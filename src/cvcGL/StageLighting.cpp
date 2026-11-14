@@ -3,6 +3,7 @@
 // shadow map sharp.
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
@@ -12,6 +13,7 @@
 #include <cvc/gl/StageLighting.h>
 #include <cvc/state/state.h>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 namespace cvc {
@@ -79,6 +81,11 @@ struct StageLighting::Impl {
   // What apply() placed this pass, so the gizmos draw exactly the rig that is
   // actually lighting the scene rather than recomputing it.
   std::vector<Placed> placed;
+
+  // The thread that built this, so connected it to its state path: the render thread. Every
+  // state change must reach handleStateChanged there (debug-asserted; STATE_EXEC_THREADED.md
+  // 4.8: a document group pumped on a worker would run it on the worker).
+  std::thread::id home = std::this_thread::get_id();
 };
 
 std::string StageLighting::sceneStatePath(const std::string &scenePrefix) {
@@ -162,6 +169,8 @@ void StageLighting::readAllFromState() {
 }
 
 void StageLighting::handleStateChanged(const std::string &) {
+  assert(std::this_thread::get_id() == m_impl->home &&
+         "StageLighting: a state change off its render thread (STATE_EXEC_THREADED.md 4.8)");
   readAllFromState();
   apply();
 }

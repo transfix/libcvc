@@ -5,12 +5,14 @@
 // script, a config file or a replicated peer drives the same overlay. The
 // getters are how that second direction is observed from C++.
 
+#include <cassert>
 #include <cvc/core/app.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ScreenTextHud.h>
 #include <cvc/state/state.h>
 #include <stdexcept>
+#include <thread>
 #include <vtkCoordinate.h>
 #include <vtkRenderer.h>
 #include <vtkSmartPointer.h>
@@ -36,6 +38,11 @@ struct ScreenTextHud::Impl {
   double r = 0.95, g = 0.93, b = 0.88;
   double opacity = 1.0;
   bool centered = true;
+
+  // The thread that built this, so connected it to its state path: the render thread. Every
+  // state change must reach handleStateChanged there (debug-asserted; STATE_EXEC_THREADED.md
+  // 4.8: a document group pumped on a worker would run it on the worker).
+  std::thread::id home = std::this_thread::get_id();
 
   void applyVisibility() { actor->SetVisibility(visible && hasText ? 1 : 0); }
 };
@@ -129,6 +136,8 @@ void ScreenTextHud::applyToActor() {
 }
 
 void ScreenTextHud::handleStateChanged(const std::string &) {
+  assert(std::this_thread::get_id() == m_impl->home &&
+         "ScreenTextHud: a state change off its render thread (STATE_EXEC_THREADED.md 4.8)");
   readAllFromState();
   applyToActor();
 }

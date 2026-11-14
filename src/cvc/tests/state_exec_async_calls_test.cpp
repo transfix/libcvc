@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdio>
 #include <cvc/core/app.h>
@@ -1696,6 +1697,33 @@ TEST(AsyncCalls, AStartedCallParksUntilItsWorkAnswers) {
   EXPECT_EQ(sp.stopped, 0) << "an answered call isn't stopped";
 }
 
+// async_call::starting_host() names the host whose call is running the work's start, and null
+// once the start has returned: a marshal made without a host (Ariadne's exported script calls,
+// bound into each program's own host) finishes its call through it.
+TEST(AsyncCalls, AStartSeesTheHostItWasMadeOn) {
+  world w(async_sched);
+  async_host *seen = nullptr;
+  std::shared_ptr<async_call> pending;
+  register_async_fn(w.env, *w.host, "where-op", [&](std::span<const value_t>) -> async_work {
+    async_work work;
+    work.start = [&](const std::shared_ptr<async_call> &call) {
+      seen = call->starting_host();
+      pending = call;
+    };
+    return work;
+  });
+  const int a = w.submit("(where-op)");
+  ASSERT_TRUE(w.pump([&] { return w.waiting(a); }));
+  ASSERT_TRUE(pending) << "the work never started";
+  EXPECT_EQ(seen, w.host.get()) << "the start did not see its host";
+  EXPECT_EQ(pending->starting_host(), nullptr) << "starting_host() outlived the start";
+  ASSERT_NE(seen, nullptr);
+  ASSERT_TRUE(pending->settle(value_t(int64_t(7)), nullptr));
+  EXPECT_TRUE(seen->make_finisher().finish(pending));
+  w.run_to_end(a);
+  EXPECT_EQ(show(*w.result(a)), "7");
+}
+
 TEST(AsyncCalls, AStartedCallsFutureAwaitsWithATimeoutAsTheWorkGoesOn) {
   world w(async_sched);
   started_probe sp;
@@ -1773,6 +1801,90 @@ TEST(AsyncCalls, HostShutdownStopsAStartedCall) {
   ASSERT_TRUE(w.pump([&] { return !sp.pending.empty(); }));
   w.host->shutdown();
   EXPECT_EQ(sp.stopped, 1);
+}
+
+// A started call's work finishes it through its host's finisher, which posts only while the host is
+// up, so a transport answering on a thread of its own as the host goes (an isolated document's
+// group's host dies with its Runtime) touches neither the host nor its scheduler. Answered while
+// the host is up, the call resumes its process; answered once the host is destroyed (the answer
+// past its cancel check already, as a racing transport's may be), nothing is posted.
+TEST(AsyncCalls, AStartedCallsFinisherPostsOnlyWhileItsHostIsUp) {
+  world w(async_sched);
+  std::vector<std::shared_ptr<async_call>> pending;
+  register_async_fn(w.env, *w.host, "far-op", [&pending](std::span<const value_t>) -> async_work {
+    async_work work;
+    work.start = [&pending](const std::shared_ptr<async_call> &call) { pending.push_back(call); };
+    return work;
+  });
+  const async_host::finisher fin = w.host->make_finisher();
+
+  const int up = w.submit("(far-op)");
+  ASSERT_TRUE(w.pump([&] { return w.waiting(up) && pending.size() == 1; }));
+  bool posted = false;
+  std::thread([&] {
+    if (pending[0]->settle(value_t(int64_t(42)), nullptr))
+      posted = fin.finish(pending[0]);
+  }).join();
+  EXPECT_TRUE(posted);
+  w.run_to_end(up);
+  ASSERT_TRUE(w.result(up));
+  EXPECT_EQ(show(*w.result(up)), "42");
+
+  const int gone = w.submit("(far-op)");
+  ASSERT_TRUE(w.pump([&] { return w.waiting(gone) && pending.size() == 2; }));
+  const std::uint64_t posts = w.async->ingress_posts_for_test();
+  w.host.reset(); // its shutdown cancels the call, then it is freed
+  EXPECT_TRUE(pending[1]->cancel_requested());
+  posted = true;
+  std::thread([&] {
+    pending[1]->settle(value_t(int64_t(7)), nullptr);
+    posted = fin.finish(pending[1]);
+  }).join();
+  EXPECT_FALSE(posted);
+  EXPECT_EQ(w.async->ingress_posts_for_test(), posts) << "nothing reached the scheduler";
+}
+
+// The host's shutdown runs a call's on_cancel hook outside its lock, so a hook may wait for its
+// work's own thread while that thread finishes the call through the host's finisher: the finisher
+// gets the lock, sees the host stopped and posts nothing. (A hook run under the lock waited for a
+// thread that waited for the lock; the hook's 5 s guard ends such a run.)
+TEST(AsyncCalls, AShutdownsCancelHookMayWaitForAThreadInTheFinisher) {
+  world w(async_sched);
+  std::vector<std::shared_ptr<async_call>> pending;
+  register_async_fn(w.env, *w.host, "hook-op", [&pending](std::span<const value_t>) -> async_work {
+    async_work work;
+    work.start = [&pending](const std::shared_ptr<async_call> &call) { pending.push_back(call); };
+    return work;
+  });
+  const async_host::finisher fin = w.host->make_finisher();
+  const int pid = w.submit("(hook-op)");
+  ASSERT_TRUE(w.pump([&] { return w.waiting(pid) && pending.size() == 1; }));
+
+  std::mutex m;
+  std::condition_variable cv;
+  bool done = false, in_time = false, posted = true;
+  std::thread transport;
+  const std::weak_ptr<async_call> weak = pending[0];
+  pending[0]->on_cancel([&, weak] {
+    transport = std::thread([&, weak] {
+      if (const std::shared_ptr<async_call> call = weak.lock()) {
+        call->settle(value_t(int64_t(1)), nullptr);
+        posted = fin.finish(call);
+      }
+      std::lock_guard<std::mutex> lock(m);
+      done = true;
+      cv.notify_all();
+    });
+    std::unique_lock<std::mutex> lock(m);
+    in_time = cv.wait_for(lock, std::chrono::seconds(5), [&] { return done; });
+  });
+  const std::uint64_t posts = w.async->ingress_posts_for_test();
+  w.host->shutdown();
+  if (transport.joinable())
+    transport.join();
+  EXPECT_TRUE(in_time) << "the hook waited out its guard: the finisher was held off by the lock";
+  EXPECT_FALSE(posted);
+  EXPECT_EQ(w.async->ingress_posts_for_test(), posts);
 }
 
 TEST(AsyncCalls, WhereAStartedCallCantParkItsKernelRuns) {

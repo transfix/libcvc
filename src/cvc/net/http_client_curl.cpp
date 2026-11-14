@@ -133,9 +133,30 @@ bool has_header(const std::vector<std::string> &lines, const std::string &name) 
   return false;
 }
 
+// The progress callback: non-zero aborts the transfer (CURLE_ABORTED_BY_CALLBACK) once the request
+// is cancelled (HttpRequest::cancelled). libcurl calls it often while data moves, and about once a
+// second while it waits. A predicate that throws cancels too: nothing may unwind through libcurl.
+int xferinfo_cb(void *clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+  try {
+    const HttpRequest &req = *static_cast<const HttpRequest *>(clientp);
+    return req.cancelled && req.cancelled() ? 1 : 0;
+  } catch (...) {
+    return 1;
+  }
+}
+
+HttpResponse cancelled_response(const HttpRequest &req) {
+  HttpResponse resp;
+  resp.canonical_url = req.url;
+  resp.error = "cvc::net: cancelled";
+  return resp;
+}
+
 class CurlHttpClient : public HttpClient {
 public:
   HttpResponse send(const HttpRequest &req) override {
+    if (req.cancelled && req.cancelled())
+      return cancelled_response(req);
     HttpResponse resp;
     resp.canonical_url = req.url;
 
@@ -161,6 +182,11 @@ public:
     // (CURL_VERSION_ASYNCHDNS), else a stalled DNS lookup ignores CONNECTTIMEOUT.
     curl_easy_setopt(h.get(), CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(h.get(), CURLOPT_USERAGENT, req.user_agent.c_str());
+    // A cancelled request stops its transfer (HttpRequest::cancelled): a kill or a host's shutdown
+    // then waits about a second for its kernel, not for the server.
+    curl_easy_setopt(h.get(), CURLOPT_XFERINFOFUNCTION, xferinfo_cb);
+    curl_easy_setopt(h.get(), CURLOPT_XFERINFODATA, const_cast<HttpRequest *>(&req));
+    curl_easy_setopt(h.get(), CURLOPT_NOPROGRESS, 0L);
 #if defined(_WIN32) && LIBCURL_VERSION_NUM >= 0x074700
     // Windows has no CA bundle file for OpenSSL to find: verify against the system's certificate
     // store, as a browser there does (7.71.0+; Schannel builds use it already).
@@ -232,6 +258,8 @@ public:
                       &eff); // post-redirect URL = the canonical id
     if (eff)
       resp.canonical_url = eff;
+    if (rc == CURLE_ABORTED_BY_CALLBACK)
+      return cancelled_response(req);
     if (rc != CURLE_OK) {
       resp.ok = false;
       resp.error = std::string("cvc::net: ") + curl_easy_strerror(rc);

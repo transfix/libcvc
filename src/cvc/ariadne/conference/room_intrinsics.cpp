@@ -273,8 +273,7 @@ std::vector<room_participant> room_roster(cvc::app &app, const std::string &room
 
 void register_room_intrinsics(cvc::app &app) {
   register_room_call_intrinsics(app); // room-call (room_calls.h): a host that joined a relay
-  const ActionIntrinsicProvider provider = [&app](std::shared_ptr<se::environment> env,
-                                                  se::intrinsics_context &ictx) {
+  auto provider = [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
     se::document_scope *doc = ictx.document; // per-document owner; null on the init: lane
 
     // (room-join ENDPOINT ROOM-ID [PROFILE]) -> handle dict { ok room pid token endpoint }.
@@ -648,7 +647,12 @@ void register_room_intrinsics(cvc::app &app) {
           return se::make_list(std::move(list));
         });
   };
-  register_action_intrinsics(app, "cvc.ariadne.room", provider);
+  // Kind host_proxied (S1-Q7): the verbs walk and write the app-global room tree raw, and use a
+  // room_handle (its chat client) outside room_table's lock, so in an `any` group they run on the
+  // host thread. The body reads only the context and binds natives into the new env, so a spawned
+  // child may run it on a worker. Keyed: a second runtime on the app keeps one copy.
+  register_action_intrinsics(app, "cvc.ariadne.room", std::move(provider),
+                             se::provider_affinity::host_proxied);
 }
 
 } // namespace conference

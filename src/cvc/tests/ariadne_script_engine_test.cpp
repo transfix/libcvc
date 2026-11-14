@@ -13,9 +13,12 @@
 #include <cvc/ariadne/requires.h>
 #include <cvc/ariadne/script_engine.h>
 #include <cvc/core/app.h>
+#include <cvc/core/exec_pool.h> // pool_options: an isolated document's workers
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h>
+#include <cvc/state/state_exec/builtins.h> // register_fn: a process's own native
 #include <cvc/state/state_exec/exceptions.h>
+#include <cvc/state/state_exec/exec_group.h> // an isolated document's group
 #include <cvc/state/state_exec/intrinsics.h> // make_future, resolve_channel_key
 #include <cvc/state/state_exec/process.h>    // a slice's process, by name
 #include <cvc/state/state_exec/types.h>
@@ -24,9 +27,12 @@
 #include <functional>
 #include <gtest/gtest.h>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -985,6 +991,240 @@ TEST_F(ScriptEngineTest, AWatchHookDeliversAChangedValue) {
   EXPECT_EQ(seen[0].second, "b");
   art.drain();
   EXPECT_EQ(seen.size(), 1u);
+}
+
+// An isolated document (ariadne.exec.isolate_documents, docs/STATE_EXEC_THREADED.md 4.12) whose
+// runtime uses an engine is pumped on the host thread: an activation's natives run its language
+// inline in the calling step, charged to its process, under a frame budget its language's
+// activations share, so a worker never runs them. Its activations are the document's processes,
+// in the document's group, where running and stop reach them.
+TEST_F(ScriptEngineTest, AnIsolatedDocumentThatUsesAnEngineRunsOnTheHostThread) {
+  REQUIRE_YAML();
+  cvc::app app;
+  cvc::pool_options pool;
+  pool.threads = 4;
+  app.exec_pool(pool);
+  cvc::state::instance(app)("ariadne.exec.isolate_documents").value(std::string("1"));
+  AppRuntime art(app, "ui.iso");
+  ScriptLane &lane = art.use_script_engine(engine);
+  const fs::path doc = write_doc("isolated", "meta: {min_libcvc: 3.4.0}\n"
+                                             "channels:\n"
+                                             "  - box\n"
+                                             "stubscript:\n"
+                                             "  source: hi\n"
+                                             "root:\n"
+                                             "  - text: hi\n");
+  art.load(doc.string());
+  se::exec_group *const group = art.runtime().isolated_group();
+  ASSERT_NE(group, nullptr) << "it stayed in group 0: " << art.runtime().isolation_reason();
+  EXPECT_EQ(group->opts().affinity, se::group_affinity::host)
+      << "a document that uses an engine is pumped on workers";
+
+  std::mutex m;
+  std::set<std::thread::id> threads;
+  auto a = std::make_shared<ScriptedActivation>([&](ScriptSlice &s, int) {
+    {
+      std::lock_guard<std::mutex> lock(m);
+      threads.insert(std::this_thread::get_id());
+    }
+    s.yield_frame();
+  });
+  bool ended = false;
+  ActivationOutcome out;
+  ActivationOptions opt;
+  opt.on_done = [&](const ActivationOutcome &o) {
+    ended = true;
+    out = o;
+  };
+  const int pid = lane.start(a, std::move(opt));
+  EXPECT_TRUE(group->sched().get_process_info(pid).has_value())
+      << "the activation is not in the document's group";
+  const auto frame = [&] {
+    art.drain_begin();
+    app.exec_pump_frame();
+    art.drain_end();
+  };
+  for (int f = 0; f < 4; ++f)
+    frame();
+  EXPECT_GE(a->steps, 2);
+  EXPECT_TRUE(lane.running(pid));
+  {
+    std::lock_guard<std::mutex> lock(m);
+    EXPECT_EQ(threads, std::set<std::thread::id>{std::this_thread::get_id()})
+        << "a slice ran off the frame thread";
+  }
+  lane.stop(pid);
+  for (int f = 0; f < 10 && !ended; ++f)
+    frame();
+  EXPECT_TRUE(ended) << "stop did not reach the activation";
+  EXPECT_FALSE(out.ok);
+  EXPECT_TRUE(a->cancelled);
+  EXPECT_FALSE(lane.running(pid));
+}
+
+// A process with natives of its own (LaneProcess::extend) started while the isolated document's
+// programs run in an `any` group is refused: a worker would run its natives. The document is not
+// moved under its running programs; its next load puts it on the host thread.
+TEST_F(ScriptEngineTest, AProcessWithNativesIsRefusedInAWorkersGroup) {
+  REQUIRE_YAML();
+  cvc::app app;
+  cvc::pool_options pool;
+  pool.threads = 4;
+  app.exec_pool(pool);
+  cvc::state::instance(app)("ariadne.exec.isolate_documents").value(std::string("1"));
+  AppRuntime art(app, "ui.late");
+  const fs::path doc = write_doc("late", "meta: {min_libcvc: 3.4.0}\n"
+                                         "channels:\n"
+                                         "  - box\n"
+                                         "on_tick: (state-set \"t\" \"1\")\n"
+                                         "root:\n"
+                                         "  - text: hi\n");
+  art.load(doc.string());
+  se::exec_group *const group = art.runtime().isolated_group();
+  ASSERT_NE(group, nullptr) << "it stayed in group 0: " << art.runtime().isolation_reason();
+  ASSERT_EQ(group->opts().affinity, se::group_affinity::any);
+  for (int i = 0; i < 10 && val(app, "ui.late.t") != "1"; ++i)
+    art.drain();
+  ASSERT_EQ(val(app, "ui.late.t"), "1") << "the resident never ran";
+
+  LaneProcess p;
+  p.program = "(late-native)";
+  p.name = "late/probe";
+  p.extend = [](const se::environment_ptr &env, se::intrinsics_context &) {
+    se::builtins::register_fn(env, "late-native",
+                              [](std::span<const se::value_t>) { return se::value_t(); });
+  };
+  EXPECT_THROW(art.runtime().start_process(std::move(p)), std::runtime_error);
+  EXPECT_EQ(art.runtime().current_group(), group) << "the document moved under its programs";
+
+  art.load(doc.string());
+  se::exec_group *const after = art.runtime().isolated_group();
+  ASSERT_NE(after, nullptr) << "it went to group 0: " << art.runtime().isolation_reason();
+  EXPECT_EQ(after->opts().affinity, se::group_affinity::host)
+      << "its next load left it on the pool's workers";
+}
+
+// Exported calls (export_activation) from an isolated document's program. (name ...) is the sliced
+// form, the program's own work: its slices step in the program's process, on its group's scheduler
+// (master's lookup on group 0's found no process there and raised RuntimeError). (name-async ...)
+// is the parked form: the call is made on the program's own host, its group's, and the activation
+// finishes it through that host, so the caller resumes with the result, as it does in group 0
+// (AnExportedCallParksOnItsActivation).
+TEST_F(ScriptEngineTest, AnIsolatedDocumentsExportedCallFinishesOnItsGroup) {
+  REQUIRE_YAML();
+  cvc::app app;
+  cvc::pool_options pool;
+  pool.threads = 4;
+  app.exec_pool(pool);
+  cvc::state::instance(app)("ariadne.exec.isolate_documents").value(std::string("1"));
+  AppRuntime art(app, "ui.ex");
+  ScriptLane &lane = art.use_script_engine(engine);
+  se::exec_group *group = nullptr; // the document's, once placed
+  std::vector<std::string> where;  // the process each slice ran in, on the group's scheduler
+  lane.export_activation("stub-iso-double", [&](std::span<const se::value_t> args) {
+    const std::int64_t x = args.empty() ? 0 : int_of(args[0]);
+    return std::make_shared<ScriptedActivation>([x, &group, &where](ScriptSlice &s, int n) {
+      const se::process_ptr *p = group ? &group->sched().current_process() : nullptr;
+      where.push_back(p && *p ? (*p)->name : std::string("none"));
+      if (n < 1)
+        s.yield_frame();
+      else
+        s.finish(se::value_t(2 * x));
+    });
+  });
+  art.load(write_doc("isolated_export", "meta: {min_libcvc: 3.4.0}\n"
+                                        "channels:\n"
+                                        "  - box\n"
+                                        "root:\n"
+                                        "  - text: hi\n")
+               .string());
+  group = art.runtime().isolated_group();
+  ASSERT_NE(group, nullptr) << "it stayed in group 0: " << art.runtime().isolation_reason();
+  EXPECT_EQ(group->opts().affinity, se::group_affinity::host);
+
+  const auto run = [&](const std::string &program) {
+    bool ended = false;
+    std::string how = "unset";
+    art.run_program(program, [&](const std::string &h) {
+      ended = true;
+      how = h;
+    });
+    for (int f = 0; f < 20 && !ended; ++f) {
+      art.drain_begin();
+      app.exec_pump_frame();
+      art.drain_end();
+    }
+    EXPECT_TRUE(ended) << program << ": the caller never resumed";
+    return how;
+  };
+
+  EXPECT_EQ(run("(state-set \"d\" (stub-iso-double 21))"), "");
+  EXPECT_EQ(val(app, "ui.ex.d"), "42");
+  ASSERT_EQ(where.size(), 2u);
+  for (const std::string &w : where) {
+    EXPECT_NE(w, "none") << "a slice ran outside a step of the document's group";
+    EXPECT_NE(w, "stubscript/stub-iso-double") << "the calling program's process, not its own";
+  }
+
+  where.clear();
+  EXPECT_EQ(run("(state-set \"e\" (await (stub-iso-double-async 4)))"), "")
+      << "the caller never resumed: its call was finished on another host";
+  EXPECT_EQ(val(app, "ui.ex.e"), "8");
+  ASSERT_FALSE(where.empty());
+  EXPECT_EQ(where.front(), "stubscript/stub-iso-double") << "the future's activation";
+}
+
+// An exported call from an isolated document's init: gets the blocking form (init:'s host runs its
+// calls inline, so it can't park), which runs the activation to its end in the load
+// (ScriptLane::run). At the first load init: runs before the document is placed, so in group 0; at
+// a reload the document is in its group, and run pumps that group (Runtime::pump), not group 0
+// alone, where the activation would never step.
+TEST_F(ScriptEngineTest, AnIsolatedDocumentsInitCallRunsInItsGroup) {
+  REQUIRE_YAML();
+  cvc::app app;
+  cvc::pool_options pool;
+  pool.threads = 4;
+  app.exec_pool(pool);
+  cvc::state::instance(app)("ariadne.exec.isolate_documents").value(std::string("1"));
+  AppRuntime art(app, "ui.ei");
+  ScriptLane &lane = art.use_script_engine(engine);
+  se::exec_group *group = nullptr; // the document's, once placed
+  bool stepped_in_group = false;
+  lane.export_activation("stub-init-triple", [&](std::span<const se::value_t> args) {
+    const std::int64_t x = args.empty() ? 0 : int_of(args[0]);
+    return std::make_shared<ScriptedActivation>(
+        [x, &group, &stepped_in_group](ScriptSlice &s, int n) {
+          if (group && group->sched().current_pid() >= 0)
+            stepped_in_group = true;
+          if (n < 1)
+            s.yield_frame(); // a frame passes: run pumps again
+          else
+            s.finish(se::value_t(3 * x));
+        });
+  });
+  const std::string doc =
+      write_doc("isolated_init_export", "meta: {min_libcvc: 3.4.0}\n"
+                                        "channels:\n"
+                                        "  - box\n"
+                                        "init: (state-set \"t\" (stub-init-triple 7))\n"
+                                        "root:\n"
+                                        "  - text: hi\n")
+          .string();
+  const std::vector<std::string> first = art.load(doc);
+  EXPECT_EQ(val(app, "ui.ei.t"), "21") << "init:'s call did not return its activation's value";
+  for (const std::string &w : first)
+    EXPECT_EQ(w.find("init:"), std::string::npos) << w;
+  group = art.runtime().isolated_group();
+  ASSERT_NE(group, nullptr) << "it stayed in group 0: " << art.runtime().isolation_reason();
+  EXPECT_EQ(group->opts().affinity, se::group_affinity::host);
+
+  cvc::state::instance(app)("ui.ei.t").value(std::string("0"));
+  const std::vector<std::string> again = art.load(doc);
+  for (const std::string &w : again)
+    EXPECT_EQ(w.find("init:"), std::string::npos) << w;
+  EXPECT_EQ(val(app, "ui.ei.t"), "21") << "the reload's init: call did not finish";
+  EXPECT_EQ(art.runtime().current_group(), group) << "the reload moved the document";
+  EXPECT_TRUE(stepped_in_group) << "the reload's activation did not run in the document's group";
 }
 
 // on_key: every key event, in order, none coalesced, with the dict an on_key: program reads. One

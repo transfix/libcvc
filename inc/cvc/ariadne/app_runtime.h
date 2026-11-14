@@ -27,6 +27,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -47,6 +48,7 @@ public:
   // adapter (nullptr = no scene: a scene-bearing document warns and drops its scene).
   // `scene`, once given, must outlive this AppRuntime.
   AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene = nullptr);
+  // Host thread, outside a pump (Runtime::~Runtime).
   ~AppRuntime();
   AppRuntime(const AppRuntime &) = delete;
   AppRuntime &operator=(const AppRuntime &) = delete;
@@ -103,16 +105,23 @@ public:
   // Register a host verb the .ari program can call. register_verb is SYNCHRONOUS (fn runs
   // inline on the drain thread, no args/return).
   //
-  // register_async_verb makes `name` an async function on the app's async host
-  // (docs/STATE_EXEC_EXCEPTIONS.md 3):
+  // Every registration below is made on the host thread, outside a frame (not from a verb or a
+  // function while one runs). Register before load(), or before the first frame: one registered
+  // once the document's programs run binds in an isolated document the first time nothing of it
+  // runs, at the latest at its next load (until then a host_only one is a NameError there; see
+  // Runtime::isolated_group), as in group 0 it binds at once.
+  //
+  // register_async_verb makes `name` an async function on the calling program's async host (the
+  // app's, or an isolated document's group's) (docs/STATE_EXEC_EXCEPTIONS.md 3):
   // - (name) parks the calling program while `work` runs on the app's background task pool,
   //   then returns `work`'s string;
   // - an exception `work` throws raises at the call;
   // - (name-async) returns a future for (await f);
   // - the work is charged to the calling action's budget (ariadne.limits.action_max_steps and
   //   action_max_time).
-  // With a `done_channel`, the result is also posted there. That keeps documents that wait with
-  // (msg-recv "done_channel") working: the old nav_compute pattern.
+  // With a `done_channel`, the result is also posted there, to the calling program's group (group
+  // 0 from init:). That keeps documents that wait with (msg-recv "done_channel") working: the old
+  // nav_compute pattern.
   void register_verb(const std::string &name, std::function<void()> fn);
   void register_async_verb(const std::string &name, std::function<std::string()> work);
   void register_async_verb(const std::string &name, const std::string &done_channel,
@@ -132,12 +141,12 @@ public:
   // runs at the call, on the scheduler's thread, and returns the work's start, which begins it and
   // returns; the work settles the call when it ends, and the program parks until then. A
   // scripting engine's activation is such work (ScriptLane::export_activation). (name-async ...)
-  // returns a future. With `blocking`, a call made outside a step of the app's scheduler (init:,
-  // which runs on a scheduler of its own, so its program can't park) is `blocking`'s instead,
+  // returns a future. With `blocking`, a call from a program whose host can't park it (init:'s,
+  // which runs on a scheduler of its own and makes its calls inline) is `blocking`'s instead,
   // made in the call: plain native code, not a kernel, so it may run processes. With `sliced`, a
-  // call from a program on the app's scheduler is `sliced`'s instead: the work done as the
-  // program's own (a data job, data_job.h), with (name-async ...) still the parked work's future.
-  // Re-registering a name replaces it.
+  // call from a program whose host parks (group 0's, or an isolated document's group's) is
+  // `sliced`'s instead: the work done as the program's own (a data job, data_job.h), with
+  // (name-async ...) still the parked work's future. Re-registering a name replaces it.
   void register_async_work_function(const std::string &name,
                                     cvc::state_exec::async_work_marshal marshal,
                                     cvc::state_exec::native_fn blocking = nullptr,
@@ -205,7 +214,9 @@ public:
   // Load + mount a .ari document, running its init:/on_* scripts and (via the SceneAdapter,
   // if any) realizing its scene under the state prefix. Returns non-fatal warnings; THROWS
   // std::runtime_error on a fatal load (min_libcvc gate, parse error, no yaml support), and
-  // document_args_error when its arguments do not match its args: block or ask for --help.
+  // document_args_error when its arguments do not match its args: block or ask for --help. It
+  // decides where the document's programs run (Runtime::isolated_group). Host thread, outside a
+  // pump.
   std::vector<std::string> load(const std::string &path);
 
   // Whether the last load()ed document declares an args: block.
@@ -215,7 +226,8 @@ public:
   // runs each with runtime().run_program).
   const std::vector<std::pair<std::string, std::string>> &tests() const;
 
-  // Mount a programmatically-built widget tree instead of a file. Applied next frame.
+  // Mount a programmatically-built widget tree instead of a file. Applied next frame. Host thread,
+  // outside a pump (Runtime::set_root).
   void set_root(Widget root);
 
   // --- per-frame (NEUTRAL core; no draw, no dt) ---
@@ -224,6 +236,18 @@ public:
   // is set) mirror bound scene visibility and service the scene. The host does input pump /
   // camera / draw around this. Call once per frame.
   void drain();
+  // drain() in two halves around app.exec_pump_frame() (Runtime::drain_begin/drain_end): the
+  // scene work, warnings and frame hooks come after drain_end(). drain() is both.
+  void drain_begin();
+  void drain_end();
+  // Declare that a subscriber this host connected at or under `prefix` must run on the host thread
+  // (STATE_EXEC_THREADED.md 4.8). A document whose prefix is at, above or under a declared one is
+  // never pumped on a worker (a write emits childChanged on every ancestor). Call before load().
+  void declare_thread_affine_prefix(const std::string &prefix);
+  // Wait, without cancelling anything, until no async kernel of this document is queued or
+  // running: on the app's host, and on its own group's when the document is isolated. Host thread,
+  // outside a frame.
+  void wait_idle();
 
   bool should_close() const;
   void request_close();
@@ -336,13 +360,20 @@ private:
     struct AsyncWork {
       cvc::state_exec::async_work_marshal marshal;
       cvc::state_exec::native_fn blocking; // init:'s form
-      cvc::state_exec::native_fn sliced;   // the app scheduler's (name ...), when there is one
+      cvc::state_exec::native_fn sliced;   // a parking host's (name ...), when there is one
     };
     std::map<std::string, AsyncWork> async_work_functions;
+    // Held by every read and write of the fields above: the providers' bodies read them, which a
+    // spawned child in an `any` group runs on the pumping worker, and the registrations, a load
+    // and the destructor write them (c-m5). A body copies what it binds under it, then binds
+    // unlocked. Nothing a host gave (a callable) is destroyed under it, since its destructor may
+    // take a lock of its own (pycvc's takes the GIL): what goes is moved out first.
+    std::mutex mutex;
   };
   std::shared_ptr<Verbs> verbs_;
   std::shared_ptr<DataStore> data_; // DataStore::of(app_): kept alive while this runtime is
   std::vector<std::string> pendingWarnings_; // read-lane diagnostics drain() collected
+  std::vector<std::string> threadAffinePrefixes_;            // declare_thread_affine_prefix
   std::function<void(const std::string &)> warningListener_; // set_warning_listener
   void collect_warnings(); // the Runtime's new warnings -> pendingWarnings_, each to the listener
   std::vector<Widget> hostMenus_;            // set_host_menus: put in every mounted tree

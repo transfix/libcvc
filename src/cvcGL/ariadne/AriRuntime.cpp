@@ -25,7 +25,6 @@
 #include <cvc/gl/ariadne/scene_views.h>            // the viewport widget
 #include <cvc/gl/ariadne/stream_texture_binding.h> // StreamTextureBinding (gl-bind-stream sink)
 #include <cvc/gl/ariadne/stream_verbs.h>     // StreamBindingSink / register_gl_stream_intrinsics
-#include <cvc/state/state_exec/async_host.h> // wait_idle
 #include <cvc/state/state_exec/intrinsics.h> // document_scope::slot
 #include <memory>
 #include <stdexcept>
@@ -360,6 +359,10 @@ AriRuntime::AriRuntime(SceneRenderer &view, CameraController &cam, ImGuiOverlay 
   // declared before app_rt_, so the Runtime it points at is destroyed first.
   app_rt_.set_backend(backend_);
   backend_.install(app_rt_.runtime(), *overlay_);
+  // The scene prefix is the document's (arigl), and the camera, touch, lighting, HUD and settings
+  // subscribers under it run on this, the render thread: the document is never pumped on a worker
+  // (STATE_EXEC_THREADED.md 4.8, S1-Q6). Before any load().
+  app_rt_.declare_thread_affine_prefix(view.scene().getStatePrefix());
   // (fullscreen ON) and the §5.13 fullscreen view: the window covers the screen. Natively the VTK
   // window (cvcGL's SDL window: the desktop's mode, borderless); in a browser the canvas, through
   // requestFullscreen, which the page grants within the click's user activation.
@@ -587,7 +590,7 @@ void AriRuntime::request_close() { app_rt_.request_close(); }
 void AriRuntime::wait_idle() {
   if (inFrame_)
     throw std::logic_error("AriRuntime::wait_idle: called from inside a frame");
-  app_.exec_async_host().wait_idle();
+  app_rt_.wait_idle(); // the app's host, and the document's group's when it is isolated
 }
 
 void AriRuntime::run(double fps) {

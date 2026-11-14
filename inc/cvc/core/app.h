@@ -549,7 +549,12 @@ public:
   // parallel_for from the scheduler / host thread: an Ariadne program `on:` / host intrinsic runs
   // INLINE inside Runtime::drain() and must not block, so it calls compute_async, which returns
   // once the job is queued; on_done hands the result back on the worker thread — typically through
-  // the one thread-safe seam, exec_scheduler().post_message(channel, value). Queuing the job does
+  // a scheduler's thread-safe post_message(channel, value), to the scheduler the waiting program
+  // parks on: ictx.host->parking_scheduler(), read in the intrinsic (an isolated document's group),
+  // or exec_scheduler() when that is null. A post to exec_scheduler() for a program in another
+  // group stays in group 0's queue and never wakes it. An async function on *ictx.host
+  // (register_async_fn), which its host tracks, is the simpler route for an Ariadne verb
+  // (STATE_EXEC_DEVELOPER_GUIDE.md, "Posting to the caller's group"). Queuing the job does
   // not wait for the pool, with one exception: while the pool has no worker running yet, only
   // worker creations under way, it waits until they have succeeded or failed, up to 5 s (normally
   // the time a thread takes to be created), to know whether to throw (below; trySubmitPooled).

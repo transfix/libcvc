@@ -1012,6 +1012,28 @@ TEST(AriadneHostVerbs, AnAsyncVerbStillPostsToItsDoneChannel) {
       << val(app, "ui.docs.c.chan");
 }
 
+// Called from init:, an async verb runs inline on the init lane's own host (S1-Q2), which parks on
+// no scheduler, so its done channel still goes to group 0 (S1.9), where a program waiting on it
+// gets it.
+TEST(AriadneHostVerbs, AnInitLanesAsyncVerbPostsItsDoneChannelToGroupZero) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("asyncinit"), "i.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "root:\n  - text: hi\n"
+                             "init: (state-set \"ran\" (init-verb))\n"
+                             "on_tick: |\n"
+                             "  (state-set \"chan\" (msg-recv \"init.done\"))\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.ai");
+  art.set_backend(be);
+  art.register_async_verb("init-verb", "init.done", [] { return std::string("from init"); });
+  art.load(doc.string());
+  EXPECT_EQ(val(app, "ui.docs.ai.ran"), "from init"); // init: ran it in load(), inline
+  EXPECT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.ai.chan") == "from init"; }))
+      << val(app, "ui.docs.ai.chan");
+}
+
 // The work's exception raises at the call, where the program can catch it. It used to be lost, and
 // the channel got "".
 TEST(AriadneHostVerbs, AnAsyncVerbsErrorRaisesAtTheCall) {
@@ -1111,6 +1133,104 @@ TEST(AriadneHostVerbs, AnAsyncFunctionTakesArgumentsAndPostsToItsChannel) {
   EXPECT_EQ(val(app, "ui.docs.af.got"), "5");
   EXPECT_EQ(how, ""); // it finished
   EXPECT_TRUE(off_thread.load());
+}
+
+// A name two of AppRuntime's tables bind resolves as it did when one provider bound them all, in
+// this order, the later one winning: the sync verbs, (quit), the async verbs, the (data-*) verbs,
+// the functions, the async functions. Its providers, split by kind (S1.9), keep that order. One
+// case per pair of tables that can share a name ((quit) and the data verbs cannot).
+TEST(AriadneHostVerbs, ANameTwoTablesBindResolvesInTheirOrder) {
+  REQUIRE_YAML();
+  namespace se = cvc::state_exec;
+  const fs::path doc =
+      write(test_dir("collisions"), "c.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: hi\n");
+  enum class Table { sync, quit, async_verb, data, function, async_function };
+  struct Outcome {
+    std::string value; // what the call returned when a string, else "other"
+    int sync_calls = 0;
+    bool closed = false;
+    int exit_code = 0;
+    std::string how; // run_program's: "" when it finished
+  };
+  const auto run = [&](const std::string &name, std::vector<Table> tables,
+                       const std::string &call) {
+    cvc::app app;
+    cvc::state::instance(app)("ariadne.limits.action_max_time").value(30.0); // async calls wait
+    FtxuiBackend be;
+    AppRuntime art(app, "ui.docs.col");
+    art.set_backend(be);
+    auto sync_calls = std::make_shared<std::atomic<int>>(0);
+    for (const Table t : tables) {
+      switch (t) {
+      case Table::sync:
+        art.register_verb(name, [sync_calls] { ++*sync_calls; });
+        break;
+      case Table::quit:
+        art.register_quit();
+        break;
+      case Table::async_verb:
+        art.register_async_verb(name, [] { return std::string("async verb"); });
+        break;
+      case Table::function:
+        art.register_function(name, [](std::span<const se::value_t>) {
+          return se::value_t(std::string("function"));
+        });
+        break;
+      case Table::async_function:
+        art.register_async_function(name, [](std::span<const se::value_t>) -> se::async_kernel {
+          return [](se::async_call &) { return se::value_t(std::string("async function")); };
+        });
+        break;
+      case Table::data: // every document's
+        break;
+      }
+    }
+    art.load(doc.string());
+    Outcome o;
+    o.how = "running";
+    art.run_program("(let ((v " + call + ")) (state-set \"got\" (if (is-string v) v \"other\")))",
+                    [&](const std::string &h) { o.how = h; });
+    EXPECT_TRUE(drain_until(art, [&] { return o.how != "running"; })) << call;
+    o.value = val(app, "ui.docs.col.got");
+    o.sync_calls = sync_calls->load();
+    o.closed = art.should_close();
+    o.exit_code = art.exit_code();
+    return o;
+  };
+  using T = Table;
+  // The sync verbs lose to every later table.
+  Outcome o = run("quit", {T::sync, T::quit}, "(quit 7)");
+  EXPECT_TRUE(o.closed && o.exit_code == 7 && o.sync_calls == 0) << "sync verb / quit";
+  o = run("c-sv-av", {T::sync, T::async_verb}, "(c-sv-av)");
+  EXPECT_TRUE(o.value == "async verb" && o.sync_calls == 0) << "sync verb / async verb";
+  o = run("data-files", {T::sync}, "(data-files \"none\")");
+  EXPECT_TRUE(o.how.empty() && o.sync_calls == 0) << "sync verb / data verb: " << o.how;
+  o = run("c-sv-fn", {T::sync, T::function}, "(c-sv-fn)");
+  EXPECT_TRUE(o.value == "function" && o.sync_calls == 0) << "sync verb / function";
+  o = run("c-sv-afn", {T::sync, T::async_function}, "(c-sv-afn)");
+  EXPECT_TRUE(o.value == "async function" && o.sync_calls == 0) << "sync verb / async function";
+  // (quit) loses to the async verbs, the functions and the async functions.
+  o = run("quit", {T::quit, T::async_verb}, "(quit 7)");
+  EXPECT_TRUE(o.value == "async verb" && !o.closed) << "quit / async verb: " << o.value;
+  o = run("quit", {T::quit, T::function}, "(quit 7)");
+  EXPECT_TRUE(o.value == "function" && !o.closed) << "quit / function: " << o.value;
+  o = run("quit", {T::quit, T::async_function}, "(quit 7)");
+  EXPECT_TRUE(o.value == "async function" && !o.closed) << "quit / async function: " << o.value;
+  // The async verbs lose to the data verbs, the functions and the async functions.
+  o = run("data-status", {T::async_verb}, "(data-status \"none\")");
+  EXPECT_TRUE(o.how.empty() && o.value != "async verb") << "async verb / data verb: " << o.value;
+  o = run("c-av-fn", {T::async_verb, T::function}, "(c-av-fn)");
+  EXPECT_EQ(o.value, "function") << "async verb / function";
+  o = run("c-av-afn", {T::async_verb, T::async_function}, "(c-av-afn)");
+  EXPECT_EQ(o.value, "async function") << "async verb / async function";
+  // The data verbs lose to the functions and the async functions.
+  o = run("data-reload", {T::function}, "(data-reload \"none\")");
+  EXPECT_EQ(o.value, "function") << "data verb / function";
+  o = run("data-file", {T::async_function}, "(data-file \"none\" \"p\")");
+  EXPECT_EQ(o.value, "async function") << "data verb / async function";
+  // The functions lose to the async functions.
+  o = run("c-fn-afn", {T::function, T::async_function}, "(c-fn-afn)");
+  EXPECT_EQ(o.value, "async function") << "function / async function";
 }
 
 TEST(AriadneHostVerbs, AFailingInitIsAWarning) {

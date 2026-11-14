@@ -305,12 +305,21 @@ void GraphicsNode::publishPoseMatrix(const double matrix[16]) {
   }
   // No scene, so no publisher: write directly (the slow path, but a scene-less
   // node is not on an animation loop). The handler this fires runs inline on
-  // this thread; m_writingPose tells it the value is our own.
+  // this thread; m_poseWriter tells it the value is our own. A nested write on
+  // this thread finds the claim already its own and leaves it to the outer one.
   struct writing_scope {
-    bool &flag;
-    explicit writing_scope(bool &f) : flag(f) { flag = true; }
-    ~writing_scope() { flag = false; }
-  } writing(m_writingPose);
+    std::atomic<std::thread::id> &writer;
+    bool claimed;
+    explicit writing_scope(std::atomic<std::thread::id> &w) : writer(w) {
+      std::thread::id none;
+      claimed = writer.compare_exchange_strong(none, std::this_thread::get_id(),
+                                               std::memory_order_acq_rel);
+    }
+    ~writing_scope() {
+      if (claimed)
+        writer.store(std::thread::id(), std::memory_order_release);
+    }
+  } writing(m_poseWriter);
   cvc::state::instance(app())(m_pathMatrix).value(state_publisher::format_matrix(matrix));
 }
 
@@ -681,8 +690,10 @@ void GraphicsNode::handleStateChanged(const std::string &childState) {
     }
   }
   // A scene-less node's setPoseMatrix writing its own value (see
-  // publishPoseMatrix): the echo arrives here, inline, during that write.
-  if (childState == "matrix" && m_writingPose)
+  // publishPoseMatrix): the echo arrives here, inline, during that write, on
+  // the writing thread. Another thread's matrix meanwhile is not the echo.
+  if (childState == "matrix" &&
+      m_poseWriter.load(std::memory_order_acquire) == std::this_thread::get_id())
     return;
   // The metadata mirror is written by setMetadata and read by nobody here: it
   // changes nothing drawn, so there is nothing to marshal or redraw -- for this

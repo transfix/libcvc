@@ -234,6 +234,9 @@ std::optional<std::size_t> take_group(pool_state &p, call_state &c, int thread, 
     }
     p.stats.skipped += c.remaining();
     c.front = c.back;
+    // The call may be complete now: its caller may be waiting for a worker (CVC_EXEC_FORCE_MOVE
+    // refuses it the groups it pumped last), so tell it.
+    c.cv.notify_all();
     return std::nullopt;
   }
   if (p.force_move) {
@@ -717,7 +720,15 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
           c.helpers_pending = std::max<std::size_t>(c.helpers_pending, p.threads);
           p.work_cv.notify_all();
         }
-        c.cv.wait(lk);
+        // With groups not started (only under CVC_EXEC_FORCE_MOVE: the caller takes any other),
+        // wait no longer than the deadline, then skip them here on time; a busy worker might reach
+        // the call much later, or never wake this caller. In slices of at most a second: a far
+        // deadline (time_point::max()) is not handed to wait_until, where some libraries overflow.
+        if (!drain && c.timed && c.remaining() > 0)
+          c.cv.wait_for(lk, std::min<clock_type::duration>(c.deadline - clock_type::now(),
+                                                           std::chrono::seconds(1)));
+        else
+          c.cv.wait(lk);
       }
     };
     try {

@@ -601,8 +601,9 @@ environment variable chooses it.
 
 | Host or lane | Scheduler | Policy | Lock home |
 |---|---|---|---|
-| Ariadne actions (`on:`), residents (`on_tick`, `on_key`, `on_pointer`, `on_signal`) and the children they spawn; `AppRuntime`'s verbs; sliced tasks, net and stream intrinsics | the app's `async_scheduler`, `app::exec_scheduler()`, one for every document the app hosts, stepped by whichever thread calls `Runtime::drain` | `state_exec.policy` | the app's manager; attached cross-thread when that manager is shared |
-| Ariadne `init:` | a private `scheduler`, run to completion on the loading thread (at most 10 million steps and 5 s) | `round_robin` | the app's manager, same thread; never waits for a lock |
+| Ariadne actions (`on:`), residents (`on_tick`, `on_key`, `on_pointer`, `on_signal`) and the children they spawn; `AppRuntime`'s verbs; sliced tasks, net and stream intrinsics | the app's `async_scheduler`, `app::exec_scheduler()`, one for every document the app hosts, stepped by whichever thread calls `Runtime::drain` (or `app.exec_pump_frame()` between `drain_begin` and `drain_end`) | `state_exec.policy` | the app's manager; attached cross-thread when that manager is shared |
+| The same, for a document `ariadne.exec.isolate_documents` isolates (`docs/ARIADNE.md` 2.5) | an `exec_group` of the document's own, registered as a frame group: pumped by the app's pool from `drain()` or `app.exec_pump_frame()`, on a worker or the calling thread for an `any` group (a lone one under `drain()` runs on its caller), on the calling thread for a `host` one | `state_exec.policy` | the app's manager, in the manager's own mode |
+| Ariadne `init:` | a private `scheduler`, run to completion on the loading thread (at most 10 million steps and 5 s), with an inline async host of its own (`ictx.host`), which runs async calls in the step and charges them to the script's process | `round_robin` | the app's manager, same thread; never waits for a lock |
 | Ariadne's read lane (`visible_when`, computed `bind:`, ...) | none: a long-lived `stackless_evaluator` (`ReactiveEngine`), during the render walk | - | - |
 | pycvc `Exec(app)` | a private `async_scheduler` per `Exec`, stepped by whichever Python thread calls `run()` | its `policy` argument, else `state_exec.policy` | the app's manager, `threaded_host_attach()` |
 | pycvc `ExecPool(app)`'s pooled `Exec`s | an `exec_group` each, pumped by the app's `exec_pool` on its workers and the thread calling `run_all` | `state_exec.policy` | the app's manager, in the manager's own mode |
@@ -616,9 +617,12 @@ Python thread, or a C++ host that does the same), and where the app's pool pumps
 once: pycvc's `ExecPool`, or a C++ host's own groups
 ([Execution Groups and the Pool](#execution-groups-and-the-pool)). Async functions' kernels and
 threaded sliced-task chunks run on other threads too, and post their results back to the
-scheduler. `state_exec.threads` sizes the app's pool, which only those hosts use; Ariadne's
-documents and `ari`/`arigl` stay on the frame thread until Stage 1b, whatever it says. It also
-feeds the lock manager's `auto` mode ([Locks](#locks-with-lock), "Single and shared mode").
+scheduler. `state_exec.threads` sizes the app's pool, which those hosts use, and Ariadne's
+isolated documents: a document may leave the frame thread only when the app tree also sets
+`ariadne.exec.isolate_documents`, the document is eligible, and its group is `any`
+(`docs/ARIADNE.md` 2.5). `ari` and `arigl` drive one document each, and arigl's documents always
+stay on the frame thread. `state_exec.threads` also feeds the lock manager's `auto` mode ([Locks](#locks-with-lock),
+"Single and shared mode").
 
 **Nothing here changes while programs run.** Each choice is made when its object is built:
 
@@ -1073,6 +1077,127 @@ When in doubt, a native is `host_only` (or the group `group_affinity::host`). li
 stdlib and intrinsics are `any`, and so are pycvc's Python natives, which take the GIL themselves.
 A spawned child inherits its parent's context, so its natives are the same (`make_spawn_context`
 copies the context's `sched` and `host` too).
+
+#### Ariadne providers
+
+An Ariadne host gives the documents' programs natives of its own through providers
+(`<cvc/ariadne/ariadne.h>`), functions that run each time a program's env is built and bind
+natives into it. Each is registered with its kind, once, at setup, before the first document
+loads (or before its first frame: one registered once a document's programs run binds in its
+isolated `any` group, if it is `host_only`, the first time nothing of the document runs, at the
+latest at its next load; [Late registrations](#late-registrations)):
+
+```cpp
+namespace ari = cvc::ariadne;
+namespace se = cvc::state_exec;
+ari::register_action_intrinsics(
+    app,
+    [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
+      // An async function on the calling program's host: its group's in an isolated document.
+      se::register_async_fn(env, *ictx.host, "nav-step",
+                            [&app](std::span<const se::value_t>) -> se::async_kernel {
+                              return [&app](se::async_call &) -> se::value_t {
+                                return se::value_t(step_nav(app)); // a fresh string
+                              };
+                            });
+    },
+    se::provider_affinity::any);
+```
+
+Without a kind, `register_action_intrinsics(app, provider)` registers it `host_only`. In the app
+scheduler, in the `init:` lane and in a document group pumped on the host thread, every provider
+runs as it is. In an isolated document's `any` group, which a worker may pump
+(`docs/ARIADNE.md` 2.5), each runs by its kind:
+
+| Kind | In an `any` document group | Choose it for |
+|---|---|---|
+| `any` | runs as it is; its natives run on whatever thread pumps the group | natives that touch only their arguments, their context, thread-safe tables and the tree through pinned lookups; async functions on `*ictx.host`, whose marshal touches nothing and whose kernel runs on the background pool (libcvc's net and stream verbs, `AppRuntime::register_async_verb`) |
+| `host_proxied` | runs into a scratch scope over the env; each native it binds there is installed through `exec_group::install(..., host_proxied)`, so on a worker its process parks and the native runs on the frame's thread after the group's pump, the program resuming a frame later; anything else it bound is bound as it is | synchronous natives over host state one thread may touch: a UI side effect (`open-url`), raw tree walks (`data-*`, the room verbs), process-global sessions (oidc) |
+| `host_only` | does not run: its names are `NameError`s there, and `has?` does not see them; a document whose env would hold one gets a `host` group instead, pumped on the frame's thread | natives that need the host thread itself (GL, SDL's devices, a callback holding a lock or the GIL), and any nobody has audited (`AppRuntime::register_verb`, `register_function`, `register_async_function`) |
+
+Rules for a provider that is not `host_only`:
+- **Its body is thread-safe.** A spawned child's env is built on the thread pumping its group,
+  a worker in an `any` group, so the body reads only its context, immutable or atomic state it
+  captured, or state behind a lock, and binds into the new env. `AppRuntime`'s bodies copy its verb
+  table under a process-wide lock, then bind unlocked.
+- **A `host_proxied` provider binds synchronous natives only.** An async function, wrapped, would
+  run its kernel inline on the frame's thread, where its host has no running process, uncharged.
+- **Anything it binds that is not a native is fresh for each env, or immutable.** It goes into an
+  `any` group's env as it is, and two groups' programs must never share a mutable value.
+- **An `any` native that documents share serializes what must stay whole.** Two documents on two
+  workers can call it at once on one shared object: libcvc's `ws-send` holds its connection's send
+  lock across a whole frame, since libcurl would continue a partly sent frame with the other
+  thread's bytes.
+- **A blocking kernel stops when its call is cancelled.** A kill or the host's shutdown cancels
+  the call, and an isolated document's teardown waits for its group's kernels, so a kernel that
+  blocks checks `call.cancel_requested()` (or `call.cancelled()`) and ends soon after. One that
+  makes http requests passes that check as the request's `HttpRequest::cancelled` (to `resolve`
+  as its `UriCancelled`, to a credential's `renew` as its `cancelled`): the transfer is then
+  aborted within about a second, with the reply "cvc::net: cancelled", as net's `http_kernel` and
+  `uri_fetch_kernel` do (the browser's fetch ignores it). The check is an argument, never a
+  `thread_local`: libcvc keeps no process-wide state (VOLROVER-LIBRARY-PORTS-ROADMAP.md 1.3).
+- **A stream it opens with the program's scheduler is owned by the document.** Hand it to the
+  document's stream table (`own_document_stream`, as `room-subscribe` does; `stream-open` does it
+  itself), so the document re-points it when it moves (`retarget_document_streams`) and closes it
+  when it goes. A stream that is the host's opens on group 0 (`stream_params::scheduler` null).
+
+**Subscribers.** A host that connects a state subscriber that must run on the host thread (a
+renderer's camera, a HUD) where documents write declares its prefix before `load()`:
+`AppRuntime::declare_thread_affine_prefix(prefix)`. An isolated document gets a `host` group when a
+declared prefix is at, above or under its own: a write emits `childChanged` on the written node's
+parent and on every ancestor, on the writing thread, so a subscriber above the document hears its
+writes too. `AriRuntime` declares its scene prefix. STATE_EXEC_THREADED.md 4.8 lists the library's
+subscribers and which are safe off the host thread.
+
+**Posting to the caller's group.** A provider whose natives post a message for the calling program
+(a done channel, a stream's events, progress) posts it to the scheduler the program's host parks
+on, read when the env is built, never to `app.exec_scheduler()` directly:
+
+```cpp
+se::async_scheduler *const parks = ictx.host->parking_scheduler(); // the program's group
+const auto post = [&app, parks](const std::string &chan, const se::value_t &v) {
+  (parks ? *parks : app.exec_scheduler()).post_message(chan, v); // null: the init: lane
+};
+```
+
+`parking_scheduler()` is null only for an inline host (the `init:` lane's, whose posts then go to
+the app scheduler, where the document's programs are when they are not isolated). A post to
+`app.exec_scheduler()` for a program of an isolated document stays in group 0's queue and never
+wakes it. The captured scheduler lives while the document stays in its group: a move or teardown
+destroys the group once its host's own calls (async functions on `*ictx.host`) have ended, which do
+not include work the host does not track, such as an `app::compute_async` job. Such a job must
+end before the document moves or goes; work that answers a program is simpler as an async function
+on `*ictx.host` (`register_async_fn`), as `nav_compute` does. Resolve the
+channel in the provider's body, on the env's thread (`resolve_channel_key(ictx.root_path, name)`),
+never in a kernel. `AppRuntime`'s done channels and libcvc's streams (`stream_params::scheduler`)
+work this way; a stream posts there from its producer thread too, and a stream the document owns
+follows it when it moves (its member `stream::retarget(from, to)`, through
+`retarget_document_streams`).
+
+**Work that answers by itself** (an `async_work` whose `start` hands the call to a transport that
+settles it on a thread of its own) keeps the host's finisher, `ictx.host->make_finisher()`, not
+the host: an isolated document's group, and its host, go with the document, and a transport may
+answer just then. `finisher::finish(call)` posts the settled call's outcome under the host's lock,
+and only while the host has not begun to shut down (it returns false then, and the shutdown has
+cancelled the call). Check `call->cancel_requested()` before settling, so a cancelled call keeps
+the outcome its cancel gave it. The host's shutdown runs the calls' `on_cancel` hooks outside that
+lock, so a hook may wait for the transport's thread even while that thread is in
+`finisher::finish`. Net's started requests do this.
+
+#### Late registrations
+
+A provider (`register_action_intrinsics`) or an `AppRuntime` verb or function registered after a
+document was placed makes its placement stale. It is decided again the first time nothing of the
+document runs (no live action, started resident or mount tick, nor spawned child), so the move
+kills nothing, and at the latest at its next restart (a load, `set_root` or a lane's program). A
+registration between `load()` and the first frame therefore still moves an isolated document to a
+`host` group when it adds a `host_only` name, and binds it, and so does one into a document with no
+resident, child or action left, at its next idle frame. While something of it runs, a late
+`host_only` name is a `NameError` in its `any` group, and the app's log says once that "it binds
+once nothing of the document runs, or at its next load (until then a host_only one is a NameError
+in its isolated group)". In group 0 and a `host` group every
+kind is bound as it is, so a late name binds in the next env built there, and a late `any` or
+`host_proxied` provider binds in an `any` group too (`docs/ARIADNE.md` 2.5).
 
 #### The host-call queue
 
@@ -1937,7 +2062,8 @@ executor, not in the step that called it
 
 `register_async_fn` (`cvc/state/state_exec/async_host.h`) registers `name`, and
 `name-async`, which returns a future. The host is the app's
-(`app.exec_async_host()`, for `exec_scheduler()`) or one you build:
+(`app.exec_async_host()`, for `exec_scheduler()`) or one you build; in an Ariadne provider it is
+the calling program's, `*ictx.host` ([Ariadne providers](#ariadne-providers)):
 
 ```cpp
 #include <cvc/state/state_exec/async_host.h>
@@ -2094,12 +2220,17 @@ raises them (`docs/ARIADNE.md` 2.2).
 #### Ariadne verbs
 
 `AppRuntime::register_async_verb(name, work)` makes a host verb an async
-function on the app's host: `(name)` parks the action while `work` runs on the
-background task pool, and returns its string or raises its exception. The
-overload with a done channel also posts the result there, for documents that
-wait with `msg-recv`. A verb that needs arguments, progress or cancellation
-registers with `register_async_fn` through `register_action_intrinsics`, as
-the nav_compute example does.
+function on the calling program's host (the app's, or an isolated document's
+group's): `(name)` parks the action while `work` runs on the background task
+pool, and returns its string or raises its exception. The overload with a done
+channel also posts the result there, to the calling program's group (to the app
+scheduler from `init:`, whose own inline host runs the work in the step and
+charges it to the script's process), for documents that wait with `msg-recv`.
+A verb that needs arguments, progress or cancellation registers with
+`register_async_fn` on `*ictx.host` through `register_action_intrinsics(app,
+provider, affinity)`, as the nav_compute example does ([Ariadne providers](#ariadne-providers)).
+Register every `AppRuntime` verb and function on the host thread, outside a frame,
+before `load()` or before the first frame ([Late registrations](#late-registrations)).
 
 ---
 

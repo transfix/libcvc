@@ -14,6 +14,7 @@
 #include <cvc/ariadne/stream/stream_channel.h>
 #include <cvc/ariadne/stream_intrinsics.h>
 #include <cvc/core/app.h>                    // exec_scheduler warm
+#include <cvc/state/state_exec/async_host.h> // ictx.host->parking_scheduler(): the caller's group
 #include <cvc/state/state_exec/builtins.h>   // register_fn
 #include <cvc/state/state_exec/intrinsics.h> // intrinsics_context
 #include <cvc/state/state_exec/types.h>      // value_t, make_dict
@@ -52,6 +53,23 @@ struct stream_table {
     std::lock_guard<std::mutex> lk(mu);
     auto it = by_token.find(token);
     return it == by_token.end() ? nullptr : it->second.get();
+  }
+  // Re-point each stream it owns from `from` to `to` (stream::retarget), under the table's lock.
+  std::size_t retarget(se::async_scheduler *from, se::async_scheduler *to) {
+    std::lock_guard<std::mutex> lk(mu);
+    std::size_t moved = 0;
+    for (auto &[token, s] : by_token)
+      if (s && s->retarget(from, to))
+        ++moved;
+    return moved;
+  }
+  // Close and drop every stream it owns, each destroyed OUTSIDE the lock (as close() does).
+  void close_all() {
+    std::unordered_map<std::string, std::unique_ptr<cvc::ariadne::stream::stream>> victims;
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      victims.swap(by_token);
+    }
   }
   bool close(const std::string &token) {
     std::unique_ptr<cvc::ariadne::stream::stream> victim; // destroyed OUTSIDE the lock: ~stream ->
@@ -135,16 +153,19 @@ std::string handle_token(const se::value_t &v) {
 } // namespace
 
 void register_stream_intrinsics(cvc::app &app) {
-  app.exec_scheduler(); // warm the lazy scheduler the stream posts lifecycle/seq on
+  app.exec_scheduler(); // warm group 0's scheduler, where a stream of a group-0 document posts
 
-  const ActionIntrinsicProvider provider = [&app](std::shared_ptr<se::environment> env,
-                                                  se::intrinsics_context &ictx) {
+  auto provider = [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
     const std::string root = ictx.root_path; // scope streams to the calling document (§4.1)
     se::document_scope *doc = ictx.document; // per-document owner; null on the init: lane
+    // The calling program's group: a stream posts its seq and lifecycle events there, from the
+    // producer thread too (td 4.9). Null (an inline host): group 0, the app's (stream::open).
+    se::async_scheduler *group = ictx.host ? ictx.host->parking_scheduler() : nullptr;
 
     // (stream-open OPTS) -> handle dict { ok id token seq_channel evt_channel }.
     se::builtins::register_fn(
-        env, "stream-open", [&app, root, doc](std::span<const se::value_t> args) -> se::value_t {
+        env, "stream-open",
+        [&app, root, doc, group](std::span<const se::value_t> args) -> se::value_t {
           if (!doc)
             return err("stream-open: no document scope (open a stream from an action or resident "
                        "lane, not the load-time init: lane)");
@@ -184,6 +205,7 @@ void register_stream_intrinsics(cvc::app &app) {
           p.subscriber_depth = static_cast<std::size_t>(sub_depth);
           p.expected_subscribers = static_cast<std::size_t>(exp_subs);
           p.heartbeat_hz = get_num(dict_get(d, "heartbeat_hz"), 10.0);
+          p.scheduler = group;
 
           // The codec selects the kind: "f32" (interleaved float PCM) opens an AUDIO stream —
           // rate/ch and a per-chunk frame size instead of w/h; every other codec opens a raw VIDEO
@@ -298,7 +320,12 @@ void register_stream_intrinsics(cvc::app &app) {
           return se::make_dict({{"ok", se::value_t(ok)}});
         });
   };
-  register_action_intrinsics(app, "cvc.ariadne.stream", provider);
+  // Kind `any` (S1-Q7): the tables are mutex-guarded, the descriptors are written through pinned
+  // walks, and a stream posts to the group it was opened in. The body only reads the context and
+  // binds natives into the new env, so a spawned child may run it on a worker. Keyed: a second
+  // runtime on the app keeps one copy.
+  register_action_intrinsics(app, "cvc.ariadne.stream", std::move(provider),
+                             se::provider_affinity::any);
 }
 
 // Cross-module accessor onto the document-owned stream table (declared in the header). Reuses the
@@ -308,6 +335,17 @@ void register_stream_intrinsics(cvc::app &app) {
 stream::stream *document_stream(se::document_scope *doc, const std::string &token) {
   stream_table *tbl = doc_streams(doc);
   return tbl ? tbl->find(token) : nullptr;
+}
+
+std::size_t retarget_document_streams(se::document_scope *doc, se::async_scheduler *from,
+                                      se::async_scheduler *to) {
+  stream_table *tbl = doc_streams(doc);
+  return tbl ? tbl->retarget(from, to) : 0;
+}
+
+void close_document_streams(se::document_scope *doc) {
+  if (stream_table *tbl = doc_streams(doc))
+    tbl->close_all();
 }
 
 // Hand an already-open stream to the document's owning table (see the header). Mirrors what

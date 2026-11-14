@@ -27,7 +27,7 @@
 #include <cvc/state/state_exec/async_host.h> // register_async_fn — the verbs are async functions
 #include <cvc/state/state_exec/builtins.h>   // percent_encode, builtin_json_encode
 #include <cvc/state/state_exec/data_job.h>   // kJsonMaxDepth — a ws-send message's nesting
-#include <cvc/state/state_exec/intrinsics.h> // intrinsics_context: a program's root
+#include <cvc/state/state_exec/intrinsics.h> // ictx.host and root, provider_affinity
 #include <cvc/state/state_exec/types.h>      // value_t, make_dict/make_list/make_bytes
 #include <map>
 #include <mutex>
@@ -523,17 +523,17 @@ cvc::net::HttpResponse send_prepared(cvc::app &app, const Prepared &p, const Net
 
 // One request, sent in place (blocking): prepare, send, complete. A credential the host can renew
 // is renewed first when it is about to expire, and once more after a 401, and the request sent
-// again.
+// again. The request's `cancelled` stops the renewals' refreshes too.
 Outcome perform(cvc::app &app, cvc::net::HttpRequest req, const RequestAuth &auth,
                 const NetAccess &access) {
   const std::shared_ptr<cvc::net::CredentialRenewer> renewer = renewer_for(auth, access);
   if (renewer && renewer->expiring())
-    renewer->renew(std::string()); // a failure leaves the old token, which may still do
+    renewer->renew(std::string(), req.cancelled); // a failure leaves the old token, which may do
   Prepared p = prepare(req, auth, access);
   if (p.failed)
     return std::move(*p.failed);
   cvc::net::HttpResponse r = send_prepared(app, p, access);
-  if (should_renew(renewer, r) && renewer->renew(p.used).empty()) {
+  if (should_renew(renewer, r) && renewer->renew(p.used, req.cancelled).empty()) {
     complete(p, std::move(r), auth, access); // the refused try's copies are blanked
     p = prepare(std::move(req), auth, access);
     if (p.failed)
@@ -546,14 +546,19 @@ Outcome perform(cvc::app &app, cvc::net::HttpRequest req, const RequestAuth &aut
 // The kernel of a fully-built request: it runs on the app's background task pool (OFF the
 // scheduler thread) and returns the marshalled response dict. A failure to send is a reply with
 // ok #f too, as the verbs document: only an HTTP reply's own failure is data, but these verbs have
-// always described a failed send that way, and a program checks `ok` either way.
+// always described a failed send that way, and a program checks `ok` either way. A cancelled call
+// (its process killed, its host shut down) aborts the transfer in flight, a credential's renewal
+// included, so a teardown that waits for its host's kernels (an isolated document's group's) waits
+// about a second, not for the server.
 se::async_kernel http_kernel(cvc::app &app, cvc::net::HttpRequest req, RequestAuth auth,
                              NetAccess access) {
   // The kernel runs on the app's background pool, which the app stops before it goes.
   return [&app, req = std::move(req), auth = std::move(auth),
-          access = std::move(access)](se::async_call &) -> se::value_t {
+          access = std::move(access)](se::async_call &call) -> se::value_t {
     try {
-      const Outcome out = perform(app, req, auth, access);
+      cvc::net::HttpRequest sent = req;
+      sent.cancelled = [&call] { return call.cancel_requested(); };
+      const Outcome out = perform(app, std::move(sent), auth, access);
       return marshal_response(out.reply, out.captured);
     } catch (const std::exception &e) {
       return marshal_error(req.url, std::string("http: ") + e.what());
@@ -563,10 +568,12 @@ se::async_kernel http_kernel(cvc::app &app, cvc::net::HttpRequest req, RequestAu
   };
 }
 
-// Settle a started call with its reply and post it, unless the call was cancelled first: then its
-// host may be gone (async_start's contract).
-void settle_started(se::async_host &host, const std::shared_ptr<se::async_call> &call,
-                    se::value_t value) {
+// Settle a started call with its reply and post it, unless the call was cancelled first. The post
+// goes through the host's finisher, never the host: a transport may answer on a thread of its own
+// just as the host is destroyed (an isolated document's group's goes with its Runtime), and the
+// finisher posts only while the host has not begun to shut down, under the host's lock.
+void settle_started(const se::async_host::finisher &host,
+                    const std::shared_ptr<se::async_call> &call, se::value_t value) {
   if (!call->cancel_requested() && call->settle(std::move(value), nullptr))
     host.finish(call);
 }
@@ -580,7 +587,7 @@ struct StartedRequest : std::enable_shared_from_this<StartedRequest> {
   cvc::net::HttpRequest req;
   RequestAuth auth;
   NetAccess access;
-  se::async_host *host = nullptr;
+  se::async_host::finisher host; // what finishes the call on its host, safely after the host
   std::shared_ptr<se::async_call> call;
   std::shared_ptr<cvc::net::CredentialRenewer> renewer;
   std::shared_ptr<cvc::net::HttpTransfer> transfer; // the one out, for a cancel to abort
@@ -592,7 +599,7 @@ struct StartedRequest : std::enable_shared_from_this<StartedRequest> {
     if (on_outcome)
       on_outcome(std::move(out));
     else
-      settle_started(*host, call, marshal_response(out.reply, out.captured));
+      settle_started(host, call, marshal_response(out.reply, out.captured));
   }
 
   void begin() {
@@ -662,13 +669,13 @@ se::async_work http_work(cvc::app &app, cvc::net::HttpRequest req, RequestAuth a
   if (!starts)
     return work;
   work.start = [&app, req = std::move(req), auth = std::move(auth), access = std::move(access),
-                &host](const std::shared_ptr<se::async_call> &call) {
+                fin = host.make_finisher()](const std::shared_ptr<se::async_call> &call) {
     auto s = std::make_shared<StartedRequest>();
     s->app = &app;
     s->req = req;
     s->auth = auth;
     s->access = access;
-    s->host = &host;
+    s->host = fin;
     s->call = call;
     s->renewer = renewer_for(auth, access);
     call->on_cancel([weak = std::weak_ptr<StartedRequest>(s)] {
@@ -745,9 +752,11 @@ se::value_t marshal_uri_result(const UriResult &r) {
 // safe there. A failure is a reply with ok #f, as for the http verbs.
 se::async_kernel uri_fetch_kernel(cvc::app &app, const std::string &uri, const std::string &base) {
   // The kernel runs on the app's background pool, which the app stops before it goes.
-  return [&app, uri, base](se::async_call &) -> se::value_t {
+  return [&app, uri, base](se::async_call &call) -> se::value_t {
     try {
-      return marshal_uri_result(resolve(app, uri, base));
+      // An http(s) URI's request (made by its URI handler) stops when the call is cancelled.
+      return marshal_uri_result(
+          resolve(app, uri, base, [&call] { return call.cancel_requested(); }));
     } catch (const std::exception &e) {
       UriResult er;
       er.ok = false;
@@ -775,9 +784,10 @@ se::async_work uri_fetch_work(cvc::app &app, std::span<const se::value_t> args,
   work.kernel = uri_fetch_kernel(app, uri, base);
   if (!cvc::net::http_starts_async(app) || !has_uri_async_handler(app, parse_uri(uri).scheme))
     return work;
-  work.start = [&app, uri, base, &host](const std::shared_ptr<se::async_call> &call) {
-    std::function<void()> stop = resolve_async(app, uri, base, [call, &host](UriResult r) {
-      settle_started(host, call, marshal_uri_result(r));
+  work.start = [&app, uri, base,
+                fin = host.make_finisher()](const std::shared_ptr<se::async_call> &call) {
+    std::function<void()> stop = resolve_async(app, uri, base, [call, fin](UriResult r) {
+      settle_started(fin, call, marshal_uri_result(r));
     });
     if (stop)
       call->on_cancel(std::move(stop));
@@ -1265,7 +1275,7 @@ se::value_t upload_blocking(const UploadPlan &plan, const NetAccess &access, cvc
 struct StartedUpload : std::enable_shared_from_this<StartedUpload> {
   UploadPlan plan;
   NetAccess access;
-  se::async_host *host = nullptr;
+  se::async_host::finisher host; // as StartedRequest's: safe after the host is gone
   std::shared_ptr<se::async_call> call;
   cvc::app *app = nullptr;
   std::shared_ptr<StartedRequest> current; // the request out, for a cancel to abort
@@ -1278,7 +1288,7 @@ struct StartedUpload : std::enable_shared_from_this<StartedUpload> {
 
   void end(const Outcome &out, bool done, std::uint64_t at) {
     current.reset();
-    settle_started(*host, call, marshal_upload(out, done, at, size()));
+    settle_started(host, call, marshal_upload(out, done, at, size()));
   }
 
   // Start `req` as http_work starts one, and hand its outcome to `then`.
@@ -1432,12 +1442,12 @@ se::async_work http_upload_work(UploadPlan plan, const NetAccess &access, se::as
     };
   if (!starts)
     return work;
-  work.start = [plan = std::move(plan), access, &host,
+  work.start = [plan = std::move(plan), access, fin = host.make_finisher(),
                 app](const std::shared_ptr<se::async_call> &call) {
     auto u = std::make_shared<StartedUpload>();
     u->plan = plan;
     u->access = access;
-    u->host = &host;
+    u->host = fin;
     u->call = call;
     u->app = app;
     call->on_cancel([weak = std::weak_ptr<StartedUpload>(u)] {
@@ -1451,33 +1461,26 @@ se::async_work http_upload_work(UploadPlan plan, const NetAccess &access, se::as
   return work;
 }
 
-// The credential verbs and (net-allowed? URL), plain functions on the scheduler thread.
-// When an app's documents last opened a URL (open-url: one a second at most).
+// When an app's documents last opened a URL (open-url: one a second at most; steady clock, ms;
+// 0 = never). An app slot, so the limit is the app's.
 struct OpenUrlLimit {
   static constexpr const char *app_slot = "cvc.ariadne.open-url-limit";
   std::atomic<std::int64_t> last_ms{0};
 };
 
-void register_net_verbs(cvc::app &app, const std::shared_ptr<se::environment> &env,
-                        const NetAccess &access, OpenUrlLimit &open_limit) {
+// (open-url URL), a plain function on the host thread (its provider is host_proxied: it opens a
+// browser tab, a side effect on the user's desktop).
+void register_open_url(cvc::app &app, const std::shared_ptr<se::environment> &env,
+                       const NetAccess &access, OpenUrlLimit &open_limit) {
   const auto live = [access](const char *verb) {
     if (!is_live(access))
       throw std::runtime_error(std::string(verb) + ": the host has turned the network off");
   };
-  // (net-allowed? URL): whether a request to URL may be made here.
-  se::builtins::register_fn(env, "net-allowed?",
-                            [access, live](std::span<const se::value_t> args) -> se::value_t {
-                              live("net-allowed?");
-                              const std::string url = arg_string(args, 0);
-                              if (access.policy)
-                                return se::value_t(access.policy->allows_url(url));
-                              return se::value_t(cvc::net::parse_origin(url).has_value());
-                            });
   // (open-url URL): open URL in the user's web browser (cvc/net/browser.h). Only an http(s) URL
   // whose origin the host allows: a page opened in a browser carries what its URL says, so the
   // allowlist bounds it as it does a request. #t when a browser was asked to open it; #f when there
   // is none here (over SSH, no display, --no-browser), and the host shows the URL instead. One a
-  // second at most, so a loop cannot flood the desktop with tabs.
+  // second at most across the app's programs, so a loop cannot flood the desktop with tabs.
   se::builtins::register_fn(
       env, "open-url",
       [&app, access, live, &open_limit](std::span<const se::value_t> args) -> se::value_t {
@@ -1487,10 +1490,10 @@ void register_net_verbs(cvc::app &app, const std::shared_ptr<se::environment> &e
         if (access.policy ? !access.policy->allows_url(url, &why)
                           : !cvc::net::parse_origin(url, &why))
           throw std::runtime_error("open-url: refused: " + why);
-        std::atomic<std::int64_t> &last_ms = open_limit.last_ms;
         const std::int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::steady_clock::now().time_since_epoch())
                                      .count();
+        std::atomic<std::int64_t> &last_ms = open_limit.last_ms;
         std::int64_t prev = last_ms.load();
         if (prev != 0 && now - prev < 1000)
           throw std::runtime_error("open-url: one URL a second at most");
@@ -1505,6 +1508,25 @@ void register_net_verbs(cvc::app &app, const std::shared_ptr<se::environment> &e
           throw std::runtime_error(why);
         }
       });
+}
+
+// The credential verbs and (net-allowed? URL), plain functions on whatever thread pumps the
+// program: the policy is immutable once the host made it, and the credential store locks (see
+// register_net_intrinsics).
+void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAccess &access) {
+  const auto live = [access](const char *verb) {
+    if (!is_live(access))
+      throw std::runtime_error(std::string(verb) + ": the host has turned the network off");
+  };
+  // (net-allowed? URL): whether a request to URL may be made here.
+  se::builtins::register_fn(env, "net-allowed?",
+                            [access, live](std::span<const se::value_t> args) -> se::value_t {
+                              live("net-allowed?");
+                              const std::string url = arg_string(args, 0);
+                              if (access.policy)
+                                return se::value_t(access.policy->allows_url(url));
+                              return se::value_t(cvc::net::parse_origin(url).has_value());
+                            });
   if (!access.credentials)
     return;
   const std::shared_ptr<cvc::net::CredentialStore> store = access.credentials;
@@ -1889,7 +1911,8 @@ bool ws_starts_async(const NetAccess &access) {
 // (ws-open)'s work: connect in a kernel (on the background pool), or, where the transport connects
 // without blocking (ws_starts_async: the browser without threads), start the connect and let the
 // socket's callbacks post the reply, so the frame loop goes on meanwhile (as http_work does for
-// HTTP). A killed or timed-out call abandons the connect.
+// HTTP). The callbacks post through the host's finisher, never the host (settle_started). A killed
+// or timed-out call abandons the connect.
 se::async_work ws_open_work(WsTable &table, std::span<const se::value_t> args,
                             const NetAccess &access, se::async_host &host) {
   WsOpen o = build_ws_open(args, access);
@@ -1911,21 +1934,21 @@ se::async_work ws_open_work(WsTable &table, std::span<const se::value_t> args,
   if (!ws_starts_async(access))
     return work;
   work.start = [&table, o = std::move(o), access,
-                &host](const std::shared_ptr<se::async_call> &call) {
+                fin = host.make_finisher()](const std::shared_ptr<se::async_call> &call) {
     auto p = std::make_shared<WsPrepared>(prepare_ws_open(o, access));
     if (p->failed) {
-      settle_started(host, call, std::move(*p->failed));
+      settle_started(fin, call, std::move(*p->failed));
       return;
     }
     cvc::net::WsConnected done = [&table, o, p, call,
-                                  &host](std::shared_ptr<cvc::net::WsConnection> conn,
-                                         std::string error) {
+                                  fin](std::shared_ptr<cvc::net::WsConnection> conn,
+                                       std::string error) {
       if (call->cancel_requested()) { // nobody waits for it now: don't keep it open
         if (conn)
           conn->close(1000);
         return;
       }
-      settle_started(host, call, finish_ws_open(table, o, *p, std::move(conn), std::move(error)));
+      settle_started(fin, call, finish_ws_open(table, o, *p, std::move(conn), std::move(error)));
     };
     std::function<void()> stop = access.ws
                                      ? access.ws->start(o.req.url, p->opts, std::move(done))
@@ -2062,14 +2085,14 @@ void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_ho
         // on the frame's thread (ws_open_work).
         if (ws_starts_async(access))
           work.start = [entry = std::move(entry), secs, access,
-                        &host](const std::shared_ptr<se::async_call> &call) {
+                        fin = host.make_finisher()](const std::shared_ptr<se::async_call> &call) {
             // The connection keeps the callback until it answers: it holds no connection back.
             WsEntry sent_by{nullptr, entry.origin, entry.sent};
             std::function<void()> stop =
                 entry.conn->recv_async(secs, [sent_by = std::move(sent_by), access, call,
-                                              &host](std::optional<cvc::net::WsEvent> e) {
+                                              fin](std::optional<cvc::net::WsEvent> e) {
                   scrub_ws_event(e, sent_by, access);
-                  settle_started(host, call, marshal_ws_event(e));
+                  settle_started(fin, call, marshal_ws_event(e));
                 });
             if (stop)
               call->on_cancel(std::move(stop));
@@ -2226,7 +2249,6 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
   // (file/state/cvc/http) and are useful with or without an HTTP backend.
   const bool have_http = cvc::net::have_http_backend();
 
-  se::async_host &host = app.exec_async_host();
   // I/O calls (async_options::io): a request's network wait and its transport's CPU (one HTTPS
   // request: a 100-300 ms round trip and about 16 ms of CPU for the TLS handshake and the CA
   // store, 130,000 steps) are the host's, not the program's. Charged as other calls are, no
@@ -2235,80 +2257,117 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
   se::async_options io;
   io.io = true;
   const bool have_ws = access.ws || cvc::net::have_ws_backend();
-  register_action_intrinsics(
-      app, [&host, have_http, have_ws, access, io, &app](std::shared_ptr<se::environment> env,
-                                                         se::intrinsics_context &) {
-        if (!is_live(access))
-          return; // the host turned the network off: later programs do not get the verbs
-        // Async functions on the app's exec scheduler (docs/STATE_EXEC_EXCEPTIONS.md 3): each verb
-        // parks the calling process while its kernel runs on the app's background task pool and
-        // resumes it with the reply dict, at any depth (the whole program included); its "-async"
-        // form returns a future for (await f [seconds]) or (await-all (list ...)). A call is
-        // charged to its process (its run time against max_time), and a killed or reaped process's
-        // call is cancelled.
-        if (have_http) {
-          // (http-get URL [OPTS]) / (http-get-async URL [OPTS]) — a GET; OPTS is the options dict
-          // (query/headers/auth/capture_auth). The future form fans out N fetches.
-          se::register_async_fn(
-              env, host, "http-get",
-              [&app, access, &host](std::span<const se::value_t> args) -> se::async_work {
-                RequestAuth auth;
-                cvc::net::HttpRequest req = build_get_request(args, auth);
-                check_request("http-get", req, auth, access);
-                return http_work(app, std::move(req), std::move(auth), access, host);
-              },
-              io);
-
-          // (http-request METHOD URL [OPTS]) / (http-request-async ...) — the GENERAL verb: any
-          // method with an options dict OPTS carrying query/headers/body/form/auth/capture_auth
-          // (see apply_http_options). It resumes with the same reply dict as (http-get).
-          se::register_async_fn(
-              env, host, "http-request",
-              [&app, access, &host](std::span<const se::value_t> args) -> se::async_work {
-                RequestAuth auth;
-                cvc::net::HttpRequest req = build_method_request(args, auth);
-                check_request("http-request", req, auth, access);
-                return http_work(app, std::move(req), std::move(auth), access, host);
-              },
-              io);
-        }
-
-        // (fetch URI [BASE]) / (fetch-async URI [BASE]) — the GENERIC async resolver over ANY
-        // registered scheme (file/state/cvc/http), so an ari program async-loads any URI without
-        // blocking the scheduler thread. Reply dict: { ok body(bytes) url error }. An http(s) URI
-        // goes through the registered handler, which carries the host's policy (enable_net).
-        se::register_async_fn(
-            env, host, "fetch",
-            [&app, &host](std::span<const se::value_t> args) {
-              return uri_fetch_work(app, args, host);
-            },
-            io);
-
-        // (ws-*) — WebSocket clients, where this build has a backend (libcurl with ws, a browser).
-        if (have_ws)
-          register_ws_verbs(env, host, app.slot<WsTable>(), access, io);
-
-        register_net_verbs(app, env, access, app.slot<OpenUrlLimit>());
-      });
-  // (http-upload URL FILE [OPTS]) / (http-upload-async ...) — send a file the user picked
-  // (file-pick, files.h), in one request or in chunks it can resume. Its own provider: it needs the
-  // app's picked files, and the program's root for its progress path.
-  if (have_http)
-    register_action_intrinsics(app, [&app, &host, access, io](std::shared_ptr<se::environment> env,
-                                                              se::intrinsics_context &ictx) {
-      if (!is_live(access))
-        return;
-      const std::string root = ictx.root ? ictx.root->fullName() : std::string();
-      cvc::app *const app_ptr = &app;
+  // Two providers by kind (S1-Q7). The first, `any`: the requests, net-allowed? and the net-auth-*
+  // verbs. A request's kernel runs on the app's background task pool and its completion goes to
+  // the call's own scheduler; the WebSocket table and each connection's sent list lock; the policy
+  // is immutable once the host made it; and the credential store locks: every CredentialStore
+  // member that reads or writes its entries, bindings or renewers holds its mutex_
+  // (cvc/net/credentials.h, "Thread-safe"), so net-allowed? and net-auth-* need no host thread.
+  // A host's own WebSocket transport (NetAccess::ws) is called as the compiled backend is:
+  // connect() from the pool's threads, and start() and a connection's recv_async() from the calling
+  // program's pump thread, whichever thread pumps its group; it must be as thread-safe as that.
+  // The body reads the context and the atomic `live`, and binds natives into the new env only, so
+  // a spawned child may run it on a worker.
+  // The app's WebSocket connections and its open-url clock: app slots, got here once so a body
+  // that runs on a worker (a spawned child's) asks the app for nothing.
+  WsTable &ws_table = app.slot<WsTable>();
+  OpenUrlLimit &open_limit = app.slot<OpenUrlLimit>();
+  // The handlers keep the app by reference: its providers and its pool go before it does.
+  auto requests = [&app, &ws_table, have_http, have_ws, access,
+                   io](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
+    if (!is_live(access))
+      return; // the host turned the network off: later programs do not get the verbs
+    // The calling program's async host (td 4.9, B30): the app's for a document in group 0, its own
+    // group's for an isolated one, the init lane's inline one in init:. A started request
+    // (http_work, uri_fetch_work) keeps its host's finisher, not the host: a host's shutdown (a
+    // group's comes after the group's kills) cancels each call it started, and the finisher posts
+    // only while its host has not begun to shut down, so an answer that comes as the group goes
+    // touches neither its host nor its scheduler (settle_started).
+    se::async_host *host = ictx.host;
+    // Async functions on the calling program's scheduler (docs/STATE_EXEC_EXCEPTIONS.md 3): each
+    // verb parks the calling process while its kernel runs on the app's background task pool and
+    // resumes it with the reply dict, at any depth (the whole program included); its "-async"
+    // form returns a future for (await f [seconds]) or (await-all (list ...)). A call is charged
+    // to its process (its run time against max_time), and a killed or reaped process's call is
+    // cancelled.
+    if (have_http) {
+      // (http-get URL [OPTS]) / (http-get-async URL [OPTS]) — a GET; OPTS is the options dict
+      // (query/headers/auth/capture_auth). The future form fans out N fetches.
       se::register_async_fn(
-          env, host, "http-upload",
-          [app_ptr, &host, access, root](std::span<const se::value_t> args) -> se::async_work {
-            UploadPlan plan = build_upload(args, *app_ptr, root);
-            check_request("http-upload", plan.base, plan.auth, access);
-            return http_upload_work(std::move(plan), access, host, app_ptr);
+          env, *host, "http-get",
+          [&app, access, host](std::span<const se::value_t> args) -> se::async_work {
+            RequestAuth auth;
+            cvc::net::HttpRequest req = build_get_request(args, auth);
+            check_request("http-get", req, auth, access);
+            return http_work(app, std::move(req), std::move(auth), access, *host);
           },
           io);
-    });
+
+      // (http-request METHOD URL [OPTS]) / (http-request-async ...) — the GENERAL verb: any
+      // method with an options dict OPTS carrying query/headers/body/form/auth/capture_auth (see
+      // apply_http_options). It resumes with the same reply dict as (http-get).
+      se::register_async_fn(
+          env, *host, "http-request",
+          [&app, access, host](std::span<const se::value_t> args) -> se::async_work {
+            RequestAuth auth;
+            cvc::net::HttpRequest req = build_method_request(args, auth);
+            check_request("http-request", req, auth, access);
+            return http_work(app, std::move(req), std::move(auth), access, *host);
+          },
+          io);
+    }
+
+    // (fetch URI [BASE]) / (fetch-async URI [BASE]) — the GENERIC async resolver over ANY
+    // registered scheme (file/state/cvc/http), so an ari program async-loads any URI without
+    // blocking the scheduler thread. Reply dict: { ok body(bytes) url error }. An http(s) URI goes
+    // through the registered handler, which carries the host's policy (enable_net).
+    se::register_async_fn(
+        env, *host, "fetch",
+        [&app, host](std::span<const se::value_t> args) {
+          return uri_fetch_work(app, args, *host);
+        },
+        io);
+
+    // (ws-*) — WebSocket clients, where this build has a backend (libcurl with ws, a browser).
+    if (have_ws)
+      register_ws_verbs(env, *host, ws_table, access, io);
+
+    register_net_verbs(env, access);
+  };
+  register_action_intrinsics(app, std::move(requests), se::provider_affinity::any);
+  // The second, host_proxied: (open-url), whose effect is a tab in the user's browser. Its
+  // one-a-second clock is the app's (OpenUrlLimit), so every program the app builds shares it.
+  register_action_intrinsics(
+      app,
+      [&app, access, &open_limit](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        if (is_live(access))
+          register_open_url(app, env, access, open_limit);
+      },
+      se::provider_affinity::host_proxied);
+  // (http-upload URL FILE [OPTS]) / (http-upload-async ...) — send a file the user picked
+  // (file-pick, files.h), in one request or in chunks it can resume. Its own provider, `any` as the
+  // requests are: the app's picked files lock (PickedFiles), its progress path is under the
+  // program's root as the context names it (ictx.root_path: no tree walk on a worker), and the
+  // program parks on its own host (ictx.host), a started upload keeping the host's finisher.
+  if (have_http)
+    register_action_intrinsics(
+        app,
+        [&app, access, io](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
+          if (!is_live(access))
+            return;
+          se::async_host *host = ictx.host;
+          const std::string root = ictx.root_path;
+          cvc::app *const app_ptr = &app;
+          se::register_async_fn(
+              env, *host, "http-upload",
+              [app_ptr, host, access, root](std::span<const se::value_t> args) -> se::async_work {
+                UploadPlan plan = build_upload(args, *app_ptr, root);
+                check_request("http-upload", plan.base, plan.auth, access);
+                return http_upload_work(std::move(plan), access, *host, app_ptr);
+              },
+              io);
+        },
+        se::provider_affinity::any);
 }
 
 } // namespace ariadne

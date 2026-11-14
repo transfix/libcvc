@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/core/cpu_placement.h>
 #include <cvc/core/exec_pool.h>
@@ -1234,4 +1235,167 @@ TEST(ExecPool, FailedGroupsOfAReusedThreadId) {
   if (!reused)
     GTEST_SKIP() << "no thread id was reused";
   EXPECT_TRUE(seen.empty()) << "a thread with a reused id read an ended thread's failed groups";
+}
+
+namespace {
+
+// CVC_EXEC_FORCE_MOVE for the pools built while it lives (a pool reads the knob when it is built).
+struct force_move_scope {
+  force_move_scope() { set("1"); }
+  ~force_move_scope() { set(nullptr); }
+  static void set(const char *v) {
+#ifdef _WIN32
+    _putenv_s("CVC_EXEC_FORCE_MOVE", v ? v : "");
+#else
+    if (v)
+      setenv("CVC_EXEC_FORCE_MOVE", v, 1);
+    else
+      unsetenv("CVC_EXEC_FORCE_MOVE");
+#endif
+  }
+};
+
+// How long the busy group's native keeps the pool's only worker.
+constexpr auto kForceMoveNap = std::chrono::milliseconds(1000);
+
+struct force_moved_call {
+  unsigned threads = 0;
+  bool returned = false;
+  double seconds = 0.0;      // until the case saw it return (the busy worker's nap included)
+  double call_seconds = 0.0; // the call's own pump_all, timed in its caller thread
+  double busy_after = 0.0;   // how long the worker still napped once the call began
+  bool skipped = false;      // the call's group was skipped (its pool link)
+  int last_thread = -1;      // which thread pumped the call's group last (0: a caller)
+  std::uint64_t skips = 0;   // stats().skipped across the call
+};
+
+std::int64_t now_ns() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(clock_type::now().time_since_epoch())
+      .count();
+}
+
+// One CVC_EXEC_FORCE_MOVE pump_all of a group the caller pumped last, so its caller may not take
+// it and hands it to the workers, while the pool's only worker is kept kForceMoveNap in another
+// caller's group (S1-Q11). `tight`: the call's deadline is 50 ms away, so the worker reaches it
+// after.
+// Should pump_all never return (the hang this guards), the call's objects are leaked and its thread
+// detached, so the case fails instead of hanging the binary.
+force_moved_call run_force_moved_call(bool tight) {
+  auto *app = new cvc::app;
+  share_locks(*app); // groups pumped on workers, not kept on the caller (S1-Q1)
+  cvc::exec_pool *pool = nullptr;
+  {
+    force_move_scope knob;
+    cvc::pool_options po;
+    po.threads = 1;
+    pool = new cvc::exec_pool(po);
+  }
+  force_moved_call out;
+  out.threads = pool->threads();
+  auto napping = std::make_shared<std::atomic<bool>>(false);
+  auto nap_end = std::make_shared<std::atomic<std::int64_t>>(0);
+  auto *busy = new exec_group(opts_for(*app, "busy"));
+  environment_ptr env = environment::extend(builtins::make_default_environment());
+  builtins::register_fn(env, "nap", [napping, nap_end](std::span<const value_t>) -> value_t {
+    napping->store(true);
+    std::this_thread::sleep_for(kForceMoveNap);
+    nap_end->store(now_ns());
+    return value_t(int64_t(1));
+  });
+  execute_options eo;
+  eo.env = env;
+  busy->execute(std::string("(nap)"), eo);
+  auto *light = new exec_group(opts_for(*app, "light"));
+  busy->pool_link().last_thread = 0; // both last pumped by a caller (thread 0)
+  light->pool_link().last_thread = 0;
+  std::thread other([pool, busy] {
+    std::vector<exec_group *> gs{busy};
+    pool->pump_all(gs, kSteps, far_deadline());
+  });
+  while (!napping->load())
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  const auto before = pool->stats();
+  auto returned = std::make_shared<std::atomic<bool>>(false);
+  auto call_seconds = std::make_shared<std::atomic<double>>(0.0);
+  auto call_start = std::make_shared<std::atomic<std::int64_t>>(0);
+  const auto t0 = clock_type::now();
+  std::thread caller([pool, light, tight, returned, call_seconds, call_start] {
+    std::vector<exec_group *> gs{light};
+    const auto c0 = clock_type::now();
+    call_start->store(now_ns());
+    pool->pump_all(gs, kSteps, tight ? c0 + std::chrono::milliseconds(50) : far_deadline());
+    call_seconds->store(std::chrono::duration<double>(clock_type::now() - c0).count());
+    returned->store(true);
+  });
+  other.join(); // the worker is free again kForceMoveNap in
+  // A loaded machine may start the caller thread late, even after the nap (seen once): the
+  // worker was then free for the call, and the case says nothing about the deadline.
+  out.busy_after = static_cast<double>(nap_end->load() - call_start->load()) * 1e-9;
+  while (!returned->load() && clock_type::now() - t0 < std::chrono::seconds(10))
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  out.returned = returned->load();
+  out.seconds = std::chrono::duration<double>(clock_type::now() - t0).count();
+  out.call_seconds = call_seconds->load();
+  if (!out.returned) {
+    caller.detach(); // still waiting in pump_all: everything it uses stays leaked
+    return out;
+  }
+  caller.join();
+  const auto after = pool->stats();
+  out.skipped = light->pool_link().skipped;
+  out.last_thread = light->pool_link().last_thread;
+  out.skips = after.skipped - before.skipped;
+  delete light;
+  delete busy;
+  delete pool;
+  delete app;
+  return out;
+}
+
+} // namespace
+
+// R1b-mid's force-move hang: under CVC_EXEC_FORCE_MOVE a caller may not take a group it pumped
+// last, so it waits for a worker. A worker that reached the call past its deadline skipped the
+// group and told no one, and the caller waited for ever (exec_pump_frame and Ariadne's drain hung
+// on a loaded machine). Now the caller waits no longer than its deadline and skips the group
+// itself, and a worker that skips tells it. The call is timed in its own thread: it must end long
+// before the busy worker is free (a worker-side skip alone would end it only then, R1b skeptic
+// m7). Control: a far deadline waits for the worker and pumps the group. One-sided ceilings: 10 s
+// for a return at all (rule 7), half the worker's nap for the tight call; the times are printed.
+// The tight call counts only when the worker napped on for over half its nap after the call
+// began (a caller thread started late on a loaded machine is tried again, up to five times).
+// Should no try count, the case passes on its hang check alone, which every try made, with a
+// note: a skip would print no "OK ]" and fail the sanitizer jobs' required list.
+TEST(ExecPool, AForceMovedCallEndsAtItsDeadline) {
+  const force_moved_call control = run_force_moved_call(false);
+  std::cout << "far deadline: " << control.threads << " worker(s), returned " << control.returned
+            << " after " << control.seconds << " s (the call " << control.call_seconds
+            << " s), last thread " << control.last_thread << ", skips " << control.skips << "\n";
+  if (control.threads != 1)
+    GTEST_SKIP() << "needs a pool with one worker";
+  ASSERT_TRUE(control.returned) << "pump_all with a far deadline did not return";
+  EXPECT_FALSE(control.skipped);
+  EXPECT_NE(control.last_thread, 0) << "the caller pumped a group it pumped last";
+  EXPECT_EQ(control.skips, 0u);
+  const double half_nap = std::chrono::duration<double>(kForceMoveNap).count() / 2;
+  force_moved_call tight;
+  for (int attempt = 1; attempt <= 5; ++attempt) {
+    tight = run_force_moved_call(true);
+    std::cout << "deadline 50 ms away: returned " << tight.returned << " after " << tight.seconds
+              << " s (the call " << tight.call_seconds << " s, the worker busy " << tight.busy_after
+              << " s after it began), last thread " << tight.last_thread << ", skips "
+              << tight.skips << "\n";
+    ASSERT_TRUE(tight.returned) << "pump_all did not return within 10 s: its caller still waits";
+    if (tight.busy_after > half_nap + 0.1)
+      break;
+  }
+  if (tight.busy_after <= half_nap + 0.1) {
+    std::cout << "NOTE: the caller thread started too late in all five tries (a loaded "
+                 "machine): the deadline was not judged; every call returned\n";
+    return;
+  }
+  EXPECT_LT(tight.call_seconds, half_nap)
+      << "the call ended when the busy worker came, not at its deadline";
+  EXPECT_TRUE(tight.skipped) << "the group was not skipped at the deadline";
+  EXPECT_EQ(tight.skips, 1u);
 }

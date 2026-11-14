@@ -392,8 +392,10 @@ struct flights {
 
 // The leader body: do the (conditional) network fetch and update the cache; return the UriResult.
 UriResult do_fetch_and_store(cvc::app &app, cvc::state &root, const std::string &key, const Uri &u,
-                             const EntrySnapshot &stale, const pt::ptime &now) {
+                             const EntrySnapshot &stale, const pt::ptime &now,
+                             const UriCancelled &cancelled) {
   cvc::net::HttpRequest req;
+  req.cancelled = cancelled; // the leader's: its followers share what its fetch got
   req.url = u.raw;
   req.max_bytes = detail::kMaxHttpBytes;
   req.follow_redirects = true; // only the uncredentialed path reaches here (matches http_fetch)
@@ -457,7 +459,7 @@ UriResult do_fetch_and_store(cvc::app &app, cvc::state &root, const std::string 
 // hit returns before this is called). This per-key serialization is the ONLY write coordination the
 // cache needs — the entry write itself is a single atomic node op (see the CONCURRENCY note).
 UriResult fetch_and_cache(cvc::app &app, cvc::state &root, const std::string &key, const Uri &u,
-                          const pt::ptime &now) {
+                          const pt::ptime &now, const UriCancelled &cancelled) {
   flights &f = app.slot<flights>();
   std::shared_ptr<Inflight> mine;
   {
@@ -483,7 +485,7 @@ UriResult fetch_and_cache(cvc::app &app, cvc::state &root, const std::string &ke
     if (snap.present && snapshot_fresh(snap, now))
       result = {true, snap.body, snap.effective_url, std::string()};
     else
-      result = do_fetch_and_store(app, root, key, u, snap, now);
+      result = do_fetch_and_store(app, root, key, u, snap, now, cancelled);
   } catch (const std::exception &e) {
     result = {false, std::string(), std::string(),
               "ari: http fetch of '" + u.raw + "' failed: " + e.what()};
@@ -503,7 +505,7 @@ UriResult fetch_and_cache(cvc::app &app, cvc::state &root, const std::string &ke
 }
 
 UriResult cached_http_fetch(cvc::app &app, cvc::state &root, const Uri &u,
-                            const std::string & /*base*/) {
+                            const std::string & /*base*/, const UriCancelled &cancelled) {
   const HttpRequestOptions opts = detail::consult_http_provider(app, u.raw, /*for_write=*/false);
   if (!opts.headers.empty() || url_has_userinfo(u.raw)) {
     // CREDENTIALED (provider headers or URL userinfo) → bypass the cache entirely (never serve one
@@ -513,6 +515,7 @@ UriResult cached_http_fetch(cvc::app &app, cvc::state &root, const Uri &u,
     req.max_bytes = detail::kMaxHttpBytes;
     req.headers = opts.headers;
     req.follow_redirects = false;
+    req.cancelled = cancelled;
     if (!opts.method.empty() && opts.method != "GET")
       req.method = opts.method;
     return detail::map_http_fetch_result(u.raw, /*follow=*/false, cvc::net::send(app, req));
@@ -530,7 +533,7 @@ UriResult cached_http_fetch(cvc::app &app, cvc::state &root, const Uri &u,
     return {true, snap.body, snap.effective_url, std::string()}; // FRESH: no network
 
   // stale (conditional GET) or miss (unconditional) — coalesced.
-  return fetch_and_cache(app, root, key, u, now);
+  return fetch_and_cache(app, root, key, u, now, cancelled);
 }
 
 StoreResult invalidating_store(cvc::app &app, cvc::state &root, const Uri &u,
@@ -548,8 +551,8 @@ void register_cached_http_uri_handler(cvc::app &app) {
     return; // no transport compiled — leave the scheme unresolved
   // The handlers are held in `app`'s own table, so `app` (and its state root) outlive them.
   cvc::state *root = &cvc::state::instance(app);
-  const auto fetch = [&app, root](const Uri &u, const std::string &b) {
-    return cached_http_fetch(app, *root, u, b);
+  const auto fetch = [&app, root](const Uri &u, const std::string &b, const UriCancelled &c) {
+    return cached_http_fetch(app, *root, u, b, c);
   };
   const auto store = [&app, root](const Uri &u, const std::string &c, const std::string &b) {
     return invalidating_store(app, *root, u, c, b);

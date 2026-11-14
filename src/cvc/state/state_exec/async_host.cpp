@@ -454,11 +454,22 @@ async_host::~async_host() { shutdown(); }
 void async_host::add_lane(const std::string &name, cvc::async_lane &lane) { lanes_[name] = &lane; }
 
 void async_host::shutdown() {
+  // Stopped, and the live calls taken, under the lock; cancelled outside it. A call's on_cancel
+  // hook may wait for its work's own thread, which may be in a finisher waiting for this lock: it
+  // gets it, sees `stopped`, and posts nothing.
+  std::vector<std::shared_ptr<async_call>> live;
+  {
+    std::lock_guard<std::mutex> lk(state_->m);
+    state_->stopped.store(true, std::memory_order_release);
+    live.reserve(state_->calls.size());
+    for (const std::weak_ptr<async_call> &w : state_->calls)
+      if (std::shared_ptr<async_call> call = w.lock())
+        live.push_back(std::move(call));
+  }
+  for (const std::shared_ptr<async_call> &call : live)
+    call->cancel();
+  live.clear();
   std::unique_lock<std::mutex> lk(state_->m);
-  state_->stopped.store(true, std::memory_order_release);
-  for (const std::weak_ptr<async_call> &w : state_->calls)
-    if (std::shared_ptr<async_call> call = w.lock())
-      call->cancel();
   state_->idle.wait(lk, [this] { return state_->running == 0; });
   state_->calls.clear();
 }
@@ -788,8 +799,14 @@ value_t async_host::call(const std::string &name, async_work work, const async_o
     request_await({call->channel_, name, detail::make_awaitable_handle(call)});
   }
   // Started once the process waits for it: an outcome posted at once (a transport that answers
-  // in place) is taken by the next drain like any other.
+  // in place) is taken by the next drain like any other. The call names this host meanwhile
+  // (async_call::starting_host).
   try {
+    struct starting_scope {
+      async_call &c;
+      starting_scope(async_call &call, async_host *h) : c(call) { c.starting_host_ = h; }
+      ~starting_scope() { c.starting_host_ = nullptr; }
+    } scope(*call, this);
     work.start(call);
   } catch (...) {
     if (call->settle({}, std::current_exception()))
@@ -840,6 +857,25 @@ void async_host::finish(const std::shared_ptr<async_call> &call) {
     state_->forget(*call); // settled: nothing to cancel any more
   if (call->async_sched_)
     call->async_sched_->post_async_completion(call);
+}
+
+bool async_host::finisher::finish(const std::shared_ptr<async_call> &call) const {
+  return call && state_ && finish_unless_stopped(*state_, call);
+}
+
+bool async_host::finish_unless_stopped(shared_state &state,
+                                       const std::shared_ptr<async_call> &call) {
+  // Under the lock shutdown() sets `stopped` under, so either this post ends before the shutdown
+  // goes on (and the host and its scheduler outlive it), or it sees `stopped` and touches neither:
+  // after the shutdown the call is cancelled, and the host and the scheduler may be gone.
+  std::lock_guard<std::mutex> lk(state.m);
+  if (state.stopped.load(std::memory_order_relaxed))
+    return false;
+  if (call->external_)
+    state.remove_locked(*call); // settled: nothing to cancel any more
+  if (call->async_sched_)
+    call->async_sched_->post_async_completion(call);
+  return true;
 }
 
 // ---------------------------------------------------------------------------

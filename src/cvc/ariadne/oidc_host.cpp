@@ -214,7 +214,8 @@ public:
 
   // The renewer's side, from any thread (renew_async: the one thread of a browser page).
   bool expiring() const;
-  std::string renew(const std::string &rejected);
+  std::string renew(const std::string &rejected,
+                    const std::function<bool()> &cancelled = std::function<bool()>());
   void renew_async(const std::string &rejected, std::function<void(std::string)> done);
   void close_listener() {
     if (listener_)
@@ -299,9 +300,10 @@ public:
     const std::shared_ptr<Session> s = s_.lock();
     return s && s->expiring();
   }
-  std::string renew(const std::string &rejected) override {
+  using cvc::net::CredentialRenewer::renew;
+  std::string renew(const std::string &rejected, const std::function<bool()> &cancelled) override {
     const std::shared_ptr<Session> s = s_.lock();
-    return s ? s->renew(rejected) : std::string("the sign-in has ended");
+    return s ? s->renew(rejected, cancelled) : std::string("the sign-in has ended");
   }
   void renew_async(const std::string &rejected, std::function<void(std::string)> done) override {
     if (const std::shared_ptr<Session> s = s_.lock())
@@ -379,7 +381,9 @@ void Session::set_status(const std::function<void(Status &)> &edit, bool termina
     copy = status_;
     path = status_path_;
   }
-  if (terminal && app_) // a program waiting with (msg-recv "oidc#NAME") hears of the end
+  // A program waiting with (msg-recv "oidc#NAME") hears of the end. On group 0: a document that
+  // uses oidc is never isolated (S1-Q6), and a "#" key is never scoped to a document anyway.
+  if (terminal && app_)
     app_->exec_scheduler().post_message("oidc#" + name_, status_dict(copy, name_));
 }
 
@@ -1044,12 +1048,13 @@ std::string Session::take_refresh(RefreshPlan &plan, cvc::net::HttpResponse &rep
 
 // A refresh, sent in place, on whatever thread asks: the credential store's renewal before or after
 // a request, the pump's ahead of expiry, a resumed session's check. One at a time.
-std::string Session::renew(const std::string &rejected) {
+std::string Session::renew(const std::string &rejected, const std::function<bool()> &cancelled) {
   std::lock_guard<std::mutex> one(renew_mutex_);
   RefreshPlan plan;
   plan_refresh(rejected, plan);
   if (!plan.send)
     return plan.why;
+  plan.req.cancelled = cancelled; // the asking caller's; one waiting on the mutex plans its own
   cvc::net::HttpResponse reply = cvc::net::send(*app_, plan.req, *policy_);
   return take_refresh(plan, reply);
 }
@@ -1619,13 +1624,19 @@ void enable_oidc(cvc::app &app, std::shared_ptr<const cvc::net::NetPolicy> polic
   }
   slot.on.store(true);
   std::weak_ptr<Host> weak = host;
+  // host_proxied (S1-Q7): the sessions are process-global and pump_oidc steps them on the host
+  // thread. A document that uses oidc stays in group 0 (S1-Q6), where a flow's end is posted
+  // (Session::set_status). The body reads the weak host and the atomic `live`, and binds natives
+  // into the new env only, so a spawned child may run it on a worker.
   register_action_intrinsics(
-      app, [weak](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
+      app,
+      [weak](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
         std::shared_ptr<Host> h = weak.lock();
         if (!h || (h->live && !h->live->load()))
           return; // turned off: later programs do not get the verbs
         register_verbs(weak, env, ictx);
-      });
+      },
+      se::provider_affinity::host_proxied);
 }
 
 void disable_oidc(cvc::app &app) {

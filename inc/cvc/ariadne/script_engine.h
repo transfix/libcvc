@@ -263,15 +263,15 @@ public:
   void export_async_function(const std::string &name, cvc::state_exec::async_marshal marshal,
                              const std::string &done_channel = std::string());
   // A function whose every call is an activation (§8.5), `make`'s, run three ways:
-  //   (name a b ...) from a program on the app's scheduler (an action, a resident) runs it as the
-  //     program's own sliced native call (a data job, data_job.h): a slice per data step of the
-  //     calling process, charged to it, so its caps are the activation's. The slice's call()s and
-  //     await()s are the program's own, made in its process (its chroot, its functions), and a
-  //     yield_frame() parks it for a frame. It returns what the activation finished with, or
-  //     raises what a step threw, with its own class. options' caps, lane, scope and priority
-  //     don't apply: the program's do. Its lock does: the program takes it around the activation,
-  //     waiting for it as with-lock waits. A call it can't run there (none of the program's steps
-  //     is running) raises RuntimeError.
+  //   (name a b ...) from a program whose host parks (an action, a resident: on group 0, or on
+  //     the document's isolated group) runs it as the program's own sliced native call (a data job,
+  //     data_job.h): a slice per data step of the calling process, charged to it, so its caps are
+  //     the activation's. The slice's call()s and await()s are the program's own, made in its
+  //     process (its chroot, its functions), and a yield_frame() parks it for a frame. It returns
+  //     what the activation finished with, or raises what a step threw, with its own class.
+  //     options' caps, lane, scope and priority don't apply: the program's do. Its lock does: the
+  //     program takes it around the activation, waiting for it as with-lock waits. A call it can't
+  //     run there (none of the program's steps is running) raises RuntimeError.
   //   (name-async ...) returns a future: the activation runs as an action of the document, in a
   //     process of its own (start), under options; a cap or a kill raises RuntimeError at the
   //     await. When the calling process goes first, the activation stops at its next slice.
@@ -297,12 +297,12 @@ public:
   // Start an activation now: the next pump runs its first slice (the drain's, when called before
   // the drain pumps: from an on: handler, or a hook). Returns its pid; throws when it can't start.
   int start(std::shared_ptr<ScriptActivation> activation, ActivationOptions options);
-  // Run an activation to its end now: start it, then pump the app's scheduler (Runtime::pump)
-  // until it ends, a frame per pump. For work that can't wait for the frame loop: a guest's
-  // ari_init at load, a call from init:. Under options.lane's caps (ProgramLane::init's for a
-  // load's work), and at most `max_seconds` of wall time, past which it is stopped. Returns how it
-  // ended (options.on_done hears it too). Throws RuntimeError from inside a step of the app's
-  // scheduler, which it would have to re-enter.
+  // Run an activation to its end now: start it, then pump the document's scheduler (its isolated
+  // group's, else the app's; Runtime::pump) until it ends, a frame per pump. For work that can't
+  // wait for the frame loop: a guest's ari_init at load, a call from init:. Under options.lane's
+  // caps (ProgramLane::init's for a load's work), and at most `max_seconds` of wall time, past
+  // which it is stopped. Returns how it ended (options.on_done hears it too). Throws RuntimeError
+  // from inside a step of either scheduler, or a frame's pump, which it would have to re-enter.
   ActivationOutcome run(std::shared_ptr<ScriptActivation> activation, ActivationOptions options,
                         double max_seconds = 30.0);
   // Stop one: its process is killed, and its on_done hears "did not complete: killed".

@@ -43,7 +43,10 @@ else 2 when a point is INCONCLUSIVE (repeat the run on a quieter machine; never 
 
 `gate` checks one statistic of a metric against an absolute bound on every matching point of one
 run (a gate the design states in nanoseconds, steps or allocations rather than as a change), with
-the same exit statuses.
+the same exit statuses. A scenario in GATE_GUARDS has its gate judge only points that could fail
+it: mt.ariadne_docs' points with documents outside `any` groups of their own fail as vacuous,
+points that can wake no helper are n/a (a gate with nothing but n/a fails), and the run's heavy
+points must show a worker pumping (the control).
 
 Standard library only.
 """
@@ -399,11 +402,98 @@ def parse_pair(text):
     return key, a, b
 
 
+# Scenarios whose gates judge something only at points that could fail them, and the metrics that
+# holds for. mt.ariadne_docs' small-frames gate (S1.md section 6: small frames wake no helper):
+# - vacuous: each row's metric must be at least the row's value of the param, else the point
+#   fails. Every document must be in a group of its own (extra.isolated) and an `any` one
+#   (extra.any_groups): the caller pumps group 0 and host-affinity groups, and they wake nobody;
+# - not_applicable: a point whose rows all have this metric at 0 can wake no helper (t=0, no
+#   worker; docs=1, the caller takes the lone group itself), so it prints n/a, neither PASS nor
+#   FAIL. A gate where every point is n/a fails: it judged nothing;
+# - control: the same run's points matching `where` that can wake a helper must have the metric's
+#   median at least `min` (heavy frames pumped on a worker), else the gate fails: a pool whose
+#   adaptive wake never fires passes small frames too.
+GATE_GUARDS = {
+    "mt.ariadne_docs": {
+        "metrics": ("extra.helper_wakes", "extra.wakes_per_frame", "extra.worker_pumps"),
+        "vacuous": (("extra.isolated", "docs"), ("extra.any_groups", "docs")),
+        "not_applicable": "extra.wakeable",
+        "control": {"where": {"frame": "heavy"}, "metric": "extra.worker_pumps", "min": 1},
+    },
+}
+
+
+def guard_of(scenario, metric_name):
+    """The GATE_GUARDS entry a gate of `metric_name` on `scenario` takes, or None."""
+    g = GATE_GUARDS.get(scenario)
+    return g if g and metric_name in g["metrics"] else None
+
+
+def unmet_guard(rs, guard):
+    """Why the rows of one point leave the gate vacuous (the guard's `vacuous`), or ""."""
+    for metric_name, name in guard["vacuous"]:
+        for r in rs:
+            have, need = metric(r, metric_name), param(r, name)
+            if have is None:
+                return f"vacuous: no {metric_name}"
+            try:
+                below = need is not None and have < float(need)
+            except ValueError:
+                below = False
+            if below:
+                return f"vacuous: {metric_name} {have:g} below {name} {need}"
+    return ""
+
+
+def not_applicable(rs, guard):
+    """Whether every row of one point has the guard's not_applicable metric at 0."""
+    name = guard["not_applicable"]
+    return all(metric(r, name) == 0 for r in rs)
+
+
+def control_failures(recs, scenario, guard, executor, out):
+    """Check the guard's control on `recs`' points of `scenario`; return the failures (1 when no
+    point could be checked)."""
+    ctl, na = guard["control"], guard["not_applicable"]
+    picked = [r for r in recs
+              if r.get("scenario", "") == scenario
+              and (executor is None or r.get("executor", "") == executor)
+              and all(param(r, k) == v for k, v in ctl["where"].items())]
+    where = " ".join(f"{k}={v}" for k, v in sorted(ctl["where"].items()))
+    print(f"control: median({ctl['metric']}) >= {ctl['min']:g} at {scenario}'s {where} points "
+          f"that can wake a helper ({na} above 0)", file=out)
+    checked = failed = 0
+    groups = group(picked)
+    for key in sorted(groups):
+        rs = groups[key]
+        label = f"  {key[0]:<28} {key[1]:<9} {key[2][:40]:<40}"
+        if not all((metric(r, na) or 0) > 0 for r in rs):
+            print(f"{label} {'':>12} {'':>7}  n/a ({na} 0)", file=out)
+            continue
+        checked += 1
+        vals = [v for v in (metric(r, ctl["metric"]) for r in rs) if v is not None]
+        if not all(r.get("ok", False) for r in rs) or not vals:
+            print(f"{label} {'':>12} {'':>7}  FAIL (a rep failed, or no {ctl['metric']})",
+                  file=out)
+            failed += 1
+            continue
+        v = statistics.median(vals)
+        verdict = "PASS" if v >= ctl["min"] else "FAIL"
+        failed += verdict == "FAIL"
+        print(f"{label} {v:>12.6g} {'':>7}  {verdict}", file=out)
+    if not checked:
+        print(f"  no {where} point that can wake a helper in the run: the gate has no control",
+              file=out)
+        return 1
+    return failed
+
+
 def gate(recs, scenario, metric_name, lo=None, hi=None, stat="median", executor=None,
          where=None, max_noise=None, out=sys.stdout):
     """Check `stat` of `metric_name` over each matching point's measured reps against [lo, hi].
-    Return 1 when a point fails, a matching point has a failed rep, or nothing matches; else 2
-    when a point is inconclusive (noisier than max_noise percent); else 0."""
+    Return 1 when a point fails, a matching point has a failed rep or leaves the gate vacuous,
+    nothing matches, every point is n/a or a control fails (GATE_GUARDS); else 2 when a point is
+    inconclusive (noisier than max_noise percent); else 0."""
     where = where or {}
     picked = [r for r in recs
               if fnmatch.fnmatchcase(r.get("scenario", ""), scenario)
@@ -418,14 +508,29 @@ def gate(recs, scenario, metric_name, lo=None, hi=None, stat="median", executor=
         print("  no point matches", file=out)
         return 1
     stat_fn = {"median": statistics.median, "min": min, "max": max}[stat]
-    failed = inconclusive = 0
+    failed = inconclusive = judged = na = 0
+    guarded = {}
     for key in sorted(groups):
         rs = groups[key]
         label = f"  {key[0]:<28} {key[1]:<9} {key[2][:40]:<40}"
+        guard = guard_of(key[0], metric_name)
+        if guard:
+            guarded[key[0]] = guard
         if not all(r.get("ok", False) for r in rs):
             print(f"{label} {'':>12} {'':>7}  FAIL (a rep failed its checks)", file=out)
             failed += 1
             continue
+        unmet = unmet_guard(rs, guard) if guard else ""
+        if unmet:
+            print(f"{label} {'':>12} {'':>7}  FAIL ({unmet})", file=out)
+            failed += 1
+            continue
+        if guard and not_applicable(rs, guard):
+            print(f"{label} {'':>12} {'':>7}  n/a ({guard['not_applicable']} 0: no helper to "
+                  "wake)", file=out)
+            na += 1
+            continue
+        judged += 1
         vals = [v for v in (metric(r, metric_name) for r in rs) if v is not None]
         if not vals:
             print(f"{label} {'':>12} {'':>7}  FAIL (no {metric_name})", file=out)
@@ -442,6 +547,11 @@ def gate(recs, scenario, metric_name, lo=None, hi=None, stat="median", executor=
             verdict = "FAIL"
             failed += 1
         print(f"{label} {v:>12.6g} {noise:>7.1f}  {verdict}", file=out)
+    if na and not judged and not failed:
+        print("  every point is n/a: the gate judged nothing", file=out)
+        failed += 1
+    for name in sorted(guarded):
+        failed += control_failures(recs, name, guarded[name], executor, out)
     return 1 if failed else (2 if inconclusive else 0)
 
 

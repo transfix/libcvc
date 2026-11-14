@@ -21,6 +21,7 @@
 // This is the P0 slice; the full contract (dynamic-DOM reconcile, expressions,
 // scene binding, validation) is docs/roadmap/CVCGL-UI-DSL-ROADMAP.md.
 
+#include <cstddef>
 #include <cstdint>
 #include <cvc/ariadne/input.h> // InputEvent — Runtime::post_input feeds on_key/on_pointer (§4.6)
 #include <cvc/ariadne/keys.h>  // KeyBinding — set_key_bindings
@@ -42,6 +43,7 @@ namespace state_exec {
 // Runtime::document_scope() return type; full definition in <cvc/state/state_exec/intrinsics.h>.
 // `class` (not struct) to match the real declaration — a tag mismatch is an LNK2019 on MSVC.
 class document_scope;
+class exec_group;          // Runtime::isolated_group(); <cvc/state/state_exec/exec_group.h>
 struct environment;        // types.h
 struct intrinsics_context; // intrinsics.h
 struct value_tag;          // types.h: value_t
@@ -94,6 +96,9 @@ public:
   // path with a leading '/' is resolved app-root-absolute instead. Empty prefix
   // = binds are used as-is (app-root-relative).
   explicit Runtime(cvc::app &app, std::string prefix = std::string());
+  // Tears the document down: closes what it opened, kills and reaps its processes, and destroys
+  // its group (waiting for that group's kernels). Host thread, outside a pump: while a pump_all of
+  // the app's pool holds its group it is refused, from any thread (logged, then aborted).
   ~Runtime();
 
   Runtime(const Runtime &) = delete;
@@ -117,8 +122,8 @@ public:
 
   // Set/replace the widget tree. The swap is applied at the next frame boundary
   // (the top of render(), before any node is emitted), never mid-walk — the P0
-  // form of the §11.5.1 reconcile commit boundary. Safe to call from the host
-  // thread between frames.
+  // form of the §11.5.1 reconcile commit boundary. Host thread, between frames and outside a
+  // pump. A new tree is a new document: where its programs run is decided again (isolated_group).
   void set_root(Widget root);
 
   // Register a host handler for an action event name (a Button / MenuItemAction
@@ -129,8 +134,9 @@ public:
   // Unlike a fire-once action `on:`, this submits ONE long-lived, owner-tagged process on the
   // app-wide scheduler that PARKS between frames (it never re-submits per frame); each drain()
   // posts it a tick to run the program once. Pass a LoadResult::on_tick_script here after loading.
-  // "" clears it (kills the resident). The resident is reaped with the Runtime (kill_owner on
-  // teardown).
+  // "" clears it (kills and reaps the resident). The resident is reaped with the Runtime
+  // (kill_owner on teardown). Host thread, outside a pump; like the other lanes' programs and the
+  // channel policy, it is read by the isolation rules, so the placement is decided again.
   void set_tick_program(std::string script);
 
   // §4.6 document-level input handlers — register a state_exec PROGRAM run per input event. Like
@@ -140,7 +146,8 @@ public:
   // set_key_program handles keyboard events (key_down/key_up); set_pointer_program handles mouse
   // events (mouse_move/mouse_button_*/mouse_wheel). Pass LoadResult::on_key_script /
   // on_pointer_script.
-  // "" clears it. (Widget-level on_click/on_hover are a separate path.)
+  // "" clears it. (Widget-level on_click/on_hover are a separate path.) Host thread, outside a
+  // pump, as set_tick_program.
   void set_key_program(std::string script);
   void set_pointer_program(std::string script);
 
@@ -169,9 +176,10 @@ public:
   bool has_signal_program() const;
   // Deliver `signal` to the on_signal program, and to the tap that takes signals
   // (set_event_tap). Returns true when one of them will handle it, false when neither is set (the
-  // host then applies the default). `source` says where it came from (e.g.
-  // "terminal" for a Ctrl-C keypress, "os" for a delivered signal). Thread-safe like post_input;
-  // the program runs in the next drain().
+  // host then applies the default). `source` says where it came from (e.g. "terminal" for a Ctrl-C
+  // keypress, "os" for a delivered signal). Host thread, outside a pump (it may start the
+  // program's resident; debug builds check it), like post_input; the program runs in the next
+  // drain(). A host that catches an OS signal on another thread hands it over.
   bool post_signal(const std::string &signal, const std::string &source = "host");
 
   // §12 channel enforcement (runtime backstop): install the document's channel policy so a program
@@ -188,8 +196,9 @@ public:
 
   // Feed one input event to the runtime — the host calls this each frame for every event from its
   // input source (e.g. cvc::gl::SdlInput), BEFORE drain(), so the event is delivered to the
-  // on_key/on_pointer residents this same frame (drain() drains the ingress + pumps). Thread-safe
-  // (routes through the scheduler's MPSC ingress). A no-op if no matching handler is registered.
+  // on_key/on_pointer residents this same frame (drain() drains the ingress + pumps). Host thread,
+  // outside a pump: it may start the residents, then posts to the document's scheduler's ingress
+  // (debug builds check it). A no-op if no matching handler is registered.
   void post_input(const InputEvent &ev);
 
   // A listener of the document's input events and signals besides its on_key:/on_pointer:/
@@ -198,7 +207,8 @@ public:
   // `event` ("key", "pointer" or "signal" its kind), in the order they came: in the next drain(),
   // before its pump, on the drain's thread. `kinds` says which it takes (tap_key | tap_pointer |
   // tap_signal). A signal it takes is handled, as one an on_signal: program takes is: post_signal
-  // returns true. 0 stops it. Set it on the drain's thread; post_input may still run anywhere.
+  // returns true. 0 stops it. Set it on the drain's thread, the host thread, where post_input and
+  // post_signal run too.
   enum : unsigned { tap_key = 1u, tap_pointer = 2u, tap_signal = 4u };
   using EventTap =
       std::function<void(const std::string &kind, const cvc::state_exec::value_tag &event)>;
@@ -209,21 +219,28 @@ public:
   // drain() calls `done` with "" for a normal finish, else why it did not finish ("failed: " an
   // uncaught exception and where it was raised, "did not complete: " a limit or a kill). Its
   // ending is reported only to `done`, never as a warning. `ari test` runs a tests: case this way.
+  // Host thread, outside a pump.
   void run_program(std::string script, std::function<void(const std::string &)> done);
 
-  // Start `p` now as a process of the document's program lane on app.exec_scheduler(), as an
-  // action or a resident is: in an environment made like theirs (the intrinsics, the host's
-  // natives and functions, writes chrooted to its scope, the document's channel policy and
-  // resource scope, the app's lock manager), after the document's functions: when it runs in the
-  // document's own scope, owner-tagged with the document so it is reaped with it, and under
-  // p.lane's caps. The next pump runs it: the same drain's, when started from inside a drain()
-  // before its pump. Returns the pid; throws (a syntax error in p.program) when it can't start.
+  // Start `p` now as a process of the document's program lane on the document's scheduler (its
+  // isolated group's, else app.exec_scheduler()), as an action or a resident is: in an environment
+  // made like theirs (the intrinsics, the host's natives and functions, writes chrooted to its
+  // scope, the document's channel policy and resource scope, the app's lock manager), after the
+  // document's functions: when it runs in the document's own scope, owner-tagged with the document
+  // so it is reaped with it, and under p.lane's caps. The next pump runs it: the same drain's, when
+  // started from inside a drain() before its pump. A process with natives of its own (p.extend)
+  // runs host code inline, so it declares require_host_thread first, and it is refused while the
+  // document still runs in an isolated `any` group (see require_host_thread). Returns the pid;
+  // throws (a syntax error in p.program, that refusal) when it can't start. Host thread, outside a
+  // pump or from a step of the document's own group 0 or host-affinity group (an exported call,
+  // an on: hook), never a worker.
   int start_process(LaneProcess p);
 
-  // Pump app.exec_scheduler() one bounded slice and sweep this document's processes, as drain()
-  // does after its handlers and residents, and nothing more: for a host extension that has to
-  // wait for a process of its own outside the frame loop (ScriptLane::run). Each call starts the
-  // next app frame, as a drain's pump does. Never call it from inside a step of that scheduler.
+  // Pump app.exec_scheduler() one bounded slice, and the document's isolated group if it has one
+  // (through the app's pool), then sweep this document's processes, as drain() does after its
+  // handlers and residents, and nothing more: for a host extension that has to wait for a
+  // process of its own outside the frame loop (ScriptLane::run). Each call starts the next app
+  // frame, as a drain's pump does. Host thread, never from inside a pump or a step of either.
   void pump();
 
   // Render one frame: apply any pending tree swap, then walk the tree driving the
@@ -266,7 +283,66 @@ public:
   // frame boundary: with each drained once a frame, in any order, an (await …) resumes once a
   // frame, not once per Runtime. While nothing has used the scheduler it is neither pumped nor
   // built. A host with no Runtime pumps it itself (cvc::pump_exec_frame, cvc/core/async_lane.h).
+  // An isolated document's group (isolated_group) is pumped there too, through the app's pool
+  // (app.exec_pool().pump_all), once a drain.
   void drain();
+  // drain() in two halves, for a host that pumps once a frame for all its Runtimes (threaded
+  // Stage 1, STATE_EXEC_THREADED.md 4.12): drain_begin() on each Runtime (events, key bindings,
+  // actions submitted, ticks, input residents), then app.exec_pump_frame(), then drain_end() on
+  // each (the sweep). drain_end() pumps the scheduler itself unless exec_pump_frame() ran since
+  // this Runtime's drain_begin(). drain() is drain_begin() then drain_end(). Host thread only.
+  void drain_begin();
+  void drain_end();
+
+  // ---- isolated documents (threaded Stage 1, S1-Q6) ----
+  // The group this document's programs run in when ariadne.exec.isolate_documents isolated it
+  // (pumped on a worker, or on the host thread when its affinity is host); null when they run in
+  // group 0, the app scheduler. Decided at load (AppRuntime::load asks at its end), and again,
+  // before the next program starts or the next frame is drawn, after a set_root, a lane's program,
+  // the channel policy, the key bindings or a thread-affine prefix change. A host verb or provider
+  // registered later (refresh_program_names, register_action_intrinsics) has it decided again the
+  // first time nothing of the document runs (before its first frame, or a frame with no resident,
+  // child or action left), at the latest at its next restart (a load, set_root, a lane's program);
+  // until then a host_only name registered late is a NameError in an isolated `any` group (logged
+  // once). When the answer changes the document
+  // moves: its actions, spawned children and residents are killed and reaped where they ran, a
+  // run_program caller is told "did not complete: the document moved to another group", the
+  // residents start again in the new place, and the streams the document owns post there from then
+  // on; an old group is unregistered at once and destroyed once its calls have ended, so a move
+  // does not wait for them. A move out of a group a pump_all holds is refused (logged, then
+  // aborted). Host thread, outside a pump.
+  cvc::state_exec::exec_group *isolated_group() const;
+  // Why the document stays in group 0: "" when it is isolated, else the first rule it failed
+  // (logged when it changes, with the setting on).
+  std::string isolation_reason() const;
+  // A subscriber the host connected at or under `prefix` must run on the host thread
+  // (AppRuntime::declare_thread_affine_prefix forwards here). An isolated document gets a
+  // host-affinity group when a declared prefix is at, above or under its own: a write under the
+  // document emits childChanged on every ancestor, so a subscriber above it runs on the writing
+  // thread too. Before the document is loaded.
+  void declare_thread_affine_prefix(const std::string &prefix);
+  // The document's programs run host code inline that must stay on the host thread: a scripting
+  // engine's activations (AppRuntime::use_script_engine declares it; start_process too, for a
+  // process with natives of its own). An activation's natives run a slice of its language in the
+  // calling step, charged to its process, under a frame budget the language's activations share.
+  // An isolated document then gets a host-affinity group, as a host_only provider gives it. `why`
+  // is kept for the first declaration. Like a late registration: decided again the first time
+  // nothing of the document runs, at the latest at its next restart; before load() it takes effect
+  // at the load.
+  void require_host_thread(const std::string &why);
+  // The document's programs this Runtime does not hold, which run elsewhere: AppRuntime::load
+  // passes its init: (run_init) and its tests: (run_program). The isolation rules read them with
+  // the document's own (S1-Q6). Each call replaces the last; before set_root.
+  void set_document_programs(std::vector<std::string> programs);
+  // The group the document's programs run in now, as isolated_group() last decided, without
+  // deciding again or moving anything (AppRuntime::idle and wait_idle). Null in group 0.
+  cvc::state_exec::exec_group *current_group() const;
+  // The kernels still running in the groups a move retired (each goes at a drain once its count
+  // is 0), and a wait until they have all ended: AppRuntime::idle and wait_idle count them too,
+  // so a host does not let go of what an async function uses while one still runs. Host thread;
+  // neither decides nor destroys anything.
+  std::size_t retired_calls_in_flight() const;
+  void wait_retired_calls();
 
   // Drain the §4 read-lane diagnostics accumulated during render() — one message per
   // distinct failing predicate (a parse error, a runtime error, or a step / time cap overrun;
@@ -303,7 +379,8 @@ public:
   bool has(const std::string &name) const;
   // Forget the cached program names, so has_function() / has() see verbs registered since they
   // were last asked. AppRuntime::register_verb calls it; a new register_action_intrinsics provider
-  // is noticed without it.
+  // is noticed without it. Like a new provider, it has the placement decided again while nothing
+  // of the document runs, else at its next restart (isolated_group).
   void refresh_program_names();
 
   // A function the read lane's expressions may call (visible_when, a computed bind:, §2.1) beside
@@ -415,6 +492,7 @@ struct environment; // NB: struct, not class — MSVC encodes the class/struct t
 struct intrinsics_context; // name (types.h/intrinsics.h declare both as struct); a mismatch =
                            // LNK2019 on Windows (Itanium ABI ignores the tag, so it hides on
                            // Linux/macOS).
+enum class provider_affinity; // intrinsics.h: any, host_proxied, host_only
 } // namespace state_exec
 namespace ariadne {
 
@@ -424,11 +502,23 @@ using ActionIntrinsicProvider = std::function<void(
 // Register a provider of host intrinsics for `app`'s program lanes. Providers run in order. The
 // list is the app's own (VOLROVER-LIBRARY-PORTS-ROADMAP.md 1.3): another app's documents never
 // get them, and they go with the app. Without a key it appends. With a non-empty key it replaces
-// the provider registered under that key, in its place, so a host that registers the same
-// stateless provider each time it starts (a cvcGL runtime) keeps one.
+// the provider registered under that key, and its kind, in its place, so a host that registers the
+// same stateless provider each time it starts (a cvcGL runtime) keeps one. The forms without a kind
+// register the provider host_only.
 void register_action_intrinsics(cvc::app &app, ActionIntrinsicProvider provider);
 void register_action_intrinsics(cvc::app &app, const std::string &key,
                                 ActionIntrinsicProvider provider);
+// The same, with the kind of every native the provider registers (STATE_EXEC_THREADED.md 4.9): an
+// isolated document's group installs them by it. A provider installed in an `any` group must also
+// have a registration body safe to run on a worker, since a spawned child runs it there. A
+// host_proxied provider binds synchronous natives only (an async one would run its kernel inline on
+// the caller, uncharged). What a provider binds that is not a native is made fresh for each env, or
+// is immutable: two groups' programs must never share a mutable value.
+void register_action_intrinsics(cvc::app &app, ActionIntrinsicProvider provider,
+                                cvc::state_exec::provider_affinity affinity);
+void register_action_intrinsics(cvc::app &app, const std::string &key,
+                                ActionIntrinsicProvider provider,
+                                cvc::state_exec::provider_affinity affinity);
 // Remove all of `app`'s providers (a host tears down before its captured context dies; also for
 // tests).
 void clear_action_intrinsics(cvc::app &app);

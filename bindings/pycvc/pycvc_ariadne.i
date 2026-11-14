@@ -165,7 +165,7 @@ public:
   void wait_idle() {
     if (inFrame_)
       throw std::logic_error("AriApp::wait_idle: called from inside a frame");
-    app_->exec_async_host().wait_idle();
+    rt_->wait_idle(); // the app's host and the document's own group's (S1.9)
   }
   static bool have_yaml() { return cvc::ariadne::AppRuntime::have_yaml(); }
 

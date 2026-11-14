@@ -166,9 +166,10 @@ cvc::net::HttpRequest http_fetch_request(cvc::app &app, const Uri &u, bool &foll
 }
 
 UriResult http_fetch(cvc::app &app, const Uri &u, const std::string & /*base*/,
-                     const cvc::net::NetPolicy *policy = nullptr) {
+                     const UriCancelled &cancelled, const cvc::net::NetPolicy *policy = nullptr) {
   bool follow = true;
-  const cvc::net::HttpRequest req = http_fetch_request(app, u, follow);
+  cvc::net::HttpRequest req = http_fetch_request(app, u, follow);
+  req.cancelled = cancelled;
   return detail::map_http_fetch_result(u.raw, follow, detail::send_http(app, req, policy));
 }
 
@@ -204,8 +205,9 @@ void register_http_uri_handler(cvc::app &app, std::shared_ptr<const cvc::net::Ne
   if (!cvc::net::have_http_backend())
     return; // no transport compiled — leave the scheme unresolved
   // The handlers are held in `app`'s own table, so `app` outlives them.
-  const auto fetch = [&app, policy](const Uri &u, const std::string &base) {
-    return http_fetch(app, u, base, policy.get());
+  const auto fetch = [&app, policy](const Uri &u, const std::string &base,
+                                    const UriCancelled &cancelled) {
+    return http_fetch(app, u, base, cancelled, policy.get());
   };
   const auto fetch_async = [&app, policy](const Uri &u, const std::string &, UriDone done) {
     return http_fetch_async(app, u, policy, std::move(done));

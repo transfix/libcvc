@@ -3,7 +3,8 @@
 // wasm: block names a module; the engine instantiates it once per document, and its exports
 // become functions the document's programs call. A call is run a slice of gas at a time: as the
 // calling program's own work, a slice per step of its process (ScriptLane::export_activation), or,
-// for a -async call and a hook, as an activation of its own on the app's scheduler.
+// for a -async call and a hook, as an activation of its own on the document's scheduler (its
+// isolated group's, else the app's).
 //
 //   requires: [wasm]
 //   wasm:

@@ -10,7 +10,8 @@
 
 The lock phases' and threaded execution's gates (docs/STATE_EXEC_BENCH.md) are decided by these
 rules: the implicit defaults that keep old records matching, --pair, the noise rule (INCONCLUSIVE,
-exit 2), the change rule (a steps_total drop fails) and gate's absolute bounds. The records of
+exit 2), the change rule (a steps_total drop fails), gate's absolute bounds and its guards against
+a pass that judged nothing (GATE_GUARDS: vacuous points, n/a points and the control). The records of
 mt_pycvc_threads.py are checked here too, without pycvc. Standard library only; CTest runs it as
 state_exec_bench_tool_test.
 """
@@ -571,6 +572,124 @@ class Gate(unittest.TestCase):
                               point(8, "cycle", [0.5, 0.5, 0.5]), *gate)
         self.assertEqual(code, 0, out)
         self.assertEqual(self.gate(eight + point(16, "fib", [0.85, 0.85, 0.85]), *gate)[0], 1)
+
+    # Stage 1b's gate: mt.ariadne_docs' small frames wake no helper (GATE_GUARDS). A point's
+    # records, as the bench writes them: extra.isolated and extra.any_groups default to every
+    # document in an `any` group of its own, extra.wakeable to what exec_pool's wake allows
+    # (min(docs - 1, t), group 0 holding nothing), worker pumps to none.
+    @staticmethod
+    def docs_point(t, docs, frame, wakes, isolated=None, any_groups=None, wakeable=None,
+                   worker_pumps=0):
+        isolated = docs if isolated is None else isolated
+        any_groups = isolated if any_groups is None else any_groups
+        wakeable = max(0, min(any_groups - 1, t)) if wakeable is None else wakeable
+        out = []
+        for i, w in enumerate(wakes):
+            r = rec("mt.ariadne_docs", {"t": t, "docs": docs, "frame": frame, "frames": 200},
+                    rep=i, wall_ns=1)
+            r["extra"] = {"helper_wakes": w, "wakes_per_frame": w / 200.0, "isolated": isolated,
+                          "any_groups": any_groups, "wakeable": wakeable,
+                          "worker_pumps": worker_pumps}
+            out.append(r)
+        return out
+
+    DOCS_GATE = ["--scenario", "mt.ariadne_docs", "--where", "frame=small", "--metric",
+                 "extra.helper_wakes", "--max", "0"]
+
+    def docs_control(self):
+        """A heavy point that can wake a helper and whose workers pumped: the control holds."""
+        return self.docs_point(4, 8, "heavy", [40, 41, 39], worker_pumps=150)
+
+    def test_ariadne_docs_gate_judges_points_that_can_wake_a_helper(self):
+        p = self.docs_point
+        run = p(4, 8, "small", [0, 0, 0]) + p(2, 2, "small", [0, 0, 0]) + self.docs_control()
+        code, out = self.gate(run, *self.DOCS_GATE)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count("PASS"), 3, out)  # two small points and the control
+        # Small frames that woke a helper fail: in the median rep, or in any with --stat max.
+        self.assertEqual(self.gate(run + p(4, 4, "small", [0, 1, 1]), *self.DOCS_GATE)[0], 1)
+        once = run + p(4, 4, "small", [0, 1, 0])
+        self.assertEqual(self.gate(once, *self.DOCS_GATE)[0], 0)
+        self.assertEqual(self.gate(once, *self.DOCS_GATE, "--stat", "max")[0], 1)
+        # The rate reads the same records: a wake in 200 frames is 0.005 a frame.
+        rate = ["--scenario", "mt.ariadne_docs", "--where", "frame=small", "--metric",
+                "extra.wakes_per_frame", "--max", "0.02"]
+        self.assertEqual(self.gate(run + p(4, 4, "small", [1, 1, 1]), *rate)[0], 0)
+        self.assertEqual(self.gate(run + p(4, 4, "small", [9, 9, 9]), *rate)[0], 1)
+
+    def test_ariadne_docs_gate_fails_documents_outside_any_groups_as_vacuous(self):
+        p, ctl = self.docs_point, self.docs_control()
+        # Documents left in group 0 (extra.isolated below docs): the caller pumps them.
+        code, out = self.gate(p(2, 2, "small", [0, 0, 0], isolated=0) + ctl, *self.DOCS_GATE)
+        self.assertEqual(code, 1, out)
+        self.assertIn("vacuous: extra.isolated 0 below docs 2", out)
+        # Isolated, but in host-affinity groups (extra.any_groups below docs): the caller too.
+        code, out = self.gate(p(4, 4, "small", [0, 0, 0], any_groups=0) + ctl, *self.DOCS_GATE)
+        self.assertEqual(code, 1, out)
+        self.assertIn("vacuous: extra.any_groups 0 below docs 4", out)
+        # One rep with a document short is enough.
+        partly = p(4, 4, "small", [0, 0]) + p(4, 4, "small", [0], any_groups=3)
+        partly[-1]["rep"] = 2
+        self.assertEqual(self.gate(partly + ctl, *self.DOCS_GATE)[0], 1)
+        # A record without the extras (a binary before them) cannot pass.
+        bare = p(2, 2, "small", [0, 0])
+        for r in bare:
+            del r["extra"]["any_groups"]
+        code, out = self.gate(bare + ctl, *self.DOCS_GATE)
+        self.assertEqual(code, 1, out)
+        self.assertIn("vacuous: no extra.any_groups", out)
+        # Other scenarios' gates take no guard: a record without the extras passes there.
+        other = reps("mt.groups", {"t": 8, "groups": 8, "prog": "fib", "runs": 5}, [0, 0],
+                     metric="extra.helper_wakes")
+        other = [dict(r, extra={"helper_wakes": r.pop("extra.helper_wakes")}) for r in other]
+        self.assertEqual(self.gate(other, "--scenario", "mt.groups", "--metric",
+                                   "extra.helper_wakes", "--max", "0")[0], 0)
+
+    def test_ariadne_docs_points_that_can_wake_no_helper_are_na(self):
+        p, ctl = self.docs_point, self.docs_control()
+        # t=0 (no worker) and docs=1 (the caller takes the lone group): n/a, whatever they woke,
+        # beside a point that judges.
+        run = (p(0, 4, "small", [0, 0, 0]) + p(2, 1, "small", [5, 5, 5]) +
+               p(2, 2, "small", [0, 0, 0]) + ctl)
+        code, out = self.gate(run, *self.DOCS_GATE)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count("n/a (extra.wakeable 0"), 2, out)
+        # A gate where every point is n/a judged nothing: it fails.
+        code, out = self.gate(p(0, 4, "small", [0, 0]) + p(4, 1, "small", [0, 0]) + ctl,
+                              *self.DOCS_GATE)
+        self.assertEqual(code, 1, out)
+        self.assertIn("every point is n/a", out)
+        # A host-affinity group or group 0 in the call lets docs=1's caller hand its group over.
+        code, out = self.gate(p(2, 1, "small", [0, 0], wakeable=1) + ctl, *self.DOCS_GATE)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("n/a (extra.wakeable", out)
+
+    def test_ariadne_docs_gate_needs_a_positive_control(self):
+        p = self.docs_point
+        small = p(2, 2, "small", [0, 0, 0])
+        # No heavy point that can wake a helper in the run (a --size frame=small run, or only
+        # t=0 and docs=1 heavy points): no control, the gate fails.
+        code, out = self.gate(small, *self.DOCS_GATE)
+        self.assertEqual(code, 1, out)
+        self.assertIn("the gate has no control", out)
+        code, out = self.gate(small + p(0, 2, "heavy", [0, 0]) + p(4, 1, "heavy", [0, 0]),
+                              *self.DOCS_GATE)
+        self.assertEqual(code, 1, out)
+        self.assertIn("the gate has no control", out)
+        # Heavy frames that no worker pumped: the adaptive wake is dead, the gate fails.
+        code, out = self.gate(small + p(4, 8, "heavy", [40, 40, 40], worker_pumps=0),
+                              *self.DOCS_GATE)
+        self.assertEqual(code, 1, out)
+        # Workers pumped in the median rep: it holds.
+        code, out = self.gate(small + p(2, 2, "heavy", [200, 200, 200], worker_pumps=0)[:1] +
+                              p(2, 2, "heavy", [200, 200], worker_pumps=180), *self.DOCS_GATE)
+        self.assertEqual(code, 0, out)
+        # The control alone, as a gate of its own, judges the same points.
+        heavy = ["--scenario", "mt.ariadne_docs", "--where", "frame=heavy", "--metric",
+                 "extra.worker_pumps", "--min", "1"]
+        code, out = self.gate(p(0, 2, "heavy", [0, 0]) + self.docs_control(), *heavy)
+        self.assertEqual(code, 0, out)
+        self.assertIn("n/a (extra.wakeable 0", out)
 
 
 class MtPycvcThreads(unittest.TestCase):
