@@ -16,8 +16,10 @@ add_executable(ariadne_scene_world_test ariadne_scene_world_test.cpp)
 add_executable(ariadne_server_document_test ariadne_server_document_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
+add_executable(ariadne_chart_test ariadne_chart_test.cpp)
 add_executable(ariadne_term_graphics_test ariadne_term_graphics_test.cpp)
 add_executable(ariadne_media_test ariadne_media_test.cpp)
+add_executable(ariadne_files_test ariadne_files_test.cpp)
 add_executable(ariadne_host_test ariadne_host_test.cpp)
 add_executable(ariadne_requires_test ariadne_requires_test.cpp)
 add_executable(ariadne_registries_test ariadne_registries_test.cpp)
@@ -158,6 +160,15 @@ add_executable(room_aoi_relay_test room_aoi_relay_test.cpp)
 add_executable(physics_codec_test physics_codec_test.cpp)
 add_executable(physics_field_test physics_field_test.cpp)
 add_executable(physics_hull_test physics_hull_test.cpp)
+add_executable(physics_immersion_test physics_immersion_test.cpp)
+# ImmersionDigest pins the columns of bodies whose poses are computed here: build without FMA
+# contraction, as ocean_ewave_test.
+if(NOT MSVC)
+  set_source_files_properties(physics_immersion_test.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(physics_immersion_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
+add_executable(physics_boat_test physics_boat_test.cpp)
 add_executable(physics_vehicle_test physics_vehicle_test.cpp)
 add_executable(physics_energy_test physics_energy_test.cpp)
 add_executable(nav_plant_test nav_plant_test.cpp)
@@ -360,8 +371,10 @@ set(TEST_TARGETS
   ariadne_server_document_test
   ariadne_bind_test
   ariadne_ftxui_test
+  ariadne_chart_test
   ariadne_term_graphics_test
   ariadne_media_test
+  ariadne_files_test
   ariadne_host_test
   ariadne_requires_test
   ariadne_registries_test
@@ -441,6 +454,8 @@ set(TEST_TARGETS
   physics_codec_test
   physics_field_test
   physics_hull_test
+  physics_immersion_test
+  physics_boat_test
   physics_vehicle_test
   physics_energy_test
   nav_plant_test
@@ -773,6 +788,13 @@ target_link_libraries(ariadne_ftxui_test
     GTest::gtest
     GTest::gtest_main
 )
+
+target_link_libraries(ariadne_chart_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 # Three tests load GL-free documents from the repo's examples/ tree.
 target_compile_definitions(ariadne_ftxui_test PRIVATE
   CVC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../examples")
@@ -784,6 +806,13 @@ target_compile_definitions(world_rules_test PRIVATE
   CVC_ARIADNE_WORLDS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../ariadne/worlds")
 
 target_link_libraries(ariadne_media_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_files_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2352,7 +2381,21 @@ target_link_libraries(physics_field_test
     GTest::gtest_main
 )
 
+target_link_libraries(physics_boat_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(physics_hull_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(physics_immersion_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2725,6 +2768,8 @@ target_compile_features(room_aoi_relay_test PRIVATE cxx_std_17)
 target_compile_features(physics_codec_test PRIVATE cxx_std_17)
 target_compile_features(physics_field_test PRIVATE cxx_std_17)
 target_compile_features(physics_hull_test PRIVATE cxx_std_17)
+target_compile_features(physics_immersion_test PRIVATE cxx_std_17)
+target_compile_features(physics_boat_test PRIVATE cxx_std_17)
 target_compile_features(physics_vehicle_test PRIVATE cxx_std_17)
 target_compile_features(physics_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_plant_test PRIVATE cxx_std_17)
@@ -2900,8 +2945,10 @@ cvc_discover_tests(ariadne_runtime_test)
 cvc_discover_tests(ariadne_scene_world_test)
 cvc_discover_tests(ariadne_server_document_test)
 cvc_discover_tests(ariadne_ftxui_test)
+cvc_discover_tests(ariadne_chart_test)
 cvc_discover_tests(ariadne_term_graphics_test)
 cvc_discover_tests(ariadne_media_test)
+cvc_discover_tests(ariadne_files_test)
 cvc_discover_tests(ariadne_host_test)
 cvc_discover_tests(ariadne_requires_test)
 cvc_discover_tests(ariadne_registries_test)
@@ -3279,6 +3326,8 @@ cvc_discover_tests(room_aoi_relay_test)
 cvc_discover_tests(physics_codec_test)
 cvc_discover_tests(physics_field_test)
 cvc_discover_tests(physics_hull_test)
+cvc_discover_tests(physics_immersion_test)
+cvc_discover_tests(physics_boat_test)
 cvc_discover_tests(physics_vehicle_test)
 cvc_discover_tests(physics_energy_test)
 cvc_discover_tests(nav_plant_test)
@@ -3413,7 +3462,10 @@ endif()
 # must be reachable from TEST_TARGETS; list a target in
 # TEST_TARGETS_INTENTIONALLY_EXCLUDED (with a reason) to opt out.
 set(TEST_TARGETS_INTENTIONALLY_EXCLUDED
-  # (none today — add entries here with a comment explaining why)
+  # The gas pass as a command (src/ariadne_wasm/meter_main.cpp): a tool the transform of the wasm
+  # test guests runs (cvc_ariadne_wasm_transform), not a test. The tests whose guests it meters
+  # depend on it, so `check` builds it anyway.
+  ari_wasm_meter
 )
 
 get_property(_cvc_dir_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)

@@ -110,6 +110,18 @@ namespace fx = ftxui;
 
 namespace {
 
+// What a one-line field takes of typed text: all of it but line breaks, as a browser's <input>
+// does. A paste can carry them, and tvision reads keys that come in a burst (three or more at
+// once) as a paste, its Enter as a "\n".
+std::string one_line(const std::string &text) {
+  std::string out;
+  out.reserve(text.size());
+  for (const char c : text)
+    if (c != '\n' && c != '\r')
+      out += c;
+  return out;
+}
+
 std::size_t utf8_prev(const std::string &s, std::size_t i) {
   if (i == 0)
     return 0;
@@ -3132,7 +3144,13 @@ IndexEdit FtxuiBackend::radio(const char *label, int current_index,
       opts.push_back(fx::hbox({fx::text("  "), o}));
     }
   }
-  fx::Element caption = fx::text(std::string(label) + ":" + (row ? " " : ""));
+  // As ImGui does, "##..." in the label is an id and not shown: "##entries" has no caption.
+  const std::string shown_label = std::string(label).substr(0, std::string(label).find("##"));
+  if (shown_label.empty() && n > 0) {
+    m.leaf(id, true, row ? fx::hbox(std::move(opts)) : fx::vbox(std::move(opts)));
+    return e;
+  }
+  fx::Element caption = fx::text(shown_label + ":" + (row ? " " : ""));
   if (f && n == 0)
     caption = caption | fx::inverted;
   m.leaf(id, true,
@@ -3168,8 +3186,9 @@ StringEdit FtxuiBackend::input_text(const char *label, const char *key, const st
     bool used = true;
     if (ev.kind == TermEvent::Kind::Text && !ev.ctrl && !ev.alt) {
       Impl::Edit &ed = edit();
-      ed.text.insert(ed.cursor, ev.text);
-      ed.cursor += ev.text.size();
+      const std::string add = one_line(ev.text);
+      ed.text.insert(ed.cursor, add);
+      ed.cursor += add.size();
     } else if (ev.key == "Backspace") {
       Impl::Edit &ed = edit();
       if (ed.cursor > 0) {
@@ -3312,9 +3331,10 @@ MessageEdit FtxuiBackend::message_input(const char *label, const char *key,
     bool used = true;
     if (ev.kind == TermEvent::Kind::Text && !ev.ctrl && !ev.alt) {
       Impl::Edit &ed = edit();
-      if (fits(ed.text, ev.text.size())) {
-        ed.text.insert(ed.cursor, ev.text);
-        ed.cursor += ev.text.size();
+      const std::string add = opts.multiline ? ev.text : one_line(ev.text);
+      if (fits(ed.text, add.size())) {
+        ed.text.insert(ed.cursor, add);
+        ed.cursor += add.size();
       }
     } else if (newline) {
       Impl::Edit &ed = edit();
