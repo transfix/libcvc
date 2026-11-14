@@ -3841,7 +3841,7 @@ The page fetches `python312.zip` with the module and puts it on `sys.path`. The 
 stdlib and the pure-Python packages.
 
 - **What runs.** A document's `python:` block runs at load as it does natively, with pycvc,
-  pycvc_gl and numpy (`?src=main.ari`).
+  pycvc_gl and numpy (`?src=main.ari`), and so does its `wasm:` block (below).
 - **A program as the entry point.** `?src=app.py` runs a Python program in place of the document.
   Only a document's own imports are fetched ahead, so list the files the program loads in the
   config's `preload`.
@@ -3859,8 +3859,9 @@ stdlib and the pure-Python packages.
 C API is found (the cvcpkg `wasmtime` package; [`src/ariadne_wasm`](../src/ariadne_wasm/wasm_engine.h))
 also runs a compiled plugin, a guest, from any language that compiles to WebAssembly. The cvcpkg
 `arix` and `ariglx` packages are built with it, and `cvcpkg install arix` brings `wasmtime` into the
-same prefix. Natively only, so far: the browser and the BSDs come later
-(roadmap/ARIADNE_SCRIPTING_HOSTS.md §8, G2–G3).
+same prefix. `ariglx-web` runs guests too, on the browser's own WebAssembly, once a guest is
+transformed for it (*In the browser*, below). The BSDs come later
+(roadmap/ARIADNE_SCRIPTING_HOSTS.md §8, G3).
 
 ```yaml
 requires: [wasm]
@@ -3958,6 +3959,15 @@ wasm:
 - **The ABI** a guest is written to (values as CBOR in its memory, `ari_alloc`, the `call`,
   `reply`, `yield` and `fail` imports, the state imports, and the data calls on handles) is in
   [`wasm_engine.h`](../src/ariadne_wasm/wasm_engine.h).
+- **In the browser (`ariglx-web`).** The page fetches the guest with the document (the module the
+  block names, beside it) and runs it in the same gas slices, so a call counts what it counts
+  natively. A page can't pause a running module by itself, so the guest must be transformed ahead:
+  metered, then put through Asyncify. In CMake that is `cvc_ariadne_wasm_transform`
+  ([`ariadne_wasm.cmake`](../src/ariadne_wasm/ariadne_wasm.cmake)); by hand it is the three
+  commands listed there (binaryen's `wasm-opt`, which emsdk ships, and `ari_wasm_meter`). The page
+  refuses a `.wat` module, or one that wasn't transformed. A guest over 8 MB loads too: Chrome
+  won't compile or instantiate a module that large on the page's own thread, so the page does both
+  asynchronously, and the document's load waits for them.
 
 ### 9.7 A server document: `arisrv --doc`
 
