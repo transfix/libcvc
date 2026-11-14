@@ -60,7 +60,8 @@ static const unsigned int data_type_sizes[] = {sizeof(unsigned char), sizeof(uns
                                                sizeof(char),          sizeof(int),
                                                sizeof(int64),         0};
 
-static const char *data_type_strings[] = {
+// Read-only: the pointers themselves are constant too (no writable table in any object file).
+inline constexpr const char *data_type_strings[] = {
     "unsigned char", "unsigned short", "unsigned int", "float", "double",
     "uint64",        "char",           "int",          "int64", "void"};
 
@@ -207,8 +208,8 @@ typedef cvc::mutex_map MutexMap;
 #ifndef CVC_COMPAT_TYPES_STATICS_DEFINED
 #define CVC_COMPAT_TYPES_STATICS_DEFINED
 namespace CVC {
-static const unsigned int *DataTypeSizes = cvc::data_type_sizes;
-static const char **DataTypeStrings = cvc::data_type_strings;
+static constexpr const unsigned int *DataTypeSizes = cvc::data_type_sizes;
+inline constexpr const char *const *DataTypeStrings = cvc::data_type_strings;
 } // namespace CVC
 #endif // CVC_COMPAT_TYPES_STATICS_DEFINED
 

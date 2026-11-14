@@ -91,14 +91,14 @@ int main(int argc, char **argv) {
     componentPaths.push_back("/");
   }
 #endif
-  // The cvc:// component-library import path (import: cvc://components/foo.ari), resolved against
-  // CVC_ARIADNE_PATH + any --component-path dirs + the install datadir + cwd. Register before load.
-  cvc::ariadne::register_cvc_uri_handler(componentPaths);
   const bool capturing = offscreen || !png.empty();
   if (capturing && frames <= 0)
     frames = 1; // a capture defaults to one frame
 
   cvc::app app;
+  // The cvc:// component-library import path (import: cvc://components/foo.ari), resolved against
+  // CVC_ARIADNE_PATH + any --component-path dirs + the install datadir + cwd. Register before load.
+  cvc::ariadne::register_cvc_uri_handler(app, componentPaths);
   SceneGraph sg(app, "hello");
   // cvcGL's Ariadne extensions: the L-system scene node types (forest_trees, …) + the shader
   // presets (terrain_bump / bark). This is what lets the generic shell render a pure-.ari L-system
@@ -179,7 +179,7 @@ int main(int argc, char **argv) {
   //   - type: labeled
   //     title: Belief
   //     bind: demo.belief
-  register_widget_type("labeled", [](const Widget &w, const WidgetEmitContext &ctx) {
+  register_widget_type(app, "labeled", [](const Widget &w, const WidgetEmitContext &ctx) {
     ctx.emit(text(w.props.str("title", w.label)));
     ctx.emit(text_bound("  =", w.bind));
   });
@@ -195,7 +195,7 @@ int main(int argc, char **argv) {
   Widget tree;
   bool loaded = false;
   if (!docPath.empty()) {
-    LoadResult lr = load_file(docPath.c_str());
+    LoadResult lr = load_file(app, docPath.c_str());
     if (lr.ok) {
       tree = std::move(lr.root);
       loaded = true;
@@ -236,7 +236,7 @@ int main(int argc, char **argv) {
       // check declared NODE customs (cvcGL registry) before realizing. A missing
       // REQUIRED node custom fails fast (skip the scene); a non-required one just logs.
       std::vector<std::string> custom_errs;
-      const bool customs_ok = cvc::gl::ariadne::verify_scene_customs(lr, &custom_errs);
+      const bool customs_ok = cvc::gl::ariadne::verify_scene_customs(app, lr, &custom_errs);
       for (const std::string &e : custom_errs)
         std::printf("[ariadne_hello]   %s\n", e.c_str());
       // Realize the scene under the SAME state prefix the Runtime binds against, so

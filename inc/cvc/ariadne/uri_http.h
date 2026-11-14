@@ -19,6 +19,7 @@
 #include <vector>
 
 namespace cvc {
+class app;
 namespace net {
 class NetPolicy; // cvc/net/net_policy.h
 } // namespace net
@@ -58,25 +59,23 @@ struct HttpRequestOptions {
 using HttpOptionsProvider =
     std::function<HttpRequestOptions(const std::string &url, bool for_write)>;
 
-// Install (or, with a default-constructed / null std::function, clear) the process-global HTTP
-// options provider — the way a host attaches an Authorization header per host. Thread-safe; the
-// http handlers copy the provider out under a lock before each call, so setting/clearing it never
-// races a transfer in flight. A no-op in a build without libcurl (the scheme can make no requests
-// anyway).
-void set_http_options_provider(HttpOptionsProvider provider);
+// Install (or, with a default-constructed / null std::function, clear) `app`'s HTTP options
+// provider — the way a host attaches an Authorization header per host. Thread-safe; the http
+// handlers copy the provider out under a lock before each call, so setting/clearing it never races
+// a transfer in flight. Another app's requests never see it.
+void set_http_options_provider(cvc::app &app, HttpOptionsProvider provider);
 
-// Register the built-in "http" and "https" URI handlers — BOTH read (GET, via register_uri_handler)
-// and write (PUT/POST, via register_uri_store_handler). A no-op when this build has no libcurl.
-// Process-global and thread-safe; register once, before load_*/store. Replaces any existing
-// handlers for those schemes (a host that wants different behaviour registers its own AFTER this,
-// or does not call this). Tear down with unregister_uri_handler / unregister_uri_store_handler on
-// "http"/"https".
-void register_http_uri_handler();
-// The same handlers with every read and write checked against `policy` (cvc::net::send(req,
+// Register `app`'s built-in "http" and "https" URI handlers — BOTH read (GET, via
+// register_uri_handler) and write (PUT/POST, via register_uri_store_handler). A no-op when this
+// build has no libcurl. Thread-safe; register once, before load_*/store. Replaces any existing
+// handlers for those schemes on `app`. Tear down with unregister_uri_handler /
+// unregister_uri_store_handler on "http"/"https".
+void register_http_uri_handler(cvc::app &app);
+// The same handlers with every read and write checked against `policy` (cvc::net::send(app, req,
 // policy)): a URL whose origin it does not allow fails to resolve or store, and so does a redirect
-// to one. Null is the unchecked register_http_uri_handler(). What a host that turned the network
+// to one. Null is the unchecked register_http_uri_handler(app). What a host that turned the network
 // on registers (net_host.h).
-void register_http_uri_handler(std::shared_ptr<const cvc::net::NetPolicy> policy);
+void register_http_uri_handler(cvc::app &app, std::shared_ptr<const cvc::net::NetPolicy> policy);
 
 // Whether this build has the libcurl-backed http handler compiled in (CVC_ARIADNE_HAVE_HTTP).
 bool have_http_uri_handler();

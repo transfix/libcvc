@@ -2364,8 +2364,8 @@ std::size_t state_transport_ws::broadcast_snapshot() {
   // Diagnostic (off unless CVC_WS_BROADCAST_DEBUG is set): per-tick summary of how many peers the
   // roster broadcast reached vs. skipped, and the worst backlog observed. This is the decisive
   // signal for "clients can't see each other" — a skipped peer is one the periodic roster never
-  // reaches.
-  static const bool dbg = std::getenv("CVC_WS_BROADCAST_DEBUG") != nullptr;
+  // reaches. Read each call: a broadcast runs about once a second.
+  const bool dbg = std::getenv("CVC_WS_BROADCAST_DEBUG") != nullptr;
   std::size_t wrote = 0, skipped = 0, max_backlog = 0, filtered = 0, entries = 0, refreshed = 0;
   for (auto &c : conns) {
     if (!c || !c->alive.load() || !c->can_write())

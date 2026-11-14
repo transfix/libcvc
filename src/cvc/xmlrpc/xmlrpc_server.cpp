@@ -221,7 +221,10 @@ public:
     cvc::state::instance(ctx)("__system.xmlrpc").valueChanged.connect([&ctx]() { monitor(ctx); });
     monitor(ctx);
   }
-
-  xmlrpc_server_thread_init() { cvc::state::on_startup(cvc::state::app_init_func(init)); }
-} static_init;
+};
 } // namespace
+
+namespace cvc {
+// Called by state::instance() when the app's root is made (state.cpp's root_defaults).
+void xmlrpc_server_startup(app &ctx) { xmlrpc_server_thread_init::init(ctx); }
+} // namespace cvc

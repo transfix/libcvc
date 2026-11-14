@@ -110,12 +110,13 @@ using FetchDone = std::function<void(FetchResult)>;
 using Fetcher =
     std::function<void(const std::string &uri, const std::string &auth, FetchDone done)>;
 
-// The default fetch, blocking: an http(s) URI through the host's network when enable_net turned it
-// on (its allowlist; `auth` through its credential store, never following a redirect), else
-// through whatever http(s) handler the host registered; any other URI through the resolver
-// (uri.h), relative file:// paths against `base`. `auth` on anything but http(s), or with no
-// credential store, is an error. A reply that is not 2xx is an error ("http 404").
-FetchResult fetch_bytes(const std::string &uri, const std::string &auth,
+// The default fetch, blocking, with `app`'s network and resolver: an http(s) URI through the host's
+// network when enable_net turned it on for `app` (its allowlist; `auth` through its credential
+// store, never following a redirect), else through whatever http(s) handler the host registered;
+// any other URI through the resolver (uri.h), relative file:// paths against `base`. `auth` on
+// anything but http(s), or with no credential store, is an error. A reply that is not 2xx is an
+// error ("http 404").
+FetchResult fetch_bytes(cvc::app &app, const std::string &uri, const std::string &auth,
                         const std::string &base = std::string());
 
 // The Runtime's cache of pictures by URI. Frame-thread API; its jobs run on the app's background

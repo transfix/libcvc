@@ -47,10 +47,10 @@ bool dot_rgb(const std::string &colour, float &r, float &g, float &b) {
 } // namespace
 #endif
 
-void register_status_dot_widget(ImGuiBackend &backend) {
+void register_status_dot_widget(ImGuiBackend &backend, cvc::app &app) {
 #ifdef CVC_ENABLE_IMGUI
   backend.register_widget(
-      "status_dot",
+      app, "status_dot",
       [](const std::string &current, const cvc::ariadne::Widget &w) -> cvc::ariadne::CustomEdit {
         float d = static_cast<float>(w.props.num("size", 10.0));
         if (!(d > 0.0f) || d > 64.0f)

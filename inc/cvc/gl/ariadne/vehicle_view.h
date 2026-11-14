@@ -61,8 +61,8 @@ void sync_spawn_markers(RealizedScene &realized, std::vector<std::string> *warni
 
 // `type: vehicle_preview` (props: `vehicles:`, the catalog's key root, default vehicles;
 // `spin:`, degrees a second, default 20): the archetype `<vehicles>.selected` names, in the
-// spawn keys' colours, at the node's position. Idempotent.
-void register_vehicle_preview_node();
+// spawn keys' colours, at the node's position. Registered on `app`; idempotent.
+void register_vehicle_preview_node(cvc::app &app);
 
 } // namespace ariadne
 } // namespace gl

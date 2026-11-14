@@ -6,6 +6,7 @@
 
 #include "guest_runtime.h"
 #include "value_cbor.h"
+#include "wasi_preview1.h"
 
 #include <algorithm>
 #include <boost/any.hpp>
@@ -45,10 +46,11 @@ namespace fs = std::filesystem;
 
 constexpr std::uint64_t kGasPerStep = 1000;                    // ariadne.limits.wasm_gas_per_step
 constexpr std::uint64_t kMaxMemory = std::uint64_t(256) << 20; // ariadne.limits.wasm_max_memory
-constexpr std::uint64_t kSetupFuel = 100'000'000; // _initialize, ari_alloc: the guest's own setup
+constexpr std::uint64_t kSetupGas = 100'000'000;  // _initialize, ari_alloc: the guest's own setup
 constexpr std::size_t kMaxHandles = 65536;        // live handles per instance
 
-const char *const kKeys[] = {"module", "export", "hooks", "imports", "limits", "priority"};
+const char *const kKeys[] = {"module", "export", "hooks", "imports", "limits", "priority", "wasi"};
+const char *const kWasiKeys[] = {"args", "dirs", "env"};
 
 std::uint64_t count_setting(cvc::state &root, const char *key, std::uint64_t fallback) {
   cvc::state *node = root.findDescendant(key);
@@ -108,6 +110,63 @@ narrowing(const std::optional<std::set<std::string>> &groups) {
   if (!groups)
     return nullptr;
   return [g = *groups](const std::string &f) { return g.count(import_group(f)) != 0; };
+}
+
+// A wasi: list of strings (or one alone); `what` names it in the error.
+std::vector<std::string> wasi_strings(const Value &v, const char *what) {
+  std::vector<std::string> out;
+  if (v.is_scalar()) {
+    if (!v.scalar.empty())
+      out.push_back(v.scalar);
+    return out;
+  }
+  if (!v.is_seq() || !std::all_of(v.items.begin(), v.items.end(),
+                                  [](const Value &item) { return item.is_scalar(); }))
+    throw std::runtime_error(std::string("wasm: wasi: ") + what + " is a list of strings");
+  for (const Value &item : v.items)
+    out.push_back(item.scalar);
+  return out;
+}
+
+// The block's wasi: request (§8.6.1): the args the guest gets after its module's name, and the
+// directories ({host, guest, mode: ro|rw}) and variables it asks for. No grant covers those yet
+// (arisrvx's --wasi-dir and --wasi-env are G6's next part), so asking for one fails the load, and
+// a guest never runs without the data it asked for. Returns the args.
+std::vector<std::string> wasi_request(const Value *wasi, const std::string &module,
+                                      std::vector<std::string> &warnings) {
+  if (!wasi)
+    return {};
+  if (!wasi->is_map())
+    throw std::runtime_error("wasm: wasi: is a map of args:, dirs:, env:");
+  for (const Value::Entry &e : wasi->entries)
+    if (std::find(std::begin(kWasiKeys), std::end(kWasiKeys), e.first) == std::end(kWasiKeys))
+      warnings.push_back("wasm: wasi: unknown key '" + e.first +
+                         "' ignored (it takes args, dirs, env)");
+  if (const Value *dirs = wasi->find("dirs")) {
+    if (!dirs->is_seq() && !dirs->empty())
+      throw std::runtime_error("wasm: wasi: dirs is a list of {host:, guest:, mode: ro|rw}");
+    for (const Value &d : dirs->items) {
+      if (!d.is_map() || d.str("host").empty() || d.str("guest").empty())
+        throw std::runtime_error("wasm: wasi: dirs: an entry is {host:, guest:, mode: ro|rw}");
+      if (const std::string mode = d.str("mode", "ro"); mode != "ro" && mode != "rw")
+        throw std::runtime_error("wasm: wasi: dirs: " + d.str("guest") +
+                                 ": mode is ro or rw, not '" + mode + "'");
+    }
+    if (!dirs->items.empty()) {
+      const Value &d = dirs->items.front();
+      throw std::runtime_error("wasm: " + module + ": wasi: dirs: " + d.str("guest") + " (" +
+                               d.str("mode", "ro") + ") = " + d.str("host") +
+                               ": no --wasi-dir grants it (this host grants WASI no directory)");
+    }
+  }
+  if (const Value *env = wasi->find("env")) {
+    const std::vector<std::string> names = wasi_strings(*env, "env");
+    if (!names.empty())
+      throw std::runtime_error("wasm: " + module + ": wasi: env: " + names.front() +
+                               ": no --wasi-env grants it (this host grants WASI no variable)");
+  }
+  const Value *args = wasi->find("args");
+  return args ? wasi_strings(*args, "args") : std::vector<std::string>();
 }
 
 std::int64_t packed(std::uint32_t ptr, std::uint32_t len) {
@@ -173,6 +232,12 @@ public:
       slots_[i].own.reset();
       free_.push_back(i);
     }
+  }
+
+  // Let every object go: the guest that held them has ended.
+  void clear() {
+    slots_.clear();
+    free_.clear();
   }
 
   // The volume `handle` names, to write into: the guest's own. A version anyone else may hold (the
@@ -242,20 +307,38 @@ struct Guest {
   std::optional<Request> request;
   std::string reply;   // the last call's CBOR result, or its error's text, for reply()
   std::string failure; // fail()'s text
+  WasiState wasi;      // its WASI imports' argv, their calls and bytes to charge, and proc_exit
+  // proc_exit's status, once a call ended with it: the guest has ended, its instance is gone (its
+  // exit ran wasi-libc's teardown), and every later call is a WasmError until the document reloads.
+  std::optional<int> exited;
 };
+
+std::span<std::uint8_t> bytes_of(std::string &s) {
+  return {reinterpret_cast<std::uint8_t *>(s.data()), s.size()};
+}
+std::span<const std::uint8_t> bytes_of(std::string_view s) {
+  return {reinterpret_cast<const std::uint8_t *>(s.data()), s.size()};
+}
+
+// Whether [at, at + n) lies inside the guest's memory; when not, a trap's message.
+bool inside(GuestMemory &mem, std::int64_t at, std::uint64_t n, std::string &trap) {
+  if (at >= 0 && mem.span_ok(static_cast<std::uint64_t>(at), n, trap))
+    return true;
+  if (trap.empty())
+    trap = "an out-of-bounds pointer into the guest's memory";
+  return false;
+}
 
 // The text of guest memory [ptr, ptr + len), or a trap's message.
 bool read_guest(GuestMemory &mem, std::int64_t ptr, std::int64_t len, std::string &out,
                 std::string &trap) {
-  if (ptr < 0 || len < 0 ||
-      !mem.span_ok(static_cast<std::uint64_t>(ptr), static_cast<std::uint64_t>(len), trap)) {
+  if (len < 0 || !inside(mem, ptr, static_cast<std::uint64_t>(len), trap)) {
     if (trap.empty())
       trap = "an out-of-bounds pointer into the guest's memory";
     return false;
   }
-  const std::span<std::uint8_t> b = mem.bytes();
-  out.assign(reinterpret_cast<const char *>(b.data()) + ptr, static_cast<std::size_t>(len));
-  return true;
+  out.resize(static_cast<std::size_t>(len));
+  return mem.read(static_cast<std::uint64_t>(ptr), bytes_of(out));
 }
 
 // A data call's refusal: its text, "Class: message", waits for reply(), and the call returns minus
@@ -295,15 +378,59 @@ std::shared_ptr<const cvc::geometry> mesh_of(const se::data_object_ptr &o) {
   return held<cvc::height_field>(o); // a height field is a mesh too
 }
 
-// [dst, dst + n) in the guest's memory, for a data call's copy; false, with a trap, when it isn't.
-std::uint8_t *room(GuestMemory &mem, std::int64_t dst, std::uint64_t n, std::string &trap) {
-  if (dst < 0 || !mem.span_ok(static_cast<std::uint64_t>(dst), n, trap)) {
-    if (trap.empty())
-      trap = "an out-of-bounds pointer into the guest's memory";
-    return nullptr;
+// [dst, dst + n) of the guest's memory, for a data call to fill: the memory itself where the
+// runtime maps it, else a buffer of the host's that commit() copies in.
+class GuestOut {
+public:
+  // False, with a trap, when [dst, dst + n) isn't inside the memory.
+  bool open(GuestMemory &mem, std::int64_t dst, std::uint64_t n, std::string &trap) {
+    if (!inside(mem, dst, n, trap))
+      return false;
+    mem_ = &mem;
+    at_ = static_cast<std::uint64_t>(dst);
+    data_ = mem.map(at_, n);
+    if (!data_) {
+      staged_.resize(static_cast<std::size_t>(n));
+      data_ = staged_.data();
+    }
+    return true;
   }
-  return mem.bytes().data() + dst;
-}
+  std::uint8_t *data() const { return data_; }
+  // What was written, into the guest's memory (where it was staged).
+  void commit() {
+    if (mem_ && !staged_.empty())
+      mem_->write(at_, staged_);
+  }
+
+private:
+  GuestMemory *mem_ = nullptr;
+  std::uint64_t at_ = 0;
+  std::uint8_t *data_ = nullptr;
+  std::vector<std::uint8_t> staged_;
+};
+
+// [src, src + n) of the guest's memory, for a data call to read: the memory itself where the
+// runtime maps it, else a copy.
+class GuestIn {
+public:
+  // False, with a trap, when [src, src + n) isn't inside the memory.
+  bool open(GuestMemory &mem, std::int64_t src, std::uint64_t n, std::string &trap) {
+    if (!inside(mem, src, n, trap))
+      return false;
+    data_ = mem.map(static_cast<std::uint64_t>(src), n);
+    if (!data_) {
+      copy_.resize(static_cast<std::size_t>(n));
+      mem.read(static_cast<std::uint64_t>(src), copy_);
+      data_ = copy_.data();
+    }
+    return true;
+  }
+  const std::uint8_t *data() const { return data_; }
+
+private:
+  const std::uint8_t *data_ = nullptr;
+  std::vector<std::uint8_t> copy_;
+};
 
 se::value_t bounds_list(const cvc::bounding_box &b) {
   return se::make_list({se::value_t(b.minx), se::value_t(b.miny), se::value_t(b.minz),
@@ -449,9 +576,10 @@ std::vector<Import> data_imports(Guest *g) {
     if (!natural(a[9]) || bytes > static_cast<std::uint64_t>(a[9]))
       return refuse(g, "ValueError: ari.volume_read: the region is " + std::to_string(bytes) +
                            " bytes, and dst holds " + std::to_string(a[9]));
-    std::uint8_t *dst = room(mem, a[8], bytes, trap);
-    if (!dst)
+    GuestOut out;
+    if (!out.open(mem, a[8], bytes, trap))
       return 0;
+    std::uint8_t *dst = out.data();
     const unsigned char *src = vol->data_ptr();
     for (std::uint64_t k = 0; k < out_n[2]; ++k)
       for (std::uint64_t j = 0; j < out_n[1]; ++j) {
@@ -465,6 +593,7 @@ std::vector<Import> data_imports(Guest *g) {
             std::memcpy(dst, row + i * step * vs, vs);
         }
       }
+    out.commit();
     g->moved += bytes;
     return static_cast<std::int64_t>(bytes);
   };
@@ -492,11 +621,11 @@ std::vector<Import> data_imports(Guest *g) {
     if (!natural(a[4]) || n * 8 > static_cast<std::uint64_t>(a[4]))
       return refuse(g, "ValueError: ari.volume_sample: " + std::to_string(n) + " values are " +
                            std::to_string(n * 8) + " bytes, and dst holds " + std::to_string(a[4]));
-    const std::uint8_t *in = room(mem, a[1], n * 24, trap);
-    if (!in)
+    GuestIn in;
+    if (!in.open(mem, a[1], n * 24, trap))
       return 0;
     std::vector<double> xyz(n * 3);
-    std::memcpy(xyz.data(), in, n * 24); // before any write: the two may overlap
+    std::memcpy(xyz.data(), in.data(), n * 24); // before any write: the two may overlap
     std::vector<double> v(n);
     try {
       for (std::uint64_t i = 0; i < n; ++i)
@@ -504,10 +633,11 @@ std::vector<Import> data_imports(Guest *g) {
     } catch (const std::exception &e) {
       return refuse(g, std::string("ValueError: ari.volume_sample: ") + e.what());
     }
-    std::uint8_t *dst = room(mem, a[3], n * 8, trap);
-    if (!dst)
+    GuestOut out;
+    if (!out.open(mem, a[3], n * 8, trap))
       return 0;
-    std::memcpy(dst, v.data(), n * 8);
+    std::memcpy(out.data(), v.data(), n * 8);
+    out.commit();
     g->moved += n * 32;
     return static_cast<std::int64_t>(n * 8);
   };
@@ -558,9 +688,10 @@ std::vector<Import> data_imports(Guest *g) {
     if (!natural(a[6]) || bytes > static_cast<std::uint64_t>(a[6]))
       return refuse(g, "ValueError: ari.mesh_read: the range is " + std::to_string(bytes) +
                            " bytes, and dst holds " + std::to_string(a[6]));
-    std::uint8_t *dst = room(mem, a[5], bytes, trap);
-    if (!dst)
+    GuestOut out;
+    if (!out.open(mem, a[5], bytes, trap))
       return 0;
+    std::uint8_t *dst = out.data();
     if (real) {
       const auto &v = attr == "positions" ? m->points() : m->normals();
       for (std::uint64_t i = 0; i < n; ++i, dst += 24)
@@ -583,6 +714,7 @@ std::vector<Import> data_imports(Guest *g) {
       if (!fits)
         return refuse(g, "ValueError: ari.mesh_read: an index is past u32");
     }
+    out.commit();
     g->moved += bytes;
     return static_cast<std::int64_t>(bytes);
   };
@@ -617,12 +749,14 @@ std::vector<Import> data_imports(Guest *g) {
     if (!natural(a[6]) || bytes > static_cast<std::uint64_t>(a[6]))
       return refuse(g, "ValueError: ari.heightfield_read: the rectangle is " +
                            std::to_string(bytes) + " bytes, and dst holds " + std::to_string(a[6]));
-    std::uint8_t *dst = room(mem, a[5], bytes, trap);
-    if (!dst)
+    GuestOut out;
+    if (!out.open(mem, a[5], bytes, trap))
       return 0;
+    std::uint8_t *dst = out.data();
     const std::vector<float> &h = hf->heights();
     for (std::uint64_t i = 0; i < nr; ++i, dst += nc * 4)
       std::memcpy(dst, h.data() + (r0 + i) * cols + c0, nc * 4);
+    out.commit();
     g->moved += bytes;
     return static_cast<std::int64_t>(bytes);
   };
@@ -658,9 +792,10 @@ std::vector<Import> data_imports(Guest *g) {
     if (!natural(a[8]) || bytes > static_cast<std::uint64_t>(a[8]))
       return refuse(g, "ValueError: ari.volume_write: the box is " + std::to_string(bytes) +
                            " bytes, and src holds " + std::to_string(a[8]));
-    const std::uint8_t *src = room(mem, a[7], bytes, trap);
-    if (!src)
+    GuestIn in;
+    if (!in.open(mem, a[7], bytes, trap))
       return 0;
+    const std::uint8_t *src = in.data();
     bool fresh = false;
     cvc::volume *own = g->handles.own_volume(static_cast<std::uint64_t>(a[0]), fresh);
     if (!own)
@@ -868,12 +1003,8 @@ std::vector<Import> imports_of(Guest *g) {
   reply.params = 1;
   reply.sync = [g](GuestMemory &mem, std::span<const std::int64_t> a,
                    std::string &trap) -> std::int64_t {
-    if (a[0] < 0 || !mem.span_ok(static_cast<std::uint64_t>(a[0]), g->reply.size(), trap)) {
-      if (trap.empty())
-        trap = "an out-of-bounds pointer into the guest's memory";
-      return 0;
-    }
-    std::memcpy(mem.bytes().data() + a[0], g->reply.data(), g->reply.size());
+    if (inside(mem, a[0], g->reply.size(), trap))
+      mem.write(static_cast<std::uint64_t>(a[0]), bytes_of(g->reply));
     return 0;
   };
   out.push_back(std::move(reply));
@@ -903,11 +1034,15 @@ std::vector<Import> imports_of(Guest *g) {
     return 0;
   };
   out.push_back(std::move(fail));
+
+  // WASI preview 1 (§8.6.1), under its own module: the stubs, for every guest.
+  for (Import &imp : wasi_imports(g->wasi))
+    out.push_back(std::move(imp));
   return out;
 }
 
 // One call of an export on a guest, as an activation (script_engine.h): its arguments go in
-// through ari_alloc, and each step polls the call for one slice's fuel.
+// through ari_alloc, and each step polls the call for one slice's gas.
 class GuestCall : public ScriptActivation {
 public:
   GuestCall(std::shared_ptr<Guest> g, std::string name, se::value_t args)
@@ -916,6 +1051,12 @@ public:
 
   void step(ScriptSlice &s) override {
     if (!call_) {
+      if (g_->exited) // proc_exit ended the guest; the document's reload starts a new one
+        throw se::dsl_error("WasmError",
+                            g_->module + ": " + name_ + ": the guest has exited (status " +
+                                std::to_string(*g_->exited) +
+                                "), and takes no more calls until the document reloads",
+                            "wasm", {{"exited", se::value_t(std::int64_t(*g_->exited))}});
       // One activation per instance: the block's lock (ActivationOptions::lock) holds the others
       // back, so the instance is busy here only in the process that holds the lock, which a call
       // from inside one of the guest's own host calls is granted again.
@@ -944,7 +1085,7 @@ public:
     // here, a step each, and the guest goes on in the same slice.
     for (std::uint64_t left = std::max<std::uint64_t>(s.budget(), 1);;) {
       const Call::State state = call_->poll(left * gas);
-      const std::uint64_t spent = (call_->fuel_used() + gas - 1) / gas + moved_steps();
+      const std::uint64_t spent = (call_->gas_used() + gas - 1) / gas + moved_steps();
       s.charge(spent);
       switch (state) {
       case Call::State::done:
@@ -952,6 +1093,11 @@ public:
         release();
         return;
       case Call::State::trapped:
+        if (g_->wasi.exit) { // proc_exit ends the guest: nil for 0, a WasmError for the rest
+          exited(*g_->wasi.exit);
+          s.finish(se::value_t());
+          return;
+        }
         if (!g_->failure.empty()) // the guest's own fail(): its text, as it said it
           fail(g_->failure);
         raise(call_->trap());
@@ -993,19 +1139,20 @@ private:
     g_->busy_name = name_;
     g_->failure.clear();
     g_->moved = 0;
+    g_->wasi.calls = g_->wasi.moved = 0;
+    g_->wasi.exit.reset();
     // A value that can't cross raises a ValueError; a host object crosses as a handle.
     const std::string cbor = to_cbor(args_, &g_->handles);
     std::int64_t ptr = 0;
     std::uint64_t used = 0;
     std::string error;
-    if (!g_->instance->run("ari_alloc", {static_cast<std::int64_t>(cbor.size())}, kSetupFuel, ptr,
+    if (!g_->instance->run("ari_alloc", {static_cast<std::int64_t>(cbor.size())}, kSetupGas, ptr,
                            used, error))
       raise("ari_alloc: " + error);
-    const std::span<std::uint8_t> mem = g_->instance->memory();
-    if (ptr < 0 || static_cast<std::uint64_t>(ptr) > mem.size() ||
-        cbor.size() > mem.size() - static_cast<std::uint64_t>(ptr))
+    GuestMemory &mem = g_->instance->memory();
+    if (std::string why; !inside(mem, ptr, cbor.size(), why))
       raise("ari_alloc gave room outside the guest's memory");
-    std::memcpy(mem.data() + ptr, cbor.data(), cbor.size());
+    mem.write(static_cast<std::uint64_t>(ptr), bytes_of(cbor));
     call_ = g_->instance->start(name_, {ptr, static_cast<std::int64_t>(cbor.size())}, error);
     if (!call_)
       fail(error);
@@ -1038,12 +1185,12 @@ private:
     const auto len = static_cast<std::uint32_t>(r & 0xffffffffu);
     if (len == 0)
       return se::value_t();
-    const std::span<std::uint8_t> mem = g_->instance->memory();
-    if (ptr > mem.size() || len > mem.size() - ptr)
+    GuestMemory &mem = g_->instance->memory();
+    std::string text;
+    if (std::string why; !read_guest(mem, ptr, len, text, why))
       fail("its result points outside the guest's memory");
     try {
-      return from_cbor(std::string_view(reinterpret_cast<const char *>(mem.data()) + ptr, len),
-                       &g_->handles);
+      return from_cbor(text, &g_->handles);
     } catch (const std::exception &e) {
       fail(std::string("its result isn't CBOR: ") + e.what());
     }
@@ -1072,11 +1219,29 @@ private:
         {{"trap", se::value_t(what)}, {"memory", se::value_t(static_cast<std::int64_t>(size))}});
   }
 
-  // The steps the data calls' copies cost since the last charge: a node of work per
-  // kDataNodeBytes, as data_job charges.
+  // proc_exit: the guest's end. wasi-libc's exit has run the atexit handlers and the static
+  // destructors, and the trap left the shadow stack where the exit was, so the instance takes no
+  // more calls: it goes, with the objects it held, and Guest::exited refuses the next call. Status
+  // 0 returns (the caller finishes with nil); any other is a WasmError with `exit`.
+  void exited(int status) {
+    const std::string trap = call_->trap();
+    release();
+    g_->exited = status;
+    g_->instance.reset();
+    g_->handles.clear();
+    if (status != 0)
+      throw se::dsl_error(
+          "WasmError", g_->module + ": " + name_ + ": exited with status " + std::to_string(status),
+          "wasm", {{"trap", se::value_t(trap)}, {"exit", se::value_t(std::int64_t(status))}});
+  }
+
+  // The steps the data and WASI calls cost since the last charge: a node of work per
+  // kDataNodeBytes they copied, as data_job charges, and a step per WASI call (§8.6.1).
   std::uint64_t moved_steps() {
-    const std::uint64_t steps = (g_->moved + se::kDataNodeBytes - 1) / se::kDataNodeBytes;
-    g_->moved = 0;
+    const std::uint64_t bytes = g_->moved + g_->wasi.moved;
+    const std::uint64_t steps =
+        (bytes + se::kDataNodeBytes - 1) / se::kDataNodeBytes + g_->wasi.calls;
+    g_->moved = g_->wasi.moved = g_->wasi.calls = 0;
     return steps;
   }
 
@@ -1121,14 +1286,15 @@ public:
     }
     if (!b.is_map())
       throw std::runtime_error("wasm: is a module's path, or a map of module:, export:, hooks:, "
-                               "imports:, limits:, priority:");
+                               "imports:, limits:, priority:, wasi:");
     for (const Value::Entry &e : b.entries) {
       bool known = false;
       for (const char *k : kKeys)
         known = known || e.first == k;
       if (!known)
-        warnings.push_back("wasm: unknown key '" + e.first +
-                           "' ignored (it takes module, export, hooks, imports, limits, priority)");
+        warnings.push_back(
+            "wasm: unknown key '" + e.first +
+            "' ignored (it takes module, export, hooks, imports, limits, priority, wasi)");
     }
     const std::string module = b.find("module") ? b.find("module")->as_string() : std::string();
     if (module.empty())
@@ -1144,6 +1310,8 @@ public:
     cvc::state &root = cvc::state::instance(lane.app());
     InstanceLimits limits;
     limits.max_memory = count_setting(root, "ariadne.limits.wasm_max_memory", kMaxMemory);
+    // 0: the runtime's own (the browser's room for a paused stack; wasmtime has no use for one).
+    limits.unwind_bytes = count_setting(root, "ariadne.limits.wasm_unwind_bytes", 0);
     if (const Value *l = b.find("limits"))
       if (const Value *mb = l->find("memory_mb")) {
         const double v = mb->as_double(-1.0);
@@ -1158,6 +1326,9 @@ public:
     g->app = &lane.app();
     g->module = path.filename().string();
     g->gas_per_step = count_setting(root, "ariadne.limits.wasm_gas_per_step", kGasPerStep);
+    g->wasi.args = {g->module};
+    for (std::string &a : wasi_request(b.find("wasi"), g->module, warnings))
+      g->wasi.args.push_back(std::move(a));
     std::string error;
     g->instance = runtime_->instantiate(compiled, imports_of(g.get()), limits, error);
     if (!g->instance)
@@ -1165,8 +1336,14 @@ public:
     if (g->instance->has_export("_initialize")) {
       std::int64_t ignored = 0;
       std::uint64_t used = 0;
-      if (!g->instance->run("_initialize", {}, kSetupFuel, ignored, used, error))
-        throw std::runtime_error("wasm: " + g->module + ": _initialize: " + error);
+      // A reactor's setup returns: one that calls proc_exit, whatever its status, has ended the
+      // guest before its first call.
+      if (!g->instance->run("_initialize", {}, kSetupGas, ignored, used, error))
+        throw std::runtime_error("wasm: " + g->module + ": _initialize: " +
+                                 (g->wasi.exit
+                                      ? "exited with status " + std::to_string(*g->wasi.exit) +
+                                            ", so the guest ended in its setup"
+                                      : error));
     }
 
     ActivationOptions options;
@@ -1197,7 +1374,7 @@ public:
                                  what + ")");
     };
     const bool calls = b.find("export") || b.find("hooks") || g->instance->has_export("ari_init");
-    if (calls && (!g->instance->has_export("ari_alloc") || g->instance->memory().empty()))
+    if (calls && (!g->instance->has_export("ari_alloc") || g->instance->memory().size() == 0))
       throw std::runtime_error("wasm: " + g->module +
                                " exports no ari_alloc or memory, so no value can cross to it");
 
@@ -1274,6 +1451,10 @@ public:
           lane.run(std::make_shared<GuestCall>(g, "ari_init", se::make_list()), std::move(o));
       if (!out.ok)
         throw std::runtime_error("wasm: " + g->module + ": ari_init " + out.error);
+      if (g->exited) // proc_exit(0): no failure, but the guest has ended
+        throw std::runtime_error(
+            "wasm: " + g->module +
+            ": ari_init exited with status 0, so the guest ended in its setup");
     }
     guests_[&lane] = std::move(g);
   }
@@ -1284,9 +1465,10 @@ private:
   // The module at `path`, compiled once while the file stays the same.
   std::shared_ptr<Module> compile(const fs::path &path) {
     std::error_code ec;
-    const std::string key =
-        std::to_string(fs::file_size(path, ec)) + ":" +
-        std::to_string(fs::last_write_time(path, ec).time_since_epoch().count());
+    // The time's count is an __int128 in Emscripten's libc++, which to_string takes no overload of.
+    const std::string key = std::to_string(fs::file_size(path, ec)) + ":" +
+                            std::to_string(static_cast<long long>(
+                                fs::last_write_time(path, ec).time_since_epoch().count()));
     Compiled &c = modules_[fs::absolute(path, ec).string()];
     if (c.module && c.key == key)
       return c.module;

@@ -21,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -607,6 +608,25 @@ TEST_F(LaneTaskTest, LaunchReturnsAUniqueHashChannelPerTask) {
   sched.drain_ingress();
   EXPECT_TRUE(take(a).has_value());
   EXPECT_TRUE(take(b).has_value());
+}
+
+// Task keys are each lane's own (no process-wide count): two lanes of one name, alive at once or
+// one made after the other is gone, never repeat a key.
+TEST(AsyncLaneKeys, TwoLanesOfOneNameNeverRepeatAKey) {
+  std::set<std::string> seen;
+  {
+    async_lane a("sim", lane_mode::deferred), b("sim", lane_mode::deferred);
+    for (int k = 0; k < 3; ++k) {
+      EXPECT_TRUE(seen.insert(a.next_task_key()).second);
+      EXPECT_TRUE(seen.insert(b.next_task_key()).second);
+    }
+  }
+  async_lane again("sim", lane_mode::deferred);
+  for (int k = 0; k < 3; ++k) {
+    const std::string key = again.next_task_key();
+    EXPECT_EQ(key.rfind("sim.", 0), 0u) << key;
+    EXPECT_TRUE(seen.insert(key).second) << key;
+  }
 }
 
 // pump_exec_frame must re-ready (await ...) frame-yielders once per frame: a resident that ticks

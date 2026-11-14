@@ -19,19 +19,22 @@ namespace volren {
 
 bool raycast_cuda_available() { return false; }
 
-frame raycast_cuda(const raycast_cuda_request &) {
+frame raycast_cuda(raycast_cuda_cache &, const raycast_cuda_request &) {
   throw volren_error("cvc::volren was built without CUDA support (no raycast_cuda backend)");
 }
 
 // The cache controls are no-ops rather than errors: raycaster::invalidate_
 // device_volume() and application teardown call them unconditionally, and a
 // CPU-only build simply has nothing resident to invalidate.
-void raycast_cuda_set_cache_budget(std::size_t) {}
-std::size_t raycast_cuda_cache_budget() { return 0; }
-std::size_t raycast_cuda_cache_bytes() { return 0; }
-std::uint64_t raycast_cuda_cache_upload_bytes() { return 0; }
-void raycast_cuda_forget_host_buffer(const void *) {}
-void raycast_cuda_clear_cache() {}
+struct raycast_cuda_cache::impl {};
+raycast_cuda_cache::raycast_cuda_cache() = default;
+raycast_cuda_cache::~raycast_cuda_cache() = default;
+void raycast_cuda_cache::set_budget(std::size_t) {}
+std::size_t raycast_cuda_cache::budget() { return 0; }
+std::size_t raycast_cuda_cache::resident() { return 0; }
+std::uint64_t raycast_cuda_cache::uploaded() { return 0; }
+void raycast_cuda_cache::forget_host(const void *) {}
+void raycast_cuda_cache::clear() {}
 
 #endif // !CVC_USING_CUDA
 

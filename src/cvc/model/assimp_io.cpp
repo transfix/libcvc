@@ -40,6 +40,7 @@
 #include <cvc/image/image.h>
 #include <fstream>
 #include <iostream>
+#include <random>
 #include <stdexcept>
 
 #if defined(_WIN32)
@@ -105,6 +106,21 @@ std::string default_temp_dir() {
   return "/tmp";
 }
 
+// An app's embedded-texture temp names: a random tag of its own (two apps of one process) and a
+// count (one app's threads).
+struct embedded_texture_names {
+  static constexpr const char *app_slot = "cvc.model.embedded_texture_names";
+  const std::string tag = [] {
+    std::random_device rd;
+    char t[17];
+    std::snprintf(t, sizeof t, "%016llx",
+                  (static_cast<unsigned long long>(rd()) << 32) ^
+                      static_cast<unsigned long long>(rd()));
+    return std::string(t);
+  }();
+  std::atomic<unsigned long long> counter{0};
+};
+
 // Decode an embedded, compressed texture blob (mHeight == 0: pcData is `mWidth`
 // bytes of e.g. PNG/JPEG). cvc's image reader only reads from a path, so spill
 // the blob to a temp file with the format-hint extension and read_image() it
@@ -112,16 +128,16 @@ std::string default_temp_dir() {
 image decode_embedded_compressed(app &ctx, const aiTexture *tex) {
   std::string hint(tex->achFormatHint);
   std::string ext = hint.empty() ? std::string("bin") : hint;
-  // Unique temp name: an atomic counter (intra-process races) qualified by the
-  // pid (two processes sharing TMPDIR) — a plain static int would collide.
-  static std::atomic<unsigned long long> counter(0);
+  // Unique temp name: the app's counter (its threads) and random tag (other apps of this
+  // process), qualified by the pid (two processes sharing TMPDIR).
+  embedded_texture_names &names = ctx.slot<embedded_texture_names>();
 #if defined(_WIN32)
   const long pid = static_cast<long>(_getpid());
 #else
   const long pid = static_cast<long>(::getpid());
 #endif
   std::string tmp = default_temp_dir() + "/cvc_embedded_tex_" + std::to_string(pid) + "_" +
-                    std::to_string(counter.fetch_add(1)) + "." + ext;
+                    names.tag + "_" + std::to_string(names.counter.fetch_add(1)) + "." + ext;
   {
     std::ofstream ofs(tmp.c_str(), std::ios::binary);
     if (!ofs)

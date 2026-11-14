@@ -28,6 +28,7 @@
 #include <set>
 #include <span>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -353,8 +354,11 @@ public:
   /// evaluate()/run() on THIS evaluator, not to a separately-constructed nested evaluator.
   void restrict_special_forms(std::shared_ptr<const std::set<std::string>> allowed);
 
-  /// The set of all special-form names this evaluator recognises (for building an allowlist).
-  static const std::set<std::string> &all_special_forms();
+  /// The set of all special-form names this evaluator recognises (for building an allowlist): a
+  /// new set each call.
+  static std::set<std::string> all_special_forms();
+  /// Whether `name` is one of all_special_forms(), without building the set.
+  static bool is_special_form(std::string_view name);
 
 private:
   void check_interrupted();

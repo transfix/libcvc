@@ -7,6 +7,7 @@
 #include <cvc/ariadne/oidc_host.h>
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/uri_http.h>
+#include <cvc/core/app.h>
 #include <cvc/net/browser.h>
 #include <cvc/net/credentials.h>
 #include <cvc/net/http_client.h>
@@ -28,14 +29,12 @@ struct NetHost {
   NetAccess access;
 };
 
-std::mutex &host_mutex() {
-  static std::mutex m;
-  return m;
-}
-NetHost &host_cell() {
-  static NetHost h;
-  return h;
-}
+// What enable_net turned on for an app.
+struct net_host_slot {
+  static constexpr const char *app_slot = "cvc.ariadne.net-host";
+  std::mutex m;
+  NetHost host;
+};
 
 } // namespace
 
@@ -121,45 +120,49 @@ std::string enable_net(cvc::app &app, const NetHostConfig &config) {
   for (const cvc::net::OidcIssuer &i : policy->oidc_issuers())
     status.oidc_issuers.push_back(i.issuer);
 
-  disable_net(); // a second enable replaces the first
+  disable_net(app); // a second enable replaces the first
   NetAccess access{policy, store, live, config.ws};
   register_net_intrinsics(app, access);
-  register_http_uri_handler(policy);
+  register_http_uri_handler(app, policy);
   if (status.oidc) {
     enable_oidc(app, policy, store, config.oidc, live);
-    status.oidc_flows = oidc_flows();
+    status.oidc_flows = oidc_flows(app);
   }
-  status.browser = cvc::net::browser_available();
-  std::lock_guard<std::mutex> lock(host_mutex());
-  host_cell() = NetHost{std::move(live), std::move(status), std::move(access)};
+  status.browser = cvc::net::browser_available(app);
+  net_host_slot &s = app.slot<net_host_slot>();
+  std::lock_guard<std::mutex> lock(s.m);
+  s.host = NetHost{std::move(live), std::move(status), std::move(access)};
   return std::string();
 }
 
-void disable_net() {
-  std::lock_guard<std::mutex> lock(host_mutex());
-  NetHost &h = host_cell();
+void disable_net(cvc::app &app) {
+  net_host_slot &s = app.slot<net_host_slot>();
+  std::lock_guard<std::mutex> lock(s.m);
+  NetHost &h = s.host;
   if (!h.live)
     return;
   h.live->store(false);
-  disable_oidc();
-  unregister_uri_handler("http");
-  unregister_uri_handler("https");
-  unregister_uri_store_handler("http");
-  unregister_uri_store_handler("https");
+  disable_oidc(app);
+  unregister_uri_handler(app, "http");
+  unregister_uri_handler(app, "https");
+  unregister_uri_store_handler(app, "http");
+  unregister_uri_store_handler(app, "https");
   h = NetHost{};
 }
 
-NetHostStatus net_host_status() {
-  std::lock_guard<std::mutex> lock(host_mutex());
-  NetHostStatus s = host_cell().status;
+NetHostStatus net_host_status(cvc::app &app) {
+  net_host_slot &slot = app.slot<net_host_slot>();
+  std::lock_guard<std::mutex> lock(slot.m);
+  NetHostStatus s = slot.host.status;
   if (s.enabled)
-    s.browser = cvc::net::browser_available(); // a test's opener, --no-browser
+    s.browser = cvc::net::browser_available(app); // a test's opener, --no-browser
   return s;
 }
 
-std::optional<NetAccess> net_host_access() {
-  std::lock_guard<std::mutex> lock(host_mutex());
-  const NetHost &h = host_cell();
+std::optional<NetAccess> net_host_access(cvc::app &app) {
+  net_host_slot &s = app.slot<net_host_slot>();
+  std::lock_guard<std::mutex> lock(s.m);
+  const NetHost &h = s.host;
   if (!h.live)
     return std::nullopt;
   return h.access;

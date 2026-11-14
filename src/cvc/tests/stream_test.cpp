@@ -395,6 +395,21 @@ TEST(MutedSource, PropagatesStopFromInner) {
 // stream_registry
 // --------------------------------------------------------------------------
 
+// An app's registry goes with it: apps made later, one after another (the allocator may hand a
+// new app the old one's address), start with no tokens.
+TEST(StreamRegistry, AnAppsRegistryGoesWithIt) {
+  auto pool = frame_pool::create(16, 4);
+  for (int round = 0; round < 4; ++round) {
+    auto app = std::make_unique<cvc::app>();
+    EXPECT_EQ(stream_registry::for_app(*app).lookup("tok"), nullptr) << "round " << round;
+    EXPECT_EQ(stream_registry::for_app(*app).size(), 0u);
+    stream_channel c(*app, "s", rgba(2, 2), pool, 2, 1);
+    EXPECT_TRUE(stream_registry::for_app(*app).install("tok", &c));
+    stream_registry::for_app(*app).uninstall("tok", &c);
+    EXPECT_TRUE(stream_registry::for_app(*app).install("tok", &c)); // left installed
+  }
+}
+
 TEST(StreamRegistry, RoundTripFirstWriterWinsPerApp) {
   cvc::app a1;
   cvc::app a2;

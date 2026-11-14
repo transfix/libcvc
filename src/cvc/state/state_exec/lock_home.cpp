@@ -114,7 +114,7 @@ value_t outcome_value(const frame_outcome &o) {
 
 std::optional<frame_outcome> outcome_of(const value_t &slot) {
   if (const auto *id = std::get_if<int64_t>(&slot.v))
-    return frame_outcome{static_cast<std::uint64_t>(*id), nil_value};
+    return frame_outcome{static_cast<std::uint64_t>(*id), nil_value()};
   if (std::holds_alternative<dict_ptr>(slot.v))
     return frame_outcome{std::nullopt, slot};
   return std::nullopt; // nil, or the wait's handle: not collected yet
@@ -128,11 +128,12 @@ std::optional<frame_outcome> outcome_of(const value_t &slot) {
 // The port (protocol 2.3)
 // ---------------------------------------------------------------------------------------------
 
-lock_port::lock_port(std::shared_ptr<wakeup> wake) : wake_(std::move(wake)) {}
+lock_port::lock_port(std::shared_ptr<wakeup> wake, std::shared_ptr<lock_fuzz> fuzz)
+    : wake_(std::move(wake)), fuzz_(std::move(fuzz)) {}
 lock_port::~lock_port() = default;
 
 bool lock_port::post(const lock_post &x) {
-  lock_fuzz_point(lock_fuzz_at::post_enter);
+  lock_fuzz_point(fuzz_.get(), lock_fuzz_at::post_enter);
   bool landed = false;
   {
     std::lock_guard<std::mutex> g(mu_);
@@ -144,7 +145,7 @@ bool lock_port::post(const lock_post &x) {
       landed = true;
     }
   }
-  lock_fuzz_point(lock_fuzz_at::post_exit);
+  lock_fuzz_point(fuzz_.get(), lock_fuzz_at::post_exit);
   return landed;
 }
 
@@ -178,9 +179,9 @@ std::uint64_t fuzz_mix(std::uint64_t x) { // splitmix64's finalizer
   return x ^ (x >> 31);
 }
 
-// CVC_EXEC_FUZZ=<seed>, read once as the library loads: decimal or 0x hex; any other non-empty
-// value is hashed, so it turns the yields on too. Unset, empty or 0: off.
-std::uint64_t fuzz_seed_from_environment() {
+} // namespace
+
+std::uint64_t lock_fuzz_seed_from_environment() {
   const char *v = std::getenv("CVC_EXEC_FUZZ");
   if (!v || !*v)
     return 0;
@@ -194,28 +195,16 @@ std::uint64_t fuzz_seed_from_environment() {
   return h ? h : 1;
 }
 
-std::atomic<std::uint64_t> g_fuzz_seed{fuzz_seed_from_environment()};
-std::atomic<std::uint64_t> g_fuzz_hits{0};
-std::atomic<std::uint64_t> g_fuzz_threads{0}; // numbers each thread's PRNG stream
-
-struct fuzz_prng {
-  std::uint64_t seed = 0; // the seed the stream was made from
-  std::uint64_t state = 0;
-};
-thread_local fuzz_prng t_fuzz;
+namespace {
 
 // The fuzzed point itself, out of the off path: run on, yield, or pause 0-50 us. The pause yields
 // until it has passed, rather than sleeping: a sleep rounds up to the OS tick (up to ~16 ms on
-// Windows), far longer than the windows LT-4 means to widen.
-void fuzz_yield(std::uint64_t seed, lock_fuzz_at where) noexcept {
-  fuzz_prng &r = t_fuzz;
-  if (r.seed != seed) {
-    r.seed = seed;
-    r.state = fuzz_mix(seed ^ fuzz_mix(g_fuzz_threads.fetch_add(1, std::memory_order_relaxed)));
-  }
-  g_fuzz_hits.fetch_add(1, std::memory_order_relaxed);
-  r.state = fuzz_mix(r.state + static_cast<std::uint64_t>(where));
-  const std::uint64_t x = r.state;
+// Windows), far longer than the windows LT-4 means to widen. Each point draws the stream's next
+// number (a splitmix64 counter), mixed with the seed and the point.
+void fuzz_yield(lock_fuzz &fuzz, std::uint64_t seed, lock_fuzz_at where) noexcept {
+  fuzz.hits.fetch_add(1, std::memory_order_relaxed);
+  const std::uint64_t n = fuzz.stream.fetch_add(1, std::memory_order_relaxed);
+  const std::uint64_t x = fuzz_mix(seed ^ fuzz_mix(n + static_cast<std::uint64_t>(where)));
   switch (x & 7) {
   case 0:
   case 1:
@@ -234,17 +223,13 @@ void fuzz_yield(std::uint64_t seed, lock_fuzz_at where) noexcept {
 
 } // namespace
 
-void lock_fuzz_point(lock_fuzz_at where) noexcept {
-  const std::uint64_t seed = g_fuzz_seed.load(std::memory_order_relaxed);
+void lock_fuzz_point(lock_fuzz *fuzz, lock_fuzz_at where) noexcept {
+  if (!fuzz)
+    return;
+  const std::uint64_t seed = fuzz->seed.load(std::memory_order_relaxed);
   if (seed != 0)
-    fuzz_yield(seed, where);
+    fuzz_yield(*fuzz, seed, where);
 }
-
-void set_lock_fuzz_seed(std::uint64_t seed) noexcept {
-  g_fuzz_seed.store(seed, std::memory_order_relaxed);
-}
-std::uint64_t lock_fuzz_seed() noexcept { return g_fuzz_seed.load(std::memory_order_relaxed); }
-std::uint64_t lock_fuzz_hits() noexcept { return g_fuzz_hits.load(std::memory_order_relaxed); }
 
 // ---------------------------------------------------------------------------------------------
 // The home
@@ -293,10 +278,10 @@ lock_home::lock_home(std::shared_ptr<lock_manager> mgr, lock_sched_ops &ops,
                      scheduling_policy policy, std::shared_ptr<wakeup> wake, lock_attach attach)
     : mgr_(std::move(mgr)), table_(mgr_->table()), ops_(ops),
       prio_(policy != scheduling_policy::round_robin),
-      port_(std::make_shared<lock_port>(std::move(wake))),
+      port_(std::make_shared<lock_port>(std::move(wake), mgr_->fuzz())),
       progress_(std::make_shared<std::atomic<std::int64_t>>(
           lock_clock::now().time_since_epoch().count())) {
-  const lock_test_hooks *hooks = lock_test_hooks_get();
+  const lock_test_hooks *hooks = mgr_->test_hooks();
   const std::size_t capacity =
       hooks && hooks->home_cache_capacity ? hooks->home_cache_capacity : kDefaultCacheCapacity;
   entries_.resize(capacity);
@@ -317,7 +302,7 @@ void lock_home::drain_port() {
   std::exception_ptr first;
   for (std::size_t i = 0; i < drained_.size(); ++i) {
     if (i > 0)
-      lock_fuzz_point(lock_fuzz_at::drain_between);
+      lock_fuzz_point(mgr_->fuzz().get(), lock_fuzz_at::drain_between);
     try {
       apply_post(drained_[i]);
     } catch (...) {
@@ -353,7 +338,7 @@ lock_home::~lock_home() {
     assert(port_->closed());
   } catch (...) {
   }
-  lock_fuzz_point(lock_fuzz_at::close_then_detach);
+  lock_fuzz_point(mgr_->fuzz().get(), lock_fuzz_at::close_then_detach);
   try {
     // Every process of the home ended with abandon, the cache's references dropped. No note
     // targets this home; the others' wakes and relevels go to their ports.
@@ -670,7 +655,7 @@ frame_outcome lock_home::collect(process &p, std::uint64_t tid) {
     h.in_handler = pl.ticket_in_handler;
     pl.holds.push_back(std::move(h));
     o.hold = out.g.hold;
-    if (const lock_test_hooks *hooks = lock_test_hooks_get(); hooks && hooks->after_grant)
+    if (const lock_test_hooks *hooks = mgr_->test_hooks(); hooks && hooks->after_grant)
       hooks->after_grant(p.pid);
   } else {
     o.error = outcome_error(out, pl);
@@ -686,8 +671,9 @@ value_t lock_home::outcome_error(const lock_outcome &out, const process_locks &p
   if (out.what == lock_outcome::kind::deadlock) {
     std::vector<value_t> cycle;
     for (const deadlock_edge &e : out.cycle)
-      cycle.push_back(make_dict({{"pid", e.pid ? value_t(static_cast<int64_t>(*e.pid)) : nil_value},
-                                 {"key", value_t(show(e.key, root))}}));
+      cycle.push_back(
+          make_dict({{"pid", e.pid ? value_t(static_cast<int64_t>(*e.pid)) : nil_value()},
+                     {"key", value_t(show(e.key, root))}}));
     return exception_from(dsl_error("DeadlockError", "with-lock: deadlock", "dsl",
                                     {{"reason", value_t(std::string("deadlock"))},
                                      {"key", std::move(key)},
@@ -810,7 +796,7 @@ void lock_home::deliver(const lock_notes &notes) {
       } else if (n.port) {
         // Another home's: to its port, or dropped when the port is closed (2.3). The counters
         // are the manager's, bumped outside M.mu.
-        if (const lock_test_hooks *hooks = lock_test_hooks_get(); hooks && hooks->cross_home_note)
+        if (const lock_test_hooks *hooks = mgr_->test_hooks(); hooks && hooks->cross_home_note)
           hooks->cross_home_note(n);
         std::atomic<std::uint64_t> &count =
             n.port->post(n.post) ? mgr_->posts_ : mgr_->posts_dropped_;
@@ -828,7 +814,8 @@ void lock_home::deliver(const lock_notes &notes) {
 void lock_home::deliver_op(const lock_notes &notes) {
   if (notes.empty())
     return;
-  lock_fuzz_point(lock_fuzz_at::after_op); // another home may act between the two (protocol 7)
+  // Another home may act between the two (protocol 7).
+  lock_fuzz_point(mgr_->fuzz().get(), lock_fuzz_at::after_op);
   deliver(notes);
 }
 
@@ -849,7 +836,7 @@ void lock_home::apply_wake(int pid, std::uint64_t tid) {
   if (f)
     f->extra_vals[static_cast<std::size_t>(lock_frame_slot::wait_or_outcome)] = outcome_value(o);
   clear_wait_fields(*p);
-  deliver_await(p->state, nil_value);
+  deliver_await(p->state, nil_value());
   ops_.ready_lock_waiter(*p);
 }
 

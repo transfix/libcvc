@@ -616,13 +616,14 @@ auto guarded(const char *call, const std::string &file, F &&fn) -> decltype(fn()
 // compares NAMES (strcmp). A second open of a name already open is handed the
 // first file's shared state: with one fixed name, a second live in-memory
 // writer fails (HDF5 won't truncate an open file) and a second blob reader
-// silently reads the FIRST blob's bytes. The atomic counter makes every name
-// unique across threads; a random per-process nonce keeps two statically linked
-// copies of libcvc that share one HDF5 apart (each has a counter of its own).
-// The name appears in error messages, which may be logged or sent anywhere, so
-// it carries nothing about the process -- no address. Nothing is created on
-// disk (backing_store is off) -- the name is only an identity.
-std::uint64_t process_nonce() {
+// silently reads the FIRST blob's bytes. Each app names its files with a
+// random nonce of its own and a count: the atomic counter makes every name of
+// one app unique across threads, and the nonce keeps two apps (or two
+// statically linked copies of libcvc that share one HDF5) apart, each counting
+// on its own. The name appears in error messages, which may be logged or sent
+// anywhere, so it carries nothing about the process -- no address. Nothing is
+// created on disk (backing_store is off) -- the name is only an identity.
+std::uint64_t random_nonce() {
   try {
     std::random_device rd;
     return (std::uint64_t(rd()) << 32) ^ std::uint64_t(rd());
@@ -630,12 +631,16 @@ std::uint64_t process_nonce() {
     return std::uint64_t(std::chrono::steady_clock::now().time_since_epoch().count());
   }
 }
-std::string unique_core_name(const char *what) {
-  static const std::uint64_t nonce = process_nonce();
-  static std::atomic<std::uint64_t> counter(0);
+struct core_names {
+  static constexpr const char *app_slot = "cvc.lod.core_names";
+  const std::uint64_t nonce = random_nonce();
+  std::atomic<std::uint64_t> counter{0};
+};
+std::string unique_core_name(app &ctx, const char *what) {
+  core_names &n = ctx.slot<core_names>();
   std::ostringstream os;
-  os << "cvc-lod-" << what << '-' << std::hex << nonce << std::dec << '-'
-     << counter.fetch_add(1, std::memory_order_relaxed) << ".cvch5";
+  os << "cvc-lod-" << what << '-' << std::hex << n.nonce << std::dec << '-'
+     << n.counter.fetch_add(1, std::memory_order_relaxed) << ".cvch5";
   return os.str();
 }
 
@@ -752,7 +757,7 @@ struct scene_writer::impl {
 };
 
 scene_writer::scene_writer(app &ctx) {
-  const std::string name = unique_core_name("mem");
+  const std::string name = unique_core_name(ctx, "mem");
   hu::library_lock lock(ctx, name, "cvc::lod::scene_writer(memory)");
   H5::Exception::dontPrint();
   _p.reset(
@@ -841,7 +846,7 @@ scene_reader scene_reader::open_verified(app &ctx, const unsigned char *bytes, s
   return r;
 }
 void scene_reader::open_bytes(app &ctx, const unsigned char *bytes, std::size_t n) {
-  const std::string name = unique_core_name("blob");
+  const std::string name = unique_core_name(ctx, "blob");
   hu::library_lock lock(ctx, name, "cvc::lod::scene_reader(blob)");
   H5::Exception::dontPrint();
   _p.reset(new impl(

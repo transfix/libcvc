@@ -19,6 +19,7 @@
 // they just built, and the trusted-source constructor -- on every HDF5.
 
 #include <H5Cpp.h>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -1242,4 +1243,40 @@ TEST(LodStore, IndexChargesEveryErrorLadderEvenWhenStoredOnce) {
   });
   EXPECT_FALSE(std_error_of([&] { cvc::lod::read_lod_index(ctx, file); }).empty());
   std::remove(file.c_str());
+}
+
+// In-memory containers of different apps never share a name: each app names its own with a nonce
+// and a count of its own, and HDF5 (one per process) would hand a second open of a name the first
+// file. Two apps in either order, apps on threads at once, and an app made once another is gone.
+TEST(LodStore, WritersOfSeveralAppsKeepTheirOwnContent) {
+  for (int order = 0; order < 2; ++order) {
+    cvc::app a, b;
+    cvc::app &first = order == 0 ? a : b;
+    cvc::app &second = order == 0 ? b : a;
+    cvc::lod::scene_writer wf(first);
+    cvc::lod::scene_writer ws(second);
+    wf.write_mesh_pyramid(tagged_name(10), tagged_pyramid(first, 10));
+    ws.write_mesh_pyramid(tagged_name(11), tagged_pyramid(second, 11));
+    cvc::lod::scene_reader rf = open_blob(first, wf.to_blob());
+    cvc::lod::scene_reader rs = open_blob(second, ws.to_blob());
+    EXPECT_EQ(contents(rf, 10).first, std::vector<std::string>{tagged_name(10)});
+    EXPECT_EQ(contents(rs, 11).first, std::vector<std::string>{tagged_name(11)});
+  }
+  std::vector<std::thread> threads;
+  std::atomic<int> wrong{0};
+  for (int i = 0; i < 3; ++i)
+    threads.emplace_back([i, &wrong] {
+      cvc::app app;
+      cvc::lod::scene_writer w(app);
+      w.write_mesh_pyramid(tagged_name(20 + i), tagged_pyramid(app, 20 + i));
+      cvc::lod::scene_reader r = open_blob(app, w.to_blob());
+      if (contents(r, 20 + i).first != std::vector<std::string>{tagged_name(20 + i)})
+        ++wrong;
+    });
+  for (std::thread &t : threads)
+    t.join();
+  EXPECT_EQ(wrong.load(), 0);
+  cvc::app later;
+  cvc::lod::scene_reader rl = open_blob(later, tagged_blob(later, 30));
+  EXPECT_EQ(contents(rl, 30).first, std::vector<std::string>{tagged_name(30)});
 }

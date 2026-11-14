@@ -175,8 +175,8 @@ TEST(StateExecTypesTest, EnvironmentSetExistingFallback) {
 }
 
 TEST(StateExecTypesTest, ValuesEqual) {
-  EXPECT_TRUE(values_equal(nil_value, nil_value));
-  EXPECT_TRUE(values_equal(true_value, true_value));
+  EXPECT_TRUE(values_equal(nil_value(), nil_value()));
+  EXPECT_TRUE(values_equal(true_value(), true_value()));
   EXPECT_TRUE(values_equal(value_t(int64_t(42)), value_t(int64_t(42))));
   EXPECT_FALSE(values_equal(value_t(int64_t(42)), value_t(int64_t(43))));
   EXPECT_TRUE(values_equal(value_t("abc"), value_t("abc")));
@@ -201,13 +201,29 @@ TEST(StateExecTypesTest, ValuesEqualDicts) {
 
 TEST(StateExecTypesTest, ValuesEqualCrossType) {
   EXPECT_FALSE(values_equal(value_t(int64_t(1)), value_t(1.0)));
-  EXPECT_FALSE(values_equal(nil_value, false_value));
+  EXPECT_FALSE(values_equal(nil_value(), false_value()));
 }
 
+// nil_value(), true_value() and false_value() are new values each call, not shared objects.
+TEST(StateExecTypesTest, ConstantsAreNewValues) {
+  value_t a = nil_value();
+  a = value_t(int64_t(5));
+  EXPECT_EQ(std::get<int64_t>(a.v), 5);
+  EXPECT_TRUE(nil_value().is_nil()) << "changing one changed the next";
+  value_t t = true_value();
+  t = value_t(false);
+  EXPECT_FALSE(std::get<bool>(t.v));
+  EXPECT_TRUE(std::get<bool>(true_value().v));
+  EXPECT_FALSE(std::get<bool>(false_value().v));
+}
+
+// The bucket formula environment lookups use matches the standard library's own (types.cpp).
+TEST(StateExecTypesTest, LookupBucketFormulaHolds) { EXPECT_TRUE(detail::bucket_formula_holds()); }
+
 TEST(StateExecTypesTest, Truthiness) {
-  EXPECT_FALSE(nil_value.is_truthy());
-  EXPECT_FALSE(false_value.is_truthy());
-  EXPECT_TRUE(true_value.is_truthy());
+  EXPECT_FALSE(nil_value().is_truthy());
+  EXPECT_FALSE(false_value().is_truthy());
+  EXPECT_TRUE(true_value().is_truthy());
   EXPECT_TRUE(value_t(int64_t(0)).is_truthy()); // 0 is truthy (not false)
   EXPECT_TRUE(value_t("").is_truthy());         // empty string is truthy
   EXPECT_TRUE(make_list().is_truthy());         // empty list is truthy

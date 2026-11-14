@@ -20,6 +20,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 using cvc::gl::GraphicsNode;
 using cvc::gl::SceneGraph;
@@ -306,7 +307,7 @@ void test_flushing_names_the_innermost_publisher() {
   using cvc::gl::state_publisher;
   cvc::app app;
   state_publisher outer(app), inner(app); // no workers: flushed by hand here
-  assert(state_publisher::flushing() == nullptr && !state_publisher::in_flush());
+  assert(state_publisher::flushing(app) == nullptr && !state_publisher::in_flush(app));
 
   const std::string outerPath = "flushing.outer", innerPath = "flushing.inner";
   cvc::state::instance(app)(outerPath).value(std::string("0"));
@@ -314,14 +315,14 @@ void test_flushing_names_the_innermost_publisher() {
   const state_publisher *seenOuter = nullptr, *seenInner = nullptr, *seenOuterAgain = nullptr;
   const state_publisher *seenOtherThread = &outer;
   boost::signals2::scoped_connection ci = cvc::state::instance(app)(innerPath).valueChanged.connect(
-      [&]() { seenInner = state_publisher::flushing(); });
+      [&]() { seenInner = state_publisher::flushing(app); });
   boost::signals2::scoped_connection co =
       cvc::state::instance(app)(outerPath).valueChanged.connect([&]() {
-        seenOuter = state_publisher::flushing();
-        // Thread-local: another thread is not inside this flush.
-        std::thread([&]() { seenOtherThread = state_publisher::flushing(); }).join();
+        seenOuter = state_publisher::flushing(app);
+        // Per thread: another thread is not inside this flush.
+        std::thread([&]() { seenOtherThread = state_publisher::flushing(app); }).join();
         inner.flush(); // a handler that drains a second publisher
-        seenOuterAgain = state_publisher::flushing();
+        seenOuterAgain = state_publisher::flushing(app);
       });
 
   inner.publish(innerPath, "1");
@@ -331,8 +332,77 @@ void test_flushing_names_the_innermost_publisher() {
   assert(seenInner == &inner);
   assert(seenOuterAgain == &outer);
   assert(seenOtherThread == nullptr);
-  assert(state_publisher::flushing() == nullptr && !state_publisher::in_flush());
+  assert(state_publisher::flushing(app) == nullptr && !state_publisher::in_flush(app));
   std::printf("  ok: flushing() names the innermost publisher, per thread\n");
+}
+
+// A publisher's flush is its own app's: a handler of another app, fired while it runs on the same
+// thread, sees none of it, and two apps' publishers flushing on two threads at once each see only
+// their own. In both orders, and the later app starts clean.
+void test_flushing_is_per_app() {
+  using cvc::gl::state_publisher;
+  const auto nested = [](bool aFirst) {
+    cvc::app a, b;
+    state_publisher pa(a), pb(b);
+    cvc::state::instance(a)("p.a").value(std::string("0"));
+    cvc::state::instance(b)("p.b").value(std::string("0"));
+    const state_publisher *bSeesOfA = &pa, *bSeesOfB = nullptr, *aSeesOfB = &pb;
+    boost::signals2::scoped_connection cb =
+        cvc::state::instance(b)("p.b").valueChanged.connect([&]() {
+          bSeesOfA = state_publisher::flushing(a); // b's flush runs inside a's handler
+          bSeesOfB = state_publisher::flushing(b);
+        });
+    boost::signals2::scoped_connection ca =
+        cvc::state::instance(a)("p.a").valueChanged.connect([&]() {
+          aSeesOfB = state_publisher::flushing(b);
+          pb.flush();
+        });
+    pb.publish("p.b", "1");
+    pa.publish("p.a", "1");
+    if (aFirst) {
+      pa.flush();
+    } else {
+      pb.flush(); // b alone first: a's state never changes, so its handler does not run
+      pb.publish("p.b", "2");
+      pa.flush();
+    }
+    assert(aSeesOfB == nullptr && "a's handler: b is not flushing");
+    assert(bSeesOfA == &pa && "a is still flushing (the outer flush) when b's runs inside it");
+    assert(bSeesOfB == &pb && "b's handler sees b's publisher");
+    assert(!state_publisher::in_flush(a) && !state_publisher::in_flush(b));
+  };
+  nested(true);
+  nested(false);
+
+  // Two apps on two threads at once: each sees its own publisher only.
+  std::atomic<int> wrong{0};
+  std::vector<std::thread> threads;
+  for (int t = 0; t < 4; ++t)
+    threads.emplace_back([&wrong, t]() {
+      cvc::app app;
+      state_publisher pub(app);
+      const std::string path = "p.t" + std::to_string(t);
+      cvc::state::instance(app)(path).value(std::string("0"));
+      boost::signals2::scoped_connection c =
+          cvc::state::instance(app)(path).valueChanged.connect([&]() {
+            if (state_publisher::flushing(app) != &pub)
+              ++wrong;
+          });
+      for (int i = 1; i <= 50; ++i) {
+        pub.publish(path, std::to_string(i));
+        pub.flush();
+      }
+      if (state_publisher::in_flush(app))
+        ++wrong;
+    });
+  for (std::thread &t : threads)
+    t.join();
+  assert(wrong.load() == 0);
+  {
+    cvc::app later; // made after the others are gone: no flush of theirs
+    assert(state_publisher::flushing(later) == nullptr && !state_publisher::in_flush(later));
+  }
+  std::printf("  ok: flushing() is per app (nested both ways, on threads at once, a later app)\n");
 }
 
 } // namespace
@@ -349,6 +419,7 @@ int main() {
   test_concurrent_flushers_keep_write_order();
   test_publish_matrix_formats_at_flush();
   test_flushing_names_the_innermost_publisher();
+  test_flushing_is_per_app();
   std::printf("cvcgl_state_publisher: OK\n");
   return 0;
 }

@@ -14,7 +14,9 @@ set(CVC_PORT_TESTS
   result_job_test
   job_intrinsics_test
   tet_complex_test
+  skeleton_test
   contour_stack_test
+  point_classes_test
 )
 
 # One port test: cvc and googletest, and under Emscripten what node needs to run it (as
@@ -39,3 +41,8 @@ endforeach()
 # Delaunay with Shewchuk's predicates: both come with cvc_permissive_geometry (the test skips
 # itself without CVC_WITH_SHEWCHUK).
 target_link_libraries(tet_complex_test PRIVATE cvc_permissive_geometry)
+
+# skeleton_test compares the port with the legacy library's goldens (tools/volrover-goldens): the
+# committed inputs and goldens are read from the source tree.
+target_compile_definitions(skeleton_test PRIVATE
+  CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")

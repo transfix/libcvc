@@ -152,9 +152,6 @@ private:
   std::unique_ptr<impl> impl_;
 };
 
-// Group pumps that ran on a worker of any pool, process-wide (AR-1).
-std::uint64_t exec_pool_worker_pumps_total();
-
 // What an exec_group uses of the pool it is pumped by (exec_group.cpp); not for hosts.
 namespace detail {
 // The pool whose worker the calling thread is, while it pumps a group for a pump_all; else null.

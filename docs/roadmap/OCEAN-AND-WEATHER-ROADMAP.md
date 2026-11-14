@@ -467,7 +467,7 @@ The swell scene's state hash is pinned in `PhysicsFluidSurface.CrossPlatformGold
 - The step is exact for any Δt, so there is no CFL limit.
 - h and φ are real, so they pack into one complex field z = h + iφ. The update pass separates them through Hermitian symmetry, reading texels k and −k. That makes **one forward and one inverse FFT per step**. The forward transform is OceanFFT's butterfly with conjugated twiddles.
 - In real space between steps:
-  - `h, φ ← mask·(h, φ)`: 0 on land and obstacles, 1 in open water. Beaches ramp toward 0 across the swash zone so they absorb, while cliffs are a hard 0 so they reflect (K_r from A3).
+  - `h, φ ← mask·(h, φ)`: 0 on land and obstacles, 1 in open water. Beaches ramp toward 0 across the swash zone so they absorb, while cliffs are a hard 0 so they reflect (K_r from A3). As built, a hard 0 is a no-flux wall by default (`walls = no_flux`, O8c, below): its cells hold the water's mirror image through a symmetric operator stepped symplectically, so a crest reflects as a crest and nothing can grow. `walls = zero` keeps O8a's Dirichlet wall, under which a crest reflects as a trough.
   - A sponge band at the window edge absorbs outgoing waves and hides the transform's wrap-around.
   - Then sources are added.
 - Damping is e^(−γ·k²·Δt) on high wavenumbers plus a small global rate.
@@ -492,7 +492,7 @@ The swell scene's state hash is pinned in `PhysicsFluidSurface.CrossPlatformGold
 
 **C6. Lakes and ponds.** The window masks against `water_bodies`, so a pond inside the window reflects off all its banks. Rain adds ripple sources (Phase F).
 
-**Cost.** At 256² one OceanFFT cascade is 35 passes (2 time-evolution passes, 2 × 16 butterflies, 1 assembly), so its 3 cascades are 105 passes per frame [counted in OceanFFT.cpp; the port notes' 57 was wrong]. eWave adds 34 more (counted pass by pass in O8b), about +32 % by pass count [E]. Measured in O8b (below): a window adds about 20–27 % to the three cascades' GPU time, since its passes write two channels to the cascades' four. Arc Blanc reports 0.34 ms of GPU time per solid for its finite-difference wakes on an RTX 2070S [L].
+**Cost.** At 256² one OceanFFT cascade is 35 passes (2 time-evolution passes, 2 × 16 butterflies, 1 assembly), so its 3 cascades are 105 passes per frame [counted in OceanFFT.cpp; the port notes' 57 was wrong]. eWave adds 34 more (counted pass by pass in O8b; with no-flux walls a 1/30 s step is 71 at the default 1/60 s substep and 36 with a 1/30 s substep, O8c), about +32 % by pass count [E]. Measured in O8b (below): a window adds about 20–27 % to the three cascades' GPU time, since its passes write two channels to the cascades' four. Arc Blanc reports 0.34 ms of GPU time per solid for its finite-difference wakes on an RTX 2070S [L].
 
 **As built (O8a: the CPU eWave).** O8 is split in two: **O8a** is eWave on the CPU in `cvc::ocean` (below), **O8b** the GPU window in cvcGL, which O8a's tests and digest can check.
 - `cvc/ocean/ewave.h`, `cvc::ocean::ewave`: an n × n window (n a power of two) of cell dx, one depth, origin at cell (0, 0). State h and φ; `step(dt)` packs z = h + iφ, runs fft.h's forward transform, separates H and Φ at k and −k, applies C1's exact update and the damping e^(−(γk² + rate)·Δt), and transforms back. The per-mode coefficients (with the inverse's 1/n² folded in) are kept while Δt is unchanged.
@@ -506,7 +506,7 @@ Measured in `ocean_ewave_test` (Windows, MSVC Release, one thread):
 - **Exact for any Δt:** a standing cosine mode, at ωΔt from 1.65 to 4.0 rad over 400 steps, deep and 1.5 m deep (kd ≈ 1.6), misses h(t) = A cos ωt by at most 6.6e−14 m on A = 0.3 m, with ω computed independently in the test.
 - **Energy:** without damping, mask or sponge, the drift is at most 7.9e−14 (relative) over 2000 steps while the energy moves between potential and kinetic.
 - **Ring:** a Gaussian drop (σ = 0.5 m) gives a ring whose envelope moves at 1.019 m/s, against the 1.000 m/s group velocity of its dominant wavelength (2.57 m, k = √1.5/σ by stationary phase). The crest height spreads by 2.9 % over 16 rays.
-- **Wall (O8's exit):** with mask 0 over a half-plane, nothing appears beyond it (exactly 0, by construction: the mask zeroes the half-plane every step). The reflection comes back as the *antisymmetric* image, best fitted about x = dx/2, to 18.8 % RMS. h = φ = 0 is a Dirichlet wall: a crest comes back as a trough. A real vertical wall reflects a crest as a crest (no flux, Neumann).
+- **Wall (O8's exit):** with mask 0 over a half-plane, nothing appears beyond it (exactly 0, by construction: the mask zeroes the half-plane every step). The reflection comes back as the *antisymmetric* image, best fitted about x = dx/2, to 18.8 % RMS. h = φ = 0 is a Dirichlet wall: a crest comes back as a trough, where a real vertical wall reflects a crest as a crest (no flux, Neumann). O8c (below) added no-flux walls, `walls = no_flux`, now the default; O8a's wall stays available as `walls = zero`, bit for bit.
 - **Thin walls leak:** the mask is a lid on the surface with water under it, and the spectral operator couples through it. With open water behind a band, a 3 m (12-cell) band lets through 4.6 % of the incident amplitude (held below 6 %) and a 6 m band 2.8 %. Diagnostic runs, not in the test: behind a thick band most of what is left came round the periodic window through the sponge. Doubling the window (n = 512) takes a 6 m band from 2.8 % to 1.4 % and a 12 m band from 3.1 % to 1.0 %, while a 3 m band only goes from 4.6 % to 4.0 %. A steeper sponge (6 /s) does not help; a wider one (32 cells) helps a little.
 - **Sponge:** 16 cells at 2 /s leaves 0.02 % of a ring's energy after 30 s (about 1.4 % of its amplitude).
 - **Beach:** a band ramping the mask from 1 to 0.2 and back over 8 m leaves 68.95 % of a ring's energy after 10 s stepped at 30 Hz, 68.96 % at 60 Hz and 68.89 % at 10 Hz.
@@ -519,7 +519,7 @@ Not in O8a:
 - moving the window with the camera or boat (C3's index shift);
 - a mask built from `water_bodies` (C6);
 - body sources (C2, O9);
-- a Neumann wall (for example, mirroring φ into the wall instead of zeroing it), if the inverted reflection shows.
+- a Neumann wall (built in O8c: a symmetric operator on ghost cells, stepped symplectically; the default).
 
 **As built (O8b: the GPU window).** `src/cvcGL/ocean/EWave.{h,cpp}`, class `EWave`: O8a's window on the GPU, in float, taking the same `cvc::ocean::ewave_params`. Like OceanFFT it lives beside the cvcGL tests, outside the library, and is compiled into what uses it (for now only `cvcgl_ewave`; drawing the wake in lsystem_coast is O9).
 - **The forward FFT is OceanFFT's.** The butterfly LUT, the butterfly pass and the pass setup (scissor test off, as O7b learned) moved out of `OceanFFT.cpp` into `src/cvcGL/ocean/OceanButterfly.{h,cpp}`, which OceanFFT, EWave, lsystem_coast and the two ocean tests now compile. The forward transform conjugates the LUT's twiddle in the shader (a `uForward` uniform), which is exact, so both directions read one table. OceanFFT is unchanged in its output: `cvcgl_ocean_band` prints O7b's table to the digit.
@@ -534,6 +534,159 @@ Measured in `cvcgl_ewave` (Windows, the offscreen context on the Intel Arc iGPU,
 - **Cost of one step at 256²:** 0.28–1.23 ms of GPU time (a timer query; 0.40–1.66 ms wall with the queue drained), against 0.35–3.3 ms for one OceanFFT cascade in the same runs. eWave's 34 RG passes cost about 0.75 of a cascade's 35 RGBA passes (0.64–0.80 in six runs, 0.38 in a seventh), so a window adds about 20–27 % to the three cascades' GPU time, under the +32 % its pass count alone would suggest (the Cost paragraph above; the +60 % first estimated there came from a wrong count of 57 passes for the cascades). The spread is the shared machine; the ratio is steadier than the times. Not yet measured in the browser.
 
 Not in O8b: drawing the wake (C4, O9), body sources (C2, O9), the window following the camera or boat (C3's index shift), a mask from `water_bodies` (C6).
+
+**As built (O8c: no-flux walls).** O8a's wall zeroed h and φ: a Dirichlet wall, like a string's fixed end, under which a crest comes back as a trough. A vertical wall or cliff is a no-flux wall, ∂φ/∂n = 0, about which h and φ are both even: a crest comes back as a crest, and the wall is an antinode. O8c builds that on the CPU and the GPU as a symmetric operator stepped by a symplectic integrator, so it conserves energy by construction, and makes it the default again (`walls = no_flux`).
+- **The first build, and why it was replaced.** Ghost cells held the mirror image of the water, overwritten after every exact step. A straight wall reflected correctly, but overwriting the ghosts is an oblique projection: the water's update was not symmetric wherever the image was not an exact mirror or was cut off at the band. The review measured exponential growth in closed basins: a disc 31 times in 2000 s at Δt = 0.1 s, a wall two cells thick 10⁷² times at 0.25 s. Tapers, ghost damping, weight caps and folds were tried on that scheme and failed (commit 2adfd1f8 has them).
+- **The scheme.** Linear water waves are Hamiltonian: H = ½(g h·h + φ·Kφ), h_t = Kφ, φ_t = −g h. The state lives on the water cells (mask above 0); wall cells hold h = φ = 0.
+  - R takes the water to an extended field over the whole window. Water cells copy, each ghost cell takes its mirror image (the weighted sum of its bilinear corners), and every other wall cell is 0. Rᵀ folds a field back: each water cell takes its own value plus, for each ghost that reads it, that ghost's weight times the field at the ghost.
+  - S = RᵀGR, where G is the periodic multiplier on the window (FFT, multiply, inverse FFT). S is symmetric positive semidefinite for any ghosts and weights. M, the lumped mass, is the diagonal of the row sums of RᵀR (`ewave_lumped_mass`). The water moves by h_t = M⁻¹Sφ, φ_t = −g h, which conserves H = ½(g h·M·h + φ·S·φ).
+  - Where a straight wall is mirrored cell for cell (weights 1), M = 2 and M⁻¹S is exactly the even extension's operator: the exact Neumann wall. Elsewhere the wall is first order in where it reflects, but it is never unstable.
+  - Störmer–Verlet in substeps of one fixed Δt_s per window: φ½ = φ − (gΔt_s/2)h, h′ = h + Δt_s M⁻¹Sφ½, φ′ = φ½ − (gΔt_s/2)h′. Δt_s is `ewave_params::substep` (default 1/60 s), or 1.8/ω_max if that is smaller, with ω_max taken at the window's corner wavenumber √2·π/Δx (`ewave_substep`; 0.136 s at 0.25 m cells).
+  - **Why it is stable.** With nonnegative weights S ≤ max(G)·RᵀR ≤ max(G)·M, so every generalised eigenvalue of (S, M) is at most G's largest, and every mode is inside Störmer–Verlet's limit ωΔt_s < 2.
+  - The substep conserves exactly the modified energy ½(g h·M·h − (gΔt_s/2)² h·S·h + φ·S·φ). That is a quadratic invariant of the linear map for any symmetric S and positive M, positive definite under the limit, so nothing can grow. H itself wobbles below it: a mode started from h alone keeps H within [(x cot x)², 1] of its start, where x = ωΔt_s/2. That is 0.99 at ωΔt_s = 0.2 and 0.51 at the limit, which only the shortest waves reach.
+  - **The substep never follows the caller's Δt** (the second review). κ̃ (below) and the invariant both depend on Δt_s. The first version of this scheme took the fewest equal substeps of each step's Δt, so a Δt that changed between steps switched between maps that each keep a different ellipse, and that pumps energy in by parametric resonance. The review measured it: Δt alternating 0.136 and 0.101 s grew a disc 10¹⁰³-fold in 4000 steps; a frame Δt uniform in [1/60, 1/30] s at 0.05 m cells grew it 26-fold in 60000 steps, a steady exponential; zero walls (the exact step, exact for any Δt) decayed. So `step(dt)` now runs ⌊(pending + Δt)/Δt_s⌋ whole substeps (`ewave_substep_count`, to within 10⁻⁹ of a substep) and carries the rest (`pending()`, below a substep), and every substep is the same linear map whatever the Δts. The waves trail `time()` by less than a substep (no interpolation), a step shorter than what is left of a substep runs none, and the cost is set by Δt_s: two substeps a 1/30 s step at the default; `substep = 1/30` halves that for a 30 Hz loop. A window with no ghosts keeps taking each Δt whole.
+  - **G is κ̃ = 4 sin²(ωΔt_s/2)/(gΔt_s²), not κ.** Störmer–Verlet's discrete frequency then satisfies cos(ω̃Δt_s) = 1 − gκ̃Δt_s²/2 = cos(ωΔt_s). So open water keeps eWave's exact dispersion, and a straight wall's modes keep their exact frequencies. κ̃ ≤ κ is still a nonnegative multiplier, so the stability argument holds unchanged. h is exact at each step for a mode started from h alone; φ's amplitude is x cot x of the exact (within 1 % for ωΔt_s < 0.35). With κ itself a ring's phase drifts, and the straight wall's reflection was 55 % off its even image at Δt = 0.1 s, against round-off with κ̃.
+  - **Dissipation acts every substep, for Δt_s (so that it too is the same map whatever the Δts), and only removes energy.** `damping_k2` becomes h ← h − M⁻¹Rᵀ(1 − F)Rh with F = e^(−2γk²Δt_s): one more FFT pair a substep, only when γ > 0. That operator is self-adjoint under M with its eigenvalues in (0, 1], so it only takes potential energy, and it is the identity as F goes to 1. Twice the rate on h alone takes a mode's energy at the exact step's mean rate.
+    - Its first form, h ← M⁻¹RᵀFRh, is the same beside a straight wall but is not the identity at F = 1. M⁻¹RᵀR averages each water cell a ghost reads with the corners round that ghost's mirror point, wherever the point falls between cells. Run once a substep, that smoothing took lsystem_coast's crater lake's ring faster than the zero walls had (below, and O9's numbers).
+  - The beach and the sponge also act on h alone, at twice their rate. A diagonal factor under the diagonal M only takes potential energy; one on φ need not, since S is not diagonal. The global damping acts on both, as a uniform factor that scales H.
+  - Without ghosts (no walls, `walls = zero`, `ghost_cells = 0`) the window keeps the exact per-mode step bit for bit.
+- **Where the image is cut, and the band.** In this scheme the fold carries G's response at every ghost back into the water. If the extended field steps down to 0 where the image is cut, the water at the cut's mirror distance feels that step. Waves longer than that distance see the step more than the wall, and reflect partly as a trough.
+  - Measured on the straight wall below (RMS against the even image), with the image cut at 16, 32, 64 and 96 cells: 62 %, 61 %, 38 % and 17 % untapered.
+  - With the cut tapered over 8 cells: 23 %, 39 %, 26 % and 12 %. With no cut (the whole wall, 128 cells, mirrors into the window): 2.2 %.
+  - So 2.2 % is the best case, where the whole image fits. Where it is cut inside the wall (a narrow channel, a small pond, land deeper than the water opposite is wide), the tapered numbers for the cut's distance are what to expect.
+  - So the default band reaches as far as the image does: `ghost_cells = 4096`, every wall cell whose mirror point lands in water, clamped to n.
+  - Near the cuts that remain (a mirror point out of the window or among walls, a ghost dropped by the readers' limit), the weights taper to 0 over `ewave_taper_cells` = 8 cells as sin². So do the weights near seams: neighbouring ghosts whose mirror points are more than 2.5 cells apart, as at the two faces of a thin wall or a wall's medial axis, and ghosts whose nearest water lies on opposite sides. The second kind is the second review's: in a wall one cell thick both faces are equally near every cell, the 2.5-cell test missed it, and the cell held the front water's image right beside the water behind, so the wall let 88 % through (zero walls: 41 %). As a seam its image tapers to almost 0, and it leaks as a zero wall does.
+  - With a taper, M is the row sum of RᵀR, 1 + Σ τ·w. The simpler 1 + Σ w would make the operator in the taper zone (1 + τ²)/(1 + τ) of the right one, as much as 17 % off.
+  - The band sets accuracy, never stability, and costs only `set_mask` time and fill and fold work.
+  - **The search.** Each wall cell's nearest water cell comes from a distance transform (Felzenszwalb and Huttenlocher's lower envelope down each column of the rows' distances), O(n²) whatever the band; the first version scanned 2·band + 1 rows per wall cell, O(n³) at the unlimited default (10 s at 1024², the second review measured). Ties, which set the mirror point as a mean, are found exactly within 32 cells of the shore (every row they can be in) and, deeper, among the nearest cells of a cell's neighbours. That reproduces the first version's ghost table on every test basin; on a 256² wavy coast about 0.5 % of the ghosts differ, all 50 or more cells inland and tapered.
+- **Ghost limits keep it symmetric.** A ghost dropped is a whole row of R dropped, never one corner from the fold but not the fill. The GPU gathers each water cell's readers, so no water cell may be read by more than `ewave_max_readers` = 12 ghosts. Where more would read it (a small convex pond compresses its image), whole ghosts are dropped, farthest from the shore first, inside `ewave_wall_ghosts`, so the CPU and the GPU agree. The 64² test basins need at most 12 and drop none.
+- **The parameters.** `ewave_params::walls` is `no_flux` (the default again) or `zero` (O8a's wall). `ghost_cells` now runs 0..4096 (at most n is used). `substep` (0 < Δt_s ≤ 1 s, default 1/60) sets the symmetric step's substep. Under `zero` the digest leaves all three out, so O8a's pin `0xa4933455f6946eca` stands bit for bit. Under `no_flux` it hashes them and `pending()`. The no-flux pin is re-measured, `0xaefff2ae097ed743` since the `damping_k2` filter's second form, on Windows; CI is to confirm it on Linux and macOS.
+- **The GPU** (`EWave`) runs the same scheme with the same ghosts, weights, mass and readers' limit, all from the CPU functions at `setMask`, and the same substep, counted on the host in double with `ewave_substep_count` so it carries the CPU's remainder exactly. A substep is 4 log₂ n + 3 passes, 35 at 256²:
+  - a fill pass: water texels write φ½, ghost texels the weighted sum of their four corners' φ½, fetched one by one since WebGL2 does not filter float textures, and other walls 0;
+  - the forward butterflies (16);
+  - a pass multiplying by κ̃/n², computed per texel from uniforms;
+  - the inverse butterflies (16);
+  - a gather pass. Each water texel adds to its own value up to 12 readers' weight × value. The readers sit two to an RGBA32F texel in six textures, each as the ghost's cell as a float index (an integer below 2²⁴, exact, read back by truncation: the first version's int(cell + 0.5) rounded odd indices up past 2²³, at n = 4096) and its weight, in the CPU table's order. The pass multiplies by 1/M (an R32F texture), writes h′ and φ′, and applies the substep's beach, sponge and global damping. The reader textures take 96 n² bytes: 6 MB at 256², 400 MB at 2048², 1.6 GB at 4096².
+  - With `damping_k2`, the same four stages once more on h every substep. Then one pass brings the state home to the same texture (none when no substep ran and it is already there). A step of s substeps is s·35 + 1 passes (s·70 + 1 with `damping_k2`): at 256² a 1/30 s step is 71 at the default substep and 36 with `substep = 1/30`, against 34 without walls.
+  - All passes are WebGL2-portable fragment shaders with the scissor test off. The gather shader's reader textures are generated per slot, since GLSL ES 3.0 cannot index a sampler array by a loop variable.
+  - A source is one pass, since the walls hold no state to refill.
+
+Measured in `ocean_ewave_test` and `cvcgl_ewave` (Windows, MSVC Release, the Intel Arc iGPU, other builds sharing the machine):
+- **The exact Neumann operator.** The setup: a window of 2M = 64 cells along x, water on 0..M − 1, wall on M..2M − 1 (the window's wrap closes the channel), uniform along y, every wall cell a ghost.
+  - Each ghost is its exact mirror cell with weight 1, and M = 2 on the water.
+  - M⁻¹S applied to cos(πm(x + Δx/2)/L)·cos(2πqy/(nΔx)) gives κ times it to within 2.9·10⁻¹⁵, built in the test from `ghosts()` and `mass()`.
+  - Stepped by the library at ωΔt_s from 0.25 to 0.74 rad, in steps of one to six whole substeps, deep and 1.5–2 m deep, the mode matches Störmer–Verlet's exact discrete solution over 400 steps. That solution is h exact and φ at x cot x. h is within 4.1·10⁻¹⁴ m on A = 0.3 m, and φ within 2.7·10⁻¹³ m²/s.
+- **Stable: the review's probe as a test** (`WallsAreStable`). Broadband noise in h on the water of seven closed basins at 64² with 0.25 m cells: a disc of water 12 m across, the disc with an island, the disc with a breakwater four cells thick, a straight channel 5 m wide, a 45° channel, a wall two cells thick across the window, and a 2-cell wall 8 m long in open water. No damping, beach or sponge; 20000 steps each at three substeps: ω_max Δt_s = 1.8 (the limit, one a step), 0.125 s (steps of 0.25 s) and 1/30 s.
+  - The modified energy never moved more than 1.3·10⁻¹⁴ from its start.
+  - energy() never rose above its start, and dipped to 0.85 at the limit, 0.87 at 0.25 s and 0.991 at 1/30 s (the wobble).
+  - Its means over the first and last quarters agree within 0.002: no trend.
+  - Zero walls never rose above their start either.
+- **Stable under a Δt that changes every step** (`VariableStepsAreStable`, the second review's probe as a test). The disc, the straight channel and the 2-cell wall in open water, from broadband noise: Δt 0.136 and 0.101 s in turn (2000 steps, default substep); Δt uniform in [0.6, 1.0] of the limit with the substep at the limit (20000 steps, 0 or 1 substep each); a frame Δt uniform in [1/60, 1/30] s at 0.05 m cells (15000 steps).
+  - The modified energy never moved more than 5.7·10⁻¹⁵ from its start, and energy() never rose above it (lowest 0.85, at the limit).
+  - The same frame jitter with `damping_k2`, the global damping, the sponge and a beach on every shore cell: energy() never rose above its start and fell below 10⁻⁵⁰ of it.
+- **A crest reflects as a crest.** The setup is O8a's wall test: a σ = 0.5 m drop 6 m from a half-plane wall, to t = 13 s at 0.1 s.
+  - The whole wall mirrors into the window (32768 ghosts). Without the sponge, the field before the wall is the even image to 2.9·10⁻¹⁴ RMS.
+  - With the sponge it is 2.2 %, the sponge's h-only form; the first build gave 6.8 %. At Δt = 0.25 s it is 2.2 % (two substeps of 0.125 s), and at 0.5 s 2.1 % (four).
+  - At the shore column, regressed on the incident wave, the field is 1.90 times it, and it peaks at 1.86 times the incident crest. The reflection against the mirrored free wave has slope +1.001.
+  - Zero walls still give the odd image to 18.8 %, slope −0.68.
+- **Lossless** (`NoFluxWallsAreLossless`). A smooth ring (σ = 1.5 m) bounces for 300 s (3000 steps of 0.1 s) about a closed 32 m straight channel, a 45° staircase channel, a disc and a pond with an island.
+  - The modified energy stays within 7.5·10⁻¹⁵ of its start.
+  - energy() stays in 0.980–1 (straight), 0.985–1 (45°), 0.983–1 (disc) and 0.985–1 (island). That is the wobble, not a loss.
+  - The first build lost 0.8 %, 2.7 % and 8.1 % in the straight, 45° and disc basins.
+- **`damping_k2` takes the same share whatever the walls** (`DampingK2TakesTheSameShareWhateverTheWalls`). The setup is a disc of water 36 m across on a 128² window of 0.5 m cells, 3.5 m deep (the crater lake's size), with a dent dropped off its centre and `damping_k2` = 2·10⁻³ m²/s (lsystem_coast's), over 300 steps of 1/30 s.
+  - Of the energy at +0.5 s, the zero walls keep 75.5 % at +10 s and the no-flux walls 75.7 %. Under the filter's first form the no-flux walls kept 49.3 %. With lsystem_coast's global damping as well (0.02 /s), both keep 52 %, against 34 % under the first form.
+  - At `damping_k2` = 10⁻¹⁵ the heights match the undamped run to 1.5·10⁻¹³ of the largest. Under the first form they were 99 % off: its smoothing alone.
+  - **What the water's own Σh² shows.** Without damping H stays at 1.000, but the water's Σh² (the energy without M, as lsystem_coast's check reads it) settles at 0.76–0.86 of its first second once the ring reaches the banks, where zero walls keep 1.01–1.02. The disc's coast compresses its image over most of the water, so the mean M there is 1.31 (1/1.31 = 0.76). This is a share moved, not a loss: the reading wanders in that range from 10 s to 60 s without a trend. Near the banks the water's amplitude is that much lower than water-only energy would make it, which is the cut image's error (above) seen as energy.
+- **Thin walls leak.** Behind a band with open water beyond it, as a share of the incident amplitude, at 0.25 m cells: 40.4 % at one cell, 26.8 % at two, 15.9 % at four, 10.8 % at 3 m, 5.7 % at 6 m and 3.0 % at 12 m.
+  - For comparison: zero walls 41.1 %, 27.2 %, 14.3 %, 4.6 %, 2.8 % and 3.1 %; the first build 13.6 %, 4.5 % and 3.3 % at 3, 6 and 12 m, and the symmetric step before the opposite-sides seam 87.6 % at one cell.
+  - So a wall up to four cells thick, mostly seam, leaks within 12 % of a zero wall; one a few metres thick, about twice a zero wall, because the front face's image sits inside the wall, nearer the water behind.
+  - Without the seam taper the two faces' images meet in the wall, the fold carries one into the other, and the leak was 63 %, 53 % and 339 % at 3, 6 and 12 m. With a 4-cell seam taper it was 17 %, 10 % and 10 %.
+- **GPU against CPU.** O8b's scenario with its wall no-flux and a round island 2.5 m across beside it. It has 32768 ghosts, the island's with fractional weights and zeroed wall corners, plus `damping_k2`, both dampings, a beach band, the sponge, a whole-field source and a drop; at a substep of 0.1 s it runs 24 steps of 0.2 s, then 24 of a Δt jumping between 0.03 and 0.17 s (steps of no substep and of two).
+  - The two agree to 1.9–9.1·10⁻⁶ RMS for h and 1.5–8.0·10⁻⁶ for φ, and to 1.1–9.1·10⁻⁶ within 3 m of the island; they take the same substeps and carry the same remainder, bit for bit.
+  - Passes, counted as rendered: 141 a step of two substeps (2 × 70 + 1, with `damping_k2`); a step of none renders nothing, or one pass home after a source.
+  - The wall test at Δt = 0.25 s gives on the GPU the even image to 2.10 % and a reflection slope of +1.001, 71 passes a step, and agrees with the CPU to 1.2·10⁻⁵ RMS. Under zero walls the GPU still gives O8b's numbers: 21.7 % against the odd image, slope −0.54, and 5.6·10⁻⁵ against the CPU.
+  - Broadband noise in the disc with an island, 10000 steps on the GPU of a Δt that changes every step, never raised the water's energy above its start: 0.887–1.000 with Δt uniform in [0.6, 1.6] of the limit and the substep at the limit (0 to 2 substeps a step), 0.998–1.000 with a frame Δt in [1/60, 1/30] s at the default substep.
+- **Cost.**
+  - CPU at 256², with a wavy coast over half the window: a 1/30 s step (two substeps at the default) takes 5.2–6.3 ms with the whole image (22398 ghosts; two runs), against 2.9 ms without walls. `set_mask` takes 11–13 ms (4 ms with a band of 16), and on the same coast scaled up 43–56 ms at 512² and 0.21–0.25 s at 1024².
+  - GPU at 256² and 1/30 s, on the shared machine: 0.60 ms of GPU time with the coast at the default substep (71 passes), 0.30 ms with a 1/30 s substep (36), 0.27 ms without walls (34) and 0.35 ms for one OceanFFT cascade. The walls cost about their passes.
+
+Not in O8c: a sub-cell shore (a smooth signed distance would place a staircase's shore better than half a cell from the nearest water cell); thin walls that stay fully no-flux without leaking (the lid model couples through a thin wall, the seam taper trades reflection for leak, and a wall a few metres thick leaks about twice what a zero wall does); output between substeps (the waves trail `time()` by up to a substep; interpolating needs the previous state); a gauge for the symmetric step (where every wall cell is a ghost with weights summing to 1, S annihilates constants, and a mean height makes φ's uniform part drift linearly without bound; it never reaches h, but costs φ's precision, on the GPU in float over hours; removing it needs a reduction pass on the GPU); volume in a closed basin is conserved only where every wall cell is a ghost (elsewhere the cut couples the mean level weakly to the deep wall); a mass that is uniform where the image is cut or compressed (M varies over such water, and the water by the banks carries M times its h² of the energy, so in a disc 36 m across the water's own Σh² settles at 0.76–0.86 of its start while H stays).
+
+**As built (O9: bodies make waves).** The shared immersion code in `cvc::physics`, bodies as sources of the GPU window, the window following the camera's target with a mask from the shore, and the wake drawn in lsystem_coast's sea and crater lake.
+- **C2's immersion code: `cvc/physics/immersion.h`.** `immersion_body` is a body's outline as the water sees it: its box, sphere or convex hull, or its `hull_mesh` where it has one (`immersion_body::of(body_desc)`, as the field step pushes on the hull in place of the cells). A convex hull's faces are found once from its points (every supporting plane through three of them, in a fixed order). `immersion_water` is a fluid field's surface, field time and box (`immersion_water::of(field, t)`). `add_immersion(body, position, rotation, water, grid, zeta)` adds the body's columns of immersed depth zeta over an `immersion_grid` laid out as `ewave`'s cells and returns their volume.
+  - A cell's zeta is the mean, over 4 × 4 sub-columns across the cell, of the length of each vertical line inside the body and below the water's top over the cell's point: `fluid_surface::height` at the field time, capped by the field box's top, inside the box. The water's top is read once per cell and the shape once per sub-column. Zeta is point-sampled: as an edge crosses a cell it moves in steps of 1/16 of a column (a sub-column is in or out), not smoothly, and it agrees with the field step to that sampling (exactly only where both resolve the body, as for the level box below).
+  - A box, a sphere and a convex hull are cut exactly by the vertical line (slabs, a chord, half-spaces). A hull mesh's inside is read from its crossings, entering where a face looks down and leaving where one looks up, so it need not be convex; the crossings are measured from below its highest vertex, so unbounded water (no surface, an open box) covers it whole. A point on an edge two faces share counts once (exactly antisymmetric edge functions and the top-left rule), and faces folding over at the outline decide alike.
+  - Standard library, IEEE arithmetic and sqrt only, in the physics exact-math list, so a client with no physics world (arisrv, from a replicated pose) gets the same bits. `PhysicsImmersion.IsTheSameOnEveryPlatform` pins four bodies' columns on a swell at `0xb582404bf028ed63`, measured on Windows (MSVC); CI checks Linux and macOS.
+  - `field_step` was not changed to call it (optional in the plan): the cells and the hull's triangles stay as they were, so every golden hash and pin is untouched. They sample the same shape, pose and surface, so the two agree to the cells' resolution (below).
+- **C2's sources: `src/cvcGL/ocean/WakeSource.{h,cpp}`.** Each step, each body's zeta at its pose, then dh = −(ζ(t) − ζ(t − Δt)) smoothed by [1 2 1]/4 along x and y (it keeps the volume and takes out edges shorter than two cells) for `EWave::addHeights`. The first step only records ζ. When the window moves, the last ζ moves with it, and cells that enter take their first ζ as their last, so a body under the entering strip makes no source as it appears.
+- **C3's window moves: `EWave::shift(di, dj)`**, one pass: cell (i, j) takes what was at (i + di, j + dj), the strip that enters is flat, the origin moves by whole cells and the sponge hides the strip. `EWave::setDepth` sets the window's one depth. The CPU `ewave` has no shift yet.
+- **In lsystem_coast.**
+  - **Two windows.** The sea's is 256² cells of 0.5 m (128 m) with C1's damping (γ = 2·10⁻³ m²/s and 0.02 /s), a 16-cell sponge and the window's wet cells' mean depth. The crater lake's is 128² cells of 0.5 m over the lake and a 3 m margin, 3.8 m deep (its mean), with no sponge, since the banks enclose it. `coast.wake.enabled` 0 at start leaves both out, shaders and all.
+  - **D3: the sea's window is centred on the camera's target** (the `--look` target, or the camera's focal point): the point the view is about, not the eye, which may be far above the water, and there is no boat yet to follow. It moves only when the target is 16 cells (8 m) from its centre, by whole cells, and gets its new place's mask and depth. Under the default orbit camera, whose target is the island's middle, the window lies mostly over land.
+  - **C6's masks.** The sea's is 0 on land (`water_bodies`' shore distance) and in the water ramps over the last 3 m to the shore from 1 down to 0.5 at the waterline, so beaches absorb (10 /s × (1 − m)). Where the shore is steep, it is 1 up to the waterline and a hard 0 past it, so cliffs reflect. Steep is the larger of the shore layer's K_r and the ground's slope ramped from 0.25 to 0.6, giving m = beach + (1 − beach) · steep. The ramp is narrow on purpose. A source in it is scaled by the mask and damped at that rate: under a first 8 m ramp to 0.3, crates dropped 5 m off the sand left no ring at all. The lake's mask is 1 in the lake (`water_bodies` at its level: depth > 0 and the lake's body) and a hard 0 on all its banks.
+  - **Sources.** Each frame, each body at the pose it is drawn at (`pose_tracker::sample_one` at the frame's alpha) is immersed in the water physics feels at that pose's time. The view lags the world by one step, so that is the world's field time a fraction alpha past its tick k − 1, not the frame's world time: cutting the drawn pose against the sea 25 ms later put a false, wave-following source under each body. A teleport (the check's drop, the panel's "drop them again") makes the sources only record the columns until the drawn poses are the ones after it, so a body leaving its place leaves no false ring there. On the sea that is a second `ocean_surface` built from the same inputs as the physics field's, so it has the same values but its own one-time cache: reads at the drawn time do not evict the physics step's, which runs on its own thread at its own times. On the lake it is the still level. The windows then step by the frame's world time.
+  - **C4's drawing.** Both water shaders read the window's RG32F state, bilinear by hand and faded to 0 over its outer 8 cells.
+    - The vertex adds the height through a [1 2 1]/4 tent over its grid's spacing, which passes nothing at the grid's Nyquist wavelength. The sea's grid is 2 m, so it draws only the wake's long waves; a plain bilinear height aliased the 2–3 m rings into bright zigzag facets. The lake's grid is 0.7 m.
+    - The fragment adds the slope to the normal, from per-cell central differences interpolated bilinearly, so the shading is continuous.
+    - Foam, until §10's persistent foam texture exists: `coast.wake.foam` × (0.35 max(−∇²h, 0) + 2 max(|∇φ| − 0.15, 0)), at most 1. ∇²h is a sharp crest; |∇φ| is the surface's speed, which for a deep-water wave equals its vertical speed |∂h/∂t|. It whitens a splash and the first ring, not a gentle ring.
+    - The knobs are `coast.wake.enabled`, `.foam`, `.vertex`, `.beach_m` and `.beach_mask`, plus a Wake section in the panel.
+  - The wake is visual (C5): the debris feel nothing of it. `--debris-check` gives O7c's numbers unchanged: a crate carried 11.3 m in and left 2.4 m up the beach, a barrel 7.9 m into the shallows, a crate 10.5 m back out, and the lake's three at rest at 23.70 m. `--shore-check` still moves no vertex onto dry ground (the wake moves vertices only vertically).
+
+Measured in `physics_immersion_test` (Windows, MSVC Release):
+- **Analytic columns.** A level 1.2 × 0.9 × 0.8 m box 0.25 m deep in still water gives each cell the draft times its share of sub-columns in the footprint, to 10⁻¹⁵ m, at 1, 4 and 16 sub-columns a side. Turned 0.7 rad about z, a column inside the footprint is the draft and one outside is 0; tilted 25°, the column through the centre is 0.8/cos 25°, cut at the water as it should be.
+- **One shape three ways.** The convex hull of a box's corners (and two interior points: 6 faces found) and the box's hull mesh, split into 4 × 4 squares a face and sampled on its shared edges and corners, give the box's columns to 10⁻⁹ m at a turned and tilted pose. A sphere's columns are its chords. lsystem_coast's barrel hull has its 22 faces.
+- **The field step's volume.** These are field_load_on's immersed volume after one step, against zeta's at the pose and field time of that step (4 sub-columns of cells 5 cm wide).
+
+  | body | still water | the swell (0.2 m, 4 s) |
+  |---|---|---|
+  | level box | 0.192000 m³, 0.000 % | −0.001 % |
+  | tilted box (0.35 and 0.2 rad) | −0.12 % | +0.12 % |
+  | sphere (r 0.4 m) | +0.68 % | −0.008 % |
+  | barrel (lsystem_coast's convex hull) | −2.5 % | +2.9 % |
+  | tilted box hull (12 triangles) | −0.001 % | −0.31 % |
+
+  The level box agrees exactly because both samplings resolve it: its faces fall on the field's cell boundaries and between zeta's sub-columns. On cells of 0.25 m with 4 sub-columns the same box reads 0.292969 m³ against 0.27 m³ (+8.5 %). Elsewhere the difference is the cells' resolution, 8 along the longest side, worst for the barrel's round section. Those are the body's own samples; the columns are exact.
+
+Measured in `cvcgl_wake` (Windows, the offscreen context on the Intel Arc iGPU, other builds sharing the machine):
+- **Sources.** Σdh·dx² matches −(V(t) − V(t − Δt)) to 1.1·10⁻¹⁶ m³ for a turned crate pushed down and let up, and a body that stays still makes none.
+- **Shift.** After a shift of (7, −5) cells, each cell holds exactly what was at its place in the world and the entering strip is exactly flat. Stepped on 2 s, the shifted window matches an unshifted one to 3.0·10⁻⁴ of the RMS height away from the edges (float round-off through the transforms, and the sponge sitting elsewhere for each).
+- **Kelvin wake (Phase C's exit).** A box footprint 2 × 1 m with a 5 cm draft (ramped in over 8 s) moves at constant speed across still water. It is immersed by `add_immersion` and fed to EWave each step through `WakeSource`, 512² at 0.5 m with Δt = 0.2 s over 140 m, read back and measured as `ocean_ewave_test` measures the CPU's.
+
+  | speed | Froude number on 2 m | 30 % edge | 40 % edge | 50 % edge | row maxima |
+  |---|---|---|---|---|---|
+  | 2.5 m/s | 0.56 | 19.43° | 19.43° | 20.02° | 20.51° |
+  | 3.0 m/s | 0.68 | 19.61° | 19.34° | 19.79° | 17.82° |
+
+  The reference is arcsin(1/3) = 19.47°, and each edge must be within 2°. The box reads closer to it than O8a's Gaussian. Each run takes 1.0–1.6 s.
+- **A rock's shadow.** A wavemaker line 40 m up-wave sends waves 4 m long at a disc 8 m across masked to 0. Over 20 s, 8–20 m behind it within 2 m of the axis, the RMS height is 0.0116 m, 23 % of the same run without the rock (0.0511 m). 12–16 m to the side it is 100 %.
+
+Measured in lsystem_coast (`--debris-check --wake-check --look -128,-48,9,-103,-14,0`, the default 1.2 m swell and 9 m/s wind, synthetic clock at 30 fps; the same numbers every run). Re-measured under O8c's no-flux walls (the banks and the sea window's land), after the fix to O8c's `damping_k2` filter:
+- **The lake keeps its waves.** At 20 s the check drops a crate from 2 m onto the lake's middle (9.5, 0.5), beside a twin lake window with absorbing banks (the mask ramping to 0.2 over the last 3 m) fed the same sources.
+  - The drop itself adds about 150 J: the absorbing twin goes from 11 J at 20.03 s, the crate still falling, to 170 J at +1 s and 160 J at +2 s. (Before the teleport fix the crate vanishing from where it floated made a second ring the frame after the drop, while the crate was still 1.6 m up: the twin jumped from 15 J to 79 J by 20.03 s.)
+  - Of the lake's energy 2 s after the drop, 48 % is left 10 s later and 34 % 20 s later. With the absorbing banks it is 13 % and 1 %.
+    - Under O9's zero walls it was 55 % and 34 %. Under the no-flux walls with the `damping_k2` filter's first form it was 20 % at 10 s: that filter smoothed the water the banks' image reaches, once a substep (O8c).
+    - The check reads the water's Σh², without O8c's mass M. Under no-flux banks that reads about 0.85 of the energy the walls keep once the ring reaches them (O8c, `DampingK2TakesTheSameShareWhateverTheWalls`), which accounts for 48 % against 55 %.
+  - Within 1.5 m of the drop the splash peaks at 0.090 m RMS at +0.6 s. From +8 to +30 s the RMS height there is 0.0066 m with the banks reflecting and 0.0016 m with them absorbing: what comes back from the banks.
+  - Before the drop, the first three bodies' splashes at 0.75 s fill the lake to 444 J at 2 s and decay to 182 J by 18 s, against 16 J with absorbing banks.
+  - The check fails (exit code 5) when a window with bodies in it has no waves, when the drop adds less than 20 J to the absorbing twin by +2 s, or when the reflecting lake keeps no more than twice the twin's share at +12 s. With no `--look` the sea's window lies over land, no body is in it, and the check says so rather than failing.
+- **The sea.** In the swell the six bodies at sea ride the long waves but not the short wind waves. Their columns change as those pass, so they scatter them continuously. The window's energy rises from 1.3 kJ at 2 s to 2.7–2.8 kJ from 12 s to 20 s, 3.6–4.5 kJ from 24 s to 44 s and 5.9–6.6 kJ from 46 s (under O9's zero walls 2.8–3.0, 4.0–4.6 and 6.1–6.7 kJ): about 0.9 cm RMS over the 128 m window at the end, with the largest heights of 0.09–0.41 m in the bodies' own footprints, where the wake cancels the crest they keep out. Read against the sea at the frame's time instead of the drawn poses' (before the review's fix), it reached about 8.3 kJ by 46 s.
+- **Frames.** On a calm sea (swell 0, wind 2–3 m/s):
+  - At 2.5 s the crate nearest the camera sits in a foamy splash ring, and the barrels have rings of their own. By 5 s the rings have spread several metres. With the narrow beach ramp, the two crates nearest the sand (in 1.5 and 2 m of water) have rings that run in to the sand. At 7 s their arcs cross between the crates and the waterline, where the shore foam band hides the line itself. Under the first 8 m ramp those crates had no rings.
+  - On the lake (`--look 24,-20,31,10,1,23.5`), at 2.5 s each of the three bodies has its own ring. By 4.5 s the rings are about 5 m across and overlapping, and by 11 s the lake shows only faint crossing ripples. At 25 s the check's dropped crate has a ring of its own.
+  - In the swell at 60 s, the bodies in the surf radiate rings that cross the near water. The rings are smooth after the tent filter and the continuous slope, but strong near the bodies.
+- **Cost** (Windows, Intel Arc iGPU, a loaded 22-core machine):
+  - The wake costs 5.0–5.8 ms of CPU a frame. Of that, 3.0–3.8 ms is the sources: immersion takes 2.4–3.3 ms, of which 1.9–2.3 ms is the sea's band computed at the frame's time and 0.5–0.9 ms the sea's heights under the bodies and their columns. The rest is the uploads and the passes.
+  - Both windows take 1.8–2.0 ms of GPU time a frame (a timer query; 2.5–2.7 ms with the check's third window).
+  - Offscreen frame loops of 300 frames with the physics on its own thread took 89 and 140 ms a frame with the wake and 81 and 75 ms without. The machine was shared and the frame rate swung from 7 to 17 fps within a run, so these say less than the wake's own times.
+
+Not in O9:
+- **The sea's band at the drawn time.** About 2 ms of CPU a frame (2.8 ms on a more loaded machine in the review's re-run). It could come off the render thread.
+- **A hull's drawn Kelvin wake.** There is no boat in lsystem_coast yet (O11). The Kelvin wake is the test's, and the sea's window follows the camera's target, not a boat.
+- **Wake-on-body coupling** (C5, D6).
+- **Persistent foam** (§10.2); foam is the simple term above.
+- **A shift for the CPU `ewave`.**
+- **The browser.** Not measured.
+- **`world::set_state` with zero velocity.** On Jolt it does not wake a sleeping body, though `world.h` says it activates it: `SetPositionRotationAndVelocity` activates only for a non-zero velocity. The check drops its crate at 0.5 m/s. The panel's "drop them again" may leave sleeping lake bodies where they are.
 
 **Exit.** A crate dropped near the beach sends a ring that reflects off the sand. A moving box hull leaves a wake at about 19.5°. A rock in the water casts a wave shadow.
 
@@ -595,6 +748,39 @@ It is a new outline kind in `field_set` that carries a hull triangle list, separ
 - An outboard motor vectors its thrust.
 - Throttle and rudder are actuators like `vehicle_controls`.
 
+**As built (O11b: boats).** `cvc/physics/boat.h`; the step is in `boat.cpp` (`boat_step.h`), called from `world::step` after the fields and vehicles and before the engine step. `docs/PHYSICS_API.md`, "Boats".
+- **The API mirrors vehicles.** `world::add_boat(boat_desc, position, rotation)` returns a `boat_id`; there are `remove_boat`, `boat_count`, `set_boat_controls`, `boat_state` and `get_boat`. A `boat_desc` holds:
+  - the hull, a `body_desc` with its collision shape and (usually) its `hull_mesh`, which must be dynamic;
+  - a `propeller_desc`: position and thrust direction in the body frame, `max_thrust` ahead and `max_reverse_thrust` astern, `max_inflow_speed`, and `outboard_max_angle` (0 for a fixed shaft);
+  - a `rudder_desc`: position, area, `lift_slope`, `stall_angle`, `drag_coefficient`, `cross_flow_drag` and `max_angle`;
+  - `actuator_time_constant`, for both actuators.
+  `boat_controls` is { throttle, rudder }, each in [−1, 1]; + rudder turns left. The hull is an ordinary body that the fluid fields float and resist (O11a). `remove_body` refuses it. Boats work on any backend, since they need only `add_force_at` (O10).
+- **Every step, in boat id order, standard library and `det::` math** (`boat.cpp` is in the exact-math source list):
+  - **Actuators.** Each moves as a first-order lag, a += (c − a)(1 − e^(−Δt/τ)).
+  - **Propeller.** It pushes only while its point is under a fluid's free surface. `field_set::water_at` gives the first fluid in id order over the point: its surface height (or box top), density and water velocity. T = |throttle|·T_max·(1 − u_a/u_max), clamped to [0, |throttle|·T_max], where u_a is the propeller's velocity through the water along its push. An outboard swings the thrust about body z by rudder × `outboard_max_angle`.
+  - **Rudder.** The flow is the water's velocity at the rudder less its point velocity v + ω × (p − com), taken in the body's horizontal plane. The angle of attack is measured from the deflected trailing edge, and wrapped so that a rudder works reversed astern. Lift is ½ρAV²·C_L normal to the flow, with C_L = `lift_slope`·α up to the stall; past it the blade is a flat plate, C_L = `cross_flow_drag`·sin 2α / 2. Drag is ½ρAV²·(`drag_coefficient` + `cross_flow_drag`·sin²α) along the flow.
+  - Both forces go to the backend's `add_force_at` at their world points, and only when non-zero, so a still boat stays asleep. The centre of mass is the fields' (`field_set::center_of_mass`).
+- **State.** With boats, `save()` appends a `CVCBOAT1` section after the hulls'. It holds each boat's id, its hull's body id, an FNV digest of the propeller, rudder and time constant, the controls, the actuators and the last step's outputs, so `state_hash()` covers them. `restore()` refuses a world whose boats, hull ids or descriptions differ. As with the vehicles' and hulls' sections, that check comes after the engine's bodies are restored, so a refused state leaves the boats as they were but not the bodies. A world without boats saves exactly as before: the `CrossPlatformGoldenHash` of `PhysicsJolt` (`70b2cc0bd34ea4be`), `PhysicsFluidSurface` (`f0085b4212e1a8c0`), `PhysicsOceanSurface` (`315e7d5f0aed8af0`) and `PhysicsHull` (`2f71a1fe229afa75`), and `physics_replay_test`, are unchanged. `snapshot()`, its JSON, `physics_codec` and pycvc do not carry boats yet.
+- **Tests** (`physics_boat_test`, MSVC Release). The boat is a 4 × 1.5 × 0.6 m box hull of 900 kg (192 triangles), floating 0.15 m deep, with no body damping, in water with C_d = 1 and damping 10⁴. Its propeller and rudder sit 0.2 m under the waterline at the stern: 2000 N ahead, 1000 N astern, u_max = 8 m/s, a 0.12 m² rudder, τ = 0.5 s.
+  - **Terminal speed.** Full throttle settles at 3.1915 m/s, where the inflow is 3.1914 m/s. Thrust is 1202.14 N (2000·(1 − 3.1914/8) exactly), against 1196.01 N of hull resistance and 6.111 N of rudder drag: an imbalance of 0.021 N, with mean acceleration 4·10⁻¹² m/s². The heading stays 0 within 10⁻³ rad.
+  - **Astern.** Full astern reaches −1.806 m/s after 30 s, with thrust −774 N as the inflow from astern grows.
+  - **Turning.** At full throttle, each steady turn is measured over one whole circle, with the yaw rate within 1 % of its mean and the circle's diameter 2U/r within 2 %:
+
+    | rudder (deg) | yaw rate (rad/s) | drift (rad) | radius U/r (m) | measured diameter (m) |
+    |---|---|---|---|---|
+    | 6.9 | 0.01518 | 0.108 | 211.15 | 422.30 |
+    | 15.5 | 0.05796 | 0.222 | 55.74 | 111.48 |
+    | 30.9 | 0.17593 | 0.395 | 18.23 | 36.46 |
+
+    The speed holds at 3.21–3.23 m/s. Opposite rudder gives the mirror turn within 10⁻³. The hull drifts into the turn until the rudder sees almost no angle of attack: 0.0017 rad at 6.9° and 0.0082 rad at 15.5°.
+  - **Dry propeller.** With the propeller over the deck, the thrust is 0 and the boat does not move (3·10⁻¹⁶ m/s after 10 s).
+  - **Outboard.** At throttle 0.2 and full steer from rest, an outboard with a 0.5 rad swing has turned the boat 0.692 rad after 3 s. The same boat with its rudder, and no slipstream over it, has turned 0.062 rad.
+  - **Swell.** On a 0.3 m, 5 s train along x (39 m long, slope amplitude kA = 0.048), the bow's rise follows the surface's slope at the centre, at correlation 0.9998, with pitch from −0.047 to 0.050. The propeller stayed wet throughout.
+  - **State.** Two runs hash alike, whether stepped 250 steps in one call or one step per call. The thrust rating and the controls change the hash. A save restores and steps alike, including `boat_state`'s outputs. A world with another boat, a world with the same hull as a plain body, and a state without the boat are refused.
+  - **Null backend.** Here the refusals are checked, along with a refused boat leaving no hull behind, `remove_boat` taking its hull, the actuator lag (1 − e⁻¹ after one τ, to 10⁻¹²) and the rated thrust at rest.
+  - **Pinned.** `PhysicsBoat.CrossPlatformGoldenHash` is the boat at throttle 0.8 and rudder 0.5 on a 0.2 m, 4 s swell after 300 steps: `bb8e1b22f58136b2`, measured on Windows MSVC; to be confirmed by CI on Linux and macOS.
+- **For D4.** `dyn_boat_plant` can drive `set_boat_controls` from a nav command and read `boat_state`'s speed, heading and yaw rate. An energy ledger would add the thrust's power, T·u_a, and the rudder's drag work. Neither is built here.
+
 **D4. A boat plant.** `dyn_boat_plant` sits beside the 4-wheel and bike plants, takes a nav command through a driver model, is selectable by `plant_host`, and keeps the same energy ledger. This puts watercraft in GRL-SNAM's reach.
 
 **D5. Drawing.**
@@ -604,6 +790,71 @@ It is a new outline kind in `field_set` that carries a hull triangle list, separ
 - The hull darkens where it is wet.
 
 **D6. An Ariadne node,** `boat` (or `vessel`): a hull mesh, plant parameters, and a body in the scene's physics world.
+
+**As built (O11c: the boat in lsystem_coast).** D5's water exclusion and the drivable boat, in `examples/cvcgl/lsystem_coast.cpp` only; no library code changed.
+- **The skiff.** A 5 m open skiff with an outboard. Its hull is a V bottom with a hard chine, 1.9 m in beam, defined as sections from the transom (x = −2.4 m) to the stem (x = 2.6 m) and interpolated to 21 stations 0.25 m apart.
+  - **Physics.** The `hull_mesh` is those sections joined and closed by the transom, the stem and a flat top at the sheer: 378 triangles and 5.34 m³. The collision shape is the convex hull of its vertices. It weighs 700 kg (hull, motor and a driver) with no body damping, and floats with 0.70 m³ immersed.
+  - **Drawing.** The drawn hull is the same sections, painted: white topsides, a blue stripe, dark red below. Above the sheer, which the water never reaches, it has a sand-coloured foredeck, white rails, a teak cockpit sole 0.12 m above the origin (about 0.25 m above the waterline at rest), a console and the outboard. The motor does not swing as it steers.
+  - **Propulsion.** A `boat_desc` added with `world::add_boat` to the debris' world, after the debris, so their ids and `--debris-check` are unchanged. The outboard gives 2.5 kN of bollard pull, falling to 0 at 11 m/s of inflow, and swings 0.5 rad to steer. Its leg is a 0.05 m² rudder that swings with it. τ is 0.4 s.
+  - **Start.** On the lee (east) side at (110, 30), heading south over 8–11 m of water. `coast.boat.enabled` 0 leaves it out (default 1), and `coast.boat.start_x`, `.start_y` and `.start_heading` place it.
+- **The helm.** `coast.boat.throttle` and `coast.boat.rudder`, each in [−1, 1], go to `set_boat_controls` every frame.
+  - Keys: I / K raise and lower the throttle (0.6 a second) while held. J / L hold full rudder left / right, and the rudder comes back to 0 when they are let go. C toggles the chase camera. WASD, Tab, F, H and the arrows still move the camera.
+  - The panel's Boat section has the two sliders, the chase checkbox, "put it back" and a readout of speed, heading and thrust.
+  - The frame loop publishes `coast.boat.speed`, `.heading`, `.x` and `.y`, so a script can drive it.
+- **The chase camera** (`coast.boat.chase`) sits `chase_back` (14 m) behind and `chase_height` (5 m) above the still level, with `chase_side` across, along the boat's heading eased over 0.9 s. It looks 4 m ahead of the boat. While it is on, the sea's wake window follows the boat, not the camera's target (D3), centred 24 m astern so the wake is in it. It moves 16 cells at a time as before (96–100 moves in the 110 s check).
+- **No water inside the hull (D5).** The sea's fragment shader discards a fragment whose surface point lies inside the hull. The test runs in the boat's frame, from its drawn pose each frame, against six of its sections as uniforms (twelve `vec3`s: the node takes no arrays). Across each section it uses the V from the keel to the chine, the straight topsides to the sheer, and the sheer's breadth for 0.5 m over it. Water under the keel, as the boat leaps a crest, is still drawn, and so is green water well over the deck. `coast.boat.keep_dry` 0 turns it off. In the 9 m/s sea at 4 s, from a low chase camera, the two renders differ in 11 123 pixels: with it off the sea fills the cockpit, and with it on the teak sole shows.
+- **The wake.** Each frame the boat's drawn pose is immersed (`add_immersion` through its `hull_mesh`) into the sea's window beside the debris, as in O9. The trail's foam is O9's wake foam.
+
+Measured by `--boat-check`: 3300 frames on the synthetic clock at 30 fps (110 s), the chase camera on. It runs on a moderate sea unless `--set` says otherwise: the default 1.2 m, 10 s swell and a 4 m/s wind sea at `wave_amp` 0.3, about 0.4 m Hs. Two runs gave the same numbers to the last digit.
+
+The run:
+
+| s | what the boat does |
+|---|---|
+| 0–3 | settles |
+| 3–21 | full throttle south, holding its heading |
+| 21–41 | 3.5 m/s (a Froude number of 0.5 on 5 m), set by a speed loop |
+| 41 on | full rudder and full throttle through one circle, measured from 47 s |
+| then | waypoints round the south of the island to the south-west shore (slope about 0.5, which the shore layer reflects), and north-north-west along it |
+
+- **Speed.** 6.85 m/s (13.3 kn) through the water over the last 4 s of the lee run, and 9.14 m/s at most. In still water (wind 0.5 m/s, no swell) it settles at 7.93 m/s on 697 N of thrust, with 0.631 m³ immersed and 1.2° bow down.
+- **Turning circle.** One circle took 16.6 s. Across the track it measured 33.7 by 29.3 m (mean 31.5 m). 2U/r gives 31.0 m (5.87 m/s over the ground, 0.378 rad/s).
+- **Motion.** RMS about the means:
+
+  | stretch | heave | pitch | roll | sea under it | swell incident / reflected |
+  |---|---|---|---|---|---|
+  | lee run, 9–21 s | 0.128 m | 1.52° | 3.07° | 0.122 m | 0.09 / 0.02 m |
+  | along the south-west shore, 10.4 s from 99 s, 18.9 m off it at the nearest | 0.329 m | 1.55° | 3.43° | 0.334 m | 0.39 / 0.30 m |
+
+  The incident and reflected amplitudes are the shore layer's means along the track. Along that shore the boat heaves on the reflected swell. A 156 m swell barely pitches a 5 m hull, so pitch and roll come from the wind sea and change little. The largest excursions from the means were 4.2° of pitch and 7.0° of roll.
+- **The wake's angle.** From the sea's window read back every frame, as RMS heights on rows 8–44 m astern in the boat's frame:
+
+  | | speed | Froude number on 5 m | row maxima | 30 % edge | 40 % edge | 50 % edge | rows' ends against the row's largest |
+  |---|---|---|---|---|---|---|---|
+  | slow, 31–41 s | 3.49 m/s | 0.50 | 20.40° | 38.6° | 35.4° | 32.7° | 19 % |
+  | full throttle, 12–21 s | 7.59 m/s | 1.08 | 10.34° | 15.3° | 14.3° | 13.4° | 1 % |
+
+  At Froude number 0.5 the line of the row maxima, the cusps, is 0.9° from Kelvin's 19.47°. The outer edges read wider there: the waves the boat scatters off the swell hold 19 % of the cusps' RMS at the rows' ends. At full throttle the wake narrows to 10–15°.
+
+  The window has one depth, the mean water depth under it (`setDepth`): 8.4 m on the slow stretch and 7.0 m at full throttle, depth Froude numbers U/√(gh) of 0.39 and 0.92. Near 1, linear finite-depth theory changes the wake angle a lot, so the full-throttle reading could have been depth's doing. The run was repeated with the window forced deep (`--set coast.wake.depth=1000`, depth Froude numbers 0.04 and 0.08), with the boat's motion unchanged to the last digit. Full throttle then reads 10.68° for the row maxima and 15.2 / 14.7 / 13.7° for the edges, and 3.5 m/s reads 20.78° and 39.7 / 36.8 / 34.2°, each within 1.5° of the run at the window's own depth. So the narrowing comes from the boat's speed against its length, as ship wakes narrow above a Froude number of about 0.5 (Rabaud and Moisy 2013), not from the shallow window. `--boat-check` prints the window's depth and depth Froude number with each wake reading.
+- **Frames** (the chase camera; a high one at 16 m up and 26 m back):
+  - At 19 s, at speed, a narrow V of foam spreads from the stern, and there is bow foam at the shoulders.
+  - At 39 s, at 3.5 m/s, the high camera shows the Kelvin pattern: transverse crests in foam chevrons inside the V.
+  - At 55 s, in the turn, the boat heels into it, and its wake piles into a saturated white patch where the circle crosses itself.
+  - At 102 s, along the south-west shore, the debris and the beach's surf are ahead.
+- **The default sea is too rough for it.** At 9 m/s and `wave_amp` 1.2 the cascades make a sea of 1.5 m RMS (6 m Hs) off the lee shore; at 4 m/s it is 1.5 m Hs. In that sea the skiff heaves 2.1 m RMS and pitches and rolls 24–25° RMS, and makes no way after 12 s. The check fails as it should (exit code 6: no full circle).
+- **Exit code 6** means the boat sank (its whole hull under water, or its origin 1 m under the water over it, for 2 s), never exceeded 1 m/s, or did not turn a full circle.
+- **The other checks are unchanged.** `--debris-check --wake-check` (1800 frames) gives O7c's and O9's numbers: crates carried 11.3 m in (2.38 m up the beach) and 10.5 m back out, a barrel 7.9 m in, the lake's three at 23.70 m, 55 % and 34 % of the lake's energy left against 13 % and 1 %, and a 0.087 m splash. `--shore-check` still moves no vertex onto dry ground. `cvcgl_ewave`, `cvcgl_wake` and `physics_boat_test` pass.
+- **Cost** (Windows, Intel Arc iGPU, a shared machine): 39–96 ms a frame over the check's runs. The wake took 3.8–6.7 ms of CPU a frame, of which immersion was 2.7–4.7 ms with the boat's 378 triangles beside the nine debris (O9: 2.4–3.3 ms), and 1.0–1.8 ms of GPU.
+
+Not in O11c:
+- **Spray** (§10 item 5): left out.
+- **Propeller wash in a foam texture,** and the hull darkening where wet.
+- **The motor drawn swinging.**
+- **The sea's height for its wind.** The cascades make about 4 times JONSWAP's Hs (6 m at 9 m/s, 1.5 m at 4 m/s), which is why the check lowers `wave_amp`. Not changed here.
+- **Wake-on-body coupling** (C5, D6): the boat feels none of its own or the debris' waves.
+- **`dyn_boat_plant`** (D4) and the Ariadne node (D6).
+- **The browser.** Not measured.
 
 **Exit.** A drivable boat in lsystem_coast that:
 - pitches over the swell;

@@ -146,7 +146,7 @@ join_relay(cvc::app &app, cvc::ariadne::AppRuntime &rt, const cvc::ariadne::Host
     if (const char *t = std::getenv("CVC_ARIADNE_ROOM_TOKEN"); t && *t)
       cli.token = t;
   if (!join) {
-    cvc::ariadne::conference::register_relay_block();
+    cvc::ariadne::conference::register_relay_block(app);
     return std::make_shared<cvc::ariadne::conference::relay_session>(app);
   }
   return cvc::ariadne::conference::attach_relay(app, rt, std::move(cli), [](const std::string &n) {
@@ -155,25 +155,20 @@ join_relay(cvc::app &app, cvc::ariadne::AppRuntime &rt, const cvc::ariadne::Host
 }
 
 #ifdef CVC_ARIADNE_WASM
-// The WebAssembly guests' engine (src/ariadne_wasm), registered for the life of main() by a
-// WasmGuests, made before any app or runtime so it outlives every runtime it is given. Null when
-// its runtime could not start: documents then load without their wasm: blocks run.
+// The WebAssembly guests' engine (src/ariadne_wasm), made for the life of main() by a WasmGuests
+// before any app or runtime, so it outlives every runtime it is given (use_script_engine registers
+// it on that runtime's app). Null when its runtime could not start: documents then load without
+// their wasm: blocks run.
 std::shared_ptr<cvc::ariadne::ScriptEngine> g_wasm;
 
 struct WasmGuests {
   WasmGuests() {
     std::string error;
     g_wasm = cvc::ariadne::wasm::make_engine(error);
-    if (g_wasm)
-      cvc::ariadne::register_script_engine(g_wasm);
-    else
+    if (!g_wasm)
       std::fprintf(stderr, "%s: no WebAssembly guests: %s\n", kRuntimeName, error.c_str());
   }
-  ~WasmGuests() {
-    if (g_wasm)
-      cvc::ariadne::unregister_script_engine("wasm");
-    g_wasm.reset();
-  }
+  ~WasmGuests() { g_wasm.reset(); }
   WasmGuests(const WasmGuests &) = delete;
   WasmGuests &operator=(const WasmGuests &) = delete;
 };
@@ -258,7 +253,7 @@ int usage(int code) {
   std::fputs("\n"
              "arix is ari with an embedded Python (with pycvc, numpy and the packages beside it):\n"
              "  arix run|snapshot|check [flags] app.py [program args...]\n"
-             "      runs a Python program in place of the document: pycvc_gl.ariadne.Host()\n"
+             "      runs a Python program in place of the document: pycvc.ari.Host()\n"
              "      adopts this host, loads a document, and runs it (host.run(), or by returning)\n"
              "  arix python [python args...]\n"
              "      the embedded interpreter as a plain python3 (a REPL, -c, -m, a script)\n"
@@ -308,6 +303,23 @@ cvc::ariadne::TermGraphics probe_terminal(cvc::ariadne::FtxuiBackend &backend,
 }
 
 // `ari info`: what this host gives a document, as `ari run` would set it up.
+// §5.13 video: / audio:: `app`'s player (cvcMedia's FFmpeg + SDL3, where this host has it) and
+// where it may play (--media-play; by default not over SSH, where the sound would play remotely).
+// Each app the host makes gets its own.
+void setup_media(cvc::app &app, const cvc::ariadne::HostOptions &o) {
+#ifdef ARI_MEDIA
+  cvc::media::register_ariadne_player(app);
+#endif
+#ifdef __EMSCRIPTEN__
+  cvc::ariadne::media::register_browser_player(app); // ari.html: the page's <video> / <audio>
+#endif
+  if (!o.media_play.empty()) {
+    cvc::ariadne::media::PlayPolicy policy = cvc::ariadne::media::PlayPolicy::Auto;
+    cvc::ariadne::media::parse_play_policy(o.media_play, policy);
+    cvc::ariadne::media::set_play_policy(app, policy);
+  }
+}
+
 int print_info(const cvc::ariadne::HostOptions &o) {
   namespace ari = cvc::ariadne;
   if (!o.doc.empty()) {
@@ -317,6 +329,7 @@ int print_info(const cvc::ariadne::HostOptions &o) {
   }
   const bool tvision = o.backend == "tvision";
   cvc::app app;
+  setup_media(app, o);
   ari::FtxuiBackend::Options look;
   look.image_color = image_mode(o.graphics);
   std::unique_ptr<ari::FtxuiBackend> backend = tvision ? std::make_unique<ari::TvisionBackend>(look)
@@ -389,6 +402,7 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
 
   cvc::app app;
   ari::apply_exec_policy(app, o); // --exec-policy, before anything builds the scheduler
+  setup_media(app, o);
   // A test checks what a document does, not how fast: a program's time backstop
   // (ariadne.limits.action_max_time, 0.1 s in a running app) is the run's own timeout here, so a
   // Debug build or a slow CI runner doesn't kill one that is merely slow. The step cap still stops
@@ -576,19 +590,6 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "ari: %s\n", o.error.c_str());
     return usage(2);
   }
-  // §5.13 video: / audio:: the player (cvcMedia's FFmpeg + SDL3, where this host has it) and where
-  // it may play (--media-play; by default not over SSH, where the sound would play remotely).
-#ifdef ARI_MEDIA
-  cvc::media::register_ariadne_player();
-#endif
-#ifdef __EMSCRIPTEN__
-  cvc::ariadne::media::register_browser_player(); // ari.html: the page's <video> / <audio>
-#endif
-  if (!o.media_play.empty()) {
-    cvc::ariadne::media::PlayPolicy policy = cvc::ariadne::media::PlayPolicy::Auto;
-    cvc::ariadne::media::parse_play_policy(o.media_play, policy);
-    cvc::ariadne::media::set_play_policy(policy);
-  }
   const std::string &cmd = o.command;
   if (cmd != "run" && cmd != "snapshot" && cmd != "check" && cmd != "info" && cmd != "test") {
     std::fprintf(stderr, "ari: unknown command '%s'\n", cmd.c_str());
@@ -655,6 +656,7 @@ int main(int argc, char **argv) {
 
   cvc::app app;
   ari::apply_exec_policy(app, o); // --exec-policy, before anything builds the scheduler
+  setup_media(app, o);
   // Declared before the AppRuntime, so it outlives it. A TvisionBackend is an FtxuiBackend in
   // hosted mode; its run() is its own (see below).
   ari::FtxuiBackend::Options look;
@@ -763,7 +765,7 @@ int main(int argc, char **argv) {
     run.notice = [&live] { return live.notice(); }; // the latest warning, for a few seconds
     // The screen is the document's: a URL the host cannot open in a browser (open-url, a sign-in)
     // is the document's to show, not printed over the frame.
-    cvc::net::set_url_notice([](const std::string &) {});
+    cvc::net::set_url_notice(app, [](const std::string &) {});
     ari::FtxuiBackend::RunExit how;
     if (tvision) {
       how = static_cast<ari::TvisionBackend &>(*backend).run(rt, run);

@@ -389,6 +389,36 @@ struct predicates {
 } // namespace
 #endif // CVC_WITH_SHEWCHUK
 
+int tet_complex::side_of_sphere(int c, const point &p) const {
+#ifdef CVC_WITH_SHEWCHUK
+  const cell &k = _cells[std::size_t(c)];
+  const int i3 = index(c, infinite_vertex());
+  if (i3 < 0)
+    return side_of_oriented_sphere(point_of(k.v[0]), point_of(k.v[1]), point_of(k.v[2]),
+                                   point_of(k.v[3]), p);
+  int i0, i1, i2; // CGAL's order for the finite facet
+  if (i3 % 2 == 1) {
+    i0 = (i3 + 1) & 3;
+    i1 = (i3 + 2) & 3;
+    i2 = (i3 + 3) & 3;
+  } else {
+    i0 = (i3 + 2) & 3;
+    i1 = (i3 + 1) & 3;
+    i2 = (i3 + 3) & 3;
+  }
+  const point &a = point_of(k.v[std::size_t(i0)]), &b = point_of(k.v[std::size_t(i1)]),
+              &d = point_of(k.v[std::size_t(i2)]);
+  const int o = orientation(a, b, d, p);
+  if (o != 0)
+    return o;
+  return coplanar_side_of_bounded_circle(a, b, d, p);
+#else
+  (void)c;
+  (void)p;
+  throw tet_complex_error("tet_complex: libcvc was built without Shewchuk's predicates");
+#endif
+}
+
 std::vector<std::string> tet_complex::validate(bool delaunay, std::size_t max_problems) const {
   std::vector<std::string> out;
   auto problem = [&](std::string s) {

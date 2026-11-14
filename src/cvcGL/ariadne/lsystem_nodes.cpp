@@ -1356,10 +1356,10 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
 
 } // namespace
 
-void register_lsystem_node_types() {
-  register_scene_node_type("forest_trees", realize_forest_trees);
-  register_scene_node_type("wave_sea", realize_wave_sea);
-  register_scene_node_type("cloud_sky", realize_cloud_sky);
+void register_lsystem_node_types(cvc::app &app) {
+  register_scene_node_type(app, "forest_trees", realize_forest_trees);
+  register_scene_node_type(app, "wave_sea", realize_wave_sea);
+  register_scene_node_type(app, "cloud_sky", realize_cloud_sky);
 }
 
 } // namespace ariadne

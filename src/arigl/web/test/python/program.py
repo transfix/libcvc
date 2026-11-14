@@ -6,7 +6,7 @@ the program returns, so the program reports from a frame hook."""
 import os
 import sys
 
-from pycvc_gl.ariadne import Host, current_host
+from pycvc.ari import Host, current_host
 
 host = Host()
 assert host.embedded and current_host() is host, "Host() adopts the scripting host"

@@ -13,7 +13,7 @@ import os
 import platform
 import sys
 
-from pycvc_gl.ariadne import Host, main_args
+from pycvc.ari import Host, main_args
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 

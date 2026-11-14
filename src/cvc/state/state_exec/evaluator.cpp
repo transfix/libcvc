@@ -104,7 +104,7 @@ value_t evaluator::evaluate_script(const std::string &script, environment_ptr en
                                    std::function<void(const value_t &)> on_complete) {
   auto exprs = parse_all(script);
   if (exprs.empty())
-    return nil_value;
+    return nil_value();
   if (exprs.size() == 1)
     return evaluate(exprs[0], env, timeout_sec, std::move(on_complete));
   std::vector<value_t> begin_exprs;
@@ -201,7 +201,7 @@ void evaluator::record_raise_point() noexcept {
     raise_trail_.clear();
     for (std::size_t i = n > kTracebackFrames ? n - kTracebackFrames : 0; i < n; ++i)
       raise_trail_.push_back(*trail_[i]);
-    raise_handled_ = handling_.empty() ? nil_value : handling_.back().first;
+    raise_handled_ = handling_.empty() ? nil_value() : handling_.back().first;
     raise_generation_ = generation_;
   } catch (...) { // out of memory: the traceback is what is left of it
   }
@@ -258,9 +258,9 @@ value_t evaluator::eval_form(const value_t &expr, const environment_ptr &env) {
   // Symbol
   if (auto *sym = std::get_if<symbol>(&expr.v)) {
     if (sym->name == "nil")
-      return nil_value;
+      return nil_value();
     if (sym->name == "t")
-      return true_value;
+      return true_value();
     if (auto *val = env->lookup(sym->name))
       return *val;
     throw dsl_error("NameError", "undefined symbol: " + sym->name);
@@ -341,7 +341,7 @@ value_t evaluator::eval_form(const value_t &expr, const environment_ptr &env) {
     auto &[params, body] = it->second;
     std::unordered_map<std::string, value_t> subst;
     for (size_t i = 0; i < params.size(); ++i)
-      subst[params[i].name] = (i < args.size()) ? args[i] : nil_value;
+      subst[params[i].name] = (i < args.size()) ? args[i] : nil_value();
     return eval_internal(substitute(body, subst), env);
   }
 
@@ -384,13 +384,13 @@ value_t evaluator::do_if(const std::vector<value_t> &args, const environment_ptr
     return eval_internal(args[1], env);
   if (args.size() > 2)
     return eval_internal(args[2], env);
-  return nil_value;
+  return nil_value();
 }
 
 value_t evaluator::do_begin(std::span<const value_t> args, const environment_ptr &env) {
   if (args.empty())
-    return nil_value;
-  value_t result = nil_value;
+    return nil_value();
+  value_t result = nil_value();
   for (auto &a : args) {
     check_interrupted();
     result = eval_internal(a, env);
@@ -403,12 +403,12 @@ value_t evaluator::do_begin(std::span<const value_t> args, const environment_ptr
 // truthy value, else #f. The builtins of the same names, which a program reaches by passing `and`
 // or `or` as a value, give the same answers from arguments already evaluated.
 value_t evaluator::do_and(std::span<const value_t> args, const environment_ptr &env) {
-  value_t result = true_value;
+  value_t result = true_value();
   for (auto &a : args) {
     check_interrupted();
     result = eval_internal(a, env);
     if (!result.is_truthy())
-      return false_value;
+      return false_value();
   }
   return result;
 }
@@ -420,7 +420,7 @@ value_t evaluator::do_or(std::span<const value_t> args, const environment_ptr &e
     if (v.is_truthy())
       return v;
   }
-  return false_value;
+  return false_value();
 }
 
 value_t evaluator::do_while(const std::vector<value_t> &args, const environment_ptr &env) {
@@ -431,7 +431,7 @@ value_t evaluator::do_while(const std::vector<value_t> &args, const environment_
     for (std::size_t i = 1; i < args.size(); ++i) // several body forms run in order
       eval_internal(args[i], env);
   }
-  return nil_value;
+  return nil_value();
 }
 
 value_t evaluator::do_for(const std::vector<value_t> &args, const environment_ptr &env) {
@@ -450,7 +450,7 @@ value_t evaluator::do_for(const std::vector<value_t> &args, const environment_pt
     for (std::size_t i = 2; i < args.size(); ++i) // several body forms run in order
       eval_internal(args[i], env);
   }
-  return nil_value;
+  return nil_value();
 }
 
 value_t evaluator::do_set(const std::vector<value_t> &args, const environment_ptr &env) {
@@ -512,7 +512,7 @@ value_t evaluator::do_return(const std::vector<value_t> &args, const environment
     throw dsl_error("TypeError",
                     "return: expected at most 1 argument, got " + std::to_string(args.size()));
   if (args.empty())
-    throw return_exception(nil_value);
+    throw return_exception(nil_value());
   throw return_exception(eval_internal(args[0], env));
 }
 
@@ -760,7 +760,7 @@ value_t evaluator::do_defclass(const std::vector<value_t> &args, const environme
   // Also store the cls_dict for inheritance lookup
   env->set(name + ".__cls_dict__", cls_dict_val);
 
-  return env->lookup(name) ? *env->lookup(name) : nil_value;
+  return env->lookup(name) ? *env->lookup(name) : nil_value();
 }
 
 value_t evaluator::do_defmacro(const std::vector<value_t> &args, const environment_ptr &env) {
@@ -859,10 +859,10 @@ value_t evaluator::do_try(const std::vector<value_t> &args, const environment_pt
         const auto handler = catch_handler(clause);
         result = do_begin(std::vector<value_t>(handler.begin(), handler.end()), scope);
         leaving = nullptr;
-        raised = nil_value;
+        raised = nil_value();
       } catch (const return_exception &) {
         leaving = std::current_exception();
-        raised = nil_value;
+        raised = nil_value();
       } catch (const std::exception &e) {
         std::optional<value_t> again = caught(e);
         if (!again)
@@ -922,7 +922,7 @@ value_t evaluator::apply_closure(const closure_ptr &cls, const std::vector<value
       local->set(cls->params[i].name, args[i]);
   }
   try {
-    value_t result = nil_value;
+    value_t result = nil_value();
     for (auto &b : cls->body) {
       check_interrupted();
       result = eval_internal(b, local);

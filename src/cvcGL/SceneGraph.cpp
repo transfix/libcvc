@@ -1162,6 +1162,7 @@ public:
   static StridedShadowBaker *New();
   vtkTypeMacro(StridedShadowBaker, vtkShadowMapBakerPass);
 
+  cvc::app *App = nullptr; // the scene's: whose props cast (GraphicsNode::propCastsShadow)
   int Interval = 1;
   // Set by SceneGraph::invalidateShadowBake(): bake on the next Render() however
   // the interval falls, then clear. The cadence counter is left alone.
@@ -1592,7 +1593,7 @@ protected:
     vtkCollectionSimpleIterator pit;
     props->InitTraversal(pit);
     while (vtkProp *p = props->GetNextProp(pit)) {
-      if (!p->GetVisibility() || !GraphicsNode::propCastsShadow(p))
+      if (!p->GetVisibility() || !GraphicsNode::propCastsShadow(*App, p))
         continue;
       if (p->GetMTime() > t || casterGeometryChanged(p, t))
         return true;
@@ -1642,7 +1643,7 @@ protected:
       vtkCollectionSimpleIterator pit;
       props->InitTraversal(pit);
       while (vtkProp *p = props->GetNextProp(pit))
-        if (p->GetVisibility() && GraphicsNode::propCastsShadow(p))
+        if (p->GetVisibility() && GraphicsNode::propCastsShadow(*App, p))
           m_bakedSet.add(p);
     }
   }
@@ -1880,6 +1881,7 @@ public:
   vtkTypeMacro(ShadowCasterFilterPass, vtkRenderPass);
 
   vtkSmartPointer<vtkRenderPass> Delegate; // VTK's camera -> lights -> opaque sequence
+  cvc::app *App = nullptr; // the scene's: whose props cast (GraphicsNode::propCastsShadow)
 
   void Render(const vtkRenderState *s) override {
     this->NumberOfRenderedProps = 0;
@@ -1892,7 +1894,7 @@ public:
     m_props.clear();
     vtkProp **all = s->GetPropArray();
     for (int i = 0; i < s->GetPropArrayCount(); ++i)
-      if (GraphicsNode::propCastsShadow(all[i]))
+      if (GraphicsNode::propCastsShadow(*App, all[i]))
         m_props.push_back(all[i]);
     vtkRenderState casters(s->GetRenderer());
     casters.SetPropArrayAndCount(m_props.data(), static_cast<int>(m_props.size()));
@@ -2074,6 +2076,7 @@ SceneGraph::buildShadowPasses(vtkSmartPointer<vtkShadowMapBakerPass> &bakerOut) 
   // those while drawing. They have to sit inside a camera pass, or the light's
   // view never gets set up.
   vtkSmartPointer<StridedShadowBaker> baker = vtkSmartPointer<StridedShadowBaker>::New();
+  baker->App = &m_ctx;
   baker->Interval = m_shadowInterval;
   baker->SetResolution(m_shadowResolution); // crisper than VTK's low 256 default
   std::copy(m_shadowFocus, m_shadowFocus + 3, baker->Focus);
@@ -2082,6 +2085,7 @@ SceneGraph::buildShadowPasses(vtkSmartPointer<vtkShadowMapBakerPass> &bakerOut) 
   vtkSmartPointer<ShadowCasterFilterPass> casterFilter =
       vtkSmartPointer<ShadowCasterFilterPass>::New();
   casterFilter->Delegate = baker->GetOpaqueSequence();
+  casterFilter->App = &m_ctx;
   baker->SetOpaqueSequence(casterFilter);
   // VTK's maps, read as depths and filtered (FilteredShadowMapPass): shadows at any scale.
   vtkSmartPointer<FilteredShadowMapPass> shadows = vtkSmartPointer<FilteredShadowMapPass>::New();

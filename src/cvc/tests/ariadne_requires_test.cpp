@@ -133,22 +133,27 @@ public:
 // A script language's tokens answer from the engine a scripting host registered (arix and ariglx
 // embed Python), not from HostFacts; elsewhere they fail, and the error says which hosts run it.
 TEST(AriadneRequires, ScriptLanguageTokensHoldOnlyWithItsEngine) {
-  const HostFacts f;
+  cvc::app app, other_app;
+  HostFacts f, other;
+  f.app = &app;
+  other.app = &other_app;
   EXPECT_TRUE(is_capability_token("python"));
   EXPECT_TRUE(is_capability_token("python.numpy"));
   EXPECT_FALSE(is_capability_token("python."));
   EXPECT_FALSE(capability_holds("python", f));
   EXPECT_FALSE(capability_holds("python.numpy", f));
-  EXPECT_EQ(capability_hint("python.numpy"),
+  EXPECT_EQ(capability_hint(app, "python.numpy"),
             "a document's python runs in the scripting hosts, arix, ariglx or arisrvx");
-  EXPECT_EQ(capability_hint("gl.scene"), "");
+  EXPECT_EQ(capability_hint(app, "gl.scene"), "");
 
-  register_script_engine(std::make_shared<NumpyOnlyEngine>());
+  register_script_engine(app, std::make_shared<NumpyOnlyEngine>());
   EXPECT_TRUE(capability_holds("python", f));
   EXPECT_TRUE(capability_holds("python.numpy", f));
   EXPECT_FALSE(capability_holds("python.scipy", f));
-  EXPECT_EQ(capability_hint("python"), ""); // this host runs it
-  unregister_script_engine("python");
+  EXPECT_EQ(capability_hint(app, "python"), ""); // this host runs it
+  EXPECT_FALSE(capability_holds("python", other)) << "another app's documents see the engine";
+  EXPECT_FALSE(capability_holds("python", HostFacts{})) << "facts with no app";
+  unregister_script_engine(app, "python");
   EXPECT_FALSE(capability_holds("python", f));
 }
 
@@ -248,7 +253,7 @@ TEST(AriadneRequires, ATerminalBackendWidgetIsAKnownType) {
   FtxuiBackend be;
   rt.set_backend(&be);
   EXPECT_FALSE(rt.has("req-test-term-widget"));
-  be.register_widget("req-test-term-widget",
+  be.register_widget(app, "req-test-term-widget",
                      [](const std::string &, const Widget &) { return CustomEdit{}; });
   EXPECT_TRUE(rt.has("req-test-term-widget"));
 }

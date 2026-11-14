@@ -13,8 +13,8 @@
 
 // Phase-2 PR7: the cvcGL stream SINK as a DECLARATIVE scene-node type. Opt-in, exactly
 // like the other register_scene_node_type consumers: a host/test/demo calls
-// register_stream_node_type() ONCE (before a scene is loaded/realized) to make the
-// "stream" node type available. A document then declares, e.g.
+// register_stream_node_type(app) ONCE per app (before a scene is loaded/realized) to make the
+// "stream" node type available on that app. A document then declares, e.g.
 //
 //   { "id": "screen", "type": "stream", "stream": "<token>", "width": 1.6, "height": 0.9 }
 //
@@ -54,13 +54,14 @@
 // (env, ictx only) does not provide.
 
 namespace cvc {
+class app;
 namespace gl {
 namespace ariadne {
 
-// Register the "stream" scene-node type. Idempotent (a no-op if already registered) and,
-// like register_scene_node_type itself, process-global and thread-safe; call it before
-// realize_scene() / document load so verify_scene_customs() sees the type.
-void register_stream_node_type();
+// Register the "stream" scene-node type on `app`. Idempotent (a no-op if already registered)
+// and, like register_scene_node_type itself, thread-safe; call it before realize_scene() /
+// document load so verify_scene_customs() sees the type.
+void register_stream_node_type(cvc::app &app);
 
 } // namespace ariadne
 } // namespace gl

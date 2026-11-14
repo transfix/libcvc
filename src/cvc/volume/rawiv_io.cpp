@@ -55,6 +55,7 @@ static inline void geterrstr(int errnum, char *strerrbuf, size_t buflen) {
 #endif
 }
 
+// Each reader and writer has a header of its own (a local rawivHeader).
 struct rawiv_header {
   float min[3];
   float max[3];
@@ -63,7 +64,7 @@ struct rawiv_header {
   unsigned int dim[3];
   float origin[3];
   float span[3];
-} rawivHeader;
+};
 
 namespace cvc {
 CVC_DEF_EXCEPTION(invalid_rawiv_header);

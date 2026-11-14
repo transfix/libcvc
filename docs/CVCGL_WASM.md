@@ -773,6 +773,9 @@ the page, then the Python ones:
 - `program.py`, a program in place of the document;
 - `python_error.ari`, a block that raises;
 - `vtk.ari`, a VTK pipeline through vtkmodules, when the zip has them;
+- `pillow.ari`, Pillow's codecs and FreeType, when the zip has PIL (cvcpkg's pillow-cp312 for
+  wasm in the deps prefix). With `--expect-pil` it runs, and fails, on a zip without PIL; CI
+  passes the flag when the deps prefix has `share/python-wasm/pillow-cp312.inittab`.
 - `threads.ari`, with `--isolated` only: four Python threads, and an async export on the app's
   pool.
 

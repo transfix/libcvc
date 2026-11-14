@@ -85,6 +85,12 @@ struct pool_task_post {
   }
 };
 
+// The numbers of an app's pool-task reply channels: unique on its scheduler.
+struct pool_task_channels {
+  static constexpr const char *app_slot = "cvc.core.pool_task_channels";
+  std::atomic<std::uint64_t> next{0};
+};
+
 } // namespace
 
 std::string launch_pool_task(app &a, se::async_scheduler &sched, const std::string &root,
@@ -93,7 +99,7 @@ std::string launch_pool_task(app &a, se::async_scheduler &sched, const std::stri
   // A UNIQUE reply channel per call so two in-flight tasks never collide on the single recv_path a
   // process has.  The '#' makes it policy-exempt + identity under resolve_channel_key, so it
   // survives channel scoping verbatim (the same trick the http/fetch launchers use).
-  static std::atomic<std::uint64_t> seq{0};
+  std::atomic<std::uint64_t> &seq = a.slot<pool_task_channels>().next;
   const std::string chan =
       chan_prefix + "#" + std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
   const std::string done = se::resolve_channel_key(root, chan);

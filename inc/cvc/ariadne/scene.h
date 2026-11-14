@@ -130,7 +130,8 @@ struct SceneHeightColorBand {
 //
 // With a `generator` the ground comes from a cvc::world terrain generator first (the layers add
 // on top): `fbm` (the analytic relief), `dem` (an elevation .npy at `file`, anchored at 0 and
-// stretched to `amp`), or one a host registered (cvc::world::register_terrain_generator).
+// stretched to `amp`), or one the host registered on its app
+// (cvc::world::register_terrain_generator).
 // source: { terrain: {...} } is the same source with the generator defaulting to fbm, the size to
 // 1200 and the resolution to one vertex per 5 m (at most 2049).
 struct SceneHeightfield {

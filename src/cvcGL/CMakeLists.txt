@@ -561,6 +561,16 @@ target_include_directories(cvcgl_ewave PRIVATE ocean)
 target_link_libraries(cvcgl_ewave PRIVATE cvcGL)
 add_test(NAME cvcgl_ewave COMMAND cvcgl_ewave)
 
+# Bodies make waves (OCEAN-AND-WEATHER-ROADMAP.md C2/C3, O9): the shared immersion code
+# (cvc/physics/immersion.h) as EWave's sources (WakeSource), the window's shift pass, a box
+# footprint's Kelvin wake read from the GPU, and a masked rock's wave shadow. SKIPs (rc 0)
+# without float render targets.
+add_executable(cvcgl_wake test/cvcgl_wake.cpp ocean/EWave.cpp ocean/WakeSource.cpp
+                          ocean/OceanButterfly.cpp)
+target_include_directories(cvcgl_wake PRIVATE ocean)
+target_link_libraries(cvcgl_wake PRIVATE cvcGL)
+add_test(NAME cvcgl_wake COMMAND cvcgl_wake)
+
 # GeometryNode::updateNormals — the in-place normal fast path the FFT ocean uses
 # to shade its CPU-deformed surface. Renders a lit quad re-normal'd toward vs away
 # from the light and checks the brightness responds, plus the no-op-on-mismatch guard.
@@ -843,6 +853,13 @@ add_executable(cvcgl_state_publisher test/cvcgl_state_publisher.cpp)
 target_link_libraries(cvcgl_state_publisher PRIVATE cvcGL)
 add_test(NAME cvcgl_state_publisher COMMAND cvcgl_state_publisher)
 
+# Several apps in one process never collide in cvcGL: scene node types, shader presets, mapper
+# settings, shadow marks, publisher flushes and UI fonts are each app's (alone, on threads at
+# once, in reverse order; a later app starts clean). Headless.
+add_executable(cvcgl_multi_app test/cvcgl_multi_app.cpp)
+target_link_libraries(cvcgl_multi_app PRIVATE cvcGL)
+add_test(NAME cvcgl_multi_app COMMAND cvcgl_multi_app)
+
 add_executable(cvcgl_nav_stats_publish test/cvcgl_nav_stats_publish.cpp)
 target_link_libraries(cvcgl_nav_stats_publish PRIVATE cvcGL)
 add_test(NAME cvcgl_nav_stats_publish COMMAND cvcgl_nav_stats_publish)
@@ -967,6 +984,12 @@ add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
 add_executable(cvcgl_imgui_group_click test/cvcgl_imgui_group_click.cpp)
 target_link_libraries(cvcgl_imgui_group_click PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_group_click COMMAND cvcgl_imgui_group_click)
+# A text: with runs: (§5.20): it wraps at its size:, a tap on a link runs on_link (not the card's
+# on_click around it), a tap on its plain text is the card's, a press that drags is nobody's, and
+# Tab then Enter activates the link. Clicked through ImGui's own input. No window, no GL.
+add_executable(cvcgl_imgui_rich_text test/cvcgl_imgui_rich_text.cpp)
+target_link_libraries(cvcgl_imgui_rich_text PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_rich_text COMMAND cvcgl_imgui_rich_text)
 # A picture with fullscreen: true (§5.13): a tap asks the host's handler for the window's
 # fullscreen and shows the picture alone, as wide as the view; Esc puts both back. No window, no GL.
 add_executable(cvcgl_imgui_fullscreen test/cvcgl_imgui_fullscreen.cpp)
@@ -998,6 +1021,11 @@ add_test(NAME cvcgl_imgui_media COMMAND cvcgl_imgui_media)
 add_executable(cvcgl_imgui_spinner test/cvcgl_imgui_spinner.cpp)
 target_link_libraries(cvcgl_imgui_spinner PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_spinner COMMAND cvcgl_imgui_spinner)
+# ImGuiBackend's chart: the canvas as the last item, a legend click hiding a series, the hover
+# crosshair, and a pick (a bare ImGui context, no GL).
+add_executable(cvcgl_imgui_chart test/cvcgl_imgui_chart.cpp)
+target_link_libraries(cvcgl_imgui_chart PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_chart COMMAND cvcgl_imgui_chart)
 # The overlay's fonts: DejaVu Sans Mono's symbols under the UI font, and Twemoji's colour emoji
 # where ImGui has 32-bit characters and FreeType (the cvcpkg imgui 1.92.9+cvc.4). No window, no GL.
 add_executable(cvcgl_imgui_fonts test/cvcgl_imgui_fonts.cpp)
@@ -1390,7 +1418,7 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_physics_scene_binding
   cvcgl_world_geometry_nodes cvcgl_ariadne_physics cvcgl_ariadne_data
   cvcgl_node_outlives_scene cvcgl_tree_version cvcgl_texture cvcgl_texture_zerocopy
-  cvcgl_stream_texture cvcgl_state_publisher cvcgl_nav_stats_publish
+  cvcgl_stream_texture cvcgl_state_publisher cvcgl_multi_app cvcgl_nav_stats_publish
   cvcgl_camera cvcgl_track_parity cvcgl_fps_hud cvcgl_stage_setters
   cvcgl_streaming_races cvcgl_sdl_input cvcgl_tet_surface
   cvcgl_webgl_state_shadow cvcgl_glsync

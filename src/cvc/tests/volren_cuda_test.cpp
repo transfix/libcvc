@@ -911,10 +911,10 @@ TEST_F(VolrenCudaTest, ResidentCacheSkipsTheUploadOnCameraOnlyChanges) {
   rc.add_volume(vol, vs);
   rc.set_backend(backend::cuda);
 
-  const std::uint64_t before_first = cvc::volren::raycast_cuda_cache_upload_bytes();
+  const std::uint64_t before_first = cvc::volren::raycast_cuda_cache_of(ctx).uploaded();
   rc.render();
   ASSERT_EQ(int(rc.backend_used()), int(backend::cuda));
-  const std::uint64_t after_first = cvc::volren::raycast_cuda_cache_upload_bytes();
+  const std::uint64_t after_first = cvc::volren::raycast_cuda_cache_of(ctx).uploaded();
   const std::size_t volume_bytes = std::size_t(kGrid) * kGrid * kGrid * sizeof(float);
   EXPECT_GE(after_first - before_first, volume_bytes) << "the first render did not upload";
 
@@ -923,20 +923,20 @@ TEST_F(VolrenCudaTest, ResidentCacheSkipsTheUploadOnCameraOnlyChanges) {
   moved.eye = {0.4, 0.3, 4.0};
   rc.view() = moved;
   rc.render();
-  EXPECT_EQ(cvc::volren::raycast_cuda_cache_upload_bytes(), after_first)
+  EXPECT_EQ(cvc::volren::raycast_cuda_cache_of(ctx).uploaded(), after_first)
       << "a camera-only change re-uploaded the volume";
 
   // (2) The VolRenNode rebuild: same voxel buffer, fresh registration.
   rc.clear_volumes();
   rc.add_volume(vol, vs);
   rc.render();
-  EXPECT_EQ(cvc::volren::raycast_cuda_cache_upload_bytes(), after_first)
+  EXPECT_EQ(cvc::volren::raycast_cuda_cache_of(ctx).uploaded(), after_first)
       << "re-registering an unchanged volume re-uploaded it";
 
   // (3) An announced in-place change must upload again.
   rc.invalidate_device_volume(0);
   rc.render();
-  EXPECT_GE(cvc::volren::raycast_cuda_cache_upload_bytes() - after_first, volume_bytes)
+  EXPECT_GE(cvc::volren::raycast_cuda_cache_of(ctx).uploaded() - after_first, volume_bytes)
       << "invalidate_device_volume() did not re-upload";
 }
 
@@ -955,22 +955,53 @@ TEST_F(VolrenCudaTest, CacheBudgetEvictsAndStaysCorrect) {
 
   const frame warm = rc.render();
   ASSERT_EQ(int(rc.backend_used()), int(backend::cuda));
-  EXPECT_GT(cvc::volren::raycast_cuda_cache_bytes(), std::size_t(0));
+  EXPECT_GT(cvc::volren::raycast_cuda_cache_of(ctx).resident(), std::size_t(0));
 
   // A budget too small for the scene must not break it: the render exceeds the
   // budget rather than freeing a block it is about to read.
-  const std::size_t saved = cvc::volren::raycast_cuda_cache_budget();
-  cvc::volren::raycast_cuda_set_cache_budget(1);
+  const std::size_t saved = cvc::volren::raycast_cuda_cache_of(ctx).budget();
+  cvc::volren::raycast_cuda_cache_of(ctx).set_budget(1);
   const frame squeezed = rc.render();
   EXPECT_EQ(int(rc.backend_used()), int(backend::cuda));
   EXPECT_EQ(framesDiffer(warm, squeezed), 0) << "eviction changed the image";
-  cvc::volren::raycast_cuda_set_cache_budget(saved);
+  cvc::volren::raycast_cuda_cache_of(ctx).set_budget(saved);
 
-  cvc::volren::raycast_cuda_clear_cache();
-  EXPECT_EQ(cvc::volren::raycast_cuda_cache_bytes(), std::size_t(0));
+  cvc::volren::raycast_cuda_cache_of(ctx).clear();
+  EXPECT_EQ(cvc::volren::raycast_cuda_cache_of(ctx).resident(), std::size_t(0));
   const frame reloaded = rc.render();
   EXPECT_EQ(framesDiffer(warm, reloaded), 0) << "a re-upload changed the image";
-  EXPECT_GT(cvc::volren::raycast_cuda_cache_bytes(), std::size_t(0));
+  EXPECT_GT(cvc::volren::raycast_cuda_cache_of(ctx).resident(), std::size_t(0));
+}
+
+// Each app has its own resident cache: a render in one app stages nothing in
+// another's, a budget set on one is not the other's, and a later app (made once
+// another is gone) starts empty.
+TEST_F(VolrenCudaTest, EachAppHasItsOwnResidentCache) {
+  volume_settings vs;
+  vs.shaded = false;
+  vs.unshaded = true;
+  vs.tf = rampTF(0.0, 1.0, 1.f, 1.f, 1.f, 1.f);
+  vs.tf_auto_domain = false;
+  for (int order = 0; order < 2; ++order) {
+    cvc::app a, b;
+    cvc::app &first = order == 0 ? a : b;
+    cvc::app &second = order == 0 ? b : a;
+    raycaster rc(first);
+    rc.view() = orthoCam();
+    rc.settings().steps = 64;
+    rc.add_volume(makeSphereVolume(first, kGrid), vs);
+    rc.set_backend(backend::cuda);
+    rc.render();
+    ASSERT_EQ(int(rc.backend_used()), int(backend::cuda));
+    EXPECT_GT(cvc::volren::raycast_cuda_cache_of(first).resident(), std::size_t(0));
+    EXPECT_EQ(cvc::volren::raycast_cuda_cache_of(second).resident(), std::size_t(0));
+    EXPECT_EQ(cvc::volren::raycast_cuda_cache_of(second).uploaded(), 0u);
+    cvc::volren::raycast_cuda_cache_of(second).set_budget(1);
+    EXPECT_NE(cvc::volren::raycast_cuda_cache_of(first).budget(), std::size_t(1));
+  }
+  cvc::app later;
+  EXPECT_EQ(cvc::volren::raycast_cuda_cache_of(later).resident(), std::size_t(0));
+  EXPECT_EQ(cvc::volren::raycast_cuda_cache_of(later).uploaded(), 0u);
 }
 
 // ---------------------------------------------------------------------------

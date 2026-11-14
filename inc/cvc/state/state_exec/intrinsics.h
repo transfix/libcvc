@@ -180,6 +180,10 @@ struct intrinsics_context {
   /// empty; an unchrooted context holds just the root. Copied to spawned children. Released leaf
   /// first (pin_vector): a context can outlive the document it is chrooted in.
   cvc::pin_vector root_pins;
+  /// The chain pins an intrinsic call of this context holds to its end (intrinsics.cpp), kept
+  /// between calls and popped back to where each call found them: empty between calls, so a call
+  /// allocates nothing once it has grown. Not copied to spawned children.
+  std::vector<cvc::state::state_ptr> pin_scratch;
   const channel_policy *channels = nullptr; // §12 channel enforcement (non-owning; host-installed)
   document_scope *document = nullptr; // Per-document resource owner (non-owning; host-installed)
 
