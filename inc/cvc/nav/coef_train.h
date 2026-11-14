@@ -54,6 +54,7 @@
 #include <cvc/nav/rollout_plant.h>    // rollout_plant (rollout_kind::jolt)
 #include <functional>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace cvc {
@@ -289,6 +290,27 @@ struct train_config {
   // speed.
   std::vector<float> coll_offsets;
   float coll_rr = 0.0f;
+  // Learning instruments (coef_trainer::train on the CPU; the CUDA trainer ignores them). Both
+  // paths empty (the defaults): nothing is written, and training is as without them, bit for bit.
+  //
+  // history_path: a JSON-lines file, rewritten by each train(). A header; one record per outer
+  // step (its windows' mean loss and the last window's, the learning rate, and the global gradient
+  // norm before the clip: mean and max over the step's Adam steps, and the share that clipped);
+  // one per checkpoint (step 0, every checkpoint_every steps -- 25 when 0 -- and after the last),
+  // with the fitness when train() was given one, whether it is the best so far, whether it rolled
+  // back, and per head (alpha, beta, gamma: each the output layer's row) its mean and spread (the
+  // standard deviation) over a probe batch of the scene's agents, and its ||dtheta||/||theta||
+  // since the last checkpoint and since the start, the trunk (the two hidden layers) alongside;
+  // then an end record (the selected step, the rollbacks). The probe is probe_agents starts and
+  // goals drawn once with probe_seed: it shows how the heads move and how much they vary with
+  // where an agent is, and selects nothing.
+  //
+  // checkpoint_prefix: each checkpoint's policy, as it was scored, saved as
+  // <prefix>.stepNNNNNN.cvcnav (coef_mlp::save).
+  std::string history_path;
+  std::string checkpoint_prefix;
+  int probe_agents = 256;
+  unsigned probe_seed = 0x5eedu;
 };
 
 // The trainable CoefMLP: its dense layers as flat params + Adam state. Distinct
@@ -363,6 +385,10 @@ public:
   // One Adam step (global-norm clip) from an externally-computed gradient — lets
   // the CUDA trainer reuse the host optimizer with device-computed gradients.
   void apply_grad(const std::vector<float> &grad) { adam_step(grad); }
+  // The last Adam step's global gradient norm before the clip, and its learning rate (0 before
+  // any step).
+  float last_grad_norm() const { return last_grad_norm_; }
+  float last_lr() const { return last_lr_; }
 
   // (alpha, beta, gamma) for a feature batch (frozen forward) — reach eval / debug.
   // feat[n*5] row-major -> out[n*3].
@@ -384,10 +410,14 @@ private:
   // Per-layer flat offsets into p_ (w then b), plus (rows, cols).
   int off_w_[3] = {0, 0, 0}, off_b_[3] = {0, 0, 0};
   int lrows_[3] = {0, 0, 0}, lcols_[3] = {0, 0, 0};
-  float bias_[3] = {1.0f, 3.0f, 4.0f}; // the CoefMLP basin (alpha, beta, gamma)
+  float bias_[3] = {1.0f, 3.0f, 4.0f};           // the CoefMLP basin (alpha, beta, gamma)
+  float last_grad_norm_ = 0.0f, last_lr_ = 0.0f; // last_grad_norm(), last_lr()
 
   void adam_step(const std::vector<float> &grad);
 };
+
+// "<prefix>.step000040.cvcnav": the name train_config::checkpoint_prefix gives a checkpoint.
+std::string coef_checkpoint_path(const std::string &prefix, int step);
 
 // The controller's vehicle the trainer's rollouts drive with: the scene's clearance (rr, d_hat),
 // top speed and step, and cfg's veh_* limits.
