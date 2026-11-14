@@ -6835,6 +6835,43 @@ long menu_at(const MockBackend &mb, const std::string &label) {
 
 } // namespace
 
+namespace {
+
+// Keeps the count function AppRuntime gives its adapter (a scene node's repeat: expression).
+struct CountSceneAdapter : SceneAdapter {
+  CountFn count;
+  void set_count_fn(CountFn fn) override { count = std::move(fn); }
+  void realize(const Scene &, const std::string &, std::vector<std::string> *) override {}
+  void sync_visibility(cvc::app &) override {}
+  void tick() override {}
+};
+
+} // namespace
+
+// §5.4 a scene node's repeat: (expr) is counted on the document's read lane, as a widget's
+// repeat: is: AppRuntime hands its adapter Runtime::eval_count, and takes it back when it goes.
+TEST(AriadneAppRuntime, SceneRepeatCountsOnTheReadLane) {
+  cvc::app app;
+  CountSceneAdapter scene;
+  {
+    AppRuntime art(app, "ui.docs.r", &scene);
+    ASSERT_TRUE(static_cast<bool>(scene.count));
+    cvc::state::instance(app)("ui.docs.r.pins").value(std::string("7"));
+    EXPECT_EQ(scene.count("(state-get \"pins\")"), 7); // a number string, from the prefix
+    EXPECT_EQ(scene.count("(* 2 3.9)"), 7);            // a double, truncated
+    EXPECT_EQ(scene.count("(- 0 5)"), 0);              // never negative
+    EXPECT_EQ(scene.count("(* 1000 1000)"), 4096);     // the widget cap
+    cvc::state::instance(app)("ui.docs.r.pins").value(std::string("2"));
+    EXPECT_EQ(scene.count("(state-get \"pins\")"), 2); // re-read once it changed
+    EXPECT_EQ(scene.count("(nope"), 0);                // broken: 0, said once
+    bool said = false;
+    for (const std::string &w : art.runtime().take_reactive_warnings())
+      said = said || w.find("(nope") != std::string::npos;
+    EXPECT_TRUE(said);
+  }
+  EXPECT_FALSE(static_cast<bool>(scene.count)); // the runtime went: nothing to call
+}
+
 // A host's menus (a gallery's Demos) go first in every document's menubar, and give a document
 // without one a menubar of their own; set_root gets them too.
 TEST(AriadneAppRuntime, HostMenusLeadEveryDocumentsMenubar) {
