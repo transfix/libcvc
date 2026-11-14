@@ -1259,6 +1259,11 @@ if(NOT EMSCRIPTEN)
                                           test/gl_upload_counter.cpp)
   target_link_libraries(cvcgl_streaming_overlays PRIVATE cvcGL)
   add_test(NAME cvcgl_streaming_overlays COMMAND cvcgl_streaming_overlays)
+  # type: ribbon / type: draped_link from a document (ribbon_nodes.h): appends that upload the
+  # new point alone, windows and links moved with no upload, value colours, pixels.
+  add_executable(cvcgl_ariadne_ribbons test/cvcgl_ariadne_ribbons.cpp test/gl_upload_counter.cpp)
+  target_link_libraries(cvcgl_ariadne_ribbons PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_ribbons COMMAND cvcgl_ariadne_ribbons)
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(cvcgl_streaming_races test/cvcgl_streaming_races.cpp)
     target_link_libraries(cvcgl_streaming_races PRIVATE cvcGL ${CMAKE_DL_LIBS})

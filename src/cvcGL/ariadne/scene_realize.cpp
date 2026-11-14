@@ -90,6 +90,7 @@ struct scene_extensions {
   static constexpr const char *app_slot = "cvc.gl.ariadne.scene-extensions";
   std::mutex m;
   std::map<std::string, NodeRealizer> node_types;
+  std::set<std::string> reads_data; // NodeTypeOptions::reads_data
   std::map<std::string, ShaderPreset> shader_presets;
 };
 NodeRealizer find_node_type(cvc::app &app, const std::string &type) {
@@ -103,6 +104,12 @@ ShaderPreset find_shader_preset(cvc::app &app, const std::string &name) {
   std::lock_guard<std::mutex> lock(x.m);
   const auto it = x.shader_presets.find(name);
   return it != x.shader_presets.end() ? it->second : ShaderPreset{};
+}
+// Whether `app`'s custom `type` reads its own source: { data } (NodeTypeOptions::reads_data).
+bool type_reads_data(cvc::app &app, const std::string &type) {
+  scene_extensions &x = app.slot<scene_extensions>();
+  std::lock_guard<std::mutex> lock(x.m);
+  return x.reads_data.count(type) != 0;
 }
 bool is_builtin_scene_type(const std::string &t) {
   return t == "geometry" || t == "volume" || t == "volren" || t == "volslice" || t == "group";
@@ -644,7 +651,7 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
                   const std::vector<cvc::ariadne::SceneAsset> &assets) {
   std::shared_ptr<GraphicsNode> node;
 
-  if (!n.source_data.empty()) {
+  if (!n.source_data.empty() && !type_reads_data(sg.appContext(), n.type)) {
     // source: { data: <name> } — an empty group now; sync_scene_data draws the dataset into it
     // once it is loaded, and again each time it changes.
     node = parent ? parent->createChild(n.id) : sg.addGraphics(n.id);
@@ -1582,11 +1589,20 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
 }
 
 void register_scene_node_type(cvc::app &app, const std::string &type, NodeRealizer realizer) {
+  register_scene_node_type(app, type, std::move(realizer), NodeTypeOptions());
+}
+
+void register_scene_node_type(cvc::app &app, const std::string &type, NodeRealizer realizer,
+                              const NodeTypeOptions &options) {
   if (!realizer || is_builtin_scene_type(type)) // built-ins own their dispatch
     return;
   scene_extensions &x = app.slot<scene_extensions>();
   std::lock_guard<std::mutex> lock(x.m);
   x.node_types[type] = std::move(realizer);
+  if (options.reads_data)
+    x.reads_data.insert(type);
+  else
+    x.reads_data.erase(type);
 }
 
 bool has_scene_node_type(cvc::app &app, const std::string &type) {

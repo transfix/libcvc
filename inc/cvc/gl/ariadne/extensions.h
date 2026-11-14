@@ -31,7 +31,8 @@
 //
 // Today it installs the default shader presets (terrain_bump / bark), the L-system scene node
 // types (forest_trees / …) and, on a CVC_ENABLE_LIBIGL build, the geometry-processing and
-// finite-element node types (mesh_lab / fe_lab, mesh_nodes.h), all on the app it is given: a
+// finite-element node types (mesh_lab / fe_lab, mesh_nodes.h), and the lines drawn from data
+// (ribbon / draped_link, ribbon_nodes.h), all on the app it is given: a
 // second app has none of them until it is set up too. ariadne_hello and AriRuntime (so pycvc
 // hosts) both call it.
 

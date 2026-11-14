@@ -301,6 +301,17 @@ using NodeRealizer = std::function<std::shared_ptr<GraphicsNode>(
 // Thread-safe; register before realize_scene.
 void register_scene_node_type(cvc::app &app, const std::string &type, NodeRealizer realizer);
 
+// How realize_scene hands a custom type its nodes.
+struct NodeTypeOptions {
+  // The realizer reads a `source: { data: <name>, item: <output> }` itself (node.props holds the
+  // source: as declared). Without it such a node is drawn as any data node is: an empty group the
+  // dataset's decoded objects are drawn into once it loads (SceneDataBinding), and the realizer is
+  // never called.
+  bool reads_data = false;
+};
+void register_scene_node_type(cvc::app &app, const std::string &type, NodeRealizer realizer,
+                              const NodeTypeOptions &options);
+
 // Whether `app` has a realizer for a custom scene node `type` (test/introspection).
 bool has_scene_node_type(cvc::app &app, const std::string &type);
 
