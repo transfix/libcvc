@@ -66,8 +66,7 @@ private:
   PyGILState_STATE state_;
 };
 
-// What the host lent (attach), for _arihost: one per process, like the interpreter. Read and
-// written with the GIL held.
+// What the host lent (attach), for _arihost. Read and written with the GIL held.
 struct Lent {
   std::string host; // the host's name, from the engine's config
   HostHandles handles;
@@ -75,9 +74,29 @@ struct Lent {
   bool loop_ran = false;
   int loop_status = 0;
 };
-Lent &lent() {
-  static Lent l;
-  return l;
+
+class PythonScriptEngine;
+
+} // namespace
+
+// Everything an Engine keeps while its interpreter runs, owned by the Engine: what the host lent,
+// the document side's modules, _arihost's definition and the ScriptEngine. CPython allows one
+// interpreter per process, but none of the engine's state lives outside its Engine: _arihost's
+// functions reach it through their module's state, the rest through the Engine, the Attachment
+// or the PythonScriptEngine that holds it.
+struct EngineState {
+  Lent lent;
+  PyObject *helper = nullptr;  // _ariadne_python (ariadne_python.py)
+  PyObject *arihost = nullptr; // _arihost
+  PyModuleDef arihost_def{};   // PyModule_Create writes its header, so it is not const
+  std::shared_ptr<PythonScriptEngine> script_engine; // while the interpreter is up
+};
+
+namespace {
+
+// The EngineState behind _arihost: what its functions' `self`, the module, holds.
+EngineState &state_of(PyObject *module) {
+  return **static_cast<EngineState **>(PyModule_GetState(module));
 }
 
 // What an app's Python is doing, kept on the app (app.slot): a python: block loading, and the
@@ -91,16 +110,13 @@ struct PythonActivity {
 };
 
 // The lent app's PythonActivity, or null with nothing attached. With the GIL.
-PythonActivity *activity() {
-  Lent &l = lent();
+PythonActivity *activity(Lent &l) {
   return l.attached && l.handles.app ? &l.handles.app->slot<PythonActivity>() : nullptr;
 }
 
-PyObject *g_helper = nullptr;  // _ariadne_python (ariadne_python.py)
-PyObject *g_arihost = nullptr; // _arihost, once imported
-
-// The exception set now, with its traceback, as text; cleared.
-std::string take_error() {
+// The exception set now, with its traceback, as text; cleared. `helper` (_ariadne_python) puts
+// the document's frames first when it is up.
+std::string take_error(PyObject *helper) {
   PyObject *type = nullptr, *value = nullptr, *tb = nullptr;
   PyErr_Fetch(&type, &value, &tb);
   if (!type)
@@ -109,8 +125,8 @@ std::string take_error() {
   if (value && tb)
     PyException_SetTraceback(value, tb);
   std::string text;
-  if (PyObject *d = g_helper && value ? PyObject_CallMethod(g_helper, "describe", "O", value)
-                                      : nullptr) { // the document's frames, not the engine's
+  if (PyObject *d = helper && value ? PyObject_CallMethod(helper, "describe", "O", value)
+                                    : nullptr) { // the document's frames, not the engine's
     if (const char *c = PyUnicode_AsUTF8(d))
       text = c;
     Py_DECREF(d);
@@ -230,10 +246,10 @@ void delete_app_capsule(PyObject *capsule) {
 // The live app, as pycvc.app_from_capsule takes it: a "cvc.app" capsule holding a
 // std::shared_ptr<cvc::app>*. Not an owner: the host owns its app, and takes it back (the
 // Attachment) before it goes.
-PyObject *arihost_app(PyObject *, PyObject *) {
-  if (!lent().attached)
+PyObject *arihost_app(PyObject *self, PyObject *) {
+  if (!state_of(self).lent.attached)
     return not_attached();
-  auto *held = new std::shared_ptr<cvc::app>(lent().handles.app, [](cvc::app *) {});
+  auto *held = new std::shared_ptr<cvc::app>(state_of(self).lent.handles.app, [](cvc::app *) {});
   PyObject *capsule = PyCapsule_New(held, "cvc.app", delete_app_capsule);
   if (!capsule)
     delete held;
@@ -241,17 +257,17 @@ PyObject *arihost_app(PyObject *, PyObject *) {
 }
 
 // The document's AppRuntime ("cvc.ariadne.AppRuntime"), for pycvc.ari_app_attach.
-PyObject *arihost_runtime(PyObject *, PyObject *) {
-  if (!lent().attached)
+PyObject *arihost_runtime(PyObject *self, PyObject *) {
+  if (!state_of(self).lent.attached)
     return not_attached();
-  return PyCapsule_New(lent().handles.runtime, "cvc.ariadne.AppRuntime", nullptr);
+  return PyCapsule_New(state_of(self).lent.handles.runtime, "cvc.ariadne.AppRuntime", nullptr);
 }
 
 // A GL host's window objects, as pycvc_gl's *_from_capsule take them, or None.
-PyObject *arihost_gl(PyObject *, PyObject *) {
-  if (!lent().attached)
+PyObject *arihost_gl(PyObject *self, PyObject *) {
+  if (!state_of(self).lent.attached)
     return not_attached();
-  const HostHandles &h = lent().handles;
+  const HostHandles &h = state_of(self).lent.handles;
   if (!h.ari_runtime || !h.view || !h.camera || !h.overlay)
     Py_RETURN_NONE;
   return Py_BuildValue("(NNNN)", PyCapsule_New(h.ari_runtime, "cvc.gl.ariadne.AriRuntime", nullptr),
@@ -260,30 +276,34 @@ PyObject *arihost_gl(PyObject *, PyObject *) {
                        PyCapsule_New(h.overlay, "cvc.gl.ImGuiOverlay", nullptr));
 }
 
-PyObject *arihost_attached(PyObject *, PyObject *) { return PyBool_FromLong(lent().attached); }
+PyObject *arihost_attached(PyObject *self, PyObject *) {
+  return PyBool_FromLong(state_of(self).lent.attached);
+}
 
 // Whether a document's python: block is loading in the lent app: code it calls is not the
 // program's (pycvc_gl.ariadne_mpl's plt.show() then neither blocks nor loads a document).
-PyObject *arihost_loading(PyObject *, PyObject *) {
-  const PythonActivity *a = activity();
+PyObject *arihost_loading(PyObject *self, PyObject *) {
+  const PythonActivity *a = activity(state_of(self).lent);
   return PyBool_FromLong(a && a->loading > 0);
 }
 
-PyObject *arihost_host(PyObject *, PyObject *) { return PyUnicode_FromString(lent().host.c_str()); }
+PyObject *arihost_host(PyObject *self, PyObject *) {
+  return PyUnicode_FromString(state_of(self).lent.host.c_str());
+}
 
 // "window", "offscreen", "terminal" or "headless"; None until a host attaches.
-PyObject *arihost_mode(PyObject *, PyObject *) {
-  if (!lent().attached)
+PyObject *arihost_mode(PyObject *self, PyObject *) {
+  if (!state_of(self).lent.attached)
     Py_RETURN_NONE;
-  return PyUnicode_FromString(lent().handles.mode.c_str());
+  return PyUnicode_FromString(state_of(self).lent.handles.mode.c_str());
 }
 
 // host.run(): the host's own frame loop, until the document closes; its exit status. Once only,
 // and only from the program: never while the loop runs (a plt.show() or host.run() from code the
 // document runs, whose frames would nest in the one that called it), during a python: block's
 // load, or from another thread than the host's.
-PyObject *arihost_run(PyObject *, PyObject *) {
-  Lent &l = lent();
+PyObject *arihost_run(PyObject *self, PyObject *) {
+  Lent &l = state_of(self).lent;
   if (!l.attached)
     return not_attached();
   if (!l.handles.run_loop) {
@@ -317,7 +337,7 @@ PyObject *arihost_run(PyObject *, PyObject *) {
   }
   PyEval_RestoreThread(saved);
   a.loop_running = false;
-  lent().loop_status = status;
+  state_of(self).lent.loop_status = status;
   if (!error.empty()) {
     PyErr_SetString(PyExc_RuntimeError, error.c_str());
     return nullptr;
@@ -328,8 +348,8 @@ PyObject *arihost_run(PyObject *, PyObject *) {
 // add_frame_hook(fn): fn() at the end of every frame the document's runtime runs, whichever loop
 // runs it (AppRuntime::add_frame_hook). An exception fn raises is printed and closes the document
 // with status 1, as an uncaught one ends a Python program.
-PyObject *arihost_add_frame_hook(PyObject *, PyObject *fn) {
-  if (!lent().attached)
+PyObject *arihost_add_frame_hook(PyObject *self, PyObject *fn) {
+  if (!state_of(self).lent.attached)
     return not_attached();
   if (!PyCallable_Check(fn)) {
     PyErr_SetString(PyExc_TypeError, "_arihost.add_frame_hook: expected a callable");
@@ -340,7 +360,7 @@ PyObject *arihost_add_frame_hook(PyObject *, PyObject *fn) {
     Gil gil;
     Py_DECREF(p);
   });
-  AppRuntime *rt = lent().handles.runtime;
+  AppRuntime *rt = state_of(self).lent.handles.runtime;
   rt->add_frame_hook([held, rt] {
     Gil gil;
     PyObject *r = PyObject_CallObject(held.get(), nullptr);
@@ -397,13 +417,13 @@ bool value_of_capsule(PyObject *o, se::value_t &out, const char *who) {
   return true;
 }
 
-ServerLink *server_link() {
-  if (!lent().attached || !lent().handles.server) {
+ServerLink *server_link(PyObject *self) {
+  if (!state_of(self).lent.attached || !state_of(self).lent.handles.server) {
     PyErr_SetString(PyExc_RuntimeError,
                     "_arihost: not a server host (arisrvx), or it has not lent its relay yet");
     return nullptr;
   }
-  return lent().handles.server;
+  return state_of(self).lent.handles.server;
 }
 
 // A tree as pycvc.ariadne hands it over: a str (a scalar's text), or (text, [(name, tree), ...])
@@ -450,12 +470,12 @@ bool tree_from_python(PyObject *o, ServerLink::Tree &out, int depth) {
 }
 
 // queue_set(path, text): the relay writes it on its next room step.
-PyObject *arihost_queue_set(PyObject *, PyObject *args) {
+PyObject *arihost_queue_set(PyObject *self, PyObject *args) {
   const char *path = nullptr, *text = nullptr;
   Py_ssize_t plen = 0, tlen = 0;
   if (!PyArg_ParseTuple(args, "s#s#", &path, &plen, &text, &tlen))
     return nullptr;
-  ServerLink *link = server_link();
+  ServerLink *link = server_link(self);
   if (!link)
     return nullptr;
   link->set(std::string(path, static_cast<std::size_t>(plen)),
@@ -464,12 +484,12 @@ PyObject *arihost_queue_set(PyObject *, PyObject *args) {
 }
 
 // queue_tree(path, tree): the relay replaces the subtree at path on its next room step.
-PyObject *arihost_queue_tree(PyObject *, PyObject *args) {
+PyObject *arihost_queue_tree(PyObject *self, PyObject *args) {
   const char *path = nullptr;
   PyObject *tree = nullptr;
   if (!PyArg_ParseTuple(args, "sO", &path, &tree))
     return nullptr;
-  ServerLink *link = server_link();
+  ServerLink *link = server_link(self);
   ServerLink::Tree t;
   if (!link || !tree_from_python(tree, t, 0))
     return nullptr;
@@ -479,11 +499,12 @@ PyObject *arihost_queue_tree(PyObject *, PyObject *args) {
 
 // get(path): the text at path in the relay's tree, or None. The relay writes the tree on its own
 // thread; the node is pinned for the read.
-PyObject *arihost_get(PyObject *, PyObject *args) {
+PyObject *arihost_get(PyObject *self, PyObject *args) {
   const char *path = nullptr;
-  if (!PyArg_ParseTuple(args, "s", &path) || !server_link())
+  if (!PyArg_ParseTuple(args, "s", &path) || !server_link(self))
     return nullptr;
-  const cvc::state::state_ptr node = lent().handles.app->root().findDescendantShared(path);
+  const cvc::state::state_ptr node =
+      state_of(self).lent.handles.app->root().findDescendantShared(path);
   if (!node)
     Py_RETURN_NONE;
   const std::string v = node->value();
@@ -491,12 +512,13 @@ PyObject *arihost_get(PyObject *, PyObject *args) {
 }
 
 // children(path): the names of the node's children, or None when there is no node.
-PyObject *arihost_children(PyObject *, PyObject *args) {
+PyObject *arihost_children(PyObject *self, PyObject *args) {
   const char *path = nullptr;
-  if (!PyArg_ParseTuple(args, "s", &path) || !server_link())
+  if (!PyArg_ParseTuple(args, "s", &path) || !server_link(self))
     return nullptr;
   cvc::pin_vector chain; // childNames() reads the node's own map; the chain keeps it reachable
-  const cvc::state::state_ptr node = lent().handles.app->root().findDescendantShared(path, &chain);
+  const cvc::state::state_ptr node =
+      state_of(self).lent.handles.app->root().findDescendantShared(path, &chain);
   if (!node)
     Py_RETURN_NONE;
   PyObject *list = PyList_New(0);
@@ -516,12 +538,12 @@ PyObject *arihost_children(PyObject *, PyObject *args) {
 
 // ready(ok, why): the program serves (its ASGI apps started), or its startup failed; the relay
 // listens only after it serves.
-PyObject *arihost_ready(PyObject *, PyObject *args) {
+PyObject *arihost_ready(PyObject *self, PyObject *args) {
   int ok = 0;
   const char *why = "";
   if (!PyArg_ParseTuple(args, "p|s", &ok, &why))
     return nullptr;
-  ServerLink *link = server_link();
+  ServerLink *link = server_link(self);
   if (!link)
     return nullptr;
   link->ready(ok != 0, why);
@@ -531,8 +553,8 @@ PyObject *arihost_ready(PyObject *, PyObject *args) {
 // next_event(): the relay's next event for the loop, waited for without the GIL, as (kind, id,
 // value): the value a capsule for pycvc.value_from_capsule, or None when the event has none (a
 // "shutdown", which so needs no pycvc). None once the link is closed. The waker thread's only call.
-PyObject *arihost_next_event(PyObject *, PyObject *) {
-  ServerLink *link = server_link();
+PyObject *arihost_next_event(PyObject *self, PyObject *) {
+  ServerLink *link = server_link(self);
   if (!link)
     return nullptr;
   ServerLink::Event event;
@@ -554,11 +576,11 @@ PyObject *arihost_next_event(PyObject *, PyObject *) {
 
 // set_converts(ok): whether pycvc is here to convert DSL values (pycvc.value_from_capsule); the
 // relay posts clients' calls only once it is.
-PyObject *arihost_set_converts(PyObject *, PyObject *args) {
+PyObject *arihost_set_converts(PyObject *self, PyObject *args) {
   int ok = 0;
   if (!PyArg_ParseTuple(args, "p", &ok))
     return nullptr;
-  ServerLink *link = server_link();
+  ServerLink *link = server_link(self);
   if (!link)
     return nullptr;
   link->set_converts(ok != 0);
@@ -567,11 +589,11 @@ PyObject *arihost_set_converts(PyObject *, PyObject *args) {
 
 // set_authenticates(ok): the program has an authenticate hook (host.authenticate), which the
 // relay asks about each connection instead of checking the room token.
-PyObject *arihost_set_authenticates(PyObject *, PyObject *args) {
+PyObject *arihost_set_authenticates(PyObject *self, PyObject *args) {
   int ok = 0;
   if (!PyArg_ParseTuple(args, "p", &ok))
     return nullptr;
-  ServerLink *link = server_link();
+  ServerLink *link = server_link(self);
   if (!link)
     return nullptr;
   link->set_authenticates(ok != 0);
@@ -579,11 +601,11 @@ PyObject *arihost_set_authenticates(PyObject *, PyObject *args) {
 }
 
 // disconnect(principal): the relay closes that principal's connections on its next step.
-PyObject *arihost_disconnect(PyObject *, PyObject *args) {
+PyObject *arihost_disconnect(PyObject *self, PyObject *args) {
   const char *principal = nullptr;
   if (!PyArg_ParseTuple(args, "s", &principal))
     return nullptr;
-  ServerLink *link = server_link();
+  ServerLink *link = server_link(self);
   if (!link)
     return nullptr;
   link->disconnect(principal);
@@ -592,11 +614,11 @@ PyObject *arihost_disconnect(PyObject *, PyObject *args) {
 
 // set_read_scopes(ok): the program has a read_scope hook (host.read_scope): each principal reads
 // only under its prefixes.
-PyObject *arihost_set_read_scopes(PyObject *, PyObject *args) {
+PyObject *arihost_set_read_scopes(PyObject *self, PyObject *args) {
   int ok = 0;
   if (!PyArg_ParseTuple(args, "p", &ok))
     return nullptr;
-  ServerLink *link = server_link();
+  ServerLink *link = server_link(self);
   if (!link)
     return nullptr;
   link->set_read_scopes(ok != 0);
@@ -605,7 +627,7 @@ PyObject *arihost_set_read_scopes(PyObject *, PyObject *args) {
 
 // set_scope(principal, prefixes): what the principal's connections read, a list of str; a change
 // re-scopes its connections on the relay's next step.
-PyObject *arihost_set_scope(PyObject *, PyObject *args) {
+PyObject *arihost_set_scope(PyObject *self, PyObject *args) {
   const char *principal = nullptr;
   PyObject *seq = nullptr;
   if (!PyArg_ParseTuple(args, "sO", &principal, &seq))
@@ -627,7 +649,7 @@ PyObject *arihost_set_scope(PyObject *, PyObject *args) {
     prefixes.emplace_back(s);
   }
   Py_DECREF(fast);
-  ServerLink *link = server_link();
+  ServerLink *link = server_link(self);
   if (!link)
     return nullptr;
   link->set_scope(principal, std::move(prefixes));
@@ -635,8 +657,8 @@ PyObject *arihost_set_scope(PyObject *, PyObject *args) {
 }
 
 // close_events(): next_event() returns None from now on: the waker thread ends.
-PyObject *arihost_close_events(PyObject *, PyObject *) {
-  ServerLink *link = server_link();
+PyObject *arihost_close_events(PyObject *self, PyObject *) {
+  ServerLink *link = server_link(self);
   if (!link)
     return nullptr;
   link->close();
@@ -648,12 +670,12 @@ PyObject *arihost_close_events(PyObject *, PyObject *) {
 //   reply(pid, call_id, value)                     its value (a pycvc.value_capsule)
 //   reply_error(pid, call_id, code, message, detail=None)
 //   progress(pid, call_id, fraction, message)
-PyObject *arihost_reply(PyObject *, PyObject *args) {
+PyObject *arihost_reply(PyObject *self, PyObject *args) {
   const char *pid = nullptr, *id = nullptr;
   PyObject *value = nullptr;
   if (!PyArg_ParseTuple(args, "ssO", &pid, &id, &value))
     return nullptr;
-  ServerLink *link = server_link();
+  ServerLink *link = server_link(self);
   if (!link)
     return nullptr;
   ServerLink::Reply r;
@@ -665,12 +687,12 @@ PyObject *arihost_reply(PyObject *, PyObject *args) {
   Py_RETURN_NONE;
 }
 
-PyObject *arihost_reply_error(PyObject *, PyObject *args) {
+PyObject *arihost_reply_error(PyObject *self, PyObject *args) {
   const char *pid = nullptr, *id = nullptr, *code = nullptr, *message = nullptr;
   PyObject *detail = Py_None;
   if (!PyArg_ParseTuple(args, "ssss|O", &pid, &id, &code, &message, &detail))
     return nullptr;
-  ServerLink *link = server_link();
+  ServerLink *link = server_link(self);
   if (!link)
     return nullptr;
   ServerLink::Reply r;
@@ -685,12 +707,12 @@ PyObject *arihost_reply_error(PyObject *, PyObject *args) {
   Py_RETURN_NONE;
 }
 
-PyObject *arihost_progress(PyObject *, PyObject *args) {
+PyObject *arihost_progress(PyObject *self, PyObject *args) {
   const char *pid = nullptr, *id = nullptr, *message = "";
   double fraction = 0;
   if (!PyArg_ParseTuple(args, "ssd|s", &pid, &id, &fraction, &message))
     return nullptr;
-  ServerLink *link = server_link();
+  ServerLink *link = server_link(self);
   if (!link)
     return nullptr;
   ServerLink::Reply r;
@@ -716,12 +738,12 @@ PyObject *answer_with(ServerLink *link, std::uint64_t id, bool ok, const se::val
   return PyBool_FromLong(waited);
 }
 
-PyObject *arihost_answer(PyObject *, PyObject *args) {
+PyObject *arihost_answer(PyObject *self, PyObject *args) {
   unsigned long long id = 0;
   PyObject *value = Py_None;
   if (!PyArg_ParseTuple(args, "K|O", &id, &value))
     return nullptr;
-  ServerLink *link = server_link();
+  ServerLink *link = server_link(self);
   if (!link)
     return nullptr;
   se::value_t v;
@@ -730,13 +752,13 @@ PyObject *arihost_answer(PyObject *, PyObject *args) {
   return answer_with(link, id, true, v, std::string());
 }
 
-PyObject *arihost_answer_error(PyObject *, PyObject *args) {
+PyObject *arihost_answer_error(PyObject *self, PyObject *args) {
   unsigned long long id = 0;
   const char *message = nullptr;
   Py_ssize_t len = 0;
   if (!PyArg_ParseTuple(args, "Ks#", &id, &message, &len))
     return nullptr;
-  ServerLink *link = server_link();
+  ServerLink *link = server_link(self);
   if (!link)
     return nullptr;
   return answer_with(link, id, false, se::value_t(),
@@ -744,7 +766,7 @@ PyObject *arihost_answer_error(PyObject *, PyObject *args) {
 }
 #endif // CVC_ARIADNE_PYTHON_SERVER
 
-PyMethodDef kArihostMethods[] = {
+const PyMethodDef kArihostMethods[] = {
     {"add_frame_hook", arihost_add_frame_hook, METH_O,
      "Call fn() at the end of every frame of the document's runtime."},
 #ifdef CVC_ARIADNE_PYTHON_SERVER
@@ -793,34 +815,45 @@ PyMethodDef kArihostMethods[] = {
     {"run", arihost_run, METH_NOARGS, "Run the host's frame loop until the document closes."},
     {nullptr, nullptr, 0, nullptr}};
 
-PyModuleDef kArihostModule = {
-    PyModuleDef_HEAD_INIT,
-    "_arihost",
-    "The scripting host this interpreter runs in (arix, ariglx, arisrvx): "
-    "what it lends Python. pycvc_gl.ariadne.Host() adopts it; in arisrvx, "
-    "pycvc.ariadne.Host().",
-    -1,
-    kArihostMethods,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr};
-
-PyObject *init_arihost() { return PyModule_Create(&kArihostModule); }
-
-// What a boot registers before Py_Initialize: _arihost, and in a host whose extensions are linked
-// in (ariglx-web: no dlopen in a browser) every one of them, from the registrar the build
-// generates (ariadne_python.cmake, cvc_ariadne_python_wasm_host). False with `error` set.
-bool register_builtins(std::string &error) {
-  if (PyImport_AppendInittab("_arihost", init_arihost) != 0) {
-    error = "could not register the _arihost module";
-    return false;
+// _arihost, made for `st` and put in sys.modules, so `import _arihost` finds it: a new reference,
+// or nullptr with a Python error set. With the GIL, once the interpreter is up. Not an inittab
+// entry: an inittab's init function has nothing to reach its engine through, while a module's
+// functions reach their EngineState through the module (state_of).
+PyObject *install_arihost(EngineState &st) {
+  st.arihost_def =
+      PyModuleDef{PyModuleDef_HEAD_INIT,
+                  "_arihost",
+                  "The scripting host this interpreter runs in (arix, ariglx, arisrvx): "
+                  "what it lends Python. pycvc_gl.ariadne.Host() adopts it; in arisrvx, "
+                  "pycvc.ariadne.Host().",
+                  static_cast<Py_ssize_t>(sizeof(EngineState *)), // the module's state: &st
+                  const_cast<PyMethodDef *>(kArihostMethods),     // CPython only reads it
+                  nullptr,
+                  nullptr,
+                  nullptr,
+                  nullptr};
+  PyObject *m = PyModule_Create(&st.arihost_def);
+  if (!m)
+    return nullptr;
+  *static_cast<EngineState **>(PyModule_GetState(m)) = &st;
+  if (PyDict_SetItemString(PyImport_GetModuleDict(), "_arihost", m) != 0) {
+    Py_DECREF(m);
+    return nullptr;
   }
+  return m;
+}
+
+// What a boot registers before Py_Initialize: in a host whose extensions are linked in
+// (ariglx-web: no dlopen in a browser) every one of them, from the registrar the build generates
+// (ariadne_python.cmake, cvc_ariadne_python_wasm_host). False with `error` set.
+bool register_builtins(std::string &error) {
 #ifdef CVC_ARIADNE_PYTHON_BUILTINS
   if (cvc_ariadne_python_register_builtins() != 0) {
     error = "could not register the Python extensions linked into this host";
     return false;
   }
+#else
+  (void)error;
 #endif
   return true;
 }
@@ -888,13 +921,19 @@ bool configure(PyConfig &cfg, const EngineConfig &config, std::string &error) {
 // a document's python: block at its load, and the `python.<module>` tokens.
 class PythonScriptEngine : public ScriptEngine {
 public:
+  explicit PythonScriptEngine(EngineState &st) : st_(&st) {}
+
+  // The Engine is going: an app that still holds this engine finds no module and loads nothing.
+  // With the GIL.
+  void detach() { st_ = nullptr; }
+
   std::string language() const override { return "python"; }
 
   bool has_module(const std::string &module) const override {
     Gil gil;
-    if (!g_helper)
+    if (!st_ || !st_->helper)
       return false;
-    PyObject *r = PyObject_CallMethod(g_helper, "has_module", "s", module.c_str());
+    PyObject *r = PyObject_CallMethod(st_->helper, "has_module", "s", module.c_str());
     const bool has = r && PyObject_IsTrue(r) == 1;
     Py_XDECREF(r);
     PyErr_Clear();
@@ -906,18 +945,21 @@ public:
   void load_block(const ScriptBlock &block, ScriptLane &lane,
                   std::vector<std::string> &warnings) override {
     Gil gil;
+    if (!st_ || !st_->helper)
+      throw std::runtime_error("python: the engine is gone");
+    PyObject *helper = st_->helper;
     PythonActivity &activity = lane.app().slot<PythonActivity>(); // _arihost.loading() says so
     ++activity.loading;
     PyObject *py_block = to_python(block.content);
-    PyObject *reg = py_block ? PyObject_CallMethod(g_helper, "pycvc_register", nullptr) : nullptr;
-    PyObject *result = reg ? PyObject_CallMethod(g_helper, "load_document", "OsO", py_block,
+    PyObject *reg = py_block ? PyObject_CallMethod(helper, "pycvc_register", nullptr) : nullptr;
+    PyObject *result = reg ? PyObject_CallMethod(helper, "load_document", "OsO", py_block,
                                                  block.document.c_str(), reg)
                            : nullptr;
     --activity.loading;
     Py_XDECREF(reg);
     Py_XDECREF(py_block);
     if (!result)
-      throw std::runtime_error("python: " + take_error());
+      throw std::runtime_error("python: " + take_error(helper));
     if (PyList_Check(result))
       for (Py_ssize_t i = 0; i < PyList_Size(result); ++i)
         if (const char *w = PyUnicode_AsUTF8(PyList_GetItem(result, i)))
@@ -925,13 +967,10 @@ public:
     PyErr_Clear();
     Py_DECREF(result);
   }
-};
 
-// The engine, registered while the interpreter is up.
-std::shared_ptr<PythonScriptEngine> &script_engine() {
-  static std::shared_ptr<PythonScriptEngine> e;
-  return e;
-}
+private:
+  EngineState *st_; // its Engine's, until detach()
+};
 
 #ifdef CVC_ARIADNE_PYTHON_SERVER
 // A document value (the loader's) as a DSL one: a scalar is its text, as the client engine's
@@ -1106,19 +1145,19 @@ AppRuntime::LoadHook server_document_hook(ServerLink *link, AppRuntime *rt, cvc:
 // `from pycvc.ariadne import Host` finds this host's own, whatever pycvc is installed beside it.
 // Its export is _arihost's too, so a server document's own modules (from _arihost import export)
 // export as the program does. False with `error` set.
-bool boot_server_module(std::string &error) {
+bool boot_server_module(EngineState &st, std::string &error) {
   PyObject *code =
       Py_CompileString(kAriadneServerSource, "pycvc/ariadne.py (built in)", Py_file_input);
   PyObject *mod = code ? PyImport_ExecCodeModule("pycvc.ariadne", code) : nullptr;
   Py_XDECREF(code);
   PyObject *r = mod ? PyObject_CallMethod(mod, "_install_parent", nullptr) : nullptr;
   PyObject *exp = r ? PyObject_GetAttrString(mod, "export") : nullptr;
-  if (!exp || PyObject_SetAttrString(g_arihost, "export", exp) != 0)
+  if (!exp || PyObject_SetAttrString(st.arihost, "export", exp) != 0)
     Py_CLEAR(r);
   Py_XDECREF(exp);
   Py_XDECREF(mod);
   if (!r) {
-    error = "pycvc.ariadne did not load: " + take_error();
+    error = "pycvc.ariadne did not load: " + take_error(st.helper);
     return false;
   }
   Py_DECREF(r);
@@ -1130,33 +1169,35 @@ bool boot_server_module(std::string &error) {
 
 // ── Attachment ──────────────────────────────────────────────────────────────────────────────────
 
-Attachment::Attachment(Attachment &&other) noexcept : live_(std::exchange(other.live_, false)) {}
+Attachment::Attachment(Attachment &&other) noexcept
+    : state_(std::exchange(other.state_, nullptr)) {}
 
 Attachment &Attachment::operator=(Attachment &&other) noexcept {
   if (this != &other) {
     Attachment old(std::move(*this)); // gives back what this one lent
-    live_ = std::exchange(other.live_, false);
+    state_ = std::exchange(other.state_, nullptr);
   }
   return *this;
 }
 
 Attachment::~Attachment() {
-  if (!live_ || !Py_IsInitialized())
+  if (!state_ || !Py_IsInitialized())
     return;
   Gil gil;
-  Lent &l = lent();
+  Lent &l = state_->lent;
   l.handles = HostHandles{};
   l.attached = false;
 }
 
 // ── Engine ──────────────────────────────────────────────────────────────────────────────────────
 
-Engine::Engine(EngineConfig config) : config_(std::move(config)) {
+Engine::Engine(EngineConfig config)
+    : config_(std::move(config)), state_(std::make_unique<EngineState>()) {
   if (Py_IsInitialized()) {
     error_ = "Python is already running in this process (one engine per process)";
     return;
   }
-  lent().host = config_.host;
+  state_->lent.host = config_.host;
   if (!register_builtins(error_))
     return;
   PyConfig cfg;
@@ -1166,29 +1207,34 @@ Engine::Engine(EngineConfig config) : config_(std::move(config)) {
     PyConfig_Clear(&cfg);
     return;
   }
-  const PyStatus st = Py_InitializeFromConfig(&cfg);
+  const PyStatus status = Py_InitializeFromConfig(&cfg);
   PyConfig_Clear(&cfg);
-  if (PyStatus_Exception(st)) {
-    error_ = std::string("Python failed to start: ") + (st.err_msg ? st.err_msg : "unknown");
+  if (PyStatus_Exception(status)) {
+    error_ =
+        std::string("Python failed to start: ") + (status.err_msg ? status.err_msg : "unknown");
     return;
   }
 
-  // The document side, compiled in: ariadne_python.py as _ariadne_python. _arihost carries its
-  // export decorator, for a document's own modules (from _arihost import export).
-  PyObject *code = Py_CompileString(kAriadnePythonSource, "ariadne_python.py", Py_file_input);
-  g_helper = code ? PyImport_ExecCodeModule("_ariadne_python", code) : nullptr;
+  // _arihost, then the document side, compiled in: ariadne_python.py as _ariadne_python.
+  // _arihost carries its export decorator, for a document's own modules (from _arihost import
+  // export).
+  EngineState &st = *state_;
+  st.arihost = install_arihost(st);
+  PyObject *code = st.arihost
+                       ? Py_CompileString(kAriadnePythonSource, "ariadne_python.py", Py_file_input)
+                       : nullptr;
+  st.helper = code ? PyImport_ExecCodeModule("_ariadne_python", code) : nullptr;
   Py_XDECREF(code);
-  g_arihost = g_helper ? PyImport_ImportModule("_arihost") : nullptr;
-  PyObject *exp = g_arihost ? PyObject_GetAttrString(g_helper, "export") : nullptr;
-  if (!exp || PyObject_SetAttrString(g_arihost, "export", exp) != 0) {
-    error_ = "the document side did not load: " + take_error();
+  PyObject *exp = st.helper ? PyObject_GetAttrString(st.helper, "export") : nullptr;
+  if (!exp || PyObject_SetAttrString(st.arihost, "export", exp) != 0) {
+    error_ = "the document side did not load: " + take_error(st.helper);
     Py_XDECREF(exp);
     mainState_ = PyEval_SaveThread();
     return;
   }
   Py_DECREF(exp);
 #ifdef CVC_ARIADNE_PYTHON_SERVER
-  if (config_.server && !boot_server_module(error_)) {
+  if (config_.server && !boot_server_module(st, error_)) {
     mainState_ = PyEval_SaveThread();
     return;
   }
@@ -1196,27 +1242,31 @@ Engine::Engine(EngineConfig config) : config_(std::move(config)) {
 
   // `python` and `python.<module>` hold on the apps of the runtimes it is attached to
   // (use_script_engine registers it there), and their documents' python: blocks are kept.
-  script_engine() = std::make_shared<PythonScriptEngine>();
+  st.script_engine = std::make_shared<PythonScriptEngine>(st);
 
   mainState_ = PyEval_SaveThread(); // park the GIL: the host's frames run without it
   ok_ = true;
 }
 
 void Engine::register_on(cvc::app &app) {
-  if (ok_ && script_engine())
-    register_script_engine(app, script_engine());
+  if (ok_ && state_->script_engine)
+    register_script_engine(app, state_->script_engine);
 }
 
 Engine::~Engine() {
-  script_engine().reset();
   if (!mainState_)
     return; // never started
   PyEval_RestoreThread(static_cast<PyThreadState *>(mainState_));
-  Py_CLEAR(g_arihost);
-  Py_CLEAR(g_helper);
-  lent().handles = HostHandles{};
-  lent().attached = false;
-  Py_FinalizeEx();
+  EngineState &st = *state_;
+  if (st.script_engine) {
+    st.script_engine->detach(); // an app may still hold it: it finds no engine
+    st.script_engine.reset();
+  }
+  Py_CLEAR(st.arihost);
+  Py_CLEAR(st.helper);
+  st.lent.handles = HostHandles{};
+  st.lent.attached = false;
+  Py_FinalizeEx(); // frees _arihost, whose definition st keeps until then
 }
 
 std::string Engine::version() const {
@@ -1232,7 +1282,7 @@ Attachment Engine::attach(const HostHandles &handles) {
   cvc::state_exec::detail::note_threaded_host(*handles.app);
   {
     Gil gil;
-    Lent &l = lent();
+    Lent &l = state_->lent;
     l.handles = handles;
     l.attached = true;
     l.loop_ran = false;
@@ -1247,7 +1297,7 @@ Attachment Engine::attach(const HostHandles &handles) {
     if (handles.runtime)
       handles.runtime->add_load_hook(
           server_document_hook(handles.server, handles.runtime, handles.app));
-    return Attachment(true);
+    return Attachment(state_.get());
   }
 #endif
   // A Python function may take its time: the caps pycvc_gl.ariadne.Host sets (DEFAULT_LIMITS),
@@ -1257,8 +1307,8 @@ Attachment Engine::attach(const HostHandles &handles) {
     root("ariadne.limits.action_max_time").value("30");
   if (!root.findDescendant("ariadne.limits.action_max_steps"))
     root("ariadne.limits.action_max_steps").value("0");
-  handles.runtime->use_script_engine(script_engine());
-  return Attachment(true);
+  handles.runtime->use_script_engine(state_->script_engine);
+  return Attachment(state_.get());
 }
 
 int Engine::run_script(const std::string &path, const std::vector<std::string> &args) {
@@ -1299,16 +1349,16 @@ int Engine::run_script(const std::string &path, const std::vector<std::string> &
   return exit_status_from_error();
 }
 
-bool Engine::loop_ran() const { return lent().loop_ran; }
-int Engine::loop_status() const { return lent().loop_status; }
+bool Engine::loop_ran() const { return state_->lent.loop_ran; }
+int Engine::loop_status() const { return state_->lent.loop_status; }
 
 int Engine::run_loop(const std::function<int()> &loop) {
   PythonActivity *a = nullptr;
   if (ok_) {
     Gil gil;
-    if ((a = activity()) != nullptr) {
+    if ((a = activity(state_->lent)) != nullptr) {
       a->loop_running = true;
-      lent().loop_ran = true; // and a later _arihost.run() finds it has run
+      state_->lent.loop_ran = true; // and a later _arihost.run() finds it has run
     }
   }
   struct Running { // the loop's end, however it ends
@@ -1385,7 +1435,10 @@ int Engine::serve(const std::string &path, const std::vector<std::string> &args,
 }
 
 int Engine::python_main(const EngineConfig &config, const std::vector<std::string> &args) {
-  lent().host = config.host;
+  // _arihost here answers that nothing is attached. Py_RunMain finalizes the interpreter, and
+  // with it the module, before this returns, so `st` outlives both.
+  EngineState st;
+  st.lent.host = config.host;
   std::string error;
   if (!register_builtins(error)) {
     std::fprintf(stderr, "%s: %s\n", config.host.c_str(), error.c_str());
@@ -1398,19 +1451,25 @@ int Engine::python_main(const EngineConfig &config, const std::vector<std::strin
   std::vector<char *> raw;
   for (std::string &a : argv)
     raw.push_back(a.data());
-  PyStatus st = PyConfig_SetBytesArgv(&cfg, static_cast<Py_ssize_t>(raw.size()), raw.data());
-  if (!PyStatus_Exception(st) && configure(cfg, config, error))
-    st = Py_InitializeFromConfig(&cfg);
-  else if (!PyStatus_Exception(st))
-    st = PyStatus_Error(error.c_str());
+  PyStatus status = PyConfig_SetBytesArgv(&cfg, static_cast<Py_ssize_t>(raw.size()), raw.data());
+  if (!PyStatus_Exception(status) && configure(cfg, config, error))
+    status = Py_InitializeFromConfig(&cfg);
+  else if (!PyStatus_Exception(status))
+    status = PyStatus_Error(error.c_str());
   PyConfig_Clear(&cfg);
-  if (PyStatus_Exception(st)) {
-    if (PyStatus_IsExit(st))
-      return st.exitcode;
+  if (PyStatus_Exception(status)) {
+    if (PyStatus_IsExit(status))
+      return status.exitcode;
     std::fprintf(stderr, "%s: Python failed to start: %s\n", config.host.c_str(),
-                 st.err_msg ? st.err_msg : "unknown");
+                 status.err_msg ? status.err_msg : "unknown");
     return 1;
   }
+  PyObject *arihost = install_arihost(st);
+  if (!arihost) {
+    std::fprintf(stderr, "%s: could not make the _arihost module\n", config.host.c_str());
+    PyErr_Clear();
+  }
+  Py_XDECREF(arihost); // sys.modules holds it
   return Py_RunMain();
 }
 

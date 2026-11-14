@@ -1735,13 +1735,14 @@ jobs:
       # ── the writable-data scan (VOLROVER-LIBRARY-PORTS-ROADMAP.md 1.3, tools/singleton_scan) ──
       # No singletons in libcvc: every writable data symbol (.data, .bss, thread-locals, function
       # statics and their guards) in the objects of libcvc (with its libigl and Jolt pieces and
-      # the vendored code built into it), cvcGL, cvcMedia and the CLI must be on
+      # the vendored code built into it), cvcGL, cvcMedia, the CLI, the ari and arigl hosts and
+      # the relay's load bench must be on
       # tools/singleton_scan/allowlist.txt, and every line there must still be in the build, so
       # the list only shrinks as P0a moves state onto the app. One lane scans them, the shipped
       # configuration (gRPC, WebSocket and CUDA on), so the list is exact; pycvc-linux scans
       # pycvc's objects. It runs even when a test failed, and nothing after it depends on it.
       # The allowlist this build needs is uploaded either way.
-      - name: Writable-data scan (libcvc, cvcGL, cvcMedia, the CLI)
+      - name: Writable-data scan (libcvc, cvcGL, cvcMedia, the CLI and hosts)
         id: scan
         if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.name == 'libcvc-release-grpc' }}
         shell: bash
@@ -1751,7 +1752,7 @@ jobs:
           out="$RUNNER_TEMP/singleton-scan"
           rc=0
           env -u LD_LIBRARY_PATH python3 tools/singleton_scan/scan.py --build-dir build \
-            --targets cvc,cvc_igl,cvc_physics_jolt,cvcGL,cvcMedia,cvc-cli \
+            --targets cvc,cvc_igl,cvc_physics_jolt,cvcGL,cvcMedia,cvc-cli,ari,arigl,arisrv_aoi_bench \
             --emit "$out/allowlist.txt" --report "$out/summary.md" || rc=$?
           cat "$out/summary.md" >> "$GITHUB_STEP_SUMMARY" || true
           exit "$rc"
@@ -2001,8 +2002,9 @@ jobs:
                tolower($0) ~ /^ *(\[skip\]|skip[: ])/ { print t ": " $0; n++ }
                END { if (!n) print "no skips" }' "$log"
 
-      # The writable-data scan of pycvc's own objects (the SWIG wrappers and pycvc's C++); see
-      # package-linux's step for the rest of libcvc and what the scan is.
+      # The writable-data scan of pycvc's own objects (the SWIG wrappers and pycvc's C++) and of the
+      # scripting hosts with their embedded Python (arix, ariglx); see package-linux's step for the
+      # rest of libcvc and what the scan is.
       - name: Writable-data scan (pycvc)
         id: scan
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
@@ -2012,7 +2014,8 @@ jobs:
           out="$RUNNER_TEMP/singleton-scan"
           rc=0
           env -u LD_LIBRARY_PATH python3 tools/singleton_scan/scan.py --build-dir build \
-            --targets pycvc,pycvc_gl --emit "$out/allowlist.txt" --report "$out/summary.md" || rc=$?
+            --targets pycvc,pycvc_gl,arix,ariglx --emit "$out/allowlist.txt" \
+            --report "$out/summary.md" || rc=$?
           cat "$out/summary.md" >> "$GITHUB_STEP_SUMMARY" || true
           exit "$rc"
 

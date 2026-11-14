@@ -90,14 +90,13 @@ namespace {
 
 constexpr const char *kRoom = "standup";
 constexpr const char *kRelayId = "server";
-double g_room_step_s = 1.0 / 60.0;           // arisrv's room step (0.05 s with --poses tree)
 constexpr std::uint64_t kTreePoseSteps = 60; // with the pose stream, the tree's poses at 1 Hz
-double g_frame_s = 1.0 / 30.0; // a client frame (--client-hz; 30: arigl's publisher rate)
-constexpr std::size_t kFrameOverhead = 48;  // an estimate of a state frame's non-path bytes
+constexpr std::size_t kFrameOverhead = 48;   // an estimate of a state frame's non-path bytes
 
+// Steady-clock seconds. Only differences and stamps compared with each other are used, so the
+// clock's own epoch serves and nothing needs remembering.
 double now_s() {
-  static const auto epoch = std::chrono::steady_clock::now();
-  return std::chrono::duration<double>(std::chrono::steady_clock::now() - epoch).count();
+  return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 double xy_distance(const cvc::physics::vec3 &a, const cvc::physics::vec3 &b) {
@@ -121,15 +120,11 @@ bool kind_built(link_kind k) {
   return false;
 }
 
-const std::string &participants_prefix() {
-  static const std::string p = ra::room_participant_path(kRoom, "");
-  return p;
-}
-
 // The participant (SUBJECT) and the family under it ("pose", "intent", ...) of a room leaf;
-// false for a path outside the room's participants.
-bool split_participant_path(const std::string &path, std::string &subject, std::string &family) {
-  const std::string &p = participants_prefix();
+// false for a path outside the room's participants, whose prefix is P
+// (ra::room_participant_path(kRoom, "")).
+bool split_participant_path(const std::string &p, const std::string &path, std::string &subject,
+                            std::string &family) {
   if (path.compare(0, p.size(), p) != 0)
     return false;
   const std::size_t a = p.size();
@@ -178,11 +173,6 @@ private:
   mutable std::mutex _mu;
   std::map<std::uint64_t, double> _at;
 };
-
-tick_clock &ticks() {
-  static tick_clock c;
-  return c;
-}
 
 // p50 / p95 / p99 / max of samples, in their own unit.
 struct spread {
@@ -277,7 +267,8 @@ std::size_t pose_snapshot_bytes(const cvc::pose_snapshot &s) {
 
 class client_tap {
 public:
-  explicit client_tap(std::string self) : _self(std::move(self)) {}
+  // TICKS: the relay's, which the arrival and age probes measure against.
+  client_tap(std::string self, const tick_clock &ticks) : _self(std::move(self)), _ticks(ticks) {}
 
   void on_applied(const cvc::state_mutation &m) {
     if (m.op != cvc::state_mutation_op::set_value)
@@ -285,7 +276,7 @@ public:
     const bool is_live = !m.origin_node_id.empty();
     const std::uint64_t bytes = m.path.size() + m.string_value.size() + kFrameOverhead;
     std::string subject, family;
-    const bool participant = split_participant_path(m.path, subject, family);
+    const bool participant = split_participant_path(_participants, m.path, subject, family);
     const bool tick = participant && family == "pose" && ends_with(m.path, ".pose.server_tick");
     if (tick)
       note_pose(subject,
@@ -322,7 +313,7 @@ public:
       return;
     hi = tick;
     if (_measuring && subject != _self) {
-      const double w = ticks().at(tick);
+      const double w = _ticks.at(tick);
       if (w >= 0.0)
         _lat.pose_arrival.push_back((t - w) * 1000.0);
     }
@@ -335,7 +326,7 @@ public:
       return;
     for (const std::string &q : subjects) {
       const auto it = _max_tick.find(q);
-      const double w = it == _max_tick.end() ? -1.0 : ticks().at(it->second);
+      const double w = it == _max_tick.end() ? -1.0 : _ticks.at(it->second);
       if (w >= 0.0)
         _lat.pose_age.push_back((t - w) * 1000.0);
     }
@@ -368,10 +359,13 @@ public:
 
 private:
   const std::string _self;
+  const std::string _participants =
+      ra::room_participant_path(kRoom, ""); // the room's leaves' prefix
   mutable std::mutex _mu;
   receive_counts _c;
   std::map<std::string, std::uint64_t> _max_tick;
   bool _measuring = false;
+  const tick_clock &_ticks;
   latency_samples _lat;
 };
 
@@ -403,6 +397,7 @@ struct bench_config {
   bool media = true;
   bool move = true;
   std::string poses = "stream"; // stream: 60 Hz room steps, pose snapshots; tree: 20 Hz tree poses
+  double frame_s = 1.0 / 30.0;  // a client frame (--client-hz; 30: arigl's publisher rate)
   long media_stall_ms = 40;
   long media_delay_ms = 100;        // gRPC's delay drop, relay and clients (0: off)
   long admission_hold_ms = 2000;    // arisrv's --admission-hold-ms (with an area of interest)
@@ -426,7 +421,8 @@ struct bench_config {
 // The relay, as arisrv builds and steps it.
 class bench_relay {
 public:
-  explicit bench_relay(const bench_config &cfg) : stream(cfg.poses == "stream") {
+  explicit bench_relay(const bench_config &cfg)
+      : stream(cfg.poses == "stream"), step_s(stream ? 1.0 / 60.0 : 0.05), frame_s(cfg.frame_s) {
     gate = cfg.s7;
     trim = cfg.s7;
     const std::chrono::milliseconds hold(cfg.s7 && cfg.aoi != "off" ? cfg.admission_hold_ms : 0);
@@ -600,7 +596,7 @@ public:
       cvc::ariadne::server_pump(server, app, kRoom, -1.0, write_poses, pose_heartbeat_s);
     }
     const double t0 = now_s();
-    ticks().stamp(server.tick(), t0); // this step's poses are written at this tick
+    ticks.stamp(server.tick(), t0); // this step's poses are written at this tick
     ra::relay_room_step(*shard, planes, aoi.get(), server, now_s(), trim);
     if (stream) {
       const auto tiers = aoi ? aoi->snapshot() : nullptr;
@@ -728,6 +724,10 @@ public:
   holon server{holon_role::server, cvc::ariadne::room_holon_config()};
   std::unique_ptr<ra::room_aoi_relay> aoi;
   const bool stream;                          // --poses stream
+  const double step_s;  // arisrv's room step: 1/60 s with the pose stream, 0.05 s with tree poses
+  const double frame_s; // a client frame (bench_config::frame_s)
+  // The relay's steady-clock time for each tick it wrote poses at: every client's probes read it.
+  tick_clock ticks;
   std::unique_ptr<ra::room_pose_relay> poses; // used with stream
   std::uint64_t steps = 0;
   std::unique_ptr<cvc::fast_lane_server> lanes, media_lanes; // the pose and the media lanes
@@ -782,8 +782,9 @@ private:
 // A synthetic participant, as arigl runs one.
 class bench_client {
 public:
-  bench_client(std::string id, link_kind k, const bench_config &cfg)
-      : pid(std::move(id)), kind(k), _cfg(cfg) {
+  // TICKS: the relay's (bench_relay::ticks), for the probes.
+  bench_client(std::string id, link_kind k, const bench_config &cfg, const tick_clock &ticks)
+      : pid(std::move(id)), kind(k), tap(pid, ticks), _cfg(cfg) {
     // Rooted at the room tree; the client from before S7 observed its whole tree.
     shard = std::make_unique<cvc::state_cluster_shard>(app, "conf", pid, cfg.s7 ? "conf" : "");
     shard->add_interest("conf");
@@ -988,7 +989,7 @@ public:
   const std::string pid;
   const link_kind kind;
   cvc::app app;
-  client_tap tap{pid};
+  client_tap tap;
   std::unique_ptr<cvc::state_cluster_shard> shard;
   holon h{holon_role::client, cvc::ariadne::room_holon_config()};
   cvc::state_transport *tp = nullptr;
@@ -1221,8 +1222,9 @@ void probe_frame(probes &pr) {
   }
 }
 
-// Run the room in real time for SECONDS (a room step every g_room_step_s, a client frame every 1/30
-// s, media when due), with the probes when MEASURING; returns early, true, once UNTIL holds.
+// Run the room in real time for SECONDS (a room step every r.step_s, a client frame every
+// r.frame_s, media when due), with the probes when MEASURING; returns early, true, once UNTIL
+// holds.
 bool run_room(bench_relay &r, const std::vector<bench_client *> &cs, double seconds, bool moving,
               bool measuring, probes *pr, const std::function<bool()> &until = {}) {
   const double t0 = now_s();
@@ -1233,18 +1235,18 @@ bool run_room(bench_relay &r, const std::vector<bench_client *> &cs, double seco
       r.step();
       if (measuring && pr)
         probe_step(r, cs, *pr);
-      next_step += g_room_step_s;
+      next_step += r.step_s;
       if (next_step < t)
-        next_step = t + g_room_step_s;
+        next_step = t + r.step_s;
     }
     if (t >= next_frame) {
       for (bench_client *c : cs)
         c->frame(moving, measuring);
       if (measuring && pr)
         probe_frame(*pr);
-      next_frame += g_frame_s;
+      next_frame += r.frame_s;
       if (next_frame < t)
-        next_frame = t + g_frame_s;
+        next_frame = t + r.frame_s;
       if (until && until())
         return true;
     }
@@ -1404,7 +1406,7 @@ int main(int argc, char **argv) {
     else if (!std::strcmp(a, "--poses"))
       cfg.poses = next();
     else if (!std::strcmp(a, "--client-hz"))
-      g_frame_s = 1.0 / (std::max)(1.0, std::atof(next()));
+      cfg.frame_s = 1.0 / (std::max)(1.0, std::atof(next()));
     else if (!std::strcmp(a, "--media-stall-ms"))
       cfg.media_stall_ms = (std::max)(0L, std::atol(next()));
     else if (!std::strcmp(a, "--media-delay-ms"))
@@ -1468,7 +1470,6 @@ int main(int argc, char **argv) {
   cfg.s7 = s7 == "on";
   cfg.media = media == "on";
   cfg.move = move == "on";
-  g_room_step_s = cfg.poses == "stream" ? 1.0 / 60.0 : 0.05;
   if (!cfg.s7)
     cfg.aoi = "off";
   if (cfg.clients < 1 || !(cfg.seconds > 0.0) || cfg.warmup < 0.0 || !(cfg.camera_hz > 0.0)) {
@@ -1525,8 +1526,8 @@ int main(int argc, char **argv) {
   for (int i = 0; i < cfg.clients; ++i) {
     char id[16];
     std::snprintf(id, sizeof id, "c%02d", i);
-    own.push_back(
-        std::make_unique<bench_client>(id, kinds[static_cast<std::size_t>(i) % kinds.size()], cfg));
+    own.push_back(std::make_unique<bench_client>(
+        id, kinds[static_cast<std::size_t>(i) % kinds.size()], cfg, relay.ticks));
     cs.push_back(own.back().get());
     const placement &p = places[static_cast<std::size_t>(i)];
     if (p.placed)
@@ -1628,7 +1629,7 @@ int main(int argc, char **argv) {
     c->set_media(false);
   const std::uint64_t backfilled0 = relay.backfilled();
   const std::uint64_t held0 = relay.admissions_held(), timeouts0 = relay.admission_timeouts();
-  bench_client late("late", kinds[cs.size() % kinds.size()], cfg);
+  bench_client late("late", kinds[cs.size() % kinds.size()], cfg, relay.ticks);
   const double tj = now_s();
   bool joined = late.connect(relay);
   if (joined && cfg.late_joiner == "join")

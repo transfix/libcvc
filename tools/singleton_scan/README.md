@@ -70,8 +70,11 @@ On the Linux CI lanes, where the objects are ELF and GNU `nm` and `c++filt` read
 
 | Lane | Targets |
 |---|---|
-| `package-linux / libcvc-release-grpc` (the shipped configuration: gRPC, WebSocket and CUDA on) | `cvc` (with the vendored code built into it: cvc-mesher, SDF, LBIE …), `cvc_igl`, `cvc_physics_jolt`, `cvcGL`, `cvcMedia`, `cvc-cli` |
-| `pycvc-linux / cp312` | `pycvc`, `pycvc_gl` |
+| `package-linux / libcvc-release-grpc` (the shipped configuration: gRPC, WebSocket and CUDA on) | `cvc` (with the vendored code built into it: cvc-mesher, SDF, LBIE …), `cvc_igl`, `cvc_physics_jolt`, `cvcGL`, `cvcMedia`, `cvc-cli`, the runtime hosts `ari` and `arigl`, and the relay's load bench `arisrv_aoi_bench` |
+| `pycvc-linux / cp312` | `pycvc`, `pycvc_gl`, the scripting hosts `arix` and `ariglx` (with the embedded Python, `src/ariadne_python`) |
+
+`arisrv` and `arisrvx` are not scanned: their one writable object is the stop flag their signal
+handler sets (`g_stop`), signal state like `host_signals`' and cvc-cli's.
 
 Each lane checks only its own targets' lines, so each line is exact for one configuration. Each
 uploads the allowlist its build needs as an artifact (`singleton-scan-libcvc`,
@@ -83,7 +86,7 @@ After a Linux build:
 
 ```bash
 python3 tools/singleton_scan/scan.py --build-dir build \
-  --targets cvc,cvc_igl,cvc_physics_jolt,cvcGL,cvcMedia,cvc-cli
+  --targets cvc,cvc_igl,cvc_physics_jolt,cvcGL,cvcMedia,cvc-cli,ari,arigl,arisrv_aoi_bench
 ```
 
 `--write-allowlist tools/singleton_scan/allowlist.txt` rewrites the allowlist for the scanned

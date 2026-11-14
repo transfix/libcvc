@@ -141,8 +141,9 @@ As built in P1 (#985):
 
   The lifecycle is VolRover3's `EmbeddedInterpreter`'s: initialize on the main thread, park the
   GIL, finalize once.
-- **The `_arihost` builtin module,** registered with `PyImport_AppendInittab`. `pycvc_gl.ariadne`
-  reads it (§3.2).
+- **The `_arihost` module,** which the engine makes at boot and puts in `sys.modules`. Its state
+  points at its `Engine`'s, so the engine keeps no process-wide state of its own.
+  `pycvc_gl.ariadne` reads it (§3.2).
   - `app()`, `runtime()` and `gl()` return capsules. `gl()`'s are the `AriRuntime`,
     `SceneRenderer`, `CameraController` and `ImGuiOverlay`, or None.
   - `attached()`, `host()`, and `mode()` (`window`, `offscreen`, `terminal` or `headless`).

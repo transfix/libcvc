@@ -25,6 +25,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -37,6 +38,7 @@ class AppRuntime;
 namespace python {
 
 class ServerLink;
+struct EngineState; // python_engine.cpp: everything an Engine keeps
 
 struct EngineConfig {
   std::string host;              // the host's name, as its messages say it: "arix", "ariglx"
@@ -97,8 +99,8 @@ public:
 
 private:
   friend class Engine;
-  explicit Attachment(bool live) : live_(live) {}
-  bool live_ = false;
+  explicit Attachment(EngineState *state) : state_(state) {}
+  EngineState *state_ = nullptr; // the lending Engine's, while the loan lives
 };
 
 class Engine {
@@ -157,6 +159,7 @@ public:
 
 private:
   EngineConfig config_;
+  std::unique_ptr<EngineState> state_; // what _arihost lends, the document side, its ScriptEngine
   bool ok_ = false;
   std::string error_;
   void *mainState_ = nullptr; // the PyThreadState parked after boot

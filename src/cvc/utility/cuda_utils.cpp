@@ -32,71 +32,65 @@ namespace cvc {
 
 #ifdef CVC_USING_CUDA
 
-cuda_device_manager::cuda_device_manager() : _cuda_available(false), _device_count(0) {
-  initialize();
+namespace {
+
+// The devices the CUDA runtime sees, asked each time rather than cached for the process: the
+// runtime keeps the answer itself, so the call is cheap, and nothing here is shared between apps.
+int count_devices() {
+  int n = 0;
+  if (cudaGetDeviceCount(&n) != cudaSuccess)
+    return 0;
+  return n;
 }
 
-cuda_device_manager::~cuda_device_manager() {
-  // Cleanup - reset all devices
-  if (_cuda_available) {
-    cudaDeviceReset();
+bool valid_device(int device_id) { return device_id >= 0 && device_id < count_devices(); }
+
+// Device I's description, or a default one (device_id -1) when the runtime cannot describe it.
+gpu_device_info describe_device(int i) {
+  gpu_device_info info;
+  cudaDeviceProp prop;
+  if (cudaGetDeviceProperties(&prop, i) != cudaSuccess)
+    return info;
+  info.device_id = i;
+  info.name = prop.name;
+  info.total_memory = prop.totalGlobalMem;
+  info.compute_capability_major = prop.major;
+  info.compute_capability_minor = prop.minor;
+  info.multiprocessor_count = prop.multiProcessorCount;
+  info.unified_memory_supported =
+      (prop.major >= 3); // Unified memory requires compute capability 3.0+
+
+  // Free memory is the device's own context's answer, so ask it on that device.
+  int old_device = 0;
+  if (cudaGetDevice(&old_device) == cudaSuccess && cudaSetDevice(i) == cudaSuccess) {
+    size_t free_mem = 0, total_mem = 0;
+    if (cudaMemGetInfo(&free_mem, &total_mem) == cudaSuccess)
+      info.free_memory = free_mem;
+    cudaSetDevice(old_device);
   }
+  return info;
 }
 
-cuda_device_manager &cuda_device_manager::instance() {
-  static cuda_device_manager mgr;
-  return mgr;
+} // namespace
+
+bool cuda_device_manager::cuda_available() { return count_devices() > 0; }
+
+int cuda_device_manager::device_count() { return count_devices(); }
+
+std::vector<gpu_device_info> cuda_device_manager::get_device_info() {
+  std::vector<gpu_device_info> devices;
+  const int n = count_devices();
+  devices.reserve(n);
+  for (int i = 0; i < n; ++i)
+    devices.push_back(describe_device(i));
+  return devices;
 }
-
-void cuda_device_manager::initialize() {
-  cudaError_t err = cudaGetDeviceCount(&_device_count);
-  if (err != cudaSuccess || _device_count == 0) {
-    _cuda_available = false;
-    _device_count = 0;
-    return;
-  }
-
-  _cuda_available = true;
-  _devices.resize(_device_count);
-
-  // Query each device for information
-  for (int i = 0; i < _device_count; ++i) {
-    cudaDeviceProp prop;
-    if (cudaGetDeviceProperties(&prop, i) == cudaSuccess) {
-      _devices[i].device_id = i;
-      _devices[i].name = prop.name;
-      _devices[i].total_memory = prop.totalGlobalMem;
-      _devices[i].compute_capability_major = prop.major;
-      _devices[i].compute_capability_minor = prop.minor;
-      _devices[i].multiprocessor_count = prop.multiProcessorCount;
-      _devices[i].unified_memory_supported =
-          (prop.major >= 3); // Unified memory requires compute capability 3.0+
-
-      // Get free memory
-      size_t free_mem, total_mem;
-      int old_device;
-      cudaGetDevice(&old_device);
-      cudaSetDevice(i);
-      if (cudaMemGetInfo(&free_mem, &total_mem) == cudaSuccess) {
-        _devices[i].free_memory = free_mem;
-      }
-      cudaSetDevice(old_device);
-    }
-  }
-}
-
-bool cuda_device_manager::cuda_available() { return instance()._cuda_available; }
-
-int cuda_device_manager::device_count() { return instance()._device_count; }
-
-std::vector<gpu_device_info> cuda_device_manager::get_device_info() { return instance()._devices; }
 
 gpu_device_info cuda_device_manager::get_device_info(int device_id) {
-  auto &inst = instance();
-  if (device_id < 0 || device_id >= inst._device_count) {
+  if (!valid_device(device_id)) {
     throw cuda_error("Invalid device ID");
   }
-  return inst._devices[device_id];
+  return describe_device(device_id);
 }
 
 int cuda_device_manager::get_current_device() {
@@ -117,11 +111,10 @@ void cuda_device_manager::set_current_device(int device_id) {
     throw cuda_not_available("CUDA not available");
   }
 
-  auto &inst = instance();
-  if (device_id < 0 || device_id >= inst._device_count) {
+  const int n = count_devices();
+  if (device_id < 0 || device_id >= n) {
     std::ostringstream oss;
-    oss << "Invalid device ID: " << device_id << " (available: 0-" << (inst._device_count - 1)
-        << ")";
+    oss << "Invalid device ID: " << device_id << " (available: 0-" << (n - 1) << ")";
     throw cuda_error(oss.str());
   }
 
@@ -137,12 +130,15 @@ bool cuda_device_manager::supports_unified_memory(int device_id) {
     device_id = get_current_device();
   }
 
-  auto &inst = instance();
-  if (device_id < 0 || device_id >= inst._device_count) {
+  if (!valid_device(device_id)) {
     return false;
   }
 
-  return inst._devices[device_id].unified_memory_supported;
+  // Unified memory requires compute capability 3.0+
+  int major = 0;
+  return cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device_id) ==
+             cudaSuccess &&
+         major >= 3;
 }
 
 bool cuda_device_manager::can_access_peer(int device_id, int peer_device_id) {
@@ -150,9 +146,7 @@ bool cuda_device_manager::can_access_peer(int device_id, int peer_device_id) {
     return false;
   }
 
-  auto &inst = instance();
-  if (device_id < 0 || device_id >= inst._device_count || peer_device_id < 0 ||
-      peer_device_id >= inst._device_count) {
+  if (!valid_device(device_id) || !valid_device(peer_device_id)) {
     return false;
   }
 
@@ -193,8 +187,7 @@ size_t cuda_device_manager::get_free_memory(int device_id) {
     device_id = get_current_device();
   }
 
-  auto &inst = instance();
-  if (device_id < 0 || device_id >= inst._device_count) {
+  if (!valid_device(device_id)) {
     return 0;
   }
 
@@ -217,12 +210,15 @@ size_t cuda_device_manager::get_total_memory(int device_id) {
     device_id = get_current_device();
   }
 
-  auto &inst = instance();
-  if (device_id < 0 || device_id >= inst._device_count) {
+  if (!valid_device(device_id)) {
     return 0;
   }
 
-  return inst._devices[device_id].total_memory;
+  cudaDeviceProp prop;
+  if (cudaGetDeviceProperties(&prop, device_id) != cudaSuccess) {
+    return 0;
+  }
+  return prop.totalGlobalMem;
 }
 
 #endif // CVC_USING_CUDA

@@ -95,6 +95,11 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARI_WITH_PYTHON))
       set(_pyt "${CVC_ARIADNE_PYTHON_TESTS}")
       add_test(NAME arix_python_block
                COMMAND arix test ${CVC_ARIADNE_PYTHON_TEST_PATH} "${_pyt}/python_block.ari")
+      # Two documents, each in an app of its own, lent in turn to the one interpreter: the
+      # second's python: block runs in its own app, with nothing left of the first's.
+      add_test(NAME arix_python_two_apps
+               COMMAND arix test ${CVC_ARIADNE_PYTHON_TEST_PATH} "${_pyt}/python_block.ari"
+                       "${_pyt}/python_block.ari")
       add_test(NAME arix_python_program
                COMMAND arix snapshot --frames 3 --width 40 --height 3 ${CVC_ARIADNE_PYTHON_TEST_PATH}
                        "${_pyt}/app.py" one two)
@@ -118,8 +123,9 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARI_WITH_PYTHON))
       add_test(NAME ari_python_needs_arix COMMAND ari check "${_pyt}/python_block.ari")
       set_tests_properties(ari_python_needs_arix PROPERTIES
                            PASS_REGULAR_EXPRESSION "scripting hosts, arix, ariglx or arisrvx")
-      cvc_ariadne_python_test_properties(arix_python_block arix_python_program arix_python_error
-                                         arix_python_interpreter arix_matplotlib_backend)
+      cvc_ariadne_python_test_properties(arix_python_block arix_python_two_apps arix_python_program
+                                         arix_python_error arix_python_interpreter
+                                         arix_matplotlib_backend)
       set_property(TEST arix_matplotlib_backend APPEND PROPERTY
                    ENVIRONMENT "MPLCONFIGDIR=${CMAKE_CURRENT_BINARY_DIR}/mplconfig")
       # A document with a WebAssembly guest (arix test), and stock ari's answer to one.
@@ -132,8 +138,8 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARI_WITH_PYTHON))
         set_tests_properties(arix_wasm_block ari_wasm_needs_arix PROPERTIES
                              SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
       endif()
-      set_tests_properties(arix_python_block arix_python_program arix_python_error
-                           ari_python_needs_arix PROPERTIES
+      set_tests_properties(arix_python_block arix_python_two_apps arix_python_program
+                           arix_python_error ari_python_needs_arix PROPERTIES
                            SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
       set_tests_properties(arix_matplotlib_backend PROPERTIES SKIP_REGULAR_EXPRESSION
                            "SKIP: no matplotlib;built without FTXUI;built without yaml-cpp")

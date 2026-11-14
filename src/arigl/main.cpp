@@ -198,36 +198,38 @@ namespace gla = cvc::gl::ariadne;
 
 const char *const kDefaultPrefix = "ui.docs.ari"; // the same root ari uses, in both modes
 
+// The scripting engines arigl_main() makes before any app or runtime, so they outlive every
+// runtime they are lent, handed down to the runs that lend them. Nothing in arigl itself.
+struct Scripting {
+#ifdef CVC_ARIADNE_PYTHON
+  ari::python::Engine *python = nullptr; // ariglx's Python
+#ifdef CVC_ARIADNE_WASM
+  // The WebAssembly guests' engine (src/ariadne_wasm): use_script_engine registers it on each
+  // runtime's app. Null when its runtime could not start: documents then load without their
+  // wasm: blocks run.
+  std::shared_ptr<cvc::ariadne::ScriptEngine> wasm;
+#endif
+#endif
+};
+
 #ifdef CVC_ARIADNE_PYTHON
 constexpr const char *kRuntimeName = "ariglx"; // arigl with an embedded Python
 
-// ariglx's Python, booted in arigl_main() before any app or runtime, so it outlives them.
-ari::python::Engine *g_python = nullptr;
-
 #ifdef CVC_ARIADNE_WASM
-// The WebAssembly guests' engine (src/ariadne_wasm), made for the life of arigl_main() by a
-// WasmGuests before any app or runtime, so it outlives every runtime it is given
-// (use_script_engine registers it on that runtime's app). Null when its runtime could not start:
-// documents then load without their wasm: blocks run.
-std::shared_ptr<cvc::ariadne::ScriptEngine> g_wasm;
-
-struct WasmGuests {
-  WasmGuests() {
-    std::string error;
-    g_wasm = cvc::ariadne::wasm::make_engine(error);
-    if (!g_wasm)
-      std::fprintf(stderr, "%s: no WebAssembly guests: %s\n", kRuntimeName, error.c_str());
-  }
-  ~WasmGuests() { g_wasm.reset(); }
-  WasmGuests(const WasmGuests &) = delete;
-  WasmGuests &operator=(const WasmGuests &) = delete;
-};
+// The WebAssembly guests' engine, or null (and why, on stderr) when its runtime could not start.
+std::shared_ptr<cvc::ariadne::ScriptEngine> make_wasm_guests() {
+  std::string error;
+  std::shared_ptr<cvc::ariadne::ScriptEngine> engine = cvc::ariadne::wasm::make_engine(error);
+  if (!engine)
+    std::fprintf(stderr, "%s: no WebAssembly guests: %s\n", kRuntimeName, error.c_str());
+  return engine;
+}
 #endif
 
 // Lend a window's app, document runtime and GL objects to the Python (_arihost), for the life of
 // the loan: the document's python: block runs at load, and a Python program's Host() adopts them.
 // `loop` is what the program's host.run() runs.
-ari::python::Attachment lend_python(cvc::app &app, gla::AriRuntime &rt,
+ari::python::Attachment lend_python(const Scripting &scripting, cvc::app &app, gla::AriRuntime &rt,
                                     cvc::gl::SceneRenderer &view, cvc::gl::CameraController &cam,
                                     cvc::gl::ImGuiOverlay &ui, const char *mode,
                                     std::function<int()> loop) {
@@ -241,24 +243,26 @@ ari::python::Attachment lend_python(cvc::app &app, gla::AriRuntime &rt,
   h.overlay = &ui;
   h.run_loop = std::move(loop);
   h.in_frame = [&rt] { return rt.in_frame(); }; // host.run() from a frame's hook: refused
-  ari::python::Attachment lent = g_python->attach(h);
+  ari::python::Attachment lent = scripting.python->attach(h);
 #ifdef CVC_ARIADNE_WASM
-  if (g_wasm)
-    rt.app_runtime().use_script_engine(g_wasm); // and its wasm: block, after the python: one
+  if (scripting.wasm)
+    rt.app_runtime().use_script_engine(
+        scripting.wasm); // and its wasm: block, after the python: one
 #endif
   return lent;
 }
 
 // ... and a terminal's (no GL objects: a Python program runs in a window).
-ari::python::Attachment lend_python(cvc::app &app, ari::AppRuntime &rt, const char *mode) {
+ari::python::Attachment lend_python(const Scripting &scripting, cvc::app &app, ari::AppRuntime &rt,
+                                    const char *mode) {
   ari::python::HostHandles h;
   h.app = &app;
   h.runtime = &rt;
   h.mode = mode;
-  ari::python::Attachment lent = g_python->attach(h);
+  ari::python::Attachment lent = scripting.python->attach(h);
 #ifdef CVC_ARIADNE_WASM
-  if (g_wasm)
-    rt.use_script_engine(g_wasm);
+  if (scripting.wasm)
+    rt.use_script_engine(scripting.wasm);
 #endif
   return lent;
 }
@@ -459,24 +463,23 @@ std::vector<ari::KeyBinding> camera_keys(const cvc::gl::CameraController &cam) {
 // (<viewer>.avatar.keys.<action>, avatar_keys_path), each one key or more.
 struct WalkKey {
   const char *action, *label;
-  std::vector<std::string> keys;
+  const char *keys[2];
+  std::vector<std::string> default_keys() const { return {std::begin(keys), std::end(keys)}; }
 };
-const std::vector<WalkKey> &walk_keys() {
-  static const std::vector<WalkKey> keys = {{"forward", "Walk forward", {"W", "Up"}},
-                                            {"backward", "Walk back", {"S", "Down"}},
-                                            {"strafe_left", "Step left", {"A", "Left"}},
-                                            {"strafe_right", "Step right", {"D", "Right"}}};
-  return keys;
-}
+constexpr WalkKey kWalkKeys[] = {{"forward", "Walk forward", {"W", "Up"}},
+                                 {"backward", "Walk back", {"S", "Down"}},
+                                 {"strafe_left", "Step left", {"A", "Left"}},
+                                 {"strafe_right", "Step right", {"D", "Right"}}};
 std::string avatar_keys_path(const cvc::gl::SceneRenderer &view) {
   return view.scene().getStatePrefix() + ".viewers." + view.name() + ".avatar.keys.";
 }
 std::vector<ari::KeyBinding> avatar_keys(const cvc::gl::SceneRenderer &view) {
   const std::string at = "/" + avatar_keys_path(view);
   std::vector<ari::KeyBinding> keys;
-  for (const WalkKey &k : walk_keys())
+  for (const WalkKey &k : kWalkKeys)
     keys.push_back({std::string("avatar_") + k.action, k.label,
-                    "Avatar (mouse look: walk where you aim)", k.keys, "", at + k.action});
+                    "Avatar (mouse look: walk where you aim)", k.default_keys(), "",
+                    at + k.action});
   return keys;
 }
 
@@ -688,6 +691,7 @@ struct ConferenceSession {
     double talk_until = 0.0; // wall time until which this peer counts as "talking" (name highlight)
   };
   std::map<std::string, peer_media> peers_; // keyed by origin pid
+  bool opus_warned_ = false;                // said that this build cannot decode a peer's Opus mic
   double self_talk_until_ = 0.0;            // wall time until which WE count as "talking"
   bool voice_talking_ = false;              // our voice.talking leaf's value (absent = not talking)
   double now_wall_ = 0.0;                   // wall-clock seconds, refreshed once per pump
@@ -1157,7 +1161,7 @@ struct ConferenceSession {
     }
     cam_ = &cam;
     cam.setPrimaryDragSteers(true); // the right button, or two fingers, turns the view
-    cam.setOrbitKeys(false);        // in Orbit the movement keys walk our avatar (walk_keys)
+    cam.setOrbitKeys(false);        // in Orbit the movement keys walk our avatar (kWalkKeys)
     walk_keys_ = avatar_keys_path(view);
     // Peers' names over their markers: a scene annotation, so it shows with the panels hidden too
     // and sits under the document's windows.
@@ -1202,14 +1206,15 @@ struct ConferenceSession {
     // Keys -> intent, only in Orbit: in Fly the same keys move the camera instead. The camera's
     // held set is dropped while the UI has the keyboard, so typing a name never walks.
     cvc::ariadne::avatar_intent in;
-    // Our walk keys as the Controls window has them (walk_keys; their defaults until the document's
-    // load seeds them): any of an action's keys held.
+    // Our walk keys as the Controls window has them (kWalkKeys; their defaults until the
+    // document's load seeds them): any of an action's keys held.
     unsigned keys = 0, bit = 1;
-    for (const WalkKey &k : walk_keys()) {
+    for (const WalkKey &k : kWalkKeys) {
       const std::string stored =
           cvc::ariadne::read_or<std::string>(*app_, walk_keys_ + k.action, std::string());
       bool down = false;
-      for (const std::string &key : stored.empty() ? k.keys : cvc::ariadne::split_keys(stored))
+      for (const std::string &key :
+           stored.empty() ? k.default_keys() : cvc::ariadne::split_keys(stored))
         down = down || cam_->keyHeld(key);
       keys |= down ? bit : 0u;
       bit <<= 1;
@@ -1757,7 +1762,7 @@ struct ConferenceSession {
   }
 
   // Peer PM's Opus packet M as f32, after concealment for a packet or two lost before it.
-  static std::vector<float> decode_opus(peer_media &pm, const cvc::media_frame &m) {
+  std::vector<float> decode_opus(peer_media &pm, const cvc::media_frame &m) {
     const int rate = m.sample_rate > 0 ? static_cast<int>(m.sample_rate) : 48000;
     const int ch = m.channels > 0 ? static_cast<int>(m.channels) : 1;
     if (!pm.opus || pm.opus->rate() != rate || pm.opus->channels() != ch) {
@@ -1766,11 +1771,10 @@ struct ConferenceSession {
     }
     std::vector<float> out;
     if (!pm.opus->valid()) {
-      static bool warned = false;
-      if (!warned)
+      if (!opus_warned_)
         std::fprintf(stderr, "arigl: a peer's mic is Opus, and this build has no libopus to "
                              "decode it: that mic is silent here\n");
-      warned = true;
+      opus_warned_ = true;
       return out;
     }
     if (pm.opus_seq >= 0 && m.seq > pm.opus_seq + 1 && m.seq <= pm.opus_seq + 3)
@@ -1986,7 +1990,7 @@ void setup_media(cvc::app &app, const ari::HostOptions &o) {
   }
 }
 
-int run_window(const ari::HostOptions &o) {
+int run_window(const ari::HostOptions &o, [[maybe_unused]] const Scripting &scripting) {
   const bool offscreen = o.command != "run"; // snapshot and check never open a window
   if (o.command == "snapshot" && o.png.empty()) {
     std::fprintf(stderr, "arigl: a window snapshot needs --png FILE (or use --terminal)\n");
@@ -2277,24 +2281,25 @@ int run_window(const ari::HostOptions &o) {
   const std::function<int()> loop = after_load;
 #endif
   const ari::python::Attachment lent =
-      lend_python(app, rt, view, cam, ui, offscreen ? "offscreen" : "window", loop);
+      lend_python(scripting, app, rt, view, cam, ui, offscreen ? "offscreen" : "window", loop);
   if (is_python_program(o.doc)) {
     bool loaded = false;
     rt.app_runtime().add_load_hook(
         [&loaded](ari::LoadResult &, const std::string &) { loaded = true; });
-    const int status = g_python->run_script(o.doc, o.doc_args);
+    ari::python::Engine &python = *scripting.python;
+    const int status = python.run_script(o.doc, o.doc_args);
 #ifndef __EMSCRIPTEN__
-    if (g_python->loop_ran())
-      return status ? status : g_python->loop_status();
+    if (python.loop_ran())
+      return status ? status : python.loop_status();
 #endif
-    return status != 0 || !loaded ? status : g_python->run_loop(after_load);
+    return status != 0 || !loaded ? status : python.run_loop(after_load);
   }
 #endif
   if (const int status = load_document(rt, o); status >= 0)
     return status;
   note_misplaced(rt.app_runtime(), o);
 #ifdef CVC_ARIADNE_PYTHON
-  return g_python->run_loop(after_load); // the document's python: may not run another inside it
+  return scripting.python->run_loop(after_load); // the document's python: may not run another
 #else
   return after_load();
 #endif
@@ -2311,7 +2316,7 @@ public:
   }
 };
 
-int run_terminal(const ari::HostOptions &o) {
+int run_terminal(const ari::HostOptions &o, [[maybe_unused]] const Scripting &scripting) {
   if (!ari::FtxuiBackend::available()) {
     std::fprintf(stderr, "arigl: libcvc was built without FTXUI (no terminal backend)\n");
     return 1;
@@ -2347,7 +2352,7 @@ int run_terminal(const ari::HostOptions &o) {
   rt.set_backend(*backend);
 #ifdef CVC_ARIADNE_PYTHON
   const ari::python::Attachment lent =
-      lend_python(app, rt, o.command == "run" ? "terminal" : "headless");
+      lend_python(scripting, app, rt, o.command == "run" ? "terminal" : "headless");
 #endif
   if (const std::string error = rt.enable_net(o.net); !error.empty()) {
     std::fprintf(stderr, "arigl: %s\n", error.c_str());
@@ -2547,9 +2552,10 @@ int arigl_main(int argc, char **argv) {
     std::fprintf(stderr, "%s: %s\n", kRuntimeName, python.error().c_str());
     return 1;
   }
-  g_python = &python;
+  Scripting scripting;
+  scripting.python = &python;
 #ifdef CVC_ARIADNE_WASM
-  const WasmGuests wasm_guests; // before any app or runtime, too
+  scripting.wasm = make_wasm_guests(); // before any app or runtime, too
 #endif
 #else
   if (!o.python_path.empty()) {
@@ -2557,8 +2563,9 @@ int arigl_main(int argc, char **argv) {
                          "has no Python\n");
     return 2;
   }
+  const Scripting scripting{};
 #endif
-  return terminal ? run_terminal(staged) : run_window(staged);
+  return terminal ? run_terminal(staged, scripting) : run_window(staged, scripting);
 }
 
 } // namespace

@@ -116,6 +116,7 @@ class Classification(unittest.TestCase):
             ("src/cvcGL/GridNode.cpp", "vtkCommonInformationKeyManagerInstance"),
             ("src/cvcGL/ImGuiOverlay.cpp", "vtkTimerLogCleanupInstance"),
             ("src/cvcGL/GridNode.cpp", "vtksys::SystemToolsManagerInstance"),
+            ("src/arigl/main.cpp", "(anonymous namespace)::vtkRenderingCore_AutoInit_Instance"),
             (scan.HEADER, "igl::viridis_cm"),
             (scan.HEADER, "Eigen::internal::manage_caching_sizes()::m_cacheSizes"),
             (scan.HEADER, "pocketfft::detail::threading::max_threads"),

@@ -154,45 +154,47 @@ join_relay(cvc::app &app, cvc::ariadne::AppRuntime &rt, const cvc::ariadne::Host
   });
 }
 
+// The scripting engines main() makes before any app or runtime, so they outlive every runtime
+// they are lent, handed down to the runs that lend them. Nothing in ari itself.
+struct Scripting {
+#ifdef CVC_ARIADNE_PYTHON
+  cvc::ariadne::python::Engine *python = nullptr; // arix's Python
 #ifdef CVC_ARIADNE_WASM
-// The WebAssembly guests' engine (src/ariadne_wasm), made for the life of main() by a WasmGuests
-// before any app or runtime, so it outlives every runtime it is given (use_script_engine registers
-// it on that runtime's app). Null when its runtime could not start: documents then load without
-// their wasm: blocks run.
-std::shared_ptr<cvc::ariadne::ScriptEngine> g_wasm;
-
-struct WasmGuests {
-  WasmGuests() {
-    std::string error;
-    g_wasm = cvc::ariadne::wasm::make_engine(error);
-    if (!g_wasm)
-      std::fprintf(stderr, "%s: no WebAssembly guests: %s\n", kRuntimeName, error.c_str());
-  }
-  ~WasmGuests() { g_wasm.reset(); }
-  WasmGuests(const WasmGuests &) = delete;
-  WasmGuests &operator=(const WasmGuests &) = delete;
+  // The WebAssembly guests' engine (src/ariadne_wasm): use_script_engine registers it on each
+  // runtime's app. Null when its runtime could not start: documents then load without their
+  // wasm: blocks run.
+  std::shared_ptr<cvc::ariadne::ScriptEngine> wasm;
+#endif
+#endif
 };
+
+#ifdef CVC_ARIADNE_WASM
+// The WebAssembly guests' engine, or null (and why, on stderr) when its runtime could not start.
+std::shared_ptr<cvc::ariadne::ScriptEngine> make_wasm_guests() {
+  std::string error;
+  std::shared_ptr<cvc::ariadne::ScriptEngine> engine = cvc::ariadne::wasm::make_engine(error);
+  if (!engine)
+    std::fprintf(stderr, "%s: no WebAssembly guests: %s\n", kRuntimeName, error.c_str());
+  return engine;
+}
 #endif
 
 #ifdef CVC_ARIADNE_PYTHON
-// arix's Python, booted in main() before any app or runtime, so it outlives them.
-cvc::ariadne::python::Engine *g_python = nullptr;
-
 // Lend a document's app and runtime to the Python (_arihost), for the life of the loan: its
 // python: block runs at load, and a Python program's Host() adopts them. `loop` is what the
 // program's host.run() runs.
-cvc::ariadne::python::Attachment lend_python(cvc::app &app, cvc::ariadne::AppRuntime &rt,
-                                             const char *mode,
+cvc::ariadne::python::Attachment lend_python(const Scripting &scripting, cvc::app &app,
+                                             cvc::ariadne::AppRuntime &rt, const char *mode,
                                              std::function<int()> loop = nullptr) {
   cvc::ariadne::python::HostHandles h;
   h.app = &app;
   h.runtime = &rt;
   h.mode = mode;
   h.run_loop = std::move(loop);
-  cvc::ariadne::python::Attachment lent = g_python->attach(h);
+  cvc::ariadne::python::Attachment lent = scripting.python->attach(h);
 #ifdef CVC_ARIADNE_WASM
-  if (g_wasm)
-    rt.use_script_engine(g_wasm); // and its wasm: block, after the python: one
+  if (scripting.wasm)
+    rt.use_script_engine(scripting.wasm); // and its wasm: block, after the python: one
 #endif
   return lent;
 }
@@ -387,7 +389,8 @@ std::string trim_ari(std::string w) {
 // Run one document headless: load it, then drain frames until it quits, its tests: have all run,
 // --frames N frames have run, or the timeout. Each frame is laid out (as snapshot does) so its
 // bound expressions run, but nothing is drawn.
-TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::string &path) {
+TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::string &path,
+                              [[maybe_unused]] const Scripting &scripting) {
   namespace ari = cvc::ariadne;
   using clock = std::chrono::steady_clock;
   TestOutcome out;
@@ -439,7 +442,7 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
     return finish();
   }
 #ifdef CVC_ARIADNE_PYTHON
-  const cvc::ariadne::python::Attachment lent = lend_python(app, rt, "headless");
+  const cvc::ariadne::python::Attachment lent = lend_python(scripting, app, rt, "headless");
 #endif
   ari::apply_state_sets(app, o.prefix.empty() ? "ui.docs.ari" : o.prefix, o.sets);
   try {
@@ -518,7 +521,7 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
 }
 
 // `ari test`: each document in turn, one line each (or TAP), then a summary. 1 if any failed.
-int run_tests(const cvc::ariadne::HostOptions &o) {
+int run_tests(const cvc::ariadne::HostOptions &o, const Scripting &scripting) {
   std::vector<std::string> docs{o.doc};
   docs.insert(docs.end(), o.doc_args.begin(), o.doc_args.end());
   for (const std::string &d : docs)
@@ -532,7 +535,7 @@ int run_tests(const cvc::ariadne::HostOptions &o) {
     std::printf("TAP version 13\n1..%zu\n", docs.size());
   std::size_t failed = 0;
   for (std::size_t i = 0; i < docs.size(); ++i) {
-    const TestOutcome r = run_test_document(o, docs[i]);
+    const TestOutcome r = run_test_document(o, docs[i], scripting);
     failed += r.passed() ? 0 : 1;
     char took[64];
     std::snprintf(took, sizeof took, "%.2f s", r.seconds);
@@ -615,9 +618,10 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "%s: %s\n", kRuntimeName, python.error().c_str());
     return 1;
   }
-  g_python = &python;
+  Scripting scripting;
+  scripting.python = &python;
 #ifdef CVC_ARIADNE_WASM
-  const WasmGuests wasm_guests; // before any app or runtime, too
+  scripting.wasm = make_wasm_guests(); // before any app or runtime, too
 #endif
 #else
   if (!o.python_path.empty()) {
@@ -626,6 +630,7 @@ int main(int argc, char **argv) {
                  kRuntimeName, kRuntimeName);
     return 2;
   }
+  const Scripting scripting{};
 #endif
   if (cmd == "info")
     return print_info(o);
@@ -646,7 +651,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   if (cmd == "test")
-    return run_tests(o);
+    return run_tests(o, scripting);
   // snapshot / check always lay out with FTXUI; tvision only changes the interactive chrome.
   const bool tvision = o.backend == "tvision" && cmd == "run";
   if (tvision && !ari::TvisionBackend::available()) {
@@ -786,7 +791,7 @@ int main(int argc, char **argv) {
   // program in place of the document has its Host() adopt this runtime and load a document; its
   // host.run() runs after_load, and when it returns without, this host does.
   const ari::python::Attachment lent =
-      lend_python(app, rt, cmd == "run" ? "terminal" : "headless", after_load);
+      lend_python(scripting, app, rt, cmd == "run" ? "terminal" : "headless", after_load);
   if (is_python_program(o.doc)) {
     bool loaded = false;
     rt.add_load_hook([&loaded](ari::LoadResult &, const std::string &) { loaded = true; });

@@ -66,8 +66,11 @@ GENERATED = (
 THIRD_PARTY = (
     (re.compile(r"^boost::"), "Boost's statics (its templates and headers, instantiated here)"),
     (
-        re.compile(r"^(vtk\w*(Manager|Cleanup)Instance|vtksys::SystemToolsManagerInstance)$"),
-        "VTK's per-file header objects (its Schwarz counters)",
+        re.compile(
+            r"^(vtk\w*(Manager|Cleanup)Instance|vtksys::SystemToolsManagerInstance"
+            r"|(\(anonymous namespace\)::)?vtk\w+_AutoInit_Instance)$"
+        ),
+        "VTK's per-file header objects (its Schwarz counters and its modules' autoinit)",
     ),
     (re.compile(r"^igl::"), "libigl's statics (its colormaps and thread pool)"),
     (re.compile(r"^Eigen::"), "Eigen's cache-size table"),
