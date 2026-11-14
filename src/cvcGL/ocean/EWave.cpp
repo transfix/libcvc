@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cvc/algo/det_math.h>
 #include <stdexcept>
 #include <string>
 #include <vtkOpenGLFramebufferObject.h>
@@ -29,15 +30,13 @@ constexpr unsigned int kGL_SCISSOR_TEST = 0x0C11;
 constexpr double kTwoPi = 6.283185307179586;
 
 // ── the update pass: separate H and PHI at k and -k, move them on, recombine ──
-// The same arithmetic as ewave::prepare and ewave::step's mode loop (cvc/ocean/ewave.cpp), with
-// the coefficients computed here per texel. Index p is wavenumber p (p < n / 2) or p - n, times
-// uDk = 2 pi / (n dx); the mirror of p is (n - p) mod n, so the Nyquist index n / 2 pairs with
-// itself.
+// The same arithmetic as ewave::step's mode loop (cvc/ocean/ewave.cpp), with ewave::prepare's
+// coefficients for this dt from uCoef (see modeCoefficients()). The mirror of index p is
+// (n - p) mod n, so the Nyquist index n / 2 pairs with itself.
 const char *kUpdateFS =
     "//VTK::System::Dec\n"
-    "uniform sampler2D uZ;\n"
+    "uniform sampler2D uZ, uCoef;\n"
     "uniform int uN;\n"
-    "uniform float uDk, uDepth, uG, uDt, uGamma, uDamping;\n"
     "//VTK::Output::Dec\n"
     "void main(){\n"
     "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
@@ -46,41 +45,86 @@ const char *kUpdateFS =
     // Z(k) = H(k) + i PHI(k) and Z(-k) = conj H(k) + i conj PHI(k), as h and phi are real.
     "  vec2 H = 0.5 * vec2(z.x + w.x, z.y - w.y);\n"
     "  vec2 P = 0.5 * vec2(z.y + w.y, w.x - z.x);\n"
-    "  vec2 q = vec2(c.x < uN / 2 ? c.x : c.x - uN, c.y < uN / 2 ? c.y : c.y - uN);\n"
-    "  vec2 kv = uDk * q;\n"
-    "  float k2 = dot(kv, kv);\n"
-    "  float damp = exp(-(uGamma * k2 + uDamping) * uDt);\n"
-    "  vec4 a = vec4(damp, 0.0, 0.0, 0.0);\n" // k = 0: the mean height stays, the mean phi is 0
-    "  if (k2 > 0.0) {\n"
-    "    float k = sqrt(k2);\n"
-    "    float kap = k * tanh(min(k * uDepth, 20.0));\n"
-    "    float om = sqrt(uG * kap), ph = om * uDt;\n"
-    "    float cs = cos(ph), sn = sin(ph);\n"
-    "    a = vec4(cs, (kap / om) * sn, -(uG / om) * sn, cs) * damp;\n"
-    "  }\n"
+    "  vec4 a = texelFetch(uCoef, c, 0);\n"
     "  vec2 H2 = a.x * H + a.y * P, P2 = a.z * H + a.w * P;\n"
     "  gl_FragData[0] = vec4(H2.x - P2.y, H2.y + P2.x, 0.0, 0.0);\n"
     "}\n";
 
-// ── the real-space pass: normalise, the mask's beach and the sponge, land to 0 ──
-// As ewave::step's real-space factor: a rate per cell applied as exp(-rate dt).
+// Each mode's update for a step of dt, ewave::prepare's: RGBA per texel the a0..a3 of
+// [H'; PHI'] = [a0 a1; a2 a3] [H; PHI], the step's damping included, and (damp, 0, 0, 0) at k = 0
+// (the mean height stays, the mean potential is held at 0). The 1 / n^2 of the inverse FFT stays
+// in the real-space pass. Index p is wavenumber p (p < n / 2) or p - n, times 2 pi / (n dx).
+//
+// Worked out in double on the host, as the CPU window does, whenever dt changes, so the GPU takes
+// no cos, sin, exp, sqrt or tanh of its own. The update pass used to work out the step's cos, sin
+// and exp itself, in float. On Apple's software renderer (macOS CI) the GPU window then drifted
+// from the CPU's at a steady rate per second of simulated time, whatever dt was: 3e-2 of the RMS
+// height in 7.2 s (cvcgl_ewave on transfix/libcvc#1171), where Linux and Windows stay near 2e-5. A
+// sin or cos off in proportion to its small angle drifts like that. Taking each mode's rates from
+// the host in double, with the cos, sin and exp still in the shader, changed nothing there, to the
+// digit (transfix/libcvc#1219's first try).
+std::vector<float> modeCoefficients(const cvc::ocean::ewave_params &p, double dt) {
+  namespace det = cvc::algo::det;
+  const int n = p.n;
+  const double dk = kTwoPi / (double(n) * p.dx);
+  std::vector<float> cf(static_cast<std::size_t>(n) * n * 4, 0.0f);
+  for (int j = 0; j < n; ++j) {
+    const double ky = dk * double(j < n / 2 ? j : j - n);
+    for (int i = 0; i < n; ++i) {
+      const double kx = dk * double(i < n / 2 ? i : i - n);
+      const double k2 = kx * kx + ky * ky, k = std::sqrt(k2);
+      float *a = cf.data() + (static_cast<std::size_t>(j) * n + i) * 4;
+      const double damp = det::exp(-(p.damping_k2 * k2 + p.damping) * dt);
+      const double kap = k > 0.0 ? k * det::tanh(std::min(k * p.depth, 20.0)) : 0.0;
+      if (!(kap > 0.0)) {
+        a[0] = static_cast<float>(damp);
+        continue;
+      }
+      const double w = std::sqrt(p.gravity * kap), ph = w * dt;
+      const double cs = det::cos(ph), sn = det::sin(ph);
+      a[0] = static_cast<float>(cs * damp);
+      a[1] = static_cast<float>((kap / w) * sn * damp);
+      a[2] = static_cast<float>(-(p.gravity / w) * sn * damp);
+      a[3] = static_cast<float>(cs * damp);
+    }
+  }
+  return cf;
+}
+
+// Each cell's real-space factor for a step of dt, ewave::step's: the mask's beach rate and the
+// sponge, a rate per cell applied as exp(-rate dt), and 0 on land. Worked out in double on the
+// host whenever dt or the mask changes, for the reason modeCoefficients() gives.
+std::vector<float> realFactors(const cvc::ocean::ewave_params &p, const std::vector<float> &mask,
+                               double dt) {
+  namespace det = cvc::algo::det;
+  const int n = p.n;
+  const double sw = p.sponge_cells;
+  std::vector<float> f(static_cast<std::size_t>(n) * n);
+  for (int j = 0; j < n; ++j)
+    for (int i = 0; i < n; ++i) {
+      const std::size_t c = static_cast<std::size_t>(j) * n + i;
+      const double m = mask[c];
+      double rate = m < 1.0 ? p.beach_rate * (1.0 - m) : 0.0;
+      const double d = double(std::min(std::min(i, n - 1 - i), std::min(j, n - 1 - j)));
+      if (sw > 0.0 && d < sw) {
+        const double r = (sw - d) / sw;
+        rate += p.sponge_rate * (r * r);
+      }
+      f[c] = static_cast<float>(m <= 0.0 ? 0.0 : rate > 0.0 ? det::exp(-rate * dt) : 1.0);
+    }
+  return f;
+}
+
+// ── the real-space pass: normalise, then the mask's beach, the sponge and land ──
+// z / n^2 times the cell's factor from uFactor (see realFactors()).
 const char *kRealFS = "//VTK::System::Dec\n"
-                      "uniform sampler2D uZ, uMask;\n"
-                      "uniform int uN;\n"
-                      "uniform float uScale, uDt, uSpongeW, uSpongeRate, uBeachRate;\n"
+                      "uniform sampler2D uZ, uFactor;\n"
+                      "uniform float uScale;\n"
                       "//VTK::Output::Dec\n"
                       "void main(){\n"
                       "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
                       "  vec2 z = texelFetch(uZ, c, 0).rg * uScale;\n"
-                      "  float m = texelFetch(uMask, c, 0).r;\n"
-                      "  float rate = m < 1.0 ? uBeachRate * (1.0 - m) : 0.0;\n"
-                      "  float d = float(min(min(c.x, uN - 1 - c.x), min(c.y, uN - 1 - c.y)));\n"
-                      "  if (uSpongeW > 0.0 && d < uSpongeW) {\n"
-                      "    float r = (uSpongeW - d) / uSpongeW;\n"
-                      "    rate += uSpongeRate * (r * r);\n"
-                      "  }\n"
-                      "  float f = m <= 0.0 ? 0.0 : (rate > 0.0 ? exp(-rate * uDt) : 1.0);\n"
-                      "  gl_FragData[0] = vec4(z * f, 0.0, 0.0);\n"
+                      "  gl_FragData[0] = vec4(z * texelFetch(uFactor, c, 0).r, 0.0, 0.0);\n"
                       "}\n";
 
 // ── a source pass: h += (a drop's bump + a field) * mask ──────────────────────
@@ -178,8 +222,13 @@ bool EWave::init(vtkOpenGLRenderWindow *rw) {
     }
   m_mask = oceanFloatTexture(m_rw, n, n, 1, m_maskHost.data());
   m_src = oceanFloatTexture(m_rw, n, n, 1, zeros.data());
-  if (!m_mask || !m_src || !m_fft.init(m_rw, n)) {
-    std::fprintf(stderr, "EWave: R32F texture or FFT allocation failed.\n");
+  // Filled by the first step (see step()).
+  m_coef = oceanFloatTexture(m_rw, n, n, 4, nullptr);
+  m_factor = oceanFloatTexture(m_rw, n, n, 1, nullptr);
+  m_dt = 0.0;
+  m_factorStale = true;
+  if (!m_mask || !m_src || !m_coef || !m_factor || !m_fft.init(m_rw, n)) {
+    std::fprintf(stderr, "EWave: R32F/RGBA32F texture or FFT allocation failed.\n");
     return false;
   }
   m_fbo = vtkSmartPointer<vtkOpenGLFramebufferObject>::New();
@@ -206,7 +255,8 @@ void EWave::releaseResources() {
   m_fbo = nullptr;
   for (auto &z : m_z)
     z = nullptr;
-  m_mask = m_src = nullptr;
+  m_mask = m_src = m_coef = m_factor = nullptr;
+  m_dt = 0.0;
   m_ready = false;
 }
 
@@ -218,6 +268,7 @@ void EWave::setMask(const std::vector<double> &mask) {
       throw std::invalid_argument("EWave: mask values must be in [0, 1]");
   for (std::size_t c = 0; c < mask.size(); ++c)
     m_maskHost[c] = static_cast<float>(mask[c]);
+  m_factorStale = true; // the beach and land are in the real-space factors
   if (m_ready) {
     m_rw->MakeCurrent();
     m_mask->Create2DFromRaw(m_p.n, m_p.n, 1, VTK_FLOAT, m_maskHost.data());
@@ -310,6 +361,19 @@ void EWave::step(double dt) {
   // passesRun() measures what step() did rather than repeating passesPerStep()'s formula.
   const long long fftBefore = m_fft.passesRun();
 
+  // A new dt (or mask) works the coefficients (or factors) out again, as ewave::step does.
+  if (dt != m_dt) {
+    std::vector<float> cf = modeCoefficients(m_p, dt);
+    m_coef->Create2DFromRaw(n, n, 4, VTK_FLOAT, cf.data());
+    m_dt = dt;
+    m_factorStale = true;
+  }
+  if (m_factorStale) {
+    std::vector<float> f = realFactors(m_p, m_maskHost, dt);
+    m_factor->Create2DFromRaw(n, n, 1, VTK_FLOAT, f.data());
+    m_factorStale = false;
+  }
+
   // Forward FFT: from st, through w1 and w2, the spectrum in w2.
   vtkTextureObject *spec = m_fft.transform(m_fbo, m_z[st], m_z[w1], m_z[w2], /*forward=*/true);
 
@@ -318,18 +382,14 @@ void EWave::step(double dt) {
   vtkShaderProgram *u = m_update->Program;
   cache->ReadyShaderProgram(u);
   spec->Activate();
+  m_coef->Activate();
   u->SetUniformi("uZ", spec->GetTextureUnit());
+  u->SetUniformi("uCoef", m_coef->GetTextureUnit());
   u->SetUniformi("uN", n);
-  u->SetUniformf("uDk", static_cast<float>(kTwoPi / (double(n) * m_p.dx)));
-  // Deep water may be +infinity; k d only feeds tanh(min(k d, 20)).
-  u->SetUniformf("uDepth", static_cast<float>(std::min(m_p.depth, 1e30)));
-  u->SetUniformf("uG", static_cast<float>(m_p.gravity));
-  u->SetUniformf("uDt", static_cast<float>(dt));
-  u->SetUniformf("uGamma", static_cast<float>(m_p.damping_k2));
-  u->SetUniformf("uDamping", static_cast<float>(m_p.damping));
   m_update->Render();
   ++m_passes;
   spec->Deactivate();
+  m_coef->Deactivate();
 
   // Inverse FFT: from w1, through w2 and w1, the field in w1.
   vtkTextureObject *field = m_fft.transform(m_fbo, m_z[w1], m_z[w2], m_z[w1], /*forward=*/false);
@@ -339,19 +399,14 @@ void EWave::step(double dt) {
   vtkShaderProgram *r = m_real->Program;
   cache->ReadyShaderProgram(r);
   field->Activate();
-  m_mask->Activate();
+  m_factor->Activate();
   r->SetUniformi("uZ", field->GetTextureUnit());
-  r->SetUniformi("uMask", m_mask->GetTextureUnit());
-  r->SetUniformi("uN", n);
+  r->SetUniformi("uFactor", m_factor->GetTextureUnit());
   r->SetUniformf("uScale", static_cast<float>(1.0 / (double(n) * double(n)))); // exact: 2^-2k
-  r->SetUniformf("uDt", static_cast<float>(dt));
-  r->SetUniformf("uSpongeW", static_cast<float>(m_p.sponge_cells));
-  r->SetUniformf("uSpongeRate", static_cast<float>(m_p.sponge_rate));
-  r->SetUniformf("uBeachRate", static_cast<float>(m_p.beach_rate));
   m_real->Render();
   ++m_passes;
   field->Deactivate();
-  m_mask->Deactivate();
+  m_factor->Deactivate();
 
   m_state = 0;
   m_passes += m_fft.passesRun() - fftBefore;

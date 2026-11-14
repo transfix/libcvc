@@ -47,8 +47,12 @@ class vtkOpenGLQuadHelper;
 //   - the inverse FFT: 2 log2 n passes;
 //   - the real-space pass: normalises by 1 / n^2, then damps by the mask's beach rate and the
 //     sponge as exp(-rate dt) and zeroes land, as the CPU does.
-// The coefficients are computed per texel in the update pass from uniforms, so a new dt costs
-// nothing; the mask is an R32F texture.
+// The step's numbers are worked out on the host in double, as the CPU window works out its own
+// (ewave::prepare and ewave::step): each mode's 2 x 2 update with its damping (an RGBA32F texture)
+// and each cell's real-space factor (R32F), again only when dt or the mask changes. So the passes
+// take no cos, sin or exp of their own, and the result doesn't depend on how a driver computes
+// them (EWave.cpp says why that matters). Stepping at the last step's dt costs nothing more; a new
+// dt costs that host work and an n^2 RGBA32F and R32F upload. The mask is an R32F texture.
 //
 // Sources go into h when they are added, times the mask, as on the CPU (add_height and
 // add_heights change h at once, and the next step moves them on): addDrop and addHeights are one
@@ -132,6 +136,10 @@ private:
   int m_state = 0;                          // which m_z holds the state (0 after a step)
   vtkSmartPointer<vtkTextureObject> m_mask; // R32F
   vtkSmartPointer<vtkTextureObject> m_src;  // R32F, addHeights' field
+  vtkSmartPointer<vtkTextureObject> m_coef; // RGBA32F, each mode's update for m_dt (EWave.cpp)
+  vtkSmartPointer<vtkTextureObject> m_factor; // R32F, each cell's real-space factor for m_dt
+  double m_dt = 0.0;                          // the dt m_coef holds; 0 before the first step
+  bool m_factorStale = true;                  // m_factor needs working out again (dt, mask)
   vtkSmartPointer<vtkOpenGLFramebufferObject> m_fbo;
 
   std::unique_ptr<vtkOpenGLQuadHelper> m_update;
