@@ -959,8 +959,13 @@ document that subscribes (`relay: { subscribe: [fog] }`, §9.8.3) names the mirr
   to that stream gets a key frame of the picture as it is, then each frame in order.
 - A client too far behind for the ring of 8 starts again at the next key frame, so `key_every`
   bounds how long it can show a stale part.
-- Each frame is one state write, so keep a mirrored raster within the relay's message size: a
-  512 × 512 key frame is 1 MiB.
+- Each frame is one state write, and a key frame is the whole raster: a 1024 × 1024 key frame is
+  4 MiB, well inside the transports' 64 MiB message cap.
+  - Bandwidth, not the cap, is the limit. The WebSocket relay skips a client whose send queue
+    passes 2 MiB until it drains, and its periodic broadcast then re-sends the mirror's current
+    values. The follower catches up from those, through the ring or the last key frame.
+  - So size the raster and `key_every` to the slowest client's link. A raster that changes a
+    little at a time costs little between its key frames.
 - The same mirror works on one machine, with no relay.
 
 Stock hosts have all of this:
