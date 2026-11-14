@@ -8852,7 +8852,7 @@ TEST(AriadneRichText, LiteralRunsReachTheBackendStyledWithTheirLinks) {
   Runtime rt(app, "ui");
   RichMock mb;
   rt.set_backend(&mb);
-  LoadResult lr = load_string(R"yaml(
+  LoadResult lr = load_string(app, R"yaml(
 windows:
   - window: W
     children:
@@ -8901,7 +8901,7 @@ TEST(AriadneRichText, RunsFromStateTakeOnLinkWithWhatTheLinkIs) {
   Runtime rt(app, "ui");
   RichMock mb;
   rt.set_backend(&mb);
-  LoadResult lr = load_string(R"yaml(
+  LoadResult lr = load_string(app, R"yaml(
 init: |
   (state-set-tree "post.runs"
     (list "hi "
@@ -8997,7 +8997,7 @@ TEST(AriadneRichText, ARepeatedRowsRunsAndHandlersSeeItsIndex) {
   Runtime rt(app, "ui");
   RichMock mb;
   rt.set_backend(&mb);
-  LoadResult lr = load_string(R"yaml(
+  LoadResult lr = load_string(app, R"yaml(
 init: |
   (state-set-tree "feed.items"
     (list (dict "runs" (list (dict "text" "first" "href" "a")))

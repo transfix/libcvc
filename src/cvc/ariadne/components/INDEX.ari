@@ -194,6 +194,20 @@ catalog:
     binds: "<prefix>.{id}.*"
     for: "the same chat without a window, to embed in a document's own window"
     args: { id: chat, room: room.token }
+  - component: py_console
+    file: py_console.ari
+    unit: py_console
+    binds: "<prefix>.{id}.log (the scrollback), <prefix>.{id}.draft and <prefix>.tree.{id}.*"
+    for: "a Python console in the document's own namespace: a scrollback, an input line (Enter runs it, or Run under ImGui; Shift+Enter for a new line), and Clear"
+    args: { id: py_console, title: Python }
+    verbs: [python-console, python-console-clear]
+    note: "needs arix/ariglx/ariglx-web and console: true in the document's python: block (with requires: [python])"
+  - component: py_console_panel
+    file: py_console.ari
+    unit: py_console_panel
+    binds: "<prefix>.{id}.log, <prefix>.{id}.draft"
+    for: "the same console without a window, to embed in a document's own window"
+    args: { id: py_console }
   - component: room_users
     file: room_users.ari
     unit: room_users

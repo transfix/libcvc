@@ -2,18 +2,20 @@
 // docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §8.5).
 //
 // A guest is a WebAssembly.Instance beside the host's own module, made in JS (EM_JS) with an `ari`
-// import object: a trampoline per Import into cvc_ari_wasm_import, and the gas check. Its memory
+// import object: a trampoline per Import into cvc_ari_wasm_import, and ari.gas. Its memory
 // is a WebAssembly.Memory of its own, so the host copies in and out of it (BrMemory) and map() is
 // null. A page has one thread and no second stack, so a guest pauses by Asyncify: it was
 // transformed at install (guest_runtime.h, cvc_ariadne_wasm_transform), and a pause unwinds its
 // stack into a room in its own memory and returns to the host. The next poll calls the export
 // again in rewind mode, which takes the guest back to where it paused.
-//   - At a gas check (ari.log_execution) once the slice's checks are spent: sliced. A check costs
-//     kFuelPerCheck units of fuel, so a slice of `fuel` runs ceil(fuel / kFuelPerCheck) checks.
+//   - At ari.gas, the gas pass's call for a block the slice can't pay for (meter.h): sliced. Each
+//     call sets the guest's ari_gas to its slice first, and what the guest took from it is the
+//     call's gas; the next poll's slice is at least the block's cost, which the guest pays first.
 //   - In an async import whose PendingImport isn't done: waiting. Rewound, the import returns the
 //     PendingImport's value.
-// Run to its end (run(), a start function), a guest can't pause: out of checks or waiting, it
-// traps. The memory limit is the module's own maximum, lowered to InstanceLimits::max_memory
+// Run to its end (run(), a start function), a guest can't pause: out of gas or waiting, it traps.
+// A start function runs on ari_gas's own start (kStartGas). The memory limit is the module's own
+// maximum, lowered to InstanceLimits::max_memory
 // before the module is compiled (cap_memory), so the engine refuses the memory.grow. A .wat module
 // (there is no WAT compiler here), or a guest that wasn't transformed, is refused.
 //
@@ -54,7 +56,8 @@
 
 // The scratch buffer's slots (kScratch i64s; the C++ side's names are below): [0, 16) an import's
 // arguments, then its answer at 0 (a trap's text at 0 and 1); 16 the answer a rewound import gets;
-// 17 the gas checks the last call ran; 18 its result; [20, 32) an export's arguments.
+// 17 the gas the last call took; 18 its result; 19 the cost of the block it paused before, where
+// its slice ran out; [20, 32) an export's arguments.
 
 // A message for the C++ side (cvc_wasm_text): the last failure's.
 EM_JS(int, cvc_wasm_text, (char *dst, int cap), {
@@ -81,17 +84,17 @@ EM_JS(int, cvc_wasm_check, (const void *bytes, int n), {
 
 // Instantiate the module `module_ctx` (the BrModule) under the memory cap `cap`, whose bytes are
 // `bytes` (compiled the first time, then taken from Module.cvcWasmModules): 1, or 0 with the
-// reason in cvcWasmText, or 2 for a module without the transform's gas checks and Asyncify
-// exports. `spec` lists the imports in order, "module:name:returns;" each (returns 1: an i64, 2: an
-// i32, WASI's errno), and each is bound under its own module (`ari`, `wasi_snapshot_preview1`).
+// reason in cvcWasmText, or 2 for a module that isn't metered (ari.gas, ari_gas) or has no
+// Asyncify exports. `spec` lists the imports in order, "module:name:returns;" each (returns 1: an
+// i64, 2: an i32, WASI's errno), and each is bound under its own module (`ari`,
+// `wasi_snapshot_preview1`).
 EM_JS(int, cvc_wasm_instantiate, (void *ctx, void *module_ctx, const void *bytes, int n,
                                   double cap, const char *spec, int spec_len, void *scratch,
-                                  double start_checks, double unwind_bytes), {
+                                  double unwind_bytes), {
   var guests = Module.cvcWasmGuests = Module.cvcWasmGuests || {};
   var mods = Module.cvcWasmModules = Module.cvcWasmModules || {};
-  var g = {ex: null, mem: null, scratch: scratch >>> 0, left: start_checks, checks: 0,
-           sliced: false, pausable: false, rewinding: false, buf: 0, unwind: unwind_bytes,
-           broken: ""};
+  var g = {ex: null, mem: null, scratch: scratch >>> 0, pending: 0n, sliced: false,
+           pausable: false, rewinding: false, buf: 0, unwind: unwind_bytes, broken: ""};
   var view = function() { return new BigInt64Array(HEAPU8.buffer, g.scratch, 32); };
   // Unwind the guest's stack into the room at buf: Asyncify's header (where it writes next, and
   // where the room ends), then the room, [buf + 8, buf + 8 + unwind).
@@ -150,8 +153,8 @@ EM_JS(int, cvc_wasm_instantiate, (void *ctx, void *module_ctx, const void *bytes
     }
     var exported = WebAssembly.Module.exports(mod), imported = WebAssembly.Module.imports(mod);
     var transformed = imported.some(function(i) {
-      return i.module == "ari" && i.name == "log_execution" && i.kind == "function";
-    });
+      return i.module == "ari" && i.name == "gas" && i.kind == "function";
+    }) && exported.some(function(e) { return e.name == "ari_gas" && e.kind == "global"; });
     ["asyncify_start_unwind", "asyncify_stop_unwind", "asyncify_start_rewind",
      "asyncify_stop_rewind", "asyncify_get_state"].forEach(function(name) {
       if (!exported.some(function(e) { return e.name == name && e.kind == "function"; }))
@@ -167,16 +170,17 @@ EM_JS(int, cvc_wasm_instantiate, (void *ctx, void *module_ctx, const void *bytes
         (imports[f[0]] = imports[f[0]] || {})[f[1]] = trampoline(i, Number(f[2]));
       }
     var ari = imports.ari;
-    ari.log_execution = function() {
+    // ari.gas(cost): the slice can't pay for the block the guest is about to run. The call pauses
+    // there; a call that can't pause, or the start function, is out of gas.
+    ari.gas = function(cost) {
       if (g.rewinding) {
         resumed();
         return;
       }
-      ++g.checks;
-      if (--g.left >= 0)
-        return;
       if (!g.pausable)
-        throw new WebAssembly.RuntimeError("ran out of fuel");
+        throw new WebAssembly.RuntimeError(g.ex ? "ran out of gas"
+                                                : "the module's start function ran out of gas");
+      g.pending = BigInt(cost);
       g.sliced = true;
       pause();
     };
@@ -211,14 +215,15 @@ EM_JS(int, cvc_wasm_arity, (void *ctx, const char *name, int name_len), {
 });
 
 // Call export `name` with the arguments at slot 20, rewinding it to where it paused when `rewind`,
-// with `left` gas checks: 0 it returned (its result at 18), 1 it paused at a gas check, 2 in an
-// import that waits, 3 it trapped (the trap's text in cvcWasmText). The checks it ran go to 17. A
-// broken guest (its paused stack ran past the room) traps at once.
+// with `gas` in its ari_gas: 0 it returned (its result at 18), 1 it paused at ari.gas (the block's
+// cost at 19), 2 in an import that waits, 3 it trapped (the trap's text in cvcWasmText). The gas it
+// took goes to 17. A broken guest (its paused stack ran past the room) traps at once.
 EM_JS(int, cvc_wasm_call, (void *ctx, const char *name, int name_len, int nargs, int rewind,
-                           int pausable, double left), {
+                           int pausable, double gas), {
   var g = Module.cvcWasmGuests[ctx], p = name >>> 0;
   var s = new BigInt64Array(HEAPU8.buffer, g.scratch, 32);
   s[17] = 0n;
+  s[19] = 0n;
   if (g.broken) {
     Module.cvcWasmText = g.broken;
     return 3;
@@ -227,8 +232,9 @@ EM_JS(int, cvc_wasm_call, (void *ctx, const char *name, int name_len, int nargs,
   var args = [];
   for (var i = 0; i < nargs; ++i)
     args.push(Number(BigInt.asIntN(32, s[20 + i])));
-  g.left = left;
-  g.checks = 0;
+  var set = BigInt(gas);
+  g.ex.ari_gas.value = set;
+  g.pending = 0n;
   g.sliced = false;
   g.pausable = !!pausable;
   // After an unwind, whether the paused stack ran past the room. Asyncify writes it unchecked and
@@ -275,7 +281,9 @@ EM_JS(int, cvc_wasm_call, (void *ctx, const char *name, int name_len, int nargs,
     status = 3;
   }
   s = new BigInt64Array(HEAPU8.buffer, g.scratch, 32); // the host's memory may have grown
-  s[17] = BigInt(g.checks);
+  var left = g.ex.ari_gas.value;
+  s[17] = set > left ? set - left : 0n;
+  s[19] = g.pending;
   if (status == 0)
     s[18] = typeof r == "bigint" ? r : BigInt(Math.trunc(Number(r) || 0));
   return status;
@@ -313,15 +321,16 @@ constexpr std::uint64_t kPage = 65536;
 constexpr std::uint64_t kUnwindBytes = 32 * 1024;
 // ari_alloc takes an i32, and the room's ends are i32 addresses.
 constexpr std::uint64_t kMaxUnwindBytes = 0x7fffffff - 16;
-// The gas checks a start function, or the room for a pause, may run: the engine's setup fuel.
-constexpr std::uint64_t kSetupChecks = 100'000'000 / kFuelPerCheck;
+// The gas ari_alloc may use for the room a pause takes: the engine's setup gas.
+constexpr std::uint64_t kSetupGas = 100'000'000;
 
 // The scratch buffer (the EM_JS bodies' slots).
 constexpr int kScratch = 32;
 constexpr int kImportArgs = 16; // [0, 16): an import's arguments; its answer at 0
 constexpr int kResumed = 16;    // what a rewound import returns
-constexpr int kChecks = 17;     // the checks the last call ran
+constexpr int kTaken = 17;      // the gas the last call took
 constexpr int kResult = 18;     // the last call's result
+constexpr int kPending = 19;    // the block it paused before, where its slice ran out
 constexpr int kExportArgs = 20; // [20, 32): an export's arguments
 
 std::string take_text() {
@@ -357,8 +366,8 @@ bool imports_match(const std::vector<FunctionImport> &declared, const std::vecto
   for (const FunctionImport &f : declared) {
     const std::string what = f.module + "." + f.name;
     std::string params, results;
-    if (f.module == "ari" && f.name == "log_execution") {
-      params = "\x7f"; // the transform's gas check, the runtime's own
+    if (f.module == "ari" && f.name == "gas") {
+      params = "\x7e"; // the gas pass's ari.gas (meter.h), the runtime's own
     } else {
       const auto im = std::find_if(host.begin(), host.end(), [&](const Import &i) {
         return i.module == f.module && i.name == f.name;
@@ -434,11 +443,11 @@ public:
     const int r = cvc_wasm_instantiate(
         this, static_cast<BrModule *>(module_.get()), bytes.data(), static_cast<int>(bytes.size()),
         static_cast<double>(max_pages_), spec.data(), static_cast<int>(spec.size()),
-        scratch_.data(), static_cast<double>(kSetupChecks), static_cast<double>(unwind_bytes_));
+        scratch_.data(), static_cast<double>(unwind_bytes_));
     if (r == 2)
-      error = "it isn't transformed for the browser (it has no gas checks, ari.log_execution, "
-              "or no Asyncify exports): install it through cvc_ariadne_wasm_transform "
-              "(wasm-opt --log-execution=ari --asyncify --pass-arg=asyncify-imports@ari.* -O1)";
+      error = "it isn't transformed for the browser (it isn't metered, with ari.gas and ari_gas, "
+              "or it has no Asyncify exports): install it through cvc_ariadne_wasm_transform "
+              "(ari_wasm_meter, then wasm-opt --asyncify --pass-arg=asyncify-imports@ari.* -O1)";
     else if (r != 1)
       error = take_text();
     return r == 1;
@@ -498,13 +507,13 @@ public:
   std::unique_ptr<Call> start(const std::string &name, std::vector<std::int64_t> args,
                               std::string &error) override;
 
-  bool run(const std::string &name, std::vector<std::int64_t> args, std::uint64_t fuel,
+  bool run(const std::string &name, std::vector<std::int64_t> args, std::uint64_t gas,
            std::int64_t &result, std::uint64_t &used, std::string &error) override {
     if (!takes(name, args.size(), error))
       return false;
-    std::uint64_t checks = 0;
-    const int status = call(name, args, false, false, fuel, checks);
-    used += checks * kFuelPerCheck;
+    std::uint64_t taken = 0;
+    const int status = call(name, args, false, false, gas, taken);
+    used += taken;
     if (status == 0) {
       result = scratch_[kResult];
       return true;
@@ -515,23 +524,23 @@ public:
 
   // ── for BrCall ──
 
-  // Call export `name` (cvc_wasm_call's statuses); `checks` gets the gas checks it ran.
+  // Call export `name` with `gas` (cvc_wasm_call's statuses); `taken` gets the gas it took.
   int call(const std::string &name, const std::vector<std::int64_t> &args, bool rewind,
-           bool pausable, std::uint64_t fuel, std::uint64_t &checks) {
+           bool pausable, std::uint64_t gas, std::uint64_t &taken) {
     std::copy(args.begin(), args.end(), scratch_.begin() + kExportArgs);
     pausable_ = pausable;
-    const std::uint64_t left =
-        std::max<std::uint64_t>((fuel + kFuelPerCheck - 1) / kFuelPerCheck, 1);
-    const int status = cvc_wasm_call(this, name.data(), static_cast<int>(name.size()),
-                                     static_cast<int>(args.size()), rewind ? 1 : 0,
-                                     pausable ? 1 : 0, static_cast<double>(left));
+    const int status = cvc_wasm_call(
+        this, name.data(), static_cast<int>(name.size()), static_cast<int>(args.size()),
+        rewind ? 1 : 0, pausable ? 1 : 0, static_cast<double>(std::max<std::uint64_t>(gas, 1)));
     pausable_ = false;
-    checks = static_cast<std::uint64_t>(scratch_[kChecks]);
+    taken = static_cast<std::uint64_t>(scratch_[kTaken]);
     return status;
   }
+  // After a pause at ari.gas: the cost of the block the slice couldn't pay for.
+  std::uint64_t pending() const { return static_cast<std::uint64_t>(scratch_[kPending]); }
   // What the guest waits on, if anything.
   const std::shared_ptr<PendingImport> &waiting() const { return waiting_; }
-  // Before a rewind: what the call the guest paused in returns (0 after a gas check).
+  // Before a rewind: what the call the guest paused in returns (0 after ari.gas).
   void resume() {
     scratch_[kResumed] = waiting_ ? waiting_->value : 0;
     waiting_.reset();
@@ -569,8 +578,8 @@ private:
       error = what + " is more than ari_alloc's i32 asks for";
       return false;
     }
-    if (!run("ari_alloc", {static_cast<std::int64_t>(unwind_bytes_ + 16)},
-             kSetupChecks * kFuelPerCheck, p, used, error)) {
+    if (!run("ari_alloc", {static_cast<std::int64_t>(unwind_bytes_ + 16)}, kSetupGas, p, used,
+             error)) {
       error = "ari_alloc, for " + what + ": " + error;
       return false;
     }
@@ -612,7 +621,7 @@ public:
       : inst_(inst), name_(std::move(name)), args_(std::move(args)) {}
   ~BrCall() override { inst_.forget(); }
 
-  State poll(std::uint64_t fuel) override {
+  State poll(std::uint64_t gas) override {
     used_ = 0;
     if (finished_)
       return trap_.empty() ? State::done : State::trapped;
@@ -621,10 +630,14 @@ public:
     const bool rewind = paused_;
     if (rewind)
       inst_.resume();
-    std::uint64_t checks = 0;
-    const int status = inst_.call(name_, args_, rewind, true, fuel ? fuel : 1, checks);
-    used_ = checks * kFuelPerCheck;
+    // The slice, and at least the block the last one couldn't pay for, which the guest pays first.
+    const std::uint64_t set = std::max<std::uint64_t>(gas, sliced_ ? pending_ : 0);
+    std::uint64_t taken = 0;
+    const int status = inst_.call(name_, args_, rewind, true, set, taken);
+    used_ = taken;
     paused_ = status == 1 || status == 2;
+    sliced_ = status == 1;
+    pending_ = sliced_ ? inst_.pending() : 0;
     switch (status) {
     case 0:
       finished_ = true;
@@ -644,7 +657,7 @@ public:
     }
   }
 
-  std::uint64_t fuel_used() const override { return used_; }
+  std::uint64_t gas_used() const override { return used_; }
   std::int64_t result() const override { return result_; }
   const std::string &trap() const override { return trap_; }
 
@@ -652,7 +665,9 @@ private:
   BrInstance &inst_;
   std::string name_;
   std::vector<std::int64_t> args_;
-  bool paused_ = false; // unwound: the next poll rewinds it
+  bool paused_ = false;       // unwound: the next poll rewinds it
+  bool sliced_ = false;       // at ari.gas
+  std::uint64_t pending_ = 0; // the block the slice couldn't pay for
   bool finished_ = false;
   std::uint64_t used_ = 0;
   std::int64_t result_ = 0;
