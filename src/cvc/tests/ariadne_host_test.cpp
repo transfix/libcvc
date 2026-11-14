@@ -35,6 +35,19 @@ namespace se = cvc::state_exec;
 namespace fs = std::filesystem;
 
 namespace {
+// A document checked against a fresh app's registries: the built-in widget types, blocks and
+// decoders only. (A test that registers its own loads against that app instead.)
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load(const std::string &yaml) {
+  cvc::app app;
+  return cvc::ariadne::load_string(app, yaml);
+}
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load_file(const std::string &path) {
+  cvc::app app;
+  return cvc::ariadne::load_file(app, path);
+}
+} // namespace
+
+namespace {
 
 #define REQUIRE_YAML()                                                                             \
   do {                                                                                             \
@@ -93,7 +106,7 @@ const char *kConfDoc = "meta:\n"
                        "  - text: hello\n";
 
 std::vector<ArgSpec> conf_spec() {
-  LoadResult lr = load_string(kConfDoc);
+  LoadResult lr = fresh_load(kConfDoc);
   EXPECT_TRUE(lr.ok) << lr.error;
   return lr.args;
 }
@@ -460,7 +473,7 @@ TEST(AriadneDocArgs, UsageListsEveryArgument) {
 TEST(AriadneDocArgs, LoaderRejectsAMalformedSpec) {
   REQUIRE_YAML();
   const auto fails = [](const std::string &args, const std::string &want) {
-    LoadResult lr = load_string("meta: {min_libcvc: 3.4.0}\nargs:\n" + args + "root: []\n");
+    LoadResult lr = fresh_load("meta: {min_libcvc: 3.4.0}\nargs:\n" + args + "root: []\n");
     EXPECT_FALSE(lr.ok) << args;
     EXPECT_NE(lr.error.find(want), std::string::npos) << lr.error;
   };
@@ -471,7 +484,7 @@ TEST(AriadneDocArgs, LoaderRejectsAMalformedSpec) {
   fails("  f: {type: bool, positional: true}\n", "cannot be a bool");
   fails("  a: {positional: true}\n  b: {positional: true, required: true}\n",
         "a required positional cannot follow an optional one");
-  LoadResult ok = load_string("meta: {min_libcvc: 3.4.0}\nargs:\n  v: bool\nroot: []\n");
+  LoadResult ok = fresh_load("meta: {min_libcvc: 3.4.0}\nargs:\n  v: bool\nroot: []\n");
   ASSERT_TRUE(ok.ok) << ok.error;
   EXPECT_TRUE(ok.has_args_block);
   ASSERT_EQ(ok.args.size(), 1u);
@@ -1377,7 +1390,7 @@ TEST(AriadneModuleTick, AModulesInputLanesAreIgnoredWithAWarning) {
   const fs::path dir = test_dir("mod_lanes");
   write(dir, "mod.ari",
         "on_key: (state-set \"k\" 1)\non_signal: (state-set \"s\" 1)\nroot:\n  - text: m\n");
-  LoadResult lr = load_file(
+  LoadResult lr = fresh_load_file(
       write(dir, "p.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - load: mod.ari\n").string());
   ASSERT_TRUE(lr.ok) << lr.error;
   int told = 0;

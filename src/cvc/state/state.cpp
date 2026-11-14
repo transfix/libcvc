@@ -44,6 +44,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <string_view>
@@ -52,32 +53,46 @@
 #include <vector>
 
 namespace cvc {
-// SEPARATOR is now an inline variable defined in state.h (C++17).
-// Keeping the symbol exported from the DLL would otherwise require an
-// explicit __declspec(dllexport), since WINDOWS_EXPORT_ALL_SYMBOLS only
-// covers function symbols, not data members.
-state::init_func_vec state::_startup;
-state::app_init_func_vec state::_appStartup;
+
+#ifdef USING_XMLRPC
+// xmlrpc_server.cpp: watches the app's __system.xmlrpc, starting or stopping its XML-RPC server.
+void xmlrpc_server_startup(app &ctx);
+#endif
+
+namespace detail {
+
+// An app's on_startup() callbacks, with their ids (what a startup_connection names, from 1: 0 is
+// a handle that never connected; never reused, so a stale handle names no later one). `started`
+// once the app's root has been made and the callbacks taken to run: one registered after that
+// runs at once.
+struct state_startup_hooks {
+  std::mutex m;
+  std::size_t last_id = 0;
+  bool started = false;
+  std::vector<std::pair<std::size_t, state::app_init_func>> hooks;
+};
+
+} // namespace detail
 
 namespace {
 
-// Guards the two on_startup() registries (_startup, _appStartup)
-// against concurrent registration and snapshot. Lives in this TU
-// rather than as a static class member so it does not look like
-// a singleton-of-state. The registries themselves are global
-// configuration tables (see state::on_startup()).
-boost::mutex &startup_registry_mutex() {
-  static boost::mutex m;
-  return m;
-}
+// The app's startup callbacks (app::slot), behind a shared_ptr so a startup_connection may outlive
+// the app.
+struct startup_hooks_slot {
+  static constexpr const char *app_slot = "cvc.state.startup-hooks";
+  std::shared_ptr<detail::state_startup_hooks> hooks =
+      std::make_shared<detail::state_startup_hooks>();
+};
 
-// Monotonic id source for startup_connection. Starts at 1 so that 0 can
-// mean "never connected" in a default-constructed handle. Ids are never
-// reused, so a stale handle can never name a later registration.
-// Caller must hold startup_registry_mutex().
-std::size_t next_startup_id() {
-  static std::size_t counter = 0;
-  return ++counter;
+// What every app's root gets when it is made, before the app's own callbacks.
+void root_defaults(app &ctx, state &root) {
+  using namespace boost::posix_time;
+  root("__system.start").value(to_simple_string(microsec_clock::universal_time()));
+#ifdef USING_XMLRPC
+  xmlrpc_server_startup(ctx);
+#else
+  (void)ctx;
+#endif
 }
 
 } // namespace
@@ -262,22 +277,19 @@ state::state_ptr state::instancePtr(app &ctx) {
   }
 
   if (fire_startup) {
-    // Snapshot both registries under the registry guard so we do
-    // not hold it while user callbacks run. Callbacks fire once
-    // per app (not once per process) — see state.h.
-    init_func_vec nullary_snapshot;
-    app_init_func_vec app_snapshot;
+    root_defaults(ctx, *ptr);
+    // The app's callbacks, taken under their lock and run outside it. Marked started in the same
+    // step, so each runs once: one registered later runs from on_startup().
+    std::vector<app_init_func> run;
     {
-      boost::mutex::scoped_lock lock(startup_registry_mutex());
-      nullary_snapshot = _startup;
-      app_snapshot = _appStartup;
+      detail::state_startup_hooks &h = *ctx.slot<startup_hooks_slot>().hooks;
+      std::lock_guard<std::mutex> lock(h.m);
+      h.started = true;
+      for (const auto &entry : h.hooks)
+        run.push_back(entry.second);
     }
-    BOOST_FOREACH (init_func_vec::value_type &entry, nullary_snapshot) {
-      entry.second();
-    }
-    BOOST_FOREACH (app_init_func_vec::value_type &entry, app_snapshot) {
-      entry.second(ctx);
-    }
+    for (app_init_func &f : run)
+      f(ctx);
   }
 
   return ptr;
@@ -2145,72 +2157,59 @@ std::size_t state::sweepExpired() {
 //   Add to the list of functions to call when first initializing cvcstate.
 // ---- Change History ----
 // 01/12/2014 -- Joe R. -- Creation.
+// 11/12/2026 -- The callbacks are the app's own (app::slot), not a process-wide registry.
 // Returns a handle the caller can use to remove the registration again.
-// Callers registering a process-lifetime callback (the usual case: a
-// file-scope static registrar) may ignore it; anything whose captures do
-// not outlive the process must keep the handle and disconnect().
-state::startup_connection state::on_startup(const nullary_func &init_func) {
-  boost::mutex::scoped_lock lock(startup_registry_mutex());
-  const std::size_t id = next_startup_id();
-  _startup.push_back(std::make_pair(id, init_func));
-  return startup_connection(startup_connection::registry_kind::nullary, id);
+state::startup_connection state::on_startup(app &ctx, const nullary_func &init_func) {
+  return on_startup(ctx, app_init_func([init_func](app &) { init_func(); }));
 }
 
-state::startup_connection state::on_startup(const app_init_func &init_func) {
-  boost::mutex::scoped_lock lock(startup_registry_mutex());
-  const std::size_t id = next_startup_id();
-  _appStartup.push_back(std::make_pair(id, init_func));
-  return startup_connection(startup_connection::registry_kind::per_app, id);
+state::startup_connection state::on_startup(app &ctx, const app_init_func &init_func) {
+  const std::shared_ptr<detail::state_startup_hooks> hooks = ctx.slot<startup_hooks_slot>().hooks;
+  std::size_t id = 0;
+  bool started = false;
+  {
+    std::lock_guard<std::mutex> lock(hooks->m);
+    id = ++hooks->last_id;
+    hooks->hooks.push_back(std::make_pair(id, init_func));
+    started = hooks->started;
+  }
+  if (started) // the root was made already: this one's turn is now
+    init_func(ctx);
+  return startup_connection(hooks, id);
 }
 
 // ------------------------------
 // state::startup_connection
 // ------------------------------
 // Purpose:
-//   Removal side of on_startup(). Both operations take the same registry
-//   guard as on_startup() and instancePtr()'s snapshot, so disconnecting
-//   concurrently with an app's first root creation is safe: the callback
+//   Removal side of on_startup(). Both operations take the app's hooks lock,
+//   as on_startup() and instancePtr()'s snapshot do, so disconnecting
+//   concurrently with the app's first root creation is safe: the callback
 //   either made it into that snapshot and runs once more, or it did not.
 //   It can never be invoked after disconnect() has returned on the thread
 //   that owns the captured storage, which is what callers need.
-namespace {
-
-// Erase the entry with the given id from a registry. Returns whether an
-// entry was actually removed. Caller must hold startup_registry_mutex().
-template <class Vec> bool erase_startup_entry(Vec &registry, std::size_t id) {
-  for (typename Vec::iterator it = registry.begin(); it != registry.end(); ++it) {
-    if (it->first == id) {
-      registry.erase(it);
-      return true;
-    }
-  }
-  return false;
-}
-
-} // namespace
-
 bool state::startup_connection::connected() const {
-  if (_id == 0)
+  const std::shared_ptr<detail::state_startup_hooks> hooks = _hooks.lock();
+  if (_id == 0 || !hooks)
     return false;
-  boost::mutex::scoped_lock lock(startup_registry_mutex());
-  if (_kind == registry_kind::nullary) {
-    BOOST_FOREACH (init_func_vec::value_type &entry, _startup)
-      if (entry.first == _id)
-        return true;
-  } else {
-    BOOST_FOREACH (app_init_func_vec::value_type &entry, _appStartup)
-      if (entry.first == _id)
-        return true;
-  }
+  std::lock_guard<std::mutex> lock(hooks->m);
+  for (const auto &entry : hooks->hooks)
+    if (entry.first == _id)
+      return true;
   return false;
 }
 
 bool state::startup_connection::disconnect() {
-  if (_id == 0)
+  const std::shared_ptr<detail::state_startup_hooks> hooks = _hooks.lock();
+  if (_id == 0 || !hooks)
     return false;
-  boost::mutex::scoped_lock lock(startup_registry_mutex());
-  return _kind == registry_kind::nullary ? erase_startup_entry(_startup, _id)
-                                         : erase_startup_entry(_appStartup, _id);
+  std::lock_guard<std::mutex> lock(hooks->m);
+  for (auto it = hooks->hooks.begin(); it != hooks->hooks.end(); ++it)
+    if (it->first == _id) {
+      hooks->hooks.erase(it);
+      return true;
+    }
+  return false;
 }
 
 // ------------------
@@ -2291,23 +2290,3 @@ std::string state::sanitizeStateName(const std::string &name) {
   return result;
 }
 } // namespace cvc
-
-namespace {
-// -----------
-// system_init
-// -----------
-// Purpose:
-//   Sets the default system settings and initial info.
-// ---- Change History ----
-// 01/13/2014 -- Joe R. -- Creation.
-class system_init {
-public:
-  static void init(cvc::app &ctx) {
-    using namespace boost::posix_time;
-    cvc::state::instance(ctx)("__system.start")
-        .value(to_simple_string(microsec_clock::universal_time()));
-  }
-
-  system_init() { cvc::state::on_startup(cvc::state::app_init_func(init)); }
-} static_init;
-} // namespace

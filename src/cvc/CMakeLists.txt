@@ -61,6 +61,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_cluster_membership.h
   ../../inc/cvc/state/state_hybrid_time.h
   ../../inc/cvc/core/world_clock.h
+  ../../inc/cvc/core/input_trace.h
   ../../inc/cvc/core/clock_follower.h
   ../../inc/cvc/core/clock_driver.h
   ../../inc/cvc/core/world_units.h
@@ -70,8 +71,10 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/field.h
   ../../inc/cvc/physics/fluid_surface.h
   ../../inc/cvc/physics/hull.h
+  ../../inc/cvc/physics/immersion.h
   ../../inc/cvc/physics/ocean_surface.h
   ../../inc/cvc/physics/vehicle.h
+  ../../inc/cvc/physics/boat.h
   ../../inc/cvc/physics/body.h
   ../../inc/cvc/physics/backend.h
   ../../inc/cvc/physics/world.h
@@ -355,14 +358,18 @@ set(SOURCE_FILES
   state/state_exec/priority.cpp
   core/world_clock.cpp
   core/world_clock_binding.cpp
+  core/input_trace.cpp
+  core/input_trace_json.cpp
   core/clock_driver.cpp
   core/world_units.cpp
   core/unit_registry.cpp
   physics/world.cpp
   physics/field_step.cpp
+  physics/immersion.cpp
   physics/fluid_surface.cpp
   physics/ocean_surface.cpp
   physics/vehicle.cpp
+  physics/boat.cpp
   physics/null_backend.cpp
   physics/world_binding.cpp
   physics/snapshot_json.cpp
@@ -462,6 +469,7 @@ set(SOURCE_FILES
   nav/sim_world.cpp
   nav/yield.cpp
   nav/sim_world_binding.cpp
+  nav/sim_world_trace.cpp
   nav/sim_thread.cpp
   nav/nav_stats.cpp
   nav/plant_ledger.cpp
@@ -658,7 +666,8 @@ endif()
 # step's vehicle and field code and the null backend, as for nav and world above (the
 # libm-free math they call, cvc/algo/det_math.h, gets it above); the Jolt backend TUs
 # get the same flag on their own target (below).
-set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/field_step.cpp
+set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/boat.cpp
+    physics/field_step.cpp physics/immersion.cpp
     physics/fluid_surface.cpp physics/ocean_surface.cpp physics/null_backend.cpp
     physics/nav_plant.cpp
     physics/dyn_bike_plant.cpp physics/dyn_4w_plant.cpp physics/dyn_world.cpp
@@ -2950,8 +2959,20 @@ option(CVC_BUILD_PERMISSIVE_SMOKE "Build permissive_libs_test without the test s
 # googletest comes from CMAKE_PREFIX_PATH or is built from source (CMake/SetupGTest.cmake).
 option(CVC_BUILD_PORT_TESTS "Build the VolumeRover ports' tests even with CVC_BUILD_TESTS off (the wasm-mt ports lane)" OFF)
 
+# ariadne_wasm_browser_test: WebAssembly guests on the browser backend (src/ariadne_wasm,
+# browser_runtime.cpp; docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §8.5, G2), a googletest binary a
+# plain-wasm (single-threaded) Emscripten build makes with CVC_BUILD_TESTS off, for node to run
+# (ci.yml's `wasm-guests (wasm, node)` job). googletest is built from source (CMake/SetupGTest.cmake),
+# and the transformed test guests are embedded at /guests. The documents' files are MEMFS's. Natively
+# the same file is ariadne_wasm_transform_test, on wasmtime (tests/CMakeLists.txt).
+option(CVC_BUILD_WASM_GUEST_TESTS "Build ariadne_wasm_browser_test even with CVC_BUILD_TESTS off (Emscripten: the wasm guests' node lane)" OFF)
+
 # Add unit tests if enabled
 if(CVC_BUILD_TESTS)
+  if(CVC_BUILD_WASM_GUEST_TESTS)
+    message(WARNING "CVC_BUILD_WASM_GUEST_TESTS builds ariadne_wasm_browser_test only with "
+                    "CVC_BUILD_TESTS off: with the tests on it is ignored")
+  endif()
   add_subdirectory(tests)
 else()
   if(CVC_BUILD_PHYSICS_REPLAY)
@@ -2966,6 +2987,23 @@ else()
     include(SetupGTest)
     cvc_setup_gtest()
     include(${CMAKE_CURRENT_SOURCE_DIR}/tests/port_tests.cmake)
+  endif()
+  if(CVC_BUILD_WASM_GUEST_TESTS)
+    if(NOT EMSCRIPTEN)
+      message(FATAL_ERROR "CVC_BUILD_WASM_GUEST_TESTS is for an Emscripten build; natively, "
+                          "CVC_BUILD_TESTS builds the same file as ariadne_wasm_transform_test")
+    endif()
+    include(SetupGTest)
+    cvc_setup_gtest()
+    include("${PROJECT_SOURCE_DIR}/src/ariadne_wasm/ariadne_wasm.cmake")
+    add_executable(ariadne_wasm_browser_test tests/ariadne_wasm_browser_test.cpp)
+    cvc_ariadne_wasm_host(ariadne_wasm_browser_test)
+    cvc_ariadne_wasm_test_guests(ariadne_wasm_browser_test)
+    target_link_libraries(ariadne_wasm_browser_test PRIVATE cvc GTest::gtest GTest::gtest_main)
+    target_compile_features(ariadne_wasm_browser_test PRIVATE cxx_std_20)
+    # The process exits with main's status. -sFETCH: Ariadne links cvc::net's fetch backend.
+    target_link_options(ariadne_wasm_browser_test PRIVATE -sEXIT_RUNTIME=1
+      -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=4mb -sFETCH=1)
   endif()
 endif()
 

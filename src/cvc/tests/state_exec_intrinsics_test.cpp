@@ -463,7 +463,7 @@ TEST_F(StateTreeIntrinsicsTest, StateSetTreeWritesDictsListsAndScalars) {
                    {"big", value_t(1234567.5)},
                    {"yes", value_t(true)},
                    {"no", value_t(false)},
-                   {"none", nil_value},
+                   {"none", nil_value()},
                    {"items", make_list({make_dict({{"text", value_t(std::string("a"))}}),
                                         make_dict({{"text", value_t(std::string("b"))}})})},
                    {"empty", make_list()}})});
@@ -494,7 +494,7 @@ TEST_F(StateTreeIntrinsicsTest, StateSetTreeReplacesTheSubtree) {
     return make_list(std::move(v));
   };
   call("state-set-tree",
-       {std::string("t"), make_dict({{"items", items(12)}, {"error", nil_value}})});
+       {std::string("t"), make_dict({{"items", items(12)}, {"error", nil_value()}})});
   EXPECT_EQ(root.findDescendant("t.stale"), nullptr);
   EXPECT_EQ(root("t").value(), "");
   EXPECT_EQ(root("t.items.11.id").value(), "11");
@@ -513,8 +513,9 @@ TEST_F(StateTreeIntrinsicsTest, StateSetTreeReplacesTheSubtree) {
   call("state-set-tree", {std::string("t"), value_t(int64_t{5})});
   EXPECT_EQ(root("t").value(), "5");
   EXPECT_EQ(root("t").numChildren(), 0u);
-  call("state-set-tree", {std::string("t"), make_dict({{"10", value_t(true)}, {"x", nil_value}})});
-  call("state-set-tree", {std::string("t"), make_list({nil_value, nil_value})});
+  call("state-set-tree",
+       {std::string("t"), make_dict({{"10", value_t(true)}, {"x", nil_value()}})});
+  call("state-set-tree", {std::string("t"), make_list({nil_value(), nil_value()})});
   EXPECT_EQ(root("t").childNames(), (std::vector<std::string>{"0", "1"})); // "10" isn't below 2
 }
 
@@ -548,7 +549,7 @@ TEST_F(StateTreeIntrinsicsTest, StateSetTreeChecksTheValueBeforeWritingAnything)
   // The bad part comes last, after values that would have been written.
   const value_t good = make_dict({{"ok", value_t(int64_t{1})}});
   for (const char *key : {"", "a.b", " a", "a ", "  "})
-    refuses(make_list({good, make_dict({{key, nil_value}})}), "ValueError", "can't name a node");
+    refuses(make_list({good, make_dict({{key, nil_value()}})}), "ValueError", "can't name a node");
   refuses(make_list({good, *env->lookup("+")}), "TypeError", "has no place in the state tree");
   refuses(make_list({good, make_bytes("x")}), "TypeError", "a bytes");
   value_t self = make_list({good});
@@ -1389,7 +1390,7 @@ TEST_F(StdlibRegistryTest, LookupQualifiedNotFound) {
 
 TEST_F(StdlibRegistryTest, RegisterCustomFunction) {
   registry.register_function("custom", "custom.noop",
-                             [](std::span<const value_t>) -> value_t { return nil_value; });
+                             [](std::span<const value_t>) -> value_t { return nil_value(); });
   auto mods = registry.list_modules();
   auto has = std::find(mods.begin(), mods.end(), "custom") != mods.end();
   EXPECT_TRUE(has);

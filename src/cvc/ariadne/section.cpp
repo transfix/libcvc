@@ -65,16 +65,21 @@ std::string utext(std::uint64_t v) { return std::to_string(static_cast<unsigned 
 
 } // namespace
 
-std::uint64_t section_epoch() {
-  static const std::uint64_t epoch = [] {
+namespace {
+// An app's epoch: random, so a restarted writer (a new app) starts a new run.
+struct writer_epoch {
+  static constexpr const char *app_slot = "cvc.ariadne.section-epoch";
+  const std::uint64_t value = [] {
     std::random_device rd;
     std::uint64_t v = (static_cast<std::uint64_t>(rd()) << 32) ^ rd();
     v ^= static_cast<std::uint64_t>(std::chrono::system_clock::now().time_since_epoch().count());
     v &= (std::uint64_t{1} << 53) - 1;
     return v ? v : 1;
   }();
-  return epoch;
-}
+};
+} // namespace
+
+std::uint64_t section_epoch(cvc::app &app) { return app.slot<writer_epoch>().value; }
 
 section_stamp read_section_stamp(cvc::app &app, const std::string &base) {
   section_stamp s;
@@ -112,7 +117,7 @@ void section_writer::set_flag(std::initializer_list<std::string> rel, bool b) {
 section_stamp section_writer::commit(std::uint64_t at, std::uint64_t epoch) {
   const section_stamp before = read_section_stamp(_app, _base);
   section_stamp s;
-  s.epoch = epoch != 0 ? epoch : section_epoch();
+  s.epoch = epoch != 0 ? epoch : section_epoch(_app);
   s.at = at;
   s.rev = before.epoch == s.epoch ? before.rev + 1 : 1;
   set_uint({"epoch"}, s.epoch);
