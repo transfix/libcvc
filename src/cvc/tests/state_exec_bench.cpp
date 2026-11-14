@@ -3623,15 +3623,13 @@ int current_cpu_efficiency() {
 #endif
 }
 
-// The highest efficiency class among the CPUs the process may use (Windows), or -1.
+// The highest efficiency class among the CPUs the process may use (Windows), or -1. Called once
+// per share, after the run, so it reads the CPU sets each time rather than caching them.
 int fastest_cpu_efficiency() {
 #if defined(_WIN32)
-  static const int fast = [] {
-    int f = -1;
-    for (const cvc::logical_cpu &c : cvc::logical_cpus())
-      f = std::max(f, int(c.efficiency));
-    return f;
-  }();
+  int fast = -1;
+  for (const cvc::logical_cpu &c : cvc::logical_cpus())
+    fast = std::max(fast, int(c.efficiency));
   return fast;
 #else
   return -1;
