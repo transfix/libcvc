@@ -33,12 +33,32 @@ constexpr double kTwoPi = 6.283185307179586;
 // the coefficients computed here per texel. Index p is wavenumber p (p < n / 2) or p - n, times
 // uDk = 2 pi / (n dx); the mirror of p is (n - p) mod n, so the Nyquist index n / 2 pairs with
 // itself.
+//
+// sin and cos are the pass's own (sinCos), not GLSL's: GLSL bounds the built-ins only to an
+// absolute 2^-11 (4.9e-4) on [-pi, pi], and a renderer may use all of it. macOS CI's Apple
+// Software Renderer does: with them the GPU window left the CPU's by about 8e-4 of the field a
+// step (3e-2 after cvcgl_ewave's 48; an Intel GPU's built-ins, 2e-5). sinCos takes x less the
+// nearest multiple of pi / 2 (pi / 2 in two parts, the first exact times q), the series to r^9
+// and r^10 on |r| <= pi / 4, and the quadrant: within 1e-7 of sin and cos for 0 <= x <= 256, in
+// float with no fused multiply-add (a step's phase is om dt, a few radians). sqrt, tanh and exp
+// stay GLSL's, which bounds them in ulps.
 const char *kUpdateFS =
     "//VTK::System::Dec\n"
     "uniform sampler2D uZ;\n"
     "uniform int uN;\n"
     "uniform float uDk, uDepth, uG, uDt, uGamma, uDamping;\n"
     "//VTK::Output::Dec\n"
+    "vec2 sinCos(float x) {\n"
+    "  float q = floor(x * 0.636619747 + 0.5);\n"
+    "  float r = (x - q * 1.5703125) - q * 0.000483826792;\n"
+    "  float r2 = r * r;\n"
+    "  float s = r + r * (r2 * (-0.166666672 + r2 * (0.00833333377 + r2 * (-0.000198412701 +\n"
+    "                    r2 * 2.75573188e-06))));\n"
+    "  float c = 1.0 + r2 * (-0.5 + r2 * (0.0416666679 + r2 * (-0.00138888892 +\n"
+    "                  r2 * (2.48015876e-05 - r2 * 2.755732e-07))));\n"
+    "  int k = int(q) & 3;\n"
+    "  return k == 0 ? vec2(s, c) : k == 1 ? vec2(c, -s) : k == 2 ? vec2(-s, -c) : vec2(-c, s);\n"
+    "}\n"
     "void main(){\n"
     "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
     "  ivec2 m = (ivec2(uN) - c) & ivec2(uN - 1);\n"
@@ -54,9 +74,9 @@ const char *kUpdateFS =
     "  if (k2 > 0.0) {\n"
     "    float k = sqrt(k2);\n"
     "    float kap = k * tanh(min(k * uDepth, 20.0));\n"
-    "    float om = sqrt(uG * kap), ph = om * uDt;\n"
-    "    float cs = cos(ph), sn = sin(ph);\n"
-    "    a = vec4(cs, (kap / om) * sn, -(uG / om) * sn, cs) * damp;\n"
+    "    float om = sqrt(uG * kap);\n"
+    "    vec2 e = sinCos(om * uDt);\n" // (sin, cos)
+    "    a = vec4(e.y, (kap / om) * e.x, -(uG / om) * e.x, e.y) * damp;\n"
     "  }\n"
     "  vec2 H2 = a.x * H + a.y * P, P2 = a.z * H + a.w * P;\n"
     "  gl_FragData[0] = vec4(H2.x - P2.y, H2.y + P2.x, 0.0, 0.0);\n"

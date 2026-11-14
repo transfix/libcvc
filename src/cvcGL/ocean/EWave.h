@@ -48,7 +48,8 @@ class vtkOpenGLQuadHelper;
 //   - the real-space pass: normalises by 1 / n^2, then damps by the mask's beach rate and the
 //     sponge as exp(-rate dt) and zeroes land, as the CPU does.
 // The coefficients are computed per texel in the update pass from uniforms, so a new dt costs
-// nothing; the mask is an R32F texture.
+// nothing (sin and cos by the pass's own series, as GLSL lets the built-ins be off by 2^-11:
+// EWave.cpp); the mask is an R32F texture.
 //
 // Sources go into h when they are added, times the mask, as on the CPU (add_height and
 // add_heights change h at once, and the next step moves them on): addDrop and addHeights are one
