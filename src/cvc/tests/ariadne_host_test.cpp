@@ -1086,7 +1086,7 @@ TEST(AriadneHostVerbs, AnAsyncFunctionTakesArgumentsAndPostsToItsChannel) {
   // The call's wait is charged to the action (ariadne.limits.action_max_time, 0.1 s by default):
   // on a loaded runner (macOS CI) starting the kernel and its 20 ms took longer, and the program
   // was stopped (time_limit_exceeded) before it set anything. This tests the arguments and the
-  // channel, not the budget, so it gets the room a host gives (pycvc_gl.ariadne.Host: 30 s).
+  // channel, not the budget, so it gets the room a host gives (pycvc.ari.Host: 30 s).
   cvc::state::instance(app)("ariadne.limits.action_max_time").value(30.0);
   std::string how = "running";
   art.run_program(

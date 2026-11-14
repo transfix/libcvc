@@ -3377,8 +3377,9 @@ and the half-block version, never to blank.
 ### 9.3 Writing a Python host
 
 A Python program can be a document's host: it opens the document, the document calls into it,
-and the two pass data both ways. `pycvc_gl.ariadne.Host`
-([`pymod_gl/ariadne.py`](../bindings/pycvc/pymod_gl/ariadne.py)) is that host; the programs in
+and the two pass data both ways. `pycvc.ari.Host` ([`pymod/ari.py`](../bindings/pycvc/pymod/ari.py))
+is that host. It is pycvc's, and a window or offscreen Host also needs pycvc_gl, which it draws
+through; `pycvc_gl.ariadne`, its first name, is the same module. The programs in
 [`examples/ariadne/python`](../examples/ariadne/python) are the place to start:
 
 | Example | The C++ host it mirrors | What it shows |
@@ -3420,7 +3421,7 @@ low warm `three_point` sun with a cool fill, and shadows that follow the camera 
 specular), set from Python on the nodes it adds.
 
 ```python
-from pycvc_gl.ariadne import Host
+from pycvc.ari import Host
 
 host = Host(mode="window")       # "window", "offscreen" (GL, no window) or "headless" (no GL)
 
@@ -3508,7 +3509,7 @@ frame: `step()`, `run()`, `frame()` or `render()` from inside one raises `Runtim
 
 **Errors.** An exception in an `on()` handler, an `on_frame` hook or a `watch` callback is raised
 from the `step()`/`run()` that ran it. A function's is the document's (above); one it does not
-catch stops that program with a warning, logged through `logging` (`pycvc_gl.ariadne`), and with
+catch stops that program with a warning, logged through `logging` (`pycvc.ari`), and with
 `Host(strict=True)` raised from `step()` as an `AriadneError` whose cause is the Python
 exception: what a test wants.
 
@@ -3594,8 +3595,8 @@ and the SWIG modules are not sub-interpreter safe.
 
 Each is a cvcpkg package of its own (Linux), so the stock hosts stay Python-free:
 `cvcpkg install ariglx` brings `python312`, `numpy-cp312`, `pycvc-cp312` and `pycvc-gl-cp312` into
-the same prefix, and `ariglx` finds them there. `arix` brings pycvc but not pycvc_gl; install
-`pycvc-gl-cp312` too for a Python program, whose `Host` is pycvc_gl's.
+the same prefix, and `ariglx` finds them there. `arix` brings pycvc but not pycvc_gl, and a
+Python program needs no more: its `Host` is pycvc's (`pycvc.ari`), with no GL in `arix`.
 
 **A document's `python:` block.**
 
@@ -3625,7 +3626,7 @@ init: (state-set-tree "hist" (histogram (list 1 2 2 3)))
 - **Exports.** They become the document's host functions, as `Host.function` makes them (§9.3):
   `(histogram xs)` passes the call's arguments as Python values and returns the function's value.
   - `@export` marks a function in the source, where `export` is already defined. A module marks its
-    own with `from _arihost import export` (or `pycvc_gl.ariadne.export`, which also imports
+    own with `from _arihost import export` (or `pycvc.ari.export`, which also imports
     under plain `python`).
   - `export:` names functions too; `as:` gives one another name, and `async: true` makes it an
     async function (§10.1).
@@ -3644,12 +3645,12 @@ init: (state-set-tree "hist" (histogram (list 1 2 2 3)))
 
 **A Python program in place of the document.** `ariglx run app.py [args]` (or `snapshot`, `check`;
 `arix` too) runs `app.py` as `__main__`, with `sys.argv` = `[app.py, args...]` and its directory
-first on `sys.path`. Its `pycvc_gl.ariadne.Host()` adopts the host (mode `"embedded"`, the default
+first on `sys.path`. Its `pycvc.ari.Host()` adopts the host (mode `"embedded"`, the default
 inside a scripting host) instead of opening a window of its own: the same window, runtime and
 state, with the rest of `Host`'s API (§9.3).
 
 ```python
-from pycvc_gl.ariadne import Host
+from pycvc.ari import Host
 
 host = Host()  # this ariglx's window and document runtime
 
@@ -3668,7 +3669,7 @@ host.run()  # the host's own loop: run's window, snapshot's frames
   or the document's when the program's is 0.
 - `on_frame` hooks, `watch` callbacks and `on` handlers run in each of the host's frames, whichever
   loop drives them. An exception in one is printed and closes the document with status 1.
-- `pycvc_gl.ariadne.current_host()` is that Host (None under plain `python`), and the same program
+- `pycvc.ari.current_host()` is that Host (None under plain `python`), and the same program
   runs under plain `python`, where `Host()` opens a window.
 - In `arix` the Host has no GL (its mode is `"headless"`).
 

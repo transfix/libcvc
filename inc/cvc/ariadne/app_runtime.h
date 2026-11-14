@@ -165,7 +165,7 @@ public:
   void script_hooks_changed();
   // Work a host extension does every frame: `hook` runs at the end of every drain(), on its
   // thread, after the document's programs and the scene service. A scripting host runs a Python
-  // program's per-frame work here (pycvc_gl.ariadne.Host's events, on_frame hooks and watches), so
+  // program's per-frame work here (pycvc.ari.Host's events, on_frame hooks and watches), so
   // it runs whichever loop drives the frames. Hooks run in the order added.
   void add_frame_hook(std::function<void()> hook);
 

@@ -4688,22 +4688,27 @@ def register_intrinsics(env, ctx):
 // pycvc.WorldGym: a world document driven by reset, step and observe, headless (L4).
 %include "pycvc_gym.i"
 
+// pycvc.ari: an Ariadne document run from a Python program (Host; ARIADNE.md §9.3, §9.6), which
+// needs pycvc_gl only for a window or offscreen Host. Its source is bindings/pycvc/pymod/ari.py,
+// installed beside this module as _pycvc_ari.py; pycvc_gl.ariadne is the same module.
 // pycvc.ariadne: Python services beside the relay (Host, serve_asgi; ARIADNE_SCRIPTING_HOSTS.md
 // §6.5). Its source is src/ariadne_python/ariadne_server.py, installed beside this module as
 // _pycvc_ariadne.py. arisrvx has that module built in and imported before any pycvc: its copy
 // stays the one. A build without the file (the browser's zip) has no pycvc.ariadne.
 %pythoncode %{
 def _register_ariadne():
+    import importlib
     import sys
 
-    mod = sys.modules.get(__name__ + ".ariadne")
-    if mod is None:
-        try:
-            import _pycvc_ariadne as mod
-        except ImportError:
-            return
-        sys.modules[__name__ + ".ariadne"] = mod
-    globals()["ariadne"] = mod
+    for name, source in (("ari", "_pycvc_ari"), ("ariadne", "_pycvc_ariadne")):
+        mod = sys.modules.get(__name__ + "." + name)
+        if mod is None:
+            try:
+                mod = importlib.import_module(source)
+            except ImportError:
+                continue
+            sys.modules[__name__ + "." + name] = mod
+        globals()[name] = mod
 
 
 _register_ariadne()
