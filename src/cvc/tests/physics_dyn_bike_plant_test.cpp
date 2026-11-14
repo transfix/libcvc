@@ -403,6 +403,60 @@ TEST(DynBikePlant, CollidesWithTheWorld) {
   EXPECT_NEAR(identity_gap(walled, 0), 0.0, 1e-9 * b.flow());
 }
 
+// With step_world off, a host steps the world (a scene world on its clock) and the plant takes a
+// substep around each of its steps: into the same wall, with wheel spin, the same run as the plant
+// stepping its own world, bit for bit. Compliant contact steps in pieces of its own, so it cannot
+// be hosted.
+TEST(DynBikePlant, AHostThatStepsTheWorldRunsItTheSame) {
+  if (!plant_host::available())
+    GTEST_SKIP() << "no Jolt in this build";
+  const double wall_x = 30.0;
+  body_id g1, g2;
+  auto w1 = walled_world(wall_x, g1);
+  auto w2 = walled_world(wall_x, g2);
+  dyn_bike_plant_options o1, o2;
+  o1.physics = w1.get();
+  o1.ground_bodies = {g1};
+  o1.wheel_spin = true;
+  o2 = o1;
+  o2.physics = w2.get();
+  o2.ground_bodies = {g2};
+  o2.step_world = false;
+  dyn_bike_plant own({vehicle_desc::humvee()}, o1), hosted({vehicle_desc::humvee()}, o2);
+  cvc::nav::plant_state start;
+  own.attach(1, &start, trained_frame(), 0.06);
+  hosted.attach(1, &start, trained_frame(), 0.06);
+  ASSERT_EQ(hosted.substeps(), own.substeps());
+  for (int t = 0; t < 120; ++t) {
+    own.command(0, 0.05f, static_cast<float>(2.0 * kS));
+    hosted.command(0, 0.05f, static_cast<float>(2.0 * kS));
+    own.advance();
+    hosted.advance(); // ends the last tick, begins this one
+    for (int k = 0; k < hosted.substeps(); ++k) {
+      hosted.before_world_step();
+      w2->step();
+      hosted.after_world_step();
+    }
+  }
+  hosted.advance(); // the last tick's books and sample
+  const diff::dyn_state<double> &a = own.body(0), &b = hosted.body(0);
+  EXPECT_EQ(a.x, b.x);
+  EXPECT_EQ(a.y, b.y);
+  EXPECT_EQ(a.psi, b.psi);
+  EXPECT_EQ(a.vx, b.vx);
+  EXPECT_EQ(a.r, b.r);
+  EXPECT_EQ(own.wheel_speed(0, 0), hosted.wheel_speed(0, 0));
+  EXPECT_EQ(own.collisions(0), hosted.collisions(0));
+  EXPECT_GT(own.collisions(0), 0) << "it reached the wall";
+  EXPECT_EQ(own.books(0).drive, hosted.books(0).drive);
+  EXPECT_EQ(own.books(0).contact, hosted.books(0).contact);
+  EXPECT_EQ(w1->state_hash(), w2->state_hash());
+  dyn_bike_plant_options bad;
+  bad.contact = true;
+  bad.step_world = false;
+  EXPECT_THROW(dyn_bike_plant({vehicle_desc::humvee()}, bad), cvc::physics_error);
+}
+
 // For nav's plant ledger the plant tells its collisions apart: agent 0 drives into the wall (static
 // contacts, no other vehicle), agents 1 and 2 drive head on into each other away from it (each
 // touches the other, no static contact). Its samples carry them and the ground's attitude, and

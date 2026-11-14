@@ -280,6 +280,57 @@ TEST(Dyn4wPlant, CollidesWithTheWorld) {
   EXPECT_NEAR(identity_gap(walled, 0), 0.0, 1e-9 * b.flow());
 }
 
+// With step_world off, a host steps the world (a scene world on its clock) and the plant takes a
+// substep around each of its steps: into the same wall, the same run as the plant stepping its own
+// world, bit for bit, with the tick's books and sample at the next advance().
+TEST(Dyn4wPlant, AHostThatStepsTheWorldRunsItTheSame) {
+  if (!plant_host::available())
+    GTEST_SKIP() << "no Jolt in this build";
+  const double wall_x = 30.0;
+  body_id g1, g2;
+  auto w1 = walled_world(wall_x, g1);
+  auto w2 = walled_world(wall_x, g2);
+  dyn_4w_plant_options o1, o2;
+  o1.physics = w1.get();
+  o1.ground_bodies = {g1};
+  o2.physics = w2.get();
+  o2.ground_bodies = {g2};
+  o2.step_world = false;
+  dyn_4w_plant own({vehicle_desc::humvee()}, o1), hosted({vehicle_desc::humvee()}, o2);
+  cvc::nav::plant_state start;
+  own.attach(1, &start, trained_frame(), 0.06);
+  hosted.attach(1, &start, trained_frame(), 0.06);
+  ASSERT_EQ(hosted.substeps(), own.substeps());
+  EXPECT_THROW(own.before_world_step(), cvc::physics_error);
+  for (int t = 0; t < 120; ++t) {
+    own.command(0, 0.1f, static_cast<float>(2.0 * kS));
+    hosted.command(0, 0.1f, static_cast<float>(2.0 * kS));
+    own.advance();
+    hosted.advance(); // ends the last tick, begins this one
+    for (int k = 0; k < hosted.substeps(); ++k) {
+      hosted.before_world_step();
+      w2->step();
+      hosted.after_world_step();
+    }
+  }
+  hosted.advance(); // the last tick's books and sample
+  const diff::dyn4_state<double> &a = own.body(0), &b = hosted.body(0);
+  for (int k = 0; k < diff::dyn4_state<double>::size; ++k)
+    EXPECT_EQ(a[k], b[k]) << k;
+  EXPECT_EQ(own.collisions(0), hosted.collisions(0));
+  EXPECT_GT(own.collisions(0), 0) << "it reached the wall";
+  EXPECT_EQ(own.books(0).drive, hosted.books(0).drive);
+  EXPECT_EQ(own.books(0).contact, hosted.books(0).contact);
+  EXPECT_EQ(w1->state_hash(), w2->state_hash());
+  // Its wheels, as drawn: on the flat ground, the front ones steered, the inner one more.
+  const auto wheels = hosted.wheels(0);
+  for (const auto &wh : wheels)
+    EXPECT_NEAR(wh.center.z, vehicle_desc::humvee().axles.front().wheel_radius, 0.05);
+  EXPECT_GT(wheels[0].steer, wheels[1].steer);
+  EXPECT_GT(wheels[1].steer, 0.0);
+  EXPECT_EQ(wheels[2].steer, 0.0);
+}
+
 // For nav's plant ledger the plant tells its collisions apart (agent 0 into the wall, agents 1 and
 // 2 head on into each other away from it), and measures the body as its model has it: upright at
 // rest with its four wheels down and no load transfer, and in a left turn the load on its right

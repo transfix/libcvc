@@ -1127,7 +1127,7 @@ scene:
   - **Restart.** `sim.restart` rebuilds only the world on.
 - **Vehicles.** The document's top-level `world:` block lists the vehicles it offers
   ([`world_rules.h`](../inc/cvc/ariadne/world_rules.h)), and the scene's world runtime spawns
-  them as Jolt vehicles into the scene's own physics world, headless or drawn
+  them into the scene's own physics world, headless or drawn
   ([`world_vehicles.h`](../inc/cvc/ariadne/world_vehicles.h)). They collide with the scene's
   bodies, step on the world clock with them, and drive on the world that is on:
 
@@ -1138,16 +1138,32 @@ scene:
         humvee:
           vehicle: humvee                                    # a preset: humvee, roboracer
           ranges: { mass: [2000, 3500], max_speed: [5, 20] } # what a spawn may set
-          controllers: [nav@1, none]                         # the first is a spawn's default
+          controllers: [nav@1, none, external]               # the first is a spawn's default
         racer:
           vehicle: { preset: roboracer, max_speed: 6 }       # a preset with overrides
           look: { file: racer.glb, scale: 1, yaw: 90, z: 0 } # default: the chassis box
+        truck:
+          plant: dynamic4w:humvee                            # the four-wheel model, a Humvee
   ```
 
-  - **Archetypes.** Each names its plant (`jolt`; `kinematic`, `dynamic` and `dynamic4w` are
-    accepted but not run in a scene world yet), its body (a preset, with `mass`, `max_speed`,
+  - **Archetypes.** Each names its plant, its body (a preset, with `mass`, `max_speed`,
     `max_accel`, `max_decel` or `max_steer` over it), its look, the ranges a spawn's settings are
-    held to, and its controllers: `nav@1`, the navigator, or `none`.
+    held to, and its controllers: `nav@1`, the navigator, `none`, or `external` (its intent
+    alone drives it).
+  - **Plants.** Every plant runs in the scene's world, on its clock, and meets its bodies (the
+    buildings, the props, the other vehicles):
+
+    | `plant:` | The vehicle | Its body in the world |
+    |---|---|---|
+    | `jolt` (the default) | a Jolt vehicle: wheels, suspension, engine and gearbox | the vehicle's chassis |
+    | `dynamic` (`dynamic:<preset>`) | the dynamic single-track model: tires, load transfer, actuator lag, with its energy books | its chassis box, which the world's contacts push back into the model |
+    | `dynamic4w` (`dynamic4w:<preset>`) | the four-wheel model with suspension: each wheel on the ground under it | as `dynamic`'s |
+    | `kinematic` | nav's bicycle | a kinematic box: it pushes what it meets, and nothing stops it (the navigator keeps it off the buildings) |
+
+    `dynamic:<preset>` names the vehicle as `vehicle: <preset>` does. The dynamic models take one
+    substep of each world step, so they step with everything else; each plant's entities have a
+    navigator of their own on the world's grid. The kinematic bicycle steers each of its
+    substeps, so it has no one command to blend with: there a `blend` intent replaces.
   - **Looks.** With no `look:`, a humvee is the real Humvee, the vehicle-humvee package's
     `Humvee.glb`, when it is installed (`find_vehicle_model`: beside `$CVC_NAV_BUNDLE`, else in
     `share/cvc-scenes/shared` or `share/cvc-scenes/*/` under `$CVC_PREFIX`, `$CVCPKG_PREFIX`,
@@ -1169,8 +1185,31 @@ scene:
     `selected` and `selection.*` (the selected archetype as a spawn would make it now), and
     `status`. Under `entities`: `ids`, `count`, `rev`, `summary`, and for each entity its
     identity, pose (`x`, `y`, `z`, `yaw`), `speed`, `power_kw`, `energy_wh`, `wh_per_km`,
-    `distance`, `wheel_load`, `aero_force` and `gear`. `physics.stats.vehicles` has a line per
-    vehicle.
+    `distance`, `wheel_load`, `aero_force` and `gear` (the dynamic models give their books'
+    power and energy, and an odometer), and `command.steer` / `command.accel`
+    (what its plant took on the last navigator tick) with `command.by` (its controller, `intent`,
+    `blend`, or `hold`). `physics.stats.vehicles` has a line per vehicle, its plant named.
+  - **Intents.** Any entity can be steered from outside. A document, a script or a server writes
+    its keys, and a C++ or Python host calls `WorldVehicles::set_intent` (`pycvc.WorldEntities`,
+    below). Each navigator tick (20 Hz) reads them, and a change replaces the intent it had:
+
+    | Key, under `entities.<id>` | What it is |
+    |---|---|
+    | `intent.mode` | `replace`: the intent's command in place of the controller's; `blend`: `weight` of it and `1 - weight` of the controller's; `off`: the controller's alone. Empty: `replace` when a steer or an acceleration is given |
+    | `intent.steer` | the bicycle angle, rad, + left, held to the vehicle's lock |
+    | `intent.accel` | m/s² along its heading (from rest a negative one backs it up), held to its top speed as the navigator's command is |
+    | `intent.weight` | the blend's share, 0 to 1 (default 0.5) |
+    | `force.x`, `force.y` | m/s², world frame: a push added to the drive's force (the goal's pull and the walls' push), as `cvc::nav::ext_force` adds one. It works under any command but `replace` |
+    | `force.steer` | `0` keeps the force out of the drive's steering (default `1`). The drive has one such switch, on while any entity's force asks for it |
+
+    An `external` entity has no command of its own: `replace` and `blend` both drive it, and with
+    no intent (or `off`) it brakes to a stop and holds there. `world: vehicles: intents: <path>`
+    names a second table, read the same way, by id or by name: `<path>.<id>.intent.*` or
+    `<path>.<name>.intent.*` (for a name that is a state name). The path resolves as a bind does,
+    so `/drive` is outside the document's prefix. That is how a server document steers: it
+    publishes the namespace (`server: publish: [drive]`), the relay replicates it, and its program
+    writes `(state-set "drive.lead.intent.accel" "2")`. The C++ setter, `set_intent`,
+    `clear_intent` and `intent`, may be called from any thread.
   - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,
     `color`, `color2` as `r,g,b`, `metadata` as `key=value, ...`, `controller`, `policy`,
     `policy_sha256`, `mass` or `mass_t` (a fraction of the range), `max_speed` or `max_speed_t`,
@@ -1178,11 +1217,22 @@ scene:
     `vehicles.spawn.request`. The result is in `vehicles.spawn.status`. `vehicles.remove.id`
     with `remove.request` removes one, and `clear.request` removes them all.
   - **Drawing.** cvcGL draws each entity on its chassis, posed between steps as the other moving
-    bodies are. A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
+    bodies are. The box look poses each wheel where its plant has it
+    (`WorldVehicles::wheels`): a Jolt wheel on its suspension, a dynamic4w wheel on the ground
+    under it, the front ones steered (Ackermann's on a dynamic4w). A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
     `spin:` in degrees a second) draws the selected archetype in the spawn's colours.
   - **The panel.** `vehicle_selector.ari`: the vehicle, its stats, a preview viewport onto a
     `scenes:` entry holding a `vehicle_preview` node (its header shows one), the settings, the
     controller and policy, the identity, Spawn, and the spawned vehicles with Remove and Clear.
+  - **From Python.** `pycvc.AriApp.entities()`, `pycvc.world_entities(app, runtime_capsule)`
+    over a GL host's runtime (`pycvc_gl.AriRuntime.app_runtime_capsule()`), or
+    `pycvc.ari.Host.entities`, is a `pycvc.WorldEntities` over the running world (the runtime's
+    own, or its adapter's): `list()` (a dict per entity: identity, pose, speed, energy, the
+    command and the intent), `spawn(archetype, name=, controller=, team=, at=(x, y[, yaw°]),
+    mass=, max_speed=)` (0 and `why()` when refused), `despawn(id)`, and `set_intent(id, steer=,
+    accel=, mode=, weight=, force=(fx, fy), force_steers=)`, `intent(id)`, `clear_intent(id)`.
+    `list`, `spawn` and `despawn` run on the thread that runs frames; the intents from any
+    thread.
   - **One runtime per world.** Each `SceneWorld` has its own physics world, vehicles, policies
     and keys, with nothing process-wide, so a host that runs several worlds runs one each.
 - **Spawn points.** Where a vehicle spawned without a start of its own begins

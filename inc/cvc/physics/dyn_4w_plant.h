@@ -46,6 +46,7 @@
 #ifndef __CVC_PHYSICS_DYN_4W_PLANT_H__
 #define __CVC_PHYSICS_DYN_4W_PLANT_H__
 
+#include <array>
 #include <cvc/core/world_units.h>
 #include <cvc/nav/detail/dyn_4w.h>
 #include <cvc/nav/vehicle_plant.h>
@@ -84,6 +85,12 @@ struct dyn_4w_plant_options {
   // not a tire's grip. At 1, the default material's, a vehicle pressed against a wall by its own
   // tires grips it like a tire and crawls along it.
   double chassis_friction = 0.3;
+  // With a world: whether advance() steps it, once a substep. false: a host that steps the world
+  // itself, with the rest of what is in it (a scene world on its clock), calls before_world_step()
+  // before each of its steps and after_world_step() after it. Nav's tick is then substeps() of
+  // them, and advance() ends the tick they ran (its books and its sample) and begins the next
+  // under the new command. Without a world it does not apply.
+  bool step_world = true;
 };
 
 // One agent's energy, in J: over the last tick, or since attach().
@@ -125,6 +132,8 @@ public:
   bool resizable() const override { return true; }
   int add_vehicle(const cvc::nav::plant_state &start, int vehicle = -1) override;
   void remove_vehicle(int i) override;
+  // Another vehicle to add_vehicle() by its index, which this returns.
+  int add_desc(vehicle_desc d);
   double energy_step(int i) const override;
   // As dyn_bike_plant's.
   int static_contacts_step(int i) const override;
@@ -160,6 +169,25 @@ public:
   // ── the world ──
   bool collides() const;
   body_id chassis(int i) const;
+  // With options.step_world off: one substep of every vehicle around each of the host's world
+  // steps. Before it, each model steps and its box is put where the step starts; after it, what
+  // the world's contacts changed goes back into the model, and into the books. A tick's substeps
+  // past substeps() keep its command.
+  void before_world_step();
+  void after_world_step();
+  // The world was made afresh (world::operator= over it, as a scene world's restart does): its
+  // boxes went with the old one, and their ids may name new bodies. The plant forgets them, so
+  // removing a vehicle (or the plant) touches nothing; it collides with nothing from now on.
+  void world_gone();
+  // Agent i's wheels as they are drawn (front left, front right, rear left, rear right): each
+  // one's centre, world metres, on the ground under it while it carries a load (else where its
+  // spring hangs it), and its steering angle (rad, + left; Ackermann's at the front).
+  struct wheel_pose {
+    vec3 center;
+    double steer = 0.0;
+    bool down = true;
+  };
+  std::array<wheel_pose, 4> wheels(int i) const;
   int collisions_tick(int i) const { return _agents.at(i).hits_tick; }
   long collisions(int i) const { return _agents.at(i).hits; }
   // As dyn_bike_plant's.
@@ -195,8 +223,19 @@ private:
     double touch_depth = 0.0; // m
     dyn_4w_books tick, total;
     cvc::nav::plant_sample sample;
+    // The tick's start (its measure()), and a substep's next state and books between its halves.
+    double vx0 = 0.0, vy0 = 0.0, psi0 = 0.0;
+    cvc::nav::diff::dyn4_state<double> next{};
+    cvc::nav::diff::dyn4_ph_books<double> step_books{};
+    bool stepping = false;
   };
 
+  // A tick: begun (the books zeroed, its start kept), its substeps in two halves around the
+  // world's step, then ended (the books summed, the sample measured).
+  void begin_tick();
+  void substep_begin(double h);
+  void substep_end(double h);
+  void end_tick();
   void measure(agent &a, double vx0, double vy0, double psi0, bool tick) const;
   // A vehicle `desc` at rest at `start`, appended (attach's, add_vehicle's), its box in the world.
   void place(const cvc::nav::plant_state &start, const vehicle_desc &desc);
@@ -210,6 +249,7 @@ private:
   double _dt = 0.0;
   double _z0 = 0.0;
   int _nsub = 1;
+  bool _ticking = false; // step_world off: a tick has begun
   std::vector<agent> _agents;
   std::unique_ptr<dyn::dyn_chassis> _chassis;
 };
