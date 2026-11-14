@@ -418,6 +418,61 @@ window plots the history `avatar_panel` publishes). ImGui draws a line plot that
 value under the mouse; a backend with none gets a text sparkline of the last 32 numbers with the
 newest and the range (`[ _.-=+*#] 12.3 (1..30)`).
 
+A `chart:` widget draws curves to read a run by: several series, each with its own x, bands, gaps,
+markers, a log y axis and a play-head. It is read-only, beside `plot:` (which is unchanged), and a
+document can check for it with `(has? "chart")`. The series come from a plot subtree at `bind`, as
+`host.set_plot` (§9.3) writes one, and from a `series:` list:
+
+```yaml
+- chart: Loss
+  bind: learn                  # learn.s.<i>.{label,x,y,lo,hi,style}, learn.m.<j>.{x,label,kind}
+  series:                      # more series after the subtree's
+    - {bind: lr, label: learning rate, style: "c2 dotted"}
+    - val_acc                  # a bare path: comma text (host.set_series), or a series subtree
+  log_y: true                  # or a state path / computed expression read each frame
+  legend: top                  # top | right | none
+  x_label: step
+  cursor: play.t               # a vertical play-head at this x
+  pick: play.seek              # a click writes the nearest x here, then on: runs
+  on: seek
+  height: 160                  # px (the default)
+```
+
+- **A series** is a subtree with `y` and any of `x`, `lo` and `hi` (a band about the line, one value
+  for each y), `label` and `style`, or a key holding comma-separated numbers (its y; its x is 0, 1,
+  2, ...). Each series has its own x, so a loss logged every 10 steps and a held-out loss every 100
+  share one axis. An empty or unreadable item (`nan`, `""`) is a gap: the line breaks there. A
+  `series:` entry's `label` and `style` win over the subtree's own.
+- **`style`** is space- or comma-separated: a line (`solid`, the default; `dashed`, `dotted`,
+  `points`), a colour slot (`c0`..`c7`, so a train curve and its held-out twin can share one), or
+  `#rrggbb`. Without a slot a series takes its place in the list. The slots are a fixed order of
+  eight colour-blind-checked hues, stepped for light and dark windows, and a series past the eighth
+  is drawn muted rather than cycling.
+- **`log_y`**: a y <= 0 is dropped (a gap), and so is a band point whose `hi` is <= 0; a band `lo`
+  <= 0 reaches the axis' bottom. The ticks are whole decades when the curves span one or more.
+- **Markers** (`<bind>.m.<j>`): an x, a label and a kind, `best`, `elbow`, `plateau` or `note`
+  (the default; another kind warns). Each is a vertical rule (solid for best, dashed for elbow,
+  dotted for the others) with its label at the top.
+- **ImGui** draws the axes and their ticks, the bands under the lines, the markers and the cursor,
+  and a legend for two or more series: clicking an entry hides or shows its series (the backend
+  keeps which, per chart). Hovering shows a crosshair and each shown series at its point nearest
+  the pointer, with its band. The canvas is the widget's item, so `tooltip:` and `on_click:` attach
+  to it.
+- **A terminal** (FTXUI, tvision; any backend without a chart of its own) prints a heading with the
+  x range, one 32-column sparkline for each series on the shared axes (a space where a column has
+  no finite value), its newest value and its range, then a line for each marker and the cursor:
+
+```text
+Loss (log y; step 0..4000)
+train:    [#       *       +       =      =] 0.08 (0.08..2)
+held-out: [#                              +] 0.15 (0.15..2.1)
+best: x=3000 held-out min
+cursor: x=2500
+```
+
+The core parses a series only when its text changes, so a chart costs a string compare a frame
+while its data is still.
+
 A `spinner:` widget says something is under way when there is no amount to show (a request, a
 search). The host turns it by its own frame clock (`Runtime::frame_clock`), not by state, so it keeps
 moving while the document's programs are parked: a program waiting on `http-get` still has a
@@ -874,7 +929,7 @@ clouds) and `shadow` (0 starts the shade off). Live keys under the node's root (
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the
 analytic relief the terrain lab stands on; the default), `dem` (an elevation `.npy` at `file`, a URI
-or a path relative to the document, stretched to `amp`), or one a host registered
+or a path relative to the document, stretched to `amp`), or one the host registered on its app
 (`cvc::world::register_terrain_generator`). Sea level is 0 m: every generator lays its ground with
 0 m as the shoreline, its floor `world_sea_share` (34/90) of the relief below it (the island preset
 stands its dome in the sea), so `water_level` raises or lowers the sea from there and a lower or
@@ -1468,6 +1523,7 @@ entry warns. An entry is one of:
   | `relay` | the document is a relay's server document, run by `arisrv --doc` (§9.7) |
   | `image.fullscreen` | `fullscreen: true` on `image:` and `video:` shows the picture alone, filling the window or the terminal (§5.13) |
   | `image.badge` | `badge:` on `image:` and `video:` shows a label over the picture, dimmed under it, or on the line under it in a terminal (§5.11) |
+  | `text.runs` | `text:` takes `runs:`: bold, italic and code runs and links, wrapped to its width; a terminal's Tab reaches each link and Enter activates it (§5.20); ImGui, FTXUI and tvision |
 
   GLSL runs in two places, and they are separate facts. The scene's shaders run in the
   scene adapter's renderer (`SceneAdapter::runs_shaders`), the UI's in the backend
@@ -1840,6 +1896,7 @@ windows:
     line as a decorative video (§5.13): silent, looping, by itself, where the host has a player.
     Hovering a picture shows its `:name:`. `{i}` in `emoji:` is substituted in a `repeat:`.
   - The capability token `text.emoji` says a host does this.
+  - A `text:` with `runs:` (§5.20) takes `emoji:` too, in each run.
 
 ### 5.12 Backgrounds: `background:` on a window or group
 
@@ -2629,6 +2686,90 @@ item over its whole area. A feed's card opens its post wherever it is clicked:
   `GroupClick*` and `GroupHover*` tests drive a repeated card list by mouse and keyboard, and
   `cvcgl_imgui_group_click` taps, drags and hovers one through ImGui's own input.
 
+### 5.20 Rich text: `runs:` on a `text:`
+
+A `text:` with `runs:` is a paragraph of runs: plain, bold, italic or code text, and links. It
+wraps to the width it has, and a link runs a program when it is activated: clicked, tapped, or
+Enter on it in a terminal. A post's text with its mentions, hashtags and URLs is the case it is
+made for:
+
+```yaml
+- text: ""
+  runs:                                  # a list written here
+    - "Shipped "
+    - {text: "v2", style: bold}
+    - " -- see "
+    - {text: "the notes", href: "https://example.org/notes", tooltip: "Release notes"}
+    - " or "
+    - {text: "Retry", on_click: (state-set "job.retry" "1")}
+  on_link: (state-set "view.open" (get-attr event "href"))
+- text: ""
+  repeat: (state-get "feed.items")
+  runs: feed.items.{i}.runs              # a state path holding a list of runs, as a client writes one
+  emoji: feed.items.{i}.emoji            # :name:s in the runs, as for a plain text: (§5.11)
+  on_link: (state-set "view.open" (get-attr event "href"))
+  max_lines: 3                           # three lines at most, the last ending in "…"
+  size: 560                              # px: the widest it wraps at
+```
+
+- **A run** is a string (plain text), or a map:
+  - `text:` the run's text. A `\n` in it ends its line.
+  - `style:` words among `bold`, `italic` and `code` (`"bold italic"`); `plain`, or none, is
+    plain. A word a host doesn't know is skipped, so a style a later host draws still shows here.
+  - `href:` makes the run a link, and is what `on_link:` reads. It is the document's own string: a
+    URL, a path such as `/user/ada`, or a key. Nothing opens it: the document decides.
+  - `on_click:` (an event name or a program) makes the run a link that runs it, in place of
+    `on_link:`. Only in a list written in the document.
+  - `tooltip:` what hovering the link shows (in a terminal, focusing it), else its `href`.
+- **Where the runs come from.** `runs:` is a list written in the document; or a state path, which
+  holds a list as `state-set-tree` writes one (its elements `0`, `1`, … each a string, or a map of
+  `text` / `style` / `href` / `tooltip`; a key with no elements, an empty list's `0` included,
+  holds none); or an expression (`(...)`) giving a list of strings and dicts, a lone string or
+  dict being one run. Runs from state or an expression are data: their links take
+  `on_link:`, and an `on_click` among them is never run, so text that came from the network can't
+  carry a program. At most 4096 runs and 256 KiB of text are drawn; the rest is left out.
+- **`on_link:`** (an event name or a program) runs when a link with no `on_click:` of its own is
+  activated, with `event.href`, `event.text`, `event.index` (the run's place in the list) and
+  `event.link` (the link's, counting links only). A link activated with no handler warns once.
+- **A click on a link is the link's**, not the text's own `on_click:` nor a clickable group's
+  around it (§5.19): a card whose body has links opens its post on a click anywhere but a link.
+  The paragraph is one item for its own `on_click:`, hover and `tooltip:`.
+- **The width.** A paragraph wraps at a space between two words, never inside a word (a bold
+  word glued to plain text is one word), and cuts a word wider than a whole line between two
+  characters. It is as wide as its line: a window's width, a grid cell's, less what is beside it.
+  In a window whose width fits its content (no `size:`, §5.8, or an `auto` width), it is as wide
+  as its longest line, up to the edge of the view. `size: N` (px; a terminal's 8 px a column) is the widest it wraps
+  at. `wrap: false` breaks only at `\n`. `max_lines: N` keeps N lines and ends the last in `…`
+  (`...` without that glyph), its last words cut back to make room.
+- **`label`.** The text's own text, when it isn't empty, comes first, as `Label: ` before the runs
+  (as a bound text's does). `color:` tints the runs that aren't links.
+- **`emoji:`** works as on a plain text (§5.11): a `:name:` in a run is that picture, one line
+  tall, in its run's style and link, where the backend puts pictures in a line.
+- **ImGui** (arigl, the browser page) draws with the one UI font: bold twice, a pixel apart;
+  italic slanted; code on a box in the frame colour; a link in the link colour (`TextLink`),
+  underlined, the hand cursor over it and a thicker line while hovered or held. Each piece of a
+  link (one a line, when it wraps) is an item of its own, so it takes the pointer before the
+  paragraph and a card around it. A click is a tap, released over the link without dragging past
+  ImGui's threshold, so a finger scrolling a feed opens nothing. Keyboard navigation reaches each
+  link, and Enter activates it.
+- **Terminals** (FTXUI, tvision): bold, italic and underline are the cells' own attributes; code
+  is on a grey background and a link cyan and underlined where the terminal has colour. Each link
+  is a stop in Tab order, after what comes before the paragraph (a clickable card, then its
+  links); while it has focus it is inverted and its tooltip (or `href`) is on the tooltip line
+  (tvision's status line), and Enter or Space activates it. A left click on any of its cells
+  activates it, on each line a wrapped link takes. A terminal draws no picture in a line: a
+  picture's `:name:` stays text, as for a plain text.
+- `(has? "text.runs")` holds where a backend does this (ImGui, FTXUI, tvision). Another backend
+  shows the runs' text on one line, and its links do nothing. A document for older hosts gates
+  its runs with `(has? "text.runs")` or `requires: [{name: text.runs, optional: true}]` and draws
+  plain text elsewhere.
+- In a `repeat:`, `{i}` reaches `runs:`, `on_link:` and a written list's runs. The layout is
+  `layout_rich_text` (`cvc/ariadne/rich_text.h`), the same in every backend.
+  `ariadne_runtime_test`'s `AriadneRichText*` tests check the runs a backend gets and the handlers
+  that run, `ariadne_ftxui_test`'s `RichText*` drive links by mouse and keyboard in both terminal
+  backends' paths, `cvcgl_imgui_rich_text` taps, drags and tabs through ImGui's own input, and
+  `ari_rich_text` checks `ari snapshot`'s lines of `src/ari/tests/rich_text.ari`.
+
 ## 6. Composition: include / import / load
 
 Three mechanisms compose documents. They differ in **isolation**, not in how they
@@ -3318,14 +3459,15 @@ and the half-block version, never to blank.
 ### 9.3 Writing a Python host
 
 A Python program can be a document's host: it opens the document, the document calls into it,
-and the two pass data both ways. `pycvc_gl.ariadne.Host`
-([`pymod_gl/ariadne.py`](../bindings/pycvc/pymod_gl/ariadne.py)) is that host; the programs in
+and the two pass data both ways. `pycvc.ari.Host` ([`pymod/ari.py`](../bindings/pycvc/pymod/ari.py))
+is that host. It is pycvc's, and a window or offscreen Host also needs pycvc_gl, which it draws
+through; `pycvc_gl.ariadne`, its first name, is the same module. The programs in
 [`examples/ariadne/python`](../examples/ariadne/python) are the place to start:
 
 | Example | The C++ host it mirrors | What it shows |
 |---|---|---|
 | [`hello.py`](../examples/ariadne/python/hello.py) | `ariadne_hello` | a button calls a Python function, another raises an event Python handles; Python writes the document every frame |
-| [`data_feed.py`](../examples/ariadne/python/data_feed.py) | `ariadne_stream` | Python pushes two plotted series, a table, a numpy picture and a live video stream, and reads the document's controls |
+| [`data_feed.py`](../examples/ariadne/python/data_feed.py) | `ariadne_stream` | Python pushes two plotted series, a table, a numpy picture, a live video stream and a learning run on a log-y `chart:` (three series, a band, a gap, markers, a play-head), and reads the document's controls |
 | [`form.py`](../examples/ariadne/python/form.py) | `nav_compute` | a two-way form: a function returns a dict the document writes with `state-set-tree`, an async function runs a Monte Carlo while the UI keeps drawing, a watch recomputes a preview |
 | [`nav.py`](../examples/ariadne/python/nav.py) | `nav_convoy`, `nav_city_drive` | a Python loop drives Humvees on a `cvc::nav` sim_world (pycvc) through Austin, or a block city when its bundle is not installed: true-scale models, routes planned for their turning radius, Jolt physics or nav's kinematic bicycle (the Plant combo), a chase or overview camera, readouts and a map picture |
 
@@ -3361,7 +3503,7 @@ low warm `three_point` sun with a cool fill, and shadows that follow the camera 
 specular), set from Python on the nodes it adds.
 
 ```python
-from pycvc_gl.ariadne import Host
+from pycvc.ari import Host
 
 host = Host(mode="window")       # "window", "offscreen" (GL, no window) or "headless" (no GL)
 
@@ -3380,6 +3522,8 @@ def reset():
 @host.on_frame                   # every frame, after the document's programs, before the draw
 def tick(dt):
     host.set_series("signal", samples)   # a plot: draws it
+    host.set_plot("learn", [{"label": "train", "x": steps, "y": loss}],
+                  markers=[(best_step, "best", "best")])   # a chart: with bind: learn
 
 host.load("doc.ari")             # register first: requires: is checked here
 host.run()                       # until the window closes or the document quits
@@ -3398,6 +3542,7 @@ the host's `name` (`Host(name=...)`, `"ari"` by default).
 | `host.set_tree(key, value)` | a subtree, as `(state-set-tree)` writes one: dict keys and list indices name children, a list's node holds its length |
 | `host.set_table(key, rows, columns=None)` | rows at `key.<i>.<column>` and the row count at `key`, for `repeat: (state-get "key")` (column names at `key_columns`) |
 | `host.set_series(key, values, limit=None)` | the comma-separated numbers a `plot:` draws |
+| `host.set_plot(key, series, x=None, markers=(), max_points=2000, fmt=".6g")` | the subtree a `chart:` with `bind: key` draws (§4): each series values, an `(x, y)` pair or a dict with `y` and any of `x`, `lo`, `hi`, `label`, `style`; markers as `(x, label, kind)` or dicts; a series longer than `max_points` decimated by min/max, so its peaks, troughs and gaps survive |
 | `host.publish_image(name, array)` | the picture `image:` widgets with `src: name` show: (H, W), (H, W, 3) or (H, W, 4), uint8 or float in [0, 1], row 0 at the top |
 | `host.open_stream(id, w, h)` | a live video stream at `streams.<id>` for a `stream_view` widget or a `type: stream` node; `stream.publish(frame)` sends one |
 | `host.run_program(script, done=None)` | a program queued as one of its actions (`done(how)` gets `""` or why it did not finish) |
@@ -3435,6 +3580,16 @@ and state all run, but nothing is drawn, so a computed `bind:` is never evaluate
 dropped with a warning, and a document that `requires: gl.scene` does not load. Tests and CI use
 it.
 
+**The loop.** `host.step(dt)` runs one frame. `host.run(fps=60, frames=None, until=None,
+realtime=None)` runs frames until the document quits or the window closes, `frames` have run, or
+`until()` is true. `realtime` paces them: it sleeps out the rest of each frame's `1/fps`. By
+default a window paces, and so does a headless Host given no `frames`, one that stays up (a
+service), which would otherwise spin a core. `run(frames=N)` headless, and an offscreen Host, run
+their frames back to back, as fast as they can, which a batch run and a capture want. Each frame's
+`dt` is `1/fps` either way, so an `on_frame` hook that advances by `dt` runs ahead of the clock
+when unpaced. Under a scripting host a bare `run()` is the host's own loop, paced by its `--fps`
+(§9.6).
+
 **Threads and the GIL.** Handlers, functions, `on_frame` hooks and `watch` callbacks run on the
 thread that calls `step()`/`run()`; an async function runs on a pool thread. An async function
 may compute and write state, but the scene and the pictures (`publish_image`, `host.lab`,
@@ -3449,7 +3604,7 @@ frame: `step()`, `run()`, `frame()` or `render()` from inside one raises `Runtim
 
 **Errors.** An exception in an `on()` handler, an `on_frame` hook or a `watch` callback is raised
 from the `step()`/`run()` that ran it. A function's is the document's (above); one it does not
-catch stops that program with a warning, logged through `logging` (`pycvc_gl.ariadne`), and with
+catch stops that program with a warning, logged through `logging` (`pycvc.ari`), and with
 `Host(strict=True)` raised from `step()` as an `AriadneError` whose cause is the Python
 exception: what a test wants.
 
@@ -3535,8 +3690,8 @@ and the SWIG modules are not sub-interpreter safe.
 
 Each is a cvcpkg package of its own (Linux), so the stock hosts stay Python-free:
 `cvcpkg install ariglx` brings `python312`, `numpy-cp312`, `pycvc-cp312` and `pycvc-gl-cp312` into
-the same prefix, and `ariglx` finds them there. `arix` brings pycvc but not pycvc_gl; install
-`pycvc-gl-cp312` too for a Python program, whose `Host` is pycvc_gl's.
+the same prefix, and `ariglx` finds them there. `arix` brings pycvc but not pycvc_gl, and a
+Python program needs no more: its `Host` is pycvc's (`pycvc.ari`), with no GL in `arix`.
 
 **A document's `python:` block.**
 
@@ -3558,15 +3713,15 @@ python:
 init: (state-set-tree "hist" (histogram (list 1 2 2 3)))
 ```
 
-- The block is its source alone (`python: |`), or a map of `source:`, `modules:`, `path:` and
-  `export:`.
+- The block is its source alone (`python: |`), or a map of `source:`, `modules:`, `path:`,
+  `export:` and `console:` (below).
 - **When.** It runs on every load (a reload too), after the document parses and before its
   `requires:` is checked and `init:` runs, in a module of its own, fresh each load. A reload also
   reloads the modules it imports from the document's own directories.
 - **Exports.** They become the document's host functions, as `Host.function` makes them (§9.3):
   `(histogram xs)` passes the call's arguments as Python values and returns the function's value.
   - `@export` marks a function in the source, where `export` is already defined. A module marks its
-    own with `from _arihost import export` (or `pycvc_gl.ariadne.export`, which also imports
+    own with `from _arihost import export` (or `pycvc.ari.export`, which also imports
     under plain `python`).
   - `export:` names functions too; `as:` gives one another name, and `async: true` makes it an
     async function (§10.1).
@@ -3583,14 +3738,47 @@ init: (state-set-tree "hist" (histogram (list 1 2 2 3)))
 - **Trust.** Natively the block runs with the user's authority, like any program they start (it
   can `import os`), so run a document with Python only when you would run the program.
 
+**A console.** The shipped component `cvc://components/py_console.ari` is a Python console: a
+scrollback, an input line, and Clear. It is plain widgets (`text_view`, `message_input`, §5.15),
+so `ariglx`, `arix` and `ariglx-web` all draw it. Under ImGui (`ariglx`, `ariglx-web`) the input
+line has a Run button; `arix` runs the cell with Enter. A document turns it on with
+`console: true` in its `python:` block:
+
+```yaml
+requires: [python]
+python:
+  console: true
+  source: import math
+import: cvc://components/py_console.ari
+windows:
+  - include: py_console
+    args: { id: console, title: Python }
+```
+
+- Each submission runs as one cell, as a notebook runs one, in the namespace the block ran in. The
+  block's names are there, and a name one cell sets is there for the next, in every console of
+  the document.
+- The cell's stdout and stderr are shown (up to 64 KB). If its last statement is an expression,
+  its value's repr is shown too, and kept as `_` in that namespace. Only the cell's thread is
+  captured: another thread that prints while a cell runs (an async export, say) prints where it
+  always does.
+- `input()` raises EOFError. An exception shows its traceback from the cell's own frames.
+  `SystemExit` ends the cell, not the document.
+- A cell runs on the frame's thread until it ends, so a long one holds the frame.
+- Behind it are two natives: `(python-console ID SOURCE)` returns `{ok output log}`, where `log`
+  is console ID's scrollback, and `(python-console-clear ID)`. In a document whose `python:` block
+  lacks `console: true`, both raise a `PermissionError`; a document with no `python:` block has
+  neither function. A server document (`arisrvx`) has no console: it warns that the key is
+  ignored.
+
 **A Python program in place of the document.** `ariglx run app.py [args]` (or `snapshot`, `check`;
 `arix` too) runs `app.py` as `__main__`, with `sys.argv` = `[app.py, args...]` and its directory
-first on `sys.path`. Its `pycvc_gl.ariadne.Host()` adopts the host (mode `"embedded"`, the default
+first on `sys.path`. Its `pycvc.ari.Host()` adopts the host (mode `"embedded"`, the default
 inside a scripting host) instead of opening a window of its own: the same window, runtime and
 state, with the rest of `Host`'s API (§9.3).
 
 ```python
-from pycvc_gl.ariadne import Host
+from pycvc.ari import Host
 
 host = Host()  # this ariglx's window and document runtime
 
@@ -3609,7 +3797,7 @@ host.run()  # the host's own loop: run's window, snapshot's frames
   or the document's when the program's is 0.
 - `on_frame` hooks, `watch` callbacks and `on` handlers run in each of the host's frames, whichever
   loop drives them. An exception in one is printed and closes the document with status 1.
-- `pycvc_gl.ariadne.current_host()` is that Host (None under plain `python`), and the same program
+- `pycvc.ari.current_host()` is that Host (None under plain `python`), and the same program
   runs under plain `python`, where `Host()` opens a window.
 - In `arix` the Host has no GL (its mode is `"headless"`).
 
@@ -3686,7 +3874,7 @@ wasm:
 ```
 
 - **Exports.** Each is a function of the document: `(score_route r)` runs the guest's export as the
-  calling program's own work, a slice of fuel per step of its process, charged to it, as
+  calling program's own work, a slice of gas per step of its process, charged to it, as
   `collections.map` runs its function. `(score_route-async r)` returns a future, and the export
   runs as an activation of its own on the app's scheduler. `init:`, which can't wait, runs the call
   to its end there instead.
@@ -3744,7 +3932,9 @@ wasm:
   allocation limit, as a native's allocation does. `imports:` without `data.write` refuses
   both.
 - **Limits.** A guest's work is charged as DSL steps (`ariadne.limits.wasm_gas_per_step`, 1000
-  units of fuel a step) to the process it runs in, the calling program's or the activation's, so
+  units of gas a step; gas is about one unit an instruction, counted the same natively and in the
+  browser, ARIADNE_SCRIPTING_HOSTS.md §8.5) to the process it runs in, the calling program's or
+  the activation's, so
   that process's caps (the action caps, §2.2) bound it. The guests share `ariadne.limits.wasm_frame_budget` (0.008 s) of each frame, and its memory
   is at most `ariadne.limits.wasm_max_memory` (256 MiB), which `limits: {memory_mb}` may lower.
 - **One call at a time.** An instance runs one call at a time. The call holds the instance's
@@ -3928,9 +4118,9 @@ host.run()                          # until SIGTERM; the app's shutdown, then th
 - **The script thread.** The program runs on a thread of its own with one asyncio loop
   (`host.loop`), which serves its ASGI apps (uvicorn) and its tasks. The relay never runs Python,
   never takes the GIL and never waits on the program: a sync handler holds up only the loop.
-- **Writes.** `host.set`, `set_tree` and `set_series` (as `pycvc_gl.ariadne.Host`'s) take paths
-  from the tree's root and are queued. The relay applies them on its next room step (60 Hz), ahead
-  of the server document's programs, coalesced per path and in the order of each path's last write
+- **Writes.** `host.set`, `set_tree`, `set_series` and `set_plot` (as `pycvc_gl.ariadne.Host`'s)
+  take paths from the tree's root and are queued. The relay applies them on its next room step
+  (60 Hz), ahead of the server document's programs, coalesced per path and in the order of each path's last write
   (a section's fields, then its `rev`). `--script-write-budget N` caps a step at N bytes (65536 by
   default; 0 for none); the rest wait for the steps after, in order, and one write larger than the
   cap still lands. `set_tree` writes as `(state-set-tree)` does: only what changed, and the
@@ -4694,6 +4884,134 @@ screen view. The backend answers them, so they work the same in every host built
   only larger. For one picture or video shown alone, use `fullscreen: true` on it (§5.13).
 - `ariadne_ftxui_test`'s `ClipboardSetIsAnOsc52Escape`, `cvcgl_imgui_fullscreen` and
   `MediaPlayer.AFullscreenVideoIsShownAloneAndComesBack` check them.
+
+### 10.8 Picking and sending files: `file-pick` and `http-upload`
+
+A document attaches a file in two steps. `(file-pick)` asks the user for one and gives the program
+a handle. `(http-upload URL H ...)` then sends the file the handle names. The program never holds
+the file's bytes or its path, and the state tree never does either. So a document can send only
+what the user chose, and it reads nothing from the disk itself.
+
+```lisp
+(set picked (file-pick (dict "accept" (list "image/*" "video/*") "multiple" #t)))
+(for f picked
+  (set r (http-upload "https://tx.wtf/social/files" (get-attr f "handle")
+                      (dict "auth" "txwtf" "progress" "compose.progress")))
+  (if (get-attr r "done")
+      (state-set "compose.last_id" (get-attr (json-parse (get-attr r "body")) "id"))))
+```
+
+**`(file-pick [OPTS])`**, and `file-pick-async`. The program waits (parks) until the user picks or
+cancels, and the frames go on meanwhile. The wait is an I/O call: it costs one step, however long
+the user takes. It returns a list with one dict per file, `{handle name size type}`, and an
+empty list when the user cancelled. `name` is the file's own name, without its folder. `type` is
+its MIME type: the browser's, or else guessed from the extension (`application/octet-stream`
+when unknown). The options (an unknown one is an error):
+
+| option | what |
+|---|---|
+| `accept` | what may be picked, as an HTML `<input accept>` lists it: a list (or one comma-separated string) of `".ext"`, `"type/subtype"` and `"type/*"`. Default: any file |
+| `multiple` | `#t`: the user may pick more than one (the composed window below picks one at a time) |
+| `title` | the picker's title; default `Open file` |
+| `dir` | the folder a native or composed picker starts in; default the working folder |
+
+One picker is open at a time: a second `file-pick` while one is open raises. Call it from an
+action (a button's `on:`), not from `init:`. A browser opens its picker only within a user's
+gesture, and an action that a click or a key ran has one. A killed program closes the composed
+window. The host asks the user in this order:
+
+- **The host's own picker** (`Backend::pick_files`). In `arigl` this is the system's file dialog,
+  through SDL: Windows' and macOS' own dialog, and on Linux a desktop portal or zenity. `accept`
+  becomes its file filter.
+- **In a browser page** (arigl-web's canvas, `ari.html`'s terminal): the page's
+  `<input type=file>`. The File stays on the page, and a read takes slices of it. A browser that
+  sends no `cancel` event for a closed dialog (Safari before 16.4) leaves the program waiting;
+  use `file-pick-async` with an `(await f SECONDS)` there.
+- **Anywhere else** (`ari`'s FTXUI and tvision backends, a GL window without SDL): the Runtime
+  draws an **Open file** window with the backend's own widgets, over the document. It shows the
+  folder, a name field that has the keys (type a name or a path, then Enter), and the folder's
+  listing: `..`, the subfolders, then the files `accept` takes. Hidden files are left out, and
+  at most 500 entries are listed. The window also has Open and Cancel. A folder opens, and a
+  file is picked. `~` is the home folder. A name that `accept` doesn't take, or one that isn't
+  there, says so and keeps the window open. Cancel or the window's close box cancels. In
+  tvision it is one of the desktop's windows.
+
+**`(file-info H)`** returns the dict again, or `nil` for a handle the app doesn't hold.
+**`(file-forget H)`** lets the file go and returns `#t` if the app held it. Handles last until
+then, or until the app ends, and an app holds at most 256. A handle reads the file as it is when
+it is sent. A file that changed size since it was picked is not sent (`the file changed since it
+was picked`).
+
+**`(http-upload URL FILE [OPTS])`**, and `http-upload-async`. It sends the file `FILE` names (a
+handle; anything else, a path included, is an error) with the http verbs' rules (§10.2, §10.3).
+The URL and each request must go to an origin the host allows. `auth` and credential values in
+`headers` put the host's token in each request, renewed after a 401 where the host can, and an
+echo of the token is blanked. `query` and `headers` work as for `http-request`. Its `as` option
+says how the file goes:
+
+- **`multipart`** (the default): one `POST` (`method` to change it) of `multipart/form-data`. The
+  file is the part named `field` (`file`), with `filename` (the file's name) and `content_type`
+  (its type). The `form` dict holds the other parts, in order. A credential value can't be one
+  of them, so send it in a header. This is what an HTML form, and most upload endpoints, take.
+- **`body`**: one request whose body is the file as it is (`POST`, or `method` `PUT`), with its
+  type as the `Content-Type` unless `headers` gives one.
+- **`chunks`**: the file a `chunk_size` at a time (default 8 MiB, 1 KiB to 64 MiB), each in its
+  own `PATCH` (`method`) to URL. Each chunk carries `offset_header` (`Upload-Offset`, `""` for
+  none) set to the chunk's first byte, and with `content_range` `#t` also `Content-Range: bytes
+  a-b/size`. Its `Content-Type` is `application/octet-stream` unless `headers` gives one.
+  - **The server's offset.** After a 2xx, the next chunk starts where the server says it has
+    data up to: its reply's `offset_header`, else a top-level `"offset"` number in a JSON body,
+    else the bytes sent. A `409` with the server's own offset (txwtf's and tus' resync) goes on
+    from there.
+  - **Retries.** A dropped connection, `408`, `425`, `429` or `5xx` is tried again, up to
+    `retries` times (3, at most 10) a chunk. The tries wait 0.5 s, then 1, 2, 4, up to 8 s
+    apart. Before each one the host asks `status_url` (a `GET`, with the same headers and
+    `auth`), when given, how much the server has. Any other status ends the upload.
+  - **Resuming.** `offset` starts at a byte the server already has, which resumes an upload
+    that failed. A protocol's own start and finish (creating the upload, completing it) are the
+    document's `http-request`s, so the same verb serves txwtf, tus and the like.
+
+The other options are `timeout`, a request's seconds (default 300), and `progress`, a state path
+under the document's root (`"compose.progress"`). The host writes the fraction sent there, 0 to
+1, as each chunk is confirmed (for one request: 0, then 1 when its 2xx comes). A `progress:`
+widget bound to that path shows it while the program waits. The reply has `http-request`'s keys,
+from the last request, and three more:
+
+| key | what |
+|---|---|
+| `done` | the server has the whole file: a 2xx came for one request, or it confirmed the last byte of the chunks |
+| `offset` | the bytes the server has: for chunks, the offset it last confirmed (pass it as `offset` to resume); else the size when `done`, or 0 |
+| `size` | the file's size |
+
+Like the other http verbs, a failure is a reply (`ok` `#f`, or a status, with `error`), not an
+exception. A misused option is an error at the call. One request sends at most 64 MiB, so a
+bigger file goes in chunks. The file is read a slice at a time, so a chunked upload holds one
+chunk in memory. In a browser build without threads (§10.2), each slice is read from the page's
+File and each request is started rather than sent. Each answer, from the browser's event loop,
+starts the next, so the frames go on while the file goes out, and a killed program aborts the
+request in flight. Natively the upload runs on the background pool.
+
+txwtf, for example, takes a small file as `multipart` at `/social/files`, and a big one in
+chunks at the URL its `/social/files/resumable` call returns:
+
+```lisp
+(set s (json-parse (get-attr (http-request "POST" (str-concat base "/social/files/resumable")
+         (dict "auth" "txwtf" "headers" (dict "Content-Type" "application/json")
+               "body" (json-encode (dict "filename" name "total_size" size "mime_type" type))))
+         "body")))
+(set url (str-concat base "/social/files/resumable/" (get-attr s "upload_id")))
+(set r (http-upload url h (dict "as" "chunks" "chunk_size" (get-attr s "chunk_size")
+                                "auth" "txwtf" "status_url" url "progress" "compose.progress")))
+(if (get-attr r "done")
+    (http-request "POST" (str-concat url "/complete")
+                  (dict "auth" "txwtf" "body" "{}" "headers" (dict "Content-Type" "application/json"))))
+```
+
+`(has? "file-pick")` is true wherever the document has a backend (and so somewhere to ask), and
+`(has? "http-upload")` wherever the network is on. `ariadne_files_test` checks both verbs. It runs
+the picker over a mock, a real FTXUI terminal and tvision's hosted layout, and the uploads blocking
+and started, with a 409, a 503 and a lost reply. `ari_run_file_pick_upload_{ftxui,tvision}`
+pick and send a file in tmux.
 
 ---
 

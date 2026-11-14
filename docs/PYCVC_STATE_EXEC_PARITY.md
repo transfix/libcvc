@@ -112,8 +112,9 @@ approach agreed for closing the gap, and the plan.
     `Exec`s and of its exec scheduler are one namespace. It attaches with
     `threaded_host_attach()` (`lock_attach{threads_compiled_in}`), since its `run()` may be on any
     Python thread. pycvc calls
-    `detail::note_threaded_host()` at import, so `state_exec.locks.threading`'s `auto` makes the
-    manager `shared` where the build has threads; with the setting at `single` the constructor
+    `detail::note_threaded_host(app)` for each app it makes (`make_app`) or runs an `Exec` on, so
+    `state_exec.locks.threading`'s `auto` makes that app's manager `shared` where the build has
+    threads; with the setting at `single` the constructor
     raises `RuntimeError` naming it. `scheduler.set_lock_manager(app)` and
     `async_scheduler.set_lock_manager(app)` give a Python scheduler the same manager, attached the
     same way, as its first lock home only (`RuntimeError` when it already has one). `Exec.lock_query(prefix="")` is `(lock-query prefix)` from the host:
@@ -148,7 +149,7 @@ are listed too. Status after PR 4:
 | types.h | `symbol` | `pycvc.symbol` | wrapped (PR 1) |
 | | `value_t` | native types, or `pycvc.value` | wrapped (PR 1), see the table above |
 | | `to_string`, `values_equal` | `pycvc.to_string`, `pycvc.values_equal` | wrapped (PR 1) |
-| | `make_list`, `make_dict`, `make_bytes`, `nil_value`, `true_value`, `false_value` | `list`, `dict`, `bytes`, `None`, `True`, `False` | exception: the native Python values are the equivalents |
+| | `make_list`, `make_dict`, `make_bytes`, `nil_value()`, `true_value()`, `false_value()` | `list`, `dict`, `bytes`, `None`, `True`, `False` | exception: the native Python values are the equivalents |
 | | `environment` (`bindings`, `outer`, `frozen`, `lookup`, `set`, `set_existing`, `extend`) | `pycvc.environment` | wrapped (PR 2), shared like `environment_ptr`. `bindings` reads and writes as a dict (a copy); `lookup` raises `KeyError` where C++ returns nullptr; `set` on a frozen scope (#660) raises `RuntimeError` |
 | | `closure`, `data_object`, `generator` | `pycvc.value` (opaque) | wrapped as opaque handles; no member access |
 | | `time_budget`, `eval_deadline_guard`, `eval_deadline_expired`, `eval_deadline_check`, `thread_cpu_seconds` | none | exception: thread-local evaluator internals |

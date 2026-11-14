@@ -13,6 +13,7 @@
 
 #include <boost/any.hpp>
 #include <cmath>
+#include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
@@ -184,8 +185,9 @@ TEST(GeometryFaceMaterials, TriSurfaceGivesASplitQuadsMaterialToBothHalves) {
 }
 
 TEST(GeometryFaceMaterials, TheStateCodecCarriesThem) {
+  cvc::app app; // the decoded geometries' app
   cvc::state_codec_registry reg;
-  cvc::register_volume_geometry_codecs(reg);
+  cvc::register_volume_geometry_codecs(app, reg);
   const geometry g = tris_and_quad(true);
   const auto bytes = reg.encode("cvc::geometry", boost::any(g));
   const auto back = boost::any_cast<geometry>(reg.decode("cvc::geometry", bytes));

@@ -25,6 +25,7 @@
 #ifndef __CVC_STATE_OBJECT_H__
 #define __CVC_STATE_OBJECT_H__
 
+#include <atomic>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <set>
@@ -86,7 +87,26 @@ private:
   bool _cancelled;
 };
 
+// An app's default for its state_objects' handler threading (set_state_object_threading), held by
+// the app (app::slot).
+struct state_object_threading {
+  static constexpr const char *app_slot = "cvc.state.object-threading";
+  std::atomic<bool> threaded{true};
+};
+
 } // namespace detail
+
+// Whether this app's state_objects run handleStateChanged on a thread of its own (true, the
+// default) or on the thread that made the change, for an object that has not chosen for itself
+// (state_object::setInstanceThreading). Each app has its own: setting it changes no other app's
+// objects, and it reaches the app's objects at their next change.
+inline void set_state_object_threading(app &ctx, bool threaded) {
+  ctx.slot<detail::state_object_threading>().threaded.store(threaded);
+}
+
+inline bool state_object_threading(app &ctx) {
+  return ctx.slot<detail::state_object_threading>().threaded.load();
+}
 
 // -------------------------
 // cvc::state_lock_scope
@@ -272,7 +292,9 @@ public:
   // Constructor with explicit app context
   state_object(app &ctx, const std::string state_path = std::string())
       : _ctx(ctx), _batchDepth(0), _initDepth(0), _hasInstanceThreading(false),
-        _instanceThreading(false), _handlerGate(boost::make_shared<detail::handler_gate>()),
+        _instanceThreading(false),
+        _appThreading(&ctx.slot<detail::state_object_threading>().threaded),
+        _handlerGate(boost::make_shared<detail::handler_gate>()),
         _state_path(state_path.empty() ? _ctx.dataTypeName<This>() + cvc::state::SEPARATOR +
                                              boost::lexical_cast<std::string>(this)
                                        : state_path) {
@@ -413,8 +435,7 @@ public:
     }
 
     // Spawn threads outside the lock
-    bool useThreading = _hasInstanceThreading ? _instanceThreading : _useThreading;
-    if (useThreading) {
+    if (getInstanceThreading()) {
       // Threading enabled - spawn threads for each change
       boost::shared_ptr<detail::handler_gate> gate = _handlerGate;
       cvc::app *ctxp = &_ctx;
@@ -474,13 +495,8 @@ public:
   // Unlock state - allows blocked threads to proceed
   void unlockState() { _stateLockMutex.unlock(); }
 
-  // Control whether handleStateChanged runs in threads (default true)
-  // Set to false in tests to avoid threading issues during destruction
-  static void setUseThreading(bool useThreading) { _useThreading = useThreading; }
-
-  static bool getUseThreading() { return _useThreading; }
-
-  // Per-instance threading control (overrides static if set)
+  // Per-instance threading control: whether handleStateChanged runs in threads. Overrides the
+  // app's default (set_state_object_threading, true unless set) while set.
   void setInstanceThreading(bool useThreading) {
     _instanceThreading = useThreading;
     _hasInstanceThreading = true;
@@ -490,7 +506,7 @@ public:
     if (_hasInstanceThreading) {
       return _instanceThreading;
     }
-    return _useThreading;
+    return _appThreading->load();
   }
 
   void clearInstanceThreading() { _hasInstanceThreading = false; }
@@ -519,8 +535,9 @@ protected:
   bool _hasInstanceThreading;
   bool _instanceThreading;
 
-  // Threading control - can be disabled for tests
-  static bool _useThreading;
+  // The app's default (set_state_object_threading), for an object that has not chosen. The app's
+  // own, which outlives the object (as _ctx does).
+  const std::atomic<bool> *_appThreading;
 
   // Disconnect from state tree to prevent NEW callbacks during destruction
   // Call this in derived class destructors to avoid pure virtual method calls
@@ -553,8 +570,7 @@ private:
       // Batching enabled - queue this change (set automatically deduplicates)
       _pendingChanges.insert(childState);
     } else {
-      bool useThreading = _hasInstanceThreading ? _instanceThreading : _useThreading;
-      if (useThreading) {
+      if (getInstanceThreading()) {
         // Threading enabled - spawn thread (unlock first to avoid holding lock)
         lock.unlock();
         std::string threadKey = stateName(childState) + "_stateChanged";
@@ -586,9 +602,6 @@ private:
     }
   }
 };
-
-// Initialize static member - threading enabled by default
-template <class This> bool state_object<This>::_useThreading = true;
 } // namespace cvc
 
 #endif // __CVC_STATE_OBJECT_H__

@@ -9,7 +9,10 @@
 #   - sched.single.arith_loop and sched.single.tail_rec: steps_total pinned, so a change to the
 #     evaluator's or a scheduler's step counts shows here; on the async scheduler also through an
 #     exec_group at threads 0 (driver=group, over its own and over the frozen base), which takes
-#     the same steps (threaded execution's Stage 1, rule 1).
+#     the same steps (threaded execution's Stage 1, rule 1);
+#   - the same points on the async scheduler at slice_steps 256 (threaded execution's Stage S): a
+#     pick that runs up to 256 steps of its process takes the same steps as one that runs one, so
+#     the pins are the same numbers (S2.md: step counts unchanged at any slice_steps).
 #
 # Run by CTest as
 #   cmake -DBENCH=<state_exec_bench> -DPYTHON=<python3> -DRUNNER=<tools/bench/state_exec_bench.py>
@@ -28,7 +31,8 @@ endforeach()
 file(MAKE_DIRECTORY "${WORK_DIR}")
 set(LOCKS_RUN "${WORK_DIR}/lock_uncontended.jsonl")
 set(SCHED_RUN "${WORK_DIR}/sched_single.jsonl")
-file(REMOVE "${LOCKS_RUN}" "${SCHED_RUN}") # --json appends
+set(SLICE_RUN "${WORK_DIR}/sched_single_slice.jsonl")
+file(REMOVE "${LOCKS_RUN}" "${SCHED_RUN}" "${SLICE_RUN}") # --json appends
 
 set(failed "")
 
@@ -49,6 +53,12 @@ gate_step("state_exec_bench lock.uncontended"
 gate_step("state_exec_bench sched.single.*"
   "${BENCH}" --scenario "sched.single.*" --size driver=spin,group --size base=own,frozen
   --reps 1 --warmup 0 --json "${SCHED_RUN}")
+# Stage S: the pinned programs alone at slice_steps 256 (async only: the sync scheduler has no
+# runs), through a group too.
+gate_step("state_exec_bench sched.single.* slice_steps=256"
+  "${BENCH}" --scenario sched.single.arith_loop --scenario sched.single.tail_rec
+  --executor async --size slice_steps=256 --size driver=spin,group --size base=own,frozen
+  --reps 1 --warmup 0 --json "${SLICE_RUN}")
 
 # 0 steps and 0 allocations per uncontended lock, for a one-form body (design 8.8, 11.2).
 foreach(metric extra.steps_per_lock extra.allocs_per_lock)
@@ -74,6 +84,11 @@ foreach(point "arith_loop;40000;1080020" "tail_rec;1000;25020" "tail_rec;10000;2
   gate_step("gate sched.single.${program} n=${n} steps_total == ${steps}"
     "${PYTHON}" -I "${RUNNER}" gate "${SCHED_RUN}" --scenario "sched.single.${program}"
     --where n=${n} --metric steps_total --min ${steps} --max ${steps})
+  # The same number at slice_steps 256: runs change which process steps when, not how many steps
+  # a program takes. --where makes a run without the 256 points fail rather than pass vacuously.
+  gate_step("gate sched.single.${program} n=${n} slice_steps=256 steps_total == ${steps}"
+    "${PYTHON}" -I "${RUNNER}" gate "${SLICE_RUN}" --scenario "sched.single.${program}"
+    --where n=${n} --where slice_steps=256 --metric steps_total --min ${steps} --max ${steps})
 endforeach()
 
 if(failed)

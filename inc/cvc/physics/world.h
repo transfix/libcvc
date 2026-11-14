@@ -52,6 +52,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cvc/physics/backend.h>
+#include <cvc/physics/boat.h>
 #include <cvc/physics/body.h>
 #include <cvc/physics/field.h>
 #include <cvc/physics/shape.h>
@@ -332,6 +333,27 @@ public:
   // refuse. Like materials, a tuning is not part of save(): restore() needs a world
   // tuned the same.
   void set_vehicle(vehicle_id id, const vehicle_desc &d);
+
+  // --- boats (boat.h) ----------------------------------------------------------
+
+  // A boat with its hull's origin at `position`: its hull body added from d.hull (its own
+  // position and rotation ignored), pushed each step by its propeller and steered by its rudder
+  // or outboard. Throws cvc::physics_error for a description it refuses (a hull that is not
+  // dynamic, add_body's refusals, values that are not finite or out of range). Its hull is a
+  // body (boat_state::hull): world::state reads it, and world::remove_body refuses it (remove
+  // the boat instead). Boats work on every backend.
+  boat_id add_boat(const boat_desc &d, const vec3 &position, const quat &rotation = {});
+  // Removes the boat and its hull.
+  void remove_boat(boat_id id);
+  std::size_t boat_count() const;
+  // What the actuators move toward from the next step on. Throws cvc::physics_error for a
+  // throttle or rudder that is not finite or outside [-1, 1].
+  void set_boat_controls(boat_id id, const boat_controls &c);
+  // The hull, its speed through the water and heading, the actuators, and the last step's
+  // thrust and rudder force.
+  physics::boat_state boat_state(boat_id id) const;
+  // The boat's description as added (its hull's position and rotation as given).
+  boat_desc get_boat(boat_id id) const;
 
   // --- time -----------------------------------------------------------------
 

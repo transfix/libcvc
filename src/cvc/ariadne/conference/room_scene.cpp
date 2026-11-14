@@ -147,7 +147,9 @@ bool of_run(cvc::app &app, const std::string &base, std::uint64_t scene_epoch) {
   return scene_epoch == 0 || e.empty() || std::strtoull(e.c_str(), nullptr, 10) == scene_epoch;
 }
 // The epoch a write stamps: EPOCH, or this process's when 0 (section_writer::commit's rule).
-std::uint64_t run_epoch(std::uint64_t epoch) { return epoch != 0 ? epoch : section_epoch(); }
+std::uint64_t run_epoch(cvc::app &app, std::uint64_t epoch) {
+  return epoch != 0 ? epoch : section_epoch(app);
+}
 
 // A rig knob: its value when the light sets it, else empty (the preset's value).
 void set_knob(cvc::app &app, const std::string &path, bool has, float f) {
@@ -288,7 +290,7 @@ void write_object_fields(cvc::app &app, const std::string &room_id,
 } // namespace
 
 void write_scene_env(cvc::app &app, const std::string &room_id, const room_scene_env &env) {
-  write_env_fields(app, room_id, env, run_epoch(0));
+  write_env_fields(app, room_id, env, run_epoch(app, 0));
   bump_revision(app, room_id);
 }
 
@@ -321,7 +323,7 @@ bool read_scene_env(cvc::app &app, const std::string &room_id, room_scene_env &e
 void write_scene_object(cvc::app &app, const std::string &room_id,
                         const cvc::ariadne::SceneNode &obj) {
   check_id(obj.id);
-  write_object_fields(app, room_id, obj, run_epoch(0));
+  write_object_fields(app, room_id, obj, run_epoch(app, 0));
   bump_revision(app, room_id);
 }
 
@@ -539,7 +541,7 @@ section_stamp write_room_world(cvc::app &app, const std::string &room_id, const 
                                std::uint64_t epoch) {
   for (const cvc::ariadne::SceneNode &o : world.objects)
     check_id(o.id);
-  const std::uint64_t run = run_epoch(epoch);
+  const std::uint64_t run = run_epoch(app, epoch);
   write_env_fields(app, room_id, world.env, run); // checks the light ids before it writes
   std::set<std::string> written;
   for (const cvc::ariadne::SceneNode &o : world.objects) {

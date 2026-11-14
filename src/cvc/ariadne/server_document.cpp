@@ -152,19 +152,16 @@ std::string parse_server_block(const Value &content, ServerBlock &out,
   return std::string();
 }
 
-void register_server_block() {
-  static std::once_flag once;
-  std::call_once(once, [] {
-    register_ari_block("server", [](const Value &content, LoadResult &out) {
-      out.extras.emplace_back("server", content);
-    });
+void register_server_block(cvc::app &app) {
+  register_ari_block(app, "server", [](const Value &content, LoadResult &out) {
+    out.extras.emplace_back("server", content);
   });
 }
 
 ServerDocument::ServerDocument(cvc::app &app, std::string room, std::string prefix)
     : app_(app), room_(std::move(room)), rt_(app, std::move(prefix)) {
-  register_server_block();
-  register_world_block();
+  register_server_block(app);
+  register_world_block(app);
   rt_.runtime().set_relay_document(true); // requires: [relay]
   rt_.add_load_hook([this](LoadResult &lr, const std::string &path) {
     ServerBlock b;
@@ -202,7 +199,7 @@ ServerDocument::~ServerDocument() = default;
 std::string ServerDocument::read(const std::string &path, std::vector<std::string> *warnings) {
   if (!AppRuntime::have_yaml())
     return "this libcvc was built without yaml-cpp, so it cannot read a document";
-  const LoadResult lr = load_file(path);
+  const LoadResult lr = load_file(app_, path);
   if (!lr.ok)
     return lr.error.empty() ? "cannot load " + path : lr.error;
   ServerBlock b;

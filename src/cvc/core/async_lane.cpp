@@ -3,12 +3,14 @@
 // the contract, the no-thread fallback and the per-frame pump.
 
 #include <chrono>
+#include <cstdio>
 #include <cvc/core/async_lane.h>
 #include <cvc/core/thread_class.h>
 #include <cvc/state/state_exec/async_scheduler.h> // post_message + the pump calls
 #include <cvc/state/state_exec/intrinsics.h> // resolve_channel_key, make_future, park_on_channel
 #include <exception>
 #include <memory>
+#include <random>
 #include <utility>
 
 #if (defined(__linux__) || defined(__APPLE__)) && !defined(__EMSCRIPTEN__)
@@ -72,11 +74,28 @@ void name_this_thread(const std::string &lane_name) {
 // async_lane
 // ---------------------------------------------------------------------------
 
+namespace {
+// 64 random bits in hex: one lane's task-key tag (message_ids.h's scheme).
+std::string random_tag() {
+  std::random_device rd;
+  const unsigned long long r = (static_cast<unsigned long long>(rd()) << 32) ^ rd();
+  char tag[17];
+  std::snprintf(tag, sizeof tag, "%016llx", r);
+  return tag;
+}
+} // namespace
+
 async_lane::async_lane(std::string name, lane_mode mode)
-    : name_(std::move(name)), mode_(async_lane_has_threads ? mode : lane_mode::deferred) {
+    : name_(std::move(name)), mode_(async_lane_has_threads ? mode : lane_mode::deferred),
+      task_tag_(random_tag()) {
   // Every member is initialized before the worker starts reading them.
   if (mode_ == lane_mode::threaded)
     worker_ = std::thread([this] { worker_loop(); });
+}
+
+std::string async_lane::next_task_key() {
+  return name_ + "." + task_tag_ + "-" +
+         std::to_string(task_keys_.fetch_add(1, std::memory_order_relaxed));
 }
 
 async_lane::~async_lane() { stop(); }
@@ -307,9 +326,7 @@ std::string launch_lane_task(async_lane &lane, se::async_scheduler &sched, const
   // A UNIQUE reply channel per call. The "<lane>." part keeps it disjoint from launch_pool_task's
   // "<prefix>#<n>" keys, so a pool task and a lane task with the same prefix never collide; the
   // '#' keeps it verbatim under chroot scoping and exempt from channel policy.
-  static std::atomic<std::uint64_t> seq{0};
-  const std::string chan = chan_prefix + "#" + lane.name() + "." +
-                           std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
+  const std::string chan = chan_prefix + "#" + lane.next_task_key();
   return post_lane_task(lane, sched, root, chan, std::move(work), std::move(on_error));
 }
 

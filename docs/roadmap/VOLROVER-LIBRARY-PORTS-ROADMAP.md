@@ -570,7 +570,7 @@ from a document carries the document's owner tag, so closing the document stops 
 | `(segment.seeded vol classes [params])` | §5's segmentation. Returns a dict of `labels`, `classes` and `border` |
 | `(segment.critical-points vol [params])` | The paper's seeds as a two-class `point_classes` |
 | `(contours.info stack)` | A `contour_stack`'s slices, counts and components. No intrinsic reads or writes files: the DSL deals with data on the state tree, and files are the rest of libcvc's (Joe, 2026-11-12) |
-| `(point-classes.read path)`, `(point-classes.write pc path)`, `(point-classes.add pc class i j k)` | Point-class I/O and edits. These are small, so they are plain synchronous natives |
+| `(point-classes.add pc class i j k)`, `(point-classes.points pc class)`, `(point-classes.info pc)` | Point-class edits and queries on the state tree (no file reads or writes, as for contours). These are small, so they are plain synchronous natives |
 | `(params.defaults name)`, `(params.check name dict)` | Defaults and validation from a parameter table, synchronous |
 | `(job.cancel pid)` | Cancels a task started by any `-start` form, at its next step |
 
@@ -1176,7 +1176,8 @@ their units and ranges as properties. Bulk data is on the data channel:
 - **Point classes:** a small `cvc::point_classes` type (classes × voxel points, per variable and
   timestep), with `.vgr` read and write and a `.pts` reader. The legacy `.vgr` form is
   `<pointclassdoc><pointclass name color variable timestep><point>"x y z"</point>`. The points
-  live on the data channel; the class metadata are keys.
+  live on the data channel; the class metadata are keys. *Built in P0d:*
+  `inc/cvc/volume/point_classes.h` ([PORT_SHARED_TYPES.md](../PORT_SHARED_TYPES.md)).
 - **Contours:** the §3 `contour_stack`, one component per object.
 - **Splines:** the legacy resampled with GSL splines every frame. Use a small natural-cubic or
   Catmull-Rom spline in libcvc instead, computed when a contour changes, so wasm needs no GSL.

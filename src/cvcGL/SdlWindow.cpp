@@ -93,7 +93,25 @@ bool sdl_window_enabled() {
 
 namespace {
 
-int g_openWindows = 0;
+// SDL's own per-window store says which SDL windows are cvcGL's and whose events they are: the
+// window, not a table of ours, holds both, and they go with it. kWindowProperty is set on each
+// window SdlGLRenderWindow makes (openWindows counts them); kInteractorProperty names the
+// interactor its events go to (claimWindow).
+constexpr const char *kWindowProperty = "cvc.gl.window";
+constexpr const char *kInteractorProperty = "cvc.gl.interactor";
+
+// The SDL windows of the process, or none while SDL's video is down. Each window once.
+std::vector<SDL_Window *> sdl_windows() {
+  std::vector<SDL_Window *> out;
+  if (!SDL_WasInit(SDL_INIT_VIDEO))
+    return out;
+  int n = 0;
+  if (SDL_Window **windows = SDL_GetWindows(&n)) {
+    out.assign(windows, windows + n);
+    SDL_free(windows);
+  }
+  return out;
+}
 
 // A hint the app has not set, set to what VTK's own windows do.
 void hint_default(const char *name, const char *value) {
@@ -107,7 +125,13 @@ void hint_default(const char *name, const char *value) {
 
 vtkStandardNewMacro(SdlGLRenderWindow);
 
-int SdlGLRenderWindow::openWindows() { return g_openWindows; }
+int SdlGLRenderWindow::openWindows() {
+  int open = 0;
+  for (SDL_Window *w : sdl_windows())
+    if (SDL_GetPointerProperty(SDL_GetWindowProperties(w), kWindowProperty, nullptr))
+      ++open;
+  return open;
+}
 
 SdlGLRenderWindow::SdlGLRenderWindow() {
   this->SetWindowName("cvcGL");
@@ -213,7 +237,7 @@ void SdlGLRenderWindow::CreateAWindow() {
     window_ = nullptr;
     return;
   }
-  ++g_openWindows;
+  SDL_SetPointerProperty(SDL_GetWindowProperties(window_), kWindowProperty, this);
 #ifdef __EMSCRIPTEN__
   cvcgl_sdl_touch_quiet(canvas_.c_str(), 1);
 #endif
@@ -257,9 +281,8 @@ void SdlGLRenderWindow::DestroyWindow() {
     cvcgl_sdl_touch_quiet(canvas_.c_str(), 0);
 #endif
     SDL_StopTextInput(window_);
-    SDL_DestroyWindow(window_);
+    SDL_DestroyWindow(window_); // and its properties: no longer one of openWindows()
     window_ = nullptr;
-    --g_openWindows;
   }
   this->Mapped = 0;
   if (video_) {
@@ -531,22 +554,29 @@ void SdlGLRenderWindow::SetCursorPosition(int x, int y) {
 
 void SdlGLRenderWindow::SetCurrentCursor(int shape) {
   this->Superclass::SetCurrentCursor(shape);
-  static const std::map<int, SDL_SystemCursor> kCursor = {
-      {VTK_CURSOR_DEFAULT, SDL_SYSTEM_CURSOR_DEFAULT},
-      {VTK_CURSOR_ARROW, SDL_SYSTEM_CURSOR_DEFAULT},
-      {VTK_CURSOR_SIZENE, SDL_SYSTEM_CURSOR_NE_RESIZE},
-      {VTK_CURSOR_SIZENW, SDL_SYSTEM_CURSOR_NW_RESIZE},
-      {VTK_CURSOR_SIZESW, SDL_SYSTEM_CURSOR_SW_RESIZE},
-      {VTK_CURSOR_SIZESE, SDL_SYSTEM_CURSOR_SE_RESIZE},
-      {VTK_CURSOR_SIZENS, SDL_SYSTEM_CURSOR_NS_RESIZE},
-      {VTK_CURSOR_SIZEWE, SDL_SYSTEM_CURSOR_EW_RESIZE},
-      {VTK_CURSOR_SIZEALL, SDL_SYSTEM_CURSOR_MOVE},
-      {VTK_CURSOR_HAND, SDL_SYSTEM_CURSOR_POINTER},
-      {VTK_CURSOR_CROSSHAIR, SDL_SYSTEM_CURSOR_CROSSHAIR}};
+  struct CursorShape {
+    int vtk;
+    SDL_SystemCursor sdl;
+  };
+  static constexpr CursorShape kCursor[] = {{VTK_CURSOR_DEFAULT, SDL_SYSTEM_CURSOR_DEFAULT},
+                                            {VTK_CURSOR_ARROW, SDL_SYSTEM_CURSOR_DEFAULT},
+                                            {VTK_CURSOR_SIZENE, SDL_SYSTEM_CURSOR_NE_RESIZE},
+                                            {VTK_CURSOR_SIZENW, SDL_SYSTEM_CURSOR_NW_RESIZE},
+                                            {VTK_CURSOR_SIZESW, SDL_SYSTEM_CURSOR_SW_RESIZE},
+                                            {VTK_CURSOR_SIZESE, SDL_SYSTEM_CURSOR_SE_RESIZE},
+                                            {VTK_CURSOR_SIZENS, SDL_SYSTEM_CURSOR_NS_RESIZE},
+                                            {VTK_CURSOR_SIZEWE, SDL_SYSTEM_CURSOR_EW_RESIZE},
+                                            {VTK_CURSOR_SIZEALL, SDL_SYSTEM_CURSOR_MOVE},
+                                            {VTK_CURSOR_HAND, SDL_SYSTEM_CURSOR_POINTER},
+                                            {VTK_CURSOR_CROSSHAIR, SDL_SYSTEM_CURSOR_CROSSHAIR}};
   if (!window_)
     return;
-  const auto it = kCursor.find(shape);
-  const SDL_SystemCursor sys = it == kCursor.end() ? SDL_SYSTEM_CURSOR_DEFAULT : it->second;
+  SDL_SystemCursor sys = SDL_SYSTEM_CURSOR_DEFAULT;
+  for (const CursorShape &c : kCursor)
+    if (c.vtk == shape) {
+      sys = c.sdl;
+      break;
+    }
   SDL_Cursor *&c = cursors_[sys];
   if (!c)
     c = SDL_CreateSystemCursor(sys);
@@ -578,21 +608,44 @@ vtkStandardNewMacro(SdlRenderWindowInteractor);
 namespace {
 
 // SDL has one event queue per process, so whichever interactor drains it hands each event to the
-// interactor of the window it names, and a timer's tick to the interactor that made the timer.
-// VTK's timer ids are unique in the process.
-std::map<SDL_WindowID, SdlRenderWindowInteractor *> &window_routes() {
-  static std::map<SDL_WindowID, SdlRenderWindowInteractor *> routes;
-  return routes;
-}
-std::map<int, SdlRenderWindowInteractor *> &timer_routes() {
-  static std::map<int, SdlRenderWindowInteractor *> routes;
-  return routes;
+// interactor of the window it names (the window's kInteractorProperty), and a timer's tick to the
+// interactor that made the timer (the one whose timers_ has it: VTK's timer ids are unique in the
+// process).
+SdlRenderWindowInteractor *interactor_of(SDL_Window *w) {
+  return w ? static_cast<SdlRenderWindowInteractor *>(
+                 SDL_GetPointerProperty(SDL_GetWindowProperties(w), kInteractorProperty, nullptr))
+           : nullptr;
 }
 
-// One registered event type carries every interactor's timer ticks.
+// The interactors the process's SDL windows name, each once.
+std::vector<SdlRenderWindowInteractor *> window_interactors() {
+  std::vector<SdlRenderWindowInteractor *> out;
+  for (SDL_Window *w : sdl_windows())
+    if (SdlRenderWindowInteractor *to = interactor_of(w))
+      if (std::find(out.begin(), out.end(), to) == out.end())
+        out.push_back(to);
+  return out;
+}
+
+// The registered event type that carries every interactor's timer ticks. An SDL event type is the
+// process's: SDL_RegisterEvents hands each out once and none is given back, so one is registered
+// for cvcGL and kept in SDL's own global properties, where every interactor and SDL's timer thread
+// find it (and which SDL_Quit clears with the rest of SDL). 0 when SDL has none left.
 Uint32 timer_event() {
-  static const Uint32 type = SDL_RegisterEvents(1);
-  return type;
+  constexpr const char *kKey = "cvc.gl.timer_event";
+  const SDL_PropertiesID global = SDL_GetGlobalProperties();
+  Sint64 type = SDL_GetNumberProperty(global, kKey, 0);
+  if (type != 0)
+    return static_cast<Uint32>(type);
+  SDL_LockProperties(global); // two first users at once register one type
+  type = SDL_GetNumberProperty(global, kKey, 0);
+  if (type == 0) {
+    type = SDL_RegisterEvents(1);
+    if (type != 0)
+      SDL_SetNumberProperty(global, kKey, type);
+  }
+  SDL_UnlockProperties(global);
+  return static_cast<Uint32>(type);
 }
 
 // Runs on SDL's timer thread: posts the tick to the queue. The timer's id and kind ride in the
@@ -611,7 +664,11 @@ Uint32 SDLCALL on_timer(void *tick, SDL_TimerID, Uint32 interval) {
 std::string x11_printable(unsigned c) {
   if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))
     return std::string(1, static_cast<char>(c));
-  static const std::map<unsigned, const char *> kPunctuation = {
+  struct Named {
+    unsigned c;
+    const char *keysym;
+  };
+  static constexpr Named kPunctuation[] = {
       {' ', "space"},      {'!', "exclam"},       {'"', "quotedbl"},    {'#', "numbersign"},
       {'$', "dollar"},     {'%', "percent"},      {'&', "ampersand"},   {'\'', "apostrophe"},
       {'(', "parenleft"},  {')', "parenright"},   {'*', "asterisk"},    {'+', "plus"},
@@ -621,8 +678,10 @@ std::string x11_printable(unsigned c) {
       {'\\', "backslash"}, {']', "bracketright"}, {'^', "asciicircum"}, {'_', "underscore"},
       {'`', "grave"},      {'{', "braceleft"},    {'|', "bar"},         {'}', "braceright"},
       {'~', "asciitilde"}};
-  const auto it = kPunctuation.find(c);
-  return it == kPunctuation.end() ? std::string() : it->second;
+  for (const Named &p : kPunctuation)
+    if (p.c == c)
+      return p.keysym;
+  return std::string();
 }
 
 // SDL's key as VTK names it. The keysym is the key's own, without Shift (SDL's key events carry
@@ -774,9 +833,9 @@ SdlRenderWindowInteractor::SdlRenderWindowInteractor() = default;
 SdlRenderWindowInteractor::~SdlRenderWindowInteractor() {
   while (!timers_.empty())
     this->InternalDestroyTimer(timers_.begin()->first);
-  auto &routes = window_routes();
-  for (auto it = routes.begin(); it != routes.end();)
-    it = it->second == this ? routes.erase(it) : std::next(it);
+  for (SDL_Window *w : sdl_windows()) // no window's events come here any more
+    if (interactor_of(w) == this)
+      SDL_ClearProperty(SDL_GetWindowProperties(w), kInteractorProperty);
 }
 
 SdlGLRenderWindow *SdlRenderWindowInteractor::sdlWindow() const {
@@ -803,7 +862,7 @@ void SdlRenderWindowInteractor::Initialize() {
 void SdlRenderWindowInteractor::claimWindow() {
   const SdlGLRenderWindow *win = sdlWindow();
   if (win && win->sdlWindow())
-    window_routes()[SDL_GetWindowID(win->sdlWindow())] = this;
+    SDL_SetPointerProperty(SDL_GetWindowProperties(win->sdlWindow()), kInteractorProperty, this);
 }
 
 int SdlRenderWindowInteractor::addSink(std::function<void(const SDL_Event &)> sink) {
@@ -856,21 +915,23 @@ void SdlRenderWindowInteractor::keep(const SDL_Event &e) {
 void SdlRenderWindowInteractor::deliver(const SDL_Event &e) {
   SdlRenderWindowInteractor *to = this;
   if (e.type == timer_event()) {
-    const auto it = timer_routes().find(e.user.code);
-    if (it == timer_routes().end())
-      return; // its timer is gone
-    to = it->second;
+    if (timers_.count(e.user.code) == 0) { // another interactor's timer
+      to = nullptr;
+      for (SdlRenderWindowInteractor *other : window_interactors())
+        if (other->timers_.count(e.user.code) != 0) {
+          to = other;
+          break;
+        }
+      if (!to)
+        return; // its timer is gone
+    }
   } else if (e.type == SDL_EVENT_QUIT) { // every window's
-    std::set<SdlRenderWindowInteractor *> others;
-    for (const auto &kv : window_routes())
-      if (kv.second != this)
-        others.insert(kv.second);
-    for (SdlRenderWindowInteractor *other : others)
-      other->keep(e);
+    for (SdlRenderWindowInteractor *other : window_interactors())
+      if (other != this)
+        other->keep(e);
   } else if (SDL_Window *w = SDL_GetWindowFromEvent(&e)) {
-    const auto it = window_routes().find(SDL_GetWindowID(w));
-    if (it != window_routes().end())
-      to = it->second;
+    if (SdlRenderWindowInteractor *owner = interactor_of(w))
+      to = owner;
   }
   if (to == this)
     dispatch(e);
@@ -1058,7 +1119,6 @@ int SdlRenderWindowInteractor::InternalCreateTimer(int timerId, int timerType,
   if (!id)
     return 0;
   timers_[timerId] = id;
-  timer_routes()[timerId] = this;
   return timerId;
 }
 
@@ -1067,8 +1127,7 @@ int SdlRenderWindowInteractor::InternalDestroyTimer(int platformTimerId) {
   if (it == timers_.end())
     return 0;
   SDL_RemoveTimer(it->second); // false for a one-shot that already fired: nothing to remove
-  timers_.erase(it);
-  timer_routes().erase(platformTimerId);
+  timers_.erase(it);           // a tick of it still queued finds no interactor: dropped (deliver)
   return 1;
 }
 

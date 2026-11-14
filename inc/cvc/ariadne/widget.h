@@ -36,6 +36,7 @@ enum class Kind {
   Separator,      // a horizontal rule
   Progress,       // a read-only bar: the number at a state path, over [lo, hi]
   Plot,           // a read-only line graph: the comma-separated numbers at a state path
+  Chart,          // read-only curves: series with their own x, bands, markers, log y, a cursor
   Checkbox,       // bound bool state
   SliderInt,      // bound int state, [ilo, ihi]
   SliderFloat,    // bound double state, [lo, hi]
@@ -72,6 +73,16 @@ enum class ImageShape { Rect, Circle };
 // on pixels, so `terminal` says what to draw there: dimmed half-blocks behind the content, the
 // picture as a row of `banner_rows` above it, or nothing.
 enum class BackdropTerminal { Behind, Banner, Off }; // Off: `terminal: none`
+
+// Kind::Chart: where its legend goes (`legend:`; Off for `none`, as BorderShow says why).
+enum class ChartLegend { Top, Right, Off };
+// One entry of a chart's `series:` list: a state path (or a computed expression) holding the
+// series, and the label and style the document gives it ("" takes the series' own, if any).
+struct ChartSeriesBind {
+  std::string bind;
+  std::string label;
+  std::string style;
+};
 struct Background {
   std::string src;
   std::string bind;
@@ -191,6 +202,19 @@ inline std::shared_ptr<const FunctionScope> make_function_scope(std::vector<Func
   scope->defs = std::move(defs);
   return scope;
 }
+
+// One run of a rich text's `runs:` (§5.20): its text, its style (words among bold, italic, code),
+// and, for a link, where it goes (`href`, which the text's on_link: reads) or what it runs
+// (`on_click`, only in a list the document writes itself). `tooltip` is what hovering the link
+// shows (else its href).
+struct TextRunSpec {
+  std::string text;
+  std::string style;
+  std::string href;
+  std::string on_click;
+  std::string tooltip;
+  bool operator==(const TextRunSpec &) const = default;
+};
 
 // One node of the retained tree. `bind` is a cvc::state path (relative to the
 // Runtime's prefix, or absolute with a leading '/'); `on` is an event name a
@@ -326,6 +350,18 @@ struct Widget {
   // `:name:` in the text that the map names is drawn as that picture, one line tall, where the
   // backend can put a picture in a line. Empty: plain text.
   std::string emoji;
+  // §5.20 Kind::Text `runs:`: rich text, a paragraph of styled runs and links (has_runs). `runs` is
+  // a list written in the document, whose runs may carry an on_click: program; `runs_src` a state
+  // path holding a list of runs, or an expression giving one: data, whose links take on_link:
+  // (their on_click is never run). `on_link` (an event name or a program) runs when a link is
+  // activated, with event.href / .text / .index (the run's) / .link (the link's). `text_max_lines`
+  // > 0 (`max_lines:`) keeps that many lines, the last ending in an ellipsis; `wrap` (default
+  // true) wraps it to the width it has.
+  bool has_runs = false;
+  std::vector<TextRunSpec> runs;
+  std::string runs_src;
+  std::string on_link;
+  int text_max_lines = 0;
 
   // Kind::Image (§ raster viewer): the host-published image to show. `src` is a static image name;
   // a non-empty `bind` overrides it with the name held in that state key (so a combo can switch
@@ -375,7 +411,19 @@ struct Widget {
   // Kind::Plot: `overlay` is the graph's caption the same way, and [lo, hi] its vertical range
   // (lo >= hi: fitted to the numbers).
   std::string overlay;
-  double plot_height = 60.0; // Kind::Plot: pixels (a window backend's)
+  double plot_height = 60.0; // Kind::Plot / Kind::Chart: pixels (a window backend's)
+
+  // Kind::Chart: `bind` is a plot subtree (<bind>.s.<i>.{label,x,y,lo,hi,style} and
+  // <bind>.m.<j>.{x,label,kind}, what host.set_plot writes) and `chart_series` the `series:` list,
+  // drawn after the subtree's. `log_y` is "1" / "0", or a state path or computed expression read
+  // each frame (a checkbox can switch it). `cursor` names the x of a play-head line and `pick` the
+  // path a click writes the nearest x to (each a state path; the cursor may be an expression).
+  std::vector<ChartSeriesBind> chart_series;
+  std::string log_y = "0";
+  ChartLegend legend = ChartLegend::Top;
+  std::string x_label;
+  std::string cursor;
+  std::string pick;
 
   // Kind::TextView: its height in px (0: the rest of the window; rows of 16 px in a terminal);
   // `follow` keeps it at the bottom while lines arrive, if it is already there; `wrap` wraps long
@@ -550,6 +598,20 @@ inline Widget plot(std::string label, std::string bind, double lo = 0.0, double 
   w.lo = lo;
   w.hi = hi;
   w.overlay = std::move(overlay);
+  w.plot_height = height;
+  return w;
+}
+
+// Read-only curves (Kind::Chart): the plot subtree at `bind` (host.set_plot's), and/or `series`
+// entries, `height` pixels tall where the backend has pixels. Set log_y / legend / x_label /
+// cursor / pick on the result.
+inline Widget chart(std::string label, std::string bind, std::vector<ChartSeriesBind> series = {},
+                    double height = 160.0) {
+  Widget w;
+  w.kind = Kind::Chart;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.chart_series = std::move(series);
   w.plot_height = height;
   return w;
 }

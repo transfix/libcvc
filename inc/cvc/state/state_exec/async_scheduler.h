@@ -150,6 +150,29 @@ public:
   uint64_t sync_run_steps(std::optional<uint64_t> max_steps = std::nullopt,
                           std::optional<double> max_time = std::nullopt);
 
+  /// Stage S (docs/STATE_EXEC_THREADED.md 4.4): a pick runs up to `steps` steps of its process, a
+  /// run, on one step's guards, clock reading and accounting. 1, the default, is today's loop
+  /// exactly. A run ends early at a park or any other status change, a post from another thread
+  /// (a message, a completion, a control, a lock post), a process made ready at a better priority
+  /// level or the runner's own level getting worse, a pending signal or watch event, a stop,
+  /// max_steps or the message limits, the run's step budget, or, at a
+  /// clock check after its steps 2, 4, 8 and 16 and then every 16, past `seconds`, the process's
+  /// time, the pump's time budget (charged as the steps since its last check), a due timer or a
+  /// due charge of an async call in flight (its timeout, or the 1 ms charge beat of a process with
+  /// limits). A process with max_step_time or max_memory keeps one step a pick (a per-step guard;
+  /// heap measured step by step). `seconds` applies only to a run loop with a time budget, so a
+  /// run on steps alone (a deterministic pump) ends on steps only; infinite never ends a run, and
+  /// 0 or less means 1 ms. Set here, the values win over the tree's state_exec.slice_steps and
+  /// state_exec.slice_seconds, which win over CVC_EXEC_SLICE_STEPS, read when the scheduler is
+  /// made. set_slice is set_slice_steps(steps) and set_slice_seconds(seconds). Scheduler thread.
+  void set_slice(std::uint64_t steps, double seconds = 1e-3);
+  /// One half of set_slice (0 steps means 1): the tree's other setting still applies, as for an
+  /// exec_group given only one of its options. Each wins over its tree setting from then on.
+  void set_slice_steps(std::uint64_t steps);
+  void set_slice_seconds(double seconds);
+  std::uint64_t slice_steps() const noexcept { return slice_steps_; }
+  double slice_seconds() const noexcept { return slice_seconds_; }
+
   /// Any thread: end the run loop at its next step boundary (td 4.12). A stop() with no run
   /// active is discarded by the next run, which starts by clearing it.
   void stop();
@@ -354,7 +377,7 @@ public:
   /// if none).  Set around evaluator_.step() so intrinsics can query `self`.
   int current_pid() const override { return current_pid_; }
   const process_ptr &current_process() const override {
-    return current_proc_ ? *current_proc_ : no_process();
+    return current_proc_ ? *current_proc_ : no_process_;
   }
 
   void queue_watch_event(int pid, process::watch_event evt);
@@ -466,6 +489,19 @@ private:
   uint32_t cycle_check_ = 0; // steps, for checking every 64th whether a cycle collection is due
   const process_ptr *current_proc_ = nullptr; // the stepping process's entry in procs_
   int reap_after_step_ = -1; // reaped while it stepped: erased once the step is over
+  // Stage S: the steps a pick may run of its process, and the time a run may take (set_slice).
+  uint64_t slice_steps_ = 1;
+  // The default (a tree slice_steps deleted): CVC_EXEC_SLICE_STEPS as the scheduler was made, or 1.
+  uint64_t slice_steps_default_ = 1;
+  double slice_seconds_ = 1e-3;
+  bool slice_steps_set_ = false;       // set_slice_steps was called: the tree's doesn't apply
+  bool slice_seconds_set_ = false;     // set_slice_seconds was called: the tree's doesn't apply
+  uint64_t slice_seen_ = ~uint64_t{0}; // the settings version the tree's slice was last read at
+  uint64_t run_steps_ = 1;             // the steps the last pick ran (execute_process_step)
+  // The last run's steps after its last clock reading, which the run loop's next check of its time
+  // budget stands for (time_budget::spent(now, checks)); 1 after a pick of one step.
+  uint64_t run_unchecked_ = 1;
+  time_budget *run_budget_ = nullptr; // the run loop's time budget, while it runs
 
   // The scheduled evaluator IS the async_stackless_evaluator (roadmap §8.12). Its step never
   // suspends, so the scheduler calls its step_now() directly (no coroutine frame per step).
@@ -527,7 +563,7 @@ private:
   std::vector<process *> woken_; // reused by the waiter wakes
   std::vector<int> charged_;     // the pids charge_async_calls charged (reused)
 
-  static const process_ptr &no_process();
+  const process_ptr no_process_; // null: current_process() while none is stepped
 
   /// Per-path FIFO for messages sent when no receiver is waiting (mirrors sync scheduler).
   std::unordered_map<std::string, std::queue<value_t>> pending_messages_;
@@ -594,7 +630,23 @@ private:
                        std::vector<std::shared_ptr<async_call>> &finished, std::size_t f,
                        std::vector<std::pair<int, control_cmd>> &controls, std::size_t c) noexcept;
   uint64_t run_loop(std::optional<uint64_t> max_steps, std::optional<double> max_time);
-  void execute_process_step(const process_ptr &pp);
+  // The tree's state_exec.slice_steps and slice_seconds, read at a run's start when a setting
+  // under state_exec may have changed (settings_changes), each unless its own setter
+  // (set_slice_steps, set_slice_seconds, or set_slice for both) was called.
+  void refresh_slice();
+  // A pick that runs up to min(slice_steps_, budget) steps of its process: step_once, with a run
+  // in place of one step. step_once is today's loop, and run_loop takes it at slice_steps_ 1.
+  int step_run(uint64_t budget);
+  // One step, or with max_run above 1 a run of up to max_run steps on that step's guards, clock
+  // reading and accounting (continue_run). run_steps_ is set to the steps it ran.
+  void execute_process_step(const process_ptr &pp, uint64_t max_run = 1);
+  // The rest of a run after its first step, counting each step in run_steps_ as it begins (a step
+  // that throws counts): returns whether the evaluation is done.
+  // count0 is the process's step count before the run: the run ends once it has charged max_run.
+  // charge_cpu and cpu0 are the run's CPU charging, as execute_process_step set it at its start:
+  // max_time's second half ends the run at its clock reads.
+  bool continue_run(process &proc, uint64_t max_run, clock::time_point start, uint64_t count0,
+                    bool charge_cpu, double cpu0);
   void handle_signal(process &proc);
   void handle_watch_event(process &proc);
   void restore_from_signal(process &proc);

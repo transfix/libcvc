@@ -1826,20 +1826,21 @@ TEST(LockShared, TableDrivenFromSeveralThreads) {
 
 namespace {
 
-/// Counts the notes deliver hands to another home's port (lock_test_hooks::cross_home_note), from
-/// any thread, while alive.
+/// Counts the notes `mgr`'s homes hand to another home's port (lock_test_hooks::cross_home_note),
+/// from any thread, while alive.
 std::atomic<std::uint64_t> g_cross_notes{0};
 void count_cross_note(const detail::lock_note &) {
   g_cross_notes.fetch_add(1, std::memory_order_relaxed);
 }
 struct note_counter {
   detail::lock_test_hooks hooks;
-  note_counter() {
+  lock_manager &mgr;
+  explicit note_counter(lock_manager &m) : mgr(m) {
     g_cross_notes = 0;
     hooks.cross_home_note = count_cross_note;
-    detail::set_lock_test_hooks(&hooks);
+    mgr.set_test_hooks(&hooks);
   }
-  ~note_counter() { detail::set_lock_test_hooks(nullptr); }
+  ~note_counter() { mgr.set_test_hooks(nullptr); }
   note_counter(const note_counter &) = delete;
   note_counter &operator=(const note_counter &) = delete;
   std::uint64_t count() const { return g_cross_notes.load(); }
@@ -1867,16 +1868,18 @@ std::vector<std::string> texts(const std::vector<detail::lock_post> &v) {
 struct race_result {
   std::uint64_t attempted = 0, posts = 0, dropped = 0, drained = 0, discarded = 0;
   bool landed_after_close = false;
+  std::uint64_t fuzz_hits = 0; // the round's manager's
 };
 
 /// Posters on `kPosters` threads, each through a home of its own, deliver notes for home B's
 /// process while B's thread drains some and then destroys B (protocol 5.7). Every post lands
 /// before the close or is dropped.
-race_result post_close_race(std::uint64_t round) {
+race_result post_close_race(std::uint64_t round, std::uint64_t fuzz_seed) {
   constexpr int kPosters = 3;
   race_result r;
   const std::shared_ptr<lock_manager> mgr = make_manager(lock_threading::shared);
-  note_counter notes_seen;
+  mgr->set_fuzz_seed(fuzz_seed);
+  note_counter notes_seen(*mgr);
   auto b = std::make_unique<sched_side>(mgr, lock_attach{true}, std::make_shared<detail::wakeup>());
   const std::shared_ptr<detail::lock_port> port = b->home->port();
   detail::lock_notes one;
@@ -1924,14 +1927,17 @@ race_result post_close_race(std::uint64_t round) {
   r.discarded = s.posts_discarded;
   posters.clear();
   EXPECT_TRUE(mgr->table().empty());
+  r.fuzz_hits = mgr->fuzz_hits();
   return r;
 }
 
 /// Runs post_close_race `rounds` times and checks each round's counts.
-void run_post_close_races(int rounds) {
-  std::uint64_t attempted = 0, dropped = 0, discarded = 0;
+/// Returns the fuzzed protocol points the rounds' managers reached (with `fuzz_seed`; 0: none).
+std::uint64_t run_post_close_races(int rounds, std::uint64_t fuzz_seed = 0) {
+  std::uint64_t attempted = 0, dropped = 0, discarded = 0, fuzz_hits = 0;
   for (int round = 0; round < rounds; ++round) {
-    const race_result r = post_close_race(std::uint64_t(round));
+    const race_result r = post_close_race(std::uint64_t(round), fuzz_seed);
+    fuzz_hits += r.fuzz_hits;
     attempted += r.attempted;
     dropped += r.dropped;
     discarded += r.discarded;
@@ -1945,6 +1951,7 @@ void run_post_close_races(int rounds) {
   std::printf("LockHomes: %d rounds, %llu notes, %llu dropped at the close, %llu discarded\n",
               rounds, (unsigned long long)attempted, (unsigned long long)dropped,
               (unsigned long long)discarded);
+  return fuzz_hits;
 }
 
 } // namespace
@@ -1993,8 +2000,8 @@ TEST(LockPort, PostCloseDrain) {
 TEST(LockHomes, CrossHomeNoteLandsInItsPort) {
   for (const lock_threading mode : {lock_threading::single, lock_threading::shared}) {
     SCOPED_TRACE(mode_name(mode));
-    note_counter notes_seen;
     const std::shared_ptr<lock_manager> mgr = make_manager(mode);
+    note_counter notes_seen(*mgr);
     auto a = std::make_unique<sched_side>(mgr);
     auto b = std::make_unique<sched_side>(mgr);
     process &pa = a->add(1);
@@ -2215,18 +2222,13 @@ TEST(LockHomes, BlockingSinksReadTheHomesProgressCell) {
 
 namespace {
 
-/// The fuzz seed while alive (0: off); off again after.
-struct fuzz_scope {
-  explicit fuzz_scope(std::uint64_t seed) { detail::set_lock_fuzz_seed(seed); }
-  ~fuzz_scope() { detail::set_lock_fuzz_seed(0); }
-  fuzz_scope(const fuzz_scope &) = delete;
-  fuzz_scope &operator=(const fuzz_scope &) = delete;
-};
-
-/// A few operations through every protocol point on one thread: an operation with notes and its
-/// delivery, posts, a drain of two posts, and a home's destruction.
-void pass_every_point() {
+/// A few operations through every protocol point on one thread, on a manager of their own fuzzed
+/// with `seed` (0: off): an operation with notes and its delivery, posts, a drain of two posts,
+/// and a home's destruction. `hits` gets the manager's fuzzed points.
+void pass_every_point(std::uint64_t seed, std::uint64_t &hits) {
   const std::shared_ptr<lock_manager> mgr = make_manager(lock_threading::shared);
+  mgr->set_fuzz_seed(seed);
+  EXPECT_EQ(mgr->fuzz_seed(), seed);
   auto a = std::make_unique<sched_side>(mgr);
   auto b = std::make_unique<sched_side>(mgr);
   process &pa = a->add(1);
@@ -2245,6 +2247,7 @@ void pass_every_point() {
   a.reset();
   EXPECT_TRUE(mgr->table().empty());
   EXPECT_EQ(mgr->stats().posts, 2u);
+  hits = mgr->fuzz_hits();
 }
 
 } // namespace
@@ -2252,30 +2255,38 @@ void pass_every_point() {
 TEST(LockFuzz, OffByDefault) {
   const char *env = std::getenv("CVC_EXEC_FUZZ");
   if (!env || !*env)
-    EXPECT_EQ(detail::lock_fuzz_seed(), 0u);
-  {
-    fuzz_scope off(0);
-    const std::uint64_t hits = detail::lock_fuzz_hits();
-    pass_every_point();
-    EXPECT_EQ(detail::lock_fuzz_hits(), hits); // off: no point fuzzed
+    EXPECT_EQ(make_manager(lock_threading::shared)->fuzz_seed(), 0u);
+  std::uint64_t hits = 1;
+  pass_every_point(0, hits);
+  EXPECT_EQ(hits, 0u); // off: no point fuzzed
+  pass_every_point(42, hits);
+  // after_op (the release), post_enter and post_exit (two posts), drain_between (one), and
+  // close_then_detach (two homes): 8 at least
+  EXPECT_GE(hits, 8u);
+}
+
+// The seed is the manager's: a manager fuzzed beside another, on threads at once or one after the
+// other, leaves the other's points alone, and a manager made after a fuzzed one is gone is off.
+TEST(LockFuzz, TheSeedIsTheManagers) {
+  std::uint64_t fuzzed = 0, plain = 1;
+  std::thread a([&] { pass_every_point(7, fuzzed); });
+  std::thread b([&] { pass_every_point(0, plain); });
+  a.join();
+  b.join();
+  EXPECT_GE(fuzzed, 8u);
+  EXPECT_EQ(plain, 0u);
+  const char *env = std::getenv("CVC_EXEC_FUZZ");
+  if (!env || !*env) {
+    {
+      const auto gone = make_manager(lock_threading::shared);
+      gone->set_fuzz_seed(9);
+    }
+    EXPECT_EQ(make_manager(lock_threading::shared)->fuzz_seed(), 0u);
   }
-  {
-    fuzz_scope on(42);
-    EXPECT_EQ(detail::lock_fuzz_seed(), 42u);
-    const std::uint64_t hits = detail::lock_fuzz_hits();
-    pass_every_point();
-    // after_op (the release), post_enter and post_exit (two posts), drain_between (one), and
-    // close_then_detach (two homes): 8 at least
-    EXPECT_GE(detail::lock_fuzz_hits() - hits, 8u);
-  }
-  EXPECT_EQ(detail::lock_fuzz_seed(), 0u);
 }
 
 TEST(LockFuzz, PostsRacingACloseNeverLandUnderFuzz) {
-  fuzz_scope on(0xC0FFEE);
-  const std::uint64_t hits = detail::lock_fuzz_hits();
-  run_post_close_races(100);
-  EXPECT_GT(detail::lock_fuzz_hits(), hits);
+  EXPECT_GT(run_post_close_races(100, 0xC0FFEE), 0u);
 }
 
 // -- the manager mutex's waits (lock.cross_thread) ------------------------------------------------
@@ -2746,9 +2757,9 @@ TEST(LockHomes, UnwoundWaitDeliversTheCancelsNotesFirst) {
     g_cancel_probe = cancel_probe{&mgr->table(), *pb.locks->ticket};
     detail::lock_test_hooks hooks;
     hooks.cross_home_note = probe_cancel_note;
-    detail::set_lock_test_hooks(&hooks);
+    mgr->set_test_hooks(&hooks);
     b->home->release_frame(pb, std::nullopt, true); // the cancel lets C's waiter in
-    detail::set_lock_test_hooks(nullptr);
+    mgr->set_test_hooks(nullptr);
     EXPECT_EQ(g_cancel_probe.notes, 1);
     EXPECT_TRUE(g_cancel_probe.ticket_there); // not resumed yet when the wake went out
     EXPECT_FALSE(pb.locks->ticket);

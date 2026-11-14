@@ -83,13 +83,16 @@ constexpr std::chrono::milliseconds kMediaLaneLifetime{100};
 constexpr const char *kLaneOfferType = "application/x-cvc-lane-offer";
 constexpr const char *kLaneAnswerType = "application/x-cvc-lane-answer";
 
-// CLIENT: PID's offer (SDP) for its ROLE lane.
+// CLIENT: PID's offer (SDP) for its ROLE lane. SERIAL makes the message id unique for its sender:
+// each sender keeps its own (a random tag and a count), so one made again under the same pid
+// repeats no id the bus has seen.
 cvc::state_message lane_offer_message(const std::string &room, const std::string &pid,
-                                      lane_role role, const std::string &sdp);
-// RELAY (RELAY_ID): its answer to PID's offer for its ROLE lane.
+                                      lane_role role, const std::string &sdp,
+                                      const std::string &serial);
+// RELAY (RELAY_ID): its answer to PID's offer for its ROLE lane; SERIAL as above.
 cvc::state_message lane_answer_message(const std::string &room, const std::string &relay_id,
                                        const std::string &pid, lane_role role,
-                                       const std::string &sdp);
+                                       const std::string &sdp, const std::string &serial);
 
 #if !defined(__EMSCRIPTEN__) // a relay never runs in a browser
 // RELAY: answers the offers that arrive on SHARD's message bus, sending each answer on every one of

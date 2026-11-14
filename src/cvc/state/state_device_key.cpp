@@ -50,7 +50,7 @@ constexpr std::size_t kPublicKeyBytes = 32;
 constexpr std::size_t kSignatureBytes = 64;
 
 std::string to_hex(const std::string &bytes) {
-  static const char *digits = "0123456789abcdef";
+  static constexpr char digits[] = "0123456789abcdef";
   std::string out;
   out.reserve(bytes.size() * 2);
   for (unsigned char b : bytes) {

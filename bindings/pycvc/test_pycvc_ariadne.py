@@ -245,4 +245,51 @@ for bad, kw in ((42, {}), (len, {"with_call": True}), (len, {"done_channel": "x"
 f = pycvc.host_function("g", len, is_async=True, done_channel="c")
 check(f.name == "g" and f.is_async() and f.done_channel == "c", "a HostFunction says what it is")
 
+# ── pycvc.ari: a Python program's Host, from pycvc alone ────────────────────────────────────────
+# arix has no pycvc_gl, so the Host its programs adopt is pycvc's: importing it, and running a
+# document headless with it, never imports pycvc_gl. Only a window or offscreen Host asks for it.
+import importlib.util  # noqa: E402
+
+import pycvc.ari as ari  # noqa: E402
+
+check(ari is pycvc.ari and sys.modules["pycvc.ari"] is ari, "pycvc.ari is a module of its name")
+check(ari.current_host() is None, "no scripting host under plain python: current_host() is None")
+ARI_DOC = """meta:
+  name: pycvc.ari test
+  min_libcvc: 3.4.0
+requires: [twice]
+init: |
+  (state-set "result" (str (twice 7)))
+"""
+with tempfile.TemporaryDirectory() as tmp:
+    path = os.path.join(tmp, "ari.ari")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(ARI_DOC)
+    with ari.Host(mode="headless", name="ari", strict=True) as host:
+        host.function("twice", lambda x: 2 * x)
+        host.load(path)
+        host.step()
+        result = host.get("result")
+        check(result == "14", f"a headless Host ran the document: {result!r}")
+        # run(): headless with no frames= stays up, so it paces at fps rather than spin a core;
+        # frames=N is a batch, run back to back.
+        n0 = host.frame_count
+        t0 = time.perf_counter()
+        host.run(fps=50, until=lambda: host.frame_count >= n0 + 6)
+        paced = time.perf_counter() - t0
+        check(host.frame_count == n0 + 6 and paced >= 0.09,
+              f"run() with no frames paces at fps: 6 frames at 50 took {paced:.3f} s")
+        t0 = time.perf_counter()
+        host.run(fps=10, frames=50)
+        fast = time.perf_counter() - t0
+        check(fast < 2.5, f"run(frames=50) runs back to back: {fast:.3f} s (paced: 5 s)")
+check("pycvc_gl" not in sys.modules, "pycvc.ari and a headless Host never import pycvc_gl")
+if importlib.util.find_spec("pycvc_gl") is None:
+    try:
+        ari.Host(mode="window")
+    except ImportError as exc:
+        check("pycvc-gl" in str(exc) and "headless" in str(exc), f"a window Host says why: {exc}")
+    else:
+        raise AssertionError("Host(mode='window') opened with no pycvc_gl")
+
 print(f"pycvc AriApp / host_function: {checks} checks passed")
