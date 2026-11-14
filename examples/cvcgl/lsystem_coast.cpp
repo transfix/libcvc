@@ -33,20 +33,43 @@
 // at its own level. coast.debris.enabled (1) turns them on; the panel's Debris section drops them
 // again.
 //
+// Wakes (OCEAN-AND-WEATHER-ROADMAP.md O9): the crates and barrels make waves. Each frame their
+// columns under the water (cvc/physics/immersion.h, from their drawn poses and the sea physics
+// feels) are the sources of two eWave windows on the GPU (EWave): 128 m of sea around the
+// camera's target and one over the crater lake. The water's shaders add the wake's height, slope
+// and foam. A dropped crate makes a ring that runs in to the sand; the lake's rings come back off
+// its banks. coast.wake.enabled (1), .foam (1), .vertex (1), .beach_m (3), .beach_mask (0.5) and
+// .depth (0: the sea window's mean water depth) are the knobs; --wake-check reports the windows'
+// energy and a lake drop's ring.
+//
+// A boat (OCEAN-AND-WEATHER-ROADMAP.md O11c): a 5 m skiff with an outboard, a cvc::physics boat
+// (boat.h) in the debris' world, floated by its hull mesh (the shape it is drawn as) on the same
+// sea, on the lee (east) side. I / K raise and lower the throttle, J / L hold full rudder left and
+// right, C toggles a chase camera, which also brings the sea's wake window along; the panel's
+// Boat section and the knobs coast.boat.throttle, .rudder and .chase do the same from a script.
+// Its columns feed the wake window like the debris', so it leaves a Kelvin wake and a foam trail,
+// and the water shader draws no sea inside its hull. --boat-check drives it on a scripted course
+// and reports its speed, turning circle, pitch and roll and its wake's angle.
+//
 // Run (onscreen, navigable):   lsystem_coast
 //   Tab toggles orbit/fly; WASD + mouse to fly; Esc releases the pointer;
-//   F toggles the FPS HUD (state coast.viewers.main.hud.*).
+//   F toggles the FPS HUD (state coast.viewers.main.hud.*); I/J/K/L drive the boat, C chases it.
 // Verify (offscreen, headless): lsystem_coast --offscreen --frames 30 --png out.png
 // Cinematic capture (mp4-ready): lsystem_coast --capture fly --frames 1800 --fps 30 \
 //   --width 1920 --height 1080 --out frames   (also --capture orbit; then encode `frames/`)
 // The debris after a minute, and a frame of the surf:
 //   lsystem_coast --offscreen --frames 1800 --debris-check --look -128,-48,9,-103,-14,0 --png s.png
+// The boat's run, with frames from the chase camera along it:
+//   lsystem_coast --offscreen --frames 3300 --boat-check --png b.png --snap 18,40,75
 
 #define _USE_MATH_DEFINES // MSVC: make <cmath> define M_PI (and friends)
+#include "EWave.h"
 #include "OceanFFT.h"
+#include "WakeSource.h"
 #include "demos_menu.h" // the gallery's Demos menu
 
 #include <algorithm>
+#include <array>
 #include <boost/program_options.hpp>
 #include <cctype>
 #include <chrono>
@@ -75,6 +98,8 @@
 #include <cvc/physics/backend.h>
 #include <cvc/physics/field.h>
 #include <cvc/physics/fluid_surface.h>
+#include <cvc/physics/hull.h>
+#include <cvc/physics/immersion.h>
 #include <cvc/physics/ocean_surface.h>
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
@@ -97,11 +122,13 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <random>
 #include <string>
 #include <thread>
 #include <vector>
 #include <vtkCamera.h>
+#include <vtkOpenGLRenderTimer.h>
 #include <vtkOpenGLRenderWindow.h>
 #include <vtkRenderer.h>
 #include <vtkSmartPointer.h>
@@ -718,7 +745,8 @@ const char *OCEAN_VS_DEC_HEAD =
     "uniform float uSwellOmega; uniform float uShoreTime;\n"
     "uniform vec3 uTrainRatio; uniform vec3 uTrainAmp; uniform vec3 uTrainPhase;\n"
     "uniform vec3 uTrainPhaseR;\n"
-    "out float vShoreBreak;\n";
+    "out float vShoreBreak;\n"
+    "out vec2 vRestXY;\n"; // the vertex's rest position: where the wake is read (wkSlopeFoam)
 const char *OCEAN_VS_DEC_FUNCS =
     // a shore-grid texture at p, bilinear by hand (WebGL2 filters no float texture)
     "vec4 oGrid4(highp sampler2D tex, vec2 p){\n"
@@ -800,6 +828,9 @@ const char *OCEAN_VS_IMPL =
     "  if (dlen > dlim) dh *= dlim/max(dlen, 1e-6);\n"
     "  dispMC.xy += dh;\n"
     "  dispMC.z  += uWaveAmp*od.y + osl.x;\n"
+    // the wake (O9): bodies' waves from the eWave window, averaged over the grid's ~2 m spacing
+    "  dispMC.z  += wkVertex(owxy, 1.97);\n"
+    "  vRestXY = owxy;\n"
     "  vertexVCVSOutput = MCVCMatrix * dispMC;\n"
     "  gl_Position = MCDCMatrix * dispMC;\n"
     "  vWorldPos = dispMC.xyz;\n"
@@ -940,6 +971,242 @@ std::vector<cvc::physics::vec3> barrelHull(double hl, double r) {
   return pts;
 }
 
+// ── the boat (OCEAN-AND-WEATHER-ROADMAP.md O11c) ─────────────────────────────────────────────
+// A 5 m open skiff with an outboard: a V-bottomed hull with a hard chine, floated and drawn as one
+// shape. Body x forward, y to port, z up, the origin near the middle of the hull's depth. Its
+// sections run from the transom (x = -2.4) to the stem (x = 2.6), each the keel on the centreline
+// and the chine and the sheer on each side. The hull_mesh the water pushes on (O11a) is those
+// sections joined, closed by the transom, the stem and a flat top at the sheer; the collision
+// shape is the convex hull of its vertices. The drawn hull is the same triangles outside, painted,
+// with an open cockpit, a console and the motor above the sheer (which the water never reaches).
+struct SkiffStation {
+  double x, zk, bc, zc, bs, zs; // the keel's z; the chine's half-breadth and z; the sheer's
+};
+constexpr SkiffStation SKIFF_CONTROL[] = {
+    {-2.40, -0.30, 0.78, -0.17, 0.86, 0.44}, {-1.50, -0.32, 0.84, -0.18, 0.93, 0.44},
+    {-0.50, -0.33, 0.85, -0.18, 0.96, 0.45}, {0.50, -0.32, 0.80, -0.16, 0.94, 0.48},
+    {1.40, -0.26, 0.64, -0.10, 0.84, 0.53},  {2.10, -0.12, 0.36, 0.02, 0.58, 0.60},
+    {2.60, 0.10, 0.02, 0.20, 0.03, 0.68}};
+constexpr int SKIFF_NC = sizeof(SKIFF_CONTROL) / sizeof(SKIFF_CONTROL[0]);
+constexpr int SKIFF_ST = 21; // stations of the mesh, 0.25 m apart
+constexpr double SKIFF_X0 = -2.4, SKIFF_X1 = 2.6;
+// The cockpit: open from the transom to a bulkhead at SKIFF_COCKPIT_X, its sole at SKIFF_SOLE_Z
+// (above the waterline), inside a rail SKIFF_RAIL wide. The bottom paint and the stripe above it
+// end at SKIFF_BOOT_Z0 and SKIFF_BOOT_Z1 amidships (the hull floats about 0.2 m below the first).
+constexpr double SKIFF_COCKPIT_X = 1.1, SKIFF_SOLE_Z = 0.12, SKIFF_RAIL = 0.07;
+constexpr double SKIFF_BOOT_Z0 = 0.0, SKIFF_BOOT_Z1 = 0.08;
+constexpr int SKIFF_RING = 9; // points a section: port sheer, down round the keel, starboard sheer
+
+// The section at x: each of its values a cubic Hermite through the control sections, the slopes
+// their centred differences (one-sided at the ends).
+SkiffStation skiffStation(double x) {
+  auto val = [](const SkiffStation &s, int f) {
+    const double v[5] = {s.zk, s.bc, s.zc, s.bs, s.zs};
+    return v[f];
+  };
+  x = std::min(SKIFF_X1, std::max(SKIFF_X0, x));
+  int k = 0;
+  while (k + 2 < SKIFF_NC && x > SKIFF_CONTROL[k + 1].x)
+    ++k;
+  const SkiffStation &a = SKIFF_CONTROL[k], &b = SKIFF_CONTROL[k + 1];
+  const double h = b.x - a.x, t = (x - a.x) / h, t2 = t * t, t3 = t2 * t;
+  auto slope = [&](int i, int f) {
+    const int i0 = std::max(0, i - 1), i1 = std::min(SKIFF_NC - 1, i + 1);
+    return (val(SKIFF_CONTROL[i1], f) - val(SKIFF_CONTROL[i0], f)) /
+           (SKIFF_CONTROL[i1].x - SKIFF_CONTROL[i0].x);
+  };
+  double v[5];
+  for (int f = 0; f < 5; ++f)
+    v[f] = (2 * t3 - 3 * t2 + 1) * val(a, f) + (t3 - 2 * t2 + t) * h * slope(k, f) +
+           (-2 * t3 + 3 * t2) * val(b, f) + (t3 - t2) * h * slope(k + 1, f);
+  return {x, v[0], std::max(0.02, v[1]), v[2], std::max(0.03, v[3]), v[4]};
+}
+double skiffStationX(int st) { return SKIFF_X0 + (SKIFF_X1 - SKIFF_X0) * st / (SKIFF_ST - 1); }
+
+// A section's ring: the port sheer, the stripe's top and the bottom paint's top on the topsides,
+// the port chine, the keel, then the same to starboard. The two paint lines sit at fixed heights
+// amidships and sweep up toward the bow, where the chine rises past them.
+std::array<Vec3d, SKIFF_RING> skiffRing(const SkiffStation &s) {
+  const double t1 = std::min(0.45, std::max(0.1, (SKIFF_BOOT_Z0 - s.zc) / (s.zs - s.zc)));
+  const double t2 = std::min(0.6, std::max(t1 + 0.1, (SKIFF_BOOT_Z1 - s.zc) / (s.zs - s.zc)));
+  auto side = [&](double t, double sgn) {
+    return Vec3d{s.x, sgn * (s.bc + (s.bs - s.bc) * t), s.zc + (s.zs - s.zc) * t};
+  };
+  return {side(1.0, 1.0),  side(t2, 1.0),  side(t1, 1.0),  side(0.0, 1.0), Vec3d{s.x, 0.0, s.zk},
+          side(0.0, -1.0), side(t1, -1.0), side(t2, -1.0), side(1.0, -1.0)};
+}
+
+// The hull the water pushes on: the sections joined, the transom and the stem fanned from their
+// centres, a flat top along the sheer. Each triangle faces away from the hull's middle (it is
+// convex enough for that test; the ends face aft and forward).
+std::shared_ptr<cvc::physics::hull_mesh> skiffHullMesh() {
+  auto m = std::make_shared<cvc::physics::hull_mesh>();
+  for (int st = 0; st < SKIFF_ST; ++st)
+    for (const Vec3d &p : skiffRing(skiffStation(skiffStationX(st))))
+      m->vertices.push_back({p.x, p.y, p.z});
+  auto idx = [](int st, int k) { return std::uint32_t(st * SKIFF_RING + k); };
+  std::vector<std::array<std::uint32_t, 3>> tris;
+  for (int st = 0; st + 1 < SKIFF_ST; ++st) {
+    for (int k = 0; k + 1 < SKIFF_RING; ++k) {
+      tris.push_back({idx(st, k), idx(st, k + 1), idx(st + 1, k + 1)});
+      tris.push_back({idx(st, k), idx(st + 1, k + 1), idx(st + 1, k)});
+    }
+    tris.push_back({idx(st, SKIFF_RING - 1), idx(st, 0), idx(st + 1, 0)}); // the top
+    tris.push_back({idx(st, SKIFF_RING - 1), idx(st + 1, 0), idx(st + 1, SKIFF_RING - 1)});
+  }
+  cvc::physics::vec3 mid;
+  for (const auto &v : m->vertices)
+    mid = mid + v;
+  mid = mid * (1.0 / double(m->vertices.size()));
+  for (int end = 0; end < 2; ++end) { // the transom, then the stem
+    const int st = end ? SKIFF_ST - 1 : 0;
+    cvc::physics::vec3 c;
+    for (int k = 0; k < SKIFF_RING; ++k)
+      c = c + m->vertices[idx(st, k)];
+    const auto ci = std::uint32_t(m->vertices.size());
+    m->vertices.push_back(c * (1.0 / SKIFF_RING));
+    for (int k = 0; k < SKIFF_RING; ++k)
+      tris.push_back({ci, idx(st, k), idx(st, (k + 1) % SKIFF_RING)});
+  }
+  for (auto &t : tris) {
+    const cvc::physics::vec3 &a = m->vertices[t[0]], &b = m->vertices[t[1]], &c = m->vertices[t[2]];
+    const Vec3d n = vcross({b.x - a.x, b.y - a.y, b.z - a.z}, {c.x - a.x, c.y - a.y, c.z - a.z});
+    const cvc::physics::vec3 g = (a + b + c) * (1.0 / 3.0) - mid;
+    const bool cap = a.x == b.x && b.x == c.x; // a transom or stem triangle
+    const double out = cap ? n.x * (a.x < 0.0 ? -1.0 : 1.0) : n.x * g.x + n.y * g.y + n.z * g.z;
+    if (out < 0.0)
+      std::swap(t[1], t[2]);
+  }
+  m->triangles = std::move(tris);
+  m->length = SKIFF_X1 - SKIFF_X0;
+  return m;
+}
+
+// An axis-aligned box [x0, x1] x [y0, y1] x [z0, z1] in one colour.
+void addBox(cvc::geometry &g, double x0, double x1, double y0, double y1, double z0, double z1,
+            const cvc::geometry::color_t &col) {
+  addQuad(g, {x1, y0, z0}, {x1, y1, z0}, {x1, y1, z1}, {x1, y0, z1}, {1, 0, 0}, col);
+  addQuad(g, {x0, y1, z0}, {x0, y0, z0}, {x0, y0, z1}, {x0, y1, z1}, {-1, 0, 0}, col);
+  addQuad(g, {x1, y1, z0}, {x0, y1, z0}, {x0, y1, z1}, {x1, y1, z1}, {0, 1, 0}, col);
+  addQuad(g, {x0, y0, z0}, {x1, y0, z0}, {x1, y0, z1}, {x0, y0, z1}, {0, -1, 0}, col);
+  addQuad(g, {x0, y0, z1}, {x1, y0, z1}, {x1, y1, z1}, {x0, y1, z1}, {0, 0, 1}, col);
+  addQuad(g, {x0, y1, z0}, {x1, y1, z0}, {x1, y0, z0}, {x0, y0, z0}, {0, 0, -1}, col);
+}
+
+// A flat-shaded quad whose normal is taken from its corners and turned to face away from `from`.
+void addQuadFacing(cvc::geometry &g, const Vec3d &a, const Vec3d &b, const Vec3d &c, const Vec3d &d,
+                   const Vec3d &from, const cvc::geometry::color_t &col) {
+  Vec3d n = vnorm(vcross({c.x - a.x, c.y - a.y, c.z - a.z}, {d.x - b.x, d.y - b.y, d.z - b.z}));
+  const Vec3d m{0.25 * (a.x + b.x + c.x + d.x) - from.x, 0.25 * (a.y + b.y + c.y + d.y) - from.y,
+                0.25 * (a.z + b.z + c.z + d.z) - from.z};
+  if (n.x * m.x + n.y * m.y + n.z * m.z < 0.0)
+    addQuad(g, a, d, c, b, {-n.x, -n.y, -n.z}, col);
+  else
+    addQuad(g, a, b, c, d, n, col);
+}
+
+// The drawn skiff: the hull's sides and bottom (the hull_mesh's own sections: white topsides, a
+// blue stripe, dark red bottom paint), its transom; then above the sheer, which the water does
+// not reach, a sand-coloured foredeck, white rails, a teak cockpit sole between grey inner sides,
+// a console and the outboard.
+cvc::geometry buildSkiff(cvc::app &app) {
+  cvc::geometry g(app);
+  const cvc::geometry::color_t white = {0.93, 0.93, 0.91}, stripe = {0.10, 0.22, 0.50},
+                               bottom = {0.50, 0.11, 0.09}, deck = {0.86, 0.70, 0.46},
+                               sole = {0.66, 0.45, 0.26}, inner = {0.80, 0.81, 0.82},
+                               motor = {0.16, 0.17, 0.19}, leg = {0.30, 0.31, 0.33},
+                               screen = {0.12, 0.16, 0.20};
+  const cvc::geometry::color_t sideCol[SKIFF_RING - 1] = {white,  stripe, bottom, bottom,
+                                                          bottom, bottom, stripe, white};
+  std::vector<std::array<Vec3d, SKIFF_RING>> rings;
+  for (int st = 0; st < SKIFF_ST; ++st)
+    rings.push_back(skiffRing(skiffStation(skiffStationX(st))));
+  for (int st = 0; st + 1 < SKIFF_ST; ++st) {
+    const SkiffStation s = skiffStation(0.5 * (skiffStationX(st) + skiffStationX(st + 1)));
+    const Vec3d mid{s.x, 0.0, 0.5 * (s.zk + s.zs)}; // inside this stretch of hull
+    for (int k = 0; k + 1 < SKIFF_RING; ++k)
+      addQuadFacing(g, rings[st][k], rings[st][k + 1], rings[st + 1][k + 1], rings[st + 1][k], mid,
+                    sideCol[k]);
+  }
+  { // the transom, white, fanned from its centre
+    const std::array<Vec3d, SKIFF_RING> &r = rings.front();
+    Vec3d c;
+    for (const Vec3d &p : r)
+      c = {c.x + p.x / SKIFF_RING, c.y + p.y / SKIFF_RING, c.z + p.z / SKIFF_RING};
+    for (int k = 0; k < SKIFF_RING; ++k)
+      addQuadFacing(g, c, r[k], r[(k + 1) % SKIFF_RING], c, {0.0, 0.0, c.z}, white);
+  }
+  // Above the sheer: the cockpit's stations (from just inside the transom to the bulkhead), then
+  // the foredeck's (the bulkhead to the stem).
+  std::vector<SkiffStation> pit;
+  pit.push_back(skiffStation(SKIFF_X0 + SKIFF_RAIL));
+  for (int st = 1; skiffStationX(st) <= SKIFF_COCKPIT_X + 1e-9; ++st)
+    pit.push_back(skiffStation(skiffStationX(st)));
+  for (std::size_t i = 0; i + 1 < pit.size(); ++i) {
+    const SkiffStation &a = pit[i], &b = pit[i + 1];
+    const double ya = a.bs - SKIFF_RAIL, yb = b.bs - SKIFF_RAIL;
+    for (double sg = -1.0; sg <= 1.0; sg += 2.0) {
+      // the rail, between the sheer and the inner side
+      addQuadFacing(g, {a.x, sg * a.bs, a.zs}, {b.x, sg * b.bs, b.zs}, {b.x, sg * yb, b.zs},
+                    {a.x, sg * ya, a.zs}, {a.x, sg * ya, a.zs - 1.0}, white);
+      // the inner side, down to the sole (facing the cockpit)
+      addQuadFacing(g, {a.x, sg * ya, a.zs}, {b.x, sg * yb, b.zs}, {b.x, sg * yb, SKIFF_SOLE_Z},
+                    {a.x, sg * ya, SKIFF_SOLE_Z}, {a.x, sg * 2.0 * ya, a.zs}, inner);
+    }
+    addQuadFacing(g, {a.x, -ya, SKIFF_SOLE_Z}, {b.x, -yb, SKIFF_SOLE_Z}, {b.x, yb, SKIFF_SOLE_Z},
+                  {a.x, ya, SKIFF_SOLE_Z}, {a.x, 0.0, SKIFF_SOLE_Z - 1.0}, sole);
+  }
+  {
+    const SkiffStation &a = pit.front(), &f = pit.back(), t = skiffStation(SKIFF_X0);
+    const double ya = a.bs - SKIFF_RAIL, yf = f.bs - SKIFF_RAIL;
+    // the transom's rail and its inner face; the bulkhead at the foredeck
+    addQuadFacing(g, {t.x, -t.bs, t.zs}, {t.x, t.bs, t.zs}, {a.x, ya, a.zs}, {a.x, -ya, a.zs},
+                  {a.x, 0.0, a.zs - 1.0}, white);
+    addQuadFacing(g, {a.x, -ya, a.zs}, {a.x, ya, a.zs}, {a.x, ya, SKIFF_SOLE_Z},
+                  {a.x, -ya, SKIFF_SOLE_Z}, {a.x - 1.0, 0.0, 0.3}, inner);
+    addQuadFacing(g, {f.x, -yf, f.zs}, {f.x, yf, f.zs}, {f.x, yf, SKIFF_SOLE_Z},
+                  {f.x, -yf, SKIFF_SOLE_Z}, {f.x + 1.0, 0.0, 0.3}, inner);
+    // the bulkhead's top, from its inner sides out to the sheer, is the foredeck's first strip
+  }
+  for (int st = 0; st + 1 < SKIFF_ST; ++st) { // the foredeck, along the sheer
+    if (skiffStationX(st) < SKIFF_COCKPIT_X - 1e-9)
+      continue;
+    const std::array<Vec3d, SKIFF_RING> &a = rings[st], &b = rings[st + 1];
+    addQuadFacing(g, a[SKIFF_RING - 1], b[SKIFF_RING - 1], b[0], a[0], {a[0].x, 0.0, a[0].z - 1.0},
+                  deck);
+  }
+  {
+    const Vec3d c{0.0, 0.0, 0.0}; // the stem's cap, a sliver
+    const std::array<Vec3d, SKIFF_RING> &r = rings.back();
+    Vec3d e;
+    for (const Vec3d &p : r)
+      e = {e.x + p.x / SKIFF_RING, e.y + p.y / SKIFF_RING, e.z + p.z / SKIFF_RING};
+    for (int k = 0; k < SKIFF_RING; ++k)
+      addQuadFacing(g, e, r[k], r[(k + 1) % SKIFF_RING], e, c, white);
+  }
+  // The console amidships, its windscreen dark; the outboard on the transom, its leg down past
+  // the keel to the propeller.
+  addBox(g, 0.0, 0.55, -0.32, 0.32, SKIFF_SOLE_Z, SKIFF_SOLE_Z + 0.85, white);
+  addBox(g, 0.42, 0.56, -0.30, 0.30, SKIFF_SOLE_Z + 0.85, SKIFF_SOLE_Z + 1.08, screen);
+  addBox(g, -2.88, -2.44, -0.22, 0.22, 0.32, 0.84, motor);
+  addBox(g, -2.74, -2.56, -0.07, 0.07, -0.52, 0.32, leg);
+  addBox(g, -2.84, -2.50, -0.09, 0.09, -0.66, -0.50, leg);
+  return g;
+}
+
+// Where the water shader hides the sea inside the hull (D5): six of the hull's sections, from the
+// transom to the stem, in the boat's frame: v[0] their x, then the keel's z, the chine's
+// half-breadth and z, the sheer's half-breadth and z (SkiffStation's fields in order).
+void skiffFootprint(float v[6][6]) {
+  const double sx[6] = {SKIFF_X0, -1.0, 0.5, 1.4, 2.1, SKIFF_X1};
+  for (int i = 0; i < 6; ++i) {
+    const SkiffStation s = skiffStation(sx[i]);
+    const double f[6] = {s.x, s.zk, s.bc, s.zc, s.bs, s.zs};
+    for (int k = 0; k < 6; ++k)
+      v[k][i] = static_cast<float>(f[k]);
+  }
+}
+
 // The lake's surface: a flat grid at LAKE_LEVEL over [x0, x1] x [y0, y1]. The crater's ground,
 // drawn over it, hides it past the waterline.
 cvc::geometry buildLake(cvc::app &app, double x0, double y0, double x1, double y1) {
@@ -960,10 +1227,126 @@ cvc::geometry buildLake(cvc::app &app, double x0, double y0, double x1, double y
   return g;
 }
 
+// ── the wake (OCEAN-AND-WEATHER-ROADMAP.md C4, O9) ───────────────────────────────────────────
+// The waves bodies make, from an eWave window (EWave: .r the height h, .g the potential phi, cell
+// (i, j) at texel (i, j), its point at uWakeGrid.xy + (i, j) uWakeGrid.z), read in the water's
+// vertex and fragment shaders of the sea and the lake. Bilinear by hand (WebGL2 filters no float
+// texture) and faded to 0 over the window's outer 8 cells, inside its sponge.
+//   - The vertex takes the height low-passed to its grid's spacing (wkVertex), so a grid coarser
+//     than the wake's waves does not alias them (C4: "where there are vertices enough").
+//   - The fragment always takes the slope, for the normal.
+//   - Foam (a simple term until the persistent foam texture of section 10 item 2 exists): from
+//     the curvature, where a crest is sharp (-laplacian h, 1/m), and from the surface's speed,
+//     estimated as |grad phi| (m/s; for a deep-water wave it is also |dh/dt|, the vertical speed),
+//     past 0.15 m/s: uWakeFoam (0.35 max(-lap h, 0) + 2 max(|grad phi| - 0.15, 0)), at most 1.
+//     A dropped crate's splash and a fast hull's bow foam; a gentle ring does not.
+const char *WAKE_GLSL_ON =
+    "uniform highp sampler2D uWake;\n"
+    "uniform vec3 uWakeGrid; uniform float uWakeN;\n"
+    "uniform float uWakeOn; uniform float uWakeFoam;\n"
+    "vec2 wkCell(ivec2 c){\n"
+    "  int n = int(uWakeN);\n"
+    "  if (c.x < 0 || c.y < 0 || c.x >= n || c.y >= n) return vec2(0.0);\n"
+    "  return texelFetch(uWake, c, 0).rg;\n"
+    "}\n"
+    "vec2 wkAt(vec2 p){\n"
+    "  vec2 f = (p - uWakeGrid.xy) / uWakeGrid.z;\n"
+    "  vec2 fl = floor(f), fr = f - fl;\n"
+    "  ivec2 i = ivec2(fl);\n"
+    "  vec2 a = mix(wkCell(i), wkCell(i + ivec2(1, 0)), fr.x);\n"
+    "  vec2 b = mix(wkCell(i + ivec2(0, 1)), wkCell(i + ivec2(1, 1)), fr.x);\n"
+    "  float e = min(min(f.x, uWakeN - 1.0 - f.x), min(f.y, uWakeN - 1.0 - f.y));\n"
+    "  return mix(a, b, fr.y) * (uWakeOn * smoothstep(0.0, 8.0, e));\n"
+    "}\n"
+    // The height a vertex of a grid of spacing s takes: a [1 2 1] / 4 tent over -s, 0, s in x and
+    // y, which passes nothing at the grid's Nyquist wavelength 2 s (cos^2(pi s / lambda)), so the
+    // grid draws the wake's long waves and leaves the short ones to the normal. uWakeVertex scales
+    // it (coast.wake.vertex, 1).
+    "uniform float uWakeVertex;\n"
+    "float wkVertex(vec2 p, float s){\n"
+    "  float h = 0.0;\n"
+    "  for (int j = -1; j <= 1; ++j)\n"
+    "    for (int i = -1; i <= 1; ++i) {\n"
+    "      float w = (j == 0 ? 2.0 : 1.0) * (i == 0 ? 2.0 : 1.0);\n"
+    "      h += w * wkAt(p + s*vec2(float(i), float(j))).x;\n"
+    "    }\n"
+    "  return uWakeVertex * h / 16.0;\n"
+    "}\n"
+    // A cell's (dh/dx, dh/dy, laplacian h, |grad phi|) from its four neighbours.
+    "vec4 wkCellDeriv(ivec2 c){\n"
+    "  float d = uWakeGrid.z;\n"
+    "  vec2 o = wkCell(c), xp = wkCell(c + ivec2(1, 0)), xm = wkCell(c - ivec2(1, 0));\n"
+    "  vec2 yp = wkCell(c + ivec2(0, 1)), ym = wkCell(c - ivec2(0, 1));\n"
+    "  return vec4((xp.x - xm.x) / (2.0*d), (yp.x - ym.x) / (2.0*d),\n"
+    "              (xp.x + xm.x + yp.x + ym.x - 4.0*o.x) / (d*d),\n"
+    "              length(vec2(xp.y - xm.y, yp.y - ym.y)) / (2.0*d));\n"
+    "}\n"
+    // (dh/dx, dh/dy, foam) at p: the cells' derivatives, bilinear between them, so the slope is
+    // continuous across the cells and the shading smooth
+    "vec3 wkSlopeFoam(vec2 p){\n"
+    "  vec2 f = (p - uWakeGrid.xy) / uWakeGrid.z;\n"
+    "  vec2 fl = floor(f), fr = f - fl;\n"
+    "  ivec2 i = ivec2(fl);\n"
+    "  vec4 a = mix(wkCellDeriv(i), wkCellDeriv(i + ivec2(1, 0)), fr.x);\n"
+    "  vec4 b = mix(wkCellDeriv(i + ivec2(0, 1)), wkCellDeriv(i + ivec2(1, 1)), fr.x);\n"
+    "  float e = min(min(f.x, uWakeN - 1.0 - f.x), min(f.y, uWakeN - 1.0 - f.y));\n"
+    "  vec4 q = mix(a, b, fr.y) * (uWakeOn * smoothstep(0.0, 8.0, e));\n"
+    "  float foam = uWakeFoam*(0.35*max(-q.z, 0.0) + 2.0*max(q.w - 0.15, 0.0));\n"
+    "  return vec3(q.xy, clamp(foam, 0.0, 1.0));\n"
+    "}\n";
+// No window (float targets missing, or coast.wake.enabled 0 at start): the same calls, flat.
+const char *WAKE_GLSL_OFF = "float wkVertex(vec2 p, float s){ return 0.0; }\n"
+                            "vec3 wkSlopeFoam(vec2 p){ return vec3(0.0); }\n";
+const char *wakeGlsl(bool on) { return on ? WAKE_GLSL_ON : WAKE_GLSL_OFF; }
+
+// The boat keeps the sea out of its hull (D5): a fragment of the sea whose surface point lies
+// inside the hull, in the boat's frame, is not drawn, so a wave rising past the cockpit's sole or
+// over the sheer does not show inside the boat. The frame is uBoatPos and the boat's axes
+// (uBoatAx forward, uBoatAy to port, uBoatAz up), from its drawn pose each frame. The hull is six
+// of its sections (skiffFootprint), linear between them along x: uBoatSk holds field k of
+// sections 0-2 and uBoatTk of sections 3-5, the fields being x, the keel's z, the chine's
+// half-breadth and z, the sheer's half-breadth and z (twelve vec3s, as the node's uniforms take
+// no arrays). Across a section, the V of the bottom from the keel to the chine, the topsides
+// straight from the chine to the sheer, and the sheer's
+// breadth for half a metre over it: water under the keel, as the boat leaps a crest, is drawn,
+// and so is green water well over the deck. uBoatOn 0 (no boat) draws all.
+const char *BOAT_GLSL =
+    "uniform float uBoatOn; uniform vec3 uBoatPos;\n"
+    "uniform vec3 uBoatAx; uniform vec3 uBoatAy; uniform vec3 uBoatAz;\n"
+    "uniform vec3 uBoatS0; uniform vec3 uBoatS1; uniform vec3 uBoatS2;\n"
+    "uniform vec3 uBoatS3; uniform vec3 uBoatS4; uniform vec3 uBoatS5;\n"
+    "uniform vec3 uBoatT0; uniform vec3 uBoatT1; uniform vec3 uBoatT2;\n"
+    "uniform vec3 uBoatT3; uniform vec3 uBoatT4; uniform vec3 uBoatT5;\n"
+    "float boatAt(vec3 s, vec3 t, int i){ return i < 3 ? s[i] : t[i - 3]; }\n"
+    "bool boatInside(vec3 p){\n"
+    "  if (uBoatOn < 0.5) return false;\n"
+    "  vec3 d = p - uBoatPos;\n"
+    "  float bx = dot(d, uBoatAx), by = abs(dot(d, uBoatAy)), bz = dot(d, uBoatAz);\n"
+    "  vec3 S[6] = vec3[6](uBoatS0, uBoatS1, uBoatS2, uBoatS3, uBoatS4, uBoatS5);\n"
+    "  vec3 T[6] = vec3[6](uBoatT0, uBoatT1, uBoatT2, uBoatT3, uBoatT4, uBoatT5);\n"
+    "  if (bx <= S[0].x || bx >= T[0].z) return false;\n"
+    "  for (int i = 0; i < 5; ++i) {\n"
+    "    float x1 = boatAt(S[0], T[0], i + 1);\n"
+    "    if (bx <= x1) {\n"
+    "      float x0 = boatAt(S[0], T[0], i), f = (bx - x0) / (x1 - x0);\n"
+    "      float v[6];\n"
+    "      for (int k = 1; k < 6; ++k)\n"
+    "        v[k] = mix(boatAt(S[k], T[k], i), boatAt(S[k], T[k], i + 1), f);\n"
+    "      float zk = v[1], bc = v[2], zc = v[3], bs = v[4], zs = v[5];\n"
+    "      if (bz < zk || bz > zs + 0.5) return false;\n"
+    "      float hw = bz < zc ? bc * (bz - zk) / max(zc - zk, 1e-3)\n"
+    "                           : mix(bc, bs, clamp((bz - zc) / max(zs - zc, 1e-3), 0.0, 1.0));\n"
+    "      return by < hw;\n"
+    "    }\n"
+    "  }\n"
+    "  return false;\n"
+    "}\n";
+
 // The vertex shader's declarations: the head, the seabed's sampler (HeightFieldTexture),
-// then the functions that read both.
-std::string oceanVsDec() {
-  return std::string(OCEAN_VS_DEC_HEAD) + cvc::gl::HeightFieldTexture::glsl() + OCEAN_VS_DEC_FUNCS;
+// then the functions that read both, and the wake's.
+std::string oceanVsDec(bool wake) {
+  return std::string(OCEAN_VS_DEC_HEAD) + cvc::gl::HeightFieldTexture::glsl() + OCEAN_VS_DEC_FUNCS +
+         wakeGlsl(wake);
 }
 // Fragment shader: a Fresnel water BRDF + a depth-tinted shallow band + animated
 // shore foam. The seabed is the vertex shader's HeightFieldTexture (cvc_hf_height),
@@ -977,6 +1360,7 @@ const char *OCEAN_FS_DEC_HEAD =
     "in vec3 vOceanN;\n"
     "in float vOceanJac;\n"
     "in float vShoreBreak;\n" // the shore layer's breaking, on its crests
+    "in vec2 vRestXY;\n"
     "uniform vec3 uCamPos; uniform vec3 uSunDir; uniform float uFoamBias;\n"
     "uniform float uTime; uniform float uShore;\n";
 const char *OCEAN_FS_DEC_FUNCS =
@@ -986,13 +1370,18 @@ const char *OCEAN_FS_DEC_FUNCS =
     "  return mix(mix(ohash(i),ohash(i+vec2(1,0)),f.x),\n"
     "             mix(ohash(i+vec2(0,1)),ohash(i+vec2(1,1)),f.x), f.y);\n"
     "}\n";
-std::string oceanFsDec() {
-  return std::string(OCEAN_FS_DEC_HEAD) + cvc::gl::HeightFieldTexture::glsl() + OCEAN_FS_DEC_FUNCS;
+std::string oceanFsDec(bool wake) {
+  return std::string(OCEAN_FS_DEC_HEAD) + cvc::gl::HeightFieldTexture::glsl() + OCEAN_FS_DEC_FUNCS +
+         wakeGlsl(wake) + BOAT_GLSL;
 }
 // Consumes //VTK::Light::Impl (VTK's lighting is replaced): writes the final water
-// colour to gl_FragData[0] directly.
+// colour to gl_FragData[0] directly. The wake's slope adds to the sea's (both as -dz/dx, -dz/dy
+// over z of the normal), and its foam joins the others. Nothing is drawn inside the boat's hull.
 const char *OCEAN_FS_LIGHT =
+    "  if (boatInside(vWorldPos)) discard;\n"
+    "  vec3 wk = wkSlopeFoam(vRestXY);\n"
     "  vec3 N = normalize(vOceanN);\n"
+    "  N = normalize(vec3(N.xy/max(N.z, 1e-3) - wk.xy, 1.0));\n"
     "  vec3 Vd = normalize(uCamPos - vWorldPos);\n"
     "  float NdotV = max(dot(N,Vd), 0.0);\n"
     "  float Fr = 0.02 + 0.98*pow(1.0-NdotV, 5.0);\n"
@@ -1021,29 +1410,37 @@ const char *OCEAN_FS_LIGHT =
     "  foam = max(foam, shoreFoam);\n"
     // breakers: the shore layer's breaking crests, frayed like the shore band
     "  foam = max(foam, clamp(vShoreBreak*(0.7+0.6*nz)*uShore, 0.0, 1.0));\n"
+    // the wake's: a splash, a bow wave
+    "  foam = max(foam, wk.z*(0.75+0.5*nz));\n"
     "  col = mix(col, vec3(0.93,0.96,0.97), foam);\n"
     "  gl_FragData[0] = vec4(col, 1.0);\n";
 
 // The lake's shading, the sea's Fresnel BRDF (OCEAN_FS_LIGHT) on calm water: faint wind ripples for
 // the glint, a darker mountain-lake colour, and the crater's sandy floor showing through where it
-// is shallow (the seabed texture holds the crater too).
-const char *LAKE_VS_DEC = "//VTK::PositionVC::Dec\n"
-                          "out vec3 vLakePos;\n";
-const char *LAKE_VS_IMPL = "  vertexVCVSOutput = MCVCMatrix * vertexMC;\n"
-                           "  gl_Position = MCDCMatrix * vertexMC;\n"
-                           "  vLakePos = vertexMC.xyz;\n";
+// is shallow (the seabed texture holds the crater too). The lake's wake window (O9) moves its
+// vertices (0.7 m apart, about the window's cells) and adds to its normal and foam.
+const char *LAKE_VS_DEC_HEAD = "//VTK::PositionVC::Dec\n"
+                               "out vec3 vLakePos;\n";
+std::string lakeVsDec(bool wake) { return std::string(LAKE_VS_DEC_HEAD) + wakeGlsl(wake); }
+const char *LAKE_VS_IMPL = "  vec4 lakeMC = vertexMC;\n"
+                           "  lakeMC.z += wkVertex(lakeMC.xy, 0.7);\n"
+                           "  vertexVCVSOutput = MCVCMatrix * lakeMC;\n"
+                           "  gl_Position = MCDCMatrix * lakeMC;\n"
+                           "  vLakePos = lakeMC.xyz;\n";
 const char *LAKE_FS_DEC_HEAD = "//VTK::Normal::Dec\n"
                                "in vec3 vLakePos;\n"
                                "uniform vec3 uCamPos; uniform vec3 uSunDir; uniform float uTime;\n";
-std::string lakeFsDec() {
-  return std::string(LAKE_FS_DEC_HEAD) + cvc::gl::HeightFieldTexture::glsl() + OCEAN_FS_DEC_FUNCS;
+std::string lakeFsDec(bool wake) {
+  return std::string(LAKE_FS_DEC_HEAD) + cvc::gl::HeightFieldTexture::glsl() + OCEAN_FS_DEC_FUNCS +
+         wakeGlsl(wake);
 }
 const char *LAKE_FS_LIGHT =
     "  vec2 q = vLakePos.xy*1.7 + vec2(uTime*0.35, uTime*0.22);\n"
     "  float e = 0.08;\n"
     "  vec2 g = vec2(onoise(q+vec2(e,0.0))-onoise(q-vec2(e,0.0)),\n"
     "                onoise(q+vec2(0.0,e))-onoise(q-vec2(0.0,e)))/(2.0*e);\n"
-    "  vec3 N = normalize(vec3(-0.035*g, 1.0));\n"
+    "  vec3 wk = wkSlopeFoam(vLakePos.xy);\n"
+    "  vec3 N = normalize(vec3(-0.035*g - wk.xy, 1.0));\n"
     "  vec3 Vd = normalize(uCamPos - vLakePos);\n"
     "  float NdotV = max(dot(N,Vd), 0.0);\n"
     "  float Fr = 0.02 + 0.98*pow(1.0-NdotV, 5.0);\n"
@@ -1056,6 +1453,7 @@ const char *LAKE_FS_LIGHT =
     "  float depth = vLakePos.z - cvc_hf_height(vLakePos.xy);\n"
     "  float clarity = exp(-max(depth,0.0)*0.45);\n"
     "  col = mix(col, mix(vec3(0.10,0.36,0.38), vec3(0.62,0.60,0.47), clarity*0.6), clarity*0.8);\n"
+    "  col = mix(col, vec3(0.93,0.96,0.97), wk.z*(0.75+0.5*onoise(vLakePos.xy*0.9)));\n"
     "  gl_FragData[0] = vec4(col, 1.0);\n";
 
 // ── the sky: a drifting, evolving cloud slab grown by an L-system 3-D turtle ──
@@ -1493,16 +1891,34 @@ int main(int argc, char **argv) {
        "capture frames per second (drives the synthetic clock)")                            //
       ("out", po::value<std::string>(&outDir)->default_value("frames"),                     //
        "capture output directory for the numbered PNGs");
-  bool no_ui = false, shoreCheck = false, debrisCheck = false;
+  bool no_ui = false, shoreCheck = false, debrisCheck = false, wakeCheck = false;
   std::vector<std::string> sets;
   std::string look;
   desc.add_options()("shore-check", po::bool_switch(&shoreCheck),
                      "after the run, check that no displaced ocean vertex lands on dry ground "
                      "(prints the counts; exit code 3 if one does)");
+  desc.add_options()("wake-check", po::bool_switch(&wakeCheck),
+                     "run on the synthetic clock (--fps), drop a crate on the crater lake at 20 s, "
+                     "and report the wake windows' energy over time and the lake's ring coming "
+                     "back from its banks (exit code 5 if there is no wake window, if a window "
+                     "with bodies in it has no waves, if the drop makes no ring, or if the lake "
+                     "keeps no more of it than a twin with absorbing banks)");
   desc.add_options()("debris-check", po::bool_switch(&debrisCheck),
                      "run on the synthetic clock (--fps), then report where each crate and barrel "
                      "went and what a physics step cost (exit code 4 if one sank or the lake's do "
                      "not float at its level)");
+  bool boatCheck = false;
+  std::string snapStr;
+  desc.add_options()("boat-check", po::bool_switch(&boatCheck),
+                     "run on the synthetic clock (--fps) with the chase camera, drive the boat "
+                     "(full throttle on the lee side, then 3.5 m/s, a full turn, then a run past "
+                     "the windward cliffs) on a moderate sea and report its speed, its turning "
+                     "circle, its heave, pitch and roll over the swell and its wake's envelope "
+                     "angle at both speeds (exit code 6 if it sinks, does not move "
+                     "or does not turn; it wants about 3300 frames at 30 fps)");
+  desc.add_options()("snap", po::value<std::string>(&snapStr)->default_value(""),
+                     "T1,T2,...: also write the frame at these world times (s), to --png's name "
+                     "with _T before .png (snap_T.png without --png)");
   desc.add_options()(
       "look", po::value<std::string>(&look)->default_value(""),
       "EX,EY,EZ,TX,TY,TZ: hold the camera at this eye, looking at this target, e.g. "
@@ -1555,6 +1971,23 @@ int main(int argc, char **argv) {
       return 2;
     }
   }
+  // --snap: the world times to write frames at, in order.
+  std::vector<double> snapTimes;
+  if (!snapStr.empty()) {
+    std::string tok;
+    for (std::size_t i = 0; i <= snapStr.size(); ++i)
+      if (i == snapStr.size() || snapStr[i] == ',') {
+        try {
+          snapTimes.push_back(std::stod(tok));
+        } catch (const std::exception &) {
+          std::cerr << "--snap wants T1,T2,..., got '" << snapStr << "'\n";
+          return 2;
+        }
+        tok.clear();
+      } else
+        tok += snapStr[i];
+    std::sort(snapTimes.begin(), snapTimes.end());
+  }
   if (capturing) {
     offscreen = true; // a capture path always renders offscreen to numbered PNGs
     std::error_code ec;
@@ -1577,6 +2010,15 @@ int main(int argc, char **argv) {
       cvc::state::instance(app)(key).value(val);
     }
   }
+  // --boat-check drives a 5 m skiff, so it runs on a moderate sea unless --set says otherwise: the
+  // default 1.2 m, 10 s swell and a 4 m/s wind sea drawn at a quarter of the cascades' height
+  // (coast.water.wave_amp 0.3), about 0.4 m Hs, which is about JONSWAP's for that wind. At the
+  // default 9 m/s and wave_amp 1.2 the cascades make about 6 m Hs off the lee shore (1.5 m at
+  // 4 m/s), short and steep enough to throw the skiff about.
+  for (const auto &kv : {std::pair<const char *, double>{"coast.water.wind_speed", 4.0},
+                         std::pair<const char *, double>{"coast.water.wave_amp", 0.3}})
+    if (boatCheck && cvc::state::instance(app)(kv.first).value().empty())
+      cvc::state::instance(app)(kv.first).value(kv.second);
   // The scene's nodes log through THIS injected app (not a process-wide singleton),
   // so we set the console verbosity right here: show only errors + warnings, unless
   // --verbose asks for the full per-frame cvcGL debug trace. Levels: a message at
@@ -1918,6 +2360,30 @@ int main(int argc, char **argv) {
   std::vector<double> lastSwell = swellSignature(seaState());
   vtkSmartPointer<vtkTextureObject> shoreWaveTex, shoreDirTex;
 
+  // The wake windows (OCEAN-AND-WEATHER-ROADMAP.md C2-C4, C6, O9): the waves the crates and
+  // barrels make, on the GPU (EWave). The sea's is 256^2 cells of 0.5 m (128 m) over the sea
+  // around the camera's target (decision D3, in the frame loop), the lake's a small one over the
+  // crater lake. coast.wake.enabled (1) at start makes them; 0 leaves them out, shaders and all
+  // (to measure what they cost). Made here, before the water's shaders, which read them only if
+  // they exist.
+  std::unique_ptr<EWave> seaWake, lakeWake, lakeAbsorb; // lakeAbsorb: --wake-check only
+  cvc::ocean::ewave_params seaWakeP;
+  seaWakeP.n = 256;
+  seaWakeP.dx = 0.5;
+  seaWakeP.depth = 5.0;       // until the window is placed: then its wet cells' mean depth
+  seaWakeP.damping_k2 = 2e-3; // m^2/s: waves 1 m long fade over about 13 s
+  seaWakeP.damping = 0.02;    // 1/s: everything, over a minute
+  seaWakeP.sponge_cells = 16.0;
+  seaWakeP.sponge_rate = 2.0;
+  seaWakeP.beach_rate = 10.0;
+  if (oceanReady && knob("coast.wake.enabled", 1.0) > 0.5) {
+    seaWake = std::make_unique<EWave>(seaWakeP);
+    if (!seaWake->init(ow)) {
+      std::printf("coast: no wake (EWave unavailable)\n");
+      seaWake.reset();
+    }
+  }
+
   // The ocean grid + GPU displace/BRDF shaders (no per-frame CPU readback — the
   // WASM-viable path). The cascade displacement textures are bound live.
   sg.addGraphics("ocean", buildOcean(app));
@@ -1963,9 +2429,9 @@ int main(int argc, char **argv) {
     ocean->setShaderUniform3f("uShoreGridSpacing", static_cast<float>(seaGrid.cell_w()),
                               static_cast<float>(seaGrid.cell_h()), 0.0f);
     ocean->setShaderUniformf("uLevel", static_cast<float>(SEA_LEVEL));
-    ocean->addVertexShaderReplacement("//VTK::PositionVC::Dec", oceanVsDec());
+    ocean->addVertexShaderReplacement("//VTK::PositionVC::Dec", oceanVsDec(seaWake != nullptr));
     ocean->addVertexShaderReplacement("//VTK::PositionVC::Impl", OCEAN_VS_IMPL);
-    ocean->addFragmentShaderReplacement("//VTK::Normal::Dec", oceanFsDec());
+    ocean->addFragmentShaderReplacement("//VTK::Normal::Dec", oceanFsDec(seaWake != nullptr));
     ocean->addFragmentShaderReplacement("//VTK::Light::Impl", OCEAN_FS_LIGHT);
   } else {
     ocean->setColor(0.05, 0.20, 0.32); // a flat blue fallback sea
@@ -2043,6 +2509,66 @@ int main(int argc, char **argv) {
     lakeNode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("coast_lake"));
     lakeNode->setUseSingleColor(true);
     vtkTextureObject *bedTex = oceanReady ? seabedTex.texture() : nullptr;
+    // The lake's wake window (C6): the lake and a 3 m margin, in cells of 0.5 m (a power of two a
+    // side), at the lake's mean depth, with no sponge: the banks enclose it, and its mask (below)
+    // is a hard 0 on them, so rings reflect off all of them.
+    if (bedTex && seaWake) {
+      cvc::ocean::ewave_params p = seaWakeP;
+      p.dx = 0.5;
+      const double span = std::max(lake.max_x - lake.min_x, lake.max_y - lake.min_y) + 6.0;
+      p.n = 16;
+      while (p.n * p.dx < span && p.n < 512)
+        p.n *= 2;
+      p.origin_x = std::floor((0.5 * (lake.min_x + lake.max_x) - 0.5 * p.n * p.dx) / p.dx) * p.dx;
+      p.origin_y = std::floor((0.5 * (lake.min_y + lake.max_y) - 0.5 * p.n * p.dx) / p.dx) * p.dx;
+      p.sponge_cells = 0.0;
+      double dsum = 0.0;
+      int dn = 0;
+      for (int j = 0; j < p.n; ++j)
+        for (int i = 0; i < p.n; ++i) {
+          const double d =
+              lakeBodies.sample(lakeBodies.depth, p.origin_x + i * p.dx, p.origin_y + j * p.dx);
+          if (d > 0.0)
+            dsum += d, ++dn;
+        }
+      p.depth = dn ? dsum / dn : 2.0;
+      lakeWake = std::make_unique<EWave>(p);
+      if (!lakeWake->init(ow)) {
+        lakeWake.reset();
+      } else {
+        std::vector<double> m(std::size_t(p.n) * p.n, 0.0);
+        int wet = 0;
+        for (int j = 0; j < p.n; ++j)
+          for (int i = 0; i < p.n; ++i) {
+            const double x = p.origin_x + i * p.dx, y = p.origin_y + j * p.dx;
+            if (lakeBodies.sample(lakeBodies.depth, x, y) > 0.0 &&
+                lakeBodies.body_at(x, y) == lakeIndex)
+              m[std::size_t(j) * p.n + i] = 1.0, ++wet;
+          }
+        lakeWake->setMask(m);
+        // --wake-check: the same lake with absorbing banks (the mask ramping from 1 down to 0.2
+        // over the last 3 m to the bank), fed the same sources, to compare with.
+        if (wakeCheck) {
+          std::vector<double> ma(m.size(), 0.0);
+          for (int j = 0; j < p.n; ++j)
+            for (int i = 0; i < p.n; ++i)
+              if (m[std::size_t(j) * p.n + i] > 0.0) {
+                const double sd = lakeBodies.sample(lakeBodies.shore_m, p.origin_x + i * p.dx,
+                                                    p.origin_y + j * p.dx);
+                const double r = std::min(1.0, std::max(0.0, sd / 3.0));
+                ma[std::size_t(j) * p.n + i] = 0.2 + 0.8 * r * r * (3.0 - 2.0 * r);
+              }
+          lakeAbsorb = std::make_unique<EWave>(p);
+          if (lakeAbsorb->init(ow))
+            lakeAbsorb->setMask(ma);
+          else
+            lakeAbsorb.reset();
+        }
+        std::printf("coast: the lake's wake window, %d^2 cells of %.1f m, %d of them water, %.1f m "
+                    "deep\n",
+                    p.n, p.dx, wet, p.depth);
+      }
+    }
     if (bedTex) {
       lakeNode->disableCoordinateShiftScale(); // vertexMC == world
       lakeNode->setShaderTexture(cvc::gl::HeightFieldTexture::samplerName(), bedTex);
@@ -2052,9 +2578,10 @@ int main(int argc, char **argv) {
       lakeNode->setShaderUniform3f(cvc::gl::HeightFieldTexture::spacingName(),
                                    static_cast<float>(seaGrid.cell_w()),
                                    static_cast<float>(seaGrid.cell_h()), 0.0f);
-      lakeNode->addVertexShaderReplacement("//VTK::PositionVC::Dec", LAKE_VS_DEC);
+      lakeNode->addVertexShaderReplacement("//VTK::PositionVC::Dec",
+                                           lakeVsDec(lakeWake != nullptr));
       lakeNode->addVertexShaderReplacement("//VTK::PositionVC::Impl", LAKE_VS_IMPL);
-      lakeNode->addFragmentShaderReplacement("//VTK::Normal::Dec", lakeFsDec());
+      lakeNode->addFragmentShaderReplacement("//VTK::Normal::Dec", lakeFsDec(lakeWake != nullptr));
       lakeNode->addFragmentShaderReplacement("//VTK::Light::Impl", LAKE_FS_LIGHT);
     } else {
       lakeNode->setColor(0.06, 0.22, 0.27);
@@ -2074,13 +2601,30 @@ int main(int argc, char **argv) {
     bool barrel = false, inLake = false;
     double half_height = 0.0; // half the body's extent across the water, lying flat
     cvc::physics::body_state start;
+    // Its outline as the water sees it (cvc/physics/immersion.h): its columns under water feed
+    // the wake windows (O9).
+    std::shared_ptr<const cvc::physics::immersion_body> outline;
   };
   std::unique_ptr<cvc::physics::world> phys;
+  // The boat's pose as the last present() drew it (a group of one in physView, whose sink present
+  // calls with the same samples it poses the nodes from). Declared before physView, which holds
+  // the sink, so it outlives it.
+  std::optional<cvc::physics::pose> boatPresented;
   std::unique_ptr<cvc::gl::physics_scene_binding> physView;
   std::vector<DebrisBody> debris;
+  // The boat (O11c): a cvc::physics boat (boat.h) in the debris' world, its hull the skiff above.
+  cvc::physics::boat_id boatId;
+  cvc::physics::body_id boatHull;
+  cvc::physics::body_state boatStart;
+  std::shared_ptr<const cvc::physics::immersion_body> boatOutline; // for the wake, as debris'
+  double boatVolume = 0.0;                                         // the hull's, m^3
   cvc::physics::field_id seaField{};
-  cvc::physics::field seaWater;
+  cvc::physics::field seaWater, lakeWater;
   std::shared_ptr<const cvc::physics::fluid_surface> seaSurface;
+  // The same sea again for the wake windows (O9): the same inputs, so the same values, but its
+  // own cache of the fields at one time, so the frame's reads at the drawn time do not evict the
+  // physics step's (which may run on another thread at another time).
+  std::shared_ptr<const cvc::physics::fluid_surface> wakeSurface;
   auto physGrid = std::make_shared<const cvc::ocean::shore_grid>(shoreGrid);
   auto physLayer = std::make_shared<const cvc::ocean::shore_layer>(shoreLayer);
   // The sea the bodies feel: the drawn sea's cascades (each with its h0, fade and decay), its
@@ -2150,11 +2694,11 @@ int main(int argc, char **argv) {
       seaWater.drag_coefficient = 1.0;
       seaWater.damping = 1.0e4; // a metre-sized body follows the water within a tenth of a second
       seaSurface = physicsSea();
+      wakeSurface = physicsSea();
       seaWater.surface = seaSurface;
       lastPhysicsSea = physicsSeaSignature();
       seaField = phys->add_field(seaWater);
       if (haveLake) { // the lake: still water at its level, over its bounds
-        cvc::physics::field lakeWater;
         lakeWater.kind = cvc::physics::field_kind::fluid;
         lakeWater.volume = waterBox(lake.min_x - 1.0, lake.min_y - 1.0, LAKE_LEVEL - 8.0,
                                     lake.max_x + 1.0, lake.max_y + 1.0, LAKE_LEVEL + 2.0);
@@ -2213,6 +2757,8 @@ int main(int argc, char **argv) {
         db.inLake = sp.inLake;
         db.half_height = sp.barrel ? barrelR : crate[2];
         db.start = phys->state(db.id);
+        db.outline = std::make_shared<const cvc::physics::immersion_body>(
+            cvc::physics::immersion_body::of(d));
         const std::string name = "coast_debris_" + std::to_string(debris.size());
         sg.addGraphics(name, sp.barrel ? buildBarrel(app, barrelHL, barrelR, tint)
                                        : buildCrate(app, crate[0], crate[1], crate[2], tint));
@@ -2226,13 +2772,83 @@ int main(int argc, char **argv) {
       }
       std::printf("coast: %zu crates and barrels on %s\n", debris.size(),
                   cvc::physics::backend_version(cvc::physics::backend::jolt).c_str());
+
+      // The boat, added after the debris (so their ids, and --debris-check, are as they were): the
+      // skiff's hull_mesh for the water, the convex hull of its vertices to collide with, 700 kg
+      // (hull, motor, a driver), no body damping (the water is its resistance). An outboard of
+      // 2.5 kN bollard pull whose thrust falls to 0 at 11 m/s of inflow swings 0.5 rad to steer,
+      // and its leg is a small rudder that swings with it. It starts on the lee (east) side, on
+      // open water 8-11 m deep, heading south along the coast.
+      if (knob("coast.boat.enabled", 1.0) > 0.5) {
+        cvc::physics::boat_desc bd;
+        std::shared_ptr<cvc::physics::hull_mesh> hull = skiffHullMesh();
+        bd.hull.shape = cvc::physics::convex_hull{hull->vertices};
+        bd.hull.hull = hull;
+        bd.hull.mass = 700.0;
+        bd.hull.linear_damping = 0.0;
+        bd.hull.angular_damping = 0.0;
+        bd.hull.allow_sleeping = false;
+        bd.propeller.position = {-2.67, 0.0, -0.58};
+        bd.propeller.max_thrust = 2500.0;
+        bd.propeller.max_reverse_thrust = 1200.0;
+        bd.propeller.max_inflow_speed = 11.0;
+        bd.propeller.outboard_max_angle = 0.5;
+        bd.rudder.position = {-2.65, 0.0, -0.45};
+        bd.rudder.area = 0.05;
+        bd.rudder.max_angle = 0.5;
+        bd.actuator_time_constant = 0.4;
+        for (const auto &t : hull->triangles) { // the divergence theorem: sum of a . (b x c) / 6
+          const cvc::physics::vec3 &a = hull->vertices[t[0]], &b = hull->vertices[t[1]],
+                                   &c = hull->vertices[t[2]];
+          boatVolume += (a.x * (b.y * c.z - b.z * c.y) - a.y * (b.x * c.z - b.z * c.x) +
+                         a.z * (b.x * c.y - b.y * c.x)) /
+                        6.0;
+        }
+        const double bx = knob("coast.boat.start_x", 110.0), by = knob("coast.boat.start_y", 30.0);
+        const double yaw = knob("coast.boat.start_heading", -90.0) * M_PI / 180.0;
+        boatId = phys->add_boat(bd, {bx, by, seaSurface->height(bx, by, 0.0) + 0.2},
+                                {std::cos(yaw / 2), 0.0, 0.0, std::sin(yaw / 2)});
+        boatHull = phys->boat_state(boatId).hull;
+        boatStart = phys->state(boatHull);
+        boatOutline = std::make_shared<const cvc::physics::immersion_body>(
+            cvc::physics::immersion_body::of(bd.hull));
+        sg.addGraphics("coast_boat", buildSkiff(app));
+        auto node = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("coast_boat"));
+        node->setUseSingleColor(false);
+        node->setAmbient(0.45);
+        node->setDiffuse(0.8);
+        node->setSpecular(0.15);
+        physView->bind(boatHull, node);
+        physView->bind_group(
+            {boatHull}, [&boatPresented](const std::vector<cvc::physics::pose_tracker::sample> &s) {
+              if (s.empty())
+                boatPresented.reset();
+              else
+                boatPresented = s.front().pose;
+            });
+        std::printf(
+            "coast: a %.1f m skiff of %.0f kg (%zu hull triangles, %.2f m^3) at (%.0f, %.0f)\n",
+            SKIFF_X1 - SKIFF_X0, bd.hull.mass, hull->triangles.size(), boatVolume, bx, by);
+      }
     } catch (const std::exception &e) {
       std::printf("coast: no debris (%s)\n", e.what());
       physView.reset();
       phys.reset();
       debris.clear();
+      boatId = {};
+      boatOutline.reset();
     }
   }
+  // A teleport (set_state and snap) moves a body in one frame. Until the poses drawn are the ones
+  // after it (a capture past the tick it happened at), the wake's sources only record the columns
+  // (stepWake), so a body leaving its place does not leave a false ring there as its column
+  // vanishes, nor make one where it appears.
+  bool wakeTeleported = false;
+  std::uint64_t wakeTeleportTick = 0;
+  auto teleported = [&] {
+    wakeTeleported = true;
+    wakeTeleportTick = physView->tracker().tick();
+  };
   // Drop them all again where they started.
   auto dropDebris = [&] {
     if (!phys)
@@ -2241,6 +2857,7 @@ int main(int argc, char **argv) {
       phys->set_state(db.id, db.start);
       physView->tracker().snap(db.id);
     }
+    teleported();
   };
   // Step the debris' world by the steps due on the app's clock, timing them.
   std::atomic<std::uint64_t> physUs{0}, physSteps{0};
@@ -2261,12 +2878,601 @@ int main(int argc, char **argv) {
   // Interactive runs step the debris on a thread of their own, so a frame never waits on the sea
   // they feel; a capture or a check steps them in the frame, so each frame shows the world at the
   // clock's time. (The world, the clock and the binding are thread-safe.)
-  bool physOnThread = phys && !capturing && !debrisCheck;
+  bool physOnThread = phys && !capturing && !debrisCheck && !wakeCheck && !boatCheck;
 #if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
   physOnThread = false; // the browser's one thread
 #endif
   std::atomic<bool> physStop{false};
   std::thread physThread;
+
+  // ── the wake (OCEAN-AND-WEATHER-ROADMAP.md C2-C4, C6, O9) ──────────────────────────────────────
+  // Each frame each body's columns under the water (cvc::physics::add_immersion, the code physics
+  // immerses with: its shape, its drawn pose, and the water physics feels, the sea's sea_surface
+  // or the lake's still level) become its window's source -(zeta(t) - zeta(t - dt)) (WakeSource),
+  // and the window steps by the frame's world time.
+  //
+  // Decision D3: the sea's window is centred on the camera's target (the --look target, or the
+  // camera's focal point), the point the view is about; not on the eye, which may be far above
+  // the water, and with no boat yet to follow. It moves only when the target is 16 cells (8 m)
+  // from its centre, by whole cells (EWave::shift, its sponge hiding the strip that enters), so
+  // a still or slowly turning camera never shifts it, and gets its new place's mask and depth.
+  //
+  // The sea's mask (C6), from the shore grid (water_bodies) and the shore layer: 0 on land; in
+  // the water a ramp over the last coast.wake.beach_m (3 m) to the shore, from 1 down to
+  // coast.wake.beach_mask (0.5) at the waterline, so beaches absorb (the window's beach_rate,
+  // 10 / s times 1 - m); and where the shore is steep, 1 up to the waterline and a hard 0 past it,
+  // so cliffs reflect. The ramp is narrow on purpose: a source in it is scaled by the mask and
+  // damped at that rate, so a crate dropped 5 m off the sand under an 8 m ramp to 0.3 left no
+  // ring at all; under this one its ring runs in to the sand. Steep is the shore layer's reflection
+  // K_r (Battjes' surf-zone K_r, which the swell's steepness sets), or the ground's slope from 0.25
+  // to 0.6 (rise over run), the larger: m = beach + (1 - beach) steep.
+  std::unique_ptr<WakeSource> seaSrc, lakeSrc;
+  if (seaWake)
+    seaSrc = std::make_unique<WakeSource>(seaWake->params());
+  if (lakeWake)
+    lakeSrc = std::make_unique<WakeSource>(lakeWake->params());
+  bool seaPlaced = false;
+  int seaShifts = 0;
+  auto seaWakeMask = [&](const cvc::ocean::ewave_params &p, double &meanDepth) {
+    const double W = std::max(0.5, knob("coast.wake.beach_m", 3.0));
+    const double mb = std::min(1.0, std::max(0.0, knob("coast.wake.beach_mask", 0.5)));
+    std::vector<double> m(std::size_t(p.n) * p.n, 0.0);
+    double dsum = 0.0;
+    int dn = 0;
+    for (int j = 0; j < p.n; ++j)
+      for (int i = 0; i < p.n; ++i) {
+        const double x = p.origin_x + i * p.dx, y = p.origin_y + j * p.dx;
+        const double s = shore.sample(shore.shore_m, x, y);
+        if (!(s > 0.0))
+          continue; // land, or off the shore grid
+        const double kr =
+            shoreLayer.empty() ? 0.0 : shoreLayer.sample_field(shoreLayer.reflection, x, y);
+        const double slope = shore.sample(shore.slope, x, y);
+        const double ss = std::min(1.0, std::max(0.0, (slope - 0.25) / 0.35));
+        const double steep =
+            std::min(1.0, std::max(std::isfinite(kr) ? kr : 0.0, ss * ss * (3.0 - 2.0 * ss)));
+        const double r = std::min(1.0, s / W);
+        const double beach = mb + (1.0 - mb) * r * r * (3.0 - 2.0 * r);
+        m[std::size_t(j) * p.n + i] = beach + (1.0 - beach) * steep;
+        const double d = shore.sample(shore.depth, x, y);
+        if (d > 0.0)
+          dsum += d, ++dn;
+      }
+    meanDepth = dn ? dsum / dn : 5.0;
+    return m;
+  };
+  // Moves the sea's window to the target (tx, ty) when it is 16 cells from its centre.
+  auto placeSeaWake = [&](double tx, double ty) {
+    const cvc::ocean::ewave_params &p = seaWake->params();
+    const double half = 0.5 * p.n * p.dx;
+    const long wi = std::lround((tx - half) / p.dx), wj = std::lround((ty - half) / p.dx);
+    const long ci = std::lround(p.origin_x / p.dx), cj = std::lround(p.origin_y / p.dx);
+    const long di = wi - ci, dj = wj - cj;
+    if (seaPlaced && std::labs(di) < 16 && std::labs(dj) < 16)
+      return;
+    const int si = int(std::max(-100000L, std::min(100000L, di)));
+    const int sj = int(std::max(-100000L, std::min(100000L, dj)));
+    seaWake->shift(si, sj);
+    seaSrc->shift(si, sj);
+    double depth = 5.0;
+    seaWake->setMask(seaWakeMask(seaWake->params(), depth));
+    // coast.wake.depth (0): a depth in metres for the window in place of its mean water depth,
+    // to tell a wake's shallow-water change from its speed's (the window takes it when it moves)
+    const double forced = knob("coast.wake.depth", 0.0);
+    seaWake->setDepth(forced > 0.0 ? forced : std::max(0.5, depth));
+    seaPlaced = true;
+    ++seaShifts;
+  };
+  double wakeT = -1.0; // the world time the windows were last stepped to
+  double wakeCpuMs = 0.0, wakeSrcMs = 0.0, wakeImmMs = 0.0, wakeBandMs = 0.0, wakeGpuMs = 0.0;
+  long wakeSteps = 0, wakeGpuTimed = 0;
+  vtkOpenGLRenderTimer wakeTimer;
+  bool wakeTimerRunning = false;
+  std::vector<double> wakeDh, lakeDh;
+  std::vector<std::optional<cvc::physics::pose>> wakePoses; // the bodies as drawn, in debris order
+  std::optional<cvc::physics::pose> boatWakePose;           // and the boat
+  // The world's field time at its tick 0 (field_time() = wakeFieldT0 + tick * fixed_dt; this demo
+  // never sets it), read before the physics thread starts.
+  const double wakeFieldT0 =
+      phys ? phys->field_time() - double(phys->tick()) * phys->config().fixed_dt : 0.0;
+  double seaVolMax = 0.0, lakeVolMax = 0.0; // the most volume each window's bodies had in it (m^3)
+  // The windows' state to the water's shaders.
+  auto bindWake = [&](GeometryNode &node, EWave &w, bool on) {
+    node.setShaderTexture("uWake", w.heightTexture());
+    node.setShaderUniform3f("uWakeGrid", static_cast<float>(w.params().origin_x),
+                            static_cast<float>(w.params().origin_y),
+                            static_cast<float>(w.params().dx));
+    node.setShaderUniformf("uWakeN", static_cast<float>(w.params().n));
+    node.setShaderUniformf("uWakeOn", on ? 1.0f : 0.0f);
+    node.setShaderUniformf("uWakeFoam", static_cast<float>(knob("coast.wake.foam", 1.0)));
+    node.setShaderUniformf("uWakeVertex", static_cast<float>(knob("coast.wake.vertex", 1.0)));
+  };
+  // One frame of the wake: place the sea's window, feed both windows their bodies' sources at the
+  // frame's world time wt (the bodies where they are drawn, clockAlpha into the clock's quantum),
+  // step them by the world time since the last frame, and bind them.
+  auto stepWake = [&](double wt, double clockAlpha, double tx, double ty) {
+    if (!seaWake && !lakeWake)
+      return;
+    const bool on = knob("coast.wake.enabled", 1.0) > 0.5;
+    if (on && seaWake)
+      placeSeaWake(tx, ty);
+    const double dt = wakeT < 0.0 ? 0.0 : wt - wakeT;
+    if (on && (wakeT < 0.0 || dt > 0.0)) {
+      const auto c0 = std::chrono::steady_clock::now();
+      if (wakeTimerRunning && wakeTimer.Ready()) {
+        wakeGpuMs += wakeTimer.GetElapsedMilliseconds();
+        ++wakeGpuTimed;
+        wakeTimerRunning = false;
+      }
+      const bool timing = !wakeTimerRunning && vtkOpenGLRenderTimer::IsSupported();
+      // The sources: each window's bodies at their drawn poses, in the water physics feels at
+      // the time of those poses. The view lags the world by one step (pose_tracker.h): a body is
+      // drawn a fraction a of the way from the world's tick k - 1 to its newest tick k, so the
+      // sea it is cut against is read at the field time of that point, not at the frame's wt
+      // (the world's field time counts its own steps, from when it first stepped, which is not
+      // the clock's time: the binding steps it with step(), not world::follow).
+      // The poses and the tick are read together: a capture on the physics thread between them
+      // samples again.
+      double a = 0.0, drawnT = wt;
+      if (phys) {
+        a = physView->tracker().alpha(app.world_clock(), clockAlpha);
+        for (int tries = 0; tries < 4; ++tries) {
+          const std::uint64_t k = physView->tracker().tick();
+          wakePoses.clear();
+          for (const DebrisBody &db : debris)
+            wakePoses.push_back(physView->tracker().sample_one(db.id, a));
+          boatWakePose.reset();
+          if (boatOutline)
+            boatWakePose = physView->tracker().sample_one(boatHull, a);
+          drawnT = wakeFieldT0 + std::max(0.0, double(k) - 1.0 + a) * phys->config().fixed_dt;
+          if (physView->tracker().tick() == k)
+            break;
+        }
+        // A teleport: only record the columns until the poses drawn are the ones after it.
+        if (wakeTeleported) {
+          if (seaSrc)
+            seaSrc->reset();
+          if (lakeSrc)
+            lakeSrc->reset();
+          if (physView->tracker().tick() > wakeTeleportTick)
+            wakeTeleported = false;
+        }
+      }
+      bool seaSource = false, lakeSource = false;
+      if (seaSrc) {
+        seaSrc->begin();
+        if (phys) {
+          cvc::physics::immersion_water sea = cvc::physics::immersion_water::of(seaWater, drawnT);
+          sea.surface = wakeSurface.get();
+          // The sea's fields at this time, computed once by the first read (timed apart: they are
+          // most of the sources' cost).
+          const auto b0 = std::chrono::steady_clock::now();
+          wakeSurface->height(tx, ty, drawnT);
+          wakeBandMs +=
+              std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - b0)
+                  .count();
+          for (std::size_t i = 0; i < debris.size(); ++i)
+            if (!debris[i].inLake && wakePoses[i])
+              seaSrc->add(*debris[i].outline, wakePoses[i]->position, wakePoses[i]->rotation, sea);
+          if (boatWakePose) // the boat, its hull_mesh's columns (O11c)
+            seaSrc->add(*boatOutline, boatWakePose->position, boatWakePose->rotation, sea);
+        }
+        wakeImmMs +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0)
+                .count();
+        seaSource = seaSrc->finish(wakeDh);
+        seaVolMax = std::max(seaVolMax, seaSrc->volume());
+      }
+      if (lakeSrc) {
+        const auto l0 = std::chrono::steady_clock::now();
+        lakeSrc->begin();
+        if (phys && lakeWater.volume) {
+          const cvc::physics::immersion_water lw =
+              cvc::physics::immersion_water::of(lakeWater, drawnT);
+          for (std::size_t i = 0; i < debris.size(); ++i)
+            if (debris[i].inLake && wakePoses[i])
+              lakeSrc->add(*debris[i].outline, wakePoses[i]->position, wakePoses[i]->rotation, lw);
+        }
+        wakeImmMs +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - l0)
+                .count();
+        lakeSource = lakeSrc->finish(lakeDh);
+        lakeVolMax = std::max(lakeVolMax, lakeSrc->volume());
+      }
+      wakeSrcMs +=
+          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count();
+      if (timing)
+        wakeTimer.Start();
+      if (seaSource)
+        seaWake->addHeights(wakeDh);
+      if (lakeSource)
+        lakeWake->addHeights(lakeDh);
+      if (lakeSource && lakeAbsorb)
+        lakeAbsorb->addHeights(lakeDh);
+      if (dt > 0.0) {
+        if (seaWake)
+          seaWake->step(dt);
+        if (lakeWake)
+          lakeWake->step(dt);
+        if (lakeAbsorb)
+          lakeAbsorb->step(dt);
+        ++wakeSteps;
+      }
+      if (timing) {
+        wakeTimer.Stop();
+        wakeTimerRunning = true;
+      }
+      wakeT = wt;
+      wakeCpuMs +=
+          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count();
+    } else if (!on && wakeT >= 0.0) {
+      wakeT = -1.0; // start again from here when it is turned back on
+      if (seaSrc)
+        seaSrc->reset();
+      if (lakeSrc)
+        lakeSrc->reset();
+    }
+    if (seaWake && ocean)
+      bindWake(*ocean, *seaWake, on);
+    if (lakeWake && lakeNode)
+      bindWake(*lakeNode, *lakeWake, on);
+  };
+
+  // --wake-check: the windows' potential energy (1/2 rho g sum h^2 dA) and largest height every
+  // half second, and a crate dropped on the crater lake at 20 s: the RMS height within 1.5 m of
+  // where it fell, every frame, so the ring's return from the banks shows.
+  struct WakeSample {
+    double t, seaE, seaMax, lakeE, lakeMax, absorbE;
+  };
+  std::vector<WakeSample> wakeSeries;
+  struct NearSample {
+    double t, reflecting, absorbing; // the RMS height near the drop, banks reflecting / absorbing
+  };
+  std::vector<NearSample> lakeNear;
+  const double kWakeDropT = 20.0;
+  double dropX = 0.0, dropY = 0.0;
+  bool dropped = false;
+  auto windowEnergy = [](EWave &w, double &maxH) {
+    const std::vector<float> h = w.readbackHeight();
+    double s = 0.0;
+    maxH = 0.0;
+    for (float v : h) {
+      s += double(v) * v;
+      maxH = std::max(maxH, double(std::fabs(v)));
+    }
+    const cvc::ocean::ewave_params &p = w.params();
+    return 0.5 * p.density * p.gravity * s * p.dx * p.dx;
+  };
+
+  // ── the boat's helm, camera and check (OCEAN-AND-WEATHER-ROADMAP.md O11c) ─────────────────────
+  // The helm is two state knobs, coast.boat.throttle and coast.boat.rudder (each in [-1, 1]; +
+  // rudder turns left), which the frame loop hands to world::set_boat_controls every frame; the
+  // keyboard (I / K: throttle up / down while held; J / L: full rudder left / right while held),
+  // the panel's Boat section, a script and --boat-check all write them. coast.boat.chase (C)
+  // puts the camera behind the boat (coast.boat.chase_back, _height and _side place it) and
+  // moves the sea's wake window with it, centred 24 m astern of the boat so the wake is in it.
+  // The frame loop publishes coast.boat.speed (m/s through the water), .heading (degrees from
+  // +x toward +y), .x and .y.
+  auto qrot = [](const cvc::physics::quat &q, const Vec3d &v) { // q v q*
+    const Vec3d u{q.x, q.y, q.z}, t = vcross(u, v);
+    const Vec3d t2{2.0 * t.x, 2.0 * t.y, 2.0 * t.z}, c = vcross(u, t2);
+    return Vec3d{v.x + q.w * t2.x + c.x, v.y + q.w * t2.y + c.y, v.z + q.w * t2.z + c.z};
+  };
+  auto wrapPi = [](double a) { return std::remainder(a, 2.0 * M_PI); };
+  if (boatCheck)
+    cvc::state::instance(app)("coast.boat.chase").value(1.0);
+  knob("coast.boat.throttle", 0.0);
+  knob("coast.boat.rudder", 0.0);
+  knob("coast.boat.chase", 0.0);
+  bool keyRudder = false, chaseKeyWas = false;
+  double chaseHeading = 0.0;
+  bool chaseSeeded = false;
+  std::optional<cvc::physics::pose> boatDrawn; // the boat as this frame draws it
+  // Put the boat back where it started, at rest (the panel's button).
+  auto resetBoat = [&] {
+    if (!phys || !boatId.valid())
+      return;
+    phys->set_boat_controls(boatId, {});
+    cvc::state::instance(app)("coast.boat.throttle").value(0.0);
+    cvc::state::instance(app)("coast.boat.rudder").value(0.0);
+    cvc::physics::body_state s = boatStart;
+    s.linear_velocity = {0.0, 0.0, -0.1}; // moving, so a body Jolt put to sleep wakes
+    phys->set_state(boatHull, s);
+    physView->tracker().snap(boatHull);
+    teleported();
+    chaseSeeded = false;
+  };
+
+  // --boat-check: a scripted run on the synthetic clock. It settles for 3 s, runs south at full
+  // throttle along the lee (east) coast holding its heading until 21 s, slows to 3.5 m/s (a
+  // Froude number of 0.5 on its 5 m) until 41 s, turns left at full throttle and full rudder
+  // through one whole circle from 6 s into the turn, then follows waypoints round the south of
+  // the island to the windward (south-west) cliffs, where the shore is steep and the shore layer
+  // reflects the swell, and runs north-north-west along them about 25 m off. Measured: the speed
+  // through the water; the turning circle (its size across the track, and 2U/r from the mean
+  // speed and yaw rate); the heave (its origin's z), pitch and roll RMS about their means, and
+  // the sea's height RMS under it, on the lee run (9-21 s) and along the cliffs; and the wake's
+  // envelope angle at full speed (12-21 s) and at 3.5 m/s (31-41 s), from the sea's window read
+  // back every frame, as RMS heights on rows across the track 8-44 m astern in the boat's frame
+  // (so the waves the boat scatters off the swell, which do not stay with it, average down while
+  // the Kelvin pattern, which does, stays).
+  enum class BoatPhase { Settle, Run, Slow, Turn, Transit, Done };
+  BoatPhase boatPhase = BoatPhase::Settle;
+  const double kBoatRun0 = 3.0, kBoatSlow0 = 21.0, kBoatTurn0 = 41.0, kBoatRms0 = 9.0;
+  const double kBoatKelvinFast0 = 12.0, kBoatKelvinSlow0 = 31.0, kBoatSlowSpeed = 3.5;
+  const double kBoatTurnSteady = 6.0, kBoatTurnMax = 60.0;
+  double boatSlowThrottle = 0.3; // the slow run's throttle, which a speed loop sets
+  const std::vector<std::pair<double, double>> boatWaypoints = {
+      {60.0, -120.0}, {-50.0, -118.0}, {-80.0, -88.0}, {-100.0, -50.0}, {-114.0, -22.0}};
+  const std::size_t kCliffWaypoint = 3; // reaching the cliffs' first point starts the cliff leg
+  std::size_t boatWp = 0;
+  double boatHeading0 = 0.0, boatUnwrapped = 0.0, boatLastHeading = 0.0;
+  bool boatHeadingSeeded = false;
+  double boatSpeedMax = 0.0, boatRunSpeedSum = 0.0;
+  long boatRunSpeedN = 0;
+  struct Rms {
+    double s = 0.0, s2 = 0.0, mx = 0.0;
+    long n = 0;
+    void add(double v) {
+      s += v, s2 += v * v, ++n;
+      mx = std::max(mx, std::fabs(v));
+    }
+    double mean() const { return n ? s / n : 0.0; }
+    double rms() const { return n ? std::sqrt(std::max(0.0, s2 / n - mean() * mean())) : 0.0; }
+  };
+  // The motions on a stretch of the run, the sea's height under the boat, and the shore layer's
+  // incident and reflected swell amplitudes there.
+  struct Leg {
+    Rms heave, pitch, roll, sea, incident, reflected;
+  };
+  Leg lee, cliff;
+  Rms turnSpeed, turnYaw;
+  bool turnMeasuring = false, turnDone = false;
+  double turnPsi0 = 0.0, turnT0 = 0.0, turnT1 = 0.0;
+  double turnMinX = 1e30, turnMaxX = -1e30, turnMinY = 1e30, turnMaxY = -1e30;
+  double cliffT0 = -1.0, cliffT1 = -1.0, cliffNearest = 1e30;
+  bool boatSank = false;
+  double boatSankT = -1.0, boatSubmergedT = 0.0;
+  std::vector<std::array<double, 4>> boatTrack; // every half second: t, x, y, speed
+  // The Kelvin rows: s metres astern of the boat's origin, y across (+ to port).
+  const int kKelvinRows = 19, kKelvinCols = 161;
+  const double kKelvinS0 = 8.0, kKelvinDs = 2.0, kKelvinY0 = -40.0, kKelvinDy = 0.5;
+  struct Kelvin { // the mean squared heights on the rows, and the boat's speed meanwhile
+    std::vector<double> sum;
+    long frames = 0;
+    Rms speed;
+    Rms depth; // the sea window's depth meanwhile
+  };
+  Kelvin kelvinFast, kelvinSlow;
+  kelvinFast.sum.assign(std::size_t(kKelvinRows) * kKelvinCols, 0.0);
+  kelvinSlow.sum = kelvinFast.sum;
+  // A wake window's height at world (x, y), bilinear in its read-back cells (0 off it).
+  auto windowHeight = [](const std::vector<float> &h, const cvc::ocean::ewave_params &p, double x,
+                         double y) {
+    const double fx = (x - p.origin_x) / p.dx, fy = (y - p.origin_y) / p.dx;
+    const int i = int(std::floor(fx)), j = int(std::floor(fy));
+    if (i < 0 || j < 0 || i + 1 >= p.n || j + 1 >= p.n)
+      return 0.0;
+    const double ax = fx - i, ay = fy - j;
+    auto at = [&](int ii, int jj) { return double(h[std::size_t(jj) * p.n + ii]); };
+    return (1 - ay) * ((1 - ax) * at(i, j) + ax * at(i + 1, j)) +
+           ay * ((1 - ax) * at(i, j + 1) + ax * at(i + 1, j + 1));
+  };
+  // The helm for this frame: the keyboard into the knobs (interactive), the check's script into
+  // them (--boat-check), then the knobs to the world.
+  auto driveBoat = [&](double wt, double dt) {
+    if (!phys || !boatId.valid())
+      return;
+    cvc::state &thrK = cvc::state::instance(app)("coast.boat.throttle");
+    cvc::state &rudK = cvc::state::instance(app)("coast.boat.rudder");
+    double thr = std::min(1.0, std::max(-1.0, knob("coast.boat.throttle", 0.0)));
+    double rud = std::min(1.0, std::max(-1.0, knob("coast.boat.rudder", 0.0)));
+    const bool kUp = cam.keyHeld("i"), kDown = cam.keyHeld("k");
+    const bool kLeft = cam.keyHeld("j"), kRight = cam.keyHeld("l");
+    if (kUp != kDown) {
+      thr = std::min(1.0, std::max(-1.0, thr + (kUp ? 0.6 : -0.6) * dt));
+      thrK.value(thr);
+    }
+    if (kLeft != kRight) {
+      rud = kLeft ? 1.0 : -1.0;
+      rudK.value(rud);
+      keyRudder = true;
+    } else if (keyRudder) { // the keys let go: the rudder they held comes back to the middle
+      rud = 0.0;
+      rudK.value(rud);
+      keyRudder = false;
+    }
+    const bool chaseKey = cam.keyHeld("c");
+    if (chaseKey && !chaseKeyWas)
+      cvc::state::instance(app)("coast.boat.chase")
+          .value(knob("coast.boat.chase", 0.0) > 0.5 ? 0.0 : 1.0);
+    chaseKeyWas = chaseKey;
+    const cvc::physics::boat_state bs = phys->boat_state(boatId);
+    if (boatCheck) {
+      const double x = bs.body.position.x, y = bs.body.position.y;
+      // Heading toward a bearing: the error, less some of the yaw rate, as rudder.
+      auto steer = [&](double bearing) {
+        return std::min(1.0,
+                        std::max(-1.0, 2.0 * wrapPi(bearing - bs.heading) - 0.8 * bs.yaw_rate));
+      };
+      if (boatPhase == BoatPhase::Settle && wt >= kBoatRun0) {
+        boatPhase = BoatPhase::Run;
+        boatHeading0 = bs.heading;
+      }
+      if (boatPhase == BoatPhase::Run && wt >= kBoatSlow0)
+        boatPhase = BoatPhase::Slow;
+      if (boatPhase == BoatPhase::Slow && wt >= kBoatTurn0)
+        boatPhase = BoatPhase::Turn;
+      if (boatPhase == BoatPhase::Turn && (turnDone || wt >= kBoatTurn0 + kBoatTurnMax))
+        boatPhase = BoatPhase::Transit;
+      if (boatPhase == BoatPhase::Transit) {
+        while (boatWp < boatWaypoints.size() &&
+               std::hypot(boatWaypoints[boatWp].first - x, boatWaypoints[boatWp].second - y) <
+                   15.0) {
+          ++boatWp;
+          if (boatWp == kCliffWaypoint && cliffT0 < 0.0)
+            cliffT0 = wt;
+        }
+        if (boatWp >= boatWaypoints.size()) {
+          boatPhase = BoatPhase::Done;
+          cliffT1 = wt;
+        }
+      }
+      switch (boatPhase) {
+      case BoatPhase::Settle:
+        thr = 0.0, rud = 0.0;
+        break;
+      case BoatPhase::Run:
+        thr = 1.0, rud = steer(boatHeading0);
+        break;
+      case BoatPhase::Slow: // a speed loop: the throttle integrates the speed's error
+        boatSlowThrottle = std::min(
+            1.0, std::max(0.0, boatSlowThrottle + 0.15 * (kBoatSlowSpeed - bs.speed) * dt));
+        thr = std::min(1.0, std::max(0.0, boatSlowThrottle + 0.2 * (kBoatSlowSpeed - bs.speed)));
+        rud = steer(boatHeading0);
+        break;
+      case BoatPhase::Turn:
+        thr = 1.0, rud = 1.0;
+        break;
+      case BoatPhase::Transit:
+        thr = 1.0;
+        rud = steer(std::atan2(boatWaypoints[boatWp].second - y, boatWaypoints[boatWp].first - x));
+        break;
+      case BoatPhase::Done:
+        thr = 0.3, rud = 0.0;
+        break;
+      }
+      thrK.value(thr);
+      rudK.value(rud);
+    }
+    phys->set_boat_controls(boatId, {thr, rud});
+    cvc::state::instance(app)("coast.boat.speed").value(bs.speed);
+    cvc::state::instance(app)("coast.boat.heading").value(bs.heading * 180.0 / M_PI);
+    cvc::state::instance(app)("coast.boat.x").value(bs.body.position.x);
+    cvc::state::instance(app)("coast.boat.y").value(bs.body.position.y);
+  };
+  // After the world's step: the boat as drawn this frame (for the camera, the wake window and the
+  // water shader's hole), and the check's measurements.
+  auto boatAfterStep = [&](double wt) {
+    boatDrawn.reset();
+    if (!phys || !boatId.valid()) {
+      if (ocean)
+        ocean->setShaderUniformf("uBoatOn", 0.0f);
+      return;
+    }
+    // The pose present() drew the hull at, not a second sample: with the physics on its own
+    // thread a step can land between the two, and the same alpha would then be a tick later
+    // (about 0.19 m at full throttle), the hole off the drawn hull for a frame.
+    boatDrawn = boatPresented;
+    if (ocean) {
+      if (boatDrawn) {
+        const Vec3d ax = qrot(boatDrawn->rotation, {1.0, 0.0, 0.0}),
+                    ay = qrot(boatDrawn->rotation, {0.0, 1.0, 0.0}),
+                    az = qrot(boatDrawn->rotation, {0.0, 0.0, 1.0});
+        const cvc::physics::vec3 &p = boatDrawn->position;
+        ocean->setShaderUniform3f("uBoatPos", float(p.x), float(p.y), float(p.z));
+        ocean->setShaderUniform3f("uBoatAx", float(ax.x), float(ax.y), float(ax.z));
+        ocean->setShaderUniform3f("uBoatAy", float(ay.x), float(ay.y), float(ay.z));
+        ocean->setShaderUniform3f("uBoatAz", float(az.x), float(az.y), float(az.z));
+        float v[6][6];
+        skiffFootprint(v);
+        for (int k = 0; k < 6; ++k) {
+          const std::string sk = std::to_string(k);
+          ocean->setShaderUniform3f("uBoatS" + sk, v[k][0], v[k][1], v[k][2]);
+          ocean->setShaderUniform3f("uBoatT" + sk, v[k][3], v[k][4], v[k][5]);
+        }
+      }
+      // coast.boat.keep_dry (1): 0 draws the sea inside the hull too, to see what the hole hides
+      ocean->setShaderUniformf("uBoatOn",
+                               boatDrawn && knob("coast.boat.keep_dry", 1.0) > 0.5 ? 1.0f : 0.0f);
+    }
+    if (!boatCheck)
+      return;
+    const cvc::physics::boat_state bs = phys->boat_state(boatId);
+    const cvc::physics::quat &q = bs.body.rotation;
+    const Vec3d fwd = qrot(q, {1.0, 0.0, 0.0}), port = qrot(q, {0.0, 1.0, 0.0});
+    const double pitch = std::asin(std::min(1.0, std::max(-1.0, fwd.z))); // bow up +
+    const double roll = std::asin(std::min(1.0, std::max(-1.0, port.z))); // port side up +
+    const double x = bs.body.position.x, y = bs.body.position.y;
+    if (!boatHeadingSeeded) {
+      boatLastHeading = bs.heading;
+      boatHeadingSeeded = true;
+    }
+    boatUnwrapped += wrapPi(bs.heading - boatLastHeading);
+    boatLastHeading = bs.heading;
+    if (boatTrack.empty() || wt >= boatTrack.back()[0] + 0.5 - 1e-9)
+      boatTrack.push_back({wt, x, y, bs.speed});
+    // Sinking: the whole hull under water, or its origin a metre under the water over it, for 2 s.
+    const double immersed = phys->field_load_on(boatHull).immersed_volume;
+    const double water = seaSurface->height(x, y, phys->field_time());
+    const bool under = immersed > 0.97 * boatVolume || bs.body.position.z < water - 1.0;
+    boatSubmergedT = under ? boatSubmergedT + 1.0 / fps : 0.0;
+    if (!boatSank && boatSubmergedT >= 2.0) {
+      boatSank = true;
+      boatSankT = wt;
+    }
+    // The wake astern, in the boat's frame as drawn (the frame its sources were cut at).
+    auto addKelvin = [&](Kelvin &k) {
+      if (!seaWake || !boatDrawn)
+        return;
+      const std::vector<float> h = seaWake->readbackHeight();
+      const cvc::ocean::ewave_params &p = seaWake->params();
+      const Vec3d f = qrot(boatDrawn->rotation, {1.0, 0.0, 0.0});
+      const double fl = std::hypot(f.x, f.y), fx = f.x / fl, fy = f.y / fl;
+      for (int r = 0; r < kKelvinRows; ++r)
+        for (int c = 0; c < kKelvinCols; ++c) {
+          const double s = kKelvinS0 + r * kKelvinDs, yy = kKelvinY0 + c * kKelvinDy;
+          const double wx = boatDrawn->position.x - s * fx - yy * fy,
+                       wy = boatDrawn->position.y - s * fy + yy * fx;
+          const double v = windowHeight(h, p, wx, wy);
+          k.sum[std::size_t(r) * kKelvinCols + c] += v * v;
+        }
+      ++k.frames;
+      k.speed.add(bs.speed);
+      k.depth.add(p.depth);
+    };
+    auto addLeg = [&](Leg &l) {
+      l.heave.add(bs.body.position.z), l.pitch.add(pitch), l.roll.add(roll), l.sea.add(water);
+      if (!shoreLayer.empty()) {
+        l.incident.add(shoreLayer.sample_field(shoreLayer.amplitude, x, y));
+        l.reflected.add(shoreLayer.sample_field(shoreLayer.reflected, x, y));
+      }
+    };
+    if (boatPhase == BoatPhase::Run) {
+      boatSpeedMax = std::max(boatSpeedMax, bs.speed);
+      if (wt >= kBoatSlow0 - 4.0)
+        boatRunSpeedSum += bs.speed, ++boatRunSpeedN;
+      if (wt >= kBoatRms0)
+        addLeg(lee);
+      if (wt >= kBoatKelvinFast0)
+        addKelvin(kelvinFast);
+    }
+    if (boatPhase == BoatPhase::Slow && wt >= kBoatKelvinSlow0)
+      addKelvin(kelvinSlow);
+    if (boatPhase == BoatPhase::Turn) {
+      boatSpeedMax = std::max(boatSpeedMax, bs.speed);
+      if (!turnMeasuring && !turnDone && wt >= kBoatTurn0 + kBoatTurnSteady) {
+        turnMeasuring = true;
+        turnPsi0 = boatUnwrapped;
+        turnT0 = wt;
+      }
+      if (turnMeasuring) {
+        turnSpeed.add(std::hypot(bs.body.linear_velocity.x, bs.body.linear_velocity.y));
+        turnYaw.add(bs.yaw_rate);
+        turnMinX = std::min(turnMinX, x), turnMaxX = std::max(turnMaxX, x);
+        turnMinY = std::min(turnMinY, y), turnMaxY = std::max(turnMaxY, y);
+        if (std::fabs(boatUnwrapped - turnPsi0) >= 2.0 * M_PI) {
+          turnMeasuring = false;
+          turnDone = true;
+          turnT1 = wt;
+        }
+      }
+    }
+    if (boatPhase == BoatPhase::Transit && cliffT0 >= 0.0) {
+      addLeg(cliff);
+      cliffNearest = std::min(cliffNearest, shore.sample(shore.shore_m, x, y));
+    }
+  };
 
   // The app's world clock drives EVERY animated layer by world time (the sea's FFT, the
   // tree wind, the cloud drift and its ground shadow): correct speed at any frame rate,
@@ -2381,6 +3587,40 @@ int main(int argc, char **argv) {
       if (ImGui::Button("drop them again"))
         dropDebris();
     }
+    if (phys && boatId.valid()) {
+      // The helm writes the same knobs as the keys and a script (coast.boat.*).
+      ImGui::SeparatorText("Boat");
+      const cvc::physics::boat_state bs = phys->boat_state(boatId);
+      float uiThr = static_cast<float>(knob("coast.boat.throttle", 0.0));
+      if (ImGui::SliderFloat("throttle (I/K)", &uiThr, -1.0f, 1.0f, "%.2f"))
+        wput("coast.boat.throttle", uiThr);
+      float uiRud = static_cast<float>(knob("coast.boat.rudder", 0.0));
+      if (ImGui::SliderFloat("rudder (J/L)", &uiRud, -1.0f, 1.0f, "%.2f"))
+        wput("coast.boat.rudder", uiRud);
+      bool uiChase = knob("coast.boat.chase", 0.0) > 0.5;
+      if (ImGui::Checkbox("chase camera (C)", &uiChase))
+        wput("coast.boat.chase", uiChase ? 1.0 : 0.0);
+      ImGui::SameLine();
+      if (ImGui::Button("put it back"))
+        resetBoat();
+      ImGui::Text("%.1f m/s (%.1f kn), heading %.0f deg, thrust %.0f N%s", bs.speed,
+                  bs.speed * 3600.0 / 1852.0, bs.heading * 180.0 / M_PI, bs.thrust,
+                  bs.propeller_wet ? "" : " (prop out)");
+    }
+    if (seaWake || lakeWake) {
+      ImGui::SeparatorText("Wake");
+      bool wakeOn = knob("coast.wake.enabled", 1.0) > 0.5;
+      if (ImGui::Checkbox("waves from bodies", &wakeOn))
+        wput("coast.wake.enabled", wakeOn ? 1.0 : 0.0);
+      float uiWakeFoam = static_cast<float>(knob("coast.wake.foam", 1.0));
+      if (ImGui::SliderFloat("wake foam", &uiWakeFoam, 0.0f, 3.0f))
+        wput("coast.wake.foam", uiWakeFoam);
+      if (seaWake)
+        ImGui::Text("sea window at (%.0f, %.0f), %.0f m across", seaWake->params().origin_x,
+                    seaWake->params().origin_y, seaWake->params().n * seaWake->params().dx);
+      ImGui::Text("%.2f ms CPU, %.2f ms GPU a frame", wakeSteps ? wakeCpuMs / wakeSteps : 0.0,
+                  wakeGpuTimed ? wakeGpuMs / wakeGpuTimed : 0.0);
+    }
     ImGui::End();
 
     // The lighting controls are the LIBRARY's panel, not demo-local code — the
@@ -2470,6 +3710,7 @@ int main(int argc, char **argv) {
   auto start = std::chrono::steady_clock::now();
   double last = 0.0;
   long frame = 0;
+  std::size_t snapNext = 0; // the next of --snap's times
   int n = 0;
   double fpsLast = 0.0; // realtime FPS readout (interactive)
   long fpsFrames = 0;
@@ -2492,7 +3733,8 @@ int main(int argc, char **argv) {
     });
   while (!view.windowClosed() && !cvc_examples::demo_switch_requested()) {
     double t, dt;
-    if (capturing || debrisCheck) { // fixed synthetic clock -> real-time playback of the animation
+    if (capturing || debrisCheck || wakeCheck ||
+        boatCheck) { // fixed synthetic clock -> real-time playback of the animation
       t = frame / fps;
       dt = 1.0 / fps;
     } else {
@@ -2598,14 +3840,99 @@ int main(int argc, char **argv) {
         if (sig != lastPhysicsSea) {
           physLayer = std::make_shared<const cvc::ocean::shore_layer>(shoreLayer);
           seaSurface = physicsSea();
+          wakeSurface = physicsSea();
           seaWater.surface = seaSurface;
           phys->set_field(seaField, seaWater);
           lastPhysicsSea = std::move(sig);
         }
       }
+      // --wake-check: a crate dropped from 2 m onto the middle of the lake at 20 s, once the lake
+      // has settled, for its ring.
+      if (wakeCheck && !dropped && haveLake && wt >= kWakeDropT) {
+        for (const DebrisBody &db : debris)
+          if (db.inLake && !db.barrel) {
+            dropX = 0.5 * (lake.min_x + lake.max_x);
+            dropY = 0.5 * (lake.min_y + lake.max_y);
+            cvc::physics::body_state s = db.start;
+            s.position = {dropX, dropY, LAKE_LEVEL + 2.0};
+            // Falling at 0.5 m/s: with no velocity a sleeping body stays asleep where it is put
+            // (Jolt's SetPositionRotationAndVelocity wakes a body only for a non-zero velocity).
+            s.linear_velocity = {0.0, 0.0, -0.5};
+            s.angular_velocity = {};
+            s.active = true;
+            phys->set_state(db.id, s);
+            physView->tracker().snap(db.id);
+            teleported(); // no false ring where it floated
+            dropped = true;
+            std::printf("wake check: a crate dropped on the lake at (%.1f, %.1f) at t = %.2f s\n",
+                        dropX, dropY, wt);
+            break;
+          }
+      }
+      driveBoat(wt, dt); // the helm, before the steps it acts through
       if (!physOnThread)
         stepDebris();
       physView->present(clock, clockStep.alpha);
+    }
+    boatAfterStep(wt);
+    const bool chase = boatDrawn && knob("coast.boat.chase", 0.0) > 0.5;
+    // The chase camera's heading: the boat's, eased over about a second, so the view does not
+    // swing with every yaw the waves give it.
+    if (boatDrawn) {
+      const Vec3d f = qrot(boatDrawn->rotation, {1.0, 0.0, 0.0});
+      const double h = std::atan2(f.y, f.x);
+      if (!chaseSeeded)
+        chaseHeading = h, chaseSeeded = true;
+      chaseHeading += wrapPi(h - chaseHeading) * (1.0 - std::exp(-dt / 0.9));
+    }
+    // The wake: its windows' sources from the bodies as drawn, and a step (O9). The sea's window
+    // follows the camera's target (D3): the --look target, or the camera's focal point.
+    {
+      double tx = 0.0, ty = 0.0;
+      if (chase) { // the boat's: 24 m astern of it, so its wake is in the window
+        tx = boatDrawn->position.x - 24.0 * std::cos(chaseHeading);
+        ty = boatDrawn->position.y - 24.0 * std::sin(chaseHeading);
+      } else if (!lookAt.empty()) {
+        tx = lookAt[3];
+        ty = lookAt[4];
+      } else if (view.renderer() && view.renderer()->GetActiveCamera()) {
+        double fp[3];
+        view.renderer()->GetActiveCamera()->GetFocalPoint(fp);
+        tx = fp[0];
+        ty = fp[1];
+      }
+      stepWake(wt, clockStep.alpha, tx, ty);
+      if (wakeCheck && (seaWake || lakeWake)) {
+        if (frame % std::max(1, int(std::lround(0.5 * fps))) == 0) {
+          WakeSample ws{wt, 0.0, 0.0, 0.0, 0.0, 0.0};
+          if (seaWake)
+            ws.seaE = windowEnergy(*seaWake, ws.seaMax);
+          if (lakeWake)
+            ws.lakeE = windowEnergy(*lakeWake, ws.lakeMax);
+          double unused = 0.0;
+          if (lakeAbsorb)
+            ws.absorbE = windowEnergy(*lakeAbsorb, unused);
+          wakeSeries.push_back(ws);
+        }
+        if (dropped && lakeWake && wt <= kWakeDropT + 35.0) {
+          const cvc::ocean::ewave_params &p = lakeWake->params();
+          auto near = [&](EWave &w) {
+            const std::vector<float> h = w.readbackHeight();
+            double s2 = 0.0;
+            int k = 0;
+            for (int j = 0; j < p.n; ++j)
+              for (int i = 0; i < p.n; ++i) {
+                const double x = p.origin_x + i * p.dx - dropX, y = p.origin_y + j * p.dx - dropY;
+                if (x * x + y * y <= 1.5 * 1.5) {
+                  s2 += double(h[std::size_t(j) * p.n + i]) * h[std::size_t(j) * p.n + i];
+                  ++k;
+                }
+              }
+            return k ? std::sqrt(s2 / k) : 0.0;
+          };
+          lakeNear.push_back({wt, near(*lakeWake), lakeAbsorb ? near(*lakeAbsorb) : 0.0});
+        }
+      }
     }
     if (cloudDue || shadowDue) {
       double shift = wt * CLOUD_DRIFT * SKY_N / (2.0 * SKY_HALF);
@@ -2630,6 +3957,16 @@ int main(int argc, char **argv) {
       view.setCamera(lookAt[0], lookAt[1], lookAt[2], lookAt[3], lookAt[4], lookAt[5], 0, 0, 1,
                      42.0, 0.5, 4000.0);
       placeSky({lookAt[0], lookAt[1], lookAt[2]});
+    } else if (chase) { // behind the boat, along its eased heading, looking a little ahead of it
+      const double back = knob("coast.boat.chase_back", 14.0),
+                   up = knob("coast.boat.chase_height", 5.0),
+                   side = knob("coast.boat.chase_side", 0.0);
+      const double c = std::cos(chaseHeading), s = std::sin(chaseHeading);
+      const cvc::physics::vec3 &p = boatDrawn->position;
+      const Vec3d e{p.x - back * c - side * s, p.y - back * s + side * c, SEA_LEVEL + up};
+      view.setCamera(e.x, e.y, e.z, p.x + 4.0 * c, p.y + 4.0 * s, SEA_LEVEL + 0.5, 0, 0, 1, 42.0,
+                     0.5, 4000.0);
+      placeSky(e);
     } else {
       if (capture == Capture::Orbit && frames > 0) // one full slow turn over the run
         cvc::state::instance(app)(azPath).value(orbitAz0 + 360.0 * double(frame) / frames);
@@ -2643,6 +3980,21 @@ int main(int argc, char **argv) {
       char path[1024];
       std::snprintf(path, sizeof path, "%s/frame_%05ld.png", outDir.c_str(), frame);
       view.writePNG(path);
+    } else if (snapNext < snapTimes.size() && wt >= snapTimes[snapNext] - 1e-9) {
+      // --snap: this frame to a file (it renders it)
+      std::string stem = png.empty() ? std::string("snap.png") : png;
+      // the tag before the file name's extension; a dot in a directory's name is not one
+      const std::size_t slash = stem.find_last_of("/\\");
+      std::size_t dot = stem.rfind('.');
+      if (dot != std::string::npos && slash != std::string::npos && dot < slash)
+        dot = std::string::npos;
+      char tag[32];
+      std::snprintf(tag, sizeof tag, "_%g", snapTimes[snapNext]);
+      stem.insert(dot == std::string::npos ? stem.size() : dot, tag);
+      view.writePNG(stem);
+      std::printf("snap: t = %.2f s to %s\n", wt, stem.c_str());
+      while (snapNext < snapTimes.size() && wt >= snapTimes[snapNext] - 1e-9)
+        ++snapNext;
     } else {
       view.render();
       // Realtime FPS readout (interactive only) — averaged over ~1 s.
@@ -2673,6 +4025,37 @@ int main(int argc, char **argv) {
   physStop = true;
   if (physThread.joinable())
     physThread.join();
+  if (offscreen && frame > 0) {
+    const double secs =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    std::printf("frame loop: %ld frames in %.2f s, %.2f ms a frame\n", frame, secs,
+                1e3 * secs / double(frame));
+  }
+  if (seaWake || lakeWake) {
+    if (wakeTimerRunning) { // the last frame's GPU time
+      ow->WaitForCompletion();
+      for (int spin = 0; spin < 1000 && !wakeTimer.Ready(); ++spin)
+        ow->WaitForCompletion();
+      if (wakeTimer.Ready()) {
+        wakeGpuMs += wakeTimer.GetElapsedMilliseconds();
+        ++wakeGpuTimed;
+      }
+    }
+    std::printf(
+        "wake: %ld steps of the sea's %d^2 window%s; %.3f ms CPU a frame (the bodies' "
+        "sources %.3f ms: immersion %.3f ms, of which the sea's fields at the frame's time %.3f "
+        "ms; the rest is the uploads and the passes), "
+        "%.3f ms GPU a frame "
+        "(timer query over %ld frames); the sea's window moved %d time%s\n",
+        wakeSteps, seaWake ? seaWake->params().n : 0,
+        lakeWake ? (" and the lake's " + std::to_string(lakeWake->params().n) + "^2").c_str() : "",
+        wakeSteps ? wakeCpuMs / double(wakeSteps) : 0.0,
+        wakeSteps ? wakeSrcMs / double(wakeSteps) : 0.0,
+        wakeSteps ? wakeImmMs / double(wakeSteps) : 0.0,
+        wakeSteps ? wakeBandMs / double(wakeSteps) : 0.0,
+        wakeGpuTimed ? wakeGpuMs / double(wakeGpuTimed) : -1.0, wakeGpuTimed, seaShifts,
+        seaShifts == 1 ? "" : "s");
+  }
   if (!png.empty())
     view.writePNG(png);
 
@@ -2844,6 +4227,269 @@ int main(int argc, char **argv) {
       if (sank > 0 || lakeOff > 0)
         rc = 4;
     }
+  }
+  // The wake check (OCEAN-AND-WEATHER-ROADMAP.md O9, Phase C's exit): the windows' energy over the
+  // run, and the crate dropped on the lake: its ring leaves the drop point, reaches the banks, and
+  // (the banks being a hard 0 in the lake's mask) comes back to it.
+  if (wakeCheck) {
+    if (!seaWake && !lakeWake) {
+      std::printf("wake check: no wake windows (no float render targets, or coast.wake.enabled "
+                  "is 0)\n");
+      rc = rc ? rc : 5;
+    } else {
+      if (seaWake)
+        std::printf("wake check: the sea's window at (%.1f, %.1f), %d^2 cells of %.1f m, %.1f m "
+                    "deep; ",
+                    seaWake->params().origin_x, seaWake->params().origin_y, seaWake->params().n,
+                    seaWake->params().dx, seaWake->params().depth);
+      if (lakeWake)
+        std::printf("the lake's at (%.1f, %.1f), %d^2 cells, %.1f m deep",
+                    lakeWake->params().origin_x, lakeWake->params().origin_y, lakeWake->params().n,
+                    lakeWake->params().depth);
+      std::printf("\n");
+      std::printf("  t (s)   sea energy (J)  sea max |h| (m)   lake energy (J)  lake max |h| (m)  "
+                  "lake, absorbing banks (J)\n");
+      for (std::size_t i = 0; i < wakeSeries.size(); ++i) {
+        const WakeSample &w = wakeSeries[i];
+        const bool around =
+            std::fabs(w.t - kWakeDropT) < 0.26 || std::fabs(w.t - kWakeDropT - 1.0) < 0.26;
+        if (i % 4 == 0 || around)
+          std::printf("  %6.2f  %14.3f  %15.4f  %16.3f  %16.4f  %16.3f\n", w.t, w.seaE, w.seaMax,
+                      w.lakeE, w.lakeMax, w.absorbE);
+      }
+      // The lake keeps its waves: the share of the energy left 10 and 20 s after the drop's
+      // splash, with reflecting banks and with absorbing ones.
+      auto energyAt = [&](double t, bool absorbing) {
+        for (const WakeSample &w : wakeSeries)
+          if (w.t >= t - 1e-9)
+            return absorbing ? w.absorbE : w.lakeE;
+        return 0.0;
+      };
+      // What the check asserts (exit code 5): a window with bodies in it has waves; the drop makes
+      // a ring; and the lake, its banks reflecting, keeps clearly more of it than its twin with
+      // absorbing banks.
+      std::vector<std::string> wakeFails;
+      double seaEMax = 0.0, lakeEMax = 0.0;
+      for (const WakeSample &w : wakeSeries)
+        seaEMax = std::max(seaEMax, w.seaE), lakeEMax = std::max(lakeEMax, w.lakeE);
+      if (seaWake) {
+        if (seaVolMax > 0.0 && !(seaEMax > 0.0))
+          wakeFails.push_back("the sea's window had bodies in it but no waves");
+        else if (!(seaVolMax > 0.0))
+          std::printf("  (no body was in the sea's window: it lies over land or open water "
+                      "away from them; --look puts it on them)\n");
+      }
+      if (lakeWake && lakeVolMax > 0.0 && !(lakeEMax > 0.0))
+        wakeFails.push_back("the lake's window had bodies in it but no waves");
+      if (dropped && lakeAbsorb) {
+        const double t0 = kWakeDropT + 2.0;
+        const double r0 = energyAt(t0, false), a0 = energyAt(t0, true);
+        const double r10 = r0 > 0 ? energyAt(t0 + 10.0, false) / r0 : 0.0,
+                     a10 = a0 > 0 ? energyAt(t0 + 10.0, true) / a0 : 0.0;
+        std::printf("  the lake's energy left 10 s and 20 s after +2 s from the drop: %.0f %% and "
+                    "%.0f %% with its banks reflecting, %.0f %% and %.0f %% with them absorbing\n",
+                    100.0 * r10, r0 > 0 ? 100.0 * energyAt(t0 + 20.0, false) / r0 : 0.0,
+                    100.0 * a10, a0 > 0 ? 100.0 * energyAt(t0 + 20.0, true) / a0 : 0.0);
+        // The energy the drop added, in the absorbing twin (whose earlier rings are gone by then):
+        // at +2 s against just before it. It adds about 150 J.
+        const double before = energyAt(kWakeDropT - 0.5, true);
+        if (!(a0 > before + 20.0))
+          wakeFails.push_back("the crate dropped on the lake made no ring");
+        else if (wakeSeries.back().t < t0 + 10.0 - 1e-9)
+          std::printf("  (the run ended before +12 s from the drop: no reflection check)\n");
+        else if (!(r10 > 2.0 * a10))
+          wakeFails.push_back("the lake's banks do not keep its waves (reflecting " +
+                              std::to_string(r10) + " vs absorbing " + std::to_string(a10) + ")");
+      } else if (lakeWake && haveLake && !dropped) {
+        std::printf("  (the run ended before the drop at %.0f s: no ring check)\n", kWakeDropT);
+      }
+      for (const std::string &f : wakeFails)
+        std::printf("wake check FAILED: %s\n", f.c_str());
+      if (!wakeFails.empty())
+        rc = rc ? rc : 5;
+      if (!lakeNear.empty()) {
+        // The RMS height within 1.5 m of the drop: its splash, then what comes back from the
+        // banks, against the same lake with absorbing banks.
+        std::printf("  the lake's drop at (%.1f, %.1f): RMS height (m) within 1.5 m of it, banks "
+                    "reflecting / absorbing, every second after the drop:\n   ",
+                    dropX, dropY);
+        double next = kWakeDropT;
+        for (const NearSample &n : lakeNear)
+          if (n.t >= next - 1e-9) {
+            std::printf(" %.0f:%.4f/%.4f", n.t - kWakeDropT, n.reflecting, n.absorbing);
+            next += 1.0;
+          }
+        std::printf("\n");
+        double splash = 0.0, splashT = 0.0, late[2] = {0.0, 0.0};
+        int lateN = 0;
+        for (const NearSample &n : lakeNear) {
+          const double t = n.t - kWakeDropT;
+          if (t < 2.0 && n.reflecting > splash)
+            splash = n.reflecting, splashT = t;
+          if (t >= 8.0 && t <= 30.0) {
+            late[0] += n.reflecting * n.reflecting;
+            late[1] += n.absorbing * n.absorbing;
+            ++lateN;
+          }
+        }
+        if (lateN)
+          std::printf("  splash %.4f m at +%.2f s; RMS height there from +8 to +30 s: %.4f m with "
+                      "the banks reflecting, %.4f m with them absorbing\n",
+                      splash, splashT, std::sqrt(late[0] / lateN), std::sqrt(late[1] / lateN));
+      }
+    }
+  }
+  // The boat check (OCEAN-AND-WEATHER-ROADMAP.md O11c, Phase D's exit): what the scripted run
+  // measured, and whether the boat floated, moved and turned (exit code 6 if not).
+  if (boatCheck) {
+    std::vector<std::string> fails;
+    if (!phys || !boatId.valid()) {
+      std::printf("boat check: no boat (no Jolt in this build, or coast.boat.enabled or "
+                  "coast.debris.enabled is 0)\n");
+      fails.push_back("no boat");
+    } else {
+      const char *phaseName[] = {"settling", "the lee run", "the slow run",
+                                 "the turn", "the transit", "done"};
+      std::printf("boat check at t = %.2f s (%s): %llu physics steps of %.0f ms, %.2f ms each\n",
+                  clock.t(), phaseName[int(boatPhase)],
+                  static_cast<unsigned long long>(physSteps.load()), 1e3 * phys->config().fixed_dt,
+                  physMsPerStep());
+      std::printf("  track (t, x, y, speed through the water) every 5 s:");
+      for (std::size_t i = 0; i < boatTrack.size(); i += 10)
+        std::printf("%s %.0f s (%.1f, %.1f) %.2f m/s", i % 40 ? "," : "\n   ", boatTrack[i][0],
+                    boatTrack[i][1], boatTrack[i][2], boatTrack[i][3]);
+      std::printf("\n");
+      const double runSpeed = boatRunSpeedN ? boatRunSpeedSum / boatRunSpeedN : 0.0;
+      std::printf("  speed: %.2f m/s (%.1f kn) through the water over the lee run's last 4 s, "
+                  "%.2f m/s at most\n",
+                  runSpeed, runSpeed * 3600.0 / 1852.0, boatSpeedMax);
+      if (turnDone) {
+        const double dx = turnMaxX - turnMinX, dy = turnMaxY - turnMinY;
+        const double r = std::fabs(turnYaw.mean());
+        std::printf("  turn: one circle in %.1f s from %.0f s, full rudder and throttle: across "
+                    "the track %.1f m by %.1f m (mean %.1f m); %.2f m/s over the ground and "
+                    "%.4f rad/s give 2U/r = %.1f m\n",
+                    turnT1 - turnT0, turnT0, dx, dy, 0.5 * (dx + dy), turnSpeed.mean(),
+                    turnYaw.mean(), r > 0.0 ? 2.0 * turnSpeed.mean() / r : 0.0);
+      } else {
+        std::printf("  turn: %s\n", boatPhase < BoatPhase::Turn
+                                        ? "not reached (run longer: about 3300 frames at 30 fps)"
+                                        : "no full circle");
+      }
+      const double deg = 180.0 / M_PI;
+      auto legLine = [&](const char *what, const Leg &l) {
+        std::printf("  %s: heave %.3f m, pitch %.2f deg, roll %.2f deg RMS (largest %.1f / %.1f "
+                    "deg from their means); the sea under it %.3f m RMS; the shore layer's swell "
+                    "there %.2f m incident, %.2f m reflected (means)\n",
+                    what, l.heave.rms(), l.pitch.rms() * deg, l.roll.rms() * deg,
+                    (l.pitch.mx - std::fabs(l.pitch.mean())) * deg,
+                    (l.roll.mx - std::fabs(l.roll.mean())) * deg, l.sea.rms(), l.incident.mean(),
+                    l.reflected.mean());
+      };
+      char what[160];
+      std::snprintf(what, sizeof what, "the lee run (%.0f-%.0f s, %ld samples)", kBoatRms0,
+                    kBoatSlow0, lee.pitch.n);
+      legLine(what, lee);
+      if (cliff.pitch.n) {
+        std::snprintf(what, sizeof what,
+                      "along the cliffs (%.1f s from %.0f s, nearest the shore %.1f m)",
+                      (cliffT1 > 0.0 ? cliffT1 : clock.t()) - cliffT0, cliffT0, cliffNearest);
+        legLine(what, cliff);
+      } else {
+        std::printf("  the cliffs: not reached\n");
+      }
+      // The wake's envelope from mean squared heights astern: on each row, the outermost point
+      // each side whose RMS height is past a share of the row's largest, fitted against the
+      // distance astern; the two sides' half-angles averaged.
+      auto fit = [](const std::vector<double> &xs, const std::vector<double> &ys) {
+        double sx = 0, sy = 0, sxx = 0, sxy = 0;
+        const double k = double(xs.size());
+        for (std::size_t q = 0; q < xs.size(); ++q)
+          sx += xs[q], sy += ys[q], sxx += xs[q] * xs[q], sxy += xs[q] * ys[q];
+        return std::atan((k * sxy - sx * sy) / (k * sxx - sx * sx)) * 180.0 / M_PI;
+      };
+      const double kelvin = std::asin(1.0 / 3.0) * deg;
+      auto kelvinReport = [&](const char *name, const Kelvin &k, double from) {
+        if (k.frames == 0) {
+          std::printf("  wake %s: not measured (no wake window, or the run ended before %.0f s)\n",
+                      name, from);
+          return;
+        }
+        const double u = k.speed.mean(), h = k.depth.mean();
+        // The window's one depth sets its dispersion: near a depth Froude number of 1 the
+        // finite-depth wake widens towards 90 deg and past it has no transverse waves, so a
+        // narrowing read there is not the length Froude number's alone.
+        std::printf("  wake %s (%.2f m/s, Froude number %.2f on 5 m; window depth %.1f m, depth "
+                    "Froude number %.2f; %ld frames from %.0f s, rows %.0f-%.0f m astern):",
+                    name, u, u / std::sqrt(9.80665 * 5.0), h,
+                    h > 0.0 ? u / std::sqrt(9.80665 * h) : 0.0, k.frames, from, kKelvinS0,
+                    kKelvinS0 + (kKelvinRows - 1) * kKelvinDs);
+        std::vector<double> ss, peakY;
+        double floorShare = 0.0;
+        std::vector<std::vector<double>> rows;
+        for (int r = 0; r < kKelvinRows; ++r) {
+          std::vector<double> row(kKelvinCols);
+          double m = 0.0, ym = 0.0;
+          for (int c = 0; c < kKelvinCols; ++c) {
+            row[c] = std::sqrt(k.sum[std::size_t(r) * kKelvinCols + c] / k.frames);
+            if (row[c] > m)
+              m = row[c], ym = std::fabs(kKelvinY0 + c * kKelvinDy);
+          }
+          // the noise floor: the row's ends (beyond 36 m to each side) against its largest
+          double e = 0.0;
+          int en = 0;
+          for (int c = 0; c < kKelvinCols; ++c)
+            if (std::fabs(kKelvinY0 + c * kKelvinDy) >= 36.0)
+              e += row[c], ++en;
+          floorShare = std::max(floorShare, m > 0.0 ? e / en / m : 0.0);
+          rows.push_back(row);
+          ss.push_back(kKelvinS0 + r * kKelvinDs);
+          peakY.push_back(ym);
+        }
+        for (double frac : {0.3, 0.4, 0.5}) {
+          std::vector<double> port, stbd;
+          for (const std::vector<double> &row : rows) {
+            double m = 0.0, yp = 0.0, ys = 0.0;
+            for (double v : row)
+              m = std::max(m, v);
+            for (int c = 0; c < kKelvinCols; ++c)
+              if (row[c] > frac * m) {
+                const double yy = kKelvinY0 + c * kKelvinDy;
+                yp = std::max(yp, yy), ys = std::max(ys, -yy);
+              }
+            port.push_back(yp);
+            stbd.push_back(ys);
+          }
+          const double ap = fit(ss, port), as = fit(ss, stbd);
+          std::printf("%s %.0f %% edge %.2f deg (port %.2f, starboard %.2f)",
+                      frac > 0.35 ? "," : "", 100.0 * frac, 0.5 * (ap + as), ap, as);
+        }
+        std::printf("; row maxima %.2f deg; Kelvin %.2f deg; the rows' ends hold at most %.0f %% "
+                    "of their largest RMS height\n",
+                    fit(ss, peakY), kelvin, 100.0 * floorShare);
+        std::printf("    RMS height (cm) across the track every 4 m astern, from 40 m to port to "
+                    "40 m to starboard every 4 m:\n");
+        for (int r = 0; r < kKelvinRows; r += 2) {
+          std::printf("    %4.0f m:", ss[r]);
+          for (int c = kKelvinCols - 1; c >= 0; c -= 8)
+            std::printf(" %4.1f", 100.0 * rows[r][c]);
+          std::printf("\n");
+        }
+      };
+      kelvinReport("at full throttle", kelvinFast, kBoatKelvinFast0);
+      kelvinReport("at 3.5 m/s", kelvinSlow, kBoatKelvinSlow0);
+      if (boatSank)
+        fails.push_back("the boat sank at t = " + std::to_string(boatSankT) + " s");
+      if (boatPhase >= BoatPhase::Run && boatSpeedMax < 1.0)
+        fails.push_back("the boat did not move (" + std::to_string(boatSpeedMax) + " m/s at most)");
+      if (!turnDone)
+        fails.push_back(boatPhase < BoatPhase::Turn ? "the run ended before the turn"
+                                                    : "the boat did not turn a full circle");
+    }
+    for (const std::string &f : fails)
+      std::printf("boat check FAILED: %s\n", f.c_str());
+    if (!fails.empty())
+      rc = rc ? rc : 6;
   }
   hud.detach();
   cam.detach(); // stop receiving events before teardown
