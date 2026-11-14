@@ -11,6 +11,7 @@
 #include "local_http_server.h"
 
 #include <cstdlib>
+#include <cvc/core/app.h>
 #include <cvc/net/credentials.h>
 #include <cvc/net/http_client.h>
 #include <cvc/net/net_policy.h>
@@ -66,10 +67,6 @@ public:
     r.canonical_url = req.url;
     return r;
   }
-};
-
-struct ClientGuard {
-  ~ClientGuard() { cvc::net::set_http_client(nullptr); }
 };
 
 HttpResponse redirect(long status, const std::string &location) {
@@ -228,14 +225,14 @@ TEST(NetPolicy, DefaultAllowsNothing) {
 // --- send(req, policy) -------------------------------------------------------------------------
 
 TEST(NetCheckedSend, RefusedOriginIsNeverDispatched) {
-  ClientGuard guard;
+  cvc::app app;
   auto *fake = new ScriptedClient;
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   NetPolicy p;
   p.allow(origin("https://tx.wtf"));
   HttpRequest req;
   req.url = "https://evil.example/steal";
-  const HttpResponse r = cvc::net::send(req, p);
+  const HttpResponse r = cvc::net::send(app, req, p);
   EXPECT_FALSE(r.ok);
   EXPECT_EQ(r.status, 0);
   EXPECT_NE(r.error.find("refused"), std::string::npos) << r.error;
@@ -244,7 +241,7 @@ TEST(NetCheckedSend, RefusedOriginIsNeverDispatched) {
 
   req.url = "https://tx.wtf/ok";
   fake->script = {{"https://tx.wtf/ok", ok_body("fine")}};
-  const HttpResponse ok = cvc::net::send(req, p);
+  const HttpResponse ok = cvc::net::send(app, req, p);
   EXPECT_TRUE(ok.ok);
   EXPECT_EQ(ok.body, "fine");
   ASSERT_EQ(fake->sent.size(), 1u);
@@ -252,9 +249,9 @@ TEST(NetCheckedSend, RefusedOriginIsNeverDispatched) {
 }
 
 TEST(NetCheckedSend, RedirectsAreCheckedHopByHop) {
-  ClientGuard guard;
+  cvc::app app;
   auto *fake = new ScriptedClient;
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   NetPolicy p;
   p.allow(origin("https://tx.wtf"));
   p.allow(origin("https://media.tx.wtf"));
@@ -270,7 +267,7 @@ TEST(NetCheckedSend, RedirectsAreCheckedHopByHop) {
   HttpRequest req;
   req.url = "https://tx.wtf/a";
   req.headers = {"Authorization: Bearer secret-for-tx", "X-Keep: 1"};
-  HttpResponse r = cvc::net::send(req, p);
+  HttpResponse r = cvc::net::send(app, req, p);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.body, "arrived");
   ASSERT_EQ(fake->sent.size(), 3u);
@@ -280,7 +277,7 @@ TEST(NetCheckedSend, RedirectsAreCheckedHopByHop) {
 
   fake->sent.clear();
   req.url = "https://tx.wtf/out";
-  r = cvc::net::send(req, p);
+  r = cvc::net::send(app, req, p);
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("https://evil.example is not an origin this host allows"),
             std::string::npos)
@@ -288,28 +285,28 @@ TEST(NetCheckedSend, RedirectsAreCheckedHopByHop) {
   EXPECT_EQ(fake->sent.size(), 1u) << "the disallowed hop is never requested";
 
   req.url = "https://tx.wtf/rel/x";
-  r = cvc::net::send(req, p);
+  r = cvc::net::send(app, req, p);
   EXPECT_EQ(r.body, "relative");
 
   req.url = "https://tx.wtf/loop";
   req.max_redirects = 3;
-  r = cvc::net::send(req, p);
+  r = cvc::net::send(app, req, p);
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("more than 3 redirects"), std::string::npos) << r.error;
 
   fake->sent.clear();
   req.url = "https://tx.wtf/out";
   req.follow_redirects = false; // the caller does not follow: the 3xx itself is the reply
-  r = cvc::net::send(req, p);
+  r = cvc::net::send(app, req, p);
   EXPECT_TRUE(r.ok);
   EXPECT_EQ(r.status, 302);
   EXPECT_EQ(fake->sent.size(), 1u);
 }
 
 TEST(NetCheckedSend, SeeOtherAndPostRedirectsBecomeBodylessGets) {
-  ClientGuard guard;
+  cvc::app app;
   auto *fake = new ScriptedClient;
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   NetPolicy p;
   p.allow(origin("https://tx.wtf"));
   fake->script = {{"https://tx.wtf/form", redirect(303, "/done")},
@@ -320,7 +317,7 @@ TEST(NetCheckedSend, SeeOtherAndPostRedirectsBecomeBodylessGets) {
   req.method = "POST";
   req.body = "a=1";
   req.headers = {"Content-Type: application/x-www-form-urlencoded"};
-  ASSERT_TRUE(cvc::net::send(req, p).ok);
+  ASSERT_TRUE(cvc::net::send(app, req, p).ok);
   ASSERT_EQ(fake->sent.size(), 2u);
   EXPECT_EQ(fake->sent[1].method, "GET");
   EXPECT_TRUE(fake->sent[1].body.empty());
@@ -328,7 +325,7 @@ TEST(NetCheckedSend, SeeOtherAndPostRedirectsBecomeBodylessGets) {
 
   fake->sent.clear();
   req.url = "https://tx.wtf/keep";
-  ASSERT_TRUE(cvc::net::send(req, p).ok);
+  ASSERT_TRUE(cvc::net::send(app, req, p).ok);
   ASSERT_EQ(fake->sent.size(), 2u);
   EXPECT_EQ(fake->sent[1].method, "POST") << "307 keeps the method";
   EXPECT_EQ(fake->sent[1].body, "a=1");
@@ -339,6 +336,7 @@ TEST(NetCheckedSend, SeeOtherAndPostRedirectsBecomeBodylessGets) {
 TEST(NetCheckedSend, LocalServersRedirectAcrossOrigins) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "built without an HTTP backend";
+  cvc::app app;
   LocalHttpServer b([](const LocalHttpServer::Request &) {
     return LocalHttpServer::Reply{200, {"Content-Type: text/plain"}, "from-b"};
   });
@@ -354,7 +352,7 @@ TEST(NetCheckedSend, LocalServersRedirectAcrossOrigins) {
 
   NetPolicy only_a;
   only_a.allow(origin(a.origin()));
-  HttpResponse r = cvc::net::send(req, only_a);
+  HttpResponse r = cvc::net::send(app, req, only_a);
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find(b.origin() + " is not an origin this host allows"), std::string::npos)
       << r.error;
@@ -362,7 +360,7 @@ TEST(NetCheckedSend, LocalServersRedirectAcrossOrigins) {
 
   NetPolicy both = only_a;
   both.allow(origin(b.origin()));
-  r = cvc::net::send(req, both);
+  r = cvc::net::send(app, req, both);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.status, 200);
   EXPECT_EQ(r.body, "from-b");
@@ -374,7 +372,7 @@ TEST(NetCheckedSend, LocalServersRedirectAcrossOrigins) {
 
   NetPolicy none;
   req.url = a.url("/plain");
-  EXPECT_FALSE(cvc::net::send(req, none).ok);
+  EXPECT_FALSE(cvc::net::send(app, req, none).ok);
   EXPECT_EQ(a.requests().size(), 2u) << "a default policy reaches nothing";
 }
 
@@ -422,15 +420,15 @@ public:
 } // namespace
 
 TEST(NetStart, ABlockingTransportAnswersBeforeStartReturns) {
-  ClientGuard guard;
+  cvc::app app;
   auto *fake = new ScriptedClient;
   fake->script = {{"https://tx.wtf/a", ok_body("now")}};
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
-  EXPECT_FALSE(cvc::net::http_starts_async());
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
+  EXPECT_FALSE(cvc::net::http_starts_async(app));
   HttpRequest req;
   req.url = "https://tx.wtf/a";
   std::optional<HttpResponse> got;
-  const auto t = cvc::net::start(req, [&](HttpResponse r) { got = std::move(r); });
+  const auto t = cvc::net::start(app, req, [&](HttpResponse r) { got = std::move(r); });
   EXPECT_EQ(t, nullptr);
   ASSERT_TRUE(got);
   EXPECT_EQ(got->body, "now");
@@ -438,23 +436,23 @@ TEST(NetStart, ABlockingTransportAnswersBeforeStartReturns) {
   // An invalid method is refused as send() refuses it, before anything is sent.
   got.reset();
   req.method = "NOT A VERB";
-  EXPECT_EQ(cvc::net::start(req, [&](HttpResponse r) { got = std::move(r); }), nullptr);
+  EXPECT_EQ(cvc::net::start(app, req, [&](HttpResponse r) { got = std::move(r); }), nullptr);
   ASSERT_TRUE(got);
   EXPECT_FALSE(got->ok);
   EXPECT_EQ(fake->sent.size(), 1u);
 }
 
 TEST(NetStart, AnAsyncTransportAnswersLater) {
-  ClientGuard guard;
+  cvc::app app;
   auto *fake = new DeferredClient;
   fake->script = {{"https://tx.wtf/a", ok_body("later")}};
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
-  EXPECT_TRUE(cvc::net::http_starts_async());
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
+  EXPECT_TRUE(cvc::net::http_starts_async(app));
   HttpRequest req;
   req.url = "https://tx.wtf/a";
   req.method = ""; // normalized to GET before the transport sees it
   std::optional<HttpResponse> got;
-  const auto t = cvc::net::start(req, [&](HttpResponse r) { got = std::move(r); });
+  const auto t = cvc::net::start(app, req, [&](HttpResponse r) { got = std::move(r); });
   ASSERT_NE(t, nullptr);
   EXPECT_FALSE(got) << "no reply until the transport answers";
   ASSERT_EQ(fake->pending.size(), 1u);
@@ -465,9 +463,9 @@ TEST(NetStart, AnAsyncTransportAnswersLater) {
 }
 
 TEST(NetStart, ThePolicyIsCheckedHopByHop) {
-  ClientGuard guard;
+  cvc::app app;
   auto *fake = new DeferredClient;
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   auto p = std::make_shared<NetPolicy>();
   p->allow(origin("https://tx.wtf"));
   p->allow(origin("https://media.tx.wtf"));
@@ -482,7 +480,7 @@ TEST(NetStart, ThePolicyIsCheckedHopByHop) {
   req.headers = {"Authorization: Bearer secret-for-tx"};
   std::optional<HttpResponse> got;
   const auto done = [&](HttpResponse r) { got = std::move(r); };
-  ASSERT_NE(cvc::net::start(req, p, done), nullptr);
+  ASSERT_NE(cvc::net::start(app, req, p, done), nullptr);
   int hops = 0;
   while (!got && fake->answer())
     ++hops;
@@ -498,13 +496,13 @@ TEST(NetStart, ThePolicyIsCheckedHopByHop) {
   got.reset();
   fake->sent.clear();
   req.url = "https://evil.example/steal";
-  EXPECT_EQ(cvc::net::start(req, p, done), nullptr);
+  EXPECT_EQ(cvc::net::start(app, req, p, done), nullptr);
   ASSERT_TRUE(got);
   EXPECT_NE(got->error.find("refused"), std::string::npos) << got->error;
   EXPECT_TRUE(fake->pending.empty());
   got.reset();
   req.url = "https://tx.wtf/out";
-  cvc::net::start(req, p, done);
+  cvc::net::start(app, req, p, done);
   while (!got && fake->answer()) {
   }
   ASSERT_TRUE(got);
@@ -515,9 +513,9 @@ TEST(NetStart, ThePolicyIsCheckedHopByHop) {
 }
 
 TEST(NetStart, AbortEndsTheHopInFlightAndNothingAnswers) {
-  ClientGuard guard;
+  cvc::app app;
   auto *fake = new DeferredClient;
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   auto p = std::make_shared<NetPolicy>();
   p->allow(origin("https://tx.wtf"));
   fake->script = {{"https://tx.wtf/a", redirect(302, "/b")}, {"https://tx.wtf/b", ok_body("b")}};
@@ -526,7 +524,7 @@ TEST(NetStart, AbortEndsTheHopInFlightAndNothingAnswers) {
   bool called = false;
   auto captured = std::make_shared<int>(0); // what the callback holds goes with abort()
   std::weak_ptr<int> watch = captured;
-  const auto t = cvc::net::start(req, p, [&called, captured](HttpResponse) { called = true; });
+  const auto t = cvc::net::start(app, req, p, [&called, captured](HttpResponse) { called = true; });
   captured.reset();
   ASSERT_NE(t, nullptr);
   ASSERT_TRUE(fake->answer()); // the redirect: the second hop is in flight

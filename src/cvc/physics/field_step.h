@@ -50,6 +50,17 @@ struct compiled_field {
   double rut_deepest = 0.0;  // m
 };
 
+// A body's hull (hull.h) as the fluids see it, built when the body is added.
+struct field_hull {
+  std::shared_ptr<const hull_mesh> desc; // null: the body has no hull
+  std::uint64_t digest = 0;              // of the description, for save() and state_hash()
+  std::vector<vec3> normal;              // per triangle, body-local unit outward normals
+  std::vector<double> wetted;            // per triangle, the last step's submerged area (m^2)
+  double length = 0.0;                   // m, for the Reynolds number
+  double slam_length = 0.0;              // m, the cube root of the hull's volume
+  double inertia = 0.0;                  // m^2 per kg, a low estimate of the least moment
+};
+
 // A dynamic body as the fields see it: its sample cells and what its drag area
 // needs, built when the body is added.
 struct field_body {
@@ -63,7 +74,16 @@ struct field_body {
   double radius = 0.0;  // sphere
   vec3 half;            // box
   bool vehicle = false; // a vehicle's chassis: no flow drag (vehicle.h's aero is its drag)
+  field_hull hull;      // a fluid pushes on its triangles in place of the cells
   field_load load;      // the last step's
+};
+
+// The water at a point (field_set::water_at), for a boat's propeller and rudder.
+struct water_sample {
+  bool wet = false;     // under the fluid's top and above its bottom, at a density > 0
+  double depth = 0.0;   // m below the top: the free surface's height, or the box's top
+  double density = 0.0; // kg/m^3
+  vec3 velocity;        // m/s, the water's: the surface's, or the velocity volumes'
 };
 
 class field_set {
@@ -94,6 +114,15 @@ public:
   // `t` is the world's field time, at which free surfaces are read.
   void apply(world_backend &be, const world_config &cfg, double t);
   field_load load(body_id id) const;
+
+  // A dynamic body's centre of mass, body-local (the origin for one the fields do not record).
+  vec3 center_of_mass(body_id id) const {
+    const auto it = _bodies.find(id.value);
+    return it == _bodies.end() ? vec3{} : it->second.center_of_mass;
+  }
+  // The water at `p` at field time `t`: the first fluid field, in id order, whose box holds `p`
+  // in x and y and reaches below it. False if none does; `out` is then dry and still.
+  bool water_at(const vec3 &p, double t, water_sample &out) const;
 
   // The air at `p` for a vehicle's aero: a flow field's density and wind where one covers
   // `p` (the first, in id order), true; else false, `rho` and `wind` untouched.
@@ -126,6 +155,12 @@ public:
   bool has_surfaces() const;
   void save_surfaces(std::string &out) const;
   void check_surfaces(const std::string &in, std::size_t &pos) const;
+  // Hulls (body_desc::hull). Whether any body has one; each hull body's id, the hull's digest
+  // and its triangles' last wetted areas, in id order, for world::save; and restoring them
+  // (throws cvc::physics_error if this world's hulls differ from the state's).
+  bool has_hulls() const;
+  void save_hulls(std::string &out) const;
+  void restore_hulls(const std::string &in, std::size_t &pos);
 
 private:
   void wake_in(world_backend &be, const field_grid &box);

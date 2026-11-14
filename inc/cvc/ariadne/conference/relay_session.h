@@ -130,8 +130,8 @@ private:
   std::shared_ptr<impl> _impl;
 };
 
-// The relay: block, kept for the host's load hook (LoadResult::extras). Idempotent.
-void register_relay_block();
+// The relay: block on `app`, kept for the host's load hook (LoadResult::extras). Idempotent.
+void register_relay_block(cvc::app &app);
 
 // A host's join, as ari and the x hosts make it: a load hook on `rt` that joins the relay before
 // the document's requires: is checked and its init: runs: the document's relay: block, with what

@@ -1,0 +1,75 @@
+# A document whose function calls plt.show() from a frame through exec() and runpy, which give the
+# code a top level of its own (ctest ariglx_matplotlib_nested: `ariglx snapshot --frames 6
+# mpl_nested.ari`). The function is still the document's: plt.show() returns at once with no frame
+# run, host.run() is refused (the host's loop is running), and the snapshot's frames go on. It
+# quits at frame 6, so `ariglx run` ends too. Prints SKIP when this Python has no matplotlib.
+
+meta:
+  name: matplotlib nested show
+  min_libcvc: 3.7.13
+
+requires: [python]
+
+python:
+  source: |
+    import os
+    import runpy
+    import tempfile
+
+    try:
+        import matplotlib
+    except ImportError:
+        matplotlib = None
+        print("mpl_nested.ari: SKIP: no matplotlib", flush=True)
+
+    SHOW = "import matplotlib.pyplot as plt\nplt.show()\n"
+
+    @export
+    def nested():
+        if matplotlib is None:
+            return "skip"
+        import matplotlib.pyplot as plt
+
+        from pycvc_gl.ariadne import current_host
+
+        host = current_host()
+        frames = host.frame_count
+        fig, ax = plt.subplots()
+        ax.plot([0, 1, 2], [2, 0, 1])
+        exec(SHOW, {})  # a top level (<module>) of its own, inside the document's function
+        path = os.path.join(tempfile.mkdtemp(prefix="mpl_nested_"), "show_script.py")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(SHOW)
+        runpy.run_path(path)  # as a script-style module's first import runs
+        ran = host.frame_count - frames
+        try:
+            host.run()
+            refused = "ran"
+        except RuntimeError as e:
+            refused = "refused" if "loop is running" in str(e) else f"failed ({e})"
+        plt.close(fig)
+        print(f"mpl_nested.ari: plt.show() returned, {ran} frames, and host.run() {refused}",
+              flush=True)
+        return ran
+
+    @export
+    def later(n):
+        print(f"mpl_nested.ari: the frames went on, to {n}", flush=True)
+        return n
+
+on_tick: |
+  (begin
+    (set n (+ 1 (if (is-null (state-get "t.n")) 0 (int (state-get "t.n")))))
+    (state-set "t.n" (str n))
+    (if (= n 2) (state-set "t.ran" (str (nested))))
+    (if (= n 4) (state-set "t.later" (str (later n))))
+    (if (>= n 6) (quit)))
+
+windows:
+  - window: Nested
+    id: nested
+    pos: [20, 20]
+    size: [320, 120]
+    children:
+      - text: frames
+        bind: t.n

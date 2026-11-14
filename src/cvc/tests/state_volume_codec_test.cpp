@@ -10,15 +10,17 @@
 #include <cvc/state/state_volume_codec.h>
 #include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
+#include <thread>
+#include <vector>
 
 using namespace cvc;
 
 class VolumeCodecTest : public ::testing::Test {
 protected:
-  void SetUp() override { register_volume_geometry_codecs(reg); }
+  void SetUp() override { register_volume_geometry_codecs(ctx, reg); }
 
+  app ctx; // made first, gone last: the registry's decoders make the app's objects
   state_codec_registry reg;
-  app ctx;
 };
 
 // ---- volume codec ----
@@ -199,8 +201,52 @@ TEST_F(VolumeCodecTest, GeometryRoundTrip_Lines) {
 }
 
 TEST_F(VolumeCodecTest, RegistrationIdempotent) {
-  register_volume_geometry_codecs(reg);
-  register_volume_geometry_codecs(reg);
+  register_volume_geometry_codecs(ctx, reg);
+  register_volume_geometry_codecs(ctx, reg);
   EXPECT_TRUE(reg.has("cvc::volume"));
   EXPECT_TRUE(reg.has("cvc::geometry"));
+}
+
+namespace {
+
+// Encode a small volume and a geometry made on `from`, decode them with `to`'s codecs, and return
+// whether the decoded objects belong to `to`.
+bool decodes_into(app &from, app &to) {
+  state_codec_registry enc, dec;
+  register_volume_geometry_codecs(from, enc);
+  register_volume_geometry_codecs(to, dec);
+  dimension d;
+  d.xdim = d.ydim = d.zdim = 2;
+  volume vol(from, d, UChar);
+  geometry geo(from);
+  geo.points().push_back({{1.0, 2.0, 3.0}});
+  const volume v = boost::any_cast<volume>(
+      dec.decode("cvc::volume", enc.encode("cvc::volume", boost::any(vol))));
+  const geometry g = boost::any_cast<geometry>(
+      dec.decode("cvc::geometry", enc.encode("cvc::geometry", boost::any(geo))));
+  return &v.ctx() == &to && &g.ctx() == &to && g.num_points() == 1u;
+}
+
+} // namespace
+
+// A decoded volume or geometry is the registering app's, not a hidden per-thread app's: two apps,
+// in both orders, and apps decoding on threads at once.
+TEST(VolumeCodecApps, DecodedObjectsBelongToTheRegisteringApp) {
+  app a, b;
+  EXPECT_TRUE(decodes_into(a, b));
+  EXPECT_TRUE(decodes_into(b, a));
+  EXPECT_TRUE(decodes_into(a, a));
+
+  constexpr int kApps = 4;
+  std::vector<int> ok(kApps, 0);
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kApps; ++i)
+    threads.emplace_back([i, &ok, &a] {
+      app mine;
+      ok[i] = decodes_into(a, mine) && decodes_into(mine, mine);
+    });
+  for (std::thread &t : threads)
+    t.join();
+  for (int i = 0; i < kApps; ++i)
+    EXPECT_TRUE(ok[i]) << "app " << i;
 }

@@ -122,6 +122,19 @@ class KeyOf(unittest.TestCase):
         self.assertIn("base=frozen", seb.key_of(frozen)[2])
         self.assertIn("driver=group", seb.key_of(frozen)[2])
 
+    def test_stage_s_slice_steps_matches_records_without_it(self):
+        # Stage S gave sched.single.*'s and limits.*'s async points a slice_steps key (1 by
+        # default, today's loop): a base binary's point (no slice_steps) matches slice_steps=1.
+        old = rec("sched.single.fib", {"n": 20, "driver": "spin", "base": "own"})
+        new = rec("sched.single.fib", dict(old["params"], slice_steps=1))
+        self.assertEqual(seb.key_of(old), seb.key_of(new))
+        self.assertEqual(seb.param(old, "slice_steps"), "1")
+        runs = rec("sched.single.fib", dict(old["params"], slice_steps=256))
+        self.assertIn("slice_steps=256", seb.key_of(runs)[2])
+        self.assertEqual(seb.key_of(rec("limits.ariadne", {"n": 150, "driver": "spin"})),
+                         seb.key_of(rec("limits.ariadne", {"n": 150, "driver": "spin",
+                                                           "slice_steps": 1})))
+
 
 class ParsePair(unittest.TestCase):
     def test_parses(self):
@@ -291,6 +304,173 @@ class CompareExit(unittest.TestCase):
     def test_bad_pair_is_a_usage_error(self):
         f = self.run.write(reps("eval.fib", {"n": 1}, [1]))
         self.assertEqual(self.run("compare", f, f, "--pair", "op=set:set")[0], 2)
+
+
+SLICE_POINT = {"n": 100, "driver": "spin", "base": "own"}
+
+
+def slice_reps(prog, slice_steps, ns, n=100, **kw):
+    """A sched.single.* point's reps at `slice_steps` (None: no such param, as a binary from before
+    Stage S wrote them), with ns_per_step `ns` and the wall_ns of 1000 steps."""
+    params = dict(SLICE_POINT, n=n)
+    if slice_steps is not None:
+        params["slice_steps"] = slice_steps
+    return [rec(f"sched.single.{prog}", params, rep=i, ns_per_step=v, wall_ns=1000 * v, **kw)
+            for i, v in enumerate(ns)]
+
+
+def slice_run(ratios, at1=(200, 201, 199)):
+    """A pooled run of three programs at slice_steps 1 and 256, each 256 point at `ratios[i]` of
+    its 1 point. The first program's 1 point has no slice_steps param (the implicit default)."""
+    out = []
+    for i, (prog, ratio) in enumerate(zip(["arith_loop", "fib", "tail_rec"], ratios)):
+        out += slice_reps(prog, None if i == 0 else 1, list(at1))
+        out += slice_reps(prog, 256, [v * ratio for v in at1])
+    return out
+
+
+class GeomeanBetter(unittest.TestCase):
+    """compare --geomean-better PCT (Stage S's gate: compare POOLED POOLED --pair
+    slice_steps=1:256 --geomean-better 20): the geomean over the matched pairs of B's median over
+    A's must be at most 1 - PCT/100."""
+
+    PAIR = ("slice_steps", "1", "256")
+
+    def geomean(self, recs, pct=20.0, metrics=("ns_per_step",), **kw):
+        return quiet(seb.compare, recs, recs, list(metrics), 3.0, pair=self.PAIR,
+                     geomean_better=pct, **kw)
+
+    def test_passes_when_the_geomean_improves_enough(self):
+        res = self.geomean(slice_run([0.5, 0.6, 0.55]))
+        g = res["geomean"]
+        self.assertEqual(g["verdict"], "pass")
+        self.assertEqual(g["metrics"]["ns_per_step"]["pairs"], 3)
+        self.assertAlmostEqual(g["metrics"]["ns_per_step"]["geomean"],
+                               (0.5 * 0.6 * 0.55) ** (1 / 3), places=9)
+
+    def test_fails_when_the_geomean_falls_short(self):
+        # Every point is better, but by 10-15 %: short of 20 %, enough for 10 %.
+        run = slice_run([0.9, 0.85, 0.88])
+        self.assertEqual(self.geomean(run)["geomean"]["verdict"], "fail")
+        self.assertEqual(self.geomean(run, pct=10.0)["geomean"]["verdict"], "pass")
+        # One point much faster carries a geomean the others alone would miss.
+        self.assertEqual(self.geomean(slice_run([0.3, 0.95, 0.95]))["geomean"]["verdict"], "pass")
+
+    def test_a_noisy_pair_is_inconclusive(self):
+        run = slice_run([0.5, 0.5, 0.5])
+        run += slice_reps("exceptions", 1, [500, 500, 500, 500, 500])
+        run += slice_reps("exceptions", 256, [250, 250, 250, 400, 250])  # one disturbed rep
+        self.assertEqual(self.geomean(run)["geomean"]["verdict"], "pass")
+        res = self.geomean(run, max_noise=5.0)
+        self.assertEqual(res["geomean"]["verdict"], "inconclusive")
+        self.assertEqual(res["geomean"]["metrics"]["ns_per_step"]["inconclusive"], 1)
+        # INCONCLUSIVE is never a pass, nor a fail: a short geomean with a noisy pair is
+        # inconclusive too (the pair could carry it either way).
+        short = slice_run([0.95, 0.95, 0.95]) + run[-10:]
+        self.assertEqual(self.geomean(short, max_noise=5.0)["geomean"]["verdict"],
+                         "inconclusive")
+
+    def test_a_failed_point_fails_it_on_either_side(self):
+        run = slice_run([0.5, 0.5, 0.5])
+        cand_failed = run + [rec("sched.single.fib", dict(SLICE_POINT, slice_steps=256), rep=3,
+                                 ok=False, error="returned 1, expected 6765")]
+        self.assertEqual(self.geomean(cand_failed)["geomean"]["verdict"], "fail")
+        base_failed = run + [rec("sched.single.fib", dict(SLICE_POINT, slice_steps=1), rep=3,
+                                 ok=False, error="timeout")]
+        self.assertEqual(self.geomean(base_failed)["geomean"]["verdict"], "fail")
+
+    def test_a_point_missing_at_b_fails_it(self):
+        # tail_rec n=1000 has its 1 point but no 256 one: "only in base".
+        run = slice_run([0.5, 0.5, 0.5]) + slice_reps("tail_rec", 1, [200, 200, 200], n=1000)
+        res = self.geomean(run)
+        self.assertEqual(res["failed"], 1)
+        self.assertEqual(res["geomean"]["verdict"], "fail")
+
+    def test_a_pair_matching_nothing_fails_it(self):
+        run = slice_run([0.5, 0.5, 0.5])
+        res = quiet(seb.compare, run, run, ["ns_per_step"], 3.0, pair=("slice_steps", "1", "265"),
+                    geomean_better=20.0)
+        self.assertEqual(res["geomean"]["verdict"], "fail")
+        self.assertEqual(res["geomean"]["metrics"]["ns_per_step"]["pairs"], 0)
+
+    def test_every_metric_must_pass(self):
+        # wall_ns and ns_per_step (compare's defaults) move together on a fixed step count.
+        res = self.geomean(slice_run([0.5, 0.6, 0.55]), metrics=("wall_ns", "ns_per_step"))
+        self.assertEqual(res["geomean"]["verdict"], "pass")
+        self.assertEqual(set(res["geomean"]["metrics"]), {"wall_ns", "ns_per_step"})
+        # A metric no record has: no pair to judge, which never passes.
+        res = self.geomean(slice_run([0.5, 0.6, 0.55]), metrics=("ns_per_step", "steps_total"))
+        self.assertEqual(res["geomean"]["verdict"], "fail")
+
+    def test_higher_is_better_takes_the_inverse(self):
+        def point(slice_steps, value):
+            recs = reps("sched.single.fib", dict(SLICE_POINT, slice_steps=slice_steps), [1, 1, 1])
+            for r in recs:
+                r["extra"] = {"steps_per_wall_s": value}
+            return recs
+        run = point(1, 100.0) + point(256, 200.0)  # twice the steps a second: a ratio of 0.5
+        res = self.geomean(run, metrics=("extra.steps_per_wall_s",))
+        self.assertAlmostEqual(res["geomean"]["metrics"]["extra.steps_per_wall_s"]["geomean"], 0.5)
+        self.assertEqual(res["geomean"]["verdict"], "pass")
+
+    def test_without_the_flag_the_result_is_unchanged(self):
+        run = slice_run([0.5, 0.6, 0.55])
+        res = quiet(seb.compare, run, run, ["ns_per_step"], 3.0, pair=self.PAIR)
+        self.assertNotIn("geomean", res)
+
+
+class GeomeanBetterExit(unittest.TestCase):
+    """The documented gate command on synthetic JSONL: exit 0 (pass), 1 (fail), 2 (INCONCLUSIVE)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.run = Runner(self.tmpdir.name)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def gate(self, recs, *extra):
+        f = self.run.write(recs)
+        return self.run("compare", f, f, "--pair", "slice_steps=1:256", "--geomean-better", "20",
+                        *extra)
+
+    def test_pass_exits_0(self):
+        code, out = self.gate(slice_run([0.5, 0.6, 0.55]))
+        self.assertEqual(code, 0, out)
+        self.assertIn("geomean of ns_per_step, slice_steps=256 over slice_steps=1, over 3 pair(s): "
+                      "0.548 (-45.2%)", out)
+        self.assertIn("geomean of wall_ns", out)
+        self.assertIn("--geomean-better 20: PASS", out)
+
+    def test_fail_exits_1(self):
+        code, out = self.gate(slice_run([0.9, 0.85, 0.88]))
+        self.assertEqual(code, 1, out)
+        self.assertIn("over 3 pair(s): 0.876 (-12.4%)", out)
+        self.assertIn("--geomean-better 20: FAIL", out)
+
+    def test_inconclusive_exits_2(self):
+        recs = (slice_run([0.5, 0.5, 0.5]) +
+                slice_reps("exceptions", 1, [500, 500, 500, 500, 500]) +
+                slice_reps("exceptions", 256, [250, 250, 250, 400, 250]))
+        self.assertEqual(self.gate(recs)[0], 0)
+        code, out = self.gate(recs, "--max-noise", "5")
+        self.assertEqual(code, 2, out)
+        self.assertIn("1 pair(s) noisier than 5%", out)
+        self.assertIn("--geomean-better 20: INCONCLUSIVE", out)
+
+    def test_a_failed_point_exits_1(self):
+        recs = slice_run([0.5, 0.5, 0.5]) + [
+            rec("sched.single.fib", dict(SLICE_POINT, slice_steps=256), rep=3, ok=False,
+                error="returned 1, expected 6765")]
+        code, out = self.gate(recs, "--max-noise", "5")
+        self.assertEqual(code, 1, out)
+        self.assertIn("CHECK FAILED in cand", out)
+
+    def test_bad_percent_is_a_usage_error(self):
+        f = self.run.write(slice_run([0.5, 0.5, 0.5]))
+        for bad in ["100", "-5", "x"]:
+            self.assertEqual(self.run("compare", f, f, "--pair", "slice_steps=1:256",
+                                      "--geomean-better", bad)[0], 2, bad)
 
 
 class Gate(unittest.TestCase):

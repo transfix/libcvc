@@ -22,8 +22,8 @@
 
 #include <cvc/lsys/parse.h>
 #include <cvc/lsys/recipes.h>
-#include <map>
 #include <stdexcept>
+#include <string_view>
 
 namespace cvc {
 namespace lsys {
@@ -33,7 +33,7 @@ namespace {
 // ── Trees & shrubs (parallel, turtle alphabet) ───────────────────────────────
 
 // Excurrent conifer: strong central leader (A), whorled lateral branches (B).
-const char *kPine = R"(# cvc lsystem v1 -- excurrent conifer [Honda 1971]
+constexpr const char *kPine = R"(# cvc lsystem v1 -- excurrent conifer [Honda 1971]
 name: pine_monopodial
 kind: plant
 mode: parallel
@@ -50,7 +50,7 @@ B(s) : s > 0.05 -> !(s*0.4) ;(1) F(4*s) [ +(20) B(s*r) ] [ -(20) B(s*r) ] ;(2) L
 )";
 
 // Sympodial spreading deciduous: ternary re-branching [Prusinkiewicz 2003].
-const char *kOak = R"(# cvc lsystem v1 -- sympodial spreading deciduous
+constexpr const char *kOak = R"(# cvc lsystem v1 -- sympodial spreading deciduous
 name: oak_sympodial
 kind: plant
 mode: parallel
@@ -67,7 +67,7 @@ A(s) : s > 0.1 -> !(s) ;(0) F(5*s) [ &(30) / A(s*r) ] [ &(30) / / / A(s*r) ] [ &
 )";
 
 // Slender birch: gently forking, thin.
-const char *kBirch = R"(# cvc lsystem v1 -- slender birch
+constexpr const char *kBirch = R"(# cvc lsystem v1 -- slender birch
 name: birch_slender
 kind: plant
 mode: parallel
@@ -85,7 +85,7 @@ B(s) : s > 0.04 -> !(s*0.3) ;(1) F(3*s) ;(2) L(1.5*s)
 )";
 
 // Dense low shrub.
-const char *kShrub = R"(# cvc lsystem v1 -- dense shrub
+constexpr const char *kShrub = R"(# cvc lsystem v1 -- dense shrub
 name: shrub_bush
 kind: plant
 mode: parallel
@@ -104,7 +104,7 @@ A(s) : s > 0.08 -> !(s*0.4) ;(1) F(2*s) [ +(35) A(s*r) ] [ -(35) A(s*r) ] [ &(35
 // ── Rocks & buildings (sequential, scope alphabet) ───────────────────────────
 
 // A boulder: three overlapping fractured chunks [Peytavie 2009 -- visual fake].
-const char *kBoulder = R"(# cvc lsystem v1 -- boulder cluster (visual, not stable)
+constexpr const char *kBoulder = R"(# cvc lsystem v1 -- boulder cluster (visual, not stable)
 name: boulder_cluster
 kind: rock
 mode: sequential
@@ -113,7 +113,7 @@ Rock -> [ Scale(1.4, 1.1, 0.9) Box(3) ] [ Trans(0.5, 0.3, 0.3) Rot(18, 12, 6) Sc
 )";
 
 // A multi-storey reinforced-concrete office block.
-const char *kOffice = R"(# cvc lsystem v1 -- office block (concrete)
+constexpr const char *kOffice = R"(# cvc lsystem v1 -- office block (concrete)
 name: office_block
 kind: building
 mode: sequential
@@ -122,7 +122,7 @@ Bldg(n) : n > 0 -> Box(6) Trans(0, 0, 3) Bldg(n-1)
 )";
 
 // A small two-storey brick house.
-const char *kHouse = R"(# cvc lsystem v1 -- brick house
+constexpr const char *kHouse = R"(# cvc lsystem v1 -- brick house
 name: brick_house
 kind: building
 mode: sequential
@@ -130,36 +130,47 @@ axiom: Scale(9, 7, 3) House(2)
 House(n) : n > 0 -> Box(7) Trans(0, 0, 3) House(n-1)
 )";
 
-const std::map<std::string, const char *> &table() {
-  static const std::map<std::string, const char *> t = {
-      {"pine_monopodial", kPine}, {"oak_sympodial", kOak},       {"birch_slender", kBirch},
-      {"shrub_bush", kShrub},     {"boulder_cluster", kBoulder}, {"office_block", kOffice},
-      {"brick_house", kHouse},
-  };
-  return t;
+struct recipe {
+  std::string_view name;
+  const char *source;
+};
+
+// By name, in order (recipe_names lists them so): read-only data, nothing built at run time.
+constexpr recipe kRecipes[] = {
+    {"birch_slender", kBirch}, {"boulder_cluster", kBoulder}, {"brick_house", kHouse},
+    {"oak_sympodial", kOak},   {"office_block", kOffice},     {"pine_monopodial", kPine},
+    {"shrub_bush", kShrub},
+};
+
+// The recipe `name`'s source, or null.
+const char *find_recipe(std::string_view name) {
+  for (const recipe &r : kRecipes)
+    if (r.name == name)
+      return r.source;
+  return nullptr;
 }
 
 } // namespace
 
 std::vector<std::string> recipe_names() {
   std::vector<std::string> out;
-  for (const auto &kv : table())
-    out.push_back(kv.first);
+  for (const recipe &r : kRecipes)
+    out.emplace_back(r.name);
   return out;
 }
 
-bool has_recipe(const std::string &name) { return table().count(name) != 0; }
+bool has_recipe(const std::string &name) { return find_recipe(name) != nullptr; }
 
 std::string recipe_source(const std::string &name) {
-  auto it = table().find(name);
-  return it == table().end() ? std::string() : std::string(it->second);
+  const char *source = find_recipe(name);
+  return source ? std::string(source) : std::string();
 }
 
 ruleset load_recipe(const std::string &name) {
-  auto it = table().find(name);
-  if (it == table().end())
+  const char *source = find_recipe(name);
+  if (!source)
     throw std::out_of_range("unknown lsys recipe: " + name);
-  parse_result pr = parse_lsys(it->second);
+  parse_result pr = parse_lsys(source);
   if (!pr.ok) {
     std::string msg = "built-in recipe failed to parse: " + name;
     for (const diagnostic &d : pr.diags)

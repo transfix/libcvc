@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <ctime>
+#include <cvc/core/app.h>
 #include <cvc/net/http_client.h>
 #include <cvc/net/oidc.h>
 #include <map>
@@ -302,7 +303,7 @@ public:
       cvc::net::HttpRequest a;
       a.url = url;
       a.follow_redirects = false;
-      const cvc::net::HttpResponse r = cvc::net::send(a);
+      const cvc::net::HttpResponse r = cvc::net::send(app_, a);
       const std::string location = cvc::net::response_header(r.headers, "Location");
       if (location.empty())
         return;
@@ -315,7 +316,7 @@ public:
       cvc::net::HttpRequest b;
       b.url = location;
       b.follow_redirects = false;
-      const cvc::net::HttpResponse page = cvc::net::send(b);
+      const cvc::net::HttpResponse page = cvc::net::send(app_, b);
       std::lock_guard<std::mutex> l(m_);
       pages_.push_back(std::to_string(page.status) + " " + page.body);
     });
@@ -336,6 +337,7 @@ public:
   }
 
 private:
+  cvc::app app_; // the browser's own transport (its threads are joined before it goes)
   mutable std::mutex m_;
   std::vector<std::thread> threads_;
   std::vector<std::string> opened_, locations_, pages_;

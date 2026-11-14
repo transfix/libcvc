@@ -52,6 +52,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cvc/physics/backend.h>
+#include <cvc/physics/boat.h>
 #include <cvc/physics/body.h>
 #include <cvc/physics/field.h>
 #include <cvc/physics/shape.h>
@@ -243,6 +244,23 @@ public:
   void set_state(body_id id, const body_state &s);
   // A force (N) applied at the centre of mass through the next step only.
   void add_force(body_id id, const vec3 &force);
+  // A world-frame force (N) applied at a world-frame point (m, the same frame as
+  // body_state::position, not the floating origin's offsets), through the next step
+  // only. Off the centre of mass it also torques the body by (point - com) x force,
+  // so a hull's buoyancy and drag, summed patch by patch, pitch and roll it. At the
+  // centre of mass it is add_force. body_state::position is the body's origin, not its
+  // centre of mass: they coincide for a sphere or a box, but a convex hull's centre of
+  // mass is its volume centroid (in body-local coordinates, rotated by the body's
+  // rotation) and a vehicle chassis's is vehicle_desc::center_of_mass, so a force at
+  // such a body's position torques it. Forces and torques given before a step add up;
+  // like add_force it wakes a sleeping dynamic body, does nothing to a static or
+  // kinematic one, and throws cvc::physics_error for a value that is not finite or
+  // an unknown id.
+  void add_force_at(body_id id, const vec3 &force, const vec3 &point);
+  // A world-frame torque (N·m) about the centre of mass through the next step only.
+  // It spins the body without moving its centre of mass, and otherwise acts as
+  // add_force does.
+  void add_torque(body_id id, const vec3 &torque);
   // An impulse (N·s) applied at the centre of mass now.
   void add_impulse(body_id id, const vec3 &impulse);
   // Drive a kinematic body so it reaches this pose at the end of the next step.
@@ -315,6 +333,27 @@ public:
   // refuse. Like materials, a tuning is not part of save(): restore() needs a world
   // tuned the same.
   void set_vehicle(vehicle_id id, const vehicle_desc &d);
+
+  // --- boats (boat.h) ----------------------------------------------------------
+
+  // A boat with its hull's origin at `position`: its hull body added from d.hull (its own
+  // position and rotation ignored), pushed each step by its propeller and steered by its rudder
+  // or outboard. Throws cvc::physics_error for a description it refuses (a hull that is not
+  // dynamic, add_body's refusals, values that are not finite or out of range). Its hull is a
+  // body (boat_state::hull): world::state reads it, and world::remove_body refuses it (remove
+  // the boat instead). Boats work on every backend.
+  boat_id add_boat(const boat_desc &d, const vec3 &position, const quat &rotation = {});
+  // Removes the boat and its hull.
+  void remove_boat(boat_id id);
+  std::size_t boat_count() const;
+  // What the actuators move toward from the next step on. Throws cvc::physics_error for a
+  // throttle or rudder that is not finite or outside [-1, 1].
+  void set_boat_controls(boat_id id, const boat_controls &c);
+  // The hull, its speed through the water and heading, the actuators, and the last step's
+  // thrust and rudder force.
+  physics::boat_state boat_state(boat_id id) const;
+  // The boat's description as added (its hull's position and rotation as given).
+  boat_desc get_boat(boat_id id) const;
 
   // --- time -----------------------------------------------------------------
 

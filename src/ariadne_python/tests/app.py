@@ -5,7 +5,7 @@ Exits 0 when the document saw the function's value and the frames ran the progra
 import os
 import sys
 
-from pycvc_gl.ariadne import Host, current_host
+from pycvc.ari import Host, current_host
 
 host = Host()
 assert host.embedded and current_host() is host, "Host() adopts the scripting host"

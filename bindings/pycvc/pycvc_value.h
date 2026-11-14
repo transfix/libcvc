@@ -81,8 +81,9 @@ struct host_function {
 /// Defined in the SWIG wrapper, which owns the type. Call with the GIL held.
 PyObject *async_call_to_py(std::shared_ptr<cvc::state_exec::async_call> call);
 
-/// The pycvc.scheduling_policy IntEnum (borrowed; null before the module's init). Defined in the
-/// SWIG wrapper.
+/// The pycvc.scheduling_policy IntEnum, which the _pycvc module holds: a new reference, or nullptr
+/// with a Python error set (before the module's init). Defined in the SWIG wrapper. Call with the
+/// GIL held.
 PyObject *scheduling_policy_type();
 
 /// A new dict {"base", "effective", "floor", "policy"} (policy a pycvc.scheduling_policy), or

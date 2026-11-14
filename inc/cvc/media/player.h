@@ -34,10 +34,10 @@ namespace media {
 // Whether this cvcMedia was built with FFmpeg.
 bool have_ffmpeg_player();
 
-// Make cvcMedia's player the one Ariadne's video: and audio: widgets use
+// Make cvcMedia's player the one `app`'s Ariadne video: and audio: widgets use
 // (ariadne::media::register_player_factory). Returns false, registering nothing, without FFmpeg.
 // ari-media and arigl call it at setup.
-bool register_ariadne_player();
+bool register_ariadne_player(cvc::app &app);
 
 struct PlayerOptions {
   bool audio = true; // play sound through SDL3 (false: decode and time it, play nothing: tests)

@@ -10,8 +10,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cvc/core/app.h>
 #include <cvc/state/state_compression_registry.h>
 #include <gtest/gtest.h>
+#include <memory>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -187,13 +189,82 @@ TEST(StateCompressionRegistry, IdsListReflectsRegistered) {
   EXPECT_EQ(ids[2], "zstd");
 }
 
-TEST(StateCompressionRegistry, SharedSingletonHasBuiltins) {
-  auto &r = cvc::state_compression_registry::shared();
+TEST(StateCompressionRegistry, SharedRegistryIsTheAppsOwnWithBuiltins) {
+  cvc::app a;
+  auto &r = cvc::state_compression_registry::shared(a);
   EXPECT_TRUE(r.has("raw"));
   EXPECT_TRUE(r.has("rle"));
-  // Same instance returned across calls.
-  auto &r2 = cvc::state_compression_registry::shared();
+  EXPECT_TRUE(r.has("zstd"));
+  // Same instance returned across calls for one app.
+  auto &r2 = cvc::state_compression_registry::shared(a);
   EXPECT_EQ(&r, &r2);
+}
+
+namespace {
+
+// A codec whose id names the app that registered it.
+struct tagged_codec : cvc::state_compression_codec {
+  explicit tagged_codec(std::string id) : _id(std::move(id)) {}
+  std::string id() const override { return _id; }
+  std::vector<unsigned char> encode(const std::vector<unsigned char> &in) const override {
+    return in;
+  }
+  bool decode(const std::vector<unsigned char> &in,
+              std::vector<unsigned char> &out) const override {
+    out = in;
+    return true;
+  }
+  std::string _id;
+};
+
+} // namespace
+
+// A codec one app registers is in that app's registry only, whichever app is made first, and a
+// later app (made after another is gone) starts with the built-ins alone.
+TEST(StateCompressionRegistry, EachAppHasItsOwnRegistry) {
+  for (int order = 0; order < 2; ++order) {
+    auto a = std::make_unique<cvc::app>();
+    auto b = std::make_unique<cvc::app>();
+    cvc::app &first = order == 0 ? *a : *b;
+    cvc::app &second = order == 0 ? *b : *a;
+    cvc::state_compression_registry::shared(first).register_codec(
+        std::make_shared<tagged_codec>("first"));
+    cvc::state_compression_registry::shared(second).register_codec(
+        std::make_shared<tagged_codec>("second"));
+    EXPECT_NE(&cvc::state_compression_registry::shared(first),
+              &cvc::state_compression_registry::shared(second));
+    EXPECT_TRUE(cvc::state_compression_registry::shared(first).has("first"));
+    EXPECT_FALSE(cvc::state_compression_registry::shared(first).has("second"));
+    EXPECT_TRUE(cvc::state_compression_registry::shared(second).has("second"));
+    EXPECT_FALSE(cvc::state_compression_registry::shared(second).has("first"));
+  }
+  {
+    cvc::app gone;
+    cvc::state_compression_registry::shared(gone).register_codec(
+        std::make_shared<tagged_codec>("gone"));
+  }
+  cvc::app later;
+  EXPECT_FALSE(cvc::state_compression_registry::shared(later).has("gone"));
+  EXPECT_EQ(cvc::state_compression_registry::shared(later).size(), 3u);
+}
+
+TEST(StateCompressionRegistry, AppsOnThreadsAtOnce) {
+  constexpr int kApps = 4;
+  std::vector<std::string> seen(kApps);
+  std::vector<std::thread> ts;
+  for (int i = 0; i < kApps; ++i)
+    ts.emplace_back([i, &seen] {
+      cvc::app app;
+      auto &r = cvc::state_compression_registry::shared(app);
+      r.register_codec(std::make_shared<tagged_codec>("app" + std::to_string(i)));
+      for (int j = 0; j < kApps; ++j)
+        if (r.has("app" + std::to_string(j)))
+          seen[i] += "app" + std::to_string(j);
+    });
+  for (auto &t : ts)
+    t.join();
+  for (int i = 0; i < kApps; ++i)
+    EXPECT_EQ(seen[i], "app" + std::to_string(i));
 }
 
 TEST(StateCompressionRegistry, ConcurrentEncodeDecodeIsSafe) {

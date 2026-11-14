@@ -36,6 +36,7 @@
 #include <random>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace cvc;
@@ -1373,36 +1374,20 @@ TEST_F(StateTestFixture, FullNameConstruction) {
 // ===========================
 
 TEST_F(StateTestFixture, OnStartupRegistration) {
-  // The startup registry is static and process-lifetime, and its callbacks fire
-  // once per app -- that is, during some LATER test, long after this one's
-  // stack frame is gone.
-  //
-  // This used to capture a local `bool` BY REFERENCE. The later firing then
-  // wrote true into a dead stack slot, corrupting whatever occupied it by then.
-  // That was not theoretical: running
-  //   state_test \
-  //     --gtest_filter='StateTestFixture.OnStartupRegistration:StateTestFixture.WaitForValue'
-  // segfaulted every time, and it poisoned every subsequent test in the same
-  // process -- which is why the damage always surfaced somewhere unrelated.
-  //
-  // Capturing an owning shared_ptr by value fixes the crash but leaves the
-  // callback in the registry for the rest of the process. on_startup() now
-  // returns a handle, so the registration can simply be taken back out --
-  // which is what makes capturing a plain local by reference safe again.
+  // The startup callbacks are the app's own: one registered on an app runs once, when that app's
+  // root is first made, and can be taken back out with the handle.
   bool startup_called = false;
 
+  cvc::app probe;
   state::startup_connection conn =
-      state::on_startup(state::nullary_func([&startup_called]() { startup_called = true; }));
+      state::on_startup(probe, state::nullary_func([&startup_called]() { startup_called = true; }));
   EXPECT_TRUE(conn.connected());
+  EXPECT_FALSE(startup_called) << "ran before the app's root was made";
 
-  // Roots are per-app, so creating an app is what fires the registry. This
-  // fixture's own ctx may or may not have a root yet, so use a fresh app to
-  // observe the firing directly rather than assuming.
-  {
-    cvc::app probe;
-    cvc::state::instance(probe);
-  }
+  cvc::state::instance(probe);
   EXPECT_TRUE(startup_called);
+  EXPECT_FALSE(cvc::state::instance(probe)("__system.start").value().empty())
+      << "the root's own defaults come first";
 
   // Must actually come back out of the registry, and idempotently so.
   EXPECT_TRUE(conn.disconnect());
@@ -1410,26 +1395,91 @@ TEST_F(StateTestFixture, OnStartupRegistration) {
   EXPECT_FALSE(conn.disconnect());
 }
 
-TEST_F(StateTestFixture, OnStartupDisconnectStopsFurtherFiring) {
+TEST_F(StateTestFixture, OnStartupRunsOncePerApp) {
   int call_count = 0;
+  cvc::app first;
   state::startup_connection conn =
-      state::on_startup(state::nullary_func([&call_count]() { ++call_count; }));
-
-  {
-    cvc::app first;
-    cvc::state::instance(first);
-  }
+      state::on_startup(first, state::app_init_func([&call_count, &first](cvc::app &a) {
+                          EXPECT_EQ(&a, &first);
+                          ++call_count;
+                        }));
+  cvc::state::instance(first);
+  cvc::state::instance(first);
   EXPECT_EQ(call_count, 1);
-
   EXPECT_TRUE(conn.disconnect());
+}
 
-  // After disconnect the callback must not fire for subsequently created
-  // apps -- the property that makes the by-reference capture above safe.
-  {
-    cvc::app second;
-    cvc::state::instance(second);
+TEST_F(StateTestFixture, OnStartupAfterTheRootRunsAtOnce) {
+  cvc::app a;
+  cvc::state::instance(a)("x").value("1");
+  std::string seen;
+  state::startup_connection conn = state::on_startup(
+      a, state::app_init_func([&seen](cvc::app &app) { seen = cvc::state::instance(app)("x"); }));
+  EXPECT_EQ(seen, "1");
+  EXPECT_TRUE(conn.connected());
+}
+
+TEST_F(StateTestFixture, OnStartupDisconnectStopsFiring) {
+  int call_count = 0;
+  cvc::app a;
+  state::startup_connection conn =
+      state::on_startup(a, state::nullary_func([&call_count]() { ++call_count; }));
+  EXPECT_TRUE(conn.disconnect());
+  cvc::state::instance(a);
+  EXPECT_EQ(call_count, 0);
+}
+
+// Another app's callbacks never run for this one, whichever is made first, and a callback
+// registered on an app that is gone does not reach a later app.
+TEST_F(StateTestFixture, OnStartupIsPerApp) {
+  for (int order = 0; order < 2; ++order) {
+    int a_calls = 0, b_calls = 0;
+    cvc::app a, b;
+    state::on_startup(a, state::nullary_func([&a_calls]() { ++a_calls; }));
+    state::on_startup(b, state::nullary_func([&b_calls]() { ++b_calls; }));
+    if (order == 0) {
+      cvc::state::instance(a);
+      EXPECT_EQ(b_calls, 0);
+      cvc::state::instance(b);
+    } else {
+      cvc::state::instance(b);
+      EXPECT_EQ(a_calls, 0);
+      cvc::state::instance(a);
+    }
+    EXPECT_EQ(a_calls, 1);
+    EXPECT_EQ(b_calls, 1);
   }
-  EXPECT_EQ(call_count, 1);
+
+  bool late = false;
+  state::startup_connection gone;
+  {
+    cvc::app before;
+    gone = state::on_startup(before, state::nullary_func([&late]() { late = true; }));
+  }
+  EXPECT_FALSE(gone.connected()) << "its app is gone";
+  EXPECT_FALSE(gone.disconnect());
+  cvc::app after;
+  cvc::state::instance(after);
+  EXPECT_FALSE(late) << "a later app ran a callback registered on an earlier one";
+}
+
+TEST_F(StateTestFixture, OnStartupAppsOnThreadsAtOnce) {
+  constexpr int kApps = 4;
+  std::vector<int> calls(kApps, 0);
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kApps; ++i)
+    threads.emplace_back([i, &calls] {
+      cvc::app app;
+      state::on_startup(app, state::app_init_func([i, &calls](cvc::app &a) {
+                          cvc::state::instance(a)("who").value(i);
+                          ++calls[i];
+                        }));
+      EXPECT_EQ(cvc::state::instance(app)("who").value<int>(), i);
+    });
+  for (std::thread &t : threads)
+    t.join();
+  for (int i = 0; i < kApps; ++i)
+    EXPECT_EQ(calls[i], 1) << "app " << i;
 }
 
 TEST_F(StateTestFixture, OnStartupDefaultConnectionIsInert) {
@@ -4645,7 +4695,7 @@ protected:
 
 TEST_F(StateObjectFixture, StateObjectThreadingDisabled) {
   // Disable threading for this test
-  state_object<ThreadingTestObject>::setUseThreading(false);
+  cvc::set_state_object_threading(ctx, false);
 
   ThreadingTestObject obj(ctx);
 
@@ -4662,16 +4712,13 @@ TEST_F(StateObjectFixture, StateObjectThreadingDisabled) {
   EXPECT_EQ(obj.synchronousCount.load(), 10);
   EXPECT_EQ(obj.threadedCount.load(), 0);
 
-  // Re-enable threading for other tests
-  state_object<ThreadingTestObject>::setUseThreading(true);
-
   // Clean up
   obj.getState().reset();
 }
 
 TEST_F(StateObjectFixture, StateObjectThreadingEnabled) {
   // Ensure threading is enabled (default)
-  state_object<ThreadingTestObject>::setUseThreading(true);
+  cvc::set_state_object_threading(ctx, true);
 
   ThreadingTestObject obj(ctx);
 
@@ -4698,8 +4745,8 @@ TEST_F(StateObjectFixture, StateObjectThreadingToggle) {
   // Test that we can toggle threading on and off
 
   // Start with threading disabled
-  state_object<ThreadingTestObject>::setUseThreading(false);
-  EXPECT_FALSE(state_object<ThreadingTestObject>::getUseThreading());
+  cvc::set_state_object_threading(ctx, false);
+  EXPECT_FALSE(cvc::state_object_threading(ctx));
 
   ThreadingTestObject obj1(ctx);
   obj1.getState("prop1").value("value1");
@@ -4708,8 +4755,8 @@ TEST_F(StateObjectFixture, StateObjectThreadingToggle) {
   EXPECT_EQ(obj1.threadedCount.load(), 0);
 
   // Enable threading
-  state_object<ThreadingTestObject>::setUseThreading(true);
-  EXPECT_TRUE(state_object<ThreadingTestObject>::getUseThreading());
+  cvc::set_state_object_threading(ctx, true);
+  EXPECT_TRUE(cvc::state_object_threading(ctx));
 
   ThreadingTestObject obj2(ctx);
   obj2.getState("prop2").value("value2");
@@ -4718,17 +4765,14 @@ TEST_F(StateObjectFixture, StateObjectThreadingToggle) {
   // With threading enabled, should be on different thread (usually)
 
   // Disable again
-  state_object<ThreadingTestObject>::setUseThreading(false);
-  EXPECT_FALSE(state_object<ThreadingTestObject>::getUseThreading());
+  cvc::set_state_object_threading(ctx, false);
+  EXPECT_FALSE(cvc::state_object_threading(ctx));
 
   ThreadingTestObject obj3(ctx);
   obj3.getState("prop3").value("value3");
   obj3.waitForHandlers();
   EXPECT_EQ(obj3.synchronousCount.load(), 1);
   EXPECT_EQ(obj3.threadedCount.load(), 0);
-
-  // Re-enable for other tests
-  state_object<ThreadingTestObject>::setUseThreading(true);
 
   // Clean up
   obj1.getState().reset();
@@ -4738,7 +4782,7 @@ TEST_F(StateObjectFixture, StateObjectThreadingToggle) {
 
 TEST_F(StateObjectFixture, StateObjectBatchingWithThreadingDisabled) {
   // Test that batching works correctly even with threading disabled
-  state_object<ThreadingTestObject>::setUseThreading(false);
+  cvc::set_state_object_threading(ctx, false);
 
   ThreadingTestObject obj(ctx);
 
@@ -4760,59 +4804,59 @@ TEST_F(StateObjectFixture, StateObjectBatchingWithThreadingDisabled) {
   EXPECT_EQ(obj.synchronousCount.load(), 5);
   EXPECT_EQ(obj.threadedCount.load(), 0);
 
-  // Re-enable threading
-  state_object<ThreadingTestObject>::setUseThreading(true);
-
   // Clean up
   obj.getState().reset();
 }
 
-TEST_F(StateObjectFixture, StateObjectThreadingPerTemplateType) {
-  // Test that threading control is independent per template instantiation
+TEST_F(StateObjectFixture, StateObjectThreadingPerApp) {
+  // The threading default is each app's own: turning it off in one app leaves another's objects
+  // threaded, whichever app is made (and set) first.
+  for (int order = 0; order < 2; ++order) {
+    cvc::app a, b;
+    cvc::app &off = order == 0 ? a : b;
+    cvc::app &on = order == 0 ? b : a;
+    cvc::set_state_object_threading(off, false);
+    EXPECT_FALSE(cvc::state_object_threading(off));
+    EXPECT_TRUE(cvc::state_object_threading(on));
 
-  class TypeA : public state_object<TypeA> {
-  public:
-    TypeA(cvc::app &ctx) : state_object<TypeA>(ctx) {}
-    std::atomic<bool> called{false};
+    ThreadingTestObject objOff(off), objOn(on);
+    EXPECT_FALSE(objOff.getInstanceThreading());
+    EXPECT_TRUE(objOn.getInstanceThreading());
+    objOff.getState("test").value("value");
+    objOn.getState("test").value("value");
+    objOff.waitForHandlers();
+    objOn.waitForHandlers();
+    EXPECT_EQ(objOff.synchronousCount.load(), 1);
+    EXPECT_EQ(objOff.threadedCount.load(), 0);
+    EXPECT_EQ(objOn.threadedCount.load(), 1);
+  }
 
-  protected:
-    void handleStateChanged(const std::string &) override { called = true; }
-  };
+  // A later app starts with the default, whatever an app before it set.
+  {
+    cvc::app gone;
+    cvc::set_state_object_threading(gone, false);
+  }
+  cvc::app later;
+  EXPECT_TRUE(cvc::state_object_threading(later));
+}
 
-  class TypeB : public state_object<TypeB> {
-  public:
-    TypeB(cvc::app &ctx) : state_object<TypeB>(ctx) {}
-    std::atomic<bool> called{false};
-
-  protected:
-    void handleStateChanged(const std::string &) override { called = true; }
-  };
-
-  // Disable threading for TypeA only
-  state_object<TypeA>::setUseThreading(false);
-  state_object<TypeB>::setUseThreading(true);
-
-  EXPECT_FALSE(state_object<TypeA>::getUseThreading());
-  EXPECT_TRUE(state_object<TypeB>::getUseThreading());
-
-  TypeA objA(ctx);
-  TypeB objB(ctx);
-
-  objA.getState("test").value("value");
-  objB.getState("test").value("value");
-
-  objA.waitForHandlers();
-  objB.waitForHandlers();
-
-  EXPECT_TRUE(objA.called);
-  EXPECT_TRUE(objB.called);
-
-  // Reset TypeA back to default
-  state_object<TypeA>::setUseThreading(true);
-
-  // Clean up
-  objA.getState().reset();
-  objB.getState().reset();
+TEST_F(StateObjectFixture, StateObjectThreadingAppsOnThreadsAtOnce) {
+  constexpr int kApps = 4;
+  std::vector<int> synchronous(kApps, -1);
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kApps; ++i)
+    threads.emplace_back([i, &synchronous] {
+      cvc::app app;
+      cvc::set_state_object_threading(app, i % 2 == 0);
+      ThreadingTestObject obj(app);
+      obj.getState("p").value(i);
+      obj.waitForHandlers();
+      synchronous[i] = obj.synchronousCount.load();
+    });
+  for (std::thread &t : threads)
+    t.join();
+  for (int i = 0; i < kApps; ++i)
+    EXPECT_EQ(synchronous[i], i % 2 == 0 ? 0 : 1) << "app " << i;
 }
 
 // ===========================
@@ -4821,7 +4865,7 @@ TEST_F(StateObjectFixture, StateObjectThreadingPerTemplateType) {
 
 TEST_F(StateObjectFixture, StateObjectInstanceThreadingEnabled) {
   // Test enabling instance threading on a single object
-  state_object<ThreadingTestObject>::setUseThreading(false); // Global disabled
+  cvc::set_state_object_threading(ctx, false); // Global disabled
 
   ThreadingTestObject obj(ctx);
 
@@ -4846,13 +4890,12 @@ TEST_F(StateObjectFixture, StateObjectInstanceThreadingEnabled) {
   EXPECT_GT(obj.threadedCount.load(), 0) << "Expected threaded execution";
 
   // Clean up
-  state_object<ThreadingTestObject>::setUseThreading(true);
   obj.getState().reset();
 }
 
 TEST_F(StateObjectFixture, StateObjectInstanceThreadingDisabled) {
   // Test disabling instance threading on a single object
-  state_object<ThreadingTestObject>::setUseThreading(true); // Global enabled
+  cvc::set_state_object_threading(ctx, true); // Global enabled
 
   ThreadingTestObject obj(ctx);
 
@@ -4876,7 +4919,7 @@ TEST_F(StateObjectFixture, StateObjectInstanceThreadingDisabled) {
 
 TEST_F(StateObjectFixture, StateObjectMixedInstanceThreading) {
   // Test multiple objects with different instance threading settings
-  state_object<ThreadingTestObject>::setUseThreading(false); // Global disabled
+  cvc::set_state_object_threading(ctx, false); // Global disabled
 
   ThreadingTestObject obj1(ctx), obj2(ctx), obj3(ctx);
 
@@ -4914,7 +4957,6 @@ TEST_F(StateObjectFixture, StateObjectMixedInstanceThreading) {
   EXPECT_GT(obj3.threadedCount.load(), 0);
 
   // Clean up
-  state_object<ThreadingTestObject>::setUseThreading(true);
   obj1.getState().reset();
   obj2.getState().reset();
   obj3.getState().reset();
@@ -4962,7 +5004,7 @@ TEST_F(StateObjectFixture, StateObjectMixedInstanceThreadingStress) {
     localCtx->properties("system.log_output", logKey);
 
     {
-      state_object<ThreadingTestObject>::setUseThreading(false);
+      cvc::set_state_object_threading(*localCtx, false);
 
       std::vector<std::unique_ptr<ThreadingTestObject>> objs;
       for (int i = 0; i < objectCount; i++)
@@ -5001,7 +5043,7 @@ TEST_F(StateObjectFixture, StateObjectMixedInstanceThreadingStress) {
       // Re-enable threading and reset: this spawns a second handler thread
       // under the same key as the first, and the objects are then
       // destroyed immediately afterwards.
-      state_object<ThreadingTestObject>::setUseThreading(true);
+      cvc::set_state_object_threading(*localCtx, true);
       for (int i = 0; i < objectCount; i++)
         objs[i]->getState().reset();
     } // every ThreadingTestObject destroyed here
@@ -5011,13 +5053,11 @@ TEST_F(StateObjectFixture, StateObjectMixedInstanceThreadingStress) {
     // and the maps out from under the escapee.
     localCtx.reset();
   }
-
-  state_object<ThreadingTestObject>::setUseThreading(true);
 }
 
 TEST_F(StateObjectFixture, StateObjectClearInstanceThreading) {
   // Test clearing instance threading to revert to global flag
-  state_object<ThreadingTestObject>::setUseThreading(false); // Global disabled
+  cvc::set_state_object_threading(ctx, false); // Global disabled
 
   ThreadingTestObject obj(ctx);
 
@@ -5041,13 +5081,12 @@ TEST_F(StateObjectFixture, StateObjectClearInstanceThreading) {
   EXPECT_EQ(obj.synchronousCount.load(), 1);
 
   // Clean up
-  state_object<ThreadingTestObject>::setUseThreading(true);
   obj.getState().reset();
 }
 
 TEST_F(StateObjectFixture, StateObjectInstanceThreadingWithGlobalChange) {
   // Test that instance threading persists across global flag changes
-  state_object<ThreadingTestObject>::setUseThreading(false);
+  cvc::set_state_object_threading(ctx, false);
 
   ThreadingTestObject obj1(ctx), obj2(ctx);
 
@@ -5058,7 +5097,7 @@ TEST_F(StateObjectFixture, StateObjectInstanceThreadingWithGlobalChange) {
   EXPECT_FALSE(obj2.getInstanceThreading());
 
   // Change global flag to true
-  state_object<ThreadingTestObject>::setUseThreading(true);
+  cvc::set_state_object_threading(ctx, true);
 
   // obj1 keeps its instance setting, obj2 follows global
   EXPECT_TRUE(obj1.getInstanceThreading());
@@ -5069,21 +5108,20 @@ TEST_F(StateObjectFixture, StateObjectInstanceThreadingWithGlobalChange) {
   EXPECT_FALSE(obj2.getInstanceThreading());
 
   // Change global back to false
-  state_object<ThreadingTestObject>::setUseThreading(false);
+  cvc::set_state_object_threading(ctx, false);
 
   // Both keep their instance settings
   EXPECT_TRUE(obj1.getInstanceThreading());
   EXPECT_FALSE(obj2.getInstanceThreading());
 
   // Clean up
-  state_object<ThreadingTestObject>::setUseThreading(true);
   obj1.getState().reset();
   obj2.getState().reset();
 }
 
 TEST_F(StateObjectFixture, StateObjectInstanceThreadingStressTest) {
   // Stress test with multiple objects and mixed threading settings
-  state_object<ThreadingTestObject>::setUseThreading(false);
+  cvc::set_state_object_threading(ctx, false);
 
   const int numObjects = 10;
   std::vector<std::shared_ptr<ThreadingTestObject>> objects;
@@ -5131,7 +5169,6 @@ TEST_F(StateObjectFixture, StateObjectInstanceThreadingStressTest) {
   }
 
   // Clean up
-  state_object<ThreadingTestObject>::setUseThreading(true);
   for (auto &obj : objects) {
     obj->getState().reset();
   }
@@ -5139,7 +5176,7 @@ TEST_F(StateObjectFixture, StateObjectInstanceThreadingStressTest) {
 
 TEST_F(StateObjectFixture, StateObjectInstanceThreadingConcurrentStress) {
   // Stress test with concurrent modifications from multiple threads
-  state_object<ThreadingTestObject>::setUseThreading(false);
+  cvc::set_state_object_threading(ctx, false);
 
   const int numObjects = 10;
   std::vector<std::shared_ptr<ThreadingTestObject>> objects;
@@ -5194,7 +5231,6 @@ TEST_F(StateObjectFixture, StateObjectInstanceThreadingConcurrentStress) {
   // The key behavior is that handlers are called and complete correctly
 
   // Clean up
-  state_object<ThreadingTestObject>::setUseThreading(true);
   for (auto &obj : objects) {
     obj->getState().reset();
   }
@@ -5202,7 +5238,7 @@ TEST_F(StateObjectFixture, StateObjectInstanceThreadingConcurrentStress) {
 
 TEST_F(StateObjectFixture, StateObjectInstanceThreadingBatching) {
   // Test that batching works correctly with instance threading
-  state_object<ThreadingTestObject>::setUseThreading(false);
+  cvc::set_state_object_threading(ctx, false);
 
   ThreadingTestObject obj(ctx);
   obj.setInstanceThreading(true);
@@ -5228,7 +5264,6 @@ TEST_F(StateObjectFixture, StateObjectInstanceThreadingBatching) {
       << "Expected threaded execution with instance threading enabled";
 
   // Clean up
-  state_object<ThreadingTestObject>::setUseThreading(true);
   obj.getState().reset();
 }
 

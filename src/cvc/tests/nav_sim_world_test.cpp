@@ -27,14 +27,19 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cvc/core/app.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h> // city_scene, training_scene
 #include <cvc/nav/detail/seeded_draw.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/state/state.h>
 #include <gtest/gtest.h>
 #include <numeric>
 #include <random>
 #include <stdexcept>
+#include <string>
+#include <thread>
 #include <vector>
 
 using cvc::nav::city_scene;
@@ -92,6 +97,59 @@ void check_world(const sim_world &w, int n, int expect_planes) {
   w.snapshot(pos.data(), head.data(), spd.data(), md.data(), rch.data());
   for (int i = 0; i < 2 * n; ++i)
     ASSERT_TRUE(std::isfinite(pos[i])) << "non-finite pose component at " << i;
+}
+
+// What app `i` makes of a world of its own: 12 + 4i agents, its sensing range from its tree
+// (pull), a few ticks, and what publish wrote back to its tree, with the agents' poses.
+std::string app_world(cvc::app &app, int i) {
+  cvc::state::instance(app)("multi.nav.range_m").value(std::to_string(20 + 5 * i));
+  sim_world w = build(12 + 4 * i, sim_world::belief_mode::shared, 1);
+  w.pull(app, "multi");
+  for (int k = 0; k < 8; ++k)
+    w.step(1);
+  w.publish(app, "multi");
+  std::vector<float> pos(2 * w.size()), head(w.size());
+  w.snapshot(pos.data(), head.data(), nullptr, nullptr, nullptr);
+  double sum = 0.0;
+  for (float v : pos)
+    sum += v;
+  const auto key = [&](const char *k) { return cvc::state::instance(app)(k).value(); };
+  char b[64];
+  std::snprintf(b, sizeof(b), " poses %.5f", sum);
+  return "tick " + key("multi.nav.tick") + " agents " + key("multi.nav.settings.agents") +
+         " range " + key("multi.nav.range_m") + " policy 0 '" + w.policy_key(0) + "'" + b;
+}
+
+// Worlds of several apps are each their own: one reads its app's tree and writes it, and its
+// answers are the same alone, with another app's world made and stepped first (in either order),
+// and on threads at once.
+TEST(NavSimWorld, WorldsOfSeveralAppsAreEachTheirOwn) {
+  constexpr int kApps = 3;
+  std::vector<std::string> alone(kApps), together(kApps);
+  for (int i = 0; i < kApps; ++i) {
+    cvc::app app;
+    alone[i] = app_world(app, i);
+  }
+  for (int i = 1; i < kApps; ++i)
+    EXPECT_NE(alone[i], alone[0]) << i;
+  {
+    cvc::app a, b;
+    EXPECT_EQ(app_world(a, 0), alone[0]);
+    EXPECT_EQ(app_world(b, 1), alone[1]);
+    cvc::app c, d;
+    EXPECT_EQ(app_world(d, 1), alone[1]);
+    EXPECT_EQ(app_world(c, 0), alone[0]);
+  }
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kApps; ++i)
+    threads.emplace_back([i, &together] {
+      cvc::app app;
+      together[i] = app_world(app, i);
+    });
+  for (std::thread &t : threads)
+    t.join();
+  for (int i = 0; i < kApps; ++i)
+    EXPECT_EQ(together[i], alone[i]) << i;
 }
 
 TEST(NavSimWorld, SharedBeliefConstructsAndSnapshots) {

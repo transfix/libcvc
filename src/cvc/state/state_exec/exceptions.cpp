@@ -39,13 +39,13 @@ struct exception_init {
       message = std::holds_alternative<std::string>(args[1].v) ? std::get<std::string>(args[1].v)
                                                                : to_string(args[1]);
     set_field(self, "message", value_t(message));
-    set_field(self, "data", args.size() > 2 ? args[2] : nil_value);
+    set_field(self, "data", args.size() > 2 ? args[2] : nil_value());
     if (!field(self, "cause"))
-      set_field(self, "cause", nil_value);
+      set_field(self, "cause", nil_value());
     if (!field(self, "origin"))
       set_field(self, "origin", value_t(std::string("dsl")));
     if (!field(self, "traceback"))
-      set_field(self, "traceback", nil_value);
+      set_field(self, "traceback", nil_value());
     return self;
   }
 };
@@ -121,7 +121,7 @@ std::string type_name_of(const std::exception &e) {
 }
 
 value_t native_exception(const char *cls, const std::exception &e) {
-  return make_exception(exception_class(cls), e.what(), nil_value, "native");
+  return make_exception(exception_class(cls), e.what(), nil_value(), "native");
 }
 
 } // namespace
@@ -214,9 +214,9 @@ value_t make_exception(const dict_ptr &cls, const std::string &message, value_t 
   inst->emplace_back("__class__", value_t(cls ? cls : exception_class("Exception")));
   inst->emplace_back("message", value_t(message));
   inst->emplace_back("data", std::move(data));
-  inst->emplace_back("cause", nil_value);
+  inst->emplace_back("cause", nil_value());
   inst->emplace_back("origin", value_t(origin));
-  inst->emplace_back("traceback", nil_value);
+  inst->emplace_back("traceback", nil_value());
   return value_t(std::move(inst));
 }
 
@@ -299,14 +299,14 @@ value_t exception_from(const std::exception &e) {
     return d->value();
   if (const auto *d = dynamic_cast<const dsl_error *>(&e)) {
     dict_ptr cls = exception_class(d->class_name());
-    value_t exc = make_exception(cls ? cls : exception_class("RuntimeError"), e.what(), nil_value,
+    value_t exc = make_exception(cls ? cls : exception_class("RuntimeError"), e.what(), nil_value(),
                                  d->origin());
     for (const auto &[key, v] : d->fields())
       set_field(exc, key, v);
     return exc;
   }
   if (const auto *p = dynamic_cast<const parse_error *>(&e)) {
-    value_t exc = make_exception(exception_class("ParseError"), e.what(), nil_value, "builtin");
+    value_t exc = make_exception(exception_class("ParseError"), e.what(), nil_value(), "builtin");
     set_field(exc, "line", value_t(static_cast<int64_t>(p->line())));
     set_field(exc, "col", value_t(static_cast<int64_t>(p->col())));
     return exc;

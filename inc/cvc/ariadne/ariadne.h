@@ -29,6 +29,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -97,6 +98,9 @@ public:
 
   Runtime(const Runtime &) = delete;
   Runtime &operator=(const Runtime &) = delete;
+
+  // The app this runtime's document runs on: its state, registries and players.
+  cvc::app &app() const;
 
   // Choose the surface. Must be set before render(); the Runtime does not own
   // the Backend (it must outlive the Runtime).
@@ -302,6 +306,17 @@ public:
   // is noticed without it.
   void refresh_program_names();
 
+  // A function the read lane's expressions may call (visible_when, a computed bind:, §2.1) beside
+  // its allowlist: a scripting engine's pure export (ScriptLane::export_pure). `fn` gets the
+  // call's arguments and the read lane's environment, whose state readers note what the
+  // expression reads, and runs inline in the expression's eval, under its step and time caps. It
+  // must be pure: an expression's result is kept, and not run again, until a path it read through
+  // those readers is written. A later registration of the name replaces the earlier one and drops
+  // the kept results.
+  using ReadFunction = std::function<cvc::state_exec::value_tag(
+      std::span<const cvc::state_exec::value_tag> args, cvc::state_exec::environment &env)>;
+  void register_read_function(const std::string &name, ReadFunction fn);
+
   // This document's per-resource scope (the se::document_scope installed on every action/resident
   // intrinsics_context as ictx.document). A host that contributes SCENE-BOUND intrinsics — whose
   // verb must reach live host objects a neutral register_action_intrinsics provider never sees (the
@@ -348,19 +363,19 @@ using WidgetEmitFn = std::function<void(const Widget &w, const WidgetEmitContext
 
 // Register (or replace) the emit fn for a custom widget `type` — a type the built-ins
 // don't handle, which the loader carries as a Kind::Custom widget (custom_type +
-// props). An unregistered custom type draws a labelled placeholder. Process-global and
-// thread-safe; register before render(). Mirrors the register_scene_node_type /
-// register_ari_block registries.
-void register_widget_type(const std::string &type, WidgetEmitFn emit);
+// props). An unregistered custom type draws a labelled placeholder. The type is `app`'s alone:
+// documents on another app don't see it. Thread-safe; register before load_* and render().
+// Mirrors the register_scene_node_type / register_ari_block registries.
+void register_widget_type(cvc::app &app, const std::string &type, WidgetEmitFn emit);
 
 // Mark `type` as a KNOWN widget type that a BACKEND renders natively (e.g. ImGuiBackend's
 // register_widget — a raw-ImGui widget like `stream_view`), so the loader does not warn that it is
 // unregistered and has_widget_type() reports it present. No compositional emit fn is involved.
-void register_known_widget_type(const std::string &type);
+void register_known_widget_type(cvc::app &app, const std::string &type);
 
-// Whether a custom widget `type` is registered — either a compositional emit fn
+// Whether `app` has a custom widget `type` — either a compositional emit fn
 // (register_widget_type) or a backend-native widget (register_known_widget_type).
-bool has_widget_type(const std::string &type);
+bool has_widget_type(cvc::app &app, const std::string &type);
 
 // --- extensibility: the `init:` block (a state_exec script run on load) -------
 //

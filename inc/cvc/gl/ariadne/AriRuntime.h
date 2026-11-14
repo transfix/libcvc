@@ -100,6 +100,9 @@ public:
   // callback. NEVER call the Runtime's render() directly.
   void render();
   void step(double dt_seconds); // frame(dt) then render()
+  // Whether frame() or render() is running: what calls in now is a host handler, verb or function
+  // of that frame, which may not start a loop of its own.
+  bool in_frame() const { return inFrame_; }
   bool should_close() const;    // a host `quit` OR the window closed
   void run(double fps = 120.0); // optional blocking host loop until should_close()
   void request_close();

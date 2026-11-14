@@ -84,12 +84,13 @@ struct DataDecode {
 };
 using DataDecoder = std::function<void(DataDecode &)>;
 
-// Register (or replace) the decoder named `as`. The built-ins: files, bytes, text, json, mesh,
-// heightfield, volume and city_bundle. Process-global and thread-safe; a decoder runs on a load's
-// worker thread and throws std::exception to fail the load.
-void register_data_decoder(const std::string &as, DataDecoder decoder);
-bool has_data_decoder(const std::string &as);
-std::vector<std::string> data_decoders();
+// Register (or replace) `app`'s decoder named `as` (an empty decoder removes it). Every app
+// starts with the built-ins: files, bytes, text, json, mesh, heightfield, volume and city_bundle.
+// Thread-safe; a decoder runs on a load's worker thread and throws std::exception to fail the
+// load. Another app's documents don't see it.
+void register_data_decoder(cvc::app &app, const std::string &as, DataDecoder decoder);
+bool has_data_decoder(cvc::app &app, const std::string &as);
+std::vector<std::string> data_decoders(cvc::app &app);
 
 // The store key of a request: a slug of its source and a hash of the request (uri, path, as).
 std::string data_key(const DataSpec &spec);

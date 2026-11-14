@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <cvc/core/app.h>
 #include <cvc/net/browser.h>
 #include <cvc/net/net_policy.h>
 #include <mutex>
@@ -109,20 +110,17 @@ namespace net {
 
 namespace {
 
-std::atomic<bool> g_disabled{false};
+// An app's browser: --no-browser, the opener and notice a host or test set, and the page hooks.
+struct browser_slot {
+  static constexpr const char *app_slot = "cvc.net.browser";
+  std::atomic<bool> disabled{false};
+  std::mutex m; // guards the rest
+  std::function<bool(const std::string &)> opener;
+  std::function<void(const std::string &)> notice;
+  std::shared_ptr<page::Hooks> hooks;
+};
 
-std::mutex &hooks_mutex() {
-  static std::mutex m;
-  return m;
-}
-std::function<bool(const std::string &)> &opener_cell() {
-  static std::function<bool(const std::string &)> f;
-  return f;
-}
-std::function<void(const std::string &)> &notice_cell() {
-  static std::function<void(const std::string &)> f;
-  return f;
-}
+browser_slot &browser_of(cvc::app &app) { return app.slot<browser_slot>(); }
 
 #if !defined(__EMSCRIPTEN__)
 bool env_set(const char *name) {
@@ -209,12 +207,13 @@ bool open_with_browser_env(const std::string &url) {
 
 } // namespace
 
-bool browser_available() {
-  if (g_disabled.load())
+bool browser_available(cvc::app &app) {
+  browser_slot &b = browser_of(app);
+  if (b.disabled.load())
     return false;
   {
-    std::lock_guard<std::mutex> lock(hooks_mutex());
-    if (opener_cell())
+    std::lock_guard<std::mutex> lock(b.m);
+    if (b.opener)
       return true;
   }
 #if defined(__EMSCRIPTEN__)
@@ -232,9 +231,11 @@ bool browser_available() {
 #endif
 }
 
-void set_browser_disabled(bool disabled) { g_disabled.store(disabled); }
+void set_browser_disabled(cvc::app &app, bool disabled) {
+  browser_of(app).disabled.store(disabled);
+}
 
-OpenUrlResult open_url(const std::string &url, std::string *error) {
+OpenUrlResult open_url(cvc::app &app, const std::string &url, std::string *error) {
   const auto failed = [&](std::string why) {
     if (error)
       *error = std::move(why);
@@ -245,12 +246,13 @@ OpenUrlResult open_url(const std::string &url, std::string *error) {
     return failed("open-url: " + why);
   if (url.find_first_of(" \t\r\n\"'`\\<>") != std::string::npos)
     return failed("open-url: the URL has a character a URL may not");
-  if (!browser_available())
+  if (!browser_available(app))
     return OpenUrlResult::no_browser;
   std::function<bool(const std::string &)> opener;
   {
-    std::lock_guard<std::mutex> lock(hooks_mutex());
-    opener = opener_cell();
+    browser_slot &b = browser_of(app);
+    std::lock_guard<std::mutex> lock(b.m);
+    opener = b.opener;
   }
   if (opener)
     return opener(url) ? OpenUrlResult::opened : failed("open-url: the browser did not start");
@@ -279,21 +281,24 @@ OpenUrlResult open_url(const std::string &url, std::string *error) {
 #endif
 }
 
-void set_url_opener(std::function<bool(const std::string &url)> opener) {
-  std::lock_guard<std::mutex> lock(hooks_mutex());
-  opener_cell() = std::move(opener);
+void set_url_opener(cvc::app &app, std::function<bool(const std::string &url)> opener) {
+  browser_slot &b = browser_of(app);
+  std::lock_guard<std::mutex> lock(b.m);
+  std::swap(b.opener, opener); // the old one goes once the lock is released
 }
 
-void set_url_notice(std::function<void(const std::string &url)> notice) {
-  std::lock_guard<std::mutex> lock(hooks_mutex());
-  notice_cell() = std::move(notice);
+void set_url_notice(cvc::app &app, std::function<void(const std::string &url)> notice) {
+  browser_slot &b = browser_of(app);
+  std::lock_guard<std::mutex> lock(b.m);
+  std::swap(b.notice, notice);
 }
 
-void url_notice(const std::string &url) {
+void url_notice(cvc::app &app, const std::string &url) {
   std::function<void(const std::string &)> notice;
   {
-    std::lock_guard<std::mutex> lock(hooks_mutex());
-    notice = notice_cell();
+    browser_slot &b = browser_of(app);
+    std::lock_guard<std::mutex> lock(b.m);
+    notice = b.notice;
   }
   if (notice) {
     notice(url);
@@ -306,13 +311,10 @@ void url_notice(const std::string &url) {
 namespace page {
 
 namespace {
-std::shared_ptr<Hooks> &hooks_cell() {
-  static std::shared_ptr<Hooks> h;
-  return h;
-}
-std::shared_ptr<Hooks> hooks() {
-  std::lock_guard<std::mutex> lock(hooks_mutex());
-  return hooks_cell();
+std::shared_ptr<Hooks> hooks(cvc::app &app) {
+  browser_slot &b = browser_of(app);
+  std::lock_guard<std::mutex> lock(b.m);
+  return b.hooks;
 }
 #if defined(__EMSCRIPTEN__)
 std::string take(char *p) {
@@ -323,21 +325,23 @@ std::string take(char *p) {
 #endif
 } // namespace
 
-void set_hooks(std::shared_ptr<Hooks> h) {
-  std::lock_guard<std::mutex> lock(hooks_mutex());
-  hooks_cell() = std::move(h);
+void set_hooks(cvc::app &app, std::shared_ptr<Hooks> h) {
+  browser_slot &b = browser_of(app);
+  std::lock_guard<std::mutex> lock(b.m);
+  b.hooks.swap(h);
 }
 
-bool present() {
+bool present(cvc::app &app) {
 #if defined(__EMSCRIPTEN__)
+  (void)app;
   return true;
 #else
-  return hooks() != nullptr;
+  return hooks(app) != nullptr;
 #endif
 }
 
-std::string url() {
-  if (const auto h = hooks())
+std::string url(cvc::app &app) {
+  if (const auto h = hooks(app))
     return h->url ? h->url() : std::string();
 #if defined(__EMSCRIPTEN__)
   return take(cvc_net_page_url());
@@ -346,8 +350,8 @@ std::string url() {
 #endif
 }
 
-std::string session_get(const std::string &key) {
-  if (const auto h = hooks())
+std::string session_get(cvc::app &app, const std::string &key) {
+  if (const auto h = hooks(app))
     return h->session_get ? h->session_get(key) : std::string();
 #if defined(__EMSCRIPTEN__)
   return take(cvc_net_session_get(key.c_str()));
@@ -356,8 +360,8 @@ std::string session_get(const std::string &key) {
 #endif
 }
 
-bool session_set(const std::string &key, const std::string &value) {
-  if (const auto h = hooks())
+bool session_set(cvc::app &app, const std::string &key, const std::string &value) {
+  if (const auto h = hooks(app))
     return h->session_set && h->session_set(key, value);
 #if defined(__EMSCRIPTEN__)
   return cvc_net_session_set(key.c_str(), value.c_str()) != 0;
@@ -366,8 +370,8 @@ bool session_set(const std::string &key, const std::string &value) {
 #endif
 }
 
-void session_remove(const std::string &key) {
-  if (const auto h = hooks()) {
+void session_remove(cvc::app &app, const std::string &key) {
+  if (const auto h = hooks(app)) {
     if (h->session_remove)
       h->session_remove(key);
     return;
@@ -377,8 +381,8 @@ void session_remove(const std::string &key) {
 #endif
 }
 
-bool navigate(const std::string &url) {
-  if (const auto h = hooks())
+bool navigate(cvc::app &app, const std::string &url) {
+  if (const auto h = hooks(app))
     return h->navigate && h->navigate(url);
 #if defined(__EMSCRIPTEN__)
   return cvc_net_navigate(url.c_str()) != 0;
@@ -387,8 +391,8 @@ bool navigate(const std::string &url) {
 #endif
 }
 
-bool replace_url(const std::string &url) {
-  if (const auto h = hooks())
+bool replace_url(cvc::app &app, const std::string &url) {
+  if (const auto h = hooks(app))
     return h->replace_url && h->replace_url(url);
 #if defined(__EMSCRIPTEN__)
   return cvc_net_replace_url(url.c_str()) != 0;

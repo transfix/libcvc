@@ -89,7 +89,8 @@ std::string over_default_elements() {
 }
 
 value_t call(const char *fn, std::vector<value_t> args) {
-  const native_fn *f = stdlib_registry::standard().lookup_qualified(fn);
+  const stdlib_registry reg;
+  const native_fn *f = reg.lookup_qualified(fn);
   if (!f)
     throw std::logic_error(std::string("no stdlib function ") + fn);
   return (*f)(std::span<const value_t>(args.data(), args.size()));
@@ -138,37 +139,62 @@ TEST(StdlibReachTest, ExplicitEnvironmentFromMakeDefaultEnvironment) {
   EXPECT_EQ(show(sched.get_result(pid)), "\xC3\xA9");
 }
 
-// --- one shared, frozen scope ---------------------------------------------------------------
+// --- a frozen scope of each environment's own -----------------------------------------------
 
-TEST(StdlibSharedScopeTest, DefaultEnvironmentsLinkOneScope) {
-  const environment_ptr scope = stdlib_registry::shared_scope();
+TEST(StdlibSharedScopeTest, EachDefaultEnvironmentLinksItsOwnScope) {
+  const environment_ptr scope = stdlib_registry::make_scope();
   ASSERT_TRUE(scope);
   EXPECT_TRUE(scope->frozen);
-  EXPECT_EQ(stdlib_registry::shared_scope(), scope); // built once
+  EXPECT_NE(stdlib_registry::make_scope(), scope); // a new one each call: none is shared
 
   auto a = builtins::make_default_environment();
   auto b = builtins::make_default_environment();
-  EXPECT_EQ(a->outer, scope);
-  EXPECT_EQ(b->outer, scope);
-  // Not copied: neither environment binds the name itself, both find the one shared value.
+  ASSERT_TRUE(a->outer);
+  ASSERT_TRUE(b->outer);
+  EXPECT_TRUE(a->outer->frozen);
+  EXPECT_NE(a->outer, b->outer) << "two environments share a stdlib scope";
+  // Not copied into the environment: it doesn't bind the name itself, its stdlib scope does.
   EXPECT_EQ(a->bindings.count("string.length"), 0u);
   ASSERT_NE(a->lookup("string.length"), nullptr);
-  EXPECT_EQ(a->lookup("string.length"), b->lookup("string.length"));
+  EXPECT_EQ(a->lookup("string.length"), a->outer->lookup("string.length"));
 
   // Every function of every module is in it.
-  const stdlib_registry &reg = stdlib_registry::standard();
+  const stdlib_registry reg;
   for (const std::string &module : {"string", "bytes", "math", "collections"})
     for (const std::string &fn : reg.list_functions(module))
       EXPECT_NE(scope->lookup(fn), nullptr) << fn;
+}
+
+// Two apps' frozen builtins (what their groups extend) are their own, each over a stdlib scope of
+// its own; one app asking again gets its one scope. A later app, made after the first is gone,
+// gets a new scope too.
+TEST(StdlibSharedScopeTest, EachAppHasItsOwnFrozenBuiltins) {
+  environment_ptr first_scope;
+  {
+    cvc::app a;
+    cvc::app b;
+    const environment_ptr fa = frozen_builtins(a);
+    const environment_ptr fb = frozen_builtins(b);
+    ASSERT_TRUE(fa && fb);
+    EXPECT_TRUE(fa->frozen);
+    EXPECT_EQ(frozen_builtins(a), fa) << "one per app";
+    EXPECT_NE(fa, fb) << "two apps share frozen builtins";
+    ASSERT_TRUE(fa->outer && fb->outer);
+    EXPECT_NE(fa->outer, fb->outer) << "two apps share a stdlib scope";
+    first_scope = fa;
+  }
+  cvc::app later;
+  EXPECT_NE(frozen_builtins(later), first_scope);
+  EXPECT_EQ(first_scope.use_count(), 1) << "the app that made it kept no other reference";
 }
 
 TEST(StdlibSharedScopeTest, SetShadowsInsteadOfWritingTheSharedScope) {
   EXPECT_EQ(run_sync("(begin (set string.length 42) string.length)"), "42");
   // Another program (another scheduler) still sees the real function.
   EXPECT_EQ(run_sync("(string.length \"ab\")"), "2");
-  ASSERT_NE(stdlib_registry::shared_scope()->lookup("string.length"), nullptr);
-  EXPECT_TRUE(std::holds_alternative<native_fn>(
-      stdlib_registry::shared_scope()->lookup("string.length")->v));
+  auto env = builtins::make_default_environment();
+  ASSERT_NE(env->lookup("string.length"), nullptr);
+  EXPECT_TRUE(std::holds_alternative<native_fn>(env->lookup("string.length")->v));
 }
 
 TEST(StdlibSharedScopeTest, DefunShadowsAStdlibName) {
@@ -181,10 +207,9 @@ TEST(StdlibSharedScopeTest, SetExistingShadowsInOutermostUnfrozenScope) {
   auto inner = environment::extend(env);
   inner->set_existing("math.pi", value_t{int64_t{3}});
   EXPECT_EQ(inner->bindings.count("math.pi"), 0u); // not in the scope it was called on
-  ASSERT_EQ(env->bindings.count("math.pi"), 1u);   // shadowed one level below the shared scope
+  ASSERT_EQ(env->bindings.count("math.pi"), 1u);   // shadowed one level below the stdlib scope
   EXPECT_EQ(std::get<int64_t>(env->bindings["math.pi"].v), 3);
-  EXPECT_TRUE(
-      std::holds_alternative<native_fn>(stdlib_registry::shared_scope()->lookup("math.pi")->v));
+  EXPECT_TRUE(std::holds_alternative<native_fn>(env->outer->lookup("math.pi")->v));
   // A name bound in an unfrozen scope is still updated where it is.
   inner->set("x", value_t{int64_t{1}});
   inner->set_existing("x", value_t{int64_t{2}});
@@ -192,11 +217,10 @@ TEST(StdlibSharedScopeTest, SetExistingShadowsInOutermostUnfrozenScope) {
 }
 
 TEST(StdlibSharedScopeTest, WritingAFrozenScopeThrows) {
-  EXPECT_THROW(stdlib_registry::shared_scope()->set_existing("math.pi", value_t{}),
-               std::logic_error);
-  EXPECT_THROW(stdlib_registry::shared_scope()->set("math.pi", value_t{}), std::logic_error);
-  EXPECT_THROW(stdlib_registry::standard().import_module("math", stdlib_registry::shared_scope()),
-               std::logic_error);
+  const environment_ptr scope = stdlib_registry::make_scope();
+  EXPECT_THROW(scope->set_existing("math.pi", value_t{}), std::logic_error);
+  EXPECT_THROW(scope->set("math.pi", value_t{}), std::logic_error);
+  EXPECT_THROW(stdlib_registry().import_module("math", scope), std::logic_error);
 }
 
 // --- per-call allocation limit --------------------------------------------------------------
@@ -628,7 +652,8 @@ TEST(StdlibSlicedTest, ADslFunctionNeedsARunningProgram) {
               call("collections.map", {one_item, value_t{cls}});
             }).find("needs a running program"),
             std::string::npos);
-  const native_fn *abs = stdlib_registry::standard().lookup_qualified("math.abs");
+  const stdlib_registry reg;
+  const native_fn *abs = reg.lookup_qualified("math.abs");
   ASSERT_NE(abs, nullptr);
   EXPECT_EQ(show(call("collections.map", {one_item, value_t{*abs}})), "(1)");
 

@@ -580,6 +580,61 @@ TEST_F(StateDeepTree, JsonLoadsWhatReadJsonLoads) {
   }
 }
 
+// Each reader holds its writes' pins itself, so readers for two apps stepped in turn on one thread,
+// in both orders, and readers for several apps on threads at once each load their own document
+// into their own app.
+TEST_F(StateDeepTree, JsonReadersOfSeveralAppsInterleave) {
+  // A value is set at its own key (relative to the target): objects only nest.
+  const auto doc_for = [](int i) {
+    const std::string s = std::to_string(i);
+    return "{\"who\": \"" + s + "\", \"deep\": {\"deep.a.b\": {\"deep.a.b.c\": \"" + s + s +
+           "\"}}, \"arr\": [\"" + s + "\"]}";
+  };
+  for (int order = 0; order < 2; ++order) {
+    cvc::app a, b;
+    const std::string da = doc_for(1), db = doc_for(2);
+    cvc::state_json_reader ra(cvc::state::instance(a)("t"), da);
+    cvc::state_json_reader rb(cvc::state::instance(b)("t"), db);
+    bool done_a = false, done_b = false;
+    while (!done_a || !done_b) {
+      if (order == 0) {
+        done_a = done_a || ra.step(1);
+        done_b = done_b || rb.step(1);
+      } else {
+        done_b = done_b || rb.step(1);
+        done_a = done_a || ra.step(1);
+      }
+    }
+    cvc::app ca, cb;
+    boost_load(cvc::state::instance(ca)("t"), da);
+    boost_load(cvc::state::instance(cb)("t"), db);
+    EXPECT_EQ(tree_values(cvc::state::instance(a)("t")),
+              tree_values(cvc::state::instance(ca)("t")));
+    EXPECT_EQ(tree_values(cvc::state::instance(b)("t")),
+              tree_values(cvc::state::instance(cb)("t")));
+  }
+
+  constexpr int kApps = 4;
+  std::vector<std::string> who(kApps);
+  std::vector<boost::thread> threads;
+  for (int i = 0; i < kApps; ++i)
+    threads.emplace_back([i, &who, &doc_for] {
+      cvc::app app;
+      const std::string doc = doc_for(i);
+      cvc::state_json_reader r(cvc::state::instance(app)("t"), doc);
+      while (!r.step(1)) {
+      }
+      who[i] = cvc::state::instance(app)("t.who").value() + "/" +
+               cvc::state::instance(app)("t.deep.a.b.c").value();
+    });
+  for (boost::thread &t : threads)
+    t.join();
+  for (int i = 0; i < kApps; ++i) {
+    const std::string s = std::to_string(i);
+    EXPECT_EQ(who[i], s + "/" + s + s);
+  }
+}
+
 TEST_F(StateDeepTree, AMalformedDocumentFailsAsReadJsonDoesAndSetsNothing) {
   // Each starts with a good entry, which must not be set: the document is checked first.
   const std::vector<std::string> bad{

@@ -39,6 +39,8 @@
 #include <cvc/nav/detail/parallel.h>
 #include <cvc/nav/grid_nav.h>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <queue>
 #include <thread>
 
@@ -47,8 +49,44 @@ namespace nav {
 
 namespace {
 
+// Buffers that calls take while they run and hand back for the next (sense_scratch, and an
+// astar_batch's queries): at most one per thread working at once, each reused as it is handed on.
+template <class T> class scratch_pool {
+public:
+  std::unique_ptr<T> take() {
+    std::lock_guard<std::mutex> lock(m_);
+    if (free_.empty())
+      return std::make_unique<T>();
+    std::unique_ptr<T> s = std::move(free_.back());
+    free_.pop_back();
+    return s;
+  }
+  void give(std::unique_ptr<T> s) {
+    std::lock_guard<std::mutex> lock(m_);
+    free_.push_back(std::move(s));
+  }
+
+private:
+  std::mutex m_;
+  std::vector<std::unique_ptr<T>> free_;
+};
+
+// One buffer of a pool, for a scope.
+template <class T> class pool_lease {
+public:
+  explicit pool_lease(scratch_pool<T> &p) : p_(p), s_(p.take()) {}
+  ~pool_lease() { p_.give(std::move(s_)); }
+  pool_lease(const pool_lease &) = delete;
+  pool_lease &operator=(const pool_lease &) = delete;
+  T &operator*() const { return *s_; }
+
+private:
+  scratch_pool<T> &p_;
+  std::unique_ptr<T> s_;
+};
+
 // The EDT itself is cvc::algo's (cvc/algo/distance_transform.h), shared with cvc::world. What
-// build_sdf adds is per-thread too: the two rows it forms phi from, and its per-row y-gradient.
+// build_sdf adds is its own too: the two rows it forms phi from, and its per-row y-gradient.
 struct SdfScratch {
   std::vector<double> row_s, row_n; // [cols] this row's distances to a building / to free space
   std::vector<float> gy;            // [cols] the per-row y-gradient
@@ -60,11 +98,6 @@ struct SdfScratch {
       gy.resize(cols);
   }
 };
-
-SdfScratch &sdf_scratch() {
-  static thread_local SdfScratch s;
-  return s;
-}
 
 // sqrt(a) - sqrt(b) for squared distances a, b >= 0, bit-for-bit, with one sqrt
 // when either is zero. That is every build_sdf cell: a cell is a seed of exactly
@@ -112,7 +145,7 @@ void build_sdf(const std::uint8_t *occ, int rows, int cols, double min_x, double
   // d_out = edt2_squared(occ) (to building) and d_in = edt2_squared(!occ) (to
   // free) come out of ONE binary pass a row at a time, and phi for that row is
   // formed while both rows are hot.
-  SdfScratch &S = sdf_scratch();
+  SdfScratch S;
   S.fit(cols);
   cvc::algo::edt2_squared_rows(
       occ, rows, cols, true,
@@ -275,13 +308,14 @@ struct AStarWorse {
   }
 };
 
-// Per-thread reusable A* scratch. Replaces the per-call `vector(ncells)` alloc +
+// Reusable A* scratch. Replaces the per-call `vector(ncells)` alloc +
 // O(ncells) fill of the came/g_best arrays with a "generation stamp": a cell
 // belongs to THIS search iff its stamp equals the current gen, so a new search
-// is just `++gen` (O(1)) instead of clearing the arrays. Held `thread_local`, so
-// each worker in astar_batch reuses one buffer across the queries it runs. The
-// values and comparisons are identical to the flat-array version — bit-identical
-// results — this only changes how "unvisited" / "g_best = +inf" is represented.
+// is just `++gen` (O(1)) instead of clearing the arrays. astar_batch's queries
+// share a pool of them, so each worker reuses one buffer across the queries it
+// runs. The values and comparisons are identical to the flat-array version —
+// bit-identical results — this only changes how "unvisited" / "g_best = +inf" is
+// represented.
 struct AStarScratch {
   std::vector<long long> came_gen; // came_val[k] belongs to this search iff ==gen
   std::vector<long long> g_gen;    // g_val[k]  belongs to this search iff ==gen
@@ -319,25 +353,32 @@ std::vector<double> clearance_cost(const std::uint8_t *occ, int rows, int cols, 
 namespace {
 
 std::vector<int> astar_impl(const std::uint8_t *occ, int rows, int cols, int start_r, int start_c,
-                            int goal_r, int goal_c, const double *cost, const climb_cost *climb);
+                            int goal_r, int goal_c, const double *cost, const climb_cost *climb,
+                            AStarScratch &S);
+
+const climb_cost *climbing(const climb_cost &climb) {
+  return climb.height && climb.per_metre > 0.0 ? &climb : nullptr;
+}
 
 } // namespace
 
 std::vector<int> astar(const std::uint8_t *occ, int rows, int cols, int start_r, int start_c,
                        int goal_r, int goal_c, const double *cost) {
-  return astar_impl(occ, rows, cols, start_r, start_c, goal_r, goal_c, cost, nullptr);
+  AStarScratch S;
+  return astar_impl(occ, rows, cols, start_r, start_c, goal_r, goal_c, cost, nullptr, S);
 }
 
 std::vector<int> astar(const std::uint8_t *occ, int rows, int cols, int start_r, int start_c,
                        int goal_r, int goal_c, const double *cost, const climb_cost &climb) {
-  return astar_impl(occ, rows, cols, start_r, start_c, goal_r, goal_c, cost,
-                    climb.height && climb.per_metre > 0.0 ? &climb : nullptr);
+  AStarScratch S;
+  return astar_impl(occ, rows, cols, start_r, start_c, goal_r, goal_c, cost, climbing(climb), S);
 }
 
 namespace {
 
 std::vector<int> astar_impl(const std::uint8_t *occ, int rows, int cols, int start_r, int start_c,
-                            int goal_r, int goal_c, const double *cost, const climb_cost *climb) {
+                            int goal_r, int goal_c, const double *cost, const climb_cost *climb,
+                            AStarScratch &S) {
   const std::pair<int, int> start = nearest_free(occ, rows, cols, start_r, start_c);
   const std::pair<int, int> goal = nearest_free(occ, rows, cols, goal_r, goal_c);
   if (start.first < 0 || goal.first < 0)
@@ -350,12 +391,11 @@ std::vector<int> astar_impl(const std::uint8_t *occ, int rows, int cols, int sta
   };
 
   std::priority_queue<AStarNode, std::vector<AStarNode>, AStarWorse> open;
-  // Closed-set / cost arrays keyed by row-major cell index, held per-thread and
-  // reused across searches via a generation stamp (see AStarScratch). Values and
-  // pop order are identical to Python's `came`/`g_best` dicts: a cell is "in
-  // came" iff came_gen[k] == GEN (came_val holds the parent key, -1 == None), and
+  // Closed-set / cost arrays keyed by row-major cell index, the caller's, reused
+  // across searches via a generation stamp (see AStarScratch). Values and pop
+  // order are identical to Python's `came`/`g_best` dicts: a cell is "in came"
+  // iff came_gen[k] == GEN (came_val holds the parent key, -1 == None), and
   // g_best is g_val[k] iff g_gen[k] == GEN else +inf.
-  static thread_local AStarScratch S;
   const int ncells = rows * cols;
   const long long GEN = S.begin(ncells);
   const int start_key = start.first * cols + start.second;
@@ -452,9 +492,12 @@ using cvc::nav::detail::parallel_for; // the shared work-splitter (detail/parall
 std::vector<std::vector<int>> astar_batch(const std::vector<astar_query> &queries, int rows,
                                           int cols, int num_threads) {
   std::vector<std::vector<int>> out(queries.size());
+  scratch_pool<AStarScratch> buffers; // one per worker at a time, reused across its queries
   parallel_for(static_cast<int>(queries.size()), num_threads, [&](int i) {
     const astar_query &q = queries[i];
-    out[i] = astar(q.occ, rows, cols, q.start_r, q.start_c, q.goal_r, q.goal_c, q.cost, q.climb);
+    const pool_lease<AStarScratch> S(buffers);
+    out[i] = astar_impl(q.occ, rows, cols, q.start_r, q.start_c, q.goal_r, q.goal_c, q.cost,
+                        climbing(q.climb), *S);
   });
   return out;
 }
@@ -500,7 +543,8 @@ inline bool in_boxes(const std::int32_t *b, int m, int rr, int cc) {
 
 // Per-agent scratch: generation-stamped free/occ visit counts (a new agent is
 // O(1) via ++gen, not an O(rows*cols) clear — cf. the A* scratch), plus the list
-// of cells this agent's cone touched (its FoV). thread_local, one per worker.
+// of cells this agent's cone touched (its FoV). One per worker at a time, from
+// the sense_scratch's pool.
 struct SenseScratch {
   std::vector<int> free_cnt, occ_cnt;
   std::vector<long long> tgen;
@@ -608,12 +652,26 @@ void raycast_agent(int i, const std::uint8_t *truth, int rows, int cols, double 
 
 } // namespace
 
+struct sense_scratch::impl : scratch_pool<SenseScratch> {};
+
+sense_scratch::sense_scratch() : impl_(std::make_unique<impl>()) {}
+sense_scratch::~sense_scratch() = default;
+sense_scratch::sense_scratch(sense_scratch &&) noexcept = default;
+sense_scratch &sense_scratch::operator=(sense_scratch &&) noexcept = default;
+
 void sense_batch(const std::uint8_t *truth, int rows, int cols, double min_x, double min_y,
                  double max_x, double max_y, const sense_agents &ag, const std::int32_t *peer_boxes,
                  int kmax, const std::int32_t *mover_boxes, int n_movers,
                  const belief_planes &planes, double l_occ, double l_free, double l_clamp,
-                 std::int32_t *flips_out, int num_threads, thread_pool *pool) {
+                 std::int32_t *flips_out, int num_threads, thread_pool *pool,
+                 sense_scratch *scratch) {
   const int N = ag.n;
+  std::unique_ptr<sense_scratch::impl> mine;
+  sense_scratch::impl *buffers = scratch ? scratch->get() : nullptr;
+  if (!buffers) {
+    mine = std::make_unique<sense_scratch::impl>();
+    buffers = mine.get();
+  }
 
   // Phase A — RAYCAST every agent in parallel. The raycast reads only `truth`
   // and the agent's own boxes, so it is order-free and fully parallel across ALL
@@ -623,9 +681,9 @@ void sense_batch(const std::uint8_t *truth, int rows, int cols, double min_x, do
   // produces the same touched cells + counts regardless of when it runs.
   std::vector<agent_sense> res(N);
   parallel_for(pool, N, num_threads, [&](int i) {
-    thread_local SenseScratch S;
+    const pool_lease<SenseScratch> S(*buffers);
     raycast_agent(i, truth, rows, cols, min_x, min_y, max_x, max_y, ag, peer_boxes, kmax,
-                  mover_boxes, n_movers, S, res[i]);
+                  mover_boxes, n_movers, *S, res[i]);
   });
 
   // Bucket agents by plane, preserving ascending global index within each — the

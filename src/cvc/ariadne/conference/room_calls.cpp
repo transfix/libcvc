@@ -1,9 +1,10 @@
 // room_calls.cpp — see the header: room-call's wire format, the relay's side and a client's.
 
+#include "message_ids.h"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <cstdio>
 #include <cstring>
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
 #include <cvc/ariadne/conference/room_calls.h>
@@ -20,7 +21,6 @@
 #include <cvc/state/state_message.h>
 #include <cvc/state/state_transport.h>
 #include <mutex>
-#include <random>
 #include <span>
 #include <unordered_map>
 #include <utility>
@@ -32,25 +32,6 @@ namespace conference {
 namespace se = cvc::state_exec;
 
 namespace {
-
-// The message ids of one relay or client: a random tag of its own, then a count. The bus drops an
-// id it has seen from the same origin, so a client that joins again with the same pid, or a second
-// relay on a shard, must not repeat one.
-class message_ids {
-public:
-  message_ids() {
-    std::random_device rd;
-    const unsigned long long r = (static_cast<unsigned long long>(rd()) << 32) ^ rd();
-    char tag[17];
-    std::snprintf(tag, sizeof tag, "%016llx", r);
-    _tag = tag;
-  }
-  std::string next() { return _tag + "-" + std::to_string(_n.fetch_add(1) + 1); }
-
-private:
-  std::string _tag;
-  std::atomic<std::uint64_t> _n{0};
-};
 
 // The wire: DSL values as CBOR (value_cbor.h), symbols as themselves, so every data value keeps its
 // type between client and relay. No handle table: a host object, like a function, doesn't cross.

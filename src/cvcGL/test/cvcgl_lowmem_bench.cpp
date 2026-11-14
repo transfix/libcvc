@@ -112,6 +112,7 @@ void swapInTally(PeekNode &n) {
   if (!old)
     return;
   vtkNew<TallyMapper> m;
+  m->setApp(n.app()); // the node's app's draw path, as the mapper it replaces had
   m->SetInputData(vtkPolyData::SafeDownCast(old->GetInput()));
   m->SetScalarVisibility(old->GetScalarVisibility());
   m->SetScalarMode(old->GetScalarMode());
@@ -304,7 +305,7 @@ LowMemoryPolyDataMapper::Stats sumStats(Bench &b) {
 }
 
 Run measure(Bench &b, DrawPath path, bool bake, int frames, int &frameNo, bool counted) {
-  LowMemoryPolyDataMapper::setDrawPath(path);
+  LowMemoryPolyDataMapper::setDrawPath(b.sg.appContext(), path);
   if (counted)
     cvcgl_test::glcallsInstall();
   else
@@ -462,13 +463,13 @@ int main(int argc, char **argv) {
                      : "shadows OFF",
              st, ft, sc, fc);
       // Same pose on both paths, then compare the frames.
-      LowMemoryPolyDataMapper::setDrawPath(DrawPath::Stock);
+      LowMemoryPolyDataMapper::setDrawPath(b.sg.appContext(), DrawPath::Stock);
       poseVehicles(b, 7);
       if (bake)
         b.sg.invalidateShadowBake();
       b.sr->render();
       const auto a = rgba(b);
-      LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
+      LowMemoryPolyDataMapper::setDrawPath(b.sg.appContext(), DrawPath::Fast);
       if (bake)
         b.sg.invalidateShadowBake();
       b.sr->render();

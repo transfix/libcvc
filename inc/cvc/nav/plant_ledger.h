@@ -29,6 +29,7 @@
 
 #include <cstdint>
 #include <cvc/nav/nav_stats.h>
+#include <span>
 #include <vector>
 
 namespace cvc {
@@ -55,9 +56,9 @@ struct plant_ledger_item {
   double (*ep)(const episode_nav_stats &);
 };
 
-// Each vehicle's items, then the episode's, in their JSON order.
-const std::vector<plant_ledger_item> &plant_ledger_vehicle();
-const std::vector<plant_ledger_item> &plant_ledger_episode();
+// Each vehicle's items, then the episode's, in their JSON order: constant tables.
+std::span<const plant_ledger_item> plant_ledger_vehicle();
+std::span<const plant_ledger_item> plant_ledger_episode();
 
 // Whether `it` has a value for this vehicle (episode): its plant fed its source and measures
 // what it is reduced from. False: not applicable.

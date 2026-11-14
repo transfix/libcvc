@@ -36,6 +36,8 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -65,13 +67,6 @@ struct overlay_task {
   unsigned generation = 0; // the volume it computes from (see impl::generation)
   std::shared_ptr<overlay_mailbox> mailbox;
 };
-
-// The scheduler owner tag of a binding's tasks, unique to the binding ("tf#<n>:<model key>"), so
-// a kill_owner of it stops exactly this binding's tasks.
-std::string task_owner(const std::string &model_key) {
-  static std::atomic<unsigned long long> seq{0};
-  return "tf#" + std::to_string(seq.fetch_add(1, std::memory_order_relaxed)) + ":" + model_key;
-}
 
 // --- small numeric helpers ----------------------------------------------------------------------
 
@@ -167,40 +162,38 @@ std::string overlay_names(unsigned bits) {
 
 // --- the live-binding registry (find_transfer_function) ------------------------------------------
 
-using registry_key = std::pair<const cvc::app *, std::string>;
+// An app's transfer-function bindings, by model key: a binding on another app shares nothing with
+// them.
+struct tf_bindings {
+  static constexpr const char *app_slot = "cvc.gl.ariadne.tf-bindings";
+  std::mutex m;
+  // The live binding of each model key (find_transfer_function).
+  std::map<std::string, std::weak_ptr<tf_binding>> live;
+  // The seed each model key was last given on this app. A re-realize (a document hot-reload)
+  // finds the key still holding the previous seed when nobody edited it: the document's new
+  // transfer function then replaces it, exactly as the renderer's own keys are re-configured.
+  // A key that differs was edited (or restored from a saved session) and is kept.
+  std::map<std::string, std::string> seeds;
+  // Whose <tf>.overlay_status it is, per model key: the owner tag of the newest binding for the
+  // key. A hot reload builds the new binding (whose histogram task says "computing histogram...")
+  // before the old one is destroyed, so a binding that stops for good leaves the status idle only
+  // while it is still its own.
+  std::map<std::string, std::string> status_owners;
+  // Numbers the bindings' scheduler owner tags (task_owner).
+  unsigned long long next_owner = 0;
 
-std::mutex &registry_mutex() {
-  static std::mutex m;
-  return m;
-}
+  void prune() { // m held
+    for (auto it = live.begin(); it != live.end();)
+      it = it->second.expired() ? live.erase(it) : std::next(it);
+  }
+};
 
-std::map<registry_key, std::weak_ptr<tf_binding>> &registry() {
-  static std::map<registry_key, std::weak_ptr<tf_binding>> r;
-  return r;
-}
-
-void prune_registry() {
-  auto &r = registry();
-  for (auto it = r.begin(); it != r.end();)
-    it = it->second.expired() ? r.erase(it) : std::next(it);
-}
-
-// The seed each model key was last given in this process. A re-realize (a document hot-reload)
-// finds the key still holding the previous seed when nobody edited it: the document's new
-// transfer function then replaces it, exactly as the renderer's own keys are re-configured.
-// A key that differs was edited (or restored from a saved session) and is kept.
-std::map<registry_key, std::string> &seed_memory() {
-  static std::map<registry_key, std::string> m;
-  return m;
-}
-
-// Whose <tf>.overlay_status it is, per model key: the owner tag of the newest binding for the key.
-// A hot reload builds the new binding (whose histogram task says "computing histogram...") before
-// the old one is destroyed, so a binding that stops for good leaves the status idle only while it
-// is still its own. Guarded by registry_mutex().
-std::map<registry_key, std::string> &status_owners() {
-  static std::map<registry_key, std::string> m;
-  return m;
+// The scheduler owner tag of a binding's tasks, unique to the binding on its app ("tf#<n>:<model
+// key>"), so a kill_owner of it stops exactly this binding's tasks.
+std::string task_owner(cvc::app &app, const std::string &model_key) {
+  tf_bindings &b = app.slot<tf_bindings>();
+  std::lock_guard<std::mutex> lock(b.m);
+  return "tf#" + std::to_string(b.next_owner++) + ":" + model_key;
 }
 
 } // namespace
@@ -357,11 +350,11 @@ struct tf_binding::impl {
     cancel_tasks();
     bool mine = false;
     {
-      std::lock_guard<std::mutex> lock(registry_mutex());
-      auto &owners = status_owners();
-      const auto it = owners.find({app, model_key});
-      if (it != owners.end() && it->second == owner) {
-        owners.erase(it);
+      tf_bindings &b = app->slot<tf_bindings>();
+      std::lock_guard<std::mutex> lock(b.m);
+      const auto it = b.status_owners.find(model_key);
+      if (it != b.status_owners.end() && it->second == owner) {
+        b.status_owners.erase(it);
         mine = true;
       }
     }
@@ -372,12 +365,12 @@ struct tf_binding::impl {
   // The idle <tf>.overlay_status: every reason in `notes` as one "unavailable: a; b" note
   // (note_unavailable's form), "" when nothing is missing.
   std::string idle_status() const {
-    static const std::string head = "unavailable: ";
+    constexpr std::string_view head = "unavailable: ";
     std::string s;
     for (const auto &n : notes) {
       if (n.second.empty())
         continue;
-      s += s.empty() ? head : "; ";
+      s += s.empty() ? head : std::string_view("; ");
       s += n.second.compare(0, head.size(), head) == 0 ? n.second.substr(head.size()) : n.second;
     }
     return s;
@@ -946,12 +939,13 @@ tf_binding::tf_binding(std::shared_ptr<GraphicsNode> node, tf_target target, con
   d.base = node->stateName();
   d.name = node->getName();
   _model_path = d.model_key = node->stateName("transfer_function");
-  d.owner = task_owner(d.model_key);
+  d.owner = task_owner(*d.app, d.model_key);
+  tf_bindings &bindings = d.app->slot<tf_bindings>();
   {
     // The newest binding for a key owns its overlay_status (a predecessor being replaced by a hot
     // reload leaves it alone).
-    std::lock_guard<std::mutex> lock(registry_mutex());
-    status_owners()[{d.app, d.model_key}] = d.owner;
+    std::lock_guard<std::mutex> lock(bindings.m);
+    bindings.status_owners[d.model_key] = d.owner;
   }
   d.opt.seed.normalize();
   d.seed_str = cvc::tf::to_string(d.opt.seed);
@@ -992,8 +986,8 @@ tf_binding::tf_binding(std::shared_ptr<GraphicsNode> node, tf_target target, con
   std::string before = ari::read_or<std::string>(a, d.model_key, "");
   bool reseed = before.empty();
   {
-    std::lock_guard<std::mutex> lock(registry_mutex());
-    std::string &prev = seed_memory()[{d.app, d.model_key}];
+    std::lock_guard<std::mutex> lock(bindings.m);
+    std::string &prev = bindings.seeds[d.model_key];
     reseed = reseed || (!prev.empty() && before == prev);
     prev = d.seed_str;
   }
@@ -1117,19 +1111,21 @@ std::shared_ptr<tf_binding> attach_transfer_function(RealizedScene &out,
     return nullptr;
   }
   {
-    std::lock_guard<std::mutex> lock(registry_mutex());
-    prune_registry();
-    registry()[{&node->app(), b->model_path()}] = b;
+    tf_bindings &bindings = node->app().slot<tf_bindings>();
+    std::lock_guard<std::mutex> lock(bindings.m);
+    bindings.prune();
+    bindings.live[b->model_path()] = b;
   }
   out.custom_ticks.push_back([b](vtkRenderer *) { b->tick(); });
   return b;
 }
 
 std::shared_ptr<tf_binding> find_transfer_function(cvc::app &app, const std::string &model_path) {
-  std::lock_guard<std::mutex> lock(registry_mutex());
-  prune_registry();
-  auto it = registry().find({&app, model_path});
-  return it == registry().end() ? nullptr : it->second.lock();
+  tf_bindings &bindings = app.slot<tf_bindings>();
+  std::lock_guard<std::mutex> lock(bindings.m);
+  bindings.prune();
+  auto it = bindings.live.find(model_path);
+  return it == bindings.live.end() ? nullptr : it->second.lock();
 }
 
 } // namespace ariadne

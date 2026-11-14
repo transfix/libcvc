@@ -144,7 +144,9 @@ public:
   std::uint64_t forwarded_through_link_count() const noexcept;
 
   // Suppression guard: while held on a given thread, local state
-  // changes on that thread are NOT journaled. Useful for bulk loads
+  // changes on that thread to this adapter's app are NOT journaled, by
+  // this adapter or another on the same app. Another app's changes are
+  // (each app keeps its own suppressed threads). Useful for bulk loads
   // and tests. Re-entrant.
   class suppression_scope {
   public:
@@ -202,10 +204,16 @@ private:
   void dispatch_local(const state_mutation &m);
 
   // True if the calling thread is currently applying a remote
-  // mutation (or holds a suppression_scope).
+  // mutation to this app (or holds a suppression_scope on it).
   bool current_thread_suppressed() const noexcept;
 
+  // The threads applying a remote mutation to the app, or holding a suppression_scope on it, with
+  // their depths: the app's own (app::slot), shared by every adapter on the app.
+  struct suppression;
+  struct suppression_guard;
+
   app &_ctx;
+  suppression &_suppression;
   std::string _root_path; // empty => whole tree
   std::string _local_node_id;
 
