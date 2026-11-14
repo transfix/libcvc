@@ -21,6 +21,9 @@ from fastapi import FastAPI
 from pycvc.ariadne import Host, serve_asgi
 
 host = Host()
+# The tasks this program starts, kept until the loop ends: the loop holds a task only weakly, and a
+# collection while one waits on a stream of its own would free it.
+tasks = []
 
 
 @contextlib.asynccontextmanager
@@ -87,7 +90,7 @@ async def selftest():
         assert host.get_tree("svc.items")[39] == {"id": "39", "name": "item39"}
         print("selftest: the server document read the 40 items", flush=True)
 
-        asyncio.ensure_future(get(port, "/slow"))
+        tasks.append(host.loop.create_task(get(port, "/slow")))
         await asyncio.sleep(0.1)  # the request is in flight
         signal.raise_signal(signal.SIGINT)
     except Exception as e:  # noqa: BLE001 - the test's verdict
@@ -95,6 +98,6 @@ async def selftest():
         host.stop(1)
 
 
-host.loop.create_task(selftest())
+tasks.append(host.loop.create_task(selftest()))
 serve_asgi(app, host="127.0.0.1", port=0)
 print(f"service: host.run() returned {host.run()}", flush=True)
