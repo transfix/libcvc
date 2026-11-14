@@ -17,6 +17,7 @@
 #include <cvc/geometry/mesh_ops.h>     // mesh_ops_available() — source.sdf.algorithm: igl
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
+#include <cvc/gl/LabelLayer.h> // label: and entity_labels: (scene_labels.h)
 #include <cvc/gl/LightNode.h>
 #include <cvc/gl/LodGraphicsNode.h> // RealizeOptions::lod: a mesh node as a LOD ladder
 #include <cvc/gl/LodPyramidCache.h>
@@ -25,6 +26,7 @@
 #include <cvc/gl/VolRenNode.h>
 #include <cvc/gl/VolSliceNode.h>
 #include <cvc/gl/VolumeNode.h>
+#include <cvc/gl/ariadne/scene_labels.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/tf_binding.h>    // every volume node's editable transfer-function model
 #include <cvc/gl/ariadne/vehicle_view.h>  // the world's vehicles, drawn on their chassis
@@ -841,6 +843,7 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
     return;
   apply_transform(*node, n); // the node's LOCAL transform (composed with the parent's)
   apply_visibility(*node, n, sg.appContext(), bind_prefix, out.visibility);
+  apply_scene_label(sg, node, n, out, warnings); // label: over the node
   if (n.has_casts_shadow) // receives shadows either way; a non-caster never forces a re-bake
     node->setCastsShadow(n.casts_shadow);
   // shader: { preset | vertex | fragment } — the declarative GLSL surface — and material.opaque.
@@ -1186,6 +1189,9 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   out.has_main_view = scene.has_main_view;
   out.main_show = scene.main_show;
   out.main_hide = scene.main_hide;
+  out.entity_labels = scene.entity_labels;
+  if (!scene.entity_labels.empty()) // the labels' layer now, so it is this scene's (out.created)
+    LabelLayerNode::of(sg);
   // Resolve the clock's key paths to absolute state paths now, with the host bind prefix — the SAME
   // rule widget binds use (resolve_bind) — so the clock and a sim_transport slider on `sim.speed`
   // land on one key. Resolved once here (like the visibility bindings), so tick_scene stays prefix-

@@ -2770,6 +2770,68 @@ made for:
   backends' paths, `cvcgl_imgui_rich_text` taps, drags and tabs through ImGui's own input, and
   `ari_rich_text` checks `ari snapshot`'s lines of `src/ari/tests/rich_text.ari`.
 
+### 5.21 Labels: `label:` and `entity_labels:`
+
+Any scene node can carry a label ([`scene_labels.h`](../inc/cvc/gl/ariadne/scene_labels.h)): text
+drawn over the node in screen space, such as a vehicle's name tag. The labels of a scene are drawn
+by one node, a `cvc::gl::LabelLayerNode` ([`LabelLayer.h`](../inc/cvc/gl/LabelLayer.h)), in the
+overlay pass. Each draw reads the label's anchor from its node's world transform; nothing is
+written to state.
+
+```yaml
+- node: car_a
+  source: { box: [4, 2, 1.5] }
+  label:
+    text: Alpha                       # or bind: <state key>, read as it draws
+    offset: 2                         # metres above the top of the node (or [x, y, z])
+    color: [1, 1, 1]                  # the text: [r, g, b], "#rrggbb" or c0..c7
+    backdrop: [0.05, 0.05, 0.07]      # the box behind the text, or none
+    edge: c0                          # a frame round the box (or true, or none)
+    size: 14                          # pixels at scale 1
+    scale: 1                          # a number or a state key
+    focus: { key: cam.follow, scale: 1.4 }   # larger while cam.follow holds this node's id
+    fade: [300, 600]                  # whole nearer than 300 m, gone past 600 m
+```
+
+- **Text.** `label: <text>` is the text alone. A label with neither `text:` nor `bind:` shows the
+  node's id. `bind:` takes the key's value while it holds one; `bold: true` is bold.
+- **Where it sits.** `anchor:` is `top` (the top of the node's bounds, the default), `center` or
+  `origin`. `offset:` is added to that point in world axes. The text sits centred above the
+  point.
+- **Backdrop and edge.** The backdrop is a box behind the text, at `backdrop_opacity` (0.6). The
+  edge is a frame round it, `edge_width` pixels wide.
+- **Size.** `scale:` multiplies `size:`. `focus:` multiplies it again by its `scale` (1.4) while its
+  key holds its `value`: the node's id by default, e.g. the vehicle the camera follows.
+- **Fade and cull.** `fade: [near, far]` is by the distance from the camera drawing it. The label
+  is whole up to `near`, fades linearly to nothing at `far`, and is not drawn past it.
+- **Depth order.** Labels are drawn farthest first, so a nearer label lies over a farther one.
+- **Views.** A label is drawn only where its node is. A hidden node's label is hidden. A view that
+  leaves the node out (`tags:`, §5.18) leaves its label out. A mirror or viewport fades and orders
+  the labels by its own camera.
+- **Cost.** The text is rasterised again only when its text, size or opacity changes. Opacity is
+  in 32 steps across the fade band. A still label costs a projection and a quad.
+
+The node's own VTK label (the `show_label`, `label_text` and `label_size` keys of every graphics
+node) is still there. It is plain text at the node's centre; `label:` is the one with these rules.
+
+`entity_labels:` in the `scene:` block gives every world entity (§5.4's world vehicles, **Entities**, drawn
+as `vehicle_<id>`) a label in the same keys. Its text is `"{name}"` by default, and `{name}`, `{id}`,
+`{archetype}` and `{team}` are filled in. An unnamed entity shows its node's id.
+`entity_labels: true` gives the default look, e.g.
+`entity_labels: { offset: 2.5, fade: [300, 600], focus: cam.follow }`. A label is made with each
+entity's node and goes with it.
+
+[`cvcgl_ariadne_labels`](../src/cvcGL/test/cvcgl_ariadne_labels.cpp) covers these from a document,
+drawn for real:
+
+- the fade rule, and a label culled past `far`;
+- the pixels of a label's text, backdrop and edge above its node;
+- the depth order;
+- bound text, scale and focus;
+- hidden nodes, and a renderer that leaves a node out;
+- that a still frame rasterises nothing again;
+- an entity's name label.
+
 ## 6. Composition: include / import / load
 
 Three mechanisms compose documents. They differ in **isolation**, not in how they

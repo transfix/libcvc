@@ -1136,6 +1136,16 @@ add_executable(cvcgl_ariadne_physics test/cvcgl_ariadne_physics.cpp)
 target_link_libraries(cvcgl_ariadne_physics PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_physics COMMAND cvcgl_ariadne_physics)
 
+# Scene node labels (scene_labels.h, LabelLayer.h): label: from a document, drawn for real -- the
+# fade and cull rule, the text over its backdrop and edge, depth order, bound text, scale and
+# focus, views, and entity_labels: on a world entity.
+# Desktop GL (an offscreen render), like the streaming tests.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_labels test/cvcgl_ariadne_labels.cpp)
+  target_link_libraries(cvcgl_ariadne_labels PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_labels COMMAND cvcgl_ariadne_labels)
+endif()
+
 # Ariadne data in the scene (docs/roadmap/ARIADNE_DATA_ROADMAP.md): a source: { data } node draws its
 # dataset once it loads, and again when the dataset is replaced. Headless.
 add_executable(cvcgl_ariadne_data test/cvcgl_ariadne_data.cpp)
