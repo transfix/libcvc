@@ -321,6 +321,48 @@ void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) 
   }
 }
 
+void pose_vehicle_wheels(RealizedScene &r) {
+  if (!r.world || !r.sg)
+    return;
+  ari::WorldVehicles *v = r.world->vehicles();
+  if (!v || r.vehicle_markers.empty())
+    return;
+  SceneGraph &sg = *r.sg;
+  for (const auto &[node, chassis] : r.vehicle_markers) {
+    const std::shared_ptr<GraphicsNode> group = sg.getGraphics(node);
+    const std::shared_ptr<GraphicsNode> first =
+        group ? group->findChildByName(node + "_wheel0") : nullptr;
+    if (!first) // a mesh look
+      continue;
+    const std::uint64_t id = std::stoull(node.substr(std::string("vehicle_").size()));
+    const std::vector<ari::entity_wheel> wheels = v->wheels(id);
+    if (wheels.empty())
+      continue;
+    // The look's four (front left, front right, rear left, rear right) each take the plant's wheel
+    // nearest it.
+    for (int k = 0; k < 4; ++k) {
+      const std::shared_ptr<GraphicsNode> w =
+          k == 0 ? first : group->findChildByName(node + "_wheel" + std::to_string(k));
+      if (!w)
+        continue;
+      const double sx = k < 2 ? 1.0 : -1.0, sy = k % 2 == 0 ? 1.0 : -1.0;
+      const ari::entity_wheel *best = nullptr;
+      for (const ari::entity_wheel &e : wheels)
+        if ((e.x >= 0.0) == (sx > 0.0) && (e.y >= 0.0) == (sy > 0.0) &&
+            (!best || std::fabs(e.x) > std::fabs(best->x)))
+          best = &e;
+      if (!best)
+        continue;
+      // Turned about its own upright by its steer, at its centre: the per-frame pose path
+      // (change-detected, published rather than written).
+      const double c = std::cos(best->steer), sn = std::sin(best->steer);
+      const double m[16] = {c,   -sn, 0.0, best->x, sn,  c,   0.0, best->y,
+                            0.0, 0.0, 1.0, best->z, 0.0, 0.0, 0.0, 1.0};
+      w->setPoseMatrix(m);
+    }
+  }
+}
+
 void sync_spawn_markers(RealizedScene &r, std::vector<std::string> *warnings) {
   if (!r.world || !r.sg)
     return;

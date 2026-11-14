@@ -1072,7 +1072,7 @@ scene:
   - **Restart.** `sim.restart` rebuilds only the world on.
 - **Vehicles.** The document's top-level `world:` block lists the vehicles it offers
   ([`world_rules.h`](../inc/cvc/ariadne/world_rules.h)), and the scene's world runtime spawns
-  them as Jolt vehicles into the scene's own physics world, headless or drawn
+  them into the scene's own physics world, headless or drawn
   ([`world_vehicles.h`](../inc/cvc/ariadne/world_vehicles.h)). They collide with the scene's
   bodies, step on the world clock with them, and drive on the world that is on:
 
@@ -1087,13 +1087,28 @@ scene:
         racer:
           vehicle: { preset: roboracer, max_speed: 6 }       # a preset with overrides
           look: { file: racer.glb, scale: 1, yaw: 90, z: 0 } # default: the chassis box
+        truck:
+          plant: dynamic4w:humvee                            # the four-wheel model, a Humvee
   ```
 
-  - **Archetypes.** Each names its plant (`jolt`; `kinematic`, `dynamic` and `dynamic4w` are
-    accepted but not run in a scene world yet), its body (a preset, with `mass`, `max_speed`,
+  - **Archetypes.** Each names its plant, its body (a preset, with `mass`, `max_speed`,
     `max_accel`, `max_decel` or `max_steer` over it), its look, the ranges a spawn's settings are
     held to, and its controllers: `nav@1`, the navigator, `none`, or `external` (its intent
     alone drives it).
+  - **Plants.** Every plant runs in the scene's world, on its clock, and meets its bodies (the
+    buildings, the props, the other vehicles):
+
+    | `plant:` | The vehicle | Its body in the world |
+    |---|---|---|
+    | `jolt` (the default) | a Jolt vehicle: wheels, suspension, engine and gearbox | the vehicle's chassis |
+    | `dynamic` (`dynamic:<preset>`) | the dynamic single-track model: tires, load transfer, actuator lag, with its energy books | its chassis box, which the world's contacts push back into the model |
+    | `dynamic4w` (`dynamic4w:<preset>`) | the four-wheel model with suspension: each wheel on the ground under it | as `dynamic`'s |
+    | `kinematic` | nav's bicycle | a kinematic box: it pushes what it meets, and nothing stops it (the navigator keeps it off the buildings) |
+
+    `dynamic:<preset>` names the vehicle as `vehicle: <preset>` does. The dynamic models take one
+    substep of each world step, so they step with everything else; each plant's entities have a
+    navigator of their own on the world's grid. The kinematic bicycle steers each of its
+    substeps, so it has no one command to blend with: there a `blend` intent replaces.
   - **Looks.** With no `look:`, a humvee is the real Humvee, the vehicle-humvee package's
     `Humvee.glb`, when it is installed (`find_vehicle_model`: beside `$CVC_NAV_BUNDLE`, else in
     `share/cvc-scenes/shared` or `share/cvc-scenes/*/` under `$CVC_PREFIX`, `$CVCPKG_PREFIX`,
@@ -1115,9 +1130,10 @@ scene:
     `selected` and `selection.*` (the selected archetype as a spawn would make it now), and
     `status`. Under `entities`: `ids`, `count`, `rev`, `summary`, and for each entity its
     identity, pose (`x`, `y`, `z`, `yaw`), `speed`, `power_kw`, `energy_wh`, `wh_per_km`,
-    `distance`, `wheel_load`, `aero_force` and `gear`, and `command.steer` / `command.accel`
+    `distance`, `wheel_load`, `aero_force` and `gear` (the dynamic models give their books'
+    power and energy, and an odometer), and `command.steer` / `command.accel`
     (what its plant took on the last navigator tick) with `command.by` (its controller, `intent`,
-    `blend`, or `hold`). `physics.stats.vehicles` has a line per vehicle.
+    `blend`, or `hold`). `physics.stats.vehicles` has a line per vehicle, its plant named.
   - **Intents.** Any entity can be steered from outside. A document, a script or a server writes
     its keys, and a C++ or Python host calls `WorldVehicles::set_intent` (`pycvc.WorldEntities`,
     below). Each navigator tick (20 Hz) reads them, and a change replaces the intent it had:
@@ -1146,7 +1162,9 @@ scene:
     `vehicles.spawn.request`. The result is in `vehicles.spawn.status`. `vehicles.remove.id`
     with `remove.request` removes one, and `clear.request` removes them all.
   - **Drawing.** cvcGL draws each entity on its chassis, posed between steps as the other moving
-    bodies are. A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
+    bodies are. The box look poses each wheel where its plant has it
+    (`WorldVehicles::wheels`): a Jolt wheel on its suspension, a dynamic4w wheel on the ground
+    under it, the front ones steered (Ackermann's on a dynamic4w). A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
     `spin:` in degrees a second) draws the selected archetype in the spawn's colours.
   - **The panel.** `vehicle_selector.ari`: the vehicle, its stats, a preview viewport onto a
     `scenes:` entry holding a `vehicle_preview` node (its header shows one), the settings, the

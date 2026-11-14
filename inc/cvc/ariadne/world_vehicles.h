@@ -48,8 +48,19 @@ namespace ariadne {
 // The vehicles a world document offers (world: vehicles: archetypes:) become entities: each one
 // spawned from an archetype, with an identity (a name, a team, two colours, metadata), a
 // controller (nav@1, the navigator with a policy of its own, or none: it holds still) and its
-// settings within the archetype's ranges. Its body is a Jolt vehicle in the world's own physics
-// world, so it collides with the scene's bodies, and it steps on the world clock with them.
+// settings within the archetype's ranges. Its body is in the world's own physics world, so it
+// collides with the scene's bodies (their buildings too), and it steps on the world clock with
+// them, on its archetype's plant:
+//
+//   jolt       a Jolt vehicle (nav_plant, which commands it; the world steps it)
+//   dynamic    the dynamic single-track model (dyn_bike_plant), its chassis box a body
+//   dynamic4w  the four-wheel model with suspension (dyn_4w_plant), its chassis box a body
+//   kinematic  nav's bicycle, its chassis box a kinematic body that pushes what it meets (nav
+//              keeps it off the buildings; nothing stops it)
+//
+// The dynamic models take one substep of each world step, so they step on the world's clock with
+// everything else. The entities on each plant have a navigator of their own (a navigator drives
+// one plant), all on the world's grid and the same tick.
 //
 // One WorldVehicles per world runtime (SceneWorld), with no process-wide state: a host that runs
 // several worlds (a relay's rooms) runs one each, under its own keys.
@@ -135,6 +146,15 @@ struct entity_intent {
 const char *intent_mode_name(entity_intent::mode m);
 bool parse_intent_mode(const std::string &s, entity_intent::mode &out);
 
+// A wheel as it is drawn, in its vehicle's chassis box's frame (m from the box's centre: x
+// forward, y left, z up): its centre, its steering angle (rad, + left), and whether it is on the
+// ground. Front to back by axle, each axle's left wheel first.
+struct entity_wheel {
+  double x = 0.0, y = 0.0, z = 0.0;
+  double steer = 0.0;
+  bool down = true;
+};
+
 // An entity as it is now.
 struct entity_info {
   std::uint64_t id = 0;
@@ -149,6 +169,7 @@ struct entity_info {
   int gear = 0;
   double rpm = 0.0, throttle = 0.0, brake = 0.0;
   bool reached = false; // at its goal (nav@1 then draws another)
+  std::string plant;    // its archetype's: jolt, dynamic, dynamic4w or kinematic
   // The command its plant took on the last navigator tick: rad and m/s^2, as entity_intent's.
   double command_steer = 0.0, command_accel = 0.0;
   entity_intent intent; // as of the last navigator tick
@@ -188,8 +209,8 @@ public:
   const WorldSpawns &spawns() const;
 
   // Spawn one: its id, or 0 and why (an archetype that is not one, a controller it does not
-  // allow, a plant a scene world does not run yet, a policy that cannot be loaded). Without a
-  // grid it is kept and placed once there is one.
+  // allow, a policy that cannot be loaded). Without a grid it is kept and placed once there is
+  // one.
   std::uint64_t spawn(const entity_spec &spec, std::string *why = nullptr);
   bool despawn(std::uint64_t id);
   void clear();
@@ -211,19 +232,26 @@ public:
   // Read the request keys: the selected archetype and settings (its keys follow), a spawn, a
   // removal, a clear.
   void poll();
-  // Before each physics step: every k-th (k = nav's tick / the step) runs the navigator's tick,
-  // which commands every vehicle for the steps until the next. That tick reads the intent keys
-  // first: an intent key's change replaces that entity's intent, as set_intent() does.
+  // Around each physics step. Before it: every k-th (k = nav's tick / the step) runs the
+  // navigators' tick, which commands every vehicle for the steps until the next; that tick reads
+  // the intent keys first (an intent key's change replaces that entity's intent, as set_intent()
+  // does). Then the dynamic models' substep, and the kinematic boxes a step along the bicycle's
+  // path. After it: the dynamic models take back what the step's contacts did.
   void before_step();
+  void after_step();
   // The entities' keys and the selection's, now.
   void publish();
 
   std::vector<entity_info> entities() const;
+  // Entity `id`'s wheels as drawn (entity_wheel), as of the last step: a view poses each one.
+  // Empty for an id that is not a placed entity.
+  std::vector<entity_wheel> wheels(std::uint64_t id) const;
   std::size_t size() const;
   // Bumps whenever a chassis comes or goes (a spawn, a removal, a new grid, a restart): a view
   // binds its drawings to the chassis again.
   std::uint64_t revision() const;
-  // A line per entity for physics.stats.vehicles: id, name, speed, power, energy.
+  // A line per entity for physics.stats.vehicles: id, name, plant, speed, power, energy, wheel
+  // load.
   std::string stats_lines() const;
   const std::string &status() const;
 

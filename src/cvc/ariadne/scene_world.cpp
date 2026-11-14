@@ -1146,6 +1146,8 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
     if (d.vehicles)
       d.vehicles->before_step();
     d.last = d.world->step();
+    if (d.vehicles)
+      d.vehicles->after_step();
     d.step_history.push_back(d.last.step_ms);
     if (d.step_history.size() > 120)
       d.step_history.pop_front();

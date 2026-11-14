@@ -1517,6 +1517,7 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
       cvc::gl::physics_scene_binding &view = *realized.physics_binding;
       realized.world->follow(wc, [&view] { view.tracker().capture(); });
       sync_vehicle_markers(realized, nullptr); // spawned, removed or placed again: drawn again
+      pose_vehicle_wheels(realized);           // each wheel where its plant has it
       sync_spawn_markers(realized, nullptr);   // the spawn points, as edited
       view.present(wc, clock_step.alpha);
     } catch (const std::exception &e) {
