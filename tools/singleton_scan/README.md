@@ -38,14 +38,24 @@ The scan fails on
 - a symbol that is not on [allowlist.txt](allowlist.txt): new process-wide state;
 - an allowlist line this build no longer has: the object moved onto the app, so delete the line.
 
-The allowlist ends at what belongs to the process, not to libcvc (roadmap §9 item 5, settled
-2026-11-14):
+The allowlist ends at the documented list Joe settled on 2026-11-14 (roadmap §9 item 5). Each
+group in `allowlist.txt` carries the reason it stays, written by `scan.py` from its
+`WHY_IT_STAYS` table:
 
-- the pointer a signal handler follows to the app its signals go to (`host_signals.cpp`);
-- the process's nice level (`thread_class.cpp`);
-- curl's, ImageMagick's, HDF5's and Jolt's global setup, each kept as a once flag, a lock or a
-  reference count;
-- state_exec's built-in exception classes, read-only, and its scope-serial ID source.
+- **Resources the process holds once**, each kept as no more than a once flag, a lock or a
+  reference count:
+  - the pointer a signal handler follows to the app its signals go to (`host_signals.cpp`). A
+    handler can reach only static storage; each app's stop flag and trapped signals are its own;
+  - the process's nice level (`thread_class.cpp`);
+  - curl's global setup (one once flag, which the HTTP and WebSocket clients share),
+    ImageMagick's, HDF5's library lock and Jolt's reference-counted runtime.
+- **A built-once, read-only table:** state_exec's 19 built-in exception classes. Writing to one
+  throws a `TypeError`.
+- **An ID source:** state_exec's scope-serial counter, one atomic holding no app state.
+
+Executables keep a global only where an OS callback needs one. That leaves the signal route
+above: `arisrv`'s, `cvc serve`'s and the Ariadne hosts' stop flags and trapped signals are their
+apps'.
 
 **Never add a line**, not even one a CI artifact suggests: move the object onto the app, or into
 an object the caller owns. CI's `clang-format (changed lines)` job runs [ratchet.py](ratchet.py), which fails a

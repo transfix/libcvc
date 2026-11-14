@@ -1636,13 +1636,21 @@ not as follow-ups.
    - Writes to the environment or the working directory go wherever an explicit argument can
      replace them.
 
-   **Settled 2026-11-14** (Joe took the recommended option on each question):
-   - The process resources above are the documented list, each kept as a once flag, a lock or a
-     reference count (curl's two init flags became one). Signal state is one pointer, the route a
-     handler follows to its app; the stop flag and the trapped signals are the app's
-     (`host_signals.h`).
-   - state_exec's built-in exception classes stay, read-only.
-   - Its scope-serial counter stays, as an ID source.
-   - Executables keep only what the OS forces: signal state. Their other globals move onto the
-     app.
-   - The scan's allowlist ends at these entries, and the ratchet stays.
+   **Settled 2026-11-14.** Joe took the recommended option on each of four questions:
+   - Process resources: "Documented list (Recommended)". They are the scan's permanent, documented
+     allowlist, each wrapped so libcvc keeps only a once flag, a lock or a reference count. The
+     two curl once flags are now one. Signal state is one pointer, the route a handler follows to
+     its app; the stop flag and the trapped signals are the app's (`host_signals.h`).
+   - state_exec's 19 built-in exception classes: "Keep, read-only (Recommended)". They stay a
+     built-once, read-only table.
+   - `g_next_serial_run`: "Keep as an ID source (Recommended)". It holds no app state, only a
+     source of unique numbers, and stays as one listed atomic.
+   - Executables: "Only OS-forced globals (Recommended)". An executable keeps a global only where
+     an OS callback needs one, such as a signal handler's. Everything else moves onto the app:
+     the hosts' `g_python` and `g_wasm`, their stop flags, and the examples' globals (the demo
+     menu's state, terrain_lab's extents and building library, the nav city demos' frame state).
+   - The allowlist ends at these entries (`tools/singleton_scan/allowlist.txt` says why each
+     stays), and the ratchet stays.
+   - Still open: the CUDA volume cache is one per app (`raycast_cuda_cache_of(app)`), each block
+     keyed by device, not one per device shared by the apps on it. Sharing it needs an object
+     that owns the device and that the host hands to each app.
