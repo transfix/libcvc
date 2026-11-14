@@ -5,6 +5,7 @@
 // menus, window placement / drag / close and its §11.4 persistence, disabled scopes, images.
 // Skipped when libcvc is built without FTXUI.
 
+#include <algorithm>
 #include <chrono>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/ariadne.h>
@@ -558,8 +559,19 @@ TEST(AriadneFtxui, MessageFieldSendsOnEnterAndTakesNewLines) {
   u.type("a");
   u.be.feed(u.rt, TermEvent::key_event("Return", false, false, true));
   u.type("b");
+  u.type("c\nd\r\n"); // a paste, or tvision's read of a burst of keys (its Enter is a "\n")
   u.key("Tab");
-  EXPECT_EQ(val(u.app, "one"), "ab") << "multiline: false takes no new line";
+  EXPECT_EQ(val(u.app, "one"), "abcd") << "multiline: false takes no new line";
+}
+
+// A one-line text field takes a pasted line's text without its line breaks.
+TEST(AriadneFtxui, TextFieldDropsPastedLineBreaks) {
+  REQUIRE_FTXUI();
+  Term t(group({input_text("Name", "name")}));
+  t.key("Tab");
+  t.type("photo.bin\n");
+  t.key("Return");
+  EXPECT_EQ(val(t.app, "name"), "photo.bin");
 }
 
 // §5.15 on_change: the draft reaches bind: as it is typed, and on_change runs with event.text each
@@ -2572,6 +2584,63 @@ TEST(AriadneFtxui, TfEditorMouseAndKeyEditsCommit) {
   t.draw();
   ASSERT_TRUE(t.click("[ + isocontour ]")) << t.screen;
   EXPECT_EQ(tf_model(t.app, "tf").isocontours.size(), 2u);
+}
+
+// chart: on a terminal is the default text chart: a heading with the axis, one sparkline per
+// series binned on the shared x (a space where a column has no finite value), the newest value
+// and the range, then the markers and the cursor. The golden is the window's whole body.
+TEST(AriadneFtxui, ChartDrawsSparklinesMarkersAndTheCursor) {
+  REQUIRE_FTXUI();
+  Widget c = chart("Loss", "learn", {{"lr", "lr", ""}});
+  c.log_y = "1";
+  c.x_label = "step";
+  c.cursor = "play.t";
+  Term t(group({window("Learning", {c})}));
+  cvc::state &s = cvc::state::instance(t.app);
+  s("learn.s.0.label").value("train");
+  s("learn.s.0.x").value("0,1000,2000,3000,4000");
+  s("learn.s.0.y").value("2.0,0.5,0.2,0.1,0.08");
+  s("learn.s.1.label").value("held-out");
+  s("learn.s.1.x").value("0,2000,4000");
+  s("learn.s.1.y").value("2.1,,0.15");
+  s("learn.m.0.x").value("3000");
+  s("learn.m.0.kind").value("best");
+  s("learn.m.0.label").value("held-out min");
+  s("learn.m.1.x").value("1000");
+  s("learn.m.1.kind").value("elbow");
+  s("lr.x").value("0,2000,4000");
+  s("lr.y").value("0.01,0.01,0.001");
+  s("play.t").value("2500");
+  t.width = 72;
+  t.height = 12;
+  t.draw();
+  // The rows between the window's side borders, trailing spaces trimmed.
+  const std::string bar = "\xE2\x94\x82"; // U+2502, the box's side
+  std::vector<std::string> body;
+  std::size_t start = 0;
+  while (start < t.screen.size()) {
+    const std::size_t nl = std::min(t.screen.find('\n', start), t.screen.size());
+    const std::string line = t.screen.substr(start, nl - start);
+    const std::size_t a = line.find(bar), z = line.rfind(bar);
+    if (a != std::string::npos && z > a) {
+      std::string row = line.substr(a + bar.size(), z - a - bar.size());
+      row.erase(row.find_last_not_of(' ') + 1);
+      body.push_back(row);
+    }
+    start = nl + 1;
+  }
+  // Each sparkline's 32 columns span step 0..4000 on a log axis from 0.001 to 2.1: train's five
+  // points at columns 0, 8, 16, 24 and 31; held-out's gap at 2000 a blank column 16.
+  const std::vector<std::string> golden = {
+      "Loss (log y; step 0..4000)",
+      "train:    [#       *       +       =      =] 0.08 (0.08..2)",
+      "held-out: [#                              +] 0.15 (0.15..2.1)",
+      "lr:       [-               -              _] 0.001 (0.001..0.01)",
+      "best: x=3000 held-out min",
+      "elbow: x=1000",
+      "cursor: x=2500",
+  };
+  EXPECT_EQ(body, golden) << t.screen;
 }
 
 // ---- §5.20 rich text in a terminal ---------------------------------------------------------

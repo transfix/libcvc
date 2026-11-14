@@ -14,7 +14,8 @@
 //      a shader: each draw puts back its pass set's; with pass programs off, each caster builds
 //      two a frame (the cost this removes);
 //   B. the frames are those of pass programs off (every draw building its shader afresh), each
-//      compared frame a bake and a view, to two levels a channel;
+//      compared frame a bake and a view, to two levels a channel (on Apple's GL, a few bytes may
+//      be further out: see kTolerance);
 //   C. the shadowing light changes (one spot stops casting and another starts, the light count
 //      the same, which VTK's light mod does not see): the shadow pass's shader is rebuilt
 //      (FilteredShadowMapPass's shader-stage MTime), and the frames match pass programs off;
@@ -47,7 +48,9 @@
 #include <vtkLight.h>
 #include <vtkLightCollection.h>
 #include <vtkMapper.h>
+#include <vtkOpenGLRenderWindow.h>
 #include <vtkProperty.h>
+#include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
 
 using cvc::gl::GeometryNode;
@@ -121,24 +124,54 @@ static bool canRasterise(cvc::app &app) {
   return false;
 }
 
-// The largest per-channel difference between two frames, and how many bytes differ.
+// Frames rendered with pass programs on and off agree within two levels a channel: byte for byte
+// on NVIDIA and Mesa. Apple's GL is not always (cvcgl_shadow_casters): in macOS CI's logs of
+// November 2026, six runs of this test in four package-macos jobs missed, each with 3 bytes apart
+// by at most 3 levels, in C or in E, and the other comparisons byte for byte. There -- an Apple
+// build whose renderer string says Apple -- up to kAppleBytes bytes may be further out. A stale
+// shader is far out: C without the shader-stage MTime differs by 145, and C's light swap moves
+// 26155 of the frame's 36864 bytes (Intel Arc).
+constexpr int kTolerance = 2;
+constexpr long kAppleBytes = 12;
+
+// The largest per-channel difference between two frames, how many bytes differ, and how many
+// differ by more than kTolerance.
 struct Diff {
   int max = 0;
   long count = 0;
+  long over = 0;
 };
 static Diff diff(const std::vector<unsigned char> &a, const std::vector<unsigned char> &b) {
   Diff d;
   if (a.size() != b.size()) {
     d.max = 255;
-    d.count = -1;
+    d.count = d.over = -1;
     return d;
   }
   for (std::size_t i = 0; i < a.size(); ++i) {
     const int e = std::abs(int(a[i]) - int(b[i]));
     d.max = std::max(d.max, e);
     d.count += e > 0 ? 1 : 0;
+    d.over += e > kTolerance ? 1 : 0;
   }
   return d;
+}
+
+// The "OpenGL renderer string" line of the window's capability report (as in
+// cvcgl_shadow_casters).
+static std::string glRendererName(vtkRenderWindow *w) {
+  auto *gl = vtkOpenGLRenderWindow::SafeDownCast(w);
+  const char *caps = gl ? gl->ReportCapabilities() : nullptr;
+  const std::string all = caps ? caps : "";
+  const std::string key = "renderer string:";
+  const std::size_t at = all.find(key);
+  if (at == std::string::npos)
+    return "unknown";
+  std::size_t b = all.find_first_not_of(' ', at + key.size());
+  const std::size_t e = all.find('\n', at);
+  if (b == std::string::npos || b > e)
+    b = e;
+  return all.substr(b, e == std::string::npos ? std::string::npos : e - b);
 }
 
 int main() {
@@ -271,22 +304,31 @@ int main() {
       chk(false, "every compared frame bakes: " + std::to_string(sg.shadowBakes() - b0) + " of 3");
     return capture();
   };
-  // Within two levels a channel: byte for byte on NVIDIA and Mesa, but Apple's GL is not always
-  // (cvcgl_shadow_casters). A stale shader is far out: C without the shader-stage MTime differs
-  // by 145.
-  constexpr int kTolerance = 2;
+  // Within kTolerance, or on Apple's GL with at most kAppleBytes bytes further out.
+  const std::string renderer = glRendererName(view.renderer()->GetRenderWindow());
+#ifdef __APPLE__
+  const bool appleGL = renderer.find("Apple") != std::string::npos;
+#else
+  const bool appleGL = false;
+#endif
+  const auto within = [&](const Diff &e) {
+    return e.max <= kTolerance || (appleGL && e.over >= 0 && e.over <= kAppleBytes);
+  };
   const auto same = [&](const std::string &what) {
     const std::vector<unsigned char> on = settled(true), off = settled(false);
     const std::vector<unsigned char> on2 = settled(true);
     const Diff d = diff(on, off), d2 = diff(on2, off);
-    chk(d.max <= kTolerance && d2.max <= kTolerance,
-        what + ": pass programs on == off (max diff " + std::to_string(std::max(d.max, d2.max)) +
-            ", " + std::to_string(d.count + d2.count) + " bytes)");
+    chk(within(d) && within(d2), what + ": pass programs on == off (max diff " +
+                                     std::to_string(std::max(d.max, d2.max)) + ", " +
+                                     std::to_string(d.count + d2.count) + " bytes, " +
+                                     std::to_string(d.over + d2.over) + " more than " +
+                                     std::to_string(kTolerance) + " levels)");
     return on;
   };
 
   // ── B. the frames ───────────────────────────────────────────────────────────
-  std::printf("B. frames\n");
+  std::printf("B. frames (%s%s)\n", renderer.c_str(),
+              appleGL ? "; Apple's GL: a few bytes may be further out" : "");
   const std::vector<unsigned char> before = same("the shadowed scene");
 
   // ── C. the shadowing light changes, the light count does not ────────────────
@@ -304,7 +346,10 @@ int main() {
   chk(sum(&LowMemoryPolyDataMapper::Stats::shaderBuilds) >= mappers.size(),
       "the new casting light rebuilds the view shaders");
   const std::vector<unsigned char> swapped = same("the other light casting");
-  chk(diff(before, swapped).max > 0, "and the frame is not the old one (the shadows moved)");
+  const Diff moved = diff(before, swapped);
+  chk(moved.max > 0, "and the frame is not the old one (the shadows moved: max diff " +
+                         std::to_string(moved.max) + ", " + std::to_string(moved.count) +
+                         " bytes)");
 
   // ── D. a property that changes the shader ───────────────────────────────────
   std::printf("D. a property that changes the shader\n");
