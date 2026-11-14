@@ -16,8 +16,10 @@ add_executable(ariadne_scene_world_test ariadne_scene_world_test.cpp)
 add_executable(ariadne_server_document_test ariadne_server_document_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
+add_executable(ariadne_chart_test ariadne_chart_test.cpp)
 add_executable(ariadne_term_graphics_test ariadne_term_graphics_test.cpp)
 add_executable(ariadne_media_test ariadne_media_test.cpp)
+add_executable(ariadne_files_test ariadne_files_test.cpp)
 add_executable(ariadne_host_test ariadne_host_test.cpp)
 add_executable(ariadne_requires_test ariadne_requires_test.cpp)
 add_executable(ariadne_registries_test ariadne_registries_test.cpp)
@@ -369,8 +371,10 @@ set(TEST_TARGETS
   ariadne_server_document_test
   ariadne_bind_test
   ariadne_ftxui_test
+  ariadne_chart_test
   ariadne_term_graphics_test
   ariadne_media_test
+  ariadne_files_test
   ariadne_host_test
   ariadne_requires_test
   ariadne_registries_test
@@ -784,6 +788,13 @@ target_link_libraries(ariadne_ftxui_test
     GTest::gtest
     GTest::gtest_main
 )
+
+target_link_libraries(ariadne_chart_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 # Three tests load GL-free documents from the repo's examples/ tree.
 target_compile_definitions(ariadne_ftxui_test PRIVATE
   CVC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../examples")
@@ -795,6 +806,13 @@ target_compile_definitions(world_rules_test PRIVATE
   CVC_ARIADNE_WORLDS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../ariadne/worlds")
 
 target_link_libraries(ariadne_media_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_files_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2927,8 +2945,10 @@ cvc_discover_tests(ariadne_runtime_test)
 cvc_discover_tests(ariadne_scene_world_test)
 cvc_discover_tests(ariadne_server_document_test)
 cvc_discover_tests(ariadne_ftxui_test)
+cvc_discover_tests(ariadne_chart_test)
 cvc_discover_tests(ariadne_term_graphics_test)
 cvc_discover_tests(ariadne_media_test)
+cvc_discover_tests(ariadne_files_test)
 cvc_discover_tests(ariadne_host_test)
 cvc_discover_tests(ariadne_requires_test)
 cvc_discover_tests(ariadne_registries_test)
@@ -3442,7 +3462,10 @@ endif()
 # must be reachable from TEST_TARGETS; list a target in
 # TEST_TARGETS_INTENTIONALLY_EXCLUDED (with a reason) to opt out.
 set(TEST_TARGETS_INTENTIONALLY_EXCLUDED
-  # (none today — add entries here with a comment explaining why)
+  # The gas pass as a command (src/ariadne_wasm/meter_main.cpp): a tool the transform of the wasm
+  # test guests runs (cvc_ariadne_wasm_transform), not a test. The tests whose guests it meters
+  # depend on it, so `check` builds it anyway.
+  ari_wasm_meter
 )
 
 get_property(_cvc_dir_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)

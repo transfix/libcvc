@@ -1021,6 +1021,11 @@ add_test(NAME cvcgl_imgui_media COMMAND cvcgl_imgui_media)
 add_executable(cvcgl_imgui_spinner test/cvcgl_imgui_spinner.cpp)
 target_link_libraries(cvcgl_imgui_spinner PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_spinner COMMAND cvcgl_imgui_spinner)
+# ImGuiBackend's chart: the canvas as the last item, a legend click hiding a series, the hover
+# crosshair, and a pick (a bare ImGui context, no GL).
+add_executable(cvcgl_imgui_chart test/cvcgl_imgui_chart.cpp)
+target_link_libraries(cvcgl_imgui_chart PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_chart COMMAND cvcgl_imgui_chart)
 # The overlay's fonts: DejaVu Sans Mono's symbols under the UI font, and Twemoji's colour emoji
 # where ImGui has 32-bit characters and FreeType (the cvcpkg imgui 1.92.9+cvc.4). No window, no GL.
 add_executable(cvcgl_imgui_fonts test/cvcgl_imgui_fonts.cpp)

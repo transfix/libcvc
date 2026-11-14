@@ -1,0 +1,48 @@
+# file_pick_upload.ari — pick a file in a terminal and send it, for file_pick_upload_test.sh.
+#
+# Attach (focused at the start: Enter presses it) calls (file-pick): ari has no picker of its own,
+# so the Runtime draws its "Open file" window, where a name typed and Enter picks the file. The file
+# then goes to --url in 1 KiB chunks (http-upload, docs/ARIADNE.md §10.8), the bar showing how far,
+# and the window says how many bytes the server confirmed.
+#
+#   ari run --net-allow http://127.0.0.1:PORT file_pick_upload.ari --url http://127.0.0.1:PORT/up
+
+meta:
+  name: File pick and upload
+  author: cvc
+  min_libcvc: 3.7.13
+
+args:
+  url: {type: string, required: true, help: Where the chunks go (PATCH with Upload-Offset)}
+
+init: |
+  (begin (state-set "ui.msg" "Nothing picked.") (state-set "ui.progress" 0))
+
+windows:
+  - window: Upload
+    id: upload
+    pos: [16, 32]
+    size: [480, auto]
+    children:
+      - button: Attach
+        autofocus: true
+        on: |
+          (begin
+            (set picked (file-pick (dict "title" "Attach a file")))
+            (if (= (length picked) 0)
+                (state-set "ui.msg" "Cancelled.")
+                (begin
+                  (set f (nth picked 0))
+                  (state-set "ui.msg" (str-concat "Sending " (get-attr f "name") "..."))
+                  (set r (http-upload (state-get "args.url") (get-attr f "handle")
+                                      (dict "as" "chunks" "chunk_size" 1024
+                                            "progress" "ui.progress")))
+                  (state-set "ui.msg"
+                             (if (get-attr r "done")
+                                 (str-concat "Sent " (str (get-attr r "offset")) " of "
+                                             (str (get-attr r "size")) " bytes.")
+                                 (str-concat "Failed: " (get-attr r "error")))))))
+      - text: ""
+        bind: ui.msg
+      - progress: ""
+        bind: ui.progress

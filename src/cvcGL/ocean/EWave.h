@@ -81,7 +81,8 @@ class vtkOpenGLQuadHelper;
 //   textures, and 1 / M as an R32F one. The six reader textures take 96 n^2 bytes: 6 MB at
 //   256^2, 400 MB at 2048^2, 1.6 GB at 4096^2.
 //
-// The coefficients are computed per texel from uniforms, so a new dt costs nothing; the mask is
+// The coefficients are computed per texel from uniforms, so a new dt costs nothing (sin and cos
+// by the passes' own series, as GLSL lets the built-ins be off by 2^-11: EWave.cpp); the mask is
 // an R32F texture.
 //
 // Sources go into h when they are added, times the mask, as on the CPU (add_height and

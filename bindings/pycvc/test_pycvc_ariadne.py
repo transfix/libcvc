@@ -271,6 +271,18 @@ with tempfile.TemporaryDirectory() as tmp:
         host.step()
         result = host.get("result")
         check(result == "14", f"a headless Host ran the document: {result!r}")
+        # run(): headless with no frames= stays up, so it paces at fps rather than spin a core;
+        # frames=N is a batch, run back to back.
+        n0 = host.frame_count
+        t0 = time.perf_counter()
+        host.run(fps=50, until=lambda: host.frame_count >= n0 + 6)
+        paced = time.perf_counter() - t0
+        check(host.frame_count == n0 + 6 and paced >= 0.09,
+              f"run() with no frames paces at fps: 6 frames at 50 took {paced:.3f} s")
+        t0 = time.perf_counter()
+        host.run(fps=10, frames=50)
+        fast = time.perf_counter() - t0
+        check(fast < 2.5, f"run(frames=50) runs back to back: {fast:.3f} s (paced: 5 s)")
 check("pycvc_gl" not in sys.modules, "pycvc.ari and a headless Host never import pycvc_gl")
 if importlib.util.find_spec("pycvc_gl") is None:
     try:

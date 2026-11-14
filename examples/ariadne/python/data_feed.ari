@@ -7,7 +7,12 @@
 # - `signal` and `walk`: the comma-separated numbers the two plot: widgets draw (host.set_series);
 # - `stats`: a table, one row per series (host.set_table), listed with repeat: below;
 # - the picture `heat` (host.publish_image), a numpy field the image: widget shows;
-# - the video stream `streams.feed` (host.open_stream), which the stream_view widget plays.
+# - the video stream `streams.feed` (host.open_stream), which the stream_view widget plays;
+# - `learn`: a learning run's curves (host.set_plot) for the chart: in the Learning window, which
+#   grows as it trains: train loss every 10 steps, held-out loss every 100 with its spread over
+#   three seeds as a band, and the grad norm with a gap where its logging stopped, on a log y
+#   axis, with the best and elbow steps marked. `learn_t` moves its play-head; a click on it
+#   writes the nearest step to `learn_pick`, and the checkbox switches the axis (`learn_log`).
 # The Controls window's widgets go the other way: data_feed.py reads `freq`, `noise` and `paused`
 # each frame.
 
@@ -18,6 +23,7 @@ meta:
 
 requires:
   - quit                                   # the Feed menu's Quit
+  - chart                                  # the Learning window (libcvc 3.7.14)
   - {name: stream_view, optional: true}    # host.open_stream registers it (GL); else text
   - {name: raster.bitmap, optional: true}  # the heat picture in real pixels
 
@@ -28,7 +34,8 @@ init: |
   (begin
     (state-set "freq" "0.5")
     (state-set "noise" "0.15")
-    (state-set "paused" "0"))
+    (state-set "paused" "0")
+    (state-set "learn_log" "1"))
 
 menubar:
   - menu: Feed
@@ -118,3 +125,23 @@ windows:
       - type: stream_view
         stream: streams.feed
         size: 320
+
+  - window: Learning
+    id: learning
+    pos: [390, 492]
+    size: [625, 268]
+    children:
+      - chart: Loss
+        bind: learn
+        log_y: learn_log
+        x_label: step
+        cursor: learn_t
+        pick: learn_pick
+        height: 150
+      - type: group
+        layout: { kind: grid, col_widths: [120, 200] }
+        children:
+          - checkbox: log y
+            bind: learn_log
+          - text: "picked step"
+            bind: learn_pick

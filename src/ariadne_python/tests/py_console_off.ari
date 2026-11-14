@@ -1,0 +1,20 @@
+# A python: block without console: true has no console (ctest arix_py_console_off): the console
+# natives refuse with a PermissionError, so a py_console window in such a document runs nothing.
+
+meta:
+  name: python console off
+  min_libcvc: 3.7.13
+
+requires: [python]
+
+python:
+  source: |
+    VALUE = 1
+
+root:
+  - text: no console
+
+tests:
+  refused: |
+    (assert (= (try (python-console "c" "1") (catch (PermissionError e) "refused")) "refused"))
+    (assert (= (try (python-console-clear "c") (catch (PermissionError e) "refused")) "refused"))

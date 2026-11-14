@@ -9,9 +9,12 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
+#include <cvc/ariadne/files.h>   // (http-upload)'s FILE: a file the user picked
 #include <cvc/ariadne/net_intrinsics.h>
 #include <cvc/ariadne/uri.h> // resolve() — the generic (fetch uri) async resolver
 #include <cvc/core/app.h>
@@ -20,9 +23,11 @@
 #include <cvc/net/http_client.h>
 #include <cvc/net/net_policy.h>
 #include <cvc/net/ws_client.h>
+#include <cvc/state/state.h>                 // (http-upload)'s progress path
 #include <cvc/state/state_exec/async_host.h> // register_async_fn — the verbs are async functions
 #include <cvc/state/state_exec/builtins.h>   // percent_encode, builtin_json_encode
 #include <cvc/state/state_exec/data_job.h>   // kJsonMaxDepth — a ws-send message's nesting
+#include <cvc/state/state_exec/intrinsics.h> // intrinsics_context: a program's root
 #include <cvc/state/state_exec/types.h>      // value_t, make_dict/make_list/make_bytes
 #include <map>
 #include <mutex>
@@ -31,8 +36,13 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten/eventloop.h> // an upload's back-off between tries, on the page's event loop
+#endif
 
 namespace cvc {
 namespace ariadne {
@@ -574,6 +584,16 @@ struct StartedRequest : std::enable_shared_from_this<StartedRequest> {
   std::shared_ptr<se::async_call> call;
   std::shared_ptr<cvc::net::CredentialRenewer> renewer;
   std::shared_ptr<cvc::net::HttpTransfer> transfer; // the one out, for a cancel to abort
+  // Where the outcome goes instead of the call's reply: the next step of a request made of several
+  // (an upload's chunks, http_upload_work). Null: settle the call with it.
+  std::function<void(Outcome)> on_outcome;
+
+  void deliver(Outcome out) {
+    if (on_outcome)
+      on_outcome(std::move(out));
+    else
+      settle_started(*host, call, marshal_response(out.reply, out.captured));
+  }
 
   void begin() {
     if (renewer && renewer->expiring()) {
@@ -590,7 +610,7 @@ struct StartedRequest : std::enable_shared_from_this<StartedRequest> {
       return;
     auto p = std::make_shared<Prepared>(prepare(req, auth, access));
     if (p->failed) {
-      settle_started(*host, call, marshal_response(p->failed->reply, p->failed->captured));
+      deliver(std::move(*p->failed));
       return;
     }
     std::shared_ptr<StartedRequest> self = shared_from_this();
@@ -617,14 +637,15 @@ struct StartedRequest : std::enable_shared_from_this<StartedRequest> {
 
   void finish(Prepared &p, cvc::net::HttpResponse r) {
     const std::string url = p.req.url;
+    Outcome out;
     try {
-      const Outcome out = complete(p, std::move(r), auth, access);
-      settle_started(*host, call, marshal_response(out.reply, out.captured));
+      out = complete(p, std::move(r), auth, access);
     } catch (const std::exception &e) {
-      settle_started(*host, call, marshal_error(url, std::string("http: ") + e.what()));
+      out = reply_error(url, std::string("http: ") + e.what());
     } catch (...) {
-      settle_started(*host, call, marshal_error(url, "http: unknown error"));
+      out = reply_error(url, "http: unknown error");
     }
+    deliver(std::move(out));
   }
 };
 
@@ -760,6 +781,672 @@ se::async_work uri_fetch_work(cvc::app &app, std::span<const se::value_t> args,
     });
     if (stop)
       call->on_cancel(std::move(stop));
+  };
+  return work;
+}
+
+// --- (http-upload URL FILE [OPTS]) (docs/ARIADNE.md §10.8) ---
+//
+// FILE is a handle (file-pick) returned: the host reads the file and sends it, so its bytes never
+// reach a value_t and a document can send only what the user picked. Each request is made as the
+// http verbs make theirs (prepare / complete: the policy, auth: and credential values, a renewal
+// after a 401), started rather than sent where the transport starts requests (a browser page
+// without threads), so the frame loop goes on while a file goes out a chunk at a time.
+
+constexpr std::uint64_t kMaxSingleUpload = 64ull * 1024 * 1024; // one request's body, at most
+constexpr std::uint64_t kMinChunk = 1024;
+constexpr std::uint64_t kMaxChunk = 64ull * 1024 * 1024;
+constexpr int kMaxRetries = 10;
+
+enum class UploadMode { multipart, body, chunks };
+
+// One upload, as its options say (build_upload).
+struct UploadPlan {
+  cvc::net::HttpRequest base; // the URL (with any query), method, the caller's headers
+  RequestAuth auth;           // auth: and credential values in the headers
+  UploadMode mode = UploadMode::multipart;
+  std::shared_ptr<FileSource> file;
+  // multipart
+  std::string field = "file";
+  std::string filename;
+  std::string content_type;
+  std::vector<std::pair<std::string, std::string>> fields; // form: the other parts, in order
+  // chunks
+  std::uint64_t chunk_size = 8ull * 1024 * 1024;
+  std::uint64_t offset = 0;
+  std::string offset_header = "Upload-Offset";
+  bool content_range = false;
+  std::string status_url;
+  int retries = 3;
+  // progress
+  std::string progress_path; // the state path the fraction sent goes to; "" none
+};
+
+// The fraction as text, the same in every locale: "0.4375".
+std::string fraction_text(double f) {
+  if (!(f > 0))
+    return "0";
+  if (f >= 1)
+    return "1";
+  const long long q = static_cast<long long>(f * 10000.0 + 0.5);
+  std::string frac = std::to_string(q % 10000);
+  frac.insert(0, 4 - frac.size(), '0');
+  return std::to_string(q / 10000) + "." + frac;
+}
+
+void write_progress(cvc::app *app, const std::string &path, std::uint64_t done,
+                    std::uint64_t size) {
+  if (path.empty())
+    return;
+  try {
+    cvc::state::instance(*app).childThroughLinks(path).value(
+        fraction_text(size ? static_cast<double>(done) / static_cast<double>(size) : 1.0));
+  } catch (const std::exception &) {
+    // A read-only node in the way: the document chose a path it cannot write; the reply still
+    // says how far it got.
+  }
+}
+
+// Whether `name` is an HTTP header name (a token).
+bool header_name_ok(const std::string &name) {
+  if (name.empty())
+    return false;
+  for (const unsigned char c : name)
+    if (c == 0 || !(std::isalnum(c) || std::strchr("!#$%&'*+-.^_`|~", c)))
+      return false;
+  return true;
+}
+
+// A state path under the program's root: dot-separated names, none empty.
+bool state_path_ok(const std::string &path) {
+  if (path.empty() || path.front() == '.' || path.back() == '.' ||
+      path.find("..") != std::string::npos)
+    return false;
+  for (const unsigned char c : path)
+    if (std::iscntrl(c) || c == '/' || c == '\\')
+      return false;
+  return true;
+}
+
+std::uint64_t upload_number(const se::value_t &v, const char *key, std::uint64_t lo,
+                            std::uint64_t hi) {
+  double d = -1;
+  if (const int64_t *i = std::get_if<int64_t>(&v.v))
+    d = static_cast<double>(*i);
+  else if (const double *f = std::get_if<double>(&v.v))
+    d = *f;
+  if (!(d >= static_cast<double>(lo) && d <= static_cast<double>(hi)) || d != std::floor(d))
+    throw std::runtime_error(std::string("http-upload: '") + key + "' is a whole number from " +
+                             std::to_string(lo) + " to " + std::to_string(hi));
+  return static_cast<std::uint64_t>(d);
+}
+
+std::string upload_text(const se::value_t &v, const char *key) {
+  const std::string *s = std::get_if<std::string>(&v.v);
+  if (!s)
+    throw std::runtime_error(std::string("http-upload: '") + key + "' is a string");
+  return *s;
+}
+
+// (http-upload URL FILE [OPTS]): the plan, checked where the verb is called (the scheduler
+// thread), so a misuse is an ordinary DSL error. `root` is the calling program's root, which a
+// `progress` path is under.
+UploadPlan build_upload(std::span<const se::value_t> args, cvc::app &app, const std::string &root) {
+  UploadPlan plan;
+  plan.base.url = arg_string(args, 0);
+  const std::string handle = arg_string(args, 1);
+  plan.file = picked_files(app).find(handle);
+  if (!plan.file)
+    throw std::runtime_error("http-upload: FILE is a handle file-pick returned, and '" + handle +
+                             "' is none the app holds");
+  std::string method;
+  std::vector<std::pair<std::string, se::value_t>> http_opts; // query, headers, auth
+  if (args.size() > 2 && !args[2].is_nil()) {
+    const se::dict_ptr *dp = std::get_if<se::dict_ptr>(&args[2].v);
+    if (!dp)
+      throw std::runtime_error("http-upload: the options are a dict");
+    for (const auto &[key, v] : **dp) {
+      if (key == "query" || key == "headers" || key == "auth") {
+        http_opts.emplace_back(key, v);
+      } else if (key == "method") {
+        method = upload_text(v, "method");
+      } else if (key == "as") {
+        const std::string as = upload_text(v, "as");
+        if (as == "multipart")
+          plan.mode = UploadMode::multipart;
+        else if (as == "body")
+          plan.mode = UploadMode::body;
+        else if (as == "chunks")
+          plan.mode = UploadMode::chunks;
+        else
+          throw std::runtime_error("http-upload: 'as' is \"multipart\", \"body\" or \"chunks\"");
+      } else if (key == "field") {
+        plan.field = upload_text(v, "field");
+      } else if (key == "filename") {
+        plan.filename = upload_text(v, "filename");
+      } else if (key == "content_type") {
+        plan.content_type = upload_text(v, "content_type");
+      } else if (key == "form") {
+        const se::dict_ptr *fd = std::get_if<se::dict_ptr>(&v.v);
+        if (!fd)
+          throw std::runtime_error("http-upload: 'form' is a dict of the other fields");
+        for (const auto &[name, value] : **fd) {
+          if (credential_value(value))
+            throw std::runtime_error("http-upload: a form field takes no credential value; send "
+                                     "it in a header, or with auth");
+          plan.fields.emplace_back(name, field_to_string(value));
+        }
+      } else if (key == "chunk_size") {
+        plan.chunk_size = upload_number(v, "chunk_size", kMinChunk, kMaxChunk);
+      } else if (key == "offset") {
+        plan.offset = upload_number(v, "offset", 0, plan.file->size());
+      } else if (key == "offset_header") {
+        plan.offset_header = upload_text(v, "offset_header");
+        if (!plan.offset_header.empty() && !header_name_ok(plan.offset_header))
+          throw std::runtime_error("http-upload: 'offset_header' is a header name");
+      } else if (key == "content_range") {
+        plan.content_range = v.is_truthy();
+      } else if (key == "status_url") {
+        plan.status_url = upload_text(v, "status_url");
+      } else if (key == "retries") {
+        plan.retries = static_cast<int>(upload_number(v, "retries", 0, kMaxRetries));
+      } else if (key == "timeout") {
+        plan.base.timeout_secs = static_cast<long>(upload_number(v, "timeout", 1, 3600));
+      } else if (key == "progress") {
+        const std::string path = upload_text(v, "progress");
+        if (!state_path_ok(path))
+          throw std::runtime_error("http-upload: 'progress' is a state path under the document, "
+                                   "like \"compose.progress\"");
+        plan.progress_path = root.empty() ? path : root + cvc::state::SEPARATOR + path;
+      } else if (key == "body" || key == "capture_auth") {
+        throw std::runtime_error("http-upload: the body is the file; '" + key +
+                                 "' is http-request's");
+      } else {
+        throw std::runtime_error("http-upload: no option '" + key + "'");
+      }
+    }
+  }
+  if (plan.base.timeout_secs == 30) // the transport's default: a chunk of megabytes needs longer
+    plan.base.timeout_secs = 300;
+  apply_http_options(plan.base, se::make_dict(std::move(http_opts)), plan.auth);
+  plan.base.method = !method.empty() ? method : plan.mode == UploadMode::chunks ? "PATCH" : "POST";
+  if (plan.filename.empty())
+    plan.filename = plan.file->name();
+  if (plan.content_type.empty())
+    plan.content_type = plan.file->type();
+  if (plan.mode != UploadMode::chunks && plan.file->size() > kMaxSingleUpload)
+    throw std::runtime_error("http-upload: the file is " + std::to_string(plan.file->size()) +
+                             " bytes, and one request sends at most 64 MiB; send it with \"as\" "
+                             "\"chunks\"");
+  if (plan.mode == UploadMode::chunks && plan.file->size() == 0)
+    throw std::runtime_error("http-upload: the file is empty: there are no chunks to send");
+  if (!plan.status_url.empty() && !cvc::net::parse_origin(plan.status_url))
+    throw std::runtime_error("http-upload: 'status_url' is an http(s) URL");
+  return plan;
+}
+
+// A form-data name or filename as a browser writes it in quotes (WHATWG multipart/form-data).
+std::string form_quoted(const std::string &s) {
+  std::string out;
+  for (const char c : s)
+    if (c == '"')
+      out += "%22";
+    else if (c == '\r')
+      out += "%0D";
+    else if (c == '\n')
+      out += "%0A";
+    else
+      out.push_back(c);
+  return out;
+}
+
+// A multipart boundary: random, from a generator of this call's own (no state kept between calls).
+std::string random_boundary() {
+  std::random_device seed;
+  std::mt19937_64 rng{(static_cast<std::uint64_t>(seed()) << 32) ^ seed()};
+  char buf[64];
+  std::snprintf(buf, sizeof buf, "----cvc-upload-%016llx%016llx",
+                static_cast<unsigned long long>(rng()), static_cast<unsigned long long>(rng()));
+  return buf;
+}
+
+// The one request of a multipart or body upload, its body the file's bytes.
+cvc::net::HttpRequest single_request(const UploadPlan &plan, std::string bytes) {
+  cvc::net::HttpRequest req = plan.base;
+  if (plan.mode == UploadMode::body) {
+    if (!has_content_type(req.headers))
+      req.headers.push_back("Content-Type: " + plan.content_type);
+    req.body = std::move(bytes);
+    return req;
+  }
+  std::string boundary;
+  do
+    boundary = random_boundary();
+  while (bytes.find(boundary) != std::string::npos);
+  std::string body;
+  body.reserve(bytes.size() + 512);
+  for (const auto &[name, value] : plan.fields)
+    body += "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + form_quoted(name) +
+            "\"\r\n\r\n" + value + "\r\n";
+  body += "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" +
+          form_quoted(plan.field) + "\"; filename=\"" + form_quoted(plan.filename) +
+          "\"\r\nContent-Type: " + plan.content_type + "\r\n\r\n";
+  body += bytes;
+  body += "\r\n--" + boundary + "--\r\n";
+  req.headers.push_back("Content-Type: multipart/form-data; boundary=" + boundary);
+  req.body = std::move(body);
+  return req;
+}
+
+// The request carrying the chunk `bytes` at `offset`.
+cvc::net::HttpRequest chunk_request(const UploadPlan &plan, std::uint64_t offset,
+                                    std::string bytes) {
+  cvc::net::HttpRequest req = plan.base;
+  if (!plan.offset_header.empty())
+    req.headers.push_back(plan.offset_header + ": " + std::to_string(offset));
+  if (plan.content_range)
+    req.headers.push_back("Content-Range: bytes " + std::to_string(offset) + "-" +
+                          std::to_string(offset + bytes.size() - 1) + "/" +
+                          std::to_string(plan.file->size()));
+  if (!has_content_type(req.headers))
+    req.headers.push_back("Content-Type: application/octet-stream");
+  req.body = std::move(bytes);
+  return req;
+}
+
+// The request that asks the server how much it has (status_url), after a failed chunk.
+cvc::net::HttpRequest status_request(const UploadPlan &plan) {
+  cvc::net::HttpRequest req;
+  req.method = "GET";
+  req.url = plan.status_url;
+  for (const std::string &h : plan.base.headers) // the caller's headers (a credential value too)
+    if (!has_content_type({h}))
+      req.headers.push_back(h);
+  return req;
+}
+
+// A whole number at `key` in a JSON object's top level, as {"offset": 123} has it.
+std::optional<std::uint64_t> json_number_at(const std::string &body, const std::string &key) {
+  const std::string quoted = "\"" + key + "\"";
+  int depth = 0;
+  bool in_string = false;
+  for (std::size_t i = 0; i < body.size(); ++i) {
+    const char c = body[i];
+    if (in_string) {
+      if (c == '\\')
+        ++i;
+      else if (c == '"')
+        in_string = false;
+      continue;
+    }
+    if (c == '{' || c == '[') {
+      ++depth;
+    } else if (c == '}' || c == ']') {
+      --depth;
+    } else if (c == '"') {
+      if (depth == 1 && body.compare(i, quoted.size(), quoted) == 0) {
+        std::size_t j = i + quoted.size();
+        while (j < body.size() && std::isspace(static_cast<unsigned char>(body[j])))
+          ++j;
+        if (j < body.size() && body[j] == ':') {
+          ++j;
+          while (j < body.size() && std::isspace(static_cast<unsigned char>(body[j])))
+            ++j;
+          std::uint64_t n = 0;
+          std::size_t digits = 0;
+          while (j < body.size() && std::isdigit(static_cast<unsigned char>(body[j])) &&
+                 digits < 19) {
+            n = n * 10 + static_cast<std::uint64_t>(body[j] - '0');
+            ++j;
+            ++digits;
+          }
+          if (digits > 0)
+            return n;
+        }
+      }
+      in_string = true;
+    }
+  }
+  return std::nullopt;
+}
+
+// The offset a reply says the server has: its offset header, else a JSON body's "offset".
+std::optional<std::uint64_t> reply_offset(const UploadPlan &plan, const cvc::net::HttpResponse &r) {
+  if (!plan.offset_header.empty()) {
+    const std::string v = cvc::net::response_header(r.headers, plan.offset_header);
+    if (!v.empty() && v.size() <= 19 &&
+        std::all_of(v.begin(), v.end(), [](unsigned char c) { return std::isdigit(c); }))
+      return std::stoull(v);
+  }
+  return json_number_at(r.body, "offset");
+}
+
+// What to do after a chunk's reply.
+struct ChunkStep {
+  enum Kind { advance, resync, retry, fail } kind = fail;
+  std::uint64_t offset = 0;
+  std::string error; // why a fail fails, where the reply does not say
+};
+
+ChunkStep judge_chunk(const UploadPlan &plan, std::uint64_t offset, std::size_t sent,
+                      const cvc::net::HttpResponse &r) {
+  const std::uint64_t size = plan.file->size();
+  ChunkStep step;
+  if (!r.ok) {
+    step.kind = ChunkStep::retry;
+    return step;
+  }
+  if (r.status >= 200 && r.status < 300) {
+    const std::optional<std::uint64_t> said = reply_offset(plan, r);
+    step.offset = said ? *said : offset + sent;
+    if (step.offset > size) {
+      step.error = "http-upload: the server says it has " + std::to_string(step.offset) +
+                   " bytes, more than the file's " + std::to_string(size);
+      return step;
+    }
+    step.kind = step.offset > offset ? ChunkStep::advance : ChunkStep::retry;
+    return step;
+  }
+  if (r.status == 409) { // the server has another offset: go on from it (txwtf's and tus' rule)
+    const std::optional<std::uint64_t> said = reply_offset(plan, r);
+    if (said && *said <= size) {
+      step.kind = ChunkStep::resync;
+      step.offset = *said;
+    }
+    return step;
+  }
+  if (r.status == 408 || r.status == 425 || r.status == 429 || r.status == 500 || r.status == 502 ||
+      r.status == 503 || r.status == 504)
+    step.kind = ChunkStep::retry;
+  return step;
+}
+
+// Seconds to wait before try `attempt` (1, 2, ...): 0.5 s, doubling, at most 8 s.
+double backoff_secs(int attempt) {
+  return std::min(8.0, 0.5 * double(1 << std::min(attempt - 1, 5)));
+}
+
+// The reply dict: the last request's (http-request's keys), with `done`, whether the server has the
+// whole file (for chunks: it confirmed its last byte; else a 2xx came), `offset`, the bytes it has
+// (for chunks, the offset it confirmed: an `offset` to resume from; else the size once done, or
+// 0), and `size`.
+se::value_t marshal_upload(const Outcome &out, bool done, std::uint64_t offset,
+                           std::uint64_t size) {
+  se::value_t v = marshal_response(out.reply, out.captured);
+  if (const se::dict_ptr *d = std::get_if<se::dict_ptr>(&v.v)) {
+    (*d)->emplace_back("done", se::value_t(done));
+    (*d)->emplace_back("offset", se::value_t(static_cast<int64_t>(offset)));
+    (*d)->emplace_back("size", se::value_t(static_cast<int64_t>(size)));
+  }
+  return v;
+}
+
+bool http_2xx(const cvc::net::HttpResponse &r) { return r.ok && r.status >= 200 && r.status < 300; }
+
+Outcome upload_failure(const std::string &url, const std::string &message) {
+  return reply_error(url, message);
+}
+
+// The whole upload, blocking (on the app's background pool): the kernel of http_upload_work.
+se::value_t upload_blocking(const UploadPlan &plan, const NetAccess &access, cvc::app *app,
+                            const se::async_call &call) {
+  const std::uint64_t size = plan.file->size();
+  const auto read = [&](std::uint64_t at, std::size_t n, std::string &bytes) {
+    std::string error;
+    plan.file->read(at, n, [&](std::string b, std::string e) {
+      bytes = std::move(b);
+      error = std::move(e);
+    });
+    return error;
+  };
+  if (plan.mode != UploadMode::chunks) {
+    write_progress(app, plan.progress_path, 0, size);
+    std::string bytes;
+    if (const std::string e = read(0, static_cast<std::size_t>(size), bytes); !e.empty())
+      return marshal_upload(upload_failure(plan.base.url, "http-upload: " + e), false, 0, size);
+    const Outcome out = perform(*app, single_request(plan, std::move(bytes)), plan.auth, access);
+    const bool done = http_2xx(out.reply);
+    if (done)
+      write_progress(app, plan.progress_path, size, size);
+    return marshal_upload(out, done, done ? size : 0, size);
+  }
+  std::uint64_t offset = plan.offset;
+  int attempts = 0;
+  Outcome last = upload_failure(plan.base.url, "http-upload: nothing left to send");
+  write_progress(app, plan.progress_path, offset, size);
+  while (offset < size) {
+    if (call.cancel_requested())
+      return marshal_upload(upload_failure(plan.base.url, "http-upload: cancelled"), false, offset,
+                            size);
+    std::string bytes;
+    const std::size_t n = static_cast<std::size_t>(std::min(plan.chunk_size, size - offset));
+    if (const std::string e = read(offset, n, bytes); !e.empty())
+      return marshal_upload(upload_failure(plan.base.url, "http-upload: " + e), false, offset,
+                            size);
+    const std::size_t sent = bytes.size();
+    last = perform(*app, chunk_request(plan, offset, std::move(bytes)), plan.auth, access);
+    const ChunkStep step = judge_chunk(plan, offset, sent, last.reply);
+    if (step.kind == ChunkStep::advance) {
+      offset = step.offset;
+      attempts = 0;
+      write_progress(app, plan.progress_path, offset, size);
+      continue;
+    }
+    if (step.kind == ChunkStep::fail || ++attempts > plan.retries) {
+      if (!step.error.empty())
+        last.reply.error = step.error;
+      return marshal_upload(last, false, offset, size);
+    }
+    if (step.kind == ChunkStep::resync) {
+      offset = step.offset;
+      write_progress(app, plan.progress_path, offset, size);
+      continue;
+    }
+    // A retry: wait (a killed program stops waiting), then ask the server how far it got.
+    const auto until = std::chrono::steady_clock::now() +
+                       std::chrono::milliseconds(static_cast<int>(backoff_secs(attempts) * 1000));
+    while (std::chrono::steady_clock::now() < until && !call.cancel_requested())
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    if (!plan.status_url.empty()) {
+      const Outcome st = perform(*app, status_request(plan), plan.auth, access);
+      if (st.reply.ok && st.reply.status >= 200 && st.reply.status < 300)
+        if (const std::optional<std::uint64_t> said = reply_offset(plan, st.reply);
+            said && *said <= size)
+          offset = *said;
+    }
+  }
+  return marshal_upload(last, true, offset, size);
+}
+
+// The same upload started rather than sent (L4), on the browser's one thread: each read of the
+// file and each request is started, and its answer, from the browser's event loop, starts the
+// next, so the frame loop goes on while the file goes out. A cancel aborts the request out and
+// stops at the next step.
+struct StartedUpload : std::enable_shared_from_this<StartedUpload> {
+  UploadPlan plan;
+  NetAccess access;
+  se::async_host *host = nullptr;
+  std::shared_ptr<se::async_call> call;
+  cvc::app *app = nullptr;
+  std::shared_ptr<StartedRequest> current; // the request out, for a cancel to abort
+  std::uint64_t offset = 0;
+  int attempts = 0;
+  Outcome last = upload_failure(std::string(), "http-upload: nothing left to send");
+
+  std::uint64_t size() const { return plan.file->size(); }
+  bool stopped() const { return call->cancel_requested(); }
+
+  void end(const Outcome &out, bool done, std::uint64_t at) {
+    current.reset();
+    settle_started(*host, call, marshal_upload(out, done, at, size()));
+  }
+
+  // Start `req` as http_work starts one, and hand its outcome to `then`.
+  void send(cvc::net::HttpRequest req, std::function<void(Outcome)> then) {
+    auto r = std::make_shared<StartedRequest>();
+    r->app = app;
+    r->req = std::move(req);
+    r->auth = plan.auth;
+    r->access = access;
+    r->host = host;
+    r->call = call;
+    r->renewer = renewer_for(plan.auth, access);
+    // The request holds the upload while it is out (and the upload the request, for a cancel):
+    // its outcome, or the cancel, lets go of both.
+    std::shared_ptr<StartedUpload> self = shared_from_this();
+    r->on_outcome = [self, then = std::move(then)](Outcome out) {
+      self->current.reset();
+      if (!self->stopped())
+        then(std::move(out));
+    };
+    current = r;
+    r->begin();
+  }
+
+  void begin() {
+    offset = plan.mode == UploadMode::chunks ? plan.offset : 0;
+    write_progress(app, plan.progress_path, offset, size());
+    if (plan.mode == UploadMode::chunks) {
+      next_chunk();
+      return;
+    }
+    std::shared_ptr<StartedUpload> self = shared_from_this();
+    plan.file->read(0, static_cast<std::size_t>(size()), [self](std::string bytes, std::string e) {
+      if (self->stopped())
+        return;
+      if (!e.empty()) {
+        self->end(upload_failure(self->plan.base.url, "http-upload: " + e), false, 0);
+        return;
+      }
+      self->send(single_request(self->plan, std::move(bytes)), [self](Outcome out) {
+        const bool done = http_2xx(out.reply);
+        if (done)
+          write_progress(self->app, self->plan.progress_path, self->size(), self->size());
+        self->end(out, done, done ? self->size() : 0);
+      });
+    });
+  }
+
+  void next_chunk() {
+    if (stopped())
+      return;
+    if (offset >= size()) {
+      end(last, true, offset);
+      return;
+    }
+    std::shared_ptr<StartedUpload> self = shared_from_this();
+    const std::uint64_t at = offset;
+    const std::size_t n = static_cast<std::size_t>(std::min(plan.chunk_size, size() - at));
+    plan.file->read(at, n, [self, at](std::string bytes, std::string e) {
+      if (self->stopped())
+        return;
+      if (!e.empty()) {
+        self->end(upload_failure(self->plan.base.url, "http-upload: " + e), false, at);
+        return;
+      }
+      const std::size_t sent = bytes.size();
+      self->send(chunk_request(self->plan, at, std::move(bytes)), [self, at, sent](Outcome out) {
+        self->last = std::move(out);
+        self->after_chunk(at, sent);
+      });
+    });
+  }
+
+  void after_chunk(std::uint64_t at, std::size_t sent) {
+    const ChunkStep step = judge_chunk(plan, at, sent, last.reply);
+    if (step.kind == ChunkStep::advance) {
+      offset = step.offset;
+      attempts = 0;
+      write_progress(app, plan.progress_path, offset, size());
+      next_chunk();
+      return;
+    }
+    if (step.kind == ChunkStep::fail || ++attempts > plan.retries) {
+      if (!step.error.empty())
+        last.reply.error = step.error;
+      end(last, false, offset);
+      return;
+    }
+    if (step.kind == ChunkStep::resync) {
+      offset = step.offset;
+      write_progress(app, plan.progress_path, offset, size());
+      next_chunk();
+      return;
+    }
+    after(backoff_secs(attempts), [](StartedUpload &self) { self.resume_after_failure(); });
+  }
+
+  void resume_after_failure() {
+    if (stopped())
+      return;
+    if (plan.status_url.empty()) {
+      next_chunk();
+      return;
+    }
+    std::shared_ptr<StartedUpload> self = shared_from_this();
+    send(status_request(plan), [self](Outcome st) {
+      if (st.reply.ok && st.reply.status >= 200 && st.reply.status < 300)
+        if (const std::optional<std::uint64_t> said = reply_offset(self->plan, st.reply);
+            said && *said <= self->size())
+          self->offset = *said;
+      self->next_chunk();
+    });
+  }
+
+  // Run `step` after `secs`, from the page's event loop. A host's own starting transport natively
+  // (a test's) has no such loop to wait on, and goes on at once.
+  void after(double secs, void (*step)(StartedUpload &)) {
+#ifdef __EMSCRIPTEN__
+    struct Wait {
+      std::shared_ptr<StartedUpload> self;
+      void (*step)(StartedUpload &);
+    };
+    emscripten_set_timeout(
+        [](void *p) {
+          std::unique_ptr<Wait> w(static_cast<Wait *>(p));
+          w->step(*w->self);
+        },
+        secs * 1000.0, new Wait{shared_from_this(), step});
+#else
+    (void)secs;
+    step(*this);
+#endif
+  }
+};
+
+// (http-upload)'s work: the blocking kernel natively; started where the transport starts requests
+// (a browser page without threads, http_work's L4).
+se::async_work http_upload_work(UploadPlan plan, const NetAccess &access, se::async_host &host,
+                                cvc::app *app) {
+  se::async_work work;
+  const bool starts = cvc::net::http_starts_async(*app);
+  if (!starts || !plan.file->reads_async())
+    work.kernel = [plan, access, app](se::async_call &call) -> se::value_t {
+      try {
+        return upload_blocking(plan, access, app, call);
+      } catch (const std::exception &e) {
+        return marshal_upload(
+            upload_failure(plan.base.url, std::string("http-upload: ") + e.what()), false, 0,
+            plan.file->size());
+      }
+    };
+  if (!starts)
+    return work;
+  work.start = [plan = std::move(plan), access, &host,
+                app](const std::shared_ptr<se::async_call> &call) {
+    auto u = std::make_shared<StartedUpload>();
+    u->plan = plan;
+    u->access = access;
+    u->host = &host;
+    u->call = call;
+    u->app = app;
+    call->on_cancel([weak = std::weak_ptr<StartedUpload>(u)] {
+      if (const std::shared_ptr<StartedUpload> t = weak.lock())
+        if (const std::shared_ptr<StartedRequest> r = std::exchange(t->current, nullptr))
+          if (const std::shared_ptr<cvc::net::HttpTransfer> transfer = r->transfer)
+            transfer->abort();
+    });
+    u->begin();
   };
   return work;
 }
@@ -1603,6 +2290,25 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
 
         register_net_verbs(app, env, access, app.slot<OpenUrlLimit>());
       });
+  // (http-upload URL FILE [OPTS]) / (http-upload-async ...) — send a file the user picked
+  // (file-pick, files.h), in one request or in chunks it can resume. Its own provider: it needs the
+  // app's picked files, and the program's root for its progress path.
+  if (have_http)
+    register_action_intrinsics(app, [&app, &host, access, io](std::shared_ptr<se::environment> env,
+                                                              se::intrinsics_context &ictx) {
+      if (!is_live(access))
+        return;
+      const std::string root = ictx.root ? ictx.root->fullName() : std::string();
+      cvc::app *const app_ptr = &app;
+      se::register_async_fn(
+          env, host, "http-upload",
+          [app_ptr, &host, access, root](std::span<const se::value_t> args) -> se::async_work {
+            UploadPlan plan = build_upload(args, *app_ptr, root);
+            check_request("http-upload", plan.base, plan.auth, access);
+            return http_upload_work(std::move(plan), access, host, app_ptr);
+          },
+          io);
+    });
 }
 
 } // namespace ariadne

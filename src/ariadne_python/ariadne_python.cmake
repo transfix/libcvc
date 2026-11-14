@@ -68,6 +68,10 @@ function(cvc_ariadne_python_host target)
   set(_gen "${CMAKE_CURRENT_BINARY_DIR}/ariadne_python/${target}")
   configure_file("${_CVC_ARIADNE_PYTHON_DIR}/ariadne_python_source.h.in"
                  "${_gen}/ariadne_python_source.h" @ONLY)
+  # The console (_ariadne_console) is a module of its own: ariadne_python.py goes in as a single
+  # literal (configure_file), already half of MSVC's 16 KB cap.
+  _cvc_ariadne_python_embed("${_CVC_ARIADNE_PYTHON_DIR}/ariadne_console.py" kAriadneConsoleSource
+                            "${_gen}/ariadne_console_source.h")
   execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import sys; print(sys.base_prefix)"
                   OUTPUT_VARIABLE _home OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE _rc)
   target_sources(${target} PRIVATE "${_CVC_ARIADNE_PYTHON_DIR}/python_engine.cpp")
@@ -114,6 +118,8 @@ function(cvc_ariadne_python_wasm_host target)
   set(_gen "${CMAKE_CURRENT_BINARY_DIR}/ariadne_python/${target}")
   configure_file("${_CVC_ARIADNE_PYTHON_DIR}/ariadne_python_source.h.in"
                  "${_gen}/ariadne_python_source.h" @ONLY)
+  _cvc_ariadne_python_embed("${_CVC_ARIADNE_PYTHON_DIR}/ariadne_console.py" kAriadneConsoleSource
+                            "${_gen}/ariadne_console_source.h")
 
   # The deps prefix: libpython, its headers, its stdlib, and the packages' site-packages.
   set(_deps "")

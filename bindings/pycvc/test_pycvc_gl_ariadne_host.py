@@ -1,7 +1,8 @@
 """pycvc_gl.ariadne.Host: an Ariadne document run by a Python program.
 
 Headless (no GL; runs in this process):
-  * data in: set / set_many / set_tree / set_table / set_series / publish_image (kept headless);
+  * data in: set / set_many / set_tree / set_table / set_series / set_plot (a chart's subtree,
+    decimated by min/max) / publish_image (kept headless);
   * data out: get / get_float / get_int / get_bool / get_tree / get_series, and watch callbacks;
   * the document calls Python: on(), function(), async_function(), with values both ways;
   * errors: an on() handler's exception is raised from step(); a function's is the document's
@@ -112,6 +113,44 @@ def headless(tmp):
     check(list(host.get_series("s")) == [2.5, -3.0], "get_series")
     host.set("s2", np.arange(3.0))
     check(host.get("s2") == "0,1,2", "a 1-D array is a series")
+    # set_plot: the subtree a chart: reads, each series with its own x, bands, styles, markers.
+    host.set_plot("pl", [np.array([3.0, 2.0, 1.0]), ([0, 10], [5, 6]),
+                         {"y": [1, None, np.nan], "x": [0, 5, 2_000_001], "lo": [0, 0, 2],
+                          "hi": [2, 2, 4], "label": "b", "style": "c1 dashed"}],
+                  markers=[(5, "min", "best"), {"x": 3, "kind": "elbow"}])
+    check(host.get("pl.s") == "3", "set_plot: s holds the series count")
+    check(host.get_tree("pl.s.0") == {"label": "", "x": "0,1,2", "y": "3,2,1"},
+          f"set_plot: values, x 0, 1, 2 ({host.get_tree('pl.s.0')})")
+    check(host.get("pl.s.1.x") == "0,10", "set_plot: an (x, y) pair")
+    check(host.get_tree("pl.s.2") == {"label": "b", "x": "0,5,2000001", "y": "1,nan,nan",
+                                      "lo": "0,0,2", "hi": "2,2,4", "style": "c1 dashed"},
+          f"set_plot: a dict series, gaps as nan, x exactly ({host.get_tree('pl.s.2')})")
+    check(host.get_tree("pl.m") == [{"x": "5", "label": "min", "kind": "best"},
+                                    {"x": "3", "label": "", "kind": "elbow"}],
+          f"set_plot: markers ({host.get_tree('pl.m')})")
+    host.set_plot("pl", {"only": [1, 2]}, x=[100, 200])
+    check(host.get("pl.s") == "1" and host.get("pl.s.0.label") == "only"
+          and host.get("pl.s.0.x") == "100,200" and host.get("pl.m") == "0",
+          "set_plot replaces the subtree: a dict by label, a shared x, no markers")
+    y = np.sin(np.arange(20000) / 300.0)
+    y[1234], y[15000], y[9000] = 9.0, -7.0, np.nan
+    host.set_plot("big", [y], max_points=500)
+    big = host.get_series("big.s.0.y")
+    check(len(big) <= 500 and np.nanmax(big) == 9.0 and np.nanmin(big) == -7.0
+          and np.isnan(big).sum() == 1,
+          f"set_plot decimates by min/max: {len(big)} points, peaks and the gap kept")
+    bx = host.get_series("big.s.0.x")
+    check(bx[0] == 0 and bx[-1] == 19999 and np.all(np.diff(bx) > 0), "decimation keeps x order")
+    for bad, why in (([{"x": [1], "y": [1, 2]}], "x and y lengths"),
+                     ([{"y": [1], "lo": [0]}], "a band without hi"),
+                     ([[1]], "a marker kind"), ([["a"]], "a value that is no number")):
+        try:
+            host.set_plot("bad", bad, markers=[(1, "", "peak")] if why == "a marker kind" else ())
+        except ValueError:
+            ok = True
+        else:
+            ok = False
+        check(ok, f"set_plot refuses {why}")
     for bad in ({"a.b": 1}, {"": 1}, {" a": 1}):
         try:
             host.set_tree("bad", bad)
@@ -253,7 +292,7 @@ def run_example(name, argv):
 
     def keep(self, _real=real_close):  # read the document's state before it closes
         if not self._closed:
-            captured.update({k: self.get(k) for k in ("clicks", "stats", "spread.n",
+            captured.update({k: self.get(k) for k in ("clicks", "stats", "spread.n", "learn.s",
                                                        "stats.trips", "stats.time",
                                                        "stats.plant", "stats.world")})
         _real(self)
@@ -357,6 +396,8 @@ def gl_child(tmp):
             check(captured["rc"] == 0 and os.path.getsize(os.path.join(tmp, f"{name}.png")) > 0,
                   f"example {name} ran offscreen")
             check(captured[expect[0]] == expect[1], f"example {name}: {expect} ({captured})")
+            if name == "data_feed":
+                check(captured["learn.s"] == "3", f"data_feed charts three series ({captured})")
         for plant in ("kinematic", "jolt"):  # nav: the fleet, the routes, the readouts, drawn
             png = os.path.join(tmp, f"nav_{plant}.png")
             got = run_example("nav", ["--offscreen", "--frames", "60", "--png", png, "--no-bundle",
