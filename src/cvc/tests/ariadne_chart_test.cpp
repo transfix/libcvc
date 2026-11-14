@@ -364,7 +364,8 @@ TEST(AriadneChart, HasChart) {
 TEST(AriadneChart, FromADocument) {
   if (!have_yaml())
     GTEST_SKIP() << "libcvc built without yaml-cpp";
-  LoadResult r = load_string(R"(
+  cvc::app app;
+  LoadResult r = load_string(app, R"(
 meta: { name: T, min_libcvc: 3.4.0 }
 windows:
   - window: W
@@ -381,7 +382,6 @@ windows:
         height: 220
 )");
   ASSERT_TRUE(r.ok) << r.error;
-  cvc::app app;
   ChartBackend be;
   Runtime rt(app, "doc");
   rt.set_backend(&be);

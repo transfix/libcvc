@@ -19,6 +19,7 @@ add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
 add_executable(ariadne_chart_test ariadne_chart_test.cpp)
 add_executable(ariadne_term_graphics_test ariadne_term_graphics_test.cpp)
 add_executable(ariadne_media_test ariadne_media_test.cpp)
+add_executable(ariadne_files_test ariadne_files_test.cpp)
 add_executable(ariadne_host_test ariadne_host_test.cpp)
 add_executable(ariadne_requires_test ariadne_requires_test.cpp)
 add_executable(ariadne_registries_test ariadne_registries_test.cpp)
@@ -373,6 +374,7 @@ set(TEST_TARGETS
   ariadne_chart_test
   ariadne_term_graphics_test
   ariadne_media_test
+  ariadne_files_test
   ariadne_host_test
   ariadne_requires_test
   ariadne_registries_test
@@ -804,6 +806,13 @@ target_compile_definitions(world_rules_test PRIVATE
   CVC_ARIADNE_WORLDS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../ariadne/worlds")
 
 target_link_libraries(ariadne_media_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_files_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2939,6 +2948,7 @@ cvc_discover_tests(ariadne_ftxui_test)
 cvc_discover_tests(ariadne_chart_test)
 cvc_discover_tests(ariadne_term_graphics_test)
 cvc_discover_tests(ariadne_media_test)
+cvc_discover_tests(ariadne_files_test)
 cvc_discover_tests(ariadne_host_test)
 cvc_discover_tests(ariadne_requires_test)
 cvc_discover_tests(ariadne_registries_test)

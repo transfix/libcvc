@@ -8,6 +8,7 @@
 // release, not one per frame (writes fan out to observers / replicated peers).
 
 #include "chart_emit.h"     // Kind::Chart (series / marker parse caches, the pick edge)
+#include "file_picker.h"    // §10.8 the Runtime's own "Open file" window
 #include "tf_editor_emit.h" // Kind::TfEditor (model / overlay / view state edges)
 
 #include <algorithm>
@@ -20,6 +21,7 @@
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/bind.h>
+#include <cvc/ariadne/files.h> // §10.8 (file-pick): the files the app's programs hold
 #include <cvc/ariadne/input.h>  // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
 #include <cvc/ariadne/loader.h> // is_builtin_widget_type (has?)
 #include <cvc/ariadne/media.h>  // §5.11 pictures by URI
@@ -29,6 +31,7 @@
 #include <cvc/ariadne/rich_text.h> // §5.20 parse_text_style
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_host.h> // §10.8 (file-pick) parks its program on the picker
 #include <cvc/state/state_exec/async_scheduler.h> // §4.7 app-wide action scheduler (exec_scheduler)
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/evaluator.h> // evaluation_timeout / evaluation_interrupted
@@ -1260,6 +1263,18 @@ struct Runtime::Impl {
   // §10.7 the verbs the core answers from the backend: (clipboard-set TEXT) where it has a
   // clipboard, and (fullscreen [ON]) everywhere (#f where the window can't).
   void bind_backend_verbs(const std::shared_ptr<cvc::state_exec::environment> &env) const;
+  // §10.8 (file-pick): whether a picker is open (one at a time), and the Runtime's own "Open
+  // file" window, drawn by render() where the host has no picker. Shared with the verb, as a
+  // program may outlive this Runtime. Drawn and opened on the drawing thread; `cancel` is set by a
+  // killed program's hook, from wherever that runs, and render() closes the window then.
+  struct FilePickHub {
+    std::mutex m;
+    bool busy = false;
+    std::atomic<bool> cancel{false};
+    ComposedFilePicker composed;
+  };
+  std::shared_ptr<FilePickHub> file_pick = std::make_shared<FilePickHub>();
+  void bind_file_verbs(const std::shared_ptr<cvc::state_exec::environment> &env) const;
 
   // What this host provides (requires:, has?). The names a program can reference are read from a
   // probe env built exactly like an action's, then cached; the cache is rebuilt when a provider is
@@ -3859,6 +3874,11 @@ void Runtime::Impl::render() {
       backend->end_main_menu_bar();
     }
     emit(root);
+    // §10.8 the Runtime's own "Open file" window, over the document, while a (file-pick) waits
+    // on it.
+    if (file_pick->cancel.exchange(false))
+      file_pick->composed.close();
+    file_pick->composed.emit(*backend);
   }
   players_end_walk(); // §5.13: a player whose widget this walk did not draw stops
   backend->end_frame();
@@ -4088,6 +4108,196 @@ void Runtime::Impl::bind_backend_verbs(
         if (args.empty())
           return se::value_t(can && b->is_fullscreen());
         return se::value_t(can && b->set_fullscreen(args[0].is_truthy()));
+      });
+  bind_file_verbs(env);
+}
+
+namespace {
+
+// {handle name size type}: a picked file as a program sees it; never its path or its bytes.
+cvc::state_exec::value_t file_dict(const std::string &handle, const FileSource &f) {
+  namespace se = cvc::state_exec;
+  return se::make_dict({
+      {"handle", se::value_t(handle)},
+      {"name", se::value_t(f.name())},
+      {"size", se::value_t(static_cast<int64_t>(f.size()))},
+      {"type", se::value_t(f.type())},
+  });
+}
+
+std::string trimmed(const std::string &s) {
+  const std::size_t a = s.find_first_not_of(" \t"), b = s.find_last_not_of(" \t");
+  return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
+}
+
+// (file-pick [OPTS])'s options: accept (a list of ".ext" / "type/sub" / "type/*", or one string of
+// them joined by commas, as an <input accept> is), multiple, title, dir.
+FilePickRequest file_pick_request(std::span<const cvc::state_exec::value_t> args) {
+  namespace se = cvc::state_exec;
+  FilePickRequest req;
+  if (args.size() > 1)
+    throw se::dsl_error("TypeError", "file-pick: expected at most one argument, an options dict");
+  if (args.empty() || args[0].is_nil())
+    return req;
+  const se::dict_ptr *d = std::get_if<se::dict_ptr>(&args[0].v);
+  if (!d)
+    throw se::dsl_error("TypeError",
+                        "file-pick: the options are a dict, not " + args[0].type_name());
+  const auto text = [](const se::value_t &v, const char *key) {
+    const std::string *s = std::get_if<std::string>(&v.v);
+    if (!s)
+      throw se::dsl_error("TypeError", std::string("file-pick: '") + key + "' is a string");
+    return *s;
+  };
+  for (const auto &[key, v] : **d) {
+    if (key == "accept") {
+      std::vector<std::string> parts;
+      if (const se::list_ptr *l = std::get_if<se::list_ptr>(&v.v)) {
+        for (const se::value_t &e : **l)
+          parts.push_back(text(e, "accept"));
+      } else {
+        const std::string all = text(v, "accept");
+        for (std::size_t at = 0; at <= all.size();) {
+          const std::size_t comma = std::min(all.find(',', at), all.size());
+          parts.push_back(all.substr(at, comma - at));
+          at = comma + 1;
+        }
+      }
+      for (const std::string &raw : parts) {
+        const std::string p = trimmed(raw);
+        if (p.empty())
+          continue;
+        if (p[0] != '.' && p.find('/') == std::string::npos)
+          throw se::dsl_error("ValueError", "file-pick: an 'accept' entry is \".ext\", "
+                                            "\"type/subtype\" or \"type/*\", not \"" +
+                                                p + "\"");
+        req.accept.push_back(p);
+      }
+    } else if (key == "multiple") {
+      req.multiple = v.is_truthy();
+    } else if (key == "title") {
+      req.title = text(v, "title");
+    } else if (key == "dir") {
+      req.dir = text(v, "dir");
+    } else {
+      throw se::dsl_error("ValueError",
+                          "file-pick: no option '" + key + "' (accept, multiple, title, dir)");
+    }
+  }
+  return req;
+}
+
+std::string handle_arg(const char *verb, std::span<const cvc::state_exec::value_t> args) {
+  namespace se = cvc::state_exec;
+  const std::string *h = args.size() == 1 ? std::get_if<std::string>(&args[0].v) : nullptr;
+  if (!h)
+    throw se::dsl_error("TypeError",
+                        std::string(verb) + ": expected one argument, a handle file-pick returned");
+  return *h;
+}
+
+} // namespace
+
+void Runtime::Impl::bind_file_verbs(
+    const std::shared_ptr<cvc::state_exec::environment> &env) const {
+  namespace se = cvc::state_exec;
+  cvc::app *const app_ptr = &app;
+  const std::weak_ptr<FilePickHub> weak_hub = file_pick;
+  const std::weak_ptr<Backend *> ref = backend_ref;
+  se::async_host &host = app.exec_async_host();
+  // The wait is the user's, not the program's: an I/O call, charged one step however long it is.
+  se::async_options io;
+  io.io = true;
+  // (file-pick [OPTS]) / (file-pick-async ...): ask the user for a file; the program parks until
+  // they pick or cancel. A list of {handle name size type}, empty when they cancelled. Bound where
+  // there is a backend, so somewhere to ask: (has? "file-pick").
+  if (backend)
+    se::register_async_fn(
+        env, host, "file-pick",
+        [app_ptr, weak_hub, ref, &host](std::span<const se::value_t> args) -> se::async_work {
+          const FilePickRequest req = file_pick_request(args);
+          se::async_work work; // no kernel: a program that can't park can't wait for the user
+          work.start = [app_ptr, weak_hub, ref, &host,
+                        req](const std::shared_ptr<se::async_call> &call) {
+            const std::shared_ptr<FilePickHub> hub = weak_hub.lock();
+            const std::shared_ptr<Backend *> drawing = ref.lock();
+            if (!hub || !drawing)
+              throw std::runtime_error("file-pick: the document is gone");
+            {
+              std::lock_guard<std::mutex> lock(hub->m);
+              if (hub->busy)
+                throw std::runtime_error("file-pick: a file picker is open already");
+              hub->busy = true;
+              hub->cancel = false;
+            }
+            hub->composed.close(); // one a cancelled program left (busy was clear)
+            auto settled = std::make_shared<std::atomic<bool>>(false);
+            const std::weak_ptr<FilePickHub> weak = hub;
+            FilePickDone done = [app_ptr, &host, call, settled,
+                                 weak](std::vector<std::shared_ptr<FileSource>> files,
+                                       std::string error) {
+              if (settled->exchange(true))
+                return;
+              if (const std::shared_ptr<FilePickHub> h = weak.lock()) {
+                std::lock_guard<std::mutex> lock(h->m);
+                h->busy = false;
+              }
+              if (call->cancel_requested())
+                return; // its host may be gone
+              se::value_t value;
+              std::exception_ptr failure;
+              try {
+                if (!error.empty())
+                  throw std::runtime_error("file-pick: " + error);
+                PickedFiles &table = picked_files(*app_ptr);
+                if (table.size() + files.size() > PickedFiles::kMaxFiles)
+                  throw std::runtime_error("file-pick: the app holds " +
+                                           std::to_string(PickedFiles::kMaxFiles) +
+                                           " files already; (file-forget H) some first");
+                std::vector<se::value_t> out;
+                for (const std::shared_ptr<FileSource> &f : files)
+                  if (f)
+                    out.push_back(file_dict(table.add(f), *f));
+                value = se::make_list(std::move(out));
+              } catch (...) {
+                failure = std::current_exception();
+              }
+              if (call->settle(std::move(value), failure))
+                host.finish(call);
+            };
+            call->on_cancel([weak, settled] {
+              if (settled->exchange(true))
+                return;
+              if (const std::shared_ptr<FilePickHub> h = weak.lock()) {
+                std::lock_guard<std::mutex> lock(h->m);
+                h->busy = false;
+                h->cancel = true; // render() closes the window
+              }
+            });
+            if (*drawing && (*drawing)->pick_files(req, done))
+              return; // the host's own (arigl: the system's file dialog)
+            if (browser_pick_files(req, done))
+              return; // a browser page's <input type=file>
+            if (!*drawing) {
+              done({}, "there is no window here to pick a file in");
+              return;
+            }
+            hub->composed.open(req, std::move(done)); // drawn by render() from the next frame
+          };
+          return work;
+        },
+        io);
+  // (file-info H): {handle name size type} of a file the app holds, or nil.
+  se::builtins::register_fn(env, "file-info",
+                            [app_ptr](std::span<const se::value_t> args) -> se::value_t {
+                              const std::string h = handle_arg("file-info", args);
+                              const std::shared_ptr<FileSource> f = picked_files(*app_ptr).find(h);
+                              return f ? file_dict(h, *f) : se::value_t();
+                            });
+  // (file-forget H): let go of a picked file; #t when the app held it.
+  se::builtins::register_fn(
+      env, "file-forget", [app_ptr](std::span<const se::value_t> args) -> se::value_t {
+        return se::value_t(picked_files(*app_ptr).forget(handle_arg("file-forget", args)));
       });
 }
 

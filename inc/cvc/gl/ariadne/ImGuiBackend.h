@@ -103,6 +103,15 @@ public:
   // browser's navigator.clipboard, which wants the click's user activation: an action a frame later
   // still has it).
   bool set_clipboard(cvc::app &app, const std::string &text) override;
+  // §10.8 (file-pick): the system's file dialog, through SDL (Windows' and macOS' own, a desktop
+  // portal or zenity on Linux), where SDL's video is up (cvcGL's SDL window). SDL may answer on
+  // another thread; the answer reaches the program at the next frame (begin_frame). False
+  // elsewhere: a browser page asks its <input type=file>, and under VTK's own window the core draws
+  // its "Open file" window with this backend's widgets.
+  bool pick_files(const cvc::ariadne::FilePickRequest &req,
+                  cvc::ariadne::FilePickDone done) override;
+  // Hands a file dialog's answer to the program that asked (pick_files).
+  void begin_frame() override;
   // The window's fullscreen, as the host does it (AriRuntime: the VTK / SDL window natively,
   // requestFullscreen on the canvas in a browser): `set(on)` asks and says whether it could, `is()`
   // says whether the window covers the screen now. Until one is installed, (fullscreen ON)
@@ -196,6 +205,10 @@ public:
   static void setImGuiContext(ImGuiContext *ctx);
 
 private:
+  // §10.8 the file dialog out (pick_files), shared with SDL's callback until it answers.
+  struct FileDialog;
+  std::shared_ptr<FileDialog> m_fileDialog;
+
   // Per-instance tf_editor state (the drag gesture, the working model while a delayed-update drag
   // is in flight, popups), keyed by the editor's `key`. Defined in tf_editor_imgui.cpp; shared_ptr
   // so this header needs only the declaration.

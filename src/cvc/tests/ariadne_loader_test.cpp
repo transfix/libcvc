@@ -506,7 +506,7 @@ windows:
         legend: bottom
         height: 0
 )";
-  LoadResult r = load_string(doc);
+  LoadResult r = fresh_load(doc);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(count(r.root, Kind::Chart), 4);
   const Widget *loss = find(r.root, Kind::Chart, "Loss");
