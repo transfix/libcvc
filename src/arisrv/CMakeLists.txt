@@ -403,6 +403,32 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
         list(APPEND _call_tests ${_name})
       endforeach()
     endif()
+    # The end-to-end test (S7, §6.5.8): tests/echo_service.py is a whole service, an HTTP route
+    # and an export over one function, an authenticate hook with a fixed test token, the echo
+    # subtree its document publishes, and a read scope of echo.public. tests/echo_client.ari joins
+    # with the token, calls the export (its reply and progress), reads what it wrote, is not sent
+    # echo.private, and fetches the route (--client-net-asgi).
+    set(_echo_client ari)
+    if(TARGET arix)
+      set(_echo_client arix)
+    endif()
+    if(TARGET ${_echo_client})
+      set(_echo_relay --relay-arg=--python "--relay-arg=${_srv_tests}/echo_service.py"
+                      --relay-arg=--doc "--relay-arg=${_srv_tests}/echo_service.ari"
+                      --relay-arg=--room --relay-arg=ctest --relay-arg=--state-listen
+                      --relay-arg=127.0.0.1:0 --relay-arg=--media-listen --relay-arg=127.0.0.1:0
+                      --relay-arg=--ws-listen --relay-arg=127.0.0.1:0)
+      foreach(_a IN LISTS CVC_ARIADNE_PYTHON_TEST_PATH)
+        list(APPEND _echo_relay "--relay-arg=${_a}")
+      endforeach()
+      add_test(NAME arisrvx_echo_service
+               COMMAND ${_pair} --relay $<TARGET_FILE:arisrvx>
+                       --client $<TARGET_FILE:${_echo_client}> --scheme grpc ${_echo_relay}
+                       --client-only --client-net-asgi --client-arg=--relay-room
+                       --client-arg=ctest --client-env=CVC_ARIADNE_ROOM_TOKEN=echo-token-0123456789
+                       "--client-arg=${_srv_tests}/echo_client.ari")
+      list(APPEND _call_tests arisrvx_echo_service)
+    endif()
     if(TARGET arix)
       add_test(NAME arisrvx_room_call_ws_arix
                COMMAND ${_pair} --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:arix>

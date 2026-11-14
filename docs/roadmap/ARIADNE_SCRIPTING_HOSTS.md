@@ -12,8 +12,10 @@ Status:
 - **S2 shipped** in transfix/libcvc#1122 (`room-call`, relay joins, TLS, a server document's
   `python:` block), and **S5** in transfix/libcvc#1130 (the authenticate hook and principals, with
   the client's `token: oidc` and reconnects).
-- **S6 is built:** `host.read_scope`, a per-connection read scope on both planes, and
-  `host.refresh_scope` (§6.5.6).
+- **S6 shipped** in transfix/libcvc#1147: `host.read_scope`, a per-connection read scope on both
+  planes, and `host.refresh_scope` (§6.5.6).
+- **S7 is built:** `pycvc.ariadne.testing.ServerHarness` for a service's tests under plain
+  `python`, and the end-to-end ctest `arisrvx_echo_service` (§6.5.8).
 - **P1b's engine interface shipped:** `ScriptEngine` and its lane, with Python moved onto it
   (§3.1, §8.3). It is what G1 and L1 plug into.
 - **G1's first part: WebAssembly guests natively on wasmtime,** in `arix` and `ariglx`
@@ -1277,7 +1279,7 @@ def scope(principal):
 - **Without a hook** nothing changes: every authenticated client reads everything published,
   which suits staff-only consoles.
 
-**As built in S6** (the reference is ARIADNE.md §9.8.5):
+**As built in S6** (transfix/libcvc#1147; the reference is ARIADNE.md §9.8.5):
 
 - **In the transports.** `state_transport::set_read_scope` takes a `state_read_scope`: for the
   connection admitted as a principal that identified as a node id, a `state_delivery_filter` over
@@ -1398,6 +1400,30 @@ def scope(principal):
 
   An `arix test` document joins it, calls the export, checks the reply and progress, reads the
   published subtree, and fails its read of a path outside its scope.
+
+**As built in S7** (the reference is ARIADNE.md §9.8.6):
+
+- **The harness drives arisrvx's own dispatch.** `ServerHarness` runs `_Program` (the code arisrvx
+  runs) on `host.loop`, with an in-process link in place of the relay. So the authenticate hook,
+  the read_scope hook, the role gates, `ctx`, the timeouts, `CallError` and the per-principal
+  limits are the same code, not a copy.
+- **Values.** They cross through pycvc's capsules, as the wire carries them.
+- **The API.**
+  - `connect(bearer)` (or `Refused`), or `client(principal)`.
+  - `call`, `call_with` (`room-call-opts`), `acall` and `acall_with`.
+  - `progress[name]` and `connected`.
+  - `get`, `get_tree` and `reads`, bounded by `publish=` and the principal's read scope, which
+    `host.refresh_scope` updates.
+  - `host.disconnect` closes the principal's clients.
+- **Where it lives.** `pycvc.ariadne.testing` is registered by the module itself, which is a single
+  file.
+- **Not modeled.** The result cap, and the room's `conf` tree.
+- **The end-to-end ctest.** `arisrvx_echo_service`: `tests/echo_service.py` and
+  `tests/echo_service.ari` against `tests/echo_client.ari`, run by `arix` when it is built, else by
+  `ari`.
+  - The client reaches the route through `relay_pair.py --client-net-asgi`, which `--net-allow`s
+    the origin the program logs.
+  - The out-of-scope read is S6's read scope (`echo.private`).
 
 #### 6.5.9 Operating it
 
@@ -2274,8 +2300,8 @@ for it.
 | S3 | Client DSL programs | S0 | S |
 | S4 | Restricted client Python in worker processes | S2 | L |
 | S5 | **Done** (transfix/libcvc#1130). The `authenticate` hook and principals: bound writes, room-call and rate limits keyed by principal; `host.disconnect` (§6.5.4). As built: `state_transport::set_authenticator` on gRPC and WS (the verdict on the connection's own thread, before admission, in place of the room token), the gate's principal (takeover only by the same principal, `principal_of`), `--auth-timeout`, `--call-concurrency`, `--call-rate`, `disconnect_principal`, bearers up to 4096 characters, a refused or dropped join told at once. Tests: `StateTransportGrpcTest.InboundGateKeysANodeIdToItsPrincipal`, `StateTransportGrpcTest.AnAuthenticatorAdmitsAndBindsPrincipals`, `StateTransportWsTest.AnAuthenticatorJudgesTheHandshake`, `ServerLinkTest.ARequestWaitsForItsAnswerOrItsTimeout`, `arisrvx_auth_{staff,user_ws,refuses_wrong,refuses_slow,refuses_raises}`, `pycvc_ariadne_server`. Not in it: the client's `token: oidc` | S1 | S |
-| S6 | **Built.** Bound reads (§6.5.6): `host.read_scope` and `host.refresh_scope`. As built: `state_transport::set_read_scope` and `refresh_read_scope` on gRPC and WS (a scoped connection held until its Hello sets its scope; the scope in the peer's `delivery_view` and checked under the write lock on every tree write; deletes for what it can no longer read, a snapshot of what it newly can), `state_prefix_filter`, `room_read_scope` (the participant's own subtree), the prefixes answered with the authenticate verdict (`ServerLink::set_scope`). Tests: `StateSyncAdapterTest.ARemoteDeleteTakesTheSubtreeOut`, `StatePrefixFilterTest`, `StatePeerRegistryTest.AScopedViewDeniesWhatItsScopeDoes`, `StateReadScopeTest.*`, `StateTransportGrpcTest.AReadScopeBoundsWhatAPrincipalReads`, `StateTransportWsTest.AReadScopeBoundsWhatAPrincipalReads`, `RoomCallsTest.AReadScopeKeepsTheParticipantsOwnSubtree`, `arisrvx_read_scope`, `arisrvx_read_scope_ws` | S5 | M |
-| S7 | `ServerHarness` for plain `python`, and the end-to-end CI test (§6.5.8) | S2, S5 | S |
+| S6 | **Done** (transfix/libcvc#1147). Bound reads (§6.5.6): `host.read_scope` and `host.refresh_scope`. As built: `state_transport::set_read_scope` and `refresh_read_scope` on gRPC and WS (a scoped connection held until its Hello sets its scope; the scope in the peer's `delivery_view` and checked under the write lock on every tree write; deletes for what it can no longer read, a snapshot of what it newly can), `state_prefix_filter`, `room_read_scope` (the participant's own subtree), the prefixes answered with the authenticate verdict (`ServerLink::set_scope`). Tests: `StateSyncAdapterTest.ARemoteDeleteTakesTheSubtreeOut`, `StatePrefixFilterTest`, `StatePeerRegistryTest.AScopedViewDeniesWhatItsScopeDoes`, `StateReadScopeTest.*`, `StateTransportGrpcTest.AReadScopeBoundsWhatAPrincipalReads`, `StateTransportWsTest.AReadScopeBoundsWhatAPrincipalReads`, `RoomCallsTest.AReadScopeKeepsTheParticipantsOwnSubtree`, `arisrvx_read_scope`, `arisrvx_read_scope_ws` | S5 | M |
+| S7 | **Built.** `ServerHarness` for plain `python`, and the end-to-end CI test (§6.5.8). As built: `pycvc.ariadne.testing.ServerHarness` and `HarnessClient` over arisrvx's own `_Program` dispatch (authenticate, read_scope, role gates, `ctx`, timeouts, `CallError`, per-principal limits; values through pycvc's capsules; `publish=` and the read scope bound what a client reads; `host.disconnect` and `host.refresh_scope` reach it), and `relay_pair.py --client-net-asgi`. Tests: `pycvc_ariadne_harness`, `arisrvx_echo_service` | S2, S5 | S |
 | L1 | Lua bindings (SWIG), the Lua engine in the `x` hosts, Lua for client code on `arisrvx` | the engine interface (P1b, done) | L |
 | G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Second part done:** `ari_init` at load and calls from `init:` (`ScriptLane::run`). **Third part done:** host objects by handle, read a region at a time (§8.4.1), and `MemoryError`. **Fourth part done:** a call from a program as its own sliced native call (`SlicedCall`). **Fifth part done:** the pump budget counts what the slices charge. **Sixth part done:** the instance waited for through the lock manager (`ActivationOptions::lock`), and `RecursionError` for a call back into it. **Seventh part done:** the key, pointer, signal and message hooks (`Runtime::set_event_tap`, `ScriptLane::on_key` and the rest). **Eighth part done:** the state imports as fast paths beside `call` (`ScriptSlice::call_now`), and §8.4.1's writes (`volume_write`, `volume_new`, `data.write`). **Ninth part done:** wasmtime in the `arix` and `ariglx` recipes, linked by name. **Tenth part done:** `--exec-policy` and pure exports on the read lane (`ScriptLane::export_pure`). **Done.** | the engine interface (P1b, done) | L |
 | G2 | The install-time transform (§8.5: gas injection, built through cvcpkg's Rust crates; Asyncify) and the browser backend: the same slices, limits, access and hooks in a single-threaded page | G1 | L |
