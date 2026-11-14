@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 // StreamTextureBinding — drives a GeometryNode's texture from a cvc::ariadne::stream video
 // subscription (roadmap STATE_BINARY_STREAMING.md Phase 2). Once per rendered
@@ -81,6 +82,57 @@ private:
   std::shared_ptr<cvc::ariadne::stream::subscription> sub_;
   std::int64_t last_seq_ = -1;
   bool released_ = false;
+};
+
+// LiveTextureBinding — a node's `material: { texture: { stream: <source> } }` (docs/ARIADNE.md
+// §5.4, "Live textures"): a GeometryNode's texture fed from a stream, uploading only what changed.
+//
+// - `sources` are the names to look for, in order: stream tokens, then state paths that may hold a
+//   raster mirror (cvc::ariadne::stream::raster_params::mirror; a relay's client has one). The
+//   first tick on which one of them is live subscribes; until then, and again after the stream
+//   closes, each tick looks again, so the producer may start before or after the scene.
+// - A raster stream (codec "rgba8.patch") is drawn into a canvas the texture aliases: the first
+//   frame (and one after a gap) uploads the texture whole, every other frame only its changed
+//   rectangles (GeometryNode::texture_modified_rect, glTexSubImage2D).
+// - A plain raw stream (rgba8, rgb8, ...) shows each new frame whole, as StreamTextureBinding does.
+//
+// Render/owner thread only, like StreamTextureBinding: construction, tick() and destruction.
+class LiveTextureBinding {
+public:
+  struct Stats {
+    std::uint64_t frames = 0;       // frames taken from the stream
+    std::uint64_t full_uploads = 0; // whole-texture uploads (setTexture, texture_modified)
+    std::uint64_t rect_uploads = 0; // texture_modified_rect calls
+    std::uint64_t texels = 0;       // texels those covered
+    std::uint64_t skipped = 0;      // delta frames dropped while waiting for a key frame
+  };
+
+  LiveTextureBinding(cvc::app &app, std::vector<std::string> sources,
+                     std::weak_ptr<cvc::gl::GeometryNode> node);
+  ~LiveTextureBinding();
+  LiveTextureBinding(const LiveTextureBinding &) = delete;
+  LiveTextureBinding &operator=(const LiveTextureBinding &) = delete;
+
+  // Look for the source when not subscribed, then take every new frame onto the node's texture.
+  // Stops for good (unsubscribing) once the node is gone.
+  void tick();
+
+  bool subscribed() const noexcept;
+  bool finished() const noexcept { return finished_; }         // the node is gone
+  const std::string &token() const noexcept { return token_; } // the stream it reads ("": none)
+  const Stats &stats() const noexcept { return stats_; }
+
+private:
+  struct Impl;
+  void release();
+
+  cvc::app &app_;
+  std::vector<std::string> sources_;
+  std::weak_ptr<cvc::gl::GeometryNode> node_;
+  std::string token_;
+  std::unique_ptr<Impl> m_;
+  Stats stats_;
+  bool finished_ = false;
 };
 
 } // namespace ariadne

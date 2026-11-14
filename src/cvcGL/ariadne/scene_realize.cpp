@@ -26,6 +26,7 @@
 #include <cvc/gl/VolSliceNode.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/gl/ariadne/stream_texture_binding.h> // material: { texture: { stream } }
 #include <cvc/gl/ariadne/tf_binding.h>    // every volume node's editable transfer-function model
 #include <cvc/gl/ariadne/vehicle_view.h>  // the world's vehicles, drawn on their chassis
 #include <cvc/gl/physics_scene_binding.h> // body: the nodes physics moves
@@ -551,6 +552,48 @@ tf_binding_options volume_tf_options(const cvc::ariadne::SceneTransferFunction &
   return o;
 }
 
+// material: { texture: { stream: <name> } } on `g`: a LiveTextureBinding, looking for the name as
+// written (a stream token) and resolved against the bind prefix (a document's own stream, or a
+// mirror under its root). It subscribes on the first tick the source is live, so the producer may
+// start after the scene.
+std::shared_ptr<LiveTextureBinding> live_texture(cvc::app &app, const std::string &name,
+                                                 const std::string &bind_prefix,
+                                                 const std::shared_ptr<GeometryNode> &g) {
+  std::vector<std::string> sources{name};
+  const std::string resolved = cvc::ariadne::resolve_bind(bind_prefix, name);
+  if (resolved != name)
+    sources.push_back(resolved);
+  return std::make_shared<LiveTextureBinding>(app, std::move(sources),
+                                              std::weak_ptr<GeometryNode>(g));
+}
+
+// The shared tail's part of it: a node that draws a mesh (a built-in geometry node, or a custom
+// type whose realizer returns one) takes a live texture through its UVs.
+void bind_live_texture(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
+                       const std::shared_ptr<GraphicsNode> &node, const std::string &bind_prefix,
+                       RealizedScene &out, std::vector<std::string> *warnings) {
+  if (n.material_texture_stream.empty() || !n.source_data.empty()) // a data node binds its terrain
+    return;
+  std::shared_ptr<GeometryNode> g = std::dynamic_pointer_cast<GeometryNode>(node);
+  if (!g || n.type == "group") { // a top-level group is an empty GeometryNode: no mesh to wear it
+    warn(warnings, "ari: scene node '" + n.id +
+                       "': texture: { stream } needs a node that draws a "
+                       "mesh; a '" +
+                       n.type + "' node draws none of its own");
+    return;
+  }
+  const cvc::geometry *geom = g->getGeometry();
+  if (geom && geom->uvs().empty())
+    warn(warnings, "ari: scene node '" + n.id +
+                       "': its mesh has no UVs, so its stream texture "
+                       "shows one texel");
+  if (n.type != "geometry") // the built-in geometry node turned its UVs already
+    apply_uv_transform(*g, n);
+  std::shared_ptr<LiveTextureBinding> b =
+      live_texture(sg.appContext(), n.material_texture_stream, bind_prefix, g);
+  out.custom_ticks.push_back([b](vtkRenderer *) { b->tick(); });
+}
+
 // Realize one node under `parent` (null = a top-level node parented to the graphics
 // root). A nested node is created via parent->createChild/addGraphicsChild, which
 // gives it the hierarchical state path `{parent}.children.{id}` AND makes its
@@ -575,8 +618,8 @@ bool lod_eligible(const cvc::ariadne::SceneNode &n, const cvc::geometry &geom,
   // Nothing a ladder cannot carry: a texture, shader or clip is set up on one GeometryNode, a body
   // is made from the node's own GeometryNode (realize_physics), and children would nest under a
   // node whose rungs come and go.
-  if (!n.material_texture.empty() || n.shader.present || n.clip.present || n.body.present ||
-      !n.children.empty())
+  if (!n.material_texture.empty() || !n.material_texture_stream.empty() || n.shader.present ||
+      n.clip.present || n.body.present || !n.children.empty())
     return false;
   return geom.num_tris() + 2 * geom.num_quads() >= options.lod_min_tris;
 }
@@ -713,6 +756,8 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
           }
         }
         apply_uv_transform(*g, n); // material: { uv: ... } orients the image
+      } else if (g && !n.material_texture_stream.empty()) {
+        apply_uv_transform(*g, n); // the live texture's orientation (bind_live_texture binds it)
       }
       node = g;
     }
@@ -851,6 +896,7 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
     apply_mesh_keys(*g, n, warnings);
   apply_clip(*node, n, sg.appContext(), bind_prefix, out.clip, warnings); // own coordinates
   warn_clip_capability(*node, n, warnings);
+  bind_live_texture(sg, n, node, bind_prefix, out, warnings); // material: { texture: { stream } }
   if (n.body.present && n.source_data.empty()) // a data node's come with its dataset
     bodies.push_back({&n, node});              // added once every node exists (realize_physics)
   out.nodes.push_back({n.id, n.tags, node});
@@ -1305,6 +1351,10 @@ boost::any dataset_object(cvc::state &root, const std::string &store, const std:
 // over `g`, the node drawing the terrain `field`: each vertex's UV is its place in the field's
 // extent, the image north up (UV (0, 0), its bottom-left, at the field's south-west corner), then
 // turned as the node's material: { uv } says. False when the dataset has no image.
+// UVs over the field's extent on `g` (UV (0, 0) at its south-west corner), turned by the node's
+// material: { uv }: what a draped image, or a live texture, samples. False without a mesh.
+bool drape_uvs(GeometryNode &g, const cvc::height_field &field, const cvc::ariadne::SceneNode &n);
+
 bool drape_satellite(cvc::state &root, const std::string &store, GeometryNode &g,
                      const cvc::height_field &field, const cvc::ariadne::SceneNode &n) {
   cvc::state *s = root.findDescendant(store + cvc::state::SEPARATOR + "satellite");
@@ -1316,6 +1366,15 @@ bool drape_satellite(cvc::state &root, const std::string &store, GeometryNode &g
     }
   }
   if (!img || img->empty() || !g.getGeometry())
+    return false;
+  if (!drape_uvs(g, field, n))
+    return false;
+  g.setTexture(*img);
+  return true;
+}
+
+bool drape_uvs(GeometryNode &g, const cvc::height_field &field, const cvc::ariadne::SceneNode &n) {
+  if (!g.getGeometry())
     return false;
   cvc::geometry mesh = *g.getGeometry(); // copy-on-write: only its UVs are new
   const double x0 = field.x0(), y0 = field.y0();
@@ -1331,7 +1390,6 @@ bool drape_satellite(cvc::state &root, const std::string &store, GeometryNode &g
   transform_uvs(uvs, n);
   mesh.uvs() = std::move(uvs);
   g.setGeometry(mesh);
-  g.setTexture(*img);
   return true;
 }
 
@@ -1342,6 +1400,18 @@ void mesh_bounds(const cvc::geometry &g, double out[6]) {
     out[k] = lo[k];
     out[3 + k] = hi[k];
   }
+}
+
+// A data node's terrain: its live texture (material: { texture: { stream } }) through UVs over the
+// field, or else the dataset's aerial image.
+void drape_terrain(RealizedScene &r, SceneDataBinding &b, const std::string &store,
+                   const std::shared_ptr<GeometryNode> &terrain, const cvc::height_field &field) {
+  if (b.spec.material_texture_stream.empty()) {
+    drape_satellite(cvc::state::instance(*r.app), store, *terrain, field, b.spec);
+    return;
+  }
+  drape_uvs(*terrain, field, b.spec);
+  b.texture = live_texture(*r.app, b.spec.material_texture_stream, r.bind_prefix, terrain);
 }
 
 // The children of a data node's group, from the dataset `store`: replaces what it drew before.
@@ -1378,9 +1448,9 @@ bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
     if (std::shared_ptr<const cvc::height_field> t = (*w)->terrain()) {
       r.height_fields[n.id] = t;
       for (const std::shared_ptr<GraphicsNode> &c : b.drawn) // the terrain wears the aerial image
-        if (auto *gn = dynamic_cast<GeometryNode *>(c.get());
+        if (auto gn = std::dynamic_pointer_cast<GeometryNode>(c);
             gn && c->getName() == n.id + "_terrain")
-          drape_satellite(cvc::state::instance(*r.app), store, *gn, *t, n);
+          drape_terrain(r, b, store, gn, *t);
     }
   } else if (const field_ptr *f = boost::any_cast<field_ptr>(&obj)) {
     auto terrain =
@@ -1390,7 +1460,7 @@ bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
     mesh_bounds(**f, bounds);
     has_bounds = true;
     if (terrain)
-      drape_satellite(cvc::state::instance(*r.app), store, *terrain, **f, n);
+      drape_terrain(r, b, store, terrain, **f);
   } else if (const geometry_ptr *g = boost::any_cast<geometry_ptr>(&obj)) {
     b.drawn.push_back(group->createChild<GeometryNode>(n.id + "_" + key, **g));
     mesh_bounds(**g, bounds);
@@ -1489,6 +1559,9 @@ bool restart_scene_world(RealizedScene &realized, std::vector<std::string> *warn
 cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *renderer,
                                          double wall_dt) {
   sync_scene_data(realized); // a data node whose dataset (re)loaded draws it this frame
+  for (SceneDataBinding &d : realized.data_nodes) // a data node's terrain's live texture
+    if (d.texture)
+      d.texture->tick();
   cvc::world_clock::step_result clock_step;
   // §9 time — drive the authoritative simulation clock FIRST, so every ticker below (and any
   // custom_tick reading app.world_clock().t()) sees ONE coherent world time for this frame. Opt-in:

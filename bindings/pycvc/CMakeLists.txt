@@ -374,7 +374,8 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_proxy_hooks:test_pycvc_proxy_hooks.py
              pycvc_lod:test_pycvc_lod.py
              pycvc_world_geometry:test_pycvc_world_geometry.py
-             pycvc_data:test_pycvc_data.py)
+             pycvc_data:test_pycvc_data.py
+             pycvc_raster:test_pycvc_raster.py)
     string(REPLACE ":" ";" _pair "${_t}")
     list(GET _pair 0 _name)
     list(GET _pair 1 _script)

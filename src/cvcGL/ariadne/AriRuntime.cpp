@@ -10,6 +10,7 @@
 #include <cvc/ariadne/bind.h>                   // sync_scene_visibility
 #include <cvc/ariadne/stream/stream_channel.h>  // subscribe / deliver_mode
 #include <cvc/ariadne/stream/stream_registry.h> // stream_registry::for_app / lookup
+#include <cvc/ariadne/stream_intrinsics.h>      // register_stream_intrinsics: streams by default
 #include <cvc/core/app.h>                       // cvc::app
 #include <cvc/gl/CameraController.h>            // cam.update / frameBounds
 #include <cvc/gl/GeometryNode.h>                // GeometryNode (gl-bind-stream target)
@@ -23,6 +24,7 @@
 #include <cvc/gl/ariadne/extensions.h>             // register_cvcgl_extensions
 #include <cvc/gl/ariadne/scene_realize.h>          // realize_scene / RealizedScene / tick_scene
 #include <cvc/gl/ariadne/scene_views.h>            // the viewport widget
+#include <cvc/gl/ariadne/stream_node.h>            // register_stream_node_type: type: stream
 #include <cvc/gl/ariadne/stream_texture_binding.h> // StreamTextureBinding (gl-bind-stream sink)
 #include <cvc/gl/ariadne/stream_verbs.h>     // StreamBindingSink / register_gl_stream_intrinsics
 #include <cvc/state/state_exec/async_host.h> // wait_idle
@@ -436,6 +438,11 @@ AriRuntime::AriRuntime(SceneRenderer &view, CameraController &cam, ImGuiOverlay 
   // render thread; the host destroys the AriRuntime there (the shared single-thread contract, not
   // new to this verb). Must run before the first load()/drain().
   register_gl_stream_intrinsics(app_);
+  // Streams and rasters by default, on every host built on this (arigl, arigl-web, ariglx and
+  // pycvc_gl's Host): (stream-open ...) and (raster-open ...), and `type: stream` nodes. A node's
+  // material: { texture: { stream } } needs nothing registered. Idempotent.
+  cvc::ariadne::register_stream_intrinsics(app_);
+  register_stream_node_type(app_);
   if (auto *sink = dynamic_cast<StreamBindingSink *>(scene_.get()))
     app_rt_.runtime().document_scope().slot<GlStreamSinkHandle>(kGlStreamSinkSlot)->sink = sink;
 }
