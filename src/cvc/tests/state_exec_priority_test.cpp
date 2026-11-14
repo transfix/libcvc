@@ -197,7 +197,7 @@ struct prio_world {
     EXPECT_TRUE(r.has_value()) << "pid " << pid << " has no result"
                                << (i && i->exit_exception ? ": " + to_string(*i->exit_exception)
                                                           : std::string());
-    return r ? *r : nil_value;
+    return r ? *r : nil_value();
   }
 
   // `script` submitted as `who` and run to its end; its result.

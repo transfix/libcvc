@@ -1,5 +1,6 @@
 """data_feed.py — Python pushes data into data_feed.ari every frame: two series the document plots,
-a table, a numpy picture, and a live video stream; and reads the document's controls back.
+a table, a numpy picture, a live video stream and a learning run's curves on a log-y chart; and
+reads the document's controls back.
 
     python data_feed.py                           # a window
     python data_feed.py --offscreen --png feed.png
@@ -15,12 +16,60 @@ import sys
 
 import numpy as np
 
-from pycvc_gl.ariadne import Host, main_args
+from pycvc.ari import Host, main_args
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HISTORY = 240  # samples each plot keeps
 HEAT = 128  # the picture's size
 STREAM_W, STREAM_H = 320, 240
+LEARN_STEPS = 3000  # the learning run's length; it shows 600 steps at first and grows
+
+
+def learning_run(rng):
+    """A learning run's curves, every 10 steps: the train loss, the held-out loss of three seeds
+    (evaluated every 100 steps; it overfits past ~1500), and the grad norm. All are > 0, for a log
+    axis."""
+    steps = np.arange(0, LEARN_STEPS + 1, 10, dtype=float)
+
+    def noise(n, s):  # lognormal jitter
+        return np.exp(s * rng.standard_normal(n))
+
+    train = (2.0 * np.exp(-steps / 400.0) + 0.04) * noise(steps.size, 0.06)
+    held_x = steps[::10]
+    seeds = np.stack([(2.1 * np.exp(-held_x / 450.0) + 0.07 + 4e-5 * np.maximum(0, held_x - 1500))
+                      * level * noise(held_x.size, 0.08) for level in (0.8, 1.0, 1.3)])
+    grad = (5.0 * np.exp(-steps / 800.0) + 0.3) * noise(steps.size, 0.15)
+    grad[(steps >= 1200) & (steps < 1400)] = np.nan  # the logger stopped: a gap
+    return steps, train, held_x, seeds, grad
+
+
+def elbow(x, y):
+    """The step where log y falls furthest below the chord from its first point to its last (a
+    Kneedle-style knee)."""
+    ly = np.log10(y)
+    chord = ly[0] + (ly[-1] - ly[0]) * (x - x[0]) / (x[-1] - x[0])
+    return float(x[int(np.argmax(chord - ly))])
+
+
+def learning_plot(run, upto):
+    """What host.set_plot takes for the run's first `upto` steps: three series, each with its own
+    x, and the best (lowest held-out mean) and elbow (of the train loss) steps."""
+    steps, train, held_x, seeds, grad = run
+    n, m = int(np.searchsorted(steps, upto, side="right")), int(np.searchsorted(held_x, upto,
+                                                                                 side="right"))
+    mean = seeds[:, :m].mean(axis=0)
+    series = [
+        {"label": "train", "x": steps[:n], "y": train[:n], "style": "c0 dashed"},
+        {"label": "held-out", "x": held_x[:m], "y": mean, "lo": seeds[:, :m].min(axis=0),
+         "hi": seeds[:, :m].max(axis=0), "style": "c0"},
+        {"label": "grad norm", "x": steps[:n], "y": grad[:n], "style": "c1"},
+    ]
+    markers = []
+    if m > 1:
+        markers.append((float(held_x[int(np.argmin(mean))]), "best held-out", "best"))
+    if n > 2:
+        markers.append((elbow(steps[:n], train[:n]), "elbow", "elbow"))
+    return series, markers
 
 
 def heat_picture(t):
@@ -57,6 +106,7 @@ def main(argv=None):
     signal = collections.deque(maxlen=HISTORY)
     walk = collections.deque([0.0], maxlen=HISTORY)
     clock = {"t": 0.0}
+    run = learning_run(np.random.default_rng(11))
 
     @host.on_frame
     def feed(dt):
@@ -79,6 +129,10 @@ def main(argv=None):
             host.set_table("stats", rows)
         if host.frame_count % 5 == 0:
             host.publish_image("heat", heat_picture(t))
+            upto = min(LEARN_STEPS, 600 + 20 * host.frame_count)  # it trains as the feed runs
+            series, markers = learning_plot(run, upto)
+            host.set_plot("learn", series, markers=markers)
+            host.set("learn_t", f"{(250.0 * t) % upto:.0f}")  # the play-head sweeps the run
         if stream is not None:
             stream.publish(stream_frame(t), t)
 
@@ -87,6 +141,7 @@ def main(argv=None):
         host.snapshot(args.png)
     print("samples:", len(host.get_series("signal")))
     print("stats rows:", host.get("stats"))
+    print("learning series:", host.get("learn.s"))
     code = host.exit_code()
     host.close()
     return code

@@ -11,6 +11,7 @@
 #include <cvc/state/state_exec/stdlib.h>            // random_stream_scope
 #include <iterator>
 #include <optional>
+#include <random>
 #include <stdexcept>
 #include <thread>
 
@@ -69,19 +70,10 @@ private:
   std::optional<random_stream_scope> random_;
 };
 
-// S1-Q4 (td 4.1), as async_scheduler's: debug builds, or CVC_EXEC_VERIFY=1 (read once), abort on a
-// public mutator called while another thread pumps.
-#ifdef NDEBUG
-const bool kVerifyPumpOwner = [] {
-  const char *v = std::getenv("CVC_EXEC_VERIFY");
-  return v && *v && *v != '0';
-}();
-#else
-constexpr bool kVerifyPumpOwner = true;
-#endif
-
+// S1-Q4 (td 4.1), as async_scheduler's: debug builds, or CVC_EXEC_VERIFY=1 (read as the scheduler
+// is made), abort on a public mutator called while another thread pumps.
 void verify_pump_owner(const scheduler &s, const char *what) {
-  if (kVerifyPumpOwner && s.pumped_elsewhere()) {
+  if (s.verifies_pump_owner() && s.pumped_elsewhere()) {
     std::fprintf(stderr, "%s: %s\n", what, kPumpedElsewhereError);
     std::abort();
   }
@@ -222,20 +214,28 @@ void scheduler::lock_ops_impl::for_each_process(const std::function<void(process
     fn(*p);
 }
 
-const process_ptr &scheduler::no_process() {
-  static const process_ptr none;
-  return none;
-}
-
 // ---------------------------------------------------------------------------
 // Settings — state-tree-backed configuration
 // ---------------------------------------------------------------------------
 
 namespace detail {
 
-std::uint64_t next_scheduler_serial() noexcept {
-  static std::atomic<std::uint64_t> next{1}; // 0 is an awaitable's "no owner"
-  return next.fetch_add(1, std::memory_order_relaxed);
+std::uint64_t new_scheduler_serial() {
+  std::random_device rd;
+  for (;;) { // 0 is an awaitable's "no owner"
+    const std::uint64_t serial = (static_cast<std::uint64_t>(rd()) << 32) ^ rd();
+    if (serial != 0)
+      return serial;
+  }
+}
+
+bool pump_owner_verification() noexcept {
+#ifdef NDEBUG
+  const char *v = std::getenv("CVC_EXEC_VERIFY");
+  return v && *v && *v != '0';
+#else
+  return true;
+#endif
 }
 
 std::optional<std::string> setting_value(cvc::state &root, const std::string &path) {
@@ -1247,7 +1247,7 @@ void scheduler::check_limits(process &proc, clock::time_point now) {
 void scheduler::terminate_process(process &proc, value_t result) {
   procs_.set_status(proc, process_status::terminated);
   // Its locks go before on_complete runs (design 5.6); a hold left now is a leak, counted.
-  if (const detail::lock_test_hooks *hooks = detail::lock_test_hooks_get();
+  if (const detail::lock_test_hooks *hooks = home_ ? home_->manager().test_hooks() : nullptr;
       hooks && hooks->before_terminate_end)
     hooks->before_terminate_end(proc);
   if (proc.locks && home_)

@@ -153,23 +153,30 @@ static void flags(cvc::app &app) {
   auto group = sg.getGraphicsRoot()->addGraphicsChild<cvc::gl::NullGraphicNode>("group");
   auto part = group->addGraphicsChild<Node>("part");
   part->setGeometry(box(0, 0, 0, 1, 1, 1));
-  chk(part->castsShadow() && GraphicsNode::propCastsShadow(part->actor()), "casts by default");
+  chk(part->castsShadow() && GraphicsNode::propCastsShadow(app, part->actor()), "casts by default");
   group->setCastsShadow(false);
-  chk(!part->castsShadow() && !GraphicsNode::propCastsShadow(part->actor()),
+  chk(!part->castsShadow() && !GraphicsNode::propCastsShadow(app, part->actor()),
       "a group's setCastsShadow(false) reaches its parts, and their props");
   auto late = group->addGraphicsChild<Node>("late");
   late->setGeometry(box(0, 0, 0, 1, 1, 1));
-  chk(!late->castsShadow() && !GraphicsNode::propCastsShadow(late->actor()),
+  chk(!late->castsShadow() && !GraphicsNode::propCastsShadow(app, late->actor()),
       "a part added later inherits it");
   group->setCastsShadow(true);
-  chk(part->castsShadow() && GraphicsNode::propCastsShadow(late->actor()), "and back on");
+  chk(part->castsShadow() && GraphicsNode::propCastsShadow(app, late->actor()), "and back on");
   vtkNew<vtkActor> raw;
-  chk(GraphicsNode::propCastsShadow(raw), "a raw prop casts unless marked");
-  GraphicsNode::setPropCastsShadow(raw, false);
-  chk(!GraphicsNode::propCastsShadow(raw), "setPropCastsShadow marks it");
-  GraphicsNode::setPropCastsShadow(raw, true);
-  chk(GraphicsNode::propCastsShadow(raw), "and clears it");
-  chk(GraphicsNode::propCastsShadow(nullptr), "null is harmless");
+  chk(GraphicsNode::propCastsShadow(app, raw), "a raw prop casts unless marked");
+  GraphicsNode::setPropCastsShadow(app, raw, false);
+  chk(!GraphicsNode::propCastsShadow(app, raw), "setPropCastsShadow marks it");
+  GraphicsNode::setPropCastsShadow(app, raw, true);
+  chk(GraphicsNode::propCastsShadow(app, raw), "and clears it");
+  {
+    cvc::app other; // the mark is its app's: another app's scenes still see the prop cast
+    GraphicsNode::setPropCastsShadow(app, raw, false);
+    chk(GraphicsNode::propCastsShadow(other, raw) && !GraphicsNode::propCastsShadow(app, raw),
+        "a mark is its app's alone");
+    GraphicsNode::setPropCastsShadow(app, raw, true);
+  }
+  chk(GraphicsNode::propCastsShadow(app, nullptr), "null is harmless");
 }
 
 // Mean luma over columns [x0, x1) of the middle half of the rows; -1 for a

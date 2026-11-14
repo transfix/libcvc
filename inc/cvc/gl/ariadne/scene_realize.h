@@ -297,11 +297,12 @@ using NodeRealizer = std::function<std::shared_ptr<GraphicsNode>(
 
 // Register (or replace) a realizer for a custom scene node `type`. Registering a
 // built-in type (geometry/volume/volren/volslice/group) is a no-op — the built-ins own
-// their dispatch. Process-global and thread-safe; register before realize_scene.
-void register_scene_node_type(const std::string &type, NodeRealizer realizer);
+// their dispatch. The type is `app`'s alone: a scene on another app does not realize it.
+// Thread-safe; register before realize_scene.
+void register_scene_node_type(cvc::app &app, const std::string &type, NodeRealizer realizer);
 
-// Whether a custom scene node `type` has a registered realizer (test/introspection).
-bool has_scene_node_type(const std::string &type);
+// Whether `app` has a realizer for a custom scene node `type` (test/introspection).
+bool has_scene_node_type(cvc::app &app, const std::string &type);
 
 // --- the built-in source readers, for custom realizers -----------------------
 //
@@ -362,13 +363,14 @@ cvc::volume load_node_volume(SceneGraph &sg, const cvc::ariadne::SceneNode &node
 // A shader preset is a named effect that configures a GeometryNode's shader (the bump/bark/etc.
 // GLSL + any platform gate living in C++). realize_scene applies the preset named by a node's
 // `shader:` block, then its inline vertex/fragment splices. Registering presets is how cvcGL (and
-// a host) contribute GL effects the pure-data DSL can only name — process-global and thread-safe,
-// register before realize_scene. register_default_shader_presets() installs the built-ins
-// ("terrain_bump", "bark"); it is idempotent and is what the cvcGL extension bundle calls.
+// a host) contribute GL effects the pure-data DSL can only name. A preset is its app's: a node
+// realized on another app does not find it. Thread-safe; register before realize_scene.
+// register_default_shader_presets() installs the built-ins ("terrain_bump", "bark"); it is
+// idempotent and is what the cvcGL extension bundle calls.
 using ShaderPreset = std::function<void(GeometryNode &)>;
-void register_shader_preset(const std::string &name, ShaderPreset preset);
-bool has_shader_preset(const std::string &name);
-void register_default_shader_presets();
+void register_shader_preset(cvc::app &app, const std::string &name, ShaderPreset preset);
+bool has_shader_preset(cvc::app &app, const std::string &name);
+void register_default_shader_presets(cvc::app &app);
 
 // The keys realize_scene applies to a node's mesh once its realizer has returned it: casts_shadow,
 // the `shader:` block and material.opaque. A realizer that draws its node's surface with meshes of
@@ -377,14 +379,14 @@ void apply_mesh_keys(GeometryNode &g, const cvc::ariadne::SceneNode &n,
                      std::vector<std::string> *warnings = nullptr);
 
 // Verify the NODE customs a document declared (`loaded.customs`, from the `customs:`
-// block) against the registered scene node types. The loader already fail-fast-checked
+// block) against `app`'s registered scene node types. The loader already fail-fast-checked
 // widget/block customs at LOAD; node types register on THIS (cvcGL) side, so the host
 // calls this after load and BEFORE realize_scene, to fail fast on a required node
 // custom this build lacks. Returns false if any REQUIRED node custom is unregistered
 // (appending a message to `errors` when non-null); an OPTIONAL missing one appends a
 // note but does not fail (realize_scene warns + skips it). Returns true when every
 // required node custom is registered (and when the document declared none).
-bool verify_scene_customs(const cvc::ariadne::LoadResult &loaded,
+bool verify_scene_customs(cvc::app &app, const cvc::ariadne::LoadResult &loaded,
                           std::vector<std::string> *errors = nullptr);
 
 } // namespace ariadne

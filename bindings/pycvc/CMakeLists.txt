@@ -318,6 +318,13 @@ if(CVC_BUILD_PYCVC_CORE)
                  "${CMAKE_CURRENT_BINARY_DIR}/_pycvc_ariadne.py" COPYONLY)
   install(FILES "${CMAKE_CURRENT_BINARY_DIR}/_pycvc_ariadne.py"
     DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc)
+  # pycvc.ari (Host: an Ariadne document run from a Python program), pure Python: pymod/ari.py,
+  # beside pycvc.py as _pycvc_ari.py, which pycvc imports as pycvc.ari. Only a window or offscreen
+  # Host imports pycvc_gl, so arix's programs need pycvc alone; pycvc_gl.ariadne is this module.
+  configure_file("${CMAKE_CURRENT_SOURCE_DIR}/pymod/ari.py"
+                 "${CMAKE_CURRENT_BINARY_DIR}/_pycvc_ari.py" COPYONLY)
+  install(FILES "${CMAKE_CURRENT_BINARY_DIR}/_pycvc_ari.py"
+    DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc)
   # ctest: facades + zero-copy numpy views end-to-end.
   cvc_pycvc_test_env(_pycvc_test_env
     PYTHONPATH "${CMAKE_CURRENT_BINARY_DIR}" LIBDIRS "${_PYCVC_TEST_LIBPATH}")
@@ -328,6 +335,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_params:test_pycvc_params.py
              pycvc_jobs:test_pycvc_jobs.py
              pycvc_contours:test_pycvc_contours.py
+             pycvc_point_classes:test_pycvc_point_classes.py
              pycvc_image:test_pycvc_image.py
              pycvc_model:test_pycvc_model.py
              pycvc_state:test_pycvc_state.py
@@ -347,6 +355,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_state_exec_async:test_pycvc_state_exec_async.py
              pycvc_state_exec_locks:test_pycvc_state_exec_locks.py
              pycvc_world_clock:test_pycvc_world_clock.py
+             pycvc_input_trace:test_pycvc_input_trace.py
              pycvc_world_units:test_pycvc_world_units.py
              pycvc_dataprep:test_pycvc_dataprep.py
              pycvc_volslice:test_pycvc_volslice.py

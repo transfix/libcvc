@@ -426,7 +426,7 @@ TEST(ParamTableDsl, DictRoundTrips) {
   ASSERT_NE(mv, nullptr);
   ASSERT_TRUE(std::holds_alternative<std::string>(mv->v)) << "past int64: its text";
   EXPECT_EQ(std::get<std::string>(mv->v), "18446744073709551615");
-  EXPECT_TRUE(cvc::params_from_value<blur_params>(se::nil_value).value == blur_params{});
+  EXPECT_TRUE(cvc::params_from_value<blur_params>(se::nil_value()).value == blur_params{});
 }
 
 TEST(ParamTableDsl, KindsConvertAndBadOnesAreNamed) {

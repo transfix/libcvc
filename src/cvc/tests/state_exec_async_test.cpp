@@ -1694,3 +1694,1226 @@ TEST(AsyncScheduler, KO02_AThrowingKillDoesNotStopTheRest) {
     EXPECT_EQ(w.sched.get_exit_error(pid), "owner_reaped") << w.describe(pid);
   }
 }
+
+// --- Stage S: slices (td 4.4, 8.10; S2-Q12; S2 section 4's SL-1..SL-9) ---
+
+// A run is up to slice_steps() consecutive steps of one process, on one step's guards, clock
+// reading and accounting. Every case sets its slice with set_slice(), so CVC_EXEC_SLICE_STEPS (the
+// whole suite at 256: state_exec_async_test_slice256) changes nothing here but SL-1's default. No
+// case times anything: each counts steps, or ticks, the iterations of a loop that calls (tick).
+
+// The includes the cases below add to the file's own.
+#include <algorithm>
+#include <cstdlib>
+#include <cvc/state/state_exec/async_host.h>
+#include <cvc/state/state_exec/exec_group.h>
+#include <limits>
+#include <optional>
+
+namespace {
+
+using steady_clock = std::chrono::steady_clock;
+
+// set_slice()'s seconds for a run that ends on steps alone.
+constexpr double kStepsAlone = std::numeric_limits<double>::infinity();
+
+// A process that never ends on its own.
+constexpr const char *kEndless = "(begin (set i 0) (while #t (set i (+ i 1))))";
+
+// CVC_EXEC_SLICE_STEPS as a scheduler made now reads it: nullopt when unset or empty, else the
+// whole number it holds, or 0 when it holds none (the cases then assert nothing about it).
+std::optional<uint64_t> env_slice_steps() {
+  const char *v = std::getenv("CVC_EXEC_SLICE_STEPS");
+  if (!v || !*v)
+    return std::nullopt;
+  char *end = nullptr;
+  const unsigned long long n = std::strtoull(v, &end, 10);
+  return (end && *end == '\0' && n >= 1) ? static_cast<uint64_t>(n) : 0;
+}
+
+// Set an environment variable for a case, and restore what it was (state_exec_groups_test.cpp's).
+class scoped_env_var {
+public:
+  scoped_env_var(const char *name, const char *value) : name_(name) {
+    if (const char *old = std::getenv(name))
+      old_ = old;
+    set(value);
+  }
+  ~scoped_env_var() { set(old_ ? old_->c_str() : nullptr); }
+  scoped_env_var(const scoped_env_var &) = delete;
+  scoped_env_var &operator=(const scoped_env_var &) = delete;
+
+private:
+  void set(const char *value) {
+#ifdef _WIN32
+    _putenv_s(name_.c_str(), value ? value : "");
+#else
+    if (value)
+      setenv(name_.c_str(), value, 1);
+    else
+      unsetenv(name_.c_str());
+#endif
+  }
+  std::string name_;
+  std::optional<std::string> old_;
+};
+
+// A slices case's world: an async scheduler (of `policy`) watching an app's tree, one intrinsics
+// context on both, and two natives a program reports through: (tick) adds one to `ticks`, which
+// another thread may read, then calls on_tick; (seen) calls on_seen. Both run inside the step of
+// the process calling them, on the scheduler's thread. Each program gets its own scope over `env`.
+// The counter and the hooks come first, so they outlive the scheduler.
+struct slice_world {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  std::atomic<uint64_t> ticks{0};
+  std::function<void()> on_tick;
+  std::function<void()> on_seen;
+  async_scheduler sched;
+  intrinsics_context ictx;
+  environment_ptr env = builtins::make_default_environment();
+
+  explicit slice_world(scheduling_policy policy = scheduling_policy::round_robin) : sched(policy) {
+    sched.set_watch_root(&tree);
+    ictx.sched = &sched;
+    ictx.root = &tree;
+    ictx.proc = make_process();
+    register_intrinsics(env, &ictx);
+    builtins::register_fn(env, "tick", [this](std::span<const value_t>) -> value_t {
+      ticks.fetch_add(1);
+      if (on_tick)
+        on_tick();
+      return value_t();
+    });
+    builtins::register_fn(env, "seen", [this](std::span<const value_t>) -> value_t {
+      if (on_seen)
+        on_seen();
+      return value_t();
+    });
+  }
+  slice_world(const slice_world &) = delete;
+  slice_world &operator=(const slice_world &) = delete;
+
+  int submit(const std::string &script, execute_options opts = {}) {
+    opts.env = environment::extend(env);
+    return sched.execute(script, opts);
+  }
+  std::optional<process_status> status(int pid) const {
+    const auto i = sched.get_process_info(pid);
+    return i ? std::optional<process_status>(i->status) : std::nullopt;
+  }
+  bool finished(int pid) const {
+    const std::optional<process_status> s = status(pid);
+    return s && is_finished(*s);
+  }
+  uint64_t steps(int pid) const {
+    const auto i = sched.get_process_info(pid);
+    return i ? i->step_count : 0;
+  }
+  std::string why(int pid) const { return sched.get_exit_error(pid).value_or(""); }
+  // `pid`'s status, exit error and steps, for a failure's message.
+  std::string describe(int pid) const {
+    const std::optional<process_status> s = status(pid);
+    return "pid " + std::to_string(pid) + ": " + (s ? to_string(*s) : "gone") + " " + why(pid) +
+           ", " + std::to_string(steps(pid)) + " steps";
+  }
+  // Pump until `done()`; false when `give_up` seconds pass first (a guard against a hang, which
+  // the case then reports: no case asserts how long anything took).
+  template <class Done> bool pump_until(Done done, double give_up = 30.0) {
+    const auto t0 = steady_clock::now();
+    while (!done()) {
+      if (std::chrono::duration<double>(steady_clock::now() - t0).count() > give_up)
+        return false;
+      sched.sync_run_steps(1000000, 0.05);
+    }
+    return true;
+  }
+};
+
+// --- SL-1 ---
+
+// One run of SL-1's program: three processes of different shapes, in the order submitted, a loop
+// that sends the receiver a message every 60 iterations and "end" after them, a recursion, and
+// the receiver. Pumped 97 steps at a time until all three end.
+struct sl01_outcome {
+  uint64_t slice = 0;           // slice_steps() for the run
+  std::vector<value_t> results; // each process's, in submission order
+  std::vector<uint64_t> steps;  // each process's step count
+  std::vector<int> completed;   // the processes, in the order their on_complete ran
+  std::vector<uint64_t> trace;  // every process's step count after each pump
+};
+
+sl01_outcome sl01_run(std::optional<uint64_t> slice) {
+  const std::vector<std::string> programs = {
+      "(begin (set i 0) (set s 0)"
+      " (while (< i 300) (set s (+ s i))"
+      "  (if (= (% i 60) 0) (msg-send \"sl01.ch\" (str i)) nil) (set i (+ i 1)))"
+      " (msg-send \"sl01.ch\" \"end\") s)",
+      "(begin (defun fib (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) (fib 12))",
+      "(begin (set n 0) (set got 0) (set m (msg-recv \"sl01.ch\"))"
+      " (while (!= (get-attr m \"payload\") \"end\")"
+      "  (set n (+ n 1)) (set got (+ got (int (get-attr m \"payload\"))))"
+      "  (set m (msg-recv \"sl01.ch\")))"
+      " (list n got))",
+  };
+  sl01_outcome out; // before the world: an on_complete writes it
+  slice_world w;
+  if (slice)
+    w.sched.set_slice(*slice);
+  out.slice = w.sched.slice_steps();
+  std::vector<int> pids;
+  for (std::size_t k = 0; k < programs.size(); ++k) {
+    execute_options opts;
+    opts.on_complete = [&out, k](value_t) { out.completed.push_back(static_cast<int>(k)); };
+    pids.push_back(w.submit(programs[k], opts));
+  }
+  const auto all_done = [&] {
+    for (const int pid : pids)
+      if (!w.finished(pid))
+        return false;
+    return true;
+  };
+  for (int pump = 0; pump < 100000 && !all_done(); ++pump) {
+    w.sched.sync_run_steps(97);
+    for (const int pid : pids)
+      out.trace.push_back(w.steps(pid));
+  }
+  for (const int pid : pids) {
+    EXPECT_EQ(w.status(pid), process_status::terminated) << w.describe(pid);
+    out.results.push_back(w.sched.get_result(pid).value_or(value_t()));
+    out.steps.push_back(w.steps(pid));
+  }
+  return out;
+}
+
+void expect_same_results(const sl01_outcome &a, const sl01_outcome &b, const char *what) {
+  ASSERT_EQ(a.results.size(), b.results.size()) << what;
+  for (std::size_t k = 0; k < a.results.size(); ++k)
+    EXPECT_TRUE(values_equal(a.results[k], b.results[k]))
+        << what << ", process " << k << ": " << to_string(a.results[k]) << " against "
+        << to_string(b.results[k]);
+}
+
+} // namespace
+
+// SL-1: slice_steps 1, the default (CVC_EXEC_SLICE_STEPS unset), is today's loop. SL-1's program
+// at the default and at set_slice(1) gives each process the same result and step count, ends them
+// in the same order, and has the same step counts after every pump (a trace at pump grain: no
+// per-step trace hook exists, S2 section 0). The step counts, the order and the number of pumps at
+// 1 are pinned, as recorded from the loop before runs. At 256 only the interleaving may change: the
+// results, and the step counts of the two processes whose work doesn't depend on it, are the same.
+TEST(Slices, SL01_OneStepRunsAreTodaysLoop) {
+  const std::optional<uint64_t> env = env_slice_steps();
+  {
+    async_scheduler made;
+    if (!env)
+      EXPECT_EQ(made.slice_steps(), 1u) << "the default, with CVC_EXEC_SLICE_STEPS unset";
+    else if (*env > 0)
+      EXPECT_EQ(made.slice_steps(), *env) << "CVC_EXEC_SLICE_STEPS, read as the scheduler is made";
+    made.set_slice(1);
+    EXPECT_EQ(made.slice_steps(), 1u);
+    EXPECT_DOUBLE_EQ(made.slice_seconds(), 1e-3); // set_slice's default
+  }
+
+  const sl01_outcome by_default = sl01_run(std::nullopt);
+  const sl01_outcome at_one = sl01_run(1);
+  ASSERT_EQ(at_one.slice, 1u);
+  ASSERT_EQ(at_one.results.size(), 3u);
+  EXPECT_TRUE(values_equal(at_one.results[0], value_t(int64_t{44850}))) // 0 + ... + 299
+      << to_string(at_one.results[0]);
+  EXPECT_TRUE(values_equal(at_one.results[1], value_t(int64_t{144}))) // (fib 12)
+      << to_string(at_one.results[1]);
+  EXPECT_TRUE(values_equal(at_one.results[2], // 5 messages: 0, 60, 120, 180, 240
+                           make_list({value_t(int64_t{5}), value_t(int64_t{600})})))
+      << to_string(at_one.results[2]);
+  EXPECT_EQ(at_one.completed.size(), 3u);
+  // Pinned: what the loop gave before runs existed (step_once, which slice_steps 1 takes,
+  // untouched since a5fbd479): each process's steps, the order they ended in, and the pumps of 97
+  // steps they took.
+  EXPECT_EQ(at_one.steps, (std::vector<uint64_t>{12967, 9530, 272}));
+  EXPECT_EQ(at_one.completed, (std::vector<int>{1, 0, 2})); // the recursion, the loop, the receiver
+  EXPECT_EQ(at_one.trace.size() / 3, 235u) << "pumps";
+
+  expect_same_results(by_default, at_one, "the default against set_slice(1)");
+  if (by_default.slice == 1) {
+    EXPECT_EQ(by_default.steps, at_one.steps);
+    EXPECT_EQ(by_default.completed, at_one.completed);
+    EXPECT_EQ(by_default.trace, at_one.trace);
+  } else {
+    // CVC_EXEC_SLICE_STEPS made longer runs the default.
+    EXPECT_EQ(by_default.steps[0], at_one.steps[0]);
+    EXPECT_EQ(by_default.steps[1], at_one.steps[1]);
+  }
+
+  const sl01_outcome at_256 = sl01_run(256);
+  ASSERT_EQ(at_256.slice, 256u);
+  expect_same_results(at_256, at_one, "set_slice(256) against set_slice(1)");
+  EXPECT_EQ(at_256.steps[0], at_one.steps[0]);
+  EXPECT_EQ(at_256.steps[1], at_one.steps[1]);
+  EXPECT_EQ(at_256.completed.size(), 3u);
+}
+
+// SL-2: max_steps is exact at any slice. An endless loop with max_steps 1000 is killed for it at
+// exactly 1000 steps, the 1000th falling 232 steps into its fourth run of 256 (or a run's 1 ms, or
+// on steps alone). Two such loops take turns, and each is killed at exactly 1000 too.
+TEST(Slices, SL02_MaxStepsIsExact) {
+  struct slice_cfg {
+    uint64_t steps;
+    double seconds;
+  };
+  for (const slice_cfg s :
+       {slice_cfg{1, 1e-3}, slice_cfg{256, 1e-3}, slice_cfg{256, kStepsAlone}}) {
+    SCOPED_TRACE("set_slice(" + std::to_string(s.steps) + ", " + std::to_string(s.seconds) + ")");
+    slice_world w;
+    w.sched.set_slice(s.steps, s.seconds);
+    execute_options opts;
+    opts.max_steps = 1000;
+    const int alone = w.submit(kEndless, opts);
+    w.sched.sync_run(10000000);
+    EXPECT_EQ(w.status(alone), process_status::killed) << w.describe(alone);
+    EXPECT_EQ(w.why(alone), "max_steps_exceeded");
+    EXPECT_EQ(w.steps(alone), 1000u);
+
+    const int a = w.submit(kEndless, opts);
+    const int b = w.submit(kEndless, opts);
+    w.sched.sync_run(10000000);
+    for (const int pid : {a, b}) {
+      EXPECT_EQ(w.status(pid), process_status::killed) << w.describe(pid);
+      EXPECT_EQ(w.why(pid), "max_steps_exceeded") << w.describe(pid);
+      EXPECT_EQ(w.steps(pid), 1000u) << w.describe(pid);
+    }
+  }
+}
+
+// SL-3: max_time at 256. An endless loop with max_time 0.05 s is killed for its time, alone and
+// beside a process with no limit whose runs take turns with its own; that one runs on. The time is
+// read at the 16-step clock checks, so a kill may come up to 16 steps late (S2 section 8): that
+// bound is a matter of when the budget ran out, which a step count can't show without a clock, so
+// only the kill is asserted (no wall-clock assertions).
+TEST(Slices, SL03_MaxTimeOvershoot) {
+  slice_world w;
+  w.sched.set_slice(256);
+  execute_options opts;
+  opts.max_time = 0.05;
+  const int alone = w.submit(kEndless, opts);
+  w.sched.sync_run(std::nullopt, 30.0); // a kill that never comes ends the run here instead
+  EXPECT_EQ(w.status(alone), process_status::killed) << w.describe(alone);
+  EXPECT_EQ(w.why(alone), "time_limit_exceeded");
+  EXPECT_GT(w.steps(alone), 0u);
+
+  const int limited = w.submit(kEndless, opts);
+  const int unlimited = w.submit(kEndless);
+  ASSERT_TRUE(w.pump_until([&] { return w.finished(limited); })) << w.describe(limited);
+  EXPECT_EQ(w.status(limited), process_status::killed) << w.describe(limited);
+  EXPECT_EQ(w.why(limited), "time_limit_exceeded");
+  EXPECT_FALSE(w.finished(unlimited)) << w.describe(unlimited);
+  EXPECT_GT(w.steps(unlimited), 0u);
+  EXPECT_TRUE(w.sched.kill(unlimited));
+}
+
+// SL-4: a process with max_step_time keeps one step a pick, so its per-step deadline is armed for
+// each step, at 256 as at 1. A resident whose step loops in a native, (spin-step), which spins
+// until a deadline cuts it (eval_deadline_check, as a long native loop does), is killed by its
+// per-step deadline after its first 1000 iterations. And beside a process with no limit, on
+// steps alone, it takes one step a pick while the other takes 256: its step count stays a small
+// fraction of the other's, where at one step a pick for both they would be equal.
+TEST(Slices, SL04_MaxStepTimeStaysPerStep) {
+  {
+    slice_world w;
+    w.sched.set_slice(256);
+    bool uncut = false; // the spin reached its own end: no deadline cut it
+    builtins::register_fn(w.env, "spin-step", [&uncut](std::span<const value_t>) -> value_t {
+      const auto until = steady_clock::now() + std::chrono::seconds(10);
+      while (steady_clock::now() < until)
+        eval_deadline_check("spin-step");
+      uncut = true;
+      return value_t();
+    });
+    execute_options opts;
+    opts.max_step_time = 0.05;
+    const int pid =
+        w.submit("(begin (set i 0) (while (< i 1000) (set i (+ i 1))) (spin-step) 1)", opts);
+    w.sched.sync_run();
+    EXPECT_EQ(w.status(pid), process_status::killed) << w.describe(pid);
+    EXPECT_EQ(w.why(pid), "time_limit_exceeded");
+    EXPECT_FALSE(uncut);
+    EXPECT_GT(w.steps(pid), 1000u); // the loop ran first
+  }
+  {
+    slice_world w;
+    w.sched.set_slice(256, kStepsAlone);
+    execute_options capped;
+    capped.max_step_time = 0.05;
+    const int resident = w.submit(kEndless, capped);
+    const int other = w.submit(kEndless);
+    w.sched.sync_run_steps(257 * 40);
+    const uint64_t resident_steps = w.steps(resident);
+    const uint64_t other_steps = w.steps(other);
+    EXPECT_GT(resident_steps, 0u);
+    EXPECT_LT(resident_steps * 16, other_steps)
+        << "the resident took " << resident_steps << " steps beside the other's " << other_steps;
+    EXPECT_FALSE(w.finished(resident)) << w.describe(resident);
+    EXPECT_TRUE(w.sched.kill(resident));
+    EXPECT_TRUE(w.sched.kill(other));
+  }
+}
+
+namespace {
+
+// SL-5's self and slot kills: what became of the process, and the ticks it made after its kill.
+struct kill_outcome {
+  std::optional<process_status> status;
+  std::string why;
+  uint64_t steps = 0;
+  uint64_t ticks = 0;
+};
+
+// A process that loops 100 times, then is killed in the middle of a run, by (kill (self-pid)) or
+// by a tree slot its write runs (`by_slot`), then would tick forever.
+kill_outcome sl05_run(uint64_t slice, bool by_slot) {
+  slice_world w;
+  w.sched.set_slice(slice);
+  int pid = -1;
+  boost::signals2::scoped_connection slot = w.tree("sl05.trip").valueChanged.connect([&w, &pid] {
+    if (pid >= 0)
+      w.sched.kill(pid);
+  });
+  pid = w.submit(std::string("(begin (set i 0) (while (< i 100) (set i (+ i 1))) ") +
+                 (by_slot ? "(state-set \"sl05.trip\" \"go\")" : "(kill (self-pid))") +
+                 " (while #t (tick)))");
+  w.sched.sync_run_steps(100000);
+  kill_outcome out{w.status(pid), w.why(pid), w.steps(pid), w.ticks.load()};
+  slot.disconnect();
+  if (!w.finished(pid))
+    w.sched.kill(pid);
+  return out;
+}
+
+} // namespace
+
+// SL-5: a kill lands within a step at 256. A self kill, and a kill from a tree slot that the
+// process's own write runs, end the run at once: no tick after it, and the same step count as at
+// 1. A kill posted from another thread while the process runs an endless loop is seen at the next
+// step boundary, five times over: a run ends at the first step that finds the ingress set (two
+// relaxed loads a step, S2-Q12), not at a clock reading or its end. At its 1000th tick the process
+// waits, inside that step, until the poster's post_control has returned, so the post is visible
+// from there on; the kill's done, on the scheduler's thread, finds no tick after that one and at
+// most the rest of that step. Nothing is timed.
+TEST(Slices, SL05_KillsLandWithinAStep) {
+  for (const bool by_slot : {false, true}) {
+    SCOPED_TRACE(by_slot ? "a slot's kill" : "a self kill");
+    const kill_outcome at_one = sl05_run(1, by_slot);
+    const kill_outcome at_256 = sl05_run(256, by_slot);
+    for (const kill_outcome *o : {&at_one, &at_256}) {
+      EXPECT_EQ(o->status, process_status::killed) << o->why;
+      EXPECT_EQ(o->why, "killed_by_user");
+      EXPECT_EQ(o->ticks, 0u) << "the process stepped on after its kill";
+    }
+    EXPECT_EQ(at_256.steps, at_one.steps);
+  }
+
+  for (int round = 0; round < 5; ++round) {
+    SCOPED_TRACE("a posted kill, round " + std::to_string(round));
+    // Before the world: the scheduler's destructor may refuse what was never applied.
+    done_log log;
+    std::atomic<bool> go{false}, posted{false};
+    bool waited = false;
+    uint64_t at_visible = 0, steps_at_visible = 0, at_apply = 0, steps_at_apply = 0;
+    slice_world w;
+    w.sched.set_slice(256);
+    execute_options opts;
+    opts.max_time = 60.0; // a post that is lost ends the run here instead, and fails the case
+    int pid = -1;
+    w.on_tick = [&] {
+      if (w.ticks.load() != 1000)
+        return;
+      go.store(true);
+      const auto give_up = steady_clock::now() + std::chrono::seconds(10);
+      while (!posted.load(std::memory_order_acquire) && steady_clock::now() < give_up)
+        std::this_thread::yield();
+      waited = posted.load(std::memory_order_acquire);
+      at_visible = w.ticks.load();
+      steps_at_visible = w.steps(pid);
+    };
+    pid = w.submit("(while #t (tick))", opts);
+    std::thread poster([&] {
+      const auto give_up = steady_clock::now() + std::chrono::seconds(10);
+      while (!go.load() && steady_clock::now() < give_up)
+        std::this_thread::yield();
+      std::function<void(bool)> done = log.done("kill");
+      w.sched.post_control(pid, control(control_cmd::kind::kill, [&, done](bool applied) {
+                             if (applied) { // a refusal comes from the destructor: leave w alone
+                               at_apply = w.ticks.load();
+                               steps_at_apply = w.steps(pid);
+                             }
+                             done(applied);
+                           }));
+      posted.store(true, std::memory_order_release); // its ingress flag is set by now
+    });
+    w.sched.sync_run_steps();
+    poster.join();
+    ASSERT_TRUE(waited) << "the post never came";
+    EXPECT_EQ(log.calls, (done_calls{{"kill", true}}));
+    EXPECT_EQ(w.status(pid), process_status::killed) << w.describe(pid);
+    EXPECT_EQ(w.why(pid), "killed_by_user");
+    EXPECT_EQ(at_visible, 1000u);
+    EXPECT_EQ(at_apply, at_visible) << "ticks after the post was visible";
+    EXPECT_GE(steps_at_apply, steps_at_visible);
+    EXPECT_LE(steps_at_apply - steps_at_visible, 1u) << "steps after the post was visible";
+    EXPECT_EQ(w.ticks.load(), at_apply) << "a tick after the kill was applied";
+    EXPECT_EQ(w.steps(pid), steps_at_apply) << "a step after the kill was applied";
+  }
+}
+
+// SL-6: at 256 a watched node changed during a run fires the watcher's handler at the watcher's
+// next run (watch events coalesce over a run, S2 section 8). Another process changes the node in
+// the middle of one of its runs, while the watcher loops: the handler fires, and the watcher sees
+// what it wrote. And a watcher's own write in the middle of its run: its handler fires before the
+// watcher has looped a run's worth after the write (256 steps, each iteration at least one).
+TEST(Slices, SL06_AWatchFiresAtTheNextRun) {
+  {
+    slice_world w;
+    w.sched.set_slice(256);
+    const int watcher = w.submit(R"((begin
+        (state-watch "sl06.v" (lambda (path val) (state-set "sl06.seen" "yes")))
+        (set n 0)
+        (while (and (not (state-exists "sl06.seen")) (< n 1000000)) (set n (+ n 1)))
+        (state-get "sl06.seen")))");
+    const int writer = w.submit(R"((begin
+        (set i 0) (while (< i 1000) (set i (+ i 1)))
+        (state-set "sl06.v" "changed")
+        (set j 0) (while (< j 1000) (set j (+ j 1)))
+        "wrote"))");
+    auto results = w.sched.sync_run(50000000);
+    ASSERT_TRUE(results.count(watcher)) << w.describe(watcher);
+    ASSERT_TRUE(results.count(writer)) << w.describe(writer);
+    EXPECT_TRUE(values_equal(results[watcher], value_t(std::string("yes"))))
+        << "the handler didn't fire: " << to_string(results[watcher]);
+    EXPECT_TRUE(values_equal(results[writer], value_t(std::string("wrote"))));
+  }
+  {
+    slice_world w;
+    w.sched.set_slice(256);
+    bool fired = false;
+    uint64_t ticks_at_fire = 0;
+    w.on_seen = [&] {
+      if (!fired)
+        ticks_at_fire = w.ticks.load();
+      fired = true;
+    };
+    builtins::register_fn(w.env, "fired",
+                          [&fired](std::span<const value_t>) -> value_t { return value_t(fired); });
+    const int pid = w.submit(R"((begin
+        (state-watch "sl06.own" (lambda (path val) (seen)))
+        (set i 0) (while (< i 100) (set i (+ i 1)))
+        (state-set "sl06.own" "x")
+        (while (not (fired)) (tick))
+        "done"))");
+    w.sched.sync_run_steps(1000000);
+    EXPECT_TRUE(fired) << w.describe(pid);
+    EXPECT_EQ(w.status(pid), process_status::terminated) << w.describe(pid);
+    EXPECT_LE(ticks_at_fire, 256u) << "iterations after the write before the handler fired";
+  }
+}
+
+namespace {
+
+// SL-7's message case: under the priority policy, a better process (-5) parked on msg-recv, and a
+// worse one (5) that loops 100 times, sends it the message, then ticks forever. What the better
+// one's (seen) read: the worse one's step count (its run over) and ticks.
+struct sl07_outcome {
+  bool seen = false;
+  uint64_t low_steps = 0;
+  uint64_t low_ticks = 0;
+};
+
+sl07_outcome sl07_message_run(uint64_t slice) {
+  sl07_outcome out;
+  slice_world w(scheduling_policy::priority);
+  w.sched.set_slice(slice);
+  int low = -1;
+  w.on_seen = [&] {
+    out.seen = true;
+    out.low_ticks = w.ticks.load();
+    out.low_steps = w.steps(low);
+  };
+  execute_options better;
+  better.priority = -5;
+  const int high = w.submit(R"((begin (msg-recv "sl07.go") (seen) 1))", better);
+  execute_options worse;
+  worse.priority = 5;
+  low = w.submit(R"((begin (set i 0) (while (< i 100) (set i (+ i 1)))
+                      (msg-send "sl07.go" "go")
+                      (while #t (tick))))",
+                 worse);
+  w.sched.sync_run_steps(100000);
+  EXPECT_EQ(w.status(high), process_status::terminated) << w.describe(high);
+  EXPECT_TRUE(w.sched.kill(low));
+  return out;
+}
+
+} // namespace
+
+// SL-7: under the priority policy a process made ready at a better level ends the runner's run
+// (the flag raised in the run queue's enqueue, S2-Q12). The worse process's send readies the
+// better one, which runs within one step of it: the worse one has made no tick, and has taken the
+// steps it takes at 1, give or take one. And a better sleeper falls due while the worse process
+// runs on alone: it runs within 16 steps of its due time (the 16-step clock checks), counted in
+// the worse process's ticks after the due time, with room for the clock reads.
+TEST(Slices, SL07_ABetterPriorityPreempts) {
+  const sl07_outcome at_one = sl07_message_run(1);
+  const sl07_outcome at_256 = sl07_message_run(256);
+  ASSERT_TRUE(at_one.seen);
+  ASSERT_TRUE(at_256.seen);
+  EXPECT_LE(at_256.low_ticks, 1u);
+  EXPECT_GE(at_256.low_steps, at_one.low_steps);
+  EXPECT_LE(at_256.low_steps, at_one.low_steps + 1);
+
+  slice_world w(scheduling_policy::priority);
+  w.sched.set_slice(256);
+  bool armed = false, seen = false;
+  steady_clock::time_point due{};
+  uint64_t after_due = 0, after_due_at_seen = 0;
+  // (arm) is called the step before (sleep 0.02): the scheduler's due time is no earlier.
+  builtins::register_fn(w.env, "arm", [&](std::span<const value_t>) -> value_t {
+    due = steady_clock::now() + std::chrono::milliseconds(20);
+    armed = true;
+    return value_t();
+  });
+  w.on_tick = [&] {
+    if (armed && steady_clock::now() >= due)
+      ++after_due;
+  };
+  w.on_seen = [&] {
+    seen = true;
+    after_due_at_seen = after_due;
+    w.sched.stop();
+  };
+  execute_options better;
+  better.priority = -5;
+  const int sleeper = w.submit("(begin (arm) (sleep 0.02) (seen) 1)", better);
+  execute_options worse;
+  worse.priority = 5;
+  const int runner = w.submit("(while #t (tick))", worse);
+  w.sched.sync_run_steps(std::nullopt, 10.0); // (seen) stops it; a sleeper never woken, the budget
+  ASSERT_TRUE(seen) << w.describe(sleeper);
+  EXPECT_GT(w.ticks.load(), 0u);
+  EXPECT_LE(after_due_at_seen, 32u) << "the runner's ticks after the sleeper's due time";
+  EXPECT_TRUE(w.sched.kill(runner));
+  w.sched.kill(sleeper); // stopped before its last step, or ended
+}
+
+// SL-8: a run counts charged steps (S2-Q12), as a pump's budget does (#1117): a script engine's
+// slice is work inside one step, charged through add_steps, which (heavy) stands in for here: it
+// charges 1000 steps on top of its own. At 256, each of its picks is one call, since the call's
+// charge is past the run's 256: a 5000-step pump takes four or five calls, as at 1
+// (AsyncSchedulerTest.ARunsStepBudgetCountsWhatAStepCharged). And beside a plain loop, on steps
+// alone, the two take turns: a call, then 256 plain steps, so the calls match the plain process's
+// runs, where a run counting picks would make 256 calls a pick and leave the plain one none.
+TEST(Slices, SL08_ScriptEngineRunsCountChargedSteps) {
+  const auto make_env = [](int &calls) {
+    environment_ptr env = builtins::make_default_environment();
+    builtins::register_fn(env, "heavy", [counter = &calls](std::span<const value_t>) {
+      ++*counter;
+      if (detail::data_step_scope *data = detail::data_step_scope::current())
+        data->stats().add_steps(step_kind::data, 1000);
+      return value_t();
+    });
+    return env;
+  };
+  {
+    async_scheduler sched;
+    sched.set_slice(256);
+    int calls = 0;
+    execute_options opts;
+    opts.env = make_env(calls);
+    const int pid = sched.execute(std::string("(while #t (heavy))"), opts);
+    const uint64_t taken = sched.sync_run_steps(5000);
+    EXPECT_GE(calls, 4);
+    EXPECT_LE(calls, 5);
+    EXPECT_GE(taken, 5000u);
+    EXPECT_LT(taken, 6100u);
+    EXPECT_TRUE(sched.kill(pid));
+  }
+  {
+    async_scheduler sched;
+    sched.set_slice(256, kStepsAlone);
+    int calls = 0;
+    execute_options opts;
+    opts.env = make_env(calls);
+    const int heavy = sched.execute(std::string("(while #t (heavy))"), opts);
+    const int plain = sched.execute(std::string(kEndless));
+    sched.sync_run_steps(100000);
+    const uint64_t plain_runs = sched.get_process_info(plain)->step_count / 256;
+    EXPECT_GE(plain_runs, 10u);
+    EXPECT_LE(static_cast<uint64_t>(calls), plain_runs + 2)
+        << calls << " calls beside " << plain_runs << " runs of the plain loop";
+    EXPECT_GE(static_cast<uint64_t>(calls) + 1, plain_runs)
+        << calls << " calls beside " << plain_runs << " runs of the plain loop";
+    EXPECT_TRUE(sched.kill(heavy));
+    EXPECT_TRUE(sched.kill(plain));
+  }
+}
+
+// SL-9: a run ends at slice_seconds, not only at slice_steps. At set_slice(1000000, 1e-3), three
+// processes each build two 400-deep lists, then compare them forever: deep-data work, 16 nodes a
+// data step (data.step_nodes), the steps whose cost made slice_seconds' 1 ms default (S2-Q12). In
+// each of three pumps with a time budget, every process makes progress, data steps included: the
+// pump's time is shared out a run of about 1 ms at a time, where runs of 1000000 steps would give
+// it all to one process. Step counts only.
+TEST(Slices, SL09_SliceSecondsEndsADataRun) {
+  slice_world w;
+  data_options data;
+  data.step_nodes = 16;
+  w.sched.set_data_defaults(data);
+  w.sched.set_slice(1000000, 1e-3);
+  ASSERT_EQ(w.sched.slice_steps(), 1000000u);
+  ASSERT_DOUBLE_EQ(w.sched.slice_seconds(), 1e-3);
+  const std::string compare_forever =
+      "(begin (set a 1) (set b 1) (set i 0)"
+      " (while (< i 400) (set a (list a)) (set b (list b)) (set i (+ i 1)))"
+      " (while #t (= a b)))";
+  std::vector<int> pids;
+  for (int k = 0; k < 3; ++k)
+    pids.push_back(w.submit(compare_forever));
+  const auto data_steps = [&](int pid) {
+    const auto i = w.sched.get_process_info(pid);
+    return i ? i->data_steps : 0;
+  };
+  // Until each is comparing (one pump each would do, even with runs of 1000000 steps).
+  ASSERT_TRUE(w.pump_until([&] {
+    for (const int pid : pids)
+      if (data_steps(pid) == 0)
+        return false;
+    return true;
+  }));
+  for (int pump = 0; pump < 3; ++pump) {
+    SCOPED_TRACE("pump " + std::to_string(pump));
+    std::vector<uint64_t> steps_before, data_before;
+    for (const int pid : pids) {
+      steps_before.push_back(w.steps(pid));
+      data_before.push_back(data_steps(pid));
+    }
+    w.sched.sync_run_steps(100000000, 0.03);
+    for (std::size_t k = 0; k < pids.size(); ++k) {
+      EXPECT_GT(w.steps(pids[k]), steps_before[k]) << w.describe(pids[k]);
+      EXPECT_GT(data_steps(pids[k]), data_before[k]) << w.describe(pids[k]);
+    }
+  }
+  for (const int pid : pids) {
+    EXPECT_FALSE(w.finished(pid)) << w.describe(pid);
+    EXPECT_TRUE(w.sched.kill(pid));
+  }
+}
+
+// The settings (SS.1): CVC_EXEC_SLICE_STEPS, read as a scheduler is made; under the tree's
+// state_exec.slice_steps and state_exec.slice_seconds, read at a run's start from the watch root
+// when no set_slice() was called; under set_slice(), whichever came first. Each of the two alone,
+// set_slice_steps() or set_slice_seconds(), leaves the tree's other in force. An exec_group's
+// options::slice_steps and slice_seconds call them, each when given; unset, the group's scheduler
+// takes the tree's at its pump.
+TEST(Slices, SL10_SliceSettingsPrecedence) {
+  {
+    scoped_env_var env("CVC_EXEC_SLICE_STEPS", "32");
+    async_scheduler made;
+    EXPECT_EQ(made.slice_steps(), 32u);
+  }
+  {
+    scoped_env_var env("CVC_EXEC_SLICE_STEPS", "32");
+    cvc::app app;
+    cvc::state &tree = cvc::state::instance(app);
+    tree("state_exec.slice_steps").value(std::string("64"));
+    tree("state_exec.slice_seconds").value(std::string("0.004"));
+    async_scheduler sched;
+    sched.set_watch_root(&tree);
+    sched.execute(std::string("(+ 1 2)"));
+    sched.sync_run();
+    EXPECT_EQ(sched.slice_steps(), 64u) << "the tree's, over CVC_EXEC_SLICE_STEPS";
+    EXPECT_DOUBLE_EQ(sched.slice_seconds(), 0.004);
+    // A change applies at the next run.
+    tree("state_exec.slice_steps").value(std::string("48"));
+    sched.execute(std::string("(+ 1 2)"));
+    sched.sync_run_steps(100);
+    EXPECT_EQ(sched.slice_steps(), 48u);
+    // set_slice() wins over the tree, at once and at every run after.
+    sched.set_slice(8, 0.002);
+    EXPECT_EQ(sched.slice_steps(), 8u);
+    EXPECT_DOUBLE_EQ(sched.slice_seconds(), 0.002);
+    tree("state_exec.slice_steps").value(std::string("128"));
+    tree("state_exec.slice_seconds").value(std::string("0.006"));
+    sched.execute(std::string("(+ 1 2)"));
+    sched.sync_run();
+    EXPECT_EQ(sched.slice_steps(), 8u);
+    EXPECT_DOUBLE_EQ(sched.slice_seconds(), 0.002);
+  }
+  {
+    // set_slice() before the scheduler's first run, and before it has a watch root.
+    cvc::app app;
+    cvc::state &tree = cvc::state::instance(app);
+    tree("state_exec.slice_steps").value(std::string("64"));
+    async_scheduler sched;
+    sched.set_slice(8);
+    sched.set_watch_root(&tree);
+    sched.execute(std::string("(+ 1 2)"));
+    sched.sync_run();
+    EXPECT_EQ(sched.slice_steps(), 8u);
+  }
+  {
+    cvc::app app;
+    cvc::state &tree = cvc::state::instance(app);
+    tree("state_exec.slice_steps").value(std::string("64"));
+    const pump_budget budget{1000, kStepsAlone};
+    exec_group::options given;
+    given.name = "sl10";
+    given.app = &app;
+    given.slice_steps = 16;
+    given.slice_seconds = 0.003;
+    exec_group group(std::move(given));
+    EXPECT_EQ(group.sched().slice_steps(), 16u);
+    EXPECT_DOUBLE_EQ(group.sched().slice_seconds(), 0.003);
+    group.execute(std::string("(+ 1 2)"));
+    group.pump(budget);
+    EXPECT_EQ(group.sched().slice_steps(), 16u) << "the group's set_slice, over the tree";
+    EXPECT_DOUBLE_EQ(group.sched().slice_seconds(), 0.003);
+
+    exec_group::options unset;
+    unset.name = "sl10-unset";
+    unset.app = &app;
+    exec_group plain(std::move(unset));
+    plain.execute(std::string("(+ 1 2)"));
+    plain.pump(budget);
+    EXPECT_EQ(plain.sched().slice_steps(), 64u) << "unset: the tree's, read at the pump";
+  }
+  {
+    // A group given one of the two sets that one: the tree's other still applies.
+    cvc::app app;
+    cvc::state &tree = cvc::state::instance(app);
+    tree("state_exec.slice_steps").value(std::string("64"));
+    tree("state_exec.slice_seconds").value(std::string("0.004"));
+    const pump_budget budget{1000, kStepsAlone};
+    exec_group::options seconds_only;
+    seconds_only.name = "sl10-seconds";
+    seconds_only.app = &app;
+    seconds_only.slice_seconds = 0.003;
+    exec_group by_seconds(std::move(seconds_only));
+    by_seconds.execute(std::string("(+ 1 2)"));
+    by_seconds.pump(budget);
+    EXPECT_EQ(by_seconds.sched().slice_steps(), 64u) << "the tree's, beside the group's seconds";
+    EXPECT_DOUBLE_EQ(by_seconds.sched().slice_seconds(), 0.003);
+    tree("state_exec.slice_steps").value(std::string("48"));
+    tree("state_exec.slice_seconds").value(std::string("0.006"));
+    by_seconds.execute(std::string("(+ 1 2)"));
+    by_seconds.pump(budget);
+    EXPECT_EQ(by_seconds.sched().slice_steps(), 48u) << "a change of the tree's applies";
+    EXPECT_DOUBLE_EQ(by_seconds.sched().slice_seconds(), 0.003);
+
+    exec_group::options steps_only;
+    steps_only.name = "sl10-steps";
+    steps_only.app = &app;
+    steps_only.slice_steps = 16;
+    exec_group by_steps(std::move(steps_only));
+    by_steps.execute(std::string("(+ 1 2)"));
+    by_steps.pump(budget);
+    EXPECT_EQ(by_steps.sched().slice_steps(), 16u);
+    EXPECT_DOUBLE_EQ(by_steps.sched().slice_seconds(), 0.006)
+        << "the tree's, beside the group's steps";
+  }
+  {
+    // set_slice_steps() or set_slice_seconds() alone: the tree's other setting still applies.
+    cvc::app app;
+    cvc::state &tree = cvc::state::instance(app);
+    tree("state_exec.slice_steps").value(std::string("64"));
+    tree("state_exec.slice_seconds").value(std::string("0.004"));
+    async_scheduler steps_given;
+    steps_given.set_watch_root(&tree);
+    steps_given.set_slice_steps(8);
+    steps_given.sync_run();
+    EXPECT_EQ(steps_given.slice_steps(), 8u);
+    EXPECT_DOUBLE_EQ(steps_given.slice_seconds(), 0.004);
+    async_scheduler seconds_given;
+    seconds_given.set_watch_root(&tree);
+    seconds_given.set_slice_seconds(0.002);
+    seconds_given.sync_run();
+    EXPECT_EQ(seconds_given.slice_steps(), 64u);
+    EXPECT_DOUBLE_EQ(seconds_given.slice_seconds(), 0.002);
+    seconds_given.set_slice_steps(0); // 0 means 1, as in set_slice
+    EXPECT_EQ(seconds_given.slice_steps(), 1u);
+  }
+  // The tree's values. A value refused leaves the one in force: steps that are not a whole number
+  // above 0, and seconds that are not a number, read strictly ("2ms" is refused). Seconds of 0 or
+  // less mean 1 ms, as in set_slice. A key deleted, or emptied, reverts to the default:
+  // CVC_EXEC_SLICE_STEPS, else 1, and 1 ms.
+  for (const char *knob : {"32", static_cast<const char *>(nullptr)}) {
+    SCOPED_TRACE(std::string("CVC_EXEC_SLICE_STEPS ") + (knob ? knob : "unset"));
+    const uint64_t by_default = knob ? 32 : 1;
+    scoped_env_var env("CVC_EXEC_SLICE_STEPS", knob);
+    cvc::app app;
+    cvc::state &tree = cvc::state::instance(app);
+    async_scheduler sched;
+    sched.set_watch_root(&tree);
+    ASSERT_EQ(sched.slice_steps(), by_default);
+    const auto run_with = [&](const char *steps, const char *seconds) {
+      if (steps)
+        tree("state_exec.slice_steps").value(std::string(steps));
+      if (seconds)
+        tree("state_exec.slice_seconds").value(std::string(seconds));
+      sched.sync_run();
+    };
+    run_with("64", "0.004");
+    EXPECT_EQ(sched.slice_steps(), 64u);
+    EXPECT_DOUBLE_EQ(sched.slice_seconds(), 0.004);
+    for (const char *bad : {"abc", "0", "-5", "1.5", "12x", " 16"}) {
+      run_with(bad, nullptr);
+      EXPECT_EQ(sched.slice_steps(), 64u) << "slice_steps \"" << bad << "\" refused";
+    }
+    for (const char *bad : {"2ms", "abc", "0.002s", " 0.002", "nan"}) {
+      run_with(nullptr, bad);
+      EXPECT_DOUBLE_EQ(sched.slice_seconds(), 0.004) << "slice_seconds \"" << bad << "\" refused";
+    }
+    run_with(nullptr, "0");
+    EXPECT_DOUBLE_EQ(sched.slice_seconds(), 1e-3) << "0 means 1 ms";
+    run_with(nullptr, "0.004");
+    run_with(nullptr, "-1");
+    EXPECT_DOUBLE_EQ(sched.slice_seconds(), 1e-3) << "less than 0 means 1 ms";
+    run_with(nullptr, "inf");
+    EXPECT_EQ(sched.slice_seconds(), std::numeric_limits<double>::infinity()) << "steps alone";
+    run_with(nullptr, "0.004");
+    tree("state_exec").removeChild("slice_steps");
+    sched.sync_run();
+    EXPECT_EQ(sched.slice_steps(), by_default) << "deleted: the default";
+    EXPECT_DOUBLE_EQ(sched.slice_seconds(), 0.004);
+    tree("state_exec").removeChild("slice_seconds");
+    sched.sync_run();
+    EXPECT_DOUBLE_EQ(sched.slice_seconds(), 1e-3) << "deleted: the default";
+    run_with("64", "0.004");
+    run_with("", "");
+    EXPECT_EQ(sched.slice_steps(), by_default) << "emptied: the default";
+    EXPECT_DOUBLE_EQ(sched.slice_seconds(), 1e-3) << "emptied: the default";
+  }
+}
+
+// SL-11: a run's steps reach the 64-step cycle check (heap.h). An endless loop leaks a reference
+// cycle each iteration, a let scope and the closure bound in it, and runs alone at 256 on steps
+// alone, so each pick is a run of exactly 256 steps: the check is made once a pick, and a run of
+// 256 must still find a collection due when its steps cross a multiple of 64. Over 40 pumps (about
+// a million steps) what the scheduler's registry tracks stays bounded, as at 1, where without the
+// check it would pass tens of thousands. Nothing else collects: the idle collection needs nothing
+// runnable.
+TEST(Slices, SL11_RunsReachTheCycleCheck) {
+  for (const uint64_t slice : {uint64_t{1}, uint64_t{256}}) {
+    SCOPED_TRACE("set_slice(" + std::to_string(slice) + ")");
+    cycle_registry_ptr reg = make_cycle_registry();
+    async_scheduler sched;
+    sched.set_cycle_registry(reg.get());
+    sched.set_slice(slice, kStepsAlone);
+    const int pid =
+        sched.execute(std::string("(begin (set i 0) (while #t (let ((h nil)) (set h (lambda () h)))"
+                                  " (set i (+ i 1))))"));
+    std::size_t most = 0;
+    for (int pump = 0; pump < 40; ++pump) {
+      sched.sync_run_steps(256 * 100);
+      most = std::max(most, tracked_objects(*reg));
+    }
+    const auto info = sched.get_process_info(pid);
+    ASSERT_TRUE(info);
+    EXPECT_FALSE(is_finished(info->status));
+    EXPECT_GE(info->step_count, 40u * 256 * 100);
+    EXPECT_LT(most, 4000u) << "objects the registry tracked at most, after a pump";
+    EXPECT_TRUE(sched.kill(pid));
+    sched.sync_run();
+  }
+}
+
+// SL-12: a run's first step can preempt it too. SL-7's message case with the send as the first
+// step of a pick: at 1, the step of the worse process that readies the better one is found (the
+// better runs right after it); at 256 the worse one is stepped one step a pick (sync_run_steps(1))
+// up to the step before it, then pumped. Its run's first step is the send, and the better process
+// runs right after it: the worse one has taken exactly the send's steps and no tick, where a flag
+// cleared after that step would leave it the rest of its run.
+TEST(Slices, SL12_ARunsFirstStepPreempts) {
+  const auto programs = [](slice_world &w, int &high, int &low) {
+    execute_options better;
+    better.priority = -5;
+    high = w.submit(R"((begin (msg-recv "sl12.go") (seen) 1))", better);
+    execute_options worse;
+    worse.priority = 5;
+    low = w.submit(R"((begin (set i 0) (while (< i 100) (set i (+ i 1)))
+                        (msg-send "sl12.go" "go")
+                        (while #t (tick))))",
+                   worse);
+  };
+  uint64_t send_step = 0;
+  {
+    slice_world w(scheduling_policy::priority);
+    w.sched.set_slice(1);
+    int high = -1, low = -1;
+    uint64_t ticks_at_seen = 1;
+    w.on_seen = [&] {
+      send_step = w.steps(low);
+      ticks_at_seen = w.ticks.load();
+    };
+    programs(w, high, low);
+    w.sched.sync_run_steps(100000);
+    EXPECT_EQ(w.status(high), process_status::terminated) << w.describe(high);
+    EXPECT_EQ(ticks_at_seen, 0u);
+    EXPECT_TRUE(w.sched.kill(low));
+  }
+  ASSERT_GT(send_step, 100u);
+
+  slice_world w(scheduling_policy::priority);
+  w.sched.set_slice(256, kStepsAlone);
+  int high = -1, low = -1;
+  bool seen = false;
+  uint64_t low_steps = 0, low_ticks = 0;
+  w.on_seen = [&] {
+    seen = true;
+    low_steps = w.steps(low);
+    low_ticks = w.ticks.load();
+  };
+  programs(w, high, low);
+  for (int k = 0; k < 100000 && w.steps(low) + 1 < send_step; ++k)
+    w.sched.sync_run_steps(1);
+  ASSERT_EQ(w.steps(low) + 1, send_step);
+  ASSERT_FALSE(seen);
+  w.sched.sync_run_steps(100000);
+  ASSERT_TRUE(seen) << w.describe(high);
+  EXPECT_EQ(low_steps, send_step) << "the worse process's steps when the better one ran";
+  EXPECT_EQ(low_ticks, 0u);
+  EXPECT_EQ(w.status(high), process_status::terminated) << w.describe(high);
+  EXPECT_TRUE(w.sched.kill(low));
+}
+
+namespace {
+
+// SL-13's run: under the priority policy, `runner_script` runs and makes its own level worse while
+// `other_script` is ready, or readied, at a level now better than the runner's; the other's (seen)
+// reads the runner's ticks, made in the runner's endless loop after that.
+struct sl13_outcome {
+  bool seen = false;
+  uint64_t runner_ticks = 0;
+};
+
+sl13_outcome sl13_run(uint64_t slice, const std::string &runner_script, int runner_priority,
+                      const std::string &other_script, int other_priority) {
+  sl13_outcome out;
+  slice_world w(scheduling_policy::priority);
+  w.sched.set_slice(slice, kStepsAlone);
+  w.on_seen = [&] {
+    out.seen = true;
+    out.runner_ticks = w.ticks.load();
+  };
+  execute_options other_opts;
+  other_opts.priority = other_priority;
+  const int other = w.submit(other_script, other_opts);
+  execute_options runner_opts;
+  runner_opts.priority = runner_priority;
+  const int runner = w.submit(runner_script, runner_opts);
+  w.sched.sync_run_steps(100000);
+  EXPECT_EQ(w.status(other), process_status::terminated) << w.describe(other);
+  EXPECT_TRUE(w.sched.kill(runner)) << w.describe(runner);
+  return out;
+}
+
+} // namespace
+
+// SL-13: a runner whose own level gets worse ends its run, as one made ready at a better level
+// does (process_table remembers the runner, and raises the flag when update() re-levels it to a
+// worse key). Two ways, at 256 on steps alone, each against 1:
+// - (set-priority 10) on itself, at 0, while another process is ready at 5: the other runs right
+//   after it, before the runner's first tick.
+// - a lock release that drops the boost it inherited: a holder at 10 that a waiter at 0 boosts
+//   releases, and the waiter is woken at its own level, 0, the runner's level when its run began,
+//   which is not better. The waiter runs right after the release, before the holder's first tick.
+TEST(Slices, SL13_TheRunnersOwnLevelGettingWorsePreempts) {
+  {
+    SCOPED_TRACE("set-priority on itself");
+    const std::string runner =
+        "(begin (set i 0) (while (< i 100) (set i (+ i 1))) (set-priority 10) (while #t (tick)))";
+    const std::string other = "(begin (seen) 1)";
+    for (const uint64_t slice : {uint64_t{1}, uint64_t{256}}) {
+      SCOPED_TRACE("set_slice(" + std::to_string(slice) + ")");
+      const sl13_outcome o = sl13_run(slice, runner, 0, other, 5);
+      ASSERT_TRUE(o.seen);
+      EXPECT_EQ(o.runner_ticks, 0u) << "the runner's ticks before the better process ran";
+    }
+  }
+  {
+    SCOPED_TRACE("a release that drops an inherited boost");
+    // The holder takes the lock, then wakes the waiter, which asks for it, parks and boosts the
+    // holder to 0; the holder loops 50 times more inside, releases, then ticks forever.
+    const std::string holder = R"((begin
+        (with-lock "sl13.k" (begin (msg-send "sl13.w" "go")
+                                   (set j 0) (while (< j 50) (set j (+ j 1)))))
+        (while #t (tick))))";
+    const std::string waiter = R"((begin (msg-recv "sl13.w") (with-lock "sl13.k" (seen)) 1))";
+    for (const uint64_t slice : {uint64_t{1}, uint64_t{256}}) {
+      SCOPED_TRACE("set_slice(" + std::to_string(slice) + ")");
+      const sl13_outcome o = sl13_run(slice, holder, 10, waiter, 0);
+      ASSERT_TRUE(o.seen);
+      EXPECT_EQ(o.runner_ticks, 0u) << "the holder's ticks before the waiter ran";
+    }
+  }
+}
+
+// SL-14: max_time's CPU half ends a run in its middle. At set_slice(1000000) on steps alone, in a
+// pump with no time budget (sync_run()), an endless loop with max_time 0.005 s is killed for its
+// time well before a run of 1000000 steps ends: at the 16-step reads, a process whose first half
+// ran out since its run began ends the run (its CPU starts being charged at the next pick), and one
+// charging CPU ends it once what the run would charge reaches the second half. Nothing in the run
+// checks a deadline between plain eval steps (the deadline guard is a native's), so it used to run
+// two whole runs, 2000000 steps. Step counts only: a step would have to take 5 ns or less for
+// 0.005 s to hold 1000000 of them (a CPU clock on a 15.6 ms tick allows about 18 ms: 18 ns).
+TEST(Slices, SL14_MaxTimesCpuHalfEndsARun) {
+  slice_world w;
+  w.sched.set_slice(1000000, kStepsAlone);
+  execute_options opts;
+  opts.max_time = 0.005;
+  const int pid = w.submit(kEndless, opts);
+  w.sched.sync_run();
+  EXPECT_EQ(w.status(pid), process_status::killed) << w.describe(pid);
+  EXPECT_EQ(w.why(pid), "time_limit_exceeded");
+  EXPECT_LT(w.steps(pid), 1000000u) << w.describe(pid);
+}
+
+// SL-15: costly steps neither overrun slice_seconds nor stretch the pump's budget. Data steps
+// (SL-9's deep compares, 16 nodes a step) cost 0.05-0.4 ms each at the default step_nodes, so a
+// run's first clock reading comes at its step 2 (then 4, 8, 16, and every 16th), and each reading
+// charges the pump's time budget as the steps since the last one (time_budget::spent(now, checks)),
+// as one step a pick checks it per step. Counted, not timed, with values that make the clock's
+// grain irrelevant:
+// - set_slice(1000000, 1e-9) in pumps with a time budget: any two data steps take longer than
+//   that, so each run ends at its first reading. In pumps of 8 steps, both of two processes advance
+//   in every pump, where a first reading at step 16 gave the whole pump to one.
+// - set_slice(1000000) on steps alone, in pumps of 2e-9 s: the budget's first half is spent at
+//   once and its second needs 16 checks' worth of capped gaps, which a reading worth its steps
+//   gives within 16 to 64 steps. Charged as one check a reading, a pump took 256 steps or more.
+TEST(Slices, SL15_CostlyStepsEndRunsOnTime) {
+  const std::string compare_forever =
+      "(begin (set a 1) (set b 1) (set i 0)"
+      " (while (< i 400) (set a (list a)) (set b (list b)) (set i (+ i 1)))"
+      " (while #t (= a b)))";
+  const auto comparing = [](slice_world &w, const std::vector<int> &pids) {
+    return w.pump_until([&] {
+      for (const int pid : pids) {
+        const auto i = w.sched.get_process_info(pid);
+        if (!i || i->data_steps == 0)
+          return false;
+      }
+      return true;
+    });
+  };
+  {
+    SCOPED_TRACE("slice_seconds");
+    slice_world w;
+    data_options data;
+    data.step_nodes = 16;
+    w.sched.set_data_defaults(data);
+    w.sched.set_slice(1000000, 1e-9);
+    const std::vector<int> pids = {w.submit(compare_forever), w.submit(compare_forever)};
+    ASSERT_TRUE(comparing(w, pids));
+    for (int pump = 0; pump < 10; ++pump) {
+      SCOPED_TRACE("pump " + std::to_string(pump));
+      const uint64_t a = w.steps(pids[0]), b = w.steps(pids[1]);
+      w.sched.sync_run_steps(8, 10.0);
+      EXPECT_GT(w.steps(pids[0]), a) << w.describe(pids[0]);
+      EXPECT_GT(w.steps(pids[1]), b) << w.describe(pids[1]);
+    }
+    for (const int pid : pids)
+      EXPECT_TRUE(w.sched.kill(pid));
+  }
+  {
+    SCOPED_TRACE("the pump's time budget");
+    slice_world w;
+    data_options data;
+    data.step_nodes = 16;
+    w.sched.set_data_defaults(data);
+    w.sched.set_slice(1000000, kStepsAlone);
+    const int pid = w.submit(compare_forever);
+    ASSERT_TRUE(comparing(w, {pid}));
+    for (int pump = 0; pump < 10; ++pump) {
+      SCOPED_TRACE("pump " + std::to_string(pump));
+      const uint64_t taken = w.sched.sync_run_steps(1000000, 2e-9);
+      EXPECT_GT(taken, 0u);
+      EXPECT_LT(taken, 128u) << "steps one pump of 2e-9 s took";
+    }
+    EXPECT_TRUE(w.sched.kill(pid));
+  }
+}
+
+// SL-16: a run counts the step that throws. A loop of 100 iterations, then a call of an unbound
+// name, which throws in the middle of a run at 256: the process fails, and the scheduler's step
+// total (get_stats) is the one at 1, the throwing step included.
+TEST(Slices, SL16_AThrowingStepIsCounted) {
+  const auto total = [](uint64_t slice) {
+    async_scheduler sched;
+    sched.set_slice(slice, kStepsAlone);
+    const int pid = sched.execute(
+        std::string("(begin (set i 0) (while (< i 100) (set i (+ i 1))) (sl16-nope 1))"));
+    sched.sync_run();
+    const auto info = sched.get_process_info(pid);
+    EXPECT_TRUE(info && is_finished(info->status) && info->status != process_status::terminated)
+        << (info ? to_string(info->status) : std::string("gone"));
+    return sched.get_stats().total_steps;
+  };
+  const uint64_t at_one = total(1);
+  EXPECT_GT(at_one, 100u);
+  EXPECT_EQ(total(256), at_one);
+}
+
+// SL-17: an async call in flight ends a run only when a charge of it is due (next_call_charge: its
+// timeout, or the 1 ms charge beat of a process with a step or time limit), not merely by being in
+// flight. A process that leaves a call in flight, with no timeout and no limit, then ticks forever,
+// beside a loop that calls (seen): runs of 256 on steps alone, so in a pump of 64 steps only one of
+// the two advances, where a call merely in flight ended every run at its first reading and the two
+// shared each pump. Its kernel waits until the case releases it.
+TEST(Slices, SL17_ACallInFlightEndsARunOnlyWhenDue) {
+  std::atomic<bool> started{false}, release{false};
+  uint64_t seen = 0;
+  slice_world w;
+  w.app.computePool();
+  async_host host(w.sched, &w.app);
+  register_async_fn(w.env, host, "sl17-hold",
+                    [&started, &release](std::span<const value_t>) -> async_kernel {
+                      return [&started, &release](async_call &call) -> value_t {
+                        started = true;
+                        while (!release.load() && !call.cancelled())
+                          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        return value_t();
+                      };
+                    });
+  w.on_seen = [&seen] { ++seen; };
+  w.sched.set_slice(256, kStepsAlone);
+  const int holder = w.submit("(begin (set f (sl17-hold-async)) (while #t (tick)))");
+  const int other = w.submit("(while #t (seen))");
+  ASSERT_TRUE(w.pump_until([&] { return started.load() && w.ticks.load() > 0 && seen > 0; }));
+  for (int pump = 0; pump < 10; ++pump) {
+    SCOPED_TRACE("pump " + std::to_string(pump));
+    const uint64_t ticks = w.ticks.load(), seen_before = seen;
+    w.sched.sync_run_steps(64);
+    const bool holder_ran = w.ticks.load() > ticks, other_ran = seen > seen_before;
+    EXPECT_NE(holder_ran, other_ran) << "the holder " << (holder_ran ? "ran" : "did not run")
+                                     << ", the other " << (other_ran ? "ran" : "did not run");
+  }
+  release = true;
+  EXPECT_TRUE(w.sched.kill(holder));
+  EXPECT_TRUE(w.sched.kill(other));
+  host.shutdown();
+}
+
+// SL-18: the message limits stay exact under runs. check_limits kills a process once it has sent
+// max_messages, or max_message_bytes, after every step at slice 1; a run checks both before each of
+// its steps, as it checks max_steps, so a sender in a run stops at the same message.
+TEST(Slices, SL18_MessageLimitsStayExact) {
+  for (const uint64_t slice : {uint64_t{1}, uint64_t{256}}) {
+    SCOPED_TRACE("slice " + std::to_string(slice));
+    slice_world w;
+    w.sched.set_slice(slice, std::numeric_limits<double>::infinity());
+    execute_options opts;
+    opts.max_messages = 5;
+    const int pid = w.submit("(while #t (msg-send \"sl18.ch\" \"m\"))", opts);
+    w.sched.sync_run(200000);
+    ASSERT_TRUE(w.finished(pid));
+    EXPECT_EQ(w.sched.get_exit_error(pid).value_or(""), "message_limit_exceeded");
+    EXPECT_EQ(w.sched.pending_message_count("sl18.ch"), 5u) << "messages sent past the limit";
+  }
+}

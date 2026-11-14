@@ -130,7 +130,7 @@ std::string bundle_manifest(const world_model &wm, const grid_spec &g, const ras
                 "  \"material\": {\"ontology\": \"%s\", \"ontology_hash\": \"b3:%016llx\", "
                 "\"hard_class_rho\": 0.0, \"note\": \"risk_raw and hard are RAW contract inputs; "
                 "all derived planes belong to cvc::nav::material_build.\"},\n",
-                reg.ontology().c_str(), (unsigned long long)reg.ontology_hash());
+                reg.ontology(), (unsigned long long)reg.ontology_hash());
   o << b;
   // Top class fractions.
   o << "  \"stats\": {\"class_fractions\": {";
@@ -190,7 +190,7 @@ std::string write_bundle(app &ctx, const std::string &dir, const world_model &wm
         "{\n  \"seed\": %llu,\n  \"ontology\": \"%s\",\n  \"ontology_hash\": "
         "\"b3:%016llx\",\n  \"bounds\": [%.17g, %.17g, %.17g, %.17g],\n  \"tool_version\": "
         "\"%s\",\n  \"libcvc\": \"%s\"\n}\n",
-        (unsigned long long)wm.params().seed, reg.ontology().c_str(),
+        (unsigned long long)wm.params().seed, reg.ontology(),
         (unsigned long long)reg.ontology_hash(), wm.params().min_x, wm.params().min_y,
         wm.params().max_x, wm.params().max_y, opt.tool_version.c_str(), opt.libcvc_commit.c_str());
     write_text((fs::path(dir) / "provenance.json").string(), b);

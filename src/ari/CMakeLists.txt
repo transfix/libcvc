@@ -122,6 +122,39 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARI_WITH_PYTHON))
                                          arix_python_interpreter arix_matplotlib_backend)
       set_property(TEST arix_matplotlib_backend APPEND PROPERTY
                    ENVIRONMENT "MPLCONFIGDIR=${CMAKE_CURRENT_BINARY_DIR}/mplconfig")
+      # The py_console component over a document's console: true (arix test), the natives'
+      # refusal without it, the console drawn in the terminal with what init: ran in it, and stock
+      # ari's answer to the document. (A reload into a document with no python: block is
+      # arix_engine_test's, below.)
+      set(_comps --component-path "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne")
+      # (py_console.ari exports an async function, which pycvc registers.)
+      add_test(NAME arix_py_console
+               COMMAND arix test ${CVC_ARIADNE_PYTHON_TEST_PATH} ${_comps} "${_pyt}/py_console.ari")
+      add_test(NAME arix_py_console_off COMMAND arix test "${_pyt}/py_console_off.ari")
+      add_test(NAME arix_py_console_terminal
+               COMMAND arix snapshot --frames 3 --width 80 --height 16
+                       ${CVC_ARIADNE_PYTHON_TEST_PATH} ${_comps} "${_pyt}/py_console.ari")
+      # The output on the scrollback's row (padded to the window's border), not the echoed cell,
+      # and not a line of the process's own stdout.
+      set_tests_properties(arix_py_console_terminal PROPERTIES
+                           PASS_REGULAR_EXPRESSION "hello from the console +[^ \r\n]"
+                           FAIL_REGULAR_EXPRESSION "\nhello from the console")
+      add_test(NAME ari_python_console_needs_arix
+               COMMAND ari check ${_comps} "${_pyt}/py_console.ari")
+      set_tests_properties(ari_python_console_needs_arix PROPERTIES
+                           PASS_REGULAR_EXPRESSION "scripting hosts, arix, ariglx or arisrvx")
+      cvc_ariadne_python_test_properties(arix_py_console arix_py_console_off
+                                         arix_py_console_terminal)
+      set_tests_properties(arix_py_console arix_py_console_off arix_py_console_terminal
+                           ari_python_console_needs_arix PROPERTIES
+                           SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
+      # The engine under one AppRuntime with no host (arix_engine_test.cpp): a live reload. One
+      # ctest entry, since discovery would run it, and its Python's DLL, at build time.
+      add_executable(arix_engine_test arix_engine_test.cpp)
+      target_link_libraries(arix_engine_test PRIVATE cvc GTest::gtest GTest::gtest_main)
+      cvc_ariadne_python_host(arix_engine_test)
+      add_test(NAME arix_engine_test COMMAND arix_engine_test)
+      cvc_ariadne_python_test_properties(arix_engine_test)
       # A document with a WebAssembly guest (arix test), one with a guest built for WASI on the
       # preview-1 stubs, and stock ari's answer to one.
       if(CVC_ARIADNE_WASM_FOUND)
@@ -168,7 +201,20 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND NOT EMSCRIPTEN)
            COMMAND ari test --component-path "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne"
                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/chat_component.ari"
            WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
-  set_tests_properties(ari_docset ari_url_document ari_chat_component PROPERTIES
+  # Rich text (docs/ARIADNE.md §5.20): a post's runs from state wrapped inside a clickable card, a
+  # list with a run's own on_click:, and max_lines: cutting a paragraph (tests/rich_text.ari).
+  add_test(NAME ari_rich_text
+           COMMAND "${CMAKE_COMMAND}" "-DARI=$<TARGET_FILE:ari>"
+                   "-DARGS=snapshot@@--width@@70@@--height@@16@@${CMAKE_CURRENT_SOURCE_DIR}/tests/rich_text.ari"
+                   "-DEXPECT1=Morning @ada, the mill is running"
+                   "-DEXPECT2=https://example.org/mill and #mill."
+                   "-DEXPECT3=Inline code() and italic words, then"
+                   "-DEXPECT4=Retry as a link of its own."
+                   "-DEXPECT5=two lines, so the rest of it, these las"
+                   "-DEXPECT6=opened: nothing"
+                   "-DREJECT1=last words here"
+                   -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_snapshot.cmake")
+  set_tests_properties(ari_docset ari_url_document ari_chat_component ari_rich_text PROPERTIES
                        SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
 endif()
 
@@ -282,6 +328,13 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
         COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/reopen_refit_test.sh" $<TARGET_FILE:ari>
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/reopen_refit.ari" ${_backend})
       set_tests_properties(ari_run_reopen_refit_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+      # A file picked in the Runtime's own Open file window (a tvision window on the desktop) and
+      # sent in chunks to a probe server (tests/file_pick_upload.ari, docs/ARIADNE.md §10.8).
+      add_test(NAME ari_run_file_pick_upload_${_backend}
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/file_pick_upload_test.sh" $<TARGET_FILE:ari>
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/file_pick_upload.ari" ${_backend})
+      set_tests_properties(ari_run_file_pick_upload_${_backend} PROPERTIES SKIP_RETURN_CODE 77
+        TIMEOUT 60)
     endforeach()
   endif()
 endif()
