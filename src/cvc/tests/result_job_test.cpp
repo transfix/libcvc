@@ -204,6 +204,19 @@ TEST(ResultJob, AStepperOwnStatusAndCancelAreUsed) {
   EXPECT_EQ(cancels.load(), 1) << "once, and never after the stepper is gone";
 }
 
+TEST(ResultJob, AStepperOwnStatusIsReadOnceDone) {
+  // Its last progress note is not left as the job's status: the job reads the stepper's own
+  // status() once it is done, before taking the result.
+  chatty c;
+  c.n = 100;
+  auto job = cvc::make_result_job(std::move(c));
+  job->step(10);
+  EXPECT_EQ(job->status(), "counted 10");
+  job->step(0);
+  EXPECT_TRUE(job->done());
+  EXPECT_EQ(job->status(), "counted 100");
+}
+
 TEST(ResultJob, ATakerMakesTheResult) {
   auto job = cvc::make_result_job<std::string>(std::make_unique<counter>(),
                                                [](counter &c) { return std::to_string(c.sum); });

@@ -36,9 +36,12 @@
 #include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/core/input_trace.h>
+#include <cvc/core/param_cli.h>
 #include <cvc/core/types.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
+#include <cvc/geometry/skeleton.h>
+#include <cvc/geometry/skeleton_params.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/sim_world_trace.h>
 #include <cvc/ph/se2_train.h>
@@ -514,6 +517,126 @@ static int cmd_hexahedralize(cvc::app &app, int argc, char **argv) {
   cvc::write_geometry(app, result, vm["output"].as<std::string>());
   std::cout << "Wrote hexahedral mesh (" << result.num_points() << " verts) to "
             << vm["output"].as<std::string>() << "\n";
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// cvc skeleton: cvc::skeletonize (cvc/geometry/skeleton.h), the VolumeRover Skeletonization port
+// ---------------------------------------------------------------------------
+
+// The legacy Skeletonization tool's flags (its main.cpp), rewritten to this command's: -r
+// (--robust), -bbr r (--big-ball-ratio r^2), -thif / -thff degrees (--theta-if / --theta-ff in
+// radians), -plc n (--sheet-count), -medth (--medial-theta), -medr (--medial-ratio). -mr and -hc
+// took a value the legacy code never used; they are accepted and ignored.
+static std::vector<std::string> skeleton_legacy_flags(int argc, char **argv,
+                                                      std::vector<std::string> &notes) {
+  std::vector<std::string> out;
+  const double deg = 3.14159265358979323846 / 180.0;
+  auto value = [&](int &i, const std::string &flag) -> std::string {
+    if (i + 1 >= argc)
+      throw std::runtime_error("cvc skeleton: " + flag + " needs a value");
+    return argv[++i];
+  };
+  // argv[0] is the command, as command_line_parser(argc, argv) skips it.
+  for (int i = 1; i < argc; ++i) {
+    const std::string a = argv[i];
+    if (a == "-r") {
+      out.push_back("--robust");
+    } else if (a == "-bbr") {
+      const double r = std::stod(value(i, a));
+      out.push_back("--big-ball-ratio=" + boost::lexical_cast<std::string>(r * r));
+    } else if (a == "-thif" || a == "-thff") {
+      const double d = std::stod(value(i, a));
+      out.push_back(std::string(a == "-thif" ? "--theta-if=" : "--theta-ff=") +
+                    boost::lexical_cast<std::string>(d * deg));
+    } else if (a == "-plc") {
+      out.push_back("--sheet-count=" + value(i, a));
+    } else if (a == "-medth") {
+      out.push_back("--medial-theta=" + value(i, a));
+    } else if (a == "-medr") {
+      out.push_back("--medial-ratio=" + value(i, a));
+    } else if (a == "-mr" || a == "-hc") {
+      value(i, a);
+      notes.push_back(a + " is accepted and ignored, as the legacy tool ignored it");
+    } else {
+      out.push_back(a);
+    }
+  }
+  return out;
+}
+
+static int cmd_skeleton(cvc::app &app, int argc, char **argv) {
+  po::options_description desc(
+      "cvc skeleton - the skeleton of a point cloud or a mesh's vertices (the VolumeRover "
+      "Skeletonization port)\n\n"
+      "Writes the strands (lines: the polylines and the stars of small planar clusters) to the "
+      "output, and the sheets (triangles) beside it as <stem>_sheets<ext>, unless --sheets says "
+      "where. .rawc keeps the colours. The legacy flags -r -bbr -thif -thff -plc -medth -medr "
+      "(and the ignored -mr -hc) are accepted.\n\n"
+      "Example:\n"
+      "  cvc skeleton points.off -o skel.rawc --robust\n");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input geometry (only its points are read)")(
+      "output,o", po::value<std::string>()->required(), "output geometry for the strands")(
+      "sheets", po::value<std::string>(), "output geometry for the sheets")(
+      "helix", po::value<std::string>(),
+      "output geometry for the helix strips")("seconds", po::value<double>()->default_value(0.0),
+                                              "report progress every this many seconds (0: never)");
+  cvc::add_param_options<cvc::skeleton_params>(desc);
+
+  std::vector<std::string> notes;
+  const std::vector<std::string> args = skeleton_legacy_flags(argc, argv, notes);
+  po::positional_options_description pos;
+  pos.add("input", 1).add("output", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(args).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+  for (const std::string &n : notes)
+    std::cerr << "cvc skeleton: " << n << "\n";
+  const cvc::param_result<cvc::skeleton_params> pr =
+      cvc::params_from_options<cvc::skeleton_params>(vm);
+  if (!pr.ok())
+    throw std::runtime_error("cvc skeleton: " + pr.message());
+
+  const std::string input = vm["input"].as<std::string>();
+  const std::string output = vm["output"].as<std::string>();
+  cvc::geometry in(app, input);
+  if (in.num_points() == 0)
+    throw std::runtime_error("cvc skeleton: " + input + " has no points");
+
+  // The stepper, so a long run can report its progress.
+  cvc::skeleton_stepper stepper(in, pr.value);
+  const double every = vm["seconds"].as<double>();
+  auto last = std::chrono::steady_clock::now();
+  while (!stepper.step(4096)) {
+    if (every > 0 &&
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - last).count() >= every) {
+      std::cerr << "cvc skeleton: " << stepper.status() << "\n";
+      last = std::chrono::steady_clock::now();
+    }
+  }
+  const cvc::skeleton s = stepper.take();
+
+  std::string sheets = vm.count("sheets") ? vm["sheets"].as<std::string>() : std::string();
+  if (sheets.empty()) {
+    const std::size_t dot = output.find_last_of('.');
+    const std::size_t sep = output.find_last_of("/\\");
+    const bool has_ext = dot != std::string::npos && (sep == std::string::npos || dot > sep);
+    sheets = has_ext ? output.substr(0, dot) + "_sheets" + output.substr(dot) : output + "_sheets";
+  }
+  cvc::write_geometry(app, s.strands, output);
+  cvc::write_geometry(app, s.sheets, sheets);
+  if (vm.count("helix"))
+    cvc::write_geometry(app, s.helix, vm["helix"].as<std::string>());
+  for (const std::string &w : s.warnings)
+    std::cerr << "cvc skeleton: warning: " << w << "\n";
+  std::cout << "Wrote " << s.polylines << " strands (" << s.strands.num_lines() << " lines) to "
+            << output << " and " << s.sheet_clusters << " sheets (" << s.sheets.num_tris()
+            << " triangles, of " << s.clusters << " planar clusters) to " << sheets << "\n";
   return 0;
 }
 
@@ -2492,6 +2615,7 @@ static const command_entry commands[] = {
 #ifdef CVC_ENABLE_MESHER
   {"iso",            "Geometry",        "extract isosurface from volume",                 cmd_iso},
   {"tetrahedralize", "Geometry",        "extract tetrahedral mesh from volume",           cmd_tetrahedralize},
+  {"skeleton",       "Geometry",        "skeleton of a point cloud (strands and sheets)", cmd_skeleton},
   {"hexahedralize",  "Geometry",        "extract hexahedral mesh from volume",            cmd_hexahedralize},
   {"tetrahedralize2","Geometry",        "extract dual-tet (tet2) mesh from volume",       cmd_tetrahedralize2},
   {"layer-mesh",     "Geometry",        "mesh layer between two isosurfaces",             cmd_layer_mesh},

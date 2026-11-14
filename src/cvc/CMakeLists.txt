@@ -28,6 +28,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/tet_complex.h
   ../../inc/cvc/geometry/skeleton.h
   ../../inc/cvc/geometry/skeleton_params.h
+  ../../inc/cvc/geometry/skeleton_intrinsics.h
   ../../inc/cvc/state/state.h
   ../../inc/cvc/state/state_key_meta.h
   ../../inc/cvc/state/state_change_journal.h
@@ -301,6 +302,7 @@ set(SOURCE_FILES
   geometry/skeleton/u2.cpp
   geometry/skeleton/skel.cpp
   geometry/skeleton/skeleton.cpp
+  geometry/skeleton/skeleton_intrinsics.cpp
   geometry/sliced_ldlt.cpp
   geometry/geometry_file_io.cpp
   geometry/contours.cpp

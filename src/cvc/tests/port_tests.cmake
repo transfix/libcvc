@@ -15,6 +15,7 @@ set(CVC_PORT_TESTS
   job_intrinsics_test
   tet_complex_test
   skeleton_test
+  skeleton_intrinsics_test
   contour_stack_test
   point_classes_test
 )

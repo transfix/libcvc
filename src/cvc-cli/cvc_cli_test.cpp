@@ -2443,6 +2443,96 @@ TEST_F(CvcCliTest, PhTrainRefusesADirectoryThatIsNotAPlantLog) {
 }
 
 // ===========================================================================
+// cvc skeleton (the VolumeRover Skeletonization port; ports plan T12)
+// ===========================================================================
+
+// A capsule along x sampled on its surface, as an OFF file of points (no faces).
+static void write_capsule_off(const std::string &file) {
+  const double pi = 3.14159265358979323846, length = 8.0, r = 1.0;
+  std::vector<std::array<double, 3>> p;
+  const int nring = 20, nalong = 40;
+  for (int i = 0; i <= nalong; ++i)
+    for (int k = 0; k < nring; ++k) {
+      const double a = 2 * pi * (k + 0.37 * (i % 3)) / nring;
+      p.push_back({length * i / nalong, r * std::cos(a), r * std::sin(a)});
+    }
+  const int ncap = nring / 4;
+  for (int side = 0; side < 2; ++side)
+    for (int i = 1; i <= ncap; ++i) {
+      const double t = (pi / 2) * i / (ncap + 0.5);
+      const int nr = std::max(1, int(std::lround(nring * std::cos(t))));
+      for (int k = 0; k < nr; ++k) {
+        const double a = 2 * pi * (k + 0.21 * i) / nr;
+        p.push_back({side == 0 ? -r * std::sin(t) : length + r * std::sin(t),
+                     r * std::cos(t) * std::cos(a), r * std::cos(t) * std::sin(a)});
+      }
+    }
+  std::ofstream f(file);
+  f << "OFF\n" << p.size() << " 0 0\n";
+  f.precision(17);
+  for (const auto &q : p)
+    f << q[0] << " " << q[1] << " " << q[2] << "\n";
+}
+
+// Skips when libcvc was built without Shewchuk's predicates (macOS for now): the command says so.
+#define SKIP_WITHOUT_SKELETON(r)                                                                   \
+  if ((r).output.find("without Shewchuk") != std::string::npos)                                    \
+  GTEST_SKIP() << "libcvc built without Shewchuk's predicates"
+
+TEST_F(CvcCliTest, SkeletonHelp) {
+  auto r = cvc("skeleton --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--robust"));
+  EXPECT_NE(std::string::npos, r.output.find("--sheet-count"));
+  EXPECT_NE(std::string::npos, r.output.find("-bbr"));
+}
+
+TEST_F(CvcCliTest, SkeletonOfACapsule) {
+  const std::string in = path("capsule.off"), out = path("skel.rawc");
+  write_capsule_off(in);
+  auto r = cvc("skeleton \"" + in + "\" -o \"" + out + "\"");
+  SKIP_WITHOUT_SKELETON(r);
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("Wrote 1 strands")) << r.output;
+  EXPECT_TRUE(fs::exists(out));
+  EXPECT_GT(fs::file_size(out), 0u);
+  EXPECT_TRUE(fs::exists(path("skel_sheets.rawc")));
+  // The strands read back: `cvc info` on the output.
+  auto info = cvc("info \"" + out + "\"");
+  EXPECT_EQ(0, info.exit_code) << info.output;
+}
+
+TEST_F(CvcCliTest, SkeletonTakesTheLegacyFlags) {
+  const std::string in = path("capsule.off");
+  write_capsule_off(in);
+  const std::string legacy =
+      " -r -bbr 0.25 -thif 5 -thff 10 -plc 1 -medth 0.39 -medr 64 -mr 1.05 -hc 20";
+  auto r = cvc("skeleton \"" + in + "\" -o \"" + path("s.rawc") + "\" --sheets \"" +
+               path("sheets.rawc") + "\"" + legacy);
+  SKIP_WITHOUT_SKELETON(r);
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("-mr is accepted and ignored")) << r.output;
+  EXPECT_TRUE(fs::exists(path("sheets.rawc")));
+}
+
+TEST_F(CvcCliTest, SkeletonOfAPlaneFails) {
+  const std::string in = path("plane.off");
+  {
+    std::ofstream f(in);
+    f << "OFF\n30 0 0\n";
+    for (int i = 0; i < 30; ++i)
+      f << (i % 6) << " " << (i / 6) << " 1\n";
+  }
+  auto r = cvc("skeleton \"" + in + "\" -o \"" + path("p.rawc") + "\"");
+  SKIP_WITHOUT_SKELETON(r);
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("one plane")) << r.output;
+  auto bad = cvc("skeleton \"" + in + "\" -o \"" + path("p.rawc") + "\" --threshold 5");
+  EXPECT_NE(0, bad.exit_code);
+  EXPECT_NE(std::string::npos, bad.output.find("threshold")) << bad.output;
+}
+
+// ===========================================================================
 // trace: an input trace's info, and its headless replay
 // ===========================================================================
 
