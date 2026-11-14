@@ -128,17 +128,14 @@ if(NOT EMSCRIPTEN)
 endif()
 
 # lsystem_coast — island + GPU FFT-ocean trial. Hosts OceanFFT (the ABYSSAL port
-# target, docs/roadmap/OCEAN-AND-VOLUMETRIC-TERRAIN-NOTES.md), which lives in
-# src/cvcGL/ocean beside the cvcGL test that checks it. A SEPARATE demo
-# from lsystem_forest by design: the forest stays the untouched perf control.
-# EWave and WakeSource are the wake windows (the waves the debris make, O9).
+# target, docs/roadmap/OCEAN-AND-VOLUMETRIC-TERRAIN-NOTES.md), which is in the cvcGL
+# library (src/cvcGL/ocean, its headers private to cvcGL, hence the include directory).
+# A SEPARATE demo from lsystem_forest by design: the forest stays the untouched perf
+# control. EWave and WakeSource are the wake windows (the waves the debris make, O9).
 # OceanFFT depends only on VTK's OpenGL2 module (transitive via cvcGL), so no
 # extra find_package. Enrolled in _wasm_demos below (the default GPU no-readback
 # path is WebGL2-viable; the CPU --cpu path is native-only).
-add_executable(lsystem_coast cvcgl/lsystem_coast.cpp "${_cvc_root}/src/cvcGL/ocean/OceanFFT.cpp"
-                             "${_cvc_root}/src/cvcGL/ocean/OceanButterfly.cpp"
-                             "${_cvc_root}/src/cvcGL/ocean/EWave.cpp"
-                             "${_cvc_root}/src/cvcGL/ocean/WakeSource.cpp")
+add_executable(lsystem_coast cvcgl/lsystem_coast.cpp)
 target_include_directories(lsystem_coast PRIVATE "${_cvc_root}/src/cvcGL/ocean")
 target_link_libraries(lsystem_coast PRIVATE cvcGL ${VTK_LIBRARIES} Boost::program_options)
 vtk_module_autoinit(TARGETS lsystem_coast MODULES ${VTK_LIBRARIES})
