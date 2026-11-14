@@ -54,18 +54,18 @@ protected:
 };
 
 TEST_F(ValueCodecTest, Nil) {
-  auto result = roundtrip(nil_value);
+  auto result = roundtrip(nil_value());
   EXPECT_TRUE(result.is_nil());
 }
 
 TEST_F(ValueCodecTest, BoolTrue) {
-  auto result = roundtrip(true_value);
+  auto result = roundtrip(true_value());
   ASSERT_TRUE(std::holds_alternative<bool>(result.v));
   EXPECT_TRUE(std::get<bool>(result.v));
 }
 
 TEST_F(ValueCodecTest, BoolFalse) {
-  auto result = roundtrip(false_value);
+  auto result = roundtrip(false_value());
   ASSERT_TRUE(std::holds_alternative<bool>(result.v));
   EXPECT_FALSE(std::get<bool>(result.v));
 }
@@ -196,7 +196,7 @@ TEST_F(ValueCodecTest, ClosureVariadic) {
 }
 
 TEST_F(ValueCodecTest, NativeFnBecomesNil) {
-  native_fn fn = [](std::span<const value_t>) -> value_t { return nil_value; };
+  native_fn fn = [](std::span<const value_t>) -> value_t { return nil_value(); };
   auto result = roundtrip(value_t{fn});
   // Native functions can't be serialized; should decode as nil
   EXPECT_TRUE(result.is_nil());
@@ -204,7 +204,7 @@ TEST_F(ValueCodecTest, NativeFnBecomesNil) {
 
 TEST_F(ValueCodecTest, MixedList) {
   auto lst = make_list(
-      {value_t{42}, value_t{std::string("hello")}, value_t{true}, nil_value, value_t{3.14}});
+      {value_t{42}, value_t{std::string("hello")}, value_t{true}, nil_value(), value_t{3.14}});
   auto result = roundtrip(lst);
   auto &elems = *std::get<list_ptr>(result.v);
   ASSERT_EQ(elems.size(), 5u);
@@ -272,7 +272,7 @@ TEST_F(EnvironmentCodecTest, ScopeChain) {
 TEST_F(EnvironmentCodecTest, NativeFnBindingsSkipped) {
   auto env = std::make_shared<environment>();
   env->set("x", value_t{42});
-  native_fn fn = [](std::span<const value_t>) -> value_t { return nil_value; };
+  native_fn fn = [](std::span<const value_t>) -> value_t { return nil_value(); };
   env->set("my-builtin", value_t{fn});
 
   auto &node = ctx.root()("__env_test_native__");
@@ -861,7 +861,7 @@ eval_frame lock_frame(eval_phase phase) {
   eval_frame f;
   f.phase = phase;
   f.expr = parse("(with-lock \"k\" 1)");
-  f.extra_vals.assign(7, nil_value);
+  f.extra_vals.assign(7, nil_value());
   f.extra_vals.push_back(value_t(int64_t(1))); // the body
   return f;
 }
@@ -960,7 +960,7 @@ TEST(LockCodec, RebindReplacesStaleLockOps) {
     std::optional<value_t> bound; // nullopt: unbound
     bool replaced;
   };
-  for (const row &r : {row{"unbound", std::nullopt, true}, row{"nil", nil_value, true},
+  for (const row &r : {row{"unbound", std::nullopt, true}, row{"nil", nil_value(), true},
                        row{"stale", detail::make_lock_ops(&stale), true},
                        row{"a program's own", closure, false}}) {
     SCOPED_TRACE(r.name);

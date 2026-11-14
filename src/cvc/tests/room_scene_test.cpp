@@ -44,6 +44,19 @@ using cvc::ariadne::SceneLight;
 using cvc::ariadne::SceneNode;
 
 namespace {
+// A document checked against a fresh app's registries: the built-in widget types, blocks and
+// decoders only. (A test that registers its own loads against that app instead.)
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load(const std::string &yaml) {
+  cvc::app app;
+  return cvc::ariadne::load_string(app, yaml);
+}
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load_file(const std::string &path) {
+  cvc::app app;
+  return cvc::ariadne::load_file(app, path);
+}
+} // namespace
+
+namespace {
 void expect_v3_eq(const float a[3], const float b[3]) {
   EXPECT_FLOAT_EQ(a[0], b[0]);
   EXPECT_FLOAT_EQ(a[1], b[1]);
@@ -639,7 +652,7 @@ TEST(RoomSceneTest, TheSceneCarriesItsWritersEpoch) {
   cvc::app app;
   EXPECT_FALSE(rs::scene_stamp(app, "r").written());
   const cvc::ariadne::section_stamp first = rs::write_room_world(app, "r", rs::default_world());
-  EXPECT_EQ(first.epoch, cvc::ariadne::section_epoch());
+  EXPECT_EQ(first.epoch, cvc::ariadne::section_epoch(app));
   EXPECT_EQ(first.rev, 1u);
   EXPECT_EQ(first.at, 0u);
   EXPECT_TRUE(rs::scene_stamp(app, "r").same(first));
@@ -647,7 +660,7 @@ TEST(RoomSceneTest, TheSceneCarriesItsWritersEpoch) {
   EXPECT_EQ(rs::scene_stamp(app, "r").epoch, first.epoch);
   EXPECT_EQ(rs::scene_revision(app, "r"), 2u) << "the same run counts on";
 
-  const std::uint64_t other = cvc::ariadne::section_epoch() ^ 1;
+  const std::uint64_t other = cvc::ariadne::section_epoch(app) ^ 1;
   const cvc::ariadne::section_stamp restarted =
       rs::write_room_world(app, "r", rs::default_world(), other);
   EXPECT_EQ(restarted.epoch, other);
@@ -706,7 +719,7 @@ TEST(RoomSceneTest, AnOldRelaysEntriesAreNotRead) {
   plain.id = "spot";
   after.env.lights.push_back(plain);
   const cvc::ariadne::section_stamp restarted =
-      rs::write_room_world(new_relay, "r", after, cvc::ariadne::section_epoch() ^ 1);
+      rs::write_room_world(new_relay, "r", after, cvc::ariadne::section_epoch(new_relay) ^ 1);
   ASSERT_EQ(restarted.rev, 1u);
   ingest_scene(new_relay, client, "r");
   ASSERT_EQ(client.root().findDescendant(object_path("r", "pillar") + ".present")->value(), "1")
@@ -735,7 +748,7 @@ TEST(RoomSceneTest, AnOldRelaysEntriesAreNotRead) {
 TEST(RoomSceneTest, RoomWorldFromSceneCarriesWhatTheWireHolds) {
   if (!cvc::ariadne::have_yaml())
     GTEST_SKIP() << "built without yaml-cpp";
-  const cvc::ariadne::LoadResult lr = cvc::ariadne::load_string(R"(
+  const cvc::ariadne::LoadResult lr = fresh_load(R"(
 meta: { name: world, min_libcvc: 3.7.12 }
 scene:
   background: [0.1, 0.2, 0.3]
@@ -813,14 +826,16 @@ TEST(RoomSceneTest, StockWorldsMatchTheirTwins) {
   for (const auto &[file, twin] : worlds) {
     SCOPED_TRACE(file);
     const cvc::ariadne::LoadResult lr =
-        cvc::ariadne::load_file(std::string(CVC_ARIADNE_WORLDS_DIR) + "/" + file);
+        fresh_load_file(std::string(CVC_ARIADNE_WORLDS_DIR) + "/" + file);
     ASSERT_TRUE(lr.ok) << lr.error;
     std::vector<std::string> warnings;
     const rs::room_world doc = rs::room_world_from_scene(lr.scene, &warnings);
     EXPECT_TRUE(warnings.empty()) << warnings.front();
+    // One epoch for both: each app has its own, and the stamps are part of the leaves compared.
     cvc::app from_doc, from_twin;
-    rs::write_room_world(from_doc, "r", doc);
-    rs::write_room_world(from_twin, "r", twin);
+    const std::uint64_t epoch = cvc::ariadne::section_epoch(from_doc);
+    rs::write_room_world(from_doc, "r", doc, epoch);
+    rs::write_room_world(from_twin, "r", twin, epoch);
     const auto a = leaf_values(from_doc, rs::room_scene_path("r"));
     const auto b = leaf_values(from_twin, rs::room_scene_path("r"));
     EXPECT_FALSE(a.empty());

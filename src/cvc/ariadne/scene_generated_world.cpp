@@ -49,18 +49,24 @@ void warn(std::vector<std::string> *w, const std::string &m) {
     w->push_back(m);
 }
 
-// The building library at `path`, loaded once per path (the Austin bundle is thousands of meshes).
-// Empty when the path is empty or holds none.
+// Each app's building libraries, loaded once per path (the Austin bundle is thousands of meshes).
+struct building_libraries {
+  static constexpr const char *app_slot = "cvc.ariadne.building-libraries";
+  std::mutex m;
+  std::map<std::string, std::shared_ptr<const world::building_library>> cache;
+  const world::building_library none;
+};
+
+// The building library at `path`, loaded once per path and app. Empty when the path is empty or
+// holds none.
 const world::building_library &library_at(cvc::app &app, const std::string &path) {
-  static std::mutex m;
-  static std::map<std::string, std::shared_ptr<const world::building_library>> cache;
-  static const world::building_library none;
+  building_libraries &libs = app.slot<building_libraries>();
   if (path.empty())
-    return none;
-  std::lock_guard<std::mutex> lock(m);
-  auto it = cache.find(path);
-  if (it == cache.end())
-    it = cache
+    return libs.none;
+  std::lock_guard<std::mutex> lock(libs.m);
+  auto it = libs.cache.find(path);
+  if (it == libs.cache.end())
+    it = libs.cache
              .emplace(path, std::make_shared<const world::building_library>(
                                 world::load_building_library(app, path)))
              .first;
@@ -102,7 +108,7 @@ const world::building_library &generated_world_library(cvc::app &app, const Scen
                                                        std::vector<std::string> *warnings) {
   std::vector<std::string> paths;
   if (const std::string uri = n.props.str("building_library"); !uri.empty()) {
-    ResolvedFile f = resolve_to_file(uri, n.base_dir);
+    ResolvedFile f = resolve_to_file(app, uri, n.base_dir);
     if (f.ok)
       paths.push_back(f.path);
     else
@@ -170,8 +176,8 @@ GeneratedWorldKeys generated_world_keys(cvc::app &app, const SceneNode &n,
   k.terrain_file = seed_str("world.terrain_file", b.terrain_file);
   // The generators a panel can offer (a host may have registered its own), one per line.
   write<std::string>(app, key("world.generators.terrain"),
-                     joined(world::terrain_generator_names()));
-  write<std::string>(app, key("world.generators.city"), joined(world::city_generator_names()));
+                     joined(world::terrain_generator_names(app)));
+  write<std::string>(app, key("world.generators.city"), joined(world::city_generator_names(app)));
   return k;
 }
 
@@ -204,11 +210,12 @@ std::string generated_world_signature(const world::generated_world_params &p) {
          p.terrain_file;
 }
 
-world::generated_world_params resolve_generated_world_file(world::generated_world_params p,
+world::generated_world_params resolve_generated_world_file(cvc::app &app,
+                                                           world::generated_world_params p,
                                                            const std::string &base_dir,
                                                            ResolvedFile &f) {
   if (!p.terrain_file.empty()) {
-    f = resolve_to_file(p.terrain_file, base_dir);
+    f = resolve_to_file(app, p.terrain_file, base_dir);
     if (!f.ok)
       throw std::runtime_error("terrain_file " + f.error);
     p.terrain_file = f.path;
@@ -223,7 +230,7 @@ first_generated_world(cvc::app &app, const GeneratedWorldKeys &k, const SceneNod
   try {
     ResolvedFile f;
     return std::make_shared<world::generated_world>(
-        world::generate_world(resolve_generated_world_file(p, n.base_dir, f), library));
+        world::generate_world(app, resolve_generated_world_file(app, p, n.base_dir, f), library));
   } catch (const std::exception &e) {
     // The document's generators failed (an unknown name, a missing DEM): start from the default
     // ones, so there is a world, and say why.
@@ -238,7 +245,7 @@ first_generated_world(cvc::app &app, const GeneratedWorldKeys &k, const SceneNod
   write<std::string>(app, k.terrain_gen, p.terrain);
   write<std::string>(app, k.city, p.city);
   write<std::string>(app, k.terrain_file, std::string());
-  return std::make_shared<world::generated_world>(world::generate_world(p, library));
+  return std::make_shared<world::generated_world>(world::generate_world(app, p, library));
 }
 
 void publish_generated_world_stats(cvc::app &app, const GeneratedWorldKeys &k,
@@ -368,8 +375,8 @@ bool GeneratedWorldRuntime::tick(std::vector<std::string> *warnings) {
     return false;
   try {
     ResolvedFile f;
-    auto w = std::make_shared<world::generated_world>(
-        world::generate_world(resolve_generated_world_file(poll.params, d.base_dir, f), d.library));
+    auto w = std::make_shared<world::generated_world>(world::generate_world(
+        app, resolve_generated_world_file(app, poll.params, d.base_dir, f), d.library));
     d.world = w;
     d.colliders->geometry = generated_world_colliders(*w);
     ++d.colliders->revision;

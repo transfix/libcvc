@@ -420,16 +420,12 @@ ViewportManager::ViewportManager(SceneGraph &mainScene, int width, int height, b
   if (width < 1 || height < 1)
     throw std::invalid_argument("ViewportManager: width and height must be >= 1");
 
-  // Same one-time VTK diagnostic routing as SceneRenderer: send ERR/WARN to
-  // stderr instead of a Win32 message box (the shadow-map pass logs cosmetic
-  // driver warnings), and never prompt.
-  static bool s_vtkOutputConfigured = false;
-  if (!s_vtkOutputConfigured) {
-    if (auto *ow = vtkOutputWindow::GetInstance()) {
-      ow->SetDisplayModeToAlwaysStdErr();
-      ow->SetPromptUser(0);
-    }
-    s_vtkOutputConfigured = true;
+  // VTK's diagnostic routing: send ERR/WARN to stderr instead of a Win32 message box (the
+  // shadow-map pass logs cosmetic driver warnings), and never prompt. The output window is VTK's,
+  // one for the process; setting it again for each manager is harmless.
+  if (auto *ow = vtkOutputWindow::GetInstance()) {
+    ow->SetDisplayModeToAlwaysStdErr();
+    ow->SetPromptUser(0);
   }
 
   m_impl->app = &mainScene.appContext();

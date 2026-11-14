@@ -22,8 +22,8 @@
 
 // extensions.h — the single hook by which cvcGL contributes its functionality to Ariadne.
 //
-// The Ariadne registries (scene node types, shader presets, program-lane intrinsics, …) are
-// process-global and populated by explicit host calls. Rather than make every host wire each one,
+// The Ariadne registries (scene node types, shader presets, program-lane intrinsics, …) are each
+// app's own and populated by explicit host calls. Rather than make every host wire each one,
 // cvcGL bundles everything it offers behind ONE call a host makes at setup. The generic
 // ariadne_hello shell calls it, so a pure `.ari` document can use cvcGL's extended node types and
 // shader effects with no bespoke host C++ — which is exactly what lets a demo collapse into a
@@ -31,9 +31,9 @@
 //
 // Today it installs the default shader presets (terrain_bump / bark), the L-system scene node
 // types (forest_trees / …) and, on a CVC_ENABLE_LIBIGL build, the geometry-processing and
-// finite-element node types (mesh_lab / fe_lab, mesh_nodes.h). It takes the app because app-scoped
-// extensions (the L-system program intrinsics) register against the app's runtime; the
-// process-global ones ignore it. ariadne_hello and AriRuntime (so pycvc hosts) both call it.
+// finite-element node types (mesh_lab / fe_lab, mesh_nodes.h), all on the app it is given: a
+// second app has none of them until it is set up too. ariadne_hello and AriRuntime (so pycvc
+// hosts) both call it.
 
 #ifndef CVC_GL_ARIADNE_EXTENSIONS_H
 #define CVC_GL_ARIADNE_EXTENSIONS_H

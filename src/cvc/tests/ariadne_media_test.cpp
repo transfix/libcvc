@@ -49,6 +49,19 @@ namespace media = cvc::ariadne::media;
 using cvc_test::LocalHttpServer;
 
 namespace {
+// A document checked against a fresh app's registries: the built-in widget types, blocks and
+// decoders only. (A test that registers its own loads against that app instead.)
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load(const std::string &yaml) {
+  cvc::app app;
+  return cvc::ariadne::load_string(app, yaml);
+}
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load_file(const std::string &path) {
+  cvc::app app;
+  return cvc::ariadne::load_file(app, path);
+}
+} // namespace
+
+namespace {
 
 // An image of `w` x `h` RGBA pixels, each `fn(x, y)`.
 template <class Fn> cvc::image make_image(int w, int h, Fn fn) {
@@ -525,10 +538,6 @@ struct ImageBackend : Backend {
   void end_backdrop() override { backdrops.push_back("end"); }
 };
 
-struct NetGuard {
-  ~NetGuard() { disable_net(); }
-};
-
 // Every value in the app's state tree, for a scan for the token.
 std::string all_state(cvc::app &app) {
   cvc::state &root = cvc::state::instance(app);
@@ -567,13 +576,12 @@ TEST(MediaWidget, ImagesLoadByUrlWithPolicyAndCredentials) {
       [&](const LocalHttpServer::Request &) -> LocalHttpServer::Reply { return {200, {}, png}; });
   LocalHttpServer third_srv(
       [&](const LocalHttpServer::Request &) -> LocalHttpServer::Reply { return {200, {}, png}; });
-  NetGuard guard;
   cvc::app app;
   NetHostConfig cfg;
   cfg.enabled = true;
   cfg.allow = {media_srv.origin(), third_srv.origin()}; // the credential is bound to one of them
   ASSERT_EQ(enable_net(app, cfg), "");
-  const std::optional<NetAccess> access = net_host_access();
+  const std::optional<NetAccess> access = net_host_access(app);
   ASSERT_TRUE(access && access->credentials);
   const auto origin = cvc::net::parse_origin(media_srv.origin());
   ASSERT_TRUE(origin);
@@ -616,7 +624,7 @@ TEST(MediaWidget, ImagesLoadByUrlWithPolicyAndCredentials) {
                           "\n"
                           "        auth: media\n"
                           "        status: img.unbound\n";
-  LoadResult lr = load_string(doc);
+  LoadResult lr = load_string(app, doc);
   ASSERT_TRUE(lr.ok) << lr.error;
   for (const std::string &w : lr.warnings)
     ADD_FAILURE() << w;
@@ -681,7 +689,6 @@ TEST(MediaWidget, BindNamesAUrlPerItemAndAPlainNameStillWorks) {
   LocalHttpServer srv([&](const LocalHttpServer::Request &) -> LocalHttpServer::Reply {
     return {200, {"Content-Type: image/png"}, png};
   });
-  NetGuard guard;
   cvc::app app;
   NetHostConfig cfg;
   cfg.enabled = true;
@@ -703,7 +710,7 @@ TEST(MediaWidget, BindNamesAUrlPerItemAndAPlainNameStillWorks) {
                           "            status: feed.items.{i}.pic_status\n"
                           "      - image: host raster\n"
                           "        src: occupancy\n";
-  LoadResult lr = load_string(doc);
+  LoadResult lr = load_string(app, doc);
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
   ImageBackend b;
@@ -725,12 +732,12 @@ TEST(MediaWidget, BindNamesAUrlPerItemAndAPlainNameStillWorks) {
 
 TEST(MediaWidget, WithTheNetworkOffAnHttpImageSaysSo) {
   cvc::app app;
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    children:\n"
-                              "      - image: pic\n"
-                              "        src: https://example.invalid/a.png\n"
-                              "        status: s\n");
+  LoadResult lr = load_string(app, "windows:\n"
+                                   "  - window: W\n"
+                                   "    children:\n"
+                                   "      - image: pic\n"
+                                   "        src: https://example.invalid/a.png\n"
+                                   "        status: s\n");
   ASSERT_TRUE(lr.ok);
   Runtime rt(app);
   ImageBackend b;
@@ -750,12 +757,12 @@ TEST(MediaWidget, FileUrisResolveAgainstTheDocumentsDirectory) {
     std::ofstream(dir / "img" / "a.png", std::ios::binary) << png;
   }
   cvc::app app;
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    children:\n"
-                              "      - image: pic\n"
-                              "        src: file://img/a.png\n"
-                              "        status: s\n");
+  LoadResult lr = load_string(app, "windows:\n"
+                                   "  - window: W\n"
+                                   "    children:\n"
+                                   "      - image: pic\n"
+                                   "        src: file://img/a.png\n"
+                                   "        status: s\n");
   ASSERT_TRUE(lr.ok);
   Runtime rt(app);
   rt.set_media_base(dir.string());
@@ -768,13 +775,13 @@ TEST(MediaWidget, FileUrisResolveAgainstTheDocumentsDirectory) {
 }
 
 TEST(MediaWidget, LoaderWarnsOnBadFitAndShape) {
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    children:\n"
-                              "      - image: pic\n"
-                              "        src: https://x.test/a.png\n"
-                              "        fit: stretch\n"
-                              "        shape: hexagon\n");
+  LoadResult lr = fresh_load("windows:\n"
+                             "  - window: W\n"
+                             "    children:\n"
+                             "      - image: pic\n"
+                             "        src: https://x.test/a.png\n"
+                             "        fit: stretch\n"
+                             "        shape: hexagon\n");
   ASSERT_TRUE(lr.ok);
   int warned = 0;
   for (const std::string &w : lr.warnings)
@@ -824,16 +831,16 @@ const char *kBackdropDoc = "meta: {min_libcvc: 3.0.0}\n"
 } // namespace
 
 TEST(MediaBackground, TheLoaderReadsAMapOrAUrl) {
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    background: https://x.test/bg.jpg\n"
-                              "    children:\n"
-                              "      - type: group\n"
-                              "        background: {bind: p.banner, fit: contain, opacity: 2,\n"
-                              "                     terminal: none, auth: svc}\n"
-                              "        children: [x]\n"
-                              "      - text: hi\n"
-                              "        background: https://x.test/no.jpg\n");
+  LoadResult lr = fresh_load("windows:\n"
+                             "  - window: W\n"
+                             "    background: https://x.test/bg.jpg\n"
+                             "    children:\n"
+                             "      - type: group\n"
+                             "        background: {bind: p.banner, fit: contain, opacity: 2,\n"
+                             "                     terminal: none, auth: svc}\n"
+                             "        children: [x]\n"
+                             "      - text: hi\n"
+                             "        background: https://x.test/no.jpg\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   const Widget &win = lr.root.children.at(0);
   EXPECT_EQ(win.background.src, "https://x.test/bg.jpg");
@@ -854,7 +861,7 @@ TEST(MediaBackground, TheLoaderReadsAMapOrAUrl) {
 TEST(MediaBackground, TheCoreBracketsTheContentAndNamesThePictureOnceLoaded) {
   const std::filesystem::path dir = picture_dir();
   cvc::app app;
-  LoadResult lr = load_string(kBackdropDoc);
+  LoadResult lr = load_string(app, kBackdropDoc);
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
   rt.set_media_base(dir.string());
@@ -892,13 +899,14 @@ TEST(MediaBackground, ColouredTextDoesNotPaintTheBackdropBesideIt) {
     GTEST_SKIP() << "built without FTXUI";
   const std::filesystem::path dir = picture_dir();
   cvc::app app;
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    size: [320, auto]\n"
-                              "    background: {src: file://bg.png, opacity: 0.5, status: s.bg}\n"
-                              "    children:\n"
-                              "      - text: admin\n"
-                              "        color: [0.95, 0.75, 0.3]\n");
+  LoadResult lr =
+      load_string(app, "windows:\n"
+                       "  - window: W\n"
+                       "    size: [320, auto]\n"
+                       "    background: {src: file://bg.png, opacity: 0.5, status: s.bg}\n"
+                       "    children:\n"
+                       "      - text: admin\n"
+                       "        color: [0.95, 0.75, 0.3]\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
   rt.set_media_base(dir.string());
@@ -930,7 +938,7 @@ TEST(MediaBackground, FtxuiDrawsHalfBlocksBehindTextAndABannerAbove) {
     GTEST_SKIP() << "built without FTXUI";
   const std::filesystem::path dir = picture_dir();
   cvc::app app;
-  LoadResult lr = load_string(kBackdropDoc);
+  LoadResult lr = load_string(app, kBackdropDoc);
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
   rt.set_media_base(dir.string());
@@ -1052,20 +1060,17 @@ private:
   std::shared_ptr<FakePlayback> f_;
 };
 
-// Registers a factory making FakePlayers (each one's playback in `made`), and undoes it.
+// Registers on `app` a factory making FakePlayers (each one's playback in `made`). It goes with
+// the app; declare it after the app, so it outlives none of the app's players.
 struct FakeFactory {
   std::vector<std::shared_ptr<FakePlayback>> made;
-  FakeFactory() {
-    media::register_player_factory([this](const media::PlayerSource &src) {
+  explicit FakeFactory(cvc::app &app) {
+    media::register_player_factory(app, [this](const media::PlayerSource &src) {
       auto f = std::make_shared<FakePlayback>();
       f->src = src;
       made.push_back(f);
       return std::make_unique<FakePlayer>(f);
     });
-  }
-  ~FakeFactory() {
-    media::register_player_factory(nullptr);
-    media::set_play_policy(media::PlayPolicy::Auto);
   }
 };
 
@@ -1087,6 +1092,7 @@ const char *kPlayerDoc = "meta: {min_libcvc: 3.0.0}\n"
 } // namespace
 
 TEST(MediaPlayer, ThePolicyAndTheTimeLine) {
+  cvc::app app;
   media::PlayPolicy p = media::PlayPolicy::Auto;
   EXPECT_TRUE(media::parse_play_policy("never", p));
   EXPECT_EQ(p, media::PlayPolicy::Never);
@@ -1096,27 +1102,56 @@ TEST(MediaPlayer, ThePolicyAndTheTimeLine) {
   EXPECT_EQ(media::format_time(3725), "1:02:05");
   EXPECT_EQ(media::format_time(-1), "-:--");
   EXPECT_STREQ(media::player_state_name(media::PlayerState::Remote), "remote");
-  media::set_play_policy(media::PlayPolicy::Always);
-  EXPECT_TRUE(media::may_play_here());
-  media::set_play_policy(media::PlayPolicy::Never);
-  EXPECT_FALSE(media::may_play_here());
-  media::set_play_policy(media::PlayPolicy::Auto);
+  media::set_play_policy(app, media::PlayPolicy::Always);
+  EXPECT_TRUE(media::may_play_here(app));
+  media::set_play_policy(app, media::PlayPolicy::Never);
+  EXPECT_FALSE(media::may_play_here(app));
+  // The policy is the app's: another app's, made before or after, starts at Auto.
+  cvc::app other;
+  EXPECT_EQ(media::play_policy(other), media::PlayPolicy::Auto)
+      << "one app's policy moved another's";
+  media::set_play_policy(other, media::PlayPolicy::Always);
+  EXPECT_EQ(media::play_policy(app), media::PlayPolicy::Never);
+}
+
+// A player factory is the app's: another app has none, and its documents' players are its own.
+TEST(MediaPlayer, APlayerFactoryIsItsAppsOwn) {
+  cvc::app a, b;
+  int made_a = 0, made_b = 0;
+  media::register_player_factory(a, [&made_a](const media::PlayerSource &) {
+    ++made_a;
+    return std::unique_ptr<media::Player>();
+  });
+  EXPECT_TRUE(media::have_player_factory(a));
+  EXPECT_FALSE(media::have_player_factory(b));
+  media::register_player_factory(b, [&made_b](const media::PlayerSource &) {
+    ++made_b;
+    return std::unique_ptr<media::Player>();
+  });
+  (void)media::make_player(a, media::PlayerSource{});
+  (void)media::make_player(b, media::PlayerSource{});
+  (void)media::make_player(b, media::PlayerSource{});
+  EXPECT_EQ(made_a, 1);
+  EXPECT_EQ(made_b, 2);
+  media::register_player_factory(a, nullptr);
+  EXPECT_FALSE(media::have_player_factory(a));
+  EXPECT_TRUE(media::have_player_factory(b)) << "removing a's factory removed b's";
 }
 
 TEST(MediaPlayer, TheLoaderReadsVideoAndAudio) {
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    children:\n"
-                              "      - video: clip\n"
-                              "        src: https://x.test/a.mp4\n"
-                              "        poster: https://x.test/a.jpg\n"
-                              "        size: [320, 180]\n"
-                              "        autoplay: true\n"
-                              "        loop: yes\n"
-                              "      - audio: voice\n"
-                              "        src: https://x.test/a.opus\n"
-                              "        muted: true\n"
-                              "      - audio: nothing\n");
+  LoadResult lr = fresh_load("windows:\n"
+                             "  - window: W\n"
+                             "    children:\n"
+                             "      - video: clip\n"
+                             "        src: https://x.test/a.mp4\n"
+                             "        poster: https://x.test/a.jpg\n"
+                             "        size: [320, 180]\n"
+                             "        autoplay: true\n"
+                             "        loop: yes\n"
+                             "      - audio: voice\n"
+                             "        src: https://x.test/a.opus\n"
+                             "        muted: true\n"
+                             "      - audio: nothing\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   const Widget &win = lr.root.children.at(0);
   const Widget &v = win.children.at(0);
@@ -1135,9 +1170,9 @@ TEST(MediaPlayer, TheLoaderReadsVideoAndAudio) {
 }
 
 TEST(MediaPlayer, WithoutAPlayerTheWidgetSaysSoAndOffersTheBrowser) {
-  media::register_player_factory(nullptr);
   cvc::app app;
-  LoadResult lr = load_string(kPlayerDoc);
+  media::register_player_factory(app, nullptr);
+  LoadResult lr = load_string(app, kPlayerDoc);
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
   ImageBackend b;
@@ -1158,10 +1193,10 @@ TEST(MediaPlayer, WithoutAPlayerTheWidgetSaysSoAndOffersTheBrowser) {
 }
 
 TEST(MediaPlayer, OverSshOrWithPlayingOffItIsRemote) {
-  FakeFactory ff;
-  media::set_play_policy(media::PlayPolicy::Never);
   cvc::app app;
-  LoadResult lr = load_string(kPlayerDoc);
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Never);
+  LoadResult lr = load_string(app, kPlayerDoc);
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
   ImageBackend b;
@@ -1179,10 +1214,10 @@ TEST(MediaPlayer, OverSshOrWithPlayingOffItIsRemote) {
 }
 
 TEST(MediaPlayer, TheControlsAndTheStateKeysDriveThePlayer) {
-  FakeFactory ff;
-  media::set_play_policy(media::PlayPolicy::Always);
   cvc::app app;
-  LoadResult lr = load_string(kPlayerDoc);
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Always);
+  LoadResult lr = load_string(app, kPlayerDoc);
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
   ImageBackend b;
@@ -1261,17 +1296,17 @@ TEST(MediaPlayer, TheControlsAndTheStateKeysDriveThePlayer) {
 // §5.13 the Loop box: it starts as the widget's loop:, the player follows it, and <bind>.loop says
 // what it is and takes a document's write. A new source's player starts as the box says.
 TEST(MediaPlayer, TheLoopBoxAndItsKeyDriveThePlayer) {
-  FakeFactory ff;
-  media::set_play_policy(media::PlayPolicy::Always);
   cvc::app app;
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: Player\n"
-                              "    children:\n"
-                              "      - video: clip\n"
-                              "        src: (state-get \"p.src\")\n"
-                              "        size: [160, 90]\n"
-                              "        bind: p.clip\n"
-                              "        loop: true\n");
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Always);
+  LoadResult lr = load_string(app, "windows:\n"
+                                   "  - window: Player\n"
+                                   "    children:\n"
+                                   "      - video: clip\n"
+                                   "        src: (state-get \"p.src\")\n"
+                                   "        size: [160, 90]\n"
+                                   "        bind: p.clip\n"
+                                   "        loop: true\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   cvc::state &root = cvc::state::instance(app);
   root("p.src").value(std::string("https://media.test/a.webm"));
@@ -1318,10 +1353,10 @@ TEST(MediaPlayer, TheLoopBoxAndItsKeyDriveThePlayer) {
 
 // A document that sets <bind>.loop before the player first draws: the player takes it.
 TEST(MediaPlayer, ALoopKeyWrittenFirstIsTheStart) {
-  FakeFactory ff;
-  media::set_play_policy(media::PlayPolicy::Always);
   cvc::app app;
-  LoadResult lr = load_string(kPlayerDoc);
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Always);
+  LoadResult lr = load_string(app, kPlayerDoc);
   ASSERT_TRUE(lr.ok) << lr.error;
   cvc::state::instance(app)("p.clip.loop").value(std::string("1"));
   Runtime rt(app);
@@ -1339,19 +1374,19 @@ TEST(MediaPlayer, ALoopKeyWrittenFirstIsTheStart) {
 
 // In a terminal the Loop box sits in the controls row beside Mute, and Space on it unchecks it.
 TEST(MediaPlayer, TheTerminalControlsHaveALoopBox) {
+  cvc::app app;
   if (!FtxuiBackend::available())
     GTEST_SKIP() << "built without FTXUI";
-  FakeFactory ff;
-  media::set_play_policy(media::PlayPolicy::Always);
-  cvc::app app;
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: Player\n"
-                              "    children:\n"
-                              "      - video: clip\n"
-                              "        src: https://media.test/a.webm\n"
-                              "        size: [160, 90]\n"
-                              "        bind: p.clip\n"
-                              "        loop: true\n");
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Always);
+  LoadResult lr = load_string(app, "windows:\n"
+                                   "  - window: Player\n"
+                                   "    children:\n"
+                                   "      - video: clip\n"
+                                   "        src: https://media.test/a.webm\n"
+                                   "        size: [160, 90]\n"
+                                   "        bind: p.clip\n"
+                                   "        loop: true\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
   FtxuiBackend b;
@@ -1415,11 +1450,11 @@ struct FullscreenBackend : ImageBackend {
 };
 
 TEST(MediaPlayer, AFullscreenVideoIsShownAloneAndComesBack) {
-  FakeFactory ff;
-  media::set_play_policy(media::PlayPolicy::Always);
   cvc::app app;
-  LoadResult lr = load_string(std::string(kPlayerDoc) + "        fullscreen: true\n" +
-                              "      - text: the rest of the window\n");
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Always);
+  LoadResult lr = load_string(app, std::string(kPlayerDoc) + "        fullscreen: true\n" +
+                                       "      - text: the rest of the window\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
   FullscreenBackend b;
@@ -1483,21 +1518,21 @@ TEST(MediaPlayer, AFullscreenVideoIsShownAloneAndComesBack) {
 // §5.11 badge: on image: and video: is their label; on audio: (no picture) it is warned about,
 // and a progress bar's overlay: stays its caption path.
 TEST(MediaBadge, TheLoaderReadsItOnPictures) {
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    children:\n"
-                              "      - image: tile\n"
-                              "        src: photo\n"
-                              "        badge: \"+3\"\n"
-                              "      - video: clip\n"
-                              "        src: https://x.test/a.mp4\n"
-                              "        badge: (state-get \"more\")\n"
-                              "      - audio: voice\n"
-                              "        src: https://x.test/a.opus\n"
-                              "        badge: x\n"
-                              "      - progress: done\n"
-                              "        bind: job.done\n"
-                              "        overlay: job.label\n");
+  LoadResult lr = fresh_load("windows:\n"
+                             "  - window: W\n"
+                             "    children:\n"
+                             "      - image: tile\n"
+                             "        src: photo\n"
+                             "        badge: \"+3\"\n"
+                             "      - video: clip\n"
+                             "        src: https://x.test/a.mp4\n"
+                             "        badge: (state-get \"more\")\n"
+                             "      - audio: voice\n"
+                             "        src: https://x.test/a.opus\n"
+                             "        badge: x\n"
+                             "      - progress: done\n"
+                             "        bind: job.done\n"
+                             "        overlay: job.label\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   const Widget &win = lr.root.children.at(0);
   ASSERT_EQ(win.children.size(), 4u);
@@ -1524,17 +1559,17 @@ TEST(MediaBadge, TheLoaderReadsItOnPictures) {
 TEST(MediaBadge, EachTileOfAGridHasItsOwn) {
   cvc::app app;
   LoadResult lr =
-      load_string("windows:\n"
-                  "  - window: W\n"
-                  "    children:\n"
-                  "      - image: \"\"\n"
-                  "        repeat: (state-get \"post.tiles\")\n"
-                  "        bind: post.media.{i}.url\n"
-                  "        size: [120, 120]\n"
-                  "        badge: (if (= \"{i}\" \"3\") (state-get \"post.more\") \"\")\n"
-                  "      - image: album\n"
-                  "        src: cover\n"
-                  "        badge: Album\n");
+      load_string(app, "windows:\n"
+                       "  - window: W\n"
+                       "    children:\n"
+                       "      - image: \"\"\n"
+                       "        repeat: (state-get \"post.tiles\")\n"
+                       "        bind: post.media.{i}.url\n"
+                       "        size: [120, 120]\n"
+                       "        badge: (if (= \"{i}\" \"3\") (state-get \"post.more\") \"\")\n"
+                       "      - image: album\n"
+                       "        src: cover\n"
+                       "        badge: Album\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   cvc::state &root = cvc::state::instance(app);
   root("post.tiles").value(std::string("4"));
@@ -1557,11 +1592,11 @@ TEST(MediaBadge, EachTileOfAGridHasItsOwn) {
 // A video's badge is drawn over its frames (before the controls), and not in the fullscreen
 // view, where the picture is shown alone.
 TEST(MediaBadge, AVideoHasItOverItsFramesButNotInTheView) {
-  FakeFactory ff;
-  media::set_play_policy(media::PlayPolicy::Always);
   cvc::app app;
-  LoadResult lr = load_string(std::string(kPlayerDoc) + "        fullscreen: true\n" +
-                              "        badge: \"+2\"\n");
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Always);
+  LoadResult lr = load_string(app, std::string(kPlayerDoc) + "        fullscreen: true\n" +
+                                       "        badge: \"+2\"\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
   FullscreenBackend b;
@@ -1587,19 +1622,19 @@ TEST(MediaBadge, AVideoHasItOverItsFramesButNotInTheView) {
 }
 
 TEST(MediaPlayer, AutoplayAndAFailure) {
-  FakeFactory ff;
-  media::set_play_policy(media::PlayPolicy::Always);
   cvc::app app;
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    children:\n"
-                              "      - audio: a\n"
-                              "        src: file:///nowhere/a.opus\n"
-                              "        bind: p.a\n"
-                              "        autoplay: true\n"
-                              "      - audio: b\n"
-                              "        src: file:///nowhere/b.opus\n"
-                              "        bind: p.b\n");
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Always);
+  LoadResult lr = load_string(app, "windows:\n"
+                                   "  - window: W\n"
+                                   "    children:\n"
+                                   "      - audio: a\n"
+                                   "        src: file:///nowhere/a.opus\n"
+                                   "        bind: p.a\n"
+                                   "        autoplay: true\n"
+                                   "      - audio: b\n"
+                                   "        src: file:///nowhere/b.opus\n"
+                                   "        bind: p.b\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
   ImageBackend b;
@@ -1675,14 +1710,14 @@ TEST(MediaDecode, AnimatedGifAndWebpKeepTheirFrames) {
 
 TEST(MediaAnimated, TheWidgetShowsTheFramesOnTheClock) {
   cvc::app app;
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    children:\n"
-                              "      - image: gif\n"
-                              "        src: file://media/anim.gif\n"
-                              "        size: [24, 24]\n"
-                              "        shape: circle\n"
-                              "        status: s.gif\n");
+  LoadResult lr = load_string(app, "windows:\n"
+                                   "  - window: W\n"
+                                   "    children:\n"
+                                   "      - image: gif\n"
+                                   "        src: file://media/anim.gif\n"
+                                   "        size: [24, 24]\n"
+                                   "        shape: circle\n"
+                                   "        status: s.gif\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
   rt.set_media_base(media_dir());
@@ -1707,23 +1742,24 @@ TEST(MediaAnimated, TheWidgetShowsTheFramesOnTheClock) {
 }
 
 TEST(MediaPlayer, ADecorativeVideoPlaysSilentlyWithNoControlsAnywhere) {
-  FakeFactory ff;
-  media::set_play_policy(media::PlayPolicy::Never); // a silent picture plays even so
   cvc::app app;
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    background: {src: https://m.test/banner.mp4, status: s.bg}\n"
-                              "    children:\n"
-                              "      - video: decor\n"
-                              "        src: https://m.test/loop.webm\n"
-                              "        size: [96, 54]\n"
-                              "        controls: false\n"
-                              "        status: s.decor\n"
-                              "      - image: avatar\n"
-                              "        src: https://m.test/u/42.mov?v=2\n"
-                              "        size: [48, 48]\n"
-                              "        shape: circle\n"
-                              "        status: s.av\n");
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Never); // a silent picture plays even so
+  LoadResult lr =
+      load_string(app, "windows:\n"
+                       "  - window: W\n"
+                       "    background: {src: https://m.test/banner.mp4, status: s.bg}\n"
+                       "    children:\n"
+                       "      - video: decor\n"
+                       "        src: https://m.test/loop.webm\n"
+                       "        size: [96, 54]\n"
+                       "        controls: false\n"
+                       "        status: s.decor\n"
+                       "      - image: avatar\n"
+                       "        src: https://m.test/u/42.mov?v=2\n"
+                       "        size: [48, 48]\n"
+                       "        shape: circle\n"
+                       "        status: s.av\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
   ImageBackend b;
@@ -1762,16 +1798,16 @@ TEST(MediaPlayer, ADecorativeVideoPlaysSilentlyWithNoControlsAnywhere) {
 }
 
 TEST(MediaPlayer, WithoutAPlayerAVideoAvatarIsAPlaceholderItsStatusNames) {
-  media::register_player_factory(nullptr);
   cvc::app app;
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    children:\n"
-                              "      - image: avatar\n"
-                              "        src: https://m.test/u/42.mp4\n"
-                              "        size: [48, 48]\n"
-                              "        shape: circle\n"
-                              "        status: s.av\n");
+  media::register_player_factory(app, nullptr);
+  LoadResult lr = load_string(app, "windows:\n"
+                                   "  - window: W\n"
+                                   "    children:\n"
+                                   "      - image: avatar\n"
+                                   "        src: https://m.test/u/42.mp4\n"
+                                   "        size: [48, 48]\n"
+                                   "        shape: circle\n"
+                                   "        status: s.av\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
   ImageBackend b;
@@ -1788,22 +1824,22 @@ TEST(MediaPlayer, WithoutAPlayerAVideoAvatarIsAPlaceholderItsStatusNames) {
 // ---- filling the width, max_height, autoplay in view, pictures in a line (§5.11, §5.13) --------
 
 TEST(MediaFill, TheLoaderReadsAShareOfTheLineAMaxHeightAndEmoji) {
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    children:\n"
-                              "      - image: a\n"
-                              "        src: https://x.test/a.png\n"
-                              "        size: \"100%\"\n"
-                              "        max_height: 300\n"
-                              "      - video: v\n"
-                              "        src: https://x.test/a.mp4\n"
-                              "        size: [\"50%\", 120]\n"
-                              "      - image: b\n"
-                              "        src: https://x.test/b.png\n"
-                              "        size: 64\n"
-                              "      - text: \"\"\n"
-                              "        bind: t.line\n"
-                              "        emoji: t.emoji\n");
+  LoadResult lr = fresh_load("windows:\n"
+                             "  - window: W\n"
+                             "    children:\n"
+                             "      - image: a\n"
+                             "        src: https://x.test/a.png\n"
+                             "        size: \"100%\"\n"
+                             "        max_height: 300\n"
+                             "      - video: v\n"
+                             "        src: https://x.test/a.mp4\n"
+                             "        size: [\"50%\", 120]\n"
+                             "      - image: b\n"
+                             "        src: https://x.test/b.png\n"
+                             "        size: 64\n"
+                             "      - text: \"\"\n"
+                             "        bind: t.line\n"
+                             "        emoji: t.emoji\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   for (const std::string &w : lr.warnings)
     EXPECT_EQ(w.find("schema"), std::string::npos) << w;
@@ -1825,15 +1861,15 @@ TEST(MediaFill, TheLoaderReadsAShareOfTheLineAMaxHeightAndEmoji) {
 
 TEST(MediaFill, APictureFillsItsShareOfTheLineOrIsItsOwnWidth) {
   cvc::app app;
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    children:\n"
-                              "      - image: half\n"
-                              "        src: pic\n" // a published image, by name
-                              "        size: \"50%\"\n"
-                              "      - image: fixed\n"
-                              "        src: pic\n"
-                              "        size: 64\n");
+  LoadResult lr = load_string(app, "windows:\n"
+                                   "  - window: W\n"
+                                   "    children:\n"
+                                   "      - image: half\n"
+                                   "        src: pic\n" // a published image, by name
+                                   "        size: \"50%\"\n"
+                                   "      - image: fixed\n"
+                                   "        src: pic\n"
+                                   "        size: 64\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
   ImageBackend b;
@@ -1860,14 +1896,14 @@ TEST(MediaFill, AFillingPictureStaysWithinItsMaxHeight) {
     std::ofstream(dir / "tall.png", std::ios::binary) << png;
   }
   cvc::app app;
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    children:\n"
-                              "      - image: tall\n"
-                              "        src: file://tall.png\n"
-                              "        size: \"100%\"\n"
-                              "        max_height: 400\n"
-                              "        status: s\n");
+  LoadResult lr = load_string(app, "windows:\n"
+                                   "  - window: W\n"
+                                   "    children:\n"
+                                   "      - image: tall\n"
+                                   "        src: file://tall.png\n"
+                                   "        size: \"100%\"\n"
+                                   "        max_height: 400\n"
+                                   "        status: s\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
   rt.set_media_base(dir.string());
@@ -1887,19 +1923,19 @@ TEST(MediaFill, AFillingPictureStaysWithinItsMaxHeight) {
 }
 
 TEST(MediaFill, AVideoFillsTheLineAndAutoplaysWhileItShows) {
-  FakeFactory ff;
-  media::set_play_policy(media::PlayPolicy::Always);
   cvc::app app;
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    children:\n"
-                              "      - video: clip\n"
-                              "        src: https://media.test/clip.mp4\n"
-                              "        size: \"100%\"\n"
-                              "        max_height: 180\n"
-                              "        autoplay: true\n"
-                              "        muted: true\n"
-                              "        bind: p.v\n");
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Always);
+  LoadResult lr = load_string(app, "windows:\n"
+                                   "  - window: W\n"
+                                   "    children:\n"
+                                   "      - video: clip\n"
+                                   "        src: https://media.test/clip.mp4\n"
+                                   "        size: \"100%\"\n"
+                                   "        max_height: 180\n"
+                                   "        autoplay: true\n"
+                                   "        muted: true\n"
+                                   "        bind: p.v\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
   ImageBackend b;
@@ -1952,15 +1988,15 @@ TEST(MediaFill, AVideoFillsTheLineAndAutoplaysWhileItShows) {
 
 TEST(MediaEmoji, TheShortcodesTheMapNamesArePicturesInTheLine) {
   cvc::app app;
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    children:\n"
-                              "      - type: group\n"
-                              "        repeat: (state-get \"t.items\")\n"
-                              "        children:\n"
-                              "          - text: \"\"\n"
-                              "            bind: t.items.{i}.line\n"
-                              "            emoji: t.items.{i}.emoji\n");
+  LoadResult lr = load_string(app, "windows:\n"
+                                   "  - window: W\n"
+                                   "    children:\n"
+                                   "      - type: group\n"
+                                   "        repeat: (state-get \"t.items\")\n"
+                                   "        children:\n"
+                                   "          - text: \"\"\n"
+                                   "            bind: t.items.{i}.line\n"
+                                   "            emoji: t.items.{i}.emoji\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   cvc::state &root = cvc::state::instance(app);
   const std::string hundred = "\xF0\x9F\x92\xAF"; // U+1F4AF, a unicode emoji's character
@@ -2006,12 +2042,12 @@ TEST(MediaEmoji, AnAnimatedGifOrWebpInTheLineMoves) {
   for (const char *file : {"anim.gif", "anim.webp"}) {
     SCOPED_TRACE(file);
     cvc::app app;
-    LoadResult lr = load_string("windows:\n"
-                                "  - window: W\n"
-                                "    children:\n"
-                                "      - text: \"\"\n"
-                                "        bind: t.line\n"
-                                "        emoji: t.emoji\n");
+    LoadResult lr = load_string(app, "windows:\n"
+                                     "  - window: W\n"
+                                     "    children:\n"
+                                     "      - text: \"\"\n"
+                                     "        bind: t.line\n"
+                                     "        emoji: t.emoji\n");
     ASSERT_TRUE(lr.ok) << lr.error;
     cvc::state &root = cvc::state::instance(app);
     root("t.line").value(std::string("it moves :spin: in the line"));
@@ -2042,14 +2078,14 @@ TEST(MediaEmoji, AnAnimatedGifOrWebpInTheLineMoves) {
 }
 
 TEST(MediaEmoji, AVideoInTheLinePlaysSilentlyOnALoop) {
-  FakeFactory ff;
   cvc::app app;
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    children:\n"
-                              "      - text: \"\"\n"
-                              "        bind: t.line\n"
-                              "        emoji: t.emoji\n");
+  FakeFactory ff(app);
+  LoadResult lr = load_string(app, "windows:\n"
+                                   "  - window: W\n"
+                                   "    children:\n"
+                                   "      - text: \"\"\n"
+                                   "        bind: t.line\n"
+                                   "        emoji: t.emoji\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   cvc::state &root = cvc::state::instance(app);
   root("t.line").value(std::string("a loop :dance: here"));
@@ -2084,11 +2120,11 @@ TEST(MediaEmoji, AVideoInTheLinePlaysSilentlyOnALoop) {
 // 30 ms budget before the last cards' ran, hiding their pictures for that frame (a flicker).
 TEST(AriadneReactiveBudget, ASkippedPredicateKeepsLastFramesAnswer) {
   cvc::app app;
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    children:\n"
-                              "      - text: card\n"
-                              "        visible_when: (= (state-get \"s.show\") \"1\")\n");
+  LoadResult lr = load_string(app, "windows:\n"
+                                   "  - window: W\n"
+                                   "    children:\n"
+                                   "      - text: card\n"
+                                   "        visible_when: (= (state-get \"s.show\") \"1\")\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   cvc::state &root = cvc::state::instance(app);
   root("s.show").value(std::string("1"));
@@ -2099,11 +2135,11 @@ TEST(AriadneReactiveBudget, ASkippedPredicateKeepsLastFramesAnswer) {
     Runtime rt(app);
     ImageBackend b;
     rt.set_backend(&b);
-    LoadResult first = load_string("windows:\n"
-                                   "  - window: W\n"
-                                   "    children:\n"
-                                   "      - text: card\n"
-                                   "        visible_when: (= (state-get \"s.show\") \"1\")\n");
+    LoadResult first = load_string(app, "windows:\n"
+                                        "  - window: W\n"
+                                        "    children:\n"
+                                        "      - text: card\n"
+                                        "        visible_when: (= (state-get \"s.show\") \"1\")\n");
     ASSERT_TRUE(first.ok) << first.error;
     rt.set_root(std::move(first.root));
     rt.render();
@@ -2137,19 +2173,19 @@ TEST(AriadneReactiveBudget, ASkippedPredicateKeepsLastFramesAnswer) {
 TEST(AriadneReactiveBudget, ASkipIsNeverAWarning) {
   cvc::app app;
   LoadResult lr =
-      load_string("windows:\n"
-                  "  - window: W\n"
-                  "    children:\n"
-                  "      - text: card\n"
-                  "        visible_when: (= (state-get \"s.show\") \"1\")\n"
-                  "        tooltip: (state-get \"s.tip\")\n"
-                  "      - text: ago\n"
-                  "        bind: (string.join (list \"posted\" (state-get \"s.ago\")) \" \")\n"
-                  "      - text: row {i}\n"
-                  "        repeat: (state-get \"s.n\")\n"
-                  "      - combo: pick\n"
-                  "        bind: s.pick\n"
-                  "        options: (list \"a\" (state-get \"s.opt\"))\n");
+      load_string(app, "windows:\n"
+                       "  - window: W\n"
+                       "    children:\n"
+                       "      - text: card\n"
+                       "        visible_when: (= (state-get \"s.show\") \"1\")\n"
+                       "        tooltip: (state-get \"s.tip\")\n"
+                       "      - text: ago\n"
+                       "        bind: (string.join (list \"posted\" (state-get \"s.ago\")) \" \")\n"
+                       "      - text: row {i}\n"
+                       "        repeat: (state-get \"s.n\")\n"
+                       "      - combo: pick\n"
+                       "        bind: s.pick\n"
+                       "        options: (list \"a\" (state-get \"s.opt\"))\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   cvc::state &root = cvc::state::instance(app);
   root("s.show").value(std::string("1"));
@@ -2215,7 +2251,7 @@ struct CacheDoc {
   Runtime rt{app};
   ImageBackend b;
   explicit CacheDoc(const std::string &doc) {
-    LoadResult lr = load_string(doc);
+    LoadResult lr = fresh_load(doc);
     EXPECT_TRUE(lr.ok) << lr.error;
     rt.set_backend(&b);
     rt.set_root(std::move(lr.root));
@@ -2377,11 +2413,11 @@ TEST(AriadneReactiveCache, AChangedHasAnswerRerunsIt) {
     }
   };
   cvc::app app;
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    children:\n"
-                              "      - text: fs\n"
-                              "        bind: (if (has? \"ui.fullscreen\") \"yes\" \"no\")\n");
+  LoadResult lr = load_string(app, "windows:\n"
+                                   "  - window: W\n"
+                                   "    children:\n"
+                                   "      - text: fs\n"
+                                   "        bind: (if (has? \"ui.fullscreen\") \"yes\" \"no\")\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
   Caps b;

@@ -124,7 +124,7 @@ std::vector<unsigned char> encode_volume(const boost::any &val) {
   return out;
 }
 
-boost::any decode_volume(const std::vector<unsigned char> &bytes) {
+boost::any decode_volume(app &ctx, const std::vector<unsigned char> &bytes) {
   const unsigned char *p = bytes.data();
   const unsigned char *end = p + bytes.size();
 
@@ -155,19 +155,14 @@ boost::any decode_volume(const std::vector<unsigned char> &bytes) {
   if (static_cast<std::size_t>(end - p) < voxel_bytes)
     throw std::runtime_error("decode_volume: truncated voxel data");
 
-  // Construct volume via a scratch app context.
-  // The caller is expected to extract the volume from the any and
-  // manage ownership. We use a thread-local static app so we don't
-  // create one per decode call.
-  thread_local app decode_ctx;
-
+  // The volume is the registering app's (register_volume_geometry_codecs).
   dimension dim;
   dim.xdim = xdim;
   dim.ydim = ydim;
   dim.zdim = zdim;
   bounding_box bbox(minx, miny, minz, maxx, maxy, maxz);
 
-  volume vol(decode_ctx, p, dim, dt, bbox);
+  volume vol(ctx, p, dim, dt, bbox);
   vol.desc(desc);
   p += voxel_bytes;
 
@@ -272,7 +267,7 @@ std::vector<unsigned char> encode_geometry(const boost::any &val) {
   return out;
 }
 
-boost::any decode_geometry(const std::vector<unsigned char> &bytes) {
+boost::any decode_geometry(app &ctx, const std::vector<unsigned char> &bytes) {
   const unsigned char *p = bytes.data();
   const unsigned char *end = p + bytes.size();
 
@@ -287,8 +282,7 @@ boost::any decode_geometry(const std::vector<unsigned char> &bytes) {
       !read_u64(p, end, nte) || !read_u64(p, end, nh) || !read_u64(p, end, nl))
     throw std::runtime_error("decode_geometry: truncated header");
 
-  thread_local app decode_ctx;
-  geometry geo(decode_ctx);
+  geometry geo(ctx);
   geo.set_geometry_type(static_cast<geometry::geometry_type>(gtype));
 
   auto &pts = geo.points();
@@ -371,9 +365,16 @@ boost::any decode_geometry(const std::vector<unsigned char> &bytes) {
 
 } // anonymous namespace
 
-void register_volume_geometry_codecs(state_codec_registry &registry) {
-  registry.register_codec("cvc::volume", encode_volume, decode_volume, "cvc.volume.v1");
-  registry.register_codec("cvc::geometry", encode_geometry, decode_geometry, "cvc.geometry.v1");
+void register_volume_geometry_codecs(app &ctx, state_codec_registry &registry) {
+  app *const a = &ctx;
+  registry.register_codec(
+      "cvc::volume", encode_volume,
+      [a](const std::vector<unsigned char> &bytes) { return decode_volume(*a, bytes); },
+      "cvc.volume.v1");
+  registry.register_codec(
+      "cvc::geometry", encode_geometry,
+      [a](const std::vector<unsigned char> &bytes) { return decode_geometry(*a, bytes); },
+      "cvc.geometry.v1");
 }
 
 } // namespace cvc

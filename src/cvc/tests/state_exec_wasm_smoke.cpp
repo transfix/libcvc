@@ -184,7 +184,7 @@ bool run_exec_pool() {
     const auto r = g.sched().get_result(pid);
     return r ? se::to_string(*r) : std::string("<no result>");
   };
-  const std::uint64_t worker_pumps = cvc::exec_pool_worker_pumps_total();
+  const std::uint64_t worker_pumps = pool.stats().worker_pumps;
   se::exec_group *const groups[] = {&a, &b};
   int rounds = 0;
   for (; rounds < 1000 && !(ended(a, pa) && ended(b, pb)); ++rounds)
@@ -194,8 +194,7 @@ bool run_exec_pool() {
   ok &= expect(rounds > 1, kind, "the loop ended in one 1000-step pump");
   ok &= expect(result(a, pa) == "4950", kind, "group a returned " + result(a, pa));
   ok &= expect(result(b, pb) == "42", kind, "group b returned " + result(b, pb));
-  ok &=
-      expect(cvc::exec_pool_worker_pumps_total() == worker_pumps, kind, "a worker pumped a group");
+  ok &= expect(pool.stats().worker_pumps == worker_pumps, kind, "a worker pumped a group");
   ok &= expect(pool.stats().pumps >= std::uint64_t(rounds) + 1, kind,
                "the pool counted " + std::to_string(pool.stats().pumps) + " pumps in " +
                    std::to_string(rounds) + " rounds");

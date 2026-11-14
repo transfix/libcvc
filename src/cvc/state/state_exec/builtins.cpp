@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cvc/core/app.h>
 #include <cvc/state/state_blob_store.h> // sha256_hex
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
@@ -704,7 +706,7 @@ value_t builtin_error(std::span<const value_t> args) {
                                   ? std::get<std::string>(args[0].v)
                                   : to_string(args[0]);
   throw dsl_exception(make_exception(exception_class("RuntimeError"), message,
-                                     args.size() > 1 ? args[1] : nil_value, "dsl"));
+                                     args.size() > 1 ? args[1] : nil_value(), "dsl"));
 }
 
 // (assert cond [message [data]]): nil when cond is truthy, else raises an AssertionError. The
@@ -716,14 +718,14 @@ value_t builtin_assert(std::span<const value_t> args) {
                     "assert: expected a condition, an optional message and data, got " +
                         std::to_string(args.size()) + " args");
   if (args[0].is_truthy())
-    return nil_value;
+    return nil_value();
   std::string message = "assertion failed";
   if (args.size() > 1)
     message +=
         ": " + (std::holds_alternative<std::string>(args[1].v) ? std::get<std::string>(args[1].v)
                                                                : to_string(args[1]));
   throw dsl_exception(make_exception(exception_class("AssertionError"), message,
-                                     args.size() > 2 ? args[2] : nil_value, "dsl"));
+                                     args.size() > 2 ? args[2] : nil_value(), "dsl"));
 }
 
 // ---------------------------------------------------------------------------
@@ -845,14 +847,27 @@ value_t builtin_random_token(std::span<const value_t> args) {
 // ---------------------------------------------------------------------------
 
 namespace {
-// print writes whole lines (td 4.11): the line is made first, outside the lock, then written with
-// its newline in one call. The lock is held for that write only, never across a data job or DSL
-// code, so lines printed from several threads never interleave. The mutex is never destroyed: a
-// thread can still print during static destruction (a daemon Python thread inside Exec.run).
+// print writes whole lines (td 4.11): the line is made first, outside any lock, then written with
+// its newline in one call, holding stdout's own lock (the C library's, which nests, and which
+// std::cout's own writes to stdout take too). The lock is held for that write only, never across a
+// data job or DSL code, so lines printed from several threads, by any app, never interleave. The C
+// library's lock outlives static destruction: a thread can still print then (a daemon Python
+// thread inside Exec.run).
+struct stdout_lock {
+#ifdef _WIN32
+  stdout_lock() { _lock_file(stdout); }
+  ~stdout_lock() { _unlock_file(stdout); }
+#else
+  stdout_lock() { flockfile(stdout); }
+  ~stdout_lock() { funlockfile(stdout); }
+#endif
+  stdout_lock(const stdout_lock &) = delete;
+  stdout_lock &operator=(const stdout_lock &) = delete;
+};
+
 void write_print_line(std::string line) {
-  static std::mutex &out = *new std::mutex;
   line += '\n';
-  std::lock_guard<std::mutex> lock(out);
+  stdout_lock lock;
   std::cout.write(line.data(), static_cast<std::streamsize>(line.size()));
 }
 } // namespace
@@ -867,7 +882,7 @@ value_t builtin_print(std::span<const value_t> args) {
       parts.push_back(std::holds_alternative<std::string>(a.v) ? value_t{to_string(a)} : a);
     return run_data_job(make_concat_job(std::move(parts), " ", "print"), [](value_t line) {
       write_print_line(std::move(std::get<std::string>(line.v)));
-      return nil_value;
+      return nil_value();
     });
   }
   std::string line;
@@ -877,7 +892,7 @@ value_t builtin_print(std::span<const value_t> args) {
     line += to_string(args[i]);
   }
   write_print_line(std::move(line));
-  return nil_value;
+  return nil_value();
 }
 
 // ---------------------------------------------------------------------------
@@ -913,12 +928,12 @@ value_t builtin_next(std::span<const value_t> args) {
     throw dsl_error("TypeError", "next: expected generator");
   if ((*gp)->native_step) { // range and friends: one cheap value
     auto result = generator_next(**gp);
-    return result ? *result : nil_value;
+    return result ? *result : nil_value();
   }
   // A DSL generator's body runs as a job, a slice per step when the process slices.
   return run_data_job(make_generator_job(*gp), [](value_t got) {
     const auto &l = *std::get<list_ptr>(got.v);
-    return l.empty() ? nil_value : l.front();
+    return l.empty() ? nil_value() : l.front();
   });
 }
 
@@ -999,15 +1014,15 @@ value_t builtin_not(std::span<const value_t> args) {
 value_t builtin_and(std::span<const value_t> args) {
   for (auto &a : args)
     if (!a.is_truthy())
-      return false_value;
-  return args.empty() ? true_value : args.back();
+      return false_value();
+  return args.empty() ? true_value() : args.back();
 }
 
 value_t builtin_or(std::span<const value_t> args) {
   for (auto &a : args)
     if (a.is_truthy())
       return a;
-  return false_value;
+  return false_value();
 }
 
 // ---------------------------------------------------------------------------
@@ -1020,9 +1035,9 @@ void builtins::register_fn(environment_ptr env, const std::string &name, native_
 
 environment_ptr builtins::make_default_environment() {
   auto env = std::make_shared<environment>();
-  // The stdlib modules (string.*, bytes.*, math.*, collections.*) are reached through the
-  // shared, frozen stdlib scope rather than copied into every environment.
-  env->outer = stdlib_registry::shared_scope();
+  // The stdlib modules (string.*, bytes.*, math.*, collections.*) are reached through a frozen
+  // stdlib scope of the environment's own (frozen_builtins shares one per app), not bound here.
+  env->outer = stdlib_registry::make_scope();
 
   // Arithmetic
   register_fn(env, "+", builtin_add);
@@ -1112,16 +1127,26 @@ environment_ptr builtins::make_default_environment() {
   return env;
 }
 
-environment_ptr frozen_builtins() {
-  // Built once (thread-safe static init) and never written again. Its natives are free functions
-  // safe on any thread: print takes a process-wide lock, generator, next and collect reach the
-  // bound registry and the step's data scope, math.random the bound stream (td 4.2, B16).
-  static const environment_ptr scope = [] {
+namespace {
+// An app's frozen builtins: built at the first call for the app, then never written again.
+struct frozen_builtins_slot {
+  static constexpr const char *app_slot = "cvc.state_exec.frozen_builtins";
+  std::once_flag once;
+  environment_ptr scope;
+};
+} // namespace
+
+environment_ptr frozen_builtins(cvc::app &app) {
+  // Its natives are free functions safe on any thread: print takes stdout's lock, generator, next
+  // and collect reach the bound registry and the step's data scope, math.random the bound stream
+  // (td 4.2, B16).
+  frozen_builtins_slot &s = app.slot<frozen_builtins_slot>();
+  std::call_once(s.once, [&s] {
     environment_ptr env = builtins::make_default_environment();
     env->frozen = true;
-    return env;
-  }();
-  return scope;
+    s.scope = std::move(env);
+  });
+  return s.scope;
 }
 
 } // namespace cvc::state_exec

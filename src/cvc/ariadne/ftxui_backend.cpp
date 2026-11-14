@@ -2656,7 +2656,7 @@ void FtxuiBackend::begin_item_group(const char *id, const ItemGroupOptions &opts
 // payload past this is more likely a mistake than something to copy.
 constexpr std::size_t kMaxClipboard = 1 << 20;
 
-bool FtxuiBackend::set_clipboard(const std::string &text) {
+bool FtxuiBackend::set_clipboard(cvc::app &, const std::string &text) {
   Impl &m = *m_;
   if (m.opt.hosted || text.size() > kMaxClipboard)
     return false;
@@ -4264,7 +4264,7 @@ bool FtxuiBackend::item_clicked() { return false; }
 bool FtxuiBackend::item_hovered() { return false; }
 void FtxuiBackend::begin_item_group(const char *, const ItemGroupOptions &) {}
 void FtxuiBackend::end_item_group() {}
-bool FtxuiBackend::set_clipboard(const std::string &) { return false; }
+bool FtxuiBackend::set_clipboard(cvc::app &, const std::string &) { return false; }
 std::string FtxuiBackend::take_clipboard() { return {}; }
 FullscreenView FtxuiBackend::begin_fullscreen_view() { return {}; }
 void FtxuiBackend::end_fullscreen_view() {}
@@ -4363,24 +4363,21 @@ void FtxuiBackend::route(Runtime &rt, const TermEvent &ev,
 }
 
 // A spinner's braille dots need a terminal that shows them: not the Linux console (its font has
-// none), a dumb terminal or a VT-series one. Read once; a browser's xterm.js sets no TERM.
+// none), a dumb terminal or a VT-series one. A browser's xterm.js sets no TERM.
 bool FtxuiBackend::unicode_glyphs() const {
-  static const bool unicode = [] {
-    const char *t = std::getenv("TERM");
-    const std::string term = t ? t : "";
-    return !(term == "linux" || term == "dumb" || term.rfind("vt", 0) == 0);
-  }();
-  return unicode;
+  const char *t = std::getenv("TERM");
+  const std::string_view term = t ? t : "";
+  return !(term == "linux" || term == "dumb" || term.rfind("vt", 0) == 0);
 }
 
 // ── custom widgets: the same in both builds (a host's draw fn calls the primitives above)
 // ─────────
 
-void FtxuiBackend::register_widget(std::string custom_type, CustomDrawFn draw) {
+void FtxuiBackend::register_widget(cvc::app &app, std::string custom_type, CustomDrawFn draw) {
   if (draw) {
     // As ImGuiBackend::register_widget does: the loader then knows the type, and has_widget_type()
     // (so requires: and (has? ...)) reports it present.
-    register_known_widget_type(custom_type);
+    register_known_widget_type(app, custom_type);
     customWidgets_[std::move(custom_type)] = std::move(draw);
   } else
     customWidgets_.erase(custom_type);

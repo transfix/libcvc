@@ -3,6 +3,12 @@
 // register and run in changes no answer. Each registry P0a moves onto the app adds its cases here.
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/conference/room_calls.h>
+#include <cvc/ariadne/data.h>
+#include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/net_host.h>
+#include <cvc/ariadne/script_engine.h>
+#include <cvc/ariadne/uri.h>
+#include <cvc/ariadne/uri_state.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
@@ -165,6 +171,192 @@ TEST(AriadneRegistries, AppsOnOtherThreadsKeepTheirOwnProviders) {
 }
 
 // --- the room-call client a host installs ---------------------------------------------------
+
+// --- the document registries: widget types, .ari blocks, data decoders ----------------------
+
+// Whether `warnings` has one containing `needle`.
+bool warned(const std::vector<std::string> &warnings, const std::string &needle) {
+  for (const std::string &w : warnings)
+    if (w.find(needle) != std::string::npos)
+      return true;
+  return false;
+}
+
+// A document that uses widget type `widget` and block `block`, and asks for decoder `decoder`.
+std::string document_using(const std::string &widget, const std::string &block,
+                           const std::string &decoder) {
+  return "meta: { min_libcvc: \"0.0.0\" }\n"
+         "windows: [ { window: W, children: [ { type: " +
+         widget + " } ] } ]\n" + block + ": { name: here }\n" +
+         "data:\n  d: { uri: \"file:x.bin\", as: " + decoder + " }\n";
+}
+
+// What `app` makes of document_using(widget, block, decoder): which of the three it knew.
+std::string what_app_knows(cvc::app &app, const std::string &widget, const std::string &block,
+                           const std::string &decoder) {
+  const LoadResult r = load_string(app, document_using(widget, block, decoder));
+  if (!r.ok)
+    return "load failed: " + r.error;
+  std::string out;
+  out += warned(r.warnings, "widget type '" + widget + "'") ? "widget? " : "widget ";
+  bool kept = false;
+  for (const auto &kv : r.extras)
+    kept = kept || kv.first == block;
+  out += kept ? "block " : "block? ";
+  out += warned(r.warnings, "as: " + decoder) ? "decoder?" : "decoder";
+  return out;
+}
+
+void register_all(cvc::app &app, const std::string &tag) {
+  register_widget_type(app, "w_" + tag, [](const Widget &, const WidgetEmitContext &) {});
+  register_ari_block(app, "b_" + tag, [tag](const Value &content, LoadResult &out) {
+    out.extras.emplace_back("b_" + tag, content);
+  });
+  register_data_decoder(app, "d_" + tag, [](DataDecode &) {});
+}
+
+TEST(AriadneRegistries, DocumentRegistriesAreEachAppsOwn) {
+  if (!have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  for (const bool aFirst : {true, false}) {
+    cvc::app a, b;
+    if (aFirst) {
+      register_all(a, "a");
+      register_all(b, "b");
+    } else {
+      register_all(b, "b");
+      register_all(a, "a");
+    }
+    EXPECT_EQ(what_app_knows(a, "w_a", "b_a", "d_a"), "widget block decoder");
+    EXPECT_EQ(what_app_knows(a, "w_b", "b_b", "d_b"), "widget? block? decoder?");
+    EXPECT_EQ(what_app_knows(b, "w_b", "b_b", "d_b"), "widget block decoder");
+    EXPECT_EQ(what_app_knows(b, "w_a", "b_a", "d_a"), "widget? block? decoder?");
+    EXPECT_TRUE(has_widget_type(a, "w_a"));
+    EXPECT_FALSE(has_widget_type(b, "w_a"));
+    EXPECT_TRUE(has_ari_block(a, "b_a"));
+    EXPECT_FALSE(has_ari_block(b, "b_a"));
+    EXPECT_TRUE(has_data_decoder(a, "d_a"));
+    EXPECT_FALSE(has_data_decoder(b, "d_a"));
+  }
+}
+
+TEST(AriadneRegistries, EveryAppStartsWithTheBuiltInDecodersOnly) {
+  cvc::app a;
+  register_data_decoder(a, "extra", [](DataDecode &) {});
+  cvc::app b; // made after a registered one
+  for (const char *as :
+       {"files", "bytes", "text", "json", "mesh", "volume", "heightfield", "city_bundle"}) {
+    EXPECT_TRUE(has_data_decoder(a, as)) << as;
+    EXPECT_TRUE(has_data_decoder(b, as)) << as;
+  }
+  EXPECT_FALSE(has_data_decoder(b, "extra"));
+  register_data_decoder(a, "json", nullptr); // removing a built-in from one app
+  EXPECT_FALSE(has_data_decoder(a, "json"));
+  EXPECT_TRUE(has_data_decoder(b, "json")) << "removing it from one app removed it from another";
+}
+
+TEST(AriadneRegistries, AppsOnOtherThreadsKeepTheirOwnDocumentRegistries) {
+  if (!have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  constexpr int kApps = 4;
+  std::vector<std::string> mine(kApps), others(kApps);
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kApps; ++i)
+    threads.emplace_back([i, &mine, &others] {
+      cvc::app app;
+      const std::string tag = std::to_string(i), next = std::to_string((i + 1) % kApps);
+      register_all(app, tag);
+      mine[i] = what_app_knows(app, "w_" + tag, "b_" + tag, "d_" + tag);
+      others[i] = what_app_knows(app, "w_" + next, "b_" + next, "d_" + next);
+    });
+  for (std::thread &t : threads)
+    t.join();
+  for (int i = 0; i < kApps; ++i) {
+    EXPECT_EQ(mine[i], "widget block decoder") << i;
+    EXPECT_EQ(others[i], "widget? block? decoder?") << i;
+  }
+}
+
+// --- the URI resolver, the net host ---------------------------------------------------------
+
+// A handler for scheme "memo" that answers `answer`.
+void register_memo(cvc::app &app, const std::string &answer) {
+  register_uri_handler(app, "memo", [answer](const Uri &, const std::string &) {
+    return UriResult{true, answer, "memo://" + answer, std::string()};
+  });
+}
+
+TEST(AriadneRegistries, UriHandlersAndCapsAreEachAppsOwn) {
+  for (const bool aFirst : {true, false}) {
+    cvc::app a, b;
+    if (aFirst)
+      register_memo(a, "from a");
+    EXPECT_FALSE(resolve(b, "memo://x").ok) << "b resolves a's scheme";
+    register_memo(b, "from b");
+    if (!aFirst)
+      register_memo(a, "from a");
+    EXPECT_EQ(resolve(a, "memo://x").content, "from a");
+    EXPECT_EQ(resolve(b, "memo://x").content, "from b");
+    unregister_uri_handler(a, "memo");
+    EXPECT_FALSE(has_uri_handler(a, "memo"));
+    EXPECT_TRUE(has_uri_handler(b, "memo")) << "unregistering a's took b's";
+
+    set_resolve_file_byte_cap(a, 10);
+    set_store_file_byte_cap(a, 20);
+    EXPECT_EQ(resolve_file_byte_cap(a), 10u);
+    EXPECT_EQ(store_file_byte_cap(a), 20u);
+    EXPECT_EQ(resolve_file_byte_cap(b), 16u * 1024u * 1024u) << "a's cap moved b's";
+    EXPECT_EQ(store_file_byte_cap(b), 16u * 1024u * 1024u);
+  }
+}
+
+// state:// resolves against the app it is registered on. When the registry was the process's,
+// the last app to register answered every app's state:// reads.
+TEST(AriadneRegistries, StateUrisReadEachAppsOwnTree) {
+  cvc::app a, b;
+  register_state_uri_handler(a);
+  register_state_uri_handler(b);
+  cvc::state::instance(a)("doc.title").value(std::string("A"));
+  cvc::state::instance(b)("doc.title").value(std::string("B"));
+  EXPECT_EQ(resolve(a, "state://doc.title").content, "A");
+  EXPECT_EQ(resolve(b, "state://doc.title").content, "B");
+  ASSERT_TRUE(store(a, "state://doc.saved", "a's").ok);
+  EXPECT_EQ(cvc::state::instance(a)("doc.saved").value(), "a's");
+  EXPECT_EQ(cvc::state::instance(b).findDescendant("doc.saved"), nullptr) << "a's store wrote b";
+  cvc::app c; // made after: no state:// handler of its own
+  EXPECT_FALSE(resolve(c, "state://doc.title").ok);
+}
+
+TEST(AriadneRegistries, TheNetHostIsEachAppsOwn) {
+  cvc::app a, b;
+  NetHostConfig on;
+  on.enabled = true;
+  ASSERT_EQ(enable_net(a, on), "");
+  EXPECT_TRUE(net_host_status(a).enabled);
+  EXPECT_FALSE(net_host_status(b).enabled) << "turning a's network on turned b's on";
+  EXPECT_TRUE(net_host_access(a).has_value());
+  EXPECT_FALSE(net_host_access(b).has_value());
+  disable_net(a);
+  EXPECT_FALSE(net_host_status(a).enabled);
+}
+
+TEST(AriadneRegistries, AppsOnOtherThreadsResolveWithTheirOwnHandlers) {
+  constexpr int kApps = 4;
+  std::vector<std::string> got(kApps);
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kApps; ++i)
+    threads.emplace_back([i, &got] {
+      cvc::app app;
+      register_memo(app, "app " + std::to_string(i));
+      register_state_uri_handler(app);
+      cvc::state::instance(app)("who").value(std::to_string(i));
+      got[i] = resolve(app, "memo://x").content + " / " + resolve(app, "state://who").content;
+    });
+  for (std::thread &t : threads)
+    t.join();
+  for (int i = 0; i < kApps; ++i)
+    EXPECT_EQ(got[i], "app " + std::to_string(i) + " / " + std::to_string(i));
+}
 
 using conference::room_call_client;
 

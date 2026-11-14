@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/uri_state.h>
+#include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <exception>
 #include <limits>
@@ -138,26 +139,29 @@ StoreResult state_store(cvc::state &root, const Uri &u, const std::string &conte
 
 } // namespace
 
-void register_state_uri_handler(cvc::state &root) {
-  cvc::state *root_ptr = &root;
-  register_uri_handler("state", [root_ptr](const Uri &u, const std::string & /*base*/) {
+void register_state_uri_handler(cvc::app &app) {
+  // The handlers are held in `app`'s own table, so its state root outlives them.
+  cvc::state *root_ptr = &cvc::state::instance(app);
+  register_uri_handler(app, "state", [root_ptr](const Uri &u, const std::string & /*base*/) {
     return state_resolve(*root_ptr, u);
   });
   register_uri_store_handler(
-      "state", [root_ptr](const Uri &u, const std::string &content, const std::string & /*base*/) {
+      app, "state",
+      [root_ptr](const Uri &u, const std::string &content, const std::string & /*base*/) {
         return state_store(*root_ptr, u, content);
       });
 }
 
-void unregister_state_uri_handler() {
-  unregister_uri_handler("state");       // read
-  unregister_uri_store_handler("state"); // write
+void unregister_state_uri_handler(cvc::app &app) {
+  unregister_uri_handler(app, "state");       // read
+  unregister_uri_store_handler(app, "state"); // write
 }
 
-void sync_resolver_caps_from_state(cvc::state &root) {
+void sync_resolver_caps_from_state(cvc::app &app) {
+  cvc::state &root = cvc::state::instance(app);
   // Read one config node's decimal byte count and push it to `setter`; leave the cap unchanged on
   // a missing / empty / non-numeric node so partial config is fine and a typo cannot zero the cap.
-  const auto apply = [&root](const char *path, void (*setter)(std::size_t)) {
+  const auto apply = [&root, &app](const char *path, void (*setter)(cvc::app &, std::size_t)) {
     cvc::state *node = root.findDescendant(path);
     if (!node)
       return;
@@ -174,7 +178,7 @@ void sync_resolver_caps_from_state(cvc::state &root) {
       if (pos != v.size() || v.find('-') != std::string::npos ||
           n > std::numeric_limits<std::size_t>::max())
         return;
-      setter(static_cast<std::size_t>(n));
+      setter(app, static_cast<std::size_t>(n));
     } catch (const std::exception &) {
       // non-numeric / out-of-range -> leave the cap unchanged
     }

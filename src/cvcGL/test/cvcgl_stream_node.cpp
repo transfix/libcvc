@@ -79,8 +79,8 @@ static SceneNode stream_node(const std::string &id, const std::string &token) {
 int main() {
   cvc::app app;
 
-  cvc::gl::ariadne::register_stream_node_type();
-  assert(cvc::gl::ariadne::has_scene_node_type("stream") && "stream type not registered");
+  cvc::gl::ariadne::register_stream_node_type(app);
+  assert(cvc::gl::ariadne::has_scene_node_type(app, "stream") && "stream type not registered");
 
   // An open stream with one published frame, resolvable before the scene realizes.
   auto s = sx::stream::open(app, video_params("vid", 8, 8));

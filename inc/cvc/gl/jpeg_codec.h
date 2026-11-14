@@ -23,16 +23,42 @@
 namespace cvc {
 namespace gl {
 
-// Encode w*h packed rgba8 (top-left origin) into a JPEG written INTO `dst` (capacity `dst_cap`); on
-// success returns the JPEG byte count, else 0 (encode error, or the JPEG did not fit `dst_cap`).
-// `quality` is 1..100. Thread-safe (a thread-local compressor handle).
-std::size_t encode_rgba_to_jpeg(const std::uint8_t *rgba, int w, int h, int quality,
-                                std::uint8_t *dst, std::size_t dst_cap);
+// A TurboJPEG compressor, kept by whoever encodes (tj3Init is not free, so its handle is reused
+// from frame to frame): a producer's own. One thread at a time.
+class jpeg_encoder {
+public:
+  jpeg_encoder() = default;
+  ~jpeg_encoder();
+  jpeg_encoder(const jpeg_encoder &) = delete;
+  jpeg_encoder &operator=(const jpeg_encoder &) = delete;
 
-// Decode a JPEG (`data`[`size`]) to packed rgba8 into `out` (resized to w*h*4), filling `out_w` /
-// `out_h`. Returns true on success. Thread-safe (a thread-local decompressor handle).
-bool decode_jpeg_to_rgba(const std::uint8_t *data, std::size_t size, std::vector<std::uint8_t> &out,
-                         int &out_w, int &out_h);
+  // Encode w*h packed rgba8 (top-left origin) into a JPEG written INTO `dst` (capacity `dst_cap`);
+  // on success returns the JPEG byte count, else 0 (encode error, or the JPEG did not fit
+  // `dst_cap`). `quality` is 1..100.
+  std::size_t encode(const std::uint8_t *rgba, int w, int h, int quality, std::uint8_t *dst,
+                     std::size_t dst_cap);
+
+private:
+  void *handle_ = nullptr; // the tjhandle, made on the first encode
+};
+
+// A TurboJPEG decompressor, kept by whoever decodes (a stream view's decoder). One thread at a
+// time.
+class jpeg_decoder {
+public:
+  jpeg_decoder() = default;
+  ~jpeg_decoder();
+  jpeg_decoder(const jpeg_decoder &) = delete;
+  jpeg_decoder &operator=(const jpeg_decoder &) = delete;
+
+  // Decode a JPEG (`data`[`size`]) to packed rgba8 into `out` (resized to w*h*4), filling `out_w` /
+  // `out_h`. Returns true on success.
+  bool decode(const std::uint8_t *data, std::size_t size, std::vector<std::uint8_t> &out,
+              int &out_w, int &out_h);
+
+private:
+  void *handle_ = nullptr; // the tjhandle, made on the first decode
+};
 
 } // namespace gl
 } // namespace cvc
