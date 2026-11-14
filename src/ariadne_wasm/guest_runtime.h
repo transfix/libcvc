@@ -1,20 +1,19 @@
 // guest_runtime.h — the WebAssembly runtimes behind the wasm engine, behind one interface
 // (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §8.3): compile a module, instantiate it with the
-// host's imports, start a call of an export, and run it a slice of fuel at a time, pausing at an
+// host's imports, start a call of an export, and run it a slice of gas at a time, pausing at an
 // import that has to wait. wasmtime is the backend natively (wasmtime_runtime.cpp), and the page's
 // own WebAssembly in the browser (browser_runtime.cpp, G2); WAMR comes later (G3) under the same
 // calls.
 //
-// The browser runs guests transformed at install (cvc_ariadne_wasm_transform, ariadne_wasm.cmake:
-// binaryen's `wasm-opt --log-execution=ari --asyncify --pass-arg=asyncify-imports@ari.* -O1`):
-//   - a gas check, an import `ari.log_execution(i32)`, at every function's entry, every loop's
-//     header and every return. Each backend defines it: the browser counts kFuelPerCheck units of
-//     fuel a check, and pauses the guest there when the slice's fuel is spent; wasmtime, whose own
-//     fuel meters the guest, defines it as nothing;
-//   - Asyncify's exports (asyncify_start_unwind and the rest), with every `ari` import a point the
-//     guest may pause at: the browser unwinds the guest's stack into its own memory there, and
-//     rewinds it to the same point on the next poll.
-// wasmtime runs the same transformed guests as it runs the originals.
+// Gas is what the gas pass counts (meter.h), so a guest's work counts the same in every runtime:
+// each block's cost, charged against the guest's own ari_gas global, and a call of ari.gas when the
+// slice can't pay for a block. wasmtime meters a module when it compiles it. The browser runs
+// guests transformed at install (cvc_ariadne_wasm_transform, ariadne_wasm.cmake): metered, then
+// binaryen's `wasm-opt --asyncify --pass-arg=asyncify-imports@ari.* -O1`, so that every `ari`
+// import, ari.gas among them, is a point the guest may pause at. The browser unwinds the guest's
+// stack into its own memory there, and rewinds it to the same point on the next poll. wasmtime runs
+// the transformed guests as it runs the originals: they're metered already, and their Asyncify
+// exports go unused.
 //
 // Everything here runs on the thread that drains the runtime. One call runs on an instance at a
 // time (a store allows one future), and the engine enforces it.
@@ -31,10 +30,6 @@
 namespace cvc {
 namespace ariadne {
 namespace wasm {
-
-// The fuel a transformed guest's gas check costs where the checks meter it (the browser): a loop's
-// iteration, or a call, is about this many instructions.
-constexpr std::uint64_t kFuelPerCheck = 16;
 
 // A guest's linear memory, as the host reads and writes it. The host copies in and out: in the
 // browser the memory is another WebAssembly.Memory than the host's, so no host pointer reaches it.
@@ -104,11 +99,11 @@ public:
   // until the call is polled. Null with `error` set when there is no such export.
   virtual std::unique_ptr<Call> start(const std::string &name, std::vector<std::int64_t> args,
                                       std::string &error) = 0;
-  // Run export `name` to its end now, with at most `fuel`: for the guest's own setup
+  // Run export `name` to its end now, with at most `gas`: for the guest's own setup
   // (_initialize, ari_alloc), which waits on no import. True with its first result in `result`,
-  // or false with `error` set (a trap, out of fuel, an import that waited). Adds the fuel it used
+  // or false with `error` set (a trap, out of gas, an import that waited). Adds the gas it used
   // to `used`.
-  virtual bool run(const std::string &name, std::vector<std::int64_t> args, std::uint64_t fuel,
+  virtual bool run(const std::string &name, std::vector<std::int64_t> args, std::uint64_t gas,
                    std::int64_t &result, std::uint64_t &used, std::string &error) = 0;
 };
 
@@ -117,14 +112,14 @@ class Call {
 public:
   enum class State {
     done,    // it returned: result()
-    sliced,  // the slice's fuel ran out: poll again
+    sliced,  // the slice's gas ran out: poll again
     waiting, // in an async import whose PendingImport isn't done: poll once it is
     trapped  // trap()
   };
   virtual ~Call() = default;
-  // Run until the call returns, `fuel` more is used, or an async import waits.
-  virtual State poll(std::uint64_t fuel) = 0;
-  virtual std::uint64_t fuel_used() const = 0; // by the last poll
+  // Run until the call returns, `gas` more is used, or an async import waits.
+  virtual State poll(std::uint64_t gas) = 0;
+  virtual std::uint64_t gas_used() const = 0;  // by the last poll
   virtual std::int64_t result() const = 0;     // the first result (0 when it returns none)
   virtual const std::string &trap() const = 0;
 };
@@ -149,7 +144,8 @@ public:
   virtual ~Runtime() = default;
   virtual std::string name() const = 0; // "wasmtime 45.0.0"
   // Compile `bytes`: a binary module, or the WebAssembly text format when `text` (which the
-  // browser refuses: it compiles binaries only). Null with `error` set.
+  // browser refuses: it compiles binaries only). wasmtime meters it (meter.h) unless it was metered
+  // already; the browser takes only transformed modules, which are. Null with `error` set.
   virtual std::shared_ptr<Module> compile(std::string_view bytes, bool text,
                                           std::string &error) = 0;
   // Instantiate `module` with `imports` (each under its Import::module; an import the module needs

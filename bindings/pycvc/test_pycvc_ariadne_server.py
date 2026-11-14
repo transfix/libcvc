@@ -2,7 +2,8 @@
 §6.5.2). arisrvx runs the same module built in; here Host keeps a tree of its own, so a service's
 code runs and is tested without arisrvx:
   * pycvc imports it as pycvc.ariadne, and current_host() is None until a Host is made;
-  * set / set_tree / set_series / get_tree on Host's own tree, set_tree as (state-set-tree) writes;
+  * set / set_tree / set_series / set_plot / get_tree on Host's own tree, set_tree as
+    (state-set-tree) writes;
   * serve_asgi + run(): a FastAPI app served on host.loop, a request, and stop() from the loop,
     with the app's shutdown run; skipped where fastapi or uvicorn is not installed.
 """
@@ -97,6 +98,24 @@ check(host.get_tree("svc.jobs") == {"b": "done", "ring": ["5"]},
       f"set_tree removes what it does not name: {host.get_tree('svc.jobs')}")
 host.set_series("svc.s", [1.5, 2, 3], limit=2)
 check(host.get_series("svc.s") == [2.0, 3.0], f"set_series keeps the last: {host.get('svc.s')}")
+host.set_plot("svc.plot", {"train": ([0, 10, 20], [3, 2, 1]),
+                           "held-out": {"x": [0, 20], "y": [3.5, None], "lo": [3, 0],
+                                        "hi": [4, 0], "style": "c0"}},
+              markers=[(10, "best step", "best")])
+check(host.get_tree("svc.plot") == {
+    "s": [{"label": "train", "x": "0,10,20", "y": "3,2,1"},
+          {"label": "held-out", "x": "0,20", "y": "3.5,nan", "lo": "3,0", "hi": "4,0",
+           "style": "c0"}],
+    "m": [{"x": "10", "label": "best step", "kind": "best"}]},
+      f"set_plot: a chart's subtree ({host.get_tree('svc.plot')})")
+host.set_plot("svc.plot", [list(range(10000))], max_points=100)
+check(len(host.get_series("svc.plot.s.0.y")) <= 100 and host.get("svc.plot.m") == "0",
+      "set_plot decimates, and replaces the markers")
+try:
+    host.set_plot("svc.plot", [[1]], markers=[(1, "", "peak")])
+    check(False, "set_plot refuses an unknown marker kind")
+except ValueError:
+    check(True, "set_plot refuses an unknown marker kind")
 
 try:
     import fastapi
