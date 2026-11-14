@@ -3522,6 +3522,16 @@ and state all run, but nothing is drawn, so a computed `bind:` is never evaluate
 dropped with a warning, and a document that `requires: gl.scene` does not load. Tests and CI use
 it.
 
+**The loop.** `host.step(dt)` runs one frame. `host.run(fps=60, frames=None, until=None,
+realtime=None)` runs frames until the document quits or the window closes, `frames` have run, or
+`until()` is true. `realtime` paces them: it sleeps out the rest of each frame's `1/fps`. By
+default a window paces, and so does a headless Host given no `frames`, one that stays up (a
+service), which would otherwise spin a core. `run(frames=N)` headless, and an offscreen Host, run
+their frames back to back, as fast as they can, which a batch run and a capture want. Each frame's
+`dt` is `1/fps` either way, so an `on_frame` hook that advances by `dt` runs ahead of the clock
+when unpaced. Under a scripting host a bare `run()` is the host's own loop, paced by its `--fps`
+(§9.6).
+
 **Threads and the GIL.** Handlers, functions, `on_frame` hooks and `watch` callbacks run on the
 thread that calls `step()`/`run()`; an async function runs on a pool thread. An async function
 may compute and write state, but the scene and the pictures (`publish_image`, `host.lab`,
@@ -3773,7 +3783,7 @@ wasm:
 ```
 
 - **Exports.** Each is a function of the document: `(score_route r)` runs the guest's export as the
-  calling program's own work, a slice of fuel per step of its process, charged to it, as
+  calling program's own work, a slice of gas per step of its process, charged to it, as
   `collections.map` runs its function. `(score_route-async r)` returns a future, and the export
   runs as an activation of its own on the app's scheduler. `init:`, which can't wait, runs the call
   to its end there instead.
@@ -3831,7 +3841,9 @@ wasm:
   allocation limit, as a native's allocation does. `imports:` without `data.write` refuses
   both.
 - **Limits.** A guest's work is charged as DSL steps (`ariadne.limits.wasm_gas_per_step`, 1000
-  units of fuel a step) to the process it runs in, the calling program's or the activation's, so
+  units of gas a step; gas is about one unit an instruction, counted the same natively and in the
+  browser, ARIADNE_SCRIPTING_HOSTS.md §8.5) to the process it runs in, the calling program's or
+  the activation's, so
   that process's caps (the action caps, §2.2) bound it. The guests share `ariadne.limits.wasm_frame_budget` (0.008 s) of each frame, and its memory
   is at most `ariadne.limits.wasm_max_memory` (256 MiB), which `limits: {memory_mb}` may lower.
 - **One call at a time.** An instance runs one call at a time. The call holds the instance's

@@ -1,0 +1,14 @@
+<!DOCTYPE pointclassdoc>
+<pointclassdoc>
+ <pointclass timestep="0" variable="0" color="#ff0000" name="Class 0">
+  <point>10 20 5</point>
+  <point>11 20 5</point>
+  <point>10 20 5</point>
+ </pointclass>
+ <pointclass color="#00aaff" name="membrane &amp; lumen" timestep="0" variable="0">
+  <point>0 0 0</point>
+ </pointclass>
+ <pointclass variable="0" name="Class 0" timestep="1" color="#00ff00">
+  <point>3 3 3</point>
+ </pointclass>
+</pointclassdoc>

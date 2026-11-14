@@ -738,15 +738,18 @@ class Host:
     def run(self, fps: float = 60.0, *, frames: int | None = None,
             until: Callable[[], bool] | None = None, realtime: bool | None = None) -> int:
         """Run frames until the window closes or the document quits (or ``frames`` ran, or
-        ``until()`` is true). ``realtime`` paces them at ``fps`` (default: in a window). Ctrl-C goes
-        to the document's ``on_signal:`` as SIGINT, and closes it when it has none. Returns the
-        document's exit code."""
+        ``until()`` is true). ``realtime`` paces them at ``fps``: it sleeps out the rest of each
+        frame's ``1/fps``. By default a window paces, and so does a headless Host given no
+        ``frames``, which stays up (a service); ``frames=N`` headless, and offscreen, run them back
+        to back, as a batch run or a capture wants. Each frame's ``dt`` is ``1/fps`` either way.
+        Ctrl-C goes to the document's ``on_signal:`` as SIGINT, and closes it when it has none.
+        Returns the document's exit code."""
         if self.embedded and frames is None and until is None and realtime is None:
             self._check_open()
             return int(self._host.run())  # the scripting host's own loop
         dt = 1.0 / fps if fps > 0 else 1.0 / 60.0
-        if realtime is None:
-            realtime = self.mode == "window"
+        if realtime is None:  # unpaced, an open-ended headless loop would spin a core
+            realtime = self.mode == "window" or (self.mode == "headless" and frames is None)
         n = 0
         while not self.should_close():
             if frames is not None and n >= frames:
