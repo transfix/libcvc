@@ -83,7 +83,8 @@ def test_file_read_plane_by_plane():
         disk = pycvc.slice_source(app, path, 0, 0, 3)
         assert mem.in_memory() and not disk.in_memory()
         assert disk.min() == 0.0 and disk.max() == 5 + 400 + 30000
-        assert disk.count(pycvc.slice_axis_y) == 5 and disk.plane(pycvc.slice_axis_z, 2) == 8.0 / 3.0 * 2
+        assert disk.count(pycvc.slice_axis_y) == 5
+        assert abs(disk.plane(pycvc.slice_axis_z, 2) - 8.0 / 3.0) < 1e-12  # 4 units over 3 gaps
         for axis in (pycvc.slice_axis_x, pycvc.slice_axis_y, pycvc.slice_axis_z):
             for s in range(mem.count(axis)):
                 assert np.array_equal(disk.slice(axis, s).values(), mem.slice(axis, s).values())

@@ -45,8 +45,9 @@
 %include "cvc/volume/volume_slice.h"
 
 %extend cvc::volume_slice_data {
-  // The values as a fresh (height, width) float64 numpy array: [row, column], row 0 the bottom.
-  PyObject *values() const {
+  // The values as a fresh (height, width) float64 numpy array: [row, column], row 0 the bottom
+  // (values(), below: the member's own name is ignored, and with it a method of that name here).
+  PyObject *values_array() const {
     npy_intp dims[2] = {static_cast<npy_intp>($self->height), static_cast<npy_intp>($self->width)};
     PyObject *arr = PyArray_SimpleNew(2, dims, NPY_FLOAT64);
     if (!arr)
@@ -56,6 +57,10 @@
     return arr;
   }
   %pythoncode %{
+    def values(self):
+        """The values as a fresh (height, width) float64 numpy array; row 0 the bottom."""
+        return self.values_array()
+
     def __repr__(self):
         return "<volume_slice_data %s %d: %d x %d>" % (
             slice_axis_name(self.axis), self.index, self.width, self.height)
