@@ -2516,8 +2516,14 @@ void add_bench_natives(const se::environment_ptr &env) {
 // the compute fan-outs' timings, and the latch the blocking kernel waits on. Shared with the
 // kernels by shared_ptr, so a kernel still running when a failed rep unwinds (~world waits for
 // it) never writes into freed memory.
+int current_cpu_efficiency(); // below: the efficiency class of the CPU the caller runs on, or -1
+int fastest_cpu_efficiency(); // below: the highest class the process may use, or -1
+
 struct kernel_log {
   std::unique_ptr<std::atomic<int64_t>[]> end_ns;
+  // The efficiency class of the CPU each call's kernel marked its end on (-1: unknown or not yet),
+  // so a scenario can tell a slow stretch of calls from kernels the OS moved to slower cores.
+  std::unique_ptr<std::atomic<int>[]> end_eff;
   std::size_t n = 0;
   std::atomic<int> started{0};
   std::mutex mu;
@@ -2528,17 +2534,39 @@ struct kernel_log {
   bool released = false;               // guarded by mu
   void reset(std::size_t count) {
     end_ns.reset(new std::atomic<int64_t>[count ? count : 1]);
+    end_eff.reset(new std::atomic<int>[count ? count : 1]);
     n = count;
-    for (std::size_t i = 0; i < n; ++i)
+    for (std::size_t i = 0; i < n; ++i) {
       end_ns[i].store(0);
+      end_eff[i].store(-1);
+    }
   }
   void mark(int64_t i) {
-    if (i >= 0 && static_cast<std::size_t>(i) < n)
+    if (i >= 0 && static_cast<std::size_t>(i) < n) {
+      end_eff[static_cast<std::size_t>(i)].store(current_cpu_efficiency(),
+                                                 std::memory_order_relaxed);
       end_ns[static_cast<std::size_t>(i)].store(now_ns(), std::memory_order_release);
+    }
     std::lock_guard<std::mutex> lk(mu);
     threads.insert(std::this_thread::get_id());
   }
   int64_t at(std::size_t i) const { return i < n ? end_ns[i].load(std::memory_order_acquire) : 0; }
+  // The share of calls [from, to) whose kernel ended on a CPU of the fastest class, or -1 where
+  // the classes are unknown (not Windows, or a uniform part reporting one class).
+  double fast_share(std::size_t from, std::size_t to) const {
+    const int fast = fastest_cpu_efficiency();
+    if (fast <= 0 || from >= to || to > n)
+      return -1;
+    std::size_t on = 0, known = 0;
+    for (std::size_t i = from; i < to; ++i) {
+      const int e = end_eff[i].load(std::memory_order_relaxed);
+      if (e < 0)
+        continue;
+      ++known;
+      on += e == fast;
+    }
+    return known ? double(on) / double(known) : -1;
+  }
   void release() {
     {
       std::lock_guard<std::mutex> lk(mu);
@@ -3590,6 +3618,21 @@ int current_cpu_efficiency() {
   PROCESSOR_NUMBER pn{};
   GetCurrentProcessorNumberEx(&pn);
   return pn.Group == 0 ? lp_efficiency(pn.Number) : -1;
+#else
+  return -1;
+#endif
+}
+
+// The highest efficiency class among the CPUs the process may use (Windows), or -1.
+int fastest_cpu_efficiency() {
+#if defined(_WIN32)
+  static const int fast = [] {
+    int f = -1;
+    for (const cvc::logical_cpu &c : cvc::logical_cpus())
+      f = std::max(f, int(c.efficiency));
+    return f;
+  }();
+  return fast;
 #else
   return -1;
 #endif
@@ -5145,8 +5188,9 @@ std::vector<scenario> make_scenarios() {
     sc.name = "async.pool_aging";
     sc.what = "ONE program making k sequential async calls (noop kernel) on one app, at most one "
               "in flight: ns per call over the first and the last 10 % of calls (from the "
-              "kernels' end times), the OS threads the kernels ran on, and the app's thread "
-              "map before and after (entries it never erases)";
+              "kernels' end times), the OS threads the kernels ran on, the share of kernels that "
+              "ended on the fastest CPU class (P-cores), and the app's thread map before and "
+              "after (entries it never erases)";
     sc.executors = {"async"};
     sc.sizes = {{"k", {"100", "1000", "3000"}}, {"where", {"background", "lane"}}};
     sc.smoke = {{"k", {"20"}}, {"where", {"background", "lane"}}};
@@ -5176,6 +5220,11 @@ std::vector<scenario> make_scenarios() {
           o.extra.d("first_ns_per_call", first)
               .d("last_ns_per_call", last)
               .d("last_over_first", first > 0 ? last / first : 0.0);
+          // Where the kernels ran: the share of calls whose kernel ended on the fastest CPU class
+          // (P-cores on a hybrid part), over the same first and last 10 % (-1: unknown).
+          o.extra.d("first_fast_cpu_share", log->fast_share(0, d + 1))
+              .d("last_fast_cpu_share", log->fast_share(ends.size() - 1 - d, ends.size()))
+              .d("fast_cpu_share", log->fast_share(0, ends.size()));
         }
         o.extra.i("kernel_threads", int64_t(log->thread_count()));
       });

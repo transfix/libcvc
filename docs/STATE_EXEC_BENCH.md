@@ -690,6 +690,14 @@ What the background executor accumulates in one app, against a lane:
   flight, so the pool never oversubscribes. `extra.first_ns_per_call` and `last_ns_per_call` are
   the mean time per call over the first and the last 10 % (from the kernels' end times), and
   `last_over_first` their ratio; `app_threads_after` is the app's thread-map entries.
+  `extra.first_fast_cpu_share`, `last_fast_cpu_share` and `fast_cpu_share` are the share of those
+  calls (and of all of them) whose kernel ended on a CPU of the fastest efficiency class: P-cores
+  on a hybrid part (Windows; -1 elsewhere or on a uniform part). The kernels' threads float, and a
+  call is mostly the OS waking one, so where they land sets the time per call more than either
+  executor does: on a Core Ultra 9 185H, stretches of calls with at least 99 % of kernels on
+  P-cores took a median 9.1 us a call, and stretches with under half on them 22.5 us. Read a
+  change in `first_ns_per_call` or `last_ns_per_call` against these shares before reading it as
+  the executor's.
 - `pool_batches`: `r` batches (20) of `b` (16) concurrent calls into one app: `extra.batch_ns`
   against the batch index.
 - `pool_retention`: `k` (100) sequential calls whose kernel returns a 1 MiB string that the program
