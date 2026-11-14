@@ -6,6 +6,8 @@
 //   (http-get URL [OPTS])            a GET
 //   (http-request METHOD URL [OPTS]) any method
 //   (fetch URI [BASE])               any registered scheme (file/state/cvc/http)
+//   (http-upload URL FILE [OPTS])    a file the user picked (files.h), as multipart, a body
+//                                    or chunks that resume (docs/ARIADNE.md §10.8)
 //
 // Each is an async function: the call parks the program while the request runs on the app's
 // background task pool and resumes it with the reply; its "-async" form returns a future for

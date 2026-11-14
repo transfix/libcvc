@@ -9,6 +9,7 @@
 */
 
 #include "backend_impl.h"
+#include "boat_step.h"
 #include "field_step.h"
 #include "vehicle_step.h"
 
@@ -153,6 +154,7 @@ constexpr char kVehicleMagic[8] = {'C', 'V', 'C', 'V', 'E', 'H', 'S', '1'};
 constexpr char kRutMagic[8] = {'C', 'V', 'C', 'R', 'U', 'T', 'S', '1'};
 constexpr char kSurfaceMagic[8] = {'C', 'V', 'C', 'S', 'U', 'R', 'F', '1'};
 constexpr char kHullMagic[8] = {'C', 'V', 'C', 'H', 'U', 'L', 'L', '1'};
+constexpr char kBoatMagic[8] = {'C', 'V', 'C', 'B', 'O', 'A', 'T', '1'};
 
 struct state_header {
   char magic[8];
@@ -189,6 +191,7 @@ struct world::impl {
   std::uint64_t field_tick0 = 0;
   detail::field_set fields;
   detail::vehicle_set vehicles;
+  detail::boat_set boats;
 
   double field_time() const {
     const double steps = tick >= field_tick0 ? static_cast<double>(tick - field_tick0)
@@ -272,6 +275,9 @@ struct world::impl {
     return id;
   }
 
+  // world::add_body under the lock (defined below, after the shape checks).
+  body_id add_body(const body_desc &d);
+
   step_report step() {
     step_report r;
     contacts.clear();
@@ -279,6 +285,7 @@ struct world::impl {
     guarded([&] {
       fields.apply(*be, cfg, field_time());
       vehicles.pre_step(*be, fields, cfg, materials);
+      boats.pre_step(*be, fields, cfg, field_time());
       be->step(contacts, r);
       vehicles.post_step(*be, fields, cfg);
     });
@@ -342,6 +349,12 @@ struct world::impl {
     if (fields.has_hulls()) {
       trailer.append(kHullMagic, sizeof(kHullMagic));
       fields.save_hulls(trailer);
+    }
+    // Then, when there are boats, each boat's description digest, controls, actuators and last
+    // forces.
+    if (boats.size() > 0) {
+      trailer.append(kBoatMagic, sizeof(kBoatMagic));
+      boats.save(trailer);
     }
     std::vector<std::uint8_t> out(sizeof(h) + engine.size() + trailer.size());
     std::memcpy(out.data(), &h, sizeof(h));
@@ -589,6 +602,11 @@ struct shape_prep {
 } // namespace
 
 body_id world::add_body(const body_desc &d) {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return _impl->add_body(d);
+}
+
+body_id world::impl::add_body(const body_desc &d) {
   if (d.motion > motion_type::dynamic)
     throw cvc::physics_error("add_body: bad motion type");
   if (!finite(d.position) || !finite(d.rotation) || !finite(d.linear_velocity) ||
@@ -602,18 +620,17 @@ body_id world::add_body(const body_desc &d) {
     throw cvc::physics_error("add_body: damping must be >= 0");
   if (d.hull && d.motion != motion_type::dynamic)
     throw cvc::physics_error("add_body: only a dynamic body has a hull");
-  std::lock_guard<std::mutex> lock(_impl->mutex);
-  if (d.material >= _impl->materials.size())
+  if (d.material >= materials.size())
     throw cvc::physics_error("add_body: unknown material id " + std::to_string(d.material));
-  const detail::engine_shape shape = std::visit(shape_prep{_impl->materials, d}, d.shape);
+  const detail::engine_shape shape = std::visit(shape_prep{materials, d}, d.shape);
   return guarded([&] {
-    const body_id id = _impl->be->add_body(d, shape);
+    const body_id id = be->add_body(d, shape);
     try {
-      _impl->fields.body_added(*_impl->be, id, d);
-      _impl->note_body(id, d);
+      fields.body_added(*be, id, d);
+      note_body(id, d);
     } catch (...) {
-      _impl->fields.body_removed(id);
-      _impl->be->remove_body(id);
+      fields.body_removed(id);
+      be->remove_body(id);
       throw;
     }
     return id;
@@ -625,6 +642,9 @@ void world::remove_body(body_id id) {
   if (_impl->vehicles.is_chassis(id))
     throw cvc::physics_error("remove_body: body " + std::to_string(id.value) +
                              " is a vehicle's chassis; remove the vehicle");
+  if (_impl->boats.is_hull(id))
+    throw cvc::physics_error("remove_body: body " + std::to_string(id.value) +
+                             " is a boat's hull; remove the boat");
   guarded([&] { _impl->be->remove_body(id); });
   _impl->fields.body_removed(id);
   _impl->forget_body(id);
@@ -843,6 +863,54 @@ void world::set_vehicle(vehicle_id id, const vehicle_desc &d) {
   guarded([&] { _impl->vehicles.tune(*_impl->be, id, d); });
 }
 
+boat_id world::add_boat(const boat_desc &d, const vec3 &position, const quat &rotation) {
+  if (!finite(position) || !finite(rotation) || !unit_length(rotation))
+    throw cvc::physics_error("add_boat: a finite position and a unit rotation are required");
+  detail::boat_set::validate(d);
+  body_desc hull = d.hull;
+  hull.position = position;
+  hull.rotation = rotation;
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  const body_id body = _impl->add_body(hull);
+  try {
+    return _impl->boats.add(d, body);
+  } catch (...) {
+    _impl->be->remove_body(body);
+    _impl->fields.body_removed(body);
+    _impl->forget_body(body);
+    throw;
+  }
+}
+
+void world::remove_boat(boat_id id) {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  const body_id hull = _impl->boats.remove(id);
+  guarded([&] { _impl->be->remove_body(hull); });
+  _impl->fields.body_removed(hull);
+  _impl->forget_body(hull);
+}
+
+std::size_t world::boat_count() const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return _impl->boats.size();
+}
+
+void world::set_boat_controls(boat_id id, const boat_controls &c) {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  _impl->boats.set_controls(id, c);
+}
+
+physics::boat_state world::boat_state(boat_id id) const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return guarded(
+      [&] { return _impl->boats.state(*_impl->be, _impl->fields, id, _impl->field_time()); });
+}
+
+boat_desc world::get_boat(boat_id id) const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return _impl->boats.desc(id);
+}
+
 field_load world::field_load_on(body_id id) const {
   std::lock_guard<std::mutex> lock(_impl->mutex);
   return _impl->fields.load(id);
@@ -949,8 +1017,10 @@ void world::restore(const std::vector<std::uint8_t> &state) {
   const bool want_ruts = _impl->fields.has_ruts();
   const bool want_surfaces = _impl->fields.has_surfaces();
   const bool want_hulls = _impl->fields.has_hulls();
+  const bool want_boats = _impl->boats.size() > 0;
   if (want_vehicles != section(0, kVehicleMagic) ||
-      (!want_vehicles && !want_ruts && !want_surfaces && !want_hulls && !rest.empty()))
+      (!want_vehicles && !want_ruts && !want_surfaces && !want_hulls && !want_boats &&
+       !rest.empty()))
     throw cvc::physics_error("restore: this world does not hold the vehicles the state was "
                              "saved with");
   guarded([&] { _impl->be->restore_engine(engine, origin); });
@@ -983,6 +1053,12 @@ void world::restore(const std::vector<std::uint8_t> &state) {
       throw cvc::physics_error("restore: this world's hulls differ from the state's");
     pos += sizeof(kHullMagic);
     _impl->fields.restore_hulls(rest, pos);
+  }
+  if (want_boats) {
+    if (!section(pos, kBoatMagic))
+      throw cvc::physics_error("restore: this world's boats differ from the state's");
+    pos += sizeof(kBoatMagic);
+    _impl->boats.restore(rest, pos);
   }
   if (pos != rest.size())
     throw cvc::physics_error("restore: the state's length does not match its sections");

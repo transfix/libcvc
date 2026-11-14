@@ -360,13 +360,13 @@ namespace {
 // else is a custom type, drawn by register_widget_type / a backend-native widget.
 // ORDER MATTERS: the short-form dispatch (widget_type) takes the FIRST of these present as a key,
 // so tf_editor precedes color — a tf_editor's own config may carry a `color:` node list — and
-// progress and plot precede overlay, their caption.
+// progress and plot precede overlay, their caption. A chart's keys name no widget type.
 constexpr const char *kBuiltinWidgetTypes[] = {
-    "group",        "menubar", "menu",  "menu_item", "window",       "progress",
-    "plot",         "overlay", "panel", "text",      "checkbox",     "slider_int",
-    "slider_float", "combo",   "radio", "radio_row", "input_text",   "input_int",
-    "tf_editor",    "color",   "image", "button",    "separator",    "windows_menu",
-    "spinner",      "video",   "audio", "text_view", "message_input"};
+    "group",        "menubar",      "menu",    "menu_item", "window",    "progress",
+    "plot",         "chart",        "overlay", "panel",     "text",      "checkbox",
+    "slider_int",   "slider_float", "combo",   "radio",     "radio_row", "input_text",
+    "input_int",    "tf_editor",    "color",   "image",     "button",    "separator",
+    "windows_menu", "spinner",      "video",   "audio",     "text_view", "message_input"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {
@@ -888,6 +888,50 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     if (!(height > 0.0))
       ctx.warn("ari: plot '" + label + "' height must be > 0 — 60");
     return plot(label, bind, lo, hi, str(n, "overlay"), height > 0.0 ? height : 60.0);
+  }
+  if (type == "chart") { // read-only curves: a plot subtree (host.set_plot's) and/or series:
+    Widget w = chart(label, str(n, "bind"));
+    if (const YAML::Node ser = n["series"]; ser && !ser.IsSequence()) {
+      ctx.warn("ari: chart '" + label + "' series: must be a list — ignored");
+    } else if (ser) {
+      for (const YAML::Node &e : ser) {
+        ChartSeriesBind sb;
+        if (e.IsScalar())
+          sb.bind = e.Scalar();
+        else if (e.IsMap())
+          sb = {str(e, "bind"), str(e, "label"), str(e, "style")};
+        if (sb.bind.empty()) {
+          ctx.warn("ari: chart '" + label + "' has a series with no bind: — skipped");
+          continue;
+        }
+        w.chart_series.push_back(std::move(sb));
+      }
+    }
+    if (w.bind.empty() && w.chart_series.empty())
+      ctx.warn("ari: chart '" + label + "' has neither bind: nor series: — it draws nothing");
+    // log_y: a boolean, or a state path / computed expression read each frame (a boolean spelling
+    // reads the same whatever flag()'s default).
+    if (const YAML::Node v = n["log_y"]; v && v.IsScalar()) {
+      const bool t = flag(n, "log_y", true), f = flag(n, "log_y", false);
+      w.log_y = t == f ? (t ? "1" : "0") : v.Scalar();
+    }
+    const std::string legend = str(n, "legend", "top");
+    if (legend == "right")
+      w.legend = ChartLegend::Right;
+    else if (legend == "none")
+      w.legend = ChartLegend::Off;
+    else if (legend != "top")
+      ctx.warn("ari: chart '" + label + "' legend: '" + legend +
+               "' is not top, right or none — top");
+    w.x_label = str(n, "x_label");
+    w.cursor = str(n, "cursor");
+    w.pick = str(n, "pick");
+    const double height = num(n, "height", 160.0);
+    if (!(height > 0.0))
+      ctx.warn("ari: chart '" + label + "' height must be > 0 — 160");
+    w.plot_height = height > 0.0 ? height : 160.0;
+    w.on = action(n); // optional: fired after a pick's write
+    return w;
   }
   if (type == "checkbox") {
     const std::string bind = str(n, "bind");

@@ -46,7 +46,7 @@ namespace fs = std::filesystem;
 
 constexpr std::uint64_t kGasPerStep = 1000;                    // ariadne.limits.wasm_gas_per_step
 constexpr std::uint64_t kMaxMemory = std::uint64_t(256) << 20; // ariadne.limits.wasm_max_memory
-constexpr std::uint64_t kSetupFuel = 100'000'000; // _initialize, ari_alloc: the guest's own setup
+constexpr std::uint64_t kSetupGas = 100'000'000;  // _initialize, ari_alloc: the guest's own setup
 constexpr std::size_t kMaxHandles = 65536;        // live handles per instance
 
 const char *const kKeys[] = {"module", "export", "hooks", "imports", "limits", "priority", "wasi"};
@@ -316,18 +316,32 @@ struct Guest {
   std::optional<int> exited;
 };
 
+std::span<std::uint8_t> bytes_of(std::string &s) {
+  return {reinterpret_cast<std::uint8_t *>(s.data()), s.size()};
+}
+std::span<const std::uint8_t> bytes_of(std::string_view s) {
+  return {reinterpret_cast<const std::uint8_t *>(s.data()), s.size()};
+}
+
+// Whether [at, at + n) lies inside the guest's memory; when not, a trap's message.
+bool inside(GuestMemory &mem, std::int64_t at, std::uint64_t n, std::string &trap) {
+  if (at >= 0 && mem.span_ok(static_cast<std::uint64_t>(at), n, trap))
+    return true;
+  if (trap.empty())
+    trap = "an out-of-bounds pointer into the guest's memory";
+  return false;
+}
+
 // The text of guest memory [ptr, ptr + len), or a trap's message.
 bool read_guest(GuestMemory &mem, std::int64_t ptr, std::int64_t len, std::string &out,
                 std::string &trap) {
-  if (ptr < 0 || len < 0 ||
-      !mem.span_ok(static_cast<std::uint64_t>(ptr), static_cast<std::uint64_t>(len), trap)) {
+  if (len < 0 || !inside(mem, ptr, static_cast<std::uint64_t>(len), trap)) {
     if (trap.empty())
       trap = "an out-of-bounds pointer into the guest's memory";
     return false;
   }
-  const std::span<std::uint8_t> b = mem.bytes();
-  out.assign(reinterpret_cast<const char *>(b.data()) + ptr, static_cast<std::size_t>(len));
-  return true;
+  out.resize(static_cast<std::size_t>(len));
+  return mem.read(static_cast<std::uint64_t>(ptr), bytes_of(out));
 }
 
 // A data call's refusal: its text, "Class: message", waits for reply(), and the call returns minus
@@ -367,15 +381,59 @@ std::shared_ptr<const cvc::geometry> mesh_of(const se::data_object_ptr &o) {
   return held<cvc::height_field>(o); // a height field is a mesh too
 }
 
-// [dst, dst + n) in the guest's memory, for a data call's copy; false, with a trap, when it isn't.
-std::uint8_t *room(GuestMemory &mem, std::int64_t dst, std::uint64_t n, std::string &trap) {
-  if (dst < 0 || !mem.span_ok(static_cast<std::uint64_t>(dst), n, trap)) {
-    if (trap.empty())
-      trap = "an out-of-bounds pointer into the guest's memory";
-    return nullptr;
+// [dst, dst + n) of the guest's memory, for a data call to fill: the memory itself where the
+// runtime maps it, else a buffer of the host's that commit() copies in.
+class GuestOut {
+public:
+  // False, with a trap, when [dst, dst + n) isn't inside the memory.
+  bool open(GuestMemory &mem, std::int64_t dst, std::uint64_t n, std::string &trap) {
+    if (!inside(mem, dst, n, trap))
+      return false;
+    mem_ = &mem;
+    at_ = static_cast<std::uint64_t>(dst);
+    data_ = mem.map(at_, n);
+    if (!data_) {
+      staged_.resize(static_cast<std::size_t>(n));
+      data_ = staged_.data();
+    }
+    return true;
   }
-  return mem.bytes().data() + dst;
-}
+  std::uint8_t *data() const { return data_; }
+  // What was written, into the guest's memory (where it was staged).
+  void commit() {
+    if (mem_ && !staged_.empty())
+      mem_->write(at_, staged_);
+  }
+
+private:
+  GuestMemory *mem_ = nullptr;
+  std::uint64_t at_ = 0;
+  std::uint8_t *data_ = nullptr;
+  std::vector<std::uint8_t> staged_;
+};
+
+// [src, src + n) of the guest's memory, for a data call to read: the memory itself where the
+// runtime maps it, else a copy.
+class GuestIn {
+public:
+  // False, with a trap, when [src, src + n) isn't inside the memory.
+  bool open(GuestMemory &mem, std::int64_t src, std::uint64_t n, std::string &trap) {
+    if (!inside(mem, src, n, trap))
+      return false;
+    data_ = mem.map(static_cast<std::uint64_t>(src), n);
+    if (!data_) {
+      copy_.resize(static_cast<std::size_t>(n));
+      mem.read(static_cast<std::uint64_t>(src), copy_);
+      data_ = copy_.data();
+    }
+    return true;
+  }
+  const std::uint8_t *data() const { return data_; }
+
+private:
+  const std::uint8_t *data_ = nullptr;
+  std::vector<std::uint8_t> copy_;
+};
 
 se::value_t bounds_list(const cvc::bounding_box &b) {
   return se::make_list({se::value_t(b.minx), se::value_t(b.miny), se::value_t(b.minz),
@@ -521,9 +579,10 @@ std::vector<Import> data_imports(Guest *g) {
     if (!natural(a[9]) || bytes > static_cast<std::uint64_t>(a[9]))
       return refuse(g, "ValueError: ari.volume_read: the region is " + std::to_string(bytes) +
                            " bytes, and dst holds " + std::to_string(a[9]));
-    std::uint8_t *dst = room(mem, a[8], bytes, trap);
-    if (!dst)
+    GuestOut out;
+    if (!out.open(mem, a[8], bytes, trap))
       return 0;
+    std::uint8_t *dst = out.data();
     const unsigned char *src = vol->data_ptr();
     for (std::uint64_t k = 0; k < out_n[2]; ++k)
       for (std::uint64_t j = 0; j < out_n[1]; ++j) {
@@ -537,6 +596,7 @@ std::vector<Import> data_imports(Guest *g) {
             std::memcpy(dst, row + i * step * vs, vs);
         }
       }
+    out.commit();
     g->moved += bytes;
     return static_cast<std::int64_t>(bytes);
   };
@@ -564,11 +624,11 @@ std::vector<Import> data_imports(Guest *g) {
     if (!natural(a[4]) || n * 8 > static_cast<std::uint64_t>(a[4]))
       return refuse(g, "ValueError: ari.volume_sample: " + std::to_string(n) + " values are " +
                            std::to_string(n * 8) + " bytes, and dst holds " + std::to_string(a[4]));
-    const std::uint8_t *in = room(mem, a[1], n * 24, trap);
-    if (!in)
+    GuestIn in;
+    if (!in.open(mem, a[1], n * 24, trap))
       return 0;
     std::vector<double> xyz(n * 3);
-    std::memcpy(xyz.data(), in, n * 24); // before any write: the two may overlap
+    std::memcpy(xyz.data(), in.data(), n * 24); // before any write: the two may overlap
     std::vector<double> v(n);
     try {
       for (std::uint64_t i = 0; i < n; ++i)
@@ -576,10 +636,11 @@ std::vector<Import> data_imports(Guest *g) {
     } catch (const std::exception &e) {
       return refuse(g, std::string("ValueError: ari.volume_sample: ") + e.what());
     }
-    std::uint8_t *dst = room(mem, a[3], n * 8, trap);
-    if (!dst)
+    GuestOut out;
+    if (!out.open(mem, a[3], n * 8, trap))
       return 0;
-    std::memcpy(dst, v.data(), n * 8);
+    std::memcpy(out.data(), v.data(), n * 8);
+    out.commit();
     g->moved += n * 32;
     return static_cast<std::int64_t>(n * 8);
   };
@@ -630,9 +691,10 @@ std::vector<Import> data_imports(Guest *g) {
     if (!natural(a[6]) || bytes > static_cast<std::uint64_t>(a[6]))
       return refuse(g, "ValueError: ari.mesh_read: the range is " + std::to_string(bytes) +
                            " bytes, and dst holds " + std::to_string(a[6]));
-    std::uint8_t *dst = room(mem, a[5], bytes, trap);
-    if (!dst)
+    GuestOut out;
+    if (!out.open(mem, a[5], bytes, trap))
       return 0;
+    std::uint8_t *dst = out.data();
     if (real) {
       const auto &v = attr == "positions" ? m->points() : m->normals();
       for (std::uint64_t i = 0; i < n; ++i, dst += 24)
@@ -655,6 +717,7 @@ std::vector<Import> data_imports(Guest *g) {
       if (!fits)
         return refuse(g, "ValueError: ari.mesh_read: an index is past u32");
     }
+    out.commit();
     g->moved += bytes;
     return static_cast<std::int64_t>(bytes);
   };
@@ -689,12 +752,14 @@ std::vector<Import> data_imports(Guest *g) {
     if (!natural(a[6]) || bytes > static_cast<std::uint64_t>(a[6]))
       return refuse(g, "ValueError: ari.heightfield_read: the rectangle is " +
                            std::to_string(bytes) + " bytes, and dst holds " + std::to_string(a[6]));
-    std::uint8_t *dst = room(mem, a[5], bytes, trap);
-    if (!dst)
+    GuestOut out;
+    if (!out.open(mem, a[5], bytes, trap))
       return 0;
+    std::uint8_t *dst = out.data();
     const std::vector<float> &h = hf->heights();
     for (std::uint64_t i = 0; i < nr; ++i, dst += nc * 4)
       std::memcpy(dst, h.data() + (r0 + i) * cols + c0, nc * 4);
+    out.commit();
     g->moved += bytes;
     return static_cast<std::int64_t>(bytes);
   };
@@ -730,9 +795,10 @@ std::vector<Import> data_imports(Guest *g) {
     if (!natural(a[8]) || bytes > static_cast<std::uint64_t>(a[8]))
       return refuse(g, "ValueError: ari.volume_write: the box is " + std::to_string(bytes) +
                            " bytes, and src holds " + std::to_string(a[8]));
-    const std::uint8_t *src = room(mem, a[7], bytes, trap);
-    if (!src)
+    GuestIn in;
+    if (!in.open(mem, a[7], bytes, trap))
       return 0;
+    const std::uint8_t *src = in.data();
     bool fresh = false;
     cvc::volume *own = g->handles.own_volume(static_cast<std::uint64_t>(a[0]), fresh);
     if (!own)
@@ -940,12 +1006,8 @@ std::vector<Import> imports_of(Guest *g) {
   reply.params = 1;
   reply.sync = [g](GuestMemory &mem, std::span<const std::int64_t> a,
                    std::string &trap) -> std::int64_t {
-    if (a[0] < 0 || !mem.span_ok(static_cast<std::uint64_t>(a[0]), g->reply.size(), trap)) {
-      if (trap.empty())
-        trap = "an out-of-bounds pointer into the guest's memory";
-      return 0;
-    }
-    std::memcpy(mem.bytes().data() + a[0], g->reply.data(), g->reply.size());
+    if (inside(mem, a[0], g->reply.size(), trap))
+      mem.write(static_cast<std::uint64_t>(a[0]), bytes_of(g->reply));
     return 0;
   };
   out.push_back(std::move(reply));
@@ -983,7 +1045,7 @@ std::vector<Import> imports_of(Guest *g) {
 }
 
 // One call of an export on a guest, as an activation (script_engine.h): its arguments go in
-// through ari_alloc, and each step polls the call for one slice's fuel.
+// through ari_alloc, and each step polls the call for one slice's gas.
 class GuestCall : public ScriptActivation {
 public:
   GuestCall(std::shared_ptr<Guest> g, std::string name, se::value_t args)
@@ -1032,7 +1094,7 @@ public:
     // here, a step each, and the guest goes on in the same slice.
     for (std::uint64_t left = std::max<std::uint64_t>(s.budget(), 1);;) {
       const Call::State state = call_->poll(left * gas);
-      const std::uint64_t spent = (call_->fuel_used() + gas - 1) / gas + moved_steps();
+      const std::uint64_t spent = (call_->gas_used() + gas - 1) / gas + moved_steps();
       s.charge(spent);
       switch (state) {
       case Call::State::done:
@@ -1093,14 +1155,13 @@ private:
     std::int64_t ptr = 0;
     std::uint64_t used = 0;
     std::string error;
-    if (!g_->instance->run("ari_alloc", {static_cast<std::int64_t>(cbor.size())}, kSetupFuel, ptr,
+    if (!g_->instance->run("ari_alloc", {static_cast<std::int64_t>(cbor.size())}, kSetupGas, ptr,
                            used, error))
       raise("ari_alloc: " + error);
-    const std::span<std::uint8_t> mem = g_->instance->memory();
-    if (ptr < 0 || static_cast<std::uint64_t>(ptr) > mem.size() ||
-        cbor.size() > mem.size() - static_cast<std::uint64_t>(ptr))
+    GuestMemory &mem = g_->instance->memory();
+    if (std::string why; !inside(mem, ptr, cbor.size(), why))
       raise("ari_alloc gave room outside the guest's memory");
-    std::memcpy(mem.data() + ptr, cbor.data(), cbor.size());
+    mem.write(static_cast<std::uint64_t>(ptr), bytes_of(cbor));
     call_ = g_->instance->start(name_, {ptr, static_cast<std::int64_t>(cbor.size())}, error);
     if (!call_)
       fail(error);
@@ -1133,12 +1194,12 @@ private:
     const auto len = static_cast<std::uint32_t>(r & 0xffffffffu);
     if (len == 0)
       return se::value_t();
-    const std::span<std::uint8_t> mem = g_->instance->memory();
-    if (ptr > mem.size() || len > mem.size() - ptr)
+    GuestMemory &mem = g_->instance->memory();
+    std::string text;
+    if (std::string why; !read_guest(mem, ptr, len, text, why))
       fail("its result points outside the guest's memory");
     try {
-      return from_cbor(std::string_view(reinterpret_cast<const char *>(mem.data()) + ptr, len),
-                       &g_->handles);
+      return from_cbor(text, &g_->handles);
     } catch (const std::exception &e) {
       fail(std::string("its result isn't CBOR: ") + e.what());
     }
@@ -1258,6 +1319,8 @@ public:
     cvc::state &root = cvc::state::instance(lane.app());
     InstanceLimits limits;
     limits.max_memory = count_setting(root, "ariadne.limits.wasm_max_memory", kMaxMemory);
+    // 0: the runtime's own (the browser's room for a paused stack; wasmtime has no use for one).
+    limits.unwind_bytes = count_setting(root, "ariadne.limits.wasm_unwind_bytes", 0);
     if (const Value *l = b.find("limits"))
       if (const Value *mb = l->find("memory_mb")) {
         const double v = mb->as_double(-1.0);
@@ -1284,7 +1347,7 @@ public:
       std::uint64_t used = 0;
       // A reactor's setup returns: one that calls proc_exit, whatever its status, has ended the
       // guest before its first call.
-      if (!g->instance->run("_initialize", {}, kSetupFuel, ignored, used, error))
+      if (!g->instance->run("_initialize", {}, kSetupGas, ignored, used, error))
         throw std::runtime_error("wasm: " + g->module + ": _initialize: " +
                                  (g->wasi.exit
                                       ? "exited with status " + std::to_string(*g->wasi.exit) +
@@ -1320,7 +1383,7 @@ public:
                                  what + ")");
     };
     const bool calls = b.find("export") || b.find("hooks") || g->instance->has_export("ari_init");
-    if (calls && (!g->instance->has_export("ari_alloc") || g->instance->memory().empty()))
+    if (calls && (!g->instance->has_export("ari_alloc") || g->instance->memory().size() == 0))
       throw std::runtime_error("wasm: " + g->module +
                                " exports no ari_alloc or memory, so no value can cross to it");
 
@@ -1411,9 +1474,10 @@ private:
   // The module at `path`, compiled once while the file stays the same.
   std::shared_ptr<Module> compile(const fs::path &path) {
     std::error_code ec;
-    const std::string key =
-        std::to_string(fs::file_size(path, ec)) + ":" +
-        std::to_string(fs::last_write_time(path, ec).time_since_epoch().count());
+    // The time's count is an __int128 in Emscripten's libc++, which to_string takes no overload of.
+    const std::string key = std::to_string(fs::file_size(path, ec)) + ":" +
+                            std::to_string(static_cast<long long>(
+                                fs::last_write_time(path, ec).time_since_epoch().count()));
     Compiled &c = modules_[fs::absolute(path, ec).string()];
     if (c.module && c.key == key)
       return c.module;
