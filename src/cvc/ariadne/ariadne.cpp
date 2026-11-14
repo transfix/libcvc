@@ -4949,6 +4949,10 @@ std::uint64_t Runtime::reactive_eval_count() const {
   return m_->reactive ? m_->reactive->evaluations() : 0;
 }
 
+int Runtime::eval_count(const std::string &expr) {
+  return m_->eval_count(expr); // outside a walk: the document's own scope
+}
+
 void Runtime::set_reactive_frame_budget(double seconds) {
   m_->reactive_budget = seconds > 0.0 ? seconds : 0.0;
 }

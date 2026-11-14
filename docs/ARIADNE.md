@@ -876,6 +876,54 @@ south-west to north-east), a body on it collides with the same triangles, and a 
 standing on it (`ground:` in `forest_trees`, `wave_sea`, `cloud_sky`) samples the triangle under
 each point.
 
+**Repeated nodes.** `repeat:` on a node makes it a template, drawn as copies beside one another,
+as a widget's `repeat:` draws its instances (§6.5). A pool of markers sized by a list in state is
+one node:
+
+```yaml
+scene:
+  nodes:
+    - node: marker_{i}
+      repeat: markers            # the count: a key holding it (a list's node holds its length)
+      source: { sphere: 0.5 }
+      tags: [markers]
+      visible: markers.{i}.on
+      casts_shadow: false
+      children:
+        - node: ring
+          source: { box: 0.2 }
+```
+
+- **The count** is a whole number (`repeat: 4`), a state key holding one (`repeat: markers`,
+  resolved as `visible:` is), or a read-lane expression (`repeat: (length (state-get "l"))`),
+  counted as a widget's is. A key that holds no number counts 0. The most is 4096.
+- **Each copy** is the template with `{i}`, its 0-based index, filled in: in its id (`marker_0`,
+  `marker_1`, ...), its `visible:` bind, its tags, its `source:` (a file, an asset, a dataset and
+  its item), its `material: { texture }`, its clips' bound offsets, every string in its props (a
+  custom type's keys), and its children's. An id without `{i}` gets `_{i}`. A copy keeps the
+  template's `transform:`, `tags:`, `visible:`, material, `shader:` and children.
+- **The count is live.** At each frame `tick_scene` counts every repeated node again and adds or
+  removes copies to match, the last copies going first, without a reload. A copy that goes takes
+  with it what it brought: its node, its view tags (§5.18), its `visible:` and clip bindings and
+  a custom type's per-frame ticks.
+- **Placing copies.** A copy is a node like any other, so a program, a script or a host moves it
+  through its own keys: `graphics.root.children.marker_3.position` holds `x,y,z`, and `rotation`
+  (degrees) and `scale` sit beside it. A copy made when the count grows starts at the pose those
+  keys hold when they hold one, so a program may write a new marker's count and its position in
+  the same step. Otherwise it starts at the template's `transform:`.
+- **Nesting.** Copies of a node under a group are the group's children. A repeated node inside a
+  repeated node counts its own copies in each copy of the outer, but `{i}` there is its own index,
+  not the outer's (the loader warns, as for widgets).
+- **Not on copies:** `body:` and `world:`. The scene's physics world and its worlds are built once,
+  from the nodes the document declares, so the loader drops them from a repeated node and its
+  children, with a warning.
+
+A host that runs the document (`AriRuntime`, so `arigl`, `arigl-web`, `ariglx` and pycvc's hosts,
+and `TerminalScene`) counts an expression on the document's read lane
+(`SceneAdapter::set_count_fn`, `Runtime::eval_count`). A host calling `realize_scene` itself passes
+`RealizeOptions::count`. Without one a number or a key still counts, and an expression draws no
+copies and warns.
+
 **Textures.** `material: { texture: <uri> }` drapes an image over a geometry node through its
 mesh's UVs. UV (0, 0) is the image's bottom-left corner. A `source: { data }` city's terrain wears
 its bundle's `satellite.png` this way, north up (§5.17).
