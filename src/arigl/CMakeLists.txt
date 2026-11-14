@@ -174,6 +174,39 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
     arigl_terminal_stream_view arigl_window_snapshot arigl_check arigl_docset arigl_url_document
     PROPERTIES RESOURCE_LOCK cvcgl_gl_context
                SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
+
+  # arigl joins a relay from its document's relay: block, as ari does (attach_host_relay,
+  # ARIADNE.md §9.8.3): an offscreen snapshot of src/arisrv/tests/relay_arigl.ari, against
+  # arisrvx running tests/call_service.py beside tests/call_server.ari, mirrors the published svc
+  # and calls echo, over gRPC and the WebSocket. src/arisrv/tests/relay_pair.py runs the pair.
+  if(TARGET arisrvx AND Python3_EXECUTABLE)
+    set(_srv_tests "${CMAKE_CURRENT_SOURCE_DIR}/../arisrv/tests")
+    set(_relay --relay-arg=--python "--relay-arg=${_srv_tests}/call_service.py"
+               --relay-arg=--doc "--relay-arg=${_srv_tests}/call_server.ari"
+               --relay-arg=--room --relay-arg=ctest --relay-arg=--state-listen
+               --relay-arg=127.0.0.1:0 --relay-arg=--media-listen --relay-arg=127.0.0.1:0
+               --relay-arg=--ws-listen --relay-arg=127.0.0.1:0)
+    foreach(_a IN LISTS CVC_ARIADNE_PYTHON_TEST_PATH)
+      list(APPEND _relay "--relay-arg=${_a}")
+    endforeach()
+    set(_relay_tests)
+    foreach(_scheme grpc ws)
+      add_test(NAME arisrvx_room_call_arigl_${_scheme}
+               COMMAND "${Python3_EXECUTABLE}" "${_srv_tests}/relay_pair.py"
+                       --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:arigl>
+                       --client-command snapshot --scheme ${_scheme} ${_relay} --client-only
+                       "--client-expect=relay_arigl: echo answered arigl_[a-z0-9]+"
+                       --client-arg=--relay-room --client-arg=ctest --client-arg=--frames
+                       --client-arg=900 --client-arg=--png
+                       "--client-arg=${CMAKE_CURRENT_BINARY_DIR}/relay_arigl_${_scheme}.png"
+                       "--client-arg=${_srv_tests}/relay_arigl.ari")
+      list(APPEND _relay_tests arisrvx_room_call_arigl_${_scheme})
+    endforeach()
+    cvc_ariadne_python_test_properties(${_relay_tests})
+    set_tests_properties(${_relay_tests} PROPERTIES
+                         RESOURCE_LOCK cvcgl_gl_context TIMEOUT 120
+                         SKIP_REGULAR_EXPRESSION "No module named '(fastapi|uvicorn|starlette)';built without yaml-cpp;needs pycvc beside arisrvx;no pycvc to convert")
+  endif()
 endif()
 
 if(EMSCRIPTEN)

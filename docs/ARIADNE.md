@@ -4120,8 +4120,10 @@ is a `PythonError` a `try` catches. A reload runs the block again.
 
 #### 9.8.3 Joining a relay: `relay:` and `--relay`
 
-`ari` and the `x` hosts join a relay as a client, from a document's `relay:` block or the host's
-`--relay URL` ([`relay_session.h`](../inc/cvc/ariadne/conference/relay_session.h)):
+Every host joins a relay as a client, from a document's `relay:` block or the host's `--relay URL`
+([`relay_session.h`](../inc/cvc/ariadne/conference/relay_session.h)): `ari` and `arix`, `arigl`
+in a window and in a terminal, `ariglx`, and `arigl-web` in a browser page. A graphics client of a
+server's state, its scene included, is then a document and a stock host:
 
 ```yaml
 relay:
@@ -4158,6 +4160,16 @@ relay:
 - **TLS for native clients.** `arisrv --tls-cert PATH --tls-key PATH` serves both gRPC planes over
   TLS, and clients dial `grpcs://`. The WebSocket listener stays plain: a reverse proxy terminates
   TLS for browsers, and the native client has no `wss://` yet.
+- **In a browser page** (`arigl-web`), the page's own WebSocket dials `ws://` or `wss://` (its TLS
+  is the browser's). Nothing in a page may wait for the socket, which the page's event loop opens,
+  so every join, a token's too, is begun at the load and made from the frames: the load does not
+  fail on a relay it cannot reach, and `relay.status` says how the join goes. The page's config
+  names the relay with `"flags": ["--relay", "{ws_origin}/<path>"]` and takes a room token from
+  the URL's fragment (`"fragment_env": {"token": "CVC_ARIADNE_ROOM_TOKEN"}`), or the document
+  signs in and joins with `token: oidc:NAME`.
+- **Conference mode first.** In `arigl`, `CVC_ARIADNE_RELAY` (its conference client) holds
+  the link to the relay when it is set: a `relay:` block is then read and not joined, and
+  `--relay` is ignored, with a note.
 - A relay that turns the host away (a wrong token, or its authenticate hook, §9.8.4) fails a
   token join's load at once: "refused this host (unauthenticated…)". A refused credential, or a
   refused reconnect, is dialed again after the backoff, renewed first. A principal the service

@@ -11,8 +11,9 @@
 #ifndef __CVC_ARIADNE_CONFERENCE_RELAY_SESSION_H__
 #define __CVC_ARIADNE_CONFERENCE_RELAY_SESSION_H__
 
-// A host joins a relay as a client (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §6.5.7, S2): ari and
-// the x hosts, from a document's relay: block or the host's --relay URL. Joined, the document may
+// A host joins a relay as a client (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §6.5.7, S2): ari,
+// arigl (in a window, in a terminal and in a browser page) and the x hosts, from a document's
+// relay: block or the host's --relay URL. Joined, the document may
 // call the relay's functions with (room-call ...) (room_calls.h), and the namespaces it subscribes
 // to are mirrored into its tree, read-only.
 //
@@ -47,8 +48,11 @@
 //
 // Paths are relative to the document's directory. A subscribed namespace lands at its own path
 // in the app's tree (cyprov.*) and is linked read-only at the same path under the document's root,
-// so a widget binds `cyprov.projects` as it binds any of the document's state. wss:// needs the
-// native WebSocket client's TLS, which libcvc does not have: dial grpcs:// instead.
+// so a widget binds `cyprov.projects` as it binds any of the document's state. Natively, wss://
+// needs the WebSocket client's TLS, which libcvc does not have: dial grpcs:// instead. In a
+// browser page (arigl-web), the page's own WebSocket dials ws:// and wss:// (TLS is the
+// browser's), and no join waits: the page's event loop opens the socket, so every join, a
+// token's too, is begun at the load and made from the frames (relay.status says how it goes).
 
 #include <chrono>
 #include <cstdint>
@@ -61,6 +65,7 @@ namespace cvc {
 class app;
 namespace ariadne {
 class AppRuntime;
+struct HostOptions;
 struct Value;
 namespace conference {
 
@@ -142,6 +147,16 @@ void register_relay_block(cvc::app &app);
 // the session (not joined until a document loads).
 std::shared_ptr<relay_session> attach_relay(cvc::app &app, AppRuntime &rt, relay_join cli,
                                             std::function<void(const std::string &)> note = {});
+
+// The join a host's flags ask for (host_cli.h): --relay URL, --relay-room, --relay-ca and
+// --relay-credential over the document's relay: block, and with --relay the room token in
+// CVC_ARIADNE_ROOM_TOKEN. `name` begins the participant's node id. With `join` false (`check`),
+// the block is read but nothing is joined. Attached to `rt` as attach_relay does; null, with
+// `error` set, when the flags are wrong.
+std::shared_ptr<relay_session>
+attach_host_relay(cvc::app &app, AppRuntime &rt, const HostOptions &o, const std::string &name,
+                  bool join, std::string &error,
+                  std::function<void(const std::string &)> note = {});
 
 } // namespace conference
 } // namespace ariadne
