@@ -387,20 +387,41 @@ void lock_home::begin_request() {
 
 std::uint32_t lock_home::scope_id(std::string_view root_path) {
   action a(*this);
+  if (last_scope_valid_ && root_path == last_root_)
+    return last_scope_;
   const auto it = scopes_.find(root_path);
-  if (it != scopes_.end())
-    return it->second;
-  const auto id = static_cast<std::uint32_t>(scopes_.size());
-  scopes_.emplace(std::string(root_path), id);
+  std::uint32_t id;
+  if (it != scopes_.end()) {
+    id = it->second;
+  } else {
+    id = static_cast<std::uint32_t>(scopes_.size());
+    scopes_.emplace(std::string(root_path), id);
+  }
+  last_root_.assign(root_path);
+  last_scope_ = id;
+  last_scope_valid_ = true;
   return id;
+}
+
+std::size_t lock_home::memo_index(std::uint32_t scope, std::string_view written) noexcept {
+  const auto a = reinterpret_cast<std::uintptr_t>(written.data());
+  return static_cast<std::size_t>(((a >> 3) ^ (a >> 11) ^ (std::uintptr_t(scope) * 0x9E3779B1u)) &
+                                  (kLookupMemo - 1));
 }
 
 lock_node *lock_home::lookup(std::uint32_t scope, std::string_view written) {
   action a(*this);
-  const auto it = index_.find(cache_key{scope, written});
-  if (it == index_.end())
-    return nullptr;
-  entry &e = entries_[it->second];
+  const std::size_t m = memo_index(scope, written);
+  std::size_t slot = lookup_memo_[m];
+  if (slot >= entries_.size() || !entries_[slot].live || entries_[slot].scope != scope ||
+      entries_[slot].written != written) {
+    const auto it = index_.find(cache_key{scope, written});
+    if (it == index_.end())
+      return nullptr;
+    slot = it->second;
+    lookup_memo_[m] = slot;
+  }
+  entry &e = entries_[slot];
   if (!e.node)
     return nullptr; // reserved for a miss of this request
   e.used = true;

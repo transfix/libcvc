@@ -442,6 +442,19 @@ private:
   std::size_t hand_ = 0;        // CLOCK's hand
   std::uint64_t pin_epoch_ = 1; // the current request's pin
   std::map<std::string, std::uint32_t, std::less<>> scopes_;
+  // scope_id's last answer: a program locks under one chroot, so most requests ask for the
+  // same scope as the one before and skip the map.
+  std::string last_root_;
+  std::uint32_t last_scope_ = 0;
+  bool last_scope_valid_ = false;
+  // lookup's memo in front of index_: slots by the address of the key's text. A key a program
+  // writes as a literal keeps its text where the parser put it, so its next request finds the
+  // slot here without hashing the text. A memo slot is only a hint: lookup takes it only when
+  // that entry is live and holds the same scope and text (an evicted or reused entry fails the
+  // test and falls through to index_).
+  static constexpr std::size_t kLookupMemo = 16;
+  std::size_t lookup_memo_[kLookupMemo] = {};
+  static std::size_t memo_index(std::uint32_t scope, std::string_view written) noexcept;
   // The misses of the request being made: (index into its keys, slot), for commit_misses.
   small_vector<std::pair<std::size_t, std::size_t>, 4> misses_;
 };

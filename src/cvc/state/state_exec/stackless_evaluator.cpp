@@ -1506,8 +1506,8 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
 
   // with-lock: a soft form, recognized by what its head is bound to (design 4.2). A user macro,
   // defun or set of the name wins: those are no lock_ops object.
-  if (detail::lock_ops_of(callee->second)) {
-    begin_lock_form(state, state.stack.size() - 1, callee->second);
+  if (const detail::lock_ops *lock = detail::lock_ops_of(callee->second)) {
+    begin_lock_form(state, state.stack.size() - 1, callee->second, *lock);
     return;
   }
 
@@ -2038,10 +2038,9 @@ value_t frame_lock_ops(eval_frame &frame) {
 } // namespace
 
 void stackless_evaluator::begin_lock_form(evaluator_state &state, std::size_t fi,
-                                          const value_t &ops_value) {
+                                          const value_t &ops_value, const detail::lock_ops &ops) {
   if (state.in_generator)
     lock_refused("generator", "with-lock: not inside a generator");
-  const detail::lock_ops &ops = *detail::lock_ops_of(ops_value);
   if (!ops.ctx || !ops.ctx->sched || ops.ctx->sched->current_pid() < 0 ||
       !ops.ctx->sched->current_process())
     lock_refused("no process", "with-lock: no process is stepping");
@@ -2072,7 +2071,9 @@ void stackless_evaluator::begin_lock_form(evaluator_state &state, std::size_t fi
                            : f.timeout ? lock_operand(args[f.timeout], *frame.env)
                                        : &no_timeout;
   if (key && timeout) {
-    lock_acquire(state, fi, *key, lock_timeout_of(*timeout));
+    // The frame's ops slot holds `ops_value` now, so `ops` (its payload) lives as long as the
+    // frame does.
+    lock_acquire(state, fi, *key, lock_timeout_of(*timeout), &ops);
     return;
   }
   // KEY or :timeout is a call: evaluated first, in lock_enter steps (index 0: KEY, 1: :timeout).
@@ -2090,10 +2091,13 @@ void stackless_evaluator::begin_lock_form(evaluator_state &state, std::size_t fi
 }
 
 void stackless_evaluator::lock_acquire(evaluator_state &state, std::size_t fi, const value_t &key,
-                                       std::optional<double> timeout) {
+                                       std::optional<double> timeout,
+                                       const detail::lock_ops *lock) {
   eval_frame &frame = state.stack[fi];
-  const value_t ops_value = frame_lock_ops(frame); // a restored frame at index 0 or 1 too
-  const detail::lock_ops &ops = *detail::lock_ops_of(ops_value);
+  // The frame's lock form, read from its ops slot unless the caller has it (begin_lock_form, which
+  // just filled the slot); a restored frame at index 0 or 1 reads it here too. Either way the
+  // slot keeps the object, and so `ops`, alive while the frame lives.
+  const detail::lock_ops &ops = lock ? *lock : *detail::lock_ops_of(frame_lock_ops(frame));
   intrinsics_context &ctx = *ops.ctx;
   process &p = stepping_process(ops);
   detail::lock_home &home = *ctx.sched->locks();

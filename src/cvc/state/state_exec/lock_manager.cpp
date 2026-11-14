@@ -823,23 +823,48 @@ struct lock_table::impl {
     return out;
   }
 
+  /// The processes with a path of one or more edges to `p` (3.2), found backwards from `p`
+  /// through predecessors(): what reach(targets) must meet for 4.6's test to find `p`. Leaves
+  /// pred_memo filled; relevel_all clears it before its own use.
+  void reaching(lock_pid p, std::unordered_set<std::uint64_t> &into) {
+    pred_memo.clear();
+    bfs_layer.assign(1, p);
+    while (!bfs_layer.empty()) {
+      bfs_next.clear();
+      for (lock_pid a : bfs_layer)
+        for (lock_pid y : predecessors(a))
+          if (y != p && into.insert(y.packed()).second)
+            bfs_next.push_back(y);
+      bfs_layer.swap(bfs_next);
+    }
+  }
+
   /// 4.6's deadlock_cycle: a depth-first search from the targets in ascending order, each
   /// successor list ascending, stopping at the first path back to P. Empty when P is not
   /// reachable from the targets (no cycle).
+  ///
+  /// The search is confined to `reach_p`, the processes with a path to P (reaching): a process
+  /// outside it reaches only processes outside it, so the search would visit nothing there that
+  /// leads back to P, and confining it changes neither whether a path is found nor which path
+  /// comes first. With no target in it there is no cycle and nothing is searched; that is the
+  /// usual case (a requester whose holds nobody waits on), and the search no longer costs each
+  /// queued ticket's successors once per block (the per-handoff cost at 64 waiters on one key).
   std::vector<deadlock_edge> deadlock_cycle(lock_pid p, const lock_request &req,
                                             const kposes &pkeys,
-                                            const std::vector<lock_pid> &targets) {
+                                            const std::vector<lock_pid> &targets,
+                                            const std::unordered_set<std::uint64_t> &reach_p) {
     struct frame {
       lock_pid a;
       std::vector<lock_pid> succ;
       std::size_t i = 0;
     };
+    const auto leads_to_p = [&](lock_pid a) { return reach_p.count(a.packed()) != 0; };
     std::unordered_set<std::uint64_t> visited;
     std::vector<frame> stack;
     std::vector<lock_pid> path;
     bool found = false;
     for (lock_pid t : targets) {
-      if (!visited.insert(t.packed()).second)
+      if (!leads_to_p(t) || !visited.insert(t.packed()).second)
         continue;
       stack.push_back({t, successors(t)});
       while (!stack.empty() && !found) {
@@ -853,7 +878,7 @@ struct lock_table::impl {
           for (const frame &g : stack)
             path.push_back(g.a);
           found = true;
-        } else if (visited.insert(b.packed()).second) {
+        } else if (leads_to_p(b) && visited.insert(b.packed()).second) {
           stack.push_back({b, successors(b)}); // invalidates f
         }
       }
@@ -921,9 +946,11 @@ struct lock_table::impl {
   }
 
   // -- 4.1 ----------------------------------------------------------------------------------------
-  rec *ensure_rec(lock_pid p, const rec_info &info) {
-    if (rec *r = rec_of(p))
-      return r;
+  rec *ensure_rec(lock_pid p, const rec_info &info) { return ensure_rec(p, info, rec_of(p)); }
+  /// The same, given rec_of(p) (`found`) when the caller has already looked it up.
+  rec *ensure_rec(lock_pid p, const rec_info &info, rec *found) {
+    if (found)
+      return found;
     rec *r = rec_pool.acquire();
     r->pid = p;
     r->owner.assign(info.owner.data(), info.owner.size());
@@ -944,8 +971,10 @@ struct lock_table::impl {
     }
   }
 
-  std::uint64_t new_hold(lock_pid p, lock_mode mode, std::span<lock_node *const> keys, bool started,
-                         std::uint64_t s) {
+  /// new_hold for the process of record `r` (which must exist, ensure_rec): the new hold.
+  lock_hold *new_hold(rec *r, lock_mode mode, std::span<lock_node *const> keys, bool started,
+                      std::uint64_t s) {
+    const lock_pid p = r->pid;
     if (opts.self_check)
       grant_checks(p, mode, keys, s);
     lock_hold *h = hold_pool.acquire();
@@ -978,14 +1007,14 @@ struct lock_table::impl {
     }
     g_max_gen = std::max(g_max_gen, h->gen);
     holds.insert(h->id, h);
-    rec_of(p)->holds.push_back(h->id);
+    r->holds.push_back(h->id);
     if (in_release && divergence_pending)
       divergence_pending = false; // plant_divergence: this grant goes uncounted
     else
       ++n_grants;
     if (started)
       body_start(h);
-    return h->id;
+    return h;
   }
 
   /// I1 and I5 at a grant, from the definitions (gap G-14; the model's new_hold).
@@ -1194,12 +1223,13 @@ struct lock_table::impl {
       small_vector<std::string_view, 4> text;
       for (lock_node *n : t->nodes) {
         kp.push_back({n, true});
-        text.push_back(n->key);
+        if (opts.self_check) // only grantable's cross-check reads the text
+          text.push_back(n->key);
       }
       if (!grantable(t->pid, t->mode, kp, view(text), t->seq))
         continue;
       dequeue(t);
-      t->hold = new_hold(t->pid, t->mode, view(t->nodes), false, t->seq);
+      t->hold = new_hold(rec_of(t->pid), t->mode, view(t->nodes), false, t->seq)->id;
       t->state = ticket_state::granted;
       out->push_back(lock_note{t->pid.home, port_of(t->pid.home),
                                lock_post{lock_post::kind::wake, t->pid.pid, t->seq}});
@@ -1409,10 +1439,16 @@ struct lock_table::impl {
     in_cancel = false;
     lending_before = lending();
     queued_before = q_head != nullptr;
-    op_seeds.assign(seeds.begin(), seeds.end());
     op_old.clear();
     op_before.clear();
-    if (!lending_before || seeds.empty())
+    if (!lending_before) {
+      // Only relevel_all reads the seeds, and with lending false at the start it either returns
+      // at once or (attach_home making lending true) runs the reference loop over every rec.
+      op_seeds.clear();
+      return;
+    }
+    op_seeds.assign(seeds.begin(), seeds.end());
+    if (seeds.empty())
       return;
     for (lock_pid p : seeds) {
       const rec *r = rec_of(p);
@@ -2023,7 +2059,8 @@ std::optional<grant> lock_table::try_acquire(lock_pid p, rec_info info, lock_req
                                              const cache_delta &refs) {
   impl &m = *impl_;
   impl::guard g(m);
-  if (const impl::rec *r = m.rec_of(p); r && r->ticket)
+  impl::rec *const found = m.rec_of(p);
+  if (found && found->ticket)
     violation("4.5", "try_acquire: " + pid_text(p) + " has a ticket");
   if (opts_.self_check)
     m.check_request(req);
@@ -2033,21 +2070,21 @@ std::optional<grant> lock_table::try_acquire(lock_pid p, rec_info info, lock_req
   small_vector<std::string_view, 4> text;
   for (const key_ref &k : req.keys) {
     kp.push_back(m.locate(k));
-    text.push_back(k.text());
+    if (opts_.self_check) // only grantable's cross-check reads the text
+      text.push_back(k.text());
   }
   std::optional<grant> res;
   if (m.grantable(p, req.mode, kp, view(text), seq_inf)) {
-    m.ensure_rec(p, info);
+    impl::rec *r = m.ensure_rec(p, info, found); // apply_refs and grantable touch no record
     small_vector<lock_node *, 4> nodes;
     for (std::size_t i = 0; i < req.keys.size(); ++i) {
       lock_node *n = kp[i].exact ? kp[i].node : m.node_for(req.keys[i].key);
       req.keys[i].node = n;
       nodes.push_back(n);
     }
-    const std::uint64_t id = m.new_hold(p, req.mode, view(nodes), true, seq_inf);
+    const lock_hold *h = m.new_hold(r, req.mode, view(nodes), true, seq_inf);
     ++m.n_fast;
-    const lock_hold *h = m.hold_of(id);
-    res = grant{id, h->gen, !h->taken.empty()};
+    res = grant{h->id, h->gen, !h->taken.empty()};
   }
   m.end_op();
   return res;
@@ -2070,7 +2107,8 @@ block_result lock_table::block(lock_pid p, rec_info info, lock_request &req,
   small_vector<std::string_view, 4> text;
   for (const key_ref &k : req.keys) {
     kp.push_back(m.locate(k));
-    text.push_back(k.text());
+    if (opts_.self_check) // only grantable's cross-check reads the text
+      text.push_back(k.text());
   }
   auto fill_nodes = [&](small_vector<lock_node *, 4> &nodes) {
     for (std::size_t i = 0; i < req.keys.size(); ++i) {
@@ -2083,7 +2121,7 @@ block_result lock_table::block(lock_pid p, rec_info info, lock_request &req,
   if (m.grantable(p, req.mode, kp, view(text), seq_inf)) { // the state changed since try_acquire
     small_vector<lock_node *, 4> nodes;
     fill_nodes(nodes);
-    const std::uint64_t id = m.new_hold(p, req.mode, view(nodes), false, s);
+    const std::uint64_t id = m.new_hold(r, req.mode, view(nodes), false, s)->id;
     lock_ticket *t = m.new_ticket(p, s, req);
     t->state = ticket_state::granted;
     t->hold = id;
@@ -2093,12 +2131,22 @@ block_result lock_table::block(lock_pid p, rec_info info, lock_request &req,
     m.end_op();
     return res;
   }
-  std::vector<lock_pid> targets;
-  m.blockers(
-      p, req.mode, kp, seq_inf, [&](lock_hold *h) { targets.push_back(h->pid); },
-      [&](lock_ticket *u) { targets.push_back(u->pid); });
-  impl::sort_unique(targets);
-  std::vector<deadlock_edge> cycle = m.deadlock_cycle(p, req, kp, targets);
+  // 4.6's test, P in reach(targets), needs an edge into P. P has no ticket (required above) and
+  // its request would queue last, so every edge into P is a queued ticket's that conflicts with a
+  // hold of P (3.2): with no hold, nothing reaches P and there is no cycle to look for.
+  std::vector<deadlock_edge> cycle;
+  if (!r->holds.empty()) {
+    std::unordered_set<std::uint64_t> reach_p;
+    m.reaching(p, reach_p);
+    if (!reach_p.empty()) {
+      std::vector<lock_pid> targets;
+      m.blockers(
+          p, req.mode, kp, seq_inf, [&](lock_hold *h) { targets.push_back(h->pid); },
+          [&](lock_ticket *u) { targets.push_back(u->pid); });
+      impl::sort_unique(targets);
+      cycle = m.deadlock_cycle(p, req, kp, targets, reach_p);
+    }
+  }
   if (!cycle.empty()) {
     lock_ticket *t = m.new_ticket(p, s, req);
     t->state = ticket_state::failed;

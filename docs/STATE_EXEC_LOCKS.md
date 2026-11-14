@@ -1147,7 +1147,13 @@ allocation (records and holds come from free lists, and the key's node stays ali
 cache's reference, protocol 2.4; the home builds the request and the mirror's keys from the cached
 nodes in reused storage, 8.4) after a process's first lock and a key's first use:
 **~25-50 ns** in single mode, and **~65-90 ns** in shared mode with one uncontended mutex lock and
-unlock on each side. Against a scheduled step of 249-263 ns (sync) and 456-470 ns (async) before
+unlock on each side. (Measured in 2026-11, these estimates do not hold. The manager alone,
+`try_acquire` plus `release` with a hot cache, takes 140-180 ns single and 190-235 ns shared on
+the development laptop. The itemization leaves out the record each section makes and drops
+(4.1's `ensure_rec` and `maybe_drop_rec`), two index updates, two pools and the operation
+framing, and the evaluator's frame layout comes on top. 11.3 has the breakdown, and 11.2's
+gate is restated from it.)
+Against a scheduled step of 249-263 ns (sync) and 456-470 ns (async) before
 `perf/sched` (td 2.5), that is 0.1-0.2 and 0.25-0.35 of a sync step; a lock-server round trip
 costs 23-95 us. Programs that never lock pay one variant-index test per `data_object` head and
 one predicted branch per end function; step counts are identical. On a scheduler that has a lock
@@ -1330,7 +1336,9 @@ Stage 0's `post_control`, not on groups.
 
 ### 11.1 What to expect
 
-- **One thread, uncontended:** 25-50 ns single, 65-90 ns shared, no step (8.8).
+- **One thread, uncontended:** no step. 8.8 estimated 25-50 ns single and 65-90 ns shared. The
+  measured architecture costs several times that (11.3), and 11.2's gate allows 450 ns and
+  550 ns.
 - **One thread, contended:** the waiter's park and resume (about 3 steps: the wait native, the await
   frame, the body start) and 0.5-1 us of bookkeeping, a deadlock search over the queued requests
   included. About 1/50 of a message round trip.
@@ -1350,7 +1358,7 @@ read. They are reported under `extra.*`.
 | Name | Executors | Workload | Sweep | Metrics and gate |
 |---|---|---|---|---|
 | `native.state_atomic` | sync, async | the `native.*` method, one scenario whose `op` param picks the native | depth 1, 4; `op` set, incr, cas | `extra.ns_per_call`; gate: `incr` and `cas` at most 1.1x `set` (`compare RUN RUN --pair op=set:incr`, and `op=set:cas`, `--metric extra.ns_per_call --threshold 10`: no `WORSE`) |
-| `lock.uncontended` | sync, async | `(with-lock K (set s (+ s 1)))` against the same loop with `begin`, and nested covered sections | depth 1, 2, 4; mode x, s; chroot 0, 1; threading single, shared (L3) | `extra.ns_per_lock`, `extra.steps_per_lock`, `extra.allocs_per_lock`; gate: extra over `begin` at most 60 ns single (L1) and 120 ns shared (L3) (sync, flat key, Release), 0 steps, 0 allocations for a single-form body |
+| `lock.uncontended` | sync, async | `(with-lock K (set s (+ s 1)))` against the same loop with `begin`, and nested covered sections | depth 1, 2, 4; mode x, s; chroot 0, 1; threading single, shared (L3) | `extra.ns_per_lock`, `extra.steps_per_lock`, `extra.allocs_per_lock`; gate: extra over `begin` at most 450 ns single (L1) and 550 ns shared (L3) (sync, flat key, Release), 0 steps, 0 allocations for a single-form body. The times were restated on 2026-11-12 from the measured architecture (11.3). They were first set at 60 and 120 ns from 8.8's estimate |
 | `lock.handoff` | sync, async | p `forever` loops on one key, a `(sleep 0)` in the body, 200 x p handoffs after warm-up; host-submitted or spawned (L1b) | p 2, 8, 64; workers host, spawn | `handoffs_per_s`, `wait_ns` p50/p99, `extra.fairness_spread` (most grants minus fewest); gate: at most 1 |
 | `lock.rw` | sync, async | r readers, w writers | 8/1, 64/1, 8/8 | writer `wait_ns` p99; gate: at most 2x the longest reader section at 64/1 |
 | `lock.many_keys` | sync, async | random keys out of k, single and two-key requests | 10, 1000, 100000 | `extra.ns_per_lock`, cache hit rate, live trie nodes |
@@ -1431,10 +1439,10 @@ mutex's waits per lock with their wait time per lock (window 2):
 The hot key's `extra.handoff_p50_ns` (gate 50 us) is 12.8-17.3, 16.4-21.0 and 28.5-34.5 us at
 t = 2, 4 and 8 in window 1, and 9.8-11.7, 11.1-14.3 and 16.7-22.8 us in window 2, the range over
 the three section lengths. Every point is under the gate, at noise of 18-154%.
-`lock.uncontended` at `threading=shared` (gate 120 ns) measures 468-1360 ns in window 1 and
-518-934 ns in window 2. Measured beside it under load, `threading=single` was the same, about
+`lock.uncontended` at `threading=shared` (its gate then 120 ns) measures 468-1360 ns in window 1
+and 518-934 ns in window 2. Measured beside it under load, `threading=single` was the same, about
 900 ns. So shared mode adds nothing visible here; the gate is waiting on the per-lock cost that
-11.2's 60 ns single-mode gate also misses.
+the 60 ns single-mode gate of that time also missed.
 
 What they show:
 - At t = 1, 3 us sections run at 0.92-0.95 of the unlocked loop, with no mutex wait. The gap is
@@ -1450,10 +1458,11 @@ What they show:
 neither window's 3 us, t = 4 point is a miss, so 3.3's fallback is not opened yet. The counters
 also say what a confirmed miss would be made of: the time each lock holds the mutex, not the
 number of mutexes. Sharding by subtree would split that hold between keys in different subtrees,
-and leave every lock's cost where it is. Cutting the per-lock cost toward 11.2's 60 ns cuts the
-hold for every key. So that work, L1's speed, comes first. Then `lock.cross_thread` is measured
-again in a window that meets the quiet rule. If the 3 us, t = 4 gate misses then, on Windows or
-on Linux, the subtree-sharding design opens as 3.3 and 14.2 question 9 say.
+and leave every lock's cost where it is. Cutting the per-lock cost toward the 60 ns gate of that
+time cuts the hold for every key. So that work, L1's speed, comes first. Then
+`lock.cross_thread` is measured again in a window that meets the quiet rule. If the 3 us, t = 4
+gate misses then, on Windows or on Linux, the subtree-sharding design opens as 3.3 and 14.2
+question 9 say.
 
 The Linux record (`locks-deep.yml`'s `stress` lane on this branch, run 41340188915, GCC Release
 on a 4-vCPU hosted runner, one round of 5 reps, unpinned, not gated) points the same way. At
@@ -1463,6 +1472,40 @@ the mutex, about 190 ns each, and the lock itself costs 615-665 ns at t = 1. At 
 is oversubscribed, so the unlocked loop is the slower one and the ratio means nothing. The hot
 key's handoff p50 is 9.4-9.5, 11.6-11.8 and 17.1-17.2 us at t = 2, 4 and 8. At t = 4 that is
 under 11.2's 20 us, which the stress lane reports without gating.
+
+**Where a lock's cost goes (2026-11-12).** The development laptop was under load, so timing
+here is orientation only. Counts are exact. Three measurements locate the cost:
+
+- a probe of the manager and the home (best of 25 loops of 100k);
+- cycle counters inside the lock path;
+- `lock.handoff`, with master and candidate interleaved.
+
+The deadlock search was the 64-waiter cost: every re-queue after a handoff searched the whole
+queue from every target, recomputing each one's successors. The requester held nothing, so it
+could not be on a cycle (protocol 4.6's implementation note). Now a handoff at p = 64 takes
+12-14 us against 92-93 us before, with steps per handoff unchanged at 37.
+
+The uncontended lock's cost has no single hot spot. In `lock.uncontended`'s loop it splits into
+the evaluator's glue (~40%: the frame layout, and five derivations of the lock form, now two),
+the home (~25%: a scope and a key-cache lookup per request, now memoized) and the manager (~30%:
+a record and a hold made and dropped per section, with their index and pool updates and the
+operation framing). The manager's share is each lock's hold of `M.mu` in shared mode: 190-235
+ns for `try_acquire` plus `release` with a hot cache, against 3.3's 30-150 ns per operation.
+Tuning doesn't bring this data model to the 60 ns (120 ns shared) that 11.2 first set from
+8.8's estimate. The other way there, a leaner fast path (records kept for a process's life,
+which changes 4.1, and holds inline in the record), was not taken. The owner restated the gate
+from the measured architecture instead (2026-11-12): at most 450 ns single and 550 ns shared
+over `begin`, sync, flat key, Release, in a quiet window. 0 steps and 0 allocations stay the
+hard gates. The numbers come from three sources:
+
+- the probe's best runs: the manager and home together are 230-250 ns single and 270-290 ns
+  shared;
+- the evaluator's share on top of that;
+- the lowest of the bench's own loaded-box runs (sync, best of 100 short runs per side):
+  230-305 ns single and 310-360 ns shared.
+
+The first run in a quiet window checks them. The sharding decision is unchanged:
+`lock.cross_thread` is measured again in a quiet window first.
 
 ## 12. Phases
 
