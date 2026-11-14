@@ -1,0 +1,31 @@
+# The client of the end-to-end ctest arisrvx_echo_service (ARIADNE_SCRIPTING_HOSTS.md 6.5.8): joins
+# arisrvx running tests/echo_service.py with its test token, which the authenticate hook admits as
+# tester; calls the export and checks its reply and progress; reads the echo.public subtree the
+# service publishes, but not echo.private, which its read scope leaves out; and fetches the same
+# answer over the service's HTTP route (relay_pair.py allows its origin).
+meta: { name: the echo service's client, min_libcvc: 3.7.13 }
+relay:
+  subscribe: [echo]
+tests:
+  the_published_subtree_arrives: |
+    (while (not (= (state-get "echo.public.status") "up")) (sleep 0.05))
+  a_path_outside_its_scope_is_not_sent: |
+    (sleep 0.5)
+    (assert (not (state-exists "echo.private")) "echo.private is outside the client's read scope")
+  the_export_answers_the_principal: |
+    (let ((r (room-call "echo" "hi")))
+      (assert (= (get-attr r "text") "hi") r)
+      (assert (= (get-attr r "length") 2) r)
+      (assert (= (type-of (get-attr r "length")) "int") r)
+      (assert (= (get-attr r "by") "tester") r))
+    (assert (= (float (state-get "calls.echo.progress")) 1.0) (state-get "calls.echo.progress"))
+    (assert (= (state-get "calls.echo.message") "echoed") (state-get "calls.echo.message"))
+  what_it_wrote_is_published: |
+    (while (not (= (state-get "echo.public.last") "hi")) (sleep 0.05))
+    (assert (= (state-get "echo.public.by") "tester") (state-get "echo.public.by"))
+  the_http_route_answers_the_same: |
+    (let ((r (http-get (str-concat (room-call "http_url") "/echo?text=hey"))))
+      (assert (get-attr r "ok") r)
+      (let ((body (json-parse (bytes.decode (get-attr r "body")))))
+        (assert (= (get-attr body "text") "hey") body)
+        (assert (= (get-attr body "length") 3) body)))

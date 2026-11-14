@@ -137,6 +137,12 @@ public:
   const point &circumcentre(int c) const { return _circumcentres[std::size_t(c)]; }
   // Computed, not cached: the circumcentre of finite cell c, and its squared radius.
   point compute_circumcentre(int c, double *squared_radius = nullptr) const;
+  // CGAL's side_of_sphere(c, p) without the perturbation, exactly: +1 when p is strictly inside
+  // finite cell c's circumsphere, 0 on it, -1 outside; for an infinite cell, +1 when p is
+  // strictly beyond its hull facet, or in that facet's plane and inside its circumcircle, 0 on the
+  // circle, -1 otherwise. A cospherical tie gives 0 here (the build breaks it by the
+  // perturbation); the cocone code asks this to find cospherical pairs of cells.
+  int side_of_sphere(int c, const point &p) const;
 
   // ---- checks ----
   // What is wrong with the complex, in words; empty when it is valid. Always checks the
