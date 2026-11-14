@@ -2383,6 +2383,29 @@ if(NOT _cvc_type STREQUAL "SHARED_LIBRARY")
   endif()
 endif()
 
+# cvc::planar (inc/cvc/geometry/planar.h; VOLROVER-LIBRARY-PORTS-ROADMAP.md §3, P3a): exact planar
+# geometry on an integer grid for the ContourTiler port, on Clipper2, CDT, Shewchuk's predicates
+# and Boost.Polygon (header-only, part of Boost). Built only with all three packages; then cvc
+# exports CVC_WITH_PLANAR, and without them the header's functions are left undefined.
+if(CVC_WITH_CLIPPER2 AND CVC_WITH_CDT AND CVC_WITH_SHEWCHUK)
+  set(CVC_WITH_PLANAR ON)
+  target_sources(cvc PRIVATE
+    geometry/planar/grid.cpp
+    geometry/planar/predicates.cpp
+    geometry/planar/polygon.cpp
+    geometry/planar/clipper.cpp
+    geometry/planar/wavefront.cpp
+    geometry/planar/triangulate.cpp
+    geometry/planar/sibson.cpp
+    geometry/planar/medial_axis.cpp
+  )
+  target_compile_definitions(cvc PUBLIC CVC_WITH_PLANAR)
+  message(STATUS "cvc::planar ENABLED (Clipper2, CDT, Shewchuk's predicates, Boost.Polygon)")
+else()
+  set(CVC_WITH_PLANAR OFF)
+  message(STATUS "cvc::planar DISABLED: it needs Clipper2, CDT and Shewchuk's predicates")
+endif()
+
 # libcvc does not use CGAL. Its two former uses (nav/spatial.cpp, geometry/project_verts) were
 # CGAL's Spatial Searching, a GPL-3+ package; both use the vendored nanoflann (BSD-2-Clause) now,
 # so cvc links neither CGAL nor, through it, GMP and MPFR. DISABLE_CGAL is accepted and ignored.
@@ -3034,7 +3057,7 @@ if(CVC_BUILD_CGAL_AB)
   endif()
   set(_cvc_ab ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/cgal_ab)
   add_executable(cgal_ab_test ${_cvc_ab}/cgal_ab.cpp ${_cvc_ab}/cgal_ab_permissive.cpp
-    ${_cvc_ab}/cgal_ab_qhull.cpp)
+    ${_cvc_ab}/cgal_ab_qhull.cpp ${_cvc_ab}/cgal_ab_planar.cpp)
   target_link_libraries(cgal_ab_test PRIVATE cvc cvc_permissive_geometry CGAL::CGAL)
   target_compile_features(cgal_ab_test PRIVATE cxx_std_17)
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
