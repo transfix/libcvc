@@ -27,6 +27,20 @@ headers):
 | `clipper2 offset ...` | straight-skeleton offsets (`create_*_skeleton_and_offset_polygons_with_holes_2`) | `InflatePaths`, mitred (limit 10^6) | the area within one unit per unit of boundary, and the same counts, for convex polygons at any depth and star polygons before their first edge event. Past an edge event the straight skeleton (a wavefront) and a mitred offset are different polygons by design: those are `INFO` lines |
 | `clipper2 minkowski ...` | `minkowski_sum_2` | `MinkowskiSum` and a union | convex + convex: the same area exactly; convex + star: within one unit per unit of boundary |
 
+cvc::planar (`cgal_ab_planar.cpp`, `inc/cvc/geometry/planar.h`), the ContourTiler port's planar
+geometry (the ports plan's P3a), against the CGAL calls ContourTiler makes today. These rows run
+cvc::planar's own functions, which is what the tiler will call, where the rows above run the
+libraries directly. Each compares the areas, the counts of outer rings and holes, and the area of
+the symmetric difference between the two results (CGAL's exact vertices rounded to the grid),
+within one grid unit per unit of boundary:
+
+| Check | A: CGAL | B: cvc::planar | Passes when |
+|---|---|---|---|
+| `planar <op> ...` | `Polygon_set_2` (Epeck) | `unite`, `intersect`, `subtract`, `exclusive_or` | skylines: equal areas exactly; stars, polygons with holes and dense contour pairs: within the tolerance; the same counts except for symmetric differences (as above) |
+| `planar wavefront_offset ...` | `create_{interior,exterior}_skeleton_and_offset_polygons_with_holes_2` | `wavefront_offset` | within the tolerance at every depth: convex and star polygons before and past their edge events, and dense contours (ContourTiler's input, whose short edges collapse at once) |
+| `planar offset (one pass) ...` | the same | `offset`, mitred, limit 10^6 | asserted only where a single pass must agree (convex polygons, and offsets before the first edge event); `INFO` elsewhere |
+| `planar minkowski_sum ...` | `minkowski_sum_2` | `minkowski_sum` | convex + convex: equal areas exactly; convex + star: within the tolerance |
+
 `TIME` lines give both sides' wall time. Nothing asserts on them, nor on the `INFO` lines, nor on
 the `SPIKE` lines below.
 
@@ -50,6 +64,23 @@ the `SPIKE` lines below.
 - Clipper2 agrees with CGAL's Booleans, Minkowski sums and early offsets to within its rounding,
   at 1.7-90x CGAL's speed (slower only on the Minkowski sums, where it unions all the swept
   quadrilaterals).
+
+**What the cvc::planar rows found (2026-11-11, Windows, MSVC 19.44, CGAL 6.0.1)**, for P3b:
+- The Booleans agree with `Polygon_set_2` in all 32 cases: exactly on the skylines, and within a
+  tenth of the tolerance elsewhere, polygons with holes and dense contour pairs included, at about
+  20-60x CGAL's speed.
+- A single mitred pass (`offset`) differs from the straight skeleton's offset in 2 of the 50 offset
+  cases, both deep inward offsets of stars, by 0.4% and 7.4% of the area. A single pass agrees
+  with the skeleton past an edge event whose collapse leaves a convex join (it resolves the loop
+  the vanished edge leaves exactly as the skeleton does), but not past one that leaves a reflex
+  join, where the skeleton mitres the neighbours and a single pass bounds the region by the
+  vanished edge's line instead.
+- `wavefront_offset` agrees with the skeleton in all 50 cases, those two included (symmetric
+  difference 0 after rounding), at about 27x CGAL's speed. It steps from event to event on a grid
+  2^20 times finer than the caller's and rounds once at the end; with every step rounded to the
+  caller's grid instead, the error grew to about two grid units per unit of boundary on the dense
+  contours, past the tolerance.
+- The Minkowski sums agree, exactly for convex pairs.
 
 **The incremental Qhull spike (`SPIKE` lines).** The skeleton port plans to insert points one at a
 time, so a long triangulation can run as a resumable stepper (the ports plan, §2). The `delaunay3`
