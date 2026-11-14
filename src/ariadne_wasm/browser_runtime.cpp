@@ -82,7 +82,8 @@ EM_JS(int, cvc_wasm_check, (const void *bytes, int n), {
 // Instantiate the module `module_ctx` (the BrModule) under the memory cap `cap`, whose bytes are
 // `bytes` (compiled the first time, then taken from Module.cvcWasmModules): 1, or 0 with the
 // reason in cvcWasmText, or 2 for a module without the transform's gas checks and Asyncify
-// exports. `spec` lists the imports in order, "name:returns;" each (returns 1: an i64).
+// exports. `spec` lists the imports in order, "module:name:returns;" each (returns 1: an i64, 2: an
+// i32, WASI's errno), and each is bound under its own module (`ari`, `wasi_snapshot_preview1`).
 EM_JS(int, cvc_wasm_instantiate, (void *ctx, void *module_ctx, const void *bytes, int n,
                                   double cap, const char *spec, int spec_len, void *scratch,
                                   double start_checks, double unwind_bytes), {
@@ -105,11 +106,15 @@ EM_JS(int, cvc_wasm_instantiate, (void *ctx, void *module_ctx, const void *bytes
     g.rewinding = false;
     g.ex.asyncify_stop_rewind();
   };
+  // An import's result as its type has it: an i64 is a BigInt, an i32 a Number.
+  var result = function(ret, v) {
+    return ret == 1 ? v : ret == 2 ? Number(BigInt.asIntN(32, v)) : undefined;
+  };
   var trampoline = function(index, ret) {
     return function() {
       if (g.rewinding) {
         resumed();
-        return ret ? view()[16] : undefined;
+        return result(ret, view()[16]);
       }
       var s = view();
       for (var i = 0; i < arguments.length; ++i)
@@ -117,13 +122,13 @@ EM_JS(int, cvc_wasm_instantiate, (void *ctx, void *module_ctx, const void *bytes
       var status = _cvc_ari_wasm_import(ctx, index, arguments.length);
       s = view(); // the host's memory may have grown
       if (status == 0)
-        return ret ? s[0] : undefined;
+        return result(ret, s[0]);
       if (status == 1) {
         var p = Number(s[0]), len = Number(s[1]);
         throw new WebAssembly.RuntimeError(new TextDecoder().decode(HEAPU8.slice(p, p + len)));
       }
       pause(); // 2: it waits
-      return ret ? 0n : undefined;
+      return result(ret, 0n);
     };
   };
   try {
@@ -154,13 +159,14 @@ EM_JS(int, cvc_wasm_instantiate, (void *ctx, void *module_ctx, const void *bytes
     });
     if (!transformed)
       return 2;
-    var ari = {};
+    var imports = {ari: {}};
     var list = new TextDecoder().decode(HEAPU8.slice(q, q + spec_len)).split(";");
     for (var i = 0; i < list.length; ++i)
       if (list[i]) {
         var f = list[i].split(":");
-        ari[f[0]] = trampoline(i, f[1] == "1");
+        (imports[f[0]] = imports[f[0]] || {})[f[1]] = trampoline(i, Number(f[2]));
       }
+    var ari = imports.ari;
     ari.log_execution = function() {
       if (g.rewinding) {
         resumed();
@@ -175,7 +181,7 @@ EM_JS(int, cvc_wasm_instantiate, (void *ctx, void *module_ctx, const void *bytes
       pause();
     };
     guests[ctx] = g; // before the start function, whose imports reach the host
-    var inst = new WebAssembly.Instance(mod, {ari: ari});
+    var inst = new WebAssembly.Instance(mod, imports);
     g.ex = inst.exports;
     g.mem = inst.exports.memory instanceof WebAssembly.Memory ? inst.exports.memory : null;
     return 1;
@@ -341,33 +347,34 @@ private:
   std::vector<FunctionImport> imports_;
 };
 
-// Whether the guest declares each `ari` import it takes as the host defines it: the parameters
-// (an i64 where Import::wide marks one) and the result (an i64, or none). wasmtime's linker checks
-// the same natively; JS checks nothing, and an import of another type would take what the
+// Whether the guest declares each import it takes as the host defines it, under the same module
+// (`ari`, WASI's `wasi_snapshot_preview1`): the parameters (an i64 where Import::wide marks one)
+// and the result (an i64, an i32 where Import::returns_i32 says so, or none). wasmtime's linker
+// checks the same natively; JS checks nothing, and an import of another type would take what the
 // trampoline passes.
 bool imports_match(const std::vector<FunctionImport> &declared, const std::vector<Import> &host,
                    std::string &error) {
   for (const FunctionImport &f : declared) {
-    if (f.module != "ari")
-      continue; // the instantiation refuses an import from another module
+    const std::string what = f.module + "." + f.name;
     std::string params, results;
-    if (f.name == "log_execution") {
+    if (f.module == "ari" && f.name == "log_execution") {
       params = "\x7f"; // the transform's gas check, the runtime's own
     } else {
-      const auto im =
-          std::find_if(host.begin(), host.end(), [&](const Import &i) { return i.name == f.name; });
+      const auto im = std::find_if(host.begin(), host.end(), [&](const Import &i) {
+        return i.module == f.module && i.name == f.name;
+      });
       if (im == host.end()) {
-        error = "it imports ari." + f.name + ", which the host doesn't define";
+        error = "it imports " + what + ", which the host doesn't define";
         return false;
       }
       for (int i = 0; i < im->params; ++i)
         params.push_back((im->wide >> i) & 1u ? '\x7e' : '\x7f');
       if (im->returns)
-        results = "\x7e";
+        results = im->returns_i32 ? "\x7f" : "\x7e";
     }
     if (f.params != params || f.results != results) {
-      error = "it imports ari." + f.name + " as (func" + type_text(f.params, f.results) +
-              "), and the host's ari." + f.name + " is (func" + type_text(params, results) + ")";
+      error = "it imports " + what + " as (func" + type_text(f.params, f.results) +
+              "), and the host's " + what + " is (func" + type_text(params, results) + ")";
       return false;
     }
   }
@@ -421,7 +428,7 @@ public:
                 " parameters, which the browser doesn't pass";
         return false;
       }
-      spec += im.name + (im.returns ? ":1;" : ":0;");
+      spec += im.module + ":" + im.name + (im.returns ? (im.returns_i32 ? ":2;" : ":1;") : ":0;");
     }
     pausable_ = false;
     const int r = cvc_wasm_instantiate(

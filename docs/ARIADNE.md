@@ -3645,7 +3645,8 @@ unless `MPLBACKEND` or a matplotlibrc names another; `matplotlib.use()` selects 
   default host. Pan, zoom and the mouse come later (roadmap C2), and so does the browser.
 
 **In the browser: `ariglx-web`.** The `ariglx-web` package is arigl-web's page (§9.4) with
-`ariglx` in it, built to single-threaded WebAssembly
+`ariglx` in it, built to WebAssembly, single-threaded (wasm) or threaded (wasm-mt, which needs a
+cross-origin-isolated page: COOP and COEP)
 ([`cvcpkg/recipes/ariglx-web`](../cvcpkg/recipes/ariglx-web/recipe.yaml)). Serve
 `share/ariglx-web/` beside the documents as for arigl-web, with the same `ariadne.config.json`.
 The page fetches `python312.zip` with the module and puts it on `sys.path`. The zip holds the
@@ -3754,6 +3755,16 @@ wasm:
   wait on itself, so it raises a `RecursionError` there instead.
 - **Errors.** A trap, or the guest's `fail`, is a `WasmError` the document can catch; its `trap`
   says what happened. A trap with the guest's memory at its limit is a `MemoryError`.
+- **WASI.** A module built for WASI (`wasm32-wasip1`, wasi-sdk) loads on every host: each guest is
+  linked WASI preview 1 as stubs. The clocks, random numbers and sleep work (a sleep returns at
+  once); argv is the module's name, then the block's `wasi: {args: [...]}`; the environment is
+  empty; stdout and stderr take every byte and drop it, and stdin is at its end; every file,
+  directory and socket call is `ENOTCAPABLE`. A `wasi:` request for `dirs:` or `env:` fails the
+  load until `arisrvx` grants them (roadmap/ARIADNE_SCRIPTING_HOSTS.md §8.6.1). `proc_exit` ends
+  the guest, not the host: the call returns nil for status 0, and raises a `WasmError` with `exit`
+  for any other. Every later call is a `WasmError` with `exited` until the document reloads, and a
+  setup (`_initialize`, `ari_init`) that exits fails the load. The details are in
+  [`wasm_engine.h`](../src/ariadne_wasm/wasm_engine.h).
 - **The ABI** a guest is written to (values as CBOR in its memory, `ari_alloc`, the `call`,
   `reply`, `yield` and `fail` imports, the state imports, and the data calls on handles) is in
   [`wasm_engine.h`](../src/ariadne_wasm/wasm_engine.h).
@@ -4714,6 +4725,14 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
 - `ws-open` and `ws-recv` are async I/O calls like the HTTP verbs: the connect, or the wait,
   runs on the background pool and the program parks. `ws-poll` is the one to call from an
   `on_tick` that also does other work: it takes what has arrived and returns.
+- In a browser build without threads (`ari.html`, arigl's page) they are started instead, as the
+  HTTP verbs are (§10.2): `ws-open` creates the browser's `WebSocket` and returns to the frame
+  loop, and its open, error or `timeout` resumes the program; `ws-recv` waits on the socket's
+  next message from its callbacks, with a timer for `SECONDS`. Frames keep drawing meanwhile. A
+  killed or timed-out program abandons its connect (the socket is closed) or drops its wait
+  (`cvc::net::ws_start`, `WsConnection::recv_async` in
+  [`ws_client.h`](../inc/cvc/net/ws_client.h)). A page may close a socket only with code 1000
+  or 3000-4999, so there any other `CODE` is sent as 1000.
 
 ## 11. Caveats — what is not yet wired
 
@@ -4724,8 +4743,8 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   [roadmap](roadmap/ARIADNE_SCRIPTING_HOSTS.md)). Only the top document's `python:` block runs: a
   `load:`ed module's is not run yet. A Python program runs in a window, offscreen or in `arix`, not
   under `ariglx --terminal`, and its embedded `Host.load()` from inside a frame raises (load before
-  `run()`). `ariglx-web` (the browser) is single-threaded only, with numpy as its one C-extension
-  package, and its `host.run()` returns at once. There is no `arisrvx` yet. The `arix` and `ariglx`
+  `run()`). `ariglx-web` (the browser) has numpy as its one C-extension package, and its
+  `host.run()` returns at once. There is no `arisrvx` yet. The `arix` and `ariglx`
   packages are Linux-only, where `pycvc-cp312` and `pycvc-gl-cp312` are; elsewhere build them
   in-tree with the bindings (`-DCVC_BUILD_PYCVC=ON`).
 

@@ -134,6 +134,17 @@ wasm_trap_t *gas_check(void *, wasmtime_caller_t *, const wasmtime_val_t *, size
   return nullptr;
 }
 
+// An import's result as its type has it: an i64, or an i32 (WASI's errno).
+void set_result(wasmtime_val_t &out, std::int64_t r, bool i32) {
+  if (i32) {
+    out.kind = WASMTIME_I32;
+    out.of.i32 = static_cast<std::int32_t>(r);
+  } else {
+    out.kind = WASMTIME_I64;
+    out.of.i64 = r;
+  }
+}
+
 wasm_trap_t *sync_import(void *env, wasmtime_caller_t *caller, const wasmtime_val_t *args,
                          size_t nargs, wasmtime_val_t *results, size_t nresults) {
   auto *ie = static_cast<ImportEnv *>(env);
@@ -148,10 +159,8 @@ wasm_trap_t *sync_import(void *env, wasmtime_caller_t *caller, const wasmtime_va
   }
   if (!trap.empty())
     return wasmtime_trap_new(trap.data(), trap.size());
-  if (nresults > 0) {
-    results[0].kind = WASMTIME_I64;
-    results[0].of.i64 = r;
-  }
+  if (nresults > 0)
+    set_result(results[0], r, ie->import.returns_i32);
   return nullptr;
 }
 
@@ -159,16 +168,15 @@ struct Continuation {
   std::shared_ptr<PendingImport> pending;
   wasmtime_val_t *results;
   size_t nresults;
+  bool i32; // Import::returns_i32
 };
 
 bool continuation_done(void *env) {
   auto *c = static_cast<Continuation *>(env);
   if (!c->pending->done)
     return false;
-  if (c->nresults > 0) {
-    c->results[0].kind = WASMTIME_I64;
-    c->results[0].of.i64 = c->pending->value;
-  }
+  if (c->nresults > 0)
+    set_result(c->results[0], c->pending->value, c->i32);
   return true;
 }
 
@@ -198,7 +206,7 @@ void async_import(void *env, wasmtime_caller_t *caller, const wasmtime_val_t *ar
   if (!pending->done)
     ie->state->waiting = pending;
   continuation_ret->callback = continuation_done;
-  continuation_ret->env = new Continuation{pending, results, nresults};
+  continuation_ret->env = new Continuation{pending, results, nresults, ie->import.returns_i32};
   continuation_ret->finalizer = free_continuation;
 }
 
@@ -209,7 +217,7 @@ wasm_functype_t *import_type(const Import &im) {
     params.data[i] = (im.wide >> i) & 1u ? wasm_valtype_new_i64() : wasm_valtype_new_i32();
   if (im.returns) {
     wasm_valtype_vec_new_uninitialized(&results, 1);
-    results.data[0] = wasm_valtype_new_i64();
+    results.data[0] = im.returns_i32 ? wasm_valtype_new_i32() : wasm_valtype_new_i64();
   } else {
     wasm_valtype_vec_new_empty(&results);
   }
@@ -326,13 +334,14 @@ public:
     for (Import &im : imports) {
       wasm_functype_t *ty = import_type(im);
       const bool async = static_cast<bool>(im.async);
-      const std::string name = im.name;
+      const std::string module = im.module, name = im.name;
       auto *env = new ImportEnv{std::move(im), state_};
       wasmtime_error_t *e =
-          async ? wasmtime_linker_define_async_func(linker_, "ari", 3, name.data(), name.size(), ty,
-                                                    async_import, env, free_import_env)
-                : wasmtime_linker_define_func(linker_, "ari", 3, name.data(), name.size(), ty,
-                                              sync_import, env, free_import_env);
+          async ? wasmtime_linker_define_async_func(linker_, module.data(), module.size(),
+                                                    name.data(), name.size(), ty, async_import, env,
+                                                    free_import_env)
+                : wasmtime_linker_define_func(linker_, module.data(), module.size(), name.data(),
+                                              name.size(), ty, sync_import, env, free_import_env);
       wasm_functype_delete(ty);
       if ((error = take_error(e)), !error.empty())
         return false;
