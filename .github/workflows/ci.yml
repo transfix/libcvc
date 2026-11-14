@@ -1129,6 +1129,7 @@ jobs:
             if ! git diff --name-only "$base" HEAD -- src/arigl src/ari \
                    inc/cvc/ariadne/doc_fetch.h src/cvc/ariadne/doc_fetch.cpp \
                    inc/cvc/ariadne/web_document.h src/cvc/ariadne/web_document.cpp \
+                   inc/cvc/ariadne/files.h src/cvc/ariadne/files.cpp \
                    src/cvc/tests/data/ariadne_docset src/cvcGL/wasm cvcpkg/recipes/arigl-web \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
@@ -2050,7 +2051,7 @@ jobs:
         id: build
         run: |
           cmake --build build --parallel --target pycvc pycvc_gl pycvc_gl_pkg physics_parity_test
-          cmake --build build --parallel --target ari arix ariglx
+          cmake --build build --parallel --target ari arix ariglx arix_engine_test
           cmake --build build --parallel --target arisrv arisrvx arisrvx_server_link_test
 
       # ── a software GL for the pycvc_gl tests ──
@@ -2416,7 +2417,7 @@ jobs:
         state_exec_gaps_test state_exec_advanced_integration_test state_exec_deep_data_test
         state_exec_bench_test state_exec_groups_test exec_pool_test
         param_table_test result_job_test job_intrinsics_test tet_complex_test skeleton_test
-        contour_stack_test
+        contour_stack_test point_classes_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py
@@ -2424,6 +2425,7 @@ jobs:
         test_pycvc_state_exec_eval.py test_pycvc_state_exec_exceptions.py
         test_pycvc_state_exec_sched.py test_pycvc_state_exec_locks.py test_pycvc_state.py
         test_pycvc_exec_pool.py test_pycvc_jobs.py test_pycvc_contours.py
+        test_pycvc_point_classes.py
       # state_exec_bench runs (build/bin/state_exec_bench), one a line: a scenario and its --size
       # options; run.sh adds --reps 1 --warmup 0 --timeout 900 and the JSON file.
       SAN_BENCH: |

@@ -13,6 +13,7 @@ The block is the source alone, or a map::
       path: [py]                   # sys.path entries, relative to the document
       modules: [sim]               # imported at load, before init:
       export: [sim.step_world]     # functions to export by name (or {name:, as:, async:})
+      console: true                # a Python console in this namespace (ariadne_console.py)
       source: |
         @export
         def histogram(values, bins=16): ...
@@ -20,6 +21,7 @@ The block is the source alone, or a map::
 The document's directory is always on sys.path. ``export`` (``@export``, ``@export(name=...)``) is
 in the source's namespace; a module imports it with ``from _arihost import export``. So is
 ``display(obj)``: pycvc_gl.ariadne_display's where a GL host has lent its window, else a print.
+``console`` is read by the engine after the block runs (``_ariadne_console.consoles_for``).
 
 The host's app keeps whether a block is loading (``_arihost.loading()``), for the code it calls.
 matplotlib's default backend, in a host that has lent a window: see _MatplotlibDefault.
@@ -32,7 +34,7 @@ import re
 import sys
 import types
 
-KEYS = ("source", "modules", "path", "export")
+KEYS = ("source", "modules", "path", "export", "console")
 
 MATPLOTLIB_BACKEND = "module://pycvc_gl.ariadne_mpl"
 
@@ -171,6 +173,12 @@ def _flag(value):
     return str(value).lower() in ("true", "1", "yes", "on")
 
 
+def document_module_name(path):
+    """The module the ``python:`` block of the document at ``path`` runs in: ``__ari__.<stem>``."""
+    stem = re.sub(r"\W", "_", os.path.splitext(os.path.basename(path))[0]) or "document"
+    return f"__ari__.{stem}"
+
+
 def _under(file, dirs):
     if not file:
         return False
@@ -250,8 +258,7 @@ def load_document(block, path, register, export_fn=None):
             sys.path.insert(0, d)
 
     # The document's own module, fresh on every load: a reload runs the block again.
-    stem = re.sub(r"\W", "_", os.path.splitext(os.path.basename(path))[0]) or "document"
-    ns = types.ModuleType(f"__ari__.{stem}", f"the python: block of {path}")
+    ns = types.ModuleType(document_module_name(path), f"the python: block of {path}")
     ns.__file__ = os.path.abspath(path)
     ns.export = export_fn or export
     ns.display = display
