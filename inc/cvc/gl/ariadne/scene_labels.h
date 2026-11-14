@@ -11,7 +11,7 @@
 #ifndef __CVC_GL_ARIADNE_SCENE_LABELS_H__
 #define __CVC_GL_ARIADNE_SCENE_LABELS_H__
 
-// A scene node's `label:` (docs/ARIADNE.md §5.4, "Labels"), drawn by the scene's
+// A scene node's `label:` (docs/ARIADNE.md §5.21), drawn by the scene's
 // cvc::gl::LabelLayerNode: text over the node, offset above it, faded and culled by the camera's
 // distance, on a backdrop with an edge, at a per-label scale, nearer labels over farther ones.
 //

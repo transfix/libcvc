@@ -9,7 +9,7 @@
 */
 
 // cvcgl_ariadne_labels -- a scene node's `label:` and the scene's `entity_labels:`
-// (scene_labels.h, LabelLayer.h, ARIADNE.md §5.4), loaded from a document and rendered for real:
+// (scene_labels.h, LabelLayer.h, ARIADNE.md §5.21), loaded from a document and rendered for real:
 //
 //   fade     label_fade: whole nearer than near, gone past far, linear between;
 //   pixels   a label draws its text over its backdrop inside its edge, above its node;
