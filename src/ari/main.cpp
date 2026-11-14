@@ -258,7 +258,7 @@ int usage(int code) {
   std::fputs("\n"
              "arix is ari with an embedded Python (with pycvc, numpy and the packages beside it):\n"
              "  arix run|snapshot|check [flags] app.py [program args...]\n"
-             "      runs a Python program in place of the document: pycvc_gl.ariadne.Host()\n"
+             "      runs a Python program in place of the document: pycvc.ari.Host()\n"
              "      adopts this host, loads a document, and runs it (host.run(), or by returning)\n"
              "  arix python [python args...]\n"
              "      the embedded interpreter as a plain python3 (a REPL, -c, -m, a script)\n"

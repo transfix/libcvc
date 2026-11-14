@@ -320,7 +320,7 @@ int usage(int code) {
              "packages beside it):\n"
              "  ariglx run|snapshot|check [flags] app.py [program args...]\n"
              "      runs a Python program in place of the document, in a window (snapshot:\n"
-             "      offscreen): pycvc_gl.ariadne.Host() adopts this window, loads a document,\n"
+             "      offscreen): pycvc.ari.Host() adopts this window, loads a document,\n"
              "      and runs it (host.run(), or by returning)\n"
              "  ariglx python [python args...]\n"
              "      the embedded interpreter as a plain python3 (a REPL, -c, -m, a script)\n"
