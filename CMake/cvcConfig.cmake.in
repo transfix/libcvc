@@ -301,6 +301,26 @@ if(@CVC_HAVE_OPUS@)
   endif()
 endif()
 
+# libsodium (E2EE, cvc/net/e2ee.h) found by header and library (no CMake package): recreate
+# CvcSodium::sodium for a STATIC cvc, as CvcOpus::opus above. A cvcpkg libsodium's sodium::sodium
+# comes through CVC_PRIVATE_LINK_PACKAGES below instead.
+if(@CVC_HAVE_SODIUM@ AND NOT TARGET CvcSodium::sodium AND NOT TARGET sodium::sodium)
+  find_package(sodium CONFIG QUIET)
+  if(NOT TARGET sodium::sodium)
+    find_path(_CVC_SODIUM_INC NAMES sodium.h)
+    find_library(_CVC_SODIUM_LIB NAMES sodium libsodium)
+    if(_CVC_SODIUM_LIB)
+      add_library(CvcSodium::sodium INTERFACE IMPORTED)
+      set_target_properties(CvcSodium::sodium PROPERTIES
+        INTERFACE_LINK_LIBRARIES "${_CVC_SODIUM_LIB}")
+      if(_CVC_SODIUM_INC)
+        set_target_properties(CvcSodium::sodium PROPERTIES
+          INTERFACE_INCLUDE_DIRECTORIES "${_CVC_SODIUM_INC}")
+      endif()
+    endif()
+  endif()
+endif()
+
 # A STATIC cvc also exports its PRIVATE imported-target links, wrapped in
 # $<LINK_ONLY:...>: yaml-cpp::yaml-cpp, ftxui::*, nlohmann_json_schema_validator::
 # validator, CURL::libcurl, Qhull::qhullstatic_r and Clipper2::Clipper2 (the permissive
