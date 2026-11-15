@@ -326,8 +326,20 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                        --relay-arg=--ws-listen --relay-arg=127.0.0.1:0 --client-only
                        --client-arg=--relay-room --client-arg=ctest
                        "--client-arg=${_srv_tests}/call_unavailable.ari")
+      # Client programs (S3, roadmap §6.3 tier 2): a stock arisrv whose --doc opts in runs a
+      # client's (room-run ...) as its own, chrooted to its participant, and refuses what that
+      # client could not write itself.
+      add_test(NAME arisrv_room_call_program
+               COMMAND ${_pair} --relay $<TARGET_FILE:arisrv> --client $<TARGET_FILE:ari>
+                       --scheme grpc --relay-arg=--room --relay-arg=ctest --relay-arg=--state-listen
+                       --relay-arg=127.0.0.1:0 --relay-arg=--media-listen --relay-arg=127.0.0.1:0
+                       --relay-arg=--ws-listen --relay-arg=127.0.0.1:0 --relay-arg=--doc
+                       "--relay-arg=${_srv_tests}/client_programs_server.ari" --client-only
+                       --client-arg=--relay-room --client-arg=ctest
+                       "--client-arg=${_srv_tests}/client_programs.ari")
       list(APPEND _call_tests arisrvx_room_call_grpc arisrvx_room_call_grpcs
-           arisrvx_room_call_tls_needs_its_ca arisrv_room_call_unavailable)
+           arisrvx_room_call_tls_needs_its_ca arisrv_room_call_unavailable
+           arisrv_room_call_program)
 
       # The authenticate hook (S5, §6.5.4): tests/auth_service.py admits two test tokens as alice
       # (staff) and bob. alice's calls carry her principal, pass the role gate, are limited to 2 in

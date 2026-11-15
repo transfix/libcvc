@@ -165,6 +165,11 @@ void collect_refs(const YAML::Node &n, std::vector<DocReference> &out, std::set<
             add(e, true);
         else
           add(v, true);
+      } else if (top && key == "wasm") {
+        // The guest the wasm: block runs, beside the document: data, not parsed for more names.
+        const YAML::Node m = v.IsMap() ? v["module"] : v;
+        if (m && m.IsScalar() && m.Scalar().rfind("cvcpkg:", 0) != 0)
+          add(m, false);
       } else if (key == "load") {
         add(v, true);
       } else if (key == "vinay") {

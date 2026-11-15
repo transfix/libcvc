@@ -58,6 +58,9 @@ class SceneGraph;
 class GraphicsNode;
 class GeometryNode; // ShaderPreset applies to a GeometryNode (forward-decl: used only by reference)
 class LodGraphicsNode;
+namespace ariadne {
+class LiveTextureBinding; // stream_texture_binding.h: a node's live texture
+} // namespace ariadne
 class LodPyramidCache;
 class VolRenNode;
 class VolSliceNode;
@@ -77,6 +80,9 @@ struct SceneDataBinding {
   std::string drawn_rev;                            // and its rev then
   std::string frame_key; // frame: the main view camera's frame request (<prefix>.viewers.main...)
   bool framed = false;   // frame: first — done
+  // material: { texture: { stream } }: the terrain's live texture, bound again with each drawing
+  // and ticked by tick_scene.
+  std::shared_ptr<LiveTextureBinding> texture;
 };
 
 // A node whose material: { opacity: <path> } (or { bind, default }) follows state. tick_scene

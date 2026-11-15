@@ -13,11 +13,16 @@
 // the full tier a VTK pipeline through
 // vtkmodules too. When python312.zip has PIL (cvcpkg's pillow-cp312 for wasm), Pillow's codecs
 // and FreeType must work in the page as well. Python's own report says how long the imports and a
-// plain 200000-step loop took in the page, which this prints.
+// plain 200000-step loop took in the page, which this prints. With --wasmdocs (the ariglx_wasm_guests
+// target's ariglx-wasm-guests: web/test/wasm's documents and the test guest, transformed for the
+// browser), a document's wasm: block must run its guest in the page: the guest fetched with the
+// document, its calls, pauses (a yield, and a loop of a few hundred gas slices) and a trap, and a
+// guest over Chrome's 8 MB (big.wasm, the guest with a 9 MiB custom section after it, which this
+// makes) compiled and instantiated asynchronously.
 //
 //   node arigl_web_smoke.mjs --web <share/arigl-web> --docset <src/cvc/tests/data/ariadne_docset> \
-//        --chrome <chrome or chromium> [--pydocs DIR [--expect-pil]] [--isolated]
-//        [--shots DIR] [--keep]
+//        --chrome <chrome or chromium> [--pydocs DIR [--expect-pil]] [--wasmdocs DIR]
+//        [--isolated] [--shots DIR] [--keep]
 //
 // --expect-pil runs the Pillow case even when the zip has no PIL, so it fails instead of being
 // skipped: pass it when the deps prefix had pillow-cp312's inittab manifest, which links PIL in.
@@ -32,6 +37,7 @@
 //   /apps/shared/       the docset's shared/
 //   /apps/py/           ariglx-web's files again, beside the --pydocs documents; /apps/pyprog/ the
 //                       same with a page config that runs program.py and preloads program.ari
+//   /apps/wasm/         ariglx-web's files again, beside the --wasmdocs documents and guests
 //
 // with an ordinary site's headers and a strict Content-Security-Policy (no inline code or style, no
 // eval, nothing from another origin), so a pass also says both pages run under one. The
@@ -56,19 +62,45 @@ const opt = name => {
   return i >= 0 ? argv[i + 1] : undefined;
 };
 const WEB = opt('--web'), DOCSET = opt('--docset'), CHROME = opt('--chrome');
-const SHOTS = opt('--shots'), PYDOCS = opt('--pydocs');
+const SHOTS = opt('--shots'), PYDOCS = opt('--pydocs'), WASMDOCS = opt('--wasmdocs');
 const EXPECT_PIL = argv.includes('--expect-pil');
 const ISOLATED = argv.includes('--isolated');
 if (!WEB || !DOCSET || !CHROME || (EXPECT_PIL && !PYDOCS)) {
   console.error('usage: arigl_web_smoke.mjs --web DIR --docset DIR --chrome PATH ' +
-                '[--pydocs DIR [--expect-pil]] [--isolated] [--shots DIR] [--keep]');
+                '[--pydocs DIR [--expect-pil]] [--wasmdocs DIR] [--isolated] [--shots DIR] ' +
+                '[--keep]');
   process.exit(2);
 }
-// ariglx-web's package (ariglx.js, python312.zip); --pydocs is for it alone.
+// ariglx-web's package (ariglx.js, python312.zip); --pydocs and --wasmdocs are for it alone.
 const PYTHON = fs.existsSync(path.join(WEB, 'ariglx.js'));
-if (PYDOCS && !PYTHON) {
-  console.error(`--pydocs: ${WEB} is not ariglx-web (no ariglx.js)`);
+for (const [flag, dir] of [['--pydocs', PYDOCS], ['--wasmdocs', WASMDOCS]])
+  if (dir && !PYTHON) {
+    console.error(`${flag}: ${WEB} is not ariglx-web (no ariglx.js)`);
+    process.exit(2);
+  }
+if (WASMDOCS && !fs.existsSync(path.join(WASMDOCS, 'guest.wasm'))) {
+  console.error(`--wasmdocs: ${WASMDOCS} has no guest.wasm (build the ariglx_wasm_guests target)`);
   process.exit(2);
+}
+// big.wasm: the test guest with a custom section of 9 MiB after it, so the module is over the 8 MB
+// Chrome compiles and instantiates on the page's own thread. A custom section changes nothing the
+// guest does, and the browser backend reads past it as the engine does.
+function bigGuest() {
+  const leb = n => {
+    const out = [];
+    do {
+      let b = n & 0x7f;
+      n >>>= 7;
+      if (n) b |= 0x80;
+      out.push(b);
+    } while (n);
+    return out;
+  };
+  const name = Buffer.from('ari.smoke.padding');
+  const pad = Buffer.alloc(9 * 1024 * 1024);
+  const body = Buffer.concat([Buffer.from(leb(name.length)), name, pad]);
+  return Buffer.concat([fs.readFileSync(path.join(WASMDOCS, 'guest.wasm')),
+                        Buffer.from([0x00, ...leb(body.length)]), body]);
 }
 const TIMEOUT_MS = Number(process.env.ARIGL_WEB_SMOKE_TIMEOUT_MS || 180000);
 
@@ -97,6 +129,14 @@ function fileFor(urlPath) {
     const shell = path.join(WEB, name);
     if (fs.existsSync(shell) && fs.statSync(shell).isFile()) return shell;
     return path.join(PYDOCS, name);
+  }
+  if (WASMDOCS && rest.startsWith('wasm/')) {
+    const name = rest.slice('wasm/'.length);
+    if (name === '' || name === 'index.html') return path.join(WEB, 'index.html');
+    if (name === 'big.wasm') return {body: bigGuest(), type: TYPES['.wasm']};
+    const shell = path.join(WEB, name);
+    if (fs.existsSync(shell) && fs.statSync(shell).isFile()) return shell;
+    return path.join(WASMDOCS, name);
   }
   if (rest.startsWith('cfg/')) rest = 'app/' + rest.slice(4);
   if (rest === 'app/' || rest === 'app/index.html') return path.join(WEB, 'index.html');
@@ -140,6 +180,12 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, {'Content-Type': 'application/json', 'Cache-Control': 'no-cache',
                         ...ISOLATION});
     res.end(f.json);
+    return;
+  }
+  if (f && f.body) {
+    res.writeHead(200, {'Content-Type': f.type, 'Cache-Control': 'no-cache',
+                        'Content-Security-Policy': CSP, ...ISOLATION});
+    res.end(f.body);
     return;
   }
   if (!f || !fs.existsSync(f) || !fs.statSync(f).isFile()) {
@@ -431,6 +477,27 @@ if (PYDOCS) {
       url: `${ORIGIN}/apps/py/?src=pillow.ari`,
       check: v => v.state === 'running' && v.log.some(l => pilReport.test(l)),
       report: v => v.log.filter(l => /^ariglx-web: PIL /.test(l)),
+    });
+}
+// ariglx-web's WebAssembly guests, with --wasmdocs: what the native arix_wasm_block ctest checks,
+// in the page, and a guest the page can only compile asynchronously.
+if (WASMDOCS) {
+  const guestReport = new RegExp('^ariglx-web: wasm booted yes, init early, echo 1 a, nap 7, ' +
+                                 'boom trapped, spin done$');
+  const bigReport = /^ariglx-web: wasm big guest booted yes, echo 2 b, get-x big$/;
+  cases.push(
+    {
+      name: 'ariglx: a wasm: block\'s guest is fetched, called, paused and trapped in the page',
+      url: `${ORIGIN}/apps/wasm/?src=guest.ari`,
+      check: v => v.state === 'running' && v.log.some(l => /2 file\(s\) from/.test(l)) &&
+                  v.log.some(l => guestReport.test(l)),
+      report: v => v.log.filter(l => /^ariglx-web: wasm /.test(l)),
+    },
+    {
+      name: 'ariglx: a guest over Chrome\'s 8 MB is compiled and instantiated asynchronously',
+      url: `${ORIGIN}/apps/wasm/?src=big.ari`,
+      check: v => v.state === 'running' && v.log.some(l => bigReport.test(l)),
+      report: v => v.log.filter(l => /^ariglx-web: wasm /.test(l)),
     });
 }
 // The tvision desktop's page, when the package has it (cvcpkg's tvision wasm in the deps).
