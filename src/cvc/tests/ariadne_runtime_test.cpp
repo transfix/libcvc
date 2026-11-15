@@ -30,6 +30,7 @@
 #include <cvc/core/app.h>
 #include <cvc/core/async_task.h>  // launch_pool_task generalization test
 #include <cvc/core/notify.h>      // §5.24 the notification feed and the tray's bell
+#include <cvc/core/server_clock.h> // §5.22 the relay's time in the clock's tooltip
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
 #include <cvc/net/browser.h>      // OIDC: a fake browser, a browser page
 #include <cvc/net/credentials.h>  // the ws-send test's CredentialStore
@@ -6390,6 +6391,32 @@ TEST(AriadneRuntime, ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus) {
   EXPECT_LT(log_index(mb, "begin_menu:FE Lab"), log_index(mb, "begin_menu:Windows")) << mb.dump();
   EXPECT_TRUE(mb.saw("tray_button:J|2|0")) << mb.dump();
   EXPECT_FALSE(mb.saw("tray_button:14:05||0")) << "not the document's bar: no clock";
+}
+
+// §5.22 joined to a relay, the clock's tooltip gives the relay's time too: this host's time plus
+// the offset its link measured (cvc/core/server_clock.h), with the offset and the round trip.
+TEST(AriadneRuntime, TheClocksTooltipGivesTheRelaysTime) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  rt.set_wall_clock(five_past_two);
+  rt.set_clock(true);
+  rt.set_root(group({menubar({menu("File", {})})}));
+  rt.render();
+  ASSERT_FALSE(mb.asked.empty());
+  EXPECT_EQ(mb.asked.back().tooltip.find('\n'), std::string::npos) << "no relay: the local time";
+  cvc::set_server_clock(app, 2500.0, 18.0, "wss://relay.test/room");
+  mb.log.clear();
+  rt.render();
+  ASSERT_FALSE(mb.asked.empty());
+  const std::string tip = mb.asked.back().tooltip;
+  EXPECT_NE(tip.find("\nwss://relay.test/room: 14:05:11 (+2.50 s, round trip 18 ms)"),
+            std::string::npos)
+      << tip;
+  cvc::clear_server_clock(app);
+  rt.render();
+  EXPECT_EQ(mb.asked.back().tooltip.find('\n'), std::string::npos) << "left: the local time";
 }
 
 TEST(AriadneRuntime, ADocumentPlacesOrTurnsOffTheTrayClock) {

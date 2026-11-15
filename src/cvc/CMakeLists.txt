@@ -152,6 +152,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/result_job.h
   ../../inc/cvc/core/job_keys.h
   ../../inc/cvc/core/notify.h
+  ../../inc/cvc/core/server_clock.h
   ../../inc/cvc/core/job_intrinsics.h
   ../../inc/cvc/core/process.h
   ../../inc/cvc/core/text.h

@@ -3003,6 +3003,17 @@ menubar:
     `ariadne.tray.clock`, which the runtime seeds from the document or the host and reads every
     frame.
   - A host or test pins the time it reads with `Runtime::set_wall_clock`.
+  - **Joined to a relay** (a `relay:` block or `--relay`, §9.8.3), the tooltip adds the relay's
+    time on a second line: "wss://relay/room: 14:05:11 (+2.50 s, round trip 18 ms)", the relay's
+    clock minus this host's and the round trip the reading came from, its error bound.
+    - The transport's link probe measures it. A Pong carries the answerer's wall clock
+      (`Pong.wall_ns`, `state_transport.proto`), and the Ping's sender takes it as read half a
+      round trip before the Pong arrived (`state_link_stats::note_peer_clock`).
+    - Of the last 8 readings, the one with the shortest round trip is kept, as NTP picks. WS and
+      gRPC both carry it; a peer that sends no wall time (an older one) gives no reading.
+    - The relay session writes the reading once a second while joined
+      (`cvc/core/server_clock.h`, one per `cvc::app`), and clears it when it leaves or loses the
+      relay. A reading not renewed for 15 s is stale and not shown.
 - **Per backend:**
   - ImGui draws the tray in its main menu bar, with the glyphs a little larger than the bar's
     text and each badge a pill.

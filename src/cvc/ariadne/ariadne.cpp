@@ -17,6 +17,7 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <cvc/ariadne/ariadne.h>
@@ -32,7 +33,8 @@
 #include <cvc/ariadne/oidc_host.h>    // pump_oidc
 #include <cvc/ariadne/rich_text.h>    // §5.20 parse_text_style
 #include <cvc/core/app.h>
-#include <cvc/core/notify.h> // §5.24 the feed the tray's bell shows
+#include <cvc/core/notify.h>       // §5.24 the feed the tray's bell shows
+#include <cvc/core/server_clock.h> // §5.22 the relay's time, in the clock's tooltip
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h> // §10.8 (file-pick) parks its program on the picker
 #include <cvc/state/state_exec/async_scheduler.h> // §4.7 app-wide action scheduler (exec_scheduler)
@@ -4745,6 +4747,15 @@ std::vector<Runtime::Impl::TrayEntry> Runtime::Impl::tray_entries(const Widget &
     c.spec.glyph = local_time(now, "%H:%M");
     c.spec.text = true;
     c.tip = local_time(now, "%A %d %B %Y, %H:%M:%S");
+    // Joined to a relay: its time too, and how far its clock is from this one's.
+    if (const cvc::server_clock_reading sc = cvc::server_clock(app); sc.known) {
+      const auto there = now + std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                                   std::chrono::duration<double, std::milli>(sc.offset_ms));
+      char off[48];
+      std::snprintf(off, sizeof off, "%+.2f s, round trip %.0f ms", sc.offset_ms / 1000.0,
+                    sc.rtt_ms < 0.0 ? 0.0 : sc.rtt_ms);
+      c.tip += "\n" + sc.name + ": " + local_time(there, "%H:%M:%S") + " (" + off + ")";
+    }
     c.spec.tooltip = c.tip;
     return c;
   };
