@@ -170,6 +170,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/point_class_intrinsics.h
   ../../inc/cvc/volume/segmentation.h
   ../../inc/cvc/volume/segmentation_params.h
+  ../../inc/cvc/volume/segmentation_intrinsics.h
   ../../inc/cvc/model/model.h
   ../../inc/cvc/model/model_file_io.h
   ../../inc/cvc/volume/volume_ops.h
@@ -322,6 +323,7 @@ set(SOURCE_FILES
   volume/point_class_intrinsics.cpp
   volume/segmentation/genseg.cpp
   volume/segmentation/segmentation.cpp
+  volume/segmentation/segmentation_intrinsics.cpp
   image/image.cpp
   image/image_decode.cpp
   image/magick_io.cpp
