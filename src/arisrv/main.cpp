@@ -705,6 +705,15 @@ int main(int argc, char **argv) {
                    docPath.c_str());
       return 2;
     }
+    // A client program is its sender's own: bound writes say who sent it.
+    if (serverDoc->block().client_programs.on && bindWritesArg != "on") {
+      std::fprintf(stderr,
+                   "arisrv: --doc: %s runs client programs, which needs bound writes "
+                   "(--bind-writes on): without them a connection could run one as another "
+                   "participant\n",
+                   docPath.c_str());
+      return 2;
+    }
   }
 
   // The room's world (ARIADNE_WORLDS.md WD1), chosen now so that a bad one stops the relay before
@@ -1401,6 +1410,27 @@ int main(int argc, char **argv) {
         calls->fail(r, "unavailable",
                     "room-call needs bound writes (--bind-writes on): without them a connection "
                     "could call as another participant");
+        continue;
+      }
+      if (!r.program.empty()) {
+        // A client program (S3): the document runs it as the caller's own, chrooted to its
+        // participant, in a stock arisrv as in arisrvx (never in Python). Its reply comes from
+        // the doc_step whose drain sees it end, or now for a refusal.
+        if (!serverDoc) {
+          calls->fail(r, "unavailable",
+                      "this relay runs no client programs (a --doc whose server: block has "
+                      "client_programs: runs them)");
+          continue;
+        }
+        cvc::ariadne::conference::room_call_relay *relay = calls.get();
+        serverDoc->run_client_program(
+            r.pid, r.program, r.args,
+            [relay, pid = r.pid, id = r.id](const cvc::ariadne::ServerDocument::ClientOutcome &o) {
+              if (o.ok)
+                relay->result(pid, id, o.value);
+              else
+                relay->error(pid, id, o.code, o.message);
+            });
         continue;
       }
 #ifdef CVC_ARIADNE_PYTHON
