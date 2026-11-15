@@ -1586,6 +1586,7 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
 | room (`register_room_intrinsics`) | `room-*` and `chat-*` | `host_proxied` | they write the app-global room tree raw, and use a room's chat client outside the room table's lock |
 | room-media (`register_room_media_intrinsics`) | `room-publish`, `room-subscribe` | `host_proxied` | they write the room tree raw and drive the bridge; a subscribed proxy posts to the caller's group |
 | oidc (`enable_oidc`) | `oidc-*` | `host_proxied` | process-global sessions, stepped by `pump_oidc` on the host thread; a document that uses oidc stays in group 0 (S1-Q6) |
+| e2ee (`enable_e2ee`, `register_e2ee_intrinsics`; master's #1191) | `e2ee-*` | `host_only` (registered without a kind; not yet audited) | the store locks; `e2ee-backup` and `e2ee-restore` are async functions on `*ictx.host`; in an app that installs them an isolated document is placed in a host-affinity group (`host_only_bindings`) |
 | `nav_compute` (the example) | `nav-step` | `any` | its marshal touches nothing, and its kernel runs on the background pool |
 | The backend's verbs (the Runtime's own, `Runtime::Impl::install_backend_verbs`) | `clipboard-set` (where the backend has a clipboard), `fullscreen` | `host_proxied` | they call the backend, whose window and clipboard are the host thread's; `has?` sees them in an `any` group too (`AriadneIsolatedDocs.TheBackendsVerbsRunOnTheFramesThread`) |
 | | `file-pick` (where there is a backend), `file-info`, `file-forget` (master's #1190) | bound as they are in every group | `file-info` and `file-forget` lock the app's `PickedFiles`; `file-pick` is async, so it is not proxied: it parks on the program's own host, claims the Runtime's picker hub under its lock where it is called, and opens the picker on the host thread (`exec_pool::run_on_host` for the group the verbs were bound for; inline when it is called there, or in group 0); the answer goes through the host's finisher |
@@ -3389,6 +3390,7 @@ audit and the thread-affine declarations; `uri_state`'s and streams' pin vectors
     `retarget_document_streams` and `close_document_streams` over a document's stream table;
   - `room_intrinsics.cpp`, `room_media_intrinsics.cpp` (a subscribed proxy on the caller's group),
     `oidc_host.cpp`: `host_proxied`;
+  - `e2ee_intrinsics.cpp` (master's #1191): its async functions on `*ictx.host`;
   - `uri_state.cpp`: its chains are `cvc::pin_vector`s;
   - `exec_pool.cpp`: a force-moved call ends at its deadline (4.4);
   - `state_sync_adapter.h`/`.cpp`: what is not thread-safe, in comments;

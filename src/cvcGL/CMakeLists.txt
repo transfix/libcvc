@@ -942,6 +942,15 @@ add_executable(cvcgl_ariadne_realize test/cvcgl_ariadne_realize.cpp)
 target_link_libraries(cvcgl_ariadne_realize PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_realize COMMAND cvcgl_ariadne_realize)
 
+# Ariadne §5.4 repeat: on a scene node: copies made and taken as the count (a number, a key, a
+# read-lane expression) changes, with RealizedScene's lists kept in step. Part 2 runs a document in
+# AriRuntime and skips without an ImGui overlay unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_repeat test/cvcgl_ariadne_repeat.cpp)
+  target_link_libraries(cvcgl_ariadne_repeat PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_repeat COMMAND cvcgl_ariadne_repeat)
+endif()
+
 # H1 slice 6: the conference room in 3D (room scene realize + avatar markers + key -> intent).
 add_executable(cvcgl_room_view test/cvcgl_room_view.cpp)
 target_link_libraries(cvcgl_room_view PRIVATE cvcGL)
@@ -1252,6 +1261,14 @@ add_executable(cvcgl_viewport_input test/cvcgl_viewport_input.cpp)
 target_link_libraries(cvcgl_viewport_input PRIVATE cvcGL)
 add_test(NAME cvcgl_viewport_input COMMAND cvcgl_viewport_input)
 
+# Viewport::setRefreshHz: a throttled inset draws its scene at most hz times a second and shows its
+# last pixels in between, byte for byte, with and without a multisampled window; a move, being
+# shown again, invalidate() and the time passing draw it, and a mirror is re-synced only when it
+# draws. Offscreen; skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+add_executable(cvcgl_viewport_refresh test/cvcgl_viewport_refresh.cpp)
+target_link_libraries(cvcgl_viewport_refresh PRIVATE cvcGL)
+add_test(NAME cvcgl_viewport_refresh COMMAND cvcgl_viewport_refresh)
+
 # Streaming geometry (StreamingGeometryNode / RibbonNode / DrapedLinkNode over the
 # two streaming VTK mappers). Uploads are counted twice: by the node's own
 # streamStats() and at the driver, by test/gl_upload_counter.cpp, which swaps
@@ -1474,4 +1491,4 @@ endif()
 # (CMake/CvcHostStack.cmake). Names not built here are skipped.
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
-                        cvcgl_ariadne_scenes)
+                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat)
