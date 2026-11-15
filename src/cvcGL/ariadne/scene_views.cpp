@@ -200,6 +200,7 @@ struct SceneViews::View {
   bool own_eye = true; // its camera is not the main view's
   std::unordered_map<vtkProp *, Twin> twins;
   bool dragging = false, panning = false;
+  int settle = 0; // frames a throttled view (refresh_hz) still draws after input on it
 
   // What the mirror draws for the main view's prop p (Viewport::setMirrorFilter).
   vtkProp *draw(vtkProp *p) {
@@ -479,6 +480,21 @@ Look look_of(const ari::Value &v) {
       l.merge(ml);
     }
   return l;
+}
+
+// Two override: lists, entry by entry: a throttled view (refresh_hz) draws at once when they
+// differ.
+bool same_overrides(const std::vector<std::pair<std::string, Look>> &a,
+                    const std::vector<std::pair<std::string, Look>> &b) {
+  if (a.size() != b.size())
+    return false;
+  for (size_t i = 0; i < a.size(); ++i) {
+    const Look &x = a[i].second, &y = b[i].second;
+    if (a[i].first != b[i].first || !(x == y) || x.replace != y.replace ||
+        x.has_xform != y.has_xform || !std::equal(x.xform, x.xform + 16, y.xform))
+      return false;
+  }
+  return true;
 }
 
 bool same_start(const ari::SceneCamera &a, const ari::SceneCamera &b) {
@@ -1248,6 +1264,12 @@ void SceneViews::register_widget() {
                                 name.c_str());
           return {};
         }
+        // What it shows, before this frame's props: a throttled view (refresh_hz) draws at once
+        // when that changes, not at its next refresh.
+        const std::vector<std::string> show0 = v->show, hide0 = v->hide;
+        const bool chrome0 = v->chrome;
+        const std::string camera0 = v->camera, shadow0 = v->shadow_mode;
+        const std::vector<std::pair<std::string, Look>> overrides0 = v->overrides;
         v->show = tag_list(w.props.find("show"));
         v->hide = tag_list(w.props.find("hide"));
         if (!w.bind.empty()) { // a bound view shows the tags its state key holds
@@ -1334,6 +1356,16 @@ void SceneViews::register_widget() {
             if (vtkRenderer *vr = v->vp->renderer()) // one colour, not the main view's gradient
               vr->SetGradientBackground(false);
           }
+        // refresh_hz: draw its scene at most this many times a second and show its last pixels in
+        // between (Viewport::setRefreshHz), for a map or an overview whose picture changes slowly
+        // and costs a second draw of the scene every frame. 0 or unset: every frame.
+        const double hz = std::max(0.0, w.props.num("refresh_hz", 0.0));
+        if (hz != v->vp->refreshHz())
+          v->vp->setRefreshHz(hz);
+        else if (hz > 0.0 && (v->show != show0 || v->hide != hide0 || v->chrome != chrome0 ||
+                              v->camera != camera0 || v->shadow_mode != shadow0 || !v->framed ||
+                              !same_overrides(v->overrides, overrides0)))
+          v->vp->invalidate();
 
         // Its rect: `width` (logical px; the window's width when unset) by `height` (3/4 of the
         // width when unset).
@@ -1436,6 +1468,17 @@ void SceneViews::register_widget() {
               cam.endDrag();
             v->dragging = v->panning = v->picking = false;
           }
+          // A throttled view answers input at once: its camera moves, or a pick changes what the
+          // host shows, so it draws now and for a few frames after, not at its rate.
+          constexpr int kSettleFrames = 3;
+          if (ImGui::IsItemActive() || ImGui::IsItemDeactivated() ||
+              (ImGui::IsItemHovered() &&
+               (io.MouseWheel != 0.0f || ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))))
+            v->settle = kSettleFrames;
+        }
+        if (v->settle > 0) {
+          --v->settle;
+          v->vp->invalidate();
         }
         return edit;
       });

@@ -2632,6 +2632,7 @@ windows:
 | `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans), the wheel zooms, and a double-click puts the camera back where it started. `pick` makes the left button pick instead of orbiting (below); the middle and right buttons still pan, and the wheel still zooms. The view is outlined while the pointer is over it. |
 | `pick` | With `input: pick`, the state key a pick writes under (bound like `bind:`). Defaults to `viewers.<view>.pick`. |
 | `on_pick` | With `input: pick`, an action run on each pick (a program, or a bare name for a host handler), with an `event` dict of the same fields. |
+| `refresh_hz` | Draw the scene at most this many times a second, and show the last picture in between (below). `0` or unset: every frame. |
 
 **Picking.** In an `input: pick` view, the left button picks what the view draws: a press, each
 move while it is held, and the release. Each pick tests the scene's nodes as this view draws them
@@ -2676,6 +2677,21 @@ writes `i`, `j`, `k` and `value` with `x`, `y`, `z`; past the volume's edge it s
 point on the plane (`x`, `y`, `z`), with `hit` 0 and no voxel, so a drag keeps reporting. In any
 other view a pick that lands on a `volume_slice` node writes its voxel too. (`cvcgl_ariadne_slice_view`,
 `cvcgl_camera_slice`.)
+
+**Refresh rate.** A view draws the scene a second time, every frame: a mirror of the main view
+draws every node again, with its own camera, so a map beside a busy scene can cost as much as the
+scene. `refresh_hz: 5` draws it at most five times a second; the frames in between show its last
+picture, kept in a texture the size of the window (`Viewport::setRefreshHz`). It draws at once,
+whatever the rate:
+
+- when it moves or changes size, or is shown again;
+- when its `show`, `hide`, `chrome`, `camera`, `shadows`, `override` or starting camera change;
+- while the pointer drags, wheels or picks in it, and for three frames after, so what a pick
+  changed shows without waiting.
+
+Picks test the scene as it is, not the last picture. A view that does not clear its rect (one that
+draws over what is under it) draws every frame whatever the rate. (`cvcgl_viewport_refresh`,
+`cvcgl_ariadne_pick`.)
 
 **Tags.** A node's `tags:` hold for its whole subtree, so a tagged child under a tagged parent is
 drawn only where both are allowed: the parent's tags take the child out of a view that rules them
@@ -4380,7 +4396,10 @@ host.run()                          # until SIGTERM; the app's shutdown, then th
 
 - **The script thread.** The program runs on a thread of its own with one asyncio loop
   (`host.loop`), which serves its ASGI apps (uvicorn) and its tasks. The relay never runs Python,
-  never takes the GIL and never waits on the program: a sync handler holds up only the loop.
+  never takes the GIL and never waits on the program: a sync handler holds up only the loop. A
+  program keeps each task it starts (`host.loop.create_task`) until the task is done: asyncio holds
+  tasks only weakly, so one waiting on a stream of its own (`asyncio.open_connection`) is freed by
+  the next full garbage collection, mid-await, and its work never finishes.
 - **Writes.** `host.set`, `set_tree`, `set_series` and `set_plot` (as `pycvc_gl.ariadne.Host`'s)
   take paths from the tree's root and are queued. The relay applies them on its next room step
   (60 Hz), ahead of the server document's programs, coalesced per path and in the order of each path's last write
@@ -4805,6 +4824,7 @@ against a local test server. `ari snapshot` prints the programs' warnings after 
 | `--net-policy FILE` | read `allow` and `credential` lines from `FILE` (repeatable; implies `--net`) |
 | `--credential-store S` | keep credentials across runs in `S` (implies `--net`; not in a browser) |
 | `--credential-env N=V` | credential `N` is the token in environment variable `V`, for this run (repeatable; a policy `credential` line must bind `N`; not in a browser) |
+| `--e2ee-store S` | keep end-to-end encryption keys in `S`, a name or a path, for the `e2ee-*` verbs (§10.8; implies `--net`; not in a browser) |
 | `--oidc-issuer ISSUER` | documents may sign in (§10.5) with `ISSUER` only; allows its origin (repeatable; implies `--net`) |
 | `--oidc-client I=ID` | sign in to issuer `I` as client `ID`, the launcher's registration (repeatable; pins `I` too) |
 | `--oidc-redirect-uri U` | the redirect URI a browser page registers (§10.5; default: the page's own URL) |
@@ -5371,6 +5391,53 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
   (`cvc::net::ws_start`, `WsConnection::recv_async` in
   [`ws_client.h`](../inc/cvc/net/ws_client.h)). A page may close a socket only with code 1000
   or 3000-4999, so there any other `CODE` is sent as 1000.
+
+### 10.8 End-to-end encrypted DMs: the `e2ee-*` verbs
+
+These verbs seal and open TX.WTF's end-to-end encrypted direct messages: X3DH, then a Double
+Ratchet, over libsodium, byte-compatible with TX.WTF's own web client.
+- **Who holds the keys.** The host does. A document names an account's handle and a conversation,
+  gives the verbs what the server sent, and sends what they give back with `http-request`. It never
+  holds a key: every dict below has public keys, ciphertext and plaintext only, and no error quotes
+  a key.
+- **When they are there.** A host has them with `--e2ee-store SPEC` (a name in the user's config
+  directory, or a path), on a build with libsodium.
+- **Where they are not.** Not in a browser yet, and never on a relay.
+- **More.** docs/E2EE.md has the design, the key storage, and the cross-check against e2ee.js.
+
+| verb | what |
+|---|---|
+| `(e2ee-status)` | `{ok persistent error}`: whether the verbs below are here (the store may not open: no libsodium, a browser, another process holds it), and whether the keys outlive this run |
+| `(e2ee-identity H)` | the handle's public keys `{identity_key_ed25519 identity_key_x25519 registration_id fingerprint one_time_prekeys publish}`, or `nil`; `publish` is the `POST /e2ee/keys` body |
+| `(e2ee-create H [N])` | make the handle's identity with N one-time prekeys (20); the same dict |
+| `(e2ee-prekeys H N)` | N more one-time prekeys: the `POST /e2ee/keys/one-time` body |
+| `(e2ee-forget H)` | drop its identity, sessions and cached plaintext |
+| `(e2ee-session? H CONV)` | whether a session for conversation CONV is held here |
+| `(e2ee-seal H CONV PEER TEXT [BUNDLE])` | `{ok need_bundle error body}`: `body` is the `POST /e2ee/dm/conversations/{CONV}/messages` body for user PEER. A first message needs BUNDLE (`GET /e2ee/keys/{username}`); without it `need_bundle` is `#t` and nothing changed |
+| `(e2ee-seal-group H CONV TEXT MEMBERS)` | one body, a key per member (`grp-dr-v1`); MEMBERS are user ids or `(dict "user_id" ID "bundle" B)`; `need_bundles` lists the ids that need one |
+| `(e2ee-sent H MSGID TEXT)` | keep our own send's text under the server's id (a sender cannot open what it sent) |
+| `(e2ee-open H CONV MESSAGE)` | `{ok status text attachments error}` for one listed message; status `ok`, `cached`, `own`, `locked`, `no-session` (its session is on another device) or `failed` |
+| `(e2ee-backup H PASSPHRASE)`, `-async` | the `PUT /e2ee/backup` body (Argon2id, about a second): `{ok error body}` |
+| `(e2ee-restore H BLOB PASSPHRASE)`, `-async` | take the identity from a `GET /e2ee/backup` reply: `{ok error identity}` |
+| `(e2ee-fingerprint KEY)` | a key people can compare: 40 hex digits in groups of 5 |
+
+Things to know:
+
+- **Order matters.** Open a conversation's messages in the order they were sent (ascending id).
+  A message opened once comes back `cached`; the ratchet never sees it twice.
+- **A tampered or forged message changes nothing.** It fails, and the session is as it was.
+- **A session is this device's.** Where another device holds a conversation's session, its
+  messages come back `no-session`. A document must not start a new one there: the other side
+  would ignore it, and its copy would break.
+- **The passphrase passes through the document.** It comes from a password field, so it is in
+  state for that one action. Clear the field in the same handler.
+- **The store is locked to one process.** A second host on the same `--e2ee-store` file gets no
+  verbs, and `(e2ee-status)` says it is in use.
+- **Tests.** `e2ee_test` replays vectors written by TX.WTF's own e2ee.js and compares every byte;
+  `ariadne_e2ee_test` runs the verbs in a document. `tools/e2ee/interop.sh` makes a live round
+  trip with e2ee.js.
+
+---
 
 ## 11. Caveats — what is not yet wired
 
