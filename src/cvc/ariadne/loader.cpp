@@ -157,7 +157,7 @@ const char *const kAriSchema = R"ARISCHEMA({
     "windows_menu": {"type": ["boolean", "string"]},
     "clock":    {"type": "boolean"},
     "notifications": {"type": "boolean"},
-    "menu_collapse": {"type": ["boolean", "string"]},
+    "menu_collapse": {"enum": [true, false, "auto", "never", "always"]},
     "keys": {
       "type": "object",
       "additionalProperties": {
