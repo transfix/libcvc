@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cvc/state/state_exec/heap.h> // cycle_registry_ptr: the evaluator's own registry
 #include <cvc/state/state_exec/types.h>
 #include <exception>
 #include <functional>
@@ -233,6 +234,11 @@ public:
   using macro_map = std::unordered_map<std::string, std::pair<std::vector<symbol>, value_t>>;
   macro_map &user_macros() { return user_macros_; }
 
+  /// The evaluator's own context, which its evaluations run in: the natives it calls get it
+  /// (call_args::context()), and what its programs capture is tracked in its registry, the
+  /// evaluator's own (made at the first call).
+  exec_context &context();
+
 private:
   // Evaluate `expr`, keeping it on the trail meanwhile (an exception's traceback).
   value_t eval_internal(const value_t &expr, const environment_ptr &env);
@@ -274,6 +280,9 @@ private:
   value_t apply_closure(const closure_ptr &cls, const std::vector<value_t> &args);
   value_t substitute(const value_t &tmpl, const std::unordered_map<std::string, value_t> &subst);
 
+  // Its registry, the first member so it goes last: after the evaluator has let go of its global
+  // environment and what else it holds of its programs' (stackless_evaluator::own_registry_).
+  cycle_registry_ptr own_registry_;
   environment_ptr global_env_;
   value_t root_expr_;
   macro_map user_macros_;
@@ -303,6 +312,8 @@ private:
   std::mutex pause_mu_;
   std::condition_variable pause_cv_;
   std::recursive_mutex eval_mu_;
+
+  exec_context ctx_; // context()
 };
 
 } // namespace cvc::state_exec
