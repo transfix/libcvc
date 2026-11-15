@@ -75,6 +75,7 @@ add_executable(state_distributed_delegation_integration_test state_distributed_d
 add_executable(state_link_test state_link_test.cpp)
 add_executable(state_send_message_test state_send_message_test.cpp)
 add_executable(stream_test stream_test.cpp)
+add_executable(stream_raster_test stream_raster_test.cpp)
 add_executable(stream_to_image_test stream_to_image_test.cpp)
 add_executable(state_link_cycles_test state_link_cycles_test.cpp)
 add_executable(state_expiry_test state_expiry_test.cpp)
@@ -426,6 +427,7 @@ set(TEST_TARGETS
   state_link_test
   state_send_message_test
   stream_test
+  stream_raster_test
   stream_to_image_test
   state_link_cycles_test
   state_expiry_test
@@ -1773,6 +1775,13 @@ target_link_libraries(stream_test
     GTest::gtest_main
 )
 
+target_link_libraries(stream_raster_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(stream_to_image_test
   PRIVATE
     cvc
@@ -3062,9 +3071,14 @@ cvc_discover_tests(vis_tiler_test)
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_ewave_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test)
   cvc_discover_tests(${_lsys_test})
 endforeach()
+# The water's long runs (a channel's walls, a thin wall, a moving source's wake) take 105-195 s
+# each in a Debug build, and a PR's Debug ctest gives a test without a TIMEOUT of its own 300 s
+# (ci.yml), which a busy runner misses: three of them timed out on two unrelated PRs on
+# 2026-11-14. Their own budget, so a slow box fails on a real hang only.
+cvc_discover_tests(ocean_ewave_test PROPERTIES TIMEOUT 1200)
 cvc_discover_tests(volume_io_extra_test)
 if(TARGET lbie_mesher_test)
   cvc_discover_tests(lbie_mesher_test)
@@ -3253,6 +3267,7 @@ cvc_discover_tests(state_distributed_delegation_integration_test)
 cvc_discover_tests(state_link_test)
 cvc_discover_tests(state_send_message_test)
 cvc_discover_tests(stream_test)
+cvc_discover_tests(stream_raster_test)
 cvc_discover_tests(stream_to_image_test)
 cvc_discover_tests(state_link_cycles_test)
 cvc_discover_tests(state_expiry_test)

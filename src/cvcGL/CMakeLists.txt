@@ -16,9 +16,9 @@ cmake_minimum_required(VERSION 3.16)
 # from the same source tree) it parses that line out of the top-level CMakeLists.txt,
 # the same single source of truth the cvc package and the recipe-version CI gate use.
 # This used to be hardcoded 3.0, so every bundle's cvcGLConfigVersion.cmake reported
-# 3.0 and a consumer's find_package(cvcGL 3.5) rejected a 3.5 cvcGL. SOVERSION stays 3,
-# so the runtime name (libcvcGL.so.3) is unchanged; only the file suffix and the
-# exported package version move -- as for libcvc itself (src/cvc/CMakeLists.txt).
+# 3.0 and a consumer's find_package(cvcGL 3.5) rejected a 3.5 cvcGL. SOVERSION is the major
+# version, as libcvc's is (src/cvc/CMakeLists.txt): libcvcGL.so.4 from 4.0, whose ABI breaks
+# with libcvc's, so a 4.x cvcGL never loads where a 3.x one was linked.
 if(DEFINED libcvc_VERSION)
   set(_cvcgl_version "${libcvc_VERSION}")
 else()
@@ -365,7 +365,7 @@ if(APPLE)
 endif()
 
 set_target_properties(cvcGL PROPERTIES POSITION_INDEPENDENT_CODE ON
-  VERSION ${PROJECT_VERSION} SOVERSION 3)
+  VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
 
 # Same reason as src/cvc/CMakeLists.txt:795-801, which cvcGL was missing: the
 # sources carry no __declspec(dllexport), so a SHARED Windows build emits a
@@ -947,6 +947,15 @@ add_executable(cvcgl_ariadne_realize test/cvcgl_ariadne_realize.cpp)
 target_link_libraries(cvcgl_ariadne_realize PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_realize COMMAND cvcgl_ariadne_realize)
 
+# Ariadne §5.4 repeat: on a scene node: copies made and taken as the count (a number, a key, a
+# read-lane expression) changes, with RealizedScene's lists kept in step. Part 2 runs a document in
+# AriRuntime and skips without an ImGui overlay unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_repeat test/cvcgl_ariadne_repeat.cpp)
+  target_link_libraries(cvcgl_ariadne_repeat PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_repeat COMMAND cvcgl_ariadne_repeat)
+endif()
+
 # H1 slice 6: the conference room in 3D (room scene realize + avatar markers + key -> intent).
 add_executable(cvcgl_room_view test/cvcgl_room_view.cpp)
 target_link_libraries(cvcgl_room_view PRIVATE cvcGL)
@@ -1305,6 +1314,11 @@ if(NOT EMSCRIPTEN)
                                           test/gl_upload_counter.cpp)
   target_link_libraries(cvcgl_streaming_geometry PRIVATE cvcGL)
   add_test(NAME cvcgl_streaming_geometry COMMAND cvcgl_streaming_geometry)
+  # Live textures (ARIADNE.md 5.4): a raster stream on a node's texture, uploaded a rectangle at a
+  # time, counted at the driver.
+  add_executable(cvcgl_live_texture test/cvcgl_live_texture.cpp test/gl_upload_counter.cpp)
+  target_link_libraries(cvcgl_live_texture PRIVATE cvcGL)
+  add_test(NAME cvcgl_live_texture COMMAND cvcgl_live_texture)
   add_executable(cvcgl_streaming_overlays test/cvcgl_streaming_overlays.cpp
                                           test/gl_upload_counter.cpp)
   target_link_libraries(cvcgl_streaming_overlays PRIVATE cvcGL)
@@ -1503,4 +1517,4 @@ endif()
 # (CMake/CvcHostStack.cmake). Names not built here are skipped.
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
-                        cvcgl_ariadne_scenes)
+                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat)
