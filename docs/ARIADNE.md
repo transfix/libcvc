@@ -1142,7 +1142,15 @@ is cast along and the clouds are lit from), `shade_k` / `shade_floor`, `horizon`
 clouds), `far_reach` (how far the far clouds reach toward the horizon; out of the camera's bounds),
 `evolve` (the weather's speed: 1 is a step every 5 s, a cloud lasting some 8 minutes; 0 holds the
 clouds) and `shadow` (0 starts the shade off). Live keys under the node's root (`sky.` unless
-`keys:`): `drift`, `morph`, `evolve`, `orographic` and `shadow`, all on `sky_controls.ari`.
+`keys:`): `drift`, `morph`, `evolve`, `orographic`, `shadow`, `coverage` (the cells' targets are
+ranked again at once, and the clouds fade in or out to them) and `wind_az`, all on
+`sky_controls.ari`.
+
+The sun is the light rig's key once the scene has one (`lighting.key_azimuth` /
+`key_elevation`, the Stage lighting panel), followed live: a new sun relights the cloud maps and
+re-composites the shade and the far clouds. `sun_az` / `sun_el` are used only without a rig. A
+`water` node listed in `receivers:` takes the shade too: its sunlight and glints dim under a cloud.
+`base` and `top` are still read once at realize.
 
 **Water.** `water` draws everything below `level` on a ground (`world:` a `generated_world`, or
 `ground:` any height-field node) as the GPU FFT sea of OCEAN-AND-WEATHER-ROADMAP.md (§11.2, O15):

@@ -50,3 +50,15 @@ units:
         hi: 2.0
         fmt: "%.2f"
         tooltip: "how strongly the slopes the wind climbs gather cloud (0: the ground has no say)"
+      - slider_float: Coverage
+        bind: "{keys}.coverage"
+        lo: 0.0
+        hi: 1.0
+        fmt: "%.2f"
+        tooltip: "the share of the sky's cells holding a cloud; clouds fade in or out to it"
+      - slider_float: Wind heading
+        bind: "{keys}.wind_az"
+        lo: -180.0
+        hi: 180.0
+        fmt: "%.0f deg"
+        tooltip: "the heading the wind blows toward (90: +x); the drift and the orographic slopes follow"
