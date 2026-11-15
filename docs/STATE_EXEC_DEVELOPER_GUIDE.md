@@ -1005,20 +1005,21 @@ while (busy())
   inside the group's own pump (a native or an inline callback of its own process) it aborts, in
   every build.
 - **Failures.** A C++ exception escaping a group's pump fails that group only: its processes are
-  killed with the exit error "internal error", `failed()` is true, and `pool.failed_groups()` lists
-  it after the calling thread's `pump_all` on that pool, until its next one. No exception leaves a
-  worker.
+  killed with the exit error "internal error", `failed()` is true, and the `pump_all` that pumped
+  it returns it among its failed groups. No exception leaves a worker.
 
 #### The pump scope
 
 A program's objects go to its group's cycle registry, and `math.random` draws from its group's
-stream, whichever thread pumps it. The group's scheduler binds both itself on every entry that can
-run DSL (`step`, `run`, `sync_run`, `sync_run_steps`, `sync_step`, `drain_ingress`,
-`wake_awaiting`, `restore`), and a pump binds the group as `exec_group::current()`. The app's
-scheduler and each pycvc `Exec` have a registry and a stream of their own too. So their tracked
-objects are read with `tracked_objects(*sched.registry())` (or `group.registry()`), not the
-no-argument `tracked_objects()`, which reads the calling thread's own registry ([Reference
-cycles](#reference-cycles)). A scheduler you build and give neither keeps the thread's, as before.
+stream, whichever thread pumps it. Both are in the group's scheduler's evaluation context
+(`sched.evaluation_context()`, an `exec_context`), which its steps run in and which its natives
+get as `call_args::context()`; a pump sets the group there, so a native reads its group as
+`exec_group::current(args.context())`, and `group.pumping_here()` says whether the calling thread
+pumps it. Nothing of it is kept per thread. The app's scheduler and each pycvc `Exec` have a
+registry and a stream of their own too. Their tracked objects are read with
+`tracked_objects(*sched.registry())` (or `group.registry()`) ([Reference
+cycles](#reference-cycles)). A scheduler you build and give neither tracks into its evaluator's own
+registry, collected and freed with it.
 
 #### The pump owner
 
@@ -2355,20 +2356,25 @@ due. A finished process also releases its evaluation state right away (`process:
 result, error and statistics stay), so what it leaked can be collected before the process is
 reaped.
 
-Tracked objects live in a **cycle registry** (`cycle_registry`, `heap.h`). A scheduler given one
-(`set_cycle_registry`) binds it on every entry that can run DSL, whichever thread drives it, and
-collects it: each execution group, the app's scheduler and each pycvc `Exec` own one, and collect
-and free it after their scheduler and environments are gone; what a host still holds then joins the
-caller's registry. Everything else (bare evaluators, bare schedulers) uses the calling thread's own
-registry, as before. The no-argument `collect_cycles()`, `tracked_objects()` and
-`cycle_collection_due()` act on the registry bound on the calling thread, else the thread's own;
-each has a form taking a registry (`tracked_objects(*sched.registry())`), and `cycle_registry_scope`
-binds one. From Python, `Exec.collect_cycles()` and `Exec.tracked_objects()` act on an `Exec`'s
-registry, and `pycvc.collect_cycles()` on the calling thread's own. A host that runs evaluators
-without a scheduler calls `collect_cycles()` itself, between steps; inside a step it does nothing. A
-thread's own registry is dropped, uncollected, when the thread ends, unless the thread called
-`collect_cycles_at_thread_exit()` once (the pool's workers do; never a Python thread or the main
-thread, whose thread-locals go after `Py_Finalize` or under the Windows loader lock).
+Tracked objects live in a **cycle registry** (`cycle_registry`, `heap.h`), the one in the
+`exec_context` the work runs in. A scheduler given one (`set_cycle_registry`) has it in its
+evaluation context, whichever thread drives it, and collects it: each execution group, the app's
+scheduler and each pycvc `Exec` own one, and collect and free it after their scheduler and
+environments are gone. A bare evaluator or a bare scheduler tracks into a registry of its own (its
+evaluator's, `evaluator.context().registry`), made at its first use and collected and freed with
+it. Nothing is kept per thread: what a host still holds when a registry goes is no longer tracked,
+so a host that keeps a program's function past its registry breaks any cycle it is in itself. A
+host that keeps an environment past the evaluator or scheduler running programs in it gives that
+one a registry of the host's (`set_cycle_registry`) that outlives the environment, as pycvc's
+`Exec` does, or lets go of the environment first: a registry's last collection, as it goes, frees
+only what nothing else holds then. (An evaluator's own registry goes after the evaluator has let
+go of its global environment, so a bare evaluator's cycles go with it.)
+`collect_cycles`, `tracked_objects`, `cycle_collection_due` and `note_process_exit` take the
+registry (`tracked_objects(*sched.registry())`); `collect_cycles(ctx)` collects a context's, and
+does nothing inside a step. From Python, `Exec.collect_cycles()` and `Exec.tracked_objects()` act
+on an `Exec`'s registry, and a bare `stackless_evaluator`'s `collect_cycles()` and
+`tracked_objects()` on its own. A host that runs evaluators without a scheduler for long calls
+`collect_cycles(*ev.context().registry)` itself, between steps.
 
 ### Cluster-Level Resource Policy
 
@@ -3020,7 +3026,7 @@ read. The document is held to the allocation limit as it grows.
   at most one level; `docs/STATE_EXEC_GRAMMAR.md`, "Native call nesting"). A DSL function runs
   as the process's own frames, so its body's steps are eval steps. The job goes on in the data
   step after it returns, even with `data.step_nodes` = 0. Another native function can do the
-  same with `call_function(fn, args, who)`.
+  same with `call_function(args.context(), fn, args, who)`.
 - **Cost.** `collections.sort` is a stable merge sort, n log n nodes.
   `collections.unique` costs a node per comparison, and compares lists and dicts with a sliced
   equality walk. `collections.dict-merge` keeps a key index, so it is linear. Every job polls the

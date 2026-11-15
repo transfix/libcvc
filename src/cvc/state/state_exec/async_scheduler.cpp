@@ -12,7 +12,7 @@
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/scheduler.h>         // max_alloc_bytes_from_state
 #include <cvc/state/state_exec/state_value_codec.h> // snapshot / restore
-#include <cvc/state/state_exec/stdlib.h>            // random_stream_scope
+#include <cvc/state/state_exec/stdlib.h>
 #include <exception>
 #include <iterator>
 #include <optional>
@@ -51,15 +51,13 @@ uint64_t slice_steps_knob() {
   return v ? parse_slice_steps(v).value_or(1) : 1;
 }
 
-// Free the reference cycles programs leaked, once enough piled up (heap.h): in `r` when the
-// scheduler names a registry (S1.1), else in the thread's own. Whether it collected.
-bool collect_cycles_if_due(cycle_registry *r) {
-  if (!(r ? cycle_collection_due(*r) : cycle_collection_due()))
+// Free the reference cycles programs leaked, once enough piled up (heap.h), in `r`: the registry
+// the scheduler's evaluation context has (the one it was given, S1.1, else its evaluator's own).
+// Whether it collected.
+bool collect_cycles_if_due(cycle_registry &r) {
+  if (!cycle_collection_due(r))
     return false;
-  if (r)
-    collect_cycles(*r);
-  else
-    collect_cycles();
+  collect_cycles(r);
   return true;
 }
 
@@ -125,9 +123,15 @@ void async_scheduler::refresh_slice() {
   }
 }
 
-void async_scheduler::set_cycle_registry(cycle_registry *r) { registry_ = r; }
+void async_scheduler::set_cycle_registry(cycle_registry *r) {
+  registry_ = r;
+  evaluator_.set_cycle_registry(r);
+}
 
-void async_scheduler::set_random_stream(random_stream *s) { random_ = s; }
+void async_scheduler::set_random_stream(random_stream *s) {
+  random_ = s;
+  evaluator_.context().random = s;
+}
 
 void async_scheduler::set_pid_source(std::shared_ptr<std::atomic<int>> source) {
   if (source) {
@@ -172,23 +176,6 @@ bool async_scheduler::pumped_elsewhere() const noexcept {
 }
 
 namespace {
-// S1.1: a scheduler given a registry or a random stream binds what it was given on each entry
-// that can run DSL or track, one store and one restore per call (never per step); a bare one binds
-// nothing, as before. What it was not given stays as the caller bound it.
-class entry_binding {
-public:
-  entry_binding(cycle_registry *r, random_stream *s) {
-    if (r)
-      registry_.emplace(r);
-    if (s)
-      random_.emplace(s);
-  }
-
-private:
-  std::optional<cycle_registry_scope> registry_;
-  std::optional<random_stream_scope> random_;
-};
-
 // S1-Q4 (td 4.1): debug builds, or CVC_EXEC_VERIFY=1 (read as the scheduler is made,
 // detail::pump_owner_verification), check the pump owner's rule in the public mutators. A call
 // while another thread pumps is a host's race: it aborts.
@@ -340,7 +327,7 @@ void async_scheduler::lock_ops_impl::for_each_process(const std::function<void(p
 // ---------------------------------------------------------------------------
 
 int async_scheduler::execute(const std::string &script, const execute_options &opts) {
-  detail::check_not_in_async_kernel("async_scheduler::execute");
+  check_not_in_kernel("async_scheduler::execute");
   verify_pump_owner(*this, "async_scheduler::execute");
   int pid = draw_pid(pid_source_, next_pid_);
   process_ptr pp = make_process(); // built in place: no move of its tables
@@ -382,7 +369,7 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
 }
 
 int async_scheduler::execute(const value_t &expr, const execute_options &opts) {
-  detail::check_not_in_async_kernel("async_scheduler::execute");
+  check_not_in_kernel("async_scheduler::execute");
   verify_pump_owner(*this, "async_scheduler::execute");
   int pid = draw_pid(pid_source_, next_pid_);
   process_ptr pp = make_process(); // built in place: no move of its tables
@@ -473,9 +460,12 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
   run_steps_ = 1;
   run_unchecked_ = 1;
   // Between steps: free the reference cycles programs leaked, once enough piled up (heap.h).
-  // Checked every 64 steps: the check reads the registry's counters. A scheduler given a registry
-  // names it (S1.1), else the thread's own is used. A run's later steps are checked by step_run.
-  if ((++cycle_check_ & 63) == 0 && collect_cycles_if_due(registry_))
+  // Checked every 64 steps: the check reads the registry's counters. The registry is the one its
+  // evaluation context has: the one it was given (S1.1), else its evaluator's own. A run's later
+  // steps are checked by step_run.
+  exec_context &ctx = evaluator_.context();
+  ctx.parkable = true; // its steps are its processes': a native call may park one
+  if ((++cycle_check_ & 63) == 0 && collect_cycles_if_due(*ctx.registry))
     chain_valid_ = false;
 
   // Track which process is currently executing so intrinsics can query it (self/ps).
@@ -549,13 +539,14 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
   // pump's own per-drain cap instead. Take the tighter of the two.
   if (proc.max_step_time > 0.0)
     step_budget = step_budget ? std::min(*step_budget, proc.max_step_time) : proc.max_step_time;
-  eval_deadline_guard step_deadline(step_budget, step_start);
+  eval_deadline_guard step_deadline(ctx, step_budget, step_start);
   // Bound what one native call in this step may allocate (see scheduler.cpp).
   // Armed only when it changes something (see scheduler.cpp).
   std::optional<eval_alloc_guard> step_alloc;
   if (proc.max_memory > 0 || proc.max_alloc_bytes != kDefaultMaxAllocBytes)
-    step_alloc.emplace(proc.alloc_limit(
-        proc.max_memory > 0 ? mem_tracker_.current_bytes(proc.pid) + proc.heap_bytes : 0));
+    step_alloc.emplace(
+        ctx, proc.alloc_limit(
+                 proc.max_memory > 0 ? mem_tracker_.current_bytes(proc.pid) + proc.heap_bytes : 0));
   const bool charge_cpu = proc.charges_cpu_time(step_start);
   double cpu0 = charge_cpu ? (chained_cpu >= 0.0 ? chained_cpu : thread_cpu_seconds()) : 0.0;
   // A run's kinds of step (Stage S): its seconds are split over them at its end.
@@ -583,7 +574,7 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
   // frame per step. With max_run above 1, the rest of a run follows on this step's guards.
   bool done = false;
   try {
-    done = evaluator_.step_now(proc.state);
+    done = evaluator_.step_now(proc.state, ctx);
     if (max_run > 1 && !done)
       done = continue_run(proc, max_run, step_start, charged.before, charge_cpu, cpu0);
   } catch (const std::exception &e) {
@@ -790,7 +781,7 @@ void async_scheduler::drain(bool in_step) {
 int async_scheduler::step_once() {
   // A step drains the ingress first (the check is drain_ingress's, as it always was: a step
   // used to begin by calling it).
-  detail::check_not_in_async_kernel("async_scheduler::drain_ingress");
+  check_not_in_kernel("async_scheduler::drain_ingress");
   // Apply any cross-thread post_message() deliveries on THIS (scheduler) thread, wake sleeping
   // processes whose deadline has passed, then poll watched paths: once a step.
   drain(true);
@@ -893,7 +884,7 @@ bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_
       }
     }
     ++run_steps_; // first: a step that throws counts too, as at one step a pick
-    done = evaluator_.step_now(proc.state);
+    done = evaluator_.step_now(proc.state, evaluator_.context());
     if (done)
       break;
   }
@@ -902,7 +893,7 @@ bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_
 
 int async_scheduler::step_run(uint64_t budget) {
   // step_once's drain, watch poll and pick, then a run of the picked process.
-  detail::check_not_in_async_kernel("async_scheduler::drain_ingress");
+  check_not_in_kernel("async_scheduler::drain_ingress");
   drain(true);
   poll_watches();
   step_charge_ = 0;
@@ -939,20 +930,18 @@ int async_scheduler::step_run(uint64_t budget) {
   // the step there would have made is made now, between picks. (A run of 64 or more always passes
   // one, so a process that runs on is checked every run, never skipped.)
   const uint32_t last = first + static_cast<uint32_t>(run_steps_ - 1);
-  if ((first >> 6) != (last >> 6) && collect_cycles_if_due(registry_))
+  if ((first >> 6) != (last >> 6) && collect_cycles_if_due(*evaluator_.context().registry))
     chain_valid_ = false;
   return 1;
 }
 
 task<int> async_scheduler::step() {
-  const entry_binding bound(registry_, random_);
   chain_valid_ = false;
   co_return step_once();
 }
 
 uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
                                    std::optional<double> max_time) {
-  const entry_binding bound(registry_, random_);
   // As the sync scheduler's run (td B17): a stop() from before this run is discarded, and one
   // made once is_running() reads true is seen.
   stop_requested_.store(false, std::memory_order_relaxed);
@@ -1019,7 +1008,6 @@ task<std::unordered_map<int, value_t>> async_scheduler::run(std::optional<uint64
 }
 
 int async_scheduler::sync_step() {
-  const entry_binding bound(registry_, random_);
   chain_valid_ = false;
   return step_once();
 }
@@ -1070,7 +1058,7 @@ async_scheduler::next_call_charge(clock::time_point now) const {
 }
 
 bool async_scheduler::wait_for_work(clock::time_point deadline) {
-  detail::check_not_in_async_kernel("async_scheduler::wait_for_work");
+  check_not_in_kernel("async_scheduler::wait_for_work");
   // The calls' next charge or timeout, from when the wait began (the beat must not move on with
   // each wake-up of the loop below).
   const std::optional<clock::time_point> charge =
@@ -1148,7 +1136,6 @@ bool async_scheduler::yield_frame(int pid) {
 }
 
 int async_scheduler::wake_awaiting() {
-  const entry_binding bound(registry_, random_);
   std::vector<process *> list;
   list.swap(woken_);
   procs_.take_awaiting(list);
@@ -1163,7 +1150,7 @@ int async_scheduler::wake_awaiting() {
 }
 
 bool async_scheduler::receive_message(int pid, const std::string &path) {
-  detail::check_not_in_async_kernel("async_scheduler::receive_message");
+  check_not_in_kernel("async_scheduler::receive_message");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return false;
@@ -1190,7 +1177,7 @@ bool async_scheduler::receive_message_until(int pid, const std::string &path, do
 }
 
 int async_scheduler::deliver_to_receivers(const std::string &path, const value_t &msg) {
-  detail::check_not_in_async_kernel("async_scheduler::deliver_to_receivers");
+  check_not_in_kernel("async_scheduler::deliver_to_receivers");
   // The processes waiting on `path`, from the receiver index (no scan).
   std::vector<process *> list;
   list.swap(woken_);
@@ -1256,8 +1243,7 @@ void async_scheduler::post_message(const std::string &path, const value_t &msg) 
 }
 
 void async_scheduler::drain_ingress() {
-  detail::check_not_in_async_kernel("async_scheduler::drain_ingress");
-  const entry_binding bound(registry_, random_);
+  check_not_in_kernel("async_scheduler::drain_ingress");
   // What a step does first: deliver the posts, finish the settled calls, charge the ones still
   // running, and wake the sleepers and timed waits that are due ((await f seconds)), so a driver
   // that only drains while nothing is runnable still sees them.
@@ -1566,7 +1552,6 @@ void async_scheduler::set_watch_root(cvc::state *root, boost::shared_ptr<cvc::st
 
 int async_scheduler::restore(process_ptr proc) {
   verify_pump_owner(*this, "async_scheduler::restore");
-  const entry_binding bound(registry_, random_);
   // A stack that holds a lock (a lock_body with its hold, or a lock_enter woken with a grant)
   // can't be restored: no snapshot makes one, and its hold is no restored process's (protocol
   // 5.11; LW-12).
@@ -1884,10 +1869,7 @@ void async_scheduler::fail_process(process &proc, value_t exc, std::exception_pt
 void async_scheduler::release_if_idle(process &proc) {
   // What it leaked is garbage now (heap.h): noted in this scheduler's registry when it has one
   // (S1.1), so a host's kill(pid) between pumps notes the group's, not the host thread's.
-  if (registry_)
-    note_process_exit(*registry_);
-  else
-    note_process_exit();
+  note_process_exit(*evaluator_.context().registry);
   // A process stepping right now (one that killed itself) is released once its step is over.
   if (proc.pid != current_pid_)
     proc.release_state();
@@ -1924,7 +1906,7 @@ bool async_scheduler::resume(int pid) {
 bool async_scheduler::kill(int pid) { return kill(pid, "killed_by_user"); }
 
 bool async_scheduler::kill(int pid, const std::string &reason) {
-  detail::check_not_in_async_kernel("async_scheduler::kill");
+  check_not_in_kernel("async_scheduler::kill");
   verify_pump_owner(*this, "async_scheduler::kill");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
@@ -1976,8 +1958,8 @@ bool async_scheduler::snapshot(int pid, cvc::state &node) const {
 
 int async_scheduler::restore(cvc::state &node, environment_ptr natives) {
   verify_pump_owner(*this, "async_scheduler::restore");
-  const entry_binding bound(registry_, random_); // the decode tracks class scopes
-  process_ptr proc = decode_process(node);
+  // The decode tracks class scopes in its evaluation context's registry.
+  process_ptr proc = decode_process(node, &evaluator_.context());
   rebind_natives(proc->state, natives);
   return restore(std::move(proc));
 }

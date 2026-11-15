@@ -486,8 +486,8 @@ holes in both review rounds (3.3). A lock on `docs.A.x` updates the counts of `d
   thread never waits for a lock (LW-9). Its default timeout is 0 as well. A child the init script
   spawns is stepped by the same `sched.run` on the host thread, and the spawn context copies both
   values to it (L1b), so it never waits either.
-- **Where a process cannot park** (`can_await()` false: a nested evaluator, under
-  `park_forbidden_scope`, a native called inline where `can_await()` is false), an uncontended
+- **Where a process cannot park** (`can_await(ctx)` false: a nested evaluator, under
+  `park_forbidden_scope`, a native called inline where `can_await(ctx)` is false), an uncontended
   `with-lock` works, a contended one raises `LockError` (`"cannot wait here"`) without blocking
   the thread (B21), and `:if-available` takes `:else`. A wait inside a DSL function that a native
   called (`collections.map`, `sort`, `apply`, a constructor) runs as frames of the calling process
@@ -710,7 +710,7 @@ the next `run()` applies the grant (LT-2).
 - **C++.** `scheduler_base.h` gains, before the class, a struct and a forward declaration, and the
   class gains non-pure virtuals, appended. The two schedulers derive from it, and from td Stage 3
   so does the forwarder `group_scheduler_ref` (td 4.15), which overrides every one of them by
-  forwarding to `exec_group::current()->sched()` (9.3), so a DSL call never reaches a default:
+  forwarding to `exec_group::current(ctx)->sched()` (9.3), so a DSL call never reaches a default:
 
   ```cpp
   struct priority_info { int base, effective, floor; scheduling_policy policy; };
@@ -1260,7 +1260,7 @@ hints to it, and every outcome is read from the manager.
 - **Movable processes** reach their home through `group_scheduler_ref` (td 4.15), which forwards
   `locks()` and every priority virtual of 7.4 (`set_priority`, `get_priority`,
   `set_priority_checked`, `get_priority_as`, `set_priority_floor`, `policy`) to
-  `exec_group::current()->sched()`. Without those overrides a movable process would reach the
+  `exec_group::current(ctx)->sched()`. Without those overrides a movable process would reach the
   defaults: its `set-priority` would return `#f` and its `get-priority` `nil`.
 
 ### 9.4 Stage 4 (in reserve)
