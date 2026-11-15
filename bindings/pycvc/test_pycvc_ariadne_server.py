@@ -4,12 +4,14 @@ code runs and is tested without arisrvx:
   * pycvc imports it as pycvc.ariadne, and current_host() is None until a Host is made;
   * set / set_tree / set_series / set_plot / get_tree on Host's own tree, set_tree as
     (state-set-tree) writes;
-  * serve_asgi + run(): a FastAPI app served on host.loop, a request, and stop() from the loop,
-    with the app's shutdown run; skipped where fastapi or uvicorn is not installed.
+  * serve_asgi + run(): a FastAPI app served on host.loop, a request (with a full garbage
+    collection while it is in flight), and stop() from the loop, with the app's shutdown run;
+    skipped where fastapi or uvicorn is not installed.
 """
 
 import asyncio
 import contextlib
+import gc
 import json
 import sys
 
@@ -141,6 +143,9 @@ app = fastapi.FastAPI(lifespan=lifespan)
 
 @app.get("/ping")
 async def ping():
+    # A full collection while the request is in flight, as one may happen there in a service. Every
+    # task on the loop, the host's and this test's, has to be held by a reference to outlive it.
+    gc.collect()
     return {"pong": True}
 
 
@@ -159,7 +164,10 @@ async def client():
 
 server = serve_asgi(app, host="127.0.0.1", port=0)
 check(host.servers == [server], "serve_asgi returns its uvicorn server")
-host.loop.create_task(client())
+# Kept: the loop holds a task only weakly, and client() then waits on a stream that nothing else
+# references, so a collection during the wait would free the task, stop(7) would never run, and
+# run() would never return.
+client_task = host.loop.create_task(client())
 status = host.run()
 check(status == 7, f"run() returns stop()'s code, not {status}")
 check(events == ["startup", (200, {"pong": True}), "shutdown"], f"served and shut down: {events}")

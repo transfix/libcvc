@@ -95,6 +95,7 @@
 #include <cvc/ocean/h0.h>
 #include <cvc/ocean/sea_surface.h>
 #include <cvc/ocean/shore.h>
+#include <cvc/ocean/whitecaps.h>
 #include <cvc/physics/backend.h>
 #include <cvc/physics/field.h>
 #include <cvc/physics/fluid_surface.h>
@@ -1361,7 +1362,8 @@ const char *OCEAN_FS_DEC_HEAD =
     "in float vOceanJac;\n"
     "in float vShoreBreak;\n" // the shore layer's breaking, on its crests
     "in vec2 vRestXY;\n"
-    "uniform vec3 uCamPos; uniform vec3 uSunDir; uniform float uFoamBias;\n"
+    "uniform vec3 uCamPos; uniform vec3 uSunDir;\n"
+    "uniform float uFoamBias; uniform float uFoamRamp; uniform float uFoamFray;\n"
     "uniform float uTime; uniform float uShore;\n";
 const char *OCEAN_FS_DEC_FUNCS =
     "float ohash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }\n"
@@ -1401,8 +1403,13 @@ const char *OCEAN_FS_LIGHT =
     "  vec3 sand = vec3(0.66,0.64,0.50);\n"
     "  vec3 shoal = mix(vec3(0.12,0.46,0.54), sand, clarity*0.55);\n"
     "  col = mix(col, shoal, clarity*0.85);\n"
-    // Jacobian (wave-fold) foam on the open sea.
-    "  float foam = clamp((uFoamBias - vOceanJac)/0.85, 0.0, 1.0); foam=foam*foam*(3.0-2.0*foam);\n"
+    // Jacobian (wave-fold) foam on the open sea: whitecaps, uFoamBias set so they cover Monahan's
+    // share for the wind (cvc/ocean/whitecaps.h), white within uFoamRamp of it. J is linear over
+    // each 2 m triangle, so a patch's edge would be straight; noise on the water's rest position
+    // (two scales, as foam_params::fray models it) frays it.
+    "  float fray = 0.65*onoise(vRestXY*1.9) + 0.35*onoise(vRestXY*4.3 + vec2(17.0, 31.0));\n"
+    "  float foam = clamp((uFoamBias - vOceanJac + uFoamFray*(fray - 0.5))/uFoamRamp, 0.0, 1.0);\n"
+    "  foam = foam*foam*(3.0-2.0*foam);\n"
     // shore foam: a bright, noisy band right at the waterline, washing up the beach.
     "  float band = 1.0 - smoothstep(0.0, 1.8, abs(depth));\n"
     "  float nz = onoise(vWorldPos.xy*0.4 + vec2(uTime*0.6, uTime*0.35));\n"
@@ -2011,14 +2018,10 @@ int main(int argc, char **argv) {
     }
   }
   // --boat-check drives a 5 m skiff, so it runs on a moderate sea unless --set says otherwise: the
-  // default 1.2 m, 10 s swell and a 4 m/s wind sea drawn at a quarter of the cascades' height
-  // (coast.water.wave_amp 0.3), about 0.4 m Hs, which is about JONSWAP's for that wind. At the
-  // default 9 m/s and wave_amp 1.2 the cascades make about 6 m Hs off the lee shore (1.5 m at
-  // 4 m/s), short and steep enough to throw the skiff about.
-  for (const auto &kv : {std::pair<const char *, double>{"coast.water.wind_speed", 4.0},
-                         std::pair<const char *, double>{"coast.water.wave_amp", 0.3}})
-    if (boatCheck && cvc::state::instance(app)(kv.first).value().empty())
-      cvc::state::instance(app)(kv.first).value(kv.second);
+  // default 1.2 m, 10 s swell and a 4 m/s wind sea, whose cascades make JONSWAP's 0.54 m Hs. The
+  // default 9 m/s makes 2.2 m Hs at a 6.4 s peak, short and steep for a skiff.
+  if (boatCheck && cvc::state::instance(app)("coast.water.wind_speed").value().empty())
+    cvc::state::instance(app)("coast.water.wind_speed").value(4.0);
   // The scene's nodes log through THIS injected app (not a process-wide singleton),
   // so we set the console verbosity right here: show only errors + warnings, unless
   // --verbose asks for the full per-frame cvcGL debug trace. Levels: a message at
@@ -2283,12 +2286,54 @@ int main(int argc, char **argv) {
       cascades.push_back(std::move(cc));
     }
   }
-  knob("coast.water.wave_amp", 1.2);   // vertical scale (raw FFT height is metres)
+  knob("coast.water.wave_amp", 1.0);   // vertical scale: 1 is JONSWAP's height for the wind
   knob("coast.water.choppiness", 1.0); // horizontal (Gerstner) displacement scale
-  knob("coast.water.foam_bias", 0.48); // Jacobian threshold below which wave foam appears
+  knob("coast.water.foam_bias", -1.0); // wave foam's J threshold; below 0 it follows the wind
+  knob("coast.water.foam_ramp", 0.1);  // wave foam is white this far (in J) under the threshold
+  knob("coast.water.foam_fray", 0.12); // noise on the threshold (in J) that frays foam's edges
+  knob("coast.water.whitecaps", 1.0);  // whitecap cover, as a share of Monahan's for the wind
   knob("coast.water.shore_foam", 1.0); // shoreline surf intensity (0 disables it)
   knob("coast.clock.scale", 1.0);      // world seconds per wall second (0 pauses the sea)
   knob("coast.clock.paused", 0.0);
+
+  // Whitecaps (OCEAN-AND-WEATHER-ROADMAP.md O5). Unless coast.water.foam_bias fixes it, the wave
+  // foam's threshold is the one that makes the open sea's foam cover Monahan's share for the wind
+  // (times coast.water.whitecaps), found on the CPU from the cascades' h0 as this grid draws them
+  // (cvc/ocean/whitecaps.h; about 0.1 s). On the calibrated sea a fixed 0.48 drew none at any
+  // wind; the threshold now runs from about 0.75 at 4 m/s to 0.86 at 25 m/s. It is found again
+  // when h0, the chop, the ramp or the share changes and has held for kFoamSettle frames, so
+  // dragging a slider does not stall every frame.
+  constexpr int kFoamSettle = 10;
+  auto foamSignature = [&](const cvc::ocean::sea_state &s) {
+    std::vector<double> sig = seaSignature(s);
+    sig.push_back(knob("coast.water.chop", 1.15));
+    sig.push_back(knob("coast.water.foam_ramp", 0.1));
+    sig.push_back(knob("coast.water.foam_fray", 0.12));
+    sig.push_back(knob("coast.water.whitecaps", 1.0));
+    return sig;
+  };
+  auto computeFoamBias = [&](const cvc::ocean::sea_state &s) {
+    std::vector<cvc::ocean::h0_field> hs;
+    for (const Cascade &c : cascades)
+      hs.push_back(c.h0);
+    cvc::ocean::foam_params p;
+    p.chop = knob("coast.water.chop", 1.15);
+    p.ramp = std::max(knob("coast.water.foam_ramp", 0.1), 1e-3);
+    p.fray = std::max(knob("coast.water.foam_fray", 0.12), 0.0);
+    p.depth_m = s.depth_m;
+    p.mesh_m = 2.0 * OCEAN_HALF / (OCEAN_N - 1);
+    const double share =
+        knob("coast.water.whitecaps", 1.0) * cvc::ocean::monahan_coverage(s.wind.speed_mps);
+    const double bias = cvc::ocean::foam_field(hs, p).bias_for(share);
+    std::printf("whitecaps: wind %.1f m/s, cover %.3f %% (Monahan's x %.2f), foam threshold %.3f "
+                "(ramp %.2f, fray %.2f)\n",
+                s.wind.speed_mps, 100.0 * share, knob("coast.water.whitecaps", 1.0), bias, p.ramp,
+                p.fray);
+    return bias;
+  };
+  double foamBias = computeFoamBias(seaState());
+  std::vector<double> foamSig = foamSignature(seaState()), foamPending = foamSig;
+  int foamSettled = 0;
 
   auto *ow = vtkOpenGLRenderWindow::SafeDownCast(view.renderWindow());
   bool oceanReady = ow != nullptr;
@@ -2642,7 +2687,7 @@ int main(int argc, char **argv) {
     cvc::ocean::sea_params p;
     p.level = SEA_LEVEL;
     p.depth_m = wind.depth_m;
-    p.wave_amp = knob("coast.water.wave_amp", 1.2);
+    p.wave_amp = knob("coast.water.wave_amp", 1.0);
     p.chop = knob("coast.water.choppiness", 1.0) * knob("coast.water.chop", 1.15);
     p.source_cell_m = knob("coast.debris.source_cell", 0.5); // 0: B3 exact at every read
     return std::make_shared<cvc::physics::ocean_surface>(
@@ -3525,9 +3570,9 @@ int main(int argc, char **argv) {
   float uiBand[3] = {static_cast<float>(knob(kBandWeight[0], 1.0)),
                      static_cast<float>(knob(kBandWeight[1], 1.0)),
                      static_cast<float>(knob(kBandWeight[2], 1.0))};
-  float uiWaveAmp = static_cast<float>(knob("coast.water.wave_amp", 1.2));
+  float uiWaveAmp = static_cast<float>(knob("coast.water.wave_amp", 1.0));
   float uiChop = static_cast<float>(knob("coast.water.choppiness", 1.0));
-  float uiFoam = static_cast<float>(knob("coast.water.foam_bias", 0.48));
+  float uiFoam = static_cast<float>(knob("coast.water.whitecaps", 1.0));
   float uiShore = static_cast<float>(knob("coast.water.shore_foam", 1.0));
   float uiClock = static_cast<float>(knob("coast.clock.scale", 1.0));
   bool uiPaused = knob("coast.clock.paused", 0.0) > 0.5;
@@ -3573,8 +3618,9 @@ int main(int argc, char **argv) {
       wput("coast.water.wave_amp", uiWaveAmp);
     if (ImGui::SliderFloat("choppiness", &uiChop, 0.0f, 2.0f))
       wput("coast.water.choppiness", uiChop);
-    if (ImGui::SliderFloat("wave foam", &uiFoam, 0.0f, 1.2f))
-      wput("coast.water.foam_bias", uiFoam);
+    // whitecap cover as a share of Monahan's for the wind (the threshold follows after a pause)
+    if (ImGui::SliderFloat("whitecaps", &uiFoam, 0.0f, 3.0f))
+      wput("coast.water.whitecaps", uiFoam);
     if (ImGui::SliderFloat("shore foam", &uiShore, 0.0f, 2.0f))
       wput("coast.water.shore_foam", uiShore);
     if (ImGui::SliderFloat("time scale", &uiClock, 0.0f, 4.0f))
@@ -3793,6 +3839,17 @@ int main(int argc, char **argv) {
         uploadShoreLayer();
         lastSwell = std::move(swellSig);
       }
+      // And the whitecaps' threshold once the sea's knobs have settled (foamSignature).
+      std::vector<double> foamNow = foamSignature(sea);
+      if (foamNow != foamSig) {
+        if (foamNow != foamPending) {
+          foamPending = std::move(foamNow);
+          foamSettled = 0;
+        } else if (++foamSettled >= kFoamSettle) {
+          foamBias = computeFoamBias(sea);
+          foamSig = foamPending;
+        }
+      }
       for (auto &c : cascades) {
         c.fft->chop = static_cast<float>(knob("coast.water.chop", 1.15));
         c.fft->step(wt);
@@ -3800,14 +3857,19 @@ int main(int argc, char **argv) {
       double camp[3] = {0, 0, 0};
       if (view.renderer() && view.renderer()->GetActiveCamera())
         view.renderer()->GetActiveCamera()->GetPosition(camp);
-      ocean->setShaderUniformf("uWaveAmp", static_cast<float>(knob("coast.water.wave_amp", 1.2)));
+      ocean->setShaderUniformf("uWaveAmp", static_cast<float>(knob("coast.water.wave_amp", 1.0)));
       ocean->setShaderUniformf("uChop", static_cast<float>(knob("coast.water.choppiness", 1.0)));
       ocean->setShaderUniform3f("uCamPos", static_cast<float>(camp[0]), static_cast<float>(camp[1]),
                                 static_cast<float>(camp[2]));
       ocean->setShaderUniform3f("uSunDir", static_cast<float>(sdir.x), static_cast<float>(sdir.y),
                                 static_cast<float>(sdir.z));
+      const double fixedFoamBias = knob("coast.water.foam_bias", -1.0);
       ocean->setShaderUniformf("uFoamBias",
-                               static_cast<float>(knob("coast.water.foam_bias", 0.48)));
+                               static_cast<float>(fixedFoamBias >= 0.0 ? fixedFoamBias : foamBias));
+      ocean->setShaderUniformf(
+          "uFoamRamp", static_cast<float>(std::max(knob("coast.water.foam_ramp", 0.1), 1e-3)));
+      ocean->setShaderUniformf(
+          "uFoamFray", static_cast<float>(std::max(knob("coast.water.foam_fray", 0.12), 0.0)));
       ocean->setShaderUniformf("uShore", static_cast<float>(knob("coast.water.shore_foam", 1.0)));
       ocean->setShaderUniformf("uTime", static_cast<float>(wt));
       ocean->setShaderUniformf("uShoreTime", static_cast<float>(wt));

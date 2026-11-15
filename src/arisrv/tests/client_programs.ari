@@ -1,0 +1,29 @@
+# The client for ctest arisrv_room_call_program: it sends stock arisrv (with
+# client_programs_server.ari) programs to run as its own (room-run, room_calls.h). The programs
+# take their paths as arguments, so their source needs no quotes of its own.
+meta: { name: client programs on a relay, min_libcvc: 3.7.13 }
+tests:
+  a_program_runs_and_returns_its_value: |
+    (let ((v (room-run "(state-set (nth args 1) (+ (car args) 1)) (list (+ (car args) 1) (state-get (nth args 1)))"
+                       41 "score")))
+      (assert (= (nth v 0) 42) v)
+      (assert (= (nth v 1) "42") v))
+  the_async_form_returns_a_future: |
+    (assert (= (await (room-run-async "(* (car args) 2)" 21)) 42))
+  it_may_not_write_the_relays_keys: |
+    (let ((m (try (begin (room-run "(state-set (car args) 1)" "pose") "no error")
+                  (catch (RuntimeError e) (list (get-attr e "code") (get-attr e "message"))))))
+      (assert (= (nth m 0) "failed") m)
+      (assert (string.contains (nth m 1) "PermissionError") m))
+  it_has_no_spawn: |
+    (let ((m (try (begin (room-run "(spawn (car args))" "1") "no error")
+                  (catch (RuntimeError e) (get-attr e "code")))))
+      (assert (= m "failed") m))
+  a_program_that_does_not_parse_is_invalid: |
+    (let ((m (try (begin (room-run "(+ 1") "no error")
+                  (catch (RuntimeError e) (get-attr e "code")))))
+      (assert (= m "invalid") m))
+  its_cap_stops_it: |
+    (let ((m (try (begin (room-run "(while (= 1 1) (+ 1 1))") "no error")
+                  (catch (RuntimeError e) (get-attr e "code")))))
+      (assert (= m "resource_exhausted") m))

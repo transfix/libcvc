@@ -32,6 +32,9 @@ add_executable(net_http_client_test net_http_client_test.cpp)
 add_executable(ariadne_data_test ariadne_data_test.cpp)
 add_executable(net_ws_client_test net_ws_client_test.cpp)
 add_executable(net_policy_test net_policy_test.cpp)
+# End-to-end encrypted DMs (cvc/net/e2ee.h): e2ee.js's vectors replayed, and the e2ee-* verbs.
+add_executable(e2ee_test e2ee_test.cpp)
+add_executable(ariadne_e2ee_test ariadne_e2ee_test.cpp)
 add_executable(net_oidc_test net_oidc_test.cpp)
 add_executable(uri_http_cache_test uri_http_cache_test.cpp)
 add_executable(state_test state_test.cpp)
@@ -72,6 +75,7 @@ add_executable(state_distributed_delegation_integration_test state_distributed_d
 add_executable(state_link_test state_link_test.cpp)
 add_executable(state_send_message_test state_send_message_test.cpp)
 add_executable(stream_test stream_test.cpp)
+add_executable(stream_raster_test stream_raster_test.cpp)
 add_executable(stream_to_image_test stream_to_image_test.cpp)
 add_executable(state_link_cycles_test state_link_cycles_test.cpp)
 add_executable(state_expiry_test state_expiry_test.cpp)
@@ -216,6 +220,22 @@ else()
   set_source_files_properties(physics_dyn_bike_plant_test.cpp physics_dyn_4w_plant_test.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
+# cvc::physics::mujoco_robot on the Menagerie's Go2. Built in every lane: without CVC_WITH_MUJOCO it
+# checks that the constructor refuses and skips the rest. With it, the tests need cvcpkg's
+# mujoco-menagerie in the deps prefix, and configure fails without it rather than skip them all.
+add_executable(physics_mujoco_robot_test physics_mujoco_robot_test.cpp)
+set(_cvc_menagerie "")
+if(CVC_WITH_MUJOCO)
+  find_path(CVC_MUJOCO_MENAGERIE_DIR unitree_go2/scene.xml PATH_SUFFIXES share/mujoco-menagerie
+            NO_SYSTEM_ENVIRONMENT_PATH NO_CMAKE_SYSTEM_PATH)
+  if(NOT CVC_MUJOCO_MENAGERIE_DIR)
+    message(FATAL_ERROR "CVC_WITH_MUJOCO's tests need the Menagerie's robots: "
+                        "cvcpkg install mujoco-menagerie --prefix <deps>")
+  endif()
+  set(_cvc_menagerie "${CVC_MUJOCO_MENAGERIE_DIR}")
+endif()
+target_compile_definitions(physics_mujoco_robot_test
+  PRIVATE CVC_MUJOCO_MENAGERIE_DIR="${_cvc_menagerie}")
 add_executable(geometry_height_field_test geometry_height_field_test.cpp)
 add_executable(world_geometry_test world_geometry_test.cpp)
 add_executable(nav_world_planes_test nav_world_planes_test.cpp)
@@ -388,6 +408,8 @@ set(TEST_TARGETS
   ariadne_data_test
   net_ws_client_test
   net_policy_test
+  e2ee_test
+  ariadne_e2ee_test
   net_oidc_test
   uri_http_cache_test
   state_test
@@ -423,6 +445,7 @@ set(TEST_TARGETS
   state_link_test
   state_send_message_test
   stream_test
+  stream_raster_test
   stream_to_image_test
   state_link_cycles_test
   state_expiry_test
@@ -484,6 +507,7 @@ set(TEST_TARGETS
   physics_plant_host_test
   physics_dyn_bike_plant_test
   physics_dyn_4w_plant_test
+  physics_mujoco_robot_test
   geometry_height_field_test
   world_geometry_test
   nav_world_planes_test
@@ -938,6 +962,20 @@ target_link_libraries(net_ws_client_test
 )
 
 target_link_libraries(net_policy_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(e2ee_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_e2ee_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1772,6 +1810,13 @@ target_link_libraries(stream_test
     GTest::gtest_main
 )
 
+target_link_libraries(stream_raster_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(stream_to_image_test
   PRIVATE
     cvc
@@ -2438,6 +2483,12 @@ target_link_libraries(physics_dyn_4w_plant_test
     GTest::gtest
     GTest::gtest_main
 )
+target_link_libraries(physics_mujoco_robot_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
 target_link_libraries(physics_pose_tracker_test
   PRIVATE
@@ -2812,6 +2863,7 @@ target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
 target_compile_features(physics_plant_host_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_bike_plant_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_4w_plant_test PRIVATE cxx_std_17)
+target_compile_features(physics_mujoco_robot_test PRIVATE cxx_std_17)
 target_compile_features(geometry_height_field_test PRIVATE cxx_std_17)
 target_compile_features(world_geometry_test PRIVATE cxx_std_17)
 target_compile_features(nav_world_planes_test PRIVATE cxx_std_17)
@@ -2983,6 +3035,8 @@ cvc_discover_tests(net_http_client_test)
 cvc_discover_tests(ariadne_data_test)
 cvc_discover_tests(net_ws_client_test)
 cvc_discover_tests(net_policy_test)
+cvc_discover_tests(e2ee_test)
+cvc_discover_tests(ariadne_e2ee_test)
 cvc_discover_tests(net_oidc_test)
 cvc_discover_tests(uri_http_cache_test)
 cvc_discover_tests(state_test)
@@ -3061,9 +3115,14 @@ cvc_discover_tests(vis_tiler_test)
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_ewave_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test)
   cvc_discover_tests(${_lsys_test})
 endforeach()
+# The water's long runs (a channel's walls, a thin wall, a moving source's wake) take 105-195 s
+# each in a Debug build, and a PR's Debug ctest gives a test without a TIMEOUT of its own 300 s
+# (ci.yml), which a busy runner misses: three of them timed out on two unrelated PRs on
+# 2026-11-14. Their own budget, so a slow box fails on a real hang only.
+cvc_discover_tests(ocean_ewave_test PROPERTIES TIMEOUT 1200)
 cvc_discover_tests(volume_io_extra_test)
 if(TARGET lbie_mesher_test)
   cvc_discover_tests(lbie_mesher_test)
@@ -3252,6 +3311,7 @@ cvc_discover_tests(state_distributed_delegation_integration_test)
 cvc_discover_tests(state_link_test)
 cvc_discover_tests(state_send_message_test)
 cvc_discover_tests(stream_test)
+cvc_discover_tests(stream_raster_test)
 cvc_discover_tests(stream_to_image_test)
 cvc_discover_tests(state_link_cycles_test)
 cvc_discover_tests(state_expiry_test)
@@ -3372,6 +3432,7 @@ cvc_discover_tests(physics_pose_tracker_test)
 cvc_discover_tests(physics_plant_host_test)
 cvc_discover_tests(physics_dyn_bike_plant_test)
 cvc_discover_tests(physics_dyn_4w_plant_test)
+cvc_discover_tests(physics_mujoco_robot_test)
 cvc_discover_tests(geometry_height_field_test)
 cvc_discover_tests(world_geometry_test)
 cvc_discover_tests(nav_world_planes_test)

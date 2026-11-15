@@ -113,7 +113,8 @@ Build recipe (see [[cvcgl-examples-windows-build]] memory for the full trap writ
 |---|---|---|
 | `coast.water.wind_speed` / `.fetch` / `.tile_size` / `.depth` / `.wind_dir_x` / `.wind_dir_z` | JONSWAP spectrum (`rebuildSpectrum()` on change) | ✓ (respectralize) |
 | `coast.water.chop` | horizontal-displacement scale (assemble `uLambda`) | ✓ per-frame |
-| `coast.water.wave_amp` / `.choppiness` / `.foam_bias` | demo displacement + foam coloring | ✓ per-frame |
+| `coast.water.wave_amp` / `.choppiness` | demo displacement | ✓ per-frame |
+| `coast.water.whitecaps` / `.foam_ramp` / `.foam_bias` | wave foam: cover as a share of Monahan's for the wind, the ramp's width in J, and a fixed threshold (below 0: found from the cover; OCEAN-AND-WEATHER-ROADMAP.md §8 E0b) | ✓ (the threshold after 10 settled frames) |
 | `coast.clock.scale` / `.paused` | `world_clock` rate / pause | ✓ per-frame |
 | `coast.clock.t` | published world time (observability) | — |
 

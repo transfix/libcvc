@@ -813,6 +813,8 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
     out->bind_vehicles(scene.vehicles, resolve_bind(bind_prefix, "vehicles"),
                        resolve_bind(bind_prefix, "entities"), scene.spawns,
                        resolve_bind(bind_prefix, "spawns"));
+    if (out->vehicles())
+      out->vehicles()->set_intents_key(resolve_bind(bind_prefix, scene.vehicle_intents));
   }
   return out;
 }
@@ -1144,6 +1146,8 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
     if (d.vehicles)
       d.vehicles->before_step();
     d.last = d.world->step();
+    if (d.vehicles)
+      d.vehicles->after_step();
     d.step_history.push_back(d.last.step_ms);
     if (d.step_history.size() > 120)
       d.step_history.pop_front();

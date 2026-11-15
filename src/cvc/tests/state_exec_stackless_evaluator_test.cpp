@@ -17,18 +17,6 @@
 #include <thread>
 #include <vector>
 
-// A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
-// scope hold each other, and only the cycle collector frees them
-// (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Reference cycles"). Nothing here runs long enough for a
-// collection to be due, so once every test is done one collection leaves LeakSanitizer only real
-// leaks to report.
-class collect_cycles_at_exit : public ::testing::Environment {
-public:
-  void TearDown() override { cvc::state_exec::collect_cycles(); }
-};
-[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
-    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
-
 using namespace cvc::state_exec;
 
 class StacklessEvaluatorTest : public ::testing::Test {
@@ -834,8 +822,12 @@ TEST(StacklessCallee, NoteWhereTheFunctionIsAndCheckIt) {
 TEST(StacklessCallee, ARewiredChainIsLookedUpAgain) {
   // E -> X -> G, G binding f, and the call (f ...) initialized in E. A host then makes E's
   // enclosing scope M, which binds f too and has as many bindings as X: the apply step finds M's.
+  // The host keeps G past the evaluator, so it gives it a registry that outlives G: its last
+  // collection frees the cycles the defun and the lambda make with G.
+  cycle_registry_ptr host_registry = make_cycle_registry();
   auto G = builtins::make_default_environment();
   stackless_evaluator ev(G);
+  ev.set_cycle_registry(host_registry.get());
   ev.evaluate_script("(defun f (x) 1)", G);
   const value_t two = ev.evaluate_script("(lambda (x) 2)", G);
   auto X = environment::extend(G);
@@ -863,10 +855,8 @@ TEST(StacklessCallee, AScopeMadeWhereADroppedOneWasIsLookedUpAgain) {
   const auto returns = [](int64_t r) {
     return value_t{native_fn{[r](std::span<const value_t>) -> value_t { return value_t(r); }}};
   };
-  std::vector<environment_ptr> taken; // room in this thread's pool for O
-  for (int i = 0; i < 64; ++i)
-    taken.push_back(environment::extend(nullptr));
-  auto E = environment::extend(environment::extend(G));
+  exec_context &ctx = ev.context(); // its scope cache: where the evaluator's scopes come from
+  auto E = environment::extend(environment::extend(G, ctx), ctx);
   E->outer->set("f", returns(1));
   E->outer->set("pad", value_t(int64_t(0)));
   evaluator_state st = ev.create_state(parse("(f (+ 0 0))"), E);
@@ -876,8 +866,9 @@ TEST(StacklessCallee, AScopeMadeWhereADroppedOneWasIsLookedUpAgain) {
   const environment *was = E->outer.get();
   const bool kept =
       was->bindings.bucket_count() == decltype(environment::bindings)().bucket_count();
-  E->outer = nullptr; // O goes
-  auto O2 = environment::extend(G);
+  environment_ptr O = std::move(E->outer); // O goes, as the evaluator drops a scope
+  detail::release_scope(O, ctx);
+  auto O2 = environment::extend(G, ctx);
   O2->bindings.emplace("f", returns(2));
   O2->bindings.emplace("pad", value_t(int64_t(0)));
   if (kept)
@@ -1046,10 +1037,13 @@ TEST(StacklessClosureBody, ABodyIsSharedOnlyWithFormsThatEvaluateTheSame) {
   const std::vector<value_t> negative = {value_t(), value_t(-0.0)};
   const std::vector<value_t> positive = {value_t(), value_t(0.0)};
   const int form = 0; // stands in for the lambda form's list: both at this address
-  const list_ptr made = detail::shared_body_expr(&form, negative);
+  cycle_registry_ptr registry = make_cycle_registry(); // the bodies are shared per registry
+  exec_context ctx;
+  ctx.registry = registry.get();
+  const list_ptr made = detail::shared_body_expr(ctx, &form, negative);
   ASSERT_NE(made, nullptr);
-  EXPECT_EQ(detail::shared_body_expr(&form, negative).get(), made.get());
-  const list_ptr other = detail::shared_body_expr(&form, positive);
+  EXPECT_EQ(detail::shared_body_expr(ctx, &form, negative).get(), made.get());
+  const list_ptr other = detail::shared_body_expr(ctx, &form, positive);
   ASSERT_NE(other, nullptr);
   EXPECT_NE(other.get(), made.get());
   ASSERT_EQ(other->size(), 3u);

@@ -173,16 +173,19 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
   if (!a.is_map())
     return at + " expects a map (plant:, vehicle:, look:, ranges:, controllers:)";
   std::string why;
+  bool named = false; // vehicle: named its preset
   for (const auto &[key, val] : a.entries) {
     if (key == "plant") {
       v.plant = val.as_string();
     } else if (key == "vehicle") {
       if (val.is_scalar()) {
         v.preset = val.scalar;
+        named = true;
       } else if (val.is_map()) {
         for (const auto &[k, x] : val.entries) {
           if (k == "preset") {
             v.preset = x.as_string();
+            named = true;
           } else if (vehicle_override_key(k)) {
             double n = 0.0;
             if (!number(x, at + " vehicle: " + k + ":", n, why))
@@ -242,14 +245,39 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
       warn(warnings, at + " unknown key '" + key + "', ignored");
     }
   }
+  // dynamic:<preset> and dynamic4w:<preset> name the vehicle too, as plant_host's names do.
+  if (const std::size_t colon = v.plant.find(':'); colon != std::string::npos) {
+    const std::string kind = v.plant.substr(0, colon), preset = v.plant.substr(colon + 1);
+    if (kind != "dynamic" && kind != "dynamic4w")
+      return at + " plant: '" + v.plant + "': only dynamic and dynamic4w name a preset";
+    if (named && preset != v.preset)
+      return at + " plant: '" + v.plant + "' names preset '" + preset + "', vehicle: '" + v.preset +
+             "'";
+    v.plant = kind;
+    v.preset = preset;
+  }
   return std::string();
 }
 
 std::string parse_vehicles(const Value &v, std::vector<vehicle_archetype> &out,
-                           std::vector<std::string> *warnings) {
+                           std::string &intents, std::vector<std::string> *warnings) {
   if (!v.is_map())
-    return "world: vehicles: expects a map (archetypes:)";
+    return "world: vehicles: expects a map (archetypes:, intents:)";
   for (const auto &[key, val] : v.entries) {
+    if (key == "intents") {
+      intents = val.is_scalar() ? val.scalar : std::string();
+      std::string path = !intents.empty() && intents[0] == '/' ? intents.substr(1) : intents;
+      bool ok = !path.empty();
+      for (std::size_t at = 0; ok && at <= path.size();) {
+        const std::size_t dot = std::min(path.find('.', at), path.size());
+        ok = cvc::state::isValidStateName(path.substr(at, dot - at));
+        at = dot + 1;
+      }
+      if (!ok)
+        return "world: vehicles: intents: expects a state path (names joined by '.', a leading / "
+               "for one outside the document's prefix)";
+      continue;
+    }
     if (key != "archetypes") {
       warn(warnings, "world: vehicles: unknown key '" + key + "', ignored");
       continue;
@@ -474,7 +502,9 @@ const vehicle_archetype *world_rules::find_vehicle(const std::string &id) const 
 
 std::vector<std::string> vehicle_presets() { return {"humvee", "roboracer"}; }
 
-bool vehicle_controller_known(const std::string &id) { return id == "nav@1" || id == "none"; }
+bool vehicle_controller_known(const std::string &id) {
+  return id == "nav@1" || id == "none" || id == "external";
+}
 
 bool spawn_policy_known(const std::string &policy) {
   return policy == "fixed" || policy == "random" || policy == "round_robin" ||
@@ -567,7 +597,7 @@ std::string check_world_rules(const world_rules &r) {
       return at + " allows no controller";
     for (const std::string &c : v.controllers)
       if (!vehicle_controller_known(c))
-        return at + " allows controller '" + c + "'; a vehicle has nav@1 or none";
+        return at + " allows controller '" + c + "'; a vehicle has nav@1, none or external";
   }
 
   if (!spawn_policy_known(r.spawns.policy))
@@ -613,7 +643,8 @@ std::string parse_world_block(const Value &content, world_rules &rules,
     if (key == "controllers")
       continue;
     if (key == "vehicles") {
-      if (std::string e = parse_vehicles(v, rules.vehicles, warnings); !e.empty())
+      if (std::string e = parse_vehicles(v, rules.vehicles, rules.vehicle_intents, warnings);
+          !e.empty())
         return e;
       continue;
     }

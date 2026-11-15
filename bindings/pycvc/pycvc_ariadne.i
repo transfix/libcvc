@@ -13,13 +13,19 @@
 //   ariglx lend it as a "cvc.ariadne.AppRuntime" capsule, _arihost.runtime()), which it does not
 //   own: the host's python: blocks register their functions through it, and
 //   pycvc.ari.Host() drives it in arix.
+// - pycvc.WorldEntities: the running world's entities (its vehicles, WorldVehicles), from
+//   AriApp.entities() or pycvc.world_entities(app, runtime) over a "cvc.ariadne.AppRuntime"
+//   capsule (a GL host's: pycvc_gl.AriRuntime.app_runtime_capsule()). It lists, spawns and
+//   removes them, and sets their intents (set_intent: a steer and acceleration, a force).
 //
 // The GIL: frame()/step()/load()/run_program's drain and wait_idle() release it, so a Python
 // function the document calls (which takes it back) and an async function on a pool thread run.
 // %include'd from pycvc.i after pycvc_exec.h. NOTE: a SWIG interface file — do NOT run clang-format.
 %{
 #include <cvc/ariadne/app_runtime.h>
+#include <cvc/ariadne/world_vehicles.h>
 #include <cvc/nav/world_grid.h>
+#include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/state/state_exec/async_host.h>
 #include <stdexcept>
@@ -77,6 +83,184 @@ host_function make_host_function(const std::string &name, PyObject *fn, bool is_
   }
   return f;
 }
+
+// A world's entities for a Python host (WorldVehicles): over an AppRuntime it does not own, finding
+// the running world again on each call, so it follows a reload. list(), spawn() and despawn() run
+// on the thread that drains the runtime (a frame hook, a host function); set_intent(), intent()
+// and clear_intent() from any thread while the document is loaded. Without a world with vehicles,
+// list() is empty and the rest return False / 0.
+class WorldEntities {
+public:
+  WorldEntities(std::shared_ptr<cvc::app> app, cvc::ariadne::AppRuntime *rt)
+      : app_(std::move(app)), rt_(rt) {
+    if (!app_ || !rt_)
+      throw std::invalid_argument("pycvc.WorldEntities: no app or no runtime");
+  }
+  bool available() const { return vehicles() != nullptr; }
+
+  // One dict per entity: id, name, archetype, team, controller, plant, placed, x, y, z, yaw, speed,
+  // power_kw, energy_wh, distance, gear, the command its plant took (steer, accel) and its intent.
+  PyObject *list() const {
+    PyObject *out = PyList_New(0);
+    if (!out)
+      return nullptr;
+    if (cvc::ariadne::WorldVehicles *v = vehicles())
+      for (const cvc::ariadne::entity_info &e : v->entities()) {
+        PyObject *d = PyDict_New();
+        put(d, "id", PyLong_FromUnsignedLongLong(e.id));
+        put(d, "name", PyUnicode_FromString(e.spec.name.c_str()));
+        put(d, "archetype", PyUnicode_FromString(e.spec.archetype.c_str()));
+        put(d, "team", PyLong_FromLong(e.spec.team));
+        put(d, "controller", PyUnicode_FromString(e.spec.controller.c_str()));
+        put(d, "plant", PyUnicode_FromString(e.plant.c_str()));
+        put(d, "placed", PyBool_FromLong(e.placed ? 1 : 0));
+        put(d, "x", PyFloat_FromDouble(e.x));
+        put(d, "y", PyFloat_FromDouble(e.y));
+        put(d, "z", PyFloat_FromDouble(e.z));
+        put(d, "yaw", PyFloat_FromDouble(e.yaw));
+        put(d, "speed", PyFloat_FromDouble(e.speed));
+        put(d, "power_kw", PyFloat_FromDouble(e.power_kw));
+        put(d, "energy_wh", PyFloat_FromDouble(e.energy_wh));
+        put(d, "distance", PyFloat_FromDouble(e.distance));
+        put(d, "gear", PyLong_FromLong(e.gear));
+        put(d, "command_steer", PyFloat_FromDouble(e.command_steer));
+        put(d, "command_accel", PyFloat_FromDouble(e.command_accel));
+        put(d, "intent", intent_dict(e.intent));
+        PyList_Append(out, d);
+        Py_DECREF(d);
+      }
+    return out;
+  }
+  // A spawn (entity_spec): its id, or 0 when it was refused (why() says why). `at` is None (a
+  // spawn point, else a free point) or (x, y) / (x, y, yaw_degrees) in world metres.
+  unsigned long long spawn(const std::string &archetype, const std::string &name = "",
+                           const std::string &controller = "", int team = 0,
+                           PyObject *at = nullptr, double mass = 0.0, double max_speed = 0.0) {
+    why_.clear();
+    cvc::ariadne::WorldVehicles *v = vehicles();
+    if (!v) {
+      why_ = "no world with vehicles";
+      return 0;
+    }
+    cvc::ariadne::entity_spec s;
+    s.archetype = archetype;
+    s.name = name;
+    s.controller = controller;
+    s.team = team;
+    s.mass = mass;
+    s.max_speed = max_speed;
+    if (at && at != Py_None) {
+      PyObject *seq = PySequence_Fast(at, "pycvc.WorldEntities.spawn: at must be (x, y[, yaw])");
+      if (!seq)
+        throw std::invalid_argument("pycvc.WorldEntities.spawn: at must be (x, y[, yaw])");
+      const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
+      double xyz[3] = {0.0, 0.0, 0.0};
+      for (Py_ssize_t i = 0; i < n && i < 3; ++i)
+        xyz[i] = PyFloat_AsDouble(PySequence_Fast_GET_ITEM(seq, i));
+      Py_DECREF(seq);
+      if (PyErr_Occurred()) {
+        PyErr_Clear();
+        throw std::invalid_argument("pycvc.WorldEntities.spawn: at must hold numbers");
+      }
+      if (n < 2 || n > 3)
+        throw std::invalid_argument("pycvc.WorldEntities.spawn: at must be (x, y[, yaw])");
+      s.placed = true;
+      s.x = xyz[0];
+      s.y = xyz[1];
+      if (n == 3)
+        s.yaw = xyz[2] * 3.14159265358979323846 / 180.0;
+    }
+    return v->spawn(s, &why_);
+  }
+  std::string why() const { return why_; }
+  bool despawn(unsigned long long id) {
+    cvc::ariadne::WorldVehicles *v = vehicles();
+    return v && v->despawn(id);
+  }
+  // An intent (entity_intent): `steer` (rad, + left) and `accel` (m/s^2) as the command, `mode`
+  // "replace", "blend" (with `weight`) or "off" ("": replace when a steer or an accel is given,
+  // else off), and `force` (fx, fy) in m/s^2, world frame. False for an id that is not an entity.
+  bool set_intent(unsigned long long id, PyObject *steer = nullptr, PyObject *accel = nullptr,
+                  const std::string &mode = "", double weight = 0.5, PyObject *force = nullptr,
+                  bool force_steers = true) {
+    cvc::ariadne::WorldVehicles *v = vehicles();
+    if (!v)
+      return false;
+    cvc::ariadne::entity_intent in;
+    const bool has_steer = number(steer, "steer", in.steer);
+    const bool has_accel = number(accel, "accel", in.accel);
+    if (mode.empty())
+      in.command = has_steer || has_accel ? cvc::ariadne::entity_intent::mode::replace
+                                          : cvc::ariadne::entity_intent::mode::off;
+    else if (!cvc::ariadne::parse_intent_mode(mode, in.command))
+      throw std::invalid_argument("pycvc.WorldEntities.set_intent: mode must be replace, blend or "
+                                  "off, not '" + mode + "'");
+    if (!(weight >= 0.0 && weight <= 1.0))
+      throw std::invalid_argument("pycvc.WorldEntities.set_intent: weight must be in [0, 1]");
+    in.weight = weight;
+    if (force && force != Py_None) {
+      PyObject *seq = PySequence_Fast(force, "pycvc.WorldEntities.set_intent: force must be (fx, fy)");
+      if (!seq)
+        throw std::invalid_argument("pycvc.WorldEntities.set_intent: force must be (fx, fy)");
+      const bool two = PySequence_Fast_GET_SIZE(seq) == 2;
+      if (two) {
+        in.force_x = PyFloat_AsDouble(PySequence_Fast_GET_ITEM(seq, 0));
+        in.force_y = PyFloat_AsDouble(PySequence_Fast_GET_ITEM(seq, 1));
+      }
+      Py_DECREF(seq);
+      if (!two || PyErr_Occurred()) {
+        PyErr_Clear();
+        throw std::invalid_argument("pycvc.WorldEntities.set_intent: force must be (fx, fy)");
+      }
+    }
+    in.force_steers = force_steers;
+    return v->set_intent(id, in);
+  }
+  PyObject *intent(unsigned long long id) const {
+    cvc::ariadne::WorldVehicles *v = vehicles();
+    return intent_dict(v ? v->intent(id) : cvc::ariadne::entity_intent{});
+  }
+  bool clear_intent(unsigned long long id) {
+    cvc::ariadne::WorldVehicles *v = vehicles();
+    return v && v->clear_intent(id);
+  }
+
+private:
+  cvc::ariadne::WorldVehicles *vehicles() const {
+    cvc::ariadne::SceneWorld *w = rt_->running_world();
+    return w ? w->vehicles() : nullptr;
+  }
+  static void put(PyObject *d, const char *k, PyObject *v) {
+    PyDict_SetItemString(d, k, v);
+    Py_XDECREF(v);
+  }
+  static PyObject *intent_dict(const cvc::ariadne::entity_intent &in) {
+    PyObject *d = PyDict_New();
+    put(d, "mode", PyUnicode_FromString(cvc::ariadne::intent_mode_name(in.command)));
+    put(d, "steer", PyFloat_FromDouble(in.steer));
+    put(d, "accel", PyFloat_FromDouble(in.accel));
+    put(d, "weight", PyFloat_FromDouble(in.weight));
+    put(d, "force", Py_BuildValue("(dd)", in.force_x, in.force_y));
+    put(d, "force_steers", PyBool_FromLong(in.force_steers ? 1 : 0));
+    return d;
+  }
+  // A Python number into `out`: false for None (not given); throws for anything else.
+  static bool number(PyObject *o, const char *name, double &out) {
+    if (!o || o == Py_None)
+      return false;
+    const double x = PyFloat_AsDouble(o);
+    if (PyErr_Occurred() || !std::isfinite(x)) {
+      PyErr_Clear();
+      throw std::invalid_argument(std::string("pycvc.WorldEntities.set_intent: ") + name +
+                                  " must be a finite number or None");
+    }
+    out = x;
+    return true;
+  }
+  std::shared_ptr<cvc::app> app_;
+  cvc::ariadne::AppRuntime *rt_ = nullptr;
+  std::string why_;
+};
 
 // A GL-free Ariadne host: an AppRuntime over `app`'s state at `prefix`, with no backend and no
 // scene. Its methods mirror pycvc_gl.AriRuntime's, so pycvc.ari.Host drives either.
@@ -161,6 +345,8 @@ public:
     return g ? new world_grid(*g) : nullptr;
   }
   std::string prefix() const { return prefix_; }
+  // The running world's entities (pycvc.WorldEntities), over this runtime.
+  WorldEntities *entities() { return new WorldEntities(app_, rt_); }
   bool has_function(const std::string &name) { return rt_->runtime().has_function(name); }
   void wait_idle() {
     if (inFrame_)
@@ -176,6 +362,20 @@ private:
   cvc::ariadne::AppRuntime *rt_ = nullptr;
   bool inFrame_ = false;
 };
+
+// The entities of the world the AppRuntime in a "cvc.ariadne.AppRuntime" capsule runs (a GL
+// host's, pycvc_gl.AriRuntime.app_runtime_capsule(); a scripting host's, _arihost.runtime()).
+WorldEntities *world_entities(std::shared_ptr<cvc::app> app, PyObject *runtime) {
+  if (!runtime || !PyCapsule_CheckExact(runtime))
+    throw std::invalid_argument("pycvc.world_entities: runtime is not a PyCapsule");
+  void *p = PyCapsule_GetPointer(runtime, "cvc.ariadne.AppRuntime");
+  if (!p) {
+    PyErr_Clear();
+    throw std::invalid_argument(
+        "pycvc.world_entities: the capsule is not a \"cvc.ariadne.AppRuntime\"");
+  }
+  return new WorldEntities(std::move(app), static_cast<cvc::ariadne::AppRuntime *>(p));
+}
 
 // An AriApp over the AppRuntime in a "cvc.ariadne.AppRuntime" capsule (a scripting host's,
 // _arihost.runtime()), not owning it.
@@ -236,6 +436,27 @@ host_function make_host_function(const std::string &name, PyObject *fn, bool is_
 
 %newobject pycvc::AriApp::grid;
 %feature("kwargs") pycvc::AriApp::grid;
+%newobject pycvc::AriApp::entities;
+%newobject pycvc::world_entities;
+%feature("kwargs") WorldEntities::spawn;
+%feature("kwargs") WorldEntities::set_intent;
+%nodefaultctor WorldEntities;
+class WorldEntities {
+public:
+  bool available() const;
+  PyObject *list() const;
+  unsigned long long spawn(const std::string &archetype, const std::string &name = "",
+                           const std::string &controller = "", int team = 0,
+                           PyObject *at = nullptr, double mass = 0.0, double max_speed = 0.0);
+  std::string why() const;
+  bool despawn(unsigned long long id);
+  bool set_intent(unsigned long long id, PyObject *steer = nullptr, PyObject *accel = nullptr,
+                  const std::string &mode = "", double weight = 0.5, PyObject *force = nullptr,
+                  bool force_steers = true);
+  PyObject *intent(unsigned long long id) const;
+  bool clear_intent(unsigned long long id);
+};
+WorldEntities *world_entities(std::shared_ptr<cvc::app> app, PyObject *runtime);
 class AriApp {
 public:
   AriApp(std::shared_ptr<cvc::app> app, const std::string &prefix = "ari");
@@ -262,6 +483,7 @@ public:
   bool restart_world();
   world_grid *grid(const std::string &node, double cell, double half = 0.0);
   std::string prefix() const;
+  WorldEntities *entities();
   bool has_function(const std::string &name);
   void wait_idle();
   static bool have_yaml();

@@ -1,7 +1,8 @@
 // ImGuiBackend + the built-in Windows menu (docs/ARIADNE.md §5.9) on a bare ImGui context (no GL):
 // a window closed with its X is not drawn, and clicking its item in the Windows menu (mouse events
-// through ImGui, as a user would) opens it again, in its place among the windows with no pos:. A
-// document with a closable window and no menubar gets a menubar for it.
+// through ImGui, as a user would) opens it again, in its place among the windows with no pos:, and
+// in front. Picking an open window brings it to the front, and so does maximizing one. A document
+// with a closable window and no menubar gets a menubar for it.
 #include <cstdio>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/widget.h>
@@ -67,6 +68,12 @@ bool drawn(const std::string &id) {
 bool overlap(const ImGuiWindow *a, const ImGuiWindow *b) {
   return a->Pos.x < b->Pos.x + b->Size.x && b->Pos.x < a->Pos.x + a->Size.x &&
          a->Pos.y < b->Pos.y + b->Size.y && b->Pos.y < a->Pos.y + a->Size.y;
+}
+
+// `a` is drawn over `b`: later in ImGui's display order.
+bool in_front(const ImGuiWindow *a, const ImGuiWindow *b) {
+  return GImGui->Windows.index_from_ptr(GImGui->Windows.find(const_cast<ImGuiWindow *>(a))) >
+         GImGui->Windows.index_from_ptr(GImGui->Windows.find(const_cast<ImGuiWindow *>(b)));
 }
 
 struct Session {
@@ -160,10 +167,20 @@ int main() {
     const ImGuiWindow *a = window_of("alpha"), *b = window_of("beta");
     chk(a && b && !overlap(a, b), "Alpha takes its place in the column again, not over Beta");
 
-    // The menu closes a window as well.
-    chk(s.click("Windows") && s.click("Beta"), "untick Beta in the Windows menu");
+    chk(a && b && in_front(a, b), "and in front of Beta");
+    chk(GImGui->NavWindow == a, "with the keys");
+
+    // Picking an open window brings it to the front, and leaves it open (its X closes it).
+    chk(s.click("Windows") && s.click("Beta"), "pick Beta, open, in the Windows menu");
     s.frame(ImVec2(990.0f, 690.0f), false);
-    chk(s.open_state("beta") == "0" && !drawn("beta"), "Beta closes");
+    chk(s.open_state("beta") == "1" && drawn("beta"), "Beta stays open");
+    chk(a && b && in_front(b, a) && GImGui->NavWindow == b, "and comes in front of Alpha");
+
+    // A window the document maximizes comes to the front too.
+    cvc::state::instance(s.app)("ui.tree.alpha.maximized").value(std::string("1"));
+    s.frame(ImVec2(990.0f, 690.0f), false);
+    s.frame(ImVec2(990.0f, 690.0f), false);
+    chk(a && b && in_front(a, b) && GImGui->NavWindow == a, "maximized, Alpha is in front");
   }
   {
     // No menubar in the document, but a closable window: the Windows menu brings its own bar.

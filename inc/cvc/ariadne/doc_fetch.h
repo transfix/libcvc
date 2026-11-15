@@ -58,8 +58,9 @@ struct DocReference {
 };
 
 // The files a document names, in document order without repeats: its top-level `import:` (one
-// URI or a list), and every `load:` and `vinay:` anywhere in it. Empty, with `error` set, when the
-// text is not YAML or this libcvc was built without yaml-cpp.
+// URI or a list) and `wasm:` block's guest (the module alone, or a map's `module:`; not a
+// `cvcpkg:` package), and every `load:` and `vinay:` anywhere in it. Empty, with `error` set, when
+// the text is not YAML or this libcvc was built without yaml-cpp.
 std::vector<DocReference> document_references(const std::string &yaml,
                                               std::string *error = nullptr);
 
