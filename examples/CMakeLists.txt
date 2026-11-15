@@ -100,6 +100,17 @@ cvc_document_host_stack(nav_compute)
 target_link_libraries(nav_compute PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS nav_compute MODULES ${VTK_LIBRARIES})
 
+# nav_scrub — watch a policy learn: cvc::nav's checkpoint scrubber on a C++ Ariadne host
+# (docs/NAV_LAB.md). It trains a short coef_trainer run (or reads --history), deploys every
+# checkpoint on the built-in blocks scenario and shows checkpoint k beside step 0 in nav_scrub.ari,
+# whose windows are libcvc's nav_lab_panels component. In the gallery (the wasm build below) the
+# document and the component library are in its file system, and the training and the deploys run
+# in the page.
+add_executable(nav_scrub ariadne/nav_scrub/nav_scrub.cpp)
+cvc_document_host_stack(nav_scrub)
+target_link_libraries(nav_scrub PRIVATE cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS nav_scrub MODULES ${VTK_LIBRARIES})
+
 # bunny_shadow — a Stanford-bunny shader/shadow-mapping test bench (one mesh, one
 # ground plane, a StageLighting rig). Loads the bunny via cvc::read_geometry, so
 # it needs only cvcGL (no nav helpers).
@@ -218,7 +229,7 @@ endif()
 # calls SceneRenderer::setFrameYield(FrameYield::App) in its C++, because its loop
 # yields once per frame on every path that renders.
 if(EMSCRIPTEN)
-  set(_wasm_demos lsystem_forest lsystem_coast bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost)
+  set(_wasm_demos lsystem_forest lsystem_coast bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost nav_scrub)
   set(_wasm_extra_demos ariadne_hello)
   # terrain_lab is native only: the browser gallery runs the Ariadne terrain lab (terrain_lab_ari,
   # arigl on documents/terrain_lab.ari), and web/demos.json keeps ../terrain_lab/ as a redirect to it.
@@ -281,6 +292,12 @@ if(EMSCRIPTEN)
     # nav_city_swarm and nav_city_drive share the Austin bundle + trained weights.
     if(_nav_swarm_bundle_flags AND ("${_wt}" STREQUAL "nav_city_swarm" OR "${_wt}" STREQUAL "nav_city_drive"))
       target_link_options(${_wt} PRIVATE ${_nav_swarm_bundle_flags})
+    endif()
+    # nav_scrub reads its document and the component library from the page's file system.
+    if("${_wt}" STREQUAL "nav_scrub")
+      target_link_options(${_wt} PRIVATE
+        "--preload-file=${CMAKE_CURRENT_SOURCE_DIR}/ariadne/nav_scrub/nav_scrub.ari@/nav_scrub/nav_scrub.ari"
+        "--preload-file=${_cvc_root}/src/cvc/ariadne/components@/components")
     endif()
     # The browser-side speedups: state shim (--pre-js) + mimalloc on wasm-mt.
     cvcgl_wasm_app(${_wt})

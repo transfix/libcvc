@@ -317,6 +317,25 @@ Both charts carry a cursor at checkpoint k's step. Checkpoint k's log and step 0
 side by side as two arms, step 0 blue and k orange. The Stats and Ledger windows show them at the
 play head, and the play head keeps its time when another checkpoint is picked.
 
+**In a browser.** `examples/ariadne/nav_scrub` is a C++ Ariadne host for the scrubber, and
+libcvc's demo gallery (https://transfix.github.io/libcvc/nav_scrub/) runs it in the page. With no
+`--history`, it first trains cvc::nav's own coef_trainer for 60 steps on the built-in blocks' map,
+in that map's frame, saving a checkpoint every 6 steps. It then deploys the 11 checkpoints and
+shows `examples/ariadne/nav_scrub/nav_scrub.ari`: the same windows, written by the same
+`scrub_view`. The training, the deploys and the view all run in the page (single-threaded wasm,
+same-origin, nothing fetched); natively the whole sequence takes under 3 s. The document and the
+component library are preloaded into the page's file system.
+
+![The scrubber in a browser page](img/nav-lab/scrub_web.jpg)
+
+*The gallery page in headless Chrome (software WebGL), after it trained and deployed in the page:
+the same numbers as the native run (step 60: path 88.8 m, 0 ticks penetrating, 53.6 m to go).*
+
+```bash
+nav_scrub examples/ariadne/nav_scrub/nav_scrub.ari --component-path src/cvc/ariadne
+nav_scrub examples/ariadne/nav_scrub/nav_scrub.ari --history run/history.jsonl --agents 8
+```
+
 ## From C++
 
 ```cpp
