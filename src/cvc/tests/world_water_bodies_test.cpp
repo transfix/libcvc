@@ -511,3 +511,39 @@ TEST(WorldWaterBodies, TheWaterColourModeDrawsTheBodies) {
   }
   EXPECT_GT(recoloured, 0);
 }
+
+// ── the waterline's slivers (lower_waterline_slivers) ────────────────────────────────────────────
+
+// Water 1 m deep everywhere but for the ridges drawn into it: each sample of a ridge one sample
+// wide and just over the level goes to the mean of the wet neighbours across it; a ridge two wide,
+// one higher than max_rise, and one along the grid's edge stay.
+TEST(WorldWaterBodies, WaterlineSliversAreLoweredUnderTheWater) {
+  const int R = 14, C = 14;
+  std::vector<float> g(std::size_t(R) * C, -1.0f);
+  auto at = [&](int r, int c) -> float & { return g[std::size_t(r) * C + c]; };
+  for (int r = 2; r <= 5; ++r)
+    at(r, 2) = 0.03f; // one wide, along y: water either side along x
+  at(4, 1) = -0.5f;   // a shallower neighbour: the mean across it is (-0.5 - 1) / 2
+  for (int r = 2; r <= 5; ++r)
+    at(r, 5) = at(r, 6) = 0.03f; // two wide
+  for (int r = 2; r <= 5; ++r)
+    at(r, 9) = 2.0f; // one wide, but 2 m over the level
+  for (int r = 3; r <= 5; ++r)
+    at(r, 0) = 0.03f; // one wide along the grid's edge: no neighbour past it
+  for (int k = 0; k < 4; ++k)
+    at(8 + k, 2 + k) = 0.01f; // a diagonal staircase: each sample has water either side along x
+  const std::size_t n = lower_waterline_slivers(g, R, C, 0.0, 0.5);
+  EXPECT_EQ(n, 8u) << "the four of the straight ridge and the four of the staircase";
+  EXPECT_FLOAT_EQ(at(2, 2), -1.0f);
+  EXPECT_FLOAT_EQ(at(4, 2), -0.75f);
+  for (int r = 2; r <= 5; ++r) {
+    EXPECT_FLOAT_EQ(at(r, 5), 0.03f) << "two wide: drawn as a cell, not a hairline";
+    EXPECT_FLOAT_EQ(at(r, 9), 2.0f) << "higher than max_rise: a real ridge";
+  }
+  for (int r = 3; r <= 5; ++r)
+    EXPECT_FLOAT_EQ(at(r, 0), 0.03f) << "the grid's edge";
+  for (int k = 0; k < 4; ++k)
+    EXPECT_LT(at(8 + k, 2 + k), 0.0f);
+  EXPECT_EQ(lower_waterline_slivers(g, R, C, 0.0, 0.5), 0u) << "nothing left to lower";
+  EXPECT_EQ(lower_waterline_slivers(g, R, C, 0.0, 0.0), 0u) << "max_rise 0: off";
+}
