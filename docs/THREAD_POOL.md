@@ -52,7 +52,7 @@ For the full per-method reference, see
   A dropped task is destroyed, so it can report the drop from its
   destructor (the async host fails the call with `RuntimeError`,
   `launch_pool_task` posts `on_error`'s value), saying why with
-  `app::poolDropReason()`.
+  the app's `poolDropReason()`.
 - **Thread creation failures.** If a new worker's thread can't be
   created, the queued tasks wait for a running worker. When the pool has
   none at all (thread resources were exhausted before its first worker),
