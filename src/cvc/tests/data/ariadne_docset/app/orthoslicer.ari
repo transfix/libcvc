@@ -1,0 +1,63 @@
+# The browser smoke test's orthoslicer (src/arigl/web/test/arigl_web_smoke.mjs): the
+# examples/ariadne/documents/orthoslicer.ari scene at 32^3, three volume_slice planes over one SDF
+# and a slice view down the axis ortho.view names (xz: down y). Once the planes are up and the
+# slice view's camera looks down y, it prints one line the test waits for.
+meta: {min_libcvc: 3.7.0}
+init: (state-set "ortho.view" "xz")
+on_tick: |
+  (if (and (!= (state-get "ortho.reported") "1")
+           (= (state-get "viewers.slice.camera.slice.axis") "y")
+           (= (state-get "graphics.root.children.slice_y.slice.count") "32"))
+      (begin
+        (print (str-concat "orthoslicer: " (state-get "graphics.root.children.slice_y.slice.count")
+                           " planes, slice view down " (state-get "viewers.slice.camera.slice.axis")))
+        (state-set "ortho.reported" "1")))
+windows:
+  - window: Orthoslicer
+    id: orthoslicer
+    pos: [16, 16]
+    size: [340, 330]
+    children:
+      - radio_row: View
+        bind: ortho.view
+        options: [XY, XZ, ZY]
+        values: [xy, xz, zy]
+      - type: viewport
+        view: slice
+        mode: slice
+        axis: { bind: ortho.view }
+        input: pick
+        pick: ortho.pick
+        chrome: false
+        width: 320
+        height: 240
+scene:
+  chrome: false
+  nodes:
+    - node: bunny_volume
+      type: volren
+      source: { sdf: { mesh: stanford.bunny, dim: 32 } }
+      fit: { height: 100, up: y }
+      volren:
+        distance_field: true
+        ambient: 0.35
+        steps: 128
+        resolution_scale: 0.5
+        isosurfaces:
+          - { value: 0.0, color: [0.85, 0.82, 0.88], opacity: 0.35 }
+        lights:
+          - { color: [1.0, 1.0, 1.0], direction: [-0.4, -0.3, -0.85] }
+    - node: slice_z
+      type: volume_slice
+      source: { sdf: { mesh: stanford.bunny, dim: 32 } }
+      fit: { height: 100, up: y }
+      axis: z
+      transfer_function: { domain: [-20, 20], preset: rainbow }
+    - node: slice_y
+      type: volume_slice
+      volume_of: slice_z
+      axis: y
+    - node: slice_x
+      type: volume_slice
+      volume_of: slice_z
+      axis: x

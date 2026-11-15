@@ -313,6 +313,25 @@ cases.push({
   check: v => v.state === 'running' && v.out.some(sent) && uploadedAll(),
 });
 
+// The orthoslicer (arigl only, not ariglx-web's lean tier): volume_slice planes over a signed
+// distance field and a slice view down the axis a key names, whose document prints one line once
+// its planes are up and the view's camera looks down y. What the page prints is captured as the
+// upload case captures it.
+if (!PYTHON) {
+  const LOGGED = `(() => {
+window.__out = [];
+const log = console.log;
+console.log = function(...a) { window.__out.push(a.join(' ')); return log.apply(this, a); };
+})();`;
+  cases.push({
+    name: 'volume_slice planes and a slice view run (the orthoslicer)',
+    url: `${ORIGIN}/apps/app/?src=orthoslicer.ari`,
+    inject: LOGGED,
+    check: v => v.state === 'running' && v.warnings.length === 0 &&
+                v.out.some(l => /orthoslicer: 32 planes, slice view down y/.test(l)),
+  });
+}
+
 // ari's terminal page, when the package has it: the same set in the FTXUI backend.
 if (fs.existsSync(path.join(WEB, 'ari.html'))) {
   const shows = v => /from lib\/panel\.ari/.test(v.text) && /from shared\/note\.ari/.test(v.text);

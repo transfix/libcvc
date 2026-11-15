@@ -1483,6 +1483,14 @@ is pushed back by `slice.overlay_offset`, so anything drawn in its plane shows o
 every view. `VolumeSliceNode::pickRay` meets a world ray with the plane exactly and names the
 voxel and its value (`cvcgl_volume_slice`, and `volume_slice_test` for the slicing itself).
 
+`volume_of: <id>` in place of `source:` makes the node another plane of the volume that the
+`volume_slice` node `<id>` (realized before it) draws, coloured through `<id>.transfer_function`:
+the volume is read or computed once, and one editor colours every plane. The classic three-plane
+orthoslicer is one node with a source and two with `volume_of:`.
+`examples/ariadne/documents/orthoslicer.ari` puts them beside a `volren` of the same volume, with
+a slice view down the axis a switch picks (§5.18) and the transfer-function editor on the first
+plane.
+
 ### 5.5 Commands as a request key
 
 A component cannot call a C++ object, but it can write a key the object reads. A
@@ -2494,8 +2502,9 @@ needs no host code. The `scene_view` component (§6.5) is the widget in a window
 
 The demos in `examples/ariadne/documents/`: `scene_views.ari` (an overview map and a view whose
 layers a menu picks), `viewer_grid.ari` (four cameras on one scene), `viewer_looks.ari` (one scene
-drawn four ways), `viewer_scenes.ari` (three scenes from one set of assets) and
-`viewer_groups.ari` (two tagged groups of one scene).
+drawn four ways), `viewer_scenes.ari` (three scenes from one set of assets),
+`viewer_groups.ari` (two tagged groups of one scene) and `orthoslicer.ari` (a slice view down the
+axis a switch picks, over three `volume_slice` planes).
 
 ```yaml
 scene:
