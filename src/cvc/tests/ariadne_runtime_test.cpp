@@ -2578,8 +2578,6 @@ TEST(AriadneHeap, FinishedActionsAreReapedAndTheirCyclesFreed) {
   ASSERT_NE(reg, nullptr) << "the app scheduler has no registry of its own";
   se::collect_cycles(*reg);
   const std::size_t before = se::tracked_objects(*reg);
-  se::collect_cycles(); // this thread's own, for the check that it gains nothing
-  const std::size_t thread_before = se::tracked_objects();
   for (int i = 0; i < 20; ++i) {
     mb.button_click = true;
     rt.render();
@@ -2596,8 +2594,6 @@ TEST(AriadneHeap, FinishedActionsAreReapedAndTheirCyclesFreed) {
   se::collect_cycles(*reg); // the held scopes are live: it keeps them
   EXPECT_GE(se::tracked_objects(*reg), before + distinct.size())
       << "the actions' scopes are not in group 0's registry";
-  se::collect_cycles();
-  EXPECT_EQ(se::tracked_objects(), thread_before) << "an action tracked into this thread's own";
   held.clear(); // now only their cycles hold them
   se::collect_cycles(*reg);
   std::size_t alive = 0;

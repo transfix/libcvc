@@ -70,8 +70,9 @@ std::size_t list_bytes(std::size_t n) {
                  alloc_bytes(n, sizeof(value_t)));
 }
 
-// Long loops inside one native call honour the evaluation deadline (see collect in builtins.cpp).
-void poll_deadline(const char *name) { eval_deadline_check(name); }
+// Long loops inside one native call honour the evaluation deadline of the context the call runs
+// in (see collect in builtins.cpp).
+void poll_deadline(exec_context *ctx, const char *name) { eval_deadline_check(ctx, name); }
 
 // A list argument by owning pointer (a null one reads as empty).
 list_ptr as_list_ptr(const value_t &v, const char *name) {
@@ -130,11 +131,12 @@ bool sort_less(const value_t &a, const value_t &b) {
 
 constexpr std::size_t npos = std::string_view::npos;
 
-// One step() call's share of the work: `budget` nodes (0 = no limit), counted into the job.
+// One step() call's share of the work: `budget` nodes (0 = no limit), counted into the job, in
+// the job's context `ctx` (its deadline).
 class slice {
 public:
-  slice(std::size_t &nodes, const char *who, std::size_t budget)
-      : nodes_(nodes), who_(who), budget_(budget) {}
+  slice(exec_context *ctx, std::size_t &nodes, const char *who, std::size_t budget)
+      : ctx_(ctx), nodes_(nodes), who_(who), budget_(budget) {}
 
   bool spent() const { return budget_ != 0 && used_ >= budget_; }
   // What is left for a nested walk (0 = no limit; never 0 while limited).
@@ -149,11 +151,12 @@ public:
     nodes_ += nodes;
     used_ += nodes;
     if ((before >> 6) != (nodes_ >> 6))
-      poll_deadline(who_); // about every 64 nodes
+      poll_deadline(ctx_, who_); // about every 64 nodes
   }
   void count_bytes(std::size_t n) { count((n + kDataNodeBytes - 1) / kDataNodeBytes); }
 
 private:
+  exec_context *ctx_;
   std::size_t &nodes_;
   const char *who_;
   std::size_t budget_;
@@ -164,7 +167,7 @@ class stdlib_job : public data_job {
 protected:
   explicit stdlib_job(const char *who) : who_(who) {}
 
-  slice begin(std::size_t budget) { return slice(nodes_, who_, budget); }
+  slice begin(std::size_t budget) { return slice(ctx_, nodes_, who_, budget); }
 
   // Stop for `fn` applied to `args`, both the job's own (see data_job::call_request).
   bool call(const value_t &fn, std::span<const value_t> args) {
@@ -247,7 +250,7 @@ public:
         return false;
       sized_ = true;
       const std::size_t count = delim_.empty() ? codepoints_ : matches_.count + 1;
-      eval_alloc_check(sat_add(list_bytes(count), s_.size()), "string.split");
+      eval_alloc_check(ctx_, sat_add(list_bytes(count), s_.size()), "string.split");
       parts_.reserve(count);
     }
     return delim_.empty() ? split_codepoints(sl) : split_at_delim(sl);
@@ -346,7 +349,7 @@ public:
       }
       if (i_ > 0)
         total_ = sat_add(total_, alloc_bytes(i_ - 1, sep_.size()));
-      eval_alloc_check(total_, "string.join");
+      eval_alloc_check(ctx_, total_, "string.join");
       out_.reserve(total_);
       sized_ = true;
       i_ = 0;
@@ -362,7 +365,7 @@ public:
       }
       const std::string &part = as_string((*list_)[i_], "string.join");
       if (const std::size_t need = sat_add(out_.size(), part.size()); need > total_) {
-        eval_alloc_check(need, "string.join"); // the list grew between slices
+        eval_alloc_check(ctx_, need, "string.join"); // the list grew between slices
         total_ = need;
       }
       if (!append_part(out_, part, off_, sl))
@@ -411,7 +414,7 @@ public:
       if (count > 0) {
         const std::size_t size =
             sat_add(s_.size() - count * from_.size(), alloc_bytes(count, to_.size()));
-        eval_alloc_check(size, "string.replace");
+        eval_alloc_check(ctx_, size, "string.replace");
         out_.reserve(size);
       } else {
         out_.reserve(s_.size());
@@ -675,7 +678,7 @@ public:
         total_ = sat_add(total_, sub ? (*sub ? (*sub)->size() : 0) : 1);
         sl.count(1);
       }
-      eval_alloc_check(list_bytes(total_), "collections.flatten");
+      eval_alloc_check(ctx_, list_bytes(total_), "collections.flatten");
       out_.reserve(total_);
       sized_ = true;
       i_ = 0;
@@ -705,7 +708,7 @@ public:
 private:
   void add(const value_t &v) {
     if (out_.size() >= total_) { // the list grew between slices
-      eval_alloc_check(list_bytes(out_.size() + 1), "collections.flatten");
+      eval_alloc_check(ctx_, list_bytes(out_.size() + 1), "collections.flatten");
       total_ = out_.size() + 1;
     }
     out_.push_back(v);
@@ -969,30 +972,30 @@ private:
 // ---------------------------------------------------------------------------
 
 void stdlib_registry::register_string_module() {
-  register_function("string", "string.split", [](std::span<const value_t> args) -> value_t {
+  register_function("string", "string.split", [](call_args args) -> value_t {
     expect_min(args, 1, "string.split");
     auto &s = as_string(args[0], "string.split");
     std::string_view delim = " ";
     if (args.size() > 1)
       delim = as_string(args[1], "string.split");
-    return run_data_job(std::make_unique<split_job>(s, delim));
+    return run_data_job(args.context(), std::make_unique<split_job>(s, delim));
   });
 
-  register_function("string", "string.join", [](std::span<const value_t> args) -> value_t {
+  register_function("string", "string.join", [](call_args args) -> value_t {
     expect_exact(args, 2, "string.join");
     list_ptr lst = as_list_ptr(args[0], "string.join");
     auto &sep = as_string(args[1], "string.join");
-    return run_data_job(std::make_unique<join_job>(std::move(lst), sep));
+    return run_data_job(args.context(), std::make_unique<join_job>(std::move(lst), sep));
   });
 
-  register_function("string", "string.replace", [](std::span<const value_t> args) -> value_t {
+  register_function("string", "string.replace", [](call_args args) -> value_t {
     expect_exact(args, 3, "string.replace");
     auto &s = as_string(args[0], "string.replace");
     auto &from = as_string(args[1], "string.replace");
     auto &to = as_string(args[2], "string.replace");
     if (from.empty())
       return value_t(s);
-    return run_data_job(std::make_unique<replace_job>(s, from, to));
+    return run_data_job(args.context(), std::make_unique<replace_job>(s, from, to));
   });
 
   register_function("string", "string.trim", [](std::span<const value_t> args) -> value_t {
@@ -1109,7 +1112,7 @@ void stdlib_registry::register_string_module() {
 
   // SE-3: string.encode — the text->binary crossing. state_exec strings are already UTF-8, so
   // encoding to utf-8 just re-tags the same bytes as `bytes`. Only utf-8 is supported.
-  register_function("string", "string.encode", [](std::span<const value_t> args) -> value_t {
+  register_function("string", "string.encode", [](call_args args) -> value_t {
     expect_min(args, 1, "string.encode");
     auto &s = as_string(args[0], "string.encode");
     if (args.size() > 1) {
@@ -1117,7 +1120,7 @@ void stdlib_registry::register_string_module() {
       if (enc != "utf-8" && enc != "utf8" && enc != "UTF-8")
         throw std::runtime_error("string.encode: unsupported encoding '" + enc + "' (only utf-8)");
     }
-    return run_data_job(std::make_unique<copy_job>("string.encode", s));
+    return run_data_job(args.context(), std::make_unique<copy_job>("string.encode", s));
   });
 }
 
@@ -1142,7 +1145,7 @@ void stdlib_registry::register_bytes_module() {
     return value_t(static_cast<int64_t>(static_cast<unsigned char>(b[static_cast<size_t>(i)])));
   });
 
-  register_function("bytes", "bytes.slice", [](std::span<const value_t> args) -> value_t {
+  register_function("bytes", "bytes.slice", [](call_args args) -> value_t {
     expect_min(args, 2, "bytes.slice");
     auto &b = as_bytes(args[0], "bytes.slice");
     int64_t pos = as_int(args[1], "bytes.slice");
@@ -1153,11 +1156,13 @@ void stdlib_registry::register_bytes_module() {
     std::size_t len = npos;
     if (args.size() > 2)
       len = static_cast<std::size_t>(std::max<int64_t>(0, as_int(args[2], "bytes.slice")));
-    return run_data_job(std::make_unique<copy_job>(
-        "bytes.slice", std::string_view(b).substr(static_cast<size_t>(pos), len)));
+    return run_data_job(
+        args.context(),
+        std::make_unique<copy_job>("bytes.slice",
+                                   std::string_view(b).substr(static_cast<size_t>(pos), len)));
   });
 
-  register_function("bytes", "bytes.concat", [](std::span<const value_t> args) -> value_t {
+  register_function("bytes", "bytes.concat", [](call_args args) -> value_t {
     std::size_t total = 0;
     std::vector<std::string_view> parts;
     parts.reserve(args.size());
@@ -1165,13 +1170,13 @@ void stdlib_registry::register_bytes_module() {
       parts.emplace_back(as_bytes(a, "bytes.concat"));
       total = sat_add(total, parts.back().size());
     }
-    eval_alloc_check(total, "bytes.concat");
-    return run_data_job(std::make_unique<concat_job>(std::move(parts), total));
+    eval_alloc_check(args.context(), total, "bytes.concat");
+    return run_data_job(args.context(), std::make_unique<concat_job>(std::move(parts), total));
   });
 
   // bytes.decode — binary->text. Only utf-8; the bytes MUST be valid UTF-8 (strict, like Python's
   // bytes.decode default) or it errors rather than yielding an invalid string.
-  register_function("bytes", "bytes.decode", [](std::span<const value_t> args) -> value_t {
+  register_function("bytes", "bytes.decode", [](call_args args) -> value_t {
     expect_min(args, 1, "bytes.decode");
     auto &b = as_bytes(args[0], "bytes.decode");
     if (args.size() > 1) {
@@ -1180,7 +1185,7 @@ void stdlib_registry::register_bytes_module() {
         throw std::runtime_error("bytes.decode: unsupported encoding '" + enc + "' (only utf-8)");
     }
     // A string holding the validated UTF-8 bytes.
-    return run_data_job(std::make_unique<decode_job>(b));
+    return run_data_job(args.context(), std::make_unique<decode_job>(b));
   });
 }
 
@@ -1189,8 +1194,6 @@ void stdlib_registry::register_bytes_module() {
 // ---------------------------------------------------------------------------
 
 namespace {
-
-thread_local random_stream *t_stream = nullptr; // random_stream_scope's
 
 // A group's engine, seeded on first use: from its seed, else from several random_device words
 // (one word, as the thread's engine takes, gives only 2^32 streams).
@@ -1307,11 +1310,12 @@ void stdlib_registry::register_math_module() {
     random_stream s;
   };
   auto own = std::make_shared<own_stream>();
-  register_function("math", "math.random", [own](std::span<const value_t> args) -> value_t {
+  register_function("math", "math.random", [own](call_args args) -> value_t {
     expect_exact(args, 0, "math.random");
     std::uniform_real_distribution<double> dist(0.0, 1.0);
-    // The bound group's stream, whichever thread pumps the group (td 4.10); else the registry's.
-    if (random_stream *s = t_stream)
+    // The stream of the context the call runs in (its group's, whichever thread pumps the group,
+    // td 4.10); else the registry's.
+    if (random_stream *s = args.context() ? args.context()->random : nullptr)
       return value_t(dist(stream_engine(*s)));
     std::lock_guard<std::mutex> lock(own->m);
     return value_t(dist(stream_engine(own->s)));
@@ -1325,123 +1329,117 @@ void stdlib_registry::register_math_module() {
 void stdlib_registry::register_collections_module() {
   // map, filter and reduce take a native function or a DSL function (a lambda, a defun): the
   // evaluator running the program makes each call, a DSL one as its own frames.
-  register_function("collections", "collections.map", [](std::span<const value_t> args) -> value_t {
+  register_function("collections", "collections.map", [](call_args args) -> value_t {
     expect_exact(args, 2, "collections.map");
     list_ptr lst = as_list_ptr(args[0], "collections.map");
     const value_t &fn = as_function(args[1], "collections.map", "second");
-    return run_data_job(std::make_unique<map_job>("collections.map", std::move(lst), fn, false));
+    return run_data_job(args.context(),
+                        std::make_unique<map_job>("collections.map", std::move(lst), fn, false));
   });
 
-  register_function(
-      "collections", "collections.filter", [](std::span<const value_t> args) -> value_t {
-        expect_exact(args, 2, "collections.filter");
-        list_ptr lst = as_list_ptr(args[0], "collections.filter");
-        const value_t &fn = as_function(args[1], "collections.filter", "second");
-        return run_data_job(
-            std::make_unique<map_job>("collections.filter", std::move(lst), fn, true));
-      });
+  register_function("collections", "collections.filter", [](call_args args) -> value_t {
+    expect_exact(args, 2, "collections.filter");
+    list_ptr lst = as_list_ptr(args[0], "collections.filter");
+    const value_t &fn = as_function(args[1], "collections.filter", "second");
+    return run_data_job(args.context(),
+                        std::make_unique<map_job>("collections.filter", std::move(lst), fn, true));
+  });
 
-  register_function(
-      "collections", "collections.reduce", [](std::span<const value_t> args) -> value_t {
-        expect_exact(args, 3, "collections.reduce");
-        list_ptr lst = as_list_ptr(args[0], "collections.reduce");
-        const value_t &fn = as_function(args[1], "collections.reduce", "second");
-        return run_data_job(std::make_unique<reduce_job>(std::move(lst), fn, args[2]));
-      });
+  register_function("collections", "collections.reduce", [](call_args args) -> value_t {
+    expect_exact(args, 3, "collections.reduce");
+    list_ptr lst = as_list_ptr(args[0], "collections.reduce");
+    const value_t &fn = as_function(args[1], "collections.reduce", "second");
+    return run_data_job(args.context(), std::make_unique<reduce_job>(std::move(lst), fn, args[2]));
+  });
 
-  register_function("collections", "collections.zip", [](std::span<const value_t> args) -> value_t {
+  register_function("collections", "collections.zip", [](call_args args) -> value_t {
     expect_exact(args, 2, "collections.zip");
     list_ptr a = as_list_ptr(args[0], "collections.zip");
     list_ptr b = as_list_ptr(args[1], "collections.zip");
     const std::size_t n = std::min(a->size(), b->size());
-    eval_alloc_check(sat_add(list_bytes(n), alloc_bytes(n, list_bytes(2))), "collections.zip");
-    return run_data_job(std::make_unique<zip_job>(std::move(a), std::move(b), n));
+    eval_alloc_check(args.context(), sat_add(list_bytes(n), alloc_bytes(n, list_bytes(2))),
+                     "collections.zip");
+    return run_data_job(args.context(), std::make_unique<zip_job>(std::move(a), std::move(b), n));
   });
 
-  register_function("collections", "collections.flatten",
-                    [](std::span<const value_t> args) -> value_t {
-                      expect_exact(args, 1, "collections.flatten");
-                      return run_data_job(std::make_unique<flatten_job>(
-                          as_list_ptr(args[0], "collections.flatten")));
-                    });
+  register_function("collections", "collections.flatten", [](call_args args) -> value_t {
+    expect_exact(args, 1, "collections.flatten");
+    return run_data_job(args.context(),
+                        std::make_unique<flatten_job>(as_list_ptr(args[0], "collections.flatten")));
+  });
 
-  register_function("collections", "collections.sort",
-                    [](std::span<const value_t> args) -> value_t {
-                      expect_exact(args, 1, "collections.sort");
-                      return run_data_job(
-                          std::make_unique<sort_job>(as_list_ptr(args[0], "collections.sort")));
-                    });
+  register_function("collections", "collections.sort", [](call_args args) -> value_t {
+    expect_exact(args, 1, "collections.sort");
+    return run_data_job(args.context(),
+                        std::make_unique<sort_job>(as_list_ptr(args[0], "collections.sort")));
+  });
 
-  register_function("collections", "collections.reverse",
-                    [](std::span<const value_t> args) -> value_t {
-                      expect_exact(args, 1, "collections.reverse");
-                      return run_data_job(std::make_unique<reverse_job>(
-                          as_list_ptr(args[0], "collections.reverse")));
-                    });
+  register_function("collections", "collections.reverse", [](call_args args) -> value_t {
+    expect_exact(args, 1, "collections.reverse");
+    return run_data_job(args.context(),
+                        std::make_unique<reverse_job>(as_list_ptr(args[0], "collections.reverse")));
+  });
 
-  register_function(
-      "collections", "collections.range", [](std::span<const value_t> args) -> value_t {
-        expect_min(args, 1, "collections.range");
-        int64_t start = 0, stop, step = 1;
-        if (args.size() == 1) {
-          stop = as_int(args[0], "collections.range");
-        } else {
-          start = as_int(args[0], "collections.range");
-          stop = as_int(args[1], "collections.range");
-          if (args.size() > 2)
-            step = as_int(args[2], "collections.range");
-        }
-        if (step == 0)
-          throw std::runtime_error("collections.range: step cannot be zero");
-        // Count the elements in unsigned arithmetic (no signed overflow at the
-        // int64 ends), check the size, then build: element k is start + k*step.
-        const uint64_t ustart = static_cast<uint64_t>(start);
-        const uint64_t ustop = static_cast<uint64_t>(stop);
-        const uint64_t ustep = static_cast<uint64_t>(step);
-        uint64_t count = 0;
-        if (step > 0 && start < stop)
-          count = (ustop - ustart - 1) / ustep + 1;
-        else if (step < 0 && start > stop)
-          count = (ustart - ustop - 1) / (0 - ustep) + 1;
-        eval_alloc_check(count > SIZE_MAX ? SIZE_MAX : list_bytes(static_cast<size_t>(count)),
-                         "collections.range");
-        return run_data_job(
-            std::make_unique<range_job>(ustart, ustep, static_cast<std::size_t>(count)));
-      });
+  register_function("collections", "collections.range", [](call_args args) -> value_t {
+    expect_min(args, 1, "collections.range");
+    int64_t start = 0, stop, step = 1;
+    if (args.size() == 1) {
+      stop = as_int(args[0], "collections.range");
+    } else {
+      start = as_int(args[0], "collections.range");
+      stop = as_int(args[1], "collections.range");
+      if (args.size() > 2)
+        step = as_int(args[2], "collections.range");
+    }
+    if (step == 0)
+      throw std::runtime_error("collections.range: step cannot be zero");
+    // Count the elements in unsigned arithmetic (no signed overflow at the
+    // int64 ends), check the size, then build: element k is start + k*step.
+    const uint64_t ustart = static_cast<uint64_t>(start);
+    const uint64_t ustop = static_cast<uint64_t>(stop);
+    const uint64_t ustep = static_cast<uint64_t>(step);
+    uint64_t count = 0;
+    if (step > 0 && start < stop)
+      count = (ustop - ustart - 1) / ustep + 1;
+    else if (step < 0 && start > stop)
+      count = (ustart - ustop - 1) / (0 - ustep) + 1;
+    eval_alloc_check(args.context(),
+                     count > SIZE_MAX ? SIZE_MAX : list_bytes(static_cast<size_t>(count)),
+                     "collections.range");
+    return run_data_job(args.context(), std::make_unique<range_job>(
+                                            ustart, ustep, static_cast<std::size_t>(count)));
+  });
 
-  register_function("collections", "collections.unique",
-                    [](std::span<const value_t> args) -> value_t {
-                      expect_exact(args, 1, "collections.unique");
-                      return run_data_job(
-                          std::make_unique<unique_job>(as_list_ptr(args[0], "collections.unique")));
-                    });
+  register_function("collections", "collections.unique", [](call_args args) -> value_t {
+    expect_exact(args, 1, "collections.unique");
+    return run_data_job(args.context(),
+                        std::make_unique<unique_job>(as_list_ptr(args[0], "collections.unique")));
+  });
 
-  register_function("collections", "collections.dict-keys",
-                    [](std::span<const value_t> args) -> value_t {
-                      expect_exact(args, 1, "collections.dict-keys");
-                      dict_ptr d = as_dict_ptr(args[0], "collections.dict-keys", "expected dict");
-                      return run_data_job(std::make_unique<dict_items_job>("collections.dict-keys",
-                                                                           std::move(d), true));
-                    });
+  register_function("collections", "collections.dict-keys", [](call_args args) -> value_t {
+    expect_exact(args, 1, "collections.dict-keys");
+    dict_ptr d = as_dict_ptr(args[0], "collections.dict-keys", "expected dict");
+    return run_data_job(args.context(), std::make_unique<dict_items_job>("collections.dict-keys",
+                                                                         std::move(d), true));
+  });
 
-  register_function("collections", "collections.dict-values",
-                    [](std::span<const value_t> args) -> value_t {
-                      expect_exact(args, 1, "collections.dict-values");
-                      dict_ptr d = as_dict_ptr(args[0], "collections.dict-values", "expected dict");
-                      return run_data_job(std::make_unique<dict_items_job>(
-                          "collections.dict-values", std::move(d), false));
-                    });
+  register_function("collections", "collections.dict-values", [](call_args args) -> value_t {
+    expect_exact(args, 1, "collections.dict-values");
+    dict_ptr d = as_dict_ptr(args[0], "collections.dict-values", "expected dict");
+    return run_data_job(args.context(), std::make_unique<dict_items_job>("collections.dict-values",
+                                                                         std::move(d), false));
+  });
 
-  register_function(
-      "collections", "collections.dict-merge", [](std::span<const value_t> args) -> value_t {
-        expect_exact(args, 2, "collections.dict-merge");
-        dict_ptr d1 = as_dict_ptr(args[0], "collections.dict-merge", "expected two dicts");
-        dict_ptr d2 = as_dict_ptr(args[1], "collections.dict-merge", "expected two dicts");
-        eval_alloc_check(
-            alloc_bytes(d1->size() + d2->size(), sizeof(std::pair<std::string, value_t>)),
-            "collections.dict-merge");
-        return run_data_job(std::make_unique<dict_merge_job>(std::move(d1), std::move(d2)));
-      });
+  register_function("collections", "collections.dict-merge", [](call_args args) -> value_t {
+    expect_exact(args, 2, "collections.dict-merge");
+    dict_ptr d1 = as_dict_ptr(args[0], "collections.dict-merge", "expected two dicts");
+    dict_ptr d2 = as_dict_ptr(args[1], "collections.dict-merge", "expected two dicts");
+    eval_alloc_check(args.context(),
+                     alloc_bytes(d1->size() + d2->size(), sizeof(std::pair<std::string, value_t>)),
+                     "collections.dict-merge");
+    return run_data_job(args.context(),
+                        std::make_unique<dict_merge_job>(std::move(d1), std::move(d2)));
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1533,11 +1531,5 @@ const native_fn *stdlib_registry::lookup_qualified(const std::string &qualified_
   }
   return nullptr;
 }
-
-random_stream_scope::random_stream_scope(random_stream *s) noexcept : outer_(t_stream) {
-  t_stream = s;
-}
-
-random_stream_scope::~random_stream_scope() { t_stream = outer_; }
 
 } // namespace cvc::state_exec
