@@ -1582,6 +1582,9 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
   for (const std::function<void(vtkRenderer *)> &t : realized.custom_ticks)
     if (t)
       t(renderer);
+  for (const auto &t : realized.scene_ticks)
+    if (t)
+      t(renderer, realized, clock_step);
   return clock_step;
 }
 

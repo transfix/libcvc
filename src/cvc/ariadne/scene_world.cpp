@@ -675,6 +675,7 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
     // body_from_visual = translate(-centre) x scale, row-major.
     made.body_from_visual = {s[0], 0, 0,    -centre.x, 0, s[1], 0, -centre.y,
                              0,    0, s[2], -centre.z, 0, 0,    0, 1};
+    made.desc = std::make_shared<const ph::body_desc>(d);
     out->_impl->bodies.push_back(made);
     impl::entry ent;
     ent.desc = d;

@@ -120,6 +120,12 @@ struct RealizedScene {
   // capture a weak_ptr to its node (not the node), matching the volren/volslice
   // discipline, so a torn-down node's tick is a no-op.
   std::vector<std::function<void(vtkRenderer *)>> custom_ticks;
+  // The same for a closure that reads the scene's world as this frame left it (the physics stepped
+  // and its moving bodies posed: `world`, `physics_binding`) and the frame's clock step. The scene
+  // is passed in, not captured, since it moves after realize. Run after the custom_ticks.
+  std::vector<
+      std::function<void(vtkRenderer *, RealizedScene &, const cvc::world_clock::step_result &)>>
+      scene_ticks;
 
   // §9 time. When the scene declared a `clock:` block, tick_scene drives the app's authoritative
   // cvc::world_clock (app.world_clock()) through a cvc::world_clock_binding each frame: it reads
