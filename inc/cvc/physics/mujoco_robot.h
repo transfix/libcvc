@@ -244,6 +244,8 @@ public:
   // --- snapshots -----------------------------------------------------------------------------
   mujoco_snapshot save() const;
   void restore(const mujoco_snapshot &s);
+  // Back to how the robot was built: the start's state, modes, gains and books (a gym's reset).
+  void reset();
 
 private:
   std::unique_ptr<detail::mujoco_engine> _e;

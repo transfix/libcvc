@@ -1269,6 +1269,11 @@ struct pycvc_py_conversion {
 // sim_world handles) and pycvc_world.i (height_field, for terrain bodies).
 %include "pycvc_physics.i"
 
+// ── cvc::physics::mujoco_robot: a MuJoCo robot on libcvc terrain ───────────────
+// The C-PHAST lab's plant (docs/MUJOCO.md); in every pycvc, live only with CVC_WITH_MUJOCO. After
+// pycvc_physics.i (its vec3 and tuple helpers) and pycvc_world.i (height_field).
+%include "pycvc_mujoco.i"
+
 // ── cvc::input_trace: record a session's inputs, replay them at their ticks ────
 // The recorder, the player and a sim_world's trace (cvc/core/input_trace.h,
 // cvc/nav/sim_world_trace.h). After pycvc_physics.i: the sim_world handles are its and nav's.

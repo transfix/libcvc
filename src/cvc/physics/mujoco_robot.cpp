@@ -283,6 +283,9 @@ mujoco_snapshot mujoco_robot::save() const { return _e->save(); }
 void mujoco_robot::restore(const mujoco_snapshot &s) {
   guarded([&] { _e->restore(s); });
 }
+void mujoco_robot::reset() {
+  guarded([&] { _e->reset(); });
+}
 
 mujoco_trial_result run_mujoco_trial(const mujoco_trial_options &t) {
   if (!(t.duration > 0.0) || !(t.settle >= 0.0) || !(t.push_duration >= 0.0) ||

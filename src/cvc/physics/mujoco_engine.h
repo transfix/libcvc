@@ -100,6 +100,7 @@ public:
 
   virtual mujoco_snapshot save() const = 0;
   virtual void restore(const mujoco_snapshot &s) = 0;
+  virtual void reset() = 0;
 };
 
 // Builds the robot: options' model, with `grid` (null: keep the model's floor) in place of

@@ -7,7 +7,8 @@ MuJoCo Menagerie. This is the base for the C-PHAST lab (Phase 6 of
 `docs/roadmap/PH-COMPOSE-ROADMAP.md`, on transfix/libcvc#1227): C-PHAST predicts a robot's
 futures, and MuJoCo is the ground truth they are checked against, energy included.
 
-Header: `cvc/physics/mujoco_robot.h`. CLI: `cvc mujoco`. Tests: `physics_mujoco_robot_test`.
+Header: `cvc/physics/mujoco_robot.h`. CLI: `cvc mujoco`. Python: `pycvc.mujoco_robot`. Tests:
+`physics_mujoco_robot_test`, `bindings/pycvc/test_pycvc_mujoco.py`.
 
 ## Building
 
@@ -25,9 +26,11 @@ cmake -S . -B build -DCMAKE_PREFIX_PATH=$PWD/deps -DCVC_WITH_MUJOCO=ON
   fails without it, so the tests never skip quietly.
 - Without the option, the header and the class are still there: `mujoco_robot::available()` is
   false, and the constructor throws `cvc::unsupported_exception`.
-- CI: the `mujoco` job in `.github/workflows/ci.yml` builds a minimal libcvc this way on
-  ubuntu-24.04 and runs the tests and `cvc mujoco stand`. It runs when the robot's code, the
-  height field, the build files or the workflow change. No other lane turns MuJoCo on.
+- CI: the `mujoco` job in `.github/workflows/ci.yml` builds a minimal libcvc and pycvc this way
+  on ubuntu-24.04 (Python 3.12, numpy and SWIG from cvcpkg too). It runs the C++ tests,
+  `cvc mujoco stand` and `test_pycvc_mujoco.py`, and fails if any of them skips. It runs when the
+  robot's code, its binding, the height field, the build files or the workflow change. No other
+  lane turns MuJoCo on.
 
 ### Licensing
 
@@ -118,7 +121,8 @@ end velocities. The kinds are:
 
 **Snapshots.** `save()` and `restore()` hold MuJoCo's integration state (time, qpos, qvel,
 controls, applied forces, the solver's warm start), plus the actuators' modes and gains and the
-books. A restored run replays the original to the bit.
+books. A restored run replays the original to the bit. `reset()` goes back to the robot as built
+(a gym's reset): the start's state, modes, gains and books.
 
 **No process-wide state.** The model, the data and the books live on the object. Nothing
 installs `mju_user_*` handlers or registers plugins, so two robots share nothing. MuJoCo's own
@@ -144,7 +148,44 @@ about 11 s.
 | Stands on a 10° slope, facing up, down and across | moves under 1.2 mm after settling, below 5e-4 m/s; the base keeps the slope's tilt |
 | Sideways push on the base for 0.1 s, after 1 s of settling | 60 N: moves up to 1.7 cm and recovers. 150 N: up to 8 cm and recovers. 200 N: falls. 300 N: rolls over. The test checks 60 N and 300 N |
 | Energy books (3 s, 60 N push) | residual 3.0e-5 J at dt = 2 ms and 1.5e-5 J at 1 ms, against about 5.9 J of gross work. Tolerance: 2e-5 of the gross work, and the residual must halve (ratio 0.3 to 0.7) when the step halves |
-| Determinism | two runs, a run that reads the robot every step, and a restored snapshot all end on the same bits |
+| Determinism | two runs, a run that reads the robot every step, a restored snapshot and a reset robot all end on the same bits |
+
+## Python (`pycvc.mujoco_robot`)
+
+`bindings/pycvc/pycvc_mujoco.i` puts the robot in every pycvc. Without `CVC_WITH_MUJOCO`,
+`pycvc.mujoco_available()` is False and the constructor raises.
+
+```python
+field = pycvc.height_field(rows, cols, x0, y0, dx, dy, heights)   # (rows, cols) float32
+go2 = pycvc.mujoco_robot(deps + "/share/mujoco-menagerie/unitree_go2/scene.xml", terrain=field)
+for episode in range(n):
+    go2.reset()                             # back to the start
+    while go2.time() < 4.0:
+        go2.command(policy(go2.qpos(), go2.qvel()))   # 12 servo targets (rad)
+        go2.step()                          # releases the GIL
+    print(go2.base()["up_z"], go2.books()["residual"])
+```
+
+- Keyword constructor with the C++ options: `terrain`, `floor`, `timestep`, `energy`,
+  `keyframe`, `x`, `y`, `yaw`, `align_to_terrain`, `mode` (`"position"` or `"torque"`), `kp`
+  and `kd`. The terrain is copied in.
+- Bodies, geoms and actuators are ints. `qpos`, `qvel`, `commands` and `actuator_forces` are
+  read-only float64 numpy copies. Positions and forces are tuples, and rotations are (w, x, y, z).
+- `base()`, `contacts()`, `energy()` and `books()` return dicts (a list of dicts for the
+  contacts), `save()` returns an opaque `pycvc.mujoco_snapshot`, and `run_mujoco_trial()`
+  returns the trial as a dict.
+
+`test_pycvc_mujoco.py` (112 checks, ctest `pycvc_mujoco`) checks:
+
+- the loaded model and its numpy readouts;
+- standing, with the feet carrying the weight, and the 60 N push and recovery: 1.66 cm, the
+  same as C++;
+- the energy books (residual 2.9e-5 J of 5.9 J);
+- that `reset()` and a restored snapshot replay an episode to the bit, and a second robot does
+  too;
+- torque saturation, and the 10° trial;
+- that another thread runs while `step()` does;
+- that bad input raises.
 
 ## `cvc mujoco`
 
@@ -172,7 +213,8 @@ cvc mujoco stand deps/share/mujoco-menagerie/unitree_go2/scene.xml --slope 10 --
 - **Coupling to the Jolt world.** The plan is a one-way kinematic proxy of the robot in Jolt, and
   the vehicles as mocap bodies in MuJoCo, over the shared height field. Two-way contact comes
   later.
-- **pycvc.** A SWIG binding of `mujoco_robot` (`reset` / `step` / readouts) for the gym. It needs
-  the pycvc lanes to carry MuJoCo first.
+- **The gym itself.** The binding gives a gym's `reset` / `step` and readouts. A scenario
+  registry (push recovery first), observation and reward conventions, and C-PHAST as the
+  planning baseline come with the lab.
 - **Other platforms.** cvcpkg publishes `mujoco` for macOS, Windows, wasm and wasm-mt. Only
   Linux x86_64 is built and tested here.

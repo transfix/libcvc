@@ -227,6 +227,7 @@ public:
     _fresh = true;
     if (energy_on())
       _books.energy_start = d->energy[0] + d->energy[1];
+    _start = save();
   }
 
   int nq() const override { return static_cast<int>(_m->nq); }
@@ -397,6 +398,7 @@ public:
     _contacts.clear();
     _fresh = false;
   }
+  void reset() override { restore(_start); }
 
 private:
   actuator_info &at(int i) { return _act.at(static_cast<std::size_t>(i)); }
@@ -581,6 +583,7 @@ private:
   int _free = -1, _terrain = -1;
   bool _fresh = false;
   mujoco_books _books;
+  mujoco_snapshot _start; // as built, for reset()
   std::vector<double> _forces;
   std::vector<mujoco_contact> _contacts;
   std::vector<mjtNum> _v0, _vbar, _tmp, _jv, _warm;

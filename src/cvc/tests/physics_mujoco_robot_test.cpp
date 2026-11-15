@@ -346,6 +346,30 @@ TEST(MujocoRobot, TwoRunsInOneBinaryAreIdentical) {
   EXPECT_EQ(first_books.work(), c.books().work());
 }
 
+// reset() goes back to the robot as built: after a run with a push and a mode change, a reset
+// robot replays a fresh one's run to the bit, books included.
+TEST(MujocoRobot, ResetReplaysAFreshRobot) {
+  NEED_MUJOCO();
+  mujoco_robot fresh(go2_on(plane(5.0)));
+  const std::vector<double> want = scripted(fresh, 600, false);
+
+  mujoco_robot r(go2_on(plane(5.0)));
+  scripted(r, 400, false);
+  r.set_mode(actuator_mode::torque);
+  r.set_gains(1, 10.0, 0.5);
+  r.apply_wrench(r.body("base"), {30.0, 0.0, 0.0});
+  r.step(10);
+  r.reset();
+  EXPECT_DOUBLE_EQ(r.time(), 0.0);
+  EXPECT_TRUE(r.contacts().empty());
+  EXPECT_EQ(r.mode(0), actuator_mode::position);
+  EXPECT_EQ(r.kp(1), 60.0);
+  EXPECT_EQ(r.books().work(), 0.0);
+  const std::vector<double> got = scripted(r, 600, false);
+  EXPECT_TRUE(same_bits(want, got));
+  EXPECT_EQ(fresh.books().residual(), r.books().residual());
+}
+
 TEST(MujocoRobot, TorqueModeAndForceLimits) {
   NEED_MUJOCO();
   mujoco_robot r(go2_on(plane(0.0)));
