@@ -14,6 +14,7 @@
 */
 
 #include <algorithm>
+#include <chrono>
 #include <cvc/state/state_link_stats.h>
 
 namespace cvc {
@@ -49,6 +50,22 @@ void state_link_stats::note_rtt(std::int64_t rtt_ns) noexcept {
     ++_rtt_count;
 }
 
+void state_link_stats::note_peer_clock(std::int64_t peer_wall_ns, std::int64_t rtt_ns,
+                                       std::int64_t local_wall_ns) noexcept {
+  if (peer_wall_ns <= 0 || rtt_ns < 0)
+    return;
+  if (local_wall_ns <= 0)
+    local_wall_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count();
+  const std::int64_t offset_us = (peer_wall_ns - (local_wall_ns - rtt_ns / 2)) / 1000;
+  std::lock_guard<std::mutex> lk(_rtt_mu);
+  _clock_ring[_clock_next] = {rtt_ns / 1000, offset_us};
+  _clock_next = (_clock_next + 1) % kRttWindow;
+  if (_clock_count < kRttWindow)
+    ++_clock_count;
+}
+
 void state_link_stats::note_media_sent() noexcept {
   _media_sent.fetch_add(1, std::memory_order_relaxed);
 }
@@ -76,6 +93,15 @@ state_link_stats::counters state_link_stats::read() const noexcept {
       const int n = _rtt_count;
       const std::int64_t med = (n % 2) ? w[n / 2] : (w[n / 2 - 1] + w[n / 2]) / 2;
       c.rtt_ms = ms(med);
+    }
+    if (_clock_count > 0) { // the reading with the shortest round trip
+      const auto *best = &_clock_ring[0];
+      for (int i = 1; i < _clock_count; ++i)
+        if (_clock_ring[i].first < best->first)
+          best = &_clock_ring[i];
+      c.peer_clock = true;
+      c.clock_rtt_ms = static_cast<double>(best->first) / 1000.0;
+      c.clock_offset_ms = static_cast<double>(best->second) / 1000.0;
     }
   }
   c.rtt_last_ms = ms(_rtt_last_us.load(std::memory_order_relaxed));
