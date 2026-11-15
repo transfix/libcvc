@@ -23,7 +23,7 @@ meta:
 
 requires:
   - quit                                   # the Feed menu's Quit
-  - chart                                  # the Learning window (libcvc 3.7.14)
+  - chart                                  # the Learning window (libcvc 4.0)
   - {name: stream_view, optional: true}    # host.open_stream registers it (GL); else text
   - {name: raster.bitmap, optional: true}  # the heat picture in real pixels
 

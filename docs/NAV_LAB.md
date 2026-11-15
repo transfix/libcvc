@@ -206,7 +206,7 @@ The document picks:
 `arms.names` (one name per line) and `arms.agents` feed the combos. A host writes `arms.time` and
 handles two events: `arms.retarget` (with `arms.goal`, "x, y") and `arms.seek`.
 
-The charts need Ariadne's `chart:` widget, which is in libcvc 3.7.14. On an older host they are
+The charts need Ariadne's `chart:` widget, which is in libcvc 4.0. On an older host they are
 hidden, and the tables show the same numbers.
 
 ## Replay

@@ -8,7 +8,7 @@
 # Use it:
 #     import: [cvc://components/nav_lab_stats.ari, cvc://components/nav_lab_ledger.ari]
 #     requires:
-#       - {name: chart, optional: true}   # the charts (libcvc 3.7.14); hidden on an older host
+#       - {name: chart, optional: true}   # the charts (libcvc 4.0); hidden on an older host
 #     windows:
 #       - include: nav_lab_stats          # pos: / size: at the include site place it
 #       - include: nav_lab_ledger
