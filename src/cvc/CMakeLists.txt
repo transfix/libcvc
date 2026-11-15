@@ -28,6 +28,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/tet_complex.h
   ../../inc/cvc/geometry/skeleton.h
   ../../inc/cvc/geometry/skeleton_params.h
+  ../../inc/cvc/geometry/skeleton_intrinsics.h
   ../../inc/cvc/state/state.h
   ../../inc/cvc/state/state_key_meta.h
   ../../inc/cvc/state/state_change_journal.h
@@ -302,6 +303,7 @@ set(SOURCE_FILES
   geometry/skeleton/u2.cpp
   geometry/skeleton/skel.cpp
   geometry/skeleton/skeleton.cpp
+  geometry/skeleton/skeleton_intrinsics.cpp
   geometry/sliced_ldlt.cpp
   geometry/geometry_file_io.cpp
   geometry/contours.cpp
@@ -1636,7 +1638,7 @@ list(APPEND INCLUDE_FILES
 # (install(EXPORT cvcTargets NAMESPACE cvc::) exports only cvc::cvc). Zero-copy
 # frame_pool + drop-oldest/latest per-subscriber channel + dedicated producer
 # thread; borrows cvc::state only for the /streams/<id> descriptor.
-list(APPEND SOURCE_FILES ariadne/stream/frame_pool.cpp ariadne/stream/stream_channel.cpp ariadne/stream/stream_registry.cpp ariadne/stream/producer_thread.cpp ariadne/stream/stream.cpp ariadne/stream/stream_codec.cpp ariadne/stream/to_image.cpp ariadne/stream/synthetic_source.cpp ariadne/stream/audio_sources.cpp ariadne/stream/stream_view.cpp)
+list(APPEND SOURCE_FILES ariadne/stream/frame_pool.cpp ariadne/stream/stream_channel.cpp ariadne/stream/stream_registry.cpp ariadne/stream/producer_thread.cpp ariadne/stream/stream.cpp ariadne/stream/stream_codec.cpp ariadne/stream/to_image.cpp ariadne/stream/raster.cpp ariadne/stream/synthetic_source.cpp ariadne/stream/audio_sources.cpp ariadne/stream/stream_view.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/stream/frame.h
   ../../inc/cvc/ariadne/stream/stream_codec.h

@@ -1583,6 +1583,7 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
 | | `open-url` | `host_proxied` | it opens a tab in the user's browser |
 | | `http-upload` (and `-async`; a provider of its own, master's #1190) | `any` | the plan is built where it is called, the app's picked files locking (`PickedFiles`); its progress path is under `ictx.root_path`, no tree walk; the blocking upload runs on the app's background pool, and a started one (a browser page) settles through its host's finisher, as a started request does |
 | streams (`register_stream_intrinsics`) | `stream-open`, `stream-info`, `stream-close` | `any` | mutex-guarded tables; descriptors written through pinned walks; a stream posts to the group it was opened in |
+| | `raster-*` (a provider of its own, master's #1236) | `host_proxied` | synchronous; `raster-open` and `raster-publish` write the raster's mirrors into the tree raw (`write_node`), and one thread paints and publishes a raster; a raster's stream posts to group 0 (it names no scheduler) |
 | room (`register_room_intrinsics`) | `room-*` and `chat-*` | `host_proxied` | they write the app-global room tree raw, and use a room's chat client outside the room table's lock |
 | room-media (`register_room_media_intrinsics`) | `room-publish`, `room-subscribe` | `host_proxied` | they write the room tree raw and drive the bridge; a subscribed proxy posts to the caller's group |
 | oidc (`enable_oidc`) | `oidc-*` | `host_proxied` | process-global sessions, stepped by `pump_oidc` on the host thread; a document that uses oidc stays in group 0 (S1-Q6) |
@@ -1591,7 +1592,7 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
 | The backend's verbs (the Runtime's own, `Runtime::Impl::install_backend_verbs`) | `clipboard-set` (where the backend has a clipboard), `fullscreen` | `host_proxied` | they call the backend, whose window and clipboard are the host thread's; `has?` sees them in an `any` group too (`AriadneIsolatedDocs.TheBackendsVerbsRunOnTheFramesThread`) |
 | | `file-pick` (where there is a backend), `file-info`, `file-forget` (master's #1190) | bound as they are in every group | `file-info` and `file-forget` lock the app's `PickedFiles`; `file-pick` is async, so it is not proxied: it parks on the program's own host, claims the Runtime's picker hub under its lock where it is called, and opens the picker on the host thread (`exec_pool::run_on_host` for the group the verbs were bound for; inline when it is called there, or in group 0); the answer goes through the host's finisher |
 | cvcGL media and stream verbs (`media_verbs.cpp`, `stream_verbs.cpp`) | `stream-capture-camera`, `stream-capture-audio`, `stream-play-audio`, `stream-set-muted`, `gl-bind-stream` | `host_only` (one-argument form) | SDL's camera and audio on their owner thread, GL on the render thread |
-| contours and point classes (`install_contour_intrinsics`, `install_point_class_intrinsics`) | `contours.info`, `point-classes.*` and the param verbs (`register_param_intrinsics`) | `host_only` (registered without a kind; not yet audited) | they bind into every env, so in an app that installs them an isolated document is placed in a host-affinity group (`host_only_bindings`) |
+| contours, point classes and skeletons (`install_contour_intrinsics`, `install_point_class_intrinsics`, `add_skeleton_intrinsics`, master's #1171) | `contours.info`, `point-classes.*`, `skeleton.compute` and the param verbs (`register_param_intrinsics`) | `host_only` (registered without a kind; not yet audited) | they bind into every env, so in an app that installs them an isolated document is placed in a host-affinity group (`host_only_bindings`) |
 
 - **Provider rules.**
   - A provider's body runs where the env is built: on the host thread for an action, a resident,
@@ -3386,7 +3387,8 @@ audit and the thread-affine declarations; `uri_state`'s and streams' pin vectors
     `UriCancelled`; `credentials.h`: `renew`'s `cancelled`; `ws_client.cpp`: a frame sent whole;
   - `stream.h`/`stream.cpp`: `stream_params::scheduler`, posts under a per-stream lock, the member
     `stream::retarget(from, to)`, the descriptor pins a `cvc::pin_vector`;
-    `stream_intrinsics.h`/`.cpp`: `any`, posting to the opener's group;
+    `stream_intrinsics.h`/`.cpp`: `any`, posting to the opener's group, and the raster verbs
+    (master's #1236) `host_proxied`;
     `retarget_document_streams` and `close_document_streams` over a document's stream table;
   - `room_intrinsics.cpp`, `room_media_intrinsics.cpp` (a subscribed proxy on the caller's group),
     `oidc_host.cpp`: `host_proxied`;
