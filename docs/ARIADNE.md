@@ -930,7 +930,101 @@ copies and warns.
 
 **Textures.** `material: { texture: <uri> }` drapes an image over a geometry node through its
 mesh's UVs. UV (0, 0) is the image's bottom-left corner. A `source: { data }` city's terrain wears
-its bundle's `satellite.png` this way, north up (§5.17).
+its bundle's `satellite.png` this way, north up (§5.17). A `plane` spans its image once, UV (0, 0)
+at its -x, -y corner, as a heightfield does.
+
+**Live textures.** `material: { texture: { stream: <name> } }` is a texture fed by a stream while
+the scene runs. A sim on a worker, a Python host or a relay's server paints a raster, and the
+node shows each part it repaints:
+
+```yaml
+scene:
+  nodes:
+    - node: city
+      source: { data: austin }
+      material: { texture: { stream: fog.tint } }   # a mirror path, here a relay's namespace
+    - node: board
+      source: { plane: { size: 4 } }
+      material: { texture: { stream: streams.board } }   # a stream token
+```
+
+- **What wears it.** Any node that draws a mesh with UVs: a geometry node (a file, an asset, a
+  primitive, a heightfield or a generated terrain), a custom type whose realizer returns a
+  `GeometryNode`, and a `source: { data }` node's terrain, with UVs over the terrain's extent as
+  its aerial image has. A group, which draws no mesh, warns. `material: { uv }` orients it.
+- **The name** is a stream token (`streams.board`), or a state path holding a raster mirror
+  (below). Each is looked for as written and resolved against the document's prefix, as a bind
+  is. The node looks for it every frame until it is live, so the producer may start before or
+  after the scene, and again after the stream closes.
+- **Rasters, a part at a time.** A raster stream's frames (codec `rgba8.patch`) are the
+  rectangles that changed and their pixels, with a key frame (the whole raster) now and then. The
+  texture aliases a canvas the frames draw into:
+  - the first frame, and one after a gap, uploads the texture whole;
+  - every other frame uploads only its rectangles (`glTexSubImage2D`), and a frame with nothing
+    new uploads nothing;
+  - a consumer that subscribes late, or misses a frame, catches up from the frames the raster keeps
+    in state (below).
+- **Other streams.** A raw video stream (`rgba8`, a camera's) shows each new frame whole.
+
+**Producing a raster.** `cvc::ariadne::stream::raster_stream`
+([`stream/raster.h`](../inc/cvc/ariadne/stream/raster.h)) holds an RGBA8 raster:
+- Paint it with `fill(rect, rgba)`, `paint(image, x, y)`,
+  `paint_grid(values, gw, gh, x, y, colormap, lo, hi, alpha)`, or by writing `pixels()` and then
+  calling `mark(rect)`.
+  - `paint_grid` colours a float grid, one pixel a value, through mesh_ops' colour maps
+    (`viridis`, `magma`, `plasma`, `inferno`, `turbo`, `jet`, `parula`, `gray`). A NaN is
+    transparent.
+- `publish()` sends what was painted since the last one, as one frame, and `publish_key()` sends
+  the whole raster.
+- A key frame goes out:
+  - on the first publish;
+  - every `key_every` frames (30);
+  - on the first publish after a subscriber joins.
+- Its frames are kept in state at its token: `.w`, `.h`, `.codec`, the last key frame in
+  `.key`, the last 8 frames in `.ring.<n % 8>`, and their number in `.frame`, written last.
+  `mirror:` names a second path to keep them under.
+
+The same producer, three ways:
+- **C++:** `raster_stream::open(app, { id, root_path, w, h, key_every, mirror })`.
+- **Python:**
+  - `pycvc.raster_open(app, id, w, h[, key_every, mirror])` (positional; `key_every` 30, no
+    mirror by default) returns a `RasterStream`. It
+    has `fill`, `paint_grid(array2d, x, y, colormap, lo, hi, alpha)`, `pixels()` (a writable
+    (h, w, 4) view), `mark`, `publish`, `publish_key`, `subscribe` and `token`.
+  - On a host, `host.open_raster(id, w, h, mirror=None)`.
+- **A document:** the stream verbs carry the raster verbs too (action and resident lanes):
+
+  | Verb | Does |
+  |---|---|
+  | `(raster-open (dict "id" "tint" "w" 256 "h" 256 "mirror" "fog.tint" "key_every" 30))` | opens it, or hands back the one already open under that token; the mirror path resolves as a bind does, through the document's holes |
+  | `(raster-fill R (list x y w h) (list r g b a))` | paints a rectangle one colour (0–255) |
+  | `(raster-grid R (list x y w h) values (dict "colormap" "turbo" "lo" 0 "hi" 1 "alpha" 160))` | paints `w × h` numbers through a colour map |
+  | `(raster-publish R)` | sends what was painted, as a frame; returns its number (0: nothing) |
+  | `(raster-key R)` | sends a key frame now |
+  | `(raster-close R)` | closes it |
+
+**Across a relay.** A server document mirrors its raster into a namespace it publishes
+(`server: publish: [fog]`, §9.7). The relay sends the frames there to every client, and a client
+document that subscribes (`relay: { subscribe: [fog] }`, §9.8.3) names the mirror:
+`material: { texture: { stream: fog.tint } }`.
+- The client turns the mirror into a stream of its own (`raster_follower`). A node that subscribes
+  to that stream gets a key frame of the picture as it is, then each frame in order.
+- A client too far behind for the ring of 8 starts again at the next key frame, so `key_every`
+  bounds how long it can show a stale part.
+- Each frame is one state write, and a key frame is the whole raster: a 1024 × 1024 key frame is
+  4 MiB, well inside the transports' 64 MiB message cap.
+  - Bandwidth, not the cap, is the limit. The WebSocket relay skips a client whose send queue
+    passes 2 MiB until it drains, and its periodic broadcast then re-sends the mirror's current
+    values. The follower catches up from those, through the ring or the last key frame.
+  - So size the raster and `key_every` to the slowest client's link. A raster that changes a
+    little at a time costs little between its key frames.
+- The same mirror works on one machine, with no relay.
+
+Stock hosts have all of this:
+- `AriRuntime` (so `arigl`, `arigl-web`, `ariglx` and `pycvc_gl`'s Host) registers the stream
+  and raster verbs and `type: stream` nodes.
+- `arisrv` registers the stream and raster verbs for its server document.
+- A node's live texture needs nothing registered.
 
 **See-through nodes.** `material: { opacity: <0..1> }` draws a node's meshes see-through: 1 is
 solid (the default) and 0 is invisible. A see-through mesh is drawn in the translucent pass even
@@ -3811,6 +3905,7 @@ the host's `name` (`Host(name=...)`, `"ari"` by default).
 | `host.set_plot(key, series, x=None, markers=(), max_points=2000, fmt=".6g")` | the subtree a `chart:` with `bind: key` draws (§4): each series values, an `(x, y)` pair or a dict with `y` and any of `x`, `lo`, `hi`, `label`, `style`; markers as `(x, label, kind)` or dicts; a series longer than `max_points` decimated by min/max, so its peaks, troughs and gaps survive |
 | `host.publish_image(name, array)` | the picture `image:` widgets with `src: name` show: (H, W), (H, W, 3) or (H, W, 4), uint8 or float in [0, 1], row 0 at the top |
 | `host.open_stream(id, w, h)` | a live video stream at `streams.<id>` for a `stream_view` widget or a `type: stream` node; `stream.publish(frame)` sends one |
+| `host.open_raster(id, w, h, key_every=30, mirror=None)` | a raster stream at `streams.<id>` for a node's `material: { texture: { stream } }` (§5.4, "Live textures"): paint it (`fill`, `paint_grid`, `pixels()` then `mark`), then `publish()` what changed |
 | `host.run_program(script, done=None)` | a program queued as one of its actions (`done(how)` gets `""` or why it did not finish) |
 | `host.emit(event)` | the event a button raises: its `on()` handler runs in the next frame |
 
@@ -4107,7 +4202,7 @@ The page fetches `python312.zip` with the module and puts it on `sys.path`. The 
 stdlib and the pure-Python packages.
 
 - **What runs.** A document's `python:` block runs at load as it does natively, with pycvc,
-  pycvc_gl and numpy (`?src=main.ari`).
+  pycvc_gl and numpy (`?src=main.ari`), and so does its `wasm:` block (below).
 - **A program as the entry point.** `?src=app.py` runs a Python program in place of the document.
   Only a document's own imports are fetched ahead, so list the files the program loads in the
   config's `preload`.
@@ -4125,8 +4220,9 @@ stdlib and the pure-Python packages.
 C API is found (the cvcpkg `wasmtime` package; [`src/ariadne_wasm`](../src/ariadne_wasm/wasm_engine.h))
 also runs a compiled plugin, a guest, from any language that compiles to WebAssembly. The cvcpkg
 `arix` and `ariglx` packages are built with it, and `cvcpkg install arix` brings `wasmtime` into the
-same prefix. Natively only, so far: the browser and the BSDs come later
-(roadmap/ARIADNE_SCRIPTING_HOSTS.md §8, G2–G3).
+same prefix. `ariglx-web` runs guests too, on the browser's own WebAssembly, once a guest is
+transformed for it (*In the browser*, below). The BSDs come later
+(roadmap/ARIADNE_SCRIPTING_HOSTS.md §8, G3).
 
 ```yaml
 requires: [wasm]
@@ -4224,6 +4320,15 @@ wasm:
 - **The ABI** a guest is written to (values as CBOR in its memory, `ari_alloc`, the `call`,
   `reply`, `yield` and `fail` imports, the state imports, and the data calls on handles) is in
   [`wasm_engine.h`](../src/ariadne_wasm/wasm_engine.h).
+- **In the browser (`ariglx-web`).** The page fetches the guest with the document (the module the
+  block names, beside it) and runs it in the same gas slices, so a call counts what it counts
+  natively. A page can't pause a running module by itself, so the guest must be transformed ahead:
+  metered, then put through Asyncify. In CMake that is `cvc_ariadne_wasm_transform`
+  ([`ariadne_wasm.cmake`](../src/ariadne_wasm/ariadne_wasm.cmake)); by hand it is the three
+  commands listed there (binaryen's `wasm-opt`, which emsdk ships, and `ari_wasm_meter`). The page
+  refuses a `.wat` module, or one that wasn't transformed. A guest over 8 MB loads too: Chrome
+  won't compile or instantiate a module that large on the page's own thread, so the page does both
+  asynchronously, and the document's load waits for them.
 
 ### 9.7 A server document: `arisrv --doc`
 
@@ -4289,6 +4394,9 @@ on_tick: |
   - Writes reach clients in the order a program makes them. So a live view can watch one key:
     write a section's fields, then its `rev`, and a client holds those fields by the time it
     sees `rev` move.
+- **Rasters.** `(raster-open (dict ... "mirror" "fog.tint"))` with `fog` published keeps its frames
+  where every client is sent them; a subscribing client's node wears it with
+  `material: { texture: { stream: fog.tint } }` (§5.4, "Live textures").
 - **`room`** is a read-only hole on the relay's room, `conf.rooms.<room>`:
   `(state-get "room.topic")`, `(state-children "room.participants")`. A write under it stays in
   the document's own subtree.

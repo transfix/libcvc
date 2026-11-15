@@ -28,6 +28,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/tet_complex.h
   ../../inc/cvc/geometry/skeleton.h
   ../../inc/cvc/geometry/skeleton_params.h
+  ../../inc/cvc/geometry/skeleton_intrinsics.h
   ../../inc/cvc/state/state.h
   ../../inc/cvc/state/state_key_meta.h
   ../../inc/cvc/state/state_change_journal.h
@@ -302,6 +303,7 @@ set(SOURCE_FILES
   geometry/skeleton/u2.cpp
   geometry/skeleton/skel.cpp
   geometry/skeleton/skeleton.cpp
+  geometry/skeleton/skeleton_intrinsics.cpp
   geometry/sliced_ldlt.cpp
   geometry/geometry_file_io.cpp
   geometry/contours.cpp
@@ -709,9 +711,10 @@ endif()
 # matter which bundle was installed -- e.g. transfix/F2Dock asked for 3.2.0,
 # never matched, and silently fell back to building libcvc from source.
 #
-# SOVERSION stays CVC_VERSION_MAJOR, so the runtime link name (libcvc.so.3)
-# is unchanged and no consumer relinks. Only the full VERSION suffix
-# (libcvc.so.3.0 -> libcvc.so.3.3.0) and the exported package version move.
+# SOVERSION stays CVC_VERSION_MAJOR, so within a major version the runtime link
+# name (libcvc.so.3, libcvc.so.4 from 4.0) is unchanged and no consumer relinks.
+# Only the full VERSION suffix (libcvc.so.3.0 -> libcvc.so.3.3.0) and the exported
+# package version move.
 set(CVC_VERSION       ${PROJECT_VERSION})
 set(CVC_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
 set(CVC_VERSION_MINOR ${PROJECT_VERSION_MINOR})
@@ -1636,7 +1639,7 @@ list(APPEND INCLUDE_FILES
 # (install(EXPORT cvcTargets NAMESPACE cvc::) exports only cvc::cvc). Zero-copy
 # frame_pool + drop-oldest/latest per-subscriber channel + dedicated producer
 # thread; borrows cvc::state only for the /streams/<id> descriptor.
-list(APPEND SOURCE_FILES ariadne/stream/frame_pool.cpp ariadne/stream/stream_channel.cpp ariadne/stream/stream_registry.cpp ariadne/stream/producer_thread.cpp ariadne/stream/stream.cpp ariadne/stream/stream_codec.cpp ariadne/stream/to_image.cpp ariadne/stream/synthetic_source.cpp ariadne/stream/audio_sources.cpp ariadne/stream/stream_view.cpp)
+list(APPEND SOURCE_FILES ariadne/stream/frame_pool.cpp ariadne/stream/stream_channel.cpp ariadne/stream/stream_registry.cpp ariadne/stream/producer_thread.cpp ariadne/stream/stream.cpp ariadne/stream/stream_codec.cpp ariadne/stream/to_image.cpp ariadne/stream/raster.cpp ariadne/stream/synthetic_source.cpp ariadne/stream/audio_sources.cpp ariadne/stream/stream_view.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/stream/frame.h
   ../../inc/cvc/ariadne/stream/stream_codec.h

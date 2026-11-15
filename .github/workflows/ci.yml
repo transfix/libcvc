@@ -1220,14 +1220,14 @@ jobs:
         include:
           - platform: wasm
             paths: >-
-              src/arigl src/ariadne_python bindings/pycvc
+              src/arigl src/ariadne_python src/ariadne_wasm bindings/pycvc
               inc/cvc/ariadne/doc_fetch.h src/cvc/ariadne/doc_fetch.cpp
               inc/cvc/ariadne/web_document.h src/cvc/ariadne/web_document.cpp
               src/cvc/tests/data/ariadne_docset src/cvcGL/wasm cvcpkg/recipes/ariglx-web
               cvcpkg/recipes/_common/wasm_pyext.py .github/workflows/ci.yml
           - platform: wasm-mt
             paths: >-
-              src/arigl src/ariadne_python src/cvcGL/wasm cvcpkg/recipes/ariglx-web
+              src/arigl src/ariadne_python src/ariadne_wasm src/cvcGL/wasm cvcpkg/recipes/ariglx-web
               cvcpkg/recipes/_common/wasm_pyext.py
     concurrency:
       group: ci-${{ github.ref }}-ariglx-web-${{ matrix.platform }}
@@ -1294,7 +1294,16 @@ jobs:
           CVC_PLATFORM=${{ matrix.platform }} bash cvcpkg/recipes/ariglx-web/build-wasm.sh
           ls -la stage-ariglx-web/share/ariglx-web
 
-      - name: Run documents with Python in headless Chrome
+      - name: Transform the smoke's WebAssembly guest (ari_wasm_meter, then wasm-opt)
+        if: steps.paths.outputs.run == 'true'
+        # In the recipe's build tree: the test guest metered and put through Asyncify, beside the
+        # documents that run it (src/arigl/web/test/wasm). Not part of the package.
+        run: |
+          source "$CVC_EMSDK_DIR/emsdk_env.sh" >/dev/null
+          cmake --build build-ariglx-web --target ariglx_wasm_guests
+          ls -la build-ariglx-web/bin/ariglx-wasm-guests
+
+      - name: Run documents with Python and WebAssembly guests in headless Chrome
         if: steps.paths.outputs.run == 'true'
         # When the deps have pillow-cp312's inittab manifest, the build linked PIL in, so the
         # Pillow case is required (--expect-pil): a zip without PIL fails it instead of skipping.
@@ -1307,6 +1316,7 @@ jobs:
           # The threaded page is served cross-origin isolated, as its SharedArrayBuffer needs.
           "$node" src/arigl/web/test/arigl_web_smoke.mjs --web stage-ariglx-web/share/ariglx-web \
             --docset src/cvc/tests/data/ariadne_docset --pydocs src/arigl/web/test/python \
+            --wasmdocs build-ariglx-web/bin/ariglx-wasm-guests \
             --chrome "$chrome" ${pil:+"$pil"} ${{ matrix.platform == 'wasm-mt' && '--isolated' || '' }}
 
   # ──────────────────────────── Linux packaging ────────────────────────────
