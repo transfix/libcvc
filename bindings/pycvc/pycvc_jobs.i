@@ -137,3 +137,28 @@ std::unique_ptr<cvc::result_job<cvc::volume>> resize_job(const cvc::volume &src,
   return cvc::resize_job(src, cvc::dimension(nx, ny, nz));
 }
 %}
+// The skeleton job (cvc/geometry/skeleton.h; pycvc_skeleton.i wraps the result and its
+// parameters): pycvc.skeletonize_job(g, robust=True, ...) or (g, pycvc.skeleton_params(...)).
+PYCVC_RESULT_JOB(result_job_skeleton, cvc::skeleton)
+%exception _skeletonize_job {
+  try {
+    $action
+  } catch (const std::exception &e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  }
+}
+%inline %{
+std::unique_ptr<cvc::result_job<cvc::skeleton>> _skeletonize_job(const cvc::geometry &g,
+                                                                 const cvc::skeleton_params &p) {
+  return cvc::skeletonize_job(g, p);
+}
+%}
+%pythoncode %{
+def skeletonize_job(geom, params=None, **keywords):
+    """skeletonize as a resumable job: step(budget), progress(), phase(), cancel(), result()."""
+    if params is None:
+        params = skeleton_params(**keywords)
+    elif keywords:
+        raise TypeError("skeletonize_job: pass a skeleton_params or keywords, not both")
+    return _skeletonize_job(geom, params)
+%}
