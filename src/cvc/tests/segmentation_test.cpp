@@ -916,12 +916,12 @@ TEST(Segmentation, ParameterTable) {
   EXPECT_TRUE(cvc::params_validate(p).empty());
   std::size_t fields = 0;
   cvc::for_each_param<cvc::seeded_segmentation_params>([&](const auto &) { ++fields; });
-  EXPECT_EQ(fields, 8u);
+  EXPECT_EQ(fields, 15u);
   cvc::state &node = a.root()("doc.grid.segment");
   cvc::params_to_state(p, node);
   EXPECT_EQ(node("t_low").value(), "40.5");
   EXPECT_EQ(node("automatic").value(), "none");
-  EXPECT_EQ(node("automatic").property("choices"), "none,local_maxima");
+  EXPECT_EQ(node("automatic").property("choices"), "none,local_maxima,critical_points");
   EXPECT_EQ(node("gamma").property("min"), "-1");
   const auto back = cvc::params_from_state<cvc::seeded_segmentation_params>(node);
   ASSERT_TRUE(back.ok()) << back.message();
@@ -939,7 +939,7 @@ TEST(Segmentation, ParameterTable) {
   ASSERT_TRUE(seeded.ok()) << seeded.message();
   EXPECT_EQ(fresh("gamma").value(), "-0.12");
   EXPECT_EQ(fresh("automatic").value(), "local_maxima");
-  fresh("automatic").value("critical_points");
+  fresh("automatic").value("watershed");
   fresh("gamma").value("0.5");
   const auto bad = cvc::params_from_state<cvc::seeded_segmentation_params>(fresh);
   EXPECT_FALSE(bad.ok());

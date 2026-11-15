@@ -6,8 +6,11 @@ cmake_minimum_required(VERSION 3.16)
 project(volrover_goldens CXX)
 
 set(VOLROVER_DIR "" CACHE PATH "A transfix/volrover checkout at the sha in volrover.sha")
-if(NOT EXISTS "${VOLROVER_DIR}/src/Segmentation/GenSeg/segment.cpp")
-  message(FATAL_ERROR "VOLROVER_DIR (${VOLROVER_DIR}) is not a volrover checkout with GenSeg")
+if(NOT EXISTS "${VOLROVER_DIR}/src/Segmentation/GenSeg/segment.cpp" AND
+   NOT EXISTS "${VOLROVER_DIR}/src/Segmentation/SegMed/GVF.cpp" AND
+   NOT EXISTS "${VOLROVER_DIR}/src/Skeletonization/Skeletonization.cpp")
+  message(FATAL_ERROR "VOLROVER_DIR (${VOLROVER_DIR}) is not a volrover checkout with a library "
+                      "this directory builds")
 endif()
 
 # Legacy code as it is: built with its warnings off, and never with -Werror.
@@ -26,10 +29,50 @@ endfunction()
 
 # GenSeg (src/Segmentation/GenSeg): the fast marching and its rawiv reader and writer, as they are.
 # general_segmentation.cpp is its XML-RPC entry, which genseg_driver.cpp stands in for.
-add_executable(genseg_legacy genseg_driver.cpp
-  ${VOLROVER_DIR}/src/Segmentation/GenSeg/segment.cpp
-  ${VOLROVER_DIR}/src/Segmentation/GenSeg/inout.cpp)
-volrover_legacy(genseg_legacy)
+if(EXISTS "${VOLROVER_DIR}/src/Segmentation/GenSeg/segment.cpp")
+  add_executable(genseg_legacy genseg_driver.cpp
+    ${VOLROVER_DIR}/src/Segmentation/GenSeg/segment.cpp
+    ${VOLROVER_DIR}/src/Segmentation/GenSeg/inout.cpp)
+  volrover_legacy(genseg_legacy)
+endif()
+
+# SegMed (src/Segmentation/SegMed): GVF.cpp (the gradient vector diffusion and its critical points)
+# and inout.cpp (the rawiv reader), from copies in the build tree with two patches, each of which
+# must apply:
+#   - GVF_Compute's `return;` right after InitGVF (GVF.cpp:97) goes: it skipped the diffusion, the
+#     critical points and their clustering, the code the port (src/cvc/volume/segmentation/
+#     critical_points.cpp) and the goldens are about;
+#   - read_data opens the rawiv file "rb", not "r" (the same on POSIX; text mode on Windows mangles
+#     the floats).
+# segmed_driver.cpp stands in for medical_segmentation.cpp, the XML-RPC entry, and includes the
+# patched GVF.cpp to read the diffused field from its globals. segment.cpp (a march from 13 seeds
+# hard-coded for one heart dataset) and diffuse.cpp (uncalled) are left out.
+if(EXISTS "${VOLROVER_DIR}/src/Segmentation/SegMed/GVF.cpp")
+  set(_segmed_out "${CMAKE_CURRENT_BINARY_DIR}/segmed_src")
+  file(MAKE_DIRECTORY "${_segmed_out}")
+  set(_gvf_in "${VOLROVER_DIR}/src/Segmentation/SegMed/GVF.cpp")
+  set(_inout_in "${VOLROVER_DIR}/src/Segmentation/SegMed/inout.cpp")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_gvf_in}" "${_inout_in}")
+  file(READ "${_gvf_in}" _text)
+  string(FIND "${_text}" "InitGVF(edge_mag);" _first)
+  string(FIND "${_text}" "InitGVF(edge_mag);" _last REVERSE)
+  string(REGEX REPLACE "InitGVF\\(edge_mag\\);[ \t\r\n]*return;" "InitGVF(edge_mag);" _patched
+                       "${_text}")
+  if(_first EQUAL -1 OR NOT _first EQUAL _last OR _patched STREQUAL _text)
+    message(FATAL_ERROR "volrover-goldens: the patch for SegMed's GVF.cpp does not apply")
+  endif()
+  file(WRITE "${_segmed_out}/GVF.cpp" "${_patched}")
+  file(READ "${_inout_in}" _text)
+  string(FIND "${_text}" "fopen(input_name, \"r\")" _at)
+  if(_at EQUAL -1)
+    message(FATAL_ERROR "volrover-goldens: the patch for SegMed's inout.cpp does not apply")
+  endif()
+  string(REPLACE "fopen(input_name, \"r\")" "fopen(input_name, \"rb\")" _text "${_text}")
+  file(WRITE "${_segmed_out}/inout.cpp" "${_text}")
+  add_executable(segmed_legacy segmed_driver.cpp "${_segmed_out}/inout.cpp")
+  volrover_legacy(segmed_legacy)
+  target_include_directories(segmed_legacy PRIVATE "${_segmed_out}")
+endif()
 
 # Skeletonization (src/Skeletonization), when the checkout has it and CGAL is found (CGAL, GMP,
 # MPFR and Boost, e.g. from cvcpkg on CMAKE_PREFIX_PATH). The sources are compiled from patched

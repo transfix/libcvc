@@ -166,6 +166,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/point_class_intrinsics.h
   ../../inc/cvc/volume/segmentation.h
   ../../inc/cvc/volume/segmentation_params.h
+  ../../inc/cvc/volume/gradient_vector_diffusion.h
+  ../../inc/cvc/volume/gradient_vector_diffusion_params.h
   ../../inc/cvc/volume/segmentation_intrinsics.h
   ../../inc/cvc/model/model.h
   ../../inc/cvc/model/model_file_io.h
@@ -314,7 +316,9 @@ set(SOURCE_FILES
   volume/point_classes.cpp
   volume/point_class_intrinsics.cpp
   volume/segmentation/genseg.cpp
+  volume/segmentation/critical_points.cpp
   volume/segmentation/segmentation.cpp
+  volume/gradient_vector_diffusion.cpp
   volume/segmentation/segmentation_intrinsics.cpp
   image/image.cpp
   image/image_decode.cpp
@@ -695,7 +699,11 @@ endif()
 # The VolumeRover GenSeg port (volume/segmentation/) matches the legacy library's labels voxel for
 # voxel on every platform (VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.7 T1): its fast marches compare
 # float arrival times, and an FMA-contracted step flips which front wins a tie.
-set(_cvc_genseg_exact_sources volume/segmentation/genseg.cpp volume/segmentation/segmentation.cpp)
+# The paper mode's critical points (critical_points.cpp) and the shared gradient vector diffusion
+# match SegMed's in the same way: the critical points are the signs of float dot products.
+set(_cvc_genseg_exact_sources volume/segmentation/genseg.cpp volume/segmentation/segmentation.cpp
+                              volume/segmentation/critical_points.cpp
+                              volume/gradient_vector_diffusion.cpp)
 if(NOT MSVC)
   set_source_files_properties(${_cvc_genseg_exact_sources}
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
