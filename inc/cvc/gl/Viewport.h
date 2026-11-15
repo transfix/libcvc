@@ -110,8 +110,25 @@ public:
   void setInputEnabled(bool on);
   bool inputEnabled() const;
 
+  // Redraw rate, for an inset whose picture changes slowly: a map, an overview. 0 (the default)
+  // draws its scene in every ViewportManager::render(). hz > 0 draws it at most hz times a second;
+  // the renders in between skip its scene (and a mirror's re-sync) and show the pixels of its last
+  // draw, kept in a colour texture the size of the window. A new size or place on screen, being
+  // shown again, or invalidate() draws it at the next render. Only an opaque viewport is throttled
+  // (setBackground(..., opaque = true)): a translucent one draws over what is under it, so its last
+  // pixels hold a stale picture of that too, and it draws every frame whatever the rate.
+  void setRefreshHz(double hz);
+  double refreshHz() const;
+  void invalidate(); // draw it at the next render(), whatever the rate
+  // How many times this viewport's scene has been drawn (renders that showed its last pixels do
+  // not count). For tests and measurements.
+  long draws() const;
+
 private:
   friend class ViewportManager; // the manager constructs and owns Viewports
+  // Manager-only, once per render() before the window draws: whether this viewport draws its scene
+  // in this render (true) or shows its last pixels (false; a hidden viewport draws nothing).
+  bool beginRender();
   // `managed` (default) builds the eager CameraController + ViewportLayout state
   // this viewport normally owns. `managed == false` builds it BARE — no
   // controller and no ".viewers.<name>.layout" state at construction; camera()

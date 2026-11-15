@@ -8,7 +8,7 @@
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/state_value_codec.h> // snapshot / restore
-#include <cvc/state/state_exec/stdlib.h>            // random_stream_scope
+#include <cvc/state/state_exec/stdlib.h>
 #include <iterator>
 #include <optional>
 #include <random>
@@ -25,9 +25,15 @@ scheduler::scheduler(scheduling_policy policy)
     : policy_(policy), evaluator_(builtins::make_default_environment()),
       procs_(policy != scheduling_policy::round_robin), idle_(std::make_shared<detail::wakeup>()) {}
 
-void scheduler::set_cycle_registry(cycle_registry *r) { registry_ = r; }
+void scheduler::set_cycle_registry(cycle_registry *r) {
+  registry_ = r;
+  evaluator_.set_cycle_registry(r);
+}
 
-void scheduler::set_random_stream(random_stream *s) { random_ = s; }
+void scheduler::set_random_stream(random_stream *s) {
+  random_ = s;
+  evaluator_.context().random = s;
+}
 
 scheduler::pump_owner_scope::pump_owner_scope(scheduler &s) : s_(s), outer_() {
   // "No owner, or me" (S1-Q4), as async_scheduler's: taken from unset with acquire.
@@ -54,22 +60,6 @@ bool scheduler::pumped_elsewhere() const noexcept {
 }
 
 namespace {
-// S1.1, as async_scheduler's: a scheduler given a registry or a random stream binds what it was
-// given on each entry that can run DSL or track, once per call; a bare one binds nothing.
-class entry_binding {
-public:
-  entry_binding(cycle_registry *r, random_stream *s) {
-    if (r)
-      registry_.emplace(r);
-    if (s)
-      random_.emplace(s);
-  }
-
-private:
-  std::optional<cycle_registry_scope> registry_;
-  std::optional<random_stream_scope> random_;
-};
-
 // S1-Q4 (td 4.1), as async_scheduler's: debug builds, or CVC_EXEC_VERIFY=1 (read as the scheduler
 // is made), abort on a public mutator called while another thread pumps.
 void verify_pump_owner(const scheduler &s, const char *what) {
@@ -237,6 +227,77 @@ bool pump_owner_verification() noexcept {
   return true;
 #endif
 }
+} // namespace detail
+
+// The kernel marks (3.7): each scope takes a slot of its own, and a thread looks for its own id
+// only, which only it writes, so the slots need no lock.
+scheduler_base::kernel_thread_scope::kernel_thread_scope(scheduler_base *sched, bool running)
+    : sched_(sched), running_(running) {
+  if (!sched_)
+    return;
+  const std::thread::id me = std::this_thread::get_id();
+  (running_ ? sched_->kernels_ : sched_->lifted_).fetch_add(1, std::memory_order_acq_rel);
+  std::atomic<std::thread::id> *slots =
+      running_ ? sched_->kernel_threads_ : sched_->lifted_threads_;
+  const int n = running_ ? kKernelSlots : kLiftedSlots;
+  for (int i = 0; i < n; ++i) {
+    std::thread::id none{};
+    if (slots[i].compare_exchange_strong(none, me, std::memory_order_acq_rel)) {
+      slot_ = i;
+      return;
+    }
+  }
+  const std::lock_guard<std::mutex> lock(sched_->kernel_mu_);
+  sched_->kernel_overflow_.emplace_back(me, running_);
+  sched_->kernel_overflow_count_.fetch_add(1, std::memory_order_acq_rel);
+}
+
+scheduler_base::kernel_thread_scope::~kernel_thread_scope() {
+  if (!sched_)
+    return;
+  if (slot_ >= 0) {
+    (running_ ? sched_->kernel_threads_ : sched_->lifted_threads_)[slot_].store(
+        std::thread::id{}, std::memory_order_release);
+  } else {
+    const std::lock_guard<std::mutex> lock(sched_->kernel_mu_);
+    std::vector<std::pair<std::thread::id, bool>> &v = sched_->kernel_overflow_;
+    const auto it =
+        std::find(v.begin(), v.end(), std::make_pair(std::this_thread::get_id(), running_));
+    if (it != v.end())
+      v.erase(it);
+    sched_->kernel_overflow_count_.fetch_sub(1, std::memory_order_acq_rel);
+  }
+  (running_ ? sched_->kernels_ : sched_->lifted_).fetch_sub(1, std::memory_order_acq_rel);
+}
+
+bool scheduler_base::kernel_runs_here() const noexcept {
+  if (kernels_.load(std::memory_order_acquire) == 0)
+    return false;
+  const std::thread::id me = std::this_thread::get_id();
+  // Whether a scope of the calling thread's is in `slots` or (running or not) the overflow list.
+  const auto has = [&](const std::atomic<std::thread::id> *slots, int n, bool running) {
+    for (int i = 0; i < n; ++i)
+      if (slots[i].load(std::memory_order_acquire) == me)
+        return true;
+    if (kernel_overflow_count_.load(std::memory_order_acquire) == 0)
+      return false;
+    const std::lock_guard<std::mutex> lock(kernel_mu_);
+    return std::find(kernel_overflow_.begin(), kernel_overflow_.end(),
+                     std::make_pair(me, running)) != kernel_overflow_.end();
+  };
+  if (!has(kernel_threads_, kKernelSlots, true))
+    return false;
+  return lifted_.load(std::memory_order_acquire) == 0 || !has(lifted_threads_, kLiftedSlots, false);
+}
+
+void scheduler_base::check_not_in_kernel(const char *what) const {
+  if (kernel_runs_here())
+    throw std::logic_error(std::string(what) +
+                           ": an async function's kernel must not use the evaluator or a "
+                           "scheduler (docs/STATE_EXEC_EXCEPTIONS.md 3.7)");
+}
+
+namespace detail {
 
 std::optional<std::string> setting_value(cvc::state &root, const std::string &path) {
   const cvc::state::state_ptr node =
@@ -446,7 +507,7 @@ uint64_t max_alloc_bytes_from_state(cvc::state &root, const std::string &schedul
 // ---------------------------------------------------------------------------
 
 int scheduler::execute(const std::string &script, const execute_options &opts) {
-  detail::check_not_in_async_kernel("scheduler::execute");
+  check_not_in_kernel("scheduler::execute");
   verify_pump_owner(*this, "scheduler::execute");
   int pid = next_pid_++;
   process_ptr pp = make_process(); // built in place: no move of its tables
@@ -485,7 +546,7 @@ int scheduler::execute(const std::string &script, const execute_options &opts) {
 }
 
 int scheduler::execute(const value_t &expr, const execute_options &opts) {
-  detail::check_not_in_async_kernel("scheduler::execute");
+  check_not_in_kernel("scheduler::execute");
   verify_pump_owner(*this, "scheduler::execute");
   int pid = next_pid_++;
   process_ptr pp = make_process(); // built in place: no move of its tables
@@ -552,14 +613,12 @@ scheduler::clock::time_point scheduler::now_for_step() {
 void scheduler::execute_process_step(const process_ptr &pp) {
   process &proc = *pp;
   // Between steps: free the reference cycles programs leaked, once enough piled up (heap.h).
-  // Checked every 64 steps: the check reads the registry's counters. A scheduler given a registry
-  // names it (S1.1), else the thread's own is used.
-  if ((++cycle_check_ & 63) == 0 &&
-      (registry_ ? cycle_collection_due(*registry_) : cycle_collection_due())) {
-    if (registry_)
-      collect_cycles(*registry_);
-    else
-      collect_cycles();
+  // Checked every 64 steps: the check reads the registry's counters. The registry is the one its
+  // evaluation context has: the one it was given (S1.1), else its evaluator's own.
+  exec_context &ctx = evaluator_.context();
+  ctx.parkable = true; // its steps are its processes': a native call may park one
+  if ((++cycle_check_ & 63) == 0 && cycle_collection_due(*ctx.registry)) {
+    collect_cycles(*ctx.registry);
     chain_valid_ = false;
   }
 
@@ -623,20 +682,21 @@ void scheduler::execute_process_step(const process_ptr &pp) {
   // between-steps max_time check (checked only after step() returns) cannot see. Arming the
   // cooperative deadline for this step lets that inner work abort at the budget too — the
   // same guarantee the read-lane's run() already has. max_time <= 0 means unlimited (nullopt).
-  eval_deadline_guard step_deadline(proc.time_left(start), start);
+  eval_deadline_guard step_deadline(ctx, proc.time_left(start), start);
   // Bound what one native call in this step may allocate: limits.max_alloc_bytes, tightened to
   // what is left of max_memory (its state-tree writes plus its measured heap share).
   // With no budget and the default cap, an armed guard would change nothing (the default applies
-  // unarmed), so it is armed only when it does: it costs thread-local writes every step.
+  // unarmed), so it is armed only when it does.
   std::optional<eval_alloc_guard> step_alloc;
   if (proc.max_memory > 0 || proc.max_alloc_bytes != kDefaultMaxAllocBytes)
-    step_alloc.emplace(proc.alloc_limit(
-        proc.max_memory > 0 ? mem_tracker_.current_bytes(proc.pid) + proc.heap_bytes : 0));
+    step_alloc.emplace(
+        ctx, proc.alloc_limit(
+                 proc.max_memory > 0 ? mem_tracker_.current_bytes(proc.pid) + proc.heap_bytes : 0));
   const bool charge_cpu = proc.charges_cpu_time(start);
   const double cpu0 = charge_cpu ? (chained_cpu >= 0.0 ? chained_cpu : thread_cpu_seconds()) : 0.0;
   bool done = false;
   try {
-    done = evaluator_.step(proc.state);
+    done = evaluator_.step(proc.state, ctx);
   } catch (const evaluation_timeout &) {
     // The step's deadline cut a long loop inside it (a data job, a generator, a stdlib call):
     // the process ran out of time, as the between-steps check below would find. A deadline
@@ -722,13 +782,12 @@ void scheduler::execute_process_step(const process_ptr &pp) {
 }
 
 int scheduler::step() {
-  const entry_binding bound(registry_, random_);
   chain_valid_ = false; // called from outside a run: what ran since the last step is no step's
   return step_once();
 }
 
 int scheduler::step_once() {
-  detail::check_not_in_async_kernel("scheduler::step");
+  check_not_in_kernel("scheduler::step");
   // Posts from other homes' threads (wakes, relevels), between steps (protocol 5.9).
   if (home_ && home_->port_pending()) {
     home_->drain_port();
@@ -785,7 +844,6 @@ std::unordered_map<int, value_t> scheduler::run(std::optional<uint64_t> max_step
 }
 
 uint64_t scheduler::run_steps(std::optional<uint64_t> max_steps, std::optional<double> max_time) {
-  const entry_binding bound(registry_, random_);
   // A stop() from before this run is discarded. The clear comes before the release that
   // publishes the run, so a stop() made once is_running() reads true is seen (td B17).
   stop_requested_.store(false, std::memory_order_relaxed);
@@ -1282,10 +1340,7 @@ void scheduler::fail_process(process &proc, value_t exc, std::exception_ptr orig
 
 void scheduler::release_if_idle(process &proc) {
   // What it leaked is garbage now (heap.h): noted in this scheduler's registry when it has one.
-  if (registry_)
-    note_process_exit(*registry_);
-  else
-    note_process_exit();
+  note_process_exit(*evaluator_.context().registry);
   // A process stepping right now (one that killed itself) is released once its step is over.
   if (proc.pid != current_pid_)
     proc.release_state();
@@ -1342,7 +1397,7 @@ bool scheduler::yield_frame(int /*pid*/) {
 }
 
 bool scheduler::receive_message(int pid, const std::string &path) {
-  detail::check_not_in_async_kernel("scheduler::receive_message");
+  check_not_in_kernel("scheduler::receive_message");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return false;
@@ -1369,7 +1424,7 @@ bool scheduler::receive_message_until(int pid, const std::string &path, double s
 }
 
 int scheduler::deliver_to_receivers(const std::string &path, const value_t &msg) {
-  detail::check_not_in_async_kernel("scheduler::deliver_to_receivers");
+  check_not_in_kernel("scheduler::deliver_to_receivers");
   // The processes waiting on `path`, from the receiver index (no scan).
   std::vector<process *> woken_list;
   woken_list.swap(woken_);
@@ -1423,7 +1478,7 @@ std::size_t scheduler::total_pending_messages() const {
 }
 
 bool scheduler::kill(int pid) {
-  detail::check_not_in_async_kernel("scheduler::kill");
+  check_not_in_kernel("scheduler::kill");
   verify_pump_owner(*this, "scheduler::kill");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
@@ -1437,7 +1492,6 @@ bool scheduler::kill(int pid) {
 
 int scheduler::restore(process_ptr proc) {
   verify_pump_owner(*this, "scheduler::restore");
-  const entry_binding bound(registry_, random_);
   // A stack that holds a lock (a lock_body with its hold, or a lock_enter woken with a grant)
   // can't be restored: no snapshot makes one, and its hold is no restored process's (protocol
   // 5.11; LW-12).
@@ -1479,8 +1533,8 @@ bool scheduler::snapshot(int pid, cvc::state &node) const {
 
 int scheduler::restore(cvc::state &node, environment_ptr natives) {
   verify_pump_owner(*this, "scheduler::restore");
-  const entry_binding bound(registry_, random_); // the decode tracks class scopes
-  process_ptr proc = decode_process(node);
+  // The decode tracks class scopes in its evaluation context's registry.
+  process_ptr proc = decode_process(node, &evaluator_.context());
   rebind_natives(proc->state, natives);
   return restore(std::move(proc));
 }
@@ -1886,7 +1940,7 @@ void scheduler::raise_exit_exception(int pid) const {
 }
 
 bool scheduler::reap(int pid) {
-  detail::check_not_in_async_kernel("scheduler::reap");
+  check_not_in_kernel("scheduler::reap");
   verify_pump_owner(*this, "scheduler::reap");
   if (pid == current_pid_) {
     // The process stepping now (its on_complete reaping it): erased once its step is over.

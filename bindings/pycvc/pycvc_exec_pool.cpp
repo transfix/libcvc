@@ -12,8 +12,8 @@
 #include <condition_variable>
 #include <cvc/core/app.h>
 #include <cvc/core/exec_pool.h>
+#include <cvc/state/state_exec/async_scheduler.h> // kernel_runs_here
 #include <cvc/state/state_exec/exec_group.h>
-#include <cvc/state/state_exec/types.h> // in_async_kernel
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -212,11 +212,10 @@ void ExecPool::close() {
       return;
     if (p.busy) {
       // Not from inside the batch, which could not end while close() waits for it: run_all's
-      // caller, a worker pumping one of its groups (a registered function), or a kernel.
-      bool inside = p.user == std::this_thread::get_id() || cvc::state_exec::in_async_kernel();
-      const cvc::state_exec::exec_group *current = cvc::state_exec::exec_group::current();
+      // caller, a worker pumping one of its groups (a registered function), or a kernel of one.
+      bool inside = p.user == std::this_thread::get_id();
       for (const std::unique_ptr<Exec> &e : p.execs)
-        inside = inside || (current != nullptr && current == &e->group());
+        inside = inside || e->group().pumping_here() || e->group().sched().kernel_runs_here();
       if (inside)
         throw std::runtime_error("pycvc.ExecPool.close: called from inside its run_all");
       // A batch on another thread: what it runs is killed, and close() waits for it with the GIL

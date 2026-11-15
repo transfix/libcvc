@@ -8,7 +8,9 @@
 #include "native_stack.h"
 
 #include <cstdint>
+#include <cvc/state/state_exec/types.h> // exec_context
 #include <limits>
+#include <thread>
 
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -48,8 +50,9 @@ std::uintptr_t stack_here() {
 #endif
 }
 
-// The lowest address of this thread's stack, or 0 when the platform does not say.
-std::uintptr_t stack_low() {
+} // namespace
+
+std::uintptr_t this_thread_stack_low() {
 #if defined(_WIN32)
   // The reservation a stack address belongs to starts at the stack's lowest address (the guard
   // pages are inside it). VirtualQuery, unlike GetCurrentThreadStackLimits, is in every Windows
@@ -78,10 +81,8 @@ std::uintptr_t stack_low() {
 #endif
 }
 
-} // namespace
-
-std::size_t native_stack_left() {
-  thread_local const std::uintptr_t low = stack_low();
+std::size_t native_stack_left(exec_context &ctx) {
+  const std::uintptr_t low = ctx.stack_low();
   if (low == 0)
     return std::numeric_limits<std::size_t>::max();
   const std::uintptr_t sp = stack_here();
@@ -89,3 +90,23 @@ std::size_t native_stack_left() {
 }
 
 } // namespace cvc::state_exec::detail
+
+namespace cvc::state_exec {
+
+std::uintptr_t exec_context::stack_low() {
+  // Read on the thread it now runs on, once per thread it moves to (an exec_group pumped by
+  // another worker): not from the OS at every check. A thread's id can be a later thread's too,
+  // once the first has ended: an address of this stack that isn't just above the bound kept says
+  // the bound is another thread's.
+  constexpr std::uintptr_t kLargestStack = std::uintptr_t{1} << 30;
+  const std::thread::id here = std::this_thread::get_id();
+  const std::uintptr_t sp = detail::stack_here();
+  if (here != stack_thread_ ||
+      (stack_low_ != 0 && (sp <= stack_low_ || sp - stack_low_ > kLargestStack))) {
+    stack_low_ = detail::this_thread_stack_low();
+    stack_thread_ = here;
+  }
+  return stack_low_;
+}
+
+} // namespace cvc::state_exec
