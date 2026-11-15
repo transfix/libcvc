@@ -590,7 +590,8 @@ its own world document.
     chassis boxes bodies the world's contacts push back into the models. `kinematic` is nav's
     bicycle with a kinematic box that pushes what it meets. Each plant's entities have a
     navigator of their own on the grid; `physics.stats.vehicles` names each one's plant; cvcGL
-    poses a box look's wheels where its plant has them.
+    poses a box look's wheels where its plant has them. A spawn may name a plant of its own
+    (`entity_spec::plant`), as a gym's agents do (L4).
   - Looks: a humvee is the vehicle-humvee package's `Humvee.glb` when it is installed (found under
     the cvcpkg prefixes, oriented and scaled to the chassis as the nav demos do it), else its
     chassis box in the entity's colours with a cabin and wheels; `look: { model: | file: |
@@ -616,6 +617,42 @@ its own world document.
 `observe()`, a reward the user writes, and an episode log. It absorbs the glue in `pycvc_gl.cars`
 (rasters, colliders, plants), which then becomes a thin layer over it. Training runs many worlds
 headless; the same document opens in arigl to watch one.
+
+- **As built (L4).** `cvc::ariadne::WorldGym` ([world_gym.h](../../inc/cvc/ariadne/world_gym.h))
+  and `pycvc.WorldGym`:
+  - **One app per gym.** Each loads its document headless on an app of its own (its state tree,
+    clock, physics world and vehicles), so a process runs many; it pauses the clock, so only
+    `step()` steps the world.
+  - **reset(seed).** The world rebuilt as the document built it, every draw seeded (starts,
+    goals, the spawn policy: `WorldVehicles::reseed`, `WorldSpawns::reseed`), and the agents
+    spawned (`count` of the first archetype with nav@1, or a list of specs).
+  - **step(steer, accel).** One navigator tick. Each agent's command replaces its controller's
+    for the tick (`WorldVehicles::command`); NaN leaves it to the controller, so nav@1 is the
+    baseline in the same loop. Goals are held (`set_wander(false)`).
+  - **observe().** Per agent, as flat arrays: pose, velocity, steering, goal, contacts (counted
+    after every physics step, `WorldVehicles::after_step`), out of the world, ray ranges on the
+    grid, body and envelope.
+  - **The reward and the log.** A reward the user writes, in C++ or Python (the default is
+    progress, less collisions, plus arrival); a row per agent per step, to CSV or numpy;
+    `<prefix>.gym.*` keys.
+  - **The end.** Terminated when every agent with a goal is at it or one leaves the world (off
+    its grid, or through its ground); truncated at `max_steps`.
+  - **`pycvc_gl.cars`.** `GymCars` gives the template's `CarsState` and `step` over a gym, with
+    `world_from_gym` for its rollouts and rasters; `--gym DOC` runs the template on it.
+  - **The example.** `examples/ariadne/python/world_gym.ari` and `world_gym.py`: world_lab's
+    worlds headless (`scene.physics` alone), arigl draws the same document.
+  - **Fixed on the way.** `SceneWorld::restart` gives the vehicles the new ground bodies (a
+    generated world's colliders come back with new ids), so a restart no longer counts the
+    terrain as an obstacle.
+  - **Then (the L4 follow-up).** Every plant in a scene world (`jolt`, `kinematic`, `dynamic`,
+    `dynamic4w`; `entity_spec::plant`, `vehicles.spawn.plant`), so `GymCars` runs the cars
+    template's plants in a world document (`--vehicle kinematic`, `dynamic:roboracer`); a
+    world's buildings are obstacles, not ground (`SceneWorldBody::ground`: the height-field
+    colliders alone); and `regenerate` makes a generated world per episode from the reset's seed
+    (`SceneWorld::regenerate_world`).
+  - **Not yet.** Vehicles on different plants do not steer around each other (each plant's
+    navigator sees its own); the cars template's own worlds (its data, generated and flat
+    builders) stay its own, beside the gym's.
 
 **What the runtime needs that isn't there** (§1):
 
@@ -683,7 +720,7 @@ each builds what a WD phase needs.
 | L2a | **Built** (2026-11-14). **Entity intents.** A document, a script, a server document or a C++ / Python host steers any world entity: a steer and acceleration in place of its controller's command or blended with it, a planar force on its drive, and the `external` controller (its intent alone). Keys `entities.<id>.intent.*` and `.force.*`, read each navigator tick; `world: vehicles: intents:` for a published namespace; `WorldVehicles::set_intent` from any thread; `pycvc.WorldEntities`. | WD4 | S |
 | L2b | **Built** (2026-11-14). **Every plant in a scene world.** `kinematic`, `dynamic[:preset]` and `dynamic4w[:preset]` beside `jolt`, all in the scene's one physics world on its clock: the dynamic plants step there (a substep around each world step, `step_world` off) with their chassis against its buildings; the kinematic bicycle's box pushes what it meets. `physics.stats.vehicles` for each, and each look drawn (a dynamic4w wheel by wheel). | WD4 | M |
 | L3 | **Built** (2026-11-11). **`spawns.*` and `spawn_points`,** with the minimap and road suggestions. As built: `world: spawns:` (points with a heading, team and archetype tags and a world; a policy, fixed, random, round_robin or nearest_free, kept per team, archetype or all); `WorldSpawns`, one per `WorldVehicles`, keeps the points per world, checks them against the grid, picks a spawn's start by the policy (aside when a vehicle sits on it), and suggests points along a generated world's road mesh; a minimap is a `mode: map`, `input: pick` viewport whose picks add, remove or tag points; cvcGL draws them tagged `spawns`. The demo is `world_lab.ari`, with every panel. | WD3 | M |
-| L4 | **The gym:** reset, step, observe, reward, episode logs, headless; `pycvc_gl.cars` moves onto it. | — | M |
+| L4 | **Built** (2026-11-12). **The gym:** reset, step, observe, reward, episode logs, headless; `pycvc_gl.cars` moves onto it. As built: `WorldGym` (C++, and `pycvc.WorldGym`), one app per gym, the clock paused so only `step()` steps it; `reset(seed)` rebuilds the world and spawns the agents with every draw seeded; `step(steer, accel)` is a navigator tick (NaN: nav@1 drives); the observation as flat arrays (pose, goal, contacts per physics step, out of the world, ray ranges, envelope); a reward of the user's; a log per agent per step (CSV, numpy); `GymCars` and `--gym` put `pycvc_gl.cars`' controllers on it; `world_gym.ari` and `world_gym.py` are the example. | — | M |
 
 **The first cut is WD0 + WD1** for the relay, and **L0** for the lab, which can run beside it. E0
 and E1 need neither and can start any time. WD1 needs S0, which transfix/libcvc#1046 builds with

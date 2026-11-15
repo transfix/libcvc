@@ -79,7 +79,7 @@ const cvc::world::building_library &generated_world_library(cvc::app &app, const
 struct GeneratedWorldKeys {
   std::string seed, half, trees, rocks, buildings, tree_gen, amp, water_level, preset, ontology,
       color, request, status, props, building_count, occupied, terrain, water, terrain_gen, city,
-      terrain_file, busy, progress, phase, autoregen, pending;
+      terrain_file, edge, busy, progress, phase, autoregen, pending;
 };
 
 // The keys for node n under `bind_prefix`, each seeded from `base` (and `color`, a

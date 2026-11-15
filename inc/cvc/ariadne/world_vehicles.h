@@ -50,7 +50,7 @@ namespace ariadne {
 // controller (nav@1, the navigator with a policy of its own, or none: it holds still) and its
 // settings within the archetype's ranges. Its body is in the world's own physics world, so it
 // collides with the scene's bodies (their buildings too), and it steps on the world clock with
-// them, on its archetype's plant:
+// them, on its archetype's plant (or its spawn's own):
 //
 //   jolt       a Jolt vehicle (nav_plant, which commands it; the world steps it)
 //   dynamic    the dynamic single-track model (dyn_bike_plant), its chassis box a body
@@ -112,6 +112,9 @@ struct entity_spec {
   std::map<std::string, std::string> metadata;      // the user's own; nothing reads it
   // nav@1, none or external (its intent alone drives it); "" the archetype's first
   std::string controller;
+  // Its plant (jolt, dynamic, dynamic4w or kinematic, as WorldVehicles runs them); "" its
+  // archetype's.
+  std::string plant;
   std::string policy, policy_sha256; // nav@1's policy (a .cvcnav); "" the default policy
   double mass = 0.0, max_speed = 0.0;
   // Where it starts: (x, y) in world metres facing `yaw` (rad; not finite: toward its goal), when
@@ -131,8 +134,8 @@ struct entity_spec {
 //   force    m/s^2 in world x and y, added to the drive's force (the goal's pull and the walls'
 //            push) as cvc::nav::ext_force adds one: it speeds, slows and (with force_steers)
 //            steers the drive, under any command but replace, which takes the drive's place.
-//            The drive has one steering switch for every vehicle: it is on while any entity's
-//            force asks for it.
+//            Each plant's drive has one steering switch for its vehicles: it is on while any
+//            of their forces asks for it.
 struct entity_intent {
   enum class mode { off, replace, blend };
   mode command = mode::off;
@@ -168,8 +171,18 @@ struct entity_info {
   double wheel_load = 0.0, aero_force = 0.0; // N: the wheels' push on the ground, the drag
   int gear = 0;
   double rpm = 0.0, throttle = 0.0, brake = 0.0;
-  bool reached = false; // at its goal (nav@1 then draws another)
-  std::string plant;    // its archetype's: jolt, dynamic, dynamic4w or kinematic
+  double vx = 0.0, vy = 0.0;         // m/s, the chassis's velocity in the world
+  double steer = 0.0;                // rad, + left: the steering's bicycle angle now
+  double goal_x = 0.0, goal_y = 0.0; // world metres: where it drives (none: where it parks)
+  double reach = 0.0;                // m from its goal that counts as there
+  bool reached = false;              // at its goal (nav@1 then draws another, unless held)
+  std::string plant;                 // jolt, dynamic, dynamic4w or kinematic (as spec.plant)
+  // Its chassis's contacts over the physics steps since the navigator's last tick (each step's
+  // contact events, begun or, when the scene's physics reports them, persisting): with the
+  // world's bodies other than the ground (buildings, walls, props), and with another vehicle. A
+  // kinematic box's obstacles are its footprint on the grid's blocked cells.
+  int obstacle_contacts = 0;
+  bool vehicle_contact = false;
   // The command its plant took on the last navigator tick: rad and m/s^2, as entity_intent's.
   double command_steer = 0.0, command_accel = 0.0;
   entity_intent intent; // as of the last navigator tick
@@ -199,9 +212,10 @@ public:
                   std::vector<physics::body_id> ground_bodies,
                   const std::string &world_name = std::string(),
                   std::shared_ptr<const cvc::world::world_geometry> world = nullptr);
-  // The physics world was made afresh (SceneWorld::restart): every vehicle is gone from it. Each
-  // entity goes back to its spawn point, at rest.
-  void world_reset();
+  // The physics world was made afresh (SceneWorld::restart): every vehicle is gone from it, and
+  // the ground is `ground_bodies` (a node whose colliders are made at run time, a generated
+  // world's, has new body ids). Each entity goes back to its spawn point, at rest.
+  void world_reset(std::vector<physics::body_id> ground_bodies);
 
   // The spawn points: a spawn without a place of its own starts at the one their policy picks
   // (a free point of the grid when none applies).
@@ -238,9 +252,31 @@ public:
   // does). Then the dynamic models' substep, and the kinematic boxes a step along the bicycle's
   // path. After it: the dynamic models take back what the step's contacts did.
   void before_step();
+  // After it, too: the step's contacts, counted on the vehicles they touch.
   void after_step();
   // The entities' keys and the selection's, now.
   void publish();
+
+  // ---- what a gym drives (WorldGym, L4) ----
+  // The draws from here on: the free points spawns and goals are drawn at, and the spawn
+  // policy's (random's draw, round_robin's turn), as a runtime made now with `seed` would draw
+  // them. With no entities, ids start again at 1.
+  void reseed(std::uint64_t seed);
+  // Whether nav@1 draws another goal when it reaches one (on by default). Off, it parks there.
+  void set_wander(bool wander);
+  // Entity `id`'s command for the navigator's next tick only, in place of its controller's: the
+  // steering's bicycle angle (rad, + left) and the acceleration along its heading (m/s^2), held to
+  // its envelope as the navigator's own command is. Either not finite: its controller drives that
+  // tick. False when it is not in the world.
+  bool command(std::uint64_t id, double steer, double accel);
+  // Drive entity `id` to (x, y) world metres. False when it is not in the world.
+  bool set_goal(std::uint64_t id, double x, double y);
+  // The navigator's tick, in seconds and in physics steps (a whole number of them); 0 without a
+  // grid.
+  double tick_seconds() const;
+  int steps_per_tick() const;
+  // The navigator's grid of the world on (null without one).
+  std::shared_ptr<const nav::world_grid> grid() const;
 
   std::vector<entity_info> entities() const;
   // Entity `id`'s wheels as drawn (entity_wheel), as of the last step: a view poses each one.
