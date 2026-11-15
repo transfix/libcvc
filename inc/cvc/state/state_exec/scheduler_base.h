@@ -22,13 +22,16 @@
 #ifndef CVC_STATE_EXEC_SCHEDULER_BASE_H
 #define CVC_STATE_EXEC_SCHEDULER_BASE_H
 
+#include <atomic>
 #include <boost/shared_ptr.hpp>
 #include <cstdint>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/types.h>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -238,6 +241,31 @@ public:
   /// (detail::pump_owner_verification).
   bool verifies_pump_owner() const noexcept { return verify_pump_owner_; }
 
+  /// Whether an async function's kernel of this scheduler runs on the calling thread now: on its
+  /// executor, in a fan-out chunk of it, or inline in the step that calls it (kernel_thread_scope;
+  /// docs/STATE_EXEC_EXCEPTIONS.md 3.7). Its entry points refuse such a call.
+  bool kernel_runs_here() const noexcept;
+  /// Throw std::logic_error naming `what` when kernel_runs_here().
+  void check_not_in_kernel(const char *what) const;
+
+  /// RAII: mark the calling thread as running a kernel of `sched` (null: nothing) while alive;
+  /// or, `running` false, lift the marks the thread has (the host's own work inside a kernel's
+  /// call: an inline kernel's progress delivered on its scheduler). The scheduler keeps the mark
+  /// (by thread), so another scheduler's entry points, and another thread's calls, see nothing of
+  /// it.
+  class kernel_thread_scope {
+  public:
+    explicit kernel_thread_scope(scheduler_base *sched, bool running = true);
+    ~kernel_thread_scope();
+    kernel_thread_scope(const kernel_thread_scope &) = delete;
+    kernel_thread_scope &operator=(const kernel_thread_scope &) = delete;
+
+  private:
+    scheduler_base *sched_;
+    bool running_;
+    int slot_ = -1; // its slot in the scheduler's slots, or -1: the overflow list
+  };
+
   // --- Process submission (spawn) ---
   virtual int execute(const std::string &script, const execute_options &opts) = 0;
   virtual int execute(const value_t &expr, const execute_options &opts) = 0;
@@ -353,6 +381,19 @@ public:
 private:
   const std::uint64_t serial_ = detail::new_scheduler_serial();
   const bool verify_pump_owner_ = detail::pump_owner_verification();
+  // The threads running a kernel of it now, and those whose marks are lifted
+  // (kernel_thread_scope), one slot per scope: each thread writes and looks for its own id only.
+  // Scopes past the slots go to the overflow list, under kernel_mu_. `kernels_` counts the marking
+  // scopes alive, so a check with none reads one atomic.
+  static constexpr int kKernelSlots = 16;
+  static constexpr int kLiftedSlots = 4;
+  std::atomic<int> kernels_{0};
+  std::atomic<int> lifted_{0};
+  std::atomic<std::thread::id> kernel_threads_[kKernelSlots] = {};
+  std::atomic<std::thread::id> lifted_threads_[kLiftedSlots] = {};
+  std::atomic<int> kernel_overflow_count_{0};
+  mutable std::mutex kernel_mu_;
+  std::vector<std::pair<std::thread::id, bool>> kernel_overflow_; // (thread, running)
 };
 
 /// limits.async_steps_per_cpu_ms when nothing sets it: what the steps cost, a step being about

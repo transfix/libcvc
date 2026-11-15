@@ -17,6 +17,7 @@ set(CVC_PORT_TESTS
   skeleton_test
   contour_stack_test
   point_classes_test
+  planar_test
   segmentation_test
 )
 

@@ -42,6 +42,7 @@ ari::Widget panel(const std::string &title, const std::string &id, int sliders,
         ari::slider_float(label + std::to_string(i), id + ".s" + std::to_string(i), 0.0, 1.0, 0.5));
   ari::Widget w = ari::window(title, std::move(kids));
   w.id = id;
+  w.closable = false; // no Windows menu bar (§5.9) unless a test gives the document one
   return w;
 }
 
