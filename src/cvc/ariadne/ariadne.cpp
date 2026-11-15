@@ -32,6 +32,7 @@
 #include <cvc/ariadne/oidc_host.h>    // pump_oidc
 #include <cvc/ariadne/rich_text.h>    // §5.20 parse_text_style
 #include <cvc/core/app.h>
+#include <cvc/core/notify.h> // §5.24 the feed the tray's bell shows
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h> // §10.8 (file-pick) parks its program on the picker
 #include <cvc/state/state_exec/async_scheduler.h> // §4.7 app-wide action scheduler (exec_scheduler)
@@ -1700,6 +1701,23 @@ struct Runtime::Impl {
   // clock).
   bool clock_default = false;
   std::function<std::chrono::system_clock::time_point()> wall_clock;
+  bool notify_default = true; // §5.24 set_notifications
+  // §5.24 each mount's composed prefix and its name relative to the document's (its `as:`), as the
+  // walk last met it: what the feed's entries are named by.
+  std::map<std::string, std::string> mount_names;
+  std::map<std::string, std::string> mount_functions; // each mount's functions: (prelude)
+  std::string notify_source(const std::string &path) const;
+  // §5.24 the Notifications window ("Show all..." in the bell's menu), rebuilt when the feed
+  // changes, and the built-in events the bell and it raise (handled by drain, not a document).
+  static constexpr const char *kNotifyEvent = "\x1F"
+                                              "notify.";
+  static constexpr const char *kNotifyWindowId = "_notifications";
+  Widget notify_window;
+  std::uint64_t notify_window_rev = ~std::uint64_t(0);
+  void emit_notify_window();
+  bool builtin_event(const QueuedAction &a);
+  void bind_notify_verbs(const std::shared_ptr<cvc::state_exec::environment> &env,
+                         const std::string &scope) const;
   bool windows_forgotten = false;
   std::set<std::string> laid_out;
 
@@ -1861,6 +1879,9 @@ struct Runtime::Impl {
     // `- clock` entry in a menubar places it (else it goes last, at the bar's right end).
     int clock_setting = -1;
     bool clock_placed = false;
+    // §5.24 the tray's bell: the document's `notifications:` and whether `- bell` places it.
+    int bell_setting = -1;
+    bool bell_placed = false;
   };
   WindowsMenuPlan windows_menu;
   int menubar_depth = 0;           // > 0 while a menubar's items are being drawn
@@ -1881,15 +1902,20 @@ struct Runtime::Impl {
   // `clock:`, else the host's default.
   static constexpr const char *kClockKey = "ariadne.tray.clock";
   bool clock_on_by_default() const;
+  static constexpr const char *kBellKey = "ariadne.tray.bell"; // §5.24
+  bool bell_on_by_default() const;
   struct TrayEntry {
-    const Widget *w = nullptr; // null for the clock when no entry places it
+    const Widget *w = nullptr; // null for the clock or the bell when no entry places it
     bool clock = false;
+    bool bell = false;
     Backend::TrayIcon spec;
     std::string tip;
   };
   Backend::TrayIcon tray_spec(const Widget &w);
   std::vector<TrayEntry> tray_entries(const Widget &bar); // this frame's, in the bar's order
   void emit_tray(const std::vector<TrayEntry> &icons);
+  void emit_tray_items(const TrayEntry &icon); // a tray menu's items: its children, or the bell's
+  void emit_bell_items();
   // §5.23 the bar's menus folded into one menu under the "menu" icon, when the document lets them
   // and they do not fit beside the tray (Backend::menus_fit).
   std::vector<std::string> bar_titles(const Widget &bar);
@@ -1925,8 +1951,15 @@ struct Runtime::Impl {
   // §3/§4: evaluate a repeat-count expression to a non-negative, capped int. Fail-safe 0.
   int eval_count(const std::string &expr);
   void warn_once(const std::string &msg) {
-    if (reactive_warned.insert(msg).second)
+    if (reactive_warned.insert(msg).second) {
       reactive_warnings.push_back(msg);
+      // §5.24 to the app's feed too, from where it was raised, so the bell names its document
+      cvc::notification n;
+      n.text = msg;
+      n.level = 1;
+      n.path = current_prefix();
+      cvc::notify(app, std::move(n));
+    }
   }
 };
 
@@ -2115,6 +2148,12 @@ void Runtime::Impl::emit_container(const Widget &w) {
       run_mount_init(sub_prefix, (w.functions ? w.functions->prelude : "") + w.init_script);
     if (!w.tick_script.empty())
       ensure_mount_tick(sub_prefix, w); // after its init:, so the first tick sees the seed
+    if (sub_prefix.size() > prefix.size() + 1 && sub_prefix.compare(0, prefix.size(), prefix) == 0)
+      mount_names[sub_prefix] = sub_prefix.substr(prefix.empty() ? 0 : prefix.size() + 1);
+    else
+      mount_names[sub_prefix] = w.scope;
+    if (w.functions)
+      mount_functions[sub_prefix] = w.functions->prelude;
     scope_stack.push_back(sub_prefix);
   }
   // §6.6 the root's and a mount's functions are the ones programs started in its subtree get.
@@ -2307,6 +2346,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
       // §5.22 seed the clock's key before the bar's menus, so a Show clock toggle among them (which
       // seeds with its own default) finds the host's or the document's choice already there.
       read_bool_or_seed(app, resolve(kClockKey), clock_on_by_default() ? 1 : 0);
+      read_bool_or_seed(app, resolve(kBellKey), bell_on_by_default() ? 1 : 0); // §5.24
       const std::vector<TrayEntry> tray = tray_entries(w);
       if (collapse_menus(w, tray)) {
         // §5.23 one menu, its items the bar's menus as submenus. menu_depth stays 0 for it, so a
@@ -3926,6 +3966,7 @@ void Runtime::Impl::render() {
       backend->end_main_menu_bar();
     }
     emit(root);
+    emit_notify_window(); // §5.24, while Show all... has it open
     // §10.8 the Runtime's own "Open file" window, over the document, while a (file-pick) waits
     // on it.
     if (file_pick->cancel.exchange(false))
@@ -3979,11 +4020,16 @@ void Runtime::Impl::plan_windows_menu() {
           if (!w.bind.empty() && !is_expr(w.bind))
             toggled.insert(resolve_bind(scope, w.bind));
           break;
-        case Kind::TrayIcon: // §5.22 the clock: placed in a menubar, else the document's setting
+        case Kind::TrayIcon: // §5.22 the clock, §5.24 the bell: placed in a menubar, else the
+                             // document's setting
           if (w.tray_clock && in_menubar)
             p.clock_placed = true;
           else if (w.tray_clock)
             p.clock_setting = w.bdef ? 1 : 0;
+          else if (w.tray_bell && in_menubar)
+            p.bell_placed = true;
+          else if (w.tray_bell)
+            p.bell_setting = w.bdef ? 1 : 0;
           break;
         case Kind::WindowsMenu:
           if (!w.bdef)
@@ -4087,6 +4133,8 @@ void Runtime::Impl::emit_windows_menu_items() {
 Backend::TrayIcon Runtime::Impl::tray_spec(const Widget &w) {
   Backend::TrayIcon t;
   t.glyph = std::string(icon_glyph(w.label, backend->unicode_glyphs()));
+  if (named_icon(w.label))
+    t.icon = w.label;
   t.badge = is_expr(w.badge) ? eval_text_or_literal(w.badge) : w.badge;
   if (t.badge == "0")
     t.badge.clear();
@@ -4115,6 +4163,276 @@ std::string local_time(std::chrono::system_clock::time_point when, const char *f
 
 bool Runtime::Impl::clock_on_by_default() const {
   return windows_menu.clock_setting >= 0 ? windows_menu.clock_setting == 1 : clock_default;
+}
+
+bool Runtime::Impl::bell_on_by_default() const {
+  return windows_menu.bell_setting >= 0 ? windows_menu.bell_setting == 1 : notify_default;
+}
+
+namespace {
+// §5.24 who an entry posted from `path` came from: the mount `path` is in (the deepest) among
+// `mounts` (composed prefix -> name), named as the document named it; "" for the document itself
+// or the host.
+std::string mount_source(const std::map<std::string, std::string> &mounts,
+                         const std::string &path) {
+  std::string best_prefix, best;
+  for (const auto &[p, name] : mounts)
+    if ((path == p || (path.size() > p.size() && path.compare(0, p.size(), p) == 0 &&
+                       path[p.size()] == cvc::state::SEPARATOR[0])) &&
+        p.size() > best_prefix.size()) {
+      best_prefix = p;
+      best = name;
+    }
+  return best;
+}
+} // namespace
+
+std::string Runtime::Impl::notify_source(const std::string &path) const {
+  return mount_source(mount_names, path);
+}
+
+namespace {
+constexpr int kBellShown = 8; // the newest entries the bell's menu lists
+
+std::chrono::system_clock::time_point epoch_time(double seconds) {
+  return std::chrono::system_clock::time_point(
+      std::chrono::duration_cast<std::chrono::system_clock::duration>(
+          std::chrono::duration<double>(seconds)));
+}
+
+// An entry as a line: unread mark, level, source, its first line of text (cut at 80 characters),
+// how many times it came, and when (`time_fmt`).
+std::string notify_line(const cvc::notification_entry &e, const std::string &source, bool unicode,
+                        const char *time_fmt) {
+  std::string line = e.read ? "  " : (unicode ? "\xE2\x80\xA2 " : "* "); // a bullet: unread
+  if (e.level >= 2)
+    line += std::string(icon_glyph("error", unicode)) + " ";
+  else if (e.level == 1)
+    line += std::string(icon_glyph("warning", unicode)) + " ";
+  if (!source.empty())
+    line += source + ": ";
+  std::string text = e.text.substr(0, e.text.find('\n'));
+  if (text.size() > 80) {
+    std::size_t cut = 77;
+    while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80)
+      --cut; // not inside a UTF-8 sequence
+    text = text.substr(0, cut) + "...";
+  }
+  line += text;
+  if (e.repeat > 1)
+    line += " (x" + std::to_string(e.repeat) + ")";
+  line += "  " + local_time(epoch_time(e.time), time_fmt);
+  return line;
+}
+} // namespace
+
+void Runtime::Impl::emit_tray_items(const TrayEntry &icon) {
+  if (icon.bell)
+    emit_bell_items();
+  else if (icon.w)
+    emit_children(*icon.w);
+}
+
+// §5.24 the bell's menu: the newest entries (a click marks one read and runs its on:), then Mark
+// all read, Clear all, and Show all..., which opens the Notifications window.
+void Runtime::Impl::emit_bell_items() {
+  Backend &b = *backend;
+  const std::vector<cvc::notification_entry> all = cvc::notifications(app);
+  int shown = 0;
+  for (auto it = all.rbegin(); it != all.rend() && shown < kBellShown; ++it, ++shown) {
+    const std::string line =
+        notify_line(*it, it->source.empty() ? notify_source(it->path) : it->source,
+                    b.unicode_glyphs(), "%H:%M");
+    b.push_id(("##notify." + std::to_string(it->id)).c_str());
+    if (b.menu_item_action(line.c_str()))
+      queued_events.push_back(
+          {kNotifyEvent + std::string("open:") + std::to_string(it->id), prefix});
+    b.pop_id();
+  }
+  if (all.size() > static_cast<std::size_t>(kBellShown))
+    b.text_line(("and " + std::to_string(all.size() - kBellShown) + " more").c_str());
+  b.separator();
+  if (b.menu_item_action("Mark all read"))
+    queued_events.push_back({kNotifyEvent + std::string("read_all"), prefix});
+  if (b.menu_item_action("Clear all"))
+    queued_events.push_back({kNotifyEvent + std::string("clear_all"), prefix});
+  if (b.menu_item_action("Show all..."))
+    queued_events.push_back({kNotifyEvent + std::string("show"), prefix});
+}
+
+// §5.24 the Notifications window, while its tree._notifications.open is 1 (Show all... sets it;
+// its X clears it): every entry, newest first, under Mark all read and Clear all.
+void Runtime::Impl::emit_notify_window() {
+  const std::string open = resolve(std::string("tree.") + kNotifyWindowId + ".open");
+  if (read_bool_or_seed(app, open, 0) == 0)
+    return;
+  const cvc::notify_summary s = cvc::notify_status(app);
+  if (s.rev != notify_window_rev || notify_window.kind != Kind::Window) {
+    std::vector<Widget> kids;
+    Widget row = group({button("Mark all read", kNotifyEvent + std::string("read_all")),
+                        button("Clear all", kNotifyEvent + std::string("clear_all"))});
+    row.layout.kind = LayoutKind::Horizontal;
+    kids.push_back(std::move(row));
+    kids.push_back(separator());
+    const std::vector<cvc::notification_entry> all = cvc::notifications(app);
+    if (all.empty())
+      kids.push_back(text("No notifications."));
+    for (auto it = all.rbegin(); it != all.rend(); ++it)
+      kids.push_back(
+          text(notify_line(*it, it->source.empty() ? notify_source(it->path) : it->source,
+                           backend->unicode_glyphs(), "%d %b %H:%M:%S")));
+    Widget w = window("Notifications", std::move(kids));
+    w.id = kNotifyWindowId;
+    w.closable = true;
+    notify_window = std::move(w);
+    notify_window_rev = s.rev;
+  }
+  emit(notify_window);
+}
+
+// §5.24 the bell's and the Notifications window's own events.
+bool Runtime::Impl::builtin_event(const QueuedAction &a) {
+  const std::string_view tag = kNotifyEvent;
+  if (a.event.compare(0, tag.size(), tag) != 0)
+    return false;
+  const std::string what = a.event.substr(tag.size());
+  if (what == "read_all") {
+    cvc::notify_read_all(app);
+  } else if (what == "clear_all") {
+    cvc::notify_clear_all(app);
+  } else if (what == "show") {
+    write<int>(app, resolve(std::string("tree.") + kNotifyWindowId + ".open"), 1);
+    write<std::string>(app, resolve(std::string("tree.") + kNotifyWindowId + ".raise"), "1");
+  } else if (what.rfind("open:", 0) == 0) {
+    std::uint64_t id = 0;
+    try {
+      id = std::stoull(what.substr(5));
+    } catch (const std::exception &) {
+      return true;
+    }
+    for (const cvc::notification_entry &e : cvc::notifications(app))
+      if (e.id == id) {
+        cvc::notify_read(app, id);
+        if (!e.on.empty()) { // its program, in the scope that posted it, from the next drain
+          const std::string scope = e.scope.empty() ? prefix : e.scope;
+          queued_events.push_back({e.on, scope});
+          const auto fn = mount_functions.find(scope);
+          queued_events.back().functions = fn != mount_functions.end() ? fn->second : doc_functions;
+        }
+        break;
+      }
+  }
+  return true;
+}
+
+// §5.24 the feed's verbs, for a program run in `scope`:
+//   (notify TEXT [LEVEL [ON]])  post; LEVEL info (the default), warn or error; ON a program run
+//                               in this scope when the entry is clicked. Returns its id.
+//   (notify-read ID) (notify-clear ID)   mark one read / drop it; #t when there was one
+//   (notify-read-all)                    mark every entry read
+//   (notify-clear-all)                   drop the entries this scope posted (its own and its
+//                                        mounts'); how many
+//   (notify-status)                      {count unread worst rev}
+//   (notify-list [N])                    the newest N entries (all), newest first, each
+//                                        {id text level source time read repeat}
+void Runtime::Impl::bind_notify_verbs(const std::shared_ptr<cvc::state_exec::environment> &env,
+                                      const std::string &scope) const {
+  namespace se = cvc::state_exec;
+  cvc::app *const on_app = &app;
+  const std::string source = notify_source(scope);
+  const auto text_arg = [](const se::value_t &v, const char *verb, const char *what) {
+    const auto *s = std::get_if<std::string>(&v.v);
+    if (!s)
+      throw se::dsl_error("TypeError",
+                          std::string(verb) + ": " + what + " is a string, not " + v.type_name());
+    return *s;
+  };
+  const auto id_arg = [](std::span<const se::value_t> args, const char *verb) -> std::uint64_t {
+    if (args.size() != 1)
+      throw se::dsl_error("TypeError", std::string(verb) + ": expected one argument, an id");
+    if (const auto *i = std::get_if<int64_t>(&args[0].v))
+      return *i > 0 ? static_cast<std::uint64_t>(*i) : 0;
+    if (const auto *d = std::get_if<double>(&args[0].v))
+      return *d > 0 ? static_cast<std::uint64_t>(*d) : 0;
+    throw se::dsl_error("TypeError", std::string(verb) + ": the id is a number");
+  };
+  se::builtins::register_fn(
+      env, "notify",
+      [on_app, scope, source, text_arg](std::span<const se::value_t> args) -> se::value_t {
+        if (args.empty() || args.size() > 3)
+          throw se::dsl_error("TypeError", "notify: (notify TEXT [LEVEL [ON]])");
+        cvc::notification n;
+        n.text = text_arg(args[0], "notify", "TEXT");
+        if (args.size() > 1 && !args[1].is_nil())
+          n.level = cvc::notify_level(text_arg(args[1], "notify", "LEVEL"));
+        if (args.size() > 2 && !args[2].is_nil())
+          n.on = text_arg(args[2], "notify", "ON");
+        n.source = source;
+        n.path = scope;
+        n.scope = scope;
+        return se::value_t(static_cast<int64_t>(cvc::notify(*on_app, std::move(n))));
+      });
+  se::builtins::register_fn(
+      env, "notify-read", [on_app, id_arg](std::span<const se::value_t> args) -> se::value_t {
+        return se::value_t(cvc::notify_read(*on_app, id_arg(args, "notify-read")));
+      });
+  se::builtins::register_fn(
+      env, "notify-clear", [on_app, id_arg](std::span<const se::value_t> args) -> se::value_t {
+        return se::value_t(cvc::notify_clear(*on_app, id_arg(args, "notify-clear")));
+      });
+  se::builtins::register_fn(
+      env, "notify-read-all", [on_app](std::span<const se::value_t> args) -> se::value_t {
+        if (!args.empty())
+          throw se::dsl_error("TypeError", "notify-read-all: expected no arguments");
+        cvc::notify_read_all(*on_app);
+        return se::value_t(true);
+      });
+  se::builtins::register_fn(
+      env, "notify-status", [on_app](std::span<const se::value_t> args) -> se::value_t {
+        if (!args.empty())
+          throw se::dsl_error("TypeError", "notify-status: expected no arguments");
+        const cvc::notify_summary s = cvc::notify_status(*on_app);
+        return se::make_dict({
+            {"count", se::value_t(static_cast<int64_t>(s.count))},
+            {"unread", se::value_t(static_cast<int64_t>(s.unread))},
+            {"worst", se::value_t(std::string(s.worst < 0 ? "" : cvc::notify_level_name(s.worst)))},
+            {"rev", se::value_t(static_cast<int64_t>(s.rev))},
+        });
+      });
+  // The mounts as they are now: a child program may outlive this Runtime, so it keeps a copy.
+  se::builtins::register_fn(
+      env, "notify-list",
+      [on_app, mounts = mount_names](std::span<const se::value_t> args) -> se::value_t {
+        if (args.size() > 1)
+          throw se::dsl_error("TypeError", "notify-list: expected at most one argument, a count");
+        std::size_t n = cvc::notify_capacity;
+        if (!args.empty()) {
+          if (const auto *i = std::get_if<int64_t>(&args[0].v))
+            n = *i > 0 ? static_cast<std::size_t>(*i) : 0;
+          else
+            throw se::dsl_error("TypeError", "notify-list: the count is an int");
+        }
+        const std::vector<cvc::notification_entry> all = cvc::notifications(*on_app);
+        std::vector<se::value_t> out;
+        for (auto it = all.rbegin(); it != all.rend() && out.size() < n; ++it)
+          out.push_back(se::make_dict({
+              {"id", se::value_t(static_cast<int64_t>(it->id))},
+              {"text", se::value_t(it->text)},
+              {"level", se::value_t(std::string(cvc::notify_level_name(it->level)))},
+              {"source",
+               se::value_t(it->source.empty() ? mount_source(mounts, it->path) : it->source)},
+              {"time", se::value_t(it->time)},
+              {"read", se::value_t(it->read)},
+              {"repeat", se::value_t(static_cast<int64_t>(it->repeat))},
+          }));
+        return se::make_list(std::move(out));
+      });
+  se::builtins::register_fn(
+      env, "notify-clear-all", [on_app, scope](std::span<const se::value_t> args) -> se::value_t {
+        if (!args.empty())
+          throw se::dsl_error("TypeError", "notify-clear-all: expected no arguments");
+        return se::value_t(static_cast<int64_t>(cvc::notify_clear_under(*on_app, scope)));
+      });
 }
 
 // The titles the bar's menus show this frame, in order: its entries (a repeated one once), then the
@@ -4168,10 +4486,37 @@ std::vector<Runtime::Impl::TrayEntry> Runtime::Impl::tray_entries(const Widget &
     c.spec.tooltip = c.tip;
     return c;
   };
+  // §5.24 the bell: while the feed has entries; its badge the unread, its tone the worst of them.
+  const cvc::notify_summary feed = cvc::notify_status(app);
+  const bool bell_on =
+      feed.count > 0 && read_bool_or_seed(app, resolve(kBellKey), bell_on_by_default()) != 0;
+  const auto bell_icon = [&](const Widget *at) {
+    Icon c;
+    c.w = at;
+    c.bell = true;
+    c.spec.icon = "bell";
+    c.spec.glyph = std::string(icon_glyph("bell", backend->unicode_glyphs()));
+    c.spec.menu = true;
+    if (feed.unread > 0) {
+      c.spec.badge = std::to_string(feed.unread);
+      c.spec.tone = std::max(feed.worst, 0);
+      c.tip = std::to_string(feed.unread) +
+              (feed.unread == 1 ? " unread notification" : " unread notifications");
+    } else {
+      c.tip = "Notifications";
+    }
+    c.spec.tooltip = c.tip;
+    return c;
+  };
   std::vector<Icon> icons;
   for (const Widget &c : bar.children) {
     if (c.kind != Kind::TrayIcon || !c.repeat.empty() || !visible(c))
       continue;
+    if (c.tray_bell) {
+      if (bell_on)
+        icons.push_back(bell_icon(&c));
+      continue;
+    }
     if (c.tray_clock) {
       if (clock_on)
         icons.push_back(clock_icon(&c));
@@ -4184,6 +4529,8 @@ std::vector<Runtime::Impl::TrayEntry> Runtime::Impl::tray_entries(const Widget &
     i.spec.tooltip = i.tip;
     icons.push_back(std::move(i));
   }
+  if (bell_on && !windows_menu.bell_placed)
+    icons.push_back(bell_icon(nullptr));
   if (clock_on && !windows_menu.clock_placed)
     icons.push_back(clock_icon(nullptr));
   return icons;
@@ -4202,7 +4549,9 @@ void Runtime::Impl::emit_tray(const std::vector<TrayEntry> &icons) {
   for (const Icon &i : icons)
     specs.push_back(i.spec);
   const auto id_of = [&](const Icon &i, int k) {
-    return i.clock ? std::string("##tray.clock") : (i.w->id.empty() ? std::to_string(k) : i.w->id);
+    if (i.clock || i.bell)
+      return std::string(i.clock ? "##tray.clock" : "##tray.bell");
+    return i.w->id.empty() ? std::to_string(k) : i.w->id;
   };
   // The icon as an item of a menu (the overflow menu, or a backend without a tray): its glyph and
   // badge, then its tooltip; its own menu as a submenu.
@@ -4214,7 +4563,7 @@ void Runtime::Impl::emit_tray(const std::vector<TrayEntry> &icons) {
       title += "  " + i.tip;
     if (i.spec.menu) {
       if (b.begin_menu(title.c_str())) {
-        emit_children(*i.w);
+        emit_tray_items(i);
         b.end_menu();
       }
     } else if (b.menu_item_action(title.c_str()) && !i.clock && !i.w->on.empty()) {
@@ -4232,7 +4581,7 @@ void Runtime::Impl::emit_tray(const std::vector<TrayEntry> &icons) {
         title += " " + i.spec.badge;
       if (b.begin_menu(title.c_str())) {
         if (i.spec.menu)
-          emit_children(*i.w);
+          emit_tray_items(i);
         else
           as_item(i);
         b.end_menu();
@@ -4273,7 +4622,7 @@ void Runtime::Impl::emit_tray(const std::vector<TrayEntry> &icons) {
     b.push_id(id_of(i, k).c_str());
     if (i.spec.menu) {
       if (b.begin_tray_menu(i.spec)) {
-        emit_children(*i.w);
+        emit_tray_items(i);
         b.end_tray_menu();
       } else if (!i.tip.empty()) {
         b.set_tooltip(i.tip.c_str());
@@ -4339,6 +4688,7 @@ Runtime::Impl::make_action_context(const std::string &scope_prefix,
     if (p)
       p(ac->env, ac->ictx);
   bind_backend_verbs(ac->env);
+  bind_notify_verbs(ac->env, scope_prefix); // §5.24
   bind_has(ac->env, [this](const std::string &n) { return has(n); });
   return ac;
 }
@@ -4995,6 +5345,7 @@ void Runtime::Impl::load_names() const {
     if (p)
       p(env, ictx);
   bind_backend_verbs(env);
+  bind_notify_verbs(env, prefix); // §5.24
   std::set<std::string> found;
   for (const se::environment *e = env.get(); e; e = e->outer.get())
     for (const auto &kv : e->bindings)
@@ -5209,6 +5560,7 @@ void Runtime::render() { m_->render(); }
 
 void Runtime::set_frame_clock(std::optional<double> seconds) { m_->pinned_clock = seconds; }
 void Runtime::set_clock(bool on) { m_->clock_default = on; }
+void Runtime::set_notifications(bool on) { m_->notify_default = on; }
 void Runtime::set_wall_clock(std::function<std::chrono::system_clock::time_point()> now) {
   m_->wall_clock = std::move(now);
 }
@@ -5320,6 +5672,8 @@ void Runtime::drain() {
       m_->submit_action(a);
       continue;
     }
+    if (m_->builtin_event(a)) // §5.24 the bell's own
+      continue;
     auto it = m_->handlers.find(a.event); // a bare event name -> the host C++ handler seam
     if (it != m_->handlers.end() && it->second)
       it->second();

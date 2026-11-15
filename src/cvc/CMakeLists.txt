@@ -151,6 +151,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/param_dsl.h
   ../../inc/cvc/core/result_job.h
   ../../inc/cvc/core/job_keys.h
+  ../../inc/cvc/core/notify.h
   ../../inc/cvc/core/job_intrinsics.h
   ../../inc/cvc/core/process.h
   ../../inc/cvc/core/text.h
@@ -273,6 +274,7 @@ set(SOURCE_FILES
   core/sliced_task.cpp
   core/param_dsl.cpp
   core/job_keys.cpp
+  core/notify.cpp
   core/job_intrinsics.cpp
   core/process.cpp
   core/text.cpp

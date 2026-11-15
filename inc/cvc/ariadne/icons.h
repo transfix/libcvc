@@ -38,6 +38,9 @@ inline constexpr NamedIcon kNamedIcons[] = {
     {"clock", "\xE2\x97\xB7", "o"},   // ◷
     {"menu", "\xE2\x89\xA1", "="},    // ≡
     {"more", "\xC2\xBB", ">>"},       // » (the tray's overflow)
+    // The tray's bell (§5.24): an emoji, which terminals draw from their own fonts; ImGui's fonts
+    // have no bell, so it draws one (TrayIcon::icon).
+    {"bell", "\xF0\x9F\x94\x94", "*"}, // 🔔
 };
 
 // The named icon called `name`, or nullptr when it is not a name.

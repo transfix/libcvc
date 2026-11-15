@@ -11,11 +11,12 @@
 #include <cvc/ariadne/loader.h>   // load_file / LoadResult / ChannelDecl / sources_changed
 #include <cvc/ariadne/oidc_host.h>
 #include <cvc/ariadne/requires.h> // requires:, free_heads (what a document needs from its host)
-#include <cvc/ariadne/script_engine.h> // a scripting host's engines: their blocks and lanes
-#include <cvc/ariadne/uri.h>      // register_cvc_uri_handler
+#include <cvc/ariadne/script_engine.h>  // a scripting host's engines: their blocks and lanes
+#include <cvc/ariadne/uri.h>            // register_cvc_uri_handler
 #include <cvc/ariadne/world_rules.h>    // the world: block's vehicles
 #include <cvc/ariadne/world_vehicles.h> // resolve_vehicle_looks
 #include <cvc/core/app.h>
+#include <cvc/core/notify.h>              // §5.24 its own warnings to the app's feed
 #include <cvc/core/world_clock_binding.h> // world_clock_keys (the scene clock's step key)
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h>      // register_async_fn
@@ -1061,12 +1062,15 @@ void AppRuntime::drain() {
   if (world_) {
     try {
       world_->follow(app_.world_clock());
-      for (std::string &w : world_->take_warnings()) // a regenerated world's, a dataset's bodies
+      for (std::string &w : world_->take_warnings()) { // a regenerated world's, a dataset's bodies
+        post_warning(w);
         pendingWarnings_.push_back(std::move(w));
+      }
     } catch (const std::exception &e) {
       // A clock whose quantum changed under the world: stop stepping rather than throw out of
       // every frame.
       pendingWarnings_.push_back(std::string("ari: physics stopped: ") + e.what());
+      post_warning(pendingWarnings_.back());
       world_.reset();
     }
   }
@@ -1138,7 +1142,16 @@ void AppRuntime::set_warning_listener(std::function<void(const std::string &)> l
   warningListener_ = std::move(listener);
 }
 
+// §5.24 a warning of the AppRuntime's own (the Runtime posts its own) to the app's feed.
+void AppRuntime::post_warning(const std::string &warning) {
+  cvc::notification n;
+  n.text = warning;
+  n.level = 1;
+  cvc::notify(app_, std::move(n));
+}
+
 void AppRuntime::add_warning(std::string warning) {
+  post_warning(warning);
   pendingWarnings_.push_back(std::move(warning));
   if (warningListener_)
     warningListener_(pendingWarnings_.back());

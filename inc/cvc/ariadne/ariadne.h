@@ -247,6 +247,11 @@ public:
   // system clock by default); a test pins it.
   void set_clock(bool on);
   void set_wall_clock(std::function<std::chrono::system_clock::time_point()> now);
+  // §5.24 the tray's bell, the app's notification feed (cvc/core/notify.h). set_notifications(on)
+  // is the host's default for whether it shows (on unless a host turns it off); it shows only while
+  // the feed has entries. A document's `notifications:` overrides it, and the user's choice (the
+  // state key ariadne.tray.bell, which arigl's Settings > Show notifications binds) overrides both.
+  void set_notifications(bool on);
   // The clock's reading for the frame render() last drew.
   double frame_clock() const;
 

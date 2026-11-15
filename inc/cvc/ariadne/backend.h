@@ -378,6 +378,8 @@ public:
     int tone = 0;        // 0 info, 1 warn, 2 error: the badge's colour
     bool menu = false;   // a click opens a menu (begin_tray_menu) rather than acting (tray_button)
     bool text = false;   // the glyph is text (the clock's time), drawn as the bar's text is
+    std::string icon;    // the named icon it shows (cvc/ariadne/icons.h), "" when none: a backend
+                         // may draw its own picture for a name ("bell") instead of the glyph
   };
   virtual int begin_tray(const std::vector<TrayIcon> &icons) {
     (void)icons;

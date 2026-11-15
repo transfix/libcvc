@@ -674,11 +674,12 @@ The built-in top-level keys (`is_builtin_block`,
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs  requires
 init  on_tick  on_key  on_pointer  on_signal  keys  units  import  channels  lint  args
-windows_menu  tests  functions  data  assets  scenes  clock  menu_collapse
+windows_menu  tests  functions  data  assets  scenes  clock  menu_collapse  notifications
 ```
 
 `tests:` is read only by `ari test` (§13). `clock:` is the tray's clock (§5.22).
-`menu_collapse:` says when the menu bar's menus fold into one (§5.23). `assets:` and
+`menu_collapse:` says when the menu bar's menus fold into one (§5.23). `notifications:` shows
+the tray's bell or not (§5.24). `assets:` and
 `scenes:` are §5.18's shared meshes and scenes of their own.
 
 Any **other** top-level key is dispatched to a parser registered via
@@ -2892,9 +2893,10 @@ menubar:
 - **`tray_icon:`** goes in a `menubar:`, among its menus. The tray draws the bar's icons in the
   order written, after every menu and the Windows menu (§5.9).
   - Its value is a named icon or any text drawn as written. The names are `warning`, `error`,
-    `info`, `check`, `gear`, `mail`, `sync`, `user`, `network`, `star`, `clock` and `menu`
-    (`cvc/ariadne/icons.h`), glyphs the UI fonts carry rather than emoji, which need a colour
-    emoji font. A backend that can't draw the glyphs (the Linux console, a
+    `info`, `check`, `gear`, `mail`, `sync`, `user`, `network`, `star`, `clock`, `menu` and
+    `bell` (`cvc/ariadne/icons.h`), glyphs the UI fonts carry rather than emoji, which need a
+    colour emoji font. `bell` is the exception: terminals draw it as the 🔔 emoji, and ImGui,
+    whose fonts have no bell, draws one (`TrayIcon::icon`). A backend that can't draw the glyphs (the Linux console, a
     dumb or VT terminal: `Backend::unicode_glyphs`) draws each name's ASCII stand-in, `!` for
     `warning` and so on.
   - `badge:` is a text, or an expression giving one each frame, as a picture's badge is (§5.11).
@@ -2974,6 +2976,80 @@ menubar:
 - `ariadne_runtime_test`'s `TheMenusFoldIntoOne…` and `ADocumentSetsWhetherTheMenusFold`, the
   loader's `MenuCollapseSetting`, and `ariadne_ftxui_test`'s `ANarrowBarFoldsItsMenusIntoOne`
   and `AFoldedBarIsOneMenuOfSubmenus` check it.
+
+### 5.24 Notifications: the host's feed and the tray's bell
+
+Every host has one notification feed, kept on its `cvc::app` (`cvc/core/notify.h`), so two apps
+in one process never share one. Everything that runs in the app posts to it: the outermost
+document, every document it loads, the host, and the jobs they start. The menu bar shows it as a
+bell in the tray (§5.22), before the clock.
+
+```yaml
+notifications: false            # top level: no bell, whatever the host's default
+on_tick: |
+  (if (> (int (state-get "mesh.holes")) 0)
+    (notify "The mesh has holes" "warn" "(state-set \"tree.mesh.open\" 1)")
+    #f)
+menubar:
+  - menu: File
+    items: [...]
+  - bell                        # here among the icons, instead of before the clock
+```
+
+- **There is nothing to propagate.** A loaded document (`load:`, §6) posts to the same feed as
+  the document that loaded it, and the outermost document's bar shows it. Each entry is named
+  by the document that posted it: its mount's `as:` (the outermost document's are named by no
+  one). The runtime takes the name from the program's scope, so one document cannot post as
+  another.
+- **Posting from a document:**
+  - `(notify TEXT [LEVEL [ON]])` posts and returns the entry's id. LEVEL is `info` (the
+    default), `warn` or `error`. ON is a program run when the entry is clicked, in the scope and
+    with the functions of the document that posted it.
+  - `(notify-read ID)` and `(notify-clear ID)` mark one entry read or drop it, giving `#t` when
+    there was one.
+  - `(notify-read-all)` marks every entry read.
+  - `(notify-clear-all)` drops the entries this document posted, its loaded documents' included,
+    and says how many.
+  - `(notify-status)` gives `{count unread worst rev}`, and `(notify-list [N])` the newest N
+    entries (all of them by default), newest first, each `{id text level source time read
+    repeat}`. A program is confined to its document's state, so these are how it reads the feed.
+- **Posting from C++:** `cvc::notify(app, cvc::notification{...})`, safe from any thread. Its
+  `path` (the state path of what posted it) is what the bell names it by.
+- **What posts on its own:**
+  - Every runtime warning (a broken expression, a resident that stopped, `AppRuntime`'s own),
+    at level warn, named by the document that raised it.
+  - A job started with `cvc::schedule_published_job` (§1.9 of the library ports roadmap: the
+    DSL's `-start` forms, fe_lab's jobs) when it ends: a failure always, as an error; a job that
+    ran a second or more, as info; a cancelled one never. Its text is "<what>: <status>", where
+    <what> is the last name of the job's keys ("segment").
+  - The chat component (§5.16, `components/chat.ari`) posts a direct message that comes while its
+    conversation is not shown; a click opens the conversation. The room's own chat does not post,
+    since that would be every line. Each client posts into its own feed: the feed lives outside the
+    conference's shared tree (`conf.*`), so nothing in it replicates to another peer.
+- **The feed.** It keeps the newest 100 entries. A post identical to the newest entry while that
+  is unread (the same text, level and source) counts as a repeat of it ("(x3)") rather than a new
+  entry. It mirrors itself into the state tree, for a widget to bind app-root-absolute
+  (`bind: /notify.unread`): `notify.count`, `notify.unread`, `notify.worst` (`info`, `warn`,
+  `error`, or "" when none is unread), `notify.rev`, and
+  `notify.items.<id>.{text, level, source, time, read, repeat}`.
+- **The bell** shows while the feed has entries. Its badge is the unread count, and its tone is
+  the worst unread level. Its menu lists the newest 8 entries: an unread mark, the level's icon,
+  the source, the text's first line and the time. A click on an entry marks it read and runs its
+  ON. Then come *Mark all read*, *Clear all*, and *Show all...*, which opens the Notifications
+  window with every entry (`tree._notifications.open`; its X closes it).
+  - The host decides whether it shows by default (`Runtime::set_notifications`, on unless a host
+    turns it off).
+  - A document's top-level `notifications: true|false` overrides the host.
+  - The user's choice overrides both: arigl's *Settings > Show notifications* toggles the state
+    key `ariadne.tray.bell`.
+  - Opening the menu does not mark anything read: a hosted backend (tvision) has every menu open
+    to every walk.
+- **Per backend:** ImGui draws the bell itself (a dome, rim, knob and clapper in the text's
+  colour), its fonts having no bell. FTXUI and tvision draw 🔔, and `*` without the glyphs.
+- `ariadne_runtime_test`'s `Notify.TheFeedIsEachAppsOwnAndMirrorsItself`,
+  `TheBellShowsTheFeedInTheTray`, `ProgramsAndWarningsPostToTheFeedFromTheirDocument` and
+  `ADocumentPlacesOrTurnsOffTheBell`, and `result_job_test`'s `JobKeys` failure and stop tests,
+  check it. `examples/ariadne/documents/tray_demo.ari` has a Notify menu.
 
 ## 6. Composition: include / import / load
 

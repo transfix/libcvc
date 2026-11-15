@@ -8,6 +8,11 @@
 # goes last unless a `- clock` entry places it; `clock: true` shows it here even in a snapshot
 # (hosts show it only in `run`).
 #
+# The bell (§5.24) is the host's notification feed: it shows while the feed has entries, its badge
+# the unread ones. (notify TEXT [LEVEL [ON]]) posts, as the Notify menu does; warnings and long or
+# failed jobs post on their own. Its menu lists the newest, then Mark all read, Clear all and
+# Show all..., a window with every entry.
+#
 #   arigl run examples/ariadne/documents/tray_demo.ari
 #   ari run examples/ariadne/documents/tray_demo.ari
 #   arigl run --terminal --backend tvision examples/ariadne/documents/tray_demo.ari
@@ -27,6 +32,12 @@ init: |
   (state-set "tray.messages" "12")
   (state-set "tray.log" "")
 
+# One entry at the start, so the bell shows.
+on_tick: |
+  (if (is-null (state-get "tray.welcomed"))
+    (begin (state-set "tray.welcomed" "1") (notify "Welcome: this is the bell" "info"))
+    #f)
+
 menubar:
   - menu: File
     items:
@@ -36,6 +47,14 @@ menubar:
     items:
       - menu_item: Wireframe
         bind: tray.wire
+  - menu: Notify
+    items:
+      - menu_item: Post info
+        on: (notify "The mesh is saved")
+      - menu_item: Post a warning
+        on: (notify "The relay is slow" "warn")
+      - menu_item: Post an error that opens the log
+        on: (notify "The solver diverged" "error" "(state-set \"tray.log\" \"diverged\")")
   - menu: Help
     items:
       - menu_item: About

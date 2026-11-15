@@ -240,9 +240,40 @@ void place_icon(float x, float y, const ariadne::Backend::TrayIcon &t) {
   ImGui::SetCursorScreenPos(ImVec2(x, y - raise));
 }
 
+// What the icon's item is labelled: its glyph, or, for a picture ImGui draws itself (the bell: its
+// fonts have none), blanks as wide as the picture, with an id.
+std::string icon_label(const ariadne::Backend::TrayIcon &t) {
+  if (t.icon == "bell")
+    return "   ##tray.bell";
+  return t.glyph;
+}
+
 float glyph_width(const ariadne::Backend::TrayIcon &t) {
   const GlyphFont font(t);
-  return ImGui::CalcTextSize(t.glyph.c_str()).x;
+  return ImGui::CalcTextSize(icon_label(t).c_str(), nullptr, true).x;
+}
+
+// §5.24 a bell over the icon that starts at x in the bar `win`, in the text's colour: a dome on a
+// rim, a knob on top and the clapper under it.
+void draw_bell(ImGuiWindow *win, float x, const ariadne::Backend::TrayIcon &t) {
+  if (t.icon != "bell")
+    return;
+  const ImGuiStyle &st = ImGui::GetStyle();
+  const ImRect bar = win->MenuBarRect();
+  const float s = ImGui::GetFontSize() * 1.05f;
+  const float cx = x + st.ItemSpacing.x * 0.5f + glyph_width(t) * 0.5f;
+  const float cy = (bar.Min.y + bar.Max.y) * 0.5f - s * 0.04f;
+  const ImU32 col = ImGui::GetColorU32(ImGuiCol_Text);
+  ImDrawList *dl = win->DrawList;
+  dl->PathLineTo(ImVec2(cx - s * 0.40f, cy + s * 0.24f));
+  dl->PathLineTo(ImVec2(cx - s * 0.30f, cy - s * 0.04f));
+  dl->PathArcTo(ImVec2(cx, cy - s * 0.04f), s * 0.30f, IM_PI, 2.0f * IM_PI, 12);
+  dl->PathLineTo(ImVec2(cx + s * 0.40f, cy + s * 0.24f));
+  dl->PathFillConcave(col);
+  dl->AddRectFilled(ImVec2(cx - s * 0.46f, cy + s * 0.22f), ImVec2(cx + s * 0.46f, cy + s * 0.30f),
+                    col, s * 0.04f);
+  dl->AddCircleFilled(ImVec2(cx, cy - s * 0.37f), s * 0.06f, col);
+  dl->AddCircleFilled(ImVec2(cx, cy + s * 0.37f), s * 0.08f, col);
 }
 
 // What a tray icon takes in the bar: its glyph laid out as a menubar item lays out its label
@@ -332,8 +363,9 @@ bool ImGuiBackend::tray_button(const TrayIcon &icon) {
   bool clicked = false;
   {
     const GlyphFont font(icon);
-    clicked = ImGui::MenuItem(icon.glyph.c_str());
+    clicked = ImGui::MenuItem(icon_label(icon).c_str());
   }
+  draw_bell(win, x, icon);
   draw_badge(win, x, icon);
   return clicked;
 #else
@@ -354,9 +386,10 @@ bool ImGuiBackend::begin_tray_menu(const TrayIcon &icon) {
   {
     const GlyphFont font(
         icon); // popped inside the menu, if it opened: its items are in the bar's font
-    open = ImGui::BeginMenu(icon.glyph.c_str());
+    open = ImGui::BeginMenu(icon_label(icon).c_str());
   }
-  draw_badge(win, x, icon); // on the bar, though an open menu is now the current window
+  draw_bell(win, x, icon); // on the bar, though an open menu is now the current window
+  draw_badge(win, x, icon);
   return open;
 #else
   (void)icon;

@@ -29,6 +29,7 @@
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
 #include <cvc/core/async_task.h>  // launch_pool_task generalization test
+#include <cvc/core/notify.h>      // §5.24 the notification feed and the tray's bell
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
 #include <cvc/net/browser.h>      // OIDC: a fake browser, a browser page
 #include <cvc/net/credentials.h>  // the ws-send test's CredentialStore
@@ -5733,6 +5734,11 @@ struct TrayBackend : MockBackend {
   int fit = -1;
   bool unicode = true;
   std::string click, open;
+  std::string pick; // §5.24 a menu item whose label starts with it is clicked
+  bool menu_item_action(const char *l) override {
+    MockBackend::menu_item_action(l);
+    return !pick.empty() && std::string(l).rfind(pick, 0) == 0;
+  }
   std::vector<TrayIcon> asked; // what begin_tray was given
   bool fits = true;            // §5.23 what menus_fit says
   std::vector<std::string> titles;
@@ -5969,6 +5975,207 @@ TEST(AriadneRuntime, ADocumentSetsWhetherTheMenusFold) {
       << mb.dump();
   EXPECT_EQ(mb.times("begin_menu:Windows"), 1) << mb.dump();
   EXPECT_LT(log_index(mb, "begin_menu:Windows"), log_index(mb, "toggle:Alpha")) << mb.dump();
+}
+
+// §5.24 the feed is the app's own: two apps never share one. It mirrors its totals and entries
+// into the state tree, counts an identical unread post as a repeat, and keeps the newest 100.
+TEST(Notify, TheFeedIsEachAppsOwnAndMirrorsItself) {
+  cvc::app a, b;
+  cvc::notification n;
+  n.text = "Meshing finished";
+  n.source = "fe_lab";
+  n.path = "ui.fe_lab";
+  const std::uint64_t id = cvc::notify(a, n);
+  EXPECT_GT(id, 0u);
+  EXPECT_EQ(cvc::notify_status(a).count, 1u);
+  EXPECT_EQ(cvc::notify_status(b).count, 0u) << "another app's feed";
+  EXPECT_EQ(cvc::notify(a, n), id) << "the same, unread: a repeat";
+  ASSERT_EQ(cvc::notifications(a).size(), 1u);
+  EXPECT_EQ(cvc::notifications(a)[0].repeat, 2);
+  cvc::notification w;
+  w.text = "a broken expression";
+  w.level = 1;
+  w.path = "ui";
+  cvc::notify(a, w);
+  EXPECT_EQ(sval(a, "notify.unread"), "2");
+  EXPECT_EQ(sval(a, "notify.worst"), "warn");
+  EXPECT_EQ(sval(a, ("notify.items." + std::to_string(id) + ".source").c_str()), "fe_lab");
+  EXPECT_TRUE(cvc::notify_read(a, id));
+  EXPECT_EQ(sval(a, "notify.unread"), "1");
+  EXPECT_EQ(cvc::notify(a, n), id + 2) << "read: a new entry, not a repeat";
+  // The entries under a path go together (a document that restarts); ui.fe_lab is under ui.
+  EXPECT_EQ(cvc::notify_clear_under(a, "ui.fe_lab"), 2u);
+  EXPECT_EQ(cvc::notify_status(a).count, 1u);
+  EXPECT_TRUE(cvc::state::instance(a)("notify.items").childNames().size() == 1u);
+  for (int i = 0; i < 150; ++i) {
+    cvc::notification k;
+    k.text = "job " + std::to_string(i);
+    cvc::notify(a, k);
+  }
+  const auto all = cvc::notifications(a);
+  ASSERT_EQ(all.size(), cvc::notify_capacity);
+  EXPECT_EQ(all.back().text, "job 149");
+  EXPECT_EQ(all.front().text, "job 50") << "the oldest went first";
+  cvc::notify_clear_all(a);
+  EXPECT_EQ(sval(a, "notify.count"), "0");
+  EXPECT_EQ(sval(a, "notify.worst"), "");
+}
+
+// §5.24 the bell: in the tray while the feed has entries, before the clock; its badge the unread
+// count, its tone the worst unread level. Its menu lists the newest entries, named by the document
+// that posted them, then Mark all read, Clear all and Show all..., which opens a window.
+TEST(AriadneRuntime, TheBellShowsTheFeedInTheTray) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  rt.set_wall_clock(five_past_two);
+  rt.set_clock(true);
+  rt.set_root(group({menubar({menu("File", {})})}));
+  rt.render();
+  EXPECT_FALSE(mb.saw_prefix("tray_menu:\xF0\x9F\x94\x94")) << "an empty feed: no bell";
+  cvc::notification n;
+  n.text = "Meshing finished";
+  cvc::notify(app, n);
+  n.text = "the mesh has holes";
+  n.level = 2;
+  n.path = "ui.demo";
+  cvc::notify(app, n);
+  mb.open = "\xF0\x9F\x94\x94";
+  mb.log.clear();
+  rt.render();
+  ASSERT_TRUE(mb.saw("tray_menu:\xF0\x9F\x94\x94|2|2")) << mb.dump();
+  ASSERT_FALSE(mb.asked.empty());
+  EXPECT_EQ(mb.asked[0].icon, "bell");
+  EXPECT_LT(log_index(mb, "tray_menu:\xF0\x9F\x94\x94|2|2"), log_index(mb, "tray_button:14:05||0"))
+      << "the clock stays rightmost";
+  // The newest first, then the bell's own items. (An entry's time is when it was posted, by the
+  // system clock, not the pinned one.)
+  const auto first_with = [&](const std::string &p) {
+    for (std::size_t i = 0; i < mb.log.size(); ++i)
+      if (mb.log[i].rfind(p, 0) == 0)
+        return static_cast<int>(i);
+    return -1;
+  };
+  const int holes = first_with("menu_action:\xE2\x80\xA2 \xE2\x9C\x96 the mesh has holes  ");
+  ASSERT_GE(holes, 0) << mb.dump();
+  EXPECT_LT(holes, first_with("menu_action:\xE2\x80\xA2 Meshing finished  ")) << mb.dump();
+  EXPECT_TRUE(mb.saw("menu_action:Mark all read"));
+  EXPECT_TRUE(mb.saw("menu_action:Clear all"));
+  // Mark all read: no badge, the bell stays.
+  mb.pick = "Mark all read";
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("tray_menu:\xF0\x9F\x94\x94||0")) << mb.dump();
+  // Show all... opens the Notifications window.
+  mb.pick = "Show all...";
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_window:Notifications(closable)")) << mb.dump();
+  EXPECT_TRUE(mb.saw_prefix("text_line:  Meshing finished")) << mb.dump();
+  // Clear all: the feed is empty, and the bell goes.
+  mb.pick = "Clear all";
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  mb.log.clear();
+  rt.render();
+  EXPECT_EQ(cvc::notify_status(app).count, 0u);
+  EXPECT_FALSE(mb.saw_prefix("tray_menu:\xF0\x9F\x94\x94")) << mb.dump();
+}
+
+// §5.24 (notify TEXT [LEVEL [ON]]) posts from the program's document: a loaded one's entries are
+// named by its mount, the outer document's by no one. A click on one runs its ON in that scope.
+// A warning goes to the feed from where it was raised.
+TEST(AriadneRuntime, ProgramsAndWarningsPostToTheFeedFromTheirDocument) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  Widget fe =
+      group({button("Go", "(notify \"meshed\" \"warn\" \"(state-set \\\"opened\\\" 1)\")")});
+  fe.scope = "fe_lab";
+  rt.set_root(group({menubar({menu("File", {})}), button("Go", "(notify \"hello\")"), fe}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+  ASSERT_TRUE(pump_until(rt, [&] { return cvc::notify_status(app).count >= 2; }));
+  std::vector<cvc::notification_entry> all = cvc::notifications(app);
+  ASSERT_EQ(all.size(), 2u);
+  const auto meshed =
+      std::find_if(all.begin(), all.end(), [](auto &e) { return e.text == "meshed"; });
+  const auto hello =
+      std::find_if(all.begin(), all.end(), [](auto &e) { return e.text == "hello"; });
+  ASSERT_NE(meshed, all.end());
+  ASSERT_NE(hello, all.end());
+  EXPECT_EQ(meshed->source, "fe_lab");
+  EXPECT_EQ(meshed->level, 1);
+  EXPECT_EQ(hello->source, "");
+  // A click on the entry: read, and its program runs in fe_lab's scope.
+  mb.open = "\xF0\x9F\x94\x94";
+  mb.pick = "\xE2\x80\xA2 \xE2\x9A\xA0 fe_lab: meshed";
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  ASSERT_TRUE(pump_until(rt, [&] { return !sval(app, "ui.demo.fe_lab.opened").empty(); }));
+  EXPECT_EQ(sval(app, "ui.demo.fe_lab.opened"), "1");
+  for (const auto &e : cvc::notifications(app))
+    if (e.text == "meshed")
+      EXPECT_TRUE(e.read);
+  // A broken expression's warning, raised in fe_lab: in the feed, named by it.
+  Widget bad = group({text("x")});
+  bad.children[0].visible_when = "(> (int"; // unbalanced: a parse error, warned once
+  bad.scope = "fe_lab";
+  rt.set_root(group({menubar({menu("File", {})}), bad}));
+  rt.render();
+  bool warned = false;
+  mb.log.clear();
+  for (const auto &e : cvc::notifications(app))
+    if (e.level == 1 && e.path == "ui.demo.fe_lab") {
+      warned = true;
+      mb.log.clear();
+      rt.render();
+      EXPECT_TRUE(mb.saw_prefix("menu_action:\xE2\x80\xA2 \xE2\x9A\xA0 fe_lab: ")) << mb.dump();
+    }
+  EXPECT_TRUE(warned);
+}
+
+// §5.24 `notifications: false` keeps the bell out of the tray whatever the feed holds; `- bell`
+// places it among the tray's icons.
+TEST(AriadneRuntime, ADocumentPlacesOrTurnsOffTheBell) {
+  {
+    cvc::app app;
+    Runtime rt(app, "ui.demo");
+    TrayBackend mb;
+    rt.set_backend(&mb);
+    cvc::notification n;
+    n.text = "x";
+    cvc::notify(app, n);
+    rt.set_root(group({menubar({tray_bell(), tray_icon("W")})}));
+    rt.render();
+    EXPECT_LT(log_index(mb, "tray_menu:\xF0\x9F\x94\x94|1|0"), log_index(mb, "tray_button:W||0"))
+        << mb.dump();
+    EXPECT_EQ(mb.times("tray_menu:\xF0\x9F\x94\x94|1|0"), 1);
+  }
+  {
+    cvc::app app;
+    Runtime rt(app, "ui.demo");
+    TrayBackend mb;
+    rt.set_backend(&mb);
+    cvc::notification n;
+    n.text = "x";
+    cvc::notify(app, n);
+    rt.set_root(group({menubar({tray_icon("W")}), tray_bell(false)}));
+    rt.render();
+    EXPECT_FALSE(mb.saw_prefix("tray_menu:\xF0\x9F\x94\x94")) << mb.dump();
+  }
 }
 
 TEST(AriadneRuntime, ADocumentPlacesOrTurnsOffTheTrayClock) {

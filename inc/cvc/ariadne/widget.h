@@ -293,6 +293,9 @@ struct Widget {
   // Kind::TrayIcon: the tray's clock (§5.22). In a menubar it places the clock there; elsewhere it
   // is the document's setting for it (bdef: shown or not).
   bool tray_clock = false;
+  // Kind::TrayIcon: the tray's bell (§5.24), the host's notification feed. In a menubar it places
+  // the bell there; elsewhere it is the document's setting for it (bdef: shown or not).
+  bool tray_bell = false;
   // Kind::Menubar: when its menus fold into one ≡ menu (§5.23): "auto" (or empty) when they and
   // the tray do not fit across the bar, "never", or "always".
   std::string collapse;
@@ -558,6 +561,16 @@ inline Widget tray_clock(bool on = true) {
   Widget w;
   w.kind = Kind::TrayIcon;
   w.tray_clock = true;
+  w.bdef = on;
+  return w;
+}
+
+// The tray's bell (§5.24): `- bell` in a menubar places it among the tray's icons; the document's
+// top-level `notifications: true|false` is the setting (on: whether it shows).
+inline Widget tray_bell(bool on = true) {
+  Widget w;
+  w.kind = Kind::TrayIcon;
+  w.tray_bell = true;
   w.bdef = on;
   return w;
 }
