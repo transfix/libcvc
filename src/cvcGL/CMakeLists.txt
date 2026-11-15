@@ -570,9 +570,12 @@ add_executable(cvcgl_wake test/cvcgl_wake.cpp ocean/EWave.cpp ocean/WakeSource.c
 target_include_directories(cvcgl_wake PRIVATE ocean)
 target_link_libraries(cvcgl_wake PRIVATE cvcGL)
 add_test(NAME cvcgl_wake COMMAND cvcgl_wake)
-# Its time is the GPU's (some 70000 passes, a third of them at 512^2), so a software renderer
-# sets it, not the build type: an unoptimised build of the test and its ocean sources adds 1 s on
-# Mesa llvmpipe. Apple's software renderer (macOS CI) is the slow one: MEASURED.
+# Its time is the renderer's (some 72000 passes, 20000 of them at 512^2), not the build type's:
+# an unoptimised build of the test and its ocean sources adds 1 s on Mesa llvmpipe. Apple's
+# Software Renderer (macOS CI) is the slow one, the Kelvin wake's 512^2 window most of all:
+# 391 s in package-macos / libcvc-debug (Kelvin 248 s, the rock 136 s), 317 s in release-grpc,
+# against 50-70 s under llvmpipe on the Linux and Windows lanes. The Debug lanes' default 300 s
+# is too short there; 900 s keeps a hang caught.
 set_tests_properties(cvcgl_wake PROPERTIES TIMEOUT 900)
 
 # GeometryNode::updateNormals — the in-place normal fast path the FFT ocean uses
