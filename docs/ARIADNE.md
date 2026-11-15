@@ -531,8 +531,10 @@ Three backends ship:
     reverts an edit or closes a popup; F10 opens the menu bar. An `autofocus:` widget has focus
     when it appears (§5.10).
   - **mouse** — click to focus or activate, pick a radio's option, drag a slider, drag a
-    window by its title bar, click `[x]` to close it, click a menu title to open it.
-  - **windows** (`caps.windows = true`) — free, z-ordered, raised on focus, placed from
+    window by its title bar, click `[x]` to close it or `[↑]` to maximize it (§5.9), click a menu
+    title to open it.
+  - **windows** (`caps.windows = true`) — free, z-ordered, raised on focus (and when picked in the
+    Windows menu or maximized, §5.9), placed from
     `pos:`/`size:` or the persisted `tree.<id>.geometry`; a drag persists back (§11.4). A
     window stops at the screen's edge and scrolls what does not fit (§5.8).
   - **graphics** — `draw_image` paints a raster published with `set_image`, and
@@ -631,7 +633,8 @@ Three backends ship:
   ([`inc/cvc/ariadne/tvision_backend.h`](../inc/cvc/ariadne/tvision_backend.h)) — the
   native-desktop terminal backend (roadmap §16.5 row 5). Turbo Vision owns the terminal
   and draws the chrome itself: movable, resizable, overlapping windows with close and
-  zoom boxes, a pull-down menu bar, a status line, and its own keys (F10 for the menu bar, F6
+  zoom boxes (a window's `closable:` and `resizable:` decide its close box and resize corner,
+  §5.9), a pull-down menu bar, a status line, and its own keys (F10 for the menu bar, F6
   for the next window, Alt-X to quit, Ctrl-F5 to move or resize the window from the keyboard:
   the arrows move it, Shift and the arrows resize it, Return keeps it, Escape puts it back).
   The windows' *contents* are the FTXUI backend's: a `TvisionBackend` is an
@@ -876,6 +879,54 @@ A heightfield is the world's own `cvc::height_field`: the node draws its mesh (e
 south-west to north-east), a body on it collides with the same triangles, and a custom node
 standing on it (`ground:` in `forest_trees`, `wave_sea`, `cloud_sky`) samples the triangle under
 each point.
+
+**Repeated nodes.** `repeat:` on a node makes it a template, drawn as copies beside one another,
+as a widget's `repeat:` draws its instances (§6.5). A pool of markers sized by a list in state is
+one node:
+
+```yaml
+scene:
+  nodes:
+    - node: marker_{i}
+      repeat: markers            # the count: a key holding it (a list's node holds its length)
+      source: { sphere: 0.5 }
+      tags: [markers]
+      visible: markers.{i}.on
+      casts_shadow: false
+      children:
+        - node: ring
+          source: { box: 0.2 }
+```
+
+- **The count** is a whole number (`repeat: 4`), a state key holding one (`repeat: markers`,
+  resolved as `visible:` is), or a read-lane expression (`repeat: (length (state-get "l"))`),
+  counted as a widget's is. A key that holds no number counts 0. The most is 4096.
+- **Each copy** is the template with `{i}`, its 0-based index, filled in: in its id (`marker_0`,
+  `marker_1`, ...), its `visible:` bind, its tags, its `source:` (a file, an asset, a dataset and
+  its item), its `material: { texture }`, its clips' bound offsets, every string in its props (a
+  custom type's keys), and its children's. An id without `{i}` gets `_{i}`. A copy keeps the
+  template's `transform:`, `tags:`, `visible:`, material, `shader:` and children.
+- **The count is live.** At each frame `tick_scene` counts every repeated node again and adds or
+  removes copies to match, the last copies going first, without a reload. A copy that goes takes
+  with it what it brought: its node, its view tags (§5.18), its `visible:` and clip bindings and
+  a custom type's per-frame ticks.
+- **Placing copies.** A copy is a node like any other, so a program, a script or a host moves it
+  through its own keys: `graphics.root.children.marker_3.position` holds `x,y,z`, and `rotation`
+  (degrees) and `scale` sit beside it. A copy made when the count grows starts at the pose those
+  keys hold when they hold one, so a program may write a new marker's count and its position in
+  the same step. Otherwise it starts at the template's `transform:`.
+- **Nesting.** Copies of a node under a group are the group's children. A repeated node inside a
+  repeated node counts its own copies in each copy of the outer, but `{i}` there is its own index,
+  not the outer's (the loader warns, as for widgets).
+- **Not on copies:** `body:` and `world:`. The scene's physics world and its worlds are built once,
+  from the nodes the document declares, so the loader drops them from a repeated node and its
+  children, with a warning.
+
+A host that runs the document (`AriRuntime`, so `arigl`, `arigl-web`, `ariglx` and pycvc's hosts,
+and `TerminalScene`) counts an expression on the document's read lane
+(`SceneAdapter::set_count_fn`, `Runtime::eval_count`). A host calling `realize_scene` itself passes
+`RealizeOptions::count`. Without one a number or a key still counts, and an expression draws no
+copies and warns.
 
 **Textures.** `material: { texture: <uri> }` drapes an image over a geometry node through its
 mesh's UVs. UV (0, 0) is the image's bottom-left corner. A `source: { data }` city's terrain wears
@@ -1683,7 +1734,7 @@ A window needs neither `pos:` nor `size:`. Its size:
 
 - A window with a `size:` (px or `"%"` of the view, per axis; `min:`/`max:` bound it) opens at
   that size, or at its persisted `tree.<id>.geometry` (§11.4) once it has one. The user may
-  resize it, and that size is the one persisted.
+  resize it, unless it is `resizable: false` (§5.9), and that size is the one persisted.
 - A window with no `size:` fits its content every frame, so it grows and shrinks with what it
   shows. It stops at the edge of the view, measured from where it stands, and never goes below an
   authored `min:` or past a `max:`. Its persisted geometry places it but does not size it.
@@ -1742,7 +1793,9 @@ How each backend does it:
   On the tvision desktop, tvision's frame holds the window, and the host sizes that frame on every
   walk, in each axis: the document's size where it gave one, else the content's. That stops when
   the user resizes the window (the frame's corner, Ctrl-F5 then Shift and the arrows, or the zoom
-  box): from then on it keeps the user's size, through a close and a reopen too. Nothing else
+  box): from then on it keeps the user's size, through a close and a reopen too. A
+  `resizable: false` window has no corner and Ctrl-F5 only moves it, so only the zoom box changes
+  its size. Nothing else
   counts as the user's: not a size the host gave the window to fit it, nor tvision scaling the
   windows when the terminal is resized, nor a move. Only the user's size is reported back to
   `tree.<id>.geometry`; for any other window the host reports its place alone.
@@ -1751,42 +1804,92 @@ How each backend does it:
   closed and must show them when they open again, and on tvision a window resized with Ctrl-F5
   must come back at that size.
 
-### 5.9 Closing and reopening windows: the Windows menu
+### 5.9 Window chrome: closing, maximizing, resizing, and the Windows menu
 
 A window's open state is `tree.<id>.open` (default open; `<id>` is its `id:`, else its title). A
-window whose state is `0` is not drawn. A `closable: true` window has a close button that sets it
-to `0`. One that opens again is sized as §5.8 says: by its `size:` or its content, unless the user
+window whose state is `0` is not drawn. A window's title bar has a close button (X) that sets it to
+`0`. One that opens again is sized as §5.8 says: by its `size:` or its content, unless the user
 resized it.
 
-**Maximizing.** A window's title bar also has a maximize button, beside the collapse arrow and the
-close X.
-- **The button:** pressed, it makes the window fill the screen under the main menu bar. Pressed
-  again, the window goes back to the place and size it had.
+**What the user may do to a window.** As in a desktop's window manager, a window's title bar ends
+with a maximize button and then the close X, on the right, and the user resizes the window by an
+edge or a corner. Each is allowed unless the document turns it off on that window:
+
+```yaml
+windows:
+  - window: Status
+    closable: false     # no close button: the user can't close it
+    maximizable: false  # no maximize button
+    resizable: false    # no resizing by an edge or a corner
+```
+
+All three default to `true`. They are the window's own keys: a `resizable:` inside its `layout:`
+is the layout's (a split's panes, a table's columns, §5.8). An `include:` may set any of them for
+that use of the unit.
+
+**Resizing.**
+- A window with a `size:` resizes by its edges and corners, and the size the user leaves it at is
+  the one persisted (§11.4). `resizable: false` keeps it at its `size:` (or a persisted size):
+  - ImGui: no edge or corner drags it; a drag there moves the window, as a drag in its body does.
+  - tvision: its frame has no resize corner, and Ctrl-F5 only moves it.
+  - FTXUI draws no resize handle on any window, so the key changes nothing there.
+- A window with no `size:` fits its content (§5.8). Under ImGui that is every frame, so the user
+  can't resize it either way. On the tvision desktop the user may resize one, and from then on it
+  keeps that size; `resizable: false` stops that as well.
+- A maximize still fills a window that isn't resizable, and a restore puts it back at its size.
+
+**Maximizing.**
+- **The button:** pressed, it makes the window fill the screen under the main menu bar, and turns
+  into a restore button. Pressed again, the window goes back to the place and size it had.
+- **The title bar:** a double click on it maximizes the window, or puts it back, where the backend
+  sees double clicks (ImGui: in place of its collapse on a double click, for a window that has the
+  button).
+- **Moving or resizing it by hand** ends the maximize, and the button is the plain maximize button
+  again:
+  - Dragged by its title bar, the window comes back to the size it had, under the pointer, held
+    where along the title bar it was grabbed.
+  - Resized by an edge or a corner (ImGui), it keeps the size it was given. That size is now the
+    window's own, so a later maximize goes back to it.
 - **The state** is `tree.<id>.maximized`, `1` or `0`. A document may write it to maximize a window
   or put it back.
+- **In front:** a window that becomes maximized, by any of these, comes to the front of the
+  others (see *Bringing a window to the front* below).
 - **Geometry:** while a window is maximized its `tree.<id>.geometry` isn't written, so it keeps
   where the window goes back to, across a restart too.
-- **Opting out:** `maximizable: false` on a window gives it no button; the default is `true`.
 - **By backend:**
-  - ImGui: a square, two squares while maximized. The window can't be moved or resized while
-    maximized.
+  - ImGui: a square, and two squares one behind the other while maximized, the size of ImGui's
+    close button, lit when the pointer is over it. Resting the pointer on a button names it
+    (Maximize, Restore, Close).
   - FTXUI: `[↑]` beside the `[x]`, `[↕]` to go back (`[^]` / `[=]` without those glyphs). The
     window is drawn from the top-left as big as the terminal.
   - The tvision desktop has its own zoom box (and Ctrl-F5) instead, which this key doesn't follow.
 - **The token** `ui.maximize` (§5.7) says the backend has the button.
 
-Every document gets a **Windows** menu to open such a window again, with no menu items to write:
+**Bringing a window to the front.** A window comes to the front of the others when:
+- the user clicks it (in a terminal, Tab moving the focus into it does too);
+- the user picks it in the Windows menu (below), whether it was open or closed;
+- it becomes maximized;
+- the document writes `1` to `tree.<id>.raise`, once: the core clears it as the window is drawn.
+  A handler that opens a closed window and wants it in front sets `tree.<id>.open` and this
+  together.
 
-- It holds a ticked item per window, bound to that window's `tree.<id>.open`. Unticking an item
-  closes the window, closable or not; ticking it opens it.
+ImGui and FTXUI do all of these. The tvision desktop does all but the maximize, which it has no
+button for (its zoom box is its own). ImGui and tvision also give the window the keyboard.
+
+Every document gets a **Windows** menu to show any of its windows again, closed or behind the
+others, with no menu items to write:
+
+- It holds an item per window, ticked while that window's `tree.<id>.open` is `1`. As in a
+  desktop's window manager, picking a window shows it in front of the others: a closed one opens,
+  and an open one stays open and comes to the front. The window's X closes it, so a
+  `closable: false` window can't be closed from the menu.
 - It lists only the windows no menu item of the document already toggles. A document with its own
   "Settings" or "View" menu bound to `tree.<id>.open` (`lsystem_forest.ari`,
   `conference_roster.ari`) keeps it, and the Windows menu lists only the windows that menu leaves
   out. When it leaves none out there is no Windows menu.
 - A window made by `repeat:` is listed once per instance, under the title that instance shows
   (its `bind:`, else its label with `{i}` filled in), after the other windows. The list follows the
-  repeat's count each frame. Opening one from the menu also brings it to the front.
-  `conference_roster.ari` sets `windows_menu: View`, so its per-peer camera windows are listed by
+  repeat's count each frame. `conference_roster.ari` sets `windows_menu: View`, so its per-peer camera windows are listed by
   name at the end of its View menu.
 - A host's menus (`AppRuntime::set_host_menus`) count as the document's: arigl's
   *Settings > Controls...* opens the Controls window, so arigl's Windows menu leaves it out. Under
@@ -1794,8 +1897,8 @@ Every document gets a **Windows** menu to open such a window again, with no menu
 - It goes after the document's own menus (and a host's). When the menu bar already has a menu of
   the same title (`fem_gallery.ari`'s own Windows menu), the items go at the end of that menu,
   after a separator, instead of a second menu of that name. A document with no `menubar:` gets a
-  menu bar holding just the Windows menu, but only when one of its windows is closable; otherwise
-  nothing can be closed.
+  menu bar holding just the Windows menu, but only when one of its windows has a close button;
+  when every window is `closable: false`, nothing can be closed.
 
 A document places or turns it off:
 
@@ -1809,7 +1912,7 @@ menubar:
 
 A bare `- windows_menu` entry places it under its default title. The menu is the core's (it calls
 the backend's ordinary menu functions), so the ImGui menu bar, the FTXUI menu bar and the tvision
-host's menu bar all show it, and its items toggle the same state the close buttons write. The open
+host's menu bar all show it, and its items write the same state the close buttons do. The open
 state lives in the document's state tree like the geometry (§11.4): it holds for the run and
 across a reload, but not across runs.
 
@@ -2191,7 +2294,8 @@ this for every one.
   feed, a form) is all panels, so they start shown (`ImGuiOverlay::setPhoneHidesPanels`, which
   arigl's `AriRuntime::load` sets). The button stays above every window, even one dragged over
   its corner. A window collapses to its title bar with the arrow at the title's left (or a double
-  tap on the title), closes with its X when it is `closable:`, and comes back from the View or
+  tap on the title, which on a phone collapses rather than maximizes), closes with its X unless
+  it is `closable: false`, and comes back from the View or
   Windows menu (§5.9). On a touch screen a window moves by its title bar only, so a finger that
   slips off a widget does not carry its window away.
 - **A list of windows.** A document laid out for a wider screen would have its windows moved
@@ -2549,6 +2653,7 @@ windows:
 | `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans), the wheel zooms, and a double-click puts the camera back where it started. `pick` makes the left button pick instead of orbiting (below); the middle and right buttons still pan, and the wheel still zooms. The view is outlined while the pointer is over it. |
 | `pick` | With `input: pick`, the state key a pick writes under (bound like `bind:`). Defaults to `viewers.<view>.pick`. |
 | `on_pick` | With `input: pick`, an action run on each pick (a program, or a bare name for a host handler), with an `event` dict of the same fields. |
+| `refresh_hz` | Draw the scene at most this many times a second, and show the last picture in between (below). `0` or unset: every frame. |
 
 **Picking.** In an `input: pick` view, the left button picks what the view draws: a press, each
 move while it is held, and the release. Each pick tests the scene's nodes as this view draws them
@@ -2566,6 +2671,21 @@ under the `pick:` key:
 example, so a tool such as a spawn-point editor is a program. A host can ask for the same hit test
 at any point with `SceneViews::pick(view, x, y, hit)`. A terrain, a generated world and a body are
 nodes like any other, so a click on the ground gives a point on it. (`cvcgl_ariadne_pick`.)
+
+**Refresh rate.** A view draws the scene a second time, every frame: a mirror of the main view
+draws every node again, with its own camera, so a map beside a busy scene can cost as much as the
+scene. `refresh_hz: 5` draws it at most five times a second; the frames in between show its last
+picture, kept in a texture the size of the window (`Viewport::setRefreshHz`). It draws at once,
+whatever the rate:
+
+- when it moves or changes size, or is shown again;
+- when its `show`, `hide`, `chrome`, `camera`, `shadows`, `override` or starting camera change;
+- while the pointer drags, wheels or picks in it, and for three frames after, so what a pick
+  changed shows without waiting.
+
+Picks test the scene as it is, not the last picture. A view that does not clear its rect (one that
+draws over what is under it) draws every frame whatever the rate. (`cvcgl_viewport_refresh`,
+`cvcgl_ariadne_pick`.)
 
 **Tags.** A node's `tags:` hold for its whole subtree, so a tagged child under a tagged parent is
 drawn only where both are allowed: the parent's tags take the child out of a view that rules them
@@ -2961,7 +3081,10 @@ windows:
 
 Any widget may carry an `id:` (not only windows): it names the instance a backend keys its
 per-instance state on and that the core persists view state under (`tree.<id>.*`). An include
-site may override the unit's `id:`, so two instances of one unit stay distinct.
+site may override the unit's `id:`, so two instances of one unit stay distinct. When the unit is a
+window, the include site may also give it its own `pos:`, `size:`, `layout:`, `frame:`,
+`closable:`, `maximizable:` and `resizable:` (§5.8, §5.9). Each replaces the unit's only where it
+is given, so a document arranges shared panels without forking them.
 
 Args are strings. A unit takes whole widget lists through **slots**: a `- slot: NAME` item in
 any of its widget lists marks where they go. The include site's `slots: {NAME: [...]}` puts its
@@ -4268,7 +4391,10 @@ host.run()                          # until SIGTERM; the app's shutdown, then th
 
 - **The script thread.** The program runs on a thread of its own with one asyncio loop
   (`host.loop`), which serves its ASGI apps (uvicorn) and its tasks. The relay never runs Python,
-  never takes the GIL and never waits on the program: a sync handler holds up only the loop.
+  never takes the GIL and never waits on the program: a sync handler holds up only the loop. A
+  program keeps each task it starts (`host.loop.create_task`) until the task is done: asyncio holds
+  tasks only weakly, so one waiting on a stream of its own (`asyncio.open_connection`) is freed by
+  the next full garbage collection, mid-await, and its work never finishes.
 - **Writes.** `host.set`, `set_tree`, `set_series` and `set_plot` (as `pycvc_gl.ariadne.Host`'s)
   take paths from the tree's root and are queued. The relay applies them on its next room step
   (60 Hz), ahead of the server document's programs, coalesced per path and in the order of each path's last write
@@ -4693,6 +4819,7 @@ against a local test server. `ari snapshot` prints the programs' warnings after 
 | `--net-policy FILE` | read `allow` and `credential` lines from `FILE` (repeatable; implies `--net`) |
 | `--credential-store S` | keep credentials across runs in `S` (implies `--net`; not in a browser) |
 | `--credential-env N=V` | credential `N` is the token in environment variable `V`, for this run (repeatable; a policy `credential` line must bind `N`; not in a browser) |
+| `--e2ee-store S` | keep end-to-end encryption keys in `S`, a name or a path, for the `e2ee-*` verbs (§10.8; implies `--net`; not in a browser) |
 | `--oidc-issuer ISSUER` | documents may sign in (§10.5) with `ISSUER` only; allows its origin (repeatable; implies `--net`) |
 | `--oidc-client I=ID` | sign in to issuer `I` as client `ID`, the launcher's registration (repeatable; pins `I` too) |
 | `--oidc-redirect-uri U` | the redirect URI a browser page registers (§10.5; default: the page's own URL) |
@@ -5260,6 +5387,53 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
   [`ws_client.h`](../inc/cvc/net/ws_client.h)). A page may close a socket only with code 1000
   or 3000-4999, so there any other `CODE` is sent as 1000.
 
+### 10.8 End-to-end encrypted DMs: the `e2ee-*` verbs
+
+These verbs seal and open TX.WTF's end-to-end encrypted direct messages: X3DH, then a Double
+Ratchet, over libsodium, byte-compatible with TX.WTF's own web client.
+- **Who holds the keys.** The host does. A document names an account's handle and a conversation,
+  gives the verbs what the server sent, and sends what they give back with `http-request`. It never
+  holds a key: every dict below has public keys, ciphertext and plaintext only, and no error quotes
+  a key.
+- **When they are there.** A host has them with `--e2ee-store SPEC` (a name in the user's config
+  directory, or a path), on a build with libsodium.
+- **Where they are not.** Not in a browser yet, and never on a relay.
+- **More.** docs/E2EE.md has the design, the key storage, and the cross-check against e2ee.js.
+
+| verb | what |
+|---|---|
+| `(e2ee-status)` | `{ok persistent error}`: whether the verbs below are here (the store may not open: no libsodium, a browser, another process holds it), and whether the keys outlive this run |
+| `(e2ee-identity H)` | the handle's public keys `{identity_key_ed25519 identity_key_x25519 registration_id fingerprint one_time_prekeys publish}`, or `nil`; `publish` is the `POST /e2ee/keys` body |
+| `(e2ee-create H [N])` | make the handle's identity with N one-time prekeys (20); the same dict |
+| `(e2ee-prekeys H N)` | N more one-time prekeys: the `POST /e2ee/keys/one-time` body |
+| `(e2ee-forget H)` | drop its identity, sessions and cached plaintext |
+| `(e2ee-session? H CONV)` | whether a session for conversation CONV is held here |
+| `(e2ee-seal H CONV PEER TEXT [BUNDLE])` | `{ok need_bundle error body}`: `body` is the `POST /e2ee/dm/conversations/{CONV}/messages` body for user PEER. A first message needs BUNDLE (`GET /e2ee/keys/{username}`); without it `need_bundle` is `#t` and nothing changed |
+| `(e2ee-seal-group H CONV TEXT MEMBERS)` | one body, a key per member (`grp-dr-v1`); MEMBERS are user ids or `(dict "user_id" ID "bundle" B)`; `need_bundles` lists the ids that need one |
+| `(e2ee-sent H MSGID TEXT)` | keep our own send's text under the server's id (a sender cannot open what it sent) |
+| `(e2ee-open H CONV MESSAGE)` | `{ok status text attachments error}` for one listed message; status `ok`, `cached`, `own`, `locked`, `no-session` (its session is on another device) or `failed` |
+| `(e2ee-backup H PASSPHRASE)`, `-async` | the `PUT /e2ee/backup` body (Argon2id, about a second): `{ok error body}` |
+| `(e2ee-restore H BLOB PASSPHRASE)`, `-async` | take the identity from a `GET /e2ee/backup` reply: `{ok error identity}` |
+| `(e2ee-fingerprint KEY)` | a key people can compare: 40 hex digits in groups of 5 |
+
+Things to know:
+
+- **Order matters.** Open a conversation's messages in the order they were sent (ascending id).
+  A message opened once comes back `cached`; the ratchet never sees it twice.
+- **A tampered or forged message changes nothing.** It fails, and the session is as it was.
+- **A session is this device's.** Where another device holds a conversation's session, its
+  messages come back `no-session`. A document must not start a new one there: the other side
+  would ignore it, and its copy would break.
+- **The passphrase passes through the document.** It comes from a password field, so it is in
+  state for that one action. Clear the field in the same handler.
+- **The store is locked to one process.** A second host on the same `--e2ee-store` file gets no
+  verbs, and `(e2ee-status)` says it is in use.
+- **Tests.** `e2ee_test` replays vectors written by TX.WTF's own e2ee.js and compares every byte;
+  `ariadne_e2ee_test` runs the verbs in a document. `tools/e2ee/interop.sh` makes a live round
+  trip with e2ee.js.
+
+---
+
 ## 11. Caveats — what is not yet wired
 
 State plainly so authors are not misled. Each item cites the code; the roadmap items
@@ -5382,8 +5556,10 @@ Measured in CI (2026-10-20):
 - macOS CI renders with the Apple Software Renderer, which is deterministic but draws edges and
   shading a little differently. Against the llvmpipe goldens, windows, menus and grid had 3 to 6
   pixels beyond 40 (they pass), widgets had 40 and scene 467 (they fail).
-- So `widgets.macos.png` and `scene.macos.png` are macOS goldens, and macOS compares those two
-  against its own renderer.
+- With the window chrome's close and maximize glyphs (2026-11-14), menus had 7 and windows 12
+  (they pass) but grid 15 (it fails).
+- So `widgets.macos.png`, `scene.macos.png` and `grid.macos.png` are macOS goldens, and macOS
+  compares those three against its own renderer.
 
 To make or refresh a macOS golden, take `<name>.actual.png` from the failing macOS job's
 `ari-golden-macOS-<lane>` artifact, look at it, and commit it as `<name>.macos.png`.
