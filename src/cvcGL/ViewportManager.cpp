@@ -748,10 +748,14 @@ void ViewportManager::render() {
   // Mirrors have no scene attachment of their own: refresh their props from the
   // source renderer so a node added / re-meshed this frame shows up in the
   // mirror too, then draw it with the mirror's own camera. A FROZEN mirror
-  // (mirrorLive() == false) keeps its add-time snapshot and is skipped here.
-  for (auto &v : m_impl->viewports)
-    if (v->isMirror() && v->mirrorLive())
+  // (mirrorLive() == false) keeps its add-time snapshot and is skipped here, and
+  // so is a throttled one (Viewport::setRefreshHz) showing its last pixels this
+  // frame: it re-syncs on the frame it draws.
+  for (auto &v : m_impl->viewports) {
+    const bool draws = v->beginRender();
+    if ((draws || !v->visible()) && v->isMirror() && v->mirrorLive())
       syncMirrorProps(*v);
+  }
   m_impl->window->Render();
 }
 
