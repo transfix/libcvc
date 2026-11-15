@@ -27,6 +27,16 @@
 //                          "published" "subscribers" } for a live stream.
 //   (stream-close H)     Closes + drops the stream. Returns { "ok" #t/#f }.
 //
+// The same call registers the raster verbs (cvc/ariadne/stream/raster.h; docs/ARIADNE.md §5.4,
+// "Live textures"), owned by the calling document as its streams are:
+//   (raster-open OPTS)   OPTS = (dict "id" ... "w" ... "h" ... ["key_every" n] ["subscribers" n]
+//                        ["mirror" path]); the mirror resolves as a bind does. Returns
+//                        { "ok" "id" "token" "mirror" "w" "h" }, the one already open on that
+//                        token when there is one.
+//   (raster-fill R RECT RGBA), (raster-grid R RECT VALUES [OPTS]) paint (RECT = (list x y w h));
+//   (raster-publish R) sends what was painted (returns the frame's number, 0 for none);
+//   (raster-key R) sends a key frame; (raster-close R).
+//
 // OWNERSHIP (PR6-core model B): the opened stream is owned by the CALLING DOCUMENT's
 // se::document_scope (reached via ictx.document), keyed by its canonical token — NOT a
 // process-static table keyed by app*. It lives until (stream-close) or document teardown:

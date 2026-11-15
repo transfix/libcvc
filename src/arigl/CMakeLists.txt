@@ -432,6 +432,39 @@ if(EMSCRIPTEN)
                             "ariglx.js")
       endif()
       file(GENERATE OUTPUT "$<TARGET_FILE_DIR:arigl>/ariglx.html" CONTENT "${_ariglx_html}")
+
+      # ... with WebAssembly guests, as the native ariglx has them: a document's wasm: block runs
+      # on the page's own WebAssembly (src/ariadne_wasm/browser_runtime.cpp), its guest transformed
+      # ahead (cvc_ariadne_wasm_transform). The page fetches the guest with the document
+      # (doc_fetch.cpp follows a wasm: block's module). The shell links Asyncify, so a guest the
+      # page won't compile on its own thread (over Chrome's 8 MB) is compiled asynchronously.
+      include("${CMAKE_CURRENT_LIST_DIR}/../ariadne_wasm/ariadne_wasm.cmake")
+      cvc_ariadne_wasm_host(ariglx ASYNC_LOAD)
+      # The browser smoke's guest documents (web/test/wasm) and the test guest they run, transformed:
+      # the ariglx_wasm_guests target (built by name, not by the package) writes them to
+      # ariglx-wasm-guests beside ariglx.js, the directory arigl_web_smoke.mjs --wasmdocs serves.
+      cvc_find_wasm_opt()
+      if(CVC_WASM_OPT)
+        set(_ariglx_guests "${_ariglx_dir}/ariglx-wasm-guests")
+        cvc_ariadne_wasm_transform("${_ariglx_guests}/guest.wasm"
+                                   "${CVC_ARIADNE_WASM_TESTS}/guest.wat")
+        set(_ariglx_guest_files "${_ariglx_guests}/guest.wasm")
+        file(GLOB _ariglx_guest_docs CONFIGURE_DEPENDS
+             "${CMAKE_CURRENT_SOURCE_DIR}/web/test/wasm/*.ari")
+        foreach(_d ${_ariglx_guest_docs})
+          get_filename_component(_n "${_d}" NAME)
+          add_custom_command(OUTPUT "${_ariglx_guests}/${_n}"
+                             COMMAND "${CMAKE_COMMAND}" -E make_directory "${_ariglx_guests}"
+                             COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_d}"
+                                     "${_ariglx_guests}/${_n}"
+                             DEPENDS "${_d}" VERBATIM)
+          list(APPEND _ariglx_guest_files "${_ariglx_guests}/${_n}")
+        endforeach()
+        add_custom_target(ariglx_wasm_guests DEPENDS ${_ariglx_guest_files})
+      else()
+        message(STATUS "ariglx: no wasm-opt (CVC_WASM_OPT), so no ariglx_wasm_guests for the "
+                       "browser smoke")
+      endif()
     endif()
   endif()
 endif()
