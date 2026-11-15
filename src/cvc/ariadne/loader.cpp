@@ -255,6 +255,15 @@ const char *const kAriSchema = R"ARISCHEMA({
         "autoplay": {"$ref": "#/$defs/flag"},
         "loop": {"$ref": "#/$defs/flag"},
         "muted": {"$ref": "#/$defs/flag"},
+        "tab": {"type": "string"},
+        "field": {"type": "string"},
+        "current": {"type": "string"},
+        "add": {"$ref": "#/$defs/flag"},
+        "remove": {"$ref": "#/$defs/flag"},
+        "new_item": {"type": "object"},
+        "on_add": {"type": "string"},
+        "on_remove": {"type": "string"},
+        "rows": {"type": "number"},
         "items": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
         "children": {"type": "array", "items": {"$ref": "#/$defs/widget"}}
       },
@@ -366,7 +375,8 @@ constexpr const char *kBuiltinWidgetTypes[] = {
     "plot",         "chart",        "overlay", "panel",     "text",      "checkbox",
     "slider_int",   "slider_float", "combo",   "radio",     "radio_row", "input_text",
     "input_int",    "tf_editor",    "color",   "image",     "button",    "separator",
-    "windows_menu", "spinner",      "video",   "audio",     "text_view", "message_input"};
+    "windows_menu", "spinner",      "video",   "audio",     "text_view", "message_input",
+    "tabs",         "list"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {
@@ -1006,6 +1016,76 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
                " options: — value mapping ignored");
     else
       w.values = std::move(values);
+    return w;
+  }
+  if (type == "tabs") { // a tab bar bound to a key: over its children, or over options: alone
+    Widget w;
+    w.kind = Kind::Tabs;
+    w.label = label;
+    w.bind = str(n, "bind");
+    w.on = action(n); // optional: fired after the user picks another tab
+    w.sdef = str(n, "default", str(n, "def"));
+    const YAML::Node kids = n["children"];
+    if (kids && kids.IsSequence() && kids.size() > 0) {
+      // One tab a child, titled by its `tab:`, else its label, else its place.
+      for (const YAML::Node &k : kids) {
+        Widget c = parse_widget(ctx, k);
+        // A group keeps no label of its own: read the child's label: (or title:) from the node.
+        std::string title =
+            k.IsMap() ? str(k, "tab", str(k, "label", str(k, "title"))) : std::string();
+        if (title.empty())
+          title = c.label;
+        if (title.empty())
+          title = "Tab " + std::to_string(w.children.size() + 1);
+        w.tab_titles.push_back(title);
+        w.children.push_back(std::move(c));
+      }
+    } else {
+      const YAML::Node o = n["options"];
+      if (o && o.IsSequence()) {
+        for (const YAML::Node &e : o)
+          if (e.IsScalar())
+            w.options.push_back(e.Scalar());
+      } else if (o && o.IsScalar()) {
+        w.options_expr = o.Scalar();
+      }
+      if (const YAML::Node v = n["values"]; v && v.IsSequence() && w.options_expr.empty()) {
+        for (const YAML::Node &e : v)
+          if (e.IsScalar())
+            w.values.push_back(e.Scalar());
+        if (w.values.size() != w.options.size()) {
+          ctx.warn("ari: tabs '" + label + "' has " + std::to_string(w.values.size()) +
+                   " values: for " + std::to_string(w.options.size()) +
+                   " options: — value mapping ignored");
+          w.values.clear();
+        }
+      }
+      if (w.options.empty() && w.options_expr.empty())
+        ctx.warn("ari: tabs '" + label + "' has neither children: nor options:");
+    }
+    return w;
+  }
+  if (type == "list") { // rows of a state array, one selected, with Add / Remove
+    Widget w;
+    w.kind = Kind::List;
+    w.label = label;
+    w.bind = str(n, "bind");
+    check_bind(ctx, "list", label, w.bind);
+    w.list_field = str(n, "field", "name");
+    w.list_current = str(n, "current");
+    w.list_add = flag(n, "add", false);
+    w.list_remove = flag(n, "remove", false);
+    w.list_rows = std::max(1, static_cast<int>(num(n, "rows", 6.0)));
+    if (const YAML::Node ni = n["new_item"]; ni && ni.IsMap()) {
+      for (const auto &kv : ni)
+        if (kv.first.IsScalar() && kv.second.IsScalar())
+          w.list_new.emplace_back(kv.first.Scalar(), kv.second.Scalar());
+    } else if (ni) {
+      ctx.warn("ari: list '" + label + "' has a new_item: that is not a map of fields — ignored");
+    }
+    w.on = action(n); // optional: fired after the user selects a row
+    w.on_add = str(n, "on_add");
+    w.on_remove = str(n, "on_remove");
     return w;
   }
   if (type == "input_text") {

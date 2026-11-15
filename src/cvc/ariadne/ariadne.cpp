@@ -207,6 +207,12 @@ Widget substitute_index(const Widget &w, int index) {
   out.hint = replace_all(out.hint, kTok, idx);
   out.send = replace_all(out.send, kTok, idx);
   out.on_change = replace_all(out.on_change, kTok, idx);
+  // A list's selection key and edit handlers, and a tab bar's titles.
+  out.list_current = replace_all(out.list_current, kTok, idx);
+  out.on_add = replace_all(out.on_add, kTok, idx);
+  out.on_remove = replace_all(out.on_remove, kTok, idx);
+  for (std::string &t : out.tab_titles)
+    t = replace_all(t, kTok, idx);
   out.visible_when = replace_all(out.visible_when, kTok, idx);
   out.enabled_when = replace_all(out.enabled_when, kTok, idx);
   out.disabled_when = replace_all(out.disabled_when, kTok, idx);
@@ -2601,6 +2607,120 @@ void Runtime::Impl::emit_node(const Widget &w) {
       write<std::string>(app, path, store[e.index]); // store the mapped value (or the text)
       if (!w.on.empty())
         enqueue(w.on);
+    }
+    break;
+  }
+
+  case Kind::Tabs: {
+    // The tabs: the children's titles, or (a bar alone) the options. `bind` holds the selected
+    // tab's title (or, with values:, its value); without one the selection is kept per widget.
+    std::vector<std::string> computed;
+    if (w.children.empty() && !w.options_expr.empty())
+      computed = eval_options(w.options_expr);
+    const std::vector<std::string> &titles = !w.children.empty()      ? w.tab_titles
+                                             : w.options_expr.empty() ? w.options
+                                                                      : computed;
+    if (titles.empty())
+      break;
+    const bool mapped = w.children.empty() && !w.values.empty() && w.options_expr.empty() &&
+                        w.values.size() == titles.size();
+    const std::vector<std::string> &store = mapped ? w.values : titles;
+    const std::string id = w.id.empty() ? std::string("tabs:") + w.label : w.id;
+    const std::string path = resolve(!w.bind.empty() ? w.bind : "tree." + id + ".tab");
+    const std::string fallback = w.sdef.empty() ? store.front() : w.sdef;
+    const std::string cur = read_or_seed<std::string>(app, path, fallback);
+    int idx = 0;
+    for (std::size_t i = 0; i < store.size(); ++i)
+      if (store[i] == cur) {
+        idx = static_cast<int>(i);
+        break;
+      }
+    b.push_id(id.c_str());
+    const IndexEdit e = b.tab_bar(label, id.c_str(), idx, titles);
+    if (e.changed && e.index >= 0 && e.index < static_cast<int>(store.size()) && e.index != idx) {
+      write<std::string>(app, path, store[e.index]);
+      idx = e.index;
+      if (!w.on.empty())
+        enqueue(w.on);
+    }
+    if (!w.children.empty())
+      emit(w.children[static_cast<std::size_t>(idx)]); // only the selected tab's subtree
+    b.pop_id();
+    break;
+  }
+
+  case Kind::List: {
+    // Rows of a state array: the count at bind, row i at bind.i, each showing its list_field.
+    const std::string path = resolve(w.bind);
+    const std::string cur_path =
+        w.list_current.empty() ? path + ".current" : resolve(w.list_current);
+    constexpr int kMaxRows = 100000;
+    int count = 0;
+    try {
+      count = std::clamp(std::stoi(read_string(app, path)), 0, kMaxRows);
+    } catch (...) {
+      count = 0;
+    }
+    std::vector<std::string> items;
+    items.reserve(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i)
+      items.push_back(read_string(app, path + "." + std::to_string(i) + "." + w.list_field));
+    int current = -1;
+    try {
+      current = std::stoi(read_string(app, cur_path));
+    } catch (...) {
+      current = -1;
+    }
+    if (current >= count)
+      current = count - 1;
+    if (current < -1)
+      current = -1;
+    ListOptions o;
+    o.add = w.list_add;
+    o.remove = w.list_remove;
+    o.rows = w.list_rows;
+    const std::string id = w.id.empty() ? std::string("list:") + path : w.id;
+    b.push_id(id.c_str());
+    const ListEdit e = b.list(label, id.c_str(), current, items, o);
+    b.pop_id();
+    cvc::state &root = cvc::state::instance(app);
+    if (e.selected && e.index >= 0 && e.index < count && e.index != current) {
+      write<std::string>(app, cur_path, std::to_string(e.index));
+      current = e.index;
+      if (!w.on.empty())
+        enqueue(w.on);
+    }
+    if (e.add && w.list_add && count < kMaxRows) {
+      // A new last row: the new_item fields ("{n}": its number from 1), then the count, then the
+      // selection on it, so a watcher of the count sees the row's fields already there.
+      const std::string row = path + "." + std::to_string(count);
+      for (const auto &f : w.list_new) {
+        std::string v = f.second;
+        for (std::size_t at = v.find("{n}"); at != std::string::npos; at = v.find("{n}", at))
+          v.replace(at, 3, std::to_string(count + 1));
+        write<std::string>(app, row + "." + f.first, v);
+      }
+      if (w.list_new.empty())
+        write<std::string>(app, row + "." + w.list_field, std::to_string(count + 1));
+      write<std::string>(app, path, std::to_string(count + 1));
+      write<std::string>(app, cur_path, std::to_string(count));
+      if (!w.on_add.empty())
+        enqueue(w.on_add);
+    } else if (e.remove && w.list_remove && current >= 0 && current < count) {
+      // The selected row goes: each row after it moves up one (its subtree copied over the one
+      // before), the last row's subtree is deleted, and the count drops.
+      for (int i = current; i + 1 < count; ++i) {
+        cvc::state &dst = root(path + "." + std::to_string(i));
+        cvc::state &src = root(path + "." + std::to_string(i + 1));
+        const boost::property_tree::ptree values = src.ptree();
+        dst.reset(false); // its children destroyed: the next row's fields replace them
+        dst.ptree(values);
+      }
+      root(path).removeChild(std::to_string(count - 1));
+      write<std::string>(app, path, std::to_string(count - 1));
+      write<std::string>(app, cur_path, std::to_string(std::min(current, count - 2)));
+      if (!w.on_remove.empty())
+        enqueue(w.on_remove);
     }
     break;
   }
@@ -5080,6 +5200,28 @@ std::vector<std::string> Runtime::take_reactive_warnings() {
 // The same per-document scope submit_action/ensure_resident install on each lane as
 // ictx.document — exposed so a scene-bound host can publish a routing handle for its verbs.
 cvc::state_exec::document_scope &Runtime::document_scope() { return m_->doc_scope_; }
+
+// A backend with no list draws the rows as stacked radio buttons (the first shown picked while
+// none is) and its buttons under them.
+ListEdit Backend::list(const char *label, const char *id, int current,
+                       const std::vector<std::string> &items, const ListOptions &o) {
+  (void)id;
+  ListEdit e;
+  if (!items.empty()) {
+    const IndexEdit r = radio(label, current < 0 ? 0 : current, items, false);
+    if (r.changed && r.index >= 0) {
+      e.selected = true;
+      e.index = r.index;
+    }
+  } else if (label && *label) {
+    text_line(label);
+  }
+  if (o.add && button("Add"))
+    e.add = true;
+  if (o.remove && current >= 0 && button("Remove"))
+    e.remove = true;
+  return e;
+}
 
 } // namespace ariadne
 } // namespace cvc

@@ -1450,6 +1450,10 @@ Most of the GL-viewer work is already on master. What exists, and what is new:
    colour picker for a class colour, radio buttons for the tool, and a tab bar or segmented
    buttons bound to a key for the view switch. Anything missing is a small ImGui widget in
    `ImGuiBackend.cpp` with an FTXUI placeholder.
+   - *Checked in P7:* `color:` (an `r,g,b` key) and `radio:` / `radio_row:` were there. *Built in
+     P7:* `tabs:` (a tab container over its children, or a bar over `options:`, bound to a key)
+     and `list:` (rows of a state array with a selection, Add and Remove), each an ImGui widget
+     with a radio-and-buttons fallback in the other backends (ARIADNE.md §5.3).
 
 Items 2 and 3 are the critical path for VolumeGridRover. Item 1 is the bulk of the rendering
 work. Items 4 and 5 are small. All of them run in arigl-web too.

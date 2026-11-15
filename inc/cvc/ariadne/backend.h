@@ -58,6 +58,18 @@ struct IndexEdit {
   bool committed = false;
   int index = -1;
 };
+// A list (Kind::List): what it shows besides its rows, and what the user did with it this frame.
+struct ListOptions {
+  bool add = false;    // an Add button
+  bool remove = false; // a Remove button (for the selected row)
+  int rows = 6;        // rows that show at once, where the backend scrolls
+};
+struct ListEdit {
+  bool selected = false; // a row was picked: `index`
+  int index = -1;
+  bool add = false;    // Add was pressed
+  bool remove = false; // Remove was pressed
+};
 // A single-line text edit (Kind::InputText; Kind::InputInt reuses it, the core coercing to/from an
 // int). `value` is the field's current text; `changed` = it differs from the value in state this
 // frame; `committed` = the user finished the edit (pressed Enter or the field lost focus) — the
@@ -636,6 +648,19 @@ public:
                           const std::vector<std::string> &options) = 0;
   // Kind::Radio: the same choice with every option shown, side by side when `row`. A backend
   // with no radio buttons draws it as a combo.
+  // A tab bar (Kind::Tabs): `labels` side by side, `current` the selected one; returns the pick
+  // when the user selects another. `id` is the bar's identity. The default draws a row of radio
+  // buttons (a backend with no tabs).
+  virtual IndexEdit tab_bar(const char *label, const char *id, int current,
+                            const std::vector<std::string> &labels) {
+    (void)id;
+    return radio(label, current, labels, true);
+  }
+  // A list (Kind::List): `items` one row each, `current` the selected one (-1: none). Returns a
+  // selection, and whether the Add or Remove button was pressed. The default draws the rows as
+  // stacked radio buttons and the two buttons under them.
+  virtual ListEdit list(const char *label, const char *id, int current,
+                        const std::vector<std::string> &items, const ListOptions &o);
   virtual IndexEdit radio(const char *label, int current_index,
                           const std::vector<std::string> &options, bool row) {
     (void)row;
