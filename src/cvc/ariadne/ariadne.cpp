@@ -23,8 +23,8 @@
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/bind.h>
-#include <cvc/ariadne/files.h>  // §10.8 (file-pick): the files the app's programs hold
-#include <cvc/ariadne/icons.h>  // §5.22 a tray icon's named glyphs
+#include <cvc/ariadne/files.h> // §10.8 (file-pick): the files the app's programs hold
+#include <cvc/ariadne/icons.h> // §5.22 a tray icon's named glyphs
 #include <cvc/ariadne/input.h>  // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
 #include <cvc/ariadne/loader.h> // is_builtin_widget_type (has?)
 #include <cvc/ariadne/media.h>  // §5.11 pictures by URI
@@ -39,7 +39,7 @@
 #include <cvc/state/state_exec/async_host.h> // §10.8 (file-pick) parks its program on the picker
 #include <cvc/state/state_exec/async_scheduler.h> // §4.7 app-wide action scheduler (exec_scheduler)
 #include <cvc/state/state_exec/builtins.h>
-#include <cvc/state/state_exec/evaluator.h>  // evaluation_timeout / evaluation_interrupted
+#include <cvc/state/state_exec/evaluator.h> // evaluation_timeout / evaluation_interrupted
 #include <cvc/state/state_exec/exceptions.h> // dsl_error (has?)
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/parser.h> // parse, parse_error

@@ -424,7 +424,8 @@ TEST(AriadneLoader, MenuCollapseSetting) {
   EXPECT_EQ(collapse_of("menu_collapse: always\nmenubar:\n  - menu: File\n"),
             std::make_pair(std::string("always"), 0));
   EXPECT_EQ(collapse_of("menu_collapse: sometimes\nmenubar:\n  - menu: File\n"),
-            std::make_pair(std::string("auto"), 1));
+            std::make_pair(std::string("auto"), have_jsonschema() ? 2 : 1))
+      << "the loader's warning, and the schema's where it is built";
   EXPECT_EQ(
       collapse_of("root:\n  - menubar:\n    collapse: never\n    items:\n      - menu: File\n"),
       std::make_pair(std::string("never"), 0));

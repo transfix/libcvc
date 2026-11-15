@@ -11,8 +11,8 @@
 #include <cvc/ariadne/loader.h>   // load_file / LoadResult / ChannelDecl / sources_changed
 #include <cvc/ariadne/oidc_host.h>
 #include <cvc/ariadne/requires.h> // requires:, free_heads (what a document needs from its host)
-#include <cvc/ariadne/script_engine.h>  // a scripting host's engines: their blocks and lanes
-#include <cvc/ariadne/uri.h>            // register_cvc_uri_handler
+#include <cvc/ariadne/script_engine.h> // a scripting host's engines: their blocks and lanes
+#include <cvc/ariadne/uri.h>           // register_cvc_uri_handler
 #include <cvc/ariadne/world_rules.h>    // the world: block's vehicles
 #include <cvc/ariadne/world_vehicles.h> // resolve_vehicle_looks
 #include <cvc/core/app.h>

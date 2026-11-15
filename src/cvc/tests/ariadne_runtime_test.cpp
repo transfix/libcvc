@@ -3,8 +3,8 @@
 // the deferred action drain, cvc::state read/seed/commit, bind-path resolution, and
 // the §3.0.3b grid dispatch.
 
-#include "local_http_server.h"  // localhost origins for the net host tests
-#include "local_ws_server.h"    // a localhost WebSocket server for the ws-* verb tests
+#include "local_http_server.h" // localhost origins for the net host tests
+#include "local_ws_server.h"   // a localhost WebSocket server for the ws-* verb tests
 #include "stub_oidc_provider.h" // a stub OpenID Provider for the sign-in tests
 
 #include <algorithm>
@@ -28,8 +28,8 @@
 #include <cvc/ariadne/uri.h>               // §13.8 (fetch uri): register a custom scheme handler
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
-#include <cvc/core/async_task.h>  // launch_pool_task generalization test
-#include <cvc/core/notify.h>      // §5.24 the notification feed and the tray's bell
+#include <cvc/core/async_task.h>   // launch_pool_task generalization test
+#include <cvc/core/notify.h>       // §5.24 the notification feed and the tray's bell
 #include <cvc/core/server_clock.h> // §5.22 the relay's time in the clock's tooltip
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
 #include <cvc/net/browser.h>      // OIDC: a fake browser, a browser page
