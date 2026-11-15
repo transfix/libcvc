@@ -14,8 +14,9 @@
 */
 
 // The document a relay runs (cvc/ariadne/server_document.h, arisrv --doc): its server: block, the
-// namespaces it publishes through holes in its chroot, the room it reads, and what a relay's shard
-// scoped by it sends. room_relay_integration_test.cpp has the same over a relay's transports.
+// namespaces it publishes through holes in its chroot, the room it reads, what a relay's shard
+// scoped by it sends, and the programs its clients send it to run (client_programs:).
+// room_relay_integration_test.cpp has the same over a relay's transports.
 
 #include <cstdint>
 #include <cstdlib>
@@ -24,9 +25,12 @@
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_exec/types.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <initializer_list>
+#include <memory>
 #include <random>
 #include <set>
 #include <stdexcept>
@@ -379,4 +383,225 @@ init: |
     EXPECT_NE(what.find("relay"), std::string::npos) << what;
     EXPECT_NE(what.find("arisrv --doc"), std::string::npos) << what;
   }
+}
+
+// client_programs: on or off, or a map of caps, which turns them on.
+TEST(ServerBlockTest, ClientProgramsTakeOnOffOrCaps) {
+  ari::ServerBlock b;
+  EXPECT_EQ(ari::parse_server_block(map({{"publish", seq({"board"})}}), b), "");
+  EXPECT_FALSE(b.client_programs.on) << "off unless asked for";
+  EXPECT_EQ(ari::parse_server_block(map({{"client_programs", scalar("on")}}), b), "");
+  EXPECT_TRUE(b.client_programs.on);
+  EXPECT_EQ(b.client_programs.max_steps, 0u) << "the action lane's caps";
+  EXPECT_EQ(ari::parse_server_block(map({{"client_programs", scalar("off")}}), b), "");
+  EXPECT_FALSE(b.client_programs.on);
+  std::vector<std::string> warnings;
+  EXPECT_EQ(ari::parse_server_block(map({{"client_programs", map({{"steps", scalar("200")},
+                                                                  {"time", scalar("0.02")},
+                                                                  {"memory_mb", scalar("1")},
+                                                                  {"lanes", scalar("2")}})}}),
+                                    b, &warnings),
+            "");
+  EXPECT_TRUE(b.client_programs.on);
+  EXPECT_EQ(b.client_programs.max_steps, 200u);
+  EXPECT_DOUBLE_EQ(b.client_programs.max_time, 0.02);
+  EXPECT_EQ(b.client_programs.max_memory, 1024u * 1024u);
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_NE(warnings[0].find("lanes"), std::string::npos) << warnings[0];
+  EXPECT_NE(ari::parse_server_block(map({{"client_programs", scalar("maybe")}}), b), "");
+  EXPECT_NE(ari::parse_server_block(map({{"client_programs", map({{"steps", scalar("-1")}})}}), b),
+            "");
+  EXPECT_NE(ari::parse_server_block(map({{"client_programs", seq({"on"})}}), b), "");
+}
+
+namespace {
+// A server document that runs its clients' programs, under a step cap of its own.
+const char *const kClientProgramsDoc = R"(meta: { name: client programs, min_libcvc: 3.7.5 }
+server:
+  client_programs: { steps: 2000 }
+init: (state-set "status" "up")
+)";
+
+struct ClientRun {
+  bool done = false;
+  ari::ServerDocument::ClientOutcome outcome;
+};
+
+// Start `source` as `pid`'s program; its outcome lands in the returned run.
+std::shared_ptr<ClientRun> run_client(ari::ServerDocument &doc, const std::string &pid,
+                                      const std::string &source,
+                                      cvc::state_exec::value_t args = cvc::state_exec::value_t()) {
+  auto run = std::make_shared<ClientRun>();
+  doc.run_client_program(pid, source, std::move(args),
+                         [run](const ari::ServerDocument::ClientOutcome &o) {
+                           run->done = true;
+                           run->outcome = o;
+                         });
+  return run;
+}
+
+// Step the document until every run has its outcome (or a few steps have gone by).
+void step_until_done(ari::ServerDocument &doc,
+                     std::initializer_list<std::shared_ptr<ClientRun>> runs) {
+  for (int i = 0; i < 20; ++i) {
+    bool all = true;
+    for (const auto &r : runs)
+      all = all && r->done;
+    if (all)
+      return;
+    doc.step(240 + i, (240 + i) / 120.0);
+  }
+}
+
+std::string text(const cvc::state_exec::value_t &v) { return cvc::state_exec::to_string(v); }
+} // namespace
+
+// A client's program runs as the document's action, chrooted to the client's own participant: it
+// reads and writes there, gets its arguments as `args`, and returns its last form's value.
+TEST(ServerDocumentTest, RunsAClientProgramInItsOwnParticipant) {
+  if (!ari::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  namespace se = cvc::state_exec;
+  TempDir dir;
+  const std::string path = dir.write("server.ari", kClientProgramsDoc);
+  cvc::app app;
+  cvc::state::instance(app)("conf.rooms.standup.topic").value(std::string("standup at ten"));
+  cvc::state::instance(app)("conf.rooms.standup.participants.p2.score").value(std::string("7"));
+  ari::ServerDocument doc(app, kRoom);
+  ASSERT_EQ(doc.read(path), "");
+  EXPECT_TRUE(doc.block().client_programs.on);
+  doc.load(path);
+
+  const auto r =
+      run_client(doc, "p1",
+                 "(state-set \"score\" (+ (car args) 1))\n"
+                 "(state-set \"seen\" (if (is-null (state-get \"topic\")) \"nothing\" "
+                 "\"the topic\"))  ; not its to see\n"
+                 "(list (+ (car args) 1) (nth args 1))",
+                 se::make_list({se::value_t(std::int64_t(41)), se::value_t(std::string("hi"))}));
+  step_until_done(doc, {r});
+  ASSERT_TRUE(r->done);
+  ASSERT_TRUE(r->outcome.ok) << r->outcome.code << ": " << r->outcome.message;
+  EXPECT_EQ(text(r->outcome.value),
+            text(se::make_list({se::value_t(std::int64_t(42)), se::value_t(std::string("hi"))})));
+  EXPECT_EQ(value_at(app, "conf.rooms.standup.participants.p1.score"), "42")
+      << "written in the client's own participant";
+  EXPECT_EQ(value_at(app, "conf.rooms.standup.participants.p1.seen"), "nothing")
+      << "the room's topic is outside its chroot";
+  EXPECT_EQ(value_at(app, "conf.rooms.standup.participants.p2.score"), "7");
+  EXPECT_EQ(value_at(app, "score"), "<absent>");
+  EXPECT_EQ(value_at(app, "ui.docs.arisrv.score"), "<absent>");
+  EXPECT_EQ(value_at(app, "ui.docs.arisrv.status"), "up");
+}
+
+// Its writes are the ones the client could make itself: never a key the relay owns.
+TEST(ServerDocumentTest, AClientProgramWritesOnlyWhatItsClientMay) {
+  if (!ari::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  TempDir dir;
+  const std::string path = dir.write("server.ari", kClientProgramsDoc);
+  cvc::app app;
+  cvc::state::instance(app)("conf.rooms.standup.participants.p1.pose").value(std::string("relay"));
+  ari::ServerDocument doc(app, kRoom);
+  ASSERT_EQ(doc.read(path), "");
+  doc.load(path);
+
+  const auto pose = run_client(doc, "p1", "(state-set \"pose\" \"teleported\")");
+  const auto padded = run_client(doc, "p2", "(state-set \"device \" \"x\")");
+  step_until_done(doc, {pose, padded});
+  ASSERT_TRUE(pose->done && padded->done);
+  EXPECT_FALSE(pose->outcome.ok);
+  EXPECT_EQ(pose->outcome.code, "failed");
+  EXPECT_NE(pose->outcome.message.find("PermissionError"), std::string::npos)
+      << pose->outcome.message;
+  EXPECT_EQ(value_at(app, "conf.rooms.standup.participants.p1.pose"), "relay");
+  EXPECT_FALSE(padded->outcome.ok) << "a path the tree would trim onto the relay's key";
+  EXPECT_EQ(value_at(app, "conf.rooms.standup.participants.p2.device"), "<absent>");
+}
+
+// Its environment is default-deny: nothing that spawns, messages, watches or stops the relay.
+TEST(ServerDocumentTest, AClientProgramHasNoWayOut) {
+  if (!ari::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  TempDir dir;
+  const std::string path = dir.write("server.ari", kClientProgramsDoc);
+  cvc::app app;
+  ari::ServerDocument doc(app, kRoom);
+  ASSERT_EQ(doc.read(path), "");
+  doc.load(path);
+  const char *const sources[] = {"(spawn \"(state-set \\\"/escaped\\\" 1)\")",
+                                 "(quit 3)",
+                                 "(msg-send \"/ui\" \"hi\")",
+                                 "(state-watch \"score\" (lambda (p) p))",
+                                 "(state-delete \"score\")",
+                                 "(sleep 1)"};
+  int i = 0;
+  for (const char *src : sources) {
+    const auto r = run_client(doc, "p" + std::to_string(i++), src);
+    step_until_done(doc, {r});
+    ASSERT_TRUE(r->done) << src;
+    EXPECT_FALSE(r->outcome.ok) << src << " ran";
+    EXPECT_EQ(r->outcome.code, "failed") << src;
+  }
+  EXPECT_FALSE(doc.should_close()) << "(quit) is the document's, not a client's";
+  EXPECT_EQ(value_at(app, "escaped"), "<absent>");
+}
+
+// The refusals: a document that did not opt in, one that has not loaded, a program that does not
+// parse, a second program while the client's first runs, and one stopped by its cap.
+TEST(ServerDocumentTest, AClientProgramsRefusalsAndCaps) {
+  if (!ari::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  TempDir dir;
+  const std::string off = dir.write("off.ari", R"(meta: { name: no clients, min_libcvc: 3.7.5 }
+server:
+  publish: [board]
+)");
+  {
+    cvc::app app;
+    ari::ServerDocument doc(app, kRoom);
+    ASSERT_EQ(doc.read(off), "");
+    doc.load(off);
+    const auto r = run_client(doc, "p1", "1");
+    ASSERT_TRUE(r->done) << "refused at once";
+    EXPECT_EQ(r->outcome.code, "unavailable");
+  }
+
+  const std::string path = dir.write("server.ari", kClientProgramsDoc);
+  cvc::app app;
+  ari::ServerDocument doc(app, kRoom);
+  ASSERT_EQ(doc.read(path), "");
+  const auto early = run_client(doc, "p1", "1");
+  ASSERT_TRUE(early->done);
+  EXPECT_EQ(early->outcome.code, "unavailable") << "before the document loads";
+  doc.load(path);
+
+  const auto bad = run_client(doc, "p1", "(+ 1");
+  ASSERT_TRUE(bad->done);
+  EXPECT_EQ(bad->outcome.code, "invalid");
+  const auto closer = run_client(doc, "p1", "1)) (quit 4) ((");
+  ASSERT_TRUE(closer->done) << "a program that closes the wrapper does not parse on its own";
+  EXPECT_EQ(closer->outcome.code, "invalid");
+  const auto huge =
+      run_client(doc, "p1", std::string(ari::ServerDocument::kClientProgramMax + 1, ' '));
+  ASSERT_TRUE(huge->done);
+  EXPECT_EQ(huge->outcome.code, "invalid");
+
+  const auto first = run_client(doc, "p1", "(state-set \"n\" 1) 1");
+  const auto second = run_client(doc, "p1", "2");
+  const auto other = run_client(doc, "p2", "3");
+  ASSERT_TRUE(second->done) << "refused at once";
+  EXPECT_EQ(second->outcome.code, "rate_limited");
+  step_until_done(doc, {first, other});
+  EXPECT_TRUE(first->outcome.ok) << first->outcome.message;
+  EXPECT_TRUE(other->outcome.ok) << other->outcome.message;
+  const auto after = run_client(doc, "p1", "4");
+  step_until_done(doc, {after});
+  EXPECT_TRUE(after->outcome.ok) << "its first has ended";
+
+  const auto spin = run_client(doc, "p1", "(while (= 1 1) (state-set \"n\" 2))");
+  step_until_done(doc, {spin});
+  ASSERT_TRUE(spin->done);
+  EXPECT_EQ(spin->outcome.code, "resource_exhausted") << spin->outcome.message;
+  EXPECT_FALSE(doc.should_close());
 }

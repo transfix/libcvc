@@ -20,6 +20,9 @@
 //            that would be). Its payload, a CBOR map: {"id", "fn", "args": [...], "kwargs": {...},
 //            "key", "timeout"}. The relay's gate has already bound the connection to <pid>, so the
 //            caller is who the path says.
+//            A client program (S3, (room-run ...)) has "program", its DSL source, in place of
+//            "fn": the relay runs it as the caller's own (ServerDocument::run_client_program),
+//            chrooted to its participant subtree, in a stock arisrv as in arisrvx.
 //   REPLY    Messages back on the same path, to the connection holding <pid> only
 //            (state_transport::send_message_to_holder), never to another that claims the pid:
 //              {"id", "type": "progress", "fraction", "message"}
@@ -29,7 +32,10 @@
 //            gate), deadline_exceeded, too_large (a result past the relay's cap), internal (the
 //            function raised; its traceback stays on the relay), unavailable (the relay runs no
 //            functions, or its program has stopped), invalid (a malformed call), and whatever a
-//            function raises with CallError.
+//            function raises with CallError. A client program's own: rate_limited (the caller's
+//            previous one still runs), failed (it raised), resource_exhausted (a cap stopped it),
+//            and unavailable (the relay's document runs no client programs) and invalid (it does
+//            not parse).
 //
 // Values are DSL values on both sides (cvc::state_exec::value_t), and the wire between them is
 // typed CBOR (cvc/state/state_exec/value_cbor.h, with symbols as themselves) in the message's
@@ -46,6 +52,11 @@
 //   (room-call-opts (dict "key" K "timeout" S) "fn" arg ...)
 //                                       the same, with the call's idempotency key and its timeout
 //                                       (seconds; the relay's default otherwise).
+//   (room-run "source" arg ...)         runs the DSL program `source` on the relay as this
+//                                       client's own, with `args` there the list of the arguments,
+//                                       and returns the value of its last form. -async and
+//                                       (room-run-opts (dict "timeout" S) "source" arg ...) as for
+//                                       room-call.
 //   An error raises with its code and detail as fields (forbidden as a PermissionError,
 //   deadline_exceeded as a TimeoutError, every other code as a RuntimeError), which a try
 //   catches. Each call's progress lands in the document's tree at calls.<fn>.progress and
@@ -87,12 +98,14 @@ constexpr const char *kCallReplyType = "application/x-cvc-room-call-reply+cbor";
 struct room_call_request {
   std::string pid;                 // the caller (the connection's bound pid)
   std::string id;                  // the caller's call id
-  std::string fn;                  // the function asked for
+  std::string fn;                  // the function asked for; "" for a client program
+  std::string program;             // a client program's DSL source; "" for a function call
   cvc::state_exec::value_t args;   // a list: the positional arguments
   cvc::state_exec::value_t kwargs; // a dict: the keyword arguments
   std::string key;                 // the idempotency key: the caller's, or the call id
   double timeout = 0;              // seconds the caller allows; 0 = the relay's default
-  // The call as one dict (pid, id, fn, args, kwargs, key, timeout), for a relay that hands it on.
+  // The call as one dict (pid, id, fn, args, kwargs, key, timeout, and program when it has one),
+  // for a relay that hands it on.
   cvc::state_exec::value_t to_value() const;
 };
 
@@ -174,6 +187,10 @@ public:
   std::string call(const std::string &fn, const cvc::state_exec::value_t &args,
                    const cvc::state_exec::value_t &kwargs, const std::string &key, double timeout,
                    done_fn done, progress_fn progress = nullptr);
+  // Run `program` (DSL source) on the relay as this client's own program, with `args` (a list)
+  // bound to `args` there; returns its id. As call() otherwise.
+  std::string run(const std::string &program, const cvc::state_exec::value_t &args, double timeout,
+                  done_fn done);
   // Stop waiting for `id` (its caller went): a reply that comes later is dropped.
   void forget(const std::string &id);
   // Every call still waiting ends `unavailable` with `why` (the host lost its relay).
@@ -185,13 +202,16 @@ public:
   static std::shared_ptr<room_call_client> for_app(cvc::app &app);
 
 private:
+  // Keep `done` and `progress` under `id`, and send `wire` (the request's CBOR); returns `id`.
+  std::string send_call(const std::string &id, std::string wire, done_fn done,
+                        progress_fn progress);
   struct impl;
   std::shared_ptr<impl> _impl;
 };
 
-// (room-call ...), (room-call-async ...), (room-call-opts ...) for every document of `app`, against
-// the client room_call_client::for_app(app) finds at each call. Idempotent;
-// register_room_intrinsics calls it.
+// (room-call ...), (room-call-async ...), (room-call-opts ...) and the room-run forms for every
+// document of `app`, against the client room_call_client::for_app(app) finds at each call.
+// Idempotent; register_room_intrinsics calls it.
 void register_room_call_intrinsics(cvc::app &app);
 
 } // namespace conference

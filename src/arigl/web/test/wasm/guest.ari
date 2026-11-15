@@ -1,0 +1,48 @@
+# ariglx-web's browser smoke (arigl_web_smoke.mjs --wasmdocs): a WebAssembly guest in the page. The
+# guest is the hosts' test guest (src/ariadne_wasm/tests/guest.wat), transformed for the browser
+# (metered, then Asyncify) by the ariglx_wasm_guests target; the page fetches it with the document.
+# Its ari_init runs at load, and init: calls it. The first tick calls the exports that pause it: nap
+# yields the frame twice, so the guest unwinds and later frames rewind it, and spin is a loop of 24
+# million gas, 376 slices over several frames. A trap is a WasmError the document catches. The tick
+# then reports through the python: block's report, to stderr, which the page keeps
+# (window.ariadneWeb.log): the DSL's print goes to stdout.
+
+meta:
+  name: a wasm guest in the page
+  min_libcvc: 3.7.13
+
+requires: [wasm, python]
+
+python:
+  source: |
+    import sys
+
+    @export
+    def report(line):
+        print(line, file=sys.stderr)
+        return line
+
+wasm:
+  module: guest.wasm
+  export: [echo, get-x, nap, boom, spin]
+
+init: |
+  (state-set "x" "early")
+  (state-set "wasm.from_init" (get-x))
+  (state-set "wasm.reported" "")
+
+on_tick: |
+  (if (= (state-get "wasm.reported") "")
+      (begin
+        (state-set "wasm.reported" "1")
+        (set echoed (echo 1 "a"))
+        (set napped (nap))
+        (set trapped (try (boom) (catch (WasmError e) "trapped")))
+        (spin)
+        (report (str-concat "ariglx-web: wasm booted " (state-get "booted")
+                            ", init " (state-get "wasm.from_init")
+                            ", echo " (str (nth echoed 0)) " " (nth echoed 1)
+                            ", nap " (str napped) ", boom " trapped ", spin done"))))
+
+root:
+  - text: a wasm guest in the page
