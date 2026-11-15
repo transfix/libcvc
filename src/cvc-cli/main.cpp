@@ -33,9 +33,11 @@
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/core/input_trace.h>
+#include <cvc/core/param_cli.h>
 #include <cvc/core/types.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
@@ -51,6 +53,9 @@
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/utility/algorithm.h>
 #include <cvc/utility/utility.h>
+#include <cvc/volume/point_classes.h>
+#include <cvc/volume/segmentation.h>
+#include <cvc/volume/segmentation_params.h>
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_info.h>
 #include <cvc/volume/volume_file_io.h>
@@ -2467,6 +2472,163 @@ static int cmd_ph_train(cvc::app &, int argc, char **argv) {
 // Command dispatch table
 // ===========================================================================
 
+// ---------------------------------------------------------------------------
+// cvc segment: cvc::segment_seeded (cvc/volume/segmentation.h), the VolumeRover GenSeg port
+// ---------------------------------------------------------------------------
+
+// The legacy flags: VolumeGridRover's Segmentation tab and GenSeg's entry took the thresholds as
+// integers on the 0..255 scale the volume is rescaled to. --tlow v / --thigh v become
+// --t-low=v / --t-high=v with --normalized-thresholds.
+static std::vector<std::string> segment_legacy_flags(int argc, char **argv) {
+  std::vector<std::string> out;
+  bool normalized = false;
+  // argv[0] is the command, as command_line_parser(argc, argv) skips it.
+  for (int i = 1; i < argc; ++i) {
+    const std::string a = argv[i];
+    const bool low = a == "--tlow" || a.rfind("--tlow=", 0) == 0;
+    const bool high = a == "--thigh" || a.rfind("--thigh=", 0) == 0;
+    if (!low && !high) {
+      out.push_back(a);
+      continue;
+    }
+    std::string v;
+    const std::size_t eq = a.find('=');
+    if (eq != std::string::npos) {
+      v = a.substr(eq + 1);
+    } else {
+      if (i + 1 >= argc)
+        throw std::runtime_error("cvc segment: " + a + " needs a value");
+      v = argv[++i];
+    }
+    out.push_back(std::string(low ? "--t-low=" : "--t-high=") + v);
+    if (!normalized) {
+      out.push_back("--normalized-thresholds");
+      normalized = true;
+    }
+  }
+  return out;
+}
+
+// "name:i,j,k" (or "name=i,j,k"): one seed of class `name`.
+static void add_seed_arg(cvc::point_classes &pc, const std::string &s, int variable, int timestep) {
+  const std::size_t sep = s.find_last_of(":=");
+  int ijk[3];
+  char tail = 0;
+  if (sep == std::string::npos || sep == 0 ||
+      std::sscanf(s.c_str() + sep + 1, "%d,%d,%d%c", &ijk[0], &ijk[1], &ijk[2], &tail) != 3)
+    throw std::runtime_error("cvc segment: --seed " + s + " is not name:i,j,k");
+  pc.add(s.substr(0, sep), ijk[0], ijk[1], ijk[2], variable, timestep);
+}
+
+static int cmd_segment(cvc::app &app, int argc, char **argv) {
+  po::options_description desc(
+      "cvc segment - seeded segmentation of a volume (the VolumeRover GenSeg port, Bajaj, Yu and "
+      "Auer, J. Struct. Biol. 2003)\n\n"
+      "Fronts grow from each point class's seeds by fast marching, slowing at edges, and stop "
+      "where they meet another class's front or a voxel below --t-low; the smoothed volume's "
+      "local maxima above --t-high join the class whose front reaches them first. Writes the "
+      "labels (UChar: the class index, 255 for none) to the output, and each class's voxels "
+      "(zero elsewhere) beside it as <stem>_class_<n><ext>. The seeds come from a point-class "
+      "file (--seeds: VolumeGridRover's .vgr, or .pts) or the command line (--seed). The legacy "
+      "--tlow / --thigh take the thresholds on the 0..255 scale the volume is rescaled to.\n\n"
+      "Examples:\n"
+      "  cvc segment map.rawiv --seeds classes.vgr --tlow 40 --thigh 200 -o labels.rawiv\n"
+      "  cvc segment map.mrc --seed virus:40,40,40 --seed solvent:2,2,2 --t-low 0.1 --t-high "
+      "0.8 -o labels.rawiv\n");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume")(
+      "output,o", po::value<std::string>()->required(), "output volume for the labels")(
+      "seeds,s", po::value<std::string>(), "point-class file of the seeds (.vgr, .pts)")(
+      "seed", po::value<std::vector<std::string>>()->composing(),
+      "a seed, name:i,j,k (repeatable): a voxel of class `name`")(
+      "border", po::value<std::string>(),
+      "write the border voxels (where a front stopped), \"i j k\" a line, to this file")(
+      "seconds", po::value<double>()->default_value(0.0),
+      "report progress every this many seconds (0: never)");
+  cvc::add_param_options<cvc::seeded_segmentation_params>(desc);
+
+  const std::vector<std::string> args = segment_legacy_flags(argc, argv);
+  po::positional_options_description pos;
+  pos.add("input", 1).add("output", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(args).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+  const cvc::param_result<cvc::seeded_segmentation_params> pr =
+      cvc::params_from_options<cvc::seeded_segmentation_params>(vm);
+  if (!pr.ok())
+    throw std::runtime_error("cvc segment: " + pr.message());
+  const cvc::seeded_segmentation_params &p = pr.value;
+
+  const std::string input = vm["input"].as<std::string>();
+  const std::string output = vm["output"].as<std::string>();
+  cvc::volume vol(app);
+  vol.read(input);
+
+  cvc::point_classes seeds;
+  if (vm.count("seeds")) {
+    cvc::point_class_read_params rp;
+    rp.dims = {int(vol.XDim()), int(vol.YDim()), int(vol.ZDim())};
+    rp.bbox = {vol.XMin(), vol.YMin(), vol.ZMin(), vol.XMax(), vol.YMax(), vol.ZMax()};
+    rp.variable = p.variable;
+    rp.timestep = p.timestep;
+    seeds = cvc::read_point_classes(app, vm["seeds"].as<std::string>(), rp);
+  }
+  if (vm.count("seed"))
+    for (const std::string &s : vm["seed"].as<std::vector<std::string>>())
+      add_seed_arg(seeds, s, p.variable, p.timestep);
+  if (seeds.point_count() == 0)
+    throw std::runtime_error("cvc segment: no seeds: give --seeds <file> or --seed name:i,j,k");
+
+  // The stepper, so a long run can report its progress.
+  cvc::segment_stepper stepper(vol, std::move(seeds), p);
+  const double every = vm["seconds"].as<double>();
+  auto last = std::chrono::steady_clock::now();
+  while (!stepper.step(4096)) {
+    if (every > 0 &&
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - last).count() >= every) {
+      std::cerr << "cvc segment: " << stepper.status() << "\n";
+      last = std::chrono::steady_clock::now();
+    }
+  }
+  cvc::seeded_segmentation r = stepper.take();
+
+  r.labels.write(output);
+  const std::size_t dot = output.find_last_of('.');
+  const std::size_t sep = output.find_last_of("/\\");
+  const bool has_ext = dot != std::string::npos && (sep == std::string::npos || dot > sep);
+  const std::string stem = has_ext ? output.substr(0, dot) : output;
+  const std::string ext = has_ext ? output.substr(dot) : std::string();
+  for (std::size_t c = 0; c < r.classes.size(); ++c) {
+    char n[16];
+    std::snprintf(n, sizeof n, "_class_%02zu", c);
+    r.classes[c].write(stem + n + ext);
+  }
+  if (vm.count("border")) {
+    const std::string file = vm["border"].as<std::string>();
+    std::ofstream b(file);
+    if (!b)
+      throw std::runtime_error("cvc segment: cannot write " + file);
+    for (const auto &v : r.border)
+      b << v[0] << " " << v[1] << " " << v[2] << "\n";
+  }
+  for (const std::string &w : r.warnings)
+    std::cerr << "cvc segment: warning: " << w << "\n";
+  std::size_t labelled = 0;
+  for (std::size_t n : r.class_voxels)
+    labelled += n;
+  std::cout << "Wrote the labels of " << r.class_names.size() << " classes (" << labelled
+            << " voxels labelled, " << r.border.size() << " on borders, " << r.classified_seeds
+            << " of " << r.automatic_seeds << " automatic seeds classified) to " << output;
+  if (!r.classes.empty())
+    std::cout << ", and the class volumes to " << stem << "_class_NN" << ext;
+  std::cout << "\n";
+  return 0;
+}
+
 struct command_entry {
   const char *name;
   const char *category;
@@ -2523,6 +2685,7 @@ static const command_entry commands[] = {
   // ── Analysis ──
   {"ssim",           "Analysis",        "compute SSIM between two volumes",              cmd_ssim},
   {"compare",        "Analysis",        "exact voxel comparison (nonzero exit on mismatch)", cmd_compare},
+  {"segment",        "Analysis",        "seeded segmentation (GenSeg): labels and class volumes", cmd_segment},
 
   // ── Projection / Reconstruction ──
   {"project",        "Projection",      "forward ray projection",                        cmd_project},
