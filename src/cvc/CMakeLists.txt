@@ -165,6 +165,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/contour_intrinsics.h
   ../../inc/cvc/volume/point_classes.h
   ../../inc/cvc/volume/point_class_intrinsics.h
+  ../../inc/cvc/volume/segmentation.h
+  ../../inc/cvc/volume/segmentation_params.h
   ../../inc/cvc/model/model.h
   ../../inc/cvc/model/model_file_io.h
   ../../inc/cvc/volume/volume_ops.h
@@ -312,6 +314,8 @@ set(SOURCE_FILES
   utility/xml_lite.cpp
   volume/point_classes.cpp
   volume/point_class_intrinsics.cpp
+  volume/segmentation/genseg.cpp
+  volume/segmentation/segmentation.cpp
   image/image.cpp
   image/image_decode.cpp
   image/magick_io.cpp
@@ -685,6 +689,18 @@ if(NOT MSVC)
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
   set_source_files_properties(${_cvc_physics_exact_sources}
+                              PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
+
+# The VolumeRover GenSeg port (volume/segmentation/) matches the legacy library's labels voxel for
+# voxel on every platform (VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.7 T1): its fast marches compare
+# float arrival times, and an FMA-contracted step flips which front wins a tie.
+set(_cvc_genseg_exact_sources volume/segmentation/genseg.cpp volume/segmentation/segmentation.cpp)
+if(NOT MSVC)
+  set_source_files_properties(${_cvc_genseg_exact_sources}
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(${_cvc_genseg_exact_sources}
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
