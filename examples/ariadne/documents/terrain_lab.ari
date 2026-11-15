@@ -40,6 +40,8 @@ requires:
 customs:
   - node: generated_world
     required: true
+  - node: water
+    required: true
 
 import:
   - cvc://components/world_controls.ari
@@ -47,6 +49,7 @@ import:
   - cvc://components/viewer_settings.ari     # frame rate, UI size, grid / axis, camera, shadows
   - cvc://components/sim_transport.ari
   - cvc://components/sky_controls.ari
+  - cvc://components/water_controls.ari
 
 # Only the Terrain Lab panel opens at first, so the world fills the view; Settings opens the rest.
 init: |
@@ -54,6 +57,7 @@ init: |
   (state-set "tree.viewer_settings.open" "0")
   (state-set "tree.sim_transport.open" "0")
   (state-set "tree.sky_controls.open" "0")
+  (state-set "tree.water_controls.open" "0")
 
 menubar:
   - menu: Sim
@@ -73,6 +77,8 @@ menubar:
         bind: tree.sim_transport.open
       - menu_item: Sky
         bind: tree.sky_controls.open
+      - menu_item: Water
+        bind: tree.water_controls.open
 
 windows:
   - include: world_controls
@@ -94,6 +100,10 @@ windows:
   - include: sky_controls
     pos: [754, 16]
     size: [370, 116]
+    closable: true
+  - include: water_controls
+    pos: [754, 140]
+    size: [370, 190]
     closable: true
 
 scene:
@@ -141,10 +151,20 @@ scene:
       tree_gen: 5
       amp: 90              # relief, metres
       water_level: 0       # metres from sea level (the shoreline); everything below is water
+      water: 0             # the water node below draws it (the world's own flat water rungs off)
       color: material      # material | risk | occupancy | height | water (the water bodies)
       look: soft           # soft (demo3's matte daylight) | classic (the C++ lab's)
       material: { opaque: true }
       shader: { preset: terrain_bump }   # value-noise fBm ground detail
+    # The water: the world's sea, lakes and ponds as the GPU FFT ocean (three wave cascades for the
+    # wind, fading out toward the shore), the near water displaced around the camera and the rest
+    # flat; whitecaps where the waves fold. The Water panel (Settings) drives the wind and waves.
+    - node: water
+      type: water
+      world: world         # the generated_world whose ground it fills below `level`
+      level: 0             # as the world's water_level
+      wind_speed: 9        # m/s
+      wind_dir: 30         # degrees: the way the waves travel, from +x toward +y
     # The clouds: a deck of L-system cumulus scattered over the whole world, drifting and slowly
     # changing shape. The ones near the camera are volumes, the rest one coarse sliced volume.
     # Their shade dims the sun on the ground, the buildings, the roads and the trees; it is drawn

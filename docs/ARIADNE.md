@@ -864,6 +864,7 @@ types behind one call, `register_cvcgl_extensions`
 ([`extensions.h`](../inc/cvc/gl/ariadne/extensions.h)), which both `ariadne_hello` and
 `AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`,
 `generated_world` (terrain_lab's world, [`world_nodes.h`](../inc/cvc/gl/ariadne/world_nodes.h)),
+`water` (its sea, lakes and ponds as the GPU FFT ocean, below),
 `ribbon` and `draped_link` (lines drawn from data, below), `volume_slice` (one axis-aligned plane
 of a volume, below), and — on a libcvc built with
 `CVC_ENABLE_LIBIGL` — `mesh_lab` and `fe_lab`. Keys the built-in parser
@@ -1100,6 +1101,23 @@ clouds), `far_reach` (how far the far clouds reach toward the horizon; out of th
 `evolve` (the weather's speed: 1 is a step every 5 s, a cloud lasting some 8 minutes; 0 holds the
 clouds) and `shadow` (0 starts the shade off). Live keys under the node's root (`sky.` unless
 `keys:`): `drift`, `morph`, `evolve`, `orographic` and `shadow`, all on `sky_controls.ari`.
+
+**Water.** `water` draws everything below `level` on a ground (`world:` a `generated_world`, or
+`ground:` any height-field node) as the GPU FFT sea of OCEAN-AND-WEATHER-ROADMAP.md (§11.2, O15):
+three wave cascades for the wind (`wind_speed`, `wind_dir`, `fetch`), each fading out over
+`shore_fade` metres of depth toward the shore. A grid `near` metres each way from the camera
+(`cells` vertices a side) is displaced by the cascades and moves with the camera by whole cells; a
+flat grid over the ground (`far_cells` a side) draws the rest and gives way inside the near one.
+Both shade as a Fresnel sea with shallows tinted by depth and whitecaps where the waves fold, the
+threshold found so they cover Monahan's share of the sea for the wind (`whitecaps` scales it;
+`foam_bias` at 0 or above fixes it), and both stay out of the scene's bounds, so the ground frames
+the view. When the ground's whole rim is under water (a `generated_world` with `edge: shore`, an
+island) the sea goes on `outer` metres past it (6000); otherwise it stops at the ground's edge. A
+`generated_world` under a water node wants `water: 0`, so its own flat water rungs do not draw
+over it. The cascades need float render targets; without them the water is flat blue. Live keys
+under the node's root (`water.` unless `keys:`): `wind_speed`, `wind_dir`, `fetch`, `chop`,
+`wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`, `foam_fray` and `shore_fade`, most on
+`water_controls.ari`.
 
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the
@@ -3798,6 +3816,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `volren_controls`, `volslice_controls` | a `volren` / `volslice` node (arg `node`, default `bunny_volume`) |
 | `forest_controls`, `sea_controls`, `sky_controls` | a `forest_trees` / `wave_sea` / `cloud_sky` node (arg `keys`, below) |
 | `world_controls` | a `generated_world` node (§5.4; arg `keys`) |
+| `water_controls` | a `water` node (arg `keys`, default `water`) |
 | `mesh_tools` | a `mesh_lab` node (§5.4; arg `node`, default `mesh`) |
 | `fe_controls` | an `fe_lab` node (§5.4; arg `node`, default `domain`) |
 | `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `scene`, `show`, `hide`, `mode`, `camera`, `chrome`, `shadows`, `caption`, `width`, `height`, `title`, `id`) |
