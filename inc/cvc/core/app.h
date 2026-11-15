@@ -60,7 +60,9 @@
 #include <queue>
 #include <set>
 #include <string>
+#include <thread>
 #include <typeinfo>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -516,12 +518,13 @@ public:
   // stopped the pool, kPoolNoWorker for a trySubmitPooled task left with no worker (above).
   static constexpr const char *kPoolStopped = "not run: the app's background pool has stopped";
   static constexpr const char *kPoolNoWorker = "not run: no background worker could be started";
-  // The reason for the drop under way on the calling thread: the pool sets it on the thread that
-  // destroys the tasks, for as long as it does, and it is kPoolStopped on a thread where no drop is
-  // under way. A task reads it in its destructor, before calling out (a callback it then runs may
-  // drop other tasks, for reasons of their own). A thread-local rather than a field of the task,
-  // so that a task costs the pool nothing for it, whatever its callable.
-  static const char *poolDropReason() noexcept;
+  // The reason for this app's drop under way on the calling thread: the pool sets it on the thread
+  // that destroys the tasks, for as long as it does, and it is kPoolStopped on a thread where no
+  // drop of this app's is under way. A task reads it in its destructor, before calling out (a
+  // callback it then runs may drop other tasks, for reasons of their own). The app keeps it, by
+  // thread, so another app's drop on the same thread (a task of one app dropped inside another's
+  // drop) is not this one's.
+  const char *poolDropReason() const noexcept;
 
   // Set the maximum number of concurrent threads in the pool
   // Default is hardware_concurrency() or 4 if unknown
@@ -915,7 +918,9 @@ protected:
   void takeUnstartableLocked(std::vector<std::function<void()>> &out);
   // _threadPoolMutex NOT held: destroy `tasks` unrun, with interruption held off and `why` as
   // poolDropReason() on this thread while they go.
-  static void dropPoolTasks(std::vector<std::function<void()>> &tasks, const char *why);
+  void dropPoolTasks(std::vector<std::function<void()>> &tasks, const char *why);
+  // RAII: `why` is this app's poolDropReason() on the calling thread while it lives (app.cpp).
+  class PoolDropScope;
   // What the pool must do, once _threadPoolMutex is released, so that every queued task that
   // may start has a worker on its way to it: idle workers to wake and new workers to start.
   struct PoolKick {
@@ -991,6 +996,10 @@ protected:
 
   mutex_map _mutexMap;
   boost::mutex _mutexMapMutex;
+
+  // The drops under way (PoolDropScope), by thread, a thread's latest last: poolDropReason().
+  mutable std::mutex _poolDropMutex;
+  std::vector<std::pair<std::thread::id, const char *>> _poolDrops;
 
   // Thread pool state, all guarded by _threadPoolMutex.
   PoolQueue _pendingTasks;

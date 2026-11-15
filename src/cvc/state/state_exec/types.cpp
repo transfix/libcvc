@@ -1,9 +1,11 @@
+#include "closure_natives.h" // a class's natives hold parts too (take_part)
 #include "scope_mark.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cvc/state/state_exec/data_job.h>   // data_step_scope::release
 #include <cvc/state/state_exec/exceptions.h> // dsl_error: a refused allocation is MemoryError
 #include <cvc/state/state_exec/types.h>
 #include <new>
@@ -195,54 +197,56 @@ double time_budget::remaining() const {
 
 // -- cooperative evaluation deadline ----------------------------------------
 
-namespace {
-thread_local eval_deadline_guard *t_innermost = nullptr; // the guards armed on this thread
-} // namespace
-
-eval_deadline_guard::eval_deadline_guard(std::optional<double> seconds) {
+eval_deadline_guard::eval_deadline_guard(exec_context &ctx, std::optional<double> seconds) {
   if (!seconds)
     return; // unarmed: not even a clock read
   budget_.emplace(*seconds);
   budget_->start();
-  outer_ = t_innermost;
-  t_innermost = this;
+  ctx_ = &ctx;
+  outer_ = ctx.deadlines;
+  ctx.deadlines = this;
 }
 
-eval_deadline_guard::eval_deadline_guard(std::optional<double> seconds,
+eval_deadline_guard::eval_deadline_guard(exec_context &ctx, std::optional<double> seconds,
                                          std::chrono::steady_clock::time_point now) {
   if (!seconds)
     return;
   budget_.emplace(*seconds);
   budget_->start(now);
-  outer_ = t_innermost;
-  t_innermost = this;
+  ctx_ = &ctx;
+  outer_ = ctx.deadlines;
+  ctx.deadlines = this;
 }
 
 eval_deadline_guard::~eval_deadline_guard() {
-  if (budget_)
-    t_innermost = outer_;
+  if (ctx_)
+    ctx_->deadlines = outer_;
 }
 
 bool eval_deadline_guard::expired() { return budget_ && budget_->spent(); }
 
-bool eval_deadline_expired() {
-  if (!t_innermost)
+bool eval_deadline_expired(exec_context *ctx) {
+  if (!ctx || !ctx->deadlines)
     return false;
   const time_budget::clock::time_point now = time_budget::clock::now();
   bool spent = false;
-  for (eval_deadline_guard *g = t_innermost; g; g = g->outer_)
+  for (eval_deadline_guard *g = ctx->deadlines; g; g = g->outer_)
     spent = g->budget_->spent(now) || spent;
   return spent;
 }
 
-void eval_deadline_check(const char *what) {
-  if (eval_deadline_expired())
+void eval_deadline_check(exec_context *ctx, const char *what) {
+  if (eval_deadline_expired(ctx))
     throw evaluation_timeout(std::string(what) + ": evaluation exceeded timeout");
 }
 
 // -- releasing nested values -------------------------------------------------
 
 namespace {
+using detail::owner_kind;
+using detail::released_owner;
+using dict_vector = std::vector<std::pair<std::string, value_t>>;
+
 // The owners a release has yet to free: the first few in uninitialized inline slots, the rest
 // on the heap, so freeing an ordinary small value constructs and allocates nothing extra.
 class release_queue {
@@ -252,22 +256,23 @@ public:
   release_queue &operator=(const release_queue &) = delete;
   ~release_queue() {
     while (count_ > 0)
-      slot(--count_).~shared_ptr();
+      slot(--count_).~released_owner();
   }
 
   // Takes `owner`, unless out of memory: then it is left with the caller.
-  void push(std::shared_ptr<void> &owner) noexcept {
+  bool push(released_owner &owner) noexcept {
     if (count_ < kInline) {
-      new (&slot(count_++)) std::shared_ptr<void>(std::move(owner));
-      return;
+      new (&slot(count_++)) released_owner(std::move(owner));
+      return true;
     }
     try {
       heap_.push_back(std::move(owner));
+      return true;
     } catch (...) {
-      // push_back left `owner` as it was.
+      return false; // push_back left `owner` as it was
     }
   }
-  bool pop(std::shared_ptr<void> &out) noexcept {
+  bool pop(released_owner &out) noexcept {
     if (!heap_.empty()) {
       out = std::move(heap_.back());
       heap_.pop_back();
@@ -275,132 +280,205 @@ public:
     }
     if (count_ == 0)
       return false;
-    std::shared_ptr<void> &s = slot(--count_);
+    released_owner &s = slot(--count_);
     out = std::move(s);
-    s.~shared_ptr();
+    s.~released_owner();
     return true;
   }
 
 private:
   static constexpr std::size_t kInline = 8;
-  std::shared_ptr<void> &slot(std::size_t i) {
-    return *std::launder(reinterpret_cast<std::shared_ptr<void> *>(inline_) + i);
+  released_owner &slot(std::size_t i) {
+    return *std::launder(reinterpret_cast<released_owner *>(inline_) + i);
   }
-  alignas(std::shared_ptr<void>) unsigned char inline_[kInline * sizeof(std::shared_ptr<void>)];
+  alignas(released_owner) unsigned char inline_[kInline * sizeof(released_owner)];
   std::size_t count_ = 0;
-  std::vector<std::shared_ptr<void>> heap_;
+  std::vector<released_owner> heap_;
 };
 
-// The queue of the release running on this thread, if one is: release_nested() called while it
-// frees something (from that thing's destructor) queues its owner there instead of freeing it
-// inline. A raw pointer to the running release's local queue, so no thread-exit destructor is
-// involved and nothing outlives the release.
-thread_local release_queue *t_release_queue = nullptr;
+template <class T, class Put> void take_owner(std::shared_ptr<T> &p, Put &&put) noexcept {
+  if (p && p.use_count() == 1) {
+    std::size_t nodes = 1;
+    if constexpr (std::is_same_v<T, std::vector<value_t>> || std::is_same_v<T, dict_vector>)
+      nodes += p->size();
+    put(released_owner{std::move(p), detail::owner_kind_of<T>(), nodes});
+  }
+  p.reset(); // another owner holds it: let go of this one now (take_or_let_go)
+}
 
-// The backlog a backlog_scope routes this thread's last owners to, if any.
-thread_local detail::release_backlog *t_backlog = nullptr;
+// A part of `v` with no other owner (a list, dict, closure or generator `v` holds the last owner
+// of), moved out of `v` and handed to `put`. `v` is left holding a null pointer, which drops
+// nothing. A class's natives hold parts too, what heap.cpp's value_edges finds in them (a
+// constructor's class dict, an inherited method's superclass dict, the recursive evaluators'
+// method closures): those are taken out of the native the same way, so freeing a long chain of
+// classes, each holding the next up through its natives, takes no native frame per class. (Only
+// values being dropped come here, through take_or_let_go, and each std::function owns its target:
+// changing it changes no other value.)
+template <class Put> void take_part(value_t &v, Put &&put) noexcept {
+  if (auto *l = std::get_if<list_ptr>(&v.v)) {
+    if (*l && l->use_count() == 1) {
+      const std::size_t nodes = 1 + (*l)->size();
+      put(released_owner{std::move(*l), owner_kind::list, nodes});
+    }
+  } else if (auto *d = std::get_if<dict_ptr>(&v.v)) {
+    if (*d && d->use_count() == 1) {
+      const std::size_t nodes = 1 + (*d)->size();
+      put(released_owner{std::move(*d), owner_kind::dict, nodes});
+    }
+  } else if (auto *c = std::get_if<closure_ptr>(&v.v)) {
+    if (*c && c->use_count() == 1)
+      put(released_owner{std::move(*c), owner_kind::closure, 1});
+  } else if (auto *g = std::get_if<generator_ptr>(&v.v)) {
+    if (*g && g->use_count() == 1)
+      put(released_owner{std::move(*g), owner_kind::generator, 1});
+  } else if (auto *f = std::get_if<native_fn>(&v.v)) {
+    if (auto *ctor = f->target<detail::class_constructor>())
+      take_owner(ctor->cls_dict, put);
+    else if (auto *inherited = f->target<detail::class_inherited_method>())
+      take_owner(inherited->super_cls, put);
+    else if (auto *method = f->target<detail::evaluator_method>())
+      take_owner(method->method, put);
+  }
+}
+
+// take_part, and when another owner holds the part, let go of `v`'s owner now, in order: so a
+// later part holding the same (the third of three references to one list) is its last owner, and
+// is taken, as a release of the part itself would find it, instead of freed inline when what holds
+// them goes. (A slicing step's backlog counts what it frees: the same nodes either way.)
+template <class Put> void take_or_let_go(value_t &v, Put &&put) noexcept {
+  take_part(v, put);
+  if (auto *l = std::get_if<list_ptr>(&v.v))
+    l->reset();
+  else if (auto *d = std::get_if<dict_ptr>(&v.v))
+    d->reset();
+  else if (auto *c = std::get_if<closure_ptr>(&v.v))
+    c->reset();
+  else if (auto *g = std::get_if<generator_ptr>(&v.v))
+    g->reset();
+}
+
+// Move the parts of what `o` owns (its last owner) that have no other owner out of it, through
+// `put`, so freeing it frees no nesting. A generator keeps its parts: freeing one starts releases
+// of their own (a few frames).
+template <class Put> void take_parts(released_owner &o, Put &&put) noexcept {
+  if (o.owner.use_count() != 1)
+    return; // another owner appeared meanwhile: it keeps everything
+  switch (o.kind) {
+  case owner_kind::list:
+    for (value_t &e : *static_cast<std::vector<value_t> *>(o.owner.get()))
+      take_or_let_go(e, put);
+    break;
+  case owner_kind::dict:
+    for (auto &entry : *static_cast<dict_vector *>(o.owner.get()))
+      take_or_let_go(entry.second, put);
+    break;
+  case owner_kind::closure: {
+    closure &c = *static_cast<closure *>(o.owner.get());
+    for (value_t &e : c.body)
+      take_or_let_go(e, put);
+    take_owner(c.env_snapshot, put);
+    take_owner(c.body_expr, put);
+    break;
+  }
+  case owner_kind::env: {
+    environment &e = *static_cast<environment *>(o.owner.get());
+    take_owner(e.outer, put);
+    for (auto &binding : e.bindings)
+      take_or_let_go(binding.second, put);
+    break;
+  }
+  case owner_kind::generator:
+    break;
+  }
+}
 } // namespace
 
-void detail::release_nested(std::shared_ptr<void> owner, std::size_t nodes) noexcept {
-  if (release_queue *queue = t_release_queue) {
-    queue->push(owner); // out of memory: `owner` is still here, and freed here, recursively
-    return;
-  }
-  if (release_backlog *backlog = t_backlog) {
-    try {
-      backlog->owners_.emplace_back(std::move(owner), nodes);
-      return;
-    } catch (...) {
-      // Out of memory: emplace_back left `owner` as it was; free it now, below.
-    }
-  }
+void detail::release_nested(released_owner first) noexcept {
   release_queue queue;
-  t_release_queue = &queue;
-  owner.reset();
-  for (std::shared_ptr<void> next; queue.pop(next);)
-    next.reset(); // a no-op unless this was the last owner
-  t_release_queue = nullptr;
+  const auto put = [&queue](released_owner &&o) {
+    if (!queue.push(o))
+      o.owner.reset(); // out of memory: freed here, recursively
+  };
+  put(std::move(first));
+  for (released_owner o; queue.pop(o);) {
+    take_parts(o, put);
+    o.owner.reset(); // a no-op unless this is the last owner
+  }
 }
 
 detail::release_backlog::~release_backlog() { drain(0); }
 
+void detail::release_backlog::push(released_owner owner) noexcept {
+  try {
+    owners_.push_back(std::move(owner));
+  } catch (...) {
+    release_nested(std::move(owner)); // out of memory: freed now
+  }
+}
+
+void detail::release_backlog::add(value_t &&v) noexcept {
+  // Taken when `v` is the last owner; else let go of now, so the holder that drops the last owner
+  // later (its frame, a finished job's input) finds it the last and hands it here too.
+  take_or_let_go(v, [this](released_owner &&o) { push(std::move(o)); });
+}
+
 std::size_t detail::release_backlog::drain(std::size_t budget) {
-  release_backlog *outer = t_backlog;
-  t_backlog = this; // what freeing an owner drops joins this backlog
   std::size_t freed = 0;
   while (!owners_.empty() && (budget == 0 || freed < budget)) {
-    auto [owner, nodes] = std::move(owners_.back());
+    released_owner o = std::move(owners_.back());
     owners_.pop_back();
-    owner.reset();
-    freed += nodes;
+    take_parts(o, [this](released_owner &&p) { push(std::move(p)); }); // they join the backlog
+    o.owner.reset();
+    freed += o.nodes;
   }
-  t_backlog = outer;
   return freed;
-}
-
-detail::backlog_scope::backlog_scope(release_backlog *backlog)
-    : outer_(t_backlog), armed_(backlog != nullptr) {
-  if (armed_)
-    t_backlog = backlog;
-}
-
-detail::backlog_scope::~backlog_scope() {
-  if (armed_)
-    t_backlog = outer_;
 }
 
 // -- per-call allocation limit ----------------------------------------------
 
-namespace {
-thread_local eval_alloc_guard *t_alloc_innermost = nullptr;
-} // namespace
-
-eval_alloc_guard::eval_alloc_guard(std::optional<std::size_t> max_bytes)
-    : limit_(max_bytes), outer_(t_alloc_innermost) {
+eval_alloc_guard::eval_alloc_guard(exec_context &ctx, std::optional<std::size_t> max_bytes)
+    : ctx_(&ctx), limit_(max_bytes), outer_(ctx.alloc) {
   if (outer_ && outer_->limit_)
     limit_ = limit_ ? std::min(*limit_, *outer_->limit_) : outer_->limit_;
-  t_alloc_innermost = this;
+  ctx.alloc = this;
 }
 
-eval_alloc_guard::~eval_alloc_guard() { t_alloc_innermost = outer_; }
+eval_alloc_guard::~eval_alloc_guard() { ctx_->alloc = outer_; }
 
-std::optional<std::size_t> eval_alloc_limit() {
-  if (!t_alloc_innermost)
+std::optional<std::size_t> eval_alloc_limit(const exec_context *ctx) {
+  if (!ctx || !ctx->alloc)
     return kDefaultMaxAllocBytes;
-  return t_alloc_innermost->limit_;
+  return ctx->alloc->limit_;
 }
 
-void eval_alloc_check(std::size_t bytes, const char *who) {
-  const std::optional<std::size_t> limit = eval_alloc_limit();
+void eval_alloc_check(exec_context *ctx, std::size_t bytes, const char *who) {
+  const std::optional<std::size_t> limit = eval_alloc_limit(ctx);
   if (limit && bytes > *limit)
     throw dsl_error("MemoryError",
                     std::string(who) + ": the result needs " + std::to_string(bytes) +
                         " bytes, over the allocation limit of " + std::to_string(*limit) +
                         " bytes (limits.max_alloc_bytes, or what is left of max_memory)");
-  eval_alloc_note(bytes);
+  eval_alloc_note(ctx, bytes);
 }
 
-void eval_alloc_note(std::size_t bytes) {
-  if (eval_alloc_guard *g = t_alloc_innermost)
+void eval_alloc_note(exec_context *ctx, std::size_t bytes) {
+  if (eval_alloc_guard *g = ctx ? ctx->alloc : nullptr)
     g->allocated_ = g->allocated_ > SIZE_MAX - bytes ? SIZE_MAX : g->allocated_ + bytes;
 }
 
 // -- async kernels -------------------------------------------------------------
 
-namespace {
-thread_local bool t_in_async_kernel = false;
-} // namespace
+bool in_async_kernel(const exec_context *ctx) { return ctx && ctx->in_async_kernel; }
 
-bool in_async_kernel() { return t_in_async_kernel; }
-
-detail::async_kernel_scope::async_kernel_scope(bool running) : outer_(t_in_async_kernel) {
-  t_in_async_kernel = running;
+detail::async_kernel_scope::async_kernel_scope(exec_context &ctx, bool running)
+    : ctx_(ctx), outer_(ctx.in_async_kernel) {
+  ctx.in_async_kernel = running;
 }
 
-detail::async_kernel_scope::~async_kernel_scope() { t_in_async_kernel = outer_; }
+detail::async_kernel_scope::~async_kernel_scope() { ctx_.in_async_kernel = outer_; }
 
-void detail::check_not_in_async_kernel(const char *what) {
-  if (t_in_async_kernel)
+void detail::check_not_in_async_kernel(const exec_context &ctx, const char *what) {
+  if (ctx.in_async_kernel)
     throw std::logic_error(std::string(what) +
                            ": an async function's kernel must not use the evaluator or a "
                            "scheduler (docs/STATE_EXEC_EXCEPTIONS.md 3.7)");
@@ -450,47 +528,77 @@ namespace {
 using binding_map = decltype(environment::bindings);
 using binding_node = binding_map::node_type;
 
-// -- scopes recycled on this thread --
+// The count scope serials are drawn from: one at a time by a scope made outside a scope cache, a
+// run at a time by a cache (one locked add per kSerialRun scopes). Constant-initialized.
+constexpr std::uint32_t kSerialRun = 1024;
+std::atomic<std::uint32_t> g_next_serial_run{0};
+
+// -- scopes recycled by a context's scope cache --
 //
 // A call scope (environment::extend) lives for one call, and a std::unordered_map is costly to
 // make: on MSVC its default constructor allocates a list sentinel and a bucket array, so a scope
 // cost three allocations before its first binding (the make_shared block, those two), and every
-// binding a node more. So a scope from extend() is not destroyed when its last owner drops it:
-// it is emptied, as its destructor would empty it, and kept on this thread for the next
-// extend(), its map's sentinel and buckets with it. The nodes of its bindings are kept too, for
-// the next set() of a new name.
+// binding a node more. So a call scope the evaluator drops for the last time is not destroyed:
+// it is emptied, as its destructor would empty it, and kept in the scope cache of the context the
+// evaluator runs in (exec_context::scopes) for the next extend(parent, ctx), its map's sentinel
+// and buckets with it. The nodes of its bindings are kept too, for the next set() of a new name
+// in that context.
 //
 // A scope and its shared_ptr control block are one allocation, as make_shared makes them: a
-// block with a slot for the control block, then the scope; the control block's allocator hands
-// out the slot. So a long-lived scope (a process's) costs one allocation, as before, 16 bytes
-// larger. The block is kept (or freed) when the control block is deallocated, which is after the
-// scope was emptied.
+// block with a header, a slot for the control block, then the scope; the control block's
+// allocator hands out the slot. So a long-lived scope (a process's) costs one allocation, as
+// before, 32 bytes larger. The header names the cache the block goes to when the control block
+// is deallocated (after the scope was emptied): set by detail::release_scope just before the
+// evaluator drops its last owner, so a block dropped anywhere else (by a host, on another
+// thread, after the context is gone) is freed, never kept by a cache it doesn't belong to.
 //
-// What is kept is bounded, and per thread, so nothing is shared between threads: a scope or
-// node made on one thread and dropped on another is kept by the other. On 64-bit MSVC that is at
-// most 64 blocks of 120 bytes, each with its empty map's sentinel and 8 buckets (about 150
-// bytes), and 128 nodes of about 130 bytes: under 35 KB per thread that steps a program.
+// What is kept is bounded, and per context, so nothing is shared between contexts: at most 64
+// blocks of 136 bytes on 64-bit MSVC, each with its empty map's sentinel and 8 buckets (about
+// 150 bytes), and 128 nodes of about 130 bytes: under 35 KB per context that steps a program.
 constexpr std::size_t kKeptScopes = 64;
 constexpr std::size_t kKeptNodes = 128;
-// The slot for a scope's control block: a vtable, two counts and the pointer (24 bytes with
-// MSVC's and libstdc++'s shared_ptr, 32 with libc++'s; the deleter and allocator are empty).
+// The block's header: the cache it goes to (block_header::keep_in).
+constexpr std::size_t kHeaderBytes = 16;
+// The slot for a scope's control block: a vtable, two counts, the pointer and the allocator (a
+// pointer: block_allocator holds its slot; the deleter is empty). 32 bytes with MSVC's and
+// libstdc++'s shared_ptr, whose counts are 32-bit; 40 with libc++'s, whose counts are long.
+#if defined(_LIBCPP_VERSION)
+constexpr std::size_t kControlBytes = 40;
+#else
 constexpr std::size_t kControlBytes = 32;
+#endif
+static_assert(kHeaderBytes % alignof(environment) == 0);
 static_assert(kControlBytes % alignof(environment) == 0);
 
-// A block: the control block's slot, then the scope.
+struct block_header {
+  detail::scope_cache *keep_in = nullptr;
+};
+static_assert(sizeof(block_header) <= kHeaderBytes);
+
+// A block: the header, the control block's slot, then the scope.
+block_header *header_of(void *block) noexcept { return static_cast<block_header *>(block); }
+void *slot_of(void *block) noexcept { return static_cast<unsigned char *>(block) + kHeaderBytes; }
+void *block_of_slot(void *slot) noexcept {
+  return static_cast<unsigned char *>(slot) - kHeaderBytes;
+}
 environment *scope_in(void *block) noexcept {
-  return std::launder(
-      reinterpret_cast<environment *>(static_cast<unsigned char *>(block) + kControlBytes));
+  return std::launder(reinterpret_cast<environment *>(static_cast<unsigned char *>(block) +
+                                                      kHeaderBytes + kControlBytes));
+}
+void *block_of_scope(environment *e) noexcept {
+  return reinterpret_cast<unsigned char *>(e) - kControlBytes - kHeaderBytes;
 }
 
 void *new_block() {
-  void *block = ::operator new(kControlBytes + sizeof(environment));
+  void *block = ::operator new(kHeaderBytes + kControlBytes + sizeof(environment));
+  ::new (block) block_header();
   try {
-    ::new (static_cast<unsigned char *>(block) + kControlBytes) environment();
+    ::new (static_cast<unsigned char *>(block) + kHeaderBytes + kControlBytes) environment();
   } catch (...) {
     ::operator delete(block);
     throw;
   }
+  scope_in(block)->from_extend.value = true;
   return block;
 }
 
@@ -498,85 +606,96 @@ void free_block(void *block) noexcept {
   scope_in(block)->~environment();
   ::operator delete(block);
 }
+} // namespace
 
-struct scope_pool {
+struct detail::scope_cache {
   void *scopes[kKeptScopes];
   std::size_t nscopes = 0;
   binding_node nodes[kKeptNodes];
   std::size_t nnodes = 0;
   // A kept scope must be what a new one is: an empty map with a new map's bucket count, so that
   // how many buckets a scope has (which heap measurement counts, heap.h) never depends on what
-  // the thread did before. (MSVC's maps start at 8 buckets and keep them up to 8 bindings;
+  // the context did before. (MSVC's maps start at 8 buckets and keep them up to 8 bindings;
   // libstdc++'s and libc++'s allocate none until the first binding, so there only scopes that
   // never had a binding are kept, with the nodes of all of them.)
   const std::size_t fresh_buckets = binding_map().bucket_count();
+  // The run of serials it hands out: scope_mark's scopes need one unique among the scopes made
+  // where a dropped one was.
+  std::uint32_t next_serial = 0;
+  std::uint32_t serials_left = 0;
+  // The last block deallocate() saw with this cache in its header (kept or freed), for
+  // release_scope to tell whether its drop deallocated the block.
+  void *last_released = nullptr;
 
-  scope_pool() = default;
-  scope_pool(const scope_pool &) = delete;
-  scope_pool &operator=(const scope_pool &) = delete;
-  ~scope_pool();
+  scope_cache() = default;
+  scope_cache(const scope_cache &) = delete;
+  scope_cache &operator=(const scope_cache &) = delete;
+  ~scope_cache() {
+    while (nscopes > 0)
+      free_block(scopes[--nscopes]);
+    // The nodes go with the array.
+  }
+
+  std::uint32_t serial() noexcept {
+    if (serials_left == 0) {
+      next_serial = g_next_serial_run.fetch_add(kSerialRun, std::memory_order_relaxed);
+      serials_left = kSerialRun;
+    }
+    --serials_left;
+    return next_serial++;
+  }
 };
 
-// Set once the thread has destroyed its pool: scopes dropped later in the thread's exit (by
-// another thread_local's destructor) are freed.
-thread_local bool t_scope_pool_gone = false;
-thread_local scope_pool t_scope_pool;
-// The block whose slot the next control block goes in: set by extend() just before it makes the
-// shared_ptr, which allocates the control block on this thread, at once.
-thread_local void *t_placing = nullptr;
-
-scope_pool *this_thread_pool() noexcept { return t_scope_pool_gone ? nullptr : &t_scope_pool; }
-
-scope_pool::~scope_pool() {
-  t_scope_pool_gone = true;
-  while (nscopes > 0)
-    free_block(scopes[--nscopes]);
-  // The nodes go with the array.
-}
-
-// Hands out the control block of a scope extend() made: the slot at the start of its block. Its
-// deallocation is the block's end: the block is kept for the next extend(), or freed.
+namespace {
+// Hands out the control block of a scope extend() made: the slot in its block. Its deallocation
+// is the block's end: the block is kept by the cache its header names, or freed.
 template <class T> struct block_allocator {
   using value_type = T;
-  block_allocator() = default;
-  template <class U> block_allocator(const block_allocator<U> &) noexcept {}
+  explicit block_allocator(void *slot) noexcept : slot(slot) {}
+  template <class U> block_allocator(const block_allocator<U> &o) noexcept : slot(o.slot) {}
 
   T *allocate(std::size_t /*n: one control block*/) {
     static_assert(sizeof(T) <= kControlBytes && alignof(T) <= alignof(std::max_align_t),
                   "a scope's control block doesn't fit its slot: raise kControlBytes");
-    void *slot = t_placing;
-    t_placing = nullptr;
-    if (!slot) // only extend() makes these, and it sets the slot first
+    if (!slot) // only extend() makes these, with the slot
       throw std::bad_alloc();
-    return static_cast<T *>(slot);
+    return static_cast<T *>(std::exchange(slot, nullptr));
   }
   void deallocate(T *p, std::size_t) noexcept {
-    void *block = p;
+    void *block = block_of_slot(p);
     const environment *e = scope_in(block);
-    scope_pool *pool = this_thread_pool();
-    if (pool && pool->nscopes < kKeptScopes && e->bindings.empty() &&
-        e->bindings.bucket_count() == pool->fresh_buckets) {
+    detail::scope_cache *cache = std::exchange(header_of(block)->keep_in, nullptr);
+    if (cache)
+      cache->last_released = block;
+    if (cache && cache->nscopes < kKeptScopes && e->bindings.empty() &&
+        e->bindings.bucket_count() == cache->fresh_buckets) {
       scope_in(block)->frozen = false;
-      pool->scopes[pool->nscopes++] = block;
+      cache->scopes[cache->nscopes++] = block;
       return;
     }
     free_block(block); // ~environment of an empty scope with no enclosing one: frees the map
   }
-  template <class U> bool operator==(const block_allocator<U> &) const noexcept { return true; }
-  template <class U> bool operator!=(const block_allocator<U> &) const noexcept { return false; }
+  template <class U> bool operator==(const block_allocator<U> &o) const noexcept {
+    return slot == o.slot;
+  }
+  template <class U> bool operator!=(const block_allocator<U> &o) const noexcept {
+    return slot != o.slot;
+  }
+
+  void *slot;
 };
 
 // Takes the place of the destructor for a scope extend() made: frees what the destructor would,
 // in its order (the enclosing scope, then each binding, through ~value_tag as the map's own
-// destruction would, so a release backlog sees the same owners), keeping the binding nodes of a
-// scope that will be kept. Its block goes with its control block (block_allocator::deallocate).
+// destruction would), keeping the binding nodes of a scope whose block a cache will keep. Its
+// block goes with its control block (block_allocator::deallocate).
 struct scope_recycler {
   void operator()(environment *e) const noexcept {
     detail::drop_owner(e->outer);
     e->outer.reset();
     binding_map &b = e->bindings;
-    scope_pool *pool = this_thread_pool();
-    if (!pool) {
+    detail::scope_cache *cache = header_of(block_of_scope(e))->keep_in;
+    if (!cache) {
       b.clear(); // as the map's destructor would
       return;
     }
@@ -586,25 +705,31 @@ struct scope_recycler {
       // still hold what it held (libc++ moves a std::function whose callable fits in it by
       // copying the callable), which a kept node would then keep alive.
       { const value_t gone = std::exchange(node.mapped(), value_t()); }
-      if (pool->nnodes < kKeptNodes)
-        pool->nodes[pool->nnodes++] = std::move(node);
+      if (cache->nnodes < kKeptNodes)
+        cache->nodes[cache->nnodes++] = std::move(node);
     }
   }
 };
 
-// Bind `name` to `val` in `b`, which doesn't have it: in a node this thread kept, if it has one.
-void bind_new(binding_map &b, const std::string &name, value_t &&val) {
-  scope_pool *pool = this_thread_pool();
-  if (!pool || pool->nnodes == 0) {
+// Bind `name` to `val` in `b`, which doesn't have it: in a node `cache` kept, if it has one.
+void bind_new(binding_map &b, const std::string &name, value_t &&val, detail::scope_cache *cache) {
+  if (!cache || cache->nnodes == 0) {
     b.emplace(name, std::move(val));
     return;
   }
-  // Out of the pool first: should the key's copy or the insert throw, the node (with the value,
+  // Out of the cache first: should the key's copy or the insert throw, the node (with the value,
   // if it got that far) is freed here, as a failed emplace frees its own.
-  binding_node node = std::move(pool->nodes[--pool->nnodes]);
+  binding_node node = std::move(cache->nodes[--cache->nnodes]);
   node.key() = name;
   node.mapped() = std::move(val);
   b.insert(std::move(node)); // the name is new, so it goes in
+}
+
+// `old`, a value a binding of a scope the evaluator running in `ctx` set no longer holds: to its
+// step's release backlog when the step slices, else dropped here.
+void release_replaced(exec_context &ctx, value_t &&old) noexcept {
+  if (ctx.data)
+    ctx.data->release(std::move(old));
 }
 
 // The bucket of a hash in a map of `buckets` buckets: hash mod buckets, which the standard
@@ -655,6 +780,44 @@ auto binding_in(Env *e, const std::string &name) -> decltype(&*e->bindings.begin
   }
   return nullptr;
 }
+
+// set() of `name` in `e`: replaces a binding it has (handing the old value to `replaced`), else
+// binds it anew (in a node from `cache`, if any).
+template <class Replaced>
+void set_in(environment &e, const std::string &name, value_t &&val, detail::scope_cache *cache,
+            Replaced &&replaced) {
+  if (e.frozen)
+    throw std::logic_error("set: '" + name + "' in a frozen scope");
+  if (!e.bindings.empty())
+    if (auto it = e.bindings.find(name); it != e.bindings.end()) {
+      replaced(std::exchange(it->second, std::move(val)));
+      return;
+    }
+  bind_new(e.bindings, name, std::move(val), cache);
+}
+
+// set_existing() of `name` from `e` (see set_in).
+template <class Replaced>
+void set_existing_in(environment &e, const std::string &name, value_t &&val,
+                     detail::scope_cache *cache, Replaced &&replaced) {
+  if (e.frozen)
+    throw std::logic_error("set_existing: '" + name + "' in a frozen scope");
+  environment *outermost = &e; // the outermost unfrozen scope walked so far
+  for (environment *s = &e; s && !s->frozen; s = s->outer.get()) {
+    auto it = s->bindings.find(name);
+    if (it != s->bindings.end()) {
+      replaced(std::exchange(it->second, std::move(val)));
+      return;
+    }
+    outermost = s;
+  }
+  // Not bound in an unfrozen scope: bind it in the outermost one, which shadows a frozen
+  // scope's binding of the same name rather than writing into the shared scope.
+  bind_new(outermost->bindings, name, std::move(val), cache);
+}
+
+// A dropped value, dropped.
+constexpr auto drop = [](value_t &&) noexcept {};
 } // namespace
 
 bool detail::bucket_formula_holds() {
@@ -697,22 +860,8 @@ detail::find_marked(const environment *e, const std::string &name, scope_mark &m
   return nullptr;
 }
 
-namespace {
-// The count scope serials are drawn from, a run at a time, and this thread's run: one locked add
-// per kSerialRun scopes. (Constant-initialized, so usable at any point of a thread's life.)
-constexpr std::uint32_t kSerialRun = 1024;
-std::atomic<std::uint32_t> g_next_serial_run{0};
-thread_local std::uint32_t t_next_serial = 0;
-thread_local std::uint32_t t_serials_left = 0;
-} // namespace
-
 std::uint32_t detail::new_scope_serial() noexcept {
-  if (t_serials_left == 0) {
-    t_next_serial = g_next_serial_run.fetch_add(kSerialRun, std::memory_order_relaxed);
-    t_serials_left = kSerialRun;
-  }
-  --t_serials_left;
-  return t_next_serial++;
+  return g_next_serial_run.fetch_add(1, std::memory_order_relaxed);
 }
 
 environment::~environment() { detail::drop_owner(outer); }
@@ -728,48 +877,76 @@ const value_t *environment::lookup(const std::string &name) const {
 }
 
 void environment::set(const std::string &name, value_t val) {
-  if (frozen)
-    throw std::logic_error("set: '" + name + "' in a frozen scope");
-  if (!bindings.empty())
-    if (auto it = bindings.find(name); it != bindings.end()) {
-      it->second = std::move(val);
-      return;
-    }
-  bind_new(bindings, name, std::move(val));
+  set_in(*this, name, std::move(val), nullptr, drop);
+}
+
+void environment::set(const std::string &name, value_t val, exec_context &ctx) {
+  set_in(*this, name, std::move(val), &ctx.scopes(),
+         [&ctx](value_t &&old) { release_replaced(ctx, std::move(old)); });
 }
 
 void environment::set_existing(const std::string &name, value_t val) {
-  if (frozen)
-    throw std::logic_error("set_existing: '" + name + "' in a frozen scope");
-  environment *outermost = this; // the outermost unfrozen scope walked so far
-  for (environment *e = this; e && !e->frozen; e = e->outer.get()) {
-    auto it = e->bindings.find(name);
-    if (it != e->bindings.end()) {
-      it->second = std::move(val);
-      return;
-    }
-    outermost = e;
-  }
-  // Not bound in an unfrozen scope: bind it in the outermost one, which shadows a frozen
-  // scope's binding of the same name rather than writing into the shared scope.
-  bind_new(outermost->bindings, name, std::move(val));
+  set_existing_in(*this, name, std::move(val), nullptr, drop);
+}
+
+void environment::set_existing(const std::string &name, value_t val, exec_context &ctx) {
+  set_existing_in(*this, name, std::move(val), &ctx.scopes(),
+                  [&ctx](value_t &&old) { release_replaced(ctx, std::move(old)); });
 }
 
 environment_ptr environment::extend(environment_ptr parent) {
-  scope_pool *pool = this_thread_pool();
+  void *block = new_block();
+  environment *child = scope_in(block);
+  child->outer = std::move(parent);
+  // Its control block goes in the block, so making the shared_ptr can't fail.
+  return environment_ptr(child, scope_recycler{}, block_allocator<environment>(slot_of(block)));
+}
+
+environment_ptr environment::extend(environment_ptr parent, exec_context &ctx) {
+  detail::scope_cache &cache = ctx.scopes();
   void *block = nullptr;
-  if (pool && pool->nscopes > 0) {
-    block = pool->scopes[--pool->nscopes];
+  if (cache.nscopes > 0) {
+    block = cache.scopes[--cache.nscopes];
     // A new scope, at the address of the one dropped last: a serial of its own tells the two
     // apart (scope_mark.h). A block from new_block() has a new scope's already.
-    scope_in(block)->serial.value = detail::new_scope_serial();
+    scope_in(block)->serial.value = cache.serial();
   } else {
     block = new_block();
   }
   environment *child = scope_in(block);
   child->outer = std::move(parent);
-  t_placing = block; // its control block goes in the block, so making the shared_ptr can't fail
-  return environment_ptr(child, scope_recycler{}, block_allocator<environment>());
+  return environment_ptr(child, scope_recycler{}, block_allocator<environment>(slot_of(block)));
+}
+
+void detail::release_scope(environment_ptr &scope, exec_context &ctx) noexcept {
+  if (!scope || !scope->from_extend.value || scope.use_count() != 1) {
+    scope.reset();
+    return;
+  }
+  scope_cache &cache = ctx.scopes();
+  void *block = block_of_scope(scope.get());
+  cache.last_released = nullptr;
+  header_of(block)->keep_in = &cache;
+  scope.reset(); // the recycler keeps its binding nodes; its deallocation keeps its block
+  // A weak reference (a cycle registry's) keeps the control block, and so the block, past the
+  // drop: then it is deallocated later, wherever that reference goes, and must not come back to
+  // this cache, which may be gone by then. (Deallocated now, the block is the cache's or freed:
+  // not touched again here.)
+  if (cache.last_released != block)
+    header_of(block)->keep_in = nullptr;
+}
+
+// -- the context ---------------------------------------------------------------
+
+exec_context::exec_context()
+    : scopes_(nullptr, [](detail::scope_cache *c) { delete c; }), vectors_(nullptr, nullptr) {}
+
+exec_context::~exec_context() = default;
+
+detail::scope_cache &exec_context::scopes() {
+  if (!scopes_)
+    scopes_.reset(new detail::scope_cache);
+  return *scopes_;
 }
 
 // to_string and values_equal are walks: see data_job.cpp.

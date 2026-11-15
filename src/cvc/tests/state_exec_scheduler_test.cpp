@@ -1311,18 +1311,13 @@ TEST(SchedulerPumpOwner, NestsRefusesAnotherThreadAndReleases) {
 }
 
 namespace {
-// The id of `r` as bound_cycle_registry_id() reports it while `r` is bound: 0 while the scopes are
-// Stage 1's interface stubs (until S1.1's heap half binds them).
-std::uint64_t id_of(cycle_registry &r) {
-  const cycle_registry_scope bound(&r);
-  return bound_cycle_registry_id();
-}
+std::uint64_t id_of(cycle_registry &r) { return cycle_registry_id(r); }
 
-// An env whose (bound-id) returns the registry bound while it runs.
+// An env whose (bound-id) returns the id of the registry its call's context has.
 environment_ptr bound_id_env() {
   environment_ptr env = builtins::make_default_environment();
-  builtins::register_fn(env, "bound-id", [](std::span<const value_t>) {
-    return value_t(static_cast<int64_t>(bound_cycle_registry_id()));
+  builtins::register_fn(env, "bound-id", [](call_args a) {
+    return value_t(static_cast<int64_t>(cycle_registry_id(a.context())));
   });
   return env;
 }
@@ -1333,23 +1328,20 @@ template <class S> int64_t result_of(const S &s, int pid) {
 }
 } // namespace
 
-// S1.1: a scheduler given a registry binds it on each entry, whoever drives it (sync_run,
-// sync_run_steps, sync_step, the coroutine step and run, and a drain's posted commands), and
-// restores the caller's binding after; a bare scheduler binds nothing. A run that leaves nothing
-// runnable collects the registry when a collection is due (the idle collection).
-TEST(AsyncSchedulerRegistry, EveryEntryBindsTheSchedulersRegistry) {
+// S1.1: a scheduler given a registry runs every step in a context with it, whoever drives it
+// (sync_run, sync_run_steps, sync_step, the coroutine step and run); a bare scheduler has a
+// registry of its own (its evaluator's). A run that leaves nothing runnable collects the registry
+// when a collection is due (the idle collection).
+TEST(AsyncSchedulerRegistry, EveryEntryRunsInTheSchedulersRegistry) {
   cycle_registry_ptr mine = make_cycle_registry();
-  cycle_registry_ptr outer = make_cycle_registry();
   const std::uint64_t want = id_of(*mine);
-  if (want == 0)
-    GTEST_SKIP() << "the registry scopes bind nothing yet (S1.1's heap half)";
+  ASSERT_NE(want, 0u);
   async_scheduler s;
   s.set_cycle_registry(mine.get());
   EXPECT_EQ(s.registry(), mine.get());
+  EXPECT_EQ(s.evaluation_context().registry, mine.get());
   execute_options opts;
   opts.env = bound_id_env();
-  const cycle_registry_scope caller(outer.get()); // the caller's binding, restored after each
-  const std::uint64_t caller_id = bound_cycle_registry_id();
 
   int pid = s.execute(std::string("(bound-id)"), opts);
   s.sync_run();
@@ -1368,29 +1360,24 @@ TEST(AsyncSchedulerRegistry, EveryEntryBindsTheSchedulersRegistry) {
   pid = s.execute(std::string("(bound-id)"), opts);
   s.run().sync_wait();
   EXPECT_EQ(result_of(s, pid), static_cast<int64_t>(want)) << "run";
-  std::uint64_t in_drain = 0;
-  control_cmd query;
-  query.what = control_cmd::kind::query;
-  query.query = [&](scheduler_base &) { in_drain = bound_cycle_registry_id(); };
-  s.post_control(0, std::move(query));
-  s.drain_ingress();
-  EXPECT_EQ(in_drain, want) << "drain_ingress";
-  EXPECT_EQ(bound_cycle_registry_id(), caller_id);
-
-  // A bare scheduler binds nothing: its steps see the caller's registry.
+  // A bare scheduler has a registry of its own.
   async_scheduler bare;
   pid = bare.execute(std::string("(bound-id)"), opts);
   bare.sync_run();
-  EXPECT_EQ(result_of(bare, pid), static_cast<int64_t>(caller_id));
+  const int64_t bare_id = result_of(bare, pid);
+  EXPECT_NE(bare_id, 0);
+  EXPECT_NE(bare_id, static_cast<int64_t>(want));
+  EXPECT_EQ(bare_id, static_cast<int64_t>(cycle_registry_id(&bare.evaluation_context())));
 
   // The idle collection: enough tracked in `mine` for a collection to be due, and a run on a fresh
   // scheduler, too short for its every-64th-step check, which leaves nothing runnable, collects it.
   {
-    const cycle_registry_scope bound(mine.get());
+    exec_context ctx;
+    ctx.registry = mine.get();
     std::vector<environment_ptr> scopes;
     for (int i = 0; i < 300; ++i) {
       scopes.push_back(environment::extend(nullptr));
-      track_captured_env(scopes.back());
+      track_captured_env(&ctx, scopes.back());
     }
   }
   EXPECT_GE(tracked_objects(*mine), 300u);
@@ -1402,12 +1389,11 @@ TEST(AsyncSchedulerRegistry, EveryEntryBindsTheSchedulersRegistry) {
   EXPECT_EQ(tracked_objects(*mine), 0u);
 }
 
-// S1.1 for the sync scheduler (the init lane's): run, run_steps and step bind its registry.
-TEST(SchedulerRegistry, RunAndStepBindTheSchedulersRegistry) {
+// S1.1 for the sync scheduler (the init lane's): run, run_steps and step run in its registry.
+TEST(SchedulerRegistry, RunAndStepRunInTheSchedulersRegistry) {
   cycle_registry_ptr mine = make_cycle_registry();
   const std::uint64_t want = id_of(*mine);
-  if (want == 0)
-    GTEST_SKIP() << "the registry scopes bind nothing yet (S1.1's heap half)";
+  ASSERT_NE(want, 0u);
   scheduler s;
   s.set_cycle_registry(mine.get());
   execute_options opts;
@@ -1422,7 +1408,6 @@ TEST(SchedulerRegistry, RunAndStepBindTheSchedulersRegistry) {
   while (s.has_runnable())
     s.step();
   EXPECT_EQ(result_of(s, pid), static_cast<int64_t>(want)) << "step";
-  EXPECT_EQ(bound_cycle_registry_id(), 0u);
 }
 
 // S1.1, the stream half: each scheduler draws math.random from the stream it was given, so two
@@ -1431,23 +1416,18 @@ TEST(AsyncSchedulerRegistry, EachSchedulerDrawsFromItsOwnStream) {
   environment_ptr env = builtins::make_default_environment();
   stdlib_registry modules;
   modules.import_module("math", env);
-  const auto draw = [&] {
+  // A call in a context with `s` (null: none, so the registry's own stream).
+  const auto draw = [&](random_stream *s) {
+    exec_context ctx;
+    ctx.random = s;
     const value_t *fn = env->lookup("math.random");
-    return std::get<double>(std::get<native_fn>(fn->v)(std::span<const value_t>()).v);
+    return std::get<double>(
+        std::get<native_fn>(fn->v)(call_args(std::span<const value_t>(), &ctx)).v);
   };
   random_stream p1, p2;
   p1.seed = p2.seed = 7;
-  double first = 0.0, again = 0.0;
-  {
-    const random_stream_scope bound(&p1);
-    first = draw();
-  }
-  {
-    const random_stream_scope bound(&p2);
-    again = draw();
-  }
-  if (first != again)
-    GTEST_SKIP() << "the stream scopes bind nothing yet (S1.2)";
+  const double first = draw(&p1);
+  EXPECT_EQ(draw(&p2), first);
   random_stream sa, sb;
   sa.seed = sb.seed = 7;
   async_scheduler a, b;
@@ -1460,7 +1440,7 @@ TEST(AsyncSchedulerRegistry, EachSchedulerDrawsFromItsOwnStream) {
     const int pa = a.execute(std::string("(math.random)"), opts);
     const int pb = b.execute(std::string("(math.random)"), opts);
     a.sync_run();
-    draw(); // the thread's own engine moves on between them
+    draw(nullptr); // the registry's own stream moves on between them
     b.sync_run();
     da.push_back(std::get<double>(a.get_result(pa)->v));
     db.push_back(std::get<double>(b.get_result(pb)->v));
@@ -1529,11 +1509,13 @@ TEST_F(CrossSchedulerTest, MultipleProgramsSameResults) {
 constexpr const char *kNeverYields = "(next (generator (lambda () (while t 1))))";
 
 TEST(StepDeadlineTest, ACheckThrowsEvaluationTimeoutNamingTheCall) {
-  EXPECT_NO_THROW(eval_deadline_check("collections.range")); // no deadline armed
-  eval_deadline_guard spent(0.0);
+  exec_context ctx;
+  EXPECT_NO_THROW(eval_deadline_check(&ctx, "collections.range"));    // no deadline armed
+  EXPECT_NO_THROW(eval_deadline_check(nullptr, "collections.range")); // no context
+  eval_deadline_guard spent(ctx, 0.0);
   EXPECT_TRUE(spent.expired());
   try {
-    eval_deadline_check("collections.range");
+    eval_deadline_check(&ctx, "collections.range");
     FAIL() << "no evaluation_timeout";
   } catch (const evaluation_timeout &e) {
     EXPECT_STREQ(e.what(), "collections.range: evaluation exceeded timeout");
@@ -1541,8 +1523,9 @@ TEST(StepDeadlineTest, ACheckThrowsEvaluationTimeoutNamingTheCall) {
 }
 
 TEST(StepDeadlineTest, EveryEvaluatorCutsALoopInsideAStepAsATimeout) {
-  // Each evaluator's timeout arms the thread's deadline, so the generator's own poll cuts the
-  // loop where the evaluator's between-steps check cannot.
+  // Each evaluator's timeout arms the deadline in its own context, which the generator's steps
+  // run in, so the generator's own poll cuts the loop where the evaluator's between-steps check
+  // cannot.
   const auto cut = [](auto &&evaluate) -> std::string {
     try {
       evaluate();
@@ -1576,7 +1559,7 @@ TEST(StepDeadlineTest, TheSyncSchedulerKillsAProcessCutInsideAStep) {
 TEST(StepDeadlineTest, TheSyncSchedulerLeavesADeadlineArmedOutsideItToItsCaller) {
   scheduler sched;
   const int pid = sched.execute(std::string(kNeverYields)); // no max_time of its own
-  eval_deadline_guard outer(0.05);
+  eval_deadline_guard outer(sched.evaluation_context(), 0.05);
   EXPECT_THROW(sched.run(), evaluation_timeout);
   EXPECT_NE(sched.get_process_info(pid)->status, process_status::killed);
 }
