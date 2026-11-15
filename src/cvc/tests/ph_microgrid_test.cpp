@@ -17,9 +17,9 @@
 //   - then the same DGU law and a 0.4 ohm / 0.8 H line added at bus 0 or at bus 2;
 //   - 200 steps of 0.01 s under held inputs.
 // Here the laws are known, so the errors are the transition's own: the split step with Euler or
-// midpoint coupling, against RK4 at dt / 16 (dt / 64 gives the same scores to six digits). The scores are voltage, DGU-current and line-current
-// RMSE, the peak line-current error, and whether each scheme orders the two candidates by peak
-// line current as the reference does.
+// midpoint coupling, against RK4 at dt / 16 (dt / 64 gives the same scores to six digits). The
+// scores are voltage, DGU-current and line-current RMSE, the peak line-current error, and whether
+// each scheme orders the two candidates by peak line current as the reference does.
 
 #include <algorithm>
 #include <cmath>
