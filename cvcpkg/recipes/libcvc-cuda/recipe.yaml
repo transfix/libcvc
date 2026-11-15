@@ -67,6 +67,9 @@ depends:
     # No cgal, gmp or mpfr: libcvc does not use CGAL (see the CPU recipe).
     - name: hdf5
     - name: log4cplus
+    # End-to-end encryption (cvc::net::E2eeStore, the e2ee-* verbs): see the CPU recipe.
+    - name: libsodium
+      platforms: [linux, macos, windows, wasm, wasm-mt]
     - name: tiff
     - name: imagemagick
     # ImageMagick delegates + libtiff codecs. `cvcpkg install` installs each

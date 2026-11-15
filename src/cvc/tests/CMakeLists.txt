@@ -28,6 +28,9 @@ add_executable(net_http_client_test net_http_client_test.cpp)
 add_executable(ariadne_data_test ariadne_data_test.cpp)
 add_executable(net_ws_client_test net_ws_client_test.cpp)
 add_executable(net_policy_test net_policy_test.cpp)
+# End-to-end encrypted DMs (cvc/net/e2ee.h): e2ee.js's vectors replayed, and the e2ee-* verbs.
+add_executable(e2ee_test e2ee_test.cpp)
+add_executable(ariadne_e2ee_test ariadne_e2ee_test.cpp)
 add_executable(net_oidc_test net_oidc_test.cpp)
 add_executable(uri_http_cache_test uri_http_cache_test.cpp)
 add_executable(state_test state_test.cpp)
@@ -353,6 +356,8 @@ set(TEST_TARGETS
   ariadne_data_test
   net_ws_client_test
   net_policy_test
+  e2ee_test
+  ariadne_e2ee_test
   net_oidc_test
   uri_http_cache_test
   state_test
@@ -838,6 +843,20 @@ target_link_libraries(net_ws_client_test
 )
 
 target_link_libraries(net_policy_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(e2ee_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_e2ee_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2814,6 +2833,8 @@ cvc_discover_tests(net_http_client_test)
 cvc_discover_tests(ariadne_data_test)
 cvc_discover_tests(net_ws_client_test)
 cvc_discover_tests(net_policy_test)
+cvc_discover_tests(e2ee_test)
+cvc_discover_tests(ariadne_e2ee_test)
 cvc_discover_tests(net_oidc_test)
 cvc_discover_tests(uri_http_cache_test)
 cvc_discover_tests(state_test)
