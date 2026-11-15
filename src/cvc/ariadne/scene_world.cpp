@@ -22,6 +22,7 @@
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
 #include <cvc/core/clock_follower.h>
+#include <cvc/core/sim_tick.h>
 #include <cvc/core/world_clock_binding.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
@@ -737,6 +738,17 @@ void SceneWorld::restart(std::vector<std::string> *warnings) {
   publish_stats();
 }
 
+void SceneWorld::use_vehicle_clock(cvc::app &app, const Scene &scene,
+                                   std::vector<std::string> *warnings) {
+  // The vehicles' tick (cvc::kSimTick) and a 100 Hz physics step are whole numbers of the 0.01 s
+  // quantum; the scenes' default 1/120 s divides neither. A clock that has ticked keeps its
+  // quantum, and the tick is then held to whole physics steps of it.
+  if (!scene.vehicles.empty() && !cvc::adopt_sim_clock(app.world_clock()))
+    warn(warnings, "ari: world: vehicles: the clock has already run at " +
+                       std::to_string(app.world_clock().fixed_dt()) +
+                       " s quanta; the vehicles' tick is held to whole physics steps of it");
+}
+
 std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &scene,
                                                    const std::string &bind_prefix,
                                                    const std::string &stats_key,
@@ -753,6 +765,7 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
       data(n);
     return nullptr;
   }
+  use_vehicle_clock(app, scene, warnings);
   std::map<const SceneNode *, std::array<double, 16>> matrices;
   scene_world_matrices(scene, matrices);
 

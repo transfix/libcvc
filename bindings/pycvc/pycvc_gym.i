@@ -351,9 +351,10 @@ public:
   WorldGym(const std::string &document, const std::string &prefix, int count,
            const std::string &world, PyObject *agents, PyObject *set, bool wander,
            unsigned long long max_steps, int rays, double range_m, double ready_timeout,
-           bool regenerate) {
+           bool regenerate, double tick) {
     cvc::ariadne::gym_options o;
     o.regenerate = regenerate;
+    o.tick = tick;
     o.prefix = prefix;
     o.count = count;
     o.world = world;
@@ -591,8 +592,9 @@ class WorldGym {
 public:
   WorldGym(const std::string &document, const std::string &prefix = "", int count = 1,
            const std::string &world = "", PyObject *agents = nullptr, PyObject *set = nullptr,
-           bool wander = false, unsigned long long max_steps = 1200, int rays = 16,
-           double range_m = 60.0, double ready_timeout = 120.0, bool regenerate = false);
+           bool wander = false, unsigned long long max_steps = 1000, int rays = 16,
+           double range_m = 60.0, double ready_timeout = 120.0, bool regenerate = false,
+           double tick = 0.0);
   ~WorldGym();
   PyObject *reset(unsigned long long seed = 0);
   PyObject *step(PyObject *steer, PyObject *accel);

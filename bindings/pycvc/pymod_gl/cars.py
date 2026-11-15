@@ -58,8 +58,12 @@ except Exception:  # pragma: no cover - pycvc is what drives the cars
 
 #: The plants a world document runs its vehicles on (GymCars' ``vehicle``).
 GYM_PLANTS = ("jolt", "kinematic", "dynamic", "dynamic4w")
-#: The tick (s): the controller runs once per tick, and the world steps once.
-DT = 0.05
+#: The tick (s): the controller runs once per tick, and the world steps once. libcvc's one
+#: simulation tick (``pycvc.SIM_TICK``, cvc/core/sim_tick.h), 0.06 s.
+DT = float(getattr(pycvc, "SIM_TICK", 0.06)) if pycvc is not None else 0.06
+#: The live clock's quantum and its catch-up per frame at 1x (``pycvc.SIM_QUANTUM``, ``SIM_CATCHUP``).
+QUANTUM = float(getattr(pycvc, "SIM_QUANTUM", 0.01)) if pycvc is not None else 0.01
+CATCHUP = float(getattr(pycvc, "SIM_CATCHUP", 0.25)) if pycvc is not None else 0.25
 #: The navigator's normalized units per metre (its trained metric, as libcvc's nav demos).
 SCALE = 0.05
 #: nav's bicycle substeps per tick.
@@ -1378,6 +1382,22 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
         host.close()
         return 1
 
+    # A drawn live run ticks against world time: a clock at the simulation quantum advances by the
+    # frame's wall time (run.ticks is then the speed), and the cars step the ticks it has passed,
+    # catching up at most CATCHUP s of world time a frame. Headless and captured runs (--frames)
+    # step lockstep, run.ticks ticks a frame, so their logs do not depend on the machine's pace.
+    clock = follower = None
+    if drawn and not args.frames and pycvc is not None and hasattr(pycvc, "clock_follower"):
+        clock = pycvc.world_clock(QUANTUM, 1.0, int(round(CATCHUP / QUANTUM)), 1, True)
+        follower = pycvc.clock_follower.for_step(clock, DT)
+
+    def ticks_due(dt) -> int:
+        if clock is None:
+            return max(1, host.get_int("run.ticks", 1))
+        clock.set_scale(max(0.0, float(host.get_int("run.ticks", 1))))
+        clock.advance(dt)
+        return int(follower.take(clock))
+
     @host.on_frame
     def tick(dt):
         cars = st["cars"]
@@ -1385,7 +1405,7 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
             cars.pull()
             if not host.get_bool("run.paused"):
                 p = {k: host.get_float(f"ctl.{k}", v) for k, v in PARAMS_DEFAULTS(params).items()}
-                for _ in range(max(1, host.get_int("run.ticks", 1))):
+                for _ in range(ticks_due(dt)):
                     s = cars.state()
                     info = {}
                     if cars.navigator:

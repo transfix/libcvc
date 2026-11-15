@@ -1155,6 +1155,7 @@ void realize_physics(SceneGraph &sg, const cvc::ariadne::Scene &scene,
       in.data_path = b.path;
       inputs.push_back(std::move(in));
     }
+  cvc::ariadne::SceneWorld::use_vehicle_clock(sg.appContext(), scene, warnings);
   out.world = cvc::ariadne::SceneWorld::build(sg.appContext(), scene.physics, inputs,
                                               out.height_fields, stats_key, warnings);
   if (!out.world)

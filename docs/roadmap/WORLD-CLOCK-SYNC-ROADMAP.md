@@ -56,6 +56,40 @@ Three problems follow from that:
   controller (5), and 0.1 s and 0.05 s rollouts. Ariadne and L-system scenes without a navigator keep
   1/120 s.
 
+## One tick (2026-11-15)
+
+Every simulation host and trainer shares one tick: the navigator's step and the control period,
+one command per agent per tick. It is configurable everywhere, with one default for all
+(Joe, 2026-11-14: "the sim tick should be configurable, but everything should use the same default.
+Realtime should tick against world time at a sensible slice"; "0.06 s default, 0.25 s cap").
+
+- **The constants** ([`cvc/core/sim_tick.h`](../../inc/cvc/core/sim_tick.h); pycvc `SIM_TICK`,
+  `SIM_QUANTUM`, `SIM_CATCHUP`):
+  - `kSimTick` is 0.06 s, the navigator's trained `veh.dt`;
+  - `kSimQuantum` is 0.01 s, the suite quantum above;
+  - `kSimCatchup` is 0.25 s, the world time a real-time frame may catch up at 1×.
+- **The helpers:**
+  - `whole_steps(span, step)` refuses a tick that is not whole steps;
+  - `sim_clock_config(scale)` is a host's live clock: the quantum, the speed, a cap of 25 quanta
+    that grows with the speed (`cap_scales_with_rate`);
+  - `adopt_sim_clock(clock)` moves a clock that has not ticked onto it.
+- **World documents with vehicles** run on that clock (`SceneWorld::use_vehicle_clock`, called by
+  `from_scene` and by cvcGL's `realize_scene`). The app clock goes from the scenes' 1/120 s to
+  0.01 s, so physics steps at 100 Hz and a tick is 6 steps; 1/120 s divides neither 0.06 s nor
+  0.01 s. Scenes without vehicles keep 1/120 s.
+- **The gym and the vehicles:** `WorldVehicles` ticks at `kSimTick` (`set_tick` for another). The gym
+  steps one tick (`gym_options::tick`, pycvc `tick=`) and runs 1,000 steps an episode (60 s) by
+  default.
+- **`pycvc_gl.cars`:** `DT` is `SIM_TICK`. A drawn live window ticks against world time: a clock at
+  the quantum advances by the frame's wall time, and the cars step the ticks it has passed.
+  `run.ticks` is then the speed. Headless and captured runs (`--frames`) stay lockstep, one tick
+  a frame.
+- **Not changed:**
+  - `plant_log_scene`'s and `cvc plant-log`'s 0.02 s: the drift tooling's 50 Hz protocol, which
+    the P8 fits were measured at;
+  - `nav::sim_thread`'s rate-paced constructor;
+  - cvcdbg's demo3 and GRL-SNAM's hosts, which move in their own repositories (T2, T3).
+
 ## Migration checklist (libcvc) — step C2, done
 
 Every row was migrated on branch `feat/world-clock-demos` (2026-10-14). Each demo was verified on

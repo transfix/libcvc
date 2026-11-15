@@ -21,6 +21,7 @@
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
 #include <cvc/core/process.h> // self_path
+#include <cvc/core/sim_tick.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/dyn_4w.h> // dyn4_params_of
@@ -50,7 +51,6 @@ namespace ph = cvc::physics;
 namespace {
 
 constexpr double kScale = 0.05;  // nav's normalized units per metre, as libcvc's nav demos
-constexpr double kNavDt = 0.05;  // nav's tick (s), rounded to whole physics steps
 constexpr double kReach = 3.0;   // m from its goal that counts as there
 constexpr double kSpacing = 8.0; // m kept between spawns drawn from the grid
 constexpr double kPi = 3.14159265358979323846;
@@ -449,6 +449,7 @@ struct WorldVehicles::impl {
   std::map<std::string, group> groups;
   bool ready = false; // a grid, and the navigator's config for it
   cvc::nav::sim_world::config cfg;
+  double tick = cvc::kSimTick; // the navigator's tick asked for (s; set_tick)
   int every = 1;           // physics steps per nav tick
   std::uint64_t steps = 0; // physics steps since the navigator was built
   std::uint64_t draws = 0; // goals drawn (each draw's seed)
@@ -661,9 +662,15 @@ struct WorldVehicles::impl {
     if (!grid)
       return;
     sdf = cvc::nav::signed_distance(*grid);
+    // The tick in whole physics steps: exactly, on the simulation clock's quantum (sim_tick.h);
+    // the nearest whole number of a step that does not divide it, with a note in the status.
     const double fixed_dt = world->config().fixed_dt;
-    every = std::max(1, static_cast<int>(std::lround(kNavDt / fixed_dt)));
+    every = std::max(1, static_cast<int>(std::lround(tick / fixed_dt)));
     const double dt = every * fixed_dt;
+    if (std::fabs(dt - tick) > 1e-9)
+      status = "the tick " + std::to_string(tick) + " s is not a whole number of the physics " +
+               "world's " + std::to_string(fixed_dt) + " s steps; it is " + std::to_string(dt) +
+               " s";
     // The navigator's vehicle: the largest and fastest any archetype may be (each vehicle plans
     // with its own envelope and size, nav_plant's plan_with_vehicle).
     double length = 0.0, top = 0.0, wheelbase = 0.0, steer = 1e9, accel = 1e9;
@@ -1546,6 +1553,13 @@ double WorldVehicles::tick_seconds() const {
 }
 
 int WorldVehicles::steps_per_tick() const { return _impl->ready ? _impl->every : 0; }
+
+void WorldVehicles::set_tick(double seconds) {
+  if (!(seconds > 0.0) || !std::isfinite(seconds))
+    throw std::invalid_argument("WorldVehicles::set_tick: the tick must be finite and > 0");
+  _impl->tick = seconds;
+}
+double WorldVehicles::tick() const { return _impl->tick; }
 
 std::shared_ptr<const nav::world_grid> WorldVehicles::grid() const { return _impl->grid; }
 
