@@ -100,8 +100,10 @@ struct vehicle_look {
 
 // A vehicle the world offers (ARIADNE_WORLDS.md §14, L2), beside the avatars' archetypes:
 //
-//   plant        what drives it: jolt (the Jolt vehicle, in the world's own physics), or kinematic,
-//                dynamic, dynamic4w (named; a scene world runs jolt so far)
+//   plant        what drives it, in the world's own physics: jolt (the Jolt vehicle), kinematic
+//                (nav's bicycle), dynamic (the single-track model), dynamic4w (the four-wheel
+//                model with suspension); dynamic:<preset> and dynamic4w:<preset> name the vehicle
+//                as well, as `vehicle: <preset>` would
 //   vehicle      its body: a preset (humvee, roboracer), with any of `overrides` on top
 //   look         how it is drawn
 //   ranges       what a spawn may set, by setting: mass (kg) and max_speed (m/s), each [lo, hi]
