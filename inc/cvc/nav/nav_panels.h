@@ -8,7 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-// What the arms' windows show (the shipped component nav_lab_panels.ari: Stats and Ledger), from a
+// What the arms' windows show (the shipped components nav_lab_stats.ari and nav_lab_ledger.ari), from a
 // run log (cvc/nav/run_log.h) at a tick: a live run's log at its last tick, a replay's at the play
 // head, so a replay shows at a tick what the live run showed there, cell for cell. Every host
 // writes them through these functions (pycvc_gl.nav_lab, a C++ Ariadne host, the browser's), as

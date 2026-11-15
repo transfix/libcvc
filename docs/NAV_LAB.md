@@ -176,11 +176,11 @@ memory, `arms_run::log()` is the same log, growing tick by tick.
 
 ## The windows
 
-`src/cvc/ariadne/components/nav_lab_panels.ari` is a shipped component with two units,
-`nav_lab_stats` and `nav_lab_ledger`:
+Two shipped components hold the windows, `src/cvc/ariadne/components/nav_lab_stats.ari` and
+`nav_lab_ledger.ari`:
 
 ```yaml
-import: cvc://components/nav_lab_panels.ari
+import: [cvc://components/nav_lab_stats.ari, cvc://components/nav_lab_ledger.ari]
 requires:
   - {name: chart, optional: true}
 windows:
@@ -301,7 +301,7 @@ cache.
 to the goals from 71 m to 54 m, checkpoint 60 (orange) beside step 0 (blue).*
 
 **The view.** `cvc::nav::scrub_view` writes every window, so the Python view and the C++ one are
-the same. Libcvc's `nav_lab_panels` component holds three more units for it:
+the same. Libcvc's `nav_lab_scrub` component holds its three windows:
 
 - **`nav_lab_scrub`** holds the controls:
   - the checkpoint, picked by a combo (`scrub.choice`), a slider (`scrub.pos`), Previous and Next
