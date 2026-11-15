@@ -27,11 +27,20 @@ namespace cvc::state_exec {
 
 async_evaluator::async_evaluator(environment_ptr global_env) : global_env_(std::move(global_env)) {}
 
+exec_context &async_evaluator::context() {
+  if (!ctx_.registry) {
+    own_registry_ = make_cycle_registry();
+    ctx_.registry = own_registry_.get();
+  }
+  return ctx_;
+}
+
 // ---------------------------------------------------------------------------
 // public API — coroutines
 // ---------------------------------------------------------------------------
 
 task<value_t> async_evaluator::evaluate(value_t expr, environment_ptr env) {
+  context(); // its registry, which what its programs capture is tracked in
   auto run_env = env ? env : environment::extend(global_env_);
   root_expr_ = expr;
   stats_.start();
@@ -88,9 +97,9 @@ value_t async_evaluator::sync_evaluate(const value_t &expr, environment_ptr env,
     std::optional<std::chrono::steady_clock::time_point> prev;
     ~deadline_restore() { self->deadline_ = prev; }
   } restore{this, saved_deadline};
-  // The thread's evaluation deadline cuts a loop inside one native call, which never reaches
-  // check_interrupted_async (as stackless_evaluator::run arms it).
-  eval_deadline_guard deadline_guard(timeout_sec);
+  // The evaluation deadline, in the context it runs in, cuts a loop inside one native call, which
+  // never reaches check_interrupted_async (as stackless_evaluator::run arms it).
+  eval_deadline_guard deadline_guard(context(), timeout_sec);
 
   auto t = evaluate(expr, env);
   // sync_wait drives the coroutine on both the trampoline (GCC/Clang) and the
@@ -248,7 +257,7 @@ task<value_t> async_evaluator::eval_internal(const value_t &expr, environment_pt
     evaled.push_back(co_await eval_internal(a, env));
 
   if (auto *fn = std::get_if<native_fn>(&func_val->v))
-    co_return (*fn)(evaled);
+    co_return (*fn)(call_args(evaled, &ctx_));
 
   if (auto *cp = std::get_if<closure_ptr>(&func_val->v))
     co_return co_await apply_closure(*cp, evaled);
@@ -384,7 +393,7 @@ task<value_t> async_evaluator::do_lambda(const std::vector<value_t> &args, envir
   cls->env_snapshot = env;
   // Bound back into env (a defun, a method, a lambda set there), it is a cycle that only the
   // collector frees, as in the stackless evaluator.
-  track_captured_env(env);
+  track_captured_env(&ctx_, env);
   co_return value_t{std::move(cls)};
 }
 
@@ -457,7 +466,7 @@ task<value_t> async_evaluator::do_super(const std::vector<value_t> &args, enviro
           fn_args.push_back(self_val);
           for (size_t i = 2; i < args.size(); ++i)
             fn_args.push_back(co_await eval_internal(args[i], env));
-          co_return (*fn)(fn_args);
+          co_return (*fn)(call_args(fn_args, &ctx_));
         }
         if (auto *cp = std::get_if<closure_ptr>(&v.v)) {
           std::vector<value_t> fn_args;
@@ -691,7 +700,7 @@ task<value_t> async_evaluator::apply_closure(const closure_ptr &cls,
 value_t async_evaluator::substitute(const value_t &tmpl,
                                     const std::unordered_map<std::string, value_t> &subst) {
   // The stackless evaluator's walk, run whole: no native recursion per template level.
-  return run_to_completion(*make_substitute_job(tmpl, subst));
+  return run_to_completion(&ctx_, *make_substitute_job(tmpl, subst));
 }
 
 } // namespace cvc::state_exec
