@@ -6,6 +6,7 @@
 // cvcGL are cvcgl_ariadne_physics's test_same_world_headless_and_drawn.
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cvc/ariadne/app_runtime.h>
@@ -15,6 +16,7 @@
 #include <cvc/ariadne/scene_generated_world.h>
 #include <cvc/ariadne/scene_geometry.h>
 #include <cvc/ariadne/scene_world.h>
+#include <cvc/ariadne/server_document.h>
 #include <cvc/ariadne/world_rules.h>
 #include <cvc/ariadne/world_spawns.h>
 #include <cvc/ariadne/world_vehicles.h>
@@ -770,7 +772,8 @@ TEST(AriadneWorldVehicles, TheWorldBlockDeclaresVehicles) {
   };
   EXPECT_NE(error("{ vehicle: tank }").find("not a preset"), std::string::npos);
   EXPECT_NE(error("{ plant: hover }").find("plant 'hover'"), std::string::npos);
-  EXPECT_NE(error("{ controllers: [walker@1] }").find("nav@1 or none"), std::string::npos);
+  EXPECT_NE(error("{ controllers: [walker@1] }").find("nav@1, none or external"),
+            std::string::npos);
   EXPECT_NE(error("{ ranges: { mass: [10, 5] } }").find("ranges: mass"), std::string::npos);
   EXPECT_NE(error("{ look: { file: '' } }").find("names nothing"), std::string::npos);
   EXPECT_EQ(error("{ vehicle: roboracer }"), "");
@@ -1107,6 +1110,330 @@ TEST(AriadneWorldVehicles, AHeadlessAppRuntimeTakesTheDocumentsVehicles) {
   }
   EXPECT_EQ(art.scene_world()->vehicles()->size(), 1u) << val(app, "vehicles.spawn.status");
   EXPECT_FALSE(any_contains(warns, "world:"));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Entity intents (ARIADNE_WORLDS.md section 14, S1): an entity steered from outside, by its keys,
+// a table of intents, a C++ (or Python) setter and a server document's published namespace.
+
+namespace {
+
+const char *kIntents = R"(
+world:
+  vehicles:
+    intents: /drive
+    archetypes:
+      humvee:
+        vehicle: humvee
+        controllers: [nav@1, none, external]
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [160, 160, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+
+LoadResult load_intents() {
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, kIntents);
+  if (r.ok)
+    if (const Value *world = find_world_block(r)) {
+      world_rules rules = default_world_rules();
+      EXPECT_EQ(parse_world_block(*world, rules), "");
+      r.scene.vehicles = rules.vehicles;
+      r.scene.vehicle_intents = rules.vehicle_intents;
+    }
+  return r;
+}
+
+// One entity of `controller` at (x, y) facing +x.
+std::uint64_t spawn_at(WorldVehicles &v, const std::string &controller, double x, double y,
+                       const std::string &name = std::string()) {
+  entity_spec s;
+  s.archetype = "humvee";
+  s.controller = controller;
+  s.name = name;
+  s.placed = true;
+  s.x = x;
+  s.y = y;
+  s.yaw = 0.0;
+  std::string why;
+  const std::uint64_t id = v.spawn(s, &why);
+  EXPECT_NE(id, 0u) << why;
+  return id;
+}
+
+entity_info entity(const WorldVehicles &v, std::uint64_t id) {
+  for (const entity_info &e : v.entities())
+    if (e.id == id)
+      return e;
+  ADD_FAILURE() << "no entity " << id;
+  return entity_info{};
+}
+
+void run(cvc::app &app, SceneWorld &w, SceneClockDriver &clock, int frames) {
+  for (int i = 0; i < frames; ++i) {
+    clock.drive(1.0 / 60.0);
+    w.follow(app.world_clock());
+  }
+}
+
+} // namespace
+
+TEST(AriadneWorldVehicles, TheWorldBlockTakesIntentsAndTheExternalController) {
+  REQUIRE_YAML();
+  LoadResult r = load_intents();
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.scene.vehicle_intents, "/drive");
+  ASSERT_EQ(r.scene.vehicles.size(), 1u);
+  EXPECT_EQ(r.scene.vehicles[0].controllers.back(), "external");
+  const auto error = [](const std::string &intents) {
+    cvc::app app;
+    register_world_block(app);
+    LoadResult bad = load_string(app, "world:\n  vehicles:\n    intents: " + intents +
+                                          "\n    archetypes:\n      v: { vehicle: humvee }\n"
+                                          "scene:\n  nodes: []\n");
+    world_rules x = default_world_rules();
+    const Value *block = find_world_block(bad);
+    return block ? parse_world_block(*block, x) : std::string("no world: block");
+  };
+  EXPECT_EQ(error("drive.cars"), "");
+  EXPECT_NE(error("\"a..b\"").find("intents: expects a state path"), std::string::npos);
+  EXPECT_NE(error("\"two words\"").find("intents: expects a state path"), std::string::npos);
+  entity_intent::mode m = entity_intent::mode::off;
+  EXPECT_TRUE(parse_intent_mode("blend", m));
+  EXPECT_EQ(m, entity_intent::mode::blend);
+  EXPECT_FALSE(parse_intent_mode("steer", m));
+  EXPECT_STREQ(intent_mode_name(entity_intent::mode::replace), "replace");
+}
+
+TEST(AriadneWorldVehicles, AnIntentDrivesAnExternalEntity) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_intents();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  EXPECT_EQ(v.intents_key(), "drive");
+  w->sync(&warnings);
+  const std::uint64_t id = spawn_at(v, "external", -40.0, 0.0);
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+
+  // No intent: it holds still where it was put.
+  run(app, *w, clock, 120);
+  const entity_info start = entity(v, id);
+  EXPECT_LT(planar(start, -40.0, 0.0), 3.0); // the chassis centre, ahead of the point
+  EXPECT_LT(std::fabs(start.speed), 0.05);
+  EXPECT_EQ(val(app, "entities.1.command.by"), "hold");
+
+  // The setter: straight ahead at 2 m/s^2.
+  entity_intent go;
+  go.command = entity_intent::mode::replace;
+  go.accel = 2.0;
+  EXPECT_TRUE(v.set_intent(id, go));
+  EXPECT_EQ(v.intent(id), go);
+  EXPECT_FALSE(v.set_intent(99, go)) << "not an entity";
+  entity_intent bad = go;
+  bad.weight = 2.0;
+  EXPECT_FALSE(v.set_intent(id, bad));
+  run(app, *w, clock, 180); // 3 s
+  const entity_info moved = entity(v, id);
+  EXPECT_GT(moved.x - start.x, 4.0) << moved.x;
+  EXPECT_LT(std::fabs(moved.y - start.y), 0.5) << moved.y;
+  EXPECT_GT(moved.speed, 2.0);
+  EXPECT_EQ(moved.intent, go);
+  EXPECT_NEAR(moved.command_accel, 2.0, 1e-3);
+  EXPECT_EQ(val(app, "entities.1.command.by"), "intent");
+
+  // Its keys: turn left. A change of a key replaces the setter's intent.
+  cvc::state &st = cvc::state::instance(app);
+  st("entities.1.intent.steer").value("0.3");
+  st("entities.1.intent.accel").value("0.5");
+  run(app, *w, clock, 120);
+  const entity_info turned = entity(v, id);
+  EXPECT_EQ(v.intent(id).command, entity_intent::mode::replace) << "a steer with no mode replaces";
+  EXPECT_NEAR(v.intent(id).steer, 0.3, 1e-12);
+  EXPECT_GT(turned.yaw, moved.yaw + 0.3) << turned.yaw;
+  EXPECT_NEAR(turned.command_steer, 0.3, 1e-6);
+
+  // Off: it brakes to a stop and holds there.
+  st("entities.1.intent.mode").value("off");
+  run(app, *w, clock, 240);
+  const entity_info held = entity(v, id);
+  EXPECT_LT(std::fabs(held.speed), 0.05) << held.speed;
+  run(app, *w, clock, 60);
+  EXPECT_LT(planar(entity(v, id), held.x, held.y), 0.05);
+
+  // The intents table, by name: the entity's own keys have not changed, so the table's does.
+  const std::uint64_t named = spawn_at(v, "external", 30.0, -40.0, "lead");
+  run(app, *w, clock, 30);
+  st("drive.lead.intent.accel").value("1.5");
+  run(app, *w, clock, 120);
+  EXPECT_DOUBLE_EQ(v.intent(named).accel, 1.5);
+  EXPECT_GT(entity(v, named).speed, 1.0);
+  // Removed: its intent goes with it.
+  EXPECT_TRUE(v.despawn(named));
+  EXPECT_FALSE(v.set_intent(named, go));
+  EXPECT_EQ(v.intent(named), entity_intent{});
+}
+
+TEST(AriadneWorldVehicles, ABlendIsTheWeightedCommandAndAForcePushesTheDrive) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_intents();
+  ASSERT_TRUE(r.ok) << r.error;
+  // Three worlds alike, but for the intent on their one nav@1 entity: none, a replace, a blend.
+  struct one {
+    cvc::app app;
+    std::unique_ptr<SceneWorld> w;
+    std::unique_ptr<SceneClockDriver> clock;
+    std::uint64_t id = 0;
+  };
+  const auto make = [&](one &o) {
+    std::vector<std::string> warnings;
+    o.w = SceneWorld::from_scene(o.app, r.scene, "", "physics", &warnings);
+    ASSERT_NE(o.w, nullptr);
+    o.w->sync(&warnings);
+    o.id = spawn_at(*o.w->vehicles(), "nav@1", -40.0, -10.0);
+    o.clock = std::make_unique<SceneClockDriver>(o.app, resolved_clock(r.scene));
+  };
+  one plain, mine, half;
+  make(plain);
+  make(mine);
+  make(half);
+  entity_intent in;
+  in.command = entity_intent::mode::replace;
+  in.steer = 0.2;
+  in.accel = 1.0;
+  ASSERT_TRUE(mine.w->vehicles()->set_intent(mine.id, in));
+  in.command = entity_intent::mode::blend;
+  in.weight = 0.25;
+  ASSERT_TRUE(half.w->vehicles()->set_intent(half.id, in));
+  for (one *o : {&plain, &mine, &half})
+    run(o->app, *o->w, *o->clock, 2); // the clock anchors, then the first navigator tick
+  const entity_info a = entity(*plain.w->vehicles(), plain.id);
+  const entity_info b = entity(*mine.w->vehicles(), mine.id);
+  const entity_info c = entity(*half.w->vehicles(), half.id);
+  EXPECT_NEAR(b.command_steer, 0.2, 1e-6);
+  EXPECT_NEAR(c.command_steer, 0.75 * a.command_steer + 0.25 * 0.2, 1e-5)
+      << a.command_steer << " " << c.command_steer;
+  EXPECT_NEAR(c.command_accel, 0.75 * a.command_accel + 0.25 * 1.0, 1e-4)
+      << a.command_accel << " " << c.command_accel;
+  EXPECT_EQ(val(half.app, "entities.1.command.by"), "blend");
+  EXPECT_EQ(val(plain.app, "entities.1.command.by"), "nav@1");
+
+  // A force north on the drive: the same nav@1 run ends north of the plain one, and the plain
+  // drive is untouched by a force of zero.
+  one pushed, zero;
+  make(pushed);
+  make(zero);
+  entity_intent north;
+  north.force_y = 3.0;
+  ASSERT_TRUE(pushed.w->vehicles()->set_intent(pushed.id, north));
+  ASSERT_TRUE(zero.w->vehicles()->set_intent(zero.id, entity_intent{}));
+  run(plain.app, *plain.w, *plain.clock, 238);
+  run(pushed.app, *pushed.w, *pushed.clock, 240);
+  run(zero.app, *zero.w, *zero.clock, 240);
+  const entity_info p = entity(*plain.w->vehicles(), plain.id);
+  const entity_info q = entity(*pushed.w->vehicles(), pushed.id);
+  EXPECT_GT(q.y, p.y + 0.5) << p.x << "," << p.y << " vs " << q.x << "," << q.y;
+  EXPECT_EQ(zero.w->world().state_hash(), plain.w->world().state_hash());
+}
+
+TEST(AriadneWorldVehicles, IntentsMaybeSetFromAnotherThread) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_intents();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  WorldVehicles &v = *w->vehicles();
+  const std::uint64_t a = spawn_at(v, "external", -40.0, 20.0);
+  const std::uint64_t b = spawn_at(v, "nav@1", 20.0, 20.0);
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  std::atomic<bool> done{false};
+  std::thread writer([&] {
+    for (int i = 0; !done.load(); ++i) {
+      entity_intent in;
+      in.command = entity_intent::mode::replace;
+      in.accel = 1.0 + (i % 3);
+      in.force_x = (i % 5) * 0.5;
+      v.set_intent(a, in);
+      in.command = entity_intent::mode::blend;
+      v.set_intent(b, in);
+      (void)v.intent(a);
+    }
+  });
+  run(app, *w, clock, 120);
+  done = true;
+  writer.join();
+  entity_intent last;
+  last.command = entity_intent::mode::replace;
+  last.accel = 2.5;
+  ASSERT_TRUE(v.set_intent(a, last));
+  run(app, *w, clock, 6);
+  EXPECT_EQ(entity(v, a).intent, last);
+  EXPECT_GT(entity(v, a).speed, 0.5);
+}
+
+TEST(AriadneWorldVehicles, AServerDocumentSteersThroughItsPublishedNamespace) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_intents();
+  ASSERT_TRUE(r.ok) << r.error;
+  // The relay's document publishes `drive`; the world here reads it as its intents table (a
+  // client's world reads the same keys once the relay replicates them).
+  cvc::app app;
+  const fs::path doc = write_doc("drive_server", R"(meta: { name: driver, min_libcvc: 3.7.5 }
+server:
+  publish: [drive]
+on_tick: |
+  (if (> (int (state-get "sim.tick")) 240)
+    (state-set "drive.lead.intent.accel" "2")
+    (state-set "drive.lead.intent.accel" "0"))
+)");
+  ServerDocument server(app, "garage");
+  ASSERT_EQ(server.read(doc.string()), "");
+  for (const std::string &warning : server.load(doc.string()))
+    ADD_FAILURE() << "warning: " << warning;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  WorldVehicles &v = *w->vehicles();
+  const std::uint64_t id = spawn_at(v, "external", -40.0, -40.0, "lead");
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  std::uint64_t tick = 0;
+  const auto steps = [&](int frames) {
+    for (int i = 0; i < frames; ++i) {
+      tick += 2; // the relay's 120 Hz under a 60 Hz frame
+      server.step(tick, tick / 120.0);
+      clock.drive(1.0 / 60.0);
+      w->follow(app.world_clock());
+    }
+  };
+  steps(60);
+  EXPECT_EQ(val(app, "drive.lead.intent.accel"), "0");
+  EXPECT_LT(std::fabs(entity(v, id).speed), 0.1);
+  steps(180);
+  EXPECT_EQ(val(app, "drive.lead.intent.accel"), "2");
+  EXPECT_DOUBLE_EQ(v.intent(id).accel, 2.0);
+  EXPECT_GT(entity(v, id).speed, 2.0);
 }
 
 // ---------------------------------------------------------------------------------------------

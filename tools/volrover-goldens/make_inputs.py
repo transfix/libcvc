@@ -8,6 +8,9 @@ inputs/skeleton/<case>.pts (a point a line) and <case>.json. Pure Python, no num
 
     python3 tools/volrover-goldens/make_inputs.py                  # every library
     python3 tools/volrover-goldens/make_inputs.py --only skeleton  # one library
+    python3 tools/volrover-goldens/make_inputs.py --only genseg --case auto_seeds_sweep
+                                                                   # one case (the rest as
+                                                                   # committed)
 """
 
 import json
@@ -26,8 +29,9 @@ def lcg(seed):
         yield state / 4294967296.0
 
 
-def volume(n, blobs, background=0.02, noise=0.0, seed=1):
-    """n^3 floats: Gaussian blobs (centre, sigma, height) over a background, plus uniform noise."""
+def volume(n, blobs, background=0.02, noise=0.0, seed=1, shells=()):
+    """n^3 floats: Gaussian blobs (centre, sigma, height) and spherical shells (centre, radius,
+    sigma, height: a Gaussian profile across the shell) over a background, plus uniform noise."""
     rnd = lcg(seed)
     out = []
     for k in range(n):
@@ -37,6 +41,9 @@ def volume(n, blobs, background=0.02, noise=0.0, seed=1):
                 for (cx, cy, cz), s, h in blobs:
                     d2 = (i - cx) ** 2 + (j - cy) ** 2 + (k - cz) ** 2
                     v += h * math.exp(-d2 / (2.0 * s * s))
+                for (cx, cy, cz), r, s, h in shells:
+                    d = math.sqrt((i - cx) ** 2 + (j - cy) ** 2 + (k - cz) ** 2) - r
+                    v += h * math.exp(-d * d / (2.0 * s * s))
                 if noise:
                     v += noise * (next(rnd) - 0.5)
                 out.append(max(v, 0.0))
@@ -70,6 +77,41 @@ CASES = {
         tlow=35,
         thigh=200,
         seeds=[(0, 5, 5, 10), (0, 14, 6, 10), (1, 10, 15, 10)],
+    ),
+    # Automatic seeds away from every user seed, so the threshold sweep classifies them: two
+    # chains of overlapping blobs, each seeded at one end, a blob between the chains (its seed
+    # goes to whichever class reaches it at the higher threshold), an isolated blob no front
+    # reaches, a seed on the volume's face, and class 1 with no seed at all.
+    "auto_seeds_sweep": dict(
+        n=28,
+        blobs=[((6, 6, 6), 2.5, 1.0), ((11, 8, 7), 2.5, 0.8), ((16, 10, 9), 2.5, 0.7),
+               ((20, 20, 20), 3.0, 0.9), ((14, 22, 18), 2.5, 0.75), ((12, 16, 13), 2.5, 0.6),
+               ((24, 5, 22), 2.0, 0.8), ((0, 14, 12), 2.5, 0.7)],
+        noise=0.05,
+        tlow=25,
+        thigh=110,
+        seeds=[(0, 6, 6, 6), (2, 20, 20, 20), (2, 0, 14, 12)],
+    ),
+    # A blob touching a shell (the roadmap's case), a seed in each: the shell's ridge is full of
+    # automatic seeds (its noise's local maxima), which the sweep gives the shell's class.
+    "blob_touching_shell": dict(
+        n=24,
+        blobs=[((20, 12, 12), 2.2, 1.0)],
+        shells=[((11, 12, 12), 7.0, 1.3, 0.8)],
+        noise=0.08,
+        tlow=35,
+        thigh=140,
+        seeds=[(0, 20, 12, 12), (1, 4, 12, 12)],
+    ),
+    # Heavy noise on a broad blob: dozens of automatic seeds (the noise's local maxima), reached
+    # and classified one by one as the sweep comes down.
+    "noisy_many_seeds": dict(
+        n=24,
+        blobs=[((12, 12, 12), 30.0, 1.0)],
+        noise=0.45,
+        tlow=60,
+        thigh=140,
+        seeds=[(0, 7, 12, 12), (1, 17, 12, 12), (2, 12, 12, 18)],
     ),
 }
 
@@ -198,6 +240,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--only", choices=["genseg", "skeleton"],
                     help="write only one library's inputs (the others stay as committed)")
+    ap.add_argument("--case", action="append",
+                    help="write only this GenSeg case (repeatable; the others stay as committed)")
     args = ap.parse_args()
     if args.only != "genseg":
         write_skeleton_inputs()
@@ -206,7 +250,10 @@ def main():
     out_dir = os.path.join(HERE, "inputs", "genseg")
     os.makedirs(out_dir, exist_ok=True)
     for name, c in CASES.items():
-        vals = volume(c["n"], c["blobs"], noise=c["noise"], seed=len(name))
+        if args.case and name not in args.case:
+            continue
+        vals = volume(c["n"], c["blobs"], noise=c["noise"], seed=len(name),
+                      shells=c.get("shells", ()))
         with open(os.path.join(out_dir, name + ".raw"), "wb") as f:
             f.write(struct.pack("<%df" % len(vals), *vals))
         meta = {

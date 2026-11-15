@@ -1,0 +1,32 @@
+# arigl joined to arisrvx from this document's relay: block (relay_session.h, attach_host_relay;
+# ARIADNE.md §9.8.3), as ari and the x hosts join one: the ctest arisrvx_room_call_arigl runs it
+# with `arigl snapshot --relay URL`, beside tests/call_service.py and tests/call_server.ari. It
+# waits for the published svc to be mirrored into its tree (relay: subscribe:), calls the relay's
+# echo with room-call, checks the value kept its type and the principal is this host's own pid,
+# and quits 0. A frame budget it runs out of quits 1.
+meta: { name: an arigl client of the room-call service, min_libcvc: 3.7.13 }
+relay:
+  subscribe: [svc]
+init: |
+  (state-set "t.frames" 0)
+  (state-set "t.phase" "waiting")
+on_tick: |
+  (state-set "t.frames" (+ 1 (int (state-get "t.frames"))))
+  (if (> (int (state-get "t.frames")) 600)
+      (begin
+        (print (str-concat "relay_arigl: gave up at phase " (str (state-get "t.phase"))
+                           ", relay.status " (str (state-get "relay.status"))))
+        (quit 1)))
+  (if (and (= (state-get "svc.status") "up") (= (state-get "t.phase") "waiting"))
+      (begin
+        (state-set "t.phase" "calling")
+        (let ((r (room-call "echo" 42 "from arigl")))
+          (assert (= (get-attr r "value") 42) r)
+          (assert (= (get-attr r "kind") "int") r)
+          (assert (= (get-attr r "label") "from arigl") r)
+          (assert (string.starts-with (get-attr r "caller") "arigl_") r)
+          (assert (= (state-get "relay.status") "joined") (state-get "relay.status"))
+          (assert (= (state-get "relay.joins") "1") (state-get "relay.joins"))
+          (print (str-concat "relay_arigl: echo answered " (get-attr r "caller")))
+          (state-set "t.phase" "done")
+          (quit 0))))

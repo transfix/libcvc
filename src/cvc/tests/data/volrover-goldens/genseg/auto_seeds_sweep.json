@@ -1,0 +1,43 @@
+{
+  "library": "GenSeg",
+  "volrover": "1cf0fbd72c7539e415a4f0fbc58c6bfce3d3caf8",
+  "case": "auto_seeds_sweep",
+  "input": "tools/volrover-goldens/inputs/genseg/auto_seeds_sweep.raw",
+  "input_sha256": "2db4a3c5b915d1eaad313cd75782e75ad7bce2d43b5268e77fbf1f556290b6de",
+  "dims": [
+    28,
+    28,
+    28
+  ],
+  "tlow": 25,
+  "thigh": 110,
+  "seeds": [
+    [
+      0,
+      6,
+      6,
+      6
+    ],
+    [
+      2,
+      20,
+      20,
+      20
+    ],
+    [
+      2,
+      0,
+      14,
+      12
+    ]
+  ],
+  "class_voxels": [
+    445,
+    0,
+    3043
+  ],
+  "labels_sha256": "0eddb7cb8f5a7fbcbaca7b45492e0833d7e53cda552c8067ae4e090c161beac1",
+  "indices_sha256": "80aaa6ba2066a0f3bbe832f258611ed54096611dc81322d80bc0e5eacfb2f195",
+  "made_by": "tools/volrover-goldens/make_goldens.py",
+  "platform": "Windows AMD64, Windows-11, Python 3.13.3"
+}

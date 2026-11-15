@@ -355,7 +355,13 @@ public:
   // (on a plant the lower of its and vmax) and, with veh_params::risk_governor, its cap
   // (risk_speed_cap). For a route_follower backing a vehicle up, or stopping it at a cusp. A
   // parked agent takes it too.
-  void override_command(int i, float steer, float accel);
+  //
+  // `weight` below 1 blends instead, on a plant: the command is (1 - weight) of the drive's
+  // (a parked agent's: its park brake) and `weight` of this one, steer and acceleration alike,
+  // and then the holds above apply to it. 0 leaves the drive's command, held the same way. The
+  // kinematic arm's drive steers each substep, so it has no one command to blend with: there a
+  // weight below 1 throws std::invalid_argument, as does one outside [0, 1].
+  void override_command(int i, float steer, float accel, float weight = 1.0f);
   // Put agent i at (x, y) (normalized) with a heading (rad) and a speed (normalized / s), on the
   // kinematic arm. A plant owns its vehicles' poses, so with one this does nothing and returns
   // false.
@@ -916,7 +922,7 @@ private:
   // footprint discs. The flags: whether any agent's plant gave that limit.
   std::vector<float> pl_a_max_, pl_vmax_, pl_a_lat_, pl_body_rr_, pl_body_off_;
   // override_command, [n], for the next step only
-  std::vector<float> ov_steer_, ov_accel_;
+  std::vector<float> ov_steer_, ov_accel_, ov_weight_;
   std::vector<std::uint8_t> ov_on_;
   bool ov_any_ = false;
   bool pl_has_a_max_ = false, pl_has_vmax_ = false, pl_has_a_lat_ = false, pl_fp_ = false;

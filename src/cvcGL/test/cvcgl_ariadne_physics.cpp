@@ -698,6 +698,131 @@ scene:
     CHECK(second->getTransform()->GetElement(2, 3) < 0.3);
 }
 
+// Entity intents (S1), scripted on the keys at fixed frames: an external entity driven by its
+// intent, a nav@1 one with a force on its drive and then a blend, run headless (SceneWorld on its
+// clock) and drawn (realize_scene + tick_scene, as arigl --offscreen steps it), reach the same
+// state, bit for bit.
+const char *kIntentWorld = R"(
+meta: { min_libcvc: "0.0.0" }
+world:
+  vehicles:
+    archetypes:
+      humvee: { vehicle: humvee, controllers: [nav@1, external] }
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [120, 120, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+
+// The script both runs follow: what is written at which frame.
+void intent_script(cvc::state &st, int frame) {
+  switch (frame) {
+  case 1:
+    st("vehicles.spawn.controller").value("external");
+    st("vehicles.spawn.at").value("-30,0,0");
+    st("vehicles.spawn.request").value("1");
+    break;
+  case 2:
+    st("vehicles.spawn.controller").value("nav@1");
+    st("vehicles.spawn.at").value("20,-20,90");
+    st("vehicles.spawn.request").value("2");
+    break;
+  case 30:
+    st("entities.1.intent.accel").value("2");
+    st("entities.2.force.x").value("-2");
+    st("entities.2.force.y").value("1.5");
+    break;
+  case 120:
+    st("entities.1.intent.steer").value("0.25");
+    st("entities.2.intent.mode").value("blend");
+    st("entities.2.intent.steer").value("-0.2");
+    st("entities.2.intent.accel").value("0.5");
+    st("entities.2.intent.weight").value("0.4");
+    break;
+  case 200:
+    st("entities.1.intent.mode").value("off");
+    break;
+  default:
+    break;
+  }
+}
+
+void test_vehicle_intents_headless_and_drawn() {
+  std::printf("test_vehicle_intents_headless_and_drawn\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt)) {
+    std::printf("  skipped: no Jolt in this build\n");
+    return;
+  }
+  const auto load = [](cvc::app &app) {
+    cvc::ariadne::register_world_block(app);
+    cvc::ariadne::LoadResult r = cvc::ariadne::load_string(app, kIntentWorld);
+    if (r.ok) {
+      cvc::ariadne::world_rules rules = cvc::ariadne::default_world_rules();
+      CHECK(cvc::ariadne::parse_world_block(*cvc::ariadne::find_world_block(r), rules).empty());
+      r.scene.vehicles = rules.vehicles;
+    }
+    return r;
+  };
+  constexpr int kFrames = 300; // five seconds at 60 frames per second
+
+  cvc::app drawn_app;
+  cvc::ariadne::LoadResult r = load(drawn_app);
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  SceneGraph sg(drawn_app);
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &warnings);
+  CHECK(out.world != nullptr && out.world->vehicles() != nullptr);
+  if (!out.world || !out.world->vehicles())
+    return;
+  cvc::state &dst = cvc::state::instance(drawn_app);
+  for (int i = 0; i < kFrames; ++i) {
+    intent_script(dst, i);
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  }
+
+  cvc::app headless_app;
+  std::unique_ptr<cvc::ariadne::SceneWorld> world =
+      cvc::ariadne::SceneWorld::from_scene(headless_app, r.scene, "", "physics", &warnings);
+  CHECK(world != nullptr && world->vehicles() != nullptr);
+  if (!world || !world->vehicles())
+    return;
+  cvc::state &hst = cvc::state::instance(headless_app);
+  cvc::ariadne::SceneClockDriver clock(headless_app, r.scene.clock);
+  for (int i = 0; i < kFrames; ++i) {
+    intent_script(hst, i);
+    clock.drive(1.0 / 60.0);
+    world->follow(headless_app.world_clock());
+  }
+
+  CHECK(world->vehicles()->size() == 2 && out.world->vehicles()->size() == 2);
+  CHECK(world->world().tick() == out.physics->tick());
+  const std::uint64_t drawn_hash = out.physics->state_hash();
+  const std::uint64_t headless_hash = world->world().state_hash();
+  if (drawn_hash != headless_hash)
+    std::printf("  drawn %016llx, headless %016llx\n", static_cast<unsigned long long>(drawn_hash),
+                static_cast<unsigned long long>(headless_hash));
+  CHECK(drawn_hash == headless_hash);
+  // The intents did their work: the external entity drove off and stopped, the nav@1 one blends.
+  if (world->vehicles()->size() == 2) {
+    const cvc::ariadne::entity_info e = world->vehicles()->entities()[0];
+    CHECK(e.x > -25.0);
+    CHECK(std::fabs(e.speed) < 2.0);
+    CHECK(hst("entities.2.command.by").value() == "blend");
+    CHECK(dst("entities.2.command.by").value() == "blend");
+  }
+}
+
 int main() {
   test_crate_lands_on_the_drawn_ground();
   test_null_backend_places_and_holds();
@@ -707,6 +832,7 @@ int main() {
   test_restart_drawn_world();
   test_worlds_drawn();
   test_vehicles_drawn();
+  test_vehicle_intents_headless_and_drawn();
   if (g_failures) {
     std::printf("cvcgl_ariadne_physics: %d FAILURE(S)\n", g_failures);
     return 1;

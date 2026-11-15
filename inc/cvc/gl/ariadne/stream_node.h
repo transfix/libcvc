@@ -26,6 +26,10 @@
 // owned by the RealizedScene (its custom_ticks closure), so it is torn down — and
 // unsubscribes — with the scene, on the render thread.
 //
+// A raster stream (codec rgba8.patch, cvc/ariadne/stream/raster.h), or a raster's mirror in state
+// named by the token, goes through LiveTextureBinding instead (a rectangle at a time; it subscribes
+// on its first tick and catches up from the raster's frames in state).
+//
 // It NEVER opens a stream ((stream-open) does that) and owns NO producer (device capture
 // is Phase 3). The token is the canonical key (stream-open) returns in its handle dict,
 // i.e. cvc::ariadne::stream::stream::token(); a bare id only resolves if it was opened at

@@ -27,6 +27,7 @@
 %{
 #include <cvc/core/app.h>
 #include <cvc/ariadne/stream/frame.h>
+#include <cvc/ariadne/stream/raster.h>
 #include <cvc/ariadne/stream/stream.h>
 #include <cvc/ariadne/stream/stream_channel.h>
 #include "pycvc_buffer.h"
@@ -45,6 +46,10 @@
 // proxy: the app is args[0], NOT a named `app` (a bare `app` would resolve to the
 // module-global app CLASS and pin nothing — the bug this fixes).
 %pythonappend pycvc::stream_open %{
+    if args:
+        val._pycvc_app = _keepalive(args[0])
+%}
+%pythonappend pycvc::raster_open %{
     if args:
         val._pycvc_app = _keepalive(args[0])
 %}
@@ -251,6 +256,105 @@ static Stream stream_open(cvc::app &app, const std::string &id, const std::strin
     throw std::runtime_error("stream_open: open failed (bad id/format or token in use)");
   Stream out;
   out.s = std::shared_ptr<cvc::ariadne::stream::stream>(std::move(up));
+  return out;
+}
+
+// A raster as a stream (cvc/ariadne/stream/raster.h): paint it, then publish what changed.
+//
+//   r = cvc.raster_open(app, "tint", 256, 256, mirror="fog.tint")
+//   r.fill(0, 0, 256, 256, 0, 0, 0, 0)
+//   r.paint_grid(values, 10, 10, "turbo", 0.0, 1.0, 160)   # a 2-D array, one pixel a value
+//   r.pixels()[0:8, 0:8] = (255, 0, 0, 255); r.mark(0, 0, 8, 8)   # or write the raster directly
+//   n = r.publish()                                         # the frame's number (0: nothing)
+struct RasterStream {
+  std::shared_ptr<cvc::ariadne::stream::raster_stream> r;
+
+  cvc::ariadne::stream::raster_stream &live(const char *what) const {
+    if (!r)
+      throw std::runtime_error(std::string("RasterStream.") + what + ": closed raster");
+    return *r;
+  }
+  int width() const { return r ? r->width() : 0; }
+  int height() const { return r ? r->height() : 0; }
+  std::string token() const { return r ? r->token() : std::string(); }
+  std::string mirror() const { return r ? r->mirror() : std::string(); }
+  unsigned long long frames() const { return r ? r->frames() : 0ULL; }
+  unsigned long long bytes_sent() const { return r ? r->bytes_sent() : 0ULL; }
+
+  // The raster as a WRITABLE (h, w, 4) uint8 view of its own pixels; mark() what you wrote.
+  pycvc::ArrayView pixels() const {
+    cvc::ariadne::stream::raster_stream &s = live("pixels");
+    pycvc::ArrayView v;
+    v.dtype = pycvc::DType::UInt8;
+    v.writable = true;
+    v.shape = {static_cast<long>(s.height()), static_cast<long>(s.width()), 4L};
+    v.data = s.pixels();
+    v.owner = s.pixel_buffer(); // the buffer alone: the raster (and its app) may go first
+    return v;
+  }
+  void mark(int x, int y, int w, int h) { live("mark").mark({x, y, w, h}); }
+  void fill(int x, int y, int w, int h, int red, int green, int blue, int alpha = 255) {
+    const auto c = [](int v) { return static_cast<std::uint8_t>(v < 0 ? 0 : v > 255 ? 255 : v); };
+    const std::uint8_t rgba[4] = {c(red), c(green), c(blue), c(alpha)};
+    live("fill").fill({x, y, w, h}, rgba);
+  }
+  // A 2-D array of numbers, one pixel each, with its top-left at (x, y), through a colour map.
+  void paint_grid(PyObject *values, int x, int y, const std::string &colormap = "viridis",
+                  double lo = 0.0, double hi = 1.0, int alpha = 255) {
+    cvc::ariadne::stream::raster_stream &s = live("paint_grid");
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(values, NPY_DOUBLE, 2, 2, NPY_ARRAY_C_CONTIGUOUS | NPY_ARRAY_FORCECAST));
+    if (!a) {
+      PyErr_Clear();
+      throw std::invalid_argument("RasterStream.paint_grid: expected a 2-D array of numbers");
+    }
+    const int gh = static_cast<int>(PyArray_DIM(a, 0)), gw = static_cast<int>(PyArray_DIM(a, 1));
+    const double *p = static_cast<const double *>(PyArray_DATA(a));
+    std::vector<double> v(p, p + PyArray_SIZE(a));
+    Py_DECREF(a);
+    if (!s.paint_grid(v, gw, gh, x, y, colormap, lo, hi,
+                      static_cast<std::uint8_t>(alpha < 0 ? 0 : alpha > 255 ? 255 : alpha)))
+      throw std::invalid_argument("RasterStream.paint_grid: unknown colour map '" + colormap + "'");
+  }
+  unsigned long long publish(double pts = 0.0) { return live("publish").publish(pts); }
+  unsigned long long publish_key(double pts = 0.0) { return live("publish_key").publish_key(pts); }
+
+  // A consumer of its frames (codec "rgba8.patch"): "ring" keeps each one, in order.
+  StreamSub subscribe(const std::string &mode = "ring", std::size_t depth = 8) {
+    cvc::ariadne::stream::raster_stream &s = live("subscribe");
+    auto sub = s.stream().channel().subscribe(mode == "latest"
+                                                  ? cvc::ariadne::stream::deliver_mode::latest
+                                                  : cvc::ariadne::stream::deliver_mode::ring,
+                                              depth);
+    if (!sub)
+      throw std::runtime_error("RasterStream.subscribe: refused (its subscribers are all taken)");
+    StreamSub out;
+    out.sub = std::move(sub);
+    return out;
+  }
+  void close() { r.reset(); }
+};
+
+// Open a raster stream: w x h RGBA8, a key frame every `key_every` frames, its frames kept at its
+// token in state and, when `mirror` is given, under that path too.
+static RasterStream raster_open(cvc::app &app, const std::string &id, int w, int h,
+                                int key_every = 30, const std::string &mirror = std::string(),
+                                const std::string &root_path = std::string(),
+                                std::size_t subscribers = 4) {
+  cvc::ariadne::stream::raster_params p;
+  p.id = id;
+  p.root_path = root_path;
+  p.w = w;
+  p.h = h;
+  p.key_every = key_every;
+  p.mirror = mirror;
+  p.expected_subscribers = subscribers;
+  std::string why;
+  auto up = cvc::ariadne::stream::raster_stream::open(app, p, &why);
+  if (!up)
+    throw std::runtime_error("raster_open: " + why);
+  RasterStream out;
+  out.r = std::shared_ptr<cvc::ariadne::stream::raster_stream>(std::move(up));
   return out;
 }
 

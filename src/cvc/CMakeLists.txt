@@ -28,6 +28,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/tet_complex.h
   ../../inc/cvc/geometry/skeleton.h
   ../../inc/cvc/geometry/skeleton_params.h
+  ../../inc/cvc/geometry/skeleton_intrinsics.h
   ../../inc/cvc/state/state.h
   ../../inc/cvc/state/state_key_meta.h
   ../../inc/cvc/state/state_change_journal.h
@@ -90,6 +91,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/plant_log.h
   ../../inc/cvc/physics/plant_log_scene.h
   ../../inc/cvc/physics/jolt_rollout.h
+  ../../inc/cvc/physics/mujoco_robot.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
@@ -164,6 +166,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/contour_intrinsics.h
   ../../inc/cvc/volume/point_classes.h
   ../../inc/cvc/volume/point_class_intrinsics.h
+  ../../inc/cvc/volume/segmentation.h
+  ../../inc/cvc/volume/segmentation_params.h
   ../../inc/cvc/model/model.h
   ../../inc/cvc/model/model_file_io.h
   ../../inc/cvc/volume/volume_ops.h
@@ -263,6 +267,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/ocean/fft.h
   ../../inc/cvc/ocean/sea_surface.h
   ../../inc/cvc/ocean/ewave.h
+  ../../inc/cvc/ocean/whitecaps.h
 )
 
 # Source files
@@ -303,6 +308,7 @@ set(SOURCE_FILES
   geometry/skeleton/u2.cpp
   geometry/skeleton/skel.cpp
   geometry/skeleton/skeleton.cpp
+  geometry/skeleton/skeleton_intrinsics.cpp
   geometry/sliced_ldlt.cpp
   geometry/geometry_file_io.cpp
   geometry/contours.cpp
@@ -311,6 +317,8 @@ set(SOURCE_FILES
   utility/xml_lite.cpp
   volume/point_classes.cpp
   volume/point_class_intrinsics.cpp
+  volume/segmentation/genseg.cpp
+  volume/segmentation/segmentation.cpp
   image/image.cpp
   image/image_decode.cpp
   image/magick_io.cpp
@@ -393,6 +401,7 @@ set(SOURCE_FILES
   physics/plant_log.cpp
   physics/plant_log_scene.cpp
   physics/jolt_rollout.cpp
+  physics/mujoco_robot.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
   state/state_sync_adapter.cpp
@@ -536,6 +545,7 @@ set(SOURCE_FILES
   ocean/fft.cpp
   ocean/sea_surface.cpp
   ocean/ewave.cpp
+  ocean/whitecaps.cpp
 )
 
 # cvc::algo holds algorithms more than one library needs (cvc::nav and cvc::world, which may not
@@ -688,6 +698,18 @@ else()
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
+# The VolumeRover GenSeg port (volume/segmentation/) matches the legacy library's labels voxel for
+# voxel on every platform (VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.7 T1): its fast marches compare
+# float arrival times, and an FMA-contracted step flips which front wins a tie.
+set(_cvc_genseg_exact_sources volume/segmentation/genseg.cpp volume/segmentation/segmentation.cpp)
+if(NOT MSVC)
+  set_source_files_properties(${_cvc_genseg_exact_sources}
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(${_cvc_genseg_exact_sources}
+                              PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
+
 # state_transport_ipc is POSIX-only (Unix domain sockets, poll()); the IPC
 # header itself is portable but the implementation is not. Drop it on Windows.
 if(WIN32)
@@ -711,9 +733,10 @@ endif()
 # matter which bundle was installed -- e.g. transfix/F2Dock asked for 3.2.0,
 # never matched, and silently fell back to building libcvc from source.
 #
-# SOVERSION stays CVC_VERSION_MAJOR, so the runtime link name (libcvc.so.3)
-# is unchanged and no consumer relinks. Only the full VERSION suffix
-# (libcvc.so.3.0 -> libcvc.so.3.3.0) and the exported package version move.
+# SOVERSION stays CVC_VERSION_MAJOR, so within a major version the runtime link
+# name (libcvc.so.3, libcvc.so.4 from 4.0) is unchanged and no consumer relinks.
+# Only the full VERSION suffix (libcvc.so.3.0 -> libcvc.so.3.3.0) and the exported
+# package version move.
 set(CVC_VERSION       ${PROJECT_VERSION})
 set(CVC_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
 set(CVC_VERSION_MINOR ${PROJECT_VERSION_MINOR})
@@ -734,6 +757,7 @@ option(CVC_ENABLE_MESHER "Enable isosurfacing/meshing capability" ON)
 option(CVC_ENABLE_SDF "Enable signed distance function calculation capability" ON)
 option(CVC_ENABLE_LIBIGL "libigl/Eigen geometry processing and P1 finite elements (mesh_ops.h, fem.h); OFF if the packages are missing" ON)
 option(CVC_WITH_JOLT "Jolt Physics backend for cvc::physics (physics/world.h); OFF if the package is missing" ON)
+option(CVC_WITH_MUJOCO "MuJoCo for cvc::physics::mujoco_robot (physics/mujoco_robot.h): articulated robots on the libcvc terrain; MuJoCo from cvcpkg (cvcpkg install mujoco)" OFF)
 option(CVC_WITH_QHULL "Reentrant Qhull (libqhull_r) for 3D Delaunay, replacing CGAL's GPL triangulations; OFF if the package is missing" ON)
 option(CVC_WITH_CLIPPER2 "Clipper2 for polygon Booleans, offsets and Minkowski sums, replacing CGAL's GPL packages; OFF if the package is missing" ON)
 option(CVC_WITH_CDT "CDT for 2D constrained Delaunay, replacing CGAL's GPL 2D triangulations; OFF if the package is missing" ON)
@@ -1553,6 +1577,11 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h ../../inc/cvc/net/net_
 # and the Ariadne host that runs the flows for documents.
 list(APPEND SOURCE_FILES net/json_lite.cpp net/oidc.cpp net/loopback_redirect.cpp net/browser.cpp
   ariadne/oidc_host.cpp)
+# Files that hold a user's secrets (the credential and E2EE stores), and end-to-end encrypted DMs
+# with the keys in the host (cvc/net/e2ee.h, docs/E2EE.md): always compiled; without libsodium
+# (CVC_HAVE_SODIUM, below) every E2EE operation fails saying so.
+list(APPEND SOURCE_FILES net/private_file.cpp net/e2ee.cpp ariadne/e2ee_intrinsics.cpp)
+list(APPEND INCLUDE_FILES ../../inc/cvc/net/e2ee.h ../../inc/cvc/ariadne/e2ee_intrinsics.h)
 list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_redirect.h
   ../../inc/cvc/net/browser.h ../../inc/cvc/ariadne/oidc_host.h)
 
@@ -1560,7 +1589,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_re
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/files.cpp ariadne/file_picker.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/world_vehicles.cpp ariadne/world_spawns.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/rich_text.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp ariadne/chart_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/files.cpp ariadne/file_picker.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_repeat.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/world_vehicles.cpp ariadne/world_spawns.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/rich_text.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp ariadne/chart_emit.cpp)
 # A document set fetched from a URL, and a runtime's browser page loading one (arigl-web, ari).
 list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 # The document a relay runs (arisrv --doc) and the namespaces it publishes.
@@ -1633,7 +1662,7 @@ list(APPEND INCLUDE_FILES
 # (install(EXPORT cvcTargets NAMESPACE cvc::) exports only cvc::cvc). Zero-copy
 # frame_pool + drop-oldest/latest per-subscriber channel + dedicated producer
 # thread; borrows cvc::state only for the /streams/<id> descriptor.
-list(APPEND SOURCE_FILES ariadne/stream/frame_pool.cpp ariadne/stream/stream_channel.cpp ariadne/stream/stream_registry.cpp ariadne/stream/producer_thread.cpp ariadne/stream/stream.cpp ariadne/stream/stream_codec.cpp ariadne/stream/to_image.cpp ariadne/stream/synthetic_source.cpp ariadne/stream/audio_sources.cpp ariadne/stream/stream_view.cpp)
+list(APPEND SOURCE_FILES ariadne/stream/frame_pool.cpp ariadne/stream/stream_channel.cpp ariadne/stream/stream_registry.cpp ariadne/stream/producer_thread.cpp ariadne/stream/stream.cpp ariadne/stream/stream_codec.cpp ariadne/stream/to_image.cpp ariadne/stream/raster.cpp ariadne/stream/synthetic_source.cpp ariadne/stream/audio_sources.cpp ariadne/stream/stream_view.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/stream/frame.h
   ../../inc/cvc/ariadne/stream/stream_codec.h
@@ -1684,6 +1713,22 @@ if(CVC_WITH_JOLT)
   else()
     message(STATUS "Jolt not found - cvc::physics has the null backend only (CVC_WITH_JOLT OFF)")
     set(CVC_WITH_JOLT OFF)
+  endif()
+endif()
+
+# MuJoCo behind cvc::physics::mujoco_robot (docs/MUJOCO.md). Off by default. Asked for, it is
+# looked for in the deps prefix only (CMAKE_PREFIX_PATH or mujoco_DIR: cvcpkg's `mujoco`), never
+# in the system's paths, and a configure that cannot find it fails: nothing turns the option on
+# but a build that wants it. It must be MuJoCo 4: cvcpkg's `mujoco3` (3.17) installs the same
+# package name and is refused.
+if(CVC_WITH_MUJOCO)
+  find_package(mujoco 4.0 CONFIG QUIET NO_SYSTEM_ENVIRONMENT_PATH NO_CMAKE_SYSTEM_PATH
+               NO_CMAKE_PACKAGE_REGISTRY NO_CMAKE_SYSTEM_PACKAGE_REGISTRY)
+  if(TARGET mujoco::mujoco)
+    message(STATUS "MuJoCo ${mujoco_VERSION} found - cvc::physics::mujoco_robot ENABLED")
+  else()
+    message(FATAL_ERROR "CVC_WITH_MUJOCO is ON, but no MuJoCo 4 package is in the deps prefix "
+                        "(cvcpkg install mujoco --prefix <deps>, then CMAKE_PREFIX_PATH=<deps>)")
   endif()
 endif()
 
@@ -1984,6 +2029,39 @@ if(CVC_OPUS_INCLUDE_DIR AND CVC_OPUS_LIBRARY)
   message(STATUS "cvc::media: Opus mics with ${CVC_OPUS_LIBRARY}")
 else()
   message(STATUS "cvc::media: no libopus - mics stay f32")
+endif()
+
+# End-to-end encrypted DMs (cvc/net/e2ee.h): TX.WTF's X3DH + Double Ratchet. OPTIONAL: libsodium
+# (cvcpkg `libsodium`, ISC). Its bundle ships a CMake package, sodium::sodium (with SODIUM_STATIC
+# on a static library, which the headers need on Windows); a system libsodium with only a
+# pkg-config file is found by header and library instead, as libopus is. Without it, the e2ee-*
+# verbs are absent and e2ee_available() is false.
+find_package(sodium CONFIG QUIET)
+set(CVC_HAVE_SODIUM OFF)
+if(TARGET sodium::sodium)
+  set(CVC_HAVE_SODIUM ON)
+  target_link_libraries(cvc PRIVATE sodium::sodium)
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES sodium)
+  message(STATUS "cvc::net: E2EE with libsodium (sodium::sodium ${sodium_VERSION})")
+else()
+  find_path(CVC_SODIUM_INCLUDE_DIR NAMES sodium.h)
+  find_library(CVC_SODIUM_LIBRARY NAMES sodium libsodium)
+  if(CVC_SODIUM_INCLUDE_DIR AND CVC_SODIUM_LIBRARY)
+    set(CVC_HAVE_SODIUM ON)
+    if(NOT TARGET CvcSodium::sodium)
+      add_library(CvcSodium::sodium INTERFACE IMPORTED)
+      set_target_properties(CvcSodium::sodium PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${CVC_SODIUM_INCLUDE_DIR}"
+        INTERFACE_LINK_LIBRARIES "${CVC_SODIUM_LIBRARY}")
+    endif()
+    target_link_libraries(cvc PRIVATE CvcSodium::sodium)
+    message(STATUS "cvc::net: E2EE with ${CVC_SODIUM_LIBRARY}")
+  else()
+    message(STATUS "cvc::net: no libsodium - no E2EE (the e2ee-* verbs are absent)")
+  endif()
+endif()
+if(CVC_HAVE_SODIUM)
+  target_compile_definitions(cvc PRIVATE CVC_HAVE_SODIUM=1)
 endif()
 
 # Ariadne FTXUI terminal backend — OPTIONAL (roadmap §16.4). When FTXUI is
@@ -2355,6 +2433,48 @@ if(CVC_WITH_JOLT)
   endif()
 endif()
 
+# MuJoCo behind cvc::physics::mujoco_robot, in Jolt's shape above. physics/mujoco/mujoco_engine.cpp
+# is its own target, cvc_physics_mujoco, with mujoco::mujoco linked PRIVATE, so MuJoCo's headers
+# reach that one TU. It sees only the std-only cvc/physics headers (and mujoco_engine.h); no public
+# header names MuJoCo, and CVC_WITH_MUJOCO is a PRIVATE definition (mujoco_robot::available()
+# answers at run time). MuJoCo is Apache-2.0 and libcvc LGPL-2.1-only, so MuJoCo stays its own
+# library and none of its code is compiled into libcvc:
+#  - SHARED cvc: cvc_physics_mujoco is a private STATIC archive of libcvc's code, linked into cvc,
+#    and cvc links MuJoCo's shared library (cvcpkg's, on every native platform). A static
+#    mujoco::mujoco is refused here, since cvc would absorb it.
+#  - STATIC cvc (wasm, or BUILD_SHARED_LIBS=OFF): an OBJECT library whose objects go into
+#    libcvc.a; the consumer links libmujoco itself, so mujoco joins CVC_PRIVATE_LINK_PACKAGES.
+if(CVC_WITH_MUJOCO)
+  target_compile_definitions(cvc PRIVATE CVC_WITH_MUJOCO)
+  get_target_property(_cvc_type cvc TYPE)
+  get_target_property(_cvc_mujoco_lib_type mujoco::mujoco TYPE)
+  if(_cvc_type STREQUAL "SHARED_LIBRARY")
+    if(NOT _cvc_mujoco_lib_type STREQUAL "SHARED_LIBRARY")
+      message(FATAL_ERROR "CVC_WITH_MUJOCO: a shared libcvc links MuJoCo's shared library, and "
+                          "this mujoco::mujoco is ${_cvc_mujoco_lib_type}")
+    endif()
+    set(_cvc_mujoco_kind STATIC)
+  else()
+    set(_cvc_mujoco_kind OBJECT)
+  endif()
+  add_library(cvc_physics_mujoco ${_cvc_mujoco_kind} physics/mujoco/mujoco_engine.cpp)
+  set_target_properties(cvc_physics_mujoco PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON)
+  target_include_directories(cvc_physics_mujoco PRIVATE ${PROJECT_SOURCE_DIR}/inc)
+  target_compile_definitions(cvc_physics_mujoco PRIVATE CVC_WITH_MUJOCO)
+  target_compile_features(cvc_physics_mujoco PRIVATE cxx_std_17)
+  target_link_libraries(cvc_physics_mujoco PRIVATE mujoco::mujoco)
+  if(_cvc_mujoco_kind STREQUAL "STATIC")
+    target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:cvc_physics_mujoco>)
+  else()
+    target_sources(cvc PRIVATE $<TARGET_OBJECTS:cvc_physics_mujoco>)
+    target_link_libraries(cvc PRIVATE $<LINK_ONLY:mujoco::mujoco>)
+    list(APPEND CVC_PRIVATE_LINK_PACKAGES mujoco)
+  endif()
+endif()
+
 # The permissive geometry packages (found above), PRIVATE. No public header names any of them.
 #  - Qhull and Clipper2 are compiled libraries: a SHARED cvc absorbs them; a STATIC cvc exports
 #    them as $<LINK_ONLY:...>, so they join CVC_PRIVATE_LINK_PACKAGES and cvcConfig.cmake finds
@@ -2385,6 +2505,29 @@ if(NOT _cvc_type STREQUAL "SHARED_LIBRARY")
   if(CVC_WITH_CLIPPER2)
     list(APPEND CVC_PRIVATE_LINK_PACKAGES Clipper2)
   endif()
+endif()
+
+# cvc::planar (inc/cvc/geometry/planar.h; VOLROVER-LIBRARY-PORTS-ROADMAP.md §3, P3a): exact planar
+# geometry on an integer grid for the ContourTiler port, on Clipper2, CDT, Shewchuk's predicates
+# and Boost.Polygon (header-only, part of Boost). Built only with all three packages; then cvc
+# exports CVC_WITH_PLANAR, and without them the header's functions are left undefined.
+if(CVC_WITH_CLIPPER2 AND CVC_WITH_CDT AND CVC_WITH_SHEWCHUK)
+  set(CVC_WITH_PLANAR ON)
+  target_sources(cvc PRIVATE
+    geometry/planar/grid.cpp
+    geometry/planar/predicates.cpp
+    geometry/planar/polygon.cpp
+    geometry/planar/clipper.cpp
+    geometry/planar/wavefront.cpp
+    geometry/planar/triangulate.cpp
+    geometry/planar/sibson.cpp
+    geometry/planar/medial_axis.cpp
+  )
+  target_compile_definitions(cvc PUBLIC CVC_WITH_PLANAR)
+  message(STATUS "cvc::planar ENABLED (Clipper2, CDT, Shewchuk's predicates, Boost.Polygon)")
+else()
+  set(CVC_WITH_PLANAR OFF)
+  message(STATUS "cvc::planar DISABLED: it needs Clipper2, CDT and Shewchuk's predicates")
 endif()
 
 # libcvc does not use CGAL. Its two former uses (nav/spatial.cpp, geometry/project_verts) were
@@ -3038,7 +3181,7 @@ if(CVC_BUILD_CGAL_AB)
   endif()
   set(_cvc_ab ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/cgal_ab)
   add_executable(cgal_ab_test ${_cvc_ab}/cgal_ab.cpp ${_cvc_ab}/cgal_ab_permissive.cpp
-    ${_cvc_ab}/cgal_ab_qhull.cpp)
+    ${_cvc_ab}/cgal_ab_qhull.cpp ${_cvc_ab}/cgal_ab_planar.cpp)
   target_link_libraries(cgal_ab_test PRIVATE cvc cvc_permissive_geometry CGAL::CGAL)
   target_compile_features(cgal_ab_test PRIVATE cxx_std_17)
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")

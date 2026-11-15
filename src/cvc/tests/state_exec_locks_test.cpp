@@ -61,18 +61,6 @@ bool under_sanitizer() {
   return v && *v && std::string(v) != "0";
 }
 
-// A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
-// scope hold each other, and only the cycle collector frees them
-// (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Reference cycles"). These tests step the schedulers by
-// hand, so nothing collects; once every world is gone, one collection leaves LeakSanitizer only
-// real leaks to report.
-class collect_cycles_at_exit : public ::testing::Environment {
-public:
-  void TearDown() override { collect_cycles(); }
-};
-[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
-    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
-
 // One app and one scheduler of the given kind ("sync" or "async"), with one intrinsics context per
 // program. state-watch registers its handler on ctx->pid and takes the watch id from ctx->proc
 // (intrinsics.cpp), so programs must not share a context; each gets its own, with its pid set
@@ -807,7 +795,7 @@ struct hook_state {
 };
 hook_state g_hook;
 
-void hook_in_step_lock_enter(int pid) {
+void hook_in_step_lock_enter(int pid, exec_context &ctx) {
   if (pid == g_hook.throw_in_enter_pid)
     throw std::runtime_error("injected into the lock_enter step");
   if (pid == g_hook.interrupt_in_enter_pid)
@@ -815,9 +803,9 @@ void hook_in_step_lock_enter(int pid) {
   if (pid == g_hook.deadline_in_enter_pid) {
     // Busy (a time budget charges CPU time once half spent), until the step's deadline passes.
     const auto until = steady::now() + std::chrono::seconds(5);
-    while (!eval_deadline_expired() && steady::now() < until) {
+    while (!eval_deadline_expired(&ctx) && steady::now() < until) {
     }
-    eval_deadline_check("the lock_enter step");
+    eval_deadline_check(&ctx, "the lock_enter step");
   }
 }
 
@@ -979,10 +967,10 @@ struct checked_world {
     });
     // One long step: runs until the step's deadline cuts it (a scheduler's max_time or
     // max_step_time), as a long native loop would (types.h: eval_deadline_check).
-    builtins::register_fn(env, "spin-step", [](std::span<const value_t>) -> value_t {
+    builtins::register_fn(env, "spin-step", [](call_args a) -> value_t {
       const auto until = steady::now() + std::chrono::seconds(5);
       while (steady::now() < until)
-        eval_deadline_check("spin-step");
+        eval_deadline_check(a.context(), "spin-step");
       return nil_value();
     });
   }
@@ -2556,7 +2544,8 @@ TEST_P(Locks, LW01_CannotWaitHere) {
   EXPECT_EQ(as_str(w.run(nested_caught)), "cannot wait here");
   EXPECT_EQ(as_str(w.run(nested_else)), "else");
   {
-    const park_forbidden_scope no_parking;
+    const park_forbidden_scope no_parking(w.sync ? w.sync->evaluation_context()
+                                                 : w.async->evaluation_context());
     EXPECT_EQ(
         as_str(w.run(R"((try (with-lock "k" 1) (catch (LockError e) (get-attr e "reason"))))")),
         "cannot wait here");
