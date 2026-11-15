@@ -160,6 +160,12 @@ It is rebuilt on regeneration. It is CPU-sampleable for physics and uploaded as 
 
 **As built (O1).** `cvc/world/water_bodies.h`: `build_water_bodies` from ground samples, and `generated_world::water` built in a `world_builder` stage (`shore`) from the terrain mesh's samples, roads graded in, at most 1025 a side. Native cost: 4 ms on the 1.2 km world, 70–105 ms on the 5 km and 10 km worlds (a 1001² grid); not yet measured in wasm. terrain_lab's debug view is the world panel's Colour by → Water bodies, and the panel lists the bodies (`world.stats.water`).
 
+**Waterline slivers (2026-11-15).** A dry ridge one terrain sample wide and just over the level drew as a ruler-straight hairline out of the water.
+- The case: on terrain_lab's 5 m mesh, two samples at (565, 555) and (565, 560), 0.03 and 0.01 m over the level with water 0.9–1.6 m deep round them, drew a 5 m line across the north-east bay.
+- `lower_waterline_slivers` (`water_bodies.h`) lowers every dry sample less than `generated_world_params::waterline_sliver_m` (0.5 m) over the level that has water on both sides along x or y. It goes to the mean of those wet neighbours, in passes until none is left. A road's bed is kept.
+- `world_builder` runs it at the end of `grade`, once the mesh has its final heights: a road's grade re-samples the base relief near it, which brought slivers back when the pass ran earlier. So the drawn ground, physics, nav, the water bodies and the water node's bed all read the cleaned mesh.
+- On terrain_lab's world it lowers 141 samples (`generated_world::waterline_slivers`), and no thin sample within 0.5 m of the level is left (`WorldGenerated.NoWaterlineSliversOnTheTerrainMesh`).
+
 **W0.3 Wave content per body:**
 
 | kind | ambient waves | shore layer | wake layer | physics |

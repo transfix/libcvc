@@ -111,6 +111,10 @@ struct generated_world_params {
   double cell_m = 5.0;      // the terrain mesh's target cell size
   int max_terrain_n = 2049; // its samples per side are capped
   int raster_n = 385;       // the material raster's cells per side (capped by the terrain's)
+  // The terrain mesh's waterline slivers (lower_waterline_slivers, cvc/world/water_bodies.h): a dry
+  // ridge one sample wide and less than this far over water_level_m is lowered under it, so the
+  // ground does not draw a ruler-straight hairline out of the water. 0 keeps them.
+  double waterline_sliver_m = 0.5;
   // The generators, by name (register_terrain_generator, register_city_generator: the app's).
   // Terrain: "fbm" (the analytic relief) or "dem" (an elevation .npy at terrain_file, anchored at
   // 0 and stretched to amp_m). City: "districts" (the roads-first city) or "none" (no streets or
@@ -234,6 +238,9 @@ struct generated_world {
   std::vector<apron> aprons;
 
   double height_min = 0, height_max = 0; // the relief's range over the raster
+  // How many terrain mesh samples were waterline slivers, lowered under the water
+  // (generated_world_params::waterline_sliver_m).
+  std::size_t waterline_slivers = 0;
 
   // The ground under each water column (water_resolution(w)^2 samples, row-major, x fastest), so
   // water_field, called every few frames, need not sample the terrain again.
