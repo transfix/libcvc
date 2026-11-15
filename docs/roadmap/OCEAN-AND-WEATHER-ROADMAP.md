@@ -953,6 +953,18 @@ This phase builds on terrain_lab's `cloud_sky` (§1.5), not on the older demo cl
 - Coverage is already a target count for the cellular automaton (`rank_cells`), so it can change live without a rebuild.
 - Read the sun from the light rig (`lighting.*`) instead of `sun_az` / `sun_el` props. The sun baked into the maps is rebuilt when it changes.
 
+**As built (O17, with A4's cloud shade on the water).**
+- **`cloud_layer`:**
+  - `set_coverage` ranks the cells' targets again at once, and the clouds fade to them; the automaton is untouched.
+  - `set_sun` makes the maps again (the grammar bakes a little top-light into its field), then their self-shade, shadow patches and far opacity. The cells and the automaton are kept. A deck relit this way shades and draws exactly as one built under the new sun (`WorldCloudLayer.CoverageAndSunChangeLive`).
+- **`cloud_sky`:**
+  - It reads `sky.coverage` and `sky.wind_az` every frame (two more sliders on `sky_controls.ari`).
+  - Its sun is the rig's `lighting.key_azimuth` / `key_elevation` when the scene has a rig, else the props. A change relights the deck and re-composites the shade and the far clouds at once.
+  - terrain_lab.ari drops its copy of the sun's angles.
+- **The water as a receiver.** `water` replaces VTK's lighting, so the deck's rewrite of the lighting sum finds nothing in it. Once the sky has wired its inputs into a water mesh, that mesh switches to lighting that multiplies its sun and glints by `cloudShade()`. terrain_lab.ari lists `water` among the receivers.
+- **Checks:** `cvcgl_ariadne_realize` checks the seeded keys, the shade wired into both water meshes, and the sun following the rig (`cloudSunR` at elevation 28, then at the rig's 50).
+- **Not done:** `base` / `top` (live, they would mean a new deck and new nodes) and `darkness` (a darker low end of the self-shade ramp). Both belong with F2's storm decks.
+
 **F2. The weather model.** It is standard library only and deterministic: a function of the seed and world time (R2).
 - **Weather state:** clear, building, storm, clearing. Transitions are scheduled or authored, in the style of ABYSSAL's Director (§10, item 7).
 - **Storm cells:** each has a centre that moves with the steering wind, a radius, and an intensity that runs through growth, maturity and decay over a compressed 20–60 minutes.
@@ -1296,7 +1308,7 @@ Each piece below is one PR with its own tests. The work starts in lsystem_coast 
 | O14 | one scene wind (E5) for trees, `cloud_sky`, water, physics flow | E | O13 | Ariadne + physics | one key turns everything |
 | O15 | canonize: the Ariadne water node in terrain_lab.ari (§11); drawing and floating bodies as built (§11.2) | — | O1–O7 at least | Ariadne | terrain_lab's sea, lakes and ponds animate and float bodies |
 | O16 | arisrv: replicate inputs, rebuild on clients (§11) | — | O15 | Ariadne / arisrv | two clients draw the same waves and wakes |
-| O17 | live sky keys, the sun from the light rig, the water as a shade receiver (F1, A4) | F | — | Ariadne | **quick win, can land any time** |
+| O17 | live sky keys, the sun from the light rig, the water as a shade receiver (F1, A4); as built (§9 F1) | F | — | Ariadne | **quick win, can land any time** |
 | O18 | the weather model, storm cells, dark bases (F2, §10.7) | F | O17 | cvc::world + Ariadne | a storm builds, darkens and clears |
 | O19 | rain: streaks, rings, wetness, shafts, fog (F3, §10.6) | F | O18, O4 (wetness) | cvcGL | the F exit, measured in the browser |
 | O20 | storm wind, lightning, friction into physics (F4–F6) | F | O14, O18 | all | traction drops in the rain |

@@ -159,8 +159,12 @@ const char *const kWaterFsFuncs =
     "             mix(whash(i+vec2(0,1)),whash(i+vec2(1,1)),f.x), f.y);\n"
     "}\n";
 // Consumes //VTK::Light::Impl (VTK's lighting is replaced) and writes the final colour.
+// WATER_SUN_SHADE is the share of the sun that reaches the water: 1.0, or, once a cloud_sky lists
+// the water in its receivers and has wired its shade in (water_light below), the deck's shade
+// there, cloudShade(), which the sky declares at //VTK::Light::Dec.
 const char *const kWaterFsLight =
     // The depth at the fragment, from the bed itself: the far grid's cells are metres across.
+    "  float sunShade = WATER_SUN_SHADE;\n"
     "  float depthF = uLevelF - cvc_hf_height(vWaterRest);\n"
     "  if (depthF < -0.25) discard;\n" // dry ground: the terrain draws there
     "  if (any(lessThan(vWaterRest, uClipMin.xy)) || any(greaterThan(vWaterRest, uClipMax.xy))) "
@@ -172,10 +176,10 @@ const char *const kWaterFsLight =
     "  float NdotV = max(dot(N,Vd), 0.0);\n"
     "  float Fr = 0.02 + 0.98*pow(1.0-NdotV, 5.0);\n"
     "  float NdotL = max(dot(N, uSunDir), 0.0);\n"
-    "  float lit = 0.30 + 0.70*NdotL;\n"
+    "  float lit = 0.30 + 0.70*NdotL*sunShade;\n"
     "  vec3 Rr = 2.0*NdotV*N - Vd;\n"
     "  float skyT = clamp(0.5+0.5*Rr.z, 0.0, 1.0);\n"
-    "  float glint = pow(max(dot(Rr, uSunDir), 0.0), 200.0)*1.8;\n"
+    "  float glint = pow(max(dot(Rr, uSunDir), 0.0), 200.0)*1.8*sunShade;\n"
     "  vec3 deep = vec3(0.05,0.22,0.38)*lit;\n"
     "  vec3 sky = mix(vec3(0.66,0.72,0.78), vec3(0.26,0.50,0.80), skyT);\n"
     "  vec3 col = mix(deep, sky, Fr) + glint*vec3(1.0,0.96,0.88);\n"
@@ -189,6 +193,18 @@ const char *const kWaterFsLight =
     "  foam = foam*foam*(3.0-2.0*foam);\n"
     "  col = mix(col, vec3(0.93,0.96,0.97), foam);\n"
     "  gl_FragData[0] = vec4(col, 1.0);\n";
+
+// The water's lighting: in a cloud_sky's shade (`shaded`: the sky has wired its inputs into the
+// mesh, so cloudShade() is declared) or in full sun.
+std::string water_light(bool shaded) {
+  std::string s = kWaterFsLight;
+  const std::string mark = "WATER_SUN_SHADE";
+  s.replace(s.find(mark), mark.size(), shaded ? "cloudShade(vertexVC.xyz)" : "1.0");
+  return s;
+}
+
+// The cloud_sky's shared shader inputs' key on a receiver (lsystem_nodes.cpp's CLOUD_INPUTS).
+constexpr const char *kCloudInputs = "cloud_sky";
 
 // ── meshes ───────────────────────────────────────────────────────────────────────────────────
 
@@ -237,6 +253,8 @@ struct WaterRT {
   double level = 0.0, nearHalf = 192.0, cell = 2.0;
   double cx = 0.0, cy = 0.0; // the near grid's centre (whole cells)
   bool placed = false;
+  // Whether each mesh draws in a cloud_sky's shade (the sky wires receivers on its ticks).
+  bool nearShaded = false, farShaded = false;
   // The world's edge: when the ground's whole rim is under water (a generated_world's `edge:
   // shore`, an island), the sea goes on `outer` metres past it; otherwise the water stops at the
   // ground's edge (a wall, or the world falling away). Found again after a regenerate.
@@ -332,7 +350,8 @@ void style_ocean(GeometryNode &g, const WaterRT &rt, vtkTextureObject *bed) {
   g.addVertexShaderReplacement("//VTK::PositionVC::Impl", kWaterVsImpl);
   g.addFragmentShaderReplacement(
       "//VTK::Normal::Dec", std::string(kWaterFsDec) + HeightFieldTexture::glsl() + kWaterFsFuncs);
-  g.addFragmentShaderReplacement("//VTK::Light::Impl", kWaterFsLight);
+  g.addFragmentShaderReplacement("//VTK::Light::Impl",
+                                 water_light(g.hasSharedShaderInputs(kCloudInputs)));
 }
 
 // Make the bed texture's heights the ground's (again after a regenerate); true when they changed.
@@ -496,6 +515,17 @@ void tick_water(cvc::app &app, WaterRT &rt, vtkRenderer *ren) {
   }
   if (!rt.ready)
     return;
+
+  // A cloud_sky that lists the water in its receivers wires its shade into each mesh on one of its
+  // ticks: from the next frame that mesh's sun is the deck's shade (O17).
+  for (auto [g, shaded] :
+       {std::pair{near.get(), &rt.nearShaded}, std::pair{far.get(), &rt.farShaded}}) {
+    const bool s = g->hasSharedShaderInputs(kCloudInputs);
+    if (s != *shaded) {
+      *shaded = s;
+      g->addFragmentShaderReplacement("//VTK::Light::Impl", water_light(s));
+    }
+  }
 
   // A regenerated world: the bed again.
   if (refresh_bed(rt)) {
