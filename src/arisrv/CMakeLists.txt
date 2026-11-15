@@ -85,6 +85,16 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARISRV_WITH_PYTHON))
       target_link_libraries(arisrvx PRIVATE cvc)
     endif()
     cvc_ariadne_python_host(arisrvx SERVER)
+    # ... and clients' WebAssembly guests (client_guests:, roadmap §6.3 and §8.6, G4) where
+    # wasmtime's C API is found (src/ariadne_wasm); with -DARISRV_WITH_WASM=ON a missing one is a
+    # configure error. Stock arisrv carries no wasm runtime.
+    option(ARISRV_WITH_WASM "arisrvx requires WebAssembly guests (wasmtime's C API)" OFF)
+    include("${CMAKE_CURRENT_LIST_DIR}/../ariadne_wasm/ariadne_wasm.cmake")
+    cvc_find_ariadne_wasm(ARISRV_WITH_WASM)
+    set(ARISRVX_WASM ${CVC_ARIADNE_WASM_FOUND})
+    if(CVC_ARIADNE_WASM_FOUND)
+      cvc_ariadne_wasm_host(arisrvx INSTALL)
+    endif()
     cvc_set_install_rpath(arisrvx bin)
     install(TARGETS arisrvx RUNTIME DESTINATION bin COMPONENT arisrvx)
   else()
@@ -132,6 +142,12 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
            COMMAND ${CMAKE_COMMAND} -DARISRV=$<TARGET_FILE:arisrv>
                    "-DARGS=--doc@@${_srv_tests}/echo_server.ari@@--bind-writes@@off@@${_srv_listen}"
                    -DSTATUS=2 "-DEXPECT1=publishes namespaces, which needs bound writes"
+                   -P "${_srv_tests}/run_arisrv.cmake")
+  # Clients' guests (client_guests:, G4) need the WebAssembly engine, which only arisrvx carries.
+  add_test(NAME arisrv_doc_client_guests_need_arisrvx
+           COMMAND ${CMAKE_COMMAND} -DARISRV=$<TARGET_FILE:arisrv>
+                   "-DARGS=--doc@@${_srv_tests}/client_guests_server.ari@@${_srv_listen}"
+                   -DSTATUS=2 "-DEXPECT1=which arisrvx built with wasmtime runs"
                    -P "${_srv_tests}/run_arisrv.cmake")
   # The room's world (ARIADNE_WORLDS.md WD1): a --doc with a scene: is it, published before init:
   # runs; --scene and such a --doc both naming it stop arisrv; and --set comes after the stock
@@ -340,6 +356,21 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
       list(APPEND _call_tests arisrvx_room_call_grpc arisrvx_room_call_grpcs
            arisrvx_room_call_tls_needs_its_ca arisrv_room_call_unavailable
            arisrv_room_call_program)
+      # Clients' WebAssembly guests (G4, roadmap §6.3 and §8.6): arisrvx built with wasmtime, whose
+      # --doc opts in with client_guests:, runs a client's (room-run module ...) as its program,
+      # chrooted to its participant, and refuses what that may not do.
+      if(ARISRVX_WASM)
+        add_test(NAME arisrvx_room_call_guest
+                 COMMAND ${_pair} --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:ari>
+                         --scheme grpc --relay-arg=--room --relay-arg=ctest
+                         --relay-arg=--state-listen --relay-arg=127.0.0.1:0
+                         --relay-arg=--media-listen --relay-arg=127.0.0.1:0
+                         --relay-arg=--ws-listen --relay-arg=127.0.0.1:0 --relay-arg=--doc
+                         "--relay-arg=${_srv_tests}/client_guests_server.ari" --client-only
+                         --client-arg=--relay-room --client-arg=ctest
+                         "--client-arg=${_srv_tests}/client_guests.ari")
+        list(APPEND _call_tests arisrvx_room_call_guest)
+      endif()
 
       # The authenticate hook (S5, §6.5.4): tests/auth_service.py admits two test tokens as alice
       # (staff) and bob. alice's calls carry her principal, pass the role gate, are limited to 2 in
