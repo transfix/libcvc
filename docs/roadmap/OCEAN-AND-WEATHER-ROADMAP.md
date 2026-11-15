@@ -1266,7 +1266,7 @@ The pattern follows the existing nodes [C `scene_realize.h:275-282`; `extensions
     - terrain_lab's north-east bay: the film and lace on its shores.
     - A copy flooded to 30 m: the film on the island beaches that face the swell, none on the lee shores.
     - With a 1.5 m swell on that low island, the wet band covers much of it: the runup is up to 2.5 H₀, carried up to 30 m inland.
-  - A straight sliver of land in the bay (seen in the renders, from before the swash too) is the generated ground's own. Two neighbouring 5 m samples, (565, 555) and (565, 560), stand 0.03 and 0.01 m over the level with water all round them, so the edge between them pokes out of the water as a straight line.
+  - A straight sliver of land in the bay (seen in the renders, from before the swash too) is the generated ground's own. Two neighbouring 5 m samples, (565, 555) and (565, 560), stand 0.03 and 0.01 m over the level with water all round them, so the edge between them pokes out of the water as a straight line. The world builder now lowers such one-sample slivers under the water after grading (`lower_waterline_slivers`, #1271; §3).
 - **Not yet:** persistent foam (§10.2); wake waves acting on bodies (C5); the browser (WebGL2) build.
 
 **`weather`.**
