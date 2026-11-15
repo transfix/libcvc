@@ -277,102 +277,175 @@ void dyn_4w_plant::command(int i, float steer, float accel) {
 }
 
 void dyn_4w_plant::advance() {
-  const std::size_t n = _agents.size();
-  const ground_sampler ground{this};
-  std::vector<double> vx0(n), vy0(n), psi0(n);
-  std::vector<diff::dyn4_state<double>> next(n);
-  std::vector<diff::dyn4_ph_books<double>> books(n);
-  for (std::size_t i = 0; i < n; ++i) {
-    agent &a = _agents[i];
-    vx0[i] = a.s.vx;
-    vy0[i] = a.s.vy;
-    psi0[i] = a.s.psi;
+  if (!_o.step_world && _chassis->on()) {
+    // The host steps the world: end the tick its steps ran, begin the next.
+    if (_ticking)
+      end_tick();
+    begin_tick();
+    _ticking = true;
+    return;
+  }
+  begin_tick();
+  const double h = _dt / _nsub;
+  for (int k = 0; k < _nsub; ++k) {
+    substep_begin(h);
+    if (_chassis->on())
+      _chassis->step();
+    substep_end(h);
+  }
+  end_tick();
+}
+
+void dyn_4w_plant::before_world_step() {
+  if (_o.step_world || !_chassis->on())
+    throw cvc::physics_error("dyn_4w_plant::before_world_step: the plant steps its own world "
+                             "(options.step_world), or it has none");
+  substep_begin(_dt / _nsub);
+}
+
+void dyn_4w_plant::after_world_step() {
+  if (_o.step_world || !_chassis->on())
+    throw cvc::physics_error("dyn_4w_plant::after_world_step: the plant steps its own world "
+                             "(options.step_world), or it has none");
+  _chassis->read_contacts();
+  substep_end(_dt / _nsub);
+}
+
+void dyn_4w_plant::begin_tick() {
+  for (agent &a : _agents) {
+    a.vx0 = a.s.vx;
+    a.vy0 = a.s.vy;
+    a.psi0 = a.s.psi;
     a.tick = dyn_4w_books{};
     a.hits_tick = 0;
     a.statics_tick = 0;
     a.touched = -1;
     a.touch_depth = 0.0;
   }
+}
+
+void dyn_4w_plant::substep_begin(double h) {
+  const ground_sampler ground{this};
   const bool world = _chassis->on();
-  const double h = _dt / _nsub;
-  for (int k = 0; k < _nsub; ++k) {
-    for (std::size_t i = 0; i < n; ++i) {
-      agent &a = _agents[i];
-      // Nav's command as the Jolt plant's driver takes it (dyn_driver), against the slope along
-      // the heading under the centre of gravity when gravity acts on it.
-      const double c = std::cos(a.s.psi), sn = std::sin(a.s.psi);
-      const double grade = _o.grade_force
-                               ? dyn::grade_at(_o.plant, a.s.x + a.p.lr * c, a.s.y + a.p.lr * sn,
-                                               a.s.psi, static_cast<double>(a.p.lf + a.p.lr))
-                               : 0.0;
-      const double accel = _o.driver ? dyn::drive(a.driver, a.desc, a.accel_cmd, a.s.vx, grade,
-                                                  _o.gravity, a.p.tau_drive, h)
-                                     : a.accel_cmd;
-      diff::dyn4_plant_books<double>(a.p, a.lim, ground, a.s, a.steer_cmd, accel, next[i],
-                                     books[i]);
-      if (world) {
-        // The box where this substep starts, moving as the model moved.
-        vec3 pos;
-        quat rot;
-        chassis_pose(a, a.s, pos, rot);
-        const diff::dyn4_state<double> &o = next[i];
-        const double c1 = std::cos(o.psi), s1 = std::sin(o.psi);
-        const double off = -a.rear_x - a.p.lr;
-        const vec3 v{c1 * o.vx - s1 * o.vy - o.r * off * s1, s1 * o.vx + c1 * o.vy + o.r * off * c1,
-                     o.zd};
-        const vec3 w{c1 * o.phid - s1 * o.thd, s1 * o.phid + c1 * o.thd, o.r};
-        _chassis->put(static_cast<int>(i), pos, rot, v, w);
-      }
-    }
-    if (world)
-      _chassis->step();
-    for (std::size_t i = 0; i < n; ++i) {
-      agent &a = _agents[i];
-      const diff::dyn4_ph_books<double> &b = books[i];
-      dyn_4w_books d;
-      (b.supplied >= 0.0 ? d.drive : d.brake) = std::fabs(b.supplied);
-      d.dissipated = b.dissipated;
-      d.lever = b.lever;
-      d.grade = b.grade;
-      d.ground = b.ground;
-      d.limiter = b.limiter;
-      d.residual = b.residual;
-      diff::dyn4_state<double> o = next[i];
-      if (world && _chassis->touched(static_cast<int>(i))) {
-        // The world's horizontal pose and twist, back into the model (heave, roll, pitch and the
-        // actuators stay the model's); the energy they changed is the contact's.
-        const body_state m = _chassis->moved(static_cast<int>(i));
-        const double before = diff::dyn4_ph_hamiltonian(a.p, a.lim, ground, o);
-        o.psi += dyn::wrap(dyn::yaw_of(m.rotation) - o.psi);
-        const double c1 = std::cos(o.psi), s1 = std::sin(o.psi);
-        const double off = -a.rear_x - a.p.lr;
-        const vec3 cg =
-            m.position + dyn::rotate(m.rotation, {a.rear_x + a.p.lr, 0.0, a.desc.center_of_mass.z});
-        o.x = cg.x - a.p.lr * c1;
-        o.y = cg.y - a.p.lr * s1;
-        o.r = m.angular_velocity.z;
-        const double vgx = m.linear_velocity.x + o.r * off * s1,
-                     vgy = m.linear_velocity.y - o.r * off * c1;
-        o.vx = c1 * vgx + s1 * vgy;
-        o.vy = -s1 * vgx + c1 * vgy;
-        d.contact = diff::dyn4_ph_hamiltonian(a.p, a.lim, ground, o) - before;
-        ++a.hits_tick;
-        dyn::count_contacts(*_chassis, static_cast<int>(i), a.statics_tick, a.touched,
-                            a.touch_depth);
-      }
-      add(a.tick, d);
-      dyn::measured(a.driver, a.s.vx, o.vx, h);
-      a.s = o;
+  for (std::size_t i = 0; i < _agents.size(); ++i) {
+    agent &a = _agents[i];
+    // Nav's command as the Jolt plant's driver takes it (dyn_driver), against the slope along
+    // the heading under the centre of gravity when gravity acts on it.
+    const double c = std::cos(a.s.psi), sn = std::sin(a.s.psi);
+    const double grade = _o.grade_force
+                             ? dyn::grade_at(_o.plant, a.s.x + a.p.lr * c, a.s.y + a.p.lr * sn,
+                                             a.s.psi, static_cast<double>(a.p.lf + a.p.lr))
+                             : 0.0;
+    const double accel = _o.driver ? dyn::drive(a.driver, a.desc, a.accel_cmd, a.s.vx, grade,
+                                                _o.gravity, a.p.tau_drive, h)
+                                   : a.accel_cmd;
+    diff::dyn4_plant_books<double>(a.p, a.lim, ground, a.s, a.steer_cmd, accel, a.next,
+                                   a.step_books);
+    a.stepping = true;
+    if (world) {
+      // The box where this substep starts, moving as the model moved.
+      vec3 pos;
+      quat rot;
+      chassis_pose(a, a.s, pos, rot);
+      const diff::dyn4_state<double> &o = a.next;
+      const double c1 = std::cos(o.psi), s1 = std::sin(o.psi);
+      const double off = -a.rear_x - a.p.lr;
+      const vec3 v{c1 * o.vx - s1 * o.vy - o.r * off * s1, s1 * o.vx + c1 * o.vy + o.r * off * c1,
+                   o.zd};
+      const vec3 w{c1 * o.phid - s1 * o.thd, s1 * o.phid + c1 * o.thd, o.r};
+      _chassis->put(static_cast<int>(i), pos, rot, v, w);
     }
   }
-  for (std::size_t i = 0; i < n; ++i) {
+}
+
+void dyn_4w_plant::substep_end(double h) {
+  const ground_sampler ground{this};
+  const bool world = _chassis->on();
+  for (std::size_t i = 0; i < _agents.size(); ++i) {
     agent &a = _agents[i];
+    if (!a.stepping) // added since the substep began
+      continue;
+    a.stepping = false;
+    const diff::dyn4_ph_books<double> &b = a.step_books;
+    dyn_4w_books d;
+    (b.supplied >= 0.0 ? d.drive : d.brake) = std::fabs(b.supplied);
+    d.dissipated = b.dissipated;
+    d.lever = b.lever;
+    d.grade = b.grade;
+    d.ground = b.ground;
+    d.limiter = b.limiter;
+    d.residual = b.residual;
+    diff::dyn4_state<double> o = a.next;
+    if (world && _chassis->touched(static_cast<int>(i))) {
+      // The world's horizontal pose and twist, back into the model (heave, roll, pitch and the
+      // actuators stay the model's); the energy they changed is the contact's.
+      const body_state m = _chassis->moved(static_cast<int>(i));
+      const double before = diff::dyn4_ph_hamiltonian(a.p, a.lim, ground, o);
+      o.psi += dyn::wrap(dyn::yaw_of(m.rotation) - o.psi);
+      const double c1 = std::cos(o.psi), s1 = std::sin(o.psi);
+      const double off = -a.rear_x - a.p.lr;
+      const vec3 cg =
+          m.position + dyn::rotate(m.rotation, {a.rear_x + a.p.lr, 0.0, a.desc.center_of_mass.z});
+      o.x = cg.x - a.p.lr * c1;
+      o.y = cg.y - a.p.lr * s1;
+      o.r = m.angular_velocity.z;
+      const double vgx = m.linear_velocity.x + o.r * off * s1,
+                   vgy = m.linear_velocity.y - o.r * off * c1;
+      o.vx = c1 * vgx + s1 * vgy;
+      o.vy = -s1 * vgx + c1 * vgy;
+      d.contact = diff::dyn4_ph_hamiltonian(a.p, a.lim, ground, o) - before;
+      ++a.hits_tick;
+      dyn::count_contacts(*_chassis, static_cast<int>(i), a.statics_tick, a.touched, a.touch_depth);
+    }
+    add(a.tick, d);
+    dyn::measured(a.driver, a.s.vx, o.vx, h);
+    a.s = o;
+  }
+}
+
+void dyn_4w_plant::end_tick() {
+  const ground_sampler ground{this};
+  for (agent &a : _agents) {
     a.hits += a.hits_tick;
     a.tick.stored = diff::dyn4_ph_hamiltonian(a.p, a.lim, ground, a.s);
     add(a.total, a.tick);
     a.total.stored = a.tick.stored;
-    measure(a, vx0[i], vy0[i], psi0[i], true);
+    measure(a, a.vx0, a.vy0, a.psi0, true);
   }
+}
+
+void dyn_4w_plant::world_gone() { _chassis->forget(); }
+
+int dyn_4w_plant::add_desc(vehicle_desc d) {
+  _descs.push_back(std::move(d));
+  return static_cast<int>(_descs.size()) - 1;
+}
+
+std::array<dyn_4w_plant::wheel_pose, 4> dyn_4w_plant::wheels(int i) const {
+  const agent &a = _agents.at(static_cast<std::size_t>(i));
+  diff::dyn4_wheels<double> w;
+  diff::dyn4_wheel_state(a.p, a.lim, ground_sampler{this}, a.s, w);
+  const double c = std::cos(a.s.psi), sn = std::sin(a.s.psi);
+  const double cgx = a.s.x + a.p.lr * c, cgy = a.s.y + a.p.lr * sn;
+  const double L = a.p.lf + a.p.lr, tan_delta = std::tan(a.s.delta);
+  const double e = a.p.fz_min * a.p.m * a.p.g; // the load floor: a wheel at it is off the ground
+  const double r = a.desc.axles.empty() ? 0.4 : a.desc.axles.front().wheel_radius;
+  std::array<wheel_pose, 4> out;
+  for (int k = 0; k < 4; ++k) {
+    wheel_pose &p = out[static_cast<std::size_t>(k)];
+    p.center.x = cgx + w.xi[k] * c - w.yi[k] * sn;
+    p.center.y = cgy + w.xi[k] * sn + w.yi[k] * c;
+    // Its corner's height on the body, and the ground under it (both from the reference _z0).
+    const double corner = a.s.z + w.yi[k] * a.s.phi - w.xi[k] * a.s.th;
+    p.down = w.Fz[k] > 1.5 * e;
+    // On the ground while it carries a load; off it, where its spring at its static length hangs
+    // it below the corner.
+    const double static_defl = w.k[k] > 0.0 ? w.Fz0[k] / w.k[k] : 0.0;
+    const double bottom = p.down ? w.hg[k] : std::max(w.hg[k], corner - static_defl);
+    p.center.z = _z0 + bottom + r;
+    p.steer = k < 2 ? diff::dyn4_ackermann(L, w.yi[k], tan_delta) : 0.0;
+  }
+  return out;
 }
 
 double dyn_4w_plant::energy_step(int i) const {

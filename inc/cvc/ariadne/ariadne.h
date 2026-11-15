@@ -65,6 +65,11 @@ enum class ProgramLane {
   init
 };
 
+// The builtins a reactive slot's predicate may call: pure, bounded functions and the state
+// readers, nothing that writes, messages, waits, spawns or watches. A LaneProcess's `allow` starts
+// from them.
+std::span<const char *const> read_lane_builtins();
+
 // A program a host extension runs as one of the document's own (Runtime::start_process): a
 // scripting engine's activation is one (script_engine.h).
 struct LaneProcess {
@@ -77,8 +82,14 @@ struct LaneProcess {
   double max_time = 0.0;
   uint64_t max_memory = 0;
   int priority = 0; // the scheduler's nice value, as a program's set-priority sets it
-  // Natives of its own, bound in a scope of their own over the lane's environment. `ictx` is the
-  // process's intrinsics context, which lives as long as the process.
+  // When not empty, the only names of the lane's environment the process sees (default-deny, as
+  // a reactive slot's predicate is: read_lane_builtins()), for a program from outside the
+  // document: a relay's client's (server_document.h). `extend` binds over them. Empty: the lane's
+  // whole environment.
+  std::vector<std::string> allow;
+  // Natives of its own, bound in a scope of their own over the lane's environment (or over
+  // `allow`'s names of it). `ictx` is the process's intrinsics context, which lives as long as the
+  // process.
   std::function<void(const std::shared_ptr<cvc::state_exec::environment> &env,
                      cvc::state_exec::intrinsics_context &ictx)>
       extend;

@@ -862,8 +862,9 @@ types behind one call, `register_cvcgl_extensions`
 ([`extensions.h`](../inc/cvc/gl/ariadne/extensions.h)), which both `ariadne_hello` and
 `AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`,
 `generated_world` (terrain_lab's world, [`world_nodes.h`](../inc/cvc/gl/ariadne/world_nodes.h)),
-`volume_slice` (one axis-aligned plane of a volume, below), and — on a libcvc built with
-`CVC_ENABLE_LIBIGL` — `mesh_lab` and `fe_lab`. Keys the built-in parser
+`volume_slice` (one axis-aligned plane of a volume, below), `water` (its sea, lakes and ponds as the
+GPU FFT ocean, below), and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and `fe_lab`.
+Keys the built-in parser
 does not know land in the node's `props`, which a custom realizer reads; most realizers
 **seed** state keys from them (`forest.*` for `forest_trees`, the node's own subtree for
 `mesh_lab` / `fe_lab`), so a document's prop is the starting value a bound component then
@@ -1095,6 +1096,23 @@ clouds), `far_reach` (how far the far clouds reach toward the horizon; out of th
 clouds) and `shadow` (0 starts the shade off). Live keys under the node's root (`sky.` unless
 `keys:`): `drift`, `morph`, `evolve`, `orographic` and `shadow`, all on `sky_controls.ari`.
 
+**Water.** `water` draws everything below `level` on a ground (`world:` a `generated_world`, or
+`ground:` any height-field node) as the GPU FFT sea of OCEAN-AND-WEATHER-ROADMAP.md (§11.2, O15):
+three wave cascades for the wind (`wind_speed`, `wind_dir`, `fetch`), each fading out over
+`shore_fade` metres of depth toward the shore. A grid `near` metres each way from the camera
+(`cells` vertices a side) is displaced by the cascades and moves with the camera by whole cells; a
+flat grid over the ground (`far_cells` a side) draws the rest and gives way inside the near one.
+Both shade as a Fresnel sea with shallows tinted by depth and whitecaps where the waves fold, the
+threshold found so they cover Monahan's share of the sea for the wind (`whitecaps` scales it;
+`foam_bias` at 0 or above fixes it), and both stay out of the scene's bounds, so the ground frames
+the view. When the ground's whole rim is under water (a `generated_world` with `edge: shore`, an
+island) the sea goes on `outer` metres past it (6000); otherwise it stops at the ground's edge. A
+`generated_world` under a water node wants `water: 0`, so its own flat water rungs do not draw
+over it. The cascades need float render targets; without them the water is flat blue. Live keys
+under the node's root (`water.` unless `keys:`): `wind_speed`, `wind_dir`, `fetch`, `chop`,
+`wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`, `foam_fray` and `shore_fade`, most on
+`water_controls.ari`.
+
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the
 analytic relief the terrain lab stands on; the default), `dem` (an elevation `.npy` at `file`, a URI
@@ -1296,7 +1314,7 @@ scene:
   - **Restart.** `sim.restart` rebuilds only the world on.
 - **Vehicles.** The document's top-level `world:` block lists the vehicles it offers
   ([`world_rules.h`](../inc/cvc/ariadne/world_rules.h)), and the scene's world runtime spawns
-  them as Jolt vehicles into the scene's own physics world, headless or drawn
+  them into the scene's own physics world, headless or drawn
   ([`world_vehicles.h`](../inc/cvc/ariadne/world_vehicles.h)). They collide with the scene's
   bodies, step on the world clock with them, and drive on the world that is on:
 
@@ -1311,13 +1329,28 @@ scene:
         racer:
           vehicle: { preset: roboracer, max_speed: 6 }       # a preset with overrides
           look: { file: racer.glb, scale: 1, yaw: 90, z: 0 } # default: the chassis box
+        truck:
+          plant: dynamic4w:humvee                            # the four-wheel model, a Humvee
   ```
 
-  - **Archetypes.** Each names its plant (`jolt`; `kinematic`, `dynamic` and `dynamic4w` are
-    accepted but not run in a scene world yet), its body (a preset, with `mass`, `max_speed`,
+  - **Archetypes.** Each names its plant, its body (a preset, with `mass`, `max_speed`,
     `max_accel`, `max_decel` or `max_steer` over it), its look, the ranges a spawn's settings are
     held to, and its controllers: `nav@1`, the navigator, `none`, or `external` (its intent
     alone drives it).
+  - **Plants.** Every plant runs in the scene's world, on its clock, and meets its bodies (the
+    buildings, the props, the other vehicles):
+
+    | `plant:` | The vehicle | Its body in the world |
+    |---|---|---|
+    | `jolt` (the default) | a Jolt vehicle: wheels, suspension, engine and gearbox | the vehicle's chassis |
+    | `dynamic` (`dynamic:<preset>`) | the dynamic single-track model: tires, load transfer, actuator lag, with its energy books | its chassis box, which the world's contacts push back into the model |
+    | `dynamic4w` (`dynamic4w:<preset>`) | the four-wheel model with suspension: each wheel on the ground under it | as `dynamic`'s |
+    | `kinematic` | nav's bicycle | a kinematic box: it pushes what it meets, and nothing stops it (the navigator keeps it off the buildings) |
+
+    `dynamic:<preset>` names the vehicle as `vehicle: <preset>` does. The dynamic models take one
+    substep of each world step, so they step with everything else; each plant's entities have a
+    navigator of their own on the world's grid. The kinematic bicycle steers each of its
+    substeps, so it has no one command to blend with: there a `blend` intent replaces.
   - **Looks.** With no `look:`, a humvee is the real Humvee, the vehicle-humvee package's
     `Humvee.glb`, when it is installed (`find_vehicle_model`: beside `$CVC_NAV_BUNDLE`, else in
     `share/cvc-scenes/shared` or `share/cvc-scenes/*/` under `$CVC_PREFIX`, `$CVCPKG_PREFIX`,
@@ -1339,9 +1372,10 @@ scene:
     `selected` and `selection.*` (the selected archetype as a spawn would make it now), and
     `status`. Under `entities`: `ids`, `count`, `rev`, `summary`, and for each entity its
     identity, pose (`x`, `y`, `z`, `yaw`), `speed`, `power_kw`, `energy_wh`, `wh_per_km`,
-    `distance`, `wheel_load`, `aero_force` and `gear`, and `command.steer` / `command.accel`
+    `distance`, `wheel_load`, `aero_force` and `gear` (the dynamic models give their books'
+    power and energy, and an odometer), and `command.steer` / `command.accel`
     (what its plant took on the last navigator tick) with `command.by` (its controller, `intent`,
-    `blend`, or `hold`). `physics.stats.vehicles` has a line per vehicle.
+    `blend`, or `hold`). `physics.stats.vehicles` has a line per vehicle, its plant named.
   - **Intents.** Any entity can be steered from outside. A document, a script or a server writes
     its keys, and a C++ or Python host calls `WorldVehicles::set_intent` (`pycvc.WorldEntities`,
     below). Each navigator tick (20 Hz) reads them, and a change replaces the intent it had:
@@ -1370,7 +1404,9 @@ scene:
     `vehicles.spawn.request`. The result is in `vehicles.spawn.status`. `vehicles.remove.id`
     with `remove.request` removes one, and `clear.request` removes them all.
   - **Drawing.** cvcGL draws each entity on its chassis, posed between steps as the other moving
-    bodies are. A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
+    bodies are. The box look poses each wheel where its plant has it
+    (`WorldVehicles::wheels`): a Jolt wheel on its suspension, a dynamic4w wheel on the ground
+    under it, the front ones steered (Ackermann's on a dynamic4w). A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
     `spin:` in degrees a second) draws the selected archetype in the spawn's colours.
   - **The panel.** `vehicle_selector.ari`: the vehicle, its stats, a preview viewport onto a
     `scenes:` entry holding a `vehicle_preview` node (its header shows one), the settings, the
@@ -3337,6 +3373,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `volren_controls`, `volslice_controls` | a `volren` / `volslice` node (arg `node`, default `bunny_volume`) |
 | `forest_controls`, `sea_controls`, `sky_controls` | a `forest_trees` / `wave_sea` / `cloud_sky` node (arg `keys`, below) |
 | `world_controls` | a `generated_world` node (§5.4; arg `keys`) |
+| `water_controls` | a `water` node (arg `keys`, default `water`) |
 | `mesh_tools` | a `mesh_lab` node (§5.4; arg `node`, default `mesh`) |
 | `fe_controls` | an `fe_lab` node (§5.4; arg `node`, default `domain`) |
 | `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `scene`, `show`, `hide`, `mode`, `camera`, `chrome`, `shadows`, `caption`, `width`, `height`, `title`, `id`) |
@@ -4234,7 +4271,7 @@ unless `MPLBACKEND` or a matplotlibrc names another; `matplotlib.use()` selects 
   `image: src: figure-1`, or by the name `pycvc_gl.ariadne_mpl.bind(fig, "name")` gives it.
 - `draw_idle()` draws once in the next frame, and timers, so `FuncAnimation`, tick on the frames.
   `plt.pause()` runs the host's frames for its interval, where the program runs them.
-- `display(obj)`, predefined in a `python:` block and in `pycvc_gl.ariadne`, shows an object's
+- `display(obj)`, predefined in a `python:` block and in `pycvc.ari`, shows an object's
   richest form in a figures.ari window as IPython's does: a figure, a numpy picture, a PIL image
   or `_repr_png_` as a picture, else markdown or plain text. Where there is no such window (a
   document of its own, `arix`, `ariglx --terminal`, `arisrvx`) it prints the text/plain form, as
@@ -4516,6 +4553,52 @@ on_tick: |
   own SIGTERM, and a `python:` block in the server document itself (arisrvx runs the operator's
   Python beside the relay instead, §9.8).
 
+#### 9.7.1 Clients' programs: `room-run`
+
+A client can send its relay a DSL program to run there as the client's own (the roadmap's §6.3,
+tier 2; [`server_document.h`](../inc/cvc/ariadne/server_document.h)). The server document opts in:
+
+```yaml
+server:
+  client_programs: { steps: 2000, time: 0.02 }   # or `on`: the action lane's caps
+```
+
+```lisp
+(room-run "(state-set (nth args 1) (+ (car args) 1)) (+ (car args) 1)" 41 "score")   ; 42
+```
+
+- **The call.** `(room-run "source" arg ...)` parks the program until the value of the source's
+  last form comes back. `(room-run-async ...)` returns a future for `(await f)`, and
+  `(room-run-opts (dict "timeout" S) "source" arg ...)` sets how long to wait. In the program,
+  `args` is the list of the arguments. The source and the values ride `room-call`'s path (§9.8.1),
+  typed the same way, so this needs bound writes too: arisrv refuses to start a document with
+  `client_programs:` under `--bind-writes off`.
+- **Where it runs.** On the relay's loop, as one of the document's actions, under the action
+  lane's caps (`ariadne.limits.action_max_steps`, `action_max_time` and `action_max_memory`,
+  §2.2). `client_programs:`'s `steps`, `time` (seconds) and `memory_mb` can only lower them. It
+  runs in a stock arisrv as it does in arisrvx, and never in Python.
+- **What it reaches.** Its chroot is its sender's own participant,
+  `conf.rooms.<room>.participants.<pid>`. It reads and writes there and nowhere else: it has no
+  `room` view, no published namespace, and none of the document's own state or functions. A
+  write must be one the client could make itself: `state-set`, `state-data-set` and the atomics
+  (`state-incr`, `state-cas`, `state-swap`), never on a key the relay owns there (`pose`,
+  `device`, `net.relay`, a stream's `ready`) or on a path the tree would trim onto one. Any other
+  write is a `PermissionError`.
+- **Its environment** is default-deny. It holds the read lane's builtins (§2.1), those writers
+  and `args`, and nothing that spawns, sends or receives messages, watches, locks, sleeps, opens
+  a file or the network, or stops the relay.
+- **One at a time.** A second program from a client whose first is still running is answered
+  `rate_limited`.
+- **Errors** raise as `room-call`'s do (§9.8.1), with these codes:
+  - `unavailable`: the relay runs no document with `client_programs:`, or its document hasn't
+    loaded.
+  - `invalid`: the source doesn't parse on its own, or is over 64 KiB.
+  - `rate_limited`.
+  - `failed`: the program raised. The message is its report.
+  - `resource_exhausted`: a cap stopped it.
+  - `too_large`: its value is over `--call-result-max`.
+  - `internal`: its value doesn't cross the wire (a function, say).
+
 ### 9.8 Python beside the relay: `arisrvx`
 
 `arisrvx` is arisrv with an embedded CPython 3.12 ([`server_link.h`](../src/ariadne_python/server_link.h),
@@ -4547,7 +4630,7 @@ host.run()                          # until SIGTERM; the app's shutdown, then th
   program keeps each task it starts (`host.loop.create_task`) until the task is done: asyncio holds
   tasks only weakly, so one waiting on a stream of its own (`asyncio.open_connection`) is freed by
   the next full garbage collection, mid-await, and its work never finishes.
-- **Writes.** `host.set`, `set_tree`, `set_series` and `set_plot` (as `pycvc_gl.ariadne.Host`'s)
+- **Writes.** `host.set`, `set_tree`, `set_series` and `set_plot` (as `pycvc.ari.Host`'s)
   take paths from the tree's root and are queued. The relay applies them on its next room step
   (60 Hz), ahead of the server document's programs, coalesced per path and in the order of each path's last write
   (a section's fields, then its `rev`). `--script-write-budget N` caps a step at N bytes (65536 by
