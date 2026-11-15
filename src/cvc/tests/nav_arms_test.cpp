@@ -160,7 +160,7 @@ TEST(NavArms, TheBooksCloseAndBookAGoalChangeAsContext) {
   EXPECT_DOUBLE_EQ(b.drive, (1.5 - 0.25) - 2.0);
   EXPECT_DOUBLE_EQ(b.projection, 0.25);
   EXPECT_DOUBLE_EQ(b.dKE, 0.5 * 0.4 * 0.4);
-  EXPECT_DOUBLE_EQ(b.residual, 0.0);
+  EXPECT_NEAR(b.residual, 0.0, 1e-15);
   // a goal moved between the ticks: U at the same pose went up by 0.75, booked as context
   const double prev_end = 1.25;
   t.context_work = 0.75f;
@@ -168,7 +168,7 @@ TEST(NavArms, TheBooksCloseAndBookAGoalChangeAsContext) {
   EXPECT_DOUBLE_EQ(b.dU, 1.5 - 1.25);
   EXPECT_DOUBLE_EQ(b.context, 0.75);
   EXPECT_NEAR(b.residual, 0.0, 1e-12);
-  EXPECT_DOUBLE_EQ(b.dKE, 0.0);
+  EXPECT_NEAR(b.dKE, 0.0, 1e-15); // a fused multiply-add may leave a last bit (arm64)
   // something moved the agent between the ticks: the books do not explain it
   t.context_work = 0.0f;
   b = books_of(t, &prev_end, 0.4, 0.4);
