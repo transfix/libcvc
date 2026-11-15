@@ -334,6 +334,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_algorithm:test_pycvc_algorithm.py
              pycvc_params:test_pycvc_params.py
              pycvc_jobs:test_pycvc_jobs.py
+             pycvc_skeleton:test_pycvc_skeleton.py
              pycvc_contours:test_pycvc_contours.py
              pycvc_point_classes:test_pycvc_point_classes.py
              pycvc_image:test_pycvc_image.py
@@ -347,6 +348,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_ariadne:test_pycvc_ariadne.py
              pycvc_ariadne_server:test_pycvc_ariadne_server.py
              pycvc_ariadne_harness:test_pycvc_ariadne_harness.py
+             pycvc_world_entities:test_pycvc_world_entities.py
              pycvc_state_exec:test_pycvc_state_exec.py
              pycvc_state_exec_sched:test_pycvc_state_exec_sched.py
              pycvc_state_exec_eval:test_pycvc_state_exec_eval.py

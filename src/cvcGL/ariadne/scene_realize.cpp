@@ -9,6 +9,7 @@
 #include <cvc/ariadne/scene_geometry.h> // a node's mesh from data (core)
 #include <cvc/ariadne/scene_world.h>    // the scene's world: physics and bodies (core)
 #include <cvc/ariadne/uri.h> // §13.4 resolve a node source: URI to a local path (temp-file bridge)
+#include <cvc/ariadne/world_vehicles.h> // its vehicles: their intents key
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h> // §9 time: tick_scene drives app.world_clock() for a clock: scene
 #include <cvc/geometry/geometry.h>
@@ -17,6 +18,7 @@
 #include <cvc/geometry/mesh_ops.h>     // mesh_ops_available() — source.sdf.algorithm: igl
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
+#include <cvc/gl/LabelLayer.h> // label: and entity_labels: (scene_labels.h)
 #include <cvc/gl/LightNode.h>
 #include <cvc/gl/LodGraphicsNode.h> // RealizeOptions::lod: a mesh node as a LOD ladder
 #include <cvc/gl/LodPyramidCache.h>
@@ -25,10 +27,12 @@
 #include <cvc/gl/VolRenNode.h>
 #include <cvc/gl/VolSliceNode.h>
 #include <cvc/gl/VolumeNode.h>
+#include <cvc/gl/ariadne/scene_labels.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/tf_binding.h>    // every volume node's editable transfer-function model
 #include <cvc/gl/ariadne/vehicle_view.h>  // the world's vehicles, drawn on their chassis
 #include <cvc/gl/physics_scene_binding.h> // body: the nodes physics moves
+#include <cvc/gl/state_publisher.h>       // a copy's published pose lands before it goes
 #include <cvc/gl/world_geometry_nodes.h>  // a dataset's world_geometry, drawn
 #include <cvc/image/image.h>              // cvc::read_image — material: { texture: <uri> }
 #include <cvc/physics/world.h>            // physics: the scene's rigid-body world
@@ -56,6 +60,31 @@
 namespace cvc {
 namespace gl {
 namespace ariadne {
+
+// A repeat: node (§5.4) as realized. Copy k is the template with `{i}` = k
+// (cvc::ariadne::scene_node_instance), realized as any node is, beside the others under `parent`
+// (the graphics root at the top level). Each copy records what it added to the RealizedScene, so
+// it takes that with it when the count drops.
+struct SceneRepeatBinding {
+  cvc::ariadne::SceneNode spec; // the template, as declared
+  cvc::ariadne::SceneRepeatCount source;
+  std::string key; // Kind::key: the count's state path, resolved
+  bool top_level = true;
+  std::weak_ptr<GraphicsNode> parent; // the copies' parent, below the top level
+  struct Copy {
+    std::shared_ptr<const cvc::ariadne::SceneNode> spec; // held as long as the copy is
+    std::weak_ptr<GraphicsNode> node; // expired: it did not realize (a warning said why)
+    std::vector<std::weak_ptr<GraphicsNode>> nodes; // its RealizedScene::nodes entries
+    std::set<std::string> visibility, clip;         // its bindings' target paths
+    std::size_t ticks_begin = 0, ticks_end = 0;     // its custom_ticks
+    std::vector<std::string> created;               // the top-level graphics it made
+    std::vector<std::pair<std::string, std::shared_ptr<const cvc::height_field>>> fields;
+    std::vector<std::shared_ptr<SceneRepeatBinding>> nested; // the repeat: nodes made in it
+  };
+  std::vector<Copy> copies;
+  bool live = true; // false once its copies went with an outer copy of theirs
+  std::set<std::string> warned;
+};
 
 namespace {
 
@@ -645,10 +674,19 @@ bool asset_geometry(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
   return true;
 }
 
+void realize_repeat(SceneGraph &sg, const cvc::ariadne::SceneNode &n, RealizedScene &out,
+                    GraphicsNode *parent, const RealizeOptions &options,
+                    std::vector<std::string> *warnings,
+                    const std::vector<cvc::ariadne::SceneAsset> &assets);
+
 void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::string &bind_prefix,
                   RealizedScene &out, GraphicsNode *parent, std::vector<pending_body> &bodies,
                   const RealizeOptions &options, std::vector<std::string> *warnings,
                   const std::vector<cvc::ariadne::SceneAsset> &assets) {
+  if (!n.repeat.empty()) { // §5.4 a template: its copies are the nodes, beside one another
+    realize_repeat(sg, n, out, parent, options, warnings, assets);
+    return;
+  }
   std::shared_ptr<GraphicsNode> node;
 
   if (!n.source_data.empty() && !type_reads_data(sg.appContext(), n.type)) {
@@ -848,6 +886,7 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
     return;
   apply_transform(*node, n); // the node's LOCAL transform (composed with the parent's)
   apply_visibility(*node, n, sg.appContext(), bind_prefix, out.visibility);
+  apply_scene_label(sg, node, n, out, warnings); // label: over the node
   if (n.has_casts_shadow) // receives shadows either way; a non-caster never forces a re-bake
     node->setCastsShadow(n.casts_shadow);
   // shader: { preset | vertex | fragment } — the declarative GLSL surface — and material.opaque.
@@ -856,6 +895,15 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
   // is shaded too. A non-geometry node (volume/group) silently ignores them.
   if (auto *g = dynamic_cast<GeometryNode *>(node.get()))
     apply_mesh_keys(*g, n, warnings);
+  if (!n.opacity_bind.empty()) { // material: { opacity: <path> }: synced each frame
+    SceneOpacityBinding ob;
+    ob.source = cvc::ariadne::resolve_bind(bind_prefix, n.opacity_bind);
+    ob.fallback = n.opacity;
+    ob.node = node;
+    if (!n.source_data.empty()) // its SceneDataBinding, pushed above with the node
+      ob.data = static_cast<int>(out.data_nodes.size()) - 1;
+    out.opacity.push_back(std::move(ob));
+  }
   apply_clip(*node, n, sg.appContext(), bind_prefix, out.clip, warnings); // own coordinates
   warn_clip_capability(*node, n, warnings);
   if (n.body.present && n.source_data.empty()) // a data node's come with its dataset
@@ -866,6 +914,330 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
   for (const auto &c : n.children)
     realize_node(sg, c, bind_prefix, out, node.get(), bodies, options, warnings, assets);
 }
+
+// --- repeat: (§5.4) ------------------------------------------------------------------------------
+
+// A repeat: node is counted every frame: each of its warnings is given once.
+void warn_once(SceneRepeatBinding &b, std::vector<std::string> *warnings, const std::string &m) {
+  if (b.warned.insert(m).second)
+    warn(warnings, m);
+}
+
+// A state value as a count: an integer, or a number truncated; anything else (unset included) 0.
+long long count_of(const std::string &v) {
+  try {
+    std::size_t used = 0;
+    const long long n = std::stoll(v, &used);
+    if (used == v.size())
+      return n;
+  } catch (const std::exception &) {
+  }
+  try {
+    const double d = std::stod(v);
+    if (std::isfinite(d) && d > -9.2e18 && d < 9.2e18)
+      return static_cast<long long>(d);
+  } catch (const std::exception &) {
+  }
+  return 0;
+}
+
+// How many copies `b` draws now: its number, its key's value, or its expression on the document's
+// read lane (options.count), clamped to 0..kSceneRepeatMax.
+int repeat_count(RealizedScene &out, SceneRepeatBinding &b, std::vector<std::string> *warnings) {
+  using Kind = cvc::ariadne::SceneRepeatCount::Kind;
+  long long n = 0;
+  switch (b.source.kind) {
+  case Kind::none:
+    return 0;
+  case Kind::literal:
+    return b.source.literal;
+  case Kind::key:
+    if (out.app)
+      n = count_of(cvc::ariadne::read_or<std::string>(*out.app, b.key, std::string()));
+    break;
+  case Kind::expression:
+    if (!out.options.count) {
+      warn_once(b, warnings,
+                "ari: scene node '" + b.spec.id + "': repeat: " + b.source.text +
+                    " is an expression, and this host counts none (no document runtime); no "
+                    "copies");
+      return 0;
+    }
+    n = out.options.count(b.source.text);
+    break;
+  }
+  if (n < 0)
+    n = 0;
+  if (n > cvc::ariadne::kSceneRepeatMax) {
+    warn_once(b, warnings,
+              "ari: scene node '" + b.spec.id + "': repeat: count " + std::to_string(n) +
+                  " is clamped to " + std::to_string(cvc::ariadne::kSceneRepeatMax));
+    n = cvc::ariadne::kSceneRepeatMax;
+  }
+  return static_cast<int>(n);
+}
+
+// Three comma-separated numbers (a node's position / rotation / scale key) into out[3].
+bool parse_triple(const std::string &v, float out[3]) {
+  std::istringstream in(v);
+  double x, y, z;
+  char c1, c2;
+  if (!(in >> x >> c1 >> y >> c2 >> z) || c1 != ',' || c2 != ',')
+    return false;
+  if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+    return false;
+  out[0] = static_cast<float>(x);
+  out[1] = static_cast<float>(y);
+  out[2] = static_cast<float>(z);
+  return true;
+}
+
+// A copy made at run time starts at the pose its node's keys already hold (a program that placed
+// it before it existed, or an earlier copy of that index), rather than its template's transform:.
+void keep_pose(cvc::app &app, const std::string &path, cvc::ariadne::SceneNode &copy) {
+  const auto held = [&](const char *leaf, float out[3]) {
+    cvc::state *s = cvc::ariadne::read_node(app, path + cvc::state::SEPARATOR + leaf);
+    return s && parse_triple(s->value(), out);
+  };
+  float p[3], r[3], k[3];
+  const bool hp = held("position", p);
+  const bool hr = held("rotation", r);
+  const bool hs = held("scale", k);
+  if (!hp && !hr && !hs)
+    return;
+  copy.has_transform = true;
+  for (int j = 0; j < 3; ++j) {
+    if (hp)
+      copy.position[j] = p[j];
+    if (hr)
+      copy.rotation[j] = r[j];
+    if (hs)
+      copy.scale[j] = k[j];
+  }
+}
+
+bool same_node(const std::weak_ptr<GraphicsNode> &a, const std::weak_ptr<GraphicsNode> &b) {
+  return !a.owner_before(b) && !b.owner_before(a);
+}
+
+// Copy `b.copies.size()` of `b`: realized as any node is, recording what it added to `out`. With
+// `run_time` (a count that grew), it starts at the pose its keys hold (keep_pose). False when its
+// parent has gone.
+bool add_copy(SceneGraph &sg, RealizedScene &out, SceneRepeatBinding &b, bool run_time,
+              std::vector<std::string> *warnings) {
+  std::shared_ptr<GraphicsNode> parent;
+  if (!b.top_level && !(parent = b.parent.lock()))
+    return false;
+  const int k = static_cast<int>(b.copies.size());
+  auto spec =
+      std::make_shared<cvc::ariadne::SceneNode>(cvc::ariadne::scene_node_instance(b.spec, k));
+  if (run_time) {
+    GraphicsNode *under = parent ? parent.get() : sg.getGraphicsRoot().get();
+    if (under)
+      keep_pose(sg.appContext(), under->getState().fullName() + ".children." + spec->id, *spec);
+  }
+  SceneRepeatBinding::Copy c;
+  c.spec = spec;
+  const std::size_t nodes0 = out.nodes.size(), vis0 = out.visibility.size(),
+                    clip0 = out.clip.size(), repeats0 = out.repeats.size();
+  c.ticks_begin = out.custom_ticks.size();
+  std::set<std::string> top0;
+  for (const auto &kv : sg.getAllGraphics())
+    top0.insert(kv.first);
+  const std::map<std::string, std::shared_ptr<const cvc::height_field>> fields0 = out.height_fields;
+  std::vector<pending_body> bodies; // the loader leaves a copy none (its world is built once)
+  realize_node(sg, *spec, out.bind_prefix, out, parent.get(), bodies, out.options, warnings,
+               out.assets);
+  c.ticks_end = out.custom_ticks.size();
+  if (out.nodes.size() > nodes0 && out.nodes[nodes0].id == spec->id)
+    c.node = out.nodes[nodes0].node;
+  for (std::size_t j = nodes0; j < out.nodes.size(); ++j)
+    c.nodes.push_back(out.nodes[j].node);
+  for (std::size_t j = vis0; j < out.visibility.size(); ++j)
+    c.visibility.insert(out.visibility[j].target_path);
+  for (std::size_t j = clip0; j < out.clip.size(); ++j)
+    c.clip.insert(out.clip[j].target_path);
+  for (std::size_t j = repeats0; j < out.repeats.size(); ++j)
+    c.nested.push_back(out.repeats[j]);
+  for (const auto &kv : sg.getAllGraphics())
+    if (!top0.count(kv.first)) {
+      c.created.push_back(kv.first);
+      if (std::find(out.created.begin(), out.created.end(), kv.first) == out.created.end())
+        out.created.push_back(kv.first);
+    }
+  for (const auto &kv : out.height_fields) {
+    const auto was = fields0.find(kv.first);
+    if (was == fields0.end() || was->second != kv.second)
+      c.fields.emplace_back(kv.first, kv.second);
+  }
+  b.copies.push_back(std::move(c));
+  return true;
+}
+
+void remove_copies(SceneGraph &sg, RealizedScene &out, SceneRepeatBinding &b, std::size_t keep);
+
+// The last copy of `b` goes, and everything it added to `out` with it: the repeat: nodes inside it
+// first, then its entries, then its node (its custom_ticks before the node they serve).
+void remove_last_copy(SceneGraph &sg, RealizedScene &out, SceneRepeatBinding &b) {
+  SceneRepeatBinding::Copy &c = b.copies.back();
+  for (const std::shared_ptr<SceneRepeatBinding> &inner : c.nested)
+    if (inner->live) {
+      remove_copies(sg, out, *inner, 0);
+      inner->live = false;
+    }
+  const auto mine = [&c](const std::weak_ptr<GraphicsNode> &w) {
+    for (const std::weak_ptr<GraphicsNode> &n : c.nodes)
+      if (same_node(n, w))
+        return true;
+    return false;
+  };
+  std::erase_if(out.nodes, [&](const RealizedScene::TaggedNode &t) { return mine(t.node); });
+  std::erase_if(out.volren_ticks, [&](const std::weak_ptr<VolRenNode> &w) {
+    return w.expired() || mine(std::weak_ptr<GraphicsNode>(w.lock()));
+  });
+  std::erase_if(out.volslice_ticks, [&](const std::weak_ptr<VolSliceNode> &w) {
+    return w.expired() || mine(std::weak_ptr<GraphicsNode>(w.lock()));
+  });
+  std::erase_if(out.lod_nodes, [&](const std::weak_ptr<LodGraphicsNode> &w) {
+    return w.expired() || mine(std::weak_ptr<GraphicsNode>(w.lock()));
+  });
+  // Its data bindings go; a bound opacity names a data node by its index, so the indices of the
+  // ones after them move down with them.
+  std::vector<int> moved(out.data_nodes.size(), -1);
+  {
+    std::size_t kept = 0;
+    for (std::size_t j = 0; j < out.data_nodes.size(); ++j) {
+      if (mine(out.data_nodes[j].group))
+        continue;
+      moved[j] = static_cast<int>(kept);
+      if (kept != j)
+        out.data_nodes[kept] = std::move(out.data_nodes[j]);
+      ++kept;
+    }
+    out.data_nodes.erase(out.data_nodes.begin() + static_cast<std::ptrdiff_t>(kept),
+                         out.data_nodes.end());
+  }
+  std::erase_if(out.opacity, [&](const SceneOpacityBinding &o) { return mine(o.node); });
+  for (SceneOpacityBinding &o : out.opacity)
+    if (o.data >= 0)
+      o.data =
+          o.data < static_cast<int>(moved.size()) ? moved[static_cast<std::size_t>(o.data)] : -1;
+  std::erase_if(out.visibility, [&](const cvc::ariadne::SceneVisibilityBinding &v) {
+    return c.visibility.count(v.target_path) != 0;
+  });
+  std::erase_if(out.clip, [&](const cvc::ariadne::SceneClipBinding &v) {
+    return c.clip.count(v.target_path) != 0;
+  });
+  for (const auto &[id, field] : c.fields)
+    if (auto it = out.height_fields.find(id); it != out.height_fields.end() && it->second == field)
+      out.height_fields.erase(it);
+  // Its custom_ticks, [begin, end): every other copy's range past it moves down, and a copy's
+  // range around it (an outer copy's) shrinks.
+  const std::size_t b0 = c.ticks_begin, e0 = std::min(c.ticks_end, out.custom_ticks.size());
+  if (e0 > b0) {
+    const std::size_t len = e0 - b0;
+    out.custom_ticks.erase(out.custom_ticks.begin() + static_cast<std::ptrdiff_t>(b0),
+                           out.custom_ticks.begin() + static_cast<std::ptrdiff_t>(e0));
+    for (const std::shared_ptr<SceneRepeatBinding> &other : out.repeats)
+      for (SceneRepeatBinding::Copy &o : other->copies) {
+        if (&o == &c)
+          continue;
+        if (o.ticks_begin >= e0) {
+          o.ticks_begin -= len;
+          o.ticks_end -= len;
+        } else if (o.ticks_begin <= b0 && o.ticks_end >= e0) {
+          o.ticks_end -= len;
+        }
+      }
+  }
+  if (std::shared_ptr<GraphicsNode> node = c.node.lock()) {
+    if (b.top_level) {
+      if (sg.hasGraphics(c.spec->id) && sg.getGraphics(c.spec->id) == node)
+        sg.removeGraphics(c.spec->id);
+    } else if (std::shared_ptr<GraphicsNode> parent = b.parent.lock()) {
+      parent->removeGraphicsChild(node);
+    }
+  }
+  for (const std::string &id : c.created) { // its top-level graphics (a custom type's beside it)
+    if (id != c.spec->id && sg.hasGraphics(id))
+      sg.removeGraphics(id);
+    std::erase(out.created, id);
+  }
+  b.copies.pop_back();
+}
+
+// `b`'s copies past the first `keep` go, the last first. The poses they published wait in the
+// scene's publisher, which writes them on its own thread: flushed now, they land before the copies
+// go, never over what a program writes for the next copy of that index.
+void remove_copies(SceneGraph &sg, RealizedScene &out, SceneRepeatBinding &b, std::size_t keep) {
+  if (b.copies.size() > keep)
+    sg.publisher().flush();
+  while (b.copies.size() > keep)
+    remove_last_copy(sg, out, b);
+}
+
+void realize_repeat(SceneGraph &sg, const cvc::ariadne::SceneNode &n, RealizedScene &out,
+                    GraphicsNode *parent, const RealizeOptions &options,
+                    std::vector<std::string> *warnings,
+                    const std::vector<cvc::ariadne::SceneAsset> &assets) {
+  if (out.repeats.empty()) { // what the copies a count adds later are realized with
+    out.options = options;
+    out.assets = assets;
+  }
+  auto b = std::make_shared<SceneRepeatBinding>();
+  b->spec = n;
+  b->source = cvc::ariadne::scene_repeat_count(n.repeat);
+  if (b->source.kind == cvc::ariadne::SceneRepeatCount::Kind::key)
+    b->key = cvc::ariadne::resolve_bind(out.bind_prefix, b->source.text);
+  b->top_level = parent == nullptr;
+  if (parent)
+    b->parent = std::static_pointer_cast<GraphicsNode>(parent->shared_from_this());
+  if (n.body.present || !n.world.empty())
+    warn(warnings, "ari: scene node '" + n.id +
+                       "': body: and world: are not supported on a repeat: node; its copies "
+                       "have neither");
+  b->spec.body = cvc::ariadne::SceneBody{};
+  b->spec.world.clear();
+  out.repeats.push_back(b);
+  const int count = repeat_count(out, *b, warnings);
+  for (int k = 0; k < count; ++k)
+    if (!add_copy(sg, out, *b, /*run_time=*/false, warnings))
+      break;
+}
+
+} // namespace
+
+int sync_scene_repeats(RealizedScene &realized, std::vector<std::string> *warnings) {
+  if (realized.repeats.empty() || !realized.sg)
+    return 0;
+  SceneGraph &sg = *realized.sg;
+  int changed = 0;
+  // By index: a copy that grows may add repeat: nodes of its own (they count themselves as they
+  // are made); one whose outer copy went is dropped after the pass.
+  for (std::size_t j = 0; j < realized.repeats.size(); ++j) {
+    std::shared_ptr<SceneRepeatBinding> b = realized.repeats[j];
+    if (!b->live)
+      continue;
+    if (!b->top_level && b->parent.expired()) { // its parent went another way
+      remove_copies(sg, realized, *b, 0);
+      b->live = false;
+      continue;
+    }
+    const std::size_t want = static_cast<std::size_t>(repeat_count(realized, *b, warnings));
+    const std::size_t had = b->copies.size();
+    if (want < had)
+      remove_copies(sg, realized, *b, want);
+    while (b->copies.size() < want)
+      if (!add_copy(sg, realized, *b, /*run_time=*/true, warnings))
+        break;
+    changed += static_cast<int>(want > had ? want - had : had - want);
+  }
+  std::erase_if(realized.repeats,
+                [](const std::shared_ptr<SceneRepeatBinding> &b) { return !b->live; });
+  return changed;
+}
+
+namespace {
 
 LightNode::Kind light_kind(const std::string &k) {
   if (k == "spot")
@@ -1032,6 +1404,8 @@ void apply_node_material(GeometryNode &g, const cvc::ariadne::SceneNode &n) {
     g.setSpecular(n.specular);
     g.setSpecularPower(n.specular_power);
   }
+  if (n.has_opacity) // see-through below 1, even when forced opaque (GeometryNode::setForceOpaque)
+    g.setOpacity(n.opacity);
 }
 
 // A dim³ signed-distance-field volume of a mesh, framed like the volume demos' bunny_sdf: the grid
@@ -1193,6 +1567,9 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   out.has_main_view = scene.has_main_view;
   out.main_show = scene.main_show;
   out.main_hide = scene.main_hide;
+  out.entity_labels = scene.entity_labels;
+  if (!scene.entity_labels.empty()) // the labels' layer now, so it is this scene's (out.created)
+    LabelLayerNode::of(sg);
   // Resolve the clock's key paths to absolute state paths now, with the host bind prefix — the SAME
   // rule widget binds use (resolve_bind) — so the clock and a sim_transport slider on `sim.speed`
   // land on one key. Resolved once here (like the visibility bindings), so tick_scene stays prefix-
@@ -1204,18 +1581,21 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   out.created.reserve(scene.nodes.size());
   // The assets' geometry: the caller's cache (shared across a document's scenes), or one for this
   // scene alone.
-  SceneAssetCache own_assets;
   RealizeOptions opts = options;
-  if (!opts.assets)
-    opts.assets = &own_assets;
+  if (!opts.assets) { // kept with the scene: a repeat: copy made later reads its assets there too
+    out.own_assets = std::make_shared<SceneAssetCache>();
+    opts.assets = out.own_assets.get();
+  }
   std::set<std::string> present; // the top-level graphics before this scene's
   for (const auto &kv : sg.getAllGraphics())
     present.insert(kv.first);
   std::vector<pending_body> bodies;
   for (const auto &n : scene.nodes) {
     realize_node(sg, n, bind_prefix, out, /*parent=*/nullptr, bodies, opts, warnings, scene.assets);
-    out.created.push_back(n.id);
+    if (n.repeat.empty()) // a repeat: template's copies are created as they are made
+      out.created.push_back(n.id);
   }
+  sync_scene_opacity(out); // a bound opacity's first value, read as visible: reads its own
   // A custom node type may add top-level graphics beside its own node (forest_trees' needles).
   // They are this scene's too, so whoever clears it -- a host loading another document -- removes
   // them with the rest.
@@ -1239,6 +1619,9 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
       out.world->bind_vehicles(scene.vehicles, cvc::ariadne::resolve_bind(bind_prefix, "vehicles"),
                                cvc::ariadne::resolve_bind(bind_prefix, "entities"), scene.spawns,
                                cvc::ariadne::resolve_bind(bind_prefix, "spawns"));
+      if (out.world->vehicles())
+        out.world->vehicles()->set_intents_key(
+            cvc::ariadne::resolve_bind(bind_prefix, scene.vehicle_intents));
     }
     if (out.physics)
       out.clock.present = true;
@@ -1435,6 +1818,30 @@ bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
 
 } // namespace
 
+void sync_scene_opacity(RealizedScene &realized) {
+  if (!realized.app)
+    return;
+  for (const SceneOpacityBinding &b : realized.opacity) {
+    const std::shared_ptr<GraphicsNode> node = b.node.lock();
+    if (!node)
+      continue;
+    double a = cvc::ariadne::read_or<double>(*realized.app, b.source, b.fallback);
+    a = std::isfinite(a) ? std::clamp(a, 0.0, 1.0) : b.fallback;
+    // GeometryNode::setOpacity writes the node's opacity key, which an unchanged value leaves be.
+    auto set = [a](GraphicsNode *g) {
+      if (auto *mesh = dynamic_cast<GeometryNode *>(g))
+        mesh->setOpacity(a);
+    };
+    set(node.get());
+    if (auto *lod = dynamic_cast<LodGraphicsNode *>(node.get()))
+      for (int k = 0; k < lod->rungCount(); ++k)
+        set(lod->rung(k).get());
+    if (b.data >= 0 && b.data < static_cast<int>(realized.data_nodes.size()))
+      for (const std::shared_ptr<GraphicsNode> &c : realized.data_nodes[b.data].drawn)
+        set(c.get());
+  }
+}
+
 int sync_scene_data(RealizedScene &realized, std::vector<std::string> *warnings) {
   if (!realized.app || realized.data_nodes.empty())
     return 0;
@@ -1495,7 +1902,15 @@ bool restart_scene_world(RealizedScene &realized, std::vector<std::string> *warn
 
 cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *renderer,
                                          double wall_dt) {
-  sync_scene_data(realized); // a data node whose dataset (re)loaded draws it this frame
+  { // a repeat: whose count changed adds or removes copies this frame, before they are drawn
+    std::vector<std::string> warns;
+    sync_scene_repeats(realized, &warns);
+    if (realized.app)
+      for (const std::string &w : warns)
+        realized.app->log(1, w + "\n");
+  }
+  sync_scene_data(realized);    // a data node whose dataset (re)loaded draws it this frame
+  sync_scene_opacity(realized); // bound material opacities, on what was just drawn too
   cvc::world_clock::step_result clock_step;
   // §9 time — drive the authoritative simulation clock FIRST, so every ticker below (and any
   // custom_tick reading app.world_clock().t()) sees ONE coherent world time for this frame. Opt-in:
@@ -1615,7 +2030,9 @@ void apply_mesh_keys(GeometryNode &g, const cvc::ariadne::SceneNode &n,
     g.setCastsShadow(n.casts_shadow);
   if (n.shader.present)
     apply_shader(g, n, warnings);
-  if (n.material_opaque) // no per-texel alpha scan to pick the pass
+  if (n.has_opacity)
+    g.setOpacity(n.opacity);
+  if (n.material_opaque) // no per-texel alpha scan to pick the pass (while not see-through)
     g.setForceOpaque(true);
 }
 

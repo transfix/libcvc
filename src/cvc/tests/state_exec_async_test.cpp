@@ -27,18 +27,6 @@
 
 using namespace cvc::state_exec;
 
-// A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
-// scope hold each other, and only the cycle collector frees them
-// (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Reference cycles"). The evaluator tests run with no
-// scheduler and the scheduler tests are too short for one to be due, so nothing collects; once
-// every test is done, one collection leaves LeakSanitizer only real leaks to report.
-class collect_cycles_at_exit : public ::testing::Environment {
-public:
-  void TearDown() override { collect_cycles(); }
-};
-[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
-    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
-
 // ===========================================================================
 // task<T> unit tests
 // ===========================================================================
@@ -635,9 +623,9 @@ TEST(AsyncSchedulerTest, ARunsStepBudgetCountsWhatAStepCharged) {
   async_scheduler sched;
   auto env = builtins::make_default_environment();
   int calls = 0;
-  builtins::register_fn(env, "heavy", [&calls](std::span<const value_t>) {
+  builtins::register_fn(env, "heavy", [&calls](call_args a) {
     ++calls;
-    if (detail::data_step_scope *data = detail::data_step_scope::current())
+    if (detail::data_step_scope *data = a.context() ? a.context()->data : nullptr)
       data->stats().add_steps(step_kind::data, 1000);
     return value_t();
   });
@@ -2022,10 +2010,10 @@ TEST(Slices, SL04_MaxStepTimeStaysPerStep) {
     slice_world w;
     w.sched.set_slice(256);
     bool uncut = false; // the spin reached its own end: no deadline cut it
-    builtins::register_fn(w.env, "spin-step", [&uncut](std::span<const value_t>) -> value_t {
+    builtins::register_fn(w.env, "spin-step", [&uncut](call_args a) -> value_t {
       const auto until = steady_clock::now() + std::chrono::seconds(10);
       while (steady_clock::now() < until)
-        eval_deadline_check("spin-step");
+        eval_deadline_check(a.context(), "spin-step");
       uncut = true;
       return value_t();
     });
@@ -2313,9 +2301,9 @@ TEST(Slices, SL07_ABetterPriorityPreempts) {
 TEST(Slices, SL08_ScriptEngineRunsCountChargedSteps) {
   const auto make_env = [](int &calls) {
     environment_ptr env = builtins::make_default_environment();
-    builtins::register_fn(env, "heavy", [counter = &calls](std::span<const value_t>) {
+    builtins::register_fn(env, "heavy", [counter = &calls](call_args a) {
       ++*counter;
-      if (detail::data_step_scope *data = detail::data_step_scope::current())
+      if (detail::data_step_scope *data = a.context() ? a.context()->data : nullptr)
         data->stats().add_steps(step_kind::data, 1000);
       return value_t();
     });

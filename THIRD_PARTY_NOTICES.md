@@ -28,7 +28,8 @@ Compiled into libcvc:
   (default ON when the package is found): [Qhull](#qhull-802), [Clipper2](#clipper2-201),
   [CDT](#cdt-201) (with [Lenthe's predicates](#cdts-predicates-william-c-lenthe) and
   [libc++'s nth_element](#cdts-portable_nth_element-llvm-libc)) and
-  [Shewchuk's predicates](#shewchuks-robust-predicates)
+  [Shewchuk's predicates](#shewchuks-robust-predicates); and, in `cvc::planar` (built with all
+  of Clipper2, CDT and Shewchuk's predicates), [Boost.Polygon's Voronoi diagram](#boostpolygon-voronoi-diagram)
 
 Compiled into libcvc (its wave spectrum, `cvc/ocean/spectrum.h`) and the cvcGL examples:
 [ABYSSAL](#abyssal).
@@ -294,6 +295,33 @@ FOR ANY DAMAGES OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT OR OTHERWISE,
 ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
+
+## Boost.Polygon (Voronoi diagram)
+
+Not vendored: header-only code from Boost (1.86 in cvcpkg's `boost` package), which libcvc already
+depends on. `cvc::planar::medial_axis` (`src/cvc/geometry/planar/medial_axis.cpp`) compiles its
+segment Voronoi diagram (`boost/polygon/voronoi.hpp` and the headers it includes, by Andrii
+Sydorchuk, with Boost.Polygon's `point_data` and `segment_data`, by Intel Corporation, Simonson
+Lucanus and Andrii Sydorchuk) into libcvc. The headers carry:
+
+```
+//          Copyright Andrii Sydorchuk 2010-2012.
+// Distributed under the Boost Software License, Version 1.0.
+//    (See accompanying file LICENSE_1_0.txt or copy at
+//          http://www.boost.org/LICENSE_1_0.txt)
+```
+
+```
+// Copyright (c) Intel Corporation 2008.
+// Copyright (c) 2008-2012 Simonson Lucanus.
+// Copyright (c) 2012-2012 Andrii Sydorchuk.
+
+// Use, modification and distribution is subject to the Boost Software License,
+// Version 1.0. (See accompanying file LICENSE_1_0.txt or copy at
+// http://www.boost.org/LICENSE_1_0.txt)
+```
+
+The Boost Software License 1.0 is reproduced in full under [Clipper2](#clipper2-201) above.
 
 ## PocketFFT
 

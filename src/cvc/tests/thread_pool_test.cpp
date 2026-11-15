@@ -4,11 +4,13 @@
 // threads all complete, and workers are reused across many calls (the whole
 // reason the pool exists).
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/core/thread_pool.h>
+#include <functional>
 #include <gtest/gtest.h>
 #include <mutex>
 #include <stdexcept>
@@ -216,8 +218,8 @@ TEST(ThreadPool, EveryTaskThrowsSurfacesExactlyOneAndDoesNotCrash) {
 
 TEST(ThreadPool, ThrowOnInlineAndWorkerlessPathsPropagatesAndRestoresState) {
   thread_pool pool;
-  // n == 1 always runs inline on the caller; the throw must propagate AND restore
-  // t_active_pool so the next fan-out is not stuck on the re-entrant path.
+  // n == 1 always runs inline on the caller; the throw must propagate and leave the pool as it
+  // was, so the next fan-out is not stuck on the re-entrant path.
   EXPECT_THROW(pool.parallel_for(1, [&](int) { throw std::runtime_error("x"); }),
                std::runtime_error);
   std::atomic<int> acc{0};
@@ -319,12 +321,12 @@ TEST(ThreadPool, ConcurrentFanoutsKeepTheirOwnContexts) {
   std::vector<std::thread> posters;
   for (int p = 0; p < kPosters; ++p)
     posters.emplace_back([&, p] {
-      cvc::fanout_context_scope scope(&ctx[p]);
+      cvc::fanout_context_scope scope(pool, &ctx[p]);
       for (int r = 0; r < kIters; ++r)
         pool.parallel_for(
             32,
             [&, p](int) {
-              if (cvc::current_fanout_context() != &ctx[p])
+              if (pool.fanout_context_here() != &ctx[p])
                 wrong.fetch_add(1);
               ran[p].fetch_add(1);
             },
@@ -340,4 +342,123 @@ TEST(ThreadPool, ConcurrentFanoutsKeepTheirOwnContexts) {
     EXPECT_LE(ctx[p].most_inside.load(), 2);
     EXPECT_LE(ctx[p].shares.load(), 2 * kIters);
   }
+}
+
+// Two pools on one thread (two apps' compute pools, say) never see each other's state: a fan-out
+// of one nested in a chunk of the other is not taken for re-entrant, and a context set on one
+// pool is carried by its own fan-outs only, also when one pool's fan-out runs inside the other's.
+TEST(ThreadPool, NestedFanoutsAcrossTwoPoolsOnOneThread) {
+  for (int order = 0; order < 2; ++order) {
+    thread_pool a(3), b(3);
+    thread_pool &outer = order == 0 ? a : b;
+    thread_pool &inner = order == 0 ? b : a;
+    counting_context outer_ctx, inner_ctx;
+    std::atomic<int> wrong{0};
+    std::atomic<long long> ran{0};
+    cvc::fanout_context_scope outer_scope(outer, &outer_ctx);
+    for (int r = 0; r < 50; ++r)
+      outer.parallel_for(8, [&](int) {
+        if (outer.fanout_context_here() != &outer_ctx)
+          wrong.fetch_add(1);
+        // The inner pool's fan-out from inside the outer's chunk: the inner pool carries nothing
+        // of the outer's context, on its caller (this chunk's thread) or on its workers.
+        inner.parallel_for(8, [&](int) {
+          if (inner.fanout_context_here() != nullptr)
+            wrong.fetch_add(1);
+          ran.fetch_add(1);
+        });
+      });
+    EXPECT_EQ(wrong.load(), 0) << "order " << order;
+    EXPECT_EQ(ran.load(), 50LL * 8 * 8) << "order " << order;
+    EXPECT_EQ(inner_ctx.shares.load(), 0);
+    // A context set on the inner pool by this thread goes with the inner pool's fan-outs only.
+    {
+      cvc::fanout_context_scope inner_scope(inner, &inner_ctx);
+      for (int r = 0; r < 50; ++r)
+        inner.parallel_for(8, [&](int) {
+          if (inner.fanout_context_here() != &inner_ctx)
+            wrong.fetch_add(1);
+        });
+      outer.parallel_for(8, [&](int) {
+        if (outer.fanout_context_here() != &outer_ctx)
+          wrong.fetch_add(1);
+      });
+    }
+    EXPECT_EQ(wrong.load(), 0) << "order " << order;
+  }
+}
+
+// One pool's re-entrancy is its own: a fan-out nested in its own chunk runs inline (on the chunk's
+// thread), while one nested on another pool runs on that pool, and a pool used again after a
+// nested call on the other is not stuck on either path.
+TEST(ThreadPool, ReentrancyIsPerPool) {
+  thread_pool a(2), b(2);
+  std::atomic<int> wrong{0};
+  std::atomic<long long> total{0};
+  a.parallel_for(16, [&](int) {
+    const std::thread::id here = std::this_thread::get_id();
+    a.parallel_for(4, [&](int) {
+      if (std::this_thread::get_id() != here)
+        wrong.fetch_add(1); // re-entrant on its own pool: inline, on this thread
+      total.fetch_add(1);
+    });
+    b.parallel_for(4, [&](int) { total.fetch_add(1); });
+  });
+  EXPECT_EQ(wrong.load(), 0);
+  EXPECT_EQ(total.load(), 16LL * 8);
+  std::atomic<int> after{0};
+  a.parallel_for(64, [&](int) { after.fetch_add(1); });
+  b.parallel_for(64, [&](int) { after.fetch_add(1); });
+  EXPECT_EQ(after.load(), 128);
+}
+
+// Pools on threads at once, each with its own poster contexts: every chunk sees its own pool's.
+TEST(ThreadPool, PoolsOnThreadsAtOnceKeepTheirOwnContexts) {
+  constexpr int kPools = 3;
+  std::atomic<int> wrong{0};
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kPools; ++i)
+    threads.emplace_back([&wrong] {
+      thread_pool pool(2);
+      counting_context ctx;
+      cvc::fanout_context_scope scope(pool, &ctx);
+      for (int r = 0; r < 100; ++r)
+        pool.parallel_for(8, [&](int) {
+          if (pool.fanout_context_here() != &ctx)
+            wrong.fetch_add(1);
+        });
+    });
+  for (std::thread &t : threads)
+    t.join();
+  EXPECT_EQ(wrong.load(), 0);
+}
+
+// Dispatch cost, a report rather than a check (run it with --gtest_also_run_disabled_tests): the
+// best of 5 runs of each shape, in nanoseconds per parallel_for.
+TEST(ThreadPool, DISABLED_DispatchCostReport) {
+  thread_pool pool(3);
+  std::atomic<int> sink{0};
+  const auto tick = [&](int) { sink.fetch_add(1, std::memory_order_relaxed); };
+  const auto report = [](const char *what, int reps, const std::function<void()> &body) {
+    double best = 1e30;
+    for (int run = 0; run < 5; ++run) {
+      for (int w = 0; w < reps / 10; ++w)
+        body();
+      const auto t0 = std::chrono::steady_clock::now();
+      for (int r = 0; r < reps; ++r)
+        body();
+      const double ns =
+          std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count() /
+          reps;
+      best = std::min(best, ns);
+    }
+    std::printf("dispatch %-28s %10.1f ns\n", what, best);
+  };
+  report("n=1 (inline)", 200000, [&] { pool.parallel_for(1, tick); });
+  report("n=8 max_par=1", 100000, [&] { pool.parallel_for(8, tick, 1); });
+  report("n=4", 20000, [&] { pool.parallel_for(4, tick); });
+  report("n=64", 10000, [&] { pool.parallel_for(64, tick); });
+  report("n=4, each nesting n=4", 10000,
+         [&] { pool.parallel_for(4, [&](int) { pool.parallel_for(4, tick); }); });
+  EXPECT_GT(sink.load(), 0);
 }

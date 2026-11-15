@@ -53,6 +53,12 @@ namespace ariadne {
 //
 // One WorldVehicles per world runtime (SceneWorld), with no process-wide state: a host that runs
 // several worlds (a relay's rooms) runs one each, under its own keys.
+//
+// From outside (S1), any entity takes an intent: a wanted steer and acceleration that replaces or
+// blends with its controller's command, an external planar force on its drive, or both. A
+// document, a script or a server writes it as state (`entities.<id>.intent.*`, `.force.*`); a C++
+// or Python host calls set_intent(). The `external` controller is one that only its intent
+// drives.
 
 // An archetype's vehicle: its preset with the archetype's overrides on top, then a spawn's mass
 // and top speed (0: the archetype's), each held to the archetype's range. Throws
@@ -93,7 +99,8 @@ struct entity_spec {
   std::array<float, 3> color{0.85f, 0.70f, 0.20f};  // primary, rgb in [0, 1]
   std::array<float, 3> color2{0.12f, 0.12f, 0.14f}; // secondary
   std::map<std::string, std::string> metadata;      // the user's own; nothing reads it
-  std::string controller;                           // nav@1 or none; "" the archetype's first
+  // nav@1, none or external (its intent alone drives it); "" the archetype's first
+  std::string controller;
   std::string policy, policy_sha256; // nav@1's policy (a .cvcnav); "" the default policy
   double mass = 0.0, max_speed = 0.0;
   // Where it starts: (x, y) in world metres facing `yaw` (rad; not finite: toward its goal), when
@@ -101,6 +108,32 @@ struct entity_spec {
   bool placed = false;
   double x = 0.0, y = 0.0, yaw = std::numeric_limits<double>::quiet_NaN();
 };
+
+// What an entity is told from outside: a command, a force, or both, kept until changed.
+//
+//   command  off: the controller's command alone; replace: steer and accel in its place; blend:
+//            `weight` of them and 1 - weight of the controller's. An `external` entity has no
+//            command of its own: replace and blend both drive it, and off holds it still.
+//   steer    the bicycle angle (rad, + left), held to the vehicle's lock
+//   accel    m/s^2 along its heading; from rest a negative one backs it up. Held to the speeds
+//            the navigator's command is held to (its top speed).
+//   force    m/s^2 in world x and y, added to the drive's force (the goal's pull and the walls'
+//            push) as cvc::nav::ext_force adds one: it speeds, slows and (with force_steers)
+//            steers the drive, under any command but replace, which takes the drive's place.
+//            The drive has one steering switch for every vehicle: it is on while any entity's
+//            force asks for it.
+struct entity_intent {
+  enum class mode { off, replace, blend };
+  mode command = mode::off;
+  double steer = 0.0, accel = 0.0;
+  double weight = 0.5; // blend: the intent's share, in [0, 1]
+  double force_x = 0.0, force_y = 0.0;
+  bool force_steers = true;
+  bool operator==(const entity_intent &) const = default;
+};
+// "off", "replace", "blend"; and back (false for anything else).
+const char *intent_mode_name(entity_intent::mode m);
+bool parse_intent_mode(const std::string &s, entity_intent::mode &out);
 
 // An entity as it is now.
 struct entity_info {
@@ -116,6 +149,9 @@ struct entity_info {
   int gear = 0;
   double rpm = 0.0, throttle = 0.0, brake = 0.0;
   bool reached = false; // at its goal (nav@1 then draws another)
+  // The command its plant took on the last navigator tick: rad and m/s^2, as entity_intent's.
+  double command_steer = 0.0, command_accel = 0.0;
+  entity_intent intent; // as of the last navigator tick
 };
 
 class WorldVehicles {
@@ -158,11 +194,26 @@ public:
   bool despawn(std::uint64_t id);
   void clear();
 
+  // An entity's intent (entity_intent), from now until it is changed: any thread may call these.
+  // It takes effect at the next navigator tick. False for an id that is not an entity, or an
+  // intent that is not finite or a weight outside [0, 1]. intent() is the one that will be used
+  // (off for none).
+  bool set_intent(std::uint64_t id, const entity_intent &intent);
+  bool clear_intent(std::uint64_t id);
+  entity_intent intent(std::uint64_t id) const;
+  // A second table of intents beside the entities' own keys (world: vehicles: intents:): an
+  // absolute state path whose `<path>.<id>` (or `<path>.<name>`, for a name that is a state name)
+  // holds `intent.*` and `force.*` as an entity's keys do. A relay's published namespace, so a
+  // server document's program steers the entities of the worlds its clients run. "" none.
+  void set_intents_key(std::string key);
+  const std::string &intents_key() const;
+
   // Read the request keys: the selected archetype and settings (its keys follow), a spawn, a
   // removal, a clear.
   void poll();
   // Before each physics step: every k-th (k = nav's tick / the step) runs the navigator's tick,
-  // which commands every vehicle for the steps until the next.
+  // which commands every vehicle for the steps until the next. That tick reads the intent keys
+  // first: an intent key's change replaces that entity's intent, as set_intent() does.
   void before_step();
   // The entities' keys and the selection's, now.
   void publish();

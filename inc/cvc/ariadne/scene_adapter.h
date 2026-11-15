@@ -12,6 +12,7 @@
 // this header pulls in no GL/VTK.
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,7 @@ namespace ariadne {
 
 struct Scene;      // the parsed scene (scene.h)
 struct LoadResult; // the loaded document (loader.h)
+class SceneWorld;  // the scene's world (scene_world.h)
 
 class SceneAdapter {
 public:
@@ -34,6 +36,13 @@ public:
     (void)errors;
     return true;
   }
+
+  // How the document's read lane counts an expression (Runtime::eval_count). A scene node's
+  // `repeat: (expr)` is counted with it each frame, as a widget's repeat: is. AppRuntime sets it
+  // when it is made and clears it (an empty function) when it goes, so an adapter that keeps it
+  // never calls into a runtime that has gone. The default ignores it.
+  using CountFn = std::function<int(const std::string &expr)>;
+  virtual void set_count_fn(CountFn count) { (void)count; }
 
   // Whether this adapter's renderer compiles the GLSL a document hands its scene (a node's shader:
   // block: presets and vertex / fragment splices). That is the gl.scene.shaders capability, and it
@@ -81,6 +90,11 @@ public:
     (void)warns;
     return false;
   }
+
+  // The world the realized scene runs beside its drawing (its bodies, its vehicles), for a host
+  // that reaches into it (AppRuntime::running_world). Null when there is none, which is the
+  // default.
+  virtual SceneWorld *scene_world() const { return nullptr; }
 
   // Per-frame scene service (volume-render/slice tickers, …). Called once per
   // AppRuntime::drain(), after sync_visibility(). A no-op until something has been

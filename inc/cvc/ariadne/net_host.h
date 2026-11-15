@@ -19,7 +19,10 @@
 //     document's requires: fails clearly where its launcher did not turn the network on;
 //   - turns on sign-in with OAuth 2.0 / OpenID Connect providers (oidc_host.h): the oidc-* verbs
 //     and open-url, the --oidc-issuer and --oidc-client pins, and the tokens oidc, oidc.loopback,
-//     oidc.device, oidc.redirect and browser.
+//     oidc.device, oidc.redirect and browser;
+//   - with --e2ee-store, opens the host's end-to-end encryption keys and registers the e2ee-*
+//     verbs (e2ee_intrinsics.h). A store that cannot open leaves them out; (e2ee-status) says
+//     why, and the rest still turns on.
 //
 // The registrations are process-wide, like the action-intrinsic providers they add to.
 
@@ -43,6 +46,9 @@ struct NetHostConfig {
   // --credential-env NAME=VAR, in order: credential NAME is the token in environment variable VAR
   // (a policy credential line binds NAME); held for the run, never written.
   std::vector<std::pair<std::string, std::string>> credential_env;
+  // --e2ee-store SPEC: keep end-to-end encryption keys in SPEC and give documents the e2ee-*
+  // verbs (e2ee_intrinsics.h). "" = none.
+  std::string e2ee_store;
   // --oidc-issuer, --oidc-client, --oidc-redirect-uri, --no-browser (oidc_host.h).
   OidcHostConfig oidc;
   // Not a flag: a WebSocket transport the ws-* verbs connect through (NetAccess::ws), a test's or

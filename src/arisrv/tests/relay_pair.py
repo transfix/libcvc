@@ -1,13 +1,15 @@
 """Run a relay and a client against it, as the room-call ctests do (src/arisrv/CMakeLists.txt):
 
     python relay_pair.py --relay ARISRVX --client ARI --scheme grpc|grpcs|ws
+                         [--client-command test|snapshot|...]
                          [--relay-arg A ...] [--client-arg A ...] [--expect REGEX ...]
                          [--client-only [--client-status N] [--client-expect REGEX]]
                          [--client-env NAME=VALUE ...] [--client-credential NAME=TOKEN]
                          [--client-net-asgi]
 
 The relay listens on ephemeral loopback ports; this reads the one the scheme dials from its
-output, then runs the client with --relay URL (and its own args), and waits for the relay to stop
+output, then runs the client's --client-command (test, the default; arigl, which has none, runs
+snapshot) with --relay URL and its own args, and waits for the relay to stop
 (the client's last call stops it). It passes when both exit 0 and the relay's output matches each
 --expect. With --client-only the relay is stopped after the client, which must exit with
 --client-status (0) and match --client-expect, and the relay's output still each --expect. --client-env sets the client's environment (its
@@ -34,6 +36,8 @@ def main() -> int:
     ap.add_argument("--client", required=True)
     ap.add_argument("--scheme", choices=("grpc", "grpcs", "ws"), default="grpc")
     ap.add_argument("--host", default="127.0.0.1", help="the host the client dials")
+    ap.add_argument("--client-command", default="test",
+                    help="the client's command: test (ari, arix), or snapshot (arigl)")
     ap.add_argument("--relay-arg", action="append", default=[])
     ap.add_argument("--client-arg", action="append", default=[])
     ap.add_argument("--expect", action="append", default=[])
@@ -101,7 +105,8 @@ def main() -> int:
                 print("relay_pair: the relay's program served no ASGI app", file=sys.stderr)
                 return 1
             cred_args += ["--net-allow", port["asgi"]]
-        client = subprocess.run([a.client, "test", "--relay", url, *cred_args, *a.client_arg],
+        client = subprocess.run([a.client, a.client_command, "--relay", url, *cred_args,
+                                 *a.client_arg],
                                 capture_output=True, text=True, encoding="utf-8",
                                 errors="replace", timeout=120, env=env)
         print(f"--- client ({url}): exit {client.returncode}")

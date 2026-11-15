@@ -1,7 +1,7 @@
 # WebAssembly guests in Ariadne documents (the wasm engine): docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md
 # §8.2-8.7, phases G1 and G2.
 #
-#   cvc_ariadne_wasm_host(<target> [INSTALL])
+#   cvc_ariadne_wasm_host(<target> [INSTALL] [ASYNC_LOAD])
 #
 # compiles the engine (wasm_engine.cpp, the CBOR codec, wasm_binary.cpp, the WASI stubs, the gas
 # pass and the runtime) into a target that already links cvc, and defines CVC_ARIADNE_WASM, so a
@@ -10,7 +10,10 @@
 # library, the DLL is copied beside the target; with the static library the target carries it.
 # INSTALL also installs that DLL into bin, beside the host. Under Emscripten the runtime is the
 # page's own WebAssembly (browser_runtime.cpp), which runs guests transformed ahead
-# (cvc_ariadne_wasm_transform), and nothing is linked.
+# (cvc_ariadne_wasm_transform), and nothing is linked. ASYNC_LOAD is for a target linked with
+# Asyncify (-sASYNCIFY), as ariglx is: a guest the page won't compile or instantiate on its own
+# thread (Chrome refuses a module over 8 MB there) is then compiled and instantiated
+# asynchronously, and the document's load waits for it. Without it such a guest fails to load.
 set(_CVC_ARIADNE_WASM_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 #   cvc_find_ariadne_wasm(<required>)
@@ -143,7 +146,7 @@ function(cvc_ariadne_wasm_test_guests target)
 endfunction()
 
 function(cvc_ariadne_wasm_host target)
-  cmake_parse_arguments(_w "INSTALL" "" "" ${ARGN})
+  cmake_parse_arguments(_w "INSTALL;ASYNC_LOAD" "" "" ${ARGN})
   target_sources(${target} PRIVATE "${_CVC_ARIADNE_WASM_DIR}/wasm_engine.cpp"
                                    "${_CVC_ARIADNE_WASM_DIR}/wasm_binary.cpp"
                                    "${_CVC_ARIADNE_WASM_DIR}/meter.cpp"
@@ -152,7 +155,13 @@ function(cvc_ariadne_wasm_host target)
   target_compile_definitions(${target} PRIVATE CVC_ARIADNE_WASM)
   if(EMSCRIPTEN)
     target_sources(${target} PRIVATE "${_CVC_ARIADNE_WASM_DIR}/browser_runtime.cpp")
-    message(STATUS "${target}: WebAssembly guests (the browser's own WebAssembly)")
+    if(_w_ASYNC_LOAD)
+      target_compile_definitions(${target} PRIVATE CVC_ARIADNE_WASM_ASYNC_LOAD)
+      message(STATUS "${target}: WebAssembly guests (the browser's own WebAssembly, a large "
+                     "guest compiled asynchronously)")
+    else()
+      message(STATUS "${target}: WebAssembly guests (the browser's own WebAssembly)")
+    endif()
     return()
   endif()
   target_sources(${target} PRIVATE "${_CVC_ARIADNE_WASM_DIR}/wasmtime_runtime.cpp")

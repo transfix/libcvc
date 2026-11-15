@@ -154,6 +154,11 @@ PYCVC_ARI_NOGIL(cvc::gl::ariadne::AriRuntime::~AriRuntime)
     else
       $self->register_function(f.name, f.call);
   }
+  // Its document runtime as a "cvc.ariadne.AppRuntime" capsule, as a scripting host lends its own:
+  // pycvc.world_entities(app, capsule) reaches the world it runs. The capsule does not own it.
+  PyObject *app_runtime_capsule() {
+    return PyCapsule_New(&$self->app_runtime(), "cvc.ariadne.AppRuntime", nullptr);
+  }
 }
 
 // run_program(script, done=None): done(how) is called from a later frame, on its thread, with ""
