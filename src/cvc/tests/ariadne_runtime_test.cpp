@@ -6260,6 +6260,138 @@ TEST(AriadneRuntime, ADocumentPlacesOrTurnsOffTheBell) {
   }
 }
 
+// §5.25 a loaded document with its own menubar, as the loader makes it: a mount (scope, the
+// document's name, its init:) around the fragment, whose bar has a menu and a tray icon.
+Widget fe_lab_mount() {
+  Widget frag =
+      group({menubar({menu("Mesh", {menu_action("Remesh", "(state-set \"remeshed\" \"1\")")}),
+                      tray_icon("J", "(state-get \"jobs\")")}),
+             window_with_id("FE", "fe", true)});
+  Widget m = group({frag});
+  m.scope = "includes.fe_lab";
+  m.app_name = "FE Lab";
+  m.init_script = "(state-set \"seeded\" \"1\")";
+  return m;
+}
+
+// §5.25 the outer document owns the bar. A loaded document's menubar is not drawn where it is: it
+// is one menu of the outer bar, under the document's name, after the outer document's menus and
+// before Windows, holding its menus as submenus, then Restart and Quit. Its tray icons join the
+// outer tray, worked out in its scope, and its items run there. Windows lists it under
+// Applications.
+TEST(AriadneRuntime, ALoadedDocumentsMenubarIsOneMenuOfTheOuterBar) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("ui.demo.includes.fe_lab.jobs").value("4");
+  rt.set_root(group({menubar({menu("File", {})}), fe_lab_mount()}));
+  rt.render();
+  EXPECT_EQ(mb.times("begin_menubar"), 1) << "one bar\n" << mb.dump();
+  const int file = log_index(mb, "begin_menu:File");
+  const int app_menu = log_index(mb, "begin_menu:FE Lab");
+  ASSERT_GE(app_menu, 0) << mb.dump();
+  EXPECT_LT(file, app_menu);
+  EXPECT_LT(app_menu, log_index(mb, "begin_menu:Mesh"));
+  EXPECT_LT(log_index(mb, "menu_action:Remesh"), log_index(mb, "menu_action:Restart FE Lab"));
+  EXPECT_LT(log_index(mb, "menu_action:Restart FE Lab"), log_index(mb, "menu_action:Quit FE Lab"));
+  EXPECT_LT(log_index(mb, "menu_action:Quit FE Lab"), log_index(mb, "begin_menu:Windows"));
+  EXPECT_TRUE(mb.saw("text_line:Applications")) << mb.dump();
+  EXPECT_TRUE(mb.toggle_shown["FE Lab"]) << "ticked: running";
+  EXPECT_TRUE(mb.saw("tray_button:J|4|0")) << "its badge read in its scope\n" << mb.dump();
+  // Its item runs in its scope.
+  mb.pick = "Remesh";
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  ASSERT_TRUE(
+      pump_until(rt, [&] { return !sval(app, "ui.demo.includes.fe_lab.remeshed").empty(); }));
+  EXPECT_TRUE(sval(app, "ui.demo.remeshed").empty());
+}
+
+// §5.25 Quit takes the loaded document away (its window, its menu, its icons) and keeps its state;
+// ticking it under Windows > Applications brings it back as it was. Restart drops its state and
+// starts it again: its init: runs anew.
+TEST(AriadneRuntime, QuitKeepsALoadedDocumentsStateAndRestartResetsIt) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({menubar({menu("File", {})}), fe_lab_mount()}));
+  rt.render();
+  rt.drain();
+  ASSERT_TRUE(pump_until(rt, [&] { return sval(app, "ui.demo.includes.fe_lab.seeded") == "1"; }));
+  cvc::state::instance(app)("ui.demo.includes.fe_lab.work").value("kept");
+  EXPECT_TRUE(mb.saw("begin_window:FE(closable)")) << mb.dump();
+
+  mb.pick = "Quit FE Lab";
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("begin_window:FE(closable)")) << mb.dump();
+  EXPECT_FALSE(mb.saw("begin_menu:FE Lab")) << mb.dump();
+  EXPECT_FALSE(mb.saw("toggle:FE")) << "its window is not listed while it is quit";
+  EXPECT_FALSE(mb.toggle_shown["FE Lab"]) << "unticked: quit";
+  EXPECT_EQ(sval(app, "ui.demo.includes.fe_lab.work"), "kept");
+
+  mb.click_toggle = "FE Lab"; // Windows > Applications > FE Lab
+  rt.render();
+  rt.drain();
+  mb.click_toggle.clear();
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_window:FE(closable)")) << mb.dump();
+  EXPECT_TRUE(mb.saw("begin_menu:FE Lab"));
+  EXPECT_EQ(sval(app, "ui.demo.includes.fe_lab.work"), "kept");
+
+  mb.pick = "Restart FE Lab";
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  rt.render();
+  rt.drain();
+  ASSERT_TRUE(pump_until(rt, [&] { return sval(app, "ui.demo.includes.fe_lab.seeded") == "1"; }));
+  EXPECT_TRUE(sval(app, "ui.demo.includes.fe_lab.work").empty()) << "its state went";
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_window:FE(closable)")) << mb.dump();
+}
+
+// §5.25 a document with no menubar of its own still shows its loaded documents' menus: in the bar
+// it gets for its Windows menu, with their tray icons but no clock or bell of its own.
+// §5.25 two mounts of one document: each menu is told apart by its mount id.
+TEST(AriadneRuntime, TwoMountsOfOneDocumentAreToldApart) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  Widget a = fe_lab_mount();
+  Widget b = fe_lab_mount();
+  b.scope = "includes.fe_lab_2";
+  rt.set_root(group({menubar({menu("File", {})}), a, b}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_menu:FE Lab (fe_lab)")) << mb.dump();
+  EXPECT_TRUE(mb.saw("begin_menu:FE Lab (fe_lab_2)")) << mb.dump();
+}
+
+TEST(AriadneRuntime, ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  rt.set_clock(true);
+  rt.set_wall_clock(five_past_two);
+  cvc::state::instance(app)("ui.demo.includes.fe_lab.jobs").value("2");
+  rt.set_root(group({fe_lab_mount()}));
+  rt.render();
+  EXPECT_EQ(mb.times("begin_menubar"), 1) << mb.dump();
+  EXPECT_LT(log_index(mb, "begin_menu:FE Lab"), log_index(mb, "begin_menu:Windows")) << mb.dump();
+  EXPECT_TRUE(mb.saw("tray_button:J|2|0")) << mb.dump();
+  EXPECT_FALSE(mb.saw("tray_button:14:05||0")) << "not the document's bar: no clock";
+}
+
 TEST(AriadneRuntime, ADocumentPlacesOrTurnsOffTheTrayClock) {
   {
     cvc::app app;

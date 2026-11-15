@@ -3079,9 +3079,9 @@ menubar:
 
 - **There is nothing to propagate.** A loaded document (`load:`, §6) posts to the same feed as
   the document that loaded it, and the outermost document's bar shows it. Each entry is named
-  by the document that posted it: its mount's `as:` (the outermost document's are named by no
-  one). The runtime takes the name from the program's scope, so one document cannot post as
-  another.
+  by the document that posted it: its `meta.name`, else its mount id (the outermost document's
+  are named by no one), as its menu is (§5.25). The runtime takes the name from the program's
+  scope, so one document cannot post as another.
 - **Posting from a document:**
   - `(notify TEXT [LEVEL [ON]])` posts and returns the entry's id. LEVEL is `info` (the
     default), `warn` or `error`. ON is a program run when the entry is clicked, in the scope and
@@ -3131,6 +3131,57 @@ menubar:
   `TheBellShowsTheFeedInTheTray`, `ProgramsAndWarningsPostToTheFeedFromTheirDocument` and
   `ADocumentPlacesOrTurnsOffTheBell`, and `result_job_test`'s `JobKeys` failure and stop tests,
   check it. `examples/ariadne/documents/tray_demo.ari` has a Notify menu.
+
+### 5.25 Loaded documents as applications: their menus in the outer bar
+
+The outermost document owns the menu bar. A document it loads (`load:`, §6.3) that has a
+`menubar:` of its own is an application: its bar is not drawn where it is, but becomes one menu of
+the outer bar.
+
+```yaml
+menubar:
+  - menu: File
+    items: [...]
+root:
+  - load: fe_lab.ari            # meta: { name: FE Lab }, with a menubar of its own
+    as: fe
+```
+
+gives the bar `File  FE Lab  Windows`, where *FE Lab* holds FE Lab's menus as submenus, then
+*Restart FE Lab* and *Quit FE Lab*.
+
+- **Its name** is the loaded document's `meta.name`, else its mount id (`as:`, or the one the
+  loader derives). Two mounts of one document are told apart by their mount ids: "Counter
+  (counter)", "Counter (counter_2)". Its notifications are named the same way (§5.24).
+- **Where it goes:** after the outer document's menus, before the Windows menu (§5.9), in tree
+  order, nested mounts included. The menus fold into `≡` with the rest (§5.23).
+- **What it holds:** the loaded bar's entries, drawn in the mount's scope and with its functions,
+  so its items bind and run as they would in its own bar. A `windows_menu`, `clock` or `bell` entry
+  in a loaded bar is ignored: those are the outer document's.
+- **Its tray icons** join the outer bar's tray, after the outer document's own and before the bell
+  and the clock. They are worked out in the mount's scope, so a badge reads the mount's state.
+- **Quit** takes the application away: its windows, its menu and its tray icons go, and its
+  `on_tick:` and the programs it started stop. Its state stays.
+- **Restart** quits it, drops its state subtree and its notifications, and starts it again as when
+  it was first loaded: its `link:` holes are planted, its `init:` runs, and its `on_tick:` starts.
+- **Windows > Applications** lists every application, ticked while it runs. Untick one to quit it;
+  tick a quit one to open it again as it was. A quit application's windows are not listed until it
+  comes back. A quit stays for the run; nothing persists it.
+- **No menubar of its own:** a document with none still gets a bar when it loads applications, as
+  it does for its Windows menu. That bar holds the applications' menus, the Windows menu, and the
+  applications' tray icons, with no clock or bell, since it is not the document's own bar.
+- **Window identity:** inside a mount, the id a window gives the backend carries the mount's
+  prefix (`count@ui.includes.counter`), so a document loaded twice has two windows, not one. Its
+  state keys (`tree.<id>.*`) are the mount's own, as before.
+- **Mechanism:** `plan_windows_menu` walks the tree with each node's composed scope. It records
+  each mount's first menubar (the mount, its bar, its name, its prefix and its functions), and the
+  walk skips those bars in place. A repeated mount's bar (`repeat:`) is made per frame, so it is not
+  hoisted: it draws where it is, as before.
+- `ariadne_runtime_test`'s `ALoadedDocumentsMenubarIsOneMenuOfTheOuterBar`,
+  `QuitKeepsALoadedDocumentsStateAndRestartResetsIt`, `TwoMountsOfOneDocumentAreToldApart` and
+  `ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus`, and the loader's
+  `ALoadedDocumentIsNamedByItsMeta`, check it. `examples/ariadne/documents/apps_demo.ari` loads
+  `tray_demo.ari` and `apps/counter.ari` twice.
 
 ## 6. Composition: include / import / load
 
@@ -3249,6 +3300,10 @@ document, not to whatever it mounts: a module that saw every key could read what
 the parent's fields, and two modules could not both decide what Ctrl-C does. A module reacts to its
 own widgets. When it needs more, the parent handles the event and passes on what the module needs
 through a `link:` hole, which the module's `on_tick:` can read.
+
+A module with a `menubar:` of its own is an application: its bar becomes one menu of the outer
+bar, with Restart and Quit, and its tray icons join the outer tray (§5.25). The loader names it
+by the fragment's `meta.name` (`Widget::app_name`), else by the mount id.
 
 ### 6.4 The URI resolver
 

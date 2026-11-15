@@ -4813,6 +4813,29 @@ windows:
   ASSERT_NE(scoped, nullptr);
 }
 
+// §5.25 a loaded document's name as an application: its meta.name, else its mount id.
+TEST(AriadneMount, ALoadedDocumentIsNamedByItsMeta) {
+  SKIP_WITHOUT_YAML();
+  write_temp_ari("named_app.ari", "meta: { name: FE Lab, min_libcvc: \"3.4.0\" }\n"
+                                  "menubar:\n  - menu: Mesh\n");
+  write_temp_ari("unnamed_app.ari", "menubar:\n  - menu: Mesh\n");
+  const std::string main = write_temp_ari("main_apps.ari", R"(
+root:
+  - load: named_app.ari
+    as: fe
+  - load: unnamed_app.ari
+    as: other
+)");
+  LoadResult r = fresh_load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *fe = find_scope(r.root, "includes.fe");
+  ASSERT_NE(fe, nullptr);
+  EXPECT_EQ(fe->app_name, "FE Lab");
+  const Widget *other = find_scope(r.root, "includes.other");
+  ASSERT_NE(other, nullptr);
+  EXPECT_EQ(other->app_name, "other");
+}
+
 TEST(AriadneMount, LoadDefaultsMountIdFromBasename) {
   SKIP_WITHOUT_YAML();
   write_temp_ari("gauge.ari", "root: [ { text: hi } ]\n");

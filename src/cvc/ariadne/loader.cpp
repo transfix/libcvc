@@ -1911,6 +1911,12 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
   // fields evaluate at the sub-prefix, while the parent's load:-block fields land on the wrapper.
   Widget wrapper = group({std::move(frag_root)});
   wrapper.scope = "includes." + as;
+  // §5.25 its name as an application (its menubar's menu in the outer bar): its meta.name, else
+  // the mount id.
+  wrapper.app_name = as;
+  if (frag.IsMap() && frag["meta"] && frag["meta"].IsMap() && frag["meta"]["name"] &&
+      frag["meta"]["name"].IsScalar() && !frag["meta"]["name"].Scalar().empty())
+    wrapper.app_name = frag["meta"]["name"].Scalar();
   wrapper.functions = make_function_scope(std::move(sub.functions)); // only these, even if none
   // §12: carry the fragment's own init: so the Runtime can run it once at the sub-prefix (the
   // loader is state-free; it captures the script, the Runtime executes it). A non-scalar init: is

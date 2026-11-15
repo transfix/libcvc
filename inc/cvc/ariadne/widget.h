@@ -467,6 +467,10 @@ struct Widget {
   bool live = false;
   std::string on_change;
 
+  // §5.25 a mount's application name: the loaded document's meta.name ("" leaves it to the mount
+  // id). Its menubar becomes one menu of the outer bar under this name.
+  std::string app_name;
+
   // §12 module mount (load:): when non-empty, this widget is a MOUNT POINT — a relative
   // state-path segment (e.g. "includes.stats") appended to the enclosing scope, so its whole
   // SUBTREE resolves binds and evaluates reactive/read-lane expressions against that deeper
