@@ -149,7 +149,8 @@ imports phast and copies none of it.
 4. **Training, if needed.** Either native, as `cvc::ph::se2_train` does (Adam on
    hand-written gradients through the split step), or export from phast's PyTorch into
    `"cvc-ph-law/1"`. Which one depends on whether Shubham's trained checkpoints can be
-   shared; exporting is the fallback that needs no new optimizer.
+   shared; exporting is the fallback that needs no new optimizer. Joe is asking him for the
+   Go2 leg checkpoints (2026-11-14), which Phase 6 needs.
 5. **Later.** The planar arm (two-link, attachment maps `B(q) = [0; (dr/dq)^T]`), and legged
    blocks on the MuJoCo plants (Go2 and Spot are in the cvcpkg Menagerie bundle; see the
    mujoco workstream).
@@ -164,3 +165,50 @@ imports phast and copies none of it.
 - Picard stopping is per block. phast stops a type's iteration when every instance in its
   batch has converged, so a block that converged early can take extra iterations there.
   The difference is far below the golden tolerance at the fixtures' step sizes.
+
+## Phase 6: the C-PHAST lab (planned)
+
+Decided by Joe (2026-11-14): after Phase 5, build a demo, gym and lab for C-PHAST, with
+MuJoCo's actuation and physics in the libcvc world. The first robot is the Unitree Go2,
+which lines up with the paper's Go2 push-recovery study.
+
+**What it is**
+
+- **Scenes in the libcvc world.**
+  - The Go2 on the shared terrain, beside Jolt vehicles and water.
+  - The DC microgrid as a first, physics-free scene, which needs only Phases 2 and 3.
+- **C-PHAST predicts; MuJoCo is the truth.** At a decision point (a push, a slope, a
+  payload, a vehicle passing), the lab:
+  1. estimates the robot's state from what its sensors give;
+  2. assigns and rolls out the candidates (recovery commands, gaits, an added payload or arm
+     block);
+  3. shows each candidate's action card and the certified ranking;
+  4. executes the choice in MuJoCo, and draws the predicted future over the actual one.
+
+  MuJoCo can compute its own energies (`mjENBL_ENERGY`). That checks C-PHAST's per-step books
+  against the real plant, not only against themselves.
+- **Rewiring live.** Add or remove a leg, an arm or a payload without retraining, and watch the
+  futures change. This is the paper's composition claim made visible. It also gives Shubham's
+  project page the examples Dr. Bajaj described (three hands, an extendable arm, legs trained
+  one at a time).
+- **A gym.** pycvc `reset` / `step` with MuJoCo as the plant, a registry of scenarios (push
+  recovery first), and C-PHAST as a model-based planning baseline.
+- **Where it runs.** Natively in Ariadne first. The browser later: cvcpkg has mujoco for wasm
+  and wasm-mt, and the TPHT site already runs MuJoCo in a page.
+
+**What it depends on**
+
+- Phases 2 to 5 here. Phase 5 brings state-dependent attachment maps, the mechanical
+  observer for position-only sensing, the learned skew coupling between legs, and contact as a
+  port.
+- MuJoCo in libcvc: the mujoco workstream's plant (`CVC_WITH_MUJOCO`, a `legged` plant kind).
+  Under that workstream's proposed split, MuJoCo owns the robot, Jolt keeps the vehicles and
+  the world, and both read one height field. One-way proxies come first; two-way contact and
+  water forces after.
+- Trained Go2 leg blocks: Shubham's checkpoints, exported into `"cvc-ph-law/1"` (Phase 4). If
+  they cannot be shared, Phase 4 trains the blocks on MuJoCo rollouts.
+
+**Open**
+
+- MuJoCo is Apache-2.0, like phast. Keep it an optional, separately linked backend, and check
+  shipping it with LGPL-2.1-only libcvc the way the phast port is checked.
