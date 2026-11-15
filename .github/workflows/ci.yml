@@ -780,6 +780,103 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # cvc::physics::mujoco_robot (docs/MUJOCO.md): a minimal libcvc with CVC_WITH_MUJOCO on, from
+  # cvcpkg's mujoco and mujoco-menagerie only, running the Go2's tests (standing on flat and sloped
+  # height fields, pushes, the energy books, determinism) and `cvc mujoco`. No other lane turns
+  # MuJoCo on. Only when the robot's code, what it stands on, its build or this file changed.
+  mujoco:
+    name: MuJoCo robot (Go2, linux)
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ci-${{ github.ref }}-mujoco
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash
+    env:
+      MJ_DEPS: ${{ github.workspace }}/mj-deps
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did the robot's code change?
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if ! git diff --name-only "$base" HEAD -- src/cvc/physics inc/cvc/physics \
+                   src/cvc/geometry/height_field.cpp inc/cvc/geometry/height_field.h \
+                   src/cvc/tests/physics_mujoco_robot_test.cpp src/cvc/tests/CMakeLists.txt \
+                   src/cvc-cli CMakeLists.txt src/cvc/CMakeLists.txt CMake \
+                   .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "robot code changed: $run"
+
+      - name: Install cvcpkg, cmake/ninja, boost, pegtl, mujoco and the Menagerie
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cvcpkg install cmake ninja --prefix "$RUNNER_TEMP/tools" --config release --link shared
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          mkdir -p "$MJ_DEPS"
+          for p in boost pegtl mujoco mujoco-menagerie; do
+            echo "=== $p ==="
+            cvcpkg install "$p" --prefix "$MJ_DEPS" --config release --link shared \
+              --no-fallback-to-source 2>&1 | tail -3
+          done
+
+      - name: Build libcvc (minimal, CVC_WITH_MUJOCO), its MuJoCo tests and cvc-cli
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          cmake -G Ninja -S . -B build-mj -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$MJ_DEPS" -DCVC_WITH_MUJOCO=ON -DCVC_BUILD_TESTS=ON \
+            -DCVC_ENABLE_CUDA=OFF -DCVC_BUILD_CLI=ON -DCVC_BUILD_ARI=OFF -DCVC_BUILD_ARIGL=OFF \
+            -DCVC_BUILD_ARISRV=OFF -DCVC_ENABLE_GRPC=OFF -DCVC_ENABLE_OPENMP=OFF \
+            -DCVC_USING_HDF5=OFF -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=OFF \
+            -DCVC_ENABLE_FFTW=OFF -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=OFF \
+            -DCVC_ENABLE_MESHER=OFF -DCVC_ENABLE_SDF=OFF -DCVC_ENABLE_LIBIGL=OFF \
+            -DCVC_BUILD_LSYS_TOOLS=OFF -DCVC_BUILD_CVCGL=OFF -DCVC_BUILD_EXAMPLES=OFF \
+            -DCVC_BUILD_PYCVC=OFF 2>&1 | tee configure.log
+          grep -q "cvc::physics::mujoco_robot ENABLED" configure.log \
+            || { echo "::error::the configure did not find cvcpkg's MuJoCo"; exit 1; }
+          cmake --build build-mj --target physics_mujoco_robot_test cvc-cli -j"$(nproc)"
+
+      - name: Run the Go2's tests and cvc mujoco
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          export LD_LIBRARY_PATH="$MJ_DEPS/lib:${LD_LIBRARY_PATH:-}"
+          build-mj/bin/physics_mujoco_robot_test 2>&1 | tee mujoco_test.txt
+          test "${PIPESTATUS[0]}" -eq 0
+          # Every test runs here: a skip means the build lost MuJoCo or the Menagerie.
+          if grep -q '^\[  SKIPPED \]' mujoco_test.txt; then
+            echo "::error::MuJoCo tests skipped in the lane that builds MuJoCo"; exit 1
+          fi
+          go2="$MJ_DEPS/share/mujoco-menagerie/unitree_go2/scene.xml"
+          build-mj/bin/cvc mujoco info "$go2"
+          build-mj/bin/cvc mujoco stand "$go2" --slope 10 --push 0,60,0 | tee stand.json
+          grep -q '"recovered": true' stand.json \
+            || { echo "::error::cvc mujoco stand: the Go2 did not recover from a 60 N push"; exit 1; }
+          {
+            echo "### MuJoCo robot (Go2)"
+            echo '```'
+            grep -E '^(flat|slope|push|dt)' mujoco_test.txt || true
+            echo
+            cat stand.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # The VolumeRover ports' T1 goldens (tools/volrover-goldens/README.md): build the legacy libraries
   # from transfix/volrover at the pinned sha, run them on the committed inputs, and require the
   # committed goldens to come out again. The legacy code is built here and only here; nothing of

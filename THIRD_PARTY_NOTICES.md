@@ -30,6 +30,13 @@ Compiled into libcvc:
   [libc++'s nth_element](#cdts-portable_nth_element-llvm-libc)) and
   [Shewchuk's predicates](#shewchuks-robust-predicates)
 
+Linked as its own library, never compiled into libcvc: MuJoCo (Apache-2.0, Google DeepMind), for
+`cvc::physics::mujoco_robot` when built with `CVC_WITH_MUJOCO` (default OFF; docs/MUJOCO.md). It
+comes from the cvcpkg `mujoco` package, whose licence and third-party notices install to
+`share/licenses/mujoco/`. The robot the tests load, the Unitree Go2 from the cvcpkg
+`mujoco-menagerie` bundle (BSD-3-Clause), is read from that package at run time and is not in this
+repository.
+
 Compiled into libcvc (its wave spectrum, `cvc/ocean/spectrum.h`) and the cvcGL examples:
 [ABYSSAL](#abyssal).
 

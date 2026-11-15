@@ -216,6 +216,22 @@ else()
   set_source_files_properties(physics_dyn_bike_plant_test.cpp physics_dyn_4w_plant_test.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
+# cvc::physics::mujoco_robot on the Menagerie's Go2. Built in every lane: without CVC_WITH_MUJOCO it
+# checks that the constructor refuses and skips the rest. With it, the tests need cvcpkg's
+# mujoco-menagerie in the deps prefix, and configure fails without it rather than skip them all.
+add_executable(physics_mujoco_robot_test physics_mujoco_robot_test.cpp)
+set(_cvc_menagerie "")
+if(CVC_WITH_MUJOCO)
+  find_path(CVC_MUJOCO_MENAGERIE_DIR unitree_go2/scene.xml PATH_SUFFIXES share/mujoco-menagerie
+            NO_SYSTEM_ENVIRONMENT_PATH NO_CMAKE_SYSTEM_PATH)
+  if(NOT CVC_MUJOCO_MENAGERIE_DIR)
+    message(FATAL_ERROR "CVC_WITH_MUJOCO's tests need the Menagerie's robots: "
+                        "cvcpkg install mujoco-menagerie --prefix <deps>")
+  endif()
+  set(_cvc_menagerie "${CVC_MUJOCO_MENAGERIE_DIR}")
+endif()
+target_compile_definitions(physics_mujoco_robot_test
+  PRIVATE CVC_MUJOCO_MENAGERIE_DIR="${_cvc_menagerie}")
 add_executable(geometry_height_field_test geometry_height_field_test.cpp)
 add_executable(world_geometry_test world_geometry_test.cpp)
 add_executable(nav_world_planes_test nav_world_planes_test.cpp)
@@ -482,6 +498,7 @@ set(TEST_TARGETS
   physics_plant_host_test
   physics_dyn_bike_plant_test
   physics_dyn_4w_plant_test
+  physics_mujoco_robot_test
   geometry_height_field_test
   world_geometry_test
   nav_world_planes_test
@@ -2420,6 +2437,12 @@ target_link_libraries(physics_dyn_4w_plant_test
     GTest::gtest
     GTest::gtest_main
 )
+target_link_libraries(physics_mujoco_robot_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
 target_link_libraries(physics_pose_tracker_test
   PRIVATE
@@ -2794,6 +2817,7 @@ target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
 target_compile_features(physics_plant_host_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_bike_plant_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_4w_plant_test PRIVATE cxx_std_17)
+target_compile_features(physics_mujoco_robot_test PRIVATE cxx_std_17)
 target_compile_features(geometry_height_field_test PRIVATE cxx_std_17)
 target_compile_features(world_geometry_test PRIVATE cxx_std_17)
 target_compile_features(nav_world_planes_test PRIVATE cxx_std_17)
@@ -3352,6 +3376,7 @@ cvc_discover_tests(physics_pose_tracker_test)
 cvc_discover_tests(physics_plant_host_test)
 cvc_discover_tests(physics_dyn_bike_plant_test)
 cvc_discover_tests(physics_dyn_4w_plant_test)
+cvc_discover_tests(physics_mujoco_robot_test)
 cvc_discover_tests(geometry_height_field_test)
 cvc_discover_tests(world_geometry_test)
 cvc_discover_tests(nav_world_planes_test)

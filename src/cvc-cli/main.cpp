@@ -33,6 +33,7 @@
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/core/input_trace.h>
@@ -42,6 +43,7 @@
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/sim_world_trace.h>
 #include <cvc/ph/se2_train.h>
+#include <cvc/physics/mujoco_robot.h>
 #include <cvc/physics/plant_log_scene.h>
 #include <cvc/state/distributed_state_session.h>
 #include <cvc/state/state.h>
@@ -2190,6 +2192,65 @@ static int cmd_trace(cvc::app &app, int argc, char **argv) {
   return r.matched ? 0 : 1;
 }
 
+// ── mujoco: a MuJoCo robot (cvc::physics::mujoco_robot) on libcvc terrain ──
+
+static int cmd_mujoco(cvc::app &, int argc, char **argv) {
+  po::options_description desc(
+      "cvc mujoco - a MuJoCo robot on a libcvc height field (docs/MUJOCO.md); needs a libcvc\n"
+      "built with CVC_WITH_MUJOCO\n\n"
+      "Operations:\n"
+      "  info <model>     the model: MuJoCo's version, sizes, mass, step, actuators, bodies\n"
+      "  stand <model>    a standing trial on a plane, settled under the servos, then pushed on\n"
+      "                   its base: prints the result and the energy books as JSON\n\n"
+      "  cvc mujoco info  <prefix>/share/mujoco-menagerie/unitree_go2/scene.xml\n"
+      "  cvc mujoco stand <...>/unitree_go2/scene.xml --slope 10 --push 0,60,0\n");
+  std::string op, model, push;
+  cvc::physics::mujoco_trial_options t;
+  // clang-format off
+  desc.add_options()
+    ("help,h", "show help")
+    ("op", po::value<std::string>(&op)->required(), "info or stand")
+    ("model", po::value<std::string>(&model)->required(), "the MJCF file")
+    ("slope", po::value<double>(&t.slope_deg)->default_value(0.0), "stand: the plane's slope (degrees, rising along +x)")
+    ("yaw", po::value<double>(&t.yaw)->default_value(0.0), "stand: the robot's heading (rad; 0 faces uphill)")
+    ("push", po::value<std::string>(&push)->default_value("0,0,0"), "stand: FX,FY,FZ on the base (N, world axes)")
+    ("push-at", po::value<double>(&t.settle)->default_value(1.0), "stand: when the push starts (s)")
+    ("push-for", po::value<double>(&t.push_duration)->default_value(0.1), "stand: how long it lasts (s)")
+    ("duration", po::value<double>(&t.duration)->default_value(4.0), "stand: the trial's length (s)")
+    ("kp", po::value<double>(&t.kp)->default_value(60.0), "stand: the servos' stiffness (N m / rad)")
+    ("kd", po::value<double>(&t.kd)->default_value(2.0), "stand: their damping (N m s / rad)")
+    ("timestep", po::value<double>(&t.timestep)->default_value(0.0), "stand: the step (s; 0: the model's)");
+  // clang-format on
+  po::positional_options_description pos;
+  pos.add("op", 1).add("model", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+  if (!cvc::physics::mujoco_robot::available())
+    throw std::runtime_error("this libcvc was built without MuJoCo (CVC_WITH_MUJOCO)");
+  if (op == "info") {
+    cvc::physics::mujoco_robot_options o;
+    o.model = model;
+    o.keyframe.clear(); // the model as written
+    std::cout << cvc::physics::describe(cvc::physics::mujoco_robot(o));
+    return 0;
+  }
+  if (op != "stand")
+    throw std::runtime_error("Unknown mujoco operation: " + op + " (use info or stand)");
+  double f[3];
+  char tail = 0;
+  if (std::sscanf(push.c_str(), "%lf,%lf,%lf%c", &f[0], &f[1], &f[2], &tail) != 3)
+    throw std::invalid_argument("--push is FX,FY,FZ, not " + push);
+  t.model = model;
+  t.push = {f[0], f[1], f[2]};
+  std::cout << cvc::physics::to_json(cvc::physics::run_mujoco_trial(t));
+  return 0;
+}
+
 // ── ph-train: fit the learned port-Hamiltonian vehicle (cvc::ph) to plant logs ──
 
 static int cmd_ph_train(cvc::app &, int argc, char **argv) {
@@ -2546,6 +2607,9 @@ static const command_entry commands[] = {
   // ── Vehicle physics ──
   {"plant-log",      "Vehicle Physics", "log nav driving Jolt vehicles for plant fitting", cmd_plant_log},
   {"ph-train",       "Vehicle Physics", "fit the learned port-Hamiltonian vehicle to plant logs", cmd_ph_train},
+
+  // ── Robots ──
+  {"mujoco",         "Robots",          "a MuJoCo robot on libcvc terrain: info, or a stand and push trial", cmd_mujoco},
 
   // ── Replay ──
   {"trace",          "Replay",          "an input trace: info, or verify by replaying it", cmd_trace},
