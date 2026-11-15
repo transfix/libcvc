@@ -9,7 +9,9 @@ What a training script relies on (ARIADNE_WORLDS.md section 14, L4):
   * the log is numpy arrays and a CSV; the keys under gym.* follow the episode;
   * agents as dicts (archetype, name, team, a start of their own), and refusals;
   * what a differentiable twin reads: fields() (the grid, its ground, its signed distance and
-    gradient) and plants() (each agent's plant as a model, in the observation's order).
+    gradient) and plants() (each agent's plant as a model, in the observation's order, with the
+    drive that commanded it last);
+  * set_intent / intent / clear_intent: an agent's intent, its force summed by the drive.
 """
 
 import math
@@ -224,6 +226,39 @@ check(abs(w["state"][2] - o["yaw"][3]) < 1e-6, "its heading is the observation's
 check(ps[2]["state"].shape == (8,) and ps[2]["params"]["mu"] > 0.0, "the single-track model")
 check(ps[1]["limits"]["L"] > 2.0 and ps[1]["limits"]["hdt"] > 0.0, "the bicycle's limits, in metres")
 
+# The drive a twin replays (plants()' drive), and an intent's force from Python.
+g4 = pycvc.WorldGym(doc, agents=[{"plant": "dynamic4w", "x": -30.0, "y": -10.0 + 20.0 * k, "yaw": 0.0}
+                                 for k in range(2)])
+o = g4.reset(5)
+ids = [int(i) for i in o["id"]]
+check(not g4.plants()[0]["drive"]["known"], "no drive before a step")
+check(g4.set_intent(ids[0], force=(0.0, 1.5)), "set_intent takes a force")
+check(g4.intent(ids[0])["force"] == (0.0, 1.5) and g4.intent(ids[0])["mode"] == "off",
+      f"the intent, held ({g4.intent(ids[0])})")
+check(not g4.set_intent(999, force=(1.0, 0.0)), "set_intent refuses an id that is not an agent")
+for _ in range(10):
+    o = g4.step(math.nan, math.nan)[0]
+dr = [p["drive"] for p in g4.plants()]
+check(all(d["known"] for d in dr), "the drive, after a step")
+check(abs(dr[0]["force_x"]) < 1e-6 and abs(dr[0]["force_y"] - 1.5) < 1e-6,  # float on the drive
+      f"the drive summed the force ({dr[0]})")
+check((dr[1]["force_x"], dr[1]["force_y"]) == (0.0, 0.0), "the other drove without one")
+check(all(d["beta"] > 0.0 and math.isfinite(d["goal_x"]) for d in dr),
+      "its coefficients and its carrot")
+g5 = pycvc.WorldGym(doc, agents=[{"plant": "dynamic4w", "x": -30.0, "y": -10.0 + 20.0 * k, "yaw": 0.0}
+                                 for k in range(2)])
+g5.reset(5)
+for _ in range(10):
+    o5 = g5.step(math.nan, math.nan)[0]
+check(o["y"][0] > o5["y"][0] + 1e-3 and abs(o["y"][1] - o5["y"][1]) < 1e-9,
+      f"the force pushed it, and only it, +y ({o['y']} against {o5['y']} without)")
+check(g4.clear_intent(ids[0]) and g4.intent(ids[0])["force"] == (0.0, 0.0), "clear_intent")
+try:
+    g4.set_intent(ids[0], force=(1.0,))
+    check(False, "a force of one number")
+except (ValueError, RuntimeError) as e:
+    check("(fx, fy)" in str(e), f"a force is (fx, fy) ({e})")
+
 for bad_doc, what in ((DOC.split("world:")[0] + "scene:" + DOC.split("scene:")[1], "no vehicles"),
                       ("windows:\n  - window: W\n", "runs no world")):
     p = os.path.join(tmp, "bad.ari")
@@ -240,5 +275,5 @@ try:
 except RuntimeError as e:
     check("does not allow" in str(e), f"the spawn's refusal ({e})")
 
-del gym, other, g2, g3
+del gym, other, g2, g3, g4, g5
 print(f"test_pycvc_gym: {checks} checks passed")

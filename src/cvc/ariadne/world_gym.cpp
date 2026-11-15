@@ -221,6 +221,8 @@ WorldGym::WorldGym(const std::string &document, gym_options options)
     throw std::runtime_error("WorldGym: '" + document +
                              "' offers no vehicles (its world: vehicles: archetypes: is empty)");
   d.rt->pause_world(true); // the world steps only when step() asks
+  // A twin replays the drive's ticks (plants()' entity_drive).
+  d.vehicles().set_drive_telemetry(d.opts.drive_telemetry);
   if (!d.opts.world.empty()) {
     std::vector<std::string> w;
     if (!d.world().set_world(d.opts.world, &w))
