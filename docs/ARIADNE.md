@@ -942,7 +942,12 @@ island) the sea goes on `outer` metres past it (6000); otherwise it stops at the
 over it. The cascades need float render targets; without them the water is flat blue. Live keys
 under the node's root (`water.` unless `keys:`): `wind_speed`, `wind_dir`, `fetch`, `chop`,
 `wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`, `foam_fray` and `shore_fade`, most on
-`water_controls.ari`.
+`water_controls.ari`. With `body: {}` the water is in the scene's physics world, with or without a
+renderer ([`scene_water.h`](../inc/cvc/ariadne/scene_water.h)). It is one fluid field over the
+water's extent, its surface the same sea computed on the CPU, so a body lighter than water floats
+on the waves the picture shows and a heavier one sinks. The field is rebuilt when the wind, chop or
+wave height change or the ground regenerates, and the scene's world swaps it as it swaps a
+generated world's bodies. Its waves do not yet fade toward the shore as the drawn ones do.
 
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the

@@ -54,6 +54,8 @@
 #include <cmath>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/scene_generated_world.h> // SceneColliders
+#include <cvc/ariadne/scene_water.h>           // its physics: WaterRuntime
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/geometry.h>
@@ -250,6 +252,9 @@ struct WaterRT {
   // the keys' resolved paths
   std::string windKey, dirKey, fetchKey, chopKey, ampKey, biasKey, rampKey, frayKey, fadeKey;
   std::string capsKey;
+  // With `body:`, the water in the scene's physics world (scene_water.h): one fluid field over the
+  // ground, its surface the sea drawn here, rebuilt as the wind or the ground changes.
+  std::unique_ptr<cvc::ariadne::WaterRuntime> physics;
 };
 
 constexpr int kFoamSettle = 10;
@@ -463,6 +468,8 @@ void tick_water(cvc::app &app, WaterRT &rt, vtkRenderer *ren) {
   auto far = rt.far.lock();
   if (!near || !far)
     return;
+  if (rt.physics)
+    rt.physics->tick(); // the field follows the keys and the ground (a regenerate)
   if (!rt.ready && !rt.failed) {
     auto *ow = ren ? vtkOpenGLRenderWindow::SafeDownCast(ren->GetRenderWindow()) : nullptr;
     if (!ow || !ow->GetInitialized())
@@ -639,6 +646,15 @@ std::shared_ptr<GraphicsNode> realize_water(SceneGraph &sg, const ari::SceneNode
   rt->near = near;
   rt->far = far;
   place_far(*rt, *far, *near); // the clip for the edge the grid was just built for
+
+  // `body:`: the water's field in the scene's physics world, over the same ground (whose shared
+  // height field a regenerated world overwrites in place: the runtime sees its new heights).
+  if (n.body.present) {
+    std::shared_ptr<const cvc::height_field> ground = rt->ground;
+    rt->physics =
+        std::make_unique<cvc::ariadne::WaterRuntime>(app, n, pref, [ground]() { return ground; });
+    out.colliders[n.id] = rt->physics->colliders();
+  }
 
   cvc::app *ap = &app;
   out.custom_ticks.push_back([ap, rt](vtkRenderer *ren) { tick_water(*ap, *rt, ren); });
