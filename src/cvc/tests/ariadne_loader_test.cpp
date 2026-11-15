@@ -911,8 +911,8 @@ windows:
   EXPECT_FLOAT_EQ(win->size.h.value, 132.0f);
 }
 
-// §window `closable:` — a close (X) button + tree.<id>.open state, both as a direct window key and
-// as an include-site override.
+// §5.9 `closable:` (default true): a close (X) button + tree.<id>.open state. `closable: false`
+// turns it off, both as a direct window key and as an include-site override.
 TEST(AriadneLoader, ClosableWindowAndIncludeOverride) {
   SKIP_WITHOUT_YAML();
   LoadResult r = fresh_load(R"(
@@ -925,10 +925,10 @@ units:
 windows:
   - window: Direct
     id: direct
-    closable: true
+    closable: false
     children: [ { text: hi } ]
   - include: panel
-    closable: true
+    closable: false
   - window: Plain
     id: plain
     children: [ { text: hi } ]
@@ -936,13 +936,13 @@ windows:
   ASSERT_TRUE(r.ok) << r.error;
   const Widget *direct = find(r.root, Kind::Window, "Direct");
   ASSERT_NE(direct, nullptr);
-  EXPECT_TRUE(direct->closable); // direct window key
+  EXPECT_FALSE(direct->closable); // direct window key
   const Widget *panel = find(r.root, Kind::Window, "Panel");
   ASSERT_NE(panel, nullptr);
-  EXPECT_TRUE(panel->closable); // applied at the include site onto the shared unit
+  EXPECT_FALSE(panel->closable); // applied at the include site onto the shared unit
   const Widget *plain = find(r.root, Kind::Window, "Plain");
   ASSERT_NE(plain, nullptr);
-  EXPECT_FALSE(plain->closable); // default: not closable
+  EXPECT_TRUE(plain->closable); // default: closable
 }
 
 // §5.9 `maximizable:` (default true): a window's maximize button.
@@ -968,6 +968,39 @@ windows:
   EXPECT_FALSE(pinned->maximizable);
   for (const std::string &w : r.warnings)
     EXPECT_EQ(w.find("maximizable"), std::string::npos) << w;
+}
+
+// §5.9 `resizable:` (default true): the user resizes a window by an edge or a corner. A window's
+// own key, not its `layout:`'s (which makes a split's panes or a table's columns resizable).
+TEST(AriadneLoader, ResizableWindow) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+units:
+  panel:
+    window: Panel
+    children: [ { text: hi } ]
+windows:
+  - window: Free
+    children: [ { text: hi } ]
+  - window: Fixed
+    resizable: false
+    layout: { kind: grid, col_widths: [100, 100], resizable: true }
+    children: [ { text: a }, { text: b } ]
+  - include: panel
+    resizable: false
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *free = find(r.root, Kind::Window, "Free");
+  const Widget *fixed = find(r.root, Kind::Window, "Fixed");
+  const Widget *panel = find(r.root, Kind::Window, "Panel");
+  ASSERT_NE(free, nullptr);
+  ASSERT_NE(fixed, nullptr);
+  ASSERT_NE(panel, nullptr);
+  EXPECT_TRUE(free->resizable);
+  EXPECT_FALSE(fixed->resizable);
+  EXPECT_TRUE(fixed->layout.resizable) << "its layout's key is its own";
+  EXPECT_FALSE(panel->resizable) << "set at the include site";
 }
 
 // An include with no geometry keys leaves the unit's own geometry untouched (no accidental
@@ -2360,6 +2393,198 @@ scene:
   EXPECT_EQ(r.scene.nodes[1].props.find("tags"), nullptr); // consumed, not left for the custom type
   EXPECT_EQ(r.scene.nodes[1].props.num("count", 0.0), 4.0);
   EXPECT_TRUE(r.scene.nodes[2].tags.empty());
+}
+
+// §5.4 repeat: on a scene node: the count is kept as written (a number, a state key, an
+// expression), the key is consumed (not a custom type's prop), and the template keeps its tags,
+// visible:, transform: and children for its copies. An id without {i} gets _{i}.
+TEST(AriadneScene, RepeatParsedOntoNode) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: disc_{i}
+      repeat: markers
+      tags: [markers, "m{i}"]
+      visible: markers.{i}.on
+      source: { sphere: 0.5 }
+      transform: { position: [1, 2, 3] }
+      children:
+        - node: ring
+          source: { box: 0.2 }
+    - node: beacon
+      type: lamp
+      repeat: 3
+      hue: "h{i}"
+    - node: pin
+      repeat: (int (state-get "pins"))
+    - node: plain
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 4u);
+  const SceneNode &disc = r.scene.nodes[0];
+  EXPECT_EQ(disc.id, "disc_{i}");
+  EXPECT_EQ(disc.repeat, "markers");
+  EXPECT_EQ(disc.tags, (std::vector<std::string>{"markers", "m{i}"}));
+  EXPECT_EQ(disc.visible_bind, "markers.{i}.on");
+  EXPECT_TRUE(disc.has_transform);
+  EXPECT_FLOAT_EQ(disc.position[2], 3.0f);
+  ASSERT_EQ(disc.children.size(), 1u);
+  EXPECT_EQ(disc.props.find("repeat"), nullptr); // consumed, not a prop
+  const SceneNode &beacon = r.scene.nodes[1];
+  EXPECT_EQ(beacon.id, "beacon_{i}"); // no {i}: each copy is still named apart
+  EXPECT_EQ(beacon.repeat, "3");
+  EXPECT_EQ(beacon.props.find("repeat"), nullptr);
+  EXPECT_EQ(beacon.props.str("hue"), "h{i}"); // substituted per copy, not at load
+  EXPECT_EQ(r.scene.nodes[2].repeat, "(int (state-get \"pins\"))");
+  EXPECT_TRUE(r.scene.nodes[3].repeat.empty());
+  EXPECT_EQ(r.scene.nodes[3].id, "plain");
+  EXPECT_FALSE(has_warning(r, "repeat"));
+}
+
+TEST(AriadneScene, RepeatCountKinds) {
+  using K = SceneRepeatCount::Kind;
+  EXPECT_EQ(scene_repeat_count("").kind, K::none);
+  EXPECT_EQ(scene_repeat_count(" 12 ").kind, K::literal);
+  EXPECT_EQ(scene_repeat_count(" 12 ").literal, 12);
+  EXPECT_EQ(scene_repeat_count("-4").literal, 0);
+  EXPECT_EQ(scene_repeat_count("99999999999999999999").literal, kSceneRepeatMax);
+  const SceneRepeatCount key = scene_repeat_count("sim.markers");
+  EXPECT_EQ(key.kind, K::key);
+  EXPECT_EQ(key.text, "sim.markers");
+  EXPECT_EQ(scene_repeat_count("/abs.count").kind, K::key);
+  EXPECT_EQ(scene_repeat_count("3.5").kind, K::key); // not a whole number: a key named "3.5"
+  const SceneRepeatCount ex = scene_repeat_count("(length (state-get \"l\"))");
+  EXPECT_EQ(ex.kind, K::expression);
+  EXPECT_EQ(ex.text, "(length (state-get \"l\"))");
+}
+
+// A copy is the template with {i} filled in where a copy names its state or its data; a child with
+// a repeat: of its own keeps its {i} for its own copies.
+TEST(AriadneScene, RepeatInstanceSubstitutesIndex) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: m{i}
+      repeat: 2
+      type: lamp
+      tags: [pool, "p{i}"]
+      visible: { bind: "pool.{i}.on", default: false }
+      source: { data: "city{i}", item: "b{i}" }
+      material: { texture: "file://tex{i}.png" }
+      clip: { planes: [{ origin: [0, 0, 0], normal: [0, 0, 1], offset: "pool.{i}.cut" }] }
+      label: "Marker {i}"
+      nested: { list: ["a{i}", 4], key: "k{i}" }
+      children:
+        - node: tag{i}
+          visible: pool.{i}.tag
+        - node: sub{i}
+          repeat: 1
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  const SceneNode c = scene_node_instance(r.scene.nodes[0], 7);
+  EXPECT_TRUE(c.repeat.empty());
+  EXPECT_EQ(c.id, "m7");
+  EXPECT_EQ(c.tags, (std::vector<std::string>{"pool", "p7"}));
+  EXPECT_EQ(c.visible_bind, "pool.7.on");
+  EXPECT_FALSE(c.visible_default);
+  EXPECT_EQ(c.source_data, "city7");
+  EXPECT_EQ(c.source_item, "b7");
+  EXPECT_EQ(c.material_texture, "file://tex7.png");
+  ASSERT_EQ(c.clip.planes.size(), 1u);
+  EXPECT_EQ(c.clip.planes[0].offset_bind, "pool.7.cut");
+  EXPECT_EQ(c.props.str("label"), "Marker 7");
+  const Value *nested = c.props.find("nested");
+  ASSERT_NE(nested, nullptr);
+  EXPECT_EQ(nested->str("key"), "k7");
+  const Value *list = nested->find("list");
+  ASSERT_NE(list, nullptr);
+  ASSERT_EQ(list->items.size(), 2u);
+  EXPECT_EQ(list->items[0].as_string(), "a7");
+  ASSERT_EQ(c.children.size(), 2u);
+  EXPECT_EQ(c.children[0].id, "tag7");
+  EXPECT_EQ(c.children[0].visible_bind, "pool.7.tag");
+  EXPECT_EQ(c.children[1].id, "sub{i}"); // its own repeat: numbers it
+  EXPECT_EQ(c.children[1].repeat, "1");
+  // The template itself is unchanged.
+  EXPECT_EQ(r.scene.nodes[0].id, "m{i}");
+  EXPECT_EQ(r.scene.nodes[0].repeat, "2");
+}
+
+// A copy's bound opacity follows its own key.
+TEST(AriadneScene, RepeatInstanceBindsItsOwnOpacity) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: glow_{i}
+      repeat: 3
+      source: { box: 1 }
+      material: { opacity: { bind: "x.{i}.alpha", default: 0.5 } }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  EXPECT_EQ(r.scene.nodes[0].opacity_bind, "x.{i}.alpha");
+  const SceneNode c = scene_node_instance(r.scene.nodes[0], 2);
+  EXPECT_EQ(c.opacity_bind, "x.2.alpha");
+  EXPECT_TRUE(c.has_opacity);
+  EXPECT_DOUBLE_EQ(c.opacity, 0.5);
+}
+
+// repeat: cannot see the outer index: each is said, not silent.
+TEST(AriadneScene, RepeatDropsBodiesAndWarnsNested) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  physics: {}
+  nodes:
+    - node: crate_{i}
+      repeat: 2
+      world: north
+      source: { box: 1 }
+      body: dynamic
+      children:
+        - node: lid
+          source: { box: 0.5 }
+          body: dynamic
+        - node: row_{i}
+          repeat: rows
+    - node: floor
+      source: { plane: 10 }
+      body: static
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode &crate = r.scene.nodes[0];
+  EXPECT_FALSE(crate.body.present);
+  EXPECT_TRUE(crate.world.empty());
+  EXPECT_TRUE(crate.visible_bind.empty()); // no world, so no world visibility either
+  EXPECT_FALSE(crate.children[0].body.present);
+  EXPECT_TRUE(r.scene.nodes[1].body.present); // a plain node keeps its body
+  EXPECT_TRUE(has_warning(r, "body: and world: are not supported under the repeat: node"));
+  EXPECT_TRUE(has_warning(r, "nested 'repeat'"));
+}
+
+TEST(AriadneScene, RepeatThatIsNotAScalarWarns) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: a
+      repeat: [1, 2]
+    - node: b
+      repeat: 100000
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.scene.nodes[0].repeat.empty());
+  EXPECT_TRUE(has_warning(r, "repeat: is a count, a state key or an expression"));
+  EXPECT_TRUE(has_warning(r, "clamped to 4096"));
 }
 
 // §9 background: a solid colour or a top→bottom gradient (a view property the host applies).
