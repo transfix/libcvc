@@ -72,6 +72,9 @@ public:
   // friction (combined with what they touch by the world's rule). Sets w's contact reporting to
   // every step's (contact_reporting::all), since a chassis pressed against a wall stays in contact.
   void reset(world *w, std::vector<body_id> ground, double friction);
+  // The world was made afresh (its bodies are gone, and their ids may name new ones): forget the
+  // boxes without removing them, and work in no world.
+  void forget();
   bool on() const { return _w != nullptr; }
   world *physics() const { return _w; }
 
@@ -85,6 +88,9 @@ public:
   void put(int i, const vec3 &position, const quat &rotation, const vec3 &v, const vec3 &w);
   // The world's step, then which boxes touched something that is not the ground.
   void step();
+  // Which boxes touched something that is not the ground in the world's last step (step()'s
+  // second half, for a world a host steps).
+  void read_contacts();
   bool touched(int i) const { return _touched.at(static_cast<std::size_t>(i)) != 0; }
   // Of that, for the plant ledger: the other box that box i touched deepest in the step (its
   // index; -1 none) and how deep (m), and the contacts it began with static geometry (a body

@@ -733,5 +733,5 @@ TEST(PhysicsOceanSurface, CrossPlatformGoldenHash) {
   const std::uint64_t h = w.state_hash();
   std::printf("[physics-golden] ocean scene after 300 steps: %016llx\n",
               static_cast<unsigned long long>(h));
-  EXPECT_EQ(h, 0x315e7d5f0aed8af0ull) << std::hex << "state hash " << h;
+  EXPECT_EQ(h, 0xbe86208109133b1aull) << std::hex << "state hash " << h;
 }

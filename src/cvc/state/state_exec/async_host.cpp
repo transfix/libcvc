@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/core/async_lane.h>
+#include <cvc/core/thread_pool.h>
 #include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
@@ -16,6 +17,7 @@
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/process_table.h> // detail::time_after, first_time_passed
 #include <cvc/state/state_exec/scheduler_base.h>
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include <utility>
@@ -101,7 +103,7 @@ void async_call::post(const value_t &progress) {
   // Inline: the kernel runs in its process's step, on the scheduler's thread, and the delivery is
   // the host's, not the kernel's.
   if (sched_ && std::this_thread::get_id() == kernel_thread_) {
-    const detail::async_kernel_scope host(false);
+    const scheduler_base::kernel_thread_scope host(sched_, false);
     sched_->deliver_to_receivers(progress_channel_, progress);
   }
 }
@@ -109,6 +111,18 @@ void async_call::post(const value_t &progress) {
 void async_call::add_wait(double seconds) {
   if (seconds > 0.0)
     wait_ns_.fetch_add(to_ns(seconds), std::memory_order_acq_rel);
+}
+
+void async_call::alloc_check(std::size_t bytes, const char *who) {
+  // eval_alloc_check's refusal, under the call's limit.
+  exec_context ctx;
+  eval_alloc_guard limit(ctx, alloc_limit_);
+  eval_alloc_check(&ctx, bytes, who);
+  alloc_note(bytes);
+}
+
+void async_call::alloc_note(std::size_t bytes) {
+  alloc_bytes_.fetch_add(bytes, std::memory_order_acq_rel);
 }
 
 void async_call::on_cancel(std::function<void()> stop) {
@@ -258,11 +272,10 @@ double async_call::unmetered_seconds(clock::time_point now) const {
 void async_call::chunk_context::run_chunks(const std::function<void()> &chunks) noexcept {
   const double cpu0 = thread_cpu_seconds();
   {
-    const detail::async_kernel_scope kernel(true);
-    // The process's allocation limit holds in the kernel's chunks too (3.8).
-    eval_alloc_guard guard(call->alloc_limit_);
+    // The worker is the kernel's while it runs them (3.7). The process's allocation limit holds
+    // in them too (3.8): async_call::alloc_check.
+    const scheduler_base::kernel_thread_scope kernel(call->sched_);
     chunks();
-    call->alloc_bytes_.fetch_add(guard.allocated(), std::memory_order_acq_rel);
   }
   call->fanout_cpu_ns_.fetch_add(to_ns(thread_cpu_seconds() - cpu0), std::memory_order_acq_rel);
 }
@@ -443,8 +456,14 @@ struct async_host::shared_state {
   }
 };
 
-async_host::async_host(scheduler_base *sched)
-    : state_(std::make_shared<shared_state>()), sched_(sched) {}
+async_host::async_host(scheduler_base *sched, cvc::thread_pool *fanout_pool)
+    : state_(std::make_shared<shared_state>()), sched_(sched), fanout_pool_(fanout_pool) {}
+
+cvc::thread_pool *async_host::fanout_pool() const {
+  if (fanout_pool_)
+    return fanout_pool_;
+  return app_ ? &app_->computePool() : nullptr;
+}
 
 async_host::async_host(async_scheduler &sched, cvc::app *app)
     : state_(std::make_shared<shared_state>()), sched_(&sched), async_sched_(&sched), app_(app) {}
@@ -491,9 +510,9 @@ bool async_host::runs_threaded(const async_options &opts) const {
   return false;
 }
 
-value_t async_host::call(const std::string &name, async_kernel kernel, const async_options &opts,
-                         bool future) {
-  if (parking_forbidden())
+value_t async_host::call(exec_context *ctx, const std::string &name, async_kernel kernel,
+                         const async_options &opts, bool future) {
+  if (parking_forbidden(ctx))
     throw dsl_error("RuntimeError",
                     name + ": an async function can't be called here (this context can't wait "
                            "for it)",
@@ -507,7 +526,7 @@ value_t async_host::call(const std::string &name, async_kernel kernel, const asy
   auto call = std::make_shared<async_call>(name, proc ? proc->pid : -1);
   call->timeout_ = opts.timeout;
   call->io_ = opts.io;
-  call->alloc_limit_ = eval_alloc_limit(); // the calling step's
+  call->alloc_limit_ = eval_alloc_limit(ctx); // the calling step's
   call->sched_ = sched_;
   if (proc) {
     call->has_progress_ = true;
@@ -517,13 +536,13 @@ value_t async_host::call(const std::string &name, async_kernel kernel, const asy
   // On an executor only where the process can be charged and resumed: a step of the parking
   // scheduler, and, for a transparent call, at a point that can park.
   const bool threaded = proc && async_sched_ && async_sched_->current_pid() == proc->pid &&
-                        runs_threaded(opts) && (future || can_await());
+                        runs_threaded(opts) && (future || can_await(ctx));
   // The reply channel: what a parked process waits on, and a future's identity. A transparent
   // inline call has neither.
   if (threaded || future)
     call->channel_ = state_->reply_channel(name, ".async#");
   if (!threaded)
-    return run_inline(call, kernel, proc, future);
+    return run_inline(ctx, call, kernel, proc, future);
 
   call->async_sched_ = async_sched_;
   ++proc->async_calls;
@@ -536,12 +555,12 @@ value_t async_host::call(const std::string &name, async_kernel kernel, const asy
     throw dsl_error("RuntimeError", name + ": can't park process " + std::to_string(proc->pid),
                     "async", function_fields(name));
   }
-  request_await({call->channel_, name, detail::make_awaitable_handle(call)});
+  request_await(ctx, {call->channel_, name, detail::make_awaitable_handle(call)});
   return nil_value();
 }
 
-value_t async_host::run_inline(const std::shared_ptr<async_call> &call, const async_kernel &kernel,
-                               process *proc, bool future) {
+value_t async_host::run_inline(exec_context *ctx, const std::shared_ptr<async_call> &call,
+                               const async_kernel &kernel, process *proc, bool future) {
   if (proc) {
     ++proc->async_calls;
     call->inline_proc_ = proc;
@@ -552,10 +571,17 @@ value_t async_host::run_inline(const std::shared_ptr<async_call> &call, const as
   std::exception_ptr error;
   call->begin_kernel();
   {
-    // The kernel runs under the step's allocation guard (its reports count as the step's); its
-    // fan-out chunks under the call's.
-    cvc::fanout_context_scope fanout(&call->chunks_);
-    const detail::async_kernel_scope in_kernel(true);
+    // The kernel and its fan-out chunks (on the app's compute pool, under the call's context)
+    // report what they allocate to the call (async_call::alloc_check, under the step's limit).
+    // The thread is its scheduler's kernel's while it runs, and the step's context a kernel's
+    // (3.7).
+    std::optional<cvc::fanout_context_scope> fanout;
+    if (cvc::thread_pool *pool = fanout_pool())
+      fanout.emplace(*pool, &call->chunks_);
+    const scheduler_base::kernel_thread_scope marked(sched_);
+    std::optional<detail::async_kernel_scope> in_kernel;
+    if (ctx)
+      in_kernel.emplace(*ctx, true);
     try {
       value = kernel(*call);
     } catch (...) {
@@ -574,13 +600,13 @@ value_t async_host::run_inline(const std::shared_ptr<async_call> &call, const as
     // Charged as a call, not as part of the step (3.8): the step's own charge leaves it out.
     proc->step_async_cpu += 1e-9 * double(call->cpu_ns_.load(std::memory_order_acquire));
     detail::charge_async_call(*proc, *call, sched_->async_steps_per_cpu_ms(*proc), true, now, true);
-    if (proc->max_memory > 0) // the kernel's own reports went to the step's guard
+    if (proc->max_memory > 0) // the kernel's reports, and its chunks'
       proc->heap_alloc_bytes += call->alloc_bytes();
     // A call that used up the budget: the scheduler kills the process when the step is over
     // (2.5), so its outcome, a value or an exception the program could catch, is dropped.
     if ((proc->max_steps > 0 && proc->step_count() >= proc->max_steps) || proc->over_time_limit())
       return nil_value();
-  } else if (detail::data_step_scope *data = detail::data_step_scope::current()) {
+  } else if (detail::data_step_scope *data = ctx ? ctx->data : nullptr) {
     // A bare evaluator: its steps are all there is to charge.
     const double steps = call->cpu_seconds() * 1000.0 * kDefaultAsyncStepsPerCpuMs;
     data->stats().add_steps(step_kind::async, std::max<uint64_t>(1, static_cast<uint64_t>(steps)));
@@ -590,8 +616,8 @@ value_t async_host::run_inline(const std::shared_ptr<async_call> &call, const as
   return call->outcome();
 }
 
-void async_host::run_kernel(const std::shared_ptr<async_call> &call, async_kernel &kernel,
-                            shared_state &state) noexcept {
+void async_host::run_kernel(cvc::thread_pool *pool, const std::shared_ptr<async_call> &call,
+                            async_kernel &kernel, shared_state &state) noexcept {
   {
     value_t value;
     std::exception_ptr error;
@@ -601,15 +627,18 @@ void async_host::run_kernel(const std::shared_ptr<async_call> &call, async_kerne
     } else {
       call->begin_kernel();
       {
-        cvc::fanout_context_scope fanout(&call->chunks_);
-        const detail::async_kernel_scope in_kernel(true);
-        eval_alloc_guard guard(call->alloc_limit_);
+        // Its fan-out chunks on the host's pool run under the call's context. Its thread is its
+        // scheduler's kernel's while it runs (3.7); it reports what it allocates to the call
+        // (async_call::alloc_check).
+        std::optional<cvc::fanout_context_scope> fanout;
+        if (pool)
+          fanout.emplace(*pool, &call->chunks_);
+        const scheduler_base::kernel_thread_scope marked(call->sched_);
         try {
           value = kernel(*call);
         } catch (...) {
           error = std::current_exception();
         }
-        call->alloc_bytes_.fetch_add(guard.allocated(), std::memory_order_acq_rel);
       }
       call->end_kernel();
     }
@@ -639,6 +668,8 @@ void async_host::run_kernel(const std::shared_ptr<async_call> &call, async_kerne
 // it: submit) is dropped the same way. The call then raises RuntimeError, its kernel goes, and the
 // host's count goes down, so the process isn't left parked and shutdown() doesn't wait for good.
 struct async_host::kernel_task {
+  cvc::app *app;          // the host's (null without one): its pool says why it drops a task
+  cvc::thread_pool *pool; // the host's fanout_pool(): the kernel's fan-outs charged there
   std::shared_ptr<async_call> call;
   async_kernel kernel;
   std::shared_ptr<shared_state> state;
@@ -648,12 +679,12 @@ struct async_host::kernel_task {
   const std::string *lane;
   bool armed = true; // this object still owes the call its end; a move or a copy takes that over
 
-  kernel_task(std::shared_ptr<async_call> c, async_kernel k, std::shared_ptr<shared_state> s,
-              const std::string *l) noexcept
-      : call(std::move(c)), kernel(std::move(k)), state(std::move(s)), lane(l) {}
+  kernel_task(cvc::app *a, cvc::thread_pool *p, std::shared_ptr<async_call> c, async_kernel k,
+              std::shared_ptr<shared_state> s, const std::string *l) noexcept
+      : app(a), pool(p), call(std::move(c)), kernel(std::move(k)), state(std::move(s)), lane(l) {}
   kernel_task(kernel_task &&o) noexcept
-      : call(std::move(o.call)), kernel(std::move(o.kernel)), state(std::move(o.state)),
-        lane(o.lane), armed(std::exchange(o.armed, false)) {
+      : app(o.app), pool(o.pool), call(std::move(o.call)), kernel(std::move(o.kernel)),
+        state(std::move(o.state)), lane(o.lane), armed(std::exchange(o.armed, false)) {
     o.kernel = nullptr; // a moved-from std::function may keep a copy of a small callable
   }
   // std::function needs a copy constructor. No executor copies its task: they move or swap the
@@ -672,12 +703,12 @@ struct async_host::kernel_task {
     // about its own task then, and an interrupt pending there stays pending (nothing in drop()
     // may take it).
     boost::this_thread::disable_interruption keep_interrupt_pending;
-    drop(cvc::app::poolDropReason());
+    drop(app ? app->poolDropReason() : cvc::app::kPoolStopped);
   }
 
   void operator()() noexcept {
     if (std::exchange(armed, false))
-      run_kernel(call, kernel, *state);
+      run_kernel(pool, call, kernel, *state);
   }
 
   // Not run: the call raises RuntimeError, naming the lane that refused it, or why the app's
@@ -717,7 +748,8 @@ void async_host::submit(const std::shared_ptr<async_call> &call, async_kernel ke
     // The executor runs, then destroys, this task; nothing else holds the kernel once it is
     // queued. Refused, it is destroyed unrun before submit() or trySubmitPooled() returns, and
     // ends the call itself (kernel_task).
-    std::function<void()> task(kernel_task(call, std::move(kernel), state_, lane_name));
+    std::function<void()> task(
+        kernel_task(app_, fanout_pool(), call, std::move(kernel), state_, lane_name));
     kernel = nullptr; // a moved-from std::function may keep a copy of a small callable
     if (lane) {
       lane->submit(std::move(task));
@@ -739,12 +771,12 @@ void async_host::submit(const std::shared_ptr<async_call> &call, async_kernel ke
   }
 }
 
-value_t async_host::call(const std::string &name, async_work work, const async_options &opts,
-                         bool future) {
+value_t async_host::call(exec_context *ctx, const std::string &name, async_work work,
+                         const async_options &opts, bool future) {
   if (!work.kernel && !work.start)
     throw dsl_error("TypeError", name + ": its marshal step returned no work", "async",
                     function_fields(name));
-  if (parking_forbidden())
+  if (parking_forbidden(ctx))
     throw dsl_error("RuntimeError",
                     name + ": an async function can't be called here (this context can't wait "
                            "for it)",
@@ -754,12 +786,12 @@ value_t async_host::call(const std::string &name, async_work work, const async_o
   // Started only where a threaded call would be: a step of the parking scheduler, and, for a
   // transparent call, at a point that can park. Elsewhere the kernel runs as any kernel does.
   const bool starts = work.start && proc && async_sched_ &&
-                      async_sched_->current_pid() == proc->pid && (future || can_await());
+                      async_sched_->current_pid() == proc->pid && (future || can_await(ctx));
   if (!starts) {
     if (!work.kernel)
       throw dsl_error("RuntimeError", name + ": can't wait for its result here", "async",
                       function_fields(name));
-    return call(name, std::move(work.kernel), opts, future);
+    return call(ctx, name, std::move(work.kernel), opts, future);
   }
 
   // An external call (begin_external) with the registration's timeout and charging: nothing runs
@@ -785,7 +817,7 @@ value_t async_host::call(const std::string &name, async_work work, const async_o
       throw dsl_error("RuntimeError", name + ": can't park process " + std::to_string(proc->pid),
                       "async", function_fields(name));
     }
-    request_await({call->channel_, name, detail::make_awaitable_handle(call)});
+    request_await(ctx, {call->channel_, name, detail::make_awaitable_handle(call)});
   }
   // Started once the process waits for it: an outcome posted at once (a transport that answers
   // in place) is taken by the next drain like any other.
@@ -798,9 +830,9 @@ value_t async_host::call(const std::string &name, async_work work, const async_o
   return result;
 }
 
-std::shared_ptr<async_call> async_host::begin_external(const std::string &name, bool future,
-                                                       value_t &result) {
-  if (parking_forbidden())
+std::shared_ptr<async_call> async_host::begin_external(exec_context *ctx, const std::string &name,
+                                                       bool future, value_t &result) {
+  if (parking_forbidden(ctx))
     throw dsl_error("RuntimeError",
                     name + ": an async function can't be called here (this context can't wait "
                            "for it)",
@@ -808,7 +840,7 @@ std::shared_ptr<async_call> async_host::begin_external(const std::string &name, 
   check_open(name);
   process *proc = sched_ && sched_->current_process() ? sched_->current_process().get() : nullptr;
   if (!proc || !async_sched_ || async_sched_->current_pid() != proc->pid ||
-      (!future && !can_await()))
+      (!future && !can_await(ctx)))
     throw dsl_error("RuntimeError", name + ": can't wait for its result here", "async",
                     function_fields(name));
   auto call = std::make_shared<async_call>(name, proc->pid);
@@ -827,7 +859,7 @@ std::shared_ptr<async_call> async_host::begin_external(const std::string &name, 
     if (!async_sched_->receive_message(proc->pid, call->channel_))
       throw dsl_error("RuntimeError", name + ": can't park process " + std::to_string(proc->pid),
                       "async", function_fields(name));
-    request_await({call->channel_, name, detail::make_awaitable_handle(call)});
+    request_await(ctx, {call->channel_, name, detail::make_awaitable_handle(call)});
     result = nil_value();
   }
   return call;
@@ -849,23 +881,26 @@ void async_host::finish(const std::shared_ptr<async_call> &call) {
 namespace {
 
 // Register `name` (and `<name>-async`) as natives that copy their arguments (3.7) and hand the
-// copies to `call(args, future)`, which marshals them and makes the call.
-using make_call_fn = std::function<value_t(std::span<const value_t> args, bool future)>;
+// copies to `call(args, future)`, which marshals them and makes the call (in the context of the
+// native call: the copy finishes in a step in the same context).
+using make_call_fn = std::function<value_t(call_args args, bool future)>;
 
 void register_async_natives(const environment_ptr &env, const std::string &name,
                             std::shared_ptr<const make_call_fn> call, bool future_variant) {
   const auto make = [call](bool future) -> native_fn {
-    return [call, future](std::span<const value_t> args) -> value_t {
-      auto start = [call, future](value_t copied) -> value_t {
+    return [call, future](call_args args) -> value_t {
+      exec_context *const ctx = args.context();
+      auto start = [call, future, ctx](value_t copied) -> value_t {
         const std::vector<value_t> &argv = *std::get<list_ptr>(copied.v);
-        return (*call)(std::span<const value_t>(argv), future);
+        return (*call)(call_args(argv, ctx), future);
       };
       value_t argv = make_list(std::vector<value_t>(args.begin(), args.end()));
       if (std::none_of(args.begin(), args.end(), [](const value_t &a) { return is_compound(a); }))
         return start(std::move(argv));
       // The program may change a list or dict it passed while the kernel runs: the kernel gets
       // copies, made as deep-data work, counted against the process's budget.
-      return run_data_job(make_copy_job(std::move(argv), copy_mode::share, "async arguments"),
+      return run_data_job(args.context(),
+                          make_copy_job(std::move(argv), copy_mode::share, "async arguments"),
                           std::move(start));
     };
   };
@@ -879,13 +914,12 @@ void register_async_natives(const environment_ptr &env, const std::string &name,
 void register_async_fn(environment_ptr env, async_host &host, const std::string &name,
                        async_marshal marshal, async_options opts) {
   auto call = std::make_shared<const make_call_fn>(
-      [&host, name, marshal = std::move(marshal), opts](std::span<const value_t> args,
-                                                        bool future) -> value_t {
+      [&host, name, marshal = std::move(marshal), opts](call_args args, bool future) -> value_t {
         async_kernel kernel = marshal(args);
         if (!kernel)
           throw dsl_error("TypeError", name + ": its marshal step returned no kernel", "async",
                           {{"function", value_t(name)}});
-        return host.call(name, std::move(kernel), opts, future);
+        return host.call(args.context(), name, std::move(kernel), opts, future);
       });
   register_async_natives(env, name, std::move(call), opts.future_variant);
 }
@@ -893,9 +927,8 @@ void register_async_fn(environment_ptr env, async_host &host, const std::string 
 void register_async_fn(environment_ptr env, async_host &host, const std::string &name,
                        async_work_marshal marshal, async_options opts) {
   auto call = std::make_shared<const make_call_fn>(
-      [&host, name, marshal = std::move(marshal), opts](std::span<const value_t> args,
-                                                        bool future) -> value_t {
-        return host.call(name, marshal(args), opts, future);
+      [&host, name, marshal = std::move(marshal), opts](call_args args, bool future) -> value_t {
+        return host.call(args.context(), name, marshal(args), opts, future);
       });
   register_async_natives(env, name, std::move(call), opts.future_variant);
 }

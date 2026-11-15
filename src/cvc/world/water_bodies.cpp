@@ -30,6 +30,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace cvc {
 namespace world {
@@ -351,6 +352,53 @@ std::size_t water_bodies::wet_cells() const {
   for (const water_body &b : bodies)
     m += b.cells;
   return m;
+}
+
+std::size_t lower_waterline_slivers(std::vector<float> &g, int rows, int cols, double level_m,
+                                    double max_rise_m, const std::vector<std::uint8_t> *keep) {
+  if (rows < 1 || cols < 1 || g.size() != std::size_t(rows) * std::size_t(cols) ||
+      !(max_rise_m > 0.0))
+    return 0;
+  if (keep && keep->size() != g.size())
+    keep = nullptr;
+  const float level = float(level_m), top = float(level_m + max_rise_m);
+  // Wet: ground under the level (no ground, NaN, is not wet: nothing is lowered beside it).
+  auto wet = [&](std::size_t i) { return std::isfinite(g[i]) && g[i] < level; };
+  std::size_t total = 0;
+  std::vector<std::pair<std::size_t, float>> lower;
+  for (int pass = 0; pass < 8; ++pass) {
+    lower.clear();
+    for (int r = 0; r < rows; ++r)
+      for (int c = 0; c < cols; ++c) {
+        const std::size_t i = std::size_t(r) * std::size_t(cols) + std::size_t(c);
+        const float h = g[i];
+        if (!std::isfinite(h) || h < level || h >= top || (keep && (*keep)[i]))
+          continue;
+        const bool acrossX = c > 0 && c < cols - 1 && wet(i - 1) && wet(i + 1);
+        const bool acrossY =
+            r > 0 && r < rows - 1 && wet(i - std::size_t(cols)) && wet(i + std::size_t(cols));
+        if (!acrossX && !acrossY)
+          continue;
+        double s = 0.0;
+        int n = 0;
+        if (acrossX) {
+          s += double(g[i - 1]) + double(g[i + 1]);
+          n += 2;
+        }
+        if (acrossY) {
+          s += double(g[i - std::size_t(cols)]) + double(g[i + std::size_t(cols)]);
+          n += 2;
+        }
+        lower.emplace_back(i, float(std::min(s / n, level_m - 1e-3)));
+      }
+    if (lower.empty())
+      break;
+    // A pass reads the ground as it was before it: the order of the samples does not matter.
+    for (const auto &l : lower)
+      g[l.first] = l.second;
+    total += lower.size();
+  }
+  return total;
 }
 
 std::string water_bodies_summary(const water_bodies &wb) {
