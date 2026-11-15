@@ -1154,25 +1154,45 @@ re-composites the shade and the far clouds. `sun_az` / `sun_el` are used only wi
 
 **Water.** `water` draws everything below `level` on a ground (`world:` a `generated_world`, or
 `ground:` any height-field node) as the GPU FFT sea of OCEAN-AND-WEATHER-ROADMAP.md (§11.2, O15):
-three wave cascades for the wind (`wind_speed`, `wind_dir`, `fetch`), each fading out over
-`shore_fade` metres of depth toward the shore. A grid `near` metres each way from the camera
-(`cells` vertices a side) is displaced by the cascades and moves with the camera by whole cells; a
-flat grid over the ground (`far_cells` a side) draws the rest and gives way inside the near one.
-Both shade as a Fresnel sea with shallows tinted by depth and whitecaps where the waves fold, the
-threshold found so they cover Monahan's share of the sea for the wind (`whitecaps` scales it;
-`foam_bias` at 0 or above fixes it), and both stay out of the scene's bounds, so the ground frames
-the view. When the ground's whole rim is under water (a `generated_world` with `edge: shore`, an
-island) the sea goes on `outer` metres past it (6000); otherwise it stops at the ground's edge. A
-`generated_world` under a water node wants `water: 0`, so its own flat water rungs do not draw
-over it. The cascades need float render targets; without them the water is flat blue. Live keys
-under the node's root (`water.` unless `keys:`): `wind_speed`, `wind_dir`, `fetch`, `chop`,
-`wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`, `foam_fray` and `shore_fade`, most on
-`water_controls.ari`. With `body: {}` the water is in the scene's physics world, with or without a
-renderer ([`scene_water.h`](../inc/cvc/ariadne/scene_water.h)). It is one fluid field over the
-water's extent, its surface the same sea computed on the CPU, so a body lighter than water floats
-on the waves the picture shows and a heavier one sinks. The field is rebuilt when the wind, chop or
-wave height change or the ground regenerates, and the scene's world swaps it as it swaps a
-generated world's bodies. Its waves do not yet fade toward the shore as the drawn ones do.
+three wave cascades for the wind (`wind_speed`, `wind_dir`, `fetch`), and a swell
+(`swell_height` m, 0 for none; `swell_period`, `swell_dir`) carried by the shore layer, which
+refracts it over the bottom, shoals it, and breaks it on the beaches that face it. Both follow the
+coast: a shore grid over the ground (still-water depth, distance to the shore, normal). Each cascade
+fades out as the water shoals, over half its peak wavelength and at most `shore_fade` metres of
+depth, and no point moves sideways more than 0.8 of the way to the shore. A grid `near` metres each
+way from the camera (`cells` vertices a side) is displaced by the cascades and the swell, and moves
+with the camera by whole cells. A flat grid over the ground (`far_cells` a side) draws the rest
+and gives way inside the near one; its normal is the long waves' and the swell's, per fragment,
+fading out by ten times `near`. Both shade as a Fresnel sea with shallows tinted by depth and
+whitecaps where the waves fold, the threshold found so they cover Monahan's share of the sea for
+the wind (`whitecaps` scales it; `foam_bias` at 0 or above fixes it), plus the swell's breakers and
+a foam band at the waterline (`shore_foam`), faint where no swell reaches. Both stay out of the
+scene's bounds, so the ground frames the view. When the ground's whole rim is under water (a
+`generated_world` with `edge: shore`, an island) the sea goes on `outer` metres past it (6000);
+otherwise it stops at the ground's edge. A `generated_world` under a water node wants `water: 0`,
+so its own flat water rungs do not draw over it. The cascades need float render targets; without
+them the water is flat blue. Live keys under the node's root (`water.` unless `keys:`):
+`wind_speed`, `wind_dir`, `fetch`, `chop`, `wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`,
+`foam_fray`, `shore_fade`, `swell_height`, `swell_period`, `swell_dir`, `shore_foam`, `wake` and
+`wake_foam`, most on `water_controls.ari`. A change to the swell rebuilds the shore layer once the
+keys have held for ten frames (12 ms for a 401² grid). With `body: {}` the water is in the scene's
+physics world, with or without a renderer ([`scene_water.h`](../inc/cvc/ariadne/scene_water.h)).
+It is one fluid field over the water's extent, its surface the same sea computed on the CPU (the
+cascades fading at the same coast, the same swell), so a body lighter than water floats on the
+waves the picture shows and a heavier one sinks. The field is rebuilt when the wind, chop, wave
+height or swell change or the ground regenerates, and the scene's world swaps it as it swaps a
+generated world's bodies. The bodies make waves: an eWave window of 128 m of 0.5 m cells around the
+camera's target takes each moving body's immersed columns as its source, so a dropped crate makes a
+ring and a bobbing one keeps radiating. Its waves move the near grid and shade both grids, foaming
+where they are sharp or fast (`wake_foam`). Beaches absorb them and steep shores reflect them
+(`wake: 0` turns the window off). They are drawn only: they do not push the bodies back. With a
+swell, the swash runs up the beach on the ground itself. The node adds it to the fragment shader
+of every mesh under its ground node (the `world:` / `ground:` node, found by id at the top of the
+scene, its LOD rungs and regenerated chunks included), as the cloud deck adds its shade to its
+receivers. Each wave's front runs up to the shore layer's runup and drains back, a film of water
+with a lace of foam under it, the sand dark and glossy behind it until it dries. The physics sea
+carries the same swash, so a body on the sand is lifted by the film drawn there. `swash: 0` leaves
+it out of both.
 
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the

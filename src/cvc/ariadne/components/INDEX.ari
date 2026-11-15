@@ -156,7 +156,7 @@ catalog:
   - component: water_controls
     file: water_controls.ari
     unit: water_controls
-    binds: "<prefix>.{keys}.{wind_speed,wind_dir,chop,wave_amp,whitecaps,shore_fade}"   # read every frame by the water realizer
+    binds: "<prefix>.{keys}.{wind_speed,wind_dir,chop,wave_amp,whitecaps,shore_fade,swell_height,swell_period,swell_dir,shore_foam,wake,wake_foam}"   # read every frame by the water realizer
     for: "a `type: water` node"
     args: { keys: water, title: Water, id: water_controls }   # defaults; keys = the node's `keys:` prop
   - component: mesh_tools
