@@ -70,9 +70,10 @@ trained train_once(const std::string &name) {
   return t;
 }
 
-const trained &shared_run() {
-  static const trained t = train_once("shared"); // a test fixture's, built once per test binary
-  return t;
+// A run of this test's own: ctest runs each test in a process of its own, in parallel, so a
+// directory two tests shared would be one test's to delete under the other.
+trained train_here() {
+  return train_once(::testing::UnitTest::GetInstance()->current_test_info()->name());
 }
 
 bool same(double a, double b) { return (std::isnan(a) && std::isnan(b)) || a == b; }
@@ -96,7 +97,7 @@ void expect_same_runs(const run_log &a, int ja, const run_log &b, int jb) {
 } // namespace
 
 TEST(NavScrub, AHistoryNamesItsCheckpointsAndCurves) {
-  const trained &t = shared_run();
+  const trained t = train_here();
   const training_history h = read_training_history(t.history);
   EXPECT_EQ(h.schema, "cvc.nav.coef_train_history/v1");
   EXPECT_EQ(h.runs, 1);
@@ -120,7 +121,7 @@ TEST(NavScrub, AHistoryNamesItsCheckpointsAndCurves) {
 }
 
 TEST(NavScrub, AHistoryOfAnotherTrainerAndSeveralRuns) {
-  const trained &t = shared_run();
+  const trained t = train_here();
   const std::string dir = (fs::path(::testing::TempDir()) / "nav_scrub_other").string();
   fs::create_directories(dir);
   fs::copy_file(t.dir + "/coef.step000005.cvcnav", dir + "/a.cvcnav",
@@ -185,7 +186,7 @@ TEST(NavScrub, TheScenarioAndItsHash) {
 }
 
 TEST(NavScrub, OneBlobDeployedTwiceIsTheSameRun) {
-  const trained &t = shared_run();
+  const trained t = train_here();
   const scrub_scenario s = default_scenario(2, 0, 150);
   policy_library lib;
   const std::string blob = t.dir + "/coef.step000010.cvcnav";
@@ -199,7 +200,7 @@ TEST(NavScrub, OneBlobDeployedTwiceIsTheSameRun) {
 }
 
 TEST(NavScrub, Checkpoint0DeployedIsTheUntrainedArm) {
-  const trained &t = shared_run();
+  const trained t = train_here();
   const scrub_scenario s = default_scenario(2, 0, 150);
   policy_library lib;
   const run_log k0 = deploy_checkpoint(s, t.dir + "/coef.step000000.cvcnav", "step 0", lib);
@@ -261,7 +262,7 @@ TEST(NavScrub, EveryCheckpointIsDeployedOnceAndCached) {
 }
 
 TEST(NavScrub, TheMetricsTheTableAndTheCharts) {
-  const trained &t = shared_run();
+  const trained t = train_here();
   const training_history h = read_training_history(t.history);
   const std::vector<scrub_entry> e = scrub(h, default_scenario(2, 0, 120));
   const scrub_metrics &m = e[0].metrics;
@@ -296,7 +297,7 @@ TEST(NavScrub, TheMetricsTheTableAndTheCharts) {
 }
 
 TEST(NavScrub, TheViewShowsCheckpointKBesideStep0) {
-  const trained &t = shared_run();
+  const trained t = train_here();
   const training_history h = read_training_history(t.history);
   std::vector<scrub_entry> e = scrub(h, default_scenario(2, 0, 120));
   EXPECT_THROW(scrub_view(h, {}), std::invalid_argument);
