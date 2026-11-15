@@ -20,6 +20,14 @@ namespace cvc::state_exec {
 
 evaluator::evaluator(environment_ptr global_env) : global_env_(std::move(global_env)) {}
 
+exec_context &evaluator::context() {
+  if (!ctx_.registry) {
+    own_registry_ = make_cycle_registry();
+    ctx_.registry = own_registry_.get();
+  }
+  return ctx_;
+}
+
 // ---------------------------------------------------------------------------
 // public API
 // ---------------------------------------------------------------------------
@@ -27,8 +35,8 @@ evaluator::evaluator(environment_ptr global_env) : global_env_(std::move(global_
 value_t evaluator::evaluate(const value_t &expr, environment_ptr env,
                             std::optional<double> timeout_sec,
                             std::function<void(const value_t &)> on_complete) {
-  detail::check_not_in_async_kernel("evaluator::evaluate");
   std::lock_guard lk(eval_mu_);
+  detail::check_not_in_async_kernel(context(), "evaluator::evaluate");
   root_expr_ = expr;
   stats_.start();
 
@@ -43,8 +51,9 @@ value_t evaluator::evaluate(const value_t &expr, environment_ptr env,
       std::atomic<bool> done{false};
       std::thread worker([&] {
         // A loop inside one native call (a generator body, a data job) never sees interrupt():
-        // the thread's evaluation deadline cuts it, so join() below does not wait on it.
-        eval_deadline_guard deadline_guard(timeout_sec);
+        // the evaluation deadline, in the context it runs in, cuts it, so join() below does not
+        // wait on it.
+        eval_deadline_guard deadline_guard(ctx_, timeout_sec);
         try {
           bg_result = eval_internal(expr, run_env);
         } catch (...) {
@@ -361,7 +370,7 @@ value_t evaluator::eval_form(const value_t &expr, const environment_ptr &env) {
 
   // native_fn
   if (auto *fn = std::get_if<native_fn>(&func_val->v))
-    return (*fn)(evaled);
+    return (*fn)(call_args(evaled, &ctx_));
 
   // closure
   if (auto *cp = std::get_if<closure_ptr>(&func_val->v))
@@ -503,7 +512,7 @@ value_t evaluator::do_lambda(const std::vector<value_t> &args, const environment
   cls->env_snapshot = env;
   // Bound back into env (a defun, a method, a lambda set there), it is a cycle that only the
   // collector frees, as in the stackless evaluator.
-  track_captured_env(env);
+  track_captured_env(&ctx_, env);
   return value_t{std::move(cls)};
 }
 
@@ -587,7 +596,7 @@ value_t evaluator::do_super(const std::vector<value_t> &args, const environment_
           fn_args.push_back(self_val);
           for (size_t i = 2; i < args.size(); ++i)
             fn_args.push_back(eval_internal(args[i], env));
-          return (*fn)(fn_args);
+          return (*fn)(state_exec::call_args(fn_args, &ctx_));
         }
         if (auto *cp = std::get_if<closure_ptr>(&v.v)) {
           std::vector<value_t> fn_args;
@@ -940,7 +949,7 @@ value_t evaluator::apply_closure(const closure_ptr &cls, const std::vector<value
 value_t evaluator::substitute(const value_t &tmpl,
                               const std::unordered_map<std::string, value_t> &subst) {
   // The stackless evaluator's walk, run whole: no native recursion per template level.
-  return run_to_completion(*make_substitute_job(tmpl, subst));
+  return run_to_completion(&ctx_, *make_substitute_job(tmpl, subst));
 }
 
 } // namespace cvc::state_exec

@@ -60,8 +60,8 @@ class vtkOpenGLQuadHelper;
 //   - the fill pass: water texels write phi_half = phi - (g dt_s / 2) h, ghost texels the
 //     weighted sum of their four corners' phi_half (fetched one by one: float textures are not
 //     filtered in WebGL2), other walls 0, as the real part of a complex field;
-//   - the forward FFT (2 log2 n), the multiply pass (kappa~ / n^2, computed per texel from
-//     uniforms), the inverse FFT (2 log2 n);
+//   - the forward FFT (2 log2 n), the multiply pass (kappa~ / n^2, from a table worked out on
+//     the host), the inverse FFT (2 log2 n);
 //   - the gather pass: each water texel adds to its own value of G~ R phi_half, for each of up to
 //     ewave_max_readers ghosts that read it, that ghost's weight on it times the value at the
 //     ghost (R^T), multiplies by 1 / M and writes h' = h + dt_s M^-1 S phi_half and
@@ -81,9 +81,15 @@ class vtkOpenGLQuadHelper;
 //   textures, and 1 / M as an R32F one. The six reader textures take 96 n^2 bytes: 6 MB at
 //   256^2, 400 MB at 2048^2, 1.6 GB at 4096^2.
 //
-// The coefficients are computed per texel from uniforms, so a new dt costs nothing (sin and cos
-// by the passes' own series, as GLSL lets the built-ins be off by 2^-11: EWave.cpp); the mask is
-// an R32F texture.
+// The step's numbers are worked out on the host in double, as the CPU window works out its own
+// (ewave::prepare, prepare_symmetric and update_real), and the passes read them as float textures:
+// the exact step's 2 x 2 update per mode (RGBA32F), the symmetric step's kappa~ and 1 - F per mode
+// (RG32F) and the real-space factor per cell (R32F). So no pass takes a sin, cos, exp, sqrt or
+// tanh of its own, and the result doesn't depend on how a driver computes them (GLSL lets sin and
+// cos be off by 2^-11: EWave.cpp). A table is worked out again only when what it depends on
+// changes: the step (dt, or the symmetric step's dt_s), the depth or the mask. dt_s is fixed, so
+// the symmetric step costs nothing more after its first; the exact step at a new dt costs that host
+// work and an n^2 RGBA32F and R32F upload. The mask is an R32F texture.
 //
 // Sources go into h when they are added, times the mask, as on the CPU (add_height and
 // add_heights change h at once, and the next step moves them on): addDrop and addHeights are one
@@ -181,6 +187,11 @@ private:
   // mode 0 a Stormer-Verlet substep of dts and its real-space factors, mode 1 damping_k2's
   // filter on h for a substep of dts (h - M^-1 R^T (1 - F) R h).
   void stage(int mode, int st, int a, int b, double dts);
+  // The step's tables for a step of dt (dt_s for the symmetric step), worked out again only when
+  // the step, the depth or the mask has changed (EWave.cpp).
+  void prepareExact(double dt);
+  void prepareSymmetric(double dts);
+  void prepareFactors(double dt);
 
   cvc::ocean::ewave_params m_p;
   int m_log2n = 0;
@@ -206,6 +217,11 @@ private:
   vtkSmartPointer<vtkTextureObject> m_ghostW;                   // RGBA32F
   vtkSmartPointer<vtkTextureObject> m_invMass;                  // R32F
   vtkSmartPointer<vtkTextureObject> m_readers[kReaderTextures]; // RGBA32F
+  vtkSmartPointer<vtkTextureObject> m_coef;   // RGBA32F, the exact step's update for m_coefDt
+  vtkSmartPointer<vtkTextureObject> m_mul;    // RG32F, the symmetric step's multipliers, m_mulDts
+  vtkSmartPointer<vtkTextureObject> m_factor; // R32F, the real-space factors for m_factorDt
+  double m_coefDt = 0.0, m_mulDts = 0.0, m_factorDt = 0.0;          // the step each table is for
+  bool m_coefStale = true, m_mulStale = true, m_factorStale = true; // to work out again
   vtkSmartPointer<vtkOpenGLFramebufferObject> m_fbo;
 
   std::unique_ptr<vtkOpenGLQuadHelper> m_update;

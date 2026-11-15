@@ -174,6 +174,39 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
     arigl_terminal_stream_view arigl_window_snapshot arigl_check arigl_docset arigl_url_document
     PROPERTIES RESOURCE_LOCK cvcgl_gl_context
                SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
+
+  # arigl joins a relay from its document's relay: block, as ari does (attach_host_relay,
+  # ARIADNE.md §9.8.3): an offscreen snapshot of src/arisrv/tests/relay_arigl.ari, against
+  # arisrvx running tests/call_service.py beside tests/call_server.ari, mirrors the published svc
+  # and calls echo, over gRPC and the WebSocket. src/arisrv/tests/relay_pair.py runs the pair.
+  if(TARGET arisrvx AND Python3_EXECUTABLE)
+    set(_srv_tests "${CMAKE_CURRENT_SOURCE_DIR}/../arisrv/tests")
+    set(_relay --relay-arg=--python "--relay-arg=${_srv_tests}/call_service.py"
+               --relay-arg=--doc "--relay-arg=${_srv_tests}/call_server.ari"
+               --relay-arg=--room --relay-arg=ctest --relay-arg=--state-listen
+               --relay-arg=127.0.0.1:0 --relay-arg=--media-listen --relay-arg=127.0.0.1:0
+               --relay-arg=--ws-listen --relay-arg=127.0.0.1:0)
+    foreach(_a IN LISTS CVC_ARIADNE_PYTHON_TEST_PATH)
+      list(APPEND _relay "--relay-arg=${_a}")
+    endforeach()
+    set(_relay_tests)
+    foreach(_scheme grpc ws)
+      add_test(NAME arisrvx_room_call_arigl_${_scheme}
+               COMMAND "${Python3_EXECUTABLE}" "${_srv_tests}/relay_pair.py"
+                       --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:arigl>
+                       --client-command snapshot --scheme ${_scheme} ${_relay} --client-only
+                       "--client-expect=relay_arigl: echo answered arigl_[a-z0-9]+"
+                       --client-arg=--relay-room --client-arg=ctest --client-arg=--frames
+                       --client-arg=900 --client-arg=--png
+                       "--client-arg=${CMAKE_CURRENT_BINARY_DIR}/relay_arigl_${_scheme}.png"
+                       "--client-arg=${_srv_tests}/relay_arigl.ari")
+      list(APPEND _relay_tests arisrvx_room_call_arigl_${_scheme})
+    endforeach()
+    cvc_ariadne_python_test_properties(${_relay_tests})
+    set_tests_properties(${_relay_tests} PROPERTIES
+                         RESOURCE_LOCK cvcgl_gl_context TIMEOUT 120
+                         SKIP_REGULAR_EXPRESSION "No module named '(fastapi|uvicorn|starlette)';built without yaml-cpp;needs pycvc beside arisrvx;no pycvc to convert")
+  endif()
 endif()
 
 if(EMSCRIPTEN)
@@ -399,6 +432,39 @@ if(EMSCRIPTEN)
                             "ariglx.js")
       endif()
       file(GENERATE OUTPUT "$<TARGET_FILE_DIR:arigl>/ariglx.html" CONTENT "${_ariglx_html}")
+
+      # ... with WebAssembly guests, as the native ariglx has them: a document's wasm: block runs
+      # on the page's own WebAssembly (src/ariadne_wasm/browser_runtime.cpp), its guest transformed
+      # ahead (cvc_ariadne_wasm_transform). The page fetches the guest with the document
+      # (doc_fetch.cpp follows a wasm: block's module). The shell links Asyncify, so a guest the
+      # page won't compile on its own thread (over Chrome's 8 MB) is compiled asynchronously.
+      include("${CMAKE_CURRENT_LIST_DIR}/../ariadne_wasm/ariadne_wasm.cmake")
+      cvc_ariadne_wasm_host(ariglx ASYNC_LOAD)
+      # The browser smoke's guest documents (web/test/wasm) and the test guest they run, transformed:
+      # the ariglx_wasm_guests target (built by name, not by the package) writes them to
+      # ariglx-wasm-guests beside ariglx.js, the directory arigl_web_smoke.mjs --wasmdocs serves.
+      cvc_find_wasm_opt()
+      if(CVC_WASM_OPT)
+        set(_ariglx_guests "${_ariglx_dir}/ariglx-wasm-guests")
+        cvc_ariadne_wasm_transform("${_ariglx_guests}/guest.wasm"
+                                   "${CVC_ARIADNE_WASM_TESTS}/guest.wat")
+        set(_ariglx_guest_files "${_ariglx_guests}/guest.wasm")
+        file(GLOB _ariglx_guest_docs CONFIGURE_DEPENDS
+             "${CMAKE_CURRENT_SOURCE_DIR}/web/test/wasm/*.ari")
+        foreach(_d ${_ariglx_guest_docs})
+          get_filename_component(_n "${_d}" NAME)
+          add_custom_command(OUTPUT "${_ariglx_guests}/${_n}"
+                             COMMAND "${CMAKE_COMMAND}" -E make_directory "${_ariglx_guests}"
+                             COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_d}"
+                                     "${_ariglx_guests}/${_n}"
+                             DEPENDS "${_d}" VERBATIM)
+          list(APPEND _ariglx_guest_files "${_ariglx_guests}/${_n}")
+        endforeach()
+        add_custom_target(ariglx_wasm_guests DEPENDS ${_ariglx_guest_files})
+      else()
+        message(STATUS "ariglx: no wasm-opt (CVC_WASM_OPT), so no ariglx_wasm_guests for the "
+                       "browser smoke")
+      endif()
     endif()
   endif()
 endif()

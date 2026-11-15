@@ -33,16 +33,21 @@
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/core/input_trace.h>
+#include <cvc/core/param_cli.h>
 #include <cvc/core/types.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
+#include <cvc/geometry/skeleton.h>
+#include <cvc/geometry/skeleton_params.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/sim_world_trace.h>
 #include <cvc/ph/compose.h>
 #include <cvc/ph/se2_train.h>
+#include <cvc/physics/mujoco_robot.h>
 #include <cvc/physics/plant_log_scene.h>
 #include <cvc/state/distributed_state_session.h>
 #include <cvc/state/state.h>
@@ -515,6 +520,126 @@ static int cmd_hexahedralize(cvc::app &app, int argc, char **argv) {
   cvc::write_geometry(app, result, vm["output"].as<std::string>());
   std::cout << "Wrote hexahedral mesh (" << result.num_points() << " verts) to "
             << vm["output"].as<std::string>() << "\n";
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// cvc skeleton: cvc::skeletonize (cvc/geometry/skeleton.h), the VolumeRover Skeletonization port
+// ---------------------------------------------------------------------------
+
+// The legacy Skeletonization tool's flags (its main.cpp), rewritten to this command's: -r
+// (--robust), -bbr r (--big-ball-ratio r^2), -thif / -thff degrees (--theta-if / --theta-ff in
+// radians), -plc n (--sheet-count), -medth (--medial-theta), -medr (--medial-ratio). -mr and -hc
+// took a value the legacy code never used; they are accepted and ignored.
+static std::vector<std::string> skeleton_legacy_flags(int argc, char **argv,
+                                                      std::vector<std::string> &notes) {
+  std::vector<std::string> out;
+  const double deg = 3.14159265358979323846 / 180.0;
+  auto value = [&](int &i, const std::string &flag) -> std::string {
+    if (i + 1 >= argc)
+      throw std::runtime_error("cvc skeleton: " + flag + " needs a value");
+    return argv[++i];
+  };
+  // argv[0] is the command, as command_line_parser(argc, argv) skips it.
+  for (int i = 1; i < argc; ++i) {
+    const std::string a = argv[i];
+    if (a == "-r") {
+      out.push_back("--robust");
+    } else if (a == "-bbr") {
+      const double r = std::stod(value(i, a));
+      out.push_back("--big-ball-ratio=" + boost::lexical_cast<std::string>(r * r));
+    } else if (a == "-thif" || a == "-thff") {
+      const double d = std::stod(value(i, a));
+      out.push_back(std::string(a == "-thif" ? "--theta-if=" : "--theta-ff=") +
+                    boost::lexical_cast<std::string>(d * deg));
+    } else if (a == "-plc") {
+      out.push_back("--sheet-count=" + value(i, a));
+    } else if (a == "-medth") {
+      out.push_back("--medial-theta=" + value(i, a));
+    } else if (a == "-medr") {
+      out.push_back("--medial-ratio=" + value(i, a));
+    } else if (a == "-mr" || a == "-hc") {
+      value(i, a);
+      notes.push_back(a + " is accepted and ignored, as the legacy tool ignored it");
+    } else {
+      out.push_back(a);
+    }
+  }
+  return out;
+}
+
+static int cmd_skeleton(cvc::app &app, int argc, char **argv) {
+  po::options_description desc(
+      "cvc skeleton - the skeleton of a point cloud or a mesh's vertices (the VolumeRover "
+      "Skeletonization port)\n\n"
+      "Writes the strands (lines: the polylines and the stars of small planar clusters) to the "
+      "output, and the sheets (triangles) beside it as <stem>_sheets<ext>, unless --sheets says "
+      "where. .rawc keeps the colours. The legacy flags -r -bbr -thif -thff -plc -medth -medr "
+      "(and the ignored -mr -hc) are accepted.\n\n"
+      "Example:\n"
+      "  cvc skeleton points.off -o skel.rawc --robust\n");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input geometry (only its points are read)")(
+      "output,o", po::value<std::string>()->required(), "output geometry for the strands")(
+      "sheets", po::value<std::string>(), "output geometry for the sheets")(
+      "helix", po::value<std::string>(),
+      "output geometry for the helix strips")("seconds", po::value<double>()->default_value(0.0),
+                                              "report progress every this many seconds (0: never)");
+  cvc::add_param_options<cvc::skeleton_params>(desc);
+
+  std::vector<std::string> notes;
+  const std::vector<std::string> args = skeleton_legacy_flags(argc, argv, notes);
+  po::positional_options_description pos;
+  pos.add("input", 1).add("output", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(args).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+  for (const std::string &n : notes)
+    std::cerr << "cvc skeleton: " << n << "\n";
+  const cvc::param_result<cvc::skeleton_params> pr =
+      cvc::params_from_options<cvc::skeleton_params>(vm);
+  if (!pr.ok())
+    throw std::runtime_error("cvc skeleton: " + pr.message());
+
+  const std::string input = vm["input"].as<std::string>();
+  const std::string output = vm["output"].as<std::string>();
+  cvc::geometry in(app, input);
+  if (in.num_points() == 0)
+    throw std::runtime_error("cvc skeleton: " + input + " has no points");
+
+  // The stepper, so a long run can report its progress.
+  cvc::skeleton_stepper stepper(in, pr.value);
+  const double every = vm["seconds"].as<double>();
+  auto last = std::chrono::steady_clock::now();
+  while (!stepper.step(4096)) {
+    if (every > 0 &&
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - last).count() >= every) {
+      std::cerr << "cvc skeleton: " << stepper.status() << "\n";
+      last = std::chrono::steady_clock::now();
+    }
+  }
+  const cvc::skeleton s = stepper.take();
+
+  std::string sheets = vm.count("sheets") ? vm["sheets"].as<std::string>() : std::string();
+  if (sheets.empty()) {
+    const std::size_t dot = output.find_last_of('.');
+    const std::size_t sep = output.find_last_of("/\\");
+    const bool has_ext = dot != std::string::npos && (sep == std::string::npos || dot > sep);
+    sheets = has_ext ? output.substr(0, dot) + "_sheets" + output.substr(dot) : output + "_sheets";
+  }
+  cvc::write_geometry(app, s.strands, output);
+  cvc::write_geometry(app, s.sheets, sheets);
+  if (vm.count("helix"))
+    cvc::write_geometry(app, s.helix, vm["helix"].as<std::string>());
+  for (const std::string &w : s.warnings)
+    std::cerr << "cvc skeleton: warning: " << w << "\n";
+  std::cout << "Wrote " << s.polylines << " strands (" << s.strands.num_lines() << " lines) to "
+            << output << " and " << s.sheet_clusters << " sheets (" << s.sheets.num_tris()
+            << " triangles, of " << s.clusters << " planar clusters) to " << sheets << "\n";
   return 0;
 }
 
@@ -2191,6 +2316,65 @@ static int cmd_trace(cvc::app &app, int argc, char **argv) {
   return r.matched ? 0 : 1;
 }
 
+// ── mujoco: a MuJoCo robot (cvc::physics::mujoco_robot) on libcvc terrain ──
+
+static int cmd_mujoco(cvc::app &, int argc, char **argv) {
+  po::options_description desc(
+      "cvc mujoco - a MuJoCo robot on a libcvc height field (docs/MUJOCO.md); needs a libcvc\n"
+      "built with CVC_WITH_MUJOCO\n\n"
+      "Operations:\n"
+      "  info <model>     the model: MuJoCo's version, sizes, mass, step, actuators, bodies\n"
+      "  stand <model>    a standing trial on a plane, settled under the servos, then pushed on\n"
+      "                   its base: prints the result and the energy books as JSON\n\n"
+      "  cvc mujoco info  <prefix>/share/mujoco-menagerie/unitree_go2/scene.xml\n"
+      "  cvc mujoco stand <...>/unitree_go2/scene.xml --slope 10 --push 0,60,0\n");
+  std::string op, model, push;
+  cvc::physics::mujoco_trial_options t;
+  // clang-format off
+  desc.add_options()
+    ("help,h", "show help")
+    ("op", po::value<std::string>(&op)->required(), "info or stand")
+    ("model", po::value<std::string>(&model)->required(), "the MJCF file")
+    ("slope", po::value<double>(&t.slope_deg)->default_value(0.0), "stand: the plane's slope (degrees, rising along +x)")
+    ("yaw", po::value<double>(&t.yaw)->default_value(0.0), "stand: the robot's heading (rad; 0 faces uphill)")
+    ("push", po::value<std::string>(&push)->default_value("0,0,0"), "stand: FX,FY,FZ on the base (N, world axes)")
+    ("push-at", po::value<double>(&t.settle)->default_value(1.0), "stand: when the push starts (s)")
+    ("push-for", po::value<double>(&t.push_duration)->default_value(0.1), "stand: how long it lasts (s)")
+    ("duration", po::value<double>(&t.duration)->default_value(4.0), "stand: the trial's length (s)")
+    ("kp", po::value<double>(&t.kp)->default_value(60.0), "stand: the servos' stiffness (N m / rad)")
+    ("kd", po::value<double>(&t.kd)->default_value(2.0), "stand: their damping (N m s / rad)")
+    ("timestep", po::value<double>(&t.timestep)->default_value(0.0), "stand: the step (s; 0: the model's)");
+  // clang-format on
+  po::positional_options_description pos;
+  pos.add("op", 1).add("model", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+  if (!cvc::physics::mujoco_robot::available())
+    throw std::runtime_error("this libcvc was built without MuJoCo (CVC_WITH_MUJOCO)");
+  if (op == "info") {
+    cvc::physics::mujoco_robot_options o;
+    o.model = model;
+    o.keyframe.clear(); // the model as written
+    std::cout << cvc::physics::describe(cvc::physics::mujoco_robot(o));
+    return 0;
+  }
+  if (op != "stand")
+    throw std::runtime_error("Unknown mujoco operation: " + op + " (use info or stand)");
+  double f[3];
+  char tail = 0;
+  if (std::sscanf(push.c_str(), "%lf,%lf,%lf%c", &f[0], &f[1], &f[2], &tail) != 3)
+    throw std::invalid_argument("--push is FX,FY,FZ, not " + push);
+  t.model = model;
+  t.push = {f[0], f[1], f[2]};
+  std::cout << cvc::physics::to_json(cvc::physics::run_mujoco_trial(t));
+  return 0;
+}
+
 // ── ph: composed port-Hamiltonian systems (cvc::ph composition) ──
 
 static std::vector<double> ph_numbers(const std::string &s, const char *what) {
@@ -2598,6 +2782,7 @@ static const command_entry commands[] = {
 #ifdef CVC_ENABLE_MESHER
   {"iso",            "Geometry",        "extract isosurface from volume",                 cmd_iso},
   {"tetrahedralize", "Geometry",        "extract tetrahedral mesh from volume",           cmd_tetrahedralize},
+  {"skeleton",       "Geometry",        "skeleton of a point cloud (strands and sheets)", cmd_skeleton},
   {"hexahedralize",  "Geometry",        "extract hexahedral mesh from volume",            cmd_hexahedralize},
   {"tetrahedralize2","Geometry",        "extract dual-tet (tet2) mesh from volume",       cmd_tetrahedralize2},
   {"layer-mesh",     "Geometry",        "mesh layer between two isosurfaces",             cmd_layer_mesh},
@@ -2653,6 +2838,9 @@ static const command_entry commands[] = {
   {"plant-log",      "Vehicle Physics", "log nav driving Jolt vehicles for plant fitting", cmd_plant_log},
   {"ph-train",       "Vehicle Physics", "fit the learned port-Hamiltonian vehicle to plant logs", cmd_ph_train},
   {"ph",             "Vehicle Physics", "composed port-Hamiltonian systems: info, simulate, check", cmd_ph},
+
+  // ── Robots ──
+  {"mujoco",         "Robots",          "a MuJoCo robot on libcvc terrain: info, or a stand and push trial", cmd_mujoco},
 
   // ── Replay ──
   {"trace",          "Replay",          "an input trace: info, or verify by replaying it", cmd_trace},

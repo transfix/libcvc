@@ -42,6 +42,7 @@ namespace state_exec {
 // Runtime::document_scope() return type; full definition in <cvc/state/state_exec/intrinsics.h>.
 // `class` (not struct) to match the real declaration — a tag mismatch is an LNK2019 on MSVC.
 class document_scope;
+class call_args;           // types.h: a native call's arguments and context
 struct environment;        // types.h
 struct intrinsics_context; // intrinsics.h
 struct value_tag;          // types.h: value_t
@@ -255,6 +256,13 @@ public:
   // cache (§2.1: nothing it read was written since) is not counted, so a frame that wrote nothing
   // adds none.
   std::uint64_t reactive_eval_count() const;
+  // A count from the read lane, as a widget's `repeat:` is counted (§3): `expr`'s value as an
+  // integer (a number string parsed, a double truncated) against the document's prefix, clamped
+  // to 0..4096. A broken expression is 0 and warns once (take_reactive_warnings); an expression
+  // the frame's budget skipped, or one that fails after it has counted, keeps its last count. A
+  // scene node's `repeat:` expression is counted with it (AppRuntime hands it to its SceneAdapter).
+  // Call it on the thread that renders, between frames.
+  int eval_count(const std::string &expr);
 
   // Run every queued action event's handler, then clear the queue. Call once per
   // frame in the host loop, BEFORE your sim tick and OUTSIDE render().
@@ -308,13 +316,14 @@ public:
 
   // A function the read lane's expressions may call (visible_when, a computed bind:, §2.1) beside
   // its allowlist: a scripting engine's pure export (ScriptLane::export_pure). `fn` gets the
-  // call's arguments and the read lane's environment, whose state readers note what the
+  // call's arguments with the eval's context (call_args: a function taking a span of arguments
+  // gets those alone) and the read lane's environment, whose state readers note what the
   // expression reads, and runs inline in the expression's eval, under its step and time caps. It
   // must be pure: an expression's result is kept, and not run again, until a path it read through
   // those readers is written. A later registration of the name replaces the earlier one and drops
   // the kept results.
-  using ReadFunction = std::function<cvc::state_exec::value_tag(
-      std::span<const cvc::state_exec::value_tag> args, cvc::state_exec::environment &env)>;
+  using ReadFunction = std::function<cvc::state_exec::value_tag(cvc::state_exec::call_args args,
+                                                                cvc::state_exec::environment &env)>;
   void register_read_function(const std::string &name, ReadFunction fn);
 
   // This document's per-resource scope (the se::document_scope installed on every action/resident

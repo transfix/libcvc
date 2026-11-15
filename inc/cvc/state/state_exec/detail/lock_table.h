@@ -37,6 +37,7 @@
 namespace cvc::state_exec {
 
 struct process;
+class exec_context;
 
 namespace detail {
 
@@ -202,7 +203,8 @@ struct lock_test_hooks {
   void (*after_grant)(int pid) = nullptr; // a grant is recorded: on the fast path once its lock
                                           // frame holds it (5.1), after a wait when it is
                                           // collected into the mirror (5.9)
-  void (*in_step_lock_enter)(int pid) = nullptr; // inside the lock_enter step, before start_body
+  // Inside the lock_enter step (in the step's context), before start_body.
+  void (*in_step_lock_enter)(int pid, exec_context &ctx) = nullptr;
   void (*before_terminate_end)(process &) = nullptr; // terminate_process, before the end hook
   std::size_t home_cache_capacity = 0;               // 0: the default (1024); read once per home
   void (*cross_home_note)(const lock_note &) = nullptr; // deliver, for each note it hands to
