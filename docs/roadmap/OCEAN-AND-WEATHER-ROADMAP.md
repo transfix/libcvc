@@ -1,6 +1,6 @@
 # Physics-Aware Water, Wind and Weather — Roadmap
 
-**Status:** revision 1 (2026-11-09), being built. On master: O1–O4, O6 and O7 (the water bodies, the CPU spectrum and h0, the shore damping and shore layer, physics fields with a free surface, and debris riding the sea). In review: O8–O11, O2b and O5's whitecap cover (the wake solver, bodies making waves, forces at a point, hulls and a drivable boat, the sea's height for its wind, and whitecaps covering Monahan's share, §8 E0b). Not started: the rest of O5, and O12 on (shading and persistent foam, the boat plant, wind and sea state, weather, the Ariadne node and arisrv). §12 has the order. It follows `OCEAN-AND-VOLUMETRIC-TERRAIN-NOTES.md` (how the FFT ocean was ported), `WATER-RENDERING-ROADMAP.md` (inland water, W1–W10), `WORLD-GEOMETRY-ROADMAP.md` (G6 fields), `GENERATED-WORLD-ROADMAP.md`, `ARIADNE_WORLDS.md` and `WORLD-CLOCK-SYNC-ROADMAP.md`. Where this document and one of those disagree about what is built, the code wins. Where they disagree about a plan, raise it as a decision (§15).
+**Status:** revision 1 (2026-11-09), being built. On master: O1–O4, O2b, O5's whitecap cover, O6 and O7 (the water bodies, the CPU spectrum and h0, the sea's height for its wind, whitecaps covering Monahan's share (§8 E0b), the shore damping and shore layer, physics fields with a free surface, and debris riding the sea). In review: O8–O11 and O15's drawing (the wake solver, bodies making waves, forces at a point, hulls and a drivable boat, and the Ariadne `water` node in terrain_lab.ari, §11.2). Not started: the rest of O5, O15's floating bodies, and O12 on (shading and persistent foam, the boat plant, wind and sea state, weather and arisrv). §12 has the order. It follows `OCEAN-AND-VOLUMETRIC-TERRAIN-NOTES.md` (how the FFT ocean was ported), `WATER-RENDERING-ROADMAP.md` (inland water, W1–W10), `WORLD-GEOMETRY-ROADMAP.md` (G6 fields), `GENERATED-WORLD-ROADMAP.md`, `ARIADNE_WORLDS.md` and `WORLD-CLOCK-SYNC-ROADMAP.md`. Where this document and one of those disagree about what is built, the code wins. Where they disagree about a plan, raise it as a decision (§15).
 
 **Goal.** Water, wind and weather become parts of the world model. The terrain generator decides where the sea, lakes, ponds and streams are. Waves react to every shore. Bodies float on, and push through, the same waves that are drawn. Boats leave wakes. Wind and storms change the water, the sky, the ground and the physics together. The same scene runs **locally** (arigl, arigl-web) and **hosted** (arisrv), and every client draws the same water.
 
@@ -159,6 +159,12 @@ W0 is the seam between that roadmap's hydrology and this one's dynamics. Nothing
 It is rebuilt on regeneration. It is CPU-sampleable for physics and uploaded as an RGBA32F texture beside the seabed `HeightFieldTexture`. The phase P depends on the swell's period, so it is built with the shore layer (O4), not with the grid.
 
 **As built (O1).** `cvc/world/water_bodies.h`: `build_water_bodies` from ground samples, and `generated_world::water` built in a `world_builder` stage (`shore`) from the terrain mesh's samples, roads graded in, at most 1025 a side. Native cost: 4 ms on the 1.2 km world, 70–105 ms on the 5 km and 10 km worlds (a 1001² grid); not yet measured in wasm. terrain_lab's debug view is the world panel's Colour by → Water bodies, and the panel lists the bodies (`world.stats.water`).
+
+**Waterline slivers (2026-11-15).** A dry ridge one terrain sample wide and just over the level drew as a ruler-straight hairline out of the water.
+- The case: on terrain_lab's 5 m mesh, two samples at (565, 555) and (565, 560), 0.03 and 0.01 m over the level with water 0.9–1.6 m deep round them, drew a 5 m line across the north-east bay.
+- `lower_waterline_slivers` (`water_bodies.h`) lowers every dry sample less than `generated_world_params::waterline_sliver_m` (0.5 m) over the level that has water on both sides along x or y. It goes to the mean of those wet neighbours, in passes until none is left. A road's bed is kept.
+- `world_builder` runs it at the end of `grade`, once the mesh has its final heights: a road's grade re-samples the base relief near it, which brought slivers back when the pass ran earlier. So the drawn ground, physics, nav, the water bodies and the water node's bed all read the cleaned mesh.
+- On terrain_lab's world it lowers 141 samples (`generated_world::waterline_slivers`), and no thin sample within 0.5 m of the level is left (`WorldGenerated.NoWaterlineSliversOnTheTerrainMesh`).
 
 **W0.3 Wave content per body:**
 
@@ -1204,6 +1210,16 @@ The pattern follows the existing nodes [C `scene_realize.h:275-282`; `extensions
 - **Keys and panel:** `water.*`, with a `water_controls.ari` panel and an `INDEX.ari` entry.
 - **It supersedes `wave_sea`** (the depth-volume sea, re-filled from `cvc::lsys::sea_field` [C `lsystem_nodes.cpp:338-386`]), which stays until the scenes that use it move over.
 
+**As built (O15, the drawing; `src/cvcGL/ariadne/water_node.cpp`).** OceanFFT, EWave and WakeSource moved into the cvcGL library first. Then:
+- **Meshes, not the world's rungs.** The world's `<id>_water` rungs are flat chunks of 5 m cells and coarser, and the short cascade's waves are shorter than that. So the node draws two meshes of its own, and terrain_lab's world sets `water: 0`:
+  - near: a grid ±`near` (192 m) around the camera, a vertex every 2 m, displaced by the cascades and faded to flat at its edge. It moves with the camera by whole cells.
+  - far: a flat grid over the ground (160 cells a side) with the same shading, discarded inside the near square.
+  - Both discard dry fragments against the bed (a HeightFieldTexture of the ground, sampled per fragment, so the far grid's coarse cells still give a sharp shoreline), and both stay out of the scene's bounds.
+- **Shading and foam.** Shading is lsystem_coast's Fresnel sea without the shore layer, wake or boat. The whitecaps' threshold comes from `foam_field` for Monahan's share (§8 E0b), on the near grid's 2 m vertices. It is found again after the wind, chop, ramp, fray or `water.whitecaps` have held for 10 frames.
+- **The world's edge.** When the ground's whole rim is under water (a `generated_world` with `edge: shore`, an island), the far grid runs `outer` (6 km, as `world::outer_sea`) past it, the bed clamped to the rim's depth. Otherwise both grids clip to the ground's rectangle (a wall, or the world falling away). It is checked again after each regenerate, so the Edge picker switches it live. The outer sea widens the camera's clipping range, as `world::outer_sea` does: about 0.1 % of the farthest corner for the near plane.
+- **A GL lesson.** `disableCoordinateShiftScale` must come before a mesh's first draw. Set after it, the far grid kept its shifted buffer, and its fragments missed both the bed and the near-square cut.
+- **Not yet:** floating bodies (the physics field and the headless glue, §11.2 Headless); the shore layer (swell, breaking, swash); the wake window; normal detail on the far grid (it is flat-shaded past the near grid).
+
 **`weather`.**
 - It holds the weather model (F2) and publishes `wind.*` (E5) and `weather.*` (storm cells, rain rate, lightning).
 - `cloud_sky` and `water` read those keys. `cloud_sky` also gets its forcing from the storm cells (F2), its live keys (F1) and its sun from `lighting.*`.
@@ -1280,7 +1296,7 @@ Each piece below is one PR with its own tests. The work starts in lsystem_coast 
 | O12 | `dyn_boat_plant` + plant_host | D4 | O11 | cvc::physics | nav drives the boat |
 | O13 | fetch/lee map, gust field, sea lag, currents (E2–E4, E6, §10.3–10.4) | E | O1, O2 | library + demo | the lee goes calm; no pop on a wind change |
 | O14 | one scene wind (E5) for trees, `cloud_sky`, water, physics flow | E | O13 | Ariadne + physics | one key turns everything |
-| O15 | canonize: the Ariadne water node in terrain_lab.ari (§11) | — | O1–O7 at least | Ariadne | terrain_lab's sea, lakes and ponds animate and float bodies |
+| O15 | canonize: the Ariadne water node in terrain_lab.ari (§11); drawing as built (§11.2), floating bodies to come | — | O1–O7 at least | Ariadne | terrain_lab's sea, lakes and ponds animate and float bodies |
 | O16 | arisrv: replicate inputs, rebuild on clients (§11) | — | O15 | Ariadne / arisrv | two clients draw the same waves and wakes |
 | O17 | live sky keys, the sun from the light rig, the water as a shade receiver (F1, A4) | F | — | Ariadne | **quick win, can land any time** |
 | O18 | the weather model, storm cells, dark bases (F2, §10.7) | F | O17 | cvc::world + Ariadne | a storm builds, darkens and clears |
