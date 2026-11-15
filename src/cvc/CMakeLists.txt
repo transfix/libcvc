@@ -179,6 +179,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/volume_jobs.h
   ../../inc/cvc/volume/contour_spectrum.h
   ../../inc/cvc/volume/resize_stepper.h
+  ../../inc/cvc/volume/volume_slice.h
   ../../inc/cvc/tf/model.h
   ../../inc/cvc/tf/vinay.h
   ../../inc/cvc/tf/overlays.h
@@ -450,6 +451,7 @@ set(SOURCE_FILES
   volume/contour_tree.cpp
   volume/contour_spectrum.cpp
   volume/resize_stepper.cpp
+  volume/volume_slice.cpp
   volume/mesh_contour_tree.cpp
   tf/model.cpp
   tf/vinay.cpp

@@ -1422,6 +1422,7 @@ struct pycvc_py_conversion {
 %include "pycvc_skeleton.i"
 %include "pycvc_contours.i"
 %include "pycvc_point_classes.i"
+%include "pycvc_volume_slice.i"
 
 // ── UTF-8 display-width utilities (cvc::text, roadmap §17) ───────────────
 // text_display_width / _pad_to_width / _truncate_to_width / … so a pycvc UI does
