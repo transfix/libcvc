@@ -77,6 +77,12 @@ list(APPEND CVCGL_SOURCES ${CVCGL_ARIADNE_SOURCES})
 # the sources compile to graceful no-ops (open_camera returns an empty result).
 file(GLOB CVCGL_CAPTURE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/capture/*.cpp")
 list(APPEND CVCGL_SOURCES ${CVCGL_CAPTURE_SOURCES})
+# The GPU ocean (OCEAN-AND-WEATHER-ROADMAP.md): OceanFFT's cascades and its butterfly IFFT, the
+# eWave wake window (EWave) and the bodies' sources into it (WakeSource), ported from ABYSSAL
+# (THIRD_PARTY_NOTICES.md). In the library so an Ariadne node can draw the sea (O15); their
+# headers stay in ocean/, private to cvcGL and its in-tree consumers.
+file(GLOB CVCGL_OCEAN_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/ocean/*.cpp")
+list(APPEND CVCGL_SOURCES ${CVCGL_OCEAN_SOURCES})
 # Phase-3 peripheral playback (the SDL3 audio-output sink) moved to cvcMedia, the GL-free media
 # library (src/cvcMedia), so a terminal program plays sound without GL; cvcGL links it (below) and
 # keeps the cvc::gl::playback names as aliases (cvc/gl/playback/*.h).
@@ -96,6 +102,7 @@ target_include_directories(cvcGL PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(cvcGL PUBLIC cvc::cvc ${VTK_LIBRARIES})
+target_include_directories(cvcGL PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/ocean")
 
 # libjpeg-turbo: conference video compression (jpeg_codec.cpp / jpeg_encode_source.cpp / the mjpeg
 # stream_view decode path). Optional at build time — where the prefix has no turbojpeg the codec
@@ -492,8 +499,8 @@ install(FILES
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/wasm/webgl_state_shadow.js"
         DESTINATION ${CVCGL_WASM_DATADIR})
 # libcvcGL carries code derived from VTK 9.5.0 (BSD-3-Clause, in
-# LowMemoryPolyDataMapper.cpp), whose notice a binary redistribution must
-# reproduce in its documentation: the standalone cvcGL package ships it too.
+# LowMemoryPolyDataMapper.cpp) and from ABYSSAL (MIT, the ocean/ port), whose notices a binary
+# redistribution must reproduce in its documentation: the standalone cvcGL package ships them too.
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../../THIRD_PARTY_NOTICES.md"
   DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
@@ -533,10 +540,10 @@ add_test(NAME cvcgl_metadata_mirror COMMAND cvcgl_metadata_mirror)
 # Spectral GPU FFT ocean (the ABYSSAL port used by lsystem_coast). Checks the
 # invariants a broken butterfly IFFT / bit-reversal / conjugate-symmetry would
 # violate: zero-mean height, unit-mean Jacobian, determinism, time evolution and
-# live wind-knob response. Compiles OceanFFT.cpp (ocean/, outside the library: it
-# has no cvc dependency and only lsystem_coast uses it) and runs against an offscreen
-# GL context. SKIPs (rc 0) if the context has no float render targets.
-add_executable(cvcgl_ocean_fft test/cvcgl_ocean_fft.cpp ocean/OceanFFT.cpp ocean/OceanButterfly.cpp)
+# live wind-knob response. OceanFFT is in the library (ocean/, its headers private, so the
+# ocean tests add the directory) and runs against an offscreen GL context. SKIPs (rc 0) if the
+# context has no float render targets.
+add_executable(cvcgl_ocean_fft test/cvcgl_ocean_fft.cpp)
 target_include_directories(cvcgl_ocean_fft PRIVATE ocean)
 target_link_libraries(cvcgl_ocean_fft PRIVATE cvcGL)
 add_test(NAME cvcgl_ocean_fft COMMAND cvcgl_ocean_fft)
@@ -545,8 +552,7 @@ add_test(NAME cvcgl_ocean_fft COMMAND cvcgl_ocean_fft)
 # cascades on the GPU (OceanFFT, read back) against the sea physics feels (cvc::ocean::sea_surface,
 # the CPU) at several band sizes; prints the table the roadmap records and holds the default band
 # to its bound. SKIPs (rc 0) without float render targets.
-add_executable(cvcgl_ocean_band test/cvcgl_ocean_band.cpp ocean/OceanFFT.cpp
-                                ocean/OceanButterfly.cpp)
+add_executable(cvcgl_ocean_band test/cvcgl_ocean_band.cpp)
 target_include_directories(cvcgl_ocean_band PRIVATE ocean)
 target_link_libraries(cvcgl_ocean_band PRIVATE cvcGL)
 add_test(NAME cvcgl_ocean_band COMMAND cvcgl_ocean_band)
@@ -554,9 +560,8 @@ add_test(NAME cvcgl_ocean_band COMMAND cvcgl_ocean_band)
 # The GPU eWave window (OCEAN-AND-WEATHER-ROADMAP.md C1/C3, O8b): EWave against the CPU window
 # cvc::ocean::ewave in the same scenario (a drop beside a wall, a beach, the sponge, a field
 # source), the ring's reflection on the GPU, and the passes and GPU time per step at 256^2. Also
-# compiles OceanFFT.cpp, to time one cascade beside it. SKIPs (rc 0) without float render targets.
-add_executable(cvcgl_ewave test/cvcgl_ewave.cpp ocean/EWave.cpp ocean/OceanFFT.cpp
-                           ocean/OceanButterfly.cpp)
+# times one OceanFFT cascade beside it. SKIPs (rc 0) without float render targets.
+add_executable(cvcgl_ewave test/cvcgl_ewave.cpp)
 target_include_directories(cvcgl_ewave PRIVATE ocean)
 target_link_libraries(cvcgl_ewave PRIVATE cvcGL)
 add_test(NAME cvcgl_ewave COMMAND cvcgl_ewave)
@@ -565,8 +570,7 @@ add_test(NAME cvcgl_ewave COMMAND cvcgl_ewave)
 # (cvc/physics/immersion.h) as EWave's sources (WakeSource), the window's shift pass, a box
 # footprint's Kelvin wake read from the GPU, and a masked rock's wave shadow. SKIPs (rc 0)
 # without float render targets.
-add_executable(cvcgl_wake test/cvcgl_wake.cpp ocean/EWave.cpp ocean/WakeSource.cpp
-                          ocean/OceanButterfly.cpp)
+add_executable(cvcgl_wake test/cvcgl_wake.cpp)
 target_include_directories(cvcgl_wake PRIVATE ocean)
 target_link_libraries(cvcgl_wake PRIVATE cvcGL)
 add_test(NAME cvcgl_wake COMMAND cvcgl_wake)
