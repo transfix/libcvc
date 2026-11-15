@@ -881,6 +881,29 @@ each point.
 mesh's UVs. UV (0, 0) is the image's bottom-left corner. A `source: { data }` city's terrain wears
 its bundle's `satellite.png` this way, north up (§5.17).
 
+**See-through nodes.** `material: { opacity: <0..1> }` draws a node's meshes see-through: 1 is
+solid (the default) and 0 is invisible. A see-through mesh is drawn in the translucent pass even
+with `opaque: true` beside it (the opacity wins, as a viewport `override:`'s does, §5.18), and it
+casts no shadow into the scene's maps. `opacity:` may instead name a state key, as
+`opacity: zone.alpha` or `{ bind: zone.alpha, default: 0.4 }`, and the node follows that key each
+frame as `visible:` follows its own: the key is read, never seeded, and clamped to 0..1, and
+`default` (1 when left out) holds while the key is unset or is not a number. The opacity reaches
+whatever the node draws: its mesh, every rung of its LOD ladder, the meshes a `source: { data }`
+node draws (each redraw included), and the mesh a custom node type returns. A volume node ignores
+it, because its transfer function holds its opacity.
+
+```yaml
+scene:
+  nodes:
+    - node: reach
+      source: { sphere: 40 }
+      transform: { position: [120, -60, 0] }
+      material: { color: [1.0, 0.35, 0.2], opacity: 0.25 }       # a see-through dome
+    - node: zone
+      source: { box: { size: [50, 30, 10] } }
+      material: { color: [0.2, 0.8, 0.3], opacity: { bind: zone.alpha, default: 0.4 } }
+```
+
 **Volumes and shadows.** A volume node (`volume`, `volren`, `volslice`) casts nothing into the
 scene's shadow maps (`shadows:`): its picture is no surface the maps can hold. A `volren` node's
 raycaster has
@@ -2556,8 +2579,10 @@ it follow it too.
 **Overrides.** `override:` restyles nodes in one view only. Each entry names a node id, a tag, or
 `"*"` (everything), and sets any of `drawstyle` (`surface`, `wireframe`, `points`), `opacity`,
 `color`, `line_width` and `point_size` (`material: { color, opacity }` spells the same fields).
-What an entry does not set stays as the node has it. An entry covers the named node's subtree, and
-the entries apply in order, each adding to the ones before it field by field:
+What an entry does not set stays as the node has it, its own `material: { opacity }` included
+(§5.4), so a node see-through in the main view is see-through in every view unless an entry sets
+its `opacity`. An entry covers the named node's subtree, and the entries apply in order, each adding
+to the ones before it field by field:
 
 ```yaml
 - type: viewport
@@ -2832,6 +2857,68 @@ made for:
   that run, `ariadne_ftxui_test`'s `RichText*` drive links by mouse and keyboard in both terminal
   backends' paths, `cvcgl_imgui_rich_text` taps, drags and tabs through ImGui's own input, and
   `ari_rich_text` checks `ari snapshot`'s lines of `src/ari/tests/rich_text.ari`.
+
+### 5.21 Labels: `label:` and `entity_labels:`
+
+Any scene node can carry a label ([`scene_labels.h`](../inc/cvc/gl/ariadne/scene_labels.h)): text
+drawn over the node in screen space, such as a vehicle's name tag. The labels of a scene are drawn
+by one node, a `cvc::gl::LabelLayerNode` ([`LabelLayer.h`](../inc/cvc/gl/LabelLayer.h)), in the
+overlay pass. Each draw reads the label's anchor from its node's world transform; nothing is
+written to state.
+
+```yaml
+- node: car_a
+  source: { box: [4, 2, 1.5] }
+  label:
+    text: Alpha                       # or bind: <state key>, read as it draws
+    offset: 2                         # metres above the top of the node (or [x, y, z])
+    color: [1, 1, 1]                  # the text: [r, g, b], "#rrggbb" or c0..c7
+    backdrop: [0.05, 0.05, 0.07]      # the box behind the text, or none
+    edge: c0                          # a frame round the box (or true, or none)
+    size: 14                          # pixels at scale 1
+    scale: 1                          # a number or a state key
+    focus: { key: cam.follow, scale: 1.4 }   # larger while cam.follow holds this node's id
+    fade: [300, 600]                  # whole nearer than 300 m, gone past 600 m
+```
+
+- **Text.** `label: <text>` is the text alone. A label with neither `text:` nor `bind:` shows the
+  node's id. `bind:` takes the key's value while it holds one; `bold: true` is bold.
+- **Where it sits.** `anchor:` is `top` (the top of the node's bounds, the default), `center` or
+  `origin`. `offset:` is added to that point in world axes. The text sits centred above the
+  point.
+- **Backdrop and edge.** The backdrop is a box behind the text, at `backdrop_opacity` (0.6). The
+  edge is a frame round it, `edge_width` pixels wide.
+- **Size.** `scale:` multiplies `size:`. `focus:` multiplies it again by its `scale` (1.4) while its
+  key holds its `value`: the node's id by default, e.g. the vehicle the camera follows.
+- **Fade and cull.** `fade: [near, far]` is by the distance from the camera drawing it. The label
+  is whole up to `near`, fades linearly to nothing at `far`, and is not drawn past it.
+- **Depth order.** Labels are drawn farthest first, so a nearer label lies over a farther one.
+- **Views.** A label is drawn only where its node is. A hidden node's label is hidden. A view that
+  leaves the node out (`tags:`, §5.18) leaves its label out. A mirror or viewport fades and orders
+  the labels by its own camera.
+- **Cost.** The text is rasterised again only when its text, size or opacity changes. Opacity is
+  in 32 steps across the fade band. A still label costs a projection and a quad.
+
+The node's own VTK label (the `show_label`, `label_text` and `label_size` keys of every graphics
+node) is still there. It is plain text at the node's centre; `label:` is the one with these rules.
+
+`entity_labels:` in the `scene:` block gives every world entity (§5.4's world vehicles, **Entities**, drawn
+as `vehicle_<id>`) a label in the same keys. Its text is `"{name}"` by default, and `{name}`, `{id}`,
+`{archetype}` and `{team}` are filled in. An unnamed entity shows its node's id.
+`entity_labels: true` gives the default look, e.g.
+`entity_labels: { offset: 2.5, fade: [300, 600], focus: cam.follow }`. A label is made with each
+entity's node and goes with it.
+
+[`cvcgl_ariadne_labels`](../src/cvcGL/test/cvcgl_ariadne_labels.cpp) covers these from a document,
+drawn for real:
+
+- the fade rule, and a label culled past `far`;
+- the pixels of a label's text, backdrop and edge above its node;
+- the depth order;
+- bound text, scale and focus;
+- hidden nodes, and a renderer that leaves a node out;
+- that a still frame rasterises nothing again;
+- an entity's name label.
 
 ## 6. Composition: include / import / load
 

@@ -19,10 +19,17 @@
 
 namespace cvc {
 
+class app;
+class exec_pool;
+
 namespace state_exec {
 class exec_group;
 struct pump_budget;
 } // namespace state_exec
+
+namespace detail {
+bool in_pool_callback(const cvc::app *app) noexcept; // below
+} // namespace detail
 
 struct pool_options {
   // threads: auto.
@@ -81,31 +88,33 @@ public:
   //   neither a busy group 0 nor busy frame groups starve the other.
   // - A group belongs to one pump_all at a time. Calls from several threads share the workers,
   //   each with its own list, host-call queue and accounting (S1-Q11).
-  // - A C++ exception escaping a group's pump fails that group (failed_groups()) and kills its
-  //   processes with "internal error"; the others finish. No exception leaves a worker.
+  // - A C++ exception escaping a group's pump fails that group and kills its processes with
+  //   "internal error"; the others finish. No exception leaves a worker. It returns the groups it
+  //   failed (raw pointers, to compare with, not to use once their owners may have destroyed
+  //   them); when it rethrows a host exception (below) they are failed() all the same.
   // - In a threaded pump_all (workers, not deterministic) every group's on_complete callbacks
   //   (exec_group::execute's) run on the caller after the join, whichever thread pumped it, in
   //   completion order per group, with the group's registry and stream bound; if any throws, the
   //   rest still run and the first throw is rethrown here. At 0 threads and in deterministic mode
   //   they run inline in the pump, as today. host_first's own callbacks run inline in it.
   // - It returns only with its host-call queue empty (run_on_host).
-  // Not from a host_proxied body or an on_complete callback (a debug assertion).
-  void pump_all(std::span<state_exec::exec_group *const> groups,
-                const state_exec::pump_budget &budget,
-                std::chrono::steady_clock::time_point deadline);
+  // - Nothing of it is kept per thread: two pools (two apps') pumped by one thread, in turn or
+  //   one inside a group of the other's, each see only their own calls and groups.
+  // Not from a host_proxied body or an on_complete callback of one of this pool's calls (a debug
+  // assertion).
+  std::vector<state_exec::exec_group *> pump_all(std::span<state_exec::exec_group *const> groups,
+                                                 const state_exec::pump_budget &budget,
+                                                 std::chrono::steady_clock::time_point deadline);
 
   // The workers running, after the clamps (pool_options::threads). The caller pumps too.
   unsigned threads() const;
   pool_stats stats() const;
-  // The groups the last pump_all this thread called on this pool marked failed: raw pointers,
-  // to compare with, not to use once their owners may have destroyed them; the thread's next
-  // pump_all replaces them.
-  std::vector<state_exec::exec_group *> failed_groups() const;
 
   // The host-call queue (S1.6, td 4.9): run `fn` on the thread that called the pump_all pumping
-  // the calling thread's group. It is queued on that call's queue, which its caller runs while it
-  // waits at the join, or it runs inline here when the calling thread is that caller or no
-  // pump_all is pumping it (0 threads included), so a caller never waits for itself. It returns
+  // `group`, when the calling thread is the worker pumping it. It is queued on that call's queue,
+  // which its caller runs while it waits at the join, or it runs inline here when the calling
+  // thread is that caller or no pump_all of this pool is pumping the group on it (0 threads
+  // included), so a caller never waits for itself. It returns
   // once `fn` is queued or has run; a host_proxied wrapper that cannot park (a generator body)
   // waits for `fn` itself. The rules:
   // - pump_all returns only with its queue empty;
@@ -120,11 +129,7 @@ public:
   // - one group's bodies run in the order they were queued; bodies of different groups run as
   //   they become runnable, not in queue order across groups;
   // - "the host thread" is the caller of that pump_all: two callers run their own queues at once.
-  void run_on_host(std::function<void()> fn);
-
-  // Whether the calling thread is inside one of this pool's pump_all calls: as its caller (where
-  // host_proxied bodies and on_complete callbacks run) or as a worker pumping one of its groups.
-  bool in_pump_all() const;
+  void run_on_host(state_exec::exec_group &group, std::function<void()> fn);
 
   // Tests (GR-9): take `seconds` as `group`'s last pump time, for the helper wake and the order.
   void set_last_pump_for_test(state_exec::exec_group &group, double seconds);
@@ -133,10 +138,10 @@ public:
   // pump would be: app::exec_pump_frame() pumps group 0 (the app scheduler, which is no
   // exec_group) with it, overlapping the workers. Its throw is rethrown after the join, as an
   // on_complete callback's is.
-  void pump_all(std::span<state_exec::exec_group *const> groups,
-                const state_exec::pump_budget &budget,
-                std::chrono::steady_clock::time_point deadline,
-                const std::function<void()> &host_first);
+  std::vector<state_exec::exec_group *> pump_all(std::span<state_exec::exec_group *const> groups,
+                                                 const state_exec::pump_budget &budget,
+                                                 std::chrono::steady_clock::time_point deadline,
+                                                 const std::function<void()> &host_first);
 
   // The options the pool was built with, before its clamps (threads() is what they came to).
   const pool_options &options() const;
@@ -148,29 +153,37 @@ public:
   std::vector<std::string> take_notes();
 
 private:
+  friend bool detail::in_pool_callback(const cvc::app *app) noexcept;
+
   struct impl;
   std::unique_ptr<impl> impl_;
 };
 
-// What an exec_group uses of the pool it is pumped by (exec_group.cpp); not for hosts.
+// What an exec_group uses of the pool it is pumped by (exec_group.cpp); not for hosts. Each takes
+// the group (or the app) it is about: a pump_all holding a group points the group at its own
+// entry (pool_link().call), so nothing is kept per thread.
 namespace detail {
-// The pool whose worker the calling thread is, while it pumps a group for a pump_all; else null.
-// A host_proxied native queues its body there (run_on_host), and runs it inline anywhere else.
-exec_pool *worker_pool() noexcept;
-// While a threaded pump_all pumps a group (on a worker, or on its caller): queue `callback` (an
-// on_complete call) for that call's caller, which runs it after the join, and return true.
-// Anywhere else (threads 0, deterministic mode, no pump_all) return false: run it inline.
-bool defer_on_complete(std::function<void()> callback);
-// Whether the calling thread is running a queued host_proxied body or a deferred on_complete
-// callback for a pump_all, where pump_all and destroying a group are refused (debug assertions).
-bool in_pool_callback() noexcept;
+// The pool whose worker the calling thread is, while it pumps `group` for a pump_all; else null.
+// A host_proxied native of `group` queues its body there (run_on_host), and runs it inline
+// anywhere else.
+exec_pool *worker_pool(state_exec::exec_group &group) noexcept;
+// While a threaded pump_all pumps `group` on the calling thread (a worker, or its caller): queue
+// `callback` (an on_complete call of the group's) for that call's caller, which runs it after the
+// join, and return true. Anywhere else (threads 0, deterministic mode, no pump_all, another
+// thread) return false: run it inline.
+bool defer_on_complete(state_exec::exec_group &group, std::function<void()> callback);
+// Whether the calling thread runs a queued host_proxied body or a deferred on_complete callback
+// of a pump_all of `app`'s pool (app::exec_pool(), if built), where destroying a group is refused
+// (a debug assertion). False for a null app.
+bool in_pool_callback(const cvc::app *app) noexcept;
 // A group's teardown (S1.5): drop the group's entries from the host-call queue of the pump_all it
 // belongs to, unrun, waiting for one its caller is running now. Nothing when it belongs to none
 // (always, in practice: ~exec_group aborts while a pump_all holds its group).
 void purge_host_calls(state_exec::exec_group &group) noexcept;
-// run_on_host for a worker that then waits for `fn` to have run (a host_proxied call that cannot
-// park): the caller runs it as soon as it services the queue, while the worker is blocked.
-void run_on_host_waiting(exec_pool &pool, std::function<void()> fn);
+// run_on_host for a worker pumping `group` that then waits for `fn` to have run (a host_proxied
+// call that cannot park): the caller runs it as soon as it services the queue, while the worker
+// is blocked.
+void run_on_host_waiting(exec_pool &pool, state_exec::exec_group &group, std::function<void()> fn);
 } // namespace detail
 
 } // namespace cvc
