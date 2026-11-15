@@ -2534,6 +2534,69 @@ TEST_F(CvcCliTest, SegmentRefusesBadInput) {
   EXPECT_NE(std::string::npos, malformed.output.find("name:i,j,k")) << malformed.output;
 }
 
+TEST_F(CvcCliTest, CapsidSeedsAndRotateSeeds) {
+  // VolUtils' seed generators (transfix/libcvc#123): maxima for a T-number, then their N-fold
+  // copies, both read back as point classes.
+  const std::string in = path("blobs.rawiv"), seeds = path("capsid.vgr");
+  write_two_blobs(in);
+  auto c = cvc("capsid-seeds \"" + in + "\" -o \"" + seeds + "\" --t-low 30 --h 1 --k 1");
+  ASSERT_EQ(0, c.exit_code) << c.output;
+  EXPECT_NE(std::string::npos, c.output.find("maxima")) << c.output;
+  cvc::app ctx;
+  const cvc::point_classes pc = cvc::read_point_classes(ctx, seeds);
+  ASSERT_EQ(pc.classes.size(), 2u);
+  EXPECT_EQ(pc.classes[0].name, "maxima");
+  EXPECT_TRUE(pc.classes[0].contains(12, 12, 12)) << "the two blobs' common peak";
+  // A quarter turn about z through the centre (11.5, 11.5): (12, 12, 12) goes to (11, 12, 12).
+  {
+    cvc::point_classes one;
+    one.add("s", 12, 12, 12);
+    cvc::write_point_classes(ctx, one, path("one.vgr"));
+  }
+  auto r = cvc("rotate-seeds \"" + in + "\" --seeds \"" + path("one.vgr") + "\" --folds 4 -o \"" +
+               path("four.vgr") + "\"");
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  const cvc::point_classes four = cvc::read_point_classes(ctx, path("four.vgr"));
+  ASSERT_EQ(four.classes.size(), 4u);
+  EXPECT_EQ(four.classes[1].name, "Class 1");
+  EXPECT_TRUE(four.classes[0].contains(12, 12, 12));
+  EXPECT_TRUE(four.classes[1].contains(11, 12, 12));
+  EXPECT_TRUE(four.classes[2].contains(11, 11, 12));
+  auto bad = cvc("rotate-seeds \"" + in + "\" --seeds \"" + path("one.vgr") + "\" --folds 0 -o \"" +
+                 path("x.vgr") + "\"");
+  EXPECT_NE(0, bad.exit_code);
+  EXPECT_NE(std::string::npos, bad.output.find("folds")) << bad.output;
+}
+
+TEST_F(CvcCliTest, SegmentAutomaticCriticalPointsNeedsNoSeeds) {
+  // The paper's automatic mode (P6): no seeds file, two classes, feature and background.
+  const std::string in = path("blobs.rawiv"), out = path("auto.rawiv");
+  write_two_blobs(in);
+  auto help = cvc("segment --help");
+  EXPECT_NE(std::string::npos, help.output.find("--cp-feature-threshold")) << help.output;
+  EXPECT_NE(std::string::npos, help.output.find("critical-points")) << help.output;
+  auto r = cvc("segment \"" + in + "\" -o \"" + out + "\" --automatic critical-points");
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("Wrote the labels of 2 classes")) << r.output;
+  EXPECT_TRUE(fs::exists(path("auto_class_00.rawiv")));
+  EXPECT_TRUE(fs::exists(path("auto_class_01.rawiv")));
+  cvc::app ctx;
+  cvc::volume labels(ctx, out);
+  EXPECT_EQ(labels.voxelType(), cvc::UChar);
+  EXPECT_EQ(labels(9, 12, 12), 0.0) << "a blob's peak is feature";
+  EXPECT_EQ(labels(0, 0, 0), 1.0) << "a corner is background";
+  // With a seed, the seed's class comes first; SegMed's own settings run too.
+  auto s = cvc("segment \"" + in + "\" -o \"" + path("s.rawiv") +
+               "\" --automatic critical_points --seed left:9,12,12 --cp-field gradient_magnitude "
+               "--cp-weights initial --cp-sample 20 --class-volumes false");
+  ASSERT_EQ(0, s.exit_code) << s.output;
+  EXPECT_NE(std::string::npos, s.output.find("Wrote the labels of 3 classes")) << s.output;
+  auto bad = cvc("segment \"" + in + "\" -o \"" + path("b.rawiv") +
+                 "\" --automatic critical-points --cp-iterations -2");
+  EXPECT_NE(0, bad.exit_code);
+  EXPECT_NE(std::string::npos, bad.output.find("cp_iterations")) << bad.output;
+}
+
 // ===========================================================================
 // trace: an input trace's info, and its headless replay
 // ===========================================================================

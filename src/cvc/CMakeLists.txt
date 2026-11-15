@@ -168,6 +168,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/segmentation_params.h
   ../../inc/cvc/volume/gradient_vector_diffusion.h
   ../../inc/cvc/volume/gradient_vector_diffusion_params.h
+  ../../inc/cvc/volume/seed_generators.h
+  ../../inc/cvc/volume/seed_generators_params.h
   ../../inc/cvc/volume/segmentation_intrinsics.h
   ../../inc/cvc/model/model.h
   ../../inc/cvc/model/model_file_io.h
@@ -317,6 +319,7 @@ set(SOURCE_FILES
   volume/point_class_intrinsics.cpp
   volume/segmentation/genseg.cpp
   volume/segmentation/critical_points.cpp
+  volume/segmentation/seed_generators.cpp
   volume/segmentation/segmentation.cpp
   volume/gradient_vector_diffusion.cpp
   volume/segmentation/segmentation_intrinsics.cpp

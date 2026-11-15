@@ -1381,6 +1381,13 @@ to draw. It never reads them while a chunk is writing them.
      SecStruct, SegMonomer and the paper's §2.3 volumetric skeletons use the same field.
 4. **Seed generators:** fold in transfix/libcvc#123's seed generators (`criticalPntsToSeed`,
    `SeedProduce*`).
+   - *Done in P6 part 2* (`inc/cvc/volume/seed_generators.h`): `capsid_critical_points` is
+     `criticalPntsToSeed` (SegSubunit's `FindCriticalPoints`: maxima kept for a capsid's T-number,
+     and the gradient magnitude's maxima when they are few), a sliced stepper; `rotated_seeds` is
+     `SeedProduce` and `SeedProduceRegardingAxis` (N-fold rotational copies about an axis). Both
+     are on the CLI (`cvc capsid-seeds`, `cvc rotate-seeds`) and in pycvc. VolUtils left
+     volrover's master (#19) before the pinned commit, so they have no T1 goldens: their tests
+     check the legacy definitions.
 5. **The default seeding** (settled 2026-11-08): `volume_grid` and the CLI keep GenSeg's local
    maxima until the paper mode matches the legacy results on real maps. Then the default switches
    to `critical_points`, in its own PR, with the comparison in its description.
@@ -1388,8 +1395,8 @@ to draw. It never reads them while a chunk is writing them.
 **Surfaces**
 
 - **CLI:** `cvc segment in.rawiv --seeds classes.vgr --tlow 40 --thigh 200 -o out`. It writes the
-  labels volume and the per-class volumes. `--auto critical-points` runs the paper's mode with no
-  seeds file.
+  labels volume and the per-class volumes. `--automatic critical-points` runs the paper's mode
+  with no seeds file (the `--cp-*` flags tune it).
 - **pycvc:** `pycvc.segment_seeded(vol, seeds, t_low=40, ...)`, `segment_seeded_job` and
   `critical_point_seeds`.
 - **DSL:** `(segment.seeded vol classes params)` and `(segment.critical-points vol params)`, each
