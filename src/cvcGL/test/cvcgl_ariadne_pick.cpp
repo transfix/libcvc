@@ -1,11 +1,14 @@
 // cvcgl_ariadne_pick — click-to-world picking in an Ariadne `viewport` (scene_views.h; L0 of
 // docs/roadmap/ARIADNE_WORLDS.md): an `input: pick` view's left button picks what the view draws
 // instead of turning its camera, writes where it landed under its `pick:` key and raises its
-// `on_pick:` with the same fields; SceneViews::pick is the same hit test for hosts. Offscreen;
-// skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+// `on_pick:` with the same fields; SceneViews::pick is the same hit test for hosts. The pick view
+// is throttled (`refresh_hz: 2`): it draws its scene less often than the orbit view beside it while
+// nothing happens in it, every frame while it is dragged, and its picks test the scene, not its
+// last pixels. Offscreen; skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
 
 #include "streaming_test_util.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -50,6 +53,7 @@ windows:
         input: pick
         pick: hits
         on_pick: (begin (state-set "picked" (get-attr event "node")) (state-set "picked_phase" (get-attr event "phase")))
+        refresh_hz: 2
         width: 400
         height: 320
   - window: Orbit
@@ -119,6 +123,23 @@ int main() {
   if (!vm.hasViewport("picker"))
     return cvcgl_test::finish("cvcgl_ariadne_pick");
   cvc::gl::Viewport &picker = vm.viewport("picker");
+  cvc::gl::Viewport &orbitView = vm.viewport("orbit");
+  check(picker.refreshHz() == 2.0 && orbitView.refreshHz() == 0.0,
+        "refresh_hz: 2 throttles the pick view, and only it");
+  {
+    // Nothing happens in either view: the orbit view draws every frame, the pick view at <= 2 Hz.
+    const long p0 = picker.draws(), o0 = orbitView.draws();
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int f = 0; f < 8; ++f)
+      rt.step(kDt);
+    const double secs =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const long pd = picker.draws() - p0, od = orbitView.draws() - o0;
+    check(od == 8, "the orbit view draws every frame", std::to_string(od));
+    check(pd <= 1 + static_cast<long>(secs * 2.0) && pd < od,
+          "the pick view draws no more than 2 Hz allows",
+          std::to_string(pd) + " draws in " + std::to_string(secs) + " s");
+  }
   double r[4];
   picker.region(r);
   // The view frames both boxes: the crate's centre on screen (VTK display coordinates, and ImGui's
@@ -171,10 +192,13 @@ int main() {
   for (const std::string &w : rt.take_warnings())
     std::printf("  warning: %s\n", w.c_str());
   const std::string seq = val(app, key + ".seq");
+  const long dragDraws = picker.draws();
   for (int i = 1; i <= 3; ++i) {
     io.AddMousePosEvent(mx + 6.0f * i, my);
     rt.step(kDt);
   }
+  check(picker.draws() - dragDraws == 3, "dragged, the throttled view draws every frame",
+        std::to_string(picker.draws() - dragDraws));
   check(val(app, key + ".phase") == "drag" && val(app, key + ".seq") != seq,
         "a drag writes phase drag, a new seq each time");
   io.AddMouseButtonEvent(0, false);
