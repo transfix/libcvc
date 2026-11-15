@@ -42,6 +42,7 @@
 #include <cvc/nav/belief_material.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/drive.h>
+#include <cvc/nav/grid_nav.h> // sense_scratch
 #include <cvc/nav/intent.h>
 #include <cvc/nav/material.h>
 #include <cvc/nav/nav_stats.h>
@@ -277,6 +278,17 @@ public:
   void min_clearance_world(float *out) const;
   const float *field_data() const { return field_.data(); }
 
+  // The agents' columns as the drive keeps them, in the normalized frame: positions and goals
+  // [n*2], headings (rad) and speeds [n]. Borrowed: valid until the next step() or agent change.
+  // An input trace (cvc/nav/sim_world_trace.h) records a world's start and hashes its state from
+  // these, exactly, where snapshot()'s world frame rounds.
+  const float *positions_normalized() const { return o_.data(); }
+  const float *goals_normalized() const { return goal_.data(); }
+  const float *headings() const { return th_.data(); }
+  const float *speeds_normalized() const { return sp_.data(); }
+  // The prior map the belief planes were seeded from ([rows*cols], as the constructor's).
+  const std::uint8_t *prior() const { return prior_.data(); }
+
   // Per-agent DRIVE TELEMETRY for the last step() — the diagnostics the drive already computes each
   // tick (drive_telemetry, drive.h): the CoefMLP coefficients (alpha/beta/gamma, lam_soft),
   // underfoot grip mu + material risk mrisk, applied external force (ext_fx/fy), final
@@ -343,7 +355,13 @@ public:
   // (on a plant the lower of its and vmax) and, with veh_params::risk_governor, its cap
   // (risk_speed_cap). For a route_follower backing a vehicle up, or stopping it at a cusp. A
   // parked agent takes it too.
-  void override_command(int i, float steer, float accel);
+  //
+  // `weight` below 1 blends instead, on a plant: the command is (1 - weight) of the drive's
+  // (a parked agent's: its park brake) and `weight` of this one, steer and acceleration alike,
+  // and then the holds above apply to it. 0 leaves the drive's command, held the same way. The
+  // kinematic arm's drive steers each substep, so it has no one command to blend with: there a
+  // weight below 1 throws std::invalid_argument, as does one outside [0, 1].
+  void override_command(int i, float steer, float accel, float weight = 1.0f);
   // Put agent i at (x, y) (normalized) with a heading (rad) and a speed (normalized / s), on the
   // kinematic arm. A plant owns its vehicles' poses, so with one this does nothing and returns
   // false.
@@ -758,6 +776,7 @@ private:
   long gstep_ = 0;
   int field_ver_ = 0;
   cvc::thread_pool *pool_ = nullptr; // borrowed executor for step() (may be null)
+  sense_scratch sense_scratch_;      // step()'s sense buffers, kept from tick to tick
   ext_force ext_{};                  // optional external force channel (null sample = off)
 
   coef_mlp model_; // policy 0
@@ -769,7 +788,16 @@ private:
   };
   std::vector<policy_entry> policies_;
   std::vector<int> policy_of_;
+  std::string no_policy_key_; // policy_key(0)'s: always empty
   void drop_unused_policies();
+  // step()'s per-phase timing (on when CVC_NAV_PROFILE was set as the world was made): the ms
+  // each phase took since the last report, and the ticks (and sensed ticks) that covers.
+  struct step_profile {
+    bool on = false;
+    double sense = 0, rebuild = 0, sdf = 0, carrot = 0, sep = 0, gate = 0, drive = 0, total = 0;
+    long ticks = 0, sense_ticks = 0;
+  };
+  step_profile prof_;
   std::vector<std::uint8_t> prior_; // [rows*cols] the prior map the planes are seeded from
   std::vector<std::uint8_t> truth_;
   std::vector<int> map_id_; // [n] agent -> belief plane in [0, M)
@@ -894,7 +922,7 @@ private:
   // footprint discs. The flags: whether any agent's plant gave that limit.
   std::vector<float> pl_a_max_, pl_vmax_, pl_a_lat_, pl_body_rr_, pl_body_off_;
   // override_command, [n], for the next step only
-  std::vector<float> ov_steer_, ov_accel_;
+  std::vector<float> ov_steer_, ov_accel_, ov_weight_;
   std::vector<std::uint8_t> ov_on_;
   bool ov_any_ = false;
   bool pl_has_a_max_ = false, pl_has_vmax_ = false, pl_has_a_lat_ = false, pl_fp_ = false;

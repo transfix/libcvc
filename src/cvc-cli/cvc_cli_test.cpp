@@ -27,9 +27,16 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
+#include <cvc/core/clock_follower.h>
+#include <cvc/core/input_trace.h>
 #include <cvc/core/types.h>
+#include <cvc/core/world_clock.h>
 #include <cvc/geometry/geometry.h>
+#include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/sim_world.h>
+#include <cvc/nav/sim_world_trace.h>
 #include <cvc/ph/se2_train.h>
+#include <cvc/state/state.h>
 #include <cvc/volume/volume.h>
 #include <filesystem>
 #include <fstream>
@@ -2433,4 +2440,180 @@ TEST_F(CvcCliTest, PhTrainRefusesADirectoryThatIsNotAPlantLog) {
   auto r = cvc("ph-train --runs \"" + path("empty") + "\" --out \"" + path("m.json") + "\"");
   EXPECT_NE(0, r.exit_code);
   EXPECT_FALSE(fs::exists(path("m.json")));
+}
+
+// ===========================================================================
+// cvc skeleton (the VolumeRover Skeletonization port; ports plan T12)
+// ===========================================================================
+
+// A capsule along x sampled on its surface, as an OFF file of points (no faces).
+static void write_capsule_off(const std::string &file) {
+  const double pi = 3.14159265358979323846, length = 8.0, r = 1.0;
+  std::vector<std::array<double, 3>> p;
+  const int nring = 20, nalong = 40;
+  for (int i = 0; i <= nalong; ++i)
+    for (int k = 0; k < nring; ++k) {
+      const double a = 2 * pi * (k + 0.37 * (i % 3)) / nring;
+      p.push_back({length * i / nalong, r * std::cos(a), r * std::sin(a)});
+    }
+  const int ncap = nring / 4;
+  for (int side = 0; side < 2; ++side)
+    for (int i = 1; i <= ncap; ++i) {
+      const double t = (pi / 2) * i / (ncap + 0.5);
+      const int nr = std::max(1, int(std::lround(nring * std::cos(t))));
+      for (int k = 0; k < nr; ++k) {
+        const double a = 2 * pi * (k + 0.21 * i) / nr;
+        p.push_back({side == 0 ? -r * std::sin(t) : length + r * std::sin(t),
+                     r * std::cos(t) * std::cos(a), r * std::cos(t) * std::sin(a)});
+      }
+    }
+  std::ofstream f(file);
+  f << "OFF\n" << p.size() << " 0 0\n";
+  f.precision(17);
+  for (const auto &q : p)
+    f << q[0] << " " << q[1] << " " << q[2] << "\n";
+}
+
+// Skips when libcvc was built without Shewchuk's predicates (macOS for now): the command says so.
+#define SKIP_WITHOUT_SKELETON(r)                                                                   \
+  if ((r).output.find("without Shewchuk") != std::string::npos)                                    \
+  GTEST_SKIP() << "libcvc built without Shewchuk's predicates"
+
+TEST_F(CvcCliTest, SkeletonHelp) {
+  auto r = cvc("skeleton --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--robust"));
+  EXPECT_NE(std::string::npos, r.output.find("--sheet-count"));
+  EXPECT_NE(std::string::npos, r.output.find("-bbr"));
+}
+
+TEST_F(CvcCliTest, SkeletonOfACapsule) {
+  const std::string in = path("capsule.off"), out = path("skel.rawc");
+  write_capsule_off(in);
+  auto r = cvc("skeleton \"" + in + "\" -o \"" + out + "\"");
+  SKIP_WITHOUT_SKELETON(r);
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("Wrote 1 strands")) << r.output;
+  EXPECT_TRUE(fs::exists(out));
+  EXPECT_GT(fs::file_size(out), 0u);
+  EXPECT_TRUE(fs::exists(path("skel_sheets.rawc")));
+  // The strands read back: `cvc info` on the output.
+  auto info = cvc("info \"" + out + "\"");
+  EXPECT_EQ(0, info.exit_code) << info.output;
+}
+
+TEST_F(CvcCliTest, SkeletonTakesTheLegacyFlags) {
+  const std::string in = path("capsule.off");
+  write_capsule_off(in);
+  const std::string legacy =
+      " -r -bbr 0.25 -thif 5 -thff 10 -plc 1 -medth 0.39 -medr 64 -mr 1.05 -hc 20";
+  auto r = cvc("skeleton \"" + in + "\" -o \"" + path("s.rawc") + "\" --sheets \"" +
+               path("sheets.rawc") + "\"" + legacy);
+  SKIP_WITHOUT_SKELETON(r);
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("-mr is accepted and ignored")) << r.output;
+  EXPECT_TRUE(fs::exists(path("sheets.rawc")));
+}
+
+TEST_F(CvcCliTest, SkeletonOfAPlaneFails) {
+  const std::string in = path("plane.off");
+  {
+    std::ofstream f(in);
+    f << "OFF\n30 0 0\n";
+    for (int i = 0; i < 30; ++i)
+      f << (i % 6) << " " << (i / 6) << " 1\n";
+  }
+  auto r = cvc("skeleton \"" + in + "\" -o \"" + path("p.rawc") + "\"");
+  SKIP_WITHOUT_SKELETON(r);
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("one plane")) << r.output;
+  auto bad = cvc("skeleton \"" + in + "\" -o \"" + path("p.rawc") + "\" --threshold 5");
+  EXPECT_NE(0, bad.exit_code);
+  EXPECT_NE(std::string::npos, bad.output.find("threshold")) << bad.output;
+}
+
+// ===========================================================================
+// trace: an input trace's info, and its headless replay
+// ===========================================================================
+
+// A short session on a small kinematic world, recorded to `file`: a top-speed change and a
+// retarget between frames.
+static cvc::input_trace record_nav_trace(const std::string &file) {
+  cvc::app app;
+  cvc::world_clock &clock = app.world_clock();
+  cvc::world_clock::config cc;
+  cc.fixed_dt = 0.01;
+  clock.configure(cc);
+  cvc::nav::sim_world::config c;
+  c.rows = c.cols = 32;
+  c.min_x = c.min_y = -16.0;
+  c.max_x = c.max_y = 16.0;
+  c.scale = 0.05;
+  c.veh.rr = 0.05f;
+  c.veh.d_hat = 0.2f;
+  c.veh.dt = 0.06f;
+  c.veh.vmax = 0.4f;
+  c.freeze_sense = true;
+  std::vector<std::uint8_t> occ(32 * 32, 0);
+  for (int r = 12; r < 20; ++r)
+    for (int k = 14; k < 18; ++k)
+      occ[static_cast<std::size_t>(r) * 32 + k] = 1;
+  const float o[4] = {-0.6f, -0.1f, -0.6f, 0.2f}, goal[4] = {0.6f, 0.1f, 0.6f, -0.2f};
+  const float color[6] = {1, 0, 0, 0, 0, 1};
+  cvc::nav::sim_world w(c, occ.data(), occ.data(), cvc::nav::coef_mlp::default_biased(), o, goal,
+                        color, 2);
+  cvc::nav::trace_options opts;
+  opts.world_id = "cli:grid32";
+  opts.policies[0] = cvc::nav::policy_ref{};
+  cvc::input_trace_recorder rec(app, clock);
+  rec.start(cvc::nav::trace_header(w, opts), file);
+  cvc::clock_follower nav = cvc::clock_follower::for_step(clock, 0.06);
+  for (int f = 0; f < 90; ++f) {
+    if (f == 15)
+      app.root()("nav.vehicle.vmax").value(std::string("4"));
+    if (f == 40)
+      cvc::nav::trace_retarget(w, &rec, 2, 0.5f, 0.5f);
+    clock.advance(1.0 / 30);
+    for (std::uint64_t n = nav.take(clock); n > 0; --n) {
+      w.pull(app, "");
+      w.step(1);
+    }
+    rec.check(cvc::nav::state_hash(w));
+  }
+  rec.finish(cvc::nav::state_hash(w));
+  return rec.trace();
+}
+
+TEST_F(CvcCliTest, TraceInfoAndVerifyReplayASession) {
+  const std::string file = path("session.trace");
+  const cvc::input_trace t = record_nav_trace(file);
+  auto info = cvc("trace info \"" + file + "\"");
+  ASSERT_EQ(0, info.exit_code) << info.output;
+  EXPECT_NE(std::string::npos, info.output.find("cli:grid32 (cvc.nav.sim_world/v1, complete)"))
+      << info.output;
+  EXPECT_NE(std::string::npos, info.output.find("nav.retarget x1")) << info.output;
+  EXPECT_NE(std::string::npos, info.output.find("2 on default")) << info.output;
+
+  auto ok = cvc("trace verify \"" + file + "\"");
+  ASSERT_EQ(0, ok.exit_code) << ok.output;
+  EXPECT_NE(std::string::npos, ok.output.find("the replay reproduces the trace")) << ok.output;
+  EXPECT_NE(std::string::npos, ok.output.find(t.end.hash)) << ok.output;
+
+  // The same trace with the retarget moved elsewhere departs, and says where.
+  cvc::input_trace bent = t;
+  for (cvc::input_trace_record &r : bent.records)
+    if (r.type == cvc::input_trace_record::kind::event)
+      r.args = "{\"agent\":2,\"goal\":[0.5,-0.5]}";
+  const std::string bent_file = path("bent.trace");
+  bent.save(bent_file);
+  auto off = cvc("trace verify \"" + bent_file + "\"");
+  EXPECT_EQ(1, off.exit_code) << off.output;
+  EXPECT_NE(std::string::npos, off.output.find("DIVERGED: first at tick")) << off.output;
+
+  auto bad = cvc("trace verify \"" + file + "\" --policy nonsense");
+  EXPECT_NE(0, bad.exit_code);
+  EXPECT_NE(std::string::npos, bad.output.find("--policy is INDEX=FILE")) << bad.output;
+  auto none = cvc("trace info \"" + path("missing.trace") + "\"");
+  EXPECT_NE(0, none.exit_code);
+  EXPECT_NE(std::string::npos, none.output.find("cannot open")) << none.output;
 }

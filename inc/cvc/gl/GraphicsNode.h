@@ -268,10 +268,10 @@ public:
   // next processEvents() from another), and castsShadow() reports it from then.
   void setCastsShadow(bool casts);
   bool castsShadow() const { return m_castsShadow.load(std::memory_order_relaxed); }
-  // The same flag on a vtkProp a host put in the renderer itself (owner thread).
-  // A prop casts unless marked.
-  static void setPropCastsShadow(vtkProp *prop, bool casts);
-  static bool propCastsShadow(vtkProp *prop);
+  // The same flag on a vtkProp a host put in the renderer itself, for `app`'s
+  // scenes (whose shadow passes ask it). A prop casts unless marked.
+  static void setPropCastsShadow(cvc::app &app, vtkProp *prop, bool casts);
+  static bool propCastsShadow(cvc::app &app, vtkProp *prop);
 
   // Bounding box visibility
   void setShowBBox(bool show);

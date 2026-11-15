@@ -13,6 +13,7 @@
   Lesser General Public License for more details.
 */
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -26,6 +27,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -68,12 +70,17 @@ bool number(const Value &v, const std::string &where, double &out, std::string &
 }
 
 bool boolean(const Value &v, const std::string &where, bool &out, std::string &why) {
-  static const std::set<std::string> yes{"true", "yes", "on", "1"}, no{"false", "no", "off", "0"};
-  if (v.is_scalar() && yes.count(v.scalar)) {
+  constexpr std::string_view yes[] = {"true", "yes", "on", "1"};
+  constexpr std::string_view no[] = {"false", "no", "off", "0"};
+  const auto among = [&](const auto &words) {
+    return v.is_scalar() &&
+           std::find(std::begin(words), std::end(words), v.scalar) != std::end(words);
+  };
+  if (among(yes)) {
     out = true;
     return true;
   }
-  if (v.is_scalar() && no.count(v.scalar)) {
+  if (among(no)) {
     out = false;
     return true;
   }
@@ -239,10 +246,24 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
 }
 
 std::string parse_vehicles(const Value &v, std::vector<vehicle_archetype> &out,
-                           std::vector<std::string> *warnings) {
+                           std::string &intents, std::vector<std::string> *warnings) {
   if (!v.is_map())
-    return "world: vehicles: expects a map (archetypes:)";
+    return "world: vehicles: expects a map (archetypes:, intents:)";
   for (const auto &[key, val] : v.entries) {
+    if (key == "intents") {
+      intents = val.is_scalar() ? val.scalar : std::string();
+      std::string path = !intents.empty() && intents[0] == '/' ? intents.substr(1) : intents;
+      bool ok = !path.empty();
+      for (std::size_t at = 0; ok && at <= path.size();) {
+        const std::size_t dot = std::min(path.find('.', at), path.size());
+        ok = cvc::state::isValidStateName(path.substr(at, dot - at));
+        at = dot + 1;
+      }
+      if (!ok)
+        return "world: vehicles: intents: expects a state path (names joined by '.', a leading / "
+               "for one outside the document's prefix)";
+      continue;
+    }
     if (key != "archetypes") {
       warn(warnings, "world: vehicles: unknown key '" + key + "', ignored");
       continue;
@@ -442,8 +463,7 @@ double avatar_controller::param(const std::string &name, double def) const {
 }
 
 const avatar_archetype &world_rules::avatar() const {
-  static const avatar_archetype kDefault;
-  return archetypes.empty() ? kDefault : archetypes.front();
+  return archetypes.empty() ? fallback_avatar : archetypes.front();
 }
 
 const avatar_controller *world_rules::find_controller(const std::string &id) const {
@@ -454,10 +474,9 @@ const avatar_controller *world_rules::find_controller(const std::string &id) con
 }
 
 const avatar_controller &world_rules::controller() const {
-  static const avatar_controller kDefault;
   const avatar_archetype &a = avatar();
   const avatar_controller *c = a.controllers.empty() ? nullptr : find_controller(a.controllers[0]);
-  return c ? *c : kDefault;
+  return c ? *c : fallback_controller;
 }
 
 const vehicle_archetype *world_rules::find_vehicle(const std::string &id) const {
@@ -469,7 +488,9 @@ const vehicle_archetype *world_rules::find_vehicle(const std::string &id) const 
 
 std::vector<std::string> vehicle_presets() { return {"humvee", "roboracer"}; }
 
-bool vehicle_controller_known(const std::string &id) { return id == "nav@1" || id == "none"; }
+bool vehicle_controller_known(const std::string &id) {
+  return id == "nav@1" || id == "none" || id == "external";
+}
 
 bool spawn_policy_known(const std::string &policy) {
   return policy == "fixed" || policy == "random" || policy == "round_robin" ||
@@ -562,7 +583,7 @@ std::string check_world_rules(const world_rules &r) {
       return at + " allows no controller";
     for (const std::string &c : v.controllers)
       if (!vehicle_controller_known(c))
-        return at + " allows controller '" + c + "'; a vehicle has nav@1 or none";
+        return at + " allows controller '" + c + "'; a vehicle has nav@1, none or external";
   }
 
   if (!spawn_policy_known(r.spawns.policy))
@@ -608,7 +629,8 @@ std::string parse_world_block(const Value &content, world_rules &rules,
     if (key == "controllers")
       continue;
     if (key == "vehicles") {
-      if (std::string e = parse_vehicles(v, rules.vehicles, warnings); !e.empty())
+      if (std::string e = parse_vehicles(v, rules.vehicles, rules.vehicle_intents, warnings);
+          !e.empty())
         return e;
       continue;
     }
@@ -643,12 +665,9 @@ std::string parse_world_block(const Value &content, world_rules &rules,
   return std::string();
 }
 
-void register_world_block() {
-  static std::once_flag once;
-  std::call_once(once, [] {
-    register_ari_block("world", [](const Value &content, LoadResult &out) {
-      out.extras.emplace_back("world", content);
-    });
+void register_world_block(cvc::app &app) {
+  register_ari_block(app, "world", [](const Value &content, LoadResult &out) {
+    out.extras.emplace_back("world", content);
   });
 }
 

@@ -1,5 +1,7 @@
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/state/state.h>
@@ -10,7 +12,7 @@
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/scheduler.h>         // max_alloc_bytes_from_state
 #include <cvc/state/state_exec/state_value_codec.h> // snapshot / restore
-#include <cvc/state/state_exec/stdlib.h>            // random_stream_scope
+#include <cvc/state/state_exec/stdlib.h>
 #include <exception>
 #include <iterator>
 #include <optional>
@@ -19,12 +21,55 @@
 
 namespace cvc::state_exec {
 
+namespace {
+
+// A whole number above 0, or nullopt (Stage S's slice_steps).
+std::optional<uint64_t> parse_slice_steps(const std::string &s) {
+  if (s.empty() || s.find_first_not_of("0123456789") != std::string::npos || s.size() > 18)
+    return std::nullopt;
+  const uint64_t n = std::stoull(s);
+  return n > 0 ? std::optional<uint64_t>(n) : std::nullopt;
+}
+
+// A number, read strictly (Stage S's slice_seconds): the whole of `s`, with nothing before or after
+// it ("2ms" is not one), and not NaN; infinite is one. nullopt otherwise.
+std::optional<double> parse_slice_seconds(const std::string &s) {
+  if (s.empty() || std::isspace(static_cast<unsigned char>(s.front())))
+    return std::nullopt;
+  char *end = nullptr;
+  const double v = std::strtod(s.c_str(), &end);
+  if (end != s.c_str() + s.size() || std::isnan(v))
+    return std::nullopt;
+  return v;
+}
+
+// CVC_EXEC_SLICE_STEPS, read whenever a scheduler is made (no process-wide copy), so a test
+// sets it for the schedulers it makes and whole suites run at 256 unchanged; 1 when unset or
+// not a whole number above 0.
+uint64_t slice_steps_knob() {
+  const char *v = std::getenv("CVC_EXEC_SLICE_STEPS");
+  return v ? parse_slice_steps(v).value_or(1) : 1;
+}
+
+// Free the reference cycles programs leaked, once enough piled up (heap.h), in `r`: the registry
+// the scheduler's evaluation context has (the one it was given, S1.1, else its evaluator's own).
+// Whether it collected.
+bool collect_cycles_if_due(cycle_registry &r) {
+  if (!cycle_collection_due(r))
+    return false;
+  collect_cycles(r);
+  return true;
+}
+
+} // namespace
+
 // ---------------------------------------------------------------------------
 // Construction
 // ---------------------------------------------------------------------------
 
 async_scheduler::async_scheduler(scheduling_policy policy)
-    : policy_(policy), evaluator_(builtins::make_default_environment()),
+    : policy_(policy), slice_steps_(slice_steps_knob()), slice_steps_default_(slice_steps_),
+      evaluator_(builtins::make_default_environment()),
       procs_(policy != scheduling_policy::round_robin),
       wakeup_(std::make_shared<detail::wakeup>()) {}
 
@@ -32,13 +77,61 @@ async_scheduler::async_scheduler(scheduling_policy policy)
 // `set` binds in its process's own run env (step_set_value's env->set), so nothing a program writes
 // reaches `base`, which may be frozen and shared (the builtins).
 async_scheduler::async_scheduler(scheduling_policy policy, environment_ptr base)
-    : policy_(policy), evaluator_(environment::extend(std::move(base))),
+    : policy_(policy), slice_steps_(slice_steps_knob()), slice_steps_default_(slice_steps_),
+      evaluator_(environment::extend(std::move(base))),
       procs_(policy != scheduling_policy::round_robin),
       wakeup_(std::make_shared<detail::wakeup>()) {}
 
-void async_scheduler::set_cycle_registry(cycle_registry *r) { registry_ = r; }
+void async_scheduler::set_slice(std::uint64_t steps, double seconds) {
+  set_slice_steps(steps);
+  set_slice_seconds(seconds);
+}
 
-void async_scheduler::set_random_stream(random_stream *s) { random_ = s; }
+void async_scheduler::set_slice_steps(std::uint64_t steps) {
+  slice_steps_ = steps ? steps : 1;
+  slice_steps_set_ = true;
+}
+
+void async_scheduler::set_slice_seconds(double seconds) {
+  slice_seconds_ = seconds > 0.0 ? seconds : 1e-3;
+  slice_seconds_set_ = true;
+}
+
+void async_scheduler::refresh_slice() {
+  if ((slice_steps_set_ && slice_seconds_set_) || !watch_root_)
+    return;
+  const uint64_t seen = settings_changes_.version(watch_root_); // before the reads
+  if (seen == slice_seen_)
+    return;
+  slice_seen_ = seen;
+  // Each setting the scheduler wasn't given (set_slice_steps, set_slice_seconds) comes from the
+  // tree. A key that is missing (never set, or deleted) or empty gives the default; a value that
+  // is not one is refused, and the value in force stays.
+  if (!slice_steps_set_) {
+    const auto v = detail::setting_value(*watch_root_, "state_exec.slice_steps");
+    if (!v || v->empty())
+      slice_steps_ = slice_steps_default_;
+    else if (const auto n = parse_slice_steps(*v)) // a whole number above 0
+      slice_steps_ = *n;
+  }
+  if (!slice_seconds_set_) {
+    const auto v = detail::setting_value(*watch_root_, "state_exec.slice_seconds");
+    if (!v || v->empty())
+      slice_seconds_ = 1e-3;
+    else if (const auto s = parse_slice_seconds(*v)) // 0 or less: 1 ms, as in set_slice_seconds
+      slice_seconds_ = *s > 0.0 ? *s : 1e-3;
+  }
+}
+
+void async_scheduler::set_cycle_registry(cycle_registry *r) {
+  registry_ = r;
+  evaluator_.set_cycle_registry(r);
+}
+
+void async_scheduler::set_random_stream(random_stream *s) {
+  random_ = s;
+  evaluator_.context().random = s;
+}
 
 void async_scheduler::set_pid_source(std::shared_ptr<std::atomic<int>> source) {
   if (source) {
@@ -83,37 +176,11 @@ bool async_scheduler::pumped_elsewhere() const noexcept {
 }
 
 namespace {
-// S1.1: a scheduler given a registry or a random stream binds what it was given on each entry
-// that can run DSL or track, one store and one restore per call (never per step); a bare one binds
-// nothing, as before. What it was not given stays as the caller bound it.
-class entry_binding {
-public:
-  entry_binding(cycle_registry *r, random_stream *s) {
-    if (r)
-      registry_.emplace(r);
-    if (s)
-      random_.emplace(s);
-  }
-
-private:
-  std::optional<cycle_registry_scope> registry_;
-  std::optional<random_stream_scope> random_;
-};
-
-// S1-Q4 (td 4.1): debug builds, or CVC_EXEC_VERIFY=1 (read once, as the library loads), check the
-// pump owner's rule in the public mutators. A call while another thread pumps is a host's race:
-// it aborts.
-#ifdef NDEBUG
-const bool kVerifyPumpOwner = [] {
-  const char *v = std::getenv("CVC_EXEC_VERIFY");
-  return v && *v && *v != '0';
-}();
-#else
-constexpr bool kVerifyPumpOwner = true;
-#endif
-
+// S1-Q4 (td 4.1): debug builds, or CVC_EXEC_VERIFY=1 (read as the scheduler is made,
+// detail::pump_owner_verification), check the pump owner's rule in the public mutators. A call
+// while another thread pumps is a host's race: it aborts.
 void verify_pump_owner(const async_scheduler &s, const char *what) {
-  if (kVerifyPumpOwner && s.pumped_elsewhere()) {
+  if (s.verifies_pump_owner() && s.pumped_elsewhere()) {
     std::fprintf(stderr, "%s: %s\n", what, kPumpedElsewhereError);
     std::abort();
   }
@@ -255,17 +322,12 @@ void async_scheduler::lock_ops_impl::for_each_process(const std::function<void(p
     fn(*p);
 }
 
-const process_ptr &async_scheduler::no_process() {
-  static const process_ptr none;
-  return none;
-}
-
 // ---------------------------------------------------------------------------
 // Process submission (same as sync scheduler)
 // ---------------------------------------------------------------------------
 
 int async_scheduler::execute(const std::string &script, const execute_options &opts) {
-  detail::check_not_in_async_kernel("async_scheduler::execute");
+  check_not_in_kernel("async_scheduler::execute");
   verify_pump_owner(*this, "async_scheduler::execute");
   int pid = draw_pid(pid_source_, next_pid_);
   process_ptr pp = make_process(); // built in place: no move of its tables
@@ -307,7 +369,7 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
 }
 
 int async_scheduler::execute(const value_t &expr, const execute_options &opts) {
-  detail::check_not_in_async_kernel("async_scheduler::execute");
+  check_not_in_kernel("async_scheduler::execute");
   verify_pump_owner(*this, "async_scheduler::execute");
   int pid = draw_pid(pid_source_, next_pid_);
   process_ptr pp = make_process(); // built in place: no move of its tables
@@ -393,19 +455,18 @@ async_scheduler::clock::time_point async_scheduler::now_for_step() {
   return chain_now_;
 }
 
-void async_scheduler::execute_process_step(const process_ptr &pp) {
+void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_run) {
   process &proc = *pp;
+  run_steps_ = 1;
+  run_unchecked_ = 1;
   // Between steps: free the reference cycles programs leaked, once enough piled up (heap.h).
-  // Checked every 64 steps: the check reads the registry's counters. A scheduler given a registry
-  // names it (S1.1), else the thread's own is used.
-  if ((++cycle_check_ & 63) == 0 &&
-      (registry_ ? cycle_collection_due(*registry_) : cycle_collection_due())) {
-    if (registry_)
-      collect_cycles(*registry_);
-    else
-      collect_cycles();
+  // Checked every 64 steps: the check reads the registry's counters. The registry is the one its
+  // evaluation context has: the one it was given (S1.1), else its evaluator's own. A run's later
+  // steps are checked by step_run.
+  exec_context &ctx = evaluator_.context();
+  ctx.parkable = true; // its steps are its processes': a native call may park one
+  if ((++cycle_check_ & 63) == 0 && collect_cycles_if_due(*ctx.registry))
     chain_valid_ = false;
-  }
 
   // Track which process is currently executing so intrinsics can query it (self/ps).
   current_pid_ = proc.pid;
@@ -478,21 +539,44 @@ void async_scheduler::execute_process_step(const process_ptr &pp) {
   // pump's own per-drain cap instead. Take the tighter of the two.
   if (proc.max_step_time > 0.0)
     step_budget = step_budget ? std::min(*step_budget, proc.max_step_time) : proc.max_step_time;
-  eval_deadline_guard step_deadline(step_budget, step_start);
+  eval_deadline_guard step_deadline(ctx, step_budget, step_start);
   // Bound what one native call in this step may allocate (see scheduler.cpp).
   // Armed only when it changes something (see scheduler.cpp).
   std::optional<eval_alloc_guard> step_alloc;
   if (proc.max_memory > 0 || proc.max_alloc_bytes != kDefaultMaxAllocBytes)
-    step_alloc.emplace(proc.alloc_limit(
-        proc.max_memory > 0 ? mem_tracker_.current_bytes(proc.pid) + proc.heap_bytes : 0));
+    step_alloc.emplace(
+        ctx, proc.alloc_limit(
+                 proc.max_memory > 0 ? mem_tracker_.current_bytes(proc.pid) + proc.heap_bytes : 0));
   const bool charge_cpu = proc.charges_cpu_time(step_start);
-  const double cpu0 = charge_cpu ? (chained_cpu >= 0.0 ? chained_cpu : thread_cpu_seconds()) : 0.0;
+  double cpu0 = charge_cpu ? (chained_cpu >= 0.0 ? chained_cpu : thread_cpu_seconds()) : 0.0;
+  // A run's kinds of step (Stage S): its seconds are split over them at its end.
+  uint64_t read0 = 0, data0 = 0, async0 = 0, all0 = 0;
+  if (max_run > 1) {
+    read0 = proc.state.stats.steps(step_kind::read);
+    data0 = proc.state.stats.steps(step_kind::data);
+    async0 = proc.state.stats.steps(step_kind::async);
+    all0 = proc.state.stats.get_step_count();
+  }
+  // A run's preemption (Stage S): from its first step on, a process made ready at a better level
+  // than the runner's ends the run (process_table::begin_run), so a first step that readies one
+  // (a msg-send to a parked better process) counts too. Over however the step ends.
+  struct run_scope {
+    detail::process_table *t;
+    ~run_scope() {
+      if (t)
+        t->end_run();
+    }
+  } run_flag{max_run > 1 ? &procs_ : nullptr};
+  if (max_run > 1)
+    procs_.begin_run(proc);
   // One async_stackless_evaluator step, run to its end here: the step never suspends inside
   // (its coroutine form only yields after it), so it is called directly, with no coroutine
-  // frame per step.
+  // frame per step. With max_run above 1, the rest of a run follows on this step's guards.
   bool done = false;
   try {
-    done = evaluator_.step_now(proc.state);
+    done = evaluator_.step_now(proc.state, ctx);
+    if (max_run > 1 && !done)
+      done = continue_run(proc, max_run, step_start, charged.before, charge_cpu, cpu0);
   } catch (const std::exception &e) {
     // A signal or watch handler's uncaught exception is raised in the program where the handler
     // interrupted it (docs/STATE_EXEC_EXCEPTIONS.md 2.4), for the program's own try to catch.
@@ -510,6 +594,12 @@ void async_scheduler::execute_process_step(const process_ptr &pp) {
       proc.accumulated_time +=
           std::chrono::duration<double>(std::chrono::steady_clock::now() - proc.last_run_start)
               .count();
+      // A run ending here keeps its earlier steps' time in the process's stats (at slice 1 the
+      // one step's is not charged, as before).
+      if (run_steps_ > 1)
+        proc.state.stats.add_step_time(
+            std::chrono::duration<double>(clock::now() - step_start).count() -
+            proc.step_async_wall);
       const auto *thrown = dynamic_cast<const dsl_exception *>(&e);
       fail_process(proc, *proc.state.uncaught, thrown ? thrown->original() : nullptr);
       return;
@@ -526,6 +616,12 @@ void async_scheduler::execute_process_step(const process_ptr &pp) {
               .count();
       // The step's deadline (max_time, or the per-step cap) cutting a long loop inside the step
       // is the process running out of time, reported as check_limits() reports it between steps.
+      // A run ending here keeps its earlier steps' time in the process's stats (at slice 1 the
+      // one step's is not charged, as before).
+      if (run_steps_ > 1)
+        proc.state.stats.add_step_time(
+            std::chrono::duration<double>(clock::now() - step_start).count() -
+            proc.step_async_wall);
       const bool out_of_time =
           dynamic_cast<const evaluation_timeout *>(&e) != nullptr && step_deadline.expired();
       kill_process(proc, out_of_time ? "time_limit_exceeded" : e.what());
@@ -545,11 +641,34 @@ void async_scheduler::execute_process_step(const process_ptr &pp) {
   double cpu1 = -1.0;
   if (charge_cpu) {
     cpu1 = thread_cpu_seconds();
-    proc.charge_cpu_time(std::max(0.0, cpu1 - cpu0 - proc.step_async_cpu));
+    const double cpu = std::max(0.0, cpu1 - cpu0 - proc.step_async_cpu);
+    if (run_steps_ > 1)
+      proc.charge_cpu_time(cpu, run_steps_); // capped at run_steps_ steps' cap, in aggregate
+    else
+      proc.charge_cpu_time(cpu);
   }
-  // Charge the step's time to what it was spent on (eval, read or data).
-  proc.state.stats.add_step_time(std::chrono::duration<double>(now - step_start).count() -
-                                 proc.step_async_wall);
+  // Charge the step's time to what it was spent on (eval, read or data); a run's, split over its
+  // steps' kinds by count (async steps are charged as calls, and their wall time is left out).
+  const double secs =
+      std::chrono::duration<double>(now - step_start).count() - proc.step_async_wall;
+  if (run_steps_ > 1) {
+    const evaluation_stats &st = proc.state.stats;
+    const uint64_t read = st.steps(step_kind::read) - read0;
+    const uint64_t data = st.steps(step_kind::data) - data0;
+    const uint64_t async = st.steps(step_kind::async) - async0;
+    const uint64_t all = st.get_step_count() - all0;
+    const uint64_t eval = all > read + data + async ? all - read - data - async : 0;
+    const uint64_t timed = read + data + eval;
+    if (timed == 0) {
+      proc.state.stats.add_step_time(secs);
+    } else {
+      proc.state.stats.add_step_time(step_kind::read, secs * double(read) / double(timed));
+      proc.state.stats.add_step_time(step_kind::data, secs * double(data) / double(timed));
+      proc.state.stats.add_step_time(step_kind::eval, secs * double(eval) / double(timed));
+    }
+  } else {
+    proc.state.stats.add_step_time(secs);
+  }
   // Heap accounting: take a finished measurement, start the next when due (heap.h).
   if (proc.max_memory > 0 || proc.state.heap_measured)
     heap_after_step(proc, step_alloc ? step_alloc->allocated() : 0,
@@ -662,7 +781,7 @@ void async_scheduler::drain(bool in_step) {
 int async_scheduler::step_once() {
   // A step drains the ingress first (the check is drain_ingress's, as it always was: a step
   // used to begin by calling it).
-  detail::check_not_in_async_kernel("async_scheduler::drain_ingress");
+  check_not_in_kernel("async_scheduler::drain_ingress");
   // Apply any cross-thread post_message() deliveries on THIS (scheduler) thread, wake sleeping
   // processes whose deadline has passed, then poll watched paths: once a step.
   drain(true);
@@ -687,15 +806,142 @@ int async_scheduler::step_once() {
   return 1;
 }
 
+bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_point start,
+                                   uint64_t count0, bool charge_cpu, double cpu0) {
+  // A run's limits (td 4.4, S2-Q12). Every step: its process still running (a park, a kill, a
+  // pause or the end change that), max_steps, the message limits, a post from another thread, a
+  // stop, a reap, a better priority level made ready, a pending signal or watch event. At one clock
+  // reading after the run's steps 2, 4, 8 and 16, then every 16th (a data step costs 0.05-0.4 ms,
+  // so a costly run is read early): slice_seconds when the run loop has a time budget (a run on
+  // steps alone, as a deterministic pump gives, ends on steps only), the run loop's budget, charged
+  // as the steps since its last check, the process's time (both halves of max_time: nothing else
+  // cuts a run of plain steps, since the deadline guard is only checked inside a native), a due
+  // timer, a due charge of an async call in flight (the drain charges it). A process with
+  // max_memory or max_step_time never runs more than one step (step_run).
+  const bool timed = run_budget_ != nullptr && slice_seconds_ < 1e300;
+  const auto slice = std::chrono::duration<double>(timed ? slice_seconds_ : 0.0);
+  // The run's preemption flag was cleared before its first step (execute_process_step).
+  // The run loop checked its budget before the pick; the steps after the last check here go to
+  // its next one, however the run ends.
+  uint64_t checked = 0;
+  struct leftover {
+    uint64_t &out;
+    const uint64_t &steps;
+    const uint64_t &checked;
+    ~leftover() { out = steps > checked ? steps - checked : 1; }
+  } unchecked{run_unchecked_, run_steps_, checked};
+  bool done = false;
+  // The run counts what its steps charged (run_loop's rule): an engine's slice or an inline call
+  // charges more than its one step.
+  while (proc.step_count() - count0 < max_run && proc.status == process_status::running) {
+    if (proc.max_steps > 0 && proc.step_count() >= proc.max_steps)
+      break;
+    // The message limits, as exact as max_steps: check_limits kills at them after every step at
+    // slice 1, and msg-send only counts, so a run that went on would send past them.
+    if ((proc.max_messages > 0 && proc.message_count >= proc.max_messages) ||
+        (proc.max_message_bytes > 0 && proc.message_bytes >= proc.max_message_bytes))
+      break;
+    if (ingress_pending_.load(std::memory_order_relaxed) || (home_ && home_->port_pending()))
+      break;
+    if (stop_requested_.load(std::memory_order_relaxed) || reap_after_step_ >= 0 ||
+        procs_.preempted())
+      break;
+    if (!proc.pending_signals.empty() || !proc.pending_watch_events.empty())
+      break;
+    const uint64_t n = run_steps_;
+    if ((n & 15) == 0 || n == 2 || n == 4 || n == 8) {
+      const clock::time_point t = clock::now();
+      if (timed && t - start >= slice)
+        break;
+      if (run_budget_ && run_budget_->spent(t, n - checked))
+        break;
+      checked = n;
+      if (proc.max_time > 0.0) {
+        if (!charge_cpu) {
+          // max_time's first half ran out since the run began: its CPU is charged from the next
+          // pick on, which needs a reading at a step's start.
+          if (proc.charges_cpu_time(t))
+            break;
+        } else {
+          // What the run would charge if it ended now (execute_process_step's charge), against
+          // the second half.
+          const double cpu = std::max(0.0, thread_cpu_seconds() - cpu0 - proc.step_async_cpu);
+          if (proc.cpu_time_charged +
+                  std::min(cpu, static_cast<double>(run_steps_) * proc.max_time / 32.0) >=
+              0.5 * proc.max_time)
+            break;
+        }
+      }
+      if (procs_.timed_count() > 0 && procs_.timer_due(t))
+        break;
+      if (!async_calls_.empty()) {
+        // A charge of a call in flight that is due: its timeout, or the charge beat of a process
+        // with a limit, counted from the drain at the run's pick (next_call_charge passes over
+        // the calls of ended processes). A call merely in flight, unlimited, runs on.
+        const std::optional<clock::time_point> due = next_call_charge(start);
+        if (due && *due <= t)
+          break;
+      }
+    }
+    ++run_steps_; // first: a step that throws counts too, as at one step a pick
+    done = evaluator_.step_now(proc.state, evaluator_.context());
+    if (done)
+      break;
+  }
+  return done;
+}
+
+int async_scheduler::step_run(uint64_t budget) {
+  // step_once's drain, watch poll and pick, then a run of the picked process.
+  check_not_in_kernel("async_scheduler::drain_ingress");
+  drain(true);
+  poll_watches();
+  step_charge_ = 0;
+  const process_ptr *pp = select_process();
+  if (!pp)
+    return 0;
+  struct reap_guard {
+    detail::process_table &procs;
+    int &pid;
+    ~reap_guard() {
+      if (pid >= 0) {
+        procs.erase(pid);
+        pid = -1;
+      }
+    }
+  } reap_deferred{procs_, reap_after_step_};
+  // A process with a per-step cap keeps one step a pick (its guard is per step), and so does one
+  // with max_memory: its heap is measured and charged step by step (heap_after_step), and a run
+  // would let a short action allocate past its budget before any measurement began.
+  const uint64_t max_run = (*pp)->max_step_time > 0.0 || (*pp)->max_memory > 0
+                               ? 1
+                               : std::min<uint64_t>(slice_steps_, std::max<uint64_t>(1, budget));
+  // However the run ends, its steps count: the scheduler's total, and the 64-step cycle check.
+  struct count_run {
+    async_scheduler &s;
+    ~count_run() {
+      s.total_steps_ += s.run_steps_;
+      s.cycle_check_ += static_cast<uint32_t>(s.run_steps_ - 1);
+    }
+  } counted{*this};
+  const uint32_t first = cycle_check_ + 1; // the count execute_process_step checks at
+  execute_process_step(*pp, max_run);
+  // The run's later steps: when the count passed a multiple of 64 after its first step, the check
+  // the step there would have made is made now, between picks. (A run of 64 or more always passes
+  // one, so a process that runs on is checked every run, never skipped.)
+  const uint32_t last = first + static_cast<uint32_t>(run_steps_ - 1);
+  if ((first >> 6) != (last >> 6) && collect_cycles_if_due(*evaluator_.context().registry))
+    chain_valid_ = false;
+  return 1;
+}
+
 task<int> async_scheduler::step() {
-  const entry_binding bound(registry_, random_);
   chain_valid_ = false;
   co_return step_once();
 }
 
 uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
                                    std::optional<double> max_time) {
-  const entry_binding bound(registry_, random_);
   // As the sync scheduler's run (td B17): a stop() from before this run is discarded, and one
   // made once is_running() reads true is seen.
   stop_requested_.store(false, std::memory_order_relaxed);
@@ -719,15 +965,30 @@ uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
     budget->start();
   }
 
+  // Stage S: the tree's slice settings, when they may have changed; runs see the run's budget.
+  refresh_slice();
+  run_budget_ = budget ? &*budget : nullptr;
+  run_unchecked_ = 1;
+  struct budget_end {
+    time_budget *&b;
+    ~budget_end() { b = nullptr; }
+  } end_of_budget{run_budget_};
+
   uint64_t taken = 0;
   // Acquire, as the sync run's: an owner may destroy the scheduler once a stopped run returns.
   while (!stop_requested_.load(std::memory_order_acquire) && has_runnable()) {
     if (max_steps && steps >= *max_steps)
       break;
-    if (budget && budget->spent(now_for_step()))
+    // A check per pick; after a run, it stands for the run's steps since its last clock reading.
+    if (budget && budget->spent(now_for_step(), run_unchecked_))
       break;
-    // A pick counts what it charged its process (run()'s note), an idle iteration one.
-    const uint64_t charged = step_once() ? std::max<uint64_t>(1, step_charge_) : 0;
+    run_unchecked_ = 1; // an idle iteration ran nothing more
+    // A pick counts what it charged its process (run()'s note), an idle iteration one. At
+    // slice_steps 1 a pick is today's step_once; above it, a run (step_run) within what is left of
+    // the run's step budget.
+    const int picked =
+        slice_steps_ > 1 ? step_run(max_steps ? *max_steps - steps : ~uint64_t{0}) : step_once();
+    const uint64_t charged = picked ? std::max<uint64_t>(1, step_charge_) : 0;
     taken += charged;
     steps += std::max<uint64_t>(1, charged);
   }
@@ -747,7 +1008,6 @@ task<std::unordered_map<int, value_t>> async_scheduler::run(std::optional<uint64
 }
 
 int async_scheduler::sync_step() {
-  const entry_binding bound(registry_, random_);
   chain_valid_ = false;
   return step_once();
 }
@@ -798,7 +1058,7 @@ async_scheduler::next_call_charge(clock::time_point now) const {
 }
 
 bool async_scheduler::wait_for_work(clock::time_point deadline) {
-  detail::check_not_in_async_kernel("async_scheduler::wait_for_work");
+  check_not_in_kernel("async_scheduler::wait_for_work");
   // The calls' next charge or timeout, from when the wait began (the beat must not move on with
   // each wake-up of the loop below).
   const std::optional<clock::time_point> charge =
@@ -876,7 +1136,6 @@ bool async_scheduler::yield_frame(int pid) {
 }
 
 int async_scheduler::wake_awaiting() {
-  const entry_binding bound(registry_, random_);
   std::vector<process *> list;
   list.swap(woken_);
   procs_.take_awaiting(list);
@@ -891,7 +1150,7 @@ int async_scheduler::wake_awaiting() {
 }
 
 bool async_scheduler::receive_message(int pid, const std::string &path) {
-  detail::check_not_in_async_kernel("async_scheduler::receive_message");
+  check_not_in_kernel("async_scheduler::receive_message");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return false;
@@ -918,7 +1177,7 @@ bool async_scheduler::receive_message_until(int pid, const std::string &path, do
 }
 
 int async_scheduler::deliver_to_receivers(const std::string &path, const value_t &msg) {
-  detail::check_not_in_async_kernel("async_scheduler::deliver_to_receivers");
+  check_not_in_kernel("async_scheduler::deliver_to_receivers");
   // The processes waiting on `path`, from the receiver index (no scan).
   std::vector<process *> list;
   list.swap(woken_);
@@ -987,8 +1246,7 @@ void async_scheduler::post_message(const std::string &path, const value_t &msg) 
 }
 
 void async_scheduler::drain_ingress() {
-  detail::check_not_in_async_kernel("async_scheduler::drain_ingress");
-  const entry_binding bound(registry_, random_);
+  check_not_in_kernel("async_scheduler::drain_ingress");
   // What a step does first: deliver the posts, finish the settled calls, charge the ones still
   // running, and wake the sleepers and timed waits that are due ((await f seconds)), so a driver
   // that only drains while nothing is runnable still sees them.
@@ -1021,7 +1279,7 @@ void async_scheduler::wake_async_waiters(const std::string &channel) {
   for (process *proc : list) {
     proc->recv_path.reset();
     proc->recv_deadline.reset();
-    deliver_await(proc->state, nil_value); // the frame reads the call's outcome
+    deliver_await(proc->state, nil_value()); // the frame reads the call's outcome
     procs_.set_status(*proc, process_status::ready);
   }
   list.clear();
@@ -1299,7 +1557,6 @@ void async_scheduler::set_watch_root(cvc::state *root, boost::shared_ptr<cvc::st
 
 int async_scheduler::restore(process_ptr proc) {
   verify_pump_owner(*this, "async_scheduler::restore");
-  const entry_binding bound(registry_, random_);
   // A stack that holds a lock (a lock_body with its hold, or a lock_enter woken with a grant)
   // can't be restored: no snapshot makes one, and its hold is no restored process's (protocol
   // 5.11; LW-12).
@@ -1563,7 +1820,7 @@ void async_scheduler::check_limits(process &proc, clock::time_point now) {
 void async_scheduler::terminate_process(process &proc, value_t result) {
   procs_.set_status(proc, process_status::terminated);
   // Its locks go before on_complete runs (design 5.6); a hold left now is a leak, counted.
-  if (const detail::lock_test_hooks *hooks = detail::lock_test_hooks_get();
+  if (const detail::lock_test_hooks *hooks = home_ ? home_->manager().test_hooks() : nullptr;
       hooks && hooks->before_terminate_end)
     hooks->before_terminate_end(proc);
   if (proc.locks && home_)
@@ -1617,10 +1874,7 @@ void async_scheduler::fail_process(process &proc, value_t exc, std::exception_pt
 void async_scheduler::release_if_idle(process &proc) {
   // What it leaked is garbage now (heap.h): noted in this scheduler's registry when it has one
   // (S1.1), so a host's kill(pid) between pumps notes the group's, not the host thread's.
-  if (registry_)
-    note_process_exit(*registry_);
-  else
-    note_process_exit();
+  note_process_exit(*evaluator_.context().registry);
   // A process stepping right now (one that killed itself) is released once its step is over.
   if (proc.pid != current_pid_)
     proc.release_state();
@@ -1657,7 +1911,7 @@ bool async_scheduler::resume(int pid) {
 bool async_scheduler::kill(int pid) { return kill(pid, "killed_by_user"); }
 
 bool async_scheduler::kill(int pid, const std::string &reason) {
-  detail::check_not_in_async_kernel("async_scheduler::kill");
+  check_not_in_kernel("async_scheduler::kill");
   verify_pump_owner(*this, "async_scheduler::kill");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
@@ -1709,8 +1963,8 @@ bool async_scheduler::snapshot(int pid, cvc::state &node) const {
 
 int async_scheduler::restore(cvc::state &node, environment_ptr natives) {
   verify_pump_owner(*this, "async_scheduler::restore");
-  const entry_binding bound(registry_, random_); // the decode tracks class scopes
-  process_ptr proc = decode_process(node);
+  // The decode tracks class scopes in its evaluation context's registry.
+  process_ptr proc = decode_process(node, &evaluator_.context());
   rebind_natives(proc->state, natives);
   return restore(std::move(proc));
 }

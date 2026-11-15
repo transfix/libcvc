@@ -1,3 +1,4 @@
 # Committed inputs, read byte for byte.
 *.raw binary
 *.json -text
+*.pts -text

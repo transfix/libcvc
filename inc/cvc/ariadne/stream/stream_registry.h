@@ -40,8 +40,8 @@ class stream_channel;
 
 class stream_registry {
 public:
-  // The per-app registry (created on first use, lives for the process).
-  static stream_registry &for_app(const app &ctx);
+  // The app's registry (made on first use, gone with the app).
+  static stream_registry &for_app(app &ctx);
 
   stream_registry(const stream_registry &) = delete;
   stream_registry &operator=(const stream_registry &) = delete;

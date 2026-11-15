@@ -94,14 +94,10 @@ protected:
       GTEST_SKIP() << "built without an HTTP backend";
     cvc::ariadne::register_cached_http_uri_handler(app);
   }
-  void TearDown() override {
-    cvc::ariadne::unregister_cached_http_uri_handler();
-    cvc::net::set_http_client(nullptr);
-    cvc::ariadne::set_http_options_provider(nullptr);
-  }
+  // The fake is the app's own client: it goes with the app.
   ScriptedClient *install() {
     auto *f = new ScriptedClient();
-    cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(f));
+    cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(f));
     return f;
   }
   cvc::state &root() { return cvc::state::instance(app); }
@@ -113,10 +109,10 @@ protected:
 TEST_F(HttpCacheTest, FreshHitServesWithoutNetwork) {
   auto *fake = install();
   fake->responses.push_back(ok_resp(200, {"Cache-Control: max-age=300"}, "A"));
-  auto r1 = cvc::ariadne::resolve("http://ex/x");
+  auto r1 = cvc::ariadne::resolve(app, "http://ex/x");
   ASSERT_TRUE(r1.ok) << r1.error;
   EXPECT_EQ(r1.content, "A");
-  auto r2 = cvc::ariadne::resolve("http://ex/x");
+  auto r2 = cvc::ariadne::resolve(app, "http://ex/x");
   ASSERT_TRUE(r2.ok) << r2.error;
   EXPECT_EQ(r2.content, "A");
   EXPECT_EQ(fake->calls, 1) << "the second resolve must be served from the cache, no network";
@@ -127,10 +123,10 @@ TEST_F(HttpCacheTest, StaleRevalidation304ServesCachedBody) {
   // max-age=0 => always stale => the next resolve revalidates; the server answers 304.
   fake->responses.push_back(ok_resp(200, {"Cache-Control: max-age=0", "ETag: \"v1\""}, "A"));
   fake->responses.push_back(ok_resp(304, {}, ""));
-  auto r1 = cvc::ariadne::resolve("http://ex/x");
+  auto r1 = cvc::ariadne::resolve(app, "http://ex/x");
   ASSERT_TRUE(r1.ok) << r1.error;
   EXPECT_EQ(r1.content, "A");
-  auto r2 = cvc::ariadne::resolve("http://ex/x");
+  auto r2 = cvc::ariadne::resolve(app, "http://ex/x");
   ASSERT_TRUE(r2.ok) << r2.error;
   EXPECT_EQ(r2.content, "A") << "a 304 serves the cached body";
   EXPECT_EQ(fake->calls, 2);
@@ -144,9 +140,9 @@ TEST_F(HttpCacheTest, StaleRevalidation200ReplacesBody) {
   fake->responses.push_back(ok_resp(200, {"Cache-Control: max-age=0", "ETag: \"v1\""}, "A"));
   fake->responses.push_back(ok_resp(200, {"Cache-Control: max-age=0", "ETag: \"v2\""}, "B"));
   fake->responses.push_back(ok_resp(304, {}, ""));
-  EXPECT_EQ(cvc::ariadne::resolve("http://ex/x").content, "A"); // miss -> store
-  EXPECT_EQ(cvc::ariadne::resolve("http://ex/x").content, "B"); // stale -> 200 replaces
-  cvc::ariadne::resolve("http://ex/x");                         // stale -> revalidate with v2
+  EXPECT_EQ(cvc::ariadne::resolve(app, "http://ex/x").content, "A"); // miss -> store
+  EXPECT_EQ(cvc::ariadne::resolve(app, "http://ex/x").content, "B"); // stale -> 200 replaces
+  cvc::ariadne::resolve(app, "http://ex/x");                         // stale -> revalidate with v2
   ASSERT_EQ(fake->requests.size(), 3u);
   EXPECT_TRUE(req_has_header(fake->requests[1], "If-None-Match: \"v1\""));
   EXPECT_TRUE(req_has_header(fake->requests[2], "If-None-Match: \"v2\""))
@@ -156,8 +152,8 @@ TEST_F(HttpCacheTest, StaleRevalidation200ReplacesBody) {
 TEST_F(HttpCacheTest, NoStoreBypassesTheCache) {
   auto *fake = install();
   fake->responses.push_back(ok_resp(200, {"Cache-Control: no-store"}, "X"));
-  EXPECT_EQ(cvc::ariadne::resolve("http://ex/x").content, "X");
-  EXPECT_EQ(cvc::ariadne::resolve("http://ex/x").content, "X");
+  EXPECT_EQ(cvc::ariadne::resolve(app, "http://ex/x").content, "X");
+  EXPECT_EQ(cvc::ariadne::resolve(app, "http://ex/x").content, "X");
   EXPECT_EQ(fake->calls, 2) << "no-store must not cache, so every resolve hits the network";
   ASSERT_EQ(fake->requests.size(), 2u);
   EXPECT_FALSE(req_has_header(fake->requests[1], "If-None-Match"))
@@ -169,12 +165,12 @@ TEST_F(HttpCacheTest, RetentionExpiryEvictsAndReFetches) {
   auto *fake = install();
   fake->responses.push_back(ok_resp(200, {"Cache-Control: max-age=300"}, "A"));
   fake->responses.push_back(ok_resp(200, {"Cache-Control: max-age=300"}, "A2"));
-  EXPECT_EQ(cvc::ariadne::resolve("http://ex/x").content, "A"); // stored fresh
+  EXPECT_EQ(cvc::ariadne::resolve(app, "http://ex/x").content, "A"); // stored fresh
   cvc::state *e = entry("http://ex/x");
   ASSERT_NE(e, nullptr);
   // Force the node past its retention; the next resolve's access-time sweep must drop it.
   e->expireAt(pt::microsec_clock::universal_time() - pt::seconds(1));
-  auto r = cvc::ariadne::resolve("http://ex/x");
+  auto r = cvc::ariadne::resolve(app, "http://ex/x");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "A2") << "the evicted entry is re-fetched, not served stale";
   EXPECT_EQ(fake->calls, 2);
@@ -183,13 +179,13 @@ TEST_F(HttpCacheTest, RetentionExpiryEvictsAndReFetches) {
 TEST_F(HttpCacheTest, CredentialedRequestBypassesTheCache) {
   auto *fake = install();
   fake->responses.push_back(ok_resp(200, {"Cache-Control: max-age=300"}, "S"));
-  cvc::ariadne::set_http_options_provider([](const std::string &, bool) {
+  cvc::ariadne::set_http_options_provider(app, [](const std::string &, bool) {
     cvc::ariadne::HttpRequestOptions o;
     o.headers.push_back("Authorization: Bearer tok");
     return o;
   });
-  EXPECT_EQ(cvc::ariadne::resolve("http://ex/x").content, "S");
-  EXPECT_EQ(cvc::ariadne::resolve("http://ex/x").content, "S");
+  EXPECT_EQ(cvc::ariadne::resolve(app, "http://ex/x").content, "S");
+  EXPECT_EQ(cvc::ariadne::resolve(app, "http://ex/x").content, "S");
   EXPECT_EQ(fake->calls, 2)
       << "a credentialed request must bypass the cache (no cross-principal reuse)";
   EXPECT_EQ(entry("http://ex/x"), nullptr) << "a credentialed response is never stored";
@@ -198,7 +194,7 @@ TEST_F(HttpCacheTest, CredentialedRequestBypassesTheCache) {
 TEST_F(HttpCacheTest, UnsolicitedNotModifiedIsAnError) {
   auto *fake = install();
   fake->responses.push_back(ok_resp(304, {}, "")); // a 304 to our unconditional (miss) GET
-  auto r = cvc::ariadne::resolve("http://ex/x");
+  auto r = cvc::ariadne::resolve(app, "http://ex/x");
   EXPECT_FALSE(r.ok) << "a 304 with no cached entry must be an error, not an empty-body success";
   EXPECT_NE(r.error.find("304"), std::string::npos);
   EXPECT_EQ(entry("http://ex/x"), nullptr);
@@ -209,19 +205,19 @@ TEST_F(HttpCacheTest, Revalidation304NoStoreEvicts) {
   fake->responses.push_back(ok_resp(200, {"Cache-Control: max-age=0", "ETag: \"v1\""}, "A"));
   fake->responses.push_back(ok_resp(304, {"Cache-Control: no-store"}, ""));
   fake->responses.push_back(ok_resp(200, {"Cache-Control: max-age=300"}, "A3"));
-  EXPECT_EQ(cvc::ariadne::resolve("http://ex/x").content, "A"); // stored (stale, ttl 0)
-  EXPECT_EQ(cvc::ariadne::resolve("http://ex/x").content,
+  EXPECT_EQ(cvc::ariadne::resolve(app, "http://ex/x").content, "A"); // stored (stale, ttl 0)
+  EXPECT_EQ(cvc::ariadne::resolve(app, "http://ex/x").content,
             "A"); // 304 no-store: served once, evicted
   EXPECT_EQ(entry("http://ex/x"), nullptr) << "a no-store revalidation must evict the entry";
-  EXPECT_EQ(cvc::ariadne::resolve("http://ex/x").content, "A3"); // gone -> re-fetched
+  EXPECT_EQ(cvc::ariadne::resolve(app, "http://ex/x").content, "A3"); // gone -> re-fetched
   EXPECT_EQ(fake->calls, 3);
 }
 
 TEST_F(HttpCacheTest, UserinfoUrlBypassesTheCache) {
   auto *fake = install();
   fake->responses.push_back(ok_resp(200, {"Cache-Control: max-age=300"}, "U"));
-  EXPECT_EQ(cvc::ariadne::resolve("http://user:pass@ex/x").content, "U");
-  EXPECT_EQ(cvc::ariadne::resolve("http://user:pass@ex/x").content, "U");
+  EXPECT_EQ(cvc::ariadne::resolve(app, "http://user:pass@ex/x").content, "U");
+  EXPECT_EQ(cvc::ariadne::resolve(app, "http://user:pass@ex/x").content, "U");
   EXPECT_EQ(fake->calls, 2) << "a userinfo URL is credential-bearing and must bypass the cache";
   ASSERT_EQ(fake->requests.size(), 2u);
   EXPECT_FALSE(req_has_header(fake->requests[1], "If-None-Match")) << "bypass is a fresh miss";
@@ -233,8 +229,8 @@ TEST_F(HttpCacheTest, AgeAnchorsFreshnessBeforeReceipt) {
   // next resolve must revalidate rather than serve it as fresh.
   fake->responses.push_back(ok_resp(200, {"Cache-Control: max-age=100", "Age: 100"}, "A"));
   fake->responses.push_back(ok_resp(200, {"Cache-Control: max-age=100", "Age: 0"}, "A2"));
-  EXPECT_EQ(cvc::ariadne::resolve("http://ex/x").content, "A");
-  EXPECT_EQ(cvc::ariadne::resolve("http://ex/x").content, "A2")
+  EXPECT_EQ(cvc::ariadne::resolve(app, "http://ex/x").content, "A");
+  EXPECT_EQ(cvc::ariadne::resolve(app, "http://ex/x").content, "A2")
       << "an Age==max-age response is already stale on arrival, so it must re-fetch";
   EXPECT_EQ(fake->calls, 2);
 }
@@ -248,7 +244,7 @@ TEST_F(HttpCacheTest, ConcurrentDistinctKeysAreServedSafely) {
   std::vector<char> oks(kN, 0);
   for (int i = 0; i < kN; ++i)
     ts.emplace_back([&, i] {
-      auto r = cvc::ariadne::resolve("http://ex/" + std::to_string(i)); // distinct keys
+      auto r = cvc::ariadne::resolve(app, "http://ex/" + std::to_string(i)); // distinct keys
       oks[i] = r.ok ? 1 : 0;
       bodies[i] = r.content;
     });
@@ -301,19 +297,20 @@ private:
 
 TEST_F(HttpCacheTest, SingleFlightCoalescesConcurrentResolves) {
   auto *fake = new LatchClient(ok_resp(200, {"Cache-Control: max-age=300"}, "C"));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
 
   // Start the leader and wait until it is inside send() — by then it has registered the in-flight
   // marker, so every follower launched now either waits on it or hits the (soon) fresh cache.
   std::string leader_body;
-  std::thread leader([&] { leader_body = cvc::ariadne::resolve("http://ex/x").content; });
+  std::thread leader([&] { leader_body = cvc::ariadne::resolve(app, "http://ex/x").content; });
   fake->wait_until_in_send();
 
   constexpr int kFollowers = 5;
   std::vector<std::thread> followers;
   std::vector<std::string> bodies(kFollowers);
   for (int i = 0; i < kFollowers; ++i)
-    followers.emplace_back([&, i] { bodies[i] = cvc::ariadne::resolve("http://ex/x").content; });
+    followers.emplace_back(
+        [&, i] { bodies[i] = cvc::ariadne::resolve(app, "http://ex/x").content; });
 
   fake->release();
   leader.join();
@@ -346,7 +343,7 @@ TEST_F(HttpCacheTest, LateArrivalAfterTheLeaderLeftIsServedFromTheCache) {
         ready.fetch_add(1);
         while (!go.load())
           std::this_thread::yield();
-        bodies[i] = cvc::ariadne::resolve(url).content;
+        bodies[i] = cvc::ariadne::resolve(app, url).content;
       });
     while (ready.load() < kThreads)
       std::this_thread::yield();

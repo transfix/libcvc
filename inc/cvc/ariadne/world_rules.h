@@ -23,6 +23,7 @@
 #include <vector>
 
 namespace cvc {
+class app;
 namespace ariadne {
 
 struct LoadResult;
@@ -104,8 +105,9 @@ struct vehicle_look {
 //   vehicle      its body: a preset (humvee, roboracer), with any of `overrides` on top
 //   look         how it is drawn
 //   ranges       what a spawn may set, by setting: mass (kg) and max_speed (m/s), each [lo, hi]
-//   controllers  what may drive it: nav@1 (the navigator), none (it holds still); the first is
-//                a spawn's default
+//   controllers  what may drive it: nav@1 (the navigator), none (it holds still), external (its
+//                intent alone: WorldVehicles::set_intent, the entity's intent keys); the first
+//                is a spawn's default
 struct vehicle_archetype {
   std::string id;
   std::string plant = "jolt";
@@ -161,8 +163,16 @@ struct world_rules {
   // The vehicles a world offers (world: vehicles: archetypes:), none by default. The relay does
   // not read them yet; a local world runtime (SceneWorld) spawns them.
   std::vector<vehicle_archetype> vehicles;
+  // Where else their intents may come from (world: vehicles: intents:): a state path, resolved
+  // as a bind is (a leading / outside the document's prefix), "" none. WorldVehicles reads
+  // `<path>.<id or name>.intent.*` beside each entity's own keys.
+  std::string vehicle_intents;
   // Where they start (world: spawns:).
   spawn_rules spawns;
+  // What avatar() and controller() give when the lists above are empty: the default person and
+  // walker@1. Left as they are.
+  avatar_archetype fallback_avatar{};
+  avatar_controller fallback_controller{};
   bool operator==(const world_rules &) const = default;
   const vehicle_archetype *find_vehicle(const std::string &id) const;
 
@@ -205,6 +215,7 @@ std::string check_world_rules(const world_rules &rules);
 //           look: { file: humvee.glb, scale: 1, yaw: 90, z: -0.5 }   # default: the chassis box
 //           ranges: { mass: [2000, 3500], max_speed: [5, 24.6] }
 //           controllers: [nav@1, none]
+//       intents: /drive             # optional: a second table of intents (a relay's namespace)
 //
 // "" or what is wrong (check_world_rules included). A key it does not know is a warning, pushed
 // onto WARNINGS when given, and so is avatars: catalog:, which the relay's seeded catalog still
@@ -212,9 +223,9 @@ std::string check_world_rules(const world_rules &rules);
 std::string parse_world_block(const Value &content, world_rules &rules,
                               std::vector<std::string> *warnings = nullptr);
 
-// The world: block's parser (register_ari_block), process-wide; idempotent. Without it the loader
-// skips a world: block. arisrv and ServerDocument register it.
-void register_world_block();
+// The world: block's parser (register_ari_block) on `app`; idempotent. Without it the loader
+// skips a world: block. arisrv, AppRuntime and ServerDocument register it.
+void register_world_block(cvc::app &app);
 // The world: block a load kept (register_world_block), or null.
 const Value *find_world_block(const LoadResult &lr);
 

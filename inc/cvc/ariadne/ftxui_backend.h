@@ -51,6 +51,7 @@
 #include <vector>
 
 namespace cvc {
+class app;
 class image;
 namespace ariadne {
 
@@ -140,6 +141,8 @@ public:
   void seed_window_geometry(const WindowGeom &g) override;
   void reset_layout() override; // a new document: windows placed afresh, as when first drawn
   WindowGeom window_geometry() const override;
+  void focus_next_window() override; // the next window to the top (hosted: HostedWindow::raise)
+  void next_window_resizable(bool resizable) override; // hosted: the host's frame resizes it
   void push_id(const char *id) override;
   void pop_id() override;
 
@@ -165,6 +168,9 @@ public:
   void text_value(const char *label, const std::string &value) override;
   void text_line_colored(const char *text, const float rgb[3]) override;
   void text_value_colored(const char *label, const std::string &value, const float rgb[3]) override;
+  // §5.20 a paragraph laid out at its box's width; each link a stop in Tab order (Enter / Space or
+  // a click activates it), underlined, inverted while it has focus.
+  RichTextEvent rich_text(const std::vector<TextRun> &runs, const RichTextOptions &opts) override;
   void separator() override;
   bool unicode_glyphs() const override; // not on the Linux console, a dumb or a VT terminal
   bool button(const char *label) override;
@@ -182,7 +188,7 @@ public:
   void end_item_group() override;
   // (clipboard-set TEXT): an OSC 52 escape, which run() writes after the drain that ran it (the
   // terminal decides; take_clipboard() is it, headless). Hosted: none (TvisionBackend has its own).
-  bool set_clipboard(const std::string &text) override;
+  bool set_clipboard(cvc::app &app, const std::string &text) override;
   std::string take_clipboard();
   // §5.13 the fullscreen view: a layer over the whole screen (Esc leaves). Not hosted: tvision's
   // desktop owns the screen there.
@@ -223,11 +229,11 @@ public:
   // it draws with this backend's own primitives (text_line, set_image + draw_image, ...). It gets
   // the bound value and the Widget and returns the edit; the core owns the cvc::state write. An
   // unregistered type is not handled, so the core draws a placeholder. TvisionBackend inherits it.
-  // Registering also marks the type known (register_known_widget_type), so a document's
-  // requires: [type] and (has? "type") find it. `stream_view` registers this way
+  // Registering also marks the type known to `app` (register_known_widget_type), so a document's
+  // requires: [type] and (has? "type") find it there. `stream_view` registers this way
   // (register_stream_view_widget, stream/stream_view.h).
   using CustomDrawFn = std::function<CustomEdit(const std::string &current, const Widget &w)>;
-  void register_widget(std::string custom_type, CustomDrawFn draw);
+  void register_widget(cvc::app &app, std::string custom_type, CustomDrawFn draw);
   CustomEdit custom_widget(const char *type, const std::string &current, const Widget &w) override;
 
   // Publish (or replace) the image a Kind::Image widget named `name` shows — the terminal
@@ -302,6 +308,8 @@ public:
   struct HostedWindow {
     std::string id, title;
     bool closable = false;
+    bool resizable = true; // the user may resize it (§5.9 `resizable:`)
+    bool raise = false;    // bring it to the front: the core raised it in this walk (§5.9)
     int x = 0, y = 0; // placement from the authored pos / persisted geometry / the host (cells)
     // Outer size per axis: the user's (user_sized), else the authored size, else 0 (fit the
     // content). A size the host gave the window to fit its content is never reported back here,

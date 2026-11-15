@@ -33,6 +33,7 @@
 #include <deque>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <span>
 #include <stdexcept>
@@ -47,17 +48,6 @@ namespace se = cvc::state_exec;
 namespace {
 
 using steady = std::chrono::steady_clock;
-
-// ── the registry ────────────────────────────────────────────────────────────────────────────────
-
-std::mutex &engines_mutex() {
-  static std::mutex m;
-  return m;
-}
-std::map<std::string, std::shared_ptr<ScriptEngine>> &engines() {
-  static std::map<std::string, std::shared_ptr<ScriptEngine>> e;
-  return e;
-}
 
 // ── settings ────────────────────────────────────────────────────────────────────────────────────
 
@@ -195,9 +185,11 @@ struct ActivationRunner {
   // A slice's start: its budget, what its calls reach, and nothing asked for yet (the reply, if
   // any, is this slice's).
   static void open(ScriptSlice &s, std::uint64_t budget, se::environment *env,
-                   const std::function<bool(const std::string &)> &may_call) {
+                   const std::function<bool(const std::string &)> &may_call,
+                   se::exec_context *ctx) {
     s.env_ = env;
     s.may_call_ = may_call ? &may_call : nullptr;
+    s.ctx_ = ctx;
     s.budget_ = budget;
     s.charged_ = 0;
     s.next_ = ScriptSlice::Next::more;
@@ -216,6 +208,7 @@ struct ActivationRunner {
 
   // A slice's end: the reply it had is spent.
   static void close(ScriptSlice &s) {
+    s.ctx_ = nullptr;
     s.replied_ = false;
     s.reply_ = se::value_t();
     s.error_.clear();
@@ -252,22 +245,23 @@ struct ActivationRunner {
   }
 
   // A pure export's activation (ScriptLane::export_pure), run to its end inside the read lane's
-  // eval that called it: a slice at a time, each slice's steps charged to that eval, and the
-  // eval's deadline checked between slices. What a slice asks for is answered at once, with no
-  // loop to make it: a call by call_now() in the read lane's environment `env` (anything else
-  // there is refused), a yield by going on, an await by refusing it.
-  static se::value_t run_pure(ScriptActivation &a, se::environment &env, std::uint64_t slice_steps,
-                              const std::string &name) {
+  // eval that called it, in `ctx` (the calling native's context: the eval's): a slice at a time,
+  // each slice's steps charged to that eval, and the eval's deadline checked between slices. What
+  // a slice asks for is answered at once, with no loop to make it: a call by call_now() in the read
+  // lane's environment `env` (anything else there is refused), a yield by going on, an await by
+  // refusing it.
+  static se::value_t run_pure(ScriptActivation &a, se::exec_context *ctx, se::environment &env,
+                              std::uint64_t slice_steps, const std::string &name) {
     ScriptSlice s;
     s.pure_ = true;
     const std::function<bool(const std::string &)> all; // the environment is the narrowing
     try {
       for (;;) {
-        se::eval_deadline_check(name.c_str());
-        open(s, slice_steps, &env, all);
+        se::eval_deadline_check(ctx, name.c_str());
+        open(s, slice_steps, &env, all, ctx);
         a.step(s);
         if (s.charged_ > 0)
-          if (se::detail::data_step_scope *data = se::detail::data_step_scope::current())
+          if (se::detail::data_step_scope *data = ctx ? ctx->data : nullptr)
             data->stats().add_steps(se::step_kind::data, s.charged_);
         close(s);
         switch (s.next_) {
@@ -278,10 +272,13 @@ struct ActivationRunner {
                  name + ": a pure function can't wait (the read lane runs it to its end)");
           break;
         case ScriptSlice::Next::call:
+          // call_now runs in the slice's context, which close() let go of: open() it again.
+          s.ctx_ = ctx;
           if (!s.call_now(s.function_, s.args_))
             refuse(s, "PermissionError",
                    s.function_ + ": not a function of the read lane (a pure function reaches the "
                                  "state readers and the pure functions only)");
+          s.ctx_ = nullptr;
           break;
         case ScriptSlice::Next::yield: // no frame to give back: on at once
         case ScriptSlice::Next::more:
@@ -294,14 +291,14 @@ struct ActivationRunner {
     }
   }
 
-  // (script-step): run a slice, and say what the loop does next.
-  se::value_t step() {
+  // (script-step): run a slice, in `ctx` (the step's), and say what the loop does next.
+  se::value_t step(se::exec_context *ctx) {
     if (finished || !activation)
       return se::value_t(std::string("done"));
     if (frame_spent(*app, budget.get(), frame_seconds))
       return se::value_t(std::string("yield")); // the reply, if any, waits for the next frame
     ScriptSlice &s = slice;
-    open(s, slice_steps, env, may_call);
+    open(s, slice_steps, env, may_call, ctx);
     const steady::time_point t0 = steady::now();
     const auto settle = [&] {
       if (budget)
@@ -374,8 +371,9 @@ struct runner_anchor {
 // The activation's natives, in its process's own scope.
 void bind_runner(const se::environment_ptr &env, const std::shared_ptr<runner_anchor> &anchor) {
   using args_t = std::span<const se::value_t>;
-  se::builtins::register_fn(env, "script-step",
-                            [anchor](args_t) -> se::value_t { return anchor->run->step(); });
+  se::builtins::register_fn(env, "script-step", [anchor](se::call_args a) -> se::value_t {
+    return anchor->run->step(a.context());
+  });
   // (script-reply (ok value)): what the call or the await came back with, for the next slice.
   se::builtins::register_fn(env, "script-reply", [anchor](args_t a) -> se::value_t {
     if (!a.empty())
@@ -399,36 +397,48 @@ void bind_runner(const se::environment_ptr &env, const std::shared_ptr<runner_an
 
 // ── the registry ────────────────────────────────────────────────────────────────────────────────
 
-void register_script_engine(std::shared_ptr<ScriptEngine> engine) {
+namespace {
+// An app's script engines, by language.
+struct engine_table {
+  static constexpr const char *app_slot = "cvc.ariadne.script-engines";
+  std::mutex m;
+  std::map<std::string, std::shared_ptr<ScriptEngine>> engines;
+};
+} // namespace
+
+void register_script_engine(cvc::app &app, std::shared_ptr<ScriptEngine> engine) {
   if (!engine)
     return;
   const std::string language = engine->language();
   if (language.empty())
     return;
   {
-    std::lock_guard<std::mutex> lock(engines_mutex());
-    engines()[language] = std::move(engine);
+    engine_table &t = app.slot<engine_table>();
+    std::lock_guard<std::mutex> lock(t.m);
+    t.engines[language] = std::move(engine);
   }
   // Its blocks are kept for the runtimes that run them (AppRuntime::use_script_engine).
-  register_ari_block(language, [language](const Value &content, LoadResult &out) {
+  register_ari_block(app, language, [language](const Value &content, LoadResult &out) {
     out.extras.emplace_back(language, content);
   });
 }
 
-void unregister_script_engine(const std::string &language) {
+void unregister_script_engine(cvc::app &app, const std::string &language) {
   std::shared_ptr<ScriptEngine> gone; // let go of outside the lock
-  std::lock_guard<std::mutex> lock(engines_mutex());
-  auto it = engines().find(language);
-  if (it == engines().end())
+  engine_table &t = app.slot<engine_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  auto it = t.engines.find(language);
+  if (it == t.engines.end())
     return;
   gone = std::move(it->second);
-  engines().erase(it);
+  t.engines.erase(it);
 }
 
-std::shared_ptr<ScriptEngine> find_script_engine(const std::string &language) {
-  std::lock_guard<std::mutex> lock(engines_mutex());
-  auto it = engines().find(language);
-  return it == engines().end() ? nullptr : it->second;
+std::shared_ptr<ScriptEngine> find_script_engine(cvc::app &app, const std::string &language) {
+  engine_table &t = app.slot<engine_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  auto it = t.engines.find(language);
+  return it == t.engines.end() ? nullptr : it->second;
 }
 
 // ── ScriptSlice ─────────────────────────────────────────────────────────────────────────────────
@@ -461,9 +471,9 @@ bool ScriptSlice::call_now(const std::string &function, std::span<const se::valu
   // The call is this slice's, not its step's: what it would hand the evaluator to finish (a
   // data job) runs to its end here instead, so the step's own call isn't completed with it.
   struct no_defer {
-    se::detail::data_step_scope *scope = se::detail::data_step_scope::current();
+    se::detail::data_step_scope *scope;
     bool was = scope && scope->defer_allowed();
-    no_defer() {
+    explicit no_defer(se::detail::data_step_scope *s) : scope(s) {
       if (scope)
         scope->allow_defer(false);
     }
@@ -472,11 +482,14 @@ bool ScriptSlice::call_now(const std::string &function, std::span<const se::valu
         scope->allow_defer(was);
     }
   };
+  // In the step's context; outside a step (no context), in one of its own.
+  std::optional<se::exec_context> own;
+  se::exec_context &cx = ctx_ ? *ctx_ : own.emplace();
   se::value_t value;
   try {
-    const no_defer here;
-    const se::detail::native_nesting level(function.c_str());
-    value = (*native)(args);
+    const no_defer here(cx.data);
+    const se::detail::native_nesting level(cx, function.c_str());
+    value = (*native)(se::call_args(args, &cx));
   } catch (const std::exception &e) {
     if (se::is_uncatchable(e))
       throw;
@@ -750,10 +763,9 @@ public:
       : app_(app), activation_(std::move(activation)), name_(std::move(name)),
         slice_steps_(slice_steps), frame_seconds_(frame_seconds), budget_(std::move(budget)),
         may_call_(std::move(may_call)), env_(std::move(env)) {
-    static const se::value_t body = se::parse(kSlicedAsk);
     auto ask = std::make_shared<se::closure>();
     ask->params = {se::symbol{"k"}, se::symbol{"f"}, se::symbol{"a"}};
-    ask->body = {body};
+    ask->body = {se::parse(kSlicedAsk)};
     ask->env_snapshot = env_;
     ask_ = se::value_t(std::move(ask));
   }
@@ -774,13 +786,13 @@ public:
       return false;
     }
     ScriptSlice &s = slice_;
-    ActivationRunner::open(s, slice_steps_, env_.get(), may_call_);
+    ActivationRunner::open(s, slice_steps_, env_.get(), may_call_, ctx_);
     const steady::time_point t0 = steady::now();
     const auto settle = [&] {
       if (budget_)
         budget_->spent += std::chrono::duration<double>(steady::now() - t0).count();
       if (s.charged_ > 0)
-        if (se::detail::data_step_scope *data = se::detail::data_step_scope::current())
+        if (se::detail::data_step_scope *data = ctx_ ? ctx_->data : nullptr)
           data->stats().add_steps(se::step_kind::data, s.charged_);
       ActivationRunner::close(s);
     };
@@ -858,21 +870,23 @@ private:
 namespace {
 
 // A sliced call under its activation's lock (`abs`, absolute): (with-lock key (run)), a call the
-// calling process makes in its environment `env` (call_function), the job starting in the body
-// once the lock is held. The key is written as that process's with-lock takes it.
-se::value_t locked_call(std::unique_ptr<SlicedCall> job, const std::string &abs,
-                        const se::environment_ptr &env, const std::string &name) {
+// calling process makes in its environment `env` (call_function, in `ctx`, the calling native's
+// context), the job starting in the body once the lock is held. The key is written as that
+// process's with-lock takes it.
+se::value_t locked_call(se::exec_context *ctx, std::unique_ptr<SlicedCall> job,
+                        const std::string &abs, const se::environment_ptr &env,
+                        const std::string &name) {
   const se::value_t *with = env ? env->lookup("with-lock") : nullptr;
   const se::detail::lock_ops *ops = with ? se::detail::lock_ops_of(*with) : nullptr;
   if (!ops || !ops->ctx)
     throw se::dsl_error("RuntimeError", name + ": called where with-lock isn't bound, so it "
                                                "can't wait for what its activation runs on");
-  static const se::value_t body = se::parse("(with-lock key (run))");
+  const se::value_t body = se::parse("(with-lock key (run))");
   auto held = std::make_shared<std::unique_ptr<SlicedCall>>(std::move(job));
-  se::native_fn run = [held](std::span<const se::value_t>) -> se::value_t {
+  se::native_fn run = [held](se::call_args a) -> se::value_t {
     if (!*held)
       throw se::dsl_error("RuntimeError", "the call has already run");
-    return se::run_data_job(std::move(*held));
+    return se::run_data_job(a.context(), std::move(*held));
   };
   auto c = std::make_shared<se::closure>();
   c->params = {se::symbol{"key"}, se::symbol{"run"}};
@@ -880,7 +894,7 @@ se::value_t locked_call(std::unique_ptr<SlicedCall> job, const std::string &abs,
   c->env_snapshot = env;
   const se::value_t args[] = {se::value_t(written_key(abs, ops->ctx->root_path)),
                               se::value_t(std::move(run))};
-  return se::call_function(se::value_t(std::move(c)), args, "with-lock");
+  return se::call_function(ctx, se::value_t(std::move(c)), args, "with-lock");
 }
 
 } // namespace
@@ -954,14 +968,15 @@ void ScriptLane::export_activation(const std::string &name, ScriptCall make,
   // activation as the program's own sliced work.
   se::native_fn sliced = [self = self_, app, language, name, make, may_call = options.may_call,
                           slices = options.slice_steps,
-                          lock = options.lock](std::span<const se::value_t> args) -> se::value_t {
+                          lock = options.lock](se::call_args args) -> se::value_t {
     ScriptLane *lane = *self;
     if (!lane)
       throw std::runtime_error(name + ": its document has gone");
-    se::detail::data_step_scope *data = se::detail::data_step_scope::current();
-    // The calling program's process: on the group this thread is pumping (an isolated document's,
-    // S1.9), else on the app's scheduler (group 0).
-    se::exec_group *const group = se::exec_group::current();
+    se::exec_context *const ctx = args.context();
+    se::detail::data_step_scope *data = ctx ? ctx->data : nullptr;
+    // The calling program's process: on the group whose pump runs this call (an isolated
+    // document's, S1.9), else on the app's scheduler (group 0).
+    se::exec_group *const group = se::exec_group::current(ctx);
     const se::process_ptr &proc =
         (group ? group->sched() : app->exec_scheduler()).current_process();
     if (!data || !data->defer_allowed() || !proc)
@@ -982,8 +997,8 @@ void ScriptLane::export_activation(const std::string &name, ScriptCall make,
         std::make_unique<SlicedCall>(*app, std::move(made), name, slice_steps, frame_seconds,
                                      budget_of(*app, language), may_call, proc->state.global_env);
     if (lock.empty())
-      return se::run_data_job(std::move(job));
-    return locked_call(std::move(job), lock_path(lock, lane->prefix()), proc->state.global_env,
+      return se::run_data_job(ctx, std::move(job));
+    return locked_call(ctx, std::move(job), lock_path(lock, lane->prefix()), proc->state.global_env,
                        name);
   };
   runtime_.register_async_work_function(name, std::move(parked), std::move(blocking),
@@ -996,8 +1011,8 @@ void ScriptLane::export_pure(const std::string &name, ScriptCall make, Activatio
   const std::string label = options.name.empty() ? language + "/" + name : options.name;
   runtime_.runtime().register_read_function(
       name,
-      [self = self_, app, language, label, make, slices = options.slice_steps](
-          std::span<const se::value_t> args, se::environment &env) -> se::value_t {
+      [self = self_, app, language, label, make,
+       slices = options.slice_steps](se::call_args args, se::environment &env) -> se::value_t {
         if (!*self)
           throw std::runtime_error(label + ": its document has gone");
         std::shared_ptr<ScriptActivation> made = make(args);
@@ -1007,7 +1022,7 @@ void ScriptLane::export_pure(const std::string &name, ScriptCall make, Activatio
             slices ? slices
                    : count_setting(cvc::state::instance(*app),
                                    "ariadne.limits." + language + "_slice_steps", kSliceSteps);
-        return ActivationRunner::run_pure(*made, env, slice_steps, label);
+        return ActivationRunner::run_pure(*made, args.context(), env, slice_steps, label);
       });
 }
 

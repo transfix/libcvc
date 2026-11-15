@@ -31,18 +31,6 @@
 
 using namespace cvc::state_exec;
 
-// A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
-// scope hold each other, and only the cycle collector frees them
-// (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Reference cycles"). Nothing here runs long enough for a
-// collection to be due, so once every test is done one collection leaves LeakSanitizer only real
-// leaks to report.
-class collect_cycles_at_exit : public ::testing::Environment {
-public:
-  void TearDown() override { collect_cycles(); }
-};
-[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
-    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
-
 namespace {
 
 value_t sym(const char *s) { return value_t{symbol{s}}; }
@@ -64,7 +52,9 @@ value_t nested_mixed(std::size_t n) {
 }
 
 // Run `job` in slices of `slice` nodes. Returns its result and how many step() calls it took.
-std::pair<value_t, int> run_sliced(data_job &job, std::size_t slice) {
+// Step `job` `slice` nodes at a time, in `ctx` (null: none), to its end.
+std::pair<value_t, int> run_sliced(data_job &job, std::size_t slice, exec_context *ctx = nullptr) {
+  job.bind(ctx);
   int calls = 1;
   while (!job.step(slice))
     ++calls;
@@ -128,11 +118,12 @@ TEST(DataJob, SlicedWalksMatchWholeOnes) {
 TEST(DataJob, ConcatChecksTheAllocationLimit) {
   // str-concat's sliced path (a list or dict among its parts) is held to the same allocation
   // limit as its fast path: the same string passed many times can outgrow every part.
-  eval_alloc_guard limit(std::size_t{100});
+  exec_context ctx;
+  eval_alloc_guard limit(ctx, std::size_t{100});
   const value_t big{std::string(60, 'x')};
   auto job = make_concat_job({big, make_list({value_t{int64_t{1}}}), big}, "", "str-concat");
   try {
-    run_sliced(*job, 1);
+    run_sliced(*job, 1, &ctx);
     FAIL() << "expected the allocation limit to stop it";
   } catch (const std::runtime_error &e) {
     EXPECT_NE(std::string(e.what()).find("str-concat"), std::string::npos) << e.what();
@@ -152,7 +143,7 @@ TEST(DataJob, NodesDoNotDependOnTheSlice) {
 TEST(DataJob, CopyKeepsSharingAndCycles) {
   value_t inner = make_list({value_t{int64_t{3}}});
   auto copy = make_copy_job(make_list({inner, inner}));
-  value_t c = run_to_completion(*copy);
+  value_t c = run_to_completion(nullptr, *copy);
   auto &l = *std::get<list_ptr>(c.v);
   EXPECT_EQ(std::get<list_ptr>(l[0].v).get(), std::get<list_ptr>(l[1].v).get());
   EXPECT_NE(std::get<list_ptr>(l[0].v).get(), std::get<list_ptr>(inner.v).get());
@@ -192,9 +183,9 @@ TEST(DataJob, ValueChangedBetweenSlices) {
 }
 
 TEST(DataJob, RunDataJobOutsideAStepRunsToCompletion) {
-  value_t r = run_data_job(make_equal_job(nested_list(100), nested_list(100)));
+  value_t r = run_data_job(nullptr, make_equal_job(nested_list(100), nested_list(100)));
   EXPECT_TRUE(std::get<bool>(r.v));
-  r = run_data_job(make_print_job(nested_list(3)),
+  r = run_data_job(nullptr, make_print_job(nested_list(3)),
                    [](value_t s) { return value_t{std::get<std::string>(s.v) + "!"}; });
   EXPECT_EQ(std::get<std::string>(r.v), "(((1)))!");
 }
@@ -216,7 +207,7 @@ std::vector<std::pair<std::string, value_t>> refused_kinds() {
   return {
       {"closure", value_t{std::make_shared<closure>()}},
       {"native function",
-       value_t{native_fn{[](std::span<const value_t>) -> value_t { return nil_value; }}}},
+       value_t{native_fn{[](std::span<const value_t>) -> value_t { return nil_value(); }}}},
       {"generator", value_t{std::make_shared<generator>(std::make_shared<environment>())}},
       {"future", make_async_future(call)},
       {"future", detail::make_awaitable_handle(call)},
@@ -290,11 +281,12 @@ TEST(DataJob, IsolatingCopyRefusesInALaterSlice) {
     EXPECT_EQ(job->nodes(), 102u); // the 101 elements and the dict's "k"
 
     bool written = false;
-    EXPECT_THROW(run_data_job(make_copy_job(make_list({value_t{int64_t{1}}, v}), copy_mode::isolate,
+    EXPECT_THROW(run_data_job(nullptr,
+                              make_copy_job(make_list({value_t{int64_t{1}}, v}), copy_mode::isolate,
                                             "state-data-set"),
                               [&](value_t) {
                                 written = true;
-                                return nil_value;
+                                return nil_value();
                               }),
                  std::runtime_error);
     EXPECT_FALSE(written);
@@ -384,7 +376,7 @@ TEST(DataJob, IsolatingCopyKeepsWhatItMemoizedAlive) {
     for (int i = 0; i < 20; ++i)
       ASSERT_FALSE(job->step(1));
     const std::weak_ptr<std::vector<value_t>> first = std::get<list_ptr>((*big)[0].v);
-    (*big)[0] = nil_value; // copied, and in the memo
+    (*big)[0] = nil_value(); // copied, and in the memo
     EXPECT_FALSE(first.expired()) << "a memoized source was freed mid-copy";
     const value_t c = run_sliced(*job, 1).first;
     EXPECT_EQ(to_string((*std::get<list_ptr>(c.v))[0]), "(0)");
@@ -430,11 +422,11 @@ TEST(DataJob, ShareModeStillSharesClosures) {
   const value_t lock = detail::make_lock_ops(nullptr);
   const value_t box = make_dict(
       {{"__class__", make_dict({{"__name__", value_t{std::string("Box")}}})}, {"n", value_t{1}}});
-  const value_t exc = make_exception(exception_class("KeyError"), "k", nil_value, "dsl");
-  const value_t source =
-      make_list({value_t{clo}, value_t{gen},
-                 value_t{native_fn{[](std::span<const value_t>) -> value_t { return nil_value; }}},
-                 future, lock, box, exc});
+  const value_t exc = make_exception(exception_class("KeyError"), "k", nil_value(), "dsl");
+  const value_t source = make_list(
+      {value_t{clo}, value_t{gen},
+       value_t{native_fn{[](std::span<const value_t>) -> value_t { return nil_value(); }}}, future,
+       lock, box, exc});
   for (bool explicit_mode : {false, true}) {
     SCOPED_TRACE(explicit_mode ? "copy_mode::share" : "the defaults");
     auto job = explicit_mode ? make_copy_job(source, copy_mode::share, "state-data-get")
@@ -461,10 +453,12 @@ TEST(DataJob, ShareModeStillSharesClosures) {
 
 TEST(DataJob, CopyNamesItsCallerAtTheDeadline) {
   // The copy's deadline names its caller: state-data-get by default, as before.
-  eval_deadline_guard spent(0.0);
+  exec_context ctx;
+  eval_deadline_guard spent(ctx, 0.0);
   const value_t v = make_list({value_t{int64_t{1}}});
-  const auto timeout_of = [](data_job &job) -> std::string {
+  const auto timeout_of = [&ctx](data_job &job) -> std::string {
     try {
+      job.bind(&ctx);
       job.step(0);
     } catch (const evaluation_timeout &e) {
       return e.what();
@@ -567,7 +561,7 @@ TEST(DataJob, ARestoredUserClassNamedLikeABuiltinStaysAUserClass) {
   cvc::app app;
   cvc::state &root = cvc::state::instance(app);
   const value_t own_init{std::make_shared<closure>()};
-  const value_t native{native_fn{[](std::span<const value_t>) -> value_t { return nil_value; }}};
+  const value_t native{native_fn{[](std::span<const value_t>) -> value_t { return nil_value(); }}};
   const value_t exception{exception_class("Exception")};
   const value_t named{std::string("ValueError")};
   const std::vector<value_t> classes = {
@@ -652,10 +646,10 @@ TEST(DataStepsStateDataSet, ASlicedStoreKeepsWhatItCopiedAlive) {
   }
   ASSERT_FALSE(w.finished(pid)) << "the copy ended before the drop";
   const std::weak_ptr<std::vector<value_t>> first = std::get<list_ptr>((*big)[0].v);
-  (*big)[0] = nil_value; // the other process's set-nth
+  (*big)[0] = nil_value(); // the other process's set-nth
   EXPECT_FALSE(first.expired()) << "a copied source was freed mid-copy";
   ASSERT_TRUE(w.step_until([&] { return w.finished(pid); }));
-  const value_t got = w.sched.get_result(pid).value_or(nil_value);
+  const value_t got = w.sched.get_result(pid).value_or(nil_value());
   ASSERT_TRUE(std::holds_alternative<list_ptr>(got.v)) << w.outcome(pid);
   EXPECT_EQ(to_string((*std::get<list_ptr>(got.v))[0]), R"(("old" 0))");
   EXPECT_EQ(std::get<list_ptr>(got.v)->size(), 400u);
@@ -850,7 +844,7 @@ TEST_F(DataStepsEvaluator, SnapshotWhileAJobsLambdaRunsRunsTheCallAgain) {
       return; // no scope, or patched already
     for (auto &[name, val] : env->bindings)
       e->set(name, val);
-    e->outer = stdlib_registry::shared_scope();
+    e->outer = stdlib_registry::make_scope();
   };
   patch(back.global_env);
   for (auto &f : back.stack) {
@@ -1316,16 +1310,17 @@ TEST(DataJob, JsonJobsMatchWholeRunsInAnySlice) {
 
 TEST(DataJob, JsonJobsAreHeldToTheAllocationLimit) {
   const std::string doc = feed_json(100);
+  exec_context ctx;
   {
-    eval_alloc_guard limit(std::size_t{4096});
+    eval_alloc_guard limit(ctx, std::size_t{4096});
     auto parse = make_json_parse_job(doc);
-    EXPECT_THROW(run_sliced(*parse, 16), std::runtime_error);
+    EXPECT_THROW(run_sliced(*parse, 16, &ctx), std::runtime_error);
   }
   auto parse = make_json_parse_job(doc);
-  const value_t v = run_sliced(*parse, 0).first;
-  eval_alloc_guard limit(std::size_t{4096});
+  const value_t v = run_sliced(*parse, 0, &ctx).first;
+  eval_alloc_guard limit(ctx, std::size_t{4096});
   auto encode = make_json_encode_job(v);
-  EXPECT_THROW(run_sliced(*encode, 16), std::runtime_error);
+  EXPECT_THROW(run_sliced(*encode, 16, &ctx), std::runtime_error);
 }
 
 TEST_F(DataStepsJson, JsonParseAndEncodeRunASliceAStep) {
@@ -1336,9 +1331,9 @@ TEST_F(DataStepsJson, JsonParseAndEncodeRunASliceAStep) {
   const auto info = sched.get_process_info(pid);
   ASSERT_EQ(info->status, process_status::terminated) << error(pid);
   auto parse = make_json_parse_job(doc);
-  auto encode = make_json_encode_job(run_to_completion(*parse), 2);
+  auto encode = make_json_encode_job(run_to_completion(nullptr, *parse), 2);
   EXPECT_EQ(std::get<std::string>(sched.get_result(pid)->v),
-            std::get<std::string>(run_to_completion(*encode).v));
+            std::get<std::string>(run_to_completion(nullptr, *encode).v));
   EXPECT_GT(info->data_steps, 100u);
 }
 

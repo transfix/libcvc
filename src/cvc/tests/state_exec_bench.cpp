@@ -2779,7 +2779,7 @@ struct world {
       // The group sets what the branch below sets (the hosts' parser and data defaults, the watch
       // root), and its own registry and math.random stream, which its scheduler binds.
       if (o.base == "frozen")
-        env = se::environment::extend(se::frozen_builtins());
+        env = se::environment::extend(se::frozen_builtins(*app));
       else if (o.base != "own")
         throw std::invalid_argument("base=" + o.base + ": not own or frozen");
       se::exec_group::options go;
@@ -3162,6 +3162,18 @@ drive_cfg driver_of(const point_ctx &pc) {
   d.driver = pc.s("driver", "spin");
   d.timeout = pc.cfg.timeout;
   return d;
+}
+
+// The slice_steps sweep key (threaded execution's Stage S, threaded-impl/S2.md S2-Q12): the steps
+// one pick of the async scheduler may run of its process (a run). The bench sets it only above 1,
+// so a point at 1 builds the scheduler exactly as a binary without the key did (today's loop,
+// step_once). Async only: the sync scheduler has no runs.
+int64_t slice_of(const point_ctx &pc) { return pc.i("slice_steps", 1); }
+void apply_slice(world &w, int64_t slice) {
+  if (slice <= 1)
+    return;
+  if (se::async_scheduler *as = w.as())
+    as->set_slice(static_cast<uint64_t>(slice));
 }
 
 // Ariadne's default action limits (ariadne.cpp: ariadne.limits.action_max_steps 5000,
@@ -3628,6 +3640,49 @@ const se::value_t &forever_ast() {
   return a;
 }
 
+// sched.scaling's rep, and sched.slice_fair's: `p` endless loops on w (each one's options tuned by
+// `tune`), run until every one has started, then exactly `steps` steps measured. The step count is
+// checked, and that every loop still runs (a rep where one ended fails). Records the fewest eval
+// steps a running loop got, the most, and their ratio (extra.fairness); kills the loops. Returns
+// the fewest and the most ({0, 0} when no loop ran).
+std::pair<uint64_t, uint64_t>
+run_endless_loops(world &w, meter &m, rep_out &o, int64_t p, uint64_t steps,
+                  const std::function<void(se::execute_options &)> &tune = nullptr) {
+  std::vector<int> pids;
+  for (int64_t j = 0; j < p; ++j) {
+    se::execute_options opts;
+    opts.env = w.process_env("extend");
+    if (tune)
+      tune(opts);
+    pids.push_back(w.submit(forever_ast(), opts));
+  }
+  run_steps(w, static_cast<uint64_t>(2 * p + 1000)); // every process has started
+  const uint64_t steps0 = w.total_steps();
+  m.begin();
+  run_steps(w, steps);
+  m.end();
+  o.steps_total = w.total_steps() - steps0;
+  if (*o.steps_total != steps)
+    o.fail("ran " + istr(int64_t(*o.steps_total)) + " steps, expected " + istr(int64_t(steps)));
+  uint64_t lo = UINT64_MAX, hi = 0;
+  for (int pid : pids) {
+    auto info = w.info(pid);
+    if (!info || se::is_finished(info->status)) {
+      o.fail("a loop ended: " + end_reason(w, pid));
+      continue;
+    }
+    lo = std::min(lo, info->eval_steps);
+    hi = std::max(hi, info->eval_steps);
+  }
+  if (hi)
+    o.extra.i("process_steps_min", int64_t(lo))
+        .i("process_steps_max", int64_t(hi))
+        .d("fairness", double(lo) / double(hi));
+  for (int pid : pids)
+    w.kill(pid);
+  return {hi ? lo : 0, hi};
+}
+
 // A JSON array of integers.
 std::string json_ints(const std::vector<int64_t> &v) {
   std::string s = "[";
@@ -3729,6 +3784,24 @@ void add_policy_and_locks(scenario &sc) {
     if (locks != "none" && locks != "private" && locks != "shared") {
       std::printf("  %-28s %-9s %-34s skipped: locks=%s is not none, private or shared\n",
                   pc.sc.name.c_str(), exec.c_str(), params_text(pc.params).c_str(), locks.c_str());
+      return false;
+    }
+    return !prev || prev(exec, pc);
+  };
+}
+
+// The slice_steps sweep key (slice_of, apply_slice), on a scenario's async points: `sizes` by
+// default, `smoke` with --smoke. A value that is not a step count of 1 or more (0, a word) is
+// skipped rather than run at 1, where its records would name a point they did not measure.
+void add_slice_steps(scenario &sc, std::vector<std::string> sizes, std::vector<std::string> smoke) {
+  sc.sizes.push_back({"slice_steps", std::move(sizes)});
+  sc.smoke.push_back({"slice_steps", std::move(smoke)});
+  sc.async_only.insert("slice_steps");
+  sc.accept = [prev = std::move(sc.accept)](const std::string &exec, const point_ctx &pc) {
+    const std::string v = pc.s("slice_steps", "1");
+    if (pc.i("slice_steps", 1) < 1 || istr(pc.i("slice_steps", 1)) != v) {
+      std::printf("  %-28s %-9s %-34s skipped: slice_steps=%s is not a step count of 1 or more\n",
+                  pc.sc.name.c_str(), exec.c_str(), params_text(pc.params).c_str(), v.c_str());
       return false;
     }
     return !prev || prev(exec, pc);
@@ -3936,15 +4009,16 @@ void xt_note(const se::detail::lock_note &n) {
     xt().posted[n.home].store(now_ns(), std::memory_order_release);
 }
 
-// Installs xt_note for its lifetime (the hooks are process-wide; the library loads them at each
-// point, and every hook left null is skipped).
+// Installs xt_note on `mgr` for its lifetime (the hooks are the manager's; the library loads them
+// at each point, and every hook left null is skipped).
 struct xt_hooks_scope {
   se::detail::lock_test_hooks hooks;
-  xt_hooks_scope() {
+  se::lock_manager &mgr;
+  explicit xt_hooks_scope(se::lock_manager &m) : mgr(m) {
     hooks.cross_home_note = &xt_note;
-    se::detail::set_lock_test_hooks(&hooks);
+    mgr.set_test_hooks(&hooks);
   }
-  ~xt_hooks_scope() { se::detail::set_lock_test_hooks(nullptr); }
+  ~xt_hooks_scope() { mgr.set_test_hooks(nullptr); }
   xt_hooks_scope(const xt_hooks_scope &) = delete;
   xt_hooks_scope &operator=(const xt_hooks_scope &) = delete;
 };
@@ -4069,9 +4143,8 @@ int64_t run_independent(int64_t count, const mt_prog &p, int64_t runs, const se:
       me.error = std::string("exception: ") + e.what();
       ready.fetch_add(1);
     }
-    // The cycles the runs left (fib's defun binds a closure in the scope it captured): only this
-    // thread's collector tracks them (heap.h), and a leak checker would report them.
-    se::collect_cycles();
+    // The cycles the runs left (fib's defun binds a closure in the scope it captured) are the
+    // evaluator's registry's, collected as it goes (heap.h).
   };
   ws.clear();
   ws.resize(std::size_t(count));
@@ -4260,12 +4333,11 @@ int64_t run_multi_exec(cvc::app *app, const std::string &prog, const mt_prog &p,
       ++finished;
     }
     cv.notify_one();
-    // Outside the span: the neighbour's bystander is killed, and the cycles the runs left (each
-    // fib run's defun) are collected by the only collector that tracks them, this thread's.
+    // Outside the span: the neighbour's bystander is killed. The cycles the runs left (each fib
+    // run's defun) are the world's scheduler's registry's, collected as it goes.
     if (tree)
       post(*worlds[(j + 1) % n]->async, ws[(j + 1) % n].bystander,
            se::control_cmd{se::control_cmd::kind::kill});
-    se::collect_cycles();
   };
   // Joins the threads before the worlds go, whatever ends the run.
   struct joiner {
@@ -4407,9 +4479,10 @@ int64_t run_groups(cvc::exec_pool &pool, const std::vector<se::exec_group *> &gs
     round.clear();
     for (std::size_t k : live)
       round.push_back(gs[k]);
-    pool.pump_all(round, kGroupSlice, std::chrono::steady_clock::time_point::max());
+    const std::vector<se::exec_group *> failed =
+        pool.pump_all(round, kGroupSlice, std::chrono::steady_clock::time_point::max());
     ++out.rounds;
-    for (se::exec_group *g : pool.failed_groups())
+    for (se::exec_group *g : failed)
       if (out.error.empty())
         out.error = g->opts().name + " failed: a C++ exception escaped its pump";
     std::size_t kept = 0;
@@ -4473,9 +4546,10 @@ void flood_groups(cvc::exec_pool &pool, const std::vector<se::exec_group *> &gs,
   for (std::size_t i = b; i < e; ++i)
     live.push_back({i, gs[(i - b) % gs.size()]->execute(src[i])});
   while (!live.empty() && out.error.empty()) {
-    pool.pump_all(gs, kGroupSlice, std::chrono::steady_clock::time_point::max());
+    const std::vector<se::exec_group *> failed =
+        pool.pump_all(gs, kGroupSlice, std::chrono::steady_clock::time_point::max());
     ++out.rounds;
-    for (se::exec_group *g : pool.failed_groups())
+    for (se::exec_group *g : failed)
       if (out.error.empty())
         out.error = g->opts().name + " failed: a C++ exception escaped its pump";
     std::size_t kept = 0;
@@ -4604,6 +4678,10 @@ std::vector<scenario> make_scenarios() {
                   params_text(pc.params).c_str(), why.c_str());
       return false;
     };
+    // slice_steps (threaded execution's Stage S): the steps one pick may run of the process; 1 is
+    // today's loop. Swept, not run by default (--size slice_steps=1,16,64,256,1024), and paired in
+    // one binary for the Stage S gate (--pair slice_steps=1:256 --geomean-better 20).
+    add_slice_steps(sc, {"1"}, {"1", "256"});
     add_policy_and_locks(sc);
     const eval_prog *pp = &p;
     sc.run = [pp](point_ctx &pc) {
@@ -4612,9 +4690,11 @@ std::vector<scenario> make_scenarios() {
       world_opts wo = world_opts::of(pc);
       wo.group = pc.s("driver", "spin") == "group";
       wo.base = pc.s("base", "own");
+      const int64_t slice = slice_of(pc);
       auto app = make_app();
       pc.reps([&](meter &m, rep_out &o) {
         world w(pc.executor, app.get(), wo);
+        apply_slice(w, slice);
         o.iterations = pp->iters(pc);
         o.programs = 1;
         run_single(w, pc, m, o, ast, expect);
@@ -4908,37 +4988,50 @@ std::vector<scenario> make_scenarios() {
       auto app = make_app();
       pc.reps([&](meter &m, rep_out &o) {
         world w(pc.executor, app.get());
-        std::vector<int> pids;
-        for (int64_t j = 0; j < p; ++j) {
-          se::execute_options opts;
-          opts.env = w.process_env("extend");
-          pids.push_back(w.submit(forever_ast(), opts));
-        }
-        run_steps(w, static_cast<uint64_t>(2 * p + 1000)); // every process has started
-        const uint64_t steps0 = w.total_steps();
-        m.begin();
-        run_steps(w, steps);
-        m.end();
-        o.steps_total = w.total_steps() - steps0;
-        if (*o.steps_total != steps)
-          o.fail("ran " + istr(int64_t(*o.steps_total)) + " steps, expected " +
-                 istr(int64_t(steps)));
-        uint64_t lo = UINT64_MAX, hi = 0;
-        for (int pid : pids) {
-          auto info = w.info(pid);
-          if (!info || se::is_finished(info->status)) {
-            o.fail("a loop ended: " + end_reason(w, pid));
-            continue;
-          }
-          lo = std::min(lo, info->eval_steps);
-          hi = std::max(hi, info->eval_steps);
-        }
+        run_endless_loops(w, m, o, p, steps);
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+  // sched.slice_fair (threaded execution's Stage S): what runs of slice_steps cost round robin's
+  // fairness, on sched.scaling's measurement. step_time=on arms max_step_time on every loop, which
+  // keeps one step a pick at any slice_steps (S2-Q12), so there 256 should change nothing.
+  {
+    scenario sc;
+    sc.name = "sched.slice_fair";
+    sc.what = "p (3) equal endless loops under round robin, warmed up; then exactly `steps` "
+              "steps timed at slice_steps 1 and 256: the fewest steps a loop got over the most "
+              "(extra.fairness) and the most less the fewest (extra.process_steps_spread); "
+              "step_time=on arms max_step_time (1e6 s) on each loop, which keeps one step a pick";
+    sc.executors = {"async"};
+    sc.sizes = {{"p", {"3"}}, {"steps", {"50000"}}, {"step_time", {"off", "on"}}};
+    sc.smoke = {{"p", {"3"}}, {"steps", {"2000"}}, {"step_time", {"off", "on"}}};
+    sc.accept = [](const std::string &exec, const point_ctx &pc) {
+      const std::string st = pc.s("step_time", "off");
+      if (st == "off" || st == "on")
+        return true;
+      std::printf("  %-28s %-9s %-34s skipped: step_time=%s is not off or on\n", pc.sc.name.c_str(),
+                  exec.c_str(), params_text(pc.params).c_str(), st.c_str());
+      return false;
+    };
+    // Both values by default: the point exists to set them side by side
+    // (compare --pair slice_steps=1:256).
+    add_slice_steps(sc, {"1", "256"}, {"1", "256"});
+    sc.run = [](point_ctx &pc) {
+      const int64_t p = pc.i("p");
+      const uint64_t steps = static_cast<uint64_t>(pc.i("steps"));
+      const bool step_time = pc.s("step_time", "off") == "on";
+      const int64_t slice = slice_of(pc);
+      auto app = make_app();
+      pc.reps([&](meter &m, rep_out &o) {
+        world w(pc.executor, app.get());
+        apply_slice(w, slice);
+        const auto [lo, hi] = run_endless_loops(w, m, o, p, steps, [&](se::execute_options &opts) {
+          if (step_time)
+            opts.max_step_time = 1e6;
+        });
         if (hi)
-          o.extra.i("process_steps_min", int64_t(lo))
-              .i("process_steps_max", int64_t(hi))
-              .d("fairness", double(lo) / double(hi));
-        for (int pid : pids)
-          w.kill(pid);
+          o.extra.i("process_steps_spread", int64_t(hi - lo));
       });
     };
     all.push_back(std::move(sc));
@@ -6165,7 +6258,21 @@ std::vector<scenario> make_scenarios() {
             "max_step_time = 1e6 s (a per-step deadline)",
             {"async"},
             {{"n", {"40000"}}},
-            {{"n", {"300"}}}}}) {
+            {{"n", {"300"}}}},
+           // An Ariadne action's process (threaded execution's Stage S): all three of the limits
+           // Ariadne arms (arm_ariadne_limits), so every step pays a step-cap test, the deadline
+           // guard, and the memory tracker's lookups for the alloc guard and the heap accounting.
+           // Its loop must finish under them: 27 steps an iteration and 20 more
+           // (state_exec_bench_gates.cmake) keep n 150 at 4070 steps, under the 5000-step cap and
+           // far short of max_time's midpoint; n above 184 is killed at the cap.
+           {"ariadne",
+            "Ariadne's action limits, max_steps 5000, max_time 0.1 s and max_memory 4 MiB, on a "
+            "loop sized to finish under them (n 150: 4070 steps)",
+            {"sync", "async"},
+            {{"n", {"150"}}},
+            // ~0.5 ms an iteration in a Debug build (max_time_ariadne's note): 30 stay well
+            // under the time limit there.
+            {{"n", {"30"}}}}}) {
     scenario sc;
     sc.name = std::string("limits.") + lk.name;
     sc.what = std::string("the arith_loop process with ") + lk.what;
@@ -6175,14 +6282,19 @@ std::vector<scenario> make_scenarios() {
     sc.sizes.push_back({"driver", {"spin"}});
     sc.smoke.push_back({"driver", {"spin"}});
     sc.async_only = {"driver"};
+    // slice_steps (Stage S): limits.max_step_time keeps one step a pick at any value (S2-Q12), and
+    // limits.ariadne is an Ariadne action's shape. Swept, not run by default.
+    add_slice_steps(sc, {"1"}, {"1", "256"});
     const std::string limit = lk.name;
     sc.run = [limit](point_ctx &pc) {
       const int64_t n = pc.i("n");
       const se::value_t ast = se::parse(loop_src(n, "(set s 0)", "(set s (+ s i))", "s"));
       const std::string expect = istr(n * (n - 1) / 2);
+      const int64_t slice = slice_of(pc);
       auto app = make_app();
       pc.reps([&](meter &m, rep_out &o) {
         world w(pc.executor, app.get());
+        apply_slice(w, slice);
         o.iterations = n;
         run_single(w, pc, m, o, ast, expect, [&](se::execute_options &opts) {
           if (limit == "max_time")
@@ -6195,6 +6307,8 @@ std::vector<scenario> make_scenarios() {
             opts.max_steps = uint64_t(1) << 62;
           else if (limit == "max_step_time")
             opts.max_step_time = 1e6;
+          else if (limit == "ariadne")
+            arm_ariadne_limits(opts);
         });
       });
     };
@@ -6708,7 +6822,7 @@ std::vector<scenario> make_scenarios() {
         c.node_id = "local";
         if (chroot)
           se::apply_chroot(c, root, prefix(k));
-        se::environment_ptr env = se::environment::extend(se::frozen_builtins());
+        se::environment_ptr env = se::environment::extend(se::frozen_builtins(*app));
         se::register_intrinsics(env, &c);
         return env;
       });
@@ -6866,7 +6980,7 @@ std::vector<scenario> make_scenarios() {
         o.latency_ns.reserve(std::size_t(frames));
         const std::vector<int64_t> before = ticks();
         const cvc::pool_stats s0 = pp.pool.stats();
-        const uint64_t w0 = cvc::exec_pool_worker_pumps_total();
+        const uint64_t w0 = s0.worker_pumps;
         const std::vector<se::exec_group *> where0 = placement();
         const uint64_t steps0 = steps(where0);
         const auto limit = static_cast<int64_t>(pc.cfg.timeout * 1e9);
@@ -6883,7 +6997,7 @@ std::vector<scenario> make_scenarios() {
         }
         m.end();
         const cvc::pool_stats s1 = pp.pool.stats();
-        const uint64_t w1 = cvc::exec_pool_worker_pumps_total();
+        const uint64_t w1 = s1.worker_pumps;
         const std::vector<se::exec_group *> where1 = placement();
         const bool moved = where1 != where0; // a group left behind may be gone: not counted
         const uint64_t steps1 = moved ? steps0 : steps(where1);
@@ -7983,7 +8097,7 @@ std::vector<scenario> make_scenarios() {
           if (run == 1) {
             s0 = wo.manager->stats();
             if (hot)
-              hooks.emplace();
+              hooks.emplace(*wo.manager);
             m.begin();
           }
           t0[run] = now_ns();

@@ -165,7 +165,9 @@ public:
   // and before the load hooks, requires: and init:. From the second load on, each engine that ran a
   // block is unloaded first, and its lane's hooks dropped. A scripting host does this for each
   // runtime it lends its engine to (python::Engine::attach). An engine of a language already used
-  // replaces that one. Returns the engine's lane.
+  // replaces that one. The engine is also registered on this runtime's app
+  // (register_script_engine), so the app's documents see its tokens and its block. Returns the
+  // engine's lane.
   ScriptLane &use_script_engine(std::shared_ptr<ScriptEngine> engine);
   // The lane of the engine this runtime uses for `language`, or null.
   ScriptLane *script_lane(const std::string &language) const;
@@ -174,7 +176,7 @@ public:
   void script_hooks_changed();
   // Work a host extension does every frame: `hook` runs at the end of every drain(), on its
   // thread, after the document's programs and the scene service. A scripting host runs a Python
-  // program's per-frame work here (pycvc_gl.ariadne.Host's events, on_frame hooks and watches), so
+  // program's per-frame work here (pycvc.ari.Host's events, on_frame hooks and watches), so
   // it runs whichever loop drives the frames. Hooks run in the order added.
   void add_frame_hook(std::function<void()> hook);
 
@@ -294,6 +296,12 @@ public:
   // app.world_clock() by drain() and publishing `physics.stats.*` (scene_world.h). Null when an
   // adapter realizes the scene (it runs the same world beside its drawing) or the scene has none.
   SceneWorld *scene_world() const { return world_.get(); }
+  // The scene's world wherever it runs: this runtime's (scene_world()), else its adapter's
+  // (SceneAdapter::scene_world). Null when the document has none. For a host that reaches into
+  // it (its vehicles) on the thread that drains this runtime.
+  SceneWorld *running_world() const {
+    return world_ ? world_.get() : scene_ ? scene_->scene_world() : nullptr;
+  }
 
   // The built-in sim.step and sim.restart (sim_transport.ari's Step and Restart buttons, and any
   // document's bare `on: sim.step` / `on: sim.restart`), which the constructor registers. A host's

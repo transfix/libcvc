@@ -50,6 +50,9 @@ PYSTD="$(dirname "$SP_DEPS")"                       # .../lib/python3.12 (stdlib
 PXA="$(find "$INST" -name '_pycvc.a' 2>/dev/null | head -1)"
 GLA="$(find "$INST" -name '_pycvc_gl.a' 2>/dev/null | head -1)"
 [ -n "$PXA" ] && [ -n "$GLA" ] || { echo "link-host: pycvc archives not found under $INST" >&2; exit 1; }
+# pycvc.ari, the Host that pycvc_gl.ariadne is: pure Python, installed beside pycvc.py.
+ARI_PY="$(dirname "$PXA")/_pycvc_ari.py"
+[ -f "$ARI_PY" ] || { echo "link-host: $ARI_PY not found (pycvc.ari, which pycvc_gl.ariadne is)" >&2; exit 1; }
 
 # The Python C extensions, from the deps prefix's share/python-wasm/*.inittab
 # manifests: each lists a package's extensions (dotted module, renamed init symbol,
@@ -158,6 +161,7 @@ DEP_LIBS=("$DEPS"/lib/*.a)
     --js-library "$DEPS/lib/vtkWebAssemblyRenderWindowInteractor.js" \
     --embed-file "${PYSTD}@/py/lib/python3.12" \
     --embed-file "$(dirname "$PXA")/pycvc.py@/py/lib/python3.12/site-packages/pycvc.py" \
+    --embed-file "${ARI_PY}@/py/lib/python3.12/site-packages/_pycvc_ari.py" \
     --embed-file "$(dirname "$GLA")@/py/lib/python3.12/site-packages/pycvc_gl" \
     ${VTK_EMBED[@]+"${VTK_EMBED[@]}"} \
     --pre-js "$OUT/pre.js" \

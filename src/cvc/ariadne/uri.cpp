@@ -1,12 +1,13 @@
-// Ariadne — the shared URI resolver (roadmap §13). See uri.h. Backend-free and app-free for
-// the built-in `file` scheme; other schemes are pluggable handlers. No yaml dependency — this
-// resolves bytes; the loader parses them.
+// Ariadne — the shared URI resolver (roadmap §13). See uri.h. Backend-free; each app has its own
+// handlers and caps, the built-in `file` scheme included. No yaml dependency — this resolves
+// bytes; the loader parses them.
 
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cvc/ariadne/uri.h>
+#include <cvc/core/app.h>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -40,22 +41,24 @@ namespace ariadne {
 
 namespace {
 
-std::mutex &uri_mutex() {
-  static std::mutex m;
-  return m;
-}
-std::map<std::string, UriHandler> &uri_registry() {
-  static std::map<std::string, UriHandler> r;
-  return r;
-}
-std::map<std::string, UriStoreHandler> &uri_store_registry() { // §13.10 write handlers
-  static std::map<std::string, UriStoreHandler> r;
-  return r;
-}
-std::map<std::string, UriAsyncHandler> &uri_async_registry() { // non-blocking forms (L4)
-  static std::map<std::string, UriAsyncHandler> r;
-  return r;
-}
+// The default file read/store byte cap: an .ari fragment or a saved blob larger than this is
+// almost certainly a mistake (or an attack), so the reader/writer refuses rather than OOM /
+// write-something-unreadable. Configurable per app via set_resolve_file_byte_cap /
+// set_store_file_byte_cap (0 = unlimited); a host drives them from the state tree
+// (sync_resolver_caps_from_state).
+constexpr std::size_t kDefaultFileByteCap = 16u * 1024u * 1024u; // 16 MiB
+
+// An app's URI handlers and file byte caps.
+struct uri_table {
+  static constexpr const char *app_slot = "cvc.ariadne.uri";
+  std::mutex m;
+  std::map<std::string, UriHandler> handlers;
+  std::map<std::string, UriStoreHandler> store_handlers; // §13.10 write handlers
+  std::map<std::string, UriAsyncHandler> async_handlers; // non-blocking forms (L4)
+  std::atomic<std::size_t> resolve_cap{kDefaultFileByteCap};
+  std::atomic<std::size_t> store_cap{kDefaultFileByteCap};
+};
+uri_table &uris(cvc::app &app) { return app.slot<uri_table>(); }
 
 std::string to_lower(std::string s) {
   std::transform(s.begin(), s.end(), s.begin(),
@@ -63,23 +66,22 @@ std::string to_lower(std::string s) {
   return s;
 }
 
-// A per-process, unpredictable token for temp-file names (the Windows fallback path; POSIX uses
-// mkstemps for exclusive creation instead). Computed once from random_device.
-[[maybe_unused]] const std::string &proc_temp_token() {
-  static const std::string tok = [] {
-    std::random_device rd;
-    std::ostringstream os;
-    os << std::hex << rd() << rd(); // ~64 bits of entropy
-    return os.str();
-  }();
-  return tok;
+// An unpredictable token for a temp-file name (the Windows fallback path; POSIX uses mkstemps for
+// exclusive creation instead): about 64 bits from random_device, drawn per name.
+[[maybe_unused]] std::string temp_token() {
+  std::random_device rd;
+  std::ostringstream os;
+  os << std::hex << rd() << rd() << rd() << rd();
+  return os.str();
 }
 
-// Whether a host has REGISTERED a "file" handler (overriding the built-in). resolve() honors such
-// an override; resolve_to_file must too, rather than short-circuiting to the raw on-disk path.
-bool file_scheme_overridden() {
-  std::lock_guard<std::mutex> lock(uri_mutex());
-  return uri_registry().find("file") != uri_registry().end();
+// Whether `app`'s host has REGISTERED a "file" handler (overriding the built-in). resolve()
+// honors such an override; resolve_to_file must too, rather than short-circuiting to the raw
+// on-disk path.
+bool file_scheme_overridden(cvc::app &app) {
+  uri_table &t = uris(app);
+  std::lock_guard<std::mutex> lock(t.m);
+  return t.handlers.find("file") != t.handlers.end();
 }
 
 // Create a FRESH file in `dir` named "<prefix>XXXXXX<suffix>", write `content`, return its path
@@ -125,9 +127,7 @@ std::string write_new_file(const std::filesystem::path &dir, const std::string &
   }
   return tmpl; // mkstemps rewrote the XXXXXX in place
 #else
-  static std::atomic<std::uint64_t> counter{0};
-  const std::uint64_t n = counter.fetch_add(1);
-  const fs::path path = dir / (prefix + proc_temp_token() + "-" + std::to_string(n) + suffix);
+  const fs::path path = dir / (prefix + temp_token() + suffix);
   std::ofstream out(path, std::ios::binary);
   if (!out) {
     err = "cannot create a file in '" + dir.string() + "'";
@@ -145,25 +145,10 @@ std::string write_new_file(const std::filesystem::path &dir, const std::string &
 #endif
 }
 
-// The default file read/store byte cap: an .ari fragment or a saved blob larger than this is
-// almost certainly a mistake (or an attack), so the reader/writer refuses rather than OOM /
-// write-something-unreadable. Runtime-configurable via set_resolve_file_byte_cap /
-// set_store_file_byte_cap (0 = unlimited); a host drives them from the state tree
-// (sync_resolver_caps_from_state). Meyers-singleton atomics so init order is well-defined.
-constexpr std::size_t kDefaultFileByteCap = 16u * 1024u * 1024u; // 16 MiB
-std::atomic<std::size_t> &resolve_cap_cell() {
-  static std::atomic<std::size_t> c{kDefaultFileByteCap};
-  return c;
-}
-std::atomic<std::size_t> &store_cap_cell() {
-  static std::atomic<std::size_t> c{kDefaultFileByteCap};
-  return c;
-}
-
-// The built-in `file` handler: read the resolved path's bytes. App-free. Rejects anything that
-// is not an ordinary, bounded file BEFORE opening — a directory or a special file (fifo,
-// /dev/zero) would otherwise throw on read or block/OOM (istreambuf never reaches EOF).
-UriResult resolve_file(const Uri &u, const std::string &base) {
+// The built-in `file` handler: read the resolved path's bytes, at most `cap` (0: no cap). Rejects
+// anything that is not an ordinary, bounded file BEFORE opening — a directory or a special file
+// (fifo, /dev/zero) would otherwise throw on read or block/OOM (istreambuf never reaches EOF).
+UriResult resolve_file(const Uri &u, const std::string &base, std::size_t cap) {
   namespace fs = std::filesystem;
   const std::string full = resolve_file_path(u.path, base);
   std::error_code ec;
@@ -181,7 +166,6 @@ UriResult resolve_file(const Uri &u, const std::string &base) {
   // under-reports its size (procfs), grows under a TOCTOU, or streams past its stat size cannot
   // exceed the cap. Read up to the (configurable) cap; one more available byte means it is too big.
   // A cap of 0 means unlimited.
-  const std::size_t cap = resolve_file_byte_cap();
   std::string content;
   char buf[64 * 1024];
   while (in) {
@@ -201,14 +185,16 @@ UriResult resolve_file(const Uri &u, const std::string &base) {
 
 // §13.10 the built-in `file` WRITER: store `content` at the resolved path ATOMICALLY — write a
 // fresh temp IN THE SAME DIRECTORY (so the rename stays on one filesystem and is atomic) then
-// rename over the target, so a reader or a crash never observes a half-written file. App-free.
-StoreResult store_file(const Uri &u, const std::string &content, const std::string &base) {
+// rename over the target, so a reader or a crash never observes a half-written file. At most `cap`
+// bytes (0: no cap).
+StoreResult store_file(const Uri &u, const std::string &content, const std::string &base,
+                       std::size_t cap) {
   namespace fs = std::filesystem;
   const std::string full = resolve_file_path(u.path, base);
   const fs::path target(full);
   // Reject oversize UP FRONT so a save fails loudly, rather than writing a file the read cap could
   // never load back. The store cap is separately configurable (0 = unlimited); default 16 MiB.
-  if (const std::size_t cap = store_file_byte_cap(); cap != 0 && content.size() > cap)
+  if (cap != 0 && content.size() > cap)
     return {false, full,
             "ari: cannot store to '" + full + "': content exceeds the " + std::to_string(cap) +
                 "-byte store cap"};
@@ -279,46 +265,52 @@ std::string resolve_file_path(const std::string &path, const std::string &base) 
   return ec ? full.lexically_normal().string() : canon.string();
 }
 
-void register_uri_handler(const std::string &scheme, UriHandler handler) {
+void register_uri_handler(cvc::app &app, const std::string &scheme, UriHandler handler) {
   if (scheme.empty() || !handler)
     return;
-  std::lock_guard<std::mutex> lock(uri_mutex());
-  uri_registry()[to_lower(scheme)] = std::move(handler);
-  uri_async_registry().erase(to_lower(scheme)); // the old handler's non-blocking form
+  uri_table &t = uris(app);
+  std::lock_guard<std::mutex> lock(t.m);
+  t.handlers[to_lower(scheme)] = std::move(handler);
+  t.async_handlers.erase(to_lower(scheme)); // the old handler's non-blocking form
 }
 
-void register_uri_handler(const std::string &scheme, UriLocalHandler handler) {
+void register_uri_handler(cvc::app &app, const std::string &scheme, UriLocalHandler handler) {
   if (!handler)
     return;
   register_uri_handler(
-      scheme, UriHandler([h = std::move(handler)](const Uri &u, const std::string &base,
-                                                  const UriCancelled &) { return h(u, base); }));
+      app, scheme,
+      UriHandler([h = std::move(handler)](const Uri &u, const std::string &base,
+                                          const UriCancelled &) { return h(u, base); }));
 }
 
-void unregister_uri_handler(const std::string &scheme) {
-  std::lock_guard<std::mutex> lock(uri_mutex());
-  uri_registry().erase(to_lower(scheme));
-  uri_async_registry().erase(to_lower(scheme));
+void unregister_uri_handler(cvc::app &app, const std::string &scheme) {
+  uri_table &t = uris(app);
+  std::lock_guard<std::mutex> lock(t.m);
+  t.handlers.erase(to_lower(scheme));
+  t.async_handlers.erase(to_lower(scheme));
 }
 
-void register_uri_async_handler(const std::string &scheme, UriAsyncHandler handler) {
+void register_uri_async_handler(cvc::app &app, const std::string &scheme, UriAsyncHandler handler) {
   if (scheme.empty() || !handler)
     return;
-  std::lock_guard<std::mutex> lock(uri_mutex());
-  uri_async_registry()[to_lower(scheme)] = std::move(handler);
+  uri_table &t = uris(app);
+  std::lock_guard<std::mutex> lock(t.m);
+  t.async_handlers[to_lower(scheme)] = std::move(handler);
 }
 
-bool has_uri_async_handler(const std::string &scheme) {
-  std::lock_guard<std::mutex> lock(uri_mutex());
-  return uri_async_registry().count(to_lower(scheme)) != 0;
+bool has_uri_async_handler(cvc::app &app, const std::string &scheme) {
+  uri_table &t = uris(app);
+  std::lock_guard<std::mutex> lock(t.m);
+  return t.async_handlers.count(to_lower(scheme)) != 0;
 }
 
-bool has_uri_handler(const std::string &scheme) {
+bool has_uri_handler(cvc::app &app, const std::string &scheme) {
   const std::string s = to_lower(scheme);
   if (s == "file")
     return true; // built-in
-  std::lock_guard<std::mutex> lock(uri_mutex());
-  return uri_registry().find(s) != uri_registry().end();
+  uri_table &t = uris(app);
+  std::lock_guard<std::mutex> lock(t.m);
+  return t.handlers.find(s) != t.handlers.end();
 }
 
 // --- cvc:// component-library scheme (a location-independent import path) ------------------------
@@ -394,37 +386,41 @@ std::vector<std::string> cvc_uri_search_dirs(const std::vector<std::string> &ext
   return dirs;
 }
 
-void register_cvc_uri_handler(const std::vector<std::string> &extra_search_dirs) {
+void register_cvc_uri_handler(cvc::app &app, const std::vector<std::string> &extra_search_dirs) {
   // Snapshot the search list at registration (env read once, at host setup).
   const std::vector<std::string> dirs = cvc_uri_search_dirs(extra_search_dirs);
-  register_uri_handler("cvc", [dirs](const Uri &u, const std::string & /*base*/) -> UriResult {
-    namespace fs = std::filesystem;
-    const std::string &rel = u.path; // the part after cvc://
-    if (rel.empty())
-      return {false, std::string(), std::string(),
-              "ari: cvc:// requires a path (e.g. cvc://components/stage_lighting.ari)"};
-    std::string tried;
-    for (const std::string &d : dirs) {
-      std::error_code ec;
-      const fs::path cand = fs::path(d) / rel;
-      if (fs::is_regular_file(cand, ec)) {
-        // Resolve through the built-in file reader so the canonical id is the found file's absolute
-        // path — a component's OWN relative imports then resolve against its directory.
-        Uri f;
-        f.scheme = "file";
-        f.path = cand.string();
-        f.raw = cand.string();
-        return resolve_file(f, std::string());
-      }
-      tried += (tried.empty() ? "" : ", ") + d;
-    }
-    return {false, std::string(), std::string(),
-            "ari: cvc://" + rel + " not found on the component search path [" + tried +
-                "] (set CVC_ARIADNE_PATH or install the component library)"};
-  });
+  // The handler is held in `app`'s own table, so `app` outlives it.
+  register_uri_handler(
+      app, "cvc", [dirs, &app](const Uri &u, const std::string & /*base*/) -> UriResult {
+        namespace fs = std::filesystem;
+        const std::string &rel = u.path; // the part after cvc://
+        if (rel.empty())
+          return {false, std::string(), std::string(),
+                  "ari: cvc:// requires a path (e.g. cvc://components/stage_lighting.ari)"};
+        std::string tried;
+        for (const std::string &d : dirs) {
+          std::error_code ec;
+          const fs::path cand = fs::path(d) / rel;
+          if (fs::is_regular_file(cand, ec)) {
+            // Resolve through the built-in file reader so the canonical id is the found file's
+            // absolute path — a component's OWN relative imports then resolve against its
+            // directory.
+            Uri f;
+            f.scheme = "file";
+            f.path = cand.string();
+            f.raw = cand.string();
+            return resolve_file(f, std::string(), resolve_file_byte_cap(app));
+          }
+          tried += (tried.empty() ? "" : ", ") + d;
+        }
+        return {false, std::string(), std::string(),
+                "ari: cvc://" + rel + " not found on the component search path [" + tried +
+                    "] (set CVC_ARIADNE_PATH or install the component library)"};
+      });
 }
 
-UriResult resolve(const std::string &uri, const std::string &base, const UriCancelled &cancelled) {
+UriResult resolve(cvc::app &app, const std::string &uri, const std::string &base,
+                  const UriCancelled &cancelled) {
   // A handler is host/registered code (state, http, …) that may throw; the built-in file
   // handler must not, but a filesystem edge case could. Contain every failure here so this
   // function honours its contract — always return a UriResult, never propagate an exception.
@@ -434,16 +430,17 @@ UriResult resolve(const std::string &uri, const std::string &base, const UriCanc
     // scheme; else the scheme is unresolvable here (e.g. state/http with no handler installed).
     UriHandler h;
     {
-      std::lock_guard<std::mutex> lock(uri_mutex());
-      const auto it = uri_registry().find(u.scheme);
-      if (it != uri_registry().end())
+      uri_table &t = uris(app);
+      std::lock_guard<std::mutex> lock(t.m);
+      const auto it = t.handlers.find(u.scheme);
+      if (it != t.handlers.end())
         h = it->second;
     }
     UriResult r;
     if (h)
       r = h(u, base, cancelled);
     else if (u.scheme == "file")
-      r = resolve_file(u, base);
+      r = resolve_file(u, base, resolve_file_byte_cap(app));
     else
       return {false, std::string(), std::string(),
               "ari: no handler for URI scheme '" + u.scheme +
@@ -463,7 +460,8 @@ UriResult resolve(const std::string &uri, const std::string &base, const UriCanc
   }
 }
 
-std::function<void()> resolve_async(const std::string &uri, const std::string &base, UriDone done) {
+std::function<void()> resolve_async(cvc::app &app, const std::string &uri, const std::string &base,
+                                    UriDone done) {
   // resolve()'s contract on the result: an error for a throwing handler, a non-empty canonical.
   const auto finish = [uri](UriDone &done, UriResult r) {
     if (r.ok && r.canonical.empty())
@@ -475,14 +473,15 @@ std::function<void()> resolve_async(const std::string &uri, const std::string &b
   Uri u;
   try {
     u = parse_uri(uri);
-    std::lock_guard<std::mutex> lock(uri_mutex());
-    const auto it = uri_async_registry().find(u.scheme);
-    if (it != uri_async_registry().end())
+    uri_table &t = uris(app);
+    std::lock_guard<std::mutex> lock(t.m);
+    const auto it = t.async_handlers.find(u.scheme);
+    if (it != t.async_handlers.end())
       h = it->second;
   } catch (...) {
   }
   if (!h) {
-    finish(done, resolve(uri, base));
+    finish(done, resolve(app, uri, base));
     return {};
   }
   // Only the first answer counts: a handler that answers and then throws, or throws after
@@ -507,43 +506,48 @@ std::function<void()> resolve_async(const std::string &uri, const std::string &b
 
 // --- §13.10 the write side ---------------------------------------------------------------------
 
-void register_uri_store_handler(const std::string &scheme, UriStoreHandler handler) {
+void register_uri_store_handler(cvc::app &app, const std::string &scheme, UriStoreHandler handler) {
   if (scheme.empty() || !handler)
     return;
-  std::lock_guard<std::mutex> lock(uri_mutex());
-  uri_store_registry()[to_lower(scheme)] = std::move(handler);
+  uri_table &t = uris(app);
+  std::lock_guard<std::mutex> lock(t.m);
+  t.store_handlers[to_lower(scheme)] = std::move(handler);
 }
 
-void unregister_uri_store_handler(const std::string &scheme) {
-  std::lock_guard<std::mutex> lock(uri_mutex());
-  uri_store_registry().erase(to_lower(scheme));
+void unregister_uri_store_handler(cvc::app &app, const std::string &scheme) {
+  uri_table &t = uris(app);
+  std::lock_guard<std::mutex> lock(t.m);
+  t.store_handlers.erase(to_lower(scheme));
 }
 
-bool has_uri_store_handler(const std::string &scheme) {
+bool has_uri_store_handler(cvc::app &app, const std::string &scheme) {
   const std::string s = to_lower(scheme);
   if (s == "file")
     return true; // built-in
-  std::lock_guard<std::mutex> lock(uri_mutex());
-  return uri_store_registry().find(s) != uri_store_registry().end();
+  uri_table &t = uris(app);
+  std::lock_guard<std::mutex> lock(t.m);
+  return t.store_handlers.find(s) != t.store_handlers.end();
 }
 
-StoreResult store(const std::string &uri, const std::string &content, const std::string &base) {
+StoreResult store(cvc::app &app, const std::string &uri, const std::string &content,
+                  const std::string &base) {
   // Contain every failure here — like resolve(), store() always returns a StoreResult, never throws
   // (a registered writer is host code that may).
   try {
     const Uri u = parse_uri(uri);
     UriStoreHandler h;
     {
-      std::lock_guard<std::mutex> lock(uri_mutex());
-      const auto it = uri_store_registry().find(u.scheme);
-      if (it != uri_store_registry().end())
+      uri_table &t = uris(app);
+      std::lock_guard<std::mutex> lock(t.m);
+      const auto it = t.store_handlers.find(u.scheme);
+      if (it != t.store_handlers.end())
         h = it->second;
     }
     StoreResult r;
     if (h)
       r = h(u, content, base);
     else if (u.scheme == "file")
-      r = store_file(u, content, base);
+      r = store_file(u, content, base, store_file_byte_cap(app));
     else
       return {false, std::string(),
               "ari: no store handler for URI scheme '" + u.scheme +
@@ -560,13 +564,17 @@ StoreResult store(const std::string &uri, const std::string &content, const std:
 
 // --- §13.10 configurable file byte caps (read + store) ------------------------------------------
 
-std::size_t resolve_file_byte_cap() { return resolve_cap_cell().load(std::memory_order_relaxed); }
-void set_resolve_file_byte_cap(std::size_t bytes) {
-  resolve_cap_cell().store(bytes, std::memory_order_relaxed);
+std::size_t resolve_file_byte_cap(cvc::app &app) {
+  return uris(app).resolve_cap.load(std::memory_order_relaxed);
 }
-std::size_t store_file_byte_cap() { return store_cap_cell().load(std::memory_order_relaxed); }
-void set_store_file_byte_cap(std::size_t bytes) {
-  store_cap_cell().store(bytes, std::memory_order_relaxed);
+void set_resolve_file_byte_cap(cvc::app &app, std::size_t bytes) {
+  uris(app).resolve_cap.store(bytes, std::memory_order_relaxed);
+}
+std::size_t store_file_byte_cap(cvc::app &app) {
+  return uris(app).store_cap.load(std::memory_order_relaxed);
+}
+void set_store_file_byte_cap(cvc::app &app, std::size_t bytes) {
+  uris(app).store_cap.store(bytes, std::memory_order_relaxed);
 }
 
 // --- the temp-file bridge (§13.4): a resolved URI as a local path a reader can open ----------
@@ -596,7 +604,7 @@ ResolvedFile::~ResolvedFile() {
   }
 }
 
-ResolvedFile resolve_to_file(const std::string &uri, const std::string &base) {
+ResolvedFile resolve_to_file(cvc::app &app, const std::string &uri, const std::string &base) {
   namespace fs = std::filesystem;
   ResolvedFile rf;
   const Uri u = parse_uri(uri);
@@ -604,7 +612,7 @@ ResolvedFile resolve_to_file(const std::string &uri, const std::string &base) {
   // place — no fetch, no copy. If a host has OVERRIDDEN the file scheme (a sandbox/remap/virtual
   // FS handler), fall through so its bytes go through the temp bridge like any other scheme —
   // matching what resolve() does for import:/load:.
-  if (u.scheme == "file" && !file_scheme_overridden()) {
+  if (u.scheme == "file" && !file_scheme_overridden(app)) {
     rf.ok = true;
     rf.path = resolve_file_path(u.path, base);
     rf.is_temp_ = false;
@@ -613,7 +621,7 @@ ResolvedFile resolve_to_file(const std::string &uri, const std::string &base) {
   // Any other scheme (or an overridden file): fetch the bytes, then spill them to a temp file the
   // reader can open. Keep the source's extension so an extension-keyed reader (geometry_file_io)
   // still dispatches.
-  const UriResult r = resolve(uri, base);
+  const UriResult r = resolve(app, uri, base);
   if (!r.ok) {
     rf.error = r.error;
     return rf;

@@ -8,6 +8,7 @@
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/conference/relay_session.h>
 #include <cvc/ariadne/conference/room_calls.h>
+#include <cvc/ariadne/host_cli.h> // HostOptions: a host's --relay flags
 #include <cvc/ariadne/loader.h>   // register_ari_block, LoadResult
 #include <cvc/ariadne/net_host.h> // net_host_access: the host's credentials
 #include <cvc/ariadne/value.h>
@@ -167,9 +168,9 @@ namespace {
 
 // The token credential `name` sends to `origin` from the host's credential store (net_host.h),
 // renewed first when the relay refused `rejected` or the token is about to expire.
-std::string host_credential_token(const std::string &name, const std::string &origin,
+std::string host_credential_token(cvc::app &app, const std::string &name, const std::string &origin,
                                   const std::string &rejected, std::string &why) {
-  const std::optional<NetAccess> access = net_host_access();
+  const std::optional<NetAccess> access = net_host_access(app);
   if (!access || !access->credentials) {
     why = "the host keeps no credentials (turn the network on: --net-policy, --credential-store)";
     return std::string();
@@ -255,7 +256,11 @@ struct relay_session::link {
 };
 
 struct relay_session::impl {
-  explicit impl(cvc::app &a) : app(a) {}
+  explicit impl(cvc::app &a)
+      : app(a), source([&a](const std::string &name, const std::string &origin,
+                            const std::string &rejected, std::string &why) {
+          return host_credential_token(a, name, origin, rejected, why);
+        }) {}
   // How a dial ended.
   enum class outcome { joined, no_token, unreachable, refused, silent };
 
@@ -265,7 +270,7 @@ struct relay_session::impl {
   bool grpc = false, grpcs = false, ws = false;
   std::string device_id;
   std::shared_ptr<const cvc::state_device_signer> device_key;
-  token_source source = host_credential_token;
+  token_source source;      // the host's credential store (host_credential_token) unless set
   std::string status_path;  // set_status_path: where status() and joins() are written
   std::string shown_status; // ... and what was written there last
   std::uint64_t shown_joins = ~std::uint64_t(0);
@@ -290,6 +295,12 @@ struct relay_session::impl {
   std::unique_ptr<link> dialed;
   outcome dial_outcome = outcome::no_token;
   std::string dial_why, dial_token;
+#ifdef __EMSCRIPTEN__
+  // The browser's dial: its WebSocket opens from the page's event loop, which nothing here may
+  // block, so the relay's Hello is looked for in the frames (step()) until this deadline.
+  std::unique_ptr<link> connecting;
+  std::chrono::steady_clock::time_point connect_deadline;
+#endif
 
   // URL checks and the shard; "" or what is wrong with `j`.
   std::string prepare(const relay_join &j) {
@@ -297,13 +308,22 @@ struct relay_session::impl {
     const std::string &url = j.url;
     grpc = starts_with(url, "grpc://");
     grpcs = starts_with(url, "grpcs://");
+#ifdef __EMSCRIPTEN__
+    // In a page the browser's own WebSocket dials, and it speaks TLS.
+    ws = starts_with(url, "ws://") || starts_with(url, "wss://");
+#else
     ws = starts_with(url, "ws://");
     if (starts_with(url, "wss://"))
       return "relay: " + url +
              ": wss:// needs the native WebSocket client's TLS, which libcvc does not have yet; "
              "dial the relay's gRPC port with grpcs:// (arisrv --tls-cert) instead";
+#endif
     if (!grpc && !grpcs && !ws)
+#ifdef __EMSCRIPTEN__
+      return "relay: " + url + ": the URL is ws:// or wss:// in a browser";
+#else
       return "relay: " + url + ": the URL is grpc://, grpcs:// or ws://";
+#endif
     address = url.substr(grpcs ? 8 : 7);
     if ((grpc || grpcs) && !address.empty() && address.back() == '/')
       address.pop_back();
@@ -359,9 +379,9 @@ struct relay_session::impl {
     return std::string();
   }
 
-  // Connect with `token` and wait, at most `timeout`, for the relay's Hello. On this thread.
-  std::unique_ptr<link> dial(const std::string &tok, std::chrono::milliseconds timeout,
-                             outcome &o) {
+  // Connect with `token`: the link, or null with `o` unreachable. Its Hello is still to come.
+  std::unique_ptr<link> open_link(const std::string &tok, std::chrono::milliseconds timeout,
+                                  outcome &o) {
     auto l = std::make_unique<link>();
     bool ok = false;
 #ifdef CVC_ENABLE_GRPC
@@ -398,6 +418,15 @@ struct relay_session::impl {
       l->stop(shard.get());
       return nullptr;
     }
+    return l;
+  }
+
+  // Connect with `token` and wait, at most `timeout`, for the relay's Hello. On this thread.
+  std::unique_ptr<link> dial(const std::string &tok, std::chrono::milliseconds timeout,
+                             outcome &o) {
+    std::unique_ptr<link> l = open_link(tok, timeout, o);
+    if (!l)
+      return nullptr;
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     bool gone = false;
     while (!l->admitted(gone) && !gone && std::chrono::steady_clock::now() < deadline)
@@ -472,16 +501,64 @@ struct relay_session::impl {
       dial_token = tok;
       dial_done = true;
     };
-#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
-    run();
+#ifdef __EMSCRIPTEN__
+    // In a page: open the socket now and look for the relay's Hello in the frames (step()), since
+    // waiting here would hold up the very event loop that opens it.
+    (void)run;
+    std::string w;
+    const std::string tok = token(w);
+    outcome o = outcome::no_token;
+    std::unique_ptr<link> l;
+    if (join.credential.empty() || !tok.empty())
+      l = open_link(tok, std::chrono::milliseconds(10000), o);
+    std::lock_guard<std::mutex> lk(dial_mu);
+    dial_token = tok;
+    if (l) {
+      connecting = std::move(l);
+      connect_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+      return;
+    }
+    dial_outcome = o;
+    dial_why = said(o, w);
+    dial_done = true;
 #else
     dialer = std::thread(run);
 #endif
   }
 
+#ifdef __EMSCRIPTEN__
+  // The browser's dial, each frame: the relay's Hello has come (joined), or the deadline has
+  // passed (silent). A refused upgrade looks like no answer, as it does natively over a
+  // WebSocket. A socket that has yet to open is not in link_reports(), so "none" is not "gone".
+  void poll_connecting() {
+    std::lock_guard<std::mutex> lk(dial_mu);
+    if (!connecting)
+      return;
+    bool gone = false;
+    const bool in = connecting->admitted(gone);
+    if (!in && std::chrono::steady_clock::now() < connect_deadline)
+      return;
+    if (in) {
+      dialed = std::move(connecting);
+      dial_outcome = outcome::joined;
+    } else {
+      connecting->stop(shard.get());
+      connecting.reset();
+      dial_outcome = outcome::silent;
+    }
+    dial_why = said(dial_outcome, std::string());
+    dial_done = true;
+  }
+#endif
+
   void leave() {
     if (dialer.joinable())
       dialer.join();
+#ifdef __EMSCRIPTEN__
+    if (connecting)
+      connecting->stop(shard.get());
+    connecting.reset();
+#endif
     if (calls)
       room_call_client::install(app, nullptr);
     calls.reset();
@@ -509,6 +586,10 @@ std::string relay_session::join(const relay_join &j, std::chrono::milliseconds t
   impl &s = *_impl;
   if (s.started)
     return "relay: this host has joined a relay already";
+#ifdef __EMSCRIPTEN__
+  (void)timeout;
+  return "relay: " + j.url + ": a page cannot wait for a join; begin() it and pump() the frames";
+#else
   if (const std::string e = s.prepare(j); !e.empty()) {
     s.started = false;
     return e;
@@ -546,6 +627,7 @@ std::string relay_session::join(const relay_join &j, std::chrono::milliseconds t
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
   return std::string();
+#endif
 }
 
 std::string relay_session::begin(const relay_join &j) {
@@ -599,6 +681,9 @@ void relay_session::step() {
     return;
   }
   case impl::phase::dialing: {
+#ifdef __EMSCRIPTEN__
+    s.poll_connecting();
+#endif
     std::unique_ptr<link> l;
     std::string w, tok;
     impl::outcome o = impl::outcome::no_token;
@@ -688,15 +773,15 @@ std::string relay_session::describe() const {
   return d;
 }
 
-void register_relay_block() {
-  register_ari_block("relay", [](const Value &content, LoadResult &out) {
+void register_relay_block(cvc::app &app) {
+  register_ari_block(app, "relay", [](const Value &content, LoadResult &out) {
     out.extras.emplace_back("relay", content);
   });
 }
 
 std::shared_ptr<relay_session> attach_relay(cvc::app &app, AppRuntime &rt, relay_join cli,
                                             std::function<void(const std::string &)> note) {
-  register_relay_block();
+  register_relay_block(app);
   register_room_call_intrinsics(app);
   auto session = std::make_shared<relay_session>(app);
   std::weak_ptr<relay_session> weak = session;
@@ -743,15 +828,23 @@ std::shared_ptr<relay_session> attach_relay(cvc::app &app, AppRuntime &rt, relay
       j.credential = cli.credential;
       j.token.clear();
     }
-    if (!j.credential.empty()) {
+#ifdef __EMSCRIPTEN__
+    // A page cannot wait at its load for a socket its event loop opens: every join is made from
+    // the frames, and relay.status says how it goes.
+    const bool deferred = true;
+#else
+    const bool deferred = !j.credential.empty();
+#endif
+    if (deferred) {
       // A credential's token may come later (a sign-in this document starts): the join happens
       // from the frames once it is there.
       if (const std::string e = s->begin(j); !e.empty())
         throw std::runtime_error(e);
       s->link_subscriptions(prefix);
       if (note)
-        note("relay: joining " + s->describe() + " once credential " + j.credential +
-             " holds a token");
+        note(j.credential.empty() ? "relay: joining " + s->describe()
+                                  : "relay: joining " + s->describe() + " once credential " +
+                                        j.credential + " holds a token");
       return;
     }
     if (const std::string e = s->join(j, std::chrono::milliseconds(10000)); !e.empty())
@@ -765,6 +858,35 @@ std::shared_ptr<relay_session> attach_relay(cvc::app &app, AppRuntime &rt, relay
       s->pump();
   });
   return session;
+}
+
+std::shared_ptr<relay_session> attach_host_relay(cvc::app &app, AppRuntime &rt,
+                                                 const HostOptions &o, const std::string &name,
+                                                 bool join, std::string &error,
+                                                 std::function<void(const std::string &)> note) {
+  relay_join cli;
+  cli.name = name;
+  cli.url = o.relay;
+  cli.room = o.relay_room; // "" = the block's, else standup
+  if ((!o.relay_room.empty() || !o.relay_ca.empty()) && o.relay.empty()) {
+    error = "--relay-room and --relay-ca go with --relay URL";
+    return nullptr;
+  }
+  cli.credential = o.relay_credential;
+  if (!o.relay_ca.empty()) {
+    if (!read_file(o.relay_ca, cli.ca_pem) && cli.ca_pem.empty()) {
+      error = "--relay-ca: cannot read '" + o.relay_ca + "'";
+      return nullptr;
+    }
+  }
+  if (!o.relay.empty() && cli.credential.empty())
+    if (const char *t = std::getenv("CVC_ARIADNE_ROOM_TOKEN"); t && *t)
+      cli.token = t;
+  if (!join) {
+    register_relay_block(app);
+    return std::make_shared<relay_session>(app);
+  }
+  return attach_relay(app, rt, std::move(cli), std::move(note));
 }
 
 } // namespace conference

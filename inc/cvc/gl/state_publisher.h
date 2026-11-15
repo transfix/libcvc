@@ -101,9 +101,10 @@ public:
   // the tree, so it stays on the superseded value for good.
   void flush();
 
-  // True while the CALLING thread is inside flush() — i.e. a state change you
-  // are reacting to right now came out of a publisher's queue rather than from
-  // a script, a dashboard or a host.
+  // True while the CALLING thread is inside flush() of one of `app`'s
+  // publishers — i.e. a state change of `app`'s you are reacting to right now
+  // came out of a publisher's queue rather than from a script, a dashboard or a
+  // host.
   //
   // Node handlers need this to recognise their own pose coming back. The queue
   // only ever holds what nodes published, so a position write seen during a
@@ -113,10 +114,12 @@ public:
   // as a foreign write, and rewinds itself onto it (see
   // GraphicsNode::handleStateChanged, and test/cvcgl_pose_echo.cpp).
   //
-  // Thread-local rather than per-instance because flush() runs its writes on
-  // the calling thread, so a handler those writes fire is on that same thread.
-  // Nesting is counted, not flagged, so a flush reached from inside a flush
-  // still reports correctly on the way back out.
+  // Per thread rather than per instance because flush() runs its writes on
+  // the calling thread, so a handler those writes fire is on that same thread;
+  // and kept by the app, whose state a publisher writes (another app's flushes
+  // are not this app's state changes). Nesting is a stack, not a flag, so a
+  // flush reached from inside a flush still reports correctly on the way back
+  // out.
   //
   // "Some publisher is flushing" is NOT "my publisher is flushing", though. Two
   // scenes can bind nodes to the same state path (a second view built with the
@@ -124,13 +127,13 @@ public:
   // the other scene's node listens to. To that node the write is foreign and
   // must be applied. A handler that is asking "is this my own echo?" wants
   // flushing() and a comparison with its own scene's publisher.
-  static bool in_flush();
+  static bool in_flush(cvc::app &app);
 
-  // The publisher whose flush() the CALLING thread is inside right now, or
-  // nullptr. When flushes nest (a handler fired by one publisher's write drains
-  // another), this is the innermost, and the outer one is reported again once
-  // the inner flush returns.
-  static const state_publisher *flushing();
+  // The publisher of `app`'s whose flush() the CALLING thread is inside right
+  // now, or nullptr. When flushes nest (a handler fired by one publisher's write
+  // drains another), this is the innermost, and the outer one is reported again
+  // once the inner flush returns.
+  static const state_publisher *flushing(cvc::app &app);
 
   // Start/stop the background flusher. `hz` is the flush cadence; matching the
   // world clock's rate keeps state updates in step with simulation ticks rather

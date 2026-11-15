@@ -1,8 +1,10 @@
 // cvc::net HTTP facade tests. Three layers, none needing the external network:
 //   - parse_response_header_blob: the pure splitter the wasm fetch backend feeds into HttpResponse
 //     (native CI never runs the fetch backend, so this is its only direct coverage).
-//   - the injection seam: set_http_client() swaps in a fake transport; send() dispatches to it;
-//     nullptr restores the compiled default. This is the seam the §13.9 cache tests will use.
+//   - the injection seam: set_http_client(app, ...) swaps in a fake transport for that app;
+//     send(app, ...) dispatches to it; nullptr restores the compiled default. Each app has its own
+//     client: two apps (in either order, at once on threads, one after another) never see each
+//     other's.
 //   - the compiled backend end to end against a throwaway localhost server, asserting the NEW
 //   status
 //     + response-header capture (the http URI handler tests in ariadne_loader_test cover the
@@ -13,6 +15,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cvc/core/app.h>
 #include <cvc/net/http_client.h>
 #include <gtest/gtest.h>
 #include <memory>
@@ -72,16 +75,10 @@ public:
 private:
   HttpResponse canned_;
 };
-
-// Restore the compiled default client on scope-out so one test's injection never leaks into
-// another.
-struct ClientGuard {
-  ~ClientGuard() { cvc::net::set_http_client(nullptr); }
-};
 } // namespace
 
 TEST(NetInjection, SendDispatchesToInjectedClientAndRoundTrips) {
-  ClientGuard g;
+  cvc::app app;
   HttpResponse canned;
   canned.ok = true;
   canned.status = 200;
@@ -89,14 +86,14 @@ TEST(NetInjection, SendDispatchesToInjectedClientAndRoundTrips) {
   canned.headers = {"Content-Type: application/json"};
   canned.canonical_url = "http://example/final";
   auto *fake = new FakeClient(canned);
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
 
   HttpRequest req;
   req.url = "http://example/x";
   req.method = "PUT";
   req.headers = {"Authorization: Bearer tok"};
   req.body = "sent";
-  const HttpResponse r = cvc::net::send(req);
+  const HttpResponse r = cvc::net::send(app, req);
 
   EXPECT_EQ(fake->calls, 1);
   EXPECT_EQ(fake->last.url, "http://example/x");
@@ -114,37 +111,113 @@ TEST(NetInjection, SendDispatchesToInjectedClientAndRoundTrips) {
 }
 
 TEST(NetInjection, NullptrRestoresCompiledDefault) {
+  cvc::app app;
   {
-    ClientGuard g;
     HttpResponse canned;
     canned.ok = true;
     canned.status = 222;
-    cvc::net::set_http_client(std::make_unique<FakeClient>(canned));
+    cvc::net::set_http_client(app, std::make_unique<FakeClient>(canned));
     HttpRequest req;
     req.url = "http://example/y";
-    EXPECT_EQ(cvc::net::send(req).status, 222); // the fake answers
-  } // guard restores default
+    EXPECT_EQ(cvc::net::send(app, req).status, 222); // the fake answers
+  }
+  cvc::net::set_http_client(app, nullptr);
   // The default is back: without a live server a real backend errors and a null backend reports "no
   // backend" — either way it is NOT the fake's 222.
   HttpRequest req;
   req.url = "http://127.0.0.1:1/nope";
-  EXPECT_NE(cvc::net::send(req).status, 222);
+  EXPECT_NE(cvc::net::send(app, req).status, 222);
+}
+
+namespace {
+HttpResponse status_reply(long status) {
+  HttpResponse r;
+  r.ok = true;
+  r.status = status;
+  return r;
+}
+long status_of(cvc::app &app) {
+  HttpRequest req;
+  req.url = "http://example/which";
+  return cvc::net::send(app, req).status;
+}
+} // namespace
+
+// Each app sends through its own client: a fake set on one is never seen by the other, made in
+// either order.
+TEST(NetInjection, TwoAppsKeepTheirOwnClientsInBothOrders) {
+  for (int order = 0; order < 2; ++order) {
+    cvc::app a, b;
+    cvc::app &first = order == 0 ? a : b;
+    cvc::app &second = order == 0 ? b : a;
+    cvc::net::set_http_client(first, std::make_unique<FakeClient>(status_reply(201)));
+    cvc::net::set_http_client(second, std::make_unique<FakeClient>(status_reply(202)));
+    EXPECT_EQ(status_of(first), 201);
+    EXPECT_EQ(status_of(second), 202);
+    cvc::net::set_http_client(first, nullptr); // one app's restore leaves the other's fake
+    EXPECT_NE(status_of(first), 201);
+    EXPECT_EQ(status_of(second), 202);
+  }
+}
+
+// Apps on threads at once, each with its own fake: every send reaches its own app's.
+TEST(NetInjection, AppsOnThreadsAtOnceSendThroughTheirOwnClients) {
+  constexpr int kApps = 4;
+  std::atomic<int> wrong{0};
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kApps; ++i)
+    threads.emplace_back([i, &wrong] {
+      cvc::app app;
+      cvc::net::set_http_client(app, std::make_unique<FakeClient>(status_reply(300 + i)));
+      for (int k = 0; k < 50; ++k)
+        if (status_of(app) != 300 + i)
+          ++wrong;
+    });
+  for (std::thread &t : threads)
+    t.join();
+  EXPECT_EQ(wrong.load(), 0);
+}
+
+// A later app, made once another is gone, starts with the compiled default, not the fake.
+TEST(NetInjection, LaterAppStartsWithTheDefaultClient) {
+  {
+    cvc::app app;
+    cvc::net::set_http_client(app, std::make_unique<FakeClient>(status_reply(222)));
+    EXPECT_EQ(status_of(app), 222);
+  }
+  cvc::app later;
+  HttpRequest req;
+  req.url = "http://127.0.0.1:1/nope";
+  EXPECT_NE(cvc::net::send(later, req).status, 222);
+}
+
+// A client taken from an app (cvc::net::http_client) sends as the app does, and keeps answering
+// once the app has replaced it.
+TEST(NetInjection, ClientTakenFromAnAppOutlivesItsReplacement) {
+  cvc::app app;
+  cvc::net::set_http_client(app, std::make_unique<FakeClient>(status_reply(203)));
+  const std::shared_ptr<cvc::net::HttpClient> taken = cvc::net::http_client(app);
+  cvc::net::set_http_client(app, std::make_unique<FakeClient>(status_reply(204)));
+  HttpRequest req;
+  req.url = "http://example/z";
+  EXPECT_EQ(cvc::net::send(*taken, req).status, 203);
+  EXPECT_EQ(status_of(app), 204);
 }
 
 // The dispatcher normalizes every request so both backends see one canonical form
 // (backend-agnostic, so an injected fake observes exactly what a real transport would).
 TEST(NetNormalize, DefaultsMethodDropsGetHeadBodyAndRejectsInvalid) {
-  ClientGuard g;
+  cvc::app app;
   HttpResponse canned;
   canned.ok = true;
   canned.status = 200;
   auto *fake = new FakeClient(canned);
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
 
   { // an empty method becomes GET (the documented default), made explicit for both backends
     HttpRequest req;
     req.url = "http://x/";
-    const HttpResponse r = cvc::net::send(req);
+    const HttpResponse r = cvc::net::send(app, req);
     EXPECT_TRUE(r.ok);
     EXPECT_EQ(fake->last.method, "GET");
   }
@@ -153,7 +226,7 @@ TEST(NetNormalize, DefaultsMethodDropsGetHeadBodyAndRejectsInvalid) {
     req.url = "http://x/";
     req.method = "GET";
     req.body = "payload";
-    cvc::net::send(req);
+    cvc::net::send(app, req);
     EXPECT_TRUE(fake->last.body.empty()) << "GET body should be dropped";
   }
   { // HEAD (case-insensitive) likewise carries no body
@@ -161,7 +234,7 @@ TEST(NetNormalize, DefaultsMethodDropsGetHeadBodyAndRejectsInvalid) {
     req.url = "http://x/";
     req.method = "head";
     req.body = "payload";
-    cvc::net::send(req);
+    cvc::net::send(app, req);
     EXPECT_TRUE(fake->last.body.empty()) << "HEAD body should be dropped";
   }
   { // a body-bearing verb keeps its body untouched
@@ -169,7 +242,7 @@ TEST(NetNormalize, DefaultsMethodDropsGetHeadBodyAndRejectsInvalid) {
     req.url = "http://x/";
     req.method = "POST";
     req.body = "payload";
-    cvc::net::send(req);
+    cvc::net::send(app, req);
     EXPECT_EQ(fake->last.method, "POST");
     EXPECT_EQ(fake->last.body, "payload");
   }
@@ -178,7 +251,7 @@ TEST(NetNormalize, DefaultsMethodDropsGetHeadBodyAndRejectsInvalid) {
     HttpRequest req;
     req.url = "http://x/";
     req.method = "BAD VERB"; // contains a space
-    const HttpResponse r = cvc::net::send(req);
+    const HttpResponse r = cvc::net::send(app, req);
     EXPECT_FALSE(r.ok);
     EXPECT_FALSE(r.error.empty());
     EXPECT_EQ(fake->calls, before) << "invalid method must short-circuit before dispatch";
@@ -187,7 +260,7 @@ TEST(NetNormalize, DefaultsMethodDropsGetHeadBodyAndRejectsInvalid) {
     HttpRequest req;
     req.url = "http://x/";
     req.method = std::string(40, 'A');
-    EXPECT_FALSE(cvc::net::send(req).ok);
+    EXPECT_FALSE(cvc::net::send(app, req).ok);
   }
 }
 
@@ -247,10 +320,11 @@ bool header_present(const std::vector<std::string> &lines, const std::string &ne
 TEST(NetCurlBackend, CapturesStatusAndResponseHeaders) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "built without an HTTP backend";
+  cvc::app app;
   OneShotServer server;
   HttpRequest req;
   req.url = "http://127.0.0.1:" + std::to_string(server.port()) + "/x";
-  const HttpResponse r = cvc::net::send(req);
+  const HttpResponse r = cvc::net::send(app, req);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.status, 200);
   EXPECT_EQ(r.body, "hi-from-localhost");
@@ -264,13 +338,14 @@ TEST(NetCurlBackend, CapturesStatusAndResponseHeaders) {
 TEST(NetCurlBackend, HeadRequestReturnsPromptlyWithNoBody) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "built without an HTTP backend";
+  cvc::app app;
   OneShotServer server;
   HttpRequest req;
   req.method = "HEAD";
   req.url = "http://127.0.0.1:" + std::to_string(server.port()) + "/x";
   req.timeout_secs = 5; // without CURLOPT_NOBODY curl would block on a body until this fires
   const auto start = std::chrono::steady_clock::now();
-  const HttpResponse r = cvc::net::send(req);
+  const HttpResponse r = cvc::net::send(app, req);
   const auto elapsed = std::chrono::steady_clock::now() - start;
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.status, 200);
@@ -282,9 +357,10 @@ TEST(NetCurlBackend, HeadRequestReturnsPromptlyWithNoBody) {
 TEST(NetCurlBackend, TransportFailureIsErrorNotThrow) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "built without an HTTP backend";
+  cvc::app app;
   HttpRequest req;
   req.url = "http://127.0.0.1:1/nope"; // nothing listens on port 1
-  const HttpResponse r = cvc::net::send(req);
+  const HttpResponse r = cvc::net::send(app, req);
   EXPECT_FALSE(r.ok);
   EXPECT_FALSE(r.error.empty());
 }
@@ -349,6 +425,7 @@ private:
 TEST(NetCurlBackend, ACancelledRequestStopsItsTransfer) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "built without an HTTP backend";
+  cvc::app app; // its client is the compiled backend
   {
     StallingServer server;
     std::atomic<bool> cancel{false};
@@ -359,7 +436,7 @@ TEST(NetCurlBackend, ACancelledRequestStopsItsTransfer) {
     req.timeout_secs = 30;
     req.cancelled = [&cancel] { return cancel.load(); };
     HttpResponse r;
-    std::thread sender([&] { r = cvc::net::send(req); });
+    std::thread sender([&] { r = cvc::net::send(app, req); });
     const auto asked_by = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!server.asked() && std::chrono::steady_clock::now() < asked_by)
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -378,5 +455,5 @@ TEST(NetCurlBackend, ACancelledRequestStopsItsTransfer) {
   HttpRequest early;
   early.url = "http://127.0.0.1:1/never"; // nothing listens: a request made would fail to connect
   early.cancelled = [] { return true; };
-  EXPECT_EQ(cvc::net::send(early).error, "cvc::net: cancelled");
+  EXPECT_EQ(cvc::net::send(app, early).error, "cvc::net: cancelled");
 }

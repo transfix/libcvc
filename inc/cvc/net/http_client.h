@@ -29,6 +29,9 @@
 // This header is deliberately dependency-light (only <cstddef>/<functional>/<memory>/<string>/
 // <vector>) and knows nothing about curl, Emscripten, or Ariadne — the dependency arrows point INTO
 // cvc::net.
+//
+// PER APP: the client requests go through is the app's own (cvc::app), made from the compiled
+// backend at its first use, so a test's fake on one app is never seen by another.
 
 #include <cstddef>
 #include <functional>
@@ -37,6 +40,7 @@
 #include <vector>
 
 namespace cvc {
+class app;
 namespace net {
 
 // One HTTP request. `method` empty means the backend's default verb (GET). `headers` are verbatim
@@ -119,11 +123,11 @@ public:
   virtual bool follows_redirects_itself() const { return false; }
 };
 
-// Send `req` through the process-global client (the compiled backend, or one a host injected via
+// Send `req` through `app`'s client (the compiled backend, or one a host injected via
 // set_http_client). Thread-safe: the current client is captured under a lock so a concurrent
 // set_http_client cannot pull it out from under an in-flight call. This is the primary entry — the
 // http URI handler and the cache both call it.
-HttpResponse send(const HttpRequest &req);
+HttpResponse send(cvc::app &app, const HttpRequest &req);
 
 class NetPolicy; // net_policy.h
 
@@ -135,30 +139,41 @@ class NetPolicy; // net_policy.h
 // into a bodyless GET, as browsers do; 307/308 keep the method and body. In a browser
 // (follows_redirects_itself) the browser follows them and only the first URL is checked; CORS and
 // the browser's own rule of dropping Authorization on a cross-origin hop bound the rest.
-HttpResponse send(const HttpRequest &req, const NetPolicy &policy);
+HttpResponse send(cvc::app &app, const HttpRequest &req, const NetPolicy &policy);
 
-// start() through the process-global client: send(req) without blocking where the client
-// starts_async(). `done` gets the reply send(req) would return. A request refused before it is made
-// (an invalid method) is answered before start() returns, and the handle is null then.
-std::shared_ptr<HttpTransfer> start(const HttpRequest &req, HttpDone done);
+// start() through `app`'s client: send(app, req) without blocking where the client
+// starts_async(). `done` gets the reply send(app, req) would return. A request refused before it is
+// made (an invalid method) is answered before start() returns, and the handle is null then. A
+// transfer in flight keeps the client it started on, whatever set_http_client does meanwhile.
+std::shared_ptr<HttpTransfer> start(cvc::app &app, const HttpRequest &req, HttpDone done);
 
-// start(), checked against `policy` as send(req, policy) is: the URL and, where the transport does
-// not follow redirects itself, each hop (each one started in turn; abort() ends whichever is in
-// flight). `policy` is kept until the reply.
-std::shared_ptr<HttpTransfer> start(const HttpRequest &req, std::shared_ptr<const NetPolicy> policy,
-                                    HttpDone done);
+// start(), checked against `policy` as send(app, req, policy) is: the URL and, where the transport
+// does not follow redirects itself, each hop (each one started in turn; abort() ends whichever is
+// in flight). `policy` is kept until the reply.
+std::shared_ptr<HttpTransfer> start(cvc::app &app, const HttpRequest &req,
+                                    std::shared_ptr<const NetPolicy> policy, HttpDone done);
 
-// Whether the process-global client starts_async() (an injected one included).
-bool http_starts_async();
+// Whether `app`'s client starts_async() (an injected one included).
+bool http_starts_async(cvc::app &app);
+
+// `app`'s current client: the compiled backend (made at the first use), or the one set_http_client
+// gave it. Work on a thread that may outlive the app (a download) takes it while it holds the app
+// and sends through it afterwards, with the two below.
+std::shared_ptr<HttpClient> http_client(cvc::app &app);
+// send(app, req) and send(app, req, policy) through `client`: the same normalizing and policy
+// checks, on the client given.
+HttpResponse send(HttpClient &client, const HttpRequest &req);
+HttpResponse send(HttpClient &client, const HttpRequest &req, const NetPolicy &policy);
 
 // The value of the first response-header line named `name` (case-insensitive), trimmed; "" when
 // there is none.
 std::string response_header(const std::vector<std::string> &lines, const std::string &name);
 
-// Replace the process-global client — the seam a HOST or a TEST uses to inject a fake transport
-// (canned responses, request capture) with no live network. Pass nullptr to restore the compiled
-// default backend. Thread-safe; typically called once at setup, before concurrent send()s.
-void set_http_client(std::unique_ptr<HttpClient> client);
+// Replace `app`'s client — the seam a HOST or a TEST uses to inject a fake transport (canned
+// responses, request capture) with no live network. Pass nullptr to restore the compiled default
+// backend. Thread-safe; typically called once at setup, before concurrent send()s. Another app's
+// client is not touched.
+void set_http_client(cvc::app &app, std::unique_ptr<HttpClient> client);
 
 // Whether a REAL HTTP backend is compiled into this build (curl or fetch) — i.e. whether the
 // default client can actually make requests. Independent of any injected client. Ariadne's

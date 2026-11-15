@@ -24,6 +24,7 @@
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/ariadne/scene_labels.h> // entity_labels:
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/vehicle_view.h>
 #include <cvc/gl/physics_scene_binding.h>
@@ -311,6 +312,12 @@ void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) 
       if (!node)
         continue;
     }
+    apply_entity_label(sg, node, r.entity_labels,
+                       {{"name", e.spec.name},
+                        {"id", std::to_string(e.id)},
+                        {"archetype", e.spec.archetype},
+                        {"team", std::to_string(e.spec.team)}},
+                       r.bind_prefix, warnings);
     try {
       r.physics_binding->bind(e.chassis, node);
     } catch (const std::exception &ex) {
@@ -457,10 +464,10 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
 
 } // namespace
 
-void register_vehicle_preview_node() {
-  if (has_scene_node_type("vehicle_preview"))
+void register_vehicle_preview_node(cvc::app &app) {
+  if (has_scene_node_type(app, "vehicle_preview"))
     return;
-  register_scene_node_type("vehicle_preview", realize_vehicle_preview);
+  register_scene_node_type(app, "vehicle_preview", realize_vehicle_preview);
 }
 
 } // namespace ariadne

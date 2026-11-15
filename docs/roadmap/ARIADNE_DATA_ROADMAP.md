@@ -198,7 +198,7 @@ read a second time. A Python program without a document loads data itself with
 `pycvc.data_load(app, uri, path=, decoder=, name=, prefix=)`, and turns the network on for it with
 `pycvc.data_allow_network(app, ["https://cvcpkg.org"])`. A document host does that with
 `AriRuntime.enable_net_allow([...])`, as `--net-allow` does for `ari` and `arigl`. A
-`Host.data(name)` handle over these comes with the Python host (`pycvc_gl.ariadne.Host`).
+`Host.data(name)` handle over these comes with the Python host (`pycvc.ari.Host`).
 
 ## Capability tokens
 

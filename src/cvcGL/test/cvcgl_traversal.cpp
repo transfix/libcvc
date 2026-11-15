@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/RenderView.h>
 #include <cvc/gl/nodes.h>
@@ -140,9 +141,10 @@ static void test_per_view_divergence() {
   root->addChild(shared);
   root->addChild(annotationScope);
 
-  RenderView main(nullptr, "main");
+  cvc::app app;
+  RenderView main(app, nullptr, "main");
   main.setVisibilityMask(0x1); // annotations excluded
-  RenderView overview(nullptr, "overview");
+  RenderView overview(app, nullptr, "overview");
   overview.setVisibilityMask(0x2); // annotations included
 
   RenderAction a1(main);
@@ -164,8 +166,9 @@ static void test_view_teardown_releases_props() {
   auto shape = make_shape("s");
   root->addChild(shape);
 
+  cvc::app app;
   {
-    RenderView tmp(nullptr, "tmp");
+    RenderView tmp(app, nullptr, "tmp");
     RenderAction a(tmp);
     a.apply(*root);
     CHECK(shape->numViewInstances() == 1);
@@ -174,7 +177,7 @@ static void test_view_teardown_releases_props() {
   CHECK(shape->numViewInstances() == 0);
 
   // And the shape is still usable in a fresh view afterwards.
-  RenderView next(nullptr, "next");
+  RenderView next(app, nullptr, "next");
   RenderAction a(next);
   a.apply(*root);
   CHECK(shape->numViewInstances() == 1);
@@ -189,7 +192,8 @@ static void test_switch() {
   sw->addChild(make_shape("b"));
   root->addChild(sw);
 
-  RenderView view(nullptr, "v");
+  cvc::app app;
+  RenderView view(app, nullptr, "v");
   auto count = [&](int which) {
     sw->setWhichChild(which);
     RenderAction a(view);

@@ -1112,38 +1112,61 @@ static PyObject *pycvc_gl_stream_stats(const cvc::gl::StreamStats &s) {
 namespace pycvc {
 namespace gl_lod {
 // The first exception a rung-style callable raised during the current call, on
-// this thread; re-raised by the wrapper once the C++ call has returned.
-struct deferred_error {
-  PyObject *type = nullptr;
-  PyObject *value = nullptr;
-  PyObject *traceback = nullptr;
-};
-inline deferred_error &style_error() {
-  static thread_local deferred_error e;
+// this thread; re-raised by the wrapper once the C++ call has returned. Kept in
+// Python's own per-thread state (PyThreadState_GetDict) under this key, as a
+// (type, value, traceback) tuple with None for a missing part. GIL held.
+constexpr const char *kStyleErrorKey = "pycvc_gl.rung_style_error";
+
+// This thread's deferred error, taken out of its state: a new reference to the
+// tuple, or nullptr (no Python error set) when there is none.
+inline PyObject *take_deferred_error() { // GIL held
+  PyObject *d = PyThreadState_GetDict();
+  PyObject *e = d ? PyDict_GetItemString(d, kStyleErrorKey) : nullptr; // borrowed
+  if (!e)
+    return nullptr;
+  Py_INCREF(e);
+  if (PyDict_DelItemString(d, kStyleErrorKey) != 0)
+    PyErr_Clear();
   return e;
 }
 inline void defer_current_error() { // GIL held
-  deferred_error &e = style_error();
-  if (e.type) { // keep the first
+  PyObject *d = PyThreadState_GetDict();
+  if (!d || PyDict_GetItemString(d, kStyleErrorKey)) { // keep the first
     PyErr_Clear();
     return;
   }
-  PyErr_Fetch(&e.type, &e.value, &e.traceback);
+  PyObject *type = nullptr, *value = nullptr, *traceback = nullptr;
+  PyErr_Fetch(&type, &value, &traceback);
+  PyObject *e = PyTuple_Pack(3, type ? type : Py_None, value ? value : Py_None,
+                             traceback ? traceback : Py_None);
+  Py_XDECREF(type);
+  Py_XDECREF(value);
+  Py_XDECREF(traceback);
+  if (e) {
+    PyDict_SetItemString(d, kStyleErrorKey, e);
+    Py_DECREF(e);
+  }
+  PyErr_Clear(); // out of memory above: the error is lost, the rung is still built
 }
 inline bool restore_deferred_error() { // GIL held; true if one was raised
-  deferred_error &e = style_error();
-  if (!e.type)
+  PyObject *e = take_deferred_error();
+  if (!e)
     return false;
-  PyErr_Restore(e.type, e.value, e.traceback);
-  e = deferred_error();
+  // PyErr_Restore steals one reference to each part; None stands for a missing one.
+  PyObject *parts[3] = {nullptr, nullptr, nullptr};
+  for (Py_ssize_t i = 0; i < 3; ++i) {
+    PyObject *p = PyTuple_GET_ITEM(e, i);
+    if (p != Py_None) {
+      Py_INCREF(p);
+      parts[i] = p;
+    }
+  }
+  Py_DECREF(e);
+  PyErr_Restore(parts[0], parts[1], parts[2]);
   return true;
 }
 inline void discard_deferred_error() { // GIL held
-  deferred_error &e = style_error();
-  Py_XDECREF(e.type);
-  Py_XDECREF(e.value);
-  Py_XDECREF(e.traceback);
-  e = deferred_error();
+  Py_XDECREF(take_deferred_error());
 }
 } // namespace gl_lod
 } // namespace pycvc

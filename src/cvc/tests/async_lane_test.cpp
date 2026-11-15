@@ -21,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -607,6 +608,52 @@ TEST_F(LaneTaskTest, LaunchReturnsAUniqueHashChannelPerTask) {
   sched.drain_ingress();
   EXPECT_TRUE(take(a).has_value());
   EXPECT_TRUE(take(b).has_value());
+}
+
+// Lanes on one thread know only their own drains (each keeps the thread running its jobs): a job
+// of lane a drains lane b, and b's job finds a's drain up the stack (a.run_deferred() returns 0),
+// refuses to re-enter its own, and drains a third lane c, which runs.
+TEST(AsyncLaneNesting, LanesOnOneThreadSeeOnlyTheirOwnDrains) {
+  async_lane a("a", lane_mode::deferred), b("b", lane_mode::deferred), c("c", lane_mode::deferred);
+  std::vector<std::string> log;
+  c.submit([&] { log.push_back("c"); });
+  b.submit([&] {
+    log.push_back("b");
+    log.push_back("a again " + std::to_string(a.run_deferred()));
+    log.push_back("b again " + std::to_string(b.run_deferred()));
+    log.push_back("c ran " + std::to_string(c.run_deferred()));
+  });
+  a.submit([&] {
+    log.push_back("a1");
+    log.push_back("b ran " + std::to_string(b.run_deferred()));
+  });
+  a.submit([&] { log.push_back("a2"); });
+  EXPECT_EQ(a.run_deferred(), 2u);
+  EXPECT_EQ(log, (std::vector<std::string>{"a1", "b", "a again 0", "b again 0", "c", "c ran 1",
+                                           "b ran 1", "a2"}));
+  // Once the drains have ended, each lane drains again on this thread.
+  a.submit([&] { log.push_back("a3"); });
+  EXPECT_EQ(a.run_deferred(), 1u);
+  EXPECT_EQ(log.back(), "a3");
+}
+
+// Task keys are each lane's own (no process-wide count): two lanes of one name, alive at once or
+// one made after the other is gone, never repeat a key.
+TEST(AsyncLaneKeys, TwoLanesOfOneNameNeverRepeatAKey) {
+  std::set<std::string> seen;
+  {
+    async_lane a("sim", lane_mode::deferred), b("sim", lane_mode::deferred);
+    for (int k = 0; k < 3; ++k) {
+      EXPECT_TRUE(seen.insert(a.next_task_key()).second);
+      EXPECT_TRUE(seen.insert(b.next_task_key()).second);
+    }
+  }
+  async_lane again("sim", lane_mode::deferred);
+  for (int k = 0; k < 3; ++k) {
+    const std::string key = again.next_task_key();
+    EXPECT_EQ(key.rfind("sim.", 0), 0u) << key;
+    EXPECT_TRUE(seen.insert(key).second) << key;
+  }
 }
 
 // pump_exec_frame must re-ready (await ...) frame-yielders once per frame: a resident that ticks

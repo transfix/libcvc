@@ -78,12 +78,12 @@ int main(int argc, char **argv) {
     else if (a[0] != '-' && docPath.empty())
       docPath = a;
   }
-  cvc::ariadne::register_cvc_uri_handler(componentPaths);
   const bool capturing = offscreen || !png.empty();
   if (capturing && frames <= 0)
     frames = 8; // a few frames so the producer delivers and the texture uploads before the capture
 
   cvc::app app;
+  cvc::ariadne::register_cvc_uri_handler(app, componentPaths);
   SceneGraph sg(app, "stream");
   SceneRenderer view(sg, width, height, offscreen, "main");
   view.setBackground(0.06, 0.07, 0.09);
@@ -102,7 +102,7 @@ int main(int argc, char **argv) {
   rt.on("quit", [&] { quit = true; });
 
   // The two Phase-3 stream sinks this demo needs, registered once before the scene loads:
-  cvc::gl::ariadne::register_stream_node_type(); // the `type: stream` viewport quad
+  cvc::gl::ariadne::register_stream_node_type(app); // the `type: stream` viewport quad
   cvc::gl::ariadne::register_stream_view_widget(backend,
                                                 app); // the `type: stream_view` ImGui widget
 
@@ -155,7 +155,7 @@ int main(int argc, char **argv) {
     std::printf("[ariadne_stream] FATAL: give a .ari document (e.g. stream.ari)\n");
     return 1;
   }
-  ari::LoadResult lr = ari::load_file(docPath.c_str());
+  ari::LoadResult lr = ari::load_file(app, docPath.c_str());
   if (!lr.ok) {
     std::printf("[ariadne_stream] load failed: %s\n", lr.error.c_str());
     return 1;

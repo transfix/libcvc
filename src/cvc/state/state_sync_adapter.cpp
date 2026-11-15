@@ -24,38 +24,62 @@
 
 namespace cvc {
 
-namespace {
+// The app's suppressed threads, shared by every adapter on the app. A thread with a depth is
+// either (a) applying a remote mutation to the app or (b) inside a suppression_scope on it. In
+// either case, its changes to the app's state should not be journaled, because they are not
+// "local user changes". Another app's adapters see their own app's threads only, so a remote
+// apply on one app never hides a local change to another made on the same thread.
+struct state_sync_adapter::suppression {
+  static constexpr const char *app_slot = "cvc.state.sync-suppression";
+  std::atomic<int> any{0}; // the depths' sum: 0 means no thread is suppressed (no lookup)
+  std::mutex m;
+  std::unordered_map<std::thread::id, int> depth;
 
-// Per-thread suppression depth shared by all adapters.
-// A non-zero value means the current thread is either (a) applying a
-// remote mutation or (b) inside a suppression_scope. In either case,
-// state mutations originating on this thread should not be journaled
-// because they are not "local user changes".
-thread_local int t_suppression_depth = 0;
-
-struct thread_suppression_guard {
-  thread_suppression_guard() { ++t_suppression_depth; }
-  ~thread_suppression_guard() { --t_suppression_depth; }
+  void enter() {
+    std::lock_guard<std::mutex> lk(m);
+    ++depth[std::this_thread::get_id()];
+    any.fetch_add(1, std::memory_order_relaxed);
+  }
+  void leave() {
+    std::lock_guard<std::mutex> lk(m);
+    const auto it = depth.find(std::this_thread::get_id());
+    if (it == depth.end())
+      return;
+    if (--it->second == 0)
+      depth.erase(it);
+    any.fetch_sub(1, std::memory_order_relaxed);
+  }
+  // A thread's own entry is sequenced before its own check, so a zero `any` is exact for it.
+  bool current() {
+    if (any.load(std::memory_order_relaxed) == 0)
+      return false;
+    std::lock_guard<std::mutex> lk(m);
+    return depth.count(std::this_thread::get_id()) != 0;
+  }
 };
 
-} // anonymous namespace
+struct state_sync_adapter::suppression_guard {
+  explicit suppression_guard(suppression &sup) : s(sup) { s.enter(); }
+  ~suppression_guard() { s.leave(); }
+  suppression_guard(const suppression_guard &) = delete;
+  suppression_guard &operator=(const suppression_guard &) = delete;
+  suppression &s;
+};
 
 // ---------------- suppression_scope ----------------
 
 state_sync_adapter::suppression_scope::suppression_scope(state_sync_adapter &a) : _adapter(a) {
-  ++t_suppression_depth;
+  _adapter._suppression.enter();
 }
 
-state_sync_adapter::suppression_scope::~suppression_scope() {
-  --t_suppression_depth;
-  (void)_adapter;
-}
+state_sync_adapter::suppression_scope::~suppression_scope() { _adapter._suppression.leave(); }
 
 // ---------------- state_sync_adapter ----------------
 
 state_sync_adapter::state_sync_adapter(app &ctx, std::string root_path, std::string local_node_id)
-    : _ctx(ctx), _root_path(std::move(root_path)), _local_node_id(std::move(local_node_id)),
-      _journal(_local_node_id), _router(), _attached(false), _local_count(0), _remote_count(0) {}
+    : _ctx(ctx), _suppression(ctx.slot<suppression>()), _root_path(std::move(root_path)),
+      _local_node_id(std::move(local_node_id)), _journal(_local_node_id), _router(),
+      _attached(false), _local_count(0), _remote_count(0) {}
 
 state_sync_adapter::~state_sync_adapter() { detach(); }
 
@@ -126,7 +150,7 @@ state_sync_adapter::subscriptions_for_path(const std::string &path) const {
 }
 
 bool state_sync_adapter::current_thread_suppressed() const noexcept {
-  return t_suppression_depth > 0;
+  return _suppression.current();
 }
 
 std::string state_sync_adapter::join_path(const std::string &parent, const std::string &child) {
@@ -381,9 +405,9 @@ void state_sync_adapter::dispatch_local(const state_mutation &m) {
 }
 
 bool state_sync_adapter::apply_remote(const state_mutation &m) {
-  // Mark this thread as applying remote, so the resulting state
+  // Mark this thread as applying remote to this app, so the resulting state
   // signal does not feed back into the journal.
-  thread_suppression_guard guard;
+  suppression_guard guard(_suppression);
 
   // A delete takes the subtree out of this tree: a relay's retraction of what a read scope no
   // longer lets this peer read (state_transport::read_scope_retraction), which nothing journals.
@@ -441,7 +465,7 @@ bool state_sync_adapter::apply_remote(const state_mutation &m) {
     break;
   case state_mutation_op::set_data:
     // Decode the inline payload with the registered codec for its type and set node.data().
-    // (We are inside the thread_suppression_guard above, so the resulting dataChanged does not
+    // (We are inside the suppression_guard above, so the resulting dataChanged does not
     // loop back into the journal.) A missing codec or a decode failure leaves data() untouched and
     // is swallowed — value() and child structure still converge.
     if (_codecs && m.payload.kind == state_payload_kind::inline_bytes && !m.type_name.empty()) {
@@ -456,7 +480,7 @@ bool state_sync_adapter::apply_remote(const state_mutation &m) {
       // installs the result on this node via node.data(). When the blob store already holds the
       // chunks (shared store, or an inproc/ipc fetch that completes inline) this runs to
       // completion synchronously on THIS thread, so the install stays inside the
-      // thread_suppression_guard above and does not re-enter the journal. When chunks must be
+      // suppression_guard above and does not re-enter the journal. When chunks must be
       // pulled asynchronously the hydrator returns `pending` and installs later off this thread;
       // re-checking shard conflict order on that late install is a follow-up for the async
       // (gRPC) transport path and is not yet exercised by the inproc/ipc transports.

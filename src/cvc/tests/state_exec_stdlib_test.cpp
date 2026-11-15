@@ -19,18 +19,6 @@
 #include <utility>
 #include <vector>
 
-// A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
-// scope hold each other, and only the cycle collector frees them
-// (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Reference cycles"). Nothing here runs long enough for a
-// collection to be due, so once every test is done one collection leaves LeakSanitizer only real
-// leaks to report.
-class collect_cycles_at_exit : public ::testing::Environment {
-public:
-  void TearDown() override { cvc::state_exec::collect_cycles(); }
-};
-[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
-    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
-
 using namespace cvc::state_exec;
 
 namespace {
@@ -88,11 +76,13 @@ std::string over_default_elements() {
   return std::to_string(kDefaultMaxAllocBytes / sizeof(value_t) + 1);
 }
 
-value_t call(const char *fn, std::vector<value_t> args) {
-  const native_fn *f = stdlib_registry::standard().lookup_qualified(fn);
+// Call the stdlib function `fn` with `args`, in `ctx` (null: no context).
+value_t call(const char *fn, std::vector<value_t> args, exec_context *ctx = nullptr) {
+  const stdlib_registry reg;
+  const native_fn *f = reg.lookup_qualified(fn);
   if (!f)
     throw std::logic_error(std::string("no stdlib function ") + fn);
-  return (*f)(std::span<const value_t>(args.data(), args.size()));
+  return (*f)(call_args(std::span<const value_t>(args.data(), args.size()), ctx));
 }
 
 } // namespace
@@ -138,37 +128,62 @@ TEST(StdlibReachTest, ExplicitEnvironmentFromMakeDefaultEnvironment) {
   EXPECT_EQ(show(sched.get_result(pid)), "\xC3\xA9");
 }
 
-// --- one shared, frozen scope ---------------------------------------------------------------
+// --- a frozen scope of each environment's own -----------------------------------------------
 
-TEST(StdlibSharedScopeTest, DefaultEnvironmentsLinkOneScope) {
-  const environment_ptr scope = stdlib_registry::shared_scope();
+TEST(StdlibSharedScopeTest, EachDefaultEnvironmentLinksItsOwnScope) {
+  const environment_ptr scope = stdlib_registry::make_scope();
   ASSERT_TRUE(scope);
   EXPECT_TRUE(scope->frozen);
-  EXPECT_EQ(stdlib_registry::shared_scope(), scope); // built once
+  EXPECT_NE(stdlib_registry::make_scope(), scope); // a new one each call: none is shared
 
   auto a = builtins::make_default_environment();
   auto b = builtins::make_default_environment();
-  EXPECT_EQ(a->outer, scope);
-  EXPECT_EQ(b->outer, scope);
-  // Not copied: neither environment binds the name itself, both find the one shared value.
+  ASSERT_TRUE(a->outer);
+  ASSERT_TRUE(b->outer);
+  EXPECT_TRUE(a->outer->frozen);
+  EXPECT_NE(a->outer, b->outer) << "two environments share a stdlib scope";
+  // Not copied into the environment: it doesn't bind the name itself, its stdlib scope does.
   EXPECT_EQ(a->bindings.count("string.length"), 0u);
   ASSERT_NE(a->lookup("string.length"), nullptr);
-  EXPECT_EQ(a->lookup("string.length"), b->lookup("string.length"));
+  EXPECT_EQ(a->lookup("string.length"), a->outer->lookup("string.length"));
 
   // Every function of every module is in it.
-  const stdlib_registry &reg = stdlib_registry::standard();
+  const stdlib_registry reg;
   for (const std::string &module : {"string", "bytes", "math", "collections"})
     for (const std::string &fn : reg.list_functions(module))
       EXPECT_NE(scope->lookup(fn), nullptr) << fn;
+}
+
+// Two apps' frozen builtins (what their groups extend) are their own, each over a stdlib scope of
+// its own; one app asking again gets its one scope. A later app, made after the first is gone,
+// gets a new scope too.
+TEST(StdlibSharedScopeTest, EachAppHasItsOwnFrozenBuiltins) {
+  environment_ptr first_scope;
+  {
+    cvc::app a;
+    cvc::app b;
+    const environment_ptr fa = frozen_builtins(a);
+    const environment_ptr fb = frozen_builtins(b);
+    ASSERT_TRUE(fa && fb);
+    EXPECT_TRUE(fa->frozen);
+    EXPECT_EQ(frozen_builtins(a), fa) << "one per app";
+    EXPECT_NE(fa, fb) << "two apps share frozen builtins";
+    ASSERT_TRUE(fa->outer && fb->outer);
+    EXPECT_NE(fa->outer, fb->outer) << "two apps share a stdlib scope";
+    first_scope = fa;
+  }
+  cvc::app later;
+  EXPECT_NE(frozen_builtins(later), first_scope);
+  EXPECT_EQ(first_scope.use_count(), 1) << "the app that made it kept no other reference";
 }
 
 TEST(StdlibSharedScopeTest, SetShadowsInsteadOfWritingTheSharedScope) {
   EXPECT_EQ(run_sync("(begin (set string.length 42) string.length)"), "42");
   // Another program (another scheduler) still sees the real function.
   EXPECT_EQ(run_sync("(string.length \"ab\")"), "2");
-  ASSERT_NE(stdlib_registry::shared_scope()->lookup("string.length"), nullptr);
-  EXPECT_TRUE(std::holds_alternative<native_fn>(
-      stdlib_registry::shared_scope()->lookup("string.length")->v));
+  auto env = builtins::make_default_environment();
+  ASSERT_NE(env->lookup("string.length"), nullptr);
+  EXPECT_TRUE(std::holds_alternative<native_fn>(env->lookup("string.length")->v));
 }
 
 TEST(StdlibSharedScopeTest, DefunShadowsAStdlibName) {
@@ -181,10 +196,9 @@ TEST(StdlibSharedScopeTest, SetExistingShadowsInOutermostUnfrozenScope) {
   auto inner = environment::extend(env);
   inner->set_existing("math.pi", value_t{int64_t{3}});
   EXPECT_EQ(inner->bindings.count("math.pi"), 0u); // not in the scope it was called on
-  ASSERT_EQ(env->bindings.count("math.pi"), 1u);   // shadowed one level below the shared scope
+  ASSERT_EQ(env->bindings.count("math.pi"), 1u);   // shadowed one level below the stdlib scope
   EXPECT_EQ(std::get<int64_t>(env->bindings["math.pi"].v), 3);
-  EXPECT_TRUE(
-      std::holds_alternative<native_fn>(stdlib_registry::shared_scope()->lookup("math.pi")->v));
+  EXPECT_TRUE(std::holds_alternative<native_fn>(env->outer->lookup("math.pi")->v));
   // A name bound in an unfrozen scope is still updated where it is.
   inner->set("x", value_t{int64_t{1}});
   inner->set_existing("x", value_t{int64_t{2}});
@@ -192,11 +206,10 @@ TEST(StdlibSharedScopeTest, SetExistingShadowsInOutermostUnfrozenScope) {
 }
 
 TEST(StdlibSharedScopeTest, WritingAFrozenScopeThrows) {
-  EXPECT_THROW(stdlib_registry::shared_scope()->set_existing("math.pi", value_t{}),
-               std::logic_error);
-  EXPECT_THROW(stdlib_registry::shared_scope()->set("math.pi", value_t{}), std::logic_error);
-  EXPECT_THROW(stdlib_registry::standard().import_module("math", stdlib_registry::shared_scope()),
-               std::logic_error);
+  const environment_ptr scope = stdlib_registry::make_scope();
+  EXPECT_THROW(scope->set_existing("math.pi", value_t{}), std::logic_error);
+  EXPECT_THROW(scope->set("math.pi", value_t{}), std::logic_error);
+  EXPECT_THROW(stdlib_registry().import_module("math", scope), std::logic_error);
 }
 
 // --- per-call allocation limit --------------------------------------------------------------
@@ -271,21 +284,26 @@ TEST(StdlibAllocLimitTest, ZeroMeansNoLimitOfItsOwn) {
 }
 
 TEST(StdlibAllocLimitTest, GuardsNestAndOnlyTighten) {
-  EXPECT_EQ(eval_alloc_limit(), std::optional<std::size_t>(kDefaultMaxAllocBytes));
+  exec_context ctx;
+  EXPECT_EQ(eval_alloc_limit(&ctx), std::optional<std::size_t>(kDefaultMaxAllocBytes));
+  EXPECT_EQ(eval_alloc_limit(nullptr), std::optional<std::size_t>(kDefaultMaxAllocBytes));
   {
-    eval_alloc_guard unlimited(std::nullopt);
-    EXPECT_EQ(eval_alloc_limit(), std::nullopt);
+    eval_alloc_guard unlimited(ctx, std::nullopt);
+    EXPECT_EQ(eval_alloc_limit(&ctx), std::nullopt);
     {
-      eval_alloc_guard outer(100);
-      EXPECT_EQ(eval_alloc_limit(), std::optional<std::size_t>(100));
-      eval_alloc_guard looser(1000);
-      EXPECT_EQ(eval_alloc_limit(), std::optional<std::size_t>(100));
-      eval_alloc_guard none(std::nullopt);
-      EXPECT_EQ(eval_alloc_limit(), std::optional<std::size_t>(100));
+      eval_alloc_guard outer(ctx, 100);
+      EXPECT_EQ(eval_alloc_limit(&ctx), std::optional<std::size_t>(100));
+      eval_alloc_guard looser(ctx, 1000);
+      EXPECT_EQ(eval_alloc_limit(&ctx), std::optional<std::size_t>(100));
+      eval_alloc_guard none(ctx, std::nullopt);
+      EXPECT_EQ(eval_alloc_limit(&ctx), std::optional<std::size_t>(100));
+      // Another context's limit is its own.
+      exec_context other;
+      EXPECT_EQ(eval_alloc_limit(&other), std::optional<std::size_t>(kDefaultMaxAllocBytes));
     }
-    EXPECT_EQ(eval_alloc_limit(), std::nullopt);
+    EXPECT_EQ(eval_alloc_limit(&ctx), std::nullopt);
   }
-  EXPECT_EQ(eval_alloc_limit(), std::optional<std::size_t>(kDefaultMaxAllocBytes));
+  EXPECT_EQ(eval_alloc_limit(&ctx), std::optional<std::size_t>(kDefaultMaxAllocBytes));
 }
 
 TEST(StdlibAllocLimitTest, EveryGrowingResultIsChecked) {
@@ -299,36 +317,42 @@ TEST(StdlibAllocLimitTest, EveryGrowingResultIsChecked) {
   d1->emplace_back("a", value_t(int64_t(1)));
   auto d2 = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
   d2->emplace_back("b", value_t(int64_t(2)));
-  const auto concat = [](std::vector<value_t> args) {
-    return builtin_str_concat(std::span<const value_t>(args.data(), args.size()));
+  exec_context ctx;
+  const auto concat = [&ctx](std::vector<value_t> args) {
+    return builtin_str_concat(call_args(std::span<const value_t>(args.data(), args.size()), &ctx));
+  };
+  const auto call_in = [&ctx](const char *fn, std::vector<value_t> args) {
+    return call(fn, std::move(args), &ctx);
   };
 
-  eval_alloc_guard tight(64);
-  EXPECT_NE(
-      thrown([&] { call("string.split", {big, value_t(std::string(""))}); }).find("string.split"),
-      std::string::npos);
+  eval_alloc_guard tight(ctx, 64);
   EXPECT_NE(thrown([&] {
-              call("string.join", {make_list({s, s}), value_t(std::string(""))});
+              call_in("string.split", {big, value_t(std::string(""))});
+            }).find("string.split"),
+            std::string::npos);
+  EXPECT_NE(thrown([&] {
+              call_in("string.join", {make_list({s, s}), value_t(std::string(""))});
             }).find("string.join"),
             std::string::npos);
   EXPECT_NE(thrown([&] {
-              call("string.replace", {s, value_t(std::string("a")), s});
+              call_in("string.replace", {s, value_t(std::string("a")), s});
             }).find("string.replace"),
             std::string::npos);
   EXPECT_NE(thrown([&] {
-              call("bytes.concat",
-                   {make_bytes(std::string(40, 'x')), make_bytes(std::string(40, 'x'))});
+              call_in("bytes.concat",
+                      {make_bytes(std::string(40, 'x')), make_bytes(std::string(40, 'x'))});
             }).find("bytes.concat"),
             std::string::npos);
-  EXPECT_NE(
-      thrown([&] { call("collections.range", {value_t(int64_t(100))}); }).find("collections.range"),
-      std::string::npos);
-  EXPECT_NE(thrown([&] { call("collections.zip", {three, three}); }).find("collections.zip"),
+  EXPECT_NE(thrown([&] {
+              call_in("collections.range", {value_t(int64_t(100))});
+            }).find("collections.range"),
             std::string::npos);
-  EXPECT_NE(thrown([&] { call("collections.flatten", {nested}); }).find("collections.flatten"),
+  EXPECT_NE(thrown([&] { call_in("collections.zip", {three, three}); }).find("collections.zip"),
+            std::string::npos);
+  EXPECT_NE(thrown([&] { call_in("collections.flatten", {nested}); }).find("collections.flatten"),
             std::string::npos);
   EXPECT_NE(thrown([&] {
-              call("collections.dict-merge", {value_t(d1), value_t(d2)});
+              call_in("collections.dict-merge", {value_t(d1), value_t(d2)});
             }).find("collections.dict-merge"),
             std::string::npos);
   EXPECT_NE(thrown([&] { concat({s, s}); }).find("str-concat"), std::string::npos);
@@ -336,11 +360,12 @@ TEST(StdlibAllocLimitTest, EveryGrowingResultIsChecked) {
   const value_t hundred(int64_t(100));
   const value_t gen = std::get<native_fn>(env->lookup("range")->v)(std::span(&hundred, 1));
   const native_fn &collect = std::get<native_fn>(env->lookup("collect")->v);
-  EXPECT_NE(thrown([&] { collect(std::span(&gen, 1)); }).find("collect"), std::string::npos);
+  EXPECT_NE(thrown([&] { collect(call_args(std::span(&gen, 1), &ctx)); }).find("collect"),
+            std::string::npos);
 
   // Results that fit still work under the same limit.
-  EXPECT_EQ(show(call("string.replace", {value_t(std::string("hello")), value_t(std::string("l")),
-                                         value_t(std::string("r"))})),
+  EXPECT_EQ(show(call_in("string.replace", {value_t(std::string("hello")),
+                                            value_t(std::string("l")), value_t(std::string("r"))})),
             "herro");
   EXPECT_EQ(show(concat({value_t(std::string("ab")), value_t(std::string("cd"))})), "abcd");
 }
@@ -628,7 +653,8 @@ TEST(StdlibSlicedTest, ADslFunctionNeedsARunningProgram) {
               call("collections.map", {one_item, value_t{cls}});
             }).find("needs a running program"),
             std::string::npos);
-  const native_fn *abs = stdlib_registry::standard().lookup_qualified("math.abs");
+  const stdlib_registry reg;
+  const native_fn *abs = reg.lookup_qualified("math.abs");
   ASSERT_NE(abs, nullptr);
   EXPECT_EQ(show(call("collections.map", {one_item, value_t{*abs}})), "(1)");
 
@@ -639,9 +665,9 @@ TEST(StdlibSlicedTest, ADslFunctionNeedsARunningProgram) {
             }).find("apply: calling a DSL function needs a running program"),
             std::string::npos);
   const value_t arg(int64_t(7));
-  EXPECT_EQ(show(call_function(value_t{*abs}, std::span(&arg, 1), "test")), "7");
+  EXPECT_EQ(show(call_function(nullptr, value_t{*abs}, std::span(&arg, 1), "test")), "7");
   EXPECT_NE(thrown([&] {
-              call_function(value_t{int64_t(1)}, std::span(&arg, 1), "test");
+              call_function(nullptr, value_t{int64_t(1)}, std::span(&arg, 1), "test");
             }).find("test: not a function"),
             std::string::npos);
 }

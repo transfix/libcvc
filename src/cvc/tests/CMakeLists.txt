@@ -16,11 +16,14 @@ add_executable(ariadne_scene_world_test ariadne_scene_world_test.cpp)
 add_executable(ariadne_server_document_test ariadne_server_document_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
+add_executable(ariadne_chart_test ariadne_chart_test.cpp)
 add_executable(ariadne_term_graphics_test ariadne_term_graphics_test.cpp)
 add_executable(ariadne_media_test ariadne_media_test.cpp)
+add_executable(ariadne_files_test ariadne_files_test.cpp)
 add_executable(ariadne_host_test ariadne_host_test.cpp)
 add_executable(ariadne_requires_test ariadne_requires_test.cpp)
 add_executable(ariadne_registries_test ariadne_registries_test.cpp)
+add_executable(multi_app_integration_test multi_app_integration_test.cpp)
 add_executable(ariadne_script_engine_test ariadne_script_engine_test.cpp)
 add_executable(ariadne_stream_view_test ariadne_stream_view_test.cpp)
 add_executable(x11_macro_headers_test x11_macro_headers_test.cpp)
@@ -29,6 +32,9 @@ add_executable(net_http_client_test net_http_client_test.cpp)
 add_executable(ariadne_data_test ariadne_data_test.cpp)
 add_executable(net_ws_client_test net_ws_client_test.cpp)
 add_executable(net_policy_test net_policy_test.cpp)
+# End-to-end encrypted DMs (cvc/net/e2ee.h): e2ee.js's vectors replayed, and the e2ee-* verbs.
+add_executable(e2ee_test e2ee_test.cpp)
+add_executable(ariadne_e2ee_test ariadne_e2ee_test.cpp)
 add_executable(net_oidc_test net_oidc_test.cpp)
 add_executable(uri_http_cache_test uri_http_cache_test.cpp)
 add_executable(state_test state_test.cpp)
@@ -69,6 +75,7 @@ add_executable(state_distributed_delegation_integration_test state_distributed_d
 add_executable(state_link_test state_link_test.cpp)
 add_executable(state_send_message_test state_send_message_test.cpp)
 add_executable(stream_test stream_test.cpp)
+add_executable(stream_raster_test stream_raster_test.cpp)
 add_executable(stream_to_image_test stream_to_image_test.cpp)
 add_executable(state_link_cycles_test state_link_cycles_test.cpp)
 add_executable(state_expiry_test state_expiry_test.cpp)
@@ -157,6 +164,15 @@ add_executable(room_aoi_relay_test room_aoi_relay_test.cpp)
 add_executable(physics_codec_test physics_codec_test.cpp)
 add_executable(physics_field_test physics_field_test.cpp)
 add_executable(physics_hull_test physics_hull_test.cpp)
+add_executable(physics_immersion_test physics_immersion_test.cpp)
+# ImmersionDigest pins the columns of bodies whose poses are computed here: build without FMA
+# contraction, as ocean_ewave_test.
+if(NOT MSVC)
+  set_source_files_properties(physics_immersion_test.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(physics_immersion_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
+add_executable(physics_boat_test physics_boat_test.cpp)
 add_executable(physics_vehicle_test physics_vehicle_test.cpp)
 add_executable(physics_energy_test physics_energy_test.cpp)
 add_executable(nav_plant_test nav_plant_test.cpp)
@@ -181,6 +197,8 @@ add_executable(ph_se2_test ph_se2_test.cpp)
 add_executable(ph_se2_train_test ph_se2_train_test.cpp)
 add_executable(nav_terrain_test nav_terrain_test.cpp)
 add_executable(nav_binding_test nav_binding_test.cpp)
+add_executable(nav_trace_test nav_trace_test.cpp)
+add_executable(input_trace_test input_trace_test.cpp)
 add_executable(nav_sim_world_agents_test nav_sim_world_agents_test.cpp)
 add_executable(physics_parity_test physics_parity_test.cpp)
 add_executable(physics_replay_test physics_replay.cpp) # plain main(); see ../CMakeLists.txt
@@ -357,11 +375,14 @@ set(TEST_TARGETS
   ariadne_server_document_test
   ariadne_bind_test
   ariadne_ftxui_test
+  ariadne_chart_test
   ariadne_term_graphics_test
   ariadne_media_test
+  ariadne_files_test
   ariadne_host_test
   ariadne_requires_test
   ariadne_registries_test
+  multi_app_integration_test
   ariadne_script_engine_test
   ariadne_stream_view_test
   x11_macro_headers_test
@@ -369,6 +390,8 @@ set(TEST_TARGETS
   ariadne_data_test
   net_ws_client_test
   net_policy_test
+  e2ee_test
+  ariadne_e2ee_test
   net_oidc_test
   uri_http_cache_test
   state_test
@@ -404,6 +427,7 @@ set(TEST_TARGETS
   state_link_test
   state_send_message_test
   stream_test
+  stream_raster_test
   stream_to_image_test
   state_link_cycles_test
   state_expiry_test
@@ -437,6 +461,8 @@ set(TEST_TARGETS
   physics_codec_test
   physics_field_test
   physics_hull_test
+  physics_immersion_test
+  physics_boat_test
   physics_vehicle_test
   physics_energy_test
   nav_plant_test
@@ -453,6 +479,8 @@ set(TEST_TARGETS
   ph_se2_train_test
   nav_terrain_test
   nav_binding_test
+  nav_trace_test
+  input_trace_test
   nav_sim_world_agents_test
   physics_parity_test
   physics_replay_test
@@ -767,6 +795,13 @@ target_link_libraries(ariadne_ftxui_test
     GTest::gtest
     GTest::gtest_main
 )
+
+target_link_libraries(ariadne_chart_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 # Three tests load GL-free documents from the repo's examples/ tree.
 target_compile_definitions(ariadne_ftxui_test PRIVATE
   CVC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../examples")
@@ -778,6 +813,13 @@ target_compile_definitions(world_rules_test PRIVATE
   CVC_ARIADNE_WORLDS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../ariadne/worlds")
 
 target_link_libraries(ariadne_media_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_files_test
   PRIVATE
     cvc
     GTest::gtest
@@ -813,6 +855,16 @@ target_link_libraries(ariadne_registries_test
     GTest::gtest_main
 )
 
+# Several apps in one process never collide: whole workloads alone, at once on threads, and in
+# reverse order give the same answers (libcvc keeps no process-wide state).
+target_link_libraries(multi_app_integration_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_compile_features(multi_app_integration_test PRIVATE cxx_std_20)
+
 target_link_libraries(ariadne_script_engine_test
   PRIVATE
     cvc
@@ -825,7 +877,9 @@ target_link_libraries(ariadne_script_engine_test
 # guests in documents, from WAT text the test writes.
 include("${PROJECT_SOURCE_DIR}/src/ariadne_wasm/ariadne_wasm.cmake")
 cvc_find_ariadne_wasm(OFF)
-if(CVC_ARIADNE_WASM_FOUND)
+# Native only: under Emscripten the macro finds the browser backend, which compiles no .wat (these
+# guests' format), and the browser's suite is ../CMakeLists.txt's CVC_BUILD_WASM_GUEST_TESTS.
+if(CVC_ARIADNE_WASM_FOUND AND NOT EMSCRIPTEN)
   add_executable(ariadne_wasm_test ariadne_wasm_test.cpp)
   cvc_ariadne_wasm_host(ariadne_wasm_test)
   target_link_libraries(ariadne_wasm_test
@@ -835,6 +889,20 @@ if(CVC_ARIADNE_WASM_FOUND)
       GTest::gtest_main
   )
   list(APPEND TEST_TARGETS ariadne_wasm_test)
+  # The guests transformed for the browser (G2), here on wasmtime: the file the browser backend's
+  # ariadne_wasm_browser_test is under Emscripten (../CMakeLists.txt, CVC_BUILD_WASM_GUEST_TESTS).
+  # The guests are transformed where wasm-opt is found (CVC_WASM_OPT); the memory cap's cases run
+  # either way.
+  add_executable(ariadne_wasm_transform_test ariadne_wasm_browser_test.cpp)
+  cvc_ariadne_wasm_host(ariadne_wasm_transform_test)
+  cvc_ariadne_wasm_test_guests(ariadne_wasm_transform_test)
+  target_link_libraries(ariadne_wasm_transform_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  list(APPEND TEST_TARGETS ariadne_wasm_transform_test)
 endif()
 
 target_link_libraries(ariadne_stream_view_test
@@ -873,6 +941,20 @@ target_link_libraries(net_ws_client_test
 )
 
 target_link_libraries(net_policy_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(e2ee_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_e2ee_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1693,6 +1775,13 @@ target_link_libraries(stream_test
     GTest::gtest_main
 )
 
+target_link_libraries(stream_raster_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(stream_to_image_test
   PRIVATE
     cvc
@@ -2293,6 +2382,18 @@ target_link_libraries(nav_binding_test
     GTest::gtest
     GTest::gtest_main
 )
+target_link_libraries(nav_trace_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(input_trace_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
 target_link_libraries(physics_parity_test
   PRIVATE
@@ -2308,7 +2409,21 @@ target_link_libraries(physics_field_test
     GTest::gtest_main
 )
 
+target_link_libraries(physics_boat_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(physics_hull_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(physics_immersion_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2681,6 +2796,8 @@ target_compile_features(room_aoi_relay_test PRIVATE cxx_std_17)
 target_compile_features(physics_codec_test PRIVATE cxx_std_17)
 target_compile_features(physics_field_test PRIVATE cxx_std_17)
 target_compile_features(physics_hull_test PRIVATE cxx_std_17)
+target_compile_features(physics_immersion_test PRIVATE cxx_std_17)
+target_compile_features(physics_boat_test PRIVATE cxx_std_17)
 target_compile_features(physics_vehicle_test PRIVATE cxx_std_17)
 target_compile_features(physics_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_plant_test PRIVATE cxx_std_17)
@@ -2697,6 +2814,8 @@ target_compile_features(ph_se2_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_train_test PRIVATE cxx_std_17)
 target_compile_features(nav_terrain_test PRIVATE cxx_std_17)
 target_compile_features(nav_binding_test PRIVATE cxx_std_17)
+target_compile_features(nav_trace_test PRIVATE cxx_std_17)
+target_compile_features(input_trace_test PRIVATE cxx_std_17)
 target_compile_features(nav_sim_world_agents_test PRIVATE cxx_std_17)
 target_compile_features(physics_parity_test PRIVATE cxx_std_17)
 target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
@@ -2854,14 +2973,18 @@ cvc_discover_tests(ariadne_runtime_test)
 cvc_discover_tests(ariadne_scene_world_test)
 cvc_discover_tests(ariadne_server_document_test)
 cvc_discover_tests(ariadne_ftxui_test)
+cvc_discover_tests(ariadne_chart_test)
 cvc_discover_tests(ariadne_term_graphics_test)
 cvc_discover_tests(ariadne_media_test)
+cvc_discover_tests(ariadne_files_test)
 cvc_discover_tests(ariadne_host_test)
 cvc_discover_tests(ariadne_requires_test)
 cvc_discover_tests(ariadne_registries_test)
+cvc_discover_tests(multi_app_integration_test)
 cvc_discover_tests(ariadne_script_engine_test)
 if(TARGET ariadne_wasm_test)
   cvc_discover_tests(ariadne_wasm_test)
+  cvc_discover_tests(ariadne_wasm_transform_test)
 endif()
 cvc_discover_tests(ariadne_stream_view_test)
 cvc_discover_tests(ariadne_bind_test)
@@ -2870,6 +2993,8 @@ cvc_discover_tests(net_http_client_test)
 cvc_discover_tests(ariadne_data_test)
 cvc_discover_tests(net_ws_client_test)
 cvc_discover_tests(net_policy_test)
+cvc_discover_tests(e2ee_test)
+cvc_discover_tests(ariadne_e2ee_test)
 cvc_discover_tests(net_oidc_test)
 cvc_discover_tests(uri_http_cache_test)
 cvc_discover_tests(state_test)
@@ -2946,9 +3071,14 @@ cvc_discover_tests(vis_tiler_test)
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_ewave_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test)
   cvc_discover_tests(${_lsys_test})
 endforeach()
+# The water's long runs (a channel's walls, a thin wall, a moving source's wake) take 105-195 s
+# each in a Debug build, and a PR's Debug ctest gives a test without a TIMEOUT of its own 300 s
+# (ci.yml), which a busy runner misses: three of them timed out on two unrelated PRs on
+# 2026-11-14. Their own budget, so a slow box fails on a real hang only.
+cvc_discover_tests(ocean_ewave_test PROPERTIES TIMEOUT 1200)
 cvc_discover_tests(volume_io_extra_test)
 if(TARGET lbie_mesher_test)
   cvc_discover_tests(lbie_mesher_test)
@@ -3137,6 +3267,7 @@ cvc_discover_tests(state_distributed_delegation_integration_test)
 cvc_discover_tests(state_link_test)
 cvc_discover_tests(state_send_message_test)
 cvc_discover_tests(stream_test)
+cvc_discover_tests(stream_raster_test)
 cvc_discover_tests(stream_to_image_test)
 cvc_discover_tests(state_link_cycles_test)
 cvc_discover_tests(state_expiry_test)
@@ -3165,6 +3296,20 @@ cvc_discover_tests(state_exec_grammar_test)
 cvc_discover_tests(state_exec_corpus_test)
 cvc_discover_tests(state_exec_pegtl_test)
 cvc_discover_tests(state_exec_async_test)
+# Stage S (S2-Q12): the async suite again with every scheduler's runs at 256 steps
+# (CVC_EXEC_SLICE_STEPS, read as a scheduler is made), the whole suite: sync_step() stays one
+# step (runs are run_loop's), so the cases that step a program one sync_step() at a time are
+# unchanged. The Slices.* cases set their own slices and run here too.
+add_test(NAME state_exec_async_test_slice256 COMMAND state_exec_async_test)
+set_tests_properties(state_exec_async_test_slice256 PROPERTIES ENVIRONMENT "CVC_EXEC_SLICE_STEPS=256")
+# Ariadne's runtime the same way: its actions and residents on schedulers whose runs are 256 steps
+# (those with max_memory or max_step_time still take one step a pick). RUN_SERIAL: an action's
+# time cap (ariadne.limits.action_max_time, 0.1 s) counts its first half on the wall clock, so
+# parallel ctest jobs preempting the suite use it up. In a Debug build next to
+# state_exec_async_test_slice256, the cap cases' loop and nav-step actions ran out of time.
+add_test(NAME ariadne_runtime_test_slice256 COMMAND ariadne_runtime_test)
+set_tests_properties(ariadne_runtime_test_slice256 PROPERTIES ENVIRONMENT "CVC_EXEC_SLICE_STEPS=256"
+                                                              RUN_SERIAL TRUE)
 cvc_discover_tests(async_lane_test)
 cvc_discover_tests(state_exec_scheduler_test)
 cvc_discover_tests(state_exec_locks_test)
@@ -3217,6 +3362,8 @@ cvc_discover_tests(room_aoi_relay_test)
 cvc_discover_tests(physics_codec_test)
 cvc_discover_tests(physics_field_test)
 cvc_discover_tests(physics_hull_test)
+cvc_discover_tests(physics_immersion_test)
+cvc_discover_tests(physics_boat_test)
 cvc_discover_tests(physics_vehicle_test)
 cvc_discover_tests(physics_energy_test)
 cvc_discover_tests(nav_plant_test)
@@ -3233,6 +3380,8 @@ cvc_discover_tests(ph_se2_test)
 cvc_discover_tests(ph_se2_train_test)
 cvc_discover_tests(nav_terrain_test)
 cvc_discover_tests(nav_binding_test)
+cvc_discover_tests(nav_trace_test)
+cvc_discover_tests(input_trace_test)
 cvc_discover_tests(nav_sim_world_agents_test)
 cvc_discover_tests(physics_parity_test)
 cvc_discover_tests(physics_pose_tracker_test)
@@ -3359,7 +3508,10 @@ endif()
 # must be reachable from TEST_TARGETS; list a target in
 # TEST_TARGETS_INTENTIONALLY_EXCLUDED (with a reason) to opt out.
 set(TEST_TARGETS_INTENTIONALLY_EXCLUDED
-  # (none today — add entries here with a comment explaining why)
+  # The gas pass as a command (src/ariadne_wasm/meter_main.cpp): a tool the transform of the wasm
+  # test guests runs (cvc_ariadne_wasm_transform), not a test. The tests whose guests it meters
+  # depend on it, so `check` builds it anyway.
+  ari_wasm_meter
 )
 
 get_property(_cvc_dir_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)

@@ -16,9 +16,9 @@ cmake_minimum_required(VERSION 3.16)
 # from the same source tree) it parses that line out of the top-level CMakeLists.txt,
 # the same single source of truth the cvc package and the recipe-version CI gate use.
 # This used to be hardcoded 3.0, so every bundle's cvcGLConfigVersion.cmake reported
-# 3.0 and a consumer's find_package(cvcGL 3.5) rejected a 3.5 cvcGL. SOVERSION stays 3,
-# so the runtime name (libcvcGL.so.3) is unchanged; only the file suffix and the
-# exported package version move -- as for libcvc itself (src/cvc/CMakeLists.txt).
+# 3.0 and a consumer's find_package(cvcGL 3.5) rejected a 3.5 cvcGL. SOVERSION is the major
+# version, as libcvc's is (src/cvc/CMakeLists.txt): libcvcGL.so.4 from 4.0, whose ABI breaks
+# with libcvc's, so a 4.x cvcGL never loads where a 3.x one was linked.
 if(DEFINED libcvc_VERSION)
   set(_cvcgl_version "${libcvc_VERSION}")
 else()
@@ -365,7 +365,7 @@ if(APPLE)
 endif()
 
 set_target_properties(cvcGL PROPERTIES POSITION_INDEPENDENT_CODE ON
-  VERSION ${PROJECT_VERSION} SOVERSION 3)
+  VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
 
 # Same reason as src/cvc/CMakeLists.txt:795-801, which cvcGL was missing: the
 # sources carry no __declspec(dllexport), so a SHARED Windows build emits a
@@ -560,6 +560,16 @@ add_executable(cvcgl_ewave test/cvcgl_ewave.cpp ocean/EWave.cpp ocean/OceanFFT.c
 target_include_directories(cvcgl_ewave PRIVATE ocean)
 target_link_libraries(cvcgl_ewave PRIVATE cvcGL)
 add_test(NAME cvcgl_ewave COMMAND cvcgl_ewave)
+
+# Bodies make waves (OCEAN-AND-WEATHER-ROADMAP.md C2/C3, O9): the shared immersion code
+# (cvc/physics/immersion.h) as EWave's sources (WakeSource), the window's shift pass, a box
+# footprint's Kelvin wake read from the GPU, and a masked rock's wave shadow. SKIPs (rc 0)
+# without float render targets.
+add_executable(cvcgl_wake test/cvcgl_wake.cpp ocean/EWave.cpp ocean/WakeSource.cpp
+                          ocean/OceanButterfly.cpp)
+target_include_directories(cvcgl_wake PRIVATE ocean)
+target_link_libraries(cvcgl_wake PRIVATE cvcGL)
+add_test(NAME cvcgl_wake COMMAND cvcgl_wake)
 
 # GeometryNode::updateNormals — the in-place normal fast path the FFT ocean uses
 # to shade its CPU-deformed surface. Renders a lit quad re-normal'd toward vs away
@@ -843,6 +853,13 @@ add_executable(cvcgl_state_publisher test/cvcgl_state_publisher.cpp)
 target_link_libraries(cvcgl_state_publisher PRIVATE cvcGL)
 add_test(NAME cvcgl_state_publisher COMMAND cvcgl_state_publisher)
 
+# Several apps in one process never collide in cvcGL: scene node types, shader presets, mapper
+# settings, shadow marks, publisher flushes and UI fonts are each app's (alone, on threads at
+# once, in reverse order; a later app starts clean). Headless.
+add_executable(cvcgl_multi_app test/cvcgl_multi_app.cpp)
+target_link_libraries(cvcgl_multi_app PRIVATE cvcGL)
+add_test(NAME cvcgl_multi_app COMMAND cvcgl_multi_app)
+
 add_executable(cvcgl_nav_stats_publish test/cvcgl_nav_stats_publish.cpp)
 target_link_libraries(cvcgl_nav_stats_publish PRIVATE cvcGL)
 add_test(NAME cvcgl_nav_stats_publish COMMAND cvcgl_nav_stats_publish)
@@ -925,6 +942,15 @@ add_executable(cvcgl_ariadne_realize test/cvcgl_ariadne_realize.cpp)
 target_link_libraries(cvcgl_ariadne_realize PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_realize COMMAND cvcgl_ariadne_realize)
 
+# Ariadne §5.4 repeat: on a scene node: copies made and taken as the count (a number, a key, a
+# read-lane expression) changes, with RealizedScene's lists kept in step. Part 2 runs a document in
+# AriRuntime and skips without an ImGui overlay unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_repeat test/cvcgl_ariadne_repeat.cpp)
+  target_link_libraries(cvcgl_ariadne_repeat PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_repeat COMMAND cvcgl_ariadne_repeat)
+endif()
+
 # H1 slice 6: the conference room in 3D (room scene realize + avatar markers + key -> intent).
 add_executable(cvcgl_room_view test/cvcgl_room_view.cpp)
 target_link_libraries(cvcgl_room_view PRIVATE cvcGL)
@@ -967,6 +993,12 @@ add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
 add_executable(cvcgl_imgui_group_click test/cvcgl_imgui_group_click.cpp)
 target_link_libraries(cvcgl_imgui_group_click PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_group_click COMMAND cvcgl_imgui_group_click)
+# A text: with runs: (§5.20): it wraps at its size:, a tap on a link runs on_link (not the card's
+# on_click around it), a tap on its plain text is the card's, a press that drags is nobody's, and
+# Tab then Enter activates the link. Clicked through ImGui's own input. No window, no GL.
+add_executable(cvcgl_imgui_rich_text test/cvcgl_imgui_rich_text.cpp)
+target_link_libraries(cvcgl_imgui_rich_text PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_rich_text COMMAND cvcgl_imgui_rich_text)
 # A picture with fullscreen: true (§5.13): a tap asks the host's handler for the window's
 # fullscreen and shows the picture alone, as wide as the view; Esc puts both back. No window, no GL.
 add_executable(cvcgl_imgui_fullscreen test/cvcgl_imgui_fullscreen.cpp)
@@ -998,6 +1030,11 @@ add_test(NAME cvcgl_imgui_media COMMAND cvcgl_imgui_media)
 add_executable(cvcgl_imgui_spinner test/cvcgl_imgui_spinner.cpp)
 target_link_libraries(cvcgl_imgui_spinner PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_spinner COMMAND cvcgl_imgui_spinner)
+# ImGuiBackend's chart: the canvas as the last item, a legend click hiding a series, the hover
+# crosshair, and a pick (a bare ImGui context, no GL).
+add_executable(cvcgl_imgui_chart test/cvcgl_imgui_chart.cpp)
+target_link_libraries(cvcgl_imgui_chart PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_chart COMMAND cvcgl_imgui_chart)
 # The overlay's fonts: DejaVu Sans Mono's symbols under the UI font, and Twemoji's colour emoji
 # where ImGui has 32-bit characters and FreeType (the cvcpkg imgui 1.92.9+cvc.4). No window, no GL.
 add_executable(cvcgl_imgui_fonts test/cvcgl_imgui_fonts.cpp)
@@ -1108,11 +1145,27 @@ add_executable(cvcgl_ariadne_physics test/cvcgl_ariadne_physics.cpp)
 target_link_libraries(cvcgl_ariadne_physics PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_physics COMMAND cvcgl_ariadne_physics)
 
+# Scene node labels (scene_labels.h, LabelLayer.h): label: from a document, drawn for real -- the
+# fade and cull rule, the text over its backdrop and edge, depth order, bound text, scale and
+# focus, views, and entity_labels: on a world entity.
+# Desktop GL (an offscreen render), like the streaming tests.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_labels test/cvcgl_ariadne_labels.cpp)
+  target_link_libraries(cvcgl_ariadne_labels PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_labels COMMAND cvcgl_ariadne_labels)
+endif()
+
 # Ariadne data in the scene (docs/roadmap/ARIADNE_DATA_ROADMAP.md): a source: { data } node draws its
 # dataset once it loads, and again when the dataset is replaced. Headless.
 add_executable(cvcgl_ariadne_data test/cvcgl_ariadne_data.cpp)
 target_link_libraries(cvcgl_ariadne_data PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_data COMMAND cvcgl_ariadne_data)
+
+# material: { opacity } on Ariadne scene nodes (docs/ARIADNE.md §5.4): literal and bound, on a mesh,
+# a LOD ladder's rungs and a data node's drawing, and the see-through pixels in the main view.
+add_executable(cvcgl_ariadne_opacity test/cvcgl_ariadne_opacity.cpp)
+target_link_libraries(cvcgl_ariadne_opacity PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_opacity COMMAND cvcgl_ariadne_opacity)
 
 # Every cvcGL setting must be IN the state tree and bound BOTH ways. This caught
 # cvc::state::SEPARATOR initialising to "" outside libcvc, which had been
@@ -1208,6 +1261,14 @@ add_executable(cvcgl_viewport_input test/cvcgl_viewport_input.cpp)
 target_link_libraries(cvcgl_viewport_input PRIVATE cvcGL)
 add_test(NAME cvcgl_viewport_input COMMAND cvcgl_viewport_input)
 
+# Viewport::setRefreshHz: a throttled inset draws its scene at most hz times a second and shows its
+# last pixels in between, byte for byte, with and without a multisampled window; a move, being
+# shown again, invalidate() and the time passing draw it, and a mirror is re-synced only when it
+# draws. Offscreen; skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+add_executable(cvcgl_viewport_refresh test/cvcgl_viewport_refresh.cpp)
+target_link_libraries(cvcgl_viewport_refresh PRIVATE cvcGL)
+add_test(NAME cvcgl_viewport_refresh COMMAND cvcgl_viewport_refresh)
+
 # Streaming geometry (StreamingGeometryNode / RibbonNode / DrapedLinkNode over the
 # two streaming VTK mappers). Uploads are counted twice: by the node's own
 # streamStats() and at the driver, by test/gl_upload_counter.cpp, which swaps
@@ -1232,6 +1293,11 @@ if(NOT EMSCRIPTEN)
                                           test/gl_upload_counter.cpp)
   target_link_libraries(cvcgl_streaming_geometry PRIVATE cvcGL)
   add_test(NAME cvcgl_streaming_geometry COMMAND cvcgl_streaming_geometry)
+  # Live textures (ARIADNE.md 5.4): a raster stream on a node's texture, uploaded a rectangle at a
+  # time, counted at the driver.
+  add_executable(cvcgl_live_texture test/cvcgl_live_texture.cpp test/gl_upload_counter.cpp)
+  target_link_libraries(cvcgl_live_texture PRIVATE cvcGL)
+  add_test(NAME cvcgl_live_texture COMMAND cvcgl_live_texture)
   add_executable(cvcgl_streaming_overlays test/cvcgl_streaming_overlays.cpp
                                           test/gl_upload_counter.cpp)
   target_link_libraries(cvcgl_streaming_overlays PRIVATE cvcGL)
@@ -1390,7 +1456,7 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_physics_scene_binding
   cvcgl_world_geometry_nodes cvcgl_ariadne_physics cvcgl_ariadne_data
   cvcgl_node_outlives_scene cvcgl_tree_version cvcgl_texture cvcgl_texture_zerocopy
-  cvcgl_stream_texture cvcgl_state_publisher cvcgl_nav_stats_publish
+  cvcgl_stream_texture cvcgl_state_publisher cvcgl_multi_app cvcgl_nav_stats_publish
   cvcgl_camera cvcgl_track_parity cvcgl_fps_hud cvcgl_stage_setters
   cvcgl_streaming_races cvcgl_sdl_input cvcgl_tet_surface
   cvcgl_webgl_state_shadow cvcgl_glsync
@@ -1430,4 +1496,4 @@ endif()
 # (CMake/CvcHostStack.cmake). Names not built here are skipped.
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
-                        cvcgl_ariadne_scenes)
+                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat)

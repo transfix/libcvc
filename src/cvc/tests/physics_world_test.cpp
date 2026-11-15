@@ -1450,6 +1450,64 @@ TEST(PhysicsBinding, PullReadsTheTreeOnlyWhenItChanged) {
   EXPECT_EQ(w.config().gravity.z, -3.71);
 }
 
+namespace {
+
+// What app `i`'s binding makes of its world: the gravity its tree sets, a program's reconfigure
+// standing through steps (the binding's own writes are no change to pull), then the tree's next
+// gravity, and the ticks it published.
+std::string app_binding(cvc::app &ctx, int i) {
+  set_key(ctx, "physics.gravity.z", std::to_string(-1.0 - i));
+  world w(world_binding::config_from_state(ctx));
+  world_binding b(ctx, w);
+  std::ostringstream t;
+  b.step();
+  t << "tree g " << w.config().gravity.z;
+  world_config c = w.config();
+  c.gravity.z = -20.0 - i;
+  w.reconfigure(c);
+  for (int k = 0; k < 4; ++k)
+    b.step();
+  t << ", program's g " << w.config().gravity.z;
+  set_key(ctx, "physics.gravity.z", std::to_string(-40.0 - i));
+  b.step();
+  t << ", tree's next g " << w.config().gravity.z << ", tick " << key_value(ctx, "physics.tick");
+  return t.str();
+}
+
+} // namespace
+
+// Bindings of several apps: each sees its own tree, and its own writes (not another binding's, on
+// another thread at once) are no change to pull. The same alone, two apps in both orders, and on
+// threads at once.
+TEST(PhysicsBinding, BindingsOfSeveralAppsAreEachTheirOwn) {
+  constexpr int kApps = 4;
+  std::vector<std::string> alone(kApps), together(kApps);
+  for (int i = 0; i < kApps; ++i) {
+    cvc::app ctx;
+    alone[i] = app_binding(ctx, i);
+  }
+  EXPECT_EQ(alone[1], "tree g -2, program's g -21, tree's next g -41, tick 6");
+  {
+    cvc::app a, b;
+    EXPECT_EQ(app_binding(a, 0), alone[0]);
+    EXPECT_EQ(app_binding(b, 1), alone[1]);
+    cvc::app c, d;
+    EXPECT_EQ(app_binding(d, 1), alone[1]);
+    EXPECT_EQ(app_binding(c, 0), alone[0]);
+  }
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kApps; ++i)
+    threads.emplace_back([i, &together] {
+      cvc::app ctx;
+      for (int k = 0; k < 3; ++k)
+        together[i] = app_binding(ctx, i); // the same app again: the same answers
+    });
+  for (std::thread &th : threads)
+    th.join();
+  for (int i = 0; i < kApps; ++i)
+    EXPECT_EQ(together[i], alone[i]) << i;
+}
+
 // A published body's settings are knobs: the material by name, the mass, damping, sleeping.
 TEST(PhysicsBinding, APublishedBodysSettingsAreKnobs) {
   REQUIRE_JOLT();

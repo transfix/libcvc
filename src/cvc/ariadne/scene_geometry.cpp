@@ -38,8 +38,8 @@ void warn(std::vector<std::string> *w, const std::string &m) {
 // open — file:// in place, any other scheme spilled to an owned temp file. On failure, warn with
 // the node id and return an unset ResolvedFile (ok=false); the caller returns early. The returned
 // object must stay alive for the whole read (it owns any temp file).
-ResolvedFile resolve_source(const SceneNode &n, std::vector<std::string> *warnings) {
-  ResolvedFile rf = resolve_to_file(n.source_file);
+ResolvedFile resolve_source(cvc::app &app, const SceneNode &n, std::vector<std::string> *warnings) {
+  ResolvedFile rf = resolve_to_file(app, n.source_file);
   if (!rf.ok)
     warn(warnings, "ari: scene node '" + n.id + "': " + rf.error);
   return rf;
@@ -49,14 +49,17 @@ ResolvedFile resolve_source(const SceneNode &n, std::vector<std::string> *warnin
 
 // A flat quad with UP normals spanning [-size/2, +size/2]² at z=0 — the built-in `plane` primitive
 // (source: { plane: { size } }): a ground / shadow receiver that needs no asset. Colour comes from
-// the node's material (single-colour), so no per-vertex colours are baked.
+// the node's material (single-colour), so no per-vertex colours are baked. Its UVs span [0, 1]²,
+// UV (0, 0) at the -x, -y corner, as a heightfield's do, so a texture covers it, north up.
 cvc::geometry make_plane_geometry(float size) {
   cvc::geometry g;
   const double h = 0.5 * static_cast<double>(size);
   const double v[4][3] = {{-h, -h, 0}, {h, -h, 0}, {h, h, 0}, {-h, h, 0}};
-  for (const auto &p : v) {
-    g.points().push_back({p[0], p[1], p[2]});
+  const double uv[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+  for (int k = 0; k < 4; ++k) {
+    g.points().push_back({v[k][0], v[k][1], v[k][2]});
     g.normals().push_back({0, 0, 1});
+    g.uvs().push_back({uv[k][0], uv[k][1]});
   }
   g.tris().push_back({0, 1, 2});
   g.tris().push_back({0, 2, 3});
@@ -127,7 +130,7 @@ cvc::geometry make_sphere_geometry(float radius) {
 // band colours ride on the mesh. All CPU, no asset. With a generator the ground starts as that
 // cvc::world terrain (`dem_path`: its resolved .npy) and the layers add on top. Throws
 // cvc::geometry_error for a size that is not > 0, std::invalid_argument for an unknown generator.
-std::shared_ptr<cvc::height_field> make_height_field(const SceneHeightfield &hf,
+std::shared_ptr<cvc::height_field> make_height_field(cvc::app &app, const SceneHeightfield &hf,
                                                      const std::string &dem_path) {
   constexpr double kTwoPi = 6.283185307179586;
   const int res = std::max(2, hf.resolution);
@@ -143,7 +146,7 @@ std::shared_ptr<cvc::height_field> make_height_field(const SceneHeightfield &hf,
     p.preset = cvc::world::world_preset_from_name(hf.preset);
     p.terrain = hf.generator;
     p.terrain_file = dem_path;
-    ground = cvc::world::make_terrain(p);
+    ground = cvc::world::make_terrain(app, p);
   }
 
   const auto height_at = [&](double x, double y) {
@@ -305,11 +308,11 @@ bool read_scene_node_geometry(cvc::app &ctx, const SceneNode &n, cvc::geometry &
     try {
       ResolvedFile dem; // alive while the field is made (a fetched URI's temp file)
       if (!n.heightfield.file.empty()) {
-        dem = resolve_to_file(n.heightfield.file, n.base_dir);
+        dem = resolve_to_file(ctx, n.heightfield.file, n.base_dir);
         if (!dem.ok)
           throw std::runtime_error("file " + dem.error);
       }
-      std::shared_ptr<cvc::height_field> f = make_height_field(n.heightfield, dem.path);
+      std::shared_ptr<cvc::height_field> f = make_height_field(ctx, n.heightfield, dem.path);
       geom = *f;
       field = f;
     } catch (const std::exception &e) {
@@ -328,7 +331,7 @@ bool read_scene_node_geometry(cvc::app &ctx, const SceneNode &n, cvc::geometry &
                          ") has no source (a file/URI or a { plane } primitive)");
       return false;
     }
-    ResolvedFile src = resolve_source(n, warnings);
+    ResolvedFile src = resolve_source(ctx, n, warnings);
     if (!src.ok)
       return false;
     try {

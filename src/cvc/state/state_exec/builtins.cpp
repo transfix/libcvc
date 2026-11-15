@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cvc/core/app.h>
 #include <cvc/state/state_blob_store.h> // sha256_hex
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
@@ -131,7 +133,7 @@ value_t *dict_find(dict_type &d, const std::string &key) {
 }
 
 /// Walk the __class__ / __super__ chain to find a method.
-value_t dispatch_method(const value_t &obj, const std::string &method,
+value_t dispatch_method(exec_context *ctx, const value_t &obj, const std::string &method,
                         std::span<const value_t> args, bool super) {
   auto &obj_dict = as_dict_mut(obj, "send");
   // find __class__
@@ -160,7 +162,7 @@ value_t dispatch_method(const value_t &obj, const std::string &method,
       call_args.push_back(obj);
       call_args.insert(call_args.end(), args.begin(), args.end());
       const value_t fn = *m; // the dict may change while a closure runs
-      return call_function(fn, call_args, "send");
+      return call_function(ctx, fn, call_args, "send");
     }
     // walk __super__
     value_t *sp = dict_find(*cls_dict, "__super__");
@@ -306,18 +308,18 @@ value_t builtin_ge(std::span<const value_t> args) {
   return value_t{as_double(args[0]) >= as_double(args[1])};
 }
 
-value_t builtin_eq(std::span<const value_t> args) {
+value_t builtin_eq(call_args args) {
   expect_exact(args, 2, "=");
   if (!is_compound(args[0]) || !is_compound(args[1]))
     return value_t{values_equal(args[0], args[1])};
-  return run_data_job(make_equal_job(args[0], args[1]));
+  return run_data_job(args.context(), make_equal_job(args[0], args[1]));
 }
 
-value_t builtin_ne(std::span<const value_t> args) {
+value_t builtin_ne(call_args args) {
   expect_exact(args, 2, "!=");
   if (!is_compound(args[0]) || !is_compound(args[1]))
     return value_t{!values_equal(args[0], args[1])};
-  return run_data_job(make_equal_job(args[0], args[1]),
+  return run_data_job(args.context(), make_equal_job(args[0], args[1]),
                       [](value_t equal) { return value_t{!std::get<bool>(equal.v)}; });
 }
 
@@ -325,14 +327,16 @@ value_t builtin_ne(std::span<const value_t> args) {
 // String
 // ---------------------------------------------------------------------------
 
-value_t builtin_str_concat(std::span<const value_t> args) {
+value_t builtin_str_concat(call_args args) {
   if (std::any_of(args.begin(), args.end(), is_compound))
-    return run_data_job(make_concat_job({args.begin(), args.end()}, "", "str-concat"));
+    return run_data_job(args.context(),
+                        make_concat_job({args.begin(), args.end()}, "", "str-concat"));
   // The same string may be passed many times, so the result can outgrow every argument: check
   // each part against the allocation limit before appending it.
   std::string result;
-  const auto add = [&result](const std::string &part) {
-    eval_alloc_check(result.size() > SIZE_MAX - part.size() ? SIZE_MAX
+  const auto add = [&result, &args](const std::string &part) {
+    eval_alloc_check(args.context(),
+                     result.size() > SIZE_MAX - part.size() ? SIZE_MAX
                                                             : result.size() + part.size(),
                      "str-concat");
     result += part;
@@ -346,10 +350,10 @@ value_t builtin_str_concat(std::span<const value_t> args) {
   return value_t{std::move(result)};
 }
 
-value_t builtin_str(std::span<const value_t> args) {
+value_t builtin_str(call_args args) {
   expect_exact(args, 1, "str");
   if (is_compound(args[0]))
-    return run_data_job(make_print_job(args[0]));
+    return run_data_job(args.context(), make_print_job(args[0]));
   return value_t{to_string(args[0])};
 }
 
@@ -492,10 +496,11 @@ value_t builtin_cdr(std::span<const value_t> args) {
   return make_list(std::vector<value_t>(lst.begin() + 1, lst.end()));
 }
 
-value_t builtin_cons(std::span<const value_t> args) {
+value_t builtin_cons(call_args args) {
   expect_exact(args, 2, "cons");
   auto &lst = as_list(args[1], "cons");
-  eval_alloc_note(alloc_bytes(lst.size() + 1, sizeof(value_t))); // a copy: heap accounting
+  eval_alloc_note(args.context(),
+                  alloc_bytes(lst.size() + 1, sizeof(value_t))); // a copy: heap accounting
   std::vector<value_t> result;
   result.reserve(1 + lst.size());
   result.push_back(args[0]);
@@ -512,7 +517,7 @@ value_t builtin_nth(std::span<const value_t> args) {
   return lst[static_cast<size_t>(idx)];
 }
 
-value_t builtin_set_nth(std::span<const value_t> args) {
+value_t builtin_set_nth(call_args args) {
   expect_exact(args, 3, "set-nth");
   auto &lst = as_list_mut(args[0], "set-nth");
   int64_t idx = as_int(args[1], "set-nth");
@@ -520,7 +525,7 @@ value_t builtin_set_nth(std::span<const value_t> args) {
     throw dsl_error("IndexError", "set-nth: index out of range");
   lst[static_cast<size_t>(idx)] = args[2];
   if (can_close_cycle(args[2]))
-    track_mutated(std::get<list_ptr>(args[0].v));
+    track_mutated(args.context(), std::get<list_ptr>(args[0].v));
   return args[2];
 }
 
@@ -535,16 +540,16 @@ value_t builtin_length(std::span<const value_t> args) {
   throw dsl_error("TypeError", "length: expected list, string, or dict");
 }
 
-value_t builtin_append(std::span<const value_t> args) {
+value_t builtin_append(call_args args) {
   expect_exact(args, 2, "append");
   auto &lst = as_list_mut(args[0], "append");
   lst.push_back(args[1]);
   if (can_close_cycle(args[1]))
-    track_mutated(std::get<list_ptr>(args[0].v));
+    track_mutated(args.context(), std::get<list_ptr>(args[0].v));
   return args[0];
 }
 
-value_t builtin_slice(std::span<const value_t> args) {
+value_t builtin_slice(call_args args) {
   if (args.size() < 2 || args.size() > 3)
     throw dsl_error("TypeError", "slice: expected 2 or 3 arguments");
   auto &lst = as_list(args[0], "slice");
@@ -560,7 +565,8 @@ value_t builtin_slice(std::span<const value_t> args) {
     end = static_cast<int64_t>(lst.size());
   if (start >= end)
     return make_list();
-  eval_alloc_note(alloc_bytes(static_cast<size_t>(end - start), sizeof(value_t))); // a copy
+  eval_alloc_note(args.context(),
+                  alloc_bytes(static_cast<size_t>(end - start), sizeof(value_t))); // a copy
   return make_list(std::vector<value_t>(lst.begin() + start, lst.begin() + end));
 }
 
@@ -605,14 +611,14 @@ value_t builtin_get_attr(std::span<const value_t> args) {
   throw dsl_error("KeyError", "get-attr: key '" + key + "' not found");
 }
 
-value_t builtin_set_attr(std::span<const value_t> args) {
+value_t builtin_set_attr(call_args args) {
   expect_exact(args, 3, "set-attr");
   auto &d = as_dict_mut(args[0], "set-attr");
   // Refused before track_mutated, so a built-in class never enters a cycle registry.
   refuse_builtin_class(args[0], d, "set-attr");
   const std::string &key = as_string(args[1], "set-attr");
   if (can_close_cycle(args[2]))
-    track_mutated(std::get<dict_ptr>(args[0].v));
+    track_mutated(args.context(), std::get<dict_ptr>(args[0].v));
   for (auto &[k, v] : d) {
     if (k == key) {
       v = args[2];
@@ -642,23 +648,23 @@ value_t builtin_del_attr(std::span<const value_t> args) {
 // OOP
 // ---------------------------------------------------------------------------
 
-value_t builtin_send(std::span<const value_t> args) {
+value_t builtin_send(call_args args) {
   expect_min(args, 2, "send");
   const std::string &method = as_string(args[1], "send");
   auto method_args = args.subspan(2);
-  return dispatch_method(args[0], method, method_args, /*super=*/false);
+  return dispatch_method(args.context(), args[0], method, method_args, /*super=*/false);
 }
 
 // ---------------------------------------------------------------------------
 // Higher-order
 // ---------------------------------------------------------------------------
 
-value_t builtin_apply(std::span<const value_t> args) {
+value_t builtin_apply(call_args args) {
   expect_exact(args, 2, "apply");
   auto &arg_list = as_list(args[1], "apply");
   // A closure runs as the program's own frames; a native function is called here, unless this
   // apply was itself called by a native function, when the evaluator calls it (call_function).
-  return call_function(args[0], arg_list, "apply");
+  return call_function(args.context(), args[0], arg_list, "apply");
 }
 
 // ---------------------------------------------------------------------------
@@ -704,7 +710,7 @@ value_t builtin_error(std::span<const value_t> args) {
                                   ? std::get<std::string>(args[0].v)
                                   : to_string(args[0]);
   throw dsl_exception(make_exception(exception_class("RuntimeError"), message,
-                                     args.size() > 1 ? args[1] : nil_value, "dsl"));
+                                     args.size() > 1 ? args[1] : nil_value(), "dsl"));
 }
 
 // (assert cond [message [data]]): nil when cond is truthy, else raises an AssertionError. The
@@ -716,14 +722,14 @@ value_t builtin_assert(std::span<const value_t> args) {
                     "assert: expected a condition, an optional message and data, got " +
                         std::to_string(args.size()) + " args");
   if (args[0].is_truthy())
-    return nil_value;
+    return nil_value();
   std::string message = "assertion failed";
   if (args.size() > 1)
     message +=
         ": " + (std::holds_alternative<std::string>(args[1].v) ? std::get<std::string>(args[1].v)
                                                                : to_string(args[1]));
   throw dsl_exception(make_exception(exception_class("AssertionError"), message,
-                                     args.size() > 2 ? args[2] : nil_value, "dsl"));
+                                     args.size() > 2 ? args[2] : nil_value(), "dsl"));
 }
 
 // ---------------------------------------------------------------------------
@@ -845,19 +851,32 @@ value_t builtin_random_token(std::span<const value_t> args) {
 // ---------------------------------------------------------------------------
 
 namespace {
-// print writes whole lines (td 4.11): the line is made first, outside the lock, then written with
-// its newline in one call. The lock is held for that write only, never across a data job or DSL
-// code, so lines printed from several threads never interleave. The mutex is never destroyed: a
-// thread can still print during static destruction (a daemon Python thread inside Exec.run).
+// print writes whole lines (td 4.11): the line is made first, outside any lock, then written with
+// its newline in one call, holding stdout's own lock (the C library's, which nests, and which
+// std::cout's own writes to stdout take too). The lock is held for that write only, never across a
+// data job or DSL code, so lines printed from several threads, by any app, never interleave. The C
+// library's lock outlives static destruction: a thread can still print then (a daemon Python
+// thread inside Exec.run).
+struct stdout_lock {
+#ifdef _WIN32
+  stdout_lock() { _lock_file(stdout); }
+  ~stdout_lock() { _unlock_file(stdout); }
+#else
+  stdout_lock() { flockfile(stdout); }
+  ~stdout_lock() { funlockfile(stdout); }
+#endif
+  stdout_lock(const stdout_lock &) = delete;
+  stdout_lock &operator=(const stdout_lock &) = delete;
+};
+
 void write_print_line(std::string line) {
-  static std::mutex &out = *new std::mutex;
   line += '\n';
-  std::lock_guard<std::mutex> lock(out);
+  stdout_lock lock;
   std::cout.write(line.data(), static_cast<std::streamsize>(line.size()));
 }
 } // namespace
 
-value_t builtin_print(std::span<const value_t> args) {
+value_t builtin_print(call_args args) {
   if (std::any_of(args.begin(), args.end(), is_compound)) {
     // The line goes out once all of it is printed. A string prints quoted here, as to_string
     // prints it, so it goes in already printed.
@@ -865,10 +884,11 @@ value_t builtin_print(std::span<const value_t> args) {
     parts.reserve(args.size());
     for (auto &a : args)
       parts.push_back(std::holds_alternative<std::string>(a.v) ? value_t{to_string(a)} : a);
-    return run_data_job(make_concat_job(std::move(parts), " ", "print"), [](value_t line) {
-      write_print_line(std::move(std::get<std::string>(line.v)));
-      return nil_value;
-    });
+    return run_data_job(args.context(), make_concat_job(std::move(parts), " ", "print"),
+                        [](value_t line) {
+                          write_print_line(std::move(std::get<std::string>(line.v)));
+                          return nil_value();
+                        });
   }
   std::string line;
   for (size_t i = 0; i < args.size(); ++i) {
@@ -877,14 +897,14 @@ value_t builtin_print(std::span<const value_t> args) {
     line += to_string(args[i]);
   }
   write_print_line(std::move(line));
-  return nil_value;
+  return nil_value();
 }
 
 // ---------------------------------------------------------------------------
 // Generators
 // ---------------------------------------------------------------------------
 
-value_t builtin_generator(std::span<const value_t> args) {
+value_t builtin_generator(call_args args) {
   expect_exact(args, 1, "generator");
   auto *cp = std::get_if<closure_ptr>(&args[0].v);
   if (!cp || !*cp)
@@ -901,24 +921,30 @@ value_t builtin_generator(std::span<const value_t> args) {
       cls.body.size() == 1 ? cls.body[0] : detail::begin_of(cls.body), env);
   gen->state.in_generator = true; // with-lock refuses here (docs/STATE_EXEC_LOCKS.md 5.3)
   gen->state.stats.start();
-  track_captured_env(env); // bound back where the closure can reach, it is a cycle
+  track_captured_env(args.context(), env); // bound back where the closure can reach, it is a cycle
 
   return value_t{std::move(gen)};
 }
 
-value_t builtin_next(std::span<const value_t> args) {
+value_t builtin_next(call_args args) {
   expect_exact(args, 1, "next");
   auto *gp = std::get_if<generator_ptr>(&args[0].v);
   if (!gp || !*gp)
     throw dsl_error("TypeError", "next: expected generator");
-  if ((*gp)->native_step) { // range and friends: one cheap value
-    auto result = generator_next(**gp);
-    return result ? *result : nil_value;
+  if ((*gp)->native_step) { // range and friends: one cheap value (no evaluator step)
+    std::optional<value_t> result;
+    if (exec_context *cx = args.context()) {
+      result = generator_next(*cx, **gp);
+    } else {
+      exec_context own;
+      result = generator_next(own, **gp);
+    }
+    return result ? *result : nil_value();
   }
   // A DSL generator's body runs as a job, a slice per step when the process slices.
-  return run_data_job(make_generator_job(*gp), [](value_t got) {
+  return run_data_job(args.context(), make_generator_job(*gp), [](value_t got) {
     const auto &l = *std::get<list_ptr>(got.v);
-    return l.empty() ? nil_value : l.front();
+    return l.empty() ? nil_value() : l.front();
   });
 }
 
@@ -976,7 +1002,7 @@ value_t builtin_range(std::span<const value_t> args) {
   return value_t{std::move(gen)};
 }
 
-value_t builtin_collect(std::span<const value_t> args) {
+value_t builtin_collect(call_args args) {
   expect_exact(args, 1, "collect");
   auto *gp = std::get_if<generator_ptr>(&args[0].v);
   if (!gp || !*gp)
@@ -984,7 +1010,7 @@ value_t builtin_collect(std::span<const value_t> args) {
   // Draining a generator is a job: a value (or a step of a DSL generator's body) is a node, so
   // a huge or unbounded one (e.g. (collect (range 0 1e11))) spreads over the process's steps,
   // within its budget, and the allocation limit checks every value kept.
-  return run_data_job(make_generator_job(*gp, true));
+  return run_data_job(args.context(), make_generator_job(*gp, true));
 }
 
 // ---------------------------------------------------------------------------
@@ -999,15 +1025,15 @@ value_t builtin_not(std::span<const value_t> args) {
 value_t builtin_and(std::span<const value_t> args) {
   for (auto &a : args)
     if (!a.is_truthy())
-      return false_value;
-  return args.empty() ? true_value : args.back();
+      return false_value();
+  return args.empty() ? true_value() : args.back();
 }
 
 value_t builtin_or(std::span<const value_t> args) {
   for (auto &a : args)
     if (a.is_truthy())
       return a;
-  return false_value;
+  return false_value();
 }
 
 // ---------------------------------------------------------------------------
@@ -1020,9 +1046,9 @@ void builtins::register_fn(environment_ptr env, const std::string &name, native_
 
 environment_ptr builtins::make_default_environment() {
   auto env = std::make_shared<environment>();
-  // The stdlib modules (string.*, bytes.*, math.*, collections.*) are reached through the
-  // shared, frozen stdlib scope rather than copied into every environment.
-  env->outer = stdlib_registry::shared_scope();
+  // The stdlib modules (string.*, bytes.*, math.*, collections.*) are reached through a frozen
+  // stdlib scope of the environment's own (frozen_builtins shares one per app), not bound here.
+  env->outer = stdlib_registry::make_scope();
 
   // Arithmetic
   register_fn(env, "+", builtin_add);
@@ -1112,16 +1138,26 @@ environment_ptr builtins::make_default_environment() {
   return env;
 }
 
-environment_ptr frozen_builtins() {
-  // Built once (thread-safe static init) and never written again. Its natives are free functions
-  // safe on any thread: print takes a process-wide lock, generator, next and collect reach the
-  // bound registry and the step's data scope, math.random the bound stream (td 4.2, B16).
-  static const environment_ptr scope = [] {
+namespace {
+// An app's frozen builtins: built at the first call for the app, then never written again.
+struct frozen_builtins_slot {
+  static constexpr const char *app_slot = "cvc.state_exec.frozen_builtins";
+  std::once_flag once;
+  environment_ptr scope;
+};
+} // namespace
+
+environment_ptr frozen_builtins(cvc::app &app) {
+  // Its natives are free functions safe on any thread: print takes stdout's lock, generator, next
+  // and collect reach the bound registry and the step's data scope, math.random the bound stream
+  // (td 4.2, B16).
+  frozen_builtins_slot &s = app.slot<frozen_builtins_slot>();
+  std::call_once(s.once, [&s] {
     environment_ptr env = builtins::make_default_environment();
     env->frozen = true;
-    return env;
-  }();
-  return scope;
+    s.scope = std::move(env);
+  });
+  return s.scope;
 }
 
 } // namespace cvc::state_exec

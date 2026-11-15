@@ -26,6 +26,9 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/mesh_ops.h
   ../../inc/cvc/geometry/fem.h
   ../../inc/cvc/geometry/tet_complex.h
+  ../../inc/cvc/geometry/skeleton.h
+  ../../inc/cvc/geometry/skeleton_params.h
+  ../../inc/cvc/geometry/skeleton_intrinsics.h
   ../../inc/cvc/state/state.h
   ../../inc/cvc/state/state_key_meta.h
   ../../inc/cvc/state/state_change_journal.h
@@ -59,6 +62,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_cluster_membership.h
   ../../inc/cvc/state/state_hybrid_time.h
   ../../inc/cvc/core/world_clock.h
+  ../../inc/cvc/core/input_trace.h
   ../../inc/cvc/core/clock_follower.h
   ../../inc/cvc/core/clock_driver.h
   ../../inc/cvc/core/world_units.h
@@ -68,8 +72,10 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/field.h
   ../../inc/cvc/physics/fluid_surface.h
   ../../inc/cvc/physics/hull.h
+  ../../inc/cvc/physics/immersion.h
   ../../inc/cvc/physics/ocean_surface.h
   ../../inc/cvc/physics/vehicle.h
+  ../../inc/cvc/physics/boat.h
   ../../inc/cvc/physics/body.h
   ../../inc/cvc/physics/backend.h
   ../../inc/cvc/physics/world.h
@@ -157,6 +163,10 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/geometry_file_io.h
   ../../inc/cvc/geometry/contours.h
   ../../inc/cvc/geometry/contour_intrinsics.h
+  ../../inc/cvc/volume/point_classes.h
+  ../../inc/cvc/volume/point_class_intrinsics.h
+  ../../inc/cvc/volume/segmentation.h
+  ../../inc/cvc/volume/segmentation_params.h
   ../../inc/cvc/model/model.h
   ../../inc/cvc/model/model_file_io.h
   ../../inc/cvc/volume/volume_ops.h
@@ -254,6 +264,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/ocean/fft.h
   ../../inc/cvc/ocean/sea_surface.h
   ../../inc/cvc/ocean/ewave.h
+  ../../inc/cvc/ocean/whitecaps.h
 )
 
 # Source files
@@ -285,12 +296,26 @@ set(SOURCE_FILES
   geometry/fem.cpp
   geometry/tet_complex.cpp
   geometry/exact_predicates.cpp
+  geometry/skeleton/datastruct.cpp
+  geometry/skeleton/init.cpp
+  geometry/skeleton/util.cpp
+  geometry/skeleton/tcocone.cpp
+  geometry/skeleton/rcocone.cpp
+  geometry/skeleton/medax.cpp
+  geometry/skeleton/u2.cpp
+  geometry/skeleton/skel.cpp
+  geometry/skeleton/skeleton.cpp
+  geometry/skeleton/skeleton_intrinsics.cpp
   geometry/sliced_ldlt.cpp
   geometry/geometry_file_io.cpp
   geometry/contours.cpp
   geometry/contour_formats.cpp
   geometry/contour_intrinsics.cpp
   utility/xml_lite.cpp
+  volume/point_classes.cpp
+  volume/point_class_intrinsics.cpp
+  volume/segmentation/genseg.cpp
+  volume/segmentation/segmentation.cpp
   image/image.cpp
   image/image_decode.cpp
   image/magick_io.cpp
@@ -344,14 +369,18 @@ set(SOURCE_FILES
   state/state_exec/priority.cpp
   core/world_clock.cpp
   core/world_clock_binding.cpp
+  core/input_trace.cpp
+  core/input_trace_json.cpp
   core/clock_driver.cpp
   core/world_units.cpp
   core/unit_registry.cpp
   physics/world.cpp
   physics/field_step.cpp
+  physics/immersion.cpp
   physics/fluid_surface.cpp
   physics/ocean_surface.cpp
   physics/vehicle.cpp
+  physics/boat.cpp
   physics/null_backend.cpp
   physics/world_binding.cpp
   physics/snapshot_json.cpp
@@ -451,6 +480,7 @@ set(SOURCE_FILES
   nav/sim_world.cpp
   nav/yield.cpp
   nav/sim_world_binding.cpp
+  nav/sim_world_trace.cpp
   nav/sim_thread.cpp
   nav/nav_stats.cpp
   nav/plant_ledger.cpp
@@ -509,6 +539,7 @@ set(SOURCE_FILES
   ocean/fft.cpp
   ocean/sea_surface.cpp
   ocean/ewave.cpp
+  ocean/whitecaps.cpp
 )
 
 # cvc::algo holds algorithms more than one library needs (cvc::nav and cvc::world, which may not
@@ -647,7 +678,8 @@ endif()
 # step's vehicle and field code and the null backend, as for nav and world above (the
 # libm-free math they call, cvc/algo/det_math.h, gets it above); the Jolt backend TUs
 # get the same flag on their own target (below).
-set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/field_step.cpp
+set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/boat.cpp
+    physics/field_step.cpp physics/immersion.cpp
     physics/fluid_surface.cpp physics/ocean_surface.cpp physics/null_backend.cpp
     physics/nav_plant.cpp
     physics/dyn_bike_plant.cpp physics/dyn_4w_plant.cpp physics/dyn_world.cpp
@@ -657,6 +689,18 @@ if(NOT MSVC)
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
   set_source_files_properties(${_cvc_physics_exact_sources}
+                              PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
+
+# The VolumeRover GenSeg port (volume/segmentation/) matches the legacy library's labels voxel for
+# voxel on every platform (VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.7 T1): its fast marches compare
+# float arrival times, and an FMA-contracted step flips which front wins a tie.
+set(_cvc_genseg_exact_sources volume/segmentation/genseg.cpp volume/segmentation/segmentation.cpp)
+if(NOT MSVC)
+  set_source_files_properties(${_cvc_genseg_exact_sources}
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(${_cvc_genseg_exact_sources}
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
@@ -683,9 +727,10 @@ endif()
 # matter which bundle was installed -- e.g. transfix/F2Dock asked for 3.2.0,
 # never matched, and silently fell back to building libcvc from source.
 #
-# SOVERSION stays CVC_VERSION_MAJOR, so the runtime link name (libcvc.so.3)
-# is unchanged and no consumer relinks. Only the full VERSION suffix
-# (libcvc.so.3.0 -> libcvc.so.3.3.0) and the exported package version move.
+# SOVERSION stays CVC_VERSION_MAJOR, so within a major version the runtime link
+# name (libcvc.so.3, libcvc.so.4 from 4.0) is unchanged and no consumer relinks.
+# Only the full VERSION suffix (libcvc.so.3.0 -> libcvc.so.3.3.0) and the exported
+# package version move.
 set(CVC_VERSION       ${PROJECT_VERSION})
 set(CVC_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
 set(CVC_VERSION_MINOR ${PROJECT_VERSION_MINOR})
@@ -1525,6 +1570,11 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h ../../inc/cvc/net/net_
 # and the Ariadne host that runs the flows for documents.
 list(APPEND SOURCE_FILES net/json_lite.cpp net/oidc.cpp net/loopback_redirect.cpp net/browser.cpp
   ariadne/oidc_host.cpp)
+# Files that hold a user's secrets (the credential and E2EE stores), and end-to-end encrypted DMs
+# with the keys in the host (cvc/net/e2ee.h, docs/E2EE.md): always compiled; without libsodium
+# (CVC_HAVE_SODIUM, below) every E2EE operation fails saying so.
+list(APPEND SOURCE_FILES net/private_file.cpp net/e2ee.cpp ariadne/e2ee_intrinsics.cpp)
+list(APPEND INCLUDE_FILES ../../inc/cvc/net/e2ee.h ../../inc/cvc/ariadne/e2ee_intrinsics.h)
 list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_redirect.h
   ../../inc/cvc/net/browser.h ../../inc/cvc/ariadne/oidc_host.h)
 
@@ -1532,7 +1582,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_re
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/world_vehicles.cpp ariadne/world_spawns.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/files.cpp ariadne/file_picker.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_repeat.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/world_vehicles.cpp ariadne/world_spawns.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/rich_text.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp ariadne/chart_emit.cpp)
 # A document set fetched from a URL, and a runtime's browser page loading one (arigl-web, ari).
 list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 # The document a relay runs (arisrv --doc) and the namespaces it publishes.
@@ -1569,6 +1619,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/uri_http_cache.h
   ../../inc/cvc/ariadne/net_intrinsics.h
   ../../inc/cvc/ariadne/net_host.h
+  ../../inc/cvc/ariadne/files.h
   ../../inc/cvc/ariadne/data.h
   ../../inc/cvc/ariadne/media.h
   ../../inc/cvc/ariadne/media_player.h
@@ -1604,7 +1655,7 @@ list(APPEND INCLUDE_FILES
 # (install(EXPORT cvcTargets NAMESPACE cvc::) exports only cvc::cvc). Zero-copy
 # frame_pool + drop-oldest/latest per-subscriber channel + dedicated producer
 # thread; borrows cvc::state only for the /streams/<id> descriptor.
-list(APPEND SOURCE_FILES ariadne/stream/frame_pool.cpp ariadne/stream/stream_channel.cpp ariadne/stream/stream_registry.cpp ariadne/stream/producer_thread.cpp ariadne/stream/stream.cpp ariadne/stream/stream_codec.cpp ariadne/stream/to_image.cpp ariadne/stream/synthetic_source.cpp ariadne/stream/audio_sources.cpp ariadne/stream/stream_view.cpp)
+list(APPEND SOURCE_FILES ariadne/stream/frame_pool.cpp ariadne/stream/stream_channel.cpp ariadne/stream/stream_registry.cpp ariadne/stream/producer_thread.cpp ariadne/stream/stream.cpp ariadne/stream/stream_codec.cpp ariadne/stream/to_image.cpp ariadne/stream/raster.cpp ariadne/stream/synthetic_source.cpp ariadne/stream/audio_sources.cpp ariadne/stream/stream_view.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/stream/frame.h
   ../../inc/cvc/ariadne/stream/stream_codec.h
@@ -1955,6 +2006,39 @@ if(CVC_OPUS_INCLUDE_DIR AND CVC_OPUS_LIBRARY)
   message(STATUS "cvc::media: Opus mics with ${CVC_OPUS_LIBRARY}")
 else()
   message(STATUS "cvc::media: no libopus - mics stay f32")
+endif()
+
+# End-to-end encrypted DMs (cvc/net/e2ee.h): TX.WTF's X3DH + Double Ratchet. OPTIONAL: libsodium
+# (cvcpkg `libsodium`, ISC). Its bundle ships a CMake package, sodium::sodium (with SODIUM_STATIC
+# on a static library, which the headers need on Windows); a system libsodium with only a
+# pkg-config file is found by header and library instead, as libopus is. Without it, the e2ee-*
+# verbs are absent and e2ee_available() is false.
+find_package(sodium CONFIG QUIET)
+set(CVC_HAVE_SODIUM OFF)
+if(TARGET sodium::sodium)
+  set(CVC_HAVE_SODIUM ON)
+  target_link_libraries(cvc PRIVATE sodium::sodium)
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES sodium)
+  message(STATUS "cvc::net: E2EE with libsodium (sodium::sodium ${sodium_VERSION})")
+else()
+  find_path(CVC_SODIUM_INCLUDE_DIR NAMES sodium.h)
+  find_library(CVC_SODIUM_LIBRARY NAMES sodium libsodium)
+  if(CVC_SODIUM_INCLUDE_DIR AND CVC_SODIUM_LIBRARY)
+    set(CVC_HAVE_SODIUM ON)
+    if(NOT TARGET CvcSodium::sodium)
+      add_library(CvcSodium::sodium INTERFACE IMPORTED)
+      set_target_properties(CvcSodium::sodium PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${CVC_SODIUM_INCLUDE_DIR}"
+        INTERFACE_LINK_LIBRARIES "${CVC_SODIUM_LIBRARY}")
+    endif()
+    target_link_libraries(cvc PRIVATE CvcSodium::sodium)
+    message(STATUS "cvc::net: E2EE with ${CVC_SODIUM_LIBRARY}")
+  else()
+    message(STATUS "cvc::net: no libsodium - no E2EE (the e2ee-* verbs are absent)")
+  endif()
+endif()
+if(CVC_HAVE_SODIUM)
+  target_compile_definitions(cvc PRIVATE CVC_HAVE_SODIUM=1)
 endif()
 
 # Ariadne FTXUI terminal backend — OPTIONAL (roadmap §16.4). When FTXUI is
@@ -2356,6 +2440,29 @@ if(NOT _cvc_type STREQUAL "SHARED_LIBRARY")
   if(CVC_WITH_CLIPPER2)
     list(APPEND CVC_PRIVATE_LINK_PACKAGES Clipper2)
   endif()
+endif()
+
+# cvc::planar (inc/cvc/geometry/planar.h; VOLROVER-LIBRARY-PORTS-ROADMAP.md §3, P3a): exact planar
+# geometry on an integer grid for the ContourTiler port, on Clipper2, CDT, Shewchuk's predicates
+# and Boost.Polygon (header-only, part of Boost). Built only with all three packages; then cvc
+# exports CVC_WITH_PLANAR, and without them the header's functions are left undefined.
+if(CVC_WITH_CLIPPER2 AND CVC_WITH_CDT AND CVC_WITH_SHEWCHUK)
+  set(CVC_WITH_PLANAR ON)
+  target_sources(cvc PRIVATE
+    geometry/planar/grid.cpp
+    geometry/planar/predicates.cpp
+    geometry/planar/polygon.cpp
+    geometry/planar/clipper.cpp
+    geometry/planar/wavefront.cpp
+    geometry/planar/triangulate.cpp
+    geometry/planar/sibson.cpp
+    geometry/planar/medial_axis.cpp
+  )
+  target_compile_definitions(cvc PUBLIC CVC_WITH_PLANAR)
+  message(STATUS "cvc::planar ENABLED (Clipper2, CDT, Shewchuk's predicates, Boost.Polygon)")
+else()
+  set(CVC_WITH_PLANAR OFF)
+  message(STATUS "cvc::planar DISABLED: it needs Clipper2, CDT and Shewchuk's predicates")
 endif()
 
 # libcvc does not use CGAL. Its two former uses (nav/spatial.cpp, geometry/project_verts) were
@@ -2939,8 +3046,20 @@ option(CVC_BUILD_PERMISSIVE_SMOKE "Build permissive_libs_test without the test s
 # googletest comes from CMAKE_PREFIX_PATH or is built from source (CMake/SetupGTest.cmake).
 option(CVC_BUILD_PORT_TESTS "Build the VolumeRover ports' tests even with CVC_BUILD_TESTS off (the wasm-mt ports lane)" OFF)
 
+# ariadne_wasm_browser_test: WebAssembly guests on the browser backend (src/ariadne_wasm,
+# browser_runtime.cpp; docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §8.5, G2), a googletest binary a
+# plain-wasm (single-threaded) Emscripten build makes with CVC_BUILD_TESTS off, for node to run
+# (ci.yml's `wasm-guests (wasm, node)` job). googletest is built from source (CMake/SetupGTest.cmake),
+# and the transformed test guests are embedded at /guests. The documents' files are MEMFS's. Natively
+# the same file is ariadne_wasm_transform_test, on wasmtime (tests/CMakeLists.txt).
+option(CVC_BUILD_WASM_GUEST_TESTS "Build ariadne_wasm_browser_test even with CVC_BUILD_TESTS off (Emscripten: the wasm guests' node lane)" OFF)
+
 # Add unit tests if enabled
 if(CVC_BUILD_TESTS)
+  if(CVC_BUILD_WASM_GUEST_TESTS)
+    message(WARNING "CVC_BUILD_WASM_GUEST_TESTS builds ariadne_wasm_browser_test only with "
+                    "CVC_BUILD_TESTS off: with the tests on it is ignored")
+  endif()
   add_subdirectory(tests)
 else()
   if(CVC_BUILD_PHYSICS_REPLAY)
@@ -2955,6 +3074,23 @@ else()
     include(SetupGTest)
     cvc_setup_gtest()
     include(${CMAKE_CURRENT_SOURCE_DIR}/tests/port_tests.cmake)
+  endif()
+  if(CVC_BUILD_WASM_GUEST_TESTS)
+    if(NOT EMSCRIPTEN)
+      message(FATAL_ERROR "CVC_BUILD_WASM_GUEST_TESTS is for an Emscripten build; natively, "
+                          "CVC_BUILD_TESTS builds the same file as ariadne_wasm_transform_test")
+    endif()
+    include(SetupGTest)
+    cvc_setup_gtest()
+    include("${PROJECT_SOURCE_DIR}/src/ariadne_wasm/ariadne_wasm.cmake")
+    add_executable(ariadne_wasm_browser_test tests/ariadne_wasm_browser_test.cpp)
+    cvc_ariadne_wasm_host(ariadne_wasm_browser_test)
+    cvc_ariadne_wasm_test_guests(ariadne_wasm_browser_test)
+    target_link_libraries(ariadne_wasm_browser_test PRIVATE cvc GTest::gtest GTest::gtest_main)
+    target_compile_features(ariadne_wasm_browser_test PRIVATE cxx_std_20)
+    # The process exits with main's status. -sFETCH: Ariadne links cvc::net's fetch backend.
+    target_link_options(ariadne_wasm_browser_test PRIVATE -sEXIT_RUNTIME=1
+      -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=4mb -sFETCH=1)
   endif()
 endif()
 
@@ -2980,7 +3116,7 @@ if(CVC_BUILD_CGAL_AB)
   endif()
   set(_cvc_ab ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/cgal_ab)
   add_executable(cgal_ab_test ${_cvc_ab}/cgal_ab.cpp ${_cvc_ab}/cgal_ab_permissive.cpp
-    ${_cvc_ab}/cgal_ab_qhull.cpp)
+    ${_cvc_ab}/cgal_ab_qhull.cpp ${_cvc_ab}/cgal_ab_planar.cpp)
   target_link_libraries(cgal_ab_test PRIVATE cvc cvc_permissive_geometry CGAL::CGAL)
   target_compile_features(cgal_ab_test PRIVATE cxx_std_17)
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")

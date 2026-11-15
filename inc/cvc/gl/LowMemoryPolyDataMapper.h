@@ -133,6 +133,7 @@
 class vtkTexture;
 
 namespace cvc {
+class app;
 namespace gl {
 
 class LowMemoryPolyDataMapper : public vtkOpenGLLowMemoryPolyDataMapper {
@@ -140,28 +141,35 @@ public:
   static LowMemoryPolyDataMapper *New();
   vtkTypeMacro(LowMemoryPolyDataMapper, vtkOpenGLLowMemoryPolyDataMapper);
 
-  // How every LowMemoryPolyDataMapper in the process draws. The initial value
-  // comes from CVCGL_LOWMEM_DRAW (stock | all | fast, default fast); the other
-  // two paths exist for A/B measurement and for the tests:
+  // How the LowMemoryPolyDataMappers of `app` draw (those newPolyDataMapper(app)
+  // made, or setApp(app) gave it). The initial value comes from CVCGL_LOWMEM_DRAW
+  // (stock | all | fast, default fast), read when the app's settings are first
+  // used; the other two paths exist for A/B measurement and for the tests:
   //   Stock         VTK's own RenderPieceDraw (all four agents, full lookup).
   //   AllCellTypes  the replica with nothing skipped -- issues the same GL calls
   //                 as Stock, call for call.
   //   Fast          the replica, empty cell types skipped, program re-bound.
   enum class DrawPath : int { Stock = 0, AllCellTypes = 1, Fast = 2 };
-  static void setDrawPath(DrawPath path);
-  static DrawPath drawPath();
+  static void setDrawPath(cvc::app &app, DrawPath path);
+  static DrawPath drawPath(cvc::app &app);
 
   // True when this build carries the VTK 9.5.0 replica (an unpatched 9.5.0, see
   // above). False means every path is the stock draw.
   static bool replicaActive();
 
-  // Whether every LowMemoryPolyDataMapper keeps a shader per render-pass set
+  // Whether `app`'s LowMemoryPolyDataMappers keep a shader per render-pass set
   // (pass programs, above). The initial value comes from
   // CVCGL_LOWMEM_PASS_PROGRAMS (0 turns it off; default on), for A/B
   // measurement and the tests. Turning it off drops nothing already kept until
   // the next draw that would use it.
-  static void setPassProgramsEnabled(bool on);
-  static bool passProgramsEnabled();
+  static void setPassProgramsEnabled(cvc::app &app, bool on);
+  static bool passProgramsEnabled(cvc::app &app);
+
+  // The app whose settings (above) this mapper draws by, and whose mappers it
+  // shares its shaders' source copies with (newPolyDataMapper(app) sets it; a
+  // node that is handed a mapper sets its own app's). A mapper with none draws by
+  // the environment's defaults and shares with no other.
+  void setApp(cvc::app &app);
 
   // Per-mapper counters, read and reset on the render thread.
   struct Stats {
@@ -177,10 +185,11 @@ public:
   const Stats &stats() const { return m_stats; }
   void resetStats() { m_stats = Stats{}; }
 
-  // Test instrumentation: when set, the replica reports where each stage of a
-  // draw begins and ends (the cvcgl_lowmem_fastdraw GL trace interleaves these
-  // with the GL calls to cut a trace into draws and cell-type blocks). Null --
-  // the default -- costs one relaxed load per stage. Stock draws report nothing.
+  // Test instrumentation: when set, the replica of `app`'s mappers reports where
+  // each stage of a draw begins and ends (the cvcgl_lowmem_fastdraw GL trace
+  // interleaves these with the GL calls to cut a trace into draws and cell-type
+  // blocks). Null -- the default -- costs one relaxed load per stage. Stock draws
+  // report nothing.
   enum class DrawStage : int {
     DrawBegin,   // arg: 1 if this draw skips its empty cell types (Fast only)
     LookupBegin, // full shader-cache lookup
@@ -193,7 +202,10 @@ public:
     DrawEnd
   };
   using StageObserver = void (*)(DrawStage stage, int arg);
-  static void setStageObserver(StageObserver observer);
+  static void setStageObserver(cvc::app &app, StageObserver observer);
+
+  // An app's settings and shared source copies (the .cpp's).
+  struct Settings;
 
   // Drop the program the last lookup resolved, so the next draw looks it up in
   // the shader cache again. For anything that edits this->Shaders outside
@@ -242,8 +254,9 @@ protected:
     vtkMTimeType lookupStamp = 0;                 // ... and m_builtStamp
     std::vector<const vtkTexture *> textures;     // the actor's, when built
   };
-  static std::shared_ptr<const ShaderSources> sharedSources(vtkShaderProgram *program,
-                                                            ShaderMap &shaders);
+  std::shared_ptr<const ShaderSources> sharedSources(vtkShaderProgram *program, ShaderMap &shaders);
+  // The settings this mapper draws by: its app's, or (none set) its own defaults.
+  Settings &settings();
   // Before VTK's RenderPieceStart: keep the current shader if this draw's pass
   // set is another, and put back the one kept for this draw's set if it is
   // still good.
@@ -267,14 +280,16 @@ protected:
   // change rebuilds the current shader (VTK) and makes the kept ones stale.
   std::vector<vtkOpenGLShaderDeclaration> m_declarations;
   int m_colorSource = -1, m_normalSource = -1;
+  std::shared_ptr<Settings> m_settings; // setApp's (settings())
 
 private:
   LowMemoryPolyDataMapper(const LowMemoryPolyDataMapper &) = delete;
   void operator=(const LowMemoryPolyDataMapper &) = delete;
 };
 
-// Which mapper newPolyDataMapper() returns. The initial value comes from the
-// CVCGL_LOWMEM_MAPPER environment variable (auto | force | off, default auto):
+// Which mapper newPolyDataMapper(app) returns for `app`. The initial value comes
+// from the CVCGL_LOWMEM_MAPPER environment variable (auto | force | off, default
+// auto), read when the app's settings are first used:
 //   Auto   LowMemoryPolyDataMapper wherever VTK's factory would hand out a
 //          vtkOpenGLLowMemoryPolyDataMapper (GLES3/WebGL2), the factory's mapper
 //          everywhere else (vtkOpenGLPolyDataMapper on desktop GL).
@@ -282,11 +297,12 @@ private:
 //          tests and GL-call measurement of the WebGL path.
 //   Off    the factory's mapper everywhere.
 enum class LowMemoryMapperPolicy : int { Auto = 0, Force = 1, Off = 2 };
-void setLowMemoryMapperPolicy(LowMemoryMapperPolicy policy);
-LowMemoryMapperPolicy lowMemoryMapperPolicy();
+void setLowMemoryMapperPolicy(cvc::app &app, LowMemoryMapperPolicy policy);
+LowMemoryMapperPolicy lowMemoryMapperPolicy(cvc::app &app);
 
-// The poly-data mapper for a cvcGL node, chosen by the policy above.
-vtkSmartPointer<vtkPolyDataMapper> newPolyDataMapper();
+// The poly-data mapper for a cvcGL node on `app`, chosen by the app's policy above (a
+// LowMemoryPolyDataMapper drawing by the app's settings).
+vtkSmartPointer<vtkPolyDataMapper> newPolyDataMapper(cvc::app &app);
 
 } // namespace gl
 } // namespace cvc

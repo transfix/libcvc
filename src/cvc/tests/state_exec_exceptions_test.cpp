@@ -23,18 +23,6 @@
 
 using namespace cvc::state_exec;
 
-// A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
-// scope hold each other, and only the cycle collector frees them
-// (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Reference cycles"). Nothing here runs long enough for a
-// collection to be due, so once every test is done one collection leaves LeakSanitizer only real
-// leaks to report.
-class collect_cycles_at_exit : public ::testing::Environment {
-public:
-  void TearDown() override { collect_cycles(); }
-};
-[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
-    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
-
 namespace exceptions_test {
 // A C++ exception type of the test's own, for UN-9: a native error becomes NativeError, its
 // native_type naming this.
@@ -837,7 +825,7 @@ TEST(ExceptionsNotCatchable, TimeoutAndInterruptReachTheCaller) {
     stackless_evaluator s(env);
     env->set("stop", value_t{native_fn{[&s](std::span<const value_t>) -> value_t {
                s.interrupt();
-               return nil_value;
+               return nil_value();
              }}});
     EXPECT_THROW(s.evaluate_script("(try (begin (stop) (while t 1)) (catch (e) \"caught\"))"),
                  evaluation_interrupted);
@@ -847,7 +835,7 @@ TEST(ExceptionsNotCatchable, TimeoutAndInterruptReachTheCaller) {
     evaluator r(env);
     env->set("stop", value_t{native_fn{[&r](std::span<const value_t>) -> value_t {
                r.interrupt();
-               return nil_value;
+               return nil_value();
              }}});
     EXPECT_THROW(r.evaluate_script("(try (begin (stop) (while t 1)) (catch (e) \"caught\"))"),
                  evaluation_interrupted);

@@ -420,16 +420,12 @@ ViewportManager::ViewportManager(SceneGraph &mainScene, int width, int height, b
   if (width < 1 || height < 1)
     throw std::invalid_argument("ViewportManager: width and height must be >= 1");
 
-  // Same one-time VTK diagnostic routing as SceneRenderer: send ERR/WARN to
-  // stderr instead of a Win32 message box (the shadow-map pass logs cosmetic
-  // driver warnings), and never prompt.
-  static bool s_vtkOutputConfigured = false;
-  if (!s_vtkOutputConfigured) {
-    if (auto *ow = vtkOutputWindow::GetInstance()) {
-      ow->SetDisplayModeToAlwaysStdErr();
-      ow->SetPromptUser(0);
-    }
-    s_vtkOutputConfigured = true;
+  // VTK's diagnostic routing: send ERR/WARN to stderr instead of a Win32 message box (the
+  // shadow-map pass logs cosmetic driver warnings), and never prompt. The output window is VTK's,
+  // one for the process; setting it again for each manager is harmless.
+  if (auto *ow = vtkOutputWindow::GetInstance()) {
+    ow->SetDisplayModeToAlwaysStdErr();
+    ow->SetPromptUser(0);
   }
 
   m_impl->app = &mainScene.appContext();
@@ -752,10 +748,14 @@ void ViewportManager::render() {
   // Mirrors have no scene attachment of their own: refresh their props from the
   // source renderer so a node added / re-meshed this frame shows up in the
   // mirror too, then draw it with the mirror's own camera. A FROZEN mirror
-  // (mirrorLive() == false) keeps its add-time snapshot and is skipped here.
-  for (auto &v : m_impl->viewports)
-    if (v->isMirror() && v->mirrorLive())
+  // (mirrorLive() == false) keeps its add-time snapshot and is skipped here, and
+  // so is a throttled one (Viewport::setRefreshHz) showing its last pixels this
+  // frame: it re-syncs on the frame it draws.
+  for (auto &v : m_impl->viewports) {
+    const bool draws = v->beginRender();
+    if ((draws || !v->visible()) && v->isMirror() && v->mirrorLive())
       syncMirrorProps(*v);
+  }
   m_impl->window->Render();
 }
 

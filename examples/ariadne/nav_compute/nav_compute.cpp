@@ -67,12 +67,12 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "usage: nav_compute nav_compute.ari [--offscreen] [--frames N]\n");
     return 2;
   }
-  ari::register_cvc_uri_handler(componentPaths);
   const bool capturing = offscreen;
   if (capturing && frames <= 0)
     frames = 3;
 
   cvc::app app;
+  ari::register_cvc_uri_handler(app, componentPaths);
   cvc::gl::SceneGraph sg(app, "navcompute");
   cvc::gl::SceneRenderer view(sg, width, height, offscreen, "main");
   view.setBackground(0.09, 0.10, 0.12);
@@ -117,7 +117,7 @@ int main(int argc, char **argv) {
       },
       se::provider_affinity::any);
 
-  ari::LoadResult lr = ari::load_file(docPath.c_str());
+  ari::LoadResult lr = ari::load_file(app, docPath.c_str());
   if (!lr.ok) {
     std::fprintf(stderr, "[nav_compute] %s\n", lr.error.c_str());
     return 1;

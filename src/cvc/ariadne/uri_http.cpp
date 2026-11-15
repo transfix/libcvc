@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/uri_http.h>
+#include <cvc/core/app.h>
 #include <cvc/net/http_client.h>
 #include <cvc/net/net_policy.h>
 #include <functional>
@@ -32,26 +33,24 @@ namespace {
 // form-parse or 415 it (a host that knows better passes its own via the provider).
 constexpr char kDefaultStoreContentType[] = "Content-Type: application/octet-stream";
 
-// The host-supplied options provider (auth headers + method), guarded by its own mutex. Copied out
-// under the lock before each call so set/clear never races a transfer in flight (uri_http.h).
-std::mutex &provider_mutex() {
-  static std::mutex m;
-  return m;
-}
-HttpOptionsProvider &provider_cell() {
-  static HttpOptionsProvider p;
-  return p;
-}
+// An app's options provider (auth headers + method). Copied out under the lock before each call so
+// set/clear never races a transfer in flight (uri_http.h).
+struct http_provider {
+  static constexpr const char *app_slot = "cvc.ariadne.http-options-provider";
+  std::mutex m;
+  HttpOptionsProvider provider;
+};
 
 } // namespace
 
 namespace detail {
 
-HttpRequestOptions consult_http_provider(const std::string &url, bool for_write) {
+HttpRequestOptions consult_http_provider(cvc::app &app, const std::string &url, bool for_write) {
   HttpOptionsProvider p;
   {
-    std::lock_guard<std::mutex> lock(provider_mutex());
-    p = provider_cell();
+    http_provider &h = app.slot<http_provider>();
+    std::lock_guard<std::mutex> lock(h.m);
+    p = h.provider;
   }
   if (p)
     return p(url, for_write);
@@ -103,14 +102,14 @@ UriResult map_http_fetch_result(const std::string &raw_url, bool follow,
   return {true, r.body, r.canonical_url, std::string()};
 }
 
-cvc::net::HttpResponse send_http(const cvc::net::HttpRequest &req,
+cvc::net::HttpResponse send_http(cvc::app &app, const cvc::net::HttpRequest &req,
                                  const cvc::net::NetPolicy *policy) {
-  return policy ? cvc::net::send(req, *policy) : cvc::net::send(req);
+  return policy ? cvc::net::send(app, req, *policy) : cvc::net::send(app, req);
 }
 
-StoreResult http_store_uncached(const Uri &u, const std::string &content,
+StoreResult http_store_uncached(cvc::app &app, const Uri &u, const std::string &content,
                                 const std::string & /*base*/, const cvc::net::NetPolicy *policy) {
-  const HttpRequestOptions opts = consult_http_provider(u.raw, /*for_write=*/true);
+  const HttpRequestOptions opts = consult_http_provider(app, u.raw, /*for_write=*/true);
   const std::string method = opts.method.empty() ? std::string("PUT") : opts.method;
 
   cvc::net::HttpRequest req;
@@ -128,7 +127,7 @@ StoreResult http_store_uncached(const Uri &u, const std::string &content,
     header_lines.push_back(kDefaultStoreContentType);
   req.headers = std::move(header_lines);
 
-  const cvc::net::HttpResponse r = send_http(req, policy);
+  const cvc::net::HttpResponse r = send_http(app, req, policy);
   if (!r.ok)
     return {false, std::string(), "ari: http " + method + " to '" + u.raw + "' failed: " + r.error};
   if (r.status >= 400)
@@ -149,8 +148,8 @@ StoreResult http_store_uncached(const Uri &u, const std::string &content,
 namespace {
 
 // The request a read of `u` makes (follow: whether it follows redirects, see below).
-cvc::net::HttpRequest http_fetch_request(const Uri &u, bool &follow) {
-  const HttpRequestOptions opts = detail::consult_http_provider(u.raw, /*for_write=*/false);
+cvc::net::HttpRequest http_fetch_request(cvc::app &app, const Uri &u, bool &follow) {
+  const HttpRequestOptions opts = detail::consult_http_provider(app, u.raw, /*for_write=*/false);
   cvc::net::HttpRequest req;
   req.url = u.raw;
   req.max_bytes = detail::kMaxHttpBytes;
@@ -166,23 +165,24 @@ cvc::net::HttpRequest http_fetch_request(const Uri &u, bool &follow) {
   return req;
 }
 
-UriResult http_fetch(const Uri &u, const std::string & /*base*/, const UriCancelled &cancelled,
-                     const cvc::net::NetPolicy *policy = nullptr) {
+UriResult http_fetch(cvc::app &app, const Uri &u, const std::string & /*base*/,
+                     const UriCancelled &cancelled, const cvc::net::NetPolicy *policy = nullptr) {
   bool follow = true;
-  cvc::net::HttpRequest req = http_fetch_request(u, follow);
+  cvc::net::HttpRequest req = http_fetch_request(app, u, follow);
   req.cancelled = cancelled;
-  return detail::map_http_fetch_result(u.raw, follow, detail::send_http(req, policy));
+  return detail::map_http_fetch_result(u.raw, follow, detail::send_http(app, req, policy));
 }
 
 // http_fetch's non-blocking form (register_uri_async_handler): the same request, started
 // (cvc::net::start), answered from the browser's event loop where the transport starts requests
 // without blocking.
-std::function<void()>
-http_fetch_async(const Uri &u, std::shared_ptr<const cvc::net::NetPolicy> policy, UriDone done) {
+std::function<void()> http_fetch_async(cvc::app &app, const Uri &u,
+                                       std::shared_ptr<const cvc::net::NetPolicy> policy,
+                                       UriDone done) {
   bool follow = true;
-  const cvc::net::HttpRequest req = http_fetch_request(u, follow);
+  const cvc::net::HttpRequest req = http_fetch_request(app, u, follow);
   std::shared_ptr<cvc::net::HttpTransfer> t =
-      cvc::net::start(req, std::move(policy),
+      cvc::net::start(app, req, std::move(policy),
                       [raw = u.raw, follow, done = std::move(done)](cvc::net::HttpResponse r) {
                         done(detail::map_http_fetch_result(raw, follow, r));
                       });
@@ -191,55 +191,35 @@ http_fetch_async(const Uri &u, std::shared_ptr<const cvc::net::NetPolicy> policy
   return [t] { t->abort(); };
 }
 
-StoreResult http_store(const Uri &u, const std::string &content, const std::string &base) {
-  return detail::http_store_uncached(u, content, base);
-}
-
 } // namespace
 
-void set_http_options_provider(HttpOptionsProvider provider) {
-  std::lock_guard<std::mutex> lock(provider_mutex());
-  provider_cell() = std::move(provider);
+void set_http_options_provider(cvc::app &app, HttpOptionsProvider provider) {
+  http_provider &h = app.slot<http_provider>();
+  std::lock_guard<std::mutex> lock(h.m);
+  h.provider = std::move(provider);
 }
 
-void register_http_uri_handler() {
-  if (!cvc::net::have_http_backend())
-    return; // no transport compiled — leave the scheme unresolved (as the old libcurl-less stub
-            // did)
-  const auto fetch = [](const Uri &u, const std::string &base, const UriCancelled &cancelled) {
-    return http_fetch(u, base, cancelled);
-  };
-  const auto fetch_async = [](const Uri &u, const std::string &, UriDone done) {
-    return http_fetch_async(u, nullptr, std::move(done));
-  };
-  for (const char *scheme : {"http", "https"}) {
-    register_uri_handler(scheme, fetch);
-    register_uri_async_handler(scheme, fetch_async);
-    register_uri_store_handler(scheme, http_store);
-  }
-}
+void register_http_uri_handler(cvc::app &app) { register_http_uri_handler(app, nullptr); }
 
-void register_http_uri_handler(std::shared_ptr<const cvc::net::NetPolicy> policy) {
-  if (!policy) {
-    register_http_uri_handler();
-    return;
-  }
+void register_http_uri_handler(cvc::app &app, std::shared_ptr<const cvc::net::NetPolicy> policy) {
   if (!cvc::net::have_http_backend())
-    return;
-  const auto fetch = [policy](const Uri &u, const std::string &base,
-                              const UriCancelled &cancelled) {
-    return http_fetch(u, base, cancelled, policy.get());
+    return; // no transport compiled — leave the scheme unresolved
+  // The handlers are held in `app`'s own table, so `app` outlives them.
+  const auto fetch = [&app, policy](const Uri &u, const std::string &base,
+                                    const UriCancelled &cancelled) {
+    return http_fetch(app, u, base, cancelled, policy.get());
   };
-  const auto fetch_async = [policy](const Uri &u, const std::string &, UriDone done) {
-    return http_fetch_async(u, policy, std::move(done));
+  const auto fetch_async = [&app, policy](const Uri &u, const std::string &, UriDone done) {
+    return http_fetch_async(app, u, policy, std::move(done));
   };
-  const auto store = [policy](const Uri &u, const std::string &content, const std::string &base) {
-    return detail::http_store_uncached(u, content, base, policy.get());
+  const auto store = [&app, policy](const Uri &u, const std::string &content,
+                                    const std::string &base) {
+    return detail::http_store_uncached(app, u, content, base, policy.get());
   };
   for (const char *scheme : {"http", "https"}) {
-    register_uri_handler(scheme, fetch);
-    register_uri_async_handler(scheme, fetch_async);
-    register_uri_store_handler(scheme, store);
+    register_uri_handler(app, scheme, fetch);
+    register_uri_async_handler(app, scheme, fetch_async);
+    register_uri_store_handler(app, scheme, store);
   }
 }
 

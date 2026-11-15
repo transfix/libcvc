@@ -31,16 +31,15 @@ namespace cvc::state_exec {
 
 namespace {
 
-thread_local exec_group *t_current = nullptr;
-
-std::atomic<std::uint64_t> g_group_seq{0};
-
-// The groups alive per app (detail::live_groups).
-std::mutex g_live_mutex;
-std::unordered_map<const cvc::app *, std::size_t> &live_by_app() {
-  static auto *m = new std::unordered_map<const cvc::app *, std::size_t>; // outlives every group
-  return *m;
-}
+// What the groups built with an app keep on it: how many were made (each one's seq, its creation
+// order in the app), how many are alive (detail::live_groups), and whether the note that the app's
+// lock manager is single was logged (S1-Q1, once per app).
+struct app_groups {
+  static constexpr const char *app_slot = "cvc.state_exec.exec_groups";
+  std::atomic<std::uint64_t> made{0};
+  std::atomic<std::size_t> live{0};
+  std::atomic<bool> single_noted{false};
+};
 
 // Log a teardown or construction note through the group's app (interruption held off: this runs
 // in a noexcept destructor), else stderr. Never throws.
@@ -111,20 +110,10 @@ value_t copy_lists_and_dicts(const value_t &v) {
   return root;
 }
 
-// The apps a group of found the lock manager single before any exec_pool was built: logged once
-// per app (S1-Q1). An app at a reused address may miss its note.
-std::mutex g_single_noted_mutex;
-std::unordered_map<const cvc::app *, bool> &single_noted() {
-  static auto *m = new std::unordered_map<const cvc::app *, bool>;
-  return *m;
-}
-
 } // namespace
 
-std::size_t detail::live_groups(const cvc::app *app) noexcept {
-  std::lock_guard<std::mutex> lock(g_live_mutex);
-  const auto it = live_by_app().find(app);
-  return it == live_by_app().end() ? 0 : it->second;
+std::size_t detail::live_groups(cvc::app &app) noexcept {
+  return app.slot<app_groups>().live.load(std::memory_order_acquire);
 }
 
 struct exec_group::impl {
@@ -139,6 +128,10 @@ struct exec_group::impl {
   std::unique_ptr<async_host> host; // declared after the scheduler it posts to, so it goes first
   std::atomic<bool> failed{false};
   detail::group_pool_link link;
+  app_groups *of_app = nullptr; // its app's counts (null: no app)
+  // The thread pumping the group now, if any (pumping_here; a group destroyed from inside its own
+  // pump aborts).
+  std::atomic<std::thread::id> pumper{};
   // An inline on_complete threw in this pump (as today, it ends the pump): pump() rethrows it
   // rather than failing the group.
   bool callback_threw = false;
@@ -147,10 +140,14 @@ struct exec_group::impl {
 exec_group::exec_group(options o) : impl_(std::make_unique<impl>()) {
   impl &m = *impl_;
   m.opts = std::move(o);
-  m.seq = g_group_seq.fetch_add(1, std::memory_order_relaxed) + 1;
+  cvc::app *const app = m.opts.app;
+  app_groups *const of_app = app ? &app->slot<app_groups>() : nullptr;
+  // Its creation order among the app's groups; a group with no app has none (0), and a pool keeps
+  // such groups in the order it is given them.
+  m.of_app = of_app;
+  m.seq = of_app ? of_app->made.fetch_add(1, std::memory_order_relaxed) + 1 : 0;
   m.link.seq = m.seq;
   m.link.random = &m.random;
-  cvc::app *const app = m.opts.app;
   cvc::state *const tree = app ? &app->root() : m.opts.watch_root;
   // As app::exec_scheduler() builds the app's (S1.5): the policy, fixed now (the home takes it at
   // attach), from state_exec.policy.
@@ -162,9 +159,16 @@ exec_group::exec_group(options o) : impl_(std::make_unique<impl>()) {
     note(app, 1,
          "exec_group '" + m.opts.name + "': state_exec.policy: unknown value; using " +
              "round_robin");
-  // Its global env extends the base: the host's, else the one frozen builtins scope (td 4.2,
-  // S1.3), so a group builds no default environment of its own.
-  environment_ptr base = m.opts.base ? m.opts.base : frozen_builtins();
+  // Its global env extends the base: the host's, else the app's frozen builtins scope (td 4.2,
+  // S1.3), so a group of an app builds no default environment of its own. A group with no app
+  // builds one, frozen as the app's is.
+  environment_ptr base = m.opts.base;
+  if (!base && app) {
+    base = frozen_builtins(*app);
+  } else if (!base) {
+    base = builtins::make_default_environment();
+    base->frozen = true;
+  }
   m.sched = std::make_unique<async_scheduler>(policy, std::move(base));
   if (cvc::state *root = m.opts.watch_root ? m.opts.watch_root : tree)
     m.sched->set_watch_root(root);
@@ -176,6 +180,12 @@ exec_group::exec_group(options o) : impl_(std::make_unique<impl>()) {
     m.random.seed = *m.opts.seed;
   m.sched->set_cycle_registry(m.registry.get());
   m.sched->set_random_stream(&m.random);
+  // Stage S: the group's runs, each setting it gives; the one it doesn't give stays the tree's
+  // (else CVC_EXEC_SLICE_STEPS and 1 ms).
+  if (m.opts.slice_steps)
+    m.sched->set_slice_steps(*m.opts.slice_steps);
+  if (m.opts.slice_seconds)
+    m.sched->set_slice_seconds(*m.opts.slice_seconds);
   if (app) {
     // Pids no other group or the app scheduler repeats (S1.4).
     m.sched->set_pid_source(app->exec_pid_source());
@@ -188,11 +198,7 @@ exec_group::exec_group(options o) : impl_(std::make_unique<impl>()) {
     // A single manager's tables have one thread: every pool pumps this group on its caller only.
     m.link.caller_only = !shared;
     if (!shared && !pool_built) {
-      bool first = false;
-      {
-        std::lock_guard<std::mutex> lock(g_single_noted_mutex);
-        first = !std::exchange(single_noted()[app], true);
-      }
+      const bool first = !of_app->single_noted.exchange(true, std::memory_order_relaxed);
       if (first)
         note(app, 2,
              "exec_group '" + m.opts.name +
@@ -201,8 +207,8 @@ exec_group::exec_group(options o) : impl_(std::make_unique<impl>()) {
                  "(S1-Q1; give app::exec_pool(opts) first, or set state_exec.threads)");
     }
   }
-  std::lock_guard<std::mutex> lock(g_live_mutex);
-  ++live_by_app()[app];
+  if (of_app)
+    of_app->live.fetch_add(1, std::memory_order_release);
 }
 
 exec_group::~exec_group() {
@@ -210,7 +216,7 @@ exec_group::~exec_group() {
   cvc::app *const app = m.opts.app;
   // Never from inside its own pump (an inline native or callback of it): its token would nest,
   // and the teardown would free the scheduler under its run loop. That aborts, in every build.
-  if (t_current == this) {
+  if (m.pumper.load(std::memory_order_acquire) == std::this_thread::get_id()) {
     std::fputs("exec_group: destroyed from inside its own pump\n", stderr);
     std::fflush(stderr);
     std::abort();
@@ -223,7 +229,7 @@ exec_group::~exec_group() {
     std::abort();
   }
   // Not from a host_proxied body or an on_complete callback at all (S1.6; a debug assertion).
-  assert(!cvc::detail::in_pool_callback() && "an exec_group destroyed inside a pump_all");
+  assert(!cvc::detail::in_pool_callback(app) && "an exec_group destroyed inside a pump_all");
   const auto step = [&](const char *what, auto &&fn) noexcept {
     try {
       fn();
@@ -262,12 +268,8 @@ exec_group::~exec_group() {
       step("a reap", [&] { m.sched->reap(p.pid); });
   });
   token.reset();
-  {
-    std::lock_guard<std::mutex> lock(g_live_mutex);
-    auto it = live_by_app().find(app);
-    if (it != live_by_app().end() && --it->second == 0)
-      live_by_app().erase(it);
-  }
+  if (m.of_app) // alive: a group never outlives its app (~app asserts it)
+    m.of_app->live.fetch_sub(1, std::memory_order_release);
   // The members go now: the host, the scheduler and its envs, and last the registry, whose
   // deleter collects it under its own binding.
 }
@@ -292,11 +294,23 @@ pump_result exec_group::pump(const pump_budget &budget) {
     assert(false && "exec_group::pump: another thread holds the group's token");
     throw;
   }
+  // The group the pump runs, in the context its scheduler's evaluator runs in (current(ctx)), and
+  // the thread pumping it (pumping_here()).
   struct current_scope {
+    impl &m;
+    exec_context &ctx;
     exec_group *outer;
-    explicit current_scope(exec_group *g) : outer(t_current) { t_current = g; }
-    ~current_scope() { t_current = outer; }
-  } bind(this);
+    std::thread::id outer_pumper;
+    current_scope(impl &m, exec_context &c, exec_group *g)
+        : m(m), ctx(c), outer(c.group),
+          outer_pumper(m.pumper.exchange(std::this_thread::get_id(), std::memory_order_acq_rel)) {
+      c.group = g;
+    }
+    ~current_scope() {
+      ctx.group = outer;
+      m.pumper.store(outer_pumper, std::memory_order_release);
+    }
+  } bind(m, m.sched->evaluation_context(), this);
   pump_result r;
   m.callback_threw = false;
   try {
@@ -335,9 +349,10 @@ namespace {
 
 // on_complete for a process of `m`'s group (S1.6, td 4.9): queued for the pump_all's caller when a
 // threaded pump_all pumps the group (on a worker or on its caller), else run inline, as today.
-std::function<void(value_t)> group_on_complete(bool *threw, std::function<void(value_t)> cb) {
-  return [threw, cb = std::move(cb)](value_t result) {
-    if (cvc::detail::defer_on_complete([cb, result] { cb(result); }))
+std::function<void(value_t)> group_on_complete(exec_group *group, bool *threw,
+                                               std::function<void(value_t)> cb) {
+  return [group, threw, cb = std::move(cb)](value_t result) {
+    if (cvc::detail::defer_on_complete(*group, [cb, result] { cb(result); }))
       return;
     try {
       cb(std::move(result));
@@ -358,7 +373,7 @@ int exec_group::execute(const std::string &script, const execute_options &opts) 
   if (o.owner.empty())
     o.owner = m.opts.owner; // the group's owner by default (options::owner)
   if (o.on_complete)
-    o.on_complete = group_on_complete(&m.callback_threw, std::move(o.on_complete));
+    o.on_complete = group_on_complete(this, &m.callback_threw, std::move(o.on_complete));
   return m.sched->execute(script, o);
 }
 
@@ -375,37 +390,43 @@ int exec_group::execute(const value_t &expr, const execute_options &opts) {
   if (o.owner.empty())
     o.owner = m.opts.owner;
   if (o.on_complete)
-    o.on_complete = group_on_complete(&m.callback_threw, std::move(o.on_complete));
+    o.on_complete = group_on_complete(this, &m.callback_threw, std::move(o.on_complete));
   return m.sched->execute(given, o);
 }
 
 namespace {
 
 // A host_proxied native's body, run on the host thread (S1.8, td 4.9): `fn` on private copies of
-// its arguments.
+// its arguments, in a context of its own with the group's registry and math.random stream (no
+// other thread pumps the group meanwhile).
 struct proxied_body {
+  exec_group *group;
   native_fn fn;
   std::vector<value_t> args;
   value_t run(std::exception_ptr &error) const {
     try {
-      return fn(std::span<const value_t>(args));
+      exec_context ctx; // no pump runs it: exec_group::current(ctx) is null
+      ctx.registry = group->registry();
+      ctx.random = group->pool_link().random;
+      return fn(call_args(args, &ctx));
     } catch (...) {
       error = std::current_exception();
-      return nil_value;
+      return nil_value();
     }
   }
 };
 
-// Where the calling thread is a worker of `pool`: park the calling process on the body, queued
-// for the pump_all's caller, and resume it with the body's value at the group's next pump; at a
-// point that cannot park (a generator body), block this worker until the caller has run it.
-value_t proxy_on_worker(cvc::exec_pool &pool, exec_group &group, const std::string &name,
-                        proxied_body body) {
-  if (can_await()) {
+// Where the calling thread is a worker of `pool`: park the calling process (whose call runs in
+// `ctx`) on the body, queued for the pump_all's caller, and resume it with the body's value at the
+// group's next pump; at a point that cannot park (a generator body), block this worker until the
+// caller has run it.
+value_t proxy_on_worker(exec_context *ctx, cvc::exec_pool &pool, exec_group &group,
+                        const std::string &name, proxied_body body) {
+  if (can_await(ctx)) {
     value_t result;
     async_host &host = group.host();
-    const std::shared_ptr<async_call> call = host.begin_external(name, false, result);
-    pool.run_on_host([&host, call, body = std::move(body)] {
+    const std::shared_ptr<async_call> call = host.begin_external(ctx, name, false, result);
+    pool.run_on_host(group, [&host, call, body = std::move(body)] {
       std::exception_ptr error;
       value_t value = body.run(error);
       call->settle(std::move(value), std::move(error));
@@ -421,7 +442,7 @@ value_t proxy_on_worker(cvc::exec_pool &pool, exec_group &group, const std::stri
     std::exception_ptr error;
   };
   auto meet = std::make_shared<rendezvous>();
-  cvc::detail::run_on_host_waiting(pool, [meet, body = std::move(body)] {
+  cvc::detail::run_on_host_waiting(pool, group, [meet, body = std::move(body)] {
     std::exception_ptr error;
     value_t value = body.run(error);
     std::lock_guard<std::mutex> lock(meet->m);
@@ -452,33 +473,38 @@ void exec_group::install(const environment_ptr &env, const std::string &name, na
   // today, at threads 0 included; through the host-call queue on a worker.
   auto shared_fn = std::make_shared<const native_fn>(std::move(fn));
   exec_group *const group = this;
-  builtins::register_fn(
-      env, name, [group, name, shared_fn](std::span<const value_t> args) -> value_t {
-        cvc::exec_pool *pool = cvc::detail::worker_pool();
-        if (!pool)
-          return (*shared_fn)(args);
-        // The body reads its arguments on the host thread while this worker steps the group's
-        // other processes: it gets copies, made as deep-data work, as an async function's do.
-        auto start = [group, name, shared_fn](value_t copied) -> value_t {
-          const std::vector<value_t> &argv = *std::get<list_ptr>(copied.v);
-          cvc::exec_pool *pool = cvc::detail::worker_pool(); // the copy may end on the caller
-          if (!pool)
-            return (*shared_fn)(std::span<const value_t>(argv));
-          return proxy_on_worker(*pool, *group, name, proxied_body{*shared_fn, argv});
-        };
-        value_t argv = make_list(std::vector<value_t>(args.begin(), args.end()));
-        if (std::none_of(args.begin(), args.end(), [](const value_t &a) { return is_compound(a); }))
-          return start(std::move(argv));
-        return run_data_job(make_copy_job(std::move(argv), copy_mode::share, "host_proxied"),
-                            std::move(start));
-      });
+  builtins::register_fn(env, name, [group, name, shared_fn](call_args args) -> value_t {
+    cvc::exec_pool *pool = cvc::detail::worker_pool(*group);
+    if (!pool)
+      return (*shared_fn)(args);
+    // The body reads its arguments on the host thread while this worker steps the group's
+    // other processes: it gets copies, made as deep-data work, as an async function's do.
+    // (The copy finishes in a step of the same scheduler: its context.)
+    exec_context *const cx = args.context();
+    auto start = [cx, group, name, shared_fn](value_t copied) -> value_t {
+      const std::vector<value_t> &argv = *std::get<list_ptr>(copied.v);
+      cvc::exec_pool *pool = cvc::detail::worker_pool(*group); // may end on the caller
+      if (!pool)
+        return (*shared_fn)(call_args(argv, cx));
+      return proxy_on_worker(cx, *pool, *group, name, proxied_body{group, *shared_fn, argv});
+    };
+    value_t argv = make_list(std::vector<value_t>(args.begin(), args.end()));
+    if (std::none_of(args.begin(), args.end(), [](const value_t &a) { return is_compound(a); }))
+      return start(std::move(argv));
+    return run_data_job(cx, make_copy_job(std::move(argv), copy_mode::share, "host_proxied"),
+                        std::move(start));
+  });
 }
 
 bool exec_group::failed() const { return impl_->failed.load(std::memory_order_acquire); }
 
 cycle_registry *exec_group::registry() const { return impl_->registry.get(); }
 
-exec_group *exec_group::current() { return t_current; }
+exec_group *exec_group::current(const exec_context *ctx) { return ctx ? ctx->group : nullptr; }
+
+bool exec_group::pumping_here() const {
+  return impl_->pumper.load(std::memory_order_acquire) == std::this_thread::get_id();
+}
 
 const exec_group::options &exec_group::opts() const { return impl_->opts; }
 

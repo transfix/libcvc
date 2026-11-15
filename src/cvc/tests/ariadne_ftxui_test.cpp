@@ -5,6 +5,7 @@
 // menus, window placement / drag / close and its §11.4 persistence, disabled scopes, images.
 // Skipped when libcvc is built without FTXUI.
 
+#include <algorithm>
 #include <chrono>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/ariadne.h>
@@ -558,8 +559,19 @@ TEST(AriadneFtxui, MessageFieldSendsOnEnterAndTakesNewLines) {
   u.type("a");
   u.be.feed(u.rt, TermEvent::key_event("Return", false, false, true));
   u.type("b");
+  u.type("c\nd\r\n"); // a paste, or tvision's read of a burst of keys (its Enter is a "\n")
   u.key("Tab");
-  EXPECT_EQ(val(u.app, "one"), "ab") << "multiline: false takes no new line";
+  EXPECT_EQ(val(u.app, "one"), "abcd") << "multiline: false takes no new line";
+}
+
+// A one-line text field takes a pasted line's text without its line breaks.
+TEST(AriadneFtxui, TextFieldDropsPastedLineBreaks) {
+  REQUIRE_FTXUI();
+  Term t(group({input_text("Name", "name")}));
+  t.key("Tab");
+  t.type("photo.bin\n");
+  t.key("Return");
+  EXPECT_EQ(val(t.app, "name"), "photo.bin");
 }
 
 // §5.15 on_change: the draft reaches bind: as it is typed, and on_change runs with event.text each
@@ -732,7 +744,7 @@ TEST(AriadneFtxui, WindowsCascadeAndUseTheAuthoredPos) {
   EXPECT_EQ(y, 10);
   ASSERT_TRUE(find_cell(t.screen, "\xe2\x95\xad Alpha", x, y)) << t.screen;
   EXPECT_EQ(x, 2);
-  EXPECT_EQ(y, 1);
+  EXPECT_EQ(y, 2) << "a row below the Windows menu bar its close buttons bring\n" << t.screen;
 }
 
 TEST(AriadneFtxui, WindowDragPersistsGeometry) {
@@ -956,14 +968,17 @@ TEST(AriadneFtxui, AWindowMaximizesToTheScreenAndBack) {
   post.has_pos = true;
   post.pos_x = 80.0f; // px: a few cells in
   post.pos_y = 64.0f;
+  post.closable = false; // no Windows menu bar: the screen's top row is the window's
   Widget pinned = window("Pinned", {text("fixed")});
   pinned.id = "pinned";
   pinned.maximizable = false;
+  pinned.closable = false;
   pinned.has_pos = true;
   pinned.pos_x = 400.0f;
   pinned.pos_y = 192.0f;
   Term t(group({post, pinned}));
   EXPECT_TRUE(t.be.capabilities().maximize);
+  EXPECT_FALSE(t.shows("[x]")) << "closable: false has no [x]\n" << t.screen;
   const bool uni = t.be.unicode_glyphs();
   const std::string up = uni ? "[\xE2\x86\x91]" : "[^]";
   const std::string down = uni ? "[\xE2\x86\x95]" : "[=]";
@@ -1007,6 +1022,53 @@ TEST(AriadneFtxui, AWindowMaximizesToTheScreenAndBack) {
   EXPECT_EQ(y, 0) << t.screen;
 }
 
+// §5.9: a window with nothing said has both title bar buttons, [x] at the end. Maximized and then
+// dragged by its title bar, it is no longer maximized: it comes back at its own size under the
+// pointer, and its marker is the maximize one again. A press alone leaves it maximized.
+TEST(AriadneFtxui, AMaximizedWindowDraggedByItsTitleIsRestored) {
+  REQUIRE_FTXUI();
+  Widget post = window("Post", {text("body")});
+  post.id = "post";
+  post.has_pos = true;
+  post.pos_x = 80.0f;
+  post.pos_y = 64.0f;
+  post.size.w = Extent{Unit::Px, 240.0f};
+  post.size.h = Extent{Unit::Px, 96.0f};
+  Term t(group({post}));
+  const bool uni = t.be.unicode_glyphs();
+  const std::string up = uni ? "[\xE2\x86\x91]" : "[^]";
+  const std::string down = uni ? "[\xE2\x86\x95]" : "[=]";
+  ASSERT_TRUE(t.shows(up + "[x]")) << "both buttons by default, [x] last\n" << t.screen;
+  int x0 = 0, y0 = 0, w0 = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, " Post ", x0, y0)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, "[x]", w0, y)) << t.screen;
+  w0 -= x0; // the title to the [x]: the window's width, give or take its frame
+
+  ASSERT_TRUE(t.click(up));
+  t.draw();
+  ASSERT_EQ(val(t.app, "tree.post.maximized"), "1");
+  int x = 0, top = 0;
+  ASSERT_TRUE(find_cell(t.screen, " Post ", x, top)) << t.screen;
+  t.mouse(TermEvent::Mouse::Press, 20, top);
+  t.mouse(TermEvent::Mouse::Release, 20, top);
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.post.maximized"), "1") << "a press on the title alone";
+
+  t.mouse(TermEvent::Mouse::Press, 20, top);
+  t.mouse(TermEvent::Mouse::Move, 30, top + 6);
+  t.mouse(TermEvent::Mouse::Release, 30, top + 6);
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.post.maximized"), "0") << t.screen;
+  EXPECT_TRUE(t.shows(up) && !t.shows(down)) << "the maximize marker again\n" << t.screen;
+  int xs = 0, ys = 0, wx = 0;
+  ASSERT_TRUE(find_cell(t.screen, " Post ", xs, ys)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, "[x]", wx, y)) << t.screen;
+  EXPECT_EQ(ys, top + 6) << "under the pointer\n" << t.screen;
+  EXPECT_EQ(wx - xs, w0) << "at its own width\n" << t.screen;
+  EXPECT_LE(xs, 30) << t.screen;
+  EXPECT_GT(wx, 30) << "the pointer still on its title bar\n" << t.screen;
+}
+
 // §5.9: a window closed with its [x] comes back from the built-in Windows menu.
 TEST(AriadneFtxui, AClosedWindowReopensFromTheWindowsMenu) {
   REQUIRE_FTXUI();
@@ -1025,6 +1087,31 @@ TEST(AriadneFtxui, AClosedWindowReopensFromTheWindowsMenu) {
   EXPECT_EQ(val(t.app, "tree.panel.open"), "1");
   t.draw();
   EXPECT_TRUE(t.shows("body")) << t.screen;
+}
+
+// §5.9: picking a window in the Windows menu brings it to the front and leaves it open, and so
+// does maximizing it: here by the document writing tree.<id>.maximized.
+TEST(AriadneFtxui, TheWindowsMenuAndMaximizeBringAWindowToTheFront) {
+  REQUIRE_FTXUI();
+  // Two windows in the same place: Beta, drawn last, covers Alpha.
+  Widget a = window("Alpha", {text("underneath")});
+  Widget b = window("Beta", {text("covering")});
+  a.id = "alpha";
+  b.id = "beta";
+  a.has_pos = b.has_pos = true;
+  a.pos_x = b.pos_x = 16;
+  a.pos_y = b.pos_y = 32;
+  Term t(group({a, b}));
+  ASSERT_TRUE(t.shows("covering") && !t.shows("underneath")) << t.screen;
+  ASSERT_TRUE(t.click("Windows"));
+  ASSERT_TRUE(t.click("[x] Alpha")) << "ticked: it is open\n" << t.screen;
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.alpha.open"), "1") << "still open";
+  EXPECT_TRUE(t.shows("underneath") && !t.shows("covering")) << "Alpha on top\n" << t.screen;
+
+  cvc::state::instance(t.app)("tree.beta.maximized").value(std::string("1"));
+  t.draw();
+  EXPECT_TRUE(t.shows("covering") && !t.shows("underneath")) << "Beta on top\n" << t.screen;
 }
 
 TEST(AriadneFtxui, FocusRaisesItsWindow) {
@@ -1520,6 +1607,48 @@ TEST(AriadneFtxuiHosted, TheHostClosesAndPlacesWindows) {
   EXPECT_TRUE(t.be.hosted_windows().empty());
 }
 
+// §5.9 `resizable:` reaches the host, whose frame resizes its windows (tvision: the corner and
+// Ctrl-F5's grow): true unless the document says false.
+TEST(AriadneFtxuiHosted, TheHostKnowsWhichWindowsResize) {
+  REQUIRE_FTXUI();
+  Widget free = window("Free", {text("body")});
+  free.id = "free";
+  Widget fixed = window("Fixed", {text("body")});
+  fixed.id = "fixed";
+  fixed.resizable = false;
+  Term t(group({free, fixed}), hosted_opts());
+  std::map<std::string, bool> resizable;
+  for (const auto &hw : t.be.hosted_windows())
+    resizable[hw.id] = hw.resizable;
+  ASSERT_EQ(resizable.size(), 2u);
+  EXPECT_TRUE(resizable["free"]);
+  EXPECT_FALSE(resizable["fixed"]);
+}
+
+// §5.9: a window the core brings to the front (picked in the Windows menu, or tree.<id>.raise)
+// is reported raised to the host for the walk that raised it, and only that one.
+TEST(AriadneFtxuiHosted, TheHostRaisesAWindowOnce) {
+  REQUIRE_FTXUI();
+  Widget a = window("Alpha", {text("a")});
+  a.id = "alpha";
+  Widget b = window("Beta", {text("b")});
+  b.id = "beta";
+  Term t(group({a, b}), hosted_opts());
+  const auto raised = [&] {
+    std::string out;
+    for (const auto &hw : t.be.hosted_windows())
+      if (hw.raise)
+        out += hw.id + " ";
+    return out;
+  };
+  EXPECT_EQ(raised(), "");
+  cvc::state::instance(t.app)("tree.alpha.raise").value(std::string("1"));
+  t.draw();
+  EXPECT_EQ(raised(), "alpha ");
+  t.draw();
+  EXPECT_EQ(raised(), "") << "once";
+}
+
 // The host reports every window's bounds on each walk. The size it gave a window to fit its
 // content is not the window's: one that closes, gains a row and opens again must be reported as
 // fitting (0) with its new content size, not at its old size. Only a size the user gave it holds.
@@ -1902,6 +2031,7 @@ cvc::image solid(int w, int h, unsigned char r, unsigned char g, unsigned char b
 Widget placed_window(const std::string &title, std::vector<Widget> kids, float x, float y, float w,
                      float h) {
   Widget win = window(title, std::move(kids));
+  win.closable = false; // no Windows menu bar over the image's top row
   win.has_pos = true;
   win.pos_x = x;
   win.pos_y = y;
@@ -2411,8 +2541,10 @@ std::filesystem::path json_feed_doc() {
 TEST(AriadneFtxui, WideGlyphsTakeTwoColumnsInTheTextSnapshot) {
   REQUIRE_FTXUI();
   // A full-width glyph's second cell isn't written: as a space it pushed the line right.
-  Term t(group({window("W", {text("\xE6\x97\xA5\xE6\x9C\xAC \xF0\x9F\x8E\x89 ok"),
-                             text("e\xCC\x81t\xC3\xA9 plain")})}));
+  Widget w = window("W", {text("\xE6\x97\xA5\xE6\x9C\xAC \xF0\x9F\x8E\x89 ok"),
+                          text("e\xCC\x81t\xC3\xA9 plain")});
+  w.closable = false; // no Windows menu bar, whose "Windows" the box would be found by
+  Term t(group({w}));
   EXPECT_TRUE(t.shows("\xE6\x97\xA5\xE6\x9C\xAC \xF0\x9F\x8E\x89 ok")) << t.screen;
   EXPECT_TRUE(t.shows("e\xCC\x81t\xC3\xA9 plain")) << t.screen; // combining and composed
   const std::vector<std::string> box = box_lines(t.screen, "W", "\xE2\x95\xB0");
@@ -2572,4 +2704,217 @@ TEST(AriadneFtxui, TfEditorMouseAndKeyEditsCommit) {
   t.draw();
   ASSERT_TRUE(t.click("[ + isocontour ]")) << t.screen;
   EXPECT_EQ(tf_model(t.app, "tf").isocontours.size(), 2u);
+}
+
+// chart: on a terminal is the default text chart: a heading with the axis, one sparkline per
+// series binned on the shared x (a space where a column has no finite value), the newest value
+// and the range, then the markers and the cursor. The golden is the window's whole body.
+TEST(AriadneFtxui, ChartDrawsSparklinesMarkersAndTheCursor) {
+  REQUIRE_FTXUI();
+  Widget c = chart("Loss", "learn", {{"lr", "lr", ""}});
+  c.log_y = "1";
+  c.x_label = "step";
+  c.cursor = "play.t";
+  Term t(group({window("Learning", {c})}));
+  cvc::state &s = cvc::state::instance(t.app);
+  s("learn.s.0.label").value("train");
+  s("learn.s.0.x").value("0,1000,2000,3000,4000");
+  s("learn.s.0.y").value("2.0,0.5,0.2,0.1,0.08");
+  s("learn.s.1.label").value("held-out");
+  s("learn.s.1.x").value("0,2000,4000");
+  s("learn.s.1.y").value("2.1,,0.15");
+  s("learn.m.0.x").value("3000");
+  s("learn.m.0.kind").value("best");
+  s("learn.m.0.label").value("held-out min");
+  s("learn.m.1.x").value("1000");
+  s("learn.m.1.kind").value("elbow");
+  s("lr.x").value("0,2000,4000");
+  s("lr.y").value("0.01,0.01,0.001");
+  s("play.t").value("2500");
+  t.width = 72;
+  t.height = 12;
+  t.draw();
+  // The rows between the window's side borders, trailing spaces trimmed.
+  const std::string bar = "\xE2\x94\x82"; // U+2502, the box's side
+  std::vector<std::string> body;
+  std::size_t start = 0;
+  while (start < t.screen.size()) {
+    const std::size_t nl = std::min(t.screen.find('\n', start), t.screen.size());
+    const std::string line = t.screen.substr(start, nl - start);
+    const std::size_t a = line.find(bar), z = line.rfind(bar);
+    if (a != std::string::npos && z > a) {
+      std::string row = line.substr(a + bar.size(), z - a - bar.size());
+      row.erase(row.find_last_not_of(' ') + 1);
+      body.push_back(row);
+    }
+    start = nl + 1;
+  }
+  // Each sparkline's 32 columns span step 0..4000 on a log axis from 0.001 to 2.1: train's five
+  // points at columns 0, 8, 16, 24 and 31; held-out's gap at 2000 a blank column 16.
+  const std::vector<std::string> golden = {
+      "Loss (log y; step 0..4000)",
+      "train:    [#       *       +       =      =] 0.08 (0.08..2)",
+      "held-out: [#                              +] 0.15 (0.15..2.1)",
+      "lr:       [-               -              _] 0.001 (0.001..0.01)",
+      "best: x=3000 held-out min",
+      "elbow: x=1000",
+      "cursor: x=2500",
+  };
+  EXPECT_EQ(body, golden) << t.screen;
+}
+
+// ---- §5.20 rich text in a terminal ---------------------------------------------------------
+
+namespace {
+
+Widget rich(std::vector<TextRunSpec> runs) {
+  Widget p = text("");
+  p.has_runs = true;
+  p.runs = std::move(runs);
+  return p;
+}
+// A window `cols` cells wide (the backend's 8 px a cell).
+Widget window_cols(const char *title, int cols, std::vector<Widget> kids) {
+  Widget w = window(title, std::move(kids));
+  w.id = title;
+  w.size.w = Extent{Unit::Px, 8.0f * static_cast<float>(cols)};
+  return w;
+}
+
+} // namespace
+
+TEST(AriadneFtxui, RichTextWrapsInItsWindowAndStylesItsCells) {
+  REQUIRE_FTXUI();
+  Widget p = rich({TextRunSpec{"Plain words then "}, TextRunSpec{"bold", "bold"},
+                   TextRunSpec{" and "}, TextRunSpec{"slanted", "italic"}, TextRunSpec{" with "},
+                   TextRunSpec{"a link here", "", "/post/1"}, TextRunSpec{" end."}});
+  Term t(group({window_cols("Post", 30, {p})})); // 28 cells inside its frame
+  EXPECT_TRUE(t.be.capabilities().rich_text);
+  EXPECT_TRUE(t.shows("Plain words then bold and")) << t.screen;
+  EXPECT_TRUE(t.shows("slanted with a link here")) << t.screen;
+  EXPECT_TRUE(t.shows("end.")) << t.screen;
+  EXPECT_FALSE(t.shows("and slanted")) << "it wrapped at the window's inside\n" << t.screen;
+  const std::string ansi = t.be.render_to_string(t.rt, t.width, t.height, true);
+  EXPECT_NE(ansi.find("\x1b[1m"), std::string::npos) << "bold";
+  EXPECT_NE(ansi.find("\x1b[3m"), std::string::npos) << "italic";
+  EXPECT_NE(ansi.find("\x1b[4m"), std::string::npos) << "the link, underlined";
+}
+
+TEST(AriadneFtxui, RichTextLinksAreTabStopsAndEnterActivatesThem) {
+  REQUIRE_FTXUI();
+  Widget p = rich({TextRunSpec{"by "}, TextRunSpec{"@bob", "", "/user/bob"}, TextRunSpec{" in "},
+                   TextRunSpec{"#cats", "", "/tag/cats", "", "Posts tagged cats"}});
+  p.on_link = "(state-set \"opened\" (get-attr event \"href\"))";
+  Term t(group({window_cols("W", 40, {p, button("After", "(state-set \"after\" \"1\")")})}));
+  const auto settle = [&] {
+    for (int i = 0; i < 50; ++i)
+      t.rt.drain();
+    t.draw();
+  };
+  t.key("Tab");
+  t.draw();
+  EXPECT_TRUE(t.shows("/user/bob")) << "the focused link's href, on the tooltip line\n" << t.screen;
+  EXPECT_NE(t.be.render_to_string(t.rt, t.width, t.height, true).find("\x1b[7m"), std::string::npos)
+      << "the focused link is inverted";
+  t.key("Return");
+  settle();
+  EXPECT_EQ(val(t.app, "opened"), "/user/bob");
+  t.key("Tab");
+  t.draw();
+  EXPECT_TRUE(t.shows("Posts tagged cats")) << "a link's tooltip: before its href\n" << t.screen;
+  t.key("Return");
+  settle();
+  EXPECT_EQ(val(t.app, "opened"), "/tag/cats");
+  t.key("Tab"); // past the links, to the button
+  t.key("Return");
+  settle();
+  EXPECT_EQ(val(t.app, "after"), "1");
+  EXPECT_EQ(val(t.app, "opened"), "/tag/cats");
+}
+
+TEST(AriadneFtxui, RichTextALinkThatWrapsIsTheLinksOnEachLineAndTheRestIsTheCards) {
+  REQUIRE_FTXUI();
+  Widget p = rich({TextRunSpec{"Some text before "},
+                   TextRunSpec{"a link that wraps", "", "/post/9"}, TextRunSpec{" and after."}});
+  p.on_link = "(state-set \"hit\" (get-attr event \"href\"))";
+  Widget card = group({p});
+  card.on_click = "(state-set \"hit\" \"card\")";
+  // 28 cells inside the frame, 27 beside the card's gutter.
+  Term t(group({window_cols("Feed", 30, {card})}));
+  ASSERT_TRUE(t.shows("Some text before a link")) << t.screen;
+  ASSERT_TRUE(t.shows("that wraps and after.")) << t.screen;
+  const auto clicked = [&](const char *where) {
+    cvc::state::instance(t.app)("hit").value(std::string());
+    EXPECT_TRUE(t.click(where)) << where << "\n" << t.screen;
+    for (int i = 0; i < 50; ++i)
+      t.rt.drain();
+    t.draw();
+    return val(t.app, "hit");
+  };
+  EXPECT_EQ(clicked("link"), "/post/9");
+  EXPECT_EQ(clicked("wraps"), "/post/9") << "the link's second line is the link too";
+  EXPECT_EQ(clicked("before"), "card");
+  EXPECT_EQ(clicked("after."), "card");
+}
+
+TEST(AriadneFtxui, RichTextMaxLinesEndsInAnEllipsis) {
+  REQUIRE_FTXUI();
+  Widget p = rich({TextRunSpec{"one two three four five six seven eight nine ten eleven"}});
+  p.text_max_lines = 2;
+  Term t(group({window_cols("W", 20, {p, text("below")})}));
+  const std::string dots = t.be.unicode_glyphs() ? "\xE2\x80\xA6" : "...";
+  EXPECT_TRUE(t.shows("one two three four")) << t.screen;
+  EXPECT_TRUE(t.shows(dots)) << t.screen;
+  EXPECT_FALSE(t.shows("eleven")) << t.screen;
+  EXPECT_TRUE(t.shows("below")) << t.screen;
+}
+
+TEST(AriadneFtxuiHosted, RichTextStylesItsCellsAndItsLinksTakeTheKeys) {
+  REQUIRE_FTXUI();
+  Widget p = rich({TextRunSpec{"so "}, TextRunSpec{"bold", "bold"}, TextRunSpec{" see "},
+                   TextRunSpec{"this", "", "/post/3"}});
+  p.on_link = "(state-set \"opened\" (get-attr event \"href\"))";
+  Widget w = window("W", {p});
+  w.id = "w";
+  Term t(group({w}), hosted_opts());
+  TermRows rows = t.be.render_window("w", 30, 3);
+  ASSERT_FALSE(rows.empty());
+  const std::string line = row_text(rows, 0);
+  ASSERT_EQ(line.substr(0, 16), "so bold see this") << line;
+  EXPECT_TRUE(rows[0][3].bold);        // "bold"
+  EXPECT_FALSE(rows[0][0].bold);       // "so"
+  EXPECT_TRUE(rows[0][12].underlined); // "this"
+  EXPECT_FALSE(rows[0][8].underlined);
+  EXPECT_TRUE(t.be.feed_window(t.rt, "w", TermEvent::key_event("Tab")));
+  EXPECT_TRUE(t.be.feed_window(t.rt, "w", TermEvent::key_event("Return")));
+  for (int i = 0; i < 50; ++i)
+    t.rt.drain();
+  EXPECT_EQ(val(t.app, "opened"), "/post/3");
+  // A click on its cells, in the window's own coordinates.
+  cvc::state::instance(t.app)("opened").value(std::string());
+  t.draw();
+  rows = t.be.render_window("w", 30, 3);
+  t.be.feed_window(t.rt, "w", TermEvent::mouse_event(TermEvent::Mouse::Press, 13, 0));
+  t.be.feed_window(t.rt, "w", TermEvent::mouse_event(TermEvent::Mouse::Release, 13, 0));
+  for (int i = 0; i < 50; ++i)
+    t.rt.drain();
+  EXPECT_EQ(val(t.app, "opened"), "/post/3");
+}
+
+TEST(AriadneFtxui, RichTextALinkInTheLinesCutAwayIsNoStop) {
+  REQUIRE_FTXUI();
+  Widget p = rich({TextRunSpec{"shown", "", "/a"},
+                   TextRunSpec{" then a long paragraph that runs on past two lines here "},
+                   TextRunSpec{"hidden", "", "/b"}});
+  p.text_max_lines = 2;
+  p.on_link = "(state-set \"opened\" (get-attr event \"href\"))";
+  Term t(group({window_cols("W", 20, {p, button("After", "(state-set \"after\" \"1\")")})}));
+  ASSERT_FALSE(t.shows("hidden")) << t.screen;
+  t.key("Tab"); // the shown link
+  t.key("Tab"); // past the hidden one, to the button
+  t.key("Return");
+  for (int i = 0; i < 50; ++i)
+    t.rt.drain();
+  EXPECT_EQ(val(t.app, "after"), "1");
+  EXPECT_EQ(val(t.app, "opened"), "");
 }

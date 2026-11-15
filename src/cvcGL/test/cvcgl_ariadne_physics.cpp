@@ -46,6 +46,19 @@ using cvc::gl::GeometryNode;
 using cvc::gl::SceneGraph;
 namespace ari = cvc::gl::ariadne;
 
+namespace {
+// A document checked against a fresh app's registries: the built-in widget types, blocks and
+// decoders only. (A test that registers its own loads against that app instead.)
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load(const std::string &yaml) {
+  cvc::app app;
+  return cvc::ariadne::load_string(app, yaml);
+}
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load_file(const std::string &path) {
+  cvc::app app;
+  return cvc::ariadne::load_file(app, path);
+}
+} // namespace
+
 static int g_failures = 0;
 static void check_impl(bool ok, const char *expr, int line) {
   if (!ok) {
@@ -120,7 +133,7 @@ void test_crate_lands_on_the_drawn_ground() {
     std::printf("  skipped: no YAML in this build\n");
     return;
   }
-  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(kScene);
+  cvc::ariadne::LoadResult r = fresh_load(kScene);
   CHECK(r.ok);
   if (!r.ok) {
     std::printf("  %s\n", r.error.c_str());
@@ -206,7 +219,7 @@ void test_null_backend_places_and_holds() {
   }
   std::string spec = kScene;
   spec.replace(spec.find("physics: {}"), 11, "physics: { backend: null }");
-  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(spec);
+  cvc::ariadne::LoadResult r = fresh_load(spec);
   CHECK(r.ok);
   cvc::app app;
   SceneGraph sg(app);
@@ -226,7 +239,7 @@ void test_problems_warn() {
     std::printf("  skipped: no YAML in this build\n");
     return;
   }
-  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(R"(
+  cvc::ariadne::LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   physics: { fixed_dt: 0.01, materials: { ice: { friction: 0.1 } } }
@@ -310,7 +323,7 @@ void test_same_world_headless_and_drawn() {
     std::printf("  skipped: no YAML in this build\n");
     return;
   }
-  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(kSameWorld);
+  cvc::ariadne::LoadResult r = fresh_load(kSameWorld);
   CHECK(r.ok);
   if (!r.ok)
     return;
@@ -318,6 +331,7 @@ void test_same_world_headless_and_drawn() {
 
   // Drawn: realized over a SceneGraph, stepped by tick_scene.
   cvc::app drawn_app;
+  ari::register_world_node_types(drawn_app);
   SceneGraph sg(drawn_app);
   std::vector<std::string> drawn_warnings;
   ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &drawn_warnings);
@@ -394,14 +408,14 @@ void test_same_generated_world_headless_and_drawn() {
     std::printf("  skipped: no YAML in this build\n");
     return;
   }
-  ari::register_world_node_types();
-  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(kGeneratedWorld);
+  cvc::ariadne::LoadResult r = fresh_load(kGeneratedWorld);
   CHECK(r.ok);
   if (!r.ok)
     return;
   constexpr int kFrames = 300; // five seconds: the ball falls and lands
 
   cvc::app drawn_app;
+  ari::register_world_node_types(drawn_app);
   SceneGraph sg(drawn_app);
   std::vector<std::string> drawn_warnings;
   ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &drawn_warnings);
@@ -467,7 +481,7 @@ void test_restart_drawn_world() {
     std::printf("  skipped: no YAML in this build\n");
     return;
   }
-  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(kSameWorld);
+  cvc::ariadne::LoadResult r = fresh_load(kSameWorld);
   CHECK(r.ok);
   if (!r.ok)
     return;
@@ -510,7 +524,7 @@ void test_worlds_drawn() {
     std::printf("  skipped: no YAML in this build\n");
     return;
   }
-  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(R"(
+  cvc::ariadne::LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   physics: {}
@@ -574,6 +588,7 @@ scene:
 // The world's vehicles drawn (L2): each spawned entity a node bound to its chassis, gone when it
 // is removed; and a vehicle_preview node draws the selected archetype on its own scene.
 void test_vehicles_drawn() {
+  cvc::app app;
   std::printf("test_vehicles_drawn\n");
   if (!cvc::ariadne::have_yaml()) {
     std::printf("  skipped: no YAML in this build\n");
@@ -583,8 +598,8 @@ void test_vehicles_drawn() {
     std::printf("  skipped: no Jolt in this build\n");
     return;
   }
-  cvc::ariadne::register_world_block();
-  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(R"(
+  cvc::ariadne::register_world_block(app);
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(app, R"(
 meta: { min_libcvc: "0.0.0" }
 world:
   vehicles:
@@ -611,7 +626,6 @@ scene:
   CHECK(cvc::ariadne::parse_world_block(*cvc::ariadne::find_world_block(r), rules).empty());
   r.scene.vehicles = rules.vehicles;
   r.scene.spawns = rules.spawns;
-  cvc::app app;
   SceneGraph sg(app);
   std::vector<std::string> warnings;
   ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &warnings);
@@ -659,8 +673,8 @@ scene:
   CHECK(out.spawn_markers.size() == 2);
 
   // The preview: the selected archetype on a scene of its own, rebuilt when the pick changes.
-  ari::register_vehicle_preview_node();
-  cvc::ariadne::LoadResult studio = cvc::ariadne::load_string(R"(
+  ari::register_vehicle_preview_node(app);
+  cvc::ariadne::LoadResult studio = cvc::ariadne::load_string(app, R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -684,6 +698,131 @@ scene:
     CHECK(second->getTransform()->GetElement(2, 3) < 0.3);
 }
 
+// Entity intents (S1), scripted on the keys at fixed frames: an external entity driven by its
+// intent, a nav@1 one with a force on its drive and then a blend, run headless (SceneWorld on its
+// clock) and drawn (realize_scene + tick_scene, as arigl --offscreen steps it), reach the same
+// state, bit for bit.
+const char *kIntentWorld = R"(
+meta: { min_libcvc: "0.0.0" }
+world:
+  vehicles:
+    archetypes:
+      humvee: { vehicle: humvee, controllers: [nav@1, external] }
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [120, 120, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+
+// The script both runs follow: what is written at which frame.
+void intent_script(cvc::state &st, int frame) {
+  switch (frame) {
+  case 1:
+    st("vehicles.spawn.controller").value("external");
+    st("vehicles.spawn.at").value("-30,0,0");
+    st("vehicles.spawn.request").value("1");
+    break;
+  case 2:
+    st("vehicles.spawn.controller").value("nav@1");
+    st("vehicles.spawn.at").value("20,-20,90");
+    st("vehicles.spawn.request").value("2");
+    break;
+  case 30:
+    st("entities.1.intent.accel").value("2");
+    st("entities.2.force.x").value("-2");
+    st("entities.2.force.y").value("1.5");
+    break;
+  case 120:
+    st("entities.1.intent.steer").value("0.25");
+    st("entities.2.intent.mode").value("blend");
+    st("entities.2.intent.steer").value("-0.2");
+    st("entities.2.intent.accel").value("0.5");
+    st("entities.2.intent.weight").value("0.4");
+    break;
+  case 200:
+    st("entities.1.intent.mode").value("off");
+    break;
+  default:
+    break;
+  }
+}
+
+void test_vehicle_intents_headless_and_drawn() {
+  std::printf("test_vehicle_intents_headless_and_drawn\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt)) {
+    std::printf("  skipped: no Jolt in this build\n");
+    return;
+  }
+  const auto load = [](cvc::app &app) {
+    cvc::ariadne::register_world_block(app);
+    cvc::ariadne::LoadResult r = cvc::ariadne::load_string(app, kIntentWorld);
+    if (r.ok) {
+      cvc::ariadne::world_rules rules = cvc::ariadne::default_world_rules();
+      CHECK(cvc::ariadne::parse_world_block(*cvc::ariadne::find_world_block(r), rules).empty());
+      r.scene.vehicles = rules.vehicles;
+    }
+    return r;
+  };
+  constexpr int kFrames = 300; // five seconds at 60 frames per second
+
+  cvc::app drawn_app;
+  cvc::ariadne::LoadResult r = load(drawn_app);
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  SceneGraph sg(drawn_app);
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &warnings);
+  CHECK(out.world != nullptr && out.world->vehicles() != nullptr);
+  if (!out.world || !out.world->vehicles())
+    return;
+  cvc::state &dst = cvc::state::instance(drawn_app);
+  for (int i = 0; i < kFrames; ++i) {
+    intent_script(dst, i);
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  }
+
+  cvc::app headless_app;
+  std::unique_ptr<cvc::ariadne::SceneWorld> world =
+      cvc::ariadne::SceneWorld::from_scene(headless_app, r.scene, "", "physics", &warnings);
+  CHECK(world != nullptr && world->vehicles() != nullptr);
+  if (!world || !world->vehicles())
+    return;
+  cvc::state &hst = cvc::state::instance(headless_app);
+  cvc::ariadne::SceneClockDriver clock(headless_app, r.scene.clock);
+  for (int i = 0; i < kFrames; ++i) {
+    intent_script(hst, i);
+    clock.drive(1.0 / 60.0);
+    world->follow(headless_app.world_clock());
+  }
+
+  CHECK(world->vehicles()->size() == 2 && out.world->vehicles()->size() == 2);
+  CHECK(world->world().tick() == out.physics->tick());
+  const std::uint64_t drawn_hash = out.physics->state_hash();
+  const std::uint64_t headless_hash = world->world().state_hash();
+  if (drawn_hash != headless_hash)
+    std::printf("  drawn %016llx, headless %016llx\n", static_cast<unsigned long long>(drawn_hash),
+                static_cast<unsigned long long>(headless_hash));
+  CHECK(drawn_hash == headless_hash);
+  // The intents did their work: the external entity drove off and stopped, the nav@1 one blends.
+  if (world->vehicles()->size() == 2) {
+    const cvc::ariadne::entity_info e = world->vehicles()->entities()[0];
+    CHECK(e.x > -25.0);
+    CHECK(std::fabs(e.speed) < 2.0);
+    CHECK(hst("entities.2.command.by").value() == "blend");
+    CHECK(dst("entities.2.command.by").value() == "blend");
+  }
+}
+
 int main() {
   test_crate_lands_on_the_drawn_ground();
   test_null_backend_places_and_holds();
@@ -693,6 +832,7 @@ int main() {
   test_restart_drawn_world();
   test_worlds_drawn();
   test_vehicles_drawn();
+  test_vehicle_intents_headless_and_drawn();
   if (g_failures) {
     std::printf("cvcgl_ariadne_physics: %d FAILURE(S)\n", g_failures);
     return 1;

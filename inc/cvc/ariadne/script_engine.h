@@ -96,13 +96,14 @@ public:
   virtual void unload(ScriptLane &lane) { (void)lane; }
 };
 
-// Register `engine` for this process, by its language, replacing any engine of that language.
-// A host does it once its interpreter is up, and unregisters before the interpreter goes.
-void register_script_engine(std::shared_ptr<ScriptEngine> engine);
-// Unregister `language`'s engine; its tokens stop holding. Runtimes that use it keep it.
-void unregister_script_engine(const std::string &language);
-// The engine registered for `language`, or null.
-std::shared_ptr<ScriptEngine> find_script_engine(const std::string &language);
+// Register `engine` on `app`, by its language, replacing any engine of that language there (and
+// registering the language's .ari block on `app`). A host does it once its interpreter is up, and
+// unregisters before the interpreter goes. Documents on another app don't see it.
+void register_script_engine(cvc::app &app, std::shared_ptr<ScriptEngine> engine);
+// Unregister `app`'s engine for `language`; its tokens stop holding. Runtimes that use it keep it.
+void unregister_script_engine(cvc::app &app, const std::string &language);
+// The engine `app` has for `language`, or null.
+std::shared_ptr<ScriptEngine> find_script_engine(cvc::app &app, const std::string &language);
 
 // ── activations ─────────────────────────────────────────────────────────────────────────────────
 
@@ -153,6 +154,11 @@ public:
   // here.
   bool call_now(const std::string &function, std::span<const cvc::state_exec::value_t> args);
 
+  // The context of the evaluator step the slice runs in (cvc::state_exec::exec_context): what an
+  // allocation the slice makes is checked against (eval_alloc_check), and what call_now's
+  // function gets. Null outside a step.
+  cvc::state_exec::exec_context *context() const { return ctx_; }
+
   // Whether the activation may wait: give a frame back, park on a future, or wait its turn for
   // something another activation holds. False for a pure export called from the read lane
   // (ScriptLane::export_pure), which runs to its end inside the expression that called it: an
@@ -168,6 +174,7 @@ private:
   // sliced call's, the calling program's), and its narrowing.
   cvc::state_exec::environment *env_ = nullptr;
   const std::function<bool(const std::string &)> *may_call_ = nullptr;
+  cvc::state_exec::exec_context *ctx_ = nullptr;
   std::uint64_t budget_ = 0;
   bool replied_ = false;
   cvc::state_exec::value_t reply_;

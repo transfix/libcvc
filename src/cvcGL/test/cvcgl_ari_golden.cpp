@@ -71,7 +71,9 @@ const double kBackground[3] = {0.09, 0.10, 0.12};
 // So +-40 a channel, with at most 0.002% of the pixels (13) beyond it, holds across Mesa versions
 // and GPUs and still fails a one-step value change or a widget moved by a pixel. macOS CI's Apple
 // Software Renderer left 3-6 px beyond 40 on windows / menus / grid but 40 on widgets and 467 on
-// scene (edges and shading), so those two have macOS goldens (<name>.macos.png) instead.
+// scene (edges and shading), so those two have macOS goldens (<name>.macos.png) instead. With the
+// window chrome's close and maximize glyphs it leaves 7 / 12 on menus / windows but 15 on grid,
+// so grid has one too.
 const Tolerance kTolerance{40, 0.00002};
 
 // A scripted pointer for documents whose interesting state needs one (an open menu, a tooltip).
@@ -93,7 +95,7 @@ const GoldenCase kCases[] = {
     {"menus",
      {{1, 22.0f, 10.0f, -1, false}, {2, 22.0f, 10.0f, 0, true}, {3, 22.0f, 10.0f, 0, false}}},
     // Rest over the "Reset" button: its tooltip shows (no hover delay on the backend's tooltips).
-    {"widgets", {{1, 52.0f, 369.0f, -1, false}}},
+    {"widgets", {{1, 52.0f, 391.0f, -1, false}}}, // under the Windows menu bar (§5.9)
 };
 
 const GoldenCase *findCase(const std::string &name) {
@@ -234,7 +236,7 @@ void injectPointer(cvc::gl::ImGuiOverlay &ui, const GoldenCase *gc, int frame) {
 
 // False when the overlay cannot draw on this GL context at all (the caller stops: a skip).
 bool runDocument(const fs::path &doc, const fs::path &goldenDir, const fs::path &outDir,
-                 bool update) {
+                 const fs::path &font, bool update) {
   const std::string name = doc.stem().string();
   std::printf("== %s\n", name.c_str());
   const GoldenCase *gc = findCase(name);
@@ -244,6 +246,10 @@ bool runDocument(const fs::path &doc, const fs::path &goldenDir, const fs::path 
       frames = std::max(frames, s.frame + 3);
 
   cvc::app app;
+  cvc::gl::ImGuiOverlay::setUiFontPath(app, font.string()); // before the overlay is constructed
+  // stb_truetype and the pinned font alone, as the goldens were drawn: FreeType hints and
+  // antialiases differently, and the fallback fonts would add glyphs a machine has or lacks.
+  cvc::gl::ImGuiOverlay::setUiFontFallbacks(app, false);
   cvc::gl::SceneGraph sg(app, "golden");
   sg.setDiagnosticChromeVisible(false);
   cvc::gl::SceneRenderer view(sg, kWidth, kHeight, /*offscreen=*/true, "main");
@@ -396,10 +402,6 @@ int main(int argc, char **argv) {
   const fs::path font = goldenDir / "fonts" / "LiberationSans-Regular.ttf";
   if (!check(fs::exists(font), "the pinned UI font is present", font.string()))
     return cvcgl_test::finish("cvcgl_ari_golden");
-  cvc::gl::ImGuiOverlay::setUiFontPath(font.string()); // before any overlay is constructed
-  // stb_truetype and the pinned font alone, as the goldens were drawn: FreeType hints and
-  // antialiases differently, and the fallback fonts would add glyphs a machine has or lacks.
-  cvc::gl::ImGuiOverlay::setUiFontFallbacks(false);
 
   {
     cvc::app probe;
@@ -421,7 +423,7 @@ int main(int argc, char **argv) {
   for (const fs::path &doc : docs) {
     if (!only.empty() && std::find(only.begin(), only.end(), doc.stem().string()) == only.end())
       continue;
-    if (!runDocument(doc, goldenDir, outDir, update))
+    if (!runDocument(doc, goldenDir, outDir, font, update))
       return skip("the ImGui overlay could not initialise its OpenGL backend on this context "
                   "(e.g. VTK's EGL fallback with no X display)");
   }

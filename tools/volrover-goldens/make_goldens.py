@@ -43,7 +43,10 @@ VOLROVER_URL = "https://github.com/transfix/volrover.git"
 # What each library needs of the legacy tree (a sparse checkout).
 SPARSE = {
     "genseg": ["src/Segmentation/GenSeg", "inc/Segmentation/GenSeg", "LICENSE", "COPYING"],
+    "skeleton": ["src/Skeletonization", "inc/Skeletonization", "LICENSE", "COPYING"],
 }
+# The executable each library's legacy build makes (CMakeLists.txt).
+TARGETS = {"genseg": "genseg_legacy", "skeleton": "skeleton_legacy"}
 
 
 def pinned_sha():
@@ -91,19 +94,27 @@ def fetch(sha, work, libs):
     return dst
 
 
-def build(volrover, work):
+def build(volrover, work, libs):
+    """Build each library's legacy executable; their paths by library. Skeletonization needs
+    CGAL, GMP, MPFR and Boost where CMake finds them (CMAKE_PREFIX_PATH)."""
     bdir = os.path.join(work, "build")
     cmd = ["cmake", "-S", HERE, "-B", bdir, "-DCMAKE_BUILD_TYPE=Release",
            "-DVOLROVER_DIR=" + volrover]
     if shutil.which("ninja") and not os.environ.get("CMAKE_GENERATOR"):
         cmd += ["-G", "Ninja"]
     run(cmd, quiet=True)
-    run(["cmake", "--build", bdir, "--config", "Release", "--target", "genseg_legacy"], quiet=True)
-    for cand in (os.path.join(bdir, "genseg_legacy"), os.path.join(bdir, "genseg_legacy.exe"),
-                 os.path.join(bdir, "Release", "genseg_legacy.exe")):
-        if os.path.exists(cand):
-            return cand
-    raise SystemExit("genseg_legacy was not built in " + bdir)
+    exes = {}
+    for lib in libs:
+        target = TARGETS[lib]
+        run(["cmake", "--build", bdir, "--config", "Release", "--target", target], quiet=True)
+        for cand in (os.path.join(bdir, target), os.path.join(bdir, target + ".exe"),
+                     os.path.join(bdir, "Release", target + ".exe")):
+            if os.path.exists(cand):
+                exes[lib] = cand
+                break
+        else:
+            raise SystemExit(target + " was not built in " + bdir)
+    return exes
 
 
 def sha256(path):
@@ -173,6 +184,30 @@ def genseg_case(exe, inputs_dir, case, out_dir):
     return meta, counts
 
 
+def skeleton_case(exe, inputs_dir, case, out_dir):
+    """Run the legacy Skeletonization on inputs/skeleton/<case>.pts; write <case>.skel.txt (what
+    skeleton_driver.cpp writes) and return the case's metadata and its counts. It runs in a
+    scratch directory: the legacy code writes debug files to the current one."""
+    with open(os.path.join(inputs_dir, case + ".json")) as f:
+        meta = json.load(f)
+    args = ["%s=%s" % (k, v) for k, v in sorted(meta.get("parameters", {}).items())]
+    with tempfile.TemporaryDirectory(prefix="skeleton-") as tmp:
+        shutil.copy(os.path.join(inputs_dir, case + ".pts"), os.path.join(tmp, "in.pts"))
+        run([exe, "in.pts", "out.txt"] + args, cwd=tmp, quiet=True)
+        with open(os.path.join(tmp, "out.txt"), "rb") as f:
+            text = f.read().replace(b"\r\n", b"\n")
+        debug = sorted(n for n in os.listdir(tmp) if n not in ("in.pts", "out.txt"))
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, case + ".skel.txt"), "wb") as f:
+        f.write(text)
+    counts = {}
+    for line in text.decode().splitlines():
+        counts[line[0]] = counts.get(line[0], 0) + 1
+    return meta, {"stars": counts.get("S", 0), "polyline_segments": counts.get("L", 0),
+                  "helix_strips": counts.get("H", 0), "polygons": counts.get("P", 0),
+                  "debug_files": debug}
+
+
 def describe_platform():
     return "%s %s, %s, Python %s" % (platform.system(), platform.machine(),
                                     platform.platform(terse=True), platform.python_version())
@@ -187,63 +222,99 @@ def main():
                                                    "volrover-goldens"))
     ap.add_argument("--check", action="store_true",
                     help="make the goldens in a scratch directory and compare them with --out")
+    ap.add_argument("--libs", default="genseg,skeleton",
+                    help="the libraries, comma-separated (genseg, skeleton; skeleton needs CGAL)")
     args = ap.parse_args()
 
     sha = pinned_sha()
-    libs = ["genseg"]
+    libs = [lib for lib in args.libs.split(",") if lib]
+    for lib in libs:
+        if lib not in SPARSE:
+            raise SystemExit("no such library: " + lib)
     work = os.path.abspath(args.work)
     os.makedirs(work, exist_ok=True)
     volrover = os.path.abspath(args.volrover) if args.volrover else fetch(sha, work, libs)
-    exe = build(volrover, work)
+    exes = build(volrover, work, libs)
 
     target = os.path.join(work, "check") if args.check else args.out
     if args.check and os.path.exists(target):
         shutil.rmtree(target)
-    inputs_dir = os.path.join(HERE, "inputs", "genseg")
-    out_dir = os.path.join(target, "genseg")
-    cases = sorted(f[:-5] for f in os.listdir(inputs_dir) if f.endswith(".json"))
-    for case in cases:
-        meta, counts = genseg_case(exe, inputs_dir, case, out_dir)
-        golden = {
-            "library": "GenSeg",
-            "volrover": sha,
-            "case": case,
-            "input": "tools/volrover-goldens/inputs/genseg/%s.raw" % case,
-            "input_sha256": sha256(os.path.join(inputs_dir, case + ".raw")),
-            "dims": meta["dims"],
-            "tlow": meta["tlow"],
-            "thigh": meta["thigh"],
-            "seeds": meta["seeds"],
-            "class_voxels": counts,
-            "labels_sha256": sha256(os.path.join(out_dir, case + ".labels.u8")),
-            "indices_sha256": sha256(os.path.join(out_dir, case + ".indices.txt")),
-            "made_by": "tools/volrover-goldens/make_goldens.py",
-            "platform": describe_platform(),
-        }
-        with open(os.path.join(out_dir, case + ".json"), "w", newline="\n") as f:
-            json.dump(golden, f, indent=2)
-            f.write("\n")
-        print("GenSeg %s: classes %s, %d voxels unlabelled" %
-              (case, counts, golden["dims"][0] * golden["dims"][1] * golden["dims"][2] -
-               sum(counts)))
+    compared = []  # (library dir, file name) pairs --check compares
+
+    if "genseg" in libs:
+        exe = exes["genseg"]
+        inputs_dir = os.path.join(HERE, "inputs", "genseg")
+        out_dir = os.path.join(target, "genseg")
+        cases = sorted(f[:-5] for f in os.listdir(inputs_dir) if f.endswith(".json"))
+        for case in cases:
+            meta, counts = genseg_case(exe, inputs_dir, case, out_dir)
+            golden = {
+                "library": "GenSeg",
+                "volrover": sha,
+                "case": case,
+                "input": "tools/volrover-goldens/inputs/genseg/%s.raw" % case,
+                "input_sha256": sha256(os.path.join(inputs_dir, case + ".raw")),
+                "dims": meta["dims"],
+                "tlow": meta["tlow"],
+                "thigh": meta["thigh"],
+                "seeds": meta["seeds"],
+                "class_voxels": counts,
+                "labels_sha256": sha256(os.path.join(out_dir, case + ".labels.u8")),
+                "indices_sha256": sha256(os.path.join(out_dir, case + ".indices.txt")),
+                "made_by": "tools/volrover-goldens/make_goldens.py",
+                "platform": describe_platform(),
+            }
+            with open(os.path.join(out_dir, case + ".json"), "w", newline="\n") as f:
+                json.dump(golden, f, indent=2)
+                f.write("\n")
+            print("GenSeg %s: classes %s, %d voxels unlabelled" %
+                  (case, counts, golden["dims"][0] * golden["dims"][1] * golden["dims"][2] -
+                   sum(counts)))
+            compared.append(("genseg", case + ".labels.u8"))
+            compared.append(("genseg", case + ".indices.txt"))
+
+    if "skeleton" in libs:
+        inputs_dir = os.path.join(HERE, "inputs", "skeleton")
+        out_dir = os.path.join(target, "skeleton")
+        for case in sorted(f[:-5] for f in os.listdir(inputs_dir) if f.endswith(".json")):
+            meta, counts = skeleton_case(exes["skeleton"], inputs_dir, case, out_dir)
+            golden = {
+                "library": "Skeletonization",
+                "volrover": sha,
+                "case": case,
+                "input": "tools/volrover-goldens/inputs/skeleton/%s.pts" % case,
+                "input_sha256": sha256(os.path.join(inputs_dir, case + ".pts")),
+                "points": meta["points"],
+                "general_position": meta["general_position"],
+                "parameters": meta.get("parameters", {}),
+                "counts": counts,
+                "skel_sha256": sha256(os.path.join(out_dir, case + ".skel.txt")),
+                "made_by": "tools/volrover-goldens/make_goldens.py",
+                "platform": describe_platform(),
+            }
+            with open(os.path.join(out_dir, case + ".json"), "w", newline="\n") as f:
+                json.dump(golden, f, indent=2)
+                f.write("\n")
+            compared.append(("skeleton", case + ".skel.txt"))
+            print("Skeletonization %s: %d polyline segments, %d stars, %d polygons, %d helix "
+                  "strips" % (case, counts["polyline_segments"], counts["stars"],
+                              counts["polygons"], counts["helix_strips"]))
 
     if args.check:
         bad = []
-        for case in cases:
-            for ext in (".labels.u8", ".indices.txt"):
-                made = os.path.join(out_dir, case + ext)
-                kept = os.path.join(args.out, "genseg", case + ext)
-                if not os.path.exists(kept):
-                    bad.append("%s%s: not committed" % (case, ext))
-                elif sha256(made) != sha256(kept):
-                    bad.append("%s%s: differs from the committed golden" % (case, ext))
+        for lib_dir, name in compared:
+            made = os.path.join(target, lib_dir, name)
+            kept = os.path.join(args.out, lib_dir, name)
+            if not os.path.exists(kept):
+                bad.append("%s/%s: not committed" % (lib_dir, name))
+            elif sha256(made) != sha256(kept):
+                bad.append("%s/%s: differs from the committed golden" % (lib_dir, name))
         if bad:
             print("\n".join(bad))
-            print("The made goldens are in", out_dir)
+            print("The made goldens are in", target)
             return 1
-        print("the goldens match (%d GenSeg cases)" % len(cases))
+        print("the goldens match (%d files: %s)" % (len(compared), ", ".join(libs)))
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

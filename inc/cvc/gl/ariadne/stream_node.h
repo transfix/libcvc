@@ -13,8 +13,8 @@
 
 // Phase-2 PR7: the cvcGL stream SINK as a DECLARATIVE scene-node type. Opt-in, exactly
 // like the other register_scene_node_type consumers: a host/test/demo calls
-// register_stream_node_type() ONCE (before a scene is loaded/realized) to make the
-// "stream" node type available. A document then declares, e.g.
+// register_stream_node_type(app) ONCE per app (before a scene is loaded/realized) to make the
+// "stream" node type available on that app. A document then declares, e.g.
 //
 //   { "id": "screen", "type": "stream", "stream": "<token>", "width": 1.6, "height": 0.9 }
 //
@@ -25,6 +25,10 @@
 // binding's single-thread contract requires its tick()/dtor to run). The binding is
 // owned by the RealizedScene (its custom_ticks closure), so it is torn down — and
 // unsubscribes — with the scene, on the render thread.
+//
+// A raster stream (codec rgba8.patch, cvc/ariadne/stream/raster.h), or a raster's mirror in state
+// named by the token, goes through LiveTextureBinding instead (a rectangle at a time; it subscribes
+// on its first tick and catches up from the raster's frames in state).
 //
 // It NEVER opens a stream ((stream-open) does that) and owns NO producer (device capture
 // is Phase 3). The token is the canonical key (stream-open) returns in its handle dict,
@@ -54,13 +58,14 @@
 // (env, ictx only) does not provide.
 
 namespace cvc {
+class app;
 namespace gl {
 namespace ariadne {
 
-// Register the "stream" scene-node type. Idempotent (a no-op if already registered) and,
-// like register_scene_node_type itself, process-global and thread-safe; call it before
-// realize_scene() / document load so verify_scene_customs() sees the type.
-void register_stream_node_type();
+// Register the "stream" scene-node type on `app`. Idempotent (a no-op if already registered)
+// and, like register_scene_node_type itself, thread-safe; call it before realize_scene() /
+// document load so verify_scene_customs() sees the type.
+void register_stream_node_type(cvc::app &app);
 
 } // namespace ariadne
 } // namespace gl

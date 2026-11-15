@@ -27,7 +27,7 @@
 #include <cvc/ariadne/stream_intrinsics.h> // register_stream_intrinsics
 #include <cvc/core/app.h>
 #include <cvc/gl/ariadne/media_verbs.h> // register_media_intrinsics (this PR)
-#include <cvc/gl/jpeg_codec.h>          // decode_jpeg_to_rgba
+#include <cvc/gl/jpeg_codec.h>          // jpeg_decoder
 #include <cvc/state/state.h>
 #include <memory>
 #include <string>
@@ -153,9 +153,8 @@ int main() {
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
     std::vector<std::uint8_t> rgba;
     int w = 0, h = 0;
-    assert(f &&
-           cvc::gl::decode_jpeg_to_rgba(static_cast<const std::uint8_t *>(f->data), f->size, rgba,
-                                        w, h) &&
+    cvc::gl::jpeg_decoder decoder;
+    assert(f && decoder.decode(static_cast<const std::uint8_t *>(f->data), f->size, rgba, w, h) &&
            "the portrait capture published a decodable JPEG");
     std::printf("portrait capture in a 320x240 stream: %dx%d\n", w, h);
     assert(w == 180 && h == 320 && "the JPEG carries the frame's own shape");

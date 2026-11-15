@@ -33,8 +33,12 @@
 // pattern). The GPU ocean evolves and draws h0 as it comes; the physics band will evolve the same
 // numbers on the CPU, so the two agree by construction.
 //
-// h0(k) = g(k) sqrt(S(k)) dk x amplitude inside the band and 0 outside it, with g a unit complex
-// Gaussian pair from the seed, S the spectrum (spectrum.h) and dk = 2 pi / tile. Deterministic: the
+// h0(k) = g(k) sqrt(S(k)) dk / 2 x amplitude inside the band and 0 outside it, with g a unit
+// complex Gaussian pair from the seed (E|g|^2 = 2), S the spectrum (spectrum.h) and dk = 2 pi /
+// tile. The surface over k is h0(k) e^(i omega t) + conj h0(-k) e^(-i omega t), so its variance is
+// the sum over k of E|h0(k)|^2 + E|h0(-k)|^2 = S(k) dk^2: the cascades' sea has the spectrum's m0,
+// and the wind sea's significant height (OCEAN-AND-WEATHER-ROADMAP.md, "The sea's height for its
+// wind"; until then h0 was twice this, and the sea twice its height). Deterministic: the
 // same inputs give the same bits in every run and on every platform, since the spectrum and the
 // Gaussians call cvc/algo/det_math.h rather than libm and are built without FMA contraction. The
 // physics band (the roadmap's B2, O6) folds them into its state_hash, which needs that.

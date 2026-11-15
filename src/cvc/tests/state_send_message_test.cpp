@@ -22,7 +22,9 @@
 #include <cvc/state/state_message_bus.h>
 #include <cvc/state/state_transport_inproc.h>
 #include <gtest/gtest.h>
+#include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -181,6 +183,86 @@ TEST(StateSendMessage, CrossClusterDeliversViaTransport) {
   EXPECT_EQ(sinkB.messages[0].path, "chat.lobby");
   EXPECT_EQ(sinkB.messages[0].cluster_id, "alpha");
   EXPECT_EQ(sinkB.messages[0].origin_node_id, "A");
+}
+
+// The default shard is each app's own: two apps, in both orders, each find theirs; a later app
+// (made after another is gone, perhaps at the same address) starts with none.
+TEST(StateSendMessage, DefaultShardIsPerApp) {
+  for (int order = 0; order < 2; ++order) {
+    cvc::app a, b;
+    cvc::state_cluster_shard sA(a, "alpha", "A");
+    cvc::state_cluster_shard sB(b, "alpha", "B");
+    if (order == 0) {
+      sA.attach();
+      EXPECT_EQ(cvc::state_cluster_shard::default_for(b), nullptr);
+      sB.attach();
+    } else {
+      sB.attach();
+      EXPECT_EQ(cvc::state_cluster_shard::default_for(a), nullptr);
+      sA.attach();
+    }
+    EXPECT_EQ(cvc::state_cluster_shard::default_for(a), &sA);
+    EXPECT_EQ(cvc::state_cluster_shard::default_for(b), &sB);
+    sA.detach();
+    EXPECT_EQ(cvc::state_cluster_shard::default_for(a), nullptr);
+    EXPECT_EQ(cvc::state_cluster_shard::default_for(b), &sB);
+  }
+  for (int round = 0; round < 3; ++round) {
+    auto app = std::make_unique<cvc::app>();
+    EXPECT_EQ(cvc::state_cluster_shard::default_for(*app), nullptr) << "round " << round;
+    cvc::state_cluster_shard s(*app, "alpha", "N");
+    s.attach(); // destroyed attached, before its app
+  }
+}
+
+TEST(StateSendMessage, DefaultShardAppsOnThreadsAtOnce) {
+  constexpr int kApps = 4;
+  std::vector<std::string> seen(kApps);
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kApps; ++i)
+    threads.emplace_back([i, &seen] {
+      cvc::app app;
+      cvc::state_cluster_shard shard(app, "alpha", "node_" + std::to_string(i));
+      shard.attach();
+      collected sink;
+      shard.message_bus().subscribe("chat", std::ref(sink));
+      auto r = cvc::state::instance(app)("chat.lobby").sendMessage("hi");
+      seen[i] = cvc::state_cluster_shard::default_for(app)->local_node_id() + " " +
+                std::to_string(r.local_admitted) + " " +
+                (sink.messages.empty() ? std::string("none") : sink.messages[0].origin_node_id);
+    });
+  for (std::thread &t : threads)
+    t.join();
+  for (int i = 0; i < kApps; ++i) {
+    const std::string node = "node_" + std::to_string(i);
+    EXPECT_EQ(seen[i], node + " 1 " + node);
+  }
+}
+
+// A shard's message ids carry a random tag of its own, so a shard made again under the same node
+// id repeats none, and a peer's bus (which drops an id it has seen from that origin) takes the
+// new shard's messages.
+TEST(StateSendMessage, MessageIdsSurviveAShardMadeAgain) {
+  cvc::app a, b;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sB(b, "alpha", "B");
+  sB.attach();
+  t.register_shard(&sB);
+  sB.set_transport(&t);
+  collected sinkB;
+  sB.message_bus().subscribe("chat", std::ref(sinkB));
+
+  for (int round = 0; round < 2; ++round) {
+    cvc::state_cluster_shard sA(a, "alpha", "A");
+    sA.attach();
+    t.register_shard(&sA);
+    sA.set_transport(&t);
+    cvc::state::instance(a)("chat.lobby").sendMessage("round " + std::to_string(round));
+    t.unregister_shard(&sA);
+  }
+  ASSERT_EQ(sinkB.messages.size(), 2u) << "the second shard's first message was dropped";
+  EXPECT_NE(sinkB.messages[0].message_id, sinkB.messages[1].message_id);
+  EXPECT_EQ(sinkB.messages[1].string_value, "round 1");
 }
 
 TEST(StateSendMessage, DefaultShardIsFirstWriterWins) {

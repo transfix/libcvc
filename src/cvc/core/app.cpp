@@ -77,6 +77,7 @@
 #include <queue>
 #include <set>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 namespace cvc {
@@ -302,7 +303,7 @@ app::~app() {
   // The exec pool first (S1.7, td 4.17): every group's owner has destroyed its groups by now, so no
   // pump_all runs, and its workers stop before the async host shuts down and the background pool,
   // which their groups' kernels ran on, closes.
-  assert(cvc::state_exec::detail::live_groups(this) == 0 && "an exec_group outlived its app");
+  assert(cvc::state_exec::detail::live_groups(*this) == 0 && "an exec_group outlived its app");
   _execPool.reset();
 
   // Async calls next: their kernels run on the background pool and post to the exec scheduler,
@@ -1137,30 +1138,37 @@ cvc::thread_pool &app::computePool() {
   return *_computePool;
 }
 
-namespace {
-
-// app::poolDropReason() on this thread: set by a pool_drop_scope while the pool destroys tasks
-// unrun here, null otherwise.
-thread_local const char *t_poolDropReason = nullptr;
-
-// Holds this thread's drop reason while the pool destroys tasks unrun, and puts back the one
-// before (a dropped task's destructor may lead to other drops: the call it ends, a callback).
-class pool_drop_scope {
-  const char *_previous;
+// Holds this app's drop reason on the calling thread while its pool destroys tasks unrun there,
+// and then the one before (a dropped task's destructor may lead to other drops: the call it ends,
+// a callback). Kept by the app, by thread: another app's drop on this thread is its own.
+class app::PoolDropScope {
+  app &_app;
 
 public:
-  explicit pool_drop_scope(const char *why) noexcept : _previous(t_poolDropReason) {
-    t_poolDropReason = why;
+  PoolDropScope(app &a, const char *why) : _app(a) {
+    std::lock_guard<std::mutex> lock(_app._poolDropMutex);
+    _app._poolDrops.emplace_back(std::this_thread::get_id(), why);
   }
-  ~pool_drop_scope() { t_poolDropReason = _previous; }
-  pool_drop_scope(const pool_drop_scope &) = delete;
-  pool_drop_scope &operator=(const pool_drop_scope &) = delete;
+  ~PoolDropScope() {
+    const std::thread::id self = std::this_thread::get_id();
+    std::lock_guard<std::mutex> lock(_app._poolDropMutex);
+    for (auto it = _app._poolDrops.end(); it != _app._poolDrops.begin();)
+      if ((--it)->first == self) {
+        _app._poolDrops.erase(it); // this thread's latest: scopes nest
+        return;
+      }
+  }
+  PoolDropScope(const PoolDropScope &) = delete;
+  PoolDropScope &operator=(const PoolDropScope &) = delete;
 };
 
-} // namespace
-
-const char *app::poolDropReason() noexcept {
-  return t_poolDropReason ? t_poolDropReason : kPoolStopped;
+const char *app::poolDropReason() const noexcept {
+  const std::thread::id self = std::this_thread::get_id();
+  std::lock_guard<std::mutex> lock(_poolDropMutex);
+  for (auto it = _poolDrops.rbegin(); it != _poolDrops.rend(); ++it)
+    if (it->first == self)
+      return it->second;
+  return kPoolStopped;
 }
 
 namespace {
@@ -1202,7 +1210,7 @@ struct compute_job {
     // thrown inside on_error and dropped by the catch below.
     boost::this_thread::disable_interruption keep_interrupt_pending;
     try {
-      on_error(app::poolDropReason());
+      on_error(owner.poolDropReason());
     } catch (...) {
     }
   }
@@ -1292,19 +1300,17 @@ std::string setting_text(cvc::state &root, const char *path) {
   return node ? const_cast<cvc::state *>(node)->value() : std::string();
 }
 
-// CVC_EXEC_THREADS (td 4.13, S1.6; read once): overrides the tree's state_exec.threads, for the
-// pool's size and the lock mode's auto alike, so whole suites run threaded unchanged (AR-1).
-const std::optional<std::string> &exec_threads_knob() {
-  static const std::optional<std::string> v = []() -> std::optional<std::string> {
-    const char *e = std::getenv("CVC_EXEC_THREADS");
-    return e ? std::optional<std::string>(e) : std::nullopt;
-  }();
-  return v;
+// CVC_EXEC_THREADS (td 4.13, S1.6): overrides the tree's state_exec.threads, for the pool's size
+// and the lock mode's auto alike, so whole suites run threaded unchanged (AR-1). Read where the
+// pool or the lock manager is built (once per app), so nothing of it is kept.
+std::optional<std::string> exec_threads_knob() {
+  const char *e = std::getenv("CVC_EXEC_THREADS");
+  return e ? std::optional<std::string>(e) : std::nullopt;
 }
 
 // state_exec.threads: CVC_EXEC_THREADS when set, else the tree's.
 std::string exec_threads_text(cvc::state &root) {
-  if (const std::optional<std::string> &knob = exec_threads_knob())
+  if (const std::optional<std::string> knob = exec_threads_knob())
     return *knob;
   return setting_text(root, "state_exec.threads");
 }
@@ -1322,12 +1328,12 @@ bool exec_threads_above_zero(cvc::state &root) {
 
 // The app lock manager's mode (docs/STATE_EXEC_LOCKS.md 8.3, 14.2 Q4): state_exec.locks.threading
 // single or shared as it says; auto (the default) is shared when the build has threads and either
-// state_exec.threads is above 0 or a threaded host (pycvc, at import) announced itself, else
-// single. `pool_threads`: this app's exec_pool(opts) asked for workers before the manager was made
-// (S1-Q1), which counts as threads above 0, for this app only. An unknown value is auto, and sets
-// *unknown.
+// state_exec.threads is above 0 or a threaded host (pycvc) announced itself to this app
+// (`threaded_host`), else single. `pool_threads`: this app's exec_pool(opts) asked for workers
+// before the manager was made (S1-Q1), which counts as threads above 0, for this app only. An
+// unknown value is auto, and sets *unknown.
 cvc::state_exec::lock_threading lock_threading_from_state(cvc::state &root, bool *unknown,
-                                                          bool pool_threads = false) {
+                                                          bool pool_threads, bool threaded_host) {
   namespace se = cvc::state_exec;
   *unknown = false;
   const std::string v = setting_text(root, "state_exec.locks.threading");
@@ -1337,19 +1343,20 @@ cvc::state_exec::lock_threading lock_threading_from_state(cvc::state &root, bool
     return se::lock_threading::shared;
   if (!v.empty() && v != "auto")
     *unknown = true;
-  return se::threads_compiled_in && (pool_threads || exec_threads_above_zero(root) ||
-                                     se::detail::threaded_host_noted())
+  return se::threads_compiled_in && (pool_threads || exec_threads_above_zero(root) || threaded_host)
              ? se::lock_threading::shared
              : se::lock_threading::single;
 }
 
-// The app's lock manager, made now in the mode the tree (and `pool_threads`) says; `note` gets
-// the warning for an unknown state_exec.locks.threading.
+// `app`'s lock manager, made now in the mode the tree (and `pool_threads`, and a threaded host's
+// note) says; `note` gets the warning for an unknown state_exec.locks.threading.
 std::shared_ptr<cvc::state_exec::lock_manager>
-new_app_lock_manager(cvc::state &root, bool pool_threads, std::string &note) {
+new_app_lock_manager(cvc::app &app, bool pool_threads, std::string &note) {
+  cvc::state &root = app.root();
   bool unknown = false;
   cvc::state_exec::lock_manager::options opts;
-  opts.threading = lock_threading_from_state(root, &unknown, pool_threads);
+  opts.threading = lock_threading_from_state(root, &unknown, pool_threads,
+                                             cvc::state_exec::detail::threaded_host_noted(app));
   if (unknown)
     note = "state_exec.locks.threading: unknown value '" +
            setting_text(root, "state_exec.locks.threading") +
@@ -1364,9 +1371,9 @@ cvc::pool_options pool_options_from_state(cvc::state &root,
                                           std::vector<std::pair<unsigned, std::string>> &notes) {
   namespace se = cvc::state_exec;
   cvc::pool_options o;
+  const std::optional<std::string> knob = exec_threads_knob();
   const std::string threads =
-      exec_threads_knob() ? *exec_threads_knob()
-                          : se::detail::setting_value(root, "state_exec.threads").value_or("");
+      knob ? *knob : se::detail::setting_value(root, "state_exec.threads").value_or("");
   if (threads == "auto") {
     o.threads = cvc::pool_options::auto_threads;
   } else if (!threads.empty()) {
@@ -1482,7 +1489,7 @@ std::shared_ptr<cvc::state_exec::lock_manager> app::lock_manager_locked(std::str
   if (!_lockManager) {
     // The mode is chosen now and fixed (docs/STATE_EXEC_LOCKS.md 8.3). An unknown value is logged,
     // and auto used, as state_exec.policy's is.
-    _lockManager = new_app_lock_manager(root(), false, note);
+    _lockManager = new_app_lock_manager(*this, false, note);
   }
   return _lockManager;
 }
@@ -1565,7 +1572,7 @@ cvc::exec_pool &app::exec_pool(const pool_options &opts) {
         {
           boost::mutex::scoped_lock sched_lock(_execSchedulerMutex);
           if (!_lockManager)
-            _lockManager = new_app_lock_manager(root(), true, note);
+            _lockManager = new_app_lock_manager(*this, true, note);
           std::string pending;
           mgr = lock_manager_locked(pending);
           if (!pending.empty())
@@ -1820,7 +1827,7 @@ bool app::submitPooled(std::function<void()> task, thread_priority priority) {
   // Refused: `t` is destroyed unrun, here, with interruption held off, so that an interrupt
   // pending on this thread isn't thrown inside a destructor reporting the drop (and dropped).
   boost::this_thread::disable_interruption keep_interrupt_pending;
-  pool_drop_scope reason(kPoolStopped);
+  PoolDropScope reason(*this, kPoolStopped);
   t.task = nullptr;
   return false;
 }
@@ -1843,7 +1850,7 @@ app::PoolSubmit app::submitPooledHandingBack(std::function<void()> &task, thread
   } else if (submitted == PoolSubmit::stopped) {
     // Destroyed unrun here, with interruption held off, as submitPooled does.
     boost::this_thread::disable_interruption keep_interrupt_pending;
-    pool_drop_scope reason(kPoolStopped);
+    PoolDropScope reason(*this, kPoolStopped);
     t.task = nullptr;
   }
   return submitted;
@@ -2023,7 +2030,7 @@ void app::dropPoolTasks(std::vector<std::function<void()>> &tasks, const char *w
   // an interrupt pending on this thread (a keyed thread's, say) stays pending instead of being
   // thrown in a task's destructor and dropped by its catch.
   boost::this_thread::disable_interruption keep_interrupt_pending;
-  pool_drop_scope reason(why);
+  PoolDropScope reason(*this, why);
   for (std::function<void()> &task : tasks)
     task = nullptr;
   tasks.clear();
@@ -2378,7 +2385,7 @@ std::vector<thread_ptr> app::closeThreadPool() {
   // pending instead of being thrown in a task's destructor (and dropped by its catch).
   {
     boost::this_thread::disable_interruption keep_interrupt_pending;
-    pool_drop_scope reason(kPoolStopped);
+    PoolDropScope reason(*this, kPoolStopped);
     PoolQueue().swap(dropped);
   }
   return workers;
@@ -2403,27 +2410,9 @@ void app::stopThreadPool() {
 }
 
 // ---------------------------------------------------------------------------
-// Process-wide free helpers (no app instance required)
+// Free helpers (no app instance required; nothing kept)
 // ---------------------------------------------------------------------------
 namespace {
-
-// Meyer's singleton: built once on first call, thread-safe since C++11.
-const std::map<std::string, data_type> &staticDataTypeEnum() {
-  static const std::map<std::string, data_type> m = [] {
-    std::map<std::string, data_type> mm;
-    mm[typeid(char).name()] = Char;
-    mm[typeid(unsigned char).name()] = UChar;
-    mm[typeid(unsigned short).name()] = UShort;
-    mm[typeid(int).name()] = Int;
-    mm[typeid(unsigned int).name()] = UInt;
-    mm[typeid(float).name()] = Float;
-    mm[typeid(double).name()] = Double;
-    mm[typeid(int64).name()] = Int64;
-    mm[typeid(uint64).name()] = UInt64;
-    return mm;
-  }();
-  return m;
-}
 
 const char *staticDataTypeName(data_type dt) {
   switch (dt) {
@@ -2452,10 +2441,28 @@ const char *staticDataTypeName(data_type dt) {
 
 } // anonymous namespace
 
+// Decided at compile time: one constant per instantiation, no table built at run time.
 template <class T> data_type dataType() {
-  const auto &m = staticDataTypeEnum();
-  auto it = m.find(typeid(T).name());
-  return (it != m.end()) ? it->second : Undefined;
+  if constexpr (std::is_same_v<T, char>)
+    return Char;
+  else if constexpr (std::is_same_v<T, unsigned char>)
+    return UChar;
+  else if constexpr (std::is_same_v<T, unsigned short>)
+    return UShort;
+  else if constexpr (std::is_same_v<T, int>)
+    return Int;
+  else if constexpr (std::is_same_v<T, unsigned int>)
+    return UInt;
+  else if constexpr (std::is_same_v<T, float>)
+    return Float;
+  else if constexpr (std::is_same_v<T, double>)
+    return Double;
+  else if constexpr (std::is_same_v<T, int64>)
+    return Int64;
+  else if constexpr (std::is_same_v<T, uint64>)
+    return UInt64;
+  else
+    return Undefined;
 }
 
 // Explicit instantiations for every type registered in registerDefaultTypes.

@@ -587,10 +587,13 @@ struct pin1_death_watch {
   }
 };
 
-// The state:// handler, registered for one tree for a scope (the URI registry is process-wide).
+// The state:// handler, registered on one app (its tree) for a scope.
 struct pin1_state_uris {
-  explicit pin1_state_uris(state &root) { cvc::ariadne::register_state_uri_handler(root); }
-  ~pin1_state_uris() { cvc::ariadne::unregister_state_uri_handler(); }
+  explicit pin1_state_uris(cvc::app &app) : app_(app) {
+    cvc::ariadne::register_state_uri_handler(app);
+  }
+  ~pin1_state_uris() { cvc::ariadne::unregister_state_uri_handler(app_); }
+  cvc::app &app_;
 };
 
 } // namespace
@@ -607,7 +610,7 @@ TEST(StateLifetime, UriStateChainsReleaseTheLeafFirst) {
     root("x.s").value("0");
     if (through_link)
       root("hole").linkTo("x.s", state::link_mode::transparent);
-    const pin1_state_uris uris(root);
+    const pin1_state_uris uris(a);
     const auto x_freed = pin1_flag_when_freed(root("x"));
     pin1_death_watch s(root("x.s"), x_freed);
     bool removed = false;
@@ -619,7 +622,7 @@ TEST(StateLifetime, UriStateChainsReleaseTheLeafFirst) {
           }
         });
     const cvc::ariadne::StoreResult r =
-        cvc::ariadne::store(through_link ? "state://hole?value" : "state://x.s?value", "1");
+        cvc::ariadne::store(a, through_link ? "state://hole?value" : "state://x.s?value", "1");
     EXPECT_TRUE(r.ok) << r.error;
     EXPECT_TRUE(removed);
     EXPECT_TRUE(s.died) << "the store was the last owner of x.s";

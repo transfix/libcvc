@@ -1,0 +1,6 @@
+# The server document beside tests/echo_service.py (ctest arisrvx_echo_service): it publishes echo,
+# which the program writes and the client mirrors.
+meta: { name: the echo service's document, min_libcvc: 3.7.13 }
+requires: [relay, python]
+server:
+  publish: [echo]

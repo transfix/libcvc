@@ -15,14 +15,20 @@
 #include <cmath> // fmod: the arc's turn
 #include <cstring>
 #include <cvc/ariadne/ariadne.h>
+#include <cvc/ariadne/rich_text.h> // §5.20 layout_rich_text
 #include <cvc/gl/Clipboard.h>    // set_clipboard
 #include <cvc/gl/ImGuiBinding.h> // cvc::gl::ui::*
 #include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/TouchScroll.h> // keepTouchDrag: a widget with on_drag: keeps its drag
 #include <cvc/gl/ariadne/ImGuiBackend.h>
 #include <memory>
+#include <mutex> // §10.8 a file dialog's answer, from SDL's thread
 #include <string>
 #include <vector>
+#if defined(CVC_ENABLE_SDL) && !defined(__EMSCRIPTEN__)
+#include <SDL3/SDL.h> // §10.8 SDL_ShowOpenFileDialog
+#define CVC_IMGUI_FILE_DIALOG 1
+#endif
 
 #ifdef CVC_ENABLE_IMGUI
 #define IMGUI_DEFINE_MATH_OPERATORS // must precede imgui.h (imgui_internal asserts it)
@@ -189,6 +195,7 @@ ariadne::Capabilities ImGuiBackend::capabilities() const {
   c.fullscreen_view = true;
   c.maximize = true;
   c.badge = true;
+  c.rich_text = true;
   return c;
 }
 
@@ -202,17 +209,14 @@ bool ImGuiBackend::next_window_maximize(bool *maximized) {
   return true;
 }
 
+void ImGuiBackend::next_window_resizable(bool resizable) { m_resizable = resizable; }
+
 #ifdef CVC_ENABLE_IMGUI
 namespace {
-// §5.9 the square button in a window's title bar, left of its close button (and of a collapse arrow
-// on the right): it flips *maximized. An item over the title bar, clipped to it, as ImGui's own
-// close button is, so a press on it is the button's and doesn't start a move. Restoring, it is
-// two squares. The window's last item (its title bar) is left as it was.
-void maximize_button(bool *maximized, bool has_close) {
-  ImGuiWindow *win = ImGui::GetCurrentWindow();
-  if (!win || (win->Flags & ImGuiWindowFlags_NoTitleBar))
-    return;
-  ImGuiContext &g = *GImGui;
+// §5.9 where the maximize button goes in a window's title bar: left of its close button (and of a
+// collapse arrow on the right), the size of ImGui's own, so the two read as one row.
+ImRect maximize_button_rect(const ImGuiWindow *win, bool has_close) {
+  const ImGuiContext &g = *GImGui;
   const ImGuiStyle &st = g.Style;
   const float sz = g.FontSize;
   const ImRect bar = win->TitleBarRect();
@@ -221,8 +225,23 @@ void maximize_button(bool *maximized, bool has_close) {
     right -= sz + st.ItemInnerSpacing.x;
   if (st.WindowMenuButtonPosition == ImGuiDir_Right && !(win->Flags & ImGuiWindowFlags_NoCollapse))
     right -= sz + st.ItemInnerSpacing.x;
-  const ImRect bb(ImVec2(right - sz, bar.Min.y + st.FramePadding.y),
-                  ImVec2(right, bar.Min.y + st.FramePadding.y + sz));
+  return ImRect(ImVec2(right - sz, bar.Min.y + st.FramePadding.y),
+                ImVec2(right, bar.Min.y + st.FramePadding.y + sz));
+}
+
+// §5.9 the square button in a window's title bar: it flips *maximized. An item over the title bar,
+// clipped to it, as ImGui's own close button is, so a press on it is the button's and doesn't start
+// a move. Restoring, it is two squares, one behind the other. The window's last item (its title
+// bar) is left as it was.
+void maximize_button(bool *maximized, bool has_close) {
+  ImGuiWindow *win = ImGui::GetCurrentWindow();
+  if (!win || (win->Flags & ImGuiWindowFlags_NoTitleBar))
+    return;
+  ImGuiContext &g = *GImGui;
+  const ImGuiStyle &st = g.Style;
+  const float sz = g.FontSize;
+  const ImRect bar = win->TitleBarRect();
+  const ImRect bb = maximize_button_rect(win, has_close);
   const ImGuiLastItemData last = g.LastItemData;
   ImGui::PushClipRect(bar.Min, bar.Max, false);
   const ImGuiID id = win->GetID("#MAXIMIZE");
@@ -238,21 +257,34 @@ void maximize_button(bool *maximized, bool has_close) {
     const ImU32 col = ImGui::GetColorU32(ImGuiCol_Text);
     const ImVec2 c = bb.GetCenter();
     const float r = ImMax(2.0f, sz * 0.27f), t = ImMax(1.0f, sz / 16.0f);
-    if (on) { // restore: a square behind another
+    if (on) {
+      // Restore: a square in front, down and to the left, and of the one behind it only the edges
+      // the front one leaves showing (nothing is painted over, so a hovered button stays lit).
       const float o = r * 0.45f;
-      win->DrawList->AddRect(ImVec2(c.x - r + o, c.y - r - o), ImVec2(c.x + r + o, c.y + r - o),
-                             col, 0.0f, 0, t);
-      win->DrawList->AddRectFilled(ImVec2(c.x - r - o, c.y - r + o),
-                                   ImVec2(c.x + r - o, c.y + r + o),
-                                   ImGui::GetColorU32(ImGuiCol_TitleBgActive));
-      win->DrawList->AddRect(ImVec2(c.x - r - o, c.y - r + o), ImVec2(c.x + r - o, c.y + r + o),
-                             col, 0.0f, 0, t);
+      const ImVec2 f0(c.x - r - o, c.y - r + o), f1(c.x + r - o, c.y + r + o); // front
+      const ImVec2 b0(c.x - r + o, c.y - r - o), b1(c.x + r + o, c.y + r - o); // behind
+      const ImVec2 behind[] = {ImVec2(b0.x, f0.y), b0, ImVec2(b1.x, b0.y), b1, ImVec2(f1.x, b1.y)};
+      win->DrawList->AddPolyline(behind, IM_ARRAYSIZE(behind), col, ImDrawFlags_None, t);
+      win->DrawList->AddRect(f0, f1, col, 0.0f, 0, t);
     } else {
       win->DrawList->AddRect(ImVec2(c.x - r, c.y - r), ImVec2(c.x + r, c.y + r), col, 0.0f, 0, t);
     }
   }
   ImGui::PopClipRect();
   g.LastItemData = last;
+}
+
+// The title bar buttons say what they do when the pointer rests on one, as other widgets' tooltips
+// do (after the style's hover delay): Close, Maximize, Restore.
+void title_button_tooltip(const ImGuiWindow *win, bool has_close, const bool *maximize) {
+  const ImGuiContext &g = *GImGui;
+  if (!win || (win->Flags & ImGuiWindowFlags_NoTitleBar) || g.HoveredId == 0 ||
+      g.ActiveId == g.HoveredId || g.HoveredIdTimer < g.Style.HoverDelayNormal)
+    return;
+  if (has_close && g.HoveredId == ImHashStr("#CLOSE", 0, win->ID))
+    ImGui::SetTooltip("Close");
+  else if (maximize && g.HoveredId == ImHashStr("#MAXIMIZE", 0, win->ID))
+    ImGui::SetTooltip("%s", *maximize ? "Restore" : "Maximize");
 }
 } // namespace
 #endif
@@ -280,6 +312,8 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   int pushes = 0;
   bool *const maximize = m_maximize; // §5.9 this window's tree.<id>.maximized, when it may be
   m_maximize = nullptr;
+  const bool resizable = m_resizable; // §5.9 `resizable: false`: no edge or corner drag
+  m_resizable = true;
   // Stable ImGui identity via the "Visible title###stable.id" trick (roadmap §3.3).
   std::string name = title;
   name += "###";
@@ -522,12 +556,58 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
     mx.x = ImMin(mx.x, ImMax(work.Max.x - at.x, fitFloor));
     mx.y = ImMin(mx.y, ImMax(work.Max.y - at.y, fitFloor));
   }
-  // §5.9 maximized: the window fills the work area (under a main menu bar), neither moved nor
-  // resized there; the place and size it had before come back when it is no longer.
+  // §5.9 maximized: the window fills the work area (under a main menu bar); the place and size it
+  // had before come back when it is no longer. As in a desktop's window manager:
+  // - a double click on its title bar maximizes it, or puts it back (in place of ImGui's collapse
+  //   on a double click, for a window that may be maximized; on a phone a double tap still
+  //   collapses, §5.14);
+  // - dragged by its title bar past the drag threshold it is no longer maximized, and comes back
+  //   to its size under the pointer, held where along its title bar it was grabbed;
+  // - resized by an edge or a corner it is no longer maximized either, and that size is its own
+  //   (below, after Begin), so a later maximize goes back to it.
+  ImGuiContext &g = *GImGui;
+  if (maximize && existing && !phone_view() && !(existing->Flags & ImGuiWindowFlags_NoTitleBar) &&
+      g.IO.MouseClickedCount[0] == 2 && g.HoveredWindow == existing &&
+      g.HoveredIdPreviousFrame == 0 && g.ActiveId == 0 &&
+      ImGui::GetKeyOwner(ImGuiKey_MouseLeft) == ImGuiKeyOwner_NoOwner &&
+      existing->TitleBarRect().Contains(g.IO.MousePos)) {
+    *maximize = !*maximize;
+    ImGui::SetKeyOwner(ImGuiKey_MouseLeft, existing->MoveId); // so ImGui doesn't also collapse it
+  }
+  // Held by the title bar: where it was grabbed, from the window's corner as it was then (ImGui has
+  // already moved the window by the drag, this frame, before Begin puts it back).
+  const bool held_by_title =
+      maximize && *maximize && existing && g.MovingWindow &&
+      g.MovingWindow->RootWindow == existing && !(existing->Flags & ImGuiWindowFlags_NoTitleBar) &&
+      g.ActiveIdClickOffset.y >= 0.0f && g.ActiveIdClickOffset.y < existing->TitleBarHeight;
+  if (held_by_title && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+    *maximize = false;
+    ImVec2 normal = existing->SizeFull;
+    bool sized = false;
+    if (auto back = m_unmaximized.find(id); back != m_unmaximized.end() && back->second.sized) {
+      normal = ImVec2(back->second.w, back->second.h);
+      sized = true;
+    } else if (fits) {
+      normal = ImMin(ImGui::CalcWindowNextAutoFitSize(existing), avail);
+    }
+    m_unmaximized.erase(id);
+    const float along = existing->SizeFull.x > 0.0f
+                            ? g.ActiveIdClickOffset.x / existing->SizeFull.x
+                            : 0.5f; // where along the title bar it was grabbed
+    g.ActiveIdClickOffset.x = ImTrunc(along * normal.x);
+    ImGui::SetNextWindowPos(g.IO.MousePos - g.ActiveIdClickOffset, ImGuiCond_Always);
+    if (sized)
+      ImGui::SetNextWindowSize(normal, ImGuiCond_Always);
+  }
   const bool maximized = maximize && *maximize;
   if (maximized) {
     if (!m_unmaximized.count(id)) {
+      // An authored size, for a window maximized before it was ever drawn at one.
+      const ImVec2 authored(fits ? 0.0f : px(size.w, avail.x), fits ? 0.0f : px(size.h, avail.y));
       Unmaximized u;
+      u.sized = authored.x > 0.0f && authored.y > 0.0f;
+      u.w = authored.x;
+      u.h = authored.y;
       if (existing) {
         u = Unmaximized{existing->Pos.x, existing->Pos.y, existing->SizeFull.x,
                         existing->SizeFull.y, !fits};
@@ -535,9 +615,11 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
         const ImVec2 origin = seedGeom.authored ? work.Min : ImVec2(0.0f, 0.0f);
         u.x = origin.x + ui_px(seedGeom.x);
         u.y = origin.y + ui_px(seedGeom.y);
-        u.sized = seedGeom.has_size && !fits;
-        u.w = ui_px(seedGeom.w);
-        u.h = ui_px(seedGeom.h);
+        if (seedGeom.has_size && !fits) {
+          u.sized = true;
+          u.w = ui_px(seedGeom.w);
+          u.h = ui_px(seedGeom.h);
+        }
       } else {
         u.x = work.Min.x + gap;
         u.y = work.Min.y + gap;
@@ -559,9 +641,11 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, border);
     ++pushes;
   }
+  // A maximized window may still be moved and resized: either is the user taking it out of the
+  // maximized state (above, and after Begin).
   const ImGuiWindowFlags flags = ImGuiWindowFlags_HorizontalScrollbar |
-                                 (maximized ? ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize
-                                            : (fits ? ImGuiWindowFlags_AlwaysAutoResize : 0));
+                                 (!maximized && fits ? ImGuiWindowFlags_AlwaysAutoResize : 0) |
+                                 (resizable ? 0 : ImGuiWindowFlags_NoResize);
   // A window that cut a hole in its background last frame (a viewport widget) paints its own in
   // end_window, around this frame's cuts: ImGui's is made clear, and the content goes on a channel
   // above the one that background is drawn on.
@@ -571,8 +655,21 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   if (cuts->paints)
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
   vis = ImGui::Begin(name.c_str(), p_open, flags);
+  if (maximized) {
+    // Begin put it at the work area's place and size, and then applied the user's drag of an edge
+    // or a corner: one that leaves it elsewhere is no longer maximized, at the size it was given.
+    const ImGuiWindow *win = ImGui::GetCurrentWindow();
+    const ImVec2 full = work.GetSize();
+    const auto off = [](float a, float b) { return std::fabs(a - b) > 0.5f; };
+    if (off(win->Pos.x, work.Min.x) || off(win->Pos.y, work.Min.y) ||
+        off(win->SizeFull.x, full.x) || off(win->SizeFull.y, full.y)) {
+      *maximize = false;
+      m_unmaximized.erase(id);
+    }
+  }
   if (maximize)
     maximize_button(maximize, p_open != nullptr);
+  title_button_tooltip(ImGui::GetCurrentWindow(), p_open != nullptr, maximize);
   if (cuts->paints) {
     ImGui::PopStyleColor();
     cuts->dl = ImGui::GetWindowDrawList();
@@ -583,6 +680,8 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
 #else
   (void)size;
   (void)border;
+  (void)maximize;
+  (void)resizable;
   m_haveSeed = false; // consume the seed even in the inert (no-ImGui) build
   vis = ui::Begin(name.c_str(), p_open);
 #endif
@@ -985,6 +1084,172 @@ bool ImGuiBackend::text_runs(const std::vector<cvc::ariadne::TextRun> &runs, con
   (void)runs;
   (void)rgb;
   return false;
+#endif
+}
+// §5.20 a rich text, laid out by layout_rich_text in px at the width its line has (in a window that
+// fits its content, as wide as its longest line up to the view's edge), size: bounding it. The
+// paragraph is one group, so it is the last item afterwards. Each piece of a link is an item of
+// its own, submitted before the group closes, so it takes the pointer before the paragraph or a
+// clickable card around it; the first piece of each is a stop for keyboard navigation. Styles are
+// drawn with the one UI font: bold twice, a pixel apart; italic slanted (its glyphs' vertices
+// sheared); code on a FrameBg box; a link in TextLink's colour, underlined.
+cvc::ariadne::RichTextEvent ImGuiBackend::rich_text(const std::vector<ariadne::TextRun> &runs,
+                                                    const ariadne::RichTextOptions &o) {
+#ifdef CVC_ENABLE_IMGUI
+  ariadne::RichTextEvent ev;
+  ImGuiWindow *win = ImGui::GetCurrentWindow();
+  ImFont *font = ImGui::GetFont();
+  const float fs = ImGui::GetFontSize();
+  const float lh = ImGui::GetTextLineHeight();
+  const float bold_dx = std::max(1.0f, std::floor(fs / 14.0f));
+  const float pad = std::max(1.0f, std::floor(fs * 0.15f)); // code's box, past its text
+  const ImVec2 origin = ImGui::GetCursorScreenPos();
+  const ImGuiStyle &style = ImGui::GetStyle();
+
+  // The width: the line's; in a window whose width fits its content (no size:, or an auto width
+  // while ImGui measures it), the room to the view's right edge, not a table cell's; size: N at
+  // most.
+  float width = ImGui::GetContentRegionAvail().x;
+  const bool fitting =
+      (win->Flags & ImGuiWindowFlags_AlwaysAutoResize) != 0 || win->AutoFitFramesX > 0;
+  if (fitting && !ImGui::GetCurrentTable()) {
+    const ImGuiViewport *vp = ImGui::GetMainViewport();
+    width = vp->WorkPos.x + vp->WorkSize.x - origin.x - style.WindowPadding.x - style.ScrollbarSize;
+  }
+  if (o.max_width > 0.0f)
+    width = std::min(width, ui_px(o.max_width));
+  width = std::max(width, fs); // a line holds at least a glyph or two
+  const auto measure = [&](const std::string &t, unsigned st) {
+    float w = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, t.data(), t.data() + t.size()).x;
+    if (st & ariadne::text_style::bold)
+      w += bold_dx;
+    return w;
+  };
+  const auto picture = [&](const ariadne::TextRun &r) {
+    int W = 0, H = 0;
+    if (image_texture(r.image.c_str(), W, H) != 0 && W > 0 && H > 0)
+      return lh * static_cast<float>(W) / static_cast<float>(H);
+    return measure(r.text, r.style);
+  };
+  const std::string ellipsis = font->IsGlyphInFont(0x2026) ? "\xE2\x80\xA6" : "...";
+  const ariadne::RichLayout layout = ariadne::layout_rich_text(
+      runs, o.wrap ? width : 0.0f, o.max_lines, measure, picture, ellipsis);
+
+  // A stable id for this paragraph: its place among the paragraphs under the same id stack.
+  if (m_richFrame != ImGui::GetFrameCount()) {
+    m_richFrame = ImGui::GetFrameCount();
+    m_richSeen.clear();
+  }
+  const ImGuiID key = ImGui::GetID("##ari_rich");
+  const int nth = m_richSeen[key]++;
+  const ImGuiID base = ImHashData(&nth, sizeof nth, key);
+
+  // The links: each piece an item, the first one a stop for keyboard navigation. Pressed is a
+  // tap: released over it, the pointer not dragged far (a finger scrolling the feed opens none).
+  const int links = std::max(0, o.links);
+  std::vector<int> link_state(static_cast<std::size_t>(links), 0); // 1 hovered, 2 held
+  std::vector<bool> link_first(static_cast<std::size_t>(links), true);
+  const float slop = ImGui::GetIO().MouseDragThreshold;
+  const bool tap = !ImGui::GetIO().MouseReleased[ImGuiMouseButton_Left] ||
+                   ImGui::GetIO().MouseDragMaxDistanceSqr[ImGuiMouseButton_Left] <= slop * slop;
+  ImGui::BeginGroup();
+  int piece_no = 0;
+  for (std::size_t li = 0; li < layout.lines.size(); ++li) {
+    const float y = origin.y + lh * static_cast<float>(li);
+    for (const ariadne::RichPiece &p : layout.lines[li].pieces) {
+      ++piece_no;
+      const ariadne::TextRun *run = p.run < runs.size() ? &runs[p.run] : nullptr;
+      const ImRect bb(ImVec2(origin.x + p.x, y), ImVec2(origin.x + p.x + p.w, y + lh));
+      if (run && run->link >= 0 && run->link < links) {
+        const std::size_t k = static_cast<std::size_t>(run->link);
+        const ImGuiID id = ImHashData(&piece_no, sizeof piece_no, base);
+        const bool first = link_first[k];
+        link_first[k] = false;
+        if (!ImGui::ItemAdd(bb, id, nullptr, first ? 0 : ImGuiItemFlags_NoNav))
+          continue;
+        bool hovered = false, held = false;
+        const bool pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held);
+        if (pressed && tap && ev.clicked < 0)
+          ev.clicked = run->link;
+        if (hovered || held) {
+          link_state[k] = std::max(link_state[k], held ? 2 : 1);
+          ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+          if (ev.hovered < 0)
+            ev.hovered = run->link;
+        }
+        if (first)
+          ImGui::RenderNavCursor(bb, id);
+        if (k < o.link_tips.size() && !o.link_tips[k].empty() &&
+            ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
+          ImGui::SetTooltip("%s", o.link_tips[k].c_str());
+      } else if (p.image && run) {
+        // A picture that isn't a link: its :shortcode: on hover, as in a plain line (text_runs).
+        if (ImGui::ItemAdd(bb, 0) && ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
+          ImGui::SetTooltip("%s", run->text.c_str());
+      }
+    }
+  }
+
+  // Draw: the code boxes first (under their text), then the text and pictures.
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  const ImU32 text_col = o.rgb ? ImGui::GetColorU32(ImVec4(o.rgb[0], o.rgb[1], o.rgb[2], 1.0f))
+                               : ImGui::GetColorU32(ImGuiCol_Text);
+  const ImU32 link_col = ImGui::GetColorU32(ImGuiCol_TextLink);
+  const ImU32 code_bg = ImGui::GetColorU32(ImGuiCol_FrameBg);
+  const float ascent = ImGui::GetFontBaked() ? ImGui::GetFontBaked()->Ascent : lh * 0.8f;
+  for (std::size_t li = 0; li < layout.lines.size(); ++li) {
+    const float y = origin.y + lh * static_cast<float>(li);
+    for (const ariadne::RichPiece &p : layout.lines[li].pieces) {
+      const ariadne::TextRun *run = p.run < runs.size() ? &runs[p.run] : nullptr;
+      if (run && (run->style & ariadne::text_style::code) && !p.image)
+        dl->AddRectFilled(ImVec2(origin.x + p.x - pad, y),
+                          ImVec2(origin.x + p.x + p.w + pad, y + lh), code_bg, pad);
+    }
+  }
+  for (std::size_t li = 0; li < layout.lines.size(); ++li) {
+    const float y = origin.y + lh * static_cast<float>(li);
+    for (const ariadne::RichPiece &p : layout.lines[li].pieces) {
+      const ariadne::TextRun *run = p.run < runs.size() ? &runs[p.run] : nullptr;
+      const ImVec2 at(origin.x + p.x, y);
+      const int link = run && run->link >= 0 && run->link < links ? run->link : -1;
+      const int st = link >= 0 ? link_state[static_cast<std::size_t>(link)] : 0;
+      if (p.image && run) {
+        int W = 0, H = 0;
+        const unsigned int tex = image_texture(run->image.c_str(), W, H);
+        if (tex != 0 && W > 0 && H > 0) {
+          dl->AddImage(static_cast<ImTextureID>(static_cast<std::intptr_t>(tex)), at,
+                       ImVec2(at.x + p.w, y + lh));
+          continue;
+        }
+      }
+      const unsigned s = run ? run->style : 0u;
+      const ImU32 col = link >= 0 ? link_col : text_col;
+      const char *b = p.text.data(), *e = p.text.data() + p.text.size();
+      const int vtx0 = dl->VtxBuffer.Size;
+      dl->AddText(font, fs, at, col, b, e);
+      if (s & ariadne::text_style::bold)
+        dl->AddText(font, fs, ImVec2(at.x + bold_dx, at.y), col, b, e);
+      if (s & ariadne::text_style::italic) { // lean the glyphs right about the baseline
+        const float base_y = at.y + ascent;
+        for (int v = vtx0; v < dl->VtxBuffer.Size; ++v)
+          dl->VtxBuffer[v].pos.x += (base_y - dl->VtxBuffer[v].pos.y) * 0.2f;
+      }
+      if (link >= 0) {
+        const float uy = std::floor(at.y + ascent + std::max(1.0f, fs / 12.0f));
+        dl->AddLine(ImVec2(at.x, uy), ImVec2(at.x + p.w, uy), col,
+                    st > 0 ? std::max(1.5f, fs / 10.0f) : 1.0f);
+      }
+    }
+  }
+  // The paragraph's own extent, so the group (and the window) take its room.
+  ImGui::SetCursorScreenPos(origin);
+  ImGui::Dummy(ImVec2(std::max(1.0f, layout.width), lh * static_cast<float>(layout.lines.size())));
+  ImGui::EndGroup();
+  return ev;
+#else
+  (void)runs;
+  (void)o;
+  return {};
 #endif
 }
 void ImGuiBackend::separator() { ui::Separator(); }
@@ -1630,13 +1895,13 @@ ariadne::ColorEdit ImGuiBackend::color(const char *label, const float rgb[3]) {
   return e;
 }
 
-void ImGuiBackend::register_widget(std::string custom_type, CustomDrawFn draw) {
+void ImGuiBackend::register_widget(cvc::app &app, std::string custom_type, CustomDrawFn draw) {
   if (draw) {
     // Tell the core loader this type is handled (natively, by this backend) so it does not warn at
     // load that the type is unregistered and fall back to a placeholder — has_widget_type() reports
     // it present and the draw routes here via custom_widget(). (e.g. the stream_view peer-video
     // tile.)
-    cvc::ariadne::register_known_widget_type(custom_type);
+    cvc::ariadne::register_known_widget_type(app, custom_type);
     m_customWidgets[std::move(custom_type)] = std::move(draw);
   }
 }
@@ -1780,7 +2045,90 @@ struct ImGuiBackend::BackdropFrame {};
 struct ImGuiBackend::ItemGroupFrame {};
 #endif
 
-bool ImGuiBackend::set_clipboard(const std::string &text) { return cvc::gl::clipboard::set(text); }
+bool ImGuiBackend::set_clipboard(cvc::app &app, const std::string &text) {
+  return cvc::gl::clipboard::set(app, text);
+}
+
+// §10.8 the file dialog: what SDL answers (on its thread, under `m`), and what it needs until then
+// (the filters it reads, the program's callback).
+struct ImGuiBackend::FileDialog {
+  std::mutex m;
+  bool answered = false;
+  std::vector<std::string> paths;
+  std::string error;
+  cvc::ariadne::FilePickDone done; // the drawing thread's
+  std::string filter_name = "Files", filter_pattern, dir;
+#ifdef CVC_IMGUI_FILE_DIALOG
+  SDL_DialogFileFilter filter{nullptr, nullptr};
+#endif
+};
+
+bool ImGuiBackend::pick_files(const cvc::ariadne::FilePickRequest &req,
+                              cvc::ariadne::FilePickDone done) {
+#ifdef CVC_IMGUI_FILE_DIALOG
+  if (SDL_WasInit(SDL_INIT_VIDEO) == 0 || m_fileDialog)
+    return false;
+  auto d = std::make_shared<FileDialog>();
+  d->done = std::move(done);
+  for (const std::string &ext : cvc::ariadne::accepted_extensions(req.accept))
+    d->filter_pattern += (d->filter_pattern.empty() ? "" : ";") + ext;
+  if (!d->filter_pattern.empty())
+    d->filter = SDL_DialogFileFilter{d->filter_name.c_str(), d->filter_pattern.c_str()};
+  d->dir = req.dir;
+  m_fileDialog = d;
+  auto *keep = new std::shared_ptr<FileDialog>(d);
+  SDL_ShowOpenFileDialog(
+      [](void *userdata, const char *const *filelist, int) {
+        std::unique_ptr<std::shared_ptr<FileDialog>> held(
+            static_cast<std::shared_ptr<FileDialog> *>(userdata));
+        FileDialog &st = **held;
+        std::lock_guard<std::mutex> lock(st.m);
+        if (!filelist) {
+          const char *why = SDL_GetError();
+          st.error = why && *why ? why : "the file dialog failed";
+        } else {
+          for (const char *const *f = filelist; *f; ++f)
+            st.paths.emplace_back(*f);
+        }
+        st.answered = true;
+      },
+      keep, SDL_GetKeyboardFocus(), d->filter_pattern.empty() ? nullptr : &d->filter,
+      d->filter_pattern.empty() ? 0 : 1, d->dir.empty() ? nullptr : d->dir.c_str(), req.multiple);
+  return true;
+#else
+  (void)req;
+  (void)done;
+  return false;
+#endif
+}
+
+void ImGuiBackend::begin_frame() {
+  if (!m_fileDialog)
+    return;
+  const std::shared_ptr<FileDialog> d = m_fileDialog;
+  std::vector<std::string> paths;
+  std::string error;
+  {
+    std::lock_guard<std::mutex> lock(d->m);
+    if (!d->answered)
+      return;
+    paths = std::move(d->paths);
+    error = std::move(d->error);
+  }
+  m_fileDialog.reset();
+  std::vector<std::shared_ptr<cvc::ariadne::FileSource>> files;
+  for (const std::string &p : paths) {
+    std::string why;
+    if (std::shared_ptr<cvc::ariadne::FileSource> f = cvc::ariadne::local_file_source(p, &why))
+      files.push_back(std::move(f));
+    else if (error.empty())
+      error = why;
+  }
+  if (d->done) {
+    const std::string why = files.empty() ? error : std::string(); // none and no error: cancelled
+    d->done(std::move(files), why);
+  }
+}
 
 void ImGuiBackend::set_fullscreen_handler(std::function<bool(bool)> set, std::function<bool()> is) {
   m_setFullscreen = std::move(set);

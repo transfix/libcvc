@@ -27,11 +27,20 @@ namespace cvc::state_exec {
 
 async_evaluator::async_evaluator(environment_ptr global_env) : global_env_(std::move(global_env)) {}
 
+exec_context &async_evaluator::context() {
+  if (!ctx_.registry) {
+    own_registry_ = make_cycle_registry();
+    ctx_.registry = own_registry_.get();
+  }
+  return ctx_;
+}
+
 // ---------------------------------------------------------------------------
 // public API — coroutines
 // ---------------------------------------------------------------------------
 
 task<value_t> async_evaluator::evaluate(value_t expr, environment_ptr env) {
+  context(); // its registry, which what its programs capture is tracked in
   auto run_env = env ? env : environment::extend(global_env_);
   root_expr_ = expr;
   stats_.start();
@@ -52,7 +61,7 @@ task<value_t> async_evaluator::evaluate_script(const std::string &script, enviro
   // "bad variant access" on symmetric transfer.
   auto exprs = parse_all(script);
   if (exprs.empty())
-    return evaluate(nil_value, env);
+    return evaluate(nil_value(), env);
   if (exprs.size() == 1)
     return evaluate(std::move(exprs[0]), env);
   std::vector<value_t> begin_exprs;
@@ -88,9 +97,9 @@ value_t async_evaluator::sync_evaluate(const value_t &expr, environment_ptr env,
     std::optional<std::chrono::steady_clock::time_point> prev;
     ~deadline_restore() { self->deadline_ = prev; }
   } restore{this, saved_deadline};
-  // The thread's evaluation deadline cuts a loop inside one native call, which never reaches
-  // check_interrupted_async (as stackless_evaluator::run arms it).
-  eval_deadline_guard deadline_guard(timeout_sec);
+  // The evaluation deadline, in the context it runs in, cuts a loop inside one native call, which
+  // never reaches check_interrupted_async (as stackless_evaluator::run arms it).
+  eval_deadline_guard deadline_guard(context(), timeout_sec);
 
   auto t = evaluate(expr, env);
   // sync_wait drives the coroutine on both the trampoline (GCC/Clang) and the
@@ -107,7 +116,7 @@ value_t async_evaluator::sync_evaluate_script(const std::string &script, environ
                                               std::function<void(const value_t &)> on_complete) {
   auto exprs = parse_all(script);
   if (exprs.empty())
-    return nil_value;
+    return nil_value();
   if (exprs.size() == 1)
     return sync_evaluate(exprs[0], env, timeout_sec, std::move(on_complete));
   std::vector<value_t> begin_exprs;
@@ -161,9 +170,9 @@ task<value_t> async_evaluator::eval_internal(const value_t &expr, environment_pt
   // Symbol
   if (auto *sym = std::get_if<symbol>(&expr.v)) {
     if (sym->name == "nil")
-      co_return nil_value;
+      co_return nil_value();
     if (sym->name == "t")
-      co_return true_value;
+      co_return true_value();
     if (auto *val = env->lookup(sym->name))
       co_return *val;
     throw std::runtime_error("undefined symbol: " + sym->name);
@@ -230,7 +239,7 @@ task<value_t> async_evaluator::eval_internal(const value_t &expr, environment_pt
     auto &[params, body] = it->second;
     std::unordered_map<std::string, value_t> subst;
     for (size_t i = 0; i < params.size(); ++i)
-      subst[params[i].name] = (i < args.size()) ? args[i] : nil_value;
+      subst[params[i].name] = (i < args.size()) ? args[i] : nil_value();
     co_return co_await eval_internal(substitute(body, subst), env);
   }
 
@@ -248,7 +257,7 @@ task<value_t> async_evaluator::eval_internal(const value_t &expr, environment_pt
     evaled.push_back(co_await eval_internal(a, env));
 
   if (auto *fn = std::get_if<native_fn>(&func_val->v))
-    co_return (*fn)(evaled);
+    co_return (*fn)(call_args(evaled, &ctx_));
 
   if (auto *cp = std::get_if<closure_ptr>(&func_val->v))
     co_return co_await apply_closure(*cp, evaled);
@@ -270,13 +279,13 @@ task<value_t> async_evaluator::do_if(const std::vector<value_t> &args, environme
     co_return co_await eval_internal(args[1], env);
   if (args.size() > 2)
     co_return co_await eval_internal(args[2], env);
-  co_return nil_value;
+  co_return nil_value();
 }
 
 task<value_t> async_evaluator::do_begin(const std::vector<value_t> &args, environment_ptr env) {
   if (args.empty())
-    co_return nil_value;
-  value_t result = nil_value;
+    co_return nil_value();
+  value_t result = nil_value();
   for (auto &a : args) {
     co_await check_interrupted_async();
     result = co_await eval_internal(a, env);
@@ -286,12 +295,12 @@ task<value_t> async_evaluator::do_begin(const std::vector<value_t> &args, enviro
 
 // (and ...) and (or ...) stop at the first argument that decides them, as in evaluator.cpp.
 task<value_t> async_evaluator::do_and(const std::vector<value_t> &args, environment_ptr env) {
-  value_t result = true_value;
+  value_t result = true_value();
   for (auto &a : args) {
     co_await check_interrupted_async();
     result = co_await eval_internal(a, env);
     if (!result.is_truthy())
-      co_return false_value;
+      co_return false_value();
   }
   co_return result;
 }
@@ -303,7 +312,7 @@ task<value_t> async_evaluator::do_or(const std::vector<value_t> &args, environme
     if (v.is_truthy())
       co_return v;
   }
-  co_return false_value;
+  co_return false_value();
 }
 
 task<value_t> async_evaluator::do_while(const std::vector<value_t> &args, environment_ptr env) {
@@ -314,7 +323,7 @@ task<value_t> async_evaluator::do_while(const std::vector<value_t> &args, enviro
     for (std::size_t i = 1; i < args.size(); ++i) // several body forms run in order
       co_await eval_internal(args[i], env);
   }
-  co_return nil_value;
+  co_return nil_value();
 }
 
 task<value_t> async_evaluator::do_for(const std::vector<value_t> &args, environment_ptr env) {
@@ -333,7 +342,7 @@ task<value_t> async_evaluator::do_for(const std::vector<value_t> &args, environm
     for (std::size_t i = 2; i < args.size(); ++i) // several body forms run in order
       co_await eval_internal(args[i], env);
   }
-  co_return nil_value;
+  co_return nil_value();
 }
 
 task<value_t> async_evaluator::do_set(const std::vector<value_t> &args, environment_ptr env) {
@@ -384,7 +393,7 @@ task<value_t> async_evaluator::do_lambda(const std::vector<value_t> &args, envir
   cls->env_snapshot = env;
   // Bound back into env (a defun, a method, a lambda set there), it is a cycle that only the
   // collector frees, as in the stackless evaluator.
-  track_captured_env(env);
+  track_captured_env(&ctx_, env);
   co_return value_t{std::move(cls)};
 }
 
@@ -393,7 +402,7 @@ task<value_t> async_evaluator::do_return(const std::vector<value_t> &args, envir
     throw std::runtime_error("return: expected at most 1 argument, got " +
                              std::to_string(args.size()));
   if (args.empty())
-    throw return_exception(nil_value);
+    throw return_exception(nil_value());
   auto val = co_await eval_internal(args[0], env);
   throw return_exception(std::move(val));
 }
@@ -457,7 +466,7 @@ task<value_t> async_evaluator::do_super(const std::vector<value_t> &args, enviro
           fn_args.push_back(self_val);
           for (size_t i = 2; i < args.size(); ++i)
             fn_args.push_back(co_await eval_internal(args[i], env));
-          co_return (*fn)(fn_args);
+          co_return (*fn)(call_args(fn_args, &ctx_));
         }
         if (auto *cp = std::get_if<closure_ptr>(&v.v)) {
           std::vector<value_t> fn_args;
@@ -603,7 +612,7 @@ task<value_t> async_evaluator::do_defclass(const std::vector<value_t> &args, env
   env->set(name, value_t{std::move(constructor)});
   env->set(name + ".__cls_dict__", cls_dict_val);
 
-  co_return env->lookup(name) ? *env->lookup(name) : nil_value;
+  co_return env->lookup(name) ? *env->lookup(name) : nil_value();
 }
 
 task<value_t> async_evaluator::do_defmacro(const std::vector<value_t> &args, environment_ptr env) {
@@ -673,7 +682,7 @@ task<value_t> async_evaluator::apply_closure(const closure_ptr &cls,
       local->set(cls->params[i].name, args[i]);
   }
   try {
-    value_t result = nil_value;
+    value_t result = nil_value();
     for (auto &b : cls->body) {
       co_await check_interrupted_async();
       result = co_await eval_internal(b, local);
@@ -691,7 +700,7 @@ task<value_t> async_evaluator::apply_closure(const closure_ptr &cls,
 value_t async_evaluator::substitute(const value_t &tmpl,
                                     const std::unordered_map<std::string, value_t> &subst) {
   // The stackless evaluator's walk, run whole: no native recursion per template level.
-  return run_to_completion(*make_substitute_job(tmpl, subst));
+  return run_to_completion(&ctx_, *make_substitute_job(tmpl, subst));
 }
 
 } // namespace cvc::state_exec

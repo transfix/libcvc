@@ -205,6 +205,9 @@ public:
   void draw() override;
   void handleEvent(TEvent &ev) override;
   TPalette &getPalette() const override;
+  // getPalette()'s answers (TVision hands out a mutable reference).
+  mutable TPalette window_text_{"\x06\x07", 2};
+  mutable TPalette desktop_text_{"\x01\x01", 2};
   std::string id;
 
 private:
@@ -215,9 +218,11 @@ private:
 class ContentWindow : public TWindow {
 public:
   ContentWindow(const TRect &r, Host &host, const std::string &id, const std::string &title,
-                bool closable)
+                bool closable, bool resizable)
       : TWindowInit(&TWindow::initFrame), TWindow(r, title, wnNoNumber), id(id), host_(host) {
-    flags = wfMove | wfGrow | wfZoom | (closable ? wfClose : 0);
+    // `resizable: false`: no corner to drag, and Ctrl-F5 only moves it (the zoom box still fills
+    // the desktop).
+    flags = wfMove | (resizable ? wfGrow : 0) | wfZoom | (closable ? wfClose : 0);
     options |= ofFirstClick; // the click that raises a window also reaches the widget under it
     TRect inner = getExtent();
     inner.grow(-1, -1);
@@ -397,7 +402,7 @@ struct Host {
           std::max<int>(kMinWindow.y, std::min(hw.h > 0 ? hw.h : hw.content_h + 2, desk->size.y))};
       if (it == windows.end()) {
         TRect r(hw.x, hw.y, hw.x + want.x, hw.y + want.y);
-        auto *win = new ContentWindow(r, *this, hw.id, hw.title, hw.closable);
+        auto *win = new ContentWindow(r, *this, hw.id, hw.title, hw.closable, hw.resizable);
         win->shown_title = hw.title;
         win->user_sized = hw.user_sized; // reopened after the user resized it: still theirs
         desk->insert(win);
@@ -407,6 +412,12 @@ struct Host {
         // (Not while the user drags it: tvision's drag loop runs this sync between moves.)
         TRect r(win->origin.x, win->origin.y, win->origin.x + want.x, win->origin.y + want.y);
         win->locate(r);
+      }
+      if (hw.raise) // picked in the Windows menu, or raised by the document (tree.<id>.raise)
+        it->second->select();
+      if (ContentWindow *win = it->second; ((win->flags & wfGrow) != 0) != hw.resizable) {
+        win->flags ^= wfGrow; // a new document made it resizable, or not
+        win->frame->drawView();
       }
       if (it->second->shown_title != hw.title) {
         ContentWindow *win = it->second;
@@ -500,9 +511,7 @@ ContentView::ContentView(const TRect &r, Host &host, std::string id)
 
 TPalette &ContentView::getPalette() const {
   // Inside a window: its scroller text colours (TWindow palette entries 6-7), like TScroller.
-  static TPalette window_text("\x06\x07", 2);
-  static TPalette desktop_text("\x01\x01", 2);
-  return id.empty() ? desktop_text : window_text;
+  return id.empty() ? desktop_text_ : window_text_;
 }
 
 void ContentView::draw() {
@@ -640,7 +649,7 @@ TvisionBackend::run_desktop(Runtime &rt, const RunOptions &opts, const std::func
 
 bool TvisionBackend::available() { return true; }
 
-bool TvisionBackend::set_clipboard(const std::string &text) {
+bool TvisionBackend::set_clipboard(cvc::app &, const std::string &text) {
   TClipboard::setText(TStringView(text.data(), text.size())); // it reports nothing back
   return true;
 }
@@ -656,7 +665,7 @@ FtxuiBackend::RunExit TvisionBackend::run_desktop(Runtime &, const RunOptions &,
 
 bool TvisionBackend::available() { return false; }
 
-bool TvisionBackend::set_clipboard(const std::string &) { return false; }
+bool TvisionBackend::set_clipboard(cvc::app &, const std::string &) { return false; }
 
 #endif
 

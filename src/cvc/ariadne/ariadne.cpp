@@ -7,6 +7,8 @@
 // backend reports the edit committed — so a slider drag costs one state write on
 // release, not one per frame (writes fan out to observers / replicated peers).
 
+#include "chart_emit.h"     // Kind::Chart (series / marker parse caches, the pick edge)
+#include "file_picker.h"    // §10.8 the Runtime's own "Open file" window
 #include "tf_editor_emit.h" // Kind::TfEditor (model / overlay / view state edges)
 
 #include <algorithm>
@@ -22,6 +24,7 @@
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/bind.h>
+#include <cvc/ariadne/files.h> // §10.8 (file-pick): the files the app's programs hold
 #include <cvc/ariadne/input.h>  // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
 #include <cvc/ariadne/loader.h> // is_builtin_widget_type (has?)
 #include <cvc/ariadne/media.h>  // §5.11 pictures by URI
@@ -29,6 +32,7 @@
 #include <cvc/ariadne/net_host.h>  // net_host_status (the net capability tokens)
 #include <cvc/ariadne/oidc_host.h> // pump_oidc
 #include <cvc/ariadne/requires.h>  // free_heads: the isolation rules' oidc check
+#include <cvc/ariadne/rich_text.h> // §5.20 parse_text_style
 #include <cvc/ariadne/stream_intrinsics.h> // retarget_document_streams: a move takes its streams
 #include <cvc/core/app.h>
 #include <cvc/core/exec_pool.h> // an isolated document's pump; in_pump_all (host-thread calls)
@@ -57,6 +61,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -174,7 +179,7 @@ std::vector<float> parse_tracks(const std::string &s) {
 }
 
 // Replace every occurrence of `token` in `s` with `rep`.
-std::string replace_all(std::string s, const std::string &token, const std::string &rep) {
+std::string replace_all(std::string s, std::string_view token, const std::string &rep) {
   if (token.empty())
     return s;
   for (std::size_t pos = s.find(token); pos != std::string::npos;
@@ -183,6 +188,9 @@ std::string replace_all(std::string s, const std::string &token, const std::stri
   return s;
 }
 
+// A repeat's loop-index token.
+constexpr std::string_view kIndexToken = "{i}";
+
 // §3 repeat: deep-copy a template widget, substituting the loop-index token `{i}` with the
 // 0-based `index` in every field an instance uses to address distinct state or to display
 // (id/label/bind/on and the pointer handlers/predicates/tooltip/options). Recurses into children.
@@ -190,7 +198,7 @@ std::string replace_all(std::string s, const std::string &token, const std::stri
 // a follow-up.)
 Widget substitute_index(const Widget &w, int index) {
   const std::string idx = std::to_string(index);
-  static const std::string kTok = "{i}";
+  constexpr std::string_view kTok = kIndexToken;
   Widget out = w; // copies every field
   out.id = replace_all(out.id, kTok, idx);
   out.label = replace_all(out.label, kTok, idx);
@@ -221,6 +229,15 @@ Widget substitute_index(const Widget &w, int index) {
   out.background.status = replace_all(out.background.status, kTok, idx);
   out.poster = replace_all(out.poster, kTok, idx); // §5.13
   out.emoji = replace_all(out.emoji, kTok, idx);   // §5.11 a post's own shortcodes
+  // §5.20 rich text: a row's runs (runs: feed.items.{i}.runs) and its handlers
+  out.runs_src = replace_all(out.runs_src, kTok, idx);
+  out.on_link = replace_all(out.on_link, kTok, idx);
+  for (TextRunSpec &r : out.runs) {
+    r.text = replace_all(r.text, kTok, idx);
+    r.href = replace_all(r.href, kTok, idx);
+    r.on_click = replace_all(r.on_click, kTok, idx);
+    r.tooltip = replace_all(r.tooltip, kTok, idx);
+  }
   // §12: a repeated MOUNT (Widget::scope set) gets a per-instance sub-prefix — append the loop
   // index so each instance's fragment binds to its OWN state subtree (includes.<as>.<i>), rather
   // than all N instances sharing one, which would violate repeat's per-instance-state contract.
@@ -246,45 +263,43 @@ Widget substitute_index(const Widget &w, int index) {
 
 // --- custom widget type registry (§ extensibility) --------------------------
 namespace {
-std::mutex &widget_mutex() {
-  static std::mutex m;
-  return m;
-}
-std::unordered_map<std::string, WidgetEmitFn> &widget_registry() {
-  static std::unordered_map<std::string, WidgetEmitFn> r;
-  return r;
-}
-// Widget types a BACKEND renders natively (no compositional emit fn) — so the loader does not warn
-// they are unregistered. Guarded by widget_mutex() like widget_registry().
-std::set<std::string> &known_widget_types() {
-  static std::set<std::string> s;
-  return s;
-}
-WidgetEmitFn lookup_widget(const std::string &type) {
-  std::lock_guard<std::mutex> lock(widget_mutex());
-  auto it = widget_registry().find(type);
-  return it != widget_registry().end() ? it->second : WidgetEmitFn{};
+// An app's custom widget types.
+struct widget_table {
+  static constexpr const char *app_slot = "cvc.ariadne.widget-types";
+  std::mutex m;
+  std::unordered_map<std::string, WidgetEmitFn> emitters;
+  // Widget types a BACKEND renders natively (no compositional emit fn) — so the loader does not
+  // warn they are unregistered.
+  std::set<std::string> known;
+};
+WidgetEmitFn lookup_widget(cvc::app &app, const std::string &type) {
+  widget_table &t = app.slot<widget_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  auto it = t.emitters.find(type);
+  return it != t.emitters.end() ? it->second : WidgetEmitFn{};
 }
 } // namespace
 
-void register_widget_type(const std::string &type, WidgetEmitFn emit) {
+void register_widget_type(cvc::app &app, const std::string &type, WidgetEmitFn emit) {
   if (!emit || type.empty())
     return;
-  std::lock_guard<std::mutex> lock(widget_mutex());
-  widget_registry()[type] = std::move(emit);
+  widget_table &t = app.slot<widget_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  t.emitters[type] = std::move(emit);
 }
 
-void register_known_widget_type(const std::string &type) {
+void register_known_widget_type(cvc::app &app, const std::string &type) {
   if (type.empty())
     return;
-  std::lock_guard<std::mutex> lock(widget_mutex());
-  known_widget_types().insert(type);
+  widget_table &t = app.slot<widget_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  t.known.insert(type);
 }
 
-bool has_widget_type(const std::string &type) {
-  std::lock_guard<std::mutex> lock(widget_mutex());
-  return widget_registry().find(type) != widget_registry().end() ||
-         known_widget_types().find(type) != known_widget_types().end();
+bool has_widget_type(cvc::app &app, const std::string &type) {
+  widget_table &t = app.slot<widget_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  return t.emitters.find(type) != t.emitters.end() || t.known.find(type) != t.known.end();
 }
 
 // --- the init: block runner (state_exec) --------------------------------------
@@ -674,6 +689,9 @@ namespace se = cvc::state_exec;
 // on an ancestor or a descendant of one), or one of those names answers otherwise. An expression
 // that read the clock, an expiry, or a node through a link is never kept. The writes are seen
 // through the tree root's childChanged, on whatever thread made them.
+// §5.20 the most runs a rich text takes (from an expression or a state path); extras are dropped.
+constexpr std::size_t kMaxRuns = 4096;
+
 class ReactiveEngine {
 public:
   // `has` answers (has? "name") in predicates (Runtime::has); empty leaves it unbound.
@@ -752,13 +770,10 @@ public:
         root.childChanged.connect([log = writes_](const std::string &path) { log->note(path); });
     ev_ = std::make_unique<se::stackless_evaluator>(env_);
     // Special-form gate: allow control flow, binding, functions, literals and loops (all
-    // step-capped or bounded); DENY the code-generation / object-graph forms. Static so the
-    // set is shared across every ReactiveEngine.
-    static const std::shared_ptr<const std::set<std::string>> kAllowedForms =
-        std::make_shared<const std::set<std::string>>(
-            std::set<std::string>{"if", "begin", "and", "or", "let", "while", "for", "lambda",
-                                  "defun", "set", "return", "quote", "yield", "break"});
-    ev_->restrict_special_forms(kAllowedForms);
+    // step-capped or bounded); DENY the code-generation / object-graph forms.
+    ev_->restrict_special_forms(std::make_shared<const std::set<std::string>>(
+        std::set<std::string>{"if", "begin", "and", "or", "let", "while", "for", "lambda", "defun",
+                              "set", "return", "quote", "yield", "break"}));
     resolve_data_settings();
   }
 
@@ -795,8 +810,8 @@ public:
   // the function it replaces, so the kept results go (each scope's map stays where it is).
   void bind_read_function(const std::string &name, const Runtime::ReadFunction &fn) {
     se::environment *env = env_.get();
-    env_->set(name, se::value_t(se::native_fn(
-                        [fn, env](std::span<const se::value_t> args) { return fn(args, *env); })));
+    env_->set(name,
+              se::value_t(se::native_fn([fn, env](se::call_args args) { return fn(args, *env); })));
     for (auto &[scope, kept] : cache_)
       kept.clear();
   }
@@ -856,6 +871,55 @@ public:
       out.push_back(display_string(o.value));
     }
     return {std::move(out), std::string()};
+  }
+
+  struct RunsOutcome {
+    std::vector<TextRunSpec> value; // empty on failure or nil
+    std::string error;              // empty on success
+    bool skipped = false;           // not evaluated: the frame's budget was spent
+  };
+
+  // Evaluate `src` to a rich text's runs (§5.20): a list of strings (plain runs) and dicts of
+  // text / style / href / tooltip; a lone string or dict is one run. A dict's on_click is not
+  // taken: runs a program computes are data, and data never runs. Capped at kMaxRuns.
+  RunsOutcome eval_runs(const std::string &src) {
+    const RawOutcome o = eval_raw(src);
+    if (!o.error.empty())
+      return {{}, o.error, o.skipped};
+    RunsOutcome out;
+    const auto field = [](const se::dict_ptr &d, const char *key) {
+      for (const auto &[k, v] : *d)
+        if (k == key)
+          return display_string(v);
+      return std::string();
+    };
+    const auto add = [&](const se::value_t &e) {
+      TextRunSpec r;
+      if (const auto *d = std::get_if<se::dict_ptr>(&e.v)) {
+        if (!*d)
+          return;
+        r.text = field(*d, "text");
+        r.style = field(*d, "style");
+        r.href = field(*d, "href");
+        r.tooltip = field(*d, "tooltip");
+      } else if (e.is_nil()) {
+        return;
+      } else {
+        r.text = display_string(e);
+      }
+      out.value.push_back(std::move(r));
+    };
+    if (const auto *l = std::get_if<se::list_ptr>(&o.value.v)) {
+      if (*l)
+        for (const se::value_t &e : **l) {
+          if (out.value.size() >= kMaxRuns)
+            break;
+          add(e);
+        }
+    } else {
+      add(o.value);
+    }
+    return out;
   }
 
   struct IntOutcome {
@@ -932,7 +996,7 @@ private:
       st.data_step_nodes = data_step_nodes_;
       // The render lane can't wait (docs/STATE_EXEC_EXCEPTIONS.md 3.3): an async function is
       // unbound here, and one reached anyway raises RuntimeError instead of parking or blocking.
-      const se::park_forbidden_scope no_parking;
+      const se::park_forbidden_scope no_parking(ev_->context());
       frame_.start();
       const charge_frame charge{frame_, st};
       se::value_t r = ev_->run(st, kMaxSteps, std::min(kMaxSeconds, remaining));
@@ -1036,16 +1100,16 @@ private:
         return;
       }
       se::native_fn inner = *fn;
-      env_->set(name, se::value_t(se::native_fn(
-                          [this, inner, live](std::span<const se::value_t> args) -> se::value_t {
-                            if (rec_) {
-                              if (live)
-                                rec_->live = true;
-                              else
-                                note_read(args);
-                            }
-                            return inner(args);
-                          })));
+      env_->set(name,
+                se::value_t(se::native_fn([this, inner, live](se::call_args args) -> se::value_t {
+                  if (rec_) {
+                    if (live)
+                      rec_->live = true;
+                    else
+                      note_read(args);
+                  }
+                  return inner(args);
+                })));
     };
     for (const char *name :
          {"state-get", "state-exists", "state-children", "state-data-get", "state-json"})
@@ -1328,6 +1392,17 @@ void static_channels(const cvc::state_exec::value_t &v, std::vector<std::string>
 }
 } // namespace
 
+namespace {
+// The owner ids of an app's Runtimes: each tags its processes on the app's scheduler.
+struct runtime_owner_ids {
+  static constexpr const char *app_slot = "cvc.ariadne.runtime-owner-ids";
+  std::atomic<std::uint64_t> next{0};
+};
+std::uint64_t next_runtime_owner_id(cvc::app &app) {
+  return app.slot<runtime_owner_ids>().next.fetch_add(1);
+}
+} // namespace
+
 struct Runtime::Impl {
   cvc::app &app;
   Backend *backend = nullptr;
@@ -1339,9 +1414,28 @@ struct Runtime::Impl {
   // clipboard, and (fullscreen [ON]) everywhere (#f where the window can't).
   void bind_backend_verbs(const std::shared_ptr<cvc::state_exec::environment> &env) const;
   // bind_backend_verbs by the kind of `group` (finish_context, the name probe): host_proxied in
-  // an `any` group, as they are elsewhere (null: group 0, the init lane).
+  // an `any` group, as they are elsewhere (null: group 0, the init lane). `host` is the
+  // program's async host (ictx.host), which (file-pick) parks it on.
   void install_backend_verbs(const std::shared_ptr<cvc::state_exec::environment> &env,
-                             cvc::state_exec::exec_group *group) const;
+                             cvc::state_exec::exec_group *group,
+                             cvc::state_exec::async_host &host) const;
+  // §10.8 (file-pick): whether a picker is open (one at a time), and the Runtime's own "Open
+  // file" window, drawn by render() where the host has no picker. Shared with the verb, as a
+  // program may outlive this Runtime. Drawn and opened on the drawing thread; `cancel` is set by a
+  // killed program's hook, from wherever that runs, and render() closes the window then.
+  struct FilePickHub {
+    std::mutex m;
+    bool busy = false;
+    std::atomic<bool> cancel{false};
+    ComposedFilePicker composed;
+  };
+  std::shared_ptr<FilePickHub> file_pick = std::make_shared<FilePickHub>();
+  // (file-pick), (file-info) and (file-forget), bound into the program's env as they are in every
+  // group (install_backend_verbs): file-info and file-forget lock the app's PickedFiles, and
+  // file-pick parks its program on `host` and opens the picker on the host thread: through the
+  // host-call queue of the pump_all holding `group` (null: group 0, the init lane, inline).
+  void bind_file_verbs(const std::shared_ptr<cvc::state_exec::environment> &env,
+                       cvc::state_exec::exec_group *group, cvc::state_exec::async_host &host) const;
 
   // What this host provides (requires:, has?). The names a program can reference are read from a
   // probe env built exactly like an action's, then cached; the cache is rebuilt when a provider is
@@ -1355,7 +1449,7 @@ struct Runtime::Impl {
   mutable std::set<std::string> names;
   void load_names() const; // names_mutex held
   bool has_function(const std::string &name) const {
-    if (cvc::state_exec::stackless_evaluator::all_special_forms().count(name))
+    if (cvc::state_exec::stackless_evaluator::is_special_form(name))
       return true;
     std::lock_guard<std::mutex> lock(names_mutex);
     load_names();
@@ -1363,16 +1457,17 @@ struct Runtime::Impl {
   }
   HostFacts facts() const {
     HostFacts f;
+    f.app = &app;
     if (backend)
       f.caps = backend->capabilities();
     f.scene = scene_capable;
     f.scene_shaders = scene_capable && scene_shaders;
-    const NetHostStatus net = net_host_status();
+    const NetHostStatus net = net_host_status(app);
     f.net = net.enabled;
     f.net_auth = net.auth;
     f.net_auth_persist = net.persist;
-    f.media_player = media::have_player_factory(); // §5.13
-    f.media = f.media_player && media::may_play_here();
+    f.media_player = media::have_player_factory(app); // §5.13
+    f.media = f.media_player && media::may_play_here(app);
     f.oidc = net.oidc;
     f.oidc_loopback = net.oidc && net.oidc_flows.loopback;
     f.oidc_device = net.oidc && net.oidc_flows.device;
@@ -1384,7 +1479,7 @@ struct Runtime::Impl {
   bool has(const std::string &name) const {
     if (is_capability_token(name))
       return capability_holds(name, facts());
-    return has_function(name) || is_builtin_widget_type(name) || has_widget_type(name);
+    return has_function(name) || is_builtin_widget_type(name) || has_widget_type(app, name);
   }
 
   // §12 channel enforcement: the document's channel policy, installed on every action/resident
@@ -1494,6 +1589,9 @@ struct Runtime::Impl {
   // `autofocus:` widgets drawn last frame and this one, by tree position (and repeat index): one
   // takes focus when it appears, not on every frame it stays.
   std::set<std::string> autofocus_shown, autofocus_now;
+  // §5.9 windows drawn maximized last frame and this one (their tree.<id>.maximized paths): one
+  // that becomes maximized comes to the front.
+  std::set<std::string> maximized_shown, maximized_now;
   void autofocus(const Widget &inst, int i);
   // §3: last successful repeat-count per expression. A reactive repeat-count eval fail-safes to 0
   // on a transient per-frame budget exhaustion (reactive eval is slow in wasm, and video decode can
@@ -1506,6 +1604,10 @@ struct Runtime::Impl {
   // Kind::TfEditor parse caches, one per editor instance ("<model path>#<id>"): a state string is
   // re-parsed only when it changes.
   std::unordered_map<std::string, TfEditorCache> tf_caches;
+  // Kind::Chart parse caches, one per chart instance: a series is re-parsed only when its text
+  // changes. Swept of the charts no frame drew for a while (`chart_frame` counts render()s).
+  std::unordered_map<std::string, ChartCache> chart_caches;
+  std::uint64_t chart_frame = 0;
 
   // §5.11 pictures by URI: loaded off the frame by the cache, published to the backend under the
   // cache's names (each once per raster, tracked in `published` against the backend it went to).
@@ -1538,6 +1640,19 @@ struct Runtime::Impl {
   // text the map gives; where the backend can't put a picture in a line, the text with them as
   // their `:name:`. False when the map names none of them (the caller draws the line as it is).
   bool emit_text_runs(const Widget &w, const char *label, const std::string &value, bool literal);
+  // §5.11: `value`'s `:name:`s that the emoji: map at `map` (a resolved path) names, appended to
+  // `out` as runs of `style` in link `link`: a picture where `pictures_here` (the backend draws one
+  // in a line), else its :name:, and a name the map gives text for as that text. `plain` gets the
+  // line with the map's text in it and its pictures as their :name:; `pictures` says whether one
+  // went in. False when the map names none of them (nothing is appended).
+  bool expand_emoji(const std::string &value, const std::string &map, bool pictures_here,
+                    std::vector<TextRun> &out, std::string &plain, bool &pictures, unsigned style,
+                    int link);
+  // §5.20 a text: with runs:: the paragraph (Backend::rich_text) and the link the user activated,
+  // whose handler runs (inner_click: the text's own on_click doesn't, nor a group's around it).
+  void emit_rich_text(const Widget &w, const char *label, bool &inner_click);
+  std::vector<TextRunSpec> eval_runs(const std::string &expr);
+  std::unordered_map<std::string, std::vector<TextRunSpec>> last_good_runs;
   // §5.11: publish a ready picture once per raster generation; keep a status: key current.
   void publish_media(const media::ImageView &v);
   void write_media_status(const std::string &status_path, const media::ImageView &v);
@@ -1592,10 +1707,9 @@ struct Runtime::Impl {
 
   // §4.7 action lane: a unique owner tag for this Runtime's processes on the app-wide
   // scheduler (app.exec_scheduler()), or its own group's, so teardown reaps exactly this
-  // document's process group via kill_owner. Monotonic so two Runtimes on the same prefix never
-  // collide.
-  static std::atomic<uint64_t> owner_seq;
-  std::string owner_ = "ari#" + std::to_string(owner_seq.fetch_add(1)) + ":" + prefix;
+  // document's process group via kill_owner. Counted per app (the app's Runtimes share its
+  // scheduler or groups it built), so two Runtimes on the same prefix never collide.
+  std::string owner_ = "ari#" + std::to_string(next_runtime_owner_id(app)) + ":" + prefix;
 
   Impl(cvc::app &a, std::string p) : app(a), prefix(std::move(p)) {}
   ~Impl();
@@ -1984,8 +2098,12 @@ struct Runtime::Impl {
     // The menubar already has a menu of this title (fem_gallery.ari's own "Windows"): the items go
     // at the end of that one, after a separator, rather than in a second menu of the same name.
     bool merged = false;
-    // The windows no menu item of the document already toggles: title, resolved open-state path.
-    std::vector<std::pair<std::string, std::string>> items;
+    // The windows no menu item of the document already toggles: title, resolved open-state and
+    // raise paths.
+    struct Item {
+      std::string title, open_path, raise_path;
+    };
+    std::vector<Item> items;
     // The windows a `repeat:` makes (conference_roster's per-peer cameras): their template in
     // `root` and the scope it resolves in. How many there are changes, so each frame's menu lists
     // that frame's instances, each under its own title.
@@ -2503,10 +2621,9 @@ void Runtime::Impl::emit_node(const Widget &w) {
     // it fires once (not every frame). Opening a closed window + raising it = set both keys in the
     // handler.
     const std::string raise_path = resolve("tree." + id + ".raise");
-    if (read_string(app, raise_path) == "1") {
-      b.focus_next_window();
+    bool raise = read_string(app, raise_path) == "1";
+    if (raise)
       write<std::string>(app, raise_path, ""); // consume the one-shot
-    }
     // A window may BIND its visible title (e.g. a per-peer camera window titled by the peer's
     // name): resolve w.bind as the title when present, else the static label. begin_window uses
     // "title###id", so the title may change each frame while the ###id identity stays stable.
@@ -2525,10 +2642,19 @@ void Runtime::Impl::emit_node(const Widget &w) {
     if (!can_maximize)
       maximized = false;
     const bool was_maximized = maximized;
+    // A window that is maximized now and was not drawn maximized last frame (its button, a double
+    // click, or a document writing the key) comes to the front, as it covers the others.
+    if (maximized && !maximized_shown.count(max_path))
+      raise = true;
+    if (raise)
+      b.focus_next_window();
+    b.next_window_resizable(w.resizable);
     const bool visible = b.begin_window(wtitle.c_str(), id.c_str(), w.size, w.frame_border,
                                         w.closable ? &open : nullptr);
     if (can_maximize && maximized != was_maximized)
       write<int>(app, max_path, maximized ? 1 : 0); // its button
+    if (maximized)
+      maximized_now.insert(max_path);
     // Persist the current geometry. When the backend can't report a size (a collapsed window),
     // back-fill it from the seed so a collapse doesn't clobber the stored content size.
     WindowGeom persist = b.window_geometry();
@@ -2585,6 +2711,10 @@ void Runtime::Impl::emit_node(const Widget &w) {
   }
 
   case Kind::Text:
+    if (w.has_runs) { // §5.20 rich text: styled runs and links in a paragraph
+      emit_rich_text(w, label, inner_click);
+      break;
+    }
     if (w.literal_text) {
       // §5.11 emoji: the caption's `:name:`s as pictures, where the backend draws them in a line.
       if (!w.emoji.empty() && emit_text_runs(w, "", label, true))
@@ -2655,6 +2785,19 @@ void Runtime::Impl::emit_node(const Widget &w) {
     if (!w.overlay.empty())
       overlay = is_expr(w.overlay) ? eval_text(w.overlay) : read_string(app, resolve(w.overlay));
     b.plot_lines(label, values, w.lo, w.hi, overlay, w.plot_height);
+    break;
+  }
+
+  case Kind::Chart: {
+    ChartContext ctx{app,
+                     b,
+                     [this](const std::string &bind) { return resolve(bind); },
+                     [this](const std::string &expr) { return eval_text(expr); },
+                     [this](const std::string &event) { enqueue(event); },
+                     [this](const std::string &msg) { warn_once(msg); },
+                     chart_caches,
+                     chart_frame};
+    emit_chart(ctx, w);
     break;
   }
 
@@ -2911,7 +3054,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
     //  2. else the BACKEND's novel-primitive escape (custom_widget) — the core reads
     //     the bound value, hands it in, and writes back on the committed edge;
     //  3. else a placeholder (neither knows this type).
-    if (const WidgetEmitFn fn = lookup_widget(w.custom_type)) {
+    if (const WidgetEmitFn fn = lookup_widget(app, w.custom_type)) {
       WidgetEmitContext ctx;
       ctx.emit = [this](const Widget &child) { emit(child); };
       ctx.read = [this](const std::string &bind) { return read_string(app, resolve(bind)); };
@@ -3112,8 +3255,9 @@ void Runtime::Impl::emit_media_image(const Widget &w, const std::string &uri, co
   write_media_status(w.media_status, v);
 }
 
-bool Runtime::Impl::emit_text_runs(const Widget &w, const char *label, const std::string &value,
-                                   bool literal) {
+bool Runtime::Impl::expand_emoji(const std::string &value, const std::string &map,
+                                 bool pictures_here, std::vector<TextRun> &out, std::string &plain,
+                                 bool &pictures, unsigned style, int link) {
   if (value.find(':') == std::string::npos)
     return false;
   // A `:name:` as txwtf, Slack and Mastodon find one: 1-64 of [A-Za-z0-9_+-] between two colons
@@ -3123,13 +3267,17 @@ bool Runtime::Impl::emit_text_runs(const Widget &w, const char *label, const std
     return (u < 0x80 && std::isalnum(u)) || c == '_';
   };
   const auto name_char = [&](char c) { return word(c) || c == '+' || c == '-'; };
-  const std::string map = resolve(w.emoji);
-  // A terminal can't put a picture in a line: its pictures aren't fetched (or played) at all.
-  const bool pictures_here = !backend->capabilities().terminal;
-  std::vector<TextRun> runs;
-  std::string text;  // the run being built
-  std::string plain; // the line with the text the map gives, its pictures as their :name:
-  bool changed = false, pictures = false;
+  const std::size_t first = out.size();
+  const std::size_t plain_at = plain.size();
+  std::string text; // the run being built
+  bool changed = false;
+  const auto text_run = [&](std::string t) {
+    TextRun r;
+    r.text = std::move(t);
+    r.style = style;
+    r.link = link;
+    out.push_back(std::move(r));
+  };
   std::size_t i = 0;
   while (i < value.size()) {
     if (value[i] == ':' && (i == 0 || !word(value[i - 1]))) {
@@ -3188,9 +3336,14 @@ bool Runtime::Impl::emit_text_runs(const Widget &w, const char *label, const std
             pic = media_picture(rq, v);
           }
           if (!text.empty())
-            runs.push_back(TextRun{std::move(text), std::string()});
+            text_run(std::move(text));
           text.clear();
-          runs.push_back(TextRun{value.substr(i, len + 2), pic});
+          TextRun r;
+          r.text = value.substr(i, len + 2);
+          r.image = pic;
+          r.style = style;
+          r.link = link;
+          out.push_back(std::move(r));
           plain += value.substr(i, len + 2);
           changed = pictures = true;
           i = j + 1;
@@ -3208,10 +3361,25 @@ bool Runtime::Impl::emit_text_runs(const Widget &w, const char *label, const std
     text += value[i];
     plain += value[i++];
   }
-  if (!changed)
+  if (!changed) {
+    out.resize(first);
+    plain.resize(plain_at);
     return false;
+  }
   if (!text.empty())
-    runs.push_back(TextRun{std::move(text), std::string()});
+    text_run(std::move(text));
+  return true;
+}
+
+bool Runtime::Impl::emit_text_runs(const Widget &w, const char *label, const std::string &value,
+                                   bool literal) {
+  // A terminal can't put a picture in a line: its pictures aren't fetched (or played) at all.
+  const bool pictures_here = !backend->capabilities().terminal;
+  std::vector<TextRun> runs;
+  std::string plain; // the line with the text the map gives, its pictures as their :name:
+  bool pictures = false;
+  if (!expand_emoji(value, resolve(w.emoji), pictures_here, runs, plain, pictures, 0u, -1))
+    return false;
   const float *rgb = w.has_text_color ? w.text_color : nullptr;
   if (pictures) {
     if (label && *label)
@@ -3229,6 +3397,127 @@ bool Runtime::Impl::emit_text_runs(const Widget &w, const char *label, const std
   else
     backend->text_value(label, plain);
   return true;
+}
+
+namespace {
+
+// §5.20 the runs a state path holds: a list as state-set-tree writes one (its node holds the
+// count, its elements are children 0..n-1, each a dict of text / style / href / tooltip or a
+// plain value). A node with no elements holds none: an empty list is a "0" with no children,
+// which is not a run of text. Read through links.
+std::vector<TextRunSpec> read_runs(cvc::app &app, const std::string &path, std::size_t cap) {
+  std::vector<TextRunSpec> out;
+  try {
+    cvc::state *n = read_node(app, path);
+    if (!n || n->numChildren() == 0)
+      return out;
+    const auto field = [](cvc::state *e, const char *key) {
+      cvc::state *f = e->findThroughLinks(key);
+      return f ? f->value() : std::string();
+    };
+    for (std::size_t i = 0; i < cap; ++i) {
+      cvc::state *e = n->findThroughLinks(std::to_string(i));
+      if (!e)
+        break;
+      TextRunSpec r;
+      if (e->numChildren() == 0) {
+        r.text = e->value();
+      } else {
+        r.text = field(e, "text");
+        r.style = field(e, "style");
+        r.href = field(e, "href");
+        r.tooltip = field(e, "tooltip");
+      }
+      out.push_back(std::move(r));
+    }
+  } catch (const std::exception &) {
+  }
+  return out;
+}
+
+} // namespace
+
+std::vector<TextRunSpec> Runtime::Impl::eval_runs(const std::string &expr) {
+  const ReactiveEngine::RunsOutcome o = ensure_reactive().eval_runs(expr);
+  if (o.skipped) { // last frame's runs (none: empty), not a warning
+    ++reactive_skips;
+    const auto it = last_good_runs.find(expr);
+    return it != last_good_runs.end() ? it->second : std::vector<TextRunSpec>();
+  }
+  if (!o.error.empty())
+    warn_once(o.error);
+  else
+    keep_last(last_good_runs, expr, o.value);
+  return o.value;
+}
+
+void Runtime::Impl::emit_rich_text(const Widget &w, const char *label, bool &inner_click) {
+  // The document's own list (whose runs may run on_click:), or the runs a state path or an
+  // expression gives (data: their links take on_link:).
+  const bool literal = w.runs_src.empty();
+  std::vector<TextRunSpec> computed;
+  if (!literal)
+    computed =
+        is_expr(w.runs_src) ? eval_runs(w.runs_src) : read_runs(app, resolve(w.runs_src), kMaxRuns);
+  const std::vector<TextRunSpec> &specs = literal ? w.runs : computed;
+  constexpr std::size_t kMaxBytes = 256 * 1024; // a paragraph's text, all its runs together
+  const std::string map = w.emoji.empty() ? std::string() : resolve(w.emoji);
+  const bool pictures_here = !backend->capabilities().terminal;
+  std::vector<TextRun> runs;
+  std::vector<std::size_t> link_spec; // per link: the run it is
+  RichTextOptions o;
+  if (label && *label)
+    runs.push_back(TextRun{std::string(label) + ": ", std::string()});
+  std::size_t bytes = 0;
+  for (std::size_t i = 0; i < specs.size(); ++i) {
+    const TextRunSpec &s = specs[i];
+    if (s.text.empty())
+      continue;
+    if ((bytes += s.text.size()) > kMaxBytes) {
+      warn_once("ari: text '" + w.label + "': its runs are over 256 KiB -- the rest is left out");
+      break;
+    }
+    int link = -1;
+    if (!s.href.empty() || (literal && !s.on_click.empty())) {
+      link = static_cast<int>(link_spec.size());
+      link_spec.push_back(i);
+      o.link_tips.push_back(s.tooltip.empty() ? s.href : s.tooltip);
+    }
+    const unsigned style = parse_text_style(s.style);
+    std::string plain;
+    bool pictures = false;
+    if (map.empty() ||
+        !expand_emoji(s.text, map, pictures_here, runs, plain, pictures, style, link)) {
+      TextRun r;
+      r.text = s.text;
+      r.style = style;
+      r.link = link;
+      runs.push_back(std::move(r));
+    }
+  }
+  o.rgb = w.has_text_color ? w.text_color : nullptr;
+  o.wrap = w.wrap;
+  o.max_lines = w.text_max_lines;
+  if (w.size.w.unit == Unit::Px && w.size.w.value > 0.0f)
+    o.max_width = w.size.w.value; // size: N
+  o.links = static_cast<int>(link_spec.size());
+  const RichTextEvent ev = backend->rich_text(runs, o);
+  if (ev.clicked < 0 || ev.clicked >= o.links)
+    return;
+  // The link's: a run's own on_click (the document's list), else the text's on_link, with what
+  // the link is in `event`.
+  const std::size_t at = link_spec[static_cast<std::size_t>(ev.clicked)];
+  const TextRunSpec &s = specs[at];
+  const std::string &handler = literal && !s.on_click.empty() ? s.on_click : w.on_link;
+  if (handler.empty())
+    warn_once("ari: a link in text '" + w.label + "' was activated, but it has no on_link:");
+  else
+    enqueue_fields(handler, {{"href", s.href},
+                             {"text", s.text},
+                             {"index", std::to_string(at)},
+                             {"link", std::to_string(ev.clicked)}});
+  ++clicks_fired; // the link's, not the text's own on_click nor a clickable card's around it
+  inner_click = true;
 }
 
 void Runtime::Impl::publish_media(const media::ImageView &v) {
@@ -3345,18 +3634,18 @@ Runtime::Impl::PlayerSlot &Runtime::Impl::player_slot(const std::string &key,
     p.decided = true;
     if (ps.uri.empty()) {
       p.state = media::PlayerState::Idle;
-    } else if (!media::have_player_factory()) {
+    } else if (!media::have_player_factory(app)) {
       p.state = media::PlayerState::Unsupported;
       p.error = "no player in this host (ari-media and arigl play it)";
-    } else if (ps.audio && !media::may_play_here()) { // silent pictures play anywhere
+    } else if (ps.audio && !media::may_play_here(app)) { // silent pictures play anywhere
       p.state = media::PlayerState::Remote;
-      p.error = media::in_ssh_session() && media::play_policy() == media::PlayPolicy::Auto
+      p.error = media::in_ssh_session() && media::play_policy(app) == media::PlayPolicy::Auto
                     ? "not played over SSH (it would play remotely)"
                     : "playing is off here (--media-play never)";
     } else {
       media::PlayerSource src = ps;
       src.base = media_base;
-      p.player = media::make_player(src);
+      p.player = media::make_player(app, src);
       p.state = p.player ? media::PlayerState::Loading : media::PlayerState::Unsupported;
       if (!p.player)
         p.error = "this host's player cannot play it";
@@ -3857,11 +4146,18 @@ void Runtime::Impl::render() {
       backend->end_main_menu_bar();
     }
     emit(root);
+    // §10.8 the Runtime's own "Open file" window, over the document, while a (file-pick) waits
+    // on it.
+    if (file_pick->cancel.exchange(false))
+      file_pick->composed.close();
+    file_pick->composed.emit(*backend);
   }
   players_end_walk(); // §5.13: a player whose widget this walk did not draw stops
   backend->end_frame();
   autofocus_shown.swap(autofocus_now);
   autofocus_now.clear();
+  maximized_shown.swap(maximized_now);
+  maximized_now.clear();
   // §4.6 on_hover_end: an item hovered last walk and not this one (the pointer left, or the item
   // went), in its own scope.
   for (const auto &[key, h] : hovered_last)
@@ -3871,13 +4167,15 @@ void Runtime::Impl::render() {
     }
   hovered_last.swap(hovered_now);
   hovered_now.clear();
+  if (++chart_frame % 64 == 0 && !chart_caches.empty())
+    sweep_chart_caches(chart_caches, chart_frame);
 }
 
 void Runtime::Impl::plan_windows_menu() {
   WindowsMenuPlan p;
   std::set<std::string> toggled;   // open-state paths a menu item of the document already toggles
   std::set<std::string> bar_menus; // the titles of the menus straight in a menubar
-  std::vector<std::pair<std::string, std::string>> windows;
+  std::vector<WindowsMenuPlan::Item> windows;
   // Walk the tree with the scope each node resolves its binds in (a load: mount scopes its
   // children, §12). A repeated widget is made per frame: a repeated window's instances are listed
   // as the menu is drawn (repeated_windows).
@@ -3913,8 +4211,9 @@ void Runtime::Impl::plan_windows_menu() {
           break;
         case Kind::Window: {
           const std::string &id = w.id.empty() ? w.label : w.id;
-          windows.emplace_back(w.label.empty() ? id : w.label,
-                               resolve_bind(scope, "tree." + id + ".open"));
+          windows.push_back({w.label.empty() ? id : w.label,
+                             resolve_bind(scope, "tree." + id + ".open"),
+                             resolve_bind(scope, "tree." + id + ".raise")});
           p.any_closable = p.any_closable || w.closable;
           in_menubar = false;
           break;
@@ -3927,7 +4226,7 @@ void Runtime::Impl::plan_windows_menu() {
       };
   walk(root, prefix, false);
   for (auto &win : windows)
-    if (!toggled.count(win.second))
+    if (!toggled.count(win.open_path))
       p.items.push_back(std::move(win));
   p.merged = !p.placed && bar_menus.count(p.title) != 0;
   p.toggled = std::move(toggled);
@@ -3936,7 +4235,7 @@ void Runtime::Impl::plan_windows_menu() {
 
 std::vector<Runtime::Impl::RepeatedWindow> Runtime::Impl::repeated_windows() {
   std::vector<RepeatedWindow> out;
-  static const std::string kTok = "{i}";
+  constexpr std::string_view kTok = kIndexToken;
   for (const auto &[tmpl, scope] : windows_menu.repeated) {
     const int n = eval_count(tmpl->repeat); // the count its windows are drawn with this frame
     for (int i = 0; i < n; ++i) {
@@ -3980,28 +4279,26 @@ void Runtime::Impl::emit_windows_menu(const std::string &title) {
 
 void Runtime::Impl::emit_windows_menu_items() {
   Backend &b = *backend;
-  for (const auto &item : windows_menu.items) {
-    const bool cur = read_bool_or_seed(app, item.second, 1) != 0;
-    const BoolEdit e = b.menu_item_toggle(item.first.c_str(), cur);
-    if (e.committed)
-      write<int>(app, item.second, e.value ? 1 : 0);
-  }
+  // As a window manager's Windows menu: picking a window shows it, in front. Its tick says it is
+  // open; picking an open one raises it rather than closing it (its X closes it).
+  const auto item = [&](const std::string &title, const std::string &open_path,
+                        const std::string &raise_path) {
+    const bool cur = read_bool_or_seed(app, open_path, 1) != 0;
+    if (b.menu_item_toggle(title.c_str(), cur).committed) {
+      write<int>(app, open_path, 1);
+      write<std::string>(app, raise_path, "1");
+    }
+  };
+  for (const WindowsMenuPlan::Item &it : windows_menu.items)
+    item(it.title, it.open_path, it.raise_path);
   for (const RepeatedWindow &r : repeated_windows()) {
     b.push_id(r.id.c_str()); // two instances may share a title (the label, before their names)
-    const bool cur = read_bool_or_seed(app, r.open_path, 1) != 0;
-    const BoolEdit e = b.menu_item_toggle(r.title.c_str(), cur);
-    if (e.committed) {
-      write<int>(app, r.open_path, e.value ? 1 : 0);
-      if (e.value) // reopened: in front, where it can be seen
-        write<std::string>(app, r.raise_path, "1");
-    }
+    item(r.title, r.open_path, r.raise_path);
     b.pop_id();
   }
 }
 
 // --------------------------------------------------------------------------
-
-std::atomic<uint64_t> Runtime::Impl::owner_seq{0};
 
 Runtime::Impl::~Impl() {
   // Host thread, outside a pump: the kills below would race a worker on the group, and its
@@ -4407,7 +4704,7 @@ bool Runtime::Impl::has_snapshot(const std::string &name) const {
     if (names.count(name))
       return true;
   }
-  return is_builtin_widget_type(name) || has_widget_type(name);
+  return is_builtin_widget_type(name) || has_widget_type(app, name);
 }
 
 std::function<bool(const std::string &)>
@@ -4448,13 +4745,18 @@ void Runtime::Impl::finish_context(ActionContext &ac, cvc::state_exec::exec_grou
   se::register_intrinsics(ac.env, &ac.ictx);
   // Host program-lane intrinsics (nav verbs, …), AFTER the standard ones (add or override).
   install_providers(app, ac.env, ac.ictx, group);
-  install_backend_verbs(ac.env, group);
+  install_backend_verbs(ac.env, group, *ac.ictx.host);
   bind_has(ac.env, program_has(group));
 }
 
 void Runtime::Impl::install_backend_verbs(const cvc::state_exec::environment_ptr &env,
-                                          cvc::state_exec::exec_group *group) const {
+                                          cvc::state_exec::exec_group *group,
+                                          cvc::state_exec::async_host &host) const {
   namespace se = cvc::state_exec;
+  // The file verbs bind into the env as they are, in every group (bind_file_verbs): (file-info)
+  // and (file-forget) are thread-safe, and (file-pick) is async, which a host_proxied wrapper
+  // could not park; it opens its picker on the host thread itself.
+  bind_file_verbs(env, group, host);
   // The backend's verbs drive its window and clipboard, which are the host thread's: they are
   // host_proxied (S1-Q7). In an `any` group each native runs on the pump_all caller's thread
   // (exec_group::install), as install_providers binds a host_proxied provider; in group 0, in a
@@ -4482,9 +4784,10 @@ void Runtime::Impl::bind_backend_verbs(
     const std::shared_ptr<Backend *> b = ref.lock();
     return b ? *b : nullptr;
   };
+  cvc::app *const on_app = &app;
   if (backend && backend->capabilities().clipboard)
     se::builtins::register_fn(
-        env, "clipboard-set", [live](std::span<const se::value_t> args) -> se::value_t {
+        env, "clipboard-set", [live, on_app](std::span<const se::value_t> args) -> se::value_t {
           if (args.size() != 1)
             throw se::dsl_error("TypeError", "clipboard-set: expected one argument, the text");
           const auto *text = std::get_if<std::string>(&args[0].v);
@@ -4492,7 +4795,7 @@ void Runtime::Impl::bind_backend_verbs(
             throw se::dsl_error("TypeError",
                                 "clipboard-set: the text is a string, not " + args[0].type_name());
           Backend *b = live();
-          return se::value_t(b && b->set_clipboard(*text));
+          return se::value_t(b && b->set_clipboard(*on_app, *text));
         });
   se::builtins::register_fn(
       env, "fullscreen", [live](std::span<const se::value_t> args) -> se::value_t {
@@ -4503,6 +4806,217 @@ void Runtime::Impl::bind_backend_verbs(
         if (args.empty())
           return se::value_t(can && b->is_fullscreen());
         return se::value_t(can && b->set_fullscreen(args[0].is_truthy()));
+      });
+}
+
+namespace {
+
+// {handle name size type}: a picked file as a program sees it; never its path or its bytes.
+cvc::state_exec::value_t file_dict(const std::string &handle, const FileSource &f) {
+  namespace se = cvc::state_exec;
+  return se::make_dict({
+      {"handle", se::value_t(handle)},
+      {"name", se::value_t(f.name())},
+      {"size", se::value_t(static_cast<int64_t>(f.size()))},
+      {"type", se::value_t(f.type())},
+  });
+}
+
+std::string trimmed(const std::string &s) {
+  const std::size_t a = s.find_first_not_of(" \t"), b = s.find_last_not_of(" \t");
+  return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
+}
+
+// (file-pick [OPTS])'s options: accept (a list of ".ext" / "type/sub" / "type/*", or one string of
+// them joined by commas, as an <input accept> is), multiple, title, dir.
+FilePickRequest file_pick_request(std::span<const cvc::state_exec::value_t> args) {
+  namespace se = cvc::state_exec;
+  FilePickRequest req;
+  if (args.size() > 1)
+    throw se::dsl_error("TypeError", "file-pick: expected at most one argument, an options dict");
+  if (args.empty() || args[0].is_nil())
+    return req;
+  const se::dict_ptr *d = std::get_if<se::dict_ptr>(&args[0].v);
+  if (!d)
+    throw se::dsl_error("TypeError",
+                        "file-pick: the options are a dict, not " + args[0].type_name());
+  const auto text = [](const se::value_t &v, const char *key) {
+    const std::string *s = std::get_if<std::string>(&v.v);
+    if (!s)
+      throw se::dsl_error("TypeError", std::string("file-pick: '") + key + "' is a string");
+    return *s;
+  };
+  for (const auto &[key, v] : **d) {
+    if (key == "accept") {
+      std::vector<std::string> parts;
+      if (const se::list_ptr *l = std::get_if<se::list_ptr>(&v.v)) {
+        for (const se::value_t &e : **l)
+          parts.push_back(text(e, "accept"));
+      } else {
+        const std::string all = text(v, "accept");
+        for (std::size_t at = 0; at <= all.size();) {
+          const std::size_t comma = std::min(all.find(',', at), all.size());
+          parts.push_back(all.substr(at, comma - at));
+          at = comma + 1;
+        }
+      }
+      for (const std::string &raw : parts) {
+        const std::string p = trimmed(raw);
+        if (p.empty())
+          continue;
+        if (p[0] != '.' && p.find('/') == std::string::npos)
+          throw se::dsl_error("ValueError", "file-pick: an 'accept' entry is \".ext\", "
+                                            "\"type/subtype\" or \"type/*\", not \"" +
+                                                p + "\"");
+        req.accept.push_back(p);
+      }
+    } else if (key == "multiple") {
+      req.multiple = v.is_truthy();
+    } else if (key == "title") {
+      req.title = text(v, "title");
+    } else if (key == "dir") {
+      req.dir = text(v, "dir");
+    } else {
+      throw se::dsl_error("ValueError",
+                          "file-pick: no option '" + key + "' (accept, multiple, title, dir)");
+    }
+  }
+  return req;
+}
+
+std::string handle_arg(const char *verb, std::span<const cvc::state_exec::value_t> args) {
+  namespace se = cvc::state_exec;
+  const std::string *h = args.size() == 1 ? std::get_if<std::string>(&args[0].v) : nullptr;
+  if (!h)
+    throw se::dsl_error("TypeError",
+                        std::string(verb) + ": expected one argument, a handle file-pick returned");
+  return *h;
+}
+
+} // namespace
+
+void Runtime::Impl::bind_file_verbs(const std::shared_ptr<cvc::state_exec::environment> &env,
+                                    cvc::state_exec::exec_group *group,
+                                    cvc::state_exec::async_host &host) const {
+  namespace se = cvc::state_exec;
+  cvc::app *const app_ptr = &app;
+  const std::weak_ptr<FilePickHub> weak_hub = file_pick;
+  const std::weak_ptr<Backend *> ref = backend_ref;
+  // The wait is the user's, not the program's: an I/O call, charged one step however long it is.
+  se::async_options io;
+  io.io = true;
+  // (file-pick [OPTS]) / (file-pick-async ...): ask the user for a file; the program parks until
+  // they pick or cancel. A list of {handle name size type}, empty when they cancelled. Bound where
+  // there is a backend, so somewhere to ask: (has? "file-pick"). The program parks on its own
+  // host (ictx.host: its group's, or the app's in group 0). The call starts on whatever thread
+  // pumps the program, a pool worker in an `any` group: it claims the hub there, under its lock,
+  // and opens the picker on the host thread (exec_pool::run_on_host for the program's group;
+  // inline when this is that thread, or in group 0), where the window and the Runtime's own picker
+  // are drawn. The group is the env's, as `host` is: both live as long as its programs. The answer
+  // goes through the
+  // host's finisher, as the host may be gone by then (an isolated document's group goes with its
+  // Runtime).
+  if (backend)
+    se::register_async_fn(
+        env, host, "file-pick",
+        [app_ptr, weak_hub, ref, group,
+         &host](std::span<const se::value_t> args) -> se::async_work {
+          const FilePickRequest req = file_pick_request(args);
+          se::async_work work; // no kernel: a program that can't park can't wait for the user
+          work.start = [app_ptr, weak_hub, ref, req, group,
+                        fin = host.make_finisher()](const std::shared_ptr<se::async_call> &call) {
+            const std::shared_ptr<FilePickHub> hub = weak_hub.lock();
+            if (!hub || !ref.lock())
+              throw std::runtime_error("file-pick: the document is gone");
+            {
+              std::lock_guard<std::mutex> lock(hub->m);
+              if (hub->busy)
+                throw std::runtime_error("file-pick: a file picker is open already");
+              hub->busy = true;
+              hub->cancel = false;
+            }
+            auto settled = std::make_shared<std::atomic<bool>>(false);
+            const std::weak_ptr<FilePickHub> weak = hub;
+            FilePickDone done = [app_ptr, fin, call, settled,
+                                 weak](std::vector<std::shared_ptr<FileSource>> files,
+                                       std::string error) {
+              if (settled->exchange(true))
+                return;
+              if (const std::shared_ptr<FilePickHub> h = weak.lock()) {
+                std::lock_guard<std::mutex> lock(h->m);
+                h->busy = false;
+              }
+              if (call->cancel_requested())
+                return; // its host may be gone
+              se::value_t value;
+              std::exception_ptr failure;
+              try {
+                if (!error.empty())
+                  throw std::runtime_error("file-pick: " + error);
+                PickedFiles &table = picked_files(*app_ptr);
+                if (table.size() + files.size() > PickedFiles::kMaxFiles)
+                  throw std::runtime_error("file-pick: the app holds " +
+                                           std::to_string(PickedFiles::kMaxFiles) +
+                                           " files already; (file-forget H) some first");
+                std::vector<se::value_t> out;
+                for (const std::shared_ptr<FileSource> &f : files)
+                  if (f)
+                    out.push_back(file_dict(table.add(f), *f));
+                value = se::make_list(std::move(out));
+              } catch (...) {
+                failure = std::current_exception();
+              }
+              if (call->settle(std::move(value), failure))
+                fin.finish(call);
+            };
+            call->on_cancel([weak, settled] {
+              if (settled->exchange(true))
+                return;
+              if (const std::shared_ptr<FilePickHub> h = weak.lock()) {
+                std::lock_guard<std::mutex> lock(h->m);
+                h->busy = false;
+                h->cancel = true; // render() closes the window
+              }
+            });
+            std::function<void()> open = [weak, ref, req, settled, done] {
+              if (settled->load())
+                return; // cancelled before the host thread came to it
+              const std::shared_ptr<FilePickHub> h = weak.lock();
+              const std::shared_ptr<Backend *> drawing = ref.lock();
+              if (!h || !drawing) {
+                done({}, "the document is gone");
+                return;
+              }
+              h->composed.close(); // one a cancelled program left (busy was clear)
+              if (*drawing && (*drawing)->pick_files(req, done))
+                return; // the host's own (arigl: the system's file dialog)
+              if (browser_pick_files(req, done))
+                return; // a browser page's <input type=file>
+              if (!*drawing) {
+                done({}, "there is no window here to pick a file in");
+                return;
+              }
+              h->composed.open(req, done); // drawn by render() from the next frame
+            };
+            if (group)
+              app_ptr->exec_pool().run_on_host(*group, std::move(open));
+            else
+              open();
+          };
+          return work;
+        },
+        io);
+  // (file-info H): {handle name size type} of a file the app holds, or nil.
+  se::builtins::register_fn(env, "file-info",
+                            [app_ptr](std::span<const se::value_t> args) -> se::value_t {
+                              const std::string h = handle_arg("file-info", args);
+                              const std::shared_ptr<FileSource> f = picked_files(*app_ptr).find(h);
+                              return f ? file_dict(h, *f) : se::value_t();
+                            });
+  // (file-forget H): let go of a picked file; #t when the app held it.
+  se::builtins::register_fn(
+      env, "file-forget", [app_ptr](std::span<const se::value_t> args) -> se::value_t {
+        return se::value_t(picked_files(*app_ptr).forget(handle_arg("file-forget", args)));
       });
 }
 
@@ -4948,6 +5462,8 @@ Runtime::Runtime(cvc::app &app, std::string prefix) : m_(new Impl(app, std::move
 
 Runtime::~Runtime() = default;
 
+cvc::app &Runtime::app() const { return m_->app; }
+
 void Runtime::Impl::load_names() const {
   namespace se = cvc::state_exec;
   const std::uint64_t generation = action_intrinsics_generation(app);
@@ -4957,7 +5473,7 @@ void Runtime::Impl::load_names() const {
   probe_env([&](const se::environment_ptr &env, se::intrinsics_context &ictx) {
     // As the document's programs get them: by kind in an `any` group, the backend's verbs too.
     install_providers(app, env, ictx, group_.get());
-    install_backend_verbs(env, group_.get());
+    install_backend_verbs(env, group_.get(), *ictx.host);
     for (const se::environment *e = env.get(); e; e = e->outer.get())
       for (const auto &kv : e->bindings)
         found.insert(kv.first);
@@ -5199,6 +5715,10 @@ std::uint64_t Runtime::reactive_eval_count() const {
   return m_->reactive ? m_->reactive->evaluations() : 0;
 }
 
+int Runtime::eval_count(const std::string &expr) {
+  return m_->eval_count(expr); // outside a walk: the document's own scope
+}
+
 void Runtime::set_reactive_frame_budget(double seconds) {
   m_->reactive_budget = seconds > 0.0 ? seconds : 0.0;
 }
@@ -5315,7 +5835,7 @@ void Runtime::drain_begin() {
   ++m.drains_; // the residents' restart clock
   // A sign-in in progress (oidc_host.h) takes its step first: a reply, a browser's redirect, a
   // device poll that is due. It writes its status to the state tree on this thread.
-  pump_oidc();
+  pump_oidc(m_->app);
   // Run the queued action events on the host thread, then clear. Never called
   // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7). The keys pressed since
   // the last drain queue theirs first.

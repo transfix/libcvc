@@ -137,15 +137,20 @@ public:
 
   // --- Groups (docs/STATE_EXEC_THREADED.md 4.1, 4.7, 4.10; Stage 1) ---
 
-  /// Use `r` (null: none) for this scheduler's tracked objects: it binds `r` on every entry that
-  /// can run DSL or track, and names it for its due check and its exit notes, so they reach `r`
-  /// whichever thread drives it. The owner keeps `r` alive, and collects and frees it after this
-  /// scheduler and its environments are gone. Unset, the thread's own registry is used, as today.
+  /// Use `r` (null: none) for this scheduler's tracked objects: its evaluation context has it, and
+  /// its due check and its exit notes name it, so they reach `r` whichever thread drives it. The
+  /// owner keeps `r` alive, and collects and frees it after this scheduler and its environments
+  /// are gone. Unset, its evaluator's own registry is used (made at the first use, collected and
+  /// freed with the scheduler).
   void set_cycle_registry(cycle_registry *r);
   /// The registry set_cycle_registry() gave, or null.
   cycle_registry *registry() const noexcept { return registry_; }
-  /// Use `s` (null: none) for math.random, bound with the registry. The owner keeps it alive.
+  /// Use `s` (null: none) for math.random, in its evaluation context. The owner keeps it alive.
   void set_random_stream(random_stream *s);
+  /// The context its processes' steps run in (exec_context): its registry and random stream, and
+  /// during a step the step's deadline and allocation guard. An exec_group's pump sets the group
+  /// in it.
+  exec_context &evaluation_context() { return evaluator_.context(); }
 
   /// RAII: the calling thread is this scheduler's pump owner while the scope lives (S1-Q4). The
   /// rule is "no owner, or me": it takes an unset owner, nests in a scope of the same thread, and
@@ -331,7 +336,7 @@ public:
 
   /// Process pointer of the process currently being stepped (nullptr if none).
   const process_ptr &current_process() const {
-    return current_proc_ ? *current_proc_ : no_process();
+    return current_proc_ ? *current_proc_ : no_process_;
   }
 
   /// Queue a watch event for a process by PID.
@@ -486,7 +491,7 @@ private:
   /// Per-path FIFO queue for messages sent when no receiver is waiting.
   std::unordered_map<std::string, std::queue<value_t>> pending_messages_;
 
-  static const process_ptr &no_process();
+  const process_ptr no_process_; // null: current_process() while none is stepped
 
   /// Select the next process to run based on scheduling policy.
   const process_ptr *select_process();
