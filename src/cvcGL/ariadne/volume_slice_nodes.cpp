@@ -143,9 +143,53 @@ void seed_keys(VolumeSliceNode &vn, const ari::SceneNode &n, std::vector<std::st
       vn.getState(std::string("slice.") + k).value(n.props.str(k));
 }
 
+// The volume_slice node a `volume_of: <id>` prop names, realized before this one (top level, or at
+// any depth by id), or null.
+std::shared_ptr<VolumeSliceNode> shared_slice(SceneGraph &sg, const RealizedScene &out,
+                                              const std::string &id) {
+  if (auto s = std::dynamic_pointer_cast<VolumeSliceNode>(sg.getGraphics(id)))
+    return s;
+  for (const RealizedScene::TaggedNode &t : out.nodes)
+    if (t.id == id)
+      if (auto s = std::dynamic_pointer_cast<VolumeSliceNode>(t.node.lock()))
+        return s;
+  return nullptr;
+}
+
 std::shared_ptr<GraphicsNode> realize_volume_slice(SceneGraph &sg, const ari::SceneNode &n,
                                                    GraphicsNode *parent, RealizedScene &out,
                                                    std::vector<std::string> *warnings) {
+  // volume_of: <id>: another plane of the volume that node draws, through its transfer function.
+  if (n.props.has("volume_of")) {
+    const std::string other = n.props.str("volume_of");
+    const std::shared_ptr<VolumeSliceNode> from = shared_slice(sg, out, other);
+    if (!from || !from->source()) {
+      warn(warnings, "ari: scene node '" + n.id + "': volume_of: '" + other +
+                         "' names no volume_slice node realized before it");
+      return nullptr;
+    }
+    GraphicsNode *pr = parent ? parent : sg.getGraphicsRoot().get();
+    if (!parent && sg.hasGraphics(n.id))
+      sg.removeGraphics(n.id);
+    std::shared_ptr<VolumeSliceNode> vn = pr->addGraphicsChild<VolumeSliceNode>(n.id);
+    if (!vn)
+      return nullptr;
+    if (!parent)
+      sg.registerGraphics(n.id, vn);
+    seed_keys(*vn, n, warnings);
+    if (n.props.has("transfer_function"))
+      warn(warnings, "ari: scene node '" + n.id + "': transfer_function: is " + other +
+                         "'s (volume_of: " + other + ") -- ignored");
+    vn->setModelKey(from->modelKey().empty() ? from->stateName("transfer_function")
+                                             : from->modelKey());
+    vn->setSource(from->source());
+    std::weak_ptr<VolumeSliceNode> weak = vn;
+    out.custom_ticks.push_back([weak](vtkRenderer *) {
+      if (std::shared_ptr<VolumeSliceNode> node = weak.lock())
+        node->tick();
+    });
+    return vn;
+  }
   if (n.source_file.empty() && n.source_sdf_mesh.empty()) {
     warn(warnings, "ari: scene node '" + n.id + "' (volume_slice) has no source (file or sdf)");
     return nullptr;
