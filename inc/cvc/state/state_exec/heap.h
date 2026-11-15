@@ -73,49 +73,43 @@ void heap_after_step(process &proc, std::size_t allocated, uint64_t state_bytes)
 // Reference cycles
 // ---------------------------------------------------------------------------
 
-// Tracked objects live in a cycle registry: the one bound on the calling thread
-// (cycle_registry_scope), else the thread's own. A scheduler given a registry
-// (set_cycle_registry) binds it itself on every entry that can run DSL or track, so whichever
-// thread drives it, its objects go to its registry (docs/STATE_EXEC_THREADED.md 4.7). Bare
-// evaluators and bare schedulers use the thread's own.
+// Tracked objects live in a cycle registry: the one of the context the work that made them runs
+// in (exec_context::registry). A scheduler's evaluator runs in a context whose registry is the
+// scheduler's own, or the one a host gave it (set_cycle_registry), so whichever thread drives
+// it, its objects go to its registry (docs/STATE_EXEC_THREADED.md 4.7). A bare evaluator's is its
+// own. Nothing per thread: two schedulers or evaluators on one thread track into their own.
 
 /// A registry of tracked objects, owned by a group (an exec_group, the app's scheduler, a pycvc
-/// Exec) and set on its scheduler. Opaque.
+/// Exec), a scheduler or an evaluator, and set in the context its work runs in. Opaque.
 struct cycle_registry;
 
-/// Collects the registry under its own binding, then frees it: what its objects still hold is
-/// garbage by then, since its owner destroys it after its scheduler and environments. What a host
-/// still holds joins the caller's registry (the bound one, else the thread's own).
+/// Collects the registry, then frees it: what its objects still hold is garbage by then, since
+/// its owner destroys it after its scheduler and environments. What a host still holds goes
+/// untracked (a cycle among it then outlives the host's hold).
 struct cycle_registry_deleter {
   void operator()(cycle_registry *r) const noexcept;
 };
 using cycle_registry_ptr = std::unique_ptr<cycle_registry, cycle_registry_deleter>;
 
-/// A new, empty registry with an id of its own (bound_cycle_registry_id()).
+/// A new, empty registry with an id of its own (cycle_registry_id).
 cycle_registry_ptr make_cycle_registry();
 
-/// RAII: bind `r` on the calling thread until the scope ends (null: none, so the thread's own
-/// registry is used), then restore the binding it found. One store and one restore.
-class cycle_registry_scope {
-public:
-  explicit cycle_registry_scope(cycle_registry *r) noexcept;
-  ~cycle_registry_scope();
-  cycle_registry_scope(const cycle_registry_scope &) = delete;
-  cycle_registry_scope &operator=(const cycle_registry_scope &) = delete;
+/// `r`'s id: random (64 bits, never 0), so a later registry at the same address, or in another
+/// app, draws its own.
+std::uint64_t cycle_registry_id(const cycle_registry &r) noexcept;
 
-private:
-  cycle_registry *outer_;
-};
+/// The id of `ctx`'s registry, or 0 when it has none (null `ctx` too).
+std::uint64_t cycle_registry_id(const exec_context *ctx) noexcept;
 
 /// Track an environment that a closure, a generator or a class method captured: it may close a
-/// cycle (the closure bound in it, or in something it holds). It is tracked in the bound
-/// registry, else this thread's.
-void track_captured_env(const environment_ptr &env);
+/// cycle (the closure bound in it, or in something it holds). It is tracked in `ctx`'s registry
+/// (null `ctx`, or none: not tracked).
+void track_captured_env(exec_context *ctx, const environment_ptr &env);
 
 /// Track a list or dict that was changed in place (append, set-nth, set-attr): only a change in
-/// place can make a container hold itself.
-void track_mutated(const list_ptr &list);
-void track_mutated(const dict_ptr &dict);
+/// place can make a container hold itself. In `ctx`'s registry, as track_captured_env.
+void track_mutated(exec_context *ctx, const list_ptr &list);
+void track_mutated(exec_context *ctx, const dict_ptr &dict);
 
 /// What a collection did.
 struct cycle_stats {
@@ -124,45 +118,26 @@ struct cycle_stats {
   std::size_t freed = 0;      ///< objects found to be garbage and cleared
 };
 
-/// Find the reference cycles among the tracked objects of the bound registry, else this
-/// thread's, that nothing outside them holds, and clear them so they free. Does nothing (and
-/// returns zeros) while an evaluator step is running on this thread: call it between steps. The
-/// schedulers call it when one is due.
-cycle_stats collect_cycles();
-/// The same for `r`, bound while it runs.
+/// Find the reference cycles among the tracked objects of `r` that nothing outside them holds,
+/// and clear them so they free. Call it between evaluator steps (the schedulers call it when one
+/// is due): native code inside a step may hold raw pointers into the heap.
 cycle_stats collect_cycles(cycle_registry &r);
+/// The same for `ctx`'s registry; does nothing (and returns zeros) while an evaluator step runs
+/// in `ctx`, or when it has no registry.
+cycle_stats collect_cycles(exec_context &ctx);
 
-/// Whether the bound registry, else this thread's, has tracked enough since its last collection
-/// for one to be due: as many new objects as survived the last one, at least an eighth of the
-/// objects it walked (so a walk costs a bounded amount per newly tracked object), and at least
-/// 256.
-bool cycle_collection_due();
-/// The same for `r`.
+/// Whether `r` has tracked enough since its last collection for one to be due: as many new
+/// objects as survived the last one, at least an eighth of the objects it walked (so a walk costs
+/// a bounded amount per newly tracked object), and at least 256.
 bool cycle_collection_due(const cycle_registry &r);
 
-/// Note that a process ended, in the bound registry, else this thread's: what it leaked is
-/// garbage now, so a collection is due as soon as anything has been tracked since the last one
-/// (at most once a second).
-void note_process_exit();
-/// The same for `r`: a scheduler names its own registry, so a host's kill(pid) between pumps notes
-/// the group's.
+/// Note that a process ended, in `r`: what it leaked is garbage now, so a collection is due as
+/// soon as anything has been tracked since the last one (at most once a second). A scheduler names
+/// its own registry, so a host's kill(pid) between pumps notes the group's.
 void note_process_exit(cycle_registry &r);
 
-/// Objects the bound registry, else this thread's, tracks: those alive after its last collection
-/// plus those tracked since.
-std::size_t tracked_objects();
-/// The same for `r`.
+/// Objects `r` tracks: those alive after its last collection plus those tracked since.
 std::size_t tracked_objects(const cycle_registry &r);
-
-/// The id of the registry bound on the calling thread, or 0 when none is (the thread's own is
-/// used). Ids are random (64 bits, never 0): no counter is shared, and a later registry at the
-/// same address, or in another app, draws its own.
-std::uint64_t bound_cycle_registry_id() noexcept;
-
-/// The calling thread's own registry is collected when the thread ends (S1-Q3). A thread opts in
-/// once: the pool's workers do, and test threads may. Python threads and the main thread never
-/// should: their thread-locals go after Py_Finalize, or under the Windows loader lock.
-void collect_cycles_at_thread_exit();
 
 /// Tests: whether a process exit is noted in `r` since its last collection.
 bool exit_pending_for_test(const cycle_registry &r);
