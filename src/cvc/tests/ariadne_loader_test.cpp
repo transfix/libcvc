@@ -936,8 +936,8 @@ windows:
   EXPECT_FLOAT_EQ(win->size.h.value, 132.0f);
 }
 
-// §window `closable:` — a close (X) button + tree.<id>.open state, both as a direct window key and
-// as an include-site override.
+// §5.9 `closable:` (default true): a close (X) button + tree.<id>.open state. `closable: false`
+// turns it off, both as a direct window key and as an include-site override.
 TEST(AriadneLoader, ClosableWindowAndIncludeOverride) {
   SKIP_WITHOUT_YAML();
   LoadResult r = fresh_load(R"(
@@ -950,10 +950,10 @@ units:
 windows:
   - window: Direct
     id: direct
-    closable: true
+    closable: false
     children: [ { text: hi } ]
   - include: panel
-    closable: true
+    closable: false
   - window: Plain
     id: plain
     children: [ { text: hi } ]
@@ -961,13 +961,13 @@ windows:
   ASSERT_TRUE(r.ok) << r.error;
   const Widget *direct = find(r.root, Kind::Window, "Direct");
   ASSERT_NE(direct, nullptr);
-  EXPECT_TRUE(direct->closable); // direct window key
+  EXPECT_FALSE(direct->closable); // direct window key
   const Widget *panel = find(r.root, Kind::Window, "Panel");
   ASSERT_NE(panel, nullptr);
-  EXPECT_TRUE(panel->closable); // applied at the include site onto the shared unit
+  EXPECT_FALSE(panel->closable); // applied at the include site onto the shared unit
   const Widget *plain = find(r.root, Kind::Window, "Plain");
   ASSERT_NE(plain, nullptr);
-  EXPECT_FALSE(plain->closable); // default: not closable
+  EXPECT_TRUE(plain->closable); // default: closable
 }
 
 // §5.9 `maximizable:` (default true): a window's maximize button.
@@ -993,6 +993,39 @@ windows:
   EXPECT_FALSE(pinned->maximizable);
   for (const std::string &w : r.warnings)
     EXPECT_EQ(w.find("maximizable"), std::string::npos) << w;
+}
+
+// §5.9 `resizable:` (default true): the user resizes a window by an edge or a corner. A window's
+// own key, not its `layout:`'s (which makes a split's panes or a table's columns resizable).
+TEST(AriadneLoader, ResizableWindow) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+units:
+  panel:
+    window: Panel
+    children: [ { text: hi } ]
+windows:
+  - window: Free
+    children: [ { text: hi } ]
+  - window: Fixed
+    resizable: false
+    layout: { kind: grid, col_widths: [100, 100], resizable: true }
+    children: [ { text: a }, { text: b } ]
+  - include: panel
+    resizable: false
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *free = find(r.root, Kind::Window, "Free");
+  const Widget *fixed = find(r.root, Kind::Window, "Fixed");
+  const Widget *panel = find(r.root, Kind::Window, "Panel");
+  ASSERT_NE(free, nullptr);
+  ASSERT_NE(fixed, nullptr);
+  ASSERT_NE(panel, nullptr);
+  EXPECT_TRUE(free->resizable);
+  EXPECT_FALSE(fixed->resizable);
+  EXPECT_TRUE(fixed->layout.resizable) << "its layout's key is its own";
+  EXPECT_FALSE(panel->resizable) << "set at the include site";
 }
 
 // An include with no geometry keys leaves the unit's own geometry untouched (no accidental
@@ -2230,6 +2263,69 @@ scene:
   EXPECT_TRUE(cam.scene.shadow_focus.follow_camera);
   EXPECT_DOUBLE_EQ(cam.scene.shadow_focus.min_radius, 150.0); // demo3's defaults
   EXPECT_DOUBLE_EQ(cam.scene.shadow_focus.max_radius, 600.0);
+}
+
+// material: { opacity }: a number 0..1 (out of range clamped, with a warning), a state path to
+// follow, or { bind, default }; opaque: alongside it is kept (the realizer lets opacity win).
+TEST(AriadneScene, MaterialOpacity) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: dome
+      source: { sphere: 5 }
+      material: { color: [1, 0.3, 0.2], opacity: 0.35 }
+    - node: solid
+      source: { box: 1 }
+      material: { opaque: true, opacity: 0.5 }
+    - node: zone
+      source: { box: 2 }
+      material: { opacity: zones.alpha }
+    - node: veil
+      source: { plane: { size: 4 } }
+      material: { opacity: { bind: /veil.alpha, default: 0.2 }, opaque: true }
+    - node: over
+      source: { box: 1 }
+      material: { opacity: 1.5 }
+    - node: under
+      source: { box: 1 }
+      material: { opacity: -2 }
+    - node: plain
+      source: { box: 1 }
+      material: { color: [0.5, 0.5, 0.5] }
+    - node: empty
+      source: { box: 1 }
+      material: { opacity: { default: nope } }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 8u);
+  const SceneNode &dome = r.scene.nodes[0];
+  EXPECT_TRUE(dome.has_opacity);
+  EXPECT_FLOAT_EQ(dome.opacity, 0.35f);
+  EXPECT_TRUE(dome.opacity_bind.empty());
+  EXPECT_FLOAT_EQ(dome.color[0], 1.0f);
+  const SceneNode &solid = r.scene.nodes[1];
+  EXPECT_TRUE(solid.has_opacity);
+  EXPECT_TRUE(solid.material_opaque);
+  EXPECT_FLOAT_EQ(solid.opacity, 0.5f);
+  const SceneNode &zone = r.scene.nodes[2];
+  EXPECT_TRUE(zone.has_opacity);
+  EXPECT_EQ(zone.opacity_bind, "zones.alpha");
+  EXPECT_FLOAT_EQ(zone.opacity, 1.0f); // while the key is unset
+  const SceneNode &veil = r.scene.nodes[3];
+  EXPECT_TRUE(veil.has_opacity);
+  EXPECT_EQ(veil.opacity_bind, "/veil.alpha");
+  EXPECT_FLOAT_EQ(veil.opacity, 0.2f);
+  EXPECT_TRUE(veil.material_opaque);
+  EXPECT_FLOAT_EQ(r.scene.nodes[4].opacity, 1.0f);
+  EXPECT_FLOAT_EQ(r.scene.nodes[5].opacity, 0.0f);
+  EXPECT_TRUE(has_warning(r, "scene node 'over': material.opacity is 0..1, not 1.5 — clamped"));
+  EXPECT_TRUE(has_warning(r, "scene node 'under': material.opacity is 0..1, not -2 — clamped"));
+  EXPECT_FALSE(r.scene.nodes[6].has_opacity);
+  EXPECT_FLOAT_EQ(r.scene.nodes[6].opacity, 1.0f);
+  EXPECT_FALSE(r.scene.nodes[7].has_opacity);
+  EXPECT_TRUE(has_warning(r, "scene node 'empty': material.opacity is a number 0..1"));
 }
 
 // assets: (id -> a node's source and fit), source: { asset } on a node, scenes: entries (each a

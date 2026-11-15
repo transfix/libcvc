@@ -280,6 +280,41 @@ TEST(OceanSea, TheVelocitiesAreTheTimeDerivatives) {
   }
 }
 
+// The sea the cascades make has the wind sea's significant height, JONSWAP's 4 sqrt(m0), what a
+// wave gauge would read. Over a cascade's tile its band's mean square height is the sum over its
+// modes (Parseval), the cascades' bands add, and the time average drops each mode's h0(k) h0(-k)
+// beat. lsystem_coast's tiles with every mode in the band, averaged over times 7 s apart and over
+// four seas: one sea misses its expected height by up to a tenth, the long tile's peak holding a
+// few dozen modes.
+TEST(OceanSea, TheSeaHasTheWindsHeight) {
+  for (double u : {4.0, 9.0, 15.0}) {
+    sea_state ss;
+    ss.wind.speed_mps = u;
+    ss.wind.dir_rad = 0.4;
+    const int seas = 4, times = 8;
+    double var = 0.0;
+    for (int seed = 0; seed < seas; ++seed) {
+      std::vector<sea_cascade> cs;
+      for (const cascade &c : make_cascades({251.0, 83.0, 29.0}, 0xC0A57ull + seed))
+        cs.push_back({build_h0(128, c, ss), 0.0, 0.0});
+      sea_params p;
+      p.band = {128, 128};
+      const sea_surface s(cs, p);
+      for (int j = 0; j < times; ++j)
+        for (std::size_t c = 0; c < cs.size(); ++c) {
+          const sea_surface::band_frame f = s.band(c, 7.0 * j);
+          double m = 0.0;
+          for (double e : f.eta)
+            m += e * e;
+          var += m / double(f.eta.size()) / (times * seas);
+        }
+    }
+    const double hs = 4.0 * std::sqrt(var), want = wind_sea_hs(ss);
+    std::printf("[sea-height] U %4.1f m/s: the sea's Hs %.3f m, JONSWAP's %.3f m\n", u, hs, want);
+    EXPECT_NEAR(hs / want, 1.0, 0.1) << u;
+  }
+}
+
 // ── height and velocity at a point (B3, B4) ─────────────────────────────────────────────────────
 
 TEST(OceanSea, TheHeightIsTheSourcesHeight) {
@@ -576,7 +611,7 @@ TEST(OceanSea, IsTheSameOnEveryPlatform) {
     fnv(f.eta.data(), f.eta.size() * sizeof(double));
     fnv(f.u.data(), f.u.size() * sizeof(double));
   }
-  EXPECT_EQ(h, 0x21bcce29d45653a8ull) << std::hex << "sea digest 0x" << h;
+  EXPECT_EQ(h, 0xc2eb633351931d66ull) << std::hex << "sea digest 0x" << h;
 }
 
 // What one physics step's sea costs (printed, not checked): the band of three cascades at time t.
@@ -680,7 +715,7 @@ TEST(OceanSea, TheSourceLatticeIsTheSameOnEveryPlatform) {
       fnv(v.data(), sizeof(double) * 3);
     }
   }
-  EXPECT_EQ(h, 0x08f956c6889de4d2ull) << std::hex << "sea digest 0x" << h;
+  EXPECT_EQ(h, 0xbf358f50d31c7ba1ull) << std::hex << "sea digest 0x" << h;
 }
 
 // A height and the velocity read after it at one point and time can share their source through

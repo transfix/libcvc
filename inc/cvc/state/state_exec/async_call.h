@@ -146,6 +146,16 @@ public:
   /// take the GIL): not charged as run time (docs/STATE_EXEC_EXCEPTIONS.md 3.8).
   void add_wait(double seconds);
 
+  /// The allocation limit the kernel and its fan-out chunks run under: the calling step's
+  /// (eval_alloc_limit of its context; std::nullopt: unbounded).
+  std::optional<std::size_t> alloc_limit() const { return alloc_limit_; }
+  /// eval_alloc_check for the kernel and its fan-out chunks, on any thread: throw MemoryError
+  /// naming `who` when `bytes` is over alloc_limit(), else report the bytes as allocated
+  /// (alloc_bytes(), which reaches the process's heap accounting, 3.8).
+  void alloc_check(std::size_t bytes, const char *who);
+  /// Report `bytes` allocated without a limit check (eval_alloc_note), on any thread.
+  void alloc_note(std::size_t bytes);
+
   /// Work that runs by itself (async_start): call `stop` once the call is cancelled, or now if
   /// it already is. It runs on the thread that cancels the call, under no lock of the call's,
   /// exactly once; a later hook replaces one not yet run. `stop` must not block, and once it
@@ -215,7 +225,7 @@ public:
   /// Run time since the kernel thread's CPU time was last recorded: a kernel that never calls
   /// cancelled() is charged that as CPU time until it ends (docs/STATE_EXEC_EXCEPTIONS.md 3.8).
   double unmetered_seconds(clock::time_point now) const;
-  /// Bytes the kernel and its fan-out chunks reported allocating (eval_alloc_check, ...).
+  /// Bytes the kernel and its fan-out chunks reported allocating (alloc_check, alloc_note).
   uint64_t alloc_bytes() const { return alloc_bytes_.load(std::memory_order_acquire); }
   /// Whether the kernel has ended (its run time and CPU time are final).
   bool kernel_ended() const { return end_ns_.load(std::memory_order_acquire) != 0; }
@@ -255,7 +265,7 @@ private:
   std::optional<double> timeout_;
   bool io_ = false; // async_options::io
   clock::time_point created_ = clock::now();
-  std::optional<std::size_t> alloc_limit_; // the calling step's (eval_alloc_limit())
+  std::optional<std::size_t> alloc_limit_; // the calling step's (eval_alloc_limit(ctx))
   chunk_context chunks_;
 
   // An external call (async_host::begin_external): the host's own loop settles it, so nothing

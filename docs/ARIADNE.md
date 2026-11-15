@@ -531,8 +531,10 @@ Three backends ship:
     reverts an edit or closes a popup; F10 opens the menu bar. An `autofocus:` widget has focus
     when it appears (§5.10).
   - **mouse** — click to focus or activate, pick a radio's option, drag a slider, drag a
-    window by its title bar, click `[x]` to close it, click a menu title to open it.
-  - **windows** (`caps.windows = true`) — free, z-ordered, raised on focus, placed from
+    window by its title bar, click `[x]` to close it or `[↑]` to maximize it (§5.9), click a menu
+    title to open it.
+  - **windows** (`caps.windows = true`) — free, z-ordered, raised on focus (and when picked in the
+    Windows menu or maximized, §5.9), placed from
     `pos:`/`size:` or the persisted `tree.<id>.geometry`; a drag persists back (§11.4). A
     window stops at the screen's edge and scrolls what does not fit (§5.8).
   - **graphics** — `draw_image` paints a raster published with `set_image`, and
@@ -631,7 +633,8 @@ Three backends ship:
   ([`inc/cvc/ariadne/tvision_backend.h`](../inc/cvc/ariadne/tvision_backend.h)) — the
   native-desktop terminal backend (roadmap §16.5 row 5). Turbo Vision owns the terminal
   and draws the chrome itself: movable, resizable, overlapping windows with close and
-  zoom boxes, a pull-down menu bar, a status line, and its own keys (F10 for the menu bar, F6
+  zoom boxes (a window's `closable:` and `resizable:` decide its close box and resize corner,
+  §5.9), a pull-down menu bar, a status line, and its own keys (F10 for the menu bar, F6
   for the next window, Alt-X to quit, Ctrl-F5 to move or resize the window from the keyboard:
   the arrows move it, Shift and the arrows resize it, Return keeps it, Escape puts it back).
   The windows' *contents* are the FTXUI backend's: a `TvisionBackend` is an
@@ -881,6 +884,29 @@ each point.
 **Textures.** `material: { texture: <uri> }` drapes an image over a geometry node through its
 mesh's UVs. UV (0, 0) is the image's bottom-left corner. A `source: { data }` city's terrain wears
 its bundle's `satellite.png` this way, north up (§5.17).
+
+**See-through nodes.** `material: { opacity: <0..1> }` draws a node's meshes see-through: 1 is
+solid (the default) and 0 is invisible. A see-through mesh is drawn in the translucent pass even
+with `opaque: true` beside it (the opacity wins, as a viewport `override:`'s does, §5.18), and it
+casts no shadow into the scene's maps. `opacity:` may instead name a state key, as
+`opacity: zone.alpha` or `{ bind: zone.alpha, default: 0.4 }`, and the node follows that key each
+frame as `visible:` follows its own: the key is read, never seeded, and clamped to 0..1, and
+`default` (1 when left out) holds while the key is unset or is not a number. The opacity reaches
+whatever the node draws: its mesh, every rung of its LOD ladder, the meshes a `source: { data }`
+node draws (each redraw included), and the mesh a custom node type returns. A volume node ignores
+it, because its transfer function holds its opacity.
+
+```yaml
+scene:
+  nodes:
+    - node: reach
+      source: { sphere: 40 }
+      transform: { position: [120, -60, 0] }
+      material: { color: [1.0, 0.35, 0.2], opacity: 0.25 }       # a see-through dome
+    - node: zone
+      source: { box: { size: [50, 30, 10] } }
+      material: { color: [0.2, 0.8, 0.3], opacity: { bind: zone.alpha, default: 0.4 } }
+```
 
 **Volumes and shadows.** A volume node (`volume`, `volren`, `volslice`) casts nothing into the
 scene's shadow maps (`shadows:`): its picture is no surface the maps can hold. A `volren` node's
@@ -1631,7 +1657,7 @@ A window needs neither `pos:` nor `size:`. Its size:
 
 - A window with a `size:` (px or `"%"` of the view, per axis; `min:`/`max:` bound it) opens at
   that size, or at its persisted `tree.<id>.geometry` (§11.4) once it has one. The user may
-  resize it, and that size is the one persisted.
+  resize it, unless it is `resizable: false` (§5.9), and that size is the one persisted.
 - A window with no `size:` fits its content every frame, so it grows and shrinks with what it
   shows. It stops at the edge of the view, measured from where it stands, and never goes below an
   authored `min:` or past a `max:`. Its persisted geometry places it but does not size it.
@@ -1690,7 +1716,9 @@ How each backend does it:
   On the tvision desktop, tvision's frame holds the window, and the host sizes that frame on every
   walk, in each axis: the document's size where it gave one, else the content's. That stops when
   the user resizes the window (the frame's corner, Ctrl-F5 then Shift and the arrows, or the zoom
-  box): from then on it keeps the user's size, through a close and a reopen too. Nothing else
+  box): from then on it keeps the user's size, through a close and a reopen too. A
+  `resizable: false` window has no corner and Ctrl-F5 only moves it, so only the zoom box changes
+  its size. Nothing else
   counts as the user's: not a size the host gave the window to fit it, nor tvision scaling the
   windows when the terminal is resized, nor a move. Only the user's size is reported back to
   `tree.<id>.geometry`; for any other window the host reports its place alone.
@@ -1699,42 +1727,92 @@ How each backend does it:
   closed and must show them when they open again, and on tvision a window resized with Ctrl-F5
   must come back at that size.
 
-### 5.9 Closing and reopening windows: the Windows menu
+### 5.9 Window chrome: closing, maximizing, resizing, and the Windows menu
 
 A window's open state is `tree.<id>.open` (default open; `<id>` is its `id:`, else its title). A
-window whose state is `0` is not drawn. A `closable: true` window has a close button that sets it
-to `0`. One that opens again is sized as §5.8 says: by its `size:` or its content, unless the user
+window whose state is `0` is not drawn. A window's title bar has a close button (X) that sets it to
+`0`. One that opens again is sized as §5.8 says: by its `size:` or its content, unless the user
 resized it.
 
-**Maximizing.** A window's title bar also has a maximize button, beside the collapse arrow and the
-close X.
-- **The button:** pressed, it makes the window fill the screen under the main menu bar. Pressed
-  again, the window goes back to the place and size it had.
+**What the user may do to a window.** As in a desktop's window manager, a window's title bar ends
+with a maximize button and then the close X, on the right, and the user resizes the window by an
+edge or a corner. Each is allowed unless the document turns it off on that window:
+
+```yaml
+windows:
+  - window: Status
+    closable: false     # no close button: the user can't close it
+    maximizable: false  # no maximize button
+    resizable: false    # no resizing by an edge or a corner
+```
+
+All three default to `true`. They are the window's own keys: a `resizable:` inside its `layout:`
+is the layout's (a split's panes, a table's columns, §5.8). An `include:` may set any of them for
+that use of the unit.
+
+**Resizing.**
+- A window with a `size:` resizes by its edges and corners, and the size the user leaves it at is
+  the one persisted (§11.4). `resizable: false` keeps it at its `size:` (or a persisted size):
+  - ImGui: no edge or corner drags it; a drag there moves the window, as a drag in its body does.
+  - tvision: its frame has no resize corner, and Ctrl-F5 only moves it.
+  - FTXUI draws no resize handle on any window, so the key changes nothing there.
+- A window with no `size:` fits its content (§5.8). Under ImGui that is every frame, so the user
+  can't resize it either way. On the tvision desktop the user may resize one, and from then on it
+  keeps that size; `resizable: false` stops that as well.
+- A maximize still fills a window that isn't resizable, and a restore puts it back at its size.
+
+**Maximizing.**
+- **The button:** pressed, it makes the window fill the screen under the main menu bar, and turns
+  into a restore button. Pressed again, the window goes back to the place and size it had.
+- **The title bar:** a double click on it maximizes the window, or puts it back, where the backend
+  sees double clicks (ImGui: in place of its collapse on a double click, for a window that has the
+  button).
+- **Moving or resizing it by hand** ends the maximize, and the button is the plain maximize button
+  again:
+  - Dragged by its title bar, the window comes back to the size it had, under the pointer, held
+    where along the title bar it was grabbed.
+  - Resized by an edge or a corner (ImGui), it keeps the size it was given. That size is now the
+    window's own, so a later maximize goes back to it.
 - **The state** is `tree.<id>.maximized`, `1` or `0`. A document may write it to maximize a window
   or put it back.
+- **In front:** a window that becomes maximized, by any of these, comes to the front of the
+  others (see *Bringing a window to the front* below).
 - **Geometry:** while a window is maximized its `tree.<id>.geometry` isn't written, so it keeps
   where the window goes back to, across a restart too.
-- **Opting out:** `maximizable: false` on a window gives it no button; the default is `true`.
 - **By backend:**
-  - ImGui: a square, two squares while maximized. The window can't be moved or resized while
-    maximized.
+  - ImGui: a square, and two squares one behind the other while maximized, the size of ImGui's
+    close button, lit when the pointer is over it. Resting the pointer on a button names it
+    (Maximize, Restore, Close).
   - FTXUI: `[↑]` beside the `[x]`, `[↕]` to go back (`[^]` / `[=]` without those glyphs). The
     window is drawn from the top-left as big as the terminal.
   - The tvision desktop has its own zoom box (and Ctrl-F5) instead, which this key doesn't follow.
 - **The token** `ui.maximize` (§5.7) says the backend has the button.
 
-Every document gets a **Windows** menu to open such a window again, with no menu items to write:
+**Bringing a window to the front.** A window comes to the front of the others when:
+- the user clicks it (in a terminal, Tab moving the focus into it does too);
+- the user picks it in the Windows menu (below), whether it was open or closed;
+- it becomes maximized;
+- the document writes `1` to `tree.<id>.raise`, once: the core clears it as the window is drawn.
+  A handler that opens a closed window and wants it in front sets `tree.<id>.open` and this
+  together.
 
-- It holds a ticked item per window, bound to that window's `tree.<id>.open`. Unticking an item
-  closes the window, closable or not; ticking it opens it.
+ImGui and FTXUI do all of these. The tvision desktop does all but the maximize, which it has no
+button for (its zoom box is its own). ImGui and tvision also give the window the keyboard.
+
+Every document gets a **Windows** menu to show any of its windows again, closed or behind the
+others, with no menu items to write:
+
+- It holds an item per window, ticked while that window's `tree.<id>.open` is `1`. As in a
+  desktop's window manager, picking a window shows it in front of the others: a closed one opens,
+  and an open one stays open and comes to the front. The window's X closes it, so a
+  `closable: false` window can't be closed from the menu.
 - It lists only the windows no menu item of the document already toggles. A document with its own
   "Settings" or "View" menu bound to `tree.<id>.open` (`lsystem_forest.ari`,
   `conference_roster.ari`) keeps it, and the Windows menu lists only the windows that menu leaves
   out. When it leaves none out there is no Windows menu.
 - A window made by `repeat:` is listed once per instance, under the title that instance shows
   (its `bind:`, else its label with `{i}` filled in), after the other windows. The list follows the
-  repeat's count each frame. Opening one from the menu also brings it to the front.
-  `conference_roster.ari` sets `windows_menu: View`, so its per-peer camera windows are listed by
+  repeat's count each frame. `conference_roster.ari` sets `windows_menu: View`, so its per-peer camera windows are listed by
   name at the end of its View menu.
 - A host's menus (`AppRuntime::set_host_menus`) count as the document's: arigl's
   *Settings > Controls...* opens the Controls window, so arigl's Windows menu leaves it out. Under
@@ -1742,8 +1820,8 @@ Every document gets a **Windows** menu to open such a window again, with no menu
 - It goes after the document's own menus (and a host's). When the menu bar already has a menu of
   the same title (`fem_gallery.ari`'s own Windows menu), the items go at the end of that menu,
   after a separator, instead of a second menu of that name. A document with no `menubar:` gets a
-  menu bar holding just the Windows menu, but only when one of its windows is closable; otherwise
-  nothing can be closed.
+  menu bar holding just the Windows menu, but only when one of its windows has a close button;
+  when every window is `closable: false`, nothing can be closed.
 
 A document places or turns it off:
 
@@ -1757,7 +1835,7 @@ menubar:
 
 A bare `- windows_menu` entry places it under its default title. The menu is the core's (it calls
 the backend's ordinary menu functions), so the ImGui menu bar, the FTXUI menu bar and the tvision
-host's menu bar all show it, and its items toggle the same state the close buttons write. The open
+host's menu bar all show it, and its items write the same state the close buttons do. The open
 state lives in the document's state tree like the geometry (§11.4): it holds for the run and
 across a reload, but not across runs.
 
@@ -2139,7 +2217,8 @@ this for every one.
   feed, a form) is all panels, so they start shown (`ImGuiOverlay::setPhoneHidesPanels`, which
   arigl's `AriRuntime::load` sets). The button stays above every window, even one dragged over
   its corner. A window collapses to its title bar with the arrow at the title's left (or a double
-  tap on the title), closes with its X when it is `closable:`, and comes back from the View or
+  tap on the title, which on a phone collapses rather than maximizes), closes with its X unless
+  it is `closable: false`, and comes back from the View or
   Windows menu (§5.9). On a touch screen a window moves by its title bar only, so a finger that
   slips off a widget does not carry its window away.
 - **A list of windows.** A document laid out for a wider screen would have its windows moved
@@ -2527,8 +2606,10 @@ it follow it too.
 **Overrides.** `override:` restyles nodes in one view only. Each entry names a node id, a tag, or
 `"*"` (everything), and sets any of `drawstyle` (`surface`, `wireframe`, `points`), `opacity`,
 `color`, `line_width` and `point_size` (`material: { color, opacity }` spells the same fields).
-What an entry does not set stays as the node has it. An entry covers the named node's subtree, and
-the entries apply in order, each adding to the ones before it field by field:
+What an entry does not set stays as the node has it, its own `material: { opacity }` included
+(§5.4), so a node see-through in the main view is see-through in every view unless an entry sets
+its `opacity`. An entry covers the named node's subtree, and the entries apply in order, each adding
+to the ones before it field by field:
 
 ```yaml
 - type: viewport
@@ -3092,7 +3173,10 @@ windows:
 
 Any widget may carry an `id:` (not only windows): it names the instance a backend keys its
 per-instance state on and that the core persists view state under (`tree.<id>.*`). An include
-site may override the unit's `id:`, so two instances of one unit stay distinct.
+site may override the unit's `id:`, so two instances of one unit stay distinct. When the unit is a
+window, the include site may also give it its own `pos:`, `size:`, `layout:`, `frame:`,
+`closable:`, `maximizable:` and `resizable:` (§5.8, §5.9). Each replaces the unit's only where it
+is given, so a document arranges shared panels without forking them.
 
 Args are strings. A unit takes whole widget lists through **slots**: a `- slot: NAME` item in
 any of its widget lists marks where they go. The include site's `slots: {NAME: [...]}` puts its
@@ -4823,6 +4907,7 @@ against a local test server. `ari snapshot` prints the programs' warnings after 
 | `--net-policy FILE` | read `allow` and `credential` lines from `FILE` (repeatable; implies `--net`) |
 | `--credential-store S` | keep credentials across runs in `S` (implies `--net`; not in a browser) |
 | `--credential-env N=V` | credential `N` is the token in environment variable `V`, for this run (repeatable; a policy `credential` line must bind `N`; not in a browser) |
+| `--e2ee-store S` | keep end-to-end encryption keys in `S`, a name or a path, for the `e2ee-*` verbs (§10.8; implies `--net`; not in a browser) |
 | `--oidc-issuer ISSUER` | documents may sign in (§10.5) with `ISSUER` only; allows its origin (repeatable; implies `--net`) |
 | `--oidc-client I=ID` | sign in to issuer `I` as client `ID`, the launcher's registration (repeatable; pins `I` too) |
 | `--oidc-redirect-uri U` | the redirect URI a browser page registers (§10.5; default: the page's own URL) |
@@ -5390,6 +5475,53 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
   [`ws_client.h`](../inc/cvc/net/ws_client.h)). A page may close a socket only with code 1000
   or 3000-4999, so there any other `CODE` is sent as 1000.
 
+### 10.8 End-to-end encrypted DMs: the `e2ee-*` verbs
+
+These verbs seal and open TX.WTF's end-to-end encrypted direct messages: X3DH, then a Double
+Ratchet, over libsodium, byte-compatible with TX.WTF's own web client.
+- **Who holds the keys.** The host does. A document names an account's handle and a conversation,
+  gives the verbs what the server sent, and sends what they give back with `http-request`. It never
+  holds a key: every dict below has public keys, ciphertext and plaintext only, and no error quotes
+  a key.
+- **When they are there.** A host has them with `--e2ee-store SPEC` (a name in the user's config
+  directory, or a path), on a build with libsodium.
+- **Where they are not.** Not in a browser yet, and never on a relay.
+- **More.** docs/E2EE.md has the design, the key storage, and the cross-check against e2ee.js.
+
+| verb | what |
+|---|---|
+| `(e2ee-status)` | `{ok persistent error}`: whether the verbs below are here (the store may not open: no libsodium, a browser, another process holds it), and whether the keys outlive this run |
+| `(e2ee-identity H)` | the handle's public keys `{identity_key_ed25519 identity_key_x25519 registration_id fingerprint one_time_prekeys publish}`, or `nil`; `publish` is the `POST /e2ee/keys` body |
+| `(e2ee-create H [N])` | make the handle's identity with N one-time prekeys (20); the same dict |
+| `(e2ee-prekeys H N)` | N more one-time prekeys: the `POST /e2ee/keys/one-time` body |
+| `(e2ee-forget H)` | drop its identity, sessions and cached plaintext |
+| `(e2ee-session? H CONV)` | whether a session for conversation CONV is held here |
+| `(e2ee-seal H CONV PEER TEXT [BUNDLE])` | `{ok need_bundle error body}`: `body` is the `POST /e2ee/dm/conversations/{CONV}/messages` body for user PEER. A first message needs BUNDLE (`GET /e2ee/keys/{username}`); without it `need_bundle` is `#t` and nothing changed |
+| `(e2ee-seal-group H CONV TEXT MEMBERS)` | one body, a key per member (`grp-dr-v1`); MEMBERS are user ids or `(dict "user_id" ID "bundle" B)`; `need_bundles` lists the ids that need one |
+| `(e2ee-sent H MSGID TEXT)` | keep our own send's text under the server's id (a sender cannot open what it sent) |
+| `(e2ee-open H CONV MESSAGE)` | `{ok status text attachments error}` for one listed message; status `ok`, `cached`, `own`, `locked`, `no-session` (its session is on another device) or `failed` |
+| `(e2ee-backup H PASSPHRASE)`, `-async` | the `PUT /e2ee/backup` body (Argon2id, about a second): `{ok error body}` |
+| `(e2ee-restore H BLOB PASSPHRASE)`, `-async` | take the identity from a `GET /e2ee/backup` reply: `{ok error identity}` |
+| `(e2ee-fingerprint KEY)` | a key people can compare: 40 hex digits in groups of 5 |
+
+Things to know:
+
+- **Order matters.** Open a conversation's messages in the order they were sent (ascending id).
+  A message opened once comes back `cached`; the ratchet never sees it twice.
+- **A tampered or forged message changes nothing.** It fails, and the session is as it was.
+- **A session is this device's.** Where another device holds a conversation's session, its
+  messages come back `no-session`. A document must not start a new one there: the other side
+  would ignore it, and its copy would break.
+- **The passphrase passes through the document.** It comes from a password field, so it is in
+  state for that one action. Clear the field in the same handler.
+- **The store is locked to one process.** A second host on the same `--e2ee-store` file gets no
+  verbs, and `(e2ee-status)` says it is in use.
+- **Tests.** `e2ee_test` replays vectors written by TX.WTF's own e2ee.js and compares every byte;
+  `ariadne_e2ee_test` runs the verbs in a document. `tools/e2ee/interop.sh` makes a live round
+  trip with e2ee.js.
+
+---
+
 ## 11. Caveats — what is not yet wired
 
 State plainly so authors are not misled. Each item cites the code; the roadmap items
@@ -5512,8 +5644,10 @@ Measured in CI (2026-10-20):
 - macOS CI renders with the Apple Software Renderer, which is deterministic but draws edges and
   shading a little differently. Against the llvmpipe goldens, windows, menus and grid had 3 to 6
   pixels beyond 40 (they pass), widgets had 40 and scene 467 (they fail).
-- So `widgets.macos.png` and `scene.macos.png` are macOS goldens, and macOS compares those two
-  against its own renderer.
+- With the window chrome's close and maximize glyphs (2026-11-14), menus had 7 and windows 12
+  (they pass) but grid 15 (it fails).
+- So `widgets.macos.png`, `scene.macos.png` and `grid.macos.png` are macOS goldens, and macOS
+  compares those three against its own renderer.
 
 To make or refresh a macOS golden, take `<name>.actual.png` from the failing macOS job's
 `ari-golden-macOS-<lane>` artifact, look at it, and commit it as `<name>.macos.png`.
