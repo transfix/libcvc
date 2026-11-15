@@ -1747,10 +1747,6 @@ public:
     _budget = bytes;
     evict_locked(0);
   }
-  std::size_t budget() {
-    std::lock_guard<std::mutex> lock(_mutex);
-    return _budget;
-  }
   std::size_t resident() {
     std::lock_guard<std::mutex> lock(_mutex);
     return _resident;
