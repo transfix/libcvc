@@ -31,8 +31,13 @@
 // a module that declares one with other parameters or another result is refused.
 //
 // A module is compiled once for each memory cap it runs under, and kept with its BrModule. The
-// compile is synchronous, so a guest past the 8 MiB Chrome compiles on the page's own thread
-// fails there (an asynchronous compile, awaited by the document's load, is left for ariglx-web).
+// compile and the instantiation are synchronous where the page allows them. On its own thread
+// Chrome refuses both for a module over 8 MB, with a RangeError. A host linked with Asyncify
+// (CVC_ARIADNE_WASM_ASYNC_LOAD: cvc_ariadne_wasm_host's ASYNC_LOAD, as ariglx-web has it) then
+// compiles the module asynchronously (WebAssembly.compile) and instantiates it so too
+// (WebAssembly.instantiate), and the document's load waits for each: the host's stack unwinds to
+// the page and rewinds when the promise settles. A small guest never pauses the page, so only a
+// guest Chrome refuses waits. Without ASYNC_LOAD that guest fails to load, saying why.
 //
 // The JS side's state is the page's, as Module.cvcMedia is: Module.cvcWasmGuests[<the
 // BrInstance's address>], made at instantiation and deleted with the instance, and
@@ -77,7 +82,9 @@ EM_JS(int, cvc_wasm_check, (const void *bytes, int n), {
   try {
     new WebAssembly.Module(b);
   } catch (e) {
-    Module.cvcWasmText = String((e && e.message) || e);
+    // The compile's own reason, unless the page refused to compile it on its thread at all.
+    if (!(e instanceof RangeError))
+      Module.cvcWasmText = String((e && e.message) || e);
   }
   return 0;
 });
@@ -87,10 +94,12 @@ EM_JS(int, cvc_wasm_check, (const void *bytes, int n), {
 // reason in cvcWasmText, or 2 for a module that isn't metered (ari.gas, ari_gas) or has no
 // Asyncify exports. `spec` lists the imports in order, "module:name:returns;" each (returns 1: an
 // i64, 2: an i32, WASI's errno), and each is bound under its own module (`ari`,
-// `wasi_snapshot_preview1`).
+// `wasi_snapshot_preview1`). With `can_wait`, a module the page won't compile on its own thread
+// is 3: compile it with cvc_wasm_compile_async, then call this again. One compiled so is 4: the
+// guest is ready but for its instance, which cvc_wasm_instantiate_async makes.
 EM_JS(int, cvc_wasm_instantiate, (void *ctx, void *module_ctx, const void *bytes, int n,
                                   double cap, const char *spec, int spec_len, void *scratch,
-                                  double unwind_bytes), {
+                                  double unwind_bytes, int can_wait), {
   var guests = Module.cvcWasmGuests = Module.cvcWasmGuests || {};
   var mods = Module.cvcWasmModules = Module.cvcWasmModules || {};
   var g = {ex: null, mem: null, scratch: scratch >>> 0, pending: 0n, sliced: false,
@@ -143,10 +152,13 @@ EM_JS(int, cvc_wasm_instantiate, (void *ctx, void *module_ctx, const void *bytes
       try {
         mod = new WebAssembly.Module(HEAPU8.slice(p, p + n));
       } catch (e) {
+        // Chrome's refusal on the page's own thread is a RangeError; a bad module's a CompileError.
+        if (can_wait && e instanceof RangeError)
+          return 3;
         var why = String((e && e.message) || e);
-        if (n > 8 * 1024 * 1024)
-          why += " (the guest is " + Math.ceil(n / 1048576) +
-                 " MiB: Chrome compiles at most 8 MiB on the page's own thread)";
+        if (e instanceof RangeError)
+          why += " (the guest is " + Math.ceil(n / 1048576) + " MiB, and this host can't wait " +
+                 "for an asynchronous compile: cvc_ariadne_wasm_host's ASYNC_LOAD)";
         throw new Error(why);
       }
       compiled[cap] = mod;
@@ -185,6 +197,13 @@ EM_JS(int, cvc_wasm_instantiate, (void *ctx, void *module_ctx, const void *bytes
       pause();
     };
     guests[ctx] = g; // before the start function, whose imports reach the host
+    // Chrome sizes up an instance as it does its compile: one it wouldn't compile here, it
+    // won't instantiate here either.
+    if (compiled.waits) {
+      g.mod = mod;
+      g.imports = imports;
+      return 4;
+    }
     var inst = new WebAssembly.Instance(mod, imports);
     g.ex = inst.exports;
     g.mem = inst.exports.memory instanceof WebAssembly.Memory ? inst.exports.memory : null;
@@ -206,6 +225,43 @@ EM_JS(void, cvc_wasm_module_drop, (void *module_ctx), {
   if (Module.cvcWasmModules)
     delete Module.cvcWasmModules[module_ctx];
 });
+
+#ifdef CVC_ARIADNE_WASM_ASYNC_LOAD
+// The module the page wouldn't compile on its own thread (cvc_wasm_instantiate's 3), compiled
+// asynchronously under the cap `cap`: 1, or 0 with the reason in cvcWasmText. Its instances are
+// made asynchronously too (cvc_wasm_instantiate's 4).
+EM_ASYNC_JS(int, cvc_wasm_compile_async, (void *module_ctx, const void *bytes, int n, double cap), {
+  var mods = Module.cvcWasmModules = Module.cvcWasmModules || {};
+  var compiled = mods[module_ctx] = mods[module_ctx] || {};
+  var p = bytes >>> 0;
+  try {
+    // The instance being made holds the BrModule, so its entry outlives the wait.
+    compiled[cap] = await WebAssembly.compile(HEAPU8.slice(p, p + n));
+    compiled.waits = true;
+    return 1;
+  } catch (e) {
+    Module.cvcWasmText = String((e && e.message) || e);
+    return 0;
+  }
+});
+
+// The instance of the guest cvc_wasm_instantiate left ready but for it (its 4): 1, or 0 with the
+// reason in cvcWasmText. The start function runs here, its imports reaching the host as they do.
+EM_ASYNC_JS(int, cvc_wasm_instantiate_async, (void *ctx), {
+  var g = Module.cvcWasmGuests[ctx];
+  try {
+    var inst = await WebAssembly.instantiate(g.mod, g.imports);
+    g.mod = g.imports = null;
+    g.ex = inst.exports;
+    g.mem = inst.exports.memory instanceof WebAssembly.Memory ? inst.exports.memory : null;
+    return 1;
+  } catch (e) {
+    delete Module.cvcWasmGuests[ctx];
+    Module.cvcWasmText = String((e && e.message) || e);
+    return 0;
+  }
+});
+#endif
 
 // The parameters export `name` takes, or -1 when it exports no such function.
 EM_JS(int, cvc_wasm_arity, (void *ctx, const char *name, int name_len), {
@@ -323,6 +379,12 @@ constexpr std::uint64_t kUnwindBytes = 32 * 1024;
 constexpr std::uint64_t kMaxUnwindBytes = 0x7fffffff - 16;
 // The gas ari_alloc may use for the room a pause takes: the engine's setup gas.
 constexpr std::uint64_t kSetupGas = 100'000'000;
+// Whether a load may wait for the page to compile and instantiate a guest (the file's comment).
+#ifdef CVC_ARIADNE_WASM_ASYNC_LOAD
+constexpr int kCanWait = 1;
+#else
+constexpr int kCanWait = 0;
+#endif
 
 // The scratch buffer (the EM_JS bodies' slots).
 constexpr int kScratch = 32;
@@ -440,10 +502,25 @@ public:
       spec += im.module + ":" + im.name + (im.returns ? (im.returns_i32 ? ":2;" : ":1;") : ":0;");
     }
     pausable_ = false;
-    const int r = cvc_wasm_instantiate(
-        this, static_cast<BrModule *>(module_.get()), bytes.data(), static_cast<int>(bytes.size()),
-        static_cast<double>(max_pages_), spec.data(), static_cast<int>(spec.size()),
-        scratch_.data(), static_cast<double>(unwind_bytes_));
+    void *const mod = static_cast<BrModule *>(module_.get());
+    const auto instantiate = [&] {
+      return cvc_wasm_instantiate(this, mod, bytes.data(), static_cast<int>(bytes.size()),
+                                  static_cast<double>(max_pages_), spec.data(),
+                                  static_cast<int>(spec.size()), scratch_.data(),
+                                  static_cast<double>(unwind_bytes_), kCanWait);
+    };
+    int r = instantiate();
+#ifdef CVC_ARIADNE_WASM_ASYNC_LOAD
+    // The page wouldn't compile it on its own thread: compile it asynchronously, the document's
+    // load waiting, then instantiate it so too.
+    if (r == 3)
+      r = cvc_wasm_compile_async(mod, bytes.data(), static_cast<int>(bytes.size()),
+                                 static_cast<double>(max_pages_))
+              ? instantiate()
+              : 0;
+    if (r == 4)
+      r = cvc_wasm_instantiate_async(this);
+#endif
     if (r == 2)
       error = "it isn't transformed for the browser (it isn't metered, with ari.gas and ari_gas, "
               "or it has no Asyncify exports): install it through cvc_ariadne_wasm_transform "

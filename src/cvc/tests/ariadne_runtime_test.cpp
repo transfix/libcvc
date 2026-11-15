@@ -111,6 +111,10 @@ struct MockBackend : Backend {
   }
   void end_window() override { rec("end_window"); }
   void focus_next_window() override { rec("focus_next_window"); }
+  void next_window_resizable(bool r) override {
+    if (!r)
+      rec("not_resizable"); // only when off: the default leaves the log as it was
+  }
   std::vector<std::string> grid_ids; // the id the core gave each begin_grid, in walk order
   bool begin_grid(const Layout &L, const char *id) override {
     rec(std::string("begin_grid:cols=") + std::to_string(L.col_widths.size()));
@@ -330,7 +334,7 @@ TEST(AriadneRuntime, EmitsWindowAndWidgetsInOrder) {
   rt.set_root(group({window("W", {text("hi"), separator(), button("Go", "go")})}));
   rt.render();
   EXPECT_TRUE(mb.saw("begin_frame"));
-  EXPECT_TRUE(mb.saw("begin_window:W"));
+  EXPECT_TRUE(mb.saw("begin_window:W(closable)")); // §5.9 a close button by default
   EXPECT_TRUE(mb.saw("text_line:hi"));
   EXPECT_TRUE(mb.saw("separator"));
   EXPECT_TRUE(mb.saw("button:Go"));
@@ -5503,28 +5507,110 @@ TEST(AriadneRuntime, WindowsMenuReopensAClosedWindow) {
   EXPECT_FALSE(mb.saw("begin_window:Alpha(closable)"));
   EXPECT_FALSE(mb.toggle_shown["Alpha"]);
 
-  // Clicking the item opens it again.
+  // Clicking the item opens it again, in front: the menu is drawn before the windows, so the
+  // same frame.
   mb.click_toggle = "Alpha";
+  mb.log.clear();
   rt.render();
   mb.click_toggle.clear();
   EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.a.open").value(), "1");
+  const std::ptrdiff_t alpha = log_index(mb, "begin_window:Alpha(closable)");
+  ASSERT_GE(alpha, 1);
+  EXPECT_EQ(mb.log[static_cast<std::size_t>(alpha - 1)], "focus_next_window");
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.a.raise").value(), "") << "consumed";
   mb.log.clear();
   rt.render();
   EXPECT_TRUE(mb.saw("begin_window:Alpha(closable)"));
+  EXPECT_FALSE(mb.saw("focus_next_window")) << "in front once, not every frame";
 
-  // A window with no close button can be hidden and shown from the menu too.
+  // Clicking an open window's item brings it to the front and leaves it open, ticked (its X closes
+  // it), as a window manager's Windows menu does: Beta, which has no close button, too.
   mb.click_toggle = "Beta";
-  rt.render();
-  mb.click_toggle.clear();
   mb.log.clear();
   rt.render();
-  EXPECT_FALSE(mb.saw("begin_window:Beta"));
-  mb.click_toggle = "Beta";
-  rt.render();
   mb.click_toggle.clear();
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.b.open").value(), "1");
+  const std::ptrdiff_t beta = log_index(mb, "begin_window:Beta");
+  ASSERT_GE(beta, 1);
+  EXPECT_EQ(mb.log[static_cast<std::size_t>(beta - 1)], "focus_next_window");
   mb.log.clear();
   rt.render();
   EXPECT_TRUE(mb.saw("begin_window:Beta"));
+  EXPECT_TRUE(mb.toggle_shown["Beta"]);
+}
+
+// §5.9 `resizable: false` reaches the backend right before that window's begin_window, and only
+// that window's.
+TEST(AriadneRuntime, ANonResizableWindowTellsTheBackend) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget fixed = window_with_id("Fixed", "f", false);
+  fixed.resizable = false;
+  rt.set_root(group({window_with_id("Free", "a", false), fixed}));
+  rt.render();
+  const std::ptrdiff_t at = log_index(mb, "begin_window:Fixed");
+  ASSERT_GE(at, 1);
+  EXPECT_EQ(mb.log[static_cast<std::size_t>(at - 1)], "not_resizable");
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "not_resizable"), 1) << "Free is resizable";
+}
+
+// §5.9: a window that becomes maximized, by its button or by a document writing its
+// tree.<id>.maximized, comes to the front the frame it is first drawn maximized, and only then.
+TEST(AriadneRuntime, AWindowComesToTheFrontWhenItIsMaximized) {
+  struct MaxBackend : MockBackend {
+    std::string press; // the window whose maximize button is pressed this frame
+    bool *pending = nullptr;
+    bool next_window_maximize(bool *m) override {
+      pending = m;
+      return true;
+    }
+    bool begin_window(const char *t, const char *id, const Size &s, float b, bool *p) override {
+      if (pending && press == t)
+        *pending = !*pending;
+      pending = nullptr;
+      return MockBackend::begin_window(t, id, s, b, p);
+    }
+  };
+  cvc::app app;
+  Runtime rt(app, "");
+  MaxBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({window_with_id("Alpha", "a", false), window_with_id("Beta", "b", false)}));
+  rt.render();
+  cvc::state &st = cvc::state::instance(app);
+  const auto raised_before = [&](const std::string &win) {
+    const std::ptrdiff_t at = log_index(mb, "begin_window:" + win);
+    return at >= 1 && mb.log[static_cast<std::size_t>(at - 1)] == "focus_next_window";
+  };
+
+  st("tree.a.maximized").value(std::string("1")); // the document's
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(raised_before("Alpha"));
+  EXPECT_FALSE(raised_before("Beta"));
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("focus_next_window")) << "once, not while it stays maximized";
+
+  // Back, and maximized again: in front again.
+  st("tree.a.maximized").value(std::string("0"));
+  rt.render();
+  st("tree.a.maximized").value(std::string("1"));
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(raised_before("Alpha"));
+
+  // Beta's button: the backend brings a pressed window up itself, so the core does not again.
+  mb.press = "Beta";
+  mb.log.clear();
+  rt.render();
+  mb.press.clear();
+  EXPECT_EQ(st("tree.b.maximized").value(), "1");
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(raised_before("Beta"));
 }
 
 TEST(AriadneRuntime, WindowsMenuLeavesOutWindowsTheDocumentAlreadyToggles) {
@@ -6830,6 +6916,43 @@ long menu_at(const MockBackend &mb, const std::string &label) {
 }
 
 } // namespace
+
+namespace {
+
+// Keeps the count function AppRuntime gives its adapter (a scene node's repeat: expression).
+struct CountSceneAdapter : SceneAdapter {
+  CountFn count;
+  void set_count_fn(CountFn fn) override { count = std::move(fn); }
+  void realize(const Scene &, const std::string &, std::vector<std::string> *) override {}
+  void sync_visibility(cvc::app &) override {}
+  void tick() override {}
+};
+
+} // namespace
+
+// §5.4 a scene node's repeat: (expr) is counted on the document's read lane, as a widget's
+// repeat: is: AppRuntime hands its adapter Runtime::eval_count, and takes it back when it goes.
+TEST(AriadneAppRuntime, SceneRepeatCountsOnTheReadLane) {
+  cvc::app app;
+  CountSceneAdapter scene;
+  {
+    AppRuntime art(app, "ui.docs.r", &scene);
+    ASSERT_TRUE(static_cast<bool>(scene.count));
+    cvc::state::instance(app)("ui.docs.r.pins").value(std::string("7"));
+    EXPECT_EQ(scene.count("(state-get \"pins\")"), 7); // a number string, from the prefix
+    EXPECT_EQ(scene.count("(* 2 3.9)"), 7);            // a double, truncated
+    EXPECT_EQ(scene.count("(- 0 5)"), 0);              // never negative
+    EXPECT_EQ(scene.count("(* 1000 1000)"), 4096);     // the widget cap
+    cvc::state::instance(app)("ui.docs.r.pins").value(std::string("2"));
+    EXPECT_EQ(scene.count("(state-get \"pins\")"), 2); // re-read once it changed
+    EXPECT_EQ(scene.count("(nope"), 0);                // broken: 0, said once
+    bool said = false;
+    for (const std::string &w : art.runtime().take_reactive_warnings())
+      said = said || w.find("(nope") != std::string::npos;
+    EXPECT_TRUE(said);
+  }
+  EXPECT_FALSE(static_cast<bool>(scene.count)); // the runtime went: nothing to call
+}
 
 // A host's menus (a gallery's Demos) go first in every document's menubar, and give a document
 // without one a menubar of their own; set_root gets them too.

@@ -5,7 +5,8 @@
 # Every window here has a size:. One without fits its widgets (cvcgl_imgui_window_fit checks that,
 # with no GL); it can join this golden when windows.png is next made under llvmpipe.
 #
-# There is no menubar:, but the closable window gets one holding the built-in Windows menu
+# Every window has a maximize button and a close button but one, which turns both off. There is
+# no menubar:, but a window with a close button gets one holding the built-in Windows menu
 # (docs/ARIADNE.md §5.9), and the pos: of every window is measured from below it.
 
 meta:
@@ -31,14 +32,15 @@ windows:
       - text: "and a line tinted with color:."
         color: [0.95, 0.65, 0.25]
 
-  - window: Closable
+  - window: No buttons
     id: closable
     pos: [24, 204]
     size: [320, 120]
-    closable: true
+    closable: false
+    maximizable: false
     frame: { border: 3 }
     children:
-      - text: "closable: true draws the close button;"
+      - text: "closable: false, maximizable: false;"
       - text: "frame: { border: 3 } widens the border."
 
   - window: Fractions

@@ -634,6 +634,20 @@ class Host:
             log.warning("%s", w)
         return warns
 
+    @property
+    def entities(self):
+        """The running world's entities (its vehicles) as a ``pycvc.WorldEntities``: ``list()``,
+        ``spawn(archetype, ...)``, ``despawn(id)``, and ``set_intent(id, steer=, accel=, mode=,
+        weight=, force=(fx, fy))`` to steer one from here (ARIADNE_WORLDS.md §14, S1)."""
+        self._check_open()
+        if getattr(self, "_entities", None) is None:
+            if isinstance(self.runtime, self._pycvc.AriApp):
+                self._entities = self.runtime.entities()
+            else:
+                self._entities = self._pycvc.world_entities(self.app,
+                                                            self.runtime.app_runtime_capsule())
+        return self._entities
+
     def has_function(self, name: str) -> bool:
         """Whether the document's programs can call ``name`` here."""
         return bool(self.runtime.has_function(name))
@@ -797,6 +811,18 @@ class Host:
         s = self._pycvc.stream_open(self.app, stream_id, codec, int(width), int(height))
         self.streams[stream_id] = s
         return s
+
+    def open_raster(self, raster_id: str, width: int, height: int, *, key_every: int = 30,
+                    mirror: str | None = None):
+        """Open a raster stream at ``streams.<raster_id>``: the picture a node's
+        ``material: { texture: { stream: streams.<raster_id> } }`` wears (docs/ARIADNE.md §5.4,
+        "Live textures"), uploaded a rectangle at a time. Paint it (``fill``, ``paint_grid``, or
+        ``pixels()`` then ``mark``), then ``publish()`` what changed. ``mirror`` is a key under this
+        host's root to keep its frames under as well. Closed by ``close()``."""
+        r = self._pycvc.raster_open(self.app, raster_id, int(width), int(height), int(key_every),
+                                    self._path(mirror) if mirror else "")
+        self.streams[raster_id] = r
+        return r
 
     # ── data out ─────────────────────────────────────────────────────────────────────────────────
 
@@ -1061,6 +1087,7 @@ class Host:
         if self._in_frame:
             raise RuntimeError("Host.close: called from inside a frame; request_close() instead")
         self._closed = True
+        self._entities = None  # it points at the runtime, which goes below
         rt = self.runtime
         rt.request_close()
         if self.embedded:  # the host owns all of it, and tears it down itself

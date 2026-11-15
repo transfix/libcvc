@@ -308,6 +308,11 @@ struct SceneNode {
   // setTexture). Empty = untextured. Meaningful only for a geometry node whose mesh carries UVs
   // (e.g. a heightfield, or a loaded mesh with texcoords); a mesh with no UVs is unaffected.
   std::string material_texture;
+  // material: { texture: { stream: <name> } } — the texture is a live stream instead (§5.4, "Live
+  // textures"): the name is a stream token, or a state path, resolved as a bind is, that holds a
+  // raster mirror (a relay's client has one). Any node that draws a mesh takes it; a raster stream
+  // re-uploads only the rectangles that changed. Empty: no stream.
+  std::string material_texture_stream;
   // material: { uv: { rotate, flip_u, flip_v, scale, offset } } — how the node's image texture
   // (material: texture, or a dataset's draped satellite image) sits in texture space. Applied to
   // the mesh's UVs in this order: flip_u / flip_v mirror the image (u -> 1 - u, v -> 1 - v);
@@ -323,6 +328,14 @@ struct SceneNode {
   // (vtkActor::SetForceOpaque). VTK otherwise scans a texture's every texel for alpha to decide
   // the pass, which on a large ground texture is a measurable share of a browser frame.
   bool material_opaque = false;
+  // material: { opacity: <0..1> } — how opaque the node's meshes draw (1 solid, 0 gone). Below 1
+  // they draw see-through, in the translucent pass even with opaque: true, as a viewport
+  // override:'s opacity does. opacity: <state path>, or { bind: <path>, default: <0..1> }, follows
+  // a state value instead (read without seeding, as visible: is): `opacity` is the value while
+  // the key is unset. A volume node ignores it (its transfer function holds its opacity).
+  bool has_opacity = false;
+  float opacity = 1.0f;
+  std::string opacity_bind;
 
   // casts_shadow: false — the node (and everything below it) receives shadows but casts none, so
   // it never forces a shadow re-bake (GraphicsNode::setCastsShadow). For a ground too big to
@@ -376,6 +389,13 @@ struct SceneNode {
   std::string visible_bind;    // visible: <state path> (or, later, an expression)
   bool visible_default = true; // initial visibility when no bind / before first read
 
+  // repeat: <count> — the node is a template, drawn as `count` copies beside one another (a
+  // widget's repeat:, §3). The count is a whole number, a state key holding one (a list's length,
+  // as host.set_table writes it), or a read-lane expression (it starts with '('); see
+  // scene_repeat_count. Copy k is scene_node_instance(*this, k). A realizer adds and removes copies
+  // as the count changes (cvcGL's tick_scene). Empty: a plain node.
+  std::string repeat;
+
   // Every node key the built-in parser did NOT consume, as a neutral map — the
   // config bag a CUSTOM node type (registered via cvc::gl::ariadne::
   // register_scene_node_type) reads. Empty for the built-in types.
@@ -395,6 +415,29 @@ inline std::string node_key(const SceneNode &n, const std::string &key) {
     return key;
   return root + key.substr(dot);
 }
+
+// What a node's `repeat:` counts by (SceneNode::repeat).
+struct SceneRepeatCount {
+  enum class Kind { none, literal, key, expression };
+  Kind kind = Kind::none;
+  int literal = 0;  // Kind::literal: the count
+  std::string text; // Kind::key: the state key (a bind path); Kind::expression: the expression
+};
+
+// The most copies one repeat: makes (a widget's repeat: has the same cap); a larger count is
+// clamped to it.
+constexpr int kSceneRepeatMax = 4096;
+
+// `repeat` as a count: a whole number (a literal, clamped to kSceneRepeatMax; a negative one is 0),
+// an expression when it starts with '(', and otherwise a state key. Empty: Kind::none.
+SceneRepeatCount scene_repeat_count(const std::string &repeat);
+
+// Copy `index` of the repeat: template `n`: `{i}` replaced by the index (0-based) in its id, its
+// `visible:` and `material: { opacity }` binds, its tags, its sources (file, asset, data and item),
+// its texture, its clips' offset binds and every string in its props, and in its children likewise.
+// The copy's `repeat` is empty. A child that has a repeat: of its own is left as it is, so its
+// copies number themselves, as a nested widget repeat's do.
+SceneNode scene_node_instance(const SceneNode &n, int index);
 
 // A scene light (§9.2). Either an explicit light (kind/pos/target/cone/intensity/
 // color, or azimuth/elevation for a directional sun) or a named StageLighting preset
@@ -518,6 +561,10 @@ struct Scene {
   bool has_main_view = false;
   std::vector<std::string> main_show, main_hide;
   std::vector<SceneLight> lights;
+  // entity_labels: { text, offset, color, backdrop, edge, size, scale, focus, fade } (a node's
+  // label: keys, its text "{name}" by default), or true for the default look: each world
+  // entity's label (cvc::gl::ariadne::apply_entity_label). Empty: none.
+  Value entity_labels;
   std::vector<SceneCamera> cameras; // cameras: [...] — named cameras viewports bind
   SceneClock clock; // §9 time: the simulation clock (clock.present gates it) — see SceneClock
   ScenePhysics physics; // physics: {...} — the world the nodes' bodies live in (see SceneBody)
@@ -525,7 +572,8 @@ struct Scene {
   // The vehicles the document's top-level `world: vehicles:` offers (world_rules.h), which the
   // host copies in after the load: the world runtime spawns them into this scene's physics.
   std::vector<vehicle_archetype> vehicles;
-  spawn_rules spawns; // and where they start (world: spawns:)
+  spawn_rules spawns;          // and where they start (world: spawns:)
+  std::string vehicle_intents; // and a table of their intents (world: vehicles: intents:)
   bool has_shadows = false;
   bool shadows_enabled = false;
   bool has_shadow_resolution = false; // shadows: { resolution: <px> } — bigger = crisper map
