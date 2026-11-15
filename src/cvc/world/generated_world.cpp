@@ -1447,6 +1447,7 @@ struct world_builder::impl {
   city_streets streets;
   FootprintIndex fps;
   std::shared_ptr<const graded_terrain> graded; // the ground with the roads graded in
+  std::vector<std::uint8_t> roadBed; // the mesh samples on a road's bed (never lowered as slivers)
 
   void advance(build_stage s) {
     base += kStageWeight[int(st)];
@@ -1610,10 +1611,13 @@ struct world_builder::impl {
         w.model = std::make_shared<const world_model>(w.model->with_terrain(graded));
         regradeRaster(*graded, p, w.raster, w.grid, w.model->registry());
         heights = w.terrain->heights();
+        roadBed.assign(heights.size(), 0);
+        streets.roads.on_or_near_road(0.0, 0.0); // its index, made here before the rows share it
       }
       const int r1 = next + std::min(N - next, rowsFor(budget, N, 1));
       const double x0 = w.terrain->x0(), y0 = w.terrain->y0(), dx = w.terrain->dx(),
                    dy = w.terrain->dy();
+      const double bedMargin = std::max(1.0, 0.75 * dx); // the grade's flat margin past each edge
       const graded_terrain &g = *graded;
 #ifdef CVC_USING_OPENMP
 #pragma omp parallel for schedule(dynamic, 4)
@@ -1621,13 +1625,23 @@ struct world_builder::impl {
       for (int r = next; r < r1; ++r)
         for (int c = 0; c < N; ++c) {
           const double x = x0 + c * dx, y = y0 + r * dy;
-          if (g.graded_at(x, y))
-            heights[std::size_t(r) * N + c] = float(g.sample(x, y));
+          if (g.graded_at(x, y)) {
+            const std::size_t i = std::size_t(r) * N + c;
+            heights[i] = float(g.sample(x, y));
+            roadBed[i] = streets.roads.on_or_near_road(x, y, bedMargin) ? 1 : 0;
+          }
         }
       next = r1;
       frac = double(next) / N;
       if (next < N)
         return;
+      // The waterline's one-sample ridges under the water, now the mesh has its final heights (a
+      // road's grade re-samples the base relief near it, so this comes after): the ground draws no
+      // hairline out of the water. A road's bed is kept.
+      if (p.waterline_sliver_m > 0.0)
+        w.waterline_slivers =
+            lower_waterline_slivers(heights, N, N, p.water_level_m, p.waterline_sliver_m, &roadBed);
+      roadBed = std::vector<std::uint8_t>();
       w.terrain->set_heights(std::move(heights));
       heights = std::vector<float>();
       advance(build_stage::city);
