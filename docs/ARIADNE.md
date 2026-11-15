@@ -960,6 +960,29 @@ each point.
 mesh's UVs. UV (0, 0) is the image's bottom-left corner. A `source: { data }` city's terrain wears
 its bundle's `satellite.png` this way, north up (§5.17).
 
+**See-through nodes.** `material: { opacity: <0..1> }` draws a node's meshes see-through: 1 is
+solid (the default) and 0 is invisible. A see-through mesh is drawn in the translucent pass even
+with `opaque: true` beside it (the opacity wins, as a viewport `override:`'s does, §5.18), and it
+casts no shadow into the scene's maps. `opacity:` may instead name a state key, as
+`opacity: zone.alpha` or `{ bind: zone.alpha, default: 0.4 }`, and the node follows that key each
+frame as `visible:` follows its own: the key is read, never seeded, and clamped to 0..1, and
+`default` (1 when left out) holds while the key is unset or is not a number. The opacity reaches
+whatever the node draws: its mesh, every rung of its LOD ladder, the meshes a `source: { data }`
+node draws (each redraw included), and the mesh a custom node type returns. A volume node ignores
+it, because its transfer function holds its opacity.
+
+```yaml
+scene:
+  nodes:
+    - node: reach
+      source: { sphere: 40 }
+      transform: { position: [120, -60, 0] }
+      material: { color: [1.0, 0.35, 0.2], opacity: 0.25 }       # a see-through dome
+    - node: zone
+      source: { box: { size: [50, 30, 10] } }
+      material: { color: [0.2, 0.8, 0.3], opacity: { bind: zone.alpha, default: 0.4 } }
+```
+
 **Volumes and shadows.** A volume node (`volume`, `volren`, `volslice`) casts nothing into the
 scene's shadow maps (`shadows:`): its picture is no surface the maps can hold. A `volren` node's
 raycaster has
@@ -1218,7 +1241,7 @@ scene:
         humvee:
           vehicle: humvee                                    # a preset: humvee, roboracer
           ranges: { mass: [2000, 3500], max_speed: [5, 20] } # what a spawn may set
-          controllers: [nav@1, none]                         # the first is a spawn's default
+          controllers: [nav@1, none, external]               # the first is a spawn's default
         racer:
           vehicle: { preset: roboracer, max_speed: 6 }       # a preset with overrides
           look: { file: racer.glb, scale: 1, yaw: 90, z: 0 } # default: the chassis box
@@ -1227,7 +1250,8 @@ scene:
   - **Archetypes.** Each names its plant (`jolt`; `kinematic`, `dynamic` and `dynamic4w` are
     accepted but not run in a scene world yet), its body (a preset, with `mass`, `max_speed`,
     `max_accel`, `max_decel` or `max_steer` over it), its look, the ranges a spawn's settings are
-    held to, and its controllers: `nav@1`, the navigator, or `none`.
+    held to, and its controllers: `nav@1`, the navigator, `none`, or `external` (its intent
+    alone drives it).
   - **Looks.** With no `look:`, a humvee is the real Humvee, the vehicle-humvee package's
     `Humvee.glb`, when it is installed (`find_vehicle_model`: beside `$CVC_NAV_BUNDLE`, else in
     `share/cvc-scenes/shared` or `share/cvc-scenes/*/` under `$CVC_PREFIX`, `$CVCPKG_PREFIX`,
@@ -1249,8 +1273,30 @@ scene:
     `selected` and `selection.*` (the selected archetype as a spawn would make it now), and
     `status`. Under `entities`: `ids`, `count`, `rev`, `summary`, and for each entity its
     identity, pose (`x`, `y`, `z`, `yaw`), `speed`, `power_kw`, `energy_wh`, `wh_per_km`,
-    `distance`, `wheel_load`, `aero_force` and `gear`. `physics.stats.vehicles` has a line per
-    vehicle.
+    `distance`, `wheel_load`, `aero_force` and `gear`, and `command.steer` / `command.accel`
+    (what its plant took on the last navigator tick) with `command.by` (its controller, `intent`,
+    `blend`, or `hold`). `physics.stats.vehicles` has a line per vehicle.
+  - **Intents.** Any entity can be steered from outside. A document, a script or a server writes
+    its keys, and a C++ or Python host calls `WorldVehicles::set_intent` (`pycvc.WorldEntities`,
+    below). Each navigator tick (20 Hz) reads them, and a change replaces the intent it had:
+
+    | Key, under `entities.<id>` | What it is |
+    |---|---|
+    | `intent.mode` | `replace`: the intent's command in place of the controller's; `blend`: `weight` of it and `1 - weight` of the controller's; `off`: the controller's alone. Empty: `replace` when a steer or an acceleration is given |
+    | `intent.steer` | the bicycle angle, rad, + left, held to the vehicle's lock |
+    | `intent.accel` | m/s² along its heading (from rest a negative one backs it up), held to its top speed as the navigator's command is |
+    | `intent.weight` | the blend's share, 0 to 1 (default 0.5) |
+    | `force.x`, `force.y` | m/s², world frame: a push added to the drive's force (the goal's pull and the walls' push), as `cvc::nav::ext_force` adds one. It works under any command but `replace` |
+    | `force.steer` | `0` keeps the force out of the drive's steering (default `1`). The drive has one such switch, on while any entity's force asks for it |
+
+    An `external` entity has no command of its own: `replace` and `blend` both drive it, and with
+    no intent (or `off`) it brakes to a stop and holds there. `world: vehicles: intents: <path>`
+    names a second table, read the same way, by id or by name: `<path>.<id>.intent.*` or
+    `<path>.<name>.intent.*` (for a name that is a state name). The path resolves as a bind does,
+    so `/drive` is outside the document's prefix. That is how a server document steers: it
+    publishes the namespace (`server: publish: [drive]`), the relay replicates it, and its program
+    writes `(state-set "drive.lead.intent.accel" "2")`. The C++ setter, `set_intent`,
+    `clear_intent` and `intent`, may be called from any thread.
   - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,
     `color`, `color2` as `r,g,b`, `metadata` as `key=value, ...`, `controller`, `policy`,
     `policy_sha256`, `mass` or `mass_t` (a fraction of the range), `max_speed` or `max_speed_t`,
@@ -1263,6 +1309,15 @@ scene:
   - **The panel.** `vehicle_selector.ari`: the vehicle, its stats, a preview viewport onto a
     `scenes:` entry holding a `vehicle_preview` node (its header shows one), the settings, the
     controller and policy, the identity, Spawn, and the spawned vehicles with Remove and Clear.
+  - **From Python.** `pycvc.AriApp.entities()`, `pycvc.world_entities(app, runtime_capsule)`
+    over a GL host's runtime (`pycvc_gl.AriRuntime.app_runtime_capsule()`), or
+    `pycvc.ari.Host.entities`, is a `pycvc.WorldEntities` over the running world (the runtime's
+    own, or its adapter's): `list()` (a dict per entity: identity, pose, speed, energy, the
+    command and the intent), `spawn(archetype, name=, controller=, team=, at=(x, y[, yaw°]),
+    mass=, max_speed=)` (0 and `why()` when refused), `despawn(id)`, and `set_intent(id, steer=,
+    accel=, mode=, weight=, force=(fx, fy), force_steers=)`, `intent(id)`, `clear_intent(id)`.
+    `list`, `spawn` and `despawn` run on the thread that runs frames; the intents from any
+    thread.
   - **One runtime per world.** Each `SceneWorld` has its own physics world, vehicles, policies
     and keys, with nothing process-wide, so a host that runs several worlds runs one each.
 - **Spawn points.** Where a vehicle spawned without a start of its own begins
@@ -2573,8 +2628,10 @@ it follow it too.
 **Overrides.** `override:` restyles nodes in one view only. Each entry names a node id, a tag, or
 `"*"` (everything), and sets any of `drawstyle` (`surface`, `wireframe`, `points`), `opacity`,
 `color`, `line_width` and `point_size` (`material: { color, opacity }` spells the same fields).
-What an entry does not set stays as the node has it. An entry covers the named node's subtree, and
-the entries apply in order, each adding to the ones before it field by field:
+What an entry does not set stays as the node has it, its own `material: { opacity }` included
+(§5.4), so a node see-through in the main view is see-through in every view unless an entry sets
+its `opacity`. An entry covers the named node's subtree, and the entries apply in order, each adding
+to the ones before it field by field:
 
 ```yaml
 - type: viewport
@@ -2849,6 +2906,68 @@ made for:
   that run, `ariadne_ftxui_test`'s `RichText*` drive links by mouse and keyboard in both terminal
   backends' paths, `cvcgl_imgui_rich_text` taps, drags and tabs through ImGui's own input, and
   `ari_rich_text` checks `ari snapshot`'s lines of `src/ari/tests/rich_text.ari`.
+
+### 5.21 Labels: `label:` and `entity_labels:`
+
+Any scene node can carry a label ([`scene_labels.h`](../inc/cvc/gl/ariadne/scene_labels.h)): text
+drawn over the node in screen space, such as a vehicle's name tag. The labels of a scene are drawn
+by one node, a `cvc::gl::LabelLayerNode` ([`LabelLayer.h`](../inc/cvc/gl/LabelLayer.h)), in the
+overlay pass. Each draw reads the label's anchor from its node's world transform; nothing is
+written to state.
+
+```yaml
+- node: car_a
+  source: { box: [4, 2, 1.5] }
+  label:
+    text: Alpha                       # or bind: <state key>, read as it draws
+    offset: 2                         # metres above the top of the node (or [x, y, z])
+    color: [1, 1, 1]                  # the text: [r, g, b], "#rrggbb" or c0..c7
+    backdrop: [0.05, 0.05, 0.07]      # the box behind the text, or none
+    edge: c0                          # a frame round the box (or true, or none)
+    size: 14                          # pixels at scale 1
+    scale: 1                          # a number or a state key
+    focus: { key: cam.follow, scale: 1.4 }   # larger while cam.follow holds this node's id
+    fade: [300, 600]                  # whole nearer than 300 m, gone past 600 m
+```
+
+- **Text.** `label: <text>` is the text alone. A label with neither `text:` nor `bind:` shows the
+  node's id. `bind:` takes the key's value while it holds one; `bold: true` is bold.
+- **Where it sits.** `anchor:` is `top` (the top of the node's bounds, the default), `center` or
+  `origin`. `offset:` is added to that point in world axes. The text sits centred above the
+  point.
+- **Backdrop and edge.** The backdrop is a box behind the text, at `backdrop_opacity` (0.6). The
+  edge is a frame round it, `edge_width` pixels wide.
+- **Size.** `scale:` multiplies `size:`. `focus:` multiplies it again by its `scale` (1.4) while its
+  key holds its `value`: the node's id by default, e.g. the vehicle the camera follows.
+- **Fade and cull.** `fade: [near, far]` is by the distance from the camera drawing it. The label
+  is whole up to `near`, fades linearly to nothing at `far`, and is not drawn past it.
+- **Depth order.** Labels are drawn farthest first, so a nearer label lies over a farther one.
+- **Views.** A label is drawn only where its node is. A hidden node's label is hidden. A view that
+  leaves the node out (`tags:`, §5.18) leaves its label out. A mirror or viewport fades and orders
+  the labels by its own camera.
+- **Cost.** The text is rasterised again only when its text, size or opacity changes. Opacity is
+  in 32 steps across the fade band. A still label costs a projection and a quad.
+
+The node's own VTK label (the `show_label`, `label_text` and `label_size` keys of every graphics
+node) is still there. It is plain text at the node's centre; `label:` is the one with these rules.
+
+`entity_labels:` in the `scene:` block gives every world entity (§5.4's world vehicles, **Entities**, drawn
+as `vehicle_<id>`) a label in the same keys. Its text is `"{name}"` by default, and `{name}`, `{id}`,
+`{archetype}` and `{team}` are filled in. An unnamed entity shows its node's id.
+`entity_labels: true` gives the default look, e.g.
+`entity_labels: { offset: 2.5, fade: [300, 600], focus: cam.follow }`. A label is made with each
+entity's node and goes with it.
+
+[`cvcgl_ariadne_labels`](../src/cvcGL/test/cvcgl_ariadne_labels.cpp) covers these from a document,
+drawn for real:
+
+- the fade rule, and a label culled past `far`;
+- the pixels of a label's text, backdrop and edge above its node;
+- the depth order;
+- bound text, scale and focus;
+- hidden nodes, and a renderer that leaves a node out;
+- that a still frame rasterises nothing again;
+- an entity's name label.
 
 ## 6. Composition: include / import / load
 
@@ -4396,8 +4515,10 @@ is a `PythonError` a `try` catches. A reload runs the block again.
 
 #### 9.8.3 Joining a relay: `relay:` and `--relay`
 
-`ari` and the `x` hosts join a relay as a client, from a document's `relay:` block or the host's
-`--relay URL` ([`relay_session.h`](../inc/cvc/ariadne/conference/relay_session.h)):
+Every host joins a relay as a client, from a document's `relay:` block or the host's `--relay URL`
+([`relay_session.h`](../inc/cvc/ariadne/conference/relay_session.h)): `ari` and `arix`, `arigl`
+in a window and in a terminal, `ariglx`, and `arigl-web` in a browser page. A graphics client of a
+server's state, its scene included, is then a document and a stock host:
 
 ```yaml
 relay:
@@ -4434,6 +4555,16 @@ relay:
 - **TLS for native clients.** `arisrv --tls-cert PATH --tls-key PATH` serves both gRPC planes over
   TLS, and clients dial `grpcs://`. The WebSocket listener stays plain: a reverse proxy terminates
   TLS for browsers, and the native client has no `wss://` yet.
+- **In a browser page** (`arigl-web`), the page's own WebSocket dials `ws://` or `wss://` (its TLS
+  is the browser's). Nothing in a page may wait for the socket, which the page's event loop opens,
+  so every join, a token's too, is begun at the load and made from the frames: the load does not
+  fail on a relay it cannot reach, and `relay.status` says how the join goes. The page's config
+  names the relay with `"flags": ["--relay", "{ws_origin}/<path>"]` and takes a room token from
+  the URL's fragment (`"fragment_env": {"token": "CVC_ARIADNE_ROOM_TOKEN"}`), or the document
+  signs in and joins with `token: oidc:NAME`.
+- **Conference mode first.** In `arigl`, `CVC_ARIADNE_RELAY` (its conference client) holds
+  the link to the relay when it is set: a `relay:` block is then read and not joined, and
+  `--relay` is ignored, with a note.
 - A relay that turns the host away (a wrong token, or its authenticate hook, §9.8.4) fails a
   token join's load at once: "refused this host (unauthenticated…)". A refused credential, or a
   refused reconnect, is dialed again after the backoff, renewed first. A principal the service

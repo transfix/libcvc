@@ -2046,12 +2046,13 @@ jobs:
       # C++ reference test_pycvc_physics.py compares against (physics_parity_test,
       # which ctest hands it in CVC_PHYSICS_PARITY_EXE). Then the scripting hosts
       # (arix, ariglx: ari and arigl with this Python embedded), and stock ari, which
-      # their tests compare against.
+      # their tests compare against, and stock arigl, which joins arisrvx from a document's
+      # relay: block (arisrvx_room_call_arigl_*).
       - name: Build
         id: build
         run: |
           cmake --build build --parallel --target pycvc pycvc_gl pycvc_gl_pkg physics_parity_test
-          cmake --build build --parallel --target ari arix ariglx arix_engine_test
+          cmake --build build --parallel --target ari arix ariglx arix_engine_test arigl
           cmake --build build --parallel --target arisrv arisrvx arisrvx_server_link_test
 
       # ── a software GL for the pycvc_gl tests ──
@@ -2459,7 +2460,7 @@ jobs:
       # KO-1 and KO-2, the foreign-future cases of state_exec_async_calls_test, K's pycvc pool
       # cases, Y's ExecPool, registry and pump-owner cases, and mt.groups' points.
       SAN_REQUIRED_S1A: |
-        state_exec_groups_test: OK ] Groups.RX01_AnOptedInThreadsCyclesAreCollectedWhenItEnds
+        state_exec_groups_test: OK ] Groups.RX01_ABareSchedulersCyclesGoWithIt
         state_exec_groups_test: OK ] Groups.RX02_AHostKillNotesTheSchedulersRegistry
         state_exec_groups_test: OK ] Groups.RX03_EveryDriverTracksIntoTheSchedulersRegistry
         state_exec_groups_test: OK ] Groups.BF01a_TheFrozenScopeRefusesASet
@@ -2566,7 +2567,7 @@ jobs:
         state_lifetime_stress_test: OK ] StateLifetime.UriStateChainsReleaseTheLeafFirst
         state_lifetime_stress_test: OK ] StateLifetime.StreamDescriptorPinsReleaseTheLeafFirst
         ariadne_runtime_test: OK ] AriadneScheduler.DrainEndDoesNotPumpAgainAfterAFramePump
-        ariadne_runtime_test: OK ] AriadneInit.ItsCyclesAreItsOwnAndFreedWhenItEnds
+        ariadne_runtime_test: OK ] AriadneInit.RunsAScriptThatLeavesCycles
         ariadne_runtime_test: OK ] AriadneHazards.AResidentAReloadStopsIsReaped
         ariadne_runtime_test: OK ] AriadneIsolatedDocs.ProvidersAreInstalledByTheirKind
         ariadne_runtime_test: OK ] AriadneIsolatedDocs.IdleAndWaitIdleCountTheDocumentsGroup

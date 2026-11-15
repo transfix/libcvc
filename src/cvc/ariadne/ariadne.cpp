@@ -810,8 +810,8 @@ public:
   // the function it replaces, so the kept results go (each scope's map stays where it is).
   void bind_read_function(const std::string &name, const Runtime::ReadFunction &fn) {
     se::environment *env = env_.get();
-    env_->set(name, se::value_t(se::native_fn(
-                        [fn, env](std::span<const se::value_t> args) { return fn(args, *env); })));
+    env_->set(name,
+              se::value_t(se::native_fn([fn, env](se::call_args args) { return fn(args, *env); })));
     for (auto &[scope, kept] : cache_)
       kept.clear();
   }
@@ -996,7 +996,7 @@ private:
       st.data_step_nodes = data_step_nodes_;
       // The render lane can't wait (docs/STATE_EXEC_EXCEPTIONS.md 3.3): an async function is
       // unbound here, and one reached anyway raises RuntimeError instead of parking or blocking.
-      const se::park_forbidden_scope no_parking;
+      const se::park_forbidden_scope no_parking(ev_->context());
       frame_.start();
       const charge_frame charge{frame_, st};
       se::value_t r = ev_->run(st, kMaxSteps, std::min(kMaxSeconds, remaining));
@@ -1100,16 +1100,16 @@ private:
         return;
       }
       se::native_fn inner = *fn;
-      env_->set(name, se::value_t(se::native_fn(
-                          [this, inner, live](std::span<const se::value_t> args) -> se::value_t {
-                            if (rec_) {
-                              if (live)
-                                rec_->live = true;
-                              else
-                                note_read(args);
-                            }
-                            return inner(args);
-                          })));
+      env_->set(name,
+                se::value_t(se::native_fn([this, inner, live](se::call_args args) -> se::value_t {
+                  if (rec_) {
+                    if (live)
+                      rec_->live = true;
+                    else
+                      note_read(args);
+                  }
+                  return inner(args);
+                })));
     };
     for (const char *name :
          {"state-get", "state-exists", "state-children", "state-data-get", "state-json"})
@@ -1432,9 +1432,10 @@ struct Runtime::Impl {
   std::shared_ptr<FilePickHub> file_pick = std::make_shared<FilePickHub>();
   // (file-pick), (file-info) and (file-forget), bound into the program's env as they are in every
   // group (install_backend_verbs): file-info and file-forget lock the app's PickedFiles, and
-  // file-pick parks its program on `host` and opens the picker on the host thread.
+  // file-pick parks its program on `host` and opens the picker on the host thread: through the
+  // host-call queue of the pump_all holding `group` (null: group 0, the init lane, inline).
   void bind_file_verbs(const std::shared_ptr<cvc::state_exec::environment> &env,
-                       cvc::state_exec::async_host &host) const;
+                       cvc::state_exec::exec_group *group, cvc::state_exec::async_host &host) const;
 
   // What this host provides (requires:, has?). The names a program can reference are read from a
   // probe env built exactly like an action's, then cached; the cache is rebuilt when a provider is
@@ -4737,7 +4738,7 @@ void Runtime::Impl::install_backend_verbs(const cvc::state_exec::environment_ptr
   // The file verbs bind into the env as they are, in every group (bind_file_verbs): (file-info)
   // and (file-forget) are thread-safe, and (file-pick) is async, which a host_proxied wrapper
   // could not park; it opens its picker on the host thread itself.
-  bind_file_verbs(env, host);
+  bind_file_verbs(env, group, host);
   // The backend's verbs drive its window and clipboard, which are the host thread's: they are
   // host_proxied (S1-Q7). In an `any` group each native runs on the pump_all caller's thread
   // (exec_group::install), as install_providers binds a host_proxied provider; in group 0, in a
@@ -4877,6 +4878,7 @@ std::string handle_arg(const char *verb, std::span<const cvc::state_exec::value_
 } // namespace
 
 void Runtime::Impl::bind_file_verbs(const std::shared_ptr<cvc::state_exec::environment> &env,
+                                    cvc::state_exec::exec_group *group,
                                     cvc::state_exec::async_host &host) const {
   namespace se = cvc::state_exec;
   cvc::app *const app_ptr = &app;
@@ -4890,17 +4892,20 @@ void Runtime::Impl::bind_file_verbs(const std::shared_ptr<cvc::state_exec::envir
   // there is a backend, so somewhere to ask: (has? "file-pick"). The program parks on its own
   // host (ictx.host: its group's, or the app's in group 0). The call starts on whatever thread
   // pumps the program, a pool worker in an `any` group: it claims the hub there, under its lock,
-  // and opens the picker on the host thread (exec_pool::run_on_host; inline when this is that
-  // thread), where the window and the Runtime's own picker are drawn. The answer goes through the
+  // and opens the picker on the host thread (exec_pool::run_on_host for the program's group;
+  // inline when this is that thread, or in group 0), where the window and the Runtime's own picker
+  // are drawn. The group is the env's, as `host` is: both live as long as its programs. The answer
+  // goes through the
   // host's finisher, as the host may be gone by then (an isolated document's group goes with its
   // Runtime).
   if (backend)
     se::register_async_fn(
         env, host, "file-pick",
-        [app_ptr, weak_hub, ref, &host](std::span<const se::value_t> args) -> se::async_work {
+        [app_ptr, weak_hub, ref, group,
+         &host](std::span<const se::value_t> args) -> se::async_work {
           const FilePickRequest req = file_pick_request(args);
           se::async_work work; // no kernel: a program that can't park can't wait for the user
-          work.start = [app_ptr, weak_hub, ref, req,
+          work.start = [app_ptr, weak_hub, ref, req, group,
                         fin = host.make_finisher()](const std::shared_ptr<se::async_call> &call) {
             const std::shared_ptr<FilePickHub> hub = weak_hub.lock();
             if (!hub || !ref.lock())
@@ -4955,7 +4960,7 @@ void Runtime::Impl::bind_file_verbs(const std::shared_ptr<cvc::state_exec::envir
                 h->cancel = true; // render() closes the window
               }
             });
-            app_ptr->exec_pool().run_on_host([weak, ref, req, settled, done] {
+            std::function<void()> open = [weak, ref, req, settled, done] {
               if (settled->load())
                 return; // cancelled before the host thread came to it
               const std::shared_ptr<FilePickHub> h = weak.lock();
@@ -4974,7 +4979,11 @@ void Runtime::Impl::bind_file_verbs(const std::shared_ptr<cvc::state_exec::envir
                 return;
               }
               h->composed.open(req, done); // drawn by render() from the next frame
-            });
+            };
+            if (group)
+              app_ptr->exec_pool().run_on_host(*group, std::move(open));
+            else
+              open();
           };
           return work;
         },

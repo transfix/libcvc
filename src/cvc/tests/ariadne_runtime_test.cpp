@@ -2590,13 +2590,10 @@ TEST(AriadneInit, EmptyScriptIsNoop) {
 }
 
 // The init lane's scheduler has a cycle registry of its own (S1.1, S1-Q3), collected when the run
-// ends: the cycles a script leaves are freed then, and none is left in the calling thread's own
-// registry, which no scheduler of the init lane would collect again.
-TEST(AriadneInit, ItsCyclesAreItsOwnAndFreedWhenItEnds) {
-  namespace se = cvc::state_exec;
+// ends: the cycles a script leaves are tracked there and freed then. (No thread has a registry of
+// its own to leave them in since master's #1217, so that is no longer checked here.)
+TEST(AriadneInit, RunsAScriptThatLeavesCycles) {
   cvc::app app;
-  se::collect_cycles(); // this thread's own registry: count from what outlives a collection
-  const std::size_t before = se::tracked_objects();
   std::vector<std::string> errs;
   // Each call's scope holds the closure that captured it: 64 cycles, tracked as each lambda is
   // made.
@@ -2608,7 +2605,6 @@ TEST(AriadneInit, ItsCyclesAreItsOwnAndFreedWhenItEnds) {
                        &errs))
       << (errs.empty() ? std::string("(no error)") : errs[0]);
   EXPECT_EQ(cvc::state::instance(app)("ui.cycles.made").value(), "64");
-  EXPECT_EQ(se::tracked_objects(), before);
 }
 
 // --- custom widget: the backend novel-primitive escape (Backend::custom_widget) ---
@@ -3641,8 +3637,6 @@ TEST(AriadneHeap, FinishedActionsAreReapedAndTheirCyclesFreed) {
   ASSERT_NE(reg, nullptr) << "the app scheduler has no registry of its own";
   se::collect_cycles(*reg);
   const std::size_t before = se::tracked_objects(*reg);
-  se::collect_cycles(); // this thread's own, for the check that it gains nothing
-  const std::size_t thread_before = se::tracked_objects();
   for (int i = 0; i < 20; ++i) {
     mb.button_click = true;
     rt.render();
@@ -3659,8 +3653,6 @@ TEST(AriadneHeap, FinishedActionsAreReapedAndTheirCyclesFreed) {
   se::collect_cycles(*reg); // the held scopes are live: it keeps them
   EXPECT_GE(se::tracked_objects(*reg), before + distinct.size())
       << "the actions' scopes are not in group 0's registry";
-  se::collect_cycles();
-  EXPECT_EQ(se::tracked_objects(), thread_before) << "an action tracked into this thread's own";
   held.clear(); // now only their cycles hold them
   se::collect_cycles(*reg);
   std::size_t alive = 0;

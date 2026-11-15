@@ -24,16 +24,18 @@ namespace {
 // left queued with no worker: app::poolDropReason() says which) or hands it back (no worker could
 // be started for it: launch_pool_task).
 struct pool_task_post {
+  app &owner; // whose pool runs it (and says why, if it drops it: poolDropReason)
   se::async_scheduler &sched;
   pool_task_work work;
   pool_task_on_error on_error;
   std::string done;
   bool armed = true; // this object still owes `done` its value; a move or a copy takes that over
 
-  pool_task_post(se::async_scheduler &s, pool_task_work w, pool_task_on_error e, std::string d)
-      : sched(s), work(std::move(w)), on_error(std::move(e)), done(std::move(d)) {}
+  pool_task_post(app &a, se::async_scheduler &s, pool_task_work w, pool_task_on_error e,
+                 std::string d)
+      : owner(a), sched(s), work(std::move(w)), on_error(std::move(e)), done(std::move(d)) {}
   pool_task_post(pool_task_post &&o) noexcept
-      : sched(o.sched), work(std::move(o.work)), on_error(std::move(o.on_error)),
+      : owner(o.owner), sched(o.sched), work(std::move(o.work)), on_error(std::move(o.on_error)),
         done(std::move(o.done)), armed(std::exchange(o.armed, false)) {}
   // std::function needs a copy constructor. The pool never copies a task (it moves or swaps the
   // std::function, which hands over a target this large by pointer); a copy takes the task over
@@ -66,7 +68,7 @@ struct pool_task_post {
     // interrupt pending there must stay pending, not be thrown inside on_error or post_message and
     // dropped by the catches below.
     boost::this_thread::disable_interruption keep_interrupt_pending;
-    drop(app::poolDropReason());
+    drop(owner.poolDropReason());
   }
 
   // Not run: post on_error(msg)'s value. The caller holds interruption off.
@@ -112,7 +114,7 @@ std::string launch_pool_task(app &a, se::async_scheduler &sched, const std::stri
   // exactly one value (on_error on a throw, or when the app drops the task unrun: it goes away, or
   // the task is left with no worker) so a waiter can't hang.
   // Refused, the task posts from its destructor before trySubmitPooled returns.
-  std::function<void()> task(pool_task_post(sched, std::move(work), std::move(on_error), done));
+  std::function<void()> task(pool_task_post(a, sched, std::move(work), std::move(on_error), done));
   if (a.trySubmitPooled(task) == app::PoolSubmit::no_worker) {
     // No worker could be started for it, and the pool has none (thread resources exhausted): it
     // posts on_error's value now rather than wait for a later submission to start a worker.
