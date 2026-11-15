@@ -662,11 +662,25 @@ public:
   // Agent i's planning limits as the drive uses them on the plant (normalized): its a_max, vmax
   // and cornering limit, its footprint discs' radius and kPlantDiscs offsets from the rear
   // axle. False without a plant; a limit the plant leaves at zero reads back as nav's own.
+  // With the rest of the plant arm (plant_drive), a twin of the drive can give the command the
+  // plant took: its wheelbase, the plant's steering lock (the fleet's tightest; 0 = nav's
+  // delta_max alone), the actuator's slew limit and its angle now, the latency and the braking
+  // the vehicle achieves (0 = none of that limit), whether the next tick parks it (brakes to a
+  // stop at a_brake, or a_max without one) and whether the plant's measured state modulates
+  // the drive (plant_modulation's gains, not read back here).
   struct plant_plan {
     float a_max = 0.0f, vmax = 0.0f, a_lat = 0.0f;
     float body_rr = 0.0f;
     float body_offsets[kPlantDiscs] = {0.0f, 0.0f, 0.0f, 0.0f};
     bool footprint = false; // the vehicles' own size, not nav's
+    float wheelbase = 0.0f;
+    float max_steer = 0.0f;  // rad
+    float steer_rate = 0.0f; // rad/s
+    float steer_now = 0.0f;  // rad, as the plant last read back
+    float latency = 0.0f;    // s
+    float a_brake = 0.0f;
+    bool parked = false;
+    bool modulated = false;
   };
   bool plant_plan_of(int i, plant_plan &out) const;
   plant_kind plant_type() const;

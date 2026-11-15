@@ -1752,6 +1752,14 @@ bool sim_world::plant_plan_of(int i, plant_plan &out) const {
   for (int b = 0; b < kPlantDiscs; ++b)
     out.body_offsets[b] = pl_body_off_[static_cast<std::size_t>(kPlantDiscs) * i + b];
   out.footprint = pl_fp_;
+  out.wheelbase = pl_L_[i];
+  out.max_steer = pl_max_steer_;
+  out.steer_rate = pl_steer_rate_[i];
+  out.steer_now = pl_steer_now_[i];
+  out.latency = pl_latency_[i];
+  out.a_brake = pl_a_brake_[i];
+  out.parked = parked_[i] != 0;
+  out.modulated = pl_mod_.tire_gain > 0.0f || pl_mod_.tip_gain > 0.0f;
   return true;
 }
 

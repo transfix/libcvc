@@ -201,6 +201,27 @@ struct entity_drive {
   double force_x = 0.0, force_y = 0.0;
 };
 
+// The limits the navigator's drive plans an entity's command with on its plant (its plant arm,
+// cvc::nav::plant_drive; sim_world::plant_plan), in SI, for a twin to give the command the plant
+// took from the drive's: the vehicle's envelope (a_max, vmax, the cornering a_lat) and its
+// wheelbase; the steering lock (rad, the fleet's tightest; 0: nav's own alone), the actuator's
+// slew limit (rad/s; 0: none) and its angle now (rad); the latency (s) and the braking the
+// vehicle achieves (a_brake; 0: a_max); its body as footprint discs (radius, and offsets along
+// the heading from the rear axle, m), when the plant gives its size; whether the next tick
+// parks it (it brakes to a stop at a_brake); and whether the plant's measured state modulates
+// the drive (plant_modulation), which a twin then cannot replay from these. Known with a plant
+// (none on nav's bicycle), from the first tick's start.
+struct entity_plan {
+  bool known = false;
+  double a_max = 0.0, vmax = 0.0, a_lat = 0.0, wheelbase = 0.0;
+  double max_steer = 0.0, steer_rate = 0.0, steer_now = 0.0;
+  double latency = 0.0, a_brake = 0.0;
+  bool footprint = false;
+  double body_rr = 0.0;
+  std::array<double, 4> body_offsets{};
+  bool parked = false, modulated = false;
+};
+
 // What drives an entity, as a model that a differentiable twin of the world steps (WorldGym::
 // plants, L4's twin; ARIADNE_WORLDS.md §14). In SI: world metres, seconds, kg, rad. The models are
 // cvc::nav::diff's, and on the dynamic plants they are the plants' own: their parameters, step
@@ -237,6 +258,7 @@ struct entity_plant {
   std::vector<double> applied_accel, applied_grade;
   int collisions_tick = 0; // model steps of the last tick a collision corrected (exact models)
   entity_drive drive;      // the drive that gave that command
+  entity_plan plan;        // the limits it planned with on the plant
 };
 
 // The navigator the entities drive with, as a twin of the drive takes it: nav's normalized units

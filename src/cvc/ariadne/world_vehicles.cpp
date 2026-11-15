@@ -1937,6 +1937,29 @@ std::vector<entity_plant> WorldVehicles::plants() const {
       p.drive.force_x = ti.ext_fx / kScale;
       p.drive.force_y = ti.ext_fy / kScale;
     }
+    // The limits it planned with on the plant (sim_world's plant arm), normalized there.
+    nav::sim_world::plant_plan pp;
+    if (g->sim->plant_plan_of(i, pp)) {
+      static_assert(nav::sim_world::kPlantDiscs == std::tuple_size<decltype(p.plan.body_offsets)>{},
+                    "entity_plan's footprint discs are sim_world's");
+      entity_plan &pl = p.plan;
+      pl.known = true;
+      pl.a_max = pp.a_max / kScale;
+      pl.vmax = pp.vmax / kScale;
+      pl.a_lat = pp.a_lat / kScale;
+      pl.wheelbase = pp.wheelbase / kScale;
+      pl.max_steer = pp.max_steer;
+      pl.steer_rate = pp.steer_rate;
+      pl.steer_now = pp.steer_now;
+      pl.latency = pp.latency;
+      pl.a_brake = pp.a_brake / kScale;
+      pl.footprint = pp.footprint;
+      pl.body_rr = pp.body_rr / kScale;
+      for (std::size_t b = 0; b < pl.body_offsets.size(); ++b)
+        pl.body_offsets[b] = pp.body_offsets[b] / kScale;
+      pl.parked = pp.parked;
+      pl.modulated = pp.modulated;
+    }
     out.push_back(std::move(p));
   }
   return out;
