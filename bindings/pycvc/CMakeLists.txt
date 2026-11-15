@@ -556,7 +556,7 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_ari
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_ari.py)
   set_tests_properties(pycvc_ari PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
-  # pycvc_gl.ariadne.Host, the Python host: data both ways, callbacks, errors and re-entrancy
+  # pycvc.ari.Host, the Python host: data both ways, callbacks, errors and re-entrancy
   # headless, then (in a child; skipped without GL unless CVC_REQUIRE_RENDER) a published picture and
   # a stream in the frame, and the examples/ariadne/python programs offscreen.
   add_test(NAME pycvc_gl_ariadne_host
