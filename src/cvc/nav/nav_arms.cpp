@@ -473,6 +473,7 @@ void arms_run::finish() {
     ends.push_back(w->nav_stats().to_json());
   log_->finish(std::move(ends));
   stream(log_->end_json());
+  writer_.reset(); // the file closed: whole, and free to read, move or remove
   finished_ = true;
 }
 

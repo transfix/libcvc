@@ -12,7 +12,7 @@
 from the same starts to the same goals on the same world with the same seed, stepped tick for tick
 together (``cvc::nav::arms_run``). Each arm is a ghost in its own colour. A Retarget (the button, or
 ``--retarget-at``) moves every arm's goals on the same tick and starts a leg. The Stats and Ledger
-windows (libcvc's ``nav_lab_panels.ari`` component) show what each arm did, from the run's log at its
+windows (libcvc's ``nav_lab_stats`` and ``nav_lab_ledger`` components) show what each arm did, from the run's log at its
 last tick; ``--log`` writes that log (``cvc.nav.run_log/v1``) as the run goes.
 
 An arm is ``default`` (libcvc's built-in policy: constant coefficients, alpha 1, beta 3, gamma 4) or

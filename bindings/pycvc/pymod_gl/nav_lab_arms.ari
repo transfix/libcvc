@@ -1,11 +1,12 @@
 # nav_lab_arms.ari — several navigation policies side by side, live (python -m pycvc_gl.nav_lab
 # arms; docs/NAV_LAB.md). pycvc_gl/nav_lab.py builds one libcvc sim_world per arm on the plant
 # nav_plant.vehicle names, steps them tick for tick together (cvc::nav::arms_run), draws each arm's
-# ghost in its colour and writes the Stats and Ledger windows (libcvc's nav_lab_panels component)
+# ghost in its colour and writes the Stats and Ledger windows (libcvc's nav_lab_stats and nav_lab_ledger components)
 # from the run's log at its last tick.
 #
 # - Run: what runs, the camera, and the transport (libcvc's sim_transport: Paused, Speed, Step).
-# - Stats and Ledger: nav_lab_panels.ari's windows; Retarget moves every arm's goals on one tick.
+# - Stats and Ledger: libcvc's nav_lab_stats and nav_lab_ledger windows; Retarget moves every
+#   arm's goals on one tick.
 # - Settings: the navigator's, the vehicle's and the plant's knobs (pycvc_gl.cars' cars_settings);
 #   nav_plant.vehicle switches the plant live in every arm.
 # The world: run.world (data: the data: block's city; generated: the world.* keys; flat), set on
@@ -17,7 +18,8 @@ meta:
 
 import:
   - cvc://components/sim_transport.ari
-  - cvc://components/nav_lab_panels.ari
+  - cvc://components/nav_lab_stats.ari
+  - cvc://components/nav_lab_ledger.ari
   - cvc://cars_panels.ari
 
 requires:

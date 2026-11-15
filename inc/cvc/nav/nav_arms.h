@@ -178,7 +178,8 @@ public:
   // The run log so far, live (each tick appended as it is recorded).
   const run_log &log() const { return *log_; }
   std::shared_ptr<const run_log> shared_log() const { return log_; }
-  // Write the end line (each arm's nav_stats record). Idempotent; the run cannot step after it.
+  // Write the end line (each arm's nav_stats record) and close the streamed file. Idempotent; the
+  // run cannot step after it.
   void finish();
   bool finished() const { return finished_; }
 
