@@ -109,6 +109,9 @@ windows:
 scene:
   chrome: false
   clock: { scale: 1.0, paused: false }
+  # A physics world on the clock: the world's ground and buildings collide, the water floats what
+  # is lighter than it (the crates on the lake below).
+  physics: {}
   # A daylight sky: pale and hazy at the horizon, bluer overhead.
   background: { top: [0.38, 0.54, 0.78], bottom: [0.78, 0.83, 0.88] }
   shadows:
@@ -156,15 +159,35 @@ scene:
       look: soft           # soft (demo3's matte daylight) | classic (the C++ lab's)
       material: { opaque: true }
       shader: { preset: terrain_bump }   # value-noise fBm ground detail
+      body: {}             # its ground, buildings, rocks and trees collide (rebuilt on Regenerate)
     # The water: the world's sea, lakes and ponds as the GPU FFT ocean (three wave cascades for the
     # wind, fading out toward the shore), the near water displaced around the camera and the rest
     # flat; whitecaps where the waves fold. The Water panel (Settings) drives the wind and waves.
+    # Its body: is the water in the physics world, the same sea, so a body floats on the waves drawn.
     - node: water
       type: water
       world: world         # the generated_world whose ground it fills below `level`
       level: 0             # as the world's water_level
       wind_speed: 9        # m/s
       wind_dir: 30         # degrees: the way the waves travel, from +x toward +y
+      body: {}
+    # Three wooden crates dropped on the big lake north of the city (seed 5's world; on another
+    # world they land where they land): they bob on its waves.
+    - node: crate_a
+      source: { box: { size: [3, 3, 3] } }
+      transform: { position: [22, 176, 6] }
+      material: { color: [0.62, 0.42, 0.22] }
+      body: { density: 450 }
+    - node: crate_b
+      source: { box: { size: [2, 2, 2] } }
+      transform: { position: [32, 186, 8] }
+      material: { color: [0.55, 0.36, 0.18] }
+      body: { density: 500 }
+    - node: crate_c
+      source: { box: { size: [2.5, 2.5, 2.5] } }
+      transform: { position: [14, 188, 10] }
+      material: { color: [0.68, 0.48, 0.26] }
+      body: { density: 400 }
     # The clouds: a deck of L-system cumulus scattered over the whole world, drifting and slowly
     # changing shape. The ones near the camera are volumes, the rest one coarse sliced volume.
     # Their shade dims the sun on the ground, the buildings, the roads and the trees; it is drawn
