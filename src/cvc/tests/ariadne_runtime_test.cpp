@@ -5394,42 +5394,59 @@ TEST(AriadneAsyncFn, ActionCapsAreTreeSettingsAndChargeAsyncCalls) {
   MockBackend mb;
   rt.set_backend(&mb);
   auto &root = cvc::state::instance(app);
-  rt.set_root(group({button("Loop", "(begin (set i 0) (while (< i 200) (set i (+ i 1))) "
-                                    "(state-set \"r.loop\" (str i)))"),
-                     button("Spin", "(state-set \"r.spin\" (spin))")}));
-  const auto click = [&](const char *key) {
+  rt.set_root(
+      group({button("Loop", "(begin (set i 0) (while (< i 200) (set i (+ i 1))) "
+                            "(state-set \"r.loop\" (str i)))"),
+             button("Spin", "(state-set \"r.spin\" (spin))"),
+             button("Endless", "(begin (while #t nil) (state-set \"r.endless\" \"out\"))")}));
+  // Click one button (button_click would click them all) and wait until its action has ended:
+  // it wrote its key, or the sweep reaped it (a kill, which the sweep reports). There is no fixed
+  // wait, so a slow runner only takes longer.
+  const auto click = [&](const char *label, const char *key) {
     root(key).value(std::string("-"));
-    mb.button_click = true;
+    mb.click_button = label;
     rt.render();
-    rt.drain();
-    mb.button_click = false;
-    pump_until(rt, [&] { return root(key).value() != "-"; }, 1000);
-    for (int i = 0; i < 3; ++i) { // let the sweep report a kill
-      rt.render();
-      rt.drain();
-    }
+    rt.drain(); // submits the action, runs it a slice, and sweeps it if it ended
+    mb.click_button.clear();
+    EXPECT_TRUE(pump_until(
+        rt, [&] { return root(key).value() != "-" || app.exec_scheduler().process_count() == 0; },
+        60000))
+        << label << ": the action never ended";
     return root(key).value();
   };
+  const auto last_warning = [&] {
+    const auto warns = rt.take_reactive_warnings();
+    return warns.empty() ? std::string("<none>") : warns.back();
+  };
 
-  // The defaults: the loop fits in 5000 steps; the spin's CPU doesn't.
-  EXPECT_EQ(click("r.loop"), "200");
-  EXPECT_EQ(click("r.spin"), "-");
-  auto warns = rt.take_reactive_warnings();
-  ASSERT_FALSE(warns.empty());
-  EXPECT_NE(warns.back().find("max_steps_exceeded"), std::string::npos) << warns.back();
-
+  // The step cap decides these, so the time cap, a backstop, is raised out of their way: its
+  // default 0.1 s is less than a Debug build with coverage spends on the loop on a slow runner.
+  root("ariadne.limits.action_max_time").value(std::string("30"));
+  // The default step cap: the loop fits in 5000 steps; the spin's CPU, charged as steps, doesn't.
+  EXPECT_EQ(click("Loop", "r.loop"), "200");
+  EXPECT_EQ(click("Spin", "r.spin"), "-");
+  std::string warning = last_warning();
+  EXPECT_NE(warning.find("max_steps_exceeded"), std::string::npos) << warning;
   // A step cap below the loop's needs kills it too.
   root("ariadne.limits.action_max_steps").value(std::string("100"));
-  EXPECT_EQ(click("r.loop"), "-");
+  EXPECT_EQ(click("Loop", "r.loop"), "-");
+  warning = last_warning();
+  EXPECT_NE(warning.find("max_steps_exceeded"), std::string::npos) << warning;
   // No limit on either: the spin finishes.
   root("ariadne.limits.action_max_steps").value(std::string("0"));
   root("ariadne.limits.action_max_time").value(std::string("0"));
-  EXPECT_EQ(click("r.spin"), "spun");
-  // Unparsable values keep the defaults.
+  EXPECT_EQ(click("Spin", "r.spin"), "spun");
+  // An unparsable step cap keeps the default.
   root("ariadne.limits.action_max_steps").value(std::string("lots"));
+  root("ariadne.limits.action_max_time").value(std::string("30"));
+  EXPECT_EQ(click("Loop", "r.loop"), "200");
+  EXPECT_EQ(click("Spin", "r.spin"), "-");
+  // An unparsable time cap keeps the default 0.1 s, which ends a loop that no step cap stops.
+  root("ariadne.limits.action_max_steps").value(std::string("0"));
   root("ariadne.limits.action_max_time").value(std::string("soon"));
-  EXPECT_EQ(click("r.loop"), "200");
-  EXPECT_EQ(click("r.spin"), "-");
+  EXPECT_EQ(click("Endless", "r.endless"), "-");
+  warning = last_warning();
+  EXPECT_NE(warning.find("time_limit_exceeded"), std::string::npos) << warning;
 }
 
 // A `closable: true` window renders with a close button, persists tree.<id>.open, is skipped once

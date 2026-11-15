@@ -1633,9 +1633,13 @@ TEST(Groups, PA01_TwoCallersShareThePool) {
     mine[k]->submit(loop);
     theirs[k]->submit(loop);
   }
+  // The ceiling only catches a caller that never finishes, and kCeiling isn't far enough above
+  // this case's time in a Debug build: the whole case takes one about 5 s on a usual runner, and
+  // on a slow one both callers were still at their loops when kCeiling ran out.
+  constexpr double kDriveCeiling = 6 * kCeiling;
   const auto drive = [&](std::vector<std::unique_ptr<group_world>> &worlds, bool &all_done) {
     const auto t0 = clock_type::now();
-    while (seconds_since(t0) < kCeiling) {
+    while (seconds_since(t0) < kDriveCeiling) {
       std::vector<exec_group *> live;
       for (auto &gw : worlds)
         if (!gw->done())
