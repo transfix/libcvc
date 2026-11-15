@@ -688,6 +688,18 @@ else()
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
+# The VolumeRover GenSeg port (volume/segmentation/) matches the legacy library's labels voxel for
+# voxel on every platform (VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.7 T1): its fast marches compare
+# float arrival times, and an FMA-contracted step flips which front wins a tie.
+set(_cvc_genseg_exact_sources volume/segmentation/genseg.cpp volume/segmentation/segmentation.cpp)
+if(NOT MSVC)
+  set_source_files_properties(${_cvc_genseg_exact_sources}
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(${_cvc_genseg_exact_sources}
+                              PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
+
 # state_transport_ipc is POSIX-only (Unix domain sockets, poll()); the IPC
 # header itself is portable but the implementation is not. Drop it on Windows.
 if(WIN32)
