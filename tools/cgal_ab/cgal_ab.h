@@ -39,6 +39,10 @@ struct rng {
 // The VolumeRover ports' rows (cgal_ab_permissive.cpp).
 void ab_permissive(rng &r);
 
+// cvc::planar's rows (cgal_ab_planar.cpp): the ContourTiler port's planar geometry against the
+// CGAL calls ContourTiler makes.
+void ab_planar(rng &r);
+
 // --- Qhull (cgal_ab_qhull.cpp) ------------------------------------------------------------
 
 // A 3D Delaunay triangulation as input indices: each tetrahedron sorted, the list sorted.
