@@ -698,6 +698,26 @@ What the background executor accumulates in one app, against a lane:
   P-cores took a median 9.1 us a call, and stretches with under half on them 22.5 us. Read a
   change in `first_ns_per_call` or `last_ns_per_call` against these shares before reading it as
   the executor's.
+  Each call is also split: `extra.turnaround_ns`, from the previous kernel's end to this call
+  being made, is `handoff_ns` (to the first step slice after that end: the completion posted, seen,
+  drained and woken) plus `driver_work_ns` (from that slice's start to the call: the steps); and
+  `wake_ns` runs from the call being made to its kernel starting (the post, and the kernel thread
+  picking it up). Each is the mean of its middle 90 % (the clock's ticks are 100 ns on Windows,
+  and a call the OS preempted would swamp a plain mean), over all calls; `first_` and `last_`
+  forms of `driver_work_ns` and `turnaround_ns` cover the first and last 10 %. The kernel thread
+  spins a few us in its wait before it blocks, so the wake is bimodal: `slow_wake_share` (with
+  its `first_` and `last_` forms) is the share of wakes over 2 us. On a Core Ultra 9 185H with the
+  kernels on one P-core, the spin lasts about 5.2 us: a call made within it waits about 1 us for
+  its kernel, one made after it about 7 us. The driver's turnaround is about 5.1-5.3 us, right at
+  that edge, and the two feed each other: with 25 ns more driver work per call, `driver_work_ns`
+  rose about 250 ns, `slow_wake_share` 0.1-0.2 and the time per call 11-26 %; with 100 ns, about
+  400 ns, 0.1-0.4 and 15-31 % (interleaved, quiet, up in 8-10 of 10 rounds). Over a run,
+  `driver_work_ns` grows 13-19 % and `slow_wake_share` from under 0.1 to about 0.5, which is what
+  makes `last_ns_per_call` 40-50 % above `first_ns_per_call`. So neither the time per call nor any
+  leg is linear in the executor's cost: compare executors on the step scenarios (`inflight_tax`,
+  `sched.single`), and read a `pool_aging` change against `slow_wake_share`; one that moves it is
+  mostly calls crossing the spin. (S1a's pool_aging points were +6.5 % to +15.7 % slower in 15-18
+  of 20 quiet rounds, from a step cost of at most about 1 % in `inflight_tax`.)
 - `pool_batches`: `r` batches (20) of `b` (16) concurrent calls into one app: `extra.batch_ns`
   against the batch index.
 - `pool_retention`: `k` (100) sequential calls whose kernel returns a 1 MiB string that the program
