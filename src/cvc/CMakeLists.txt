@@ -165,6 +165,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/contour_intrinsics.h
   ../../inc/cvc/volume/point_classes.h
   ../../inc/cvc/volume/point_class_intrinsics.h
+  ../../inc/cvc/volume/segmentation.h
+  ../../inc/cvc/volume/segmentation_params.h
   ../../inc/cvc/model/model.h
   ../../inc/cvc/model/model_file_io.h
   ../../inc/cvc/volume/volume_ops.h
@@ -312,6 +314,8 @@ set(SOURCE_FILES
   utility/xml_lite.cpp
   volume/point_classes.cpp
   volume/point_class_intrinsics.cpp
+  volume/segmentation/genseg.cpp
+  volume/segmentation/segmentation.cpp
   image/image.cpp
   image/image_decode.cpp
   image/magick_io.cpp
@@ -688,6 +692,18 @@ else()
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
+# The VolumeRover GenSeg port (volume/segmentation/) matches the legacy library's labels voxel for
+# voxel on every platform (VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.7 T1): its fast marches compare
+# float arrival times, and an FMA-contracted step flips which front wins a tie.
+set(_cvc_genseg_exact_sources volume/segmentation/genseg.cpp volume/segmentation/segmentation.cpp)
+if(NOT MSVC)
+  set_source_files_properties(${_cvc_genseg_exact_sources}
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(${_cvc_genseg_exact_sources}
+                              PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
+
 # state_transport_ipc is POSIX-only (Unix domain sockets, poll()); the IPC
 # header itself is portable but the implementation is not. Drop it on Windows.
 if(WIN32)
@@ -711,9 +727,10 @@ endif()
 # matter which bundle was installed -- e.g. transfix/F2Dock asked for 3.2.0,
 # never matched, and silently fell back to building libcvc from source.
 #
-# SOVERSION stays CVC_VERSION_MAJOR, so the runtime link name (libcvc.so.3)
-# is unchanged and no consumer relinks. Only the full VERSION suffix
-# (libcvc.so.3.0 -> libcvc.so.3.3.0) and the exported package version move.
+# SOVERSION stays CVC_VERSION_MAJOR, so within a major version the runtime link
+# name (libcvc.so.3, libcvc.so.4 from 4.0) is unchanged and no consumer relinks.
+# Only the full VERSION suffix (libcvc.so.3.0 -> libcvc.so.3.3.0) and the exported
+# package version move.
 set(CVC_VERSION       ${PROJECT_VERSION})
 set(CVC_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
 set(CVC_VERSION_MINOR ${PROJECT_VERSION_MINOR})
