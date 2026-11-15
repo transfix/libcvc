@@ -103,9 +103,9 @@ vtk_module_autoinit(TARGETS nav_compute MODULES ${VTK_LIBRARIES})
 # nav_scrub — watch a policy learn: cvc::nav's checkpoint scrubber on a C++ Ariadne host
 # (docs/NAV_LAB.md). It trains a short coef_trainer run (or reads --history), deploys every
 # checkpoint on the built-in blocks scenario and shows checkpoint k beside step 0 in nav_scrub.ari,
-# whose windows are libcvc's nav_lab_panels component. In the gallery (the wasm build below) the
-# document and the component library are in its file system, and the training and the deploys run
-# in the page.
+# whose windows are libcvc's nav_lab_scrub, nav_lab_stats and nav_lab_ledger components. In the
+# gallery (the wasm build below) the document and the component library are in its file system,
+# and the training and the deploys run in the page.
 add_executable(nav_scrub ariadne/nav_scrub/nav_scrub.cpp)
 cvc_document_host_stack(nav_scrub)
 target_link_libraries(nav_scrub PRIVATE cvcGL ${VTK_LIBRARIES})

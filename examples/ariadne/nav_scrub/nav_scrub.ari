@@ -16,7 +16,9 @@ meta:
 
 import:
   - cvc://components/sim_transport.ari
-  - cvc://components/nav_lab_panels.ari
+  - cvc://components/nav_lab_scrub.ari
+  - cvc://components/nav_lab_stats.ari
+  - cvc://components/nav_lab_ledger.ari
 
 requires:
   - {name: chart, optional: true}   # the charts (libcvc 3.7.14); the tables show the numbers too
