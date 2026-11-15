@@ -116,6 +116,10 @@ const LabelLayerNode::Drawn *drawn(const std::vector<LabelLayerNode::Drawn> &d,
       return &x;
   return nullptr;
 }
+// lastDrawn() returns a copy: what drawn() points into must outlive the statement, so a temporary
+// does not compile. (It read freed memory, which kept its values on Linux and not on macOS.)
+const LabelLayerNode::Drawn *drawn(std::vector<LabelLayerNode::Drawn> &&,
+                                   const std::string &) = delete;
 
 void test_fade_rule() {
   std::printf("fade: label_fade\n");
@@ -233,12 +237,14 @@ void test_scene(cvc::app &app) {
         b ? std::to_string(b->size) : "not drawn");
   put(app, "cam.follow", "bound");
   frame();
-  b = drawn(layer->lastDrawn(), "Charlie");
+  d = layer->lastDrawn();
+  b = drawn(d, "Charlie");
   check(b && b->size == 42, "focus: the followed node's label is focus.scale (2) larger",
         b ? std::to_string(b->size) : "not drawn");
   put(app, "cam.follow", "plain");
   frame();
-  b = drawn(layer->lastDrawn(), "Charlie");
+  d = layer->lastDrawn();
+  b = drawn(d, "Charlie");
   check(b && b->size == 21, "focus: and back once the key moves on");
 
   // Moving the camera closer brings the band label in whole, and the culled one back.
@@ -259,18 +265,21 @@ void test_scene(cvc::app &app) {
     plainProp->Register(nullptr);
     sr.renderer()->RemoveViewProp(plainProp);
     frame();
-    check(!drawn(layer->lastDrawn(), "Plain"), "views: its label goes with its prop");
+    d = layer->lastDrawn();
+    check(!drawn(d, "Plain"), "views: its label goes with its prop");
     sr.renderer()->AddViewProp(plainProp);
     plainProp->UnRegister(nullptr);
     frame();
-    check(drawn(layer->lastDrawn(), "Plain") != nullptr, "views: and comes back with it");
+    d = layer->lastDrawn();
+    check(drawn(d, "Plain") != nullptr, "views: and comes back with it");
   }
 
   // A moved node's label follows it, read from its transform.
   sg.getGraphics("plain")->setPosition(-10, -20, 10);
   frame();
-  const LabelLayerNode::Drawn *moved = drawn(layer->lastDrawn(), "Plain");
-  const LabelLayerNode::Drawn *still = drawn(layer->lastDrawn(), "Charlie");
+  d = layer->lastDrawn();
+  const LabelLayerNode::Drawn *moved = drawn(d, "Plain");
+  const LabelLayerNode::Drawn *still = drawn(d, "Charlie");
   check(moved && still && moved->x < still->x, "follow: the label moves with its node");
 }
 
