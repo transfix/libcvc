@@ -87,6 +87,9 @@ dyn_bike_plant::dyn_bike_plant(std::vector<vehicle_desc> descs, dyn_bike_plant_o
     throw cvc::physics_error("dyn_bike_plant: the substep must be finite and > 0");
   if (!(_o.mu > 0.0))
     throw cvc::physics_error("dyn_bike_plant: mu must be > 0");
+  if (!_o.step_world && _o.contact)
+    throw cvc::physics_error("dyn_bike_plant: compliant contact (options.contact) steps the plant "
+                             "in pieces of its own, so the world cannot step outside it");
 }
 
 dyn_bike_plant::~dyn_bike_plant() = default;
@@ -411,7 +414,173 @@ void dyn_bike_plant::command(int i, float steer, float accel) {
   a.accel_cmd = _units.from_normalized(accel, dim::acceleration, _frame);
 }
 
+void dyn_bike_plant::step_model(agent &a, std::size_t i, double hs, const double *wrench,
+                                diff::dyn_state<double> &next, diff::dyn_ph_books<double> &books,
+                                diff::dyn_spin_ph_books<double> &spin_books, double om_next[2],
+                                double &port, diff::dyn_step_free<double> &free) {
+  // The slope along the heading under the centre of gravity, over a wheelbase.
+  const double c = std::cos(a.s.psi), sn = std::sin(a.s.psi);
+  const double grade = dyn::grade_at(_o.plant, a.s.x + a.p.lr * c, a.s.y + a.p.lr * sn, a.s.psi,
+                                     static_cast<double>(a.p.lf + a.p.lr));
+  // Nav's command as the Jolt plant's driver takes it (dyn_driver).
+  const double accel = _o.driver ? dyn::drive(a.driver, a.desc, a.accel_cmd, a.s.vx, grade,
+                                              _o.gravity, a.p.tau_drive, hs)
+                                 : a.accel_cmd;
+  // With side_slope, gravity along and across the heading from the ground's gradient, a
+  // potential in the books (the driver still reads the sine along the heading).
+  const ground_sampler ground{&_o.plant};
+  if (_o.wheel_spin) {
+    diff::dyn_spin_state<double> ss, so;
+    ss.b = a.s;
+    ss.om_f = a.om[0];
+    ss.om_r = a.om[1];
+    if (_o.side_slope)
+      diff::dyn_spin_plant_books_ground<double>(a.p, a.lim, ground, ss, a.steer_cmd, accel, so,
+                                                spin_books, wrench, &port, &free);
+    else
+      diff::dyn_spin_plant_books<double>(a.p, a.lim, ss, a.steer_cmd, accel, grade, so, spin_books,
+                                         wrench, &port, &free);
+    next = so.b;
+    om_next[0] = so.om_f;
+    om_next[1] = so.om_r;
+  } else if (_o.side_slope) {
+    diff::dyn_plant_books_ground<double>(a.p, a.lim, ground, a.s, a.steer_cmd, accel, next, books,
+                                         wrench, &port, &free);
+  } else {
+    diff::dyn_plant_books<double>(a.p, a.lim, a.s, a.steer_cmd, accel, grade, next, books, wrench,
+                                  &port, &free);
+  }
+  if (_chassis->on()) {
+    // The box where this substep starts, moving as the model moved: its centre's velocity is
+    // the centre of gravity's plus the yaw rate's sweep of the offset along the heading.
+    vec3 pos;
+    quat rot;
+    chassis_pose(a, a.s, pos, rot);
+    const diff::dyn_state<double> &o = next;
+    const double c1 = std::cos(o.psi), s1 = std::sin(o.psi);
+    const double off = -a.rear_x - a.p.lr; // from the centre of gravity to the box's centre
+    const vec3 v{c1 * o.vx - s1 * o.vy - o.r * off * s1, s1 * o.vx + c1 * o.vy + o.r * off * c1,
+                 0.0};
+    _chassis->put(static_cast<int>(i), pos, rot, v, {0.0, 0.0, o.r});
+  }
+}
+
+dyn_bike_books dyn_bike_plant::step_books(agent &a, const diff::dyn_ph_books<double> &books,
+                                          const diff::dyn_spin_ph_books<double> &spin_books,
+                                          const double om_next[2]) {
+  dyn_bike_books d;
+  if (_o.wheel_spin) {
+    const diff::dyn_spin_ph_books<double> &b = spin_books;
+    (b.supplied >= 0.0 ? d.drive : d.brake) = std::fabs(b.supplied);
+    d.brake += b.braked;
+    d.dissipated = b.dissipated;
+    d.slip = b.slip;
+    d.floor = b.floor;
+    d.grade = b.grade;
+    d.limiter = b.limiter;
+    d.residual = b.residual;
+    a.om[0] = om_next[0];
+    a.om[1] = om_next[1];
+  } else {
+    const diff::dyn_ph_books<double> &b = books;
+    (b.supplied >= 0.0 ? d.drive : d.brake) = std::fabs(b.supplied);
+    d.dissipated = b.dissipated;
+    d.floor = b.floor;
+    d.grade = b.grade;
+    d.limiter = b.limiter;
+    d.residual = b.residual;
+  }
+  return d;
+}
+
+void dyn_bike_plant::settle(agent &a, std::size_t i, double hs, dyn_bike_books d,
+                            diff::dyn_state<double> o) {
+  if (_chassis->on() && _chassis->touched(static_cast<int>(i))) {
+    // The world's pose and twist, back into the model; the energy they changed is the
+    // contact's. The actuators keep the model's.
+    const body_state m = _chassis->moved(static_cast<int>(i));
+    const double before = diff::dyn_ph_hamiltonian(a.p, o);
+    o.psi += dyn::wrap(dyn::yaw_of(m.rotation) - o.psi);
+    const double c1 = std::cos(o.psi), s1 = std::sin(o.psi);
+    const double off = -a.rear_x - a.p.lr;
+    o.x = m.position.x + a.rear_x * c1;
+    o.y = m.position.y + a.rear_x * s1;
+    o.r = m.angular_velocity.z;
+    const double vgx = m.linear_velocity.x + o.r * off * s1,
+                 vgy = m.linear_velocity.y - o.r * off * c1;
+    o.vx = c1 * vgx + s1 * vgy;
+    o.vy = -s1 * vgx + c1 * vgy;
+    d.contact = diff::dyn_ph_hamiltonian(a.p, o) - before;
+    ++a.hits_tick;
+    dyn::count_contacts(*_chassis, static_cast<int>(i), a.statics_tick, a.touched, a.touch_depth);
+  }
+  add(a.tick, d);
+  dyn::measured(a.driver, a.s.vx, o.vx, hs);
+  a.s = o;
+}
+
+void dyn_bike_plant::before_world_step() {
+  if (_o.step_world || !_chassis->on())
+    throw cvc::physics_error("dyn_bike_plant::before_world_step: the plant steps its own world "
+                             "(options.step_world), or it has none");
+  const double h = _dt / _nsub;
+  for (std::size_t i = 0; i < _agents.size(); ++i) {
+    agent &a = _agents[i];
+    agent::substep &k = a.step;
+    step_model(a, i, h, nullptr, k.next, k.books, k.spin_books, k.om, k.port, k.free);
+    k.on = true;
+  }
+}
+
+void dyn_bike_plant::after_world_step() {
+  if (_o.step_world || !_chassis->on())
+    throw cvc::physics_error("dyn_bike_plant::after_world_step: the plant steps its own world "
+                             "(options.step_world), or it has none");
+  const double h = _dt / _nsub;
+  _chassis->read_contacts();
+  for (std::size_t i = 0; i < _agents.size(); ++i) {
+    agent &a = _agents[i];
+    agent::substep &k = a.step;
+    if (!k.on) // added since the substep began
+      continue;
+    k.on = false;
+    settle(a, i, h, step_books(a, k.books, k.spin_books, k.om), k.next);
+  }
+}
+
+void dyn_bike_plant::world_gone() { _chassis->forget(); }
+
+int dyn_bike_plant::add_desc(vehicle_desc d) {
+  _descs.push_back(std::move(d));
+  return static_cast<int>(_descs.size()) - 1;
+}
+
 void dyn_bike_plant::advance() {
+  if (!_o.step_world && _chassis->on()) {
+    // The host steps the world: end the tick its steps ran, begin the next.
+    if (_ticking)
+      for (agent &a : _agents) {
+        a.hits += a.hits_tick;
+        a.tick.kinetic = diff::dyn_ph_hamiltonian(a.p, a.s);
+        if (_o.wheel_spin)
+          a.tick.kinetic += 0.5 * (a.p.J_f * a.om[0] * a.om[0] + a.p.J_r * a.om[1] * a.om[1]);
+        add(a.total, a.tick);
+        a.total.kinetic = a.tick.kinetic;
+        measure(a, a.vx0, a.vy0, a.psi0, true);
+      }
+    for (agent &a : _agents) {
+      a.vx0 = a.s.vx;
+      a.vy0 = a.s.vy;
+      a.psi0 = a.s.psi;
+      a.tick = dyn_bike_books{};
+      a.hits_tick = 0;
+      a.statics_tick = 0;
+      a.touched = -1;
+      a.touch_depth = 0.0;
+    }
+    _ticking = true;
+    return;
+  }
   const std::size_t n = _agents.size();
   std::vector<double> vx0(n), vy0(n), psi0(n);
   std::vector<diff::dyn_state<double>> next(n);
@@ -495,50 +664,8 @@ void dyn_bike_plant::advance() {
         c.wrench(W);
         wrench = W;
       }
-      // The slope along the heading under the centre of gravity, over a wheelbase.
-      const double c = std::cos(a.s.psi), sn = std::sin(a.s.psi);
-      const double grade = dyn::grade_at(_o.plant, a.s.x + a.p.lr * c, a.s.y + a.p.lr * sn, a.s.psi,
-                                         static_cast<double>(a.p.lf + a.p.lr));
-      // Nav's command as the Jolt plant's driver takes it (dyn_driver).
-      const double accel = _o.driver ? dyn::drive(a.driver, a.desc, a.accel_cmd, a.s.vx, grade,
-                                                  _o.gravity, a.p.tau_drive, hs)
-                                     : a.accel_cmd;
-      // With side_slope, gravity along and across the heading from the ground's gradient, a
-      // potential in the books (the driver still reads the sine along the heading).
-      const ground_sampler ground{&_o.plant};
-      if (_o.wheel_spin) {
-        diff::dyn_spin_state<double> ss, so;
-        ss.b = a.s;
-        ss.om_f = a.om[0];
-        ss.om_r = a.om[1];
-        if (_o.side_slope)
-          diff::dyn_spin_plant_books_ground<double>(a.p, a.lim, ground, ss, a.steer_cmd, accel, so,
-                                                    spin_books[i], wrench, &port[i], &free[i]);
-        else
-          diff::dyn_spin_plant_books<double>(a.p, a.lim, ss, a.steer_cmd, accel, grade, so,
-                                             spin_books[i], wrench, &port[i], &free[i]);
-        next[i] = so.b;
-        om_next[i] = {so.om_f, so.om_r};
-      } else if (_o.side_slope) {
-        diff::dyn_plant_books_ground<double>(a.p, a.lim, ground, a.s, a.steer_cmd, accel, next[i],
-                                             books[i], wrench, &port[i], &free[i]);
-      } else {
-        diff::dyn_plant_books<double>(a.p, a.lim, a.s, a.steer_cmd, accel, grade, next[i], books[i],
-                                      wrench, &port[i], &free[i]);
-      }
-      if (world) {
-        // The box where this substep starts, moving as the model moved: its centre's velocity is
-        // the centre of gravity's plus the yaw rate's sweep of the offset along the heading.
-        vec3 pos;
-        quat rot;
-        chassis_pose(a, a.s, pos, rot);
-        const diff::dyn_state<double> &o = next[i];
-        const double c1 = std::cos(o.psi), s1 = std::sin(o.psi);
-        const double off = -a.rear_x - a.p.lr; // from the centre of gravity to the box's centre
-        const vec3 v{c1 * o.vx - s1 * o.vy - o.r * off * s1, s1 * o.vx + c1 * o.vy + o.r * off * c1,
-                     0.0};
-        _chassis->put(static_cast<int>(i), pos, rot, v, {0.0, 0.0, o.r});
-      }
+      step_model(a, i, hs, wrench, next[i], books[i], spin_books[i], om_next[i].data(), port[i],
+                 free[i]);
     }
     if (world)
       _chassis->step();
@@ -547,28 +674,7 @@ void dyn_bike_plant::advance() {
       contacts(next, cf1, cp1);
     for (std::size_t i = 0; i < n; ++i) {
       agent &a = _agents[i];
-      dyn_bike_books d;
-      if (_o.wheel_spin) {
-        const diff::dyn_spin_ph_books<double> &b = spin_books[i];
-        (b.supplied >= 0.0 ? d.drive : d.brake) = std::fabs(b.supplied);
-        d.brake += b.braked;
-        d.dissipated = b.dissipated;
-        d.slip = b.slip;
-        d.floor = b.floor;
-        d.grade = b.grade;
-        d.limiter = b.limiter;
-        d.residual = b.residual;
-        a.om[0] = om_next[i][0];
-        a.om[1] = om_next[i][1];
-      } else {
-        const diff::dyn_ph_books<double> &b = books[i];
-        (b.supplied >= 0.0 ? d.drive : d.brake) = std::fabs(b.supplied);
-        d.dissipated = b.dissipated;
-        d.floor = b.floor;
-        d.grade = b.grade;
-        d.limiter = b.limiter;
-        d.residual = b.residual;
-      }
+      dyn_bike_books d = step_books(a, books[i], spin_books[i], om_next[i].data());
       if (_o.contact) {
         // The port's energy, split: the field barrier's work, the vehicles' barrier's work, the
         // dampers'. Over the step the barriers' work is minus their energy's change, to second
@@ -589,30 +695,7 @@ void dyn_bike_plant::advance() {
         d.residual += work_field + d_field;
         a.tick.contact_energy = cf1[i].energy + cp1[i].energy;
       }
-      diff::dyn_state<double> o = next[i];
-      if (world && _chassis->touched(static_cast<int>(i))) {
-        // The world's pose and twist, back into the model; the energy they changed is the
-        // contact's. The actuators keep the model's.
-        const body_state m = _chassis->moved(static_cast<int>(i));
-        const double before = diff::dyn_ph_hamiltonian(a.p, o);
-        o.psi += dyn::wrap(dyn::yaw_of(m.rotation) - o.psi);
-        const double c1 = std::cos(o.psi), s1 = std::sin(o.psi);
-        const double off = -a.rear_x - a.p.lr;
-        o.x = m.position.x + a.rear_x * c1;
-        o.y = m.position.y + a.rear_x * s1;
-        o.r = m.angular_velocity.z;
-        const double vgx = m.linear_velocity.x + o.r * off * s1,
-                     vgy = m.linear_velocity.y - o.r * off * c1;
-        o.vx = c1 * vgx + s1 * vgy;
-        o.vy = -s1 * vgx + c1 * vgy;
-        d.contact = diff::dyn_ph_hamiltonian(a.p, o) - before;
-        ++a.hits_tick;
-        dyn::count_contacts(*_chassis, static_cast<int>(i), a.statics_tick, a.touched,
-                            a.touch_depth);
-      }
-      add(a.tick, d);
-      dyn::measured(a.driver, a.s.vx, o.vx, hs);
-      a.s = o;
+      settle(a, i, hs, d, next[i]);
     }
     if (++piece < pieces)
       continue;

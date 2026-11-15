@@ -137,6 +137,20 @@ water_bodies build_water_bodies(const terrain_source &t, const grid_spec &grid,
 // The bodies in a line, for a panel: "1 sea, 2 lakes, 5 ponds", or "no water".
 std::string water_bodies_summary(const water_bodies &wb);
 
+// Lower the ground's waterline slivers: dry samples less than `max_rise_m` over `level_m` with
+// water on both sides along x or along y. Such a ridge is one sample wide, and a mesh over the
+// samples draws it as a hairline edge just out of the water, ruler-straight along the grid: two
+// samples 0.01 and 0.03 m over the level drew a 5 m line across a bay of terrain_lab's world.
+//   - Each goes to the mean of the wet neighbours across it, kept under the level. Passes repeat
+//     while any is lowered (at most 8).
+//   - A sample at the grid's edge has no neighbour past it, so it is never thin across the edge.
+//   - A sample whose `keep` is set (a road's bed) is never lowered, though it still counts as dry.
+// `rows` x `cols` row-major, as build_water_bodies takes them (`keep` too, or null). Returns how
+// many it lowered.
+std::size_t lower_waterline_slivers(std::vector<float> &ground, int rows, int cols, double level_m,
+                                    double max_rise_m,
+                                    const std::vector<std::uint8_t> *keep = nullptr);
+
 // A debug colour at (x, y) (RGB, 0..255), interpolated between the samples: dry land in greys by
 // height, each body in its kind's hue (sea blue, lake teal, pond green, stream cyan) with its own
 // shade, darkening with depth, and a light contour every `band_m` metres of shore distance on

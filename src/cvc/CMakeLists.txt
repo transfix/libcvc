@@ -91,6 +91,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/plant_log.h
   ../../inc/cvc/physics/plant_log_scene.h
   ../../inc/cvc/physics/jolt_rollout.h
+  ../../inc/cvc/physics/mujoco_robot.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
@@ -165,6 +166,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/contour_intrinsics.h
   ../../inc/cvc/volume/point_classes.h
   ../../inc/cvc/volume/point_class_intrinsics.h
+  ../../inc/cvc/volume/segmentation.h
+  ../../inc/cvc/volume/segmentation_params.h
   ../../inc/cvc/model/model.h
   ../../inc/cvc/model/model_file_io.h
   ../../inc/cvc/volume/volume_ops.h
@@ -312,6 +315,8 @@ set(SOURCE_FILES
   utility/xml_lite.cpp
   volume/point_classes.cpp
   volume/point_class_intrinsics.cpp
+  volume/segmentation/genseg.cpp
+  volume/segmentation/segmentation.cpp
   image/image.cpp
   image/image_decode.cpp
   image/magick_io.cpp
@@ -394,6 +399,7 @@ set(SOURCE_FILES
   physics/plant_log.cpp
   physics/plant_log_scene.cpp
   physics/jolt_rollout.cpp
+  physics/mujoco_robot.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
   state/state_sync_adapter.cpp
@@ -473,6 +479,8 @@ set(SOURCE_FILES
   nav/belief_material.cpp
   nav/policy_library.cpp
   nav/belief_material_controller.cpp
+  nav/coph_config.cpp
+  nav/coph_ledger.cpp
   nav/sim_world.cpp
   nav/yield.cpp
   nav/sim_world_binding.cpp
@@ -639,10 +647,10 @@ endforeach()
 # this one gets the explicit flag (the CPU analog of the nav .cu precise-math
 # properties below).
 if(NOT MSVC)
-  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
-  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
@@ -688,6 +696,18 @@ else()
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
+# The VolumeRover GenSeg port (volume/segmentation/) matches the legacy library's labels voxel for
+# voxel on every platform (VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.7 T1): its fast marches compare
+# float arrival times, and an FMA-contracted step flips which front wins a tie.
+set(_cvc_genseg_exact_sources volume/segmentation/genseg.cpp volume/segmentation/segmentation.cpp)
+if(NOT MSVC)
+  set_source_files_properties(${_cvc_genseg_exact_sources}
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(${_cvc_genseg_exact_sources}
+                              PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
+
 # state_transport_ipc is POSIX-only (Unix domain sockets, poll()); the IPC
 # header itself is portable but the implementation is not. Drop it on Windows.
 if(WIN32)
@@ -711,9 +731,10 @@ endif()
 # matter which bundle was installed -- e.g. transfix/F2Dock asked for 3.2.0,
 # never matched, and silently fell back to building libcvc from source.
 #
-# SOVERSION stays CVC_VERSION_MAJOR, so the runtime link name (libcvc.so.3)
-# is unchanged and no consumer relinks. Only the full VERSION suffix
-# (libcvc.so.3.0 -> libcvc.so.3.3.0) and the exported package version move.
+# SOVERSION stays CVC_VERSION_MAJOR, so within a major version the runtime link
+# name (libcvc.so.3, libcvc.so.4 from 4.0) is unchanged and no consumer relinks.
+# Only the full VERSION suffix (libcvc.so.3.0 -> libcvc.so.3.3.0) and the exported
+# package version move.
 set(CVC_VERSION       ${PROJECT_VERSION})
 set(CVC_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
 set(CVC_VERSION_MINOR ${PROJECT_VERSION_MINOR})
@@ -734,6 +755,7 @@ option(CVC_ENABLE_MESHER "Enable isosurfacing/meshing capability" ON)
 option(CVC_ENABLE_SDF "Enable signed distance function calculation capability" ON)
 option(CVC_ENABLE_LIBIGL "libigl/Eigen geometry processing and P1 finite elements (mesh_ops.h, fem.h); OFF if the packages are missing" ON)
 option(CVC_WITH_JOLT "Jolt Physics backend for cvc::physics (physics/world.h); OFF if the package is missing" ON)
+option(CVC_WITH_MUJOCO "MuJoCo for cvc::physics::mujoco_robot (physics/mujoco_robot.h): articulated robots on the libcvc terrain; MuJoCo from cvcpkg (cvcpkg install mujoco)" OFF)
 option(CVC_WITH_QHULL "Reentrant Qhull (libqhull_r) for 3D Delaunay, replacing CGAL's GPL triangulations; OFF if the package is missing" ON)
 option(CVC_WITH_CLIPPER2 "Clipper2 for polygon Booleans, offsets and Minkowski sums, replacing CGAL's GPL packages; OFF if the package is missing" ON)
 option(CVC_WITH_CDT "CDT for 2D constrained Delaunay, replacing CGAL's GPL 2D triangulations; OFF if the package is missing" ON)
@@ -1638,7 +1660,7 @@ list(APPEND INCLUDE_FILES
 # (install(EXPORT cvcTargets NAMESPACE cvc::) exports only cvc::cvc). Zero-copy
 # frame_pool + drop-oldest/latest per-subscriber channel + dedicated producer
 # thread; borrows cvc::state only for the /streams/<id> descriptor.
-list(APPEND SOURCE_FILES ariadne/stream/frame_pool.cpp ariadne/stream/stream_channel.cpp ariadne/stream/stream_registry.cpp ariadne/stream/producer_thread.cpp ariadne/stream/stream.cpp ariadne/stream/stream_codec.cpp ariadne/stream/to_image.cpp ariadne/stream/synthetic_source.cpp ariadne/stream/audio_sources.cpp ariadne/stream/stream_view.cpp)
+list(APPEND SOURCE_FILES ariadne/stream/frame_pool.cpp ariadne/stream/stream_channel.cpp ariadne/stream/stream_registry.cpp ariadne/stream/producer_thread.cpp ariadne/stream/stream.cpp ariadne/stream/stream_codec.cpp ariadne/stream/to_image.cpp ariadne/stream/raster.cpp ariadne/stream/synthetic_source.cpp ariadne/stream/audio_sources.cpp ariadne/stream/stream_view.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/stream/frame.h
   ../../inc/cvc/ariadne/stream/stream_codec.h
@@ -1689,6 +1711,22 @@ if(CVC_WITH_JOLT)
   else()
     message(STATUS "Jolt not found - cvc::physics has the null backend only (CVC_WITH_JOLT OFF)")
     set(CVC_WITH_JOLT OFF)
+  endif()
+endif()
+
+# MuJoCo behind cvc::physics::mujoco_robot (docs/MUJOCO.md). Off by default. Asked for, it is
+# looked for in the deps prefix only (CMAKE_PREFIX_PATH or mujoco_DIR: cvcpkg's `mujoco`), never
+# in the system's paths, and a configure that cannot find it fails: nothing turns the option on
+# but a build that wants it. It must be MuJoCo 4: cvcpkg's `mujoco3` (3.17) installs the same
+# package name and is refused.
+if(CVC_WITH_MUJOCO)
+  find_package(mujoco 4.0 CONFIG QUIET NO_SYSTEM_ENVIRONMENT_PATH NO_CMAKE_SYSTEM_PATH
+               NO_CMAKE_PACKAGE_REGISTRY NO_CMAKE_SYSTEM_PACKAGE_REGISTRY)
+  if(TARGET mujoco::mujoco)
+    message(STATUS "MuJoCo ${mujoco_VERSION} found - cvc::physics::mujoco_robot ENABLED")
+  else()
+    message(FATAL_ERROR "CVC_WITH_MUJOCO is ON, but no MuJoCo 4 package is in the deps prefix "
+                        "(cvcpkg install mujoco --prefix <deps>, then CMAKE_PREFIX_PATH=<deps>)")
   endif()
 endif()
 
@@ -2390,6 +2428,48 @@ if(CVC_WITH_JOLT)
     target_sources(cvc PRIVATE $<TARGET_OBJECTS:cvc_physics_jolt>)
     target_link_libraries(cvc PRIVATE $<LINK_ONLY:Jolt::Jolt>)
     list(APPEND CVC_PRIVATE_LINK_PACKAGES Jolt)
+  endif()
+endif()
+
+# MuJoCo behind cvc::physics::mujoco_robot, in Jolt's shape above. physics/mujoco/mujoco_engine.cpp
+# is its own target, cvc_physics_mujoco, with mujoco::mujoco linked PRIVATE, so MuJoCo's headers
+# reach that one TU. It sees only the std-only cvc/physics headers (and mujoco_engine.h); no public
+# header names MuJoCo, and CVC_WITH_MUJOCO is a PRIVATE definition (mujoco_robot::available()
+# answers at run time). MuJoCo is Apache-2.0 and libcvc LGPL-2.1-only, so MuJoCo stays its own
+# library and none of its code is compiled into libcvc:
+#  - SHARED cvc: cvc_physics_mujoco is a private STATIC archive of libcvc's code, linked into cvc,
+#    and cvc links MuJoCo's shared library (cvcpkg's, on every native platform). A static
+#    mujoco::mujoco is refused here, since cvc would absorb it.
+#  - STATIC cvc (wasm, or BUILD_SHARED_LIBS=OFF): an OBJECT library whose objects go into
+#    libcvc.a; the consumer links libmujoco itself, so mujoco joins CVC_PRIVATE_LINK_PACKAGES.
+if(CVC_WITH_MUJOCO)
+  target_compile_definitions(cvc PRIVATE CVC_WITH_MUJOCO)
+  get_target_property(_cvc_type cvc TYPE)
+  get_target_property(_cvc_mujoco_lib_type mujoco::mujoco TYPE)
+  if(_cvc_type STREQUAL "SHARED_LIBRARY")
+    if(NOT _cvc_mujoco_lib_type STREQUAL "SHARED_LIBRARY")
+      message(FATAL_ERROR "CVC_WITH_MUJOCO: a shared libcvc links MuJoCo's shared library, and "
+                          "this mujoco::mujoco is ${_cvc_mujoco_lib_type}")
+    endif()
+    set(_cvc_mujoco_kind STATIC)
+  else()
+    set(_cvc_mujoco_kind OBJECT)
+  endif()
+  add_library(cvc_physics_mujoco ${_cvc_mujoco_kind} physics/mujoco/mujoco_engine.cpp)
+  set_target_properties(cvc_physics_mujoco PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON)
+  target_include_directories(cvc_physics_mujoco PRIVATE ${PROJECT_SOURCE_DIR}/inc)
+  target_compile_definitions(cvc_physics_mujoco PRIVATE CVC_WITH_MUJOCO)
+  target_compile_features(cvc_physics_mujoco PRIVATE cxx_std_17)
+  target_link_libraries(cvc_physics_mujoco PRIVATE mujoco::mujoco)
+  if(_cvc_mujoco_kind STREQUAL "STATIC")
+    target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:cvc_physics_mujoco>)
+  else()
+    target_sources(cvc PRIVATE $<TARGET_OBJECTS:cvc_physics_mujoco>)
+    target_link_libraries(cvc PRIVATE $<LINK_ONLY:mujoco::mujoco>)
+    list(APPEND CVC_PRIVATE_LINK_PACKAGES mujoco)
   endif()
 endif()
 

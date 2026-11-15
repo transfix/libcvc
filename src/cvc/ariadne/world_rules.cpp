@@ -173,16 +173,19 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
   if (!a.is_map())
     return at + " expects a map (plant:, vehicle:, look:, ranges:, controllers:)";
   std::string why;
+  bool named = false; // vehicle: named its preset
   for (const auto &[key, val] : a.entries) {
     if (key == "plant") {
       v.plant = val.as_string();
     } else if (key == "vehicle") {
       if (val.is_scalar()) {
         v.preset = val.scalar;
+        named = true;
       } else if (val.is_map()) {
         for (const auto &[k, x] : val.entries) {
           if (k == "preset") {
             v.preset = x.as_string();
+            named = true;
           } else if (vehicle_override_key(k)) {
             double n = 0.0;
             if (!number(x, at + " vehicle: " + k + ":", n, why))
@@ -241,6 +244,17 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
     } else {
       warn(warnings, at + " unknown key '" + key + "', ignored");
     }
+  }
+  // dynamic:<preset> and dynamic4w:<preset> name the vehicle too, as plant_host's names do.
+  if (const std::size_t colon = v.plant.find(':'); colon != std::string::npos) {
+    const std::string kind = v.plant.substr(0, colon), preset = v.plant.substr(colon + 1);
+    if (kind != "dynamic" && kind != "dynamic4w")
+      return at + " plant: '" + v.plant + "': only dynamic and dynamic4w name a preset";
+    if (named && preset != v.preset)
+      return at + " plant: '" + v.plant + "' names preset '" + preset + "', vehicle: '" + v.preset +
+             "'";
+    v.plant = kind;
+    v.preset = preset;
   }
   return std::string();
 }

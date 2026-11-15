@@ -22,7 +22,7 @@ and ``.text``, with the window's own ``tree.ari_figure_<k>.open``. ``Figures``, 
 frame, and the windows the user closed.
 
 Which host: the one named (``host=``; a figure's, from ``ariadne_mpl.attach`` or ``bind``), else
-the scripting host's where it has lent a window (ariglx: ``pycvc_gl.ariadne.current_host()``).
+the scripting host's where it has lent a window (ariglx: ``pycvc.ari.current_host()``).
 arix, ``ariglx --terminal`` and arisrvx lend none, so display() prints there. Nothing here is the
 process's: a host is named, or it is the scripting host's. This module imports no matplotlib,
 numpy or PIL unless the object is one of theirs.

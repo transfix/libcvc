@@ -62,6 +62,7 @@
 #include <cvc/ariadne/loader.h>          // load_file: the stock world documents
 #include <cvc/ariadne/server_document.h> // --doc: the server document and what it publishes
 #include <cvc/ariadne/stream/stream_relay.h>
+#include <cvc/ariadne/stream_intrinsics.h> // a server document's streams and rasters
 #include <cvc/ariadne/uri.h>         // cvc://worlds/... (register_cvc_uri_handler)
 #include <cvc/ariadne/world_rules.h> // the world: block (world_rules_from)
 #include <cvc/core/app.h>
@@ -705,6 +706,15 @@ int main(int argc, char **argv) {
                    docPath.c_str());
       return 2;
     }
+    // A client program is its sender's own: bound writes say who sent it.
+    if (serverDoc->block().client_programs.on && bindWritesArg != "on") {
+      std::fprintf(stderr,
+                   "arisrv: --doc: %s runs client programs, which needs bound writes "
+                   "(--bind-writes on): without them a connection could run one as another "
+                   "participant\n",
+                   docPath.c_str());
+      return 2;
+    }
   }
 
   // The room's world (ARIADNE_WORLDS.md WD1), chosen now so that a bad one stops the relay before
@@ -718,6 +728,9 @@ int main(int argc, char **argv) {
   // default_world_rules()). --avatar-energy and --avatar-empty override its energy policy.
   cvc::ariadne::register_cvc_uri_handler(app);
   cvc::ariadne::register_world_block(app);
+  // A server document's streams and rasters ((raster-open {... mirror: <published ns>})): a raster
+  // mirrored into a published namespace reaches the clients that subscribe to it.
+  cvc::ariadne::register_stream_intrinsics(app);
   namespace rconf = cvc::ariadne::conference;
   rconf::room_world world;
   std::string worldFrom;
@@ -1401,6 +1414,27 @@ int main(int argc, char **argv) {
         calls->fail(r, "unavailable",
                     "room-call needs bound writes (--bind-writes on): without them a connection "
                     "could call as another participant");
+        continue;
+      }
+      if (!r.program.empty()) {
+        // A client program (S3): the document runs it as the caller's own, chrooted to its
+        // participant, in a stock arisrv as in arisrvx (never in Python). Its reply comes from
+        // the doc_step whose drain sees it end, or now for a refusal.
+        if (!serverDoc) {
+          calls->fail(r, "unavailable",
+                      "this relay runs no client programs (a --doc whose server: block has "
+                      "client_programs: runs them)");
+          continue;
+        }
+        cvc::ariadne::conference::room_call_relay *relay = calls.get();
+        serverDoc->run_client_program(
+            r.pid, r.program, r.args,
+            [relay, pid = r.pid, id = r.id](const cvc::ariadne::ServerDocument::ClientOutcome &o) {
+              if (o.ok)
+                relay->result(pid, id, o.value);
+              else
+                relay->error(pid, id, o.code, o.message);
+            });
         continue;
       }
 #ifdef CVC_ARIADNE_PYTHON

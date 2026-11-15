@@ -774,6 +774,11 @@ TEST(AriadneWorldVehicles, TheWorldBlockDeclaresVehicles) {
   EXPECT_NE(error("{ plant: hover }").find("plant 'hover'"), std::string::npos);
   EXPECT_NE(error("{ controllers: [walker@1] }").find("nav@1, none or external"),
             std::string::npos);
+  EXPECT_NE(error("{ plant: jolt:roboracer }").find("only dynamic and dynamic4w"),
+            std::string::npos);
+  EXPECT_NE(error("{ plant: dynamic4w:roboracer, vehicle: humvee }").find("names preset"),
+            std::string::npos);
+  EXPECT_EQ(error("{ plant: dynamic4w:roboracer }"), "");
   EXPECT_NE(error("{ ranges: { mass: [10, 5] } }").find("ranges: mass"), std::string::npos);
   EXPECT_NE(error("{ look: { file: '' } }").find("names nothing"), std::string::npos);
   EXPECT_EQ(error("{ vehicle: roboracer }"), "");
@@ -1024,20 +1029,20 @@ TEST(AriadneWorldVehicles, SpawnsAndRemovesFromTheKeys) {
   st("vehicles.spawn.controller").value("");
   st("vehicles.spawn.request").value("3");
   w->sync(&warnings);
-  EXPECT_NE(val(app, "vehicles.spawn.status").find("plant kinematic does not run"),
-            std::string::npos);
-  EXPECT_EQ(w->vehicles()->size(), 1u);
+  EXPECT_EQ(val(app, "vehicles.spawn.status"), "spawned 2: Bo"); // a kinematic plant
+  EXPECT_EQ(w->vehicles()->size(), 2u);
+  EXPECT_EQ(w->vehicles()->entities()[1].plant, "kinematic");
   // Removed by id, then a clear.
   st("vehicles.selected").value("humvee");
   st("vehicles.spawn.at").value("");
   st("vehicles.spawn.request").value("4");
   w->sync(&warnings);
-  EXPECT_EQ(w->vehicles()->size(), 2u);
+  EXPECT_EQ(w->vehicles()->size(), 3u);
   st("vehicles.remove.id").value("1");
   st("vehicles.remove.request").value("1");
   w->sync(&warnings);
-  EXPECT_EQ(w->vehicles()->size(), 1u);
-  EXPECT_EQ(w->world().vehicle_count(), 1u);
+  EXPECT_EQ(w->vehicles()->size(), 2u);
+  EXPECT_EQ(w->world().vehicle_count(), 1u); // the humvee; the walker's box is not a vehicle
   st("vehicles.clear.request").value("1");
   w->sync(&warnings);
   EXPECT_EQ(w->vehicles()->size(), 0u);
@@ -1434,6 +1439,252 @@ on_tick: |
   EXPECT_EQ(val(app, "drive.lead.intent.accel"), "2");
   EXPECT_DOUBLE_EQ(v.intent(id).accel, 2.0);
   EXPECT_GT(entity(v, id).speed, 2.0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Every plant in a scene world (ARIADNE_WORLDS.md section 14, L2b): the kinematic bicycle and the
+// dynamic models beside Jolt, each stepped on the world's clock, against its buildings.
+
+namespace {
+
+const char *kPlants = R"(
+world:
+  vehicles:
+    archetypes:
+      jolt: { plant: jolt, vehicle: humvee, controllers: [nav@1, external] }
+      bike: { plant: dynamic, vehicle: humvee, controllers: [nav@1, external] }
+      four: { plant: "dynamic4w:humvee", controllers: [nav@1, external] }
+      walker: { plant: kinematic, vehicle: humvee, controllers: [nav@1, external] }
+scene:
+  physics: {}
+  world: { source: yard, cell: 2 }
+  nodes:
+    - node: yard
+      world: yard
+      source:
+        heightfield:
+          size: 200
+          resolution: 101
+          layers:
+            - { kind: dome, amplitude: 1.5, radius: 25 }
+      body: static
+    - node: wall
+      source: { box: { size: [2, 60, 6] } }
+      transform: { position: [60, 0, 3] }
+      body: static
+    - node: crate
+      source: { box: { size: [1, 1, 1] } }
+      transform: { position: [-20, -60, 0.6] }
+      body: { mass: 200 }
+)";
+
+LoadResult load_plants() {
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, kPlants);
+  if (r.ok)
+    if (const Value *world = find_world_block(r)) {
+      world_rules rules = default_world_rules();
+      EXPECT_EQ(parse_world_block(*world, rules), "");
+      r.scene.vehicles = rules.vehicles;
+    }
+  return r;
+}
+
+std::uint64_t spawn_one(WorldVehicles &v, const std::string &archetype,
+                        const std::string &controller, double x, double y, double yaw = 0.0) {
+  entity_spec s;
+  s.archetype = archetype;
+  s.controller = controller;
+  s.placed = true;
+  s.x = x;
+  s.y = y;
+  s.yaw = yaw;
+  std::string why;
+  const std::uint64_t id = v.spawn(s, &why);
+  EXPECT_NE(id, 0u) << archetype << ": " << why;
+  return id;
+}
+
+entity_info entity_of(const WorldVehicles &v, std::uint64_t id) {
+  for (const entity_info &e : v.entities())
+    if (e.id == id)
+      return e;
+  ADD_FAILURE() << "no entity " << id;
+  return entity_info{};
+}
+
+void drive(cvc::app &app, SceneWorld &w, SceneClockDriver &clock, int frames) {
+  for (int i = 0; i < frames; ++i) {
+    clock.drive(1.0 / 60.0);
+    w.follow(app.world_clock());
+  }
+}
+
+} // namespace
+
+TEST(AriadneWorldVehicles, EveryPlantDrivesInTheScenesWorld) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_plants();
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.vehicles.size(), 4u);
+  EXPECT_EQ(r.scene.vehicles[2].plant, "dynamic4w");
+  EXPECT_EQ(r.scene.vehicles[2].preset, "humvee");
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  ASSERT_EQ(v.status(), "ready");
+  EXPECT_EQ(val(app, "vehicles.archetypes.four.plant"), "dynamic4w");
+  const std::size_t bodies = w->world().body_count();
+  const std::array<std::string, 4> kinds{"jolt", "bike", "four", "walker"};
+  std::array<std::uint64_t, 4> ids{};
+  for (std::size_t k = 0; k < 4; ++k)
+    ids[k] = spawn_one(v, kinds[k], "nav@1", -50.0 + 25.0 * k, 40.0, -1.5);
+  EXPECT_EQ(w->world().body_count(), bodies + 4) << "each one's chassis is a body in the world";
+  std::array<entity_info, 4> start;
+  for (std::size_t k = 0; k < 4; ++k)
+    start[k] = entity_of(v, ids[k]);
+  EXPECT_EQ(start[1].plant, "dynamic");
+  EXPECT_EQ(start[3].plant, "kinematic");
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  drive(app, *w, clock, 480); // 8 s
+  for (std::size_t k = 0; k < 4; ++k) {
+    const entity_info e = entity_of(v, ids[k]);
+    EXPECT_GT(planar(e, start[k].x, start[k].y), 5.0) << kinds[k] << " " << e.x << "," << e.y;
+    EXPECT_GT(e.distance, 5.0) << kinds[k];
+    EXPECT_GT(e.z, e.ground_z) << kinds[k] << ": above the ground";
+    EXPECT_LT(e.z, e.ground_z + 3.0) << kinds[k] << ": on it, not flying";
+    if (kinds[k] != "walker")
+      EXPECT_GT(e.energy_wh, 0.0) << kinds[k];
+  }
+  const std::string lines = val(app, "physics.stats.vehicles");
+  for (const char *plant : {"  jolt  ", "  dynamic  ", "  dynamic4w  ", "  kinematic  "})
+    EXPECT_NE(lines.find(plant), std::string::npos) << plant << " in\n" << lines;
+
+  // The four-wheeler's wheels as drawn: on the ground, below its box, the front ones steered.
+  const std::uint64_t turning = spawn_one(v, "four", "external", -60.0, -30.0, 0.0);
+  entity_intent turn;
+  turn.command = entity_intent::mode::replace;
+  turn.steer = 0.3;
+  turn.accel = 0.5;
+  ASSERT_TRUE(v.set_intent(turning, turn));
+  drive(app, *w, clock, 120);
+  const std::vector<entity_wheel> wheels = v.wheels(turning);
+  ASSERT_EQ(wheels.size(), 4u);
+  for (std::size_t k = 0; k < 4; ++k) {
+    EXPECT_TRUE(wheels[k].down) << k;
+    EXPECT_LT(wheels[k].z, 0.0) << k << ": below the box's centre";
+    EXPECT_EQ(wheels[k].x > 0.0, k < 2) << k << ": front, then rear";
+    EXPECT_EQ(wheels[k].y > 0.0, k % 2 == 0) << k << ": left, then right";
+  }
+  EXPECT_GT(wheels[0].steer, 0.2);
+  EXPECT_GT(wheels[1].steer, 0.2);
+  EXPECT_DOUBLE_EQ(wheels[2].steer, 0.0);
+  EXPECT_GT(wheels[0].steer, wheels[1].steer) << "Ackermann: the inner wheel turns more";
+  EXPECT_EQ(v.wheels(ids[0]).size(), 4u);
+  EXPECT_TRUE(v.wheels(999).empty());
+  EXPECT_TRUE(v.despawn(turning));
+
+  // Removed: their bodies go.
+  for (const std::uint64_t id : ids)
+    EXPECT_TRUE(v.despawn(id));
+  EXPECT_EQ(w->world().body_count(), bodies);
+}
+
+TEST(AriadneWorldVehicles, TheDynamicPlantsMeetTheBuildings) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_plants();
+  ASSERT_TRUE(r.ok) << r.error;
+  // Each driven at the wall at x = 59 (its face) from x = 30, on its own: the wall stops it.
+  for (const char *kind : {"jolt", "bike", "four"}) {
+    cvc::app app;
+    std::vector<std::string> warnings;
+    std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+    ASSERT_NE(w, nullptr);
+    w->sync(&warnings);
+    WorldVehicles &v = *w->vehicles();
+    const std::uint64_t id = spawn_one(v, kind, "external", 30.0, 0.0, 0.0);
+    entity_intent go;
+    go.command = entity_intent::mode::replace;
+    go.accel = 2.5;
+    ASSERT_TRUE(v.set_intent(id, go));
+    SceneClockDriver clock(app, resolved_clock(r.scene));
+    drive(app, *w, clock, 600); // 10 s: far enough to pass it twice over
+    const entity_info e = entity_of(v, id);
+    EXPECT_LT(e.x, 59.0) << kind << ": stopped by the wall, not through it";
+    EXPECT_GT(e.x, 45.0) << kind << ": it got there";
+    EXPECT_LT(std::fabs(e.speed), 2.0) << kind;
+  }
+  // The kinematic one pushes what it meets: the crate in its way moves.
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  WorldVehicles &v = *w->vehicles();
+  const cvc::physics::body_id crate = w->body("crate");
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  drive(app, *w, clock, 60); // the crate settles
+  const double crate_x = w->world().state(crate).position.x;
+  const std::uint64_t id = spawn_one(v, "walker", "external", -35.0, -60.0, 0.0);
+  entity_intent go;
+  go.command = entity_intent::mode::replace;
+  go.accel = 2.0;
+  ASSERT_TRUE(v.set_intent(id, go));
+  drive(app, *w, clock, 360);
+  EXPECT_GT(entity_of(v, id).x, -20.0) << "it drove through the crate's place";
+  EXPECT_GT(w->world().state(crate).position.x, crate_x + 2.0) << "and pushed it along";
+}
+
+TEST(AriadneWorldVehicles, ARestartKeepsTheScenesBodiesWithDynamicPlants) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_plants();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  WorldVehicles &v = *w->vehicles();
+  const std::size_t bodies = w->world().body_count();
+  // Driven by their intents (nav@1 draws new goals after a restart, so it does not replay).
+  std::vector<std::uint64_t> ids;
+  for (const char *kind : {"bike", "four", "walker", "jolt"}) {
+    ids.push_back(spawn_one(v, kind, "external", -40.0 + 20.0 * ids.size(), -20.0, 1.2));
+    entity_intent go;
+    go.command = entity_intent::mode::replace;
+    go.steer = 0.1;
+    go.accel = 1.5;
+    EXPECT_TRUE(v.set_intent(ids.back(), go));
+  }
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  drive(app, *w, clock, 180);
+  // Restart: a fresh world with the scene's bodies made again under the same ids, and each
+  // entity back at its start. The old vehicles' bodies are not removed from the new world.
+  w->restart(&warnings);
+  EXPECT_EQ(w->world().body_count(), bodies + ids.size());
+  EXPECT_TRUE(w->body("crate").valid());
+  EXPECT_TRUE(w->body("wall").valid());
+  for (std::size_t k = 0; k < ids.size(); ++k) {
+    const entity_info e = entity_of(v, ids[k]);
+    EXPECT_TRUE(e.placed);
+    EXPECT_NEAR(e.speed, 0.0, 1e-6);
+  }
+  // It steps again as a new world: the same run twice over gives the same state.
+  drive(app, *w, clock, 120);
+  const std::uint64_t once = w->world().state_hash();
+  w->restart(&warnings);
+  drive(app, *w, clock, 120);
+  EXPECT_EQ(w->world().state_hash(), once);
 }
 
 // ---------------------------------------------------------------------------------------------
