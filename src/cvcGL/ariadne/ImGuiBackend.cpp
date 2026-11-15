@@ -367,6 +367,31 @@ bool ImGuiBackend::begin_tray_menu(const TrayIcon &icon) {
 void ImGuiBackend::end_tray_menu() { ui::EndMenu(); }
 void ImGuiBackend::end_tray() { m_trayShown = false; }
 
+// §5.23 the menus as BeginMenu lays a bar's titles out (half the item spacing before the label,
+// twice after it, then back half), from where the bar's first menu goes; then the gap and the tray
+// as begin_tray lays them out, against the bar's right edge.
+bool ImGuiBackend::menus_fit(const std::vector<std::string> &titles,
+                             const std::vector<TrayIcon> &tray) {
+#ifdef CVC_ENABLE_IMGUI
+  ImGuiWindow *win = ImGui::GetCurrentWindow();
+  if (!win || !(win->Flags & ImGuiWindowFlags_MenuBar))
+    return true;
+  const ImGuiStyle &st = ImGui::GetStyle();
+  float x = win->DC.CursorPos.x;
+  for (const std::string &t : titles)
+    x += ImGui::CalcTextSize(t.c_str(), nullptr, true).x + st.ItemSpacing.x * 2.0f;
+  if (!tray.empty())
+    x += st.ItemSpacing.x * 2.0f;
+  for (const TrayIcon &t : tray)
+    x += tray_icon_width(t);
+  return x <= win->MenuBarRect().Max.x - st.ItemSpacing.x * 0.5f;
+#else
+  (void)titles;
+  (void)tray;
+  return true;
+#endif
+}
+
 bool ImGuiBackend::next_window_maximize(bool *maximized) {
   m_maximize = maximized;
   return true;

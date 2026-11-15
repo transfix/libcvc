@@ -139,6 +139,8 @@ public:
   // Enter fires it); a menu is a menubar title whose dropdown hangs left from its right edge.
   // Hosted, the tray is a model (hosted_tray) the host draws.
   int begin_tray(const std::vector<TrayIcon> &icons) override;
+  bool menus_fit(const std::vector<std::string> &titles,
+                 const std::vector<TrayIcon> &tray) override;
   bool tray_button(const TrayIcon &icon) override;
   bool begin_tray_menu(const TrayIcon &icon) override;
   void end_tray_menu() override;
@@ -325,6 +327,11 @@ public:
   struct HostedMenuItem {
     std::string id, label;
     bool toggle = false, checked = false, separator = false;
+    // A submenu's title (no id): the items after it with a greater depth are its own. depth counts
+    // the submenus an item is in (0: straight in its menu); a collapsed bar (§5.23) holds its menus
+    // this way.
+    bool submenu = false;
+    int depth = 0;
   };
   struct HostedMenu {
     std::string label;

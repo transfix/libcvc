@@ -393,6 +393,18 @@ public:
   }
   virtual void end_tray_menu() {}
   virtual void end_tray() {}
+  // §5.23 whether the bar's menus, under these titles (in order: a title is drawn as begin_menu
+  // draws it), fit across the bar beside its whole tray. Asked right after begin_main_menu_bar,
+  // before any menu. When they do not, and the document leaves the bar to collapse, the core draws
+  // one menu instead, titled with the "menu" icon's glyph (cvc/ariadne/icons.h), whose items are
+  // the menus as submenus; the tray stays at the bar's right end. The default says they fit: a
+  // backend that cannot measure its bar never collapses it.
+  virtual bool menus_fit(const std::vector<std::string> &titles,
+                         const std::vector<TrayIcon> &tray) {
+    (void)titles;
+    (void)tray;
+    return true;
+  }
   // A visible window. `id` is a stable identity (the backend keeps a window's
   // geometry/state keyed on it, independent of the visible title). `size` is the
   // §3.0.3b sizing spec (px | percent-of-parent | auto per axis, with min/max) —

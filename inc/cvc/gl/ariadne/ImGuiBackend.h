@@ -47,6 +47,8 @@ public:
   bool begin_tray_menu(const TrayIcon &icon) override;
   void end_tray_menu() override;
   void end_tray() override;
+  bool menus_fit(const std::vector<std::string> &titles,
+                 const std::vector<TrayIcon> &tray) override;
   bool begin_window(const char *title, const char *id, const cvc::ariadne::Size &size, float border,
                     bool *p_open = nullptr) override;
   void end_window() override;

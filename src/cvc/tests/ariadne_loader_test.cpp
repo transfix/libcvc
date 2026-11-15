@@ -405,6 +405,31 @@ windows_menu: Panels
   EXPECT_EQ(wm->label, "Panels");
 }
 
+// §5.23 `menu_collapse:` at the top level, or `collapse:` on a menubar entry: when the bar's
+// menus fold into one. false reads as never; a value that is none of them warns and reads as auto.
+TEST(AriadneLoader, MenuCollapseSetting) {
+  SKIP_WITHOUT_YAML();
+  const auto collapse_of = [](const std::string &doc) {
+    LoadResult r = fresh_load("meta: { name: T, min_libcvc: \"3.4.0\" }\n" + doc);
+    EXPECT_TRUE(r.ok) << r.error;
+    const Widget *mb = find(r.root, Kind::Menubar);
+    return std::make_pair(mb ? mb->collapse : std::string("(no menubar)"),
+                          static_cast<int>(r.warnings.size()));
+  };
+  EXPECT_EQ(collapse_of("menubar:\n  - menu: File\n"), std::make_pair(std::string(), 0));
+  EXPECT_EQ(collapse_of("menu_collapse: never\nmenubar:\n  - menu: File\n"),
+            std::make_pair(std::string("never"), 0));
+  EXPECT_EQ(collapse_of("menu_collapse: false\nmenubar:\n  - menu: File\n"),
+            std::make_pair(std::string("never"), 0));
+  EXPECT_EQ(collapse_of("menu_collapse: always\nmenubar:\n  - menu: File\n"),
+            std::make_pair(std::string("always"), 0));
+  EXPECT_EQ(collapse_of("menu_collapse: sometimes\nmenubar:\n  - menu: File\n"),
+            std::make_pair(std::string("auto"), 1));
+  EXPECT_EQ(
+      collapse_of("root:\n  - menubar:\n    collapse: never\n    items:\n      - menu: File\n"),
+      std::make_pair(std::string("never"), 0));
+}
+
 // Phase 0a: input_text / input_int parse — both the shorthand `input_text:` key and the generic
 // `type: input_text` form — carrying bind, the optional `on` (send-on-commit), `def`, and the int
 // range lo/hi. These are the conference app's chat / display-name / room-id fields.

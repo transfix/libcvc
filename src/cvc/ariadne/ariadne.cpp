@@ -1881,8 +1881,19 @@ struct Runtime::Impl {
   // `clock:`, else the host's default.
   static constexpr const char *kClockKey = "ariadne.tray.clock";
   bool clock_on_by_default() const;
+  struct TrayEntry {
+    const Widget *w = nullptr; // null for the clock when no entry places it
+    bool clock = false;
+    Backend::TrayIcon spec;
+    std::string tip;
+  };
   Backend::TrayIcon tray_spec(const Widget &w);
-  void emit_tray(const Widget &bar);
+  std::vector<TrayEntry> tray_entries(const Widget &bar); // this frame's, in the bar's order
+  void emit_tray(const std::vector<TrayEntry> &icons);
+  // §5.23 the bar's menus folded into one menu under the "menu" icon, when the document lets them
+  // and they do not fit beside the tray (Backend::menus_fit).
+  std::vector<std::string> bar_titles(const Widget &bar);
+  bool collapse_menus(const Widget &bar, const std::vector<TrayEntry> &tray);
 
   // §4 read-lane: is `w` shown this frame? True when it has no visible_when; otherwise
   // the predicate's result (fail-safe HIDDEN on a broken predicate).
@@ -2296,10 +2307,23 @@ void Runtime::Impl::emit_node(const Widget &w) {
       // §5.22 seed the clock's key before the bar's menus, so a Show clock toggle among them (which
       // seeds with its own default) finds the host's or the document's choice already there.
       read_bool_or_seed(app, resolve(kClockKey), clock_on_by_default() ? 1 : 0);
-      emit_children(w);
-      if (!windows_menu.placed) // §5.9: the Windows menu goes last unless the document placed it
-        emit_windows_menu(windows_menu.title);
-      emit_tray(w); // after every menu, at the bar's right end
+      const std::vector<TrayEntry> tray = tray_entries(w);
+      if (collapse_menus(w, tray)) {
+        // §5.23 one menu, its items the bar's menus as submenus. menu_depth stays 0 for it, so a
+        // menu titled as the Windows menu still takes the Windows menu's items (§5.9).
+        const std::string glyph(icon_glyph("menu", b.unicode_glyphs()));
+        if (b.begin_menu(glyph.c_str())) {
+          emit_children(w);
+          if (!windows_menu.placed)
+            emit_windows_menu(windows_menu.title);
+          b.end_menu();
+        }
+      } else {
+        emit_children(w);
+        if (!windows_menu.placed) // §5.9: the Windows menu goes last unless the document placed it
+          emit_windows_menu(windows_menu.title);
+      }
+      emit_tray(tray); // after every menu, at the bar's right end
       --menubar_depth;
       b.end_main_menu_bar();
     }
@@ -4093,19 +4117,45 @@ bool Runtime::Impl::clock_on_by_default() const {
   return windows_menu.clock_setting >= 0 ? windows_menu.clock_setting == 1 : clock_default;
 }
 
-// The bar's tray: its TrayIcon children and the clock (§5.22), right-aligned after the menus. The
-// clock goes where a `- clock` entry places it, else last, at the right end. The icons the backend
-// has no room for go, in order, into an overflow menu at the tray's left end, whose badge counts
-// what their badges count and takes the strongest of their tones. A backend without a tray shows
-// each as an ordinary menu at the end of the bar.
-void Runtime::Impl::emit_tray(const Widget &bar) {
-  struct Icon {
-    const Widget *w = nullptr; // null for the clock when no entry places it
-    bool clock = false;
-    Backend::TrayIcon spec;
-    std::string tip;
-  };
-  Backend &b = *backend;
+// The titles the bar's menus show this frame, in order: its entries (a repeated one once), then the
+// Windows menu when it goes last (§5.9).
+std::vector<std::string> Runtime::Impl::bar_titles(const Widget &bar) {
+  std::vector<std::string> out;
+  for (const Widget &c : bar.children) {
+    if (c.kind == Kind::TrayIcon || c.kind == Kind::Separator || !visible(c))
+      continue;
+    if (c.kind == Kind::WindowsMenu) {
+      if (c.bdef && windows_menu.on && windows_menu_has_items())
+        out.push_back(c.label.empty() ? windows_menu.title : c.label);
+      continue;
+    }
+    out.push_back(c.label);
+  }
+  if (!windows_menu.placed && !windows_menu.merged && windows_menu.on && windows_menu_has_items())
+    out.push_back(windows_menu.title);
+  return out;
+}
+
+// §5.23 whether the bar's menus fold into one: always or never when the document says so, else
+// when the backend finds they do not fit beside the whole tray.
+bool Runtime::Impl::collapse_menus(const Widget &bar, const std::vector<TrayEntry> &tray) {
+  if (bar.collapse == "never")
+    return false;
+  if (bar.collapse == "always")
+    return true;
+  const std::vector<std::string> titles = bar_titles(bar);
+  if (titles.empty())
+    return false;
+  std::vector<Backend::TrayIcon> specs;
+  for (const TrayEntry &t : tray)
+    specs.push_back(t.spec);
+  return !backend->menus_fit(titles, specs);
+}
+
+// The bar's tray this frame: its TrayIcon children and the clock (§5.22), in the order the bar
+// shows them. The clock goes where a `- clock` entry places it, else last, at the right end.
+std::vector<Runtime::Impl::TrayEntry> Runtime::Impl::tray_entries(const Widget &bar) {
+  using Icon = TrayEntry;
   const bool clock_on = read_bool_or_seed(app, resolve(kClockKey), clock_on_by_default()) != 0;
   const auto clock_icon = [&](const Widget *at) {
     const auto now = wall_clock ? wall_clock() : std::chrono::system_clock::now();
@@ -4136,8 +4186,18 @@ void Runtime::Impl::emit_tray(const Widget &bar) {
   }
   if (clock_on && !windows_menu.clock_placed)
     icons.push_back(clock_icon(nullptr));
+  return icons;
+}
+
+// The bar's tray, right-aligned after the menus. The icons the backend has no room for go, in
+// order, into an overflow menu at the tray's left end, whose badge counts what their badges count
+// and takes the strongest of their tones. A backend without a tray shows each as an ordinary menu
+// at the end of the bar.
+void Runtime::Impl::emit_tray(const std::vector<TrayEntry> &icons) {
+  using Icon = TrayEntry;
   if (icons.empty())
     return;
+  Backend &b = *backend;
   std::vector<Backend::TrayIcon> specs;
   for (const Icon &i : icons)
     specs.push_back(i.spec);

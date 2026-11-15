@@ -674,10 +674,11 @@ The built-in top-level keys (`is_builtin_block`,
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs  requires
 init  on_tick  on_key  on_pointer  on_signal  keys  units  import  channels  lint  args
-windows_menu  tests  functions  data  assets  scenes  clock
+windows_menu  tests  functions  data  assets  scenes  clock  menu_collapse
 ```
 
-`tests:` is read only by `ari test` (§13). `clock:` is the tray's clock (§5.22). `assets:` and
+`tests:` is read only by `ari test` (§13). `clock:` is the tray's clock (§5.22).
+`menu_collapse:` says when the menu bar's menus fold into one (§5.23). `assets:` and
 `scenes:` are §5.18's shared meshes and scenes of their own.
 
 Any **other** top-level key is dispatched to a parser registered via
@@ -2903,11 +2904,12 @@ menubar:
   - `tooltip:`, `visible_when:` and `id:` work as on any widget.
   - A click raises `on:`. An icon with `items:` opens them as a menu instead, hanging left from
     the icon so it stays on the screen.
-- **When the bar is too narrow**, the icons leave from the left, the end nearest the menus. They
-  go into a `»` icon at the tray's left end. Its badge sums the hidden badges, its tone is the
-  strongest of theirs, and its menu lists each hidden icon with its badge and tooltip. The menus
-  never yield: with no room for even the `»`, the tray is not drawn. So the rightmost icon is
-  the one kept longest.
+- **When the bar is too narrow**, the menus fold into one first (§5.23). If the tray still has
+  too little room, its icons leave from the left, the end nearest the menus. They go into a `»`
+  icon at the tray's left end. Its badge sums the hidden badges, its tone is the strongest of
+  theirs, and its menu lists each hidden icon with its badge and tooltip. The menus, folded or
+  not, never yield to the tray: with no room for even the `»`, the tray is not drawn. So the
+  rightmost icon is the one kept longest.
 - **The clock** shows the local time as HH:MM. Its tooltip is the date and the time to the
   second.
   - It goes last, at the bar's right end, unless a `- clock` entry in the menubar places it.
@@ -2934,6 +2936,44 @@ menubar:
   clock's three settings. `ariadne_ftxui_test`'s tray tests check the right-aligned layout, the
   overflow, a click, a menu that stays on the screen and the hosted model.
   `examples/ariadne/documents/tray_demo.ari` shows three icons and the clock.
+
+### 5.23 A narrow menu bar folds its menus into one
+
+When the menu bar is too narrow for its menus and its whole tray (§5.22), the menus fold into one
+menu at the bar's left end, titled `≡` (the `menu` icon; `=` without the glyphs). Its items are
+the bar's menus, each a submenu under its own title, the Windows menu (§5.9) included. The tray
+keeps the bar's right end.
+
+```yaml
+menu_collapse: never            # top level: auto (the default), never or always
+menubar:
+  - menu: File
+    items: [...]
+```
+
+- **`menu_collapse:`** at the top level, or `collapse:` on a `- menubar:` entry, decides.
+  - `auto`, the default, folds the menus while they don't fit beside the tray, and unfolds them
+    when the bar is wide enough again. It decides afresh every frame, so a window resized past
+    the point flips the bar.
+  - `never` keeps the menus in the bar whatever the room; the tray gives way instead, as §5.22
+    says. `false` reads as `never`.
+  - `always` folds them however much room there is.
+  - Any other value warns and reads as `auto`.
+- **How it decides.** Each frame, right after `begin_main_menu_bar`, the core gives
+  `Backend::menus_fit` the titles the bar's menus show, in order, and the tray's icons. The
+  backend answers whether they fit across its bar. A backend that can't measure its bar keeps
+  the default, which answers yes, so its menus never fold.
+- **Per backend:**
+  - ImGui measures each title as `BeginMenu` lays out a bar's titles, and the tray as its
+    `begin_tray` does. The `≡` menu opens the menus as ImGui's own nested submenus.
+  - FTXUI counts columns: each title takes its width and two, the tray its icons' columns and one
+    between them. Its `≡` dropdown lists each menu's items under the menu's title.
+  - tvision measures against its own screen. The hosted model gives each menu inside `≡` as a
+    `HostedMenuItem` with `submenu` set, followed by its items one `depth` deeper, and tvision
+    nests them as its own submenus. The `≡` title has no Alt key.
+- `ariadne_runtime_test`'s `TheMenusFoldIntoOne…` and `ADocumentSetsWhetherTheMenusFold`, the
+  loader's `MenuCollapseSetting`, and `ariadne_ftxui_test`'s `ANarrowBarFoldsItsMenusIntoOne`
+  and `AFoldedBarIsOneMenuOfSubmenus` check it.
 
 ## 6. Composition: include / import / load
 

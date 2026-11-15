@@ -495,7 +495,7 @@ struct Host {
     for (const auto &m : menus) {
       sig += m.label + '\x1f';
       for (const auto &i : m.items)
-        sig += i.id + (i.checked ? "+" : "-") + i.label + '\x1e';
+        sig += i.id + (i.checked ? "+" : "-") + std::to_string(i.depth) + i.label + '\x1e';
     }
     if (sig == menu_signature)
       return;
@@ -503,21 +503,15 @@ struct Host {
     menu_items.clear();
     TMenuItem *first = nullptr, **next = &first;
     for (const auto &m : menus) {
-      const char hot = m.label.empty() ? 0 : static_cast<char>(std::toupper(m.label[0]));
-      auto *sub = new TSubMenu("~" + m.label.substr(0, 1) + "~" + m.label.substr(1),
+      // Alt and the title's first letter opens it; a title that starts with a symbol (the
+      // collapsed bar's, §5.23) has no such key.
+      const unsigned char c0 = m.label.empty() ? 0 : static_cast<unsigned char>(m.label[0]);
+      const char hot = c0 >= 0x80 ? 0 : static_cast<char>(std::toupper(c0));
+      auto *sub = new TSubMenu(hot ? "~" + m.label.substr(0, 1) + "~" + m.label.substr(1) : m.label,
                                hot ? TKey(hot, kbAltShift) : TKey(kbNoKey));
       TMenuItem **inner = &sub->subMenu->items;
-      for (const auto &i : m.items) {
-        if (i.separator) {
-          *inner = &newLine();
-        } else {
-          const std::string label = (i.toggle ? (i.checked ? "[x] " : "[ ] ") : "") + i.label;
-          *inner =
-              new TMenuItem(label, static_cast<ushort>(cmAriMenuBase + menu_items.size()), kbNoKey);
-          menu_items.push_back(i.id);
-        }
-        inner = &(*inner)->next;
-      }
+      std::size_t k = 0;
+      menu_items_of(m.items, k, 0, cmAriMenuBase, menu_items, inner);
       *next = sub;
       next = &sub->next;
     }
@@ -591,19 +585,35 @@ struct Host {
     tray->drawView();
   }
 
-  // A popup menu's items for `items`, each item's command cmAriTrayBase + its index in `ids`.
-  static void tray_items(const std::vector<FtxuiBackend::HostedMenuItem> &items,
-                         std::vector<std::string> &ids, TMenuItem **&next) {
-    for (const FtxuiBackend::HostedMenuItem &i : items) {
+  // The menu items from items[k] on that are `depth` submenus deep, each picked item's command
+  // `base` + its index in `ids`; a submenu's title takes the deeper items after it as its own.
+  static void menu_items_of(const std::vector<FtxuiBackend::HostedMenuItem> &items, std::size_t &k,
+                            int depth, int base, std::vector<std::string> &ids, TMenuItem **&next) {
+    while (k < items.size() && items[k].depth >= depth) {
+      const FtxuiBackend::HostedMenuItem &i = items[k++];
+      if (i.depth > depth) // under a title it was never given: skipped
+        continue;
       if (i.separator) {
         *next = &newLine();
+      } else if (i.submenu) {
+        auto *sub = new TSubMenu(i.label, kbNoKey);
+        TMenuItem **inner = &sub->subMenu->items;
+        menu_items_of(items, k, depth + 1, base, ids, inner);
+        *next = sub;
       } else {
         const std::string label = (i.toggle ? (i.checked ? "[x] " : "[ ] ") : "") + i.label;
-        *next = new TMenuItem(label, static_cast<ushort>(cmAriTrayBase + ids.size()), kbNoKey);
+        *next = new TMenuItem(label, static_cast<ushort>(base + ids.size()), kbNoKey);
         ids.push_back(i.id);
       }
       next = &(*next)->next;
     }
+  }
+
+  // A popup menu's items for `items`, each item's command cmAriTrayBase + its index in `ids`.
+  static void tray_items(const std::vector<FtxuiBackend::HostedMenuItem> &items,
+                         std::vector<std::string> &ids, TMenuItem **&next) {
+    std::size_t k = 0;
+    menu_items_of(items, k, 0, cmAriTrayBase, ids, next);
   }
 
   // A click on tray icon `t`: a button activates; a menu (or the overflow icon) opens as a popup

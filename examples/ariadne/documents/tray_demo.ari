@@ -3,9 +3,10 @@
 # A tray_icon: is a named icon (warning, error, info, check, gear, mail, sync, user, network, star,
 # clock, menu) or any text. badge: is a text or an expression (empty or 0 shows none),
 # tone: colours it (info, warn, error), on: is what a click does, and items: make the click open a
-# menu instead. When the bar is too narrow the leftmost icons go into a » menu at the tray's left
-# end; the menus never yield. The clock goes last unless a `- clock` entry places it; `clock: true`
-# shows it here even in a snapshot (hosts show it only in `run`).
+# menu instead. When the bar is too narrow the menus fold into one ≡ menu (§5.23; menu_collapse:
+# never keeps them), then the leftmost icons go into a » menu at the tray's left end. The clock
+# goes last unless a `- clock` entry places it; `clock: true` shows it here even in a snapshot
+# (hosts show it only in `run`).
 #
 #   arigl run examples/ariadne/documents/tray_demo.ari
 #   ari run examples/ariadne/documents/tray_demo.ari

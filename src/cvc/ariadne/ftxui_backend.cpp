@@ -880,6 +880,7 @@ struct FtxuiBackend::Impl {
   bool tray_shown = false;
   int tray_k = 0;
   bool in_tray_menu = false;
+  int hosted_depth = 0;                 // hosted: the submenus the items being emitted are in
   std::vector<std::string> item_groups; // the item groups open in the walk, innermost last
   // The last item group closed, and whether this walk's press or key fired it (item_clicked).
   std::string group_hit_id;
@@ -1171,6 +1172,7 @@ struct FtxuiBackend::Impl {
   // Hosted: an item of the menu being emitted, into the model: a tray menu's (§5.22), else the
   // bar's last menu.
   void hosted_add(FtxuiBackend::HostedMenuItem it) {
+    it.depth = hosted_depth;
     if (in_tray_menu && !walk.tray.empty())
       walk.tray.back().items.push_back(std::move(it));
     else if (!walk.menus.empty())
@@ -2056,10 +2058,19 @@ bool FtxuiBackend::begin_menu(const char *label) {
     m.cur_menu = mid;
     return true;
   }
-  // A submenu, or a menu outside the bar: an always-open list under a header line.
+  // A submenu, or a menu outside the bar: an always-open list under a header line. Hosted, a
+  // submenu's title goes into the model, and its items after it, one deeper.
   m.add(fx::text(std::string(label) + " ▸") | fx::bold);
   Impl::Frame f;
   f.type = Impl::Frame::Type::InlineMenu;
+  if (m.opt.hosted && !m.cur_menu.empty()) {
+    HostedMenuItem sub;
+    sub.label = label;
+    sub.submenu = true;
+    m.hosted_add(std::move(sub));
+    ++m.hosted_depth;
+    f.id = "hosted-submenu";
+  }
   m.stack.push_back(std::move(f));
   return true;
 }
@@ -2080,6 +2091,8 @@ void FtxuiBackend::end_menu() {
     m.walk.menu_popup = f.id;
     return;
   }
+  if (f.id == "hosted-submenu")
+    --m.hosted_depth;
   m.add(fx::hbox({fx::text("  "), fx::vbox(std::move(f.items))}));
 }
 
@@ -2200,6 +2213,22 @@ void FtxuiBackend::end_tray_menu() {
 void FtxuiBackend::end_tray() {
   Impl &m = *m_;
   m.tray_shown = false;
+}
+
+// §5.23 the titles as begin_menu draws them (" Title "), a column between them and the tray, and
+// the tray as begin_tray lays it out, across the terminal. Hosted, the same sum across the host's
+// screen (set_screen_size): tvision draws its bar's titles that way too, from its second column.
+bool FtxuiBackend::menus_fit(const std::vector<std::string> &titles,
+                             const std::vector<TrayIcon> &tray) {
+  const Impl &m = *m_;
+  int used = m.opt.hosted ? 1 : 0;
+  for (const std::string &t : titles)
+    used += fx::string_width(t) + 2;
+  if (!tray.empty())
+    used += 1;
+  for (const TrayIcon &t : tray)
+    used += tray_cols(t);
+  return used <= m.term_w;
 }
 
 bool FtxuiBackend::menu_item_action(const char *label) {
@@ -4400,6 +4429,9 @@ bool FtxuiBackend::tray_button(const TrayIcon &) { return false; }
 bool FtxuiBackend::begin_tray_menu(const TrayIcon &) { return false; }
 void FtxuiBackend::end_tray_menu() {}
 void FtxuiBackend::end_tray() {}
+bool FtxuiBackend::menus_fit(const std::vector<std::string> &, const std::vector<TrayIcon> &) {
+  return true;
+}
 bool FtxuiBackend::begin_window(const char *, const char *, const Size &, float, bool *) {
   return false;
 }

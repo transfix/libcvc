@@ -36,7 +36,7 @@ inline constexpr NamedIcon kNamedIcons[] = {
     {"network", "\xE2\x87\x85", "^"}, // ⇅
     {"star", "\xE2\x98\x85", "+"},    // ★
     {"clock", "\xE2\x97\xB7", "o"},   // ◷
-    {"menu", "\xE2\x98\xB0", "="},    // ☰
+    {"menu", "\xE2\x89\xA1", "="},    // ≡
     {"more", "\xC2\xBB", ">>"},       // » (the tray's overflow)
 };
 

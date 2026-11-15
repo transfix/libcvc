@@ -293,6 +293,9 @@ struct Widget {
   // Kind::TrayIcon: the tray's clock (§5.22). In a menubar it places the clock there; elsewhere it
   // is the document's setting for it (bdef: shown or not).
   bool tray_clock = false;
+  // Kind::Menubar: when its menus fold into one ≡ menu (§5.23): "auto" (or empty) when they and
+  // the tray do not fit across the bar, "never", or "always".
+  std::string collapse;
 
   // `autofocus: true`: the widget takes keyboard focus each time it appears (a form's first field,
   // so a person can just type). If it cannot take focus, the next one that can does.

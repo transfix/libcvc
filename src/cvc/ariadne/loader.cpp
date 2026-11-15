@@ -102,7 +102,7 @@ bool is_builtin_block(const std::string &k) {
          k == "on_key" || k == "on_pointer" || k == "on_signal" || k == "units" || k == "import" ||
          k == "channels" || k == "lint" || k == "args" || k == "requires" || k == "keys" ||
          k == "windows_menu" || k == "tests" || k == "functions" || k == "data" || k == "assets" ||
-         k == "scenes" || k == "clock";
+         k == "scenes" || k == "clock" || k == "menu_collapse";
 }
 // The parser `app` has for block `key`, or none.
 AriBlockParser find_ari_block(cvc::app &app, const std::string &key) {
@@ -156,6 +156,7 @@ const char *const kAriSchema = R"ARISCHEMA({
     "menubar":  {"type": "array", "items": {"$ref": "#/$defs/widget"}},
     "windows_menu": {"type": ["boolean", "string"]},
     "clock":    {"type": "boolean"},
+    "menu_collapse": {"enum": [true, false, "auto", "never", "always"]},
     "keys": {
       "type": "object",
       "additionalProperties": {
@@ -592,6 +593,24 @@ Widget windows_menu_setting(const std::string &v) {
   return windows_menu(v);
 }
 
+// A menubar's `collapse:`, or the document's `menu_collapse:` (§5.23): auto (the default: the
+// menus fold into one when they do not fit), never, or always. false / no / off read as never,
+// true / yes / on as auto.
+std::string menu_collapse_setting(Ctx &ctx, const YAML::Node &n) {
+  if (!n || !n.IsScalar())
+    return std::string();
+  std::string t;
+  for (char c : n.Scalar())
+    t += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (t == "never" || t == "false" || t == "no" || t == "off")
+    return "never";
+  if (t == "always")
+    return "always";
+  if (t != "auto" && t != "true" && t != "yes" && t != "on")
+    ctx.warn("ari: menu_collapse: '" + n.Scalar() + "' is not auto, never or always — auto");
+  return "auto";
+}
+
 void parse_pos(const YAML::Node &n, Widget &w) {
   const YAML::Node p = n["pos"];
   if (p && p.IsSequence() && p.size() >= 2) {
@@ -785,6 +804,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     Widget w;
     w.kind = Kind::Menubar;
     w.children = parse_seq(ctx, has(n, "children") ? n["children"] : n["items"]);
+    w.collapse = menu_collapse_setting(ctx, has(n, "collapse") ? n["collapse"] : YAML::Node());
     return w;
   }
   if (type == "menu")
@@ -2032,6 +2052,7 @@ Widget parse_document(Ctx &ctx, const YAML::Node &doc) {
       Widget mb;
       mb.kind = Kind::Menubar;
       mb.children = parse_seq(ctx, doc["menubar"]);
+      mb.collapse = menu_collapse_setting(ctx, doc["menu_collapse"]); // §5.23
       roots.push_back(std::move(mb));
     }
     for (const char *k : {"windows", "overlays"})

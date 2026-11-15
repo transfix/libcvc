@@ -5734,6 +5734,10 @@ struct TrayBackend : MockBackend {
   bool unicode = true;
   std::string click, open;
   std::vector<TrayIcon> asked; // what begin_tray was given
+  bool fits = true;            // §5.23 what menus_fit says
+  std::vector<std::string> titles;
+  std::vector<TrayIcon> fit_tray; // what menus_fit was given
+  int fit_asked = 0;
   static std::string spec(const TrayIcon &t) {
     return t.glyph + "|" + t.badge + "|" + std::to_string(t.tone);
   }
@@ -5759,6 +5763,12 @@ struct TrayBackend : MockBackend {
   }
   void end_tray_menu() override { rec("end_tray_menu"); }
   void end_tray() override { rec("end_tray"); }
+  bool menus_fit(const std::vector<std::string> &t, const std::vector<TrayIcon> &tray) override {
+    titles = t;
+    fit_tray = tray;
+    ++fit_asked;
+    return fits;
+  }
 };
 
 TEST(AriadneRuntime, TrayIconsComeAfterTheMenusAndTheWindowsMenu) {
@@ -5892,6 +5902,73 @@ TEST(AriadneRuntime, TheTrayClockFollowsTheHostAndTheUser) {
   mb.log.clear();
   rt.render();
   EXPECT_FALSE(mb.saw("tray_button:14:05||0"));
+}
+
+// §5.23 the bar's menus, Windows menu included, fold into one menu under the "menu" icon when the
+// backend finds they do not fit beside the tray, which stays where it was, at the bar's right end.
+TEST(AriadneRuntime, TheMenusFoldIntoOneWhenTheyDoNotFitBesideTheTray) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({menubar({menu("File", {menu_action("Quit", "quit")}),
+                              menu("View", {menu_action("Zoom", "zoom")}), tray_icon("warning")}),
+                     window_with_id("Alpha", "a", true)}));
+  rt.render();
+  // It asked with the titles the bar shows, in order, and the whole tray.
+  EXPECT_EQ(mb.titles, (std::vector<std::string>{"File", "View", "Windows"}));
+  ASSERT_EQ(mb.fit_tray.size(), 1u);
+  EXPECT_EQ(mb.fit_tray[0].glyph, "\xE2\x9A\xA0");
+  EXPECT_FALSE(mb.saw("begin_menu:\xE2\x89\xA1")) << "they fit: the bar as it was";
+
+  mb.fits = false;
+  mb.log.clear();
+  rt.render();
+  const int burger = log_index(mb, "begin_menu:\xE2\x89\xA1");
+  ASSERT_GE(burger, 0) << mb.dump();
+  EXPECT_EQ(mb.times("begin_menu:\xE2\x89\xA1"), 1);
+  EXPECT_LT(log_index(mb, "begin_menubar"), burger);
+  EXPECT_LT(burger, log_index(mb, "begin_menu:File"));
+  EXPECT_LT(log_index(mb, "begin_menu:View"), log_index(mb, "begin_menu:Windows"));
+  EXPECT_TRUE(mb.saw("toggle:Alpha")) << mb.dump();
+  // The tray after the folded menus, still in the bar.
+  EXPECT_LT(log_index(mb, "toggle:Alpha"), log_index(mb, "begin_tray:1"));
+  EXPECT_LT(log_index(mb, "end_tray"), log_index(mb, "end_menubar"));
+
+  // Without the glyphs, the ASCII stand-in.
+  mb.unicode = false;
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_menu:=")) << mb.dump();
+}
+
+// §5.23 the document decides: `collapse: never` keeps the menus in the bar whatever the room (the
+// backend is not asked), `always` folds them however much room there is. A menu of the bar titled
+// as the Windows menu still takes its items when folded, and there is one of it.
+TEST(AriadneRuntime, ADocumentSetsWhetherTheMenusFold) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  mb.fits = false;
+  Widget bar = menubar({menu("File", {menu_action("Quit", "quit")}),
+                        menu("Windows", {menu_action("Tile", "tile")})});
+  bar.collapse = "never";
+  rt.set_root(group({bar, window_with_id("Alpha", "a", true)}));
+  rt.render();
+  EXPECT_EQ(mb.fit_asked, 0);
+  EXPECT_FALSE(mb.saw("begin_menu:\xE2\x89\xA1")) << mb.dump();
+  EXPECT_TRUE(mb.saw("begin_menu:File"));
+
+  bar.collapse = "always";
+  mb.fits = true;
+  rt.set_root(group({bar, window_with_id("Alpha", "a", true)}));
+  mb.log.clear();
+  rt.render();
+  EXPECT_LT(log_index(mb, "begin_menu:\xE2\x89\xA1"), log_index(mb, "begin_menu:File"))
+      << mb.dump();
+  EXPECT_EQ(mb.times("begin_menu:Windows"), 1) << mb.dump();
+  EXPECT_LT(log_index(mb, "begin_menu:Windows"), log_index(mb, "toggle:Alpha")) << mb.dump();
 }
 
 TEST(AriadneRuntime, ADocumentPlacesOrTurnsOffTheTrayClock) {
