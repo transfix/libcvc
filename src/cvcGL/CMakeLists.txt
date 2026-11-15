@@ -910,6 +910,11 @@ add_test(NAME cvcgl_camera_idle COMMAND cvcgl_camera_idle)
 add_executable(cvcgl_camera_map test/cvcgl_camera_map.cpp)
 target_link_libraries(cvcgl_camera_map PRIVATE cvcGL)
 add_test(NAME cvcgl_camera_map COMMAND cvcgl_camera_map)
+# Slice mode: a parallel view down one axis with VolumeGridRover's screen axes, its state keys,
+# its pan, and the wheel zooming about the pointer. Headless.
+add_executable(cvcgl_camera_slice test/cvcgl_camera_slice.cpp)
+target_link_libraries(cvcgl_camera_slice PRIVATE cvcGL)
+add_test(NAME cvcgl_camera_slice COMMAND cvcgl_camera_slice)
 
 # Numeric parity: the push-fed Track controller reproduces pymod_gl/camera.py's
 # ChaseCamera (the two-stage EMA follow) to floating point, so the C++ and Python
@@ -1136,6 +1141,15 @@ if(NOT EMSCRIPTEN)
   add_executable(cvcgl_ariadne_pick test/cvcgl_ariadne_pick.cpp)
   target_link_libraries(cvcgl_ariadne_pick PRIVATE cvcGL)
   add_test(NAME cvcgl_ariadne_pick COMMAND cvcgl_ariadne_pick)
+endif()
+
+# A viewport in mode: slice: its axis bound to a key, the other axes' volume_slice nodes left out,
+# picks that name the voxel and its value, the wheel zooming about the pointer. Offscreen; skips
+# where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_slice_view test/cvcgl_ariadne_slice_view.cpp)
+  target_link_libraries(cvcgl_ariadne_slice_view PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_slice_view COMMAND cvcgl_ariadne_slice_view)
 endif()
 
 # The volume_slice node (VolumeSliceNode.h): its keys, region reads, pickRay, and (offscreen) its
