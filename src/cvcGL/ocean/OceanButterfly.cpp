@@ -27,7 +27,7 @@ constexpr float kTAU = 6.28318530718f;
 // ── one butterfly stage (2 complex per texel: .rg and .ba) ────────────────────
 // The LUT holds the inverse's twiddle exp(+i ang); the forward transform conjugates it, which is
 // exact, so the two directions use the same table.
-const char *kButterflyFS =
+const char *const kButterflyFS =
     "//VTK::System::Dec\n"
     "uniform sampler2D uSrc, uButterfly;\n"
     "uniform int uStage, uVertical, uForward;\n"

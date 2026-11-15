@@ -125,13 +125,16 @@ std::string call_request_path(const std::string &room, const std::string &pid) {
 }
 
 se::value_t room_call_request::to_value() const {
-  return se::make_dict({{"pid", se::value_t(pid)},
-                        {"id", se::value_t(id)},
-                        {"fn", se::value_t(fn)},
-                        {"args", args.is_nil() ? se::make_list() : args},
-                        {"kwargs", kwargs.is_nil() ? se::make_dict() : kwargs},
-                        {"key", se::value_t(key)},
-                        {"timeout", se::value_t(timeout)}});
+  se::value_t v = se::make_dict({{"pid", se::value_t(pid)},
+                                 {"id", se::value_t(id)},
+                                 {"fn", se::value_t(fn)},
+                                 {"args", args.is_nil() ? se::make_list() : args},
+                                 {"kwargs", kwargs.is_nil() ? se::make_dict() : kwargs},
+                                 {"key", se::value_t(key)},
+                                 {"timeout", se::value_t(timeout)}});
+  if (!program.empty())
+    se::set_field(v, "program", se::value_t(program));
+  return v;
 }
 
 std::string parse_call(const std::string &pid, std::string_view data, room_call_request &out) {
@@ -147,8 +150,17 @@ std::string parse_call(const std::string &pid, std::string_view data, room_call_
   out.fn = text_of(field(v, "fn"));
   if (out.id.empty() || out.id.size() > 128)
     return "the call has no id, or one longer than 128 characters";
-  if (out.fn.empty() || out.fn.size() > 256)
+  if (const se::value_t *program = field(v, "program"); program && !program->is_nil()) {
+    // A client program (S3): its source, in place of a function's name.
+    const std::string *src = std::get_if<std::string>(&program->v);
+    if (!src)
+      return "the call's program is not a string";
+    if (!out.fn.empty())
+      return "the call names a function and a program";
+    out.program = *src;
+  } else if (out.fn.empty() || out.fn.size() > 256) {
     return "the call names no function, or one longer than 256 characters";
+  }
   const se::value_t *args = field(v, "args");
   if (args && !args->is_nil() && !std::get_if<se::list_ptr>(&args->v))
     return "the call's args is not a list";
@@ -398,6 +410,22 @@ std::string room_call_client::call(const std::string &fn, const se::value_t &arg
                                  {"kwargs", kwargs.is_nil() ? se::make_dict() : kwargs},
                                  {"key", se::value_t(key)},
                                  {"timeout", se::value_t(timeout > 0 ? timeout : 0.0)}}));
+  return send_call(id, std::move(wire), std::move(done), std::move(progress));
+}
+
+std::string room_call_client::run(const std::string &program, const se::value_t &args,
+                                  double timeout, done_fn done) {
+  const std::string id = _impl->pid + "-" + std::to_string(_impl->next.fetch_add(1) + 1);
+  std::string wire =
+      encode_wire(se::make_dict({{"id", se::value_t(id)},
+                                 {"program", se::value_t(program)},
+                                 {"args", args.is_nil() ? se::make_list() : args},
+                                 {"timeout", se::value_t(timeout > 0 ? timeout : 0.0)}}));
+  return send_call(id, std::move(wire), std::move(done), nullptr);
+}
+
+std::string room_call_client::send_call(const std::string &id, std::string wire, done_fn done,
+                                        progress_fn progress) {
   {
     std::lock_guard<std::mutex> lk(_impl->mu);
     _impl->calls[id] = impl::pending{done, std::move(progress)};
@@ -484,14 +512,14 @@ struct call_state {
   room_call_client::outcome result;
 };
 
-// The DSL value a call ended with, or the exception it raises.
-se::value_t value_of(const room_call_client::outcome &o) {
+// The DSL value a call (by `verb`) ended with, or the exception it raises.
+se::value_t value_of(const room_call_client::outcome &o, const std::string &verb) {
   if (o.ok)
     return o.value;
   const char *cls = o.code == "forbidden"           ? "PermissionError"
                     : o.code == "deadline_exceeded" ? "TimeoutError"
                                                     : "RuntimeError";
-  throw se::dsl_error(cls, "room-call: " + o.code + ": " + o.message, "room-call",
+  throw se::dsl_error(cls, verb + ": " + o.code + ": " + o.message, verb,
                       {{"code", se::value_t(o.code)}, {"detail", o.detail}});
 }
 
@@ -499,7 +527,9 @@ se::value_t value_of(const room_call_client::outcome &o) {
 // arguments.
 struct call_args {
   std::string fn;
+  std::string program; // (room-run ...): the client program's source, in place of fn
   se::value_t args = se::make_list(), kwargs = se::make_dict();
+  const char *verb() const { return program.empty() ? "room-call" : "room-run"; }
 };
 call_args parse_args(const char *verb, std::span<const se::value_t> args) {
   if (args.empty())
@@ -517,13 +547,35 @@ call_args parse_args(const char *verb, std::span<const se::value_t> args) {
   return out;
 }
 
+// A program's arguments: its source, then the values its `args` holds.
+call_args parse_run_args(const char *verb, std::span<const se::value_t> args) {
+  const std::string *src = args.empty() ? nullptr : std::get_if<std::string>(&args[0].v);
+  if (!src || src->empty())
+    throw se::dsl_error("TypeError",
+                        std::string(verb) + ": expected the program's source first, a string");
+  call_args out;
+  out.program = *src;
+  const std::span<const se::value_t> rest = args.subspan(1);
+  out.args = se::make_list(std::vector<se::value_t>(rest.begin(), rest.end()));
+  return out;
+}
+
+// Send one call, or one program, through `client`; returns its id.
+std::string send_one(room_call_client &client, const call_args &a, const std::string &key,
+                     double timeout, room_call_client::done_fn done,
+                     room_call_client::progress_fn progress) {
+  if (!a.program.empty())
+    return client.run(a.program, a.args, timeout, std::move(done));
+  return client.call(a.fn, a.args, a.kwargs, key, timeout, std::move(done), std::move(progress));
+}
+
 // The work of one call: started where the process parks (the reply settles it on a reader
 // thread), else waited for in one blocking call (init:).
 se::async_work call_work(cvc::app &app, se::async_host &host, std::string prefix, call_args a,
                          std::string key, double timeout) {
   const std::string fn = a.fn;
   const auto progress = [&app, prefix, fn](double fraction, const std::string &message) {
-    if (prefix.empty())
+    if (prefix.empty() || fn.empty())
       return;
     cvc::state &root = cvc::state::instance(app);
     const std::string base = prefix + ".calls." + fn;
@@ -535,19 +587,20 @@ se::async_work call_work(cvc::app &app, se::async_host &host, std::string prefix
     const std::shared_ptr<room_call_client> client = room_call_client::for_app(app);
     if (!client)
       throw se::dsl_error("RuntimeError",
-                          "room-call: this document's host has joined no relay (a relay: block, "
-                          "or the host's --relay), or lost the one it joined",
-                          "room-call", {{"code", se::value_t(std::string("unavailable"))}});
+                          std::string(a.verb()) +
+                              ": this document's host has joined no relay (a relay: block, "
+                              "or the host's --relay), or lost the one it joined",
+                          a.verb(), {{"code", se::value_t(std::string("unavailable"))}});
     std::weak_ptr<se::async_call> wc = c;
-    const std::string id = client->call(
-        a.fn, a.args, a.kwargs, key, timeout,
-        [&host, wc](const room_call_client::outcome &o) {
+    const std::string id = send_one(
+        *client, a, key, timeout,
+        [&host, wc, verb = std::string(a.verb())](const room_call_client::outcome &o) {
           const std::shared_ptr<se::async_call> call = wc.lock();
           if (!call || call->cancel_requested())
             return;
           bool settled = false;
           try {
-            settled = call->settle(value_of(o), nullptr);
+            settled = call->settle(value_of(o, verb), nullptr);
           } catch (...) {
             settled = call->settle(se::value_t(), std::current_exception());
           }
@@ -566,12 +619,13 @@ se::async_work call_work(cvc::app &app, se::async_host &host, std::string prefix
     const std::shared_ptr<room_call_client> client = room_call_client::for_app(app);
     if (!client)
       throw se::dsl_error("RuntimeError",
-                          "room-call: this document's host has joined no relay (a relay: block, "
-                          "or the host's --relay), or lost the one it joined",
-                          "room-call", {{"code", se::value_t(std::string("unavailable"))}});
+                          std::string(a.verb()) +
+                              ": this document's host has joined no relay (a relay: block, "
+                              "or the host's --relay), or lost the one it joined",
+                          a.verb(), {{"code", se::value_t(std::string("unavailable"))}});
     auto s = std::make_shared<call_state>();
-    const std::string id = client->call(
-        a.fn, a.args, a.kwargs, key, timeout,
+    const std::string id = send_one(
+        *client, a, key, timeout,
         [s](const room_call_client::outcome &o) {
           std::lock_guard<std::mutex> lk(s->mu);
           s->result = o;
@@ -583,9 +637,11 @@ se::async_work call_work(cvc::app &app, se::async_host &host, std::string prefix
     const double wait = timeout > 0 ? timeout + 5.0 : 120.0;
     if (!s->cv.wait_for(lk, std::chrono::duration<double>(wait), [&] { return s->done; })) {
       client->forget(id);
-      throw se::dsl_error("TimeoutError", "room-call: " + a.fn + ": no reply from the relay");
+      throw se::dsl_error("TimeoutError", std::string(a.verb()) + ": " +
+                                              (a.program.empty() ? a.fn + ": " : std::string()) +
+                                              "no reply from the relay");
     }
-    return value_of(s->result);
+    return value_of(s->result, a.verb());
   };
   return work;
 }
@@ -622,6 +678,28 @@ void register_room_call_intrinsics(cvc::app &app) {
               const double timeout = number_of(field(args[0], "timeout"));
               call_args a = parse_args("room-call-opts", args.subspan(1));
               return call_work(app, host, prefix, std::move(a), key, timeout > 0 ? timeout : 0.0);
+            },
+            io);
+        // (room-run "source" arg ...) / (room-run-async ...): a client program (S3)
+        se::register_async_fn(
+            env, host, "room-run",
+            [&app, &host, prefix](std::span<const se::value_t> args) -> se::async_work {
+              call_args a = parse_run_args("room-run", args);
+              return call_work(app, host, prefix, std::move(a), std::string(), 0.0);
+            },
+            io);
+        // (room-run-opts (dict "timeout" S) "source" arg ...) / (room-run-opts-async ...)
+        se::register_async_fn(
+            env, host, "room-run-opts",
+            [&app, &host, prefix](std::span<const se::value_t> args) -> se::async_work {
+              if (args.empty() || !std::get_if<se::dict_ptr>(&args[0].v))
+                throw se::dsl_error("TypeError",
+                                    "room-run-opts: expected (dict \"timeout\" S) first, then the "
+                                    "program's source");
+              const double timeout = number_of(field(args[0], "timeout"));
+              call_args a = parse_run_args("room-run-opts", args.subspan(1));
+              return call_work(app, host, prefix, std::move(a), std::string(),
+                               timeout > 0 ? timeout : 0.0);
             },
             io);
       });
