@@ -45,6 +45,13 @@
 // (above the level) discards its fragments. A generated_world under a water node wants `water: 0`,
 // so its flat water rungs do not draw over this.
 //
+// With a swell, the swash runs up the beach on the ground itself: the node adds it to the fragment
+// shader of every mesh under its ground node (the `world:` / `ground:` node, found by id at the top
+// of the scene), as the cloud deck adds its shade to its receivers. Each wave's front runs up to
+// the shore layer's runup and drains back, a film of water with a lace of foam under it, the sand
+// dark and glossy behind it until it dries. The physics sea carries the same swash. `swash: 0`
+// leaves it out of both.
+//
 // With `body:` the water is in the scene's physics world (scene_water.h), and the bodies floating
 // in it make waves: an eWave window (EWave, 128 m of 0.5 m cells) around the camera's target takes
 // each moving body's immersed columns as its source (WakeSource, cvc::physics::add_immersion),
@@ -103,6 +110,8 @@
 #include <vtkCamera.h>
 #include <vtkLight.h>
 #include <vtkLightCollection.h>
+#include <vtkMatrix4x4.h>
+#include <vtkNew.h>
 #include <vtkOpenGLRenderWindow.h>
 #include <vtkRenderer.h>
 #include <vtkTextureObject.h>
@@ -395,6 +404,75 @@ std::string water_light(bool shaded) {
 // The cloud_sky's shared shader inputs' key on a receiver (lsystem_nodes.cpp's CLOUD_INPUTS).
 constexpr const char *kCloudInputs = "cloud_sky";
 
+// ── the swash on the beach (lsystem_coast's, OCEAN-AND-WEATHER-ROADMAP.md A3, decision D4) ─────
+// Drawn in the ground's fragment shader, not as geometry: no z-fighting with the sand, on every
+// LOD rung. Each wave's front runs up the sand to Hunt's runup (the shore layer's runup field,
+// carried up the beach from the waterline) and drains back; under it a thin film of water with
+// foam at its edge; behind it the sand stays dark and glossy, drying over the layer's dry time. The
+// arithmetic is cvc::ocean::shore_layer::swash's, so the physics sea knows where it is wet.
+//   - It reads the shore layer's phase and runup from a texture of the ground's own (binding the
+//     water's two in the ground's programs as well was not needed, so it does not).
+//   - The fragment's world position comes from its view position (uSwashVCWC, view -> world, as
+//     the cloud deck's shade finds it), so the ground's own coordinates (shifted or not) do not
+//     matter.
+//   - It runs at //VTK::Picking::Impl, after VTK has applied the ground's texture (albedo x light).
+//     At //VTK::TCoord::Impl, VTK no longer applied the texture.
+//   - Its inputs stay out of the shadow maps' bake (ShaderInputs::skip_shadow_bake): there the
+//     fragment's colour is the occluder's depth, and the swash would rewrite it. uSwashOn reads 0
+//     in the bake's program.
+const char *const kSwashDec =
+    "//VTK::CustomUniforms::Dec\n"
+    "uniform highp sampler2D uSwash;\n" // (phase, runup) on the shore layer's grid
+    "uniform vec3 uSwashOrigin; uniform vec3 uSwashSpacing;\n"
+    "uniform float uSwashOmega; uniform float uSwashTime; uniform float uSwashPhase0;\n"
+    "uniform float uSwashDry; uniform float uSwashLevel; uniform float uSwashFoam;\n"
+    "uniform float uSwashOn; uniform mat4 uSwashVCWC;\n"
+    "vec2 swGrid(vec2 p){\n"
+    "  ivec2 sz = textureSize(uSwash, 0);\n"
+    "  vec2 f = (p - uSwashOrigin.xy) / uSwashSpacing.xy;\n"
+    "  vec2 fl = floor(f), fr = f - fl;\n"
+    "  ivec2 i0 = clamp(ivec2(fl), ivec2(0), sz - ivec2(1));\n"
+    "  ivec2 i1 = clamp(ivec2(fl) + ivec2(1), ivec2(0), sz - ivec2(1));\n"
+    "  vec2 a = mix(texelFetch(uSwash, i0, 0).rg, texelFetch(uSwash, ivec2(i1.x, i0.y), 0).rg, "
+    "fr.x);\n"
+    "  vec2 b = mix(texelFetch(uSwash, ivec2(i0.x, i1.y), 0).rg, texelFetch(uSwash, i1, 0).rg, "
+    "fr.x);\n"
+    "  return mix(a, b, fr.y);\n"
+    "}\n"
+    // (film, lace, wet) of the ground at world p
+    "vec3 oSwash(vec3 p){\n"
+    "  float z = p.z - uSwashLevel;\n"
+    "  if (z <= 0.0) return vec3(0.0, 0.0, 1.0);\n"
+    "  vec2 s = swGrid(p.xy);\n"
+    "  float R = s.y;\n"
+    "  if (R <= 0.0 || z >= R) return vec3(0.0);\n"
+    "  float th = uSwashOmega*uSwashTime - s.x + uSwashPhase0;\n"
+    "  float front = R*(0.5 + 0.5*cos(th));\n"
+    "  float alpha = acos(clamp(2.0*z/R - 1.0, -1.0, 1.0));\n"
+    "  float w = th - 6.2831853*floor(th/6.2831853 + 0.5);\n"
+    "  if (abs(w) <= alpha) {\n"
+    "    float film = clamp((front - z)/max(0.15*R, 0.05), 0.0, 1.0);\n"
+    "    float lace = 1.0 - smoothstep(0.0, max(0.12*R, 0.03), front - z);\n"
+    "    return vec3(film, lace, 1.0);\n"
+    "  }\n"
+    "  float since = w - alpha; if (since < 0.0) since += 6.2831853;\n"
+    "  return vec3(0.0, 0.0, exp(-since/uSwashOmega/max(uSwashDry, 1e-3)));\n"
+    "}\n";
+const char *const kSwashImpl =
+    "//VTK::Picking::Impl\n"
+    "  if (uSwashOn > 0.5) {\n"
+    "    vec3 sw = oSwash((uSwashVCWC * vec4(vertexVC.xyz, 1.0)).xyz);\n"
+    "    vec3 c = gl_FragData[0].rgb;\n"
+    "    c *= mix(1.0, 0.62, sw.z);\n"                     // wet sand is darker
+    "    c = mix(c, vec3(0.70, 0.78, 0.86), 0.22*sw.z);\n" // and glossier
+    "    c = mix(c, vec3(0.42, 0.58, 0.64), 0.5*sw.x);\n"  // the film's water
+    "    c = mix(c, vec3(0.95, 0.97, 0.98), clamp(0.9*sw.y*uSwashFoam, 0.0, 1.0));\n" // its edge
+    "    gl_FragData[0].rgb = c;\n"
+    "  }\n";
+
+// The swash's shared shader inputs' key on a ground mesh.
+constexpr const char *kSwashInputs = "water_swash";
+
 // ── meshes ───────────────────────────────────────────────────────────────────────────────────
 
 // A flat cells x cells-vertex grid at z, from (x0, y0) to (x1, y1).
@@ -464,9 +542,16 @@ struct WaterRT {
   std::vector<double> shoreSig, shorePending;
   int shoreSettled = 0;
   const float *shoreGround = nullptr;
-  vtkSmartPointer<vtkTextureObject> shoreTex, waveTex, dirTex;
+  vtkSmartPointer<vtkTextureObject> shoreTex, waveTex, dirTex, swashTex;
   // the drawing-only keys' resolved paths
   std::string biasKey, rampKey, frayKey, capsKey, shoreFoamKey, wakeKey, wakeFoamKey;
+  // The swash on the ground node's meshes (`swash:`, on by default): their shared inputs, the
+  // scene graph's tree version they were last wired at, and the node that draws the ground.
+  bool swash = true;
+  SceneGraph *sg = nullptr;
+  std::string groundId;
+  std::shared_ptr<GeometryNode::ShaderInputs> swashInputs;
+  std::uint64_t swashTree = ~std::uint64_t(0);
   // With `body:`, the water in the scene's physics world (scene_water.h): one fluid field over the
   // ground, its surface the sea drawn here, rebuilt as the wind or the ground changes.
   std::unique_ptr<cvc::ariadne::WaterRuntime> physics;
@@ -566,10 +651,21 @@ bool upload_shore(WaterRT &rt, vtkOpenGLRenderWindow *ow, GeometryNode &near, Ge
   rt.shoreTex = g ? float_texture(ow, g->cols, g->rows, 1, g->shore_m.data())
                   : float_texture(ow, 1, 1, 1, farShore);
   const cvc::ocean::shore_layer *L = sh ? sh->layer.get() : nullptr;
+  rt.swashTex = nullptr;
   if (L && !L->empty()) {
     const std::vector<float> wave = L->wave_texels(), dir = L->dir_texels();
     rt.waveTex = float_texture(ow, L->cols, L->rows, 4, wave.data());
     rt.dirTex = float_texture(ow, L->cols, L->rows, 4, dir.data());
+    // The ground's own texture for the swash, (phase, runup): bound in the ground's programs
+    // only. Binding the water's two in them as well left the ground without its colour texture.
+    if (rt.swash) {
+      std::vector<float> sw(L->phase.size() * 2);
+      for (std::size_t i = 0; i < L->phase.size(); ++i) {
+        sw[i * 2] = L->phase[i];
+        sw[i * 2 + 1] = L->runup[i];
+      }
+      rt.swashTex = float_texture(ow, L->cols, L->rows, 2, sw.data());
+    }
   } else {
     rt.waveTex = float_texture(ow, 1, 1, 4, zero);
     rt.dirTex = float_texture(ow, 1, 1, 4, zero);
@@ -937,6 +1033,63 @@ void tick_wake(cvc::app &app, WaterRT &rt, vtkRenderer *ren, RealizedScene &scen
   }
 }
 
+// ── the swash's frame ────────────────────────────────────────────────────────────────────────
+
+// Give `g` and every mesh under it the swash, once each.
+void wire_swash(WaterRT &rt, GraphicsNode &g) {
+  if (auto *m = dynamic_cast<GeometryNode *>(&g); m && !m->hasSharedShaderInputs(kSwashInputs)) {
+    m->addFragmentShaderReplacement("//VTK::CustomUniforms::Dec", kSwashDec);
+    m->addFragmentShaderReplacement("//VTK::Picking::Impl", kSwashImpl);
+    m->setSharedShaderInputs(kSwashInputs, rt.swashInputs);
+  }
+  for (const std::shared_ptr<GraphicsNode> &c : g.getGraphicsChildren())
+    if (c)
+      wire_swash(rt, *c);
+}
+
+// The swash's inputs for this frame at world time t, and the ground's meshes wired: the first time
+// there is a swell, then whenever the scene's tree changes (a regenerated world's chunks, an LOD
+// rung made late), so a new mesh takes it on the frame after it joins.
+void tick_swash(cvc::app &app, WaterRT &rt, vtkRenderer *ren, double t) {
+  if (!rt.swash || !rt.sg)
+    return;
+  const ari::SceneWaterShore *sh = rt.shore.get();
+  const cvc::ocean::shore_layer *L = sh ? sh->layer.get() : nullptr;
+  const bool on = L && !L->empty() && rt.swashTex;
+  if (!on && !rt.swashInputs)
+    return; // never a swell: the ground is left alone
+  if (!rt.swashInputs) {
+    rt.swashInputs = std::make_shared<GeometryNode::ShaderInputs>();
+    rt.swashInputs->skip_shadow_bake = true; // it recolours after VTK: not in the bake
+  }
+  GeometryNode::ShaderInputs &in = *rt.swashInputs;
+  in.f["uSwashOn"] = on ? 1.0f : 0.0f;
+  if (on) {
+    in.tex["uSwash"] = rt.swashTex;
+    in.f3["uSwashOrigin"] = {float(L->min_x), float(L->min_y), 0.0f};
+    in.f3["uSwashSpacing"] = {float(L->cell), float(L->cell), 0.0f};
+    in.f["uSwashOmega"] = float(L->omega);
+    in.f["uSwashPhase0"] = L->trains.empty() ? 0.0f : float(L->trains.front().phase);
+    in.f["uSwashDry"] = float(L->dry_time_s);
+  }
+  in.f["uSwashTime"] = float(t);
+  in.f["uSwashLevel"] = float(rt.level);
+  in.f["uSwashFoam"] = float(std::max(key(app, rt.shoreFoamKey, 1.0), 0.0));
+  if (vtkCamera *cam = ren ? ren->GetActiveCamera() : nullptr) {
+    vtkNew<vtkMatrix4x4> vcwc;
+    vtkMatrix4x4::Invert(cam->GetModelViewTransformMatrix(), vcwc);
+    std::array<double, 16> &m4 = in.m4["uSwashVCWC"];
+    for (int i = 0; i < 4; ++i)
+      for (int j = 0; j < 4; ++j)
+        m4[i * 4 + j] = vcwc->GetElement(i, j);
+  }
+  if (const std::uint64_t tv = rt.sg->treeVersion(); on && tv != rt.swashTree) {
+    rt.swashTree = tv;
+    if (auto g = rt.sg->getGraphics(rt.groundId))
+      wire_swash(rt, *g);
+  }
+}
+
 // ── the frame ────────────────────────────────────────────────────────────────────────────────
 
 void tick_water(cvc::app &app, WaterRT &rt, vtkRenderer *ren) {
@@ -1044,6 +1197,7 @@ void tick_water(cvc::app &app, WaterRT &rt, vtkRenderer *ren) {
   }
   if (rebuild)
     rt.lastSea = sea;
+  tick_swash(app, rt, ren, t); // the swash on the ground, at the same time as the swell
   // The whitecaps' threshold, once its keys have settled (a slider drag does not stall each frame).
   std::vector<double> foamNow = foam_signature(app, rt);
   if (foamNow != rt.foamSig) {
@@ -1124,6 +1278,9 @@ std::shared_ptr<GraphicsNode> realize_water(SceneGraph &sg, const ari::SceneNode
   rt->ground = hf->second;
   rt->level = n.props.num("level", 0.0);
   rt->nearHalf = std::max(n.props.num("near", 192.0), 16.0);
+  rt->swash = n.props.num("swash", 1.0) != 0.0; // the swash on the ground node's meshes
+  rt->sg = &sg;
+  rt->groundId = groundId;
   const int cells = std::clamp(static_cast<int>(n.props.num("cells", 192.0)), 16, 512);
   rt->cell = 2.0 * rt->nearHalf / (cells - 1);
 

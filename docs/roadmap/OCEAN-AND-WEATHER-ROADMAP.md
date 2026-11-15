@@ -1221,7 +1221,7 @@ The pattern follows the existing nodes [C `scene_realize.h:275-282`; `extensions
   - near: a grid ±`near` (192 m) around the camera, a vertex every 2 m, displaced by the cascades and faded to flat at its edge. It moves with the camera by whole cells.
   - far: a flat grid over the ground (160 cells a side) with the same shading, discarded inside the near square.
   - Both discard dry fragments against the bed (a HeightFieldTexture of the ground, sampled per fragment, so the far grid's coarse cells still give a sharp shoreline), and both stay out of the scene's bounds.
-- **Shading and foam.** Shading is lsystem_coast's Fresnel sea without the swash or boat. The whitecaps' threshold comes from `foam_field` for Monahan's share (§8 E0b), on the near grid's 2 m vertices. It is found again after the wind, chop, ramp, fray or `water.whitecaps` have held for 10 frames. The swell's breakers foam on their crests, and a band at the waterline foams too, faint where no swell reaches (`water.shore_foam`).
+- **Shading and foam.** Shading is lsystem_coast's Fresnel sea without the boat. The whitecaps' threshold comes from `foam_field` for Monahan's share (§8 E0b), on the near grid's 2 m vertices. It is found again after the wind, chop, ramp, fray or `water.whitecaps` have held for 10 frames. The swell's breakers foam on their crests, and a band at the waterline foams too, faint where no swell reaches (`water.shore_foam`).
 - **The coast (A2, A3).** `scene_water_shore` builds a shore grid over the ground's samples (`cvc::world::water_bodies`, at most 1025 a side) and, with `swell_height` above 0, the swell's shore layer on it. Both the drawn water and the physics sea read them:
   - each cascade fades out as the still water shoals, over half its band's peak wavelength and at most `shore_fade` (lsystem_coast's `cascadeFade`);
   - a sideways move stays under 0.8 of the way to the shore;
@@ -1236,7 +1236,7 @@ The pattern follows the existing nodes [C `scene_realize.h:275-282`; `extensions
 - **Floating bodies (O15, part 3).** `water` with `body: {}` is one fluid field (`inc/cvc/ariadne/scene_water.h`, `WaterRuntime`). Its volume covers the water's extent (with the outer sea when the rim is sea) from below the deepest ground to 15 m over the level, and its surface is `ocean_surface` over a `sea_surface` built from the same cascades' h0, so bodies float on the waves drawn. The drawn node and `SceneWorld::from_scene` both run it. `SceneWorld::apply` now swaps a tracked node's fields with its bodies; before, a field added through a node's colliders was never removed, and leaked on each new revision.
   - Headless test: a flooded world with a density-400 raft at z 200.25 after 10 s (level 200) and a density-3000 anchor sunk to 182; one field after a wind change rebuilds it.
   - terrain_lab.ari now has `physics: {}` and three crates on the big lake. Headless after 10 s they sit at z 0.23, −0.12 and 0.98 over 17–20 m of water.
-  - The physics sea reads the same coast: the cascades fade with the same fades, and the swell's shore layer is in it. It has no swash (`sea_params::swash` off), since the beach does not draw one.
+  - The physics sea reads the same coast: the cascades fade with the same fades, the swell's shore layer is in it, and so is its swash on the beach (below), unless `swash: 0`.
   - Test `AWaterNodesSeaFadesAtTheShoreAndCarriesTheSwell`, over a beach at 1 in 10 with a 9 m/s wind:
     - The wind sea's RMS is 0.794 m in 15 m of water and 0.011 m in 0.3 m.
     - A 1 m swell is 0.245 m RMS in 15 m of water (0.25 in theory) and 0.076 m where it breaks in 0.5 m. The RMS is taken over 300 s, because the trains' periods are 6 % apart and come in sets about 170 s long.
@@ -1253,7 +1253,21 @@ The pattern follows the existing nodes [C `scene_realize.h:275-282`; `extensions
   - Medians: 54.9 ms with the water, 49.8 ms without the water node, 48.9 ms with `water.wake: 0`, 57.1 ms with `water.swell_height: 0`.
   - Runs varied by about ±5 ms. So the node costs about 5 ms of a 50 ms frame, and the wake and the swell are within the noise.
   - Not measured: GPU timer queries per pass, and the browser.
-- **Not yet:** the swash on the beach (the terrain is another node's: the water would add the swash to the world's ground shaders); persistent foam (§10.2); wake waves acting on bodies (C5); the browser (WebGL2) build.
+- **The swash on the beach (A3, decision D4).** With a swell, the node draws lsystem_coast's swash in the ground's own fragment shader. It is wired into every mesh under the `world:` / `ground:` node, again whenever the scene's tree changes (regenerated chunks, LOD rungs made late), as the cloud deck wires its receivers. Each wave's front runs up to the runup and drains back, with a film and a lace of foam; the sand stays dark and glossy behind it for the layer's dry time.
+  - The physics sea carries the same swash (`sea_params::swash`). `swash: 0` leaves it out of both.
+  - Test: on sand 0.3 m over the level, 3 m up the 1 in 10 beach, a 1 m swell's swash covers it 78 % of the time, and 0 % with `swash: 0`.
+  - `cvcgl_ariadne_realize`: with a swell, the swash is on all 21 of the test world's ground meshes, and out of the shadow bake.
+  - **What the ground's shader taught.**
+    - The fragment's world position is its view position times the inverse of the camera's model-view, as the cloud deck finds it, so the ground's own coordinates do not matter.
+    - The code runs at `//VTK::Picking::Impl`, after VTK's texture. At `//VTK::TCoord::Impl` the ground lost its colour texture.
+    - The swash reads its own RG32F texture (phase, runup).
+    - The swash's inputs stay out of the shadow maps' bake, through `GeometryNode::ShaderInputs::skip_shadow_bake`, new. In the bake the fragment's colour is the occluder's depth (StridedShadowBaker's 1 + exp(c·depth)), and the swash rewrote it. Worse, the bake draws from the light, so the view-to-world matrix was the wrong camera's. The shadow map came out wrong and the whole ground fell into shade. The set's uniforms are never set in the bake's program, so `uSwashOn` reads 0 there.
+  - Renders:
+    - terrain_lab's north-east bay: the film and lace on its shores.
+    - A copy flooded to 30 m: the film on the island beaches that face the swell, none on the lee shores.
+    - With a 1.5 m swell on that low island, the wet band covers much of it: the runup is up to 2.5 H₀, carried up to 30 m inland.
+  - A straight sliver of land in the bay (seen in the renders, from before the swash too) is the generated ground's own. Two neighbouring 5 m samples, (565, 555) and (565, 560), stand 0.03 and 0.01 m over the level with water all round them, so the edge between them pokes out of the water as a straight line.
+- **Not yet:** persistent foam (§10.2); wake waves acting on bodies (C5); the browser (WebGL2) build.
 
 **`weather`.**
 - It holds the weather model (F2) and publishes `wind.*` (E5) and `weather.*` (storm cells, rain rate, lightning).

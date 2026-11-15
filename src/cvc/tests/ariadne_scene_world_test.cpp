@@ -511,6 +511,37 @@ scene:
   EXPECT_LT(swellDeep, 0.45);
   EXPECT_LT(swellShallow, swellDeep) << "it breaks in the shallows (H under 0.78 d)";
   EXPECT_FALSE(rt.tick()) << "nothing changed: nothing rebuilt";
+
+  // The swash: on the dry sand 3 m up the beach (0.3 m over the level) the surface reaches over
+  // the ground as each wave runs up, and stays at the level between them; with `swash: 0` it
+  // never leaves the level there.
+  auto wetShare = [&](const WaterRuntime &w) {
+    int wet = 0, k = 0;
+    for (double t = 0.0; t < 300.0; t += 0.25, ++k)
+      if (w.sea()->height(3.0, 0.0, t) > 0.3)
+        ++wet;
+    return double(wet) / k;
+  };
+  const double wet = wetShare(rt);
+  LoadResult dry = fresh_load(R"(
+scene:
+  nodes:
+    - node: water
+      type: water
+      ground: beach
+      level: 0
+      swash: 0
+)");
+  ASSERT_TRUE(dry.ok) << dry.error;
+  WaterRuntime noSwash(app, dry.scene.nodes.front(), "", [beach] { return beach; });
+  const double wetWithout = wetShare(noSwash);
+  std::printf(
+      "[water] the sand 0.3 m over the level is under the swash %.0f %% of the time (%.0f %% "
+      "with swash: 0)\n",
+      100.0 * wet, 100.0 * wetWithout);
+  EXPECT_GT(wet, 0.05) << "the swash runs up over it";
+  EXPECT_LT(wet, 0.95) << "and drains back";
+  EXPECT_EQ(wetWithout, 0.0);
 }
 
 TEST(AriadneSceneWorld, RegenerateMakesANewWorldAndSwapsItsBodies) {

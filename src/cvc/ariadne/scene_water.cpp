@@ -73,6 +73,7 @@ SceneWaterSpec scene_water_spec(cvc::app &app, const SceneNode &n, const std::st
   SceneWaterSpec s;
   s.level = n.props.num("level", 0.0);
   s.outer = std::max(n.props.num("outer", 6000.0), 0.0);
+  s.swash = n.props.num("swash", 1.0) != 0.0;
   auto key = [&](const char *k, const char *prop, double def) {
     const std::string path = resolve_bind(bind_prefix, node_key(n, k));
     const double seeded = n.props.num(prop, def);
@@ -248,7 +249,7 @@ bool WaterRuntime::tick() {
   const SceneWaterSpec s = scene_water_spec(*d.app, d.node, d.prefix);
   const std::vector<double> spec{s.level,        s.wind_speed, s.wind_dir,   s.fetch,
                                  s.chop,         s.wave_amp,   s.shore_fade, s.swell_height,
-                                 s.swell_period, s.swell_dir,  s.outer};
+                                 s.swell_period, s.swell_dir,  s.outer,      s.swash ? 1.0 : 0.0};
   const std::vector<float> &heights = g->heights();
   const bool groundNew = heights.data() != d.groundData || heights.size() != d.groundSize;
   if (!groundNew && spec == d.built && d.colliders->geometry)
@@ -274,7 +275,7 @@ bool WaterRuntime::tick() {
   }
 
   // The sea the renderer draws, on the CPU: the cascades fading at the shore, the swell's shore
-  // layer (no swash: the beach does not draw it).
+  // layer, and its swash on the beach, which the drawn node draws on the ground (`swash: 0`: none).
   const SceneWaterCascades cd = scene_water_cascades(s);
   std::vector<cvc::ocean::sea_cascade> cs;
   for (std::size_t i = 0; i < d.h0.size(); ++i)
@@ -285,7 +286,7 @@ bool WaterRuntime::tick() {
   p.wave_amp = s.wave_amp;
   p.chop = s.chop;
   p.source_cell_m = 0.5; // B3's source on a 0.5 m lattice, as lsystem_coast's debris
-  p.swash = false;
+  p.swash = s.swash;
   d.sea = std::make_shared<const cvc::ocean::sea_surface>(
       std::move(cs), p, d.shore ? d.shore->grid : nullptr, d.shore ? d.shore->layer : nullptr);
 

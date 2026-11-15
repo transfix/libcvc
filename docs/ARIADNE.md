@@ -991,7 +991,14 @@ generated world's bodies. The bodies make waves: an eWave window of 128 m of 0.5
 camera's target takes each moving body's immersed columns as its source, so a dropped crate makes a
 ring and a bobbing one keeps radiating. Its waves move the near grid and shade both grids, foaming
 where they are sharp or fast (`wake_foam`). Beaches absorb them and steep shores reflect them
-(`wake: 0` turns the window off). They are drawn only: they do not push the bodies back.
+(`wake: 0` turns the window off). They are drawn only: they do not push the bodies back. With a
+swell, the swash runs up the beach on the ground itself. The node adds it to the fragment shader
+of every mesh under its ground node (the `world:` / `ground:` node, found by id at the top of the
+scene, its LOD rungs and regenerated chunks included), as the cloud deck adds its shade to its
+receivers. Each wave's front runs up to the shore layer's runup and drains back, a film of water
+with a lace of foam under it, the sand dark and glossy behind it until it dries. The physics sea
+carries the same swash, so a body on the sand is lifted by the film drawn there. `swash: 0` leaves
+it out of both.
 
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the

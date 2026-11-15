@@ -44,8 +44,9 @@
 // past the rim (at most 512 m), the ground there the rim's, so the swell enters as a plane wave
 // before it meets the coast. Past the grid both the GPU and the CPU read its edge.
 //
-// Not drawn: the swash on the beach (the terrain is another node's), so the physics sea leaves it
-// out too.
+// On the beach the swell runs up as the swash (shore_layer::swash): the drawn node draws it on the
+// ground node's meshes, and the physics sea carries it, so a body on the sand is lifted by the film
+// drawn there. `swash: 0` leaves it out of both.
 
 #ifndef __CVC_ARIADNE_SCENE_WATER_H__
 #define __CVC_ARIADNE_SCENE_WATER_H__
@@ -87,6 +88,7 @@ struct SceneWaterSpec {
   double swell_period = 10.0; // s
   double swell_dir = 200.0;   // degrees: the way it travels, from +x toward +y
   double outer = 6000.0;      // m past a rim under water
+  bool swash = true;          // the swash on the beach (the `swash` prop)
 };
 
 // The node's spec: its props, then its live keys (seeded from the props, as the drawn node does).
