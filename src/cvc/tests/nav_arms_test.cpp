@@ -383,11 +383,14 @@ TEST(NavArms, TheLogReadsBackValueForValue) {
   EXPECT_EQ(streamed.header().arms[2].name, "net2");
   EXPECT_EQ(streamed.end_nav_stats().size(), 3u);
   // the same text, line for line
-  std::ifstream f(path);
   std::stringstream file;
-  file << f.rdbuf();
+  {
+    std::ifstream f(path);
+    file << f.rdbuf();
+  }
   EXPECT_EQ(file.str(), ss.str());
-  std::filesystem::remove(path);
+  run.reset();
+  std::filesystem::remove(path); // finish() closed it, so it goes on Windows too
 }
 
 TEST(NavArms, ALogCutShortReadsToItsLastWholeTick) {

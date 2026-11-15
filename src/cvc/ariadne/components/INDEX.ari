@@ -64,14 +64,21 @@ catalog:
     for: "pause/speed/step/restart of a host sim loop"
     args: []
     verbs: [sim.step, sim.restart]         # bare-name on: AppRuntime's own, or a host's Runtime::on
-  - component: nav_lab_panels
-    file: nav_lab_panels.ari
+  - component: nav_lab_stats
+    file: nav_lab_stats.ari
     unit: nav_lab_stats
-    binds: "<prefix>.{arms,ledger,play,view.arm}.*"   # cvc::nav::publish_tables / publish_charts
-    for: "several navigation policies side by side (cvc::nav's arms): their Stats and Ledger"
+    binds: "<prefix>.{arms,play,view.arm}.*"   # cvc::nav::publish_tables / publish_charts
+    for: "several navigation policies side by side (cvc::nav's arms): one Stats row per arm"
     args: { title: Stats, id: nav_lab_stats }   # defaults
-    note: "nav_lab_ledger is the Ledger (args title: Ledger, id: nav_lab_ledger); a host raises nothing, it handles arms.retarget and arms.seek (docs/NAV_LAB.md)"
+    note: "a host handles arms.retarget and arms.seek (docs/NAV_LAB.md)"
     verbs: [arms.retarget, arms.seek]
+  - component: nav_lab_ledger
+    file: nav_lab_ledger.ari
+    unit: nav_lab_ledger
+    binds: "<prefix>.{ledger,arms.names,arms.agents,play}.*"   # cvc::nav::publish_tables / publish_charts
+    for: "the same arms: coefficients, terms of U_nav, the books against it, one arm's plant ledger"
+    args: { title: Ledger, id: nav_lab_ledger }   # defaults
+    verbs: [arms.seek]
   - component: raster_view
     file: raster_view.ari
     unit: raster_view

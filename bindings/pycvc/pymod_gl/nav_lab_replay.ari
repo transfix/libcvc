@@ -6,8 +6,8 @@
 #
 # - Transport: libcvc's sim_transport (Paused, Speed, Step one tick on while paused, Restart); the
 #   Replay window: the run, a Position slider (play.pos, 0..1) that scrubs, the time, Loop, camera.
-# - Stats and Ledger: nav_lab_panels.ari's windows at the play head. Their charts draw the whole run
-#   with a cursor at the play head (play.t); a click on one seeks there.
+# - Stats and Ledger: libcvc's nav_lab_stats and nav_lab_ledger windows at the play head. Their
+#   charts draw the whole run with a cursor at the play head (play.t); a click on one seeks there.
 
 meta:
   name: nav lab — replay
@@ -15,7 +15,8 @@ meta:
 
 import:
   - cvc://components/sim_transport.ari
-  - cvc://components/nav_lab_panels.ari
+  - cvc://components/nav_lab_stats.ari
+  - cvc://components/nav_lab_ledger.ari
 
 requires:
   - {name: chart, optional: true}   # the Stats and Ledger charts (libcvc 3.7.14)

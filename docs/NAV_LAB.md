@@ -173,11 +173,11 @@ memory, `arms_run::log()` is the same log, growing tick by tick.
 
 ## The windows
 
-`src/cvc/ariadne/components/nav_lab_panels.ari` is a shipped component with two units,
-`nav_lab_stats` and `nav_lab_ledger`:
+Two shipped components hold the windows, `src/cvc/ariadne/components/nav_lab_stats.ari` and
+`nav_lab_ledger.ari`:
 
 ```yaml
-import: cvc://components/nav_lab_panels.ari
+import: [cvc://components/nav_lab_stats.ari, cvc://components/nav_lab_ledger.ari]
 requires:
   - {name: chart, optional: true}
 windows:
