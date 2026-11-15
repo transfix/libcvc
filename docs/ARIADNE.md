@@ -4458,6 +4458,52 @@ on_tick: |
   own SIGTERM, and a `python:` block in the server document itself (arisrvx runs the operator's
   Python beside the relay instead, §9.8).
 
+#### 9.7.1 Clients' programs: `room-run`
+
+A client can send its relay a DSL program to run there as the client's own (the roadmap's §6.3,
+tier 2; [`server_document.h`](../inc/cvc/ariadne/server_document.h)). The server document opts in:
+
+```yaml
+server:
+  client_programs: { steps: 2000, time: 0.02 }   # or `on`: the action lane's caps
+```
+
+```lisp
+(room-run "(state-set (nth args 1) (+ (car args) 1)) (+ (car args) 1)" 41 "score")   ; 42
+```
+
+- **The call.** `(room-run "source" arg ...)` parks the program until the value of the source's
+  last form comes back. `(room-run-async ...)` returns a future for `(await f)`, and
+  `(room-run-opts (dict "timeout" S) "source" arg ...)` sets how long to wait. In the program,
+  `args` is the list of the arguments. The source and the values ride `room-call`'s path (§9.8.1),
+  typed the same way, so this needs bound writes too: arisrv refuses to start a document with
+  `client_programs:` under `--bind-writes off`.
+- **Where it runs.** On the relay's loop, as one of the document's actions, under the action
+  lane's caps (`ariadne.limits.action_max_steps`, `action_max_time` and `action_max_memory`,
+  §2.2). `client_programs:`'s `steps`, `time` (seconds) and `memory_mb` can only lower them. It
+  runs in a stock arisrv as it does in arisrvx, and never in Python.
+- **What it reaches.** Its chroot is its sender's own participant,
+  `conf.rooms.<room>.participants.<pid>`. It reads and writes there and nowhere else: it has no
+  `room` view, no published namespace, and none of the document's own state or functions. A
+  write must be one the client could make itself: `state-set`, `state-data-set` and the atomics
+  (`state-incr`, `state-cas`, `state-swap`), never on a key the relay owns there (`pose`,
+  `device`, `net.relay`, a stream's `ready`) or on a path the tree would trim onto one. Any other
+  write is a `PermissionError`.
+- **Its environment** is default-deny. It holds the read lane's builtins (§2.1), those writers
+  and `args`, and nothing that spawns, sends or receives messages, watches, locks, sleeps, opens
+  a file or the network, or stops the relay.
+- **One at a time.** A second program from a client whose first is still running is answered
+  `rate_limited`.
+- **Errors** raise as `room-call`'s do (§9.8.1), with these codes:
+  - `unavailable`: the relay runs no document with `client_programs:`, or its document hasn't
+    loaded.
+  - `invalid`: the source doesn't parse on its own, or is over 64 KiB.
+  - `rate_limited`.
+  - `failed`: the program raised. The message is its report.
+  - `resource_exhausted`: a cap stopped it.
+  - `too_large`: its value is over `--call-result-max`.
+  - `internal`: its value doesn't cross the wire (a function, say).
+
 ### 9.8 Python beside the relay: `arisrvx`
 
 `arisrvx` is arisrv with an embedded CPython 3.12 ([`server_link.h`](../src/ariadne_python/server_link.h),
