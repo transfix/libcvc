@@ -3042,6 +3042,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `stage_lighting`, `scene_controls`, `camera_controls` | a `rig:` light, `shadows:`, a viewer's camera (arg `viewer`) |
 | `display_toggles`, `sim_transport`, `raster_view` | `show.*` layer keys, `sim.*` + host verbs, a host-published image (arg `keys`, default `raster`) |
 | `nav_lab_stats`, `nav_lab_ledger` (`nav_lab_panels.ari`) | several navigation policies side by side: their Stats and Ledger from a run log at a tick, written by cvc::nav's `publish_tables` / `publish_charts` (host verbs `arms.retarget`, `arms.seek`; [NAV_LAB.md](NAV_LAB.md)) |
+| `nav_lab_scrub`, `nav_lab_training`, `nav_lab_episode` (`nav_lab_panels.ari`) | the checkpoint scrubber: checkpoint k beside step 0, the deployed metric, the training curve, the episode's time, written by `cvc::nav::scrub_view` (host verbs `scrub.prev`, `scrub.next`, `scrub.pick_step`) |
 | `volren_controls`, `volslice_controls` | a `volren` / `volslice` node (arg `node`, default `bunny_volume`) |
 | `forest_controls`, `sea_controls`, `sky_controls` | a `forest_trees` / `wave_sea` / `cloud_sky` node (arg `keys`, below) |
 | `world_controls` | a `generated_world` node (§5.4; arg `keys`) |

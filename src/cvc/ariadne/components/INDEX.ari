@@ -70,8 +70,8 @@ catalog:
     binds: "<prefix>.{arms,ledger,play,view.arm}.*"   # cvc::nav::publish_tables / publish_charts
     for: "several navigation policies side by side (cvc::nav's arms): their Stats and Ledger"
     args: { title: Stats, id: nav_lab_stats }   # defaults
-    note: "nav_lab_ledger is the Ledger (args title: Ledger, id: nav_lab_ledger); a host raises nothing, it handles arms.retarget and arms.seek (docs/NAV_LAB.md)"
-    verbs: [arms.retarget, arms.seek]
+    note: "nav_lab_ledger is the Ledger (args title: Ledger, id: nav_lab_ledger); the checkpoint scrubber's windows are nav_lab_scrub, nav_lab_training and nav_lab_episode (cvc::nav::scrub_view writes them); a host handles arms.retarget and arms.seek, and with the scrubber scrub.prev, scrub.next and scrub.pick_step (docs/NAV_LAB.md)"
+    verbs: [arms.retarget, arms.seek, scrub.prev, scrub.next, scrub.pick_step]
   - component: raster_view
     file: raster_view.ari
     unit: raster_view

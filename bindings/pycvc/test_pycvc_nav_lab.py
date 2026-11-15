@@ -11,7 +11,8 @@ Checks:
   5. the log streamed to a file reads back value for value, and the tables at a tick are the same;
   6. the plant ledger's items are bound (20 per vehicle); on the kinematic plant none applies;
   7. the windows land in an app's state tree, and a replay view moves its play head;
-  8. errors: arms that cannot run together, a file that is not a run log.
+  8. errors: arms that cannot run together, a file that is not a run log;
+  9. the checkpoint scrubber: a history's checkpoints deployed and cached, the report, the view.
 Script-style, like the other pycvc tests; self-skips (exit 0) when the running pycvc predates the
 bindings.
 """
@@ -224,5 +225,52 @@ with open(os.path.join(tmp, "x.txt"), "w") as f:
 expect_raises(lambda: pycvc.nav_run_log_read(os.path.join(tmp, "x.txt")), "not a run log",
               "not a run log")  # fmt: skip
 expect_raises(lambda: pycvc.nav_arms_step(run), "a finished run", "finished")
+
+# 9. the checkpoint scrubber (cvc/nav/nav_scrub.h): a history naming two checkpoints
+if hasattr(pycvc, "nav_scrub_create") and has_trained:
+    import shutil
+
+    hdir = os.path.join(tmp, "train")
+    os.makedirs(hdir)
+    shutil.copy(TRAINED, os.path.join(hdir, "a.cvcnav"))
+    shutil.copy(TRAINED, os.path.join(hdir, "b.cvcnav"))
+    hist = os.path.join(hdir, "history.jsonl")
+    with open(hist, "w") as f:
+        f.write('{"kind":"header","schema":"cvc.nav.coef_train_history/v1"}\n'
+                '{"kind":"step","step":1,"loss":2.0}\n{"kind":"step","step":2,"loss":1.5}\n'
+                '{"kind":"checkpoint","step":0,"fitness":0.2,"blob":"a.cvcnav"}\n'
+                '{"kind":"checkpoint","step":2,"fitness":0.4,"blob":"b.cvcnav"}\n'
+                '{"kind":"checkpoint","step":3,"blob":"missing.cvcnav"}\n'
+                '{"kind":"end","selected_step":2}\n')  # fmt: skip
+    sc = pycvc.nav_scrub_create(hist, agents=2, ticks=60)
+    info = pycvc.nav_scrub_info(sc)
+    check(len(info["checkpoints"]) == 2 and info["missing"] == ["missing.cvcnav"], "two of three")
+    check(info["checkpoints"][1]["selected"] and info["scenario"] == "blocks, 2 agents, seed 0",
+          "the pick, the scenario")  # fmt: skip
+    check(not info["checkpoints"][0]["cached"] and info["checkpoints"][1]["cached"],
+          "the same blob twice: deployed once, the second from the cache")  # fmt: skip
+    check(os.path.isdir(hist + ".scrub") and len(info["lines"]) == 2, "the cache, the lines")
+    check(set(info["checkpoints"][0]["metrics"]) >= {"reached", "path_m", "goal_m"}, "metrics")
+    rep = json.loads(pycvc.nav_scrub_report(sc))
+    check(rep["schema"] == "cvc.nav.scrub/v1" and len(rep["checkpoints"]) == 2, "the report")
+    check(pycvc.nav_run_log_ticks(pycvc.nav_scrub_log(sc, 1)) == 60, "a checkpoint's log")
+    occ, bounds = pycvc.nav_scrub_world(sc)
+    check(occ.shape == (121, 121) and occ.any() and bounds == (-60.0, -60.0, 60.0, 60.0), "world")
+    app2 = pycvc.App()
+    f = pycvc.nav_scrub_view_update(sc, app2, "", 0.0)
+    check(f["checkpoint"] == 1 and f["poses"].shape == (2, 2, 6), "the view starts at the pick")
+    check(pycvc.state_get(app2, "scrub.labels") == "step 0\nstep 2 (pick)", "the labels")
+    check(pycvc.state_get(app2, "scrub.curve_name") == "step.loss", "the training curve")
+    pycvc.nav_scrub_prev(sc)
+    f = pycvc.nav_scrub_view_update(sc, app2, "", 0.0)
+    check(f["checkpoint"] == 0 and pycvc.state_get(app2, "arms.names") == "step 0\nstep 0 ",
+          "previous: step 0 beside itself")  # fmt: skip
+    pycvc.state_set(app2, "scrub.pick", "1.9")
+    pycvc.nav_scrub_pick_step(sc, app2, "")
+    check(pycvc.nav_scrub_checkpoint(sc) == 1, "a click on a chart picks the nearest step")
+    pycvc.nav_scrub_step(sc)
+    pycvc.nav_scrub_restart(sc, app2, "")
+    expect_raises(lambda: pycvc.nav_scrub_log(sc, 5), "no such checkpoint")
+    expect_raises(lambda: pycvc.nav_scrub_create(os.path.join(tmp, "none.jsonl")), "no history")
 
 print(f"test_pycvc_nav_lab: {checks} checks passed")

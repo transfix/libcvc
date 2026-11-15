@@ -5,6 +5,7 @@
         --headless --frames 600 --log run.cvcrun
     python -m pycvc_gl.nav_lab replay run.cvcrun
     python -m pycvc_gl.nav_lab replay run.cvcrun --at 12 --offscreen --frames 1 --png at12.png
+    python -m pycvc_gl.nav_lab scrub run/history.jsonl --agents 8 --ticks 900
 
 **arms** runs several policies side by side: one libcvc sim_world per arm, each on the plant
 ``nav_plant.vehicle`` names (``--plant``: kinematic, humvee, roboracer, dynamic:humvee, ...), all
@@ -23,6 +24,12 @@ each arm's ghost and track where it was at the play head, and writes the Stats a
 the live run showed them at that tick, through the same library code, so they are the same cells.
 The transport is libcvc's sim_transport (Paused, Speed, Step, Restart), with a Position slider that
 scrubs; a click on a chart seeks there. Headless, nothing is drawn and no world is built.
+
+**scrub** watches a policy learn: every checkpoint a training history names (cvc::nav's coef_trainer
+``history_path``, or GRL-SNAM's) deployed on one scenario (the built-in blocks, or ``--scenario
+TRACE``), cached beside the history; the view shows checkpoint k beside step 0 (cvc::nav's
+``scrub_view``): the deployed metric against the step, the training curve, the table, the two
+runs' Stats and Ledger at the play head, and their ghosts on the scenario's grid.
 
 The windows and the replay's play head are cvc::nav's (cvc/nav/nav_panels.h): this module builds the
 worlds, draws the ghosts and wires the events. docs/NAV_LAB.md has the whole model. The shipped
@@ -47,6 +54,7 @@ from pycvc_gl import cars as C
 HERE = Path(__file__).resolve().parent
 ARMS_DOC = HERE / "nav_lab_arms.ari"
 REPLAY_DOC = HERE / "nav_lab_replay.ari"
+SCRUB_DOC = HERE / "nav_lab_scrub.ari"
 #: Ariadne chart:'s palette (light), slots c0..c7: arm j draws in slot j everywhere.
 SLOTS = (0x2A78D6, 0xEB6834, 0x1BAF7A, 0xEDA100, 0xE87BA4, 0x008300, 0x6250D6, 0xE34948)
 #: How often a live run's charts are rewritten (frames).
@@ -512,13 +520,120 @@ def run_replay(argv) -> int:
     return code
 
 
-COMMANDS = {"arms": run_arms, "replay": run_replay}
+def grid_world(occ, bounds, kind="grid", height=1.5) -> C.World:
+    """A ``pycvc_gl.cars.World`` from an occupancy grid over ``bounds``, its blocked cells drawn
+    as boxes ``height`` m tall (each row's runs merged), on flat ground."""
+    occ = np.ascontiguousarray(np.asarray(occ, np.uint8))
+    rows, cols = occ.shape
+    mnx, mny, mxx, mxy = bounds
+    cx, cy = (mxx - mnx) / (cols - 1), (mxy - mny) / (rows - 1)
+    boxes = []
+    for r in range(rows):
+        c = 0
+        while c < cols:
+            if not occ[r, c]:
+                c += 1
+                continue
+            c0 = c
+            while c < cols and occ[r, c]:
+                c += 1
+            boxes.append((mnx + (c0 - 0.5) * cx, mny + (r - 0.5) * cy, mnx + (c - 0.5) * cx,
+                          mny + (r + 0.5) * cy, height))  # fmt: skip
+    w = C.World("flat", occ, tuple(float(b) for b in bounds), None, None, {"source": kind}, boxes)
+    return w
+
+
+def run_scrub(argv) -> int:
+    from pycvc_gl.ariadne import main_args
+
+    ns = main_args(argv)
+    p = argparse.ArgumentParser(prog="python -m pycvc_gl.nav_lab scrub")
+    p.add_argument("history", help="a training history (JSON lines) whose checkpoints name a "
+                                   ".cvcnav blob: coef_trainer's history_path, or GRL-SNAM's")  # fmt: skip
+    p.add_argument("--run", type=int, default=-1, help="which run in the file (default the last)")
+    p.add_argument("--scenario", default="", help="an input trace whose world to deploy on "
+                                                  "(default: the built-in blocks)")  # fmt: skip
+    p.add_argument("--agents", type=int, default=4, help="the built-in scenario's agents")
+    p.add_argument("--seed", type=int, default=0, help="the built-in scenario's seed")
+    p.add_argument("--ticks", type=int, default=600, help="each checkpoint's ticks (0.05 s each)")
+    p.add_argument("--no-cache", action="store_true", help="deploy every checkpoint again")
+    p.add_argument("--report", default=None, help="write every checkpoint's metrics (JSON)")
+    p.add_argument("--at", type=int, default=None, help="start at checkpoint k (default the pick)")
+    args = p.parse_args(ns.rest)
+    for k, v in vars(ns).items():
+        if k != "rest":
+            setattr(args, k, v)
+    try:
+        s = pycvc.nav_scrub_create(args.history, run=args.run, scenario=args.scenario,
+                                   agents=args.agents, seed=args.seed, ticks=args.ticks,
+                                   use_cache=not args.no_cache,
+                                   k=-1 if args.at is None else args.at)  # fmt: skip
+    except RuntimeError as e:
+        return _refuse("scrub", e)
+    info = pycvc.nav_scrub_info(s)
+    for line in info["lines"]:
+        print(line)
+    if info["missing"]:
+        print(f"scrub: {len(info['missing'])} saved policies are not there (first: "
+              f"{info['missing'][0]})", file=sys.stderr)  # fmt: skip
+    if args.report:
+        Path(args.report).write_text(pycvc.nav_scrub_report(s))
+        print(f"scrub: {len(info['checkpoints'])} checkpoints to {args.report}")
+    host = _host(args, SCRUB_DOC, "nav_lab")
+    host.on("scrub.prev", lambda: pycvc.nav_scrub_prev(s))
+    host.on("scrub.next", lambda: pycvc.nav_scrub_next(s))
+    host.on("scrub.pick_step", lambda: pycvc.nav_scrub_pick_step(s, host.app, host.prefix))
+    host.on("sim.step", lambda: pycvc.nav_scrub_step(s))
+    host.on("sim.restart", lambda: pycvc.nav_scrub_restart(s, host.app, host.prefix))
+    host.on("arms.seek", lambda: pycvc.nav_scrub_seek(s, host.app, host.prefix))
+    host.on("arms.retarget", lambda: None)
+    drawn = host.mode != "headless"
+    ghosts, world = None, None
+    if drawn:
+        occ, bounds = pycvc.nav_scrub_world(s)
+        world = grid_world(occ, bounds)
+        C.show_world(host, "flat", str(SCRUB_DOC))
+        C.draw_world(host, {"world": world})
+    charts = hasattr(host, "set_plot")
+    st = {"shown": None, "log": None, "a": None}
+
+    @host.on_frame
+    def frame(dt):
+        f = pycvc.nav_scrub_view_update(s, host.app, host.prefix, dt, charts=charts)
+        if world is None:
+            return
+        nonlocal ghosts
+        if st["shown"] != f["checkpoint"]:  # the pair's recorded tracks
+            st["shown"] = f["checkpoint"]
+            a0 = pycvc.nav_run_log_arrays(pycvc.nav_scrub_log(s, 0))
+            ak = pycvc.nav_run_log_arrays(pycvc.nav_scrub_log(s, f["checkpoint"]))
+            st["a"] = (a0, ak)
+            if ghosts is None:
+                ghosts = Ghosts(host, world, 2, a0["x"].shape[2])
+        k = f["k"]
+        every = max(1, len(st["a"][0]["t"]) // 600)
+        tracks = [[list(zip(a["x"][: k + 1 : every, 0, i].tolist(),
+                            a["y"][: k + 1 : every, 0, i].tolist(), strict=True))
+                   for i in range(a["x"].shape[2])] for a in st["a"]]  # fmt: skip
+        a0 = st["a"][0]
+        goals = np.stack([a0["goal_x"][k, 0], a0["goal_y"][k, 0]], 1)
+        ghosts.update(f["poses"], goals, 1, track_upto=tracks)
+
+    host.run(fps=30, frames=args.frames or None)
+    if args.png and drawn:
+        host.snapshot(args.png)
+    code = host.exit_code()
+    host.close()
+    return code
+
+
+COMMANDS = {"arms": run_arms, "replay": run_replay, "scrub": run_scrub}
 
 
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] not in COMMANDS:
-        print("usage: python -m pycvc_gl.nav_lab {arms|replay} ...  (docs/NAV_LAB.md)",
+        print("usage: python -m pycvc_gl.nav_lab {arms|replay|scrub} ...  (docs/NAV_LAB.md)",
               file=sys.stderr)  # fmt: skip
         return 2
     return COMMANDS[argv[0]](argv[1:])
