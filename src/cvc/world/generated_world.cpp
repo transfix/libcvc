@@ -1449,6 +1449,35 @@ struct world_builder::impl {
   std::shared_ptr<const graded_terrain> graded; // the ground with the roads graded in
   std::vector<std::uint8_t> roadBed; // the mesh samples on a road's bed (never lowered as slivers)
 
+  // Terrain cell (r, c)'s material: the raster cell's under its centre, but its water from the
+  // mesh `hs`: deep water, shallow water or dry by its own height (its corners' mean) against the
+  // sea, with derived_class's depths. One raster sample stands for the whole cell, and where the
+  // raster and the mesh share their samples it is a corner: on a steep shore that corner can be dry
+  // or shallow while the cell under it is metres deep, and the navigator and the physics would
+  // take that cell for drivable shallow water. A prop's footprint keeps its own.
+  std::uint16_t cell_class(int r, int c, const std::vector<float> &hs) const {
+    const int cells = terrainN - 1;
+    const double u = (c + 0.5) / cells, v = (r + 0.5) / cells;
+    // The raster's samples are corner-inclusive: the nearest is at u x (rasterN - 1).
+    const int rc = std::min(rasterN - 1, int(std::lround(u * (rasterN - 1))));
+    const int rr = std::min(rasterN - 1, int(std::lround(v * (rasterN - 1))));
+    const std::size_t ri = std::size_t(rr) * rasterN + rc;
+    std::uint16_t k = w.raster.klass[ri];
+    const surface_registry &reg = w.model->registry();
+    std::uint16_t shallow = 0, deep = 0, sand = 0;
+    if (!reg.find("water_shallow", shallow) || !reg.find("water_deep", deep) ||
+        !reg.find("sand", sand) || w.raster.layer_owner[ri] != 0)
+      return k;
+    const double sea = w.model->terrain().sea_level_m();
+    const std::size_t i = std::size_t(r) * terrainN + c;
+    const double h = 0.25 * (double(hs[i]) + hs[i + 1] + hs[i + terrainN] + hs[i + terrainN + 1]);
+    if (h < sea - 0.5)
+      return deep;
+    if (h < sea)
+      return shallow;
+    return k == shallow || k == deep ? sand : k; // dry: derived_class's shore band above the sea
+  }
+
   void advance(build_stage s) {
     base += kStageWeight[int(st)];
     frac = 0.0;
@@ -1525,44 +1554,16 @@ struct world_builder::impl {
       return;
     }
     case build_stage::materials: {
-      // Each terrain cell takes the material of the raster cell under its centre, but its water
-      // from the mesh: a cell is deep water, shallow water or dry by its own height (its corners'
-      // mean) against the sea, with derived_class's depths. One raster sample stands for the whole
-      // cell, and where the raster and the mesh share their samples it is a corner: on a steep
-      // shore that corner can be dry or shallow while the cell under it is metres deep, and the
-      // navigator and the physics would take that cell for drivable shallow water.
+      // Each terrain cell's material: the raster's, its water the mesh's (cell_class).
       const int cells = terrainN - 1;
       if (next == 0)
         mats.assign(std::size_t(cells) * cells, cvc::geometry::face_material_t(0));
-      const surface_registry &reg = w.model->registry();
-      std::uint16_t shallow = 0, deep = 0, sand = 0;
-      const bool water = reg.find("water_shallow", shallow) && reg.find("water_deep", deep) &&
-                         reg.find("sand", sand);
-      const double sea = w.model->terrain().sea_level_m();
       const std::vector<float> &hs = w.terrain->heights();
       // A cell costs far less than a sample: eight to a unit.
       const int r1 = next + std::min(cells - next, rowsFor(budget * 8, cells, 1));
       for (int r = next; r < r1; ++r)
-        for (int c = 0; c < cells; ++c) {
-          const double u = (c + 0.5) / cells, v = (r + 0.5) / cells;
-          // The raster's samples are corner-inclusive: the nearest is at u x (rasterN - 1).
-          const int rc = std::min(rasterN - 1, int(std::lround(u * (rasterN - 1))));
-          const int rr = std::min(rasterN - 1, int(std::lround(v * (rasterN - 1))));
-          const std::size_t ri = std::size_t(rr) * rasterN + rc;
-          std::uint16_t k = w.raster.klass[ri];
-          if (water && w.raster.layer_owner[ri] == 0) { // a prop's footprint keeps its own
-            const std::size_t s = std::size_t(r) * terrainN + c;
-            const double h =
-                0.25 * (double(hs[s]) + hs[s + 1] + hs[s + terrainN] + hs[s + terrainN + 1]);
-            if (h < sea - 0.5)
-              k = deep;
-            else if (h < sea)
-              k = shallow;
-            else if (k == shallow || k == deep)
-              k = sand; // dry: the shore band derived_class gives the ground just above the sea
-          }
-          mats[std::size_t(r) * cells + c] = cvc::geometry::face_material_t(k);
-        }
+        for (int c = 0; c < cells; ++c)
+          mats[std::size_t(r) * cells + c] = cvc::geometry::face_material_t(cell_class(r, c, hs));
       next = r1;
       frac = double(next) / cells;
       if (next < cells)
@@ -1638,11 +1639,31 @@ struct world_builder::impl {
       // The waterline's one-sample ridges under the water, now the mesh has its final heights (a
       // road's grade re-samples the base relief near it, so this comes after): the ground draws no
       // hairline out of the water. A road's bed is kept.
-      if (p.waterline_sliver_m > 0.0)
+      // The cells round a lowered sample take their water class again from the lowered ground.
+      std::vector<cvc::geometry::face_material_t> recl;
+      if (p.waterline_sliver_m > 0.0) {
+        const std::vector<float> before = heights;
         w.waterline_slivers =
             lower_waterline_slivers(heights, N, N, p.water_level_m, p.waterline_sliver_m, &roadBed);
+        if (w.waterline_slivers > 0 && terrainN == N) {
+          recl = w.terrain->cell_materials();
+          const int cells = N - 1;
+          for (int r = 0; r < N; ++r)
+            for (int c = 0; c < N; ++c) {
+              const std::size_t i = std::size_t(r) * N + c;
+              if (heights[i] == before[i])
+                continue;
+              for (int cr = std::max(0, r - 1); cr <= std::min(cells - 1, r); ++cr)
+                for (int cc = std::max(0, c - 1); cc <= std::min(cells - 1, c); ++cc)
+                  recl[std::size_t(cr) * cells + cc] =
+                      cvc::geometry::face_material_t(cell_class(cr, cc, heights));
+            }
+        }
+      }
       roadBed = std::vector<std::uint8_t>();
       w.terrain->set_heights(std::move(heights));
+      if (!recl.empty())
+        w.terrain->set_cell_materials(std::move(recl));
       heights = std::vector<float>();
       advance(build_stage::city);
       return;
