@@ -583,12 +583,15 @@ its own world document.
 - **As built (L2).** The catalog is `world: vehicles: archetypes:`, a list of its own beside
   `avatars:`, so the holon's avatar (the first avatar archetype) is unchanged
   (`world_rules::vehicles`, [world_rules.h](../../inc/cvc/ariadne/world_rules.h)).
-  - Plants: `jolt` is a Jolt vehicle in the world's own `cvc::physics::world` (`nav_plant` with
-    `step_world` off, so the world steps once, on the clock). Since L4 the other three run too,
-    each plant's entities a navigator of their own: `kinematic` (nav's bicycle, no body) and
-    `dynamic` / `dynamic4w` (the dynamic models, whose chassis are boxes in a world of their own
-    holding the world's colliders: they step it themselves). Across plants vehicles touch by
-    their chassis boxes; a vehicle with no chassis in the scene's world is drawn from its pose.
+  - Plants (L2b, built 2026-11-14): every plant runs in the world's own `cvc::physics::world`,
+    stepped once a step, on the clock. `jolt` is a Jolt vehicle (`nav_plant` with `step_world`
+    off). `dynamic` and `dynamic4w` (`dyn_bike_plant`, `dyn_4w_plant`, with `step_world` off) take
+    one substep around each of the world's steps (`before_world_step`, `after_world_step`), their
+    chassis boxes bodies the world's contacts push back into the models. `kinematic` is nav's
+    bicycle with a kinematic box that pushes what it meets. Each plant's entities have a
+    navigator of their own on the grid; `physics.stats.vehicles` names each one's plant; cvcGL
+    poses a box look's wheels where its plant has them. A spawn may name a plant of its own
+    (`entity_spec::plant`), as a gym's agents do (L4).
   - Looks: a humvee is the vehicle-humvee package's `Humvee.glb` when it is installed (found under
     the cvcpkg prefixes, oriented and scaled to the chassis as the nav demos do it), else its
     chassis box in the entity's colours with a cabin and wheels; `look: { model: | file: |
@@ -728,6 +731,7 @@ each builds what a WD phase needs.
 | L1 | **Built** (2026-11-09). **`world_source` and `world_physics`,** the two panels on pieces that already exist. As built: a node's `world: <name>` names the scene's worlds (generated, data, terrain, flat), and the scene's `world: { source, cell, half }` picks one. `SceneWorld::bind_worlds` keeps the others out of the physics world, and their nodes follow `scene.world.on.<node>`, so they are not drawn. It publishes `scene.world.*`: source, sources, node, kind, ready, rev, status, and the grid of the world on. `physics.enabled` (Q11 as proposed: off pauses the world), plus `physics.stats.step_ms_history` and `.nodes`. Per-vehicle energy and forces wait for L2's archetypes. | WD5 | M |
 | L2 | **Built** (2026-11-11). **Vehicle archetypes and `vehicle_selector`,** with the studio preview. As built: `world: vehicles: archetypes:` (plant, preset and overrides, look, ranges, controllers); `WorldVehicles`, the scene world's entities, spawned as Jolt vehicles into its own physics world and driven by `nav@1` (a policy each) or held still (`none`), placed again on a world switch and back at their starts on restart; the `vehicles.*` and `entities.*` keys, and `physics.stats.vehicles` (speed, power, energy, wheel load) in `world_physics`; cvcGL draws each on its chassis (the Humvee model when installed), and `type: vehicle_preview` draws the selected one on a studio scene. No demo until L3 (owner, 2026-11-11). | WD4 | M |
 | L2a | **Built** (2026-11-14). **Entity intents.** A document, a script, a server document or a C++ / Python host steers any world entity: a steer and acceleration in place of its controller's command or blended with it, a planar force on its drive, and the `external` controller (its intent alone). Keys `entities.<id>.intent.*` and `.force.*`, read each navigator tick; `world: vehicles: intents:` for a published namespace; `WorldVehicles::set_intent` from any thread; `pycvc.WorldEntities`. | WD4 | S |
+| L2b | **Built** (2026-11-14). **Every plant in a scene world.** `kinematic`, `dynamic[:preset]` and `dynamic4w[:preset]` beside `jolt`, all in the scene's one physics world on its clock: the dynamic plants step there (a substep around each world step, `step_world` off) with their chassis against its buildings; the kinematic bicycle's box pushes what it meets. `physics.stats.vehicles` for each, and each look drawn (a dynamic4w wheel by wheel). | WD4 | M |
 | L3 | **Built** (2026-11-11). **`spawns.*` and `spawn_points`,** with the minimap and road suggestions. As built: `world: spawns:` (points with a heading, team and archetype tags and a world; a policy, fixed, random, round_robin or nearest_free, kept per team, archetype or all); `WorldSpawns`, one per `WorldVehicles`, keeps the points per world, checks them against the grid, picks a spawn's start by the policy (aside when a vehicle sits on it), and suggests points along a generated world's road mesh; a minimap is a `mode: map`, `input: pick` viewport whose picks add, remove or tag points; cvcGL draws them tagged `spawns`. The demo is `world_lab.ari`, with every panel. | WD3 | M |
 | L4 | **Built** (2026-11-12). **The gym:** reset, step, observe, reward, episode logs, headless; `pycvc_gl.cars` moves onto it. As built: `WorldGym` (C++, and `pycvc.WorldGym`), one app per gym, the clock paused so only `step()` steps it; `reset(seed)` rebuilds the world and spawns the agents with every draw seeded; `step(steer, accel)` is a navigator tick (NaN: nav@1 drives); the observation as flat arrays (pose, goal, contacts per physics step, out of the world, ray ranges, envelope); a reward of the user's; a log per agent per step (CSV, numpy); `GymCars` and `--gym` put `pycvc_gl.cars`' controllers on it; `world_gym.ari` and `world_gym.py` are the example. | — | M |
 

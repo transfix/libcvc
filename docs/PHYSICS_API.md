@@ -29,6 +29,7 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/physics/world_geometry.h` | `add_world_geometry`: a `cvc::world::world_geometry`'s static bodies and materials |
 | `cvc/physics/nav_plant.h` | `nav_plant`: a world's vehicles as `cvc::nav`'s plant (`cvc/nav/vehicle_plant.h`) |
 | `cvc/physics/jolt_rollout.h` | `jolt_rollout`: the Jolt vehicle as `cvc::nav`'s training rollout (`rollout_kind::jolt`, `cvc/nav/rollout_plant.h`; NAV_TRAINING.md, "Training on Jolt") |
+| `cvc/physics/mujoco_robot.h` | `mujoco_robot`: one articulated robot (the Unitree Go2 first) simulated by MuJoCo on a `cvc::height_field`, with servo and torque commands, pushes, contacts and MuJoCo's energies; `run_mujoco_trial`. Optional (`CVC_WITH_MUJOCO`); [MUJOCO.md](MUJOCO.md) |
 
 The physics headers include only the standard library, except:
 

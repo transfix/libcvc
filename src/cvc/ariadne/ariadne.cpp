@@ -590,6 +590,42 @@ bool run_init(cvc::app &app, const std::string &prefix, const std::string &scrip
   return true;
 }
 
+// The read lane's builtins (read_lane_builtins, ariadne.h): what a reactive slot's predicate may
+// call, and where a LaneProcess's `allow` starts.
+namespace {
+constexpr const char *kReadLaneBuiltins[] = {
+    // arithmetic / comparison / coercion / type predicates / logic
+    "+", "-", "*", "/", "%", "<", ">", "<=", ">=", "=", "!=", "int", "float", "str", "is-int",
+    "is-float", "is-string", "is-null", "is-list", "type-of", "not", "and", "or",
+    // bounded compound construction (by-reference; not the doubling materializers) + access
+    "list", "cons", "car", "cdr", "nth", "length", "dict", "get-attr",
+    // side-effect-free state readers (state-data-get deep-copies; no aliasing, no callables;
+    // state-json writes its document as sliced data steps, under the allocation limit)
+    "state-get", "state-exists", "state-children", "state-data-get", "state-json",
+    "state-root-path", "state-has-expiry", "state-is-expired",
+    // JSON text to values and back: pure, sliced data steps under the allocation limit
+    "json-parse", "json-encode",
+    // the wall clock (a post's "2h ago"): one read, nothing written
+    "time-now",
+    // the stdlib: the pure, bounded functions (a scalar, or a result no bigger than its
+    // argument), and the materializers, which do their work as sliced data steps (each
+    // eval slices, see data_step_nodes_) under the per-call allocation limit. A function
+    // collections.map/filter/reduce call runs as this evaluator's own frames, so the
+    // special-form gate and the caps cover it too. math.random stays out because a
+    // predicate must be deterministic.
+    "string.length", "string.byte-length", "string.char-at", "string.substring", "string.upper",
+    "string.lower", "string.trim", "string.starts-with", "string.ends-with", "string.contains",
+    "string.split", "string.join", "string.replace", "string.encode", "bytes.length",
+    "bytes.byte-at", "bytes.slice", "bytes.concat", "bytes.decode", "math.sqrt", "math.abs",
+    "math.floor", "math.ceil", "math.round", "math.pow", "math.log", "math.sin", "math.cos",
+    "math.tan", "math.min", "math.max", "math.clamp", "math.pi", "math.e", "collections.map",
+    "collections.filter", "collections.reduce", "collections.zip", "collections.flatten",
+    "collections.sort", "collections.reverse", "collections.range", "collections.unique",
+    "collections.dict-keys", "collections.dict-values", "collections.dict-merge"};
+} // namespace
+
+std::span<const char *const> read_lane_builtins() { return kReadLaneBuiltins; }
+
 // --- §4 read-lane: the per-frame reactive predicate evaluator ----------------
 namespace {
 namespace se = cvc::state_exec;
@@ -656,36 +692,7 @@ public:
     env_ = std::make_shared<se::environment>();
     se::environment_ptr full = se::builtins::make_default_environment();
     se::register_intrinsics(full, &ctx_);
-    static const char *const kAllowed[] = {
-        // arithmetic / comparison / coercion / type predicates / logic
-        "+", "-", "*", "/", "%", "<", ">", "<=", ">=", "=", "!=", "int", "float", "str", "is-int",
-        "is-float", "is-string", "is-null", "is-list", "type-of", "not", "and", "or",
-        // bounded compound construction (by-reference; not the doubling materializers) + access
-        "list", "cons", "car", "cdr", "nth", "length", "dict", "get-attr",
-        // side-effect-free state readers (state-data-get deep-copies; no aliasing, no callables;
-        // state-json writes its document as sliced data steps, under the allocation limit)
-        "state-get", "state-exists", "state-children", "state-data-get", "state-json",
-        "state-root-path", "state-has-expiry", "state-is-expired",
-        // JSON text to values and back: pure, sliced data steps under the allocation limit
-        "json-parse", "json-encode",
-        // the wall clock (a post's "2h ago"): one read, nothing written
-        "time-now",
-        // the stdlib: the pure, bounded functions (a scalar, or a result no bigger than its
-        // argument), and the materializers, which do their work as sliced data steps (each
-        // eval slices, see data_step_nodes_) under the per-call allocation limit. A function
-        // collections.map/filter/reduce call runs as this evaluator's own frames, so the
-        // special-form gate and the caps cover it too. math.random stays out because a
-        // predicate must be deterministic.
-        "string.length", "string.byte-length", "string.char-at", "string.substring", "string.upper",
-        "string.lower", "string.trim", "string.starts-with", "string.ends-with", "string.contains",
-        "string.split", "string.join", "string.replace", "string.encode", "bytes.length",
-        "bytes.byte-at", "bytes.slice", "bytes.concat", "bytes.decode", "math.sqrt", "math.abs",
-        "math.floor", "math.ceil", "math.round", "math.pow", "math.log", "math.sin", "math.cos",
-        "math.tan", "math.min", "math.max", "math.clamp", "math.pi", "math.e", "collections.map",
-        "collections.filter", "collections.reduce", "collections.zip", "collections.flatten",
-        "collections.sort", "collections.reverse", "collections.range", "collections.unique",
-        "collections.dict-keys", "collections.dict-values", "collections.dict-merge"};
-    for (const char *name : kAllowed)
+    for (const char *name : read_lane_builtins())
       if (const se::value_t *v = full->lookup(name))
         env_->set(name, *v);
     // pure and bounded: a capability / name lookup, answered once a frame per name, and noted
@@ -739,8 +746,8 @@ public:
   // the function it replaces, so the kept results go (each scope's map stays where it is).
   void bind_read_function(const std::string &name, const Runtime::ReadFunction &fn) {
     se::environment *env = env_.get();
-    env_->set(name, se::value_t(se::native_fn(
-                        [fn, env](std::span<const se::value_t> args) { return fn(args, *env); })));
+    env_->set(name,
+              se::value_t(se::native_fn([fn, env](se::call_args args) { return fn(args, *env); })));
     for (auto &[scope, kept] : cache_)
       kept.clear();
   }
@@ -925,7 +932,7 @@ private:
       st.data_step_nodes = data_step_nodes_;
       // The render lane can't wait (docs/STATE_EXEC_EXCEPTIONS.md 3.3): an async function is
       // unbound here, and one reached anyway raises RuntimeError instead of parking or blocking.
-      const se::park_forbidden_scope no_parking;
+      const se::park_forbidden_scope no_parking(ev_->context());
       frame_.start();
       const charge_frame charge{frame_, st};
       se::value_t r = ev_->run(st, kMaxSteps, std::min(kMaxSeconds, remaining));
@@ -1029,16 +1036,16 @@ private:
         return;
       }
       se::native_fn inner = *fn;
-      env_->set(name, se::value_t(se::native_fn(
-                          [this, inner, live](std::span<const se::value_t> args) -> se::value_t {
-                            if (rec_) {
-                              if (live)
-                                rec_->live = true;
-                              else
-                                note_read(args);
-                            }
-                            return inner(args);
-                          })));
+      env_->set(name,
+                se::value_t(se::native_fn([this, inner, live](se::call_args args) -> se::value_t {
+                  if (rec_) {
+                    if (live)
+                      rec_->live = true;
+                    else
+                      note_read(args);
+                  }
+                  return inner(args);
+                })));
     };
     for (const char *name :
          {"state-get", "state-exists", "state-children", "state-data-get", "state-json"})
@@ -1428,6 +1435,9 @@ struct Runtime::Impl {
   // `autofocus:` widgets drawn last frame and this one, by tree position (and repeat index): one
   // takes focus when it appears, not on every frame it stays.
   std::set<std::string> autofocus_shown, autofocus_now;
+  // §5.9 windows drawn maximized last frame and this one (their tree.<id>.maximized paths): one
+  // that becomes maximized comes to the front.
+  std::set<std::string> maximized_shown, maximized_now;
   void autofocus(const Widget &inst, int i);
   // §3: last successful repeat-count per expression. A reactive repeat-count eval fail-safes to 0
   // on a transient per-frame budget exhaustion (reactive eval is slow in wasm, and video decode can
@@ -1843,8 +1853,12 @@ struct Runtime::Impl {
     // The menubar already has a menu of this title (fem_gallery.ari's own "Windows"): the items go
     // at the end of that one, after a separator, rather than in a second menu of the same name.
     bool merged = false;
-    // The windows no menu item of the document already toggles: title, resolved open-state path.
-    std::vector<std::pair<std::string, std::string>> items;
+    // The windows no menu item of the document already toggles: title, resolved open-state and
+    // raise paths.
+    struct Item {
+      std::string title, open_path, raise_path;
+    };
+    std::vector<Item> items;
     // The windows a `repeat:` makes (conference_roster's per-peer cameras): their template in
     // `root` and the scope it resolves in. How many there are changes, so each frame's menu lists
     // that frame's instances, each under its own title.
@@ -2362,10 +2376,9 @@ void Runtime::Impl::emit_node(const Widget &w) {
     // it fires once (not every frame). Opening a closed window + raising it = set both keys in the
     // handler.
     const std::string raise_path = resolve("tree." + id + ".raise");
-    if (read_string(app, raise_path) == "1") {
-      b.focus_next_window();
+    bool raise = read_string(app, raise_path) == "1";
+    if (raise)
       write<std::string>(app, raise_path, ""); // consume the one-shot
-    }
     // A window may BIND its visible title (e.g. a per-peer camera window titled by the peer's
     // name): resolve w.bind as the title when present, else the static label. begin_window uses
     // "title###id", so the title may change each frame while the ###id identity stays stable.
@@ -2384,10 +2397,19 @@ void Runtime::Impl::emit_node(const Widget &w) {
     if (!can_maximize)
       maximized = false;
     const bool was_maximized = maximized;
+    // A window that is maximized now and was not drawn maximized last frame (its button, a double
+    // click, or a document writing the key) comes to the front, as it covers the others.
+    if (maximized && !maximized_shown.count(max_path))
+      raise = true;
+    if (raise)
+      b.focus_next_window();
+    b.next_window_resizable(w.resizable);
     const bool visible = b.begin_window(wtitle.c_str(), id.c_str(), w.size, w.frame_border,
                                         w.closable ? &open : nullptr);
     if (can_maximize && maximized != was_maximized)
       write<int>(app, max_path, maximized ? 1 : 0); // its button
+    if (maximized)
+      maximized_now.insert(max_path);
     // Persist the current geometry. When the backend can't report a size (a collapsed window),
     // back-fill it from the seed so a collapse doesn't clobber the stored content size.
     WindowGeom persist = b.window_geometry();
@@ -3884,6 +3906,8 @@ void Runtime::Impl::render() {
   backend->end_frame();
   autofocus_shown.swap(autofocus_now);
   autofocus_now.clear();
+  maximized_shown.swap(maximized_now);
+  maximized_now.clear();
   // §4.6 on_hover_end: an item hovered last walk and not this one (the pointer left, or the item
   // went), in its own scope.
   for (const auto &[key, h] : hovered_last)
@@ -3901,7 +3925,7 @@ void Runtime::Impl::plan_windows_menu() {
   WindowsMenuPlan p;
   std::set<std::string> toggled;   // open-state paths a menu item of the document already toggles
   std::set<std::string> bar_menus; // the titles of the menus straight in a menubar
-  std::vector<std::pair<std::string, std::string>> windows;
+  std::vector<WindowsMenuPlan::Item> windows;
   // Walk the tree with the scope each node resolves its binds in (a load: mount scopes its
   // children, §12). A repeated widget is made per frame: a repeated window's instances are listed
   // as the menu is drawn (repeated_windows).
@@ -3937,8 +3961,9 @@ void Runtime::Impl::plan_windows_menu() {
           break;
         case Kind::Window: {
           const std::string &id = w.id.empty() ? w.label : w.id;
-          windows.emplace_back(w.label.empty() ? id : w.label,
-                               resolve_bind(scope, "tree." + id + ".open"));
+          windows.push_back({w.label.empty() ? id : w.label,
+                             resolve_bind(scope, "tree." + id + ".open"),
+                             resolve_bind(scope, "tree." + id + ".raise")});
           p.any_closable = p.any_closable || w.closable;
           in_menubar = false;
           break;
@@ -3951,7 +3976,7 @@ void Runtime::Impl::plan_windows_menu() {
       };
   walk(root, prefix, false);
   for (auto &win : windows)
-    if (!toggled.count(win.second))
+    if (!toggled.count(win.open_path))
       p.items.push_back(std::move(win));
   p.merged = !p.placed && bar_menus.count(p.title) != 0;
   p.toggled = std::move(toggled);
@@ -4004,21 +4029,21 @@ void Runtime::Impl::emit_windows_menu(const std::string &title) {
 
 void Runtime::Impl::emit_windows_menu_items() {
   Backend &b = *backend;
-  for (const auto &item : windows_menu.items) {
-    const bool cur = read_bool_or_seed(app, item.second, 1) != 0;
-    const BoolEdit e = b.menu_item_toggle(item.first.c_str(), cur);
-    if (e.committed)
-      write<int>(app, item.second, e.value ? 1 : 0);
-  }
+  // As a window manager's Windows menu: picking a window shows it, in front. Its tick says it is
+  // open; picking an open one raises it rather than closing it (its X closes it).
+  const auto item = [&](const std::string &title, const std::string &open_path,
+                        const std::string &raise_path) {
+    const bool cur = read_bool_or_seed(app, open_path, 1) != 0;
+    if (b.menu_item_toggle(title.c_str(), cur).committed) {
+      write<int>(app, open_path, 1);
+      write<std::string>(app, raise_path, "1");
+    }
+  };
+  for (const WindowsMenuPlan::Item &it : windows_menu.items)
+    item(it.title, it.open_path, it.raise_path);
   for (const RepeatedWindow &r : repeated_windows()) {
     b.push_id(r.id.c_str()); // two instances may share a title (the label, before their names)
-    const bool cur = read_bool_or_seed(app, r.open_path, 1) != 0;
-    const BoolEdit e = b.menu_item_toggle(r.title.c_str(), cur);
-    if (e.committed) {
-      write<int>(app, r.open_path, e.value ? 1 : 0);
-      if (e.value) // reopened: in front, where it can be seen
-        write<std::string>(app, r.raise_path, "1");
-    }
+    item(r.title, r.open_path, r.raise_path);
     b.pop_id();
   }
 }
@@ -4949,6 +4974,10 @@ std::uint64_t Runtime::reactive_eval_count() const {
   return m_->reactive ? m_->reactive->evaluations() : 0;
 }
 
+int Runtime::eval_count(const std::string &expr) {
+  return m_->eval_count(expr); // outside a walk: the document's own scope
+}
+
 void Runtime::set_reactive_frame_budget(double seconds) {
   m_->reactive_budget = seconds > 0.0 ? seconds : 0.0;
 }
@@ -4981,8 +5010,16 @@ int Runtime::start_process(LaneProcess p) {
   ac->done = std::move(p.done); // without one, the sweep warns of a failure as it does an action's
   ac->script = p.name;
   se::environment_ptr env = ac->env;
+  if (!p.allow.empty()) {
+    // Default-deny: a scope of its own with only the allowed names (no parent to reach the rest
+    // through), as the read lane's evaluator is made.
+    env = std::make_shared<se::environment>();
+    for (const std::string &name : p.allow)
+      if (const se::value_t *v = ac->env->lookup(name))
+        env->set(name, *v);
+  }
   if (p.extend) {
-    env = se::environment::extend(ac->env);
+    env = se::environment::extend(env);
     p.extend(env, ac->ictx);
   }
   se::execute_options opts;

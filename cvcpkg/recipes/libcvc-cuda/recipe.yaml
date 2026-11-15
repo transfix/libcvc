@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: libcvc-cuda
-  upstream_version: "3.7.13"
+  upstream_version: "4.0.0"
   # Bumped 1 -> 2: this bundle no longer ships the `cvc` CLI (it moved to its own
   # cvc-cli / cvc-cli-cuda packages so it lands deliberately in a user's PATH).
   # Dropping the binary changes bundle contents, and +cvc.1 was already published
@@ -95,6 +95,9 @@ depends:
       platforms: [linux, macos, windows]
     - name: libopus
       platforms: [linux, macos, windows, wasm]
+    # End-to-end encryption (cvc::net::E2eeStore, the e2ee-* verbs): see the CPU recipe.
+    - name: libsodium
+      platforms: [linux, macos, windows, wasm, wasm-mt]
     - name: tiff
     - name: imagemagick
     # ImageMagick delegates and libtiff codecs (the flat-install note is in libcvc's recipe).

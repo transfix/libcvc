@@ -129,7 +129,7 @@ struct WorldGym::impl {
     for (std::size_t i = 0; i < ents.size(); ++i) {
       const entity_info &e = ents[i];
       o.id.push_back(e.id);
-      o.plant.push_back(e.spec.plant);
+      o.plant.push_back(e.plant);
       o.x.push_back(e.x);
       o.y.push_back(e.y);
       o.z.push_back(e.z);

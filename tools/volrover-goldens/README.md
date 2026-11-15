@@ -62,11 +62,21 @@ because it has no CGAL.
 | Case | Size | What it covers |
 |---|---|---|
 | `two_blobs` | 24³ | two touching blobs, one seed each |
-| `three_classes_noisy` | 24³ | three classes on noisy data, so GenSeg's automatic seeds (its local maxima) join in |
+| `three_classes_noisy` | 24³ | three classes on noisy data |
 | `two_seeds_one_class` | 20³ | a class with two seeds |
+| `auto_seeds_sweep` | 28³ | automatic seeds away from the user seeds: two chains of blobs seeded at one end, a blob between them, an isolated blob, a seed on the volume's face, a class with no seed |
+| `blob_touching_shell` | 24³ | a blob touching a noisy shell, a seed in each |
+| `noisy_many_seeds` | 24³ | heavy noise on a broad blob: 316 automatic seeds, 302 of them classified by the threshold sweep |
+
+In the first three cases every automatic seed (GenSeg's local maxima) lies under a user seed, so
+GenSeg's threshold sweep, which gives each other automatic seed a class, never runs. The last three
+make it run, and `noisy_many_seeds` runs it hundreds of times. With noise 0.5 instead of 0.45 that
+case makes the legacy executable crash: a seed the sweep classifies has nowhere to go, and the
+legacy march then pops an empty heap, reading before its arrays (the port ends that march instead;
+segmentation_test's `RunsWhereTheLegacyLibraryCrashed`).
 
 **Platforms:** the goldens were made on Windows with MSVC 2022. CI's check on ubuntu-24.04 with
-GCC then made the same bytes for every case (2026-11-10, transfix/libcvc#1115).
+GCC then made the same bytes for the first three cases (2026-11-10, transfix/libcvc#1115).
 
 The roadmap (§5) says the legacy GenSeg "doesn't work properly today". These goldens record what
 it does, so the port can first match it voxel for voxel, before the port fixes it.

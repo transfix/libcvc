@@ -1978,7 +1978,8 @@ void ws_send_json(const WsEntry &entry, const se::value_t &message, const NetAcc
       throw std::runtime_error("ws-send: refused: " + origin.str() +
                                " is not an origin this host allows");
   }
-  std::string text = std::get<std::string>(se::builtin_json_encode(shaped).v);
+  std::string text =
+      std::get<std::string>(se::builtin_json_encode(std::span<const se::value_t>(shaped)).v);
   // Room for every token up front (a token is at most 4096 bytes), so no replace below moves the
   // text and leaves a copy of a token behind in a freed buffer.
   text.reserve(text.size() + auth.values.size() * 4096);
