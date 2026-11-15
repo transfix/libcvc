@@ -816,6 +816,25 @@ TEST(AriadneFtxui, ANarrowBarFoldsItsMenusIntoOne) {
   EXPECT_EQ(quit, 1);
 }
 
+// A document's second bar continues the first on the one row: its menus after the first one's,
+// its tray left of the first one's tray (it used to replace the first bar).
+TEST(AriadneFtxui, ASecondBarContinuesTheFirst) {
+  REQUIRE_FTXUI();
+  Term t(group(
+      {menubar({menu("File", {}), tray_icon("A")}), menubar({menu("Edit", {}), tray_icon("B")})}));
+  int fx_ = 0, ex = 0, ax = 0, bx = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "File", fx_, y)) << t.screen;
+  EXPECT_EQ(y, 0);
+  ASSERT_TRUE(find_cell(t.screen, "Edit", ex, y)) << t.screen;
+  EXPECT_EQ(y, 0);
+  ASSERT_TRUE(find_cell(t.screen, "A", ax, y)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, "B", bx, y)) << t.screen;
+  EXPECT_LT(fx_, ex);
+  EXPECT_LT(ex, bx);
+  EXPECT_LT(bx, ax);
+  EXPECT_EQ(ax + 2, t.width) << "the first bar's tray keeps the right end\n" << t.screen;
+}
+
 TEST(AriadneFtxui, WindowsCascadeAndUseTheAuthoredPos) {
   REQUIRE_FTXUI();
   Widget a = window("Alpha", {text("a")});

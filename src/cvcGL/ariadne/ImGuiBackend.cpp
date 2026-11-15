@@ -320,7 +320,9 @@ int ImGuiBackend::begin_tray(const std::vector<TrayIcon> &icons) {
     return -1;
   const ImGuiStyle &st = ImGui::GetStyle();
   const float left = win->DC.CursorPos.x + st.ItemSpacing.x * 2.0f; // a gap after the menus
-  const float right = win->MenuBarRect().Max.x - st.ItemSpacing.x * 0.5f;
+  float right = win->MenuBarRect().Max.x - st.ItemSpacing.x * 0.5f;
+  if (m_trayFrame == ImGui::GetFrameCount()) // a second bar's tray: left of the first one's
+    right = std::min(right, m_trayLeft - st.ItemSpacing.x);
   const int n = static_cast<int>(icons.size());
   float total = 0.0f;
   int fit = 0;
@@ -345,6 +347,13 @@ int ImGuiBackend::begin_tray(const std::vector<TrayIcon> &icons) {
   }
   m_trayX = right - total;
   m_trayY = ImGui::GetCursorScreenPos().y;
+  m_menusEndX = win->DC.CursorPos.x;
+  m_menusEndY = win->DC.CursorPos.y;
+  m_trayOpen = true;
+  if (m_trayShown) {
+    m_trayFrame = ImGui::GetFrameCount();
+    m_trayLeft = m_trayX;
+  }
   return m_trayShown ? fit : 0;
 #else
   (void)icons;
@@ -398,7 +407,16 @@ bool ImGuiBackend::begin_tray_menu(const TrayIcon &icon) {
 }
 
 void ImGuiBackend::end_tray_menu() { ui::EndMenu(); }
-void ImGuiBackend::end_tray() { m_trayShown = false; }
+void ImGuiBackend::end_tray() {
+  m_trayShown = false;
+#ifdef CVC_ENABLE_IMGUI
+  if (m_trayOpen) // back to where the menus ended
+    if (ImGuiWindow *win = ImGui::GetCurrentWindow();
+        win && (win->Flags & ImGuiWindowFlags_MenuBar))
+      win->DC.CursorPos = ImVec2(m_menusEndX, m_menusEndY);
+#endif
+  m_trayOpen = false;
+}
 
 // §5.23 the menus as BeginMenu lays a bar's titles out (half the item spacing before the label,
 // twice after it, then back half), from where the bar's first menu goes; then the gap and the tray
@@ -417,7 +435,10 @@ bool ImGuiBackend::menus_fit(const std::vector<std::string> &titles,
     x += st.ItemSpacing.x * 2.0f;
   for (const TrayIcon &t : tray)
     x += tray_icon_width(t);
-  return x <= win->MenuBarRect().Max.x - st.ItemSpacing.x * 0.5f;
+  float right = win->MenuBarRect().Max.x - st.ItemSpacing.x * 0.5f;
+  if (m_trayFrame == ImGui::GetFrameCount()) // an earlier bar's tray is there
+    right = std::min(right, m_trayLeft - st.ItemSpacing.x);
+  return x <= right;
 #else
   (void)titles;
   (void)tray;

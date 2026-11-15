@@ -3026,6 +3026,10 @@ menubar:
     draws from.
   - A backend with no tray (`Backend::begin_tray`'s default) gets each icon as an ordinary menu
     at the end of the bar, titled by its glyph and badge, so every backend shows the icons.
+- **A document with two bars of its own** shows them as one: the second bar's menus follow the
+  first one's, and its tray icons go left of the first one's tray. The clock and the bell are the
+  first bar's only. ImGui appends a bar begun again to the same strip, and FTXUI keeps the first
+  bar's menus and tray and continues them (it used to keep only the last bar).
 - `ariadne_runtime_test`'s `Tray*` tests check the order, badges, tones, overflow, clicks and the
   clock's three settings. `ariadne_ftxui_test`'s tray tests check the right-aligned layout, the
   overflow, a click, a menu that stays on the screen and the hosted model.
@@ -3184,10 +3188,14 @@ gives the bar `File  FE Lab  Windows`, where *FE Lab* holds FE Lab's menus as su
 - **Window identity:** inside a mount, the id a window gives the backend carries the mount's
   prefix (`count@ui.includes.counter`), so a document loaded twice has two windows, not one. Its
   state keys (`tree.<id>.*`) are the mount's own, as before.
+- **A repeated mount** (`repeat:`) is an application per instance, named "<name> 1", "<name> 2"
+  and so on, each in its instance's scope (`includes.<as>.<i>`). Each can be quit and restarted on
+  its own. How many there are is worked out each frame, as the repeat's count is.
 - **Mechanism:** `plan_windows_menu` walks the tree with each node's composed scope. It records
-  each mount's first menubar (the mount, its bar, its name, its prefix and its functions), and the
-  walk skips those bars in place. A repeated mount's bar (`repeat:`) is made per frame, so it is not
-  hoisted: it draws where it is, as before.
+  each mount's first menubar (the mount, its bar, its name, its prefix and its functions), and a
+  repeated mount's from its template. Each frame `plan_frame_apps` expands the repeated ones into
+  their instances, each with a per-instance copy of its bar. The walk skips a menubar in place when
+  it is drawn in an application's scope.
 - `ariadne_runtime_test`'s `ALoadedDocumentsMenubarIsOneMenuOfTheOuterBar`,
   `QuitKeepsALoadedDocumentsStateAndRestartResetsIt`, `TwoMountsOfOneDocumentAreToldApart` and
   `ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus`, and the loader's

@@ -791,6 +791,7 @@ struct FtxuiBackend::Impl {
     // bar's filler goes there, so the tray sits at the right end); -1: no tray (§5.22).
     int bar_cols = 0;
     int tray_from = -1;
+    int tray_cols = 0; // the columns its tray took
     void add(fx::Element e) {
       if (type == Type::Grid) {
         if (cells.empty())
@@ -840,6 +841,10 @@ struct FtxuiBackend::Impl {
     std::string combo_popup;                                    // combo list drawn, if any
     int combo_n = 0;
     bool has_menubar = false;
+    // The bar so far this walk (§5.22): a document's second bar continues it, after its menus and
+    // before its tray, rather than replacing it.
+    std::vector<fx::Element> bar_menus, bar_tray;
+    int bar_cols = 0, bar_tray_cols = 0;
     std::vector<Seam> seams; // draggable grid seams, for the hit-test
     // Hosted chrome (Options::hosted): each window's body ("" = outside every window) and the menu
     // bar's model, for the host to draw.
@@ -2023,6 +2028,8 @@ bool FtxuiBackend::begin_main_menu_bar() {
     return false;
   Impl::Frame f;
   f.type = Impl::Frame::Type::Menubar;
+  f.items = m.walk.bar_menus; // a second bar goes on after the first one's menus
+  f.bar_cols = m.walk.bar_cols;
   m.stack.push_back(std::move(f));
   m.walk.has_menubar = true;
   return true;
@@ -2033,10 +2040,19 @@ void FtxuiBackend::end_main_menu_bar() {
   Impl::Frame f = m.pop();
   if (m.opt.hosted)
     return; // the host draws the bar from hosted_menus()
-  // The filler before the tray (§5.22), so the tray sits at the bar's right end; else last.
-  const std::size_t at = f.tray_from >= 0 ? static_cast<std::size_t>(f.tray_from) : f.items.size();
-  f.items.insert(f.items.begin() + static_cast<std::ptrdiff_t>(std::min(at, f.items.size())),
-                 fx::filler() | fx::inverted);
+  // The filler before the tray (§5.22), so the tray sits at the bar's right end. A document's
+  // second bar continues the first: its menus after the first one's, its tray left of the first
+  // one's tray.
+  const std::size_t at = std::min(
+      f.tray_from >= 0 ? static_cast<std::size_t>(f.tray_from) : f.items.size(), f.items.size());
+  m.walk.bar_menus.assign(f.items.begin(), f.items.begin() + static_cast<std::ptrdiff_t>(at));
+  m.walk.bar_tray.insert(m.walk.bar_tray.begin(), f.items.begin() + static_cast<std::ptrdiff_t>(at),
+                         f.items.end());
+  m.walk.bar_cols = f.bar_cols;
+  m.walk.bar_tray_cols += f.tray_cols;
+  f.items = m.walk.bar_menus;
+  f.items.push_back(fx::filler() | fx::inverted);
+  f.items.insert(f.items.end(), m.walk.bar_tray.begin(), m.walk.bar_tray.end());
   // Over a picture behind the widgets the bar is its own: inverted over the image's colours its
   // titles would take them (the same colour on both sides of a cell, often).
   m.menubar = fx::hbox(std::move(f.items)) | fx::clear_under;
@@ -2150,7 +2166,8 @@ int FtxuiBackend::begin_tray(const std::vector<TrayIcon> &icons) {
     return n; // the host lays the tray out (and overflows it) itself
   Impl::Frame &f = m.top();
   f.tray_from = static_cast<int>(f.items.size());
-  const int room = m.term_w - f.bar_cols - 1; // a column between the menus and the tray
+  // A column between the menus and the tray, and the room an earlier bar's tray took.
+  const int room = m.term_w - f.bar_cols - 1 - m.walk.bar_tray_cols;
   int used = 0, fit = 0;
   while (fit < n && used + tray_cols(icons[n - 1 - fit]) <= room)
     used += tray_cols(icons[n - 1 - fit++]);
@@ -2162,7 +2179,9 @@ int FtxuiBackend::begin_tray(const std::vector<TrayIcon> &icons) {
     while (fit > 0 && used + mw > room)
       used -= tray_cols(icons[n - fit--]);
     m.tray_shown = used + mw <= room;
+    used += mw;
   }
+  f.tray_cols = m.tray_shown ? used : 0;
   return m.tray_shown ? fit : 0;
 }
 
@@ -2237,7 +2256,8 @@ void FtxuiBackend::end_tray() {
 bool FtxuiBackend::menus_fit(const std::vector<std::string> &titles,
                              const std::vector<TrayIcon> &tray) {
   const Impl &m = *m_;
-  int used = m.opt.hosted ? 1 : 0;
+  // After an earlier bar's menus and tray, when this is a document's second bar.
+  int used = (m.opt.hosted ? 1 : m.walk.bar_cols) + m.walk.bar_tray_cols;
   for (const std::string &t : titles)
     used += fx::string_width(t) + 2;
   if (!tray.empty())

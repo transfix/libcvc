@@ -6377,6 +6377,68 @@ TEST(AriadneRuntime, TwoMountsOfOneDocumentAreToldApart) {
   EXPECT_TRUE(mb.saw("begin_menu:FE Lab (fe_lab_2)")) << mb.dump();
 }
 
+// §5.25 a repeated loaded document is an application per instance, "<name> <n>", each in its
+// instance's scope; its bar is not drawn where it is. Quit takes one instance away.
+TEST(AriadneRuntime, ARepeatedLoadedDocumentIsAnApplicationPerInstance) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  Widget m = fe_lab_mount();
+  m.repeat = "(int 2)";
+  m.scope = "includes.cam";
+  m.app_name = "Camera";
+  cvc::state::instance(app)("ui.demo.includes.cam.1.jobs").value("7");
+  rt.set_root(group({menubar({menu("File", {})}), m}));
+  rt.render();
+  EXPECT_EQ(mb.times("begin_menubar"), 1) << mb.dump();
+  EXPECT_LT(log_index(mb, "begin_menu:Camera 1"), log_index(mb, "begin_menu:Camera 2"))
+      << mb.dump();
+  EXPECT_EQ(mb.times("begin_menu:Mesh"), 2);
+  EXPECT_TRUE(mb.saw("tray_button:J|7|0")) << "instance 2's badge, read in its scope\n"
+                                           << mb.dump();
+  mb.pick = "Remesh"; // both instances' items carry the label: the first one's is picked
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  ASSERT_TRUE(
+      pump_until(rt, [&] { return !sval(app, "ui.demo.includes.cam.0.remeshed").empty(); }));
+  mb.pick = "Quit Camera 2";
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_menu:Camera 1")) << mb.dump();
+  EXPECT_FALSE(mb.saw("begin_menu:Camera 2")) << mb.dump();
+  EXPECT_EQ(mb.times("begin_window:FE(closable)"), 1) << "instance 2's window went";
+  EXPECT_FALSE(mb.toggle_shown["Camera 2"]);
+}
+
+// A document with two bars of its own: one clock and one bell, in the first; the loaded documents'
+// menus once, in the first too.
+TEST(AriadneRuntime, TwoBarsOfADocumentShareOneClockAndBell) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  rt.set_clock(true);
+  rt.set_wall_clock(five_past_two);
+  cvc::notification n;
+  n.text = "x";
+  cvc::notify(app, n);
+  rt.set_root(group(
+      {menubar({menu("File", {})}), menubar({menu("Edit", {}), tray_icon("E")}), fe_lab_mount()}));
+  rt.render();
+  EXPECT_EQ(mb.times("begin_menubar"), 2) << mb.dump();
+  EXPECT_EQ(mb.times("tray_button:14:05||0"), 1) << mb.dump();
+  EXPECT_EQ(mb.times("tray_menu:\xF0\x9F\x94\x94|1|0"), 1) << mb.dump();
+  EXPECT_EQ(mb.times("begin_menu:FE Lab"), 1) << mb.dump();
+  EXPECT_LT(log_index(mb, "begin_menu:FE Lab"), log_index(mb, "begin_menu:Edit"))
+      << "in the first bar";
+  EXPECT_TRUE(mb.saw("tray_button:E||0")) << "the second bar's own icon";
+}
+
 TEST(AriadneRuntime, ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus) {
   cvc::app app;
   Runtime rt(app, "ui.demo");

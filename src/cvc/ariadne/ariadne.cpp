@@ -46,6 +46,7 @@
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h> // §4 read-lane predicate evaluator
+#include <deque>
 #include <exception>
 #include <functional>
 #include <locale> // §11.4 geometry (de)serialize: pin std::locale::classic() so digit grouping
@@ -1900,9 +1901,12 @@ struct Runtime::Impl {
       std::string name;  // its meta.name, else its mount id
       std::string scope; // its composed prefix
       const FunctionScope *functions = nullptr;
+      // A repeated mount (`repeat:`): its template, and the scope the template sits in. Its
+      // instances are worked out each frame (plan_frame_apps), one application each.
+      const Widget *repeat = nullptr;
+      std::string parent_scope;
     };
     std::vector<App> apps;
-    std::set<const Widget *> hoisted; // their bars
   };
   WindowsMenuPlan windows_menu;
   int menubar_depth = 0;           // > 0 while a menubar's items are being drawn
@@ -1911,6 +1915,14 @@ struct Runtime::Impl {
   // §5.25 the applications (loaded documents with a menubar): drawn once a frame, in the first bar
   // that is the document's own; the ones the user quit (by prefix), kept for the run.
   bool apps_drawn = false;
+  // The first of the document's bars this frame has been drawn: the clock and the bell were its.
+  bool first_bar_drawn = false;
+  // This frame's applications: the plan's, with each repeated one expanded into its instances
+  // (their bars per-instance copies, kept here for the frame).
+  std::vector<WindowsMenuPlan::App> frame_apps;
+  std::deque<Widget> frame_app_bars;
+  void plan_frame_apps();
+  bool is_app_scope(const std::string &scope) const;
   std::set<std::string> quit_apps;
   int app_menu_depth = 0; // > 0 while an application's menu is being drawn
   void emit_app_menus();
@@ -2400,7 +2412,8 @@ void Runtime::Impl::emit_node(const Widget &w) {
   bool inner_click = false; // a group: something inside it took this walk's click
   switch (w.kind) {
   case Kind::Menubar:
-    if (windows_menu.hoisted.count(&w)) // §5.25 a loaded document's: one menu of the outer bar
+    // §5.25 a loaded document's (a repeated one's instance too): one menu of the outer bar
+    if (!scope_stack.empty() && is_app_scope(current_prefix()))
       break;
     if (b.begin_main_menu_bar()) {
       ++menubar_depth;
@@ -2427,6 +2440,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
           emit_windows_menu(windows_menu.title);
       }
       emit_tray(tray); // after every menu, at the bar's right end
+      first_bar_drawn = true;
       --menubar_depth;
       b.end_main_menu_bar();
     }
@@ -4026,6 +4040,8 @@ void Runtime::Impl::render() {
                        // this is belt-and-suspenders so one bad frame can't leak into the next)
   windows_menu_drawn = false;
   apps_drawn = false;
+  first_bar_drawn = false;
+  plan_frame_apps(); // §5.25 the repeated applications' instances this frame
   backend->begin_frame();
   clicks_fired = 0;
   instance_path.clear();
@@ -4035,7 +4051,7 @@ void Runtime::Impl::render() {
     // Windows menu, so a window closed with its X can be opened again.
     // §5.25 and one whose loaded documents have menubars gets one holding theirs.
     if (!windows_menu.has_menubar &&
-        (!windows_menu.apps.empty() ||
+        (!frame_apps.empty() ||
          (windows_menu.any_closable && windows_menu.on && windows_menu_has_items())) &&
         backend->begin_main_menu_bar()) {
       ++menubar_depth;
@@ -4097,6 +4113,31 @@ void Runtime::Impl::plan_windows_menu() {
             p.repeated.emplace_back(&w, scope);
             p.any_closable = p.any_closable || w.closable;
           }
+          // §5.25 a repeated mount with a menubar of its own: an application per instance.
+          if (!w.scope.empty()) {
+            const std::function<const Widget *(const Widget &)> first_bar =
+                [&](const Widget &n) -> const Widget * {
+              for (const Widget &c : n.children) {
+                if (c.kind == Kind::Menubar)
+                  return &c;
+                if (!c.scope.empty())
+                  continue; // a nested mount's bar is its own
+                if (const Widget *b = first_bar(c))
+                  return b;
+              }
+              return nullptr;
+            };
+            if (const Widget *bar = first_bar(w)) {
+              WindowsMenuPlan::App a;
+              a.mount = &w;
+              a.bar = bar;
+              a.name = !w.app_name.empty() ? w.app_name : w.scope.substr(w.scope.rfind('.') + 1);
+              a.functions = w.functions.get();
+              a.repeat = &w;
+              a.parent_scope = scope;
+              p.apps.push_back(std::move(a));
+            }
+          }
           return;
         }
         const std::string inner = w.scope.empty() ? scope : resolve_bind(scope, w.scope);
@@ -4123,7 +4164,6 @@ void Runtime::Impl::plan_windows_menu() {
             bool seen = false;
             for (const WindowsMenuPlan::App &a : p.apps)
               seen = seen || a.mount == mount;
-            p.hoisted.insert(&w);
             if (!seen) {
               WindowsMenuPlan::App a;
               a.mount = mount;
@@ -4189,11 +4229,12 @@ void Runtime::Impl::plan_windows_menu() {
       p.items.push_back(std::move(win));
   p.merged = !p.placed && bar_menus.count(p.title) != 0;
   // §5.25 two mounts of one document share its name: each is told apart by its mount id.
-  std::map<std::string, int> named;
+  std::map<std::string, int> named; // (a repeated one's instances are numbered instead)
   for (const WindowsMenuPlan::App &a : p.apps)
-    ++named[a.name];
+    if (!a.repeat)
+      ++named[a.name];
   for (WindowsMenuPlan::App &a : p.apps)
-    if (named[a.name] > 1)
+    if (!a.repeat && named[a.name] > 1)
       a.name += " (" + a.mount->scope.substr(a.mount->scope.rfind('.') + 1) + ")";
   p.toggled = std::move(toggled);
   windows_menu = std::move(p);
@@ -4228,7 +4269,7 @@ std::vector<Runtime::Impl::RepeatedWindow> Runtime::Impl::repeated_windows() {
 }
 
 bool Runtime::Impl::windows_menu_has_items() {
-  return !windows_menu.items.empty() || !windows_menu.apps.empty() ||
+  return !windows_menu.items.empty() || !frame_apps.empty() ||
          (!windows_menu.repeated.empty() && !repeated_windows().empty());
 }
 
@@ -4265,10 +4306,10 @@ void Runtime::Impl::emit_windows_menu_items() {
   }
   // §5.25 the loaded documents with a menubar: ticked while running; untick to quit one, tick to
   // open it again as it was.
-  if (!windows_menu.apps.empty()) {
+  if (!frame_apps.empty()) {
     b.separator();
     b.text_line("Applications");
-    for (const WindowsMenuPlan::App &a : windows_menu.apps) {
+    for (const WindowsMenuPlan::App &a : frame_apps) {
       b.push_id(("##app." + a.scope).c_str());
       const bool running = app_running(a.scope);
       const BoolEdit e = b.menu_item_toggle(a.name.c_str(), running);
@@ -4327,6 +4368,40 @@ bool path_under(const std::string &path, const std::string &scope) {
 }
 } // namespace
 
+// §5.25 this frame's applications: the plan's, a repeated one as many as its repeat: makes now,
+// each named "<name> <n>" with its instance's scope and its bar's per-instance copy.
+void Runtime::Impl::plan_frame_apps() {
+  frame_apps.clear();
+  frame_app_bars.clear();
+  for (const WindowsMenuPlan::App &a : windows_menu.apps) {
+    if (!a.repeat) {
+      frame_apps.push_back(a);
+      continue;
+    }
+    int n = 0;
+    {
+      const ScopedTo in(*this, a.parent_scope, nullptr);
+      n = eval_count(a.repeat->repeat);
+    }
+    for (int i = 0; i < n; ++i) {
+      WindowsMenuPlan::App inst = a;
+      inst.scope = resolve_bind(a.parent_scope, a.repeat->scope + "." + std::to_string(i));
+      inst.name = a.name + " " + std::to_string(i + 1);
+      frame_app_bars.push_back(substitute_index(*a.bar, i));
+      inst.bar = &frame_app_bars.back();
+      inst.repeat = nullptr;
+      frame_apps.push_back(std::move(inst));
+    }
+  }
+}
+
+bool Runtime::Impl::is_app_scope(const std::string &scope) const {
+  for (const WindowsMenuPlan::App &a : frame_apps)
+    if (a.scope == scope)
+      return true;
+  return false;
+}
+
 bool Runtime::Impl::app_running(const std::string &path) const {
   for (const std::string &q : quit_apps)
     if (path_under(path, q))
@@ -4338,11 +4413,11 @@ bool Runtime::Impl::app_running(const std::string &path) const {
 // submenus), drawn in its scope with its functions, then Restart <name> and Quit <name>. Once a
 // frame, in the first bar that is the document's own.
 void Runtime::Impl::emit_app_menus() {
-  if (apps_drawn || windows_menu.apps.empty())
+  if (apps_drawn || frame_apps.empty())
     return;
   apps_drawn = true;
   Backend &b = *backend;
-  for (const WindowsMenuPlan::App &a : windows_menu.apps) {
+  for (const WindowsMenuPlan::App &a : frame_apps) {
     if (!app_running(a.scope))
       continue; // reopened from Windows > Applications
     b.push_id(("##app." + a.scope).c_str());
@@ -4540,7 +4615,7 @@ bool Runtime::Impl::builtin_event(const QueuedAction &a) {
     const std::string verb = what.substr(0, colon);
     const std::string scope = colon == std::string::npos ? std::string() : what.substr(colon + 1);
     bool known = false;
-    for (const WindowsMenuPlan::App &app_ : windows_menu.apps)
+    for (const WindowsMenuPlan::App &app_ : frame_apps)
       known = known || app_.scope == scope;
     if (!known)
       return true;
@@ -4710,7 +4785,7 @@ std::vector<std::string> Runtime::Impl::bar_titles(const Widget &bar) {
     out.push_back(c.label);
   }
   if (!apps_drawn) // §5.25 the loaded documents' menus, after the document's
-    for (const WindowsMenuPlan::App &a : windows_menu.apps)
+    for (const WindowsMenuPlan::App &a : frame_apps)
       if (app_running(a.scope))
         out.push_back(a.name);
   if (!windows_menu.placed && !windows_menu.merged && windows_menu.on && windows_menu_has_items())
@@ -4738,7 +4813,8 @@ bool Runtime::Impl::collapse_menus(const Widget &bar, const std::vector<TrayEntr
 // shows them. The clock goes where a `- clock` entry places it, else last, at the right end.
 std::vector<Runtime::Impl::TrayEntry> Runtime::Impl::tray_entries(const Widget &bar) {
   using Icon = TrayEntry;
-  const bool clock_on = read_bool_or_seed(app, resolve(kClockKey), clock_on_by_default()) != 0;
+  const bool clock_on =
+      !first_bar_drawn && read_bool_or_seed(app, resolve(kClockKey), clock_on_by_default()) != 0;
   const auto clock_icon = [&](const Widget *at) {
     const auto now = wall_clock ? wall_clock() : std::chrono::system_clock::now();
     Icon c;
@@ -4761,8 +4837,9 @@ std::vector<Runtime::Impl::TrayEntry> Runtime::Impl::tray_entries(const Widget &
   };
   // §5.24 the bell: while the feed has entries; its badge the unread, its tone the worst of them.
   const cvc::notify_summary feed = cvc::notify_status(app);
-  const bool bell_on =
-      feed.count > 0 && read_bool_or_seed(app, resolve(kBellKey), bell_on_by_default()) != 0;
+  // The clock and the bell are the document's first bar's (a second bar of its own has neither).
+  const bool bell_on = !first_bar_drawn && feed.count > 0 &&
+                       read_bool_or_seed(app, resolve(kBellKey), bell_on_by_default()) != 0;
   const auto bell_icon = [&](const Widget *at) {
     Icon c;
     c.w = at;
@@ -4805,7 +4882,7 @@ std::vector<Runtime::Impl::TrayEntry> Runtime::Impl::tray_entries(const Widget &
   // §5.25 the running loaded documents' icons, after the document's own (in the first bar only),
   // each worked out in its mount's scope.
   if (!apps_drawn)
-    for (const WindowsMenuPlan::App &a : windows_menu.apps) {
+    for (const WindowsMenuPlan::App &a : frame_apps) {
       if (!app_running(a.scope))
         continue;
       const ScopedTo in(*this, a.scope, a.functions);
