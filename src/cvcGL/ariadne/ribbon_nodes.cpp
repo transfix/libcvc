@@ -12,7 +12,9 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <boost/any.hpp>
+#include <boost/signals2/connection.hpp>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -336,15 +338,25 @@ private:
       _floats.clear();
       _text.clear();
       _node = nullptr;
+      _on_value.disconnect();
+      _on_data.disconnect();
       same = 0;
       return true;
     }
     cvc::state &node = cvc::ariadne::read_effective(*found);
-    const boost::posix_time::ptime mod = node.lastMod();
-    if (&node == _node && mod == _mod)
-      return false; // untouched since the last read: the per-frame fast path
-    _node = &node;
-    _mod = mod;
+    // Writes are counted by the node's own change signals: a timestamp would not do, since two
+    // writes can share one tick of the clock (Windows' is coarse).
+    if (&node != _node || !_on_value.connected() || !_on_data.connected()) {
+      std::shared_ptr<std::atomic<std::uint64_t>> writes = _writes;
+      _on_value = node.valueChanged.connect([writes]() { ++*writes; });
+      _on_data = node.dataChanged.connect([writes]() { ++*writes; });
+      _node = &node;
+      _seen = ~std::uint64_t(0); // a node seen for the first time is read
+    }
+    const std::uint64_t writes = _writes->load();
+    if (writes == _seen)
+      return false; // not written since the last read: the per-frame fast path
+    _seen = writes;
     std::vector<float> next;
     const boost::any d = node.data();
     if (!d.empty() && floats_of(d, next)) {
@@ -486,8 +498,11 @@ private:
   bool _literal_done = false;
   // state
   std::string _path;
-  const cvc::state *_node = nullptr; // compared, never dereferenced
-  boost::posix_time::ptime _mod;
+  const cvc::state *_node = nullptr; // the node the counter listens to (compared only)
+  std::shared_ptr<std::atomic<std::uint64_t>> _writes =
+      std::make_shared<std::atomic<std::uint64_t>>(0);
+  std::uint64_t _seen = ~std::uint64_t(0);
+  boost::signals2::scoped_connection _on_value, _on_data;
   std::string _text;
   // stream
   std::vector<std::string> _tokens; // what to look the stream up by, in turn
