@@ -334,6 +334,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_algorithm:test_pycvc_algorithm.py
              pycvc_params:test_pycvc_params.py
              pycvc_jobs:test_pycvc_jobs.py
+             pycvc_skeleton:test_pycvc_skeleton.py
              pycvc_contours:test_pycvc_contours.py
              pycvc_point_classes:test_pycvc_point_classes.py
              pycvc_image:test_pycvc_image.py
@@ -375,7 +376,8 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_proxy_hooks:test_pycvc_proxy_hooks.py
              pycvc_lod:test_pycvc_lod.py
              pycvc_world_geometry:test_pycvc_world_geometry.py
-             pycvc_data:test_pycvc_data.py)
+             pycvc_data:test_pycvc_data.py
+             pycvc_raster:test_pycvc_raster.py)
     string(REPLACE ":" ";" _pair "${_t}")
     list(GET _pair 0 _name)
     list(GET _pair 1 _script)
