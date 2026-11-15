@@ -711,8 +711,8 @@ class GymCars:
     go to ``pycvc.WorldGym`` (``prefix``, ``world``, ``set``, ``ready_timeout``).
 
     What differs from :class:`Cars`: the plant runs in the document's world (a Jolt vehicle in
-    its physics world, the dynamic models in a world of their own holding its colliders, nav's
-    bicycle on its grid), the navigator's telemetry (``CarsState.nav``) is empty, and
+    its physics world, the dynamic models' chassis boxes in it too, nav's bicycle a kinematic box
+    there), the navigator's telemetry (``CarsState.nav``) is empty, and
     ``collided`` is the gym's: a contact with the world's bodies other than its ground, or with
     another vehicle, over the tick."""
 

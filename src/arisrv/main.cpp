@@ -62,6 +62,7 @@
 #include <cvc/ariadne/loader.h>          // load_file: the stock world documents
 #include <cvc/ariadne/server_document.h> // --doc: the server document and what it publishes
 #include <cvc/ariadne/stream/stream_relay.h>
+#include <cvc/ariadne/stream_intrinsics.h> // a server document's streams and rasters
 #include <cvc/ariadne/uri.h>         // cvc://worlds/... (register_cvc_uri_handler)
 #include <cvc/ariadne/world_rules.h> // the world: block (world_rules_from)
 #include <cvc/core/app.h>
@@ -718,6 +719,9 @@ int main(int argc, char **argv) {
   // default_world_rules()). --avatar-energy and --avatar-empty override its energy policy.
   cvc::ariadne::register_cvc_uri_handler(app);
   cvc::ariadne::register_world_block(app);
+  // A server document's streams and rasters ((raster-open {... mirror: <published ns>})): a raster
+  // mirrored into a published namespace reaches the clients that subscribe to it.
+  cvc::ariadne::register_stream_intrinsics(app);
   namespace rconf = cvc::ariadne::conference;
   rconf::room_world world;
   std::string worldFrom;
