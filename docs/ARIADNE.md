@@ -4295,7 +4295,10 @@ host.run()                          # until SIGTERM; the app's shutdown, then th
 
 - **The script thread.** The program runs on a thread of its own with one asyncio loop
   (`host.loop`), which serves its ASGI apps (uvicorn) and its tasks. The relay never runs Python,
-  never takes the GIL and never waits on the program: a sync handler holds up only the loop.
+  never takes the GIL and never waits on the program: a sync handler holds up only the loop. A
+  program keeps each task it starts (`host.loop.create_task`) until the task is done: asyncio holds
+  tasks only weakly, so one waiting on a stream of its own (`asyncio.open_connection`) is freed by
+  the next full garbage collection, mid-await, and its work never finishes.
 - **Writes.** `host.set`, `set_tree`, `set_series` and `set_plot` (as `pycvc_gl.ariadne.Host`'s)
   take paths from the tree's root and are queued. The relay applies them on its next room step
   (60 Hz), ahead of the server document's programs, coalesced per path and in the order of each path's last write
