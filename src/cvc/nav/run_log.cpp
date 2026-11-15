@@ -28,7 +28,7 @@ namespace tj = cvc::trace_json;
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 constexpr const char *kWho = "cvc::nav::run_log: ";
 
-std::string quoted(std::string_view s) {
+std::string json_str(std::string_view s) {
   std::string out;
   tj::append_string(out, s);
   return out;
@@ -153,17 +153,17 @@ std::vector<std::string> object_list(const tj::value *v) {
 // ── the header ──────────────────────────────────────────────────────────────────────────────────
 
 std::string run_log_header::to_json() const {
-  std::string out = "{\"schema\":" + quoted(schema) + ",\"libcvc\":" + quoted(libcvc) +
+  std::string out = "{\"schema\":" + json_str(schema) + ",\"libcvc\":" + json_str(libcvc) +
                     ",\"dt\":" + tj::number(dt) + ",\"scale\":" + tj::number(scale) +
                     ",\"center\":[" + tj::number(cx) + "," + tj::number(cy) +
-                    "],\"seed\":" + tj::number(seed) + ",\"scene\":" + quoted(scene) +
-                    ",\"plant\":" + quoted(plant) + ",\"agents\":" + std::to_string(agents) +
+                    "],\"seed\":" + tj::number(seed) + ",\"scene\":" + json_str(scene) +
+                    ",\"plant\":" + json_str(plant) + ",\"agents\":" + std::to_string(agents) +
                     ",\"arms\":[";
   for (std::size_t j = 0; j < arms.size(); ++j) {
     const run_log_arm &a = arms[j];
-    out += std::string(j ? "," : "") + "{\"name\":" + quoted(a.name) +
-           ",\"slot\":" + std::to_string(a.slot) + ",\"key\":" + quoted(a.key) +
-           ",\"policy\":{\"uri\":" + quoted(a.uri) + ",\"sha256\":" + quoted(a.sha256) +
+    out += std::string(j ? "," : "") + "{\"name\":" + json_str(a.name) +
+           ",\"slot\":" + std::to_string(a.slot) + ",\"key\":" + json_str(a.key) +
+           ",\"policy\":{\"uri\":" + json_str(a.uri) + ",\"sha256\":" + json_str(a.sha256) +
            "},\"meta\":" + object_text(a.meta, "an arm's meta") + "}";
   }
   out += "],\"start\":" + tuples(start, 3) + ",\"world\":" + object_text(world, "world") +
