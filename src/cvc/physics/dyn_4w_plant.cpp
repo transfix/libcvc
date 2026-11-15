@@ -297,6 +297,7 @@ void dyn_4w_plant::advance() {
     a.statics_tick = 0;
     a.touched = -1;
     a.touch_depth = 0.0;
+    a.applied.assign(static_cast<std::size_t>(_nsub), 0.0);
   }
   const bool world = _chassis->on();
   const double h = _dt / _nsub;
@@ -313,6 +314,7 @@ void dyn_4w_plant::advance() {
       const double accel = _o.driver ? dyn::drive(a.driver, a.desc, a.accel_cmd, a.s.vx, grade,
                                                   _o.gravity, a.p.tau_drive, h)
                                      : a.accel_cmd;
+      a.applied[static_cast<std::size_t>(k)] = accel;
       diff::dyn4_plant_books<double>(a.p, a.lim, ground, a.s, a.steer_cmd, accel, next[i],
                                      books[i]);
       if (world) {

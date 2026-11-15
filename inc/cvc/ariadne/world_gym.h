@@ -90,6 +90,24 @@ struct gym_observation {
   std::vector<double> length, width, wheelbase, max_steer, max_accel, max_decel, max_speed;
 };
 
+// The world as a differentiable twin of it reads it (fields(); ARIADNE_WORLDS.md §14, L4's twin):
+// the navigator's grid with its ground and its signed distance, each on the grid's samples
+// (rows x cols, row-major, row 0 at min_y, sample (r, c) at (min_x + c cell, min_y + r cell)).
+struct gym_fields {
+  int rows = 0, cols = 0;
+  double min_x = 0.0, min_y = 0.0, max_x = 0.0, max_y = 0.0, cell = 0.0;
+  std::vector<std::uint8_t> occupancy; // 1 blocked, the wall included
+  std::vector<float> height;           // the terrain's height (m; 0 without one)
+  // The ground's grip under each sample: the dynamic plants' (one value for the whole ground
+  // today; a world with materials per cell would give each its own). Double, as the plants
+  // sample it, so a twin's ground is theirs to the last bit.
+  std::vector<double> mu;
+  // The navigator's signed distance (m, + free; cvc::nav::signed_distance) and its gradient
+  // (central differences, one-sided at the edges).
+  std::vector<float> sdf, sdf_dx, sdf_dy;
+  navigator_params navigator; // the navigator the agents drive with
+};
+
 // What step() returns.
 struct gym_step {
   gym_observation observation;
@@ -179,6 +197,12 @@ public:
 
   // The reward step() pays (gym_progress_reward by default; null puts it back).
   void set_reward(gym_reward reward);
+
+  // ---- what a differentiable twin of the world reads (ARIADNE_WORLDS.md §14, L4's twin) ----
+  // The world's fields, as the agents drive in it now. Throws std::logic_error before a reset.
+  gym_fields fields() const;
+  // Each agent's plant as a model a twin steps (WorldVehicles::plants), in observe()'s order.
+  std::vector<entity_plant> plants() const;
 
   const gym_log &log() const;
   void clear_log();

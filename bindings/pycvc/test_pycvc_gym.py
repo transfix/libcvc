@@ -7,7 +7,9 @@ What a training script relies on (ARIADNE_WORLDS.md section 14, L4):
   * one seed and one list of commands give one world, in two gyms side by side;
   * a reward written in Python is paid and logged; its exception comes back out of step();
   * the log is numpy arrays and a CSV; the keys under gym.* follow the episode;
-  * agents as dicts (archetype, name, team, a start of their own), and refusals.
+  * agents as dicts (archetype, name, team, a start of their own), and refusals;
+  * what a differentiable twin reads: fields() (the grid, its ground, its signed distance and
+    gradient) and plants() (each agent's plant as a model, in the observation's order).
 """
 
 import math
@@ -196,6 +198,31 @@ for _ in range(60):
     o = g3.step(0.0, 2.0)[0]
 check(bool(np.all(o["x"] > -27.0)) and bool(np.all(o["speed"] > 1.0)),
       f"each plant drives ({np.round(o['x'], 1)}, {np.round(o['speed'], 1)})")
+
+# What a differentiable twin reads: the world's fields and each agent's plant as a model.
+f = g3.fields()
+rows, cols = f["occupancy"].shape
+check(f["sdf"].shape == (rows, cols) and f["sdf"].dtype == np.float32, "the sdf is the grid's")
+check(f["height"].shape == f["mu"].shape == f["sdf_dx"].shape == f["sdf_dy"].shape == (rows, cols),
+      "every field on the grid")
+check(bool(np.all((f["sdf"] > 0) == (f["occupancy"] == 0))), "the sdf is + free, - blocked")
+check(abs(f["mu"][0, 0] - 0.9) < 1e-6, f"the ground's grip ({f['mu'][0, 0]})")
+check(f["sdf_dx"][rows // 2, 2] > 0.5 and f["sdf_dy"][2, cols // 2] > 0.5,
+      "the gradient points away from the walls")
+nv = f["navigator"]
+check(nv["ready"] and nv["scale"] == 0.05 and abs(nv["tick"] - g3.dt()) < 1e-6,
+      f"the navigator's settings ({nv['scale']}, {nv['tick']})")
+ps = g3.plants()
+check([p["model"] for p in ps] == ["dyn4", "bike", "dyn_bike", "dyn4"],
+      f"the models ({[p['model'] for p in ps]})")
+check([p["exact"] for p in ps] == [False, True, True, True], "only Jolt's state is read back")
+check([int(p["id"]) for p in ps] == [int(i) for i in o["id"]], "in the observation's order")
+w = ps[3]
+check(w["state"].shape == (14,) and w["params"]["m"] > 1000.0, "the four-wheel model's state and mass")
+check(w["applied_accel"].shape == (w["substeps"],), "a command per substep")
+check(abs(w["state"][2] - o["yaw"][3]) < 1e-6, "its heading is the observation's")
+check(ps[2]["state"].shape == (8,) and ps[2]["params"]["mu"] > 0.0, "the single-track model")
+check(ps[1]["limits"]["L"] > 2.0 and ps[1]["limits"]["hdt"] > 0.0, "the bicycle's limits, in metres")
 
 for bad_doc, what in ((DOC.split("world:")[0] + "scene:" + DOC.split("scene:")[1], "no vehicles"),
                       ("windows:\n  - window: W\n", "runs no world")):

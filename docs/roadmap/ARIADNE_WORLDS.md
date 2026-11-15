@@ -650,6 +650,19 @@ headless; the same document opens in arigl to watch one.
   - **Not yet.** Vehicles on different plants do not steer around each other (each plant's
     navigator sees its own); the cars template's own worlds (its data, generated and flat
     builders) stay its own, beside the gym's.
+- **As built (L4's twin).** What a differentiable twin of the gym's world reads, so a trainer can
+  backpropagate through a model of it while the gym (Jolt, the physics worlds) stays the judge, as
+  P8 did for the Jolt vehicle:
+  - `WorldGym::fields()`: the navigator's grid and signed distance with its gradient, the
+    ground's height and grip, and the navigator's settings;
+  - `WorldGym::plants()` (`WorldVehicles::plants`): each agent's plant as a `cvc::nav::diff`
+    model in SI, with its parameters, limits and state. On the dynamic plants it is the plant's
+    own model, with what the model took of the last command in each substep after the driver.
+    On `dynamic4w`, away from a collision, the replay is bit for bit
+    (`AriadneWorldGym.ThePlantsAreModelsATwinReplays`).
+  - GRL-SNAM's `grl_snam.gym_twin` is the torch twin over these.
+  - **Not yet:** a twin of the driver (`dyn_driver`), of contact on the four-wheel model and of
+    its `grade_force`; per-cell grip; a C++ twin rollout over a gym.
 
 **What the runtime needs that isn't there** (§1):
 

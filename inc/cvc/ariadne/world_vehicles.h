@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cvc/ariadne/world_rules.h> // vehicle_archetype
 #include <cvc/ariadne/world_spawns.h>
+#include <cvc/nav/detail/dyn_4w.h> // the models a twin steps: dyn4_params, dyn_bike_params, bike_veh
 #include <cvc/physics/types.h>
 #include <cvc/physics/vehicle.h> // vehicle_desc
 #include <limits>
@@ -167,6 +168,55 @@ struct entity_info {
   entity_intent intent; // as of the last navigator tick
 };
 
+// What drives an entity, as a model that a differentiable twin of the world steps (WorldGym::
+// plants, L4's twin; ARIADNE_WORLDS.md §14). In SI: world metres, seconds, kg, rad. The models are
+// cvc::nav::diff's, and on the dynamic plants they are the plants' own: their parameters, step
+// limits and state as the plant holds them.
+struct entity_plant {
+  std::uint64_t id = 0;
+  std::string plant;          // jolt, kinematic, dynamic or dynamic4w
+  physics::vehicle_desc desc; // its body
+  double rear_x = 0.0;        // the rear axle along the body from the chassis's centre (m)
+  bool placed = false;        // in the world; nothing below is set otherwise
+  // The model that stands for the plant:
+  //   dyn4      dynamic4w: the plant's own (physics::dyn_4w_plant), `exact`. jolt: the four-wheel
+  //             model with the vehicle's own numbers (nav_plant::dyn4_si_of), its pose and twist
+  //             read from the chassis, its heave 0 and its drive state 0 (not `exact`).
+  //   dyn_bike  dynamic: the plant's own (physics::dyn_bike_plant), `exact`.
+  //   bike      kinematic: nav's bicycle; `bike_state` holds the rear axle, the heading and the
+  //             speed (as vx), `limits` its limits.
+  std::string model;
+  bool exact = false;
+  nav::diff::dyn4_params dyn4{};
+  nav::diff::dyn4_state<double> dyn4_state{};
+  nav::diff::dyn_bike_params bike{};
+  nav::diff::dyn_state<double> bike_state{};
+  nav::diff::bike_veh limits{}; // the model step's limits (hdt: one model step)
+  int substeps = 1;             // model steps per navigator tick
+  // dyn4: the model's heights are the ground's less this (m), as dyn_4w_plant measures them.
+  double ground_reference = 0.0;
+  double mu = 0.9; // the ground's grip the model drives on
+  // The last tick: nav's command (the steering's angle, rad; the acceleration along the heading,
+  // m/s^2) and, on the dynamic plants, what the model took of it in each model step after the
+  // driver (m/s^2), with the grade (the sine along the heading) for dyn_bike. Away from a
+  // collision, replaying the model from the tick's first state with these gives its last state.
+  double steer_command = 0.0, accel_command = 0.0;
+  std::vector<double> applied_accel, applied_grade;
+  int collisions_tick = 0; // model steps of the last tick a collision corrected (exact models)
+};
+
+// The navigator the entities drive with, as a twin of the drive takes it: nav's normalized units
+// per metre, its tick (s), the arrival radius (m), and its vehicle in normalized units (the
+// largest and fastest any archetype may be; each vehicle's own envelope is in entity_plant).
+struct navigator_params {
+  bool ready = false; // a grid, and the navigator built for it
+  double scale = 0.0, tick = 0.0, reach = 0.0;
+  float rr = 0.0f, d_hat = 0.0f, dt = 0.0f, vmax = 0.0f, L = 0.0f, delta_max = 0.0f, a_max = 0.0f,
+        a_lat_max = 0.0f, k_steer = 0.0f;
+  int nsub = 1;
+  bool allow_reverse = true;
+};
+
 class WorldVehicles {
 public:
   // The vehicles of `world`, under `vehicles_key` (the catalog, the spawn keys), `entities_key`
@@ -254,6 +304,15 @@ public:
   int steps_per_tick() const;
   // The navigator's grid of the world on (null without one).
   std::shared_ptr<const nav::world_grid> grid() const;
+
+  // ---- what a twin of the world reads (WorldGym::fields, WorldGym::plants) ----
+  // Each entity's plant as a model (entity_plant), in the order entities() gives them.
+  std::vector<entity_plant> plants() const;
+  // The navigator's own settings (not ready without a grid).
+  navigator_params navigator() const;
+  // The navigator's signed distance (m) on its grid (cvc::nav::signed_distance of grid()), rows *
+  // cols; empty without a grid.
+  const std::vector<float> &sdf() const;
 
   std::vector<entity_info> entities() const;
   std::size_t size() const;
