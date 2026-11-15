@@ -304,6 +304,7 @@ add_executable(nav_material_test nav_material_test.cpp)
 add_executable(nav_belief_material_test nav_belief_material_test.cpp)
 add_executable(nav_belief_material_net_test nav_belief_material_net_test.cpp)
 add_executable(nav_belief_material_controller_test nav_belief_material_controller_test.cpp)
+add_executable(nav_coph_test nav_coph_test.cpp)
 add_executable(nav_material_deploy_test nav_material_deploy_test.cpp)
 add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
 add_executable(nav_material_rollout_grad_test nav_material_rollout_grad_test.cpp)
@@ -553,6 +554,7 @@ set(TEST_TARGETS
   nav_belief_material_test
   nav_belief_material_net_test
   nav_belief_material_controller_test
+  nav_coph_test
   nav_material_deploy_test
   nav_material_raster_test
   nav_coef_energy_test
@@ -1364,6 +1366,13 @@ target_link_libraries(nav_belief_material_net_test
 )
 
 target_link_libraries(nav_belief_material_controller_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_coph_test
   PRIVATE
     cvc
     GTest::gtest
@@ -3066,6 +3075,7 @@ cvc_discover_tests(nav_material_test)
 cvc_discover_tests(nav_belief_material_test)
 cvc_discover_tests(nav_belief_material_net_test)
 cvc_discover_tests(nav_belief_material_controller_test)
+cvc_discover_tests(nav_coph_test)
 cvc_discover_tests(nav_material_deploy_test)
 cvc_discover_tests(nav_material_raster_test)
 cvc_discover_tests(nav_coef_energy_test)
