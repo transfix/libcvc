@@ -2739,6 +2739,30 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
       }
     }
     sn.material_opaque = flag(mat, "opaque", false);
+    if (const YAML::Node op = mat["opacity"]) {
+      // material: { opacity: <0..1> }, a state path to follow, or { bind: <path>, default: <0..1> }
+      const YAML::Node lit = op.IsMap() ? op["default"] : op;
+      bool literal = false;
+      if (lit && lit.IsScalar()) {
+        try {
+          const double a = lit.as<double>();
+          literal = true;
+          if (!std::isfinite(a) || a < 0.0 || a > 1.0)
+            ctx.warn("ari: scene node '" + sn.id + "': material.opacity is 0..1, not " +
+                     lit.Scalar() + (std::isfinite(a) ? " — clamped" : " — 1 used"));
+          sn.opacity = std::isfinite(a) ? static_cast<float>(std::clamp(a, 0.0, 1.0)) : 1.0f;
+        } catch (const std::exception &) {
+        }
+      }
+      if (op.IsMap())
+        sn.opacity_bind = str(op, "bind");
+      else if (op.IsScalar() && !literal)
+        sn.opacity_bind = op.Scalar(); // a state path
+      sn.has_opacity = literal || !sn.opacity_bind.empty();
+      if (!sn.has_opacity)
+        ctx.warn("ari: scene node '" + sn.id +
+                 "': material.opacity is a number 0..1, a state path or { bind, default }");
+    }
   }
   if (n["casts_shadow"]) {
     sn.has_casts_shadow = true;
