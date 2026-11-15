@@ -28,6 +28,7 @@
 //   --net-policy FILE     ... with FILE's allow and credential lines (repeatable; implies --net)
 //   --credential-store S  keep credentials across runs in S, a name or a path (implies --net)
 //   --credential-env N=V  credential N is the token in environment variable V (repeatable)
+//   --e2ee-store S        keep end-to-end encryption keys in S, a name or a path (implies --net)
 //   --media-play WHEN     video: / audio: play here: auto (not over SSH), always or never
 //   --exec-policy P       the app scheduler's policy, state_exec.policy: round_robin (the
 //                         default), priority or priority_rr (apply_exec_policy)
