@@ -24,34 +24,6 @@ namespace se = state_exec;
 
 namespace {
 
-struct running_lane_scope;
-
-// The innermost lane running a job on this thread; each scope links to the one it nests in. A
-// threaded lane's worker holds its scope for its whole life; a deferred drain holds one while it
-// runs, and a job of one lane can drain another lane, so the chain can be several lanes deep.
-thread_local const running_lane_scope *t_running_top = nullptr;
-
-struct running_lane_scope {
-  const async_lane *lane;
-  const running_lane_scope *outer;
-  explicit running_lane_scope(const async_lane *l) : lane(l), outer(t_running_top) {
-    t_running_top = this;
-  }
-  ~running_lane_scope() { t_running_top = outer; }
-  running_lane_scope(const running_lane_scope &) = delete;
-  running_lane_scope &operator=(const running_lane_scope &) = delete;
-};
-
-// True when a job of `l` is running anywhere on this thread's stack: this is `l`'s worker, or a
-// drain of `l` sits further up, even beneath another lane's drain. stop() and run_deferred() must
-// then neither join this thread nor wait for (or re-enter) that drain, which this thread owns.
-bool lane_running_on_this_thread(const async_lane *l) {
-  for (const running_lane_scope *s = t_running_top; s; s = s->outer)
-    if (s->lane == l)
-      return true;
-  return false;
-}
-
 void name_this_thread(const std::string &lane_name) {
 #if defined(CVC_ASYNC_LANE_NAMES_THREADS)
   // Shown by top/perf/gdb. Linux caps a thread name at 15 bytes plus the NUL.
@@ -89,8 +61,16 @@ async_lane::async_lane(std::string name, lane_mode mode)
     : name_(std::move(name)), mode_(async_lane_has_threads ? mode : lane_mode::deferred),
       task_tag_(random_tag()) {
   // Every member is initialized before the worker starts reading them.
-  if (mode_ == lane_mode::threaded)
+  if (mode_ == lane_mode::threaded) {
     worker_ = std::thread([this] { worker_loop(); });
+    worker_id_ = worker_.get_id(); // read only by jobs (submitted after this) and stop()
+  }
+}
+
+bool async_lane::running_on_this_thread() const {
+  const std::thread::id self = std::this_thread::get_id();
+  return (mode_ == lane_mode::threaded && worker_id_ == self) ||
+         drainer_.load(std::memory_order_acquire) == self;
 }
 
 std::string async_lane::next_task_key() {
@@ -133,7 +113,6 @@ void async_lane::worker_loop() {
   // A process class set before this worker started (Linux, where the class is per thread).
   detail::apply_process_class_here();
   name_this_thread(name_);
-  running_lane_scope scope(this);
   for (;;) {
     job j;
     {
@@ -196,7 +175,7 @@ void async_lane::stop() {
   // thread cannot join itself, and this thread owns the deferred drain further up its stack, so
   // waiting for that drain would spin forever. The lane is marked stopping; the join (or the rest
   // of the drain) happens in the destructor or in a stop() from outside the lane's jobs.
-  if (lane_running_on_this_thread(this))
+  if (running_on_this_thread())
     return;
   if (mode_ == lane_mode::threaded) {
     cv_.notify_all();
@@ -213,16 +192,17 @@ void async_lane::stop() {
     std::this_thread::yield();
   }
   {
-    running_lane_scope scope(this);
+    drainer_.store(std::this_thread::get_id(), std::memory_order_release);
     job j;
     while (pop_front(j))
       run_job(j);
+    drainer_.store(std::thread::id(), std::memory_order_release);
   }
   draining_.store(false, std::memory_order_release);
 }
 
 std::size_t async_lane::run_deferred(std::size_t max_jobs) {
-  if (mode_ != lane_mode::deferred || lane_running_on_this_thread(this))
+  if (mode_ != lane_mode::deferred || running_on_this_thread())
     return 0;
   bool expected = false;
   if (!draining_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
@@ -236,12 +216,13 @@ std::size_t async_lane::run_deferred(std::size_t max_jobs) {
     budget = max_jobs;
   std::size_t ran = 0;
   {
-    running_lane_scope scope(this);
+    drainer_.store(std::this_thread::get_id(), std::memory_order_release);
     job j;
     while (ran < budget && pop_front(j)) {
       run_job(j);
       ++ran;
     }
+    drainer_.store(std::thread::id(), std::memory_order_release);
   }
   draining_.store(false, std::memory_order_release);
   return ran;

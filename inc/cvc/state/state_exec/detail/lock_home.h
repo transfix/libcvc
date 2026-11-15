@@ -176,9 +176,9 @@ std::string resolve_lock_key(const intrinsics_context &ctx, std::string_view wri
 void build_request(home_request &req, lock_home &home, const intrinsics_context &ctx,
                    const value_t &key, lock_mode mode);
 /// %lock-wait's body (protocol 5.2): KEYS as written, MODE ("exclusive" or "shared"), TIMEOUT
-/// (nil, or seconds). LockError where the process cannot wait, or with no lock-enter token.
-value_t lock_wait_call(const lock_ops &ops, std::span<const value_t> args,
-                       const lock_enter_token *token);
+/// (nil, or seconds), in the context of the call (call_args::context()). LockError where the
+/// process cannot wait, or with no lock-enter token.
+value_t lock_wait_call(const lock_ops &ops, call_args args, const lock_enter_token *token);
 /// Bind with-lock, locks-held, lock-query and %lock-wait, and set-priority and get-priority, in
 /// `env` (register_intrinsics does).
 void register_lock_intrinsics(environment_ptr env, intrinsics_context *ctx);

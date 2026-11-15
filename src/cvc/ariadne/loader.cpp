@@ -817,8 +817,9 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     w.size = parse_size(n["size"]);                  // §3.0.3b window sizing (%/px/auto)
     w.layout = parse_layout(n["layout"]);            // §3.0.3b window-body layout (grid/tracks)
     w.frame_border = parse_frame_border(n["frame"]); // §3.0.3b border width
-    w.closable = flag(n, "closable", false);         // a close (X) button + tree.<id>.open state
+    w.closable = flag(n, "closable", true);          // §5.9 a close (X) button + tree.<id>.open
     w.maximizable = flag(n, "maximizable", true);    // §5.9 a maximize button + .maximized
+    w.resizable = flag(n, "resizable", true);        // §5.9 the user resizes it by an edge
     return w;
   }
   if (type == "text") {
@@ -1807,9 +1808,11 @@ Widget expand_include(Ctx &ctx, const YAML::Node &n) {
     if (n["frame"])
       w.frame_border = parse_frame_border(n["frame"]);
     if (n["closable"])
-      w.closable = flag(n, "closable", false);
+      w.closable = flag(n, "closable", true);
     if (n["maximizable"])
       w.maximizable = flag(n, "maximizable", true);
+    if (n["resizable"])
+      w.resizable = flag(n, "resizable", true);
   }
   return w;
 }
@@ -2819,6 +2822,30 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
       }
     }
     sn.material_opaque = flag(mat, "opaque", false);
+    if (const YAML::Node op = mat["opacity"]) {
+      // material: { opacity: <0..1> }, a state path to follow, or { bind: <path>, default: <0..1> }
+      const YAML::Node lit = op.IsMap() ? op["default"] : op;
+      bool literal = false;
+      if (lit && lit.IsScalar()) {
+        try {
+          const double a = lit.as<double>();
+          literal = true;
+          if (!std::isfinite(a) || a < 0.0 || a > 1.0)
+            ctx.warn("ari: scene node '" + sn.id + "': material.opacity is 0..1, not " +
+                     lit.Scalar() + (std::isfinite(a) ? " — clamped" : " — 1 used"));
+          sn.opacity = std::isfinite(a) ? static_cast<float>(std::clamp(a, 0.0, 1.0)) : 1.0f;
+        } catch (const std::exception &) {
+        }
+      }
+      if (op.IsMap())
+        sn.opacity_bind = str(op, "bind");
+      else if (op.IsScalar() && !literal)
+        sn.opacity_bind = op.Scalar(); // a state path
+      sn.has_opacity = literal || !sn.opacity_bind.empty();
+      if (!sn.has_opacity)
+        ctx.warn("ari: scene node '" + sn.id +
+                 "': material.opacity is a number 0..1, a state path or { bind, default }");
+    }
   }
   if (n["casts_shadow"]) {
     sn.has_casts_shadow = true;
@@ -3044,6 +3071,8 @@ Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
   if (nodes && nodes.IsSequence())
     for (const YAML::Node &n : nodes)
       sc.nodes.push_back(parse_scene_node(ctx, n));
+  if (const YAML::Node el = s["entity_labels"])
+    sc.entity_labels = to_value(el);
   const YAML::Node lights = s["lights"];
   if (lights && lights.IsSequence())
     for (const YAML::Node &l : lights)

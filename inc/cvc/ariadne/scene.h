@@ -323,6 +323,14 @@ struct SceneNode {
   // (vtkActor::SetForceOpaque). VTK otherwise scans a texture's every texel for alpha to decide
   // the pass, which on a large ground texture is a measurable share of a browser frame.
   bool material_opaque = false;
+  // material: { opacity: <0..1> } — how opaque the node's meshes draw (1 solid, 0 gone). Below 1
+  // they draw see-through, in the translucent pass even with opaque: true, as a viewport
+  // override:'s opacity does. opacity: <state path>, or { bind: <path>, default: <0..1> }, follows
+  // a state value instead (read without seeding, as visible: is): `opacity` is the value while
+  // the key is unset. A volume node ignores it (its transfer function holds its opacity).
+  bool has_opacity = false;
+  float opacity = 1.0f;
+  std::string opacity_bind;
 
   // casts_shadow: false — the node (and everything below it) receives shadows but casts none, so
   // it never forces a shadow re-bake (GraphicsNode::setCastsShadow). For a ground too big to
@@ -518,6 +526,10 @@ struct Scene {
   bool has_main_view = false;
   std::vector<std::string> main_show, main_hide;
   std::vector<SceneLight> lights;
+  // entity_labels: { text, offset, color, backdrop, edge, size, scale, focus, fade } (a node's
+  // label: keys, its text "{name}" by default), or true for the default look: each world
+  // entity's label (cvc::gl::ariadne::apply_entity_label). Empty: none.
+  Value entity_labels;
   std::vector<SceneCamera> cameras; // cameras: [...] — named cameras viewports bind
   SceneClock clock; // §9 time: the simulation clock (clock.present gates it) — see SceneClock
   ScenePhysics physics; // physics: {...} — the world the nodes' bodies live in (see SceneBody)
