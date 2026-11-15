@@ -9,6 +9,7 @@
 #include <cvc/ariadne/scene_geometry.h> // a node's mesh from data (core)
 #include <cvc/ariadne/scene_world.h>    // the scene's world: physics and bodies (core)
 #include <cvc/ariadne/uri.h> // §13.4 resolve a node source: URI to a local path (temp-file bridge)
+#include <cvc/ariadne/world_vehicles.h> // its vehicles: their intents key
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h> // §9 time: tick_scene drives app.world_clock() for a clock: scene
 #include <cvc/geometry/geometry.h>
@@ -17,6 +18,7 @@
 #include <cvc/geometry/mesh_ops.h>     // mesh_ops_available() — source.sdf.algorithm: igl
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
+#include <cvc/gl/LabelLayer.h> // label: and entity_labels: (scene_labels.h)
 #include <cvc/gl/LightNode.h>
 #include <cvc/gl/LodGraphicsNode.h> // RealizeOptions::lod: a mesh node as a LOD ladder
 #include <cvc/gl/LodPyramidCache.h>
@@ -25,6 +27,7 @@
 #include <cvc/gl/VolRenNode.h>
 #include <cvc/gl/VolSliceNode.h>
 #include <cvc/gl/VolumeNode.h>
+#include <cvc/gl/ariadne/scene_labels.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/tf_binding.h>    // every volume node's editable transfer-function model
 #include <cvc/gl/ariadne/vehicle_view.h>  // the world's vehicles, drawn on their chassis
@@ -841,6 +844,7 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
     return;
   apply_transform(*node, n); // the node's LOCAL transform (composed with the parent's)
   apply_visibility(*node, n, sg.appContext(), bind_prefix, out.visibility);
+  apply_scene_label(sg, node, n, out, warnings); // label: over the node
   if (n.has_casts_shadow) // receives shadows either way; a non-caster never forces a re-bake
     node->setCastsShadow(n.casts_shadow);
   // shader: { preset | vertex | fragment } — the declarative GLSL surface — and material.opaque.
@@ -849,6 +853,15 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
   // is shaded too. A non-geometry node (volume/group) silently ignores them.
   if (auto *g = dynamic_cast<GeometryNode *>(node.get()))
     apply_mesh_keys(*g, n, warnings);
+  if (!n.opacity_bind.empty()) { // material: { opacity: <path> }: synced each frame
+    SceneOpacityBinding ob;
+    ob.source = cvc::ariadne::resolve_bind(bind_prefix, n.opacity_bind);
+    ob.fallback = n.opacity;
+    ob.node = node;
+    if (!n.source_data.empty()) // its SceneDataBinding, pushed above with the node
+      ob.data = static_cast<int>(out.data_nodes.size()) - 1;
+    out.opacity.push_back(std::move(ob));
+  }
   apply_clip(*node, n, sg.appContext(), bind_prefix, out.clip, warnings); // own coordinates
   warn_clip_capability(*node, n, warnings);
   if (n.body.present && n.source_data.empty()) // a data node's come with its dataset
@@ -1025,6 +1038,8 @@ void apply_node_material(GeometryNode &g, const cvc::ariadne::SceneNode &n) {
     g.setSpecular(n.specular);
     g.setSpecularPower(n.specular_power);
   }
+  if (n.has_opacity) // see-through below 1, even when forced opaque (GeometryNode::setForceOpaque)
+    g.setOpacity(n.opacity);
 }
 
 // A dim³ signed-distance-field volume of a mesh, framed like the volume demos' bunny_sdf: the grid
@@ -1186,6 +1201,9 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   out.has_main_view = scene.has_main_view;
   out.main_show = scene.main_show;
   out.main_hide = scene.main_hide;
+  out.entity_labels = scene.entity_labels;
+  if (!scene.entity_labels.empty()) // the labels' layer now, so it is this scene's (out.created)
+    LabelLayerNode::of(sg);
   // Resolve the clock's key paths to absolute state paths now, with the host bind prefix — the SAME
   // rule widget binds use (resolve_bind) — so the clock and a sim_transport slider on `sim.speed`
   // land on one key. Resolved once here (like the visibility bindings), so tick_scene stays prefix-
@@ -1209,6 +1227,7 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
     realize_node(sg, n, bind_prefix, out, /*parent=*/nullptr, bodies, opts, warnings, scene.assets);
     out.created.push_back(n.id);
   }
+  sync_scene_opacity(out); // a bound opacity's first value, read as visible: reads its own
   // A custom node type may add top-level graphics beside its own node (forest_trees' needles).
   // They are this scene's too, so whoever clears it -- a host loading another document -- removes
   // them with the rest.
@@ -1232,6 +1251,9 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
       out.world->bind_vehicles(scene.vehicles, cvc::ariadne::resolve_bind(bind_prefix, "vehicles"),
                                cvc::ariadne::resolve_bind(bind_prefix, "entities"), scene.spawns,
                                cvc::ariadne::resolve_bind(bind_prefix, "spawns"));
+      if (out.world->vehicles())
+        out.world->vehicles()->set_intents_key(
+            cvc::ariadne::resolve_bind(bind_prefix, scene.vehicle_intents));
     }
     if (out.physics)
       out.clock.present = true;
@@ -1428,6 +1450,30 @@ bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
 
 } // namespace
 
+void sync_scene_opacity(RealizedScene &realized) {
+  if (!realized.app)
+    return;
+  for (const SceneOpacityBinding &b : realized.opacity) {
+    const std::shared_ptr<GraphicsNode> node = b.node.lock();
+    if (!node)
+      continue;
+    double a = cvc::ariadne::read_or<double>(*realized.app, b.source, b.fallback);
+    a = std::isfinite(a) ? std::clamp(a, 0.0, 1.0) : b.fallback;
+    // GeometryNode::setOpacity writes the node's opacity key, which an unchanged value leaves be.
+    auto set = [a](GraphicsNode *g) {
+      if (auto *mesh = dynamic_cast<GeometryNode *>(g))
+        mesh->setOpacity(a);
+    };
+    set(node.get());
+    if (auto *lod = dynamic_cast<LodGraphicsNode *>(node.get()))
+      for (int k = 0; k < lod->rungCount(); ++k)
+        set(lod->rung(k).get());
+    if (b.data >= 0 && b.data < static_cast<int>(realized.data_nodes.size()))
+      for (const std::shared_ptr<GraphicsNode> &c : realized.data_nodes[b.data].drawn)
+        set(c.get());
+  }
+}
+
 int sync_scene_data(RealizedScene &realized, std::vector<std::string> *warnings) {
   if (!realized.app || realized.data_nodes.empty())
     return 0;
@@ -1488,7 +1534,8 @@ bool restart_scene_world(RealizedScene &realized, std::vector<std::string> *warn
 
 cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *renderer,
                                          double wall_dt) {
-  sync_scene_data(realized); // a data node whose dataset (re)loaded draws it this frame
+  sync_scene_data(realized);    // a data node whose dataset (re)loaded draws it this frame
+  sync_scene_opacity(realized); // bound material opacities, on what was just drawn too
   cvc::world_clock::step_result clock_step;
   // §9 time — drive the authoritative simulation clock FIRST, so every ticker below (and any
   // custom_tick reading app.world_clock().t()) sees ONE coherent world time for this frame. Opt-in:
@@ -1599,7 +1646,9 @@ void apply_mesh_keys(GeometryNode &g, const cvc::ariadne::SceneNode &n,
     g.setCastsShadow(n.casts_shadow);
   if (n.shader.present)
     apply_shader(g, n, warnings);
-  if (n.material_opaque) // no per-texel alpha scan to pick the pass
+  if (n.has_opacity)
+    g.setOpacity(n.opacity);
+  if (n.material_opaque) // no per-texel alpha scan to pick the pass (while not see-through)
     g.setForceOpaque(true);
 }
 

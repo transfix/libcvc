@@ -531,8 +531,10 @@ Three backends ship:
     reverts an edit or closes a popup; F10 opens the menu bar. An `autofocus:` widget has focus
     when it appears (§5.10).
   - **mouse** — click to focus or activate, pick a radio's option, drag a slider, drag a
-    window by its title bar, click `[x]` to close it, click a menu title to open it.
-  - **windows** (`caps.windows = true`) — free, z-ordered, raised on focus, placed from
+    window by its title bar, click `[x]` to close it or `[↑]` to maximize it (§5.9), click a menu
+    title to open it.
+  - **windows** (`caps.windows = true`) — free, z-ordered, raised on focus (and when picked in the
+    Windows menu or maximized, §5.9), placed from
     `pos:`/`size:` or the persisted `tree.<id>.geometry`; a drag persists back (§11.4). A
     window stops at the screen's edge and scrolls what does not fit (§5.8).
   - **graphics** — `draw_image` paints a raster published with `set_image`, and
@@ -631,7 +633,8 @@ Three backends ship:
   ([`inc/cvc/ariadne/tvision_backend.h`](../inc/cvc/ariadne/tvision_backend.h)) — the
   native-desktop terminal backend (roadmap §16.5 row 5). Turbo Vision owns the terminal
   and draws the chrome itself: movable, resizable, overlapping windows with close and
-  zoom boxes, a pull-down menu bar, a status line, and its own keys (F10 for the menu bar, F6
+  zoom boxes (a window's `closable:` and `resizable:` decide its close box and resize corner,
+  §5.9), a pull-down menu bar, a status line, and its own keys (F10 for the menu bar, F6
   for the next window, Alt-X to quit, Ctrl-F5 to move or resize the window from the keyboard:
   the arrows move it, Shift and the arrows resize it, Return keeps it, Escape puts it back).
   The windows' *contents* are the FTXUI backend's: a `TvisionBackend` is an
@@ -879,6 +882,29 @@ each point.
 **Textures.** `material: { texture: <uri> }` drapes an image over a geometry node through its
 mesh's UVs. UV (0, 0) is the image's bottom-left corner. A `source: { data }` city's terrain wears
 its bundle's `satellite.png` this way, north up (§5.17).
+
+**See-through nodes.** `material: { opacity: <0..1> }` draws a node's meshes see-through: 1 is
+solid (the default) and 0 is invisible. A see-through mesh is drawn in the translucent pass even
+with `opaque: true` beside it (the opacity wins, as a viewport `override:`'s does, §5.18), and it
+casts no shadow into the scene's maps. `opacity:` may instead name a state key, as
+`opacity: zone.alpha` or `{ bind: zone.alpha, default: 0.4 }`, and the node follows that key each
+frame as `visible:` follows its own: the key is read, never seeded, and clamped to 0..1, and
+`default` (1 when left out) holds while the key is unset or is not a number. The opacity reaches
+whatever the node draws: its mesh, every rung of its LOD ladder, the meshes a `source: { data }`
+node draws (each redraw included), and the mesh a custom node type returns. A volume node ignores
+it, because its transfer function holds its opacity.
+
+```yaml
+scene:
+  nodes:
+    - node: reach
+      source: { sphere: 40 }
+      transform: { position: [120, -60, 0] }
+      material: { color: [1.0, 0.35, 0.2], opacity: 0.25 }       # a see-through dome
+    - node: zone
+      source: { box: { size: [50, 30, 10] } }
+      material: { color: [0.2, 0.8, 0.3], opacity: { bind: zone.alpha, default: 0.4 } }
+```
 
 **Volumes and shadows.** A volume node (`volume`, `volren`, `volslice`) casts nothing into the
 scene's shadow maps (`shadows:`): its picture is no surface the maps can hold. A `volren` node's
@@ -1138,7 +1164,7 @@ scene:
         humvee:
           vehicle: humvee                                    # a preset: humvee, roboracer
           ranges: { mass: [2000, 3500], max_speed: [5, 20] } # what a spawn may set
-          controllers: [nav@1, none]                         # the first is a spawn's default
+          controllers: [nav@1, none, external]               # the first is a spawn's default
         racer:
           vehicle: { preset: roboracer, max_speed: 6 }       # a preset with overrides
           look: { file: racer.glb, scale: 1, yaw: 90, z: 0 } # default: the chassis box
@@ -1147,7 +1173,8 @@ scene:
   - **Archetypes.** Each names its plant (`jolt`; `kinematic`, `dynamic` and `dynamic4w` are
     accepted but not run in a scene world yet), its body (a preset, with `mass`, `max_speed`,
     `max_accel`, `max_decel` or `max_steer` over it), its look, the ranges a spawn's settings are
-    held to, and its controllers: `nav@1`, the navigator, or `none`.
+    held to, and its controllers: `nav@1`, the navigator, `none`, or `external` (its intent
+    alone drives it).
   - **Looks.** With no `look:`, a humvee is the real Humvee, the vehicle-humvee package's
     `Humvee.glb`, when it is installed (`find_vehicle_model`: beside `$CVC_NAV_BUNDLE`, else in
     `share/cvc-scenes/shared` or `share/cvc-scenes/*/` under `$CVC_PREFIX`, `$CVCPKG_PREFIX`,
@@ -1169,8 +1196,30 @@ scene:
     `selected` and `selection.*` (the selected archetype as a spawn would make it now), and
     `status`. Under `entities`: `ids`, `count`, `rev`, `summary`, and for each entity its
     identity, pose (`x`, `y`, `z`, `yaw`), `speed`, `power_kw`, `energy_wh`, `wh_per_km`,
-    `distance`, `wheel_load`, `aero_force` and `gear`. `physics.stats.vehicles` has a line per
-    vehicle.
+    `distance`, `wheel_load`, `aero_force` and `gear`, and `command.steer` / `command.accel`
+    (what its plant took on the last navigator tick) with `command.by` (its controller, `intent`,
+    `blend`, or `hold`). `physics.stats.vehicles` has a line per vehicle.
+  - **Intents.** Any entity can be steered from outside. A document, a script or a server writes
+    its keys, and a C++ or Python host calls `WorldVehicles::set_intent` (`pycvc.WorldEntities`,
+    below). Each navigator tick (20 Hz) reads them, and a change replaces the intent it had:
+
+    | Key, under `entities.<id>` | What it is |
+    |---|---|
+    | `intent.mode` | `replace`: the intent's command in place of the controller's; `blend`: `weight` of it and `1 - weight` of the controller's; `off`: the controller's alone. Empty: `replace` when a steer or an acceleration is given |
+    | `intent.steer` | the bicycle angle, rad, + left, held to the vehicle's lock |
+    | `intent.accel` | m/s² along its heading (from rest a negative one backs it up), held to its top speed as the navigator's command is |
+    | `intent.weight` | the blend's share, 0 to 1 (default 0.5) |
+    | `force.x`, `force.y` | m/s², world frame: a push added to the drive's force (the goal's pull and the walls' push), as `cvc::nav::ext_force` adds one. It works under any command but `replace` |
+    | `force.steer` | `0` keeps the force out of the drive's steering (default `1`). The drive has one such switch, on while any entity's force asks for it |
+
+    An `external` entity has no command of its own: `replace` and `blend` both drive it, and with
+    no intent (or `off`) it brakes to a stop and holds there. `world: vehicles: intents: <path>`
+    names a second table, read the same way, by id or by name: `<path>.<id>.intent.*` or
+    `<path>.<name>.intent.*` (for a name that is a state name). The path resolves as a bind does,
+    so `/drive` is outside the document's prefix. That is how a server document steers: it
+    publishes the namespace (`server: publish: [drive]`), the relay replicates it, and its program
+    writes `(state-set "drive.lead.intent.accel" "2")`. The C++ setter, `set_intent`,
+    `clear_intent` and `intent`, may be called from any thread.
   - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,
     `color`, `color2` as `r,g,b`, `metadata` as `key=value, ...`, `controller`, `policy`,
     `policy_sha256`, `mass` or `mass_t` (a fraction of the range), `max_speed` or `max_speed_t`,
@@ -1183,6 +1232,15 @@ scene:
   - **The panel.** `vehicle_selector.ari`: the vehicle, its stats, a preview viewport onto a
     `scenes:` entry holding a `vehicle_preview` node (its header shows one), the settings, the
     controller and policy, the identity, Spawn, and the spawned vehicles with Remove and Clear.
+  - **From Python.** `pycvc.AriApp.entities()`, `pycvc.world_entities(app, runtime_capsule)`
+    over a GL host's runtime (`pycvc_gl.AriRuntime.app_runtime_capsule()`), or
+    `pycvc.ari.Host.entities`, is a `pycvc.WorldEntities` over the running world (the runtime's
+    own, or its adapter's): `list()` (a dict per entity: identity, pose, speed, energy, the
+    command and the intent), `spawn(archetype, name=, controller=, team=, at=(x, y[, yaw°]),
+    mass=, max_speed=)` (0 and `why()` when refused), `despawn(id)`, and `set_intent(id, steer=,
+    accel=, mode=, weight=, force=(fx, fy), force_steers=)`, `intent(id)`, `clear_intent(id)`.
+    `list`, `spawn` and `despawn` run on the thread that runs frames; the intents from any
+    thread.
   - **One runtime per world.** Each `SceneWorld` has its own physics world, vehicles, policies
     and keys, with nothing process-wide, so a host that runs several worlds runs one each.
 - **Spawn points.** Where a vehicle spawned without a start of its own begins
@@ -1597,7 +1655,7 @@ A window needs neither `pos:` nor `size:`. Its size:
 
 - A window with a `size:` (px or `"%"` of the view, per axis; `min:`/`max:` bound it) opens at
   that size, or at its persisted `tree.<id>.geometry` (§11.4) once it has one. The user may
-  resize it, and that size is the one persisted.
+  resize it, unless it is `resizable: false` (§5.9), and that size is the one persisted.
 - A window with no `size:` fits its content every frame, so it grows and shrinks with what it
   shows. It stops at the edge of the view, measured from where it stands, and never goes below an
   authored `min:` or past a `max:`. Its persisted geometry places it but does not size it.
@@ -1656,7 +1714,9 @@ How each backend does it:
   On the tvision desktop, tvision's frame holds the window, and the host sizes that frame on every
   walk, in each axis: the document's size where it gave one, else the content's. That stops when
   the user resizes the window (the frame's corner, Ctrl-F5 then Shift and the arrows, or the zoom
-  box): from then on it keeps the user's size, through a close and a reopen too. Nothing else
+  box): from then on it keeps the user's size, through a close and a reopen too. A
+  `resizable: false` window has no corner and Ctrl-F5 only moves it, so only the zoom box changes
+  its size. Nothing else
   counts as the user's: not a size the host gave the window to fit it, nor tvision scaling the
   windows when the terminal is resized, nor a move. Only the user's size is reported back to
   `tree.<id>.geometry`; for any other window the host reports its place alone.
@@ -1665,42 +1725,92 @@ How each backend does it:
   closed and must show them when they open again, and on tvision a window resized with Ctrl-F5
   must come back at that size.
 
-### 5.9 Closing and reopening windows: the Windows menu
+### 5.9 Window chrome: closing, maximizing, resizing, and the Windows menu
 
 A window's open state is `tree.<id>.open` (default open; `<id>` is its `id:`, else its title). A
-window whose state is `0` is not drawn. A `closable: true` window has a close button that sets it
-to `0`. One that opens again is sized as §5.8 says: by its `size:` or its content, unless the user
+window whose state is `0` is not drawn. A window's title bar has a close button (X) that sets it to
+`0`. One that opens again is sized as §5.8 says: by its `size:` or its content, unless the user
 resized it.
 
-**Maximizing.** A window's title bar also has a maximize button, beside the collapse arrow and the
-close X.
-- **The button:** pressed, it makes the window fill the screen under the main menu bar. Pressed
-  again, the window goes back to the place and size it had.
+**What the user may do to a window.** As in a desktop's window manager, a window's title bar ends
+with a maximize button and then the close X, on the right, and the user resizes the window by an
+edge or a corner. Each is allowed unless the document turns it off on that window:
+
+```yaml
+windows:
+  - window: Status
+    closable: false     # no close button: the user can't close it
+    maximizable: false  # no maximize button
+    resizable: false    # no resizing by an edge or a corner
+```
+
+All three default to `true`. They are the window's own keys: a `resizable:` inside its `layout:`
+is the layout's (a split's panes, a table's columns, §5.8). An `include:` may set any of them for
+that use of the unit.
+
+**Resizing.**
+- A window with a `size:` resizes by its edges and corners, and the size the user leaves it at is
+  the one persisted (§11.4). `resizable: false` keeps it at its `size:` (or a persisted size):
+  - ImGui: no edge or corner drags it; a drag there moves the window, as a drag in its body does.
+  - tvision: its frame has no resize corner, and Ctrl-F5 only moves it.
+  - FTXUI draws no resize handle on any window, so the key changes nothing there.
+- A window with no `size:` fits its content (§5.8). Under ImGui that is every frame, so the user
+  can't resize it either way. On the tvision desktop the user may resize one, and from then on it
+  keeps that size; `resizable: false` stops that as well.
+- A maximize still fills a window that isn't resizable, and a restore puts it back at its size.
+
+**Maximizing.**
+- **The button:** pressed, it makes the window fill the screen under the main menu bar, and turns
+  into a restore button. Pressed again, the window goes back to the place and size it had.
+- **The title bar:** a double click on it maximizes the window, or puts it back, where the backend
+  sees double clicks (ImGui: in place of its collapse on a double click, for a window that has the
+  button).
+- **Moving or resizing it by hand** ends the maximize, and the button is the plain maximize button
+  again:
+  - Dragged by its title bar, the window comes back to the size it had, under the pointer, held
+    where along the title bar it was grabbed.
+  - Resized by an edge or a corner (ImGui), it keeps the size it was given. That size is now the
+    window's own, so a later maximize goes back to it.
 - **The state** is `tree.<id>.maximized`, `1` or `0`. A document may write it to maximize a window
   or put it back.
+- **In front:** a window that becomes maximized, by any of these, comes to the front of the
+  others (see *Bringing a window to the front* below).
 - **Geometry:** while a window is maximized its `tree.<id>.geometry` isn't written, so it keeps
   where the window goes back to, across a restart too.
-- **Opting out:** `maximizable: false` on a window gives it no button; the default is `true`.
 - **By backend:**
-  - ImGui: a square, two squares while maximized. The window can't be moved or resized while
-    maximized.
+  - ImGui: a square, and two squares one behind the other while maximized, the size of ImGui's
+    close button, lit when the pointer is over it. Resting the pointer on a button names it
+    (Maximize, Restore, Close).
   - FTXUI: `[↑]` beside the `[x]`, `[↕]` to go back (`[^]` / `[=]` without those glyphs). The
     window is drawn from the top-left as big as the terminal.
   - The tvision desktop has its own zoom box (and Ctrl-F5) instead, which this key doesn't follow.
 - **The token** `ui.maximize` (§5.7) says the backend has the button.
 
-Every document gets a **Windows** menu to open such a window again, with no menu items to write:
+**Bringing a window to the front.** A window comes to the front of the others when:
+- the user clicks it (in a terminal, Tab moving the focus into it does too);
+- the user picks it in the Windows menu (below), whether it was open or closed;
+- it becomes maximized;
+- the document writes `1` to `tree.<id>.raise`, once: the core clears it as the window is drawn.
+  A handler that opens a closed window and wants it in front sets `tree.<id>.open` and this
+  together.
 
-- It holds a ticked item per window, bound to that window's `tree.<id>.open`. Unticking an item
-  closes the window, closable or not; ticking it opens it.
+ImGui and FTXUI do all of these. The tvision desktop does all but the maximize, which it has no
+button for (its zoom box is its own). ImGui and tvision also give the window the keyboard.
+
+Every document gets a **Windows** menu to show any of its windows again, closed or behind the
+others, with no menu items to write:
+
+- It holds an item per window, ticked while that window's `tree.<id>.open` is `1`. As in a
+  desktop's window manager, picking a window shows it in front of the others: a closed one opens,
+  and an open one stays open and comes to the front. The window's X closes it, so a
+  `closable: false` window can't be closed from the menu.
 - It lists only the windows no menu item of the document already toggles. A document with its own
   "Settings" or "View" menu bound to `tree.<id>.open` (`lsystem_forest.ari`,
   `conference_roster.ari`) keeps it, and the Windows menu lists only the windows that menu leaves
   out. When it leaves none out there is no Windows menu.
 - A window made by `repeat:` is listed once per instance, under the title that instance shows
   (its `bind:`, else its label with `{i}` filled in), after the other windows. The list follows the
-  repeat's count each frame. Opening one from the menu also brings it to the front.
-  `conference_roster.ari` sets `windows_menu: View`, so its per-peer camera windows are listed by
+  repeat's count each frame. `conference_roster.ari` sets `windows_menu: View`, so its per-peer camera windows are listed by
   name at the end of its View menu.
 - A host's menus (`AppRuntime::set_host_menus`) count as the document's: arigl's
   *Settings > Controls...* opens the Controls window, so arigl's Windows menu leaves it out. Under
@@ -1708,8 +1818,8 @@ Every document gets a **Windows** menu to open such a window again, with no menu
 - It goes after the document's own menus (and a host's). When the menu bar already has a menu of
   the same title (`fem_gallery.ari`'s own Windows menu), the items go at the end of that menu,
   after a separator, instead of a second menu of that name. A document with no `menubar:` gets a
-  menu bar holding just the Windows menu, but only when one of its windows is closable; otherwise
-  nothing can be closed.
+  menu bar holding just the Windows menu, but only when one of its windows has a close button;
+  when every window is `closable: false`, nothing can be closed.
 
 A document places or turns it off:
 
@@ -1723,7 +1833,7 @@ menubar:
 
 A bare `- windows_menu` entry places it under its default title. The menu is the core's (it calls
 the backend's ordinary menu functions), so the ImGui menu bar, the FTXUI menu bar and the tvision
-host's menu bar all show it, and its items toggle the same state the close buttons write. The open
+host's menu bar all show it, and its items write the same state the close buttons do. The open
 state lives in the document's state tree like the geometry (§11.4): it holds for the run and
 across a reload, but not across runs.
 
@@ -2105,7 +2215,8 @@ this for every one.
   feed, a form) is all panels, so they start shown (`ImGuiOverlay::setPhoneHidesPanels`, which
   arigl's `AriRuntime::load` sets). The button stays above every window, even one dragged over
   its corner. A window collapses to its title bar with the arrow at the title's left (or a double
-  tap on the title), closes with its X when it is `closable:`, and comes back from the View or
+  tap on the title, which on a phone collapses rather than maximizes), closes with its X unless
+  it is `closable: false`, and comes back from the View or
   Windows menu (§5.9). On a touch screen a window moves by its title bar only, so a finger that
   slips off a widget does not carry its window away.
 - **A list of windows.** A document laid out for a wider screen would have its windows moved
@@ -2493,8 +2604,10 @@ it follow it too.
 **Overrides.** `override:` restyles nodes in one view only. Each entry names a node id, a tag, or
 `"*"` (everything), and sets any of `drawstyle` (`surface`, `wireframe`, `points`), `opacity`,
 `color`, `line_width` and `point_size` (`material: { color, opacity }` spells the same fields).
-What an entry does not set stays as the node has it. An entry covers the named node's subtree, and
-the entries apply in order, each adding to the ones before it field by field:
+What an entry does not set stays as the node has it, its own `material: { opacity }` included
+(§5.4), so a node see-through in the main view is see-through in every view unless an entry sets
+its `opacity`. An entry covers the named node's subtree, and the entries apply in order, each adding
+to the ones before it field by field:
 
 ```yaml
 - type: viewport
@@ -2770,6 +2883,68 @@ made for:
   backends' paths, `cvcgl_imgui_rich_text` taps, drags and tabs through ImGui's own input, and
   `ari_rich_text` checks `ari snapshot`'s lines of `src/ari/tests/rich_text.ari`.
 
+### 5.21 Labels: `label:` and `entity_labels:`
+
+Any scene node can carry a label ([`scene_labels.h`](../inc/cvc/gl/ariadne/scene_labels.h)): text
+drawn over the node in screen space, such as a vehicle's name tag. The labels of a scene are drawn
+by one node, a `cvc::gl::LabelLayerNode` ([`LabelLayer.h`](../inc/cvc/gl/LabelLayer.h)), in the
+overlay pass. Each draw reads the label's anchor from its node's world transform; nothing is
+written to state.
+
+```yaml
+- node: car_a
+  source: { box: [4, 2, 1.5] }
+  label:
+    text: Alpha                       # or bind: <state key>, read as it draws
+    offset: 2                         # metres above the top of the node (or [x, y, z])
+    color: [1, 1, 1]                  # the text: [r, g, b], "#rrggbb" or c0..c7
+    backdrop: [0.05, 0.05, 0.07]      # the box behind the text, or none
+    edge: c0                          # a frame round the box (or true, or none)
+    size: 14                          # pixels at scale 1
+    scale: 1                          # a number or a state key
+    focus: { key: cam.follow, scale: 1.4 }   # larger while cam.follow holds this node's id
+    fade: [300, 600]                  # whole nearer than 300 m, gone past 600 m
+```
+
+- **Text.** `label: <text>` is the text alone. A label with neither `text:` nor `bind:` shows the
+  node's id. `bind:` takes the key's value while it holds one; `bold: true` is bold.
+- **Where it sits.** `anchor:` is `top` (the top of the node's bounds, the default), `center` or
+  `origin`. `offset:` is added to that point in world axes. The text sits centred above the
+  point.
+- **Backdrop and edge.** The backdrop is a box behind the text, at `backdrop_opacity` (0.6). The
+  edge is a frame round it, `edge_width` pixels wide.
+- **Size.** `scale:` multiplies `size:`. `focus:` multiplies it again by its `scale` (1.4) while its
+  key holds its `value`: the node's id by default, e.g. the vehicle the camera follows.
+- **Fade and cull.** `fade: [near, far]` is by the distance from the camera drawing it. The label
+  is whole up to `near`, fades linearly to nothing at `far`, and is not drawn past it.
+- **Depth order.** Labels are drawn farthest first, so a nearer label lies over a farther one.
+- **Views.** A label is drawn only where its node is. A hidden node's label is hidden. A view that
+  leaves the node out (`tags:`, §5.18) leaves its label out. A mirror or viewport fades and orders
+  the labels by its own camera.
+- **Cost.** The text is rasterised again only when its text, size or opacity changes. Opacity is
+  in 32 steps across the fade band. A still label costs a projection and a quad.
+
+The node's own VTK label (the `show_label`, `label_text` and `label_size` keys of every graphics
+node) is still there. It is plain text at the node's centre; `label:` is the one with these rules.
+
+`entity_labels:` in the `scene:` block gives every world entity (§5.4's world vehicles, **Entities**, drawn
+as `vehicle_<id>`) a label in the same keys. Its text is `"{name}"` by default, and `{name}`, `{id}`,
+`{archetype}` and `{team}` are filled in. An unnamed entity shows its node's id.
+`entity_labels: true` gives the default look, e.g.
+`entity_labels: { offset: 2.5, fade: [300, 600], focus: cam.follow }`. A label is made with each
+entity's node and goes with it.
+
+[`cvcgl_ariadne_labels`](../src/cvcGL/test/cvcgl_ariadne_labels.cpp) covers these from a document,
+drawn for real:
+
+- the fade rule, and a label culled past `far`;
+- the pixels of a label's text, backdrop and edge above its node;
+- the depth order;
+- bound text, scale and focus;
+- hidden nodes, and a renderer that leaves a node out;
+- that a still frame rasterises nothing again;
+- an entity's name label.
+
 ## 6. Composition: include / import / load
 
 Three mechanisms compose documents. They differ in **isolation**, not in how they
@@ -2811,7 +2986,10 @@ windows:
 
 Any widget may carry an `id:` (not only windows): it names the instance a backend keys its
 per-instance state on and that the core persists view state under (`tree.<id>.*`). An include
-site may override the unit's `id:`, so two instances of one unit stay distinct.
+site may override the unit's `id:`, so two instances of one unit stay distinct. When the unit is a
+window, the include site may also give it its own `pos:`, `size:`, `layout:`, `frame:`,
+`closable:`, `maximizable:` and `resizable:` (§5.8, §5.9). Each replaces the unit's only where it
+is given, so a document arranges shared panels without forking them.
 
 Args are strings. A unit takes whole widget lists through **slots**: a `- slot: NAME` item in
 any of its widget lists marks where they go. The include site's `slots: {NAME: [...]}` puts its
@@ -4117,7 +4295,10 @@ host.run()                          # until SIGTERM; the app's shutdown, then th
 
 - **The script thread.** The program runs on a thread of its own with one asyncio loop
   (`host.loop`), which serves its ASGI apps (uvicorn) and its tasks. The relay never runs Python,
-  never takes the GIL and never waits on the program: a sync handler holds up only the loop.
+  never takes the GIL and never waits on the program: a sync handler holds up only the loop. A
+  program keeps each task it starts (`host.loop.create_task`) until the task is done: asyncio holds
+  tasks only weakly, so one waiting on a stream of its own (`asyncio.open_connection`) is freed by
+  the next full garbage collection, mid-await, and its work never finishes.
 - **Writes.** `host.set`, `set_tree`, `set_series` and `set_plot` (as `pycvc.ari.Host`'s)
   take paths from the tree's root and are queued. The relay applies them on its next room step
   (60 Hz), ahead of the server document's programs, coalesced per path and in the order of each path's last write
@@ -4542,6 +4723,7 @@ against a local test server. `ari snapshot` prints the programs' warnings after 
 | `--net-policy FILE` | read `allow` and `credential` lines from `FILE` (repeatable; implies `--net`) |
 | `--credential-store S` | keep credentials across runs in `S` (implies `--net`; not in a browser) |
 | `--credential-env N=V` | credential `N` is the token in environment variable `V`, for this run (repeatable; a policy `credential` line must bind `N`; not in a browser) |
+| `--e2ee-store S` | keep end-to-end encryption keys in `S`, a name or a path, for the `e2ee-*` verbs (§10.8; implies `--net`; not in a browser) |
 | `--oidc-issuer ISSUER` | documents may sign in (§10.5) with `ISSUER` only; allows its origin (repeatable; implies `--net`) |
 | `--oidc-client I=ID` | sign in to issuer `I` as client `ID`, the launcher's registration (repeatable; pins `I` too) |
 | `--oidc-redirect-uri U` | the redirect URI a browser page registers (§10.5; default: the page's own URL) |
@@ -5109,6 +5291,53 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
   [`ws_client.h`](../inc/cvc/net/ws_client.h)). A page may close a socket only with code 1000
   or 3000-4999, so there any other `CODE` is sent as 1000.
 
+### 10.8 End-to-end encrypted DMs: the `e2ee-*` verbs
+
+These verbs seal and open TX.WTF's end-to-end encrypted direct messages: X3DH, then a Double
+Ratchet, over libsodium, byte-compatible with TX.WTF's own web client.
+- **Who holds the keys.** The host does. A document names an account's handle and a conversation,
+  gives the verbs what the server sent, and sends what they give back with `http-request`. It never
+  holds a key: every dict below has public keys, ciphertext and plaintext only, and no error quotes
+  a key.
+- **When they are there.** A host has them with `--e2ee-store SPEC` (a name in the user's config
+  directory, or a path), on a build with libsodium.
+- **Where they are not.** Not in a browser yet, and never on a relay.
+- **More.** docs/E2EE.md has the design, the key storage, and the cross-check against e2ee.js.
+
+| verb | what |
+|---|---|
+| `(e2ee-status)` | `{ok persistent error}`: whether the verbs below are here (the store may not open: no libsodium, a browser, another process holds it), and whether the keys outlive this run |
+| `(e2ee-identity H)` | the handle's public keys `{identity_key_ed25519 identity_key_x25519 registration_id fingerprint one_time_prekeys publish}`, or `nil`; `publish` is the `POST /e2ee/keys` body |
+| `(e2ee-create H [N])` | make the handle's identity with N one-time prekeys (20); the same dict |
+| `(e2ee-prekeys H N)` | N more one-time prekeys: the `POST /e2ee/keys/one-time` body |
+| `(e2ee-forget H)` | drop its identity, sessions and cached plaintext |
+| `(e2ee-session? H CONV)` | whether a session for conversation CONV is held here |
+| `(e2ee-seal H CONV PEER TEXT [BUNDLE])` | `{ok need_bundle error body}`: `body` is the `POST /e2ee/dm/conversations/{CONV}/messages` body for user PEER. A first message needs BUNDLE (`GET /e2ee/keys/{username}`); without it `need_bundle` is `#t` and nothing changed |
+| `(e2ee-seal-group H CONV TEXT MEMBERS)` | one body, a key per member (`grp-dr-v1`); MEMBERS are user ids or `(dict "user_id" ID "bundle" B)`; `need_bundles` lists the ids that need one |
+| `(e2ee-sent H MSGID TEXT)` | keep our own send's text under the server's id (a sender cannot open what it sent) |
+| `(e2ee-open H CONV MESSAGE)` | `{ok status text attachments error}` for one listed message; status `ok`, `cached`, `own`, `locked`, `no-session` (its session is on another device) or `failed` |
+| `(e2ee-backup H PASSPHRASE)`, `-async` | the `PUT /e2ee/backup` body (Argon2id, about a second): `{ok error body}` |
+| `(e2ee-restore H BLOB PASSPHRASE)`, `-async` | take the identity from a `GET /e2ee/backup` reply: `{ok error identity}` |
+| `(e2ee-fingerprint KEY)` | a key people can compare: 40 hex digits in groups of 5 |
+
+Things to know:
+
+- **Order matters.** Open a conversation's messages in the order they were sent (ascending id).
+  A message opened once comes back `cached`; the ratchet never sees it twice.
+- **A tampered or forged message changes nothing.** It fails, and the session is as it was.
+- **A session is this device's.** Where another device holds a conversation's session, its
+  messages come back `no-session`. A document must not start a new one there: the other side
+  would ignore it, and its copy would break.
+- **The passphrase passes through the document.** It comes from a password field, so it is in
+  state for that one action. Clear the field in the same handler.
+- **The store is locked to one process.** A second host on the same `--e2ee-store` file gets no
+  verbs, and `(e2ee-status)` says it is in use.
+- **Tests.** `e2ee_test` replays vectors written by TX.WTF's own e2ee.js and compares every byte;
+  `ariadne_e2ee_test` runs the verbs in a document. `tools/e2ee/interop.sh` makes a live round
+  trip with e2ee.js.
+
+---
+
 ## 11. Caveats — what is not yet wired
 
 State plainly so authors are not misled. Each item cites the code; the roadmap items
@@ -5231,8 +5460,10 @@ Measured in CI (2026-10-20):
 - macOS CI renders with the Apple Software Renderer, which is deterministic but draws edges and
   shading a little differently. Against the llvmpipe goldens, windows, menus and grid had 3 to 6
   pixels beyond 40 (they pass), widgets had 40 and scene 467 (they fail).
-- So `widgets.macos.png` and `scene.macos.png` are macOS goldens, and macOS compares those two
-  against its own renderer.
+- With the window chrome's close and maximize glyphs (2026-11-14), menus had 7 and windows 12
+  (they pass) but grid 15 (it fails).
+- So `widgets.macos.png`, `scene.macos.png` and `grid.macos.png` are macOS goldens, and macOS
+  compares those three against its own renderer.
 
 To make or refresh a macOS golden, take `<name>.actual.png` from the failing macOS job's
 `ari-golden-macOS-<lane>` artifact, look at it, and commit it as `<name>.macos.png`.

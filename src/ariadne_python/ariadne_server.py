@@ -14,7 +14,9 @@ are the functions clients call. The relay never runs Python and never waits on i
 ``Host`` (one per program; ``current_host()`` returns it):
 
 * ``host.loop`` is the script thread's asyncio loop. Under plain ``python`` it is the running loop,
-  or a new one that ``run()`` runs.
+  or a new one that ``run()`` runs. Keep the task ``host.loop.create_task()`` returns until it is
+  done: asyncio holds a task only weakly, so one waiting on a stream of its own (a client of
+  ``asyncio.open_connection``) is freed by the next full garbage collection, mid-await.
 * ``host.set(key, value)``, ``set_tree``, ``set_series`` and ``set_plot`` write the relay's tree,
   as ``pycvc.ari.Host``'s do. A key is a path from the tree's root (``cyprov.status``; a leading
   ``/`` is allowed too). In arisrvx a write is queued, and the relay applies it on its next room step

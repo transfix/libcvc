@@ -30,6 +30,7 @@
 #include <cvc/state/state.h>
 #include <exception>
 #include <filesystem>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -120,7 +121,75 @@ double clamp_to(const vehicle_archetype &a, const char *setting, double v) {
   return it == a.ranges.end() ? v : std::clamp(v, it->second.first, it->second.second);
 }
 
+// An intent's keys under `base` (`<base>.intent.*`, `<base>.force.*`), in this order.
+constexpr const char *kIntentLeaves[] = {"intent.mode",   "intent.steer", "intent.accel",
+                                         "intent.weight", "force.x",      "force.y",
+                                         "force.steer"};
+constexpr std::size_t kIntentKeys = sizeof(kIntentLeaves) / sizeof(kIntentLeaves[0]);
+// What the keys read as when none is set: nothing to apply.
+std::string no_intent_keys() { return std::string(kIntentKeys, '|'); }
+
+bool finite_intent(const entity_intent &in) {
+  return std::isfinite(in.steer) && std::isfinite(in.accel) && std::isfinite(in.force_x) &&
+         std::isfinite(in.force_y) && in.weight >= 0.0 && in.weight <= 1.0;
+}
+
+// The intent the keys say: a value that is not a number (or a mode that is not one) counts as
+// not given. With no mode, a steer or an acceleration replaces the command.
+entity_intent intent_from_keys(const std::array<std::string, kIntentKeys> &v) {
+  entity_intent in;
+  const auto number = [](const std::string &t, double &out) {
+    if (t.empty())
+      return false;
+    try {
+      std::size_t used = 0;
+      const double x = std::stod(t, &used);
+      if (used != t.size() || !std::isfinite(x))
+        return false;
+      out = x;
+      return true;
+    } catch (const std::exception &) {
+      return false;
+    }
+  };
+  const bool steer = number(v[1], in.steer);
+  const bool accel = number(v[2], in.accel);
+  if (!parse_intent_mode(v[0], in.command))
+    in.command = steer || accel ? entity_intent::mode::replace : entity_intent::mode::off;
+  double w = in.weight;
+  if (number(v[3], w))
+    in.weight = std::clamp(w, 0.0, 1.0);
+  number(v[4], in.force_x);
+  number(v[5], in.force_y);
+  in.force_steers = !(v[6] == "0" || v[6] == "false" || v[6] == "off");
+  return in;
+}
+
 } // namespace
+
+const char *intent_mode_name(entity_intent::mode m) {
+  switch (m) {
+  case entity_intent::mode::replace:
+    return "replace";
+  case entity_intent::mode::blend:
+    return "blend";
+  case entity_intent::mode::off:
+    break;
+  }
+  return "off";
+}
+
+bool parse_intent_mode(const std::string &s, entity_intent::mode &out) {
+  if (s == "off")
+    out = entity_intent::mode::off;
+  else if (s == "replace")
+    out = entity_intent::mode::replace;
+  else if (s == "blend")
+    out = entity_intent::mode::blend;
+  else
+    return false;
+  return true;
+}
 
 ph::vehicle_desc vehicle_desc_of(const vehicle_archetype &a, double mass, double max_speed) {
   ph::vehicle_desc d;
@@ -297,6 +366,10 @@ struct WorldVehicles::impl {
     double sx = 0.0, sy = 0.0, syaw = 0.0; // where it starts (resolved at its first placing)
     bool started = false;
     double gx = 0.0, gy = 0.0; // its goal
+    // Its intent keys as last read: its own, the intents table's by id, and by name.
+    std::array<std::string, 3> seen_intent{no_intent_keys(), no_intent_keys(), no_intent_keys()};
+    entity_intent applied;  // the intent the last navigator tick used
+    std::string command_by; // who commanded it then: its controller, intent, blend or hold
   };
   std::vector<entity> ents;
   std::uint64_t next_id = 1;
@@ -306,6 +379,116 @@ struct WorldVehicles::impl {
 
   // The request keys as last seen (a change is a request).
   std::string seen_spawn, seen_remove, seen_clear, seen_sel;
+
+  // Intents (S1). `mu` guards `intents` and `live`, which set_intent() reaches from any thread;
+  // the rest is the stepping thread's.
+  mutable std::mutex mu;
+  std::map<std::uint64_t, entity_intent> intents;
+  std::set<std::uint64_t> live;
+  std::string ikey; // the intents table (world: vehicles: intents:), "" none
+  // The drive's external force on each of the navigator's agents (normalized), for the tick: the
+  // drive's threads read it while sim->step runs.
+  std::vector<std::array<float, 2>> force;
+
+  static void sample_force(void *user, int i, int, float, float, float *fx, float *fy) {
+    const impl *d = static_cast<const impl *>(user);
+    if (i >= 0 && static_cast<std::size_t>(i) < d->force.size()) {
+      *fx = d->force[static_cast<std::size_t>(i)][0];
+      *fy = d->force[static_cast<std::size_t>(i)][1];
+    } else {
+      *fx = *fy = 0.0f;
+    }
+  }
+
+  // Each entity's intent keys: a change (from what they read last) is a new intent.
+  void read_intent_keys() {
+    cvc::state *r = root();
+    if (!r || (ekey.empty() && ikey.empty()))
+      return;
+    for (entity &e : ents) {
+      const std::string id = std::to_string(e.id);
+      const std::string bases[3] = {
+          ekey.empty() ? std::string() : ekey + cvc::state::SEPARATOR + id,
+          ikey.empty() ? std::string() : ikey + cvc::state::SEPARATOR + id,
+          ikey.empty() || !cvc::state::isValidStateName(e.spec.name)
+              ? std::string()
+              : ikey + cvc::state::SEPARATOR + e.spec.name};
+      for (std::size_t k = 0; k < 3; ++k) {
+        if (bases[k].empty())
+          continue;
+        cvc::state *base = r->findDescendant(bases[k]);
+        std::array<std::string, kIntentKeys> v;
+        std::string sig;
+        for (std::size_t j = 0; j < kIntentKeys; ++j) {
+          if (base)
+            if (cvc::state *leaf = base->findDescendant(kIntentLeaves[j]))
+              v[j] = leaf->value();
+          sig += v[j] + "|";
+        }
+        if (sig == e.seen_intent[k])
+          continue;
+        e.seen_intent[k] = sig;
+        const entity_intent in = intent_from_keys(v);
+        std::lock_guard<std::mutex> lock(mu);
+        intents[e.id] = in;
+      }
+    }
+  }
+
+  // The navigator's tick, before it steps: each entity's intent as its command (sim_world's
+  // override_command) and its force on the drive (ext_force); an external entity with no intent
+  // brakes to a stop and holds.
+  void apply_intents() {
+    std::map<std::uint64_t, entity_intent> now;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      now = intents;
+    }
+    force.assign(static_cast<std::size_t>(sim->size()), {0.0f, 0.0f});
+    const double dt = every * world->config().fixed_dt;
+    bool pushed = false, steers = false;
+    for (entity &e : ents) {
+      const int i = index(e);
+      if (i < 0)
+        continue;
+      const auto it = now.find(e.id);
+      e.applied = it == now.end() ? entity_intent{} : it->second;
+      const entity_intent &in = e.applied;
+      const bool external = e.spec.controller == "external";
+      const float steer = static_cast<float>(in.steer);
+      const float accel = static_cast<float>(in.accel * kScale);
+      if (in.command == entity_intent::mode::replace ||
+          (external && in.command != entity_intent::mode::off)) {
+        sim->override_command(i, steer, accel);
+        e.command_by = "intent";
+      } else if (in.command == entity_intent::mode::blend) {
+        sim->override_command(i, steer, accel, static_cast<float>(in.weight));
+        e.command_by = "blend";
+      } else if (external) {
+        const double v = world->vehicle_state(plant->vehicle(i)).speed;
+        const double a_b = std::max(e.desc.max_decel, 0.1);
+        sim->override_command(i, 0.0f, static_cast<float>(std::clamp(-v / dt, -a_b, a_b) * kScale));
+        e.command_by = "hold";
+      } else {
+        e.command_by = e.spec.controller;
+      }
+      if (in.force_x != 0.0 || in.force_y != 0.0) {
+        force[static_cast<std::size_t>(i)] = {static_cast<float>(in.force_x * kScale),
+                                              static_cast<float>(in.force_y * kScale)};
+        pushed = true;
+        steers = steers || in.force_steers;
+      }
+    }
+    if (pushed) {
+      cvc::nav::ext_force ef;
+      ef.sample = &impl::sample_force;
+      ef.user = this;
+      ef.steer = steers;
+      sim->set_ext_force(ef);
+    } else {
+      sim->clear_ext_force(); // the plain drive, byte for byte
+    }
+  }
 
   cvc::state *root() const { return app ? &cvc::state::instance(*app) : nullptr; }
   std::string get(const std::string &leaf) const {
@@ -581,6 +764,11 @@ struct WorldVehicles::impl {
     out.throttle = vs.throttle;
     out.brake = vs.brake;
     out.reached = std::hypot(e.gx - (out.x), e.gy - (out.y)) < kReach + e.desc.half_extents.x;
+    if (const float *s = sim->plant_steer_command())
+      out.command_steer = s[i];
+    if (const float *a = sim->plant_accel_command())
+      out.command_accel = a[i] / kScale;
+    out.intent = e.applied;
     return out;
   }
 
@@ -759,6 +947,9 @@ struct WorldVehicles::impl {
       put(at + "wheel_load", num(in.wheel_load));
       put(at + "aero_force", num(in.aero_force));
       put(at + "gear", std::to_string(in.gear));
+      put(at + "command.steer", num(in.command_steer));
+      put(at + "command.accel", num(in.command_accel));
+      put(at + "command.by", e.command_by);
       summary += (summary.empty() ? "" : "\n") + id + "  " + e.spec.name + "  " + e.spec.archetype +
                  "  " + e.spec.controller + "  " +
                  (in.placed ? fixed(in.speed, 1) + " m/s" : std::string("waiting"));
@@ -894,6 +1085,10 @@ std::uint64_t WorldVehicles::spawn(const entity_spec &spec, std::string *why) {
   }
   ++d.next_id;
   ++d.rev;
+  {
+    std::lock_guard<std::mutex> lock(d.mu);
+    d.live.insert(placed.id);
+  }
   return placed.id;
 }
 
@@ -905,6 +1100,9 @@ bool WorldVehicles::despawn(std::uint64_t id) {
         d.sim->remove_agent(it->agent);
       d.ents.erase(it);
       ++d.rev;
+      std::lock_guard<std::mutex> lock(d.mu);
+      d.live.erase(id);
+      d.intents.erase(id);
       return true;
     }
   return false;
@@ -915,7 +1113,33 @@ void WorldVehicles::clear() {
   d.unplace_all(false);
   d.ents.clear();
   ++d.rev;
+  std::lock_guard<std::mutex> lock(d.mu);
+  d.live.clear();
+  d.intents.clear();
 }
+
+bool WorldVehicles::set_intent(std::uint64_t id, const entity_intent &intent) {
+  impl &d = *_impl;
+  if (!finite_intent(intent))
+    return false;
+  std::lock_guard<std::mutex> lock(d.mu);
+  if (!d.live.count(id))
+    return false;
+  d.intents[id] = intent;
+  return true;
+}
+
+bool WorldVehicles::clear_intent(std::uint64_t id) { return set_intent(id, entity_intent{}); }
+
+entity_intent WorldVehicles::intent(std::uint64_t id) const {
+  const impl &d = *_impl;
+  std::lock_guard<std::mutex> lock(d.mu);
+  const auto it = d.intents.find(id);
+  return it == d.intents.end() ? entity_intent{} : it->second;
+}
+
+void WorldVehicles::set_intents_key(std::string key) { _impl->ikey = std::move(key); }
+const std::string &WorldVehicles::intents_key() const { return _impl->ikey; }
 
 WorldSpawns &WorldVehicles::spawns() { return *_impl->spawns; }
 const WorldSpawns &WorldVehicles::spawns() const { return *_impl->spawns; }
@@ -964,6 +1188,8 @@ void WorldVehicles::before_step() {
     return;
   if (d.steps++ % static_cast<std::uint64_t>(d.every) != 0)
     return;
+  d.read_intent_keys();
+  d.apply_intents();
   d.sim->step(1);
   // nav@1 wanders: one at its goal draws another.
   for (impl::entity &e : d.ents) {

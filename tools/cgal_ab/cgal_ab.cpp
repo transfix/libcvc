@@ -295,6 +295,8 @@ int main() {
 
   // The VolumeRover ports' permissive libraries (row T16 of their plan's test matrix).
   cgal_ab::ab_permissive(r);
+  // cvc::planar, the ContourTiler port's planar geometry, against ContourTiler's CGAL calls.
+  cgal_ab::ab_planar(r);
 
   std::printf("%s: %d failure(s)\n", cgal_ab::g_failures ? "FAILED" : "ok", cgal_ab::g_failures);
   return cgal_ab::g_failures ? 1 : 0;

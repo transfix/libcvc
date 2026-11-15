@@ -19,5 +19,5 @@ async def main():
     host.stop(0)
 
 
-host.loop.create_task(main())
+main_task = host.loop.create_task(main())  # kept: the loop holds a task only weakly
 host.run()

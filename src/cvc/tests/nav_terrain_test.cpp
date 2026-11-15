@@ -14,6 +14,7 @@
 // route (H5). The Jolt plant's gates are in nav_plant_test.
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -26,6 +27,7 @@
 #include <cvc/nav/vehicle_plant.h>
 #include <functional>
 #include <gtest/gtest.h>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -344,6 +346,41 @@ TEST(NavTerrain, AnOverrideCommandIsHeldToTheTopSpeed) {
   std::printf("  full throttle on a plant with no top speed: %.2f m/s (nav's vmax 8)\n", top);
   EXPECT_LE(top, 8.0 + 0.01);
   EXPECT_GT(top, 7.5) << "held at the top speed, not below it";
+}
+
+// A weight below 1 blends the caller's command with the drive's, on a plant: the plant's command
+// is (1 - w) of the drive's and w of the caller's, steer and acceleration alike. The kinematic arm
+// has no one command for the tick, so a blend there, and a weight outside [0, 1], throw.
+TEST(NavTerrain, AnOverrideCommandBlendsWithTheDrivesOnAPlant) {
+  std::vector<std::uint8_t> occ(static_cast<std::size_t>(R) * C, 0);
+  const sim_world::config c = config(8.0);
+  const auto first_command = [&](float weight, bool override_it) {
+    sim_world w = make(c, occ, -40.0, -10.0, 60.0, 30.0);
+    free_plant plant;
+    w.set_plant(&plant);
+    if (override_it)
+      w.override_command(0, 0.2f, 0.5f * c.veh.a_max, weight);
+    w.step();
+    return std::array<float, 2>{w.plant_steer_command()[0], w.plant_accel_command()[0]};
+  };
+  const std::array<float, 2> drive = first_command(1.0f, false);
+  const std::array<float, 2> mine = first_command(1.0f, true);
+  const std::array<float, 2> blend = first_command(0.3f, true);
+  const std::array<float, 2> none = first_command(0.0f, true);
+  EXPECT_NEAR(mine[0], 0.2f, 1e-6f);
+  EXPECT_NEAR(mine[1], 0.5f * c.veh.a_max, 1e-6f);
+  EXPECT_NEAR(blend[0], 0.7f * drive[0] + 0.3f * 0.2f, 1e-6f) << drive[0];
+  EXPECT_NEAR(blend[1], 0.7f * drive[1] + 0.3f * 0.5f * c.veh.a_max, 1e-6f) << drive[1];
+  EXPECT_NEAR(none[0], drive[0], 1e-6f);
+  EXPECT_NEAR(none[1], drive[1], 1e-6f);
+
+  sim_world kin = make(c, occ, -40.0, -10.0, 60.0, 30.0);
+  EXPECT_THROW(kin.override_command(0, 0.2f, 0.0f, 0.5f), std::invalid_argument);
+  EXPECT_NO_THROW(kin.override_command(0, 0.2f, 0.0f, 1.0f));
+  free_plant plant;
+  kin.set_plant(&plant);
+  EXPECT_THROW(kin.override_command(0, 0.2f, 0.0f, 1.5f), std::invalid_argument);
+  EXPECT_THROW(kin.override_command(0, 0.2f, 0.0f, -0.1f), std::invalid_argument);
 }
 
 // A parked agent on a plant brakes at what the plant says its brakes achieve (plant_limits::
