@@ -496,6 +496,9 @@ set(SOURCE_FILES
   nav/sim_thread.cpp
   nav/nav_stats.cpp
   nav/plant_ledger.cpp
+  nav/nav_arms.cpp
+  nav/nav_panels.cpp
+  nav/run_log.cpp
   nav/rollout_plant.cpp
   nav/dyn4_ledger.cpp
   ph/compose.cpp

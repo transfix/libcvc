@@ -44,6 +44,8 @@
 #include <cvc/geometry/skeleton.h>
 #include <cvc/geometry/skeleton_params.h>
 #include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/nav_panels.h>
+#include <cvc/nav/run_log.h>
 #include <cvc/nav/sim_world_trace.h>
 #include <cvc/ph/compose.h>
 #include <cvc/ph/se2_train.h>
@@ -2483,6 +2485,63 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
   return 0;
 }
 
+// ── nav: cvc::nav's lab (docs/NAV_LAB.md): a run log's Stats ──
+
+// A run log's arms, legs and Stats rows at its last tick, as the Stats window shows them.
+static void print_run_log(const cvc::nav::run_log &log, std::ostream &out) {
+  const cvc::nav::run_log_header &h = log.header();
+  out << "run log " << cvc::nav::kRunLogSchema << " (libcvc " << h.libcvc << "): " << log.arms()
+      << (log.arms() == 1 ? " arm, " : " arms, ") << h.agents
+      << (h.agents == 1 ? " agent each, " : " agents each, ") << log.ticks() << " ticks of " << h.dt
+      << " s, " << log.legs().size() << (log.legs().size() == 1 ? " leg" : " legs")
+      << (log.finished() ? "" : ", not finished") << "\n";
+  out << "  scene " << (h.scene.empty() ? "-" : h.scene) << " on "
+      << (h.plant.empty() ? "kinematic" : h.plant) << ", seed " << h.seed << "\n";
+  for (const cvc::nav::run_log_arm &a : h.arms)
+    out << "  arm " << a.slot << " " << a.name << ": "
+        << (a.uri.empty() ? std::string("the built-in policy") : a.uri)
+        << (a.sha256.empty() ? std::string() : " (sha256 " + a.sha256.substr(0, 16) + ")") << "\n";
+  const std::vector<cvc::nav::panel_table> t = cvc::nav::arms_tables(log, log.ticks() - 1, 0);
+  const cvc::nav::panel_table &stats = t.front();
+  out << "  Stats, the last leg:\n   ";
+  for (const std::string &c : stats.columns)
+    out << " " << std::setw(c == "arm" ? 14 : 10) << c;
+  out << "\n";
+  for (const std::vector<std::string> &r : stats.rows) {
+    out << "   ";
+    for (std::size_t c = 0; c < r.size(); ++c)
+      out << " " << std::setw(stats.columns[c] == "arm" ? 14 : 10) << r[c];
+    out << "\n";
+  }
+  for (const std::string &n : log.notes())
+    out << "  note: " << n << "\n";
+}
+
+static int cmd_nav(cvc::app &, int argc, char **argv) {
+  po::options_description desc(
+      "cvc nav - cvc::nav's lab: policies side by side (docs/NAV_LAB.md)\n\n"
+      "Operations:\n"
+      "  log <file>       a run log (cvc.nav.run_log/v1): its arms, legs and Stats rows\n\n"
+      "  cvc nav log run.cvcrun\n");
+  std::string op, file;
+  desc.add_options()("help,h", "show help")("op", po::value<std::string>(&op)->required(), "log")(
+      "file", po::value<std::string>(&file)->required(), "the run log");
+  po::positional_options_description pos;
+  pos.add("op", 1).add("file", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+  if (op == "log") {
+    print_run_log(cvc::nav::run_log::read(file), std::cout);
+    return 0;
+  }
+  throw std::runtime_error("Unknown nav operation: " + op + " (use log)");
+}
+
 // ── ph-train: fit the learned port-Hamiltonian vehicle (cvc::ph) to plant logs ──
 
 static int cmd_ph_train(cvc::app &, int argc, char **argv) {
@@ -3005,6 +3064,7 @@ static const command_entry commands[] = {
 
   // ── Replay ──
   {"trace",          "Replay",          "an input trace: info, or verify by replaying it", cmd_trace},
+  {"nav",            "Replay",          "cvc::nav's lab: a run log's arms and Stats",      cmd_nav},
 
   // ── Network (legacy XMLRPC) ──
 #ifdef USING_XMLRPC

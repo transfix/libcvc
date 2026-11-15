@@ -1284,6 +1284,10 @@ struct pycvc_py_conversion {
 // (cvc/ph/compose.h, docs/PH_COMPOSE.md).
 %include "pycvc_ph.i"
 
+// cvc::nav's arms, run log and panels, and the plant ledger's items (cvc/nav/nav_arms.h,
+// run_log.h, nav_panels.h, plant_ledger.h). After pycvc_nav.i: the sim_world handles are its.
+%include "pycvc_nav_lab.i"
+
 // ── Direct wrap of the REAL cvc::state class (full surface, no facade) ───────
 // Like voxels/volume/geometry, the real libcvc header is %include'd here so
 // Python gets the actual cvc::state tree node — not a parallel facade. This
