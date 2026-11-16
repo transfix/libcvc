@@ -258,10 +258,10 @@ The goal is to fix "the waves pass through the geometry". The ambient FFT cascad
 - **Ripples for the glitter, a deviation.** With that alone the near grid's lobe came out at α ≈ 0.24 at 9 m/s, because its 2 m vertices leave most of the short cascade out: toward the sun a washed-out sheen replaced O15's crisp glints. So the share a pixel still resolves (fading out as its footprint grows from 0.12 m to 0.5 m) goes into the normal: 60 % of the unresolved slope variance as six short gravity waves (1.7 m down to 0.43 m, spread about the wind, each at its own speed). The rest widens the lobe. A value-noise gradient in their place printed its lattice as a crosshatch on the glitter, as ABYSSAL's comments warn.
 - **Light through crests** is ABYSSAL's term, height × (L·−V)⁴ × (½ − ½ L·N)³, scaled to the display colours. The bubbles a breaker leaves (the persistent foam's second channel, §10.2) brighten the water body.
 - **The sky** is still the gradient, now blurred toward its mean as the surface roughens; an environment map waits for the atmosphere (D8). Foam is lit, with N·L wrapped and the cloud shade.
-- **Level of detail.** `water.lod_shade` (lsystem_coast: `coast.water.lod_shade`, 1500 m): this shading within it, the O15 water past it, mixed over its last quarter. `water.lod_foam` (150 m) does the same for the foam's detail (§10.2). Both are live keys named for the later level-of-detail and adaptive-quality work (O21) to drive. At 0 they turn each piece off everywhere.
-- **Frame cost.** Measured in one process, so the machine's load drifts out: a scratch harness drew terrain_lab's 1.2 km world (no props) and its water at 1280 × 720 offscreen, the camera 14 m over the crate lake so the water fills most of the frame, each frame a render, a glFinish and the scene's tick. Five configurations alternated 16 times, 30 frames each; the figure is the median over the rounds of each round's difference from the same round's baseline. On the RTX 4070 laptop, with three other agents' builds and benchmarks running: the defaults cost 1.75 ms a frame (quartiles 1.54–2.27) over `lod_shade` 0 with `foam_decay` 0, which is O15's shading and whitecaps. The shading alone costs 1.06 ms and the persistent foam alone (its pass, the atlas reads, the windrows) 0.87 ms; the water's whole draw before O5 was 1.55 ms there. `lod_shade` 0 and `foam_decay` 0 turn each off. arigl snapshots of terrain_lab across processes (unpaced, 420 frames less 120, medians of 3) swung by ±50 ms with the other benchmarks on the same GPU (115 ms before, 76 after, 45 without the water node), too noisy to show 1–2 ms. At its default 20 fps a snapshot paces its frames to 50 ms, which hides any cost under that; #1264's numbers sat at or near that floor. Not measured: the browser.
+- **Level of detail.** `water.lod_shade` (lsystem_coast: `coast.water.lod_shade`, 1500 m): this shading within it, the O15 water past it, mixed over its last quarter. `water.lod_foam` (150 m) does the same for the foam's detail (§10.2). Both are live keys, which adaptive quality (O21, §10.10) now drives. At 0 they turn each piece off everywhere.
+- **Frame cost.** Measured in one process, so the machine's load drifts out: a scratch harness drew terrain_lab's 1.2 km world (no props) and its water at 1280 × 720 offscreen, the camera 14 m over the crate lake so the water fills most of the frame, each frame a render, a glFinish and the scene's tick. Five configurations alternated 16 times, 30 frames each; the figure is the median over the rounds of each round's difference from the same round's baseline. On the laptop's Intel Arc iGPU (where cvcGL's contexts run; the RTX 4070 beside it sat idle), with three other agents' builds and benchmarks running: the defaults cost 1.75 ms a frame (quartiles 1.54–2.27) over `lod_shade` 0 with `foam_decay` 0, which is O15's shading and whitecaps. The shading alone costs 1.06 ms and the persistent foam alone (its pass, the atlas reads, the windrows) 0.87 ms; the water's whole draw before O5 was 1.55 ms there. `lod_shade` 0 and `foam_decay` 0 turn each off. arigl snapshots of terrain_lab across processes (unpaced, 420 frames less 120, medians of 3) swung by ±50 ms with the other benchmarks on the same GPU (115 ms before, 76 after, 45 without the water node), too noisy to show 1–2 ms. At its default 20 fps a snapshot paces its frames to 50 ms, which hides any cost under that; #1264's numbers sat at or near that floor. Not measured: the browser.
 - **Samplers.** The node's vertex stage reads 8 samplers (the three cascades, the bed, the shore distance, the shore layer's two planes, the wake), as before. Its fragment stage reads those 8 and the foam atlas: 9 where it read 8, or 11 where it read 10 with a cloud_sky's shade (two more), as in terrain_lab. lsystem_coast's sea: the vertex stage 8, as before; the fragment stage 3 (the bed, the wake, the atlas) where it read 2. The foam pass's own program reads 3 (two cascades and the last atlas).
-- **Not done.** The projected near grid of §10.11 and D9 (b): the near grid's 2 m vertices already cover the range the foam's detail is drawn over, and the geometric level of detail is its own PR. The atmosphere and its environment map (D8).
+- **Not done.** The projected near grid of §10.11 and D9 (b): the near grid's 2 m vertices already cover the range the foam's detail is drawn over. The geometric level of detail came after, with O21 (§10.11's notes). The atmosphere and its environment map (D8).
 
 **Tests.**
 - A shader compile-and-link smoke test on desktop and on the GLES3 path, as `cvcgl_sway_shader` does.
@@ -1196,6 +1196,43 @@ All of these are vertex-shader maths plus a CPU event manager, and every one has
 
   It would also help terrain_lab's large worlds on their own.
 
+**As built (O21).** `cvc/ariadne/scene_quality.h` (`AdaptiveQuality`, with ABYSSAL's MIT notice), run by cvcGL's `AriRuntime` on the wall time between frames: `arigl run`, the browser and pycvc_gl. On a fixed clock (`arigl snapshot`, the tests) it does not run, and everything draws at tier 0, so a capture shows what it asked for.
+- **Keys** (under the scene's prefix). `quality.adaptive` (1; 0 holds the tier and scale, which can then be set by hand) and `quality.target_fps` (30). The loop writes `quality.tier` (0, everything, to 4, the least), `quality.scale` (0.5–1) and `quality.frame_ms` (the last window's mean).
+- **The loop is ABYSSAL's**: the window, the median panic, the mean's 1.25× and 0.68× bands, the scale's 0.09 and 0.045 steps and the cooldowns. It differs in three ways:
+  - **There is no render scale.** VTK draws at the window's size. The scale moves the distances each tier draws its detail to, which buys far less than pixels do.
+  - **So the panic is at 2× target, not 4×.** At 4×, a frame 3× over its budget nibbled the scale for 4.5 s before each tier, about 29 s to a playable frame on the 15 fps machine below.
+  - **A tier comes back.** ABYSSAL never upgrades. Here, after 5 s of windows under 0.45× target at full scale, a tier returns at half scale. A tier lost again within 10 s of returning doubles the calm spell asked for next time (at most 120 s). A slow start (shaders compiling, the world being built) or a passing load does not cost the session its quality, and a machine on the edge between two tiers does not swing.
+- **What it steps: the water** (`water_quality`, the node's `quality` key overriding with a fixed tier). Drawing only: the physics sea reads none of it, so a run is the same at every tier.
+
+  | tier | the A4 shading | persistent foam | wake window | short cascade | far normal |
+  |---|---|---|---|---|---|
+  | 0 full | to `lod_shade` | to `lod_foam` | 256² (128 m) | to `lod_waves` | full |
+  | 1 high | half | half | 128² (64 m) | to `lod_waves` | full |
+  | 2 medium | a quarter | off | 128² (64 m) | half | half |
+  | 3 low | off | off | off | not transformed or read | half |
+  | 4 least | off | off | off | not transformed or read | a quarter |
+
+  Each distance is also multiplied by the scale. With the persistent foam off by a tier, the whitecaps take the bias that covers Monahan's share alone; the calibration finds it with the other two (`OceanFoamCalibration::whitecapsAlone`), so a tier change never stalls the frame on a synchronous threshold search. The whitecaps keep `lod_foam` at every tier, since they cost nothing.
+- **Not stepped.**
+  - The near grid's density. After the rings its vertices do about 3 % of the water's texture reads (counting reads per vertex and per pixel), and doubling their spacing aliases the middle cascade's shortest waves (about 7 m).
+  - The FFT's resolution. The long and middle cascades' bands fit in ±12 texels, so 128² would hold them, but nearest reads at half the texels need a bilinear read in the shader and a recalibrated foam.
+  - The clouds, rain and spray. They can read `quality.tier` when they want it.
+- **Tests.**
+  - `ariadne_scene_quality_test` covers the loop's pure logic, porting ABYSSAL's `quality-sim.mjs` cases:
+    - machines at 1, 4 and 15 fps reach a playable frame (25 ms) within 12 s on ABYSSAL's cost model;
+    - on a model where the scale buys a fifth, the hopeless machines reach the last tier in 12 s and the 15 fps one a playable frame;
+    - a healthy 60 fps is left alone, and a 2 s hitch drops nothing;
+    - windows close at 24 frames or 400 ms, and the start's cooldown holds;
+    - a tier comes back after a calm spell, and the edge machine changes tier at most 20 times in 10 minutes;
+    - the tier table only takes away.
+  - `cvcgl_ari_switch`: 150 ms frames step the tier down within 3.2 s (to tier 2 at half scale, 157 ms windows). The fixed clock holds the loop, and `quality.adaptive` 0 holds the tier.
+  - `cvcgl_ariadne_realize` checks each tier's uniforms on the water and the whitecaps' higher threshold alone.
+- **Measured** in one process: terrain_lab at 1280 × 720 offscreen on the laptop's Intel Arc iGPU, the tiers alternated round by round (16 frames each after 8 dropped), GPU time from timestamp queries.
+  - In the lake view, where the water fills the frame, the GPU's work a frame (what the tick queues, plus the draw) is 24.0 ms at tier 0. It is 20.9 ms at tier 1 (mostly the wake's smaller window), 20.6 at tier 2, and 17.7 at tiers 3 and 4, about a quarter less.
+  - The frame's wall time also carries the physics step's 16 ms of CPU. It falls by 4.7 ms at tier 3 and 6.1 ms at tier 4 (medians of the per-round differences; tiers 1 and 2 are within its noise).
+  - Seen from high over the whole world, the water is a small part of the picture. The tick's GPU work halves (3.4 to 1.7 ms) and the frame falls by 2.5–3.3 ms.
+  - The physics step is the largest cost, and no tier touches it.
+
 ### 10.11 Shading, projected grid, atmosphere [X `OceanMesh.js`, `ShadingGLSL.js`]
 
 - **GGX.** Trowbridge–Reitz with height-correlated Smith visibility. The sun's disc widens the lobe; Schlick Fresnel with F₀ = 0.02.
@@ -1207,6 +1244,29 @@ All of these are vertex-shader maths plus a CPU event manager, and every one has
   - GGX, footprint roughness and crest scattering in A4 (shader only; reflections stay the gradient sky until an env map exists).
   - The projected grid for the open sea on large terrain_lab worlds (§11).
   - The atmosphere lookup tables are a separate, larger sky project: they would also give the fog that F3 wants. Deferred (decision **D8**).
+
+**As built (the water's frame cost and its geometric level of detail, with O21).** The `water` node, profiled first, then cut where the time went.
+- **Profiling.** `water.profile` 1 times the node's work each frame, section by section, into `water.stats.<section>_ms`; 2 also waits for the GPU after each section (glFinish), so the passes a section queues count in it. On terrain_lab at 1280 × 720 offscreen (the laptop's Intel Arc iGPU, where cvcGL's contexts run; other agents' builds and snapshots on the same machine), with GPU fences, a frame's water work was:
+  - CPU: the scene's physics step, 16 ms, most of it the water's fluid field reading the sea's surface for every immersed cell. It is the largest cost, and adaptive quality may not touch it (the physics sea stays the same at every tier). It is left as a follow-up for the physics.
+  - GPU: the cascades 4–5 ms, the wake's window 2.4 ms, the persistent foam 0.9 ms. The water's own CPU work outside the physics was under 1 ms.
+  - The draws: in the lake view, where the water fills most of the frame, the water's two grids cost several milliseconds of fragment work. The wake's per-pixel reads were the largest piece, then the A4 shading and the persistent foam.
+- **The cascades in one set of passes** (`OceanCascades`). The three cascades' textures are atlases of tiles side by side, and every pass does all of them: one time pass, 2 log₂ n butterfly passes (`OceanButterfly` with tiles), one assemble. That is 18 passes a frame for three 256² cascades instead of 105, texel for texel the same as three OceanFFTs (the test's worst difference is 0). On the iGPU the passes cost their pixels more than their count, so the saving is small: 0.1–0.7 ms of about 4 ms a frame (three runs of 360 paired steps in one process, each fenced). The rest of the win is the CPU's 87 fewer draw calls and two fewer samplers. Each cascade's two tiles sit together, so the first k cascades are the atlases' left part, and `setActive(k)` has the passes cover only those (tiers 3 and 4 drop the short cascade so).
+- **The near grid in rings.** Its inner spacing (`cells` over `near`, 2 m by default) runs out to a third of the way, twice that to two thirds, and four times that past. That is about 2.9 times fewer vertices than the uniform grid. Every ring is a whole multiple of the coarsest spacing, and the grid moves with the camera by that spacing, so no vertex swims. A vertex's normal is differenced over half its own ring's spacing.
+- **Distance fades.** The short cascade's metre-long waves fade out by `water.lod_waves` (150 m), past which a vertex does not read them. The far grid's vertex shader reads nothing (it is flat; its normal is the fragment's). A cascade with no weight at a point is not read at all.
+- **The wake only near.** A fragment outside the window, or with the wake off, reads none of it. Inside, its slope and foam come from the 12 cells the four corners' stencils share, read once each, not 20. A vertex outside the window takes no taps.
+- **Samplers.** WebGL2 gives a draw 16 units, which the low-memory mapper's emulated vertex arrays share.
+  - The cascades are one sampler (`uDisp`, the displacement atlas) where they were three.
+  - The coast is one (`uCoast`): the shore distance and the still water's depth side by side, then the shore layer's two planes, on the shore grid. Before, the shore grid, the two shore-layer planes and the ground's height field (the bed) were four samplers. The depth replaces the bed: it is the level minus the bed on the same grid.
+  - The vertex stage reads 3 samplers (the cascades, the coast, the wake) where it read 8. The fragment stage reads 4 (those and the foam atlas) where it read 9, or 6 where it read 11 with a cloud_sky's shade.
+  - The persistent foam's pass reads its Jacobians from the displacement atlas: its program reads 2 samplers where it read 3.
+  - The cloud shade's previous map is still bound outside a crossfade: at 6 there is no need to pack it.
+- **Frame cost.** No frame-level before/after is claimed.
+  - #1314's head and this branch were run in alternate processes: three rounds each, the lake and default views, tier 0. The GPU's tick and draw and the frame moved with the other agents' load on the same iGPU by more than the change. The lake view's draw, round by round, was 15.6, 18.9 and 40.0 ms before against 18.6, 17.7 and 31.6 ms after.
+  - Measured in one process instead: the cascades' atlas saves 0.1–0.7 ms of their 4 ms (above), and what each adaptive-quality tier saves is in O21's notes (§10.10).
+- **Not done.**
+  - The projected grid of D9 (b). The rings give the level of detail a projected grid would near the camera, and the far grid carries the rest flat, its waves in the normal. Large worlds' open sea past `outer` is still the far grid.
+  - The FFT at a lower resolution (see O21).
+  - The physics sea's CPU cost (above).
 
 ---
 
@@ -1438,7 +1498,7 @@ Tetrahedral meshes of water stay parked as W5, for the reasons in `OCEAN-AND-VOL
 | D6 | can wakes push bodies? | (a) no, the wake layer is visual; (b) an opt-in deterministic CPU eWave | **(a)** now; revisit for boat-to-boat play |
 | D7 | lake vs pond, and per-body defaults | area threshold, fetch, ripple strength | start at 1 ha [E]; tune in terrain_lab |
 | D8 | atmosphere lookup tables (ABYSSAL's sky) | port, or keep the gradient sky plus simple fog | **defer**; F3's fog first |
-| D9 | how terrain_lab draws the sea | (a) displace the per-chunk LOD rungs; (b) a projected near grid (§10.11) plus rungs for distance; (c) rungs for geometry, everything small in the normal | **(c)** to start, then (b). Rung 0 of `make_water_rungs` is the heightfield's own sample spacing [C `terrain_lod.cpp:244-300`], which coarsens as the world grows, so on large worlds only the long swell can be geometry |
+| D9 | how terrain_lab draws the sea | (a) displace the per-chunk LOD rungs; (b) a projected near grid (§10.11) plus rungs for distance; (c) rungs for geometry, everything small in the normal | **(c)** to start, then (b). Rung 0 of `make_water_rungs` is the heightfield's own sample spacing [C `terrain_lod.cpp:244-300`], which coarsens as the world grows, so on large worlds only the long swell can be geometry As built (with O21, §10.11): the `water` node draws the near sea as camera-centred rings (2, 4 and 8 m at its defaults) in place of a projected grid, and the far sea flat with its waves in the normal. |
 | D10 | ABYSSAL's unrotated cos² spreading | copy it or rotate it with the wind | **rotate**: it is a bug |
 | D11 | the order of work | start at O1–O4 (the visible shore fix) or at O6 (physics) | **O1–O4** |
 | D12 | does water get its own node? | (a) a `water` node referencing a world or a ground; (b) folded into `generated_world` | **(a)**: lsystem scenes and future terrain sources get water too, and the panel and keys stay separate |
