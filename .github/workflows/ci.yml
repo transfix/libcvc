@@ -133,6 +133,23 @@ jobs:
           fi
           "$py" .github/scripts/recipe-deps-parity.py
 
+      # A package built here (ari*, arisrv*, pycvc*, cvcgl*, cvc-cli*, ...) loads only the libcvc
+      # major it was built against (libcvc.so.4), but an unversioned dependency lets
+      # `cvcpkg install` pick any: arisrvx 3.7.13 took libcvc-cuda 4.0.0 and did not load. Every
+      # dependency on one of these recipes, or a name one provides, pins "^<major>.0" from
+      # CMakeLists.txt, so a major bump moves the pins with upstream_version. A step of this job.
+      - name: Dependencies on libcvc's own packages pin its major version
+        shell: bash
+        run: |
+          set -euo pipefail
+          py=python3
+          if ! python3 -c 'import yaml' 2>/dev/null; then
+            python3 -m venv "$RUNNER_TEMP/pins-venv"
+            "$RUNNER_TEMP/pins-venv/bin/pip" install --quiet pyyaml
+            py="$RUNNER_TEMP/pins-venv/bin/python"
+          fi
+          "$py" .github/scripts/recipe-family-pins.py
+
   # ─────────────────────── Format check ────────────────────────
   #
   # Enforces .clang-format on lines changed by this PR/push.
