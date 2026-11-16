@@ -485,4 +485,24 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                          SKIP_REGULAR_EXPRESSION "No module named '(fastapi|uvicorn|starlette)';built without yaml-cpp;needs pycvc beside arisrvx;no pycvc to convert"
                          TIMEOUT 120)
   endif()
+
+  # Client identity (docs/roadmap/ARISRV_IDENTITY.md, ID1): stock arisrv keeps a record of each
+  # client, answers server.whoami and server.set itself, owns profile.name (room-join asks for
+  # it), and never sends a client arisrv.clients. tests/relay_pair.py runs the relay and the
+  # client, as the room-call tests do; it needs only a Python to run it, not arisrvx.
+  if(TARGET ari AND Python3_EXECUTABLE)
+    set(_id_pair "${Python3_EXECUTABLE}" "${_srv_tests}/relay_pair.py")
+    set(_id_relay --relay-arg=--room --relay-arg=ctest --relay-arg=--state-listen
+                  --relay-arg=127.0.0.1:0 --relay-arg=--media-listen --relay-arg=127.0.0.1:0
+                  --relay-arg=--ws-listen --relay-arg=127.0.0.1:0)
+    foreach(_scheme grpc ws)
+      add_test(NAME arisrv_identity_${_scheme}
+               COMMAND ${_id_pair} --relay $<TARGET_FILE:arisrv> --client $<TARGET_FILE:ari>
+                       --scheme ${_scheme} ${_id_relay} --client-only --client-arg=--relay-room
+                       --client-arg=ctest "--client-arg=${_srv_tests}/identity_client.ari")
+      set_tests_properties(arisrv_identity_${_scheme} PROPERTIES
+                           ENVIRONMENT "PYTHONIOENCODING=utf-8"
+                           SKIP_REGULAR_EXPRESSION "built without yaml-cpp" TIMEOUT 120)
+    endforeach()
+  endif()
 endif()

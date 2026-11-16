@@ -318,6 +318,13 @@ public:
   std::string remote_node_id;
   std::string remote_cluster_id;
   std::string remote_device_id; // the device id of that Hello ("" when none), written the same way
+  std::string remote_local_address; // the local address that Hello reported ("" when none)
+  // Set before the connection is admitted and constant after: an accepted connection's peer
+  // address, and a dialed one's own end toward the relay, for its Hello. admit numbers each
+  // connection.
+  std::string peer_address;
+  std::string local_address;
+  std::uint64_t serial = 0;
   std::atomic<bool> identified{false};
   // The principal an authenticator admitted it as ("" without one); set before it is admitted.
   std::string principal;
@@ -362,6 +369,8 @@ public:
     remote_cluster_id = h.cluster_id();
     // An id that is not a valid_device_id (oversized, say) is ignored, not stored.
     remote_device_id = valid_device_id(h.device_id()) ? h.device_id() : std::string();
+    remote_local_address =
+        valid_reported_address(h.local_address()) ? h.local_address() : std::string();
     identified.store(true, std::memory_order_release);
   }
 
@@ -642,6 +651,7 @@ public:
 
     auto conn = std::make_shared<state_transport_grpc::connection>();
     conn->accepted = true;
+    conn->peer_address = ctx->peer();
     conn->principal = std::move(principal);
     // Under a read scope a principal is sent no tree state until its Hello says who it is.
     if (!conn->principal.empty() && _owner->read_scope()) {
@@ -884,6 +894,7 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
   conn->client_stream = stream;
   conn->client_stub = std::move(stub);
   conn->client_channel = channel;
+  conn->local_address = local_address_toward(target);
 
   conn->write_raw = [stream](const pb::Frame &f) -> bool { return stream->Write(f); };
 
@@ -1536,6 +1547,7 @@ void state_transport_grpc::register_connection(std::shared_ptr<connection> conn)
 }
 
 void state_transport_grpc::admit_connection(const std::shared_ptr<connection> &conn) {
+  conn->serial = _connection_serial.fetch_add(1, std::memory_order_relaxed) + 1;
   // Snapshot the shard list before taking the write mutex: every
   // other path releases _shards_mu before touching a connection's
   // write mutex, and keeping that order here avoids introducing a
@@ -1787,6 +1799,8 @@ void state_transport_grpc::send_hello_locked(connection &c) {
   h->set_cluster_id(_cluster_id);
   if (!_device_id.empty())
     h->set_device_id(_device_id);
+  if (!c.accepted && !c.local_address.empty())
+    h->set_local_address(c.local_address);
   // A relay with a pin store challenges each client it accepts to prove its device key.
   if (c.accepted && _device_pins && device_keys_available()) {
     std::lock_guard<std::mutex> lk(c.proof_mu);
@@ -1930,9 +1944,12 @@ std::vector<state_link_report> state_transport_grpc::link_reports() const {
       continue;
     state_link_report r;
     r.transport = "grpc";
+    r.connection = c->serial;
+    r.remote_address = c->peer_address;
     if (const std::string *pid = c->peer_id()) {
       r.remote_node_id = *pid;
       r.remote_device_id = c->remote_device_id;
+      r.remote_local_address = c->remote_local_address;
       r.holds_id = !c->gate || c->gate->holder(*pid) == c.get();
       r.device_verified = c->device_verified.load(std::memory_order_relaxed);
     }

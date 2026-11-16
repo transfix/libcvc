@@ -336,9 +336,9 @@ TEST(RoomWriteGate, AParticipantWritesOnlyItsOwnSubtree) {
   using op = cvc::state_mutation_op;
 
   // What clients write (room_join, write_intent, room_net, room_publish).
-  for (const char *key : {"presence.joined", "profile.name", "intent.move.x", "intent.yaw",
-                          "intent.tick", "net.rtt_ms", "net.in_kbps", "voice.talking", "video.off",
-                          "audio.opus", "streams.camera.endpoint", "streams.camera.token"})
+  for (const char *key : {"presence.joined", "intent.move.x", "intent.yaw", "intent.tick",
+                          "net.rtt_ms", "net.in_kbps", "voice.talking", "video.off", "audio.opus",
+                          "streams.camera.endpoint", "streams.camera.token"})
     EXPECT_TRUE(gate.may_write("alice", alice + "." + key, op::set_value)) << key;
   EXPECT_TRUE(gate.may_write("alice", alice + ".intent.move.x", op::touch));
   EXPECT_TRUE(gate.may_write("alice", alice + ".avatar", op::set_data));
@@ -348,6 +348,9 @@ TEST(RoomWriteGate, AParticipantWritesOnlyItsOwnSubtree) {
   EXPECT_FALSE(gate.may_write("alice", alice + ".pose.pos.x", op::set_value));
   EXPECT_FALSE(gate.may_write("alice", alice + ".pose.server_tick", op::touch));
   EXPECT_FALSE(gate.may_write("alice", alice + ".net.relay.rtt_ms", op::set_value));
+  // Its username is the relay's too (client_registry.h): it asks with server.set.
+  EXPECT_FALSE(gate.may_write("alice", alice + ".profile.name", op::set_value));
+  EXPECT_FALSE(gate.may_write("alice", alice + ".profile.name", op::touch));
   EXPECT_FALSE(gate.may_write("alice", alice + ".net.relay.video", op::set_value))
       << "the relay picks alice's video rung";
   EXPECT_TRUE(gate.may_write("alice", alice + ".net.relayed", op::set_value))
@@ -411,7 +414,8 @@ TEST(RoomWriteGate, AParticipantSourcesWhatItWrites) {
   const std::string bob = conf::room_participant_path("standup", "bob");
   EXPECT_TRUE(gate.sources("alice", alice + ".intent.move.x"));
   EXPECT_TRUE(gate.sources("alice", alice + ".intent.tick"));
-  EXPECT_TRUE(gate.sources("alice", alice + ".profile.name"));
+  EXPECT_TRUE(gate.sources("alice", alice + ".presence.joined"));
+  EXPECT_FALSE(gate.sources("alice", alice + ".profile.name")) << "the relay's username";
   EXPECT_FALSE(gate.sources("alice", alice + ".pose.pos.x")) << "the relay's pose";
   EXPECT_FALSE(gate.sources("alice", alice + ".device")) << "the relay's device tag";
   EXPECT_FALSE(gate.sources("alice", bob + ".intent.move.x")) << "another participant";

@@ -60,6 +60,17 @@ std::string default_device_id();
 // for an empty id. A client sends this, not the raw default_device_id().
 std::string scoped_device_id(const std::string &device_id, const std::string &scope);
 
+// The address this host's end of a connection to TARGET would have ("host:port", "[v6]:port", a
+// gRPC target such as "dns:///host:port" or "ipv4:1.2.3.4:5", or a ws:// URL): a UDP socket
+// connected toward it, which sends nothing, then its local address. "" when that fails, and always
+// under Emscripten (a browser can't see its own address). A client's Hello carries it, and a relay
+// logs it (client_registry.h).
+std::string local_address_toward(const std::string &target);
+
+// Whether ADDRESS can be a reported local address: 1 to 64 characters of [0-9A-Za-z.:%_-]. A
+// relay ignores any other.
+bool valid_reported_address(const std::string &address) noexcept;
+
 } // namespace cvc
 
 #endif // __CVC_STATE_IDENTITY_H__

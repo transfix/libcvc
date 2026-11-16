@@ -499,6 +499,7 @@ private:
   std::atomic<std::uint64_t> _scope_retractions{0};
   std::atomic<std::uint64_t> _inbound_rejected{0};
   std::atomic<std::uint64_t> _auth_rejected{0};
+  std::atomic<std::uint64_t> _connection_serial{0}; // the last connection admit_connection numbered
   std::atomic<std::uint64_t> _devices_verified{0};
   std::atomic<std::uint64_t> _device_proofs_refused{0};
 
