@@ -41,6 +41,7 @@ patches: []
 depends:
   build:
     - name: libcvc
+      version: "^4.0"
     - name: vtk
     - name: boost
     # The demos' control panels. cvcGL compiles ImGuiOverlay to inert stubs when
@@ -53,6 +54,7 @@ depends:
     # The binaries link the installed libcvc + VTK + Boost shared libs (cvcGL
     # itself is built static into them: no soname coupling to the cvcgl SDK).
     - name: libcvc
+      version: "^4.0"
     - name: vtk
     - name: boost
     # imgui-w32 is linked shared, so libimgui-w32.so is a load-time dependency
