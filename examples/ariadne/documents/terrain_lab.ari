@@ -99,10 +99,10 @@ windows:
     closable: true
   - include: sky_controls
     pos: [754, 16]
-    size: [370, 116]
+    size: [370, 170]
     closable: true
   - include: water_controls
-    pos: [754, 140]
+    pos: [754, 196]
     size: [370, 190]
     closable: true
 
@@ -197,14 +197,14 @@ scene:
     - node: sky
       type: cloud_sky
       ground: world        # the deck covers this node's extent, live, and shades its meshes
-      receivers: [world_buildings, world_roads, world_props, world_foliage]
+      receivers: [world_buildings, world_roads, world_props, world_foliage, water]
       extent: 250          # a cloud's half-width, metres: small fair-weather cumulus
       base: 300
       top: 520
-      coverage: 0.6        # the share of the sky's cells holding a cloud
+      coverage: 0.6        # the share of the sky's cells holding a cloud (live: sky.coverage)
       near: 6              # the clouds nearest the camera drawn as volumes; the rest sliced
-      sun_az: -60          # the key light's: the clouds cast along it
-      sun_el: 28
-      wind_az: 90          # the wind blows toward +x
+      # The sun is the light rig's key (lighting.key_azimuth / key_elevation, the Stage lighting
+      # panel): the clouds are lit from it and cast their shade along it, live.
+      wind_az: 90          # the wind blows toward +x (live: sky.wind_az)
       evolve: 1            # a weather step every 5 s; 0 holds the clouds
       orographic: 1        # windward flanks gather cloud
