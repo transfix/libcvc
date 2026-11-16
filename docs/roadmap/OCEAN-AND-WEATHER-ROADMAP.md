@@ -1100,6 +1100,51 @@ This phase builds on terrain_lab's `cloud_sky` (§1.5), not on the older demo cl
 - Gusts push light bodies.
 - Later, once W1 exists: rain raises lake levels and makes streams run.
 
+**As built (O20, part 1): F5 and F6's rain.** F4 and F6's gusts wait for O14's scene wind (below). Like O19, nothing joins the receivers but uniforms.
+- **The strike schedule** (`cvc::world::weather`):
+  - `strikes(t, window)` lists the strikes in the last `window` weather seconds. Each recent cell's life is cut into 1 s slots. A slot holds a strike with probability `flash_rate` × smoothstep((I − `flash_onset`) / (1 − `flash_onset`)) of the cell's intensity then (0.05 and 0.55 by default), a hashed draw of the seed, the cell's id and the slot. The strike lands at a hashed point within the cell's rain radius. `ground_share` (0.6) of them reach the ground.
+  - A strike (`lightning_strike`) carries its id (the seed of its bolt), its weather time, its point and one to four strokes (their start, length and brightness). `intensity(age)` is its light at an age in world seconds: each stroke decays as (1 − u)^1.7 with a flicker, then the channel's afterglow.
+  - It is a pure function of the seed, the time and the events, the same in every client and at any frame rate. Test: `WorldWeather.LightningStrikesOnSchedule`. It checks that a window gives the same strikes as the seconds that make it up; that a storm strikes only while mature, within its rain radius, at about the rate asked; that the ground share holds; and that a clear sky never strikes.
+- **The bolt:** a port of ABYSSAL's `Lightning` (`Lightning.js` at 849ff7f4, MIT).
+  - The channel runs from the cloud base to the ground under the strike, its midpoints displaced across it by 0.42 of its height, 0.55 less each level, to depth 5 or 40 m. Dead-end forks branch off (0.42 a level, to depth 3) and fade, and two to four crawlers spread in the cloud. An in-cloud strike is its crawlers alone. The random stream is a splitmix64 of the strike's id, not `Math.random`, so every client grows the same bolt.
+  - It is drawn as camera-facing ribbons: a hot near-white core (2.2 m across) and a blue-white glow (26 m), both wider with distance. Each ribbon tapers to nothing a half-width past its ends, so the segments blend where they meet. The weather node's mesh `<id>_bolt` is rebuilt when a new strike shows (at most 2048 segments, once a strike), shown while the strike's light is up, and drawn in the volume layer after the deck as one of the sky's receivers, lightly fogged.
+  - It has no texture of its own. As a receiver it carries the sky's two shade samplers, which its shader does not read.
+  - The bolt's ground point is the ground's height there, or at the ground's nearest edge when the strike lands past the terrain. Without that it was NaN and the bolt drew nothing.
+- **The flash,** uniforms only:
+  - The weather node writes `sky.flash` ("x y z intensity", the brightest strike under the cloud base). The sky hands it to its receivers, the water and its far shells as `cloudFlash`.
+  - It falls off as 1 / (1 + d² / 900²). The receivers add 1.5 × their albedo × it, a light from everywhere above. The water adds 1.5 × it to its lit term. The far shells' in-cloud light gains 2 × it, so the cloud round a strike glows. The scene's gradient background goes up to half way toward a blue white.
+  - The sky reads `sky.flash` on its tick, which comes before the weather's in a document. So the weather hands it the flash one frame step ahead, and the light lands on the bolt's frame.
+  - The near cloud volumes are not lit by it: their colour is set per cell on the CPU.
+- **F6, the rain into physics:**
+  - `surface_class::mu_wet` is each class's friction soaked: wet asphalt and concrete 0.55, dirt 0.35, gravel and sand 0.45, grass 0.3. Indoor floors and classes already wet keep their `mu`.
+  - `cvc::physics::wet_friction(class, w)` runs `mu` toward `mu_wet` by the wetness.
+  - `cvc::physics::apply_wetness(world, w)` sets every material named after a surface class (as `add_world_geometry` names them) through `world::set_material`, keeping restitution and rolling resistance. It returns how many changed. Every plant reads the one table, so a vehicle's tires and a box both feel it.
+  - The weather node does this in the scene's physics world, as a scene tick. The wetness is `weather::wetness` at the vehicles (their mean; the ground's centre with none). It is applied at most twice a world second, and only when it has moved by 1/64. It is a function of the seed, the time and the events, so the friction replicates with the weather. `weather.friction` (0 restores the dry friction) and `weather.wetness` are on the Weather panel.
+  - Test: `PhysicsVehicle.RainLowersTheRoadsTractionAndItComesBackAsItDries`. A full storm crosses the road. The vehicle braking from 20 m/s stops in 25.2 m before it, 37.8 m soaked as the rain leaves (within 15 % of the friction limit v² / (2 μ g)), and 25.2 m three dry times later.
+  - `cvcgl_ariadne_realize` checks it in a realized scene: a generated world's surfaces in its physics world, five of eight lowered at wetness 0.45, and dry again with `weather.friction` off.
+- **Found on the way** (fixed in O19's PR, which this stacks on):
+  - cloud_sky looked its receivers up by top-level name only. So the weather's meshes (`<id>_rain`, and now `<id>_bolt`, inside the weather's node) were neither shaded nor drawn after the deck. Receivers are now found anywhere in the scene, and the realize test checks both meshes.
+  - The streaks' ground under a camera off the terrain is its edge's height too.
+- **Renders** (terrain_lab with `flash_rate: 3`, 1280×720):
+  - a ground strike near the city from a low camera under the storm: the bolt, its forks, and the ground and the buildings lit (+15 to +20 levels in the lower half against a frame without a strike);
+  - an in-cloud strike: crawlers under the deck;
+  - the same ground strike from 1.6 km, outside the storm: the bolt under the deck and its crawlers along the base.
+- **Frame cost:**
+  - Method: arigl snapshots of terrain_lab with `flash_rate: 3` (a strike about every second) at 1280×720, from a low camera under a storm overhead, (720 − 120 frames) / 600, three interleaved runs.
+  - Lightning off: 177, 140 and 67 ms a frame. Lightning on: 111, 83 and 73 ms (medians 140 and 83). Other agents were building on the machine, so the runs show nothing finer than that; the quietest pair is 67 against 73 ms.
+  - Measured directly, a new strike's bolt (51 segments on average, at most 2048) takes 0.05 ms to grow and mesh, and 0.7 ms (at most 1.3 ms) to hand to its node. That happens once a strike. The flash is one vec4 uniform, and `strikes()` is O(cells × window) over a window of under a second.
+- **What F4 needs from O14:**
+  - one scene wind (`wind.speed`, `wind.dir`) that `steeringWind()` in `weather_node.cpp` reads instead of `sky.wind_az`, and that the water's wind sea, the trees and the rain's slant read too;
+  - a force from that wind on light bodies (the physics flow field), which F6's "gusts push light bodies" also needs;
+  - a gust front per cell: its wind speed rising and veering ahead of the cell, from the cells the weather already lists (centre, radius, motion, intensity);
+  - the wind sea's lag (E4) behind that wind, so the sea builds and settles after the storm.
+- **Not done:**
+  - F4, and F6's gusts (O14);
+  - thunder (no audio path);
+  - the near volumes' flash;
+  - F6's lake levels and streams (W1);
+  - the browser run, Linux and macOS.
+
 **F7. Replication.**
 - The weather is a function of the seed and time, plus authored events under state keys (`weather.*`). Clients rebuild it; a server streams only the events (decision **D5**).
 

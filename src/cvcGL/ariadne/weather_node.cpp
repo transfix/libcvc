@@ -24,10 +24,15 @@
   (github.com/Token-Gremlin/natural-disasters, src/weather/Precipitation.js at 849ff7f4),
   MIT licensed, Copyright (c) 2026 Davi (Token-Gremlin). MIT notice retained; see
   THIRD_PARTY_NOTICES.md.
+
+  The lightning bolts (growBolt, boltOf, boltMesh, BOLT_FS_LIGHT) port ABYSSAL's Lightning
+  (the same repository, src/weather/Lightning.js at 849ff7f4), under the same MIT licence and
+  copyright; see THIRD_PARTY_NOTICES.md.
 */
 
 // weather_node.cpp — the Ariadne `weather` node (docs/roadmap/OCEAN-AND-WEATHER-ROADMAP.md §9 F2,
-// F3, §11.2, O18, O19): the scene's weather model, the storms it puts in the sky, and their rain.
+// F3, F5, F6, §11.2, O18, O19, O20): the scene's weather model, the storms it puts in the sky,
+// their rain and lightning, and the wet ground's friction.
 //
 //   - { id: weather, type: weather, ground: world, sky: sky }
 //
@@ -47,8 +52,14 @@
 // (sky.rain_k), from which the sky's shaders draw the wet ground, the rain shafts, the rings on the
 // water and the fog; and it draws the streaks near the camera itself (its mesh `<id>_rain`, which
 // the sky lists among its receivers). weather.streaks / .rings / .fog / .wet scale each, and
-// weather.rain_quality the streaks' count. O20's storm wind, lightning and friction read the cells,
-// the rain rate and cvc::world::weather::wetness.
+// weather.rain_quality the streaks' count.
+// The lightning (O20): the strikes the weather schedules (cvc::world::weather::strikes), each drawn
+// as a bolt while it shows (its mesh `<id>_bolt`, listed among the sky's receivers like the rain's)
+// and handed to the sky as a flash (sky.flash) that lights the receivers, the water and the far
+// clouds; weather.lightning scales it and weather.flash publishes it. The wet ground's friction
+// (O20): the scene's physics world's surface materials take their friction at the weather's
+// wetness under the vehicles (cvc::physics::apply_wetness); weather.friction turns it off and
+// weather.wetness publishes the wetness. The storm wind (F4) waits for O14's scene wind.
 //
 // The steering wind the cells ride is the scene's one wind (R5), read through steeringWind(): until
 // one scene wind exists (O14's wind.speed / wind.dir) it is the cloud deck's, sky.wind_az at the
@@ -73,6 +84,7 @@
 #include <cvc/gl/ariadne/lsystem_nodes.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/world_nodes.h>
+#include <cvc/physics/world_geometry.h> // apply_wetness: the rain into the scene's friction
 #include <cvc/world/weather.h>
 #include <limits>
 #include <memory>
@@ -178,6 +190,183 @@ std::string rain_light(bool shaded) {
   return s;
 }
 
+// ── Lightning (O20, F5) ──────────────────────────────────────────────────────────────────────
+// A strike's bolt, a port of ABYSSAL's Lightning (src/weather/Lightning.js at 849ff7f4, MIT): a
+// polyline from the cloud base to the ground, its midpoints displaced across the channel (by 0.42
+// of its height at first, 0.55 less each level, to depth 5 or 40 m), forking into shorter dead
+// ends that fade (0.42 a level, to depth 3), with two to four crawlers spreading in the cloud. An
+// in-cloud strike is its crawlers alone. Seeded by the strike's id (a splitmix64 stream, not
+// Math.random), so every client grows the same bolt. Drawn as camera-facing ribbons, a hot core
+// and a wide glow, three vertices across so the colour's red runs 0 at an edge to 1 on the line.
+struct BoltSeg {
+  double a[3], b[3], fade;
+};
+
+struct BoltRng {
+  std::uint64_t s;
+  double next() {
+    s += 0x9E3779B97F4A7C15ull;
+    std::uint64_t z = s;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    z ^= z >> 31;
+    return double(z >> 11) * (1.0 / 9007199254740992.0);
+  }
+};
+
+constexpr std::size_t BOLT_SEGMENTS = 2048;
+
+void growBolt(std::vector<BoltSeg> &out, BoltRng &g, const double a[3], const double b[3],
+              double jitter, int depth, double fade) {
+  if (out.size() > BOLT_SEGMENTS - 8)
+    return;
+  const double d[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+  const double len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+  if (depth > 5 || len < 40.0) {
+    out.push_back({{a[0], a[1], a[2]}, {b[0], b[1], b[2]}, fade});
+    return;
+  }
+  const double dir[3] = {d[0] / len, d[1] / len, d[2] / len};
+  // across the channel: horizontal and perpendicular to it, and the third axis
+  double perp[3] = {-dir[1], dir[0], 0.0};
+  double pl = std::sqrt(perp[0] * perp[0] + perp[1] * perp[1]);
+  if (pl < 1e-6) {
+    perp[0] = 1.0;
+    perp[1] = 0.0;
+    pl = 1.0;
+  }
+  for (double &v : perp)
+    v /= pl;
+  const double up[3] = {dir[1] * perp[2] - dir[2] * perp[1], dir[2] * perp[0] - dir[0] * perp[2],
+                        dir[0] * perp[1] - dir[1] * perp[0]};
+  const double jp = (g.next() - 0.5) * jitter, ju = (g.next() - 0.5) * jitter;
+  double mid[3];
+  for (int k = 0; k < 3; ++k)
+    mid[k] = 0.5 * (a[k] + b[k]) + perp[k] * jp + up[k] * ju;
+  growBolt(out, g, a, mid, jitter * 0.55, depth + 1, fade);
+  growBolt(out, g, mid, b, jitter * 0.55, depth + 1, fade);
+  if (depth < 3 && g.next() < 0.42) { // a fork: a shorter dead end that fades out
+    const double fl = len * (0.35 + 0.45 * g.next());
+    const double fp = (g.next() - 0.5) * 1.5, fu = (g.next() - 0.5) * 1.5;
+    double bd[3], bn = 0.0;
+    for (int k = 0; k < 3; ++k) {
+      bd[k] = dir[k] + perp[k] * fp + up[k] * fu;
+      bn += bd[k] * bd[k];
+    }
+    bn = std::sqrt(std::max(bn, 1e-12));
+    double tip[3];
+    for (int k = 0; k < 3; ++k)
+      tip[k] = mid[k] + bd[k] / bn * fl;
+    growBolt(out, g, mid, tip, jitter * 0.5, depth + 2, fade * 0.5);
+  }
+}
+
+// A strike's segments: from `top` (the cloud base) down to the ground under it (ground: its height
+// there), and the crawlers in the cloud.
+std::vector<BoltSeg> boltOf(const cvc::world::lightning_strike &k, double top, double ground) {
+  std::vector<BoltSeg> out;
+  BoltRng g{k.id};
+  const double height = std::max(50.0, top - ground);
+  if (k.ground) {
+    const double a[3] = {k.x, k.y, top};
+    const double b[3] = {k.x + (g.next() - 0.5) * height * 0.5,
+                         k.y + (g.next() - 0.5) * height * 0.5, ground};
+    growBolt(out, g, a, b, height * 0.42, 0, 1.0);
+  }
+  const int crawl = 2 + static_cast<int>(g.next() * 3.0);
+  for (int i = 0; i < crawl; ++i) {
+    const double ang = 2.0 * 3.14159265358979323846 * g.next();
+    const double len = height * (0.5 + g.next());
+    const double a[3] = {k.x, k.y, top + height * 0.25 * g.next()};
+    const double b[3] = {k.x + std::cos(ang) * len, k.y + std::sin(ang) * len,
+                         top + height * (0.05 + 0.3 * g.next())};
+    growBolt(out, g, a, b, len * 0.3, 2, 0.45);
+  }
+  return out;
+}
+
+// The bolt's mesh, its ribbons facing `eye`: per segment a core and a glow, each three vertices
+// across at either end and tapering to nothing a half-width beyond them, so the segments' ends
+// blend where they meet (colour red: 0 at the edges and the tips, 1 on the line; green: 0 core,
+// 1 glow; blue: the segment's fade). Widths are ABYSSAL's (2.2 m core, 26 m glow across, wider
+// with distance).
+cvc::geometry boltMesh(cvc::app &app, const std::vector<BoltSeg> &segs, const double eye[3]) {
+  cvc::geometry g(app);
+  auto &pts = g.points();
+  auto &cols = g.colors();
+  auto &tris = g.tris();
+  using idx = cvc::geometry::index_t;
+  for (const BoltSeg &s : segs) {
+    double d[3], m[3], e[3];
+    for (int k = 0; k < 3; ++k) {
+      d[k] = s.b[k] - s.a[k];
+      m[k] = 0.5 * (s.a[k] + s.b[k]);
+      e[k] = eye[k] - m[k];
+    }
+    double side[3] = {d[1] * e[2] - d[2] * e[1], d[2] * e[0] - d[0] * e[2],
+                      d[0] * e[1] - d[1] * e[0]};
+    const double sl = std::sqrt(side[0] * side[0] + side[1] * side[1] + side[2] * side[2]);
+    const double dl = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    if (sl < 1e-9 || dl < 1e-9)
+      continue;
+    const double dist = std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+    const double widen = 1.0 + dist * 0.002;
+    for (int layer = 0; layer < 2; ++layer) {
+      const double w = (layer == 0 ? 1.1 : 13.0) * s.fade * widen; // half-widths
+      const idx v = idx(pts.size());
+      // Four rows along: the tip before a, a, b, the tip past b.
+      for (int row = 0; row < 4; ++row) {
+        const double *end = row < 2 ? s.a : s.b;
+        const double out = row == 0 ? -w / dl : row == 3 ? w / dl : 0.0;
+        const bool tip = row == 0 || row == 3;
+        for (int c = -1; c <= 1; ++c) {
+          pts.push_back({end[0] + d[0] * out + side[0] / sl * w * c,
+                         end[1] + d[1] * out + side[1] / sl * w * c,
+                         end[2] + d[2] * out + side[2] / sl * w * c});
+          cols.push_back({c == 0 && !tip ? 1.0 : 0.0, double(layer), s.fade});
+        }
+      }
+      for (int row = 0; row < 3; ++row)
+        for (int c = 0; c < 2; ++c) {
+          const idx q = idx(v + 3 * row + c);
+          tris.push_back({q, idx(q + 1), idx(q + 3)});
+          tris.push_back({idx(q + 1), idx(q + 4), idx(q + 3)});
+        }
+    }
+  }
+  if (pts.empty()) { // no bolt yet: one degenerate triangle, so the mesh has something to hold
+    for (int k = 0; k < 3; ++k) {
+      pts.push_back({0.0, 0.0, 0.0});
+      cols.push_back({0.0, 0.0, 0.0});
+    }
+    tris.push_back({0, 1, 2});
+  }
+  return g;
+}
+
+// The bolt's light: emissive, from the vertex colour VTK has put in diffuseColor (red: across, 1 on
+// the line; green: the glow layer; blue: the fade) and boltIntensity; a hot near-white core and a
+// blue-white halo, as ABYSSAL's; a little fogged once the sky shades the mesh (BOLT_FOG: a
+// bolt's light reaches through the rain far better than the ground's).
+const char *const BOLT_FS_DEC = R"(//VTK::Normal::Dec
+uniform float boltIntensity;
+)";
+const char *const BOLT_FS_LIGHT = R"(  float bx = 1.0 - clamp(diffuseColor.r, 0.0, 1.0);
+  float core = exp(-bx * bx * 2.5), halo = exp(-bx * bx * 4.5);
+  float glow = clamp(diffuseColor.g, 0.0, 1.0), fade = clamp(diffuseColor.b, 0.0, 1.0);
+  vec3 bcol = mix(vec3(1.0, 0.98, 0.95), vec3(0.70, 0.78, 1.0), glow);
+  float ba = clamp(boltIntensity * fade * mix(core, 0.45 * halo, glow), 0.0, 1.0);
+  gl_FragData[0] = vec4(BOLT_FOG, ba);
+)";
+
+std::string bolt_light(bool shaded) {
+  std::string s = BOLT_FS_LIGHT;
+  const std::string mark = "BOLT_FOG";
+  s.replace(s.find(mark), mark.size(),
+            shaded ? "mix(bcol, cloudFog(bcol, vertexVC.xyz), 0.2)" : "bcol");
+  return s;
+}
+
 // The streaks' mesh: `count` quads, each a drop (its corner in xy, its index in z).
 cvc::geometry rain_mesh(cvc::app &app, int count) {
   cvc::geometry g(app);
@@ -235,6 +424,16 @@ struct WeatherRT {
   std::weak_ptr<cvc::gl::GeometryNode> streaks;
   std::shared_ptr<cvc::gl::GeometryNode::ShaderInputs> rainIn;
   int rainCount = RAIN_COUNT;
+  // O20: the lightning (its strength key; the flash, published; the bolt's mesh, the strike it
+  // shows) and the rain in the scene's friction (weather.friction; the wetness it set).
+  std::string lightningKey, flashKey, frictionKey, wetHereKey, skyFlash;
+  std::weak_ptr<cvc::gl::GeometryNode> bolt;
+  std::shared_ptr<cvc::gl::GeometryNode::ShaderInputs> boltIn;
+  std::uint64_t boltId = 0;
+  bool boltShown = false, boltShaded = false;
+  double lastFlash = -1.0, lastSkyFlash = -1.0, flashT = -1.0;
+  double frictionAt = -1e9;  // the world time the friction was last set
+  double frictionWet = -1.0; // the wetness it was set for
   bool rainShaded = false;
   double lastRainHere = -1.0;
 };
@@ -289,6 +488,7 @@ std::string discs(const cvc::world::weather_now &w) {
 }
 
 void rain(WeatherRT &r, const cvc::world::weather_now &w, vtkRenderer *ren);
+void lightning(WeatherRT &r, vtkRenderer *ren);
 
 void tick(WeatherRT &r, vtkRenderer *ren) {
   cvc::app &app = *r.app;
@@ -413,6 +613,7 @@ void tick(WeatherRT &r, vtkRenderer *ren) {
     r.lastStorms = d;
   }
   rain(r, w, ren);
+  lightning(r, ren);
   if (!r.drivesSky)
     return;
   // The deck: its heights and darkness as authored, read once; then a storm's.
@@ -525,6 +726,114 @@ void rain(WeatherRT &r, const cvc::world::weather_now &w, vtkRenderer *ren) {
   in.f3["rainColor"] = {0.74f, 0.77f, 0.82f};
 }
 
+// The lightning (O20): the latest strike of the last moment, its bolt drawn while it shows, and its
+// flash handed to the sky (sky.flash, "x y z intensity": the receivers', the water's and the far
+// clouds' transient light). A strike's strokes are in world seconds, whatever the weather's rate.
+// The sky reads sky.flash on its own tick, earlier in the frame than this one (it comes first in a
+// document), so it is handed the flash a frame step ahead: the light lands on the bolt's frame.
+constexpr double FLASH_LOOK = 0.8; // world seconds back the strikes are looked for
+void lightning(WeatherRT &r, vtkRenderer *ren) {
+  cvc::app &app = *r.app;
+  const double t = app.world_clock().t();
+  const double ahead = r.flashT >= 0.0 ? std::clamp(t - r.flashT, 0.0, 0.1) : 0.0;
+  r.flashT = t;
+  const double strength = std::max(0.0, ari::read_or<double>(app, r.lightningKey, 1.0));
+  const double rate = r.model.rate_at(t);
+  double flash = 0.0, next = 0.0; // now, and a frame step on (the sky's)
+  const cvc::world::lightning_strike *shown = nullptr, *lit = nullptr;
+  std::vector<cvc::world::lightning_strike> ks;
+  if (strength > 0.0 && rate > 0.0) {
+    ks = r.model.strikes(t + ahead, (FLASH_LOOK + ahead) * rate);
+    const double tau = r.model.weather_time(t), tauNext = r.model.weather_time(t + ahead);
+    for (const cvc::world::lightning_strike &k : ks) {
+      if (const double a = k.intensity((tau - k.tau) / rate) * strength; a > flash) {
+        flash = a;
+        shown = &k;
+      }
+      if (const double a = k.intensity((tauNext - k.tau) / rate) * strength; a > next) {
+        next = a;
+        lit = &k;
+      }
+    }
+  }
+  const double base = ari::read_or<double>(app, r.skyBase, 300.0);
+  if (r.drivesSky && (next > 0.0 || r.lastSkyFlash != 0.0)) {
+    r.lastSkyFlash = next;
+    char buf[128];
+    if (lit)
+      std::snprintf(buf, sizeof buf, "%.1f %.1f %.1f %.4f", lit->x, lit->y, base, next);
+    else
+      std::snprintf(buf, sizeof buf, "0 0 0 0");
+    put(app, r.skyFlash, std::string(buf));
+  }
+  // Published in steps of 0.02, so a strike is a few writes and not one a frame.
+  if (const double fq = std::round(flash * 50.0) / 50.0; fq != r.lastFlash) {
+    r.lastFlash = fq;
+    put(app, r.flashKey, fq);
+  }
+  auto bolt = r.bolt.lock();
+  if (!bolt)
+    return;
+  if (const bool shaded = bolt->hasSharedShaderInputs("cloud_sky"); shaded != r.boltShaded) {
+    r.boltShaded = shaded;
+    bolt->addFragmentShaderReplacement("//VTK::Light::Impl", bolt_light(shaded));
+  }
+  const bool show = shown != nullptr && flash > 0.002;
+  if (show && shown->id != r.boltId && ren && ren->IsActiveCameraCreated()) {
+    // A new strike: its bolt, facing the camera now (it shows for a fraction of a second).
+    double eye[3];
+    ren->GetActiveCamera()->GetPosition(eye);
+    const double ground = groundAt(r, shown->x, shown->y);
+    bolt->setGeometry(boltMesh(app, boltOf(*shown, base, ground), eye));
+    r.boltId = shown->id;
+  }
+  if (show)
+    r.boltIn->f["boltIntensity"] = float(flash);
+  if (show != r.boltShown) {
+    r.boltShown = show;
+    bolt->setVisible(show);
+  }
+}
+
+// The rain into the scene's friction (O20, F6): the wetness where the vehicles are (their mean;
+// the ground's centre with none) runs every surface material's friction toward its wet value
+// (cvc::physics::apply_wetness), at most twice a world second and only when it has moved by
+// 1/64. The wetness is the weather's, a function of the seed, the time and the events.
+void friction(WeatherRT &r, RealizedScene &rs) {
+  cvc::app &app = *r.app;
+  if (!rs.physics)
+    return;
+  if (ari::read_or<double>(app, r.frictionKey, 1.0) == 0.0) {
+    // Turned off: the surfaces dry at once, and are wetted again when it is turned back on.
+    if (r.frictionWet > 0.0) {
+      cvc::physics::apply_wetness(*rs.physics, 0.0);
+      put(app, r.wetHereKey, 0.0);
+    }
+    r.frictionWet = 0.0;
+    r.frictionAt = -1e9;
+    return;
+  }
+  const double t = app.world_clock().t();
+  if (std::fabs(t - r.frictionAt) < 0.5)
+    return;
+  r.frictionAt = t;
+  const cvc::physics::world_snapshot snap = rs.physics->snapshot();
+  double wet = 0.0;
+  if (snap.vehicles.empty()) {
+    wet = r.model.wetness(t, r.cx, r.cy, r.soak, r.dry);
+  } else {
+    for (const cvc::physics::vehicle_snapshot &v : snap.vehicles)
+      wet += r.model.wetness(t, v.state.body.position.x, v.state.body.position.y, r.soak, r.dry);
+    wet /= double(snap.vehicles.size());
+  }
+  wet = std::round(wet * 64.0) / 64.0;
+  if (wet == r.frictionWet)
+    return;
+  r.frictionWet = wet;
+  cvc::physics::apply_wetness(*rs.physics, wet);
+  put(app, r.wetHereKey, wet);
+}
+
 // type: weather — the scene's weather (see above).
 // props: ground (the node whose extent the storms serve; default world, else `area` around
 // (`cx`, `cy`)), sky (the cloud_sky's key root to drive: default sky; "" drives none), seed,
@@ -535,7 +844,10 @@ void rain(WeatherRT &r, const cvc::world::weather_now &w, vtkRenderer *ren) {
 // (weather seconds per world second; live: weather.time_scale), events (authored events, as
 // weather.events text), storm_top / storm_base (the deck in a full storm; the base stays put
 // unless given), darkness (the deck's darkness with a storm in view) and reach (how far past a
-// storm's edge the deck feels it, metres).
+// storm's edge the deck feels it, metres); O20: flash_rate / flash_onset / ground_share (the
+// lightning's schedule, cvc::world::weather_params), lightning (its strength; live:
+// weather.lightning) and friction (0: the rain leaves the physics world's friction alone; live:
+// weather.friction).
 std::shared_ptr<GraphicsNode> realize_weather(SceneGraph &sg, const ari::SceneNode &n,
                                               GraphicsNode *parent, RealizedScene &out,
                                               std::vector<std::string> *warnings) {
@@ -572,6 +884,9 @@ std::shared_ptr<GraphicsNode> realize_weather(SceneGraph &sg, const ari::SceneNo
   p.rain_onset = std::clamp(n.props.num("rain_onset", p.rain_onset), 0.0, 0.999);
   p.rain_max = std::max(0.0, n.props.num("rain_max", p.rain_max));
   p.calm_s = std::max(1.0, n.props.num("calm", p.calm_s));
+  p.flash_rate = std::max(0.0, n.props.num("flash_rate", p.flash_rate));
+  p.flash_onset = std::clamp(n.props.num("flash_onset", p.flash_onset), 0.0, 0.999);
+  p.ground_share = std::clamp(n.props.num("ground_share", p.ground_share), 0.0, 1.0);
   p.rate = std::max(0.0, n.props.num("time_scale", 1.0));
   rt->model.set_params(p);
   rt->cx = p.cx;
@@ -655,6 +970,39 @@ std::shared_ptr<GraphicsNode> realize_weather(SceneGraph &sg, const ari::SceneNo
       rt->streaks = mesh;
     }
   }
+  // O20: the lightning's keys and its bolt (a mesh of ribbons in the volume layer, after the deck:
+  // list it among the sky's receivers too), and the rain's friction.
+  rt->lightningKey = key(pref, n, "weather.lightning");
+  rt->flashKey = key(pref, n, "weather.flash");
+  rt->frictionKey = key(pref, n, "weather.friction");
+  rt->wetHereKey = key(pref, n, "weather.wetness");
+  ari::read_or_seed<double>(app, rt->lightningKey, std::max(0.0, n.props.num("lightning", 1.0)));
+  ari::read_or_seed<double>(app, rt->frictionKey, n.props.num("friction", 1.0) != 0.0 ? 1.0 : 0.0);
+  rt->skyFlash = ari::resolve_bind(pref, root + ".flash");
+  if (node) {
+    std::vector<BoltSeg> none;
+    const double eye[3] = {0.0, 0.0, 0.0};
+    auto mesh = std::dynamic_pointer_cast<GeometryNode>(
+        node->createChild<GeometryNode>(n.id + "_bolt", boltMesh(app, none, eye)));
+    if (mesh) {
+      mesh->setUseBounds(false);
+      mesh->setContributesToSceneBounds(false);
+      mesh->setCastsShadow(false);
+      mesh->setDrawWithVolumes(true);
+      mesh->disableCoordinateShiftScale();
+      mesh->addFragmentShaderReplacement("//VTK::Normal::Dec", BOLT_FS_DEC);
+      mesh->addFragmentShaderReplacement("//VTK::Light::Impl", bolt_light(false));
+      mesh->setAmbient(0.0); // diffuseColor is the vertex colour as given (bolt_light reads it)
+      mesh->setDiffuse(1.0);
+      mesh->setSpecular(0.0);
+      rt->boltIn = std::make_shared<GeometryNode::ShaderInputs>();
+      mesh->setSharedShaderInputs("weather_bolt", rt->boltIn);
+      mesh->setVisible(false);
+      rt->bolt = mesh;
+    }
+  }
+  out.scene_ticks.push_back([rt](vtkRenderer *, RealizedScene &rs,
+                                 const cvc::world_clock::step_result &) { friction(*rt, rs); });
 
   out.custom_ticks.push_back([rt](vtkRenderer *ren) { tick(*rt, ren); });
   // A node of its own (the rain's mesh under it), so the scene lists it and a host can find it.

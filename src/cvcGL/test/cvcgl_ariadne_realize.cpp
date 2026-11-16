@@ -37,13 +37,15 @@
 #include <cvc/gl/ariadne/lsystem_nodes.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/image/image.h>
+#include <cvc/physics/world_geometry.h>           // O20: wet_friction
 #include <cvc/state/state.h>                      // clock test: read/write the bound sim.* keys
 #include <cvc/state/state_exec/async_scheduler.h> // fe_lab: its jobs are scheduler processes
 #include <cvc/tf/model.h>                         // mesh_lab / fe_lab field colours
 #include <cvc/tf/overlays.h>
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_io.h>
-#include <cvc/world/generated_world.h> // terrain source test: the generator it draws
+#include <cvc/world/generated_world.h>
+#include <cvc/world/surface.h> // O20: the surface classes' wet friction // terrain source test: the generator it draws
 #include <filesystem>                  // mesh_lab / fe_lab sources: a temp "document directory"
 #include <functional>
 #include <thread>
@@ -2351,6 +2353,156 @@ int main() {
         printf("  warning: %s\n", w.c_str());
     }
     cvc::gl::setLowMemoryMapperPolicy(app, policy);
+  }
+
+  // ── O20, part 1: lightning, and the rain into the physics world's friction ──────────────────
+  // A storm in its prime throws lightning on the weather's schedule: a bolt drawn while it shows
+  // and a flash in the receivers' uniforms. And its rain lowers the friction of the world's surface
+  // materials, by the weather's wetness, in the scene's physics world.
+  {
+    printf("== weather: lightning and the wet ground's friction ==\n");
+    SceneGraph sg(app, "o20");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    auto node = [](const char *id, const char *type,
+                   std::vector<std::pair<const char *, std::string>> props) {
+      SceneNode n;
+      n.id = id;
+      n.type = type;
+      n.props.kind = Value::Kind::Map;
+      for (auto &p : props) {
+        Value v;
+        v.kind = Value::Kind::Scalar;
+        v.scalar = p.second;
+        n.props.entries.emplace_back(p.first, v);
+      }
+      return n;
+    };
+    SceneNode world = node("world", "generated_world",
+                           {{"seed", "5"},
+                            {"half", "150"},
+                            {"trees", "0"},
+                            {"rocks", "0"},
+                            {"buildings", "0"},
+                            {"amp", "40"},
+                            {"water", "0"},
+                            {"texture", "256"}});
+    world.body.present = true;
+    scene.nodes.push_back(world);
+    scene.physics.present = true;
+    SceneNode sky = node("sky", "cloud_sky",
+                         {{"ground", "world"},
+                          {"extent", "60"},
+                          {"base", "120"},
+                          {"top", "180"},
+                          {"coverage", "0.4"},
+                          {"near", "2"}});
+    Value rec;
+    rec.kind = Value::Kind::Sequence;
+    Value item;
+    item.kind = Value::Kind::Scalar;
+    item.scalar = "weather_bolt";
+    rec.items.push_back(item);
+    sky.props.entries.emplace_back("receivers", rec);
+    scene.nodes.push_back(sky);
+    scene.nodes.push_back(node("weather", "weather",
+                               {{"ground", "world"},
+                                {"sky", "sky"},
+                                {"chance", "0"},
+                                {"radius_min", "500"},
+                                {"radius_max", "500"},
+                                {"storm_top", "600"},
+                                {"flash_rate", "5"}}));
+    std::vector<std::string> warnings;
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "o20", &warnings);
+    auto st = [&](const char *k) -> cvc::state & {
+      return cvc::state::instance(app)(cvc::ariadne::resolve_bind("o20", k));
+    };
+    chk(approx(st("weather.lightning").value<double>(), 1.0) &&
+            approx(st("weather.friction").value<double>(), 1.0),
+        "the lightning's and the friction's keys are seeded");
+    chk(realized.physics != nullptr, "the scene has its physics world (the world's surfaces)");
+    // The world's surface materials, dry.
+    std::vector<std::pair<std::string, float>> dry;
+    if (realized.physics)
+      for (std::size_t i = 0; i < realized.physics->material_count(); ++i) {
+        const cvc::physics::material m =
+            realized.physics->get_material(static_cast<cvc::physics::material_id>(i));
+        dry.emplace_back(m.name, m.friction);
+      }
+    st("weather.request").value(std::string("overhead"));
+    auto wgroup = sg.getGraphics("weather");
+    auto bolt = wgroup ? std::dynamic_pointer_cast<cvc::gl::GeometryNode>(
+                             wgroup->findChildByName("weather_bolt"))
+                       : nullptr;
+    double flashMax = 0.0;
+    bool boltSeen = false, flashUniform = false, boltFinite = true;
+    std::size_t boltPoints = 0;
+    for (int k = 0; k < 120; ++k) {
+      cvc::pump_exec_frame(app.exec_scheduler());
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer());
+      flashMax = std::max(flashMax, st("weather.flash").value<double>());
+      if (bolt && bolt->isVisible() && bolt->getGeometry()) {
+        boltSeen = true;
+        boltPoints = std::max(boltPoints, bolt->getGeometry()->points().size());
+        for (const auto &q : bolt->getGeometry()->points())
+          boltFinite =
+              boltFinite && std::isfinite(q[0]) && std::isfinite(q[1]) && std::isfinite(q[2]);
+      }
+      // The receivers and the far clouds share the sky's inputs: the far slices' are theirs.
+      if (auto far = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("sky_far")))
+        if (auto in = far->sharedShaderInputs("cloud_sky"))
+          if (in->f4.count("cloudFlash") && in->f4.at("cloudFlash")[3] > 0.0f)
+            flashUniform = true;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    printf("  brightest flash %.2f; a bolt of %zu vertices\n", flashMax, boltPoints);
+    chk(flashMax > 0.3, "the storm threw lightning (weather.flash)");
+    chk(boltSeen && boltPoints > 12, "a strike's bolt was drawn (its ribbons)");
+    chk(boltFinite, "the bolt reaches the ground's edge height when it strikes past the terrain");
+    chk(bolt && bolt->hasSharedShaderInputs("cloud_sky"),
+        "the sky found the bolt among its receivers, so it draws after the deck");
+    chk(flashUniform, "the receivers and the far clouds had the flash as a uniform");
+    // The rain into the friction: the wetness under the storm, and the surfaces' friction lowered.
+    const double wet = st("weather.wetness").value<double>();
+    int lowered = 0, surfaces = 0;
+    if (realized.physics)
+      for (std::size_t i = 0; i < dry.size(); ++i) {
+        std::uint16_t sid = 0;
+        if (!cvc::world::surface_registry::builtin().find(dry[i].first, sid))
+          continue;
+        ++surfaces;
+        const float now =
+            realized.physics->get_material(static_cast<cvc::physics::material_id>(i)).friction;
+        const cvc::world::surface_class &c = cvc::world::surface_registry::builtin()[sid];
+        lowered += now < dry[i].second && std::fabs(now - cvc::physics::wet_friction(c, wet)) < 1e-4
+                       ? 1
+                       : 0;
+      }
+    printf("  wetness %.3f: %d of %d surface materials' friction lowered\n", wet, lowered,
+           surfaces);
+    chk(wet > 0.0 && surfaces > 0 && lowered > 0,
+        "the rain lowered the world's surface friction by the weather's wetness");
+    // Turned off, the surfaces dry at once.
+    st("weather.friction").value(0.0);
+    for (int k = 0; k < 3; ++k) {
+      cvc::pump_exec_frame(app.exec_scheduler());
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer());
+    }
+    int restored = 0;
+    if (realized.physics)
+      for (std::size_t i = 0; i < dry.size(); ++i)
+        restored +=
+            realized.physics->get_material(static_cast<cvc::physics::material_id>(i)).friction ==
+                    dry[i].second
+                ? 1
+                : 0;
+    chk(restored == int(dry.size()) && dry.size() > 0,
+        "with weather.friction off the surfaces have their dry friction back");
+    for (const std::string &w : warnings)
+      printf("  warning: %s\n", w.c_str());
   }
 
   // ── a generated terrain as a geometry source (source: { terrain: {...} }) ─────────────────

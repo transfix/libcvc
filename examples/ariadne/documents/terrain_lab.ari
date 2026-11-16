@@ -211,7 +211,8 @@ scene:
     - node: sky
       type: cloud_sky
       ground: world        # the deck covers this node's extent, live, and shades its meshes
-      receivers: [world_buildings, world_roads, world_props, world_foliage, water, weather_rain]
+      receivers: [world_buildings, world_roads, world_props, world_foliage, water, weather_rain,
+                  weather_bolt]
       extent: 250          # a cloud's half-width, metres: small fair-weather cumulus
       base: 300
       top: 520
@@ -230,6 +231,9 @@ scene:
     # storms. It rains under a storm (rain shafts in the distance, streaks near the camera, rings
     # on the lakes, the ground and the roads wet and drying after it, and fog): the streaks are its
     # mesh weather_rain, which the sky lists among its receivers, so they draw after the clouds.
+    # A storm in its prime throws lightning (its bolts are the mesh weather_bolt, listed the same
+    # way; its flash lights the ground, the water and the clouds), and the wet ground's friction
+    # drops for the vehicles and bodies in the physics world, coming back as it dries.
     - node: weather
       type: weather
       ground: world        # the storms are timed to cross this node's extent
