@@ -48,7 +48,9 @@
 #define CVC_OCEAN_WHITECAPS_H
 
 #include <cstddef>
+#include <cstdint>
 #include <cvc/ocean/h0.h>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -106,6 +108,155 @@ private:
   std::vector<double> _fray_q; // n - 0.5 at 16 quantiles of the fray noise
   double _mean = 1.0;
   std::vector<double> _area; // the sums of |J| (the drawn surface) of the first i samples
+};
+
+// ── Persistent foam (OCEAN-AND-WEATHER-ROADMAP.md section 10.2, O5) ──────────────────────
+//
+// A breaking wave leaves foam behind that thins over seconds. The drawn sea keeps it in a
+// turbulence texture beside its long cascades, in each cascade's own texels (OceanFoam, in cvcGL):
+// each frame a texel takes its cascade's fold, smoothstep((bias - J) / ramp) with J that
+// cascade's Jacobian, and its foam builds at build_per_s a second while it folds and decays as
+// exp(-t / decay_s) after (foam_step). Bubbles build at bubble_gain of that rate and decay more
+// slowly; the crest channel is the injection itself and the spray channel latches it, decaying in
+// a sixth of a second (for spray particles, section 10.5; nothing draws them yet).
+//
+// Only the first `cascades` cascades (the long waves: lsystem_coast's and the water node's 251 m
+// and 83 m tiles, waves over about 7 m) leave foam that lasts. The short cascade's folds are its
+// metre-long waves flickering in and out in a fraction of a second: integrated, they would whiten
+// the sea evenly, which is not what breaking looks like, and their 29 m tile would print its
+// pattern on the foam. They keep the instantaneous whitecaps alone. (ABYSSAL weights its short
+// cascade's foam by 0.22 and fades it four times faster, for the same reason.)
+//
+// The water's fragment shader draws the stronger cascade's foam carved into windrows (foam_look):
+// fresh foam is white with lace in it, and as it ages only the streaks the windrow noise picks
+// survive, until it is gone (below about 0.2). The instantaneous whitecaps (foam_field's:
+// smoothstep((bias - J + fray (n - 0.5)) / ramp) on the least of all the cascades' J) draw on top,
+// at the fragment's resolution.
+//
+// Together they cover Monahan's share for the wind: foam_history evolves the cascades' h0 on the
+// CPU over a few seconds, runs foam_step on every texel of the long cascades, and measures what
+// the shader would draw on a lattice of the open sea. The aging foam alone takes `share` of it
+// (its own bias), and the whitecaps' bias makes up the rest.
+
+struct foam_persistence {
+  double decay_s = 2.5;        // the foam's e-folding time (s); 0: no persistent foam
+  double build_per_s = 4.0;    // foam gained a second while a texel folds fully (inject 1)
+  double bubble_decay_s = 6.0; // the bubbles' e-folding time (s)
+  double bubble_gain = 0.55;   // the bubbles' share of the foam's injection
+  double spray_decay_s = 1.0 / 6.0;
+  double max_dt_s = 0.25; // a longer step (a stall, a jump of the clock) integrates this much
+  int cascades = 2;       // the first this many cascades leave persistent foam
+  double share = 0.6;     // the share of Monahan's cover the aging foam alone draws
+};
+
+// One texel's turbulence: (foam, bubbles, crest, spray), each in [0, 1], OceanFoam's RGBA.
+struct foam_state {
+  double foam = 0.0, bubbles = 0.0, crest = 0.0, spray = 0.0;
+};
+
+// The fold's injection at Jacobian j: smoothstep((bias - j) / ramp), ramp > 0.
+double foam_inject(double j, double bias, double ramp);
+
+// One step of dt_s seconds (clamped to [0, max_dt_s]) with injection `inject` in [0, 1], as
+// OceanFoam's pass runs it (in floats there):
+//   foam    <- clamp(foam exp(-dt / decay_s) + inject build_per_s dt, 0, 1)
+//   bubbles <- clamp(bubbles exp(-dt / bubble_decay_s) + inject build_per_s dt bubble_gain, 0, 1)
+//   crest   <- inject
+//   spray   <- max(spray exp(-dt / spray_decay_s), smoothstep(0.45, 0.95, inject))
+// A decay time of 0 or less keeps nothing from the step before.
+void foam_step(foam_state &s, double inject, double dt_s, const foam_persistence &p);
+
+// The drawn whiteness of persistent foam `foam` at a point whose windrow noise is w (in [0, 1]):
+// smoothstep((foam (0.1 + 1.6 w) - 0.35) / 0.3). The shader's windrow noise is
+// 0.45 v1 + 0.3 v2 + 0.25 v3, three scales of value noise: streaks downwind about 12 m by 2.5 m
+// and 3 m by 0.8 m, and a lace 0.5 m across that makes the edges ragged (fading to its mean, 0.5,
+// as a pixel grows past it).
+double foam_look(double foam, double windrow);
+
+struct foam_history_params {
+  // The longest cascade's Jacobian is evaluated every step_s seconds, a shorter one's every
+  // step_s sqrt(tile / longest tile) (its waves are faster); the integration steps dt_s, the
+  // Jacobian a Catmull-Rom spline in time through the evaluations.
+  double step_s = 0.4;
+  double dt_s = 1.0 / 24.0;
+  // The history before the first sample (0: twice decay_s; older foam has thinned past drawing),
+  // then the samples, seconds after it.
+  double window_s = 0.0;
+  std::vector<double> samples_s = {0.0, 0.5, 1.0};
+  double t0_s = 0.0; // the history's first time
+};
+
+// The two thresholds the drawn foam takes: the instantaneous whitecaps' on the least J of all the
+// cascades (the shader's uFoamBias) and the persistent foam's injection on each long cascade's J.
+struct foam_biases {
+  double whitecaps = 0.8;
+  double persistent = 0.9;
+};
+
+// The drawn foam's share of the open sea with persistent foam: the instantaneous whitecaps and the
+// persistent foam drawn with foam_look, the larger of the two at each point, weighted by |J| as
+// foam_field weighs. The lattice is foam_field's (its spacing_m, or the mesh's vertices and
+// mesh_samples points a cell, J linear over each triangle), the persistent foam read at each point
+// from the nearest texel of each long cascade, as the shader reads it. The windrow noise is
+// averaged over 64 quantiles of its distribution (foam_look is monotone in the foam, so the
+// stronger cascade's foam decides), and the fray takes foam_field's 16 quantiles in turn from
+// point to point. Deterministic.
+//
+// The Jacobians are the work: units() of them, one cascade at one time each (two n x n
+// transforms): the long cascades' over the history, and every cascade's at the samples. step()
+// does them a few at a time, so a caller can spread them over frames or hand them to a worker;
+// the shares and biases_for() need them all (ready()).
+class foam_history {
+public:
+  // Throws std::invalid_argument as foam_field does, or for decay_s <= 0, build_per_s < 0,
+  // cascades < 1, share outside [0, 1), step_s or dt_s <= 0, or samples_s empty or negative.
+  foam_history(const std::vector<h0_field> &cascades, const foam_params &p,
+               const foam_persistence &q, const foam_history_params &h = {});
+
+  std::size_t units() const noexcept { return _units.size(); }
+  std::size_t units_done() const noexcept { return _done; }
+  bool ready() const noexcept { return _done == _units.size(); }
+  // Does up to n units (0: all); true once all are done.
+  bool step(std::size_t n = 1);
+
+  // Need ready(); throw std::logic_error before.
+  double coverage(const foam_biases &b) const; // what the shader draws
+  double persistent(double bias) const;        // the aging foam alone, at its injection's bias
+  double active(double bias) const;            // the whitecaps alone, at theirs
+  // The persistent bias whose aging foam alone covers share x `share` of the sea, then the
+  // whitecaps' bias that brings the drawn foam to `share` (each a bisection).
+  foam_biases biases_for(double share) const;
+
+private:
+  // The aging foam's look at every lattice point and sample, at injection bias `bias`.
+  std::vector<float> looks(double bias) const;
+  double drawn(double whitecaps, const std::vector<float> *looks) const; // looks null: none
+  void lattice(); // once every Jacobian is in: the lattice's points, their texels and J
+
+  std::vector<h0_field> _h;
+  foam_params _p;
+  foam_persistence _q;
+  foam_history_params _hp;
+  std::size_t _np = 0; // the long cascades
+  double _window = 0.0, _end = 0.0, _side = 0.0;
+  std::vector<double> _step;                        // each long cascade's time between evaluations
+  std::vector<std::vector<std::vector<float>>> _j;  // [long cascade][evaluation] n x n Jacobians
+  std::vector<std::vector<float>> _jmin;            // [long cascade] each texel's least J in it
+  std::vector<std::vector<std::vector<float>>> _js; // [sample][cascade] the Jacobians at samples
+  struct unit {
+    std::size_t cascade, index;
+    bool sample; // a sample's field (index the sample), else a history's (index its evaluation)
+  };
+  std::vector<unit> _units;
+  std::size_t _done = 0;
+  std::vector<double> _fray_q; // as foam_field's
+  std::vector<double> _look;   // foam_look averaged over the windrow noise, at foam i / 256
+  double _dt = 0.0;            // the integration's step
+  std::vector<long> _at;       // the integration step each sample is read after
+  std::vector<std::vector<std::uint32_t>> _texel; // [long cascade] each lattice point's texel
+  std::vector<float> _pj;   // [sample][point] the least J the shader sees there
+  std::vector<float> _area; // [sample][point] its weight, |J|
+  double _area_sum = 0.0;
 };
 
 } // namespace ocean
