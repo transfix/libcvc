@@ -18,6 +18,7 @@
 // non-zero on any failure: assert() is a NO-OP under NDEBUG (Release / cvcpkg),
 // so a test that assert()s would pass vacuously (see cvcgl_volume_range.cpp).
 
+#include "OceanCascades.h"
 #include "OceanFFT.h"
 #include "OceanFoam.h"
 
@@ -28,6 +29,7 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/ocean/h0.h>
 #include <cvc/ocean/whitecaps.h>
+#include <memory>
 #include <vector>
 #include <vtkOpenGLRenderWindow.h>
 #include <vtkTextureObject.h>
@@ -230,6 +232,98 @@ int main() {
       const Stat fs = compStat(sea.readback(), 0, 4);
       std::printf("  (a storm's foam: mean %.4f, max %.4f)\n", fs.mean, fs.mx);
       check(fs.finite && fs.mx > 0.0 && fs.mx <= 1.0, "a storm's folds leave foam, within [0, 1]");
+    }
+  }
+
+  // 9. OceanCascades: three cascades side by side in atlases, every pass doing all of them, give
+  //    each cascade's OceanFFT field (the same h0, the same time), in 2 + 2 log2 N passes where
+  //    three OceanFFTs take three times 3 + 4 log2 N. A foam atlas reads their Jacobians from the
+  //    displacement atlas as from three textures.
+  {
+    const double tiles[3] = {251.0, 83.0, 29.0};
+    OceanCascades all(N, 3);
+    std::vector<std::unique_ptr<OceanFFT>> one;
+    bool ok = all.init(ow);
+    for (int c = 0; c < 3 && ok; ++c) {
+      cvc::ocean::cascade b;
+      b.tile_m = tiles[c];
+      b.seed = 11 + c;
+      const cvc::ocean::h0_field h = cvc::ocean::build_h0(N, b, calm);
+      ok = all.setH0(c, h);
+      one.push_back(std::make_unique<OceanFFT>(N));
+      ok = ok && one.back()->setH0(h) && one.back()->init(ow);
+    }
+    check(!all.setH0(3, cvc::ocean::build_h0(N, band, calm)) &&
+              !all.setH0(0, cvc::ocean::build_h0(N * 2, band, calm)),
+          "OceanCascades refuses a fourth cascade or another resolution");
+    if (ok) {
+      const long long before = all.passesRun();
+      all.step(2.25);
+      const long long passes = all.passesRun() - before;
+      const std::vector<float> atlas = all.readbackDisplacement();
+      double worst = 0.0, scale = 0.0;
+      for (int c = 0; c < 3; ++c) {
+        one[c]->step(2.25);
+        const std::vector<float> d = one[c]->readbackDisplacement();
+        for (int y = 0; y < N; ++y)
+          for (int x = 0; x < N; ++x)
+            for (int k = 0; k < 4; ++k) {
+              const float a = atlas[(static_cast<size_t>(y) * N * 3 + c * N + x) * 4 + k];
+              const float b = d[(static_cast<size_t>(y) * N + x) * 4 + k];
+              worst = std::max(worst, double(std::fabs(a - b)));
+              scale = std::max(scale, double(std::fabs(b)));
+            }
+      }
+      std::printf("  (OceanCascades vs three OceanFFTs: worst difference %.3g over a largest value "
+                  "%.3g; %lld passes)\n",
+                  worst, scale, passes);
+      check(atlas.size() == static_cast<size_t>(N) * N * 3 * 4 && worst <= 1e-4 * scale,
+            "OceanCascades' tiles are each cascade's OceanFFT field");
+      check(passes == 2 + 2 * static_cast<long long>(std::lround(std::log2(N))),
+            "all three cascades in 2 + 2 log2 N passes");
+      OceanFoam foam3(N, 2);
+      OceanFoam foam1(N, 2);
+      if (foam3.init(ow) && foam1.init(ow)) {
+        foam3.bias = foam1.bias = 1.0;
+        for (int i = 0; i < 10; ++i) {
+          foam3.step(all.displacement(), 1.0 / 60.0);
+          foam1.step({one[0]->displacement(), one[1]->displacement()}, 1.0 / 60.0);
+        }
+        const std::vector<float> f3 = foam3.readback(), f1 = foam1.readback();
+        double fw = 0.0;
+        for (std::size_t i = 0; i < f3.size() && i < f1.size(); ++i)
+          fw = std::max(fw, double(std::fabs(f3[i] - f1[i])));
+        check(f3.size() == f1.size() && fw < 1e-4,
+              "the foam reads the cascades' Jacobians from the atlas as from their textures");
+      }
+      // Two cascades active (adaptive quality's lower tiers): the first two tiles move on, each
+      // still its OceanFFT field, and the third keeps what it held.
+      all.setActive(2);
+      all.step(3.5);
+      const std::vector<float> two = all.readbackDisplacement();
+      double worst2 = 0.0, kept = 0.0;
+      for (int c = 0; c < 3; ++c) {
+        std::vector<float> d;
+        if (c < 2) {
+          one[c]->step(3.5);
+          d = one[c]->readbackDisplacement();
+        }
+        for (int y = 0; y < N; ++y)
+          for (int x = 0; x < N; ++x)
+            for (int k = 0; k < 4; ++k) {
+              const std::size_t i = (static_cast<size_t>(y) * N * 3 + c * N + x) * 4 + k;
+              if (c < 2)
+                worst2 = std::max(
+                    worst2,
+                    double(std::fabs(two[i] - d[(static_cast<size_t>(y) * N + x) * 4 + k])));
+              else
+                kept = std::max(kept, double(std::fabs(two[i] - atlas[i])));
+            }
+      }
+      check(all.active() == 2 && worst2 <= 1e-4 * scale && kept == 0.0,
+            "with two active, the first two cascades step and the third is left alone");
+      all.setActive(5);
+      check(all.active() == 3, "setActive clamps to the cascades there are");
     }
   }
 

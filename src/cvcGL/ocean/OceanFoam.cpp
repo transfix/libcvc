@@ -25,13 +25,14 @@ namespace {
 constexpr unsigned int kGL_SCISSOR_TEST = 0x0C11;
 
 // One frame of the turbulence: cvc::ocean::foam_step on every texel of the atlas, tile c reading
-// cascade c's Jacobian. The decay factors (uKeep = exp(-dt / decay) ...) and the gain
-// (build_per_s dt) come from the CPU.
+// cascade c's Jacobian, from its own texture or (uAtlas) from tile c of one displacement atlas
+// (OceanCascades). The decay factors (uKeep = exp(-dt / decay) ...) and the gain (build_per_s dt)
+// come from the CPU.
 const char *const kFoamFS =
     "//VTK::System::Dec\n"
     "uniform highp sampler2D uDisp0; uniform highp sampler2D uDisp1;\n"
     "uniform highp sampler2D uDisp2; uniform highp sampler2D uPrev;\n"
-    "uniform int uN;\n"
+    "uniform int uN, uAtlas;\n"
     "uniform float uBias, uRamp, uKeep, uBubbleKeep, uSprayKeep, uGain, uBubbleGain;\n"
     "//VTK::Output::Dec\n"
     "void main(){\n"
@@ -39,7 +40,8 @@ const char *const kFoamFS =
     "  int c = p.x / uN;\n"
     "  ivec2 t = ivec2(p.x - c*uN, p.y);\n"
     "  float J;\n"
-    "  if (c == 0) J = texelFetch(uDisp0, t, 0).w;\n"
+    "  if (uAtlas != 0) J = texelFetch(uDisp0, p, 0).w;\n" // tile c of the atlas is at p too
+    "  else if (c == 0) J = texelFetch(uDisp0, t, 0).w;\n"
     "  else if (c == 1) J = texelFetch(uDisp1, t, 0).w;\n"
     "  else J = texelFetch(uDisp2, t, 0).w;\n"
     "  vec4 prev = texelFetch(uPrev, p, 0);\n"
@@ -249,8 +251,17 @@ void OceanFoam::clear() {
 void OceanFoam::step(const std::vector<vtkTextureObject *> &disp, double dt_s) {
   if (!m_ready || disp.size() < std::size_t(m_tiles))
     return;
-  for (int c = 0; c < m_tiles; ++c)
-    if (!disp[std::size_t(c)])
+  run(std::vector<vtkTextureObject *>(disp.begin(), disp.begin() + m_tiles), false, dt_s);
+}
+
+void OceanFoam::step(vtkTextureObject *dispAtlas, double dt_s) {
+  if (m_ready && dispAtlas)
+    run({dispAtlas}, true, dt_s);
+}
+
+void OceanFoam::run(const std::vector<vtkTextureObject *> &disp, bool atlas, double dt_s) {
+  for (vtkTextureObject *d : disp)
+    if (!d)
       return;
   m_rw->MakeCurrent();
   const double dt = std::clamp(dt_s, 0.0, std::max(params.max_dt_s, 0.0));
@@ -264,13 +275,14 @@ void OceanFoam::step(const std::vector<vtkTextureObject *> &disp, double dt_s) {
   m_rw->GetShaderCache()->ReadyShaderProgram(p);
   vtkTextureObject *src = m_atlas[m_cur];
   src->Activate();
-  for (int c = 0; c < m_tiles; ++c)
-    disp[std::size_t(c)]->Activate();
+  for (vtkTextureObject *d : disp)
+    d->Activate();
   const char *names[3] = {"uDisp0", "uDisp1", "uDisp2"};
-  for (int c = 0; c < 3; ++c) // unused slots read the first cascade (never sampled)
-    p->SetUniformi(names[c], disp[std::size_t(std::min(c, m_tiles - 1))]->GetTextureUnit());
+  for (int c = 0; c < 3; ++c) // unused slots read the first texture (never sampled)
+    p->SetUniformi(names[c], disp[std::min(std::size_t(c), disp.size() - 1)]->GetTextureUnit());
   p->SetUniformi("uPrev", src->GetTextureUnit());
   p->SetUniformi("uN", m_n);
+  p->SetUniformi("uAtlas", atlas ? 1 : 0);
   p->SetUniformf("uBias", static_cast<float>(bias));
   p->SetUniformf("uRamp", static_cast<float>(std::max(ramp, 1e-6)));
   p->SetUniformf("uKeep", static_cast<float>(keep(params.decay_s)));
@@ -279,8 +291,8 @@ void OceanFoam::step(const std::vector<vtkTextureObject *> &disp, double dt_s) {
   p->SetUniformf("uGain", static_cast<float>(std::max(params.build_per_s, 0.0) * dt));
   p->SetUniformf("uBubbleGain", static_cast<float>(params.bubble_gain));
   m_pass->Render();
-  for (int c = 0; c < m_tiles; ++c)
-    disp[std::size_t(c)]->Deactivate();
+  for (vtkTextureObject *d : disp)
+    d->Deactivate();
   src->Deactivate();
   m_rw->GetState()->PopFramebufferBindings();
   m_cur = dst;
@@ -339,6 +351,14 @@ bool OceanFoamCalibration::step(std::size_t budget) {
     return false;
   }
   m_biases = m_h.biases_for(m_share);
+  // the whitecaps alone (foam_history::active rises with the bias): a bisection over every bias
+  // a J can take
+  double lo = -2.0, hi = 3.0;
+  for (int i = 0; i < 48 && hi - lo > 1e-6; ++i) {
+    const double mid = 0.5 * (lo + hi);
+    (m_h.active(mid) < m_share ? lo : hi) = mid;
+  }
+  m_alone = 0.5 * (lo + hi);
   m_finished.store(true, std::memory_order_release);
   m_done.store(true, std::memory_order_release);
   return true;

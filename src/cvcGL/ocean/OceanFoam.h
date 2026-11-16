@@ -72,6 +72,8 @@ public:
   // One frame, dt_s seconds after the last (clamped as foam_step clamps it): tile c takes
   // disp[c]'s Jacobian (.w). disp holds tiles() textures of n x n.
   void step(const std::vector<vtkTextureObject *> &disp, double dt_s);
+  // The same, tile c reading tile c of one displacement atlas (OceanCascades::displacement()).
+  void step(vtkTextureObject *dispAtlas, double dt_s);
   // No foam anywhere.
   void clear();
 
@@ -86,6 +88,8 @@ public:
   cvc::ocean::foam_persistence params;
 
 private:
+  void run(const std::vector<vtkTextureObject *> &disp, bool atlas, double dt_s);
+
   int m_n, m_tiles;
   bool m_ready = false;
   int m_cur = 0; // the atlas last written
@@ -119,6 +123,9 @@ public:
   std::string status() const override;
   bool finished() const { return m_finished.load(std::memory_order_acquire); }
   cvc::ocean::foam_biases biases() const { return m_biases; } // once finished()
+  // The whitecaps' bias that covers the share with no persistent foam beside them (once
+  // finished()): what the water draws while adaptive quality has the persistent foam off.
+  double whitecapsAlone() const { return m_alone; }
 
   // Submits it to app's scheduler (`subject` names it, `owner` tags it), or, where no task can
   // start, runs it here. Null only if it cannot be made (a bad h0).
@@ -131,6 +138,7 @@ private:
   cvc::ocean::foam_history m_h;
   double m_share;
   cvc::ocean::foam_biases m_biases;
+  double m_alone = 0.8;
   std::atomic<bool> m_done{false}, m_cancel{false}, m_finished{false};
   std::atomic<int> m_phase{0};
   std::atomic<double> m_progress{0.0};
