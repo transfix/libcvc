@@ -10,6 +10,7 @@
     "volren_bunny_ari",
     "volslice_bunny",
     "volslice_bunny_ari",
+    "orthoslicer_ari",
     "fem_gallery_ari",
     "viewer_grid_ari",
     "viewer_looks_ari",
@@ -184,6 +185,15 @@
       "blurb":
           "The slice-based bunny, rebuilt in the Ariadne UI DSL: scene, transfer function, lighting and the slice control panel declared in one .ari document, run by arigl — no demo-specific C++. The volume is the signed distance field of the embedded Stanford mesh (source: { sdf: { mesh } }), and the controls are reusable .ari components.",
       "thumb": "img/volslice_bunny_ari.jpg"
+    },
+    "orthoslicer_ari": {
+      "app": "arigl",
+      "doc": "orthoslicer",
+      "title": "orthoslicer",
+      "desc": "three slice planes through the bunny's volume, and a view down any axis",
+      "blurb":
+          "The classic orthoslicer beside a raycast volume, as one Ariadne document: the signed distance field of the embedded Stanford bunny, raycast with a see-through surface and cut by three axis-aligned volume_slice planes that share one volume and one transfer function. A slice view looks straight down whichever axis the XY / XZ / ZY switch picks: drag to pan, the wheel zooms about the pointer, a click reads out the voxel under it. The sliders move the planes, and the transfer-function editor recolours all three.",
+      "thumb": "img/orthoslicer_ari.jpg"
     },
     "arigl_term": {
       "title": "arigl --terminal",

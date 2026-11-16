@@ -924,6 +924,13 @@ field_load world::field_load_on(body_id id) const {
   return _impl->fields.load(id);
 }
 
+water_sample world::water_at(const vec3 &p) const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  water_sample out;
+  _impl->fields.water_at(p, _impl->field_time(), out);
+  return out;
+}
+
 step_report world::step() {
   std::lock_guard<std::mutex> lock(_impl->mutex);
   return _impl->step();

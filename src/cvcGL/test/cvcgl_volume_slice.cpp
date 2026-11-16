@@ -250,6 +250,34 @@ void headless(const fs::path &dir) {
           "transfer_function: { preset: hot } seeds the model");
   }
 
+  // volume_of: another plane of the same volume, through the same transfer function.
+  {
+    realized_doc v(app, "slice_shared",
+                   doc(file, "      axis: z\n      transfer_function: { preset: grayscale }\n") +
+                       "    - node: t\n      type: volume_slice\n      volume_of: s\n"
+                       "      axis: x\n      index: 1\n"
+                       "    - node: u\n      type: volume_slice\n      volume_of: nobody\n");
+    auto first = slice_node(v.sg, "s"), second = slice_node(v.sg, "t");
+    check(first && second && second->source() == first->source(),
+          "volume_of: shares the first node's volume (one slice_source)");
+    check(second && second->params().axis == cvc::slice_axis::x && second->params().index == 1,
+          "with its own axis and index");
+    check(second && second->modelKey() == first->stateName("transfer_function"),
+          "and colours through the first node's transfer function");
+    bool nobody = false;
+    for (const std::string &w : v.warnings)
+      nobody =
+          nobody || w.find("volume_of: 'nobody' names no volume_slice node") != std::string::npos;
+    check(nobody && !v.sg.getGraphics("u"), "a volume_of: that names no slice node warns");
+    if (first && second) {
+      const std::vector<std::uint8_t> before = second->pixels();
+      set(app, first->stateName("transfer_function"),
+          cvc::tf::to_string(cvc::tf::model::preset("hot")));
+      v.tick();
+      check(second->pixels() != before, "an edit of the first node's model recolours the second");
+    }
+  }
+
   // Bad input: no source, a missing file, an axis that is not one.
   {
     realized_doc b(app, "slice_bad",

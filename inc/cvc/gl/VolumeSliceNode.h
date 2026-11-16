@@ -79,6 +79,12 @@ public:
   void setSource(std::shared_ptr<cvc::slice_source> src);
   std::shared_ptr<cvc::slice_source> source() const { return m_source; }
 
+  // Colour through the model at another key (an absolute state path: another slice node's
+  // <node>.transfer_function, so several planes share one editor) instead of this node's own.
+  // Read every tick. Empty: this node's own key again.
+  void setModelKey(const std::string &path);
+  const std::string &modelKey() const { return m_modelKey; }
+
   // Cut, colour and upload the plane again if the source, a slice.* key or the transfer function
   // changed since the last call. Call once per frame before rendering, on the owner thread.
   // Returns true when the drawing changed.
@@ -117,6 +123,7 @@ private:
   bool m_drawn = false;
   cvc::tf::model m_model;
   std::string m_modelText = "\x01"; // the model string m_model was parsed from (never a real one)
+  std::string m_modelKey;           // setModelKey: another key the model is read from
   std::shared_ptr<const cvc::volume_slice_data> m_slice;
   std::vector<std::uint8_t> m_pixels;
   cvc::image m_image; // the texture's pixels (aliased by the texture: written in place)
