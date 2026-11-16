@@ -108,11 +108,19 @@ target_include_directories(cvcGL PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/ocean")
 # auto-adjusting render uses; cvcpkg's VTK (vtk 9.5.0+cvc.5, written for upstream) adds an opt-in
 # vtkSmartVolumeMapper::FinishEveryRender to skip it. VolumeNode turns it off per mapper where the
 # VTK found has it (RENDER_PERF_ROADMAP.md Phase 6); an unpatched VTK builds and renders as before.
+#
+# The check compiles only (the header declares the property; a static-library try_compile links
+# nothing), so a link that fails for another reason, a wasm one say, cannot turn it off. It runs
+# at every configure: VTK's version stays 9.5.0 across cvcpkg's revisions, so a cached answer from
+# before the prefix's VTK changed would stick.
 include(CheckCXXSourceCompiles)
 include(CMakePushCheckState)
+unset(CVC_VTK_HAS_FINISH_EVERY_RENDER CACHE)
 cmake_push_check_state(RESET)
 set(CMAKE_REQUIRED_LIBRARIES VTK::RenderingVolumeOpenGL2)
 set(CMAKE_REQUIRED_QUIET ON)
+set(_cvc_try_compile_target_type "${CMAKE_TRY_COMPILE_TARGET_TYPE}")
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 check_cxx_source_compiles("
 #include <vtkNew.h>
 #include <vtkSmartVolumeMapper.h>
@@ -121,6 +129,8 @@ int main() {
   m->FinishEveryRenderOff();
   return m->GetFinishEveryRender() ? 1 : 0;
 }" CVC_VTK_HAS_FINISH_EVERY_RENDER)
+set(CMAKE_TRY_COMPILE_TARGET_TYPE "${_cvc_try_compile_target_type}")
+unset(_cvc_try_compile_target_type)
 cmake_pop_check_state()
 if(CVC_VTK_HAS_FINISH_EVERY_RENDER)
   target_compile_definitions(cvcGL PRIVATE CVC_VTK_HAS_FINISH_EVERY_RENDER=1)
