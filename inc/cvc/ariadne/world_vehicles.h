@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cvc/ariadne/world_rules.h> // vehicle_archetype
 #include <cvc/ariadne/world_spawns.h>
+#include <cvc/physics/dyn_boat_plant.h> // dyn_boat_desc
 #include <cvc/physics/types.h>
 #include <cvc/physics/vehicle.h> // vehicle_desc
 #include <limits>
@@ -57,6 +58,13 @@ namespace ariadne {
 //   dynamic4w  the four-wheel model with suspension (dyn_4w_plant), its chassis box a body
 //   kinematic  nav's bicycle, its chassis box a kinematic body that pushes what it meets (nav
 //              keeps it off the buildings; nothing stops it)
+//   dynamicboat  a boat (dyn_boat_plant), its hull a body afloat on the world's water: the field
+//              a scene's water node puts in the world, or, where the world has none over the
+//              grid's water, a still one at the water's level that WorldVehicles adds. Its
+//              navigator plans on the water deep enough for the deepest boat (land blocked).
+//
+// Each archetype starts and aims on its medium (its plant's vehicle_plant::medium(); WorldSpawns'
+// needs): a car out of water deeper than a ford, a boat in water deep and open enough for it.
 //
 // The dynamic models take one substep of each world step, so they step on the world's clock with
 // everything else. The entities on each plant have a navigator of their own (a navigator drives
@@ -72,10 +80,17 @@ namespace ariadne {
 // drives.
 
 // An archetype's vehicle: its preset with the archetype's overrides on top, then a spawn's mass
-// and top speed (0: the archetype's), each held to the archetype's range. Throws
+// and top speed (0: the archetype's), each held to the archetype's range. A boat's (dynamicboat)
+// is a stand-in for what reads a vehicle: its hull's box, mass, top speed, the thrusts per unit
+// mass as its acceleration and braking, the lock of its plan, and no wheels. Throws
 // std::invalid_argument for a preset that is not one.
 physics::vehicle_desc vehicle_desc_of(const vehicle_archetype &a, double mass = 0.0,
                                       double max_speed = 0.0);
+// A boat archetype's boat (dynamicboat): its preset (launch, jonboat) with the archetype's mass and
+// max_speed overrides, then a spawn's, held to its ranges. Throws std::invalid_argument for a
+// preset that is not a boat's.
+physics::dyn_boat_desc boat_desc_of(const vehicle_archetype &a, double mass = 0.0,
+                                    double max_speed = 0.0);
 
 // A vehicle model's file by name (`humvee`: Humvee.glb; any other name is taken as the file's
 // name), where the vehicle-humvee cvcpkg package installs it: beside $CVC_NAV_BUNDLE (in it, or
@@ -169,7 +184,8 @@ struct entity_info {
   int gear = 0;
   double rpm = 0.0, throttle = 0.0, brake = 0.0;
   bool reached = false; // at its goal (nav@1 then draws another)
-  std::string plant;    // its archetype's: jolt, dynamic, dynamic4w or kinematic
+  double goal_x = 0.0, goal_y = 0.0; // where it is going (world metres; its start for none)
+  std::string plant; // its archetype's: jolt, dynamic, dynamic4w, kinematic or dynamicboat
   // The command its plant took on the last navigator tick: rad and m/s^2, as entity_intent's.
   double command_steer = 0.0, command_accel = 0.0;
   entity_intent intent; // as of the last navigator tick

@@ -145,6 +145,8 @@ public:
   std::shared_ptr<const SceneWaterShore> shore() const;
   std::shared_ptr<const cvc::ocean::sea_surface> sea() const;
   std::shared_ptr<const cvc::physics::field> field() const;
+  // The still-water level (m) the field was last built for (before the first build, its spec's).
+  double level() const;
 
 private:
   struct impl;

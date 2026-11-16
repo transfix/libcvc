@@ -240,6 +240,10 @@ const std::shared_ptr<SceneColliders> &WaterRuntime::colliders() const { return 
 std::shared_ptr<const SceneWaterShore> WaterRuntime::shore() const { return _impl->shore; }
 std::shared_ptr<const cvc::ocean::sea_surface> WaterRuntime::sea() const { return _impl->sea; }
 std::shared_ptr<const cvc::physics::field> WaterRuntime::field() const { return _impl->field; }
+double WaterRuntime::level() const {
+  const impl &d = *_impl;
+  return d.built.empty() ? scene_water_spec(*d.app, d.node, d.prefix).level : d.built[0];
+}
 
 bool WaterRuntime::tick() {
   impl &d = *_impl;
