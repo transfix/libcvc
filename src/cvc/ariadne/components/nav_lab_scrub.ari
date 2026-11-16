@@ -1,0 +1,147 @@
+# nav_lab_scrub.ari — a REUSABLE Ariadne component: the checkpoint scrubber's windows (cvc::nav's
+# scrub_view, docs/NAV_LAB.md, "The scrubber"): checkpoint k of a training run beside step 0. A host
+# (pycvc_gl.nav_lab scrub, examples/ariadne/nav_scrub) runs cvc::nav::scrub_view, which writes every
+# key below, and handles scrub.prev, scrub.next and scrub.pick_step (and, for the two runs' Stats and
+# Ledger windows beside them, nav_lab_stats.ari and nav_lab_ledger.ari's arms.seek).
+#
+# Use it:
+#     import: [cvc://components/nav_lab_scrub.ari, cvc://components/nav_lab_stats.ari,
+#              cvc://components/nav_lab_ledger.ari]
+#     windows:
+#       - include: nav_lab_scrub
+#       - include: nav_lab_training
+#       - include: nav_lab_episode
+#
+# The keys:
+#   nav_lab_scrub     scrub.title, scrub.scenario; the checkpoint: scrub.choice (a combo over
+#                     scrub.labels), scrub.pos (a slider 0..1), Previous / Next (scrub.prev,
+#                     scrub.next), scrub.now; scrub.metric_name, the chart scrub.metric (a click
+#                     writes scrub.pick and raises scrub.pick_step), scrub.metric_text and the table
+#                     scrub.table
+#   nav_lab_training  scrub.curve_name over scrub.curve_names, the chart scrub.curve (log y when
+#                     scrub.curve_log is 1), scrub.curve_text
+#   nav_lab_episode   play.title, play.pos, play.time, the camera
+
+units:
+  nav_lab_scrub:
+    args: { title: Scrub, id: nav_lab_scrub }
+    window: "{title}"
+    id: "{id}"
+    size: [520, 640]
+    children:
+      - text: ""
+        bind: scrub.title
+      - text: ""
+        bind: scrub.scenario
+      - combo: Checkpoint
+        bind: scrub.choice
+        options: (string.split (state-get "scrub.labels") "\n")
+      - slider_float: Scrub
+        bind: scrub.pos
+        lo: 0
+        hi: 1
+        fmt: ""
+        tooltip: "drag through the checkpoints, step 0 to the last"
+      - button: Previous
+        on: scrub.prev
+      - button: Next
+        on: scrub.next
+      - text: ""
+        bind: scrub.now
+      - separator
+      - combo: Metric
+        bind: scrub.metric_name
+        options: [Reached the goal, Time (s), Path (m), Ticks penetrating, Clearance min (m),
+                  Clearance mean (m), Left to the goal (m)]
+        values: [reached, time_s, path_m, pen_steps, clear_min_m, clear_mean_m, goal_m]
+      - type: group
+        visible_when: (has? "chart")
+        children:
+          - chart: The deployed metric, each checkpoint
+            bind: scrub.metric
+            legend: top
+            x_label: training step
+            cursor: scrub.step
+            pick: scrub.pick
+            on: scrub.pick_step
+            height: 130
+      - text: ""
+        bind: scrub.metric_text
+      - type: group
+        layout: { kind: grid, col_widths: [14, 50, 40, 54, 44, 52, 36, 54, 56] }
+        children:
+          - text: ""
+          - text: "step"
+          - text: "flag"
+          - text: "reached"
+          - text: "time"
+          - text: "path"
+          - text: "pen"
+          - text: "clr min"
+          - text: "to goal"
+      - type: group
+        repeat: (state-get "scrub.table")
+        layout: { kind: grid, col_widths: [14, 50, 40, 54, 44, 52, 36, 54, 56] }
+        children:
+          - text: ""
+            bind: scrub.table.{i}.at
+          - text: ""
+            bind: scrub.table.{i}.step
+          - text: ""
+            bind: scrub.table.{i}.flag
+          - text: ""
+            bind: scrub.table.{i}.reached
+          - text: ""
+            bind: scrub.table.{i}.time_s
+          - text: ""
+            bind: scrub.table.{i}.path_m
+          - text: ""
+            bind: scrub.table.{i}.pen_steps
+          - text: ""
+            bind: scrub.table.{i}.clear_min_m
+          - text: ""
+            bind: scrub.table.{i}.goal_m
+
+  nav_lab_training:
+    args: { title: Training, id: nav_lab_training }
+    window: "{title}"
+    id: "{id}"
+    size: [520, 300]
+    children:
+      - combo: Curve
+        bind: scrub.curve_name
+        options: (string.split (state-get "scrub.curve_names") "\n")
+      - type: group
+        visible_when: (has? "chart")
+        children:
+          - chart: The training history
+            bind: scrub.curve
+            log_y: scrub.curve_log
+            legend: top
+            x_label: training step
+            cursor: scrub.step
+            pick: scrub.pick
+            on: scrub.pick_step
+            height: 150
+      - text: ""
+        bind: scrub.curve_text
+
+  nav_lab_episode:
+    args: { title: Episode, id: nav_lab_episode }
+    window: "{title}"
+    id: "{id}"
+    size: [520, 150]
+    children:
+      - text: ""
+        bind: play.title
+      - slider_float: Position
+        bind: play.pos
+        lo: 0
+        hi: 1
+        fmt: "%.3f"
+      - text: ""
+        bind: play.time
+      - combo: Camera
+        bind: view.camera
+        options: [Follow the arm, Orbit]
+        values: [follow, orbit]

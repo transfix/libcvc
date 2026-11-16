@@ -1279,6 +1279,11 @@ struct pycvc_py_conversion {
 // cvc/nav/sim_world_trace.h). After pycvc_physics.i: the sim_world handles are its and nav's.
 %include "pycvc_trace.i"
 
+// cvc::nav's arms, run log, panels and checkpoint scrubber, and the plant ledger's items
+// (cvc/nav/nav_arms.h, run_log.h, nav_panels.h, nav_scrub.h, plant_ledger.h). After pycvc_nav.i:
+// the sim_world handles are its.
+%include "pycvc_nav_lab.i"
+
 // ── cvc::ph composition: composed port-Hamiltonian systems ─────────────────────
 // ph_composite: a cvc-ph-system/1 file, its field, power ledger, rollouts and balance check
 // (cvc/ph/compose.h, docs/PH_COMPOSE.md).
@@ -1423,6 +1428,7 @@ struct pycvc_py_conversion {
 %include "pycvc_contours.i"
 %include "pycvc_point_classes.i"
 %include "pycvc_segmentation.i"
+%include "pycvc_volume_slice.i"
 
 // ── UTF-8 display-width utilities (cvc::text, roadmap §17) ───────────────
 // text_display_width / _pad_to_width / _truncate_to_width / … so a pycvc UI does

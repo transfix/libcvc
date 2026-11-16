@@ -1825,6 +1825,10 @@ int main() {
     };
     chk(approx(key("water.wind_speed"), 12.0) && approx(key("water.whitecaps"), 1.0),
         "water seeded water.* from its props (the wind) and its defaults (the whitecaps)");
+    chk(approx(key("water.gustiness"), 0.25) && approx(key("water.lee"), 1.0) &&
+            approx(key("water.sea_lag"), 20.0) && approx(key("water.sea_fade"), 4.0) &&
+            approx(key("water.current"), 0.0),
+        "water seeded the wind's keys (O13): gustiness, lee, sea_lag, sea_fade, current");
     if (far) {
       const cvc::bounding_box b = far->getBoundingBox();
       auto hf = realized.height_fields.find("world");
@@ -2070,17 +2074,19 @@ int main() {
       chk(alternates, "the foam's atlas steps with the world's clock (its two atlases alternate)");
       chk(uf(*near, "uFoamDetail") == 1.0f && uf(*far, "uFoamDetail") == 0.0f,
           "the near grid draws the foam's detail, the far grid its mean cover only");
-      // The thresholds: the whitecaps start at the guess (0.75) and take the calibration's.
-      const float guess = uf(*near, "uFoamBias");
-      float bias = guess;
+      // The thresholds: the whitecaps start at the guess (0.75) and take the calibration's. The
+      // task can finish within the frames above on a fast runner, so the guess is the constant,
+      // not the first value read here.
+      constexpr float kGuess = 0.75f;
+      float bias = uf(*near, "uFoamBias");
       int frames = 0;
-      for (; frames < 1500 && bias == guess; ++frames) {
+      for (; frames < 1500 && bias == kGuess; ++frames) {
         tick();
         bias = uf(*near, "uFoamBias");
       }
-      printf("  the thresholds landed after %d frames: whitecaps %.4f (the guess %.2f)\n", frames,
-             bias, guess);
-      chk(approx(guess, 0.75) && bias != guess && bias > 0.6f && bias < 0.9f,
+      printf("  the thresholds landed after %d more frames: whitecaps %.4f (the guess %.2f)\n",
+             frames, bias, kGuess);
+      chk(bias != kGuess && bias > 0.6f && bias < 0.9f,
           "the thresholds are found off the frame and replace the whitecaps' guess");
       st("water.lod_foam").value(42.0);
       st("water.lod_shade").value(420.0);
@@ -2094,6 +2100,14 @@ int main() {
               !near->shaderTexture("uDisp0") && !near->shaderTexture("uShoreGrid") &&
               !near->shaderTexture("cvcHF"),
           "the cascades' displacement in one atlas (uDisp) and the coast in one (uCoast)");
+      // The wind's fetch maps (O13) are in the coast atlas, past its planes: no sampler of their
+      // own (uWindFetch), so the water stays under 16 with a cloud_sky's shade and the shadows.
+      vtkTextureObject *coast = near->shaderTexture("uCoast");
+      const float coastN = uf(*near, "uCoastN"), coastRows = uf(*near, "uCoastRows");
+      chk(coast && !near->shaderTexture("uWindFetch") && !far->shaderTexture("uWindFetch") &&
+              far->shaderTexture("uCoast") == coast && coastN >= 1.0f && coastRows >= 1.0f &&
+              float(coast->GetWidth()) > coastN && float(coast->GetHeight()) >= coastRows,
+          "the wind's fetch maps sit in the coast atlas beside its planes (no uWindFetch)");
       // Adaptive quality (O21): the scene's tier and scale (quality.tier, quality.scale: what
       // AriRuntime's loop writes), or water.quality's own tier, pick what the water draws.
       chk(approx(st("water.quality").value<double>(), -1.0),

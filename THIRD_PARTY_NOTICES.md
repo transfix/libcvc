@@ -967,7 +967,12 @@ Donelan-Banner spreading, the fetch law and the swell term), ports ABYSSAL's
 `src/ocean/OceanFFT.js`'s assemble pass; the windrow-carved foam, the footprint roughness and the
 light through crests of `src/ocean/OceanMesh.js`; the GGX, Smith and Fresnel terms of
 `src/gfx/ShadingGLSL.js`), used by the Ariadne `water` node and `lsystem_coast`, port the same
-commit. Upstream's `LICENSE`:
+commit. The gusts' pulse over time in
+`inc/cvc/algo/wind_field.h` and `src/cvc/algo/wind_field.cpp` ports
+`src/weather/Weather.js:107-110`, and the current's shape in `inc/cvc/ocean/current.h`
+and `src/cvc/ocean/current.cpp` (the curl of noise at two scales, drifting) follows
+`src/ocean/OceanSampleGLSL.js:31-41` and `src/gfx/ProceduralTextures.js`'s curl bake, at
+the same commit. Upstream's `LICENSE`:
 
 ```
 MIT License
