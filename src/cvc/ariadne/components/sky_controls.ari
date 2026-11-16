@@ -31,7 +31,7 @@ units:
         lo: 0.0
         hi: 4.0
         fmt: "%.2f"
-        tooltip: "how fast the wind carries the clouds: 1 is 3 m/s, 0 holds them still"
+        tooltip: "how fast the wind carries the clouds: 1 is the scene wind's speed at the deck (3 m/s without one), 0 holds them still"
       - slider_float: Morph speed
         bind: "{keys}.morph"
         lo: 0.0
@@ -61,4 +61,4 @@ units:
         lo: -180.0
         hi: 180.0
         fmt: "%.0f deg"
-        tooltip: "the heading the wind blows toward (90: +x); the drift and the orographic slopes follow"
+        tooltip: "the heading the wind blows toward (90: +x); the drift and the orographic slopes follow. Unused while the scene has a wind (Wind panel)"
