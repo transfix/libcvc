@@ -93,6 +93,11 @@ struct ClientPrograms {
   std::uint64_t max_memory = 0; // bytes
 };
 
+// One client's caps for one kind of code (ServerDocument::set_client_limits;
+// docs/roadmap/ARISRV_IDENTITY.md §2.6, ID4a): the same fields, `on` false refusing that client
+// the kind, and 0 leaving the document's cap.
+using ClientLimits = ClientPrograms;
+
 // A document's server: block.
 struct ServerBlock {
   bool present = false;
@@ -110,8 +115,9 @@ std::string parse_server_block(const Value &content, ServerBlock &out,
 
 // Whether `ns` may be published: "" or why not. A namespace is a dotted path of identifiers
 // (cvc::state::isValidStateName), outside the relay's own roots: conf (the room tree), ui (where
-// documents keep their own state, this one's too), ariadne and state_exec (the host's settings),
-// and room (the name of the document's room view).
+// documents keep their own state, this one's too), arisrv (the relay's own records, which no client
+// is sent), ariadne and state_exec (the host's settings), and room (the name of the document's room
+// view).
 std::string check_published_namespace(const std::string &ns);
 
 // The server: block's parser (register_ari_block) on `app`; idempotent. ServerDocument
@@ -177,6 +183,7 @@ public:
   // One program per client at a time. `done` gets the value of its last form, or an error:
   //   unavailable          the server: block has no client_programs:, or the document has not
   //                        loaded;
+  //   forbidden            this client's limits refuse it programs (set_client_limits);
   //   rate_limited         that client's previous program is still running;
   //   invalid              it does not parse, or is longer than kClientProgramMax bytes;
   //   failed               it raised (the message is its report: a write it may not make is a
@@ -203,10 +210,12 @@ public:
   // same default-deny environment (the guest's calls and state imports reach only it, and each
   // write meets room_write_gate::may_write), the action lane's caps lowered by client_guests:, and
   // one program or guest per client at a time. Its linear memory is capped at client_guests:'
-  // memory_mb, else kClientGuestMemory, and never above ariadne.limits.wasm_max_memory. It gets
+  // memory_mb (or the client's own, set_client_limits), else kClientGuestMemory, and never above
+  // ariadne.limits.wasm_max_memory. It gets
   // no WASI grant (§8.6.1), no hooks, and none of its exports but `entry`. `done` gets its result,
-  // or an error as for a program: unavailable (no client_guests:, no engine, not loaded), invalid
-  // (not a binary module, or over kClientGuestMax bytes), rate_limited, failed (it raised, or the
+  // or an error as for a program: unavailable (no client_guests:, no engine, not loaded),
+  // forbidden (this client's limits refuse it guests), invalid (not a binary module, or over
+  // kClientGuestMax bytes), rate_limited, failed (it raised, or the
   // module doesn't compile, link or export `entry`) and resource_exhausted.
   // Its program starts once its module has compiled (on the app's pool, off the relay's loop), at
   // a step(): the wait costs it none of its caps, and one that takes over kClientGuestCompileWait
@@ -218,6 +227,26 @@ public:
                         cvc::state_exec::value_t args,
                         std::function<void(const ClientOutcome &)> done);
 
+  // Each client's limits (docs/roadmap/ARISRV_IDENTITY.md §2.6, ID4a). Without a function, every
+  // client's programs run under client_programs:' caps and its guests under client_guests:'.
+  // With one, each run_client_program and run_client_guest asks it for the caps that client's
+  // code of that kind runs under, given the document's as they are in its server: block, and
+  // takes its answer: `on` false refuses the client (forbidden), and 0 is the document's cap.
+  // Without kClientLimitsAboveDocument a cap above the document's is held to it; with it, a cap may
+  // rise to the action lane's. The action lane's caps (ariadne.limits.action_max_*) hold over both,
+  // and a guest's memory stays under ariadne.limits.wasm_max_memory. It is asked at each start, so
+  // a change applies to the client's next program or guest, not to one running. One that throws
+  // refuses the start (unavailable). The host sets it (arisrv's main(), from its client registry);
+  // it runs on the thread that calls run_client_*.
+  enum class ClientKind { program, guest };
+  // Decision D2 (ARISRV_IDENTITY.md §4): whether a client's limits may go above its document's
+  // caps (up to the action lane's), or only lower them, the document's caps being set for a
+  // server's biggest clients.
+  static constexpr bool kClientLimitsAboveDocument = false;
+  using ClientLimitsFn = std::function<ClientLimits(const std::string &pid, ClientKind kind,
+                                                    const ClientLimits &document)>;
+  void set_client_limits(ClientLimitsFn limits) { limits_ = std::move(limits); }
+
 private:
   void plant();
   // Start `program` as client `pid`'s: run_client_program's process (its chroot, environment and
@@ -226,12 +255,16 @@ private:
                     cvc::state_exec::value_t args,
                     std::function<void(const cvc::state_exec::environment_ptr &)> bind,
                     std::function<void(const ClientOutcome &)> done);
-  // A client's guest's program, its activation ready; and the held ones that have become ready (or
-  // waited too long), at each step().
+  // A client's guest's program, its activation ready, under `caps`; and the held ones that have
+  // become ready (or waited too long), at each step().
   void start_guest(const std::string &pid, const std::string &entry,
-                   std::shared_ptr<ScriptActivation> activation,
+                   std::shared_ptr<ScriptActivation> activation, const ClientLimits &caps,
                    std::function<void(const ClientOutcome &)> done);
   void start_held_guests();
+  // The caps client `pid`'s code of `kind` runs under: `document`, or set_client_limits' answer.
+  // "" with `caps` set, or the refusal's code with its message in `why`.
+  std::string client_caps(const std::string &pid, ClientKind kind, const ClientLimits &document,
+                          ClientLimits &caps, std::string &why) const;
 
   cvc::app &app_;
   std::string room_;
@@ -246,10 +279,12 @@ private:
   bool loaded_ = false;                   // a load() returned: client programs run
   std::set<std::string> clients_running_; // the pids whose program or guest has not ended
   std::shared_ptr<ScriptEngine> guests_;  // runs clients' guests (use_client_guests)
+  ClientLimitsFn limits_;                 // each client's caps (set_client_limits), or none
   // Clients' guests whose activation isn't ready yet (their module compiles), in arrival order.
   struct HeldGuest {
     std::string pid, entry;
     std::shared_ptr<ScriptActivation> activation;
+    ClientLimits caps;
     std::function<void(const ClientOutcome &)> done;
     std::chrono::steady_clock::time_point since;
   };
