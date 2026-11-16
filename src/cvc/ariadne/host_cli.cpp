@@ -34,6 +34,8 @@ constexpr const char *kValueFlags[] = {"--prefix",
                                        "--height",
                                        "--frames",
                                        "--png",
+                                       "--mp4",
+                                       "--seconds",
                                        "--graphics",
                                        "--image",
                                        "--set",
@@ -140,6 +142,14 @@ bool apply(const po::option &opt, HostOptions &o) {
       return false;
     }
     o.settle = t;
+  } else if (a == "--seconds") {
+    char *end = nullptr;
+    const double t = std::strtod(value.c_str(), &end);
+    if (value.empty() || end != value.c_str() + value.size() || !(t > 0) || !std::isfinite(t)) {
+      o.error = "--seconds needs a number of seconds above 0, not '" + value + "'";
+      return false;
+    }
+    o.seconds = t;
   } else if (a == "--timeout") {
     char *end = nullptr;
     const double t = std::strtod(value.c_str(), &end);
@@ -164,6 +174,8 @@ bool apply(const po::option &opt, HostOptions &o) {
     o.backend = value;
   } else if (a == "--png") {
     o.png = value;
+  } else if (a == "--mp4") {
+    o.mp4 = value;
   } else if (a == "--log") {
     o.log = value;
   } else if (a == "--graphics") {
@@ -364,6 +376,10 @@ std::string host_flags_help() {
          "                         0.1 is a running app's, 0 no limit)\n"
          "  --ansi                 snapshot: keep colour escapes\n"
          "  --png FILE             snapshot: also write a PNG\n"
+         "  --seconds S            snapshot: run the scene clock S seconds, --fps frames a\n"
+         "                         second (default 30), each frame 1/fps of scene time\n"
+         "  --mp4 FILE             snapshot: record those frames as an MP4 video (with\n"
+         "                         --seconds; --frames N runs N frames first, unrecorded)\n"
          "  --log FILE             run: append each warning to FILE as it happens (or set\n"
          "                         ARIADNE_LOG=FILE)\n"
          "  --settle S             snapshot: with the network on, wait at most S seconds\n"

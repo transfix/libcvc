@@ -154,13 +154,21 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARI_WITH_PYTHON))
       set_tests_properties(arix_py_console arix_py_console_off arix_py_console_terminal
                            ari_python_console_needs_arix PROPERTIES
                            SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
-      # The engine under one AppRuntime with no host (arix_engine_test.cpp): a live reload. One
-      # ctest entry, since discovery would run it, and its Python's DLL, at build time.
+      # The engine with no host (arix_engine_test.cpp): a live reload under one AppRuntime, and
+      # two documents on one app. A ctest entry per case, not discovery, which would run it, and
+      # its Python's DLL, at build time; and each case boots an interpreter of its own, which a
+      # process does once. The build's pycvc is on the second's sys.path, for export:.
       add_executable(arix_engine_test arix_engine_test.cpp)
       target_link_libraries(arix_engine_test PRIVATE cvc GTest::gtest GTest::gtest_main)
       cvc_ariadne_python_host(arix_engine_test)
-      add_test(NAME arix_engine_test COMMAND arix_engine_test)
-      cvc_ariadne_python_test_properties(arix_engine_test)
+      target_compile_definitions(arix_engine_test PRIVATE
+        ARIX_ENGINE_TEST_PYCVC_PKG="${CMAKE_BINARY_DIR}/bindings/pycvc/pkg"
+        ARIX_ENGINE_TEST_PYCVC="${CMAKE_BINARY_DIR}/bindings/pycvc")
+      add_test(NAME arix_engine_test COMMAND arix_engine_test
+               --gtest_filter=ArixEngine.AReloadIntoADocumentWithNoPythonBlockTakesTheConsoleAway)
+      add_test(NAME arix_engine_two_documents COMMAND arix_engine_test
+               --gtest_filter=ArixEngine.TwoDocumentsOnOneAppEachRunTheirOwnPython)
+      cvc_ariadne_python_test_properties(arix_engine_test arix_engine_two_documents)
       # A document with a WebAssembly guest (arix test), one with a guest built for WASI on the
       # preview-1 stubs, and stock ari's answer to one.
       if(CVC_ARIADNE_WASM_FOUND)
@@ -201,6 +209,11 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND NOT EMSCRIPTEN)
   add_test(NAME ari_url_document COMMAND ari check https://example.invalid/app/main.ari)
   set_tests_properties(ari_url_document PROPERTIES
                        PASS_REGULAR_EXPRESSION "ari runs a document from a path")
+  # A recording runs a scene, which ari drops: it says arigl records one (exit 2).
+  add_test(NAME ari_refuses_mp4
+           COMMAND ari snapshot --mp4 "${CMAKE_CURRENT_BINARY_DIR}/ari_no.mp4" --seconds 1
+                   "${CMAKE_CURRENT_SOURCE_DIR}/../../examples/ariadne/documents/hello.ari")
+  set_tests_properties(ari_refuses_mp4 PROPERTIES PASS_REGULAR_EXPRESSION "arigl can record one")
   # The chat and users components' DSL (components/chat.ari, room_users.ari), with the room verbs
   # they call played by the test document's functions: ari has no relay.
   add_test(NAME ari_chat_component
