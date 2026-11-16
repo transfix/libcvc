@@ -24,12 +24,15 @@
 #include <vtkDoubleArray.h>
 #include <vtkFloatArray.h>
 #include <vtkImageData.h>
+#include <vtkInformation.h>
+#include <vtkInformationObjectBaseVectorKey.h>
 #include <vtkLine.h>
 #include <vtkMatrix4x4.h>
 #include <vtkNew.h>
 #include <vtkObjectFactory.h>
 #include <vtkOpenGLActor.h>
 #include <vtkOpenGLPolyDataMapper.h>
+#include <vtkOpenGLRenderPass.h>
 #include <vtkOpenGLRenderWindow.h>
 #include <vtkOpenGLState.h>
 #include <vtkOpenGLTexture.h>
@@ -1497,8 +1500,19 @@ void GeometryNode::onUpdateShader(vtkObject *, unsigned long, void *clientData, 
   std::vector<std::pair<std::string, vtkTextureObject *>> textures;
   for (auto &kv : self->m_shaderTextures)
     textures.emplace_back(kv.first, kv.second.GetPointer());
+  // A shadow map's bake among the actor's passes: the sets that stay out of it are skipped.
+  bool baking = false;
+  if (vtkInformation *info = self->m_actor ? self->m_actor->GetPropertyKeys() : nullptr;
+      info && info->Has(vtkOpenGLRenderPass::RenderPasses())) {
+    const int n = info->Length(vtkOpenGLRenderPass::RenderPasses());
+    for (int i = 0; i < n && !baking; ++i)
+      if (vtkObjectBase *pass = info->Get(vtkOpenGLRenderPass::RenderPasses(), i))
+        baking = pass->IsA("vtkShadowMapBakerPass") != 0;
+  }
   for (auto &src : self->m_sharedInputs) {
     const ShaderInputs &in = *src.second;
+    if (baking && in.skip_shadow_bake)
+      continue;
     for (auto &kv : in.f)
       if (program->IsUniformUsed(kv.first.c_str()))
         program->SetUniformf(kv.first.c_str(), kv.second);

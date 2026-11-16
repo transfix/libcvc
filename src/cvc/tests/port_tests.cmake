@@ -20,6 +20,7 @@ set(CVC_PORT_TESTS
   point_classes_test
   planar_test
   segmentation_test
+  segmentation_intrinsics_test
   volume_slice_test
 )
 

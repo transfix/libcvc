@@ -1279,6 +1279,11 @@ struct pycvc_py_conversion {
 // cvc/nav/sim_world_trace.h). After pycvc_physics.i: the sim_world handles are its and nav's.
 %include "pycvc_trace.i"
 
+// ── cvc::ph composition: composed port-Hamiltonian systems ─────────────────────
+// ph_composite: a cvc-ph-system/1 file, its field, power ledger, rollouts and balance check
+// (cvc/ph/compose.h, docs/PH_COMPOSE.md).
+%include "pycvc_ph.i"
+
 // ── Direct wrap of the REAL cvc::state class (full surface, no facade) ───────
 // Like voxels/volume/geometry, the real libcvc header is %include'd here so
 // Python gets the actual cvc::state tree node — not a parallel facade. This
@@ -1417,6 +1422,7 @@ struct pycvc_py_conversion {
 %include "pycvc_skeleton.i"
 %include "pycvc_contours.i"
 %include "pycvc_point_classes.i"
+%include "pycvc_segmentation.i"
 %include "pycvc_volume_slice.i"
 
 // ── UTF-8 display-width utilities (cvc::text, roadmap §17) ───────────────
