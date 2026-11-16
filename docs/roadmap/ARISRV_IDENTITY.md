@@ -234,9 +234,9 @@ arisrv.clients.<client_id>.
   - arisrv's `main()` sets it from `client_registry::limits(pid)`, on the room loop, where
     `run_client_*` asks at each start. A change applies to the client's next start, not to one
     already running. That wiring lands once #1296 and #1295 are both on master.
-  - Whether a client's caps may go above the document's is D2: one switch,
-    `ServerDocument::kClientLimitsAboveDocument`. The action lane's caps apply on top either
-    way.
+  - A client's caps replace the document's for that client, lower or higher, up to
+    `ariadne.limits.action_max_*` (D2; `ServerDocument::kClientLimitsAboveDocument` is true). A
+    guest's memory stays under `wasm_max_memory`, and the action lane's caps apply on top.
 - **Python guests in python.wasm** (D3, D4).
   - CPython can't be sandboxed in the relay's process, because a client's Python could reach `os`,
     `ctypes` and the interpreter itself. A WebAssembly build of CPython on G4's engine gets the same
@@ -284,21 +284,22 @@ arisrv.clients.<client_id>.
 ## 4. Decisions (Joe, 2026-11-16)
 
 - **D1. The addresses go in the log, not the client id.** He said the same to both sessions: "if
-  no device ID then lean on IP for identity hash. but add it to the log either way". In the hash, a laptop on a new Wi-Fi
-  network, or a phone moving between Wi-Fi and cellular, would be a new client. It would lose its
+  no device ID then lean on IP for identity hash. but add it to the log either way". In the hash,
+  a laptop on a new Wi-Fi network, or a phone moving between Wi-Fi and cellular, would be a new
+  client. It would lose its
   username and, under #1290, get a fresh gas grant to farm. The id is the device id, and the
   addresses are the fallback only for a client that sends none. A browser's random id can be
   farmed either way, by clearing its storage.
-- **D2. Whether a client's limits may go above the document's caps: two answers, being
-  confirmed.**
-  - To the identity session, Joe chose "Yes, up to the ceiling": an admin may raise a client
-    above the document's caps, up to `ariadne.limits.*`.
-  - To the arisrvx session, about 20 minutes earlier, he wrote: "no, the server should have a
+- **D2. A client's limits may go above the document's caps,** up to the ceiling
+  (`ariadne.limits.action_max_*`). The document's caps are the default, and an admin can raise or
+  lower one client's.
+  - His first answer to the arisrvx session read the other way: "no, the server should have a
     higher default to accommodate the biggest clients. there should be separate client limits
     possible too".
-  - The arisrvx session is asking him again. Until he answers, #1296 holds a client within the
-    document's caps (`kClientLimitsAboveDocument = false`), and the switch is one line. The
-    records here store the limits either way.
+  - Asked again, he confirmed it to that session: "Yes, up to ceiling", as he had told the identity
+    session.
+  - #1296 sets `kClientLimitsAboveDocument = true`. Python needs this, since CPython wants about
+    64 MiB.
 - **D3. Clients' Python runs in python.wasm** on G4's engine (2.6). It does not run as in-process
   CPython.
 - **D4. Python in wasm replaces S4** (RestrictedPython in worker processes) as tier 3 of the
