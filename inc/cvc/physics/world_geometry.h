@@ -60,6 +60,18 @@ struct world_bodies {
 // terrain's height tolerance (physics::terrain). Throws cvc::physics_error as
 // world::add_body and world::add_field do; bodies and fields added before a
 // failure stay.
+// O20 (F6), the weather into physics: the friction a surface class has at a wetness w (0 dry,
+// 1 soaked), its dry mu run toward its wet one (surface_class::mu_wet).
+double wet_friction(const cvc::world::surface_class &c, double wetness);
+// Set every material of `w` named after a class of `surfaces` (add_world_geometry names them so)
+// to its friction at `wetness`, its restitution and rolling resistance kept; the others are left
+// alone. Returns how many changed. Every plant reads the one material table, so a vehicle's tires
+// and a box both feel the rain. The wetness is the weather's (cvc::world::weather::wetness), a
+// function of the seed, the time and the events, so the friction replicates with it.
+std::size_t apply_wetness(
+    world &w, double wetness,
+    const cvc::world::surface_registry &surfaces = cvc::world::surface_registry::builtin());
+
 world_bodies add_world_geometry(world &w, const cvc::world::world_geometry &g,
                                 double max_error = 0.005,
                                 const std::vector<int> &nav_materials = {});

@@ -180,56 +180,59 @@ constexpr std::array<surface_class, surface_registry::class_count> base_classes(
 // Contact physics per class: dry tire-on-surface friction mu and rolling
 // resistance C_rr, from the usual vehicle-dynamics tables (asphalt 0.9 / 0.010,
 // gravel 0.55 / 0.03, sand 0.45 / 0.2, snow 0.25 / 0.05, ...). Obstacles and walls
-// are never driven on; their mu is what a box sliding along them meets.
+// are never driven on; their mu is what a box sliding along them meets. The last
+// column is mu soaked by rain (wet asphalt 0.55, wet grass 0.3; indoor floors and the
+// already wet keep theirs), which a weather's wetness runs mu toward (O20, F6).
 template <class Classes> constexpr void apply_contact_physics(Classes &classes) {
   struct row {
     std::uint16_t id;
-    float mu, crr, restitution;
+    float mu, crr, restitution, mu_wet;
   };
   constexpr row kRows[] = {
-      {0, 0.60f, 0.020f, 0.0f},  // void_unknown: a middling ground
-      {1, 0.90f, 0.010f, 0.0f},  // asphalt
-      {2, 0.85f, 0.011f, 0.0f},  // concrete_ext
-      {3, 0.60f, 0.040f, 0.0f},  // dirt
-      {4, 0.55f, 0.030f, 0.0f},  // gravel
-      {5, 0.45f, 0.200f, 0.0f},  // sand
-      {6, 0.50f, 0.060f, 0.0f},  // grass
-      {7, 0.45f, 0.080f, 0.0f},  // tall_grass
-      {8, 0.40f, 0.120f, 0.0f},  // bush_cover
-      {9, 0.70f, 0.020f, 0.1f},  // bare_rock
-      {10, 0.45f, 0.080f, 0.0f}, // scree
-      {11, 0.25f, 0.050f, 0.0f}, // snow
-      {12, 0.50f, 0.100f, 0.0f}, // rubble
-      {13, 0.30f, 0.150f, 0.0f}, // mud
-      {14, 0.50f, 0.015f, 0.0f}, // puddle (wet pavement)
-      {15, 0.30f, 0.050f, 0.0f}, // water_shallow
-      {16, 0.10f, 0.050f, 0.0f}, // water_deep
-      {17, 0.70f, 0.020f, 0.1f}, // cliff_rock
-      {18, 0.60f, 0.010f, 0.1f}, // tree_trunk
-      {19, 0.70f, 0.010f, 0.1f}, // boulder
-      {20, 0.40f, 0.010f, 0.2f}, // fence_pole
-      {21, 0.80f, 0.010f, 0.0f}, // concrete_floor
-      {22, 0.60f, 0.010f, 0.0f}, // tile
-      {23, 0.60f, 0.012f, 0.0f}, // linoleum
-      {24, 0.55f, 0.012f, 0.0f}, // wood_floor
-      {25, 0.70f, 0.030f, 0.0f}, // carpet
-      {26, 0.60f, 0.015f, 0.0f}, // metal_grating
-      {27, 0.30f, 0.012f, 0.0f}, // wet_floor
-      {28, 0.50f, 0.050f, 0.0f}, // debris_indoor
-      {29, 0.60f, 0.010f, 0.0f}, // wall_interior
-      {30, 0.30f, 0.010f, 0.1f}, // glass_pane
-      {31, 0.00f, 0.000f, 0.0f}, // void_fall: nothing to stand on
-      {32, 0.70f, 0.010f, 0.0f}, // building_concrete
-      {33, 0.70f, 0.010f, 0.0f}, // building_brick
-      {34, 0.50f, 0.010f, 0.0f}, // building_drywall
-      {35, 0.30f, 0.010f, 0.1f}, // building_glass
-      {36, 0.40f, 0.010f, 0.2f}, // building_metal
+      {0, 0.60f, 0.020f, 0.0f, 0.40f},  // void_unknown: a middling ground
+      {1, 0.90f, 0.010f, 0.0f, 0.55f},  // asphalt
+      {2, 0.85f, 0.011f, 0.0f, 0.55f},  // concrete_ext
+      {3, 0.60f, 0.040f, 0.0f, 0.35f},  // dirt
+      {4, 0.55f, 0.030f, 0.0f, 0.45f},  // gravel
+      {5, 0.45f, 0.200f, 0.0f, 0.45f},  // sand
+      {6, 0.50f, 0.060f, 0.0f, 0.30f},  // grass
+      {7, 0.45f, 0.080f, 0.0f, 0.30f},  // tall_grass
+      {8, 0.40f, 0.120f, 0.0f, 0.30f},  // bush_cover
+      {9, 0.70f, 0.020f, 0.1f, 0.45f},  // bare_rock
+      {10, 0.45f, 0.080f, 0.0f, 0.35f}, // scree
+      {11, 0.25f, 0.050f, 0.0f, 0.20f}, // snow
+      {12, 0.50f, 0.100f, 0.0f, 0.40f}, // rubble
+      {13, 0.30f, 0.150f, 0.0f, 0.20f}, // mud
+      {14, 0.50f, 0.015f, 0.0f, 0.50f}, // puddle (wet pavement)
+      {15, 0.30f, 0.050f, 0.0f, 0.30f}, // water_shallow
+      {16, 0.10f, 0.050f, 0.0f, 0.10f}, // water_deep
+      {17, 0.70f, 0.020f, 0.1f, 0.45f}, // cliff_rock
+      {18, 0.60f, 0.010f, 0.1f, 0.40f}, // tree_trunk
+      {19, 0.70f, 0.010f, 0.1f, 0.45f}, // boulder
+      {20, 0.40f, 0.010f, 0.2f, 0.30f}, // fence_pole
+      {21, 0.80f, 0.010f, 0.0f, 0.80f}, // concrete_floor
+      {22, 0.60f, 0.010f, 0.0f, 0.60f}, // tile
+      {23, 0.60f, 0.012f, 0.0f, 0.60f}, // linoleum
+      {24, 0.55f, 0.012f, 0.0f, 0.55f}, // wood_floor
+      {25, 0.70f, 0.030f, 0.0f, 0.70f}, // carpet
+      {26, 0.60f, 0.015f, 0.0f, 0.60f}, // metal_grating
+      {27, 0.30f, 0.012f, 0.0f, 0.30f}, // wet_floor
+      {28, 0.50f, 0.050f, 0.0f, 0.50f}, // debris_indoor
+      {29, 0.60f, 0.010f, 0.0f, 0.60f}, // wall_interior
+      {30, 0.30f, 0.010f, 0.1f, 0.30f}, // glass_pane
+      {31, 0.00f, 0.000f, 0.0f, 0.00f}, // void_fall: nothing to stand on
+      {32, 0.70f, 0.010f, 0.0f, 0.50f}, // building_concrete
+      {33, 0.70f, 0.010f, 0.0f, 0.50f}, // building_brick
+      {34, 0.50f, 0.010f, 0.0f, 0.50f}, // building_drywall
+      {35, 0.30f, 0.010f, 0.1f, 0.20f}, // building_glass
+      {36, 0.40f, 0.010f, 0.2f, 0.30f}, // building_metal
   };
   for (const row &r : kRows)
     if (r.id < classes.size()) {
       classes[r.id].mu = r.mu;
       classes[r.id].rolling_resistance = r.crr;
       classes[r.id].restitution = r.restitution;
+      classes[r.id].mu_wet = r.mu_wet;
     }
 }
 
