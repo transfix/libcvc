@@ -304,7 +304,7 @@ int main(int argc, char **argv) {
     if (no_ui) // a capture keeps its panel unless --no-ui asks for a clean still
       return;
     if (ImGui::BeginMainMenuBar()) {
-      cvc_examples::demos_menu("volslice_bunny");
+      cvc_examples::demos_menu(app, "volslice_bunny");
       ImGui::EndMainMenuBar();
     }
     ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_FirstUseEver);
@@ -369,7 +369,7 @@ int main(int argc, char **argv) {
   auto last_report = std::chrono::steady_clock::now();
   auto last_t = last_report;
 
-  while (!view.windowClosed() && !cvc_examples::demo_switch_requested()) {
+  while (!view.windowClosed() && !cvc_examples::demo_switch_requested(app)) {
     ++ticks;
     double dt;
     if (capturing) {

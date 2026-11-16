@@ -4186,10 +4186,13 @@ return rt.exit_code();
 
 To route OS signals as well, install your handlers in `RunOptions::on_start` (it runs after
 FTXUI has installed its own), restore them in `on_stop`, and return pending signal names
-from `take_signal`. [`host_signals.h`](../inc/cvc/ariadne/host_signals.h) has the
-`sigaction` traps `ari` uses (`install_signal_traps`, `restore_signal_traps`,
-`take_trapped_signal`, `signal_number`). Signal handlers are process-wide, so libcvc never
-installs them by itself: a host program opts in around its own loop.
+from `take_signal`. [`host_signals.h`](../inc/cvc/ariadne/host_signals.h) has what `ari` uses:
+a `signal_route` in trap mode, made in `on_start` and dropped in `on_stop`, sends the signals to
+one app, and `signals_of(app).take_trapped()` takes them; `signal_number` maps a name to its
+number. The signals an app takes, and its stop flag (a route in stop mode, which `arisrv` and
+`cvc serve` use), are the app's own; only the route, the one pointer a signal handler follows,
+is the process's. Signal handlers are process-wide, so libcvc never routes them by itself: a
+host program opts in around its own loop.
 
 Give the document its command line with `rt.set_document_args(args, "myhost run doc.ari")`
 before `load()`. When the arguments don't match its `args:` block, `load()` throws

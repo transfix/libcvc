@@ -593,7 +593,7 @@ int main(int argc, char **argv) {
   ImGui::SetCurrentContext(ui.imguiContext());
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
-      cvc_examples::demos_menu("nav_fog_ghost");
+      cvc_examples::demos_menu(app, "nav_fog_ghost");
       if (ImGui::BeginMenu("Scenario")) {
         const char *sc[] = {"ghost", "dynamic"};
         for (const char *n : sc)
@@ -732,7 +732,7 @@ int main(int argc, char **argv) {
 
   replan(sx, sy); // initial belief route: the phantom bends it around from t=0
 
-  while (!view.windowClosed() && !cvc_examples::demo_switch_requested()) {
+  while (!view.windowClosed() && !cvc_examples::demo_switch_requested(app)) {
     double t, dt;
     if (capturing) {
       t = frame / fps;
