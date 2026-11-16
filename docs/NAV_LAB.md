@@ -1,15 +1,17 @@
-# The nav lab: policies side by side, run logs and replays
+# The nav lab: policies side by side, run logs, replays and the scrubber
 
 cvc::nav compares navigation policies. Several of them run side by side, each in its own world,
 on the same world from the same starts to the same goals with the same seed, stepped tick for tick
 together: these are the **arms**. What each arm did, tick by tick, is its **run log**. The Stats
-and Ledger windows show the run log at a tick, and a **replay** plays it back.
+and Ledger windows show the run log at a tick, and a **replay** plays it back. The **scrubber**
+deploys every checkpoint of a training run the same way, to watch a policy learn.
 
 ```bash
 python -m pycvc_gl.nav_lab arms --arms default,trained=run/coef.step000200.cvcnav
 python -m pycvc_gl.nav_lab arms --arms default,a=A.cvcnav --world flat --cars 3 \
     --headless --frames 600 --log run.cvcrun
 python -m pycvc_gl.nav_lab replay run.cvcrun
+python -m pycvc_gl.nav_lab scrub run/history.jsonl
 ```
 
 ![Two arms in Austin: the ghosts and their tracks, the Stats and the Ledger](img/nav-lab/arms_austin.jpg)
@@ -30,6 +32,7 @@ Contents:
 - [The run log](#the-run-log)
 - [The windows](#the-windows)
 - [Replay](#replay)
+- [The scrubber](#the-scrubber)
 - [From C++](#from-c)
 - [From Python](#from-python)
 
@@ -227,6 +230,112 @@ hidden, and the tables show the same numbers.
 arm's ghost and its track up to the play head. `--at`, `--paused` and `--loop` set where and how
 it starts. Headless, no world is built.
 
+## The scrubber
+
+The scrubber is for watching a policy learn. It deploys every checkpoint a training history names
+on one scenario, headless, and shows checkpoint k beside step 0.
+
+```bash
+cvc nav scrub run/history.jsonl                           # every checkpoint, a table
+cvc nav scrub run/history.jsonl --agents 8 --ticks 900 --report scrub.json
+python -m pycvc_gl.nav_lab scrub run/history.jsonl        # the view
+```
+
+**The history.** A training history is JSON lines.
+- cvc::nav's coef_trainer writes one when `train_config::history_path` is set
+  (`cvc.nav.coef_train_history/v1`, [NAV_TRAINING.md](NAV_TRAINING.md)). With `checkpoint_prefix`,
+  it also saves each checkpoint's policy as a `.cvcnav`.
+- GRL-SNAM's trainers write the same kind of file.
+
+How the scrubber reads one:
+- A record's `kind` names its series: `step.loss`, `checkpoint.fitness`,
+  `checkpoint.heads.alpha.mean`, and so on. The Training window draws them.
+- A checkpoint record names its policy in `blob` (or `checkpoint`). A relative path is resolved
+  beside the history first.
+- Only a `.cvcnav` is deployed. A `.pt` needs torch, so it is listed as skipped. A blob that is
+  not on disk is listed as missing.
+- The end record's `selected_step` (or a checkpoint's `"selected": true`) marks the pick.
+- A file may hold several runs, each starting at its header. `--run` picks one; the default is the
+  last.
+
+**The scenario.** The scenario is a world described by an input trace's header (a complete
+`cvc.nav.sim_world/v1` world with its maps embedded), its agents, and the number of ticks.
+- **The built-in one** is a walled 120 m square with a 3 x 3 grid of buildings and streets between
+  them, each building nudged and sized by `--seed`. `--agents` agents (4 by default) start on its
+  west side and drive to goals on its east, on nav's kinematic bicycle, at a scale of 0.05
+  normalized units per metre and 0.05 s a tick, with the map known. Their start and goal lanes
+  come from `--seed`.
+- **`--scenario TRACE`** uses a recorded input trace's world and agents. Its inputs are not
+  replayed.
+
+Each checkpoint's blob replaces the world's own policy for every agent, and the run is an arms run
+with one arm. So checkpoint 0 deployed here is the untrained policy's arm anywhere else, tick for
+tick (gtest `NavScrub.Checkpoint0DeployedIsTheUntrainedArm`). A blob deployed twice gives the same
+run (`NavScrub.OneBlobDeployedTwiceIsTheSameRun`).
+
+**The cache.** Each run is a run log, cached at
+`<history>.scrub/<blob sha256, 16 hex>-<scenario hash>.cvcrun`. The scenario's hash covers:
+- its world, agents and settings;
+- the ticks;
+- the scrubber's version and libcvc's.
+
+So changing any of them deploys the checkpoints again. `--no-cache` neither reads nor writes the
+cache.
+
+**The metrics** come from each run's last tick:
+
+| metric | what |
+|---|---|
+| `reached` | the share of agents at their goals |
+| `time_s` | the elapsed time (the Stats row's) |
+| `path_m` | the agents' mean path |
+| `pen_steps` | the ticks an agent's centre was in a wall |
+| `clear_min_m`, `clear_mean_m` | the least and the mean clearance |
+| `goal_m` | the agents' mean distance left to their goals |
+
+`--report R.json` writes them all for every checkpoint (`cvc.nav.scrub/v1`).
+
+![The scrubber: checkpoint 60 beside step 0](img/nav-lab/scrub_python.jpg)
+
+*`python -m pycvc_gl.nav_lab scrub` on a 60-step coef_trainer run on the built-in blocks' own map: the ticks penetrating fall from 106 to 0 and the distance left
+to the goals from 71 m to 54 m, checkpoint 60 (orange) beside step 0 (blue).*
+
+**The view.** `cvc::nav::scrub_view` writes every window, so the Python view and the C++ one are
+the same. Libcvc's `nav_lab_scrub` component holds its three windows:
+
+- **`nav_lab_scrub`** holds the controls:
+  - the checkpoint, picked by a combo (`scrub.choice`), a slider (`scrub.pos`), Previous and Next
+    (`scrub.prev`, `scrub.next`), or a click on a chart (`scrub.pick`, then `scrub.pick_step`);
+  - the deployed metric against the step, with step 0's as a dashed line (`scrub.metric`;
+    `scrub.metric_name` picks the metric);
+  - the table (`scrub.table`), one row per checkpoint, with k marked.
+- **`nav_lab_training`** draws a series from the history (`scrub.curve`, picked by
+  `scrub.curve_name`), with the pick marked.
+- **`nav_lab_episode`** shows the episode's position and time. libcvc's `sim_transport` steps it.
+
+Both charts carry a cursor at checkpoint k's step. Checkpoint k's log and step 0's are stacked
+side by side as two arms, step 0 blue and k orange. The Stats and Ledger windows show them at the
+play head, and the play head keeps its time when another checkpoint is picked.
+
+**In a browser.** `examples/ariadne/nav_scrub` is a C++ Ariadne host for the scrubber, and
+libcvc's demo gallery (https://transfix.github.io/libcvc/nav_scrub/) runs it in the page. With no
+`--history`, it first trains cvc::nav's own coef_trainer for 60 steps on the built-in blocks' map,
+in that map's frame, saving a checkpoint every 6 steps. It then deploys the 11 checkpoints and
+shows `examples/ariadne/nav_scrub/nav_scrub.ari`: the same windows, written by the same
+`scrub_view`. The training, the deploys and the view all run in the page (single-threaded wasm,
+same-origin, nothing fetched); natively the whole sequence takes under 3 s. The document and the
+component library are preloaded into the page's file system.
+
+![The scrubber in a browser page](img/nav-lab/scrub_web.jpg)
+
+*The gallery page in headless Chrome (software WebGL), after it trained and deployed in the page:
+the same numbers as the native run (step 60: path 88.8 m, 0 ticks penetrating, 53.6 m to go).*
+
+```bash
+nav_scrub examples/ariadne/nav_scrub/nav_scrub.ari --component-path src/cvc/ariadne
+nav_scrub examples/ariadne/nav_scrub/nav_scrub.ari --history run/history.jsonl --agents 8
+```
+
 ## From C++
 
 ```cpp
@@ -236,7 +345,7 @@ it starts. Headless, no world is built.
 std::vector<std::unique_ptr<cvc::nav::sim_world>> worlds;   // one per arm, policies set
 ...
 cvc::nav::arms_options o;
-o.scene = "rooms";
+o.scene = "blocks";
 o.log_path = "run.cvcrun";
 cvc::nav::arms_run run(std::move(worlds), {{"default"}, {"trained", "coef.cvcnav"}}, o);
 for (int k = 0; k < 600; ++k)
@@ -261,7 +370,7 @@ cvc::nav::replay_view view(rec);
 import json, pycvc
 
 run = pycvc.nav_arms_create([w0, w1], ["default", {"name": "trained", "uri": path}],
-                            scene="rooms", log_path="run.cvcrun")
+                            scene="blocks", log_path="run.cvcrun")
 for _ in range(600):
     pycvc.nav_arms_step(run)
 pycvc.nav_arms_finish(run)

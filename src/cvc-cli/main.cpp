@@ -41,6 +41,7 @@
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/nav_panels.h>
+#include <cvc/nav/nav_scrub.h>
 #include <cvc/nav/run_log.h>
 #include <cvc/nav/sim_world_trace.h>
 #include <cvc/ph/se2_train.h>
@@ -2226,13 +2227,33 @@ static void print_run_log(const cvc::nav::run_log &log, std::ostream &out) {
 
 static int cmd_nav(cvc::app &, int argc, char **argv) {
   po::options_description desc(
-      "cvc nav - cvc::nav's lab: policies side by side (docs/NAV_LAB.md)\n\n"
+      "cvc nav - cvc::nav's lab: policies side by side, and watching one learn "
+      "(docs/NAV_LAB.md)\n\n"
       "Operations:\n"
-      "  log <file>       a run log (cvc.nav.run_log/v1): its arms, legs and Stats rows\n\n"
-      "  cvc nav log run.cvcrun\n");
-  std::string op, file;
-  desc.add_options()("help,h", "show help")("op", po::value<std::string>(&op)->required(), "log")(
-      "file", po::value<std::string>(&file)->required(), "the run log");
+      "  log <file>        a run log (cvc.nav.run_log/v1): its arms, legs and Stats rows\n"
+      "  scrub <history>   deploy every checkpoint a training history names on one scenario\n"
+      "                    (cached at <history>.scrub/), and print each one's metrics\n\n"
+      "  cvc nav log run.cvcrun\n"
+      "  cvc nav scrub run/history.jsonl --agents 8 --ticks 900 --report scrub.json\n");
+  std::string op, file, scenario, report;
+  int run = -1, agents = 4;
+  unsigned seed = 0;
+  long ticks = 600;
+  bool no_cache = false;
+  desc.add_options()("help,h", "show help")("op", po::value<std::string>(&op)->required(),
+                                            "log or scrub")(
+      "file", po::value<std::string>(&file)->required(),
+      "the run log, or the training history")("run", po::value<int>(&run)->default_value(-1),
+                                              "scrub: which run of the history (-1: the last)")(
+      "scenario", po::value<std::string>(&scenario),
+      "scrub: an input trace whose world and agents to deploy on (default: the built-in blocks)")(
+      "agents", po::value<int>(&agents)->default_value(4), "scrub: the built-in scenario's agents")(
+      "seed", po::value<unsigned>(&seed)->default_value(0), "scrub: the built-in scenario's seed")(
+      "ticks", po::value<long>(&ticks)->default_value(600), "scrub: each checkpoint's ticks")(
+      "report", po::value<std::string>(&report),
+      "scrub: write every checkpoint's metrics here (cvc.nav.scrub/v1)")(
+      "no-cache", po::bool_switch(&no_cache),
+      "scrub: deploy every checkpoint again, cache nothing");
   po::positional_options_description pos;
   pos.add("op", 1).add("file", 1);
   po::variables_map vm;
@@ -2246,7 +2267,44 @@ static int cmd_nav(cvc::app &, int argc, char **argv) {
     print_run_log(cvc::nav::run_log::read(file), std::cout);
     return 0;
   }
-  throw std::runtime_error("Unknown nav operation: " + op + " (use log)");
+  if (op != "scrub")
+    throw std::runtime_error("Unknown nav operation: " + op + " (use log or scrub)");
+  const cvc::nav::training_history h = cvc::nav::read_training_history(file, run);
+  for (const std::string &m : h.missing)
+    std::cerr << "cvc nav scrub: not there: " << m << "\n";
+  for (const std::string &s : h.skipped)
+    std::cerr << "cvc nav scrub: not a .cvcnav, skipped: " << s << "\n";
+  if (h.checkpoints.empty()) {
+    std::cerr << "cvc nav scrub: " << file << " names no checkpoint (a .cvcnav) that is there\n";
+    return 2;
+  }
+  const cvc::nav::scrub_scenario s = scenario.empty()
+                                         ? cvc::nav::default_scenario(agents, seed, ticks)
+                                         : cvc::nav::scenario_from_trace(scenario, ticks);
+  cvc::nav::scrub_options o;
+  o.use_cache = !no_cache;
+  o.say = [](const std::string &line) { std::cout << line << "\n"; };
+  std::cout << "cvc nav scrub: " << h.checkpoints.size() << " checkpoints of " << file << " (run "
+            << h.run + 1 << " of " << h.runs << ") on " << s.name << ", " << s.ticks
+            << " ticks (scenario " << cvc::nav::scenario_hash(s) << ")\n";
+  const std::vector<cvc::nav::scrub_entry> e = cvc::nav::scrub(h, s, o);
+  const cvc::nav::panel_table t = cvc::nav::scrub_table(e, -1);
+  for (const std::string &c : t.columns)
+    std::cout << " " << std::setw(c == "at" ? 2 : 11) << (c == "at" ? "" : c);
+  std::cout << "\n";
+  for (const std::vector<std::string> &r : t.rows) {
+    for (std::size_t c = 0; c < r.size(); ++c)
+      std::cout << " " << std::setw(t.columns[c] == "at" ? 2 : 11) << r[c];
+    std::cout << "\n";
+  }
+  if (!report.empty()) {
+    std::ofstream out(report);
+    out << cvc::nav::scrub_report_json(h, s, e) << "\n";
+    if (!out)
+      throw std::runtime_error("cannot write " + report);
+    std::cout << "cvc nav scrub: the report is " << report << "\n";
+  }
+  return 0;
 }
 
 // ── ph-train: fit the learned port-Hamiltonian vehicle (cvc::ph) to plant logs ──
@@ -2608,7 +2666,7 @@ static const command_entry commands[] = {
 
   // ── Replay ──
   {"trace",          "Replay",          "an input trace: info, or verify by replaying it", cmd_trace},
-  {"nav",            "Replay",          "cvc::nav's lab: a run log's arms and Stats",      cmd_nav},
+  {"nav",            "Replay",          "cvc::nav's lab: a run log's Stats, or scrub a training run's checkpoints", cmd_nav},
 
   // ── Network (legacy XMLRPC) ──
 #ifdef USING_XMLRPC

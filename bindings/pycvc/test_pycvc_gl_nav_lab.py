@@ -9,7 +9,8 @@ Headless, in this process (no GL):
   3. the trained arm is the cars template's navigator on that policy alone, tick for tick;
   4. `replay` shows at a tick what the live run showed there, cell for cell, and its transport
      steps, seeks and restarts;
-  5. refusals: an arm that is not there, a file that is not a run log.
+  5. refusals: an arm that is not there, a file that is not a run log;
+  6. scrub: a history's checkpoints deployed headless, its report; a grid world's walls as boxes.
 Offscreen (when GL is there): the ghosts and the windows, to a PNG.
 Script-style, like the other pycvc tests; self-skips (exit 0) when the running pycvc predates the
 bindings.
@@ -108,6 +109,27 @@ for key in ("arms.stats", "ledger.coef", "ledger.books", "ledger.plant"):
     check(host.get_tree(key) == want[key], f"{key} at tick {f['k']}, cell for cell")
 code = L.main(["replay", log_path, "--headless", "--frames", "12", "--at", "1.0"])
 check(code == 0, f"replay ran: exit {code}")
+
+# 4b. scrub: a history's checkpoints, headless and with a report
+if hasattr(pycvc, "nav_scrub_create"):
+    import shutil
+
+    hdir = os.path.join(tmp, "train")
+    os.makedirs(hdir)
+    shutil.copy(TRAINED, os.path.join(hdir, "coef.step000000.cvcnav"))
+    with open(os.path.join(hdir, "history.jsonl"), "w") as fh:
+        fh.write('{"kind":"header"}\n{"kind":"step","step":1,"loss":1.0}\n'
+                 '{"kind":"checkpoint","step":0,"blob":"coef.step000000.cvcnav"}\n')  # fmt: skip
+    report = os.path.join(tmp, "scrub.json")
+    code = L.main(["scrub", os.path.join(hdir, "history.jsonl"), "--headless", "--frames", "5",
+                   "--agents", "2", "--ticks", "40", "--report", report])  # fmt: skip
+    check(code == 0, f"scrub ran: exit {code}")
+    check(json.load(open(report))["schema"] == "cvc.nav.scrub/v1", "the scrub report")
+    check(L.main(["scrub", os.path.join(tmp, "none.jsonl"), "--headless"]) == 2, "no history")
+    occ = np.zeros((5, 7), np.uint8)
+    occ[2, 1:4] = 1
+    w = L.grid_world(occ, (0.0, 0.0, 6.0, 4.0))
+    check(len(w.boxes) == 1 and w.boxes[0][:4] == (0.5, 1.5, 3.5, 2.5), f"a run, a box: {w.boxes}")
 
 # 5. refusals
 check(L.main(["arms", "--headless", "--arms", "x=/no/such.cvcnav"]) == 2, "no such arm: exit 2")

@@ -79,6 +79,14 @@ catalog:
     for: "the same arms: coefficients, terms of U_nav, the books against it, one arm's plant ledger"
     args: { title: Ledger, id: nav_lab_ledger }   # defaults
     verbs: [arms.seek]
+  - component: nav_lab_scrub
+    file: nav_lab_scrub.ari
+    unit: nav_lab_scrub
+    binds: "<prefix>.{scrub,play}.*"   # cvc::nav::scrub_view
+    for: "the checkpoint scrubber: checkpoint k of a training run beside step 0"
+    args: { title: Scrub, id: nav_lab_scrub }   # defaults
+    note: "nav_lab_training (the training curve) and nav_lab_episode (the episode's time) are its other windows; with nav_lab_stats and nav_lab_ledger for the two runs"
+    verbs: [scrub.prev, scrub.next, scrub.pick_step]
   - component: raster_view
     file: raster_view.ari
     unit: raster_view

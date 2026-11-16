@@ -33,6 +33,7 @@
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/coef_train.h>
 #include <cvc/nav/nav_arms.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/sim_world_trace.h>
@@ -2569,4 +2570,39 @@ TEST_F(CvcCliTest, NavLogPrintsARunLogsArmsAndStats) {
   auto none = cvc("nav log \"" + path("missing.cvcrun") + "\"");
   EXPECT_NE(0, none.exit_code);
   EXPECT_NE(std::string::npos, none.output.find("cannot read")) << none.output;
+}
+
+TEST_F(CvcCliTest, NavScrubDeploysEveryCheckpointAndCachesIt) {
+  // a short coef_trainer run with its history and three checkpoints
+  cvc::nav::train_config cfg;
+  cfg.n = 16;
+  cfg.window = 4;
+  cfg.hidden = 16;
+  cfg.horizon = 8;
+  cfg.steps = 4;
+  cfg.checkpoint_every = 2;
+  cfg.history_path = path("history.jsonl");
+  cfg.checkpoint_prefix = path("coef");
+  cvc::nav::coef_trainer(cfg, 3).train(cvc::nav::city_scene(32));
+  const std::string report = path("scrub.json");
+  auto r = cvc("nav scrub \"" + cfg.history_path + "\" --agents 2 --ticks 60 --report \"" + report +
+               "\"");
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("3 checkpoints of")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("step 0 (1/3), deployed")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("blocks, 2 agents, seed 0, 60 ticks")) << r.output;
+  EXPECT_TRUE(fs::is_directory(cfg.history_path + ".scrub"));
+  std::ifstream f(report);
+  std::stringstream ss;
+  ss << f.rdbuf();
+  EXPECT_NE(std::string::npos, ss.str().find("\"schema\":\"cvc.nav.scrub/v1\"")) << ss.str();
+  auto again = cvc("nav scrub \"" + cfg.history_path + "\" --agents 2 --ticks 60");
+  ASSERT_EQ(0, again.exit_code) << again.output;
+  EXPECT_NE(std::string::npos, again.output.find("step 4 (3/3), cached")) << again.output;
+  auto empty = cvc("nav scrub \"" + path("nothing.jsonl") + "\"");
+  EXPECT_NE(0, empty.exit_code);
+  { std::ofstream(path("none.jsonl")) << "{\"kind\":\"step\",\"step\":1,\"loss\":1}\n"; }
+  auto none = cvc("nav scrub \"" + path("none.jsonl") + "\"");
+  EXPECT_EQ(2, none.exit_code) << none.output;
+  EXPECT_NE(std::string::npos, none.output.find("names no checkpoint")) << none.output;
 }
