@@ -215,6 +215,7 @@ add_executable(physics_pose_tracker_test physics_pose_tracker_test.cpp)
 add_executable(physics_plant_host_test physics_plant_host_test.cpp)
 add_executable(physics_dyn_bike_plant_test physics_dyn_bike_plant_test.cpp)
 add_executable(physics_dyn_4w_plant_test physics_dyn_4w_plant_test.cpp)
+add_executable(physics_dyn_boat_plant_test physics_dyn_boat_plant_test.cpp)
 # StepsAsTheDynamicPlantDoes (and the four-wheel StepsAsTheFourWheelPlantDoes) hold the plant
 # (built with -ffp-contract=off) to its model called inline here, bit for bit: build them the same
 # way, or clang contracts this copy into FMAs on aarch64 (the macOS arm64 lanes) and the last bits
@@ -527,6 +528,7 @@ set(TEST_TARGETS
   physics_plant_host_test
   physics_dyn_bike_plant_test
   physics_dyn_4w_plant_test
+  physics_dyn_boat_plant_test
   physics_mujoco_robot_test
   geometry_height_field_test
   world_geometry_test
@@ -2544,6 +2546,12 @@ target_link_libraries(physics_dyn_4w_plant_test
     GTest::gtest
     GTest::gtest_main
 )
+target_link_libraries(physics_dyn_boat_plant_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 target_link_libraries(physics_mujoco_robot_test
   PRIVATE
     cvc
@@ -2930,6 +2938,7 @@ target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
 target_compile_features(physics_plant_host_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_bike_plant_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_4w_plant_test PRIVATE cxx_std_17)
+target_compile_features(physics_dyn_boat_plant_test PRIVATE cxx_std_17)
 target_compile_features(physics_mujoco_robot_test PRIVATE cxx_std_17)
 target_compile_features(geometry_height_field_test PRIVATE cxx_std_17)
 target_compile_features(world_geometry_test PRIVATE cxx_std_17)
@@ -3509,6 +3518,7 @@ cvc_discover_tests(physics_pose_tracker_test)
 cvc_discover_tests(physics_plant_host_test)
 cvc_discover_tests(physics_dyn_bike_plant_test)
 cvc_discover_tests(physics_dyn_4w_plant_test)
+cvc_discover_tests(physics_dyn_boat_plant_test)
 cvc_discover_tests(physics_mujoco_robot_test)
 cvc_discover_tests(geometry_height_field_test)
 cvc_discover_tests(world_geometry_test)
