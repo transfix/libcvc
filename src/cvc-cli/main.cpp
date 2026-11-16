@@ -35,6 +35,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cvc/ariadne/host_signals.h>
 #include <cvc/core/app.h>
 #include <cvc/core/input_trace.h>
 #include <cvc/core/param_cli.h>
@@ -44,8 +45,12 @@
 #include <cvc/geometry/skeleton.h>
 #include <cvc/geometry/skeleton_params.h>
 #include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/nav_panels.h>
+#include <cvc/nav/nav_scrub.h>
+#include <cvc/nav/run_log.h>
 #include <cvc/nav/sim_world_trace.h>
 #include <cvc/ph/compose.h>
+#include <cvc/ph/microgrid.h>
 #include <cvc/ph/se2_train.h>
 #include <cvc/physics/mujoco_robot.h>
 #include <cvc/physics/plant_log_scene.h>
@@ -1341,10 +1346,6 @@ static int cmd_bunny(cvc::app &app, int argc, char **argv) {
 // State server (distributed_state_session)
 // ---------------------------------------------------------------------------
 
-static std::atomic<bool> g_serve_running{true};
-
-static void serve_signal_handler(int) { g_serve_running.store(false); }
-
 static int cmd_serve(cvc::app &app, int argc, char **argv) {
   po::options_description desc(
       "cvc serve - run a headless CVC state server\n\n"
@@ -1475,9 +1476,10 @@ static int cmd_serve(cvc::app &app, int argc, char **argv) {
   // the handlers installed afterwards there is a window -- join() returning,
   // through delegation parsing and exec-coordinator startup, to the old
   // install site below -- in which SIGINT still had its default disposition
-  // and killed the process outright, discarding the buffered log with it.
-  std::signal(SIGINT, serve_signal_handler);
-  std::signal(SIGTERM, serve_signal_handler);
+  // and killed the process outright, discarding the buffered log with it. They set this app's
+  // stop flag (host_signals.h), which the loop below polls; the route goes before the app.
+  cvc::ariadne::signal_route stopRoute(app, cvc::ariadne::signal_route::mode::stop);
+  const cvc::ariadne::host_signals &signals = cvc::ariadne::signals_of(app);
 
   auto session = cvc::distributed_state_session::join(app, cfg);
   // Flush the readiness banner: stdout is fully buffered when it is a file or
@@ -1528,7 +1530,7 @@ static int cmd_serve(cvc::app &app, int argc, char **argv) {
 
   // Block until SIGINT/SIGTERM (handlers were installed before join() above).
   std::cout << "Press Ctrl+C to stop." << std::endl;
-  while (g_serve_running.load()) {
+  while (!signals.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     // If exec enabled, step the scheduler: for a runnable process, or for a command posted to it
     // (the coordinator's bus threads post_control), which only a step applies.
@@ -2404,18 +2406,23 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
       "  simulate <system>   roll it out from --x0 under --u held (or one row per step) and\n"
       "                      print the energy books; --csv writes every state\n"
       "  check <system>      the power balance at random states: exit 1 when\n"
-      "                      the pairing does work or dH/dt departs from -loss + supplied\n\n"
-      "  cvc ph simulate grid.json --x0 2.2,0,2.2,0,0 --u -0.1,1,-0.1,1 --steps 200\n");
-  std::string op, file, x0s, us, csv, coupling, scheme;
-  int steps = 100, substeps = 2, local = 1, samples = 100, max_iter = 10;
+      "                      the pairing does work or dH/dt departs from -loss + supplied\n"
+      "  microgrid <out>     write a DC microgrid (DGUs and RL lines, docs/PH_COMPOSE.md) as a\n"
+      "                      system file\n\n"
+      "  cvc ph microgrid grid.json --dgus 4 --edges 0-1,1-2,2-3 --line-r 0.3,0.4,0.5\n"
+      "  cvc ph simulate grid.json --physical 1,0,1.1,0,0.9,0,1,0,0,0,0 --u "
+      "-0.1,1,-0.1,1,-0.1,1,-0.1,1\n");
+  std::string op, file, x0s, physical, us, csv, coupling, scheme, edges, line_r, line_l, dgu_kind;
+  int steps = 100, substeps = 2, local = 1, samples = 100, max_iter = 10, dgus = 4;
   unsigned seed = 1;
-  double dt = 0.01, tol = 1e-6, scale = 1.0;
+  double dt = 0.01, tol = 1e-6, scale = 1.0, dgu_c = 2.2, dgu_l = 1.8, dgu_r = 1.2;
   // clang-format off
   desc.add_options()
     ("help,h", "show help")
-    ("op", po::value<std::string>(&op)->required(), "info, simulate or check")
-    ("file", po::value<std::string>(&file)->required(), "the system file")
+    ("op", po::value<std::string>(&op)->required(), "info, simulate, check or microgrid")
+    ("file", po::value<std::string>(&file)->required(), "the system file (microgrid: the one to write)")
     ("x0", po::value<std::string>(&x0s), "simulate: the start state, comma separated (default zeros)")
+    ("physical", po::value<std::string>(&physical), "simulate: the start as every block's efforts instead (a DGU's v and i, a line's i), mapped to its state")
     ("u", po::value<std::string>(&us), "simulate: the inputs, one row held or one row per step (default zeros)")
     ("steps", po::value<int>(&steps)->default_value(100), "simulate: steps")
     ("dt", po::value<double>(&dt)->default_value(0.01), "simulate: step (s)")
@@ -2428,7 +2435,15 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
     ("csv", po::value<std::string>(&csv), "simulate: write t, the state, H and the books per step")
     ("samples", po::value<int>(&samples)->default_value(100), "check: random states")
     ("seed", po::value<unsigned>(&seed)->default_value(1), "check: their seed")
-    ("scale", po::value<double>(&scale)->default_value(1.0), "check: their standard deviation");
+    ("scale", po::value<double>(&scale)->default_value(1.0), "check: their standard deviation")
+    ("dgus", po::value<int>(&dgus)->default_value(4), "microgrid: buses, one DGU each")
+    ("edges", po::value<std::string>(&edges), "microgrid: lines as FROM-TO, comma separated (default a chain)")
+    ("line-r", po::value<std::string>(&line_r)->default_value("0.3,0.4,0.5"), "microgrid: line resistances (ohm), one or one per line (the last repeats)")
+    ("line-l", po::value<std::string>(&line_l)->default_value("0.8"), "microgrid: line inductances (H), likewise")
+    ("dgu", po::value<std::string>(&dgu_kind)->default_value("reference"), "microgrid: reference (q = 2.2 (v + v^3/3), 1.8 H, 1.2 ohm) or linear")
+    ("dgu-c", po::value<double>(&dgu_c)->default_value(2.2), "microgrid: a linear DGU's capacitance (F)")
+    ("dgu-l", po::value<double>(&dgu_l)->default_value(1.8), "microgrid: a linear DGU's inductance (H)")
+    ("dgu-r", po::value<double>(&dgu_r)->default_value(1.2), "microgrid: a linear DGU's resistance (ohm)");
   // clang-format on
   po::positional_options_description pos;
   pos.add("op", 1).add("file", 1);
@@ -2440,6 +2455,44 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
   }
   po::notify(vm);
 
+  if (op == "microgrid") {
+    std::vector<cvc::ph::line_spec> lines;
+    if (edges.empty())
+      for (int i = 0; i + 1 < dgus; ++i)
+        lines.push_back({i, i + 1, 0.0, 1.0});
+    else {
+      std::stringstream in(edges);
+      std::string item;
+      while (std::getline(in, item, ',')) {
+        const size_t dash = item.find('-');
+        if (dash == std::string::npos)
+          throw std::invalid_argument("--edges: '" + item + "' is not FROM-TO");
+        lines.push_back(
+            {std::stoi(item.substr(0, dash)), std::stoi(item.substr(dash + 1)), 0.0, 1.0});
+      }
+    }
+    const std::vector<double> rs = ph_numbers(line_r, "line-r"), ls = ph_numbers(line_l, "line-l");
+    if (rs.empty() || ls.empty())
+      throw std::invalid_argument("--line-r and --line-l need at least one value");
+    for (size_t k = 0; k < lines.size(); ++k) {
+      lines[k].R = rs[std::min(k, rs.size() - 1)];
+      lines[k].L = ls[std::min(k, ls.size() - 1)];
+    }
+    cvc::ph::law_ptr dgu;
+    if (dgu_kind == "reference")
+      dgu = cvc::ph::reference_dgu();
+    else if (dgu_kind == "linear")
+      dgu = cvc::ph::linear_dgu(dgu_c, dgu_l, dgu_r);
+    else
+      throw std::invalid_argument("--dgu: '" + dgu_kind + "' (use reference or linear)");
+    const cvc::ph::microgrid g = cvc::ph::make_microgrid(dgu, dgus, lines);
+    std::ofstream out(file);
+    if (!out)
+      throw std::runtime_error("cannot write " + file);
+    out << cvc::ph::system_json(g.system) << "\n";
+    std::cout << cvc::ph::describe(g.system) << "  wrote " << file << "\n";
+    return 0;
+  }
   const cvc::ph::composite s = cvc::ph::load_system(file);
   if (op == "info") {
     std::cout << cvc::ph::describe(s);
@@ -2457,7 +2510,8 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
     return ok ? 0 : 1;
   }
   if (op != "simulate")
-    throw std::runtime_error("Unknown ph operation: " + op + " (use info, simulate or check)");
+    throw std::runtime_error("Unknown ph operation: " + op +
+                             " (use info, simulate, check or microgrid)");
   cvc::ph::transition_opts o;
   o.dt = dt;
   o.substeps = substeps;
@@ -2467,6 +2521,19 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
   o.solve.max_iter = max_iter;
   o.solve.tol = tol;
   std::vector<double> x0 = ph_numbers(x0s, "x0"), u = ph_numbers(us, "u");
+  if (!physical.empty()) {
+    if (!x0.empty())
+      throw std::invalid_argument("give --x0 or --physical, not both");
+    const cvc::ph::storage_result st =
+        cvc::ph::storage_from_efforts(s, ph_numbers(physical, "physical"));
+    if (!st.converged)
+      throw std::runtime_error("--physical: no state reaches those efforts (residual " +
+                               std::to_string(st.residual) + " after " +
+                               std::to_string(st.iterations) + " iterations)");
+    std::cout << "start from efforts: " << st.iterations << " Newton iterations, residual "
+              << st.residual << "\n";
+    x0 = st.x;
+  }
   if (x0.empty())
     x0.assign(s.state_dim(), 0.0);
   if (u.empty())
@@ -2479,6 +2546,120 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
       throw std::runtime_error("cannot write " + csv);
     cvc::ph::write_csv(out, s, o, r);
     std::cout << "  wrote " << csv << "\n";
+  }
+  return 0;
+}
+
+// ── nav: cvc::nav's lab (docs/NAV_LAB.md): a run log's Stats ──
+
+// A run log's arms, legs and Stats rows at its last tick, as the Stats window shows them.
+static void print_run_log(const cvc::nav::run_log &log, std::ostream &out) {
+  const cvc::nav::run_log_header &h = log.header();
+  out << "run log " << cvc::nav::kRunLogSchema << " (libcvc " << h.libcvc << "): " << log.arms()
+      << (log.arms() == 1 ? " arm, " : " arms, ") << h.agents
+      << (h.agents == 1 ? " agent each, " : " agents each, ") << log.ticks() << " ticks of " << h.dt
+      << " s, " << log.legs().size() << (log.legs().size() == 1 ? " leg" : " legs")
+      << (log.finished() ? "" : ", not finished") << "\n";
+  out << "  scene " << (h.scene.empty() ? "-" : h.scene) << " on "
+      << (h.plant.empty() ? "kinematic" : h.plant) << ", seed " << h.seed << "\n";
+  for (const cvc::nav::run_log_arm &a : h.arms)
+    out << "  arm " << a.slot << " " << a.name << ": "
+        << (a.uri.empty() ? std::string("the built-in policy") : a.uri)
+        << (a.sha256.empty() ? std::string() : " (sha256 " + a.sha256.substr(0, 16) + ")") << "\n";
+  const std::vector<cvc::nav::panel_table> t = cvc::nav::arms_tables(log, log.ticks() - 1, 0);
+  const cvc::nav::panel_table &stats = t.front();
+  out << "  Stats, the last leg:\n   ";
+  for (const std::string &c : stats.columns)
+    out << " " << std::setw(c == "arm" ? 14 : 10) << c;
+  out << "\n";
+  for (const std::vector<std::string> &r : stats.rows) {
+    out << "   ";
+    for (std::size_t c = 0; c < r.size(); ++c)
+      out << " " << std::setw(stats.columns[c] == "arm" ? 14 : 10) << r[c];
+    out << "\n";
+  }
+  for (const std::string &n : log.notes())
+    out << "  note: " << n << "\n";
+}
+
+static int cmd_nav(cvc::app &, int argc, char **argv) {
+  po::options_description desc(
+      "cvc nav - cvc::nav's lab: policies side by side, and watching one learn "
+      "(docs/NAV_LAB.md)\n\n"
+      "Operations:\n"
+      "  log <file>        a run log (cvc.nav.run_log/v1): its arms, legs and Stats rows\n"
+      "  scrub <history>   deploy every checkpoint a training history names on one scenario\n"
+      "                    (cached at <history>.scrub/), and print each one's metrics\n\n"
+      "  cvc nav log run.cvcrun\n"
+      "  cvc nav scrub run/history.jsonl --agents 8 --ticks 900 --report scrub.json\n");
+  std::string op, file, scenario, report;
+  int run = -1, agents = 4;
+  unsigned seed = 0;
+  long ticks = 600;
+  bool no_cache = false;
+  desc.add_options()("help,h", "show help")("op", po::value<std::string>(&op)->required(),
+                                            "log or scrub")(
+      "file", po::value<std::string>(&file)->required(),
+      "the run log, or the training history")("run", po::value<int>(&run)->default_value(-1),
+                                              "scrub: which run of the history (-1: the last)")(
+      "scenario", po::value<std::string>(&scenario),
+      "scrub: an input trace whose world and agents to deploy on (default: the built-in blocks)")(
+      "agents", po::value<int>(&agents)->default_value(4), "scrub: the built-in scenario's agents")(
+      "seed", po::value<unsigned>(&seed)->default_value(0), "scrub: the built-in scenario's seed")(
+      "ticks", po::value<long>(&ticks)->default_value(600), "scrub: each checkpoint's ticks")(
+      "report", po::value<std::string>(&report),
+      "scrub: write every checkpoint's metrics here (cvc.nav.scrub/v1)")(
+      "no-cache", po::bool_switch(&no_cache),
+      "scrub: deploy every checkpoint again, cache nothing");
+  po::positional_options_description pos;
+  pos.add("op", 1).add("file", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+  if (op == "log") {
+    print_run_log(cvc::nav::run_log::read(file), std::cout);
+    return 0;
+  }
+  if (op != "scrub")
+    throw std::runtime_error("Unknown nav operation: " + op + " (use log or scrub)");
+  const cvc::nav::training_history h = cvc::nav::read_training_history(file, run);
+  for (const std::string &m : h.missing)
+    std::cerr << "cvc nav scrub: not there: " << m << "\n";
+  for (const std::string &s : h.skipped)
+    std::cerr << "cvc nav scrub: not a .cvcnav, skipped: " << s << "\n";
+  if (h.checkpoints.empty()) {
+    std::cerr << "cvc nav scrub: " << file << " names no checkpoint (a .cvcnav) that is there\n";
+    return 2;
+  }
+  const cvc::nav::scrub_scenario s = scenario.empty()
+                                         ? cvc::nav::default_scenario(agents, seed, ticks)
+                                         : cvc::nav::scenario_from_trace(scenario, ticks);
+  cvc::nav::scrub_options o;
+  o.use_cache = !no_cache;
+  o.say = [](const std::string &line) { std::cout << line << "\n"; };
+  std::cout << "cvc nav scrub: " << h.checkpoints.size() << " checkpoints of " << file << " (run "
+            << h.run + 1 << " of " << h.runs << ") on " << s.name << ", " << s.ticks
+            << " ticks (scenario " << cvc::nav::scenario_hash(s) << ")\n";
+  const std::vector<cvc::nav::scrub_entry> e = cvc::nav::scrub(h, s, o);
+  const cvc::nav::panel_table t = cvc::nav::scrub_table(e, -1);
+  for (const std::string &c : t.columns)
+    std::cout << " " << std::setw(c == "at" ? 2 : 11) << (c == "at" ? "" : c);
+  std::cout << "\n";
+  for (const std::vector<std::string> &r : t.rows) {
+    for (std::size_t c = 0; c < r.size(); ++c)
+      std::cout << " " << std::setw(t.columns[c] == "at" ? 2 : 11) << r[c];
+    std::cout << "\n";
+  }
+  if (!report.empty()) {
+    std::ofstream out(report);
+    out << cvc::nav::scrub_report_json(h, s, e) << "\n";
+    if (!out)
+      throw std::runtime_error("cannot write " + report);
+    std::cout << "cvc nav scrub: the report is " << report << "\n";
   }
   return 0;
 }
@@ -3005,6 +3186,7 @@ static const command_entry commands[] = {
 
   // ── Replay ──
   {"trace",          "Replay",          "an input trace: info, or verify by replaying it", cmd_trace},
+  {"nav",            "Replay",          "cvc::nav's lab: a run log's Stats, or scrub a training run's checkpoints", cmd_nav},
 
   // ── Network (legacy XMLRPC) ──
 #ifdef USING_XMLRPC

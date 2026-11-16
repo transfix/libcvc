@@ -70,6 +70,20 @@
 // breakers' bores). On the beach, the swash runs up and drains along the slope, at the front's
 // rise over the slope, at most sqrt(2 g R).
 //
+// The wind on the sea (sea_forcing, O13; optional, and without it the sea is as above):
+//   - E4, the sea lags the wind: each cascade may carry the old sea's h0 (h0_from), and over the
+//     crossfade [t0, t1] its modes are (1 - w) h0_from + w h0, w a smoothstep in t (sea_lag.h).
+//     The drawn sea mixes the same two h0 by the same weight, so the two stay in phase.
+//   - E2, fetch and lee: each cascade's weight is multiplied by fetch_scale(F, full) (fetch.h),
+//     F the fetch map's at the point and `full` the fetch the cascade's band is grown at; with a
+//     crossfade, the old keyframe's scale crossfades into the new one's by the same w.
+//   - E3, gusts: a cascade with `gust` 1 (the ripples) has its weight multiplied by the scene's
+//     gust factor there (cvc::algo::wind_gust).
+//   - E6, currents: a cascade with `advect` is read through the current's two-phase flow map
+//     (current.h), and the water's velocity carries the current, so a floating body drifts with
+//     the small waves drawn.
+// Each of these is read at the point the cascades are read at (x0 below), as the shader does.
+//
 // Determinism: everything is computed with cvc::algo::det and the FFT in fft.h, without FMA
 // contraction, so a surface gives the same bits on every platform; physics folds digest() into
 // its state_hash. The fields for one time are computed once and kept, so the many reads of one
@@ -84,6 +98,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cvc/algo/wind_field.h>
+#include <cvc/ocean/current.h>
+#include <cvc/ocean/fetch.h>
 #include <cvc/ocean/fft.h>
 #include <cvc/ocean/h0.h>
 #include <cvc/ocean/shore.h>
@@ -106,6 +123,22 @@ struct sea_cascade {
   h0_field h0;          // build_h0's texels: what OceanFFT uploads
   double fade_m = 0.0;  // the still-water depth over which it fades out at the shore; 0: never
   double decay_k = 0.0; // its velocity decays as e^(decay_k z) below the still level; 0: never
+  // Read only with a sea_forcing (see "The wind on the sea" above):
+  h0_field h0_from;               // E4: the old sea's h0 it crossfades from (empty: none)
+  double full_fetch_m = 0.0;      // E2: the fetch its band is fully grown at (0: no fetch scaling)
+  double full_fetch_from_m = 0.0; // and the old keyframe's (0: full_fetch_m)
+  double gust = 0.0;              // E3: 1 for the ripples, whose weight follows the gusts
+  bool advect = false;            // E6: carried by the current
+};
+
+// The wind's forcing of the sea (O13): the crossfade, the fetch maps, the scene's wind for the
+// gusts, and the current.
+struct sea_forcing {
+  double t0 = 0.0, t1 = 0.0;                     // E4: h0_from -> h0 over [t0, t1]
+  std::shared_ptr<const fetch_field> fetch;      // E2: the new keyframe's (null: open water)
+  std::shared_ptr<const fetch_field> fetch_from; // and the old's (null: `fetch`)
+  cvc::algo::wind_state wind;                    // E3: the gusts' wind (the scene's)
+  current_params current;                        // E6
 };
 
 struct sea_params {
@@ -134,9 +167,11 @@ public:
   // planes do not match its size.
   sea_surface(std::vector<sea_cascade> cascades, const sea_params &p,
               std::shared_ptr<const shore_grid> grid = nullptr,
-              std::shared_ptr<const shore_layer> layer = nullptr);
+              std::shared_ptr<const shore_layer> layer = nullptr,
+              std::shared_ptr<const sea_forcing> forcing = nullptr);
 
   const sea_params &params() const noexcept { return _p; }
+  const std::shared_ptr<const sea_forcing> &forcing() const noexcept { return _forcing; }
   std::size_t cascade_count() const noexcept { return _cascades.size(); }
 
   // The surface's height (m, world z) over (x, y) at time t (s). On dry ground it is the swash
@@ -186,15 +221,31 @@ private:
     int gx = 0, gy = 0; // the mode's place on the lattice (its wavenumber index, wrapped)
     double kx = 0.0, ky = 0.0, knx = 0.0, kny = 0.0, omega = 0.0;
     double h0r = 0.0, h0i = 0.0, hcr = 0.0, hci = 0.0; // h0(k) and conj h0(-k)
+    double f0r = 0.0, f0i = 0.0, fcr = 0.0, fci = 0.0; // the old sea's (E4)
   };
   struct cascade_band {
     double tile_m = 0.0, fade_m = 0.0, decay_k = 0.0;
+    bool from = false; // E4: its modes crossfade from the old sea's
+    double full = 0.0, full_from = 0.0, gust = 0.0;
+    bool advect = false;
     std::vector<mode> modes;
   };
   struct frame; // the cascades' fields at one time
+  // The forcing at one point: the gust there, the fetch maps', and the current.
+  struct point_forcing {
+    double gust = 1.0, fetch = 0.0, fetch_from = 0.0;
+    std::array<double, 2> v{};
+  };
 
   std::shared_ptr<const frame> frame_at(double t) const;
   std::shared_ptr<frame> compute(double t) const;
+  point_forcing forcing_at(const frame &f, double x, double y) const;
+  // Cascade c's weight at a point of still-water depth d: its fade, times the fetch and the gust.
+  double weight(const frame &f, std::size_t c, double d, const point_forcing &pf) const;
+  // Where cascade c is read for the point (x, y): there, or the flow map's two points, with their
+  // weights. Returns how many.
+  int taps(const frame &f, std::size_t c, double x, double y, const point_forcing &pf, double *qx,
+           double *qy, double *w) const;
   // The sideways move D at x0 (the shader's dh, limited), from frame f.
   std::array<double, 2> move(const frame &f, double x, double y, double t) const;
   std::array<double, 2> source(const frame &f, double x, double y, double t,
@@ -208,6 +259,8 @@ private:
   std::vector<cascade_band> _cascades;
   std::shared_ptr<const shore_grid> _grid;
   std::shared_ptr<const shore_layer> _layer;
+  std::shared_ptr<const sea_forcing> _forcing;
+  bool _advects = false; // a cascade is carried by a current
   std::uint64_t _digest = 0;
 
   mutable std::mutex _cache_mutex;
