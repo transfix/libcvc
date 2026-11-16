@@ -977,6 +977,13 @@ add_executable(cvcgl_ari_switch test/cvcgl_ari_switch.cpp)
 target_link_libraries(cvcgl_ari_switch PRIVATE cvcGL)
 add_test(NAME cvcgl_ari_switch COMMAND cvcgl_ari_switch)
 
+# arigl snapshot --mp4 / --seconds (record_frames): a falling ball recorded 1 s at 10 fps, the
+# video decoded back and the scene clock and the body checked. Skips without a video encoder.
+add_executable(cvcgl_ari_record test/cvcgl_ari_record.cpp)
+target_link_libraries(cvcgl_ari_record PRIVATE cvcGL)
+add_test(NAME cvcgl_ari_record COMMAND cvcgl_ari_record)
+set_tests_properties(cvcgl_ari_record PROPERTIES SKIP_REGULAR_EXPRESSION "cvcgl_ari_record: SKIP")
+
 # The terminal extension (TerminalScene, roadmap §16.6): a scene rendered offscreen becomes the
 # terminal backend's background under the widgets, and a background drag turns the camera.
 add_executable(cvcgl_terminal_scene test/cvcgl_terminal_scene.cpp)
@@ -1524,4 +1531,4 @@ endif()
 # (CMake/CvcHostStack.cmake). Names not built here are skipped.
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
-                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat)
+                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ari_record)
