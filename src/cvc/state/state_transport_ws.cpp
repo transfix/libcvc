@@ -55,6 +55,13 @@ namespace cvc {
 
 namespace {
 
+// An endpoint as "host:port", with an IPv6 address in brackets ("[::1]:5678"), as gRPC's
+// peer names it, so a reader can cut the port off (client_registry::address_host).
+template <class Endpoint> std::string endpoint_text(const Endpoint &ep) {
+  const std::string host = ep.address().to_string();
+  return (ep.address().is_v6() ? "[" + host + "]" : host) + ":" + std::to_string(ep.port());
+}
+
 namespace pb = ::cvc::transport::v1;
 
 // Match the gRPC/IPC frame ceiling so all three wire paths agree (a large set_data payload can be
@@ -866,7 +873,7 @@ void state_transport_ws::accept_loop() {
       beast::error_code pec;
       const auto ep = sock.remote_endpoint(pec);
       if (!pec)
-        conn->peer_address = ep.address().to_string() + ":" + std::to_string(ep.port());
+        conn->peer_address = endpoint_text(ep);
     }
     conn->ws = std::make_unique<websocket::stream<tcp::socket>>(std::move(sock));
     conn->ws->read_message_max(kMaxWsMessageBytes);
@@ -908,8 +915,7 @@ bool state_transport_ws::handshake_accepted(connection &c) {
   if (authenticate) { // §6.5.4: the authenticator judges the bearer instead of the room token
     beast::error_code pec;
     const auto ep = c.ws->next_layer().remote_endpoint(pec);
-    const std::string peer =
-        pec ? std::string() : ep.address().to_string() + ":" + std::to_string(ep.port());
+    const std::string peer = pec ? std::string() : endpoint_text(ep);
     std::string why;
     try {
       c.principal =

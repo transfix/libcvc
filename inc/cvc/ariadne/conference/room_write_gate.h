@@ -18,6 +18,7 @@
 
 #include <cvc/state/state_change_journal.h>
 #include <cvc/state/state_inbound_gate.h>
+#include <functional>
 #include <string>
 
 namespace cvc {
@@ -53,6 +54,13 @@ public:
   // Whether participant `pid` may write `path` with `op` (the rule above, without the binding).
   bool may_write(const std::string &pid, const std::string &path, cvc::state_mutation_op op) const;
 
+  // A client's own write of its participant's profile.name is refused (the name is the relay's,
+  // client_registry.h), and its value handed to `fn` as a rename the relay may grant, so a client
+  // that predates server.set keeps its name. `fn` runs on transport reader threads. Set it before
+  // the relay listens; null (the default) hands nothing on.
+  using name_request_fn = std::function<void(const std::string &pid, const std::string &name)>;
+  void set_name_requests(name_request_fn fn) { _name_requests = std::move(fn); }
+
   bool admit(const std::string &node_id, const cvc::state_mutation &m) const override;
   bool admit(const std::string &node_id, const cvc::state_message &m) const override;
   // A participant is the source of every value it may write (its participant subtree minus the
@@ -63,6 +71,8 @@ private:
   bool own_path(const std::string &pid, const std::string &path) const;
 
   std::string _room;
+
+  name_request_fn _name_requests;
 };
 
 } // namespace conference

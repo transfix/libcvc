@@ -639,8 +639,20 @@ int main(int argc, char **argv) {
   const long holdMs = aoiMode != "off" ? (std::min)(admissionHoldMs, 600000L) : 0L;
   // One gate for both transports, so a pid held on one cannot be claimed on the other.
   std::shared_ptr<cvc::state_inbound_gate> bindGate;
-  if (bindWritesArg == "on")
-    bindGate = std::make_shared<cvc::ariadne::conference::room_write_gate>(room);
+  // A client's own profile.name write, which the gate refuses (the name is the relay's): queued
+  // here on a transport thread, and granted as a rename on the room loop (ARISRV_IDENTITY.md ID1),
+  // so a client that predates server.set keeps its name. At most 256 wait at once.
+  std::mutex nameRequestsMu;
+  std::vector<std::pair<std::string, std::string>> nameRequests;
+  if (bindWritesArg == "on") {
+    auto gate = std::make_shared<cvc::ariadne::conference::room_write_gate>(room);
+    gate->set_name_requests([&](const std::string &pid, const std::string &name) {
+      std::lock_guard<std::mutex> lk(nameRequestsMu);
+      if (nameRequests.size() < 256)
+        nameRequests.emplace_back(pid, name);
+    });
+    bindGate = gate;
+  }
   // The room token: from the file (its first line, trimmed), else the environment. Not taken from
   // the command line, which other users of the host can read. A token asked for must be one: a
   // flag with no path, an unreadable or blank file, or a set but empty variable stops arisrv here
@@ -1500,8 +1512,10 @@ int main(int argc, char **argv) {
   //                                 has "ana", where it would be refused. Answers as whoami.
   const auto server_call = [&](const cvc::ariadne::conference::room_call_request &r) {
     namespace se = cvc::state_exec;
-    if (clients.identity_key(r.pid).empty()) // a call that came before a pass saw its Hello
-      clients.update(client_links(), clients_now(), clients_wall());
+    // The links as they are now, not as the last pass saw them: a call that came before a pass
+    // saw its Hello has a record, and a pid taken over since is its new holder's, so nothing the
+    // old holder's connection was carries over to it.
+    clients.update(client_links(), clients_now(), clients_wall());
     if (r.fn == "server.whoami") {
       se::value_t who = clients.whoami(r.pid);
       if (std::holds_alternative<std::monostate>(who.v))
@@ -1827,9 +1841,22 @@ int main(int argc, char **argv) {
           if (r.stats.rtt_ms >= 0.0 && present.count(r.remote_node_id))
             pose_relay.set_rtt(r.remote_node_id, r.stats.rtt_ms);
       cvc::ariadne::conference::write_link_devices(app, room, links, present);
-      // Each client's record, and each present participant's username (ID1).
+      // Each client's record, each client's own profile.name write as a rename (one that predates
+      // server.set), and each present participant's username (ID1).
       clients.update(links, now_s, clients_wall());
-      clients.write(app, present);
+      {
+        std::vector<std::pair<std::string, std::string>> asked;
+        {
+          std::lock_guard<std::mutex> lk(nameRequestsMu);
+          asked.swap(nameRequests);
+        }
+        for (const auto &[pid, name] : asked) {
+          client_registry::refusal why;
+          clients.set_username(pid, name, now_s, why, /*make_unique=*/true);
+        }
+      }
+      // Without bound writes the names stay the clients' own, as before: no gate keeps them out.
+      clients.write(app, bindGate ? present : std::set<std::string>());
       // Each viewer's video rung for its link, to the shaper and to the room (its net.relay.video,
       // which its client shows).
       // A viewer's video rung follows the link that carries its media: its lane's report, when it

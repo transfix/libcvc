@@ -113,6 +113,12 @@ bool room_write_gate::may_write(const std::string &pid, const std::string &path,
 }
 
 bool room_write_gate::admit(const std::string &node_id, const cvc::state_mutation &m) const {
+  // Its own profile.name, exactly (a non-canonical spelling is only refused): a rename request.
+  if (_name_requests && m.op == cvc::state_mutation_op::set_value &&
+      cvc::state::isValidStateName(node_id) &&
+      m.path == room_participant_path(_room, node_id) + cvc::state::SEPARATOR + "profile" +
+                    cvc::state::SEPARATOR + "name")
+    _name_requests(node_id, m.string_value);
   return may_write(node_id, m.path, m.op);
 }
 

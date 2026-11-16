@@ -406,6 +406,36 @@ TEST(RoomWriteGate, AParticipantWritesOnlyItsOwnSubtree) {
   EXPECT_FALSE(gate.admit("alice", msg));
 }
 
+// A client's own profile.name write (client_registry.h) is refused, and handed on as a rename the
+// relay may grant, so a client that predates server.set keeps its name. Another participant's,
+// or a non-canonical spelling of its own, is only refused.
+TEST(RoomWriteGate, AClientsOwnNameWriteIsARenameRequest) {
+  conf::room_write_gate gate("standup");
+  std::vector<std::pair<std::string, std::string>> asked;
+  gate.set_name_requests(
+      [&](const std::string &pid, const std::string &name) { asked.emplace_back(pid, name); });
+  const std::string alice = conf::room_participant_path("standup", "alice");
+  const std::string bob = conf::room_participant_path("standup", "bob");
+  const auto write = [](const std::string &path, const std::string &v,
+                        cvc::state_mutation_op op = cvc::state_mutation_op::set_value) {
+    cvc::state_mutation m;
+    m.path = path;
+    m.op = op;
+    m.string_value = v;
+    return m;
+  };
+  EXPECT_FALSE(gate.admit("alice", write(alice + ".profile.name", "Alice")));
+  ASSERT_EQ(asked.size(), 1u);
+  EXPECT_EQ(asked[0].first, "alice");
+  EXPECT_EQ(asked[0].second, "Alice");
+  EXPECT_FALSE(
+      gate.admit("alice", write(alice + ".profile.name", "", cvc::state_mutation_op::touch)));
+  EXPECT_FALSE(gate.admit("alice", write(bob + ".profile.name", "Bob")));
+  EXPECT_FALSE(gate.admit("alice", write(alice + ".profile..name", "A2")));
+  EXPECT_TRUE(gate.admit("alice", write(alice + ".presence.joined", "1")));
+  EXPECT_EQ(asked.size(), 1u) << "only its own name, set as a value, asks";
+}
+
 // A participant is the source of what it may write, so the relay's re-broadcast never sends it back
 // (state_inbound_gate::sources); the relay's own keys and other participants' are still sent.
 TEST(RoomWriteGate, AParticipantSourcesWhatItWrites) {
