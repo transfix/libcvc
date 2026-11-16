@@ -36,6 +36,7 @@
 #include <optional>
 #include <set>
 #include <sstream>
+#include <thread>
 
 namespace cvc {
 namespace ariadne {
@@ -469,6 +470,10 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
                          " s quanta; using " + std::to_string(steps * quantum) + " s");
   }
   cfg.fixed_dt = steps * quantum;
+  // The fields' free-surface reads (a water node's floating bodies) on up to three workers
+  // beside the stepping thread: the same values in the same order, so a run is the same.
+  const unsigned hw = std::thread::hardware_concurrency();
+  cfg.field_threads = hw > 1 ? static_cast<int>(std::min(3u, hw - 1)) : 0;
 
   std::unique_ptr<SceneWorld> out(new SceneWorld());
   out->_impl->app = &app;

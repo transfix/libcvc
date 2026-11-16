@@ -120,6 +120,8 @@ void validate(const world_config &c) {
     throw cvc::physics_error("world_config: penetration_slop must be finite and >= 0");
   if (c.threads < 0)
     throw cvc::physics_error("world_config: threads must be >= 0");
+  if (c.field_threads < 0 || c.field_threads > 64)
+    throw cvc::physics_error("world_config: field_threads must be in 0..64");
   if (!finite(c.gravity) || !finite(c.origin))
     throw cvc::physics_error("world_config: gravity and origin must be finite");
   if (c.max_bodies == 0 || c.max_body_pairs == 0 || c.max_contact_constraints == 0 ||
@@ -282,14 +284,20 @@ struct world::impl {
     step_report r;
     contacts.clear();
     const auto t0 = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point tf = t0, te0 = t0, te1 = t0;
     guarded([&] {
       fields.apply(*be, cfg, field_time());
+      tf = std::chrono::steady_clock::now();
       vehicles.pre_step(*be, fields, cfg, materials);
       boats.pre_step(*be, fields, cfg, field_time());
+      te0 = std::chrono::steady_clock::now();
       be->step(contacts, r);
+      te1 = std::chrono::steady_clock::now();
       vehicles.post_step(*be, fields, cfg);
     });
     const auto t1 = std::chrono::steady_clock::now();
+    r.fields_ms = std::chrono::duration<double, std::milli>(tf - t0).count();
+    r.engine_ms = std::chrono::duration<double, std::milli>(te1 - te0).count();
     std::sort(contacts.begin(), contacts.end(), [](const contact_event &a, const contact_event &b) {
       return std::make_tuple(a.body_a.value, a.sub_shape_a, a.body_b.value, a.sub_shape_b,
                              static_cast<int>(a.type)) <

@@ -88,12 +88,15 @@
 #include <cvc/ocean/h0.h>
 #include <cvc/ocean/shore.h>
 #include <cvc/ocean/spectrum.h>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
 
 namespace cvc {
 namespace ocean {
+
+struct sea_surface_frame; // sea_surface's fields at one time (sea_surface.cpp)
 
 // The physics band of each cascade (B2).
 struct band_params {
@@ -167,6 +170,29 @@ public:
   // The still-water depth at (x, y): level - ground; +infinity without a grid.
   double depth(double x, double y) const;
 
+  // The sea at one time, its fields held: height() and velocity() at that time, the same values,
+  // without the cache's lock and count on every read, so many reads from several threads at once
+  // (a physics step's cells) do not queue on them. Made by at(); cheap to copy; keeps the sea's
+  // fields for that time alive, and the sea must outlive it.
+  class at_time {
+  public:
+    double t() const noexcept { return _t; }
+    double height(double x, double y, source_memo &memo) const;
+    std::array<double, 3> velocity(double x, double y, double z, source_memo &memo) const;
+
+  private:
+    friend class sea_surface;
+    const sea_surface *_sea = nullptr;
+    std::shared_ptr<const struct sea_surface_frame> _f;
+    double _t = 0.0;
+  };
+  // Runs fn(0) .. fn(n - 1), in any order and on any threads, and returns when all have run.
+  using parallel_run =
+      std::function<void(std::size_t n, const std::function<void(std::size_t)> &fn)>;
+  // The fields for time t, computed now if the cache does not hold them: each cascade's modes and
+  // each of its three transforms a task of `run` when one is given (the same values).
+  at_time at(double t, const parallel_run &run = nullptr) const;
+
   // A 64-bit digest of everything the values depend on (state_hash folds it in).
   std::uint64_t digest() const noexcept { return _digest; }
 
@@ -191,10 +217,14 @@ private:
     double tile_m = 0.0, fade_m = 0.0, decay_k = 0.0;
     std::vector<mode> modes;
   };
-  struct frame; // the cascades' fields at one time
+  using frame = sea_surface_frame; // the cascades' fields at one time
 
-  std::shared_ptr<const frame> frame_at(double t) const;
-  std::shared_ptr<frame> compute(double t) const;
+  std::shared_ptr<const frame> frame_at(double t, const parallel_run &run = nullptr) const;
+  // height() and velocity() given the fields for t (computed as needed when f is null).
+  double height_from(const frame *f, double x, double y, double t, source_memo &memo) const;
+  std::array<double, 3> velocity_from(const frame *f, double x, double y, double z, double t,
+                                      source_memo &memo) const;
+  std::shared_ptr<frame> compute(double t, const parallel_run &run) const;
   // The sideways move D at x0 (the shader's dh, limited), from frame f.
   std::array<double, 2> move(const frame &f, double x, double y, double t) const;
   std::array<double, 2> source(const frame &f, double x, double y, double t,

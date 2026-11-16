@@ -735,3 +735,48 @@ TEST(PhysicsOceanSurface, CrossPlatformGoldenHash) {
               static_cast<unsigned long long>(h));
   EXPECT_EQ(h, 0xbe86208109133b1aull) << std::hex << "state hash " << h;
 }
+
+// The fields' surface reads on worker threads (world_config::field_threads) give the same run:
+// several bodies on the sea, with and without the source lattice, at 0, 1 and 3 workers, and the
+// workers changed mid-run by reconfigure.
+TEST(PhysicsOceanSurface, TheFieldThreadsChangeNoValue) {
+  REQUIRE_JOLT();
+  for (double cell : {0.0, 0.5}) {
+    std::uint64_t h[4];
+    for (int k = 0; k < 4; ++k) {
+      world_config c = jolt_config();
+      c.field_threads = k == 3 ? 0 : (k == 0 ? 0 : (k == 1 ? 1 : 3));
+      world w(c);
+      w.add_field(ocean_water(std::make_shared<ocean_surface>(open_sea(0.0, cell))));
+      w.add_body(slab(500.0, 0.0));
+      w.add_body(ball_at(2.5, -1.5, 0.3));
+      w.add_body(ball_at(-3.0, 2.0, 0.1));
+      body_desc tilted = slab(420.0, 0.2);
+      tilted.position = {-1.0, -3.0, 0.2};
+      const double half = 0.2; // 0.4 rad about (0.6, 0.8, 0)
+      tilted.rotation = {std::cos(half), 0.6 * std::sin(half), 0.8 * std::sin(half), 0.0};
+      w.add_body(tilted);
+      w.set_field_time(17.0);
+      if (k == 3) { // switched on and off as it runs
+        w.step(60);
+        c.field_threads = 2;
+        w.reconfigure(c);
+        w.step(80);
+        c.field_threads = 0;
+        w.reconfigure(c);
+        w.step(60);
+      } else {
+        w.step(200);
+      }
+      h[k] = w.state_hash();
+    }
+    for (int k = 1; k < 4; ++k)
+      EXPECT_EQ(h[0], h[k]) << std::hex << "cell " << cell << ", run " << k << ": " << h[0]
+                            << " against " << h[k];
+  }
+  world_config bad = jolt_config();
+  bad.field_threads = -1;
+  EXPECT_THROW(world w(bad), cvc::physics_error);
+  bad.field_threads = 65;
+  EXPECT_THROW(world w(bad), cvc::physics_error);
+}

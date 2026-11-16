@@ -25,6 +25,7 @@
 #include <cvc/algo/det_math.h>
 #include <cvc/ocean/sea_surface.h>
 #include <limits>
+#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -77,6 +78,14 @@ void catmull_rom(double t, double w[4]) {
   w[3] = 0.5 * (t3 - t2);
 }
 
+// fmod(f, g) of an integer-valued f, as a long long: below 2^53 f fits one, and its integer
+// remainder is fmod's exact one (fmod is slow, and a read builds several stencils).
+long long wrap_floor(double f, int g) {
+  if (std::fabs(f) < 9007199254740992.0)
+    return static_cast<long long>(f) % g;
+  return static_cast<long long>(std::fmod(f, double(g)));
+}
+
 // A 4 x 4 Catmull-Rom stencil on a periodic grid x grid lattice of a tile.
 struct stencil {
   int ix[4], iy[4];
@@ -89,8 +98,7 @@ struct stencil {
     catmull_rom(fx - flx, wx);
     catmull_rom(fy - fly, wy);
     // Wrap without overflow for any finite coordinate: reduce the floor modulo g first.
-    const long long cx = static_cast<long long>(std::fmod(flx, double(g))),
-                    cy = static_cast<long long>(std::fmod(fly, double(g)));
+    const long long cx = wrap_floor(flx, g), cy = wrap_floor(fly, g);
     for (int i = 0; i < 4; ++i) {
       ix[i] = int(((cx - 1 + i) % g + g) % g);
       iy[i] = int(((cy - 1 + i) % g + g) % g);
@@ -131,13 +139,14 @@ sea_params checked(const sea_params &p) {
 
 } // namespace
 
-struct sea_surface::frame {
+struct sea_surface_frame {
   double t = 0.0;
-  std::vector<band_frame> bands;
+  std::vector<sea_surface::band_frame> bands;
   // With source_cell_m: the move x - x0 at the lattice corners found so far at this time, keyed
   // by the corner's index pair. Each is a pure function of the corner and t, so the order in
   // which reads fill them (and from which threads) changes no value.
-  mutable std::mutex lattice_mutex;
+  // (Reads of the found corners share the lock: a step's cells read them from several threads.)
+  mutable std::shared_mutex lattice_mutex;
   mutable std::unordered_map<std::uint64_t, std::array<double, 2>> lattice;
 };
 
@@ -252,18 +261,23 @@ sea_surface::sea_surface(std::vector<sea_cascade> cascades, const sea_params &p,
   _digest = d.h;
 }
 
-std::shared_ptr<sea_surface::frame> sea_surface::compute(double t) const {
+std::shared_ptr<sea_surface_frame> sea_surface::compute(double t, const parallel_run &run) const {
   auto f = std::make_shared<frame>();
   f->t = t;
   const int G = _p.band.grid;
-  const std::size_t cells = std::size_t(G) * std::size_t(G);
-  std::vector<double> a1(cells * 2), a2(cells * 2), a3(cells * 2);
-  for (const cascade_band &b : _cascades) {
-    std::fill(a1.begin(), a1.end(), 0.0);
-    std::fill(a2.begin(), a2.end(), 0.0);
-    std::fill(a3.begin(), a3.end(), 0.0);
+  const std::size_t cells = std::size_t(G) * std::size_t(G), C = _cascades.size();
+  // Each cascade's three transforms' inputs: its modes at time t, summed onto the lattice.
+  std::vector<std::array<std::vector<double>, 3>> work(C);
+  const auto modes = [&](std::size_t ci) {
+    const cascade_band &b = _cascades[ci];
+    std::vector<double> &a1 = work[ci][0], &a2 = work[ci][1], &a3 = work[ci][2];
+    a1.assign(cells * 2, 0.0);
+    a2.assign(cells * 2, 0.0);
+    a3.assign(cells * 2, 0.0);
     for (const mode &m : b.modes) {
-      const double ph = m.omega * t, c = det::cos(ph), s = det::sin(ph);
+      const double ph = m.omega * t;
+      double s, c;
+      det::sincos(ph, s, c);
       // h = h0 e^(i w t) + conj h0(-k) e^(-i w t), and dh/dt = i w (h0 e^(i w t) - ...).
       const double ar = m.h0r * c - m.h0i * s, ai = m.h0r * s + m.h0i * c;
       const double br = m.hcr * c + m.hci * s, bi = m.hci * c - m.hcr * s;
@@ -278,12 +292,22 @@ std::shared_ptr<sea_surface::frame> sea_surface::compute(double t) const {
       a3[i] += -di * m.knx - dr * m.kny;
       a3[i + 1] += dr * m.knx - di * m.kny;
     }
-    _fft.run_2d(a1.data(), +1);
-    _fft.run_2d(a2.data(), +1);
-    _fft.run_2d(a3.data(), +1);
+  };
+  const auto transform = [&](std::size_t j) { _fft.run_2d(work[j / 3][j % 3].data(), +1); };
+  if (run) { // every task's arithmetic is its own, so the order they run in changes nothing
+    run(C, modes);
+    run(3 * C, transform);
+  } else {
+    for (std::size_t ci = 0; ci < C; ++ci)
+      modes(ci);
+    for (std::size_t j = 0; j < 3 * C; ++j)
+      transform(j);
+  }
+  for (std::size_t ci = 0; ci < C; ++ci) {
+    const std::vector<double> &a1 = work[ci][0], &a2 = work[ci][1], &a3 = work[ci][2];
     band_frame out;
     out.grid = G;
-    out.tile_m = b.tile_m;
+    out.tile_m = _cascades[ci].tile_m;
     for (std::vector<double> *v : {&out.eta, &out.dx, &out.dy, &out.u, &out.v, &out.w})
       v->resize(cells);
     for (std::size_t i = 0; i < cells; ++i) {
@@ -299,13 +323,14 @@ std::shared_ptr<sea_surface::frame> sea_surface::compute(double t) const {
   return f;
 }
 
-std::shared_ptr<const sea_surface::frame> sea_surface::frame_at(double t) const {
+std::shared_ptr<const sea_surface::frame> sea_surface::frame_at(double t,
+                                                                const parallel_run &run) const {
   {
     std::lock_guard<std::mutex> lock(_cache_mutex);
     if (_cache && same_bits(_cache->t, t))
       return _cache;
   }
-  std::shared_ptr<const frame> f = compute(t); // outside the lock: a pure function of t
+  std::shared_ptr<const frame> f = compute(t, run); // outside the lock: a pure function of t
   std::lock_guard<std::mutex> lock(_cache_mutex);
   _cache = f;
   return f;
@@ -326,6 +351,23 @@ double sea_surface::grid_sample(const std::vector<float> &f, double x, double y)
 
 double sea_surface::depth(double x, double y) const {
   return _grid ? grid_sample(_grid->depth, x, y) : kInf;
+}
+
+sea_surface::at_time sea_surface::at(double t, const parallel_run &run) const {
+  at_time a;
+  a._sea = this;
+  a._f = frame_at(t, run);
+  a._t = t;
+  return a;
+}
+
+double sea_surface::at_time::height(double x, double y, source_memo &memo) const {
+  return _sea->height_from(_f.get(), x, y, _t, memo);
+}
+
+std::array<double, 3> sea_surface::at_time::velocity(double x, double y, double z,
+                                                     source_memo &memo) const {
+  return _sea->velocity_from(_f.get(), x, y, z, _t, memo);
 }
 
 std::array<double, 2> sea_surface::move(const frame &f, double x, double y, double t) const {
@@ -390,7 +432,7 @@ std::array<double, 2> sea_surface::find_source(const frame &f, double x, double 
   std::array<double, 2> o[4];
   bool have[4] = {false, false, false, false};
   {
-    std::lock_guard<std::mutex> lock(f.lattice_mutex);
+    std::shared_lock<std::shared_mutex> lock(f.lattice_mutex);
     for (int k = 0; k < 4; ++k) {
       const auto it = f.lattice.find(key(i0 + (k & 1), j0 + (k >> 1)));
       if (it != f.lattice.end()) {
@@ -406,7 +448,7 @@ std::array<double, 2> sea_surface::find_source(const frame &f, double x, double 
     const double cx = double(i) * h, cy = double(j) * h;
     const std::array<double, 2> p = source_exact(f, cx, cy, t);
     o[k] = {cx - p[0], cy - p[1]};
-    std::lock_guard<std::mutex> lock(f.lattice_mutex);
+    std::unique_lock<std::shared_mutex> lock(f.lattice_mutex);
     f.lattice.emplace(key(i, j), o[k]);
   }
   const double ox =
@@ -495,6 +537,11 @@ double sea_surface::height(double x, double y, double t) const {
 }
 
 double sea_surface::height(double x, double y, double t, source_memo &memo) const {
+  return height_from(nullptr, x, y, t, memo);
+}
+
+double sea_surface::height_from(const frame *pre, double x, double y, double t,
+                                source_memo &memo) const {
   if (_grid) {
     const double d = depth(x, y);
     if (std::isnan(d))
@@ -505,7 +552,12 @@ double sea_surface::height(double x, double y, double t, source_memo &memo) cons
       return _p.level;
     }
   }
-  const std::shared_ptr<const frame> f = frame_at(t);
+  std::shared_ptr<const frame> held; // the cache's, when the caller holds none
+  if (!pre) {
+    held = frame_at(t);
+    pre = held.get();
+  }
+  const frame *f = pre;
   const std::array<double, 2> x0 = source(*f, x, y, t, memo);
   const double d0 = depth(x0[0], x0[1]);
   double h = 0.0;
@@ -530,6 +582,11 @@ std::array<double, 3> sea_surface::velocity(double x, double y, double z, double
 
 std::array<double, 3> sea_surface::velocity(double x, double y, double z, double t,
                                             source_memo &memo) const {
+  return velocity_from(nullptr, x, y, z, t, memo);
+}
+
+std::array<double, 3> sea_surface::velocity_from(const frame *pre, double x, double y, double z,
+                                                 double t, source_memo &memo) const {
   if (_grid) {
     const double d = depth(x, y);
     if (std::isnan(d))
@@ -555,7 +612,12 @@ std::array<double, 3> sea_surface::velocity(double x, double y, double z, double
       return {speed * ux, speed * uy, speed * slope};
     }
   }
-  const std::shared_ptr<const frame> f = frame_at(t);
+  std::shared_ptr<const frame> held; // the cache's, when the caller holds none
+  if (!pre) {
+    held = frame_at(t);
+    pre = held.get();
+  }
+  const frame *f = pre;
   const std::array<double, 2> x0 = source(*f, x, y, t, memo);
   const double d0 = depth(x0[0], x0[1]);
   const double zrel = z - _p.level, zc = std::min(zrel, 0.0);
