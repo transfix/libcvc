@@ -2070,17 +2070,19 @@ int main() {
       chk(alternates, "the foam's atlas steps with the world's clock (its two atlases alternate)");
       chk(uf(*near, "uFoamDetail") == 1.0f && uf(*far, "uFoamDetail") == 0.0f,
           "the near grid draws the foam's detail, the far grid its mean cover only");
-      // The thresholds: the whitecaps start at the guess (0.75) and take the calibration's.
-      const float guess = uf(*near, "uFoamBias");
-      float bias = guess;
+      // The thresholds: the whitecaps start at the guess (0.75) and take the calibration's. The
+      // task can finish within the frames above on a fast runner, so the guess is the constant,
+      // not the first value read here.
+      constexpr float kGuess = 0.75f;
+      float bias = uf(*near, "uFoamBias");
       int frames = 0;
-      for (; frames < 1500 && bias == guess; ++frames) {
+      for (; frames < 1500 && bias == kGuess; ++frames) {
         tick();
         bias = uf(*near, "uFoamBias");
       }
-      printf("  the thresholds landed after %d frames: whitecaps %.4f (the guess %.2f)\n", frames,
-             bias, guess);
-      chk(approx(guess, 0.75) && bias != guess && bias > 0.6f && bias < 0.9f,
+      printf("  the thresholds landed after %d more frames: whitecaps %.4f (the guess %.2f)\n",
+             frames, bias, kGuess);
+      chk(bias != kGuess && bias > 0.6f && bias < 0.9f,
           "the thresholds are found off the frame and replace the whitecaps' guess");
       st("water.lod_foam").value(42.0);
       st("water.lod_shade").value(420.0);
