@@ -43,6 +43,7 @@
 #include <cvc/volume/volume_file_io.h>
 #include <cvc/world/generated_world.h> // terrain source test: the generator it draws
 #include <filesystem>                  // mesh_lab / fe_lab sources: a temp "document directory"
+#include <functional>
 #include <thread>
 #include <vtkAbstractVolumeMapper.h>
 #include <vtkActor.h> // LOD test: a rung's material
@@ -53,7 +54,7 @@
 #include <vtkLightCollection.h>
 #include <vtkMapper.h> // field colours: an opacity curve is an RGBA colour array
 #include <vtkNew.h>
-#include <vtkPlane.h>  // clip test: the planes handed to a node's renderer
+#include <vtkPlane.h> // clip test: the planes handed to a node's renderer
 #include <vtkPlaneCollection.h>
 #include <vtkPointData.h>
 #include <vtkPolyData.h>
@@ -1939,6 +1940,33 @@ int main() {
     chk(std::fabs(std::hypot(r1[0], r1[1]) - cot50) < 1e-3 &&
             (std::fabs(r1[0] - r0[0]) > 1e-3 || std::fabs(r1[1] - r0[1]) > 1e-3),
         "the sky's sun follows the rig's key (azimuth 120, elevation 50)");
+
+    // O15, the swash: with a swell (its shore layer found once the keys have held for 10 frames)
+    // the world's ground meshes take the swash, its inputs left out of the shadow maps' bake.
+    st("water.swell_height").value(1.0);
+    for (int i = 0; i < 14; ++i)
+      tick();
+    if (near && near->isVisible()) {
+      int wired = 0, baked = 0, on = 0;
+      std::function<void(cvc::gl::GraphicsNode &)> walk = [&](cvc::gl::GraphicsNode &g) {
+        if (auto *m = dynamic_cast<cvc::gl::GeometryNode *>(&g))
+          if (auto in = m->sharedShaderInputs("water_swash")) {
+            ++wired;
+            baked += in->skip_shadow_bake ? 0 : 1;
+            on += in->f.count("uSwashOn") && in->f.at("uSwashOn") > 0.5f ? 1 : 0;
+          }
+        for (const auto &c : g.getGraphicsChildren())
+          if (c)
+            walk(*c);
+      };
+      if (auto ground = sg.getGraphics("world"))
+        walk(*ground);
+      printf("  the swash on %d of the ground's meshes\n", wired);
+      chk(wired > 0 && baked == 0 && on == wired,
+          "a swell puts the swash on the world's ground meshes, out of the shadow bake");
+    } else {
+      printf("  SKIP the swash: the water's cascades are not up (no float render targets)\n");
+    }
     for (const std::string &w : warnings)
       printf("  warning: %s\n", w.c_str());
   }
