@@ -216,12 +216,16 @@ private:
   task SearchIndex();
   void GetTime(const voxel_at &m);
   void T_GetTime(const voxel_at &m);
-  // The threshold sweep's shortcut (Segment()): sweep_order() sorts the voxels a search front
-  // can pass by the highest threshold at which it can, and reach_level() finds the highest
-  // threshold at which a search would reach a labelled voxel at all, or -1.
-  task sweep_order();
-  task reach_level(int &level);
+  // The threshold sweep's shortcut (Segment()): sweep_tree() builds the component tree of the
+  // voxels a search front can pass, by level; sweep_labelled() brings it up to date with the
+  // voxels the sweep has labelled since; reach_level() is the highest threshold at which a search
+  // can reach a labelled voxel at all, or -1.
+  task sweep_tree();
+  task sweep_labelled();
+  int reach_level() const;
   int face_neighbours(std::size_t v, std::size_t out[6]) const;
+  std::uint32_t tree_node(std::uint32_t v) const;
+  void mark_up(std::uint32_t v);
 
   buffer<float> step_cost; // per voxel, 0.01 exp(ALPHA |grad|)
   buffer<float> T_tdata;   // the sweep's search times
@@ -236,17 +240,23 @@ private:
 
   // The sweep's shortcut. A voxel's level is the floor of the least of its six neighbours'
   // values (as neighbours() gives them): a search front passes it at every threshold up to its
-  // level. sweep_voxels holds the unlabelled voxels that are not automatic seeds, at levels from
-  // 255 down to sweep_floor, highest first; sweep_start[255 - l] is where level l starts, and
-  // sweep_start[256 - sweep_floor] where they end. uf and uf_flags are reach_level()'s
-  // union-find over the voxels it has let in (uf_none: not let in), and a root's flags: 1, its
-  // set holds an unclassified seed; 2, it holds a voxel next to a labelled one.
-  static constexpr std::uint32_t uf_none = 0xffffffffu;
+  // level. An automatic seed's level is 256 (fronts start there at any threshold); voxels below
+  // sweep_floor, the lowest threshold the sweep searches at, are left out (tree_out). A node of
+  // the component tree is a set of voxels at levels l and up, connected through face neighbours,
+  // at level l: tree_parent gives each voxel the voxel that names its node, and a node's name the
+  // name of the node above it (itself at a root). Per node, by its name: tree_seeds, how many
+  // unclassified seeds it holds, and tree_marked, whether it holds a voxel next to a labelled
+  // one; qualifying[l] counts the nodes of level l with both.
+  static constexpr std::uint16_t tree_out = 0xffffu;
   bool sweep_shortcut = false;
   int sweep_floor = 0;
-  std::vector<std::uint32_t> sweep_voxels, sweep_start, uf;
-  std::vector<unsigned char> uf_flags;
-  std::vector<std::uint32_t> let_in;
+  std::vector<std::uint16_t> tree_level;
+  std::vector<std::uint32_t> tree_parent, tree_seeds;
+  std::vector<unsigned char> tree_marked;
+  std::size_t qualifying[257] = {};
+  // During the sweep, GetTime() records the voxels it labels, and the automatic seeds among them.
+  bool log_labels = false;
+  std::vector<std::uint32_t> labelled_log, classified_log;
 };
 
 } // namespace cvc::genseg
