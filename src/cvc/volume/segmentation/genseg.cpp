@@ -51,6 +51,11 @@ University of Texas at Austin for a different license.
 //     it classified, the legacy sweep searched again at every threshold from 255 down, and on a
 //     large map those searches, which change nothing, took nearly all its time (Segment() says
 //     how it knows where to start);
+//   - the per-voxel passes (the rescale and its extremes, the gradient, the step costs, the
+//     smoothing and its local maxima, the sweep's levels) run in pieces spread over the app's
+//     compute pool (for_voxels, GS_FOR_VOXELS_OF): each voxel's result depends only on the
+//     buffers the pass reads, and the extremes are combined by min and max, so the labels are
+//     the same on any number of threads; the marches and the sweep's searches stay sequential;
 //   - read_data's min and max start from the first voxel, not from -/+99999999;
 //   - three fixes of undefined behaviour: popping an empty heap ends the march (the legacy code
 //     read before the heap's arrays, and on some inputs crashed); a heap that would overflow its
@@ -68,6 +73,8 @@ University of Texas at Austin for a different license.
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cvc/core/thread_pool.h>
+#include <mutex>
 
 namespace cvc::genseg {
 
@@ -179,21 +186,48 @@ task genseg_context::run() {
 
 // read_data's normalisation (inout.cpp): the voxels' minimum and maximum, then every voxel
 // rescaled to 0..255. With data_unit_thresholds, tlow and thigh are rescaled the same way.
+void for_voxels(thread_pool *pool, std::size_t begin, std::size_t end,
+                const std::function<void(std::size_t, std::size_t)> &body) {
+  const std::size_t count = end > begin ? end - begin : 0;
+  const std::size_t pieces = (count + for_voxels_piece - 1) / for_voxels_piece;
+  if (!pool || pieces < 2 || pool->concurrency() < 2) {
+    if (count)
+      body(begin, end);
+    return;
+  }
+  pool->parallel_for(int(pieces), [&](int i) {
+    const std::size_t b = begin + std::size_t(i) * for_voxels_piece;
+    body(b, end - b > for_voxels_piece ? b + for_voxels_piece : end);
+  });
+}
+
+// The minimum and maximum (each piece's, then theirs: the same whatever the order), then every
+// voxel rescaled to 0..255.
 task genseg_context::normalise() {
   const std::size_t n = voxel_count();
   maxraw = dataset[0];
   minraw = dataset[0];
-  for (std::size_t v = 0; v < n; v++) {
-    if (dataset[v] > maxraw)
-      maxraw = dataset[v];
-    if (dataset[v] < minraw)
-      minraw = dataset[v];
-    GS_UNIT();
-  }
-  for (std::size_t v = 0; v < n; v++) {
-    dataset[v] = 255 * (dataset[v] - minraw) / (maxraw - minraw);
-    GS_UNIT();
-  }
+  std::mutex join;
+  const auto extremes = [&](std::size_t b, std::size_t e) {
+    float lo = dataset[b], hi = dataset[b];
+    for (std::size_t v = b; v < e; v++) {
+      if (dataset[v] > hi)
+        hi = dataset[v];
+      if (dataset[v] < lo)
+        lo = dataset[v];
+    }
+    const std::lock_guard<std::mutex> hold(join);
+    if (hi > maxraw)
+      maxraw = hi;
+    if (lo < minraw)
+      minraw = lo;
+  };
+  GS_FOR_VOXELS_OF(*this, n, extremes);
+  const auto rescale = [&](std::size_t b, std::size_t e) {
+    for (std::size_t v = b; v < e; v++)
+      dataset[v] = 255 * (dataset[v] - minraw) / (maxraw - minraw);
+  };
+  GS_FOR_VOXELS_OF(*this, n, rescale);
   if (data_unit_thresholds) {
     tlow = 255 * (tlow - minraw) / (maxraw - minraw);
     thigh = 255 * (thigh - minraw) / (maxraw - minraw);
@@ -202,10 +236,11 @@ task genseg_context::normalise() {
 
 task genseg_context::step_costs() {
   const std::size_t n = voxel_count();
-  for (std::size_t v = 0; v < n; v++) {
-    step_cost[v] = 0.01f * (float)std::exp(double(ALPHA * step_cost[v]));
-    GS_UNIT();
-  }
+  const auto costs = [&](std::size_t b, std::size_t e) {
+    for (std::size_t v = b; v < e; v++)
+      step_cost[v] = 0.01f * (float)std::exp(double(ALPHA * step_cost[v]));
+  };
+  GS_FOR_VOXELS_OF(*this, n, costs);
 }
 
 task genseg_context::Segment() {
@@ -270,10 +305,11 @@ task genseg_context::Segment() {
   if (SeedNum > 0) {
     T_heap.allocate(n);
     T_tdata.allocate(n);
-    for (v = 0; v < n; v++) {
-      T_tdata[v] = MAX_TIME;
-      GS_UNIT();
-    }
+    const auto clear = [&](std::size_t b, std::size_t e) {
+      for (std::size_t u = b; u < e; u++)
+        T_tdata[u] = MAX_TIME;
+    };
+    GS_FOR_VOXELS_OF(*this, n, clear);
     GS_RUN(sweep_tree());
   }
   t_low = 255.0f;
@@ -535,22 +571,27 @@ task genseg_context::sweep_tree() {
   sweep_floor = int(std::ceil(double(tlow)));
   sweep_floor = sweep_floor < 0 ? 0 : (sweep_floor > 255 ? 255 : sweep_floor);
   tree_level.assign(n, tree_out);
+  const auto levels = [&](std::size_t b, std::size_t e) {
+    for (std::size_t v = b; v < e; v++) {
+      int l = 256;
+      if (seed_index[v] != 254) {
+        voxel_at nb[6];
+        neighbours(at(v), nb);
+        float least = dataset[nb[0].v];
+        for (int i = 1; i < 6; i++)
+          if (dataset[nb[i].v] < least)
+            least = dataset[nb[i].v];
+        l = least >= 255.0f ? 255 : (least < 0.0f ? -1 : int(std::floor(least)));
+      }
+      if (l >= sweep_floor)
+        tree_level[v] = std::uint16_t(l);
+    }
+  };
+  GS_FOR_VOXELS_OF(*this, n, levels);
   std::size_t at_level[257] = {};
   for (std::size_t v = 0; v < n; v++) {
-    int l = 256;
-    if (seed_index[v] != 254) {
-      voxel_at nb[6];
-      neighbours(at(v), nb);
-      float least = dataset[nb[0].v];
-      for (int i = 1; i < 6; i++)
-        if (dataset[nb[i].v] < least)
-          least = dataset[nb[i].v];
-      l = least >= 255.0f ? 255 : (least < 0.0f ? -1 : int(std::floor(least)));
-    }
-    if (l >= sweep_floor) {
-      tree_level[v] = std::uint16_t(l);
-      at_level[l]++;
-    }
+    if (tree_level[v] != tree_out)
+      at_level[tree_level[v]]++;
     GS_UNIT();
   }
   std::size_t next[257] = {}, total = 0;
@@ -677,142 +718,145 @@ int genseg_context::reach_level() const {
   return -1;
 }
 
+// Each voxel's gradient magnitude (the legacy 3x3x3 stencil, in the legacy order), and their
+// minimum and maximum (each piece's, then theirs); then every one rescaled to 0..255.
 task genseg_context::GetGradient(float *edge_mag) {
-  int x, y, z;
-  int i, j, k;
-  float gradient, grad_x, grad_y, grad_z;
-  float maxgrad, mingrad;
-
-  maxgrad = 0;
-  mingrad = 999999.0;
-  for (z = 0; z < ZDIM; z++)
-    for (y = 0; y < YDIM; y++)
-      for (x = 0; x < XDIM; x++) {
-        grad_x = 0.0;
-        for (j = gs_max(y - 1, 0); j <= gs_min(y + 1, YDIM - 1); j++)
-          for (k = gs_max(z - 1, 0); k <= gs_min(z + 1, ZDIM - 1); k++) {
+  float maxgrad = 0, mingrad = 999999.0;
+  std::mutex join;
+  const auto gradients = [&](std::size_t b, std::size_t e) {
+    float lo = 999999.0, hi = 0;
+    const std::size_t xy = std::size_t(XDIM) * YDIM;
+    for (std::size_t v = b; v < e; v++) {
+      const int x = int(v % XDIM), y = int((v / XDIM) % YDIM), z = int(v / xy);
+      int i, j, k;
+      float grad_x, grad_y, grad_z;
+      grad_x = 0.0;
+      for (j = gs_max(y - 1, 0); j <= gs_min(y + 1, YDIM - 1); j++)
+        for (k = gs_max(z - 1, 0); k <= gs_min(z + 1, ZDIM - 1); k++) {
+          grad_x += dataset[IndexVect(gs_min(x + 1, XDIM - 1), j, k)] -
+                    dataset[IndexVect(gs_max(x - 1, 0), j, k)];
+          if (j == y || k == z)
             grad_x += dataset[IndexVect(gs_min(x + 1, XDIM - 1), j, k)] -
                       dataset[IndexVect(gs_max(x - 1, 0), j, k)];
-            if (j == y || k == z)
-              grad_x += dataset[IndexVect(gs_min(x + 1, XDIM - 1), j, k)] -
-                        dataset[IndexVect(gs_max(x - 1, 0), j, k)];
-            if (j == y && k == z)
-              grad_x += 2.0f * (dataset[IndexVect(gs_min(x + 1, XDIM - 1), j, k)] -
-                                dataset[IndexVect(gs_max(x - 1, 0), j, k)]);
-          }
+          if (j == y && k == z)
+            grad_x += 2.0f * (dataset[IndexVect(gs_min(x + 1, XDIM - 1), j, k)] -
+                              dataset[IndexVect(gs_max(x - 1, 0), j, k)]);
+        }
 
-        grad_y = 0.0;
-        for (i = gs_max(x - 1, 0); i <= gs_min(x + 1, XDIM - 1); i++)
-          for (k = gs_max(z - 1, 0); k <= gs_min(z + 1, ZDIM - 1); k++) {
+      grad_y = 0.0;
+      for (i = gs_max(x - 1, 0); i <= gs_min(x + 1, XDIM - 1); i++)
+        for (k = gs_max(z - 1, 0); k <= gs_min(z + 1, ZDIM - 1); k++) {
+          grad_y += dataset[IndexVect(i, gs_min(y + 1, YDIM - 1), k)] -
+                    dataset[IndexVect(i, gs_max(y - 1, 0), k)];
+          if (i == x || k == z)
             grad_y += dataset[IndexVect(i, gs_min(y + 1, YDIM - 1), k)] -
                       dataset[IndexVect(i, gs_max(y - 1, 0), k)];
-            if (i == x || k == z)
-              grad_y += dataset[IndexVect(i, gs_min(y + 1, YDIM - 1), k)] -
-                        dataset[IndexVect(i, gs_max(y - 1, 0), k)];
-            if (i == x && k == z)
-              grad_y += 2.0f * (dataset[IndexVect(i, gs_min(y + 1, YDIM - 1), k)] -
-                                dataset[IndexVect(i, gs_max(y - 1, 0), k)]);
-          }
+          if (i == x && k == z)
+            grad_y += 2.0f * (dataset[IndexVect(i, gs_min(y + 1, YDIM - 1), k)] -
+                              dataset[IndexVect(i, gs_max(y - 1, 0), k)]);
+        }
 
-        grad_z = 0.0;
-        for (i = gs_max(x - 1, 0); i <= gs_min(x + 1, XDIM - 1); i++)
-          for (j = gs_max(y - 1, 0); j <= gs_min(y + 1, YDIM - 1); j++) {
+      grad_z = 0.0;
+      for (i = gs_max(x - 1, 0); i <= gs_min(x + 1, XDIM - 1); i++)
+        for (j = gs_max(y - 1, 0); j <= gs_min(y + 1, YDIM - 1); j++) {
+          grad_z += dataset[IndexVect(i, j, gs_min(z + 1, ZDIM - 1))] -
+                    dataset[IndexVect(i, j, gs_max(z - 1, 0))];
+          if (i == x || j == y)
             grad_z += dataset[IndexVect(i, j, gs_min(z + 1, ZDIM - 1))] -
                       dataset[IndexVect(i, j, gs_max(z - 1, 0))];
-            if (i == x || j == y)
-              grad_z += dataset[IndexVect(i, j, gs_min(z + 1, ZDIM - 1))] -
-                        dataset[IndexVect(i, j, gs_max(z - 1, 0))];
-            if (i == x && j == y)
-              grad_z += 2.0f * (dataset[IndexVect(i, j, gs_min(z + 1, ZDIM - 1))] -
-                                dataset[IndexVect(i, j, gs_max(z - 1, 0))]);
-          }
+          if (i == x && j == y)
+            grad_z += 2.0f * (dataset[IndexVect(i, j, gs_min(z + 1, ZDIM - 1))] -
+                              dataset[IndexVect(i, j, gs_max(z - 1, 0))]);
+        }
 
-        gradient = (float)std::sqrt(grad_x * grad_x + grad_y * grad_y + grad_z * grad_z);
-        edge_mag[IndexVect(x, y, z)] = gradient;
-
-        if (gradient < mingrad)
-          mingrad = gradient;
-        if (gradient > maxgrad)
-          maxgrad = gradient;
-        GS_UNIT();
-      }
+      const float gradient = (float)std::sqrt(grad_x * grad_x + grad_y * grad_y + grad_z * grad_z);
+      edge_mag[v] = gradient;
+      if (gradient < lo)
+        lo = gradient;
+      if (gradient > hi)
+        hi = gradient;
+    }
+    const std::lock_guard<std::mutex> hold(join);
+    if (lo < mingrad)
+      mingrad = lo;
+    if (hi > maxgrad)
+      maxgrad = hi;
+  };
+  GS_FOR_VOXELS_OF(*this, voxel_count(), gradients);
 
   if (mingrad < maxgrad) {
-    for (z = 0; z < ZDIM; z++)
-      for (y = 0; y < YDIM; y++)
-        for (x = 0; x < XDIM; x++) {
-
-          edge_mag[IndexVect(x, y, z)] =
-              255.0f * (edge_mag[IndexVect(x, y, z)] - mingrad) / (maxgrad - mingrad);
-          GS_UNIT();
-        }
+    const auto rescale = [&](std::size_t b, std::size_t e) {
+      for (std::size_t v = b; v < e; v++)
+        edge_mag[v] = 255.0f * (edge_mag[v] - mingrad) / (maxgrad - mingrad);
+    };
+    GS_FOR_VOXELS_OF(*this, voxel_count(), rescale);
   }
 }
 
+// The automatic seeds: the local maxima above t_high of the volume smoothed twice (each pass
+// reads one buffer and writes the other, so a voxel's value never depends on its neighbours'
+// order).
 task genseg_context::GetSeeds(unsigned char *result) {
-  int i, j, k;
-  int m, n, l, u;
-  float tmp;
-  buffer<float> smth_img, temp;
-
+  const std::size_t n = voxel_count();
   if (!automatic_seeds) {
-    for (std::size_t v = 0; v < voxel_count(); v++) {
-      result[v] = 255;
-      GS_UNIT();
-    }
+    const auto none = [&](std::size_t b, std::size_t e) {
+      for (std::size_t v = b; v < e; v++)
+        result[v] = 255;
+    };
+    GS_FOR_VOXELS_OF(*this, n, none);
     co_return;
   }
 
-  smth_img.allocate(voxel_count());
-  temp.allocate(voxel_count());
-  for (k = 0; k < ZDIM; k++)
-    for (j = 0; j < YDIM; j++)
-      for (i = 0; i < XDIM; i++) {
-        smth_img[IndexVect(i, j, k)] = dataset[IndexVect(i, j, k)];
-        GS_UNIT();
-      }
+  buffer<float> smth_img, temp;
+  smth_img.allocate(n);
+  temp.allocate(n);
+  const std::size_t xy = std::size_t(XDIM) * YDIM;
+  const auto copy_in = [&](std::size_t b, std::size_t e) {
+    for (std::size_t v = b; v < e; v++)
+      smth_img[v] = dataset[v];
+  };
+  GS_FOR_VOXELS_OF(*this, n, copy_in);
 
-  for (u = 0; u < 2; u++) {
-    for (k = 0; k < ZDIM; k++)
-      for (j = 0; j < YDIM; j++)
-        for (i = 0; i < XDIM; i++) {
-          temp[IndexVect(i, j, k)] = 0.4f * smth_img[IndexVect(i, j, k)] +
-                                     0.1f * (smth_img[IndexVect(gs_max(0, i - 1), j, k)] +
-                                             smth_img[IndexVect(gs_min(XDIM - 1, i + 1), j, k)] +
-                                             smth_img[IndexVect(i, gs_max(0, j - 1), k)] +
-                                             smth_img[IndexVect(i, gs_min(YDIM - 1, j + 1), k)] +
-                                             smth_img[IndexVect(i, j, gs_max(0, k - 1))] +
-                                             smth_img[IndexVect(i, j, gs_min(ZDIM - 1, k + 1))]);
-          GS_UNIT();
-        }
-    for (k = 0; k < ZDIM; k++)
-      for (j = 0; j < YDIM; j++)
-        for (i = 0; i < XDIM; i++) {
-          smth_img[IndexVect(i, j, k)] = temp[IndexVect(i, j, k)];
-          GS_UNIT();
-        }
+  const auto smooth = [&](std::size_t b, std::size_t e) {
+    for (std::size_t v = b; v < e; v++) {
+      const int i = int(v % XDIM), j = int((v / XDIM) % YDIM), k = int(v / xy);
+      temp[v] = 0.4f * smth_img[IndexVect(i, j, k)] +
+                0.1f * (smth_img[IndexVect(gs_max(0, i - 1), j, k)] +
+                        smth_img[IndexVect(gs_min(XDIM - 1, i + 1), j, k)] +
+                        smth_img[IndexVect(i, gs_max(0, j - 1), k)] +
+                        smth_img[IndexVect(i, gs_min(YDIM - 1, j + 1), k)] +
+                        smth_img[IndexVect(i, j, gs_max(0, k - 1))] +
+                        smth_img[IndexVect(i, j, gs_min(ZDIM - 1, k + 1))]);
+    }
+  };
+  const auto copy_back = [&](std::size_t b, std::size_t e) {
+    for (std::size_t v = b; v < e; v++)
+      smth_img[v] = temp[v];
+  };
+  for (int u = 0; u < 2; u++) {
+    GS_FOR_VOXELS_OF(*this, n, smooth);
+    GS_FOR_VOXELS_OF(*this, n, copy_back);
   }
 
-  for (k = 0; k < ZDIM; k++)
-    for (j = 0; j < YDIM; j++)
-      for (i = 0; i < XDIM; i++) {
-
-        result[IndexVect(i, j, k)] = 255;
-        tmp = smth_img[IndexVect(i, j, k)];
-        if (tmp > t_high) {
-          u = 0;
-          for (l = gs_max(k - 1, 0); l <= gs_min(k + 1, ZDIM - 1); l++)
-            for (n = gs_max(j - 1, 0); n <= gs_min(j + 1, YDIM - 1); n++)
-              for (m = gs_max(i - 1, 0); m <= gs_min(i + 1, XDIM - 1); m++) {
-                if (tmp < smth_img[IndexVect(m, n, l)])
-                  u = 1;
-              }
-
-          if (u == 0)
-            result[IndexVect(i, j, k)] = 254;
-        }
-        GS_UNIT();
+  const auto maxima = [&](std::size_t b, std::size_t e) {
+    for (std::size_t v = b; v < e; v++) {
+      const int i = int(v % XDIM), j = int((v / XDIM) % YDIM), k = int(v / xy);
+      result[v] = 255;
+      const float tmp = smth_img[v];
+      if (tmp > t_high) {
+        int u = 0;
+        for (int l = gs_max(k - 1, 0); l <= gs_min(k + 1, ZDIM - 1); l++)
+          for (int nn = gs_max(j - 1, 0); nn <= gs_min(j + 1, YDIM - 1); nn++)
+            for (int m = gs_max(i - 1, 0); m <= gs_min(i + 1, XDIM - 1); m++) {
+              if (tmp < smth_img[IndexVect(m, nn, l)])
+                u = 1;
+            }
+        if (u == 0)
+          result[v] = 254;
       }
+    }
+  };
+  GS_FOR_VOXELS_OF(*this, n, maxima);
 }
 
 } // namespace cvc::genseg

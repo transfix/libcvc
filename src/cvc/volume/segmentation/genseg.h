@@ -37,11 +37,25 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <utility>
 #include <vector>
 
+namespace cvc {
+class thread_pool;
+}
+
 namespace cvc::genseg {
+
+// The per-voxel passes' pieces: body(begin, end) runs on [begin, end) split into pieces of
+// for_voxels_piece voxels spread over `pool` when there are at least two of them (else on the
+// calling thread, as with no pool). A pass hands it only work whose result for each voxel does
+// not depend on the order the pieces run in, so the labels are the same however many threads
+// run them.
+constexpr std::size_t for_voxels_piece = 8192;
+void for_voxels(thread_pool *pool, std::size_t begin, std::size_t end,
+                const std::function<void(std::size_t, std::size_t)> &body);
 
 // A routine that runs a unit at a time: each co_yield hands control back to whoever resumed it.
 // Destroying the task destroys its frame (a cancel frees everything at once). What the routine
@@ -187,6 +201,8 @@ public:
   int seeds_left = 0;
   std::size_t marched = 0;
   float minraw = 0.0f, maxraw = 0.0f; // read_data's
+  // The pool the per-voxel passes spread over (the app's compute pool), or none.
+  thread_pool *pool = nullptr;
 
   task run();
 
@@ -268,6 +284,20 @@ private:
     if (--(ctx).units_left == 0)                                                                   \
       co_yield 0;                                                                                  \
   } while (0)
+// A per-voxel pass over the voxels [0, n) in a coroutine of the context `ctx`, a unit a voxel:
+// body(begin, end) runs on slices of at most what the step has left (so a step of budget b still
+// does b units), each slice spread over ctx.pool by for_voxels; yields once the step is used up.
+#define GS_FOR_VOXELS_OF(ctx, n, body)                                                             \
+  for (std::size_t gs_done_ = 0, gs_n_ = (n); gs_done_ < gs_n_;) {                                 \
+    const std::size_t gs_take_ =                                                                   \
+        gs_n_ - gs_done_ < (ctx).units_left ? gs_n_ - gs_done_ : (ctx).units_left;                 \
+    ::cvc::genseg::for_voxels((ctx).pool, gs_done_, gs_done_ + gs_take_, (body));                  \
+    gs_done_ += gs_take_;                                                                          \
+    (ctx).units += gs_take_;                                                                       \
+    (ctx).units_left -= gs_take_;                                                                  \
+    if ((ctx).units_left == 0)                                                                     \
+      co_yield 0;                                                                                  \
+  }
 // Run a coroutine (a task) to its end, yielding whenever it yields.
 #define GS_RUN(call)                                                                               \
   do {                                                                                             \
