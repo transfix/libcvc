@@ -54,6 +54,7 @@
 #include <vtkUniforms.h>
 #include <vtkUnsignedCharArray.h>
 #include <vtkVertex.h>
+#include <vtkWeakPointer.h>
 #include <vtk_glad.h>
 
 namespace cvc {
@@ -83,6 +84,24 @@ public:
   vtkTypeBool HasTranslucentPolygonalGeometry() override {
     return WithVolumes ? 0 : vtkOpenGLActor::HasTranslucentPolygonalGeometry();
   }
+  // Every draw of the actor, in every layer and pass (the shadow bake, picking, the volumes'
+  // layer below): the mapper's draw, then the shader-input textures bound for it let go of their
+  // units (see bindShaderTextures).
+  void Render(vtkRenderer *ren, vtkMapper *mapper) override {
+    vtkOpenGLActor::Render(ren, mapper);
+    ReleaseBound();
+  }
+
+  // The shader-input textures GeometryNode::bindShaderTextures activated for the draw under way
+  // (UpdateShaderEvent fires inside it). Weak: a texture freed meanwhile has freed its unit.
+  std::vector<vtkWeakPointer<vtkTextureObject>> Bound;
+  void ReleaseBound() {
+    for (auto &t : Bound)
+      if (t)
+        t->Deactivate();
+    Bound.clear();
+  }
+
   int RenderVolumetricGeometry(vtkViewport *vp) override {
     if (!WithVolumes || !this->Mapper)
       return 0;
@@ -1520,7 +1539,7 @@ void GeometryNode::onUpdateShader(vtkObject *, unsigned long, void *clientData, 
       textures.emplace_back(kv.first, kv.second.GetPointer());
   }
   if (!textures.empty())
-    bindShaderTextures(program, textures);
+    self->bindShaderTextures(program, textures);
 }
 
 void GeometryNode::bindShaderTextures(
@@ -1556,10 +1575,20 @@ void GeometryNode::bindShaderTextures(
         break;
       reserved[nReserved++] = u;
     }
+  // Each texture this activates holds its unit until the draw it is bound for is done: the
+  // node's actor lets it go (GeometryActor::Render). Kept, every texture any node had ever drawn
+  // held a unit, and a scene with enough of them ran out: WebGL2 gives VTK 32 units for
+  // everything, the low-memory mapper takes some for each draw, and every draw after that failed
+  // and logged (terrain_lab with its water, in the browser). One already active (someone else's)
+  // is left as it was.
+  auto *actor = GeometryActor::SafeDownCast(m_actor);
   for (auto &kv : textures) {
     if (kv.second && kv.second->GetContext() && program->IsUniformUsed(kv.first.c_str())) {
+      const bool wasActive = kv.second->GetTextureUnit() >= 0;
       kv.second->Activate();
       program->SetUniformi(kv.first.c_str(), kv.second->GetTextureUnit());
+      if (!wasActive && actor)
+        actor->Bound.emplace_back(kv.second);
     }
   }
   if (tum)

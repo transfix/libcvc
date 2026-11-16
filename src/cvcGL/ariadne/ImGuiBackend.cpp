@@ -204,6 +204,248 @@ void ImGuiBackend::end_main_menu_bar() { ui::EndMainMenuBar(); }
 bool ImGuiBackend::begin_menu(const char *label) { return ui::BeginMenu(label); }
 void ImGuiBackend::end_menu() { ui::EndMenu(); }
 
+#ifdef CVC_ENABLE_IMGUI
+namespace {
+// The tray's badge: the font at this fraction of the bar's.
+constexpr float kBadgeScale = 0.68f;
+
+ImVec2 badge_size(const std::string &badge) {
+  const float fs = ImGui::GetFontSize() * kBadgeScale;
+  const ImVec2 t = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, badge.c_str());
+  const float h = fs + 2.0f;
+  return ImVec2(std::max(h, t.x + fs * 0.6f), h); // a pill, round with one digit
+}
+
+// A tray glyph is drawn larger than the bar's text: the symbol fonts it falls back on draw theirs
+// small beside the letters of a UI font. Text (the clock's time) is drawn as the bar's text is.
+constexpr float kGlyphScale = 1.3f;
+struct GlyphFont {
+  explicit GlyphFont(const ariadne::Backend::TrayIcon &t) : on(!t.text) {
+    if (on)
+      ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * kGlyphScale);
+  }
+  ~GlyphFont() {
+    if (on)
+      ImGui::PopFont();
+  }
+  GlyphFont(const GlyphFont &) = delete;
+  GlyphFont &operator=(const GlyphFont &) = delete;
+  bool on;
+};
+
+// Put the bar's cursor at (x, y) for tray icon `t`, y being the bar's line; a larger glyph is
+// raised by half of what it adds, so it sits centred on the bar's text line.
+void place_icon(float x, float y, const ariadne::Backend::TrayIcon &t) {
+  const float raise = t.text ? 0.0f : ImGui::GetFontSize() * (kGlyphScale - 1.0f) * 0.5f;
+  ImGui::SetCursorScreenPos(ImVec2(x, y - raise));
+}
+
+// What the icon's item is labelled: its glyph, or, for a picture ImGui draws itself (the bell: its
+// fonts have none), blanks as wide as the picture, with an id.
+std::string icon_label(const ariadne::Backend::TrayIcon &t) {
+  if (t.icon == "bell")
+    return "   ##tray.bell";
+  return t.glyph;
+}
+
+float glyph_width(const ariadne::Backend::TrayIcon &t) {
+  const GlyphFont font(t);
+  return ImGui::CalcTextSize(icon_label(t).c_str(), nullptr, true).x;
+}
+
+// §5.24 a bell over the icon that starts at x in the bar `win`, in the text's colour: a dome on a
+// rim, a knob on top and the clapper under it.
+void draw_bell(ImGuiWindow *win, float x, const ariadne::Backend::TrayIcon &t) {
+  if (t.icon != "bell")
+    return;
+  const ImGuiStyle &st = ImGui::GetStyle();
+  const ImRect bar = win->MenuBarRect();
+  const float s = ImGui::GetFontSize() * 1.05f;
+  const float cx = x + st.ItemSpacing.x * 0.5f + glyph_width(t) * 0.5f;
+  const float cy = (bar.Min.y + bar.Max.y) * 0.5f - s * 0.04f;
+  const ImU32 col = ImGui::GetColorU32(ImGuiCol_Text);
+  ImDrawList *dl = win->DrawList;
+  dl->PathLineTo(ImVec2(cx - s * 0.40f, cy + s * 0.24f));
+  dl->PathLineTo(ImVec2(cx - s * 0.30f, cy - s * 0.04f));
+  dl->PathArcTo(ImVec2(cx, cy - s * 0.04f), s * 0.30f, IM_PI, 2.0f * IM_PI, 12);
+  dl->PathLineTo(ImVec2(cx + s * 0.40f, cy + s * 0.24f));
+  dl->PathFillConcave(col);
+  dl->AddRectFilled(ImVec2(cx - s * 0.46f, cy + s * 0.22f), ImVec2(cx + s * 0.46f, cy + s * 0.30f),
+                    col, s * 0.04f);
+  dl->AddCircleFilled(ImVec2(cx, cy - s * 0.37f), s * 0.06f, col);
+  dl->AddCircleFilled(ImVec2(cx, cy + s * 0.37f), s * 0.08f, col);
+}
+
+// What a tray icon takes in the bar: its glyph laid out as a menubar item lays out its label
+// (half the item spacing before it, twice after), and its badge, which overhangs the glyph's top
+// right corner.
+float tray_icon_width(const ariadne::Backend::TrayIcon &t) {
+  const ImGuiStyle &st = ImGui::GetStyle();
+  float w = glyph_width(t) + st.ItemSpacing.x * 2.0f;
+  if (!t.badge.empty())
+    w += badge_size(t.badge).x - ImGui::GetFontSize() * 0.15f;
+  return w;
+}
+
+// The badge over the icon that starts at x in the bar `win`: just past the glyph, at the top.
+void draw_badge(ImGuiWindow *win, float x, const ariadne::Backend::TrayIcon &t) {
+  if (t.badge.empty())
+    return;
+  const ImGuiStyle &st = ImGui::GetStyle();
+  const float fs = ImGui::GetFontSize() * kBadgeScale;
+  const ImVec2 sz = badge_size(t.badge);
+  const float glyph_end = x + st.ItemSpacing.x * 0.5f + glyph_width(t);
+  const ImRect bar = win->MenuBarRect();
+  const ImVec2 p0(glyph_end - ImGui::GetFontSize() * 0.15f, bar.Min.y + 1.0f);
+  const ImVec2 p1(p0.x + sz.x, p0.y + sz.y);
+  const ImU32 kTone[] = {IM_COL32(64, 140, 240, 255), IM_COL32(235, 160, 40, 255),
+                         IM_COL32(225, 64, 64, 255)};
+  const ImU32 bg = kTone[t.tone < 0 ? 0 : (t.tone > 2 ? 2 : t.tone)];
+  win->DrawList->AddRectFilled(p0, p1, bg, sz.y * 0.5f);
+  const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, t.badge.c_str());
+  win->DrawList->AddText(ImGui::GetFont(), fs,
+                         ImVec2(p0.x + (sz.x - ts.x) * 0.5f, p0.y + (sz.y - ts.y) * 0.5f),
+                         IM_COL32(255, 255, 255, 255), t.badge.c_str());
+}
+} // namespace
+#endif
+
+// The tray, right-aligned in the menubar: as many of the last icons as fit between the menus and
+// the bar's right edge, with room for the overflow icon when not all do. The menus never yield:
+// with no room even for the overflow icon, the tray is not drawn.
+int ImGuiBackend::begin_tray(const std::vector<TrayIcon> &icons) {
+#ifdef CVC_ENABLE_IMGUI
+  ImGuiWindow *win = ImGui::GetCurrentWindow();
+  if (!win || !(win->Flags & ImGuiWindowFlags_MenuBar))
+    return -1;
+  const ImGuiStyle &st = ImGui::GetStyle();
+  const float left = win->DC.CursorPos.x + st.ItemSpacing.x * 2.0f; // a gap after the menus
+  float right = win->MenuBarRect().Max.x - st.ItemSpacing.x * 0.5f;
+  if (m_trayFrame == ImGui::GetFrameCount()) // a second bar's tray: left of the first one's
+    right = std::min(right, m_trayLeft - st.ItemSpacing.x);
+  const int n = static_cast<int>(icons.size());
+  float total = 0.0f;
+  int fit = 0;
+  while (fit < n) {
+    const float w = tray_icon_width(icons[n - 1 - fit]);
+    if (left + total + w > right)
+      break;
+    total += w;
+    ++fit;
+  }
+  m_trayShown = true;
+  if (fit < n) { // the rest go in the overflow icon, which needs its own room
+    TrayIcon more;
+    more.glyph = "\xC2\xBB"; // a right guillemet
+    // Its own room, and its badge's.
+    const float mw = tray_icon_width(more) + ImGui::GetFontSize();
+    while (fit > 0 && left + total + mw > right)
+      total -= tray_icon_width(icons[n - fit--]);
+    if (left + total + mw > right)
+      m_trayShown = false;
+    total += mw;
+  }
+  m_trayX = right - total;
+  m_trayY = ImGui::GetCursorScreenPos().y;
+  m_menusEndX = win->DC.CursorPos.x;
+  m_menusEndY = win->DC.CursorPos.y;
+  m_trayOpen = true;
+  if (m_trayShown) {
+    m_trayFrame = ImGui::GetFrameCount();
+    m_trayLeft = m_trayX;
+  }
+  return m_trayShown ? fit : 0;
+#else
+  (void)icons;
+  return -1;
+#endif
+}
+
+bool ImGuiBackend::tray_button(const TrayIcon &icon) {
+#ifdef CVC_ENABLE_IMGUI
+  if (!m_trayShown)
+    return false;
+  ImGuiWindow *win = ImGui::GetCurrentWindow();
+  const float x = m_trayX;
+  place_icon(x, m_trayY, icon);
+  m_trayX += tray_icon_width(icon);
+  bool clicked = false;
+  {
+    const GlyphFont font(icon);
+    clicked = ImGui::MenuItem(icon_label(icon).c_str());
+  }
+  draw_bell(win, x, icon);
+  draw_badge(win, x, icon);
+  return clicked;
+#else
+  (void)icon;
+  return false;
+#endif
+}
+
+bool ImGuiBackend::begin_tray_menu(const TrayIcon &icon) {
+#ifdef CVC_ENABLE_IMGUI
+  if (!m_trayShown)
+    return false;
+  ImGuiWindow *win = ImGui::GetCurrentWindow();
+  const float x = m_trayX;
+  place_icon(x, m_trayY, icon);
+  m_trayX += tray_icon_width(icon);
+  bool open = false;
+  {
+    const GlyphFont font(
+        icon); // popped inside the menu, if it opened: its items are in the bar's font
+    open = ImGui::BeginMenu(icon_label(icon).c_str());
+  }
+  draw_bell(win, x, icon); // on the bar, though an open menu is now the current window
+  draw_badge(win, x, icon);
+  return open;
+#else
+  (void)icon;
+  return false;
+#endif
+}
+
+void ImGuiBackend::end_tray_menu() { ui::EndMenu(); }
+void ImGuiBackend::end_tray() {
+  m_trayShown = false;
+#ifdef CVC_ENABLE_IMGUI
+  if (m_trayOpen) // back to where the menus ended
+    if (ImGuiWindow *win = ImGui::GetCurrentWindow();
+        win && (win->Flags & ImGuiWindowFlags_MenuBar))
+      win->DC.CursorPos = ImVec2(m_menusEndX, m_menusEndY);
+#endif
+  m_trayOpen = false;
+}
+
+// §5.23 the menus as BeginMenu lays a bar's titles out (half the item spacing before the label,
+// twice after it, then back half), from where the bar's first menu goes; then the gap and the tray
+// as begin_tray lays them out, against the bar's right edge.
+bool ImGuiBackend::menus_fit(const std::vector<std::string> &titles,
+                             const std::vector<TrayIcon> &tray) {
+#ifdef CVC_ENABLE_IMGUI
+  ImGuiWindow *win = ImGui::GetCurrentWindow();
+  if (!win || !(win->Flags & ImGuiWindowFlags_MenuBar))
+    return true;
+  const ImGuiStyle &st = ImGui::GetStyle();
+  float x = win->DC.CursorPos.x;
+  for (const std::string &t : titles)
+    x += ImGui::CalcTextSize(t.c_str(), nullptr, true).x + st.ItemSpacing.x * 2.0f;
+  if (!tray.empty())
+    x += st.ItemSpacing.x * 2.0f;
+  for (const TrayIcon &t : tray)
+    x += tray_icon_width(t);
+  float right = win->MenuBarRect().Max.x - st.ItemSpacing.x * 0.5f;
+  if (m_trayFrame == ImGui::GetFrameCount()) // an earlier bar's tray is there
+    right = std::min(right, m_trayLeft - st.ItemSpacing.x);
+  return x <= right;
+#else
+  (void)titles;
+  (void)tray;
+  return true;
+#endif
+}
+
 bool ImGuiBackend::next_window_maximize(bool *maximized) {
   m_maximize = maximized;
   return true;
@@ -2134,9 +2376,32 @@ bool ImGuiBackend::pick_files(const cvc::ariadne::FilePickRequest &req,
   if (!d->filter_pattern.empty())
     d->filter = SDL_DialogFileFilter{d->filter_name.c_str(), d->filter_pattern.c_str()};
   d->dir = req.dir;
+  // A folder to start in, so it ends in a separator: SDL takes a location without one for a file
+  // (Windows opened the folder's parent, with the folder's name typed in as the file's).
+#ifdef _WIN32
+  if (!d->dir.empty() && d->dir.back() != '\\' && d->dir.back() != '/')
+    d->dir += '\\';
+#else
+  if (!d->dir.empty() && d->dir.back() != '/')
+    d->dir += '/';
+#endif
   m_fileDialog = d;
   auto *keep = new std::shared_ptr<FileDialog>(d);
-  SDL_ShowOpenFileDialog(
+  // With properties, as SDL_ShowOpenFileDialog itself does, for the title it has no argument for.
+  // SDL copies the strings; the filter lives in `d` until the answer.
+  const SDL_PropertiesID props = SDL_CreateProperties();
+  if (!d->filter_pattern.empty()) {
+    SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_FILTERS_POINTER, &d->filter);
+    SDL_SetNumberProperty(props, SDL_PROP_FILE_DIALOG_NFILTERS_NUMBER, 1);
+  }
+  SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_WINDOW_POINTER, SDL_GetKeyboardFocus());
+  if (!d->dir.empty())
+    SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_LOCATION_STRING, d->dir.c_str());
+  SDL_SetBooleanProperty(props, SDL_PROP_FILE_DIALOG_MANY_BOOLEAN, req.multiple);
+  if (!req.title.empty()) // else the system's own, in the user's language
+    SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_TITLE_STRING, req.title.c_str());
+  SDL_ShowFileDialogWithProperties(
+      SDL_FILEDIALOG_OPENFILE,
       [](void *userdata, const char *const *filelist, int) {
         std::unique_ptr<std::shared_ptr<FileDialog>> held(
             static_cast<std::shared_ptr<FileDialog> *>(userdata));
@@ -2151,8 +2416,8 @@ bool ImGuiBackend::pick_files(const cvc::ariadne::FilePickRequest &req,
         }
         st.answered = true;
       },
-      keep, SDL_GetKeyboardFocus(), d->filter_pattern.empty() ? nullptr : &d->filter,
-      d->filter_pattern.empty() ? 0 : 1, d->dir.empty() ? nullptr : d->dir.c_str(), req.multiple);
+      keep, props);
+  SDL_DestroyProperties(props);
   return true;
 #else
   (void)req;

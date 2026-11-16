@@ -38,6 +38,11 @@
 #   C.draft              the message being written (the message_input's bind)
 #   C.read.<slot>        the channel's head when it was last shown (slot: the peer, or _room)
 #   C.unread.<slot>      head - read: what came since (a users list shows it, room_users.ari)
+#   C.dm_peer            who sent the latest direct message that went to the notification feed
+#
+# A direct message that comes while its conversation is not shown goes into this host's
+# notification feed (docs/ARIADNE.md §5.24), the tray's bell; a click on it opens the conversation.
+# The room's own chat does not post there: that would be every line.
 
 functions: |
   (defun chat-ui-key (c k) (str-concat c "." k))
@@ -59,6 +64,21 @@ functions: |
     (set r (chat-post room text (chat-ui-get c "channel")))
     (state-set (chat-ui-key c "send_error") (if (get-attr r "ok") "" (get-attr r "error"))))
   (defun chat-ui-more (c room) (chat-more room (chat-ui-get c "channel")))
+  ; §5.24 a direct message from PEER while its conversation is not shown (u went up): into this
+  ; host's feed. Not on the first count after joining, which counts the history. The peer's name
+  ; only goes in the text: what a click runs reads the peer from the state, never from the name.
+  (defun chat-ui-notify (c peer name u)
+    (set before (chat-ui-get c (str-concat "unread." peer)))
+    (if (and (not (= before "")) (> u (int before)))
+      (begin
+        (state-set (chat-ui-key c "dm_peer") peer)
+        (state-set "chat_ui.dm_instance" c)
+        (notify (str-concat name (if (> u 1) (str-concat " sent you " (str u) " messages") " sent you a message"))
+                "info" "(chat-ui-open-dm)"))
+      #f))
+  (defun chat-ui-open-dm ()
+    (set c (state-get "chat_ui.dm_instance"))
+    (if (is-null c) #f (chat-ui-open c (chat-ui-get c "dm_peer") "")))
   (defun chat-ui-picker (c room)
     ; A pick of the user's: a label other than the one written last. Its channel is at the same
     ; place in the ids.
@@ -91,6 +111,7 @@ functions: |
           (begin
             (set peer (get-attr v "peer"))
             (set u (chat-ui-count c peer (get-attr v "head")))
+            (chat-ui-notify c peer (get-attr v "name") u)
             (chat-ui-put c (str-concat "unread." peer) (str u))
             (append labels (chat-ui-label (if (get-attr v "present") (get-attr v "name") (str-concat (get-attr v "name") " (left)")) u))
             (append ids peer)

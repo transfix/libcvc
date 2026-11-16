@@ -24,6 +24,7 @@
 #include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/core/job_keys.h>
+#include <cvc/core/notify.h>
 #include <cvc/core/result_job.h>
 #include <cvc/core/sliced_task.h>
 #include <cvc/state/state.h>
@@ -488,6 +489,7 @@ TEST_P(JobKeys, AStopPublishesCancelledAndNoResult) {
   EXPECT_EQ(key("stoppable"), "0");
   EXPECT_FALSE(cvc::stop_sliced_job(app, pid)) << "gone";
   EXPECT_FALSE(cvc::stop_sliced_job(app, 987654)) << "never was";
+  EXPECT_EQ(cvc::notify_status(app).count, 0u) << "a stop the user asked for is not news";
 }
 
 TEST_P(JobKeys, AFailurePublishesItsMessage) {
@@ -505,6 +507,12 @@ TEST_P(JobKeys, AFailurePublishesItsMessage) {
   EXPECT_FALSE(took) << "a failed job has no result to take";
   EXPECT_EQ(key("status"), "failed: boom at 50000");
   EXPECT_EQ(key("busy"), "0");
+  // The failure goes to the app's notification feed, named by its keys (docs/ARIADNE.md §5.24).
+  const std::vector<cvc::notification_entry> feed = cvc::notifications(app);
+  ASSERT_EQ(feed.size(), 1u);
+  EXPECT_EQ(feed[0].text, "job: failed: boom at 50000");
+  EXPECT_EQ(feed[0].level, 2);
+  EXPECT_EQ(feed[0].path, "doc.job");
 }
 
 INSTANTIATE_TEST_SUITE_P(Modes, JobKeys,

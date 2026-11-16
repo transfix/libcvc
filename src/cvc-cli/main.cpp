@@ -35,6 +35,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cvc/ariadne/host_signals.h>
 #include <cvc/core/app.h>
 #include <cvc/core/input_trace.h>
 #include <cvc/core/param_cli.h>
@@ -46,6 +47,7 @@
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/sim_world_trace.h>
 #include <cvc/ph/compose.h>
+#include <cvc/ph/microgrid.h>
 #include <cvc/ph/se2_train.h>
 #include <cvc/physics/mujoco_robot.h>
 #include <cvc/physics/plant_log_scene.h>
@@ -1341,10 +1343,6 @@ static int cmd_bunny(cvc::app &app, int argc, char **argv) {
 // State server (distributed_state_session)
 // ---------------------------------------------------------------------------
 
-static std::atomic<bool> g_serve_running{true};
-
-static void serve_signal_handler(int) { g_serve_running.store(false); }
-
 static int cmd_serve(cvc::app &app, int argc, char **argv) {
   po::options_description desc(
       "cvc serve - run a headless CVC state server\n\n"
@@ -1475,9 +1473,10 @@ static int cmd_serve(cvc::app &app, int argc, char **argv) {
   // the handlers installed afterwards there is a window -- join() returning,
   // through delegation parsing and exec-coordinator startup, to the old
   // install site below -- in which SIGINT still had its default disposition
-  // and killed the process outright, discarding the buffered log with it.
-  std::signal(SIGINT, serve_signal_handler);
-  std::signal(SIGTERM, serve_signal_handler);
+  // and killed the process outright, discarding the buffered log with it. They set this app's
+  // stop flag (host_signals.h), which the loop below polls; the route goes before the app.
+  cvc::ariadne::signal_route stopRoute(app, cvc::ariadne::signal_route::mode::stop);
+  const cvc::ariadne::host_signals &signals = cvc::ariadne::signals_of(app);
 
   auto session = cvc::distributed_state_session::join(app, cfg);
   // Flush the readiness banner: stdout is fully buffered when it is a file or
@@ -1528,7 +1527,7 @@ static int cmd_serve(cvc::app &app, int argc, char **argv) {
 
   // Block until SIGINT/SIGTERM (handlers were installed before join() above).
   std::cout << "Press Ctrl+C to stop." << std::endl;
-  while (g_serve_running.load()) {
+  while (!signals.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     // If exec enabled, step the scheduler: for a runnable process, or for a command posted to it
     // (the coordinator's bus threads post_control), which only a step applies.
@@ -2404,18 +2403,23 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
       "  simulate <system>   roll it out from --x0 under --u held (or one row per step) and\n"
       "                      print the energy books; --csv writes every state\n"
       "  check <system>      the power balance at random states: exit 1 when\n"
-      "                      the pairing does work or dH/dt departs from -loss + supplied\n\n"
-      "  cvc ph simulate grid.json --x0 2.2,0,2.2,0,0 --u -0.1,1,-0.1,1 --steps 200\n");
-  std::string op, file, x0s, us, csv, coupling, scheme;
-  int steps = 100, substeps = 2, local = 1, samples = 100, max_iter = 10;
+      "                      the pairing does work or dH/dt departs from -loss + supplied\n"
+      "  microgrid <out>     write a DC microgrid (DGUs and RL lines, docs/PH_COMPOSE.md) as a\n"
+      "                      system file\n\n"
+      "  cvc ph microgrid grid.json --dgus 4 --edges 0-1,1-2,2-3 --line-r 0.3,0.4,0.5\n"
+      "  cvc ph simulate grid.json --physical 1,0,1.1,0,0.9,0,1,0,0,0,0 --u "
+      "-0.1,1,-0.1,1,-0.1,1,-0.1,1\n");
+  std::string op, file, x0s, physical, us, csv, coupling, scheme, edges, line_r, line_l, dgu_kind;
+  int steps = 100, substeps = 2, local = 1, samples = 100, max_iter = 10, dgus = 4;
   unsigned seed = 1;
-  double dt = 0.01, tol = 1e-6, scale = 1.0;
+  double dt = 0.01, tol = 1e-6, scale = 1.0, dgu_c = 2.2, dgu_l = 1.8, dgu_r = 1.2;
   // clang-format off
   desc.add_options()
     ("help,h", "show help")
-    ("op", po::value<std::string>(&op)->required(), "info, simulate or check")
-    ("file", po::value<std::string>(&file)->required(), "the system file")
+    ("op", po::value<std::string>(&op)->required(), "info, simulate, check or microgrid")
+    ("file", po::value<std::string>(&file)->required(), "the system file (microgrid: the one to write)")
     ("x0", po::value<std::string>(&x0s), "simulate: the start state, comma separated (default zeros)")
+    ("physical", po::value<std::string>(&physical), "simulate: the start as every block's efforts instead (a DGU's v and i, a line's i), mapped to its state")
     ("u", po::value<std::string>(&us), "simulate: the inputs, one row held or one row per step (default zeros)")
     ("steps", po::value<int>(&steps)->default_value(100), "simulate: steps")
     ("dt", po::value<double>(&dt)->default_value(0.01), "simulate: step (s)")
@@ -2428,7 +2432,15 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
     ("csv", po::value<std::string>(&csv), "simulate: write t, the state, H and the books per step")
     ("samples", po::value<int>(&samples)->default_value(100), "check: random states")
     ("seed", po::value<unsigned>(&seed)->default_value(1), "check: their seed")
-    ("scale", po::value<double>(&scale)->default_value(1.0), "check: their standard deviation");
+    ("scale", po::value<double>(&scale)->default_value(1.0), "check: their standard deviation")
+    ("dgus", po::value<int>(&dgus)->default_value(4), "microgrid: buses, one DGU each")
+    ("edges", po::value<std::string>(&edges), "microgrid: lines as FROM-TO, comma separated (default a chain)")
+    ("line-r", po::value<std::string>(&line_r)->default_value("0.3,0.4,0.5"), "microgrid: line resistances (ohm), one or one per line (the last repeats)")
+    ("line-l", po::value<std::string>(&line_l)->default_value("0.8"), "microgrid: line inductances (H), likewise")
+    ("dgu", po::value<std::string>(&dgu_kind)->default_value("reference"), "microgrid: reference (q = 2.2 (v + v^3/3), 1.8 H, 1.2 ohm) or linear")
+    ("dgu-c", po::value<double>(&dgu_c)->default_value(2.2), "microgrid: a linear DGU's capacitance (F)")
+    ("dgu-l", po::value<double>(&dgu_l)->default_value(1.8), "microgrid: a linear DGU's inductance (H)")
+    ("dgu-r", po::value<double>(&dgu_r)->default_value(1.2), "microgrid: a linear DGU's resistance (ohm)");
   // clang-format on
   po::positional_options_description pos;
   pos.add("op", 1).add("file", 1);
@@ -2440,6 +2452,44 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
   }
   po::notify(vm);
 
+  if (op == "microgrid") {
+    std::vector<cvc::ph::line_spec> lines;
+    if (edges.empty())
+      for (int i = 0; i + 1 < dgus; ++i)
+        lines.push_back({i, i + 1, 0.0, 1.0});
+    else {
+      std::stringstream in(edges);
+      std::string item;
+      while (std::getline(in, item, ',')) {
+        const size_t dash = item.find('-');
+        if (dash == std::string::npos)
+          throw std::invalid_argument("--edges: '" + item + "' is not FROM-TO");
+        lines.push_back(
+            {std::stoi(item.substr(0, dash)), std::stoi(item.substr(dash + 1)), 0.0, 1.0});
+      }
+    }
+    const std::vector<double> rs = ph_numbers(line_r, "line-r"), ls = ph_numbers(line_l, "line-l");
+    if (rs.empty() || ls.empty())
+      throw std::invalid_argument("--line-r and --line-l need at least one value");
+    for (size_t k = 0; k < lines.size(); ++k) {
+      lines[k].R = rs[std::min(k, rs.size() - 1)];
+      lines[k].L = ls[std::min(k, ls.size() - 1)];
+    }
+    cvc::ph::law_ptr dgu;
+    if (dgu_kind == "reference")
+      dgu = cvc::ph::reference_dgu();
+    else if (dgu_kind == "linear")
+      dgu = cvc::ph::linear_dgu(dgu_c, dgu_l, dgu_r);
+    else
+      throw std::invalid_argument("--dgu: '" + dgu_kind + "' (use reference or linear)");
+    const cvc::ph::microgrid g = cvc::ph::make_microgrid(dgu, dgus, lines);
+    std::ofstream out(file);
+    if (!out)
+      throw std::runtime_error("cannot write " + file);
+    out << cvc::ph::system_json(g.system) << "\n";
+    std::cout << cvc::ph::describe(g.system) << "  wrote " << file << "\n";
+    return 0;
+  }
   const cvc::ph::composite s = cvc::ph::load_system(file);
   if (op == "info") {
     std::cout << cvc::ph::describe(s);
@@ -2457,7 +2507,8 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
     return ok ? 0 : 1;
   }
   if (op != "simulate")
-    throw std::runtime_error("Unknown ph operation: " + op + " (use info, simulate or check)");
+    throw std::runtime_error("Unknown ph operation: " + op +
+                             " (use info, simulate, check or microgrid)");
   cvc::ph::transition_opts o;
   o.dt = dt;
   o.substeps = substeps;
@@ -2467,6 +2518,19 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
   o.solve.max_iter = max_iter;
   o.solve.tol = tol;
   std::vector<double> x0 = ph_numbers(x0s, "x0"), u = ph_numbers(us, "u");
+  if (!physical.empty()) {
+    if (!x0.empty())
+      throw std::invalid_argument("give --x0 or --physical, not both");
+    const cvc::ph::storage_result st =
+        cvc::ph::storage_from_efforts(s, ph_numbers(physical, "physical"));
+    if (!st.converged)
+      throw std::runtime_error("--physical: no state reaches those efforts (residual " +
+                               std::to_string(st.residual) + " after " +
+                               std::to_string(st.iterations) + " iterations)");
+    std::cout << "start from efforts: " << st.iterations << " Newton iterations, residual "
+              << st.residual << "\n";
+    x0 = st.x;
+  }
   if (x0.empty())
     x0.assign(s.state_dim(), 0.0);
   if (u.empty())
