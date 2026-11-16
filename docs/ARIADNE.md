@@ -1123,15 +1123,25 @@ scene's bounds, so the ground frames the view. When the ground's whole rim is un
 otherwise it stops at the ground's edge. A `generated_world` under a water node wants `water: 0`,
 so its own flat water rungs do not draw over it. The cascades need float render targets; without
 them the water is flat blue. Live keys under the node's root (`water.` unless `keys:`):
-`wind_speed`, `wind_dir`, `fetch`, `chop`, `wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`,
-`foam_fray`, `shore_fade`, `swell_height`, `swell_period`, `swell_dir`, `shore_foam`, `wake` and
-`wake_foam`, most on `water_controls.ari`. A change to the swell rebuilds the shore layer once the
-keys have held for ten frames (12 ms for a 401² grid). With `body: {}` the water is in the scene's
+`wind_speed`, `wind_dir`, `gustiness`, `fetch`, `lee`, `sea_lag`, `sea_fade`, `current`, `chop`,
+`wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`, `foam_fray`, `shore_fade`, `swell_height`,
+`swell_period`, `swell_dir`, `shore_foam`, `wake` and `wake_foam`, most on `water_controls.ari`. A
+change to the swell rebuilds the shore layer once the keys have held for ten frames (12 ms for a
+401² grid). The wind (OCEAN-AND-WEATHER-ROADMAP.md O13) is read through one place,
+[`scene_wind.h`](../inc/cvc/ariadne/scene_wind.h) (today the node's `wind_speed`, `wind_dir` and
+`gustiness`; the scene's one wind later). The sea lags it: its wind follows with a `sea_lag`
+seconds' time constant (20; a compressed scale), and each new state of it crossfades in over
+`sea_fade` seconds (4), so a wind change never pops. With `lee` (1) the water downwind of land is
+calm: each wave band is scaled by the square root of its fetch, the distance the wind has blown over
+water, up to where the band is fully grown, from a coarse fetch map built when the wind turns. The
+gusts (`gustiness`, 0.25) ripple and roughen racing patches of water (cat's paws), and `current`
+(m/s, 0) is a slowly varying flow that carries the short waves and floating bodies alike. With `body: {}` the water is in the scene's
 physics world, with or without a renderer ([`scene_water.h`](../inc/cvc/ariadne/scene_water.h)).
 It is one fluid field over the water's extent, its surface the same sea computed on the CPU (the
 cascades fading at the same coast, the same swell), so a body lighter than water floats on the
-waves the picture shows and a heavier one sinks. The field is rebuilt when the wind, chop, wave
-height or swell change or the ground regenerates, and the scene's world swaps it as it swaps a
+waves the picture shows and a heavier one sinks: calm in the lee, crossfading with the drawn sea, and
+drifting on the current. The field is rebuilt when the sea takes a new state of its wind, the chop,
+wave height, swell, gusts or current change, or the ground regenerates, and the scene's world swaps it as it swaps a
 generated world's bodies. The bodies make waves: an eWave window of 128 m of 0.5 m cells around the
 camera's target takes each moving body's immersed columns as its source, so a dropped crate makes a
 ring and a bobbing one keeps radiating. Its waves move the near grid and shade both grids, foaming
