@@ -324,6 +324,9 @@ struct SceneViews::View {
       bm->SetInputDataObject(am->GetInputDataObject(0, 0));
     bm->SetBlendMode(am->GetBlendMode());
     bm->SetAutoAdjustSampleDistances(am->GetAutoAdjustSampleDistances());
+#ifdef CVC_VTK_HAS_FINISH_EVERY_RENDER
+    bm->FinishEveryRenderOff(); // as the node's: a still render does not wait for the GPU
+#endif
     bm->SetSampleDistance(am->GetSampleDistance());
     bm->SetVolumetricScatteringBlending(am->GetVolumetricScatteringBlending());
     bm->SetGlobalIlluminationReach(am->GetGlobalIlluminationReach());

@@ -104,6 +104,29 @@ target_include_directories(cvcGL PUBLIC
 target_link_libraries(cvcGL PUBLIC cvc::cvc ${VTK_LIBRARIES})
 target_include_directories(cvcGL PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/ocean")
 
+# VTK's GPU volume ray caster ends every render with glFinish(), for a timer only an
+# auto-adjusting render uses; cvcpkg's VTK (vtk 9.5.0+cvc.5, written for upstream) adds an opt-in
+# vtkSmartVolumeMapper::FinishEveryRender to skip it. VolumeNode turns it off per mapper where the
+# VTK found has it (RENDER_PERF_ROADMAP.md Phase 6); an unpatched VTK builds and renders as before.
+include(CheckCXXSourceCompiles)
+include(CMakePushCheckState)
+cmake_push_check_state(RESET)
+set(CMAKE_REQUIRED_LIBRARIES VTK::RenderingVolumeOpenGL2)
+set(CMAKE_REQUIRED_QUIET ON)
+check_cxx_source_compiles("
+#include <vtkNew.h>
+#include <vtkSmartVolumeMapper.h>
+int main() {
+  vtkNew<vtkSmartVolumeMapper> m;
+  m->FinishEveryRenderOff();
+  return m->GetFinishEveryRender() ? 1 : 0;
+}" CVC_VTK_HAS_FINISH_EVERY_RENDER)
+cmake_pop_check_state()
+if(CVC_VTK_HAS_FINISH_EVERY_RENDER)
+  target_compile_definitions(cvcGL PRIVATE CVC_VTK_HAS_FINISH_EVERY_RENDER=1)
+endif()
+message(STATUS "cvcGL: VTK's FinishEveryRender: ${CVC_VTK_HAS_FINISH_EVERY_RENDER}")
+
 # libjpeg-turbo: conference video compression (jpeg_codec.cpp / jpeg_encode_source.cpp / the mjpeg
 # stream_view decode path). Optional at build time — where the prefix has no turbojpeg the codec
 # compiles to a no-op (the "mjpeg" path then yields no video); native builds that need it ship it.
@@ -616,6 +639,14 @@ add_test(NAME cvcgl_volume_range COMMAND cvcgl_volume_range)
 add_executable(cvcgl_volume_half_float test/cvcgl_volume_half_float.cpp)
 target_link_libraries(cvcgl_volume_half_float PRIVATE cvcGL)
 add_test(NAME cvcgl_volume_half_float COMMAND cvcgl_volume_half_float)
+
+# VolumeNode's mapper with VTK's FinishEveryRender off (where the VTK has it), the same pixels.
+add_executable(cvcgl_volume_finish test/cvcgl_volume_finish.cpp)
+target_link_libraries(cvcgl_volume_finish PRIVATE cvcGL)
+if(CVC_VTK_HAS_FINISH_EVERY_RENDER)
+  target_compile_definitions(cvcgl_volume_finish PRIVATE CVC_VTK_HAS_FINISH_EVERY_RENDER=1)
+endif()
+add_test(NAME cvcgl_volume_finish COMMAND cvcgl_volume_finish)
 
 # The explicit traversal: state stack, ORDER-DEPENDENT property semantics,
 # per-view divergence and teardown. Runs with a null renderer, so it exercises
