@@ -214,6 +214,7 @@ check(f["sdf_dx"][rows // 2, 2] > 0.5 and f["sdf_dy"][2, cols // 2] > 0.5,
 nv = f["navigator"]
 check(nv["ready"] and nv["scale"] == 0.05 and abs(nv["tick"] - g3.dt()) < 1e-6,
       f"the navigator's settings ({nv['scale']}, {nv['tick']})")
+check(nv["stop_at_goal"] and nv["park_hold"], "nav@1 comes to rest at its goal and holds")
 ps = g3.plants()
 check([p["model"] for p in ps] == ["dyn4", "bike", "dyn_bike", "dyn4"],
       f"the models ({[p['model'] for p in ps]})")

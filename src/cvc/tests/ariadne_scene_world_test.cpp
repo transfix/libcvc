@@ -2556,6 +2556,49 @@ TEST(AriadneWorldGym, ThePlanTheDriveCommandedThePlantWith) {
   EXPECT_NEAR(q.accel_command, std::clamp(-v / dt, -q.plan.a_brake, q.plan.a_max), 1e-3);
 }
 
+// nav@1 comes to rest at its goal (WorldVehicles turns on sim_world's stop_at_goal and
+// park_hold): three agents sent 35-95 m, on dynamic4w and on nav's bicycle, arrive one by one, and
+// the episode ends with each at rest within its reach and staying there. Without it each met its
+// goal at speed and stopped past it (the bicycle drove on), so they were never all there at once.
+TEST(AriadneWorldGym, NavAtOneComesToRestAtItsGoalAndTheEpisodeEnds) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  gym_options o;
+  for (const char *plant : {"dynamic4w", "dynamic4w", "kinematic"}) {
+    entity_spec sp;
+    sp.archetype = "humvee";
+    sp.controller = "nav@1";
+    sp.plant = plant;
+    sp.placed = true;
+    sp.x = -50.0;
+    sp.y = -30.0 + 30.0 * static_cast<double>(o.agents.size());
+    sp.yaw = 0.0;
+    o.agents.push_back(sp);
+  }
+  WorldGym g(write_doc("gym_arrive", gym_doc(false, false)).string(), o);
+  const gym_observation o0 = g.reset(4);
+  EXPECT_TRUE(g.fields().navigator.stop_at_goal);
+  EXPECT_TRUE(g.fields().navigator.park_hold);
+  const double gx[3] = {-15.0, 15.0, 45.0};
+  for (std::size_t k = 0; k < 3; ++k)
+    ASSERT_TRUE(g.set_goal(o0.id[k], gx[k], o0.y[k]));
+  const std::vector<double> nan(3, kNaN);
+  int t = 0;
+  bool done = false;
+  for (; t < 1500 && !done; ++t)
+    done = g.step(nan, nan).terminated;
+  ASSERT_TRUE(done) << "every agent at its goal at once";
+  for (int k = 0; k < 100; ++k)
+    g.step(nan, nan);
+  const gym_observation &ob = g.observe();
+  for (std::size_t k = 0; k < 3; ++k) {
+    EXPECT_TRUE(ob.reached[k]) << "agent " << k << " stays at its goal, " << ob.goal_dist[k]
+                               << " m from it";
+    EXPECT_LT(std::fabs(ob.speed[k]), 0.05) << "agent " << k << " at rest";
+  }
+}
+
 // Vehicles on different plants meet in the one physics world. Nav's bicycle is a kinematic box,
 // which no building stops: it touches what is blocked in the grid.
 TEST(AriadneWorldGym, VehiclesOnOtherPlantsAndTheBicycleTouch) {

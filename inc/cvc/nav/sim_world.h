@@ -79,6 +79,16 @@ public:
     double fov_rad = 6.283185307179586;
     veh_params veh;         // vehicle + integration params (rr/d_hat/dt/vmax/... /nsub)
     float reach_tol = 0.8f; // normalized "arrived" radius (also drives park)
+    // ARRIVAL (both default false = OFF, byte-identical). `stop_at_goal`: the drive holds each
+    // agent's speed toward its goal to the speed from which it stops there (veh_params::stop_at),
+    // so it comes to rest at the goal rather than meeting it at the speed the goal's pull leaves
+    // and parking past it. A goal that moves every tick (a follower's slot) is trailed by about
+    // the vehicle's stopping distance, so leave it off for those. `park_hold`: on the kinematic
+    // arm a parked agent brakes to a stop at a_max and holds, as the plant arm's park brake
+    // stops one at a_brake. Without it the parked carrot (2 v straight ahead) and the goal's
+    // pull can hold a speed: a Humvee-sized agent parked at 5.5 m/s drove on to the map's edge.
+    bool stop_at_goal = false;
+    bool park_hold = false;
     int sense_every = 4;
     bool freeze_sense = false; // static known map: skip the sense/rebuild path
     double l_occ = 2.2, l_free = -1.4, l_clamp = 8.0;

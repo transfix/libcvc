@@ -271,6 +271,10 @@ struct navigator_params {
         a_lat_max = 0.0f, k_steer = 0.0f;
   int nsub = 1;
   bool allow_reverse = true;
+  // How it arrives (sim_world::config): each agent comes to rest at its goal (stop_at_goal: the
+  // drive's stop point is the goal), and a parked one on nav's bicycle brakes to a stop and holds
+  // (park_hold).
+  bool stop_at_goal = false, park_hold = false;
 };
 
 class WorldVehicles {

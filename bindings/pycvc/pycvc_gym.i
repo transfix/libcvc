@@ -116,6 +116,8 @@ static PyObject *gym_navigator(const cvc::ariadne::navigator_params &p) {
   PYCVC_GYM_F(a_lat_max); PYCVC_GYM_F(k_steer);
   gym_put(d, "nsub", PyLong_FromLong(p.nsub));
   gym_put(d, "allow_reverse", PyBool_FromLong(p.allow_reverse));
+  gym_put(d, "stop_at_goal", PyBool_FromLong(p.stop_at_goal));
+  gym_put(d, "park_hold", PyBool_FromLong(p.park_hold));
   return d;
 }
 #undef PYCVC_GYM_F
