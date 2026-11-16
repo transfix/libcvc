@@ -405,6 +405,32 @@ windows_menu: Panels
   EXPECT_EQ(wm->label, "Panels");
 }
 
+// §5.23 `menu_collapse:` at the top level, or `collapse:` on a menubar entry: when the bar's
+// menus fold into one. false reads as never; a value that is none of them warns and reads as auto.
+TEST(AriadneLoader, MenuCollapseSetting) {
+  SKIP_WITHOUT_YAML();
+  const auto collapse_of = [](const std::string &doc) {
+    LoadResult r = fresh_load("meta: { name: T, min_libcvc: \"3.4.0\" }\n" + doc);
+    EXPECT_TRUE(r.ok) << r.error;
+    const Widget *mb = find(r.root, Kind::Menubar);
+    return std::make_pair(mb ? mb->collapse : std::string("(no menubar)"),
+                          static_cast<int>(r.warnings.size()));
+  };
+  EXPECT_EQ(collapse_of("menubar:\n  - menu: File\n"), std::make_pair(std::string(), 0));
+  EXPECT_EQ(collapse_of("menu_collapse: never\nmenubar:\n  - menu: File\n"),
+            std::make_pair(std::string("never"), 0));
+  EXPECT_EQ(collapse_of("menu_collapse: false\nmenubar:\n  - menu: File\n"),
+            std::make_pair(std::string("never"), 0));
+  EXPECT_EQ(collapse_of("menu_collapse: always\nmenubar:\n  - menu: File\n"),
+            std::make_pair(std::string("always"), 0));
+  EXPECT_EQ(collapse_of("menu_collapse: sometimes\nmenubar:\n  - menu: File\n"),
+            std::make_pair(std::string("auto"), have_jsonschema() ? 2 : 1))
+      << "the loader's warning, and the schema's where it is built";
+  EXPECT_EQ(
+      collapse_of("root:\n  - menubar:\n    collapse: never\n    items:\n      - menu: File\n"),
+      std::make_pair(std::string("never"), 0));
+}
+
 // Phase 0a: input_text / input_int parse — both the shorthand `input_text:` key and the generic
 // `type: input_text` form — carrying bind, the optional `on` (send-on-commit), `def`, and the int
 // range lo/hi. These are the conference app's chat / display-name / room-id fields.
@@ -5007,6 +5033,29 @@ windows:
   // A scoped wrapper carries includes.<as>.
   const Widget *scoped = find_scope(r.root, "includes.rf");
   ASSERT_NE(scoped, nullptr);
+}
+
+// §5.25 a loaded document's name as an application: its meta.name, else its mount id.
+TEST(AriadneMount, ALoadedDocumentIsNamedByItsMeta) {
+  SKIP_WITHOUT_YAML();
+  write_temp_ari("named_app.ari", "meta: { name: FE Lab, min_libcvc: \"3.4.0\" }\n"
+                                  "menubar:\n  - menu: Mesh\n");
+  write_temp_ari("unnamed_app.ari", "menubar:\n  - menu: Mesh\n");
+  const std::string main = write_temp_ari("main_apps.ari", R"(
+root:
+  - load: named_app.ari
+    as: fe
+  - load: unnamed_app.ari
+    as: other
+)");
+  LoadResult r = fresh_load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *fe = find_scope(r.root, "includes.fe");
+  ASSERT_NE(fe, nullptr);
+  EXPECT_EQ(fe->app_name, "FE Lab");
+  const Widget *other = find_scope(r.root, "includes.other");
+  ASSERT_NE(other, nullptr);
+  EXPECT_EQ(other->app_name, "other");
 }
 
 TEST(AriadneMount, LoadDefaultsMountIdFromBasename) {
