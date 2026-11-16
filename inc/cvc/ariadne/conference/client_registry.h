@@ -22,6 +22,7 @@
 #include <cvc/state/state_exec/types.h> // value_t
 #include <deque>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -81,6 +82,21 @@ public:
     bool active = false;
   };
 
+  // A client's own caps, where an admin set them (server.limits); an unset field keeps the
+  // server document's (ServerDocument::set_client_limits, ID4a, which also holds them to the
+  // document's caps or not, by its switch). Kept by client id, so a reconnect keeps them while the
+  // relay runs. Python guests (ID4c) add a `python` flag.
+  struct client_limits {
+    std::optional<bool> programs, guests; // false refuses the client that kind; true enables
+                                          // nothing the document doesn't
+    std::uint64_t steps = 0;              // 0: the document's
+    double time = 0.0;                    // seconds; 0: the document's
+    std::uint64_t memory_mb = 0;          // a guest's linear memory too; 0: the document's
+    bool empty() const noexcept {
+      return !programs && !guests && steps == 0 && time == 0.0 && memory_mb == 0;
+    }
+  };
+
   struct record {
     std::string id;       // the client id
     std::string username; // the server's name for it
@@ -96,8 +112,7 @@ public:
     bool log_dirty = true;      // its connections changed since they were last mirrored
     bool banned = false;        // refused at each connection (server.ban), until unbanned
     std::uint64_t rcon_failures = 0; // wrong rcon passwords its connections sent
-    // Its limits where an admin set them (server.limits; ID4a reads them): see kLimitKeys.
-    std::map<std::string, cvc::state_exec::value_t> limits;
+    client_limits limits;            // where an admin set them (server.limits)
   };
 
   // Why a request was refused: a room-call error code (room_calls.h) and its message.
@@ -184,15 +199,15 @@ public:
   std::vector<link_ref> take_banned_links();
   // Rename client ID as an admin: no rate limit, and still unique among the active clients.
   bool rename(const std::string &id, const std::string &name, refusal &why);
-  // Set client ID's limit KEY (kLimitKeys), or with nil take it back to the document's default.
-  // False, with WHY (`invalid`), for an unknown id or key, or a value of the wrong type: a boolean
-  // for programs, guests and python, a number not below 0 for the others.
+  // Set client ID's limit KEY, or with nil take it back to the document's: programs and guests
+  // are true or false, steps and memory_mb whole numbers not below 0, time a number of seconds not
+  // below 0 (0 is the document's too). False, with WHY (`invalid`), for an unknown id or key, or a
+  // value of the wrong type.
   bool set_limit(const std::string &id, const std::string &key,
                  const cvc::state_exec::value_t &value, refusal &why);
-  static constexpr const char *kLimitKeys[] = {"programs", "guests",    "python",     "steps",
-                                               "time",     "memory_mb", "concurrency"};
-  // PID's client's limits as an admin set them; null when PID has no record.
-  const std::map<std::string, cvc::state_exec::value_t> *limits(const std::string &pid) const;
+  // PID's client's limits; nullopt when it has no record or none are set. On the relay's room
+  // loop, as every call here is (ServerDocument asks from run_client_*, which runs there).
+  std::optional<client_limits> limits(const std::string &pid) const;
 
   // Every record, active ones first, then the latest seen (server.clients): a list of
   // {client_id, username, active, admin, banned, verified, device, first_seen, last_seen}.

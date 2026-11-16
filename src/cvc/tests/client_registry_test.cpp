@@ -466,23 +466,32 @@ TEST(ClientRegistry, LimitsAreCheckedAndCleared) {
   reg.update({link(1, "a")}, 1.0, "t");
   const std::string id = reg.identity_key("a");
   reg_t::refusal why;
+  EXPECT_FALSE(reg.limits("a").has_value()) << "none set";
   EXPECT_TRUE(reg.set_limit(id, "memory_mb", se::value_t(std::int64_t(64)), why));
   EXPECT_TRUE(reg.set_limit(id, "time", se::value_t(2.5), why));
   EXPECT_TRUE(reg.set_limit(id, "guests", se::value_t(true), why));
+  EXPECT_TRUE(reg.set_limit(id, "programs", se::value_t(false), why));
   EXPECT_FALSE(reg.set_limit(id, "guests", se::value_t(std::int64_t(1)), why)) << "a boolean";
   EXPECT_FALSE(reg.set_limit(id, "steps", se::value_t(std::int64_t(-1)), why)) << "not below 0";
+  EXPECT_FALSE(reg.set_limit(id, "steps", se::value_t(2.5), why)) << "a whole number";
   EXPECT_FALSE(reg.set_limit(id, "steps", se::value_t(std::string("9")), why)) << "a number";
+  EXPECT_FALSE(reg.set_limit(id, "concurrency", se::value_t(std::int64_t(2)), why));
   EXPECT_FALSE(reg.set_limit(id, "colour", se::value_t(true), why));
   EXPECT_EQ(why.code, "invalid");
   EXPECT_FALSE(reg.set_limit("cnobody", "steps", se::value_t(std::int64_t(1)), why));
-  const auto *lim = reg.limits("a");
-  ASSERT_NE(lim, nullptr);
-  EXPECT_EQ(lim->size(), 3u);
-  EXPECT_EQ(std::get<std::int64_t>(lim->at("memory_mb").v), 64);
-  // Nil takes one back to the document's default.
+  const std::optional<reg_t::client_limits> lim = reg.limits("a");
+  ASSERT_TRUE(lim.has_value());
+  EXPECT_EQ(lim->memory_mb, 64u);
+  EXPECT_DOUBLE_EQ(lim->time, 2.5);
+  EXPECT_EQ(lim->guests, std::optional<bool>(true));
+  EXPECT_EQ(lim->programs, std::optional<bool>(false));
+  EXPECT_EQ(lim->steps, 0u) << "unset: the document's";
+  // Nil takes one back to the document's.
   EXPECT_TRUE(reg.set_limit(id, "memory_mb", se::value_t(), why));
-  EXPECT_EQ(reg.limits("a")->count("memory_mb"), 0u);
-  EXPECT_EQ(reg.limits("nobody"), nullptr);
+  EXPECT_TRUE(reg.set_limit(id, "programs", se::value_t(), why));
+  EXPECT_EQ(reg.limits("a")->memory_mb, 0u);
+  EXPECT_FALSE(reg.limits("a")->programs.has_value());
+  EXPECT_FALSE(reg.limits("nobody").has_value());
 
   cvc::app app;
   reg.write(app, {});

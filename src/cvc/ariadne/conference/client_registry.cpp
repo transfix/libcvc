@@ -141,22 +141,26 @@ void remove_child(cvc::app &app, const std::string &parent, const std::string &n
     n->removeChild(name);
 }
 
-// A limit's value as the mirror writes it.
-std::string limit_text(const se::value_t &v) {
-  if (const bool *b = std::get_if<bool>(&v.v))
-    return *b ? "true" : "false";
-  if (const std::int64_t *i = std::get_if<std::int64_t>(&v.v))
-    return std::to_string(*i);
-  if (const double *d = std::get_if<double>(&v.v)) {
-    char buf[32];
-    std::snprintf(buf, sizeof buf, "%g", *d);
-    return buf;
-  }
-  return std::string();
+std::string seconds_text(double s) {
+  char buf[32];
+  std::snprintf(buf, sizeof buf, "%g", s);
+  return buf;
 }
 
-bool is_flag_limit(const std::string &key) {
-  return key == "programs" || key == "guests" || key == "python";
+// A client's limits as server.client answers them: only the ones set.
+se::value_t limits_value(const client_registry::client_limits &l) {
+  std::vector<std::pair<std::string, se::value_t>> out;
+  if (l.programs)
+    out.emplace_back("programs", se::value_t(*l.programs));
+  if (l.guests)
+    out.emplace_back("guests", se::value_t(*l.guests));
+  if (l.steps)
+    out.emplace_back("steps", se::value_t(static_cast<std::int64_t>(l.steps)));
+  if (l.time > 0.0)
+    out.emplace_back("time", se::value_t(l.time));
+  if (l.memory_mb)
+    out.emplace_back("memory_mb", se::value_t(static_cast<std::int64_t>(l.memory_mb)));
+  return se::make_dict(std::move(out));
 }
 
 } // namespace
@@ -463,13 +467,20 @@ void client_registry::mirror(cvc::app &app) {
       put(app, join(base, "admin"), record_admin(id) ? "1" : "0");
       put(app, join(base, "banned"), rec.banned ? "1" : "0");
       put(app, join(base, "rcon_failures"), std::to_string(rec.rcon_failures));
-      for (const char *k : kLimitKeys) {
-        const auto lim = rec.limits.find(k);
-        if (lim != rec.limits.end())
-          put(app, join(join(base, "limits"), k), limit_text(lim->second));
+      // Only the limits set, each under limits.<key>.
+      const std::string lb = join(base, "limits");
+      const client_limits &l = rec.limits;
+      const auto limit = [&](const char *k, bool set, const std::string &text) {
+        if (set)
+          put(app, join(lb, k), text);
         else
-          remove_child(app, join(base, "limits"), k);
-      }
+          remove_child(app, lb, k);
+      };
+      limit("programs", l.programs.has_value(), l.programs.value_or(false) ? "true" : "false");
+      limit("guests", l.guests.has_value(), l.guests.value_or(false) ? "true" : "false");
+      limit("steps", l.steps != 0, std::to_string(l.steps));
+      limit("time", l.time > 0.0, seconds_text(l.time));
+      limit("memory_mb", l.memory_mb != 0, std::to_string(l.memory_mb));
       rec.dirty = false;
     }
     if (!rec.log_dirty)
@@ -602,40 +613,47 @@ bool client_registry::set_limit(const std::string &id, const std::string &key,
     why = {"invalid", "no client " + id};
     return false;
   }
-  bool known = false;
-  for (const char *k : kLimitKeys)
-    known = known || key == k;
-  if (!known) {
-    why = {"invalid", key + " is not a limit (programs, guests, python, steps, time, memory_mb, "
-                            "concurrency)"};
-    return false;
-  }
-  if (std::holds_alternative<std::monostate>(value.v)) {
-    if (rec->limits.erase(key))
-      rec->dirty = _dirty = true;
-    return true;
-  }
-  if (is_flag_limit(key)) {
-    if (!std::holds_alternative<bool>(value.v)) {
+  const bool nil = std::holds_alternative<std::monostate>(value.v);
+  const bool *b = std::get_if<bool>(&value.v);
+  const std::int64_t *i = std::get_if<std::int64_t>(&value.v);
+  const double *d = std::get_if<double>(&value.v);
+  client_limits &l = rec->limits;
+  if (key == "programs" || key == "guests") {
+    // The DSL's false is nil, so nil takes the limit back; a false given as a boolean (from
+    // Python, or (= 1 0)) refuses the kind.
+    if (!nil && !b) {
       why = {"invalid", key + " is true or false"};
       return false;
     }
-  } else {
-    const std::int64_t *i = std::get_if<std::int64_t>(&value.v);
-    const double *d = std::get_if<double>(&value.v);
-    if ((!i && !d) || (i && *i < 0) || (d && !(*d >= 0.0))) {
-      why = {"invalid", key + " is a number, not below 0"};
+    std::optional<bool> &flag = key == "programs" ? l.programs : l.guests;
+    flag = nil ? std::nullopt : std::optional<bool>(*b);
+  } else if (key == "steps" || key == "memory_mb") {
+    if (!nil && (!i || *i < 0)) {
+      why = {"invalid", key + " is a whole number, not below 0"};
       return false;
     }
+    (key == "steps" ? l.steps : l.memory_mb) = nil ? 0 : static_cast<std::uint64_t>(*i);
+  } else if (key == "time") {
+    const double s = i ? static_cast<double>(*i) : d ? *d : -1.0;
+    if (!nil && !(s >= 0.0)) {
+      why = {"invalid", "time is a number of seconds, not below 0"};
+      return false;
+    }
+    l.time = nil ? 0.0 : s;
+  } else {
+    why = {"invalid", key + " is not a limit (programs, guests, steps, time, memory_mb)"};
+    return false;
   }
-  rec->limits[key] = value;
   rec->dirty = _dirty = true;
   return true;
 }
 
-const std::map<std::string, se::value_t> *client_registry::limits(const std::string &pid) const {
+std::optional<client_registry::client_limits>
+client_registry::limits(const std::string &pid) const {
   const record *rec = record_of(pid);
-  return rec ? &rec->limits : nullptr;
+  if (!rec || rec->limits.empty())
+    return std::nullopt;
+  return rec->limits;
 }
 
 se::value_t client_registry::summary(const record &rec) const {
@@ -670,9 +688,6 @@ se::value_t client_registry::record_value(const std::string &id) const {
   if (!rec)
     return se::value_t();
   se::value_t v = summary(*rec);
-  std::vector<std::pair<std::string, se::value_t>> lim;
-  for (const auto &[k, x] : rec->limits)
-    lim.emplace_back(k, x);
   std::vector<se::value_t> conns;
   for (const connection &c : rec->connections)
     conns.push_back(se::make_dict({{"pid", se::value_t(c.pid)},
@@ -683,7 +698,7 @@ se::value_t client_registry::record_value(const std::string &id) const {
                                    {"closed", se::value_t(c.closed)},
                                    {"active", se::value_t(c.active)}}));
   se::dict_ptr *d = std::get_if<se::dict_ptr>(&v.v);
-  (*d)->emplace_back("limits", se::make_dict(std::move(lim)));
+  (*d)->emplace_back("limits", limits_value(rec->limits));
   (*d)->emplace_back("rcon_failures", se::value_t(static_cast<std::int64_t>(rec->rcon_failures)));
   (*d)->emplace_back("connections", se::make_list(std::move(conns)));
   return v;

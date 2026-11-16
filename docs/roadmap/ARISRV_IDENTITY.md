@@ -106,11 +106,13 @@ arisrv.clients.<client_id>.
   thread, so an operator can use their own GeoIP database. Bundling one is left out: GeoLite2
   needs a licence key, and DB-IP Lite needs attribution.
 - **The seam for other parts:**
-  - `client_registry::identity_key(pid)`: the client id behind a pid. #1290's gas ledger keys on
-    it.
+  - `client_registry::identity_key(pid)`: the client id behind a pid, for this relay's records.
+  - **#1290's gas ledger must not key on the client id.** Its salt is new each run, and a client
+    with no device id is hashed on its addresses. The ledger keys on the principal, else on the
+    verified device tag (`record_of(pid)->device`).
   - `client_registry::is_admin(pid)`: whether the connection holding that pid holds rcon (2.5).
     #1290's D10 uses it beside `admin_role`.
-  - `client_registry::limits(pid)`: that client's overrides (2.6).
+  - `client_registry::limits(pid)`: that client's overrides (2.6), or nullopt.
 - **In Python** (ID4's side): `host.clients` is a read-only view (`host.clients[id]`,
   `host.clients.active()`), and `ctx.client` is the caller's record.
 
@@ -129,6 +131,14 @@ arisrv.clients.<client_id>.
     it gets a suffix.
   - A Hello can't carry the name, because a host joins the relay before its document runs
     `room-join`.
+- **A client that predates `server.set`** writes `profile.name` itself: a packaged ari or arigl,
+  which cypkg's and nicotina's CI and users run until a release ships this.
+  - The gate refuses that write, as it refuses any write to a relay-owned key. It also hands the
+    value to the relay (`room_write_gate::set_name_requests`), which grants it on the room loop as
+    a rename with `unique`, under the same checks and rate limit.
+  - Such a client keeps its name.
+  - Without bound writes there is no gate, so the relay writes no names at all, and they stay the
+    clients' own, as before.
 - **Built-in calls.** These are reserved `fn` names that `call_step` answers itself, before the
   Python dispatch, in stock arisrv as in arisrvx. No change to `room_calls.*` and no new client
   native is needed. A Python `@export` under `server.` is refused at load.
@@ -197,9 +207,14 @@ arisrv.clients.<client_id>.
     each new one as soon as the relay's next pass sees it. Kept in memory.
   - `server.rename` ID NAME: with no rate limit, but still unique.
   - `server.limits` ID {key value ...}: a client's caps (2.6). A `nil` value puts one back to the
-    default. The keys are `programs`, `guests` and `python` (booleans) and `steps`, `time`,
-    `memory_mb` and `concurrency` (numbers not below 0). They are kept, and mirrored under
-    `limits.*`. ID4a makes them apply.
+    document's.
+    - The keys are S3's and G4's: `programs` and `guests` (true or false; false refuses the
+      client that kind), `steps` and `memory_mb` (whole numbers), and `time` (seconds). 0 is the
+      document's.
+    - They're kept by client id, and mirrored under `limits.*`. ID4a (#1296) makes them apply.
+    - There's no `fuel`: gas is charged as steps. There's no `concurrency`: one program or guest at
+      a time per client is by design, and #1290's residents get their own count. ID4c adds
+      `python`.
   - Rotating the guest password at run time waits on the transports (2.4).
 - The rate limit is `rcon_guard`, beside `client_registry` in `client_registry.h`. Its lock
   starts at 30 s and doubles, up to an hour. A right password clears it.
@@ -209,19 +224,25 @@ arisrv.clients.<client_id>.
 
 ### 2.6 Each client's guest limits (ID4, the arisrvx session)
 
-- **The seam.**
-  - `struct ClientLimits {programs, guests, python, steps, time, memory_mb, concurrency}`.
-  - `ServerDocument::set_client_limits(std::function<ClientLimits(const std::string &pid, const
-    ClientLimits &document_caps)>)`, which arisrv's `main()` sets from the registry.
-  - The document's `client_programs:` and `client_guests:` are the defaults. The callback returns
-    a client's limits, and ServerDocument clamps them to `ariadne.limits.*`. A client's limits may
-    be above the document's caps (D2).
-  - A limit is read when a client's program or guest starts. A change applies to the next start,
-    not to one already running.
+- **The seam, as #1296 builds it:**
+  - `using ClientLimits = ClientPrograms`: `{on, max_steps, max_time, max_memory}`.
+  - `enum class ServerDocument::ClientKind { program, guest }`. Python guests add a third kind.
+  - `ServerDocument::set_client_limits(std::function<ClientLimits(const std::string &pid,
+    ClientKind kind, const ClientLimits &document)>)`. The callback returns the whole caps: it
+    starts from `document` and changes what the client's record sets. `on = false` refuses the
+    client that kind (`forbidden`), and 0 is the document's.
+  - arisrv's `main()` sets it from `client_registry::limits(pid)`, on the room loop, where
+    `run_client_*` asks at each start. A change applies to the client's next start, not to one
+    already running. That wiring lands once #1296 and #1295 are both on master.
+  - Whether a client's caps may go above the document's is D2: one switch,
+    `ServerDocument::kClientLimitsAboveDocument`. The action lane's caps apply on top either
+    way.
 - **Python guests in python.wasm** (D3, D4).
   - CPython can't be sandboxed in the relay's process, because a client's Python could reach `os`,
     `ctypes` and the interpreter itself. A WebAssembly build of CPython on G4's engine gets the same
     memory and gas caps, chroot, gate and ledger as any guest.
+  - **It isn't W5's Python.** W5 builds CPython for `wasm32-emscripten`, which needs Emscripten's
+    JS glue. G4's wasmtime runs WASI modules, so this needs a new build.
   - **The module is the server's.** It is far over G4's 1 MiB module cap, and a client shouldn't
     choose the interpreter. The document opts in with
     `server: client_python: {module, steps, time, memory_mb}`. A client sends source as data:
@@ -242,16 +263,19 @@ arisrv.clients.<client_id>.
 
 ## 3. Parts
 
-| Part | What | Who | Files |
+| Part | What | Session | Files |
 |---|---|---|---|
-| ID1 | The client id, the registry and its private root, the username, `server.whoami` / `server.set`, `Hello.local_address`, each link report's addresses and connection number | paws | `client_registry.{h,cpp}` (new, `conference/`), `state_local_address.cpp` (new), `state_transport.proto` + both transports, `state_link_stats.h`, `room_write_gate.*`, `room_intrinsics.cpp`, arisrv `main.cpp` |
-| ID2 | The guest password | paws | `state_identity.{h,cpp}` (`valid_guest_password`, `guest_password_bearer`), arisrv `main.cpp`, `relay_session.{h,cpp}` (`password:`, `CVC_ARIADNE_GUEST_PASSWORD`), arigl `main.cpp`, `arigl-web.html`'s config notes |
-| ID3 | rcon and the admin calls | paws | `client_registry.{h,cpp}` (elevation, ban, limits, `rcon_guard`), `state_transport*` (`disconnect_connection`, a link report's `secure`), arisrv `main.cpp`'s `call_step` |
-| ID4a | Per-client limits | arisrvx | `server_document.{h,cpp}` |
-| ID4b | The python-guest module (cvcpkg recipe) | arisrvx | the cvcpkg recipe, `src/ariadne_wasm/*` |
-| ID4c | The Python route and `host.clients` / `ctx.client` / `@host.geolocate` | arisrvx | `server_document.*`, `room_calls.*` if a `language` field is needed, `ariadne_server.py` |
+| ID1 | The client id, the registry and its private root, the username, `server.whoami` / `server.set`, `Hello.local_address`, each link report's addresses and connection number | the identity session (ID1-ID3) | `client_registry.{h,cpp}` (new, `conference/`), `state_local_address.cpp` (new), `state_transport.proto` + both transports, `state_link_stats.h`, `room_write_gate.*`, `room_intrinsics.cpp`, arisrv `main.cpp` |
+| ID2 | The guest password | the identity session | `state_identity.{h,cpp}` (`valid_guest_password`, `guest_password_bearer`), arisrv `main.cpp`, `relay_session.{h,cpp}` (`password:`, `CVC_ARIADNE_GUEST_PASSWORD`), arigl `main.cpp`, `arigl-web.html`'s config notes |
+| ID3 | rcon and the admin calls | the identity session | `client_registry.{h,cpp}` (elevation, ban, limits, `rcon_guard`), `state_transport*` (`disconnect_connection`, a link report's `secure`), arisrv `main.cpp`'s `call_step` |
+| ID4a | Per-client limits (#1296) | "arisrvx S1: Python engine" | `server_document.{h,cpp}` |
+| ID4b | The python-guest module (cvcpkg recipe) | "arisrvx S1: Python engine" | the cvcpkg recipe, `src/ariadne_wasm/*` |
+| ID4c | The Python route and `host.clients` / `ctx.client` / `@host.geolocate` / `host.guest_password_ok` | "arisrvx S1: Python engine" | `server_document.*`, `room_calls.*` if a `language` field is needed, `ariadne_server.py`, `python_engine.cpp`, `server_link.{h,cpp}` |
 
-- arisrv `main.cpp` is paws's in every part. Whatever ID4 needs wired there, paws wires.
+- arisrv `main.cpp` is the identity session's in every part. Whatever ID4 needs wired there, it
+  wires: the `set_client_limits` callback, the call event's `client` beside `principal`,
+  geolocate requests, and `ServerLink::set_guest_password_bearer`. Python never sees the expected
+  bearer: `host.guest_password_ok` compares in C++.
 - Both sessions add ctests to `src/arisrv/CMakeLists.txt`, each in a block of its own. Whoever
   lands second merges.
 - **Order.** ID1 first, then ID2 and ID3; ID4a can go beside ID1. ID4 stacks on #1283, and
@@ -259,14 +283,22 @@ arisrv.clients.<client_id>.
 
 ## 4. Decisions (Joe, 2026-11-16)
 
-- **D1. The addresses go in the log, not the client id.** In the hash, a laptop on a new Wi-Fi
+- **D1. The addresses go in the log, not the client id.** He said the same to both sessions: "if
+  no device ID then lean on IP for identity hash. but add it to the log either way". In the hash, a laptop on a new Wi-Fi
   network, or a phone moving between Wi-Fi and cellular, would be a new client. It would lose its
   username and, under #1290, get a fresh gas grant to farm. The id is the device id, and the
   addresses are the fallback only for a client that sends none. A browser's random id can be
   farmed either way, by clearing its storage.
-- **D2. A client's limits may go above the document's caps,** up to `ariadne.limits.*`. The
-  document's caps are the default, and an admin can raise or lower one client's. Python needs
-  this, since CPython wants about 64 MiB.
+- **D2. Whether a client's limits may go above the document's caps: two answers, being
+  confirmed.**
+  - To the identity session, Joe chose "Yes, up to the ceiling": an admin may raise a client
+    above the document's caps, up to `ariadne.limits.*`.
+  - To the arisrvx session, about 20 minutes earlier, he wrote: "no, the server should have a
+    higher default to accommodate the biggest clients. there should be separate client limits
+    possible too".
+  - The arisrvx session is asking him again. Until he answers, #1296 holds a client within the
+    document's caps (`kClientLimitsAboveDocument = false`), and the switch is one line. The
+    records here store the limits either way.
 - **D3. Clients' Python runs in python.wasm** on G4's engine (2.6). It does not run as in-process
   CPython.
 - **D4. Python in wasm replaces S4** (RestrictedPython in worker processes) as tier 3 of the
