@@ -3,6 +3,7 @@
 #include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/gl/NullGraphicNode.h>
+#include <cvc/gl/OverlappingVolumeMapper.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/state/state.h>
@@ -117,7 +118,8 @@ vtkStandardNewMacro(HalfFloatVolume);
 VolumeNode::VolumeNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
     : GraphicsNode(ctx, statePath, name), m_hasVolume(false),
       m_vtkVolume(vtkSmartPointer<HalfFloatVolume>::New()),
-      m_mapper(vtkSmartPointer<vtkSmartVolumeMapper>::New()),
+      // the GPU ray caster without its glFinish per draw (OverlappingVolumeMapper.h)
+      m_mapper(vtkSmartPointer<OverlappingVolumeMapper>::New()),
       m_imageData(vtkSmartPointer<vtkImageData>::New()),
       m_colorFunc(vtkSmartPointer<vtkColorTransferFunction>::New()),
       m_opacityFunc(vtkSmartPointer<vtkPiecewiseFunction>::New()),
