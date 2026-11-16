@@ -10,14 +10,25 @@
 //   r.class_names, r.class_voxels, r.border_array(), r.warnings
 //   pycvc.segment_seeded(vol, seeds, automatic="none", normalized_thresholds=True, t_low=40)
 //
-// An enum field (automatic) takes its name as text, or pycvc.seed_mode_none / _local_maxima.
-// pycvc.segment_seeded_job(vol, seeds, ...) is the same as a resumable job (pycvc_jobs.i). Bad
-// input (no seeds, a seed outside the volume, a constant volume, bad parameters) raises ValueError.
-// The stepper is not wrapped: the job is how Python steps it.
+// An enum field (automatic) takes its name as text, or pycvc.seed_mode_none / _local_maxima /
+// _critical_points. pycvc.segment_seeded_job(vol, seeds, ...) is the same as a resumable job
+// (pycvc_jobs.i). Bad input (no seeds, a seed outside the volume, a constant volume, bad
+// parameters) raises ValueError. The steppers are not wrapped: the jobs are how Python steps them.
 %{
+#include <cvc/volume/gradient_vector_diffusion.h>
 #include <cvc/volume/segmentation.h>
 #include <cvc/volume/segmentation_params.h>
 %}
+
+// cvc/volume/gradient_vector_diffusion.h for its enums (seeded_segmentation_params' cp_weights,
+// critical_kind); the diffusion itself is C++ only for now.
+%ignore cvc::gradient_vector_diffusion_error;
+%ignore cvc::vector_field;
+%ignore cvc::gradient_vector_diffusion;
+%ignore cvc::gradient_vector_diffusion_stepper;
+%ignore cvc::gradient_vector_diffusion_job;
+%ignore cvc::critical_point_at;
+%include "cvc/volume/gradient_vector_diffusion.h"
 
 // The result's parts are copies Python owns: the member variables' own getters would hand out
 // views into the struct, which dangle once it is collected. (Volume copies share their voxels.)
@@ -100,6 +111,10 @@
 %ignore cvc::segment_stepper;
 %ignore cvc::segment_seeded_stepper;
 %ignore cvc::segment_seeded_job; // pycvc_jobs.i wraps it
+// The paper's seeds alone, their stepper and their job: C++ only for now.
+%ignore cvc::critical_point_seeds;
+%ignore cvc::critical_point_seeds_stepper;
+%ignore cvc::critical_point_seeds_job;
 
 // A segmentation takes a while: other Python threads run meanwhile. Bad input raises ValueError.
 %exception cvc::segment_seeded {
