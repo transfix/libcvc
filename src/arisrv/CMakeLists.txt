@@ -533,5 +533,25 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
     set_tests_properties(arisrv_guest_password arisrv_guest_password_refuses arisrv_rcon
                          PROPERTIES ENVIRONMENT "PYTHONIOENCODING=utf-8"
                          SKIP_REGULAR_EXPRESSION "built without yaml-cpp" TIMEOUT 120)
+    # rcon's role in arisrvx (ID3): a connection rcon made an admin has the role admin in
+    # ctx.principal, so tests/rcon_service.py's @export(roles=["admin"]) answers it; before rcon,
+    # and from the same client's next connection, it is forbidden.
+    if(TARGET arisrvx)
+      set(_id_rcon_relay --relay-arg=--python "--relay-arg=${_srv_tests}/rcon_service.py"
+                         --relay-arg=--rcon-password-file
+                         "--relay-arg=${_srv_tests}/rcon_password.txt")
+      foreach(_a IN LISTS CVC_ARIADNE_PYTHON_TEST_PATH)
+        list(APPEND _id_rcon_relay "--relay-arg=${_a}")
+      endforeach()
+      add_test(NAME arisrvx_rcon_admin_role
+               COMMAND ${_id_pair} --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:ari>
+                       --scheme grpc ${_id_relay} ${_id_rcon_relay} --client-only
+                       --client-arg=--relay-room --client-arg=ctest
+                       "--client-arg=${_srv_tests}/rcon_admin.ari")
+      cvc_ariadne_python_test_properties(arisrvx_rcon_admin_role)
+      set_tests_properties(arisrvx_rcon_admin_role PROPERTIES
+                           SKIP_REGULAR_EXPRESSION "No module named '(fastapi|uvicorn|starlette)';built without yaml-cpp;needs pycvc beside arisrvx;no pycvc to convert"
+                           TIMEOUT 120)
+    endif()
   endif()
 endif()
