@@ -2087,6 +2087,42 @@ int main() {
       tick();
       chk(uf(*near, "uLodFoam") == 42.0f && uf(*far, "uLodShade") == 420.0f,
           "water.lod_foam and water.lod_shade are live");
+      // The samplers (WebGL2 has 16 a draw): the cascades in one atlas, the coast in another.
+      vtkTextureObject *disp = near->shaderTexture("uDisp");
+      chk(disp && disp->GetWidth() == 3 * 256 && disp->GetHeight() == 256 &&
+              near->shaderTexture("uCoast") && far->shaderTexture("uDisp") == disp &&
+              !near->shaderTexture("uDisp0") && !near->shaderTexture("uShoreGrid") &&
+              !near->shaderTexture("cvcHF"),
+          "the cascades' displacement in one atlas (uDisp) and the coast in one (uCoast)");
+      // Adaptive quality (O21): the scene's tier and scale (quality.tier, quality.scale: what
+      // AriRuntime's loop writes), or water.quality's own tier, pick what the water draws.
+      chk(approx(st("water.quality").value<double>(), -1.0),
+          "water.quality is seeded at -1: the scene's tier");
+      st("quality.tier").value(1.0);
+      st("quality.scale").value(0.5);
+      tick();
+      chk(uf(*near, "uLodShade") == 105.0f && uf(*near, "uFoamReach") == 0.25f &&
+              uf(*near, "uLodWaves") == 75.0f && uf(*far, "uFarReach") == 0.5f &&
+              uf(*near, "uFoamOn") == 1.0f && uf(*near, "uLodFoam") == 42.0f,
+          "tier 1 at half scale: the shading to a quarter (105 m), the persistent foam's reads to "
+          "a quarter of lod_foam, the short cascade and the far normal to half; the foam stays on");
+      st("water.quality").value(3.0); // the node's own tier, whatever the scene's
+      tick();
+      const float aloneBias = uf(*near, "uFoamBias");
+      chk(uf(*near, "uLodShade") == 1e-3f && uf(*near, "uLodWaves") == -1.0f &&
+              uf(*near, "uFoamOn") == 0.0f && uf(*near, "uFoamReach") == 0.0f &&
+              uf(*far, "uFarReach") == 0.5f,
+          "water.quality 3: the simple shading, no short cascade, no persistent foam");
+      chk(aloneBias > bias,
+          "... the whitecaps alone take the higher threshold that covers Monahan's share");
+      st("water.quality").value(-1.0);
+      st("quality.tier").value(0.0);
+      st("quality.scale").value(1.0);
+      tick();
+      chk(uf(*near, "uLodShade") == 420.0f && uf(*near, "uLodWaves") == 150.0f &&
+              uf(*near, "uFoamOn") == 1.0f && uf(*near, "uFoamReach") == 1.0f &&
+              uf(*near, "uFoamBias") == bias,
+          "tier 0 again: everything back as the keys have it");
       // foam_decay 0: the atlas stops, and the whitecaps' threshold is found alone (once the key
       // has held for 10 frames), as before O5.
       st("water.foam_decay").value(0.0);

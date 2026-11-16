@@ -6,7 +6,8 @@
 # how far the waves fade toward the shore, the swell that breaks on the beaches (its shore layer is
 # found again once the sliders rest), the foam at the waterline, the waves floating bodies make (a
 # water node with body:), and the level of detail: how far from the camera the foam keeps its
-# detail and the water its full shading. Seeded from the node's .ari props.
+# detail, the water its full shading and the short waves reach, and the water's quality tier (by
+# default the scene's adaptive quality). Seeded from the node's .ari props.
 #
 # Args (every one has a default, so a bare include works):
 #   keys   the water node's state key root: its `keys:` prop, else water (the default).
@@ -100,3 +101,15 @@ units:
         hi: 3000.0
         fmt: "%.0f"
         tooltip: "the full water shading ends this far from the camera; a simpler one beyond"
+      - slider_float: Short waves to (m)
+        bind: "{keys}.lod_waves"
+        lo: 0.0
+        hi: 400.0
+        fmt: "%.0f"
+        tooltip: "the metre-long waves fade out this far from the camera"
+      - slider_float: Quality tier
+        bind: "{keys}.quality"
+        lo: -1.0
+        hi: 4.0
+        fmt: "%.0f"
+        tooltip: "-1: the scene's adaptive quality (quality.tier); 0 everything .. 4 the least"

@@ -27,10 +27,13 @@
 //
 // What it draws, everything below `level` on the ground (a generated_world's height field, or any
 // height-field node's, `world:` / `ground:`):
-//   - near: a grid `near` metres each way from the camera (a vertex every 2 near / (cells - 1)),
-//     displaced by three FFT cascades (OceanFFT, the wind sea's h0 from cvc::ocean::build_h0) and
-//     the swell's shore layer, the waves fading toward the grid's edge. It moves with the camera by
-//     whole cells, so the waves do not swim.
+//   - near: a grid `near` metres each way from the camera, displaced by three FFT cascades
+//     (OceanCascades: all three in one set of passes, the wind sea's h0 from
+//     cvc::ocean::build_h0) and the swell's shore layer, the waves fading toward the grid's edge.
+//     It is three rings: a vertex every 2 near / (cells - 1) out to a third of the way, every
+//     twice that to two thirds, every four times that past (ring_coords). It moves with the camera
+//     by the coarsest spacing, so the waves do not swim; the short cascade fades out by
+//     `lod_waves` metres from the camera.
 //   - far: a flat grid over the ground's extent with the same shading, its normal the waves' per
 //     fragment (the two long cascades and the swell, fading with distance), for the water past the
 //     near grid; it gives way inside the near grid.
@@ -57,7 +60,8 @@
 // leaves it out of both.
 //
 // With `body:` the water is in the scene's physics world (scene_water.h), and the bodies floating
-// in it make waves: an eWave window (EWave, 128 m of 0.5 m cells) around the camera's target takes
+// in it make waves: an eWave window (EWave, 128 m of 0.5 m cells; 64 m at adaptive quality's tiers 1
+// and 2) around the camera's target takes
 // each moving body's immersed columns as its source (WakeSource, cvc::physics::add_immersion),
 // steps by the world's time, and adds its height to the near grid's vertices and its slope and foam
 // to both grids' fragments. Beaches absorb its waves and steep shores reflect them.
@@ -68,25 +72,38 @@
 // Jacobian threshold, its ramp and the noise on its edge), whitecaps (a share of Monahan's cover),
 // foam_decay (s: how long the persistent foam lasts; 0 none), shore_fade (m), swell_height (m),
 // swell_period (s), swell_dir (degrees), shore_foam (the waterline's and the breakers' foam), wake
-// (0 / 1), wake_foam, lod_foam and lod_shade (m: where the foam's detail and the full shading end).
+// (0 / 1), wake_foam, lod_foam, lod_shade and lod_waves (m: where the foam's detail, the full
+// shading and the short cascade end), quality (-1: the scene's adaptive quality tier, else 0 .. 4)
+// and profile (1: time the node's work into water.stats.*; 2: and wait for the GPU in each part).
 // A change to the wind rebuilds the cascades' h0 (tens of milliseconds); a change to the swell, the
 // coast's shore layer (once the keys have held for a few frames); and to what the foam's
 // thresholds depend on, the thresholds, off the frame (OceanFoamCalibration).
+//
+// Adaptive quality (cvc/ariadne/scene_quality.h, O21): the scene's quality.tier and quality.scale
+// (AriRuntime's loop on the frame time), or `quality`, pick how far the shading, the persistent
+// foam, the short cascade and the far grid's waves reach, the wake's window and whether the
+// persistent foam, the wake and the short cascade run at all. Drawing only: the physics sea is the
+// same at every tier.
+//
+// Samplers (WebGL2 gives a draw 16): the vertex stage reads the cascades' atlas, the coast atlas and
+// the wake; the fragment stage those and the foam atlas (and a cloud_sky's two shade maps).
 //
 // The cascades and the wake need float render targets (WebGL2's EXT_color_buffer_float). Without
 // them, or before the window is up, the water draws as flat blue.
 
 #include "EWave.h"
-#include "OceanFFT.h"
+#include "OceanCascades.h"
 #include "OceanFoam.h"
 #include "WakeSource.h"
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_generated_world.h> // SceneColliders
+#include <cvc/ariadne/scene_quality.h>         // adaptive quality's tiers (O21)
 #include <cvc/ariadne/scene_water.h>           // its physics (WaterRuntime) and coast
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/core/app.h>
@@ -94,7 +111,6 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/gl/GeometryNode.h>
-#include <cvc/gl/HeightFieldTexture.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/world_nodes.h>
@@ -139,40 +155,48 @@ constexpr double kDefaultSun[3] = {0.35, 0.25, 0.90}; // when the renderer has n
 // What both stages read: the cascades, the coast (the bed, the shore distance, the shore layer) and
 // the wake. Every uniform says highp, so the two stages' declarations match under WebGL2.
 const char *const kWaterCommonDec =
-    "uniform highp sampler2D uDisp0; uniform highp sampler2D uDisp1; uniform highp sampler2D "
-    "uDisp2;\n"
+    // the cascades' displacement atlas (OceanCascades: tile c cascade c, n texels a side)
+    "uniform highp sampler2D uDisp;\n"
     "uniform highp float uTile0; uniform highp float uTile1; uniform highp float uTile2;\n"
     "uniform highp float uHalfTexel; uniform highp float uWaveAmp; uniform highp float uLevel;\n"
     "uniform highp vec3 uFade; uniform highp float uWaves; uniform highp float uNearHalf;\n"
-    // the shore grid: the signed distance to the shore (+ offshore), on its grid
-    "uniform highp sampler2D uShoreGrid; uniform highp vec3 uShoreGridOrigin;\n"
-    "uniform highp vec3 uShoreGridSpacing;\n"
-    // the shore layer on the same grid: (phase, amplitude, reflected, steepness) and (direction x,
-    // y, wavenumber, breaking), and its trains
-    "uniform highp sampler2D uShoreWave; uniform highp sampler2D uShoreDir;\n"
+    "uniform highp vec3 uCamPos;\n"
+    // The coast atlas, on the shore grid: its planes side by side, uCoastN columns each. Plane 0
+    // holds (the signed distance to the shore, + offshore; the still water's depth, the level
+    // minus the bed, <= 0 on dry ground); with a swell (uSwellOn) plane 1 the shore layer's
+    // (phase, amplitude, reflected, steepness) and plane 2 its (direction x, y, wavenumber,
+    // breaking). One sampler for the bed, the shore and the swell (a WebGL2 draw has 16).
+    "uniform highp sampler2D uCoast; uniform highp float uCoastN; uniform highp float uSwellOn;\n"
+    "uniform highp vec3 uShoreGridOrigin; uniform highp vec3 uShoreGridSpacing;\n"
     "uniform highp float uSwellOmega; uniform highp float uShoreTime;\n"
     "uniform highp vec3 uTrainRatio; uniform highp vec3 uTrainAmp; uniform highp vec3 "
     "uTrainPhase;\n"
     "uniform highp vec3 uTrainPhaseR;\n";
 const char *const kWaterCommonFuncs =
-    // a shore-grid texture at p, bilinear by hand (WebGL2 filters no float texture)
-    "vec4 oGrid4(highp sampler2D tex, vec2 p){\n"
-    "  ivec2 sz = textureSize(tex, 0);\n"
+    // a plane of the coast atlas at p, bilinear by hand (WebGL2 filters no float texture),
+    // clamped to the grid
+    "vec4 oCoast(int plane, vec2 p){\n"
+    "  ivec2 sz = ivec2(int(uCoastN + 0.5), textureSize(uCoast, 0).y);\n"
     "  vec2 f = (p - uShoreGridOrigin.xy) / uShoreGridSpacing.xy;\n"
     "  vec2 fl = floor(f), fr = f - fl;\n"
     "  ivec2 i0 = clamp(ivec2(fl), ivec2(0), sz - ivec2(1));\n"
     "  ivec2 i1 = clamp(ivec2(fl) + ivec2(1), ivec2(0), sz - ivec2(1));\n"
-    "  vec4 a = mix(texelFetch(tex, i0, 0), texelFetch(tex, ivec2(i1.x, i0.y), 0), fr.x);\n"
-    "  vec4 b = mix(texelFetch(tex, ivec2(i0.x, i1.y), 0), texelFetch(tex, i1, 0), fr.x);\n"
+    "  int o = plane*sz.x;\n"
+    "  vec4 a = mix(texelFetch(uCoast, ivec2(o + i0.x, i0.y), 0),\n"
+    "               texelFetch(uCoast, ivec2(o + i1.x, i0.y), 0), fr.x);\n"
+    "  vec4 b = mix(texelFetch(uCoast, ivec2(o + i0.x, i1.y), 0),\n"
+    "               texelFetch(uCoast, ivec2(o + i1.x, i1.y), 0), fr.x);\n"
     "  return mix(a, b, fr.y);\n"
     "}\n"
-    "float oShoreDist(vec2 p){ return oGrid4(uShoreGrid, p).r; }\n"
+    "float oShoreDist(vec2 p){ return oCoast(0, p).r; }\n"
+    "float oDepth(vec2 p){ return oCoast(0, p).g; }\n" // the level minus the bed
     // the shore layer at p: (height, sideways x, sideways y, breaking on a crest), the sum
     // cvc::ocean::shore_layer::evaluate does on the CPU
     "vec4 oShoreLayer(vec2 p){\n"
-    "  vec4 w = oGrid4(uShoreWave, p);\n"
+    "  if (uSwellOn < 0.5) return vec4(0.0);\n"
+    "  vec4 w = oCoast(1, p);\n"
     "  if (w.y <= 0.0 && w.z <= 0.0) return vec4(0.0);\n"
-    "  vec4 d = oGrid4(uShoreDir, p);\n"
+    "  vec4 d = oCoast(2, p);\n"
     "  vec2 dir = d.xy; float dl = length(dir); if (dl > 1e-6) dir /= dl;\n"
     "  float eta = 0.0, h = 0.0, crest = -1.0;\n"
     "  for (int i = 0; i < 3; ++i) {\n"
@@ -186,7 +210,8 @@ const char *const kWaterCommonFuncs =
     "  return vec4(eta, h*dir, d.w*smoothstep(0.55, 1.0, crest));\n"
     "}\n"
     "float oShoreEta(vec2 p){\n"
-    "  vec4 w = oGrid4(uShoreWave, p);\n"
+    "  if (uSwellOn < 0.5) return 0.0;\n"
+    "  vec4 w = oCoast(1, p);\n"
     "  if (w.y <= 0.0 && w.z <= 0.0) return 0.0;\n"
     "  float eta = 0.0;\n"
     "  for (int i = 0; i < 3; ++i) {\n"
@@ -197,21 +222,34 @@ const char *const kWaterCommonFuncs =
     "  return eta;\n"
     "}\n"
     // each cascade's weight at p: 0 on dry ground, rising to 1 as the still water deepens
-    "vec3 oDepthW(vec2 p){\n"
-    "  float d = uLevel - cvc_hf_height(p);\n"
+    "vec3 depthW(float d){\n"
     "  return vec3(smoothstep(0.0,uFade.x,d), smoothstep(0.0,uFade.y,d), "
     "smoothstep(0.0,uFade.z,d));\n"
     "}\n"
-    // a cascade at world w: the texel nearest w (lsystem_coast's oDisp)
-    "vec4 wDisp(highp sampler2D t, vec2 w, float tile){ return textureLod(t, w/tile + uHalfTexel, "
-    "0.0); }\n"
+    "vec3 oDepthW(vec2 p){ return depthW(oDepth(p)); }\n"
+    // cascade c at world w: the texel nearest w (lsystem_coast's oDisp), wrapped into its tile of
+    // the atlas
+    "vec4 wDisp(int c, vec2 w, float tile){\n"
+    "  float fn = 0.5/uHalfTexel;\n"
+    "  vec2 f = floor(w*(fn/tile) + 0.5);\n"
+    "  f -= fn*floor(f/fn);\n"
+    "  return texelFetch(uDisp, ivec2(int(f.x) + c*int(fn), int(f.y)), 0);\n"
+    "}\n"
+    // a cascade whose weight is 0 (faded by depth, by distance, or the far grid) is not read
     "vec4 wSum(vec2 w, vec3 k){\n"
-    "  vec4 a=wDisp(uDisp0,w,uTile0), b=wDisp(uDisp1,w,uTile1), c=wDisp(uDisp2,w,uTile2);\n"
+    "  vec4 a = k.x > 0.0 ? wDisp(0,w,uTile0) : vec4(0.0, 0.0, 0.0, 1.0);\n"
+    "  vec4 b = k.y > 0.0 ? wDisp(1,w,uTile1) : vec4(0.0, 0.0, 0.0, 1.0);\n"
+    "  vec4 c = k.z > 0.0 ? wDisp(2,w,uTile2) : vec4(0.0, 0.0, 0.0, 1.0);\n"
     "  vec3 j = vec3(1.0) + k*(vec3(a.w,b.w,c.w) - vec3(1.0));\n" // a faded fold folds less
     "  return vec4(k.x*a.xyz+k.y*b.xyz+k.z*c.xyz, min(min(j.x,j.y),j.z));\n"
     "}\n"
-    "float wHt(vec2 w, vec3 k){ return "
-    "k.x*wDisp(uDisp0,w,uTile0).y+k.y*wDisp(uDisp1,w,uTile1).y+k.z*wDisp(uDisp2,w,uTile2).y; }\n";
+    "float wHt(vec2 w, vec3 k){\n"
+    "  float h = 0.0;\n"
+    "  if (k.x > 0.0) h += k.x*wDisp(0,w,uTile0).y;\n"
+    "  if (k.y > 0.0) h += k.y*wDisp(1,w,uTile1).y;\n"
+    "  if (k.z > 0.0) h += k.z*wDisp(2,w,uTile2).y;\n"
+    "  return h;\n"
+    "}\n";
 
 // The wake (lsystem_coast's WAKE_GLSL_ON): an eWave window's state (.r the height h, .g the
 // potential phi; cell (i, j) at texel (i, j), its point at uWakeGrid.xy + (i, j) uWakeGrid.z),
@@ -239,6 +277,9 @@ const char *const kWakeOn =
     "  return mix(a, b, fr.y) * (uWakeOn * smoothstep(0.0, 8.0, e));\n"
     "}\n"
     "float wkVertex(vec2 p, float s){\n"
+    "  vec2 g = (p - uWakeGrid.xy) / uWakeGrid.z;\n" // outside the window: no taps
+    "  if (uWakeOn < 0.5 || any(lessThan(g, vec2(-2.0*s/uWakeGrid.z)))\n"
+    "      || any(greaterThan(g, vec2(uWakeN + 2.0*s/uWakeGrid.z)))) return 0.0;\n"
     "  float h = 0.0;\n"
     "  for (int j = -1; j <= 1; ++j)\n"
     "    for (int i = -1; i <= 1; ++i) {\n"
@@ -247,20 +288,30 @@ const char *const kWakeOn =
     "    }\n"
     "  return h / 16.0;\n"
     "}\n"
-    "vec4 wkCellDeriv(ivec2 c){\n"
+    // a cell's (dh/dx, dh/dy, laplacian h, |grad phi|) from it and its four neighbours
+    "vec4 wkDeriv(vec2 o, vec2 xp, vec2 xm, vec2 yp, vec2 ym){\n"
     "  float d = uWakeGrid.z;\n"
-    "  vec2 o = wkCell(c), xp = wkCell(c + ivec2(1, 0)), xm = wkCell(c - ivec2(1, 0));\n"
-    "  vec2 yp = wkCell(c + ivec2(0, 1)), ym = wkCell(c - ivec2(0, 1));\n"
     "  return vec4((xp.x - xm.x) / (2.0*d), (yp.x - ym.x) / (2.0*d),\n"
     "              (xp.x + xm.x + yp.x + ym.x - 4.0*o.x) / (d*d),\n"
     "              length(vec2(xp.y - xm.y, yp.y - ym.y)) / (2.0*d));\n"
     "}\n"
     "vec3 wkSlopeFoam(vec2 p){\n"
     "  vec2 f = (p - uWakeGrid.xy) / uWakeGrid.z;\n"
+    // off, or outside the window (where its edge's fade is 0): none of the reads
+    "  if (uWakeOn < 0.5 || any(lessThan(f, vec2(0.0))) || any(greaterThan(f, vec2(uWakeN - "
+    "1.0))))\n"
+    "    return vec3(0.0);\n"
     "  vec2 fl = floor(f), fr = f - fl;\n"
     "  ivec2 i = ivec2(fl);\n"
-    "  vec4 a = mix(wkCellDeriv(i), wkCellDeriv(i + ivec2(1, 0)), fr.x);\n"
-    "  vec4 b = mix(wkCellDeriv(i + ivec2(0, 1)), wkCellDeriv(i + ivec2(1, 1)), fr.x);\n"
+    // the four corners' stencils share 12 cells: each read once
+    "  vec2 c00 = wkCell(i), c10 = wkCell(i + ivec2(1, 0));\n"
+    "  vec2 c01 = wkCell(i + ivec2(0, 1)), c11 = wkCell(i + ivec2(1, 1));\n"
+    "  vec2 cm0 = wkCell(i + ivec2(-1, 0)), cm1 = wkCell(i + ivec2(-1, 1));\n"
+    "  vec2 c20 = wkCell(i + ivec2(2, 0)), c21 = wkCell(i + ivec2(2, 1));\n"
+    "  vec2 c0m = wkCell(i + ivec2(0, -1)), c1m = wkCell(i + ivec2(1, -1));\n"
+    "  vec2 c02 = wkCell(i + ivec2(0, 2)), c12 = wkCell(i + ivec2(1, 2));\n"
+    "  vec4 a = mix(wkDeriv(c00, c10, cm0, c01, c0m), wkDeriv(c10, c20, c00, c11, c1m), fr.x);\n"
+    "  vec4 b = mix(wkDeriv(c01, c11, cm1, c02, c00), wkDeriv(c11, c21, c01, c12, c10), fr.x);\n"
     "  float e = min(min(f.x, uWakeN - 1.0 - f.x), min(f.y, uWakeN - 1.0 - f.y));\n"
     "  vec4 q = mix(a, b, fr.y) * (uWakeOn * smoothstep(0.0, 8.0, e));\n"
     "  float foam = uWakeFoam*(0.35*max(-q.z, 0.0) + 2.0*max(q.w - 0.15, 0.0));\n"
@@ -271,8 +322,7 @@ const char *const kWakeOff = "float wkVertex(vec2 p, float s){ return 0.0; }\n"
                              "vec3 wkSlopeFoam(vec2 p){ return vec3(0.0); }\n";
 
 std::string common_glsl(bool wake) {
-  return std::string(kWaterCommonDec) + HeightFieldTexture::glsl() + kWaterCommonFuncs +
-         (wake ? kWakeOn : kWakeOff);
+  return std::string(kWaterCommonDec) + kWaterCommonFuncs + (wake ? kWakeOn : kWakeOff);
 }
 
 const char *const kWaterVsDec = "//VTK::PositionVC::Dec\n"
@@ -283,30 +333,52 @@ const char *const kWaterVsDec = "//VTK::PositionVC::Dec\n"
                                 "out float vShoreBreak;\n"
                                 "out vec3 vWaterK;\n" // each cascade's weight (depth, grid edge)
                                 "uniform highp float uCell;\n"
-                                "uniform highp vec3 uCenter;\n";
+                                "uniform highp vec3 uCenter;\n"
+                                // the near grid's rings: the inner spacing uCell out to uRing.x,
+                                // twice it to uRing.y, four times it past; and where the short
+                                // cascade has faded out (water.lod_waves, m from the camera)
+                                "uniform highp vec3 uRing; uniform highp float uLodWaves;\n";
 // The cascades and the swell, each faded by the depth under it and, on the near grid, toward its
 // edge; the sideways move capped by the shore distance (sea_surface::displacement on the CPU); the
 // wake's height on top.
 const char *const kWaterVsImpl =
     "  vec4 dispMC = vertexMC;\n"
     "  vec2 w = vertexMC.xy + uCenter.xy;\n"
-    "  float edge = max(abs(vertexMC.x), abs(vertexMC.y)) / max(uNearHalf, 1e-3);\n"
-    "  float ke = uWaves * (1.0 - smoothstep(0.75, 1.0, edge));\n"
-    "  vec3 k = ke * oDepthW(w);\n"
-    "  vec4 od = wSum(w, k);\n"
+    "  vec3 k = vec3(0.0);\n"
+    "  vec4 od = vec4(0.0, 0.0, 0.0, 1.0), osl = vec4(0.0);\n"
+    "  vWaterN = vec3(0.0, 0.0, 1.0);\n"
+    // The far grid stays flat (its normal is the fragment's): none of the near grid's reads.
+    "  if (uWaves > 0.5) {\n"
+    "    float edge = max(abs(vertexMC.x), abs(vertexMC.y)) / max(uNearHalf, 1e-3);\n"
+    "    float ke = 1.0 - smoothstep(0.75, 1.0, edge);\n"
+    // the vertex's own spacing: the ring it is in
+    "    float r = max(abs(vertexMC.x), abs(vertexMC.y));\n"
+    "    float sp = r <= uRing.x + 1e-3 ? uCell : (r <= uRing.y + 1e-3 ? 2.0*uCell : 4.0*uCell);\n"
+    "    vec4 c0 = oCoast(0, w);\n" // (shore distance, depth)
+    "    k = ke * depthW(c0.g);\n"
+    // the short cascade's metre-long waves fade out with distance from the camera (and are not
+    // read); a negative uLodWaves leaves them out (adaptive quality's two cascades)
+    "    k.z *= uLodWaves > 0.0 ? 1.0 - smoothstep(0.6*uLodWaves, uLodWaves, length(w - "
+    "uCamPos.xy))"
+    " : 0.0;\n"
+    "    od = wSum(w, k);\n"
     // the swell at its true size: uWaveAmp scales the cascades only, so the shore layer's breaking
     // cap holds at any wave height
-    "  vec4 osl = ke * oShoreLayer(w);\n"
-    "  float hpx = uWaveAmp*wHt(w+vec2(1.0,0.0), k) + ke*oShoreEta(w+vec2(1.0,0.0));\n"
-    "  float hmx = uWaveAmp*wHt(w-vec2(1.0,0.0), k) + ke*oShoreEta(w-vec2(1.0,0.0));\n"
-    "  float hpy = uWaveAmp*wHt(w+vec2(0.0,1.0), k) + ke*oShoreEta(w+vec2(0.0,1.0));\n"
-    "  float hmy = uWaveAmp*wHt(w-vec2(0.0,1.0), k) + ke*oShoreEta(w-vec2(0.0,1.0));\n"
-    "  vWaterN = normalize(vec3(-(hpx-hmx)*0.5, -(hpy-hmy)*0.5, 1.0));\n"
-    "  vec2 dh = vec2(od.x, od.z) + osl.yz;\n"
-    "  float dlim = 0.8*max(oShoreDist(w), 0.0), dlen = length(dh);\n"
-    "  if (dlen > dlim) dh *= dlim/max(dlen, 1e-6);\n"
-    "  dispMC.xy += dh;\n"
-    "  dispMC.z += uWaveAmp*od.y + osl.x + ke*wkVertex(w, uCell);\n"
+    "    osl = ke * oShoreLayer(w);\n"
+    // the normal from differences half the vertex's spacing either way (1 m on the inner ring)
+    "    float e = max(1.0, 0.5*sp);\n"
+    "    vec2 ex = vec2(e, 0.0), ey = vec2(0.0, e);\n"
+    "    float hpx = uWaveAmp*wHt(w+ex, k) + ke*oShoreEta(w+ex);\n"
+    "    float hmx = uWaveAmp*wHt(w-ex, k) + ke*oShoreEta(w-ex);\n"
+    "    float hpy = uWaveAmp*wHt(w+ey, k) + ke*oShoreEta(w+ey);\n"
+    "    float hmy = uWaveAmp*wHt(w-ey, k) + ke*oShoreEta(w-ey);\n"
+    "    vWaterN = normalize(vec3(-(hpx-hmx)/(2.0*e), -(hpy-hmy)/(2.0*e), 1.0));\n"
+    "    vec2 dh = vec2(od.x, od.z) + osl.yz;\n"
+    "    float dlim = 0.8*max(c0.r, 0.0), dlen = length(dh);\n"
+    "    if (dlen > dlim) dh *= dlim/max(dlen, 1e-6);\n"
+    "    dispMC.xy += dh;\n"
+    "    dispMC.z += uWaveAmp*od.y + osl.x + ke*wkVertex(w, sp);\n"
+    "  }\n"
     "  vertexVCVSOutput = MCVCMatrix * dispMC;\n"
     "  gl_Position = MCDCMatrix * dispMC;\n"
     "  vWaterPos = vec3(dispMC.xy + uCenter.xy, dispMC.z);\n"
@@ -323,7 +395,7 @@ const char *const kWaterFsDec =
     "in float vWaterJac;\n"
     "in float vShoreBreak;\n"
     "in vec3 vWaterK;\n"
-    "uniform highp vec3 uCamPos; uniform highp vec3 uSunDir;\n"
+    "uniform highp vec3 uSunDir;\n"
     "uniform highp float uFoamBias; uniform highp float uFoamRamp; uniform highp float uFoamFray;\n"
     "uniform highp float uShore; uniform highp float uTime;\n"
     // The persistent foam (OceanFoam's atlas: the long and middle cascades' tiles); whether it is
@@ -332,7 +404,8 @@ const char *const kWaterFsDec =
     // at (water.lod_foam, water.lod_shade); the wind (the roughness, the windrows).
     "uniform highp sampler2D uFoamTex; uniform highp float uFoamOn;\n"
     "uniform highp float uFoamDetail; uniform highp float uFoamCover;\n"
-    "uniform highp float uLodFoam; uniform highp float uLodShade;\n"
+    "uniform highp float uLodFoam; uniform highp float uLodShade; uniform highp float uFarReach;\n"
+    "uniform highp float uFoamReach;\n"
     "uniform highp float uWindU; uniform highp vec3 uWindDir; uniform highp float uCell;\n"
     "uniform highp vec3 uCutMin; uniform highp vec3 uCutMax;\n"    // the far grid gives way inside
                                                                    // the near one
@@ -347,10 +420,12 @@ const char *const kWaterFsFuncs =
     "}\n"
     // The far grid's cascade weights at distance dist: the middle cascade fades out by 3 near,
     // the long one and the swell by 10 near (the cascades' texels are read nearest, so a pixel
-    // wider than a texel would sparkle); the short one is never in its normal.
+    // wider than a texel would sparkle), both nearer at adaptive quality's lower tiers
+    // (uFarReach); the short one is never in its normal.
     "vec3 wFarK(float dist){\n"
-    "  return vec3(1.0 - smoothstep(uNearHalf, 10.0*uNearHalf, dist),\n"
-    "              1.0 - smoothstep(uNearHalf, 3.0*uNearHalf, dist), 0.0);\n"
+    "  float r = max(uFarReach, 0.1);\n"
+    "  return vec3(1.0 - smoothstep(uNearHalf, max(10.0*r, 1.01)*uNearHalf, dist),\n"
+    "              1.0 - smoothstep(uNearHalf, max(3.0*r, 1.01)*uNearHalf, dist), 0.0);\n"
     "}\n"
     // The far grid's normal: the long and middle cascades' and the swell's slopes at the fragment,
     // the difference's step growing with distance (1 + 0.004 dist), the detail fading out (wFarK).
@@ -383,7 +458,7 @@ const char *const kWaterFsFuncs =
 const char *const kWaterFsLight =
     // The depth at the fragment, from the bed itself: the far grid's cells are metres across.
     "  float sunShade = WATER_SUN_SHADE;\n"
-    "  float depthF = uLevel - cvc_hf_height(vWaterRest);\n"
+    "  float depthF = oDepth(vWaterRest);\n"
     "  if (depthF < -0.25) discard;\n" // dry ground: the terrain draws there
     "  if (any(lessThan(vWaterRest, uClipMin.xy)) || any(greaterThan(vWaterRest, uClipMax.xy))) "
     "discard;\n"
@@ -405,14 +480,17 @@ const char *const kWaterFsLight =
     // The persistent foam and its bubbles: the stronger long cascade's, each faded as its waves
     // fade (vWaterK), carved into windrows (cvc::ocean::foam_look).
     "  float fd = uFoamDetail*(1.0 - smoothstep(0.6*uLodFoam, uLodFoam, distXY));\n"
+    // its reads reach a share of that at adaptive quality's lower tiers (uFoamReach: 1 at full)
+    "  float pr = uLodFoam*uFoamReach;\n"
+    "  float fdp = pr > 0.0 ? uFoamDetail*(1.0 - smoothstep(0.6*pr, pr, distXY)) : 0.0;\n"
     "  float pf = 0.0, bub = 0.0;\n"
-    "  if (uFoamOn > 0.5 && fd > 0.0) {\n"
+    "  if (uFoamOn > 0.5 && fdp > 0.0) {\n"
     "    int fn = int(0.5/uHalfTexel + 0.5);\n"
     "    vec4 f0 = oFoamTile(uFoamTex, 0, fn, uTile0, vWaterRest);\n"
     "    vec4 f1 = oFoamTile(uFoamTex, 1, fn, uTile1, vWaterRest);\n"
     "    float F = max(vWaterK.x*f0.r, vWaterK.y*f1.r);\n"
-    "    if (F > 0.2) pf = oFoamLook(F, oWindrow(vWaterRest, uWindDir.xy, fp));\n" // else none
-    "    bub = max(vWaterK.x*f0.g, vWaterK.y*f1.g)*fd;\n"
+    "    if (F > 0.2) pf = oFoamLook(F, oWindrow(vWaterRest, uWindDir.xy, fp))*(fdp/fd);\n"
+    "    bub = max(vWaterK.x*f0.g, vWaterK.y*f1.g)*fdp;\n"
     "  }\n"
     // The shading: A4 near (sd 1), the O15 model far (sd 0), mixed between. The cascades in the
     // normal are the near grid's (its vertices 2 m apart) or the far grid's (its differences
@@ -429,7 +507,7 @@ const char *const kWaterFsLight =
     "  }\n"
     // Shallow water is translucent: the bed shows through, fading with the depth under the surface
     // (Beer-Lambert), so the shallows brighten and darken as the waves pass.
-    "  float depthS = vWaterPos.z - cvc_hf_height(vWaterPos.xy);\n"
+    "  float depthS = vWaterPos.z - uLevel + oDepth(vWaterPos.xy);\n"
     "  float clarity = exp(-max(depthS,0.0)*0.20);\n"
     "  vec3 shoal = mix(vec3(0.12,0.46,0.54), vec3(0.66,0.64,0.50), clarity*0.55);\n"
     "  col = mix(col, shoal, clarity*0.85);\n"
@@ -443,7 +521,8 @@ const char *const kWaterFsLight =
     // A noisy band at the waterline, washing up and down with the waves: faint on calm water, full
     // where the swell reaches; and the swell's breakers on their crests.
     "  float nz = wnoise(vWaterPos.xy*0.4 + vec2(uTime*0.6, uTime*0.35));\n"
-    "  float surf = clamp(0.25 + oGrid4(uShoreWave, vWaterRest).y/0.25, 0.0, 1.0);\n"
+    "  float surf = clamp(0.25 + (uSwellOn > 0.5 ? oCoast(1, vWaterRest).y : 0.0)/0.25, 0.0, "
+    "1.0);\n"
     "  float band = 1.0 - smoothstep(0.0, 1.8, abs(depthS));\n"
     "  foam = max(foam, clamp(band*(0.55+0.75*nz)*step(-0.4, depthS)*surf*uShore, 0.0, 1.0));\n"
     "  foam = max(foam, clamp(vShoreBreak*(0.7+0.6*nz)*uShore, 0.0, 1.0));\n"
@@ -535,6 +614,50 @@ constexpr const char *kSwashInputs = "water_swash";
 
 // ── meshes ───────────────────────────────────────────────────────────────────────────────────
 
+// A flat grid at z over the coordinates xs by ys (each ascending).
+cvc::geometry tensor_grid(cvc::app &app, const std::vector<double> &xs,
+                          const std::vector<double> &ys, double z) {
+  cvc::geometry g(app);
+  auto &pts = g.points();
+  auto &cols = g.colors();
+  const int nx = int(xs.size()), ny = int(ys.size());
+  pts.reserve(std::size_t(nx) * std::size_t(ny));
+  for (int j = 0; j < ny; ++j)
+    for (int i = 0; i < nx; ++i) {
+      pts.push_back({xs[std::size_t(i)], ys[std::size_t(j)], z});
+      cols.push_back({0.05, 0.20, 0.32}); // the flat fallback's colour
+    }
+  auto &tris = g.tris();
+  using idx = cvc::geometry::index_t;
+  for (int j = 0; j < ny - 1; ++j)
+    for (int i = 0; i < nx - 1; ++i) {
+      const idx v = idx(j * nx + i);
+      tris.push_back({v, idx(v + 1), idx(v + nx)});
+      tris.push_back({idx(v + 1), idx(v + nx + 1), idx(v + nx)});
+    }
+  return g;
+}
+
+// The near grid's coordinates along an axis, from -half to half: spacing s out to r1, 2 s out to
+// r2, 4 s out to half (all whole multiples of 4 s), so the vertex count falls off with distance
+// from the camera and every vertex stays on its own ring's lattice when the grid moves by 4 s.
+std::vector<double> ring_coords(double s, double r1, double r2, double half) {
+  std::vector<double> pos{0.0};
+  const int n1 = int(std::lround(r1 / s)), n2 = int(std::lround((r2 - r1) / (2.0 * s))),
+            n3 = int(std::lround((half - r2) / (4.0 * s)));
+  for (int i = 1; i <= n1; ++i)
+    pos.push_back(i * s);
+  for (int i = 1; i <= n2; ++i)
+    pos.push_back(n1 * s + i * 2.0 * s);
+  for (int i = 1; i <= n3; ++i)
+    pos.push_back(n1 * s + n2 * 2.0 * s + i * 4.0 * s);
+  std::vector<double> out;
+  for (std::size_t i = pos.size(); i-- > 1;)
+    out.push_back(-pos[i]);
+  out.insert(out.end(), pos.begin(), pos.end());
+  return out;
+}
+
 // A flat cells x cells-vertex grid at z, from (x0, y0) to (x1, y1).
 cvc::geometry flat_grid(cvc::app &app, int cells, double x0, double y0, double x1, double y1,
                         double z) {
@@ -563,9 +686,39 @@ cvc::geometry flat_grid(cvc::app &app, int cells, double x0, double y0, double x
 // ── runtime ──────────────────────────────────────────────────────────────────────────────────
 
 struct Cascade {
-  std::unique_ptr<OceanFFT> fft;
   cvc::ocean::cascade band;
-  cvc::ocean::h0_field h0; // what fft was given (the whitecaps' threshold is found from it)
+  cvc::ocean::h0_field h0; // what the FFT was given (the whitecaps' threshold is found from it)
+};
+
+// water.profile: 1 times the node's work a frame, section by section, on the CPU; 2 also waits for
+// the GPU at the end of each section (glFinish), so the passes a section queues count in it (and
+// the frame slows). Published as water.stats.<section>_ms; 0 (the default) times nothing.
+struct WaterLaps {
+  int mode = 0;
+  vtkOpenGLRenderWindow *ow = nullptr;
+  std::chrono::steady_clock::time_point t;
+  std::vector<std::pair<const char *, double>> laps;
+  void begin(int m, vtkOpenGLRenderWindow *w) {
+    mode = m;
+    ow = w;
+    laps.clear();
+    if (mode > 0) {
+      fence();
+      t = std::chrono::steady_clock::now();
+    }
+  }
+  void fence() const {
+    if (mode >= 2 && ow)
+      ow->WaitForCompletion();
+  }
+  void lap(const char *name) {
+    if (mode <= 0)
+      return;
+    fence();
+    const auto n = std::chrono::steady_clock::now();
+    laps.emplace_back(name, std::chrono::duration<double, std::milli>(n - t).count());
+    t = n;
+  }
 };
 
 struct WaterRT {
@@ -573,13 +726,15 @@ struct WaterRT {
   std::string prefix;
   std::weak_ptr<GeometryNode> near, far;
   std::shared_ptr<const cvc::height_field> ground;
-  std::unique_ptr<HeightFieldTexture> bed;
   const float *bedData = nullptr; // the ground's heights the bed was made from (regenerates)
   std::size_t bedSize = 0;
   std::vector<Cascade> cascades;
+  std::unique_ptr<OceanCascades> fft; // every cascade's FFT, in one set of passes
   std::vector<double> lastSea; // the wind keys h0 was built for
   bool ready = false, failed = false;
   double level = 0.0, nearHalf = 192.0, cell = 2.0;
+  double ring1 = 64.0, ring2 = 128.0; // the near grid's rings (ring_coords)
+  std::string lodWavesKey;
   double cx = 0.0, cy = 0.0; // the near grid's centre (whole cells)
   bool placed = false;
   // Whether each mesh draws in a cloud_sky's shade (the sky wires receivers on its ticks).
@@ -604,6 +759,15 @@ struct WaterRT {
   double persistBias = 0.77;
   std::shared_ptr<OceanFoamCalibration> foamJob;
   std::string decayKey, lodFoamKey, lodShadeKey;
+  // Adaptive quality (scene_quality.h, O21): water.quality (< 0: the scene's tier and scale,
+  // quality.tier and quality.scale; 0 .. 4 that tier) and the scene's keys. With the persistent
+  // foam off by a tier, the whitecaps take the bias that covers Monahan's share alone (found with
+  // the other two, off the frame; a guess until it lands).
+  std::string qualityKey, tierKey, scaleKey;
+  double aloneBias = 0.8;
+  // water.profile's timings (the frame's tick and the wake's), and the key.
+  WaterLaps laps, wakeLaps;
+  std::string profileKey;
   ~WaterRT() {
     if (foamJob)
       foamJob->cancel();
@@ -614,7 +778,7 @@ struct WaterRT {
   std::vector<double> shoreSig, shorePending;
   int shoreSettled = 0;
   const float *shoreGround = nullptr;
-  vtkSmartPointer<vtkTextureObject> shoreTex, waveTex, dirTex, swashTex;
+  vtkSmartPointer<vtkTextureObject> coastTex, swashTex; // the coast atlas; the ground's swash
   // the drawing-only keys' resolved paths
   std::string biasKey, rampKey, frayKey, capsKey, shoreFoamKey, wakeKey, wakeFoamKey;
   // The swash on the ground node's meshes (`swash:`, on by default): their shared inputs, the
@@ -657,6 +821,16 @@ std::string seed(cvc::app &app, const std::string &prefix, const ari::SceneNode 
 
 ari::SceneWaterSpec spec_of(cvc::app &app, const WaterRT &rt) {
   return ari::scene_water_spec(app, rt.node, rt.prefix);
+}
+
+// What adaptive quality has the water draw now: water.quality's tier, else the scene's tier and
+// scale (full when nothing runs the loop: a test, a capture on the fixed clock).
+ari::WaterQuality quality_of(cvc::app &app, const WaterRT &rt) {
+  const double pinned = key(app, rt.qualityKey, -1.0);
+  if (pinned >= 0.0)
+    return ari::water_quality(static_cast<int>(std::lround(pinned)), 1.0);
+  return ari::water_quality(static_cast<int>(std::lround(key(app, rt.tierKey, 0.0))),
+                            key(app, rt.scaleKey, 1.0));
 }
 
 // The cascades' wind sea (the swell is the shore layer's).
@@ -717,19 +891,39 @@ vtkSmartPointer<vtkTextureObject> float_texture(vtkOpenGLRenderWindow *ow, int w
 // nothing without a swell), on both meshes. False when a texture failed.
 bool upload_shore(WaterRT &rt, vtkOpenGLRenderWindow *ow, GeometryNode &near, GeometryNode &far) {
   const ari::SceneWaterShore *sh = rt.shore.get();
-  const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-  const float farShore[4] = {1.0e6f, 0.0f, 0.0f, 0.0f}; // no coast: no cap on the sideways move
   const cvc::ocean::shore_grid *g = sh ? sh->grid.get() : nullptr;
-  rt.shoreTex = g ? float_texture(ow, g->cols, g->rows, 1, g->shore_m.data())
-                  : float_texture(ow, 1, 1, 1, farShore);
   const cvc::ocean::shore_layer *L = sh ? sh->layer.get() : nullptr;
+  // The coast atlas (see kWaterCommonDec): plane 0 the shore distance and the still water's depth,
+  // and with a swell the shore layer's two planes beside it. No grid: one texel of open, deep
+  // water (no cap on the sideways move).
+  const bool swell = g && L && !L->empty() && L->cols == g->cols && L->rows == g->rows;
+  const int cols = g ? g->cols : 1, rows = g ? g->rows : 1, planes = swell ? 3 : 1;
+  std::vector<float> atlas(std::size_t(cols) * planes * std::size_t(rows) * 4, 0.0f);
+  auto texel = [&](int plane, std::size_t i) {
+    const std::size_t r = i / std::size_t(cols), c = i % std::size_t(cols);
+    return &atlas[((r * std::size_t(planes) + std::size_t(plane)) * std::size_t(cols) + c) * 4];
+  };
+  if (g) {
+    for (std::size_t i = 0; i < g->count(); ++i) {
+      float *t = texel(0, i);
+      const float d = g->depth[i], sd = g->shore_m[i];
+      t[0] = std::isfinite(sd) ? sd : -1.0f; // off the grid: dry
+      t[1] = std::isfinite(d) ? d : -1.0f;
+    }
+  } else {
+    atlas[0] = 1.0e6f;
+    atlas[1] = 1.0e3f;
+  }
   rt.swashTex = nullptr;
-  if (L && !L->empty()) {
+  if (swell) {
     const std::vector<float> wave = L->wave_texels(), dir = L->dir_texels();
-    rt.waveTex = float_texture(ow, L->cols, L->rows, 4, wave.data());
-    rt.dirTex = float_texture(ow, L->cols, L->rows, 4, dir.data());
+    for (std::size_t i = 0; i < std::size_t(cols) * std::size_t(rows); ++i)
+      for (int k = 0; k < 4; ++k) {
+        texel(1, i)[k] = wave[i * 4 + std::size_t(k)];
+        texel(2, i)[k] = dir[i * 4 + std::size_t(k)];
+      }
     // The ground's own texture for the swash, (phase, runup): bound in the ground's programs
-    // only. Binding the water's two in them as well left the ground without its colour texture.
+    // only. Binding the water's in them as well left the ground without its colour texture.
     if (rt.swash) {
       std::vector<float> sw(L->phase.size() * 2);
       for (std::size_t i = 0; i < L->phase.size(); ++i) {
@@ -738,11 +932,9 @@ bool upload_shore(WaterRT &rt, vtkOpenGLRenderWindow *ow, GeometryNode &near, Ge
       }
       rt.swashTex = float_texture(ow, L->cols, L->rows, 2, sw.data());
     }
-  } else {
-    rt.waveTex = float_texture(ow, 1, 1, 4, zero);
-    rt.dirTex = float_texture(ow, 1, 1, 4, zero);
   }
-  if (!rt.shoreTex || !rt.waveTex || !rt.dirTex)
+  rt.coastTex = float_texture(ow, cols * planes, rows, 4, atlas.data());
+  if (!rt.coastTex)
     return false;
   float v[4][3] = {};
   if (L)
@@ -757,9 +949,9 @@ bool upload_shore(WaterRT &rt, vtkOpenGLRenderWindow *ow, GeometryNode &near, Ge
               oy = g ? static_cast<float>(g->min_y) : 0.0f;
   const float cs = g ? static_cast<float>(g->cell) : 1.0f;
   for (GeometryNode *m : {&near, &far}) {
-    m->setShaderTexture("uShoreGrid", rt.shoreTex);
-    m->setShaderTexture("uShoreWave", rt.waveTex);
-    m->setShaderTexture("uShoreDir", rt.dirTex);
+    m->setShaderTexture("uCoast", rt.coastTex);
+    m->setShaderUniformf("uCoastN", static_cast<float>(cols));
+    m->setShaderUniformf("uSwellOn", swell ? 1.0f : 0.0f);
     m->setShaderUniform3f("uShoreGridOrigin", ox, oy, 0.0f);
     m->setShaderUniform3f("uShoreGridSpacing", cs, cs, 0.0f);
     m->setShaderUniformf("uSwellOmega", L ? static_cast<float>(L->omega) : 0.0f);
@@ -770,23 +962,18 @@ bool upload_shore(WaterRT &rt, vtkOpenGLRenderWindow *ow, GeometryNode &near, Ge
   return true;
 }
 
-// The shaders, the cascades' textures and the bed on one of the water's meshes.
-void style_ocean(GeometryNode &g, const WaterRT &rt, vtkTextureObject *bed) {
-  const char *disp[3] = {"uDisp0", "uDisp1", "uDisp2"};
+// The shaders and the cascades' atlas on one of the water's meshes (the coast's atlas, with the
+// bed's depth, is upload_shore's).
+void style_ocean(GeometryNode &g, const WaterRT &rt) {
   const char *tile[3] = {"uTile0", "uTile1", "uTile2"};
-  for (std::size_t i = 0; i < rt.cascades.size() && i < 3; ++i) {
-    g.setShaderTexture(disp[i], rt.cascades[i].fft->displacement());
+  g.setShaderTexture("uDisp", rt.fft->displacement());
+  for (std::size_t i = 0; i < rt.cascades.size() && i < 3; ++i)
     g.setShaderUniformf(tile[i], static_cast<float>(rt.cascades[i].band.tile_m));
-  }
   g.setShaderUniformf("uHalfTexel", 0.5f / static_cast<float>(kFftN));
   g.setShaderUniformf("uLevel", static_cast<float>(rt.level));
   g.setShaderUniformf("uNearHalf", static_cast<float>(rt.nearHalf));
   g.setShaderUniformf("uCell", static_cast<float>(rt.cell));
-  g.setShaderTexture(HeightFieldTexture::samplerName(), bed);
-  g.setShaderUniform3f(HeightFieldTexture::originName(), static_cast<float>(rt.bed->x0()),
-                       static_cast<float>(rt.bed->y0()), 0.0f);
-  g.setShaderUniform3f(HeightFieldTexture::spacingName(), static_cast<float>(rt.bed->dx()),
-                       static_cast<float>(rt.bed->dy()), 0.0f);
+  g.setShaderUniform3f("uRing", static_cast<float>(rt.ring1), static_cast<float>(rt.ring2), 0.0f);
   const std::string common = common_glsl(rt.wake != nullptr);
   g.addVertexShaderReplacement("//VTK::PositionVC::Dec", std::string(kWaterVsDec) + common);
   g.addVertexShaderReplacement("//VTK::PositionVC::Impl", kWaterVsImpl);
@@ -799,7 +986,7 @@ void style_ocean(GeometryNode &g, const WaterRT &rt, vtkTextureObject *bed) {
   if (rt.foam && rt.foam->texture())
     g.setShaderTexture("uFoamTex", rt.foam->texture());
   else
-    g.setShaderTexture("uFoamTex", rt.cascades.front().fft->displacement()); // never read
+    g.setShaderTexture("uFoamTex", rt.fft->displacement()); // never read
   if (rt.wake) {
     g.setShaderTexture("uWake", rt.wake->heightTexture());
     g.setShaderUniformf("uWakeN", static_cast<float>(rt.wake->params().n));
@@ -807,18 +994,11 @@ void style_ocean(GeometryNode &g, const WaterRT &rt, vtkTextureObject *bed) {
   }
 }
 
-// Make the bed texture's heights the ground's (again after a regenerate); true when they changed.
+// Whether the ground's heights are new (the first time, or a regenerated world).
 bool refresh_bed(WaterRT &rt) {
-  const cvc::height_field &hf = *rt.ground;
-  const std::vector<float> &h = hf.heights();
-  if (h.data() == rt.bedData && h.size() == rt.bedSize && rt.bed)
+  const std::vector<float> &h = rt.ground->heights();
+  if (h.data() == rt.bedData && h.size() == rt.bedSize)
     return false;
-  if (!rt.bed || rt.bed->nx() != hf.cols() || rt.bed->ny() != hf.rows() ||
-      rt.bed->x0() != hf.x0() || rt.bed->y0() != hf.y0() || rt.bed->dx() != hf.dx() ||
-      rt.bed->dy() != hf.dy())
-    rt.bed = std::make_unique<HeightFieldTexture>(hf.cols(), hf.rows(), hf.x0(), hf.y0(), hf.dx(),
-                                                  hf.dy());
-  rt.bed->setHeights(h);
   rt.bedData = h.data();
   rt.bedSize = h.size();
   return true;
@@ -869,16 +1049,21 @@ bool start_ocean(cvc::app &app, WaterRT &rt, vtkOpenGLRenderWindow *ow) {
   const ari::SceneWaterSpec spec = spec_of(app, rt);
   const cvc::ocean::sea_state s = wind_sea(spec);
   const ari::SceneWaterCascades cd = ari::scene_water_cascades(spec);
-  for (const cvc::ocean::cascade &b : cvc::ocean::make_cascades(cd.tiles, cd.seed)) {
+  const std::vector<cvc::ocean::cascade> bands = cvc::ocean::make_cascades(cd.tiles, cd.seed);
+  if (bands.empty() || bands.size() > 3)
+    return false;
+  // All the cascades in one set of passes (OceanCascades: 18 for three, where an OceanFFT each
+  // took 105).
+  rt.fft = std::make_unique<OceanCascades>(kFftN, int(bands.size()));
+  rt.fft->depth_m = 1000.0f;
+  rt.fft->chop = static_cast<float>(spec.chop);
+  if (!rt.fft->init(ow))
+    return false;
+  for (const cvc::ocean::cascade &b : bands) {
     Cascade c;
     c.band = b;
-    c.fft = std::make_unique<OceanFFT>(kFftN);
-    c.fft->depth_m = 1000.0f;
-    c.fft->chop = static_cast<float>(spec.chop);
-    if (!c.fft->init(ow))
-      return false;
     c.h0 = cvc::ocean::build_h0(kFftN, c.band, s);
-    c.fft->setH0(c.h0);
+    rt.fft->setH0(int(rt.cascades.size()), c.h0);
     rt.cascades.push_back(std::move(c));
   }
   rt.lastSea = {s.wind.speed_mps, s.wind.fetch_m, s.wind.dir_rad};
@@ -935,6 +1120,7 @@ void follow_foam_calibration(WaterRT &rt) {
   const cvc::ocean::foam_biases b = rt.foamJob->biases();
   rt.foamBias = b.whitecaps;
   rt.persistBias = b.persistent;
+  rt.aloneBias = rt.foamJob->whitecapsAlone();
   rt.foamJob.reset();
 }
 
@@ -1074,6 +1260,42 @@ outline_of(WaterRT &rt, const std::shared_ptr<const cvc::physics::body_desc> &d)
   return it->second.second.get();
 }
 
+// The bodies' waves' window: `cells` a side of 0.5 m (adaptive quality's tier picks 256 or 128,
+// the window's reach halving with it), started flat; placed again on the next frame. False (and no
+// window) without float targets.
+bool start_wake(WaterRT &rt, vtkOpenGLRenderWindow *ow, int cells) {
+  cvc::ocean::ewave_params wp;
+  wp.n = cells;
+  wp.dx = 0.5;
+  wp.depth = 5.0;       // until the window is placed: then its wet cells' mean depth
+  wp.damping_k2 = 2e-3; // m^2/s: waves 1 m long fade over about 13 s
+  wp.damping = 0.02;    // 1/s: everything, over a minute
+  wp.sponge_cells = 16.0;
+  wp.sponge_rate = 2.0;
+  wp.beach_rate = 10.0;
+  rt.wake = std::make_unique<EWave>(wp);
+  rt.wakeSrc.reset();
+  rt.wakePlaced = false;
+  rt.wakeShore = nullptr;
+  rt.wakeT = -1.0;
+  if (!ow || !rt.wake->init(ow)) {
+    rt.wake.reset();
+    return false;
+  }
+  rt.wakeSrc = std::make_unique<WakeSource>(rt.wake->params());
+  return true;
+}
+
+// water.profile's timings to water.stats.<section>_ms (nothing when it is off).
+void publish_laps(cvc::app &app, const WaterRT &rt, const WaterLaps &laps) {
+  for (const auto &[name, ms] : laps.laps)
+    ari::write<double>(
+        app,
+        ari::resolve_bind(rt.prefix,
+                          ari::node_key(rt.node, std::string("water.stats.") + name + "_ms")),
+        ms);
+}
+
 // One frame of the wake: place the window at the camera's target, add the moving bodies' sources
 // (each body where it is drawn, in the water physics feels at the time of that pose), step it by
 // the world time since the last frame, and bind it.
@@ -1085,7 +1307,12 @@ void tick_wake(cvc::app &app, WaterRT &rt, vtkRenderer *ren, RealizedScene &scen
   auto far = rt.far.lock();
   if (!near || !far)
     return;
-  const bool on = key(app, rt.wakeKey, 1.0) > 0.5;
+  const ari::WaterQuality q = quality_of(app, rt);
+  const bool on = key(app, rt.wakeKey, 1.0) > 0.5 && q.wake;
+  // the tier's window size (a new window, flat; the old one's waves are dropped)
+  if (on && q.wake_cells != rt.wake->params().n &&
+      !start_wake(rt, vtkOpenGLRenderWindow::SafeDownCast(ren->GetRenderWindow()), q.wake_cells))
+    return;
   // Decision D3: the camera's target, the point the view is about; the camera's own place when the
   // target is off past the near grid (a view toward the horizon).
   double tx = rt.cx, ty = rt.cy;
@@ -1097,8 +1324,11 @@ void tick_wake(cvc::app &app, WaterRT &rt, vtkRenderer *ren, RealizedScene &scen
     tx = close ? f[0] : e[0];
     ty = close ? f[1] : e[1];
   }
+  rt.wakeLaps.begin(int(key(app, rt.profileKey, 0.0)),
+                    vtkOpenGLRenderWindow::SafeDownCast(ren->GetRenderWindow()));
   if (on)
     place_wake(rt, tx, ty);
+  rt.wakeLaps.lap("wake_place");
   const double wt = app.world_clock().t();
   const double dt = rt.wakeT < 0.0 ? 0.0 : wt - rt.wakeT;
   if (on && (rt.wakeT < 0.0 || dt > 0.0)) {
@@ -1130,10 +1360,15 @@ void tick_wake(cvc::app &app, WaterRT &rt, vtkRenderer *ren, RealizedScene &scen
         rt.wakeSrc->add(*o, pose->position, pose->rotation, water);
       }
     }
-    if (rt.wakeSrc->finish(rt.wakeDh))
+    rt.wakeLaps.lap("wake_sources");
+    const bool added = rt.wakeSrc->finish(rt.wakeDh);
+    rt.wakeLaps.lap("wake_finish");
+    if (added)
       rt.wake->addHeights(rt.wakeDh);
+    rt.wakeLaps.lap("wake_upload");
     if (dt > 0.0)
       rt.wake->step(dt);
+    rt.wakeLaps.lap("wake_step");
     rt.wakeT = wt;
   } else if (!on && rt.wakeT >= 0.0) {
     rt.wakeT = -1.0; // start again from here when it is turned back on
@@ -1149,6 +1384,7 @@ void tick_wake(cvc::app &app, WaterRT &rt, vtkRenderer *ren, RealizedScene &scen
     g->setShaderUniformf("uWakeOn", on && rt.wakePlaced ? 1.0f : 0.0f);
     g->setShaderUniformf("uWakeFoam", foam);
   }
+  publish_laps(app, rt, rt.wakeLaps);
 }
 
 // ── the swash's frame ────────────────────────────────────────────────────────────────────────
@@ -1215,48 +1451,38 @@ void tick_water(cvc::app &app, WaterRT &rt, vtkRenderer *ren) {
   auto far = rt.far.lock();
   if (!near || !far)
     return;
+  rt.laps.begin(int(key(app, rt.profileKey, 0.0)),
+                ren ? vtkOpenGLRenderWindow::SafeDownCast(ren->GetRenderWindow()) : nullptr);
   if (rt.physics)
     rt.physics->tick(); // the field follows the keys and the ground (a regenerate)
+  rt.laps.lap("physics_follow");
   if (!rt.ready && !rt.failed) {
     auto *ow = ren ? vtkOpenGLRenderWindow::SafeDownCast(ren->GetRenderWindow()) : nullptr;
     if (!ow || !ow->GetInitialized())
       return;
     refresh_bed(rt);
-    vtkTextureObject *bed = rt.bed ? rt.bed->prepare(ow) : nullptr;
-    if (!bed || !start_ocean(app, rt, ow)) {
+    if (!start_ocean(app, rt, ow)) {
       rt.failed = true; // no float render targets: the far grid's flat blue stays, alone
       rt.cascades.clear();
+      rt.fft.reset();
       return;
     }
     // The bodies' waves, with body: (the window needs float targets too).
-    if (rt.physics) {
-      cvc::ocean::ewave_params wp;
-      wp.n = 256;
-      wp.dx = 0.5;
-      wp.depth = 5.0;       // until the window is placed: then its wet cells' mean depth
-      wp.damping_k2 = 2e-3; // m^2/s: waves 1 m long fade over about 13 s
-      wp.damping = 0.02;    // 1/s: everything, over a minute
-      wp.sponge_cells = 16.0;
-      wp.sponge_rate = 2.0;
-      wp.beach_rate = 10.0;
-      rt.wake = std::make_unique<EWave>(wp);
-      if (rt.wake->init(ow))
-        rt.wakeSrc = std::make_unique<WakeSource>(rt.wake->params());
-      else
-        rt.wake.reset();
-    }
+    if (rt.physics)
+      start_wake(rt, ow, std::max(quality_of(app, rt).wake_cells, 128));
     // The persistent foam: the long and middle cascades' turbulence, in one atlas.
     if (rt.cascades.size() >= 2) {
       rt.foam = std::make_unique<OceanFoam>(kFftN, 2);
       if (!rt.foam->init(ow))
         rt.foam.reset();
     }
-    style_ocean(*near, rt, bed);
-    style_ocean(*far, rt, bed);
+    style_ocean(*near, rt);
+    style_ocean(*far, rt);
     follow_shore(app, rt);
     if (!upload_shore(rt, ow, *near, *far)) {
       rt.failed = true;
       rt.cascades.clear();
+      rt.fft.reset();
       rt.wake.reset();
       rt.wakeSrc.reset();
       return;
@@ -1294,45 +1520,46 @@ void tick_water(cvc::app &app, WaterRT &rt, vtkRenderer *ren) {
     }
   }
 
-  // A regenerated world: the bed again.
-  if (refresh_bed(rt)) {
-    if (vtkTextureObject *bed = ow ? rt.bed->prepare(ow) : nullptr)
-      for (GeometryNode *g : {near.get(), far.get()}) {
-        g->setShaderTexture(HeightFieldTexture::samplerName(), bed);
-        g->setShaderUniform3f(HeightFieldTexture::originName(), static_cast<float>(rt.bed->x0()),
-                              static_cast<float>(rt.bed->y0()), 0.0f);
-        g->setShaderUniform3f(HeightFieldTexture::spacingName(), static_cast<float>(rt.bed->dx()),
-                              static_cast<float>(rt.bed->dy()), 0.0f);
-      }
+  // A regenerated world (the coast below follows it, the bed's depth with it).
+  if (refresh_bed(rt))
     place_far(rt, *far, *near); // the edge may have changed (world.edge), or the world's size
-  }
   // The coast: again after a regenerate or a swell change.
   follow_shore(app, rt);
   if (rt.shore != rt.shoreDrawn && ow)
     upload_shore(rt, ow, *near, *far);
+  rt.laps.lap("coast");
 
-  // The wind: h0 again when it changed; the cascades to the world's time.
+  // Adaptive quality's tier and scale: what to draw this frame (drawing only; the physics sea is
+  // the same at every tier).
+  const ari::WaterQuality q = quality_of(app, rt);
+
+  // The wind: h0 again when it changed; the cascades to the world's time (the short one only when
+  // the tier draws it).
   const ari::SceneWaterSpec spec = spec_of(app, rt);
   const cvc::ocean::sea_state s = wind_sea(spec);
   const std::vector<double> sea{s.wind.speed_mps, s.wind.fetch_m, s.wind.dir_rad};
   const bool rebuild = sea != rt.lastSea;
   const float chop = static_cast<float>(spec.chop);
   const double t = app.world_clock().t();
-  for (Cascade &c : rt.cascades) {
-    if (rebuild) {
+  if (rebuild)
+    for (std::size_t i = 0; i < rt.cascades.size(); ++i) {
+      Cascade &c = rt.cascades[i];
       c.h0 = cvc::ocean::build_h0(kFftN, c.band, s);
-      c.fft->setH0(c.h0);
+      rt.fft->setH0(int(i), c.h0);
     }
-    c.fft->chop = chop;
-    c.fft->step(t);
-  }
+  rt.fft->chop = chop;
+  rt.fft->setActive(q.cascades);
+  rt.fft->step(t);
   if (rebuild)
     rt.lastSea = sea;
+  rt.laps.lap("cascades");
   const float ramp = static_cast<float>(std::max(key(app, rt.rampKey, 0.1), 1e-3));
   // The persistent foam: the long cascades' folds since the last frame, at the world's time (none
-  // while it is paused; a clock run back starts it empty); emptied when it is turned off.
+  // while it is paused; a clock run back starts it empty); emptied when it is turned off, by
+  // water.foam_decay or by the tier (which leaves its calibration as it was).
   const cvc::ocean::foam_persistence fq = foam_persistence_of(app, rt);
-  const bool persist = rt.foam && fq.decay_s > 0.0;
+  const bool keyPersist = rt.foam && fq.decay_s > 0.0;
+  const bool persist = keyPersist && q.persistent_foam;
   if (persist) {
     const double dtf = rt.foamT < 0.0 ? 0.0 : t - rt.foamT;
     if (dtf < 0.0)
@@ -1341,14 +1568,16 @@ void tick_water(cvc::app &app, WaterRT &rt, vtkRenderer *ren) {
       rt.foam->params = fq;
       rt.foam->bias = rt.persistBias;
       rt.foam->ramp = ramp;
-      rt.foam->step({rt.cascades[0].fft->displacement(), rt.cascades[1].fft->displacement()}, dtf);
+      rt.foam->step(rt.fft->displacement(), dtf);
     }
     rt.foamT = t;
   } else if (rt.foam && rt.foamT >= 0.0) {
     rt.foam->clear();
     rt.foamT = -1.0;
   }
+  rt.laps.lap("foam");
   tick_swash(app, rt, ren, t); // the swash on the ground, at the same time as the swell
+  rt.laps.lap("swash");
   // The whitecaps' threshold, once its keys have settled (a slider drag does not stall each frame).
   std::vector<double> foamNow = foam_signature(app, rt);
   if (foamNow != rt.foamSig) {
@@ -1356,7 +1585,7 @@ void tick_water(cvc::app &app, WaterRT &rt, vtkRenderer *ren) {
       rt.foamPending = std::move(foamNow);
       rt.foamSettled = 0;
     } else if (++rt.foamSettled >= kSettle) {
-      if (persist)
+      if (keyPersist)
         start_foam_calibration(app, rt);
       else
         rt.foamBias = find_foam_bias(app, rt);
@@ -1364,13 +1593,15 @@ void tick_water(cvc::app &app, WaterRT &rt, vtkRenderer *ren) {
     }
   }
   follow_foam_calibration(rt);
+  rt.laps.lap("thresholds");
 
   // The near grid follows the camera by whole cells.
   double cam[3] = {0.0, 0.0, 0.0};
   if (vtkCamera *c = ren->GetActiveCamera())
     c->GetPosition(cam);
-  const double qx = std::round(cam[0] / rt.cell) * rt.cell,
-               qy = std::round(cam[1] / rt.cell) * rt.cell;
+  // (by its coarsest ring's spacing, 4 cells, so every ring's vertices land on their own lattice)
+  const double snap = 4.0 * rt.cell;
+  const double qx = std::round(cam[0] / snap) * snap, qy = std::round(cam[1] / snap) * snap;
   if (!rt.placed || std::abs(qx - rt.cx) > 0.25 * rt.nearHalf ||
       std::abs(qy - rt.cy) > 0.25 * rt.nearHalf) {
     rt.cx = qx;
@@ -1389,14 +1620,21 @@ void tick_water(cvc::app &app, WaterRT &rt, vtkRenderer *ren) {
   const std::array<double, 3> sun = sun_direction(ren);
   const float amp = static_cast<float>(spec.wave_amp);
   const double fixedBias = key(app, rt.biasKey, -1.0); // >= 0 fixes the threshold by hand
-  const float bias = static_cast<float>(fixedBias >= 0.0 ? fixedBias : rt.foamBias);
+  const float bias = static_cast<float>(
+      fixedBias >= 0.0 ? fixedBias : (keyPersist && !persist ? rt.aloneBias : rt.foamBias));
   const float fray = static_cast<float>(std::max(key(app, rt.frayKey, 0.12), 0.0));
   const float shoreFoam = static_cast<float>(std::max(key(app, rt.shoreFoamKey, 1.0), 0.0));
   const ari::SceneWaterCascades cd = ari::scene_water_cascades(spec);
-  // The level of detail's distances (m; a later adaptive-quality pass can drive them) and what
-  // stands in for the foam past them: the sea's mean whitecap cover for the wind.
+  // The level of detail's distances (m), the shading's and the short cascade's scaled by the tier
+  // (the persistent foam's by uFoamReach, in the shader: the whitecaps keep theirs, which cost
+  // nothing), and what stands in for the foam past them: the sea's mean whitecap cover for the
+  // wind. No short cascade: a negative lod_waves.
   const float lodFoam = static_cast<float>(std::max(key(app, rt.lodFoamKey, 150.0), 0.0));
-  const float lodShade = static_cast<float>(std::max(key(app, rt.lodShadeKey, 1500.0), 0.0));
+  const float lodShade =
+      static_cast<float>(std::max(key(app, rt.lodShadeKey, 1500.0), 0.0) * q.shade);
+  const double lodWaves0 = std::max(key(app, rt.lodWavesKey, 150.0), 0.0) * q.waves;
+  const float lodWaves =
+      q.cascades < 3 || lodWaves0 <= 0.0 ? -1.0f : static_cast<float>(std::max(lodWaves0, 1e-3));
   const float cover = static_cast<float>(std::max(key(app, rt.capsKey, 1.0), 0.0) *
                                          cvc::ocean::monahan_coverage(spec.wind_speed));
   const double wd = spec.wind_dir * 3.14159265358979323846 / 180.0;
@@ -1409,6 +1647,9 @@ void tick_water(cvc::app &app, WaterRT &rt, vtkRenderer *ren) {
     g->setShaderUniformf("uFoamCover", cover);
     g->setShaderUniformf("uLodFoam", std::max(lodFoam, 1e-3f));
     g->setShaderUniformf("uLodShade", std::max(lodShade, 1e-3f));
+    g->setShaderUniformf("uLodWaves", lodWaves);
+    g->setShaderUniformf("uFarReach", static_cast<float>(q.far_normal));
+    g->setShaderUniformf("uFoamReach", static_cast<float>(q.foam));
     g->setShaderUniformf("uWindU", static_cast<float>(spec.wind_speed));
     g->setShaderUniform3f("uWindDir", static_cast<float>(std::cos(wd)),
                           static_cast<float>(std::sin(wd)), 0.0f);
@@ -1426,6 +1667,8 @@ void tick_water(cvc::app &app, WaterRT &rt, vtkRenderer *ren) {
     g->setShaderUniformf("uShoreTime", static_cast<float>(t));
     g->setShaderUniformf("uTime", static_cast<float>(t));
   }
+  rt.laps.lap("uniforms");
+  publish_laps(app, rt, rt.laps);
 }
 
 std::shared_ptr<GraphicsNode> realize_water(SceneGraph &sg, const ari::SceneNode &n,
@@ -1455,6 +1698,15 @@ std::shared_ptr<GraphicsNode> realize_water(SceneGraph &sg, const ari::SceneNode
   rt->groundId = groundId;
   const int cells = std::clamp(static_cast<int>(n.props.num("cells", 192.0)), 16, 512);
   rt->cell = 2.0 * rt->nearHalf / (cells - 1);
+  // Level of detail: the near grid is three rings, its inner spacing (`cells` over `near`) out to
+  // a third of the way, twice that to two thirds, four times past (ring_coords): about a third of
+  // the vertices of a uniform grid.
+  {
+    const double q = 4.0 * rt->cell;
+    rt->ring1 = q * std::ceil(rt->nearHalf / 3.0 / q);
+    rt->ring2 = q * std::ceil(2.0 * rt->nearHalf / 3.0 / q);
+    rt->nearHalf = q * std::ceil(rt->nearHalf / q);
+  }
 
   // The sea's keys (wind, chop, wave height, shore fade, swell) are seeded by scene_water_spec;
   // these are the drawing's.
@@ -1472,6 +1724,11 @@ std::shared_ptr<GraphicsNode> realize_water(SceneGraph &sg, const ari::SceneNode
   rt->decayKey = seed(app, pref, n, "water.foam_decay", n.props.num("foam_decay", 2.5));
   rt->lodFoamKey = seed(app, pref, n, "water.lod_foam", n.props.num("lod_foam", 150.0));
   rt->lodShadeKey = seed(app, pref, n, "water.lod_shade", n.props.num("lod_shade", 1500.0));
+  rt->profileKey = seed(app, pref, n, "water.profile", 0.0); // 1: time the node; 2: and its GPU
+  rt->lodWavesKey = seed(app, pref, n, "water.lod_waves", n.props.num("lod_waves", 150.0));
+  rt->qualityKey = seed(app, pref, n, "water.quality", n.props.num("quality", -1.0));
+  rt->tierKey = ari::resolve_bind(pref, "quality.tier"); // the scene's (AriRuntime's loop)
+  rt->scaleKey = ari::resolve_bind(pref, "quality.scale");
 
   const cvc::height_field &g = *rt->ground;
   rt->outer = std::max(n.props.num("outer", 6000.0), 0.0);
@@ -1480,9 +1737,9 @@ std::shared_ptr<GraphicsNode> realize_water(SceneGraph &sg, const ari::SceneNode
   auto far = std::dynamic_pointer_cast<GeometryNode>(
       group->createChild<GeometryNode>("far", flat_grid(app, rt->farCells, g.x0() - m, g.y0() - m,
                                                         g.max_x() + m, g.max_y() + m, rt->level)));
-  auto near = std::dynamic_pointer_cast<GeometryNode>(
-      group->createChild<GeometryNode>("near", flat_grid(app, cells, -rt->nearHalf, -rt->nearHalf,
-                                                         rt->nearHalf, rt->nearHalf, rt->level)));
+  auto near = std::dynamic_pointer_cast<GeometryNode>(group->createChild<GeometryNode>(
+      "near", tensor_grid(app, ring_coords(rt->cell, rt->ring1, rt->ring2, rt->nearHalf),
+                          ring_coords(rt->cell, rt->ring1, rt->ring2, rt->nearHalf), rt->level)));
   if (!far || !near) {
     if (warnings)
       warnings->push_back("ari: water '" + n.id + "': could not create its meshes");

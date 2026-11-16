@@ -993,6 +993,12 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+Also from ABYSSAL at 849ff7f4, under the license above: `src/cvcGL/ocean/OceanCascades.h` and
+`OceanCascades.cpp` run OceanFFT's port for several cascades in one set of passes, and the
+adaptive quality loop in libcvc itself, `inc/cvc/ariadne/scene_quality.h` and
+`src/cvc/ariadne/scene_quality.cpp` (run by cvcGL's `AriRuntime`), ports `Quality.tick` in
+`src/core/Quality.js`.
+
 ## DejaVu Sans Mono 2.37
 
 `src/cvcGL/fonts/DejaVuSansMono.ttf`, unchanged from DejaVu 2.37
