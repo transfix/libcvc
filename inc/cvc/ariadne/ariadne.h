@@ -48,12 +48,18 @@ class call_args;           // types.h: a native call's arguments and context
 class exec_group;          // Runtime::isolated_group(); <cvc/state/state_exec/exec_group.h>
 struct environment;        // types.h
 struct intrinsics_context; // intrinsics.h
+enum class provider_affinity; // intrinsics.h: any, host_proxied, host_only
 struct value_tag;          // types.h: value_t
 } // namespace state_exec
 } // namespace cvc
 
 namespace cvc {
 namespace ariadne {
+
+// A host's program-lane intrinsics, bound into each program env as it is built: the app's
+// (register_action_intrinsics, below), or one document's (Runtime::add_program_intrinsics).
+using ActionIntrinsicProvider = std::function<void(
+    std::shared_ptr<cvc::state_exec::environment> env, cvc::state_exec::intrinsics_context &ictx)>;
 
 // The caps a program of the document runs under, read from the tree as each one starts.
 enum class ProgramLane {
@@ -412,9 +418,28 @@ public:
   bool has(const std::string &name) const;
   // Forget the cached program names, so has_function() / has() see verbs registered since they
   // were last asked. AppRuntime::register_verb calls it; a new register_action_intrinsics provider
-  // is noticed without it. Like a new provider, it has the placement decided again while nothing
-  // of the document runs, else at its next restart (isolated_group).
+  // or add_program_intrinsics provider is noticed without it. Like a new provider, it has the
+  // placement decided again while nothing of the document runs, else at its next restart
+  // (isolated_group).
   void refresh_program_names();
+
+  // Host intrinsics of this Runtime's programs alone. `provider` runs in every program env the
+  // Runtime builds (its init: and a mounted module's, an action, a resident, a child of one,
+  // start_process's) after the app's providers (register_action_intrinsics), so it adds or
+  // overrides; and in no other Runtime's. A host binds what belongs to one document here
+  // (AppRuntime's verbs and host functions, and so a scripting engine's exports), so two documents
+  // on one app each reach their own. Providers run in the order added, and go with the Runtime.
+  // Each has a kind, as register_action_intrinsics's do (STATE_EXEC_THREADED.md 4.9): an
+  // isolated document's `any` group installs it by its kind, and a host_only one that binds
+  // anything pumps the document's group on the host thread. The form without a kind adds it
+  // host_only. Like a host verb, a provider added after the placement has it decided again while
+  // nothing of the document runs, else at its next restart (isolated_group).
+  void add_program_intrinsics(ActionIntrinsicProvider provider);
+  void add_program_intrinsics(ActionIntrinsicProvider provider,
+                              cvc::state_exec::provider_affinity affinity);
+  // Those providers as one, for a program env a host builds itself (AppRuntime's init:, through
+  // run_init). It reaches this Runtime: call it while the Runtime lives.
+  ActionIntrinsicProvider program_intrinsics() const;
 
   // A function the read lane's expressions may call (visible_when, a computed bind:, §2.1) beside
   // its allowlist: a scripting engine's pure export (ScriptLane::export_pure). `fn` gets the
@@ -498,10 +523,13 @@ bool has_widget_type(cvc::app &app, const std::string &type);
 // script); false with a message appended to `errors` on a parse/runtime error. Never
 // throws. (The loader stays app-free and only captures the script; this is the
 // host/Runtime-side seam that has the app.)
-// `has`, when set, binds (has? "name") for the script (AppRuntime passes Runtime::has).
+// `has`, when set, binds (has? "name") for the script (AppRuntime passes Runtime::has). `own`,
+// when set, binds the document's own intrinsics after the app's providers, in the script's env
+// and its children's (AppRuntime passes Runtime::program_intrinsics).
 bool run_init(cvc::app &app, const std::string &prefix, const std::string &script,
               std::vector<std::string> *errors = nullptr,
-              const std::function<bool(const std::string &)> &has = {});
+              const std::function<bool(const std::string &)> &has = {},
+              const ActionIntrinsicProvider &own = {});
 
 // ---------------------------------------------------------------------------
 // Host-contributed state_exec intrinsics for the PROGRAM lanes (init: and a program `on:` action).
@@ -520,25 +548,14 @@ bool run_init(cvc::app &app, const std::string &prefix, const std::string &scrip
 // so an intrinsic that mutates async host state (a worker-thread sim) should ENQUEUE the mutation,
 // not do it inline.
 // ---------------------------------------------------------------------------
-} // namespace ariadne
-namespace state_exec {
-struct environment; // NB: struct, not class — MSVC encodes the class/struct tag in the mangled
-struct intrinsics_context; // name (types.h/intrinsics.h declare both as struct); a mismatch =
-                           // LNK2019 on Windows (Itanium ABI ignores the tag, so it hides on
-                           // Linux/macOS).
-enum class provider_affinity; // intrinsics.h: any, host_proxied, host_only
-} // namespace state_exec
-namespace ariadne {
-
-using ActionIntrinsicProvider = std::function<void(
-    std::shared_ptr<cvc::state_exec::environment> env, cvc::state_exec::intrinsics_context &ictx)>;
 
 // Register a provider of host intrinsics for `app`'s program lanes. Providers run in order. The
 // list is the app's own (VOLROVER-LIBRARY-PORTS-ROADMAP.md 1.3): another app's documents never
-// get them, and they go with the app. Without a key it appends. With a non-empty key it replaces
-// the provider registered under that key, and its kind, in its place, so a host that registers the
-// same stateless provider each time it starts (a cvcGL runtime) keeps one. The forms without a kind
-// register the provider host_only.
+// get them, and they go with the app. Every document of the app gets them, so what belongs to one
+// document goes to its Runtime instead (Runtime::add_program_intrinsics). Without a key it
+// appends. With a non-empty key it replaces the provider registered under that key, and its kind,
+// in its place, so a host that registers the same stateless provider each time it starts (a cvcGL
+// runtime) keeps one. The forms without a kind register the provider host_only.
 void register_action_intrinsics(cvc::app &app, ActionIntrinsicProvider provider);
 void register_action_intrinsics(cvc::app &app, const std::string &key,
                                 ActionIntrinsicProvider provider);

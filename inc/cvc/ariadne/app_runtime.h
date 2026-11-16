@@ -102,7 +102,9 @@ public:
   // calls this gets the window too. Applied by the next load() or set_root().
   void set_host_mouse(MouseControls mouse);
 
-  // Register a host verb the .ari program can call. register_verb is SYNCHRONOUS (fn runs
+  // Register a host verb the .ari program can call. Verbs and host functions (below) are this
+  // runtime's own: its documents' programs call them, and those of another runtime on the same
+  // app don't, whatever names that one registers. register_verb is SYNCHRONOUS (fn runs
   // inline on the drain thread, no args/return).
   //
   // Every registration below is made on the host thread, outside a frame (not from a verb or a
@@ -320,7 +322,7 @@ public:
   bool restart_world();
 
 private:
-  void ensure_intrinsics(); // lazily install the register_action_intrinsics provider
+  void ensure_intrinsics(); // lazily install the verbs' providers (rt_.add_program_intrinsics)
 
   cvc::app &app_;
   std::string prefix_;
@@ -348,9 +350,10 @@ private:
   int exitCode_ = 0; // the first close request's code
   bool intrinsicsRegistered_ = false;
   bool netEnabled_ = false; // enable_net turned the network on: the destructor turns it off
-  // The host verbs, shared with the program-lane provider so a verb registered after the first
-  // is still bound when the next program env is built. Emptied by the destructor: the provider
-  // lives on in the app's list, and must not reach this AppRuntime's handlers after it.
+  // The host verbs, shared with the program-lane providers so a verb registered after the first
+  // is still bound when the next program env is built. The providers are rt_'s own, so only this
+  // runtime's programs get them. Emptied by the destructor: rt_ goes after it, and nothing it
+  // binds meanwhile may reach this AppRuntime's handlers.
   struct Verbs {
     std::vector<std::pair<std::string, std::function<void()>>> sync;
     std::vector<std::tuple<std::string, std::string, std::function<std::string()>>> async;

@@ -944,9 +944,9 @@ types behind one call, `register_cvcgl_extensions`
 ([`extensions.h`](../inc/cvc/gl/ariadne/extensions.h)), which both `ariadne_hello` and
 `AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`,
 `generated_world` (terrain_lab's world, [`world_nodes.h`](../inc/cvc/gl/ariadne/world_nodes.h)),
-`water` (its sea, lakes and ponds as the GPU FFT ocean, below), `ribbon` and `draped_link`
-(lines drawn from data, below), and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and
-`fe_lab`. Keys the built-in parser
+`volume_slice` (one axis-aligned plane of a volume, below), `water` (its sea, lakes and ponds as the
+GPU FFT ocean, below), `ribbon` and `draped_link` (lines drawn from data, below), and — on a libcvc
+built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and `fe_lab`. Keys the built-in parser
 does not know land in the node's `props`, which a custom realizer reads. So does a `source:` the
 built-ins have no field for, `{ state: <key> }` or `{ stream: <token> }`, as written. A
 `source: { data }` node is drawn as a data node (§5.17) unless its type was registered with
@@ -1209,15 +1209,25 @@ scene's bounds, so the ground frames the view. When the ground's whole rim is un
 otherwise it stops at the ground's edge. A `generated_world` under a water node wants `water: 0`,
 so its own flat water rungs do not draw over it. The cascades need float render targets; without
 them the water is flat blue. Live keys under the node's root (`water.` unless `keys:`):
-`wind_speed`, `wind_dir`, `fetch`, `chop`, `wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`,
-`foam_fray`, `shore_fade`, `swell_height`, `swell_period`, `swell_dir`, `shore_foam`, `wake` and
-`wake_foam`, most on `water_controls.ari`. A change to the swell rebuilds the shore layer once the
-keys have held for ten frames (12 ms for a 401² grid). With `body: {}` the water is in the scene's
+`wind_speed`, `wind_dir`, `gustiness`, `fetch`, `lee`, `sea_lag`, `sea_fade`, `current`, `chop`,
+`wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`, `foam_fray`, `shore_fade`, `swell_height`,
+`swell_period`, `swell_dir`, `shore_foam`, `wake` and `wake_foam`, most on `water_controls.ari`. A
+change to the swell rebuilds the shore layer once the keys have held for ten frames (12 ms for a
+401² grid). The wind (OCEAN-AND-WEATHER-ROADMAP.md O13) is read through one place,
+[`scene_wind.h`](../inc/cvc/ariadne/scene_wind.h) (today the node's `wind_speed`, `wind_dir` and
+`gustiness`; the scene's one wind later). The sea lags it: its wind follows with a `sea_lag`
+seconds' time constant (20; a compressed scale), and each new state of it crossfades in over
+`sea_fade` seconds (4), so a wind change never pops. With `lee` (1) the water downwind of land is
+calm: each wave band is scaled by the square root of its fetch, the distance the wind has blown over
+water, up to where the band is fully grown, from a coarse fetch map built when the wind turns. The
+gusts (`gustiness`, 0.25) ripple and roughen racing patches of water (cat's paws), and `current`
+(m/s, 0) is a slowly varying flow that carries the short waves and floating bodies alike. With `body: {}` the water is in the scene's
 physics world, with or without a renderer ([`scene_water.h`](../inc/cvc/ariadne/scene_water.h)).
 It is one fluid field over the water's extent, its surface the same sea computed on the CPU (the
 cascades fading at the same coast, the same swell), so a body lighter than water floats on the
-waves the picture shows and a heavier one sinks. The field is rebuilt when the wind, chop, wave
-height or swell change or the ground regenerates, and the scene's world swaps it as it swaps a
+waves the picture shows and a heavier one sinks: calm in the lee, crossfading with the drawn sea, and
+drifting on the current. The field is rebuilt when the sea takes a new state of its wind, the chop,
+wave height, swell, gusts or current change, or the ground regenerates, and the scene's world swaps it as it swaps a
 generated world's bodies. The bodies make waves: an eWave window of 128 m of 0.5 m cells around the
 camera's target takes each moving body's immersed columns as its source, so a dropped crate makes a
 ring and a bobbing one keeps radiating. Its waves move the near grid and shade both grids, foaming
@@ -1757,6 +1767,53 @@ thread, or deferred onto it in a single-threaded wasm build — and apply result
 per-frame tick. A job captures only its own hand-off struct, never the node's runtime
 (which owns the lane), and teardown cancels it; tearing a scene down still waits for a
 running tet-mesh or Poisson solve to finish.
+
+**`type: volume_slice`** ([`volume_slice_nodes.h`](../inc/cvc/gl/ariadne/volume_slice_nodes.h),
+[`VolumeSliceNode.h`](../inc/cvc/gl/VolumeSliceNode.h)) is one axis-aligned plane of a volume: a
+textured quad coloured through the node's transfer function, as VolumeGridRover's slice views and
+the classic three-plane orthoslicer show a volume. It reads `source: { file }` or `{ sdf }` (with
+`fit:`) like a `volren` node.
+
+```yaml
+- node: ct_z
+  type: volume_slice
+  source: { file: head.rawiv }
+  axis: z                          # x | y | z, or a view's name: xy (z), xz (y), zy (x)
+  index: 40                        # the plane along the axis; -1 (the default) the middle one
+  transfer_function: { preset: grayscale }
+  children:                        # overlays: drawn on top of the plane
+    - { node: mark, source: { plane: { size: 2 } }, transform: { position: [10, 12, 0] } }
+```
+
+The plane's axes, right then up, are VolumeGridRover's: looking down z, x right and y up (its XY
+view); down y, x right and z up (XZ); down x, z right and y up (ZY). Each voxel draws as a square
+centred on it (the quad reaches half a voxel past the outer ones), unlit: the texture is the
+colour. Its keys live under the node's own state:
+
+| key | meaning | seeded from prop |
+|---|---|---|
+| `slice.axis` | the axis the plane looks down: `x`, `y` or `z` | `axis` |
+| `slice.index` | the plane's number along the axis, from 0. `-1` is the middle one, written back as its number; an index past the last plane draws the last and is written back. Its `max` property is the last plane's number, so a slider takes its range from it | `index` |
+| `slice.filter` | `nearest` (each voxel a sharp square, the default) or `linear` | `filter` |
+| `slice.opaque` | `1` (the default): every voxel in its colour at full opacity; `0`: the transfer function's opacity, so the plane blends | `opaque` |
+| `slice.overlay_offset` | how far back in depth the plane draws (polygon-offset units, 2 by default), so the overlays in its plane stay on top | `overlay_offset` |
+| `slice.count`, `slice.position` | published: how many planes the axis has, and where this one lies along it | — |
+| `slice.status` | published: `""`, or what is wrong (a key that does not parse, a failed read) | — |
+| `info.dims`, `info.min`, `info.max`, `info.span`, `info.box`, `info.file` | published: the volume's dimensions, data range, voxel spacing, bounding box and file | — |
+| `transfer_function` | the `cvc::tf::model` the voxels are coloured through, over the volume's data range unless its domain is explicit; a `tf_editor` edits it and shows the volume's histogram | `transfer_function:` — `preset:` (grayscale by default) and the model's own keys (`color`, `alpha`, `isocontours`, `domain`, `opacity_cubed`, `resolution`), each replacing the preset's |
+
+The keys carry `cvc::volume_slice_params`' parameter table
+([`volume_slice.h`](../inc/cvc/volume/volume_slice.h)): `doc`, `unit`, `min`, `max` and `choices`
+as properties. Each change of plane, axis or transfer function colours the plane on the CPU and
+uploads one 2D texture; a new plane the same size as the last is written into the same texture.
+So stepping through a large volume never puts the volume on the GPU. `region_reads: auto` (the
+default) reads a file of more than 64 Mi voxels one plane at a time (`cvc::slice_source`, the
+last eight planes kept), so a volume larger than memory can be scrubbed; `true` always reads that
+way, `false` never. Read plane by plane, the editor's histogram is the first plane's, over the
+file's range. **Overlays** are the node's children: point glyphs, polylines, crosshairs. The plane
+is pushed back by `slice.overlay_offset`, so anything drawn in its plane shows on top of it in
+every view. `VolumeSliceNode::pickRay` meets a world ray with the plane exactly and names the
+voxel and its value (`cvcgl_volume_slice`, and `volume_slice_test` for the slicing itself).
 
 #### Lines from data: `type: ribbon` and `type: draped_link`
 
@@ -2788,10 +2845,19 @@ adds the verbs to the action lanes. `ROOM` is the `room-join` handle (or its tok
 |---|---|
 | `(chat-post ROOM TEXT [TO])` | `{ok}`, or `{ok #f error}`: TEXT is empty or longer than 2000 bytes once cleaned, or there is no relay to send it to. TO `""` posts to the room, a pid is a direct message. The relay may still refuse it (its rate limit, TO not in the room): `chat-info`'s `error` says so. |
 | `(chat-info ROOM [CHANNEL])` | `{available rev count oldest newest head first more loading error}`. `rev` changes whenever the messages held change; `oldest`..`newest` is the contiguous run held (`count` of them); `head` is the next seq and `first` the oldest the relay keeps; `more` says older ones are kept; `loading` says a page is on its way. It also asks for the newest page the first time a channel is read, and again when a push was lost. |
-| `(chat-messages ROOM [CHANNEL [AFTER]])` | the run, oldest first, as `{seq from name text t clock mine}` (`clock` is the local "HH:MM", `mine` is #t for your own), or with AFTER only those after that seq. |
+| `(chat-messages ROOM [CHANNEL [AFTER]])` | the run, oldest first, as `{seq from name text t clock mine via}` (`clock` is the local "HH:MM", `mine` is #t for your own, `via` a bridged user's system or `""`), or with AFTER only those after that seq. |
 | `(chat-more ROOM [CHANNEL])` | `{ok loading more}`: asks for the page before the oldest message held. One request per channel is in flight; one unanswered for 3 s is sent again. |
 | `(chat-conversations ROOM)` | the direct-message conversations: `{peer name head present}`. |
 | `(chat-rev ROOM)` | a number that changes with every push the relay makes to you. |
+| `(room-roster ROOM [KIND [LIMIT]])` | who is in the room: `"participants"` (the default), `"bridged"` (another chat system's users, below) or `"all"` (the participants, then the bridged), with at most LIMIT bridged users. Each entry has `pid`, `name` and `bridged` (`"0"` or `"1"`); a bridged one adds `via`, `uid` and `detail`. |
+| `(room-bridged-count ROOM)` | how many bridged users are in the room. |
+| `(room-bridged-rev ROOM)` | a number that moves whenever a bridged user comes, goes or changes. |
+
+**Bridged users.** The relay's program can put another chat system's users in the room (an NMDC
+hub's, say: §9.8.7). They are in `(room-roster ROOM "all")`, post to the room's chat (their
+messages carry `via`), and take and send direct messages under their pid (`_nmdc_Zed_2eZ`), with no
+camera, microphone or avatar. The users list shows them in rows of their own. The layout and rules
+are in [ARIADNE_CHAT.md](roadmap/ARIADNE_CHAT.md), "Bridged users".
 
 The shipped component `chat.ari` (§6.5) builds a chat window from these verbs, in the DSL:
 - a channel picker, the room and each conversation, with what came since you last looked;
@@ -3789,6 +3855,8 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `viewer_settings` | a viewer (arg `viewer`, default `main`): the frame-rate readout, UI size, grid / origin axis / scene bounds, camera and shadows in one window |
 | `stage_lighting`, `scene_controls`, `camera_controls` | a `rig:` light, `shadows:`, a viewer's camera (arg `viewer`) |
 | `display_toggles`, `sim_transport`, `raster_view` | `show.*` layer keys, `sim.*` + host verbs, a host-published image (arg `keys`, default `raster`) |
+| `nav_lab_stats`, `nav_lab_ledger` | several navigation policies side by side: their Stats and Ledger from a run log at a tick, written by cvc::nav's `publish_tables` / `publish_charts` (host verbs `arms.retarget`, `arms.seek`; [NAV_LAB.md](NAV_LAB.md)) |
+| `nav_lab_scrub`, `nav_lab_training`, `nav_lab_episode` (`nav_lab_scrub.ari`) | the checkpoint scrubber: checkpoint k beside step 0, the deployed metric, the training curve, the episode's time, written by `cvc::nav::scrub_view` (host verbs `scrub.prev`, `scrub.next`, `scrub.pick_step`) |
 | `volren_controls`, `volslice_controls` | a `volren` / `volslice` node (arg `node`, default `bunny_volume`) |
 | `forest_controls`, `sea_controls`, `sky_controls` | a `forest_trees` / `wave_sea` / `cloud_sky` node (arg `keys`, below) |
 | `world_controls` | a `generated_world` node (§5.4; arg `keys`) |
@@ -3799,7 +3867,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
-| `room_users`, `room_users_compact` | everyone in a room from `room-roster`, with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
+| `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
 
 Each window component also takes `title` and `id` args, and every arg has a default, so a bare
 `include:` works. A document with two nodes of a kind includes the panel twice, each with its
@@ -4120,6 +4188,7 @@ standalone configure refuses an SDK without gRPC. For a build of your own, gRPC 
 ```
 arigl run      [--terminal] [flags] doc.ari [document args...]
 arigl snapshot --png out.png [flags] doc.ari [document args...]       # offscreen window frame
+arigl snapshot --mp4 out.mp4 --seconds S [flags] doc.ari [...]        # the scene running, recorded
 arigl snapshot --terminal [--ansi] [--png scene.png] doc.ari [...]    # a terminal frame as text
 arigl check    [flags] doc.ari
 ```
@@ -4129,8 +4198,8 @@ arigl check    [flags] doc.ari
 stream and media verbs, and the `stream_view` widget (ImGui in a window, the terminal one
 with `--terminal`). In both modes it routes OS signals to `on_signal:` and exits 128 + N
 for one the document does not handle. A snapshot's frames run at `--fps` (20 by default),
-so a live stream delivers into them; in a window the scene clock is fixed, so its frames
-are reproducible.
+so a live stream delivers into them; in a window the scene clock steps a fixed 1/30 s a
+frame rather than the wall time, so its frames are reproducible.
 
 **The camera from the command line.** The main view's camera is state under
 `viewers.main.camera` (`CameraController.h`): `mode` (0 orbit, 1 fly, 2 track, 3 map), the orbit
@@ -4146,6 +4215,32 @@ arigl snapshot --png lake.png --set viewers.main.camera.orbit.center.x=22 \
 arigl snapshot --png crate.png --set viewers.main.camera.mode=2 \
   --set viewers.main.camera.track.target=crate_b --set viewers.main.camera.track.back=14 \
   --set viewers.main.camera.track.height=5 examples/ariadne/documents/terrain_lab.ari
+```
+
+**Recording a video.** `arigl snapshot --mp4 out.mp4 --seconds S` runs the document's scene
+on its clock for S seconds of scene time and records it: `S × fps` frames, `--fps` a second
+(30 by default), offscreen at `--width × --height` (1024 × 768 by default; both even). Each
+frame steps the scene clock by exactly 1/fps, however long it takes to render, so the
+physics, the clock's tickers (the water's waves, the clouds) and the custom nodes' ticks
+advance with it, and a slow machine makes the same video, only more slowly. The frames are
+paced no faster than real time, as a snapshot's are. `--png FILE` beside it also writes the
+last frame; `--frames N` first runs N frames unrecorded (a world still building, say), each
+1/fps of scene time too. `--seconds` without `--mp4` runs the same frames and writes only the
+`--png`. The video is encoded
+([`video_writer.h`](../inc/cvc/media/video_writer.h)) in process through the FFmpeg libraries
+cvcMedia links for its player, as H.264 where they have libx264 or libopenh264; else by an
+`ffmpeg` program on PATH, fed raw RGB on its stdin (its MP4 default: H.264 with libx264);
+else in process as MPEG-4 Part 2 (cvcpkg's ffmpeg-lgpl has no H.264 encoder), which most
+players play but a browser may not. arigl says which it used. With none of them it exits 2
+before loading the document, saying why. `--mp4` and `--seconds` are for a window's snapshot:
+`--terminal`, `run` and `check` refuse them, as do `ari` and the browser shell. Aim the
+camera with `--set`, as above; track mode follows a node through the recording:
+
+```
+arigl snapshot --mp4 crates.mp4 --seconds 5 --width 1280 --height 720 \
+  --set viewers.main.camera.mode=2 --set viewers.main.camera.track.target=crate_b \
+  --set viewers.main.camera.track.back=14 --set viewers.main.camera.track.height=5 \
+  examples/ariadne/documents/terrain_lab.ari
 ```
 
 The cvcGL examples
@@ -5477,9 +5572,78 @@ assert alice.get("cyprov.public.status") == "up"     # what the relay would send
   - The scope is asked at each connect, and again on `host.refresh_scope`.
 - **Closing.** `host.disconnect(principal_id)` closes that principal's clients: their calls are
   `unavailable`.
+- **The room's chat** (§9.8.7). `ServerHarness(room="nmdc")` names the relay's room
+  (`host.room`; `standup` by default), and each connected client is a participant in it, named
+  `connect(..., name=)`. `client.chat_post(text, to=None)` posts as the relay takes a post (a
+  refusal raises `ChatRefused` with the relay's reason) and runs the program's `on_room_chat` /
+  `on_room_dm` hooks to the end. `client.chat_messages(channel="")` and `harness.room_messages()`
+  read the history, the program's bridged posts included; `client.roster(kind)` is
+  `(room-roster ROOM KIND)`; `client.leave()` takes the client out of the room. The program's
+  `room_presence` and `room_chat_post` land at once, where arisrvx applies them a room step later.
 - **Not modeled.**
   - The relay's result cap (`--call-result-max`).
-  - The room's own tree (`conf`), where each participant's own subtree is.
+  - The room's own tree (`conf`), where each participant's own subtree is, and the chat's rate limit
+    and pages.
+
+#### 9.8.7 Another chat system in the room: bridged users
+
+A program can bridge another chat system into the relay's room: an NMDC hub's users, say, listed in
+the room's roster and chatting with its participants both ways ([roadmap/ARIADNE_CHAT.md](roadmap/ARIADNE_CHAT.md),
+"Bridged users"). The relay keeps them and their messages; the program says who is there, posts
+for them, and hears what the participants say:
+
+```python
+from pycvc.ariadne import Host
+
+host = Host()
+ROOM = host.room                      # the relay's --room
+
+def joined(nick, description):        # the hub said a user joined
+    host.room_presence(ROOM, nick, {"name": nick, "detail": description}, via="nmdc")
+
+def said(nick, text):                 # the hub's main chat
+    host.room_chat_post(ROOM, text, sender_id=nick, via="nmdc")
+
+@host.on_room_chat(ROOM)
+async def to_hub(msg):                # a participant posted to the room
+    await hub.say(f"<{msg.name}> {msg.text}")
+
+@host.on_room_dm(ROOM)
+async def to_user(msg):               # a participant wrote to a hub user
+    await hub.private(msg.to, msg.name, msg.text)
+```
+
+- **`host.room_presence(room, user_id, info=None, *, via="bridge")`**: user `user_id` of system
+  `via` is in the room, shown as `info["name"]` (the id without one) with `info["detail"]` (a line
+  about them, optional). A repeat updates them. It returns the user's pid, `bridged_pid(user_id,
+  via=via)`: `_<via>_` and the id with each byte that is not an ASCII letter or digit written `_xx`.
+  `via` is a lowercase letter, then up to 15 lowercase letters and digits.
+- **`host.room_absent(room, user_id, *, via="bridge")`**: the user left (nothing when it was not
+  there). `host.room_bridged(room)` lists the users the program has said are present.
+- **`host.room_chat_post(room, text, *, sender_id, name=None, via="bridge", to=None)`**: post as
+  the user: to the room, where the relay stamps it, keeps it and pushes it to every participant
+  marked with `via`, or with `to` (a participant's pid) a direct message from a present user. A
+  sender need not be present to post to the room (a hub's own messages); `name` overrides the name
+  its presence gave. The text is cleaned and limited as a participant's post is (2000 bytes), but not
+  rate-limited.
+- **`@host.on_room_chat(room)`** hears every message a participant posts to the room, and
+  **`@host.on_room_dm(room)`** every direct message a participant sends a bridged user, each as a
+  `RoomChatMessage`: `room`, `seq`, `pid` (the sender's), `name`, `text`, `t`, and for a DM `to` (the
+  user's id), `to_pid` and `via`. A hook may be sync or async and runs on the loop, in order;
+  several are allowed. The program never hears its own posts. Without an `on_room_dm` hook the relay
+  refuses a DM to a bridged user. The events are JSON, so they need no pycvc beside arisrvx.
+- **The room.** In arisrvx the room is the relay's (`host.room`, its `--room`); another raises
+  `ValueError`. The calls are queued and the relay applies them on its next room steps, in order
+  (at most 128 a step, so a hub's login burst of thousands drains over a second), and a post after
+  a `room_presence` shows the name it gave. What the relay would refuse raises at the
+  call: a bad `via`, a blank id or one over 128 bytes, a name over 128 or a detail over 256 bytes,
+  an empty or too long post, a DM from an absent user or to a participant who is not there, more
+  than 10000 bridged users. A refusal the program could not see (the participant left meanwhile)
+  is logged by the relay.
+- **Clients.** `(room-roster ROOM "all")` lists them after the participants, marked `bridged`;
+  `room_users.ari` shows them in rows of their own; their messages carry `via`, which `chat.ari`
+  shows after the name (§5.16). Bridged users linger as absent nodes, as participants do, until the
+  relay restarts.
 
 ---
 

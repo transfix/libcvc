@@ -619,6 +619,13 @@ class Cars:
         self.last_command = (np.full(self.n, np.nan), np.full(self.n, np.nan))
         return self._advance()
 
+    def stepped(self) -> CarsState:
+        """After the world was stepped elsewhere, one tick (an arms run steps its worlds itself,
+        pycvc.nav_arms_step): advance the clock and read the cars back, as
+        :meth:`step_navigator` does after its own step."""
+        self.last_command = (np.full(self.n, np.nan), np.full(self.n, np.nan))
+        return self._advance()
+
     def _advance(self):
         self.t += DT
         self.tick += 1

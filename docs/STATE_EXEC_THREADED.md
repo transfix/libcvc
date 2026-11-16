@@ -1559,8 +1559,11 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
 
 - **Ariadne's providers** (built in Stage 1b, S1-Q7, S1.9). `register_action_intrinsics(app,
   provider, affinity)` (`ariadne.h`) adds a provider of the program lanes' natives with its kind
-  to the app's own list; the forms without a kind register it `host_only`. Where an env is built,
-  `install_providers` (`ariadne.cpp`) runs the registered providers in registration order:
+  to the app's own list; the forms without a kind register it `host_only`.
+  `Runtime::add_program_intrinsics(provider, affinity)` (master's #1305) adds one to that Runtime's
+  own list, for its programs alone, with its kind the same way. Where an env is built,
+  `install_providers` (`ariadne.cpp`) runs the app's providers in registration order, then the
+  Runtime's own (`bind_own_intrinsics`), each list by the same rules:
   - in group 0, in a host-affinity group, in the init lane and in the name probes, each runs as it
     is, into the env;
   - in an `any` group, an `any` provider runs as it is and a `host_only` one does not run; a
@@ -1572,7 +1575,7 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
 
 | Provider | Natives | Kind | Why |
 |---|---|---|---|
-| AppRuntime (`AppRuntime::ensure_intrinsics`; seven providers, registered in the order the one provider bound them before, so a name two of them bind resolves as it did, the later one winning: `AriadneHostVerbs.ANameTwoTablesBindResolvesInTheirOrder`) | 1. the host's verbs (`register_verb`) | `host_only` | arbitrary host code, run in the calling step |
+| AppRuntime (`AppRuntime::ensure_intrinsics`; seven providers of its Runtime's own (`add_program_intrinsics`, #1305: another document on the app never gets them), added in the order the one provider bound them before, so a name two of them bind resolves as it did, the later one winning: `AriadneHostVerbs.ANameTwoTablesBindResolvesInTheirOrder`) | 1. the host's verbs (`register_verb`) | `host_only` | arbitrary host code, run in the calling step |
 | | 2. `(quit [code])` (`register_quit`) | `host_proxied` | it writes the AppRuntime's close request and exit code |
 | | 3. the host's async verbs (`register_async_verb`) | `any` | libcvc's own marshal on `*ictx.host`; the work runs on the app's background pool; the done channel goes to the calling program's group |
 | | 4. `data-load`, `data-reload`, `data-status`, `data-files`, `data-file` | `host_proxied` | they walk the tree raw (`data.cpp`); the body binds them only for a program of its own app, which it checks through a pinned walk |
@@ -2183,9 +2186,9 @@ and 9.1).
   returns what was last decided and decides nothing, and `AppRuntime::idle()` and `wait_idle()` use
   it, so a query never builds, moves or destroys the document's group.
 - **Late registrations** (R1b skeptic m3). A host verb or provider registered after the placement
-  makes it stale, by any of three paths: AppRuntime's `register_*` (through `refresh_program_names`),
+  makes it stale, by any of four paths: AppRuntime's `register_*` (through `refresh_program_names`),
   `register_action_intrinsics` (the providers' registry moves past the generation the placement
-  read), or `require_host_thread`. A stale placement is decided again, at the same points (each `drain_begin`, render and
+  read), `Runtime::add_program_intrinsics`, or `require_host_thread`. A stale placement is decided again, at the same points (each `drain_begin`, render and
   submission tries), the first time nothing of the document runs where it runs
   (`nothing_running`: no live action, started resident or mount tick, nor spawned child), so a
   move then kills nothing; at the latest it is decided at the document's next restart (a load,

@@ -97,7 +97,7 @@ AppRuntime::~AppRuntime() {
         e.engine->unload(*e.lane);
       } catch (...) {
       }
-  // The provider outlives us in the registry: it must bind nothing of ours.
+  // The providers are rt_'s, which goes after us: they must bind nothing of ours meanwhile.
   Verbs dropped; // goes after the lock
   {
     std::lock_guard<std::mutex> lock(verbs_->mutex);
@@ -553,16 +553,18 @@ void AppRuntime::ensure_intrinsics() {
   intrinsicsRegistered_ = true;
   cvc::app *app = &app_;
   app->exec_async_host(); // build the host on this thread, before a program env needs it
-  // register_action_intrinsics providers run each time a program env is built. Share the verb
-  // table rather than copy it, so every verb registered so far is bound, not only the first.
+  // The document's own providers (Runtime::add_program_intrinsics), not the app's: they run each
+  // time one of this runtime's program envs is built, and in no other runtime's, so another
+  // document on the app never reaches these verbs and functions, nor this document another's.
+  // Share the verb table rather than copy it, so every verb registered so far is bound, not only
+  // the first.
   std::shared_ptr<Verbs> verbs = verbs_;
   namespace se = cvc::state_exec;
   // Seven providers, in the order the one provider bound them before (S1-Q7, STATE_EXEC_THREADED.md
   // 4.9), so a name two of them bind resolves as it did, the later one winning; an isolated
   // document whose group a worker may pump installs each by its kind.
   // 1. The host's verbs, host_only: arbitrary host code, run in the calling step.
-  register_action_intrinsics(
-      app_,
+  rt_.add_program_intrinsics(
       [verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         std::vector<std::pair<std::string, std::function<void()>>> sync;
         {
@@ -580,8 +582,7 @@ void AppRuntime::ensure_intrinsics() {
       },
       se::provider_affinity::host_only);
   // 2. (quit [code]), host_proxied: it writes quit_ and exitCode_.
-  register_action_intrinsics(
-      app_,
+  rt_.add_program_intrinsics(
       [verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         std::function<void(int)> quit;
         {
@@ -621,8 +622,7 @@ void AppRuntime::ensure_intrinsics() {
   };
   // 3. The host's async verbs, any: libcvc's own marshal, the work on the background task pool, on
   // the program's own host (*ictx.host).
-  register_action_intrinsics(
-      app_,
+  rt_.add_program_intrinsics(
       [app, verbs, done_poster](std::shared_ptr<se::environment> env,
                                 se::intrinsics_context &ictx) {
         se::async_host &host = ictx.host ? *ictx.host : app->exec_async_host();
@@ -657,8 +657,7 @@ void AppRuntime::ensure_intrinsics() {
       se::provider_affinity::any);
   // 4. The (data-*) verbs, host_proxied: they walk the tree raw (data.cpp). The body runs on a
   // spawned child's pumping thread, so it reads the tree only through a pinned walk.
-  register_action_intrinsics(
-      app_,
+  rt_.add_program_intrinsics(
       [app, verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
         // The (data-*) verbs (data.h), for programs in this runtime's app: (data-load NAME URI [AS
         // [PATH]]) points the document's data.NAME at a request and starts it (the scene's nodes
@@ -754,8 +753,7 @@ void AppRuntime::ensure_intrinsics() {
       },
       se::provider_affinity::host_proxied);
   // 5. The host's functions, host_only: inline on the drain thread, like a sync verb.
-  register_action_intrinsics(
-      app_,
+  rt_.add_program_intrinsics(
       [verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         std::map<std::string, se::native_fn> functions;
         {
@@ -768,8 +766,7 @@ void AppRuntime::ensure_intrinsics() {
       se::provider_affinity::host_only);
   // 6. The host's async functions, host_only: the host's marshal runs in the calling step (pycvc's
   // takes the GIL, a C++ host's is unaudited), on the program's own host.
-  register_action_intrinsics(
-      app_,
+  rt_.add_program_intrinsics(
       [app, verbs, done_poster](std::shared_ptr<se::environment> env,
                                 se::intrinsics_context &ictx) {
         se::async_host &host = ictx.host ? *ictx.host : app->exec_async_host();
@@ -807,8 +804,7 @@ void AppRuntime::ensure_intrinsics() {
   // the calling program's own (master's #1105). A host whose calls can't park (init:'s, which runs
   // them inline, S1-Q2) gets the blocking form instead, when there is one; its -async form raises
   // RuntimeError there.
-  register_action_intrinsics(
-      app_,
+  rt_.add_program_intrinsics(
       [app, verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
         std::map<std::string, Verbs::AsyncWork> work;
         {
@@ -816,7 +812,7 @@ void AppRuntime::ensure_intrinsics() {
           work = verbs->async_work_functions;
         }
         if (work.empty())
-          return; // a runtime that has gone binds nothing (its app may be gone too)
+          return; // a runtime that is going has emptied them (its app may be going too)
         se::async_host &host = ictx.host ? *ictx.host : app->exec_async_host();
         const bool parks = host.parking_scheduler() != nullptr;
         for (const auto &[name, entry] : work) {
@@ -1025,7 +1021,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   if (!lr.ok)
     throw std::runtime_error(lr.error.empty() ? ("AppRuntime.load: failed to load " + path)
                                               : lr.error);
-  ensure_intrinsics(); // the (data-*) verbs are every document's
+  ensure_intrinsics(); // the (data-*) verbs are every document's, each its own
   rt_.refresh_program_names();
   run_script_blocks(lr, path);            // a scripting host's python: block, before requires:
   for (const LoadHook &hook : loadHooks_) // ... and the host extensions' parts
@@ -1072,11 +1068,14 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   seed_keys(lr.keys, new_document);
 
   std::vector<std::string> initErrors;
-  // §init: seeds win over widget defaults. It runs with the document's functions (§6.6).
+  // §init: seeds win over widget defaults. It runs with the document's functions (§6.6), and with
+  // this runtime's verbs and host functions, as an action has them.
   const std::string init = lr.init_script.empty() || !lr.root.functions
                                ? lr.init_script
                                : lr.root.functions->prelude + lr.init_script;
-  run_init(app_, prefix_, init, &initErrors, [this](const std::string &n) { return rt_.has(n); });
+  run_init(
+      app_, prefix_, init, &initErrors, [this](const std::string &n) { return rt_.has(n); },
+      rt_.program_intrinsics());
   for (std::string &e : initErrors) // a failed init: is not fatal, but it must not be silent
     lr.warnings.push_back(std::move(e));
   rt_.set_tick_program(lr.on_tick_script);          // empty = no resident (safe)
