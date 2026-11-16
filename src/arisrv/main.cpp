@@ -59,6 +59,7 @@
 #include <cvc/ariadne/holon.h>                      // server-authoritative avatar holon (H1)
 #include <cvc/ariadne/holon_sync.h>      // server_pump: intent -> holon -> authoritative pose
 #include <cvc/ariadne/host_cli.h>        // --set KEY=VALUE, as ari and arigl take it
+#include <cvc/ariadne/host_signals.h>    // SIGINT and SIGTERM stop this app's relay
 #include <cvc/ariadne/loader.h>          // load_file: the stock world documents
 #include <cvc/ariadne/server_document.h> // --doc: the server document and what it publishes
 #include <cvc/ariadne/stream/stream_relay.h>
@@ -93,6 +94,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -104,9 +106,6 @@
 #endif
 
 namespace {
-std::atomic<bool> g_stop{false};
-void on_signal(int) { g_stop.store(true); }
-
 #if defined(__linux__) && defined(__GLIBC__)
 // A relay runs unattended, so a crash must explain itself in its log: on SIGSEGV / SIGABRT (glibc's
 // "malloc(): ... corrupted" aborts) / SIGBUS / SIGFPE / SIGILL, write the stack to stderr, then
@@ -688,6 +687,15 @@ int main(int argc, char **argv) {
 #endif
 
   cvc::app app;
+  // What stops the relay: a SIGINT or SIGTERM once signals are routed here (route_signals, below),
+  // a server document that fails or quits, or an arisrvx Python program that ends. The flag is
+  // this app's (host_signals.h); the route is what lets a signal handler reach it.
+  cvc::ariadne::host_signals &signals = cvc::ariadne::signals_of(app);
+  std::optional<cvc::ariadne::signal_route> signalRoute; // goes before the app
+  const auto route_signals = [&] {
+    if (!signalRoute)
+      signalRoute.emplace(app, cvc::ariadne::signal_route::mode::stop);
+  };
 #ifdef CVC_ARIADNE_PYTHON
   // Before the server document is read: its requires: python, and its python: block, are this
   // app's engine's to answer (use_script_engine is not called for a server document).
@@ -906,8 +914,7 @@ int main(int argc, char **argv) {
     return status ? status : ran;
   }
   // Signals now, so a stop during the program's startup is the program's to act on.
-  std::signal(SIGINT, on_signal);
-  std::signal(SIGTERM, on_signal);
+  route_signals();
   std::thread scriptThread;
   // Wait at most `seconds` for the program to end, then join it; false (it is left running, so
   // the interpreter may not be finalized) when it did not.
@@ -926,7 +933,7 @@ int main(int argc, char **argv) {
         std::thread([&] { scriptLink.finish(python.serve(pythonScript, {}, serveOpts)); });
     bool asked = false;
     const auto ask_stop = [&] {
-      if (g_stop.load() && !asked) {
+      if (signals.stop_requested() && !asked) {
         scriptLink.post("shutdown");
         asked = true;
       }
@@ -943,7 +950,7 @@ int main(int argc, char **argv) {
         std::_Exit(1);
       }
       const int status = scriptLink.status();
-      if (g_stop.load())
+      if (signals.stop_requested())
         return status;
       const std::string how = scriptLink.why().empty()
                                   ? "ended before it served (status " + std::to_string(status) + ")"
@@ -1191,8 +1198,7 @@ int main(int argc, char **argv) {
                 tlsCert.c_str());
 
   install_crash_trace();
-  std::signal(SIGINT, on_signal);
-  std::signal(SIGTERM, on_signal);
+  route_signals();
   std::printf("[arisrv] relay up | room='%s' node='%s' | state=%s | media=%s\n", room.c_str(),
               nodeId.c_str(), state_tp.listen_address().c_str(), media_tp.listen_address().c_str());
 #if CVC_ENABLE_WS
@@ -1429,7 +1435,7 @@ int main(int argc, char **argv) {
     } catch (const std::exception &e) {
       std::fprintf(stderr, "arisrv: --doc: %s\n", e.what());
       docFailed = true;
-      g_stop.store(true);
+      signals.request_stop();
     }
     std::fflush(stdout);
   }
@@ -1557,10 +1563,10 @@ int main(int argc, char **argv) {
     if (!serverDoc || docFailed)
       return;
     serverDoc->step(server_holon.tick(), server_holon.clock().t());
-    if (serverDoc->should_close() && !g_stop.load()) {
+    if (serverDoc->should_close() && !signals.stop_requested()) {
       std::printf("[arisrv] the server document asked to stop (quit %d)\n", serverDoc->exit_code());
       std::fflush(stdout);
-      g_stop.store(true);
+      signals.request_stop();
     }
   };
   // The room steps on a fixed 50 ms grid (sleep_until, not sleep_for after each step's work), so
@@ -1583,15 +1589,15 @@ int main(int argc, char **argv) {
 #ifdef CVC_ARIADNE_PYTHON
     if (scriptThread.joinable()) {
       if (scriptLink.finished()) {
-        if (!g_stop.load()) {
+        if (!signals.stop_requested()) {
           std::printf("[arisrvx] the python program stopped (status %d); stopping the relay\n",
                       scriptLink.status());
           std::fflush(stdout);
-          g_stop.store(true);
+          signals.request_stop();
         }
         return false;
       }
-      if (g_stop.load()) {
+      if (signals.stop_requested()) {
         const auto now = std::chrono::steady_clock::now();
         if (!scriptStopping) {
           scriptStopping = true;
@@ -1612,7 +1618,7 @@ int main(int argc, char **argv) {
       }
     }
 #endif
-    return !g_stop.load();
+    return !signals.stop_requested();
   };
   while (relay_running()) {
 #if CVC_ENABLE_WS

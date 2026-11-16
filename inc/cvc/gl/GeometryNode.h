@@ -379,9 +379,10 @@ protected:
   // hands its emulated vertex buffers (see onUpdateShader for why), setting each
   // sampler uniform that the program actually uses. For UpdateShaderEvent
   // observers; textures without a context, or unused by the program, are skipped.
-  static void
-  bindShaderTextures(vtkShaderProgram *program,
-                     const std::vector<std::pair<std::string, vtkTextureObject *>> &textures);
+  // Each texture holds its unit only for the draw under way: this node's actor
+  // releases it once that draw is done.
+  void bindShaderTextures(vtkShaderProgram *program,
+                          const std::vector<std::pair<std::string, vtkTextureObject *>> &textures);
 
   // Shader replacements a SUBCLASS needs for itself. Kept out of reach of the
   // public add*ShaderReplacement / clearShaderReplacements (see there), and

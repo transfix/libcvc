@@ -2,7 +2,9 @@
 #include "demos_menu.h"
 
 #ifdef CVC_ENABLE_IMGUI
+#include <atomic>
 #include <cstdlib>
+#include <cvc/core/app.h>
 #include <imgui.h>
 #include <string>
 #include <vector>
@@ -28,8 +30,6 @@ const demo_entry kDemos[] = {
 };
 constexpr std::size_t kCount = sizeof kDemos / sizeof kDemos[0];
 
-bool g_switch_requested = false;
-
 // How to open each demo: worked out at the first draw, then kept. Empty = not available here.
 struct opener {
   bool resolved = false;
@@ -39,7 +39,14 @@ struct opener {
   std::vector<std::string> argv; // the program to start
 #endif
 };
-opener g_open[kCount];
+
+// The menu's state, the app's (app::slot): drawn on the thread that draws the overlay, and
+// switch_requested read by the demo's loop.
+struct menu_state {
+  static constexpr const char *app_slot = "cvc_examples.demos_menu";
+  opener open[kCount];
+  std::atomic<bool> switch_requested{false};
+};
 
 #ifdef __EMSCRIPTEN__
 
@@ -70,7 +77,7 @@ namespace fs = std::filesystem;
 
 // The program beside this one, or nothing when it isn't there.
 fs::path sibling(const std::string &name) {
-  static const fs::path dir = cvc::process::self_path().parent_path();
+  const fs::path dir = cvc::process::self_path().parent_path();
 #ifdef _WIN32
   const fs::path p = dir / (name + ".exe");
 #else
@@ -133,14 +140,15 @@ void export_gallery() {
 
 } // namespace
 
-void demos_menu(const char *self) {
+void demos_menu(cvc::app &app, const char *self) {
   if (!ImGui::BeginMenu("Demos"))
     return;
+  menu_state &state = app.slot<menu_state>();
   const std::string me = self ? self : "";
   for (std::size_t i = 0; i < kCount; ++i) {
     const demo_entry &d = kDemos[i];
     const bool current = me == d.slug;
-    opener &o = g_open[i];
+    opener &o = state.open[i];
     if (!o.resolved) {
 #ifdef __EMSCRIPTEN__
       o.href = href_for(d);
@@ -160,7 +168,7 @@ void demos_menu(const char *self) {
     if (ImGui::MenuItem(d.title, nullptr, current, !current)) {
       export_gallery();
       if (cvc::process::spawn_detached(o.argv))
-        g_switch_requested = true;
+        state.switch_requested.store(true);
     }
 #endif
     if (d.desc[0] && ImGui::IsItemHovered())
@@ -169,15 +177,15 @@ void demos_menu(const char *self) {
   ImGui::EndMenu();
 }
 
-bool demo_switch_requested() { return g_switch_requested; }
+bool demo_switch_requested(cvc::app &app) { return app.slot<menu_state>().switch_requested.load(); }
 
 } // namespace cvc_examples
 
 #else // a cvcGL without the ImGui overlay draws no menus
 
 namespace cvc_examples {
-void demos_menu(const char *) {}
-bool demo_switch_requested() { return false; }
+void demos_menu(cvc::app &, const char *) {}
+bool demo_switch_requested(cvc::app &) { return false; }
 } // namespace cvc_examples
 
 #endif
