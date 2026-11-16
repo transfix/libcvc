@@ -1,0 +1,8 @@
+# The client for ctest arisrv_guest_password (docs/roadmap/ARISRV_IDENTITY.md, ID2): stock arisrv
+# with --guest-password-file admits a client that sends the password's hash
+# (CVC_ARIADNE_GUEST_PASSWORD), and it is a client like any other there.
+meta: { name: a guest password on a relay, min_libcvc: 3.7.13 }
+tests:
+  a_the_password_lets_it_in: |
+    (let ((w (room-call "server.whoami")))
+      (assert (string.starts-with (get-attr w "client_id") "c") w))

@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <ctime>
 #include <cvc/ariadne/conference/client_registry.h>
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_participant_path
@@ -23,6 +24,7 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_blob_store.h> // sha256_hex
 #include <cvc/state/state_link_stats.h> // state_link_report
+#include <iterator>                     // std::next
 #include <random>
 #include <utility>
 
@@ -139,6 +141,28 @@ void remove_child(cvc::app &app, const std::string &parent, const std::string &n
     n->removeChild(name);
 }
 
+std::string seconds_text(double s) {
+  char buf[32];
+  std::snprintf(buf, sizeof buf, "%g", s);
+  return buf;
+}
+
+// A client's limits as server.client answers them: only the ones set.
+se::value_t limits_value(const client_registry::client_limits &l) {
+  std::vector<std::pair<std::string, se::value_t>> out;
+  if (l.programs)
+    out.emplace_back("programs", se::value_t(*l.programs));
+  if (l.guests)
+    out.emplace_back("guests", se::value_t(*l.guests));
+  if (l.steps)
+    out.emplace_back("steps", se::value_t(static_cast<std::int64_t>(l.steps)));
+  if (l.time > 0.0)
+    out.emplace_back("time", se::value_t(l.time));
+  if (l.memory_mb)
+    out.emplace_back("memory_mb", se::value_t(static_cast<std::int64_t>(l.memory_mb)));
+  return se::make_dict(std::move(out));
+}
+
 } // namespace
 
 client_registry::client_registry(options o) : _opt(std::move(o)) {
@@ -194,13 +218,22 @@ void client_registry::update(const std::vector<cvc::state_link_report> &links, d
       rec.connections.push_back(std::move(c));
       while (rec.connections.size() > _opt.max_connections)
         rec.connections.pop_front();
-      it = _links.emplace(key, link_state{id, rec.connections.back().seq, r.remote_node_id, false})
-               .first;
+      link_state ls;
+      ls.client_id = id;
+      ls.seq = rec.connections.back().seq;
+      ls.pid = r.remote_node_id;
+      ls.transport = r.transport;
+      ls.connection = r.connection;
+      ls.public_address = pub;
+      it = _links.emplace(key, std::move(ls)).first;
+      if (rec.banned)
+        _to_kick.push_back({r.transport, r.connection});
       rec.dirty = rec.log_dirty = true;
       _dirty = true;
     }
     link_state &ls = it->second;
     ls.holds = r.holds_id;
+    ls.secure = r.secure;
     record *rec = find_mut(ls.client_id);
     if (!rec)
       continue;
@@ -243,15 +276,28 @@ void client_registry::update(const std::vector<cvc::state_link_report> &links, d
       rec->active = any;
       rec->dirty = rec->log_dirty = _dirty = true;
     }
+    _admins.erase(it->first); // an elevation ends with its connection
     it = _links.erase(it);
   }
   // A pid whose holder went, or no longer holds it (a takeover), is held by no known link.
+  // A link that no longer holds its pid loses its elevation with it.
   for (auto h = _holders.begin(); h != _holders.end();) {
     const auto l = _links.find(h->second);
     if (l == _links.end() || !l->second.holds || l->second.pid != h->first)
       h = _holders.erase(h);
     else
       ++h;
+  }
+  for (auto a = _admins.begin(); a != _admins.end();) {
+    const auto l = _links.find(*a);
+    if (l == _links.end() || !l->second.holds) {
+      if (l != _links.end())
+        if (record *rec = find_mut(l->second.client_id))
+          rec->dirty = _dirty = true;
+      a = _admins.erase(a);
+    } else {
+      ++a;
+    }
   }
 }
 
@@ -381,7 +427,7 @@ se::value_t client_registry::whoami(const std::string &pid) const {
                         {"username", se::value_t(rec->username)},
                         {"verified", se::value_t(rec->verified)},
                         {"device", se::value_t(rec->device)},
-                        {"admin", se::value_t(false)}});
+                        {"admin", se::value_t(is_admin(pid))}});
 }
 
 void client_registry::write(cvc::app &app, const std::set<std::string> &present) {
@@ -418,6 +464,23 @@ void client_registry::mirror(cvc::app &app) {
       put(app, join(base, "first_seen"), rec.first_seen);
       put(app, join(base, "last_seen"), rec.last_seen);
       put(app, join(base, "active"), rec.active ? "1" : "0");
+      put(app, join(base, "admin"), record_admin(id) ? "1" : "0");
+      put(app, join(base, "banned"), rec.banned ? "1" : "0");
+      put(app, join(base, "rcon_failures"), std::to_string(rec.rcon_failures));
+      // Only the limits set, each under limits.<key>.
+      const std::string lb = join(base, "limits");
+      const client_limits &l = rec.limits;
+      const auto limit = [&](const char *k, bool set, const std::string &text) {
+        if (set)
+          put(app, join(lb, k), text);
+        else
+          remove_child(app, lb, k);
+      };
+      limit("programs", l.programs.has_value(), l.programs.value_or(false) ? "true" : "false");
+      limit("guests", l.guests.has_value(), l.guests.value_or(false) ? "true" : "false");
+      limit("steps", l.steps != 0, std::to_string(l.steps));
+      limit("time", l.time > 0.0, seconds_text(l.time));
+      limit("memory_mb", l.memory_mb != 0, std::to_string(l.memory_mb));
       rec.dirty = false;
     }
     if (!rec.log_dirty)
@@ -443,6 +506,240 @@ void client_registry::mirror(cvc::app &app) {
     had = std::move(now);
   }
   _dirty = false;
+}
+
+bool client_registry::is_admin(const std::string &pid) const {
+  const auto h = _holders.find(pid);
+  return h != _holders.end() && _admins.count(h->second) != 0;
+}
+
+bool client_registry::record_admin(const std::string &id) const {
+  for (const std::string &key : _admins) {
+    const auto l = _links.find(key);
+    if (l != _links.end() && l->second.client_id == id)
+      return true;
+  }
+  return false;
+}
+
+bool client_registry::set_admin(const std::string &pid, bool on) {
+  const auto h = _holders.find(pid);
+  if (h == _holders.end())
+    return false;
+  if (on)
+    _admins.insert(h->second);
+  else
+    _admins.erase(h->second);
+  if (record *rec = record_of_mut(pid))
+    rec->dirty = _dirty = true;
+  return true;
+}
+
+void client_registry::note_rcon_failure(const std::string &pid) {
+  if (record *rec = record_of_mut(pid)) {
+    ++rec->rcon_failures;
+    rec->dirty = _dirty = true;
+  }
+}
+
+bool client_registry::holder_of(const std::string &pid, holder &out) const {
+  const auto h = _holders.find(pid);
+  if (h == _holders.end())
+    return false;
+  const auto l = _links.find(h->second);
+  if (l == _links.end())
+    return false;
+  out.public_address = l->second.public_address;
+  out.secure = l->second.secure;
+  return true;
+}
+
+std::vector<client_registry::link_ref>
+client_registry::links_of(const std::string &id_or_pid) const {
+  std::string id = id_or_pid;
+  if (!find(id))
+    id = identity_key(id_or_pid);
+  std::vector<link_ref> out;
+  if (id.empty())
+    return out;
+  for (const auto &[key, ls] : _links)
+    if (ls.client_id == id)
+      out.push_back({ls.transport, ls.connection});
+  return out;
+}
+
+bool client_registry::ban(const std::string &id, bool on) {
+  record *rec = find_mut(id);
+  if (!rec)
+    return false;
+  if (rec->banned != on)
+    rec->dirty = _dirty = true;
+  rec->banned = on;
+  return true;
+}
+
+std::vector<client_registry::link_ref> client_registry::take_banned_links() {
+  std::vector<link_ref> out;
+  out.swap(_to_kick);
+  return out;
+}
+
+bool client_registry::rename(const std::string &id, const std::string &name, refusal &why) {
+  record *rec = find_mut(id);
+  if (!rec) {
+    why = {"invalid", "no client " + id};
+    return false;
+  }
+  std::string clean;
+  if (!clean_username(name, clean)) {
+    why = {"invalid", "a username is 1 to " + std::to_string(kUsernameMax) +
+                          " bytes of text, with no control characters"};
+    return false;
+  }
+  if (clean != rec->username && name_taken(clean, id)) {
+    why = {"invalid", "the username " + clean + " is taken"};
+    return false;
+  }
+  if (clean != rec->username)
+    rec->dirty = _dirty = true;
+  rec->username = clean;
+  return true;
+}
+
+bool client_registry::set_limit(const std::string &id, const std::string &key,
+                                const se::value_t &value, refusal &why) {
+  record *rec = find_mut(id);
+  if (!rec) {
+    why = {"invalid", "no client " + id};
+    return false;
+  }
+  const bool nil = std::holds_alternative<std::monostate>(value.v);
+  const bool *b = std::get_if<bool>(&value.v);
+  const std::int64_t *i = std::get_if<std::int64_t>(&value.v);
+  const double *d = std::get_if<double>(&value.v);
+  client_limits &l = rec->limits;
+  if (key == "programs" || key == "guests") {
+    // The DSL's false is nil, so nil takes the limit back; a false given as a boolean (from
+    // Python, or (= 1 0)) refuses the kind.
+    if (!nil && !b) {
+      why = {"invalid", key + " is true or false"};
+      return false;
+    }
+    std::optional<bool> &flag = key == "programs" ? l.programs : l.guests;
+    flag = nil ? std::nullopt : std::optional<bool>(*b);
+  } else if (key == "steps" || key == "memory_mb") {
+    if (!nil && (!i || *i < 0)) {
+      why = {"invalid", key + " is a whole number, not below 0"};
+      return false;
+    }
+    (key == "steps" ? l.steps : l.memory_mb) = nil ? 0 : static_cast<std::uint64_t>(*i);
+  } else if (key == "time") {
+    const double s = i ? static_cast<double>(*i) : d ? *d : -1.0;
+    if (!nil && !(s >= 0.0)) {
+      why = {"invalid", "time is a number of seconds, not below 0"};
+      return false;
+    }
+    l.time = nil ? 0.0 : s;
+  } else {
+    why = {"invalid", key + " is not a limit (programs, guests, steps, time, memory_mb)"};
+    return false;
+  }
+  rec->dirty = _dirty = true;
+  return true;
+}
+
+std::optional<client_registry::client_limits>
+client_registry::limits(const std::string &pid) const {
+  const record *rec = record_of(pid);
+  if (!rec || rec->limits.empty())
+    return std::nullopt;
+  return rec->limits;
+}
+
+se::value_t client_registry::summary(const record &rec) const {
+  return se::make_dict({{"client_id", se::value_t(rec.id)},
+                        {"username", se::value_t(rec.username)},
+                        {"active", se::value_t(rec.active)},
+                        {"admin", se::value_t(record_admin(rec.id))},
+                        {"banned", se::value_t(rec.banned)},
+                        {"verified", se::value_t(rec.verified)},
+                        {"device", se::value_t(rec.device)},
+                        {"first_seen", se::value_t(rec.first_seen)},
+                        {"last_seen", se::value_t(rec.last_seen)}});
+}
+
+se::value_t client_registry::list_value() const {
+  std::vector<const record *> recs;
+  for (const auto &[id, rec] : _records)
+    recs.push_back(&rec);
+  std::stable_sort(recs.begin(), recs.end(), [](const record *a, const record *b) {
+    if (a->active != b->active)
+      return a->active;
+    return a->seen_s > b->seen_s;
+  });
+  std::vector<se::value_t> out;
+  for (const record *rec : recs)
+    out.push_back(summary(*rec));
+  return se::make_list(std::move(out));
+}
+
+se::value_t client_registry::record_value(const std::string &id) const {
+  const record *rec = find(id);
+  if (!rec)
+    return se::value_t();
+  se::value_t v = summary(*rec);
+  std::vector<se::value_t> conns;
+  for (const connection &c : rec->connections)
+    conns.push_back(se::make_dict({{"pid", se::value_t(c.pid)},
+                                   {"transport", se::value_t(c.transport)},
+                                   {"public", se::value_t(c.public_address)},
+                                   {"local", se::value_t(c.local_address)},
+                                   {"opened", se::value_t(c.opened)},
+                                   {"closed", se::value_t(c.closed)},
+                                   {"active", se::value_t(c.active)}}));
+  se::dict_ptr *d = std::get_if<se::dict_ptr>(&v.v);
+  (*d)->emplace_back("limits", limits_value(rec->limits));
+  (*d)->emplace_back("rcon_failures", se::value_t(static_cast<std::int64_t>(rec->rcon_failures)));
+  (*d)->emplace_back("connections", se::make_list(std::move(conns)));
+  return v;
+}
+
+double rcon_guard::wait(const std::string &address, const std::string &client, double now_s) const {
+  double w = 0.0;
+  for (const std::string &key : {"a:" + address, "c:" + client}) {
+    const auto it = _by.find(key);
+    if (it != _by.end() && it->second.locked_until > now_s)
+      w = std::max(w, it->second.locked_until - now_s);
+  }
+  return w;
+}
+
+void rcon_guard::fail_one(const std::string &key, double now_s) {
+  if (_by.size() >= kMaxEntries && !_by.count(key)) {
+    // Full: forget every entry that holds no lock now, so a flood of addresses can't grow it.
+    for (auto it = _by.begin(); it != _by.end();)
+      it = it->second.locked_until <= now_s ? _by.erase(it) : std::next(it);
+    if (_by.size() >= kMaxEntries)
+      return;
+  }
+  entry &e = _by[key];
+  ++e.failures;
+  e.last_s = now_s;
+  if (e.failures >= kFreeTries) {
+    e.lock_s = e.lock_s == 0.0 ? kFirstLockS : std::min(kMaxLockS, e.lock_s * 2.0);
+    e.locked_until = now_s + e.lock_s;
+  }
+}
+
+void rcon_guard::failed(const std::string &address, const std::string &client, double now_s) {
+  fail_one("a:" + address, now_s);
+  if (!client.empty())
+    fail_one("c:" + client, now_s);
+}
+
+void rcon_guard::succeeded(const std::string &address, const std::string &client) {
+  _by.erase("a:" + address);
+  _by.erase("c:" + client);
 }
 
 bool client_registry::clean_username(const std::string &in, std::string &out) {

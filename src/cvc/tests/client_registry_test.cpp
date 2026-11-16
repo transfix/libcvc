@@ -21,6 +21,7 @@
 #include <cvc/ariadne/conference/room_net.h>        // room_device_tag
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/exceptions.h> // field
 #include <cvc/state/state_link_stats.h>
 #include <gtest/gtest.h>
 #include <string>
@@ -63,7 +64,7 @@ std::string value_at(cvc::app &app, const std::string &path) {
   return n ? n->value() : std::string("<absent>");
 }
 
-std::string field(const se::value_t &v, const std::string &key) {
+std::string str_field(const se::value_t &v, const std::string &key) {
   const se::dict_ptr *d = std::get_if<se::dict_ptr>(&v.v);
   if (!d || !*d)
     return "<not a dict>";
@@ -293,11 +294,11 @@ TEST(ClientRegistry, AVerifiedDeviceGetsItsRoomTag) {
   EXPECT_EQ(reg.record_of("bob")->device, conf::room_device_tag("r", "dev-1"));
 
   const se::value_t who = reg.whoami("bob");
-  EXPECT_EQ(field(who, "client_id"), reg.identity_key("bob"));
-  EXPECT_EQ(field(who, "username"), reg.record_of("bob")->username);
-  EXPECT_EQ(field(who, "verified"), "true");
-  EXPECT_EQ(field(who, "device"), conf::room_device_tag("r", "dev-1"));
-  EXPECT_EQ(field(who, "admin"), "false");
+  EXPECT_EQ(str_field(who, "client_id"), reg.identity_key("bob"));
+  EXPECT_EQ(str_field(who, "username"), reg.record_of("bob")->username);
+  EXPECT_EQ(str_field(who, "verified"), "true");
+  EXPECT_EQ(str_field(who, "device"), conf::room_device_tag("r", "dev-1"));
+  EXPECT_EQ(str_field(who, "admin"), "false");
   EXPECT_TRUE(std::holds_alternative<std::monostate>(reg.whoami("nobody").v));
 }
 
@@ -377,4 +378,173 @@ TEST(ClientRegistry, UtcIsoIsToTheSecond) {
   const auto epoch = std::chrono::system_clock::from_time_t(0);
   EXPECT_EQ(reg_t::utc_iso(epoch), "1970-01-01T00:00:00Z");
   EXPECT_EQ(reg_t::utc_iso(epoch + std::chrono::seconds(86400 + 3661)), "1970-01-02T01:01:01Z");
+}
+
+// -------- ID3: rcon's elevation, bans, an admin's rename and limits, the admin's views --------
+
+TEST(ClientRegistry, RconElevatesOneConnectionUntilItGoes) {
+  reg_t reg(opts());
+  cvc::state_link_report a = link(1, "bob");
+  reg.update({a}, 1.0, "t1");
+  EXPECT_FALSE(reg.is_admin("bob"));
+  EXPECT_FALSE(reg.set_admin("nobody", true));
+  ASSERT_TRUE(reg.set_admin("bob", true));
+  EXPECT_TRUE(reg.is_admin("bob"));
+  EXPECT_EQ(str_field(reg.whoami("bob"), "admin"), "true");
+  // A new connection of the same client must log in again.
+  reg.update({}, 2.0, "t2");
+  reg.update({link(2, "bob")}, 3.0, "t3");
+  EXPECT_FALSE(reg.is_admin("bob"));
+  // A takeover by another link drops it too.
+  ASSERT_TRUE(reg.set_admin("bob", true));
+  cvc::state_link_report old = link(2, "bob");
+  old.holds_id = false;
+  reg.update({old, link(3, "bob", "dev-2")}, 4.0, "t4");
+  EXPECT_FALSE(reg.is_admin("bob"));
+  // And a logout.
+  ASSERT_TRUE(reg.set_admin("bob", true));
+  ASSERT_TRUE(reg.set_admin("bob", false));
+  EXPECT_FALSE(reg.is_admin("bob"));
+}
+
+TEST(ClientRegistry, TheHolderIsWhatRconChecks) {
+  reg_t reg(opts());
+  cvc::state_link_report r = link(1, "bob", "dev-1", "ipv4:198.51.100.4:999");
+  r.secure = true;
+  reg.update({r}, 1.0, "t");
+  reg_t::holder h;
+  ASSERT_TRUE(reg.holder_of("bob", h));
+  EXPECT_EQ(h.public_address, "198.51.100.4");
+  EXPECT_TRUE(h.secure);
+  EXPECT_FALSE(reg.holder_of("nobody", h));
+  reg.note_rcon_failure("bob");
+  reg.note_rcon_failure("bob");
+  EXPECT_EQ(reg.record_of("bob")->rcon_failures, 2u);
+}
+
+TEST(ClientRegistry, ABannedClientIsClosedAtEachConnection) {
+  reg_t reg(opts());
+  reg.update({link(1, "bob")}, 1.0, "t1");
+  const std::string id = reg.identity_key("bob");
+  const std::vector<reg_t::link_ref> open = reg.links_of(id);
+  ASSERT_EQ(open.size(), 1u);
+  EXPECT_EQ(open[0].transport, "grpc");
+  EXPECT_EQ(open[0].connection, 1u);
+  EXPECT_EQ(reg.links_of("bob").size(), 1u); // by pid too
+  EXPECT_TRUE(reg.links_of("nobody").empty());
+  EXPECT_FALSE(reg.ban("cnobody", true));
+  ASSERT_TRUE(reg.ban(id, true));
+  EXPECT_TRUE(reg.take_banned_links().empty()); // the relay closes the open ones itself
+  reg.update({}, 2.0, "t2");
+  reg.update({link(2, "bob")}, 3.0, "t3"); // it comes back
+  const std::vector<reg_t::link_ref> kick = reg.take_banned_links();
+  ASSERT_EQ(kick.size(), 1u);
+  EXPECT_EQ(kick[0].connection, 2u);
+  EXPECT_TRUE(reg.take_banned_links().empty());
+  ASSERT_TRUE(reg.ban(id, false));
+  reg.update({}, 4.0, "t4");
+  reg.update({link(3, "bob")}, 5.0, "t5");
+  EXPECT_TRUE(reg.take_banned_links().empty());
+}
+
+TEST(ClientRegistry, AnAdminRenamesWithoutTheRateLimit) {
+  reg_t reg(opts());
+  reg.update({link(1, "a", "dev-a"), link(2, "b", "dev-b")}, 1.0, "t");
+  const std::string a = reg.identity_key("a");
+  reg_t::refusal why;
+  for (int i = 0; i < 6; ++i)
+    ASSERT_TRUE(reg.rename(a, "n" + std::to_string(i), why)) << why.message;
+  ASSERT_TRUE(reg.set_username("b", "taken", 1.0, why));
+  EXPECT_FALSE(reg.rename(a, "TAKEN", why));
+  EXPECT_EQ(why.code, "invalid");
+  EXPECT_FALSE(reg.rename(a, "", why));
+  EXPECT_FALSE(reg.rename("cnobody", "x", why));
+}
+
+TEST(ClientRegistry, LimitsAreCheckedAndCleared) {
+  reg_t reg(opts());
+  reg.update({link(1, "a")}, 1.0, "t");
+  const std::string id = reg.identity_key("a");
+  reg_t::refusal why;
+  EXPECT_FALSE(reg.limits("a").has_value()) << "none set";
+  EXPECT_TRUE(reg.set_limit(id, "memory_mb", se::value_t(std::int64_t(64)), why));
+  EXPECT_TRUE(reg.set_limit(id, "time", se::value_t(2.5), why));
+  EXPECT_TRUE(reg.set_limit(id, "guests", se::value_t(true), why));
+  EXPECT_TRUE(reg.set_limit(id, "programs", se::value_t(false), why));
+  EXPECT_FALSE(reg.set_limit(id, "guests", se::value_t(std::int64_t(1)), why)) << "a boolean";
+  EXPECT_FALSE(reg.set_limit(id, "steps", se::value_t(std::int64_t(-1)), why)) << "not below 0";
+  EXPECT_FALSE(reg.set_limit(id, "steps", se::value_t(2.5), why)) << "a whole number";
+  EXPECT_FALSE(reg.set_limit(id, "steps", se::value_t(std::string("9")), why)) << "a number";
+  EXPECT_FALSE(reg.set_limit(id, "concurrency", se::value_t(std::int64_t(2)), why));
+  EXPECT_FALSE(reg.set_limit(id, "colour", se::value_t(true), why));
+  EXPECT_EQ(why.code, "invalid");
+  EXPECT_FALSE(reg.set_limit("cnobody", "steps", se::value_t(std::int64_t(1)), why));
+  const std::optional<reg_t::client_limits> lim = reg.limits("a");
+  ASSERT_TRUE(lim.has_value());
+  EXPECT_EQ(lim->memory_mb, 64u);
+  EXPECT_DOUBLE_EQ(lim->time, 2.5);
+  EXPECT_EQ(lim->guests, std::optional<bool>(true));
+  EXPECT_EQ(lim->programs, std::optional<bool>(false));
+  EXPECT_EQ(lim->steps, 0u) << "unset: the document's";
+  // Nil takes one back to the document's.
+  EXPECT_TRUE(reg.set_limit(id, "memory_mb", se::value_t(), why));
+  EXPECT_TRUE(reg.set_limit(id, "programs", se::value_t(), why));
+  EXPECT_EQ(reg.limits("a")->memory_mb, 0u);
+  EXPECT_FALSE(reg.limits("a")->programs.has_value());
+  EXPECT_FALSE(reg.limits("nobody").has_value());
+
+  cvc::app app;
+  reg.write(app, {});
+  const std::string base = std::string(reg_t::kRoot) + "." + id;
+  EXPECT_EQ(value_at(app, base + ".limits.time"), "2.5");
+  EXPECT_EQ(value_at(app, base + ".limits.guests"), "true");
+  EXPECT_EQ(value_at(app, base + ".limits.memory_mb"), "<absent>");
+}
+
+TEST(ClientRegistry, TheAdminsViewsListActiveClientsFirst) {
+  reg_t reg(opts());
+  reg.update({link(1, "a", "dev-a")}, 1.0, "t1");
+  reg.update({}, 2.0, "t2");
+  reg.update({link(2, "b", "dev-b")}, 3.0, "t3");
+  ASSERT_TRUE(reg.set_admin("b", true));
+  const se::value_t all = reg.list_value();
+  const se::list_ptr *l = std::get_if<se::list_ptr>(&all.v);
+  ASSERT_TRUE(l && *l);
+  ASSERT_EQ((*l)->size(), 2u);
+  EXPECT_EQ(str_field((**l)[0], "client_id"), reg.identity_key("b"));
+  EXPECT_EQ(str_field((**l)[0], "active"), "true");
+  EXPECT_EQ(str_field((**l)[0], "admin"), "true");
+  EXPECT_EQ(str_field((**l)[1], "active"), "false");
+
+  const se::value_t rec = reg.record_value(reg.identity_key("b"));
+  EXPECT_EQ(str_field(rec, "username"), reg.record_of("b")->username);
+  const se::value_t *conns = se::field(rec, "connections");
+  ASSERT_NE(conns, nullptr);
+  const se::list_ptr *cl = std::get_if<se::list_ptr>(&conns->v);
+  ASSERT_TRUE(cl && *cl);
+  ASSERT_EQ((*cl)->size(), 1u);
+  EXPECT_EQ(str_field((**cl)[0], "pid"), "b");
+  EXPECT_EQ(str_field((**cl)[0], "public"), "203.0.113.7");
+  EXPECT_NE(se::field(rec, "limits"), nullptr);
+  EXPECT_TRUE(std::holds_alternative<std::monostate>(reg.record_value("cnobody").v));
+}
+
+TEST(RconGuard, ThreeWrongTriesLockOutAndTheLockDoubles) {
+  conf::rcon_guard g;
+  EXPECT_EQ(g.wait("1.2.3.4", "ca", 0.0), 0.0);
+  g.failed("1.2.3.4", "ca", 1.0);
+  g.failed("1.2.3.4", "ca", 2.0);
+  EXPECT_EQ(g.wait("1.2.3.4", "ca", 2.0), 0.0) << "two are free";
+  g.failed("1.2.3.4", "ca", 3.0);
+  EXPECT_DOUBLE_EQ(g.wait("1.2.3.4", "ca", 3.0), 30.0);
+  // Locked by address for another client, and by client from another address.
+  EXPECT_GT(g.wait("1.2.3.4", "cb", 4.0), 0.0);
+  EXPECT_GT(g.wait("5.6.7.8", "ca", 4.0), 0.0);
+  EXPECT_EQ(g.wait("5.6.7.8", "cb", 4.0), 0.0);
+  EXPECT_EQ(g.wait("1.2.3.4", "ca", 33.0), 0.0) << "the lock ends";
+  g.failed("1.2.3.4", "ca", 34.0);
+  EXPECT_DOUBLE_EQ(g.wait("1.2.3.4", "ca", 34.0), 60.0) << "then twice as long";
+  // A right password clears both.
+  g.succeeded("1.2.3.4", "ca");
+  EXPECT_EQ(g.wait("1.2.3.4", "ca", 35.0), 0.0);
 }

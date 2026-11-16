@@ -102,3 +102,25 @@ TEST_F(DeviceIdEnv, CvcDeviceIdOverridesIt) {
   set_env("CVC_DEVICE_ID", "0123456789abcdef0123456789abcdef");
   EXPECT_EQ(cvc::default_device_id(), "0123456789abcdef0123456789abcdef");
 }
+
+// A relay's guest password (docs/roadmap/ARISRV_IDENTITY.md, ID2): text a person types, and the
+// bearer a client sends for it, a hash that fits a room token's slot on both transports.
+TEST(StateIdentity, AGuestPasswordGoesAsAHashThatFitsTheTokenSlot) {
+  EXPECT_TRUE(cvc::valid_guest_password("correct horse battery staple"));
+  EXPECT_TRUE(cvc::valid_guest_password("p\xC3\xA4ss")); // UTF-8 is text
+  EXPECT_TRUE(cvc::valid_guest_password(std::string(256, 'x')));
+  EXPECT_FALSE(cvc::valid_guest_password(""));
+  EXPECT_FALSE(cvc::valid_guest_password(std::string(257, 'x')));
+  EXPECT_FALSE(cvc::valid_guest_password("a\tb"));
+  EXPECT_FALSE(cvc::valid_guest_password("a\x7F"));
+  const std::string b = cvc::guest_password_bearer("correct horse battery staple");
+  EXPECT_EQ(b.size(), 64u);
+  EXPECT_TRUE(std::all_of(b.begin(), b.end(), [](char c) {
+    return std::isdigit(static_cast<unsigned char>(c)) || (c >= 'a' && c <= 'f');
+  }));
+  EXPECT_TRUE(cvc::valid_bearer_token(b));
+  EXPECT_TRUE(cvc::valid_room_token(b));
+  EXPECT_EQ(b, cvc::guest_password_bearer("correct horse battery staple"));
+  EXPECT_NE(b, cvc::guest_password_bearer("correct horse battery stapl"));
+  EXPECT_EQ(b.find("horse"), std::string::npos);
+}

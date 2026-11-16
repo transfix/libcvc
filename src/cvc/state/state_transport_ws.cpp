@@ -2053,6 +2053,28 @@ std::size_t state_transport_ws::disconnect_principal(const std::string &principa
 #endif
 }
 
+bool state_transport_ws::disconnect_connection(std::uint64_t number) {
+#ifdef __EMSCRIPTEN__
+  // A browser accepts no connections.
+  (void)number;
+  return false;
+#else
+  std::shared_ptr<connection> drop;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns)
+      if (c && c->accepted && c->alive.load() && c->serial == number) {
+        drop = c;
+        break;
+      }
+  }
+  if (!drop)
+    return false;
+  drop->abort_io(); // its reader ends and retracts the peer, as any close does
+  return true;
+#endif
+}
+
 void state_transport_ws::set_read_scope(state_read_scope scope) {
   std::lock_guard<std::mutex> lk(_inbound_gate_mu);
   _read_scope = std::move(scope);
