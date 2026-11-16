@@ -962,7 +962,12 @@ for both directions) are a C++/VTK port of ABYSSAL
 `cvcgl_ocean_fft`, `cvcgl_ocean_band` and `cvcgl_ewave` tests. The wave spectrum it is fed, `inc/cvc/ocean/spectrum.h` and
 `src/cvc/ocean/spectrum.cpp` in libcvc itself (JONSWAP with the TMA correction,
 Donelan-Banner spreading, the fetch law and the swell term), ports ABYSSAL's
-`src/ocean/OceanFFT.js` at 849ff7f4. Upstream's `LICENSE`:
+`src/ocean/OceanFFT.js` at 849ff7f4. The persistent foam and the water's shading in
+`src/cvcGL/ocean/OceanFoam.h` and `OceanFoam.cpp` (the turbulence integration of
+`src/ocean/OceanFFT.js`'s assemble pass; the windrow-carved foam, the footprint roughness and the
+light through crests of `src/ocean/OceanMesh.js`; the GGX, Smith and Fresnel terms of
+`src/gfx/ShadingGLSL.js`), used by the Ariadne `water` node and `lsystem_coast`, port the same
+commit. Upstream's `LICENSE`:
 
 ```
 MIT License

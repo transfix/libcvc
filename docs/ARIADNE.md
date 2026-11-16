@@ -1121,8 +1121,15 @@ way from the camera (`cells` vertices a side) is displaced by the cascades and t
 with the camera by whole cells. A flat grid over the ground (`far_cells` a side) draws the rest
 and gives way inside the near one; its normal is the long waves' and the swell's, per fragment,
 fading out by ten times `near`. Both shade as a Fresnel sea with shallows tinted by depth and
-whitecaps where the waves fold, the threshold found so they cover Monahan's share of the sea for
-the wind (`whitecaps` scales it; `foam_bias` at 0 or above fixes it), plus the swell's breakers and
+whitecaps where the waves fold. The long waves' folds leave foam that thins over `foam_decay`
+seconds (2.5; 0: the whitecaps alone), carved into streaks downwind as it ages; the whitecaps and
+this foam together cover Monahan's share of the sea for the wind (`whitecaps` scales it;
+`foam_bias` at 0 or above fixes the whitecaps' threshold), both thresholds found off the frame.
+The shading near the camera (O5) is a GGX sun on the roughness the waves the mesh cannot carry give
+it (from the wind), with Fresnel softening as it roughens, light through backlit crests and the
+bubbles a breaker leaves; past `lod_shade` metres (1500) it gives way to the plain Fresnel sea.
+The foam keeps its detail within `lod_foam` metres (150) on the near grid; past it, and on the far
+grid, the water takes the foam's mean cover. Then the swell's breakers and
 a foam band at the waterline (`shore_foam`), faint where no swell reaches. Both stay out of the
 scene's bounds, so the ground frames the view. When the ground's whole rim is under water (a
 `generated_world` with `edge: shore`, an island) the sea goes on `outer` metres past it (6000);
@@ -1130,8 +1137,9 @@ otherwise it stops at the ground's edge. A `generated_world` under a water node 
 so its own flat water rungs do not draw over it. The cascades need float render targets; without
 them the water is flat blue. Live keys under the node's root (`water.` unless `keys:`):
 `wind_speed`, `wind_dir`, `fetch`, `chop`, `wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`,
-`foam_fray`, `shore_fade`, `swell_height`, `swell_period`, `swell_dir`, `shore_foam`, `wake` and
-`wake_foam`, most on `water_controls.ari`. A change to the swell rebuilds the shore layer once the
+`foam_fray`, `foam_decay`, `shore_fade`, `swell_height`, `swell_period`, `swell_dir`,
+`shore_foam`, `wake`, `wake_foam`, `lod_foam` and `lod_shade`, most on `water_controls.ari`. A
+change to the swell rebuilds the shore layer once the
 keys have held for ten frames (12 ms for a 401² grid). With `body: {}` the water is in the scene's
 physics world, with or without a renderer ([`scene_water.h`](../inc/cvc/ariadne/scene_water.h)).
 It is one fluid field over the water's extent, its surface the same sea computed on the CPU (the
