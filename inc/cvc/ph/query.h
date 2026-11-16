@@ -93,9 +93,9 @@ history_fit_result fit_history(const composite &s, const history &h, const histo
 // States at the query time drawn from the fit's posterior: xi ~ N(xi_hat, sigmas^2 covariance),
 // each mapped to a start (storage_from_efforts) and run through the history's inputs. Draws whose
 // start no state reaches are skipped. Needs xi_covariance.
-std::vector<vecd> posterior_states(const composite &s, const history &h, const history_fit_options &o,
-                                   const history_fit_result &fit, int count, std::uint64_t seed,
-                                   double sigmas = 1.0);
+std::vector<vecd> posterior_states(const composite &s, const history &h,
+                                   const history_fit_options &o, const history_fit_result &fit,
+                                   int count, std::uint64_t seed, double sigmas = 1.0);
 
 // The readouts at the history's sample steps, from a start state (its forward model).
 std::vector<vecd> history_readouts(const composite &s, const history &h,

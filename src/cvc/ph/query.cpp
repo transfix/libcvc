@@ -345,8 +345,9 @@ history_fit_result fit_history(const composite &s, const history &h, const histo
   return res;
 }
 
-std::vector<vecd> posterior_states(const composite &s, const history &h, const history_fit_options &o,
-                                   const history_fit_result &fit, int count, std::uint64_t seed, double sigmas) {
+std::vector<vecd> posterior_states(const composite &s, const history &h,
+                                   const history_fit_options &o, const history_fit_result &fit,
+                                   int count, std::uint64_t seed, double sigmas) {
   const int N = s.state_dim();
   if (fit.xi_covariance.size() != size_t(N) * N || fit.xi.size() != size_t(N))
     bad("posterior_states: the fit has no posterior covariance");
@@ -354,7 +355,8 @@ std::vector<vecd> posterior_states(const composite &s, const history &h, const h
   vecd sym = fit.xi_covariance;
   for (int i = 0; i < N; ++i)
     for (int j = 0; j < i; ++j)
-      sym[size_t(i) * N + j] = sym[size_t(j) * N + i] = 0.5 * (sym[size_t(i) * N + j] + sym[size_t(j) * N + i]);
+      sym[size_t(i) * N + j] = sym[size_t(j) * N + i] =
+          0.5 * (sym[size_t(i) * N + j] + sym[size_t(j) * N + i]);
   if (!cholesky(N, sym, L))
     bad("posterior_states: the posterior covariance is not positive definite");
   rng g(seed);
