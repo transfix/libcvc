@@ -661,6 +661,42 @@ bool run_init(cvc::app &app, const std::string &prefix, const std::string &scrip
   return true;
 }
 
+// The read lane's builtins (read_lane_builtins, ariadne.h): what a reactive slot's predicate may
+// call, and where a LaneProcess's `allow` starts.
+namespace {
+constexpr const char *kReadLaneBuiltins[] = {
+    // arithmetic / comparison / coercion / type predicates / logic
+    "+", "-", "*", "/", "%", "<", ">", "<=", ">=", "=", "!=", "int", "float", "str", "is-int",
+    "is-float", "is-string", "is-null", "is-list", "type-of", "not", "and", "or",
+    // bounded compound construction (by-reference; not the doubling materializers) + access
+    "list", "cons", "car", "cdr", "nth", "length", "dict", "get-attr",
+    // side-effect-free state readers (state-data-get deep-copies; no aliasing, no callables;
+    // state-json writes its document as sliced data steps, under the allocation limit)
+    "state-get", "state-exists", "state-children", "state-data-get", "state-json",
+    "state-root-path", "state-has-expiry", "state-is-expired",
+    // JSON text to values and back: pure, sliced data steps under the allocation limit
+    "json-parse", "json-encode",
+    // the wall clock (a post's "2h ago"): one read, nothing written
+    "time-now",
+    // the stdlib: the pure, bounded functions (a scalar, or a result no bigger than its
+    // argument), and the materializers, which do their work as sliced data steps (each
+    // eval slices, see data_step_nodes_) under the per-call allocation limit. A function
+    // collections.map/filter/reduce call runs as this evaluator's own frames, so the
+    // special-form gate and the caps cover it too. math.random stays out because a
+    // predicate must be deterministic.
+    "string.length", "string.byte-length", "string.char-at", "string.substring", "string.upper",
+    "string.lower", "string.trim", "string.starts-with", "string.ends-with", "string.contains",
+    "string.split", "string.join", "string.replace", "string.encode", "bytes.length",
+    "bytes.byte-at", "bytes.slice", "bytes.concat", "bytes.decode", "math.sqrt", "math.abs",
+    "math.floor", "math.ceil", "math.round", "math.pow", "math.log", "math.sin", "math.cos",
+    "math.tan", "math.min", "math.max", "math.clamp", "math.pi", "math.e", "collections.map",
+    "collections.filter", "collections.reduce", "collections.zip", "collections.flatten",
+    "collections.sort", "collections.reverse", "collections.range", "collections.unique",
+    "collections.dict-keys", "collections.dict-values", "collections.dict-merge"};
+} // namespace
+
+std::span<const char *const> read_lane_builtins() { return kReadLaneBuiltins; }
+
 // --- §4 read-lane: the per-frame reactive predicate evaluator ----------------
 namespace {
 namespace se = cvc::state_exec;
@@ -727,36 +763,7 @@ public:
     env_ = std::make_shared<se::environment>();
     se::environment_ptr full = se::builtins::make_default_environment();
     se::register_intrinsics(full, &ctx_);
-    static const char *const kAllowed[] = {
-        // arithmetic / comparison / coercion / type predicates / logic
-        "+", "-", "*", "/", "%", "<", ">", "<=", ">=", "=", "!=", "int", "float", "str", "is-int",
-        "is-float", "is-string", "is-null", "is-list", "type-of", "not", "and", "or",
-        // bounded compound construction (by-reference; not the doubling materializers) + access
-        "list", "cons", "car", "cdr", "nth", "length", "dict", "get-attr",
-        // side-effect-free state readers (state-data-get deep-copies; no aliasing, no callables;
-        // state-json writes its document as sliced data steps, under the allocation limit)
-        "state-get", "state-exists", "state-children", "state-data-get", "state-json",
-        "state-root-path", "state-has-expiry", "state-is-expired",
-        // JSON text to values and back: pure, sliced data steps under the allocation limit
-        "json-parse", "json-encode",
-        // the wall clock (a post's "2h ago"): one read, nothing written
-        "time-now",
-        // the stdlib: the pure, bounded functions (a scalar, or a result no bigger than its
-        // argument), and the materializers, which do their work as sliced data steps (each
-        // eval slices, see data_step_nodes_) under the per-call allocation limit. A function
-        // collections.map/filter/reduce call runs as this evaluator's own frames, so the
-        // special-form gate and the caps cover it too. math.random stays out because a
-        // predicate must be deterministic.
-        "string.length", "string.byte-length", "string.char-at", "string.substring", "string.upper",
-        "string.lower", "string.trim", "string.starts-with", "string.ends-with", "string.contains",
-        "string.split", "string.join", "string.replace", "string.encode", "bytes.length",
-        "bytes.byte-at", "bytes.slice", "bytes.concat", "bytes.decode", "math.sqrt", "math.abs",
-        "math.floor", "math.ceil", "math.round", "math.pow", "math.log", "math.sin", "math.cos",
-        "math.tan", "math.min", "math.max", "math.clamp", "math.pi", "math.e", "collections.map",
-        "collections.filter", "collections.reduce", "collections.zip", "collections.flatten",
-        "collections.sort", "collections.reverse", "collections.range", "collections.unique",
-        "collections.dict-keys", "collections.dict-values", "collections.dict-merge"};
-    for (const char *name : kAllowed)
+    for (const char *name : read_lane_builtins())
       if (const se::value_t *v = full->lookup(name))
         env_->set(name, *v);
     // pure and bounded: a capability / name lookup, answered once a frame per name, and noted
@@ -5768,8 +5775,16 @@ int Runtime::start_process(LaneProcess p) {
   ac->script = p.name;
   se::async_scheduler &sched = m_->current_sched(); // as placed: its group's, else group 0's
   se::environment_ptr env = ac->env;
+  if (!p.allow.empty()) {
+    // Default-deny: a scope of its own with only the allowed names (no parent to reach the rest
+    // through), as the read lane's evaluator is made.
+    env = std::make_shared<se::environment>();
+    for (const std::string &name : p.allow)
+      if (const se::value_t *v = ac->env->lookup(name))
+        env->set(name, *v);
+  }
   if (p.extend) {
-    env = se::environment::extend(ac->env);
+    env = se::environment::extend(env);
     p.extend(env, ac->ictx);
   }
   se::execute_options opts;

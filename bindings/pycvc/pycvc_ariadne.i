@@ -98,7 +98,7 @@ public:
   }
   bool available() const { return vehicles() != nullptr; }
 
-  // One dict per entity: id, name, archetype, team, controller, placed, x, y, z, yaw, speed,
+  // One dict per entity: id, name, archetype, team, controller, plant, placed, x, y, z, yaw, speed,
   // power_kw, energy_wh, distance, gear, the command its plant took (steer, accel) and its intent.
   PyObject *list() const {
     PyObject *out = PyList_New(0);
@@ -112,6 +112,7 @@ public:
         put(d, "archetype", PyUnicode_FromString(e.spec.archetype.c_str()));
         put(d, "team", PyLong_FromLong(e.spec.team));
         put(d, "controller", PyUnicode_FromString(e.spec.controller.c_str()));
+        put(d, "plant", PyUnicode_FromString(e.plant.c_str()));
         put(d, "placed", PyBool_FromLong(e.placed ? 1 : 0));
         put(d, "x", PyFloat_FromDouble(e.x));
         put(d, "y", PyFloat_FromDouble(e.y));

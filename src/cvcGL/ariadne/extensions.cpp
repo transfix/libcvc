@@ -38,6 +38,7 @@ void register_cvcgl_extensions(cvc::app &app) {
   register_lsystem_node_types(app);     // "forest_trees", …
   register_mesh_node_types(app);        // "mesh_lab", "fe_lab" (CVC_ENABLE_LIBIGL builds only)
   register_world_node_types(app);       // "generated_world"
+  register_water_node_types(app);       // "water"
   register_vehicle_preview_node(app);   // "vehicle_preview"
 }
 

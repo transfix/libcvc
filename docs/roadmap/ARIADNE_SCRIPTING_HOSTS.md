@@ -14,13 +14,16 @@ Status:
   the client's `token: oidc` and reconnects).
 - **S6 shipped** in transfix/libcvc#1147: `host.read_scope`, a per-connection read scope on both
   planes, and `host.refresh_scope` (§6.5.6).
-- **S7 is built:** `pycvc.ariadne.testing.ServerHarness` for a service's tests under plain
-  `python`, and the end-to-end ctest `arisrvx_echo_service` (§6.5.8).
+- **S7 shipped** in transfix/libcvc#1177: `pycvc.ariadne.testing.ServerHarness` for a service's
+  tests under plain `python`, and the end-to-end ctest `arisrvx_echo_service` (§6.5.8).
 - **P1b's engine interface shipped:** `ScriptEngine` and its lane, with Python moved onto it
   (§3.1, §8.3). It is what G1 and L1 plug into.
 - **G1's first part: WebAssembly guests natively on wasmtime,** in `arix` and `ariglx`
   ([`src/ariadne_wasm`](../../src/ariadne_wasm/wasm_engine.h); ARIADNE.md §9.6). §8.3 says what
   it built and what G1 has left.
+- **S3 is built:** clients' DSL programs, `(room-run ...)`, on a relay whose server document has
+  `client_programs:`, each chrooted to its sender's participant under the bound-writes rule
+  (§6.3, tier 2; ARIADNE.md §9.7.1).
 - **The rest is design** (2026-11-02; §4.6, §5.5, §5.6 and §8.2–8.9 added 2026-11-03;
   §6.5, application services: an ASGI API and live state from one `arisrvx`, and phases
   S5–S7 added 2026-11-05).
@@ -374,7 +377,7 @@ document (§4.3) can mount one.
 **In the `x` hosts:**
 
 **As built (C1, first part), in `ariglx`:** the backend is `module://pycvc_gl.ariadne_mpl`, since
-`pycvc_gl.ariadne` is a module, not a package. ariglx makes it the default through a finder on
+the Host's `pycvc.ari` is a module, not a package. ariglx makes it the default through a finder on
 matplotlib's first import. A program with no document gets the shipped `pycvc_gl/figures.ari`, one
 window per figure. A `plt.show()` during a load, a call the document makes or a frame neither
 blocks nor loads a document, and the host refuses a loop inside its loop, a load or another
@@ -386,8 +389,8 @@ figures (`ariadne_mpl.show_in(host)`, `attach(host)`): no process-wide default h
 process-wide figures would want; that waits on a decision. Not yet: interaction (C2), the
 browser, VTK and mesh output.
 
-- **A matplotlib backend, `pycvc_gl.ariadne.mpl`.** It is the default inside an `x` host, or
-  selected with `matplotlib.use("module://pycvc_gl.ariadne.mpl")`.
+- **A matplotlib backend, `pycvc_gl.ariadne_mpl`.** It is the default inside an `x` host, or
+  selected with `matplotlib.use("module://pycvc_gl.ariadne_mpl")`.
   - It's a `FigureCanvasAgg`, and a draw publishes `buffer_rgba()` to an `image:` widget with
     `Host.publish_image`.
   - Python and the window share a process, so nothing is PNG-encoded: the pixels go straight to
@@ -874,6 +877,18 @@ Clients are untrusted. In order of preference:
 2. **Client DSL programs.** When a client must send logic, it sends a `state_exec` program. The
    server runs it with `run_program` in a reduced environment, chrooted to the client's subtree,
    under step and time caps. It runs in-process, it's cheap, and it's already sandboxed.
+
+   *As built (S3; ARIADNE.md §9.7.1):*
+   - The server document opts in with `server: client_programs:` (on, or caps that lower the
+     action lane's). A client sends `(room-run "source" arg ...)` on `room-call`'s path.
+   - Stock arisrv runs it as one of the document's actions (`Runtime::start_process`, not
+     `run_program`, which has no chroot or result), chrooted to the sender's participant. Each
+     write is checked by `room_write_gate::may_write`, so the relay's own keys there stay its.
+   - Its environment is default-deny (`LaneProcess::allow`): the read lane's builtins, five
+     writers and `args`.
+   - The value of its last form comes back as typed CBOR. A client runs one program at a time.
+   - Not in it: reads beyond its own participant (what its client is sent, under its read
+     scope), quoted forms as the program, and the document's functions.
 3. **Client Python, restricted.** Only when the server document opts in
    (`client_scripts: {engine: restricted-python, ...}`). The source is compiled with
    RestrictedPython and runs in a worker process (§6.4), never in the relay or in the script
@@ -2409,11 +2424,11 @@ for it.
 | S0 | **Done** (transfix/libcvc#1046). Server documents in stock arisrv (`--doc`), plus the `server: publish:` namespaces (§6.1, §6.5.3): `ServerDocument`, the shard's outbound scope, the area of interest subscribed to it, the read-only `room` hole, the holon's world clock at `sim.tick`, the parsed `scene:` kept for the world runtime (with a warning that it is not simulated), `requires: [relay]`, `(quit)` as arisrv's exit status, `state-set-tree` through writable links on every hop, and first writes to fresh nodes journaled. Tests: `ServerBlockTest`, `ServerDocumentTest`, `StatePublishScopeTest`, `RoomRelayLoopbackTest.ServerDocumentPublishesItsNamespaceOnly`, the rev-before-fields order, the `arisrv_doc_*` ctests, `ari_server_block_ignored` and `ari_server_document_needs_relay` | — | M |
 | S1 | **Done** (transfix/libcvc#1081). `arisrvx`: the engine on a script thread with an asyncio loop, operator Python (§6.5.1); `serve_asgi` / `--http-listen`, lifespan and graceful shutdown (§6.5.2); `arisrvx check`; the `arisrvx` recipe. As built: `pycvc.ariadne` built in (and shipped with pycvc for plain `python`), the ServerLink (writes coalesced per path in last-write order, `--script-write-budget`, the relay's events through a waker thread), the relay listening only once the ASGI apps have started, a stop that drains the program before the relay, `arisrvx python`, a server document's `python:` block refused, risk 16 tested. Tests: `ServerLinkTest`, the `arisrvx_*` ctests (serve, program, http_listen, startup_fails, check, check_missing_module, doc_python_refused, python_interpreter), `arisrv_python_needs_arisrvx`, `pycvc_ariadne_server`. `--script-slow-ms` moved to S2 | S0, P1 | M |
 | S2 | **Done** (transfix/libcvc#1122). `room-call`: functions clients may call, with `ctx` (principal, progress, idempotency key, deadline), role gates and `CallError` (§6.5.5); the `relay:` block and `--relay` join mode in `ari` and the `x` hosts, and transport security for native clients (§6.5.7); `--script-slow-ms` (§6.5.1); a server document's `python:` block, its exports run on the script thread (§6.2). As built: DSL values typed across every hop (pycvc's conversion through `cvc.state_exec.value` capsules in-process, typed CBOR on the wire, symbols and bytes included), replies only to the connection holding the pid (`send_message_to_holder`), `--call-result-max`, `grpcs://` with `--tls-cert`/`--tls-key` (wss:// left to the conference card), a join that waits out the admission hold, `arisrvx check` without a program. Tests: `ServerLinkTest`, `RoomRelayLoopbackTest.ARoomCallReachesTheRelayAndOnlyItsCaller`, `RoomCallsTest.ParseCall`, `ValueCbor.*`, `arisrvx_doc_python`, `arisrvx_check_doc_python`, `arisrvx_room_call_{grpc,grpcs,tls_needs_its_ca,ws_arix}`, `arisrv_room_call_unavailable`, `pycvc_ariadne_server`. `token: oidc` left for later (see S5) | S1 | M |
-| S3 | Client DSL programs | S0 | S |
+| S3 | **Built.** Client DSL programs (§6.3, tier 2). As built: `server: client_programs:` (on, or `{steps, time, memory_mb}` caps that only lower the action lane's) and `(room-run "source" arg ...)` / `-async` / `room-run-opts` on `room-call`'s path; `ServerDocument::run_client_program` runs it in stock arisrv as a document action chrooted to `conf.rooms.<room>.participants.<pid>`, in a default-deny environment (`LaneProcess::allow`: the read lane's builtins, `state-set`, `state-data-set`, `state-incr`, `state-cas`, `state-swap`, each held to `room_write_gate::may_write`, and `args`), one per client at a time; codes `unavailable`, `invalid`, `rate_limited`, `failed`, `resource_exhausted`. Tests: `ServerDocumentTest.*ClientProgram*`, `ServerBlockTest.ClientProgramsTakeOnOffOrCaps`, `RoomCallsTest.ParseCall`, `arisrv_room_call_program`, `arisrv_room_call_unavailable` | S0 | S |
 | S4 | Restricted client Python in worker processes | S2 | L |
 | S5 | **Done** (transfix/libcvc#1130). The `authenticate` hook and principals: bound writes, room-call and rate limits keyed by principal; `host.disconnect` (§6.5.4). As built: `state_transport::set_authenticator` on gRPC and WS (the verdict on the connection's own thread, before admission, in place of the room token), the gate's principal (takeover only by the same principal, `principal_of`), `--auth-timeout`, `--call-concurrency`, `--call-rate`, `disconnect_principal`, bearers up to 4096 characters, a refused or dropped join told at once. Tests: `StateTransportGrpcTest.InboundGateKeysANodeIdToItsPrincipal`, `StateTransportGrpcTest.AnAuthenticatorAdmitsAndBindsPrincipals`, `StateTransportWsTest.AnAuthenticatorJudgesTheHandshake`, `ServerLinkTest.ARequestWaitsForItsAnswerOrItsTimeout`, `arisrvx_auth_{staff,user_ws,refuses_wrong,refuses_slow,refuses_raises}`, `pycvc_ariadne_server`. Not in it: the client's `token: oidc` | S1 | S |
 | S6 | **Done** (transfix/libcvc#1147). Bound reads (§6.5.6): `host.read_scope` and `host.refresh_scope`. As built: `state_transport::set_read_scope` and `refresh_read_scope` on gRPC and WS (a scoped connection held until its Hello sets its scope; the scope in the peer's `delivery_view` and checked under the write lock on every tree write; deletes for what it can no longer read, a snapshot of what it newly can), `state_prefix_filter`, `room_read_scope` (the participant's own subtree), the prefixes answered with the authenticate verdict (`ServerLink::set_scope`). Tests: `StateSyncAdapterTest.ARemoteDeleteTakesTheSubtreeOut`, `StatePrefixFilterTest`, `StatePeerRegistryTest.AScopedViewDeniesWhatItsScopeDoes`, `StateReadScopeTest.*`, `StateTransportGrpcTest.AReadScopeBoundsWhatAPrincipalReads`, `StateTransportWsTest.AReadScopeBoundsWhatAPrincipalReads`, `RoomCallsTest.AReadScopeKeepsTheParticipantsOwnSubtree`, `arisrvx_read_scope`, `arisrvx_read_scope_ws` | S5 | M |
-| S7 | **Built.** `ServerHarness` for plain `python`, and the end-to-end CI test (§6.5.8). As built: `pycvc.ariadne.testing.ServerHarness` and `HarnessClient` over arisrvx's own `_Program` dispatch (authenticate, read_scope, role gates, `ctx`, timeouts, `CallError`, per-principal limits; values through pycvc's capsules; `publish=` and the read scope bound what a client reads; `host.disconnect` and `host.refresh_scope` reach it), and `relay_pair.py --client-net-asgi`. Tests: `pycvc_ariadne_harness`, `arisrvx_echo_service` | S2, S5 | S |
+| S7 | **Done** (transfix/libcvc#1177). `ServerHarness` for plain `python`, and the end-to-end CI test (§6.5.8). As built: `pycvc.ariadne.testing.ServerHarness` and `HarnessClient` over arisrvx's own `_Program` dispatch (authenticate, read_scope, role gates, `ctx`, timeouts, `CallError`, per-principal limits; values through pycvc's capsules; `publish=` and the read scope bound what a client reads; `host.disconnect` and `host.refresh_scope` reach it), and `relay_pair.py --client-net-asgi`. Tests: `pycvc_ariadne_harness`, `arisrvx_echo_service` | S2, S5 | S |
 | L1 | Lua bindings (SWIG), the Lua engine in the `x` hosts, Lua for client code on `arisrvx` | the engine interface (P1b, done) | L |
 | G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Second part done:** `ari_init` at load and calls from `init:` (`ScriptLane::run`). **Third part done:** host objects by handle, read a region at a time (§8.4.1), and `MemoryError`. **Fourth part done:** a call from a program as its own sliced native call (`SlicedCall`). **Fifth part done:** the pump budget counts what the slices charge. **Sixth part done:** the instance waited for through the lock manager (`ActivationOptions::lock`), and `RecursionError` for a call back into it. **Seventh part done:** the key, pointer, signal and message hooks (`Runtime::set_event_tap`, `ScriptLane::on_key` and the rest). **Eighth part done:** the state imports as fast paths beside `call` (`ScriptSlice::call_now`), and §8.4.1's writes (`volume_write`, `volume_new`, `data.write`). **Ninth part done:** wasmtime in the `arix` and `ariglx` recipes, linked by name. **Tenth part done:** `--exec-policy` and pure exports on the read lane (`ScriptLane::export_pure`). **Done.** | the engine interface (P1b, done) | L |
 | G2 | The install-time transform (§8.5: gas injection; Asyncify) and the browser backend: the same slices, limits, access and hooks in a single-threaded page. **First part done** (§8.5, "Gas"): `cvc_ariadne_wasm_transform` (binaryen's gas checks and Asyncify, from emsdk), the browser backend on the page's own WebAssembly, the memory cap, `GuestMemory` as copies, and `ariadne_wasm_browser_test` under node with its native twin on wasmtime. **Second part done:** the gas pass (`meter.h`, in C++ rather than through the Rust crates): weighted counters, natively on wasmtime and in the transform before Asyncify, so a call counts the same in both and however it is sliced. **Third part done:** the `ariglx-web` wiring: `wasm:` blocks in the page, the guest fetched with the document, a guest over Chrome's 8 MB compiled and instantiated asynchronously, and two guest documents in ci.yml's headless-Chrome smoke. **Left:** JSPI measured against Asyncify | G1 | L |
