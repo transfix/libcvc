@@ -124,8 +124,10 @@ int main() {
 cmake_pop_check_state()
 if(CVC_VTK_HAS_FINISH_EVERY_RENDER)
   target_compile_definitions(cvcGL PRIVATE CVC_VTK_HAS_FINISH_EVERY_RENDER=1)
+  message(STATUS "cvcGL: VTK has FinishEveryRender; VolumeNode turns it off")
+else()
+  message(STATUS "cvcGL: VTK has no FinishEveryRender; volume renders keep VTK's glFinish")
 endif()
-message(STATUS "cvcGL: VTK's FinishEveryRender: ${CVC_VTK_HAS_FINISH_EVERY_RENDER}")
 
 # libjpeg-turbo: conference video compression (jpeg_codec.cpp / jpeg_encode_source.cpp / the mjpeg
 # stream_view decode path). Optional at build time — where the prefix has no turbojpeg the codec
