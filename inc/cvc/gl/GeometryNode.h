@@ -209,6 +209,11 @@ public:
     std::map<std::string, std::array<float, 4>> f4;
     std::map<std::string, std::array<double, 16>> m4; // row-major, as a vtkMatrix4x4
     std::map<std::string, vtkSmartPointer<vtkTextureObject>> tex;
+    // Leave this set out of a shadow map's bake (a vtkShadowMapBakerPass among the actor's render
+    // passes): there the fragment writes the occluder's depth into the colour target, so code that
+    // recolours a fragment after VTK's own (the water's swash on the ground) would corrupt the map.
+    // Never set in the bake's program, the set's uniforms read 0 there: gate such code on one.
+    bool skip_shadow_bake = false;
   };
   void setSharedShaderInputs(const std::string &key, std::shared_ptr<const ShaderInputs> in);
   bool hasSharedShaderInputs(const std::string &key) const;

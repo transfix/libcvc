@@ -862,6 +862,7 @@ types behind one call, `register_cvcgl_extensions`
 ([`extensions.h`](../inc/cvc/gl/ariadne/extensions.h)), which both `ariadne_hello` and
 `AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`,
 `generated_world` (terrain_lab's world, [`world_nodes.h`](../inc/cvc/gl/ariadne/world_nodes.h)),
+`water` (its sea, lakes and ponds as the GPU FFT ocean, below),
 and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and `fe_lab`. Keys the built-in parser
 does not know land in the node's `props`, which a custom realizer reads; most realizers
 **seed** state keys from them (`forest.*` for `forest_trees`, the node's own subtree for
@@ -879,9 +880,151 @@ south-west to north-east), a body on it collides with the same triangles, and a 
 standing on it (`ground:` in `forest_trees`, `wave_sea`, `cloud_sky`) samples the triangle under
 each point.
 
+**Repeated nodes.** `repeat:` on a node makes it a template, drawn as copies beside one another,
+as a widget's `repeat:` draws its instances (§6.5). A pool of markers sized by a list in state is
+one node:
+
+```yaml
+scene:
+  nodes:
+    - node: marker_{i}
+      repeat: markers            # the count: a key holding it (a list's node holds its length)
+      source: { sphere: 0.5 }
+      tags: [markers]
+      visible: markers.{i}.on
+      casts_shadow: false
+      children:
+        - node: ring
+          source: { box: 0.2 }
+```
+
+- **The count** is a whole number (`repeat: 4`), a state key holding one (`repeat: markers`,
+  resolved as `visible:` is), or a read-lane expression (`repeat: (length (state-get "l"))`),
+  counted as a widget's is. A key that holds no number counts 0. The most is 4096.
+- **Each copy** is the template with `{i}`, its 0-based index, filled in: in its id (`marker_0`,
+  `marker_1`, ...), its `visible:` bind, its tags, its `source:` (a file, an asset, a dataset and
+  its item), its `material: { texture }`, its clips' bound offsets, every string in its props (a
+  custom type's keys), and its children's. An id without `{i}` gets `_{i}`. A copy keeps the
+  template's `transform:`, `tags:`, `visible:`, material, `shader:` and children.
+- **The count is live.** At each frame `tick_scene` counts every repeated node again and adds or
+  removes copies to match, the last copies going first, without a reload. A copy that goes takes
+  with it what it brought: its node, its view tags (§5.18), its `visible:` and clip bindings and
+  a custom type's per-frame ticks.
+- **Placing copies.** A copy is a node like any other, so a program, a script or a host moves it
+  through its own keys: `graphics.root.children.marker_3.position` holds `x,y,z`, and `rotation`
+  (degrees) and `scale` sit beside it. A copy made when the count grows starts at the pose those
+  keys hold when they hold one, so a program may write a new marker's count and its position in
+  the same step. Otherwise it starts at the template's `transform:`.
+- **Nesting.** Copies of a node under a group are the group's children. A repeated node inside a
+  repeated node counts its own copies in each copy of the outer, but `{i}` there is its own index,
+  not the outer's (the loader warns, as for widgets).
+- **Not on copies:** `body:` and `world:`. The scene's physics world and its worlds are built once,
+  from the nodes the document declares, so the loader drops them from a repeated node and its
+  children, with a warning.
+
+A host that runs the document (`AriRuntime`, so `arigl`, `arigl-web`, `ariglx` and pycvc's hosts,
+and `TerminalScene`) counts an expression on the document's read lane
+(`SceneAdapter::set_count_fn`, `Runtime::eval_count`). A host calling `realize_scene` itself passes
+`RealizeOptions::count`. Without one a number or a key still counts, and an expression draws no
+copies and warns.
+
 **Textures.** `material: { texture: <uri> }` drapes an image over a geometry node through its
 mesh's UVs. UV (0, 0) is the image's bottom-left corner. A `source: { data }` city's terrain wears
-its bundle's `satellite.png` this way, north up (§5.17).
+its bundle's `satellite.png` this way, north up (§5.17). A `plane` spans its image once, UV (0, 0)
+at its -x, -y corner, as a heightfield does.
+
+**Live textures.** `material: { texture: { stream: <name> } }` is a texture fed by a stream while
+the scene runs. A sim on a worker, a Python host or a relay's server paints a raster, and the
+node shows each part it repaints:
+
+```yaml
+scene:
+  nodes:
+    - node: city
+      source: { data: austin }
+      material: { texture: { stream: fog.tint } }   # a mirror path, here a relay's namespace
+    - node: board
+      source: { plane: { size: 4 } }
+      material: { texture: { stream: streams.board } }   # a stream token
+```
+
+- **What wears it.** Any node that draws a mesh with UVs: a geometry node (a file, an asset, a
+  primitive, a heightfield or a generated terrain), a custom type whose realizer returns a
+  `GeometryNode`, and a `source: { data }` node's terrain, with UVs over the terrain's extent as
+  its aerial image has. A group, which draws no mesh, warns. `material: { uv }` orients it.
+- **The name** is a stream token (`streams.board`), or a state path holding a raster mirror
+  (below). Each is looked for as written and resolved against the document's prefix, as a bind
+  is. The node looks for it every frame until it is live, so the producer may start before or
+  after the scene, and again after the stream closes.
+- **Rasters, a part at a time.** A raster stream's frames (codec `rgba8.patch`) are the
+  rectangles that changed and their pixels, with a key frame (the whole raster) now and then. The
+  texture aliases a canvas the frames draw into:
+  - the first frame, and one after a gap, uploads the texture whole;
+  - every other frame uploads only its rectangles (`glTexSubImage2D`), and a frame with nothing
+    new uploads nothing;
+  - a consumer that subscribes late, or misses a frame, catches up from the frames the raster keeps
+    in state (below).
+- **Other streams.** A raw video stream (`rgba8`, a camera's) shows each new frame whole.
+
+**Producing a raster.** `cvc::ariadne::stream::raster_stream`
+([`stream/raster.h`](../inc/cvc/ariadne/stream/raster.h)) holds an RGBA8 raster:
+- Paint it with `fill(rect, rgba)`, `paint(image, x, y)`,
+  `paint_grid(values, gw, gh, x, y, colormap, lo, hi, alpha)`, or by writing `pixels()` and then
+  calling `mark(rect)`.
+  - `paint_grid` colours a float grid, one pixel a value, through mesh_ops' colour maps
+    (`viridis`, `magma`, `plasma`, `inferno`, `turbo`, `jet`, `parula`, `gray`). A NaN is
+    transparent.
+- `publish()` sends what was painted since the last one, as one frame, and `publish_key()` sends
+  the whole raster.
+- A key frame goes out:
+  - on the first publish;
+  - every `key_every` frames (30);
+  - on the first publish after a subscriber joins.
+- Its frames are kept in state at its token: `.w`, `.h`, `.codec`, the last key frame in
+  `.key`, the last 8 frames in `.ring.<n % 8>`, and their number in `.frame`, written last.
+  `mirror:` names a second path to keep them under.
+
+The same producer, three ways:
+- **C++:** `raster_stream::open(app, { id, root_path, w, h, key_every, mirror })`.
+- **Python:**
+  - `pycvc.raster_open(app, id, w, h[, key_every, mirror])` (positional; `key_every` 30, no
+    mirror by default) returns a `RasterStream`. It
+    has `fill`, `paint_grid(array2d, x, y, colormap, lo, hi, alpha)`, `pixels()` (a writable
+    (h, w, 4) view), `mark`, `publish`, `publish_key`, `subscribe` and `token`.
+  - On a host, `host.open_raster(id, w, h, mirror=None)`.
+- **A document:** the stream verbs carry the raster verbs too (action and resident lanes):
+
+  | Verb | Does |
+  |---|---|
+  | `(raster-open (dict "id" "tint" "w" 256 "h" 256 "mirror" "fog.tint" "key_every" 30))` | opens it, or hands back the one already open under that token; the mirror path resolves as a bind does, through the document's holes |
+  | `(raster-fill R (list x y w h) (list r g b a))` | paints a rectangle one colour (0–255) |
+  | `(raster-grid R (list x y w h) values (dict "colormap" "turbo" "lo" 0 "hi" 1 "alpha" 160))` | paints `w × h` numbers through a colour map |
+  | `(raster-publish R)` | sends what was painted, as a frame; returns its number (0: nothing) |
+  | `(raster-key R)` | sends a key frame now |
+  | `(raster-close R)` | closes it |
+
+**Across a relay.** A server document mirrors its raster into a namespace it publishes
+(`server: publish: [fog]`, §9.7). The relay sends the frames there to every client, and a client
+document that subscribes (`relay: { subscribe: [fog] }`, §9.8.3) names the mirror:
+`material: { texture: { stream: fog.tint } }`.
+- The client turns the mirror into a stream of its own (`raster_follower`). A node that subscribes
+  to that stream gets a key frame of the picture as it is, then each frame in order.
+- A client too far behind for the ring of 8 starts again at the next key frame, so `key_every`
+  bounds how long it can show a stale part.
+- Each frame is one state write, and a key frame is the whole raster: a 1024 × 1024 key frame is
+  4 MiB, well inside the transports' 64 MiB message cap.
+  - Bandwidth, not the cap, is the limit. The WebSocket relay skips a client whose send queue
+    passes 2 MiB until it drains, and its periodic broadcast then re-sends the mirror's current
+    values. The follower catches up from those, through the ring or the last key frame.
+  - So size the raster and `key_every` to the slowest client's link. A raster that changes a
+    little at a time costs little between its key frames.
+- The same mirror works on one machine, with no relay.
+
+Stock hosts have all of this:
+- `AriRuntime` (so `arigl`, `arigl-web`, `ariglx` and `pycvc_gl`'s Host) registers the stream
+  and raster verbs and `type: stream` nodes.
+- `arisrv` registers the stream and raster verbs for its server document.
+- A node's live texture needs nothing registered.
 
 **See-through nodes.** `material: { opacity: <0..1> }` draws a node's meshes see-through: 1 is
 solid (the default) and 0 is invisible. A see-through mesh is drawn in the translucent pass even
@@ -950,7 +1093,57 @@ is cast along and the clouds are lit from), `shade_k` / `shade_floor`, `horizon`
 clouds), `far_reach` (how far the far clouds reach toward the horizon; out of the camera's bounds),
 `evolve` (the weather's speed: 1 is a step every 5 s, a cloud lasting some 8 minutes; 0 holds the
 clouds) and `shadow` (0 starts the shade off). Live keys under the node's root (`sky.` unless
-`keys:`): `drift`, `morph`, `evolve`, `orographic` and `shadow`, all on `sky_controls.ari`.
+`keys:`): `drift`, `morph`, `evolve`, `orographic`, `shadow`, `coverage` (the cells' targets are
+ranked again at once, and the clouds fade in or out to them) and `wind_az`, all on
+`sky_controls.ari`.
+
+The sun is the light rig's key once the scene has one (`lighting.key_azimuth` /
+`key_elevation`, the Stage lighting panel), followed live: a new sun relights the cloud maps and
+re-composites the shade and the far clouds. `sun_az` / `sun_el` are used only without a rig. A
+`water` node listed in `receivers:` takes the shade too: its sunlight and glints dim under a cloud.
+`base` and `top` are still read once at realize.
+
+**Water.** `water` draws everything below `level` on a ground (`world:` a `generated_world`, or
+`ground:` any height-field node) as the GPU FFT sea of OCEAN-AND-WEATHER-ROADMAP.md (§11.2, O15):
+three wave cascades for the wind (`wind_speed`, `wind_dir`, `fetch`), and a swell
+(`swell_height` m, 0 for none; `swell_period`, `swell_dir`) carried by the shore layer, which
+refracts it over the bottom, shoals it, and breaks it on the beaches that face it. Both follow the
+coast: a shore grid over the ground (still-water depth, distance to the shore, normal). Each cascade
+fades out as the water shoals, over half its peak wavelength and at most `shore_fade` metres of
+depth, and no point moves sideways more than 0.8 of the way to the shore. A grid `near` metres each
+way from the camera (`cells` vertices a side) is displaced by the cascades and the swell, and moves
+with the camera by whole cells. A flat grid over the ground (`far_cells` a side) draws the rest
+and gives way inside the near one; its normal is the long waves' and the swell's, per fragment,
+fading out by ten times `near`. Both shade as a Fresnel sea with shallows tinted by depth and
+whitecaps where the waves fold, the threshold found so they cover Monahan's share of the sea for
+the wind (`whitecaps` scales it; `foam_bias` at 0 or above fixes it), plus the swell's breakers and
+a foam band at the waterline (`shore_foam`), faint where no swell reaches. Both stay out of the
+scene's bounds, so the ground frames the view. When the ground's whole rim is under water (a
+`generated_world` with `edge: shore`, an island) the sea goes on `outer` metres past it (6000);
+otherwise it stops at the ground's edge. A `generated_world` under a water node wants `water: 0`,
+so its own flat water rungs do not draw over it. The cascades need float render targets; without
+them the water is flat blue. Live keys under the node's root (`water.` unless `keys:`):
+`wind_speed`, `wind_dir`, `fetch`, `chop`, `wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`,
+`foam_fray`, `shore_fade`, `swell_height`, `swell_period`, `swell_dir`, `shore_foam`, `wake` and
+`wake_foam`, most on `water_controls.ari`. A change to the swell rebuilds the shore layer once the
+keys have held for ten frames (12 ms for a 401² grid). With `body: {}` the water is in the scene's
+physics world, with or without a renderer ([`scene_water.h`](../inc/cvc/ariadne/scene_water.h)).
+It is one fluid field over the water's extent, its surface the same sea computed on the CPU (the
+cascades fading at the same coast, the same swell), so a body lighter than water floats on the
+waves the picture shows and a heavier one sinks. The field is rebuilt when the wind, chop, wave
+height or swell change or the ground regenerates, and the scene's world swaps it as it swaps a
+generated world's bodies. The bodies make waves: an eWave window of 128 m of 0.5 m cells around the
+camera's target takes each moving body's immersed columns as its source, so a dropped crate makes a
+ring and a bobbing one keeps radiating. Its waves move the near grid and shade both grids, foaming
+where they are sharp or fast (`wake_foam`). Beaches absorb them and steep shores reflect them
+(`wake: 0` turns the window off). They are drawn only: they do not push the bodies back. With a
+swell, the swash runs up the beach on the ground itself. The node adds it to the fragment shader
+of every mesh under its ground node (the `world:` / `ground:` node, found by id at the top of the
+scene, its LOD rungs and regenerated chunks included), as the cloud deck adds its shade to its
+receivers. Each wave's front runs up to the shore layer's runup and drains back, a film of water
+with a lace of foam under it, the sand dark and glossy behind it until it dries. The physics sea
+carries the same swash, so a body on the sand is lifted by the film drawn there. `swash: 0` leaves
+it out of both.
 
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the
@@ -1153,7 +1346,7 @@ scene:
   - **Restart.** `sim.restart` rebuilds only the world on.
 - **Vehicles.** The document's top-level `world:` block lists the vehicles it offers
   ([`world_rules.h`](../inc/cvc/ariadne/world_rules.h)), and the scene's world runtime spawns
-  them as Jolt vehicles into the scene's own physics world, headless or drawn
+  them into the scene's own physics world, headless or drawn
   ([`world_vehicles.h`](../inc/cvc/ariadne/world_vehicles.h)). They collide with the scene's
   bodies, step on the world clock with them, and drive on the world that is on:
 
@@ -1168,13 +1361,28 @@ scene:
         racer:
           vehicle: { preset: roboracer, max_speed: 6 }       # a preset with overrides
           look: { file: racer.glb, scale: 1, yaw: 90, z: 0 } # default: the chassis box
+        truck:
+          plant: dynamic4w:humvee                            # the four-wheel model, a Humvee
   ```
 
-  - **Archetypes.** Each names its plant (`jolt`; `kinematic`, `dynamic` and `dynamic4w` are
-    accepted but not run in a scene world yet), its body (a preset, with `mass`, `max_speed`,
+  - **Archetypes.** Each names its plant, its body (a preset, with `mass`, `max_speed`,
     `max_accel`, `max_decel` or `max_steer` over it), its look, the ranges a spawn's settings are
     held to, and its controllers: `nav@1`, the navigator, `none`, or `external` (its intent
     alone drives it).
+  - **Plants.** Every plant runs in the scene's world, on its clock, and meets its bodies (the
+    buildings, the props, the other vehicles):
+
+    | `plant:` | The vehicle | Its body in the world |
+    |---|---|---|
+    | `jolt` (the default) | a Jolt vehicle: wheels, suspension, engine and gearbox | the vehicle's chassis |
+    | `dynamic` (`dynamic:<preset>`) | the dynamic single-track model: tires, load transfer, actuator lag, with its energy books | its chassis box, which the world's contacts push back into the model |
+    | `dynamic4w` (`dynamic4w:<preset>`) | the four-wheel model with suspension: each wheel on the ground under it | as `dynamic`'s |
+    | `kinematic` | nav's bicycle | a kinematic box: it pushes what it meets, and nothing stops it (the navigator keeps it off the buildings) |
+
+    `dynamic:<preset>` names the vehicle as `vehicle: <preset>` does. The dynamic models take one
+    substep of each world step, so they step with everything else; each plant's entities have a
+    navigator of their own on the world's grid. The kinematic bicycle steers each of its
+    substeps, so it has no one command to blend with: there a `blend` intent replaces.
   - **Looks.** With no `look:`, a humvee is the real Humvee, the vehicle-humvee package's
     `Humvee.glb`, when it is installed (`find_vehicle_model`: beside `$CVC_NAV_BUNDLE`, else in
     `share/cvc-scenes/shared` or `share/cvc-scenes/*/` under `$CVC_PREFIX`, `$CVCPKG_PREFIX`,
@@ -1196,9 +1404,10 @@ scene:
     `selected` and `selection.*` (the selected archetype as a spawn would make it now), and
     `status`. Under `entities`: `ids`, `count`, `rev`, `summary`, and for each entity its
     identity, pose (`x`, `y`, `z`, `yaw`), `speed`, `power_kw`, `energy_wh`, `wh_per_km`,
-    `distance`, `wheel_load`, `aero_force` and `gear`, and `command.steer` / `command.accel`
+    `distance`, `wheel_load`, `aero_force` and `gear` (the dynamic models give their books'
+    power and energy, and an odometer), and `command.steer` / `command.accel`
     (what its plant took on the last navigator tick) with `command.by` (its controller, `intent`,
-    `blend`, or `hold`). `physics.stats.vehicles` has a line per vehicle.
+    `blend`, or `hold`). `physics.stats.vehicles` has a line per vehicle, its plant named.
   - **Intents.** Any entity can be steered from outside. A document, a script or a server writes
     its keys, and a C++ or Python host calls `WorldVehicles::set_intent` (`pycvc.WorldEntities`,
     below). Each navigator tick (20 Hz) reads them, and a change replaces the intent it had:
@@ -1227,7 +1436,9 @@ scene:
     `vehicles.spawn.request`. The result is in `vehicles.spawn.status`. `vehicles.remove.id`
     with `remove.request` removes one, and `clear.request` removes them all.
   - **Drawing.** cvcGL draws each entity on its chassis, posed between steps as the other moving
-    bodies are. A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
+    bodies are. The box look poses each wheel where its plant has it
+    (`WorldVehicles::wheels`): a Jolt wheel on its suspension, a dynamic4w wheel on the ground
+    under it, the front ones steered (Ackermann's on a dynamic4w). A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
     `spin:` in degrees a second) draws the selected archetype in the spawn's colours.
   - **The panel.** `vehicle_selector.ari`: the vehicle, its stats, a preview viewport onto a
     `scenes:` entry holding a `vehicle_preview` node (its header shows one), the settings, the
@@ -2574,6 +2785,7 @@ windows:
 | `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans), the wheel zooms, and a double-click puts the camera back where it started. `pick` makes the left button pick instead of orbiting (below); the middle and right buttons still pan, and the wheel still zooms. The view is outlined while the pointer is over it. |
 | `pick` | With `input: pick`, the state key a pick writes under (bound like `bind:`). Defaults to `viewers.<view>.pick`. |
 | `on_pick` | With `input: pick`, an action run on each pick (a program, or a bare name for a host handler), with an `event` dict of the same fields. |
+| `refresh_hz` | Draw the scene at most this many times a second, and show the last picture in between (below). `0` or unset: every frame. |
 
 **Picking.** In an `input: pick` view, the left button picks what the view draws: a press, each
 move while it is held, and the release. Each pick tests the scene's nodes as this view draws them
@@ -2591,6 +2803,21 @@ under the `pick:` key:
 example, so a tool such as a spawn-point editor is a program. A host can ask for the same hit test
 at any point with `SceneViews::pick(view, x, y, hit)`. A terrain, a generated world and a body are
 nodes like any other, so a click on the ground gives a point on it. (`cvcgl_ariadne_pick`.)
+
+**Refresh rate.** A view draws the scene a second time, every frame: a mirror of the main view
+draws every node again, with its own camera, so a map beside a busy scene can cost as much as the
+scene. `refresh_hz: 5` draws it at most five times a second; the frames in between show its last
+picture, kept in a texture the size of the window (`Viewport::setRefreshHz`). It draws at once,
+whatever the rate:
+
+- when it moves or changes size, or is shown again;
+- when its `show`, `hide`, `chrome`, `camera`, `shadows`, `override` or starting camera change;
+- while the pointer drags, wheels or picks in it, and for three frames after, so what a pick
+  changed shows without waiting.
+
+Picks test the scene as it is, not the last picture. A view that does not clear its rect (one that
+draws over what is under it) draws every frame whatever the rate. (`cvcgl_viewport_refresh`,
+`cvcgl_ariadne_pick`.)
 
 **Tags.** A node's `tags:` hold for its whole subtree, so a tagged child under a tagged parent is
 drawn only where both are allowed: the parent's tags take the child out of a view that rules them
@@ -3103,6 +3330,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `volren_controls`, `volslice_controls` | a `volren` / `volslice` node (arg `node`, default `bunny_volume`) |
 | `forest_controls`, `sea_controls`, `sky_controls` | a `forest_trees` / `wave_sea` / `cloud_sky` node (arg `keys`, below) |
 | `world_controls` | a `generated_world` node (§5.4; arg `keys`) |
+| `water_controls` | a `water` node (arg `keys`, default `water`) |
 | `mesh_tools` | a `mesh_lab` node (§5.4; arg `node`, default `mesh`) |
 | `fe_controls` | an `fe_lab` node (§5.4; arg `node`, default `domain`) |
 | `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `scene`, `show`, `hide`, `mode`, `camera`, `chrome`, `shadows`, `caption`, `width`, `height`, `title`, `id`) |
@@ -3723,6 +3951,7 @@ the host's `name` (`Host(name=...)`, `"ari"` by default).
 | `host.set_plot(key, series, x=None, markers=(), max_points=2000, fmt=".6g")` | the subtree a `chart:` with `bind: key` draws (§4): each series values, an `(x, y)` pair or a dict with `y` and any of `x`, `lo`, `hi`, `label`, `style`; markers as `(x, label, kind)` or dicts; a series longer than `max_points` decimated by min/max, so its peaks, troughs and gaps survive |
 | `host.publish_image(name, array)` | the picture `image:` widgets with `src: name` show: (H, W), (H, W, 3) or (H, W, 4), uint8 or float in [0, 1], row 0 at the top |
 | `host.open_stream(id, w, h)` | a live video stream at `streams.<id>` for a `stream_view` widget or a `type: stream` node; `stream.publish(frame)` sends one |
+| `host.open_raster(id, w, h, key_every=30, mirror=None)` | a raster stream at `streams.<id>` for a node's `material: { texture: { stream } }` (§5.4, "Live textures"): paint it (`fill`, `paint_grid`, `pixels()` then `mark`), then `publish()` what changed |
 | `host.run_program(script, done=None)` | a program queued as one of its actions (`done(how)` gets `""` or why it did not finish) |
 | `host.emit(event)` | the event a button raises: its `on()` handler runs in the next frame |
 
@@ -3999,7 +4228,7 @@ unless `MPLBACKEND` or a matplotlibrc names another; `matplotlib.use()` selects 
   `image: src: figure-1`, or by the name `pycvc_gl.ariadne_mpl.bind(fig, "name")` gives it.
 - `draw_idle()` draws once in the next frame, and timers, so `FuncAnimation`, tick on the frames.
   `plt.pause()` runs the host's frames for its interval, where the program runs them.
-- `display(obj)`, predefined in a `python:` block and in `pycvc_gl.ariadne`, shows an object's
+- `display(obj)`, predefined in a `python:` block and in `pycvc.ari`, shows an object's
   richest form in a figures.ari window as IPython's does: a figure, a numpy picture, a PIL image
   or `_repr_png_` as a picture, else markdown or plain text. Where there is no such window (a
   document of its own, `arix`, `ariglx --terminal`, `arisrvx`) it prints the text/plain form, as
@@ -4019,7 +4248,7 @@ The page fetches `python312.zip` with the module and puts it on `sys.path`. The 
 stdlib and the pure-Python packages.
 
 - **What runs.** A document's `python:` block runs at load as it does natively, with pycvc,
-  pycvc_gl and numpy (`?src=main.ari`).
+  pycvc_gl and numpy (`?src=main.ari`), and so does its `wasm:` block (below).
 - **A program as the entry point.** `?src=app.py` runs a Python program in place of the document.
   Only a document's own imports are fetched ahead, so list the files the program loads in the
   config's `preload`.
@@ -4037,8 +4266,9 @@ stdlib and the pure-Python packages.
 C API is found (the cvcpkg `wasmtime` package; [`src/ariadne_wasm`](../src/ariadne_wasm/wasm_engine.h))
 also runs a compiled plugin, a guest, from any language that compiles to WebAssembly. The cvcpkg
 `arix` and `ariglx` packages are built with it, and `cvcpkg install arix` brings `wasmtime` into the
-same prefix. Natively only, so far: the browser and the BSDs come later
-(roadmap/ARIADNE_SCRIPTING_HOSTS.md §8, G2–G3).
+same prefix. `ariglx-web` runs guests too, on the browser's own WebAssembly, once a guest is
+transformed for it (*In the browser*, below). The BSDs come later
+(roadmap/ARIADNE_SCRIPTING_HOSTS.md §8, G3).
 
 ```yaml
 requires: [wasm]
@@ -4136,6 +4366,15 @@ wasm:
 - **The ABI** a guest is written to (values as CBOR in its memory, `ari_alloc`, the `call`,
   `reply`, `yield` and `fail` imports, the state imports, and the data calls on handles) is in
   [`wasm_engine.h`](../src/ariadne_wasm/wasm_engine.h).
+- **In the browser (`ariglx-web`).** The page fetches the guest with the document (the module the
+  block names, beside it) and runs it in the same gas slices, so a call counts what it counts
+  natively. A page can't pause a running module by itself, so the guest must be transformed ahead:
+  metered, then put through Asyncify. In CMake that is `cvc_ariadne_wasm_transform`
+  ([`ariadne_wasm.cmake`](../src/ariadne_wasm/ariadne_wasm.cmake)); by hand it is the three
+  commands listed there (binaryen's `wasm-opt`, which emsdk ships, and `ari_wasm_meter`). The page
+  refuses a `.wat` module, or one that wasn't transformed. A guest over 8 MB loads too: Chrome
+  won't compile or instantiate a module that large on the page's own thread, so the page does both
+  asynchronously, and the document's load waits for them.
 
 ### 9.7 A server document: `arisrv --doc`
 
@@ -4201,6 +4440,9 @@ on_tick: |
   - Writes reach clients in the order a program makes them. So a live view can watch one key:
     write a section's fields, then its `rev`, and a client holds those fields by the time it
     sees `rev` move.
+- **Rasters.** `(raster-open (dict ... "mirror" "fog.tint"))` with `fog` published keeps its frames
+  where every client is sent them; a subscribing client's node wears it with
+  `material: { texture: { stream: fog.tint } }` (§5.4, "Live textures").
 - **`room`** is a read-only hole on the relay's room, `conf.rooms.<room>`:
   `(state-get "room.topic")`, `(state-children "room.participants")`. A write under it stays in
   the document's own subtree.
@@ -4268,6 +4510,52 @@ on_tick: |
   own SIGTERM, and a `python:` block in the server document itself (arisrvx runs the operator's
   Python beside the relay instead, §9.8).
 
+#### 9.7.1 Clients' programs: `room-run`
+
+A client can send its relay a DSL program to run there as the client's own (the roadmap's §6.3,
+tier 2; [`server_document.h`](../inc/cvc/ariadne/server_document.h)). The server document opts in:
+
+```yaml
+server:
+  client_programs: { steps: 2000, time: 0.02 }   # or `on`: the action lane's caps
+```
+
+```lisp
+(room-run "(state-set (nth args 1) (+ (car args) 1)) (+ (car args) 1)" 41 "score")   ; 42
+```
+
+- **The call.** `(room-run "source" arg ...)` parks the program until the value of the source's
+  last form comes back. `(room-run-async ...)` returns a future for `(await f)`, and
+  `(room-run-opts (dict "timeout" S) "source" arg ...)` sets how long to wait. In the program,
+  `args` is the list of the arguments. The source and the values ride `room-call`'s path (§9.8.1),
+  typed the same way, so this needs bound writes too: arisrv refuses to start a document with
+  `client_programs:` under `--bind-writes off`.
+- **Where it runs.** On the relay's loop, as one of the document's actions, under the action
+  lane's caps (`ariadne.limits.action_max_steps`, `action_max_time` and `action_max_memory`,
+  §2.2). `client_programs:`'s `steps`, `time` (seconds) and `memory_mb` can only lower them. It
+  runs in a stock arisrv as it does in arisrvx, and never in Python.
+- **What it reaches.** Its chroot is its sender's own participant,
+  `conf.rooms.<room>.participants.<pid>`. It reads and writes there and nowhere else: it has no
+  `room` view, no published namespace, and none of the document's own state or functions. A
+  write must be one the client could make itself: `state-set`, `state-data-set` and the atomics
+  (`state-incr`, `state-cas`, `state-swap`), never on a key the relay owns there (`pose`,
+  `device`, `net.relay`, a stream's `ready`) or on a path the tree would trim onto one. Any other
+  write is a `PermissionError`.
+- **Its environment** is default-deny. It holds the read lane's builtins (§2.1), those writers
+  and `args`, and nothing that spawns, sends or receives messages, watches, locks, sleeps, opens
+  a file or the network, or stops the relay.
+- **One at a time.** A second program from a client whose first is still running is answered
+  `rate_limited`.
+- **Errors** raise as `room-call`'s do (§9.8.1), with these codes:
+  - `unavailable`: the relay runs no document with `client_programs:`, or its document hasn't
+    loaded.
+  - `invalid`: the source doesn't parse on its own, or is over 64 KiB.
+  - `rate_limited`.
+  - `failed`: the program raised. The message is its report.
+  - `resource_exhausted`: a cap stopped it.
+  - `too_large`: its value is over `--call-result-max`.
+  - `internal`: its value doesn't cross the wire (a function, say).
+
 ### 9.8 Python beside the relay: `arisrvx`
 
 `arisrvx` is arisrv with an embedded CPython 3.12 ([`server_link.h`](../src/ariadne_python/server_link.h),
@@ -4295,8 +4583,11 @@ host.run()                          # until SIGTERM; the app's shutdown, then th
 
 - **The script thread.** The program runs on a thread of its own with one asyncio loop
   (`host.loop`), which serves its ASGI apps (uvicorn) and its tasks. The relay never runs Python,
-  never takes the GIL and never waits on the program: a sync handler holds up only the loop.
-- **Writes.** `host.set`, `set_tree`, `set_series` and `set_plot` (as `pycvc_gl.ariadne.Host`'s)
+  never takes the GIL and never waits on the program: a sync handler holds up only the loop. A
+  program keeps each task it starts (`host.loop.create_task`) until the task is done: asyncio holds
+  tasks only weakly, so one waiting on a stream of its own (`asyncio.open_connection`) is freed by
+  the next full garbage collection, mid-await, and its work never finishes.
+- **Writes.** `host.set`, `set_tree`, `set_series` and `set_plot` (as `pycvc.ari.Host`'s)
   take paths from the tree's root and are queued. The relay applies them on its next room step
   (60 Hz), ahead of the server document's programs, coalesced per path and in the order of each path's last write
   (a section's fields, then its `rev`). `--script-write-budget N` caps a step at N bytes (65536 by

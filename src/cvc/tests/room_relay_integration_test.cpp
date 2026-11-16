@@ -1756,6 +1756,21 @@ TEST(RoomCallsTest, ParseCall) {
   ASSERT_TRUE(l && *l && (*l)->size() == 2);
   EXPECT_TRUE(std::holds_alternative<std::int64_t>((**l)[0].v));
   EXPECT_TRUE(std::holds_alternative<double>((**l)[1].v));
+
+  // A client program (S3): its source in place of a function's name.
+  const se::value_t src(std::string("(+ (car args) 1)"));
+  ASSERT_EQ(ra::parse_call("A",
+                           wire({{"id", one},
+                                 {"program", src},
+                                 {"args", se::make_list({se::value_t(std::int64_t(41))})}}),
+                           q),
+            "");
+  EXPECT_EQ(q.program, "(+ (car args) 1)");
+  EXPECT_EQ(q.fn, "");
+  EXPECT_NE(ra::parse_call("A", wire({{"id", one}, {"program", src}, {"fn", f}}), q), "")
+      << "a function and a program";
+  EXPECT_NE(ra::parse_call("A", wire({{"id", one}, {"program", se::value_t(3.0)}}), q), "")
+      << "a program is its source, a string";
 }
 
 // Bound writes (arisrv --bind-writes, on by default). M writes, from its own replica and through

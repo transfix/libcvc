@@ -280,7 +280,7 @@ def _closable(host):
 
 
 def attach(host, *figures):
-    """Show matplotlib figures in ``host`` (a ``pycvc_gl.ariadne.Host``): ``figures``, else every
+    """Show matplotlib figures in ``host`` (a ``pycvc.ari.Host``): ``figures``, else every
     figure pyplot has open, and after them each figure pyplot makes while one of them is its
     current figure. Their draws, windows and timers go to ``host``. What a plain ``python`` program
     with a Host of its own calls once it has made a figure; a program in ariglx needs nothing. The

@@ -1194,3 +1194,47 @@ TEST(WorldGenerated, StreetVergesLineSomeStretches) {
   }
   EXPECT_GT(edges.size(), 5u) << "the verge's edge does not wander";
 }
+
+// terrain_lab's world (seed 5, 1.2 km, its 5 m mesh): no dry mesh sample within half a metre of
+// the water level has water either side of it along x or y, so the ground draws no hairline out of
+// the water. Two samples that did, (565, 555) and (565, 560) at 0.03 and 0.01 m, drew a straight
+// 5 m line across the north-east bay. With waterline_sliver_m 0 they are kept.
+TEST(WorldGenerated, NoWaterlineSliversOnTheTerrainMesh) {
+  cvc::app app;
+  generated_world_params p; // terrain_lab's world
+  p.trees = 0;
+  p.rocks = 0;
+  const generated_world w = generate_world(app, p);
+  const cvc::height_field &t = *w.terrain;
+  const int N = t.rows();
+  ASSERT_EQ(t.dx(), 5.0);
+  auto h = [&](int r, int c) { return double(t.height_at(r, c)); };
+  auto at = [&](double x, double y) {
+    return h(int(std::lround((y - t.y0()) / t.dy())), int(std::lround((x - t.x0()) / t.dx())));
+  };
+  const double level = p.water_level_m;
+  int thin = 0;
+  for (int r = 1; r < N - 1; ++r)
+    for (int c = 1; c < N - 1; ++c) {
+      const double z = h(r, c);
+      if (z < level || z >= level + p.waterline_sliver_m)
+        continue;
+      if ((h(r, c - 1) < level && h(r, c + 1) < level) ||
+          (h(r - 1, c) < level && h(r + 1, c) < level))
+        ++thin;
+    }
+  std::printf("[world] %zu waterline slivers lowered; (565, 555) at %.2f, (565, 560) at %.2f\n",
+              w.waterline_slivers, at(565.0, 555.0), at(565.0, 560.0));
+  EXPECT_EQ(thin, 0);
+  EXPECT_GT(w.waterline_slivers, 0u);
+  EXPECT_LT(at(565.0, 555.0), level);
+  EXPECT_LT(at(565.0, 560.0), level);
+  EXPECT_LT(w.water.sample(w.water.ground, 565.0, 557.5), level) << "the shore grid is the mesh's";
+
+  p.waterline_sliver_m = 0.0;
+  const generated_world kept = generate_world(app, p);
+  EXPECT_EQ(kept.waterline_slivers, 0u);
+  EXPECT_GT(kept.terrain->height_at(int(std::lround((555.0 - t.y0()) / t.dy())),
+                                    int(std::lround((565.0 - t.x0()) / t.dx()))),
+            level);
+}

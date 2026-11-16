@@ -2335,6 +2335,64 @@ TEST_F(CvcCliTest, Regression_ClusterStatusDefaultIdsEndToEnd) {
 #endif // !_WIN32
 
 // ===========================================================================
+// ph: composed port-Hamiltonian systems (cvc::ph composition)
+// ===========================================================================
+
+// Two DGUs (capacitor charge, inductor flux) and the RL line between them, as cvc-ph-system/1.
+static void write_two_bus_grid(const std::string &file) {
+  std::ofstream(file) << R"({"format": "cvc-ph-system/1",
+ "laws": {
+  "dgu": {"format": "cvc-ph-law/1", "kind": "canonical", "n": 1, "potential": {"K": [[0.4545]]},
+          "mass": {"diag": [1.8]}, "damping": {"diag": [1.2]}, "ports": 1, "B": [[1], [0]],
+          "inputs": 2, "G": [[1, 0], [0, 1]], "scheme": "leapfrog"},
+  "line": {"format": "cvc-ph-law/1", "kind": "linear", "n": 1, "Q": [1.25], "R": [0.3],
+           "ports": 1, "B": [1]}},
+ "blocks": [{"name": "dgu0", "law": "dgu"}, {"name": "dgu1", "law": "dgu"}, {"name": "l01", "law": "line"}],
+ "couplings": [{"type": "incidence", "buses": ["dgu0", "dgu1"], "lines": ["l01"], "A": [[-1], [1]]}]}
+)";
+}
+
+TEST_F(CvcCliTest, PhInfoSimulateAndCheckAComposedGrid) {
+  const std::string grid = path("grid.json");
+  write_two_bus_grid(grid);
+  auto info = cvc("ph info \"" + grid + "\"");
+  ASSERT_EQ(0, info.exit_code) << info.output;
+  EXPECT_NE(std::string::npos, info.output.find("3 blocks, state 5, ports 3, inputs 4"))
+      << info.output;
+  EXPECT_NE(std::string::npos, info.output.find("pair dgu0.0 - l01.0: 1")) << info.output;
+  EXPECT_NE(std::string::npos, info.output.find("pair dgu1.0 - l01.0: -1")) << info.output;
+
+  auto check = cvc("ph check \"" + grid + "\" --samples 50");
+  ASSERT_EQ(0, check.exit_code) << check.output;
+  EXPECT_NE(std::string::npos, check.output.find("balanced")) << check.output;
+
+  const std::string csv = path("grid.csv");
+  auto sim = cvc("ph simulate \"" + grid +
+                 "\" --x0 2.2,0,2.6,0,0 --u -0.1,1,-0.15,1.1 --steps 50 --csv \"" + csv + "\"");
+  ASSERT_EQ(0, sim.exit_code) << sim.output;
+  EXPECT_NE(std::string::npos,
+            sim.output.find("50 steps of 0.01 s (split, 2 substeps, midpoint coupling)"))
+      << sim.output;
+  EXPECT_NE(std::string::npos, sim.output.find("supplied")) << sim.output;
+  std::ifstream in(csv);
+  std::string header, line;
+  std::getline(in, header);
+  EXPECT_EQ("t,dgu0.0,dgu0.1,dgu1.0,dgu1.1,l01.0,H,supplied,dissipated,residual", header);
+  int rows = 0;
+  while (std::getline(in, line))
+    ++rows;
+  EXPECT_EQ(51, rows);
+
+  auto bad = cvc("ph simulate \"" + grid + "\" --x0 1,2");
+  EXPECT_NE(0, bad.exit_code);
+  EXPECT_NE(std::string::npos, bad.output.find("rollout start state")) << bad.output;
+  auto op = cvc("ph frobnicate \"" + grid + "\"");
+  EXPECT_NE(0, op.exit_code);
+  auto none = cvc("ph info \"" + path("missing.json") + "\"");
+  EXPECT_NE(0, none.exit_code);
+}
+
+// ===========================================================================
 // ph-train: the learned port-Hamiltonian vehicle (cvc::ph) from plant logs
 // ===========================================================================
 
@@ -2532,6 +2590,96 @@ TEST_F(CvcCliTest, SegmentRefusesBadInput) {
   auto malformed = cvc("segment \"" + in + "\" -o \"" + path("x.rawiv") + "\" --seed a:1,1");
   EXPECT_NE(0, malformed.exit_code);
   EXPECT_NE(std::string::npos, malformed.output.find("name:i,j,k")) << malformed.output;
+}
+
+// ===========================================================================
+// cvc skeleton (the VolumeRover Skeletonization port; ports plan T12)
+// ===========================================================================
+
+// A capsule along x sampled on its surface, as an OFF file of points (no faces).
+static void write_capsule_off(const std::string &file) {
+  const double pi = 3.14159265358979323846, length = 8.0, r = 1.0;
+  std::vector<std::array<double, 3>> p;
+  const int nring = 20, nalong = 40;
+  for (int i = 0; i <= nalong; ++i)
+    for (int k = 0; k < nring; ++k) {
+      const double a = 2 * pi * (k + 0.37 * (i % 3)) / nring;
+      p.push_back({length * i / nalong, r * std::cos(a), r * std::sin(a)});
+    }
+  const int ncap = nring / 4;
+  for (int side = 0; side < 2; ++side)
+    for (int i = 1; i <= ncap; ++i) {
+      const double t = (pi / 2) * i / (ncap + 0.5);
+      const int nr = std::max(1, int(std::lround(nring * std::cos(t))));
+      for (int k = 0; k < nr; ++k) {
+        const double a = 2 * pi * (k + 0.21 * i) / nr;
+        p.push_back({side == 0 ? -r * std::sin(t) : length + r * std::sin(t),
+                     r * std::cos(t) * std::cos(a), r * std::cos(t) * std::sin(a)});
+      }
+    }
+  std::ofstream f(file);
+  f << "OFF\n" << p.size() << " 0 0\n";
+  f.precision(17);
+  for (const auto &q : p)
+    f << q[0] << " " << q[1] << " " << q[2] << "\n";
+}
+
+// Skips when libcvc was built without Shewchuk's predicates (macOS for now): the command says so.
+#define SKIP_WITHOUT_SKELETON(r)                                                                   \
+  if ((r).output.find("without Shewchuk") != std::string::npos)                                    \
+  GTEST_SKIP() << "libcvc built without Shewchuk's predicates"
+
+TEST_F(CvcCliTest, SkeletonHelp) {
+  auto r = cvc("skeleton --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--robust"));
+  EXPECT_NE(std::string::npos, r.output.find("--sheet-count"));
+  EXPECT_NE(std::string::npos, r.output.find("-bbr"));
+}
+
+TEST_F(CvcCliTest, SkeletonOfACapsule) {
+  const std::string in = path("capsule.off"), out = path("skel.rawc");
+  write_capsule_off(in);
+  auto r = cvc("skeleton \"" + in + "\" -o \"" + out + "\"");
+  SKIP_WITHOUT_SKELETON(r);
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("Wrote 1 strands")) << r.output;
+  EXPECT_TRUE(fs::exists(out));
+  EXPECT_GT(fs::file_size(out), 0u);
+  EXPECT_TRUE(fs::exists(path("skel_sheets.rawc")));
+  // The strands read back: `cvc info` on the output.
+  auto info = cvc("info \"" + out + "\"");
+  EXPECT_EQ(0, info.exit_code) << info.output;
+}
+
+TEST_F(CvcCliTest, SkeletonTakesTheLegacyFlags) {
+  const std::string in = path("capsule.off");
+  write_capsule_off(in);
+  const std::string legacy =
+      " -r -bbr 0.25 -thif 5 -thff 10 -plc 1 -medth 0.39 -medr 64 -mr 1.05 -hc 20";
+  auto r = cvc("skeleton \"" + in + "\" -o \"" + path("s.rawc") + "\" --sheets \"" +
+               path("sheets.rawc") + "\"" + legacy);
+  SKIP_WITHOUT_SKELETON(r);
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("-mr is accepted and ignored")) << r.output;
+  EXPECT_TRUE(fs::exists(path("sheets.rawc")));
+}
+
+TEST_F(CvcCliTest, SkeletonOfAPlaneFails) {
+  const std::string in = path("plane.off");
+  {
+    std::ofstream f(in);
+    f << "OFF\n30 0 0\n";
+    for (int i = 0; i < 30; ++i)
+      f << (i % 6) << " " << (i / 6) << " 1\n";
+  }
+  auto r = cvc("skeleton \"" + in + "\" -o \"" + path("p.rawc") + "\"");
+  SKIP_WITHOUT_SKELETON(r);
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("one plane")) << r.output;
+  auto bad = cvc("skeleton \"" + in + "\" -o \"" + path("p.rawc") + "\" --threshold 5");
+  EXPECT_NE(0, bad.exit_code);
+  EXPECT_NE(std::string::npos, bad.output.find("threshold")) << bad.output;
 }
 
 // ===========================================================================

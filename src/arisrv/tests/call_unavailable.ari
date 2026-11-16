@@ -1,5 +1,5 @@
 # The client for ctest arisrv_room_call_unavailable: stock arisrv runs no functions, so it answers
-# every call `unavailable` itself (room_calls.h).
+# every call `unavailable` itself (room_calls.h), and, with no --doc, every client program too.
 meta: { name: room-call to a relay with no functions, min_libcvc: 3.7.13 }
 tests:
   the_relay_runs_no_functions: |
@@ -7,3 +7,8 @@ tests:
                   (catch (RuntimeError e) (list (get-attr e "code") (get-attr e "message"))))))
       (assert (= (nth m 0) "unavailable") m)
       (assert (string.contains (nth m 1) "arisrvx --python") m))
+  the_relay_runs_no_client_programs: |
+    (let ((m (try (begin (room-run "1") "no error")
+                  (catch (RuntimeError e) (list (get-attr e "code") (get-attr e "message"))))))
+      (assert (= (nth m 0) "unavailable") m)
+      (assert (string.contains (nth m 1) "client_programs") m))

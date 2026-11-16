@@ -48,6 +48,8 @@ AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
   register_world_block(app_); // a document's world: block is kept, for its vehicles (world_rules.h)
   rt_.set_scene_capable(scene_ != nullptr); // the gl.scene capability (requires:, has?)
   rt_.set_scene_shaders(scene_ && scene_->runs_shaders()); // gl.scene.shaders
+  if (scene_) // a scene node's repeat: (expr), counted on this document's read lane
+    scene_->set_count_fn([this](const std::string &expr) { return rt_.eval_count(expr); });
   verbs_->data = data_;
   verbs_->prefix = prefix_;
   // sim_transport.ari's Step and Restart, for every host; a host's own handler replaces these.
@@ -80,6 +82,8 @@ bool AppRuntime::restart_world() {
 }
 
 AppRuntime::~AppRuntime() {
+  if (scene_) // the adapter outlives us: it must not count on a runtime that has gone
+    scene_->set_count_fn({});
   // The tap reaches the lanes: no event goes to them now.
   rt_.set_event_tap(0, nullptr);
   for (EngineUse &e : engines_) // the document goes: what its blocks made goes with it
