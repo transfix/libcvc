@@ -1,0 +1,68 @@
+# A participant of a room the relay's program bridges another chat system into (ARIADNE_CHAT.md,
+# "Bridged users"): the ctests arisrvx_bridge_arigl_* run it with `arigl snapshot` in conference
+# mode (CVC_ARIADNE_RELAY=URL, CVC_ARIADNE_ROOM=ctest, CVC_ARIADNE_NAME=Alice), beside
+# tests/bridge_service.py. It joins the room, finds the system's users in the roster with
+# "all" (and not in the default, the participants'), reads the welcome they posted (marked with
+# their system), posts and reads the echo, sends one of them a direct message and reads the
+# answer, then says bye and sees the other leave the roster. It prints "bridge_arigl: ok" and
+# quits 0; a frame budget it runs out of quits 1, saying where it was.
+meta: { name: a participant beside bridged users, min_libcvc: 4.0.0 }
+requires: [room-join, room-roster, room-bridged-rev, chat-post, chat-messages]
+functions: |
+  (defun t-phase (p) (state-set "t.phase" p))
+  ; The text of the room's last message (or of the conversation with PEER), "" for none.
+  (defun t-last (peer)
+    (chat-info (state-get "t.tok") peer)
+    (set ms (chat-messages (state-get "t.tok") peer))
+    (if (= (length ms) 0) "" (get-attr (nth ms (- (length ms) 1)) "text")))
+init: |
+  (state-set "t.frames" 0)
+  (t-phase "join")
+on_tick: |
+  (state-set "t.frames" (+ 1 (int (state-get "t.frames"))))
+  (if (> (int (state-get "t.frames")) 1500)
+      (begin
+        (print (str-concat "bridge_arigl: gave up at phase " (str (state-get "t.phase"))
+                           ", relay.status " (str (state-get "relay.status"))))
+        (quit 1)))
+  (if (= (state-get "t.phase") "join")
+      (begin
+        (state-set "t.tok" (get-attr (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self"))) "token"))
+        (t-phase "roster")))
+  (if (and (= (state-get "t.phase") "roster")
+           (= (length (room-roster (state-get "t.tok") "bridged")) 2))
+      (let ((all (room-roster (state-get "t.tok") "all"))
+            (zed (nth (room-roster (state-get "t.tok") "bridged") 0)))
+        (assert (= (get-attr zed "pid") "_nmdc_Zed_2eZ") zed)
+        (assert (= (get-attr zed "name") "Zed") zed)
+        (assert (= (get-attr zed "bridged") "1") zed)
+        (assert (= (get-attr zed "via") "nmdc") zed)
+        (assert (= (get-attr zed "detail") "on the hub") zed)
+        (assert (= (length all) (+ 2 (length (room-roster (state-get "t.tok"))))) all)
+        (for p (room-roster (state-get "t.tok"))
+          (assert (= (get-attr p "bridged") "0") p))
+        (assert (> (room-bridged-rev (state-get "t.tok")) 0))
+        (t-phase "welcome")))
+  (if (and (= (state-get "t.phase") "welcome") (= (t-last "") "welcome from the hub"))
+      (let ((m (nth (chat-messages (state-get "t.tok") "") 0)))
+        (assert (= (get-attr m "via") "nmdc") m)
+        (assert (= (get-attr m "from") "_nmdc_Zed_2eZ") m)
+        (assert (= (get-attr m "name") "Zed") m)
+        (assert (get-attr (chat-post (state-get "t.tok") "hello hub") "ok"))
+        (t-phase "echo")))
+  (if (and (= (state-get "t.phase") "echo") (= (t-last "") "echo Alice: hello hub"))
+      (begin
+        (assert (get-attr (chat-post (state-get "t.tok") "ping" "_nmdc_Zed_2eZ") "ok"))
+        (t-phase "dm")))
+  (if (and (= (state-get "t.phase") "dm") (= (t-last "_nmdc_Zed_2eZ") "pong ping"))
+      (let ((c (nth (chat-conversations (state-get "t.tok")) 0)))
+        (assert (= (get-attr c "peer") "_nmdc_Zed_2eZ") c)
+        (assert (= (get-attr c "name") "Zed") c)
+        (assert (get-attr (chat-post (state-get "t.tok") "bye") "ok"))
+        (t-phase "bye")))
+  (if (and (= (state-get "t.phase") "bye") (= (t-last "") "ann left the hub")
+           (= (length (room-roster (state-get "t.tok") "bridged")) 1))
+      (begin
+        (print "bridge_arigl: ok")
+        (t-phase "done")
+        (quit 0)))

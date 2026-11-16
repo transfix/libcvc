@@ -25,8 +25,10 @@
 #include <cvc/gl/ariadne/extensions.h>
 #include <cvc/gl/ariadne/lsystem_nodes.h>
 #include <cvc/gl/ariadne/mesh_nodes.h>
+#include <cvc/gl/ariadne/ribbon_nodes.h> // register_ribbon_node_types
 #include <cvc/gl/ariadne/scene_realize.h> // register_default_shader_presets
 #include <cvc/gl/ariadne/vehicle_view.h>  // register_vehicle_preview_node
+#include <cvc/gl/ariadne/volume_slice_nodes.h>
 #include <cvc/gl/ariadne/world_nodes.h>
 
 namespace cvc {
@@ -38,7 +40,10 @@ void register_cvcgl_extensions(cvc::app &app) {
   register_lsystem_node_types(app);     // "forest_trees", …
   register_mesh_node_types(app);        // "mesh_lab", "fe_lab" (CVC_ENABLE_LIBIGL builds only)
   register_world_node_types(app);       // "generated_world"
+  register_water_node_types(app);       // "water"
   register_vehicle_preview_node(app);   // "vehicle_preview"
+  register_ribbon_node_types(app);      // "ribbon", "draped_link"
+  register_volume_slice_node_type(app); // "volume_slice"
 }
 
 } // namespace ariadne

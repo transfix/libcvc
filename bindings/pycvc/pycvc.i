@@ -1269,10 +1269,25 @@ struct pycvc_py_conversion {
 // sim_world handles) and pycvc_world.i (height_field, for terrain bodies).
 %include "pycvc_physics.i"
 
+// ── cvc::physics::mujoco_robot: a MuJoCo robot on libcvc terrain ───────────────
+// The C-PHAST lab's plant (docs/MUJOCO.md); in every pycvc, live only with CVC_WITH_MUJOCO. After
+// pycvc_physics.i (its vec3 and tuple helpers) and pycvc_world.i (height_field).
+%include "pycvc_mujoco.i"
+
 // ── cvc::input_trace: record a session's inputs, replay them at their ticks ────
 // The recorder, the player and a sim_world's trace (cvc/core/input_trace.h,
 // cvc/nav/sim_world_trace.h). After pycvc_physics.i: the sim_world handles are its and nav's.
 %include "pycvc_trace.i"
+
+// cvc::nav's arms, run log, panels and checkpoint scrubber, and the plant ledger's items
+// (cvc/nav/nav_arms.h, run_log.h, nav_panels.h, nav_scrub.h, plant_ledger.h). After pycvc_nav.i:
+// the sim_world handles are its.
+%include "pycvc_nav_lab.i"
+
+// ── cvc::ph composition: composed port-Hamiltonian systems ─────────────────────
+// ph_composite: a cvc-ph-system/1 file, its field, power ledger, rollouts and balance check
+// (cvc/ph/compose.h, docs/PH_COMPOSE.md).
+%include "pycvc_ph.i"
 
 // ── Direct wrap of the REAL cvc::state class (full surface, no facade) ───────
 // Like voxels/volume/geometry, the real libcvc header is %include'd here so
@@ -1412,6 +1427,8 @@ struct pycvc_py_conversion {
 %include "pycvc_skeleton.i"
 %include "pycvc_contours.i"
 %include "pycvc_point_classes.i"
+%include "pycvc_segmentation.i"
+%include "pycvc_volume_slice.i"
 
 // ── UTF-8 display-width utilities (cvc::text, roadmap §17) ───────────────
 // text_display_width / _pad_to_width / _truncate_to_width / … so a pycvc UI does

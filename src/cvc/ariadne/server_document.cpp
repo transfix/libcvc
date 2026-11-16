@@ -16,13 +16,21 @@
 // The document a relay runs — see inc/cvc/ariadne/server_document.h.
 
 #include <algorithm>
-#include <cvc/ariadne/loader.h> // load_file, register_ari_block, LoadResult
+#include <chrono>
+#include <cvc/ariadne/conference/room_intrinsics.h> // room_participant_path
+#include <cvc/ariadne/conference/room_write_gate.h> // may_write: a client program's writes
+#include <cvc/ariadne/loader.h>                     // load_file, register_ari_block, LoadResult
+#include <cvc/ariadne/script_engine.h>              // a client guest's engine and its work
 #include <cvc/ariadne/server_document.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/ariadne/world_rules.h> // register_world_block, find_world_block
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_change_journal.h> // state_mutation_op
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_exec/exceptions.h> // dsl_error
+#include <cvc/state/state_exec/parser.h>     // parse_all
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <utility>
@@ -105,6 +113,43 @@ std::string check_published_namespace(const std::string &ns) {
   return std::string();
 }
 
+namespace {
+// client_programs: or client_guests: (`key`): on|off, or a map of caps (which turns them on): ""
+// or what is wrong.
+std::string parse_client_programs(const Value &v, ClientPrograms &out, const std::string &key,
+                                  std::vector<std::string> *warnings) {
+  out = ClientPrograms{};
+  if (v.is_scalar()) {
+    const std::string &s = v.scalar;
+    if (s == "on" || s == "true" || s == "yes" || s == "1")
+      out.on = true;
+    else if (!(s == "off" || s == "false" || s == "no" || s == "0" || s.empty()))
+      return "expects on or off, or a map of caps (steps, time, memory_mb), got '" + s + "'";
+    return std::string();
+  }
+  if (!v.is_map())
+    return "expects on or off, or a map of caps (steps, time, memory_mb)";
+  out.on = true;
+  for (const auto &[name, cap] : v.entries) {
+    const double n = cap.as_double(-1.0);
+    if (name != "steps" && name != "time" && name != "memory_mb") {
+      if (warnings)
+        warnings->push_back("server: " + key + ": unknown key '" + name + "', ignored");
+      continue;
+    }
+    if (!(n > 0.0))
+      return name + " expects a positive number, got '" + (cap.is_scalar() ? cap.scalar : "") + "'";
+    if (name == "steps")
+      out.max_steps = static_cast<std::uint64_t>(n);
+    else if (name == "time")
+      out.max_time = n;
+    else
+      out.max_memory = static_cast<std::uint64_t>(n * 1024.0 * 1024.0);
+  }
+  return std::string();
+}
+} // namespace
+
 std::string parse_server_block(const Value &content, ServerBlock &out,
                                std::vector<std::string> *warnings) {
   out = ServerBlock{};
@@ -114,6 +159,12 @@ std::string parse_server_block(const Value &content, ServerBlock &out,
   if (!content.is_map())
     return "server: expects a map (publish: [...])";
   for (const auto &[key, v] : content.entries) {
+    if (key == "client_programs" || key == "client_guests") {
+      ClientPrograms &caps = key == "client_programs" ? out.client_programs : out.client_guests;
+      if (std::string why = parse_client_programs(v, caps, key, warnings); !why.empty())
+        return "server: " + key + ": " + why;
+      continue;
+    }
     if (key != "publish") {
       if (warnings)
         warnings->push_back("server: unknown key '" + key + "', ignored");
@@ -233,6 +284,7 @@ void ServerDocument::step(std::uint64_t tick, double seconds) {
   const std::string &prefix = rt_.prefix();
   root(prefix + ".sim.tick").value(std::to_string(tick));
   root(prefix + ".sim.time").value(seconds);
+  start_held_guests();
   rt_.drain();
 }
 
@@ -269,7 +321,249 @@ std::vector<std::string> ServerDocument::load(const std::string &path) {
     rt_.register_quit();
     started_ = true;
   }
-  return rt_.load(path);
+  std::vector<std::string> warnings = rt_.load(path);
+  loaded_ = true;
+  return warnings;
+}
+
+namespace {
+// A client program's writers (run_client_program), each held to the relay's bound-writes rule as
+// the operation the rule weighs it as.
+struct ClientWriter {
+  const char *name;
+  cvc::state_mutation_op op;
+};
+constexpr ClientWriter kClientWriters[] = {{"state-set", cvc::state_mutation_op::set_value},
+                                           {"state-data-set", cvc::state_mutation_op::set_data},
+                                           {"state-incr", cvc::state_mutation_op::set_value},
+                                           {"state-cas", cvc::state_mutation_op::set_value},
+                                           {"state-swap", cvc::state_mutation_op::set_value}};
+// The native the program's forms are wrapped in, which keeps the last one's value; and the one a
+// client guest's program calls. Both are the program's alone (kClientInternal).
+constexpr const char *kClientResult = "__client-result";
+constexpr const char *kClientGuest = "__client-guest";
+constexpr const char *kClientInternal = "__client-";
+constexpr const char *kDidNotComplete = "did not complete: ";
+constexpr const char *kFailed = "failed: ";
+} // namespace
+
+void ServerDocument::run_client_program(const std::string &pid, const std::string &source,
+                                        cvc::state_exec::value_t args,
+                                        std::function<void(const ClientOutcome &)> done) {
+  namespace se = cvc::state_exec;
+  const auto refuse = [&done](const char *code, std::string message) {
+    ClientOutcome o;
+    o.code = code;
+    o.message = std::move(message);
+    if (done)
+      done(o);
+  };
+  if (!block_.client_programs.on)
+    return refuse("unavailable", "this relay runs no client programs (its document's server: "
+                                 "block has no client_programs:)");
+  if (!loaded_)
+    return refuse("unavailable", "the relay's document has not loaded yet");
+  if (pid.empty() || pid.find(cvc::state::SEPARATOR) != std::string::npos)
+    return refuse("invalid", "a client program needs its sender's pid, one name");
+  if (source.size() > kClientProgramMax)
+    return refuse("invalid", "the program is " + std::to_string(source.size()) +
+                                 " bytes, over the relay's " + std::to_string(kClientProgramMax));
+  if (clients_running_.count(pid))
+    return refuse("rate_limited", "this client's previous program is still running (one at a "
+                                  "time)");
+  // Parsed on its own first, so the wrapper below holds exactly its forms.
+  try {
+    (void)se::parse_all(source);
+  } catch (const std::exception &e) {
+    return refuse("invalid", std::string("the program does not parse: ") + e.what());
+  }
+  // Its forms in one begin, whose value (the last form's) the wrapper keeps; the newline ends a
+  // comment on its last line.
+  start_client(pid, std::string("(") + kClientResult + " (begin\n" + source + "\n))",
+               block_.client_programs, std::move(args), nullptr, std::move(done));
+}
+
+void ServerDocument::start_client(
+    const std::string &pid, std::string program, const ClientPrograms &caps,
+    cvc::state_exec::value_t args,
+    std::function<void(const cvc::state_exec::environment_ptr &)> bind,
+    std::function<void(const ClientOutcome &)> done) {
+  namespace se = cvc::state_exec;
+  const std::string scope = conference::room_participant_path(room_, pid);
+  const auto result = std::make_shared<se::value_t>();
+  const auto gate = std::make_shared<conference::room_write_gate>(room_);
+  LaneProcess p;
+  p.program = std::move(program);
+  p.name = "client " + pid;
+  p.lane = ProgramLane::action;
+  p.scope = scope;
+  p.max_steps = caps.max_steps;
+  p.max_time = caps.max_time;
+  p.max_memory = caps.max_memory;
+  for (const char *name : read_lane_builtins())
+    p.allow.emplace_back(name);
+  for (const ClientWriter &w : kClientWriters)
+    p.allow.emplace_back(w.name);
+  p.extend = [gate, pid, scope, args = std::move(args), result,
+              bind = std::move(bind)](const se::environment_ptr &env, se::intrinsics_context &) {
+    env->set("args", args.is_nil() ? se::make_list() : args);
+    // Each writer checks its path against the rule a client's own write meets on the transport,
+    // then writes as it would.
+    for (const ClientWriter &w : kClientWriters) {
+      const se::value_t *v = env->lookup(w.name);
+      const se::native_fn *f = v ? std::get_if<se::native_fn>(&v->v) : nullptr;
+      if (!f)
+        continue;
+      env->set(w.name,
+               se::value_t(se::native_fn([orig = *f, gate, pid, scope, name = std::string(w.name),
+                                          op = w.op](se::call_args a) -> se::value_tag {
+                 const std::string *path = a.empty() ? nullptr : std::get_if<std::string>(&a[0].v);
+                 if (path && !gate->may_write(pid, scope + cvc::state::SEPARATOR + *path, op))
+                   throw se::dsl_error("PermissionError",
+                                       name + ": '" + *path +
+                                           "' is not this client's to write (a key the relay "
+                                           "owns, or not a plain path)",
+                                       name);
+                 return orig(a);
+               })));
+    }
+    env->set(kClientResult, se::value_t(se::native_fn([result](se::call_args a) -> se::value_tag {
+               *result = a.empty() ? se::value_t() : a[0];
+               return se::value_t();
+             })));
+    if (bind)
+      bind(env);
+  };
+  p.done = [this, pid, result, done](const std::string &how) {
+    clients_running_.erase(pid);
+    ClientOutcome o;
+    const std::size_t dnc = std::char_traits<char>::length(kDidNotComplete);
+    const std::size_t failed = std::char_traits<char>::length(kFailed);
+    if (how.empty()) {
+      o.ok = true;
+      o.value = *result;
+    } else if (how.compare(0, dnc, kDidNotComplete) == 0) {
+      o.code = "resource_exhausted";
+      o.message = how.substr(dnc);
+    } else {
+      o.code = "failed";
+      o.message = how.compare(0, failed, kFailed) == 0 ? how.substr(failed) : how;
+    }
+    if (done)
+      done(o);
+  };
+  try {
+    rt_.runtime().start_process(std::move(p));
+  } catch (const std::exception &e) {
+    ClientOutcome o;
+    o.code = "invalid";
+    o.message = std::string("the program does not start: ") + e.what();
+    if (done)
+      done(o);
+    return;
+  }
+  clients_running_.insert(pid);
+}
+
+void ServerDocument::run_client_guest(const std::string &pid, std::string module,
+                                      const std::string &entry, cvc::state_exec::value_t args,
+                                      std::function<void(const ClientOutcome &)> done) {
+  namespace se = cvc::state_exec;
+  const auto refuse = [&done](const char *code, std::string message) {
+    ClientOutcome o;
+    o.code = code;
+    o.message = std::move(message);
+    if (done)
+      done(o);
+  };
+  if (!block_.client_guests.on)
+    return refuse("unavailable", "this relay runs no clients' WebAssembly guests (its document's "
+                                 "server: block has no client_guests:)");
+  if (!guests_)
+    return refuse("unavailable", "this relay has no WebAssembly engine (arisrvx built with "
+                                 "wasmtime runs clients' guests)");
+  if (!loaded_)
+    return refuse("unavailable", "the relay's document has not loaded yet");
+  if (pid.empty() || pid.find(cvc::state::SEPARATOR) != std::string::npos)
+    return refuse("invalid", "a client's guest needs its sender's pid, one name");
+  if (module.size() > kClientGuestMax)
+    return refuse("invalid", "the module is " + std::to_string(module.size()) +
+                                 " bytes, over the relay's " + std::to_string(kClientGuestMax));
+  if (entry.empty())
+    return refuse("invalid", "a client's guest names the export to call");
+  if (clients_running_.count(pid))
+    return refuse("rate_limited", "this client's previous program is still running (one at a "
+                                  "time)");
+  ClientCode code;
+  code.bytes = std::move(module);
+  code.entry = entry;
+  code.name = "client " + pid;
+  code.max_memory =
+      block_.client_guests.max_memory ? block_.client_guests.max_memory : kClientGuestMemory;
+  std::string error;
+  std::shared_ptr<ScriptActivation> activation =
+      guests_->client_activation(app_, std::move(code), std::move(args), error);
+  if (!activation)
+    return refuse("invalid", error);
+  // Its program starts once the activation is ready (its module compiled, off the loop), so the
+  // wait costs it nothing of its caps. Held, it is running as far as rate_limited is concerned.
+  if (!activation->ready()) {
+    clients_running_.insert(pid);
+    held_guests_.push_back(HeldGuest{pid, entry, std::move(activation), std::move(done),
+                                     std::chrono::steady_clock::now()});
+    return;
+  }
+  start_guest(pid, entry, std::move(activation), std::move(done));
+}
+
+void ServerDocument::start_held_guests() {
+  for (std::size_t i = 0; i < held_guests_.size();) {
+    HeldGuest &h = held_guests_[i];
+    const bool ready = h.activation->ready();
+    const bool late = std::chrono::steady_clock::now() - h.since >
+                      std::chrono::duration<double>(kClientGuestCompileWait);
+    if (!ready && !late) {
+      ++i;
+      continue;
+    }
+    HeldGuest out = std::move(h);
+    held_guests_.erase(held_guests_.begin() + static_cast<std::ptrdiff_t>(i));
+    clients_running_.erase(out.pid); // start_client takes it again
+    if (ready) {
+      start_guest(out.pid, out.entry, std::move(out.activation), std::move(out.done));
+      continue;
+    }
+    ClientOutcome o;
+    o.code = "resource_exhausted";
+    o.message = "its module did not compile within " +
+                std::to_string(static_cast<int>(kClientGuestCompileWait)) + " s";
+    if (out.done)
+      out.done(o);
+  }
+}
+
+void ServerDocument::start_guest(const std::string &pid, const std::string &entry,
+                                 std::shared_ptr<ScriptActivation> activation,
+                                 std::function<void(const ClientOutcome &)> done) {
+  namespace se = cvc::state_exec;
+  // The guest is its program's one call, made by a native only that program reaches: the guest's
+  // own calls reach the rest of the environment, never the two natives (kClientInternal). The
+  // activation goes once that call has run it.
+  auto once = std::make_shared<std::shared_ptr<ScriptActivation>>(std::move(activation));
+  const auto bind = [app = &app_, once, language = guests_->language(),
+                     name = "client " + pid + ": " + entry](const se::environment_ptr &env) {
+    env->set(kClientGuest, se::value_t(se::native_fn([app, once, language,
+                                                      name](se::call_args a) -> se::value_tag {
+               std::shared_ptr<ScriptActivation> made = std::move(*once);
+               if (!made)
+                 throw se::dsl_error("RuntimeError", name + ": the guest has already run");
+               return run_as_program_work(
+                   *app, a, std::move(made), language, name,
+                   [](const std::string &f) { return f.rfind(kClientInternal, 0) != 0; });
+             })));
+  };
+  start_client(pid, std::string("(") + kClientResult + " (" + kClientGuest + "))",
+               block_.client_guests, se::value_t(), bind, std::move(done));
 }
 
 } // namespace ariadne

@@ -1435,6 +1435,10 @@ Most of the GL-viewer work is already on master. What exists, and what is new:
    - Today the only axis-aligned cut is fe_lab's `<id>_slice`, an FE field on tetrahedra.
      `volslice` slices face the camera, which is a different thing.
    - Useful on its own: the classic three-plane orthoslicer next to a `volren`.
+   - *Built in P7:* `cvc::slice_source`, `extract_slice` and `color_slice`
+     (`inc/cvc/volume/volume_slice.h`, with `volume_slice_params`' table; `volume_slice_test` in the
+     ports lane), cvcGL's `VolumeSliceNode` and the `volume_slice` node type
+     (`volume_slice_nodes.h`, in `register_cvcgl_extensions`; `cvcgl_volume_slice`).
 2. **A slice camera mode for the viewport** (`mode: slice`, `axis: x | y | z`, the axis bindable
    to a key so one viewport can follow the view switch): parallel projection looking down the
    axis, no rotation; drag pans, the wheel zooms about the pointer, and double-click refits the
@@ -1458,6 +1462,8 @@ Most of the GL-viewer work is already on master. What exists, and what is new:
    geometry nodes of the slice, with a coincident-topology offset (or a later render layer) so
    they never z-fight the textured quad. `point_size` / `line_width` already exist as override
    fields.
+   - *Built in P7:* a `volume_slice` node's children are its overlays; the quad is pushed back by
+     `slice.overlay_offset` (a relative polygon offset, 2 units by default).
 5. **Widgets the side panel needs** (check each against the backend before planning around it):
    a list bound to a state array with add and remove (the `repeat:` the card component uses), a
    colour picker for a class colour, radio buttons for the tool, and a tab bar or segmented

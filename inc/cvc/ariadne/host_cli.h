@@ -18,6 +18,11 @@
 //   --frames N            snapshot: frames to run before the capture
 //   --ansi                snapshot: keep colour escapes
 //   --png FILE            snapshot: also write a PNG (where the runtime can render one)
+//   --seconds S           snapshot: run the scene clock S seconds, --fps frames a second (30 by
+//                         default), each frame exactly 1/fps of scene time (where the runtime
+//                         has a scene: arigl in a window)
+//   --mp4 FILE            snapshot: record those frames as an MP4 video (needs --seconds; a
+//                         --frames N runs N frames first, unrecorded; cvc/media/video_writer.h)
 //   --graphics MODE       how images draw in a terminal: auto, kitty, sixel, color or mono
 //   --image NAME=FILE     publish the picture in FILE under NAME, for image: widgets (repeatable)
 //   --set KEY=VALUE       write VALUE to the state key KEY under the document's state root before
@@ -81,6 +86,8 @@ struct HostOptions {
   double action_time = -1;
   bool ansi = false;
   std::string png;
+  std::string mp4;      // --mp4 FILE: snapshot records its --seconds of frames as a video
+  double seconds = 0;   // --seconds S: snapshot runs S seconds of scene time; 0 = not given
   std::string log;      // --log FILE: the run's warnings, appended as they happen (host_warnings.h)
   std::string graphics; // empty = auto (FtxuiBackend::Options::ImageColor)
   std::vector<std::pair<std::string, std::string>> images; // --image NAME=FILE, in order
@@ -113,6 +120,13 @@ bool parse_state_set(const std::string &arg, std::pair<std::string, std::string>
 // string the way a widget's text would be, in order.
 void apply_state_sets(cvc::app &app, const std::string &prefix,
                       const std::vector<std::pair<std::string, std::string>> &sets);
+
+// The --set entries for the views: those under `viewers.` (a camera's mode and pose, its track
+// target, a HUD, the UI), relative or absolute. A host that draws a scene writes them again once
+// the document has loaded: realizing the scene frames the main camera, which overwrites the pose
+// (orbit.*, fly.*) --set wrote before the load.
+std::vector<std::pair<std::string, std::string>>
+view_state_sets(const std::vector<std::pair<std::string, std::string>> &sets);
 
 // --exec-policy: write it to the app tree's state_exec.policy, which the app reads once, when it
 // first builds its scheduler (app::exec_scheduler). So call it on a fresh app, before anything

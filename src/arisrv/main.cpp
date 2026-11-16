@@ -81,6 +81,11 @@
 #include "python_engine.h" // arisrvx: the embedded Python (src/ariadne_python)
 #include "server_link.h"   // its writes and the relay's events, between the two threads
 #endif
+#ifdef CVC_ARIADNE_WASM
+#include "wasm_engine.h" // arisrvx: clients' WebAssembly guests (src/ariadne_wasm)
+
+#include <cvc/ariadne/script_engine.h>
+#endif
 #include <cvc/state/state_exec/exceptions.h> // set_field: a call's principal
 #include <cvc/state/state_exec/types.h>
 #include <fstream>
@@ -672,6 +677,15 @@ int main(int argc, char **argv) {
   }
   const auto devicePins = std::make_shared<cvc::state_device_pins>(devicePinsFile);
 
+#ifdef CVC_ARIADNE_WASM
+  // Clients' WebAssembly guests (client_guests:), on wasmtime: the engine before the app, so it
+  // outlives the server document that runs them and the pool tasks that compile them. Null when
+  // its runtime could not start; a document that asks for guests then stops arisrvx below.
+  std::string wasmError;
+  const std::shared_ptr<cvc::ariadne::ScriptEngine> wasmGuests =
+      cvc::ariadne::wasm::make_engine(wasmError);
+#endif
+
   cvc::app app;
   // What stops the relay: a SIGINT or SIGTERM once signals are routed here (route_signals, below),
   // a server document that fails or quits, or an arisrvx Python program that ends. The flag is
@@ -713,6 +727,41 @@ int main(int argc, char **argv) {
                    "(--bind-writes on): without them a client could write there too\n",
                    docPath.c_str());
       return 2;
+    }
+    // A client program is its sender's own: bound writes say who sent it.
+    if (serverDoc->block().client_programs.on && bindWritesArg != "on") {
+      std::fprintf(stderr,
+                   "arisrv: --doc: %s runs client programs, which needs bound writes "
+                   "(--bind-writes on): without them a connection could run one as another "
+                   "participant\n",
+                   docPath.c_str());
+      return 2;
+    }
+    // So is a client's guest, and it needs the WebAssembly engine, which only arisrvx carries.
+    if (serverDoc->block().client_guests.on) {
+      if (bindWritesArg != "on") {
+        std::fprintf(stderr,
+                     "arisrv: --doc: %s runs clients' guests, which needs bound writes "
+                     "(--bind-writes on): without them a connection could run one as another "
+                     "participant\n",
+                     docPath.c_str());
+        return 2;
+      }
+#ifdef CVC_ARIADNE_WASM
+      if (!wasmGuests) {
+        std::fprintf(stderr,
+                     "arisrvx: --doc: %s runs clients' guests, but WebAssembly did not start: %s\n",
+                     docPath.c_str(), wasmError.c_str());
+        return 2;
+      }
+      serverDoc->use_client_guests(wasmGuests);
+#else
+      std::fprintf(stderr,
+                   "arisrv: --doc: %s runs clients' WebAssembly guests (client_guests:), which "
+                   "arisrvx built with wasmtime runs (cvcpkg install arisrvx)\n",
+                   docPath.c_str());
+      return 2;
+#endif
     }
   }
 
@@ -809,6 +858,7 @@ int main(int argc, char **argv) {
   scriptHandles.runtime = serverDoc ? &serverDoc->runtime() : nullptr;
   scriptHandles.mode = "server";
   scriptHandles.server = &scriptLink;
+  scriptLink.set_room(room); // what the program's bridged users (host.room_presence ...) name
   const cvc::ariadne::python::Attachment scriptLent = python.attach(scriptHandles);
   cvc::ariadne::python::ServeOptions serveOpts;
   // The program's authenticate hook, as the planes call it (null without one), and the principals
@@ -1114,6 +1164,48 @@ int main(int argc, char **argv) {
 #if CVC_ENABLE_WS
   chat->add_transport(&ws_tp);
 #endif
+#ifdef CVC_ARIADNE_PYTHON
+  // Bridged users (room_intrinsics.h, ARIADNE_CHAT.md): the program's presence and posts for the
+  // users of another chat system, applied each room step ahead of the chat's, and what the room's
+  // participants post handed to the program, as it listens (host.on_room_chat, on_room_dm).
+  bool chatHearsRoom = false, chatHearsDms = false;
+  const auto bridge_step = [&] {
+    namespace rc = cvc::ariadne::conference;
+    using Op = cvc::ariadne::python::ServerLink::BridgeOp;
+    const bool room_on = scriptLink.hears_room(), dms_on = scriptLink.hears_dms();
+    if (room_on != chatHearsRoom || dms_on != chatHearsDms) {
+      chatHearsRoom = room_on;
+      chatHearsDms = dms_on;
+      rc::room_chat_relay::listener hear;
+      if (room_on || dms_on)
+        hear = [&](const rc::chat_event &e) {
+          scriptLink.post(cvc::ariadne::python::ServerLink::Event{
+              "room_chat", 0, cvc::state_exec::value_t(rc::encode_chat_event(room, e))});
+        };
+      chat->set_listener(std::move(hear), room_on, dms_on);
+    }
+    // At most 128 a step (a presence is ~65 us, so ~8 ms): a hub's login burst of thousands
+    // drains over a second's steps instead of stalling one.
+    for (const Op &op : scriptLink.take_bridge_ops(128)) {
+      std::string why;
+      bool ok = true;
+      if (op.kind == Op::Kind::presence) {
+        ok = rc::room_bridge_presence(app, room, op.via, op.uid, op.name, op.detail, why);
+      } else if (op.kind == Op::Kind::absent) {
+        if (rc::room_bridge_absent(app, room, op.via, op.uid))
+          chat->participant_left(rc::bridged_pid(op.via, op.uid));
+      } else {
+        ok = chat->post_bridged(op.via, op.uid, op.name, op.text, op.to, why);
+      }
+      if (!ok) {
+        std::printf("[arisrvx] bridge: %s of %s user '%s' refused: %s\n",
+                    op.kind == Op::Kind::presence ? "presence" : "a post", op.via.c_str(),
+                    op.uid.c_str(), why.c_str());
+        std::fflush(stdout);
+      }
+    }
+  };
+#endif
   // room-call (room_calls.h): the calls clients make, taken each room step. The replies go only to
   // the connection holding the caller's pid, so like DMs they take bound writes.
   auto calls = std::make_unique<cvc::ariadne::conference::room_call_relay>(shard, room);
@@ -1279,7 +1371,12 @@ int main(int argc, char **argv) {
     const double now_s =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - room_start).count();
     // Chat first: its pushes go out now, and the room head it writes rides this step's drain, so
-    // a client never sees the head before the message.
+    // a client never sees the head before the message. In arisrvx the program's bridged users'
+    // presence and posts go before it.
+#ifdef CVC_ARIADNE_PYTHON
+    if (scriptThread.joinable())
+      bridge_step();
+#endif
     chat->step(now_s);
     cvc::ariadne::conference::relay_room_step(shard, planes, aoi_relay.get(), server_holon, now_s,
                                               trimJournal);
@@ -1411,6 +1508,47 @@ int main(int argc, char **argv) {
         calls->fail(r, "unavailable",
                     "room-call needs bound writes (--bind-writes on): without them a connection "
                     "could call as another participant");
+        continue;
+      }
+      if (!r.program.empty()) {
+        // A client program (S3): the document runs it as the caller's own, chrooted to its
+        // participant, in a stock arisrv as in arisrvx (never in Python). Its reply comes from
+        // the doc_step whose drain sees it end, or now for a refusal.
+        if (!serverDoc) {
+          calls->fail(r, "unavailable",
+                      "this relay runs no client programs (a --doc whose server: block has "
+                      "client_programs: runs them)");
+          continue;
+        }
+        cvc::ariadne::conference::room_call_relay *relay = calls.get();
+        serverDoc->run_client_program(
+            r.pid, r.program, r.args,
+            [relay, pid = r.pid, id = r.id](const cvc::ariadne::ServerDocument::ClientOutcome &o) {
+              if (o.ok)
+                relay->result(pid, id, o.value);
+              else
+                relay->error(pid, id, o.code, o.message);
+            });
+        continue;
+      }
+      if (!r.guest.empty()) {
+        // A client's WebAssembly guest (G4): run as its program is, in arisrvx, whose document
+        // opts in with client_guests:.
+        if (!serverDoc) {
+          calls->fail(r, "unavailable",
+                      "this relay runs no clients' guests (arisrvx with a --doc whose server: "
+                      "block has client_guests: runs them)");
+          continue;
+        }
+        cvc::ariadne::conference::room_call_relay *relay = calls.get();
+        serverDoc->run_client_guest(
+            r.pid, std::move(r.guest), r.guest_export, r.args,
+            [relay, pid = r.pid, id = r.id](const cvc::ariadne::ServerDocument::ClientOutcome &o) {
+              if (o.ok)
+                relay->result(pid, id, o.value);
+              else
+                relay->error(pid, id, o.code, o.message);
+            });
         continue;
       }
 #ifdef CVC_ARIADNE_PYTHON
@@ -1790,11 +1928,12 @@ int main(int argc, char **argv) {
           held_timeouts, shard.journal().size());
       const auto cs = chat->take_stats();
       std::printf(
-          "[arisrv] chat: %llu post(s) (%llu direct) | %llu page(s) | %llu refused | %llu "
-          "dropped | %llu push(es)\n",
+          "[arisrv] chat: %llu post(s) (%llu direct, %llu bridged) | %llu page(s) | %llu refused "
+          "| %llu dropped | %llu push(es) | %llu heard by the program\n",
           static_cast<unsigned long long>(cs.posts), static_cast<unsigned long long>(cs.dms),
-          static_cast<unsigned long long>(cs.pages), static_cast<unsigned long long>(cs.refused),
-          static_cast<unsigned long long>(cs.dropped), static_cast<unsigned long long>(cs.pushes));
+          static_cast<unsigned long long>(cs.bridged), static_cast<unsigned long long>(cs.pages),
+          static_cast<unsigned long long>(cs.refused), static_cast<unsigned long long>(cs.dropped),
+          static_cast<unsigned long long>(cs.pushes), static_cast<unsigned long long>(cs.heard));
       const auto ps = pose_relay.take_stats();
       std::printf(
           "[arisrv] poses: %llu snapshot(s) (%llu on pose lanes, %llu acks), %llu entries, "

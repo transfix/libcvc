@@ -193,11 +193,17 @@ if(NOT MSVC)
 else()
   set_source_files_properties(nav_potential_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
+add_executable(ph_compose_test ph_compose_test.cpp)
+add_executable(ph_compose_parity_test ph_compose_parity_test.cpp)
+add_executable(ph_microgrid_test ph_microgrid_test.cpp)
+add_executable(ph_convoy_test ph_convoy_test.cpp)
 add_executable(ph_se2_test ph_se2_test.cpp)
 add_executable(ph_se2_train_test ph_se2_train_test.cpp)
 add_executable(nav_terrain_test nav_terrain_test.cpp)
 add_executable(nav_binding_test nav_binding_test.cpp)
 add_executable(nav_trace_test nav_trace_test.cpp)
+add_executable(nav_arms_test nav_arms_test.cpp)
+add_executable(nav_scrub_test nav_scrub_test.cpp)
 add_executable(input_trace_test input_trace_test.cpp)
 add_executable(nav_sim_world_agents_test nav_sim_world_agents_test.cpp)
 add_executable(physics_parity_test physics_parity_test.cpp)
@@ -220,6 +226,22 @@ else()
   set_source_files_properties(physics_dyn_bike_plant_test.cpp physics_dyn_4w_plant_test.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
+# cvc::physics::mujoco_robot on the Menagerie's Go2. Built in every lane: without CVC_WITH_MUJOCO it
+# checks that the constructor refuses and skips the rest. With it, the tests need cvcpkg's
+# mujoco-menagerie in the deps prefix, and configure fails without it rather than skip them all.
+add_executable(physics_mujoco_robot_test physics_mujoco_robot_test.cpp)
+set(_cvc_menagerie "")
+if(CVC_WITH_MUJOCO)
+  find_path(CVC_MUJOCO_MENAGERIE_DIR unitree_go2/scene.xml PATH_SUFFIXES share/mujoco-menagerie
+            NO_SYSTEM_ENVIRONMENT_PATH NO_CMAKE_SYSTEM_PATH)
+  if(NOT CVC_MUJOCO_MENAGERIE_DIR)
+    message(FATAL_ERROR "CVC_WITH_MUJOCO's tests need the Menagerie's robots: "
+                        "cvcpkg install mujoco-menagerie --prefix <deps>")
+  endif()
+  set(_cvc_menagerie "${CVC_MUJOCO_MENAGERIE_DIR}")
+endif()
+target_compile_definitions(physics_mujoco_robot_test
+  PRIVATE CVC_MUJOCO_MENAGERIE_DIR="${_cvc_menagerie}")
 add_executable(geometry_height_field_test geometry_height_field_test.cpp)
 add_executable(world_geometry_test world_geometry_test.cpp)
 add_executable(nav_world_planes_test nav_world_planes_test.cpp)
@@ -288,6 +310,8 @@ add_executable(nav_material_test nav_material_test.cpp)
 add_executable(nav_belief_material_test nav_belief_material_test.cpp)
 add_executable(nav_belief_material_net_test nav_belief_material_net_test.cpp)
 add_executable(nav_belief_material_controller_test nav_belief_material_controller_test.cpp)
+add_executable(nav_coph_test nav_coph_test.cpp)
+add_executable(nav_coph_model_test nav_coph_model_test.cpp)
 add_executable(nav_material_deploy_test nav_material_deploy_test.cpp)
 add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
 add_executable(nav_material_rollout_grad_test nav_material_rollout_grad_test.cpp)
@@ -350,6 +374,14 @@ else()
   set_source_files_properties(ocean_sea_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 add_executable(ocean_ewave_test ocean_ewave_test.cpp)
+add_executable(ocean_wind_test ocean_wind_test.cpp)
+# The gusts', the current's and the fetch map's golden hashes are of values computed from inputs
+# computed here: build without FMA contraction, as ocean_sea_test.
+if(NOT MSVC)
+  set_source_files_properties(ocean_wind_test.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(ocean_wind_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 # EwaveDigest pins a window's digest after a fixed scenario whose inputs (the drops' points, the
 # wall's mask) are computed here: build without FMA contraction, as ocean_sea_test.
 if(NOT MSVC)
@@ -475,11 +507,17 @@ set(TEST_TARGETS
   physics_dyn_contact_test
   nav_dyn_ph_full_test
   nav_potential_test
+  ph_compose_test
+  ph_compose_parity_test
+  ph_microgrid_test
+  ph_convoy_test
   ph_se2_test
   ph_se2_train_test
   nav_terrain_test
   nav_binding_test
   nav_trace_test
+  nav_arms_test
+  nav_scrub_test
   input_trace_test
   nav_sim_world_agents_test
   physics_parity_test
@@ -489,6 +527,7 @@ set(TEST_TARGETS
   physics_plant_host_test
   physics_dyn_bike_plant_test
   physics_dyn_4w_plant_test
+  physics_mujoco_robot_test
   geometry_height_field_test
   world_geometry_test
   nav_world_planes_test
@@ -536,6 +575,8 @@ set(TEST_TARGETS
   nav_belief_material_test
   nav_belief_material_net_test
   nav_belief_material_controller_test
+  nav_coph_test
+  nav_coph_model_test
   nav_material_deploy_test
   nav_material_raster_test
   nav_coef_energy_test
@@ -590,6 +631,7 @@ set(TEST_TARGETS
   ocean_shore_test
   ocean_sea_test
   ocean_ewave_test
+  ocean_wind_test
   world_bundle_test
   volren_math_test
   volren_camera_test
@@ -1353,6 +1395,20 @@ target_link_libraries(nav_belief_material_controller_test
     GTest::gtest_main
 )
 
+target_link_libraries(nav_coph_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_coph_model_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(nav_material_deploy_test
   PRIVATE
     cvc
@@ -1542,7 +1598,7 @@ target_link_libraries(vis_tiler_test
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_ewave_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_ewave_test ocean_wind_test)
   target_link_libraries(${_lsys_test} PRIVATE cvc GTest::gtest GTest::gtest_main)
   target_compile_features(${_lsys_test} PRIVATE cxx_std_17)
 endforeach()
@@ -2349,6 +2405,34 @@ target_link_libraries(nav_potential_test
     GTest::gtest_main
 )
 
+target_link_libraries(ph_compose_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ph_convoy_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ph_compose_parity_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ph_microgrid_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(ph_se2_test
   PRIVATE
     cvc
@@ -2383,6 +2467,18 @@ target_link_libraries(nav_binding_test
     GTest::gtest_main
 )
 target_link_libraries(nav_trace_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(nav_arms_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(nav_scrub_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2443,6 +2539,12 @@ target_link_libraries(physics_dyn_bike_plant_test
     GTest::gtest_main
 )
 target_link_libraries(physics_dyn_4w_plant_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(physics_mujoco_robot_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2810,11 +2912,17 @@ target_compile_features(nav_dyn_spin_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_contact_test PRIVATE cxx_std_17)
 target_compile_features(nav_dyn_ph_full_test PRIVATE cxx_std_17)
 target_compile_features(nav_potential_test PRIVATE cxx_std_17)
+target_compile_features(ph_compose_test PRIVATE cxx_std_17)
+target_compile_features(ph_compose_parity_test PRIVATE cxx_std_17)
+target_compile_features(ph_microgrid_test PRIVATE cxx_std_17)
+target_compile_features(ph_convoy_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_train_test PRIVATE cxx_std_17)
 target_compile_features(nav_terrain_test PRIVATE cxx_std_17)
 target_compile_features(nav_binding_test PRIVATE cxx_std_17)
 target_compile_features(nav_trace_test PRIVATE cxx_std_17)
+target_compile_features(nav_arms_test PRIVATE cxx_std_20)
+target_compile_features(nav_scrub_test PRIVATE cxx_std_20)
 target_compile_features(input_trace_test PRIVATE cxx_std_17)
 target_compile_features(nav_sim_world_agents_test PRIVATE cxx_std_17)
 target_compile_features(physics_parity_test PRIVATE cxx_std_17)
@@ -2822,6 +2930,7 @@ target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
 target_compile_features(physics_plant_host_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_bike_plant_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_4w_plant_test PRIVATE cxx_std_17)
+target_compile_features(physics_mujoco_robot_test PRIVATE cxx_std_17)
 target_compile_features(geometry_height_field_test PRIVATE cxx_std_17)
 target_compile_features(world_geometry_test PRIVATE cxx_std_17)
 target_compile_features(nav_world_planes_test PRIVATE cxx_std_17)
@@ -3042,6 +3151,8 @@ cvc_discover_tests(nav_material_test)
 cvc_discover_tests(nav_belief_material_test)
 cvc_discover_tests(nav_belief_material_net_test)
 cvc_discover_tests(nav_belief_material_controller_test)
+cvc_discover_tests(nav_coph_test)
+cvc_discover_tests(nav_coph_model_test)
 cvc_discover_tests(nav_material_deploy_test)
 cvc_discover_tests(nav_material_raster_test)
 cvc_discover_tests(nav_coef_energy_test)
@@ -3071,7 +3182,7 @@ cvc_discover_tests(vis_tiler_test)
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_wind_test)
   cvc_discover_tests(${_lsys_test})
 endforeach()
 # The water's long runs (a channel's walls, a thin wall, a moving source's wake) take 105-195 s
@@ -3376,11 +3487,17 @@ cvc_discover_tests(nav_dyn_spin_test)
 cvc_discover_tests(physics_dyn_contact_test)
 cvc_discover_tests(nav_dyn_ph_full_test)
 cvc_discover_tests(nav_potential_test)
+cvc_discover_tests(ph_compose_test)
+cvc_discover_tests(ph_compose_parity_test)
+cvc_discover_tests(ph_microgrid_test)
+cvc_discover_tests(ph_convoy_test)
 cvc_discover_tests(ph_se2_test)
 cvc_discover_tests(ph_se2_train_test)
 cvc_discover_tests(nav_terrain_test)
 cvc_discover_tests(nav_binding_test)
 cvc_discover_tests(nav_trace_test)
+cvc_discover_tests(nav_arms_test)
+cvc_discover_tests(nav_scrub_test)
 cvc_discover_tests(input_trace_test)
 cvc_discover_tests(nav_sim_world_agents_test)
 cvc_discover_tests(physics_parity_test)
@@ -3388,6 +3505,7 @@ cvc_discover_tests(physics_pose_tracker_test)
 cvc_discover_tests(physics_plant_host_test)
 cvc_discover_tests(physics_dyn_bike_plant_test)
 cvc_discover_tests(physics_dyn_4w_plant_test)
+cvc_discover_tests(physics_mujoco_robot_test)
 cvc_discover_tests(geometry_height_field_test)
 cvc_discover_tests(world_geometry_test)
 cvc_discover_tests(nav_world_planes_test)

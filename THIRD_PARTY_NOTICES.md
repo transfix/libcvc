@@ -31,6 +31,13 @@ Compiled into libcvc:
   [Shewchuk's predicates](#shewchuks-robust-predicates); and, in `cvc::planar` (built with all
   of Clipper2, CDT and Shewchuk's predicates), [Boost.Polygon's Voronoi diagram](#boostpolygon-voronoi-diagram)
 
+Linked as its own library, never compiled into libcvc: MuJoCo (Apache-2.0, Google DeepMind), for
+`cvc::physics::mujoco_robot` when built with `CVC_WITH_MUJOCO` (default OFF; docs/MUJOCO.md). It
+comes from the cvcpkg `mujoco` package, whose licence and third-party notices install to
+`share/licenses/mujoco/`. The robot the tests load, the Unitree Go2 from the cvcpkg
+`mujoco-menagerie` bundle (BSD-3-Clause), is read from that package at run time and is not in this
+repository.
+
 Compiled into libcvc (its wave spectrum, `cvc/ocean/spectrum.h`) and the cvcGL examples:
 [ABYSSAL](#abyssal).
 
@@ -955,7 +962,12 @@ for both directions) are a C++/VTK port of ABYSSAL
 `cvcgl_ocean_fft`, `cvcgl_ocean_band` and `cvcgl_ewave` tests. The wave spectrum it is fed, `inc/cvc/ocean/spectrum.h` and
 `src/cvc/ocean/spectrum.cpp` in libcvc itself (JONSWAP with the TMA correction,
 Donelan-Banner spreading, the fetch law and the swell term), ports ABYSSAL's
-`src/ocean/OceanFFT.js` at 849ff7f4. Upstream's `LICENSE`:
+`src/ocean/OceanFFT.js` at 849ff7f4. The gusts' pulse over time in
+`inc/cvc/algo/wind_field.h` and `src/cvc/algo/wind_field.cpp` ports
+`src/weather/Weather.js:107-110`, and the current's shape in `inc/cvc/ocean/current.h`
+and `src/cvc/ocean/current.cpp` (the curl of noise at two scales, drifting) follows
+`src/ocean/OceanSampleGLSL.js:31-41` and `src/gfx/ProceduralTextures.js`'s curl bake, at
+the same commit. Upstream's `LICENSE`:
 
 ```
 MIT License

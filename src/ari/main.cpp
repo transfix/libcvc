@@ -615,6 +615,10 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "ari: --png needs a renderer; arigl can write one\n");
     return 2;
   }
+  if (!o.mp4.empty() || o.seconds > 0) {
+    std::fprintf(stderr, "ari: --mp4 and --seconds run a scene; arigl can record one\n");
+    return 2;
+  }
   if (!ari::AppRuntime::have_yaml()) {
     std::fprintf(stderr, "ari: libcvc was built without yaml-cpp, so it cannot load a .ari\n");
     return 1;
@@ -664,6 +668,7 @@ int main(int argc, char **argv) {
   for (const std::string &d : o.component_paths)
     rt.add_component_path(d);
   rt.register_quit(); // on: quit and (quit [code]), e.g. from an on_signal: program
+  rt.runtime().set_clock(cmd == "run"); // the tray's clock (§5.22): not in a snapshot's frames
   std::string relayError;
   const auto relay = join_relay(app, rt, o, /*join=*/cmd != "check", relayError);
   if (!relay) {
