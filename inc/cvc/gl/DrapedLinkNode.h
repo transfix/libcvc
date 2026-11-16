@@ -78,9 +78,14 @@ public:
   // Re-derive the reserved bounds from the height field's current extent, and
   // un-pin a box set with setReservedBounds(). Any thread.
   void refreshReservedBounds();
+  // Drape over another height field from now on (a ground made again on a new
+  // grid): its grid uniforms, and the bounds re-derived from it unless pinned.
+  // No upload of the link; the texture is the field's own. Null is ignored.
+  // Any thread.
+  void setHeightField(std::shared_ptr<HeightFieldTexture> heights);
 
   int stations() const { return m_stations; }
-  std::shared_ptr<HeightFieldTexture> heightField() const { return m_heights; }
+  std::shared_ptr<HeightFieldTexture> heightField() const;
   // Where the drawn centre line is at parameter t in [0, 1]: the GPU's
   // piecewise-linear drape, evaluated with HeightFieldTexture::sample.
   void centerAt(double t, double out[3]) const;
@@ -97,7 +102,10 @@ private:
   // committed (the caller then requestApply()s, outside the lock).
   bool commitDerivedLocked();
 
-  std::shared_ptr<HeightFieldTexture> m_heights;
+  void setGridUniforms(const HeightFieldTexture &heights);
+
+  std::shared_ptr<HeightFieldTexture> m_heights; // guarded by m_heightsMutex
+  mutable std::mutex m_heightsMutex;
   const int m_stations;
   mutable std::mutex m_linkMutex;
   float m_a[2] = {0, 0}, m_b[2] = {0, 0};

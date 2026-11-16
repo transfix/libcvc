@@ -59,6 +59,7 @@
 #include <cvc/ariadne/holon.h>                      // server-authoritative avatar holon (H1)
 #include <cvc/ariadne/holon_sync.h>      // server_pump: intent -> holon -> authoritative pose
 #include <cvc/ariadne/host_cli.h>        // --set KEY=VALUE, as ari and arigl take it
+#include <cvc/ariadne/host_signals.h>    // SIGINT and SIGTERM stop this app's relay
 #include <cvc/ariadne/loader.h>          // load_file: the stock world documents
 #include <cvc/ariadne/server_document.h> // --doc: the server document and what it publishes
 #include <cvc/ariadne/stream/stream_relay.h>
@@ -93,6 +94,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -104,9 +106,6 @@
 #endif
 
 namespace {
-std::atomic<bool> g_stop{false};
-void on_signal(int) { g_stop.store(true); }
-
 #if defined(__linux__) && defined(__GLIBC__)
 // A relay runs unattended, so a crash must explain itself in its log: on SIGSEGV / SIGABRT (glibc's
 // "malloc(): ... corrupted" aborts) / SIGBUS / SIGFPE / SIGILL, write the stack to stderr, then
@@ -688,6 +687,15 @@ int main(int argc, char **argv) {
 #endif
 
   cvc::app app;
+  // What stops the relay: a SIGINT or SIGTERM once signals are routed here (route_signals, below),
+  // a server document that fails or quits, or an arisrvx Python program that ends. The flag is
+  // this app's (host_signals.h); the route is what lets a signal handler reach it.
+  cvc::ariadne::host_signals &signals = cvc::ariadne::signals_of(app);
+  std::optional<cvc::ariadne::signal_route> signalRoute; // goes before the app
+  const auto route_signals = [&] {
+    if (!signalRoute)
+      signalRoute.emplace(app, cvc::ariadne::signal_route::mode::stop);
+  };
 #ifdef CVC_ARIADNE_PYTHON
   // Before the server document is read: its requires: python, and its python: block, are this
   // app's engine's to answer (use_script_engine is not called for a server document).
@@ -850,6 +858,7 @@ int main(int argc, char **argv) {
   scriptHandles.runtime = serverDoc ? &serverDoc->runtime() : nullptr;
   scriptHandles.mode = "server";
   scriptHandles.server = &scriptLink;
+  scriptLink.set_room(room); // what the program's bridged users (host.room_presence ...) name
   const cvc::ariadne::python::Attachment scriptLent = python.attach(scriptHandles);
   cvc::ariadne::python::ServeOptions serveOpts;
   // The program's authenticate hook, as the planes call it (null without one), and the principals
@@ -906,8 +915,7 @@ int main(int argc, char **argv) {
     return status ? status : ran;
   }
   // Signals now, so a stop during the program's startup is the program's to act on.
-  std::signal(SIGINT, on_signal);
-  std::signal(SIGTERM, on_signal);
+  route_signals();
   std::thread scriptThread;
   // Wait at most `seconds` for the program to end, then join it; false (it is left running, so
   // the interpreter may not be finalized) when it did not.
@@ -926,7 +934,7 @@ int main(int argc, char **argv) {
         std::thread([&] { scriptLink.finish(python.serve(pythonScript, {}, serveOpts)); });
     bool asked = false;
     const auto ask_stop = [&] {
-      if (g_stop.load() && !asked) {
+      if (signals.stop_requested() && !asked) {
         scriptLink.post("shutdown");
         asked = true;
       }
@@ -943,7 +951,7 @@ int main(int argc, char **argv) {
         std::_Exit(1);
       }
       const int status = scriptLink.status();
-      if (g_stop.load())
+      if (signals.stop_requested())
         return status;
       const std::string how = scriptLink.why().empty()
                                   ? "ended before it served (status " + std::to_string(status) + ")"
@@ -1156,6 +1164,48 @@ int main(int argc, char **argv) {
 #if CVC_ENABLE_WS
   chat->add_transport(&ws_tp);
 #endif
+#ifdef CVC_ARIADNE_PYTHON
+  // Bridged users (room_intrinsics.h, ARIADNE_CHAT.md): the program's presence and posts for the
+  // users of another chat system, applied each room step ahead of the chat's, and what the room's
+  // participants post handed to the program, as it listens (host.on_room_chat, on_room_dm).
+  bool chatHearsRoom = false, chatHearsDms = false;
+  const auto bridge_step = [&] {
+    namespace rc = cvc::ariadne::conference;
+    using Op = cvc::ariadne::python::ServerLink::BridgeOp;
+    const bool room_on = scriptLink.hears_room(), dms_on = scriptLink.hears_dms();
+    if (room_on != chatHearsRoom || dms_on != chatHearsDms) {
+      chatHearsRoom = room_on;
+      chatHearsDms = dms_on;
+      rc::room_chat_relay::listener hear;
+      if (room_on || dms_on)
+        hear = [&](const rc::chat_event &e) {
+          scriptLink.post(cvc::ariadne::python::ServerLink::Event{
+              "room_chat", 0, cvc::state_exec::value_t(rc::encode_chat_event(room, e))});
+        };
+      chat->set_listener(std::move(hear), room_on, dms_on);
+    }
+    // At most 128 a step (a presence is ~65 us, so ~8 ms): a hub's login burst of thousands
+    // drains over a second's steps instead of stalling one.
+    for (const Op &op : scriptLink.take_bridge_ops(128)) {
+      std::string why;
+      bool ok = true;
+      if (op.kind == Op::Kind::presence) {
+        ok = rc::room_bridge_presence(app, room, op.via, op.uid, op.name, op.detail, why);
+      } else if (op.kind == Op::Kind::absent) {
+        if (rc::room_bridge_absent(app, room, op.via, op.uid))
+          chat->participant_left(rc::bridged_pid(op.via, op.uid));
+      } else {
+        ok = chat->post_bridged(op.via, op.uid, op.name, op.text, op.to, why);
+      }
+      if (!ok) {
+        std::printf("[arisrvx] bridge: %s of %s user '%s' refused: %s\n",
+                    op.kind == Op::Kind::presence ? "presence" : "a post", op.via.c_str(),
+                    op.uid.c_str(), why.c_str());
+        std::fflush(stdout);
+      }
+    }
+  };
+#endif
   // room-call (room_calls.h): the calls clients make, taken each room step. The replies go only to
   // the connection holding the caller's pid, so like DMs they take bound writes.
   auto calls = std::make_unique<cvc::ariadne::conference::room_call_relay>(shard, room);
@@ -1191,8 +1241,7 @@ int main(int argc, char **argv) {
                 tlsCert.c_str());
 
   install_crash_trace();
-  std::signal(SIGINT, on_signal);
-  std::signal(SIGTERM, on_signal);
+  route_signals();
   std::printf("[arisrv] relay up | room='%s' node='%s' | state=%s | media=%s\n", room.c_str(),
               nodeId.c_str(), state_tp.listen_address().c_str(), media_tp.listen_address().c_str());
 #if CVC_ENABLE_WS
@@ -1322,7 +1371,12 @@ int main(int argc, char **argv) {
     const double now_s =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - room_start).count();
     // Chat first: its pushes go out now, and the room head it writes rides this step's drain, so
-    // a client never sees the head before the message.
+    // a client never sees the head before the message. In arisrvx the program's bridged users'
+    // presence and posts go before it.
+#ifdef CVC_ARIADNE_PYTHON
+    if (scriptThread.joinable())
+      bridge_step();
+#endif
     chat->step(now_s);
     cvc::ariadne::conference::relay_room_step(shard, planes, aoi_relay.get(), server_holon, now_s,
                                               trimJournal);
@@ -1429,7 +1483,7 @@ int main(int argc, char **argv) {
     } catch (const std::exception &e) {
       std::fprintf(stderr, "arisrv: --doc: %s\n", e.what());
       docFailed = true;
-      g_stop.store(true);
+      signals.request_stop();
     }
     std::fflush(stdout);
   }
@@ -1557,10 +1611,10 @@ int main(int argc, char **argv) {
     if (!serverDoc || docFailed)
       return;
     serverDoc->step(server_holon.tick(), server_holon.clock().t());
-    if (serverDoc->should_close() && !g_stop.load()) {
+    if (serverDoc->should_close() && !signals.stop_requested()) {
       std::printf("[arisrv] the server document asked to stop (quit %d)\n", serverDoc->exit_code());
       std::fflush(stdout);
-      g_stop.store(true);
+      signals.request_stop();
     }
   };
   // The room steps on a fixed 50 ms grid (sleep_until, not sleep_for after each step's work), so
@@ -1583,15 +1637,15 @@ int main(int argc, char **argv) {
 #ifdef CVC_ARIADNE_PYTHON
     if (scriptThread.joinable()) {
       if (scriptLink.finished()) {
-        if (!g_stop.load()) {
+        if (!signals.stop_requested()) {
           std::printf("[arisrvx] the python program stopped (status %d); stopping the relay\n",
                       scriptLink.status());
           std::fflush(stdout);
-          g_stop.store(true);
+          signals.request_stop();
         }
         return false;
       }
-      if (g_stop.load()) {
+      if (signals.stop_requested()) {
         const auto now = std::chrono::steady_clock::now();
         if (!scriptStopping) {
           scriptStopping = true;
@@ -1612,7 +1666,7 @@ int main(int argc, char **argv) {
       }
     }
 #endif
-    return !g_stop.load();
+    return !signals.stop_requested();
   };
   while (relay_running()) {
 #if CVC_ENABLE_WS
@@ -1874,11 +1928,12 @@ int main(int argc, char **argv) {
           held_timeouts, shard.journal().size());
       const auto cs = chat->take_stats();
       std::printf(
-          "[arisrv] chat: %llu post(s) (%llu direct) | %llu page(s) | %llu refused | %llu "
-          "dropped | %llu push(es)\n",
+          "[arisrv] chat: %llu post(s) (%llu direct, %llu bridged) | %llu page(s) | %llu refused "
+          "| %llu dropped | %llu push(es) | %llu heard by the program\n",
           static_cast<unsigned long long>(cs.posts), static_cast<unsigned long long>(cs.dms),
-          static_cast<unsigned long long>(cs.pages), static_cast<unsigned long long>(cs.refused),
-          static_cast<unsigned long long>(cs.dropped), static_cast<unsigned long long>(cs.pushes));
+          static_cast<unsigned long long>(cs.bridged), static_cast<unsigned long long>(cs.pages),
+          static_cast<unsigned long long>(cs.refused), static_cast<unsigned long long>(cs.dropped),
+          static_cast<unsigned long long>(cs.pushes), static_cast<unsigned long long>(cs.heard));
       const auto ps = pose_relay.take_stats();
       std::printf(
           "[arisrv] poses: %llu snapshot(s) (%llu on pose lanes, %llu acks), %llu entries, "

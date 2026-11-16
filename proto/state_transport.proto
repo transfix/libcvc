@@ -206,6 +206,10 @@ message Ping {
 message Pong {
   uint64 seq = 1;
   int64 sent_ns = 2; // the Ping's sent_ns, echoed
+  // The answerer's wall clock as it answered: ns since the Unix epoch, 0 when not sent (an older
+  // peer). With the round trip, the Ping's sender learns how far the answerer's clock is from its
+  // own (state_link_stats::note_peer_clock): a client, its relay's time.
+  int64 wall_ns = 3;
 }
 
 // Single bidirectional frame envelope. Both client and server write

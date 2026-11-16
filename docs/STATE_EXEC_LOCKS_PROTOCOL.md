@@ -487,6 +487,16 @@ block(P, info, R, refs) -> (tid, state):
   (Lemma B), so a block that does not close a cycle leaves the graph acyclic, and one that would
   close a cycle never queues. There is no hop cap on the search, no lazy check and no timer for
   it. Its cost is bounded by the number of queued tickets.
+- **Implementation note (equivalent, cheaper).** `P in reach(targets)` needs an edge into `P`.
+  `P` has no ticket here, and its request would queue last, so every edge into `P` comes from a
+  queued ticket that conflicts with a hold of `P` (3.2). When `P` holds nothing, the
+  implementation skips the search. Otherwise it first finds the processes with a path to `P`,
+  searching backwards over predecessor edges. It runs `deadlock_cycle` only when a target is
+  among them, and confines the search to them. A process with no path to `P` reaches only
+  processes with none, so the confined search finds a cycle exactly when the full one does, and
+  the same first path. The full search is O(queued tickets^2), each successor list recomputed
+  per node. With many waiters on one key, it made every re-queue after a handoff cost the whole
+  queue squared.
 - **`deadlock_cycle`.** A depth-first search from `targets`, each successor list taken in
   ascending `(home, pid)` order, stopping at the first path back to `P`. The cycle is the list of
   `{pid key}` for each edge `A -> B` on it, starting with `P`: `pid` is `A`'s pid when `A` shares

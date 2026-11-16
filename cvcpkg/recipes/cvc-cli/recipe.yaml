@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: cvc-cli
-  upstream_version: "4.0.0"
+  upstream_version: "4.0.1"
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
   # revisions OF an upstream version, so a version bump restarts it.
   cvc_revision: 1
@@ -47,9 +47,11 @@ depends:
     # libcvc SDK (find_package(cvc CONFIG)) + Boost.program_options (the CLI's
     # argument parser; not part of the libcvc link interface).
     - name: libcvc
+      version: "^4.0"
     - name: boost
   runtime:
     - name: libcvc
+      version: "^4.0"
     - name: boost
   host_tools:
     - cmake

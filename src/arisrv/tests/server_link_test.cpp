@@ -360,3 +360,55 @@ TEST(ServerLinkTest, StartStates) {
     EXPECT_EQ(link.status(), 1);
   }
 }
+
+// Bridged users (room chat): the program's ops reach the relay in the order it made them, and what
+// it listens to is said at once.
+TEST(ServerLinkTest, BridgeOpsReachTheRelayInOrder) {
+  ServerLink link;
+  link.set_room("nmdc");
+  EXPECT_EQ(link.room(), "nmdc");
+  EXPECT_FALSE(link.hears_room());
+  EXPECT_FALSE(link.hears_dms());
+  using Op = ServerLink::BridgeOp;
+  Op presence;
+  presence.kind = Op::Kind::presence;
+  presence.via = "nmdc";
+  presence.uid = "zed";
+  presence.name = "Zed";
+  Op post;
+  post.kind = Op::Kind::post;
+  post.via = "nmdc";
+  post.uid = "zed";
+  post.text = "hi";
+  Op absent;
+  absent.kind = Op::Kind::absent;
+  absent.via = "nmdc";
+  absent.uid = "zed";
+  std::thread t([&] {
+    link.bridge(presence);
+    link.bridge(post);
+    link.bridge(absent);
+  });
+  t.join();
+  const std::vector<Op> ops = link.take_bridge_ops();
+  ASSERT_EQ(ops.size(), 3u);
+  EXPECT_EQ(ops[0].kind, Op::Kind::presence);
+  EXPECT_EQ(ops[0].name, "Zed");
+  EXPECT_EQ(ops[1].kind, Op::Kind::post);
+  EXPECT_EQ(ops[1].text, "hi");
+  EXPECT_EQ(ops[2].kind, Op::Kind::absent);
+  EXPECT_TRUE(link.take_bridge_ops().empty());
+  for (int i = 0; i < 5; ++i) {
+    post.text = std::to_string(i);
+    link.bridge(post);
+  }
+  const std::vector<Op> first = link.take_bridge_ops(3);
+  ASSERT_EQ(first.size(), 3u);
+  EXPECT_EQ(first[2].text, "2");
+  const std::vector<Op> rest = link.take_bridge_ops(3);
+  ASSERT_EQ(rest.size(), 2u) << "the rest, in order, on the next step";
+  EXPECT_EQ(rest[0].text, "3");
+  link.listen_chat(true, false);
+  EXPECT_TRUE(link.hears_room());
+  EXPECT_FALSE(link.hears_dms());
+}

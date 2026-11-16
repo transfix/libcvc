@@ -282,6 +282,11 @@ public:
   // is the texture `from` has now: after a new setTexture on `from`, share it again.
   void shareTexture(std::shared_ptr<const GeometryNode> from);
   void clearTexture();
+  // How the texture is sampled between texel centres: linearly (the default) or from the nearest
+  // texel, so each texel draws as a sharp square (a volume slice's voxels). Holds for the texture
+  // set now and every later one.
+  void setTextureInterpolate(bool on);
+  bool textureInterpolate() const { return m_textureInterpolate; }
   // Whether a texture is set, and its size in pixels (0 x 0 when none). Read on the owner
   // thread, where setTexture/clearTexture land.
   bool hasTexture() const;
@@ -378,9 +383,10 @@ protected:
   // hands its emulated vertex buffers (see onUpdateShader for why), setting each
   // sampler uniform that the program actually uses. For UpdateShaderEvent
   // observers; textures without a context, or unused by the program, are skipped.
-  static void
-  bindShaderTextures(vtkShaderProgram *program,
-                     const std::vector<std::pair<std::string, vtkTextureObject *>> &textures);
+  // Each texture holds its unit only for the draw under way: this node's actor
+  // releases it once that draw is done.
+  void bindShaderTextures(vtkShaderProgram *program,
+                          const std::vector<std::pair<std::string, vtkTextureObject *>> &textures);
 
   // Shader replacements a SUBCLASS needs for itself. Kept out of reach of the
   // public add*ShaderReplacement / clearShaderReplacements (see there), and
@@ -451,6 +457,7 @@ private:
   vtkSmartPointer<vtkImageData> m_textureImageData; // the texture's input (for texture_modified())
   boost::shared_array<unsigned char> m_textureStorage; // keeps the aliased zero-copy buffer alive
   bool m_textureFlipV; // true when a texture is active: UVs' V is flipped (top-left image -> VTK)
+  bool m_textureInterpolate = true; // setTextureInterpolate: linear (true) or nearest sampling
   bool m_forceOpaque = false; // setForceOpaque's ask, kept while the mesh is see-through
 
   boost::signals2::connection m_dataConnection;
