@@ -1739,9 +1739,12 @@ int main(int argc, char **argv) {
   // own null GImGui. Adopt the overlay's context so the raw ImGui::* calls below
   // and the cvc::gl::ui::* widgets inside libcvc share one.
   ImGui::SetCurrentContext(ui.imguiContext());
+  // The panel's state from frame to frame (the callback runs once a frame).
+  int fpsTick = 0;
+  bool chaseOn = false;
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
-      cvc_examples::demos_menu("nav_city_swarm");
+      cvc_examples::demos_menu(app, "nav_city_swarm");
       if (ImGui::BeginMenu("Sim")) {
         // Pause and Step are the clock's controls (sim.paused, a step request), so they act
         // on world time itself: Step runs exactly one navigator step and stays paused.
@@ -1789,7 +1792,6 @@ int main(int argc, char **argv) {
     ImGui::Begin("Swarm controls");
     ImGui::Text("%d agents | %ld arrived | %.0f fps", N, arrived, ImGui::GetIO().Framerate);
     { // periodic fps to stdout so benchmarking doesn't need a screenshot of the HUD
-      static int fpsTick = 0;
       if ((++fpsTick % 120) == 30) {
         std::printf("nav_city_swarm: %.1f fps | %d agents\n", ImGui::GetIO().Framerate, N);
         std::fflush(stdout); // stdout is block-buffered when redirected; flush so a
@@ -1840,7 +1842,6 @@ int main(int argc, char **argv) {
     // Checkbox on/off — no more "-1 == off" magic. When on, an index typable
     // in the InputInt AND draggable on the slider picks the agent to CHASE;
     // unchecking snaps the camera back to Orbit and re-frames the whole city.
-    static bool chaseOn = false;
     // Keep chaseOn in sync with followAgent for external mutators (e.g. the
     // PiP click-to-follow, which sets followAgent directly).
     if (followAgent >= 0)
@@ -2096,7 +2097,18 @@ int main(int argc, char **argv) {
   double last = 0.0;
   long frame = 0;
   double eye[3], focal[3];
-  while (!view.windowClosed() && !cvc_examples::demo_switch_requested()) {
+  // What the loop keeps from frame to frame: the world being rebuilt, whether the far skyline
+  // shows, and the render-cost profile (CVC_RENDER_PROFILE=1), averaged every 120 frames.
+  std::future<std::unique_ptr<cvc::nav::sim_world>> pendingWorld;
+  bool farOn = false;
+  const bool kRProf = [] {
+    const char *e = std::getenv("CVC_RENDER_PROFILE");
+    return e && e[0] && e[0] != '0';
+  }();
+  double accRender = 0.0, accFrame = 0.0;
+  long rframes = 0;
+  std::chrono::steady_clock::time_point prev{};
+  while (!view.windowClosed() && !cvc_examples::demo_switch_requested(app)) {
     double t, dt;
     if (capturing) {
       t = frame / fps;
@@ -2153,7 +2165,6 @@ int main(int argc, char **argv) {
     // The swap itself still stops the sim, moves the world, and rebuilds the
     // N-sized meshes when N/M changed — that lands in a few frames rather
     // than half a second.
-    static std::future<std::unique_ptr<cvc::nav::sim_world>> pendingWorld;
     if (uiRestart && !pendingWorld.valid()) {
       uiRestart = false;
       const int reqAgents = uiAgents;
@@ -2482,7 +2493,6 @@ int main(int argc, char **argv) {
           const double dx = e[0] - f[0], dy = e[1] - f[1], dz = e[2] - f[2];
           const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
           const double span2 = std::max(bounds.max_x - bounds.min_x, bounds.max_y - bounds.min_y);
-          static bool farOn = false;
           if (!farOn && dist > 0.30 * span2)
             farOn = true;
           else if (farOn && dist < 0.22 * span2)
@@ -2514,15 +2524,8 @@ int main(int argc, char **argv) {
       // Optional render-cost profiling (CVC_RENDER_PROFILE=1): time view.render()
       // (main + shadow + PiP submission) vs the rest of the frame, averaged every
       // 120 frames. Pair with --no-pip to attribute the PiP's share.
-      static const bool kRProf = [] {
-        const char *e = std::getenv("CVC_RENDER_PROFILE");
-        return e && e[0] && e[0] != '0';
-      }();
       if (kRProf) {
         using rclk = std::chrono::steady_clock;
-        static double accRender = 0.0;
-        static long rframes = 0;
-        static rclk::time_point prev{};
         const auto t0 = rclk::now();
         view.render();
         const auto t1 = rclk::now();
@@ -2531,7 +2534,6 @@ int main(int argc, char **argv) {
         if (prev.time_since_epoch().count() != 0) // full frame = render-end to render-end
           frameMs = std::chrono::duration<double, std::milli>(t1 - prev).count();
         prev = t1;
-        static double accFrame = 0.0;
         accFrame += frameMs;
         if (++rframes >= 120) {
           const double n = static_cast<double>(rframes);

@@ -35,6 +35,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cvc/ariadne/host_signals.h>
 #include <cvc/core/app.h>
 #include <cvc/core/input_trace.h>
 #include <cvc/core/param_cli.h>
@@ -1342,10 +1343,6 @@ static int cmd_bunny(cvc::app &app, int argc, char **argv) {
 // State server (distributed_state_session)
 // ---------------------------------------------------------------------------
 
-static std::atomic<bool> g_serve_running{true};
-
-static void serve_signal_handler(int) { g_serve_running.store(false); }
-
 static int cmd_serve(cvc::app &app, int argc, char **argv) {
   po::options_description desc(
       "cvc serve - run a headless CVC state server\n\n"
@@ -1476,9 +1473,10 @@ static int cmd_serve(cvc::app &app, int argc, char **argv) {
   // the handlers installed afterwards there is a window -- join() returning,
   // through delegation parsing and exec-coordinator startup, to the old
   // install site below -- in which SIGINT still had its default disposition
-  // and killed the process outright, discarding the buffered log with it.
-  std::signal(SIGINT, serve_signal_handler);
-  std::signal(SIGTERM, serve_signal_handler);
+  // and killed the process outright, discarding the buffered log with it. They set this app's
+  // stop flag (host_signals.h), which the loop below polls; the route goes before the app.
+  cvc::ariadne::signal_route stopRoute(app, cvc::ariadne::signal_route::mode::stop);
+  const cvc::ariadne::host_signals &signals = cvc::ariadne::signals_of(app);
 
   auto session = cvc::distributed_state_session::join(app, cfg);
   // Flush the readiness banner: stdout is fully buffered when it is a file or
@@ -1529,7 +1527,7 @@ static int cmd_serve(cvc::app &app, int argc, char **argv) {
 
   // Block until SIGINT/SIGTERM (handlers were installed before join() above).
   std::cout << "Press Ctrl+C to stop." << std::endl;
-  while (g_serve_running.load()) {
+  while (!signals.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     // If exec enabled, step the scheduler: for a runnable process, or for a command posted to it
     // (the coordinator's bus threads post_control), which only a step applies.

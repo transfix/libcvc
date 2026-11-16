@@ -86,7 +86,7 @@ EM_JS(char *, cvcgl_clip_read, (), {
 #elif defined(__APPLE__)
 // Implemented in Clipboard_mac.mm (NSPasteboard) when the Cocoa bits are built.
 extern "C" bool cvcgl_mac_clip_set(const char *);
-extern "C" const char *cvcgl_mac_clip_get();
+std::string cvcgl_mac_clip_get(); // the pasteboard's text, empty when it has none
 
 #else
 // ---- X11 -------------------------------------------------------------------
@@ -280,8 +280,7 @@ std::string get(cvc::app &app) {
   return {};
 #endif
 #elif defined(__APPLE__)
-  const char *t = cvcgl_mac_clip_get();
-  return t ? t : "";
+  return cvcgl_mac_clip_get();
 #else
   X11ClipSlot &x = app.slot<X11ClipSlot>();
   std::lock_guard<std::mutex> lock(x.m);
