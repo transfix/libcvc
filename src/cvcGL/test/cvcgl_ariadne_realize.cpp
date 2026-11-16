@@ -1992,12 +1992,16 @@ int main() {
   // A weather node starts a storm when asked; the sky it drives closes and darkens under it, its
   // deck rises into cumulonimbus (built off the frame, then swapped in) while the storm is about,
   // the receivers' ambient drops under it, and a calm takes it all back. The storms ride the sky's
-  // wind: a change of it settles into a steer event.
-  {
-    printf("== weather: storms in the sky ==\n");
+  // wind: a change of it settles into a steer event. Twice: the storm deck built as the scene's
+  // build sees fit (on the pool, natively) and a share a frame (deck_threading: cooperative, as
+  // single-threaded wasm builds it, with no thread to start).
+  for (const char *mode : {"automatic", "cooperative"}) {
+    const bool sliced = std::string(mode) == "cooperative";
+    const std::string pre = sliced ? "o18c" : "o18";
+    printf("== weather: storms in the sky (the deck built %s) ==\n", mode);
     chk(cvc::gl::ariadne::has_scene_node_type(app, "weather"),
         "the weather node type is registered");
-    SceneGraph sg(app, "o18");
+    SceneGraph sg(app, pre);
     SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
     Scene scene;
     auto node = [](const char *id, const char *type,
@@ -2029,7 +2033,8 @@ int main() {
                                 {"base", "120"},
                                 {"top", "180"},
                                 {"coverage", "0.4"},
-                                {"near", "2"}}));
+                                {"near", "2"},
+                                {"deck_threading", mode}}));
     scene.nodes.push_back(node("weather", "weather",
                                {{"ground", "world"},
                                 {"sky", "sky"},
@@ -2038,13 +2043,14 @@ int main() {
                                 {"radius_max", "500"},
                                 {"storm_top", "600"}}));
     std::vector<std::string> warnings;
-    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "o18", &warnings);
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, pre, &warnings);
     auto st = [&](const char *k) -> cvc::state & {
-      return cvc::state::instance(app)(cvc::ariadne::resolve_bind("o18", k));
+      return cvc::state::instance(app)(cvc::ariadne::resolve_bind(pre, k));
     };
     auto num = [&](const char *k) { return st(k).value<double>(); };
     auto str = [&](const char *k) { return st(k).value<std::string>(); };
     auto tick = [&]() {
+      cvc::pump_exec_frame(app.exec_scheduler()); // the storm deck is a sliced task on it
       view.render();
       cvc::gl::ariadne::tick_scene(realized, view.renderer());
     };
@@ -2105,10 +2111,20 @@ int main() {
       chk(storm && dark,
           "the receivers and the far clouds have the storm and the darkness (uniforms)");
     }
-    // The storm deck is built on its own thread and swapped in: the near volumes' boxes rise.
+    // The storm deck is built as a sliced task and swapped in: the near volumes' boxes rise.
+    // Its process on the scheduler names how it runs: cloud_sky/threaded or cloud_sky/cooperative.
+    int frames = 0;
+    std::string task;
+    auto seeTask = [&]() {
+      for (const auto &pi : app.exec_scheduler().list_processes())
+        if (pi.name.rfind("cloud_sky/", 0) == 0)
+          task = pi.name;
+    };
     auto waitTop = [&](double want) {
-      for (int k = 0; k < 600 && std::fabs(boxTop() - want) > 1e-3; ++k) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      frames = 0;
+      for (int k = 0; k < 600 && std::fabs(boxTop() - want) > 1e-3; ++k, ++frames) {
+        seeTask();
+        std::this_thread::sleep_for(std::chrono::milliseconds(sliced ? 5 : 50));
         tick();
       }
       return std::fabs(boxTop() - want) < 1e-3;
@@ -2116,8 +2132,15 @@ int main() {
     const auto t0 = std::chrono::steady_clock::now();
     chk(waitTop(600.0), "the storm deck was built and swapped in (the near volumes reach 600 m)");
     std::printf(
-        "  the storm deck took %.0f ms to come in\n",
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        "  the storm deck took %.0f ms and %d frames to come in\n",
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
+        frames);
+    std::printf("  its task: %s\n", task.c_str());
+    if (sliced)
+      chk(task.find("cloud_sky/cooperative") == 0 && frames > 2,
+          "a share a frame: the storm deck was a cooperative task over several frames");
+    else
+      chk(task.find("cloud_sky/threaded") == 0, "natively the storm deck was built on the pool");
     // The wind turns: once it has held, a steer event joins the events.
     st("sky.wind_az").value(45.0);
     for (int k = 0; k < 12; ++k)

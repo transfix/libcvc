@@ -32,6 +32,7 @@
 #include <cvc/lsys/cloud.h>
 #include <cvc/world/cloud_layer.h>
 #include <gtest/gtest.h>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -798,6 +799,52 @@ TEST(WorldCloudLayer, AStormDeckTowersAndDarkensItsBase) {
       ASSERT_EQ(u[(tall.nz - 1) * layer + i], 0.0f);
   }
   EXPECT_EQ(towered, fair.variants);
+}
+
+// A storm deck built a unit at a time (as a renderer with no thread to give it steps it, a share a
+// frame: single-threaded wasm) is the deck built at once. Its phases come in order and its progress
+// climbs to 1.
+TEST(WorldCloudLayer, ADeckBuiltInStepsIsTheDeckBuiltAtOnce) {
+  cloud_layer_params fair = small();
+  fair.cumulus = fair.top - fair.base;
+  cloud_layer A(fair), B(fair);
+  std::shared_ptr<cloud_layer::deck_job> ja = A.prepare_deck(fair.base, 900.0, 30, 9);
+  cloud_layer::run(*ja);
+  ASSERT_TRUE(A.adopt_deck(*ja));
+  std::shared_ptr<cloud_layer::deck_job> jb = B.prepare_deck(fair.base, 900.0, 30, 9);
+  EXPECT_EQ(std::string(cloud_layer::phase(*jb)), "grow");
+  std::vector<std::string> phases;
+  double last = -1.0;
+  int steps = 0;
+  while (!cloud_layer::step(*jb, 1)) {
+    ++steps;
+    const double pr = cloud_layer::progress(*jb);
+    EXPECT_GE(pr, last);
+    EXPECT_LT(pr, 1.0);
+    last = pr;
+    const std::string ph = cloud_layer::phase(*jb);
+    if (phases.empty() || phases.back() != ph)
+      phases.push_back(ph);
+  }
+  std::printf("a storm deck in %d steps of one unit\n", steps + 1);
+  EXPECT_GT(steps, 50);
+  EXPECT_EQ(cloud_layer::progress(*jb), 1.0);
+  EXPECT_EQ(std::string(cloud_layer::phase(*jb)), "built");
+  EXPECT_EQ(phases, (std::vector<std::string>{"grow", "self-shade", "sky", "shade", "far"}));
+  EXPECT_TRUE(cloud_layer::step(*jb, 1)); // built: nothing more to do
+  ASSERT_TRUE(B.adopt_deck(*jb));
+  std::vector<unsigned char> ma, mb, fa, fb;
+  A.shadow_mask(0.7, 0.13, 0.3, ma);
+  B.shadow_mask(0.7, 0.13, 0.3, mb);
+  EXPECT_EQ(ma, mb);
+  A.far_density(0.7, {}, fa);
+  B.far_density(0.7, {}, fb);
+  EXPECT_EQ(fa, fb);
+  for (int v = 0; v < fair.variants; ++v) {
+    EXPECT_EQ(A.variant_map(v), B.variant_map(v));
+    EXPECT_EQ(A.variant_sun_tau(v), B.variant_sun_tau(v));
+    EXPECT_EQ(A.variant_up_tau(v), B.variant_up_tau(v));
+  }
 }
 
 // What a storm deck costs to build (terrain_lab's deck: 60 x 60 maps of 250 m half-width, the

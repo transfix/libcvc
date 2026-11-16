@@ -1120,10 +1120,14 @@ light also dims as the cloud above it hides the sky (ABYSSAL's dark bases), so a
 dark and a cumulus's stays light. `sky.base` and `sky.top` are live. A deck deeper than the props'
 is a storm deck: its maps are cumulonimbus (the cumulus at the bottom, a tower from its core, an
 anvil under the top) on up to 64 layers and 24 far slices, and their self-shade marches the sun
-through the tower. The new maps are built on a thread of their own and swapped in when done (about
-150 ms for terrain_lab's 3 km deck; the cumulus they grow from is kept, so the way back is about
-30 ms). The near volumes then take the new box, their opacity corrected so a metre of cloud is as
-opaque as before.
+through the tower. The new maps are built as a sliced task (`cvc/core/sliced_task.h`, as
+`generated_world` rebuilds), off the frame, and swapped in when done: natively on the background
+pool, and in single-threaded wasm a few milliseconds a frame on the scheduler thread.
+`deck_threading: cooperative` builds them that way natively too (or `threaded`; `automatic` by
+default, which `CVC_SLICED_THREADING=cooperative` also turns cooperative). A build takes about 150 ms
+for terrain_lab's 3 km deck. The cumulus the maps grow from is kept, so the way back is about 30 ms.
+The near volumes then take the new box, their opacity corrected so a metre of cloud is as opaque as
+before.
 
 **Weather.** `weather` holds the scene's weather model (`cvc::world::weather`,
 [`weather.h`](../inc/cvc/world/weather.h)): storm cells on a hashed schedule, and the storms people

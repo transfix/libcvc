@@ -71,11 +71,12 @@
 // up it, and an anvil spreading under the top (the height profile of ABYSSAL's Clouds.js,
 // Token-Gremlin/natural-disasters, MIT). Its self-shade marches the sun across the tall voxels,
 // so a tower's base sits in the optical depth of the whole tower: a dark base. Rebuilding the maps
-// is a few hundred milliseconds, so a renderer builds them away from its frame (prepare_deck,
-// deck_job::run on another thread, adopt_deck).
+// takes about 150 ms for terrain_lab's deck, so a renderer builds them away from its frame
+// (prepare_deck; run on another thread, or step a share a frame; adopt_deck).
 #ifndef CVC_WORLD_CLOUD_LAYER_H
 #define CVC_WORLD_CLOUD_LAYER_H
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -194,10 +195,18 @@ public:
   // the layer is kept), run() builds it on any thread, and adopt_deck swaps it in on the layer's
   // thread, true when it did. A job made before the layer's layout or sun changed is refused (the
   // caller prepares another); a job for the deck the layer has is adopted at no cost.
+  // step(job, budget) builds a share at a time, for a renderer with no thread to give it (a
+  // cvc::sliced_job, single-threaded wasm): about `budget` units (a variant's map, one layer of its
+  // self-shade, one row of its shade...; 0 runs to the end), true once built. run() builds it all
+  // at once, and a deck built in steps is the deck built so. phase() names the next unit's kind
+  // and progress() is in [0, 1].
   struct deck_job;
   std::shared_ptr<deck_job> prepare_deck(double base, double top, int nz = 0,
                                          int far_layers = 0) const;
   static void run(deck_job &job);
+  static bool step(deck_job &job, std::size_t budget);
+  static const char *phase(const deck_job &job);
+  static double progress(const deck_job &job);
   bool adopt_deck(deck_job &job);
 
   // ── Storms

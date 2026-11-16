@@ -33,12 +33,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cvc/ariadne/bind.h> // live node params: read_or_seed / read_or / resolve_bind
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
+#include <cvc/core/sliced_task.h> // a storm deck's build: on the pool, or sliced between frames
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
@@ -54,7 +56,6 @@
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/volume.h>
 #include <cvc/world/cloud_layer.h>
-#include <future>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -754,8 +755,50 @@ struct Composite {
   std::vector<unsigned char> bytes;
 };
 
+// A storm deck's build as a sliced task (cvc/core/sliced_task.h), as generated_world rebuilds:
+// natively on the background pool; in single-threaded wasm (no threads to start), or with
+// `deck_threading: cooperative`, a few milliseconds a frame on the scheduler thread, through
+// cloud_layer::step. It writes only its job, and the tick adopts the job once it is done.
+class DeckTask : public cvc::sliced_job {
+public:
+  explicit DeckTask(std::shared_ptr<cvc::world::cloud_layer::deck_job> job)
+      : m_job(std::move(job)) {}
+  bool step(std::size_t budget) override {
+    if (done())
+      return true;
+    try {
+      const bool built = cvc::world::cloud_layer::step(*m_job, budget);
+      m_phase = cvc::world::cloud_layer::phase(*m_job);
+      m_progress = cvc::world::cloud_layer::progress(*m_job);
+      if (built)
+        m_built.store(true, std::memory_order_release);
+    } catch (...) {
+      m_failed.store(true, std::memory_order_release);
+    }
+    return done();
+  }
+  bool done() const override {
+    return m_built.load(std::memory_order_acquire) || m_failed.load(std::memory_order_acquire) ||
+           m_cancelled.load();
+  }
+  void cancel() override { m_cancelled = true; }
+  bool cancelled() const override { return m_cancelled.load(); }
+  const char *phase() const override { return m_phase.load(); }
+  double progress() const override { return m_progress.load(); }
+  std::string status() const override { return built() ? "built" : "building"; }
+  bool built() const { return m_built.load(std::memory_order_acquire); }
+  bool failed() const { return m_failed.load(std::memory_order_acquire); }
+
+private:
+  std::shared_ptr<cvc::world::cloud_layer::deck_job> m_job;
+  std::atomic<const char *> m_phase{"grow"};
+  std::atomic<double> m_progress{0.0};
+  std::atomic<bool> m_built{false}, m_failed{false}, m_cancelled{false};
+};
+
 struct SkyRT {
   cvc::app *app = nullptr;
+  std::string id;
   std::unique_ptr<cvc::world::cloud_layer> layer;
   std::string driftKey, morphKey, shadowKey, evolveKey, oroKey;
   // F1, the live sky: coverage and the wind's heading (sky.*), and the sun: the light rig's key
@@ -768,11 +811,13 @@ struct SkyRT {
   std::vector<cvc::world::storm_disc> storms; // ...and what they said
   double darkness = 0.0;
   // The deck the props built (the cumulus's): its depth, layers and far slices. A deeper deck is
-  // a storm deck, built off the frame (deckJob, on its own thread) and swapped in when done.
+  // a storm deck, built off the frame (deckTask, a sliced task) and swapped in when done.
   double fairDepth = 0.0;
   int fairNz = SKY_NZ, fairLayers = 10;
   std::shared_ptr<cvc::world::cloud_layer::deck_job> deckJob;
-  std::future<void> deckDone;
+  std::shared_ptr<DeckTask> deckTask;
+  int deckPid = -1;
+  cvc::sliced_threading deckThreading = cvc::sliced_threading::automatic;
   double unit0 = 1.0, unit = 1.0; // the near volumes' opacity unit, built and now (skyTransfer)
   std::vector<std::string>
       receivers; // the nodes whose meshes (and their children's) take the shade
@@ -1154,7 +1199,8 @@ bool stepComposite(Composite &c, long f, double morph, bool now, std::size_t cel
 // starts the shade off), wind_az (the heading the wind blows toward, degrees as sun_az: 90, the
 // default, is +x), evolve (the weather's rate: 0 holds the clouds where they are), orographic (how
 // strongly windward flanks gather cloud: 0 none, 1 the default), fade (seconds a cloud takes to
-// come or go) and darkness (0..1, the ramp's storm end; live: sky.darkness).
+// come or go), darkness (0..1, the ramp's storm end; live: sky.darkness) and deck_threading (how a
+// storm deck is built off the frame: automatic, cooperative or threaded).
 // Live keys besides the props' (F1, F2): sky.coverage, sky.wind_az, sky.base / sky.top (a deck
 // deeper than the props' is a storm deck of cumulonimbus, built off the frame), sky.darkness and
 // sky.storms (storm discs, "x y r intensity; ...", which a weather node writes).
@@ -1164,6 +1210,14 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
   auto rt = std::make_shared<SkyRT>();
   cvc::app &app0 = sg.appContext();
   rt->app = &app0;
+  rt->id = n.id;
+  // How a storm deck is built off the frame (a sliced task): automatic (on the pool where there
+  // are threads, else a share a frame), cooperative (always a share a frame, as single-threaded
+  // wasm builds it) or threaded.
+  if (const std::string t = n.props.str("deck_threading"); t == "cooperative")
+    rt->deckThreading = cvc::sliced_threading::cooperative;
+  else if (t == "threaded")
+    rt->deckThreading = cvc::sliced_threading::threaded;
   const std::string ground = n.props.str("ground").empty() ? "terrain" : n.props.str("ground");
   if (const auto it = out.height_fields.find(ground); it != out.height_fields.end())
     rt->ground = it->second;
@@ -1365,10 +1419,10 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
         r.fresh = true;
       }
     }
-    // F2: the storms over the deck and its darkness, live; a new deck's heights are built on a
-    // thread of their own and swapped in when done (the near volumes re-boxed, the shade and the
-    // far clouds re-composited at once). A storm deck is a deeper deck: more layers for its
-    // towers, more far slices.
+    // F2: the storms over the deck and its darkness, live; a new deck's heights are built as a
+    // sliced task (on the pool, or a share a frame where there are no threads) and swapped in when
+    // done (the near volumes re-boxed, the shade and the far clouds re-composited at once). A
+    // storm deck is a deeper deck: more layers for its towers, more far slices.
     {
       const std::string text = ari::read_or<std::string>(app, r.stormsKey, std::string());
       if (text != r.stormsText) {
@@ -1380,21 +1434,17 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
         }
       }
       r.darkness = std::clamp(read_key(app, r.darkKey, 0.0), 0.0, 1.0);
-      if (r.deckJob && r.deckDone.valid() &&
-          r.deckDone.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-        bool built = true;
-        try {
-          r.deckDone.get();
-        } catch (const std::exception &e) {
-          built = false;
-          app.log(1, std::string("ari: cloud_sky: a new deck failed: ") + e.what() + "\n");
-        }
-        if (built && L.adopt_deck(*r.deckJob)) {
+      if (r.deckTask && r.deckTask->done()) {
+        if (r.deckTask->failed())
+          app.log(1, "ari: cloud_sky '" + r.id + "': a new deck failed to build\n");
+        if (r.deckTask->built() && L.adopt_deck(*r.deckJob)) {
           reboxNear(r, app);
           r.fresh = true;
           r.shade.phase = r.far.phase = 0;
         }
+        r.deckTask.reset();
         r.deckJob.reset();
+        r.deckPid = -1;
       }
       const double base = read_key(app, r.baseKey, L.params().base);
       const double top = std::max(base + 1.0, read_key(app, r.topKey, L.params().top));
@@ -1408,8 +1458,19 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
                                             r.fairLayers, MAX_DECK_LAYERS)
                                : r.fairLayers;
         r.deckJob = L.prepare_deck(base, top, nz, layers);
-        auto job = r.deckJob;
-        r.deckDone = std::async(std::launch::async, [job] { cvc::world::cloud_layer::run(*job); });
+        r.deckTask = std::make_shared<DeckTask>(r.deckJob);
+        cvc::sliced_task_options o;
+        o.kind = "cloud_sky";
+        o.subject = "deck " + r.id;
+        o.owner = "cloud_sky:" + r.id;
+        o.threading = r.deckThreading;
+        std::string why;
+        r.deckPid = cvc::schedule_sliced_job(app, r.deckTask, o, &why);
+        if (r.deckPid < 0) { // no scheduler to run it on: build it now (bounded), adopt it next
+          app.log(1,
+                  "ari: cloud_sky '" + r.id + "': building the deck in the frame (" + why + ")\n");
+          r.deckTask->step(0);
+        }
       }
     }
     const double ds = dt * CLOUD_DRIFT * read_key(app, r.driftKey, 1.0);
