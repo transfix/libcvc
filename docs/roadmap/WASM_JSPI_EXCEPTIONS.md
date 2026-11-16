@@ -55,14 +55,14 @@ destructor in C++, and a C++ `main` that catches.
 So the packages that use JS exceptions or JS longjmp move in one step with every consumer that
 links them. Packages that use neither link with both sides, so they can be rebuilt on any schedule.
 
-**Which packages use them.** Of the 301 archives `ariglx-web` links (its `w5pil-wasm-deps` prefix),
-12 have members that do (llvm-nm):
-- JS longjmp: libpng and libpng16, freetype, libtiff, libturbojpeg, VTK's `vtkpng` and `IOImage`,
-  and boost's three test libraries;
-- JS exceptions: ImageMagick's MagickCore (which also uses JS longjmp), and VTK's `CommonMisc`.
+**Which packages use them.** JX1's pack gate checked the latest wasm and wasm-mt bundle of every
+component on cvcpkg.org, 126 bundles. 16 components have JS-exception or JS-longjmp objects:
+- JS longjmp: boost (its test libraries), freetype, libjpeg-turbo, libpng, lua, qhull and tiff;
+- JS exceptions: datachannel-wasm, and mujoco and mujoco3 (as LTO bitcode);
+- both: imagemagick, qt6 and vtk;
+- libcvc's own: libcvc, cvcgl and pycvc-gl-cp312.
 
-`libpython3.12.a`, numpy and the rest use neither. Outside that prefix, the only recipe that asks
-for JS exceptions itself is `datachannel-wasm`, plus `pillow-cp312`'s test harness.
+python312, numpy, vtk-python-cp312 and the rest use neither.
 
 **Browsers.** All three engines ship JSPI:
 - Chrome since 137 (May 2025);
@@ -76,31 +76,41 @@ needs (JX4), not a fallback.
 
 | Phase | What | Needs | Size |
 |---|---|---|---|
-| JX1 | cvcpkg: `-fwasm-exceptions` in `_common/env-wasm.sh`, the pack gate, and every wasm recipe rebuilt to the dev catalog | — | M |
+| JX1 | cvcpkg: `-fwasm-exceptions` in `_common/env-wasm.sh`, the pack gate, and the 13 recipes that need it rebuilt to the dev catalog (cy-pca/cvcpkg PR, open until JX4) | — | M |
 | JX2 | libcvc: `-fwasm-exceptions`, every host on `-sJSPI`, the suspension audit, and tests on a node with JSPI | JX1 on dev | M |
 | JX3 | Guests on JSPI: the gas pass without Asyncify, and `browser_runtime.cpp` with a suspending `ari.gas` | JX2 | S |
 | JX4 | The switch: JX1 to prod, JX2 and JX3 merged, consumers moved the same day, and the browser gate | JX1-JX3 | S |
 
 ### JX1: cvcpkg
 
-- **`recipes/_common/env-wasm.sh`.** Add `-fwasm-exceptions` to `CFLAGS`, `CXXFLAGS` and `LDFLAGS`,
-  for wasm and wasm-mt alike, the way `CVC_WASM_THREADS=1` adds `-pthread`.
+- **`recipes/_common/env-wasm.sh` and `env-wasm.ps1`** export `EMCC_CFLAGS=-fwasm-exceptions`, for
+  wasm and wasm-mt alike. emcc adds it to every compile and link (emsdk 5.0.7, `emcc.py:194`).
   - For C, it makes `setjmp` use wasm longjmp. For C++, a package can throw and catch, with its
     destructors run.
+  - Not `CFLAGS`: several recipes build native host tools from the same environment (CPython's
+    build Python, protoc), and gcc rejects the flag. emcc keeps `EMCC_CFLAGS` out of its own system
+    libraries (`system_libs.py:89-95`).
+  - A package's own `-fexceptions` loses to it: the object comes out with wasm exceptions. Its own
+    `-fno-exceptions` wins, which links either way. Its own `-sDISABLE_EXCEPTION_CATCHING=0` is an
+    error, which the dev rebuild shows.
   - wasi keeps `env-wasi.sh` as it is.
 - **The recipes' own `-fexceptions` goes:** `datachannel-wasm/build-wasm.sh:15`, and
   `pillow-cp312/build-wasm.sh:173,186`.
-- **A pack gate.** Refuse a wasm or wasm-mt archive any of whose members leaves undefined
-  `emscripten_longjmp`, `__resumeException`, `__cxa_find_matching_catch_*` or `invoke_*`. That
-  catches a build script that drops the flags (CPython's configure, a hand-written Makefile).
-  - The check is the same llvm-nm scan as above, beside `check_declared_files`.
-- **Rebuild.** Bump every wasm recipe's `cvc_revision`. Changing `_common` re-keys every recipe's
-  cache anyway (`chain_hash`).
-  - Populate with `platforms=wasm,wasm-mt` only, so no native bundle is rebuilt, as libpng's
-    Windows row skipped cvc.4 and cvc.5.
-  - The latest bundles of both flavours total about 1 GiB (528 MiB wasm across 75 components,
-    548 MiB wasm-mt across 51), against the org's 30 GiB.
-  - VTK and vtk-python take longest: over 90 minutes a flavour on the fleet.
+- **A pack gate** (`cvcpkg.wasm_eh`) refuses a wasm or wasm-mt bundle with a member that imports
+  `emscripten_longjmp`, `__resumeException`, `__cxa_find_matching_catch_*` or `invoke_*`.
+  - It reads the wasm import sections itself, with no llvm-nm.
+  - For LTO bitcode it checks the C++ personality: `__gxx_personality_v0` is JS exception IR. setjmp
+    in bitcode is lowered at the consumer's link, so that part doesn't matter.
+  - It catches a build script that drops `EMCC_CFLAGS`.
+- **Rebuild only the 13 recipes that need it** (section 2's list, less libcvc's own): bump their
+  `cvc_revision`.
+  - Every other recipe's wasm objects link either way and pick the flag up at their next bump.
+  - A bump also opens a gap in every native column, which a default populate would fill. So
+    populate with `platforms=wasm,wasm-mt` only.
+  - VTK takes longest: over 90 minutes a flavour on the fleet.
+- **The PR stays open until JX4.** Once the flag is on master, the next prod populate publishes
+  wasm-exception bundles that today's libcvc can't link. And the gate would fail every wasm pack
+  of a package that hasn't been rebuilt. Dev rebuilds run from the PR's branch.
 - **Rust.** Rust recipes already use wasm exceptions (Rust 1.93 and later), so nothing changes
   there.
 - **Encoding.** Keep Emscripten's default `WASM_LEGACY_EXCEPTIONS`. Every browser with JSPI also has
@@ -160,7 +170,7 @@ needs (JX4), not a fallback.
 ### JX4: the switch
 
 - **Publish and merge on one day.**
-  1. Promote JX1's packages to prod in one populate.
+  1. Merge JX1's cvcpkg PR, and populate prod from master with `platforms=wasm,wasm-mt`.
   2. Merge JX2 and JX3 right after. Between the two, libcvc master's wasm CI (JS exceptions against
      wasm-longjmp packages) can't link.
   3. Release libcvc's wasm packages (ari-web, arigl-web, pycvc-gl, libcvc wasm and wasm-mt) on
@@ -183,5 +193,6 @@ needs (JX4), not a fallback.
   SuspendError, not at link. Each host's smoke has to reach every suspension site.
 - **The wasm-mt flavour.** JSPI with `-pthread` links (the table), but no threaded host has run on
   it yet.
-- **Not checked:** a full scan of every wasm bundle on the catalog. The scan above covers
-  `ariglx-web`'s prefix only. JX1's pack gate checks the rest as they rebuild.
+- **The dev rebuild is the first build of these 13 recipes with the flag** on the fleet's Linux
+  hosts. Locally, only libjpeg-turbo was built (Windows host, `build-wasm.ps1`). It came out with
+  wasm longjmp and packed, while its published cvc.3 objects are refused.
