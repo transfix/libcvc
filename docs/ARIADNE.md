@@ -4050,7 +4050,25 @@ stream and media verbs, and the `stream_view` widget (ImGui in a window, the ter
 with `--terminal`). In both modes it routes OS signals to `on_signal:` and exits 128 + N
 for one the document does not handle. A snapshot's frames run at `--fps` (20 by default),
 so a live stream delivers into them; in a window the scene clock is fixed, so its frames
-are reproducible. The cvcGL examples
+are reproducible.
+
+**The camera from the command line.** The main view's camera is state under
+`viewers.main.camera` (`CameraController.h`): `mode` (0 orbit, 1 fly, 2 track, 3 map), the orbit
+pose `orbit.center.x|y|z`, `orbit.distance`, `orbit.azimuth`, `orbit.elevation` (degrees), the fly
+pose `fly.position.x|y|z`, `fly.yaw`, `fly.pitch`, and the chase camera's `track.target` (a scene
+node's id), `track.back`, `track.height`. `--set` writes the `viewers.` keys a second time once the
+document has loaded, after the scene's first framing, so they hold:
+
+```
+arigl snapshot --png lake.png --set viewers.main.camera.orbit.center.x=22 \
+  --set viewers.main.camera.orbit.center.y=180 --set viewers.main.camera.orbit.distance=40 \
+  --set viewers.main.camera.orbit.elevation=15 examples/ariadne/documents/terrain_lab.ari
+arigl snapshot --png crate.png --set viewers.main.camera.mode=2 \
+  --set viewers.main.camera.track.target=crate_b --set viewers.main.camera.track.back=14 \
+  --set viewers.main.camera.track.height=5 examples/ariadne/documents/terrain_lab.ari
+```
+
+The cvcGL examples
 (`ariadne_hello`, `ariadne_stream`, `ariadne_conference`, `ariadne_terminal`) still build;
 `arigl` is meant to replace them once it does everything they do.
 

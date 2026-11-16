@@ -2330,6 +2330,8 @@ int run_window(const ari::HostOptions &o) {
 #endif
   if (const int status = load_document(rt, o); status >= 0)
     return status;
+  // --set's view keys again: realizing the scene framed the camera over the pose they set.
+  ari::apply_state_sets(app, sg.getStatePrefix(), ari::view_state_sets(o.sets));
   note_misplaced(rt.app_runtime(), o);
 #ifdef CVC_ARIADNE_PYTHON
   return g_python->run_loop(after_load); // the document's python: may not run another inside it
@@ -2441,6 +2443,8 @@ int run_terminal(const ari::HostOptions &o) {
   ari::apply_state_sets(app, prefix, o.sets); // --set: before the nodes seed theirs
   if (const int status = load_document(rt, o); status >= 0)
     return status;
+  // --set's view keys again: realizing the scene framed the camera over the pose they set.
+  ari::apply_state_sets(app, prefix, ari::view_state_sets(o.sets));
   note_misplaced(rt, o);
   if (o.command == "check")
     return rt.exit_code(); // an init: that called (quit code)

@@ -371,7 +371,10 @@ std::string host_flags_help() {
          "  --graphics MODE        images in a terminal: auto, kitty, sixel, iterm, color or mono\n"
          "  --image NAME=FILE      publish FILE's picture as NAME, for image: widgets\n"
          "  --set KEY=VALUE        set the state key KEY (under the document's root) before the\n"
-         "                         document loads (repeatable)\n"
+         "                         document loads (repeatable); keys under viewers. (the camera:\n"
+         "                         viewers.main.camera.orbit.*, .mode, ...) are set again after "
+         "it,\n"
+         "                         over the scene's first framing\n"
          "  --media-play WHEN      video: / audio: play here: auto (not over SSH), always,\n"
          "                         never\n"
          "  --exec-policy P        how the scheduler picks the documents' programs and guests:\n"
@@ -430,6 +433,21 @@ void apply_state_sets(cvc::app &app, const std::string &prefix,
                       const std::vector<std::pair<std::string, std::string>> &sets) {
   for (const auto &[key, value] : sets)
     write<std::string>(app, resolve_bind(prefix, key), value);
+}
+
+std::vector<std::pair<std::string, std::string>>
+view_state_sets(const std::vector<std::pair<std::string, std::string>> &sets) {
+  std::vector<std::pair<std::string, std::string>> out;
+  for (const auto &kv : sets) {
+    const std::string &key = kv.first;
+    const bool relative = key.rfind("viewers.", 0) == 0;
+    const bool absolute =
+        !key.empty() && key[0] == '/' &&
+        (key.rfind("/viewers.", 0) == 0 || key.find(".viewers.") != std::string::npos);
+    if (relative || absolute)
+      out.push_back(kv);
+  }
+  return out;
 }
 
 void apply_exec_policy(cvc::app &app, const HostOptions &o) {
