@@ -834,6 +834,9 @@ target_link_libraries(ariadne_chart_test
 # Three tests load GL-free documents from the repo's examples/ tree.
 target_compile_definitions(ariadne_ftxui_test PRIVATE
   CVC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../examples")
+# ariadne_scene_world_test runs terrain_lab.ari's world headless (its boat on the lake).
+target_compile_definitions(ariadne_scene_world_test PRIVATE
+  CVC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../examples")
 # room_scene_test pins the stock world documents to their C++ twins.
 target_compile_definitions(room_scene_test PRIVATE
   CVC_ARIADNE_WORLDS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../ariadne/worlds")

@@ -1661,6 +1661,7 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
       if (out.world->vehicles())
         out.world->vehicles()->set_intents_key(
             cvc::ariadne::resolve_bind(bind_prefix, scene.vehicle_intents));
+      out.world->bind_boats(scene, bind_prefix, warnings); // boat nodes: their boats run here
     }
     if (out.physics)
       out.clock.present = true;

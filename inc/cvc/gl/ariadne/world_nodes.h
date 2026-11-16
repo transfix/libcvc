@@ -73,6 +73,11 @@ void register_world_node_types(cvc::app &app);
 // calls it.
 void register_water_node_types(cvc::app &app);
 
+// Register the boat scene node type on `app` (boat_node.cpp: a boat's hull drawn at its pose, the
+// boat run by the scene's world, scene_boat.h; OCEAN-AND-WEATHER-ROADMAP.md D6). Idempotent; the
+// cvcGL extension bundle calls it.
+void register_boat_node_types(cvc::app &app);
+
 } // namespace ariadne
 } // namespace gl
 } // namespace cvc

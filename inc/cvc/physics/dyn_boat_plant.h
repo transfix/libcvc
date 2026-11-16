@@ -172,6 +172,12 @@ public:
   // top speed (no more than lateral_g) and the hull's outline about its origin.
   cvc::nav::plant_limits limits(int i) const override;
   void command(int i, float steer, float accel) override;
+  // A helm of agent i's own in place of nav's: its controls held (world::set_boat_controls) from
+  // the next world step until release_controls(i), whatever nav commands. The books go on. Throws
+  // cvc::physics_error for a throttle or rudder outside [-1, 1].
+  void hold_controls(int i, const boat_controls &c);
+  void release_controls(int i);
+  bool held(int i) const { return _agents.at(static_cast<std::size_t>(i)).hold; }
   void advance() override;
   int reference_substeps() const override { return _nsub; }
   // The drive energy of agent i's last tick (J): what its thrust delivered through the water.
@@ -270,6 +276,8 @@ private:
     double steer_cmd = 0.0;                           // rad
     double accel_cmd = 0.0;                           // m/s^2 along the heading
     driver_state driver;
+    bool hold = false; // hold_controls: `helm` in place of nav's command
+    boat_controls helm;
     double kinetic0 = 0.0;
     dyn_boat_books tick, total;
     int statics_tick = 0;

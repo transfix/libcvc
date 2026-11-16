@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/scene_boat.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/world_rules.h>
 #include <cvc/ariadne/world_vehicles.h>
@@ -32,6 +33,7 @@
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/ariadne/extensions.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/vehicle_view.h>
 #include <cvc/gl/ariadne/world_nodes.h>
@@ -943,6 +945,131 @@ void test_every_plant_headless_and_drawn() {
   }
 }
 
+// The boat node (OCEAN-AND-WEATHER-ROADMAP.md D6) and the boats drawn (D5): a launch on a lake (a
+// bowl under a water node at -1 m) drawn with its hull at its boat's pose once the boat is in the
+// world, its helm keys moving it; the water's shaders told to keep out of its hull; and a boat
+// world vehicle drawn with its hull, not the chassis box stand-in.
+void test_boats_drawn() {
+  cvc::app app;
+  std::printf("test_boats_drawn\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt)) {
+    std::printf("  skipped: no Jolt in this build\n");
+    return;
+  }
+  cvc::gl::ariadne::register_cvcgl_extensions(app);
+  cvc::ariadne::register_world_block(app);
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(app, R"(
+meta: { min_libcvc: "0.0.0" }
+world:
+  vehicles:
+    archetypes:
+      launch: { plant: dynamicboat:launch, controllers: [none] }
+scene:
+  physics: {}
+  world: { source: lake, cell: 2 }
+  nodes:
+    - node: terrain
+      world: lake
+      source:
+        heightfield:
+          size: 300
+          resolution: 151
+          layers:
+            - { kind: dome, amplitude: -6, radius: 40 }
+      body: static
+    - node: water
+      type: water
+      ground: terrain
+      level: -1
+      wind_speed: 0.5
+      wave_amp: 0.1
+      body: {}
+    - node: skiff
+      type: boat
+      water: water
+      preset: launch
+      transform: { position: [-30, 0, 0] }
+)");
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  cvc::ariadne::world_rules rules = cvc::ariadne::default_world_rules();
+  CHECK(cvc::ariadne::parse_world_block(*cvc::ariadne::find_world_block(r), rules).empty());
+  r.scene.vehicles = rules.vehicles;
+  r.scene.spawns = rules.spawns;
+  SceneGraph sg(app);
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &warnings);
+  for (const std::string &w : warnings)
+    std::printf("  warning: %s\n", w.c_str());
+  CHECK(out.world != nullptr);
+  if (!out.world)
+    return;
+  std::shared_ptr<cvc::gl::GraphicsNode> boat = sg.getGraphics("skiff");
+  CHECK(boat != nullptr);
+  auto hull =
+      boat ? std::dynamic_pointer_cast<cvc::gl::GeometryNode>(boat->findChildByName("skiff_hull"))
+           : nullptr;
+  CHECK(hull != nullptr && hull->getGeometry() && hull->getGeometry()->num_points() == 484);
+  for (int i = 0; i < 30; ++i)
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  cvc::ariadne::BoatRuntime *b = out.world->boat("skiff");
+  CHECK(b != nullptr && b->placed());
+  if (!b || !b->placed() || !boat)
+    return;
+  CHECK(boat->isVisible());
+  CHECK(out.physics_binding->bound(b->hull()));
+  const cvc::physics::boat_state s0 = b->state();
+  const vtkMatrix4x4 *m = boat->getTransform();
+  CHECK(near(m->GetElement(0, 3), s0.body.position.x, 0.05));
+  CHECK(near(m->GetElement(2, 3), -1.0 + 0.15, 0.1)); // afloat at its draft
+  // Its helm: ahead and left.
+  cvc::state &st = cvc::state::instance(app);
+  st("skiff.throttle").value(1.0);
+  st("skiff.rudder").value(0.5);
+  for (int i = 0; i < 300; ++i)
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  const cvc::physics::boat_state s1 = b->state();
+  std::printf(
+      "  the helm moved it %.1f m and turned it %.2f rad\n",
+      std::hypot(s1.body.position.x - s0.body.position.x, s1.body.position.y - s0.body.position.y),
+      s1.heading - s0.heading);
+  CHECK(std::hypot(s1.body.position.x - s0.body.position.x,
+                   s1.body.position.y - s0.body.position.y) > 5.0);
+  CHECK(s1.heading - s0.heading > 0.1);
+  CHECK(near(boat->getTransform()->GetElement(0, 3), s1.body.position.x, 0.5));
+  // The water keeps out of its hull: its half length and beam, about where it is.
+  std::shared_ptr<cvc::gl::GraphicsNode> water = sg.getGraphics("water");
+  auto far = water ? std::dynamic_pointer_cast<cvc::gl::GeometryNode>(water->findChildByName("far"))
+                   : nullptr;
+  std::array<float, 3> p{}, e{};
+  CHECK(far && far->shaderUniform3f("uHullP0", p) && far->shaderUniform3f("uHullE0", e));
+  CHECK(near(e[0], 2.0, 1e-6) && near(e[1], 0.75, 1e-6));
+  CHECK(near(p[0], s1.body.position.x, 0.5) && near(p[1], s1.body.position.y, 0.5));
+  // between its bottom and its sheer, its waterline (the level, -1 m) in between
+  float bottom = 0.0f;
+  CHECK(far && far->shaderUniformf("uHullB0", bottom));
+  CHECK(near(e[2] - bottom, b->sheer() - b->bottom(), 0.05) && bottom < -1.0f && e[2] > -1.0f);
+  std::array<float, 3> e1{};
+  CHECK(far && far->shaderUniform3f("uHullE1", e1) && e1[0] == 0.0f); // no second boat yet
+  // A boat world vehicle: drawn with its hull, and the water keeps out of it too.
+  st("vehicles.selected").value(std::string("launch"));
+  st("vehicles.spawn.controller").value(std::string("none"));
+  st("vehicles.spawn.at").value("20,0,0");
+  st("vehicles.spawn.request").value("1");
+  for (int i = 0; i < 30; ++i)
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  CHECK(out.world->vehicles() && out.world->vehicles()->size() == 1);
+  std::shared_ptr<cvc::gl::GraphicsNode> v = sg.getGraphics("vehicle_1");
+  CHECK(v != nullptr && v->findChildByName("vehicle_1_hull") != nullptr);
+  CHECK(v != nullptr && v->findChildByName("vehicle_1_wheel0") == nullptr); // no box look's wheels
+  CHECK(far && far->shaderUniform3f("uHullE1", e1) && near(e1[0], 2.0, 1e-6));
+}
+
 int main() {
   test_crate_lands_on_the_drawn_ground();
   test_null_backend_places_and_holds();
@@ -954,6 +1081,7 @@ int main() {
   test_vehicles_drawn();
   test_vehicle_intents_headless_and_drawn();
   test_every_plant_headless_and_drawn();
+  test_boats_drawn();
   if (g_failures) {
     std::printf("cvcgl_ariadne_physics: %d FAILURE(S)\n", g_failures);
     return 1;

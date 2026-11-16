@@ -42,6 +42,8 @@ customs:
     required: true
   - node: water
     required: true
+  - node: boat
+    required: true
 
 import:
   - cvc://components/world_controls.ari
@@ -50,6 +52,7 @@ import:
   - cvc://components/sim_transport.ari
   - cvc://components/sky_controls.ari
   - cvc://components/water_controls.ari
+  - cvc://components/boat_controls.ari
 
 # Only the Terrain Lab panel opens at first, so the world fills the view; Settings opens the rest.
 init: |
@@ -58,6 +61,7 @@ init: |
   (state-set "tree.sim_transport.open" "0")
   (state-set "tree.sky_controls.open" "0")
   (state-set "tree.water_controls.open" "0")
+  (state-set "tree.boat_controls.open" "0")
 
 menubar:
   - menu: Sim
@@ -79,6 +83,8 @@ menubar:
         bind: tree.sky_controls.open
       - menu_item: Water
         bind: tree.water_controls.open
+      - menu_item: Launch
+        bind: tree.boat_controls.open
 
 windows:
   - include: world_controls
@@ -104,6 +110,11 @@ windows:
   - include: water_controls
     pos: [754, 196]
     size: [370, 345]
+    closable: true
+  - include: boat_controls
+    args: { keys: launch, title: Launch }
+    pos: [754, 550]
+    size: [370, 300]
     closable: true
 
 scene:
@@ -192,6 +203,15 @@ scene:
       transform: { position: [14, 188, 10] }
       material: { color: [0.68, 0.48, 0.26] }
       body: { density: 400 }
+    # A launch on the lake beside the crates (a 4 m box hull with a shaft propeller and a rudder),
+    # afloat on the water node's sea. Settings > Launch is its helm: Drive keys and the Throttle and
+    # Rudder sliders (launch.throttle, launch.rudder), or Drive nav to its goal (launch.goal).
+    - node: launch
+      type: boat
+      water: water
+      preset: launch
+      transform: { position: [0, 170, 0] }
+      goal: [40, 150]
     # The clouds: a deck of L-system cumulus scattered over the whole world, drifting and slowly
     # changing shape. The ones near the camera are volumes, the rest one coarse sliced volume.
     # Their shade dims the sun on the ground, the buildings, the roads and the trees; it is drawn

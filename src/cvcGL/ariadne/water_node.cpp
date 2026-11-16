@@ -79,9 +79,11 @@
 #include <cmath>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/scene_boat.h>            // the boats the water keeps out of
 #include <cvc/ariadne/scene_generated_world.h> // SceneColliders
 #include <cvc/ariadne/scene_water.h>           // its physics (WaterRuntime) and coast
 #include <cvc/ariadne/scene_world.h>
+#include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/geometry.h>
@@ -316,11 +318,33 @@ const char *const kWaterFsDec =
     "uniform highp vec3 uCamPos; uniform highp vec3 uSunDir;\n"
     "uniform highp float uFoamBias; uniform highp float uFoamRamp; uniform highp float uFoamFray;\n"
     "uniform highp float uShore; uniform highp float uTime;\n"
-    "uniform highp vec3 uCutMin; uniform highp vec3 uCutMax;\n"    // the far grid gives way inside
-                                                                   // the near one
-    "uniform highp vec3 uClipMin; uniform highp vec3 uClipMax;\n"; // no water past the world,
-                                                                   // unless its rim is sea
+    "uniform highp vec3 uCutMin; uniform highp vec3 uCutMax;\n"   // the far grid gives way inside
+                                                                  // the near one
+    "uniform highp vec3 uClipMin; uniform highp vec3 uClipMax;\n" // no water past the world,
+                                                                  // unless its rim is sea
+    // Up to four hulls the water stays out of (D5): each its origin and heading (x, y, yaw), its
+    // half length, half beam and sheer's height, and its bottom's height (none while the half
+    // length is 0). Uniforms, not a texture: a WebGL2 draw has 16 texture units and the water
+    // already binds 11-12.
+    "uniform highp vec3 uHullP0; uniform highp vec3 uHullP1; uniform highp vec3 uHullP2;\n"
+    "uniform highp vec3 uHullP3;\n"
+    "uniform highp vec3 uHullE0; uniform highp vec3 uHullE1; uniform highp vec3 uHullE2;\n"
+    "uniform highp vec3 uHullE3;\n"
+    "uniform highp float uHullB0; uniform highp float uHullB1; uniform highp float uHullB2;\n"
+    "uniform highp float uHullB3;\n";
 const char *const kWaterFsFuncs =
+    // Inside a hull's footprint (its box about its origin, turned to its heading), under its
+    // sheer and over its bottom: water a boat holds out. Green water over the sheer still shows,
+    // and so does a trough under its bottom (a hull bridges the waves shorter than it is).
+    "bool wHull1(vec3 p, vec3 c, vec3 e, float b){\n"
+    "  if (e.x <= 0.0) return false;\n"
+    "  vec2 d = p.xy - c.xy; float ch = cos(c.z), sh = sin(c.z);\n"
+    "  return abs(d.x*ch + d.y*sh) < e.x && abs(d.y*ch - d.x*sh) < e.y && p.z < e.z && p.z > b;\n"
+    "}\n"
+    "bool wInHull(vec3 p){\n"
+    "  return wHull1(p, uHullP0, uHullE0, uHullB0) || wHull1(p, uHullP1, uHullE1, uHullB1) ||\n"
+    "         wHull1(p, uHullP2, uHullE2, uHullB2) || wHull1(p, uHullP3, uHullE3, uHullB3);\n"
+    "}\n"
     "float whash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }\n"
     "float wnoise(vec2 p){\n"
     "  vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);\n"
@@ -354,6 +378,7 @@ const char *const kWaterFsLight =
     "discard;\n"
     "  if (all(greaterThan(vWaterRest, uCutMin.xy)) && all(lessThan(vWaterRest, uCutMax.xy))) "
     "discard;\n"
+    "  if (wInHull(vWaterPos)) discard;\n"
     "  vec3 N = normalize(vWaterN);\n"
     "  if (uWaves < 0.5) N = wFarNormal(vWaterRest, length(uCamPos.xy - vWaterRest));\n"
     // the wake's slope adds to the sea's (both as -dz/dx, -dz/dy over z of the normal)
@@ -520,6 +545,7 @@ struct WaterRT {
   std::vector<double> lastSea; // the wind keys h0 was built for
   bool ready = false, failed = false;
   double level = 0.0, nearHalf = 192.0, cell = 2.0;
+  std::size_t hulls = 0;     // the hulls the water keeps out of this frame (tick_hulls)
   double cx = 0.0, cy = 0.0; // the near grid's centre (whole cells)
   bool placed = false;
   // Whether each mesh draws in a cloud_sky's shade (the sky wires receivers on its ticks).
@@ -956,6 +982,78 @@ outline_of(WaterRT &rt, const std::shared_ptr<const cvc::physics::body_desc> &d)
   return it->second.second.get();
 }
 
+// The hulls the water keeps out of (D5), each frame: the scene's boats (its boat nodes, and its
+// world vehicles on a boat plant) nearest the camera, at most four, each where it is drawn.
+void tick_hulls(WaterRT &rt, vtkRenderer *ren, RealizedScene &scene,
+                const cvc::world_clock::step_result &clock, cvc::app &app) {
+  auto near = rt.near.lock();
+  auto far = rt.far.lock();
+  if (!near || !far)
+    return;
+  struct hull {
+    double d2, x, y, yaw, hl, hb, top, bottom;
+  };
+  std::vector<hull> hulls;
+  double cam[3] = {rt.cx, rt.cy, 0.0};
+  if (ren)
+    if (vtkCamera *c = ren->GetActiveCamera())
+      c->GetPosition(cam);
+  const auto yaw_of = [](const cvc::physics::quat &q) {
+    return std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+  };
+  if (scene.world && scene.physics_binding) {
+    cvc::physics::pose_tracker &tracker = scene.physics_binding->tracker();
+    const double a = tracker.alpha(app.world_clock(), clock.alpha);
+    const cvc::physics::world &w = scene.world->world();
+    for (const auto &b : scene.world->boats()) {
+      const cvc::physics::body_id id = b->hull();
+      if (!id.valid() || !w.contains(id))
+        continue;
+      std::optional<cvc::physics::pose> p = tracker.sample_one(id, a);
+      if (!p) {
+        const cvc::physics::body_state st = w.state(id);
+        p = cvc::physics::pose{st.position, st.rotation};
+      }
+      const double dx = p->position.x - cam[0], dy = p->position.y - cam[1];
+      hulls.push_back({dx * dx + dy * dy, p->position.x, p->position.y, yaw_of(p->rotation),
+                       b->half_length(), b->half_beam(), p->position.z + b->sheer(),
+                       p->position.z + b->bottom()});
+    }
+    if (const ari::WorldVehicles *v = scene.world->vehicles())
+      for (const ari::entity_info &e : v->entities()) {
+        if (!e.placed || !ari::vehicle_plant_floats(e.plant))
+          continue;
+        for (const ari::vehicle_archetype &x : v->archetypes())
+          if (x.id == e.spec.archetype) {
+            const cvc::physics::vehicle_desc d = ari::vehicle_desc_of(x, e.spec.mass);
+            const double dx = e.x - cam[0], dy = e.y - cam[1];
+            hulls.push_back({dx * dx + dy * dy, e.x, e.y, e.yaw, d.half_extents.x, d.half_extents.y,
+                             e.z + d.half_extents.z, e.z - d.half_extents.z});
+          }
+      }
+  }
+  std::sort(hulls.begin(), hulls.end(), [](const hull &p, const hull &q) { return p.d2 < q.d2; });
+  rt.hulls = std::min<std::size_t>(hulls.size(), 4);
+  const char *pn[4] = {"uHullP0", "uHullP1", "uHullP2", "uHullP3"};
+  const char *en[4] = {"uHullE0", "uHullE1", "uHullE2", "uHullE3"};
+  const char *bn[4] = {"uHullB0", "uHullB1", "uHullB2", "uHullB3"};
+  for (GeometryNode *g : {near.get(), far.get()})
+    for (std::size_t k = 0; k < 4; ++k) {
+      if (k < hulls.size()) {
+        const hull &h = hulls[k];
+        g->setShaderUniform3f(pn[k], static_cast<float>(h.x), static_cast<float>(h.y),
+                              static_cast<float>(h.yaw));
+        g->setShaderUniform3f(en[k], static_cast<float>(h.hl), static_cast<float>(h.hb),
+                              static_cast<float>(h.top));
+        g->setShaderUniformf(bn[k], static_cast<float>(h.bottom));
+      } else {
+        g->setShaderUniform3f(pn[k], 0.0f, 0.0f, 0.0f);
+        g->setShaderUniform3f(en[k], 0.0f, 0.0f, 0.0f);
+        g->setShaderUniformf(bn[k], 0.0f);
+      }
+    }
+}
+
 // One frame of the wake: place the window at the camera's target, add the moving bodies' sources
 // (each body where it is drawn, in the water physics feels at the time of that pose), step it by
 // the world time since the last frame, and bind it.
@@ -1007,6 +1105,19 @@ void tick_wake(cvc::app &app, WaterRT &rt, vtkRenderer *ren, RealizedScene &scen
           if (!w.contains(b.id))
             continue;
           const cvc::physics::body_state st = w.state(b.id);
+          pose = cvc::physics::pose{st.position, st.rotation};
+        }
+        rt.wakeSrc->add(*o, pose->position, pose->rotation, water);
+      }
+      for (const auto &bt : scene.world->boats()) { // the boat nodes' hulls make waves too
+        const cvc::physics::body_id id = bt->hull();
+        const cvc::physics::immersion_body *o =
+            id.valid() ? outline_of(rt, bt->hull_desc()) : nullptr;
+        if (!o || !w.contains(id))
+          continue;
+        std::optional<cvc::physics::pose> pose = tracker.sample_one(id, a);
+        if (!pose) {
+          const cvc::physics::body_state st = w.state(id);
           pose = cvc::physics::pose{st.position, st.rotation};
         }
         rt.wakeSrc->add(*o, pose->position, pose->rotation, water);
@@ -1343,6 +1454,7 @@ std::shared_ptr<GraphicsNode> realize_water(SceneGraph &sg, const ari::SceneNode
     out.scene_ticks.push_back([ap, rt](vtkRenderer *ren, RealizedScene &scene,
                                        const cvc::world_clock::step_result &clock) {
       tick_wake(*ap, *rt, ren, scene, clock);
+      tick_hulls(*rt, ren, scene, clock, *ap);
     });
   return group;
 }

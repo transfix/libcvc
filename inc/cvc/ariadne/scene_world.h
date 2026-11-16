@@ -104,6 +104,7 @@ struct SceneColliders;
 struct vehicle_archetype;
 struct spawn_rules;
 class WorldVehicles;
+class BoatRuntime;
 
 // Whether a scene has a world to run: a `physics:` block, a `world:` block, or a node (at any
 // depth) with a `body:` or a `world:` (a data node's bodies come with its dataset, so its body
@@ -258,6 +259,16 @@ public:
   // The vehicles (null before bind_vehicles, or without archetypes).
   WorldVehicles *vehicles();
   const WorldVehicles *vehicles() const;
+
+  // Take on the scene's boat nodes (type: boat, at any depth; scene_boat.h): a BoatRuntime each,
+  // its keys under `bind_prefix`. Each boat goes in at a sync() once its water's grid (the water
+  // node's ground's, with the water's depth) is ready and has water where it starts; it steps with
+  // the world. from_scene does this itself; a renderer that build()s the world calls it.
+  void bind_boats(const Scene &scene, const std::string &bind_prefix,
+                  std::vector<std::string> *warnings = nullptr);
+  // The boat nodes' runtimes, in the document's order, and one by its node's id (null for none).
+  const std::vector<std::unique_ptr<BoatRuntime>> &boats() const;
+  BoatRuntime *boat(const std::string &node);
 
   // The warnings follow()'s syncs gathered since the last call.
   std::vector<std::string> take_warnings();
