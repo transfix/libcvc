@@ -27,7 +27,7 @@ endif()
 get_filename_component(_CVCMEDIA_INC "${CMAKE_CURRENT_SOURCE_DIR}/../../inc" ABSOLUTE)
 
 add_library(cvcMedia playback/audio_output.cpp playback/audio_stream_player.cpp
-                     player/ffmpeg_player.cpp)
+                     player/ffmpeg_player.cpp record/video_writer.cpp)
 add_library(cvc::cvcMedia ALIAS cvcMedia)
 set_target_properties(cvcMedia PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(cvcMedia PUBLIC $<BUILD_INTERFACE:${_CVCMEDIA_INC}>
@@ -54,10 +54,12 @@ else()
   message(STATUS "cvcMedia: SDL3 not found -- no audio output (open_audio_output is empty)")
 endif()
 
-# FFmpeg (optional): the decoders behind Ariadne's video: and audio: widgets (cvc/media/player.h).
-# Linked as SHARED libraries only (cvcpkg's ffmpeg-lgpl: LGPL-2.1, decoders only), so the LGPL is
-# kept by dynamic linking. Found through pkg-config (FFmpeg's own .pc files), else by name. Without
-# it the player is absent and the widgets say `unsupported`.
+# FFmpeg (optional): the decoders behind Ariadne's video: and audio: widgets (cvc/media/player.h),
+# and the encoder arigl snapshot --mp4 records with (cvc/media/video_writer.h: H.264 where this
+# FFmpeg has libx264 or libopenh264, else its own MPEG-4 Part 2 encoder). Linked as SHARED
+# libraries only (cvcpkg's ffmpeg-lgpl: LGPL-2.1, no H.264 encoder), so the LGPL is kept by dynamic
+# linking. Found through pkg-config (FFmpeg's own .pc files), else by name. Without it the player
+# is absent and the widgets say `unsupported`, and the video writer needs an ffmpeg program on PATH.
 #
 # An FFmpeg named by CVC_FFMPEG_INCLUDE_DIR and the CVC_FFMPEG_<lib>_LIBRARY paths is used as given:
 # pkg-config is asked only when none is named, so a host FFmpeg's .pc cannot stand in for it.
@@ -115,7 +117,8 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND NOT CVC_MEDIA_NO_I
     RUNTIME DESTINATION bin)
   install(DIRECTORY "${_CVCMEDIA_INC}/cvc/media/playback" DESTINATION include/cvc/media
           FILES_MATCHING PATTERN "*.h")
-  install(FILES "${_CVCMEDIA_INC}/cvc/media/player.h" DESTINATION include/cvc/media)
+  install(FILES "${_CVCMEDIA_INC}/cvc/media/player.h" "${_CVCMEDIA_INC}/cvc/media/video_writer.h"
+          DESTINATION include/cvc/media)
   install(EXPORT cvcMediaTargets NAMESPACE cvc:: FILE cvcMediaTargets.cmake
           DESTINATION lib/cmake/cvcMedia)
   configure_package_config_file("${CMAKE_CURRENT_SOURCE_DIR}/cvcMediaConfig.cmake.in"

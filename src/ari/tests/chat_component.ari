@@ -31,7 +31,7 @@ functions: |
     (set out (list))
     (set start (if (< (length a) 3) (fake-from ch) (+ 1 (int (nth a 2)))))
     (for s (range start (fake-n ch))
-      (append out (dict "seq" s "clock" "12:00" "mine" #f
+      (append out (dict "seq" s "clock" "12:00" "mine" #f "via" ""
                         "name" (state-get (str-concat "fake." (fake-slot ch) "." (str s) ".name"))
                         "text" (state-get (str-concat "fake." (fake-slot ch) "." (str s) ".text")))))
     out)
@@ -50,9 +50,21 @@ functions: |
       (if (= p "") #f
         (append out (dict "peer" p "name" (str-concat "N-" p) "head" (fake-n p) "present" #t))))
     out)
-  (defun room-roster (room)
-    (list (dict "pid" "me" "name" "Me" "video" "full" "video_off" "0" "ping" "5 ms" "down" "1M" "up" "1M")
-          (dict "pid" "bob" "name" "Bob" "video" "half" "video_off" "0" "ping" "9 ms" "down" "2M" "up" "1M")))
+  ; (room-roster ROOM [KIND [LIMIT]]): the participants, or with "bridged" the bridged users at
+  ; fake.bridged (pid:name, comma-separated; LIMIT is not modelled), whose rev is fake.brev
+  (defun room-roster (&rest a)
+    (if (and (> (length a) 1) (= (nth a 1) "bridged"))
+      (begin
+        (set out (list))
+        (for e (string.split (if (is-null (state-get "fake.bridged")) "" (state-get "fake.bridged")) ",")
+          (if (= e "") #f
+            (append out (dict "pid" (nth (string.split e ":") 0) "name" (nth (string.split e ":") 1)
+                              "bridged" "1" "via" "nmdc"))))
+        out)
+      (list (dict "pid" "me" "name" "Me" "video" "full" "video_off" "0" "ping" "5 ms" "down" "1M" "up" "1M")
+            (dict "pid" "bob" "name" "Bob" "video" "half" "video_off" "0" "ping" "9 ms" "down" "2M" "up" "1M"))))
+  (defun room-bridged-rev (room) (fake-num "fake.brev"))
+  (defun room-bridged-count (room) (length (room-roster room "bridged")))
   (defun step () (chat-ui-step "chat" "tok"))
 
 init: |
@@ -148,3 +160,33 @@ tests:
     (room-users-step "peer" "r" "chat")
     (assert (= (state-get "ctl.bob.vol") "0.5") "the volume is parked under the person")
     (assert (= (state-get "peer.0.vol") "0.5") "and given back to the row")
+  bridged_users_get_rows_of_their_own: |
+    (state-set "peer_b.wait" "") ; the rows have not been built for as long as it takes
+    (state-set "fake.bridged" "_nmdc_zed:Zed,_nmdc_ann:Ann")
+    (state-set "fake.brev" "7")
+    (room-users-step "peer" "r" "chat")
+    (assert (= (state-get "peer.count") "1") "the participants' rows (and cameras) are bob's alone")
+    (assert (= (state-get "peer_b.count") "2"))
+    (assert (= (state-get "peer_b.0.pid") "_nmdc_zed"))
+    (assert (= (state-get "peer_b.1.name") "Ann"))
+    (assert (= (state-get "peer_b.1.via") "nmdc"))
+    (assert (= (state-get "peer_b.more") ""))
+    (assert (= (state-get "self.count") "4"))
+  bridged_rows_are_rebuilt_when_the_rev_moves_at_most_every_30_ticks: |
+    (state-set "fake.bridged" "_nmdc_zed:Zed")
+    (state-set "peer_b.wait" "29") ; due, but the rev has not moved
+    (room-users-step "peer" "r" "chat")
+    (assert (= (state-get "peer_b.count") "2") "rebuilt only when the rev moves")
+    (state-set "fake.brev" "8")
+    (state-set "peer_b.wait" "0") ; the rev moved, but the rows were just built
+    (room-users-step "peer" "r" "chat")
+    (assert (= (state-get "peer_b.count") "2") "and at most every 30 ticks")
+    (state-set "peer_b.wait" "29") ; 29 ticks since the rows were built
+    (room-users-step "peer" "r" "chat")
+    (assert (= (state-get "peer_b.count") "1"))
+    (assert (= (state-get "self.count") "3"))
+  a_bridged_line_names_its_system: |
+    (assert (= (chat-ui-line (dict "clock" "12:00" "name" "Zed" "text" "hi" "via" "nmdc"))
+               "[12:00] Zed (nmdc): hi"))
+    (assert (= (chat-ui-line (dict "clock" "12:00" "name" "Bob" "text" "hi" "via" ""))
+               "[12:00] Bob: hi"))

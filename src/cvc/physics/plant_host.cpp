@@ -32,9 +32,11 @@ const detail::key_meta kHostKeys[] = {
     {"vehicle", "knob", "", kNone, kNone,
      "What the agents drive: kinematic (nav's bicycle), a vehicle preset on Jolt (humvee, "
      "roboracer), a comma-separated list of presets cycled over the agents, dynamic / "
-     "dynamic:<presets> for the presets' dynamic single-track model, or dynamic4w / "
-     "dynamic4w:<presets> for their four-wheel model with suspension. The dynamic models drive "
-     "the terrain and, with Jolt, collide with the world. A change rebuilds the plant."},
+     "dynamic:<presets> for the presets' dynamic single-track model, dynamic4w / "
+     "dynamic4w:<presets> for their four-wheel model with suspension, or dynamicboat / "
+     "dynamicboat:<presets> for boats (launch, jonboat) on the host's water. The dynamic models "
+     "drive the terrain and, with Jolt, collide with the world; boats need Jolt. A change "
+     "rebuilds the plant."},
     {"driving", "telemetry", "", kNone, kNone,
      "What the agents drive now: the vehicle asked for, or kinematic for Jolt presets in a build "
      "without Jolt."},
@@ -56,6 +58,7 @@ bool is_kinematic(const std::string &name) {
 
 constexpr const char *kDynamic = "dynamic";
 constexpr const char *kDynamic4w = "dynamic4w";
+constexpr const char *kDynamicBoat = "dynamicboat";
 
 // The presets after "dynamic:" or "dynamic4w:", or the Humvee for either alone.
 std::string dynamic_presets(const std::string &name) {
@@ -63,6 +66,26 @@ std::string dynamic_presets(const std::string &name) {
   const std::string::size_type colon = n.find(':');
   const std::string rest = colon == std::string::npos ? std::string() : trim(n.substr(colon + 1));
   return rest.empty() ? std::string("humvee") : rest;
+}
+
+// The boat presets after "dynamicboat:", or the launch alone.
+std::string boat_presets(const std::string &name) {
+  const std::string n = trim(name);
+  const std::string::size_type colon = n.find(':');
+  const std::string rest = colon == std::string::npos ? std::string() : trim(n.substr(colon + 1));
+  return rest.empty() ? std::string("launch") : rest;
+}
+
+// The boats a preset list names, in order; throws on an unknown one.
+std::vector<dyn_boat_desc> boat_descs_of(const std::string &boats) {
+  std::vector<dyn_boat_desc> out;
+  std::stringstream ss(boats);
+  std::string item;
+  while (std::getline(ss, item, ','))
+    out.push_back(dyn_boat_desc::preset(trim(item)));
+  if (out.empty())
+    throw cvc::physics_error("plant_host: no boat named");
+  return out;
 }
 
 // The presets a vehicle string names, in order; throws on an unknown one.
@@ -90,6 +113,7 @@ plant_host::plant_host(plant_host_options options) : _o(std::move(options)) {}
 
 // The plant goes before its world: it is the world's vehicles' owner of record.
 plant_host::~plant_host() {
+  _boat.reset();
   _dyn4.reset();
   _dyn.reset();
   _plant.reset();
@@ -110,7 +134,14 @@ bool plant_host::is_dynamic4w(const std::string &vehicle) {
   return n == kDynamic4w || n.rfind(std::string(kDynamic4w) + ":", 0) == 0;
 }
 
+bool plant_host::is_dynamic_boat(const std::string &vehicle) {
+  const std::string n = trim(vehicle);
+  return n == kDynamicBoat || n.rfind(std::string(kDynamicBoat) + ":", 0) == 0;
+}
+
 cvc::nav::vehicle_plant *plant_host::active() {
+  if (_boat)
+    return _boat.get();
   if (_dyn4)
     return _dyn4.get();
   if (_dyn)
@@ -120,6 +151,7 @@ cvc::nav::vehicle_plant *plant_host::active() {
 
 void plant_host::drop(cvc::nav::sim_world &sim) {
   sim.set_plant(nullptr);
+  _boat.reset();
   _dyn4.reset();
   _dyn.reset();
   _plant.reset();
@@ -161,11 +193,14 @@ vehicle_desc plant_host::preset(const std::string &name) {
     return vehicle_desc::roboracer();
   throw cvc::physics_error(
       "plant_host: no vehicle preset named '" + name +
-      "' (humvee, roboracer, kinematic, dynamic[:presets] or dynamic4w[:presets])");
+      "' (humvee, roboracer, kinematic, dynamic[:presets], dynamic4w[:presets] or "
+      "dynamicboat[:launch, jonboat])");
 }
 
 void plant_host::check(const std::string &vehicle) {
-  if (is_dynamic(vehicle) || is_dynamic4w(vehicle))
+  if (is_dynamic_boat(vehicle))
+    boat_descs_of(boat_presets(vehicle));
+  else if (is_dynamic(vehicle) || is_dynamic4w(vehicle))
     descs_of(dynamic_presets(vehicle));
   else if (!is_kinematic(vehicle))
     descs_of(vehicle);
@@ -185,6 +220,43 @@ std::string plant_host::use(cvc::nav::sim_world &sim, const std::string &vehicle
   nav_plant_options po = _o.plant;
   if (!_geometry)
     po.ground_z = _o.ground_z;
+  if (is_dynamic_boat(vehicle)) {
+    std::vector<dyn_boat_desc> boats = boat_descs_of(boat_presets(vehicle)); // throws first
+    if (!available()) {
+      drop(sim);
+      _asked = trim(vehicle);
+      _driving = "kinematic";
+      return _driving;
+    }
+    // A world of the geometry (no flat ground: the boats float) and the water, its contacts
+    // every step's.
+    world_config cfg = _o.world;
+    cfg.contacts = contact_reporting::all;
+    auto w = std::make_unique<world>(cfg);
+    if (_geometry)
+      add_world_geometry(*w, *_geometry, 0.005, _nav_materials);
+    if (_water)
+      w->add_field(*_water);
+    dyn_boat_plant_options o;
+    o.plant = po;
+    o.physics = w.get();
+    auto b = std::make_unique<dyn_boat_plant>(std::move(boats), o);
+    drop(sim);
+    _world = std::move(w);
+    _boat = std::move(b);
+    try {
+      sim.set_plant(_boat.get());
+    } catch (...) {
+      // A start with no water under it: back on the bicycle, as a fallback (so pull() does not
+      // try again every call until the knob changes).
+      drop(sim);
+      _asked = trim(vehicle);
+      _driving = "kinematic";
+      throw;
+    }
+    _asked = _driving = trim(vehicle);
+    return _driving;
+  }
   if (is_dynamic(vehicle) || is_dynamic4w(vehicle)) {
     std::vector<vehicle_desc> descs = descs_of(dynamic_presets(vehicle)); // throws first
     // With Jolt, a world the chassis collide in; every step's contacts, since a vehicle pressed
