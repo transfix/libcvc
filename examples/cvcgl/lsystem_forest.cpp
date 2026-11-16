@@ -1281,7 +1281,7 @@ int main(int argc, char **argv) {
   bool uiLighting = true; // the StageLightingPanel window
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
-      cvc_examples::demos_menu("lsystem_forest");
+      cvc_examples::demos_menu(app, "lsystem_forest");
       if (ImGui::BeginMenu("Scene")) {
         // The library's menu: shadows, shadow-map resolution, bake interval and
         // the diagnostic chrome, all read back from the scene rather than from
@@ -1405,7 +1405,7 @@ int main(int argc, char **argv) {
   // capture's fixed 1/fps makes the frames reproducible.
   cvc::world_clock &clock = app.world_clock();
   cvc::world_clock_binding clockDrive(app, clock);
-  while (!view.windowClosed() && !cvc_examples::demo_switch_requested()) {
+  while (!view.windowClosed() && !cvc_examples::demo_switch_requested(app)) {
     double t, dt;
     if (capturing) { // fixed synthetic clock -> real-time playback of the animation
       t = frame / fps;

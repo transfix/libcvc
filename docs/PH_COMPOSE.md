@@ -73,6 +73,52 @@ The residual is not zero for any of these schemes:
 `check_balance` tests the power balance at a state. `check_balance_random` tests it at random
 states.
 
+## States from physical quantities
+
+`storage_from_efforts(s, e)` finds the state whose efforts are `e`, in the readout's order: a
+DGU's voltage and current, a line's current. It works block by block, by Newton with a
+central-difference Jacobian, capping each update at 2 in the infinity norm, for at most 30
+iterations, to a residual of 1e-9. It reports whether it converged, the iterations and the
+residual.
+
+`assign_state(now, x_now, candidate, added)` gives a candidate its start. Each candidate block
+named as a block of the actual system keeps that block's state. Every other block takes its state
+from `added`, by name.
+
+## DC microgrids
+
+`cvc/ph/microgrid.h` builds DC networks from `composite` pieces:
+
+- `linear_dgu(C, L, R)`, `nonlinear_dgu(charge, L, R)` and `reference_dgu()`. A DGU's state is
+  its capacitor charge and inductor flux; its inputs are the current injected at its bus (minus
+  its load) and its source voltage; its one port is its bus voltage. The reference DGU has
+  `q = 2.2 (v + v^3 / 3)` C, `L = 1.8` H and `R = 1.2` ohm.
+- `rl_line(R, L)`.
+- `make_microgrid(dgu, buses, lines)` names the blocks `dgu0..` and `line0..` and wires them by
+  the lines' incidence (`{from, to}`: from is the sending bus).
+- `physical_state(g, x)`, `peak_line_current(g, x)`, and `compare_trajectories(g, a, b)`, which
+  gives voltage, DGU-current and line-current RMSE and the peak line-current error.
+
+**The candidate study** (`ph_microgrid_test`) runs 16 episodes:
+
+1. A four-DGU chain of reference DGUs (lines 0.3 / 0.4 / 0.5 ohm, 0.8 H) starts from a sampled
+   physical state: bus voltage 0.5-1.3 V, DGU current -0.25-0.35 A, line current -0.1-0.1 A,
+   loads 0.05-0.2 A, sources 0.9-1.2 V.
+2. It runs for one second.
+3. The same DGU law and a 0.4 ohm / 0.8 H line are added at bus 0 or at bus 2, with the added
+   blocks' states supplied.
+4. Each candidate runs 200 steps of 0.01 s against RK4 at dt / 16.
+
+The laws are known, so these errors are the transition's own. Averaged over the 32 trajectories:
+
+| coupling | voltage RMSE | DGU current RMSE | line current RMSE | peak line current error | orderings by peak |
+| --- | --- | --- | --- | --- | --- |
+| Euler | 7.9e-5 V | 2.0e-5 A | 2.0e-4 A | 2.4e-4 A | 16 / 16 |
+| midpoint | 5.1e-7 V | 7.1e-7 A | 2.9e-7 A | 5.7e-8 A | 16 / 16 |
+
+The worst single-step energy residual is 1.2e-5 J with Euler coupling and 1.7e-7 J with
+midpoint coupling.
+
 ## Files
 
 ### `cvc-ph-law/1`
@@ -100,8 +146,11 @@ A canonical law:
  "scheme": "implicit_midpoint"}
 ```
 
-- `potential` is `1/2 (q - center) . K (q - center) + scale * net(q)`. Either part may be
-  left out.
+- `potential` is `1/2 (q - center) . K (q - center) + scale * net(q) + sum_i C(q_i)`. Any part
+  may be left out. `capacitor` gives `C`, a capacitor curve: the charge as an odd increasing
+  polynomial of the voltage, `q = sum_j capacitor[j] v^j` (`capacitor[1] > 0`, odd entries
+  `>= 0`, even entries 0). Its energy has `dC/dq = v`, and `v` is found from `q` by Newton.
+  `[0, c]` is a linear capacitor `c`.
 - `mass` is `diag` (positive constants) or `net` plus `min` (with `min > 0`).
 - `damping` is `diag` or `net` plus `min`. Leaving it out means no damping.
 - A net is a list of dense layers. `W` is `out x in`. `act` is one of `identity`, `silu`,
@@ -134,6 +183,10 @@ stacked in the order given. The coupling types:
 
 A block never pairs with itself (`C_ii = 0`).
 
+`law_json(law)` and `system_json(s)` write these formats. Every number is written to 17 digits,
+each shared law once, and the pairing as `pair` couplings, so a file read back gives the same
+composite.
+
 ## Command line
 
 ```
@@ -144,7 +197,17 @@ cvc ph simulate grid.json --x0 2.2,0,2.6,0,0 --u -0.1,1,-0.15,1.1 --steps 200 \
     [--substeps 2] [--local-substeps 1] [--max-iter 10] [--tol 1e-6] [--csv out.csv]
 ```
 
+```
+cvc ph microgrid grid.json --dgus 4 --edges 0-1,1-2,2-3 --line-r 0.3,0.4,0.5 --line-l 0.8 \
+    [--dgu reference|linear] [--dgu-c 2.2] [--dgu-l 1.8] [--dgu-r 1.2]
+cvc ph simulate grid.json --physical 1,0,1.1,0,0.9,0,1,0,0,0,0 --u -0.1,1,-0.1,1,-0.1,1,-0.1,1
+```
+
 - `check` exits 1 when the pairing does work or `dH/dt` departs from `-loss + supplied`.
+- `microgrid` writes a network of one DGU law on every bus. `--edges` defaults to a chain. Line
+  resistances and inductances take one value or one per line; the last repeats.
+- `--physical` starts from every block's efforts instead of `--x0`: a DGU's voltage and current,
+  a line's current. They are mapped to the state by `storage_from_efforts`.
 - `--u` takes one row of inputs, held over the rollout, or one row per step.
 - `--csv` writes `t`, every coordinate (`<block>.<i>`), `H`, then the step's `supplied`,
   `dissipated` and `residual`.
@@ -159,6 +222,9 @@ r["x"]                                      # (steps + 1, state_dim) float64
 r["residual"]                               # per step
 g.check(200)                                # {"rate_error", "internal_error", "skew_error", ...}
 g.energy(x), g.effort(x), g.field(x, u), g.powers(x, u), g.pairing(), g.block(i)
+g.storage(e)                                # {"x", "converged", "iterations", "residual"}
+g.system_json()                             # the system as cvc-ph-system/1 text
+pycvc.ph_microgrid_json(4, edges=[(0, 1), (1, 2), (2, 3)], line_r=[0.3, 0.4, 0.5], line_l=[0.8])
 ```
 
 ## Parity with the reference implementation

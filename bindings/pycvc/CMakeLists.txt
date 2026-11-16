@@ -338,6 +338,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_contours:test_pycvc_contours.py
              pycvc_point_classes:test_pycvc_point_classes.py
              pycvc_segmentation:test_pycvc_segmentation.py
+             pycvc_volume_slice:test_pycvc_volume_slice.py
              pycvc_image:test_pycvc_image.py
              pycvc_model:test_pycvc_model.py
              pycvc_state:test_pycvc_state.py

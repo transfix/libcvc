@@ -410,10 +410,10 @@ vendored function that logs gets the context passed in, which is a mechanical ch
   pycvc and the vendored libraries, list the writable data symbols: `nm` on Linux, the `.data` /
   `.bss` symbols, including function-local statics and their guard variables. Fail on any that
   is not on the allowlist.
-  - The allowlist holds libcvc's own objects still to move; third-party libraries' statics are
+  - The allowlist holds libcvc's own process-wide objects; third-party libraries' statics are
     left out and only counted. It never gains an entry: CI fails a change that adds one
     (`tools/singleton_scan/ratchet.py`; Joe, 2026-11-11: no singletons in code we control). P0a
-    empties it.
+    takes it down to §9 item 5's list.
   - This catches what a grep misses: a static inside a macro, or a vendored template.
 - **Concurrency tests** (§1.7 T6): two jobs with different parameters on two threads give exactly
   what each gives alone, under the TSan lane (`sanitizers / tsan`).
@@ -1449,6 +1449,10 @@ Most of the GL-viewer work is already on master. What exists, and what is new:
    - Today the only axis-aligned cut is fe_lab's `<id>_slice`, an FE field on tetrahedra.
      `volslice` slices face the camera, which is a different thing.
    - Useful on its own: the classic three-plane orthoslicer next to a `volren`.
+   - *Built in P7:* `cvc::slice_source`, `extract_slice` and `color_slice`
+     (`inc/cvc/volume/volume_slice.h`, with `volume_slice_params`' table; `volume_slice_test` in the
+     ports lane), cvcGL's `VolumeSliceNode` and the `volume_slice` node type
+     (`volume_slice_nodes.h`, in `register_cvcgl_extensions`; `cvcgl_volume_slice`).
 2. **A slice camera mode for the viewport** (`mode: slice`, `axis: x | y | z`, the axis bindable
    to a key so one viewport can follow the view switch): parallel projection looking down the
    axis, no rotation; drag pans, the wheel zooms about the pointer, and double-click refits the
@@ -1472,6 +1476,8 @@ Most of the GL-viewer work is already on master. What exists, and what is new:
    geometry nodes of the slice, with a coincident-topology offset (or a later render layer) so
    they never z-fight the textured quad. `point_size` / `line_width` already exist as override
    fields.
+   - *Built in P7:* a `volume_slice` node's children are its overlays; the quad is pushed back by
+     `slice.overlay_offset` (a relative polygon offset, 2 units by default).
 5. **Widgets the side panel needs** (check each against the backend before planning around it):
    a list bound to a state array with add and remove (the `repeat:` the card component uses), a
    colour picker for a class colour, radio buttons for the tool, and a tab bar or segmented
@@ -1666,3 +1672,22 @@ not as follow-ups.
      duplicated per app), and it is on the list.
    - Writes to the environment or the working directory go wherever an explicit argument can
      replace them.
+
+   **Settled 2026-11-14.** Joe took the recommended option on each of four questions:
+   - Process resources: "Documented list (Recommended)". They are the scan's permanent, documented
+     allowlist, each wrapped so libcvc keeps only a once flag, a lock or a reference count. The
+     two curl once flags are now one. Signal state is one pointer, the route a handler follows to
+     its app; the stop flag and the trapped signals are the app's (`host_signals.h`).
+   - state_exec's 19 built-in exception classes: "Keep, read-only (Recommended)". They stay a
+     built-once, read-only table.
+   - `g_next_serial_run`: "Keep as an ID source (Recommended)". It holds no app state, only a
+     source of unique numbers, and stays as one listed atomic.
+   - Executables: "Only OS-forced globals (Recommended)". An executable keeps a global only where
+     an OS callback needs one, such as a signal handler's. Everything else moves onto the app:
+     the hosts' `g_python` and `g_wasm`, their stop flags, and the examples' globals (the demo
+     menu's state, terrain_lab's extents and building library, the nav city demos' frame state).
+   - The allowlist ends at these entries (`tools/singleton_scan/allowlist.txt` says why each
+     stays), and the ratchet stays.
+   - Still open: the CUDA volume cache is one per app (`raycast_cuda_cache_of(app)`), each block
+     keyed by device, not one per device shared by the apps on it. Sharing it needs an object
+     that owns the device and that the host hands to each app.

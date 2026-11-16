@@ -28,6 +28,12 @@ struct FunctionImport {
 bool function_imports(std::string_view module, std::vector<FunctionImport> &out,
                       std::string &error);
 
+// Whether `module` has a start section (8): a function the runtime runs at instantiation, to its
+// end, on the start's own allowance of gas (kStartGas, meter.h), before the host can slice it. A
+// client's guest may not have one (wasm_engine.h). False, with `error` set, for bytes that aren't a
+// module or a section that runs past the module's end.
+bool has_start(std::string_view module, bool &start, std::string &error);
+
 // A function type as the text format writes it: " (param i32 i32) (result i64)", "" for () -> ().
 std::string type_text(std::string_view params, std::string_view results);
 

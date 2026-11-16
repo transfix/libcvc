@@ -153,6 +153,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/param_dsl.h
   ../../inc/cvc/core/result_job.h
   ../../inc/cvc/core/job_keys.h
+  ../../inc/cvc/core/notify.h
+  ../../inc/cvc/core/server_clock.h
   ../../inc/cvc/core/job_intrinsics.h
   ../../inc/cvc/core/process.h
   ../../inc/cvc/core/text.h
@@ -180,6 +182,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/volume_jobs.h
   ../../inc/cvc/volume/contour_spectrum.h
   ../../inc/cvc/volume/resize_stepper.h
+  ../../inc/cvc/volume/volume_slice.h
   ../../inc/cvc/tf/model.h
   ../../inc/cvc/tf/vinay.h
   ../../inc/cvc/tf/overlays.h
@@ -196,6 +199,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/nav/vehicle_plant.h
   ../../inc/cvc/ph/compose.h
   ../../inc/cvc/ph/mat3.h
+  ../../inc/cvc/ph/microgrid.h
   ../../inc/cvc/ph/optim.h
   ../../inc/cvc/ph/rff.h
   ../../inc/cvc/ph/rng.h
@@ -282,6 +286,7 @@ set(SOURCE_FILES
   core/sliced_task.cpp
   core/param_dsl.cpp
   core/job_keys.cpp
+  core/notify.cpp
   core/job_intrinsics.cpp
   core/process.cpp
   core/text.cpp
@@ -453,6 +458,7 @@ set(SOURCE_FILES
   volume/contour_tree.cpp
   volume/contour_spectrum.cpp
   volume/resize_stepper.cpp
+  volume/volume_slice.cpp
   volume/mesh_contour_tree.cpp
   tf/model.cpp
   tf/vinay.cpp
@@ -488,6 +494,8 @@ set(SOURCE_FILES
   nav/belief_material_controller.cpp
   nav/coph_config.cpp
   nav/coph_ledger.cpp
+  nav/coph_model.cpp
+  nav/coph_allocation.cpp
   nav/sim_world.cpp
   nav/yield.cpp
   nav/sim_world_binding.cpp
@@ -498,6 +506,7 @@ set(SOURCE_FILES
   nav/rollout_plant.cpp
   nav/dyn4_ledger.cpp
   ph/compose.cpp
+  ph/microgrid.cpp
   ph/se2_data.cpp
   ph/se2_model.cpp
   ph/se2_train.cpp
@@ -655,10 +664,10 @@ endforeach()
 # this one gets the explicit flag (the CPU analog of the nav .cu precise-math
 # properties below).
 if(NOT MSVC)
-  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp nav/coph_model.cpp nav/coph_allocation.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
-  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp nav/coph_model.cpp nav/coph_allocation.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 

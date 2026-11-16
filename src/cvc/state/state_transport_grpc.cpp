@@ -1954,6 +1954,9 @@ bool state_transport_grpc::on_link_frame(connection &c, const pb::Frame &in) {
     pb::Frame f;
     f.mutable_pong()->set_seq(in.ping().seq());
     f.mutable_pong()->set_sent_ns(in.ping().sent_ns());
+    f.mutable_pong()->set_wall_ns(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                      std::chrono::system_clock::now().time_since_epoch())
+                                      .count()); // the relay's time, for a client's clock
     if (c.write_through_hold(f))
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
     return true;
@@ -1961,8 +1964,11 @@ bool state_transport_grpc::on_link_frame(connection &c, const pb::Frame &in) {
   if (in.has_pong()) {
     if (in.pong().seq() & kProbeSeqBit)
       c.on_probe_pong(in.pong().seq(), link_now_ns());
-    else
-      c.link.note_rtt(link_now_ns() - in.pong().sent_ns());
+    else {
+      const std::int64_t rtt = link_now_ns() - in.pong().sent_ns();
+      c.link.note_rtt(rtt);
+      c.link.note_peer_clock(in.pong().wall_ns(), rtt);
+    }
     return true;
   }
   return false;

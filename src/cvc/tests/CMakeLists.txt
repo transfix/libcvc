@@ -195,6 +195,7 @@ else()
 endif()
 add_executable(ph_compose_test ph_compose_test.cpp)
 add_executable(ph_compose_parity_test ph_compose_parity_test.cpp)
+add_executable(ph_microgrid_test ph_microgrid_test.cpp)
 add_executable(ph_convoy_test ph_convoy_test.cpp)
 add_executable(ph_se2_test ph_se2_test.cpp)
 add_executable(ph_se2_train_test ph_se2_train_test.cpp)
@@ -308,6 +309,7 @@ add_executable(nav_belief_material_test nav_belief_material_test.cpp)
 add_executable(nav_belief_material_net_test nav_belief_material_net_test.cpp)
 add_executable(nav_belief_material_controller_test nav_belief_material_controller_test.cpp)
 add_executable(nav_coph_test nav_coph_test.cpp)
+add_executable(nav_coph_model_test nav_coph_model_test.cpp)
 add_executable(nav_material_deploy_test nav_material_deploy_test.cpp)
 add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
 add_executable(nav_material_rollout_grad_test nav_material_rollout_grad_test.cpp)
@@ -497,6 +499,7 @@ set(TEST_TARGETS
   nav_potential_test
   ph_compose_test
   ph_compose_parity_test
+  ph_microgrid_test
   ph_convoy_test
   ph_se2_test
   ph_se2_train_test
@@ -561,6 +564,7 @@ set(TEST_TARGETS
   nav_belief_material_net_test
   nav_belief_material_controller_test
   nav_coph_test
+  nav_coph_model_test
   nav_material_deploy_test
   nav_material_raster_test
   nav_coef_energy_test
@@ -1379,6 +1383,13 @@ target_link_libraries(nav_belief_material_controller_test
 )
 
 target_link_libraries(nav_coph_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_coph_model_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2402,6 +2413,13 @@ target_link_libraries(ph_compose_parity_test
     GTest::gtest_main
 )
 
+target_link_libraries(ph_microgrid_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(ph_se2_test
   PRIVATE
     cvc
@@ -2871,6 +2889,7 @@ target_compile_features(nav_dyn_ph_full_test PRIVATE cxx_std_17)
 target_compile_features(nav_potential_test PRIVATE cxx_std_17)
 target_compile_features(ph_compose_test PRIVATE cxx_std_17)
 target_compile_features(ph_compose_parity_test PRIVATE cxx_std_17)
+target_compile_features(ph_microgrid_test PRIVATE cxx_std_17)
 target_compile_features(ph_convoy_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_train_test PRIVATE cxx_std_17)
@@ -3106,6 +3125,7 @@ cvc_discover_tests(nav_belief_material_test)
 cvc_discover_tests(nav_belief_material_net_test)
 cvc_discover_tests(nav_belief_material_controller_test)
 cvc_discover_tests(nav_coph_test)
+cvc_discover_tests(nav_coph_model_test)
 cvc_discover_tests(nav_material_deploy_test)
 cvc_discover_tests(nav_material_raster_test)
 cvc_discover_tests(nav_coef_energy_test)
@@ -3442,6 +3462,7 @@ cvc_discover_tests(nav_dyn_ph_full_test)
 cvc_discover_tests(nav_potential_test)
 cvc_discover_tests(ph_compose_test)
 cvc_discover_tests(ph_compose_parity_test)
+cvc_discover_tests(ph_microgrid_test)
 cvc_discover_tests(ph_convoy_test)
 cvc_discover_tests(ph_se2_test)
 cvc_discover_tests(ph_se2_train_test)

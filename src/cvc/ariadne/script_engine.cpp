@@ -756,7 +756,15 @@ public:
     auto ask = std::make_shared<se::closure>();
     ask->params = {se::symbol{"k"}, se::symbol{"f"}, se::symbol{"a"}};
     ask->body = {se::parse(kSlicedAsk)};
-    ask->env_snapshot = env_;
+    // A scope of its own over the process's, with the `apply` it calls by: an environment narrowed
+    // to a few names (LaneProcess::allow: a client's program) may not hold it. What the activation
+    // calls is still only what the process holds: `f` is the value env_ has for the name it asked.
+    se::environment_ptr scope =
+        se::environment::extend(env_ ? env_ : std::make_shared<se::environment>());
+    scope->set("apply", se::value_t(se::native_fn([](se::call_args a) -> se::value_tag {
+                 return se::builtin_apply(a);
+               })));
+    ask->env_snapshot = std::move(scope);
     ask_ = se::value_t(std::move(ask));
   }
 
@@ -887,7 +895,50 @@ se::value_t locked_call(se::exec_context *ctx, std::unique_ptr<SlicedCall> job,
   return se::call_function(ctx, se::value_t(std::move(c)), args, "with-lock");
 }
 
+// The process whose step calls a native in `ctx`, for an activation run as its own work; a
+// RuntimeError naming `name` where none of a program's steps is running.
+const se::process_ptr &calling_process(cvc::app &app, se::exec_context *ctx,
+                                       const std::string &name) {
+  se::detail::data_step_scope *data = ctx ? ctx->data : nullptr;
+  const se::process_ptr &proc = app.exec_scheduler().current_process();
+  if (!data || !data->defer_allowed() || !proc)
+    throw se::dsl_error("RuntimeError",
+                        name + ": called where no program's step is running, so it can't run "
+                               "as that program's work");
+  return proc;
+}
+
+// `made` as a sliced call in the environment `env` (the calling process's), under the language's
+// slice size (`slices`, else its setting) and frame budget.
+std::unique_ptr<SlicedCall> sliced_call(cvc::app &app, std::shared_ptr<ScriptActivation> made,
+                                        const std::string &language, const std::string &name,
+                                        std::uint64_t slices,
+                                        std::function<bool(const std::string &)> may_call,
+                                        se::environment_ptr env) {
+  cvc::state &root = cvc::state::instance(app);
+  const std::uint64_t slice_steps =
+      slices ? slices
+             : count_setting(root, "ariadne.limits." + language + "_slice_steps", kSliceSteps);
+  const double frame_seconds =
+      seconds_setting(root, "ariadne.limits." + language + "_frame_budget", kFrameBudget);
+  return std::make_unique<SlicedCall>(app, std::move(made), name, slice_steps, frame_seconds,
+                                      budget_of(app, language), std::move(may_call),
+                                      std::move(env));
+}
+
 } // namespace
+
+se::value_t run_as_program_work(cvc::app &app, se::call_args args,
+                                std::shared_ptr<ScriptActivation> activation,
+                                const std::string &language, const std::string &name,
+                                std::function<bool(const std::string &)> may_call) {
+  se::exec_context *const ctx = args.context();
+  const se::process_ptr &proc = calling_process(app, ctx, name);
+  if (!activation)
+    return se::value_t();
+  return se::run_data_job(ctx, sliced_call(app, std::move(activation), language, name, 0,
+                                           std::move(may_call), proc->state.global_env));
+}
 
 void ScriptLane::export_activation(const std::string &name, ScriptCall make,
                                    ActivationOptions options) {
@@ -956,25 +1007,13 @@ void ScriptLane::export_activation(const std::string &name, ScriptCall make,
     if (!lane)
       throw std::runtime_error(name + ": its document has gone");
     se::exec_context *const ctx = args.context();
-    se::detail::data_step_scope *data = ctx ? ctx->data : nullptr;
-    const se::process_ptr &proc = app->exec_scheduler().current_process();
-    if (!data || !data->defer_allowed() || !proc)
-      throw se::dsl_error("RuntimeError",
-                          name + ": called where no program's step is running, so it can't run "
-                                 "as that program's work");
+    const se::process_ptr &proc = calling_process(*app, ctx, name);
     std::shared_ptr<ScriptActivation> made =
         make(std::vector<se::value_t>(args.begin(), args.end()));
     if (!made)
       return se::value_t();
-    cvc::state &root = cvc::state::instance(*app);
-    const std::uint64_t slice_steps =
-        slices ? slices
-               : count_setting(root, "ariadne.limits." + language + "_slice_steps", kSliceSteps);
-    const double frame_seconds =
-        seconds_setting(root, "ariadne.limits." + language + "_frame_budget", kFrameBudget);
-    auto job =
-        std::make_unique<SlicedCall>(*app, std::move(made), name, slice_steps, frame_seconds,
-                                     budget_of(*app, language), may_call, proc->state.global_env);
+    auto job = sliced_call(*app, std::move(made), language, name, slices, may_call,
+                           proc->state.global_env);
     if (lock.empty())
       return se::run_data_job(ctx, std::move(job));
     return locked_call(ctx, std::move(job), lock_path(lock, lane->prefix()), proc->state.global_env,
