@@ -209,8 +209,10 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                --relay-arg=--room --relay-arg=ctest --relay-arg=--state-listen
                --relay-arg=127.0.0.1:0 --relay-arg=--media-listen --relay-arg=127.0.0.1:0
                --relay-arg=--ws-listen --relay-arg=127.0.0.1:0)
+    set(_relay_python_path)
     foreach(_a IN LISTS CVC_ARIADNE_PYTHON_TEST_PATH)
       list(APPEND _relay "--relay-arg=${_a}")
+      list(APPEND _relay_python_path "--relay-arg=${_a}")
     endforeach()
     set(_relay_tests)
     foreach(_scheme grpc ws)
@@ -224,6 +226,25 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                        "--client-arg=${CMAKE_CURRENT_BINARY_DIR}/relay_arigl_${_scheme}.png"
                        "--client-arg=${_srv_tests}/relay_arigl.ari")
       list(APPEND _relay_tests arisrvx_room_call_arigl_${_scheme})
+      # Bridged users (ARIADNE_CHAT.md): arisrvx running tests/bridge_service.py puts another chat
+      # system's users in the room; src/arisrv/tests/bridge_arigl.ari, a participant (arigl's
+      # conference mode, CVC_ARIADNE_RELAY), finds them in the roster, reads and answers their
+      # posts, and messages one of them.
+      add_test(NAME arisrvx_bridge_arigl_${_scheme}
+               COMMAND "${Python3_EXECUTABLE}" "${_srv_tests}/relay_pair.py"
+                       --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:arigl>
+                       --client-command snapshot --scheme ${_scheme}
+                       --relay-arg=--python "--relay-arg=${_srv_tests}/bridge_service.py"
+                       --relay-arg=--room --relay-arg=ctest --relay-arg=--state-listen
+                       --relay-arg=127.0.0.1:0 --relay-arg=--media-listen --relay-arg=127.0.0.1:0
+                       --relay-arg=--ws-listen --relay-arg=127.0.0.1:0 ${_relay_python_path}
+                       --client-only "--client-expect=bridge_arigl: ok"
+                       "--client-env=CVC_ARIADNE_RELAY={url}" --client-env=CVC_ARIADNE_ROOM=ctest
+                       --client-env=CVC_ARIADNE_NAME=Alice --client-arg=--frames
+                       --client-arg=1800 --client-arg=--png
+                       "--client-arg=${CMAKE_CURRENT_BINARY_DIR}/bridge_arigl_${_scheme}.png"
+                       "--client-arg=${_srv_tests}/bridge_arigl.ari")
+      list(APPEND _relay_tests arisrvx_bridge_arigl_${_scheme})
     endforeach()
     cvc_ariadne_python_test_properties(${_relay_tests})
     set_tests_properties(${_relay_tests} PROPERTIES
