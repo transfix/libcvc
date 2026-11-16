@@ -149,6 +149,12 @@ units:
         options: [Material, Risk, Occupancy, Height, Water bodies]
         values: [0, 1, 2, 3, 4]
         tooltip: "repaints the ground at once, no Regenerate. Material: its surfaces; Risk: each surface's risk (Ontology), cold to hot; Occupancy: red where a cell is taken (a building, hard ground), dark where free; Height: low to high; Water bodies: the sea blue, lakes teal, ponds green, dry land grey, contours every 25 m from the shore"
+      - slider_float: Tree sway
+        bind: "{keys}.sway"
+        lo: 0.0
+        hi: 3.0
+        fmt: "%.2f"
+        tooltip: "how far the trees lean and sway in the scene's wind (the Wind panel), at once, no Regenerate; 0 holds them still. Without a scene wind they stand still"
       - text: "props"
         bind: "{keys}.stats.props"
       - text: "buildings"

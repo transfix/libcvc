@@ -2003,10 +2003,11 @@ int main() {
       }
       return n;
     };
+    constexpr double kPiD = 3.14159265358979323846;
     scene.nodes.push_back(node("world", "generated_world",
                                {{"seed", "5"},
                                 {"half", "150"},
-                                {"trees", "0"},
+                                {"trees", "24"}, // the world's own trees sway too
                                 {"rocks", "0"},
                                 {"buildings", "0"},
                                 {"amp", "40"},
@@ -2052,18 +2053,65 @@ int main() {
         "the water follows the scene's wind; its own keys stay, unused");
     chk(approx(drift(), 120.0), "the clouds drift along the scene's wind (heading dir + 90)");
     chk(!lean().empty() && approx(std::stod(lean()), 30.0), "the trees lean along it");
+    // The generated world's trees (its prop meshes, every rung): the sway's code and the world's
+    // shared uniforms on each, normals carrying the height above the ground, world.lean_dir.
+    using cvc::gl::GeometryNode;
+    using cvc::gl::GraphicsNode;
+    using cvc::gl::LodGraphicsNode;
+    std::vector<GeometryNode *> swayed;
+    std::function<void(GraphicsNode &)> collect = [&](GraphicsNode &g) {
+      if (auto *m = dynamic_cast<GeometryNode *>(&g);
+          m && m->hasSharedShaderInputs("cvc.foliage_wind"))
+        swayed.push_back(m);
+      if (auto *l = dynamic_cast<LodGraphicsNode *>(&g))
+        for (int k = 0; k < l->rungCount(); ++k)
+          if (auto r = l->rung(k); r && r.get() != &g)
+            collect(*r);
+      for (const std::shared_ptr<GraphicsNode> &c : g.getGraphicsChildren())
+        if (c)
+          collect(*c);
+    };
+    for (const char *part : {"world_props", "world_foliage", "world_needles"})
+      if (auto g = sg.getGraphics(part))
+        collect(*g);
+    std::sort(swayed.begin(), swayed.end());
+    swayed.erase(std::unique(swayed.begin(), swayed.end()), swayed.end());
+    auto worldLean = [&]() { return st("world.lean_dir").value(); };
+    auto fw = [&]() -> std::shared_ptr<const GeometryNode::ShaderInputs> {
+      return swayed.empty() ? nullptr : swayed.front()->sharedShaderInputs("cvc.foliage_wind");
+    };
+    double tallest = 0.0; // the most height above the ground a vertex's normal carries (m)
+    for (GeometryNode *m : swayed)
+      if (const cvc::geometry *g = m->getGeometry())
+        for (const auto &v : g->const_normals())
+          tallest =
+              std::max(tallest, (std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) - 1.0) * 64.0);
+    printf("  %zu prop meshes sway; the tallest vertex is %.1f m over the ground\n", swayed.size(),
+           tallest);
+    chk(!swayed.empty() && fw() && fw()->skip_shadow_bake && fw()->f.count("uFwOn") &&
+            fw()->f.at("uFwOn") == 1.0f && fw()->f3.count("uFwDir") &&
+            approx(fw()->f3.at("uFwDir")[0], std::cos(30.0 * kPiD / 180.0)) &&
+            approx(fw()->f3.at("uFwDir")[1], std::sin(30.0 * kPiD / 180.0)) &&
+            fw()->f3.count("uWindGust") && fw()->f3.count("uFwEye") && tallest > 3.0,
+        "the world's trees sway in the scene's wind (uniforms on every prop mesh, out of the "
+        "bake)");
+    chk(!worldLean().empty() && approx(std::stod(worldLean()), 30.0),
+        "world.lean_dir: the world's trees lean along it");
     // One key: the waves, the clouds and the trees turn together, on the next tick.
     st("wind.dir").value(120.0);
     tick();
     chk(approx(water().wind_dir, 120.0) && approx(drift(), 210.0) && !lean().empty() &&
-            approx(std::stod(lean()), 120.0),
+            approx(std::stod(lean()), 120.0) && !worldLean().empty() &&
+            approx(std::stod(worldLean()), 120.0) && fw() &&
+            approx(fw()->f3.at("uFwDir")[0], std::cos(120.0 * kPiD / 180.0)),
         "one key (wind.dir) turns the water, the clouds and the trees together");
     // No scene wind: each falls back to its own.
     st("wind.speed").value(std::string());
     tick();
     chk(approx(water().wind_dir, -90.0) && approx(water().wind_speed, 3.0) &&
-            approx(drift(), st("sky.wind_az").value<double>()) && lean().empty(),
-        "without wind.speed each node takes its own wind again");
+            approx(drift(), st("sky.wind_az").value<double>()) && lean().empty() &&
+            worldLean().empty() && fw() && fw()->f.at("uFwOn") == 0.0f,
+        "without wind.speed each node takes its own wind again (the world's trees stand still)");
     for (const std::string &w : warnings)
       printf("  warning: %s\n", w.c_str());
   }

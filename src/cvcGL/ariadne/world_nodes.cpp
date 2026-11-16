@@ -36,6 +36,7 @@
 #include <cvc/ariadne/bind.h> // live node params: read_or_seed / read_or / write / resolve_bind
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_generated_world.h> // the node in core: params, keys, stats, colliders
+#include <cvc/ariadne/scene_wind.h>            // the scene's one wind, which the trees lean in
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
@@ -45,6 +46,7 @@
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/LodGraphicsNode.h> // the props' and the ground's ladders, make_view_params
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/WindGLSL.h> // the gusts the trees sway in, the water's and the physics'
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/world_nodes.h>
 #include <cvc/image/image.h>
@@ -58,6 +60,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <vtkCamera.h>
 #include <vtkRenderer.h>
 
 namespace cvc {
@@ -166,6 +169,17 @@ struct WorldRT {
   // the running one until it is in.
   std::unique_ptr<WorldInstall> install;
   WorldRetired retired; // what is on its way out (retire_world_step)
+  // The trees in the scene's wind (wire_foliage_wind): the uniforms every prop mesh's sway reads,
+  // set each frame, and left out of the shadows' bake, so the trees' shadows stay at rest. The
+  // document's state root (the scene wind's keys), world.sway (the sway's strength, 0 holds the
+  // trees) and world.lean_dir (the way they lean, published; empty without a wind).
+  std::shared_ptr<GeometryNode::ShaderInputs> wind = [] {
+    auto in = std::make_shared<GeometryNode::ShaderInputs>();
+    in->skip_shadow_bake = true;
+    in->f["uFwOn"] = 0.0f;
+    return in;
+  }();
+  std::string prefix, sway_key, lean_key, lean_now;
 
   ~WorldRT();
 };
@@ -275,6 +289,122 @@ void style_needles(GeometryNode &g) {
   g.setDiffuse(0.75);
 }
 
+// ── The trees in the scene's wind (OCEAN-AND-WEATHER-ROADMAP.md E5) ──────────────────────────
+// Every prop mesh (the wood, the leaves and the needles, on every rung) leans downwind and sways
+// in the vertex shader, from uniforms alone: no texture, no extra vertex array (the low-memory
+// mapper keeps each array in a texture unit, and WebGL2 has 16). A vertex's height above the
+// ground under it rides in its normal's length, 1 + h / kLiftPerNormal (with_lift_normals): the
+// lighting normalises the normal, so it shades as before, and the shader reads h back. The sway
+// grows as h squared, so a trunk's foot stays put, its crown moves most, and a rock (a metre or
+// two high) barely stirs. Its phase is the vertex's world position, so neighbouring trees sway
+// apart, and the scene's gust field (cvc_wind_gust, the water's and the physics') scales it, so a
+// gust is seen crossing the woods. The shadows' bake leaves the uniforms out (uFwOn reads 0
+// there): the trees' shadows stay at rest rather than freeze at whatever moment a bake caught.
+constexpr const char *kFoliageWind = "cvc.foliage_wind"; // the shared shader inputs' key
+constexpr double kLiftPerNormal = 64.0; // metres of height per unit of normal length past 1
+constexpr double kLiftMax = 60.0;       // the height encoded at most
+
+// The vertex shader's declarations: the uniforms, the gusts, and the sway of a model-space point
+// p with normal n. uFwDir is the way the wind blows (x, y); uFwMotion holds the lean (radians, at
+// 10 m up), the sway's amplitude (radians) and the clock (s, reduced to the sway's period);
+// uFwEye is the camera, and the sway fades out between 300 and 450 m from it (where it is about a
+// pixel at terrain_lab's view), so a far tree skips the gusts' noise.
+std::string foliage_wind_dec() {
+  return std::string("//VTK::PositionVC::Dec\n"
+                     "uniform highp float uFwOn; uniform highp vec3 uFwDir; "
+                     "uniform highp vec3 uFwMotion; uniform highp vec3 uFwEye;\n") +
+         cvc::gl::WindGLSL::glsl() +
+         "vec4 cvc_foliage_sway(vec4 p, vec3 n){\n"
+         "  float h = max(length(n) - 1.0, 0.0) * 64.0;\n" // kLiftPerNormal
+         "  float lift = h - 0.3;\n"                       // the foot of a trunk stays put
+         "  if (uFwOn <= 0.0 || lift <= 0.0) return p;\n"
+         "  float near = 1.0 - smoothstep(300.0, 450.0, distance(p.xyz, uFwEye));\n"
+         "  if (near <= 0.0) return p;\n"
+         "  float g = cvc_wind_gust(p.xy, 0.0);\n"
+         "  float phase = dot(p.xy, vec2(0.071, 0.053));\n"
+         "  float a = near * g * (uFwMotion.x + uFwMotion.y * sin(1.3 * uFwMotion.z + phase));\n"
+         "  float s = a * lift * lift * 0.1;\n" // the bend: angle a at 10 m up
+         "  p.xy += uFwDir.xy * s;\n"
+         "  p.z -= 0.5 * s * s / max(h, 1.0);\n" // a leaning crown comes down a little
+         "  return p;\n"
+         "}\n";
+}
+// At //VTK::Clip::Impl, the earliest point after the low-memory mapper declares vertexMC and
+// normalMC: the #define re-points VTK's position code (and the shadow baker's) at the swayed
+// point, in either mapper (as DrapedLinkNode drapes its link).
+const char *const kFoliageWindClip = "vec4 cvcFoliageMC = cvc_foliage_sway(vertexMC, normalMC);\n"
+                                     "#define vertexMC cvcFoliageMC\n"
+                                     "  //VTK::Clip::Impl\n";
+
+// Give a prop mesh the sway, once: its shader code, world-space vertexMC, and the world's inputs.
+void wire_foliage_wind(GeometryNode &g,
+                       const std::shared_ptr<const GeometryNode::ShaderInputs> &in) {
+  if (!in || g.hasSharedShaderInputs(kFoliageWind))
+    return;
+  g.disableCoordinateShiftScale(); // the gusts and the phase are read at world xy
+  g.addVertexShaderReplacement("//VTK::PositionVC::Dec", foliage_wind_dec());
+  g.addVertexShaderReplacement("//VTK::Clip::Impl", kFoliageWindClip);
+  g.setSharedShaderInputs(kFoliageWind, in);
+}
+
+// `g` with normals, each lengthened by its vertex's height above `ground` (the sway's weight, read
+// back in the shader): a mesh's own smooth normals, or +z for lines.
+cvc::geometry with_lift_normals(cvc::geometry g, const cvc::height_field &ground) {
+  const std::size_t n = g.num_points();
+  if (n == 0)
+    return g;
+  if (!g.const_tris().empty())
+    g.compute_normals();
+  else
+    g.normals().assign(n, cvc::geometry::vector_t{{0.0, 0.0, 1.0}});
+  const auto &P = g.const_points();
+  auto &N = g.normals();
+  for (std::size_t i = 0; i < n; ++i) {
+    cvc::geometry::vector_t &v = N[i];
+    const double len = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (!(len > 0.5))
+      v = {{0.0, 0.0, 1.0}}; // a degenerate vertex: any direction shades it
+    const double h = std::clamp(P[i][2] - ground.height(P[i][0], P[i][1]), 0.0, kLiftMax);
+    const double s = (1.0 + h / kLiftPerNormal) / (len > 0.5 ? len : 1.0);
+    for (int k = 0; k < 3; ++k)
+      v[k] *= s;
+  }
+  return g;
+}
+
+// This frame's wind on the trees: the scene's (none without one, or with world.sway at 0, and the
+// trees stand still). The lean grows as the wind's square, the sway as the wind, both to 9 m/s's
+// 0.03 and 0.02 rad at 10 m up times world.sway; world.lean_dir publishes the way they lean. The
+// camera (`ren`'s) is where the sway fades out from.
+void tick_foliage_wind(WorldRT &rt, vtkRenderer *ren) {
+  cvc::app &app = *rt.app;
+  const std::optional<ari::SceneWind> sw = ari::scene_wind_set(app, rt.prefix);
+  const double strength = ari::read_or<double>(app, rt.sway_key, 1.0);
+  const bool on = sw && sw->speed > 0.0 && strength > 0.0;
+  GeometryNode::ShaderInputs &in = *rt.wind;
+  in.f["uFwOn"] = on ? 1.0f : 0.0f;
+  if (on) {
+    constexpr double kPi = 3.14159265358979323846, kSwayPeriod = 2.0 * kPi / 1.3;
+    const double rad = sw->dir * kPi / 180.0, u = sw->speed / 9.0, t = app.world_clock().t();
+    const double lean = std::min(0.03 * u * u * strength, 0.3);
+    const double sway = std::min(0.02 * u * strength, 0.2);
+    in.f3["uFwDir"] = {float(std::cos(rad)), float(std::sin(rad)), 0.0f};
+    in.f3["uFwMotion"] = {float(lean), float(sway), float(std::fmod(t, kSwayPeriod))};
+    const cvc::gl::WindGLSL::frame f = cvc::gl::WindGLSL::at(sw->state(), t);
+    in.f3["uWindGust"] = f.gust;
+    in.f3["uWindDriftL"] = f.driftL;
+    in.f3["uWindDriftF"] = f.driftF;
+    double eye[3] = {0.0, 0.0, 1.0e6}; // no camera yet: everything is far, and still
+    if (ren && ren->IsActiveCameraCreated())
+      ren->GetActiveCamera()->GetPosition(eye);
+    in.f3["uFwEye"] = {float(eye[0]), float(eye[1]), float(eye[2])};
+  }
+  if (std::string lean = on ? std::to_string(sw->dir) : std::string(); lean != rt.lean_now) {
+    rt.lean_now = lean;
+    ari::write<std::string>(app, rt.lean_key, lean);
+  }
+}
+
 // The top-level node `name` that holds a merged mesh as its child (WorldRT::buildings, roads):
 // made the first time, drawing nothing itself.
 std::weak_ptr<GeometryNode> mesh_holder(SceneGraph &sg, const std::string &name,
@@ -315,34 +445,47 @@ std::shared_ptr<LodGraphicsNode> hidden_ladder(GraphicsNode &parent, const std::
 }
 
 // Prop cell i of w: a ladder per layer under the groups <id>_props, <id>_foliage and
-// <id>_needles, hidden.
+// <id>_needles, hidden. Every rung sways in the scene's wind (`wind`, wire_foliage_wind), its
+// normals carrying each vertex's height above w's ground.
 WorldRT::PropCell make_prop_cell(SceneGraph &sg, const std::string &id,
                                  const world::generated_world &w, std::size_t i,
-                                 const std::string &suffix, bool soft) {
+                                 const std::string &suffix, bool soft,
+                                 const std::shared_ptr<const GeometryNode::ShaderInputs> &wind) {
   std::shared_ptr<GraphicsNode> wood = group_node(sg, id + "_props"),
                                 leaves = group_node(sg, id + "_foliage"),
                                 needles = group_node(sg, id + "_needles");
   WorldRT::PropCell c;
-  if (!wood || !leaves || !needles)
+  if (!wood || !leaves || !needles || !w.terrain)
     return c;
   const world::generated_world::prop_cell &pc = w.prop_cells[i];
   const std::string name = "cell" + std::to_string(i) + suffix;
+  const cvc::height_field &ground = *w.terrain;
+  auto lifted = [&ground](cvc::geometry g) { return with_lift_normals(std::move(g), ground); };
   c.wood = hidden_ladder(*wood, name,
-                         prop_ladder({world::prop_span_mesh(w.props, pc.props),
-                                      world::prop_span_mesh(w.props_r1, pc.props_r1),
-                                      world::prop_span_mesh(w.props_r2, pc.props_r2)}),
-                         [soft](GeometryNode &g) { style_solid(g, soft); });
+                         prop_ladder({lifted(world::prop_span_mesh(w.props, pc.props)),
+                                      lifted(world::prop_span_mesh(w.props_r1, pc.props_r1)),
+                                      lifted(world::prop_span_mesh(w.props_r2, pc.props_r2))}),
+                         [soft, wind](GeometryNode &g) {
+                           style_solid(g, soft);
+                           wire_foliage_wind(g, wind);
+                         });
   // The leaves and needles are rung 0's only: the coarser rungs carry them as solids.
   if (!pc.foliage.empty())
     c.leaves = hidden_ladder(*leaves, name,
-                             prop_ladder({world::prop_span_mesh(w.foliage, pc.foliage),
+                             prop_ladder({lifted(world::prop_span_mesh(w.foliage, pc.foliage)),
                                           cvc::geometry(), cvc::geometry()}),
-                             [soft](GeometryNode &g) { style_foliage(g, soft); });
+                             [soft, wind](GeometryNode &g) {
+                               style_foliage(g, soft);
+                               wire_foliage_wind(g, wind);
+                             });
   if (!pc.needles.empty())
     c.needles = hidden_ladder(*needles, name,
-                              prop_ladder({world::prop_span_mesh(w.needles, pc.needles),
+                              prop_ladder({lifted(world::prop_span_mesh(w.needles, pc.needles)),
                                            cvc::geometry(), cvc::geometry()}),
-                              [](GeometryNode &g) { style_needles(g); });
+                              [wind](GeometryNode &g) {
+                                style_needles(g);
+                                wire_foliage_wind(g, wind);
+                              });
   return c;
 }
 
@@ -698,7 +841,7 @@ bool put_world_step(SceneGraph &sg, const std::string &id, WorldRT &rt, double b
       continue; // not a piece
     case Stage::cells:
       if (in.next < w.prop_cells.size()) {
-        in.cells.push_back(make_prop_cell(sg, id, w, in.next++, in.suffix, rt.soft));
+        in.cells.push_back(make_prop_cell(sg, id, w, in.next++, in.suffix, rt.soft, rt.wind));
         break;
       }
       in.next = 0;
@@ -927,6 +1070,12 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
 
   // world.*, or under the node's `keys:` prop (node_key) so two worlds keep separate panels.
   rt->k = ari::generated_world_keys(app, n, sg.getStatePrefix(), rt->base, rt->color);
+  // The trees in the scene's wind: world.sway (its strength, from the `sway` prop, 1), and the way
+  // they lean published at world.lean_dir.
+  rt->prefix = sg.getStatePrefix();
+  rt->sway_key = ari::resolve_bind(rt->prefix, ari::node_key(n, "world.sway"));
+  rt->lean_key = ari::resolve_bind(rt->prefix, ari::node_key(n, "world.lean_dir"));
+  ari::read_or_seed<double>(app, rt->sway_key, n.props.num("sway", 1.0));
   world::generated_world_params p0 = ari::read_generated_world_params(app, rt->k, rt->base);
   rt->preset = p0.preset;
   rt->color = int(ari::read_or<double>(app, rt->k.color, rt->color));
@@ -986,6 +1135,7 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
     }
     cvc::app &app = *rt->app;
     rt->frame++;
+    tick_foliage_wind(*rt, ren); // the trees' sway in the scene's wind, for this frame's draw
     // Regenerate, Randomize and Stop, a new preset, and world.auto (poll_generated_world). A new
     // colour alone repaints the shown world at once, once no rebuild is running (a rebuild paints
     // in the colour asked when it started, and a later change is repainted after it).
