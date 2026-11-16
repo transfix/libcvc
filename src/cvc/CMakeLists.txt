@@ -396,6 +396,7 @@ set(SOURCE_FILES
   physics/nav_plant.cpp
   physics/dyn_bike_plant.cpp
   physics/dyn_4w_plant.cpp
+  physics/dyn_boat_plant.cpp
   physics/dyn_world.cpp
   physics/nav_eval.cpp
   physics/nav_es.cpp
@@ -692,7 +693,8 @@ set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/boa
     physics/field_step.cpp physics/immersion.cpp
     physics/fluid_surface.cpp physics/ocean_surface.cpp physics/null_backend.cpp
     physics/nav_plant.cpp
-    physics/dyn_bike_plant.cpp physics/dyn_4w_plant.cpp physics/dyn_world.cpp
+    physics/dyn_bike_plant.cpp physics/dyn_4w_plant.cpp physics/dyn_boat_plant.cpp
+    physics/dyn_world.cpp
     physics/jolt_rollout.cpp)
 if(NOT MSVC)
   set_source_files_properties(${_cvc_physics_exact_sources}

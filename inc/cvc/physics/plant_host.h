@@ -31,6 +31,13 @@
 // physics world built as below, so they collide with the geometry, with each other and with
 // anything added to physics(); without Jolt they drive the same ground and collide with nothing.
 //
+// "dynamicboat" puts them on boats instead (dyn_boat_plant: a hull, a propeller and a rudder in a
+// physics world that floats them), the launch alone, or "dynamicboat:<presets>" (launch, jonboat).
+// The boats float on set_water's fluid field (calm, or with a free surface such as a swell) and on
+// any fluid field the geometry has; a start with neither under it is refused. Their world has no
+// flat ground: with geometry they collide with its terrain and buildings (a shore, a pier). Boats
+// need Jolt; without it "dynamicboat" falls back to the kinematic bicycle, as the presets do.
+//
 // The world is rebuilt on every switch. It holds a flat ground at options::ground_z, or, after
 // set_geometry, a cvc::world's static collide items (add_world_geometry). The navigator's
 // occupancy grid is not added: nav keeps its agents off what it sees, and the vehicles collide
@@ -45,6 +52,7 @@
 
 #include <cvc/physics/dyn_4w_plant.h>
 #include <cvc/physics/dyn_bike_plant.h>
+#include <cvc/physics/dyn_boat_plant.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/world.h>
 #include <memory>
@@ -88,6 +96,8 @@ public:
   // four-wheel one ("dynamic4w" or "dynamic4w:...").
   static bool is_dynamic(const std::string &vehicle);
   static bool is_dynamic4w(const std::string &vehicle);
+  // Whether a name asks for the boat plant ("dynamicboat" or "dynamicboat:...").
+  static bool is_dynamic_boat(const std::string &vehicle);
   // A preset by name (as in use()); unknown names throw cvc::physics_error.
   static vehicle_desc preset(const std::string &name);
   // Throws cvc::physics_error unless use() accepts `vehicle`: for checking a name up front.
@@ -97,10 +107,17 @@ public:
   // ground, with nav material ids per surface id (add_world_geometry's). Borrowed until the
   // next call; null goes back to the flat ground. Takes effect at the next use().
   void set_geometry(const cvc::world::world_geometry *g, std::vector<int> nav_materials = {});
+  // The boats' water: a fluid field (field.h) the next "dynamicboat" world gets beside the
+  // geometry, still or with a free surface. Null: none (the geometry's fluid fields alone). Takes
+  // effect at the next use().
+  void set_water(std::shared_ptr<const field> water) { _water = std::move(water); }
+  const std::shared_ptr<const field> &water() const { return _water; }
 
   // Put sim's agents on `vehicle`, at their poses, at rest, in a new world. An unknown name
   // throws and changes nothing. Returns what they drive now: `vehicle`, or "kinematic" when it
-  // asked for vehicles and this build has no Jolt.
+  // asked for vehicles and this build has no Jolt. Boats whose starts have no water under them
+  // throw too, after the old plant has gone: the agents are then on the kinematic bicycle
+  // (driving() says so, and fallback() is true).
   std::string use(cvc::nav::sim_world &sim, const std::string &vehicle);
 
   const std::string &vehicle() const { return _asked; }   // what use() was last asked for
@@ -111,6 +128,7 @@ public:
   world *physics() { return _world.get(); }
   dyn_bike_plant *dynamic() { return _dyn.get(); }  // null unless the agents drive "dynamic"
   dyn_4w_plant *dynamic4w() { return _dyn4.get(); } // null unless they drive "dynamic4w"
+  dyn_boat_plant *dynamic_boat() { return _boat.get(); } // null unless they drive "dynamicboat"
   // Whichever plant the agents drive on (null on the bicycle).
   cvc::nav::vehicle_plant *active();
   const plant_host_options &options() const { return _o; }
@@ -137,6 +155,8 @@ private:
   std::unique_ptr<nav_plant> _plant;
   std::unique_ptr<dyn_bike_plant> _dyn;
   std::unique_ptr<dyn_4w_plant> _dyn4;
+  std::unique_ptr<dyn_boat_plant> _boat;
+  std::shared_ptr<const field> _water;
   std::string _asked = "kinematic", _driving = "kinematic";
   std::set<std::string> _described;
 };
