@@ -5769,9 +5769,10 @@ server:
 - **Each client's limits.** A relay can give each client caps of its own
   (`ServerDocument::set_client_limits`; [roadmap/ARISRV_IDENTITY.md](roadmap/ARISRV_IDENTITY.md)
   §2.6). They are read at each start, so a change applies to the client's next program. They
-  lower the document's caps and never raise them: a server sets `client_programs:` (and
-  `client_guests:`) for its biggest clients, and each client's limits hold the others below
-  that. A client whose limits refuse it programs is answered `forbidden`.
+  replace the document's caps for that client: lower, or higher up to the action lane's
+  (`ariadne.limits.action_max_*`), which hold over every process. So `client_programs:` (and
+  `client_guests:`) are what every client gets, and an admin can give one client more, or less.
+  A client whose limits refuse it programs is answered `forbidden`.
 - **Errors** raise as `room-call`'s do (§9.8.1), with these codes:
   - `unavailable`: the relay runs no document with `client_programs:`, or its document hasn't
     loaded.
@@ -5825,7 +5826,7 @@ server:
   refuses to start a document with `client_guests:`, and arisrvx refuses one under
   `--bind-writes off`.
 - **Each client's limits** apply as for programs (§9.7.1): its `steps`, `time` and `memory_mb`,
-  the last capping its linear memory, each held to `client_guests:`'s.
+  the last capping its linear memory, never above `ariadne.limits.wasm_max_memory`.
 
 ### 9.8 Python beside the relay: `arisrvx`
 

@@ -239,10 +239,10 @@ public:
   // refuses the start (unavailable). The host sets it (arisrv's main(), from its client registry);
   // it runs on the thread that calls run_client_*.
   enum class ClientKind { program, guest };
-  // Decision D2 (ARISRV_IDENTITY.md §4): whether a client's limits may go above its document's
-  // caps (up to the action lane's), or only lower them, the document's caps being set for a
-  // server's biggest clients.
-  static constexpr bool kClientLimitsAboveDocument = false;
+  // Decision D2 (ARISRV_IDENTITY.md §4), settled 2026-11-16: a client's limits may go above its
+  // document's caps, up to the action lane's (ariadne.limits.action_max_*), so an admin can give
+  // one client more than the document gives every client. false would only let them lower them.
+  static constexpr bool kClientLimitsAboveDocument = true;
   using ClientLimitsFn = std::function<ClientLimits(const std::string &pid, ClientKind kind,
                                                     const ClientLimits &document)>;
   void set_client_limits(ClientLimitsFn limits) { limits_ = std::move(limits); }
