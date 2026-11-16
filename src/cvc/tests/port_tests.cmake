@@ -24,6 +24,7 @@ set(CVC_PORT_TESTS
   gradient_vector_diffusion_test
   critical_points_test
   seed_generators_test
+  volume_slice_test
 )
 
 # One port test: cvc and googletest, and under Emscripten what node needs to run it (as

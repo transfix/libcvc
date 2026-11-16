@@ -2392,6 +2392,28 @@ TEST_F(CvcCliTest, PhInfoSimulateAndCheckAComposedGrid) {
   EXPECT_NE(0, none.exit_code);
 }
 
+TEST_F(CvcCliTest, PhMicrogridWritesANetworkAndStartsFromVoltages) {
+  const std::string grid = path("mg.json");
+  auto mk = cvc("ph microgrid \"" + grid + "\" --dgus 3 --edges 0-1,2-1 --line-r 0.3,0.5");
+  ASSERT_EQ(0, mk.exit_code) << mk.output;
+  EXPECT_NE(std::string::npos, mk.output.find("5 blocks, state 8, ports 5, inputs 6")) << mk.output;
+  EXPECT_NE(std::string::npos, mk.output.find("pair dgu2.0 - line1.0: 1")) << mk.output;
+  auto check = cvc("ph check \"" + grid + "\"");
+  ASSERT_EQ(0, check.exit_code) << check.output;
+  auto sim = cvc("ph simulate \"" + grid +
+                 "\" --physical 1,0,1.1,0.1,0.9,0,0,0.05 --u -0.1,1,-0.1,1.1,-0.15,1 --steps 20");
+  ASSERT_EQ(0, sim.exit_code) << sim.output;
+  EXPECT_NE(std::string::npos, sim.output.find("start from efforts:")) << sim.output;
+  EXPECT_NE(std::string::npos, sim.output.find("20 steps of 0.01 s")) << sim.output;
+  auto both = cvc("ph simulate \"" + grid + "\" --physical 1,0,1,0,1,0,0,0 --x0 0,0,0,0,0,0,0,0");
+  EXPECT_NE(0, both.exit_code);
+  EXPECT_NE(std::string::npos, both.output.find("not both")) << both.output;
+  auto bad = cvc("ph microgrid \"" + path("x.json") + "\" --dgu flux-capacitor");
+  EXPECT_NE(0, bad.exit_code);
+  auto lin = cvc("ph microgrid \"" + path("lin.json") + "\" --dgus 2 --dgu linear --dgu-c 1.5");
+  ASSERT_EQ(0, lin.exit_code) << lin.output;
+}
+
 // ===========================================================================
 // ph-train: the learned port-Hamiltonian vehicle (cvc::ph) from plant logs
 // ===========================================================================
