@@ -7,8 +7,10 @@
 #include "guest_runtime.h"
 #include "value_cbor.h"
 #include "wasi_preview1.h"
+#include "wasm_binary.h" // has_start: a client's module
 
 #include <algorithm>
+#include <atomic>
 #include <boost/any.hpp>
 #include <charconv>
 #include <cmath>
@@ -26,6 +28,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <list>
 #include <map>
 #include <optional>
 #include <set>
@@ -48,6 +51,10 @@ constexpr std::uint64_t kGasPerStep = 1000;                    // ariadne.limits
 constexpr std::uint64_t kMaxMemory = std::uint64_t(256) << 20; // ariadne.limits.wasm_max_memory
 constexpr std::uint64_t kSetupGas = 100'000'000;  // _initialize, ari_alloc: the guest's own setup
 constexpr std::size_t kMaxHandles = 65536;        // live handles per instance
+// A client's guest (client_activation): its _initialize and each ari_alloc, which run to their end
+// on the relay's loop, get this much gas (a thousand steps), charged to its program.
+constexpr std::uint64_t kClientSetupGas = 1'000'000;
+constexpr std::size_t kClientModules = 16; // clients' modules kept compiled, the latest used
 
 const char *const kKeys[] = {"module", "export", "hooks", "imports", "limits", "priority", "wasi"};
 const char *const kWasiKeys[] = {"args", "dirs", "env"};
@@ -295,6 +302,7 @@ struct Guest {
   se::exec_context *ctx = nullptr;
   std::string module;      // the module's name, for messages
   std::uint64_t gas_per_step = kGasPerStep;
+  std::uint64_t setup_gas = kSetupGas; // what each ari_alloc may use, to its end
   const void *busy = nullptr; // the activation whose call is on the instance
   int busy_pid = -1;          // the process it runs in
   std::string busy_name;      // the export it runs, for messages
@@ -1155,8 +1163,8 @@ private:
     std::int64_t ptr = 0;
     std::uint64_t used = 0;
     std::string error;
-    if (!g_->instance->run("ari_alloc", {static_cast<std::int64_t>(cbor.size())}, kSetupGas, ptr,
-                           used, error))
+    if (!g_->instance->run("ari_alloc", {static_cast<std::int64_t>(cbor.size())}, g_->setup_gas,
+                           ptr, used, error))
       raise("ari_alloc: " + error);
     GuestMemory &mem = g_->instance->memory();
     if (std::string why; !inside(mem, ptr, cbor.size(), why))
@@ -1278,11 +1286,181 @@ std::string read_file(const fs::path &p) {
   return ss.str();
 }
 
+// Clients' modules, compiled (client_activation): the runtime they compile on, and the last
+// kClientModules of them, the latest used first, so a client that sends the same module again
+// isn't compiled again. On the thread that drains the runtime; only `runtime` is shared with the
+// compiles on the app's pool.
+struct ClientModules {
+  std::shared_ptr<Runtime> runtime;
+  std::list<std::pair<std::string, std::shared_ptr<Module>>> recent;
+
+  std::shared_ptr<Module> find(const std::string &bytes) {
+    for (auto it = recent.begin(); it != recent.end(); ++it)
+      if (it->first == bytes) {
+        recent.splice(recent.begin(), recent, it);
+        return recent.front().second;
+      }
+    return nullptr;
+  }
+  void put(std::string bytes, std::shared_ptr<Module> module) {
+    if (find(bytes))
+      return;
+    recent.emplace_front(std::move(bytes), std::move(module));
+    while (recent.size() > kClientModules)
+      recent.pop_back();
+  }
+};
+
+// A client's module, compiled on the app's pool: done once `module` or `error` is set.
+struct ClientCompile {
+  std::string bytes;
+  std::atomic<bool> done{false};
+  std::shared_ptr<Module> module;
+  std::string error;
+};
+
+// A client's guest (client_activation): its module, compiled off the drain's thread, then one
+// instance of it, made in the first slice once the module is there, and the call of its entry on
+// that instance (a GuestCall), which every later slice steps. The instance goes with the
+// activation. Its calls reach only the process it runs in (run_as_program_work).
+class ClientGuest : public ScriptActivation {
+public:
+  ClientGuest(cvc::app &app, std::shared_ptr<ClientModules> modules, ClientCode code,
+              se::value_t args)
+      : app_(app), modules_(std::move(modules)), name_(std::move(code.name)),
+        entry_(std::move(code.entry)), max_memory_(code.max_memory), args_(std::move(args)) {
+    module_ = modules_->find(code.bytes);
+    if (module_)
+      return;
+    compile_ = std::make_shared<ClientCompile>();
+    compile_->bytes = std::move(code.bytes);
+    const auto compile = [job = compile_, rt = modules_->runtime] {
+      std::string error;
+      std::shared_ptr<Module> m = rt->compile(job->bytes, false, error);
+      job->module = std::move(m);
+      job->error = std::move(error);
+      job->done.store(true, std::memory_order_release);
+    };
+#ifdef __EMSCRIPTEN__
+    compile(); // the page has no pool to compile on
+#else
+    // Off the drain's thread: compiling a module takes time in its size, which the relay's room
+    // steps don't wait for. A pool that runs no task compiles here.
+    if (!app_.submitPooled(compile))
+      compile();
+#endif
+  }
+
+  void step(ScriptSlice &s) override {
+    if (!call_) {
+      if (!module_) {
+        if (!compile_->done.load(std::memory_order_acquire)) {
+          s.yield_frame(); // the next frame, once it has compiled
+          return;
+        }
+        if (!compile_->module)
+          fail("the module doesn't compile: " + compile_->error);
+        module_ = compile_->module;
+        modules_->put(std::move(compile_->bytes), module_);
+        compile_.reset();
+      }
+      instantiate(s);
+    }
+    call_->step(s);
+  }
+
+  void cancel() override {
+    if (call_)
+      call_->cancel();
+  }
+
+  // Ready once its module has compiled (or failed to).
+  bool ready() const override {
+    return module_ || !compile_ || compile_->done.load(std::memory_order_acquire);
+  }
+
+private:
+  // The instance, its setup, and the call of its entry.
+  void instantiate(ScriptSlice &s) {
+    cvc::state &root = cvc::state::instance(app_);
+    auto g = std::make_shared<Guest>();
+    g->app = &app_;
+    g->module = name_;
+    g->gas_per_step = count_setting(root, "ariadne.limits.wasm_gas_per_step", kGasPerStep);
+    g->setup_gas = kClientSetupGas;
+    g->data_write = false; // what the client's program may do: read its objects, never make one
+    g->wasi.args = {name_};
+    InstanceLimits limits;
+    limits.max_memory = count_setting(root, "ariadne.limits.wasm_max_memory", kMaxMemory);
+    if (max_memory_ && (limits.max_memory == 0 || max_memory_ < limits.max_memory))
+      limits.max_memory = max_memory_;
+    limits.unwind_bytes = count_setting(root, "ariadne.limits.wasm_unwind_bytes", 0);
+    std::string error;
+    g->instance = modules_->runtime->instantiate(module_, imports_of(g.get()), limits, error);
+    if (!g->instance)
+      fail(error);
+    const std::uint64_t gas = g->gas_per_step ? g->gas_per_step : 1;
+    if (g->instance->has_export("_initialize")) {
+      std::int64_t ignored = 0;
+      std::uint64_t used = 0;
+      const bool ok = g->instance->run("_initialize", {}, kClientSetupGas, ignored, used, error);
+      s.charge((used + gas - 1) / gas);
+      if (!ok)
+        fail("_initialize: " +
+             (g->wasi.exit ? "exited with status " + std::to_string(*g->wasi.exit) : error));
+    }
+    if (!g->instance->has_export(entry_))
+      fail("it exports no function '" + entry_ + "'");
+    if (!g->instance->has_export("ari_alloc") || g->instance->memory().size() == 0)
+      fail("it exports no ari_alloc or memory, so no value can cross to it");
+    call_ = std::make_unique<GuestCall>(std::move(g), entry_, std::move(args_));
+  }
+
+  [[noreturn]] void fail(const std::string &what) {
+    throw se::dsl_error("WasmError", name_ + ": " + entry_ + ": " + what, "wasm",
+                        {{"trap", se::value_t(what)}});
+  }
+
+  cvc::app &app_;
+  std::shared_ptr<ClientModules> modules_;
+  std::string name_, entry_;
+  std::uint64_t max_memory_;
+  se::value_t args_;
+  std::shared_ptr<Module> module_;
+  std::shared_ptr<ClientCompile> compile_;
+  std::unique_ptr<GuestCall> call_;
+};
+
 class WasmEngine : public ScriptEngine {
 public:
-  explicit WasmEngine(std::unique_ptr<Runtime> rt) : runtime_(std::move(rt)) {}
+  explicit WasmEngine(std::unique_ptr<Runtime> rt)
+      : runtime_(std::move(rt)), clients_(std::make_shared<ClientModules>()) {
+    clients_->runtime = runtime_;
+  }
 
   std::string language() const override { return "wasm"; }
+
+  std::shared_ptr<ScriptActivation>
+  client_activation(cvc::app &app, ClientCode code, se::value_t args, std::string &error) override {
+    // What can be told from the bytes alone, before anything is compiled: a binary module, with no
+    // start function, which would run at instantiation, to its end, on the start's own gas.
+    bool start = false;
+    if (!has_start(code.bytes, start, error)) {
+      error = "the module isn't one: " + error;
+      return nullptr;
+    }
+    if (start) {
+      error = "the module has a start function, which a client's guest may not (it would run to "
+              "its end as the guest is made): export _initialize instead";
+      return nullptr;
+    }
+    if (code.entry.empty()) {
+      error = "a client's guest names the export to call";
+      return nullptr;
+    }
+    return std::make_shared<ClientGuest>(app, clients_, std::move(code),
+                                         args.is_nil() ? se::make_list() : std::move(args));
+  }
 
   void load_block(const ScriptBlock &block, ScriptLane &lane,
                   std::vector<std::string> &warnings) override {
@@ -1494,7 +1672,8 @@ private:
     std::string key;
     std::shared_ptr<Module> module;
   };
-  std::unique_ptr<Runtime> runtime_;
+  std::shared_ptr<Runtime> runtime_; // shared with clients' compiles on the app's pool
+  std::shared_ptr<ClientModules> clients_;
   std::map<std::string, Compiled> modules_;
   std::map<ScriptLane *, std::shared_ptr<Guest>> guests_;
 };

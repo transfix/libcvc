@@ -863,9 +863,12 @@ types behind one call, `register_cvcgl_extensions`
 `AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`,
 `generated_world` (terrain_lab's world, [`world_nodes.h`](../inc/cvc/gl/ariadne/world_nodes.h)),
 `volume_slice` (one axis-aligned plane of a volume, below), `water` (its sea, lakes and ponds as the
-GPU FFT ocean, below), and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and `fe_lab`.
-Keys the built-in parser
-does not know land in the node's `props`, which a custom realizer reads; most realizers
+GPU FFT ocean, below), `ribbon` and `draped_link` (lines drawn from data, below), and — on a libcvc
+built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and `fe_lab`. Keys the built-in parser
+does not know land in the node's `props`, which a custom realizer reads. So does a `source:` the
+built-ins have no field for, `{ state: <key> }` or `{ stream: <token> }`, as written. A
+`source: { data }` node is drawn as a data node (§5.17) unless its type was registered with
+`NodeTypeOptions::reads_data`, which hands the node to its realizer instead. Most realizers
 **seed** state keys from them (`forest.*` for `forest_trees`, the node's own subtree for
 `mesh_lab` / `fe_lab`), so a document's prop is the starting value a bound component then
 edits live. A document that cannot run without a custom type says so
@@ -1719,6 +1722,123 @@ file's range. **Overlays** are the node's children: point glyphs, polylines, cro
 is pushed back by `slice.overlay_offset`, so anything drawn in its plane shows on top of it in
 every view. `VolumeSliceNode::pickRay` meets a world ray with the plane exactly and names the
 voxel and its value (`cvcgl_volume_slice`, and `volume_slice_test` for the slicing itself).
+
+#### Lines from data: `type: ribbon` and `type: draped_link`
+
+Two custom types draw lines whose points come from data
+([`ribbon_nodes.h`](../inc/cvc/gl/ariadne/ribbon_nodes.h)): a vehicle's track that grows every
+tick, a planned route replaced on each re-plan, a link between two moving things coloured by how
+well it carries. Both are streaming nodes (`cvc::gl::RibbonNode`, `cvc::gl::DrapedLinkNode`), so a
+change uploads only what changed and the node is never rebuilt. Each is a node of its own, updated
+only when its data changes; `visible:`, `tags:` (and so views, §5.18), `transform:` and
+`casts_shadow:` apply as to any node.
+
+```yaml
+scene:
+  nodes:
+    - node: ground
+      source: { terrain: { size: 1200 } }
+    - node: track_a
+      type: ribbon
+      source: { state: tracks.a }      # a list of numbers, three a point
+      width: 3
+      color: c1
+      ground: ground                   # each point's z from the ground, plus lift:
+      lift: 0.4
+      window: { tail: 300, units: m }  # only its last 300 m
+    - node: route_a
+      type: ribbon
+      source: { state: routes.a }
+      color: [0.2, 0.9, 0.3]
+      window: { from: routes.a_done, units: m }   # the driven front hidden as the car advances
+    - node: link_ab
+      type: draped_link
+      ground: ground
+      between: [car_a, car_b]
+      value: links.ab.quality
+      ramp: quality
+```
+
+**A ribbon's points** come from `source:`:
+
+- `{ state: <key> }`: the key's `data()` when it holds floats
+  (`std::shared_ptr<const std::vector<float>>`, which is read without a copy of the key's value, or
+  `std::vector<float>`, `std::vector<double>`, float32 bytes, a mesh's points), else its value as
+  text: numbers separated by commas, spaces, semicolons or brackets. The key is read again only
+  when it was written.
+- `{ data: <name>, item: <output> }`: an output of a dataset of the document's `data:` block
+  (§5.17), read like a state key; a lazy dataset loads when the ribbon asks for it.
+- `{ stream: <token>, replace: false, depth: 4 }`: a stream of float32 frames, by its token or its
+  id (opened by the document, or at the root). Each frame's points are appended; with
+  `replace: true` each frame is the whole line. A stream opened after the scene is realized is
+  picked up when it opens.
+- `points: [[x, y, z], ...]` instead of `source:`: a fixed line written in the document.
+
+`fields:` says what each point's numbers are, in order: `x` and `y`, and any of `z`, `w` (that
+point's full width) and `v` (its value). The default is `xyz`; `xy` puts the points at z = 0, or on
+the ground.
+
+What is drawn follows the data, and only what changed is written:
+
+- A list that grew appends its new points: each uploads its own two vertices and re-mitres the one
+  before (48 bytes a point).
+- A list whose tail changed (a last point that is the live position) is written from the first
+  point that differs.
+- Anything else is written again whole, as one sub-range upload.
+- A key that was not written since the last frame is not read.
+- Past the ribbon's `capacity:` (256 points by default) it grows to twice that, one full upload.
+
+**Width, colour and style.**
+
+- `width:` is the ribbon's full width in metres (2 by default); a `w` field overrides it per point,
+  and a segment tapers between its points' widths.
+- `color:` is `[r, g, b]` (0 to 1), `"#rrggbb"`, or a style slot `c0` to `c7` (the chart's
+  categorical colours: blue, orange, aqua, yellow, magenta, green, violet, red). The ribbon is drawn
+  flat, unlit, in that colour; a `material:` block draws it lit instead.
+- With a `v` field, `ramp:` colours each point by its value, blended along each segment: `quality`
+  (red to yellow to green over 0 to 1), `heat` (blue to yellow to red), or up to eight
+  `[value, colour]` stops. A named ramp runs over `range: [lo, hi]` when given. The values sit in a
+  float texture beside the points, and a point written uploads its own texel.
+- `opacity:` and `depth_offset:` (polygon offset toward the camera, for a line laid on a surface)
+  are per node.
+
+**On the ground.** `ground: <node>` names a heightfield or terrain node (or a `generated_world`)
+declared before this one. Each point then sits on it: its z is the ground's height there (the
+triangle under the point, clamped onto the grid) plus `lift:`. Without a ground, `lift:` is added to
+the points' own z. The ground is sampled in its own coordinates: put the ribbon under the ground
+node, or give it the same transform. When the ground is made again (a regenerated world), the ribbon
+is draped on the new one.
+
+**`window:`** draws part of the line, with no upload: a draw range and a cut at a fraction of a
+segment.
+
+- `{ from: <a>, to: <b> }` draws from `a` to `b`. Each is a number or a state key read each frame;
+  `to: end` (or no `to:`) runs to the last point.
+- `{ tail: <n> }` draws the last `n`.
+- `units: point` (the default) counts points, fractionally; `units: m` counts metres along the line.
+
+**A draped link** is a strip between two ground points that follows the terrain, placed in the
+vertex shader over the ground's heights (a float texture shared by every link on that ground).
+Moving, widening or recolouring it changes uniforms and uploads nothing.
+
+- Its ends:
+  - `between: [<node>, <node>]` follows two nodes each frame: their origins, anywhere in the scene.
+    A world entity's node is `vehicle_<id>`; it is found again when the world draws it anew;
+  - `from: [x, y]` and `to: [x, y]`, each a literal or a state key holding `x, y`;
+  - or `source:` (as for a ribbon) holding `x0, y0, x1, y1`.
+- `ground:` as for a ribbon. Without one the link lies on a flat ground at z = 0 under the scene.
+- `width:` (2), `lift:` (0.5 m above the ground) and `stations:` (24 points along it).
+- `color:` as for a ribbon, or `value:` (a number or a state key) through `ramp:` (`range:` too):
+  the link's colour by a quality read each frame.
+- `opacity:`, a number or a state key.
+
+Coordinates are the node's own: give it the ground's transform, or nest it under the ground.
+
+[`cvcgl_ariadne_ribbons`](../src/cvcGL/test/cvcgl_ariadne_ribbons.cpp) covers these from a document,
+drawn for real. It counts the uploads of each append, both in the node and at the driver: one quad,
+nothing made, never the whole node. It moves a window and a link and checks that nothing is
+uploaded, and it checks the pixels, the value colours on both VTK mapper families, the streams and
+a regenerated ground.
 
 ### 5.5 Commands as a request key
 
@@ -4631,6 +4751,47 @@ server:
   - `resource_exhausted`: a cap stopped it.
   - `too_large`: its value is over `--call-result-max`.
   - `internal`: its value doesn't cross the wire (a function, say).
+
+#### 9.7.2 Clients' WebAssembly guests: `room-run` with a module
+
+In arisrvx built with wasmtime, a client can send a WebAssembly module in place of the source (the
+roadmap's §6.3 and §8.6, phase G4; [`wasm_engine.h`](../src/ariadne_wasm/wasm_engine.h) has the
+guest ABI). The server document opts in with its own key:
+
+```yaml
+server:
+  client_guests: { steps: 2000, time: 0.05, memory_mb: 8 }   # or `on`
+```
+
+```lisp
+(room-run (guest-bytes) 41 "score")                       ; its export `run`, with (41 "score")
+(room-run-opts (dict "export" "score" "timeout" 2) (guest-bytes) 41)
+```
+
+- **The call.** The first argument is the module's bytes (a `b"\0asm..."` literal, or bytes the
+  client read), and the rest are its arguments. It calls the module's export `run`, or the one
+  `"export"` names, with the CBOR list of the arguments, and returns its value. It rides
+  `room-call`'s path as a program does, as the call's `guest` and `export`.
+- **As its client's program.** The guest is run by a program of its client's (§9.7.1): the same
+  chroot, the same environment (its `call` and its state imports reach only the read lane's
+  builtins and the five writers, each held to the bound-writes rule), the same caps, and the same
+  one at a time with that client's programs. Its gas is charged as steps, so `steps` caps it.
+  `memory_mb` caps its linear memory too, 16 MiB without it, and never above
+  `ariadne.limits.wasm_max_memory`. It can read the host objects in its participant
+  (`data.read`), and makes none (`data.write` is a `PermissionError`). It has WASI's stubs alone
+  (§8.6.1's grants are the server's guests'), no `ari_init` and no hooks.
+- **Off the loop.** The relay compiles the module on the app's pool, and starts the guest's
+  program only once it has compiled, so the wait costs none of its caps; meanwhile the client
+  counts as running, and a module that takes over 10 s to compile ends `resource_exhausted`. The
+  last 16 modules stay compiled, so the same bytes sent again start at once. Its instance is its
+  own, made when it starts and gone when it ends; its `_initialize` and each `ari_alloc` get a
+  thousand steps of gas, charged to it.
+- **What it refuses.** `invalid`: bytes that aren't a module, a module over 1 MiB, or one with a
+  start function (which would run to its end as the instance is made: export `_initialize`
+  instead). `failed`: a module that doesn't compile, or doesn't export the function, and every
+  trap, `fail()`, `PermissionError` and `MemoryError`. `unavailable`: no `client_guests:`, or a
+  relay without WebAssembly. Stock arisrv refuses to start a document with `client_guests:`, and
+  arisrvx refuses one under `--bind-writes off`.
 
 ### 9.8 Python beside the relay: `arisrvx`
 
