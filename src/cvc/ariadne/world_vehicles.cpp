@@ -808,6 +808,11 @@ struct WorldVehicles::impl {
     cfg.veh.allow_reverse = true;
     cfg.reach_tol = static_cast<float>(kReach * kScale);
     cfg.freeze_sense = true; // the world's grid is known
+    // nav@1 comes to rest at its goal and stays there: without these a Humvee 150 m out met its
+    // goal at ~19 m/s and parked ~28 m past it (on the bicycle it drove on), so a gym's agents
+    // never were all at their goals at once.
+    cfg.stop_at_goal = true;
+    cfg.park_hold = true;
     ready = true;
   }
 
@@ -1986,6 +1991,8 @@ navigator_params WorldVehicles::navigator() const {
   n.k_steer = v.k_steer;
   n.nsub = v.nsub;
   n.allow_reverse = v.allow_reverse;
+  n.stop_at_goal = d.cfg.stop_at_goal;
+  n.park_hold = d.cfg.park_hold;
   return n;
 }
 

@@ -483,6 +483,9 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
     const material_stack *mat_risk = mat ? mat->stack : nullptr;
     const bool risk_on = v.risk_governor && (mat_risk || (v.terrain && v.terrain->stack));
     const int rplane = (mat_risk && map_id && mat_risk->M > 1) ? map_id[i] : 0;
+    // Its stop point (veh_params::stop_at), when it has one.
+    const bool stops =
+        v.stop_at && std::isfinite(v.stop_at[2 * i]) && std::isfinite(v.stop_at[2 * i + 1]);
     float tel_fx = 0.0f, tel_fy = 0.0f;
 
     for (int s = 0; s < nsub; ++s) {
@@ -707,18 +710,19 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
                                           : std::sqrt(2.0f * a_max * ds);
       if (v.slope)
         v_stop = std::sqrt(2.0f * a_stop_g * ds + 1e-24f); // H2: gravity's help or hindrance
+      // The plant arm's stopping: the latency and the braking it plans with (below).
+      float tau_p = 0.0f, ab_p = 0.0f;
       if (pd) {
         // The plant arm: the speed from which the vehicle, covering |v| latency before it
         // responds and then braking at a_brake, stops within ds: v tau + v^2 / 2a = ds.
-        const float tau = pd->latency ? pd->latency[i] : 0.0f;
-        float ab =
-            (pd->a_brake && pd->a_brake[i] > 0.0f) ? std::min(pd->a_brake[i], a_max_e) : a_max_e;
+        tau_p = pd->latency ? pd->latency[i] : 0.0f;
+        ab_p = (pd->a_brake && pd->a_brake[i] > 0.0f) ? std::min(pd->a_brake[i], a_max_e) : a_max_e;
         if (v.slope) // H2, as above
-          ab = std::max(
-              std::min(ab,
+          ab_p = std::max(
+              std::min(ab_p,
                        (pd->a_brake && pd->a_brake[i] > 0.0f ? pd->a_brake[i] : a_max_e) + g_along),
-              0.1f * ab);
-        v_stop = std::sqrt(ab * ab * tau * tau + 2.0f * ab * ds + 1e-24f) - ab * tau;
+              0.1f * ab_p);
+        v_stop = std::sqrt(ab_p * ab_p * tau_p * tau_p + 2.0f * ab_p * ds + 1e-24f) - ab_p * tau_p;
       }
       const float motion_sign = spi >= 0.0f ? 1.0f : -1.0f;
       float approach = -(nx * ch + ny * sh) * motion_sign;
@@ -739,12 +743,29 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         tel_vrisk = cap;
         v_lim = std::min(v_lim, cap);
       }
+      // The stop point (veh_params::stop_at): the speed toward it from which the vehicle stops
+      // there, braking as v_stop plans to (on the plant arm with the latency and a_brake), over
+      // the component of the motion that closes on it.
+      float v_arrive_dir = vmax;
+      if (stops) {
+        const float sx = v.stop_at[2 * i] - ox, sy = v.stop_at[2 * i + 1] - oy;
+        const float dsg = std::sqrt(sx * sx + sy * sy);
+        const float v_arrive =
+            pd ? std::sqrt(ab_p * ab_p * tau_p * tau_p + 2.0f * ab_p * dsg + 1e-24f) - ab_p * tau_p
+               : std::sqrt(2.0f * a_stop_g * dsg + 1e-24f);
+        float closing = dsg > 1e-6f ? (sx * ch + sy * sh) / dsg * motion_sign : 1.0f;
+        closing = std::min(std::max(closing, 0.0f), 1.0f);
+        v_arrive_dir = closing > 0.05f ? v_arrive / std::max(closing, 0.05f) : vmax;
+        v_lim = std::min(v_lim, v_arrive_dir);
+      }
 
       const bool hard_steer = std::fabs(delta) >= 0.7f * dmax;
       const bool can_move = d > 0.25f * gov_rr;
       float v_floor = (hard_steer && can_move) ? 0.08f : 0.0f;
       if (pd)
         v_floor = std::min(v_floor, v_stop_dir); // the plant arm creeps only as fast as it can stop
+      if (stops)
+        v_floor = std::min(v_floor, v_arrive_dir); // nor past its stop point
       v_lim = std::max(v_lim, v_floor);
 
       const float v_creep = std::min(0.5f * v_corner, creep_cap);
