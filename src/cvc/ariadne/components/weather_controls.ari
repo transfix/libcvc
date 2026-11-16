@@ -30,8 +30,10 @@ units:
         bind: "{keys}.storminess"
       - text: "storm cells"
         bind: "{keys}.cells"
-      - text: "rain here (mm/h)"
+      - text: "rain at the ground's centre (mm/h)"
         bind: "{keys}.rain"
+      - text: "rain at the camera (mm/h)"
+        bind: "{keys}.rain_here"
       - separator
       - button: Storm upwind
         on: (state-set "{keys}.request" "upwind")
@@ -48,3 +50,35 @@ units:
         hi: 120.0
         fmt: "%.0f x"
         tooltip: "weather seconds per world second: a storm's 20 to 60 minutes in seconds; 0 holds the weather"
+      - separator
+      - text: "Rain"
+      - slider_float: Streaks
+        bind: "{keys}.streaks"
+        lo: 0.0
+        hi: 2.0
+        fmt: "%.2f"
+        tooltip: "the rain's streaks near the camera, as a share of the rain there (0: none)"
+      - slider_float: Streak count
+        bind: "{keys}.rain_quality"
+        lo: 0.1
+        hi: 1.0
+        fmt: "%.2f"
+        tooltip: "the share of the node's rain_count streaks a downpour draws (lower is cheaper)"
+      - slider_float: Rings
+        bind: "{keys}.rings"
+        lo: 0.0
+        hi: 2.0
+        fmt: "%.2f"
+        tooltip: "raindrop rings on the water"
+      - slider_float: Fog
+        bind: "{keys}.fog"
+        lo: 0.0
+        hi: 2.0
+        fmt: "%.2f"
+        tooltip: "how thick the fog the rain brings is"
+      - slider_float: Wet ground
+        bind: "{keys}.wet"
+        lo: 0.0
+        hi: 2.0
+        fmt: "%.2f"
+        tooltip: "how dark and glossy the ground goes where it has rained; it dries after"

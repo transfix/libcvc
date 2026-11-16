@@ -2115,6 +2115,13 @@ int main() {
             num("sky.darkness") > 0.55,
         "the deck rises to the storm's top and darkens");
     chk(num("weather.rain") > 0.0, "it rains at the ground's centre");
+    // O19: the rain's keys are seeded, and the weather hands the sky its tracks and constants.
+    chk(approx(num("weather.streaks"), 1.0) && approx(num("weather.rings"), 1.0) &&
+            approx(num("weather.fog"), 1.0) && approx(num("weather.wet"), 1.0) &&
+            approx(num("weather.rain_quality"), 1.0),
+        "the rain's keys are seeded (streaks, rings, fog, wet, rain_quality)");
+    chk(!str("sky.rain").empty() && !str("sky.rain_k").empty(),
+        "the sky has the storm's rain track (sky.rain) and the rain's constants (sky.rain_k)");
     tick();
     {
       auto ground = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("world"));
@@ -2134,6 +2141,12 @@ int main() {
       const bool dark = in && in->f.count("cloudDark") && in->f.at("cloudDark") > 0.55f;
       chk(storm && dark,
           "the receivers and the far clouds have the storm and the darkness (uniforms)");
+      // O19: the wet ground's track and the rain's constants: uniforms, no texture.
+      const bool track = in && in->f4.count("cloudWetA0") && in->f4.at("cloudWetA0")[2] > 0.0f &&
+                         in->f4.count("cloudRainK") && in->f4.at("cloudRainK")[1] > 0.0f;
+      const std::size_t samplers = in ? in->tex.size() : 99;
+      chk(track && samplers == 2,
+          "the receivers have the rain's track as uniforms (still the shade's 2 samplers)");
     }
     // The storm deck is built as a sliced task and swapped in: the near volumes' boxes rise.
     // Its process on the scheduler names how it runs: cloud_sky/threaded or cloud_sky/cooperative.
@@ -2181,6 +2194,8 @@ int main() {
     chk(str("weather.state") == "clear" && str("sky.storms").empty() &&
             approx(num("sky.top"), 180.0) && approx(num("sky.darkness"), 0.0),
         "cleared: no storms, the deck as authored, no darkness");
+    chk(!str("sky.rain").empty(),
+        "the gone storm's track stays in sky.rain while the ground dries");
     chk(waitTop(180.0), "the cumulus deck came back (the near volumes span 180 m again)");
     for (const std::string &w : warnings)
       printf("  warning: %s\n", w.c_str());
@@ -2225,6 +2240,8 @@ int main() {
                                   {"texture", "256"}}));
       scene.nodes.push_back(
           node("water", "water", {{"world", "world"}, {"level", "0"}, {"swell_height", "1"}}));
+      // O19: a storm raining on it all: the wet ground, the rings and the fog in the receivers'
+      // uniforms, and the streaks' own mesh.
       SceneNode sky = node("sky", "cloud_sky",
                            {{"ground", "world"},
                             {"extent", "60"},
@@ -2238,8 +2255,17 @@ int main() {
       item.kind = Value::Kind::Scalar;
       item.scalar = "water";
       rec.items.push_back(item);
+      item.scalar = "weather_rain";
+      rec.items.push_back(item);
       sky.props.entries.emplace_back("receivers", rec);
       scene.nodes.push_back(sky);
+      scene.nodes.push_back(node("weather", "weather",
+                                 {{"ground", "world"},
+                                  {"sky", "sky"},
+                                  {"chance", "0"},
+                                  {"radius_min", "500"},
+                                  {"radius_max", "500"},
+                                  {"storm_top", "600"}}));
       // terrain_lab's light: a three-point rig whose key is a directional sun, its one shadow
       // caster, so the shadow pass holds its map's unit through every draw.
       SceneLight rig;
@@ -2257,8 +2283,20 @@ int main() {
       scene.shadows_enabled = true;
       std::vector<std::string> warnings;
       auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "webgl", &warnings);
+      cvc::state::instance(app)(cvc::ariadne::resolve_bind("webgl", "weather.request"))
+          .value(std::string("overhead"));
+      bool placed = false;
       auto tick = [&]() {
+        cvc::pump_exec_frame(app.exec_scheduler());
         view.render();
+        if (!placed) { // in the rain, near the ground, looking along it
+          placed = true;
+          vtkCamera *c = view.renderer()->GetActiveCamera();
+          c->SetPosition(0.0, -20.0, 25.0);
+          c->SetFocalPoint(60.0, 40.0, 5.0);
+          c->SetViewUp(0.0, 0.0, 1.0);
+          view.renderer()->ResetCameraClippingRange();
+        }
         cvc::gl::ariadne::tick_scene(realized, view.renderer());
       };
       view.viewportManager().limitTextureUnits(16); // WebGL2's, as VTK counts them
@@ -2293,6 +2331,19 @@ int main() {
         chk(heard == 1, "the count hears vtkOpenGLState's out-of-units warning");
         chk(counter->count == 0,
             "no draw runs out of WebGL2's 16 units (the water, the swash, the shade)");
+        auto wgroup = sg.getGraphics("weather");
+        auto streaks = wgroup ? std::dynamic_pointer_cast<cvc::gl::GeometryNode>(
+                                    wgroup->findChildByName("weather_rain"))
+                              : nullptr;
+        auto win2 = near ? near->sharedShaderInputs("cloud_sky") : nullptr;
+        printf("  the rain's streaks: %s, the low-memory mapper %s\n",
+               streaks && streaks->isVisible() ? "drawn" : "not drawn",
+               streaks && streaks->usesLowMemoryMapper() ? "yes" : "no");
+        chk(streaks && streaks->isVisible(),
+            "the rain's streaks draw too, in the same 16 units (the camera is in the rain)");
+        chk(win2 && win2->f4.count("cloudFogC") && win2->f4.at("cloudFogC")[3] > 0.0f &&
+                win2->tex.size() == 2,
+            "the water has the rain's fog as a uniform, its sky samplers still 2");
       }
       for (const std::string &w : warnings)
         printf("  warning: %s\n", w.c_str());
