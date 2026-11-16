@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_device_key.h>
@@ -1257,12 +1258,19 @@ void state_transport_ws::deliver_inbound(connection *c, const void *data, std::s
     pb::Frame f;
     f.mutable_pong()->set_seq(in.ping().seq());
     f.mutable_pong()->set_sent_ns(in.ping().sent_ns());
+    f.mutable_pong()->set_wall_ns(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                      std::chrono::system_clock::now().time_since_epoch())
+                                      .count()); // the relay's time, for a client's clock
     if (c->write(f))
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
     return;
   }
   if (in.has_pong()) {
-    c->link.note_rtt(steady_ns() - in.pong().sent_ns());
+    {
+      const std::int64_t rtt = steady_ns() - in.pong().sent_ns();
+      c->link.note_rtt(rtt);
+      c->link.note_peer_clock(in.pong().wall_ns(), rtt);
+    }
     return;
   }
   if (in.has_hello()) {

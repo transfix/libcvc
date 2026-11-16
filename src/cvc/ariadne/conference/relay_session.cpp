@@ -13,8 +13,9 @@
 #include <cvc/ariadne/net_host.h> // net_host_access: the host's credentials
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
-#include <cvc/net/credentials.h> // CredentialStore, CredentialRenewer
-#include <cvc/net/net_policy.h>  // parse_origin
+#include <cvc/core/server_clock.h> // the relay's time, for the tray clock's tooltip
+#include <cvc/net/credentials.h>   // CredentialStore, CredentialRenewer
+#include <cvc/net/net_policy.h>    // parse_origin
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_device_key.h> // load_device_seed, state_device_signer
@@ -315,6 +316,21 @@ struct relay_session::impl {
   std::unique_ptr<link> live;
   std::shared_ptr<room_call_client> calls;
 
+  std::chrono::steady_clock::time_point next_clock{}; // when the relay's time is read next
+
+  // Once a second while joined: the relay's clock as our link to it measures it (the Pong's wall
+  // time), for the tray clock (cvc/core/server_clock.h).
+  void publish_clock(std::chrono::steady_clock::time_point t) {
+    if (t < next_clock || !live || !live->tp)
+      return;
+    next_clock = t + std::chrono::seconds(1);
+    for (const cvc::state_link_report &l : live->tp->link_reports())
+      if (!l.remote_node_id.empty() && l.stats.peer_clock) {
+        cvc::set_server_clock(app, l.stats.clock_offset_ms, l.stats.clock_rtt_ms, join.url);
+        return;
+      }
+  }
+
   enum class phase { idle, waiting, dialing, joined, backoff };
   phase now = phase::idle;
   bool started = false;
@@ -491,6 +507,7 @@ struct relay_session::impl {
 
   // The live link is gone: calls end unavailable, and the next dial is due after `wait`.
   void lose(const std::string &w) {
+    cvc::clear_server_clock(app);
     if (calls) {
       room_call_client::install(app, nullptr);
       calls->fail_all("room-call: the relay closed this host's connection");
@@ -588,6 +605,7 @@ struct relay_session::impl {
 #endif
 
   void leave() {
+    cvc::clear_server_clock(app);
     if (dialer.joinable())
       dialer.join();
 #ifdef __EMSCRIPTEN__
@@ -714,6 +732,7 @@ void relay_session::step() {
       return;
     }
     s.live->tp->pump_all();
+    s.publish_clock(t);
     return;
   }
   case impl::phase::dialing: {

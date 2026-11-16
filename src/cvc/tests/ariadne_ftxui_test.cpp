@@ -730,6 +730,111 @@ TEST(AriadneFtxui, MenuByMouse) {
   EXPECT_FALSE(t.shows("Quit")) << t.screen;
 }
 
+// §5.22 the tray sits at the bar's right end: its last icon ends in the last column.
+TEST(AriadneFtxui, TheTraySitsAtTheBarsRightEnd) {
+  REQUIRE_FTXUI();
+  Term t(group({menubar({menu("File", {}), tray_icon("M", "", "mail"), tray_icon("W", "3")})}));
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "W3", x, y)) << t.screen;
+  EXPECT_EQ(y, 0);
+  EXPECT_EQ(x + 3, t.width) << "\" W3 \" ends the row\n" << t.screen;
+  int mx = 0, my = 0;
+  ASSERT_TRUE(find_cell(t.screen, "M", mx, my)) << t.screen;
+  EXPECT_EQ(my, 0);
+  EXPECT_EQ(mx + 3, x) << "the icons sit side by side\n" << t.screen;
+  // A click on a button runs its on:.
+  int mail = 0;
+  t.rt.on("mail", [&] { ++mail; });
+  t.mouse(TermEvent::Mouse::Press, mx, 0);
+  t.mouse(TermEvent::Mouse::Release, mx, 0);
+  t.draw();
+  t.rt.drain();
+  EXPECT_EQ(mail, 1);
+}
+
+TEST(AriadneFtxui, ATrayMenuHangsLeftFromItsIcon) {
+  REQUIRE_FTXUI();
+  Term t(group({menubar(
+      {menu("File", {}), tray_icon("J", "2", "", {menu_action("Show all the jobs", "jobs")})})}));
+  int jobs = 0;
+  t.rt.on("jobs", [&] { ++jobs; });
+  ASSERT_TRUE(t.click("J2")) << t.screen;
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "Show all the jobs", x, y)) << t.screen;
+  EXPECT_LE(x + static_cast<int>(std::string("Show all the jobs").size()), t.width)
+      << "the dropdown stays on the screen\n"
+      << t.screen;
+  ASSERT_TRUE(t.click("Show all the jobs"));
+  t.rt.drain();
+  EXPECT_EQ(jobs, 1);
+}
+
+TEST(AriadneFtxui, TrayIconsWithNoRoomGoInAnOverflowMenu) {
+  REQUIRE_FTXUI();
+  Widget bar = menubar({menu("File", {}), menu("Edit", {}), tray_icon("A", "1"),
+                        tray_icon("B", "2"), tray_icon("C")});
+  bar.collapse = "never"; // §5.23: else the menus would fold to make room
+  Term t(group({bar}));
+  t.width = 22; // " File  Edit " takes 12 columns: room for " C " and the overflow icon
+  t.draw();
+  EXPECT_TRUE(t.shows("\xC2\xBB"
+                      "3"))
+      << "the overflow icon sums the hidden badges\n"
+      << t.screen;
+  EXPECT_TRUE(t.shows("\xC2\xBB"
+                      "3  C"))
+      << "then the last icon, which fits\n"
+      << t.screen;
+  EXPECT_FALSE(t.shows("A1")) << t.screen;
+  EXPECT_TRUE(t.shows("File")) << "the menus never yield\n" << t.screen;
+  EXPECT_TRUE(t.shows("Edit")) << t.screen;
+}
+
+// §5.23 a bar too narrow for its menus and its tray folds the menus into one, " ≡ ", whose
+// dropdown lists each menu under its title; the tray keeps the bar's right end.
+TEST(AriadneFtxui, ANarrowBarFoldsItsMenusIntoOne) {
+  REQUIRE_FTXUI();
+  Term t(group({menubar({menu("File", {menu_action("Quit", "quit")}), menu("Edit", {}),
+                         menu("View", {}), tray_icon("M"), tray_icon("W", "3")})}));
+  EXPECT_TRUE(t.shows("File")) << "80 columns: room for all of it\n" << t.screen;
+  t.width = 20; // " File  Edit  View " is 18 columns, the tray 7 more
+  t.draw();
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "\xE2\x89\xA1", x, y)) << t.screen;
+  EXPECT_EQ(y, 0);
+  EXPECT_EQ(x, 1) << "at the bar's left end\n" << t.screen;
+  EXPECT_FALSE(t.shows("File")) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, "W3", x, y)) << t.screen;
+  EXPECT_EQ(x + 3, t.width) << "the whole tray, at the right end\n" << t.screen;
+  ASSERT_TRUE(t.click("\xE2\x89\xA1")) << t.screen;
+  EXPECT_TRUE(t.shows("File")) << "the dropdown lists the menus\n" << t.screen;
+  EXPECT_TRUE(t.shows("View")) << t.screen;
+  int quit = 0;
+  t.rt.on("quit", [&] { ++quit; });
+  ASSERT_TRUE(t.click("Quit")) << t.screen;
+  t.rt.drain();
+  EXPECT_EQ(quit, 1);
+}
+
+// A document's second bar continues the first on the one row: its menus after the first one's,
+// its tray left of the first one's tray (it used to replace the first bar).
+TEST(AriadneFtxui, ASecondBarContinuesTheFirst) {
+  REQUIRE_FTXUI();
+  Term t(group(
+      {menubar({menu("File", {}), tray_icon("A")}), menubar({menu("Edit", {}), tray_icon("B")})}));
+  int fx_ = 0, ex = 0, ax = 0, bx = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "File", fx_, y)) << t.screen;
+  EXPECT_EQ(y, 0);
+  ASSERT_TRUE(find_cell(t.screen, "Edit", ex, y)) << t.screen;
+  EXPECT_EQ(y, 0);
+  ASSERT_TRUE(find_cell(t.screen, "A", ax, y)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, "B", bx, y)) << t.screen;
+  EXPECT_LT(fx_, ex);
+  EXPECT_LT(ex, bx);
+  EXPECT_LT(bx, ax);
+  EXPECT_EQ(ax + 2, t.width) << "the first bar's tray keeps the right end\n" << t.screen;
+}
+
 TEST(AriadneFtxui, WindowsCascadeAndUseTheAuthoredPos) {
   REQUIRE_FTXUI();
   Widget a = window("Alpha", {text("a")});
@@ -1508,6 +1613,63 @@ TEST(AriadneFtxuiHosted, KeepsWindowBodiesAndAMenuModel) {
   ASSERT_EQ(rows.size(), 4u);
   EXPECT_EQ(row_text(rows, 0).substr(0, 5), "[ ] A");
   EXPECT_EQ(row_text(rows, 1).substr(0, 5), "[ ] B");
+}
+
+// §5.22 the tray: a hosted backend draws none of it, and gives the host its icons, their tooltips
+// and their menus' items, which the host activates.
+TEST(AriadneFtxuiHosted, TheTrayIsAModelTheHostActivates) {
+  REQUIRE_FTXUI();
+  Widget jobs = tray_icon("J", "2", "", {menu_action("Show jobs", "jobs")});
+  jobs.tooltip = "Jobs";
+  Term t(group({menubar({menu("File", {}), tray_icon("M", "", "mail"), jobs})}), hosted_opts());
+  t.draw(); // hosted menus (and so the tray) join the walk from the second frame
+  int mail = 0, shown = 0;
+  t.rt.on("mail", [&] { ++mail; });
+  t.rt.on("jobs", [&] { ++shown; });
+  const auto tray = t.be.hosted_tray();
+  ASSERT_EQ(tray.size(), 2u);
+  EXPECT_EQ(tray[0].glyph, "M");
+  EXPECT_FALSE(tray[0].menu);
+  EXPECT_EQ(tray[1].glyph, "J");
+  EXPECT_EQ(tray[1].badge, "2");
+  EXPECT_EQ(tray[1].tooltip, "Jobs");
+  ASSERT_TRUE(tray[1].menu);
+  ASSERT_EQ(tray[1].items.size(), 1u);
+  EXPECT_EQ(tray[1].items[0].label, "Show jobs");
+  ASSERT_EQ(t.be.hosted_menus().size(), 1u) << "the tray menu is not one of the bar's menus";
+  t.be.activate_menu_item(t.rt, tray[0].id);
+  t.be.activate_menu_item(t.rt, tray[1].items[0].id);
+  t.rt.drain();
+  EXPECT_EQ(mail, 1);
+  EXPECT_EQ(shown, 1);
+}
+
+// §5.23 hosted, a folded bar is one menu whose items hold each menu as a submenu: its title, then
+// its items one deeper, for the host to nest.
+TEST(AriadneFtxuiHosted, AFoldedBarIsOneMenuOfSubmenus) {
+  REQUIRE_FTXUI();
+  Widget bar = menubar(
+      {menu("File", {menu_action("Quit", "quit")}), menu("Edit", {menu_action("Undo", "undo")})});
+  bar.collapse = "always";
+  Term t(group({bar}), hosted_opts());
+  t.draw();
+  const auto menus = t.be.hosted_menus();
+  ASSERT_EQ(menus.size(), 1u);
+  EXPECT_EQ(menus[0].label, "\xE2\x89\xA1");
+  ASSERT_EQ(menus[0].items.size(), 4u);
+  EXPECT_TRUE(menus[0].items[0].submenu);
+  EXPECT_EQ(menus[0].items[0].label, "File");
+  EXPECT_EQ(menus[0].items[0].depth, 0);
+  EXPECT_EQ(menus[0].items[1].label, "Quit");
+  EXPECT_EQ(menus[0].items[1].depth, 1);
+  EXPECT_TRUE(menus[0].items[2].submenu);
+  EXPECT_EQ(menus[0].items[3].label, "Undo");
+  EXPECT_EQ(menus[0].items[3].depth, 1);
+  int undo = 0;
+  t.rt.on("undo", [&] { ++undo; });
+  t.be.activate_menu_item(t.rt, menus[0].items[3].id);
+  t.rt.drain();
+  EXPECT_EQ(undo, 1);
 }
 
 TEST(AriadneFtxuiHosted, AMenuToggleDoesNotSeedAWindowClosed) {

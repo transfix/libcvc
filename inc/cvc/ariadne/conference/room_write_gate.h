@@ -30,9 +30,9 @@ namespace conference {
 // ----------------
 // The room's write rule for a relay's clients (ARIADNE_CONFERENCE_ROADMAP §5d/§5e item 1): install
 // one gate on every transport of the relay (state_transport::set_inbound_gate), which binds each
-// connection to the pid of its Hello. A participant (whose pid is one identifier, no '.') may then
-// write only inside its own participant subtree, conf.rooms.<room>.participants.<pid>, and there
-// only:
+// connection to the pid of its Hello. A participant (whose pid is one identifier, no '.', and does
+// not begin with '_', the form of a bridged user's pid, room_intrinsics.h) may then write only
+// inside its own participant subtree, conf.rooms.<room>.participants.<pid>, and there only:
 //   - a value, a touch or a data() payload (no delete, reset, delegation, read-only or hidden
 //     flag: no client uses them, and each could take a key from the relay);
 //   - outside the keys the relay owns there: `pose` (the server holon's authoritative pose),

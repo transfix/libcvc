@@ -100,21 +100,26 @@ Vec3d vcross(Vec3d a, Vec3d b) {
 }
 
 // ── the world scale ──────────────────────────────────────────────────────────
-double gHalf = 600.0; // world spans [-gHalf, gHalf]^2 (metres) — set live from the size knob
-// The world's unit scale: one world unit == one metre. Realistic, centred-on-origin coordinates;
-// used to label spans in the natural regime (metres, promoting to km past 1000 m).
-cvc::world_units gUnits{cvc::world_units::config{cvc::world_units::system::si, 1.0}};
+// The extents that follow the world's size, which is a live knob: main owns one and sets it on
+// each rebuild. The world spans [-half, half]^2 (metres); the water grid is sea_n^2, and the cloud
+// slab spans [-sky_half, sky_half]^2 from sky_base to sky_top. Spans are labelled with the app's
+// world units (SI, one world unit == one metre: metres, promoting to km past 1000 m).
+struct Extents {
+  double half = 600.0;
+  int sea_n = 160;
+  double sky_half = 640.0, sky_base = 220.0, sky_top = 360.0;
+};
 const char *const kPresetNames[] = {"standard", "forest", "urban", "sparse", "island"};
 const char *const kOntologyNames[] = {"merged_default", "soft_vegetation", "strict_water_mud"};
 const char *const kColorModeNames[] = {"material", "risk", "occupancy", "height"};
 constexpr int TEX = 2048; // the terrain surface texture (material + roads + shoreline)
 
-// The Austin building archetype library, loaded once. Discovery: $CVC_NAV_BUNDLE (a buildings.glb
-// file, or a directory / scene dir containing one), else a buildings.glb beside the working dir.
-// Empty without one: the city's buildings are then procedural massing. Read with app's model
-// handlers.
-const world::building_library &cityLibrary(cvc::app &app) {
-  static const world::building_library lib = [&app] {
+// The Austin building archetype library; main loads it once. Discovery: $CVC_NAV_BUNDLE (a
+// buildings.glb file, or a directory / scene dir containing one), else a buildings.glb beside the
+// working dir. Empty without one: the city's buildings are then procedural massing. Read with
+// app's model handlers.
+world::building_library loadCityLibrary(cvc::app &app) {
+  return [&app] {
     std::vector<std::string> paths;
     if (const char *env = std::getenv("CVC_NAV_BUNDLE"); env && *env) {
       const std::string e(env);
@@ -134,7 +139,6 @@ const world::building_library &cityLibrary(cvc::app &app) {
         "terrain_lab: no Austin building bundle (set CVC_NAV_BUNDLE) — procedural buildings\n");
     return world::building_library{};
   }();
-  return lib;
 }
 
 // Procedural fragment bump map for the ground (verbatim GLSL from lsystem_forest / the Python demo:
@@ -182,19 +186,18 @@ void addTerrainBump(GeometryNode &node) {
 }
 
 // ── the water: generated_world's depth volume under a gently travelling wave ─
-int gSeaN = 160;
 constexpr int SEA_NZ = 22;
-cvc::volume seaVolume(cvc::app &app, const world::generated_world &w, double t) {
-  const std::vector<float> field = world::water_field(w, t, gSeaN, SEA_NZ);
-  return cvc::volume(
-      app, reinterpret_cast<const unsigned char *>(field.data()),
-      cvc::dimension(gSeaN, gSeaN, SEA_NZ), cvc::Float,
-      cvc::bounding_box(-gHalf, -gHalf, world::water_floor(w), gHalf, gHalf, world::water_top(w)));
+cvc::volume seaVolume(cvc::app &app, const Extents &ext, const world::generated_world &w,
+                      double t) {
+  const std::vector<float> field = world::water_field(w, t, ext.sea_n, SEA_NZ);
+  return cvc::volume(app, reinterpret_cast<const unsigned char *>(field.data()),
+                     cvc::dimension(ext.sea_n, ext.sea_n, SEA_NZ), cvc::Float,
+                     cvc::bounding_box(-ext.half, -ext.half, world::water_floor(w), ext.half,
+                                       ext.half, world::water_top(w)));
 }
 
 // ── the sky: a drifting cloud slab (fixed 60^3 grid, world-scaled extent) ─────
 constexpr int SKY_N = 60, SKY_NZ = 26;
-double gSkyHalf = 640.0, gSkyBase = 220.0, gSkyTop = 360.0;
 constexpr int CLOUD_MAPS = 2, CLOUD_DEPTH = 6;
 constexpr double CLOUD_TURN = 32.0, CLOUD_STEP0 = 8.1, CLOUD_STEP_DECAY = 0.9;
 constexpr double CLOUD_PUFF0 = 8.8, CLOUD_PUFF_DECAY = 0.88;
@@ -251,12 +254,12 @@ double fbm3(double x, double y, double z, int octaves) {
   }
   return f / tot;
 }
-std::vector<float> walkClouds(std::mt19937 &rng) {
+std::vector<float> walkClouds(std::mt19937 &rng, const Extents &ext) {
   std::uniform_real_distribution<double> U(0.0, 1.0);
   auto uni = [&](double a, double b) { return a + (b - a) * U(rng); };
   const int N = SKY_N, NZ = SKY_NZ;
   std::vector<float> field(std::size_t(NZ) * N * N, 0.0f);
-  const double zscale = (double(N) / NZ) * ((gSkyTop - gSkyBase) / (2.0 * gSkyHalf));
+  const double zscale = (double(N) / NZ) * ((ext.sky_top - ext.sky_base) / (2.0 * ext.sky_half));
   double x = uni(0.25, 0.75) * N, y = uni(0.3, 0.7) * N, z = NZ * 0.42;
   double head = uni(0.0, 360.0);
   double step = CLOUD_STEP0, puff = CLOUD_PUFF0, climb = 0.0;
@@ -381,11 +384,11 @@ struct SkyModel {
     return r;
   }
 };
-SkyModel buildSky() {
+SkyModel buildSky(const Extents &ext) {
   SkyModel sky;
   std::mt19937 rng(20u);
   for (int m = 0; m < CLOUD_MAPS; ++m)
-    sky.maps.push_back(walkClouds(rng));
+    sky.maps.push_back(walkClouds(rng, ext));
   double norm = 0.0;
   for (int c = 0; c < SKY_N; c += 8)
     for (double mo : {0.0, 0.5, 1.0}) {
@@ -396,11 +399,11 @@ SkyModel buildSky() {
   sky.norm = norm > 0 ? norm : 1.0;
   return sky;
 }
-cvc::volume skyVolume(cvc::app &app, const std::vector<float> &field) {
-  return cvc::volume(
-      app, reinterpret_cast<const unsigned char *>(field.data()),
-      cvc::dimension(SKY_N, SKY_N, SKY_NZ), cvc::Float,
-      cvc::bounding_box(-gSkyHalf, -gSkyHalf, gSkyBase, gSkyHalf, gSkyHalf, gSkyTop));
+cvc::volume skyVolume(cvc::app &app, const Extents &ext, const std::vector<float> &field) {
+  return cvc::volume(app, reinterpret_cast<const unsigned char *>(field.data()),
+                     cvc::dimension(SKY_N, SKY_N, SKY_NZ), cvc::Float,
+                     cvc::bounding_box(-ext.sky_half, -ext.sky_half, ext.sky_base, ext.sky_half,
+                                       ext.sky_half, ext.sky_top));
 }
 void skyTransfer(std::vector<double> &color, std::vector<double> &opacity) {
   color = {0.0, 0.80, 0.85, 0.93, 0.45, 0.94, 0.96, 0.98, 1.0, 1.00, 1.00, 1.00};
@@ -408,7 +411,7 @@ void skyTransfer(std::vector<double> &color, std::vector<double> &opacity) {
 }
 
 // ── the sun (a flat-lit disc + halo, camera-relative, at infinity) ───────────
-double SUN_AZ = -52.0, SUN_EL = 36.0;
+constexpr double SUN_AZ = -52.0, SUN_EL = 36.0;
 Vec3d sunDir(double azDeg, double elDeg) {
   double az = azDeg * M_PI / 180.0, el = elDeg * M_PI / 180.0;
   return {std::cos(el) * std::sin(az), -std::cos(el) * std::cos(az), std::sin(el)};
@@ -485,10 +488,11 @@ int main(int argc, char **argv) {
     std::filesystem::create_directories(outDir, ec);
   }
 
-  gHalf = half;
+  Extents ext; // follows the world size (here, and on each rebuild)
+  ext.half = half;
   // Water/cloud extents follow the world size.
-  gSeaN = std::max(80, std::min(160, int(std::lround(2.0 * gHalf / 8.0))));
-  gSkyHalf = gHalf * 1.06;
+  ext.sea_n = std::max(80, std::min(160, int(std::lround(2.0 * ext.half / 8.0))));
+  ext.sky_half = ext.half * 1.06;
 
   world::generated_world_params gp;
   gp.seed = seed;
@@ -497,6 +501,7 @@ int main(int argc, char **argv) {
 
   cvc::app app;
   app.properties("system.log_verbosity", verbose ? "6" : "2");
+  const world::building_library cityLib = loadCityLibrary(app); // once, for every rebuild
   SceneGraph sg(app, "terrain_lab");
 
   int colorMode = 0; // material
@@ -539,8 +544,8 @@ int main(int argc, char **argv) {
     // The world size is a live knob: every size-dependent extent follows it, and the terrain
     // mesh keeps a fixed cell size (capped), so a big terrain stays detailed — the mesh the LOD
     // path is stress-tested on.
-    gHalf = std::max(50.0, gp.half_m);
-    gSkyHalf = gHalf * 1.06;
+    ext.half = std::max(50.0, gp.half_m);
+    ext.sky_half = ext.half * 1.06;
     auto _tp = std::chrono::steady_clock::now();
     const bool _prof = std::getenv("CVC_TL_PROF") != nullptr;
     auto lap = [&](const char *name) {
@@ -550,11 +555,11 @@ int main(int argc, char **argv) {
                      std::chrono::duration<double, std::milli>(n - _tp).count());
       _tp = n;
     };
-    W = world::generate_world(app, gp, &cityLibrary(app));
+    W = world::generate_world(app, gp, &cityLib);
     lap("generate-world");
-    gSeaN = world::water_resolution(W);
-    gSkyBase = W.height_max + gHalf * 0.35 + 60.0;
-    gSkyTop = gSkyBase + gHalf * 0.30 + 80.0;
+    ext.sea_n = world::water_resolution(W);
+    ext.sky_base = W.height_max + ext.half * 0.35 + 60.0;
+    ext.sky_top = ext.sky_base + ext.half * 0.30 + 80.0;
 
     // A plain copy of the terrain's mesh (its arrays shared copy-on-write).
     const cvc::geometry terrain(*W.terrain);
@@ -605,9 +610,9 @@ int main(int argc, char **argv) {
     // water volume
     if (sg.hasGraphics("water"))
       std::dynamic_pointer_cast<VolumeNode>(sg.getGraphics("water"))
-          ->setVolume(seaVolume(app, W, 0.0));
+          ->setVolume(seaVolume(app, ext, W, 0.0));
     else {
-      auto w = sg.addGraphics("water", seaVolume(app, W, 0.0));
+      auto w = sg.addGraphics("water", seaVolume(app, ext, W, 0.0));
       std::vector<double> col, op;
       world::water_transfer(0.0, col, op);
       w->setTransferFunction(col, op);
@@ -634,9 +639,9 @@ int main(int argc, char **argv) {
 
   // Stage lighting (a rig aimed at the world, not a sky).
   cvc::gl::StageLighting rig(sg);
-  rig.setStage(0.0, 0.0, 0.0, gHalf);
+  rig.setStage(0.0, 0.0, 0.0, ext.half);
   rig.applyPreset(cvc::gl::StageLighting::Preset::ThreePoint);
-  rig.setKey(1.15, SUN_AZ, SUN_EL, gHalf * 0.3);
+  rig.setKey(1.15, SUN_AZ, SUN_EL, ext.half * 0.3);
   rig.setWarmth(0.4);
 
   SceneRenderer view(sg, width, height, offscreen, "main");
@@ -670,7 +675,7 @@ int main(int argc, char **argv) {
   bool uiScene = false, uiLighting = false;
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
-      cvc_examples::demos_menu("terrain_lab");
+      cvc_examples::demos_menu(app, "terrain_lab");
       if (ImGui::BeginMenu("Scene")) {
         cvc::gl::ui::SceneMenuItems(sg, &uiScene, &uiLighting);
         ImGui::EndMenu();
@@ -699,7 +704,7 @@ int main(int argc, char **argv) {
                              ImGuiSliderFlags_Logarithmic))
         gp.half_m = hm;
       const cvc::world_units::measurement span =
-          gUnits.format(2.0 * gp.half_m, cvc::world_units::dimension::length);
+          app.world_units().format(2.0 * gp.half_m, cvc::world_units::dimension::length);
       const int tn = W.terrain ? W.terrain->rows() : 0;
       ImGui::Text("   span %.2f %s  |  terrain %dx%d", span.value, span.unit.c_str(), tn, tn);
     }
@@ -739,7 +744,7 @@ int main(int argc, char **argv) {
   // The sun billboard (added after framing so it doesn't inflate the bounds).
   Vec3d sd = sunDir(SUN_AZ, SUN_EL);
   Vec3d face{-sd.x, -sd.y, -sd.z};
-  double sunR = gHalf * 0.10, sunRef = gHalf * 4.0, sunCap = gHalf * 1.1;
+  double sunR = ext.half * 0.10, sunRef = ext.half * 4.0, sunCap = ext.half * 1.1;
   sg.addGraphics("sun", discGeom(app, {0, 0, 0}, face, sunR));
   {
     auto disc = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("sun"));
@@ -775,8 +780,8 @@ int main(int argc, char **argv) {
   };
 
   // The sky slab (added after framing too — it is scenery, not a framing target).
-  SkyModel sky = buildSky();
-  auto skyNode = sg.addGraphics("sky", skyVolume(app, sky.field(0.0, 0.0)));
+  SkyModel sky = buildSky(ext);
+  auto skyNode = sg.addGraphics("sky", skyVolume(app, ext, sky.field(0.0, 0.0)));
   skyNode->setShading(false);
   skyNode->setAmbient(0.95);
   skyNode->setDiffuse(0.35);
@@ -793,18 +798,18 @@ int main(int argc, char **argv) {
 
   {
     const cvc::world_units::measurement span =
-        gUnits.format(2.0 * gHalf, cvc::world_units::dimension::length);
+        app.world_units().format(2.0 * ext.half, cvc::world_units::dimension::length);
     std::printf(
         "terrain_lab: %s, world %.2f %s (1 world unit = 1 m), %s. Tab=orbit/fly, WASD+mouse=fly.\n",
         offscreen ? "offscreen" : "onscreen", span.value, span.unit.c_str(),
         shadows ? "shadows on" : "no shadows");
   }
 
-  const std::vector<Vec3d> flyEye = {{-gHalf * 1.5, -gHalf * 1.3, gHalf * 0.4},
-                                     {-gHalf * 0.6, gHalf * 0.2, gHalf * 0.35},
-                                     {gHalf * 0.5, gHalf * 0.6, gHalf * 0.5},
-                                     {gHalf * 1.1, -gHalf * 0.3, gHalf * 0.7}};
-  const std::vector<Vec3d> flyTgt(4, {0, 0, gHalf * 0.1});
+  const std::vector<Vec3d> flyEye = {{-ext.half * 1.5, -ext.half * 1.3, ext.half * 0.4},
+                                     {-ext.half * 0.6, ext.half * 0.2, ext.half * 0.35},
+                                     {ext.half * 0.5, ext.half * 0.6, ext.half * 0.5},
+                                     {ext.half * 1.1, -ext.half * 0.3, ext.half * 0.7}};
+  const std::vector<Vec3d> flyTgt(4, {0, 0, ext.half * 0.1});
   auto crInterp = [](const std::vector<Vec3d> &p, double s) {
     int m = int(p.size());
     double x = s * (m - 1);
@@ -841,7 +846,7 @@ int main(int argc, char **argv) {
   // fixed 1/fps makes the frames reproducible.
   cvc::world_clock &clock = app.world_clock();
   cvc::world_clock_binding clockDrive(app, clock);
-  while (!view.windowClosed() && !cvc_examples::demo_switch_requested()) {
+  while (!view.windowClosed() && !cvc_examples::demo_switch_requested(app)) {
     double t, dt;
     if (capturing) {
       t = frame / fps;
@@ -863,13 +868,13 @@ int main(int argc, char **argv) {
     const bool cloudDue = capturing || frame % CLOUD_STRIDE == 1;
     if (seaDue && sg.hasGraphics("water")) {
       auto w = std::dynamic_pointer_cast<VolumeNode>(sg.getGraphics("water"));
-      w->updateScalars(world::water_field(W, wt, gSeaN, SEA_NZ));
+      w->updateScalars(world::water_field(W, wt, ext.sea_n, SEA_NZ));
       std::vector<double> col, op;
       world::water_transfer(wt, col, op);
       w->setTransferFunction(col, op);
     }
     if (cloudDue) {
-      double shift = wt * (gHalf * 0.010) * SKY_N / (2.0 * gSkyHalf);
+      double shift = wt * (ext.half * 0.010) * SKY_N / (2.0 * ext.sky_half);
       double morph = wt / 60.0 * CLOUD_MAPS;
       skyNode->updateScalars(sky.field(shift, morph));
     }
@@ -877,7 +882,7 @@ int main(int argc, char **argv) {
       double s = frames > 1 ? double(frame) / (frames - 1) : 0.0;
       s = s * s * (3.0 - 2.0 * s);
       Vec3d e = crInterp(flyEye, s), tg = crInterp(flyTgt, s);
-      view.setCamera(e.x, e.y, e.z, tg.x, tg.y, tg.z, 0, 0, 1, 42.0, 1.0, gHalf * 12.0);
+      view.setCamera(e.x, e.y, e.z, tg.x, tg.y, tg.z, 0, 0, 1, 42.0, 1.0, ext.half * 12.0);
       placeSky(e);
     } else {
       if (capture == Capture::Orbit && frames > 0)

@@ -29,8 +29,14 @@
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_generated_world.h> // SceneColliders
 #include <cvc/ariadne/scene_water.h>
+#include <cvc/ariadne/scene_wind.h>
+#include <cvc/core/app.h>
+#include <cvc/core/world_clock.h>
 #include <cvc/geometry/height_field.h>
+#include <cvc/ocean/current.h>
+#include <cvc/ocean/fetch.h>
 #include <cvc/ocean/h0.h>
+#include <cvc/ocean/sea_lag.h>
 #include <cvc/ocean/sea_surface.h>
 #include <cvc/ocean/shore.h>
 #include <cvc/ocean/spectrum.h>
@@ -67,6 +73,48 @@ cvc::ocean::sea_state sea_state_of(const SceneWaterSpec &s) {
   return sea;
 }
 
+constexpr int kFetchMaxSide = 256; // the fetch map's most samples a side (a coarse texture)
+
+// The cascades' bands (lsystem_coast's tiles and seed).
+std::vector<cvc::ocean::cascade> water_bands() {
+  return cvc::ocean::make_cascades({kTiles[0], kTiles[1], kTiles[2]}, kCascadeSeed);
+}
+
+// The cascades' h0 for keyframe wind w: the wind sea alone, as the drawn cascades.
+std::vector<cvc::ocean::h0_field> keyframe_h0(const cvc::ocean::sea_wind &w) {
+  cvc::ocean::sea_state sea;
+  sea.wind.speed_mps = w.speed_mps;
+  sea.wind.dir_rad = w.dir_rad;
+  sea.wind.fetch_m = w.fetch_m;
+  sea.swell.hs_m = 0.0;
+  std::vector<cvc::ocean::h0_field> out;
+  for (const cvc::ocean::cascade &c : water_bands())
+    out.push_back(cvc::ocean::build_h0(kH0N, c, sea));
+  return out;
+}
+
+// Each cascade's fully grown fetch for keyframe wind w (fetch.h).
+std::vector<double> keyframe_full(const cvc::ocean::sea_wind &w) {
+  const double F = cvc::ocean::spectrum_fetch(w.speed_mps, w.fetch_m);
+  std::vector<double> out;
+  for (const cvc::ocean::cascade &c : water_bands())
+    out.push_back(cvc::ocean::band_full_fetch(w.speed_mps, c.k_min, F));
+  return out;
+}
+
+// The fetch map over the coast for a wind toward dir_rad: coarse (kFetchMaxSide a side at most),
+// each sample capped by its body's open extent, the sea's by the open fetch.
+std::shared_ptr<const cvc::ocean::fetch_field> keyframe_fetch(const SceneWaterShore &sh,
+                                                              double dir_rad, double open_m) {
+  if (!sh.grid)
+    return nullptr;
+  const cvc::ocean::shore_grid &g = *sh.grid;
+  const int stride = std::max(1, static_cast<int>(std::ceil(double(std::max(g.rows, g.cols) - 1) /
+                                                            double(kFetchMaxSide - 1))));
+  return std::make_shared<const cvc::ocean::fetch_field>(cvc::ocean::build_fetch(
+      g, dir_rad, open_m, sh.fetch_cap.size() == g.count() ? &sh.fetch_cap : nullptr, stride));
+}
+
 } // namespace
 
 SceneWaterSpec scene_water_spec(cvc::app &app, const SceneNode &n, const std::string &bind_prefix) {
@@ -80,9 +128,17 @@ SceneWaterSpec scene_water_spec(cvc::app &app, const SceneNode &n, const std::st
     read_or_seed<double>(app, path, seeded);
     return read_or<double>(app, path, seeded);
   };
-  s.wind_speed = std::max(key("water.wind_speed", "wind_speed", s.wind_speed), 0.0);
-  s.wind_dir = key("water.wind_dir", "wind_dir", s.wind_dir);
+  // The wind, through the one place every node reads it (scene_wind.h; O14's scene wind).
+  const SceneWind w =
+      scene_wind(app, n, bind_prefix, kWaterWindKeys, {s.wind_speed, s.wind_dir, s.gustiness});
+  s.wind_speed = w.speed;
+  s.wind_dir = w.dir;
+  s.gustiness = w.gustiness;
   s.fetch = std::max(key("water.fetch", "fetch", s.fetch), 400.0);
+  s.lee = key("water.lee", "lee", 1.0) != 0.0;
+  s.sea_lag = std::max(key("water.sea_lag", "sea_lag", s.sea_lag), 0.0);
+  s.sea_fade = std::max(key("water.sea_fade", "sea_fade", s.sea_fade), 0.0);
+  s.current = std::max(key("water.current", "current", s.current), 0.0);
   s.chop = key("water.chop", "chop", s.chop);
   s.wave_amp = key("water.wave_amp", "wave_amp", s.wave_amp);
   s.shore_fade = std::max(key("water.shore_fade", "shore_fade", s.shore_fade), 0.05);
@@ -168,6 +224,14 @@ std::shared_ptr<const SceneWaterShore> scene_water_shore(const cvc::height_field
   grid->normal_y = wb.normal_y;
   auto out = std::make_shared<SceneWaterShore>();
   out->slope = wb.slope;
+  // Each sample's most fetch: an enclosed body's open extent; the sea's is the open fetch (-1).
+  out->fetch_cap.assign(wb.body.size(), -1.0f);
+  for (std::size_t i = 0; i < wb.body.size(); ++i) {
+    const std::int32_t b = wb.body[i];
+    if (b >= 0 && std::size_t(b) < wb.bodies.size() &&
+        wb.bodies[std::size_t(b)].kind != cvc::world::water_kind::sea)
+      out->fetch_cap[i] = float(wb.bodies[std::size_t(b)].fetch_m);
+  }
   if (s.swell_height > 0.0) {
     const cvc::ocean::sea_state sea = sea_state_of(s);
     cvc::ocean::shore_swell sw;
@@ -207,6 +271,108 @@ SceneWaterCascades scene_water_cascades(const SceneWaterSpec &s) {
   return out;
 }
 
+// ── the sea as the wind grows it (O13) ─────────────────────────────────────────────────────────
+
+double SceneWaterSea::weight(double t) const { return cvc::ocean::crossfade_weight(t, t0, t1); }
+
+struct SceneWaterSeaClock::impl {
+  cvc::ocean::sea_lag lag;
+  std::shared_ptr<const SceneWaterSea> sea;
+  const SceneWaterShore *shore = nullptr; // the coast the fetch maps were built over
+  bool lee = true;
+};
+
+SceneWaterSeaClock::SceneWaterSeaClock() : _impl(std::make_unique<impl>()) {}
+SceneWaterSeaClock::~SceneWaterSeaClock() = default;
+std::shared_ptr<const SceneWaterSea> SceneWaterSeaClock::sea() const { return _impl->sea; }
+
+bool SceneWaterSeaClock::advance(double t, const SceneWaterSpec &s,
+                                 const std::shared_ptr<const SceneWaterShore> &shore) {
+  impl &d = *_impl;
+  cvc::ocean::sea_lag_params lp = d.lag.params();
+  lp.lag_s = s.sea_lag;
+  lp.crossfade_s = s.sea_fade;
+  d.lag.set_params(lp);
+  const bool key = d.lag.advance(t, {s.wind_speed, s.wind_dir * kPi / 180.0, s.fetch});
+  const bool coast = shore.get() != d.shore || s.lee != d.lee;
+  if (!key && !coast && d.sea)
+    return false;
+  const auto t0 = std::chrono::steady_clock::now();
+  auto next = std::make_shared<SceneWaterSea>(d.sea ? *d.sea : SceneWaterSea{});
+  const SceneWaterSea *prev = d.sea.get();
+  if (key) {
+    next->from = d.lag.from();
+    next->to = d.lag.to();
+    next->t0 = d.lag.t0();
+    next->t1 = d.lag.t1();
+    // The old sea is the last keyframe's whole (a keyframe comes only once a crossfade is over).
+    next->h0_from = prev ? prev->h0 : std::vector<cvc::ocean::h0_field>{};
+    next->full_from = prev ? prev->full : keyframe_full(next->to);
+    next->h0 = keyframe_h0(next->to);
+    next->full = keyframe_full(next->to);
+    next->fetch_from = prev ? prev->fetch : nullptr;
+    ++next->keyframe;
+  }
+  // The fetch maps: the new keyframe's again when its direction moved (or the coast or the lee
+  // switch changed); a change of speed alone keeps them. Both on the same coast.
+  if (!s.lee || !shore || !shore->grid) {
+    next->fetch = next->fetch_from = nullptr;
+  } else {
+    const bool turned = !prev || !prev->fetch || next->to.dir_rad != prev->fetch->dir_rad;
+    if (coast || turned || !next->fetch)
+      next->fetch = keyframe_fetch(*shore, next->to.dir_rad, next->to.fetch_m);
+    if (coast || !next->fetch_from) {
+      next->fetch_from =
+          next->from.dir_rad == next->to.dir_rad && next->from.fetch_m == next->to.fetch_m
+              ? next->fetch
+              : keyframe_fetch(*shore, next->from.dir_rad, next->from.fetch_m);
+    }
+  }
+  next->build_ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  d.sea = std::move(next);
+  d.shore = shore.get();
+  d.lee = s.lee;
+  return true;
+}
+
+std::shared_ptr<const cvc::ocean::sea_forcing> scene_water_forcing(const SceneWaterSpec &s,
+                                                                   const SceneWaterSea &k) {
+  auto f = std::make_shared<cvc::ocean::sea_forcing>();
+  if (!k.h0_from.empty()) {
+    f->t0 = k.t0;
+    f->t1 = k.t1;
+  }
+  f->fetch = k.fetch;
+  f->fetch_from = k.fetch_from;
+  f->wind = SceneWind{s.wind_speed, s.wind_dir, s.gustiness}.state();
+  f->current.speed_mps = s.current;
+  return f;
+}
+
+std::vector<cvc::ocean::sea_cascade> scene_water_sea_cascades(const SceneWaterSpec &s,
+                                                              const SceneWaterSea &k) {
+  SceneWaterSpec ks = s; // the fades and decays for the new keyframe's wind
+  ks.wind_speed = k.to.speed_mps;
+  ks.wind_dir = k.to.dir_rad * 180.0 / kPi;
+  ks.fetch = k.to.fetch_m;
+  const SceneWaterCascades cd = scene_water_cascades(ks);
+  std::vector<cvc::ocean::sea_cascade> cs;
+  for (std::size_t i = 0; i < k.h0.size(); ++i) {
+    cvc::ocean::sea_cascade c{k.h0[i], cd.fade_m[i], cd.decay_k[i]};
+    if (i < k.h0_from.size())
+      c.h0_from = k.h0_from[i];
+    c.full_fetch_m = i < k.full.size() ? k.full[i] : 0.0;
+    c.full_fetch_from_m = i < k.full_from.size() ? k.full_from[i] : c.full_fetch_m;
+    c.gust = i < 3 ? kWaterGustWeight[i] : 0.0;
+    c.advect = i < 3 && kWaterAdvect[i];
+    cs.push_back(std::move(c));
+  }
+  return cs;
+}
+
+// ── the physics ──────────────────────────────────────────────────────────────────────────────
+
 struct WaterRuntime::impl {
   cvc::app *app = nullptr;
   SceneNode node;
@@ -214,9 +380,8 @@ struct WaterRuntime::impl {
   std::function<std::shared_ptr<const cvc::height_field>()> ground;
   std::shared_ptr<SceneColliders> colliders = std::make_shared<SceneColliders>();
   std::vector<double> built;    // the spec the field was built for
-  std::vector<double> windSea;  // the wind h0 was built for
   std::vector<double> shoreSig; // and the coast
-  std::vector<cvc::ocean::h0_field> h0;
+  SceneWaterSeaClock clock;     // the sea's keyframes of its lagged wind
   std::shared_ptr<const SceneWaterShore> shore;
   std::shared_ptr<const cvc::ocean::sea_surface> sea;
   std::shared_ptr<const cvc::physics::field> field;
@@ -240,6 +405,7 @@ const std::shared_ptr<SceneColliders> &WaterRuntime::colliders() const { return 
 std::shared_ptr<const SceneWaterShore> WaterRuntime::shore() const { return _impl->shore; }
 std::shared_ptr<const cvc::ocean::sea_surface> WaterRuntime::sea() const { return _impl->sea; }
 std::shared_ptr<const cvc::physics::field> WaterRuntime::field() const { return _impl->field; }
+std::shared_ptr<const SceneWaterSea> WaterRuntime::keyframes() const { return _impl->clock.sea(); }
 
 bool WaterRuntime::tick() {
   impl &d = *_impl;
@@ -247,39 +413,31 @@ bool WaterRuntime::tick() {
   if (!g || g->rows() < 2 || g->cols() < 2)
     return false;
   const SceneWaterSpec s = scene_water_spec(*d.app, d.node, d.prefix);
-  const std::vector<double> spec{s.level,        s.wind_speed, s.wind_dir,   s.fetch,
-                                 s.chop,         s.wave_amp,   s.shore_fade, s.swell_height,
-                                 s.swell_period, s.swell_dir,  s.outer,      s.swash ? 1.0 : 0.0};
+  // The wind is not here: it reaches the field through the sea's keyframes (the clock below).
+  const std::vector<double> spec{
+      s.level,     s.chop,  s.wave_amp,          s.shore_fade,      s.swell_height, s.swell_period,
+      s.swell_dir, s.outer, s.swash ? 1.0 : 0.0, s.lee ? 1.0 : 0.0, s.gustiness,    s.current};
   const std::vector<float> &heights = g->heights();
   const bool groundNew = heights.data() != d.groundData || heights.size() != d.groundSize;
-  if (!groundNew && spec == d.built && d.colliders->geometry)
-    return false;
 
-  // The cascades' h0 again only when the wind changed (tens of milliseconds).
-  const cvc::ocean::sea_state sea = sea_state_of(s);
-  const std::vector<double> wind{s.wind_speed, s.wind_dir, s.fetch};
-  if (wind != d.windSea || d.h0.empty()) {
-    cvc::ocean::sea_state windOnly = sea;
-    windOnly.swell.hs_m = 0.0; // the wind sea alone, as the drawn cascades
-    d.h0.clear();
-    for (const cvc::ocean::cascade &c :
-         cvc::ocean::make_cascades({kTiles[0], kTiles[1], kTiles[2]}, kCascadeSeed))
-      d.h0.push_back(cvc::ocean::build_h0(kH0N, c, windOnly));
-    d.windSea = wind;
-  }
   // The coast again when the ground, the level or the swell changed.
   const std::vector<double> shoreSig = scene_water_shore_signature(s);
   if (groundNew || shoreSig != d.shoreSig || !d.shore) {
     d.shore = scene_water_shore(*g, s);
     d.shoreSig = shoreSig;
   }
+  // The sea follows its lagged wind: a keyframe (h0, and the fetch map when it turned) at most
+  // once a crossfade, on the world's clock, the time physics and the renderer share.
+  const bool seaNew = d.clock.advance(d.app->world_clock().t(), s, d.shore);
+  if (!groundNew && !seaNew && spec == d.built && d.colliders->geometry)
+    return false;
 
-  // The sea the renderer draws, on the CPU: the cascades fading at the shore, the swell's shore
-  // layer, and its swash on the beach, which the drawn node draws on the ground (`swash: 0`: none).
-  const SceneWaterCascades cd = scene_water_cascades(s);
-  std::vector<cvc::ocean::sea_cascade> cs;
-  for (std::size_t i = 0; i < d.h0.size(); ++i)
-    cs.push_back({d.h0[i], cd.fade_m[i], cd.decay_k[i]});
+  // The sea the renderer draws, on the CPU: the cascades fading at the shore and crossfading
+  // between the keyframes, scaled by the fetch, the ripples by the gusts, the short ones carried by
+  // the current; the swell's shore layer, and its swash on the beach, which the drawn node draws on
+  // the ground (`swash: 0`: none).
+  const std::shared_ptr<const SceneWaterSea> k = d.clock.sea();
+  std::vector<cvc::ocean::sea_cascade> cs = scene_water_sea_cascades(s, *k);
   cvc::ocean::sea_params p;
   p.level = s.level;
   p.depth_m = 1000.0;
@@ -288,7 +446,8 @@ bool WaterRuntime::tick() {
   p.source_cell_m = 0.5; // B3's source on a 0.5 m lattice, as lsystem_coast's debris
   p.swash = s.swash;
   d.sea = std::make_shared<const cvc::ocean::sea_surface>(
-      std::move(cs), p, d.shore ? d.shore->grid : nullptr, d.shore ? d.shore->layer : nullptr);
+      std::move(cs), p, d.shore ? d.shore->grid : nullptr, d.shore ? d.shore->layer : nullptr,
+      scene_water_forcing(s, *k));
 
   // One field over the water: the ground, and `outer` past it when its rim is sea; from below the
   // deepest ground to above the highest crest.
