@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cvc/core/clock_follower.h>
 #include <cvc/core/exception.h>
+#include <cvc/core/sim_tick.h>
 #include <cvc/core/world_clock.h>
 #include <functional>
 #include <gtest/gtest.h>
@@ -737,4 +738,55 @@ TEST(WorldClockTest, WaitForTickChangeWakesOnAdvanceAndTimesOut) {
   EXPECT_EQ(c.wait_for_tick_change(3, 0.0), 3u) << "a zero timeout does not wait";
   c.reset();
   EXPECT_EQ(c.wait_for_tick_change(3, 0.01), 0u) << "a reset is a change too";
+}
+
+// The one simulation tick (sim_tick.h): 0.06 s, six quanta of the hosts' 0.01 s clock, and a
+// real-time frame catches up at most 0.25 s of world time (more at a higher speed), the rest
+// dropped and reported.
+TEST(SimTickTest, TheTickIsWholeQuantaAndRealTimeCatchesUpAQuarterSecond) {
+  EXPECT_EQ(cvc::kSimTick, 0.06);
+  EXPECT_EQ(cvc::whole_steps(cvc::kSimTick, cvc::kSimQuantum), 6);
+  EXPECT_EQ(cvc::whole_steps(cvc::kSimTick, 0.03), 2);
+  EXPECT_THROW(cvc::whole_steps(cvc::kSimTick, 1.0 / 120.0), std::invalid_argument); // 7.2 steps
+  EXPECT_THROW(cvc::whole_steps(0.0, 0.01), std::invalid_argument);
+
+  const cvc::world_clock::config c = cvc::sim_clock_config(2.0);
+  EXPECT_EQ(c.fixed_dt, cvc::kSimQuantum);
+  EXPECT_EQ(c.scale, 2.0);
+  EXPECT_EQ(c.max_steps_per_advance, 25);
+  EXPECT_TRUE(c.cap_scales_with_rate);
+
+  cvc::world_clock stalled(cvc::sim_clock_config());
+  const cvc::world_clock::step_result stall = stalled.advance(1.0); // a second-long frame
+  EXPECT_EQ(stall.steps, 25) << "0.25 s caught up";
+  // The rest is dropped, and said so (1.0 / 0.01 is a hair under 100 quanta in doubles).
+  EXPECT_GE(stall.dropped_steps, 74u);
+  EXPECT_LE(stall.dropped_steps, 75u);
+
+  cvc::world_clock clock(cvc::sim_clock_config());
+  cvc::clock_follower ticks = cvc::clock_follower::for_step(clock, cvc::kSimTick);
+  EXPECT_EQ(ticks.period(), 6u);
+  const cvc::world_clock::step_result frame = clock.advance(0.125);
+  EXPECT_EQ(frame.steps, 12);
+  EXPECT_EQ(ticks.take(clock), 2u) << "a frame runs the ticks world time has passed";
+}
+
+// A clock goes to the simulation quantum only before it has ticked, keeping its speed.
+TEST(SimTickTest, AdoptingTheSimulationClockKeepsTheSpeedAndSparesARunningClock) {
+  cvc::world_clock::config c;
+  c.scale = 3.0;
+  cvc::world_clock fresh(c);
+  ASSERT_NE(fresh.fixed_dt(), cvc::kSimQuantum);
+  EXPECT_TRUE(cvc::adopt_sim_clock(fresh));
+  EXPECT_EQ(fresh.fixed_dt(), cvc::kSimQuantum);
+  EXPECT_EQ(fresh.current_config().scale, 3.0);
+  EXPECT_EQ(fresh.current_config().max_steps_per_advance, 25);
+  EXPECT_TRUE(cvc::adopt_sim_clock(fresh)) << "already there";
+
+  cvc::world_clock running;
+  running.advance(0.1);
+  ASSERT_GT(running.tick(), 0u);
+  const double q = running.fixed_dt();
+  EXPECT_FALSE(cvc::adopt_sim_clock(running));
+  EXPECT_EQ(running.fixed_dt(), q) << "a running clock keeps its quantum";
 }

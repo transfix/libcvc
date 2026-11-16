@@ -183,6 +183,12 @@ struct RealizedScene {
   // capture a weak_ptr to its node (not the node), matching the volren/volslice
   // discipline, so a torn-down node's tick is a no-op.
   std::vector<std::function<void(vtkRenderer *)>> custom_ticks;
+  // The same for a closure that reads the scene's world as this frame left it (the physics stepped
+  // and its moving bodies posed: `world`, `physics_binding`) and the frame's clock step. The scene
+  // is passed in, not captured, since it moves after realize. Run after the custom_ticks.
+  std::vector<
+      std::function<void(vtkRenderer *, RealizedScene &, const cvc::world_clock::step_result &)>>
+      scene_ticks;
 
   // §9 time. When the scene declared a `clock:` block, tick_scene drives the app's authoritative
   // cvc::world_clock (app.world_clock()) through a cvc::world_clock_binding each frame: it reads
@@ -352,6 +358,17 @@ using NodeRealizer = std::function<std::shared_ptr<GraphicsNode>(
 // their dispatch. The type is `app`'s alone: a scene on another app does not realize it.
 // Thread-safe; register before realize_scene.
 void register_scene_node_type(cvc::app &app, const std::string &type, NodeRealizer realizer);
+
+// How realize_scene hands a custom type its nodes.
+struct NodeTypeOptions {
+  // The realizer reads a `source: { data: <name>, item: <output> }` itself (node.props holds the
+  // source: as declared). Without it such a node is drawn as any data node is: an empty group the
+  // dataset's decoded objects are drawn into once it loads (SceneDataBinding), and the realizer is
+  // never called.
+  bool reads_data = false;
+};
+void register_scene_node_type(cvc::app &app, const std::string &type, NodeRealizer realizer,
+                              const NodeTypeOptions &options);
 
 // Whether `app` has a realizer for a custom scene node `type` (test/introspection).
 bool has_scene_node_type(cvc::app &app, const std::string &type);

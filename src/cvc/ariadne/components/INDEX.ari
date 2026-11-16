@@ -64,6 +64,29 @@ catalog:
     for: "pause/speed/step/restart of a host sim loop"
     args: []
     verbs: [sim.step, sim.restart]         # bare-name on: AppRuntime's own, or a host's Runtime::on
+  - component: nav_lab_stats
+    file: nav_lab_stats.ari
+    unit: nav_lab_stats
+    binds: "<prefix>.{arms,play,view.arm}.*"   # cvc::nav::publish_tables / publish_charts
+    for: "several navigation policies side by side (cvc::nav's arms): one Stats row per arm"
+    args: { title: Stats, id: nav_lab_stats }   # defaults
+    note: "a host handles arms.retarget and arms.seek (docs/NAV_LAB.md)"
+    verbs: [arms.retarget, arms.seek]
+  - component: nav_lab_ledger
+    file: nav_lab_ledger.ari
+    unit: nav_lab_ledger
+    binds: "<prefix>.{ledger,arms.names,arms.agents,play}.*"   # cvc::nav::publish_tables / publish_charts
+    for: "the same arms: coefficients, terms of U_nav, the books against it, one arm's plant ledger"
+    args: { title: Ledger, id: nav_lab_ledger }   # defaults
+    verbs: [arms.seek]
+  - component: nav_lab_scrub
+    file: nav_lab_scrub.ari
+    unit: nav_lab_scrub
+    binds: "<prefix>.{scrub,play}.*"   # cvc::nav::scrub_view
+    for: "the checkpoint scrubber: checkpoint k of a training run beside step 0"
+    args: { title: Scrub, id: nav_lab_scrub }   # defaults
+    note: "nav_lab_training (the training curve) and nav_lab_episode (the episode's time) are its other windows; with nav_lab_stats and nav_lab_ledger for the two runs"
+    verbs: [scrub.prev, scrub.next, scrub.pick_step]
   - component: raster_view
     file: raster_view.ari
     unit: raster_view
@@ -135,9 +158,15 @@ catalog:
   - component: sky_controls
     file: sky_controls.ari
     unit: sky_controls
-    binds: "<prefix>.{keys}.{drift,morph,evolve,orographic,shadow}"   # read every frame by the cloud_sky realizer
+    binds: "<prefix>.{keys}.{drift,morph,evolve,orographic,shadow,coverage,wind_az}"   # read every frame by the cloud_sky realizer
     for: "a `type: cloud_sky` node"
     args: { keys: sky, title: Sky, id: sky_controls }   # defaults; keys = the node's `keys:` prop
+  - component: water_controls
+    file: water_controls.ari
+    unit: water_controls
+    binds: "<prefix>.{keys}.{wind_speed,wind_dir,chop,wave_amp,whitecaps,shore_fade,swell_height,swell_period,swell_dir,shore_foam,wake,wake_foam}"   # read every frame by the water realizer
+    for: "a `type: water` node"
+    args: { keys: water, title: Water, id: water_controls }   # defaults; keys = the node's `keys:` prop
   - component: mesh_tools
     file: mesh_tools.ari
     unit: mesh_tools

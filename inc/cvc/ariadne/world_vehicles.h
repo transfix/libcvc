@@ -338,6 +338,12 @@ public:
   // grid.
   double tick_seconds() const;
   int steps_per_tick() const;
+  // The navigator's tick to use (s), cvc::kSimTick by default: the one simulation tick every host
+  // shares (cvc/core/sim_tick.h). It takes effect when the navigator is next built (a new grid, a
+  // restart: WorldGym::reset), held to the nearest whole number of physics steps (the status says
+  // when it is not one). Throws std::invalid_argument for a tick that is not finite and > 0.
+  void set_tick(double seconds);
+  double tick() const;
   // The navigator's grid of the world on (null without one).
   std::shared_ptr<const nav::world_grid> grid() const;
 

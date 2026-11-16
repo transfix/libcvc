@@ -337,6 +337,8 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_skeleton:test_pycvc_skeleton.py
              pycvc_contours:test_pycvc_contours.py
              pycvc_point_classes:test_pycvc_point_classes.py
+             pycvc_segmentation:test_pycvc_segmentation.py
+             pycvc_volume_slice:test_pycvc_volume_slice.py
              pycvc_image:test_pycvc_image.py
              pycvc_model:test_pycvc_model.py
              pycvc_state:test_pycvc_state.py
@@ -359,6 +361,8 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_state_exec_locks:test_pycvc_state_exec_locks.py
              pycvc_world_clock:test_pycvc_world_clock.py
              pycvc_input_trace:test_pycvc_input_trace.py
+             pycvc_nav_lab:test_pycvc_nav_lab.py
+             pycvc_ph:test_pycvc_ph.py
              pycvc_world_units:test_pycvc_world_units.py
              pycvc_dataprep:test_pycvc_dataprep.py
              pycvc_volslice:test_pycvc_volslice.py
@@ -557,7 +561,7 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_ari
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_ari.py)
   set_tests_properties(pycvc_ari PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
-  # pycvc_gl.ariadne.Host, the Python host: data both ways, callbacks, errors and re-entrancy
+  # pycvc.ari.Host, the Python host: data both ways, callbacks, errors and re-entrancy
   # headless, then (in a child; skipped without GL unless CVC_REQUIRE_RENDER) a published picture and
   # a stream in the frame, and the examples/ariadne/python programs offscreen.
   add_test(NAME pycvc_gl_ariadne_host
@@ -573,6 +577,11 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_gl_cars
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_cars.py)
   set_tests_properties(pycvc_gl_cars PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
+  # pycvc_gl.nav_lab: libcvc's policies side by side (arms, the Stats and Ledger windows, the run
+  # log) and a run log played back, headless; offscreen when GL is there.
+  add_test(NAME pycvc_gl_nav_lab
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_nav_lab.py)
+  set_tests_properties(pycvc_gl_nav_lab PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
   # VTK Python bridge test — skips gracefully unless the vtk-python wrappers
   # (vtkmodules) are importable; runs the vtkProp<->vtkActor round trip when they are.
   add_test(NAME pycvc_vtk

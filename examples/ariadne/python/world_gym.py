@@ -8,12 +8,12 @@
     python world_gym.py --world generated --regenerate  # a generated world per episode
     python world_gym.py --log episodes.csv
 
-Each episode resets the world (the same seed, the same episode), spawns the agents at the
-document's spawn points (or free points of the grid), and steps them 0.05 s at a time until every
+Each episode resets the world (the same seed, the same episode), spawns the agents at the document's
+spawn points (or free points of the grid), and steps them a tick (0.06 s) at a time until every
 agent is at its goal, one leaves the world (off its edge, or through its ground), or --steps run
 out. The policy below is the simplest that works: steer at the goal, brake when the ray ahead is
-short. The reward is the gym's (progress toward the goal, less one per tick touching something,
-plus ten on arrival) unless you pass your own to set_reward(). To watch the same world drawn, open
+short. The reward is the gym's (progress toward the goal, less one per tick touching something, plus
+ten on arrival) unless you pass your own to set_reward(). To watch the same world drawn, open
 world_gym.ari in arigl.
 """
 
@@ -47,7 +47,7 @@ def main(argv=None):
     p.add_argument("--world", default="flat", help="flat, terrain or generated")
     p.add_argument("--agents", type=int, default=4)
     p.add_argument("--episodes", type=int, default=3)
-    p.add_argument("--steps", type=int, default=1200, help="per episode (0.05 s each)")
+    p.add_argument("--steps", type=int, default=1000, help="per episode (a 0.06 s tick each)")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--navigator", action="store_true", help="nav@1 drives instead of policy()")
     p.add_argument("--plant", default="",

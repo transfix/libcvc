@@ -22,7 +22,9 @@
 //            caller is who the path says.
 //            A client program (S3, (room-run ...)) has "program", its DSL source, in place of
 //            "fn": the relay runs it as the caller's own (ServerDocument::run_client_program),
-//            chrooted to its participant subtree, in a stock arisrv as in arisrvx.
+//            chrooted to its participant subtree, in a stock arisrv as in arisrvx. A client's
+//            WebAssembly guest (G4) has "guest", the module's bytes, and "export", the function
+//            to call (run when absent): arisrvx runs it the same way (run_client_guest).
 //   REPLY    Messages back on the same path, to the connection holding <pid> only
 //            (state_transport::send_message_to_holder), never to another that claims the pid:
 //              {"id", "type": "progress", "fraction", "message"}
@@ -35,7 +37,7 @@
 //            function raises with CallError. A client program's own: rate_limited (the caller's
 //            previous one still runs), failed (it raised), resource_exhausted (a cap stopped it),
 //            and unavailable (the relay's document runs no client programs) and invalid (it does
-//            not parse).
+//            not parse, or a guest is not a module the relay takes).
 //
 // Values are DSL values on both sides (cvc::state_exec::value_t), and the wire between them is
 // typed CBOR (cvc/state/state_exec/value_cbor.h, with symbols as themselves) in the message's
@@ -57,6 +59,12 @@
 //                                       and returns the value of its last form. -async and
 //                                       (room-run-opts (dict "timeout" S) "source" arg ...) as for
 //                                       room-call.
+//   (room-run module arg ...)           with the bytes of a WebAssembly module in place of the
+//                                       source (b"\0asm...", or bytes read from a file): runs its
+//                                       export `run` on the relay as this client's own guest, with
+//                                       the list of the arguments, and returns its value.
+//                                       (room-run-opts (dict "export" E) module arg ...) calls
+//                                       export E instead.
 //   An error raises with its code and detail as fields (forbidden as a PermissionError,
 //   deadline_exceeded as a TimeoutError, every other code as a RuntimeError), which a try
 //   catches. Each call's progress lands in the document's tree at calls.<fn>.progress and
@@ -100,12 +108,14 @@ struct room_call_request {
   std::string id;                  // the caller's call id
   std::string fn;                  // the function asked for; "" for a client program
   std::string program;             // a client program's DSL source; "" for a function call
+  std::string guest;               // a client guest's module, its bytes; "" for the others
+  std::string guest_export;        // the guest's function to call ("run" when the call names none)
   cvc::state_exec::value_t args;   // a list: the positional arguments
   cvc::state_exec::value_t kwargs; // a dict: the keyword arguments
   std::string key;                 // the idempotency key: the caller's, or the call id
   double timeout = 0;              // seconds the caller allows; 0 = the relay's default
-  // The call as one dict (pid, id, fn, args, kwargs, key, timeout, and program when it has one),
-  // for a relay that hands it on.
+  // The call as one dict (pid, id, fn, args, kwargs, key, timeout, and program, or guest and
+  // export, when it has them), for a relay that hands it on.
   cvc::state_exec::value_t to_value() const;
 };
 
@@ -191,6 +201,10 @@ public:
   // bound to `args` there; returns its id. As call() otherwise.
   std::string run(const std::string &program, const cvc::state_exec::value_t &args, double timeout,
                   done_fn done);
+  // Run the WebAssembly module `module` (its bytes) on the relay as this client's own guest: its
+  // function `entry` ("" for run), with the list `args`; returns its id. As call() otherwise.
+  std::string run_guest(const std::string &module, const std::string &entry,
+                        const cvc::state_exec::value_t &args, double timeout, done_fn done);
   // Stop waiting for `id` (its caller went): a reply that comes later is dropped.
   void forget(const std::string &id);
   // Every call still waiting ends `unavailable` with `why` (the host lost its relay).

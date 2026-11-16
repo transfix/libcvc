@@ -74,8 +74,8 @@ struct FilePickRequest {
   // <input accept> lists them. Empty: any file.
   std::vector<std::string> accept;
   bool multiple = false; // the user may pick more than one
-  std::string title;     // the picker's title; "" = "Open file"
-  std::string dir;       // the folder a native or composed picker starts in; "" = the working one
+  std::string title;     // the picker's title; "" = "Open file", or a system dialog's own
+  std::string dir;       // the folder it starts in; "" = the working one, or a system dialog's own
 };
 
 // Whether a file named `name` of MIME type `type` is one `accept` takes; an empty `accept` takes

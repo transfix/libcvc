@@ -1113,8 +1113,10 @@ jobs:
           ari_media snapshot --width 100 --height 24 examples/ariadne/terminal/terminal_tour.ari | tee ari-media-tour.txt
           grep -qF "agents: 64" ari-media-tour.txt
           # The player test's clip and tone (src/ari/tests/media): both open, on SDL's dummy sound.
+          # 20 rows: since #1220 a closable window brings the Windows menu bar, and in 14 rows the
+          # window's scrollbars hid the status line this greps for.
           (cd src/ari/tests && SDL_AUDIO_DRIVER=dummy ari_media snapshot \
-            --media-play always --width 60 --height 14 media_player.ari) | tee ari-media-player.txt
+            --media-play always --width 60 --height 20 media_player.ari) | tee ari-media-player.txt
           grep -qE "video (ready|playing) audio (ready|playing)" ari-media-player.txt \
             || { echo "::error::ari-media did not open the test clip and tone"; exit 1; }
           mkdir -p dist
@@ -1550,7 +1552,7 @@ jobs:
         # and python312. Last among this job's Linux steps: like arigl's (the cp311 job's), its smoke
         # installs Mesa and Xvfb beside VTK's libglvnd in $PY, which nothing else may link. It must
         # load a document with a python: block in a window, and run a Python program in place of
-        # the document: pycvc_gl.ariadne.Host() adopts the window, gives the document a function,
+        # the document: pycvc.ari.Host() adopts the window, gives the document a function,
         # and the host renders it (under Xvfb on llvmpipe). And it must load a document with a
         # wasm: block, against the wasmtime it links ($WT, as in the arix step).
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && steps.cvcgl-linux.outcome == 'success' && steps.pycvc-linux.outcome == 'success' && steps.pycvcgl-linux.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '312' }}
@@ -1921,7 +1923,7 @@ jobs:
           ari_media snapshot --width 100 --height 24 examples/ariadne/terminal/terminal_tour.ari | tee ari-media-tour.txt
           grep -qF "agents: 64" ari-media-tour.txt
           (cd src/ari/tests && SDL_AUDIO_DRIVER=dummy ari_media snapshot \
-            --media-play always --width 60 --height 14 media_player.ari) | tee ari-media-player.txt
+            --media-play always --width 60 --height 20 media_player.ari) | tee ari-media-player.txt
           grep -qE "video (ready|playing) audio (ready|playing)" ari-media-player.txt \
             || { echo "::error::ari-media did not open the test clip and tone"; exit 1; }
           mkdir -p dist
@@ -2278,9 +2280,10 @@ jobs:
             Tee-Object -FilePath ari-media-tour.txt
           if ($LASTEXITCODE -ne 0) { throw "ari-media snapshot failed ($LASTEXITCODE)" }
           # The player test's clip and tone (src/ari/tests/media): both open, on SDL's dummy sound.
+          # 20 rows: since #1220 a closable window brings the Windows menu bar (see the Linux lane).
           $env:SDL_AUDIO_DRIVER = 'dummy'
           Push-Location src/ari/tests
-          & "$env:GITHUB_WORKSPACE/stage-ari-media/bin/ari-media.exe" snapshot --media-play always --width 60 --height 14 media_player.ari |
+          & "$env:GITHUB_WORKSPACE/stage-ari-media/bin/ari-media.exe" snapshot --media-play always --width 60 --height 20 media_player.ari |
             Tee-Object -FilePath "$env:GITHUB_WORKSPACE/ari-media-player.txt"
           $played = $LASTEXITCODE
           Pop-Location

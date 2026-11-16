@@ -666,6 +666,10 @@ headless; the same document opens in arigl to watch one.
   - GRL-SNAM's `grl_snam.gym_twin` is the torch twin over these.
   - **Not yet:** a twin of the driver (`dyn_driver`), of contact on the four-wheel model and of
     its `grade_force`; per-cell grip; a C++ twin rollout over a gym.
+- **The tick (2026-11-15).** A world with vehicles runs on the simulation hosts' clock (0.01 s
+  quanta, physics at 100 Hz; WORLD-CLOCK-SYNC-ROADMAP, "One tick"), and its vehicles tick at
+  libcvc's one simulation tick, 0.06 s (`cvc::kSimTick`; `WorldVehicles::set_tick`,
+  `gym_options::tick`). It was 0.05 s on the scenes' 1/120 s quanta.
 
 **What the runtime needs that isn't there** (§1):
 
