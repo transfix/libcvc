@@ -282,6 +282,11 @@ public:
   // is the texture `from` has now: after a new setTexture on `from`, share it again.
   void shareTexture(std::shared_ptr<const GeometryNode> from);
   void clearTexture();
+  // How the texture is sampled between texel centres: linearly (the default) or from the nearest
+  // texel, so each texel draws as a sharp square (a volume slice's voxels). Holds for the texture
+  // set now and every later one.
+  void setTextureInterpolate(bool on);
+  bool textureInterpolate() const { return m_textureInterpolate; }
   // Whether a texture is set, and its size in pixels (0 x 0 when none). Read on the owner
   // thread, where setTexture/clearTexture land.
   bool hasTexture() const;
@@ -452,6 +457,7 @@ private:
   vtkSmartPointer<vtkImageData> m_textureImageData; // the texture's input (for texture_modified())
   boost::shared_array<unsigned char> m_textureStorage; // keeps the aliased zero-copy buffer alive
   bool m_textureFlipV; // true when a texture is active: UVs' V is flipped (top-left image -> VTK)
+  bool m_textureInterpolate = true; // setTextureInterpolate: linear (true) or nearest sampling
   bool m_forceOpaque = false; // setForceOpaque's ask, kept while the mesh is see-through
 
   boost::signals2::connection m_dataConnection;

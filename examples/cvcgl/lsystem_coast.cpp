@@ -70,6 +70,7 @@
 #include "EWave.h"
 #include "OceanFFT.h"
 #include "OceanFoam.h"
+#include "OceanWind.h"
 #include "WakeSource.h"
 #include "demos_menu.h" // the gallery's Demos menu
 
@@ -99,6 +100,7 @@
 #include <cvc/gl/TouchGestures.h>
 #include <cvc/gl/physics_scene_binding.h>
 #include <cvc/ocean/h0.h>
+#include <cvc/ocean/sea_lag.h>
 #include <cvc/ocean/sea_surface.h>
 #include <cvc/ocean/shore.h>
 #include <cvc/ocean/whitecaps.h>
@@ -808,19 +810,23 @@ const char *OCEAN_VS_DEC_FUNCS =
     // w rather than the one at or before it: the steps then straddle the field instead of trailing
     // it by half a texel, which halves how far the picture is from the sea physics feels
     // (cvcgl_ocean_band: 106 mm RMS to 47 mm, OCEAN-AND-WEATHER-ROADMAP.md O7b).
-    "vec4 oDisp(sampler2D t, vec2 w, float tile){ return textureLod(t, w/tile + uHalfTexel, 0.0); "
-    "}\n"
+    // The short cascades go through the current's flow map (OceanWind's owDisp, O13).
+    "vec4 oDisp(sampler2D t, vec2 w, float tile, float adv){ return owDisp(t, w, tile, uHalfTexel, "
+    "adv); }\n"
     "vec4 oSum(vec2 w, vec3 k){\n"
-    "  vec4 a=oDisp(uDisp0,w,uTile0), b=oDisp(uDisp1,w,uTile1), c=oDisp(uDisp2,w,uTile2);\n"
+    "  vec4 a=oDisp(uDisp0,w,uTile0,uAdvect.x), b=oDisp(uDisp1,w,uTile1,uAdvect.y), "
+    "c=oDisp(uDisp2,w,uTile2,uAdvect.z);\n"
     "  vec3 j = vec3(1.0) + k*(vec3(a.w,b.w,c.w) - vec3(1.0));\n" // a faded fold folds less
     "  return vec4(k.x*a.xyz+k.y*b.xyz+k.z*c.xyz, min(min(j.x,j.y),j.z));\n"
     "}\n"
-    "float oHt(vec2 w, vec3 k){ return "
-    "k.x*oDisp(uDisp0,w,uTile0).y+k.y*oDisp(uDisp1,w,uTile1).y+k.z*oDisp(uDisp2,w,uTile2).y; }\n";
+    "float oHt(vec2 w, vec3 k){ return k.x*oDisp(uDisp0,w,uTile0,uAdvect.x).y"
+    "+k.y*oDisp(uDisp1,w,uTile1,uAdvect.y).y+k.z*oDisp(uDisp2,w,uTile2,uAdvect.z).y; }\n";
 const char *OCEAN_VS_IMPL =
     "  vec4 dispMC = vertexMC;\n"
     "  vec2 owxy = dispMC.xy;\n"
-    "  vec3 ok = oDepthW(owxy);\n"
+    // the wind (O13): the current here, and each cascade's weight from the lee and the gusts
+    "  owFlow = owCurrent(owxy);\n"
+    "  vec3 ok = oDepthW(owxy) * owWindW(owxy, cvc_wind_gust(owxy, 1.0));\n"
     "  vec4 od = oSum(owxy, ok);\n"
     // the swell at the coast, at its true size: uWaveAmp scales the cascades only, so the shore
     // layer's breaking cap (crest to trough under 0.78 of the depth) holds at any wave height
@@ -1354,8 +1360,8 @@ const char *BOAT_GLSL =
 // The vertex shader's declarations: the head, the seabed's sampler (HeightFieldTexture),
 // then the functions that read both, and the wake's.
 std::string oceanVsDec(bool wake) {
-  return std::string(OCEAN_VS_DEC_HEAD) + cvc::gl::HeightFieldTexture::glsl() + OCEAN_VS_DEC_FUNCS +
-         wakeGlsl(wake);
+  return std::string(OCEAN_VS_DEC_HEAD) + cvc::gl::HeightFieldTexture::glsl() +
+         cvc::gl::OceanWind::glsl() + OCEAN_VS_DEC_FUNCS + wakeGlsl(wake);
 }
 // Fragment shader: a Fresnel water BRDF + a depth-tinted shallow band + animated
 // shore foam. The seabed is the vertex shader's HeightFieldTexture (cvc_hf_height),
@@ -2467,6 +2473,57 @@ int main(int argc, char **argv) {
   shoreGrid.shore_m = shore.shore_m;
   shoreGrid.normal_x = shore.normal_x;
   shoreGrid.normal_y = shore.normal_y;
+
+  // The wind on the sea (O13, OCEAN-AND-WEATHER-ROADMAP.md E2-E4, E6), in the drawn sea (OceanWind)
+  // and the debris' alike, as the Ariadne water node does (scene_water.h):
+  //   - the sea lags the wind (coast.water.sea_lag, 20 s; cvc::ocean::sea_lag): a keyframe of its
+  //     lagged wind builds h0, and the old h0 crossfades into it over coast.water.sea_fade (4 s),
+  //     mixed on the CPU and uploaded only while the crossfade runs;
+  //   - the lee (coast.water.lee, 1): each cascade scaled by its fetch over the shore grid (a
+  //     coarse map, built again when the keyframe's direction moved);
+  //   - the gusts (coast.water.gustiness, 0.25) move the ripples' weight;
+  //   - the current (coast.water.current, m/s, 0) carries the short cascades and the debris.
+  struct SeaKeys {
+    cvc::ocean::sea_lag lag;
+    std::vector<cvc::ocean::h0_field> from, mix; // the old keyframe's h0, the crossfade's scratch
+    std::shared_ptr<const cvc::ocean::fetch_field> fetch, fetchFrom;
+    std::array<double, 3> full{}, fullFrom{};
+    double t0 = 0.0, t1 = 0.0;
+    bool final = false;      // the new h0 is uploaded whole
+    bool fetchDrawn = false; // the fetch maps are on the GPU
+    std::uint64_t count = 0; // keyframes so far
+  } seaKeys;
+  const std::array<double, 3> kGustW{0.0, 0.0, 1.0};
+  const std::array<bool, 3> kAdvect{false, true, true};
+  auto seaFetch = [&](double dir, double fetch) -> std::shared_ptr<const cvc::ocean::fetch_field> {
+    if (knob("coast.water.lee", 1.0) <= 0.5)
+      return nullptr;
+    const int stride = std::max(1, (std::max(shoreGrid.rows, shoreGrid.cols) + 254) / 255);
+    return std::make_shared<const cvc::ocean::fetch_field>(
+        cvc::ocean::build_fetch(shoreGrid, dir, fetch, nullptr, stride));
+  };
+  auto seaFull = [&](const cvc::ocean::sea_wind &w, const std::vector<cvc::ocean::cascade> &bands) {
+    std::array<double, 3> f{};
+    const double F = cvc::ocean::spectrum_fetch(w.speed_mps, w.fetch_m);
+    for (std::size_t i = 0; i < bands.size() && i < 3; ++i)
+      f[i] = cvc::ocean::band_full_fetch(w.speed_mps, bands[i].k_min, F);
+    return f;
+  };
+  // The forcing a sea_surface takes, and the drawn sea's wind uniforms come from.
+  auto seaForcing = [&] {
+    auto f = std::make_shared<cvc::ocean::sea_forcing>();
+    if (!seaKeys.from.empty()) {
+      f->t0 = seaKeys.t0;
+      f->t1 = seaKeys.t1;
+    }
+    f->fetch = seaKeys.fetch;
+    f->fetch_from = seaKeys.fetchFrom;
+    const cvc::ocean::sea_state s = seaState();
+    f->wind = {s.wind.speed_mps, s.wind.dir_rad,
+               std::max(knob("coast.water.gustiness", 0.25), 0.0)};
+    f->current.speed_mps = std::max(knob("coast.water.current", 0.0), 0.0);
+    return f;
+  };
   cvc::ocean::shore_layer_params shoreLayerParams;
   shoreLayerParams.trains = 3; // the shader sums three
   shoreLayerParams.seed = 0x5E11ull;
@@ -2517,8 +2574,42 @@ int main(int argc, char **argv) {
   sg.addGraphics("ocean", buildOcean(app));
   auto ocean = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("ocean"));
   ocean->setUseSingleColor(true); // colour comes from the BRDF, not the vertex colours
+  // The sea's first keyframe (the cascades' h0 above is its wind's), and its fetch maps to the
+  // GPU: one RG32F texture of the old and the new keyframe's (OceanWind), again at each keyframe.
+  vtkSmartPointer<vtkTextureObject> fetchTex;
+  auto uploadFetch = [&] {
+    const cvc::gl::OceanWind::fetch_texels ft =
+        cvc::gl::OceanWind::fetch(seaKeys.fetchFrom.get(), seaKeys.fetch.get());
+    if (!fetchTex) {
+      fetchTex = vtkSmartPointer<vtkTextureObject>::New();
+      fetchTex->SetContext(ow);
+    }
+    if (!fetchTex->Create2DFromRaw(ft.cols, ft.rows, 2, VTK_FLOAT,
+                                   const_cast<float *>(ft.rg.data())))
+      std::printf("coast: the fetch texture failed\n");
+    fetchTex->SetMinificationFilter(vtkTextureObject::Nearest);
+    fetchTex->SetMagnificationFilter(vtkTextureObject::Nearest);
+    fetchTex->SetWrapS(vtkTextureObject::ClampToEdge);
+    fetchTex->SetWrapT(vtkTextureObject::ClampToEdge);
+    ocean->setShaderTexture(cvc::gl::OceanWind::fetchName(), fetchTex);
+    ocean->setShaderUniform3f(cvc::gl::OceanWind::fetchGridName(), ft.grid[0], ft.grid[1],
+                              ft.grid[2]);
+    seaKeys.fetchDrawn = true;
+  };
+  {
+    const cvc::ocean::sea_state s0 = seaState();
+    seaKeys.lag.advance(0.0, {s0.wind.speed_mps, s0.wind.dir_rad, s0.wind.fetch_m});
+    seaKeys.fetch = seaKeys.fetchFrom = seaFetch(s0.wind.dir_rad, s0.wind.fetch_m);
+    std::vector<cvc::ocean::cascade> bands;
+    for (const Cascade &c : cascades)
+      bands.push_back(c.band);
+    seaKeys.full = seaKeys.fullFrom = seaFull(seaKeys.lag.to(), bands);
+    seaKeys.count = 1;
+    seaKeys.final = true;
+  }
   if (oceanReady) {
     ocean->disableCoordinateShiftScale(); // vertexMC.xy == world xy
+    uploadFetch();
     const char *dispName[3] = {"uDisp0", "uDisp1", "uDisp2"};
     const char *tileName[3] = {"uTile0", "uTile1", "uTile2"};
     for (size_t i = 0; i < cascades.size() && i < 3; ++i) {
@@ -2769,26 +2860,38 @@ int main(int argc, char **argv) {
     const cvc::ocean::sea_state wind = fftSea(seaState());
     const double cap = knob("coast.water.shore_fade", 3.0);
     std::vector<cvc::ocean::sea_cascade> cs;
-    for (const Cascade &c : cascades)
-      cs.push_back({c.h0, cascadeFade(c.band, wind, cap), cascadeDecayK(c.band, wind)});
+    for (std::size_t i = 0; i < cascades.size(); ++i) {
+      const Cascade &c = cascades[i];
+      cvc::ocean::sea_cascade sc{c.h0, cascadeFade(c.band, wind, cap), cascadeDecayK(c.band, wind)};
+      if (i < seaKeys.from.size()) // the wind (O13): the crossfade, the lee, the gusts, the current
+        sc.h0_from = seaKeys.from[i];
+      sc.full_fetch_m = i < 3 ? seaKeys.full[i] : 0.0;
+      sc.full_fetch_from_m = i < 3 ? seaKeys.fullFrom[i] : 0.0;
+      sc.gust = i < 3 ? kGustW[i] : 0.0;
+      sc.advect = i < 3 && kAdvect[i];
+      cs.push_back(std::move(sc));
+    }
     cvc::ocean::sea_params p;
     p.level = SEA_LEVEL;
     p.depth_m = wind.depth_m;
     p.wave_amp = knob("coast.water.wave_amp", 1.0);
     p.chop = knob("coast.water.choppiness", 1.0) * knob("coast.water.chop", 1.15);
     p.source_cell_m = knob("coast.debris.source_cell", 0.5); // 0: B3 exact at every read
-    return std::make_shared<cvc::physics::ocean_surface>(
-        std::make_shared<cvc::ocean::sea_surface>(std::move(cs), p, physGrid, physLayer));
+    return std::make_shared<cvc::physics::ocean_surface>(std::make_shared<cvc::ocean::sea_surface>(
+        std::move(cs), p, physGrid, physLayer, seaForcing()));
   };
-  // Every knob that sea reads, to tell when it must be rebuilt.
+  // Every knob that sea reads, to tell when it must be rebuilt (the sea's keyframes, not the wind
+  // itself: the sea lags it).
   auto physicsSeaSignature = [&] {
     const cvc::ocean::sea_state s = seaState();
     std::vector<double> v = seaSignature(s);
     for (double x : swellSignature(s))
       v.push_back(x);
     for (const char *k : {"coast.water.wave_amp", "coast.water.choppiness", "coast.water.chop",
-                          "coast.water.shore_fade", "coast.debris.source_cell"})
+                          "coast.water.shore_fade", "coast.debris.source_cell",
+                          "coast.water.gustiness", "coast.water.current", "coast.water.lee"})
       v.push_back(knob(k, 0.0));
+    v.push_back(double(seaKeys.count));
     return v;
   };
   std::vector<double> lastPhysicsSea;
@@ -3617,7 +3720,10 @@ int main(int argc, char **argv) {
   clockKeys.speed = "coast.clock.scale";
   clockKeys.time = "coast.clock.t";
   cvc::world_clock_binding clockDrive(app, clock, clockKeys);
-  std::vector<double> lastSea = seaSignature(seaState());
+  // What h0 is built from besides the sea's keyframes: the depth, the weights and the lee (O13).
+  std::vector<double> lastSea{seaState().depth_m, knob(kBandWeight[0], 1.0),
+                              knob(kBandWeight[1], 1.0), knob(kBandWeight[2], 1.0),
+                              knob("coast.water.lee", 1.0)};
 
   // FPS readout drawn by the scene itself ('f' toggles; state
   // coast.viewers.main.hud.*). Off for captures so frames stay clean.
@@ -3913,19 +4019,66 @@ int main(int argc, char **argv) {
     // the live uniforms — the mesh shader displaces + shades straight from the bound
     // displacement textures.
     if (oceanReady) {
-      // Rebuild h0 on the CPU only when a spectrum knob or a weight actually changes
-      // (not free: the band's texels of each cascade, tens of milliseconds).
+      // Rebuild h0 on the CPU only at a keyframe of the sea's lagged wind (O13) or when the depth
+      // or a weight changes (not free: the band's texels of each cascade, tens of milliseconds).
+      // A keyframe crossfades from the old h0; the depth and the weights change it at once.
       const cvc::ocean::sea_state sea = seaState();
-      std::vector<double> sig = seaSignature(sea);
-      if (sig != lastSea) {
+      cvc::ocean::sea_lag_params lp;
+      lp.lag_s = std::max(knob("coast.water.sea_lag", 20.0), 0.0);
+      lp.crossfade_s = std::max(knob("coast.water.sea_fade", 4.0), 0.0);
+      seaKeys.lag.set_params(lp);
+      const bool key =
+          seaKeys.lag.advance(wt, {sea.wind.speed_mps, sea.wind.dir_rad, sea.wind.fetch_m});
+      std::vector<double> sig{sea.depth_m, knob(kBandWeight[0], 1.0), knob(kBandWeight[1], 1.0),
+                              knob(kBandWeight[2], 1.0), knob("coast.water.lee", 1.0)};
+      if (key || sig != lastSea) {
+        cvc::ocean::sea_state kf = fftSea(sea); // the keyframe's wind
+        kf.wind.speed_mps = seaKeys.lag.to().speed_mps;
+        kf.wind.dir_rad = seaKeys.lag.to().dir_rad;
+        kf.wind.fetch_m = seaKeys.lag.to().fetch_m;
+        seaKeys.from.clear();
+        if (key) // the old sea, to crossfade from
+          for (const Cascade &c : cascades)
+            seaKeys.from.push_back(c.h0);
+        std::vector<cvc::ocean::cascade> bands;
         for (std::size_t i = 0; i < cascades.size(); ++i) {
           Cascade &c = cascades[i];
           c.band.amplitude = knob(kBandWeight[i], 1.0);
           c.fft->depth_m = static_cast<float>(sea.depth_m);
-          c.h0 = cvc::ocean::build_h0(FFT_N, c.band, fftSea(sea));
-          c.fft->setH0(c.h0);
+          c.h0 = cvc::ocean::build_h0(FFT_N, c.band, kf);
+          bands.push_back(c.band);
         }
+        seaKeys.fullFrom = key ? seaKeys.full : seaFull(seaKeys.lag.to(), bands);
+        seaKeys.full = seaFull(seaKeys.lag.to(), bands);
+        seaKeys.t0 = seaKeys.lag.t0();
+        seaKeys.t1 = seaKeys.lag.t1();
+        // The fetch maps: the new keyframe's again when its direction moved or the lee changed.
+        seaKeys.fetchFrom = seaKeys.fetch;
+        if (!seaKeys.fetch || seaKeys.fetch->dir_rad != kf.wind.dir_rad || sig != lastSea)
+          seaKeys.fetch = seaFetch(kf.wind.dir_rad, kf.wind.fetch_m);
+        if (!key)
+          seaKeys.fetchFrom = seaKeys.fetch;
+        seaKeys.final = false;
+        seaKeys.fetchDrawn = false;
+        ++seaKeys.count;
         lastSea = std::move(sig);
+      }
+      if (!seaKeys.fetchDrawn)
+        uploadFetch();
+      // The crossfade on the CPU, only while it runs: the two h0 mixed and uploaded each frame;
+      // then the new one once.
+      if (!seaKeys.from.empty() && wt >= seaKeys.t0 && wt < seaKeys.t1) {
+        const double w = cvc::ocean::crossfade_weight(wt, seaKeys.t0, seaKeys.t1);
+        seaKeys.mix.resize(cascades.size());
+        for (std::size_t i = 0; i < cascades.size() && i < seaKeys.from.size(); ++i) {
+          cvc::gl::OceanWind::mix_h0(seaKeys.from[i], cascades[i].h0, w, seaKeys.mix[i]);
+          cascades[i].fft->setH0(seaKeys.mix[i]);
+        }
+        seaKeys.final = false;
+      } else if (!seaKeys.final) {
+        for (Cascade &c : cascades)
+          c.fft->setH0(c.h0);
+        seaKeys.final = true;
       }
       // And the shore layer when the swell changes (a fast march over the shore grid, about a
       // hundred milliseconds).
@@ -4022,6 +4175,15 @@ int main(int argc, char **argv) {
           "uFade", static_cast<float>(cascadeFade(cascades[0].band, windSea, shoreFade)),
           static_cast<float>(cascadeFade(cascades[1].band, windSea, shoreFade)),
           static_cast<float>(cascadeFade(cascades[2].band, windSea, shoreFade)));
+      // The wind's uniforms (O13): the crossfade, the lee, the gusts, the current.
+      cvc::gl::OceanWind::cascades wc;
+      for (std::size_t i = 0; i < 3; ++i) {
+        wc.full[i] = seaKeys.full[i];
+        wc.full_from[i] = seaKeys.fullFrom[i];
+        wc.gust[i] = kGustW[i];
+        wc.advect[i] = kAdvect[i];
+      }
+      cvc::gl::OceanWind::apply(*ocean, cvc::gl::OceanWind::at(*seaForcing(), wc, wt));
     }
     if (lakeNode && oceanReady) {
       double camp[3] = {0, 0, 0};
