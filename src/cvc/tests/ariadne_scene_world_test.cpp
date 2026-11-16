@@ -1522,9 +1522,10 @@ TEST(AriadneWorldVehicles, ABlendIsTheWeightedCommandAndAForcePushesTheDrive) {
 
 // Intents may be set from another thread while the world steps: a writer keeps replacing a's
 // intent (and blending b's) as the frames run, and the last one set wins. The frames start once
-// the writer has landed its first intent. A thread may start late: on a busy machine all 120
-// frames (a few tens of milliseconds) can pass before it runs. Then none of its intents reach a,
-// which sits still, and only the last 6 frames move it (0.108 m/s, what Windows CI read on #1318).
+// the writer has landed its first intent, and go on past 120 until another lands while the world
+// steps. A thread may start late, or be descheduled: on a busy machine all 120 frames (a few tens
+// of milliseconds) can pass before it runs. Then none of its intents reach a, which sits still,
+// and only the last 6 frames move it (0.108 m/s, what Windows CI read on #1318).
 TEST(AriadneWorldVehicles, IntentsMaybeSetFromAnotherThread) {
   REQUIRE_YAML();
   if (!jolt())
@@ -1560,6 +1561,11 @@ TEST(AriadneWorldVehicles, IntentsMaybeSetFromAnotherThread) {
     std::this_thread::yield();
   const int before = landed.load();
   run(app, *w, clock, 120);
+  // The writer may be descheduled for all 120 frames: step on, a frame at a time, until one of its
+  // intents lands while the world steps (10 s at most).
+  const auto more = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (landed.load() == before && std::chrono::steady_clock::now() < more)
+    run(app, *w, clock, 1);
   const int during = landed.load() - before;
   done = true;
   writer.join();
