@@ -261,19 +261,27 @@ work lands. Measured guidance from PR #249's WATER-RENDERING-ROADMAP:
   `vtkSmartVolumeMapper`.
   - terrain_lab.ari, 1280×720, Intel Arc iGPU (Windows, MSVC Release),
     timed in-process around `AriRuntime::frame` and `render` and sampled
-    every millisecond. Before: the wait was 45–48 % of all samples, about
-    25 ms of a 45 ms offscreen frame (`arigl snapshot`'s path), and the
-    window (`arigl run`) took 56–67 ms. After: 18–19 ms offscreen and 31 ms
-    in the window. `arigl snapshot` frames are md5-identical with and
-    without it. `arigl snapshot` reads back only its last frame.
+    every millisecond: the wait was 45–48 % of all samples, about 25 ms of
+    a 45 ms offscreen frame.
   - With the wake window's step tables kept per step as well
-    (OCEAN-AND-WEATHER-ROADMAP.md, the wake window), the window frame is
-    23.5–25 ms median. What is left there: the shadow bake every 4th frame
-    (about 30 ms of `render` on those frames against about 5 ms on the
-    rest, much of it VTK rebuilding each mapper's shader strings as the
-    render passes change), mappers' `GetBounds` updating their pipelines
-    for three callers a frame (about 3 ms), and the scene's physics step
-    (about 7 ms; #1322).
+    (OCEAN-AND-WEATHER-ROADMAP.md, the wake window), four interleaved runs
+    each on a quiet machine, median frame [range of the runs' medians]:
+
+    | | `arigl run` (window) | offscreen (`arigl snapshot`'s path) |
+    |---|---|---|
+    | master | 62.9 ms [62.5–63.0] | 44.2 ms [43.1–45.4] |
+    | both changes | 27.1 ms [26.6–33.2] | 18.1 ms [17.9–22.9] |
+    | #1322 alone | 54.3 ms [51.3–55.2] | 39.4 ms [38.2–42.3] |
+    | both changes and #1322 | 20.2 ms [17.6–25.2] | 13.0 ms [12.5–15.4] |
+
+    `arigl snapshot` of 400 unpaced frames: 30–33 s on master, 21–22 s
+    with both changes, 18–20 s with #1322 too. Its PNG is md5-identical
+    in all four builds, and it reads back only its last frame.
+  - What is left: the shadow bake every 4th frame (about 30 ms of `render`
+    on those frames against 5–6 ms on the rest, much of it VTK rebuilding
+    each mapper's shader strings as the render passes change, so p90 stays
+    at 42–49 ms), and mappers' `GetBounds` updating their pipelines for
+    three callers a frame (about 3 ms).
 
 ## Phase 7 — Async streaming / on-demand tile load
 
