@@ -864,9 +864,9 @@ types behind one call, `register_cvcgl_extensions`
 ([`extensions.h`](../inc/cvc/gl/ariadne/extensions.h)), which both `ariadne_hello` and
 `AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`,
 `generated_world` (terrain_lab's world, [`world_nodes.h`](../inc/cvc/gl/ariadne/world_nodes.h)),
-`water` (its sea, lakes and ponds as the GPU FFT ocean, below), `ribbon` and `draped_link`
-(lines drawn from data, below), and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and
-`fe_lab`. Keys the built-in parser
+`volume_slice` (one axis-aligned plane of a volume, below), `water` (its sea, lakes and ponds as the
+GPU FFT ocean, below), `ribbon` and `draped_link` (lines drawn from data, below), and — on a libcvc
+built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and `fe_lab`. Keys the built-in parser
 does not know land in the node's `props`, which a custom realizer reads. So does a `source:` the
 built-ins have no field for, `{ state: <key> }` or `{ stream: <token> }`, as written. A
 `source: { data }` node is drawn as a data node (§5.17) unless its type was registered with
@@ -1677,6 +1677,53 @@ thread, or deferred onto it in a single-threaded wasm build — and apply result
 per-frame tick. A job captures only its own hand-off struct, never the node's runtime
 (which owns the lane), and teardown cancels it; tearing a scene down still waits for a
 running tet-mesh or Poisson solve to finish.
+
+**`type: volume_slice`** ([`volume_slice_nodes.h`](../inc/cvc/gl/ariadne/volume_slice_nodes.h),
+[`VolumeSliceNode.h`](../inc/cvc/gl/VolumeSliceNode.h)) is one axis-aligned plane of a volume: a
+textured quad coloured through the node's transfer function, as VolumeGridRover's slice views and
+the classic three-plane orthoslicer show a volume. It reads `source: { file }` or `{ sdf }` (with
+`fit:`) like a `volren` node.
+
+```yaml
+- node: ct_z
+  type: volume_slice
+  source: { file: head.rawiv }
+  axis: z                          # x | y | z, or a view's name: xy (z), xz (y), zy (x)
+  index: 40                        # the plane along the axis; -1 (the default) the middle one
+  transfer_function: { preset: grayscale }
+  children:                        # overlays: drawn on top of the plane
+    - { node: mark, source: { plane: { size: 2 } }, transform: { position: [10, 12, 0] } }
+```
+
+The plane's axes, right then up, are VolumeGridRover's: looking down z, x right and y up (its XY
+view); down y, x right and z up (XZ); down x, z right and y up (ZY). Each voxel draws as a square
+centred on it (the quad reaches half a voxel past the outer ones), unlit: the texture is the
+colour. Its keys live under the node's own state:
+
+| key | meaning | seeded from prop |
+|---|---|---|
+| `slice.axis` | the axis the plane looks down: `x`, `y` or `z` | `axis` |
+| `slice.index` | the plane's number along the axis, from 0. `-1` is the middle one, written back as its number; an index past the last plane draws the last and is written back. Its `max` property is the last plane's number, so a slider takes its range from it | `index` |
+| `slice.filter` | `nearest` (each voxel a sharp square, the default) or `linear` | `filter` |
+| `slice.opaque` | `1` (the default): every voxel in its colour at full opacity; `0`: the transfer function's opacity, so the plane blends | `opaque` |
+| `slice.overlay_offset` | how far back in depth the plane draws (polygon-offset units, 2 by default), so the overlays in its plane stay on top | `overlay_offset` |
+| `slice.count`, `slice.position` | published: how many planes the axis has, and where this one lies along it | — |
+| `slice.status` | published: `""`, or what is wrong (a key that does not parse, a failed read) | — |
+| `info.dims`, `info.min`, `info.max`, `info.span`, `info.box`, `info.file` | published: the volume's dimensions, data range, voxel spacing, bounding box and file | — |
+| `transfer_function` | the `cvc::tf::model` the voxels are coloured through, over the volume's data range unless its domain is explicit; a `tf_editor` edits it and shows the volume's histogram | `transfer_function:` — `preset:` (grayscale by default) and the model's own keys (`color`, `alpha`, `isocontours`, `domain`, `opacity_cubed`, `resolution`), each replacing the preset's |
+
+The keys carry `cvc::volume_slice_params`' parameter table
+([`volume_slice.h`](../inc/cvc/volume/volume_slice.h)): `doc`, `unit`, `min`, `max` and `choices`
+as properties. Each change of plane, axis or transfer function colours the plane on the CPU and
+uploads one 2D texture; a new plane the same size as the last is written into the same texture.
+So stepping through a large volume never puts the volume on the GPU. `region_reads: auto` (the
+default) reads a file of more than 64 Mi voxels one plane at a time (`cvc::slice_source`, the
+last eight planes kept), so a volume larger than memory can be scrubbed; `true` always reads that
+way, `false` never. Read plane by plane, the editor's histogram is the first plane's, over the
+file's range. **Overlays** are the node's children: point glyphs, polylines, crosshairs. The plane
+is pushed back by `slice.overlay_offset`, so anything drawn in its plane shows on top of it in
+every view. `VolumeSliceNode::pickRay` meets a world ray with the plane exactly and names the
+voxel and its value (`cvcgl_volume_slice`, and `volume_slice_test` for the slicing itself).
 
 #### Lines from data: `type: ribbon` and `type: draped_link`
 
