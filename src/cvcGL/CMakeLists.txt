@@ -617,11 +617,6 @@ add_executable(cvcgl_volume_half_float test/cvcgl_volume_half_float.cpp)
 target_link_libraries(cvcgl_volume_half_float PRIVATE cvcGL)
 add_test(NAME cvcgl_volume_half_float COMMAND cvcgl_volume_half_float)
 
-# The volume draw queued without VTK's glFinish on still renders (OverlappingVolumeMapper.h).
-add_executable(cvcgl_volume_overlap test/cvcgl_volume_overlap.cpp)
-target_link_libraries(cvcgl_volume_overlap PRIVATE cvcGL)
-add_test(NAME cvcgl_volume_overlap COMMAND cvcgl_volume_overlap)
-
 # The explicit traversal: state stack, ORDER-DEPENDENT property semantics,
 # per-view divergence and teardown. Runs with a null renderer, so it exercises
 # the whole walk without a GL context.

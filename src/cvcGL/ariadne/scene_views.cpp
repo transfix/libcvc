@@ -17,7 +17,6 @@
 #include <cvc/ariadne/widget.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GraphicsNode.h>
-#include <cvc/gl/OverlappingVolumeMapper.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/TouchScroll.h>
@@ -318,8 +317,8 @@ struct SceneViews::View {
     auto *am = vtkSmartVolumeMapper::SafeDownCast(a->GetMapper());
     if (!am)
       return a; // only VolumeNode's mapper is restyled
-    if (!t.vmap) // as the node's: the ray caster without its glFinish per draw
-      t.vmap = vtkSmartPointer<OverlappingVolumeMapper>::New();
+    if (!t.vmap)
+      t.vmap = vtkSmartPointer<vtkSmartVolumeMapper>::New();
     vtkSmartVolumeMapper *bm = t.vmap;
     if (bm->GetInputDataObject(0, 0) != am->GetInputDataObject(0, 0))
       bm->SetInputDataObject(am->GetInputDataObject(0, 0));
