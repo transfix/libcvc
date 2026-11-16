@@ -245,6 +245,35 @@ work lands. Measured guidance from PR #249's WATER-RENDERING-ROADMAP:
   needs `vtkGPUVolumeRayCastMapper` reading opaque depth, which
   `SceneGraph.cpp:1044-1074` wires but has never been exercised with 500 m
   of mountain inside a cloud slab — a **named risk with a screenshot test**.
+- **VTK's GPU ray caster waits for the GPU at the end of every draw.**
+  `vtkOpenGLGPUVolumeRayCastMapper::GPURender` ends with `glFinish()` so
+  that the CPU timer around it measures the GPU's work for auto-adjusting
+  the sample distance. The CPU then waits for the whole frame queued so
+  far, and the CPU's and the GPU's times add instead of overlapping. Only
+  an auto-adjusting draw (an interactive render: the window's desired
+  update rate at or above the mapper's interactive rate) uses that time.
+  `cvc::gl::OverlappingVolumeMapper` (VolumeNode's mapper, and the scene
+  views' twin volumes) makes that `glFinish` a no-op during every other
+  draw, by swapping glad's pointer for the length of its own `Render`. The
+  pixels are the same. WebAssembly keeps VTK's behaviour. Test:
+  `cvcgl_volume_overlap` checks no `glFinish` on still renders, VTK's kept
+  on interactive ones, and byte-identical pixels against
+  `vtkSmartVolumeMapper`.
+  - terrain_lab.ari, 1280×720, Intel Arc iGPU (Windows, MSVC Release),
+    timed in-process around `AriRuntime::frame` and `render` and sampled
+    every millisecond. Before: the wait was 45–48 % of all samples, about
+    25 ms of a 45 ms offscreen frame (`arigl snapshot`'s path), and the
+    window (`arigl run`) took 56–67 ms. After: 18–19 ms offscreen and 31 ms
+    in the window. `arigl snapshot` frames are md5-identical with and
+    without it. `arigl snapshot` reads back only its last frame.
+  - With the wake window's step tables kept per step as well
+    (OCEAN-AND-WEATHER-ROADMAP.md, the wake window), the window frame is
+    23.5–25 ms median. What is left there: the shadow bake every 4th frame
+    (about 30 ms of `render` on those frames against about 5 ms on the
+    rest, much of it VTK rebuilding each mapper's shader strings as the
+    render passes change), mappers' `GetBounds` updating their pipelines
+    for three callers a frame (about 3 ms), and the scene's physics step
+    (about 7 ms; #1322).
 
 ## Phase 7 — Async streaming / on-demand tile load
 
