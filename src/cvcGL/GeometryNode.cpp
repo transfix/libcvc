@@ -529,7 +529,9 @@ void GeometryNode::setTexture(const cvc::image &img, bool zeroCopy) {
 
     auto tex = vtkSmartPointer<vtkTexture>::New();
     tex->SetInputData(id);
-    tex->InterpolateOn();
+    tex->SetInterpolate(m_textureInterpolate);
+    if (!m_textureInterpolate)
+      mipmap = false; // a mipmap would blend texels at a distance
     if (mipmap)
       tex->MipmapOn();
     else
@@ -548,6 +550,19 @@ void GeometryNode::setTexture(const cvc::image &img, bool zeroCopy) {
 }
 
 bool GeometryNode::hasTexture() const { return m_texture.Get() != nullptr; }
+
+void GeometryNode::setTextureInterpolate(bool on) {
+  runOnMainThread([this, on]() {
+    m_textureInterpolate = on;
+    if (m_texture && m_texture->GetInterpolate() != (on ? 1 : 0)) {
+      m_texture->SetInterpolate(on);
+      if (!on)
+        m_texture->MipmapOff();
+      if (SceneGraph *sg = getSceneGraph())
+        sg->requestRender();
+    }
+  });
+}
 
 int GeometryNode::textureWidth() const {
   int d[3] = {0, 0, 0};
