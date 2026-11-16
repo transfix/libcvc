@@ -25,6 +25,7 @@
 #include <cvc/ariadne/world_spawns.h>
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
+#include <cvc/core/sim_tick.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/nav/world_grid.h>
 #include <cvc/ocean/sea_surface.h>
@@ -2350,7 +2351,7 @@ TEST(AriadneWorldGym, ResetStepAndObserve) {
   if (!jolt())
     GTEST_SKIP() << "no Jolt in this build";
   WorldGym gym(write_doc("gym", gym_doc(true, true)).string(), agents(2));
-  EXPECT_NEAR(gym.dt(), 0.05, 0.01);
+  EXPECT_NEAR(gym.dt(), cvc::kSimTick, 1e-12);                      // libcvc's one simulation tick
   EXPECT_THROW(gym.step({0.0, 0.0}, {0.0, 0.0}), std::logic_error); // no episode yet
 
   const gym_observation o = gym.reset(1);
@@ -2583,6 +2584,41 @@ TEST(AriadneWorldGym, EveryPlantDrivesInTheWorld) {
     EXPECT_EQ(oa.x[k], ob.x[k]) << plants[k] << ": the same twice";
     EXPECT_EQ(oa.y[k], ob.y[k]) << plants[k];
   }
+}
+
+// A world with vehicles runs on the simulation hosts' clock: the 0.01 s quantum, physics at
+// 100 Hz, real time catching up 0.25 s a frame. The gym's tick is libcvc's one simulation tick,
+// 0.06 s, six physics steps; gym_options::tick sets another, held to whole physics steps.
+TEST(AriadneWorldGym, TheTickIsLibcvcsOneSimulationTick) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const std::string path = write_doc("gym_tick", gym_doc(false, false)).string();
+  WorldGym gym(path, agents(1));
+  EXPECT_EQ(gym.app().world_clock().fixed_dt(), cvc::kSimQuantum);
+  EXPECT_EQ(gym.app().world_clock().current_config().max_steps_per_advance, 25);
+  EXPECT_TRUE(gym.app().world_clock().current_config().cap_scales_with_rate);
+  EXPECT_EQ(gym.world().world().config().fixed_dt, cvc::kSimQuantum);
+  const gym_observation o0 = gym.reset(1);
+  EXPECT_NEAR(gym.dt(), cvc::kSimTick, 1e-12);
+  EXPECT_EQ(gym.vehicles().steps_per_tick(), 6);
+  const gym_step st = gym.step({kNaN}, {kNaN});
+  EXPECT_NEAR(st.observation.time - o0.time, cvc::kSimTick, 1e-9);
+
+  gym_options o = agents(1);
+  o.tick = 0.05;
+  WorldGym five(path, o);
+  five.reset(1);
+  EXPECT_NEAR(five.dt(), 0.05, 1e-12);
+  EXPECT_EQ(five.vehicles().steps_per_tick(), 5);
+
+  o.tick = 0.055; // not whole physics steps: held to the nearest, and the status says so
+  WorldGym odd(path, o);
+  odd.reset(1);
+  EXPECT_EQ(odd.vehicles().steps_per_tick(), static_cast<int>(std::lround(0.055 / 0.01)));
+  EXPECT_NE(odd.vehicles().status().find("not a whole number"), std::string::npos)
+      << odd.vehicles().status();
+  EXPECT_THROW(gym.vehicles().set_tick(0.0), std::invalid_argument);
 }
 
 // What a differentiable twin of the world reads: the navigator's own grid, its signed distance and

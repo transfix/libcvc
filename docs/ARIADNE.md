@@ -1438,7 +1438,8 @@ scene:
     `blend`, or `hold`). `physics.stats.vehicles` has a line per vehicle, its plant named.
   - **Intents.** Any entity can be steered from outside. A document, a script or a server writes
     its keys, and a C++ or Python host calls `WorldVehicles::set_intent` (`pycvc.WorldEntities`,
-    below). Each navigator tick (20 Hz) reads them, and a change replaces the intent it had:
+    below). Each navigator tick (0.06 s by default, `cvc::kSimTick`) reads them, and a change
+    replaces the intent it had:
 
     | Key, under `entities.<id>` | What it is |
     |---|---|
@@ -1550,7 +1551,10 @@ scene:
   - **A world per episode.** With `regenerate=True` each reset makes a generated world on again
     from its seed (the node's `world.seed`): another seed, another world; the same seed, the same
     world.
-  - **A step** is one navigator tick (0.05 s, a whole number of physics steps). An agent takes
+  - **A step** is one navigator tick: `tick=` (`gym_options::tick`), by default libcvc's one
+    simulation tick, 0.06 s (`cvc::kSimTick`, `pycvc.SIM_TICK`; cvc/core/sim_tick.h). It is a whole
+    number of physics steps: a world with vehicles runs its clock at the 0.01 s simulation quantum,
+    so physics steps at 100 Hz and a tick is 6 of them. An agent takes
     its command for that tick in place of its controller's (`WorldVehicles::command`, held to its
     envelope); a NaN leaves it to its controller, so NaN everywhere is the navigator's baseline.
     Goals are held for the episode (`wander=False`); `set_goal(id, x, y)` moves one.
