@@ -1971,6 +1971,157 @@ int main() {
       printf("  warning: %s\n", w.c_str());
   }
 
+  // ── O18: the weather node and its storms in the sky ──────────────────────────────────────────
+  // A weather node starts a storm when asked; the sky it drives closes and darkens under it, its
+  // deck rises into cumulonimbus (built off the frame, then swapped in) while the storm is about,
+  // the receivers' ambient drops under it, and a calm takes it all back. The storms ride the sky's
+  // wind: a change of it settles into a steer event.
+  {
+    printf("== weather: storms in the sky ==\n");
+    chk(cvc::gl::ariadne::has_scene_node_type(app, "weather"),
+        "the weather node type is registered");
+    SceneGraph sg(app, "o18");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    auto node = [](const char *id, const char *type,
+                   std::vector<std::pair<const char *, std::string>> props) {
+      SceneNode n;
+      n.id = id;
+      n.type = type;
+      n.props.kind = Value::Kind::Map;
+      for (auto &p : props) {
+        Value v;
+        v.kind = Value::Kind::Scalar;
+        v.scalar = p.second;
+        n.props.entries.emplace_back(p.first, v);
+      }
+      return n;
+    };
+    scene.nodes.push_back(node("world", "generated_world",
+                               {{"seed", "5"},
+                                {"half", "150"},
+                                {"trees", "0"},
+                                {"rocks", "0"},
+                                {"buildings", "0"},
+                                {"amp", "40"},
+                                {"water", "0"},
+                                {"texture", "256"}}));
+    scene.nodes.push_back(node("sky", "cloud_sky",
+                               {{"ground", "world"},
+                                {"extent", "60"},
+                                {"base", "120"},
+                                {"top", "180"},
+                                {"coverage", "0.4"},
+                                {"near", "2"}}));
+    scene.nodes.push_back(node("weather", "weather",
+                               {{"ground", "world"},
+                                {"sky", "sky"},
+                                {"chance", "0"}, // only the storms asked for
+                                {"radius_min", "500"},
+                                {"radius_max", "500"},
+                                {"storm_top", "600"}}));
+    std::vector<std::string> warnings;
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "o18", &warnings);
+    auto st = [&](const char *k) -> cvc::state & {
+      return cvc::state::instance(app)(cvc::ariadne::resolve_bind("o18", k));
+    };
+    auto num = [&](const char *k) { return st(k).value<double>(); };
+    auto str = [&](const char *k) { return st(k).value<std::string>(); };
+    auto tick = [&]() {
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer());
+    };
+    cvc::world_clock &clock = app.world_clock();
+    const double q = clock.fixed_dt();
+    auto seek = [&](double t) { clock.seek_tick(static_cast<std::uint64_t>(std::llround(t / q))); };
+    seek(100.0);
+    chk(approx(num("weather.time_scale"), 1.0) && str("weather.events").empty(),
+        "the weather seeded weather.time_scale and an empty weather.events");
+    tick();
+    tick();
+    chk(str("weather.state") == "clear" && str("sky.storms").empty() &&
+            approx(num("sky.top"), 180.0),
+        "a clear sky: no storms, the deck as authored");
+    // The near volume's box: its top is the deck's.
+    auto boxTop = [&]() {
+      auto v = std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("sky"));
+      vtkImageData *img = v ? v->getImageData() : nullptr;
+      // VolumeNode spaces its voxels a box's span over their count: the box's top is past the last.
+      return img ? img->GetOrigin()[2] + img->GetSpacing()[2] * img->GetDimensions()[2] : -1.0;
+    };
+    std::printf("  the near volumes' top: %.3f\n", boxTop());
+    chk(std::fabs(boxTop() - 180.0) < 1e-3, "the near volumes span the authored deck");
+    // A storm overhead: in its prime over the ground now.
+    st("weather.request").value(std::string("overhead"));
+    tick();
+    std::printf("  events: %s\n  storms: %s\n", str("weather.events").c_str(),
+                str("sky.storms").c_str());
+    chk(str("weather.request").empty() && str("weather.events").find("storm") == 0,
+        "the request became a storm event and was emptied");
+    chk(str("weather.state") == "storm" && approx(num("weather.cells"), 1.0) &&
+            num("weather.storminess") > 0.7,
+        "the weather is a storm, one cell in its prime");
+    chk(!str("sky.storms").empty() && str("weather.storms") == str("sky.storms"),
+        "the sky has the storm (sky.storms), as the weather publishes it");
+    chk(approx(num("sky.top"), 600.0) &&
+            std::fabs(num("sky.darkness") - 0.6 * num("weather.deck")) < 1e-9 &&
+            num("sky.darkness") > 0.55,
+        "the deck rises to the storm's top and darkens");
+    chk(num("weather.rain") > 0.0, "it rains at the ground's centre");
+    tick();
+    {
+      auto ground = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("world"));
+      std::shared_ptr<const cvc::gl::GeometryNode::ShaderInputs> in;
+      std::function<void(cvc::gl::GraphicsNode &)> find = [&](cvc::gl::GraphicsNode &g) {
+        if (auto *m = dynamic_cast<cvc::gl::GeometryNode *>(&g))
+          if (!in)
+            in = m->sharedShaderInputs("cloud_sky");
+        for (const auto &c : g.getGraphicsChildren())
+          if (c)
+            find(*c);
+      };
+      if (auto g = sg.getGraphics("world"))
+        find(*g);
+      const bool storm = in && in->f4.count("cloudStorm0") && in->f4.at("cloudStorm0")[3] > 0.7f &&
+                         in->f4.at("cloudStorm0")[2] > 0.0f;
+      const bool dark = in && in->f.count("cloudDark") && in->f.at("cloudDark") > 0.55f;
+      chk(storm && dark,
+          "the receivers and the far clouds have the storm and the darkness (uniforms)");
+    }
+    // The storm deck is built on its own thread and swapped in: the near volumes' boxes rise.
+    auto waitTop = [&](double want) {
+      for (int k = 0; k < 600 && std::fabs(boxTop() - want) > 1e-3; ++k) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        tick();
+      }
+      return std::fabs(boxTop() - want) < 1e-3;
+    };
+    const auto t0 = std::chrono::steady_clock::now();
+    chk(waitTop(600.0), "the storm deck was built and swapped in (the near volumes reach 600 m)");
+    std::printf(
+        "  the storm deck took %.0f ms to come in\n",
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    // The wind turns: once it has held, a steer event joins the events.
+    st("sky.wind_az").value(45.0);
+    for (int k = 0; k < 12; ++k)
+      tick();
+    chk(str("weather.events").find("steer") != std::string::npos &&
+            str("weather.events").find("az=45") != std::string::npos,
+        "a settled change of the sky's wind became a steer event");
+    // A calm: the storm clears over calm_s, and the deck goes back to its cumulus.
+    st("weather.request").value(std::string("calm"));
+    tick();
+    chk(str("weather.state") == "clearing", "a calm starts the storm clearing");
+    seek(100.0 + 400.0);
+    tick();
+    chk(str("weather.state") == "clear" && str("sky.storms").empty() &&
+            approx(num("sky.top"), 180.0) && approx(num("sky.darkness"), 0.0),
+        "cleared: no storms, the deck as authored, no darkness");
+    chk(waitTop(180.0), "the cumulus deck came back (the near volumes span 180 m again)");
+    for (const std::string &w : warnings)
+      printf("  warning: %s\n", w.c_str());
+  }
+
   // ── a generated terrain as a geometry source (source: { terrain: {...} }) ─────────────────
   {
     printf("== terrain geometry source ==\n");

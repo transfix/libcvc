@@ -6175,6 +6175,7 @@ TEST(AriadneComponents, NodeComponentsTakeTheirNodeAsAnArg) {
       {"forest_controls", "{ keys: north }", "forest.", "north."},
       {"sea_controls", "{ keys: bay }", "sea.", "bay."},
       {"sky_controls", "{ keys: storm }", "sky.", "storm."},
+      {"weather_controls", "{ keys: squall }", "weather.", "squall."},
       {"world_controls", "{ keys: island }", "world.", "island."},
       {"raster_view", "{ keys: risk }", "raster.", "risk."},
       {"camera_controls", "{ viewer: inset }", "viewers.main.", "viewers.inset."},
