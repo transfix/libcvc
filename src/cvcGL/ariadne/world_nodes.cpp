@@ -300,6 +300,9 @@ void style_needles(GeometryNode &g) {
 // apart, and the scene's gust field (cvc_wind_gust, the water's and the physics') scales it, so a
 // gust is seen crossing the woods. The shadows' bake leaves the uniforms out (uFwOn reads 0
 // there): the trees' shadows stay at rest rather than freeze at whatever moment a bake caught.
+// And a swaying mesh looks its shadow up where it stands at rest (cvcFwRestVC), so its crown and
+// trunk are shaded as the at-rest map says: a point moved behind its own rest-pose surface would
+// otherwise read as shadowed (acne along the trunk and the limbs, from about 9 m/s close up).
 constexpr const char *kFoliageWind = "cvc.foliage_wind"; // the shared shader inputs' key
 constexpr double kLiftPerNormal = 64.0; // metres of height per unit of normal length past 1
 constexpr double kLiftMax = 60.0;       // the height encoded at most
@@ -312,7 +315,8 @@ constexpr double kLiftMax = 60.0;       // the height encoded at most
 std::string foliage_wind_dec() {
   return std::string("//VTK::PositionVC::Dec\n"
                      "uniform highp float uFwOn; uniform highp vec3 uFwDir; "
-                     "uniform highp vec3 uFwMotion; uniform highp vec3 uFwEye;\n") +
+                     "uniform highp vec3 uFwMotion; uniform highp vec3 uFwEye;\n"
+                     "out vec4 cvcFwRestVC;\n") +
          cvc::gl::WindGLSL::glsl() +
          "vec4 cvc_foliage_sway(vec4 p, vec3 n){\n"
          "  float h = max(length(n) - 1.0, 0.0) * 64.0;\n" // kLiftPerNormal
@@ -330,11 +334,18 @@ std::string foliage_wind_dec() {
          "}\n";
 }
 // At //VTK::Clip::Impl, the earliest point after the low-memory mapper declares vertexMC and
-// normalMC: the #define re-points VTK's position code (and the shadow baker's) at the swayed
-// point, in either mapper (as DrapedLinkNode drapes its link).
-const char *const kFoliageWindClip = "vec4 cvcFoliageMC = cvc_foliage_sway(vertexMC, normalMC);\n"
+// normalMC: the rest pose's view-space position goes to the fragments for the shadow lookup, then
+// the #define re-points VTK's position code (and the shadow baker's) at the swayed point, in
+// either mapper (as DrapedLinkNode drapes its link).
+const char *const kFoliageWindClip = "cvcFwRestVC = MCVCMatrix * vertexMC;\n"
+                                     "vec4 cvcFoliageMC = cvc_foliage_sway(vertexMC, normalMC);\n"
                                      "#define vertexMC cvcFoliageMC\n"
                                      "  //VTK::Clip::Impl\n";
+// The fragments' side: the rest position, and the (first) shadow lookup at it (cvcGL's
+// FilteredShadowMapPass writes calcShadow(vertexVC, ...) into the lighting).
+const char *const kFoliageWindFsDec = "//VTK::Normal::Dec\nin vec4 cvcFwRestVC;\n";
+const char *const kShadowAtFragment = "calcShadow(vertexVC,";
+const char *const kShadowAtRest = "calcShadow(cvcFwRestVC,";
 
 // Give a prop mesh the sway, once: its shader code, world-space vertexMC, and the world's inputs.
 void wire_foliage_wind(GeometryNode &g,
@@ -344,6 +355,8 @@ void wire_foliage_wind(GeometryNode &g,
   g.disableCoordinateShiftScale(); // the gusts and the phase are read at world xy
   g.addVertexShaderReplacement("//VTK::PositionVC::Dec", foliage_wind_dec());
   g.addVertexShaderReplacement("//VTK::Clip::Impl", kFoliageWindClip);
+  g.addFragmentShaderReplacement("//VTK::Normal::Dec", kFoliageWindFsDec);
+  g.addFragmentShaderPostReplacement(kShadowAtFragment, kShadowAtRest);
   g.setSharedShaderInputs(kFoliageWind, in);
 }
 

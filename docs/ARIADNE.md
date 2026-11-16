@@ -1188,8 +1188,9 @@ scene:
     9 m/s a tree 12 m tall leans about 0.4 m at its top and sways about 0.3 m either side; the lean
     grows as the wind's square. `world.sway` (from the node's `sway` prop, 1) scales it, and 0
     holds the trees ("Tree sway" on `world_controls.ari`). `world.lean_dir` publishes the way they
-    lean. The sway fades out 300–450 m from the camera, where it is about a pixel, and their
-    shadows stay at rest. Without a scene wind the trees stand still, as before;
+    lean. The sway fades out 300–450 m from the camera, where it is about a pixel. Their shadows
+    stay at rest, and a swaying tree is shaded as it would be at rest, so it never shadows itself
+    where it has moved. Without a scene wind the trees stand still, as before;
   - the scene's physics world, when it has one: a flow field of air everywhere, the same gusts
     times a height profile (`cvc::physics::wind_flow`, PHYSICS_API.md "The wind"), so every
     dynamic body feels drag against it. A beach ball dropped from 40 m in a 12 m/s wind rides it
