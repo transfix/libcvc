@@ -384,6 +384,36 @@ TEST(AriadneHostCli, SetWritesStateKeysBeforeTheDocument) {
   EXPECT_DOUBLE_EQ(st("ui.docs.t.world.preset").value<double>(), 2.0);
 }
 
+// The views' --set keys (under viewers., relative or absolute) are the ones a scene host writes
+// again after the load, over the first framing of the camera; the rest are not, so nothing the
+// document changed while it loaded is undone.
+TEST(AriadneHostCli, ViewSetsAreTheOnesUnderViewers) {
+  const std::vector<std::pair<std::string, std::string>> sets = {
+      {"world.preset", "2"},
+      {"viewers.main.camera.orbit.center.x", "22"},
+      {"/ui.docs.ari.viewers.main.camera.mode", "0"},
+      {"/viewers.side.camera.orbit.distance", "40"},
+      {"myviewers.x", "1"},
+      {"/abs.key", "a"},
+      {"viewers.main.camera.orbit.distance", "30"}};
+  const auto views = view_state_sets(sets);
+  ASSERT_EQ(views.size(), 4u);
+  EXPECT_EQ(views[0].first, "viewers.main.camera.orbit.center.x");
+  EXPECT_EQ(views[1].first, "/ui.docs.ari.viewers.main.camera.mode");
+  EXPECT_EQ(views[2].first, "/viewers.side.camera.orbit.distance");
+  EXPECT_EQ(views[3].first, "viewers.main.camera.orbit.distance") << "in --set's order";
+
+  // Written again after something overwrote them (the framing), they hold --set's values.
+  cvc::app app;
+  apply_state_sets(app, "ui.docs.t", sets);
+  auto &st = cvc::state::instance(app);
+  st("ui.docs.t.viewers.main.camera.orbit.center.x").value(std::string("150"));
+  st("ui.docs.t.world.preset").value(std::string("3")); // the document's own change
+  apply_state_sets(app, "ui.docs.t", views);
+  EXPECT_EQ(st("ui.docs.t.viewers.main.camera.orbit.center.x").value(), "22");
+  EXPECT_EQ(st("ui.docs.t.world.preset").value(), "3") << "a key outside viewers. is left alone";
+}
+
 // --exec-policy names the app scheduler's policy, which apply_exec_policy puts where the app reads
 // it when it builds the scheduler; without it the scheduler keeps round_robin.
 TEST(AriadneHostCli, ExecPolicyIsTheSchedulersPolicy) {

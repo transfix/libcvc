@@ -38,9 +38,27 @@ The scan fails on
 - a symbol that is not on [allowlist.txt](allowlist.txt): new process-wide state;
 - an allowlist line this build no longer has: the object moved onto the app, so delete the line.
 
-The allowlist is libcvc's own objects still to move, and it only shrinks, to empty. **Never add a
-line**, not even one a CI artifact suggests: move the object onto the app, or into an object the
-caller owns. CI's `clang-format (changed lines)` job runs [ratchet.py](ratchet.py), which fails a
+The allowlist ends at the documented list Joe settled on 2026-11-14 (roadmap §9 item 5). Each
+group in `allowlist.txt` carries the reason it stays, written by `scan.py` from its
+`WHY_IT_STAYS` table:
+
+- **Resources the process holds once**, each kept as no more than a once flag, a lock or a
+  reference count:
+  - the pointer a signal handler follows to the app its signals go to (`host_signals.cpp`). A
+    handler can reach only static storage; each app's stop flag and trapped signals are its own;
+  - the process's nice level (`thread_class.cpp`);
+  - curl's global setup (one once flag, which the HTTP and WebSocket clients share),
+    ImageMagick's, HDF5's library lock and Jolt's reference-counted runtime.
+- **A built-once, read-only table:** state_exec's 19 built-in exception classes. Writing to one
+  throws a `TypeError`.
+- **An ID source:** state_exec's scope-serial counter, one atomic holding no app state.
+
+Executables keep a global only where an OS callback needs one. That leaves the signal route
+above: `arisrv`'s, `cvc serve`'s and the Ariadne hosts' stop flags and trapped signals are their
+apps'.
+
+**Never add a line**, not even one a CI artifact suggests: move the object onto the app, or into
+an object the caller owns. CI's `clang-format (changed lines)` job runs [ratchet.py](ratchet.py), which fails a
 change whose allowlist has a line its base's does not (a moved or renamed object counts as new).
 Each move comes with tests that make several `cvc::app`s, in both orders and on threads, and show
 that nothing one does reaches another.
@@ -70,8 +88,11 @@ On the Linux CI lanes, where the objects are ELF and GNU `nm` and `c++filt` read
 
 | Lane | Targets |
 |---|---|
-| `package-linux / libcvc-release-grpc` (the shipped configuration: gRPC, WebSocket and CUDA on) | `cvc` (with the vendored code built into it: cvc-mesher, SDF, LBIE …), `cvc_igl`, `cvc_physics_jolt`, `cvcGL`, `cvcMedia`, `cvc-cli` |
-| `pycvc-linux / cp312` | `pycvc`, `pycvc_gl` |
+| `package-linux / libcvc-release-grpc` (the shipped configuration: gRPC, WebSocket and CUDA on) | `cvc` (with the vendored code built into it: cvc-mesher, SDF, LBIE …), `cvc_igl`, `cvc_physics_jolt`, `cvcGL`, `cvcMedia`, `cvc-cli`, the runtime hosts `ari` and `arigl`, the relay `arisrv` and its load bench `arisrv_aoi_bench` |
+| `pycvc-linux / cp312` | `pycvc`, `pycvc_gl`, the scripting hosts `arix`, `ariglx` and `arisrvx` (with the embedded Python, `src/ariadne_python`) |
+
+A host's stop flag and the signals it traps are its app's (`host_signals.h`); the one pointer a
+signal handler follows to that app is `host_signals.cpp`'s line.
 
 Each lane checks only its own targets' lines, so each line is exact for one configuration. Each
 uploads the allowlist its build needs as an artifact (`singleton-scan-libcvc`,
@@ -83,7 +104,7 @@ After a Linux build:
 
 ```bash
 python3 tools/singleton_scan/scan.py --build-dir build \
-  --targets cvc,cvc_igl,cvc_physics_jolt,cvcGL,cvcMedia,cvc-cli
+  --targets cvc,cvc_igl,cvc_physics_jolt,cvcGL,cvcMedia,cvc-cli,ari,arigl,arisrv,arisrv_aoi_bench
 ```
 
 `--write-allowlist tools/singleton_scan/allowlist.txt` rewrites the allowlist for the scanned

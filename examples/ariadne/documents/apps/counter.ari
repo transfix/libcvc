@@ -1,0 +1,37 @@
+# counter.ari — a small application, loaded by apps_demo.ari (docs/ARIADNE.md §5.25).
+#
+# It has its own menubar, so when another document loads it, the menubar becomes one menu of that
+# document's bar, under this document's name ("Counter"), with Restart Counter and Quit Counter
+# under its own items. Its tray icon joins that bar's tray. On its own it is an ordinary document:
+#
+#   arigl run examples/ariadne/documents/apps/counter.ari
+
+meta:
+  name: Counter
+  min_libcvc: 3.6.0
+
+requires:
+  - ui.menubar                     # its menus and its tray icon live in a menu bar
+
+init: |
+  (state-set "count" "0")
+
+menubar:
+  - menu: Counter
+    items:
+      - menu_item: Add one
+        on: (state-set "count" (str (+ 1 (int (state-get "count")))))
+      - menu_item: Reset
+        on: (state-set "count" "0")
+  - tray_icon: star
+    badge: (state-get "count")
+    tooltip: The count (click to add one)
+    on: (state-set "count" (str (+ 1 (int (state-get "count")))))
+
+windows:
+  - window: Count
+    id: count
+    size: [220, 90]
+    children:
+      - text: "count"
+        bind: count

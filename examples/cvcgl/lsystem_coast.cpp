@@ -3684,7 +3684,7 @@ int main(int argc, char **argv) {
   bool uiPaused = knob("coast.clock.paused", 0.0) > 0.5;
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
-      cvc_examples::demos_menu("lsystem_coast");
+      cvc_examples::demos_menu(app, "lsystem_coast");
       if (ImGui::BeginMenu("Scene")) {
         // The library's menu: shadows, shadow-map resolution, bake interval and
         // the diagnostic chrome, all read back from the scene rather than from
@@ -3883,7 +3883,7 @@ int main(int argc, char **argv) {
         std::printf("coast: the debris stopped (%s)\n", e.what());
       }
     });
-  while (!view.windowClosed() && !cvc_examples::demo_switch_requested()) {
+  while (!view.windowClosed() && !cvc_examples::demo_switch_requested(app)) {
     double t, dt;
     if (capturing || debrisCheck || wakeCheck ||
         boatCheck) { // fixed synthetic clock -> real-time playback of the animation

@@ -2262,11 +2262,18 @@ TEST(Slices, SL07_ABetterPriorityPreempts) {
   bool armed = false, seen = false;
   steady_clock::time_point due{};
   uint64_t after_due = 0, after_due_at_seen = 0;
-  // (arm) is called the step before (sleep 0.02): the scheduler's due time is no earlier.
+  // (sleep (arm)): (arm) reads the clock just before the sleep's own reading, which sets the
+  // scheduler's due time, so that due time is no earlier than this one. The (sleep 0.001) before
+  // it runs the sleep's path once, so that nothing between the two readings runs for the first
+  // time. In a fresh process the first run of that code (page faults, cold caches) came between
+  // them, and the runner's ticks over it counted as lateness: timed from an (arm) the step before
+  // a first (sleep 0.02), a macOS CI job counted 37-62 ticks on all three tries, and an idle
+  // Windows machine 9-24 in fresh processes. With the path warm that machine counts 1-5, and 0-10
+  // with 66 busy loops on its 22 CPUs.
   builtins::register_fn(w.env, "arm", [&](std::span<const value_t>) -> value_t {
     due = steady_clock::now() + std::chrono::milliseconds(20);
     armed = true;
-    return value_t();
+    return value_t(0.02);
   });
   w.on_tick = [&] {
     if (armed && steady_clock::now() >= due)
@@ -2279,13 +2286,16 @@ TEST(Slices, SL07_ABetterPriorityPreempts) {
   };
   execute_options better;
   better.priority = -5;
-  const int sleeper = w.submit("(begin (arm) (sleep 0.02) (seen) 1)", better);
+  const int sleeper = w.submit("(begin (sleep 0.001) (sleep (arm)) (seen) 1)", better);
   execute_options worse;
   worse.priority = 5;
   const int runner = w.submit("(while #t (tick))", worse);
   w.sched.sync_run_steps(std::nullopt, 10.0); // (seen) stops it; a sleeper never woken, the budget
   ASSERT_TRUE(seen) << w.describe(sleeper);
   EXPECT_GT(w.ticks.load(), 0u);
+  std::printf("SL-7: the runner made %llu ticks past the sleeper's due time, %llu in all\n",
+              static_cast<unsigned long long>(after_due_at_seen),
+              static_cast<unsigned long long>(w.ticks.load()));
   EXPECT_LE(after_due_at_seen, 32u) << "the runner's ticks after the sleeper's due time";
   EXPECT_TRUE(w.sched.kill(runner));
   w.sched.kill(sleeper); // stopped before its last step, or ended

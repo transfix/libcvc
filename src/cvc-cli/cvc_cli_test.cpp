@@ -33,6 +33,8 @@
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/coef_train.h>
+#include <cvc/nav/nav_arms.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/sim_world_trace.h>
 #include <cvc/ph/se2_train.h>
@@ -2392,6 +2394,28 @@ TEST_F(CvcCliTest, PhInfoSimulateAndCheckAComposedGrid) {
   EXPECT_NE(0, none.exit_code);
 }
 
+TEST_F(CvcCliTest, PhMicrogridWritesANetworkAndStartsFromVoltages) {
+  const std::string grid = path("mg.json");
+  auto mk = cvc("ph microgrid \"" + grid + "\" --dgus 3 --edges 0-1,2-1 --line-r 0.3,0.5");
+  ASSERT_EQ(0, mk.exit_code) << mk.output;
+  EXPECT_NE(std::string::npos, mk.output.find("5 blocks, state 8, ports 5, inputs 6")) << mk.output;
+  EXPECT_NE(std::string::npos, mk.output.find("pair dgu2.0 - line1.0: 1")) << mk.output;
+  auto check = cvc("ph check \"" + grid + "\"");
+  ASSERT_EQ(0, check.exit_code) << check.output;
+  auto sim = cvc("ph simulate \"" + grid +
+                 "\" --physical 1,0,1.1,0.1,0.9,0,0,0.05 --u -0.1,1,-0.1,1.1,-0.15,1 --steps 20");
+  ASSERT_EQ(0, sim.exit_code) << sim.output;
+  EXPECT_NE(std::string::npos, sim.output.find("start from efforts:")) << sim.output;
+  EXPECT_NE(std::string::npos, sim.output.find("20 steps of 0.01 s")) << sim.output;
+  auto both = cvc("ph simulate \"" + grid + "\" --physical 1,0,1,0,1,0,0,0 --x0 0,0,0,0,0,0,0,0");
+  EXPECT_NE(0, both.exit_code);
+  EXPECT_NE(std::string::npos, both.output.find("not both")) << both.output;
+  auto bad = cvc("ph microgrid \"" + path("x.json") + "\" --dgu flux-capacitor");
+  EXPECT_NE(0, bad.exit_code);
+  auto lin = cvc("ph microgrid \"" + path("lin.json") + "\" --dgus 2 --dgu linear --dgu-c 1.5");
+  ASSERT_EQ(0, lin.exit_code) << lin.output;
+}
+
 // ===========================================================================
 // ph-train: the learned port-Hamiltonian vehicle (cvc::ph) from plant logs
 // ===========================================================================
@@ -2766,4 +2790,81 @@ TEST_F(CvcCliTest, TraceInfoAndVerifyReplayASession) {
   auto none = cvc("trace info \"" + path("missing.trace") + "\"");
   EXPECT_NE(0, none.exit_code);
   EXPECT_NE(std::string::npos, none.output.find("cannot open")) << none.output;
+}
+
+// ===========================================================================
+// nav: a run log's arms and Stats (cvc::nav's lab)
+// ===========================================================================
+
+TEST_F(CvcCliTest, NavLogPrintsARunLogsArmsAndStats) {
+  cvc::nav::sim_world::config c;
+  c.rows = c.cols = 32;
+  c.min_x = c.min_y = -16.0;
+  c.max_x = c.max_y = 16.0;
+  c.scale = 0.05;
+  c.veh.rr = 0.05f;
+  c.veh.d_hat = 0.2f;
+  c.veh.dt = 0.05f;
+  c.veh.vmax = 0.4f;
+  c.freeze_sense = true;
+  std::vector<std::uint8_t> occ(32 * 32, 0);
+  const float o[2] = {-0.6f, -0.1f}, goal[2] = {0.6f, 0.1f}, color[3] = {1, 0, 0};
+  std::vector<std::unique_ptr<cvc::nav::sim_world>> worlds;
+  for (int a = 0; a < 2; ++a)
+    worlds.push_back(std::make_unique<cvc::nav::sim_world>(
+        c, occ.data(), occ.data(), cvc::nav::coef_mlp::default_biased(), o, goal, color, 1));
+  cvc::nav::arms_options opt;
+  opt.scene = "cli:open32";
+  opt.log_path = path("run.cvcrun");
+  cvc::nav::arms_run run(std::move(worlds), {{"one"}, {"two"}}, opt);
+  for (int k = 0; k < 40; ++k)
+    run.step(1);
+  run.finish();
+  auto r = cvc("nav log \"" + path("run.cvcrun") + "\"");
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("2 arms, 1 agent each, 40 ticks")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("scene cli:open32 on kinematic")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("arm 1 two: the built-in policy")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("clear_min")) << r.output;
+  auto bad = cvc("nav what \"" + path("run.cvcrun") + "\"");
+  EXPECT_NE(0, bad.exit_code);
+  EXPECT_NE(std::string::npos, bad.output.find("Unknown nav operation")) << bad.output;
+  auto none = cvc("nav log \"" + path("missing.cvcrun") + "\"");
+  EXPECT_NE(0, none.exit_code);
+  EXPECT_NE(std::string::npos, none.output.find("cannot read")) << none.output;
+}
+
+TEST_F(CvcCliTest, NavScrubDeploysEveryCheckpointAndCachesIt) {
+  // a short coef_trainer run with its history and three checkpoints
+  cvc::nav::train_config cfg;
+  cfg.n = 16;
+  cfg.window = 4;
+  cfg.hidden = 16;
+  cfg.horizon = 8;
+  cfg.steps = 4;
+  cfg.checkpoint_every = 2;
+  cfg.history_path = path("history.jsonl");
+  cfg.checkpoint_prefix = path("coef");
+  cvc::nav::coef_trainer(cfg, 3).train(cvc::nav::city_scene(32));
+  const std::string report = path("scrub.json");
+  auto r = cvc("nav scrub \"" + cfg.history_path + "\" --agents 2 --ticks 60 --report \"" + report +
+               "\"");
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("3 checkpoints of")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("step 0 (1/3), deployed")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("blocks, 2 agents, seed 0, 60 ticks")) << r.output;
+  EXPECT_TRUE(fs::is_directory(cfg.history_path + ".scrub"));
+  std::ifstream f(report);
+  std::stringstream ss;
+  ss << f.rdbuf();
+  EXPECT_NE(std::string::npos, ss.str().find("\"schema\":\"cvc.nav.scrub/v1\"")) << ss.str();
+  auto again = cvc("nav scrub \"" + cfg.history_path + "\" --agents 2 --ticks 60");
+  ASSERT_EQ(0, again.exit_code) << again.output;
+  EXPECT_NE(std::string::npos, again.output.find("step 4 (3/3), cached")) << again.output;
+  auto empty = cvc("nav scrub \"" + path("nothing.jsonl") + "\"");
+  EXPECT_NE(0, empty.exit_code);
+  { std::ofstream(path("none.jsonl")) << "{\"kind\":\"step\",\"step\":1,\"loss\":1}\n"; }
+  auto none = cvc("nav scrub \"" + path("none.jsonl") + "\"");
+  EXPECT_EQ(2, none.exit_code) << none.output;
+  EXPECT_NE(std::string::npos, none.output.find("names no checkpoint")) << none.output;
 }

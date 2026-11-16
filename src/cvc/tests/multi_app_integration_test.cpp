@@ -25,6 +25,7 @@
 #include <cmath>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/data.h>
+#include <cvc/ariadne/host_signals.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/media_player.h>
 #include <cvc/ariadne/section.h>
@@ -73,6 +74,7 @@
 #endif
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <functional>
 #include <gtest/gtest.h>
@@ -677,6 +679,18 @@ void core_threads(cvc::app &app, int index, std::ostringstream &t) {
   t << "; lanes: " << seen << "\n";
 }
 
+// An app's signal state is its own: it starts with no stop asked and nothing trapped, and app i
+// stops only when it asks (the odd ones). No route here: routes are the process's, and the
+// workloads run on threads at once (SignalsGoToTheRoutedAppOnly routes them).
+void host_signals_part(cvc::app &app, int index, std::ostringstream &t) {
+  cvc::ariadne::host_signals &s = cvc::ariadne::signals_of(app);
+  t << "signals: stop at first " << s.stop_requested();
+  if (index % 2 == 1)
+    s.request_stop();
+  t << ", stopped " << s.stop_requested() << ", the same object again "
+    << (&cvc::ariadne::signals_of(app) == &s) << ", trapped '" << s.take_trapped() << "'\n";
+}
+
 std::string whole_workload(cvc::app &app, int index) {
   std::ostringstream t;
   file_handlers(app, index, t);
@@ -695,6 +709,7 @@ std::string whole_workload(cvc::app &app, int index) {
   nav_world(app, index, t);
   state_exec(app, index, t);
   state_exec_contexts(app, index, t);
+  host_signals_part(app, index, t);
   return t.str();
 }
 
@@ -854,6 +869,72 @@ TEST(MultiAppIntegration, EachAppHasItsOwnSectionEpoch) {
     (void)cvc::ariadne::section_epoch(between);
   }
   EXPECT_EQ(cvc::ariadne::section_epoch(a), before) << "making another app moved this one's";
+}
+
+// The handler a signal has now, put back as it was.
+using handler_t = void (*)(int);
+handler_t handler_of(int signo) {
+  const handler_t now = std::signal(signo, SIG_IGN);
+  std::signal(signo, now);
+  return now;
+}
+
+// A signal reaches only the app its route names, from any thread; a route made inside another
+// sends the signals to its own app until it goes, then the outer route's app has them again; and
+// the last route to go puts the process's handlers back as they were.
+TEST(MultiAppIntegration, SignalsGoToTheRoutedAppOnly) {
+  using cvc::ariadne::signal_route;
+  using cvc::ariadne::signals_of;
+  const handler_t int_before = handler_of(SIGINT), term_before = handler_of(SIGTERM);
+  {
+    cvc::app a, b, c;
+    {
+      signal_route to_a(a, signal_route::mode::stop);
+      std::raise(SIGTERM);
+      EXPECT_TRUE(signals_of(a).stop_requested());
+      EXPECT_FALSE(signals_of(b).stop_requested()) << "a signal routed to a reached b";
+      {
+        signal_route to_b(b, signal_route::mode::stop);
+        std::thread([] { std::raise(SIGINT); }).join(); // from another thread
+        EXPECT_TRUE(signals_of(b).stop_requested());
+      }
+      EXPECT_FALSE(signals_of(c).stop_requested()) << "an unrouted app was stopped";
+    }
+    EXPECT_FALSE(signals_of(c).stop_requested());
+  }
+  EXPECT_EQ(handler_of(SIGINT), int_before) << "SIGINT's handler did not come back";
+  EXPECT_EQ(handler_of(SIGTERM), term_before) << "SIGTERM's handler did not come back";
+  {
+    cvc::app later; // an app made after others were stopped starts with no stop of its own
+    EXPECT_FALSE(signals_of(later).stop_requested());
+  }
+
+#ifndef _WIN32
+  // Traps: each app takes only the signals sent to it, each once, in either nesting.
+  const handler_t usr1_before = handler_of(SIGUSR1);
+  {
+    cvc::app a, b;
+    signal_route to_a(a, signal_route::mode::trap);
+    std::raise(SIGUSR1);
+    {
+      signal_route to_b(b, signal_route::mode::trap);
+      std::raise(SIGHUP);
+      EXPECT_EQ(signals_of(b).take_trapped(), "SIGHUP");
+      EXPECT_EQ(signals_of(b).take_trapped(), "");
+    }
+    std::thread([] { std::raise(SIGUSR2); }).join();
+    EXPECT_EQ(signals_of(b).take_trapped(), "") << "b took a signal routed to a";
+    std::string taken = signals_of(a).take_trapped();
+    taken += " " + signals_of(a).take_trapped();
+    EXPECT_EQ(taken, "SIGUSR1 SIGUSR2");
+    EXPECT_EQ(signals_of(a).take_trapped(), "");
+    EXPECT_FALSE(signals_of(a).stop_requested()) << "a trap route stopped its app";
+  }
+  EXPECT_EQ(handler_of(SIGUSR1), usr1_before) << "SIGUSR1's handler did not come back";
+  EXPECT_EQ(cvc::ariadne::signal_number("SIGTERM"), SIGTERM);
+#else
+  EXPECT_EQ(cvc::ariadne::signal_number("SIGTERM"), 0); // nothing is trapped on Windows
+#endif
 }
 
 } // namespace
