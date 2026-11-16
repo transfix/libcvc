@@ -35,6 +35,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cvc/ariadne/host_signals.h>
 #include <cvc/core/app.h>
 #include <cvc/core/input_trace.h>
 #include <cvc/core/param_cli.h>
@@ -46,6 +47,7 @@
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/sim_world_trace.h>
 #include <cvc/ph/compose.h>
+#include <cvc/ph/microgrid.h>
 #include <cvc/ph/se2_train.h>
 #include <cvc/physics/mujoco_robot.h>
 #include <cvc/physics/plant_log_scene.h>
@@ -57,6 +59,9 @@
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/utility/algorithm.h>
 #include <cvc/utility/utility.h>
+#include <cvc/volume/point_classes.h>
+#include <cvc/volume/segmentation.h>
+#include <cvc/volume/segmentation_params.h>
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_info.h>
 #include <cvc/volume/volume_file_io.h>
@@ -1338,10 +1343,6 @@ static int cmd_bunny(cvc::app &app, int argc, char **argv) {
 // State server (distributed_state_session)
 // ---------------------------------------------------------------------------
 
-static std::atomic<bool> g_serve_running{true};
-
-static void serve_signal_handler(int) { g_serve_running.store(false); }
-
 static int cmd_serve(cvc::app &app, int argc, char **argv) {
   po::options_description desc(
       "cvc serve - run a headless CVC state server\n\n"
@@ -1472,9 +1473,10 @@ static int cmd_serve(cvc::app &app, int argc, char **argv) {
   // the handlers installed afterwards there is a window -- join() returning,
   // through delegation parsing and exec-coordinator startup, to the old
   // install site below -- in which SIGINT still had its default disposition
-  // and killed the process outright, discarding the buffered log with it.
-  std::signal(SIGINT, serve_signal_handler);
-  std::signal(SIGTERM, serve_signal_handler);
+  // and killed the process outright, discarding the buffered log with it. They set this app's
+  // stop flag (host_signals.h), which the loop below polls; the route goes before the app.
+  cvc::ariadne::signal_route stopRoute(app, cvc::ariadne::signal_route::mode::stop);
+  const cvc::ariadne::host_signals &signals = cvc::ariadne::signals_of(app);
 
   auto session = cvc::distributed_state_session::join(app, cfg);
   // Flush the readiness banner: stdout is fully buffered when it is a file or
@@ -1525,7 +1527,7 @@ static int cmd_serve(cvc::app &app, int argc, char **argv) {
 
   // Block until SIGINT/SIGTERM (handlers were installed before join() above).
   std::cout << "Press Ctrl+C to stop." << std::endl;
-  while (g_serve_running.load()) {
+  while (!signals.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     // If exec enabled, step the scheduler: for a runnable process, or for a command posted to it
     // (the coordinator's bus threads post_control), which only a step applies.
@@ -2401,18 +2403,23 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
       "  simulate <system>   roll it out from --x0 under --u held (or one row per step) and\n"
       "                      print the energy books; --csv writes every state\n"
       "  check <system>      the power balance at random states: exit 1 when\n"
-      "                      the pairing does work or dH/dt departs from -loss + supplied\n\n"
-      "  cvc ph simulate grid.json --x0 2.2,0,2.2,0,0 --u -0.1,1,-0.1,1 --steps 200\n");
-  std::string op, file, x0s, us, csv, coupling, scheme;
-  int steps = 100, substeps = 2, local = 1, samples = 100, max_iter = 10;
+      "                      the pairing does work or dH/dt departs from -loss + supplied\n"
+      "  microgrid <out>     write a DC microgrid (DGUs and RL lines, docs/PH_COMPOSE.md) as a\n"
+      "                      system file\n\n"
+      "  cvc ph microgrid grid.json --dgus 4 --edges 0-1,1-2,2-3 --line-r 0.3,0.4,0.5\n"
+      "  cvc ph simulate grid.json --physical 1,0,1.1,0,0.9,0,1,0,0,0,0 --u "
+      "-0.1,1,-0.1,1,-0.1,1,-0.1,1\n");
+  std::string op, file, x0s, physical, us, csv, coupling, scheme, edges, line_r, line_l, dgu_kind;
+  int steps = 100, substeps = 2, local = 1, samples = 100, max_iter = 10, dgus = 4;
   unsigned seed = 1;
-  double dt = 0.01, tol = 1e-6, scale = 1.0;
+  double dt = 0.01, tol = 1e-6, scale = 1.0, dgu_c = 2.2, dgu_l = 1.8, dgu_r = 1.2;
   // clang-format off
   desc.add_options()
     ("help,h", "show help")
-    ("op", po::value<std::string>(&op)->required(), "info, simulate or check")
-    ("file", po::value<std::string>(&file)->required(), "the system file")
+    ("op", po::value<std::string>(&op)->required(), "info, simulate, check or microgrid")
+    ("file", po::value<std::string>(&file)->required(), "the system file (microgrid: the one to write)")
     ("x0", po::value<std::string>(&x0s), "simulate: the start state, comma separated (default zeros)")
+    ("physical", po::value<std::string>(&physical), "simulate: the start as every block's efforts instead (a DGU's v and i, a line's i), mapped to its state")
     ("u", po::value<std::string>(&us), "simulate: the inputs, one row held or one row per step (default zeros)")
     ("steps", po::value<int>(&steps)->default_value(100), "simulate: steps")
     ("dt", po::value<double>(&dt)->default_value(0.01), "simulate: step (s)")
@@ -2425,7 +2432,15 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
     ("csv", po::value<std::string>(&csv), "simulate: write t, the state, H and the books per step")
     ("samples", po::value<int>(&samples)->default_value(100), "check: random states")
     ("seed", po::value<unsigned>(&seed)->default_value(1), "check: their seed")
-    ("scale", po::value<double>(&scale)->default_value(1.0), "check: their standard deviation");
+    ("scale", po::value<double>(&scale)->default_value(1.0), "check: their standard deviation")
+    ("dgus", po::value<int>(&dgus)->default_value(4), "microgrid: buses, one DGU each")
+    ("edges", po::value<std::string>(&edges), "microgrid: lines as FROM-TO, comma separated (default a chain)")
+    ("line-r", po::value<std::string>(&line_r)->default_value("0.3,0.4,0.5"), "microgrid: line resistances (ohm), one or one per line (the last repeats)")
+    ("line-l", po::value<std::string>(&line_l)->default_value("0.8"), "microgrid: line inductances (H), likewise")
+    ("dgu", po::value<std::string>(&dgu_kind)->default_value("reference"), "microgrid: reference (q = 2.2 (v + v^3/3), 1.8 H, 1.2 ohm) or linear")
+    ("dgu-c", po::value<double>(&dgu_c)->default_value(2.2), "microgrid: a linear DGU's capacitance (F)")
+    ("dgu-l", po::value<double>(&dgu_l)->default_value(1.8), "microgrid: a linear DGU's inductance (H)")
+    ("dgu-r", po::value<double>(&dgu_r)->default_value(1.2), "microgrid: a linear DGU's resistance (ohm)");
   // clang-format on
   po::positional_options_description pos;
   pos.add("op", 1).add("file", 1);
@@ -2437,6 +2452,44 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
   }
   po::notify(vm);
 
+  if (op == "microgrid") {
+    std::vector<cvc::ph::line_spec> lines;
+    if (edges.empty())
+      for (int i = 0; i + 1 < dgus; ++i)
+        lines.push_back({i, i + 1, 0.0, 1.0});
+    else {
+      std::stringstream in(edges);
+      std::string item;
+      while (std::getline(in, item, ',')) {
+        const size_t dash = item.find('-');
+        if (dash == std::string::npos)
+          throw std::invalid_argument("--edges: '" + item + "' is not FROM-TO");
+        lines.push_back(
+            {std::stoi(item.substr(0, dash)), std::stoi(item.substr(dash + 1)), 0.0, 1.0});
+      }
+    }
+    const std::vector<double> rs = ph_numbers(line_r, "line-r"), ls = ph_numbers(line_l, "line-l");
+    if (rs.empty() || ls.empty())
+      throw std::invalid_argument("--line-r and --line-l need at least one value");
+    for (size_t k = 0; k < lines.size(); ++k) {
+      lines[k].R = rs[std::min(k, rs.size() - 1)];
+      lines[k].L = ls[std::min(k, ls.size() - 1)];
+    }
+    cvc::ph::law_ptr dgu;
+    if (dgu_kind == "reference")
+      dgu = cvc::ph::reference_dgu();
+    else if (dgu_kind == "linear")
+      dgu = cvc::ph::linear_dgu(dgu_c, dgu_l, dgu_r);
+    else
+      throw std::invalid_argument("--dgu: '" + dgu_kind + "' (use reference or linear)");
+    const cvc::ph::microgrid g = cvc::ph::make_microgrid(dgu, dgus, lines);
+    std::ofstream out(file);
+    if (!out)
+      throw std::runtime_error("cannot write " + file);
+    out << cvc::ph::system_json(g.system) << "\n";
+    std::cout << cvc::ph::describe(g.system) << "  wrote " << file << "\n";
+    return 0;
+  }
   const cvc::ph::composite s = cvc::ph::load_system(file);
   if (op == "info") {
     std::cout << cvc::ph::describe(s);
@@ -2454,7 +2507,8 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
     return ok ? 0 : 1;
   }
   if (op != "simulate")
-    throw std::runtime_error("Unknown ph operation: " + op + " (use info, simulate or check)");
+    throw std::runtime_error("Unknown ph operation: " + op +
+                             " (use info, simulate, check or microgrid)");
   cvc::ph::transition_opts o;
   o.dt = dt;
   o.substeps = substeps;
@@ -2464,6 +2518,19 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
   o.solve.max_iter = max_iter;
   o.solve.tol = tol;
   std::vector<double> x0 = ph_numbers(x0s, "x0"), u = ph_numbers(us, "u");
+  if (!physical.empty()) {
+    if (!x0.empty())
+      throw std::invalid_argument("give --x0 or --physical, not both");
+    const cvc::ph::storage_result st =
+        cvc::ph::storage_from_efforts(s, ph_numbers(physical, "physical"));
+    if (!st.converged)
+      throw std::runtime_error("--physical: no state reaches those efforts (residual " +
+                               std::to_string(st.residual) + " after " +
+                               std::to_string(st.iterations) + " iterations)");
+    std::cout << "start from efforts: " << st.iterations << " Newton iterations, residual "
+              << st.residual << "\n";
+    x0 = st.x;
+  }
   if (x0.empty())
     x0.assign(s.state_dim(), 0.0);
   if (u.empty())
@@ -2757,6 +2824,163 @@ static int cmd_ph_train(cvc::app &, int argc, char **argv) {
 // Command dispatch table
 // ===========================================================================
 
+// ---------------------------------------------------------------------------
+// cvc segment: cvc::segment_seeded (cvc/volume/segmentation.h), the VolumeRover GenSeg port
+// ---------------------------------------------------------------------------
+
+// The legacy flags: VolumeGridRover's Segmentation tab and GenSeg's entry took the thresholds as
+// integers on the 0..255 scale the volume is rescaled to. --tlow v / --thigh v become
+// --t-low=v / --t-high=v with --normalized-thresholds.
+static std::vector<std::string> segment_legacy_flags(int argc, char **argv) {
+  std::vector<std::string> out;
+  bool normalized = false;
+  // argv[0] is the command, as command_line_parser(argc, argv) skips it.
+  for (int i = 1; i < argc; ++i) {
+    const std::string a = argv[i];
+    const bool low = a == "--tlow" || a.rfind("--tlow=", 0) == 0;
+    const bool high = a == "--thigh" || a.rfind("--thigh=", 0) == 0;
+    if (!low && !high) {
+      out.push_back(a);
+      continue;
+    }
+    std::string v;
+    const std::size_t eq = a.find('=');
+    if (eq != std::string::npos) {
+      v = a.substr(eq + 1);
+    } else {
+      if (i + 1 >= argc)
+        throw std::runtime_error("cvc segment: " + a + " needs a value");
+      v = argv[++i];
+    }
+    out.push_back(std::string(low ? "--t-low=" : "--t-high=") + v);
+    if (!normalized) {
+      out.push_back("--normalized-thresholds");
+      normalized = true;
+    }
+  }
+  return out;
+}
+
+// "name:i,j,k" (or "name=i,j,k"): one seed of class `name`.
+static void add_seed_arg(cvc::point_classes &pc, const std::string &s, int variable, int timestep) {
+  const std::size_t sep = s.find_last_of(":=");
+  int ijk[3];
+  char tail = 0;
+  if (sep == std::string::npos || sep == 0 ||
+      std::sscanf(s.c_str() + sep + 1, "%d,%d,%d%c", &ijk[0], &ijk[1], &ijk[2], &tail) != 3)
+    throw std::runtime_error("cvc segment: --seed " + s + " is not name:i,j,k");
+  pc.add(s.substr(0, sep), ijk[0], ijk[1], ijk[2], variable, timestep);
+}
+
+static int cmd_segment(cvc::app &app, int argc, char **argv) {
+  po::options_description desc(
+      "cvc segment - seeded segmentation of a volume (the VolumeRover GenSeg port, Bajaj, Yu and "
+      "Auer, J. Struct. Biol. 2003)\n\n"
+      "Fronts grow from each point class's seeds by fast marching, slowing at edges, and stop "
+      "where they meet another class's front or a voxel below --t-low; the smoothed volume's "
+      "local maxima above --t-high join the class whose front reaches them first. Writes the "
+      "labels (UChar: the class index, 255 for none) to the output, and each class's voxels "
+      "(zero elsewhere) beside it as <stem>_class_<n><ext>. The seeds come from a point-class "
+      "file (--seeds: VolumeGridRover's .vgr, or .pts) or the command line (--seed). The legacy "
+      "--tlow / --thigh take the thresholds on the 0..255 scale the volume is rescaled to.\n\n"
+      "Examples:\n"
+      "  cvc segment map.rawiv --seeds classes.vgr --tlow 40 --thigh 200 -o labels.rawiv\n"
+      "  cvc segment map.mrc --seed virus:40,40,40 --seed solvent:2,2,2 --t-low 0.1 --t-high "
+      "0.8 -o labels.rawiv\n");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume")(
+      "output,o", po::value<std::string>()->required(), "output volume for the labels")(
+      "seeds,s", po::value<std::string>(), "point-class file of the seeds (.vgr, .pts)")(
+      "seed", po::value<std::vector<std::string>>()->composing(),
+      "a seed, name:i,j,k (repeatable): a voxel of class `name`")(
+      "border", po::value<std::string>(),
+      "write the border voxels (where a front stopped), \"i j k\" a line, to this file")(
+      "seconds", po::value<double>()->default_value(0.0),
+      "report progress every this many seconds (0: never)");
+  cvc::add_param_options<cvc::seeded_segmentation_params>(desc);
+
+  const std::vector<std::string> args = segment_legacy_flags(argc, argv);
+  po::positional_options_description pos;
+  pos.add("input", 1).add("output", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(args).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+  const cvc::param_result<cvc::seeded_segmentation_params> pr =
+      cvc::params_from_options<cvc::seeded_segmentation_params>(vm);
+  if (!pr.ok())
+    throw std::runtime_error("cvc segment: " + pr.message());
+  const cvc::seeded_segmentation_params &p = pr.value;
+
+  const std::string input = vm["input"].as<std::string>();
+  const std::string output = vm["output"].as<std::string>();
+  cvc::volume vol(app);
+  vol.read(input);
+
+  cvc::point_classes seeds;
+  if (vm.count("seeds")) {
+    cvc::point_class_read_params rp;
+    rp.dims = {int(vol.XDim()), int(vol.YDim()), int(vol.ZDim())};
+    rp.bbox = {vol.XMin(), vol.YMin(), vol.ZMin(), vol.XMax(), vol.YMax(), vol.ZMax()};
+    rp.variable = p.variable;
+    rp.timestep = p.timestep;
+    seeds = cvc::read_point_classes(app, vm["seeds"].as<std::string>(), rp);
+  }
+  if (vm.count("seed"))
+    for (const std::string &s : vm["seed"].as<std::vector<std::string>>())
+      add_seed_arg(seeds, s, p.variable, p.timestep);
+  if (seeds.point_count() == 0)
+    throw std::runtime_error("cvc segment: no seeds: give --seeds <file> or --seed name:i,j,k");
+
+  // The stepper, so a long run can report its progress.
+  cvc::segment_stepper stepper(vol, std::move(seeds), p);
+  const double every = vm["seconds"].as<double>();
+  auto last = std::chrono::steady_clock::now();
+  while (!stepper.step(4096)) {
+    if (every > 0 &&
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - last).count() >= every) {
+      std::cerr << "cvc segment: " << stepper.status() << "\n";
+      last = std::chrono::steady_clock::now();
+    }
+  }
+  cvc::seeded_segmentation r = stepper.take();
+
+  r.labels.write(output);
+  const std::size_t dot = output.find_last_of('.');
+  const std::size_t sep = output.find_last_of("/\\");
+  const bool has_ext = dot != std::string::npos && (sep == std::string::npos || dot > sep);
+  const std::string stem = has_ext ? output.substr(0, dot) : output;
+  const std::string ext = has_ext ? output.substr(dot) : std::string();
+  for (std::size_t c = 0; c < r.classes.size(); ++c) {
+    char n[16];
+    std::snprintf(n, sizeof n, "_class_%02zu", c);
+    r.classes[c].write(stem + n + ext);
+  }
+  if (vm.count("border")) {
+    const std::string file = vm["border"].as<std::string>();
+    std::ofstream b(file);
+    if (!b)
+      throw std::runtime_error("cvc segment: cannot write " + file);
+    for (const auto &v : r.border)
+      b << v[0] << " " << v[1] << " " << v[2] << "\n";
+  }
+  for (const std::string &w : r.warnings)
+    std::cerr << "cvc segment: warning: " << w << "\n";
+  std::size_t labelled = 0;
+  for (std::size_t n : r.class_voxels)
+    labelled += n;
+  std::cout << "Wrote the labels of " << r.class_names.size() << " classes (" << labelled
+            << " voxels labelled, " << r.border.size() << " on borders, " << r.classified_seeds
+            << " of " << r.automatic_seeds << " automatic seeds classified) to " << output;
+  if (!r.classes.empty())
+    std::cout << ", and the class volumes to " << stem << "_class_NN" << ext;
+  std::cout << "\n";
+  return 0;
+}
+
 struct command_entry {
   const char *name;
   const char *category;
@@ -2814,6 +3038,7 @@ static const command_entry commands[] = {
   // ── Analysis ──
   {"ssim",           "Analysis",        "compute SSIM between two volumes",              cmd_ssim},
   {"compare",        "Analysis",        "exact voxel comparison (nonzero exit on mismatch)", cmd_compare},
+  {"segment",        "Analysis",        "seeded segmentation (GenSeg): labels and class volumes", cmd_segment},
 
   // ── Projection / Reconstruction ──
   {"project",        "Projection",      "forward ray projection",                        cmd_project},

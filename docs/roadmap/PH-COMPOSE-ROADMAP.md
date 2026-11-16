@@ -127,14 +127,24 @@ imports phast and copies none of it.
    - a microgrid (linear DGUs, RL lines, a fifth DGU added at either of two buses) against
      a fine-step RK4 reference (`ph_compose_test`);
    - parity with phast on the fixtures above (`ph_compose_parity_test`).
-2. **The DC microgrid study end to end.** DGU (Eq. 21) and line laws as `canonical_law` /
-   `linear_law` presets, the paper's reference nonlinear DGU
-   (`q_C / C = 2.2 (v + v^3 / 3)`, L = 1.8 H, R = 1.2 ohm), the four-unit chain with lines
-   0.3/0.4/0.5 ohm and 0.8 H, and the added DGU and line at bus 0 or bus 2. The storage
-   inversion (`Storage`: physical voltages and currents to charge and flux, by Newton).
-   Parity: phast's Python on the network fixtures at golden tolerance. Where phast has no
-   counterpart (the nonlinear reference DGU), against an independent fine-step reference
-   (RK4 at dt/64).
+2. **The DC microgrid study end to end (in review, stacked on Phase 1).**
+   - DGU (Eq. 21) and line laws as presets in `cvc/ph/microgrid.h`.
+   - The paper's reference nonlinear DGU (`q_C / C = 2.2 (v + v^3 / 3)`, L = 1.8 H,
+     R = 1.2 ohm), through a capacitor curve on `canonical_law`.
+   - The four-unit chain with lines 0.3/0.4/0.5 ohm and 0.8 H, and the added DGU and line at
+     bus 0 or bus 2, assigned by `assign_state` (Eq. 53, identity reset).
+   - The storage inversion (`Storage` in Appendix I.2: physical voltages and currents to charge
+     and flux, by Newton, capped at 2, 30 iterations, 1e-9) as `storage_from_efforts`.
+   - Writing systems out (`system_json`), and `cvc ph microgrid` / `--physical`.
+   - The check:
+     - phast's Python covers the linear network (Phase 1's fixtures).
+     - phast has no counterpart for the nonlinear reference DGU, so the candidate study runs
+       against RK4 at dt/16, which gives the same scores to six digits as dt/64.
+     - With known laws, midpoint coupling is 28 to 4,200 times more accurate than Euler (voltage
+       RMSE 5.1e-7 against 7.9e-5 V; peak line-current error 5.7e-8 against 2.4e-4 A). Both
+       order all 16 candidate pairs as the reference does.
+   - Not here: the paper's learned DGU family (2,407 parameters). It is not in phast; it would
+     come with Shubham's checkpoints (Phase 4).
 3. **The query.**
    - `InitializeState` as the voltage-history fit: least squares over the prior-scaled
      physical state at the window start, propagated through the frozen transition, with

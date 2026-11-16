@@ -158,14 +158,45 @@ cloud_layer::cloud_layer(const cloud_layer_params &p) : m_p(p) {
   if (m_p.opacity.empty() || m_amax <= 0.0)
     m_amax = 1.0;
 
+  make_maps();
+  build_sun();
+
+  set_area(m_p.area);
+}
+
+void cloud_layer::set_coverage(double share) {
+  share = std::min(1.0, std::max(0.0, share));
+  if (share == m_p.coverage)
+    return;
+  m_p.coverage = share;
+  if (!m_cells.empty())
+    rank_cells(); // the targets now; the presences fade to them over fade_s
+}
+
+void cloud_layer::set_sun(double az_deg, double el_deg) {
+  el_deg = std::min(89.0, std::max(5.0, el_deg));
+  if (az_deg == m_p.sun_az && el_deg == m_p.sun_el)
+    return;
+  m_p.sun_az = az_deg;
+  m_p.sun_el = el_deg;
+  make_maps(); // the grammar bakes a little top-light into its field
+  build_sun();
+  if (!m_tau.empty())
+    build_tau();
+  if (!m_far.empty())
+    build_far();
+}
+
+void cloud_layer::make_maps() {
   // The maps: each scaled to its own peak (the grammar grows some variants much fainter than
   // others, and a cell showing one must still hold a cloud), then lumped: clear sky below
   // LUMP_FLOOR, squared above. A crossfade of two is what a cell shows, and its optical depth is
   // the crossfade of theirs.
+  m_maps.clear();
   const int n = m_p.n, nz = m_p.nz;
   for (int v = 0; v < m_p.variants; ++v) {
     lsys::cloud_params cp;
-    cp.seed = p.seed;
+    cp.seed = m_p.seed;
     cp.variant = static_cast<std::uint32_t>(v);
     cp.n = n;
     cp.nz = nz;
@@ -198,9 +229,6 @@ cloud_layer::cloud_layer(const cloud_layer_params &p) : m_p(p) {
     }
     m_maps.push_back(std::move(f));
   }
-  build_sun();
-
-  set_area(m_p.area);
 }
 
 void cloud_layer::build_sun() {

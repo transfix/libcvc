@@ -37,6 +37,7 @@
 #include <cvc/nav/sim_world_trace.h>
 #include <cvc/ph/se2_train.h>
 #include <cvc/state/state.h>
+#include <cvc/volume/point_classes.h>
 #include <cvc/volume/volume.h>
 #include <filesystem>
 #include <fstream>
@@ -2391,6 +2392,28 @@ TEST_F(CvcCliTest, PhInfoSimulateAndCheckAComposedGrid) {
   EXPECT_NE(0, none.exit_code);
 }
 
+TEST_F(CvcCliTest, PhMicrogridWritesANetworkAndStartsFromVoltages) {
+  const std::string grid = path("mg.json");
+  auto mk = cvc("ph microgrid \"" + grid + "\" --dgus 3 --edges 0-1,2-1 --line-r 0.3,0.5");
+  ASSERT_EQ(0, mk.exit_code) << mk.output;
+  EXPECT_NE(std::string::npos, mk.output.find("5 blocks, state 8, ports 5, inputs 6")) << mk.output;
+  EXPECT_NE(std::string::npos, mk.output.find("pair dgu2.0 - line1.0: 1")) << mk.output;
+  auto check = cvc("ph check \"" + grid + "\"");
+  ASSERT_EQ(0, check.exit_code) << check.output;
+  auto sim = cvc("ph simulate \"" + grid +
+                 "\" --physical 1,0,1.1,0.1,0.9,0,0,0.05 --u -0.1,1,-0.1,1.1,-0.15,1 --steps 20");
+  ASSERT_EQ(0, sim.exit_code) << sim.output;
+  EXPECT_NE(std::string::npos, sim.output.find("start from efforts:")) << sim.output;
+  EXPECT_NE(std::string::npos, sim.output.find("20 steps of 0.01 s")) << sim.output;
+  auto both = cvc("ph simulate \"" + grid + "\" --physical 1,0,1,0,1,0,0,0 --x0 0,0,0,0,0,0,0,0");
+  EXPECT_NE(0, both.exit_code);
+  EXPECT_NE(std::string::npos, both.output.find("not both")) << both.output;
+  auto bad = cvc("ph microgrid \"" + path("x.json") + "\" --dgu flux-capacitor");
+  EXPECT_NE(0, bad.exit_code);
+  auto lin = cvc("ph microgrid \"" + path("lin.json") + "\" --dgus 2 --dgu linear --dgu-c 1.5");
+  ASSERT_EQ(0, lin.exit_code) << lin.output;
+}
+
 // ===========================================================================
 // ph-train: the learned port-Hamiltonian vehicle (cvc::ph) from plant logs
 // ===========================================================================
@@ -2498,6 +2521,97 @@ TEST_F(CvcCliTest, PhTrainRefusesADirectoryThatIsNotAPlantLog) {
   auto r = cvc("ph-train --runs \"" + path("empty") + "\" --out \"" + path("m.json") + "\"");
   EXPECT_NE(0, r.exit_code);
   EXPECT_FALSE(fs::exists(path("m.json")));
+}
+
+// ===========================================================================
+// cvc segment (the VolumeRover GenSeg port; ports plan T12)
+// ===========================================================================
+
+// Two touching Gaussian blobs along x on a 24^3 grid, over a 0.02 background.
+static void write_two_blobs(const std::string &file) {
+  cvc::app ctx;
+  cvc::volume v(ctx, cvc::dimension(24, 24, 24), cvc::Float,
+                cvc::bounding_box(0, 0, 0, 23, 23, 23));
+  for (int k = 0; k < 24; ++k)
+    for (int j = 0; j < 24; ++j)
+      for (int i = 0; i < 24; ++i) {
+        const double r2 = (j - 12.0) * (j - 12.0) + (k - 12.0) * (k - 12.0);
+        const double f = std::exp(-((i - 9.0) * (i - 9.0) + r2) / 24.5) +
+                         std::exp(-((i - 15.0) * (i - 15.0) + r2) / 24.5);
+        v(i, j, k, 0.02 + f);
+      }
+  v.write(file);
+}
+
+TEST_F(CvcCliTest, SegmentHelp) {
+  auto r = cvc("segment --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--t-low"));
+  EXPECT_NE(std::string::npos, r.output.find("--normalized-thresholds"));
+  EXPECT_NE(std::string::npos, r.output.find("--seeds"));
+  EXPECT_NE(std::string::npos, r.output.find("--tlow"));
+}
+
+TEST_F(CvcCliTest, SegmentTwoBlobs) {
+  const std::string in = path("blobs.rawiv"), out = path("labels.rawiv");
+  write_two_blobs(in);
+  auto r = cvc("segment \"" + in + "\" -o \"" + out +
+               "\" --seed left:9,12,12 --seed right:15,12,12 --t-low 0.2 --t-high 1.5 --border \"" +
+               path("border.txt") + "\"");
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("Wrote the labels of 2 classes")) << r.output;
+  ASSERT_TRUE(fs::exists(out));
+  EXPECT_TRUE(fs::exists(path("labels_class_00.rawiv")));
+  EXPECT_TRUE(fs::exists(path("labels_class_01.rawiv")));
+  EXPECT_GT(fs::file_size(path("border.txt")), 0u);
+  // The outputs read back: the labels are UChar, class 0 left of the middle, class 1 right.
+  cvc::app ctx;
+  cvc::volume labels(ctx, out), c1(ctx, path("labels_class_01.rawiv"));
+  EXPECT_EQ(labels.voxelType(), cvc::UChar);
+  EXPECT_EQ(labels(9, 12, 12), 0.0);
+  EXPECT_EQ(labels(15, 12, 12), 1.0);
+  EXPECT_EQ(labels(0, 0, 0), 255.0);
+  EXPECT_EQ(c1.voxelType(), cvc::Float);
+  EXPECT_GT(c1(15, 12, 12), 0.9);
+  EXPECT_EQ(c1(9, 12, 12), 0.0);
+}
+
+TEST_F(CvcCliTest, SegmentTakesTheLegacyFlagsAndASeedsFile) {
+  const std::string in = path("blobs.rawiv"), seeds = path("seeds.vgr");
+  write_two_blobs(in);
+  {
+    cvc::app ctx;
+    cvc::point_classes pc;
+    pc.add("left", 9, 12, 12);
+    pc.add("right", 15, 12, 12);
+    cvc::write_point_classes(ctx, pc, seeds);
+  }
+  // The legacy integers, on the 0..255 scale the volume is rescaled to.
+  auto r = cvc("segment \"" + in + "\" --seeds \"" + seeds + "\" --tlow 40 --thigh 250 -o \"" +
+               path("l.rawiv") + "\" --class-volumes false");
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("Wrote the labels of 2 classes")) << r.output;
+  EXPECT_TRUE(fs::exists(path("l.rawiv")));
+  EXPECT_FALSE(fs::exists(path("l_class_00.rawiv")));
+}
+
+TEST_F(CvcCliTest, SegmentRefusesBadInput) {
+  const std::string in = path("blobs.rawiv");
+  write_two_blobs(in);
+  auto none = cvc("segment \"" + in + "\" -o \"" + path("x.rawiv") + "\"");
+  EXPECT_NE(0, none.exit_code);
+  EXPECT_NE(std::string::npos, none.output.find("no seeds")) << none.output;
+  auto outside = cvc("segment \"" + in + "\" -o \"" + path("x.rawiv") + "\" --seed a:30,1,1");
+  EXPECT_NE(0, outside.exit_code);
+  EXPECT_NE(std::string::npos, outside.output.find("outside the 24x24x24 volume"))
+      << outside.output;
+  auto gamma =
+      cvc("segment \"" + in + "\" -o \"" + path("x.rawiv") + "\" --seed a:1,1,1 --gamma 2");
+  EXPECT_NE(0, gamma.exit_code);
+  EXPECT_NE(std::string::npos, gamma.output.find("gamma")) << gamma.output;
+  auto malformed = cvc("segment \"" + in + "\" -o \"" + path("x.rawiv") + "\" --seed a:1,1");
+  EXPECT_NE(0, malformed.exit_code);
+  EXPECT_NE(std::string::npos, malformed.output.find("name:i,j,k")) << malformed.output;
 }
 
 // ===========================================================================

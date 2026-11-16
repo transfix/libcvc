@@ -43,6 +43,7 @@
 #include <cvc/volume/volume_file_io.h>
 #include <cvc/world/generated_world.h> // terrain source test: the generator it draws
 #include <filesystem>                  // mesh_lab / fe_lab sources: a temp "document directory"
+#include <functional>
 #include <thread>
 #include <vtkAbstractVolumeMapper.h>
 #include <vtkActor.h> // LOD test: a rung's material
@@ -53,14 +54,17 @@
 #include <vtkLightCollection.h>
 #include <vtkMapper.h> // field colours: an opacity curve is an RGBA colour array
 #include <vtkNew.h>
-#include <vtkPlane.h>  // clip test: the planes handed to a node's renderer
+#include <vtkOpenGLRenderWindow.h> // water + sky: no texture unit held between frames
+#include <vtkPlane.h>              // clip test: the planes handed to a node's renderer
 #include <vtkPlaneCollection.h>
 #include <vtkPointData.h>
 #include <vtkPolyData.h>
 #include <vtkPropCollection.h>
 #include <vtkProperty.h>
+#include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
 #include <vtkTextureObject.h> // the cloud shade's crossfade textures
+#include <vtkTextureUnitManager.h>
 #include <vtkVolume.h>
 #include <vtkVolumeProperty.h>
 
@@ -1843,6 +1847,145 @@ int main() {
       t(nullptr); // no window: nothing starts, nothing breaks
     chk(near && !near->isVisible() && far && far->isVisible(),
         "without a window the water stays the flat far grid");
+  }
+
+  // ── O17: the sky follows the light rig's sun and shades the water it lists ──────────────────
+  // A cloud_sky's sun is the rig's key (lighting.key_azimuth / key_elevation) once the scene has
+  // one, live; its coverage and wind heading are live keys; and the water, as one of its receivers,
+  // takes the deck's shade into its meshes' shaders (the water switches to its shaded lighting).
+  {
+    printf("== cloud_sky: the rig's sun, live keys, the water as a receiver ==\n");
+    SceneGraph sg(app, "o17");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    auto node = [](const char *id, const char *type,
+                   std::vector<std::pair<const char *, std::string>> props) {
+      SceneNode n;
+      n.id = id;
+      n.type = type;
+      n.props.kind = Value::Kind::Map;
+      for (auto &p : props) {
+        Value v;
+        v.kind = Value::Kind::Scalar;
+        v.scalar = p.second;
+        n.props.entries.emplace_back(p.first, v);
+      }
+      return n;
+    };
+    scene.nodes.push_back(node("world", "generated_world",
+                               {{"seed", "5"},
+                                {"half", "150"},
+                                {"trees", "0"},
+                                {"rocks", "0"},
+                                {"buildings", "0"},
+                                {"amp", "40"},
+                                {"water_level", "0"},
+                                {"water", "0"},
+                                {"texture", "256"}}));
+    scene.nodes.push_back(node("water", "water", {{"world", "world"}, {"level", "0"}}));
+    SceneNode sky = node("sky", "cloud_sky",
+                         {{"ground", "world"},
+                          {"extent", "60"},
+                          {"base", "120"},
+                          {"top", "180"},
+                          {"coverage", "0.5"},
+                          {"near", "2"},
+                          {"sun_az", "-60"},
+                          {"sun_el", "28"}});
+    Value rec;
+    rec.kind = Value::Kind::Sequence;
+    Value item;
+    item.kind = Value::Kind::Scalar;
+    item.scalar = "water";
+    rec.items.push_back(item);
+    sky.props.entries.emplace_back("receivers", rec);
+    scene.nodes.push_back(sky);
+    std::vector<std::string> warnings;
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "o17", &warnings);
+    auto st = [&](const char *k) -> cvc::state & {
+      return cvc::state::instance(app)(cvc::ariadne::resolve_bind("o17", k));
+    };
+    chk(approx(st("sky.coverage").value<double>(), 0.5) &&
+            approx(st("sky.wind_az").value<double>(), 90.0),
+        "cloud_sky seeded sky.coverage and sky.wind_az from its props");
+    auto tick = [&]() {
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer());
+    };
+    tick();
+    tick();
+    auto group = sg.getGraphics("water");
+    auto near =
+        group ? std::dynamic_pointer_cast<cvc::gl::GeometryNode>(group->findChildByName("near"))
+              : nullptr;
+    auto far = group
+                   ? std::dynamic_pointer_cast<cvc::gl::GeometryNode>(group->findChildByName("far"))
+                   : nullptr;
+    chk(near && far && near->hasSharedShaderInputs("cloud_sky") &&
+            far->hasSharedShaderInputs("cloud_sky"),
+        "the sky wired its shade into both water meshes (a receiver: water)");
+    auto sunR = [&]() -> std::array<float, 3> {
+      auto in = far ? far->sharedShaderInputs("cloud_sky") : nullptr;
+      if (!in || !in->f3.count("cloudSunR"))
+        return {0.0f, 0.0f, -1.0f};
+      return in->f3.at("cloudSunR");
+    };
+    const std::array<float, 3> r0 = sunR();
+    const double cot28 = 1.0 / std::tan(28.0 * 3.14159265358979323846 / 180.0);
+    chk(r0[2] == 0.0f && std::fabs(std::hypot(r0[0], r0[1]) - cot28) < 1e-3,
+        "without the rig's keys the sky's sun is its props' (elevation 28)");
+    // The rig's key moves: the sky's sun follows on its next tick.
+    st("lighting.key_azimuth").value(120.0);
+    st("lighting.key_elevation").value(50.0);
+    tick();
+    const std::array<float, 3> r1 = sunR();
+    const double cot50 = 1.0 / std::tan(50.0 * 3.14159265358979323846 / 180.0);
+    chk(std::fabs(std::hypot(r1[0], r1[1]) - cot50) < 1e-3 &&
+            (std::fabs(r1[0] - r0[0]) > 1e-3 || std::fabs(r1[1] - r0[1]) > 1e-3),
+        "the sky's sun follows the rig's key (azimuth 120, elevation 50)");
+
+    // O15, the swash: with a swell (its shore layer found once the keys have held for 10 frames)
+    // the world's ground meshes take the swash, its inputs left out of the shadow maps' bake.
+    st("water.swell_height").value(1.0);
+    for (int i = 0; i < 14; ++i)
+      tick();
+    if (near && near->isVisible()) {
+      int wired = 0, baked = 0, on = 0;
+      std::function<void(cvc::gl::GraphicsNode &)> walk = [&](cvc::gl::GraphicsNode &g) {
+        if (auto *m = dynamic_cast<cvc::gl::GeometryNode *>(&g))
+          if (auto in = m->sharedShaderInputs("water_swash")) {
+            ++wired;
+            baked += in->skip_shadow_bake ? 0 : 1;
+            on += in->f.count("uSwashOn") && in->f.at("uSwashOn") > 0.5f ? 1 : 0;
+          }
+        for (const auto &c : g.getGraphicsChildren())
+          if (c)
+            walk(*c);
+      };
+      if (auto ground = sg.getGraphics("world"))
+        walk(*ground);
+      printf("  the swash on %d of the ground's meshes\n", wired);
+      chk(wired > 0 && baked == 0 && on == wired,
+          "a swell puts the swash on the world's ground meshes, out of the shadow bake");
+    } else {
+      printf("  SKIP the swash: the water's cascades are not up (no float render targets)\n");
+    }
+
+    // Between frames the context holds no texture unit for the scene's shader inputs (the
+    // cascades, the coast, the wake, the swash, the cloud shade): each holds one only for the
+    // draw it is bound for. Held for good, they ran out WebGL2's 32 units in the browser, and
+    // every draw after that failed and logged.
+    if (auto *win = vtkOpenGLRenderWindow::SafeDownCast(view.renderer()->GetRenderWindow())) {
+      vtkTextureUnitManager *tum = win->GetTextureUnitManager();
+      int held = 0;
+      for (int u = 0; u < tum->GetNumberOfTextureUnits(); ++u)
+        held += tum->IsAllocated(u) ? 1 : 0;
+      printf("  texture units held between frames: %d of %d\n", held,
+             tum->GetNumberOfTextureUnits());
+      chk(held == 0, "no texture unit is held between frames (the water, the swash, the shade)");
+    }
+    for (const std::string &w : warnings)
+      printf("  warning: %s\n", w.c_str());
   }
 
   // ── a generated terrain as a geometry source (source: { terrain: {...} }) ─────────────────
