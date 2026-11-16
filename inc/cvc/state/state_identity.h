@@ -71,6 +71,17 @@ std::string local_address_toward(const std::string &target);
 // relay ignores any other.
 bool valid_reported_address(const std::string &address) noexcept;
 
+// Whether PASSWORD can be a relay's guest password (docs/roadmap/ARISRV_IDENTITY.md, ID2): 1 to
+// 256 bytes with no control character (C0 or DEL), which a person can type.
+bool valid_guest_password(const std::string &password) noexcept;
+
+// The bearer a client presents for the guest password PASSWORD: the 64 hex digits of SHA-256
+// over "cvc-guest-password/1", a NUL and the password. It fits valid_bearer_token's character set
+// on both transports, and keeps the password itself off the wire and out of proxy logs. It is
+// password-equivalent: someone who sees it can replay it, so use grpcs:// or wss:// where that
+// matters. A relay with a guest password expects exactly this as the room token.
+std::string guest_password_bearer(const std::string &password);
+
 } // namespace cvc
 
 #endif // __CVC_STATE_IDENTITY_H__

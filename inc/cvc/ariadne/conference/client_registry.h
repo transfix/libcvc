@@ -50,6 +50,9 @@ namespace conference {
 // The relay writes two things from it, each changed-only:
 //   conf.rooms.<room>.participants.<pid>.profile.name   the username, relay-owned
 //                                                       (room_write_gate refuses a client's write)
+// An rcon login (ID3) elevates one connection, the one holding a pid, until it closes or another
+// link takes the pid over; rcon_guard below limits wrong passwords.
+//
 //   arisrv.clients.<client id>.*                         the record (kRoot), its connections at
 //                                                       connections.n<seq>; outside conf and every
 //                                                       publish: namespace, so no client is sent it
@@ -91,6 +94,10 @@ public:
     double seen_s = 0.0;        // when it was last seen active (update()'s clock), for eviction
     bool dirty = true;          // its fields changed since they were last mirrored
     bool log_dirty = true;      // its connections changed since they were last mirrored
+    bool banned = false;        // refused at each connection (server.ban), until unbanned
+    std::uint64_t rcon_failures = 0; // wrong rcon passwords its connections sent
+    // Its limits where an admin set them (server.limits; ID4a reads them): see kLimitKeys.
+    std::map<std::string, cvc::state_exec::value_t> limits;
   };
 
   // Why a request was refused: a room-call error code (room_calls.h) and its message.
@@ -145,6 +152,55 @@ public:
   // TP in UTC, ISO 8601 to the second ("2026-11-16T01:02:03Z").
   static std::string utc_iso(std::chrono::system_clock::time_point tp);
 
+  // -------- rcon and the admin's calls (ID3) --------
+
+  // Whether the connection holding PID is elevated by rcon.
+  bool is_admin(const std::string &pid) const;
+  // Elevate the connection holding PID, or drop its elevation; false when no known link holds it.
+  bool set_admin(const std::string &pid, bool on);
+  // A wrong rcon password from PID's connection, for its record.
+  void note_rcon_failure(const std::string &pid);
+
+  // The connection holding PID, as rcon checks it: the address the relay saw and whether it is
+  // TLS. False when no known link holds it.
+  struct holder {
+    std::string public_address;
+    bool secure = false;
+  };
+  bool holder_of(const std::string &pid, holder &out) const;
+
+  // One open connection, as a transport numbers it (state_link_report::connection).
+  struct link_ref {
+    std::string transport; // "grpc" | "ws"
+    std::uint64_t connection = 0;
+  };
+  // The open connections of client ID_OR_PID (a client id, or the pid its connection holds):
+  // what server.kick closes.
+  std::vector<link_ref> links_of(const std::string &id_or_pid) const;
+  // Ban (or unban) client ID: each connection it makes is closed as soon as a pass sees it. False
+  // for an unknown id.
+  bool ban(const std::string &id, bool on);
+  // The open connections of banned clients that update() found, for the relay to close.
+  std::vector<link_ref> take_banned_links();
+  // Rename client ID as an admin: no rate limit, and still unique among the active clients.
+  bool rename(const std::string &id, const std::string &name, refusal &why);
+  // Set client ID's limit KEY (kLimitKeys), or with nil take it back to the document's default.
+  // False, with WHY (`invalid`), for an unknown id or key, or a value of the wrong type: a boolean
+  // for programs, guests and python, a number not below 0 for the others.
+  bool set_limit(const std::string &id, const std::string &key,
+                 const cvc::state_exec::value_t &value, refusal &why);
+  static constexpr const char *kLimitKeys[] = {"programs", "guests",    "python",     "steps",
+                                               "time",     "memory_mb", "concurrency"};
+  // PID's client's limits as an admin set them; null when PID has no record.
+  const std::map<std::string, cvc::state_exec::value_t> *limits(const std::string &pid) const;
+
+  // Every record, active ones first, then the latest seen (server.clients): a list of
+  // {client_id, username, active, admin, banned, verified, device, first_seen, last_seen}.
+  cvc::state_exec::value_t list_value() const;
+  // One record (server.client): the list's fields, its limits, its rcon failures and its
+  // connection log. Nil for an unknown id.
+  cvc::state_exec::value_t record_value(const std::string &id) const;
+
 private:
   record *find_mut(const std::string &id);
   record *record_of_mut(const std::string &pid);
@@ -160,7 +216,13 @@ private:
     std::uint64_t seq = 0;
     std::string pid;
     bool holds = false;
+    std::string transport;
+    std::uint64_t connection = 0;
+    std::string public_address;
+    bool secure = false;
   };
+  bool record_admin(const std::string &id) const;
+  cvc::state_exec::value_t summary(const record &rec) const;
 
   options _opt;
   std::map<std::string, record> _records;
@@ -170,6 +232,31 @@ private:
   std::set<std::string> _mirrored;             // record ids under kRoot
   std::map<std::string, std::set<std::uint64_t>> _mirrored_seqs; // id -> connection seqs there
   bool _dirty = true;
+  std::set<std::string> _admins;  // the keys of the links rcon elevated
+  std::vector<link_ref> _to_kick; // banned clients' links, for take_banned_links
+};
+
+// How many wrong rcon passwords a relay takes (ID3): after kFreeTries from one address, or by one
+// client, it checks no more from that address or client for kFirstLockS, and twice as long after
+// each further one (at most kMaxLockS). A right password clears both.
+class rcon_guard {
+public:
+  static constexpr int kFreeTries = 3;
+  static constexpr double kFirstLockS = 30.0;
+  static constexpr double kMaxLockS = 3600.0;
+  // Seconds until a try from ADDRESS by client CLIENT may be checked; 0 when it may be now.
+  double wait(const std::string &address, const std::string &client, double now_s) const;
+  void failed(const std::string &address, const std::string &client, double now_s);
+  void succeeded(const std::string &address, const std::string &client);
+
+private:
+  struct entry {
+    int failures = 0;
+    double lock_s = 0.0, locked_until = 0.0, last_s = 0.0;
+  };
+  void fail_one(const std::string &key, double now_s);
+  std::map<std::string, entry> _by; // "a:<address>", "c:<client id>"
+  static constexpr std::size_t kMaxEntries = 8192;
 };
 
 } // namespace conference

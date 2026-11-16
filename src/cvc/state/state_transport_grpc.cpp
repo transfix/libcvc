@@ -1729,6 +1729,22 @@ std::size_t state_transport_grpc::disconnect_principal(const std::string &princi
   return drop.size();
 }
 
+bool state_transport_grpc::disconnect_connection(std::uint64_t number) {
+  std::shared_ptr<connection> drop;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns)
+      if (c && c->accepted && c->alive.load() && c->serial == number) {
+        drop = c;
+        break;
+      }
+  }
+  if (!drop)
+    return false;
+  drop->abort_io(); // its handler ends the stream and retracts the peer as any close does
+  return true;
+}
+
 bool state_transport_grpc::is_local_id(const std::string &id) const {
   if (id == _node_id)
     return true;
@@ -1946,6 +1962,8 @@ std::vector<state_link_report> state_transport_grpc::link_reports() const {
     r.transport = "grpc";
     r.connection = c->serial;
     r.remote_address = c->peer_address;
+    r.secure =
+        c->accepted && _tls_set && !_tls.server_cert_pem.empty() && !_tls.server_key_pem.empty();
     if (const std::string *pid = c->peer_id()) {
       r.remote_node_id = *pid;
       r.remote_device_id = c->remote_device_id;

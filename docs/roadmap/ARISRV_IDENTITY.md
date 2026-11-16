@@ -1,6 +1,6 @@
 # arisrv identity, admission and admin (ID1–ID4)
 
-Status: ID1 is built (this document's first PR); ID2-ID4 are the plan. It extends the conference roadmap's §5f (room token,
+Status: ID1 (#1293), ID2 and ID3 are built; ID4 is the plan. It extends the conference roadmap's §5f (room token,
 device id, device keys) and the scripting hosts' S5 (`set_authenticator`, principals, role gates),
 S3 (client programs) and G4 (client WebAssembly guests, #1283). It sits beside the resident guests
 plan (#1290, `ARIADNE_RESIDENT_GUESTS.md`), whose gas ledger keys on this plan's identity.
@@ -154,12 +154,22 @@ arisrv.clients.<client_id>.
     when that matters, as for the room token.
   - The relay's origin is not hashed in. A relay can't know which of its names (a host, an IP or a
     proxy) the client dialed, so the hashes would not match.
-- **A built-in authenticator** does this check when no `@host.authenticate` is set. When one is
-  set, the hook decides, as it does today for the room token. A server that wants both OIDC and a
-  guest password checks it in its hook, with `host.guest_password_ok(cred)`.
-- The room token stays: a relay with both accepts either. Clients take the password from
-  `CVC_ARIADNE_GUEST_PASSWORD`, a relay join's `password:`, or for a browser page the invite link's
-  fragment (`#password=…`), which never reaches a server.
+- **As built, the relay expects the hash where it would expect a room token.** The transports'
+  existing check does the comparing, so neither transport changed. A relay takes a room token or a
+  guest password, not both: arisrv refuses to start with both.
+- **When an `@host.authenticate` hook is set, the hook decides,** as it does for the room token.
+  A program that wants both OIDC and a guest password checks the password in its hook. Giving the
+  hook a helper for that (`host.guest_password_ok(cred)`) belongs to ID4c.
+- **Clients:**
+  - ari and the x hosts with `--relay` take it from `CVC_ARIADNE_GUEST_PASSWORD` when no
+    `CVC_ARIADNE_ROOM_TOKEN` is set.
+  - A relay join's `password: env:NAME` or `password: file:PATH` sets it. As with `token:`, the
+    password itself is never written in the document, and a block has one or the other.
+  - arigl reads `CVC_ARIADNE_GUEST_PASSWORD`. A browser page takes it from the invite link's
+    fragment (`#password=…`, which never reaches a server) when its config's `fragment_env` names
+    it: `"password": "CVC_ARIADNE_GUEST_PASSWORD"`.
+- **Not yet:** changing the guest password while the relay runs. The transports take their token
+  when they start, so rotating it means restarting the relay.
 
 ### 2.5 rcon (ID3)
 
@@ -177,14 +187,22 @@ arisrv.clients.<client_id>.
     or a call's progress.
   - A connection without TLS, from an address that is not loopback, is refused (`forbidden`)
     unless `--rcon-plaintext` is given. A Quake server sends rcon in the clear. We don't have to.
-- **Admin calls**, built in. Each is `forbidden` unless the caller's connection is elevated.
-  - `server.clients`: every record, active first.
-  - `server.client` id: one record, with its connection log.
-  - `server.kick` id-or-pid: closes that client's connections (S5's disconnect queue).
-  - `server.ban` id / `server.unban` id: refuses a client id at its Hello, in memory.
-  - `server.rename` id name
-  - `server.limits` id dict: a client's caps (2.6). A `nil` value puts one back to the default.
-  - `server.guest-password` new: rotates it. Connections already in stay.
+- **Admin calls**, built in. Each is `forbidden` unless the caller's connection is elevated. ID
+  is a client id, or the pid one of its connections holds.
+  - `server.clients`: every record, active first, then by when each was last seen.
+  - `server.client` ID: one record, with its limits, its rcon failures and its connection log.
+  - `server.kick` ID: closes that client's open connections (`state_transport::
+    disconnect_connection`, by the number each link report carries), and answers how many.
+  - `server.ban` ID / `server.unban` ID: a banned client's open connections are closed, and so is
+    each new one as soon as the relay's next pass sees it. Kept in memory.
+  - `server.rename` ID NAME: with no rate limit, but still unique.
+  - `server.limits` ID {key value ...}: a client's caps (2.6). A `nil` value puts one back to the
+    default. The keys are `programs`, `guests` and `python` (booleans) and `steps`, `time`,
+    `memory_mb` and `concurrency` (numbers not below 0). They are kept, and mirrored under
+    `limits.*`. ID4a makes them apply.
+  - Rotating the guest password at run time waits on the transports (2.4).
+- The rate limit is `rcon_guard`, beside `client_registry` in `client_registry.h`. Its lock
+  starts at 30 s and doubles, up to an hour. A right password clears it.
 - **In arisrvx**, while a connection is elevated, its `ctx.principal["roles"]` include `"admin"`.
   A program's own `@export(clients=True, roles=["admin"])` is then an admin command too, so an
   operator adds commands without touching the relay.
@@ -227,8 +245,8 @@ arisrv.clients.<client_id>.
 | Part | What | Who | Files |
 |---|---|---|---|
 | ID1 | The client id, the registry and its private root, the username, `server.whoami` / `server.set`, `Hello.local_address`, each link report's addresses and connection number | paws | `client_registry.{h,cpp}` (new, `conference/`), `state_local_address.cpp` (new), `state_transport.proto` + both transports, `state_link_stats.h`, `room_write_gate.*`, `room_intrinsics.cpp`, arisrv `main.cpp` |
-| ID2 | The guest password and the built-in authenticator | paws | `state_identity.{h,cpp}`, arisrv `main.cpp`, relay_session's join, the browser page's join |
-| ID3 | rcon and the admin calls | paws | `room_admin.{h,cpp}` (new), arisrv `main.cpp`'s `call_step` |
+| ID2 | The guest password | paws | `state_identity.{h,cpp}` (`valid_guest_password`, `guest_password_bearer`), arisrv `main.cpp`, `relay_session.{h,cpp}` (`password:`, `CVC_ARIADNE_GUEST_PASSWORD`), arigl `main.cpp`, `arigl-web.html`'s config notes |
+| ID3 | rcon and the admin calls | paws | `client_registry.{h,cpp}` (elevation, ban, limits, `rcon_guard`), `state_transport*` (`disconnect_connection`, a link report's `secure`), arisrv `main.cpp`'s `call_step` |
 | ID4a | Per-client limits | arisrvx | `server_document.{h,cpp}` |
 | ID4b | The python-guest module (cvcpkg recipe) | arisrvx | the cvcpkg recipe, `src/ariadne_wasm/*` |
 | ID4c | The Python route and `host.clients` / `ctx.client` / `@host.geolocate` | arisrvx | `server_document.*`, `room_calls.*` if a `language` field is needed, `ariadne_server.py` |

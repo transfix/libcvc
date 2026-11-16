@@ -504,5 +504,34 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                            ENVIRONMENT "PYTHONIOENCODING=utf-8"
                            SKIP_REGULAR_EXPRESSION "built without yaml-cpp" TIMEOUT 120)
     endforeach()
+    # The guest password (ID2): a relay with --guest-password-file admits a client that sends the
+    # password's hash (CVC_ARIADNE_GUEST_PASSWORD, here with spaces in it) and refuses one that
+    # doesn't, before it is sent anything.
+    set(_id_guest --relay-arg=--guest-password-file
+                  "--relay-arg=${_srv_tests}/guest_password.txt")
+    add_test(NAME arisrv_guest_password
+             COMMAND ${_id_pair} --relay $<TARGET_FILE:arisrv> --client $<TARGET_FILE:ari>
+                     --scheme grpc ${_id_relay} ${_id_guest} --client-only
+                     "--client-env=CVC_ARIADNE_GUEST_PASSWORD=correct horse battery staple"
+                     --client-arg=--relay-room --client-arg=ctest
+                     "--client-arg=${_srv_tests}/guest_client.ari")
+    add_test(NAME arisrv_guest_password_refuses
+             COMMAND ${_id_pair} --relay $<TARGET_FILE:arisrv> --client $<TARGET_FILE:ari>
+                     --scheme grpc ${_id_relay} ${_id_guest} --client-only --client-status 1
+                     "--client-expect=refused this host \\(unauthenticated"
+                     "--client-env=CVC_ARIADNE_GUEST_PASSWORD=wrong horse battery staple"
+                     --client-arg=--relay-room --client-arg=ctest
+                     "--client-arg=${_srv_tests}/guest_client.ari")
+    # rcon (ID3): server.rcon makes the caller's connection an admin (on the loopback, without
+    # TLS), and only then do the admin's server.* calls answer.
+    add_test(NAME arisrv_rcon
+             COMMAND ${_id_pair} --relay $<TARGET_FILE:arisrv> --client $<TARGET_FILE:ari>
+                     --scheme grpc ${_id_relay} --relay-arg=--rcon-password-file
+                     "--relay-arg=${_srv_tests}/rcon_password.txt" --client-only
+                     --client-arg=--relay-room --client-arg=ctest
+                     "--client-arg=${_srv_tests}/rcon_client.ari")
+    set_tests_properties(arisrv_guest_password arisrv_guest_password_refuses arisrv_rcon
+                         PROPERTIES ENVIRONMENT "PYTHONIOENCODING=utf-8"
+                         SKIP_REGULAR_EXPRESSION "built without yaml-cpp" TIMEOUT 120)
   endif()
 endif()
