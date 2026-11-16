@@ -13,6 +13,14 @@ add_executable(ariadne_doc_fetch_test ariadne_doc_fetch_test.cpp)
 add_executable(ariadne_scene_tf_test ariadne_scene_tf_test.cpp)
 add_executable(ariadne_runtime_test ariadne_runtime_test.cpp)
 add_executable(ariadne_scene_world_test ariadne_scene_world_test.cpp)
+# AriadneWorldGym.ThePlantsAreModelsATwinReplays replays the dynamic4w plant (built with
+# -ffp-contract=off) with its model called inline here, bit for bit: build it the same way, or clang
+# contracts this copy into FMAs on aarch64 (the macOS arm64 lanes) and the last bits differ.
+if(NOT MSVC)
+  set_source_files_properties(ariadne_scene_world_test.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(ariadne_scene_world_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 add_executable(ariadne_server_document_test ariadne_server_document_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)

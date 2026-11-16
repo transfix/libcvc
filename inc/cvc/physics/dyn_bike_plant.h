@@ -213,6 +213,15 @@ public:
   // wheel_spin their own, else the speed's at the rolling radius (they do not slip).
   double wheel_speed(int i, int axle) const;
   int substeps() const { return _nsub; }
+  // Agent i's command as nav last gave it (the steering's angle, rad, held to its lock; the
+  // acceleration along its heading, m/s^2), and, for each model step of the last tick, what the
+  // model took of it after the driver (m/s^2) and the grade along the heading it drove on (the
+  // sine); empty before the first tick. A tick through a contact split into pieces has a value per
+  // piece.
+  double steer_command(int i) const { return _agents.at(i).steer_cmd; }
+  double accel_command(int i) const { return _agents.at(i).accel_cmd; }
+  const std::vector<double> &applied_accel(int i) const { return _agents.at(i).applied; }
+  const std::vector<double> &applied_grade(int i) const { return _agents.at(i).applied_grade; }
 
   // ── the books ──
   const dyn_bike_books &books(int i) const { return _agents.at(i).total; }
@@ -277,6 +286,8 @@ private:
     double kinetic0 = 0.0;     // J
     int hits_tick = 0;
     long hits = 0;
+    // The last tick's acceleration and grade per model step (applied_accel, applied_grade).
+    std::vector<double> applied, applied_grade;
     int statics_tick = 0;     // contacts begun with static geometry over the last tick
     int touched = -1;         // the agent it touched deepest over the last tick; -1 none
     double touch_depth = 0.0; // m

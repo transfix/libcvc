@@ -23,6 +23,7 @@
 #include <cvc/core/process.h> // self_path
 #include <cvc/geometry/height_field.h>
 #include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/dyn_4w.h> // dyn4_params_of
 #include <cvc/nav/policy_library.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/world_grid.h>
@@ -1790,6 +1791,152 @@ double WorldVehicles::tick_seconds() const {
 int WorldVehicles::steps_per_tick() const { return _impl->ready ? _impl->every : 0; }
 
 std::shared_ptr<const nav::world_grid> WorldVehicles::grid() const { return _impl->grid; }
+
+namespace {
+// v rotated by q.
+ph::vec3 rotated(const ph::quat &q, const ph::vec3 &v) {
+  const ph::vec3 u{q.x, q.y, q.z};
+  const ph::vec3 t{2.0 * (u.y * v.z - u.z * v.y), 2.0 * (u.z * v.x - u.x * v.z),
+                   2.0 * (u.x * v.y - u.y * v.x)};
+  return v + q.w * t +
+         ph::vec3{u.y * t.z - u.z * t.y, u.z * t.x - u.x * t.z, u.x * t.y - u.y * t.x};
+}
+} // namespace
+
+std::vector<entity_plant> WorldVehicles::plants() const {
+  const impl &d = *_impl;
+  std::vector<entity_plant> out;
+  for (const impl::entity &e : d.ents) {
+    entity_plant p;
+    p.id = e.id;
+    p.plant = e.plant;
+    p.desc = e.desc;
+    const double rear_x = impl::rear_axle_x(e.desc);
+    p.rear_x = rear_x;
+    const impl::fleet *g = d.fleet_of(e);
+    const int i = d.index(e);
+    p.placed = g && i >= 0;
+    if (!p.placed) {
+      out.push_back(std::move(p));
+      continue;
+    }
+    if (g->four) {
+      const ph::dyn_4w_plant &pl = *g->four;
+      p.model = "dyn4";
+      p.exact = true;
+      p.dyn4 = pl.params(i);
+      p.dyn4_state = pl.body(i);
+      p.limits = pl.step_limits(i);
+      p.substeps = pl.substeps();
+      p.ground_reference = pl.ground_reference();
+      p.mu = pl.options().mu;
+      p.steer_command = pl.steer_command(i);
+      p.accel_command = pl.accel_command(i);
+      p.applied_accel = pl.applied_accel(i);
+      p.collisions_tick = pl.collisions_tick(i);
+    } else if (g->bike) {
+      const ph::dyn_bike_plant &pl = *g->bike;
+      p.model = "dyn_bike";
+      p.exact = true;
+      p.bike = pl.params(i);
+      p.bike_state = pl.body(i);
+      p.limits = pl.step_limits(i);
+      p.substeps = pl.substeps();
+      p.mu = pl.options().mu;
+      p.steer_command = pl.steer_command(i);
+      p.accel_command = pl.accel_command(i);
+      p.applied_accel = pl.applied_accel(i);
+      p.applied_grade = pl.applied_grade(i);
+      p.collisions_tick = pl.collisions_tick(i);
+    } else if (g->jolt) {
+      // The four-wheel model with the vehicle's own numbers, as dyn_4w_plant builds it, its pose
+      // and twist read back from the chassis as dyn_4w_plant reads a collision back.
+      p.model = "dyn4";
+      cvc::world_units::normalized_frame si;
+      si.scale = 1.0;
+      p.dyn4 = nav::dyn4_params_of(ph::nav_plant::dyn4_si_of(e.desc), si);
+      p.substeps = d.every;
+      p.limits.L = p.dyn4.lf + p.dyn4.lr;
+      p.limits.delta_max = static_cast<float>(e.desc.max_steer);
+      p.limits.hdt = static_cast<float>(d.cfg.veh.dt / std::max(1, d.every));
+      p.limits.vmax = static_cast<float>(e.desc.max_speed > 0.0 ? e.desc.max_speed : 1e3);
+      p.limits.allow_reverse = 1;
+      const ph::vehicle_state vs = d.world->vehicle_state(g->jolt->vehicle(i));
+      const ph::quat &q = vs.body.rotation;
+      nav::diff::dyn4_state<double> &o = p.dyn4_state;
+      o.psi = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+      const double c = std::cos(o.psi), sn = std::sin(o.psi);
+      const double lr = p.dyn4.lr, off = -rear_x - lr;
+      const ph::vec3 cg =
+          vs.body.position + rotated(q, {rear_x + lr, 0.0, e.desc.center_of_mass.z});
+      o.x = cg.x - lr * c;
+      o.y = cg.y - lr * sn;
+      const ph::vec3 &v = vs.body.linear_velocity, &w = vs.body.angular_velocity;
+      o.r = w.z;
+      const double vgx = v.x + o.r * off * sn, vgy = v.y - o.r * off * c;
+      o.vx = c * vgx + sn * vgy;
+      o.vy = -sn * vgx + c * vgy;
+      o.zd = v.z;
+      o.phi = std::atan2(2.0 * (q.w * q.x + q.y * q.z), 1.0 - 2.0 * (q.x * q.x + q.y * q.y));
+      o.th = std::asin(std::clamp(2.0 * (q.w * q.y - q.z * q.x), -1.0, 1.0));
+      o.phid = c * w.x + sn * w.y;
+      o.thd = -sn * w.x + c * w.y;
+      o.delta = vs.steer;
+      p.steer_command = vs.steer_command;
+    } else {
+      // Nav's bicycle: the rear axle, the heading and the speed, in world metres.
+      p.model = "bike";
+      p.exact = true;
+      const int n = g->sim->size();
+      std::vector<float> pos(2 * static_cast<std::size_t>(n)), head(n), speed(n);
+      g->sim->snapshot(pos.data(), head.data(), speed.data(), nullptr, nullptr);
+      p.bike_state.x = pos[2 * static_cast<std::size_t>(i)];
+      p.bike_state.y = pos[2 * static_cast<std::size_t>(i) + 1];
+      p.bike_state.psi = head[i];
+      p.bike_state.vx = speed[i];
+      const nav::veh_params &vp = d.cfg.veh;
+      p.limits.rr = static_cast<float>(vp.rr / kScale);
+      p.limits.d_hat = static_cast<float>(vp.d_hat / kScale);
+      p.limits.vmax = static_cast<float>(vp.vmax / kScale);
+      p.limits.L = static_cast<float>(vp.L / kScale);
+      p.limits.delta_max = vp.delta_max;
+      p.limits.a_max = static_cast<float>(vp.a_max / kScale);
+      p.limits.a_lat_max = static_cast<float>(vp.a_lat_max / kScale);
+      p.limits.k_steer = vp.k_steer;
+      p.limits.hdt = static_cast<float>(vp.dt / std::max(1, vp.nsub));
+      p.limits.allow_reverse = vp.allow_reverse ? 1 : 0;
+      p.substeps = std::max(1, vp.nsub);
+    }
+    out.push_back(std::move(p));
+  }
+  return out;
+}
+
+navigator_params WorldVehicles::navigator() const {
+  const impl &d = *_impl;
+  navigator_params n;
+  n.ready = d.ready;
+  if (!d.ready)
+    return n;
+  n.scale = kScale;
+  n.tick = d.cfg.veh.dt;
+  n.reach = d.cfg.reach_tol / kScale;
+  const nav::veh_params &v = d.cfg.veh;
+  n.rr = v.rr;
+  n.d_hat = v.d_hat;
+  n.dt = v.dt;
+  n.vmax = v.vmax;
+  n.L = v.L;
+  n.delta_max = v.delta_max;
+  n.a_max = v.a_max;
+  n.a_lat_max = v.a_lat_max;
+  n.k_steer = v.k_steer;
+  n.nsub = v.nsub;
+  n.allow_reverse = v.allow_reverse;
+  return n;
+}
+
+const std::vector<float> &WorldVehicles::sdf() const { return _impl->sdf; }
 
 std::vector<entity_info> WorldVehicles::entities() const {
   const impl &d = *_impl;

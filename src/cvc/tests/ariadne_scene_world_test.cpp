@@ -2333,6 +2333,16 @@ gym_options agents(int n) {
 
 const double kNaN = std::numeric_limits<double>::quiet_NaN();
 
+// A dynamic plant's ground on a flat world, as a twin of it samples it: its grip (a double, as
+// the plant holds it) and no height.
+struct flat_twin_ground {
+  double mu = 0.9;
+  template <class S> void at(S, S, S &m, S &h) const {
+    m = S(mu);
+    h = S(0);
+  }
+};
+
 } // namespace
 
 TEST(AriadneWorldGym, ResetStepAndObserve) {
@@ -2573,6 +2583,140 @@ TEST(AriadneWorldGym, EveryPlantDrivesInTheWorld) {
     EXPECT_EQ(oa.x[k], ob.x[k]) << plants[k] << ": the same twice";
     EXPECT_EQ(oa.y[k], ob.y[k]) << plants[k];
   }
+}
+
+// What a differentiable twin of the world reads: the navigator's own grid, its signed distance and
+// gradient, the ground's grip, and the navigator's settings.
+TEST(AriadneWorldGym, TheFieldsAreTheNavigatorsGrid) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  WorldGym gym(write_doc("gym_fields", gym_doc(false, true)).string(), agents(1));
+  EXPECT_THROW(gym.fields(), std::logic_error); // no episode yet
+  EXPECT_THROW(gym.plants(), std::logic_error);
+  gym.reset(3);
+  const gym_fields f = gym.fields();
+  const std::shared_ptr<const cvc::nav::world_grid> g = gym.vehicles().grid();
+  ASSERT_TRUE(g);
+  ASSERT_EQ(f.rows, g->rows);
+  ASSERT_EQ(f.cols, g->cols);
+  EXPECT_EQ(f.cell, g->cell());
+  EXPECT_EQ(f.min_x, g->min_x);
+  EXPECT_EQ(f.min_y, g->min_y);
+  const std::size_t cells = static_cast<std::size_t>(f.rows) * static_cast<std::size_t>(f.cols);
+  ASSERT_EQ(f.occupancy, g->occupancy);
+  ASSERT_EQ(f.height.size(), cells);
+  ASSERT_EQ(f.mu.size(), cells);
+  EXPECT_EQ(f.mu.front(), 0.9);
+  // The navigator's own signed distance, bit for bit: + free, - blocked.
+  ASSERT_EQ(f.sdf, cvc::nav::signed_distance(*g));
+  ASSERT_EQ(f.sdf_dx.size(), cells);
+  ASSERT_EQ(f.sdf_dy.size(), cells);
+  std::size_t free = 0, blocked = 0;
+  for (std::size_t k = 0; k < cells; ++k) {
+    if (f.occupancy[k]) {
+      ++blocked;
+      EXPECT_LE(f.sdf[k], 0.0f) << k;
+    } else {
+      ++free;
+      EXPECT_GT(f.sdf[k], 0.0f) << k;
+    }
+  }
+  EXPECT_GT(free, 0u);
+  EXPECT_GT(blocked, 0u);
+  // The gradient points away from the square's walls: east of the west wall, north of the south.
+  const int r = f.rows / 2, c = f.cols / 2;
+  const auto at = [&](const std::vector<float> &v, int rr, int cc) {
+    return v[static_cast<std::size_t>(rr) * static_cast<std::size_t>(f.cols) +
+             static_cast<std::size_t>(cc)];
+  };
+  EXPECT_GT(at(f.sdf_dx, r, 3), 0.5f);
+  EXPECT_LT(at(f.sdf_dx, r, f.cols - 4), -0.5f);
+  EXPECT_GT(at(f.sdf_dy, 3, c), 0.5f);
+  EXPECT_LT(at(f.sdf_dy, f.rows - 4, c), -0.5f);
+  // The navigator: nav's normalized units per metre, its tick, the arrival radius.
+  EXPECT_TRUE(f.navigator.ready);
+  EXPECT_EQ(f.navigator.scale, 0.05);
+  EXPECT_NEAR(f.navigator.tick, gym.dt(), 1e-6);
+  EXPECT_GT(f.navigator.reach, 0.0);
+  EXPECT_GT(f.navigator.vmax, 0.0f);
+}
+
+// Each agent's plant as a model: on dynamic4w the plant's own four-wheel model, its parameters and
+// state, and what it took of the command in each substep, so that replaying the model from the
+// state before a tick gives the state after it, to the last bit. The other plants give theirs.
+TEST(AriadneWorldGym, ThePlantsAreModelsATwinReplays) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  gym_options o;
+  const char *plants[] = {"jolt", "kinematic", "dynamic", "dynamic4w"};
+  const char *models[] = {"dyn4", "bike", "dyn_bike", "dyn4"};
+  for (int k = 0; k < 4; ++k) {
+    entity_spec sp;
+    sp.archetype = "humvee";
+    sp.controller = "none";
+    sp.plant = plants[k];
+    sp.placed = true;
+    sp.x = -30.0;
+    sp.y = -30.0 + 20.0 * k;
+    sp.yaw = 0.0;
+    o.agents.push_back(sp);
+  }
+  WorldGym gym(write_doc("gym_twin", gym_doc(false, false)).string(), o);
+  gym.reset(4);
+  gym_step st;
+  for (int i = 0; i < 20; ++i)
+    st = gym.step({0.05, 0.05, 0.05, 0.05}, {2.0, 2.0, 2.0, 2.0});
+  const std::vector<entity_plant> before = gym.plants();
+  st = gym.step({0.08, 0.08, 0.08, 0.08}, {1.5, 1.5, 1.5, 1.5});
+  const std::vector<entity_plant> after = gym.plants();
+  ASSERT_EQ(after.size(), 4u);
+  for (int k = 0; k < 4; ++k) {
+    const entity_plant &p = after[static_cast<std::size_t>(k)];
+    EXPECT_EQ(p.id, st.observation.id[static_cast<std::size_t>(k)]) << plants[k];
+    EXPECT_EQ(p.plant, plants[k]);
+    EXPECT_TRUE(p.placed) << plants[k];
+    EXPECT_EQ(p.model, models[k]) << plants[k];
+    EXPECT_EQ(p.exact, k != 0) << plants[k];
+    EXPECT_GE(p.substeps, 1) << plants[k];
+    EXPECT_GT(p.limits.hdt, 0.0f) << plants[k];
+  }
+  // Jolt: the four-wheel model's numbers for a Humvee, its heading and speed from the chassis.
+  const entity_plant &j = after[0];
+  EXPECT_GT(j.dyn4.m, 1000.0f);
+  EXPECT_GT(j.dyn4.lf + j.dyn4.lr, 2.5f);
+  EXPECT_NEAR(j.dyn4_state.psi, st.observation.yaw[0], 1e-9);
+  EXPECT_NEAR(j.dyn4_state.vx, st.observation.speed[0], 0.5);
+  EXPECT_TRUE(j.applied_accel.empty());
+  // nav's bicycle: the rear axle and heading the navigator holds, in metres.
+  const entity_plant &b = after[1];
+  EXPECT_NEAR(b.bike_state.psi, st.observation.yaw[1], 1e-6);
+  EXPECT_NEAR(b.bike_state.vx, st.observation.speed[1], 1e-4);
+  EXPECT_NEAR(b.bike_state.x, st.observation.x[1] + b.rear_x * std::cos(b.bike_state.psi), 1e-3);
+  // The dynamic single-track model: its parameters and a value per model step.
+  const entity_plant &d = after[2];
+  EXPECT_GT(d.bike.m, 1000.0f);
+  EXPECT_EQ(d.applied_accel.size(), d.applied_grade.size());
+  EXPECT_EQ(static_cast<int>(d.applied_accel.size()), d.substeps);
+  // The four-wheel model: replayed from the state before the tick with the command it took.
+  const entity_plant &w0 = before[3], &w = after[3];
+  ASSERT_EQ(static_cast<int>(w.applied_accel.size()), w.substeps);
+  EXPECT_EQ(w.collisions_tick, 0);
+  EXPECT_NEAR(w.steer_command, 0.08, 1e-6);
+  EXPECT_GT(w.accel_command, 0.0);
+  const flat_twin_ground ground{w.mu};
+  cvc::nav::diff::dyn4_state<double> s = w0.dyn4_state, next{};
+  for (int k = 0; k < w.substeps; ++k) {
+    cvc::nav::diff::dyn4_ph_books<double> books{};
+    cvc::nav::diff::dyn4_plant_books<double>(w.dyn4, w.limits, ground, s, w.steer_command,
+                                             w.applied_accel[static_cast<std::size_t>(k)], next,
+                                             books);
+    s = next;
+  }
+  for (int i = 0; i < cvc::nav::diff::dyn4_state<double>::size; ++i)
+    EXPECT_EQ(s[i], w.dyn4_state[i]) << "state " << i;
+  EXPECT_GT(w.dyn4_state.vx, 1.0);
 }
 
 // Vehicles on different plants meet in the one physics world. Nav's bicycle is a kinematic box,

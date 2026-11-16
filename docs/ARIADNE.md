@@ -1575,6 +1575,26 @@ scene:
     its own or `--navigator`. Open the document in arigl to watch the same world drawn.
   - **`pycvc_gl.cars` on it.** `GymCars` runs the cars template's controllers in a world
     document (docs/CARS.md, "In a world document").
+  - **A differentiable twin** reads the world from the gym (ARIADNE_WORLDS.md §14, "As built
+    (L4's twin)"). Neither Jolt nor a physics world is differentiated, so a trainer steps a
+    model of the gym instead, as P8 did for the Jolt vehicle (NAV-VEHICLE-PHYSICS-ROADMAP), and
+    the gym judges the result.
+    - `fields()` gives the navigator's grid (`occupancy`), its `height`, the ground's grip `mu`,
+      the navigator's signed distance `sdf` with its gradient `sdf_dx` and `sdf_dy`, the
+      `bounds` and `cell`, and the navigator's own settings (`navigator`: nav's scale, its tick,
+      the arrival radius, its vehicle in normalized units).
+    - `plants()` gives each agent's plant as a model, in the observation's order, in SI
+      (`entity_plant`, `WorldVehicles::plants`):
+      - `dynamic4w`: the plant's own four-wheel model (`diff::dyn4_plant`), with its parameters,
+        step limits, substeps, ground reference and state. It also gives what the model took of the
+        last command in each substep, after the driver (`applied_accel`). Away from a
+        collision, replaying the model from the state before a tick with that command gives the
+        state after it, to the last bit.
+      - `dynamic`: the single-track model, the same way, with each step's grade.
+      - `jolt`: the four-wheel model with the vehicle's own numbers (`nav_plant::dyn4_si_of`).
+        Its state is read back from the chassis, so `exact` is false.
+      - `kinematic`: nav's bicycle, its rear axle, heading and speed, and its limits in metres.
+    - GRL-SNAM's `grl_snam.gym_twin` is the torch twin built on them.
 - **Terrain transforms.** A terrain follows its node's position but not its rotation or scale.
   Draw a ground you collide with unrotated and unscaled.
 - **Reading physics.** `RealizedScene::physics` is the world (`RealizedScene::world` the

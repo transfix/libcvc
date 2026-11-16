@@ -407,6 +407,62 @@ bool WorldGym::set_goal(std::uint64_t id, double x, double y) {
 
 void WorldGym::set_reward(gym_reward reward) { _impl->reward = std::move(reward); }
 
+gym_fields WorldGym::fields() const {
+  const impl &d = *_impl;
+  if (!d.have_episode)
+    throw std::logic_error("WorldGym::fields: reset() first");
+  const WorldVehicles &v = d.vehicles();
+  gym_fields f;
+  f.navigator = v.navigator();
+  const std::shared_ptr<const nav::world_grid> g = v.grid();
+  if (!g)
+    return f;
+  f.rows = g->rows;
+  f.cols = g->cols;
+  f.min_x = g->min_x;
+  f.min_y = g->min_y;
+  f.max_x = g->max_x;
+  f.max_y = g->max_y;
+  f.cell = g->cell();
+  const std::size_t cells = static_cast<std::size_t>(f.rows) * static_cast<std::size_t>(f.cols);
+  f.occupancy = g->occupancy;
+  f.height = g->height.size() == cells ? g->height : std::vector<float>(cells, 0.0f);
+  double mu = 0.9; // the dynamic plants' default grip
+  for (const entity_plant &p : v.plants())
+    if (p.placed && p.exact && p.model != "bike") {
+      mu = p.mu;
+      break;
+    }
+  f.mu.assign(cells, mu);
+  f.sdf = v.sdf().size() == cells ? v.sdf() : nav::signed_distance(*g);
+  f.sdf_dx.assign(cells, 0.0f);
+  f.sdf_dy.assign(cells, 0.0f);
+  const double h = f.cell > 0.0 ? f.cell : 1.0;
+  const auto at = [&](int r, int c) {
+    return f.sdf[static_cast<std::size_t>(r) * static_cast<std::size_t>(f.cols) +
+                 static_cast<std::size_t>(c)];
+  };
+  for (int r = 0; r < f.rows; ++r)
+    for (int c = 0; c < f.cols; ++c) {
+      const int c0 = std::max(0, c - 1), c1 = std::min(f.cols - 1, c + 1);
+      const int r0 = std::max(0, r - 1), r1 = std::min(f.rows - 1, r + 1);
+      const std::size_t k = static_cast<std::size_t>(r) * static_cast<std::size_t>(f.cols) +
+                            static_cast<std::size_t>(c);
+      if (c1 > c0)
+        f.sdf_dx[k] = static_cast<float>((at(r, c1) - at(r, c0)) / ((c1 - c0) * h));
+      if (r1 > r0)
+        f.sdf_dy[k] = static_cast<float>((at(r1, c) - at(r0, c)) / ((r1 - r0) * h));
+    }
+  return f;
+}
+
+std::vector<entity_plant> WorldGym::plants() const {
+  const impl &d = *_impl;
+  if (!d.have_episode)
+    throw std::logic_error("WorldGym::plants: reset() first");
+  return d.vehicles().plants();
+}
+
 const gym_log &WorldGym::log() const { return _impl->log; }
 void WorldGym::clear_log() { _impl->log.clear(); }
 

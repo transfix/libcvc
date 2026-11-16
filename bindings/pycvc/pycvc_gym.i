@@ -63,6 +63,111 @@ static PyObject *gym_bool(const std::vector<std::uint8_t> &v) {
   return a;
 }
 
+// A (rows, cols) float32 array of `v` (rows * cols values; zeros when it has none).
+static PyObject *gym_grid_f32(const std::vector<float> &v, int rows, int cols) {
+  npy_intp dims[2] = {rows, cols};
+  PyObject *a = PyArray_ZEROS(2, dims, NPY_FLOAT, 0);
+  if (a && v.size() == static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols) && !v.empty())
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(a)), v.data(), v.size() * sizeof(float));
+  return a;
+}
+
+static void gym_putf(PyObject *d, const char *k, double v) { gym_put(d, k, PyFloat_FromDouble(v)); }
+
+// A model's parameters as a dict, by the C++ (and GRL-SNAM's torch twins') field names.
+#define PYCVC_GYM_F(name) gym_putf(d, #name, static_cast<double>(p.name))
+static PyObject *gym_dyn4_params(const cvc::nav::diff::dyn4_params &p) {
+  PyObject *d = PyDict_New();
+  PYCVC_GYM_F(m); PYCVC_GYM_F(Iz); PYCVC_GYM_F(Ix); PYCVC_GYM_F(Iy); PYCVC_GYM_F(lf);
+  PYCVC_GYM_F(lr); PYCVC_GYM_F(tf); PYCVC_GYM_F(tr); PYCVC_GYM_F(h); PYCVC_GYM_F(g);
+  PYCVC_GYM_F(k_f); PYCVC_GYM_F(k_r); PYCVC_GYM_F(c_f); PYCVC_GYM_F(c_r); PYCVC_GYM_F(B_f);
+  PYCVC_GYM_F(B_r); PYCVC_GYM_F(C); PYCVC_GYM_F(front_drive); PYCVC_GYM_F(front_brake);
+  PYCVC_GYM_F(drag); PYCVC_GYM_F(c_rr); PYCVC_GYM_F(tau_steer); PYCVC_GYM_F(steer_rate);
+  PYCVC_GYM_F(tau_drive); PYCVC_GYM_F(v_blend); PYCVC_GYM_F(v_width); PYCVC_GYM_F(eps);
+  PYCVC_GYM_F(fz_min); PYCVC_GYM_F(drive_gain); PYCVC_GYM_F(brake_gain); PYCVC_GYM_F(resist_comp);
+  PYCVC_GYM_F(r_w); PYCVC_GYM_F(J_f); PYCVC_GYM_F(J_r); PYCVC_GYM_F(B_x); PYCVC_GYM_F(C_x);
+  gym_put(d, "iters", PyLong_FromLong(p.iters));
+  gym_put(d, "grade_force", PyLong_FromLong(p.grade_force));
+  return d;
+}
+static PyObject *gym_bike_params(const cvc::nav::diff::dyn_bike_params &p) {
+  PyObject *d = PyDict_New();
+  PYCVC_GYM_F(m); PYCVC_GYM_F(Iz); PYCVC_GYM_F(lf); PYCVC_GYM_F(lr); PYCVC_GYM_F(h);
+  PYCVC_GYM_F(g); PYCVC_GYM_F(mu); PYCVC_GYM_F(B_f); PYCVC_GYM_F(B_r); PYCVC_GYM_F(C);
+  PYCVC_GYM_F(front_drive); PYCVC_GYM_F(front_brake); PYCVC_GYM_F(drag); PYCVC_GYM_F(c_rr);
+  PYCVC_GYM_F(tau_steer); PYCVC_GYM_F(steer_rate); PYCVC_GYM_F(tau_drive); PYCVC_GYM_F(v_blend);
+  PYCVC_GYM_F(v_width); PYCVC_GYM_F(eps); PYCVC_GYM_F(fz_min); PYCVC_GYM_F(r_w); PYCVC_GYM_F(J_f);
+  PYCVC_GYM_F(J_r); PYCVC_GYM_F(B_x); PYCVC_GYM_F(C_x);
+  gym_put(d, "iters", PyLong_FromLong(p.iters));
+  return d;
+}
+static PyObject *gym_limits(const cvc::nav::diff::bike_veh &p) {
+  PyObject *d = PyDict_New();
+  PYCVC_GYM_F(rr); PYCVC_GYM_F(d_hat); PYCVC_GYM_F(vmax); PYCVC_GYM_F(L); PYCVC_GYM_F(delta_max);
+  PYCVC_GYM_F(a_max); PYCVC_GYM_F(a_lat_max); PYCVC_GYM_F(k_steer); PYCVC_GYM_F(hdt);
+  gym_put(d, "allow_reverse", PyBool_FromLong(p.allow_reverse));
+  return d;
+}
+static PyObject *gym_navigator(const cvc::ariadne::navigator_params &p) {
+  PyObject *d = PyDict_New();
+  gym_put(d, "ready", PyBool_FromLong(p.ready));
+  PYCVC_GYM_F(scale); PYCVC_GYM_F(tick); PYCVC_GYM_F(reach); PYCVC_GYM_F(rr); PYCVC_GYM_F(d_hat);
+  PYCVC_GYM_F(dt); PYCVC_GYM_F(vmax); PYCVC_GYM_F(L); PYCVC_GYM_F(delta_max); PYCVC_GYM_F(a_max);
+  PYCVC_GYM_F(a_lat_max); PYCVC_GYM_F(k_steer);
+  gym_put(d, "nsub", PyLong_FromLong(p.nsub));
+  gym_put(d, "allow_reverse", PyBool_FromLong(p.allow_reverse));
+  return d;
+}
+#undef PYCVC_GYM_F
+
+template <class State> static PyObject *gym_state(const State &s) {
+  std::vector<double> v(State::size);
+  for (int k = 0; k < State::size; ++k)
+    v[static_cast<std::size_t>(k)] = s[k];
+  return gym_f64(v);
+}
+
+static PyObject *gym_plant_dict(const cvc::ariadne::entity_plant &p) {
+  PyObject *d = PyDict_New();
+  gym_put(d, "id", PyLong_FromUnsignedLongLong(p.id));
+  gym_put(d, "plant", PyUnicode_FromString(p.plant.c_str()));
+  gym_put(d, "placed", PyBool_FromLong(p.placed));
+  gym_put(d, "model", PyUnicode_FromString(p.model.c_str()));
+  gym_put(d, "exact", PyBool_FromLong(p.exact));
+  gym_putf(d, "rear_x", p.rear_x);
+  PyObject *desc = PyDict_New();
+  gym_putf(desc, "length", 2.0 * p.desc.half_extents.x);
+  gym_putf(desc, "width", 2.0 * p.desc.half_extents.y);
+  gym_putf(desc, "height", 2.0 * p.desc.half_extents.z);
+  gym_putf(desc, "mass", p.desc.mass);
+  gym_putf(desc, "wheelbase", p.desc.wheelbase());
+  gym_putf(desc, "max_steer", p.desc.max_steer);
+  gym_putf(desc, "max_speed", p.desc.max_speed);
+  gym_putf(desc, "max_accel", p.desc.max_accel);
+  gym_putf(desc, "max_decel", p.desc.max_decel);
+  gym_put(d, "desc", desc);
+  if (p.model == "dyn4") {
+    gym_put(d, "params", gym_dyn4_params(p.dyn4));
+    gym_put(d, "state", gym_state(p.dyn4_state));
+  } else if (p.model == "dyn_bike" || p.model == "bike") {
+    gym_put(d, "params", p.model == "dyn_bike" ? gym_bike_params(p.bike) : PyDict_New());
+    gym_put(d, "state", gym_state(p.bike_state));
+  } else {
+    gym_put(d, "params", PyDict_New());
+    gym_put(d, "state", gym_f64({}));
+  }
+  gym_put(d, "limits", gym_limits(p.limits));
+  gym_put(d, "substeps", PyLong_FromLong(p.substeps));
+  gym_putf(d, "ground_reference", p.ground_reference);
+  gym_putf(d, "mu", p.mu);
+  gym_putf(d, "steer_command", p.steer_command);
+  gym_putf(d, "accel_command", p.accel_command);
+  gym_put(d, "applied_accel", gym_f64(p.applied_accel));
+  gym_put(d, "applied_grade", gym_f64(p.applied_grade));
+  gym_put(d, "collisions_tick", PyLong_FromLong(p.collisions_tick));
+  return d;
+}
+
 static PyObject *gym_observation_dict(const cvc::ariadne::gym_observation &o) {
   PyObject *d = PyDict_New();
   try {
@@ -408,6 +513,44 @@ public:
     gym_put(d, "bounds", Py_BuildValue("(dddd)", g->min_x, g->min_y, g->max_x, g->max_y));
     return d;
   }
+  // The world as a differentiable twin reads it (gym_fields): occupancy (rows, cols) uint8; height,
+  // sdf, sdf_dx and sdf_dy (rows, cols) float32; mu (rows, cols) float64; bounds, cell, and the
+  // navigator's settings.
+  PyObject *fields() const {
+    const cvc::ariadne::gym_fields f = gym_->fields();
+    PyObject *d = PyDict_New();
+    npy_intp dims[2] = {f.rows, f.cols};
+    PyObject *occ = PyArray_ZEROS(2, dims, NPY_UINT8, 0);
+    if (occ && !f.occupancy.empty())
+      std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(occ)), f.occupancy.data(),
+                  f.occupancy.size());
+    gym_put(d, "occupancy", occ);
+    gym_put(d, "height", gym_grid_f32(f.height, f.rows, f.cols));
+    {
+      npy_intp mdims[2] = {f.rows, f.cols};
+      PyObject *mu = PyArray_ZEROS(2, mdims, NPY_DOUBLE, 0);
+      if (mu && f.mu.size() == static_cast<std::size_t>(f.rows) * static_cast<std::size_t>(f.cols) &&
+          !f.mu.empty())
+        std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(mu)), f.mu.data(),
+                    f.mu.size() * sizeof(double));
+      gym_put(d, "mu", mu);
+    }
+    gym_put(d, "sdf", gym_grid_f32(f.sdf, f.rows, f.cols));
+    gym_put(d, "sdf_dx", gym_grid_f32(f.sdf_dx, f.rows, f.cols));
+    gym_put(d, "sdf_dy", gym_grid_f32(f.sdf_dy, f.rows, f.cols));
+    gym_put(d, "bounds", Py_BuildValue("(dddd)", f.min_x, f.min_y, f.max_x, f.max_y));
+    gym_putf(d, "cell", f.cell);
+    gym_put(d, "navigator", gym_navigator(f.navigator));
+    return d;
+  }
+  // Each agent's plant as a model (entity_plant), in observe()'s order: a list of dicts.
+  PyObject *plants() const {
+    const std::vector<cvc::ariadne::entity_plant> ps = gym_->plants();
+    PyObject *l = PyList_New(static_cast<Py_ssize_t>(ps.size()));
+    for (std::size_t i = 0; i < ps.size(); ++i)
+      PyList_SET_ITEM(l, static_cast<Py_ssize_t>(i), gym_plant_dict(ps[i]));
+    return l;
+  }
   double dt() const { return gym_->dt(); }
   std::size_t agents() const { return gym_->agents(); }
   double episode_return() const { return gym_->episode_return(); }
@@ -460,6 +603,8 @@ public:
   bool save_log(const std::string &path) const;
   bool set_goal(unsigned long long id, double x, double y);
   PyObject *grid() const;
+  PyObject *fields() const;
+  PyObject *plants() const;
   double dt() const;
   std::size_t agents() const;
   double episode_return() const;
