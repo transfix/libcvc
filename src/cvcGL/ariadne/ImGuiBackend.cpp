@@ -274,6 +274,51 @@ void maximize_button(bool *maximized, bool has_close) {
   g.LastItemData = last;
 }
 
+// §5.9 the title of a window whose title bar has the maximize button. ImGui's own title (drawn in
+// Begin) leaves room for the close button and the collapse arrow only, so a long one would run
+// under the maximize button. Such a window is begun with no visible title ("###<id>"), and this
+// draws it where ImGui's RenderWindowTitleBarContents (1.92) would, the same size, aligned and
+// clipped the same way, with one more button's room on the right. A title that fits lands on the
+// same pixels.
+void title_text(const char *title, bool has_close) {
+  ImGuiWindow *win = ImGui::GetCurrentWindow();
+  if (!win || (win->Flags & ImGuiWindowFlags_NoTitleBar) || !title || !*title)
+    return;
+  const ImGuiContext &g = *GImGui;
+  const ImGuiStyle &st = g.Style;
+  const ImRect outer = win->TitleBarRect();
+  const ImRect bar(outer.Min.x + win->WindowBorderSize, outer.Min.y,
+                   outer.Max.x - win->WindowBorderSize, outer.Max.y);
+  const bool has_collapse =
+      !(win->Flags & ImGuiWindowFlags_NoCollapse) && st.WindowMenuButtonPosition != ImGuiDir_None;
+  const float button = g.FontSize + st.ItemInnerSpacing.x;
+  float pad_l = st.FramePadding.x;
+  float pad_r = st.FramePadding.x + button; // the maximize button
+  if (has_close)
+    pad_r += button;
+  if (has_collapse && st.WindowMenuButtonPosition == ImGuiDir_Right)
+    pad_r += button;
+  if (has_collapse && st.WindowMenuButtonPosition == ImGuiDir_Left)
+    pad_l += button;
+  const ImVec2 text_size = ImGui::CalcTextSize(title, nullptr, true);
+  if (pad_l > st.FramePadding.x)
+    pad_l += st.ItemInnerSpacing.x;
+  pad_r += st.ItemInnerSpacing.x;
+  if (st.WindowTitleAlign.x > 0.0f && st.WindowTitleAlign.x < 1.0f) {
+    const float centerness = ImSaturate(1.0f - ImFabs(st.WindowTitleAlign.x - 0.5f) * 2.0f);
+    const float extend = ImMin(ImMax(pad_l, pad_r), bar.GetWidth() - pad_l - pad_r - text_size.x);
+    pad_l = ImMax(pad_l, extend * centerness);
+    pad_r = ImMax(pad_r, extend * centerness);
+  }
+  const ImRect layout(bar.Min.x + pad_l, bar.Min.y, bar.Max.x - pad_r, bar.Max.y);
+  const ImRect clip(layout.Min.x, layout.Min.y,
+                    ImMin(layout.Max.x + st.ItemInnerSpacing.x, bar.Max.x), layout.Max.y);
+  ImGui::PushClipRect(outer.Min, outer.Max, false);
+  ImGui::RenderTextClipped(layout.Min, layout.Max, title, nullptr, &text_size, st.WindowTitleAlign,
+                           &clip);
+  ImGui::PopClipRect();
+}
+
 // The title bar buttons say what they do when the pointer rests on one, as other widgets' tooltips
 // do (after the style's hover delay): Close, Maximize, Restore.
 void title_button_tooltip(const ImGuiWindow *win, bool has_close, const bool *maximize) {
@@ -654,7 +699,10 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   cuts->paints = m_cutWindows.count(name) != 0;
   if (cuts->paints)
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-  vis = ImGui::Begin(name.c_str(), p_open, flags);
+  // With a maximize button the title is drawn after Begin, short of that button (title_text): the
+  // window is begun as "###<id>", which is the same ImGui window (its id hashes from the "###").
+  const bool own_title = maximize != nullptr && *title;
+  vis = ImGui::Begin(own_title ? (std::string("###") + id).c_str() : name.c_str(), p_open, flags);
   if (maximized) {
     // Begin put it at the work area's place and size, and then applied the user's drag of an edge
     // or a corner: one that leaves it elsewhere is no longer maximized, at the size it was given.
@@ -666,6 +714,17 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
       *maximize = false;
       m_unmaximized.erase(id);
     }
+  }
+  if (own_title) {
+    // The window's name stays "title###id", as ImGui's Ctrl+Tab list shows it (Begin sets it to the
+    // name it was given, "###id", while that list is up, and on a window's first frame).
+    ImGuiWindow *win = ImGui::GetCurrentWindow();
+    if (std::strcmp(win->Name, name.c_str()) != 0) {
+      size_t len = static_cast<size_t>(win->NameBufLen);
+      win->Name = ImStrdupcpy(win->Name, &len, name.c_str());
+      win->NameBufLen = static_cast<int>(len);
+    }
+    title_text(title, p_open != nullptr);
   }
   if (maximize)
     maximize_button(maximize, p_open != nullptr);

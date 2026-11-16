@@ -2142,6 +2142,8 @@ and 9.1).
     The sliced form finds the calling process on the group whose pump runs the call
     (`exec_group::current(ctx)`, from the call's context), else on group 0. Master looked only on group 0, where an isolated
     document's call found no process and raised RuntimeError. The same test covers both forms.
+    The lookup is `calling_process` in `script_engine.cpp`, which `run_as_program_work` (master's
+    #1283: a client's WebAssembly guest on a relay, run as its client's program) shares.
   - **An activation's lock** (master's #1126, `ActivationOptions::lock`) is a `with-lock` key that
     the activation's process holds, and that a sliced call takes in the calling process. The app's
     one lock manager serves every group (4.19), so the lock excludes across group 0 and isolated
