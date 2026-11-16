@@ -153,6 +153,28 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
            COMMAND arigl snapshot --frames 2 --png "${CMAKE_CURRENT_BINARY_DIR}/arigl_window.png"
                    "${_arigl_examples}/hello.ari")
   add_test(NAME arigl_check COMMAND arigl check "${_arigl_examples}/hello.ari")
+  # snapshot --mp4 records the scene on its clock (record_frames; cvcGL's cvcgl_ari_record checks
+  # the video itself); it skips where there is no video encoder. --mp4 without --seconds, or with
+  # --terminal, is refused before anything loads.
+  add_test(NAME arigl_record_mp4
+           COMMAND arigl snapshot --mp4 "${CMAKE_CURRENT_BINARY_DIR}/arigl_record.mp4" --seconds 0.5
+                   --fps 10 --width 160 --height 120
+                   --png "${CMAKE_CURRENT_BINARY_DIR}/arigl_record.png"
+                   "${_arigl_examples}/hello.ari")
+  set_tests_properties(arigl_record_mp4 PROPERTIES
+                       PASS_REGULAR_EXPRESSION "recorded 5 frames \\(0.5 s at 10 fps, 160x120"
+                       SKIP_REGULAR_EXPRESSION "no video encoder;built without yaml-cpp"
+                       RESOURCE_LOCK cvcgl_gl_context)
+  add_test(NAME arigl_record_needs_seconds
+           COMMAND arigl snapshot --mp4 "${CMAKE_CURRENT_BINARY_DIR}/arigl_no.mp4"
+                   "${_arigl_examples}/hello.ari")
+  set_tests_properties(arigl_record_needs_seconds PROPERTIES
+                       PASS_REGULAR_EXPRESSION "--mp4 needs --seconds")
+  add_test(NAME arigl_record_not_in_terminal
+           COMMAND arigl snapshot --terminal --mp4 "${CMAKE_CURRENT_BINARY_DIR}/arigl_no.mp4"
+                   --seconds 1 "${_arigl_examples}/hello.ari")
+  set_tests_properties(arigl_record_not_in_terminal PROPERTIES
+                       PASS_REGULAR_EXPRESSION "drop --terminal")
   # A document set as an app installs one (share/<app>/main.ari), run from another working
   # directory: its relative imports, out of its own directory and its parent's, resolve against
   # the importing file's directory. The same set is what ari's test and the browser shell's check
@@ -172,6 +194,7 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   set_tests_properties(
     arigl_terminal_snapshot arigl_document_args arigl_rejects_bad_document_args
     arigl_terminal_stream_view arigl_window_snapshot arigl_check arigl_docset arigl_url_document
+    arigl_record_needs_seconds arigl_record_not_in_terminal
     PROPERTIES RESOURCE_LOCK cvcgl_gl_context
                SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
 
@@ -186,8 +209,10 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                --relay-arg=--room --relay-arg=ctest --relay-arg=--state-listen
                --relay-arg=127.0.0.1:0 --relay-arg=--media-listen --relay-arg=127.0.0.1:0
                --relay-arg=--ws-listen --relay-arg=127.0.0.1:0)
+    set(_relay_python_path)
     foreach(_a IN LISTS CVC_ARIADNE_PYTHON_TEST_PATH)
       list(APPEND _relay "--relay-arg=${_a}")
+      list(APPEND _relay_python_path "--relay-arg=${_a}")
     endforeach()
     set(_relay_tests)
     foreach(_scheme grpc ws)
@@ -201,6 +226,25 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                        "--client-arg=${CMAKE_CURRENT_BINARY_DIR}/relay_arigl_${_scheme}.png"
                        "--client-arg=${_srv_tests}/relay_arigl.ari")
       list(APPEND _relay_tests arisrvx_room_call_arigl_${_scheme})
+      # Bridged users (ARIADNE_CHAT.md): arisrvx running tests/bridge_service.py puts another chat
+      # system's users in the room; src/arisrv/tests/bridge_arigl.ari, a participant (arigl's
+      # conference mode, CVC_ARIADNE_RELAY), finds them in the roster, reads and answers their
+      # posts, and messages one of them.
+      add_test(NAME arisrvx_bridge_arigl_${_scheme}
+               COMMAND "${Python3_EXECUTABLE}" "${_srv_tests}/relay_pair.py"
+                       --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:arigl>
+                       --client-command snapshot --scheme ${_scheme}
+                       --relay-arg=--python "--relay-arg=${_srv_tests}/bridge_service.py"
+                       --relay-arg=--room --relay-arg=ctest --relay-arg=--state-listen
+                       --relay-arg=127.0.0.1:0 --relay-arg=--media-listen --relay-arg=127.0.0.1:0
+                       --relay-arg=--ws-listen --relay-arg=127.0.0.1:0 ${_relay_python_path}
+                       --client-only "--client-expect=bridge_arigl: ok"
+                       "--client-env=CVC_ARIADNE_RELAY={url}" --client-env=CVC_ARIADNE_ROOM=ctest
+                       --client-env=CVC_ARIADNE_NAME=Alice --client-arg=--frames
+                       --client-arg=1800 --client-arg=--png
+                       "--client-arg=${CMAKE_CURRENT_BINARY_DIR}/bridge_arigl_${_scheme}.png"
+                       "--client-arg=${_srv_tests}/bridge_arigl.ari")
+      list(APPEND _relay_tests arisrvx_bridge_arigl_${_scheme})
     endforeach()
     cvc_ariadne_python_test_properties(${_relay_tests})
     set_tests_properties(${_relay_tests} PROPERTIES

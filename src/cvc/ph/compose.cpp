@@ -348,6 +348,16 @@ canonical_law::canonical_law(canonical_spec s) : s_(std::move(s)) {
         if (std::fabs(s_.K[i * n + j] - s_.K[j * n + i]) > 1e-12 * (1 + std::fabs(s_.K[i * n + j])))
           bad("canonical law K is not symmetric");
   }
+  if (!s_.capacitor.empty()) {
+    if (s_.capacitor.size() < 2 || !(s_.capacitor[1] > 0))
+      bad("canonical law capacitor needs capacitor[1] > 0");
+    for (size_t j = 0; j < s_.capacitor.size(); ++j) {
+      if (j % 2 == 0 && s_.capacitor[j] != 0)
+        bad("canonical law capacitor must be odd: entry " + std::to_string(j) + " is not 0");
+      if (j % 2 == 1 && s_.capacitor[j] < 0)
+        bad("canonical law capacitor entry " + std::to_string(j) + " is negative");
+    }
+  }
   if (s_.center.empty())
     s_.center.assign(n, 0.0);
   check_size(s_.center, size_t(n), "canonical law center");
@@ -380,11 +390,46 @@ canonical_law::canonical_law(canonical_spec s) : s_(std::move(s)) {
     bad("leapfrog needs a constant mass; use implicit_midpoint with a mass net");
 }
 
+double canonical_law::capacitor_voltage(double q) const {
+  const vecd &c = s_.capacitor;
+  if (c.empty())
+    return 0.0;
+  // Newton on q(v) - q, an odd increasing polynomial, from the linear part's voltage. For q > 0
+  // the curve is convex and that start is above the root, so the iterates fall to it (and
+  // symmetrically below 0).
+  double v = q / c[1];
+  for (int it = 0; it < 100; ++it) {
+    double f = -q, df = 0, pw = 1; // pw = v^j
+    for (size_t j = 0; j < c.size(); ++j) {
+      f += c[j] * pw;
+      if (j + 1 < c.size())
+        df += double(j + 1) * c[j + 1] * pw;
+      pw *= v;
+    }
+    const double step = f / df;
+    v -= step;
+    if (std::fabs(step) <= 1e-15 * (1 + std::fabs(v)))
+      break;
+  }
+  return v;
+}
+
 double canonical_law::potential(const double *q, double *grad) const {
   const int n = s_.n;
   double V = 0;
   if (grad)
     std::fill(grad, grad + n, 0.0);
+  if (!s_.capacitor.empty())
+    for (int i = 0; i < n; ++i) {
+      const double v = capacitor_voltage(q[i]);
+      double p = v * v; // v^(j + 1) for j = 1
+      for (size_t j = 1; j < s_.capacitor.size(); ++j) {
+        V += s_.capacitor[j] * double(j) / double(j + 1) * p;
+        p *= v;
+      }
+      if (grad)
+        grad[i] += v;
+    }
   if (!s_.K.empty()) {
     vecd d(n), Kd(n);
     for (int i = 0; i < n; ++i)
@@ -935,6 +980,96 @@ balance_summary check_balance_random(const composite &s, int samples, unsigned s
   return out;
 }
 
+// ── states ──────────────────────────────────────────────────────────────────────────────────────
+
+storage_result storage_from_efforts(const composite &s, const vecd &e, const vecd &x0, int max_iter,
+                                    double tol, double cap) {
+  const size_t N = s.state_dim();
+  check_size(e, N, "storage_from_efforts efforts");
+  if (!x0.empty())
+    check_size(x0, N, "storage_from_efforts start");
+  storage_result r;
+  r.x = x0.empty() ? vecd(N, 0.0) : x0;
+  r.converged = true;
+  for (int i = 0; i < s.blocks(); ++i) {
+    const block_law &L = s.law(i);
+    const int n = L.state_dim(), off = s.state_offset(i);
+    double *x = r.x.data() + off;
+    const double *want = e.data() + off;
+    vecd f(n), fp(n), fm(n), J(size_t(n) * size_t(n)), dx(n);
+    bool done = false;
+    double res = 0;
+    int it = 0;
+    for (;; ++it) {
+      L.effort(x, f.data());
+      res = 0;
+      for (int k = 0; k < n; ++k) {
+        f[k] -= want[k];
+        res = std::max(res, std::fabs(f[k]));
+      }
+      if (res <= tol) {
+        done = true;
+        break;
+      }
+      if (it == max_iter)
+        break;
+      for (int c = 0; c < n; ++c) {
+        const double h = 1e-6 * (1 + std::fabs(x[c])), keep = x[c];
+        x[c] = keep + h;
+        L.effort(x, fp.data());
+        x[c] = keep - h;
+        L.effort(x, fm.data());
+        x[c] = keep;
+        for (int k = 0; k < n; ++k)
+          J[k * n + c] = (fp[k] - fm[k]) / (2 * h);
+      }
+      for (int k = 0; k < n; ++k)
+        dx[k] = -f[k];
+      try {
+        solve_in_place(n, J.data(), dx.data());
+      } catch (const std::runtime_error &) {
+        break; // a singular effort Jacobian: no storage state reaches these efforts from here
+      }
+      double big = 0;
+      for (double v : dx)
+        big = std::max(big, std::fabs(v));
+      const double scale = big > cap ? cap / big : 1.0;
+      for (int k = 0; k < n; ++k)
+        x[k] += scale * dx[k];
+    }
+    r.converged = r.converged && done;
+    r.iterations = std::max(r.iterations, it);
+    r.residual = std::max(r.residual, res);
+  }
+  return r;
+}
+
+vecd assign_state(const composite &now, const vecd &x_now, const composite &candidate,
+                  const std::map<std::string, vecd> &added) {
+  check_size(x_now, size_t(now.state_dim()), "assign_state actual state");
+  vecd x(candidate.state_dim(), 0.0);
+  for (int i = 0; i < candidate.blocks(); ++i) {
+    const std::string &name = candidate.name(i);
+    const int n = candidate.law(i).state_dim(), off = candidate.state_offset(i);
+    const int j = name.empty() ? -1 : now.find(name);
+    if (j >= 0) {
+      if (now.law(j).state_dim() != n)
+        bad("assign_state: block '" + name + "' has state " + std::to_string(n) +
+            " in the candidate, " + std::to_string(now.law(j).state_dim()) + " now");
+      std::copy(x_now.begin() + now.state_offset(j), x_now.begin() + now.state_offset(j) + n,
+                x.begin() + off);
+      continue;
+    }
+    auto it = added.find(name);
+    if (it == added.end())
+      bad("assign_state: candidate block '" + (name.empty() ? "#" + std::to_string(i) : name) +
+          "' is not in the actual system and has no supplied state");
+    check_size(it->second, size_t(n), "assign_state supplied state of '" + name + "'");
+    std::copy(it->second.begin(), it->second.end(), x.begin() + off);
+  }
+  return x;
+}
+
 // ── reports ─────────────────────────────────────────────────────────────────────────────────────
 
 namespace {
@@ -1098,7 +1233,8 @@ double number(const pt::ptree &t, const std::string &what) {
 // A number, or an array (of arrays) of numbers flattened in row-major order.
 void flatten(const pt::ptree &t, vecd &out, const std::string &what) {
   if (t.empty()) {
-    out.push_back(number(t, what));
+    if (!t.data().empty()) // an empty array reads as a leaf with no data: no numbers
+      out.push_back(number(t, what));
     return;
   }
   for (const auto &kv : t)
@@ -1204,6 +1340,7 @@ law_ptr read_law(const pt::ptree &t, const std::string &what) {
       s.scheme = scheme_of(t.get<std::string>("scheme", ""), what);
       if (auto v = t.get_child_optional("potential")) {
         s.K = numbers(*v, "K", what + ".potential");
+        s.capacitor = numbers(*v, "capacitor", what + ".potential");
         s.center = numbers(*v, "center", what + ".potential");
         s.v_scale = v->get<double>("scale", 1.0);
         if (auto net = v->get_child_optional("net"))
@@ -1333,6 +1470,169 @@ composite read_system(const pt::ptree &root, const std::filesystem::path &dir,
 }
 
 } // namespace
+
+namespace {
+
+std::string num(double v) {
+  char b[40];
+  std::snprintf(b, sizeof b, "%.17g", v);
+  return b;
+}
+
+std::string quoted(const std::string &s) {
+  std::string o = "\"";
+  for (char c : s) {
+    if (c == '"' || c == '\\')
+      o += '\\';
+    o += c;
+  }
+  return o + "\"";
+}
+
+void put_numbers(std::ostringstream &o, const char *key, const vecd &v) {
+  o << ", " << quoted(key) << ": [";
+  for (size_t i = 0; i < v.size(); ++i)
+    o << (i ? ", " : "") << num(v[i]);
+  o << "]";
+}
+
+const char *activation_name(activation a) {
+  switch (a) {
+  case activation::identity:
+    return "identity";
+  case activation::silu:
+    return "silu";
+  case activation::tanh:
+    return "tanh";
+  case activation::softplus:
+    return "softplus";
+  case activation::sigmoid:
+    return "sigmoid";
+  }
+  return "identity";
+}
+
+void put_net(std::ostringstream &o, const mlp &net) {
+  o << ", \"net\": [";
+  for (size_t l = 0; l < net.layers.size(); ++l) {
+    const dense_layer &L = net.layers[l];
+    o << (l ? ", " : "") << "{\"W\": [";
+    for (int r = 0; r < L.out; ++r) {
+      o << (r ? ", " : "") << "[";
+      for (int c = 0; c < L.in; ++c)
+        o << (c ? ", " : "") << num(L.W[size_t(r) * L.in + c]);
+      o << "]";
+    }
+    o << "]";
+    put_numbers(o, "b", L.b);
+    o << ", \"act\": " << quoted(activation_name(L.act)) << "}";
+  }
+  o << "]";
+}
+
+} // namespace
+
+std::string law_json(const block_law &law) {
+  std::ostringstream o;
+  if (const auto *l = dynamic_cast<const linear_law *>(&law)) {
+    const linear_spec &s = l->spec();
+    o << "{\"format\": \"cvc-ph-law/1\", \"kind\": \"linear\", \"n\": " << s.n
+      << ", \"ports\": " << s.ports << ", \"inputs\": " << s.inputs;
+    put_numbers(o, "Q", s.Q);
+    put_numbers(o, "J", s.J);
+    put_numbers(o, "R", s.R);
+    if (s.ports > 0)
+      put_numbers(o, "B", s.B);
+    if (s.inputs > 0)
+      put_numbers(o, "G", s.G);
+    o << "}";
+    return o.str();
+  }
+  if (const auto *c = dynamic_cast<const canonical_law *>(&law)) {
+    const canonical_spec &s = c->spec();
+    o << "{\"format\": \"cvc-ph-law/1\", \"kind\": \"canonical\", \"n\": " << s.n
+      << ", \"ports\": " << s.ports << ", \"inputs\": " << s.inputs << ", \"scheme\": \""
+      << (s.scheme == conservative_scheme::leapfrog ? "leapfrog" : "implicit_midpoint") << "\"";
+    if (s.ports > 0)
+      put_numbers(o, "B", s.B);
+    if (s.inputs > 0)
+      put_numbers(o, "G", s.G);
+    o << ", \"potential\": {\"scale\": " << num(s.v_scale);
+    if (!s.K.empty()) {
+      put_numbers(o, "K", s.K);
+      put_numbers(o, "center", s.center);
+    }
+    if (!s.capacitor.empty())
+      put_numbers(o, "capacitor", s.capacitor);
+    if (!s.v_net.empty())
+      put_net(o, s.v_net);
+    o << "}, \"mass\": {";
+    if (s.m_net.empty()) {
+      o << "\"min\": 0";
+      put_numbers(o, "diag", s.mass);
+    } else {
+      o << "\"min\": " << num(s.m_min);
+      put_net(o, s.m_net);
+    }
+    o << "}";
+    if (!s.d_net.empty()) {
+      o << ", \"damping\": {\"min\": " << num(s.d_min);
+      put_net(o, s.d_net);
+      o << "}";
+    } else if (!s.damping.empty()) {
+      o << ", \"damping\": {\"min\": 0";
+      put_numbers(o, "diag", s.damping);
+      o << "}";
+    }
+    o << "}";
+    return o.str();
+  }
+  bad("law_json: a " + law.kind() + " law has no file form");
+}
+
+std::string system_json(const composite &s) {
+  std::map<const block_law *, std::string> names;
+  std::ostringstream o;
+  o << "{\"format\": \"cvc-ph-system/1\", \"laws\": {";
+  for (int i = 0; i < s.blocks(); ++i) {
+    const block_law *l = &s.law(i);
+    if (names.count(l))
+      continue;
+    const std::string name = "law" + std::to_string(names.size());
+    o << (names.empty() ? "" : ", ") << quoted(name) << ": " << law_json(*l);
+    names[l] = name;
+  }
+  auto block_name = [&](int i) { return s.name(i).empty() ? "b" + std::to_string(i) : s.name(i); };
+  o << "}, \"blocks\": [";
+  for (int i = 0; i < s.blocks(); ++i)
+    o << (i ? ", " : "") << "{\"name\": " << quoted(block_name(i))
+      << ", \"law\": " << quoted(names[&s.law(i)]) << "}";
+  o << "], \"couplings\": [";
+  // Each nonzero entry of the pairing's upper triangle, as the pair that made it.
+  auto port_of = [&](int a) {
+    int i = 0;
+    while (i + 1 < s.blocks() && s.port_offset(i + 1) <= a)
+      ++i;
+    while (s.law(i).port_dim() == 0 || a >= s.port_offset(i) + s.law(i).port_dim())
+      ++i;
+    return std::make_pair(i, a - s.port_offset(i));
+  };
+  const int ny = s.port_dim();
+  bool first = true;
+  for (int a = 0; a < ny; ++a)
+    for (int b = a + 1; b < ny; ++b) {
+      const double c = s.pairing()[size_t(a) * ny + b];
+      if (c == 0)
+        continue;
+      const auto pa = port_of(a), pb = port_of(b);
+      o << (first ? "" : ", ") << "{\"type\": \"pair\", \"a\": " << quoted(block_name(pa.first))
+        << ", \"a_port\": " << pa.second << ", \"b\": " << quoted(block_name(pb.first))
+        << ", \"b_port\": " << pb.second << ", \"c\": " << num(c) << "}";
+      first = false;
+    }
+  o << "]}";
+  return o.str();
+}
 
 law_ptr load_law(const std::string &path) { return read_law(read_tree_file(path), path); }
 law_ptr parse_law(const std::string &json) {

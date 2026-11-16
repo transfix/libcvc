@@ -952,13 +952,34 @@ In lsystem_coast:
 - Scale the wind-sea cascades by `sqrt(F_local / F_spectrum)`, clamped. Height grows as the square root of fetch [L], so the island's lee goes calm and a small lake stays small.
 - This is an amplitude scaling only; a shorter fetch also shortens the peak period, which this ignores [P]. It is probably the most visible wind effect on an island.
 
+**As built (O13).** `cvc/ocean/fetch.h`.
+- **The march** is one sweep, not a march per texel: column by column (or row by row, whichever axis the wind runs more along) from the upwind edge, each sample takes the fetch of the point one column upwind, read linearly between the two samples there (dry reads 0), plus the step. It is O(rows × cols) for any wind. The lee's edge comes out soft over a few samples and widens with distance. Past the grid's edge over water the fetch is the open fetch (`water.fetch`); each sample is capped by its body's open extent (`water_body::fetch_m` for a lake or pond).
+- **Coarse, and rebuilt only when the wind turns.** The map is at most 256 samples a side over the shore grid (`build_fetch`'s stride). It depends on the direction only, so a speed change keeps it. It is rebuilt with the sea's keyframe (E4) when the keyframe's direction moved: at most once per crossfade, never per frame. terrain_lab's 241² coast gives a 241² map; a 401² test coast a 201² one (85 ms with the keyframe's three h0).
+- **Decision: each cascade's own clamp.** The roadmap's `sqrt(F_local / F_spectrum)` holds for the long cascade. A shorter band is fully grown sooner: once the fetch has carried JONSWAP's peak (ω_p = 22 (g²/UF)^⅓) below the band's lowest frequency, the band is in the spectrum's equilibrium tail and grows no more. So cascade c is scaled by `clamp(sqrt(F / F_full,c), 0, 1)`, `F_full,c = min(F_spectrum, g² / (U (ω_min,c / 22)³))` (`band_full_fetch`). At 9 m/s the three cascades are fully grown at 120, 22.2 and 4.6 km. A 400 m lake scales them 0.058, 0.134 and 0.295; the ripples come back within a few hundred metres of a lee shore, where the long waves wait for the open sea.
+- **Both seas.** `sea_surface`'s forcing (`sea_forcing`) multiplies each cascade's weight by its scale at the point the cascades are read; the drawn sea reads the same map from one RG32F texture (the old and the new keyframe's maps) and the same `F_full`s.
+- **Measured.** Behind a round island 150 m in radius on a 5 m grid (`OceanFetch.TheLeeOfAnIslandIsCalmAndGrowsAsTheRootOfTheFetch`), the fetch 10, 50, 100, 200, 400 and 800 m downwind reads 15, 55, 105, 205, 405 and 805 m (the shore sits half a cell out), the long cascade's scale 0.011 there and 0.058 at 400 m: four times as far, twice the waves. In the physics sea, 30 m behind the island the RMS height is 0.011 m against 0.476 m without the lee and 0.803 m ahead of it (`OceanSea.ThePhysicsSeaIsCalm...`). On the water node (`AWaterNodesLeeIsCalmerThanItsOpenWater`, a 9 m/s wind past a round island): 0.014 m RMS 40 m behind it, 0.715 m upwind, 0.543 m with `lee: 0`; a 2 m crate floating there heaves 0.009 m RMS against 0.625 m in the open.
+
 **E3. Gusts.**
 - A low-frequency noise drifts with the wind and modulates the ripple cascade's weight and the shading roughness, giving cat's paws: dark, ruffled patches racing across calm water.
 - It is the same field the trees sway in, and ABYSSAL's `gustiness` sets its strength (§10, item 4).
 
+**As built (O13).** `cvc/algo/wind_field.h`, for every reader of the wind.
+- **One function of (x, y, t)**, `cvc::algo::wind_gust`: the factor on the mean wind there, `max(0, 1 + gustiness (2.4 (n − 0.5) + 0.5 pulse(t)))`, where n is value noise at two scales (120 m gusts at the wind's speed, 37 m cat's paws at 0.8 of it, so the pattern changes as it travels) and pulse is ABYSSAL's three sines. It is in cvc::algo because the water, the clouds, the trees and physics may all depend on it. The noise is integer-hashed, its lattice periodic every 4096 cells, so the drift is reduced in double precision (`wind_drift`) and a float shader (`cvc/gl/WindGLSL.h`) reads the same pattern after hours of wind. Deterministic: `OceanWind.TheGustsAreDeterministicAndRideTheWind` pins its hash, and checks that the large scale at x + U t is the pattern that was at x.
+- **What it moves.** The ripple cascade's weight, in both seas (`sea_cascade::gust` 1 for it, 0 for the others). The drawn water's roughness: where the gust is above 1 a ruffled patch mirrors less sky (darker, everywhere), and near the camera a fine ripple tilts the normal, faded out from 80 m to 300 m. `water.gustiness` (0.25) sets it.
+- **Level of detail.** The gusts are evaluated per vertex (the near grid's 2 m, the far grid's coarse cells) and handed to the fragments; the cat's paws' fine scale fades out toward the near grid's edge and is off on the far grid. No texture.
+
 **E4. The sea lags the wind.**
 - U₁₀ ramps toward its target with a time constant. Duration-limited growth takes hours; a compressed scale is a knob.
 - h0 crossfades from the old spectrum to the new one over seconds, instead of today's single-frame respectralize.
+
+**As built (O13).** `cvc/ocean/sea_lag.h`; `SceneWaterSeaClock` in `scene_water.h`.
+- **The lag.** The sea's wind follows the wind with `water.sea_lag` seconds' time constant (20): its speed exponentially, its direction along the shorter arc; its fetch at once.
+- **Keyframes, not a rebuild per frame.** build_h0 takes tens of milliseconds, so the sea steps along its lagged wind by keyframes. One is made when no crossfade is running and the lagged wind has moved a step from the last keyframe's (5 % of the speed or 0.25 m/s, 3°, 2 % of the fetch); once within a step of the wind, the last keyframe takes the wind itself, so the sea lands where the wind is. Each crossfades from the last over `water.sea_fade` seconds (4), a smoothstep in time. At most one keyframe per crossfade: a slider dragged back and forth makes one every 4 s. That is the debounce for everything a keyframe rebuilds (h0, and the fetch map when its direction moved). A wind from 9 to 15 m/s with a 20 s lag makes 8 keyframes, the last at 41.6 s.
+- **No pop.** h0(k) = g(k) √S(k) dk / 2 with the same noise g at every wind, so the old and new h0 are in phase texel by texel, and their linear crossfade moves each mode's amplitude monotonically without touching its phase. Measured (`OceanSeaLag.TheCrossfadeIsContinuousNoStepInHeight`: 9 m/s toward 0° turning to 15 m/s toward 30°, four points): an instant rebuild jumps 0.571 m; crossfaded, the sea at the change is the old one bit for bit, the first frame moves 0.021 m, and the worst frame in the fade 0.037 m, under the waves' own worst frame (0.048 m).
+- **Both seas in phase.** The physics sea mixes the two h0 per mode by the weight at its own time (`sea_surface`, `sea_cascade::h0_from`, `sea_forcing::t0` / `t1`); its field is rebuilt once per keyframe. The drawn node mixes the same two on the CPU by the weight at the world clock's time and uploads them, only while a crossfade runs, then the new h0 once (`OceanWind::mix_h0`; OceanFFT is unchanged). Both run on the world's clock, so drawn and felt waves stay in phase through the fade.
+- **The whitecaps' threshold** follows the new keyframe's wind (found again once it has held for 10 frames, as before), so a lagged ramp finds it once per keyframe (110–250 ms each).
+
+**E5 and O14.** O13 reads the wind through one place, `scene_wind.h` (`scene_wind`, `kWaterWindKeys`: today the water node's `water.wind_speed`, `water.wind_dir` and `water.gustiness`), and the gusts through `cvc::algo::wind_gust`, so O14 points that one function at `wind.speed`, `wind.dir` and `wind.gustiness` and every reader follows.
 
 **E5. One scene wind** (R5). `wind.speed`, `wind.dir` and `wind.gustiness`, plus the storm modulation (Phase F), drive:
 - tree sway;
@@ -970,6 +991,24 @@ In lsystem_coast:
 **E6. Currents** (port, [X] §10, item 3).
 - A slowly varying curl-noise flow advects the small cascades, which breaks up their tiling.
 - The same flow, plus stream velocities from `water_bodies`, feeds `field::velocity`, so a drifting body moves the way the drawn water does.
+
+**As built (O13).** `cvc/ocean/current.h`.
+- **The flow** is the curl of a stream function, value noise at two scales (`scale_m`, 600 m, and 0.41 of it at 0.45 of the weight, ABYSSAL's two taps), drifting slowly: divergence-free exactly, and a physical speed, `water.current` its RMS (0 by default). Measured: the divergence by central differences is at most 2.5e-8 /s against gradients up to 6e-3 /s, and the RMS over 2 × 10⁵ points is the asked speed to 1e-4 (`OceanCurrent.IsDivergenceFreeAndItsSpeedIsTheRMS`). Its hash is pinned. ABYSSAL normalises its curl to a direction and uses it as a 26 m domain warp, neither divergence-free nor a velocity (§10.3); here one field is both what the drawn waves move with and what a body drifts on.
+- **The short cascades are carried** (the 83 m and 29 m tiles) by a two-phase flow map: each is read at `p − v(p)(τ_i − T/2) + o_i tile`, the phases half a period (`flow_period_s`, 12 s) apart, each with a random offset drawn at its restart, blended by triangle weights divided by `sqrt(w0² + w1²)` so the sea's variance holds through the blend (0.544 m RMS carried against 0.500 m not, at 0.5 m/s). Neighbouring tiles see different currents, so the same tile is read at different offsets across the sea: the tiling breaks up while the waves move with the water.
+- **Physics.** `sea_surface::velocity` adds the current at every depth wherever there is water, so a floating body drifts as the small waves drawn do (`OceanSea.ThePhysicsSea...`: the velocity is the waves' plus the current exactly).
+- **Not built: stream velocities.** `water_bodies` has no flow grid until hydrology (W1), so the current is the curl noise alone; `sea_forcing` is where a stream's velocity plane would join it.
+- **Drawn.** The current is evaluated per vertex (no texture) and the far grid's middle cascade reads through it too.
+
+**What O13 costs a frame, and the GPU's budget.**
+- Samplers: one new one, `uWindFetch` (RG32F, the two keyframes' fetch maps, at most 256² × 8 bytes). The gusts and the current are hashed noise in the shader, no texture. Each water stage had 8 samplers (three cascades, the bed, the shore distance, the shore layer's two planes, the wake) and has 9; a stage in a cloud_sky's shade adds the deck's as before.
+- Uniforms: 15 vec3s and floats more per stage.
+- Per vertex: the gust (two noise lattices), the current (two, with derivatives), the fetch weights (one bilinear read), and two more cascade reads for each of the two carried cascades. The far grid's height reads skip the cascades it does not draw.
+- CPU per frame: the uniforms only, except while a crossfade runs (the three h0 mixed and uploaded, 3 × 256² × 4 floats).
+- Measured, and not resolved. terrain_lab, arigl snapshots at 1280×720, (720-frame run − 120-frame run) / 600, seven rounds of master's arigl and this branch's, interleaved and alternating. The machine was shared with three other agents' builds and tests (six compilers, about 66 % CPU).
+  - Per frame, master read 58–247 ms (median 145) and this branch 49–247 ms (median 122).
+  - The per-round difference (branch − master) has a median of −9 ms and a spread of ±100 ms.
+  - The quietest round read 57.8 ms on master (the 54.9 ms of §11.2's quiet machine) and 49.0 ms here.
+  - So the change costs less than this machine could resolve that day. A clean measurement, with GPU timer queries, and the browser's are still to do.
 
 ---
 

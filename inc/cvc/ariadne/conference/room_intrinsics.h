@@ -53,6 +53,8 @@
 // subtree the author left joined (while the app + its state tree are still alive). Opening requires
 // a document scope, so the verbs run on the action/resident lanes, not the load-time init: lane.
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -97,6 +99,74 @@ void room_leave(cvc::app &app, const std::string &room_id, const std::string &pi
 // so the (room-roster) verb and tests both call it. Returns them in pid order; empty when the room
 // has no present participants or does not exist in this app's tree yet.
 std::vector<room_participant> room_roster(cvc::app &app, const std::string &room_id);
+
+// ----------------
+// Bridged users (docs/roadmap/ARIADNE_CHAT.md, "Bridged users")
+// ----------------
+// The users of another chat system (an NMDC hub's, say) that the relay's program bridges into the
+// room: listed in the room's roster beside its participants, posting to and reading its chat, with
+// no media and no avatar. The relay is their only writer, from what its program asks
+// (pycvc.ariadne's host.room_presence / room_absent), in a subtree of the room tree apart from the
+// participants, so the participants' code (presence, the area of interest, the holon) never sees
+// them:
+//
+//   conf.rooms.<room>.bridge.rev                       moves with every change below (the
+//                                                      relay's clock in ms, or one past the last)
+//   conf.rooms.<room>.bridge.count                     how many are present
+//   conf.rooms.<room>.bridge.users.<pid>.{present, uid, via, name, detail, e}
+//
+// `e` is the relay's epoch (its chat's, room_chat.h) when it wrote the user: one an earlier relay
+// process wrote, which a client that outlived it still holds, is not listed.
+// A bridged user's pid is "_<via>_<uid escaped>": VIA names the system (a lowercase letter, then
+// up to 15 lowercase letters and digits), and every byte of the system's own id for the user (UID)
+// that is not an ASCII letter or digit is written "_xx" (its hex). So two different users never
+// share a pid, and the pid is a state name, which is what a chat channel is keyed by. It begins
+// with '_', and a relay with bound writes takes no write from a participant whose pid does
+// (room_write_gate), so none can join as one.
+// Leaving is soft, as a participant's is: present = "0", the node kept, and a user who comes back
+// takes the same node again.
+
+struct room_bridged_user {
+  std::string pid;    // bridged_pid(via, uid)
+  std::string uid;    // the system's own id for the user (an NMDC nick)
+  std::string via;    // the system ("nmdc")
+  std::string name;   // what the roster and their posts show
+  std::string detail; // a line about them from their system ("" for none)
+};
+
+struct bridge_limits {
+  std::size_t uid_max = 128;       // bytes of a uid
+  std::size_t name_max = 128;      // of a name, once cleaned
+  std::size_t detail_max = 256;    // of a detail, once cleaned
+  std::size_t present_max = 10000; // bridged users present in a room at once
+};
+
+// conf.rooms.<room>.bridge
+std::string room_bridge_path(const std::string &room_id);
+// Whether VIA names a system: [a-z][a-z0-9]{0,15}.
+bool valid_bridge_via(const std::string &via);
+// The pid of UID on VIA; "" when VIA is not valid_bridge_via or UID is empty.
+std::string bridged_pid(const std::string &via, const std::string &uid);
+// Whether PID has a bridged user's form (a leading '_'). Says nothing about whether one is present.
+bool is_bridged_pid(const std::string &pid);
+
+// UID on VIA is in ROOM-ID, shown as NAME ("" shows UID) with DETAIL. A repeat updates the name
+// and detail. False, with the reason in WHY, for a VIA or UID that cannot be one (empty, too long,
+// not UTF-8), or a new user past LIMITS.present_max. On the relay's thread (it is the writer).
+bool room_bridge_presence(cvc::app &app, const std::string &room_id, const std::string &via,
+                          const std::string &uid, const std::string &name,
+                          const std::string &detail, std::string &why,
+                          const bridge_limits &limits = {});
+// UID on VIA left ROOM-ID. False when it was not present.
+bool room_bridge_absent(cvc::app &app, const std::string &room_id, const std::string &via,
+                        const std::string &uid);
+// The bridged users present in ROOM-ID, in pid order, as this app's tree holds them.
+std::vector<room_bridged_user> room_bridged(cvc::app &app, const std::string &room_id);
+// The one present as PID; false when none is.
+bool room_bridged_user_of(cvc::app &app, const std::string &room_id, const std::string &pid,
+                          room_bridged_user &out);
+// bridge.rev: 0 before the relay has bridged anyone.
+std::uint64_t room_bridge_rev(cvc::app &app, const std::string &room_id);
 
 } // namespace conference
 } // namespace ariadne

@@ -21,6 +21,7 @@
 // This is the P0 slice; the full contract (dynamic-DOM reconcile, expressions,
 // scene binding, validation) is docs/roadmap/CVCGL-UI-DSL-ROADMAP.md.
 
+#include <chrono>
 #include <cstdint>
 #include <cvc/ariadne/input.h> // InputEvent — Runtime::post_input feeds on_key/on_pointer (§4.6)
 #include <cvc/ariadne/keys.h>  // KeyBinding — set_key_bindings
@@ -51,6 +52,11 @@ struct value_tag;          // types.h: value_t
 
 namespace cvc {
 namespace ariadne {
+
+// A host's program-lane intrinsics, bound into each program env as it is built: the app's
+// (register_action_intrinsics, below), or one document's (Runtime::add_program_intrinsics).
+using ActionIntrinsicProvider = std::function<void(
+    std::shared_ptr<cvc::state_exec::environment> env, cvc::state_exec::intrinsics_context &ictx)>;
 
 // The caps a program of the document runs under, read from the tree as each one starts.
 enum class ProgramLane {
@@ -250,6 +256,19 @@ public:
   // frames with no real time between them (a snapshot) pins it instead: set_frame_clock(t) holds t
   // from the next render() on; nullopt goes back to the steady clock.
   void set_frame_clock(std::optional<double> seconds);
+  // §5.22 the tray's clock, at the menubar's right end. set_clock(on) is the host's default for
+  // whether it shows: off until a host turns it on, so a snapshot's frames do not change with the
+  // time of day. A document's `clock:` overrides it, and the user's choice (the state key
+  // ariadne.tray.clock, which arigl's Settings > Show clock binds) overrides both: the key is
+  // seeded from them once and read every frame. set_wall_clock gives the time the clock reads (the
+  // system clock by default); a test pins it.
+  void set_clock(bool on);
+  void set_wall_clock(std::function<std::chrono::system_clock::time_point()> now);
+  // §5.24 the tray's bell, the app's notification feed (cvc/core/notify.h). set_notifications(on)
+  // is the host's default for whether it shows (on unless a host turns it off); it shows only while
+  // the feed has entries. A document's `notifications:` overrides it, and the user's choice (the
+  // state key ariadne.tray.bell, which arigl's Settings > Show notifications binds) overrides both.
+  void set_notifications(bool on);
   // The clock's reading for the frame render() last drew.
   double frame_clock() const;
 
@@ -322,8 +341,19 @@ public:
   bool has(const std::string &name) const;
   // Forget the cached program names, so has_function() / has() see verbs registered since they
   // were last asked. AppRuntime::register_verb calls it; a new register_action_intrinsics provider
-  // is noticed without it.
+  // or add_program_intrinsics provider is noticed without it.
   void refresh_program_names();
+
+  // Host intrinsics of this Runtime's programs alone. `provider` runs in every program env the
+  // Runtime builds (its init: and a mounted module's, an action, a resident, a child of one,
+  // start_process's) after the app's providers (register_action_intrinsics), so it adds or
+  // overrides; and in no other Runtime's. A host binds what belongs to one document here
+  // (AppRuntime's verbs and host functions, and so a scripting engine's exports), so two documents
+  // on one app each reach their own. Providers run in the order added, and go with the Runtime.
+  void add_program_intrinsics(ActionIntrinsicProvider provider);
+  // Those providers as one, for a program env a host builds itself (AppRuntime's init:, through
+  // run_init). It reaches this Runtime: call it while the Runtime lives.
+  ActionIntrinsicProvider program_intrinsics() const;
 
   // A function the read lane's expressions may call (visible_when, a computed bind:, §2.1) beside
   // its allowlist: a scripting engine's pure export (ScriptLane::export_pure). `fn` gets the
@@ -407,10 +437,13 @@ bool has_widget_type(cvc::app &app, const std::string &type);
 // script); false with a message appended to `errors` on a parse/runtime error. Never
 // throws. (The loader stays app-free and only captures the script; this is the
 // host/Runtime-side seam that has the app.)
-// `has`, when set, binds (has? "name") for the script (AppRuntime passes Runtime::has).
+// `has`, when set, binds (has? "name") for the script (AppRuntime passes Runtime::has). `own`,
+// when set, binds the document's own intrinsics after the app's providers, in the script's env
+// and its children's (AppRuntime passes Runtime::program_intrinsics).
 bool run_init(cvc::app &app, const std::string &prefix, const std::string &script,
               std::vector<std::string> *errors = nullptr,
-              const std::function<bool(const std::string &)> &has = {});
+              const std::function<bool(const std::string &)> &has = {},
+              const ActionIntrinsicProvider &own = {});
 
 // ---------------------------------------------------------------------------
 // Host-contributed state_exec intrinsics for the PROGRAM lanes (init: and a program `on:` action).
@@ -429,23 +462,14 @@ bool run_init(cvc::app &app, const std::string &prefix, const std::string &scrip
 // so an intrinsic that mutates async host state (a worker-thread sim) should ENQUEUE the mutation,
 // not do it inline.
 // ---------------------------------------------------------------------------
-} // namespace ariadne
-namespace state_exec {
-struct environment; // NB: struct, not class — MSVC encodes the class/struct tag in the mangled
-struct intrinsics_context; // name (types.h/intrinsics.h declare both as struct); a mismatch =
-                           // LNK2019 on Windows (Itanium ABI ignores the tag, so it hides on
-                           // Linux/macOS).
-} // namespace state_exec
-namespace ariadne {
-
-using ActionIntrinsicProvider = std::function<void(
-    std::shared_ptr<cvc::state_exec::environment> env, cvc::state_exec::intrinsics_context &ictx)>;
 
 // Register a provider of host intrinsics for `app`'s program lanes. Providers run in order. The
 // list is the app's own (VOLROVER-LIBRARY-PORTS-ROADMAP.md 1.3): another app's documents never
-// get them, and they go with the app. Without a key it appends. With a non-empty key it replaces
-// the provider registered under that key, in its place, so a host that registers the same
-// stateless provider each time it starts (a cvcGL runtime) keeps one.
+// get them, and they go with the app. Every document of the app gets them, so what belongs to one
+// document goes to its Runtime instead (Runtime::add_program_intrinsics). Without a key it
+// appends. With a non-empty key it replaces the provider registered under that key, in its place,
+// so a host that registers the same stateless provider each time it starts (a cvcGL runtime)
+// keeps one.
 void register_action_intrinsics(cvc::app &app, ActionIntrinsicProvider provider);
 void register_action_intrinsics(cvc::app &app, const std::string &key,
                                 ActionIntrinsicProvider provider);
