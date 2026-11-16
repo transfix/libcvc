@@ -195,6 +195,11 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND NOT EMSCRIPTEN)
   add_test(NAME ari_url_document COMMAND ari check https://example.invalid/app/main.ari)
   set_tests_properties(ari_url_document PROPERTIES
                        PASS_REGULAR_EXPRESSION "ari runs a document from a path")
+  # A recording runs a scene, which ari drops: it says arigl records one (exit 2).
+  add_test(NAME ari_refuses_mp4
+           COMMAND ari snapshot --mp4 "${CMAKE_CURRENT_BINARY_DIR}/ari_no.mp4" --seconds 1
+                   "${CMAKE_CURRENT_SOURCE_DIR}/../../examples/ariadne/documents/hello.ari")
+  set_tests_properties(ari_refuses_mp4 PROPERTIES PASS_REGULAR_EXPRESSION "arigl can record one")
   # The chat and users components' DSL (components/chat.ari, room_users.ari), with the room verbs
   # they call played by the test document's functions: ari has no relay.
   add_test(NAME ari_chat_component

@@ -4040,6 +4040,7 @@ standalone configure refuses an SDK without gRPC. For a build of your own, gRPC 
 ```
 arigl run      [--terminal] [flags] doc.ari [document args...]
 arigl snapshot --png out.png [flags] doc.ari [document args...]       # offscreen window frame
+arigl snapshot --mp4 out.mp4 --seconds S [flags] doc.ari [...]        # the scene running, recorded
 arigl snapshot --terminal [--ansi] [--png scene.png] doc.ari [...]    # a terminal frame as text
 arigl check    [flags] doc.ari
 ```
@@ -4049,8 +4050,8 @@ arigl check    [flags] doc.ari
 stream and media verbs, and the `stream_view` widget (ImGui in a window, the terminal one
 with `--terminal`). In both modes it routes OS signals to `on_signal:` and exits 128 + N
 for one the document does not handle. A snapshot's frames run at `--fps` (20 by default),
-so a live stream delivers into them; in a window the scene clock is fixed, so its frames
-are reproducible.
+so a live stream delivers into them; in a window the scene clock steps a fixed 1/30 s a
+frame rather than the wall time, so its frames are reproducible.
 
 **The camera from the command line.** The main view's camera is state under
 `viewers.main.camera` (`CameraController.h`): `mode` (0 orbit, 1 fly, 2 track, 3 map), the orbit
@@ -4066,6 +4067,32 @@ arigl snapshot --png lake.png --set viewers.main.camera.orbit.center.x=22 \
 arigl snapshot --png crate.png --set viewers.main.camera.mode=2 \
   --set viewers.main.camera.track.target=crate_b --set viewers.main.camera.track.back=14 \
   --set viewers.main.camera.track.height=5 examples/ariadne/documents/terrain_lab.ari
+```
+
+**Recording a video.** `arigl snapshot --mp4 out.mp4 --seconds S` runs the document's scene
+on its clock for S seconds of scene time and records it: `S × fps` frames, `--fps` a second
+(30 by default), offscreen at `--width × --height` (1024 × 768 by default; both even). Each
+frame steps the scene clock by exactly 1/fps, however long it takes to render, so the
+physics, the clock's tickers (the water's waves, the clouds) and the custom nodes' ticks
+advance with it, and a slow machine makes the same video, only more slowly. The frames are
+paced no faster than real time, as a snapshot's are. `--png FILE` beside it also writes the
+last frame; `--frames N` first runs N frames unrecorded (a world still building, say), each
+1/fps of scene time too. `--seconds` without `--mp4` runs the same frames and writes only the
+`--png`. The video is encoded
+([`video_writer.h`](../inc/cvc/media/video_writer.h)) in process through the FFmpeg libraries
+cvcMedia links for its player, as H.264 where they have libx264 or libopenh264; else by an
+`ffmpeg` program on PATH, fed raw RGB on its stdin (its MP4 default: H.264 with libx264);
+else in process as MPEG-4 Part 2 (cvcpkg's ffmpeg-lgpl has no H.264 encoder), which most
+players play but a browser may not. arigl says which it used. With none of them it exits 2
+before loading the document, saying why. `--mp4` and `--seconds` are for a window's snapshot:
+`--terminal`, `run` and `check` refuse them, as do `ari` and the browser shell. Aim the
+camera with `--set`, as above; track mode follows a node through the recording:
+
+```
+arigl snapshot --mp4 crates.mp4 --seconds 5 --width 1280 --height 720 \
+  --set viewers.main.camera.mode=2 --set viewers.main.camera.track.target=crate_b \
+  --set viewers.main.camera.track.back=14 --set viewers.main.camera.track.height=5 \
+  examples/ariadne/documents/terrain_lab.ari
 ```
 
 The cvcGL examples

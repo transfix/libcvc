@@ -42,9 +42,13 @@
 // SIGUSR1/2) go to the document's on_signal: in both modes; one it does not handle ends the run
 // with exit status 128 + the signal number.
 // snapshot renders N frames, paced like run so a live stream delivers into them (a window's scene
-// clock stays fixed, so its frames are reproducible): in a window, offscreen at --width x --height
-// pixels (default 1024 x 768), writing the last one to --png FILE; with --terminal, the last frame
-// as text (--ansi keeps its colours), plus the rendered scene as --png if given.
+// clock steps a fixed 1/30 s a frame, not the wall time, so its frames are reproducible): in a
+// window, offscreen at --width x --height pixels (default 1024 x 768), writing the last one to
+// --png FILE; with --terminal, the last frame as text (--ansi keeps its colours), plus the rendered
+// scene as --png if given. In a window, --seconds S runs the scene clock S seconds instead, at
+// --fps frames a second (30 by default), each frame exactly 1/fps of scene time whatever the wall
+// time; --mp4 FILE records those frames as a video (gla::record_frames, cvc::media::VideoWriter:
+// in process through cvcMedia's FFmpeg, else an ffmpeg program on PATH).
 // check loads the document as run would, offscreen, and prints its warnings.
 //
 // run in a window adds a Settings menu after the document's own (the scene's shadows, grid, axis
@@ -180,6 +184,7 @@ EM_ASYNC_JS(void, arigl_wait_frame, (), {
 #endif
 #include <cvc/gl/ariadne/TerminalScene.h>
 #include <cvc/gl/ariadne/bundles.h>
+#include <cvc/gl/ariadne/record.h> // snapshot --mp4 / --seconds: the scene on its clock, recorded
 #include <cvc/gl/ariadne/scene_panels.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/stream_view_widget.h> // jpeg_frame_decoder
@@ -293,6 +298,12 @@ int usage(int code) {
                "it with --png FILE, or with --terminal print it as text. Everything after the\n"
                "document path is the document's own: it reads it as argv, or declares an args:\n"
                "block (then `arigl run doc.ari --help` shows its options).\n"
+               "\n"
+               "snapshot --mp4 FILE --seconds S records a video: S seconds of the scene running\n"
+               "on its clock (physics, water, clouds), --fps frames a second (default 30) at\n"
+               "--width x --height, each frame 1/fps of scene time however long it takes to\n"
+               "render. H.264 where this build's FFmpeg has an H.264 encoder, else an ffmpeg\n"
+               "program on PATH, else MPEG-4 Part 2; --png FILE also writes the last frame.\n"
                "\n"
                "info prints what this host provides, in a window or with --terminal: the GL it\n"
                "renders with, the terminal (size, colours, kitty / Sixel), what libcvc was built\n"
@@ -421,7 +432,8 @@ bool publish_images(cvc::app &app, Backend &backend, const ari::HostOptions &o) 
 }
 
 // A snapshot's frames run at the interactive loop's rate (--fps, else 20 a second), so a live
-// stream's producer has time to deliver frames into them. The window's scene clock stays fixed.
+// stream's producer has time to deliver frames into them. The window's scene clock steps a fixed
+// 1/30 s a frame (--seconds: 1/fps).
 std::chrono::duration<double> snapshot_period(const ari::HostOptions &o) {
   return std::chrono::duration<double>(1.0 / (o.fps > 0 ? o.fps : 20));
 }
@@ -2020,13 +2032,41 @@ void setup_media(cvc::app &app, const ari::HostOptions &o) {
   }
 }
 
+// snapshot --seconds / --mp4: what gla::record_frames runs, from the flags.
+gla::RecordOptions record_options(const ari::HostOptions &o) {
+  gla::RecordOptions r;
+  r.mp4 = o.mp4;
+  r.png = o.png;
+  r.seconds = o.seconds;
+  r.fps = o.fps > 0 ? o.fps : 30;
+  r.lead_frames = o.frames;
+  return r;
+}
+
 int run_window(const ari::HostOptions &o) {
   const bool offscreen = o.command != "run"; // snapshot and check never open a window
-  if (o.command == "snapshot" && o.png.empty()) {
-    std::fprintf(stderr, "arigl: a window snapshot needs --png FILE (or use --terminal)\n");
+  if (o.command == "snapshot" && o.png.empty() && o.mp4.empty()) {
+    std::fprintf(stderr, "arigl: a window snapshot needs --png FILE or --mp4 FILE (or use "
+                         "--terminal)\n");
     return 2;
   }
   const int width = o.width ? o.width : 1024, height = o.height ? o.height : 768;
+  if (!o.mp4.empty()) { // an encoder, and a size it takes, before the document loads
+    std::string why;
+    if (width % 2 || height % 2) {
+      std::fprintf(stderr,
+                   "arigl: --mp4 needs an even --width and --height (H.264's 4:2:0), "
+                   "not %dx%d\n",
+                   width, height);
+      return 2;
+    }
+    if (cvc::media::video_encoder(gla::record_writer_options(record_options(o), width, height),
+                                  &why)
+            .empty()) {
+      std::fprintf(stderr, "arigl: --mp4: no video encoder: %s\n", why.c_str());
+      return 2;
+    }
+  }
 
   cvc::app app;
   ari::apply_exec_policy(app, o); // --exec-policy, before anything builds the scheduler
@@ -2174,6 +2214,21 @@ int run_window(const ari::HostOptions &o) {
     if (o.command == "check")
       return rt.app_runtime().exit_code(); // an init: that called (quit code)
 
+    if (o.command == "snapshot" && o.seconds > 0) { // the scene on its clock, maybe recorded
+      gla::RecordOptions rec = record_options(o);
+      rec.before_frame = [&conf] { conf.pump(); }; // as below: a live conference must pump too
+      const gla::RecordResult r = gla::record_frames(rt, view, rec);
+      print_warnings(rt.take_warnings());
+      if (!r.ok) {
+        std::fprintf(stderr, "arigl: %s\n", r.error.c_str());
+        return 1;
+      }
+      if (!o.mp4.empty())
+        std::fprintf(stderr, "arigl: recorded %d frames (%.3g s at %d fps, %dx%d, %s) to %s\n",
+                     r.frames, r.frames / static_cast<double>(rec.fps), rec.fps, r.width, r.height,
+                     r.encoder.c_str(), o.mp4.c_str());
+      return rt.app_runtime().exit_code();
+    }
     if (o.command == "snapshot") {
       rt.set_fixed_clock(true); // reproducible: the scene clock advances 1/30 s a frame
       const int frames = std::max(1, o.frames);
@@ -2568,6 +2623,25 @@ int arigl_main(int argc, char **argv) {
     std::fprintf(stderr, "arigl: --backend, --graphics and --cell-size are for a terminal; add "
                          "--terminal\n");
     return 2;
+  }
+  if (!o.mp4.empty() || o.seconds > 0) { // a recording: a window's snapshot, natively
+#ifdef __EMSCRIPTEN__
+    std::fprintf(stderr, "arigl: --mp4 and --seconds are not available in a browser\n");
+    return 2;
+#endif
+    if (o.command != "snapshot") {
+      std::fprintf(stderr, "arigl: --mp4 and --seconds are for snapshot\n");
+      return 2;
+    }
+    if (terminal) {
+      std::fprintf(stderr, "arigl: --mp4 and --seconds run the scene in an offscreen window; "
+                           "drop --terminal\n");
+      return 2;
+    }
+    if (!o.mp4.empty() && !(o.seconds > 0)) {
+      std::fprintf(stderr, "arigl: --mp4 needs --seconds S, how long to record\n");
+      return 2;
+    }
   }
   if (!ari::AppRuntime::have_yaml()) {
     std::fprintf(stderr, "arigl: libcvc was built without yaml-cpp, so it cannot load a .ari\n");

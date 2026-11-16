@@ -153,6 +153,28 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
            COMMAND arigl snapshot --frames 2 --png "${CMAKE_CURRENT_BINARY_DIR}/arigl_window.png"
                    "${_arigl_examples}/hello.ari")
   add_test(NAME arigl_check COMMAND arigl check "${_arigl_examples}/hello.ari")
+  # snapshot --mp4 records the scene on its clock (record_frames; cvcGL's cvcgl_ari_record checks
+  # the video itself); it skips where there is no video encoder. --mp4 without --seconds, or with
+  # --terminal, is refused before anything loads.
+  add_test(NAME arigl_record_mp4
+           COMMAND arigl snapshot --mp4 "${CMAKE_CURRENT_BINARY_DIR}/arigl_record.mp4" --seconds 0.5
+                   --fps 10 --width 160 --height 120
+                   --png "${CMAKE_CURRENT_BINARY_DIR}/arigl_record.png"
+                   "${_arigl_examples}/hello.ari")
+  set_tests_properties(arigl_record_mp4 PROPERTIES
+                       PASS_REGULAR_EXPRESSION "recorded 5 frames \\(0.5 s at 10 fps, 160x120"
+                       SKIP_REGULAR_EXPRESSION "no video encoder;built without yaml-cpp"
+                       RESOURCE_LOCK cvcgl_gl_context)
+  add_test(NAME arigl_record_needs_seconds
+           COMMAND arigl snapshot --mp4 "${CMAKE_CURRENT_BINARY_DIR}/arigl_no.mp4"
+                   "${_arigl_examples}/hello.ari")
+  set_tests_properties(arigl_record_needs_seconds PROPERTIES
+                       PASS_REGULAR_EXPRESSION "--mp4 needs --seconds")
+  add_test(NAME arigl_record_not_in_terminal
+           COMMAND arigl snapshot --terminal --mp4 "${CMAKE_CURRENT_BINARY_DIR}/arigl_no.mp4"
+                   --seconds 1 "${_arigl_examples}/hello.ari")
+  set_tests_properties(arigl_record_not_in_terminal PROPERTIES
+                       PASS_REGULAR_EXPRESSION "drop --terminal")
   # A document set as an app installs one (share/<app>/main.ari), run from another working
   # directory: its relative imports, out of its own directory and its parent's, resolve against
   # the importing file's directory. The same set is what ari's test and the browser shell's check
@@ -172,6 +194,7 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   set_tests_properties(
     arigl_terminal_snapshot arigl_document_args arigl_rejects_bad_document_args
     arigl_terminal_stream_view arigl_window_snapshot arigl_check arigl_docset arigl_url_document
+    arigl_record_needs_seconds arigl_record_not_in_terminal
     PROPERTIES RESOURCE_LOCK cvcgl_gl_context
                SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
 
