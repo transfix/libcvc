@@ -4556,6 +4556,47 @@ server:
   - `too_large`: its value is over `--call-result-max`.
   - `internal`: its value doesn't cross the wire (a function, say).
 
+#### 9.7.2 Clients' WebAssembly guests: `room-run` with a module
+
+In arisrvx built with wasmtime, a client can send a WebAssembly module in place of the source (the
+roadmap's §6.3 and §8.6, phase G4; [`wasm_engine.h`](../src/ariadne_wasm/wasm_engine.h) has the
+guest ABI). The server document opts in with its own key:
+
+```yaml
+server:
+  client_guests: { steps: 2000, time: 0.05, memory_mb: 8 }   # or `on`
+```
+
+```lisp
+(room-run (guest-bytes) 41 "score")                       ; its export `run`, with (41 "score")
+(room-run-opts (dict "export" "score" "timeout" 2) (guest-bytes) 41)
+```
+
+- **The call.** The first argument is the module's bytes (a `b"\0asm..."` literal, or bytes the
+  client read), and the rest are its arguments. It calls the module's export `run`, or the one
+  `"export"` names, with the CBOR list of the arguments, and returns its value. It rides
+  `room-call`'s path as a program does, as the call's `guest` and `export`.
+- **As its client's program.** The guest is run by a program of its client's (§9.7.1): the same
+  chroot, the same environment (its `call` and its state imports reach only the read lane's
+  builtins and the five writers, each held to the bound-writes rule), the same caps, and the same
+  one at a time with that client's programs. Its gas is charged as steps, so `steps` caps it.
+  `memory_mb` caps its linear memory too, 16 MiB without it, and never above
+  `ariadne.limits.wasm_max_memory`. It can read the host objects in its participant
+  (`data.read`), and makes none (`data.write` is a `PermissionError`). It has WASI's stubs alone
+  (§8.6.1's grants are the server's guests'), no `ari_init` and no hooks.
+- **Off the loop.** The relay compiles the module on the app's pool, and starts the guest's
+  program only once it has compiled, so the wait costs none of its caps; meanwhile the client
+  counts as running, and a module that takes over 10 s to compile ends `resource_exhausted`. The
+  last 16 modules stay compiled, so the same bytes sent again start at once. Its instance is its
+  own, made when it starts and gone when it ends; its `_initialize` and each `ari_alloc` get a
+  thousand steps of gas, charged to it.
+- **What it refuses.** `invalid`: bytes that aren't a module, a module over 1 MiB, or one with a
+  start function (which would run to its end as the instance is made: export `_initialize`
+  instead). `failed`: a module that doesn't compile, or doesn't export the function, and every
+  trap, `fail()`, `PermissionError` and `MemoryError`. `unavailable`: no `client_guests:`, or a
+  relay without WebAssembly. Stock arisrv refuses to start a document with `client_guests:`, and
+  arisrvx refuses one under `--bind-writes off`.
+
 ### 9.8 Python beside the relay: `arisrvx`
 
 `arisrvx` is arisrv with an embedded CPython 3.12 ([`server_link.h`](../src/ariadne_python/server_link.h),
