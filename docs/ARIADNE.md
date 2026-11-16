@@ -1198,9 +1198,12 @@ scene:
   75 m/s 13.6 m. A kinematic avatar holds while the wind's drag on it is within what its
   walker grips and slides downwind past it: still in 9 m/s, 23.1 m in 1 s in 90 m/s. The drift is
   folded into its intent, so the server, a client's prediction and a replay agree bit for bit.
-- **A floating body** feels the wind on its part above the water, but the water's damping (the
-  `water` node's field, set so a body follows the waves) holds it: a crate drifts millimetres a
-  second.
+- **A floating body** feels the wind on its part above the water and drifts downwind through it.
+  The `water` node's field is inertial (PHYSICS_API.md, "Floating bodies"): its damping holds a
+  body's heave only, and sideways the water's acceleration carries the body on the waves while its
+  drag holds it, so it drifts at the speed where the air's drag on its freeboard balances the
+  water's on its hull, plus the current. A 1 × 1 × 0.5 m crate in a 10 m/s wind drifts about
+  0.15 m/s.
 - **Not yet.** Spray and rain slant (Phase F has neither yet), and the weather's steering wind
   (O18) does not read it yet.
 

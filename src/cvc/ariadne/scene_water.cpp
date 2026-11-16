@@ -463,7 +463,11 @@ bool WaterRuntime::tick() {
   item.field.kind = cvc::physics::field_kind::fluid;
   item.field.volume = box;
   item.field.drag_coefficient = 1.0;
-  item.field.damping = 1.0e4; // a metre-sized body follows the water within a tenth of a second
+  // A metre-sized body heaves with the water within a tenth of a second; sideways the water's
+  // acceleration carries it on the waves and the current, and its drag against the water holds
+  // it while a wind blows it through (field.h, inertial).
+  item.field.damping = 1.0e4;
+  item.field.inertial = true;
   item.field.surface = std::make_shared<cvc::physics::ocean_surface>(d.sea);
   d.field = std::make_shared<const cvc::physics::field>(item.field);
   auto geo = std::make_shared<cvc::world::world_geometry>();
