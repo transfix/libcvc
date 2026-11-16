@@ -65,8 +65,10 @@ depends:
     # shared-lib wasm libcvc — build-wasm.sh compiles the WHOLE cvc + cvcGL closure
     # from the repo root instead, so they are NOT prebuilt deps there.
     - name: libcvc
+      version: "^4.0"
       platforms: [linux, windows]
     - name: cvcgl
+      version: "^4.0"
       platforms: [linux, windows]
     # On wasm, 3.12.10+cvc.25 or later with the VTK bridge (cvc.23 without it). The host link
     # (bindings/pycvc/wasm/link-host.sh) takes undefined symbols as errors, and earlier wasm
@@ -115,10 +117,13 @@ depends:
     # to (same interpreter column). On wasm the core is embedded into the host
     # binary (static archive + inittab), not a separate side-by-side package.
     - name: pycvc-cp312
+      version: "^4.0"
       platforms: [linux, windows]
     - name: libcvc
+      version: "^4.0"
       platforms: [linux, windows]
     - name: cvcgl
+      version: "^4.0"
       platforms: [linux, windows]
     - name: python312
     - name: numpy-cp312
