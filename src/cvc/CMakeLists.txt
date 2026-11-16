@@ -153,6 +153,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/param_dsl.h
   ../../inc/cvc/core/result_job.h
   ../../inc/cvc/core/job_keys.h
+  ../../inc/cvc/core/notify.h
+  ../../inc/cvc/core/server_clock.h
   ../../inc/cvc/core/job_intrinsics.h
   ../../inc/cvc/core/process.h
   ../../inc/cvc/core/text.h
@@ -280,6 +282,7 @@ set(SOURCE_FILES
   core/sliced_task.cpp
   core/param_dsl.cpp
   core/job_keys.cpp
+  core/notify.cpp
   core/job_intrinsics.cpp
   core/process.cpp
   core/text.cpp
@@ -484,6 +487,8 @@ set(SOURCE_FILES
   nav/belief_material_controller.cpp
   nav/coph_config.cpp
   nav/coph_ledger.cpp
+  nav/coph_model.cpp
+  nav/coph_allocation.cpp
   nav/sim_world.cpp
   nav/yield.cpp
   nav/sim_world_binding.cpp
@@ -651,10 +656,10 @@ endforeach()
 # this one gets the explicit flag (the CPU analog of the nav .cu precise-math
 # properties below).
 if(NOT MSVC)
-  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp nav/coph_model.cpp nav/coph_allocation.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
-  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp nav/coph_model.cpp nav/coph_allocation.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 

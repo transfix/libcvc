@@ -102,7 +102,7 @@ bool is_builtin_block(const std::string &k) {
          k == "on_key" || k == "on_pointer" || k == "on_signal" || k == "units" || k == "import" ||
          k == "channels" || k == "lint" || k == "args" || k == "requires" || k == "keys" ||
          k == "windows_menu" || k == "tests" || k == "functions" || k == "data" || k == "assets" ||
-         k == "scenes";
+         k == "scenes" || k == "clock" || k == "menu_collapse" || k == "notifications";
 }
 // The parser `app` has for block `key`, or none.
 AriBlockParser find_ari_block(cvc::app &app, const std::string &key) {
@@ -155,6 +155,9 @@ const char *const kAriSchema = R"ARISCHEMA({
     },
     "menubar":  {"type": "array", "items": {"$ref": "#/$defs/widget"}},
     "windows_menu": {"type": ["boolean", "string"]},
+    "clock":    {"type": "boolean"},
+    "notifications": {"type": "boolean"},
+    "menu_collapse": {"enum": [true, false, "auto", "never", "always"]},
     "keys": {
       "type": "object",
       "additionalProperties": {
@@ -376,7 +379,7 @@ constexpr const char *kBuiltinWidgetTypes[] = {
     "slider_int",   "slider_float", "combo",   "radio",     "radio_row", "input_text",
     "input_int",    "tf_editor",    "color",   "image",     "button",    "separator",
     "windows_menu", "spinner",      "video",   "audio",     "text_view", "message_input",
-    "tabs",         "list"};
+    "tray_icon",    "tabs",         "list"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {
@@ -600,6 +603,24 @@ Widget windows_menu_setting(const std::string &v) {
   return windows_menu(v);
 }
 
+// A menubar's `collapse:`, or the document's `menu_collapse:` (§5.23): auto (the default: the
+// menus fold into one when they do not fit), never, or always. false / no / off read as never,
+// true / yes / on as auto.
+std::string menu_collapse_setting(Ctx &ctx, const YAML::Node &n) {
+  if (!n || !n.IsScalar())
+    return std::string();
+  std::string t;
+  for (char c : n.Scalar())
+    t += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (t == "never" || t == "false" || t == "no" || t == "off")
+    return "never";
+  if (t == "always")
+    return "always";
+  if (t != "auto" && t != "true" && t != "yes" && t != "on")
+    ctx.warn("ari: menu_collapse: '" + n.Scalar() + "' is not auto, never or always — auto");
+  return "auto";
+}
+
 void parse_pos(const YAML::Node &n, Widget &w) {
   const YAML::Node p = n["pos"];
   if (p && p.IsSequence() && p.size() >= 2) {
@@ -764,6 +785,10 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
       return separator();
     if (s == "windows_menu")
       return windows_menu();
+    if (s == "clock") // §5.22: the tray's clock, placed here among a menubar's tray icons
+      return tray_clock();
+    if (s == "bell") // §5.24: the tray's bell, placed here among a menubar's tray icons
+      return tray_bell();
     if (s == "spinner")
       return spinner("");
     return text(s);
@@ -791,12 +816,19 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     Widget w;
     w.kind = Kind::Menubar;
     w.children = parse_seq(ctx, has(n, "children") ? n["children"] : n["items"]);
+    w.collapse = menu_collapse_setting(ctx, has(n, "collapse") ? n["collapse"] : YAML::Node());
     return w;
   }
   if (type == "menu")
     return menu(label, parse_seq(ctx, has(n, "items") ? n["items"] : n["children"]));
   if (type == "windows_menu") // §5.9: `windows_menu: View` puts the built-in Windows menu here
     return windows_menu_setting(label);
+  if (type == "tray_icon") { // an icon at the menubar's right end
+    Widget w = tray_icon(label, str(n, "badge"), action(n),
+                         has(n, "items") ? parse_seq(ctx, n["items"]) : std::vector<Widget>{});
+    w.tone = str(n, "tone");
+    return w;
+  }
   if (type == "menu_item") {
     if (has(n, "bind")) {
       Widget w = menu_toggle(label, str(n, "bind"), flag(n, "def"));
@@ -1958,6 +1990,12 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
   // fields evaluate at the sub-prefix, while the parent's load:-block fields land on the wrapper.
   Widget wrapper = group({std::move(frag_root)});
   wrapper.scope = "includes." + as;
+  // §5.25 its name as an application (its menubar's menu in the outer bar): its meta.name, else
+  // the mount id.
+  wrapper.app_name = as;
+  if (frag.IsMap() && frag["meta"] && frag["meta"].IsMap() && frag["meta"]["name"] &&
+      frag["meta"]["name"].IsScalar() && !frag["meta"]["name"].Scalar().empty())
+    wrapper.app_name = frag["meta"]["name"].Scalar();
   wrapper.functions = make_function_scope(std::move(sub.functions)); // only these, even if none
   // §12: carry the fragment's own init: so the Runtime can run it once at the sub-prefix (the
   // loader is state-free; it captures the script, the Runtime executes it). A non-scalar init: is
@@ -2105,6 +2143,7 @@ Widget parse_document(Ctx &ctx, const YAML::Node &doc) {
       Widget mb;
       mb.kind = Kind::Menubar;
       mb.children = parse_seq(ctx, doc["menubar"]);
+      mb.collapse = menu_collapse_setting(ctx, doc["menu_collapse"]); // §5.23
       roots.push_back(std::move(mb));
     }
     for (const char *k : {"windows", "overlays"})
@@ -2119,6 +2158,12 @@ Widget parse_document(Ctx &ctx, const YAML::Node &doc) {
     const YAML::Node wm = doc["windows_menu"];
     if (wm.IsDefined() && wm.IsScalar())
       roots.push_back(windows_menu_setting(wm.Scalar()));
+    // §5.22: `clock: true|false` shows the tray's clock or not, whatever the host's default.
+    if (doc["clock"].IsDefined())
+      roots.push_back(tray_clock(flag(doc, "clock")));
+    // §5.24: `notifications: true|false` shows the tray's bell or not, whatever the host's default.
+    if (doc["notifications"].IsDefined())
+      roots.push_back(tray_bell(flag(doc, "notifications")));
   } else {
     ctx.warn("ari: document root is neither a map nor a sequence — nothing to load");
   }
@@ -3026,14 +3071,17 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
   sn.clip = parse_scene_clip(n["clip"]);
   sn.body = parse_scene_body(n["body"]);
   // Capture every key the built-ins did NOT consume into props (a neutral Map), so a
-  // custom node type registered on the cvcGL side reads its own config from there.
+  // custom node type registered on the cvcGL side reads its own config from there. A source the
+  // built-ins have no field for, `{ state: <key> }` or `{ stream: <token> }`, goes there too, as
+  // written: it is a custom type's own to read (a ribbon's points).
+  const bool own_source = src && src.IsMap() && (src["state"] || src["stream"]);
   sn.props.kind = Value::Kind::Map;
   if (n.IsMap())
     for (const auto &kv : n) {
       if (!kv.first.IsScalar())
         continue;
       const std::string key = kv.first.Scalar();
-      if (!known_scene_node_key(key))
+      if (!known_scene_node_key(key) || (own_source && key == "source"))
         sn.props.entries.emplace_back(key, to_value(kv.second));
     }
   const YAML::Node kids = n["children"];

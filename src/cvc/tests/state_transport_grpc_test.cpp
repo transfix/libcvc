@@ -12,6 +12,7 @@
 #include <atomic>
 #include <boost/any.hpp>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -623,6 +624,9 @@ TEST(StateTransportGrpcTest, LinkProbeMeasuresRoundTripAtBothEnds) {
     EXPECT_GT(r.stats.bytes_in, 0u);
     EXPECT_GT(r.stats.bytes_out, 0u);
     EXPECT_LT(r.stats.rtt_ms, 1000.0) << "loopback round trip";
+    // The Pong carries the answerer's wall clock: one machine, so the offset is about nothing.
+    EXPECT_TRUE(r.stats.peer_clock);
+    EXPECT_LT(std::abs(r.stats.clock_offset_ms), 1000.0);
   }
   client.stop();
   relay.stop();

@@ -373,6 +373,52 @@ public:
   virtual void end_main_menu_bar() = 0;
   virtual bool begin_menu(const char *label) = 0;
   virtual void end_menu() = 0;
+
+  // The menubar's tray: icons at its right end, after the menus (Kind::TrayIcon). Inside a
+  // begin_main_menu_bar, after its menus, the core calls begin_tray with every icon this frame, in
+  // the order the bar shows them; the backend returns how many of the LAST ones fit between the
+  // menus and the bar's right edge, with room left for one overflow icon when not all of them fit,
+  // and places them. The core then draws the ones that do not fit as items of an overflow menu
+  // (begin_tray_menu with the overflow glyph), then the ones that fit, then calls end_tray. A
+  // backend without a tray returns -1 (the default): the core draws each icon as an ordinary menu
+  // at the end of the bar instead, so every backend shows them.
+  struct TrayIcon {
+    std::string glyph;   // what the icon shows
+    std::string badge;   // drawn over its corner; empty: none
+    std::string tooltip; // its tooltip, for a backend that shows it its own way (the core also
+                         // calls set_tooltip after a button, or a menu that is not open)
+    int tone = 0;        // 0 info, 1 warn, 2 error: the badge's colour
+    bool menu = false;   // a click opens a menu (begin_tray_menu) rather than acting (tray_button)
+    bool text = false;   // the glyph is text (the clock's time), drawn as the bar's text is
+    std::string icon;    // the named icon it shows (cvc/ariadne/icons.h), "" when none: a backend
+                         // may draw its own picture for a name ("bell") instead of the glyph
+  };
+  virtual int begin_tray(const std::vector<TrayIcon> &icons) {
+    (void)icons;
+    return -1;
+  }
+  virtual bool tray_button(const TrayIcon &icon) { // clicked this frame
+    (void)icon;
+    return false;
+  }
+  virtual bool begin_tray_menu(const TrayIcon &icon) { // open: the core emits its items
+    (void)icon;
+    return false;
+  }
+  virtual void end_tray_menu() {}
+  virtual void end_tray() {}
+  // §5.23 whether the bar's menus, under these titles (in order: a title is drawn as begin_menu
+  // draws it), fit across the bar beside its whole tray. Asked right after begin_main_menu_bar,
+  // before any menu. When they do not, and the document leaves the bar to collapse, the core draws
+  // one menu instead, titled with the "menu" icon's glyph (cvc/ariadne/icons.h), whose items are
+  // the menus as submenus; the tray stays at the bar's right end. The default says they fit: a
+  // backend that cannot measure its bar never collapses it.
+  virtual bool menus_fit(const std::vector<std::string> &titles,
+                         const std::vector<TrayIcon> &tray) {
+    (void)titles;
+    (void)tray;
+    return true;
+  }
   // A visible window. `id` is a stable identity (the backend keeps a window's
   // geometry/state keyed on it, independent of the visible title). `size` is the
   // §3.0.3b sizing spec (px | percent-of-parent | auto per axis, with min/max) —

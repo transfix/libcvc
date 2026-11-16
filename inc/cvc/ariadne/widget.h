@@ -56,6 +56,8 @@ enum class Kind {
   MessageInput,   // a field to post a message: Enter sends it, Shift+Enter adds a line
   Video,          // a video player (§5.13): src URI, picture box, controls; bind = its state keys
   Audio,          // an audio player (§5.13): the same without a picture
+  TrayIcon,       // an icon at the menubar's right end (label = glyph): a click raises `on`, or
+                  // opens its `children` as a menu; `badge` over its corner, `tone` its colour
   Tabs,           // a tab bar bound to a key: over its children (one tab each, the selected one
                   // shown under it), or over `options:` alone (a switch)
   List,           // rows of a state array (count at bind, rows at bind.<i>), one selected, with
@@ -289,6 +291,19 @@ struct Widget {
   // expression re-evaluated each frame. Empty = no tooltip.
   std::string tooltip;
 
+  // Kind::TrayIcon: the badge's tone, "info" (default), "warn" or "error", or an expression that
+  // gives one each frame.
+  std::string tone;
+  // Kind::TrayIcon: the tray's clock (§5.22). In a menubar it places the clock there; elsewhere it
+  // is the document's setting for it (bdef: shown or not).
+  bool tray_clock = false;
+  // Kind::TrayIcon: the tray's bell (§5.24), the host's notification feed. In a menubar it places
+  // the bell there; elsewhere it is the document's setting for it (bdef: shown or not).
+  bool tray_bell = false;
+  // Kind::Menubar: when its menus fold into one ≡ menu (§5.23): "auto" (or empty) when they and
+  // the tray do not fit across the bar, "never", or "always".
+  std::string collapse;
+
   // `autofocus: true`: the widget takes keyboard focus each time it appears (a form's first field,
   // so a person can just type). If it cannot take focus, the next one that can does.
   bool autofocus = false;
@@ -473,6 +488,10 @@ struct Widget {
   bool live = false;
   std::string on_change;
 
+  // §5.25 a mount's application name: the loaded document's meta.name ("" leaves it to the mount
+  // id). Its menubar becomes one menu of the outer bar under this name.
+  std::string app_name;
+
   // §12 module mount (load:): when non-empty, this widget is a MOUNT POINT — a relative
   // state-path segment (e.g. "includes.stats") appended to the enclosing scope, so its whole
   // SUBTREE resolves binds and evaluates reactive/read-lane expressions against that deeper
@@ -562,6 +581,41 @@ inline Widget windows_menu(std::string title = std::string(), bool on = true) {
   w.kind = Kind::WindowsMenu;
   w.label = std::move(title);
   w.bdef = on;
+  return w;
+}
+
+// The tray's clock (§5.22): `- clock` in a menubar places it among the tray's icons; the document's
+// top-level `clock: true|false` is the setting (on: whether it shows).
+inline Widget tray_clock(bool on = true) {
+  Widget w;
+  w.kind = Kind::TrayIcon;
+  w.tray_clock = true;
+  w.bdef = on;
+  return w;
+}
+
+// The tray's bell (§5.24): `- bell` in a menubar places it among the tray's icons; the document's
+// top-level `notifications: true|false` is the setting (on: whether it shows).
+inline Widget tray_bell(bool on = true) {
+  Widget w;
+  w.kind = Kind::TrayIcon;
+  w.tray_bell = true;
+  w.bdef = on;
+  return w;
+}
+
+// An icon in the menubar's tray (its right end): `glyph` is what it shows (a named icon,
+// cvc/ariadne/icons.h, or the text as written), `badge` a text or an expression giving one, drawn
+// over its corner when not empty or "0", `on` what a click raises; with `items` a click opens them
+// as a menu instead.
+inline Widget tray_icon(std::string glyph, std::string badge = std::string(),
+                        std::string on = std::string(), std::vector<Widget> items = {}) {
+  Widget w;
+  w.kind = Kind::TrayIcon;
+  w.label = std::move(glyph);
+  w.badge = std::move(badge);
+  w.on = std::move(on);
+  w.children = std::move(items);
   return w;
 }
 

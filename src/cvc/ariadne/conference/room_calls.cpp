@@ -134,6 +134,10 @@ se::value_t room_call_request::to_value() const {
                                  {"timeout", se::value_t(timeout)}});
   if (!program.empty())
     se::set_field(v, "program", se::value_t(program));
+  if (!guest.empty()) {
+    se::set_field(v, "guest", se::make_bytes(guest));
+    se::set_field(v, "export", se::value_t(guest_export));
+  }
   return v;
 }
 
@@ -150,7 +154,11 @@ std::string parse_call(const std::string &pid, std::string_view data, room_call_
   out.fn = text_of(field(v, "fn"));
   if (out.id.empty() || out.id.size() > 128)
     return "the call has no id, or one longer than 128 characters";
-  if (const se::value_t *program = field(v, "program"); program && !program->is_nil()) {
+  const se::value_t *program = field(v, "program");
+  const se::value_t *guest = field(v, "guest");
+  if (program && !program->is_nil() && guest && !guest->is_nil())
+    return "the call has a program and a guest";
+  if (program && !program->is_nil()) {
     // A client program (S3): its source, in place of a function's name.
     const std::string *src = std::get_if<std::string>(&program->v);
     if (!src)
@@ -158,6 +166,22 @@ std::string parse_call(const std::string &pid, std::string_view data, room_call_
     if (!out.fn.empty())
       return "the call names a function and a program";
     out.program = *src;
+  } else if (guest && !guest->is_nil()) {
+    // A client's WebAssembly guest (G4): the module's bytes, and the function it calls.
+    const se::bytes_value *module = std::get_if<se::bytes_value>(&guest->v);
+    if (!module || module->data.empty())
+      return "the call's guest is not a module's bytes";
+    if (!out.fn.empty())
+      return "the call names a function and a guest";
+    out.guest = module->data;
+    const se::value_t *entry = field(v, "export");
+    if (entry && !entry->is_nil() && !std::get_if<std::string>(&entry->v))
+      return "the call's export is not a string";
+    out.guest_export = text_of(entry);
+    if (out.guest_export.empty())
+      out.guest_export = "run";
+    if (out.guest_export.size() > 256)
+      return "the call's export is longer than 256 characters";
   } else if (out.fn.empty() || out.fn.size() > 256) {
     return "the call names no function, or one longer than 256 characters";
   }
@@ -424,6 +448,18 @@ std::string room_call_client::run(const std::string &program, const se::value_t 
   return send_call(id, std::move(wire), std::move(done), nullptr);
 }
 
+std::string room_call_client::run_guest(const std::string &module, const std::string &entry,
+                                        const se::value_t &args, double timeout, done_fn done) {
+  const std::string id = _impl->pid + "-" + std::to_string(_impl->next.fetch_add(1) + 1);
+  se::value_t call = se::make_dict({{"id", se::value_t(id)},
+                                    {"guest", se::make_bytes(module)},
+                                    {"args", args.is_nil() ? se::make_list() : args},
+                                    {"timeout", se::value_t(timeout > 0 ? timeout : 0.0)}});
+  if (!entry.empty())
+    se::set_field(call, "export", se::value_t(entry));
+  return send_call(id, encode_wire(call), std::move(done), nullptr);
+}
+
 std::string room_call_client::send_call(const std::string &id, std::string wire, done_fn done,
                                         progress_fn progress) {
   {
@@ -528,8 +564,11 @@ se::value_t value_of(const room_call_client::outcome &o, const std::string &verb
 struct call_args {
   std::string fn;
   std::string program; // (room-run ...): the client program's source, in place of fn
+  std::string guest;   // (room-run ...) with a module's bytes: the client's guest, in place of fn
+  std::string entry;   // the guest's function ("" for run)
   se::value_t args = se::make_list(), kwargs = se::make_dict();
-  const char *verb() const { return program.empty() ? "room-call" : "room-run"; }
+  bool runs() const { return !program.empty() || !guest.empty(); }
+  const char *verb() const { return runs() ? "room-run" : "room-call"; }
 };
 call_args parse_args(const char *verb, std::span<const se::value_t> args) {
   if (args.empty())
@@ -547,14 +586,20 @@ call_args parse_args(const char *verb, std::span<const se::value_t> args) {
   return out;
 }
 
-// A program's arguments: its source, then the values its `args` holds.
+// A program's arguments: its source (a string), or a guest's module (bytes), then the values its
+// `args` holds.
 call_args parse_run_args(const char *verb, std::span<const se::value_t> args) {
   const std::string *src = args.empty() ? nullptr : std::get_if<std::string>(&args[0].v);
-  if (!src || src->empty())
-    throw se::dsl_error("TypeError",
-                        std::string(verb) + ": expected the program's source first, a string");
+  const se::bytes_value *module = args.empty() ? nullptr : std::get_if<se::bytes_value>(&args[0].v);
+  if ((!src || src->empty()) && (!module || module->data.empty()))
+    throw se::dsl_error("TypeError", std::string(verb) +
+                                         ": expected the program's source first, a string, or a "
+                                         "WebAssembly module's bytes");
   call_args out;
-  out.program = *src;
+  if (src)
+    out.program = *src;
+  else
+    out.guest = module->data;
   const std::span<const se::value_t> rest = args.subspan(1);
   out.args = se::make_list(std::vector<se::value_t>(rest.begin(), rest.end()));
   return out;
@@ -566,6 +611,8 @@ std::string send_one(room_call_client &client, const call_args &a, const std::st
                      room_call_client::progress_fn progress) {
   if (!a.program.empty())
     return client.run(a.program, a.args, timeout, std::move(done));
+  if (!a.guest.empty())
+    return client.run_guest(a.guest, a.entry, a.args, timeout, std::move(done));
   return client.call(a.fn, a.args, a.kwargs, key, timeout, std::move(done), std::move(progress));
 }
 
@@ -638,7 +685,7 @@ se::async_work call_work(cvc::app &app, se::async_host &host, std::string prefix
     if (!s->cv.wait_for(lk, std::chrono::duration<double>(wait), [&] { return s->done; })) {
       client->forget(id);
       throw se::dsl_error("TimeoutError", std::string(a.verb()) + ": " +
-                                              (a.program.empty() ? a.fn + ": " : std::string()) +
+                                              (a.runs() ? std::string() : a.fn + ": ") +
                                               "no reply from the relay");
     }
     return value_of(s->result, a.verb());
@@ -688,16 +735,21 @@ void register_room_call_intrinsics(cvc::app &app) {
               return call_work(app, host, prefix, std::move(a), std::string(), 0.0);
             },
             io);
-        // (room-run-opts (dict "timeout" S) "source" arg ...) / (room-run-opts-async ...)
+        // (room-run-opts (dict "timeout" S "export" E) program arg ...) / (room-run-opts-async ...)
         se::register_async_fn(
             env, host, "room-run-opts",
             [&app, &host, prefix](std::span<const se::value_t> args) -> se::async_work {
               if (args.empty() || !std::get_if<se::dict_ptr>(&args[0].v))
                 throw se::dsl_error("TypeError",
                                     "room-run-opts: expected (dict \"timeout\" S) first, then the "
-                                    "program's source");
+                                    "program's source or a module");
               const double timeout = number_of(field(args[0], "timeout"));
               call_args a = parse_run_args("room-run-opts", args.subspan(1));
+              a.entry = text_of(field(args[0], "export"));
+              if (!a.entry.empty() && a.guest.empty())
+                throw se::dsl_error("TypeError",
+                                    "room-run-opts: \"export\" names a guest's function, and the "
+                                    "program is DSL source");
               return call_work(app, host, prefix, std::move(a), std::string(),
                                timeout > 0 ? timeout : 0.0);
             },

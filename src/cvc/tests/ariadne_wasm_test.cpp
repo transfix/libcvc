@@ -12,6 +12,8 @@
 // G2), whose count is the same however a call is sliced.
 // WASI preview 1 (§8.6.1, phase G6) too: the stubs every guest links, and the block's wasi:
 // request.
+// Clients' guests (§6.3, §8.6, phase G4): a relay's client's module run as its program
+// (ServerDocument::run_client_guest), compiled on the pool, and what it may not do.
 
 #include "guest_runtime.h"
 #include "meter.h"
@@ -27,6 +29,7 @@
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/requires.h>
 #include <cvc/ariadne/script_engine.h>
+#include <cvc/ariadne/server_document.h> // clients' guests (G4)
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
@@ -37,11 +40,13 @@
 #include <fstream>
 #include <functional>
 #include <gtest/gtest.h>
+#include <initializer_list>
 #include <memory>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 #include <wasmtime.h>
 
@@ -2228,4 +2233,223 @@ TEST_F(WasmGasTest, WhatThePassCantReadIsRefused) {
 TEST_F(WasmGasTest, AStartFunctionThatNeverEndsIsRefused) {
   EXPECT_EQ(instance("(module (start $s) (func $s (loop $l (br $l))))"), nullptr);
   EXPECT_NE(error.find("start function ran out of gas"), std::string::npos) << error;
+}
+
+// ── clients' guests (G4, §6.3 and §8.6) ─────────────────────────────────────────────────────────
+
+namespace {
+
+// A relay's client's guest: client_guest.wat's exports (src/arisrv/tests) and a few more.
+const char kClientGuest[] = R"WAT(
+(module
+  (import "ari" "call" (func $call (param i32 i32 i32 i32) (result i64)))
+  (import "ari" "reply" (func $reply (param i32)))
+  (import "ari" "fail" (func $fail (param i32 i32)))
+  (import "ari" "state_set" (func $state_set (param i32 i32 i32 i32) (result i64)))
+  (import "ari" "state_get" (func $state_get (param i32 i32) (result i64)))
+  (import "ari" "volume_new" (func $volume_new (param i32 i32) (result i64)))
+  (memory (export "memory") 1)
+  (global $heap (mut i32) (i32.const 1024))
+  (global $inits (mut i32) (i32.const 0))
+  (func (export "_initialize") (global.set $inits (i32.add (global.get $inits) (i32.const 1))))
+  (func (export "ari_alloc") (param $n i32) (result i32) (local $p i32)
+    (local.set $p (global.get $heap))
+    (global.set $heap (i32.add (global.get $heap) (local.get $n)))
+    (local.get $p))
+  (func $pack (param $p i32) (param $n i32) (result i64)
+    (i64.or (i64.shl (i64.extend_i32_u (local.get $p)) (i64.const 32))
+            (i64.extend_i32_u (local.get $n))))
+  (func $answer (param $r i64) (result i64) (local $dst i32)
+    (local.set $dst (global.get $heap))
+    (call $reply (local.get $dst))
+    (if (i64.lt_s (local.get $r) (i64.const 0))
+      (then (call $fail (local.get $dst) (i32.wrap_i64 (i64.sub (i64.const 0) (local.get $r))))
+            (unreachable)))
+    (global.set $heap (i32.add (global.get $heap) (i32.wrap_i64 (local.get $r))))
+    (call $pack (local.get $dst) (i32.wrap_i64 (local.get $r))))
+  (data (i32.const 16) "score")
+  (data (i32.const 32) "\18\2a")
+  (data (i32.const 48) "pose")
+  (data (i32.const 64) "spawn")
+  (data (i32.const 80) "\80")
+  (data (i32.const 96) "\a1\64dims\83\01\01\01")
+  (func (export "run") (param $p i32) (param $n i32) (result i64)
+    (call $pack (local.get $p) (local.get $n)))
+  (func (export "inits") (param i32 i32) (result i64)
+    (i32.store8 (i32.const 200) (global.get $inits))
+    (call $pack (i32.const 200) (i32.const 1)))
+  (func (export "write") (param i32 i32) (result i64)
+    (drop (call $answer (call $state_set (i32.const 16) (i32.const 5) (i32.const 32) (i32.const 2))))
+    (call $answer (call $state_get (i32.const 16) (i32.const 5))))
+  (func (export "pose") (param i32 i32) (result i64)
+    (call $answer (call $state_set (i32.const 48) (i32.const 4) (i32.const 32) (i32.const 2))))
+  (func (export "spawn") (param i32 i32) (result i64)
+    (call $answer (call $call (i32.const 64) (i32.const 5) (i32.const 80) (i32.const 1))))
+  (func (export "make") (param i32 i32) (result i64)
+    (call $answer (call $volume_new (i32.const 96) (i32.const 10))))
+  (func (export "grow") (param i32 i32) (result i64)
+    (loop $l (br_if $l (i32.ge_s (memory.grow (i32.const 1)) (i32.const 0))))
+    (unreachable))
+  (func (export "spin") (param i32 i32) (result i64)
+    (loop $l (br $l))
+    (i64.const 0)))
+)WAT";
+
+// A relay's document that runs its clients' guests, under caps of its own.
+const char kClientGuestsDoc[] = R"(meta: { name: client guests, min_libcvc: 3.7.5 }
+server:
+  client_guests: { steps: 3000, memory_mb: 4 }
+init: (state-set "status" "up")
+)";
+
+struct GuestRun {
+  bool done = false;
+  ServerDocument::ClientOutcome outcome;
+};
+
+std::shared_ptr<GuestRun> run_guest(ServerDocument &doc, const std::string &pid,
+                                    const std::string &module, const std::string &entry,
+                                    se::value_t args = se::value_t()) {
+  auto run = std::make_shared<GuestRun>();
+  doc.run_client_guest(pid, module, entry, std::move(args),
+                       [run](const ServerDocument::ClientOutcome &o) {
+                         run->done = true;
+                         run->outcome = o;
+                       });
+  return run;
+}
+
+// Step the document until every run has its outcome, for at most 20 s: a module compiles on the
+// app's pool meanwhile.
+void settle(ServerDocument &doc, std::initializer_list<std::shared_ptr<GuestRun>> runs) {
+  const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+  for (std::uint64_t tick = 1; std::chrono::steady_clock::now() < until; ++tick) {
+    bool all = true;
+    for (const auto &r : runs)
+      all = all && r->done;
+    if (all)
+      return;
+    doc.step(tick, tick / 120.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
+
+class WasmClientGuestTest : public WasmEngineTest {
+protected:
+  void SetUp() override {
+    WasmEngineTest::SetUp();
+    if (!AppRuntime::have_yaml())
+      GTEST_SKIP() << "libcvc built without yaml-cpp";
+    path = write("client_guests.ari", kClientGuestsDoc).string();
+    doc = std::make_unique<ServerDocument>(app, "standup");
+    ASSERT_EQ(doc->read(path), "");
+    doc->use_client_guests(engine);
+    doc->load(path);
+    module = wat2wasm(kClientGuest);
+  }
+  void TearDown() override { doc.reset(); }
+
+  cvc::app app;
+  std::string path, module;
+  std::unique_ptr<ServerDocument> doc;
+};
+
+std::string printed(const se::value_t &v) { return se::to_string(v); }
+
+} // namespace
+
+// A client's guest runs as its client's program: its arguments in, its value out, its writes in its
+// own participant, its _initialize once per instance, and the same module sent again run again
+// (compiled once, and kept).
+TEST_F(WasmClientGuestTest, AGuestRunsAsItsClientsProgram) {
+  const auto echo =
+      run_guest(*doc, "p1", module, "run",
+                se::make_list({se::value_t(std::int64_t(41)), se::value_t(std::string("hi"))}));
+  const auto write = run_guest(*doc, "p2", module, "write");
+  settle(*doc, {echo, write});
+  ASSERT_TRUE(echo->done && write->done) << "never ended";
+  ASSERT_TRUE(echo->outcome.ok) << echo->outcome.code << ": " << echo->outcome.message;
+  EXPECT_EQ(printed(echo->outcome.value), printed(se::make_list({se::value_t(std::int64_t(41)),
+                                                                 se::value_t(std::string("hi"))})));
+  ASSERT_TRUE(write->outcome.ok) << write->outcome.code << ": " << write->outcome.message;
+  EXPECT_EQ(printed(write->outcome.value), printed(se::value_t(std::string("42"))));
+  EXPECT_EQ(val(app, "conf.rooms.standup.participants.p2.score"), "42");
+  EXPECT_EQ(cvc::state::instance(app).findDescendant("score"), nullptr);
+
+  for (int i = 0; i < 2; ++i) {
+    const auto inits = run_guest(*doc, "p1", module, "inits");
+    settle(*doc, {inits});
+    ASSERT_TRUE(inits->done && inits->outcome.ok) << inits->outcome.message;
+    EXPECT_EQ(printed(inits->outcome.value), "1") << "an instance of its own, set up once";
+  }
+}
+
+// What a client's guest may not do, each a failure of its call: a key the relay owns, a function
+// its client's program doesn't have, a host object of its own, memory past its cap, work past its
+// step cap.
+TEST_F(WasmClientGuestTest, AGuestMayDoOnlyWhatItsClientsProgramMay) {
+  cvc::state::instance(app)("conf.rooms.standup.participants.p1.pose").value(std::string("relay"));
+  const auto pose = run_guest(*doc, "p1", module, "pose");
+  const auto spawn = run_guest(*doc, "p2", module, "spawn");
+  const auto make = run_guest(*doc, "p3", module, "make");
+  const auto grow = run_guest(*doc, "p4", module, "grow");
+  const auto spin = run_guest(*doc, "p5", module, "spin");
+  settle(*doc, {pose, spawn, make, grow, spin});
+  const struct {
+    const char *what;
+    std::shared_ptr<GuestRun> run;
+    const char *code, *says;
+  } cases[] = {{"pose", pose, "failed", "PermissionError"},
+               {"spawn", spawn, "failed", "NameError"},
+               {"make", make, "failed", "PermissionError"},
+               {"grow", grow, "failed", "MemoryError"},
+               {"spin", spin, "resource_exhausted", ""}};
+  for (const auto &c : cases) {
+    ASSERT_TRUE(c.run->done) << c.what << " never ended";
+    EXPECT_FALSE(c.run->outcome.ok) << c.what << " ran";
+    EXPECT_EQ(c.run->outcome.code, c.code) << c.what << ": " << c.run->outcome.message;
+    EXPECT_NE(c.run->outcome.message.find(c.says), std::string::npos)
+        << c.what << ": " << c.run->outcome.message;
+  }
+  EXPECT_EQ(val(app, "conf.rooms.standup.participants.p1.pose"), "relay");
+  EXPECT_FALSE(doc->should_close());
+}
+
+// The engine's refusals: before a step, bytes that are no module and a module with a start
+// function (invalid); in its first steps, a module that doesn't compile, and an export it doesn't
+// have (failed).
+TEST_F(WasmClientGuestTest, TheEngineRefusesWhatItCantRun) {
+  const auto prose = run_guest(*doc, "p1", std::string("not a module"), "run");
+  ASSERT_TRUE(prose->done) << "refused at once";
+  EXPECT_EQ(prose->outcome.code, "invalid");
+  const auto started = run_guest(
+      *doc, "p1", wat2wasm("(module (memory (export \"memory\") 1) (start $s) (func $s))"), "run");
+  ASSERT_TRUE(started->done) << "refused at once";
+  EXPECT_EQ(started->outcome.code, "invalid");
+  EXPECT_NE(started->outcome.message.find("start function"), std::string::npos)
+      << started->outcome.message;
+
+  // A header, then a section that runs past the end: a module only in name.
+  const auto broken = run_guest(*doc, "p1", std::string("\0asm\x01\0\0\0\x01\x7f", 10), "run");
+  const auto missing = run_guest(*doc, "p2", module, "no_such_export");
+  settle(*doc, {broken, missing});
+  ASSERT_TRUE(broken->done && missing->done) << "never ended";
+  EXPECT_FALSE(broken->outcome.ok);
+  EXPECT_EQ(broken->outcome.code, "invalid") << broken->outcome.message;
+  EXPECT_EQ(missing->outcome.code, "failed") << missing->outcome.message;
+  EXPECT_NE(missing->outcome.message.find("no_such_export"), std::string::npos)
+      << missing->outcome.message;
+
+  // A module that reads as one, but doesn't validate: compiled, and refused there.
+  const std::string invalid("\0asm\x01\0\0\0"
+                            "\x01\x04\x01\x60\x00\x00"
+                            "\x03\x02\x01\x00"
+                            "\x0a\x07\x01\x05\x00\x23\x00\x1a\x0b",
+                            27);
+  const auto bad = run_guest(*doc, "p3", invalid, "run");
+  settle(*doc, {bad});
+  ASSERT_TRUE(bad->done) << "never ended";
+  EXPECT_EQ(bad->outcome.code, "failed") << bad->outcome.message;
+  EXPECT_NE(bad->outcome.message.find("doesn't compile"), std::string::npos)
+      << bad->outcome.message;
 }

@@ -135,6 +135,16 @@ public:
   void end_main_menu_bar() override;
   bool begin_menu(const char *label) override;
   void end_menu() override;
+  // §5.22 the tray: after the bar's filler, at its right end. A button is an item (a click or
+  // Enter fires it); a menu is a menubar title whose dropdown hangs left from its right edge.
+  // Hosted, the tray is a model (hosted_tray) the host draws.
+  int begin_tray(const std::vector<TrayIcon> &icons) override;
+  bool menus_fit(const std::vector<std::string> &titles,
+                 const std::vector<TrayIcon> &tray) override;
+  bool tray_button(const TrayIcon &icon) override;
+  bool begin_tray_menu(const TrayIcon &icon) override;
+  void end_tray_menu() override;
+  void end_tray() override;
   bool begin_window(const char *title, const char *id, const Size &size, float border,
                     bool *p_open = nullptr) override;
   void end_window() override;
@@ -321,14 +331,28 @@ public:
   struct HostedMenuItem {
     std::string id, label;
     bool toggle = false, checked = false, separator = false;
+    // A submenu's title (no id): the items after it with a greater depth are its own. depth counts
+    // the submenus an item is in (0: straight in its menu); a collapsed bar (§5.23) holds its menus
+    // this way.
+    bool submenu = false;
+    int depth = 0;
   };
   struct HostedMenu {
     std::string label;
     std::vector<HostedMenuItem> items;
   };
+  // §5.22 one of the tray's icons. A button's `id` is an item the host activates
+  // (activate_menu_item); a menu's items are activated the same way.
+  struct HostedTrayIcon {
+    std::string id, glyph, badge, tooltip;
+    int tone = 0; // 0 info, 1 warn, 2 error
+    bool menu = false;
+    std::vector<HostedMenuItem> items;
+  };
 
   std::vector<HostedWindow> hosted_windows() const; // the windows the last walk drew, in order
   std::vector<HostedMenu> hosted_menus() const;     // the menu bar the last walk drew
+  std::vector<HostedTrayIcon> hosted_tray() const;  // its tray, left to right (§5.22)
   bool hosted_root() const;                         // whether body "" has any widgets
   std::string tooltip() const;                      // the focused / hovered widget's tooltip
 
