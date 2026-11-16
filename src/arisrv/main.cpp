@@ -850,6 +850,7 @@ int main(int argc, char **argv) {
   scriptHandles.runtime = serverDoc ? &serverDoc->runtime() : nullptr;
   scriptHandles.mode = "server";
   scriptHandles.server = &scriptLink;
+  scriptLink.set_room(room); // what the program's bridged users (host.room_presence ...) name
   const cvc::ariadne::python::Attachment scriptLent = python.attach(scriptHandles);
   cvc::ariadne::python::ServeOptions serveOpts;
   // The program's authenticate hook, as the planes call it (null without one), and the principals
@@ -1156,6 +1157,48 @@ int main(int argc, char **argv) {
 #if CVC_ENABLE_WS
   chat->add_transport(&ws_tp);
 #endif
+#ifdef CVC_ARIADNE_PYTHON
+  // Bridged users (room_intrinsics.h, ARIADNE_CHAT.md): the program's presence and posts for the
+  // users of another chat system, applied each room step ahead of the chat's, and what the room's
+  // participants post handed to the program, as it listens (host.on_room_chat, on_room_dm).
+  bool chatHearsRoom = false, chatHearsDms = false;
+  const auto bridge_step = [&] {
+    namespace rc = cvc::ariadne::conference;
+    using Op = cvc::ariadne::python::ServerLink::BridgeOp;
+    const bool room_on = scriptLink.hears_room(), dms_on = scriptLink.hears_dms();
+    if (room_on != chatHearsRoom || dms_on != chatHearsDms) {
+      chatHearsRoom = room_on;
+      chatHearsDms = dms_on;
+      rc::room_chat_relay::listener hear;
+      if (room_on || dms_on)
+        hear = [&](const rc::chat_event &e) {
+          scriptLink.post(cvc::ariadne::python::ServerLink::Event{
+              "room_chat", 0, cvc::state_exec::value_t(rc::encode_chat_event(room, e))});
+        };
+      chat->set_listener(std::move(hear), room_on, dms_on);
+    }
+    // At most 128 a step (a presence is ~65 us, so ~8 ms): a hub's login burst of thousands
+    // drains over a second's steps instead of stalling one.
+    for (const Op &op : scriptLink.take_bridge_ops(128)) {
+      std::string why;
+      bool ok = true;
+      if (op.kind == Op::Kind::presence) {
+        ok = rc::room_bridge_presence(app, room, op.via, op.uid, op.name, op.detail, why);
+      } else if (op.kind == Op::Kind::absent) {
+        if (rc::room_bridge_absent(app, room, op.via, op.uid))
+          chat->participant_left(rc::bridged_pid(op.via, op.uid));
+      } else {
+        ok = chat->post_bridged(op.via, op.uid, op.name, op.text, op.to, why);
+      }
+      if (!ok) {
+        std::printf("[arisrvx] bridge: %s of %s user '%s' refused: %s\n",
+                    op.kind == Op::Kind::presence ? "presence" : "a post", op.via.c_str(),
+                    op.uid.c_str(), why.c_str());
+        std::fflush(stdout);
+      }
+    }
+  };
+#endif
   // room-call (room_calls.h): the calls clients make, taken each room step. The replies go only to
   // the connection holding the caller's pid, so like DMs they take bound writes.
   auto calls = std::make_unique<cvc::ariadne::conference::room_call_relay>(shard, room);
@@ -1322,7 +1365,12 @@ int main(int argc, char **argv) {
     const double now_s =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - room_start).count();
     // Chat first: its pushes go out now, and the room head it writes rides this step's drain, so
-    // a client never sees the head before the message.
+    // a client never sees the head before the message. In arisrvx the program's bridged users'
+    // presence and posts go before it.
+#ifdef CVC_ARIADNE_PYTHON
+    if (scriptThread.joinable())
+      bridge_step();
+#endif
     chat->step(now_s);
     cvc::ariadne::conference::relay_room_step(shard, planes, aoi_relay.get(), server_holon, now_s,
                                               trimJournal);
@@ -1874,11 +1922,12 @@ int main(int argc, char **argv) {
           held_timeouts, shard.journal().size());
       const auto cs = chat->take_stats();
       std::printf(
-          "[arisrv] chat: %llu post(s) (%llu direct) | %llu page(s) | %llu refused | %llu "
-          "dropped | %llu push(es)\n",
+          "[arisrv] chat: %llu post(s) (%llu direct, %llu bridged) | %llu page(s) | %llu refused "
+          "| %llu dropped | %llu push(es) | %llu heard by the program\n",
           static_cast<unsigned long long>(cs.posts), static_cast<unsigned long long>(cs.dms),
-          static_cast<unsigned long long>(cs.pages), static_cast<unsigned long long>(cs.refused),
-          static_cast<unsigned long long>(cs.dropped), static_cast<unsigned long long>(cs.pushes));
+          static_cast<unsigned long long>(cs.bridged), static_cast<unsigned long long>(cs.pages),
+          static_cast<unsigned long long>(cs.refused), static_cast<unsigned long long>(cs.dropped),
+          static_cast<unsigned long long>(cs.pushes), static_cast<unsigned long long>(cs.heard));
       const auto ps = pose_relay.take_stats();
       std::printf(
           "[arisrv] poses: %llu snapshot(s) (%llu on pose lanes, %llu acks), %llu entries, "

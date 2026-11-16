@@ -545,14 +545,99 @@ PyObject *arihost_next_event(PyObject *, PyObject *) {
   if (!got)
     Py_RETURN_NONE;
   PyObject *value = nullptr;
+  const std::string *text = std::get_if<std::string>(&event.value.v);
   if (event.value.is_nil()) {
     value = Py_None;
     Py_INCREF(value);
+  } else if (text) {
+    // A "room_chat" event's JSON: a str, so it needs no pycvc.
+    if (!(value =
+              PyUnicode_DecodeUTF8(text->data(), static_cast<Py_ssize_t>(text->size()), "replace")))
+      return nullptr;
   } else if (!(value = value_capsule(std::move(event.value)))) {
     return nullptr;
   }
   return Py_BuildValue("(sKN)", event.kind.c_str(), static_cast<unsigned long long>(event.id),
                        value);
+}
+
+// room(): the relay's room, which the bridge ops below name.
+PyObject *arihost_room(PyObject *, PyObject *) {
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  const std::string room = link->room();
+  return PyUnicode_FromStringAndSize(room.data(), static_cast<Py_ssize_t>(room.size()));
+}
+
+// The room's bridged users (host.room_presence, room_absent, room_chat_post), applied by the relay
+// on its next room step, in order:
+//   bridge_presence(via, uid, name, detail)
+//   bridge_absent(via, uid)
+//   bridge_post(via, uid, name, text, to)        to: "" the room, or a participant's pid
+PyObject *arihost_bridge_presence(PyObject *, PyObject *args) {
+  const char *via = nullptr, *uid = nullptr, *name = nullptr, *detail = nullptr;
+  Py_ssize_t vl = 0, ul = 0, nl = 0, dl = 0;
+  if (!PyArg_ParseTuple(args, "s#s#s#s#", &via, &vl, &uid, &ul, &name, &nl, &detail, &dl))
+    return nullptr;
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  ServerLink::BridgeOp op;
+  op.kind = ServerLink::BridgeOp::Kind::presence;
+  op.via.assign(via, static_cast<std::size_t>(vl));
+  op.uid.assign(uid, static_cast<std::size_t>(ul));
+  op.name.assign(name, static_cast<std::size_t>(nl));
+  op.detail.assign(detail, static_cast<std::size_t>(dl));
+  link->bridge(std::move(op));
+  Py_RETURN_NONE;
+}
+
+PyObject *arihost_bridge_absent(PyObject *, PyObject *args) {
+  const char *via = nullptr, *uid = nullptr;
+  Py_ssize_t vl = 0, ul = 0;
+  if (!PyArg_ParseTuple(args, "s#s#", &via, &vl, &uid, &ul))
+    return nullptr;
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  ServerLink::BridgeOp op;
+  op.kind = ServerLink::BridgeOp::Kind::absent;
+  op.via.assign(via, static_cast<std::size_t>(vl));
+  op.uid.assign(uid, static_cast<std::size_t>(ul));
+  link->bridge(std::move(op));
+  Py_RETURN_NONE;
+}
+
+PyObject *arihost_bridge_post(PyObject *, PyObject *args) {
+  const char *via = nullptr, *uid = nullptr, *name = nullptr, *text = nullptr, *to = nullptr;
+  Py_ssize_t vl = 0, ul = 0, nl = 0, tl = 0, ol = 0;
+  if (!PyArg_ParseTuple(args, "s#s#s#s#s#", &via, &vl, &uid, &ul, &name, &nl, &text, &tl, &to, &ol))
+    return nullptr;
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  ServerLink::BridgeOp op;
+  op.kind = ServerLink::BridgeOp::Kind::post;
+  op.via.assign(via, static_cast<std::size_t>(vl));
+  op.uid.assign(uid, static_cast<std::size_t>(ul));
+  op.name.assign(name, static_cast<std::size_t>(nl));
+  op.text.assign(text, static_cast<std::size_t>(tl));
+  op.to.assign(to, static_cast<std::size_t>(ol));
+  link->bridge(std::move(op));
+  Py_RETURN_NONE;
+}
+
+// listen_chat(room, dms): which of the room's posts reach the program as "room_chat" events.
+PyObject *arihost_listen_chat(PyObject *, PyObject *args) {
+  int room = 0, dms = 0;
+  if (!PyArg_ParseTuple(args, "pp", &room, &dms))
+    return nullptr;
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  link->listen_chat(room != 0, dms != 0);
+  Py_RETURN_NONE;
 }
 
 // set_converts(ok): whether pycvc is here to convert DSL values (pycvc.value_from_capsule); the
@@ -763,6 +848,15 @@ PyMethodDef kArihostMethods[] = {
     {"next_event", arihost_next_event, METH_NOARGS,
      "The relay's next event for the loop, or None once closed (blocks without the GIL)."},
     {"close_events", arihost_close_events, METH_NOARGS, "End next_event()'s wait."},
+    {"room", arihost_room, METH_NOARGS, "The relay's room."},
+    {"bridge_presence", arihost_bridge_presence, METH_VARARGS,
+     "bridge_presence(via, uid, name, detail): a bridged user is in the room."},
+    {"bridge_absent", arihost_bridge_absent, METH_VARARGS,
+     "bridge_absent(via, uid): a bridged user left the room."},
+    {"bridge_post", arihost_bridge_post, METH_VARARGS,
+     "bridge_post(via, uid, name, text, to): post as a bridged user."},
+    {"listen_chat", arihost_listen_chat, METH_VARARGS,
+     "listen_chat(room, dms): which of the room's posts reach the program."},
     {"set_converts", arihost_set_converts, METH_VARARGS,
      "set_converts(ok): pycvc is here to convert DSL values, so calls may be posted."},
     {"set_authenticates", arihost_set_authenticates, METH_VARARGS,

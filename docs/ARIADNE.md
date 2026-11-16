@@ -2708,10 +2708,19 @@ adds the verbs to the action lanes. `ROOM` is the `room-join` handle (or its tok
 |---|---|
 | `(chat-post ROOM TEXT [TO])` | `{ok}`, or `{ok #f error}`: TEXT is empty or longer than 2000 bytes once cleaned, or there is no relay to send it to. TO `""` posts to the room, a pid is a direct message. The relay may still refuse it (its rate limit, TO not in the room): `chat-info`'s `error` says so. |
 | `(chat-info ROOM [CHANNEL])` | `{available rev count oldest newest head first more loading error}`. `rev` changes whenever the messages held change; `oldest`..`newest` is the contiguous run held (`count` of them); `head` is the next seq and `first` the oldest the relay keeps; `more` says older ones are kept; `loading` says a page is on its way. It also asks for the newest page the first time a channel is read, and again when a push was lost. |
-| `(chat-messages ROOM [CHANNEL [AFTER]])` | the run, oldest first, as `{seq from name text t clock mine}` (`clock` is the local "HH:MM", `mine` is #t for your own), or with AFTER only those after that seq. |
+| `(chat-messages ROOM [CHANNEL [AFTER]])` | the run, oldest first, as `{seq from name text t clock mine via}` (`clock` is the local "HH:MM", `mine` is #t for your own, `via` a bridged user's system or `""`), or with AFTER only those after that seq. |
 | `(chat-more ROOM [CHANNEL])` | `{ok loading more}`: asks for the page before the oldest message held. One request per channel is in flight; one unanswered for 3 s is sent again. |
 | `(chat-conversations ROOM)` | the direct-message conversations: `{peer name head present}`. |
 | `(chat-rev ROOM)` | a number that changes with every push the relay makes to you. |
+| `(room-roster ROOM [KIND [LIMIT]])` | who is in the room: `"participants"` (the default), `"bridged"` (another chat system's users, below) or `"all"` (the participants, then the bridged), with at most LIMIT bridged users. Each entry has `pid`, `name` and `bridged` (`"0"` or `"1"`); a bridged one adds `via`, `uid` and `detail`. |
+| `(room-bridged-count ROOM)` | how many bridged users are in the room. |
+| `(room-bridged-rev ROOM)` | a number that moves whenever a bridged user comes, goes or changes. |
+
+**Bridged users.** The relay's program can put another chat system's users in the room (an NMDC
+hub's, say: §9.8.7). They are in `(room-roster ROOM "all")`, post to the room's chat (their
+messages carry `via`), and take and send direct messages under their pid (`_nmdc_Zed_2eZ`), with no
+camera, microphone or avatar. The users list shows them in rows of their own. The layout and rules
+are in [ARIADNE_CHAT.md](roadmap/ARIADNE_CHAT.md), "Bridged users".
 
 The shipped component `chat.ari` (§6.5) builds a chat window from these verbs, in the DSL:
 - a channel picker, the room and each conversation, with what came since you last looked;
@@ -3719,7 +3728,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
-| `room_users`, `room_users_compact` | everyone in a room from `room-roster`, with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
+| `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
 
 Each window component also takes `title` and `id` args, and every arg has a default, so a bare
 `include:` works. A document with two nodes of a kind includes the panel twice, each with its
@@ -5283,9 +5292,78 @@ assert alice.get("cyprov.public.status") == "up"     # what the relay would send
   - The scope is asked at each connect, and again on `host.refresh_scope`.
 - **Closing.** `host.disconnect(principal_id)` closes that principal's clients: their calls are
   `unavailable`.
+- **The room's chat** (§9.8.7). `ServerHarness(room="nmdc")` names the relay's room
+  (`host.room`; `standup` by default), and each connected client is a participant in it, named
+  `connect(..., name=)`. `client.chat_post(text, to=None)` posts as the relay takes a post (a
+  refusal raises `ChatRefused` with the relay's reason) and runs the program's `on_room_chat` /
+  `on_room_dm` hooks to the end. `client.chat_messages(channel="")` and `harness.room_messages()`
+  read the history, the program's bridged posts included; `client.roster(kind)` is
+  `(room-roster ROOM KIND)`; `client.leave()` takes the client out of the room. The program's
+  `room_presence` and `room_chat_post` land at once, where arisrvx applies them a room step later.
 - **Not modeled.**
   - The relay's result cap (`--call-result-max`).
-  - The room's own tree (`conf`), where each participant's own subtree is.
+  - The room's own tree (`conf`), where each participant's own subtree is, and the chat's rate limit
+    and pages.
+
+#### 9.8.7 Another chat system in the room: bridged users
+
+A program can bridge another chat system into the relay's room: an NMDC hub's users, say, listed in
+the room's roster and chatting with its participants both ways ([roadmap/ARIADNE_CHAT.md](roadmap/ARIADNE_CHAT.md),
+"Bridged users"). The relay keeps them and their messages; the program says who is there, posts
+for them, and hears what the participants say:
+
+```python
+from pycvc.ariadne import Host
+
+host = Host()
+ROOM = host.room                      # the relay's --room
+
+def joined(nick, description):        # the hub said a user joined
+    host.room_presence(ROOM, nick, {"name": nick, "detail": description}, via="nmdc")
+
+def said(nick, text):                 # the hub's main chat
+    host.room_chat_post(ROOM, text, sender_id=nick, via="nmdc")
+
+@host.on_room_chat(ROOM)
+async def to_hub(msg):                # a participant posted to the room
+    await hub.say(f"<{msg.name}> {msg.text}")
+
+@host.on_room_dm(ROOM)
+async def to_user(msg):               # a participant wrote to a hub user
+    await hub.private(msg.to, msg.name, msg.text)
+```
+
+- **`host.room_presence(room, user_id, info=None, *, via="bridge")`**: user `user_id` of system
+  `via` is in the room, shown as `info["name"]` (the id without one) with `info["detail"]` (a line
+  about them, optional). A repeat updates them. It returns the user's pid, `bridged_pid(user_id,
+  via=via)`: `_<via>_` and the id with each byte that is not an ASCII letter or digit written `_xx`.
+  `via` is a lowercase letter, then up to 15 lowercase letters and digits.
+- **`host.room_absent(room, user_id, *, via="bridge")`**: the user left (nothing when it was not
+  there). `host.room_bridged(room)` lists the users the program has said are present.
+- **`host.room_chat_post(room, text, *, sender_id, name=None, via="bridge", to=None)`**: post as
+  the user: to the room, where the relay stamps it, keeps it and pushes it to every participant
+  marked with `via`, or with `to` (a participant's pid) a direct message from a present user. A
+  sender need not be present to post to the room (a hub's own messages); `name` overrides the name
+  its presence gave. The text is cleaned and limited as a participant's post is (2000 bytes), but not
+  rate-limited.
+- **`@host.on_room_chat(room)`** hears every message a participant posts to the room, and
+  **`@host.on_room_dm(room)`** every direct message a participant sends a bridged user, each as a
+  `RoomChatMessage`: `room`, `seq`, `pid` (the sender's), `name`, `text`, `t`, and for a DM `to` (the
+  user's id), `to_pid` and `via`. A hook may be sync or async and runs on the loop, in order;
+  several are allowed. The program never hears its own posts. Without an `on_room_dm` hook the relay
+  refuses a DM to a bridged user. The events are JSON, so they need no pycvc beside arisrvx.
+- **The room.** In arisrvx the room is the relay's (`host.room`, its `--room`); another raises
+  `ValueError`. The calls are queued and the relay applies them on its next room steps, in order
+  (at most 128 a step, so a hub's login burst of thousands drains over a second), and a post after
+  a `room_presence` shows the name it gave. What the relay would refuse raises at the
+  call: a bad `via`, a blank id or one over 128 bytes, a name over 128 or a detail over 256 bytes,
+  an empty or too long post, a DM from an absent user or to a participant who is not there, more
+  than 10000 bridged users. A refusal the program could not see (the participant left meanwhile)
+  is logged by the relay.
+- **Clients.** `(room-roster ROOM "all")` lists them after the participants, marked `bridged`;
+  `room_users.ari` shows them in rows of their own; their messages carry `via`, which `chat.ari`
+  shows after the name (§5.16). Bridged users linger as absent nodes, as participants do, until the
+  relay restarts.
 
 ---
 
