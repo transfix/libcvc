@@ -19,6 +19,7 @@
 // so a test that assert()s would pass vacuously (see cvcgl_volume_range.cpp).
 
 #include "OceanFFT.h"
+#include "OceanFoam.h"
 
 #include <cmath>
 #include <cstdio>
@@ -26,8 +27,10 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/ocean/h0.h>
+#include <cvc/ocean/whitecaps.h>
 #include <vector>
 #include <vtkOpenGLRenderWindow.h>
+#include <vtkTextureObject.h>
 
 using cvc::gl::SceneGraph;
 using cvc::gl::SceneRenderer;
@@ -158,6 +161,76 @@ int main() {
     flat.step(1.0);
     const Stat fh = compStat(flat.readbackDisplacement(), 1, 4);
     check(fh.finite && fh.rms == 0.0, "an ocean with no h0 is flat");
+  }
+
+  // 8. Persistent foam (OceanFoam, OCEAN-AND-WEATHER-ROADMAP.md section 10.2): a disc of tile 0
+  //    folds (J 0.5) for half a second and then stops. Its foam builds while it folds and decays
+  //    at its rate after, as cvc::ocean::foam_step says, frame by frame; tile 1 never folds.
+  {
+    const int FN = 32;
+    std::vector<float> fold(static_cast<size_t>(FN) * FN * 4, 0.0f), calm = fold;
+    for (int y = 0; y < FN; ++y)
+      for (int x = 0; x < FN; ++x) {
+        const size_t i = (static_cast<size_t>(y) * FN + x) * 4;
+        const bool in = (x - 10) * (x - 10) + (y - 12) * (y - 12) < 25;
+        fold[i + 3] = in ? 0.5f : 1.0f;
+        calm[i + 3] = 1.0f;
+      }
+    auto dFold = oceanFloatTexture(ow, FN, FN, 4, fold.data());
+    auto dCalm = oceanFloatTexture(ow, FN, FN, 4, calm.data());
+    OceanFoam foam(FN, 2);
+    foam.bias = 0.8;
+    foam.ramp = 0.1;
+    if (dFold && dCalm && foam.init(ow)) {
+      cvc::ocean::foam_state cpu; // the disc's centre on the CPU
+      const double dt = 1.0 / 60.0;
+      for (int i = 0; i < 30; ++i) {
+        foam.step({dFold, dCalm}, dt);
+        cvc::ocean::foam_step(cpu, cvc::ocean::foam_inject(0.5, 0.8, 0.1), dt, foam.params);
+      }
+      const std::vector<float> a = foam.readback();
+      auto at = [&](const std::vector<float> &f, int tile, int x, int y, int c) {
+        return f[(static_cast<size_t>(y) * FN * 2 + tile * FN + x) * 4 + c];
+      };
+      check(a.size() == static_cast<size_t>(FN) * FN * 2 * 4, "the foam atlas is two tiles wide");
+      check(std::fabs(at(a, 0, 10, 12, 0) - cpu.foam) < 1e-4 &&
+                std::fabs(at(a, 0, 10, 12, 1) - cpu.bubbles) < 1e-4 && at(a, 0, 10, 12, 2) == 1.0f,
+            "half a second of folding: foam, bubbles and crest as foam_step has them");
+      check(at(a, 0, 25, 25, 0) == 0.0f && at(a, 1, 10, 12, 0) == 0.0f,
+            "no foam where nothing folds, nor in the other cascade's tile");
+      for (int i = 0; i < 150; ++i) { // 2.5 s with the fold gone
+        foam.step({dCalm, dCalm}, dt);
+        cvc::ocean::foam_step(cpu, 0.0, dt, foam.params);
+      }
+      const std::vector<float> b = foam.readback();
+      std::printf("  (foam after the fold: GPU %.5f, CPU %.5f, e^-1 x before %.5f; bubbles %.5f / "
+                  "%.5f; spray %.2e)\n",
+                  at(b, 0, 10, 12, 0), cpu.foam, std::exp(-1.0) * at(a, 0, 10, 12, 0),
+                  at(b, 0, 10, 12, 1), cpu.bubbles, at(b, 0, 10, 12, 3));
+      check(
+          std::fabs(at(b, 0, 10, 12, 0) - cpu.foam) < 1e-4 &&
+              std::fabs(at(b, 0, 10, 12, 1) - cpu.bubbles) < 1e-4 && at(b, 0, 10, 12, 2) == 0.0f,
+          "the fold gone, the foam persists and decays at its rate (e^-1 in 2.5 s), as on the CPU");
+      check(at(b, 0, 10, 12, 0) > 0.3f && at(b, 0, 10, 12, 0) < 0.4f,
+            "2.5 s after the fold the foam is still there, a third of what it was");
+      foam.clear();
+      check(foam.readback()[(static_cast<size_t>(12) * FN * 2 + 10) * 4] == 0.0f,
+            "clear() empties the atlas");
+    } else {
+      std::printf("SKIP the foam: its float targets are unavailable\n");
+    }
+    // On a real sea: a storm's cascade folds somewhere, and its foam stays finite.
+    OceanFoam sea(N, 1);
+    sea.bias = 1.0;
+    if (sea.init(ow)) {
+      for (int i = 0; i < 20; ++i) {
+        ocean.step(3.0 + i / 60.0);
+        sea.step({ocean.displacement()}, 1.0 / 60.0);
+      }
+      const Stat fs = compStat(sea.readback(), 0, 4);
+      std::printf("  (a storm's foam: mean %.4f, max %.4f)\n", fs.mean, fs.mx);
+      check(fs.finite && fs.mx > 0.0 && fs.mx <= 1.0, "a storm's folds leave foam, within [0, 1]");
+    }
   }
 
   std::printf("%s: cvcgl_ocean_fft (%d check%s failed)\n", g_fail == 0 ? "PASS" : "FAIL", g_fail,
