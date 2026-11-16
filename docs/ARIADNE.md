@@ -906,9 +906,9 @@ types behind one call, `register_cvcgl_extensions`
 ([`extensions.h`](../inc/cvc/gl/ariadne/extensions.h)), which both `ariadne_hello` and
 `AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`,
 `generated_world` (terrain_lab's world, [`world_nodes.h`](../inc/cvc/gl/ariadne/world_nodes.h)),
-`water` (its sea, lakes and ponds as the GPU FFT ocean, below), `ribbon` and `draped_link`
-(lines drawn from data, below), and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and
-`fe_lab`. Keys the built-in parser
+`volume_slice` (one axis-aligned plane of a volume, below), `water` (its sea, lakes and ponds as the
+GPU FFT ocean, below), `ribbon` and `draped_link` (lines drawn from data, below), and — on a libcvc
+built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and `fe_lab`. Keys the built-in parser
 does not know land in the node's `props`, which a custom realizer reads. So does a `source:` the
 built-ins have no field for, `{ state: <key> }` or `{ stream: <token> }`, as written. A
 `source: { data }` node is drawn as a data node (§5.17) unless its type was registered with
@@ -951,8 +951,8 @@ scene:
   counted as a widget's is. A key that holds no number counts 0. The most is 4096.
 - **Each copy** is the template with `{i}`, its 0-based index, filled in: in its id (`marker_0`,
   `marker_1`, ...), its `visible:` bind, its tags, its `source:` (a file, an asset, a dataset and
-  its item), its `material: { texture }`, its clips' bound offsets, every string in its props (a
-  custom type's keys), and its children's. An id without `{i}` gets `_{i}`. A copy keeps the
+  its item), its `material: { texture }` (an image, or a live texture's `stream:`), its clips'
+  bound offsets, every string in its props (a custom type's keys), and its children's. An id without `{i}` gets `_{i}`. A copy keeps the
   template's `transform:`, `tags:`, `visible:`, material, `shader:` and children.
 - **The count is live.** At each frame `tick_scene` counts every repeated node again and adds or
   removes copies to match, the last copies going first, without a reload. A copy that goes takes
@@ -1719,6 +1719,53 @@ thread, or deferred onto it in a single-threaded wasm build — and apply result
 per-frame tick. A job captures only its own hand-off struct, never the node's runtime
 (which owns the lane), and teardown cancels it; tearing a scene down still waits for a
 running tet-mesh or Poisson solve to finish.
+
+**`type: volume_slice`** ([`volume_slice_nodes.h`](../inc/cvc/gl/ariadne/volume_slice_nodes.h),
+[`VolumeSliceNode.h`](../inc/cvc/gl/VolumeSliceNode.h)) is one axis-aligned plane of a volume: a
+textured quad coloured through the node's transfer function, as VolumeGridRover's slice views and
+the classic three-plane orthoslicer show a volume. It reads `source: { file }` or `{ sdf }` (with
+`fit:`) like a `volren` node.
+
+```yaml
+- node: ct_z
+  type: volume_slice
+  source: { file: head.rawiv }
+  axis: z                          # x | y | z, or a view's name: xy (z), xz (y), zy (x)
+  index: 40                        # the plane along the axis; -1 (the default) the middle one
+  transfer_function: { preset: grayscale }
+  children:                        # overlays: drawn on top of the plane
+    - { node: mark, source: { plane: { size: 2 } }, transform: { position: [10, 12, 0] } }
+```
+
+The plane's axes, right then up, are VolumeGridRover's: looking down z, x right and y up (its XY
+view); down y, x right and z up (XZ); down x, z right and y up (ZY). Each voxel draws as a square
+centred on it (the quad reaches half a voxel past the outer ones), unlit: the texture is the
+colour. Its keys live under the node's own state:
+
+| key | meaning | seeded from prop |
+|---|---|---|
+| `slice.axis` | the axis the plane looks down: `x`, `y` or `z` | `axis` |
+| `slice.index` | the plane's number along the axis, from 0. `-1` is the middle one, written back as its number; an index past the last plane draws the last and is written back. Its `max` property is the last plane's number, so a slider takes its range from it | `index` |
+| `slice.filter` | `nearest` (each voxel a sharp square, the default) or `linear` | `filter` |
+| `slice.opaque` | `1` (the default): every voxel in its colour at full opacity; `0`: the transfer function's opacity, so the plane blends | `opaque` |
+| `slice.overlay_offset` | how far back in depth the plane draws (polygon-offset units, 2 by default), so the overlays in its plane stay on top | `overlay_offset` |
+| `slice.count`, `slice.position` | published: how many planes the axis has, and where this one lies along it | — |
+| `slice.status` | published: `""`, or what is wrong (a key that does not parse, a failed read) | — |
+| `info.dims`, `info.min`, `info.max`, `info.span`, `info.box`, `info.file` | published: the volume's dimensions, data range, voxel spacing, bounding box and file | — |
+| `transfer_function` | the `cvc::tf::model` the voxels are coloured through, over the volume's data range unless its domain is explicit; a `tf_editor` edits it and shows the volume's histogram | `transfer_function:` — `preset:` (grayscale by default) and the model's own keys (`color`, `alpha`, `isocontours`, `domain`, `opacity_cubed`, `resolution`), each replacing the preset's |
+
+The keys carry `cvc::volume_slice_params`' parameter table
+([`volume_slice.h`](../inc/cvc/volume/volume_slice.h)): `doc`, `unit`, `min`, `max` and `choices`
+as properties. Each change of plane, axis or transfer function colours the plane on the CPU and
+uploads one 2D texture; a new plane the same size as the last is written into the same texture.
+So stepping through a large volume never puts the volume on the GPU. `region_reads: auto` (the
+default) reads a file of more than 64 Mi voxels one plane at a time (`cvc::slice_source`, the
+last eight planes kept), so a volume larger than memory can be scrubbed; `true` always reads that
+way, `false` never. Read plane by plane, the editor's histogram is the first plane's, over the
+file's range. **Overlays** are the node's children: point glyphs, polylines, crosshairs. The plane
+is pushed back by `slice.overlay_offset`, so anything drawn in its plane shows on top of it in
+every view. `VolumeSliceNode::pickRay` meets a world ray with the plane exactly and names the
+voxel and its value (`cvcgl_volume_slice`, and `volume_slice_test` for the slicing itself).
 
 #### Lines from data: `type: ribbon` and `type: draped_link`
 
@@ -4092,7 +4139,25 @@ stream and media verbs, and the `stream_view` widget (ImGui in a window, the ter
 with `--terminal`). In both modes it routes OS signals to `on_signal:` and exits 128 + N
 for one the document does not handle. A snapshot's frames run at `--fps` (20 by default),
 so a live stream delivers into them; in a window the scene clock is fixed, so its frames
-are reproducible. The cvcGL examples
+are reproducible.
+
+**The camera from the command line.** The main view's camera is state under
+`viewers.main.camera` (`CameraController.h`): `mode` (0 orbit, 1 fly, 2 track, 3 map), the orbit
+pose `orbit.center.x|y|z`, `orbit.distance`, `orbit.azimuth`, `orbit.elevation` (degrees), the fly
+pose `fly.position.x|y|z`, `fly.yaw`, `fly.pitch`, and the chase camera's `track.target` (a scene
+node's id), `track.back`, `track.height`. `--set` writes the `viewers.` keys a second time once the
+document has loaded, after the scene's first framing, so they hold:
+
+```
+arigl snapshot --png lake.png --set viewers.main.camera.orbit.center.x=22 \
+  --set viewers.main.camera.orbit.center.y=180 --set viewers.main.camera.orbit.distance=40 \
+  --set viewers.main.camera.orbit.elevation=15 examples/ariadne/documents/terrain_lab.ari
+arigl snapshot --png crate.png --set viewers.main.camera.mode=2 \
+  --set viewers.main.camera.track.target=crate_b --set viewers.main.camera.track.back=14 \
+  --set viewers.main.camera.track.height=5 examples/ariadne/documents/terrain_lab.ari
+```
+
+The cvcGL examples
 (`ariadne_hello`, `ariadne_stream`, `ariadne_conference`, `ariadne_terminal`) still build;
 `arigl` is meant to replace them once it does everything they do.
 
@@ -4210,10 +4275,13 @@ return rt.exit_code();
 
 To route OS signals as well, install your handlers in `RunOptions::on_start` (it runs after
 FTXUI has installed its own), restore them in `on_stop`, and return pending signal names
-from `take_signal`. [`host_signals.h`](../inc/cvc/ariadne/host_signals.h) has the
-`sigaction` traps `ari` uses (`install_signal_traps`, `restore_signal_traps`,
-`take_trapped_signal`, `signal_number`). Signal handlers are process-wide, so libcvc never
-installs them by itself: a host program opts in around its own loop.
+from `take_signal`. [`host_signals.h`](../inc/cvc/ariadne/host_signals.h) has what `ari` uses:
+a `signal_route` in trap mode, made in `on_start` and dropped in `on_stop`, sends the signals to
+one app, and `signals_of(app).take_trapped()` takes them; `signal_number` maps a name to its
+number. The signals an app takes, and its stop flag (a route in stop mode, which `arisrv` and
+`cvc serve` use), are the app's own; only the route, the one pointer a signal handler follows,
+is the process's. Signal handlers are process-wide, so libcvc never routes them by itself: a
+host program opts in around its own loop.
 
 Give the document its command line with `rt.set_document_args(args, "myhost run doc.ari")`
 before `load()`. When the arguments don't match its `args:` block, `load()` throws
@@ -5859,8 +5927,8 @@ when unknown). The options (an unknown one is an error):
 |---|---|
 | `accept` | what may be picked, as an HTML `<input accept>` lists it: a list (or one comma-separated string) of `".ext"`, `"type/subtype"` and `"type/*"`. Default: any file |
 | `multiple` | `#t`: the user may pick more than one (the composed window below picks one at a time) |
-| `title` | the picker's title; default `Open file` |
-| `dir` | the folder a native or composed picker starts in; default the working folder |
+| `title` | the picker's title: the composed window's (default `Open file`), and the system dialog's where it shows one (default: the system's own, in the user's language). A browser's picker has none |
+| `dir` | the folder the picker starts in. The composed window's default is the working folder; the system dialog's is the system's own choice, usually the folder last used there. A browser's picker starts where the browser chooses |
 
 One picker is open at a time: a second `file-pick` while one is open raises. Call it from an
 action (a button's `on:`), not from `init:`. A browser opens its picker only within a user's
@@ -5936,7 +6004,9 @@ bigger file goes in chunks. The file is read a slice at a time, so a chunked upl
 chunk in memory. In a browser build without threads (§10.2), each slice is read from the page's
 File and each request is started rather than sent. Each answer, from the browser's event loop,
 starts the next, so the frames go on while the file goes out, and a killed program aborts the
-request in flight. Natively the upload runs on the background pool.
+request in flight. The answers are the browser's own events (the slice's promise, the request's
+reply), not a timer's, so an upload keeps its pace in a background tab, where the browser runs
+timers about once a second. Natively the upload runs on the background pool.
 
 txwtf, for example, takes a small file as `multipart` at `/social/files`, and a big one in
 chunks at the URL its `/social/files/resumable` call returns:

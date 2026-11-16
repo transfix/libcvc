@@ -2470,9 +2470,32 @@ bool ImGuiBackend::pick_files(const cvc::ariadne::FilePickRequest &req,
   if (!d->filter_pattern.empty())
     d->filter = SDL_DialogFileFilter{d->filter_name.c_str(), d->filter_pattern.c_str()};
   d->dir = req.dir;
+  // A folder to start in, so it ends in a separator: SDL takes a location without one for a file
+  // (Windows opened the folder's parent, with the folder's name typed in as the file's).
+#ifdef _WIN32
+  if (!d->dir.empty() && d->dir.back() != '\\' && d->dir.back() != '/')
+    d->dir += '\\';
+#else
+  if (!d->dir.empty() && d->dir.back() != '/')
+    d->dir += '/';
+#endif
   m_fileDialog = d;
   auto *keep = new std::shared_ptr<FileDialog>(d);
-  SDL_ShowOpenFileDialog(
+  // With properties, as SDL_ShowOpenFileDialog itself does, for the title it has no argument for.
+  // SDL copies the strings; the filter lives in `d` until the answer.
+  const SDL_PropertiesID props = SDL_CreateProperties();
+  if (!d->filter_pattern.empty()) {
+    SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_FILTERS_POINTER, &d->filter);
+    SDL_SetNumberProperty(props, SDL_PROP_FILE_DIALOG_NFILTERS_NUMBER, 1);
+  }
+  SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_WINDOW_POINTER, SDL_GetKeyboardFocus());
+  if (!d->dir.empty())
+    SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_LOCATION_STRING, d->dir.c_str());
+  SDL_SetBooleanProperty(props, SDL_PROP_FILE_DIALOG_MANY_BOOLEAN, req.multiple);
+  if (!req.title.empty()) // else the system's own, in the user's language
+    SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_TITLE_STRING, req.title.c_str());
+  SDL_ShowFileDialogWithProperties(
+      SDL_FILEDIALOG_OPENFILE,
       [](void *userdata, const char *const *filelist, int) {
         std::unique_ptr<std::shared_ptr<FileDialog>> held(
             static_cast<std::shared_ptr<FileDialog> *>(userdata));
@@ -2487,8 +2510,8 @@ bool ImGuiBackend::pick_files(const cvc::ariadne::FilePickRequest &req,
         }
         st.answered = true;
       },
-      keep, SDL_GetKeyboardFocus(), d->filter_pattern.empty() ? nullptr : &d->filter,
-      d->filter_pattern.empty() ? 0 : 1, d->dir.empty() ? nullptr : d->dir.c_str(), req.multiple);
+      keep, props);
+  SDL_DestroyProperties(props);
   return true;
 #else
   (void)req;

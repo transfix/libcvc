@@ -66,8 +66,11 @@ GENERATED = (
 THIRD_PARTY = (
     (re.compile(r"^boost::"), "Boost's statics (its templates and headers, instantiated here)"),
     (
-        re.compile(r"^(vtk\w*(Manager|Cleanup)Instance|vtksys::SystemToolsManagerInstance)$"),
-        "VTK's per-file header objects (its Schwarz counters)",
+        re.compile(
+            r"^(vtk\w*(Manager|Cleanup)Instance|vtksys::SystemToolsManagerInstance"
+            r"|(\(anonymous namespace\)::)?vtk\w+_AutoInit_Instance)$"
+        ),
+        "VTK's per-file header objects (its Schwarz counters and its modules' autoinit)",
     ),
     (re.compile(r"^igl::"), "libigl's statics (its colormaps and thread pool)"),
     (re.compile(r"^Eigen::"), "Eigen's cache-size table"),
@@ -410,11 +413,38 @@ ALLOWLIST_HEADER = """\
 # static, which any object including its header may carry. <kind> is data, bss, tls, guard or
 # common. Third-party libraries' statics are left out (scan.py's THIRD_PARTY) and only counted.
 #
-# libcvc keeps no process-wide state: it lives on cvc::app or in an object the caller owns. Each
-# line here is one still to move, and the list only shrinks to empty. Never add a line: CI's
-# format-check job fails a change that does (ratchet.py). The scan fails on a line this build no
-# longer has, so delete a line when its object moves.
+# libcvc keeps no process-wide state: it lives on cvc::app or in an object the caller owns. What
+# is left is the documented list Joe settled on 2026-11-14 (VOLROVER-LIBRARY-PORTS-ROADMAP.md
+# section 9, item 5): resources the process holds once, each kept as a once flag, a lock, a
+# reference count or the one pointer a signal handler needs; a built-once, read-only table; and an
+# ID source. The comment above each group says why it stays. The list ends at these. Never add a
+# line: CI's format-check job fails a change that does (ratchet.py). The scan fails on a line this
+# build no longer has, so delete a line when its object goes.
 """
+
+# Why each object on the list stays (roadmap section 9, item 5), by the file that defines it.
+# render_allowlist writes the reason above the file's lines, so a regenerated list keeps them.
+WHY_IT_STAYS = {
+    "src/cvc/ariadne/host_signals.cpp":
+        "Signal dispositions are the process's, and a handler can reach only static storage: the\n"
+        "pointer it follows to the routed app. Each app's stop flag and trapped signals are its own.",
+    "src/cvc/core/thread_class.cpp":
+        "The process's nice level (set_process_class), which the workers that start later apply.",
+    "src/cvc/image/magick_io.cpp":
+        "ImageMagick's global setup (MagickCoreGenesis) is the process's: one once-flag.",
+    "src/cvc/net/http_client_curl.cpp":
+        "libcurl's global setup (curl_global_init) is the process's: libcvc's one once-flag for it,\n"
+        "which the WebSocket client calls too.",
+    "src/cvc/state/state_exec/exceptions.cpp":
+        "state_exec's built-in exception classes: a built-once, read-only table.",
+    "src/cvc/state/state_exec/types.cpp":
+        "A source of unique scope serials: one atomic counter, holding no app state.",
+    "src/cvc/volume/hdf5_utils.cpp":
+        "HDF5's library is not thread-safe and its state is the process's: one lock around it.",
+    "src/cvc/physics/jolt/jolt_backend.cpp":
+        "Jolt's factory and type registry are the process's: a reference count and its lock, so the\n"
+        "last world to go tears Jolt down.",
+}
 
 
 def render_allowlist(lines_by_target: dict[str, list[str]]) -> str:
@@ -424,7 +454,13 @@ def render_allowlist(lines_by_target: dict[str, list[str]]) -> str:
         if not lines:
             continue
         out.append(f"\n# --- {target} ({len(lines)})\n")
-        out.extend(f"{line}\n" for line in lines)
+        source = None
+        for line in lines:
+            here = line.split(None, 3)[1]
+            if here != source and here in WHY_IT_STAYS:
+                out.extend(f"# {why}\n" for why in WHY_IT_STAYS[here].split("\n"))
+            source = here
+            out.append(f"{line}\n")
     return "".join(out)
 
 

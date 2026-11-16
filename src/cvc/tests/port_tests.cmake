@@ -21,6 +21,7 @@ set(CVC_PORT_TESTS
   planar_test
   segmentation_test
   segmentation_intrinsics_test
+  volume_slice_test
   tabs_list_test
 )
 

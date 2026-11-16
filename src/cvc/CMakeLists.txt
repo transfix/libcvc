@@ -180,6 +180,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/volume_jobs.h
   ../../inc/cvc/volume/contour_spectrum.h
   ../../inc/cvc/volume/resize_stepper.h
+  ../../inc/cvc/volume/volume_slice.h
   ../../inc/cvc/tf/model.h
   ../../inc/cvc/tf/vinay.h
   ../../inc/cvc/tf/overlays.h
@@ -196,6 +197,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/nav/vehicle_plant.h
   ../../inc/cvc/ph/compose.h
   ../../inc/cvc/ph/mat3.h
+  ../../inc/cvc/ph/microgrid.h
   ../../inc/cvc/ph/optim.h
   ../../inc/cvc/ph/rff.h
   ../../inc/cvc/ph/rng.h
@@ -452,6 +454,7 @@ set(SOURCE_FILES
   volume/contour_tree.cpp
   volume/contour_spectrum.cpp
   volume/resize_stepper.cpp
+  volume/volume_slice.cpp
   volume/mesh_contour_tree.cpp
   tf/model.cpp
   tf/vinay.cpp
@@ -499,6 +502,7 @@ set(SOURCE_FILES
   nav/rollout_plant.cpp
   nav/dyn4_ledger.cpp
   ph/compose.cpp
+  ph/microgrid.cpp
   ph/se2_data.cpp
   ph/se2_model.cpp
   ph/se2_train.cpp

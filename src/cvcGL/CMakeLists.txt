@@ -1151,6 +1151,13 @@ if(NOT EMSCRIPTEN)
   add_test(NAME cvcgl_ariadne_pick COMMAND cvcgl_ariadne_pick)
 endif()
 
+# The volume_slice node (VolumeSliceNode.h): its keys, region reads, pickRay, and (offscreen) its
+# voxels' colours and an overlay drawn on top of it. The rendered part skips where nothing
+# rasterises unless CVC_REQUIRE_RENDER=1.
+add_executable(cvcgl_volume_slice test/cvcgl_volume_slice.cpp)
+target_link_libraries(cvcgl_volume_slice PRIVATE cvcGL)
+add_test(NAME cvcgl_volume_slice COMMAND cvcgl_volume_slice)
+
 # A document's assets (read once, shared buffers) and its scenes: of their own (each a SceneGraph
 # with its own viewport, mirrored by the viewports that name it), and main_view: show. Offscreen;
 # the AriRuntime part skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
