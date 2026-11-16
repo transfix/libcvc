@@ -258,6 +258,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/world/terrain_lod.h
   ../../inc/cvc/world/road_grade.h
   ../../inc/cvc/world/cloud_layer.h
+  ../../inc/cvc/world/weather.h
   ../../inc/cvc/world/water_bodies.h
   ../../inc/cvc/algo/distance_transform.h
   ../../inc/cvc/algo/det_math.h
@@ -542,6 +543,7 @@ set(SOURCE_FILES
   world/terrain_lod.cpp
   world/road_grade.cpp
   world/cloud_layer.cpp
+  world/weather.cpp
   world/water_bodies.cpp
   ocean/spectrum.cpp
   ocean/h0.cpp
