@@ -52,9 +52,12 @@
 //   (conference::write_room_rules, ARIADNE_WORLDS.md WD2), with the scene's physics: gravity.
 // - Clients' programs. With `client_programs:` in its server: block, the relay runs the DSL
 //   programs its clients send ((room-run ...), room_calls.h) as this document's actions, each
-//   confined to its sender's own participant subtree (run_client_program).
+//   confined to its sender's own participant subtree (run_client_program). With
+//   `client_guests:`, a relay with a WebAssembly engine (arisrvx; use_client_guests) runs the
+//   guests they send the same way (run_client_guest).
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cvc/ariadne/app_runtime.h>
@@ -62,6 +65,7 @@
 #include <cvc/ariadne/value.h>
 #include <cvc/state/state_exec/types.h>
 #include <functional>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -72,10 +76,13 @@ class state_cluster_shard;
 namespace ariadne {
 
 struct Value;
+class ScriptActivation;
+class ScriptEngine;
 
 // Whether a relay's clients may send it programs to run (client_programs:, ServerDocument::
-// run_client_program), and the caps those run under, which only lower the action lane's
-// (ariadne.limits.action_max_*): 0 leaves the lane's.
+// run_client_program) or WebAssembly guests (client_guests:, run_client_guest), and the caps those
+// run under, which only lower the action lane's (ariadne.limits.action_max_*): 0 leaves the
+// lane's. A guest's linear memory is capped by max_memory too (kClientGuestMemory without one).
 struct ClientPrograms {
   bool on = false;
   std::uint64_t max_steps = 0;
@@ -88,12 +95,13 @@ struct ServerBlock {
   bool present = false;
   std::vector<std::string> publish; // the published namespaces, in document order, no repeats
   ClientPrograms client_programs;
+  ClientPrograms client_guests;
 };
 
 // Read a server: block's content into `out`: "" or what is wrong. A key it does not know is a
 // warning, pushed onto `warnings` when given. publish: takes a list of names, or one name.
-// client_programs: takes on/off (true/false), or a map of the caps (steps, time in seconds,
-// memory_mb), which turns them on.
+// client_programs: and client_guests: each take on/off (true/false), or a map of the caps (steps,
+// time in seconds, memory_mb), which turns them on.
 std::string parse_server_block(const Value &content, ServerBlock &out,
                                std::vector<std::string> *warnings = nullptr);
 
@@ -182,8 +190,45 @@ public:
                           cvc::state_exec::value_t args,
                           std::function<void(const ClientOutcome &)> done);
 
+  // The engine that runs clients' WebAssembly guests (the host's wasm engine: arisrvx's), or null
+  // for none. The host keeps it alive while this document runs.
+  void use_client_guests(std::shared_ptr<ScriptEngine> engine) { guests_ = std::move(engine); }
+  bool runs_client_guests() const { return guests_ != nullptr; }
+  // A client's WebAssembly guest (§6.3, §8.6; G4): a module the relay's client `pid` sent
+  // ((room-run module arg ...) with the module's bytes), whose export `entry` the relay calls with
+  // the list of `args`, run as that client's program is (run_client_program): the same chroot, the
+  // same default-deny environment (the guest's calls and state imports reach only it, and each
+  // write meets room_write_gate::may_write), the action lane's caps lowered by client_guests:, and
+  // one program or guest per client at a time. Its linear memory is capped at client_guests:'
+  // memory_mb, else kClientGuestMemory, and never above ariadne.limits.wasm_max_memory. It gets
+  // no WASI grant (§8.6.1), no hooks, and none of its exports but `entry`. `done` gets its result,
+  // or an error as for a program: unavailable (no client_guests:, no engine, not loaded), invalid
+  // (not a binary module, or over kClientGuestMax bytes), rate_limited, failed (it raised, or the
+  // module doesn't compile, link or export `entry`) and resource_exhausted.
+  // Its program starts once its module has compiled (on the app's pool, off the relay's loop), at
+  // a step(): the wait costs it none of its caps, and one that takes over kClientGuestCompileWait
+  // seconds ends resource_exhausted.
+  static constexpr std::size_t kClientGuestMax = 1024 * 1024;
+  static constexpr std::uint64_t kClientGuestMemory = std::uint64_t(16) << 20;
+  static constexpr double kClientGuestCompileWait = 10.0;
+  void run_client_guest(const std::string &pid, std::string module, const std::string &entry,
+                        cvc::state_exec::value_t args,
+                        std::function<void(const ClientOutcome &)> done);
+
 private:
   void plant();
+  // Start `program` as client `pid`'s: run_client_program's process (its chroot, environment and
+  // caps), with `bind` adding to its environment.
+  void start_client(const std::string &pid, std::string program, const ClientPrograms &caps,
+                    cvc::state_exec::value_t args,
+                    std::function<void(const cvc::state_exec::environment_ptr &)> bind,
+                    std::function<void(const ClientOutcome &)> done);
+  // A client's guest's program, its activation ready; and the held ones that have become ready (or
+  // waited too long), at each step().
+  void start_guest(const std::string &pid, const std::string &entry,
+                   std::shared_ptr<ScriptActivation> activation,
+                   std::function<void(const ClientOutcome &)> done);
+  void start_held_guests();
 
   cvc::app &app_;
   std::string room_;
@@ -196,7 +241,16 @@ private:
   bool read_ = false;                     // read() fixed block_
   bool started_ = false;                  // load() built the app's scheduler
   bool loaded_ = false;                   // a load() returned: client programs run
-  std::set<std::string> clients_running_; // the pids whose program has not ended
+  std::set<std::string> clients_running_; // the pids whose program or guest has not ended
+  std::shared_ptr<ScriptEngine> guests_;  // runs clients' guests (use_client_guests)
+  // Clients' guests whose activation isn't ready yet (their module compiles), in arrival order.
+  struct HeldGuest {
+    std::string pid, entry;
+    std::shared_ptr<ScriptActivation> activation;
+    std::function<void(const ClientOutcome &)> done;
+    std::chrono::steady_clock::time_point since;
+  };
+  std::vector<HeldGuest> held_guests_;
 };
 
 } // namespace ariadne

@@ -1771,6 +1771,44 @@ TEST(RoomCallsTest, ParseCall) {
       << "a function and a program";
   EXPECT_NE(ra::parse_call("A", wire({{"id", one}, {"program", se::value_t(3.0)}}), q), "")
       << "a program is its source, a string";
+
+  // A client's guest (G4): a module's bytes, and the function it calls (run when it names none).
+  const se::value_t module = se::make_bytes(std::string("\0asm\x01\0\0\0", 8));
+  ASSERT_EQ(ra::parse_call("A", wire({{"id", one}, {"guest", module}}), q), "");
+  EXPECT_EQ(q.guest, std::string("\0asm\x01\0\0\0", 8));
+  EXPECT_EQ(q.guest_export, "run");
+  EXPECT_EQ(q.fn, "");
+  EXPECT_EQ(q.program, "");
+  ASSERT_EQ(
+      ra::parse_call(
+          "A",
+          wire({{"id", one}, {"guest", module}, {"export", se::value_t(std::string("score"))}}), q),
+      "");
+  EXPECT_EQ(q.guest_export, "score");
+  EXPECT_NE(ra::parse_call("A", wire({{"id", one}, {"guest", module}, {"fn", f}}), q), "")
+      << "a function and a guest";
+  EXPECT_NE(ra::parse_call("A", wire({{"id", one}, {"guest", module}, {"program", src}}), q), "")
+      << "a program and a guest";
+  EXPECT_NE(ra::parse_call("A", wire({{"id", one}, {"guest", src}}), q), "")
+      << "a guest is a module's bytes, not text";
+  EXPECT_NE(
+      ra::parse_call(
+          "A", wire({{"id", one}, {"guest", module}, {"export", se::value_t(std::int64_t(3))}}), q),
+      "")
+      << "an export is a name";
+  EXPECT_NE(
+      ra::parse_call(
+          "A",
+          wire({{"id", one}, {"guest", module}, {"export", se::value_t(std::string(257, 'e'))}}),
+          q),
+      "")
+      << "an export longer than 256 characters";
+  // It goes back out as it came (to_value: a relay that hands it on).
+  ASSERT_EQ(ra::parse_call("A", wire({{"id", one}, {"guest", module}}), q), "");
+  const se::value_t back = q.to_value();
+  const se::value_t *guest = se::field(back, "guest");
+  ASSERT_TRUE(guest);
+  EXPECT_TRUE(std::holds_alternative<se::bytes_value>(guest->v)) << "the module stays bytes";
 }
 
 // Bound writes (arisrv --bind-writes, on by default). M writes, from its own replica and through

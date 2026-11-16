@@ -188,6 +188,22 @@ int main() {
       return 0;
     }
   }
+  // The renderer and each section's wall time, for the CI log ("cvcgl_wake timings" prints them
+  // from LastTest.log): software renderers differ several-fold in how long this program takes.
+  {
+    const char *report = ow->ReportCapabilities();
+    const std::string caps = report ? report : "";
+    const std::size_t at = caps.find("OpenGL renderer string:");
+    std::printf("  (%s)\n", at == std::string::npos
+                                ? "OpenGL renderer unknown"
+                                : caps.substr(at, caps.find('\n', at) - at).c_str());
+  }
+  auto mark = std::chrono::steady_clock::now();
+  auto section = [&mark](int s) {
+    const auto now = std::chrono::steady_clock::now();
+    std::printf("  (section %d: %.1f s)\n", s, std::chrono::duration<double>(now - mark).count());
+    mark = now;
+  };
 
   // ── 1. The sources hold the volume ──────────────────────────────────────────
   {
@@ -229,6 +245,7 @@ int main() {
     src.add(crate, {0.3, -0.2, -0.2}, turned, water);
     check(!src.finish(dh), "a body that stays still makes no source");
   }
+  section(1);
 
   // ── 2. The window moves by whole cells ─────────────────────────────────────
   {
@@ -291,6 +308,7 @@ int main() {
       check(rel < 1e-3, "a shifted window steps on as an unshifted one does (to 1e-3)");
     }
   }
+  section(2);
 
   // ── 3. A box hull's Kelvin wake on the GPU ─────────────────────────────────
   {
@@ -319,18 +337,30 @@ int main() {
       check(worst < 2.0, msg);
     }
   }
+  section(3);
 
   // ── 4. A rock casts a wave shadow ──────────────────────────────────────────
   // A wavemaker 40 m upwave of a rock 8 m across (mask 0 in the disc) sends waves 4 m long; the
   // RMS height behind the rock, 8-20 m downwave within 2 m of the axis, over 20 s once the train
   // has arrived, against the same run without the rock. And to the side, 12-16 m off the axis,
   // where the rock's shadow does not reach.
+  //
+  // The rock's run takes the symmetric step, whose cost is set by its substep, not by the step:
+  // at the default 1/60 s each step of 0.1 s is six substeps of 35 passes (148400 passes in all,
+  // two thirds of the program's time on Mesa llvmpipe). A substep equal to the step, 0.1 s, is
+  // one substep a step and stays inside the limit (ewave_max_phase / omega_max = 0.19 s at 0.5 m
+  // cells). kappa~ keeps open water's dispersion exact at any substep (inc/cvc/ocean/ewave.h), so
+  // the train reaching the rock is the one the open-sea run, which takes the exact step, makes;
+  // for these waves, omega dt_s = 0.39, phi keeps within 2 % of the exact. On llvmpipe the
+  // section went from 64 s to 18 s, the heights behind and beside the rock to the same percent.
   {
+    const double dt = 0.1;
     cvc::ocean::ewave_params p;
     p.n = 256;
     p.dx = 0.5;
     p.origin_x = p.origin_y = -64.0;
     p.sponge_cells = 16.0;
+    p.substep = dt;
     const int n = p.n;
     const double lambda = 4.0, k = 2.0 * kPi / lambda, om = std::sqrt(kG * k), R = 4.0, xs = -40.0,
                  amp = 0.05;
@@ -355,7 +385,6 @@ int main() {
           line[std::size_t(j) * n + i] = taper * std::exp(-(x - xs) * (x - xs) / (2.0 * 0.25));
         }
       w.setMask(mask);
-      const double dt = 0.1;
       std::vector<double> dh(line.size());
       double sb = 0.0, sside = 0.0;
       int kb = 0;
@@ -393,6 +422,7 @@ int main() {
       check(aside > 0.7 && aside < 1.4, "to the side the waves are about as high as without it");
     }
   }
+  section(4);
 
   std::printf("%s: cvcgl_wake (%d check%s failed)\n", g_fail == 0 ? "PASS" : "FAIL", g_fail,
               g_fail == 1 ? "" : "s");

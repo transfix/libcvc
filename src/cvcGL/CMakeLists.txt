@@ -574,6 +574,14 @@ add_executable(cvcgl_wake test/cvcgl_wake.cpp)
 target_include_directories(cvcgl_wake PRIVATE ocean)
 target_link_libraries(cvcgl_wake PRIVATE cvcGL)
 add_test(NAME cvcgl_wake COMMAND cvcgl_wake)
+# Both step 256^2 and 512^2 windows for hundreds of steps of 34-71 passes each. On macOS CI the
+# renderer is Apple's software one, on the CPU: cvcgl_ewave takes 255 s in Release and 287-299 s
+# in Debug, and cvcgl_wake 631 s in Release (CI runs of 2026-11-14 and -15). A Debug or PR ctest
+# gives a test with no TIMEOUT of its own 300 s (ci.yml), so the macOS Debug lane timed out
+# cvcgl_wake on every attempt and cvcgl_ewave on a busy runner. As for cvcgl_volren_node, each
+# gets its own budget with headroom, so only a real hang fails.
+set_tests_properties(cvcgl_ewave PROPERTIES TIMEOUT 1200)
+set_tests_properties(cvcgl_wake PROPERTIES TIMEOUT 1800)
 
 # GeometryNode::updateNormals — the in-place normal fast path the FFT ocean uses
 # to shade its CPU-deformed surface. Renders a lit quad re-normal'd toward vs away
@@ -1310,6 +1318,11 @@ if(NOT EMSCRIPTEN)
                                           test/gl_upload_counter.cpp)
   target_link_libraries(cvcgl_streaming_overlays PRIVATE cvcGL)
   add_test(NAME cvcgl_streaming_overlays COMMAND cvcgl_streaming_overlays)
+  # type: ribbon / type: draped_link from a document (ribbon_nodes.h): appends that upload the
+  # new point alone, windows and links moved with no upload, value colours, pixels.
+  add_executable(cvcgl_ariadne_ribbons test/cvcgl_ariadne_ribbons.cpp test/gl_upload_counter.cpp)
+  target_link_libraries(cvcgl_ariadne_ribbons PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_ribbons COMMAND cvcgl_ariadne_ribbons)
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(cvcgl_streaming_races test/cvcgl_streaming_races.cpp)
     target_link_libraries(cvcgl_streaming_races PRIVATE cvcGL ${CMAKE_DL_LIBS})

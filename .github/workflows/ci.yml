@@ -2550,7 +2550,7 @@ jobs:
         state_exec_gaps_test state_exec_advanced_integration_test state_exec_deep_data_test
         state_exec_bench_test state_exec_groups_test exec_pool_test
         param_table_test result_job_test job_intrinsics_test tet_complex_test skeleton_test
-        contour_stack_test point_classes_test planar_test segmentation_test
+        contour_stack_test point_classes_test planar_test segmentation_test segmentation_intrinsics_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py
@@ -3009,6 +3009,20 @@ jobs:
                d
                run && /^Test (Passed|Failed)/ { print "   " $0 }
                /^"cvcgl_shadow_casters" end time:/ { run = 0; d = 0 }' "$log"
+
+      # cvcgl_wake prints its GL renderer and each section's wall time. Apple's
+      # software renderer runs it several times slower than Mesa llvmpipe, and
+      # its ctest TIMEOUT (src/cvcGL/CMakeLists.txt) is sized from these lines:
+      # print them from LastTest.log on every run, pass or fail.
+      - name: cvcgl_wake timings
+        if: always() && matrix.kind == 'libcvc'
+        shell: bash
+        run: |
+          log=build/Testing/Temporary/LastTest.log
+          [ -f "$log" ] || { echo "no $log"; exit 0; }
+          awk '/^"cvcgl_wake" start time:/ { run = 1; print "-- attempt " ++n }
+               run && /^(  \((OpenGL renderer|section [0-9])|  U [0-9.]+ m\/s: the row maxima|Test time|Test (Passed|Failed))/
+               /^"cvcgl_wake" end time:/ { run = 0 }' "$log"
 
       # cvcgl_ari_golden prints each document's renderer and how far its frame
       # is from the golden (docs/ARIADNE.md section 12). --output-on-failure

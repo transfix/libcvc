@@ -337,6 +337,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_skeleton:test_pycvc_skeleton.py
              pycvc_contours:test_pycvc_contours.py
              pycvc_point_classes:test_pycvc_point_classes.py
+             pycvc_segmentation:test_pycvc_segmentation.py
              pycvc_image:test_pycvc_image.py
              pycvc_model:test_pycvc_model.py
              pycvc_state:test_pycvc_state.py
@@ -358,6 +359,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_state_exec_locks:test_pycvc_state_exec_locks.py
              pycvc_world_clock:test_pycvc_world_clock.py
              pycvc_input_trace:test_pycvc_input_trace.py
+             pycvc_ph:test_pycvc_ph.py
              pycvc_world_units:test_pycvc_world_units.py
              pycvc_dataprep:test_pycvc_dataprep.py
              pycvc_volslice:test_pycvc_volslice.py

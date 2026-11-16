@@ -49,6 +49,11 @@ public:
   std::uint64_t next_ping_seq() noexcept;
   // A Pong arrived: rtt_ns is now minus the echoed sent_ns, on the sender's own clock.
   void note_rtt(std::int64_t rtt_ns) noexcept;
+  // ... and it carried the answerer's wall clock (Pong.wall_ns): the peer's clock is taken to have
+  // read peer_wall_ns half a round trip ago. `local_wall_ns` is this end's wall clock now (0: read
+  // it); a test passes its own.
+  void note_peer_clock(std::int64_t peer_wall_ns, std::int64_t rtt_ns,
+                       std::int64_t local_wall_ns = 0) noexcept;
   // A media frame for this link was written, or dropped because the link could not take it (a
   // backed-up send buffer, a stalled write): the share dropped is how far the link falls short.
   void note_media_sent() noexcept;
@@ -60,6 +65,11 @@ public:
     std::uint64_t pings_sent = 0, pongs_received = 0;
     std::uint64_t media_sent = 0, media_dropped = 0;
     double rtt_ms = -1.0, rtt_last_ms = -1.0, rtt_min_ms = -1.0;
+    // The peer's clock minus this end's, in ms (peer_clock: known). It is the reading with the
+    // shortest round trip among the last kRttWindow, whose half-round-trip guess is the tightest
+    // (as NTP picks); clock_rtt_ms is that round trip, the reading's error bound.
+    bool peer_clock = false;
+    double clock_offset_ms = 0.0, clock_rtt_ms = -1.0;
   };
   counters read() const noexcept;
 
@@ -75,6 +85,9 @@ private:
   std::array<std::int64_t, kRttWindow> _rtt_ring{};
   int _rtt_count = 0, _rtt_next = 0;
   std::atomic<std::int64_t> _rtt_last_us{-1}, _rtt_min_us{-1};
+  // The peer clock readings (round trip, offset) in microseconds, under _rtt_mu.
+  std::array<std::pair<std::int64_t, std::int64_t>, kRttWindow> _clock_ring{};
+  int _clock_count = 0, _clock_next = 0;
 };
 
 // One link as a transport reports it (state_transport::link_reports()).

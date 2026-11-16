@@ -80,6 +80,11 @@
 #include "python_engine.h" // arisrvx: the embedded Python (src/ariadne_python)
 #include "server_link.h"   // its writes and the relay's events, between the two threads
 #endif
+#ifdef CVC_ARIADNE_WASM
+#include "wasm_engine.h" // arisrvx: clients' WebAssembly guests (src/ariadne_wasm)
+
+#include <cvc/ariadne/script_engine.h>
+#endif
 #include <cvc/state/state_exec/exceptions.h> // set_field: a call's principal
 #include <cvc/state/state_exec/types.h>
 #include <fstream>
@@ -673,6 +678,15 @@ int main(int argc, char **argv) {
   }
   const auto devicePins = std::make_shared<cvc::state_device_pins>(devicePinsFile);
 
+#ifdef CVC_ARIADNE_WASM
+  // Clients' WebAssembly guests (client_guests:), on wasmtime: the engine before the app, so it
+  // outlives the server document that runs them and the pool tasks that compile them. Null when
+  // its runtime could not start; a document that asks for guests then stops arisrvx below.
+  std::string wasmError;
+  const std::shared_ptr<cvc::ariadne::ScriptEngine> wasmGuests =
+      cvc::ariadne::wasm::make_engine(wasmError);
+#endif
+
   cvc::app app;
 #ifdef CVC_ARIADNE_PYTHON
   // Before the server document is read: its requires: python, and its python: block, are this
@@ -714,6 +728,32 @@ int main(int argc, char **argv) {
                    "participant\n",
                    docPath.c_str());
       return 2;
+    }
+    // So is a client's guest, and it needs the WebAssembly engine, which only arisrvx carries.
+    if (serverDoc->block().client_guests.on) {
+      if (bindWritesArg != "on") {
+        std::fprintf(stderr,
+                     "arisrv: --doc: %s runs clients' guests, which needs bound writes "
+                     "(--bind-writes on): without them a connection could run one as another "
+                     "participant\n",
+                     docPath.c_str());
+        return 2;
+      }
+#ifdef CVC_ARIADNE_WASM
+      if (!wasmGuests) {
+        std::fprintf(stderr,
+                     "arisrvx: --doc: %s runs clients' guests, but WebAssembly did not start: %s\n",
+                     docPath.c_str(), wasmError.c_str());
+        return 2;
+      }
+      serverDoc->use_client_guests(wasmGuests);
+#else
+      std::fprintf(stderr,
+                   "arisrv: --doc: %s runs clients' WebAssembly guests (client_guests:), which "
+                   "arisrvx built with wasmtime runs (cvcpkg install arisrvx)\n",
+                   docPath.c_str());
+      return 2;
+#endif
     }
   }
 
@@ -1429,6 +1469,26 @@ int main(int argc, char **argv) {
         cvc::ariadne::conference::room_call_relay *relay = calls.get();
         serverDoc->run_client_program(
             r.pid, r.program, r.args,
+            [relay, pid = r.pid, id = r.id](const cvc::ariadne::ServerDocument::ClientOutcome &o) {
+              if (o.ok)
+                relay->result(pid, id, o.value);
+              else
+                relay->error(pid, id, o.code, o.message);
+            });
+        continue;
+      }
+      if (!r.guest.empty()) {
+        // A client's WebAssembly guest (G4): run as its program is, in arisrvx, whose document
+        // opts in with client_guests:.
+        if (!serverDoc) {
+          calls->fail(r, "unavailable",
+                      "this relay runs no clients' guests (arisrvx with a --doc whose server: "
+                      "block has client_guests: runs them)");
+          continue;
+        }
+        cvc::ariadne::conference::room_call_relay *relay = calls.get();
+        serverDoc->run_client_guest(
+            r.pid, std::move(r.guest), r.guest_export, r.args,
             [relay, pid = r.pid, id = r.id](const cvc::ariadne::ServerDocument::ClientOutcome &o) {
               if (o.ok)
                 relay->result(pid, id, o.value);
