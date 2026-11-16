@@ -1717,12 +1717,18 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     // New meshes under the receivers (a regenerated world, an LOD rung made late) take the shade
     // on the frame after they join the scene: adding a node anywhere in it bumps its
     // treeVersion(), so the receivers are walked then and never on a timer. The version is read
-    // before the walk, so a mesh added during it is found on the next frame.
+    // before the walk, so a mesh added during it is found on the next frame. A receiver is a
+    // node of the scene's or a mesh inside one (the weather's rain and bolt, under its node).
     if (const std::uint64_t tv = sgp->treeVersion(); tv != r.wiredTree) {
       r.wiredTree = tv;
-      for (const std::string &id : r.receivers)
-        if (auto g = sgp->getGraphics(id))
+      for (const std::string &id : r.receivers) {
+        std::shared_ptr<GraphicsNode> g = sgp->getGraphics(id);
+        if (!g)
+          if (auto top = sgp->getGraphicsRoot())
+            g = top->findChildByName(id);
+        if (g)
           wireReceivers(r, *g);
+      }
     }
     // A grown (or moved) ground re-lays the deck over it.
     if (f % AREA_STRIDE == 0) {

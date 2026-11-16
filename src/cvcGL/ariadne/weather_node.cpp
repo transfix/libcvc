@@ -257,6 +257,16 @@ void steeringWind(const WeatherRT &r, double &speed, double &az) {
   speed = CLOUD_SKY_DRIFT * ari::read_or<double>(*r.app, r.skyDrift, 1.0);
 }
 
+// The ground's height under (x, y), at its nearest edge beyond it (a strike can land past the
+// terrain, the camera can stand off it) and 0 over a hole or with no ground.
+double groundAt(const WeatherRT &r, double x, double y) {
+  if (!r.ground || r.ground->rows() < 2 || r.ground->cols() < 2)
+    return 0.0;
+  const cvc::height_field &g = *r.ground;
+  const double h = g.height(std::clamp(x, g.x0(), g.max_x()), std::clamp(y, g.y0(), g.max_y()));
+  return std::isfinite(h) ? h : 0.0;
+}
+
 // Log an event at world time t and publish the list (compacted when it has grown long).
 void logEvent(WeatherRT &r, const cvc::world::weather_event &e, double t) {
   r.model.add_event(e);
@@ -499,9 +509,7 @@ void rain(WeatherRT &r, const cvc::world::weather_now &w, vtkRenderer *ren) {
   constexpr double kPi = 3.14159265358979323846;
   int *sz = ren->GetSize();
   const double h = sz && sz[1] > 0 ? double(sz[1]) : 720.0;
-  double ground = 0.0;
-  if (r.ground)
-    ground = r.ground->height(cp[0], cp[1]);
+  const double ground = groundAt(r, cp[0], cp[1]);
   in.f3["rainCam"] = {float(cp[0]), float(cp[1]), float(cp[2])};
   in.f3["rainFwd"] = {float(fwd[0] / fl), float(fwd[1] / fl), float(fwd[2] / fl)};
   in.f["rainTime"] = float(std::fmod(t, 3600.0));

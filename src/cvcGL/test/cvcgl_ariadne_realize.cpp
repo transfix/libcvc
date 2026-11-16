@@ -2341,6 +2341,8 @@ int main() {
                streaks && streaks->usesLowMemoryMapper() ? "yes" : "no");
         chk(streaks && streaks->isVisible(),
             "the rain's streaks draw too, in the same 16 units (the camera is in the rain)");
+        chk(streaks && streaks->hasSharedShaderInputs("cloud_sky"),
+            "the sky found the streaks among its receivers (a mesh inside the weather's node)");
         chk(win2 && win2->f4.count("cloudFogC") && win2->f4.at("cloudFogC")[3] > 0.0f &&
                 win2->tex.size() == 2,
             "the water has the rain's fog as a uniform, its sky samplers still 2");
