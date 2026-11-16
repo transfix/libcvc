@@ -330,7 +330,8 @@ TEST(SegmentationIntrinsicsAriadne, AnActionStartsItUnderTheDefaultLimits) {
   std::set<std::string> progress_seen;
   std::size_t frames = 0, frames_busy = 0;
   const auto t0 = steady::now();
-  while (std::chrono::duration<double>(steady::now() - t0).count() < 300.0) {
+  // 93-101 s in a Debug job, three times that on a loaded runner: ctest gives the suite 900 s too.
+  while (std::chrono::duration<double>(steady::now() - t0).count() < 900.0) {
     rt.render();
     rt.drain();
     ++frames;
