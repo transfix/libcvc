@@ -569,6 +569,14 @@ struct Scene {
   SceneClock clock; // §9 time: the simulation clock (clock.present gates it) — see SceneClock
   ScenePhysics physics; // physics: {...} — the world the nodes' bodies live in (see SceneBody)
   SceneWorldSpec world; // world: {...} — which of the nodes' worlds is on (see SceneWorldSpec)
+  // wind: { speed, dir, gustiness, base } — the scene's one wind (scene_wind.h): it seeds the
+  // live keys wind.speed (m/s), wind.dir (degrees, the way it blows, from +x toward +y) and
+  // wind.gustiness, which the water, the clouds, the trees and the physics all read; base (m) is
+  // the level its height profile is measured from.
+  struct WindSpec {
+    bool present = false;
+    double speed = 5.0, dir = 0.0, gustiness = 0.25, base = 0.0;
+  } wind;
   // The vehicles the document's top-level `world: vehicles:` offers (world_rules.h), which the
   // host copies in after the load: the world runtime spawns them into this scene's physics.
   std::vector<vehicle_archetype> vehicles;

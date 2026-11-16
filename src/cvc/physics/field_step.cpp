@@ -28,6 +28,12 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 // Sample cells along a body's longest side.
 constexpr int kCellsAcross = 8;
+// A flow with a wind and no volume (field.h): air of this density over a box this wide.
+constexpr double kAirDensity = 1.225, kEverywhere = 1.0e7;
+// The heights across a body a wind's profile is read at (flow_velocity.h), closer together near
+// the bottom, where a profile over the ground or the water bends most; a cell's is linear between
+// them.
+constexpr int kProfiles = 9;
 
 vec3 cross(const vec3 &a, const vec3 &b) {
   return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
@@ -97,20 +103,31 @@ field_grid grid_of(const cvc::volume &v, const char *what, bool nonnegative) {
 
 compiled_field compile(const field &f) {
   need(f.kind <= field_kind::flow, "bad kind");
-  need(f.volume != nullptr, "no volume");
+  need(f.volume != nullptr || (f.kind == field_kind::flow && f.wind),
+       "no volume (only a flow with a wind may have none)");
   need(std::isfinite(f.drag_coefficient) && f.drag_coefficient >= 0.0,
        "drag_coefficient must be finite and >= 0");
   need(std::isfinite(f.damping) && f.damping >= 0.0, "damping must be finite and >= 0");
   need(std::isfinite(f.traction) && f.traction >= 0.0, "traction must be finite and >= 0");
   need(!f.surface || f.kind == field_kind::fluid, "only a fluid has a free surface");
+  need(!f.wind || f.kind == field_kind::flow, "only a flow has a wind");
   const int components =
       (f.velocity[0] ? 1 : 0) + (f.velocity[1] ? 1 : 0) + (f.velocity[2] ? 1 : 0);
   need(components == 0 || components == 3, "give all three velocity components or none");
   compiled_field c;
   c.desc = f;
-  c.scalar = grid_of(
-      *f.volume, f.kind == field_kind::medium ? "the bearing modulus volume" : "the density volume",
-      true);
+  if (f.volume) {
+    c.scalar = grid_of(
+        *f.volume,
+        f.kind == field_kind::medium ? "the bearing modulus volume" : "the density volume", true);
+  } else { // a wind without a volume: air at sea level's density, everywhere (field.h)
+    for (int k = 0; k < 3; ++k) {
+      c.scalar.n[k] = 1;
+      c.scalar.lo[k] = -kEverywhere;
+      c.scalar.hi[k] = kEverywhere;
+    }
+    c.scalar.values.assign(1, kAirDensity);
+  }
   c.moving = components == 3;
   if (c.moving)
     for (int k = 0; k < 3; ++k)
@@ -630,7 +647,7 @@ void field_set::mark_vehicle(body_id id, const vec3 &center_of_mass) {
   it->second.center_of_mass = center_of_mass;
 }
 
-bool field_set::air_at(const vec3 &p, double &rho, vec3 &wind) const {
+bool field_set::air_at(const vec3 &p, double t, double &rho, vec3 &wind) const {
   const double q[3] = {p.x, p.y, p.z};
   for (const auto &fe : _fields) {
     const compiled_field &cf = fe.second;
@@ -638,7 +655,9 @@ bool field_set::air_at(const vec3 &p, double &rho, vec3 &wind) const {
       continue;
     rho = cf.scalar.at(q);
     wind = vec3{};
-    if (cf.moving)
+    if (cf.desc.wind)
+      wind = cf.desc.wind->velocity(p, t);
+    else if (cf.moving)
       wind = {cf.velocity[0].contains(q) ? cf.velocity[0].at(q) : 0.0,
               cf.velocity[1].contains(q) ? cf.velocity[1].at(q) : 0.0,
               cf.velocity[2].contains(q) ? cf.velocity[2].at(q) : 0.0};
@@ -718,17 +737,37 @@ rut_map field_set::ruts(field_id id) const {
 
 bool field_set::has_surfaces() const {
   for (const auto &fe : _fields)
-    if (fe.second.desc.surface)
+    if (fe.second.desc.surface || fe.second.desc.wind)
       return true;
   return false;
 }
 
+namespace {
+// A field's time-dependent hook as (id, digest): a fluid's surface, or a flow's wind (a field has
+// at most one). A wind's id carries the top bit, so a surface and a wind never read as each other.
+constexpr std::uint32_t kWindTag = 0x80000000u;
+bool hook_of(const compiled_field &cf, std::uint32_t field, std::uint32_t &id,
+             std::uint64_t &digest) {
+  if (cf.desc.surface) {
+    id = field;
+    digest = cf.desc.surface->digest();
+    return true;
+  }
+  if (cf.desc.wind) {
+    id = field | kWindTag;
+    digest = cf.desc.wind->digest();
+    return true;
+  }
+  return false;
+}
+} // namespace
+
 void field_set::save_surfaces(std::string &out) const {
   for (const auto &fe : _fields) {
-    if (!fe.second.desc.surface)
+    std::uint32_t id = 0;
+    std::uint64_t digest = 0;
+    if (!hook_of(fe.second, fe.first, id, digest))
       continue;
-    const std::uint32_t id = fe.first;
-    const std::uint64_t digest = fe.second.desc.surface->digest();
     out.append(reinterpret_cast<const char *>(&id), sizeof(id));
     out.append(reinterpret_cast<const char *>(&digest), sizeof(digest));
   }
@@ -736,7 +775,9 @@ void field_set::save_surfaces(std::string &out) const {
 
 void field_set::check_surfaces(const std::string &in, std::size_t &pos) const {
   for (const auto &fe : _fields) {
-    if (!fe.second.desc.surface)
+    std::uint32_t want_id = 0;
+    std::uint64_t want = 0;
+    if (!hook_of(fe.second, fe.first, want_id, want))
       continue;
     std::uint32_t id = 0;
     std::uint64_t digest = 0;
@@ -744,8 +785,9 @@ void field_set::check_surfaces(const std::string &in, std::size_t &pos) const {
       throw cvc::physics_error("restore: the free-surface state is truncated");
     std::memcpy(&id, in.data() + pos, sizeof(id));
     std::memcpy(&digest, in.data() + pos + sizeof(id), sizeof(digest));
-    if (id != fe.first || digest != fe.second.desc.surface->digest())
-      throw cvc::physics_error("restore: this world's free surfaces differ from the state's");
+    if (id != want_id || digest != want)
+      throw cvc::physics_error("restore: this world's free surfaces or winds differ from the "
+                               "state's");
     pos += sizeof(id) + sizeof(digest);
   }
 }
@@ -938,6 +980,7 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
     // for stability below.
     vec3 push_f, push_t, drag_f, drag_t;
     double rate = 0.0, immersed = 0.0;
+    bool felt = false; // a field pushed on one of its cells
     // A hull's triangles take the fluids' push in place of the cells (hull.h).
     const bool hull = fb.hull.desc != nullptr;
     push_sums hs;
@@ -953,6 +996,28 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
         push_hull(fb, s, r, com, cf, gn, cfg.fixed_dt, t, world_v, depth, wet, hs);
         continue;
       }
+      // A flow's wind is read once per body (flow_velocity.h): its reference at the centre of
+      // mass, since the gusts vary over tens of metres, and its profile at kProfiles heights from
+      // its base (or the body's bottom) to the body's top, spaced as the squares. The wind costs
+      // O(bodies) a step.
+      const flow_velocity *wind = cf.desc.wind.get();
+      vec3 body_wind;
+      double wind_floor = 0.0, prof_z0 = 0.0, prof_span = 0.0;
+      double prof_z[kProfiles] = {}, prof[kProfiles] = {};
+      if (wind) {
+        wind_floor = wind->base();
+        const double zlo = std::max(blo[2], wind_floor);
+        if (!(bhi[2] > zlo))
+          continue; // all of the body is below the air (under the water or the ground)
+        body_wind = wind->reference(com, t);
+        prof_z0 = zlo;
+        prof_span = bhi[2] - zlo;
+        for (int j = 0; j < kProfiles; ++j) {
+          const double s = static_cast<double>(j) / (kProfiles - 1);
+          prof_z[j] = zlo + prof_span * s * s;
+          prof[j] = wind->profile(prof_z[j]);
+        }
+      }
       const fluid_surface *surface = cf.desc.surface.get();
       for (const vec3 &local : fb.cells) {
         const vec3 c = s.position + r * local;
@@ -966,7 +1031,10 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
           double top = cf.scalar.hi[k];
           if (k == 2 && surface)
             top = std::min(top, surface->height_with(p[0], p[1], t, memo));
-          const double lo = std::max(component(c, k) - ext[k], cf.scalar.lo[k]);
+          double bottom = cf.scalar.lo[k];
+          if (k == 2 && wind) // the air starts at the wind's base
+            bottom = std::max(bottom, wind_floor);
+          const double lo = std::max(component(c, k) - ext[k], bottom);
           const double hi = std::min(component(c, k) + ext[k], top);
           in = hi > lo;
           p[k] = 0.5 * (lo + hi);
@@ -980,7 +1048,9 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
         const double fv = f * fb.cell_volume;
         const vec3 at{p[0], p[1], p[2]};
         const vec3 arm = at - com;
-        immersed += fv;
+        felt = true;
+        if (!wind) // a body is not immersed in the air
+          immersed += fv;
 
         if (cf.desc.kind == field_kind::fluid) {
           const vec3 b = g * (-value * fv);
@@ -995,7 +1065,14 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
         vec3 w;
         if (surface)
           w = surface->velocity_with(at, t, memo);
-        else if (cf.moving)
+        else if (wind) { // the body's wind, times its profile at the cell's height
+          const double s = std::min(std::max((p[2] - prof_z0) / prof_span, 0.0), 1.0);
+          const int j = std::min(static_cast<int>((kProfiles - 1) * std::sqrt(s)), kProfiles - 2);
+          const double gap = prof_z[j + 1] - prof_z[j];
+          const double fr =
+              gap > 0.0 ? std::min(std::max((p[2] - prof_z[j]) / gap, 0.0), 1.0) : 0.0;
+          w = body_wind * (prof[j] + (prof[j + 1] - prof[j]) * fr);
+        } else if (cf.moving)
           w = {cf.velocity[0].contains(p) ? cf.velocity[0].at(p) : 0.0,
                cf.velocity[1].contains(p) ? cf.velocity[1].at(p) : 0.0,
                cf.velocity[2].contains(p) ? cf.velocity[2].at(p) : 0.0};
@@ -1017,7 +1094,7 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
     }
     if (hull) {
       fb.hull.wetted.swap(wet);
-      if (!hs.wet && !(immersed > 0.0))
+      if (!hs.wet && !felt)
         continue;
       push_f = push_f + hs.push_f;
       push_t = push_t + hs.push_t;
@@ -1025,7 +1102,7 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
       drag_t = drag_t + hs.drag_t;
       rate += hs.rate;
       immersed += hs.immersed;
-    } else if (!(immersed > 0.0)) {
+    } else if (!felt) {
       continue;
     }
     // Drag integrated implicitly in its own rate: a step never carries the body

@@ -7,6 +7,7 @@
 #include <cvc/ariadne/data.h> // source: { data } — a dataset of the document's data: block
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_geometry.h> // a node's mesh from data (core)
+#include <cvc/ariadne/scene_wind.h>     // the scene's one wind (O14)
 #include <cvc/ariadne/scene_world.h>    // the scene's world: physics and bodies (core)
 #include <cvc/ariadne/uri.h> // §13.4 resolve a node source: URI to a local path (temp-file bridge)
 #include <cvc/ariadne/world_vehicles.h> // its vehicles: their intents key
@@ -1609,6 +1610,8 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   out.entity_labels = scene.entity_labels;
   if (!scene.entity_labels.empty()) // the labels' layer now, so it is this scene's (out.created)
     LabelLayerNode::of(sg);
+  // The scene's one wind (O14): its keys before any node reads its wind (scene_wind.h).
+  cvc::ariadne::seed_scene_wind(sg.appContext(), scene, bind_prefix);
   // Resolve the clock's key paths to absolute state paths now, with the host bind prefix — the SAME
   // rule widget binds use (resolve_bind) — so the clock and a sim_transport slider on `sim.speed`
   // land on one key. Resolved once here (like the visibility bindings), so tick_scene stays prefix-
@@ -1661,6 +1664,7 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
       if (out.world->vehicles())
         out.world->vehicles()->set_intents_key(
             cvc::ariadne::resolve_bind(bind_prefix, scene.vehicle_intents));
+      out.world->bind_wind(scene, bind_prefix); // the scene's wind pushes its bodies (O14)
     }
     if (out.physics)
       out.clock.present = true;

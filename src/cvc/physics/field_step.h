@@ -124,9 +124,10 @@ public:
   // in x and y and reaches below it. False if none does; `out` is then dry and still.
   bool water_at(const vec3 &p, double t, water_sample &out) const;
 
-  // The air at `p` for a vehicle's aero: a flow field's density and wind where one covers
-  // `p` (the first, in id order), true; else false, `rho` and `wind` untouched.
-  bool air_at(const vec3 &p, double &rho, vec3 &wind) const;
+  // The air at `p` at field time `t` for a vehicle's aero: a flow field's density and wind (its
+  // flow_velocity's, or its velocity volumes') where one covers `p` (the first, in id order),
+  // true; else false, `rho` and `wind` untouched.
+  bool air_at(const vec3 &p, double t, double &rho, vec3 &wind) const;
   // The medium over a wheel's ground contact `p`: the deepest medium field above it along
   // +z, its bearing modulus at mid-depth and its traction. False if none lies over `p`.
   // Read-only: safe from the engine's worker threads during a step.

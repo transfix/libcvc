@@ -51,8 +51,9 @@ public:
   void drive(vehicle_id id, const drive_command &c);
   void set_controls(vehicle_id id, const vehicle_controls &c);
 
+  // `t` is the world's field time, the air's wind is read at (field_set::air_at).
   void pre_step(world_backend &be, const field_set &fields, const world_config &cfg,
-                const std::vector<material> &materials);
+                const std::vector<material> &materials, double t);
   // After it: read the vehicles back, and press their ruts into rutted media.
   void post_step(world_backend &be, field_set &fields, const world_config &cfg);
   vehicle_state state(const world_backend &be, vehicle_id id) const;

@@ -3165,6 +3165,14 @@ Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
   }
   sc.physics = parse_scene_physics(s["physics"]);
   sc.world = parse_scene_world(s["world"]);
+  if (const YAML::Node wn = s["wind"]; wn && wn.IsMap()) {
+    // wind: { speed, dir, gustiness, base } — the scene's one wind (scene_wind.h).
+    sc.wind.present = true;
+    sc.wind.speed = std::max(0.0, num(wn, "speed", sc.wind.speed));
+    sc.wind.dir = num(wn, "dir", sc.wind.dir);
+    sc.wind.gustiness = std::max(0.0, num(wn, "gustiness", sc.wind.gustiness));
+    sc.wind.base = num(wn, "base", sc.wind.base);
+  }
   bind_world_visibility(sc);
   return sc;
 }

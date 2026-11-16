@@ -48,8 +48,14 @@ struct Value;
 
 struct world_physics {
   cvc::physics::vec3 gravity{0.0, 0.0, -9.80665}; // m/s^2
+  // The room's wind (the document's scene: wind:, scene_wind.h, O14): its speed (m/s; 0, the
+  // default, is none), the way it blows (degrees, from +x toward +y), its gustiness and the level
+  // its height profile is over. Every holon pushes its avatars with it alike.
+  double wind_speed = 0.0, wind_dir = 0.0, wind_gustiness = 0.0, wind_base = 0.0;
   bool operator==(const world_physics &o) const {
-    return gravity.x == o.gravity.x && gravity.y == o.gravity.y && gravity.z == o.gravity.z;
+    return gravity.x == o.gravity.x && gravity.y == o.gravity.y && gravity.z == o.gravity.z &&
+           wind_speed == o.wind_speed && wind_dir == o.wind_dir &&
+           wind_gustiness == o.wind_gustiness && wind_base == o.wind_base;
   }
 };
 

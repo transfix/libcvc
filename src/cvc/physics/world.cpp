@@ -284,7 +284,7 @@ struct world::impl {
     const auto t0 = std::chrono::steady_clock::now();
     guarded([&] {
       fields.apply(*be, cfg, field_time());
-      vehicles.pre_step(*be, fields, cfg, materials);
+      vehicles.pre_step(*be, fields, cfg, materials, field_time());
       boats.pre_step(*be, fields, cfg, field_time());
       be->step(contacts, r);
       vehicles.post_step(*be, fields, cfg);

@@ -19,6 +19,7 @@
 #include <cvc/ariadne/scene_generated_world.h>
 #include <cvc/ariadne/scene_geometry.h>
 #include <cvc/ariadne/scene_water.h>
+#include <cvc/ariadne/scene_wind.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
@@ -315,6 +316,14 @@ struct SceneWorld::impl {
   std::unique_ptr<WorldVehicles> vehicles;
   std::shared_ptr<const cvc::nav::world_grid> ground_grid;
   bool ground_given = false;
+  // The scene's wind (bind_wind): its keys' root, the base its profile is over, the wind its field
+  // was made for and the field (invalid: none in the world).
+  bool wind_bound = false;
+  std::string wind_prefix;
+  double wind_base = 0.0;
+  std::optional<SceneWind> wind_applied;
+  ph::field_id wind_field;
+  std::shared_ptr<const ph::flow_velocity> wind_flow;
   // A terrain node's field as its body has it (placed), and a node's own bodies' XY extent (min_x,
   // min_y, max_x, max_y): what grid() makes a terrain's or a flat ground's grid from.
   std::map<std::string, std::shared_ptr<const cvc::height_field>> fields;
@@ -727,6 +736,8 @@ void SceneWorld::restart(std::vector<std::string> *warnings) {
   d.follower.reset(); // the next follow() anchors on the clock again
   d.last = ph::step_report{};
   d.step_history.clear();
+  d.wind_field = ph::field_id{}; // the wind's field went with the old world: sync adds it again
+  d.wind_applied.reset();
   if (d.vehicles) { // the vehicles went with the old world: each back to its start
     d.vehicles->world_reset();
     d.vehicles->publish();
@@ -738,6 +749,7 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
                                                    const std::string &bind_prefix,
                                                    const std::string &stats_key,
                                                    std::vector<std::string> *warnings) {
+  seed_scene_wind(app, scene, bind_prefix); // before the water reads its wind (scene_wind.h)
   if (!scene_has_world(scene)) {
     // A data node's bodies need the physics: block (as cvcGL says when it draws the dataset).
     const std::function<void(const SceneNode &)> data = [&](const SceneNode &n) {
@@ -869,6 +881,7 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
                        resolve_bind(bind_prefix, "spawns"));
     if (out->vehicles())
       out->vehicles()->set_intents_key(resolve_bind(bind_prefix, scene.vehicle_intents));
+    out->bind_wind(scene, bind_prefix);
   }
   return out;
 }
@@ -952,6 +965,7 @@ std::shared_ptr<const cvc::nav::world_grid> SceneWorld::grid(const std::string &
 
 void SceneWorld::sync(std::vector<std::string> *warnings) {
   impl &d = *_impl;
+  sync_wind(); // the scene wind's field, before anything steps in it
   if (!d.world_key.empty() && d.app) {
     // The source key: another world's name switches to it.
     cvc::state *k =
@@ -1085,6 +1099,51 @@ void SceneWorld::bind_vehicles(const std::vector<vehicle_archetype> &archetypes,
 
 WorldVehicles *SceneWorld::vehicles() { return _impl->vehicles.get(); }
 const WorldVehicles *SceneWorld::vehicles() const { return _impl->vehicles.get(); }
+
+void SceneWorld::bind_wind(const Scene &scene, const std::string &bind_prefix) {
+  impl &d = *_impl;
+  if (!d.app)
+    return;
+  seed_scene_wind(*d.app, scene, bind_prefix);
+  d.wind_bound = true;
+  d.wind_prefix = bind_prefix;
+  d.wind_base = scene.wind.base;
+  d.wind_applied.reset();
+  sync_wind();
+}
+
+ph::field_id SceneWorld::wind_field() const { return _impl->wind_field; }
+
+void SceneWorld::sync_wind() {
+  impl &d = *_impl;
+  if (!d.wind_bound || !d.app || !d.world)
+    return;
+  const std::optional<SceneWind> w = scene_wind_set(*d.app, d.wind_prefix);
+  if (w != d.wind_applied || (w && !d.wind_field.valid())) {
+    d.wind_applied = w;
+    if (!w) {
+      if (d.wind_field.valid())
+        d.world->remove_field(d.wind_field);
+      d.wind_field = ph::field_id{};
+    } else {
+      // Air everywhere (a flow with a wind and no volume: 1.225 kg/m^3, field.h); the wind's
+      // profile is 0 under its base, so a body under water feels none.
+      ph::field f;
+      f.kind = ph::field_kind::flow;
+      f.drag_coefficient = 1.0;
+      f.wind = scene_wind_flow(*w, d.wind_base);
+      d.wind_flow = f.wind;
+      if (d.wind_field.valid())
+        d.world->set_field(d.wind_field, f);
+      else
+        d.wind_field = d.world->add_field(f);
+    }
+    if (!w)
+      d.wind_flow.reset();
+  }
+  if (d.vehicles) // the plants that do not feel the field (WorldVehicles::set_wind)
+    d.vehicles->set_wind(d.wind_flow);
+}
 
 bool SceneWorld::set_world(const std::string &name, std::vector<std::string> *warnings) {
   impl &d = *_impl;

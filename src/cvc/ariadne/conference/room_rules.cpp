@@ -68,6 +68,12 @@ section_stamp write_room_physics(cvc::app &app, const std::string &room_id, cons
   w.set_double({"gravity", "x"}, p.gravity.x);
   w.set_double({"gravity", "y"}, p.gravity.y);
   w.set_double({"gravity", "z"}, p.gravity.z);
+  if (p.wind_speed > 0.0) { // a room without a wind writes what it always did
+    w.set_double({"wind", "speed"}, p.wind_speed);
+    w.set_double({"wind", "dir"}, p.wind_dir);
+    w.set_double({"wind", "gustiness"}, p.wind_gustiness);
+    w.set_double({"wind", "base"}, p.wind_base);
+  }
   return w.commit(at, epoch);
 }
 
@@ -83,6 +89,10 @@ bool read_room_physics(cvc::app &app, const std::string &room_id, world_physics 
   p.gravity.x = r.number({"gravity", "x"}, p.gravity.x);
   p.gravity.y = r.number({"gravity", "y"}, p.gravity.y);
   p.gravity.z = r.number({"gravity", "z"}, p.gravity.z);
+  p.wind_speed = r.number({"wind", "speed"}, p.wind_speed);
+  p.wind_dir = r.number({"wind", "dir"}, p.wind_dir);
+  p.wind_gustiness = r.number({"wind", "gustiness"}, p.wind_gustiness);
+  p.wind_base = r.number({"wind", "base"}, p.wind_base);
   out = p;
   return true;
 }
