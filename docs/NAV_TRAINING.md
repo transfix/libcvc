@@ -106,6 +106,9 @@ anything. To see whether it did, and what, set:
 - `cfg.checkpoint_prefix`: each checkpoint's policy, as it was scored, saved as
   `<prefix>.stepNNNNNN.cvcnav`.
 
+To see each checkpoint drive, deploy them all on one scenario with the scrubber: `cvc nav scrub
+<history>` or `python -m pycvc_gl.nav_lab scrub <history>` ([NAV_LAB.md](NAV_LAB.md)).
+
 Without a fitness they still record at the same cadence. The probe selects nothing: it shows how
 the heads move, and how much they vary with where an agent is. Both are off by default, and with
 them on training is the same, bit for bit. The CPU trainer only; `train_coef_mlp_cuda` ignores them.

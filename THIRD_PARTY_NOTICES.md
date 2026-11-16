@@ -38,7 +38,8 @@ comes from the cvcpkg `mujoco` package, whose licence and third-party notices in
 `mujoco-menagerie` bundle (BSD-3-Clause), is read from that package at run time and is not in this
 repository.
 
-Compiled into libcvc (its wave spectrum, `cvc/ocean/spectrum.h`, and the cumulonimbus maps of
+Compiled into libcvc (its wave spectrum, `cvc/ocean/spectrum.h`, the wind's gusts and the currents,
+`cvc/algo/wind_field.h` and `cvc/ocean/current.h`, and the cumulonimbus maps of
 `cvc/world/cloud_layer.h`), cvcGL (the cloud deck's dark storm bases) and the cvcGL examples:
 [ABYSSAL](#abyssal).
 
@@ -963,7 +964,12 @@ for both directions) are a C++/VTK port of ABYSSAL
 `cvcgl_ocean_fft`, `cvcgl_ocean_band` and `cvcgl_ewave` tests. The wave spectrum it is fed, `inc/cvc/ocean/spectrum.h` and
 `src/cvc/ocean/spectrum.cpp` in libcvc itself (JONSWAP with the TMA correction,
 Donelan-Banner spreading, the fetch law and the swell term), ports ABYSSAL's
-`src/ocean/OceanFFT.js` at 849ff7f4. The storm deck ports two parts of
+`src/ocean/OceanFFT.js` at 849ff7f4. The gusts' pulse over time in
+`inc/cvc/algo/wind_field.h` and `src/cvc/algo/wind_field.cpp` ports
+`src/weather/Weather.js:107-110`, and the current's shape in `inc/cvc/ocean/current.h`
+and `src/cvc/ocean/current.cpp` (the curl of noise at two scales, drifting) follows
+`src/ocean/OceanSampleGLSL.js:31-41` and `src/gfx/ProceduralTextures.js`'s curl bake, at
+the same commit. The storm deck ports two parts of
 `src/sky/Clouds.js` at 849ff7f4: the cumulonimbus height profile (the tower and
 the anvil, and the anvil's spread cover) that `src/cvc/world/cloud_layer.cpp`
 grows its storm maps with, and the sky hidden by the cloud above a sample (its
