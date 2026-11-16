@@ -500,7 +500,8 @@ std::string program_tag(const std::string &script) {
 
 std::string run_scoped_program(cvc::app &app, const std::string &prefix, const std::string &script,
                                uint64_t max_steps, double max_seconds, uint64_t max_bytes,
-                               const std::function<bool(const std::string &)> &has = {}) {
+                               const std::function<bool(const std::string &)> &has = {},
+                               const ActionIntrinsicProvider &own = {}) {
   namespace se = cvc::state_exec;
   try {
     // All of these must outlive execute()+run(): the intrinsics capture &ictx by pointer. A
@@ -526,14 +527,17 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     ictx.lock_wait_allowed = false;
     ictx.lock_default_timeout = 0.0;
     // A child the script spawns copies both (so it never waits either), the chroot and this
-    // scheduler, and gets the intrinsics, the host's providers and has? (docs/STATE_EXEC_LOCKS.md
-    // 5.5). This scope's sched.run steps it, and its context goes with the scheduler. No Impl
-    // here, so no document: the library's callback, not Runtime::Impl::make_action_context.
+    // scheduler, and gets the intrinsics, the host's providers, the document's own and has?
+    // (docs/STATE_EXEC_LOCKS.md 5.5). This scope's sched.run steps it, and its context goes with
+    // the scheduler. No Impl here, so no document scope: the library's callback, not
+    // Runtime::Impl::make_action_context.
     ictx.spawn_context = se::make_spawn_context(
-        nullptr, [has, &app](const se::environment_ptr &e, se::intrinsics_context &c) {
+        nullptr, [has, own, &app](const se::environment_ptr &e, se::intrinsics_context &c) {
           for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot(app))
             if (p)
               p(e, c);
+          if (own)
+            own(e, c);
           bind_has(e, has);
         });
     se::apply_chroot(ictx, root, prefix); // scope writes under the document/mount prefix
@@ -545,6 +549,8 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot(app))
       if (p)
         p(env, ictx);
+    if (own) // the document's own, after the app's (Runtime::add_program_intrinsics)
+      own(env, ictx);
     bind_has(env, has);
     // Bound the run so a looping or blocking script (an accidental infinite loop, or a
     // (msg-recv ...) with no sender) can never hang: cap the process (check_limits kills a runner
@@ -576,8 +582,8 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
 } // namespace
 
 bool run_init(cvc::app &app, const std::string &prefix, const std::string &script,
-              std::vector<std::string> *errors,
-              const std::function<bool(const std::string &)> &has) {
+              std::vector<std::string> *errors, const std::function<bool(const std::string &)> &has,
+              const ActionIntrinsicProvider &own) {
   const auto err = [&](const std::string &m) {
     if (errors)
       errors->push_back(m);
@@ -588,7 +594,7 @@ bool run_init(cvc::app &app, const std::string &prefix, const std::string &scrip
   static constexpr uint64_t kInitMaxSteps = 10'000'000;
   static constexpr double kInitMaxSeconds = 5.0;
   const std::string e =
-      run_scoped_program(app, prefix, script, kInitMaxSteps, kInitMaxSeconds, 0, has);
+      run_scoped_program(app, prefix, script, kInitMaxSteps, kInitMaxSeconds, 0, has, own);
   if (!e.empty()) {
     err("ari: init: script " + e);
     return false;
@@ -1289,9 +1295,22 @@ struct Runtime::Impl {
   std::shared_ptr<FilePickHub> file_pick = std::make_shared<FilePickHub>();
   void bind_file_verbs(const std::shared_ptr<cvc::state_exec::environment> &env) const;
 
+  // The document's own program-lane intrinsics (add_program_intrinsics), in order: bound after the
+  // app's into every program env this Runtime builds, and into no other Runtime's. Added on the
+  // drain's thread, under names_mutex, which load_names holds while it binds them; a provider
+  // binds, and adds none.
+  std::vector<ActionIntrinsicProvider> own_intrinsics;
+  void bind_own_intrinsics(const std::shared_ptr<cvc::state_exec::environment> &env,
+                           cvc::state_exec::intrinsics_context &ictx) const {
+    for (const ActionIntrinsicProvider &p : own_intrinsics)
+      if (p)
+        p(env, ictx);
+  }
+
   // What this host provides (requires:, has?). The names a program can reference are read from a
   // probe env built exactly like an action's, then cached; the cache is rebuilt when a provider is
-  // registered (the registry's generation moves) or refresh_program_names() drops it.
+  // registered (the registry's generation moves), add_program_intrinsics adds one, or
+  // refresh_program_names() drops it.
   bool scene_capable = false;
   bool scene_shaders = false;
   bool relay_document = false;
@@ -2199,8 +2218,12 @@ void Runtime::Impl::wire_holes(const std::string &parent_prefix, const std::stri
 
 void Runtime::Impl::run_mount_init(const std::string &sub_prefix, const std::string &script) {
   std::vector<std::string> errs;
-  // (has? ...) as in the document's own init: and every action: a module's host is the same host.
-  run_init(app, sub_prefix, script, &errs, [this](const std::string &n) { return has(n); });
+  // (has? ...) and the document's own intrinsics as in its own init: and every action: a module's
+  // host is the same host.
+  run_init(
+      app, sub_prefix, script, &errs, [this](const std::string &n) { return has(n); },
+      [this](const std::shared_ptr<cvc::state_exec::environment> &env,
+             cvc::state_exec::intrinsics_context &ictx) { bind_own_intrinsics(env, ictx); });
   for (const std::string &e : errs)
     warn_once("ari: mount init at '" + sub_prefix + "': " + e);
 }
@@ -5066,10 +5089,12 @@ Runtime::Impl::make_action_context(const std::string &scope_prefix,
   ac->scope = scope_prefix;
   ac->env = se::builtins::make_default_environment();
   se::register_intrinsics(ac->env, &ac->ictx);
-  // Host program-lane intrinsics (nav verbs, …), AFTER the standard ones (add or override).
+  // Host program-lane intrinsics (nav verbs, …), AFTER the standard ones (add or override): the
+  // app's, then this document's own.
   for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot(app))
     if (p)
       p(ac->env, ac->ictx);
+  bind_own_intrinsics(ac->env, ac->ictx);
   bind_backend_verbs(ac->env);
   bind_notify_verbs(ac->env, scope_prefix); // §5.24
   bind_has(ac->env, [this](const std::string &n) { return has(n); });
@@ -5727,6 +5752,7 @@ void Runtime::Impl::load_names() const {
   for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot(app))
     if (p)
       p(env, ictx);
+  bind_own_intrinsics(env, ictx);
   bind_backend_verbs(env);
   bind_notify_verbs(env, prefix); // §5.24
   std::set<std::string> found;
@@ -5758,6 +5784,22 @@ bool Runtime::has(const std::string &name) const { return m_->has(name); }
 void Runtime::refresh_program_names() {
   std::lock_guard<std::mutex> lock(m_->names_mutex);
   m_->names_valid = false;
+}
+
+void Runtime::add_program_intrinsics(ActionIntrinsicProvider provider) {
+  if (!provider)
+    return;
+  std::lock_guard<std::mutex> lock(m_->names_mutex);
+  m_->own_intrinsics.push_back(std::move(provider));
+  m_->names_valid = false;
+}
+
+ActionIntrinsicProvider Runtime::program_intrinsics() const {
+  namespace se = cvc::state_exec;
+  const Impl *impl = m_.get();
+  return [impl](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
+    impl->bind_own_intrinsics(env, ictx);
+  };
 }
 
 void Runtime::register_read_function(const std::string &name, ReadFunction fn) {
