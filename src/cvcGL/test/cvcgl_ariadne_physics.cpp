@@ -823,6 +823,126 @@ void test_vehicle_intents_headless_and_drawn() {
   }
 }
 
+// Every plant in a scene world (L2b): a Jolt Humvee, the dynamic single track, the dynamic four
+// wheels and the kinematic bicycle, spawned on the keys and run by nav@1 on a hill, reach the same
+// state headless and drawn, bit for bit; and the drawn four-wheeler's wheels are posed where its
+// plant has them.
+const char *kPlantWorld = R"(
+meta: { min_libcvc: "0.0.0" }
+world:
+  vehicles:
+    archetypes:
+      jolt: { plant: jolt, vehicle: humvee, look: { box: {} } }
+      bike: { plant: dynamic, vehicle: humvee, look: { box: {} } }
+      four: { plant: dynamic4w, vehicle: humvee, look: { box: {} } }
+      walker: { plant: kinematic, vehicle: humvee, look: { box: {} } }
+scene:
+  physics: {}
+  world: { source: hill, cell: 2 }
+  nodes:
+    - node: hill
+      world: hill
+      source:
+        heightfield:
+          size: 160
+          resolution: 81
+          layers:
+            - { kind: dome, amplitude: 2.0, radius: 30 }
+      body: static
+)";
+
+void plant_script(cvc::state &st, int frame) {
+  static const char *const kinds[4] = {"jolt", "bike", "four", "walker"};
+  static const char *const at[4] = {"-40,-30,30", "-30,30,-30", "30,-30,150", "30,30,-150"};
+  if (frame >= 1 && frame <= 4) {
+    st("vehicles.selected").value(kinds[frame - 1]);
+    st("vehicles.spawn.at").value(at[frame - 1]);
+    st("vehicles.spawn.request").value(std::to_string(frame));
+  }
+}
+
+void test_every_plant_headless_and_drawn() {
+  std::printf("test_every_plant_headless_and_drawn\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt)) {
+    std::printf("  skipped: no Jolt in this build\n");
+    return;
+  }
+  const auto load = [](cvc::app &app) {
+    cvc::ariadne::register_world_block(app);
+    cvc::ariadne::LoadResult r = cvc::ariadne::load_string(app, kPlantWorld);
+    if (r.ok) {
+      cvc::ariadne::world_rules rules = cvc::ariadne::default_world_rules();
+      CHECK(cvc::ariadne::parse_world_block(*cvc::ariadne::find_world_block(r), rules).empty());
+      r.scene.vehicles = rules.vehicles;
+    }
+    return r;
+  };
+  constexpr int kFrames = 360; // six seconds at 60 frames per second
+
+  cvc::app drawn_app;
+  cvc::ariadne::LoadResult r = load(drawn_app);
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  SceneGraph sg(drawn_app);
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &warnings);
+  CHECK(out.world != nullptr && out.world->vehicles() != nullptr);
+  if (!out.world || !out.world->vehicles())
+    return;
+  cvc::state &dst = cvc::state::instance(drawn_app);
+  for (int i = 0; i < kFrames; ++i) {
+    plant_script(dst, i);
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  }
+
+  cvc::app headless_app;
+  std::unique_ptr<cvc::ariadne::SceneWorld> world =
+      cvc::ariadne::SceneWorld::from_scene(headless_app, r.scene, "", "physics", &warnings);
+  CHECK(world != nullptr && world->vehicles() != nullptr);
+  if (!world || !world->vehicles())
+    return;
+  cvc::state &hst = cvc::state::instance(headless_app);
+  cvc::ariadne::SceneClockDriver clock(headless_app, r.scene.clock);
+  for (int i = 0; i < kFrames; ++i) {
+    plant_script(hst, i);
+    clock.drive(1.0 / 60.0);
+    world->follow(headless_app.world_clock());
+  }
+
+  CHECK(world->vehicles()->size() == 4 && out.world->vehicles()->size() == 4);
+  CHECK(world->world().tick() == out.physics->tick());
+  const std::uint64_t drawn_hash = out.physics->state_hash();
+  const std::uint64_t headless_hash = world->world().state_hash();
+  if (drawn_hash != headless_hash)
+    std::printf("  drawn %016llx, headless %016llx\n", static_cast<unsigned long long>(drawn_hash),
+                static_cast<unsigned long long>(headless_hash));
+  CHECK(drawn_hash == headless_hash);
+  // Each drove, and each is drawn on its chassis.
+  for (const cvc::ariadne::entity_info &e : world->vehicles()->entities()) {
+    std::printf("  %s: %.1f m at %.1f m/s\n", e.plant.c_str(), e.distance, e.speed);
+    CHECK(e.distance > 3.0);
+  }
+  CHECK(out.vehicle_markers.size() == 4);
+  // The drawn four-wheeler's front-left wheel where its plant has it, not where the box look put
+  // it.
+  const std::vector<cvc::ariadne::entity_wheel> wheels = out.world->vehicles()->wheels(3);
+  std::shared_ptr<cvc::gl::GraphicsNode> four = sg.getGraphics("vehicle_3");
+  std::shared_ptr<cvc::gl::GraphicsNode> fl =
+      four ? four->findChildByName("vehicle_3_wheel0") : nullptr;
+  CHECK(fl != nullptr && wheels.size() == 4);
+  if (fl && wheels.size() == 4) {
+    const vtkMatrix4x4 *m = fl->getTransform();
+    CHECK(near(m->GetElement(0, 3), wheels[0].x, 1e-6));
+    CHECK(near(m->GetElement(1, 3), wheels[0].y, 1e-6));
+    CHECK(near(m->GetElement(2, 3), wheels[0].z, 1e-6));
+  }
+}
+
 int main() {
   test_crate_lands_on_the_drawn_ground();
   test_null_backend_places_and_holds();
@@ -833,6 +953,7 @@ int main() {
   test_worlds_drawn();
   test_vehicles_drawn();
   test_vehicle_intents_headless_and_drawn();
+  test_every_plant_headless_and_drawn();
   if (g_failures) {
     std::printf("cvcgl_ariadne_physics: %d FAILURE(S)\n", g_failures);
     return 1;

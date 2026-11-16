@@ -68,6 +68,11 @@ namespace ariadne {
 // (the cvcGL extension bundle, register_cvcgl_extensions, does).
 void register_world_node_types(cvc::app &app);
 
+// Register the water scene node type on `app` (water_node.cpp: a ground's sea, lakes and ponds as
+// the GPU FFT ocean, OCEAN-AND-WEATHER-ROADMAP.md §11.2). Idempotent; the cvcGL extension bundle
+// calls it.
+void register_water_node_types(cvc::app &app);
+
 } // namespace ariadne
 } // namespace gl
 } // namespace cvc

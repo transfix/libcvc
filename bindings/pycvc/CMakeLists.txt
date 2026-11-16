@@ -334,6 +334,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_algorithm:test_pycvc_algorithm.py
              pycvc_params:test_pycvc_params.py
              pycvc_jobs:test_pycvc_jobs.py
+             pycvc_skeleton:test_pycvc_skeleton.py
              pycvc_contours:test_pycvc_contours.py
              pycvc_point_classes:test_pycvc_point_classes.py
              pycvc_segmentation:test_pycvc_segmentation.py
@@ -358,6 +359,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_state_exec_locks:test_pycvc_state_exec_locks.py
              pycvc_world_clock:test_pycvc_world_clock.py
              pycvc_input_trace:test_pycvc_input_trace.py
+             pycvc_ph:test_pycvc_ph.py
              pycvc_world_units:test_pycvc_world_units.py
              pycvc_dataprep:test_pycvc_dataprep.py
              pycvc_volslice:test_pycvc_volslice.py
@@ -376,7 +378,8 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_proxy_hooks:test_pycvc_proxy_hooks.py
              pycvc_lod:test_pycvc_lod.py
              pycvc_world_geometry:test_pycvc_world_geometry.py
-             pycvc_data:test_pycvc_data.py)
+             pycvc_data:test_pycvc_data.py
+             pycvc_raster:test_pycvc_raster.py)
     string(REPLACE ":" ";" _pair "${_t}")
     list(GET _pair 0 _name)
     list(GET _pair 1 _script)
@@ -394,6 +397,20 @@ if(CVC_BUILD_PYCVC_CORE)
   add_test(NAME pycvc_physics
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_physics.py)
   set_tests_properties(pycvc_physics PROPERTIES ENVIRONMENT "${_pycvc_physics_env}")
+  # cvc::physics::mujoco_robot (docs/MUJOCO.md). With CVC_WITH_MUJOCO the test drives the Go2 from
+  # cvcpkg's mujoco-menagerie, whose directory it gets in CVC_MUJOCO_MENAGERIE_DIR; without it, it
+  # checks that the robot refuses.
+  set(_pycvc_mujoco_env "${_pycvc_test_env}")
+  if(CVC_WITH_MUJOCO)
+    find_path(CVC_MUJOCO_MENAGERIE_DIR unitree_go2/scene.xml PATH_SUFFIXES share/mujoco-menagerie
+              NO_SYSTEM_ENVIRONMENT_PATH NO_CMAKE_SYSTEM_PATH)
+    if(CVC_MUJOCO_MENAGERIE_DIR)
+      list(APPEND _pycvc_mujoco_env "CVC_MUJOCO_MENAGERIE_DIR=${CVC_MUJOCO_MENAGERIE_DIR}")
+    endif()
+  endif()
+  add_test(NAME pycvc_mujoco
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_mujoco.py)
+  set_tests_properties(pycvc_mujoco PROPERTIES ENVIRONMENT "${_pycvc_mujoco_env}")
 endif() # CVC_BUILD_PYCVC_CORE
 
 # ── pycvc_gl — direct wrap of the cvcGL scene graph (scriptable; needs VTK) ──
@@ -541,7 +558,7 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_ari
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_ari.py)
   set_tests_properties(pycvc_ari PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
-  # pycvc_gl.ariadne.Host, the Python host: data both ways, callbacks, errors and re-entrancy
+  # pycvc.ari.Host, the Python host: data both ways, callbacks, errors and re-entrancy
   # headless, then (in a child; skipped without GL unless CVC_REQUIRE_RENDER) a published picture and
   # a stream in the frame, and the examples/ariadne/python programs offscreen.
   add_test(NAME pycvc_gl_ariadne_host

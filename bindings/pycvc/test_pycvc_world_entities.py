@@ -6,7 +6,8 @@ controller may drive. From Python:
   * set_intent(accel=) drives it ahead, set_intent(steer=) turns it, mode="off" stops it;
   * a force on a nav@1 entity's drive moves it off the path it takes without one;
   * set_intent() from another thread, while frames run, is safe, and the last one holds;
-  * the refusals: no such entity, a bad mode or weight, a bad force.
+  * the refusals: no such entity, a bad mode or weight, a bad force;
+  * a dynamic4w entity (every plant runs in a scene world) is listed with its plant and driven.
 pycvc.ari.Host(mode="headless").entities is the same object.
 """
 
@@ -53,6 +54,7 @@ world:
   vehicles:
     archetypes:
       humvee: { vehicle: humvee, controllers: [external, nav@1] }
+      four: { plant: dynamic4w, vehicle: humvee, controllers: [external, nav@1] }
 scene:
   clock: { paused: true }
   physics: {}
@@ -169,6 +171,18 @@ raises(lambda: ents.set_intent(a, accel=float("nan")), "a steer or accel that is
 check(ents.despawn(a) and ents.list() == [], "despawned")
 check(not ents.set_intent(a, accel=1.0), "its intent goes with it")
 del ents, rt
+
+# Every plant runs in the world: a dynamic four-wheeler, steered from here like the Jolt one.
+_, rt4 = open_world("f")
+fours = rt4.entities()
+c = fours.spawn("four", at=(-40.0, -40.0, 0.0))
+check(c == 1 and by_id(fours, c)["plant"] == "dynamic4w", f"a dynamic4w ({fours.why()})")
+check(fours.set_intent(c, accel=2.0), "driven ahead")
+frames(rt4, 180)
+e = by_id(fours, c)
+check(e["x"] > -36.0 and e["speed"] > 2.0, f"it drove ahead ({e['x']:.2f}, {e['speed']:.2f} m/s)")
+check(e["energy_wh"] > 0.0, "its books")
+del fours, rt4
 
 # The Host's entities.
 import pycvc.ari as ari  # noqa: E402

@@ -16,9 +16,9 @@ cmake_minimum_required(VERSION 3.16)
 # from the same source tree) it parses that line out of the top-level CMakeLists.txt,
 # the same single source of truth the cvc package and the recipe-version CI gate use.
 # This used to be hardcoded 3.0, so every bundle's cvcGLConfigVersion.cmake reported
-# 3.0 and a consumer's find_package(cvcGL 3.5) rejected a 3.5 cvcGL. SOVERSION stays 3,
-# so the runtime name (libcvcGL.so.3) is unchanged; only the file suffix and the
-# exported package version move -- as for libcvc itself (src/cvc/CMakeLists.txt).
+# 3.0 and a consumer's find_package(cvcGL 3.5) rejected a 3.5 cvcGL. SOVERSION is the major
+# version, as libcvc's is (src/cvc/CMakeLists.txt): libcvcGL.so.4 from 4.0, whose ABI breaks
+# with libcvc's, so a 4.x cvcGL never loads where a 3.x one was linked.
 if(DEFINED libcvc_VERSION)
   set(_cvcgl_version "${libcvc_VERSION}")
 else()
@@ -77,6 +77,12 @@ list(APPEND CVCGL_SOURCES ${CVCGL_ARIADNE_SOURCES})
 # the sources compile to graceful no-ops (open_camera returns an empty result).
 file(GLOB CVCGL_CAPTURE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/capture/*.cpp")
 list(APPEND CVCGL_SOURCES ${CVCGL_CAPTURE_SOURCES})
+# The GPU ocean (OCEAN-AND-WEATHER-ROADMAP.md): OceanFFT's cascades and its butterfly IFFT, the
+# eWave wake window (EWave) and the bodies' sources into it (WakeSource), ported from ABYSSAL
+# (THIRD_PARTY_NOTICES.md). In the library so an Ariadne node can draw the sea (O15); their
+# headers stay in ocean/, private to cvcGL and its in-tree consumers.
+file(GLOB CVCGL_OCEAN_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/ocean/*.cpp")
+list(APPEND CVCGL_SOURCES ${CVCGL_OCEAN_SOURCES})
 # Phase-3 peripheral playback (the SDL3 audio-output sink) moved to cvcMedia, the GL-free media
 # library (src/cvcMedia), so a terminal program plays sound without GL; cvcGL links it (below) and
 # keeps the cvc::gl::playback names as aliases (cvc/gl/playback/*.h).
@@ -96,6 +102,7 @@ target_include_directories(cvcGL PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(cvcGL PUBLIC cvc::cvc ${VTK_LIBRARIES})
+target_include_directories(cvcGL PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/ocean")
 
 # libjpeg-turbo: conference video compression (jpeg_codec.cpp / jpeg_encode_source.cpp / the mjpeg
 # stream_view decode path). Optional at build time — where the prefix has no turbojpeg the codec
@@ -365,7 +372,7 @@ if(APPLE)
 endif()
 
 set_target_properties(cvcGL PROPERTIES POSITION_INDEPENDENT_CODE ON
-  VERSION ${PROJECT_VERSION} SOVERSION 3)
+  VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
 
 # Same reason as src/cvc/CMakeLists.txt:795-801, which cvcGL was missing: the
 # sources carry no __declspec(dllexport), so a SHARED Windows build emits a
@@ -492,8 +499,8 @@ install(FILES
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/wasm/webgl_state_shadow.js"
         DESTINATION ${CVCGL_WASM_DATADIR})
 # libcvcGL carries code derived from VTK 9.5.0 (BSD-3-Clause, in
-# LowMemoryPolyDataMapper.cpp), whose notice a binary redistribution must
-# reproduce in its documentation: the standalone cvcGL package ships it too.
+# LowMemoryPolyDataMapper.cpp) and from ABYSSAL (MIT, the ocean/ port), whose notices a binary
+# redistribution must reproduce in its documentation: the standalone cvcGL package ships them too.
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../../THIRD_PARTY_NOTICES.md"
   DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
@@ -533,10 +540,10 @@ add_test(NAME cvcgl_metadata_mirror COMMAND cvcgl_metadata_mirror)
 # Spectral GPU FFT ocean (the ABYSSAL port used by lsystem_coast). Checks the
 # invariants a broken butterfly IFFT / bit-reversal / conjugate-symmetry would
 # violate: zero-mean height, unit-mean Jacobian, determinism, time evolution and
-# live wind-knob response. Compiles OceanFFT.cpp (ocean/, outside the library: it
-# has no cvc dependency and only lsystem_coast uses it) and runs against an offscreen
-# GL context. SKIPs (rc 0) if the context has no float render targets.
-add_executable(cvcgl_ocean_fft test/cvcgl_ocean_fft.cpp ocean/OceanFFT.cpp ocean/OceanButterfly.cpp)
+# live wind-knob response. OceanFFT is in the library (ocean/, its headers private, so the
+# ocean tests add the directory) and runs against an offscreen GL context. SKIPs (rc 0) if the
+# context has no float render targets.
+add_executable(cvcgl_ocean_fft test/cvcgl_ocean_fft.cpp)
 target_include_directories(cvcgl_ocean_fft PRIVATE ocean)
 target_link_libraries(cvcgl_ocean_fft PRIVATE cvcGL)
 add_test(NAME cvcgl_ocean_fft COMMAND cvcgl_ocean_fft)
@@ -545,8 +552,7 @@ add_test(NAME cvcgl_ocean_fft COMMAND cvcgl_ocean_fft)
 # cascades on the GPU (OceanFFT, read back) against the sea physics feels (cvc::ocean::sea_surface,
 # the CPU) at several band sizes; prints the table the roadmap records and holds the default band
 # to its bound. SKIPs (rc 0) without float render targets.
-add_executable(cvcgl_ocean_band test/cvcgl_ocean_band.cpp ocean/OceanFFT.cpp
-                                ocean/OceanButterfly.cpp)
+add_executable(cvcgl_ocean_band test/cvcgl_ocean_band.cpp)
 target_include_directories(cvcgl_ocean_band PRIVATE ocean)
 target_link_libraries(cvcgl_ocean_band PRIVATE cvcGL)
 add_test(NAME cvcgl_ocean_band COMMAND cvcgl_ocean_band)
@@ -554,9 +560,8 @@ add_test(NAME cvcgl_ocean_band COMMAND cvcgl_ocean_band)
 # The GPU eWave window (OCEAN-AND-WEATHER-ROADMAP.md C1/C3, O8b): EWave against the CPU window
 # cvc::ocean::ewave in the same scenario (a drop beside a wall, a beach, the sponge, a field
 # source), the ring's reflection on the GPU, and the passes and GPU time per step at 256^2. Also
-# compiles OceanFFT.cpp, to time one cascade beside it. SKIPs (rc 0) without float render targets.
-add_executable(cvcgl_ewave test/cvcgl_ewave.cpp ocean/EWave.cpp ocean/OceanFFT.cpp
-                           ocean/OceanButterfly.cpp)
+# times one OceanFFT cascade beside it. SKIPs (rc 0) without float render targets.
+add_executable(cvcgl_ewave test/cvcgl_ewave.cpp)
 target_include_directories(cvcgl_ewave PRIVATE ocean)
 target_link_libraries(cvcgl_ewave PRIVATE cvcGL)
 add_test(NAME cvcgl_ewave COMMAND cvcgl_ewave)
@@ -565,8 +570,7 @@ add_test(NAME cvcgl_ewave COMMAND cvcgl_ewave)
 # (cvc/physics/immersion.h) as EWave's sources (WakeSource), the window's shift pass, a box
 # footprint's Kelvin wake read from the GPU, and a masked rock's wave shadow. SKIPs (rc 0)
 # without float render targets.
-add_executable(cvcgl_wake test/cvcgl_wake.cpp ocean/EWave.cpp ocean/WakeSource.cpp
-                          ocean/OceanButterfly.cpp)
+add_executable(cvcgl_wake test/cvcgl_wake.cpp)
 target_include_directories(cvcgl_wake PRIVATE ocean)
 target_link_libraries(cvcgl_wake PRIVATE cvcGL)
 add_test(NAME cvcgl_wake COMMAND cvcgl_wake)
@@ -600,6 +604,10 @@ add_test(NAME cvcgl_tet_surface COMMAND cvcgl_tet_surface)
 add_executable(cvcgl_volume_range test/cvcgl_volume_range.cpp)
 target_link_libraries(cvcgl_volume_range PRIVATE cvcGL)
 add_test(NAME cvcgl_volume_range COMMAND cvcgl_volume_range)
+
+add_executable(cvcgl_volume_half_float test/cvcgl_volume_half_float.cpp)
+target_link_libraries(cvcgl_volume_half_float PRIVATE cvcGL)
+add_test(NAME cvcgl_volume_half_float COMMAND cvcgl_volume_half_float)
 
 # The explicit traversal: state stack, ORDER-DEPENDENT property semantics,
 # per-view divergence and teardown. Runs with a null renderer, so it exercises
@@ -942,6 +950,15 @@ add_executable(cvcgl_ariadne_realize test/cvcgl_ariadne_realize.cpp)
 target_link_libraries(cvcgl_ariadne_realize PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_realize COMMAND cvcgl_ariadne_realize)
 
+# Ariadne §5.4 repeat: on a scene node: copies made and taken as the count (a number, a key, a
+# read-lane expression) changes, with RealizedScene's lists kept in step. Part 2 runs a document in
+# AriRuntime and skips without an ImGui overlay unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_repeat test/cvcgl_ariadne_repeat.cpp)
+  target_link_libraries(cvcgl_ariadne_repeat PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_repeat COMMAND cvcgl_ariadne_repeat)
+endif()
+
 # H1 slice 6: the conference room in 3D (room scene realize + avatar markers + key -> intent).
 add_executable(cvcgl_room_view test/cvcgl_room_view.cpp)
 target_link_libraries(cvcgl_room_view PRIVATE cvcGL)
@@ -1252,6 +1269,14 @@ add_executable(cvcgl_viewport_input test/cvcgl_viewport_input.cpp)
 target_link_libraries(cvcgl_viewport_input PRIVATE cvcGL)
 add_test(NAME cvcgl_viewport_input COMMAND cvcgl_viewport_input)
 
+# Viewport::setRefreshHz: a throttled inset draws its scene at most hz times a second and shows its
+# last pixels in between, byte for byte, with and without a multisampled window; a move, being
+# shown again, invalidate() and the time passing draw it, and a mirror is re-synced only when it
+# draws. Offscreen; skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+add_executable(cvcgl_viewport_refresh test/cvcgl_viewport_refresh.cpp)
+target_link_libraries(cvcgl_viewport_refresh PRIVATE cvcGL)
+add_test(NAME cvcgl_viewport_refresh COMMAND cvcgl_viewport_refresh)
+
 # Streaming geometry (StreamingGeometryNode / RibbonNode / DrapedLinkNode over the
 # two streaming VTK mappers). Uploads are counted twice: by the node's own
 # streamStats() and at the driver, by test/gl_upload_counter.cpp, which swaps
@@ -1276,6 +1301,11 @@ if(NOT EMSCRIPTEN)
                                           test/gl_upload_counter.cpp)
   target_link_libraries(cvcgl_streaming_geometry PRIVATE cvcGL)
   add_test(NAME cvcgl_streaming_geometry COMMAND cvcgl_streaming_geometry)
+  # Live textures (ARIADNE.md 5.4): a raster stream on a node's texture, uploaded a rectangle at a
+  # time, counted at the driver.
+  add_executable(cvcgl_live_texture test/cvcgl_live_texture.cpp test/gl_upload_counter.cpp)
+  target_link_libraries(cvcgl_live_texture PRIVATE cvcGL)
+  add_test(NAME cvcgl_live_texture COMMAND cvcgl_live_texture)
   add_executable(cvcgl_streaming_overlays test/cvcgl_streaming_overlays.cpp
                                           test/gl_upload_counter.cpp)
   target_link_libraries(cvcgl_streaming_overlays PRIVATE cvcGL)
@@ -1474,4 +1504,4 @@ endif()
 # (CMake/CvcHostStack.cmake). Names not built here are skipped.
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
-                        cvcgl_ariadne_scenes)
+                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat)

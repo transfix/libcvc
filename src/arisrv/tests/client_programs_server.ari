@@ -1,0 +1,7 @@
+# The server document for ctest arisrv_room_call_program: a stock arisrv runs its clients'
+# programs (room-run), each chrooted to its sender's own participant (server_document.h).
+meta: { name: a relay that runs its clients' programs, min_libcvc: 3.7.13 }
+requires: [relay]
+server:
+  client_programs: { steps: 5000 }
+init: (state-set "status" "up")

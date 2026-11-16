@@ -65,6 +65,11 @@ enum class ProgramLane {
   init
 };
 
+// The builtins a reactive slot's predicate may call: pure, bounded functions and the state
+// readers, nothing that writes, messages, waits, spawns or watches. A LaneProcess's `allow` starts
+// from them.
+std::span<const char *const> read_lane_builtins();
+
 // A program a host extension runs as one of the document's own (Runtime::start_process): a
 // scripting engine's activation is one (script_engine.h).
 struct LaneProcess {
@@ -77,8 +82,14 @@ struct LaneProcess {
   double max_time = 0.0;
   uint64_t max_memory = 0;
   int priority = 0; // the scheduler's nice value, as a program's set-priority sets it
-  // Natives of its own, bound in a scope of their own over the lane's environment. `ictx` is the
-  // process's intrinsics context, which lives as long as the process.
+  // When not empty, the only names of the lane's environment the process sees (default-deny, as
+  // a reactive slot's predicate is: read_lane_builtins()), for a program from outside the
+  // document: a relay's client's (server_document.h). `extend` binds over them. Empty: the lane's
+  // whole environment.
+  std::vector<std::string> allow;
+  // Natives of its own, bound in a scope of their own over the lane's environment (or over
+  // `allow`'s names of it). `ictx` is the process's intrinsics context, which lives as long as the
+  // process.
   std::function<void(const std::shared_ptr<cvc::state_exec::environment> &env,
                      cvc::state_exec::intrinsics_context &ictx)>
       extend;
@@ -256,6 +267,13 @@ public:
   // cache (§2.1: nothing it read was written since) is not counted, so a frame that wrote nothing
   // adds none.
   std::uint64_t reactive_eval_count() const;
+  // A count from the read lane, as a widget's `repeat:` is counted (§3): `expr`'s value as an
+  // integer (a number string parsed, a double truncated) against the document's prefix, clamped
+  // to 0..4096. A broken expression is 0 and warns once (take_reactive_warnings); an expression
+  // the frame's budget skipped, or one that fails after it has counted, keeps its last count. A
+  // scene node's `repeat:` expression is counted with it (AppRuntime hands it to its SceneAdapter).
+  // Call it on the thread that renders, between frames.
+  int eval_count(const std::string &expr);
 
   // Run every queued action event's handler, then clear the queue. Call once per
   // frame in the host loop, BEFORE your sim tick and OUTSIDE render().

@@ -112,6 +112,12 @@ struct dyn_bike_plant_options {
   // default; it does not need a world (options.physics, which collides the chassis in Jolt
   // instead: use one or the other).
   bool contact = false;
+  // With a world: whether advance() steps it, once a substep. false: a host that steps the world
+  // itself, with the rest of what is in it (a scene world on its clock), calls before_world_step()
+  // before each of its steps and after_world_step() after it. Nav's tick is then substeps() of
+  // them, and advance() ends the tick they ran (its books and its sample) and begins the next
+  // under the new command. Not with `contact`. Without a world it does not apply.
+  bool step_world = true;
   cvc::nav::diff::dyn_contact_params contact_params;
   // The field, world metres: the signed distance at (x, y) (> 0 free) and its gradient. Empty:
   // none (the vehicles still meet each other). dyn_bike_plant::sdf_field builds one from nav's.
@@ -192,6 +198,8 @@ public:
   bool resizable() const override { return true; }
   int add_vehicle(const cvc::nav::plant_state &start, int vehicle = -1) override;
   void remove_vehicle(int i) override;
+  // Another vehicle to add_vehicle() by its index, which this returns.
+  int add_desc(vehicle_desc d);
 
   // ── the vehicles ──
   int size() const { return static_cast<int>(_agents.size()); }
@@ -217,6 +225,16 @@ public:
   bool collides() const;
   // Agent i's chassis box in the world (invalid without one).
   body_id chassis(int i) const;
+  // With options.step_world off: one substep of every vehicle around each of the host's world
+  // steps. Before it, each model steps and its box is put where the step starts; after it, what
+  // the world's contacts changed goes back into the model, and into the books. A tick's substeps
+  // past substeps() keep its command.
+  void before_world_step();
+  void after_world_step();
+  // The world was made afresh (world::operator= over it, as a scene world's restart does): its
+  // boxes went with the old one, and their ids may name new bodies. The plant forgets them, so
+  // removing a vehicle (or the plant) touches nothing; it collides with nothing from now on.
+  void world_gone();
   // The substeps of agent i's last tick in which it collided, and all since attach().
   int collisions_tick(int i) const { return _agents.at(i).hits_tick; }
   long collisions(int i) const { return _agents.at(i).hits; }
@@ -264,6 +282,17 @@ private:
     double touch_depth = 0.0; // m
     dyn_bike_books tick, total;
     cvc::nav::plant_sample sample;
+    // options.step_world off: the tick's start (its measure()), and a substep's between its halves.
+    double vx0 = 0.0, vy0 = 0.0, psi0 = 0.0;
+    struct substep {
+      cvc::nav::diff::dyn_state<double> next{};
+      cvc::nav::diff::dyn_ph_books<double> books{};
+      cvc::nav::diff::dyn_spin_ph_books<double> spin_books{};
+      double om[2] = {0.0, 0.0};
+      double port = 0.0;
+      cvc::nav::diff::dyn_step_free<double> free{};
+      bool on = false;
+    } step;
   };
 
   // A vehicle `desc` at rest at `start`, appended (attach's, add_vehicle's), its box in the world.
@@ -279,6 +308,22 @@ private:
                 std::vector<cvc::nav::diff::dyn_contact> &pair,
                 std::vector<cvc::nav::diff::dyn_contact_row> *rows = nullptr,
                 double *closing = nullptr, double hdt = 0.0) const;
+  // One agent's substep of hs (advance()'s, and before_world_step()'s): its model's next state
+  // and books under the held command (and `wrench`, the contact's, or null), its box put where the
+  // step starts when there is a world.
+  void step_model(agent &a, std::size_t i, double hs, const double *wrench,
+                  cvc::nav::diff::dyn_state<double> &next,
+                  cvc::nav::diff::dyn_ph_books<double> &books,
+                  cvc::nav::diff::dyn_spin_ph_books<double> &spin_books, double om_next[2],
+                  double &port, cvc::nav::diff::dyn_step_free<double> &free);
+  // The step's books as the plant keeps them (and, with wheel spin, its wheels' speeds taken).
+  dyn_bike_books step_books(agent &a, const cvc::nav::diff::dyn_ph_books<double> &books,
+                            const cvc::nav::diff::dyn_spin_ph_books<double> &spin_books,
+                            const double om_next[2]);
+  // After the world's step: the world's pose and twist back into a model that touched something
+  // (the contact's energy into `d`), then the books, the driver and the state.
+  void settle(agent &a, std::size_t i, double hs, dyn_bike_books d,
+              cvc::nav::diff::dyn_state<double> o);
   // Agent a's chassis box at state s: its origin, on the ground under it, and its attitude.
   void chassis_pose(const agent &a, const cvc::nav::diff::dyn_state<double> &s, vec3 &position,
                     quat &rotation) const;
@@ -288,6 +333,7 @@ private:
   cvc::world_units _units;
   cvc::world_units::normalized_frame _frame;
   double _dt = 0.0;
+  bool _ticking = false; // step_world off: a tick has begun
   int _nsub = 1;
   int _pieces = 1; // options.contact: the pieces each substep of the current contact takes
   std::vector<agent> _agents;
