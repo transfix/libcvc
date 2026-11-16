@@ -161,6 +161,12 @@ catalog:
     binds: "<prefix>.{keys}.{drift,morph,evolve,orographic,shadow}"   # read every frame by the cloud_sky realizer
     for: "a `type: cloud_sky` node"
     args: { keys: sky, title: Sky, id: sky_controls }   # defaults; keys = the node's `keys:` prop
+  - component: water_controls
+    file: water_controls.ari
+    unit: water_controls
+    binds: "<prefix>.{keys}.{wind_speed,wind_dir,chop,wave_amp,whitecaps,shore_fade}"   # read every frame by the water realizer
+    for: "a `type: water` node"
+    args: { keys: water, title: Water, id: water_controls }   # defaults; keys = the node's `keys:` prop
   - component: mesh_tools
     file: mesh_tools.ari
     unit: mesh_tools

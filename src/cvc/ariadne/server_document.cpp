@@ -16,13 +16,19 @@
 // The document a relay runs — see inc/cvc/ariadne/server_document.h.
 
 #include <algorithm>
-#include <cvc/ariadne/loader.h> // load_file, register_ari_block, LoadResult
+#include <cvc/ariadne/conference/room_intrinsics.h> // room_participant_path
+#include <cvc/ariadne/conference/room_write_gate.h> // may_write: a client program's writes
+#include <cvc/ariadne/loader.h>                     // load_file, register_ari_block, LoadResult
 #include <cvc/ariadne/server_document.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/ariadne/world_rules.h> // register_world_block, find_world_block
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_change_journal.h> // state_mutation_op
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_exec/exceptions.h> // dsl_error
+#include <cvc/state/state_exec/parser.h>     // parse_all
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <utility>
@@ -105,6 +111,42 @@ std::string check_published_namespace(const std::string &ns) {
   return std::string();
 }
 
+namespace {
+// client_programs: on|off, or a map of caps (which turns them on): "" or what is wrong.
+std::string parse_client_programs(const Value &v, ClientPrograms &out,
+                                  std::vector<std::string> *warnings) {
+  out = ClientPrograms{};
+  if (v.is_scalar()) {
+    const std::string &s = v.scalar;
+    if (s == "on" || s == "true" || s == "yes" || s == "1")
+      out.on = true;
+    else if (!(s == "off" || s == "false" || s == "no" || s == "0" || s.empty()))
+      return "expects on or off, or a map of caps (steps, time, memory_mb), got '" + s + "'";
+    return std::string();
+  }
+  if (!v.is_map())
+    return "expects on or off, or a map of caps (steps, time, memory_mb)";
+  out.on = true;
+  for (const auto &[key, cap] : v.entries) {
+    const double n = cap.as_double(-1.0);
+    if (key != "steps" && key != "time" && key != "memory_mb") {
+      if (warnings)
+        warnings->push_back("server: client_programs: unknown key '" + key + "', ignored");
+      continue;
+    }
+    if (!(n > 0.0))
+      return key + " expects a positive number, got '" + (cap.is_scalar() ? cap.scalar : "") + "'";
+    if (key == "steps")
+      out.max_steps = static_cast<std::uint64_t>(n);
+    else if (key == "time")
+      out.max_time = n;
+    else
+      out.max_memory = static_cast<std::uint64_t>(n * 1024.0 * 1024.0);
+  }
+  return std::string();
+}
+} // namespace
+
 std::string parse_server_block(const Value &content, ServerBlock &out,
                                std::vector<std::string> *warnings) {
   out = ServerBlock{};
@@ -114,6 +156,11 @@ std::string parse_server_block(const Value &content, ServerBlock &out,
   if (!content.is_map())
     return "server: expects a map (publish: [...])";
   for (const auto &[key, v] : content.entries) {
+    if (key == "client_programs") {
+      if (std::string why = parse_client_programs(v, out.client_programs, warnings); !why.empty())
+        return "server: client_programs: " + why;
+      continue;
+    }
     if (key != "publish") {
       if (warnings)
         warnings->push_back("server: unknown key '" + key + "', ignored");
@@ -269,7 +316,129 @@ std::vector<std::string> ServerDocument::load(const std::string &path) {
     rt_.register_quit();
     started_ = true;
   }
-  return rt_.load(path);
+  std::vector<std::string> warnings = rt_.load(path);
+  loaded_ = true;
+  return warnings;
+}
+
+namespace {
+// A client program's writers (run_client_program), each held to the relay's bound-writes rule as
+// the operation the rule weighs it as.
+struct ClientWriter {
+  const char *name;
+  cvc::state_mutation_op op;
+};
+constexpr ClientWriter kClientWriters[] = {{"state-set", cvc::state_mutation_op::set_value},
+                                           {"state-data-set", cvc::state_mutation_op::set_data},
+                                           {"state-incr", cvc::state_mutation_op::set_value},
+                                           {"state-cas", cvc::state_mutation_op::set_value},
+                                           {"state-swap", cvc::state_mutation_op::set_value}};
+// The native the program's forms are wrapped in, which keeps the last one's value.
+constexpr const char *kClientResult = "__client-result";
+constexpr const char *kDidNotComplete = "did not complete: ";
+constexpr const char *kFailed = "failed: ";
+} // namespace
+
+void ServerDocument::run_client_program(const std::string &pid, const std::string &source,
+                                        cvc::state_exec::value_t args,
+                                        std::function<void(const ClientOutcome &)> done) {
+  namespace se = cvc::state_exec;
+  const auto refuse = [&done](const char *code, std::string message) {
+    ClientOutcome o;
+    o.code = code;
+    o.message = std::move(message);
+    if (done)
+      done(o);
+  };
+  if (!block_.client_programs.on)
+    return refuse("unavailable", "this relay runs no client programs (its document's server: "
+                                 "block has no client_programs:)");
+  if (!loaded_)
+    return refuse("unavailable", "the relay's document has not loaded yet");
+  if (pid.empty() || pid.find(cvc::state::SEPARATOR) != std::string::npos)
+    return refuse("invalid", "a client program needs its sender's pid, one name");
+  if (source.size() > kClientProgramMax)
+    return refuse("invalid", "the program is " + std::to_string(source.size()) +
+                                 " bytes, over the relay's " + std::to_string(kClientProgramMax));
+  if (clients_running_.count(pid))
+    return refuse("rate_limited", "this client's previous program is still running (one at a "
+                                  "time)");
+  // Parsed on its own first, so the wrapper below holds exactly its forms.
+  try {
+    (void)se::parse_all(source);
+  } catch (const std::exception &e) {
+    return refuse("invalid", std::string("the program does not parse: ") + e.what());
+  }
+
+  const std::string scope = conference::room_participant_path(room_, pid);
+  const auto result = std::make_shared<se::value_t>();
+  const auto gate = std::make_shared<conference::room_write_gate>(room_);
+  LaneProcess p;
+  // Its forms in one begin, whose value (the last form's) the wrapper keeps; the newline ends a
+  // comment on its last line.
+  p.program = std::string("(") + kClientResult + " (begin\n" + source + "\n))";
+  p.name = "client " + pid;
+  p.lane = ProgramLane::action;
+  p.scope = scope;
+  p.max_steps = block_.client_programs.max_steps;
+  p.max_time = block_.client_programs.max_time;
+  p.max_memory = block_.client_programs.max_memory;
+  for (const char *name : read_lane_builtins())
+    p.allow.emplace_back(name);
+  for (const ClientWriter &w : kClientWriters)
+    p.allow.emplace_back(w.name);
+  p.extend = [gate, pid, scope, args = std::move(args), result](const se::environment_ptr &env,
+                                                                se::intrinsics_context &) {
+    env->set("args", args.is_nil() ? se::make_list() : args);
+    // Each writer checks its path against the rule a client's own write meets on the transport,
+    // then writes as it would.
+    for (const ClientWriter &w : kClientWriters) {
+      const se::value_t *v = env->lookup(w.name);
+      const se::native_fn *f = v ? std::get_if<se::native_fn>(&v->v) : nullptr;
+      if (!f)
+        continue;
+      env->set(w.name,
+               se::value_t(se::native_fn([orig = *f, gate, pid, scope, name = std::string(w.name),
+                                          op = w.op](se::call_args a) -> se::value_tag {
+                 const std::string *path = a.empty() ? nullptr : std::get_if<std::string>(&a[0].v);
+                 if (path && !gate->may_write(pid, scope + cvc::state::SEPARATOR + *path, op))
+                   throw se::dsl_error("PermissionError",
+                                       name + ": '" + *path +
+                                           "' is not this client's to write (a key the relay "
+                                           "owns, or not a plain path)",
+                                       name);
+                 return orig(a);
+               })));
+    }
+    env->set(kClientResult, se::value_t(se::native_fn([result](se::call_args a) -> se::value_tag {
+               *result = a.empty() ? se::value_t() : a[0];
+               return se::value_t();
+             })));
+  };
+  p.done = [this, pid, result, done](const std::string &how) {
+    clients_running_.erase(pid);
+    ClientOutcome o;
+    const std::size_t dnc = std::char_traits<char>::length(kDidNotComplete);
+    const std::size_t failed = std::char_traits<char>::length(kFailed);
+    if (how.empty()) {
+      o.ok = true;
+      o.value = *result;
+    } else if (how.compare(0, dnc, kDidNotComplete) == 0) {
+      o.code = "resource_exhausted";
+      o.message = how.substr(dnc);
+    } else {
+      o.code = "failed";
+      o.message = how.compare(0, failed, kFailed) == 0 ? how.substr(failed) : how;
+    }
+    if (done)
+      done(o);
+  };
+  try {
+    rt_.runtime().start_process(std::move(p));
+  } catch (const std::exception &e) {
+    return refuse("invalid", std::string("the program does not start: ") + e.what());
+  }
+  clients_running_.insert(pid);
 }
 
 } // namespace ariadne

@@ -122,6 +122,11 @@ void dyn_chassis::clear() {
   _other_depth.clear();
 }
 
+void dyn_chassis::forget() {
+  _w = nullptr;
+  clear();
+}
+
 void dyn_chassis::reset(world *w, std::vector<body_id> ground, double friction) {
   clear();
   _w = w;
@@ -210,6 +215,12 @@ void dyn_chassis::step() {
   if (!_w)
     return;
   _w->step();
+  read_contacts();
+}
+
+void dyn_chassis::read_contacts() {
+  if (!_w)
+    return;
   std::map<std::uint32_t, std::size_t> of_box;
   for (std::size_t i = 0; i < _boxes.size(); ++i) {
     of_box[_boxes[i].value] = i;

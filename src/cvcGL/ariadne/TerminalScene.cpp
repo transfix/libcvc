@@ -27,6 +27,7 @@ struct TerminalScene::Impl {
   CameraController camera;
   RealizedScene realized;
   bool have_scene = false;
+  cvc::ariadne::SceneAdapter::CountFn count; // repeat: expressions (AppRuntime's read lane)
   std::chrono::steady_clock::time_point last_tick{};
   // A drag in progress: which button, and where the pointer was (cells).
   int drag_button = 0;
@@ -61,13 +62,17 @@ void TerminalScene::realize(const ari::Scene &scene, const std::string &prefix,
                      "' is not the scene graph's '" + m_->scene.getStatePrefix() +
                      "', so panels bound to scene-node state will read nothing; pass the "
                      "document's prefix to the TerminalScene constructor");
-  m_->realized = realize_scene(m_->scene, scene, prefix, warns);
+  RealizeOptions options;
+  options.count = [m = m_.get()](const std::string &expr) { return m->count ? m->count(expr) : 0; };
+  m_->realized = realize_scene(m_->scene, scene, prefix, warns, options);
   m_->have_scene = true;
   const cvc::bounding_box bb = m_->scene.computeGraphicsBounds();
   if (!bb.isNull())
     m_->camera.frameBounds(bb.minx, bb.miny, bb.minz, bb.maxx, bb.maxy, bb.maxz);
   m_->backend.set_background(kImage);
 }
+
+void TerminalScene::set_count_fn(CountFn count) { m_->count = std::move(count); }
 
 void TerminalScene::sync_visibility(cvc::app &app) {
   if (m_->have_scene)

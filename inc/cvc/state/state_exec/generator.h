@@ -44,12 +44,13 @@ struct generator {
   explicit generator(environment_ptr env) : evaluator(std::move(env)) {}
 };
 
-/// Advance a generator by one value.
+/// Advance a generator by one value, in `ctx` (the context of the work advancing it: its deadline
+/// and registry hold for the generator's own evaluator's steps).
 ///
 /// For native generators, calls `native_step`.  For closure-based
 /// generators, steps the evaluator until `state.yielded` or `state.done`.
 /// Returns std::nullopt when the generator is exhausted.
-inline std::optional<value_t> generator_next(generator &gen) {
+inline std::optional<value_t> generator_next(exec_context &ctx, generator &gen) {
   if (gen.exhausted)
     return std::nullopt;
 
@@ -65,11 +66,11 @@ inline std::optional<value_t> generator_next(generator &gen) {
   // (generator (lambda () (while t 1)))) would spin here inside one native step, so honour
   // the evaluation deadline (a no-op when none is armed) rather than looping forever.
   gen.state.yielded = false;
-  detail::native_nesting level("generator"); // a nested evaluator
+  detail::native_nesting level(ctx, "generator"); // a nested evaluator
   while (!gen.state.done && !gen.state.yielded) {
-    eval_deadline_check("generator");
+    eval_deadline_check(&ctx, "generator");
     try {
-      gen.evaluator.step(gen.state);
+      gen.evaluator.step(gen.state, ctx);
     } catch (...) {
       if (gen.state.uncaught) // the body raised: the generator is over
         gen.exhausted = true;

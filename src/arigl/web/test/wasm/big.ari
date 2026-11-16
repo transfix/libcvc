@@ -1,0 +1,33 @@
+# ariglx-web's browser smoke (arigl_web_smoke.mjs --wasmdocs): a guest over Chrome's 8 MB. The smoke
+# serves big.wasm as guest.wasm with a 9 MiB custom section after it, so Chrome refuses to compile
+# or instantiate it synchronously on the page's own thread. The browser backend then compiles and
+# instantiates it asynchronously, and the document's load waits (browser_runtime.cpp). init: calls
+# it and reports through the python: block, to stderr (window.ariadneWeb.log).
+
+meta:
+  name: a guest over 8 MB in the page
+  min_libcvc: 3.7.13
+
+requires: [wasm, python]
+
+python:
+  source: |
+    import sys
+
+    @export
+    def report(line):
+        print(line, file=sys.stderr)
+        return line
+
+wasm:
+  module: big.wasm
+  export: [echo, get-x]
+
+init: |
+  (state-set "x" "big")
+  (set echoed (echo 2 "b"))
+  (report (str-concat "ariglx-web: wasm big guest booted " (state-get "booted")
+                      ", echo " (str (nth echoed 0)) " " (nth echoed 1) ", get-x " (get-x)))
+
+root:
+  - text: a guest over 8 MB in the page

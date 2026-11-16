@@ -71,7 +71,9 @@ const double kBackground[3] = {0.09, 0.10, 0.12};
 // So +-40 a channel, with at most 0.002% of the pixels (13) beyond it, holds across Mesa versions
 // and GPUs and still fails a one-step value change or a widget moved by a pixel. macOS CI's Apple
 // Software Renderer left 3-6 px beyond 40 on windows / menus / grid but 40 on widgets and 467 on
-// scene (edges and shading), so those two have macOS goldens (<name>.macos.png) instead.
+// scene (edges and shading), so those two have macOS goldens (<name>.macos.png) instead. With the
+// window chrome's close and maximize glyphs it leaves 7 / 12 on menus / windows but 15 on grid,
+// so grid has one too.
 const Tolerance kTolerance{40, 0.00002};
 
 // A scripted pointer for documents whose interesting state needs one (an open menu, a tooltip).
@@ -93,7 +95,7 @@ const GoldenCase kCases[] = {
     {"menus",
      {{1, 22.0f, 10.0f, -1, false}, {2, 22.0f, 10.0f, 0, true}, {3, 22.0f, 10.0f, 0, false}}},
     // Rest over the "Reset" button: its tooltip shows (no hover delay on the backend's tooltips).
-    {"widgets", {{1, 52.0f, 369.0f, -1, false}}},
+    {"widgets", {{1, 52.0f, 391.0f, -1, false}}}, // under the Windows menu bar (§5.9)
 };
 
 const GoldenCase *findCase(const std::string &name) {

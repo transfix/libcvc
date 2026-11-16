@@ -206,6 +206,18 @@ TEST(AriadneDocFetch, ListsTheFilesADocumentNames) {
   EXPECT_FALSE(refs[3].document); // a colour table, not parsed for more names
 
   EXPECT_EQ(document_references("import: lone.ari\n").size(), 1u);
+  // A wasm: block's guest, the module alone or a map's module:; a cvcpkg: package is no file.
+  const std::vector<DocReference> lone = document_references("wasm: guests/g.wasm\n");
+  ASSERT_EQ(lone.size(), 1u);
+  EXPECT_EQ(lone[0].uri, "guests/g.wasm");
+  EXPECT_FALSE(lone[0].document);
+  const std::vector<DocReference> block =
+      document_references("wasm: { module: g.wasm, export: [echo] }\n");
+  ASSERT_EQ(block.size(), 1u);
+  EXPECT_EQ(block[0].uri, "g.wasm");
+  EXPECT_FALSE(block[0].document);
+  EXPECT_TRUE(document_references("wasm:\n  module: cvcpkg:some-guest\n").empty());
+  EXPECT_TRUE(document_references("windows:\n  - wasm: not_a_block.wasm\n").empty());
   EXPECT_TRUE(document_references("windows: [ { window: W, children: [] }\n", &error).empty());
   EXPECT_FALSE(error.empty());
 }
