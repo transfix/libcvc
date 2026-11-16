@@ -1849,6 +1849,10 @@ int main() {
     };
     chk(approx(key("water.wind_speed"), 12.0) && approx(key("water.whitecaps"), 1.0),
         "water seeded water.* from its props (the wind) and its defaults (the whitecaps)");
+    chk(approx(key("water.gustiness"), 0.25) && approx(key("water.lee"), 1.0) &&
+            approx(key("water.sea_lag"), 20.0) && approx(key("water.sea_fade"), 4.0) &&
+            approx(key("water.current"), 0.0),
+        "water seeded the wind's keys (O13): gustiness, lee, sea_lag, sea_fade, current");
     if (far) {
       const cvc::bounding_box b = far->getBoundingBox();
       auto hf = realized.height_fields.find("world");
