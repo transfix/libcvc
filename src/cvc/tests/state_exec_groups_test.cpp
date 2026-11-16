@@ -1633,9 +1633,15 @@ TEST(Groups, PA01_TwoCallersShareThePool) {
     mine[k]->submit(loop);
     theirs[k]->submit(loop);
   }
+  // The two calls' own ceiling (rule 7), above kCeiling. On a quiet runner a debug build takes
+  // 5-7 s for the whole case. A loaded runner slows it several times over: the pool's workers and
+  // the two callers hand work to each other, and each handoff waits for a CPU. With 66 busy loops
+  // on 22 CPUs a release run took 7x as long, and in debug CI jobs that ran the Groups cases
+  // 2.5-3x slower than usual, 10 s ran out with all three tries unfinished. A hang still fails.
+  constexpr double kTwoCallsCeiling = 60.0;
   const auto drive = [&](std::vector<std::unique_ptr<group_world>> &worlds, bool &all_done) {
     const auto t0 = clock_type::now();
-    while (seconds_since(t0) < kCeiling) {
+    while (seconds_since(t0) < kTwoCallsCeiling) {
       std::vector<exec_group *> live;
       for (auto &gw : worlds)
         if (!gw->done())

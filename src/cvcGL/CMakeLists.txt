@@ -574,6 +574,14 @@ add_executable(cvcgl_wake test/cvcgl_wake.cpp)
 target_include_directories(cvcgl_wake PRIVATE ocean)
 target_link_libraries(cvcgl_wake PRIVATE cvcGL)
 add_test(NAME cvcgl_wake COMMAND cvcgl_wake)
+# Both step 256^2 and 512^2 windows for hundreds of steps of 34-71 passes each. On macOS CI the
+# renderer is Apple's software one, on the CPU: cvcgl_ewave takes 255 s in Release and 287-299 s
+# in Debug, and cvcgl_wake 631 s in Release (CI runs of 2026-11-14 and -15). A Debug or PR ctest
+# gives a test with no TIMEOUT of its own 300 s (ci.yml), so the macOS Debug lane timed out
+# cvcgl_wake on every attempt and cvcgl_ewave on a busy runner. As for cvcgl_volren_node, each
+# gets its own budget with headroom, so only a real hang fails.
+set_tests_properties(cvcgl_ewave PROPERTIES TIMEOUT 1200)
+set_tests_properties(cvcgl_wake PROPERTIES TIMEOUT 1800)
 
 # GeometryNode::updateNormals — the in-place normal fast path the FFT ocean uses
 # to shade its CPU-deformed surface. Renders a lit quad re-normal'd toward vs away
@@ -969,6 +977,13 @@ add_executable(cvcgl_ari_switch test/cvcgl_ari_switch.cpp)
 target_link_libraries(cvcgl_ari_switch PRIVATE cvcGL)
 add_test(NAME cvcgl_ari_switch COMMAND cvcgl_ari_switch)
 
+# arigl snapshot --mp4 / --seconds (record_frames): a falling ball recorded 1 s at 10 fps, the
+# video decoded back and the scene clock and the body checked. Skips without a video encoder.
+add_executable(cvcgl_ari_record test/cvcgl_ari_record.cpp)
+target_link_libraries(cvcgl_ari_record PRIVATE cvcGL)
+add_test(NAME cvcgl_ari_record COMMAND cvcgl_ari_record)
+set_tests_properties(cvcgl_ari_record PROPERTIES SKIP_REGULAR_EXPRESSION "cvcgl_ari_record: SKIP")
+
 # The terminal extension (TerminalScene, roadmap §16.6): a scene rendered offscreen becomes the
 # terminal backend's background under the widgets, and a background drag turns the camera.
 add_executable(cvcgl_terminal_scene test/cvcgl_terminal_scene.cpp)
@@ -1137,6 +1152,13 @@ if(NOT EMSCRIPTEN)
   target_link_libraries(cvcgl_ariadne_pick PRIVATE cvcGL)
   add_test(NAME cvcgl_ariadne_pick COMMAND cvcgl_ariadne_pick)
 endif()
+
+# The volume_slice node (VolumeSliceNode.h): its keys, region reads, pickRay, and (offscreen) its
+# voxels' colours and an overlay drawn on top of it. The rendered part skips where nothing
+# rasterises unless CVC_REQUIRE_RENDER=1.
+add_executable(cvcgl_volume_slice test/cvcgl_volume_slice.cpp)
+target_link_libraries(cvcgl_volume_slice PRIVATE cvcGL)
+add_test(NAME cvcgl_volume_slice COMMAND cvcgl_volume_slice)
 
 # A document's assets (read once, shared buffers) and its scenes: of their own (each a SceneGraph
 # with its own viewport, mirrored by the viewports that name it), and main_view: show. Offscreen;
@@ -1310,6 +1332,11 @@ if(NOT EMSCRIPTEN)
                                           test/gl_upload_counter.cpp)
   target_link_libraries(cvcgl_streaming_overlays PRIVATE cvcGL)
   add_test(NAME cvcgl_streaming_overlays COMMAND cvcgl_streaming_overlays)
+  # type: ribbon / type: draped_link from a document (ribbon_nodes.h): appends that upload the
+  # new point alone, windows and links moved with no upload, value colours, pixels.
+  add_executable(cvcgl_ariadne_ribbons test/cvcgl_ariadne_ribbons.cpp test/gl_upload_counter.cpp)
+  target_link_libraries(cvcgl_ariadne_ribbons PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_ribbons COMMAND cvcgl_ariadne_ribbons)
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(cvcgl_streaming_races test/cvcgl_streaming_races.cpp)
     target_link_libraries(cvcgl_streaming_races PRIVATE cvcGL ${CMAKE_DL_LIBS})
@@ -1504,4 +1531,4 @@ endif()
 # (CMake/CvcHostStack.cmake). Names not built here are skipped.
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
-                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat)
+                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ari_record)

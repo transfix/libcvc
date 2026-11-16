@@ -74,15 +74,15 @@ struct gpu_device_info {
 
 /**
  * @class cuda_device_manager
- * @brief Manages CUDA device selection and provides device information
+ * @brief CUDA device selection and device information
  *
- * Thread-safe singleton that manages GPU device selection per-thread.
- * Each thread can select its own GPU device independently.
+ * Every call asks the CUDA runtime, and the class holds nothing: no instance, no cache, so no
+ * state is shared between apps. The current device is the CUDA runtime's own, per host thread:
+ * each thread can select its own GPU independently.
  */
 class cuda_device_manager {
 public:
-  // Get singleton instance
-  static cuda_device_manager &instance();
+  cuda_device_manager() = delete;
 
   // Query available devices
   static bool cuda_available();
@@ -102,20 +102,6 @@ public:
   // Memory info
   static size_t get_free_memory(int device_id = -1);
   static size_t get_total_memory(int device_id = -1);
-
-private:
-  cuda_device_manager();
-  ~cuda_device_manager();
-
-  // Non-copyable
-  cuda_device_manager(const cuda_device_manager &) = delete;
-  cuda_device_manager &operator=(const cuda_device_manager &) = delete;
-
-  bool _cuda_available;
-  int _device_count;
-  std::vector<gpu_device_info> _devices;
-
-  void initialize();
 };
 
 /**
