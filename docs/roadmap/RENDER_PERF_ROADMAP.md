@@ -245,6 +245,33 @@ work lands. Measured guidance from PR #249's WATER-RENDERING-ROADMAP:
   needs `vtkGPUVolumeRayCastMapper` reading opaque depth, which
   `SceneGraph.cpp:1044-1074` wires but has never been exercised with 500 m
   of mountain inside a cloud slab — a **named risk with a screenshot test**.
+- **VTK's GPU ray caster waits for the GPU at the end of every render,
+  and VolumeNode turns that off.** `vtkOpenGLGPUVolumeRayCastMapper::GPURender`
+  ends with `glFinish()` so the timer around it measures the GPU's work,
+  which only an auto-adjusting render (an interactive one) uses. The CPU
+  waits for the whole frame queued so far, so the CPU's and the GPU's
+  times add instead of overlapping. cvcpkg's VTK (vtk 9.5.0+cvc.5,
+  cy-pca/cvcpkg#625, written to go upstream) adds an opt-in
+  `vtkGPUVolumeRayCastMapper::FinishEveryRender`, and
+  `vtkSmartVolumeMapper`'s, forwarded to its GPU mapper. Off, a render
+  waits only when it adjusts its sample distance.
+  - VolumeNode's mapper and the scene views' twin volumes turn it off,
+    where a compile check finds it (`CVC_VTK_HAS_FINISH_EVERY_RENDER`). An
+    unpatched VTK builds and renders as before. No process-wide state.
+  - terrain_lab.ari (6 volumes), 1280×720, Intel Arc iGPU, Windows MSVC
+    Release, libcvc built against the patched VTK. In-process A/B (the
+    harness turns every volume's mapper back on before each frame for
+    "on"), four interleaved runs each, median frame [range of the runs'
+    medians]: window 79.4 [76.2–80.5] ms on, 49.3 [47.3–52.6] ms off
+    (`render` 50.3 → 11.1 ms); offscreen 69.1 [66.4–71.4] ms on, 26.5
+    [25.4–27.6] ms off (`render` 50.5 → 9.2 ms). The last offscreen
+    frame's pixels hash the same in all eight runs.
+  - In the window `AriRuntime::frame` grows (25.0 → 33.8 ms), probably
+    because GL calls there (uploads, the cascades' passes) now wait for
+    part of the GPU work the volume's `glFinish` used to wait for. Not
+    profiled.
+  - Test: `cvcgl_volume_finish` (the node's mapper has it off; the pixels
+    are the same with it on and off).
 
 ## Phase 7 — Async streaming / on-demand tile load
 
