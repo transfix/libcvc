@@ -85,6 +85,40 @@ TEST(WorldCloudLayer, PeriodCoversTheWorldAndHoldsTheCoverage) {
   EXPECT_EQ(mask.size(), std::size_t(G.shadow_size()) * G.shadow_size());
 }
 
+// F1, the live sky: the coverage and the sun change on a built deck. A new coverage ranks the
+// cells' targets again at once (36 cells at 0.3: 11 of them); a new sun relights the deck, and it
+// then shades and draws exactly as a deck built under that sun, its cells and automaton kept.
+TEST(WorldCloudLayer, CoverageAndSunChangeLive) {
+  cloud_layer L(small(1000.0));
+  EXPECT_EQ(L.occupied(), 22);
+  L.set_coverage(0.3);
+  EXPECT_EQ(L.occupied(), 11);
+  L.set_coverage(1.5); // clamped
+  EXPECT_EQ(L.occupied(), 36);
+  L.set_coverage(0.6);
+  EXPECT_EQ(L.occupied(), 22);
+
+  cloud_layer A(small());
+  cloud_layer_params q = small();
+  q.sun_az = 40.0;
+  q.sun_el = 60.0;
+  const cloud_layer B(q);
+  std::vector<unsigned char> ma, mb, fa, fb;
+  A.shadow_mask(0.7, 0.13, 0.3, ma);
+  B.shadow_mask(0.7, 0.13, 0.3, mb);
+  EXPECT_NE(ma, mb); // another sun, another shadow
+  A.set_sun(40.0, 60.0);
+  EXPECT_DOUBLE_EQ(A.params().sun_az, 40.0);
+  EXPECT_DOUBLE_EQ(A.params().sun_el, 60.0);
+  A.shadow_mask(0.7, 0.13, 0.3, ma);
+  EXPECT_EQ(ma, mb);
+  A.far_density(0.7, {}, fa);
+  B.far_density(0.7, {}, fb);
+  EXPECT_EQ(fa, fb);
+  A.set_sun(40.0, 95.0); // elevation clamped to 89, as at construction
+  EXPECT_DOUBLE_EQ(A.params().sun_el, 89.0);
+}
+
 TEST(WorldCloudLayer, IsDeterministic) {
   const cloud_layer a(small()), b(small());
   std::vector<unsigned char> ma, mb, fa, fb;

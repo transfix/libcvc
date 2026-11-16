@@ -151,6 +151,14 @@ public:
   }
   void set_orographic(double s) { m_p.orographic = s < 0.0 ? 0.0 : s; }
   void set_wind(double az_deg) { m_p.wind_az = az_deg; }
+  // The share of cells holding a cloud, live (clamped to [0, 1]): the cells' targets are ranked
+  // again at once and their clouds fade in or out over fade_s, the automaton untouched.
+  void set_coverage(double share);
+  // The sun, live (elevation clamped to [5, 89] degrees as at construction): the maps are made
+  // again with the new top-light, then their self-shade, shadow patches and far opacity; the
+  // cells, their morphs and the automaton are kept, so the clouds do not jump. A few tens of
+  // milliseconds; nothing when the sun is unchanged.
+  void set_sun(double az_deg, double el_deg);
   // The ground under the deck, for orographic coupling: rows x cols heights, row-major, sample
   // (r, c) at (x0 + c dx, y0 + r dy) (cvc::height_field's layout). It is kept box-averaged to
   // about an eighth of a cloud. Empty: no ground, no coupling.
@@ -241,6 +249,7 @@ private:
   int m_gw = 0, m_grows = 0;
   double m_gx0 = 0.0, m_gy0 = 0.0, m_gsx = 1.0, m_gsy = 1.0;
   void seed_automaton();
+  void make_maps(); // the variants' maps from the params (the constructor's, and set_sun's)
   void rank_cells();
   void fade(double share);
   double ground_at(double x, double y) const;
