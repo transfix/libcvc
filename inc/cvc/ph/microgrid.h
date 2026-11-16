@@ -79,6 +79,15 @@ grid_errors compare_trajectories(const microgrid &g, const std::vector<vecd> &a,
 // The largest absolute line current over a trajectory (row 0 left out).
 double peak_line_current(const microgrid &g, const std::vector<vecd> &x);
 
+// Readout indices: the bus voltages, the DGU currents, the line currents.
+std::vector<int> voltage_channels(const microgrid &g);
+std::vector<int> dgu_current_channels(const microgrid &g);
+std::vector<int> line_current_channels(const microgrid &g);
+
+// The electrical studies' prior over a network's physical state, as fit_history (query.h) takes
+// it: bus voltage 1 +- 0.4 V, DGU current 0.1 +- 0.3 A, line current 0 +- 0.2 A.
+void microgrid_prior(const microgrid &g, vecd &mean, vecd &scale);
+
 } // namespace ph
 } // namespace cvc
 

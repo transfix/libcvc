@@ -194,6 +194,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/ph/compose.h
   ../../inc/cvc/ph/mat3.h
   ../../inc/cvc/ph/microgrid.h
+  ../../inc/cvc/ph/query.h
   ../../inc/cvc/ph/optim.h
   ../../inc/cvc/ph/rff.h
   ../../inc/cvc/ph/rng.h
@@ -494,6 +495,7 @@ set(SOURCE_FILES
   nav/dyn4_ledger.cpp
   ph/compose.cpp
   ph/microgrid.cpp
+  ph/query.cpp
   ph/se2_data.cpp
   ph/se2_model.cpp
   ph/se2_train.cpp
