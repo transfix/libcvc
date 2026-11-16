@@ -47,6 +47,10 @@ University of Texas at Austin for a different license.
 //     and, before each search, flood-filled every seed in it (InitialTime()), which cleared the
 //     same voxels: every voxel a search sets is reached from one of its seeds through voxels it
 //     set;
+//   - the threshold sweep skips the searches that would reach no labelled voxel: after each seed
+//     it classified, the legacy sweep searched again at every threshold from 255 down, and on a
+//     large map those searches, which change nothing, took nearly all its time (Segment() says
+//     how it knows where to start);
 //   - read_data's min and max start from the first voxel, not from -/+99999999;
 //   - three fixes of undefined behaviour: popping an empty heap ends the march (the legacy code
 //     read before the heap's arrays, and on some inputs crashed); a heap that would overflow its
@@ -250,6 +254,15 @@ task genseg_context::Segment() {
   // The threshold sweep: from 255 down to tlow, each automatic seed takes the class of the first
   // labelled front its own front reaches through voxels at or above the threshold; the class then
   // spreads from it through voxels at or above that threshold.
+  //
+  // After each seed it classifies, the legacy sweep went back up to 255 and searched again at
+  // each threshold on the way down; a search that reaches no labelled voxel changes nothing, and
+  // most of them reached none. A search at threshold t can reach one only if, through voxels a
+  // front passes at t (sweep_order()), some unclassified seed connects to a voxel next to a
+  // labelled one: reach_level() finds the highest such t, and the sweep starts there. Every
+  // search it skips would have found nothing, so the labels are the legacy ones. (A search can
+  // still find nothing where reach_level() saw a path, when the times along it pass MAX_TIME or
+  // the walk back to its seed sticks; then the sweep goes down a threshold at a time, as before.)
   begin("classifying");
   if (SeedNum > 0) {
     T_heap.allocate(n);
@@ -258,9 +271,21 @@ task genseg_context::Segment() {
       T_tdata[v] = MAX_TIME;
       GS_UNIT();
     }
+    GS_RUN(sweep_order());
   }
   t_low = 255.0f;
+  bool jump = sweep_shortcut;
   while (SeedNum > 0) {
+    if (jump) {
+      jump = false;
+      int level = -1;
+      GS_RUN(reach_level(level));
+      if (level < 0)
+        break; // every search down to tlow would find nothing
+      // level >= sweep_floor >= tlow and >= 0, so the legacy loop came down to it.
+      if (level < 255)
+        t_low = float(level);
+    }
     GS_RUN(SearchIndex());
     if (search_index == 255) {
       t_low = t_low - 1.0f;
@@ -275,6 +300,7 @@ task genseg_context::Segment() {
     }
     t_high = t_low;
     t_low = 255.0f;
+    jump = sweep_shortcut;
 
     v = search_voxel;
     heap.clear();
@@ -289,6 +315,11 @@ task genseg_context::Segment() {
     }
   }
   seeds_left = SeedNum;
+  sweep_voxels = {};
+  sweep_start = {};
+  uf = {};
+  uf_flags = {};
+  let_in = {};
 
   // The final march: every labelled voxel starts a front at time 0, through voxels at or above
   // tlow.
@@ -452,6 +483,138 @@ void genseg_context::T_GetTime(const voxel_at &m) {
     touched.push_back(c.v);
     T_heap.push(c.v, T_tdata[c.v]);
   }
+}
+
+// v's face neighbours inside the volume (neighbours() stands v in for the missing ones).
+int genseg_context::face_neighbours(std::size_t v, std::size_t out[6]) const {
+  voxel_at nb[6];
+  neighbours(at(v), nb);
+  int k = 0;
+  for (const voxel_at &u : nb)
+    if (u.v != v)
+      out[k++] = u.v;
+  return k;
+}
+
+// The voxels a search front can pass, by level, highest first (Segment()'s threshold sweep). A
+// front passes voxel c at threshold t when every value neighbours(c) gives is at least t
+// (T_GetTime()): at every threshold up to c's level, the floor of the least of them. The
+// automatic seeds (fronts start there at any threshold) and the labelled voxels are left out,
+// and so are levels below sweep_floor, where the sweep never searches.
+task genseg_context::sweep_order() {
+  const std::size_t n = voxel_count();
+  sweep_shortcut = n < std::size_t(uf_none);
+  if (!sweep_shortcut)
+    co_return;
+  // The sweep searches at 255 (even when tlow is above it), then on down to tlow; below 0 every
+  // voxel passes, as at 0.
+  sweep_floor = int(std::ceil(double(tlow)));
+  sweep_floor = sweep_floor < 0 ? 0 : (sweep_floor > 255 ? 255 : sweep_floor);
+  const auto level = [&](std::size_t v) {
+    voxel_at nb[6];
+    neighbours(at(v), nb);
+    float least = dataset[nb[0].v];
+    for (int i = 1; i < 6; ++i)
+      if (dataset[nb[i].v] < least)
+        least = dataset[nb[i].v];
+    return least >= 255.0f ? 255 : (least < 0.0f ? -1 : int(std::floor(least)));
+  };
+  const int levels = 256 - sweep_floor;
+  sweep_start.assign(std::size_t(levels) + 1, 0u);
+  for (std::size_t v = 0; v < n; v++) {
+    if (seed_index[v] == 255) {
+      const int l = level(v);
+      if (l >= sweep_floor)
+        ++sweep_start[std::size_t(256 - l)];
+    }
+    GS_UNIT();
+  }
+  for (int i = 0; i < levels; i++)
+    sweep_start[std::size_t(i) + 1] += sweep_start[std::size_t(i)];
+  sweep_voxels.resize(sweep_start[std::size_t(levels)]);
+  std::vector<std::uint32_t> next(sweep_start.begin(), sweep_start.end() - 1);
+  for (std::size_t v = 0; v < n; v++) {
+    if (seed_index[v] == 255) {
+      const int l = level(v);
+      if (l >= sweep_floor)
+        sweep_voxels[next[std::size_t(255 - l)]++] = std::uint32_t(v);
+    }
+    GS_UNIT();
+  }
+  uf.assign(n, uf_none);
+  uf_flags.assign(n, 0);
+}
+
+// The highest threshold at which SearchIndex() would reach a labelled voxel, MAX_TIME aside: the
+// unclassified seeds come in first (256), then the voxels of sweep_order() a level at a time,
+// each joining the sets of its face neighbours already in; the first level at which a set holds
+// both an unclassified seed and a voxel next to a labelled one is it (256: a seed is next to a
+// labelled voxel). A search front starts at every unclassified seed and passes exactly the voxels
+// in at its threshold, and the search ends at the first labelled voxel next to one it reached.
+// -1 when no level down to sweep_floor has such a set.
+task genseg_context::reach_level(int &level) {
+  level = -1;
+  const auto find = [&](std::uint32_t x) {
+    while (uf[x] != x) {
+      uf[x] = uf[uf[x]];
+      x = uf[x];
+    }
+    return x;
+  };
+  // Lets v in; true once its set holds both.
+  const auto let = [&](std::size_t v) {
+    std::size_t nb[6];
+    const int k = face_neighbours(v, nb);
+    unsigned char flags = seed_index[v] == 254 ? 1 : 0;
+    for (int i = 0; i < k; i++)
+      if (seed_index[nb[i]] < 254)
+        flags |= 2;
+    const auto self = std::uint32_t(v);
+    uf[v] = self;
+    uf_flags[v] = flags;
+    let_in.push_back(self);
+    std::uint32_t root = self;
+    for (int i = 0; i < k; i++) {
+      if (uf[nb[i]] == uf_none)
+        continue;
+      const std::uint32_t r = find(std::uint32_t(nb[i]));
+      if (r == root)
+        continue;
+      if (root == self) {
+        uf[self] = r;
+        uf_flags[r] |= uf_flags[self];
+        root = r;
+      } else {
+        uf[r] = root;
+        uf_flags[root] |= uf_flags[r];
+      }
+    }
+    return uf_flags[root] == 3;
+  };
+  bool found = false;
+  for (std::size_t s = 0; s < unclassified.size() && !found; s++) {
+    if (seed_index[unclassified[s]] == 254 && let(unclassified[s])) {
+      found = true;
+      level = 256;
+    }
+    GS_UNIT();
+  }
+  for (int l = 255; l >= sweep_floor && !found; l--) {
+    const std::uint32_t end = sweep_start[std::size_t(256 - l)];
+    for (std::uint32_t i = sweep_start[std::size_t(255 - l)]; i < end && !found; i++) {
+      const std::size_t v = sweep_voxels[i];
+      if (seed_index[v] == 255 && let(v)) {
+        found = true;
+        level = l;
+      }
+      GS_UNIT();
+    }
+  }
+  for (const std::uint32_t v : let_in) {
+    uf[v] = uf_none;
+    GS_UNIT();
+  }
+  let_in.clear();
 }
 
 task genseg_context::GetGradient(float *edge_mag) {

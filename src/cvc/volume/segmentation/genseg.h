@@ -35,6 +35,7 @@
 
 #include <coroutine>
 #include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <memory>
 #include <utility>
@@ -215,6 +216,12 @@ private:
   task SearchIndex();
   void GetTime(const voxel_at &m);
   void T_GetTime(const voxel_at &m);
+  // The threshold sweep's shortcut (Segment()): sweep_order() sorts the voxels a search front
+  // can pass by the highest threshold at which it can, and reach_level() finds the highest
+  // threshold at which a search would reach a labelled voxel at all, or -1.
+  task sweep_order();
+  task reach_level(int &level);
+  int face_neighbours(std::size_t v, std::size_t out[6]) const;
 
   buffer<float> step_cost; // per voxel, 0.01 exp(ALPHA |grad|)
   buffer<float> T_tdata;   // the sweep's search times
@@ -226,6 +233,20 @@ private:
   // SearchIndex()'s results: the seed it found, and its class (255: none).
   std::size_t search_voxel = 0;
   unsigned char search_index = 255;
+
+  // The sweep's shortcut. A voxel's level is the floor of the least of its six neighbours'
+  // values (as neighbours() gives them): a search front passes it at every threshold up to its
+  // level. sweep_voxels holds the unlabelled voxels that are not automatic seeds, at levels from
+  // 255 down to sweep_floor, highest first; sweep_start[255 - l] is where level l starts, and
+  // sweep_start[256 - sweep_floor] where they end. uf and uf_flags are reach_level()'s
+  // union-find over the voxels it has let in (uf_none: not let in), and a root's flags: 1, its
+  // set holds an unclassified seed; 2, it holds a voxel next to a labelled one.
+  static constexpr std::uint32_t uf_none = 0xffffffffu;
+  bool sweep_shortcut = false;
+  int sweep_floor = 0;
+  std::vector<std::uint32_t> sweep_voxels, sweep_start, uf;
+  std::vector<unsigned char> uf_flags;
+  std::vector<std::uint32_t> let_in;
 };
 
 } // namespace cvc::genseg
