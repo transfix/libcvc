@@ -98,6 +98,26 @@ struct weather_params {
   double rain_onset = 0.35, rain_max = 50.0;
   // A calm event's fade, weather seconds.
   double calm_s = 300.0;
+  // Lightning (O20): a cell strikes at flash_rate a weather second at full intensity, ramping in
+  // from flash_onset, within its rain radius; a share ground_share of the strikes reach the ground
+  // (the rest stay in the cloud).
+  double flash_rate = 0.05, flash_onset = 0.55, ground_share = 0.6;
+};
+
+// A lightning strike: where and when, scheduled by the weather like everything in it, so every
+// client sees the same strike at the same time. Its strokes are in world seconds from the strike
+// (a flash is a fraction of a second whatever the weather's rate).
+struct lightning_strike {
+  std::uint64_t id = 0;    // the seed of its bolt's shape
+  double tau = 0.0;        // weather time
+  double x = 0.0, y = 0.0; // the ground point under it
+  bool ground = true;      // to the ground, or only in the cloud
+  int strokes = 1;         // return strokes, 1..4
+  double at[4] = {0, 0, 0, 0}, dur[4] = {0, 0, 0, 0}, amp[4] = {0, 0, 0, 0};
+  // Its brightness `age` world seconds after it: each stroke a fast rise and a decay with a
+  // flicker (ABYSSAL's), and a faint afterglow; 0 past its life.
+  double intensity(double age) const;
+  double life() const; // world seconds it shows for
 };
 
 enum class weather_state : int { clear = 0, building = 1, storm = 2, clearing = 3 };
@@ -190,6 +210,11 @@ public:
   // dry); the wettest. A storm's rain covers its rain radius at its peak, along its track as its
   // motion now runs it back (cloud_sky's shader computes the same, cloudWet).
   double wetness(double t, double x, double y, double soak, double dry) const;
+  // The lightning strikes of the weather seconds (tau - window, tau], tau the weather time at t:
+  // each cell's alive in it, in 1-second slots, a slot holding one by a hashed draw at the cell's
+  // rate there (flash_rate times a smoothstep of its intensity from flash_onset to 1), at a hashed
+  // time in it and a hashed point in the cell's rain radius. Oldest first. O(cells x window).
+  std::vector<lightning_strike> strikes(double t, double window) const;
 
   // A cell's footprint at distance d from its centre: 1 over its core, falling to 0 at its radius.
   static double footprint(double d, double r);
