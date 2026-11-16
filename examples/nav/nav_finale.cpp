@@ -703,7 +703,7 @@ int main(int argc, char **argv) {
   ImGui::SetCurrentContext(ui.imguiContext());
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
-      cvc_examples::demos_menu("nav_finale");
+      cvc_examples::demos_menu(app, "nav_finale");
       if (ImGui::BeginMenu("Sim")) {
         // Pause is the clock's control (sim.paused): world time, the vehicles and the
         // targets all stop together.
@@ -825,7 +825,7 @@ int main(int argc, char **argv) {
                 rv.min_radius, rv.disc_offsets.size(), rv.disc_radius, reached, N, cusps, planMs);
   }
 
-  while (!view.windowClosed() && !cvc_examples::demo_switch_requested()) {
+  while (!view.windowClosed() && !cvc_examples::demo_switch_requested(app)) {
     double t, dt;
     if (capturing) {
       t = frame / fps;

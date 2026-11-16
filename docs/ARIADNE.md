@@ -989,8 +989,8 @@ scene:
   counted as a widget's is. A key that holds no number counts 0. The most is 4096.
 - **Each copy** is the template with `{i}`, its 0-based index, filled in: in its id (`marker_0`,
   `marker_1`, ...), its `visible:` bind, its tags, its `source:` (a file, an asset, a dataset and
-  its item), its `material: { texture }`, its clips' bound offsets, every string in its props (a
-  custom type's keys), and its children's. An id without `{i}` gets `_{i}`. A copy keeps the
+  its item), its `material: { texture }` (an image, or a live texture's `stream:`), its clips'
+  bound offsets, every string in its props (a custom type's keys), and its children's. An id without `{i}` gets `_{i}`. A copy keeps the
   template's `transform:`, `tags:`, `visible:`, material, `shader:` and children.
 - **The count is live.** At each frame `tick_scene` counts every repeated node again and adds or
   removes copies to match, the last copies going first, without a reload. A copy that goes takes
@@ -4130,7 +4130,25 @@ stream and media verbs, and the `stream_view` widget (ImGui in a window, the ter
 with `--terminal`). In both modes it routes OS signals to `on_signal:` and exits 128 + N
 for one the document does not handle. A snapshot's frames run at `--fps` (20 by default),
 so a live stream delivers into them; in a window the scene clock is fixed, so its frames
-are reproducible. The cvcGL examples
+are reproducible.
+
+**The camera from the command line.** The main view's camera is state under
+`viewers.main.camera` (`CameraController.h`): `mode` (0 orbit, 1 fly, 2 track, 3 map), the orbit
+pose `orbit.center.x|y|z`, `orbit.distance`, `orbit.azimuth`, `orbit.elevation` (degrees), the fly
+pose `fly.position.x|y|z`, `fly.yaw`, `fly.pitch`, and the chase camera's `track.target` (a scene
+node's id), `track.back`, `track.height`. `--set` writes the `viewers.` keys a second time once the
+document has loaded, after the scene's first framing, so they hold:
+
+```
+arigl snapshot --png lake.png --set viewers.main.camera.orbit.center.x=22 \
+  --set viewers.main.camera.orbit.center.y=180 --set viewers.main.camera.orbit.distance=40 \
+  --set viewers.main.camera.orbit.elevation=15 examples/ariadne/documents/terrain_lab.ari
+arigl snapshot --png crate.png --set viewers.main.camera.mode=2 \
+  --set viewers.main.camera.track.target=crate_b --set viewers.main.camera.track.back=14 \
+  --set viewers.main.camera.track.height=5 examples/ariadne/documents/terrain_lab.ari
+```
+
+The cvcGL examples
 (`ariadne_hello`, `ariadne_stream`, `ariadne_conference`, `ariadne_terminal`) still build;
 `arigl` is meant to replace them once it does everything they do.
 
@@ -4339,10 +4357,13 @@ return rt.exit_code();
 
 To route OS signals as well, install your handlers in `RunOptions::on_start` (it runs after
 FTXUI has installed its own), restore them in `on_stop`, and return pending signal names
-from `take_signal`. [`host_signals.h`](../inc/cvc/ariadne/host_signals.h) has the
-`sigaction` traps `ari` uses (`install_signal_traps`, `restore_signal_traps`,
-`take_trapped_signal`, `signal_number`). Signal handlers are process-wide, so libcvc never
-installs them by itself: a host program opts in around its own loop.
+from `take_signal`. [`host_signals.h`](../inc/cvc/ariadne/host_signals.h) has what `ari` uses:
+a `signal_route` in trap mode, made in `on_start` and dropped in `on_stop`, sends the signals to
+one app, and `signals_of(app).take_trapped()` takes them; `signal_number` maps a name to its
+number. The signals an app takes, and its stop flag (a route in stop mode, which `arisrv` and
+`cvc serve` use), are the app's own; only the route, the one pointer a signal handler follows,
+is the process's. Signal handlers are process-wide, so libcvc never routes them by itself: a
+host program opts in around its own loop.
 
 Give the document its command line with `rt.set_document_args(args, "myhost run doc.ari")`
 before `load()`. When the arguments don't match its `args:` block, `load()` throws

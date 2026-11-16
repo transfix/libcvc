@@ -116,6 +116,7 @@ class Classification(unittest.TestCase):
             ("src/cvcGL/GridNode.cpp", "vtkCommonInformationKeyManagerInstance"),
             ("src/cvcGL/ImGuiOverlay.cpp", "vtkTimerLogCleanupInstance"),
             ("src/cvcGL/GridNode.cpp", "vtksys::SystemToolsManagerInstance"),
+            ("src/arigl/main.cpp", "(anonymous namespace)::vtkRenderingCore_AutoInit_Instance"),
             (scan.HEADER, "igl::viridis_cm"),
             (scan.HEADER, "Eigen::internal::manage_caching_sizes()::m_cacheSizes"),
             (scan.HEADER, "pocketfft::detail::threading::max_threads"),
@@ -215,6 +216,23 @@ class Allowlist(unittest.TestCase):
         self.assertEqual({(e.target, e.source, e.kind, e.symbol) for e in entries}, EXPECTED)
         # Objects with a file sort before <header> ones.
         self.assertEqual(entries[-1].source, scan.HEADER)
+
+    def test_reasons_written_once_per_file(self):
+        src = "src/cvc/volume/hdf5_utils.cpp"
+        lines = {"cvc": [f"cvc {src} bss cvc::m", f"cvc {src} guard guard variable for cvc::m"]}
+        text = scan.render_allowlist(lines)
+        first = "# " + scan.WHY_IT_STAYS[src].split("\n")[0]
+        self.assertEqual(text.count(first), 1)
+        self.assertLess(text.index(first), text.index(f"cvc {src} bss"))
+        entries, errors = scan.parse_allowlist(text)
+        self.assertEqual((len(entries), errors), (2, []))
+
+    def test_every_allowlist_line_says_why_it_stays(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, "allowlist.txt"), encoding="utf-8") as fh:
+            entries, errors = scan.parse_allowlist(fh.read())
+        self.assertEqual(errors, [])
+        self.assertEqual([e.line() for e in entries if e.source not in scan.WHY_IT_STAYS], [])
 
 
 class Ratchet(unittest.TestCase):
