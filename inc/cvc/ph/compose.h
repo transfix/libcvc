@@ -54,6 +54,7 @@
 
 #include <cvc/nav/detail/dyn_bike.h> // dyn_ph_books: the energy books every libcvc plant keeps
 #include <iosfwd>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -140,7 +141,7 @@ private:
 // ────────────────────────────────────────────────────── x = (q, p) in R^n x R^n, H = V(q) + 1/2 p
 // . M(q)^-1 p, J = [[0, I], [-I, 0]], R = diag(0, D(q)):
 //
-//   V(q) = 1/2 (q - c) . K (q - c) + v_scale v_net(q)
+//   V(q) = 1/2 (q - c) . K (q - c) + v_scale v_net(q) + sum_i C(q_i)
 //   M(q) = diag(mass)        or diag(softplus(m_net(q)) + m_min)
 //   D(q) = diag(damping)     or diag(softplus(d_net(q)) + d_min)
 //
@@ -174,6 +175,11 @@ enum class conservative_scheme { implicit_midpoint, leapfrog };
 struct canonical_spec {
   int n = 1;
   vecd K, center; // n x n stiffness (symmetric) and its centre; empty K is no quadratic term
+  // A capacitor curve, the same for every coordinate: charge q = sum_j capacitor[j] v^j as a
+  // function of the effort v (an odd polynomial: capacitor[1] > 0, odd entries >= 0, even entries
+  // 0). Its energy C(q) = sum_j capacitor[j] j / (j + 1) v^(j + 1) has dC/dq = v, found from q by
+  // Newton. Empty is none. A linear capacitor of capacitance c is {0, c}: C(q) = q^2 / (2 c).
+  vecd capacitor;
   double v_scale = 1.0;
   mlp v_net; // R^n -> R; empty is none
   vecd mass; // n constants, used when m_net is empty
@@ -203,6 +209,9 @@ public:
   void input_map(const double *x, double *G) const override;
   void damp(double tau, double *x) const override;
   int conserve(double tau, double *x, const solve_opts &o) const override;
+
+  // The capacitor curve's effort for one coordinate's charge: v with q = sum_j capacitor[j] v^j.
+  double capacitor_voltage(double q) const;
 
   // The pieces at q (n each): V, its gradient, the diagonal of M and of D.
   double potential(const double *q, double *grad = nullptr) const;
@@ -337,6 +346,28 @@ struct balance_check {
 };
 balance_check check_balance(const composite &s, const double *x, const double *u);
 
+// ── states ──────────────────────────────────────────────────────────────────────────────────────
+
+// The state whose efforts are e (state_dim values in block order, as readout() gives them: a DGU's
+// voltage and current, a line's current), block by block, by Newton from x0 (zeros when empty)
+// with a central-difference Jacobian. Each update is capped at `cap` in the infinity norm; it
+// stops when every effort is within `tol`. The physical-to-storage map of a component model.
+struct storage_result {
+  vecd x;
+  bool converged = false;
+  int iterations = 0;    // the most any block took
+  double residual = 0.0; // the largest |effort - e| at the end
+};
+storage_result storage_from_efforts(const composite &s, const vecd &e, const vecd &x0 = {},
+                                    int max_iter = 30, double tol = 1e-9, double cap = 2.0);
+
+// A candidate's start from the actual system's state: each candidate block whose name is a block
+// of `now` keeps that block's state (their laws must have the same state size); every other
+// block takes its state from `added`, by name. Throws std::invalid_argument for a block with
+// neither, or a state of the wrong size.
+vecd assign_state(const composite &now, const vecd &x_now, const composite &candidate,
+                  const std::map<std::string, vecd> &added = {});
+
 // check_balance's worst case over `samples` random states and inputs (normal, standard deviation
 // `scale`, from `seed`).
 struct balance_summary {
@@ -362,6 +393,13 @@ void write_csv(std::ostream &out, const composite &s, const transition_opts &o,
 // "laws": {name: law}, "blocks": [{"name", "law"}], "couplings": [{"type": "pair" | "incidence" |
 // "skew", ...}]}. The fields are in docs/PH_COMPOSE.md. Both throw std::runtime_error on a file
 // they cannot read.
+
+// The same formats written out: every law in full (numbers to 17 digits), each shared law once,
+// and the pairing as "pair" couplings (its upper triangle), so a file read back gives the same
+// composite. A block without a name is written as "b<index>". Laws other than linear_law and
+// canonical_law throw std::invalid_argument.
+std::string law_json(const block_law &law);
+std::string system_json(const composite &s);
 
 law_ptr load_law(const std::string &path);
 law_ptr parse_law(const std::string &json);

@@ -14,7 +14,9 @@
 //   g.check(100)    # the power balance at random states: {"rate_error", "internal_error", ...}
 
 %{
+#include <algorithm>
 #include <cvc/ph/compose.h>
+#include <cvc/ph/microgrid.h>
 
 namespace pycvc {
 
@@ -55,6 +57,8 @@ PyObject *ph_list(const double *v, size_t n) {
 %feature("kwargs") pycvc::ph_composite::check;
 %feature("kwargs") pycvc::ph_composite::field;
 %feature("kwargs") pycvc::ph_composite::powers;
+%feature("kwargs") pycvc::ph_composite::storage;
+%feature("kwargs") pycvc::ph_microgrid_json;
 
 %inline %{
 namespace pycvc {
@@ -180,6 +184,21 @@ public:
     return d;
   }
 
+  // The state whose efforts are e (storage_from_efforts): {"x", "converged", "iterations",
+  // "residual"}. For a microgrid, e is each DGU's voltage and current, then each line's current.
+  PyObject *storage(PyObject *e, PyObject *x0 = nullptr, int max_iter = 30, double tol = 1e-9) const {
+    const cvc::ph::storage_result r =
+        cvc::ph::storage_from_efforts(s_, state(e), ph_floats(x0, "x0"), max_iter, tol);
+    PyObject *x = ph_list(r.x.data(), r.x.size());
+    PyObject *d = Py_BuildValue("{s:O,s:O,s:i,s:d}", "x", x, "converged", r.converged ? Py_True : Py_False,
+                                "iterations", r.iterations, "residual", r.residual);
+    Py_DECREF(x);
+    return d;
+  }
+
+  // The system as cvc-ph-system/1 text (system_json).
+  std::string system_json() const { return cvc::ph::system_json(s_); }
+
   // The power balance at random states (check_balance_random): the worst relative errors.
   PyObject *check(int samples = 100, unsigned seed = 1, double scale = 1.0) const {
     const cvc::ph::balance_summary b = cvc::ph::check_balance_random(s_, samples, seed, scale);
@@ -207,6 +226,50 @@ private:
     return v;
   }
 };
+
+// A DC microgrid (make_microgrid) as cvc-ph-system/1 text, for ph_composite: `dgus` buses, lines
+// as (from, to) pairs (a chain when None), resistances and inductances (one value or one per line;
+// the last repeats), and the DGU law: "reference" (q = 2.2 (v + v^3/3), 1.8 H, 1.2 ohm) or
+// "linear" (C, L and R from dgu_c, dgu_l, dgu_r).
+std::string ph_microgrid_json(int dgus, PyObject *edges = nullptr, PyObject *line_r = nullptr,
+                              PyObject *line_l = nullptr, const std::string &dgu = "reference",
+                              double dgu_c = 2.2, double dgu_l = 1.8, double dgu_r = 1.2) {
+  std::vector<cvc::ph::line_spec> lines;
+  if (!edges || edges == Py_None) {
+    for (int i = 0; i + 1 < dgus; ++i)
+      lines.push_back({i, i + 1, 0.0, 1.0});
+  } else {
+    PyObject *seq = PySequence_Fast(edges, "edges");
+    if (!seq)
+      throw std::invalid_argument("edges is a sequence of (from, to) pairs");
+    for (Py_ssize_t k = 0; k < PySequence_Fast_GET_SIZE(seq); ++k) {
+      const std::vector<double> p = ph_floats(PySequence_Fast_GET_ITEM(seq, k), "an edge");
+      if (p.size() != 2) {
+        Py_DECREF(seq);
+        throw std::invalid_argument("each edge is a (from, to) pair");
+      }
+      lines.push_back({int(p[0]), int(p[1]), 0.0, 1.0});
+    }
+    Py_DECREF(seq);
+  }
+  std::vector<double> rs = ph_floats(line_r, "line_r"), ls = ph_floats(line_l, "line_l");
+  if (rs.empty())
+    rs = {0.3, 0.4, 0.5};
+  if (ls.empty())
+    ls = {0.8};
+  for (size_t k = 0; k < lines.size(); ++k) {
+    lines[k].R = rs[std::min(k, rs.size() - 1)];
+    lines[k].L = ls[std::min(k, ls.size() - 1)];
+  }
+  cvc::ph::law_ptr law;
+  if (dgu == "reference")
+    law = cvc::ph::reference_dgu();
+  else if (dgu == "linear")
+    law = cvc::ph::linear_dgu(dgu_c, dgu_l, dgu_r);
+  else
+    throw std::invalid_argument("dgu is \"reference\" or \"linear\", not " + dgu);
+  return cvc::ph::system_json(cvc::ph::make_microgrid(law, dgus, lines).system);
+}
 
 } // namespace pycvc
 %}

@@ -122,6 +122,18 @@ tests:
     (assert (= (state-get "chat.channel") ""))
     (chat-ui-send "chat" "tok" "hi all")
     (assert (= (state-get "fake.posted") ":hi all"))
+  a_direct_message_goes_to_the_feed: |
+    ; the room is shown: a new message from bob is unread, and goes to the host's feed (§5.24)
+    (fake-add "bob" "Bob" "are you there?")
+    (step)
+    (assert (= (state-get "chat.unread.bob") "1") (state-get "chat.unread.bob"))
+    (assert (= (state-get "chat.dm_peer") "bob"))
+    (assert (= (get-attr (notify-status) "unread") 1))
+    (assert (= (get-attr (nth (notify-list 1) 0) "text") "N-bob sent you a message"))
+    ; a click on it opens bob's conversation
+    (chat-ui-open-dm)
+    (assert (= (state-get "chat.channel") "bob"))
+    (state-set "chat.channel" "")
   the_users_rows_follow_the_roster: |
     (state-set "chat.unread.bob" "2")
     (room-users-step "peer" "r" "chat")

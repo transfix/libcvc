@@ -114,6 +114,13 @@ bool parse_state_set(const std::string &arg, std::pair<std::string, std::string>
 void apply_state_sets(cvc::app &app, const std::string &prefix,
                       const std::vector<std::pair<std::string, std::string>> &sets);
 
+// The --set entries for the views: those under `viewers.` (a camera's mode and pose, its track
+// target, a HUD, the UI), relative or absolute. A host that draws a scene writes them again once
+// the document has loaded: realizing the scene frames the main camera, which overwrites the pose
+// (orbit.*, fly.*) --set wrote before the load.
+std::vector<std::pair<std::string, std::string>>
+view_state_sets(const std::vector<std::pair<std::string, std::string>> &sets);
+
 // --exec-policy: write it to the app tree's state_exec.policy, which the app reads once, when it
 // first builds its scheduler (app::exec_scheduler). So call it on a fresh app, before anything
 // builds that: before AppRuntime::enable_net, register_quit or register_verb.

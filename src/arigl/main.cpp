@@ -432,6 +432,14 @@ ari::Widget keys_menu_item() {
   return ari::menu_toggle("Controls...", std::string("tree.") + ari::kKeysWindow + ".open");
 }
 
+// Settings' item that shows or hides the tray's clock (§5.22): the key the runtime reads, seeded
+// from the document's `clock:` or the host's default before the menu can seed it.
+ari::Widget clock_menu_item() { return ari::menu_toggle("Show clock", "ariadne.tray.clock", true); }
+// §5.24 the tray's bell, which shows while the notification feed has entries.
+ari::Widget bell_menu_item() {
+  return ari::menu_toggle("Show notifications", "ariadne.tray.bell", true);
+}
+
 // The camera's mouse settings and distance, for the Controls window: it reads them from its own
 // state. Mouse look needs a mouse: a touch screen keeps dragging (a tap there must stay a tap on
 // the scene).
@@ -2097,8 +2105,8 @@ int run_window(const ari::HostOptions &o) {
     if (!gallery.empty())
       menus.push_back(gallery.menu(doc));
     menus.push_back(ari::AppRuntime::document_menus(gallery.empty() ? "" : "Document"));
-    menus.push_back(
-        ari::menu("Settings", {keys_menu_item(), ari::separator(), ari::custom("scene_settings")}));
+    menus.push_back(ari::menu("Settings", {keys_menu_item(), clock_menu_item(), bell_menu_item(),
+                                           ari::separator(), ari::custom("scene_settings")}));
     return menus;
   };
   // The Controls window's UI size: the overlay's own scale in the state tree, which it applies at
@@ -2113,6 +2121,7 @@ int run_window(const ari::HostOptions &o) {
       ui_size.scroll_friction = ui_path + ".scroll_friction";
     rt.app_runtime().set_host_ui_size(std::move(ui_size));
   }
+  rt.app_runtime().runtime().set_clock(o.command == "run"); // the tray's clock (§5.22)
   rt.app_runtime().set_host_menus(host_menus(o.doc));
   std::vector<ari::KeyBinding> host_keys = camera_keys(cam);
   if (conf.active) // walking our avatar in the room
@@ -2321,6 +2330,8 @@ int run_window(const ari::HostOptions &o) {
 #endif
   if (const int status = load_document(rt, o); status >= 0)
     return status;
+  // --set's view keys again: realizing the scene framed the camera over the pose they set.
+  ari::apply_state_sets(app, sg.getStatePrefix(), ari::view_state_sets(o.sets));
   note_misplaced(rt.app_runtime(), o);
 #ifdef CVC_ARIADNE_PYTHON
   return g_python->run_loop(after_load); // the document's python: may not run another inside it
@@ -2392,7 +2403,10 @@ int run_terminal(const ari::HostOptions &o) {
   rt.register_quit(); // on: quit and (quit [code]): the exit status is the code
   // As in a window, Settings after the document's own menus opens the Keys window (the terminal's
   // camera has no keys to list; the scene's display settings are ImGui's).
-  rt.set_host_menus({ari::AppRuntime::document_menus(), ari::menu("Settings", {keys_menu_item()})});
+  rt.set_host_menus(
+      {ari::AppRuntime::document_menus(),
+       ari::menu("Settings", {keys_menu_item(), clock_menu_item(), bell_menu_item()})});
+  rt.runtime().set_clock(o.command == "run"); // the tray's clock (§5.22)
   rt.set_host_keys({});
   rt.set_document_args(o.doc_args, "arigl " + o.command + " --terminal " + o.doc,
                        /*validate=*/o.command != "check");
@@ -2429,6 +2443,8 @@ int run_terminal(const ari::HostOptions &o) {
   ari::apply_state_sets(app, prefix, o.sets); // --set: before the nodes seed theirs
   if (const int status = load_document(rt, o); status >= 0)
     return status;
+  // --set's view keys again: realizing the scene framed the camera over the pose they set.
+  ari::apply_state_sets(app, prefix, ari::view_state_sets(o.sets));
   note_misplaced(rt, o);
   if (o.command == "check")
     return rt.exit_code(); // an init: that called (quit code)

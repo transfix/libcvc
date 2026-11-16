@@ -542,7 +542,9 @@ arigl's browser loop yields with `emscripten_sleep(0)` under Asyncify (the
 - Phase W1 measures it. The fallbacks, in order:
   1. `ASYNCIFY_REMOVE` for CPython's eval, which is safe because Python never sleeps;
   2. drive the `ariglx-web` page from `emscripten_set_main_loop` instead of Asyncify;
-  3. JSPI, where the browser has it.
+  3. JSPI, where the browser has it. Measured in G2 (§8.5, "As measured: JSPI against Asyncify"):
+     a JSPI host needs wasm exceptions throughout, since libcvc's JS exceptions put `invoke_*`
+     frames on the stack, which JSPI can't suspend.
 
   `-sASYNCIFY_IGNORE_INDIRECT` stays a checklist, never a default (CVCGL_WASM.md).
 
@@ -2074,8 +2076,80 @@ and the process's next step resumes it. Two mechanisms, one contract:
   - both survivors' results matched unsliced runs.
 
   Asyncify doubled that tiny guest (444 → 893 bytes), so measure it on real ones.
-- **JSPI** (`WebAssembly.Suspending`) could replace Asyncify in the browser later. It resumes
-  through the event loop, so measure it against Asyncify first.
+- **As measured: JSPI against Asyncify (G2's last part).** JSPI (`WebAssembly.Suspending` and
+  `WebAssembly.promising`) pauses a guest without transforming it, so the guest would be installed
+  metered only. But it resumes the guest only from a promise's reaction, so a host that steps a
+  guest a slice at a time has to wait for each slice.
+  - **The bench:** `src/ariadne_wasm/bench/jspi_bench.mjs`, in headless Chrome.
+    - The guests are five C workloads (`jspi_guest.c`), each run four ways: plain, metered, metered
+      then Asyncify (today's install), and metered under JSPI. Each runs unsliced, then sliced.
+    - A host (`jspi_host.cpp`) polls a guest from N frames down. It's built under Asyncify or
+      JSPI, with no exceptions, JS exceptions or wasm exceptions.
+    - The bench checks every variant's result and gas against the others'.
+  - **Conditions.** Measured on sandipaws on 2026-11-15:
+    - Chrome 157, with Chrome's processes at High priority on a busy machine.
+    - Each number is the median of 9 rounds, each round timing every variant once.
+  - **Size.** Asyncify more than doubles a metered guest:
+    - the bench's own guest, from 7.5 to 20.9 KiB;
+    - `ari_wasm_meter.wasm` (metered), from 0.4 to 1.0 MiB;
+    - `ariadne_wasm_browser_test.wasm` (9.1 MiB as built), from 14.3 to 30.3 MiB metered, or 3.9 to
+      7.8 MiB gzipped.
+
+    Asyncify took 594 s on that last one, against the meter's 0.3 s (the machine was busy). A JSPI
+    guest is the metered one.
+  - **Speed.** Unsliced, against the metered guest:
+    - Asyncify runs call-heavy code at half speed or less: `fib` takes 30.1 ms against 14.1, and
+      `qsort` 1495 against 530.
+    - It slows straight-line code less: SHA-256 takes 80 ms against 62, the interpreter 370 against
+      339, and a loop 52 against 46.
+    - Under JSPI the guest runs at the metered speed.
+  - **A pause.**
+    - Asyncify's pause grows with the stack it unwinds and rewinds: 0.5 µs at the top, 3.7 µs 48
+      frames down.
+    - JSPI's is a stack switch and two promise reactions, about 1.0 µs at any depth.
+    - The default slice is 64,000 gas, which is 7 to 37 µs of these workloads' metered code. So a
+      pause at the top of the stack is 1 to 15% of a slice either way. 48 frames down, an Asyncify
+      pause is 10 to 50% of one.
+  - **The host's wait.**
+    - **Where `ariglx` is at a slice.** A probe of the smoke's `guest.ari` page found 34 of its
+      frames below the guest. 13 of them are calls through Emscripten's `invoke_*`, which come from
+      libcvc's JS exceptions.
+    - **Why `ariglx` can't be a JSPI host as it's built.** JSPI can't suspend a stack with JS
+      frames on it. Under `-sJSPI`, Emscripten makes every `invoke_*` a suspending import, so V8
+      refuses one called below another, whether or not anything waits. A JSPI host built as
+      libcvc builds doesn't run at all: "trying to suspend JS frames".
+    - **So today's `ariglx` would wait through its own Asyncify.** Every promise in the wait
+      settles from a microtask, which runs before the page renders or takes its next event, so the
+      wait doesn't give up the frame. A poll of `spin` at 1,000-gas slices costs:
+
+      | host | guest | 1 frame | 34 frames (`ariglx`'s) | 128 frames |
+      |---|---|---|---|---|
+      | Asyncify, JS exceptions (as `ariglx`) | Asyncify | 0.6 µs | 0.7 µs | 0.5 µs |
+      | Asyncify, JS exceptions (as `ariglx`) | JSPI | 3.6 µs | 11.4 µs | 24.8 µs |
+      | JSPI, wasm exceptions | JSPI | 0.6 µs | 0.6 µs | 0.6 µs |
+
+  - **In today's `ariglx`, Asyncify stays the browser's way to pause a guest.** A JSPI guest there
+    pays about 11 µs a slice, against Asyncify's 0.7. What that buys back is Asyncify's own cost to
+    the guest's code, per default slice:
+    - for `fib` and `qsort`, 36 and 41 µs, so JSPI wins;
+    - for the loop, SHA-256 and the interpreter, 1 to 3.5 µs, so JSPI loses.
+  - **A page on JSPI throughout would win everywhere.**
+    - With wasm exceptions, the host's wait is 0.6 µs at any depth.
+    - The guests skip Asyncify.
+    - The host's own Asyncify goes too, and with it §5.3's W1 costs: CPython at half speed, and 8%
+      of the module.
+
+    What it needs:
+    - libcvc and every wasm package rebuilt with `-fwasm-exceptions`. Rust's Emscripten target
+      needs the same move to link into cvcdbg's wasm build, since Rust 1.93.
+    - JSPI in the browser: Chrome has it since 137 and Safari from 27, and Firefox planned it for
+      153.
+    - The Asyncify build kept for the browsers without JSPI.
+
+    It isn't planned yet (§9, item 13).
+  - **Natively,** wasmtime would run the metered guest without the Asyncify it carries now
+    (unmeasured). G3's WAMR needs the Asyncify build, so the install keeps it whatever the browser
+    does.
 
 **The DSL's limits, mapped.** The caps are the host's settings, read per activation as the DSL's
 are. A document can lower them for its guests, never raise them.
@@ -2384,8 +2458,13 @@ hook is declared in the block's `hooks:`, or registered by `ari_init` through th
 12. **Where the wasm runtime lives** (§8.2). WAMR is small: cvcpkg's static build is a 355 KB
     archive, so it could go into the stock hosts. wasmtime is far larger and belongs in the `x`
     hosts. One runtime everywhere, or the choice per host?
-13. **Asyncify's cost** (§8.5). It doubled a tiny test guest. Measure size and speed on real
-    guests, and JSPI against it in the browser.
+13. **Asyncify's cost** (§8.5). Measured in G2's last part:
+    - Asyncify more than doubles a metered guest and runs call-heavy code at half speed. JSPI
+      avoids both.
+    - But today's `ariglx` (Asyncify, JS exceptions) waits 11 µs a slice for a JSPI guest, so
+      Asyncify stays.
+    - **Open:** moving the page to wasm exceptions and JSPI throughout. That would take Asyncify
+      out of host and guests where the browser has JSPI, and needs every wasm package rebuilt.
 14. **Gas calibration** (§8.5). `wasm_gas_per_step` has to be measured, as
     `limits.async_steps_per_cpu_ms` was. A wrong rate makes guests too cheap or too dear against
     DSL programs under the same caps.
@@ -2451,7 +2530,7 @@ for it.
 | S7 | **Done** (transfix/libcvc#1177). `ServerHarness` for plain `python`, and the end-to-end CI test (§6.5.8). As built: `pycvc.ariadne.testing.ServerHarness` and `HarnessClient` over arisrvx's own `_Program` dispatch (authenticate, read_scope, role gates, `ctx`, timeouts, `CallError`, per-principal limits; values through pycvc's capsules; `publish=` and the read scope bound what a client reads; `host.disconnect` and `host.refresh_scope` reach it), and `relay_pair.py --client-net-asgi`. Tests: `pycvc_ariadne_harness`, `arisrvx_echo_service` | S2, S5 | S |
 | L1 | Lua bindings (SWIG), the Lua engine in the `x` hosts, Lua for client code on `arisrvx` | the engine interface (P1b, done) | L |
 | G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Second part done:** `ari_init` at load and calls from `init:` (`ScriptLane::run`). **Third part done:** host objects by handle, read a region at a time (§8.4.1), and `MemoryError`. **Fourth part done:** a call from a program as its own sliced native call (`SlicedCall`). **Fifth part done:** the pump budget counts what the slices charge. **Sixth part done:** the instance waited for through the lock manager (`ActivationOptions::lock`), and `RecursionError` for a call back into it. **Seventh part done:** the key, pointer, signal and message hooks (`Runtime::set_event_tap`, `ScriptLane::on_key` and the rest). **Eighth part done:** the state imports as fast paths beside `call` (`ScriptSlice::call_now`), and §8.4.1's writes (`volume_write`, `volume_new`, `data.write`). **Ninth part done:** wasmtime in the `arix` and `ariglx` recipes, linked by name. **Tenth part done:** `--exec-policy` and pure exports on the read lane (`ScriptLane::export_pure`). **Done.** | the engine interface (P1b, done) | L |
-| G2 | The install-time transform (§8.5: gas injection; Asyncify) and the browser backend: the same slices, limits, access and hooks in a single-threaded page. **First part done** (§8.5, "Gas"): `cvc_ariadne_wasm_transform` (binaryen's gas checks and Asyncify, from emsdk), the browser backend on the page's own WebAssembly, the memory cap, `GuestMemory` as copies, and `ariadne_wasm_browser_test` under node with its native twin on wasmtime. **Second part done:** the gas pass (`meter.h`, in C++ rather than through the Rust crates): weighted counters, natively on wasmtime and in the transform before Asyncify, so a call counts the same in both and however it is sliced. **Third part done:** the `ariglx-web` wiring: `wasm:` blocks in the page, the guest fetched with the document, a guest over Chrome's 8 MB compiled and instantiated asynchronously, and two guest documents in ci.yml's headless-Chrome smoke. **Left:** JSPI measured against Asyncify | G1 | L |
+| G2 | The install-time transform (§8.5: gas injection; Asyncify) and the browser backend: the same slices, limits, access and hooks in a single-threaded page. **First part done** (§8.5, "Gas"): `cvc_ariadne_wasm_transform` (binaryen's gas checks and Asyncify, from emsdk), the browser backend on the page's own WebAssembly, the memory cap, `GuestMemory` as copies, and `ariadne_wasm_browser_test` under node with its native twin on wasmtime. **Second part done:** the gas pass (`meter.h`, in C++ rather than through the Rust crates): weighted counters, natively on wasmtime and in the transform before Asyncify, so a call counts the same in both and however it is sliced. **Third part done:** the `ariglx-web` wiring: `wasm:` blocks in the page, the guest fetched with the document, a guest over Chrome's 8 MB compiled and instantiated asynchronously, and two guest documents in ci.yml's headless-Chrome smoke. **Fourth part done:** JSPI measured against Asyncify (`src/ariadne_wasm/bench`, §8.5): Asyncify stays, since `ariglx` waits 11 µs a slice for a JSPI guest, and a page on JSPI throughout needs wasm exceptions (§9, item 13). **Done.** | G1 | L |
 | G3 | The WAMR backend, on G2's transform: guests on the BSDs | G2 | S |
 | G4 | Client guests on `arisrvx` (§6.3, §8.6), with the optional Worker backstop in the browser. **First part built:** `server: client_guests:` and `(room-run module arg ...)` (the module's bytes on `room-call`'s path as `guest` and `export`); arisrvx with wasmtime runs the guest's export as its client's program (`ScriptEngine::client_activation`, `run_as_program_work`): the S3 chroot, environment, write gate, caps and one at a time; compiled on the app's pool, the last 16 kept; a start function refused; linear memory capped at `memory_mb` (16 MiB by default); `data.write` refused; stock arisrv refuses the document. Tests: `ServerBlockTest.ClientGuestsTakeOnOffOrCaps`, `ServerDocumentTest.AClientGuest*` (a fake engine), `WasmClientGuestTest.*`, `RoomCallsTest.ParseCall`, `arisrvx_room_call_guest`, `arisrv_doc_client_guests_need_arisrvx`. **Left:** the Worker backstop in the browser, wasmtime in the arisrvx recipe | G1, S2 | M |
 | G5 | Guest packages on cvcpkg (§8.8): the `wasi` platform, install and enter, the import manifest and consent | G1, G2 | M |
