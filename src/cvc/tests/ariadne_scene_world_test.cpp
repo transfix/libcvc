@@ -1704,6 +1704,11 @@ TEST(AriadneWorldVehicles, ABlendIsTheWeightedCommandAndAForcePushesTheDrive) {
   EXPECT_EQ(zero.w->world().state_hash(), plain.w->world().state_hash());
 }
 
+// Intents may be set from another thread while the world steps: a writer keeps replacing a's
+// intent (and blending b's) as the frames run, and the last one set wins. The frames start once
+// the writer has landed its first intent. A thread may start late: on a busy machine all 120
+// frames (a few tens of milliseconds) can pass before it runs. Then none of its intents reach a,
+// which sits still, and only the last 6 frames move it (0.108 m/s, what Windows CI read on #1318).
 TEST(AriadneWorldVehicles, IntentsMaybeSetFromAnotherThread) {
   REQUIRE_YAML();
   if (!jolt())
@@ -1720,28 +1725,43 @@ TEST(AriadneWorldVehicles, IntentsMaybeSetFromAnotherThread) {
   const std::uint64_t b = spawn_at(v, "nav@1", 20.0, 20.0);
   SceneClockDriver clock(app, resolved_clock(r.scene));
   std::atomic<bool> done{false};
+  std::atomic<int> landed{0}; // the writer's intents a took
   std::thread writer([&] {
     for (int i = 0; !done.load(); ++i) {
       entity_intent in;
       in.command = entity_intent::mode::replace;
       in.accel = 1.0 + (i % 3);
       in.force_x = (i % 5) * 0.5;
-      v.set_intent(a, in);
+      if (v.set_intent(a, in))
+        landed.fetch_add(1);
       in.command = entity_intent::mode::blend;
       v.set_intent(b, in);
       (void)v.intent(a);
     }
   });
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (landed.load() == 0 && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  const int before = landed.load();
   run(app, *w, clock, 120);
+  const int during = landed.load() - before;
   done = true;
   writer.join();
+  const std::vector<entity_info> all = v.entities();
+  const bool there =
+      std::any_of(all.begin(), all.end(), [a](const entity_info &e) { return e.id == a; });
+  const double moving = there ? entity(v, a).speed : -1.0;
+  ASSERT_GT(before, 0) << "the writer landed no intent in 10 s";
+  EXPECT_GT(during, 0) << "no intent landed while the frames ran";
   entity_intent last;
   last.command = entity_intent::mode::replace;
   last.accel = 2.5;
   ASSERT_TRUE(v.set_intent(a, last));
   run(app, *w, clock, 6);
   EXPECT_EQ(entity(v, a).intent, last);
-  EXPECT_GT(entity(v, a).speed, 0.5);
+  EXPECT_GT(entity(v, a).speed, 0.5)
+      << "after the 120 threaded frames a's speed was " << moving << " m/s, " << during
+      << " intents landed during them, and a " << (there ? "existed" : "was missing");
 }
 
 TEST(AriadneWorldVehicles, AServerDocumentSteersThroughItsPublishedNamespace) {
