@@ -252,36 +252,24 @@ work lands. Measured guidance from PR #249's WATER-RENDERING-ROADMAP:
   far, and the CPU's and the GPU's times add instead of overlapping. Only
   an auto-adjusting draw (an interactive render: the window's desired
   update rate at or above the mapper's interactive rate) uses that time.
-  `cvc::gl::OverlappingVolumeMapper` (VolumeNode's mapper, and the scene
-  views' twin volumes) makes that `glFinish` a no-op during every other
-  draw, by swapping glad's pointer for the length of its own `Render`. The
-  pixels are the same. WebAssembly keeps VTK's behaviour. Test:
-  `cvcgl_volume_overlap` checks no `glFinish` on still renders, VTK's kept
-  on interactive ones, and byte-identical pixels against
-  `vtkSmartVolumeMapper`.
   - terrain_lab.ari, 1280×720, Intel Arc iGPU (Windows, MSVC Release),
     timed in-process around `AriRuntime::frame` and `render` and sampled
     every millisecond: the wait was 45–48 % of all samples, about 25 ms of
-    a 45 ms offscreen frame.
-  - With the wake window's step tables kept per step as well
-    (OCEAN-AND-WEATHER-ROADMAP.md, the wake window), four interleaved runs
-    each on a quiet machine, median frame [range of the runs' medians]:
-
-    | | `arigl run` (window) | offscreen (`arigl snapshot`'s path) |
-    |---|---|---|
-    | master | 62.9 ms [62.5–63.0] | 44.2 ms [43.1–45.4] |
-    | both changes | 27.1 ms [26.6–33.2] | 18.1 ms [17.9–22.9] |
-    | #1322 alone | 54.3 ms [51.3–55.2] | 39.4 ms [38.2–42.3] |
-    | both changes and #1322 | 20.2 ms [17.6–25.2] | 13.0 ms [12.5–15.4] |
-
-    `arigl snapshot` of 400 unpaced frames: 30–33 s on master, 21–22 s
-    with both changes, 18–20 s with #1322 too. Its PNG is md5-identical
-    in all four builds, and it reads back only its last frame.
+    a 45 ms offscreen frame. Skipping it (in a trial since dropped) took
+    the offscreen frame to 18 ms and the window's (`arigl run`) from 63 ms
+    to 27 ms, with byte-identical pixels.
+  - The fix goes into VTK, not libcvc, which keeps no process-wide state to
+    work around it. cvcpkg's VTK gets an opt-in
+    `vtkGPUVolumeRayCastMapper::FinishEveryRender` (and
+    `vtkSmartVolumeMapper`'s, forwarded to its GPU mapper), written to go
+    upstream. On, the default, every render waits as before; off, only a
+    render that adjusts its sample distance waits. VolumeNode then turns it
+    off per mapper, where the VTK it is built against has it.
   - What is left: the shadow bake every 4th frame (about 30 ms of `render`
     on those frames against 5–6 ms on the rest, much of it VTK rebuilding
-    each mapper's shader strings as the render passes change, so p90 stays
-    at 42–49 ms), and mappers' `GetBounds` updating their pipelines for
-    three callers a frame (about 3 ms).
+    each mapper's shader strings as the render passes change), mappers'
+    `GetBounds` updating their pipelines for three callers a frame (about
+    3 ms), and the scene's physics step (#1322).
 
 ## Phase 7 — Async streaming / on-demand tile load
 
