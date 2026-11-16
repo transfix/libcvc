@@ -757,11 +757,13 @@ The built-in top-level keys (`is_builtin_block`,
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs  requires
 init  on_tick  on_key  on_pointer  on_signal  keys  units  import  channels  lint  args
-windows_menu  tests  functions  data  assets  scenes
+windows_menu  tests  functions  data  assets  scenes  clock  menu_collapse  notifications
 ```
 
-`tests:` is read only by `ari test` (§13). `assets:` and `scenes:` are §5.18's shared meshes and
-scenes of their own.
+`tests:` is read only by `ari test` (§13). `clock:` is the tray's clock (§5.22).
+`menu_collapse:` says when the menu bar's menus fold into one (§5.23). `notifications:` shows
+the tray's bell or not (§5.24). `assets:` and
+`scenes:` are §5.18's shared meshes and scenes of their own.
 
 Any **other** top-level key is dispatched to a parser registered via
 `register_ari_block`, or — if none is registered — **silently ignored**. This is
@@ -942,9 +944,13 @@ types behind one call, `register_cvcgl_extensions`
 ([`extensions.h`](../inc/cvc/gl/ariadne/extensions.h)), which both `ariadne_hello` and
 `AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`,
 `generated_world` (terrain_lab's world, [`world_nodes.h`](../inc/cvc/gl/ariadne/world_nodes.h)),
-`water` (its sea, lakes and ponds as the GPU FFT ocean, below),
-and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and `fe_lab`. Keys the built-in parser
-does not know land in the node's `props`, which a custom realizer reads; most realizers
+`water` (its sea, lakes and ponds as the GPU FFT ocean, below), `ribbon` and `draped_link`
+(lines drawn from data, below), and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and
+`fe_lab`. Keys the built-in parser
+does not know land in the node's `props`, which a custom realizer reads. So does a `source:` the
+built-ins have no field for, `{ state: <key> }` or `{ stream: <token> }`, as written. A
+`source: { data }` node is drawn as a data node (§5.17) unless its type was registered with
+`NodeTypeOptions::reads_data`, which hands the node to its realizer instead. Most realizers
 **seed** state keys from them (`forest.*` for `forest_trees`, the node's own subtree for
 `mesh_lab` / `fe_lab`), so a document's prop is the starting value a bound component then
 edits live. A document that cannot run without a custom type says so
@@ -1751,6 +1757,123 @@ thread, or deferred onto it in a single-threaded wasm build — and apply result
 per-frame tick. A job captures only its own hand-off struct, never the node's runtime
 (which owns the lane), and teardown cancels it; tearing a scene down still waits for a
 running tet-mesh or Poisson solve to finish.
+
+#### Lines from data: `type: ribbon` and `type: draped_link`
+
+Two custom types draw lines whose points come from data
+([`ribbon_nodes.h`](../inc/cvc/gl/ariadne/ribbon_nodes.h)): a vehicle's track that grows every
+tick, a planned route replaced on each re-plan, a link between two moving things coloured by how
+well it carries. Both are streaming nodes (`cvc::gl::RibbonNode`, `cvc::gl::DrapedLinkNode`), so a
+change uploads only what changed and the node is never rebuilt. Each is a node of its own, updated
+only when its data changes; `visible:`, `tags:` (and so views, §5.18), `transform:` and
+`casts_shadow:` apply as to any node.
+
+```yaml
+scene:
+  nodes:
+    - node: ground
+      source: { terrain: { size: 1200 } }
+    - node: track_a
+      type: ribbon
+      source: { state: tracks.a }      # a list of numbers, three a point
+      width: 3
+      color: c1
+      ground: ground                   # each point's z from the ground, plus lift:
+      lift: 0.4
+      window: { tail: 300, units: m }  # only its last 300 m
+    - node: route_a
+      type: ribbon
+      source: { state: routes.a }
+      color: [0.2, 0.9, 0.3]
+      window: { from: routes.a_done, units: m }   # the driven front hidden as the car advances
+    - node: link_ab
+      type: draped_link
+      ground: ground
+      between: [car_a, car_b]
+      value: links.ab.quality
+      ramp: quality
+```
+
+**A ribbon's points** come from `source:`:
+
+- `{ state: <key> }`: the key's `data()` when it holds floats
+  (`std::shared_ptr<const std::vector<float>>`, which is read without a copy of the key's value, or
+  `std::vector<float>`, `std::vector<double>`, float32 bytes, a mesh's points), else its value as
+  text: numbers separated by commas, spaces, semicolons or brackets. The key is read again only
+  when it was written.
+- `{ data: <name>, item: <output> }`: an output of a dataset of the document's `data:` block
+  (§5.17), read like a state key; a lazy dataset loads when the ribbon asks for it.
+- `{ stream: <token>, replace: false, depth: 4 }`: a stream of float32 frames, by its token or its
+  id (opened by the document, or at the root). Each frame's points are appended; with
+  `replace: true` each frame is the whole line. A stream opened after the scene is realized is
+  picked up when it opens.
+- `points: [[x, y, z], ...]` instead of `source:`: a fixed line written in the document.
+
+`fields:` says what each point's numbers are, in order: `x` and `y`, and any of `z`, `w` (that
+point's full width) and `v` (its value). The default is `xyz`; `xy` puts the points at z = 0, or on
+the ground.
+
+What is drawn follows the data, and only what changed is written:
+
+- A list that grew appends its new points: each uploads its own two vertices and re-mitres the one
+  before (48 bytes a point).
+- A list whose tail changed (a last point that is the live position) is written from the first
+  point that differs.
+- Anything else is written again whole, as one sub-range upload.
+- A key that was not written since the last frame is not read.
+- Past the ribbon's `capacity:` (256 points by default) it grows to twice that, one full upload.
+
+**Width, colour and style.**
+
+- `width:` is the ribbon's full width in metres (2 by default); a `w` field overrides it per point,
+  and a segment tapers between its points' widths.
+- `color:` is `[r, g, b]` (0 to 1), `"#rrggbb"`, or a style slot `c0` to `c7` (the chart's
+  categorical colours: blue, orange, aqua, yellow, magenta, green, violet, red). The ribbon is drawn
+  flat, unlit, in that colour; a `material:` block draws it lit instead.
+- With a `v` field, `ramp:` colours each point by its value, blended along each segment: `quality`
+  (red to yellow to green over 0 to 1), `heat` (blue to yellow to red), or up to eight
+  `[value, colour]` stops. A named ramp runs over `range: [lo, hi]` when given. The values sit in a
+  float texture beside the points, and a point written uploads its own texel.
+- `opacity:` and `depth_offset:` (polygon offset toward the camera, for a line laid on a surface)
+  are per node.
+
+**On the ground.** `ground: <node>` names a heightfield or terrain node (or a `generated_world`)
+declared before this one. Each point then sits on it: its z is the ground's height there (the
+triangle under the point, clamped onto the grid) plus `lift:`. Without a ground, `lift:` is added to
+the points' own z. The ground is sampled in its own coordinates: put the ribbon under the ground
+node, or give it the same transform. When the ground is made again (a regenerated world), the ribbon
+is draped on the new one.
+
+**`window:`** draws part of the line, with no upload: a draw range and a cut at a fraction of a
+segment.
+
+- `{ from: <a>, to: <b> }` draws from `a` to `b`. Each is a number or a state key read each frame;
+  `to: end` (or no `to:`) runs to the last point.
+- `{ tail: <n> }` draws the last `n`.
+- `units: point` (the default) counts points, fractionally; `units: m` counts metres along the line.
+
+**A draped link** is a strip between two ground points that follows the terrain, placed in the
+vertex shader over the ground's heights (a float texture shared by every link on that ground).
+Moving, widening or recolouring it changes uniforms and uploads nothing.
+
+- Its ends:
+  - `between: [<node>, <node>]` follows two nodes each frame: their origins, anywhere in the scene.
+    A world entity's node is `vehicle_<id>`; it is found again when the world draws it anew;
+  - `from: [x, y]` and `to: [x, y]`, each a literal or a state key holding `x, y`;
+  - or `source:` (as for a ribbon) holding `x0, y0, x1, y1`.
+- `ground:` as for a ribbon. Without one the link lies on a flat ground at z = 0 under the scene.
+- `width:` (2), `lift:` (0.5 m above the ground) and `stations:` (24 points along it).
+- `color:` as for a ribbon, or `value:` (a number or a state key) through `ramp:` (`range:` too):
+  the link's colour by a quality read each frame.
+- `opacity:`, a number or a state key.
+
+Coordinates are the node's own: give it the ground's transform, or nest it under the ground.
+
+[`cvcgl_ariadne_ribbons`](../src/cvcGL/test/cvcgl_ariadne_ribbons.cpp) covers these from a document,
+drawn for real. It counts the uploads of each append, both in the node and at the driver: one quad,
+nothing made, never the whole node. It moves a window and a link and checks that nothing is
+uploaded, and it checks the pixels, the value colours on both VTK mapper families, the streams and
+a regenerated ground.
 
 ### 5.5 Commands as a request key
 
@@ -3252,6 +3375,261 @@ drawn for real:
 - that a still frame rasterises nothing again;
 - an entity's name label.
 
+### 5.22 The tray: icons and a clock at the menu bar's right end
+
+The menu bar's right end is a tray, like a desktop's system tray: icons with a count on them,
+and a clock. The menus stay on the left.
+
+```yaml
+clock: true                    # top level: show the clock, whatever the host's default
+menubar:
+  - menu: File
+    items: [...]
+  - tray_icon: mail             # a named icon, or any text
+    badge: (state-get "inbox.unread")
+    tooltip: New messages
+    on: inbox.open              # a click raises it ...
+  - tray_icon: warning
+    badge: (state-get "warns.count")
+    tone: warn                  # info (the default), warn or error: the badge's colour
+    items:                      # ... or, with items:, opens them as a menu
+      - text: (state-get "warns.latest")
+      - menu_item: Clear
+        on: (state-set "warns.count" "0")
+  - clock                       # here among the icons, instead of last
+```
+
+- **`tray_icon:`** goes in a `menubar:`, among its menus. The tray draws the bar's icons in the
+  order written, after every menu and the Windows menu (§5.9).
+  - Its value is a named icon or any text drawn as written. The names are `warning`, `error`,
+    `info`, `check`, `gear`, `mail`, `sync`, `user`, `network`, `star`, `clock`, `menu` and
+    `bell` (`cvc/ariadne/icons.h`), glyphs the UI fonts carry rather than emoji, which need a
+    colour emoji font. `bell` is the exception: terminals draw it as the 🔔 emoji, and ImGui,
+    whose fonts have no bell, draws one (`TrayIcon::icon`). A backend that can't draw the glyphs (the Linux console, a
+    dumb or VT terminal: `Backend::unicode_glyphs`) draws each name's ASCII stand-in, `!` for
+    `warning` and so on.
+  - `badge:` is a text, or an expression giving one each frame, as a picture's badge is (§5.11).
+    It is drawn over the icon's top right corner. "" and "0" show no badge.
+  - `tone:` (`info`, `warn` or `error`, or an expression giving one) colours the badge: blue,
+    amber or red.
+  - `tooltip:`, `visible_when:` and `id:` work as on any widget.
+  - A click raises `on:`. An icon with `items:` opens them as a menu instead, hanging left from
+    the icon so it stays on the screen.
+- **When the bar is too narrow**, the menus fold into one first (§5.23). If the tray still has
+  too little room, its icons leave from the left, the end nearest the menus. They go into a `»`
+  icon at the tray's left end. Its badge sums the hidden badges, its tone is the strongest of
+  theirs, and its menu lists each hidden icon with its badge and tooltip. The menus, folded or
+  not, never yield to the tray: with no room for even the `»`, the tray is not drawn. So the
+  rightmost icon is the one kept longest.
+- **The clock** shows the local time as HH:MM. Its tooltip is the date and the time to the
+  second.
+  - It goes last, at the bar's right end, unless a `- clock` entry in the menubar places it.
+  - The host decides whether it shows by default (`Runtime::set_clock`): arigl and ari show it in
+    `run`, never in `snapshot` or `check`, whose frames must not change with the time of day.
+  - A document's top-level `clock: true|false` overrides the host.
+  - The user's choice overrides both: arigl's *Settings > Show clock* toggles the state key
+    `ariadne.tray.clock`, which the runtime seeds from the document or the host and reads every
+    frame.
+  - A host or test pins the time it reads with `Runtime::set_wall_clock`.
+  - **Joined to a relay** (a `relay:` block or `--relay`, §9.8.3), the tooltip adds the relay's
+    time on a second line: "wss://relay/room: 14:05:11 (+2.50 s, round trip 18 ms)", the relay's
+    clock minus this host's and the round trip the reading came from, its error bound.
+    - The transport's link probe measures it. A Pong carries the answerer's wall clock
+      (`Pong.wall_ns`, `state_transport.proto`), and the Ping's sender takes it as read half a
+      round trip before the Pong arrived (`state_link_stats::note_peer_clock`).
+    - Of the last 8 readings, the one with the shortest round trip is kept, as NTP picks. WS and
+      gRPC both carry it; a peer that sends no wall time (an older one) gives no reading.
+    - The relay session writes the reading once a second while joined
+      (`cvc/core/server_clock.h`, one per `cvc::app`), and clears it when it leaves or loses the
+      relay. A reading not renewed for 15 s is stale and not shown.
+- **Per backend:**
+  - ImGui draws the tray in its main menu bar, with the glyphs a little larger than the bar's
+    text and each badge a pill.
+  - FTXUI puts the tray after the bar's filler, each badge in its tone's colour. A click on a
+    button fires it. A menu icon is a menubar title: F10 and Left / Right reach it as they reach
+    the menus.
+  - tvision draws the tray over the right end of its menu bar's row, where tvision's own demo
+    puts its clock. A click on a menu icon opens a popup menu under it. The pointer resting on
+    an icon shows its tooltip in the status line. `FtxuiBackend::hosted_tray` is the model it
+    draws from.
+  - A backend with no tray (`Backend::begin_tray`'s default) gets each icon as an ordinary menu
+    at the end of the bar, titled by its glyph and badge, so every backend shows the icons.
+- **A document with two bars of its own** shows them as one: the second bar's menus follow the
+  first one's, and its tray icons go left of the first one's tray. The clock and the bell are the
+  first bar's only. ImGui appends a bar begun again to the same strip, and FTXUI keeps the first
+  bar's menus and tray and continues them (it used to keep only the last bar).
+- `ariadne_runtime_test`'s `Tray*` tests check the order, badges, tones, overflow, clicks and the
+  clock's three settings. `ariadne_ftxui_test`'s tray tests check the right-aligned layout, the
+  overflow, a click, a menu that stays on the screen and the hosted model.
+  `examples/ariadne/documents/tray_demo.ari` shows three icons and the clock.
+
+### 5.23 A narrow menu bar folds its menus into one
+
+When the menu bar is too narrow for its menus and its whole tray (§5.22), the menus fold into one
+menu at the bar's left end, titled `≡` (the `menu` icon; `=` without the glyphs). Its items are
+the bar's menus, each a submenu under its own title, the Windows menu (§5.9) included. The tray
+keeps the bar's right end.
+
+```yaml
+menu_collapse: never            # top level: auto (the default), never or always
+menubar:
+  - menu: File
+    items: [...]
+```
+
+- **`menu_collapse:`** at the top level, or `collapse:` on a `- menubar:` entry, decides.
+  - `auto`, the default, folds the menus while they don't fit beside the tray, and unfolds them
+    when the bar is wide enough again. It decides afresh every frame, so a window resized past
+    the point flips the bar.
+  - `never` keeps the menus in the bar whatever the room; the tray gives way instead, as §5.22
+    says. `false` reads as `never`.
+  - `always` folds them however much room there is.
+  - Any other value warns and reads as `auto`.
+- **How it decides.** Each frame, right after `begin_main_menu_bar`, the core gives
+  `Backend::menus_fit` the titles the bar's menus show, in order, and the tray's icons. The
+  backend answers whether they fit across its bar. A backend that can't measure its bar keeps
+  the default, which answers yes, so its menus never fold.
+- **Per backend:**
+  - ImGui measures each title as `BeginMenu` lays out a bar's titles, and the tray as its
+    `begin_tray` does. The `≡` menu opens the menus as ImGui's own nested submenus.
+  - FTXUI counts columns: each title takes its width and two, the tray its icons' columns and one
+    between them. Its `≡` dropdown lists each menu's items under the menu's title.
+  - tvision measures against its own screen. The hosted model gives each menu inside `≡` as a
+    `HostedMenuItem` with `submenu` set, followed by its items one `depth` deeper, and tvision
+    nests them as its own submenus. The `≡` title has no Alt key.
+- `ariadne_runtime_test`'s `TheMenusFoldIntoOne…` and `ADocumentSetsWhetherTheMenusFold`, the
+  loader's `MenuCollapseSetting`, and `ariadne_ftxui_test`'s `ANarrowBarFoldsItsMenusIntoOne`
+  and `AFoldedBarIsOneMenuOfSubmenus` check it.
+
+### 5.24 Notifications: the host's feed and the tray's bell
+
+Every host has one notification feed, kept on its `cvc::app` (`cvc/core/notify.h`), so two apps
+in one process never share one. Everything that runs in the app posts to it: the outermost
+document, every document it loads, the host, and the jobs they start. The menu bar shows it as a
+bell in the tray (§5.22), before the clock.
+
+```yaml
+notifications: false            # top level: no bell, whatever the host's default
+on_tick: |
+  (if (> (int (state-get "mesh.holes")) 0)
+    (notify "The mesh has holes" "warn" "(state-set \"tree.mesh.open\" 1)")
+    #f)
+menubar:
+  - menu: File
+    items: [...]
+  - bell                        # here among the icons, instead of before the clock
+```
+
+- **There is nothing to propagate.** A loaded document (`load:`, §6) posts to the same feed as
+  the document that loaded it, and the outermost document's bar shows it. Each entry is named
+  by the document that posted it: its `meta.name`, else its mount id (the outermost document's
+  are named by no one), as its menu is (§5.25). The runtime takes the name from the program's
+  scope, so one document cannot post as another.
+- **Posting from a document:**
+  - `(notify TEXT [LEVEL [ON]])` posts and returns the entry's id. LEVEL is `info` (the
+    default), `warn` or `error`. ON is a program run when the entry is clicked, in the scope and
+    with the functions of the document that posted it.
+  - `(notify-read ID)` and `(notify-clear ID)` mark one entry read or drop it, giving `#t` when
+    there was one.
+  - `(notify-read-all)` marks every entry read.
+  - `(notify-clear-all)` drops the entries this document posted, its loaded documents' included,
+    and says how many.
+  - `(notify-status)` gives `{count unread worst rev}`, and `(notify-list [N])` the newest N
+    entries (all of them by default), newest first, each `{id text level source time read
+    repeat}`. A program is confined to its document's state, so these are how it reads the feed.
+- **Posting from C++:** `cvc::notify(app, cvc::notification{...})`, safe from any thread. Its
+  `path` (the state path of what posted it) is what the bell names it by.
+- **What posts on its own:**
+  - Every runtime warning (a broken expression, a resident that stopped, `AppRuntime`'s own),
+    at level warn, named by the document that raised it.
+  - A job started with `cvc::schedule_published_job` (§1.9 of the library ports roadmap: the
+    DSL's `-start` forms, fe_lab's jobs) when it ends: a failure always, as an error; a job that
+    ran a second or more, as info; a cancelled one never. Its text is "<what>: <status>", where
+    <what> is the last name of the job's keys ("segment").
+  - The chat component (§5.16, `components/chat.ari`) posts a direct message that comes while its
+    conversation is not shown; a click opens the conversation. The room's own chat does not post,
+    since that would be every line. Each client posts into its own feed: the feed lives outside the
+    conference's shared tree (`conf.*`), so nothing in it replicates to another peer.
+- **The feed.** It keeps the newest 100 entries. A post identical to the newest entry while that
+  is unread (the same text, level and source) counts as a repeat of it ("(x3)") rather than a new
+  entry. It mirrors itself into the state tree, for a widget to bind app-root-absolute
+  (`bind: /notify.unread`): `notify.count`, `notify.unread`, `notify.worst` (`info`, `warn`,
+  `error`, or "" when none is unread), `notify.rev`, and
+  `notify.items.<id>.{text, level, source, time, read, repeat}`.
+- **The bell** shows while the feed has entries. Its badge is the unread count, and its tone is
+  the worst unread level. Its menu lists the newest 8 entries: an unread mark, the level's icon,
+  the source, the text's first line and the time. A click on an entry marks it read and runs its
+  ON. Then come *Mark all read*, *Clear all*, and *Show all...*, which opens the Notifications
+  window with every entry (`tree._notifications.open`; its X closes it).
+  - The host decides whether it shows by default (`Runtime::set_notifications`, on unless a host
+    turns it off).
+  - A document's top-level `notifications: true|false` overrides the host.
+  - The user's choice overrides both: arigl's *Settings > Show notifications* toggles the state
+    key `ariadne.tray.bell`.
+  - Opening the menu does not mark anything read: a hosted backend (tvision) has every menu open
+    to every walk.
+- **Per backend:** ImGui draws the bell itself (a dome, rim, knob and clapper in the text's
+  colour), its fonts having no bell. FTXUI and tvision draw 🔔, and `*` without the glyphs.
+- `ariadne_runtime_test`'s `Notify.TheFeedIsEachAppsOwnAndMirrorsItself`,
+  `TheBellShowsTheFeedInTheTray`, `ProgramsAndWarningsPostToTheFeedFromTheirDocument` and
+  `ADocumentPlacesOrTurnsOffTheBell`, and `result_job_test`'s `JobKeys` failure and stop tests,
+  check it. `examples/ariadne/documents/tray_demo.ari` has a Notify menu.
+
+### 5.25 Loaded documents as applications: their menus in the outer bar
+
+The outermost document owns the menu bar. A document it loads (`load:`, §6.3) that has a
+`menubar:` of its own is an application: its bar is not drawn where it is, but becomes one menu of
+the outer bar.
+
+```yaml
+menubar:
+  - menu: File
+    items: [...]
+root:
+  - load: fe_lab.ari            # meta: { name: FE Lab }, with a menubar of its own
+    as: fe
+```
+
+gives the bar `File  FE Lab  Windows`, where *FE Lab* holds FE Lab's menus as submenus, then
+*Restart FE Lab* and *Quit FE Lab*.
+
+- **Its name** is the loaded document's `meta.name`, else its mount id (`as:`, or the one the
+  loader derives). Two mounts of one document are told apart by their mount ids: "Counter
+  (counter)", "Counter (counter_2)". Its notifications are named the same way (§5.24).
+- **Where it goes:** after the outer document's menus, before the Windows menu (§5.9), in tree
+  order, nested mounts included. The menus fold into `≡` with the rest (§5.23).
+- **What it holds:** the loaded bar's entries, drawn in the mount's scope and with its functions,
+  so its items bind and run as they would in its own bar. A `windows_menu`, `clock` or `bell` entry
+  in a loaded bar is ignored: those are the outer document's.
+- **Its tray icons** join the outer bar's tray, after the outer document's own and before the bell
+  and the clock. They are worked out in the mount's scope, so a badge reads the mount's state.
+- **Quit** takes the application away: its windows, its menu and its tray icons go, and its
+  `on_tick:` and the programs it started stop. Its state stays.
+- **Restart** quits it, drops its state subtree and its notifications, and starts it again as when
+  it was first loaded: its `link:` holes are planted, its `init:` runs, and its `on_tick:` starts.
+- **Windows > Applications** lists every application, ticked while it runs. Untick one to quit it;
+  tick a quit one to open it again as it was. A quit application's windows are not listed until it
+  comes back. A quit stays for the run; nothing persists it.
+- **No menubar of its own:** a document with none still gets a bar when it loads applications, as
+  it does for its Windows menu. That bar holds the applications' menus, the Windows menu, and the
+  applications' tray icons, with no clock or bell, since it is not the document's own bar.
+- **Window identity:** inside a mount, the id a window gives the backend carries the mount's
+  prefix (`count@ui.includes.counter`), so a document loaded twice has two windows, not one. Its
+  state keys (`tree.<id>.*`) are the mount's own, as before.
+- **A repeated mount** (`repeat:`) is an application per instance, named "<name> 1", "<name> 2"
+  and so on, each in its instance's scope (`includes.<as>.<i>`). Each can be quit and restarted on
+  its own. How many there are is worked out each frame, as the repeat's count is.
+- **Mechanism:** `plan_windows_menu` walks the tree with each node's composed scope. It records
+  each mount's first menubar (the mount, its bar, its name, its prefix and its functions), and a
+  repeated mount's from its template. Each frame `plan_frame_apps` expands the repeated ones into
+  their instances, each with a per-instance copy of its bar. The walk skips a menubar in place when
+  it is drawn in an application's scope.
+- `ariadne_runtime_test`'s `ALoadedDocumentsMenubarIsOneMenuOfTheOuterBar`,
+  `QuitKeepsALoadedDocumentsStateAndRestartResetsIt`, `TwoMountsOfOneDocumentAreToldApart` and
+  `ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus`, and the loader's
+  `ALoadedDocumentIsNamedByItsMeta`, check it. `examples/ariadne/documents/apps_demo.ari` loads
+  `tray_demo.ari` and `apps/counter.ari` twice.
+
 ## 6. Composition: include / import / load
 
 Three mechanisms compose documents. They differ in **isolation**, not in how they
@@ -3369,6 +3747,10 @@ document, not to whatever it mounts: a module that saw every key could read what
 the parent's fields, and two modules could not both decide what Ctrl-C does. A module reacts to its
 own widgets. When it needs more, the parent handles the event and passes on what the module needs
 through a `link:` hole, which the module's `on_tick:` can read.
+
+A module with a `menubar:` of its own is an application: its bar becomes one menu of the outer
+bar, with Restart and Quit, and its tray icons join the outer tray (§5.25). The loader names it
+by the fragment's `meta.name` (`Widget::app_name`), else by the mount id.
 
 ### 6.4 The URI resolver
 

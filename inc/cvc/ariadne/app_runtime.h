@@ -381,6 +381,7 @@ private:
   std::vector<std::string> pendingWarnings_; // read-lane diagnostics drain() collected
   std::vector<std::string> threadAffinePrefixes_;            // declare_thread_affine_prefix
   std::function<void(const std::string &)> warningListener_; // set_warning_listener
+  void post_warning(const std::string &warning);             // §5.24 to the app's feed
   void collect_warnings(); // the Runtime's new warnings -> pendingWarnings_, each to the listener
   std::vector<Widget> hostMenus_;            // set_host_menus: put in every mounted tree
   UiSizeControl hostUiSize_;                 // set_host_ui_size: the Controls window's first row

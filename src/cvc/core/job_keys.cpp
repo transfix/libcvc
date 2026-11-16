@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cvc/core/job_keys.h>
+#include <cvc/core/notify.h>
 #include <cvc/core/result_job.h>
 #include <exception>
 #include <memory>
@@ -97,6 +98,35 @@ void job_keys::finished(const sliced_job &job) { finished(job.status()); }
 
 void job_keys::pid(int pid) { write<int>("pid", pid); }
 
+std::string job_keys::full_path() const {
+  const std::string root = _root->fullName();
+  if (root.empty())
+    return _base;
+  return _base.empty() ? root : root + cvc::state::SEPARATOR + _base;
+}
+
+namespace {
+// A finished job's entry in the feed: "<what>: <status>", <what> being the last name of its keys'
+// base ("segment"), posted from the base's path so the feed can name the document that ran it.
+void post_job(cvc::app &app, const job_keys &keys, const std::string &status, double ms,
+              bool failed) {
+  if (!failed && ms < 1000.0)
+    return;
+  const std::string path = keys.full_path();
+  const std::size_t dot = path.rfind(cvc::state::SEPARATOR[0]);
+  const std::string what = dot == std::string::npos ? path : path.substr(dot + 1);
+  cvc::notification n;
+  n.text = what.empty() ? status : what + ": " + status;
+  n.level = failed ? 2 : 0;
+  n.path = path;
+  cvc::notify(app, std::move(n));
+}
+
+bool failed_status(const std::string &s) {
+  return s.rfind("failed", 0) == 0 || s.rfind("error", 0) == 0;
+}
+} // namespace
+
 double job_keys::work_ms() const {
   if (!_running)
     return 0.0;
@@ -120,7 +150,7 @@ int schedule_published_job(cvc::app &app, std::shared_ptr<sliced_job> job, slice
       user_progress(j);
     keys->progress(j);
   };
-  opt.on_done = [keys, user_done, on_result](sliced_job &j) {
+  opt.on_done = [&app, keys, user_done, on_result](sliced_job &j) {
     if (user_done)
       user_done(j);
     const auto *rj = dynamic_cast<const result_job_base *>(&j);
@@ -134,7 +164,11 @@ int schedule_published_job(cvc::app &app, std::shared_ptr<sliced_job> job, slice
         fail = "failed: an unknown exception";
       }
     }
-    keys->finished(fail.empty() ? j.status() : fail);
+    const double ms = keys->work_ms();
+    const std::string status = fail.empty() ? j.status() : fail;
+    keys->finished(status);
+    post_job(app, *keys, status, ms,
+             !fail.empty() || (rj && rj->failed()) || failed_status(status));
   };
   opt.on_cancelled = [keys, user_cancelled](sliced_job &j) {
     if (user_cancelled)
@@ -145,6 +179,7 @@ int schedule_published_job(cvc::app &app, std::shared_ptr<sliced_job> job, slice
   const int pid = schedule_sliced_job(app, std::move(job), opt, &w);
   if (pid < 0) {
     keys->finished("error: the job could not start: " + w);
+    post_job(app, *keys, "error: the job could not start: " + w, 0.0, true);
     if (why)
       *why = w;
     return -1;

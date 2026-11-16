@@ -1590,8 +1590,9 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
 | oidc (`enable_oidc`) | `oidc-*` | `host_proxied` | process-global sessions, stepped by `pump_oidc` on the host thread; a document that uses oidc stays in group 0 (S1-Q6) |
 | e2ee (`enable_e2ee`, `register_e2ee_intrinsics`; master's #1191) | `e2ee-*` | `host_only` (registered without a kind; not yet audited) | the store locks; `e2ee-backup` and `e2ee-restore` are async functions on `*ictx.host`; in an app that installs them an isolated document is placed in a host-affinity group (`host_only_bindings`) |
 | `nav_compute` (the example) | `nav-step` | `any` | its marshal touches nothing, and its kernel runs on the background pool |
-| The backend's verbs (the Runtime's own, `Runtime::Impl::install_backend_verbs`) | `clipboard-set` (where the backend has a clipboard), `fullscreen` | `host_proxied` | they call the backend, whose window and clipboard are the host thread's; `has?` sees them in an `any` group too (`AriadneIsolatedDocs.TheBackendsVerbsRunOnTheFramesThread`) |
+| The backend's verbs (the Runtime's own, `Runtime::Impl::install_host_verbs`) | `clipboard-set` (where the backend has a clipboard), `fullscreen` | `host_proxied` | they call the backend, whose window and clipboard are the host thread's; `has?` sees them in an `any` group too (`AriadneIsolatedDocs.TheBackendsVerbsRunOnTheFramesThread`) |
 | | `file-pick` (where there is a backend), `file-info`, `file-forget` (master's #1190) | bound as they are in every group | `file-info` and `file-forget` lock the app's `PickedFiles`; `file-pick` is async, so it is not proxied: it parks on the program's own host, claims the Runtime's picker hub under its lock where it is called, and opens the picker on the host thread (`exec_pool::run_on_host` for the group the verbs were bound for; inline when it is called there, or in group 0); the answer goes through the host's finisher |
+| | `notify`, `notify-read`, `notify-clear`, `notify-read-all`, `notify-clear-all`, `notify-status`, `notify-list` (master's #1241) | `host_proxied` | the feed locks, but `cvc::notify` mirrors it into the app's `notify.*` subtree raw on the caller's thread (4.8). What they capture (the program's scope, the source the feed names for it and a copy of the mounts' names) is taken on the host thread when its context is made (`notify_scope`); a spawned child binds from its parent's copy, as `mount_names` is the host thread's |
 | cvcGL media and stream verbs (`media_verbs.cpp`, `stream_verbs.cpp`) | `stream-capture-camera`, `stream-capture-audio`, `stream-play-audio`, `stream-set-muted`, `gl-bind-stream` | `host_only` (one-argument form) | SDL's camera and audio on their owner thread, GL on the render thread |
 | contours, point classes, skeletons and segmentation (`install_contour_intrinsics`, `install_point_class_intrinsics`, `add_skeleton_intrinsics`, master's #1171, `install_segmentation_intrinsics`, master's #1252) | `contours.info`, `point-classes.*`, `skeleton.compute`, `segment.seeded` and the param verbs (`register_param_intrinsics`) | `host_only` (registered without a kind; not yet audited) | they bind into every env, so in an app that installs them an isolated document is placed in a host-affinity group (`host_only_bindings`) |
 
@@ -2167,7 +2168,8 @@ and 9.1).
 - **What goes to the group.** Every process the Runtime starts runs in its group, and every post
   and kill goes there: its actions and residents (`make_action_context` gives them the group's
   scheduler and host), the children they spawn (4.15), its tick, key, pointer and signal posts,
-  `stop_resident`, and the teardown's kills. Its settings reads stay on the host thread. Its
+  `stop_resident`, an application's Quit (`quit_app`, master's #1241: its actions under the
+  application's scope are killed on `current_sched()`, its group's), and the teardown's kills. Its settings reads stay on the host thread. Its
   providers are installed by kind (4.9), so a `host_proxied` verb on a worker completes a frame
   later (4.11 item 7). Its programs see only the group: `ps`, `inspect` and `kill` reach only the
   document's own processes (5 item 11), and pids stay unique app-wide.
@@ -2526,8 +2528,9 @@ no groups. Stage 1 then only extends it to groups and adds what follows from the
   `document` (its resource scope), both lock fields and `spawn_context` (grandchildren get one
   too). It walks no tree, so it is safe on the pumping thread, which is a worker in an `any`
   group. It then builds the child's env as an action's (`finish_context`: the intrinsics, the
-  providers by kind for the parent's group, `has?`), and records the child so the drain reaps it
-  once it ends; the child keeps the document's owner, so the teardown's `kill_owner` reaches it.
+  providers by kind for the parent's group, the host verbs, `has?`), and records the child so the
+  drain reaps it once it ends. Its notify verbs bind from its parent's `NotifyScope`, which the
+  spawn context carries from the host thread; the child keeps the document's owner, so the teardown's `kill_owner` reaches it.
   So a child of a deleted chroot keeps writing its parent's detached node, as the library's
   default does, and makes no node at the old path (SP-1). Before, it re-chrooted by path, through
   `make_action_context`, which made a new node there.
