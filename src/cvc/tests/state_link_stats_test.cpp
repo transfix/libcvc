@@ -52,6 +52,25 @@ TEST(StateLinkStatsTest, RoundTripMedianMinAndLast) {
   EXPECT_DOUBLE_EQ(c.rtt_min_ms, 40.0);
 }
 
+// A Pong's wall time gives the peer's clock offset: the peer read its clock half a round trip
+// before the Pong arrived. Of the recent readings, the one with the shortest round trip is kept
+// (its guess is the tightest); a Pong with no wall time (an older peer) gives none.
+TEST(StateLinkStatsTest, PeerClockTakesTheShortestRoundTrip) {
+  state_link_stats s;
+  EXPECT_FALSE(s.read().peer_clock);
+  const std::int64_t local = 1'800'000'000'000'000'000; // this end's wall clock, ns
+  s.note_peer_clock(0, 10'000'000, local);              // no wall time: nothing
+  EXPECT_FALSE(s.read().peer_clock);
+  // The peer is 2 s ahead: it read local + 2 s - rtt/2 as it answered.
+  s.note_peer_clock(local + 2'000'000'000 - 40'000'000, 80'000'000, local); // 80 ms round trip
+  s.note_peer_clock(local + 2'000'000'000 + 5'000'000 - 5'000'000, 10'000'000,
+                    local); // 10 ms, and its guess 5 ms off the slower one's
+  const auto c = s.read();
+  ASSERT_TRUE(c.peer_clock);
+  EXPECT_DOUBLE_EQ(c.clock_rtt_ms, 10.0);
+  EXPECT_DOUBLE_EQ(c.clock_offset_ms, 2005.0);
+}
+
 // One stall (a probe answered only after a frozen tab woke) barely moves the median, and leaves the
 // window entirely after kRttWindow more samples.
 TEST(StateLinkStatsTest, MedianShrugsOffAStall) {
