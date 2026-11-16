@@ -497,7 +497,10 @@ scene:
   EXPECT_GT(deep, 0.1);
   EXPECT_LT(shallow, 0.1 * deep) << "the cascades fade out as the water shoals";
 
-  // A 1 m swell on a near-calm sea: the shore layer carries it.
+  // A 1 m swell on a near-calm sea: the shore layer carries it. The world's clock is not running
+  // here, so the sea's wind would never move off 9 m/s (it lags the wind, O13): no lag, no fade.
+  cvc::state::instance(app)("water.sea_lag").value(0.0);
+  cvc::state::instance(app)("water.sea_fade").value(0.0);
   cvc::state::instance(app)("water.wind_speed").value(1.0);
   cvc::state::instance(app)("water.swell_height").value(1.0);
   cvc::state::instance(app)("water.swell_dir").value(0.0); // toward the beach
@@ -542,6 +545,126 @@ scene:
   EXPECT_GT(wet, 0.05) << "the swash runs up over it";
   EXPECT_LT(wet, 0.95) << "and drains back";
   EXPECT_EQ(wetWithout, 0.0);
+}
+
+// The lee is calm in the physics sea too (O13, E2): a 9 m/s wind blowing toward +x past a round
+// island leaves the water just downwind of it calm, so a crate floating there moves less than one
+// in the open water upwind; with `lee: 0` the two seas are alike. Then a wind change crossfades the
+// sea over sea_fade seconds on the world's clock, and the field is rebuilt once per keyframe.
+TEST(AriadneSceneWorld, AWaterNodesLeeIsCalmerThanItsOpenWater) {
+  REQUIRE_YAML();
+  LoadResult r = fresh_load(R"(
+scene:
+  nodes:
+    - node: water
+      type: water
+      ground: island
+      level: 0
+      wind_speed: 9
+      wind_dir: 0
+      gustiness: 0
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode &n = r.scene.nodes.front();
+  cvc::app app;
+  // A round island 120 m in radius rising to 20 m, in water 20 m deep, on 1.2 km of 3 m samples.
+  const int N = 401;
+  const double cell = 3.0, x0 = -600.0;
+  std::vector<float> h(std::size_t(N) * N);
+  for (int r0 = 0; r0 < N; ++r0)
+    for (int c = 0; c < N; ++c) {
+      const double x = x0 + c * cell, y = x0 + r0 * cell, d = std::hypot(x, y);
+      h[std::size_t(r0) * N + c] = float(d < 120.0 ? 20.0 * (1.0 - d / 120.0) + 0.5 : -20.0);
+    }
+  auto island = std::make_shared<cvc::height_field>(N, N, x0, x0, cell, cell, h);
+  WaterRuntime rt(app, n, "", [island] { return island; });
+  ASSERT_NE(rt.sea(), nullptr);
+  ASSERT_NE(rt.keyframes(), nullptr);
+  ASSERT_NE(rt.keyframes()->fetch, nullptr) << "a fetch map over the coast";
+  const cvc::ocean::fetch_field &F = *rt.keyframes()->fetch;
+  std::printf("[water] the fetch map: %d x %d samples of %.1f m in %.1f ms (the keyframe)\n",
+              F.cols, F.rows, F.cell, rt.keyframes()->build_ms);
+  EXPECT_LE(std::max(F.rows, F.cols), 256) << "a coarse map";
+  const double leeX = 160.0, openX = -400.0; // 40 m behind the island; 280 m upwind of it
+  auto rms = [](const cvc::ocean::sea_surface &s, double x, double y) {
+    double s2 = 0.0;
+    int k = 0;
+    for (double t = 0.0; t < 30.0; t += 0.25, ++k) {
+      const double z = s.height(x, y, t);
+      s2 += z * z;
+    }
+    return std::sqrt(s2 / k);
+  };
+  const double lee = rms(*rt.sea(), leeX, 0.0), open = rms(*rt.sea(), openX, 0.0);
+  std::printf("[water] RMS 40 m behind the island %.3f m, upwind %.3f m\n", lee, open);
+  EXPECT_LT(lee, 0.3 * open) << "the lee is calm";
+
+  if (jolt()) {
+    // A crate in each, 20 s on the field.
+    cvc::physics::world_config c;
+    c.backend = cvc::physics::backend::jolt;
+    cvc::physics::world w(c);
+    w.add_field(*rt.field());
+    auto crate = [&](double x) {
+      cvc::physics::body_desc d;
+      d.shape = cvc::physics::box{{1.0, 1.0, 1.0}};
+      d.density = 500.0;
+      d.position = {x, 0.0, 0.2};
+      d.allow_sleeping = false;
+      return w.add_body(d);
+    };
+    const cvc::physics::body_id a = crate(leeX), b = crate(openX);
+    double za = 0.0, zb = 0.0, za2 = 0.0, zb2 = 0.0;
+    int k = 0;
+    for (int i = 0; i < 1200; ++i) {
+      w.step();
+      if (i < 180)
+        continue; // settle 3 s
+      const double ha = w.state(a).position.z, hb = w.state(b).position.z;
+      za += ha, zb += hb, za2 += ha * ha, zb2 += hb * hb, ++k;
+    }
+    const double sa = std::sqrt(std::max(za2 / k - (za / k) * (za / k), 0.0));
+    const double sb = std::sqrt(std::max(zb2 / k - (zb / k) * (zb / k), 0.0));
+    std::printf("[water] a crate's heave over 17 s: %.3f m RMS in the lee, %.3f m in the open\n",
+                sa, sb);
+    EXPECT_LT(sa, 0.5 * sb) << "the crate in the lee moves less";
+  }
+
+  // lee: 0 puts the waves back behind the island.
+  cvc::state::instance(app)("water.lee").value(0.0);
+  EXPECT_TRUE(rt.tick());
+  EXPECT_EQ(rt.keyframes()->fetch, nullptr);
+  const double noLee = rms(*rt.sea(), leeX, 0.0);
+  std::printf("[water] without the lee, 40 m behind the island: %.3f m\n", noLee);
+  EXPECT_GT(noLee, 3.0 * lee);
+
+  // A wind change on the world's clock (no lag, a 4 s fade): one keyframe, the field rebuilt for
+  // it, the sea crossfading; a second change during the fade waits for it to end.
+  cvc::state::instance(app)("water.lee").value(1.0);
+  cvc::state::instance(app)("water.sea_lag").value(0.0);
+  EXPECT_TRUE(rt.tick());
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  const std::uint64_t k0 = rt.keyframes()->keyframe;
+  cvc::state::instance(app)("water.wind_dir").value(30.0);
+  int rebuilds = 0;
+  double midWeight = -1.0;
+  for (int i = 0; i < 6 * 60; ++i) {
+    if (i == 60)
+      cvc::state::instance(app)("water.wind_speed").value(12.0);
+    clock.drive(1.0 / 60.0);
+    if (rt.tick())
+      ++rebuilds;
+    if (i == 2 * 60)
+      midWeight = rt.keyframes()->weight(app.world_clock().t());
+  }
+  std::printf(
+      "[water] two wind changes 1 s apart: %d keyframes, %d rebuilds; 2 s into the fade the "
+      "new sea's share is %.2f\n",
+      int(rt.keyframes()->keyframe - k0), rebuilds, midWeight);
+  EXPECT_EQ(rt.keyframes()->keyframe - k0, 2u) << "the second waited for the first fade";
+  EXPECT_EQ(rebuilds, 2);
+  EXPECT_GT(midWeight, 0.2);
+  EXPECT_LT(midWeight, 0.8);
 }
 
 TEST(AriadneSceneWorld, RegenerateMakesANewWorldAndSwapsItsBodies) {

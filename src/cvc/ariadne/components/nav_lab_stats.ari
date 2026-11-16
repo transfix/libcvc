@@ -1,0 +1,96 @@
+# nav_lab_stats.ari — a REUSABLE Ariadne component: the Stats window for several navigation policies
+# run side by side (cvc::nav's arms, docs/NAV_LAB.md), one row per arm. Its twin is the Ledger
+# (nav_lab_ledger.ari). A host writes what they show from a run log at a tick with
+# cvc::nav::publish_tables / publish_charts (pycvc: nav_run_log_publish): a live run at its last
+# tick, a replay at its play head, so both show the same cells. pycvc_gl.nav_lab is such a host; so
+# is a C++ AppRuntime.
+#
+# Use it:
+#     import: [cvc://components/nav_lab_stats.ari, cvc://components/nav_lab_ledger.ari]
+#     requires:
+#       - {name: chart, optional: true}   # the charts (libcvc 3.7.14); hidden on an older host
+#     windows:
+#       - include: nav_lab_stats          # pos: / size: at the include site place it
+#       - include: nav_lab_ledger
+#
+# It shows while arms.on is 1; the Retarget controls only while arms.live is 1 (a live run). The
+# chart draws a cursor at play.t (a replay's play head), and a click on it writes the time there to
+# play.seek and raises arms.seek (a replay seeks there). The keys: arms.time; arms.stats (a row per
+# arm over its agents and the current leg: arm, colour, clear_min, clear_mean, pen, path, elapsed,
+# ms, reached); arms.goal (the next Retarget's "x, y" in metres: empty asks the host for one) and
+# the button, which raises arms.retarget; arms.status; view.arm (the arm the camera follows;
+# arms.names lists them, one a line); the chart arms.clearance.
+
+units:
+  nav_lab_stats:
+    args: { title: Stats, id: nav_lab_stats }
+    window: "{title}"
+    id: "{id}"
+    size: [600, 400]
+    visible_when: (= (state-get "arms.on") "1")
+    children:
+      - text: "a row per arm, this leg: clearance (m), ticks penetrating, path (m),"
+      - text: "elapsed (s, to the goal once there), wall time per tick (ms), reached"
+      - text: ""
+        bind: arms.time
+      - type: group
+        layout: { kind: grid, col_widths: [88, 60, 54, 54, 40, 56, 58, 60, 52] }
+        children:
+          - text: "arm"
+          - text: "colour"
+          - text: "min"
+          - text: "mean"
+          - text: "pen"
+          - text: "path"
+          - text: "elapsed"
+          - text: "ms/tick"
+          - text: "reached"
+      - type: group
+        repeat: (state-get "arms.stats")
+        layout: { kind: grid, col_widths: [88, 60, 54, 54, 40, 56, 58, 60, 52] }
+        children:
+          - text: ""
+            bind: arms.stats.{i}.arm
+          - text: ""
+            bind: arms.stats.{i}.colour
+          - text: ""
+            bind: arms.stats.{i}.clear_min
+          - text: ""
+            bind: arms.stats.{i}.clear_mean
+          - text: ""
+            bind: arms.stats.{i}.pen
+          - text: ""
+            bind: arms.stats.{i}.path
+          - text: ""
+            bind: arms.stats.{i}.elapsed
+          - text: ""
+            bind: arms.stats.{i}.ms
+          - text: ""
+            bind: arms.stats.{i}.reached
+      - separator
+      - type: group
+        visible_when: (= (state-get "arms.live") "1")
+        children:
+          - input_text: Goal (x, y)
+            bind: arms.goal
+            tooltip: "where the next Retarget sends every arm (m); empty: the host picks a free point"
+          - button: Retarget every arm
+            on: arms.retarget
+            tooltip: "every arm's goal moves on the same tick, and a new leg starts"
+      - text: ""
+        bind: arms.status
+      - combo: Follow
+        bind: view.arm
+        options: (string.split (state-get "arms.names") "\n")
+        tooltip: "the arm the camera follows"
+      - type: group
+        visible_when: (has? "chart")
+        children:
+          - chart: Clearance (m), every arm
+            bind: arms.clearance
+            legend: right
+            x_label: time (s)
+            cursor: play.t
+            pick: play.seek
+            on: arms.seek
+            height: 110

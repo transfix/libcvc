@@ -1,0 +1,57 @@
+# nav_scrub.ari — watch a policy learn: every checkpoint of a training run deployed, checkpoint k
+# beside step 0 (cvc::nav's scrubber, docs/NAV_LAB.md). nav_scrub.cpp trains (or reads a history),
+# deploys the checkpoints, draws the world and the ghosts; cvc::nav::scrub_view writes every window.
+#
+#   nav_scrub nav_scrub.ari --component-path <repo>/src/cvc/ariadne
+#
+# - Scrub: the checkpoint (a combo, a slider, Previous and Next, or a click on a chart), the
+#   deployed metric against the step with step 0's dashed, and the table, one row per checkpoint.
+# - Training: a curve from the training history (Curve picks it), with the pick marked.
+# - Episode and Simulation: the two runs' time (libcvc's sim transport, a Position slider).
+# - Stats and Ledger: step 0 (blue) and checkpoint k (orange) at the play head.
+
+meta:
+  name: nav lab — scrub
+  min_libcvc: 3.7.13
+
+import:
+  - cvc://components/sim_transport.ari
+  - cvc://components/nav_lab_scrub.ari
+  - cvc://components/nav_lab_stats.ari
+  - cvc://components/nav_lab_ledger.ari
+
+requires:
+  - {name: chart, optional: true}   # the charts (libcvc 3.7.14); the tables show the numbers too
+
+init: |
+  (begin
+    (state-set "sim.paused" "0")
+    (state-set "sim.speed" "1.0")
+    (state-set "play.pos" "0")
+    (state-set "play.loop" "1")
+    (state-set "view.camera" "orbit")
+    (state-set "arms.on" "1")
+    (state-set "arms.live" "0")
+    (state-set "ledger.book" "dU")
+    (state-set "ledger.vehicle" "0")
+    (state-set "scrub.metric_name" "goal_m"))
+
+windows:
+  - include: nav_lab_scrub
+    pos: [16, 30]
+    size: [520, 560]
+  - include: nav_lab_training
+    pos: [548, 30]
+    size: [480, 300]
+  - include: nav_lab_episode
+    pos: [548, 342]
+    size: [480, 130]
+  - include: sim_transport
+    pos: [548, 484]
+    size: [260, 170]
+  - include: nav_lab_stats
+    pos: [1040, 30]
+    size: [600, 320]
+  - include: nav_lab_ledger
+    pos: [1040, 362]
+    size: [600, 540]
