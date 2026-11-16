@@ -3452,7 +3452,11 @@ cvc_discover_tests(nav_dyn_ph_full_test)
 cvc_discover_tests(nav_potential_test)
 cvc_discover_tests(ph_compose_test)
 cvc_discover_tests(ph_compose_parity_test)
-cvc_discover_tests(ph_convoy_test)
+# The convoy's two full runs (the composite against the formation; the follow laws on a step and
+# a stop) take ~95 s each in a Debug build, and a PR's Debug ctest gives a test without a TIMEOUT
+# of its own 300 s (ci.yml), which a busy runner misses: both timed out on #1288's run on
+# 2026-11-16. Their own budget, as ocean_ewave_test has, so a slow box fails on a real hang only.
+cvc_discover_tests(ph_convoy_test PROPERTIES TIMEOUT 1200)
 cvc_discover_tests(ph_se2_test)
 cvc_discover_tests(ph_se2_train_test)
 cvc_discover_tests(nav_terrain_test)
