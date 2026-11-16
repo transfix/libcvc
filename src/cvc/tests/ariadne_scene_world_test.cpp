@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/requires.h>
@@ -377,6 +378,73 @@ TEST(AriadneSceneWorld, AGeneratedWorldRunsWithoutARenderer) {
   const cvc::physics::body_state b = w->world().state(w->body("ball"));
   const double ground = gw->height(b.position.x, b.position.y);
   EXPECT_NEAR(b.position.z, ground + 0.5, 0.25);
+}
+
+// A water node with body: is one fluid field over its ground (scene_water.h), run with no
+// renderer: the world flooded to 200 m, a light crate floats at the level on the cascades' sea, a
+// dense one sinks; a new wind rebuilds the field and the world still holds one (the old one is
+// removed with the node's revision, as a regenerated world's bodies are).
+TEST(AriadneSceneWorld, AWaterNodesBodyFloatsWhatIsLighterThanWater) {
+  REQUIRE_YAML();
+  LoadResult r = fresh_load(R"(
+scene:
+  physics: {}
+  nodes:
+    - node: world
+      type: generated_world
+      seed: 5
+      half: 150
+      trees: 0
+      rocks: 0
+      buildings: 0
+      water_level: 200
+      body: {}
+    - node: water
+      type: water
+      world: world
+      level: 200
+      wind_speed: 3
+      body: {}
+    - node: raft
+      source: { box: { size: [2, 2, 2] } }
+      transform: { position: [5, 5, 204] }
+      body: { density: 400 }
+    - node: anchor
+      source: { box: { size: [1, 1, 1] } }
+      transform: { position: [-5, -5, 204] }
+      body: { density: 3000 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  if (!jolt())
+    return;
+  EXPECT_TRUE(warnings.empty()) << warnings.front();
+  EXPECT_EQ(w->world().field_count(), 1u);
+  EXPECT_EQ(val(app, "water.wind_speed"), "3"); // seeded from the node, as the drawn node does
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  for (int i = 0; i < 600; ++i) { // 10 s
+    clock.drive(1.0 / 60.0);
+    w->follow(app.world_clock());
+  }
+  const cvc::physics::body_state raft = w->world().state(w->body("raft"));
+  const cvc::physics::body_state anchor = w->world().state(w->body("anchor"));
+  std::printf("[water] after 10 s: raft at z %.3f (level 200), anchor at z %.3f\n", raft.position.z,
+              anchor.position.z);
+  // At density 400 the raft rides 40 % under: its centre 0.2 m over the water, within the 3 m/s
+  // sea's waves (about 0.25 m significant).
+  EXPECT_NEAR(raft.position.z, 200.2, 0.6);
+  EXPECT_LT(anchor.position.z, 195.0) << "the dense crate sinks";
+  // A new wind: the field is rebuilt, and the world still holds one.
+  cvc::state::instance(app)("water.wind_speed").value(6.0);
+  for (int i = 0; i < 30; ++i) {
+    clock.drive(1.0 / 60.0);
+    w->follow(app.world_clock());
+  }
+  EXPECT_EQ(w->world().field_count(), 1u);
+  EXPECT_NEAR(w->world().state(w->body("raft")).position.z, 200.2, 1.0);
 }
 
 TEST(AriadneSceneWorld, RegenerateMakesANewWorldAndSwapsItsBodies) {
