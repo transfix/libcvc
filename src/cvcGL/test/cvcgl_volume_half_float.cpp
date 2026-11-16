@@ -40,29 +40,60 @@ struct Frame {
   bool restored = false;
 };
 
-// Count the context's live textures in 16-bit float formats (desktop GL can ask a texture its
-// format; GLES cannot, so -1 there).
-int halfFloatTextures(vtkOpenGLRenderWindow *win) {
+// Count the context's live textures in 16-bit float formats, in any texture target (desktop GL
+// can ask a texture its format; GLES cannot, so -1 there). Each texture is listed with its target,
+// size and format, so a failure shows what the context really holds.
+int halfFloatTextures(vtkOpenGLRenderWindow *win, const char *run) {
 #ifdef GL_ES_VERSION_3_0
   (void)win;
+  (void)run;
   return -1;
 #else
   win->MakeCurrent();
+  while (glGetError() != GL_NO_ERROR) {
+  }
+  struct Target {
+    GLenum target, binding;
+    const char *name;
+  };
+  const Target targets[] = {{GL_TEXTURE_2D, GL_TEXTURE_BINDING_2D, "2D"},
+                            {GL_TEXTURE_1D, GL_TEXTURE_BINDING_1D, "1D"},
+                            {GL_TEXTURE_3D, GL_TEXTURE_BINDING_3D, "3D"},
+                            {GL_TEXTURE_RECTANGLE, GL_TEXTURE_BINDING_RECTANGLE, "rect"},
+                            {GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BINDING_2D_ARRAY, "2D array"}};
+  const int nTargets = static_cast<int>(sizeof(targets) / sizeof(targets[0]));
+  GLint was[sizeof(targets) / sizeof(targets[0])] = {};
+  for (int i = 0; i < nTargets; ++i)
+    glGetIntegerv(targets[i].binding, &was[i]);
+  const char *renderer = reinterpret_cast<const char *>(glGetString(GL_RENDERER));
+  std::printf("  %s run, %s:\n", run, renderer ? renderer : "renderer unknown");
   int n = 0;
-  GLint was = 0;
-  glGetIntegerv(GL_TEXTURE_BINDING_2D, &was);
-  for (GLuint t = 1; t < 512; ++t) {
+  for (GLuint t = 1; t < 4096; ++t) {
     if (!glIsTexture(t))
       continue;
-    glBindTexture(GL_TEXTURE_2D, t);
-    if (glGetError() != GL_NO_ERROR) // not a 2-D texture
+    const Target *found = nullptr;
+    for (const Target &g : targets) {
+      glBindTexture(g.target, t);
+      if (glGetError() == GL_NO_ERROR) { // binding a texture to another target is an error
+        found = &g;
+        break;
+      }
+    }
+    if (!found) {
+      std::printf("    texture %u: another target (buffer, cube map, multisample)\n", t);
       continue;
-    GLint f = 0;
-    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &f);
-    if (f == GL_R16F || f == GL_RG16F || f == GL_RGB16F || f == GL_RGBA16F)
-      ++n;
+    }
+    GLint f = 0, w = 0, h = 0;
+    glGetTexLevelParameteriv(found->target, 0, GL_TEXTURE_INTERNAL_FORMAT, &f);
+    glGetTexLevelParameteriv(found->target, 0, GL_TEXTURE_WIDTH, &w);
+    glGetTexLevelParameteriv(found->target, 0, GL_TEXTURE_HEIGHT, &h);
+    const bool half = f == GL_R16F || f == GL_RG16F || f == GL_RGB16F || f == GL_RGBA16F;
+    n += half ? 1 : 0;
+    std::printf("    texture %u: %s %dx%d, format 0x%04X%s\n", t, found->name, w, h,
+                static_cast<unsigned>(f), half ? " (16F)" : "");
   }
-  glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(was));
+  for (int i = 0; i < nTargets; ++i)
+    glBindTexture(targets[i].target, static_cast<GLuint>(was[i]));
   while (glGetError() != GL_NO_ERROR) {
   }
   return n;
@@ -98,7 +129,7 @@ Frame render(int halfMode) {
   f.rgb = sr.frameRGB();
   auto *win = vtkOpenGLRenderWindow::SafeDownCast(sr.renderer()->GetRenderWindow());
   if (win) {
-    f.halfTextures = halfFloatTextures(win);
+    f.halfTextures = halfFloatTextures(win, halfMode ? "16F" : "32F");
     f.restored = win->GetState()->GetDefaultTextureInternalFormat(VTK_FLOAT, 1, false, true,
                                                                   false) == GL_R32F &&
                  win->GetState()->GetDefaultTextureInternalFormat(VTK_FLOAT, 3, false, true,
