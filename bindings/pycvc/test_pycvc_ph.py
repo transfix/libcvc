@@ -11,7 +11,9 @@ Checks:
      dH = supplied - dissipated + residual, with the residual small (O(dt^3) with midpoint
      coupling) and smaller than Euler coupling's;
   5. rewiring the same laws (the line to the other bus) changes the future;
-  6. errors: a wrong-sized state, an unknown scheme, a malformed file.
+  6. a DC microgrid of nonlinear DGUs: ph_microgrid_json, system_json read back, storage()
+     from voltages and currents, and its books;
+  7. errors: a wrong-sized state, an unknown scheme, a malformed file.
 Script-style, like the other pycvc tests; self-skips (exit 0) when the running pycvc predates the
 bindings.
 """
@@ -99,7 +101,32 @@ g2 = pycvc.ph_composite(grid([[-1], [0], [1]]))
 X2 = g2.simulate(x0, u0, steps=200)["x"]
 check(np.abs(X2[-1] - X[-1]).max() > 1e-3, "rewiring changes the future")
 
-# 6. Errors.
+# 6. A DC microgrid with the nonlinear reference DGU: built, written out and read back, and
+#    started from a physical state (voltages and currents) through storage().
+if hasattr(pycvc, "ph_microgrid_json"):
+    text = pycvc.ph_microgrid_json(4, edges=[(0, 1), (1, 2), (2, 3)], line_r=[0.3, 0.4, 0.5], line_l=[0.8])
+    mg = pycvc.ph_composite(text)
+    check(mg.blocks() == 7 and mg.state_dim() == 11 and mg.input_dim() == 8, "microgrid dims")
+    check(mg.check(100)["rate_error"] < 1e-12, "the nonlinear microgrid balances its power")
+    again = pycvc.ph_composite(mg.system_json())
+    check(again.pairing() == mg.pairing(), "system_json round trip: pairing")
+    phys = [1.1, 0.1, 0.9, -0.05, 1.2, 0.2, 0.7, 0.0, 0.05, -0.02, 0.01]
+    st = mg.storage(phys)
+    check(st["converged"] and st["residual"] < 1e-9, f"storage: {st}")
+    check(np.allclose(mg.effort(st["x"]), phys, rtol=0, atol=1e-9), "storage inverts the efforts")
+    check(abs(again.energy(st["x"]) - mg.energy(st["x"])) == 0, "round trip: energy")
+    r = mg.simulate(st["x"], [-0.1, 1.0] * 4, steps=50)
+    check(r["converged"] and np.abs(r["residual"]).max() < 1e-6, f"microgrid books: {np.abs(r['residual']).max()}")
+    lin = pycvc.ph_composite(pycvc.ph_microgrid_json(2, dgu="linear", dgu_c=1.5))
+    check(lin.block(0)["kind"] == "canonical" and lin.state_dim() == 5, "a linear-DGU microgrid")
+    try:
+        pycvc.ph_microgrid_json(2, dgu="flux")
+    except (RuntimeError, ValueError):
+        checks += 1
+    else:
+        raise AssertionError("an unknown DGU kind did not raise")
+
+# 7. Errors.
 for bad, what in ((lambda: g.energy([1.0, 2.0]), "a wrong-sized state"),
                   (lambda: g.simulate(x0, u0, coupling="trapezoid"), "an unknown coupling"),
                   (lambda: pycvc.ph_composite('{"format": "cvc-ph-system/9"}'), "a wrong format"),

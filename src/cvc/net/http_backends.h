@@ -19,6 +19,11 @@ namespace detail {
 
 std::unique_ptr<HttpClient> make_default_backend();
 
+// libcurl's global init, done once for the process before any easy handle, by the HTTP client and
+// the WebSocket client (ws_client.cpp) alike. Defined in http_client_curl.cpp, so only under
+// CVC_NET_HAVE_CURL, which the WebSocket client's libcurl backend also needs.
+void curl_global_init_once();
+
 } // namespace detail
 } // namespace net
 } // namespace cvc

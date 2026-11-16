@@ -55,14 +55,17 @@
 #include <vtkLightCollection.h>
 #include <vtkMapper.h> // field colours: an opacity curve is an RGBA colour array
 #include <vtkNew.h>
-#include <vtkPlane.h> // clip test: the planes handed to a node's renderer
+#include <vtkOpenGLRenderWindow.h> // water + sky: no texture unit held between frames
+#include <vtkPlane.h>              // clip test: the planes handed to a node's renderer
 #include <vtkPlaneCollection.h>
 #include <vtkPointData.h>
 #include <vtkPolyData.h>
 #include <vtkPropCollection.h>
 #include <vtkProperty.h>
+#include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
 #include <vtkTextureObject.h> // the cloud shade's crossfade textures
+#include <vtkTextureUnitManager.h>
 #include <vtkVolume.h>
 #include <vtkVolumeProperty.h>
 
@@ -1971,6 +1974,20 @@ int main() {
           "a swell puts the swash on the world's ground meshes, out of the shadow bake");
     } else {
       printf("  SKIP the swash: the water's cascades are not up (no float render targets)\n");
+    }
+
+    // Between frames the context holds no texture unit for the scene's shader inputs (the
+    // cascades, the coast, the wake, the swash, the cloud shade): each holds one only for the
+    // draw it is bound for. Held for good, they ran out WebGL2's 32 units in the browser, and
+    // every draw after that failed and logged.
+    if (auto *win = vtkOpenGLRenderWindow::SafeDownCast(view.renderer()->GetRenderWindow())) {
+      vtkTextureUnitManager *tum = win->GetTextureUnitManager();
+      int held = 0;
+      for (int u = 0; u < tum->GetNumberOfTextureUnits(); ++u)
+        held += tum->IsAllocated(u) ? 1 : 0;
+      printf("  texture units held between frames: %d of %d\n", held,
+             tum->GetNumberOfTextureUnits());
+      chk(held == 0, "no texture unit is held between frames (the water, the swash, the shade)");
     }
     for (const std::string &w : warnings)
       printf("  warning: %s\n", w.c_str());
