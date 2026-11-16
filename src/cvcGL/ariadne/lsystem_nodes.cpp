@@ -669,6 +669,9 @@ struct SkyRT {
   cvc::app *app = nullptr;
   std::unique_ptr<cvc::world::cloud_layer> layer;
   std::string driftKey, morphKey, shadowKey, evolveKey, oroKey;
+  // F1, the live sky: coverage and the wind's heading (sky.*), and the sun: the light rig's key
+  // (lighting.key_azimuth / key_elevation) when the scene has one, else the props.
+  std::string coverageKey, windKey, sunAzKey, sunElKey;
   std::vector<std::string>
       receivers; // the nodes whose meshes (and their children's) take the shade
   std::shared_ptr<const cvc::height_field> ground; // its extent is the area, unless `area` is set
@@ -1148,6 +1151,10 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
   rt->shadowKey = seed_key(app0, pref, n, "sky.shadow", n.props.num("shadow", 1.0));
   rt->evolveKey = seed_key(app0, pref, n, "sky.evolve", std::max(0.0, n.props.num("evolve", 1.0)));
   rt->oroKey = seed_key(app0, pref, n, "sky.orographic", p.orographic);
+  rt->coverageKey = seed_key(app0, pref, n, "sky.coverage", p.coverage);
+  rt->windKey = seed_key(app0, pref, n, "sky.wind_az", p.wind_az);
+  rt->sunAzKey = ari::resolve_bind(pref, "lighting.key_azimuth"); // the rig's: not seeded here
+  rt->sunElKey = ari::resolve_bind(pref, "lighting.key_elevation");
   rt->receivers.push_back(ground);
   if (const ari::Value *rv = n.props.find("receivers"); rv && rv->is_seq())
     for (const ari::Value &v : rv->items)
@@ -1165,6 +1172,24 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     const double t = app.world_clock().t();
     const double dt = r.lastT < 0.0 ? 0.0 : std::max(0.0, t - r.lastT);
     r.lastT = t;
+    // The live sky (F1): the coverage (the cells' targets ranked again; the clouds fade over fade
+    // s), the wind's heading, and the sun from the light rig. A new sun relights the maps and
+    // re-composites the shade and the far clouds at once.
+    L.set_coverage(read_key(app, r.coverageKey, L.params().coverage));
+    if (const double w = read_key(app, r.windKey, L.params().wind_az); w != L.params().wind_az) {
+      constexpr double kPi = 3.14159265358979323846;
+      L.set_wind(w);
+      r.windX = std::sin(w * kPi / 180.0);
+      r.windY = -std::cos(w * kPi / 180.0);
+    }
+    {
+      const double az = read_key(app, r.sunAzKey, L.params().sun_az);
+      const double el = std::min(89.0, std::max(5.0, read_key(app, r.sunElKey, L.params().sun_el)));
+      if (az != L.params().sun_az || el != L.params().sun_el) {
+        L.set_sun(az, el);
+        r.fresh = true;
+      }
+    }
     const double ds = dt * CLOUD_DRIFT * read_key(app, r.driftKey, 1.0);
     r.driftX += ds * r.windX;
     r.driftY += ds * r.windY;

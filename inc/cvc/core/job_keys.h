@@ -28,6 +28,10 @@
 //   int pid = cvc::schedule_published_job(app, job, opt, keys, "segmenting...",
 //                                         [&](cvc::sliced_job &j) { take the result });
 //
+// A job scheduled with schedule_published_job also posts to the app's notification feed
+// (cvc/core/notify.h) when it ends: a failure always, as an error; a job that ran a second or more,
+// as info; a cancelled one never (the user asked for it).
+//
 // Every write goes through cvc::state::childThroughLinks (as Ariadne's binds write), never throws,
 // and is a no-op when the value is unchanged. The writes are the scheduler thread's: call these
 // from the thread that pumps it (a node's tick, a task's hooks).
@@ -89,6 +93,8 @@ public:
 
   // ms since started() (0 before it).
   double work_ms() const;
+  // The base's path from the app root (the root's own path, then the base).
+  std::string full_path() const;
 
 private:
   cvc::state *_root;

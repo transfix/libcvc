@@ -2,7 +2,8 @@
 // window's title bar, through ImGui's own mouse input, fills the window to the view, and another
 // puts it back where it was at its size. tree.<id>.maximized follows and drives it, and the
 // window's persisted geometry stays where it goes back to. A `maximizable: false` window has none.
-// A `resizable: false` window keeps its size when its corner is dragged.
+// A `resizable: false` window keeps its size when its corner is dragged. A title too long for its
+// window stops short of the maximize button.
 #include <cmath>
 #include <cstdio>
 #include <cvc/ariadne/ariadne.h>
@@ -107,16 +108,30 @@ struct Session {
                   bar.Min.y + st.FramePadding.y + sz * 0.5f);
   }
   // How many vertices the window drew inside the maximize button: one square, or more for two.
-  int glyph_vertices(const char *name) {
+  // `inset` px off each side leaves out what only touches the button's edge.
+  int glyph_vertices(const char *name, float inset = 0.0f) {
     ImGuiWindow *w = window(name);
     if (!w)
       return -1;
     const ImVec2 c = button(name, true);
-    const float h = ImGui::GetFontSize() * 0.5f;
+    const float h = ImGui::GetFontSize() * 0.5f - inset;
     const ImRect bb(c.x - h, c.y - h, c.x + h, c.y + h);
     int n = 0;
     for (const ImDrawVert &v : w->DrawList->VtxBuffer)
       if (bb.Contains(v.pos))
+        ++n;
+    return n;
+  }
+  // How many vertices the window drew in its title bar between x0 and x1 (its title's glyphs).
+  int title_vertices(const char *name, float x0, float x1) {
+    ImGuiWindow *w = window(name);
+    if (!w)
+      return -1;
+    const ImRect bar = w->TitleBarRect();
+    const ImRect r(x0, bar.Min.y, x1, bar.Max.y);
+    int n = 0;
+    for (const ImDrawVert &v : w->DrawList->VtxBuffer)
+      if (r.Contains(v.pos))
         ++n;
     return n;
   }
@@ -187,7 +202,16 @@ int main() {
   plain.size.w = ari::Extent{ari::Unit::Px, 200.0f};
   plain.size.h = ari::Extent{ari::Unit::Px, 100.0f};
   chk(plain.closable && plain.maximizable, "a window has a close and a maximize button by default");
-  Session s(ari::group({post, pinned, plain}));
+  // A title longer than its window is wide: it stops short of the maximize button.
+  ari::Widget wordy =
+      ari::window("A title much longer than this narrow window", {ari::text("narrow")});
+  wordy.id = "wordy";
+  wordy.has_pos = true;
+  wordy.pos_x = 100.0f;
+  wordy.pos_y = 400.0f;
+  wordy.size.w = ari::Extent{ari::Unit::Px, 160.0f};
+  wordy.size.h = ari::Extent{ari::Unit::Px, 100.0f};
+  Session s(ari::group({post, pinned, plain, wordy}));
   chk(s.be.capabilities().maximize && s.rt.has("ui.maximize"),
       "the backend maximizes (ui.maximize)");
   ImGuiWindow *w = s.window("Post###post");
@@ -335,6 +359,25 @@ int main() {
   cvc::state::instance(s.app)("ui.tree.post.open").value(std::string("1"));
   s.frames(2);
   chk(w->Active && near(w->SizeFull, resized), "and it opens again at its size");
+
+  // A long title is clipped short of the maximize button, as it is short of the close button: the
+  // button holds its square alone (as many vertices as a window with a short title's), and the
+  // title is still drawn, left of it.
+  {
+    ImGuiWindow *wd = s.window("###wordy");
+    const float x_max = s.button("###wordy", true).x - ImGui::GetFontSize() * 0.5f;
+    const int alone = s.glyph_vertices("Plain###plain", 1.0f);
+    const int there = s.glyph_vertices("###wordy", 1.0f);
+    const float x_min = wd ? wd->Pos.x + 2.0f * ImGui::GetFontSize() : 0.0f; // past the arrow
+    const int title = wd ? s.title_vertices("###wordy", x_min, x_max) : -1;
+    chk(wd && wd->Active && alone > 0 && there == alone,
+        "a long title stops short of the maximize button (" + std::to_string(there) +
+            " vertices in it, " + std::to_string(alone) + " with a short title)");
+    chk(title >= 4 * 6,
+        "and is drawn left of it (" + std::to_string(title) + " vertices, 4 a glyph)");
+    chk(wd && std::string(wd->Name) == "A title much longer than this narrow window###wordy",
+        "its ImGui window keeps its name, title and id (" + std::string(wd ? wd->Name : "") + ")");
+  }
 
   // A window with nothing said has both buttons.
   ImGuiWindow *pl = s.window("Plain###plain");

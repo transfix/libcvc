@@ -26,6 +26,10 @@
 //             again; going back to auto clears the window only while it is the binding's.
 //   volume    model -> transfer_function.{color,opacity} (the VTK VolumeNode's own keys; it
 //             re-reads them live)
+//   volume_slice  nothing to lower: VolumeSliceNode colours its plane through the model key
+//             itself, over the same range the binding publishes (its volume's data range: the
+//             realizer passes the volume, or for a file read plane by plane a stand-in holding a
+//             plane of it and the file's range)
 //   fe_lab    ONE isocontour -> fe.mesh.isovalue, then a debounced fe.request = mesh (the remesh
 //             takes seconds, so it waits for the drag to settle and for a running job to finish).
 //             The isocontour is followed by id -- the lowest at attach, the lowest again if that
@@ -131,7 +135,7 @@ namespace ariadne {
 struct RealizedScene;
 
 // The renderer a binding drives.
-enum class tf_target { volren, volslice, volume, fe_lab };
+enum class tf_target { volren, volslice, volume, fe_lab, volume_slice };
 
 struct tf_binding_options {
   // The model the key is seeded with when it is empty (the document's transfer_function:, the

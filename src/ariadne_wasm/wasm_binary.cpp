@@ -328,6 +328,25 @@ bool function_imports(std::string_view module, std::vector<FunctionImport> &out,
   return true;
 }
 
+bool has_start(std::string_view module, bool &start, std::string &error) {
+  error.clear();
+  start = false;
+  if (!is_module(module, error))
+    return false;
+  Reader r{module, 8};
+  while (!r.done()) {
+    const std::uint8_t id = r.byte();
+    const std::uint64_t size = r.leb();
+    if (r.bad || size > module.size() - r.at) {
+      error = "a section runs past the module's end";
+      return false;
+    }
+    r.skip(size);
+    start = start || id == 8;
+  }
+  return true;
+}
+
 std::string type_text(std::string_view params, std::string_view results) {
   std::string s;
   const auto list = [&s](const char *what, std::string_view types) {

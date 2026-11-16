@@ -1,0 +1,8 @@
+# The server document for ctest arisrvx_room_call_guest: arisrvx runs its clients' WebAssembly
+# guests ((room-run module ...)), each chrooted to its sender's own participant (server_document.h).
+# Stock arisrv refuses it (ctest arisrv_doc_client_guests_need_arisrvx).
+meta: { name: a relay that runs its clients' guests, min_libcvc: 3.7.13 }
+requires: [relay]
+server:
+  client_guests: { steps: 5000 }
+init: (state-set "status" "up")

@@ -83,6 +83,7 @@ struct world_clock_keys;
 
 namespace physics {
 class world;
+struct body_desc;
 }
 namespace nav {
 struct world_grid;
@@ -158,6 +159,9 @@ struct SceneWorldBody {
   bool ground = true;
   // Where the node is drawn relative to the body: body pose x body_from_visual (row-major).
   std::array<double, 16> body_from_visual{};
+  // What the body was made from (its shape, mass, motion) when a node declared it; null for the
+  // bodies of a node's colliders (a generated world's, a dataset's). A water node's wake reads it.
+  std::shared_ptr<const physics::body_desc> desc;
 };
 
 class SceneWorld {
