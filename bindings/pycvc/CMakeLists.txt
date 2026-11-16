@@ -359,6 +359,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_state_exec_locks:test_pycvc_state_exec_locks.py
              pycvc_world_clock:test_pycvc_world_clock.py
              pycvc_input_trace:test_pycvc_input_trace.py
+             pycvc_ph:test_pycvc_ph.py
              pycvc_world_units:test_pycvc_world_units.py
              pycvc_dataprep:test_pycvc_dataprep.py
              pycvc_volslice:test_pycvc_volslice.py
@@ -557,7 +558,7 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_ari
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_ari.py)
   set_tests_properties(pycvc_ari PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
-  # pycvc_gl.ariadne.Host, the Python host: data both ways, callbacks, errors and re-entrancy
+  # pycvc.ari.Host, the Python host: data both ways, callbacks, errors and re-entrancy
   # headless, then (in a child; skipped without GL unless CVC_REQUIRE_RENDER) a published picture and
   # a stream in the frame, and the examples/ariadne/python programs offscreen.
   add_test(NAME pycvc_gl_ariadne_host

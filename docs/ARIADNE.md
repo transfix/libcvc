@@ -862,6 +862,7 @@ types behind one call, `register_cvcgl_extensions`
 ([`extensions.h`](../inc/cvc/gl/ariadne/extensions.h)), which both `ariadne_hello` and
 `AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`,
 `generated_world` (terrain_lab's world, [`world_nodes.h`](../inc/cvc/gl/ariadne/world_nodes.h)),
+`water` (its sea, lakes and ponds as the GPU FFT ocean, below),
 and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and `fe_lab`. Keys the built-in parser
 does not know land in the node's `props`, which a custom realizer reads; most realizers
 **seed** state keys from them (`forest.*` for `forest_trees`, the node's own subtree for
@@ -1093,6 +1094,28 @@ clouds), `far_reach` (how far the far clouds reach toward the horizon; out of th
 `evolve` (the weather's speed: 1 is a step every 5 s, a cloud lasting some 8 minutes; 0 holds the
 clouds) and `shadow` (0 starts the shade off). Live keys under the node's root (`sky.` unless
 `keys:`): `drift`, `morph`, `evolve`, `orographic` and `shadow`, all on `sky_controls.ari`.
+
+**Water.** `water` draws everything below `level` on a ground (`world:` a `generated_world`, or
+`ground:` any height-field node) as the GPU FFT sea of OCEAN-AND-WEATHER-ROADMAP.md (§11.2, O15):
+three wave cascades for the wind (`wind_speed`, `wind_dir`, `fetch`), each fading out over
+`shore_fade` metres of depth toward the shore. A grid `near` metres each way from the camera
+(`cells` vertices a side) is displaced by the cascades and moves with the camera by whole cells; a
+flat grid over the ground (`far_cells` a side) draws the rest and gives way inside the near one.
+Both shade as a Fresnel sea with shallows tinted by depth and whitecaps where the waves fold, the
+threshold found so they cover Monahan's share of the sea for the wind (`whitecaps` scales it;
+`foam_bias` at 0 or above fixes it), and both stay out of the scene's bounds, so the ground frames
+the view. When the ground's whole rim is under water (a `generated_world` with `edge: shore`, an
+island) the sea goes on `outer` metres past it (6000); otherwise it stops at the ground's edge. A
+`generated_world` under a water node wants `water: 0`, so its own flat water rungs do not draw
+over it. The cascades need float render targets; without them the water is flat blue. Live keys
+under the node's root (`water.` unless `keys:`): `wind_speed`, `wind_dir`, `fetch`, `chop`,
+`wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`, `foam_fray` and `shore_fade`, most on
+`water_controls.ari`. With `body: {}` the water is in the scene's physics world, with or without a
+renderer ([`scene_water.h`](../inc/cvc/ariadne/scene_water.h)). It is one fluid field over the
+water's extent, its surface the same sea computed on the CPU, so a body lighter than water floats
+on the waves the picture shows and a heavier one sinks. The field is rebuilt when the wind, chop or
+wave height change or the ground regenerates, and the scene's world swaps it as it swaps a
+generated world's bodies. Its waves do not yet fade toward the shore as the drawn ones do.
 
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the
@@ -3341,6 +3364,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `volren_controls`, `volslice_controls` | a `volren` / `volslice` node (arg `node`, default `bunny_volume`) |
 | `forest_controls`, `sea_controls`, `sky_controls` | a `forest_trees` / `wave_sea` / `cloud_sky` node (arg `keys`, below) |
 | `world_controls` | a `generated_world` node (§5.4; arg `keys`) |
+| `water_controls` | a `water` node (arg `keys`, default `water`) |
 | `mesh_tools` | a `mesh_lab` node (§5.4; arg `node`, default `mesh`) |
 | `fe_controls` | an `fe_lab` node (§5.4; arg `node`, default `domain`) |
 | `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `scene`, `show`, `hide`, `mode`, `camera`, `chrome`, `shadows`, `caption`, `width`, `height`, `title`, `id`) |
@@ -4238,7 +4262,7 @@ unless `MPLBACKEND` or a matplotlibrc names another; `matplotlib.use()` selects 
   `image: src: figure-1`, or by the name `pycvc_gl.ariadne_mpl.bind(fig, "name")` gives it.
 - `draw_idle()` draws once in the next frame, and timers, so `FuncAnimation`, tick on the frames.
   `plt.pause()` runs the host's frames for its interval, where the program runs them.
-- `display(obj)`, predefined in a `python:` block and in `pycvc_gl.ariadne`, shows an object's
+- `display(obj)`, predefined in a `python:` block and in `pycvc.ari`, shows an object's
   richest form in a figures.ari window as IPython's does: a figure, a numpy picture, a PIL image
   or `_repr_png_` as a picture, else markdown or plain text. Where there is no such window (a
   document of its own, `arix`, `ariglx --terminal`, `arisrvx`) it prints the text/plain form, as
@@ -4597,7 +4621,7 @@ host.run()                          # until SIGTERM; the app's shutdown, then th
   program keeps each task it starts (`host.loop.create_task`) until the task is done: asyncio holds
   tasks only weakly, so one waiting on a stream of its own (`asyncio.open_connection`) is freed by
   the next full garbage collection, mid-await, and its work never finishes.
-- **Writes.** `host.set`, `set_tree`, `set_series` and `set_plot` (as `pycvc_gl.ariadne.Host`'s)
+- **Writes.** `host.set`, `set_tree`, `set_series` and `set_plot` (as `pycvc.ari.Host`'s)
   take paths from the tree's root and are queued. The relay applies them on its next room step
   (60 Hz), ahead of the server document's programs, coalesced per path and in the order of each path's last write
   (a section's fields, then its `rev`). `--script-write-budget N` caps a step at N bytes (65536 by

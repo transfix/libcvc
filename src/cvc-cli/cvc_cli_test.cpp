@@ -2334,6 +2334,64 @@ TEST_F(CvcCliTest, Regression_ClusterStatusDefaultIdsEndToEnd) {
 #endif // !_WIN32
 
 // ===========================================================================
+// ph: composed port-Hamiltonian systems (cvc::ph composition)
+// ===========================================================================
+
+// Two DGUs (capacitor charge, inductor flux) and the RL line between them, as cvc-ph-system/1.
+static void write_two_bus_grid(const std::string &file) {
+  std::ofstream(file) << R"({"format": "cvc-ph-system/1",
+ "laws": {
+  "dgu": {"format": "cvc-ph-law/1", "kind": "canonical", "n": 1, "potential": {"K": [[0.4545]]},
+          "mass": {"diag": [1.8]}, "damping": {"diag": [1.2]}, "ports": 1, "B": [[1], [0]],
+          "inputs": 2, "G": [[1, 0], [0, 1]], "scheme": "leapfrog"},
+  "line": {"format": "cvc-ph-law/1", "kind": "linear", "n": 1, "Q": [1.25], "R": [0.3],
+           "ports": 1, "B": [1]}},
+ "blocks": [{"name": "dgu0", "law": "dgu"}, {"name": "dgu1", "law": "dgu"}, {"name": "l01", "law": "line"}],
+ "couplings": [{"type": "incidence", "buses": ["dgu0", "dgu1"], "lines": ["l01"], "A": [[-1], [1]]}]}
+)";
+}
+
+TEST_F(CvcCliTest, PhInfoSimulateAndCheckAComposedGrid) {
+  const std::string grid = path("grid.json");
+  write_two_bus_grid(grid);
+  auto info = cvc("ph info \"" + grid + "\"");
+  ASSERT_EQ(0, info.exit_code) << info.output;
+  EXPECT_NE(std::string::npos, info.output.find("3 blocks, state 5, ports 3, inputs 4"))
+      << info.output;
+  EXPECT_NE(std::string::npos, info.output.find("pair dgu0.0 - l01.0: 1")) << info.output;
+  EXPECT_NE(std::string::npos, info.output.find("pair dgu1.0 - l01.0: -1")) << info.output;
+
+  auto check = cvc("ph check \"" + grid + "\" --samples 50");
+  ASSERT_EQ(0, check.exit_code) << check.output;
+  EXPECT_NE(std::string::npos, check.output.find("balanced")) << check.output;
+
+  const std::string csv = path("grid.csv");
+  auto sim = cvc("ph simulate \"" + grid +
+                 "\" --x0 2.2,0,2.6,0,0 --u -0.1,1,-0.15,1.1 --steps 50 --csv \"" + csv + "\"");
+  ASSERT_EQ(0, sim.exit_code) << sim.output;
+  EXPECT_NE(std::string::npos,
+            sim.output.find("50 steps of 0.01 s (split, 2 substeps, midpoint coupling)"))
+      << sim.output;
+  EXPECT_NE(std::string::npos, sim.output.find("supplied")) << sim.output;
+  std::ifstream in(csv);
+  std::string header, line;
+  std::getline(in, header);
+  EXPECT_EQ("t,dgu0.0,dgu0.1,dgu1.0,dgu1.1,l01.0,H,supplied,dissipated,residual", header);
+  int rows = 0;
+  while (std::getline(in, line))
+    ++rows;
+  EXPECT_EQ(51, rows);
+
+  auto bad = cvc("ph simulate \"" + grid + "\" --x0 1,2");
+  EXPECT_NE(0, bad.exit_code);
+  EXPECT_NE(std::string::npos, bad.output.find("rollout start state")) << bad.output;
+  auto op = cvc("ph frobnicate \"" + grid + "\"");
+  EXPECT_NE(0, op.exit_code);
+  auto none = cvc("ph info \"" + path("missing.json") + "\"");
+  EXPECT_NE(0, none.exit_code);
+}
+
+// ===========================================================================
 // ph-train: the learned port-Hamiltonian vehicle (cvc::ph) from plant logs
 // ===========================================================================
 

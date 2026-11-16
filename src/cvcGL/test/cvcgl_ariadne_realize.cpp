@@ -1780,6 +1780,92 @@ int main() {
     }
   }
 
+  // ── water: a generated world's sea, lakes and ponds as the GPU FFT ocean (O15) ─────────────────
+  // Its meshes: a near grid that follows the camera and a far grid over the ground, out of the
+  // scene's bounds (the ground frames the view). The far grid stops at the ground's edge, unless
+  // the ground's whole rim is under water (a shore-edged world, an island): then the sea goes on
+  // `outer` metres past it. The cascades start on the first tick with a window; without one the
+  // water stays the flat fallback.
+  for (const double level : {0.0, 500.0}) {
+    printf("== water node (level %.0f) ==\n", level);
+    chk(cvc::gl::ariadne::has_scene_node_type(app, "water"),
+        "register_cvcgl_extensions installed the water node type");
+    SceneGraph sg(app, "wt");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    auto node = [](const char *id, const char *type,
+                   std::vector<std::pair<const char *, std::string>> props) {
+      SceneNode n;
+      n.id = id;
+      n.type = type;
+      n.props.kind = Value::Kind::Map;
+      for (auto &p : props) {
+        Value v;
+        v.kind = Value::Kind::Scalar;
+        v.scalar = p.second;
+        n.props.entries.emplace_back(p.first, v);
+      }
+      return n;
+    };
+    const std::string lv = std::to_string(level);
+    scene.nodes.push_back(node("world", "generated_world",
+                               {{"seed", "5"},
+                                {"half", "200"},
+                                {"trees", "0"},
+                                {"rocks", "0"},
+                                {"buildings", "0"},
+                                {"amp", "40"},
+                                {"water_level", lv},
+                                {"water", "0"},
+                                {"texture", "256"}}));
+    scene.nodes.push_back(
+        node("water", "water", {{"world", "world"}, {"level", lv}, {"wind_speed", "12"}}));
+    std::vector<std::string> warnings;
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "wt", &warnings);
+    for (const std::string &w : warnings)
+      printf("  warning: %s\n", w.c_str());
+    auto group = sg.getGraphics("water");
+    auto near =
+        group ? std::dynamic_pointer_cast<cvc::gl::GeometryNode>(group->findChildByName("near"))
+              : nullptr;
+    auto far = group
+                   ? std::dynamic_pointer_cast<cvc::gl::GeometryNode>(group->findChildByName("far"))
+                   : nullptr;
+    chk(group && near && far, "water realized its near and far grids under its node");
+    chk(sg.getGraphics("world_water") == nullptr,
+        "the world with water: 0 drew no flat water rungs of its own");
+    chk(group && !group->contributesToSceneBounds() && near && !near->contributesToSceneBounds() &&
+            far && !far->contributesToSceneBounds(),
+        "the water stays out of the scene's bounds: the ground frames the view");
+    auto key = [&](const char *k) {
+      return cvc::state::instance(app)(cvc::ariadne::resolve_bind("wt", k)).value<double>();
+    };
+    chk(approx(key("water.wind_speed"), 12.0) && approx(key("water.whitecaps"), 1.0),
+        "water seeded water.* from its props (the wind) and its defaults (the whitecaps)");
+    if (far) {
+      const cvc::bounding_box b = far->getBoundingBox();
+      auto hf = realized.height_fields.find("world");
+      const bool haveGround = hf != realized.height_fields.end() && hf->second;
+      chk(haveGround, "the world published its ground for the water");
+      if (haveGround) {
+        const cvc::height_field &g = *hf->second;
+        // At level 0 the world's rim is partly dry: the water ends at its edge. At 500 m every
+        // bit of it is under water, as a shore-edged world's rim is: the sea goes on 6 km past.
+        const double m = level > 100.0 ? 6000.0 : 0.0;
+        chk(approx(b.minx, g.x0() - m) && approx(b.maxx, g.max_x() + m) &&
+                approx(b.miny, g.y0() - m) && approx(b.maxy, g.max_y() + m),
+            level > 100.0 ? "a rim under water all round: the far grid runs 6 km past the ground"
+                          : "a rim partly dry: the far grid ends at the ground's edge");
+        chk(approx(b.minz, level) && approx(b.maxz, level), "the far grid lies at the level");
+      }
+    }
+    chk(near && !near->isVisible(), "the near grid waits for the cascades (hidden)");
+    for (auto &t : realized.custom_ticks)
+      t(nullptr); // no window: nothing starts, nothing breaks
+    chk(near && !near->isVisible() && far && far->isVisible(),
+        "without a window the water stays the flat far grid");
+  }
+
   // ── a generated terrain as a geometry source (source: { terrain: {...} }) ─────────────────
   {
     printf("== terrain geometry source ==\n");
