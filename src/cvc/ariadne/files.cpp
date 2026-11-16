@@ -13,7 +13,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <emscripten.h>
-#include <emscripten/eventloop.h>
+#include <memory>
 #include <thread>
 #ifdef __EMSCRIPTEN_PTHREADS__
 #include <emscripten/proxying.h> // a pool thread's read, run on the page's thread
@@ -263,14 +263,18 @@ PickedFiles &picked_files(cvc::app &app) { return app.slot<PickedFiles>(); }
 
 // The page's side: Module.cvcFiles holds the File objects picked ({files: {id: File}}) and the
 // operations out ({ops: {op: {done, ...}}}), numbered by the page, so nothing on this side is kept
-// between calls. An operation's result is polled from a timer on the browser's event loop
-// (emscripten_set_timeout) until it is done.
+// between calls. When an operation it was handed a `ctx` for settles, the page calls back
+// (cvc_files_settled, below) from the browser's own event: the input's change or cancel, the read's
+// promise. Not from a timer: a hidden tab's timers run about once a second (once a minute after
+// five minutes hidden), which held an upload to a chunk or two a second. An answer the page has
+// before it returns comes from a microtask, after this side's call is over.
 // clang-format off
-EM_JS(int, cvc_files_pick, (const char *accept, int multiple), {
+EM_JS(int, cvc_files_pick, (const char *accept, int multiple, void *ctx), {
   if (typeof document === 'undefined' || !document.body) return 0;
   var reg = Module.cvcFiles = Module.cvcFiles || {next: 1, op: 1, files: {}, ops: {}};
   var op = reg.op++;
   var st = reg.ops[op] = {done: false, ids: []};
+  var settle = function() { _cvc_files_settled(ctx, op); };
   try {
     var input = document.createElement('input');
     input.type = 'file';
@@ -290,14 +294,18 @@ EM_JS(int, cvc_files_pick, (const char *accept, int multiple), {
         st.ids.push(id);
       }
       if (input.parentNode) input.parentNode.removeChild(input);
+      Promise.resolve().then(settle); // even an input that answers inside click()
     };
     input.addEventListener('change', finish);
     input.addEventListener('cancel', finish); // no files: the user closed the dialog
     document.body.appendChild(input);
     input.click();
   } catch (e) {
-    st.done = true;
-    st.error = String((e && e.message) || e);
+    if (!st.done) {
+      st.done = true;
+      st.error = String((e && e.message) || e);
+      Promise.resolve().then(settle);
+    }
   }
   return op;
 });
@@ -351,25 +359,32 @@ EM_JS(double, cvc_files_size, (int id), {
 EM_JS(void, cvc_files_release, (int id), { if (Module.cvcFiles) delete Module.cvcFiles.files[id]; });
 
 // Read [offset, offset + length) of file `id` into `dst` (length bytes the caller keeps until the
-// operation is done). The count read lands in the op's `n`.
-EM_JS(int, cvc_files_read, (int id, double offset, int length, unsigned char *dst), {
+// operation is done). The count read lands in the op's `n`. With a `ctx` the page calls back when
+// the read settles; without one (a pool thread's read, which waits) the caller asks
+// (cvc_files_op_done).
+EM_JS(int, cvc_files_read, (int id, double offset, int length, unsigned char *dst, void *ctx), {
   var reg = Module.cvcFiles;
   var op = reg.op++;
   var st = reg.ops[op] = {done: false, n: 0};
+  var settle = function() { if (ctx) _cvc_files_settled(ctx, op); };
   var f = reg.files[id];
   if (!f) {
     st.done = true;
     st.error = 'the file is gone';
+    Promise.resolve().then(settle);
     return op;
   }
+  // Settles once whatever fails: the read, or the copy into the heap.
   f.slice(offset, offset + length).arrayBuffer().then(function(buf) {
     var bytes = new Uint8Array(buf);
     HEAPU8.set(bytes, dst);
     st.n = bytes.length;
+  }).catch(function(e) {
+    st.n = 0;
+    st.error = String((e && e.message) || e) || 'the read failed';
+  }).then(function() {
     st.done = true;
-  }, function(e) {
-    st.error = String((e && e.message) || e);
-    st.done = true;
+    settle();
   });
   return op;
 });
@@ -409,6 +424,13 @@ template <class F> void at_page(F &&f) {
   f();
 }
 
+// Something waiting for an operation the page settles (a pick, a read): handed to the page as that
+// operation's `ctx`, and taken back, once, when it settles (cvc_files_settled).
+struct PendingOp {
+  virtual ~PendingOp() = default;
+  virtual void settled(int op) = 0;
+};
+
 // A file the page picked: its File stays on the page, by id, until this goes.
 class BrowserFile : public FileSource {
 public:
@@ -442,7 +464,7 @@ public:
       int op = 0;
       at_page([&] {
         op = cvc_files_read(id_, static_cast<double>(offset), static_cast<int>(n),
-                            reinterpret_cast<unsigned char *>(bytes.data()));
+                            reinterpret_cast<unsigned char *>(bytes.data()), nullptr);
       });
       int state = 0;
       while (state == 0) {
@@ -464,38 +486,31 @@ public:
       done(std::move(bytes), std::string());
       return;
     }
-    auto *r = new Read;
+    // The page's thread: the page calls back when the read settles (Read::settled).
+    auto r = std::make_unique<Read>();
     r->bytes.resize(n);
     r->done = std::move(done);
-    r->op = cvc_files_read(id_, static_cast<double>(offset), static_cast<int>(r->bytes.size()),
-                           reinterpret_cast<unsigned char *>(r->bytes.data()));
-    poll(r);
+    unsigned char *dst = reinterpret_cast<unsigned char *>(r->bytes.data());
+    cvc_files_read(id_, static_cast<double>(offset), static_cast<int>(n), dst, r.release());
   }
 
 private:
   // A read out: its buffer lives until the page has written it (or failed), whatever the reader
   // does meanwhile.
-  struct Read {
-    int op = 0;
+  struct Read : PendingOp {
     std::string bytes;
     ReadDone done;
-  };
-  static void poll(void *p) {
-    auto *r = static_cast<Read *>(p);
-    if (cvc_files_op_done(r->op) == 0) {
-      emscripten_set_timeout(&BrowserFile::poll, 4, r);
-      return;
+    void settled(int op) override {
+      const std::string error = take_js_string(cvc_files_op_error(op));
+      const int got = error.empty() ? cvc_files_op_count(op) : 0;
+      cvc_files_op_free(op);
+      bytes.resize(static_cast<std::size_t>(std::max(0, got)));
+      if (error.empty())
+        done(std::move(bytes), std::string());
+      else
+        done(std::string(), "the browser could not read the file: " + error);
     }
-    std::string error = take_js_string(cvc_files_op_error(r->op));
-    const int n = error.empty() ? cvc_files_op_count(r->op) : 0;
-    cvc_files_op_free(r->op);
-    std::unique_ptr<Read> owned(r);
-    owned->bytes.resize(static_cast<std::size_t>(std::max(0, n)));
-    if (error.empty())
-      owned->done(std::move(owned->bytes), std::string());
-    else
-      owned->done(std::string(), "the browser could not read the file: " + error);
-  }
+  };
 
   int id_;
   std::string name_;
@@ -503,26 +518,19 @@ private:
   std::string type_;
 };
 
-struct PendingPick {
-  int op = 0;
+// A pick out: the page calls back when the user picks or closes the dialog.
+struct PendingPick : PendingOp {
   FilePickDone done;
-};
-
-void poll_pick(void *p) {
-  auto *pick = static_cast<PendingPick *>(p);
-  if (cvc_files_op_done(pick->op) == 0) {
-    emscripten_set_timeout(&poll_pick, 50, pick);
-    return;
+  void settled(int op) override {
+    const std::string error = take_js_string(cvc_files_op_error(op));
+    std::vector<std::shared_ptr<FileSource>> files;
+    const int n = error.empty() ? cvc_files_op_count(op) : 0;
+    for (int i = 0; i < n; ++i)
+      files.push_back(std::make_shared<BrowserFile>(cvc_files_op_id(op, i)));
+    cvc_files_op_free(op);
+    done(std::move(files), error.empty() ? error : "the browser's file picker: " + error);
   }
-  std::unique_ptr<PendingPick> owned(pick);
-  std::string error = take_js_string(cvc_files_op_error(pick->op));
-  std::vector<std::shared_ptr<FileSource>> files;
-  const int n = error.empty() ? cvc_files_op_count(pick->op) : 0;
-  for (int i = 0; i < n; ++i)
-    files.push_back(std::make_shared<BrowserFile>(cvc_files_op_id(pick->op, i)));
-  cvc_files_op_free(pick->op);
-  owned->done(std::move(files), error.empty() ? error : "the browser's file picker: " + error);
-}
+};
 
 } // namespace
 
@@ -530,11 +538,12 @@ bool browser_pick_files(const FilePickRequest &req, FilePickDone done) {
   std::string accept;
   for (const std::string &a : req.accept)
     accept += (accept.empty() ? "" : ",") + a;
-  const int op = cvc_files_pick(accept.c_str(), req.multiple ? 1 : 0);
-  if (op == 0)
-    return false;
-  auto *pick = new PendingPick{op, std::move(done)};
-  emscripten_set_timeout(&poll_pick, 50, pick);
+  auto pick = std::make_unique<PendingPick>();
+  pick->done = std::move(done);
+  // The page never settles before this call returns, so `pick` is still here to hand over.
+  if (cvc_files_pick(accept.c_str(), req.multiple ? 1 : 0, pick.get()) == 0)
+    return false; // no page to ask
+  pick.release(); // the page's until it settles (cvc_files_settled)
   return true;
 }
 
@@ -546,3 +555,12 @@ bool browser_pick_files(const FilePickRequest &, FilePickDone) { return false; }
 
 } // namespace ariadne
 } // namespace cvc
+
+#ifdef __EMSCRIPTEN__
+// The page calls here when an operation it was handed a `ctx` for settles (cvc_files_pick,
+// cvc_files_read): `ctx` is the PendingOp waiting for it, which goes with this call.
+extern "C" EMSCRIPTEN_KEEPALIVE void cvc_files_settled(void *ctx, int op) {
+  std::unique_ptr<cvc::ariadne::PendingOp> pending(static_cast<cvc::ariadne::PendingOp *>(ctx));
+  pending->settled(op);
+}
+#endif

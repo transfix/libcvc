@@ -5817,8 +5817,8 @@ when unknown). The options (an unknown one is an error):
 |---|---|
 | `accept` | what may be picked, as an HTML `<input accept>` lists it: a list (or one comma-separated string) of `".ext"`, `"type/subtype"` and `"type/*"`. Default: any file |
 | `multiple` | `#t`: the user may pick more than one (the composed window below picks one at a time) |
-| `title` | the picker's title; default `Open file` |
-| `dir` | the folder a native or composed picker starts in; default the working folder |
+| `title` | the picker's title: the composed window's (default `Open file`), and the system dialog's where it shows one (default: the system's own, in the user's language). A browser's picker has none |
+| `dir` | the folder the picker starts in. The composed window's default is the working folder; the system dialog's is the system's own choice, usually the folder last used there. A browser's picker starts where the browser chooses |
 
 One picker is open at a time: a second `file-pick` while one is open raises. Call it from an
 action (a button's `on:`), not from `init:`. A browser opens its picker only within a user's
@@ -5894,7 +5894,9 @@ bigger file goes in chunks. The file is read a slice at a time, so a chunked upl
 chunk in memory. In a browser build without threads (§10.2), each slice is read from the page's
 File and each request is started rather than sent. Each answer, from the browser's event loop,
 starts the next, so the frames go on while the file goes out, and a killed program aborts the
-request in flight. Natively the upload runs on the background pool.
+request in flight. The answers are the browser's own events (the slice's promise, the request's
+reply), not a timer's, so an upload keeps its pace in a background tab, where the browser runs
+timers about once a second. Natively the upload runs on the background pool.
 
 txwtf, for example, takes a small file as `multipart` at `/social/files`, and a big one in
 chunks at the URL its `/social/files/resumable` call returns:
