@@ -1,0 +1,34 @@
+# apps_demo.ari — documents loaded into one host, each with its own menubar (docs/ARIADNE.md
+# §5.25).
+#
+# This document owns the menu bar. Each document it loads that has a menubar of its own becomes
+# one menu of this bar, under its meta.name: its menus as submenus, then Restart <name> (start it
+# again with its state dropped) and Quit <name> (its windows, menus and tray icons go; its state
+# stays). Windows > Applications ticks the ones running; tick a quit one to open it again as it
+# was. Their tray icons join this bar's tray, and their notifications go to the host's one feed,
+# the bell, named by them (§5.24). The two counters are one document loaded twice, so their menus
+# are told apart by their mount ids.
+#
+#   arigl run examples/ariadne/documents/apps_demo.ari
+#   ari run examples/ariadne/documents/apps_demo.ari
+
+meta:
+  name: apps demo
+  min_libcvc: 3.6.0
+
+requires:
+  - ui.menubar                     # the loaded documents' menus are menus of this bar
+
+menubar:
+  - menu: File
+    items:
+      - menu_item: Quit
+        on: quit
+
+root:
+  - load: tray_demo.ari
+    as: tray
+  - load: apps/counter.ari
+    as: counter
+  - load: apps/counter.ari
+    as: counter_2

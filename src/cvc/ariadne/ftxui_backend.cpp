@@ -787,6 +787,11 @@ struct FtxuiBackend::Impl {
     // Window: its inside's width in cells, as far as the walk knows it (its own width, else the
     // room it has to the screen's right edge): a rich text's first guess at its width (§5.20).
     int cols = 0;
+    // Menubar: the columns its menu titles take, and where among its items the tray starts (the
+    // bar's filler goes there, so the tray sits at the right end); -1: no tray (§5.22).
+    int bar_cols = 0;
+    int tray_from = -1;
+    int tray_cols = 0; // the columns its tray took
     void add(fx::Element e) {
       if (type == Type::Grid) {
         if (cells.empty())
@@ -836,6 +841,10 @@ struct FtxuiBackend::Impl {
     std::string combo_popup;                                    // combo list drawn, if any
     int combo_n = 0;
     bool has_menubar = false;
+    // The bar so far this walk (§5.22): a document's second bar continues it, after its menus and
+    // before its tray, rather than replacing it.
+    std::vector<fx::Element> bar_menus, bar_tray;
+    int bar_cols = 0, bar_tray_cols = 0;
     std::vector<Seam> seams; // draggable grid seams, for the hit-test
     // Hosted chrome (Options::hosted): each window's body ("" = outside every window) and the menu
     // bar's model, for the host to draw.
@@ -849,6 +858,7 @@ struct FtxuiBackend::Impl {
     };
     std::map<std::string, Body> bodies;
     std::vector<FtxuiBackend::HostedMenu> menus;
+    std::vector<FtxuiBackend::HostedTrayIcon> tray; // §5.22
   };
 
   struct Layer {
@@ -873,6 +883,13 @@ struct FtxuiBackend::Impl {
   std::string clipboard_out;            // OSC 52 escapes clipboard-set queued, for run() to write
   std::string last_item;                // the leaf emitted last (item_* queries, set_tooltip)
   int last_picture_cols = 0;            // that leaf's width in columns, when it is a picture
+  // §5.22 the tray this walk: drawn at all (not when even its overflow icon has no room beside the
+  // menus), the next icon's index (its id), and whether a hosted tray menu's items are being
+  // emitted.
+  bool tray_shown = false;
+  int tray_k = 0;
+  bool in_tray_menu = false;
+  int hosted_depth = 0;                 // hosted: the submenus the items being emitted are in
   std::vector<std::string> item_groups; // the item groups open in the walk, innermost last
   // The last item group closed, and whether this walk's press or key fired it (item_clicked).
   std::string group_hit_id;
@@ -1162,6 +1179,16 @@ struct FtxuiBackend::Impl {
   }
   bool activated(const std::string &id) {
     return pressed(id) || key(id, "Return") || key(id, "Space");
+  }
+
+  // Hosted: an item of the menu being emitted, into the model: a tray menu's (§5.22), else the
+  // bar's last menu.
+  void hosted_add(FtxuiBackend::HostedMenuItem it) {
+    it.depth = hosted_depth;
+    if (in_tray_menu && !walk.tray.empty())
+      walk.tray.back().items.push_back(std::move(it));
+    else if (!walk.menus.empty())
+      walk.menus.back().items.push_back(std::move(it));
   }
 
   // ---- pixel graphics --------------------------------------------------------------------------
@@ -2001,6 +2028,8 @@ bool FtxuiBackend::begin_main_menu_bar() {
     return false;
   Impl::Frame f;
   f.type = Impl::Frame::Type::Menubar;
+  f.items = m.walk.bar_menus; // a second bar goes on after the first one's menus
+  f.bar_cols = m.walk.bar_cols;
   m.stack.push_back(std::move(f));
   m.walk.has_menubar = true;
   return true;
@@ -2011,7 +2040,19 @@ void FtxuiBackend::end_main_menu_bar() {
   Impl::Frame f = m.pop();
   if (m.opt.hosted)
     return; // the host draws the bar from hosted_menus()
+  // The filler before the tray (§5.22), so the tray sits at the bar's right end. A document's
+  // second bar continues the first: its menus after the first one's, its tray left of the first
+  // one's tray.
+  const std::size_t at = std::min(
+      f.tray_from >= 0 ? static_cast<std::size_t>(f.tray_from) : f.items.size(), f.items.size());
+  m.walk.bar_menus.assign(f.items.begin(), f.items.begin() + static_cast<std::ptrdiff_t>(at));
+  m.walk.bar_tray.insert(m.walk.bar_tray.begin(), f.items.begin() + static_cast<std::ptrdiff_t>(at),
+                         f.items.end());
+  m.walk.bar_cols = f.bar_cols;
+  m.walk.bar_tray_cols += f.tray_cols;
+  f.items = m.walk.bar_menus;
   f.items.push_back(fx::filler() | fx::inverted);
+  f.items.insert(f.items.end(), m.walk.bar_tray.begin(), m.walk.bar_tray.end());
   // Over a picture behind the widgets the bar is its own: inverted over the image's colours its
   // titles would take them (the same colour on both sides of a cell, often).
   m.menubar = fx::hbox(std::move(f.items)) | fx::clear_under;
@@ -2034,6 +2075,7 @@ bool FtxuiBackend::begin_menu(const char *label) {
   if (m.top().type == Impl::Frame::Type::Menubar) {
     const std::string mid = std::string("menu|") + label;
     m.walk.menu_titles.push_back(mid);
+    m.top().bar_cols += fx::string_width(label) + 2; // the tray's room is what the titles leave
     const bool open = m.open_menu == mid;
     fx::Element t = fx::text(std::string(" ") + label + " ");
     if (!open)
@@ -2048,10 +2090,19 @@ bool FtxuiBackend::begin_menu(const char *label) {
     m.cur_menu = mid;
     return true;
   }
-  // A submenu, or a menu outside the bar: an always-open list under a header line.
+  // A submenu, or a menu outside the bar: an always-open list under a header line. Hosted, a
+  // submenu's title goes into the model, and its items after it, one deeper.
   m.add(fx::text(std::string(label) + " ▸") | fx::bold);
   Impl::Frame f;
   f.type = Impl::Frame::Type::InlineMenu;
+  if (m.opt.hosted && !m.cur_menu.empty()) {
+    HostedMenuItem sub;
+    sub.label = label;
+    sub.submenu = true;
+    m.hosted_add(std::move(sub));
+    ++m.hosted_depth;
+    f.id = "hosted-submenu";
+  }
   m.stack.push_back(std::move(f));
   return true;
 }
@@ -2072,7 +2123,148 @@ void FtxuiBackend::end_menu() {
     m.walk.menu_popup = f.id;
     return;
   }
+  if (f.id == "hosted-submenu")
+    --m.hosted_depth;
   m.add(fx::hbox({fx::text("  "), fx::vbox(std::move(f.items))}));
+}
+
+// ---- the tray (§5.22)
+// ----------------------------------------------------------------------------
+
+namespace {
+// A tray icon in the bar: its glyph inverted like the bar (not while its menu is open), and its
+// badge in the tone's colour.
+fx::Element tray_element(const Backend::TrayIcon &t, bool open) {
+  fx::Element glyph = fx::text(" " + t.glyph);
+  fx::Element after = fx::text(" ");
+  if (!open) {
+    glyph = glyph | fx::inverted;
+    after = after | fx::inverted;
+  }
+  if (t.badge.empty())
+    return fx::hbox({glyph, after});
+  const fx::Color bg = t.tone >= 2   ? fx::Color::Red
+                       : t.tone == 1 ? fx::Color::Yellow
+                                     : fx::Color::Blue;
+  const fx::Color fg = t.tone == 1 ? fx::Color::Black : fx::Color::White;
+  return fx::hbox({glyph, fx::text(t.badge) | fx::bold | fx::bgcolor(bg) | fx::color(fg), after});
+}
+
+int tray_cols(const Backend::TrayIcon &t) {
+  return 1 + fx::string_width(t.glyph) + fx::string_width(t.badge) + 1;
+}
+} // namespace
+
+int FtxuiBackend::begin_tray(const std::vector<TrayIcon> &icons) {
+  Impl &m = *m_;
+  if (m.stack.empty() || m.top().type != Impl::Frame::Type::Menubar)
+    return -1;
+  m.tray_k = 0;
+  m.tray_shown = true;
+  const int n = static_cast<int>(icons.size());
+  if (m.opt.hosted)
+    return n; // the host lays the tray out (and overflows it) itself
+  Impl::Frame &f = m.top();
+  f.tray_from = static_cast<int>(f.items.size());
+  // A column between the menus and the tray, and the room an earlier bar's tray took.
+  const int room = m.term_w - f.bar_cols - 1 - m.walk.bar_tray_cols;
+  int used = 0, fit = 0;
+  while (fit < n && used + tray_cols(icons[n - 1 - fit]) <= room)
+    used += tray_cols(icons[n - 1 - fit++]);
+  if (fit < n) { // the rest go in the overflow icon: its glyph and a two-digit badge
+    TrayIcon more;
+    more.glyph = unicode_glyphs() ? "\xC2\xBB" : ">>";
+    more.badge = "00";
+    const int mw = tray_cols(more);
+    while (fit > 0 && used + mw > room)
+      used -= tray_cols(icons[n - fit--]);
+    m.tray_shown = used + mw <= room;
+    used += mw;
+  }
+  f.tray_cols = m.tray_shown ? used : 0;
+  return m.tray_shown ? fit : 0;
+}
+
+bool FtxuiBackend::tray_button(const TrayIcon &icon) {
+  Impl &m = *m_;
+  if (!m.tray_shown)
+    return false;
+  const std::string id = m.uid("tray|" + std::to_string(m.tray_k++));
+  if (m.opt.hosted) {
+    m.walk.tray.push_back(
+        HostedTrayIcon{id, icon.glyph, icon.badge, icon.tooltip, icon.tone, false, {}});
+    return m.activated(id);
+  }
+  m.leaf(id, false, tray_element(icon, false));
+  return m.activated(id);
+}
+
+bool FtxuiBackend::begin_tray_menu(const TrayIcon &icon) {
+  Impl &m = *m_;
+  if (!m.tray_shown)
+    return false;
+  const std::string mid = "menu|tray|" + std::to_string(m.tray_k++);
+  Impl::Frame f;
+  f.type = Impl::Frame::Type::Menu;
+  f.id = mid;
+  if (m.opt.hosted) { // open to every walk, as a hosted menu is, so its items can be activated
+    m.walk.tray.push_back(
+        HostedTrayIcon{mid, icon.glyph, icon.badge, icon.tooltip, icon.tone, true, {}});
+    m.in_tray_menu = true;
+    m.stack.push_back(std::move(f));
+    m.cur_menu = mid;
+    return true;
+  }
+  m.walk.menu_titles.push_back(mid); // F10 and Left / Right reach it as they reach the menus
+  const bool open = m.open_menu == mid;
+  m.add(tray_element(icon, open) | fx::reflect(m.boxes[mid]));
+  if (!open)
+    return false;
+  m.stack.push_back(std::move(f));
+  m.cur_menu = mid;
+  return true;
+}
+
+void FtxuiBackend::end_tray_menu() {
+  Impl &m = *m_;
+  Impl::Frame f = m.pop();
+  m.cur_menu.clear();
+  if (m.opt.hosted) {
+    m.in_tray_menu = false;
+    return;
+  }
+  // The dropdown hangs left from the icon's right edge: at the bar's right end, a menu drawn from
+  // the icon's left edge would run off the screen.
+  fx::Element dd = (f.items.empty() ? fx::text(" (empty) ") : fx::vbox(std::move(f.items))) |
+                   fx::border | fx::reflect(m.boxes["menud|" + f.id]) | fx::clear_under;
+  dd->ComputeRequirement();
+  const int w = dd->requirement().min_x;
+  const fx::Box &title = m.boxes[f.id];
+  m.popups.push_back(
+      place(isolated(std::move(dd)), std::max(0, title.x_max + 1 - w), title.y_max + 1));
+  m.walk.menu_popup = f.id;
+}
+
+void FtxuiBackend::end_tray() {
+  Impl &m = *m_;
+  m.tray_shown = false;
+}
+
+// §5.23 the titles as begin_menu draws them (" Title "), a column between them and the tray, and
+// the tray as begin_tray lays it out, across the terminal. Hosted, the same sum across the host's
+// screen (set_screen_size): tvision draws its bar's titles that way too, from its second column.
+bool FtxuiBackend::menus_fit(const std::vector<std::string> &titles,
+                             const std::vector<TrayIcon> &tray) {
+  const Impl &m = *m_;
+  // After an earlier bar's menus and tray, when this is a document's second bar.
+  int used = (m.opt.hosted ? 1 : m.walk.bar_cols) + m.walk.bar_tray_cols;
+  for (const std::string &t : titles)
+    used += fx::string_width(t) + 2;
+  if (!tray.empty())
+    used += 1;
+  for (const TrayIcon &t : tray)
+    used += tray_cols(t);
+  return used <= m.term_w;
 }
 
 bool FtxuiBackend::menu_item_action(const char *label) {
@@ -2085,8 +2277,8 @@ bool FtxuiBackend::menu_item_action(const char *label) {
   m.leaf(id, true, el);
   if (hit && !m.cur_menu.empty())
     m.menu_close_req = true;
-  if (m.opt.hosted && !m.cur_menu.empty() && !m.walk.menus.empty())
-    m.walk.menus.back().items.push_back(HostedMenuItem{id, label, false, false, false});
+  if (m.opt.hosted && !m.cur_menu.empty())
+    m.hosted_add(HostedMenuItem{id, label, false, false, false});
   return hit;
 }
 
@@ -2105,8 +2297,8 @@ BoolEdit FtxuiBackend::menu_item_toggle(const char *label, bool current) {
   if (m.has_focus(id))
     el = el | fx::inverted;
   m.leaf(id, true, el);
-  if (m.opt.hosted && !m.cur_menu.empty() && !m.walk.menus.empty())
-    m.walk.menus.back().items.push_back(HostedMenuItem{id, label, true, e.value, false});
+  if (m.opt.hosted && !m.cur_menu.empty())
+    m.hosted_add(HostedMenuItem{id, label, true, e.value, false});
   return e;
 }
 
@@ -2919,8 +3111,8 @@ RichTextEvent FtxuiBackend::rich_text(const std::vector<TextRun> &runs, const Ri
 
 void FtxuiBackend::separator() {
   Impl &m = *m_;
-  if (m.opt.hosted && !m.cur_menu.empty() && !m.walk.menus.empty())
-    m.walk.menus.back().items.push_back(HostedMenuItem{"", "", false, false, true});
+  if (m.opt.hosted && !m.cur_menu.empty())
+    m.hosted_add(HostedMenuItem{"", "", false, false, true});
   m.add(fx::separator());
 }
 
@@ -3845,6 +4037,9 @@ std::vector<FtxuiBackend::HostedWindow> FtxuiBackend::hosted_windows() const {
 }
 
 std::vector<FtxuiBackend::HostedMenu> FtxuiBackend::hosted_menus() const { return m_->last.menus; }
+std::vector<FtxuiBackend::HostedTrayIcon> FtxuiBackend::hosted_tray() const {
+  return m_->last.tray;
+}
 
 bool FtxuiBackend::hosted_root() const {
   if (!m_->background.empty())
@@ -4280,6 +4475,14 @@ bool FtxuiBackend::begin_main_menu_bar() { return false; }
 void FtxuiBackend::end_main_menu_bar() {}
 bool FtxuiBackend::begin_menu(const char *) { return false; }
 void FtxuiBackend::end_menu() {}
+int FtxuiBackend::begin_tray(const std::vector<TrayIcon> &) { return -1; }
+bool FtxuiBackend::tray_button(const TrayIcon &) { return false; }
+bool FtxuiBackend::begin_tray_menu(const TrayIcon &) { return false; }
+void FtxuiBackend::end_tray_menu() {}
+void FtxuiBackend::end_tray() {}
+bool FtxuiBackend::menus_fit(const std::vector<std::string> &, const std::vector<TrayIcon> &) {
+  return true;
+}
 bool FtxuiBackend::begin_window(const char *, const char *, const Size &, float, bool *) {
   return false;
 }
@@ -4381,6 +4584,7 @@ std::string FtxuiBackend::render_to_string(Runtime &, int, int, bool) {
 bool FtxuiBackend::feed(Runtime &, const TermEvent &) { return false; }
 std::vector<FtxuiBackend::HostedWindow> FtxuiBackend::hosted_windows() const { return {}; }
 std::vector<FtxuiBackend::HostedMenu> FtxuiBackend::hosted_menus() const { return {}; }
+std::vector<FtxuiBackend::HostedTrayIcon> FtxuiBackend::hosted_tray() const { return {}; }
 bool FtxuiBackend::hosted_root() const { return false; }
 std::string FtxuiBackend::tooltip() const { return {}; }
 TermRows FtxuiBackend::render_window(const std::string &, int, int) { return {}; }

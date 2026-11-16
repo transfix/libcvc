@@ -195,6 +195,7 @@ else()
 endif()
 add_executable(ph_compose_test ph_compose_test.cpp)
 add_executable(ph_compose_parity_test ph_compose_parity_test.cpp)
+add_executable(ph_microgrid_test ph_microgrid_test.cpp)
 add_executable(ph_convoy_test ph_convoy_test.cpp)
 add_executable(ph_se2_test ph_se2_test.cpp)
 add_executable(ph_se2_train_test ph_se2_train_test.cpp)
@@ -498,6 +499,7 @@ set(TEST_TARGETS
   nav_potential_test
   ph_compose_test
   ph_compose_parity_test
+  ph_microgrid_test
   ph_convoy_test
   ph_se2_test
   ph_se2_train_test
@@ -2411,6 +2413,13 @@ target_link_libraries(ph_compose_parity_test
     GTest::gtest_main
 )
 
+target_link_libraries(ph_microgrid_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(ph_se2_test
   PRIVATE
     cvc
@@ -2880,6 +2889,7 @@ target_compile_features(nav_dyn_ph_full_test PRIVATE cxx_std_17)
 target_compile_features(nav_potential_test PRIVATE cxx_std_17)
 target_compile_features(ph_compose_test PRIVATE cxx_std_17)
 target_compile_features(ph_compose_parity_test PRIVATE cxx_std_17)
+target_compile_features(ph_microgrid_test PRIVATE cxx_std_17)
 target_compile_features(ph_convoy_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_train_test PRIVATE cxx_std_17)
@@ -3452,6 +3462,7 @@ cvc_discover_tests(nav_dyn_ph_full_test)
 cvc_discover_tests(nav_potential_test)
 cvc_discover_tests(ph_compose_test)
 cvc_discover_tests(ph_compose_parity_test)
+cvc_discover_tests(ph_microgrid_test)
 cvc_discover_tests(ph_convoy_test)
 cvc_discover_tests(ph_se2_test)
 cvc_discover_tests(ph_se2_train_test)
