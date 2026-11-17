@@ -321,6 +321,7 @@ void dyn_4w_plant::begin_tick() {
     a.statics_tick = 0;
     a.touched = -1;
     a.touch_depth = 0.0;
+    a.applied.clear();
   }
 }
 
@@ -339,6 +340,7 @@ void dyn_4w_plant::substep_begin(double h) {
     const double accel = _o.driver ? dyn::drive(a.driver, a.desc, a.accel_cmd, a.s.vx, grade,
                                                 _o.gravity, a.p.tau_drive, h)
                                    : a.accel_cmd;
+    a.applied.push_back(accel);
     diff::dyn4_plant_books<double>(a.p, a.lim, ground, a.s, a.steer_cmd, accel, a.next,
                                    a.step_books);
     a.stepping = true;

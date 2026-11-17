@@ -98,6 +98,7 @@ protected:
     env = se::builtins::make_default_environment();
     se::register_intrinsics(env, &ictx);
     cvc::register_job_op(env, ictx, app, cvc::segment_seeded_op(GetParam()));
+    cvc::register_job_op(env, ictx, app, cvc::critical_point_seeds_op(GetParam()));
     cvc::register_job_intrinsics(env, app);
     cvc::register_point_class_intrinsics(env, ictx, app);
     vol.emplace(bumps(app, 20));
@@ -243,6 +244,65 @@ TEST_P(SegmentationIntrinsics, JobCancelAndKillStopIt) {
   EXPECT_FALSE(finished(waiting)) << exit_error(waiting);
   app.exec_scheduler().kill(waiting);
   EXPECT_TRUE(pump_until([&] { return finished(waiting); }));
+}
+
+// ---- segment.critical-points: the paper's seeds -----------------------------------------------
+
+TEST_P(SegmentationIntrinsics, CriticalPointsInTheThreeForms) {
+  const cvc::point_classes want = cvc::critical_point_seeds(*vol);
+  ASSERT_EQ(want.classes.size(), 2u);
+  // The waiting form: a point_classes data object, feature then background.
+  const int pid =
+      run("(let ((pc (segment.critical-points \"doc.volume\")))"
+          "  (state-set \"r.names\" (str (get-attr (point-classes.info pc) \"classes\")))"
+          "  (state-set \"r.feature\" (length (point-classes.points pc \"feature\")))"
+          "  (state-data-set \"r.seeds\" pc))");
+  ASSERT_TRUE(pump_until([&] { return finished(pid); }));
+  EXPECT_EQ(exit_error(pid), "");
+  EXPECT_NE(key("r.names").find("feature"), std::string::npos) << key("r.names");
+  EXPECT_NE(key("r.names").find("background"), std::string::npos) << key("r.names");
+  EXPECT_EQ(key("r.feature"), std::to_string(want.classes[0].size()));
+  const auto got = object_at<cvc::point_classes>("r.seeds");
+  ASSERT_TRUE(got);
+  EXPECT_TRUE(*got == want);
+  // The async form, with parameters (the §4 threshold moving every maximum to the background).
+  const int apid =
+      run("(let ((f (segment.critical-points-async \"doc.volume\" "
+          "             (dict \"cp_feature_threshold\" 100.0))))"
+          "  (state-set \"r.between\" \"ran\")"
+          "  (state-set \"r.f2\" (length (point-classes.points (await f) \"feature\"))))");
+  ASSERT_TRUE(pump_until([&] { return finished(apid); }));
+  EXPECT_EQ(exit_error(apid), "");
+  EXPECT_EQ(key("r.between"), "ran");
+  EXPECT_EQ(key("r.f2"), "0");
+  // The start form publishes the node keys and lands the result at target.result.
+  const int caller = run("(state-set \"r.cpid\" (segment.critical-points-start \"doc.volume\" nil "
+                         "\"cpjob\"))");
+  ASSERT_TRUE(pump_until([&] { return finished(caller); }, 5.0)) << "-start returns at once";
+  EXPECT_EQ(exit_error(caller), "");
+  ASSERT_TRUE(pump_until([&] { return !app.root()("cpjob.result").data().empty(); }))
+      << "status: " << key("cpjob.status");
+  // A bad parameter raises at the call, naming it.
+  const int bad = run("(segment.critical-points \"doc.volume\" (dict \"cp_k\" -1))");
+  ASSERT_TRUE(pump_until([&] { return finished(bad); }));
+  EXPECT_NE(exit_error(bad).find("cp_k"), std::string::npos) << exit_error(bad);
+}
+
+TEST_P(SegmentationIntrinsics, SegmentSeededWithCriticalPointsNeedsNoClasses) {
+  cvc::seeded_segmentation_params p = test_params();
+  p.automatic = cvc::seed_mode::critical_points;
+  const cvc::seeded_segmentation want = cvc::segment_seeded(*vol, cvc::point_classes{}, p);
+  const int pid =
+      run(std::string("(let ((s (segment.seeded \"doc.volume\" "
+                      "             (point-classes.remove nil \"x\" 0 0 0) "
+                      "             (dict \"t_low\" 0.1 \"t_high\" 10.0 \"gamma\" "
+                      "                   -0.02 \"automatic\" \"critical-points\"))))") +
+          "  (state-set \"r.names\" (str (get-attr s \"class_names\")))"
+          "  (state-set \"r.feature\" (nth (get-attr s \"class_voxels\") 0)))");
+  ASSERT_TRUE(pump_until([&] { return finished(pid); }));
+  EXPECT_EQ(exit_error(pid), "");
+  EXPECT_NE(key("r.names").find("background"), std::string::npos) << key("r.names");
+  EXPECT_EQ(key("r.feature"), std::to_string(want.class_voxels.at(0)));
 }
 
 INSTANTIATE_TEST_SUITE_P(Modes, SegmentationIntrinsics,
