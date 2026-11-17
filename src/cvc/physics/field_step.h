@@ -19,9 +19,16 @@
 
 #include "backend_impl.h"
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <exception>
+#include <functional>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace cvc {
@@ -78,12 +85,35 @@ struct field_body {
   field_load load;      // the last step's
 };
 
-// The water at a point (field_set::water_at), for a boat's propeller and rudder.
-struct water_sample {
-  bool wet = false;     // under the fluid's top and above its bottom, at a density > 0
-  double depth = 0.0;   // m below the top: the free surface's height, or the box's top
-  double density = 0.0; // kg/m^3
-  vec3 velocity;        // m/s, the water's: the surface's, or the velocity volumes'
+// Worker threads for the fields' free-surface reads (world_config::field_threads). run(n, fn)
+// hands the indices 0 .. n - 1 out to the workers and the calling thread from a shared counter
+// and returns once every one has run; fn must not depend on which thread runs an index. Without
+// workers (or in a build without threads) it runs them in turn on the calling thread. The first
+// exception an index throws is rethrown from run().
+class field_workers {
+public:
+  explicit field_workers(int threads);
+  ~field_workers();
+  field_workers(const field_workers &) = delete;
+  field_workers &operator=(const field_workers &) = delete;
+  int threads() const { return _wanted; }
+  void run(std::size_t n, const std::function<void(std::size_t)> &fn);
+
+private:
+  void loop();
+  void work();
+
+  int _wanted = 0;
+  std::vector<std::thread> _threads;
+  std::mutex _m;
+  std::condition_variable _go, _done;
+  const std::function<void(std::size_t)> *_fn = nullptr;
+  std::size_t _n = 0;
+  std::atomic<std::size_t> _next{0};
+  std::uint64_t _generation = 0;
+  int _busy = 0;
+  bool _stop = false;
+  std::exception_ptr _error;
 };
 
 class field_set {
@@ -122,7 +152,7 @@ public:
   }
   // The water at `p` at field time `t`: the first fluid field, in id order, whose box holds `p`
   // in x and y and reaches below it. False if none does; `out` is then dry and still.
-  bool water_at(const vec3 &p, double t, water_sample &out) const;
+  bool water_at(const vec3 &p, double t, physics::water_sample &out) const;
 
   // The air at `p` at field time `t` for a vehicle's aero: a flow field's density and wind (its
   // flow_velocity's, or its velocity volumes') where one covers `p` (the first, in id order),
@@ -169,6 +199,7 @@ private:
   std::map<std::uint32_t, compiled_field> _fields;
   std::map<std::uint32_t, field_body> _bodies;
   std::uint32_t _next = 0;
+  std::unique_ptr<field_workers> _workers; // world_config::field_threads, made on first use
 };
 
 } // namespace detail

@@ -73,6 +73,11 @@ void register_world_node_types(cvc::app &app);
 // calls it.
 void register_water_node_types(cvc::app &app);
 
+// Register the weather scene node type on `app` (weather_node.cpp: the scene's weather model,
+// cvc::world::weather, its storms in a cloud_sky's deck, OCEAN-AND-WEATHER-ROADMAP.md §9 F2).
+// Idempotent; the cvcGL extension bundle calls it.
+void register_weather_node_types(cvc::app &app);
+
 } // namespace ariadne
 } // namespace gl
 } // namespace cvc

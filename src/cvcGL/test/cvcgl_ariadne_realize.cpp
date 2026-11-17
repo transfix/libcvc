@@ -12,6 +12,7 @@
 #include <chrono> // mesh_lab test: bounded waits on the node's worker lane
 #include <cmath>
 #include <cstdio>
+#include <cstring> // strstr: WebGL2's units, a draw that ran out
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_water.h> // scene_water_spec: the scene wind's case (O14)
 #include <cvc/ariadne/value.h>
@@ -29,6 +30,7 @@
 #include <cvc/gl/LowMemoryPolyDataMapper.h> // clip test: the low-memory mapper honours no planes
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/gl/ViewportManager.h> // WebGL2's units: limitTextureUnits
 #include <cvc/gl/VolRenNode.h>
 #include <cvc/gl/VolSliceNode.h>
 #include <cvc/gl/VolumeNode.h>
@@ -55,8 +57,10 @@
 #include <vtkLightCollection.h>
 #include <vtkMapper.h> // field colours: an opacity curve is an RGBA colour array
 #include <vtkNew.h>
+#include <vtkObjectFactory.h>      // WebGL2's units: a counter of VTK's out-of-units warning
 #include <vtkOpenGLRenderWindow.h> // water + sky: no texture unit held between frames
-#include <vtkPlane.h>              // clip test: the planes handed to a node's renderer
+#include <vtkOutputWindow.h>
+#include <vtkPlane.h> // clip test: the planes handed to a node's renderer
 #include <vtkPlaneCollection.h>
 #include <vtkPointData.h>
 #include <vtkPolyData.h>
@@ -93,6 +97,26 @@ static void chk(bool ok, const std::string &w) {
     ++fails;
 }
 static bool approx(double a, double b) { return std::fabs(a - b) < 1e-3; }
+
+// Counts vtkOpenGLState's "Hardware does not support the number of textures defined" (a draw
+// that ran out of texture units) while it is VTK's output window.
+class TextureUnitWarnings : public vtkOutputWindow {
+public:
+  static TextureUnitWarnings *New();
+  vtkTypeMacro(TextureUnitWarnings, vtkOutputWindow);
+  int count = 0;
+  void DisplayText(const char *t) override { note(t); }
+  void DisplayErrorText(const char *t) override { note(t); }
+  void DisplayWarningText(const char *t) override { note(t); }
+  void DisplayGenericWarningText(const char *t) override { note(t); }
+
+private:
+  void note(const char *t) {
+    if (t && std::strstr(t, "number of textures defined"))
+      ++count;
+  }
+};
+vtkStandardNewMacro(TextureUnitWarnings);
 
 // Walk the renderer's lights, counting positional vs directional and capturing the
 // (single) positional light's position.
@@ -1476,6 +1500,27 @@ int main() {
           "generated_world drew its water as surface ladders on the chunk rungs");
       chk(holder && holder->hasTexture() && holder->textureWidth() > 0 && textured,
           "every water rung is drawn with the water's one shared texture");
+      chk(!sg.getGraphics("world_water") ||
+              !sg.getGraphics("world_water")->findChildByName("outer_sea"),
+          "a walled world (the default edge) draws no sea past its edge");
+    }
+    {
+      // edge: shore -- the sea goes on past the world: a ring under world_water at the waterline,
+      // in its own colours (no texture), casting no shadow.
+      SceneGraph ssg(app, "gws");
+      Scene shore = scene;
+      Value edge;
+      edge.kind = Value::Kind::Scalar;
+      edge.scalar = "shore";
+      shore.nodes[0].props.entries.emplace_back("edge", edge);
+      std::vector<std::string> swarn;
+      cvc::gl::ariadne::realize_scene(ssg, shore, "gws", &swarn);
+      std::shared_ptr<cvc::gl::GeometryNode> sea;
+      if (auto g = ssg.getGraphics("world_water"))
+        sea = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(g->findChildByName("outer_sea"));
+      chk(sea && sea->getGeometry() && sea->getGeometry()->const_points().size() == 8 &&
+              !sea->hasTexture() && !sea->castsShadow(),
+          "edge: shore draws the sea past the world's edge");
     }
     chk(realized.height_fields.count("world") == 1,
         "generated_world published its ground (ground: world stands on it)");
@@ -2083,6 +2128,294 @@ int main() {
         "without wind.speed each node takes its own wind again");
     for (const std::string &w : warnings)
       printf("  warning: %s\n", w.c_str());
+  }
+
+  // ── O18: the weather node and its storms in the sky ──────────────────────────────────────────
+  // A weather node starts a storm when asked; the sky it drives closes and darkens under it, its
+  // deck rises into cumulonimbus (built off the frame, then swapped in) while the storm is about,
+  // the receivers' ambient drops under it, and a calm takes it all back. The storms ride the sky's
+  // wind: a change of it settles into a steer event. Twice: the storm deck built as the scene's
+  // build sees fit (on the pool, natively) and a share a frame (deck_threading: cooperative, as
+  // single-threaded wasm builds it, with no thread to start).
+  for (const char *mode : {"automatic", "cooperative"}) {
+    const bool sliced = std::string(mode) == "cooperative";
+    const std::string pre = sliced ? "o18c" : "o18";
+    printf("== weather: storms in the sky (the deck built %s) ==\n", mode);
+    chk(cvc::gl::ariadne::has_scene_node_type(app, "weather"),
+        "the weather node type is registered");
+    SceneGraph sg(app, pre);
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    auto node = [](const char *id, const char *type,
+                   std::vector<std::pair<const char *, std::string>> props) {
+      SceneNode n;
+      n.id = id;
+      n.type = type;
+      n.props.kind = Value::Kind::Map;
+      for (auto &p : props) {
+        Value v;
+        v.kind = Value::Kind::Scalar;
+        v.scalar = p.second;
+        n.props.entries.emplace_back(p.first, v);
+      }
+      return n;
+    };
+    scene.nodes.push_back(node("world", "generated_world",
+                               {{"seed", "5"},
+                                {"half", "150"},
+                                {"trees", "0"},
+                                {"rocks", "0"},
+                                {"buildings", "0"},
+                                {"amp", "40"},
+                                {"water", "0"},
+                                {"texture", "256"}}));
+    scene.nodes.push_back(node("sky", "cloud_sky",
+                               {{"ground", "world"},
+                                {"extent", "60"},
+                                {"base", "120"},
+                                {"top", "180"},
+                                {"coverage", "0.4"},
+                                {"near", "2"},
+                                {"deck_threading", mode}}));
+    scene.nodes.push_back(node("weather", "weather",
+                               {{"ground", "world"},
+                                {"sky", "sky"},
+                                {"chance", "0"}, // only the storms asked for
+                                {"radius_min", "500"},
+                                {"radius_max", "500"},
+                                {"storm_top", "600"}}));
+    std::vector<std::string> warnings;
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, pre, &warnings);
+    auto st = [&](const char *k) -> cvc::state & {
+      return cvc::state::instance(app)(cvc::ariadne::resolve_bind(pre, k));
+    };
+    auto num = [&](const char *k) { return st(k).value<double>(); };
+    auto str = [&](const char *k) { return st(k).value<std::string>(); };
+    auto tick = [&]() {
+      cvc::pump_exec_frame(app.exec_scheduler()); // the storm deck is a sliced task on it
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer());
+    };
+    cvc::world_clock &clock = app.world_clock();
+    const double q = clock.fixed_dt();
+    auto seek = [&](double t) { clock.seek_tick(static_cast<std::uint64_t>(std::llround(t / q))); };
+    seek(100.0);
+    chk(approx(num("weather.time_scale"), 1.0) && str("weather.events").empty(),
+        "the weather seeded weather.time_scale and an empty weather.events");
+    tick();
+    tick();
+    chk(str("weather.state") == "clear" && str("sky.storms").empty() &&
+            approx(num("sky.top"), 180.0),
+        "a clear sky: no storms, the deck as authored");
+    // The near volume's box: its top is the deck's.
+    auto boxTop = [&]() {
+      auto v = std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("sky"));
+      vtkImageData *img = v ? v->getImageData() : nullptr;
+      // VolumeNode spaces its voxels a box's span over their count: the box's top is past the last.
+      return img ? img->GetOrigin()[2] + img->GetSpacing()[2] * img->GetDimensions()[2] : -1.0;
+    };
+    std::printf("  the near volumes' top: %.3f\n", boxTop());
+    chk(std::fabs(boxTop() - 180.0) < 1e-3, "the near volumes span the authored deck");
+    // A storm overhead: in its prime over the ground now.
+    st("weather.request").value(std::string("overhead"));
+    tick();
+    std::printf("  events: %s\n  storms: %s\n", str("weather.events").c_str(),
+                str("sky.storms").c_str());
+    chk(str("weather.request").empty() && str("weather.events").find("storm") == 0,
+        "the request became a storm event and was emptied");
+    chk(str("weather.state") == "storm" && approx(num("weather.cells"), 1.0) &&
+            num("weather.storminess") > 0.7,
+        "the weather is a storm, one cell in its prime");
+    chk(!str("sky.storms").empty() && str("weather.storms") == str("sky.storms"),
+        "the sky has the storm (sky.storms), as the weather publishes it");
+    chk(approx(num("sky.top"), 600.0) &&
+            std::fabs(num("sky.darkness") - 0.6 * num("weather.deck")) < 1e-9 &&
+            num("sky.darkness") > 0.55,
+        "the deck rises to the storm's top and darkens");
+    chk(num("weather.rain") > 0.0, "it rains at the ground's centre");
+    tick();
+    {
+      auto ground = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("world"));
+      std::shared_ptr<const cvc::gl::GeometryNode::ShaderInputs> in;
+      std::function<void(cvc::gl::GraphicsNode &)> find = [&](cvc::gl::GraphicsNode &g) {
+        if (auto *m = dynamic_cast<cvc::gl::GeometryNode *>(&g))
+          if (!in)
+            in = m->sharedShaderInputs("cloud_sky");
+        for (const auto &c : g.getGraphicsChildren())
+          if (c)
+            find(*c);
+      };
+      if (auto g = sg.getGraphics("world"))
+        find(*g);
+      const bool storm = in && in->f4.count("cloudStorm0") && in->f4.at("cloudStorm0")[3] > 0.7f &&
+                         in->f4.at("cloudStorm0")[2] > 0.0f;
+      const bool dark = in && in->f.count("cloudDark") && in->f.at("cloudDark") > 0.55f;
+      chk(storm && dark,
+          "the receivers and the far clouds have the storm and the darkness (uniforms)");
+    }
+    // The storm deck is built as a sliced task and swapped in: the near volumes' boxes rise.
+    // Its process on the scheduler names how it runs: cloud_sky/threaded or cloud_sky/cooperative.
+    int frames = 0;
+    std::string task;
+    auto seeTask = [&]() {
+      for (const auto &pi : app.exec_scheduler().list_processes())
+        if (pi.name.rfind("cloud_sky/", 0) == 0)
+          task = pi.name;
+    };
+    auto waitTop = [&](double want) {
+      frames = 0;
+      for (int k = 0; k < 600 && std::fabs(boxTop() - want) > 1e-3; ++k, ++frames) {
+        seeTask();
+        std::this_thread::sleep_for(std::chrono::milliseconds(sliced ? 5 : 50));
+        tick();
+      }
+      return std::fabs(boxTop() - want) < 1e-3;
+    };
+    const auto t0 = std::chrono::steady_clock::now();
+    chk(waitTop(600.0), "the storm deck was built and swapped in (the near volumes reach 600 m)");
+    std::printf(
+        "  the storm deck took %.0f ms and %d frames to come in\n",
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
+        frames);
+    std::printf("  its task: %s\n", task.c_str());
+    if (sliced)
+      chk(task.find("cloud_sky/cooperative") == 0 && frames > 2,
+          "a share a frame: the storm deck was a cooperative task over several frames");
+    else
+      chk(task.find("cloud_sky/threaded") == 0, "natively the storm deck was built on the pool");
+    // The wind turns: once it has held, a steer event joins the events.
+    st("sky.wind_az").value(45.0);
+    for (int k = 0; k < 12; ++k)
+      tick();
+    chk(str("weather.events").find("steer") != std::string::npos &&
+            str("weather.events").find("az=45") != std::string::npos,
+        "a settled change of the sky's wind became a steer event");
+    // A calm: the storm clears over calm_s, and the deck goes back to its cumulus.
+    st("weather.request").value(std::string("calm"));
+    tick();
+    chk(str("weather.state") == "clearing", "a calm starts the storm clearing");
+    seek(100.0 + 400.0);
+    tick();
+    chk(str("weather.state") == "clear" && str("sky.storms").empty() &&
+            approx(num("sky.top"), 180.0) && approx(num("sky.darkness"), 0.0),
+        "cleared: no storms, the deck as authored, no darkness");
+    chk(waitTop(180.0), "the cumulus deck came back (the near volumes span 180 m again)");
+    for (const std::string &w : warnings)
+      printf("  warning: %s\n", w.c_str());
+  }
+
+  // ── WebGL2's texture units: the water, the swash and the sky's shade draw in 16 ────────────────
+  // In the browser VTK has 16 texture units in all (GL_MAX_TEXTURE_IMAGE_UNITS), and its
+  // low-memory mapper, the browser's, takes some of them every draw for its vertex data. Here the
+  // same scene draws with that mapper and a 16-unit table, and no draw runs out. The deployed
+  // terrain_lab ran out in every water draw, and the warnings it logged locked the page up.
+  {
+    printf("== WebGL2's 16 texture units: the water, the swash and the shade ==\n");
+    const cvc::gl::LowMemoryMapperPolicy policy = cvc::gl::lowMemoryMapperPolicy(app);
+    cvc::gl::setLowMemoryMapperPolicy(app, cvc::gl::LowMemoryMapperPolicy::Force);
+    {
+      SceneGraph sg(app, "webgl");
+      SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+      Scene scene;
+      auto node = [](const char *id, const char *type,
+                     std::vector<std::pair<const char *, std::string>> props) {
+        SceneNode n;
+        n.id = id;
+        n.type = type;
+        n.props.kind = Value::Kind::Map;
+        for (auto &p : props) {
+          Value v;
+          v.kind = Value::Kind::Scalar;
+          v.scalar = p.second;
+          n.props.entries.emplace_back(p.first, v);
+        }
+        return n;
+      };
+      scene.nodes.push_back(node("world", "generated_world",
+                                 {{"seed", "5"},
+                                  {"half", "150"},
+                                  {"trees", "0"},
+                                  {"rocks", "0"},
+                                  {"buildings", "0"},
+                                  {"amp", "40"},
+                                  {"water_level", "0"},
+                                  {"water", "0"},
+                                  {"texture", "256"}}));
+      scene.nodes.push_back(
+          node("water", "water", {{"world", "world"}, {"level", "0"}, {"swell_height", "1"}}));
+      SceneNode sky = node("sky", "cloud_sky",
+                           {{"ground", "world"},
+                            {"extent", "60"},
+                            {"base", "120"},
+                            {"top", "180"},
+                            {"coverage", "0.5"},
+                            {"near", "2"}});
+      Value rec;
+      rec.kind = Value::Kind::Sequence;
+      Value item;
+      item.kind = Value::Kind::Scalar;
+      item.scalar = "water";
+      rec.items.push_back(item);
+      sky.props.entries.emplace_back("receivers", rec);
+      scene.nodes.push_back(sky);
+      // terrain_lab's light: a three-point rig whose key is a directional sun, its one shadow
+      // caster, so the shadow pass holds its map's unit through every draw.
+      SceneLight rig;
+      rig.id = "sun";
+      rig.rig = "three_point";
+      rig.has_sun = true;
+      rig.sun = true;
+      rig.has_key = true;
+      rig.key_intensity = 1.3f;
+      rig.key_azimuth = -60.0f;
+      rig.key_elevation = 28.0f;
+      rig.key_cone = 62.0f;
+      scene.lights.push_back(rig);
+      scene.has_shadows = true;
+      scene.shadows_enabled = true;
+      std::vector<std::string> warnings;
+      auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "webgl", &warnings);
+      auto tick = [&]() {
+        view.render();
+        cvc::gl::ariadne::tick_scene(realized, view.renderer());
+      };
+      view.viewportManager().limitTextureUnits(16); // WebGL2's, as VTK counts them
+      auto *win = vtkOpenGLRenderWindow::SafeDownCast(view.renderer()->GetRenderWindow());
+      vtkNew<TextureUnitWarnings> counter;
+      vtkSmartPointer<vtkOutputWindow> before = vtkOutputWindow::GetInstance();
+      int heard = 0; // the counter hears VTK's warning (vtkOpenGLState's, as it words it)
+      int units = 0;
+      if (win) {
+        vtkOutputWindow::SetInstance(counter);
+        vtkGenericWarningMacro("Hardware does not support the number of textures defined.");
+        heard = counter->count;
+        counter->count = 0;
+        for (int i = 0; i < 17; ++i) // past the 10 frames the swell's keys hold before the swash
+          tick();
+        vtkOutputWindow::SetInstance(before);
+        units = win->GetTextureUnitManager()->GetNumberOfTextureUnits();
+      }
+      auto group = sg.getGraphics("water");
+      auto near =
+          group ? std::dynamic_pointer_cast<cvc::gl::GeometryNode>(group->findChildByName("near"))
+                : nullptr;
+      if (!win) {
+        printf("  SKIP: no OpenGL window\n");
+      } else if (!near || !near->isVisible()) {
+        printf("  SKIP: the water's cascades are not up (no float render targets)\n");
+      } else {
+        printf("  the low-memory mapper: %s; %d texture units; out of units: %d warnings\n",
+               near->usesLowMemoryMapper() ? "yes" : "no", units, counter->count);
+        chk(near->usesLowMemoryMapper() && units == 16,
+            "the water draws with the low-memory mapper, in 16 texture units");
+        chk(heard == 1, "the count hears vtkOpenGLState's out-of-units warning");
+        chk(counter->count == 0,
+            "no draw runs out of WebGL2's 16 units (the water, the swash, the shade)");
+      }
+      for (const std::string &w : warnings)
+        printf("  warning: %s\n", w.c_str());
+    }
+    cvc::gl::setLowMemoryMapperPolicy(app, policy);
   }
 
   // ── a generated terrain as a geometry source (source: { terrain: {...} }) ─────────────────

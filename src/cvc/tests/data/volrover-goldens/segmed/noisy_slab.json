@@ -1,0 +1,18 @@
+{
+  "library": "SegMed",
+  "volrover": "1cf0fbd72c7539e415a4f0fbc58c6bfce3d3caf8",
+  "case": "noisy_slab",
+  "input": "tools/volrover-goldens/inputs/segmed/noisy_slab.raw",
+  "input_sha256": "52e4e838ea95e4601d331f5b8b8f4f1704e573526613034dfeb694e06c418360",
+  "dims": [
+    20,
+    20,
+    20
+  ],
+  "tlow": 20,
+  "critical_points": 12,
+  "critical_sha256": "9a5347b68c1ead0c14460874a3ea60da7ee6d23272c231ed6414f4ec00d1286f",
+  "field_sha256": "56267d58efa8e8f858afea08f45482055d988f25702b5a6326a03d861f89d49f",
+  "made_by": "tools/volrover-goldens/make_goldens.py",
+  "platform": "Windows AMD64, Windows-11, Python 3.13.3"
+}

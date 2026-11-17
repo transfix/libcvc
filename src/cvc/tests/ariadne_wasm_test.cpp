@@ -1,8 +1,9 @@
 // WebAssembly guests in documents (src/ariadne_wasm; docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md
 // §8.2-8.7, phase G1), on wasmtime: the CBOR codec; a wasm: block whose WAT guest's exports the
-// document's programs call (each call an activation, parked on by the caller); calls back into
-// the lane under the document's chroot, and their narrowing; slices of gas charged as steps
-// under the action caps; a yield; traps and fail() as WasmError; _initialize; re-entry, direct
+// document's programs call (each call an activation, parked on by the caller), each document its
+// own guest's when two share an app; calls back into the lane under the document's chroot, and
+// their narrowing; slices of gas charged as steps under the action caps; a yield; traps and
+// fail() as WasmError; _initialize; re-entry, direct
 // or through a document function, as a RecursionError; one activation per instance, the others
 // waiting as with-lock waits; a frame hook; the block's load errors; host objects by handle
 // (§8.4.1): volumes, meshes and height fields, read a region at a time, their handles dropped,
@@ -184,6 +185,31 @@ std::string doc(const std::string &wasm_extra = std::string()) {
          "  - text: hi\n";
 }
 
+// A guest whose (who) answers `n` (1 to 9, a CBOR small integer): which document's guest a call
+// reached.
+std::string who_guest(int n) {
+  return "(module\n"
+         "  (memory (export \"memory\") 1)\n"
+         "  (func (export \"ari_alloc\") (param i32) (result i32) (i32.const 1024))\n"
+         "  (data (i32.const 16) \"\\0" +
+         std::to_string(n) +
+         "\")\n"
+         "  (func (export \"who\") (param i32 i32) (result i64)\n"
+         "    (i64.const 68719476737)))\n"; // (16 << 32) | 1: the byte at 16
+}
+
+std::string who_doc(const std::string &module) {
+  return "requires: [wasm, who]\n"
+         "wasm:\n"
+         "  module: " +
+         module +
+         "\n"
+         "  export: [who]\n"
+         "init: (state-set \"boot\" (who))\n"
+         "root:\n"
+         "  - text: hi\n";
+}
+
 class WasmEngineTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -305,6 +331,38 @@ TEST_F(WasmEngineTest, ExportsAreFunctionsOfTheDocument) {
                      "(assert (has? \"wasm\") \"the token\")\n"
                      "(let ((f (echo-async 3))) (assert (= (await f) (list 3)) \"a future\"))"),
             "");
+}
+
+// Two documents on one app, each with a guest of its own that exports (who), and both loaded
+// before either runs: each document's calls reach its own guest (from an action, as a future, and
+// from its init: on a reload while the other is loaded), and a third document with no wasm: block
+// has no (who).
+TEST_F(WasmEngineTest, TwoDocumentsOnOneAppEachCallTheirOwnGuest) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  AppRuntime plain(app, "ui.wb");
+  plain.use_script_engine(engine);
+  AppRuntime bare(app, "ui.wc");
+  write("who1.wat", who_guest(1));
+  write("who2.wat", who_guest(2));
+  ASSERT_NO_THROW(art.load(write("who1.ari", who_doc("who1.wat")).string()));
+  ASSERT_NO_THROW(plain.load(write("who2.ari", who_doc("who2.wat")).string()));
+  ASSERT_NO_THROW(bare.load(write("who3.ari", "root:\n  - text: hi\n").string()));
+  const char calls[] = "(state-set \"now\" (who))\n"
+                       "(state-set \"future\" (await (who-async)))";
+  EXPECT_EQ(run(art, calls), "");
+  EXPECT_EQ(run(plain, calls), "");
+  EXPECT_EQ(val(app, "ui.wa.now"), "1") << "the first document's call reaches its own guest";
+  EXPECT_EQ(val(app, "ui.wa.future"), "1");
+  EXPECT_EQ(val(app, "ui.wb.now"), "2");
+  EXPECT_EQ(val(app, "ui.wb.future"), "2");
+
+  ASSERT_NO_THROW(art.load(write("who1.ari", who_doc("who1.wat")).string()));
+  EXPECT_EQ(val(app, "ui.wa.boot"), "1") << "init:, the second document still loaded";
+  EXPECT_EQ(run(bare, "(state-set \"has\" (if (has? \"who\") \"yes\" \"no\"))"), "");
+  EXPECT_EQ(val(app, "ui.wc.has"), "no") << "a document with no guest sees the others' exports";
 }
 
 // ari_init runs at load, through the host, before the document's init:; and init:, which can't

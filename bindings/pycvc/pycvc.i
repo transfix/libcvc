@@ -43,6 +43,7 @@ if _sys.platform == "win32":
 #include <cvc/core/exception.h>
 #include <cvc/state/state_exec/lock_manager.h> // note_threaded_host (app_from_capsule)
 #include <cvc/core/clock_follower.h>
+#include <cvc/core/sim_tick.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/core/world_clock_binding.h>
 #include <cvc/core/world_units.h>
@@ -374,6 +375,15 @@ namespace cvc {
 // ticks_per_step / steps_due / clock_follower: a Python simulation whose step is
 // k quanta follows the shared clock the same way a C++ one does.
 %include "cvc/core/clock_follower.h"
+
+// ── The one simulation tick (cvc/core/sim_tick.h) ──
+// SIM_TICK: the navigator's step and control period every host and trainer shares by default;
+// SIM_QUANTUM: the simulation hosts' clock quantum; SIM_CATCHUP: the world time a real-time frame
+// may catch up at 1x. A Python host's live clock: world_clock(SIM_QUANTUM, speed,
+// round(SIM_CATCHUP / SIM_QUANTUM), 1, True), followed with clock_follower.for_step(clock, tick).
+%constant double SIM_TICK = cvc::kSimTick;
+%constant double SIM_QUANTUM = cvc::kSimQuantum;
+%constant double SIM_CATCHUP = cvc::kSimCatchup;
 
 // ── cvc::world_clock_binding — the clock on the state tree ──────────
 // Speed / pause / mode / single-step come from <prefix>.* keys and the shared
@@ -4850,6 +4860,9 @@ def register_intrinsics(env, ctx):
 // The GL-free half of a Python Ariadne host: pycvc.host_function (a Python callable as a host
 // function with arguments and a value) and pycvc.AriApp (a document's programs with no window).
 %include "pycvc_ariadne.i"
+
+// pycvc.WorldGym: a world document driven by reset, step and observe, headless (L4).
+%include "pycvc_gym.i"
 
 // pycvc.ari: an Ariadne document run from a Python program (Host; ARIADNE.md §9.3, §9.6), which
 // needs pycvc_gl only for a window or offscreen Host. Its source is bindings/pycvc/pymod/ari.py,

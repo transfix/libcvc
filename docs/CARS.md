@@ -45,7 +45,8 @@ Contents:
 
 ## Your controller
 
-Edit `controller(s, p)` in `cars.py`. It runs every tick (0.05 s), once for all the cars, and
+Edit `controller(s, p)` in `cars.py`. It runs every tick (0.06 s, libcvc's one simulation tick,
+`pycvc.SIM_TICK`), once for all the cars, and
 returns `(steer, accel)`: one front-wheel angle (rad, + left) and one acceleration along the
 heading (m/s²) per car, as numpy arrays. Each car's plant takes them in the navigator's place
 (`pycvc.nav_sim_world_override`), held to the car's steering lock, its acceleration and braking,
@@ -275,7 +276,10 @@ The knobs, with the values a Humvee run starts from:
 | `nav.ttl_s` | s | 0 .. 60 | 4 | How long an obstacle added at run time stays on the map |
 
 The template's own keys: `run.world`, `run.uri`, `run.data_path`, `run.crop` (m), `run.cars`,
-`run.controller` (`yours`, `navigator`), `run.ticks` (ticks per frame), `run.regoal`,
+`run.controller` (`yours`, `navigator`), `run.ticks` (in a live window, the speed: world seconds
+per wall second, the cars stepping the ticks world time has passed on a clock at the 0.01 s
+quantum, catching up at most 0.25 s a frame; headless or with `--frames`, ticks per frame),
+`run.regoal`,
 `run.paused`, and `view.camera`, `view.car` (the chosen car), `view.horizon` (s of predicted
 path), `view.raster_m` (the raster window, m), `show.plans`.
 
@@ -367,6 +371,41 @@ the command line). `Cars(..., app=app,
 prefix=...)` keeps its settings in that app's state tree (`pull()` and `publish()`).
 `Cars(..., starts=..., goals=...)` places the cars ((n, 2) world positions) instead of picking
 random ones.
+
+## In a world document
+
+`GymCars` runs the same cars in a world document, through libcvc's gym (`pycvc.WorldGym`,
+docs/ARIADNE.md, "The gym"). The document's world (generated, terrain, flat or a data bundle)
+is the world, its `world: vehicles:` archetypes are the vehicles (Jolt vehicles in the
+document's own physics world, colliding with its bodies), and its `spawns:` are the starts:
+
+```python
+from pycvc_gl import cars as C
+
+cars = C.GymCars("examples/ariadne/python/world_gym.ari", 4, "humvee", seed=3, world="flat")
+s = cars.state()                         # a CarsState, as Cars gives it
+while s.t < 60.0:
+    s = cars.step(*my_controller(s))     # or cars.step_navigator(): the document's nav@1
+    if s.reached.any():
+        cars.new_goals(s.reached)
+path = C.rollout(my_controller, s, params, cars.world)   # cars.world: the gym's grid as a World
+```
+
+On the command line, `--gym DOC` runs the template on it, headless (`--vehicle` names an
+archetype; open the document in arigl to watch the same world):
+
+```bash
+python my_cars/cars.py --headless --frames 600 --gym world_gym.ari --log run.npz
+```
+
+`vehicle` names an archetype, or a plant as `Cars` names it (`kinematic`, `jolt`, `dynamic`,
+`dynamic4w`, with `:<archetype>` after it: `dynamic:roboracer`); `--vehicle` does the same with
+`--gym`. What differs from `Cars`: the plant runs in the document's world (a Jolt vehicle in its
+physics world, a dynamic model in a world of its own holding its colliders, nav's bicycle on its
+grid; `nav_plant.vehicle` and the `nav.*` settings do not apply), `CarsState.nav` is empty (the navigator's telemetry stays in the
+gym), and `collided` is a physics contact over the tick (with the world's bodies other than its
+ground, or another vehicle) rather than a footprint on the grid. A `CarsState`'s `(x, y)` is
+still the rear axle; the gym's own observation gives the chassis's centre.
 
 ## Your own host
 

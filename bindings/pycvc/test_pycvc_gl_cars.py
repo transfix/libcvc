@@ -18,7 +18,10 @@ Headless, in this process (no GL):
   7. the pieces another host reuses: cars.ari's panels come from cars_panels.ari by cvc://, a
      state from a host's own arrays (state_from) goes in a CarsLog, the rasters and pictures, the
      coefficient plots, Cars at given starts and goals, add_args and apply_settings, save_log's
-     meta and exit_code.
+     meta and exit_code;
+  8. GymCars: the template's controller in a world document (pycvc.WorldGym): the gym's world as a
+     World, the state a CarsState, the navigator's baseline, new goals, a rollout, and --gym
+     headless.
 Script-style, like the other pycvc tests; self-skips (exit 0) when the running pycvc predates the
 bindings pycvc_gl.cars needs.
 """
@@ -97,8 +100,10 @@ try:
     x0, y0, h0 = s.x.copy(), s.y.copy(), s.heading.copy()
     for _ in range(20):
         s = cars.step([0.0, 0.0], [1.0, 1.0])
-    check(np.allclose(s.speed, 1.0, atol=1e-4), f"1 m/s^2 for 1 s: 1 m/s ({s.speed})")
-    check(np.allclose(np.hypot(s.x - x0, s.y - y0), 0.5, atol=0.02), "0.5 m covered")
+    t = 20 * C.DT  # 1.2 s at libcvc's 0.06 s tick
+    check(np.allclose(s.speed, t, atol=1e-4), f"1 m/s^2 for {t:.2f} s: {t:.2f} m/s ({s.speed})")
+    check(np.allclose(np.hypot(s.x - x0, s.y - y0), 0.5 * t * t, atol=0.03),
+          f"{0.5 * t * t:.2f} m covered")
     check(np.allclose(s.heading, h0, atol=1e-6), "straight")
     s = cars.step([5.0, 5.0], [100.0, 100.0])
     check(
@@ -189,7 +194,8 @@ try:
     meta = json.loads(str(z["meta"]))
     check(z["x"].shape == (40, 6) and z["raster_sdf"].shape[1:] == (96, 96), "states and rasters")
     check(
-        z["raster_plan"].shape[1:3] == (6, 31) and "coef_heading error" in z.files,
+        z["raster_plan"].shape[1:3] == (6, max(2, int(3.0 / C.DT)) // 2 + 1)  # 3 s, every 2nd tick
+        and "coef_heading error" in z.files,
         "predicted paths and coefficients",
     )
     check(
@@ -295,6 +301,71 @@ try:
     check(C.exit_code(0, error="boom") == 1 and C.exit_code(0, arrivals=1, min_arrivals=2) == 3
           and C.exit_code(4, arrivals=2, min_arrivals=2) == 4, "exit_code: 1, 3 or the document's")  # fmt: skip
     host.close()
+
+    # 8. GymCars: the cars in a world document, run by pycvc.WorldGym.
+    if hasattr(pycvc, "WorldGym") and "jolt" in pycvc.physics_backends():
+        gym_doc = os.path.join(TMP, "gym.ari")
+        with open(gym_doc, "w", encoding="utf-8") as f:
+            f.write("""requires: [scene.physics]
+world:
+  vehicles:
+    archetypes:
+      humvee: { vehicle: humvee, controllers: [nav@1, none] }
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [160, 160, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+""")
+        g = C.GymCars(gym_doc, 3, seed=4)
+        check(g.world.kind == "gym" and g.world.occ.ndim == 2 and g.world.occupied(1e6, 0.0),
+              "world_from_gym: the gym's grid as a World")  # fmt: skip
+        s = g.state()
+        check(isinstance(s, C.CarsState) and s.n == 3 and s.ranges.shape == (3, 16)
+              and s.driving == "jolt" and s.world == "gym", "GymCars: a CarsState")  # fmt: skip
+        check(np.allclose(s.center, s.pos + 0.5 * s.wheelbase[:, None]
+                          * np.stack([np.cos(s.heading), np.sin(s.heading)], 1)),
+              "its (x, y) is the rear axle")  # fmt: skip
+        p = dict(T.PARAMS)
+        d0 = s.goal_dist.copy()
+        for _ in range(60):
+            r = T.controller(g.state(), p)
+            s = g.step(r[0], r[1])
+        check(s.tick == 60 and abs(s.t - 60 * g.gym.dt()) < 1e-9, "the template's controller steps it")
+        check(float(np.max(np.abs(s.speed))) > 0.5, "and drives")
+        check(np.allclose(g.last_command[0], np.clip(r[0], -s.max_steer, s.max_steer)),
+              "its commands, held to the lock")  # fmt: skip
+        for _ in range(80):
+            s = g.step_navigator()
+        check(np.isnan(g.last_command[0]).all() and float(np.min(s.goal_dist - d0)) < 0.0,
+              "the navigator's baseline drives toward the goals")  # fmt: skip
+        before = s.goal.copy()
+        s = g.new_goals([0])
+        check(not np.allclose(s.goal[0], before[0]) and np.allclose(s.goal[1:], before[1:]),
+              "new_goals: car 0's alone")  # fmt: skip
+        path = C.rollout(T.controller, s, p, g.world, steps=10)
+        check(path.shape == (3, 11, 2), "rollout on the gym's world")
+        again = C.GymCars(gym_doc, 3, seed=4)
+        check(np.array_equal(again.state().x, C.GymCars(gym_doc, 3, seed=4).state().x),
+              "one seed, one start")  # fmt: skip
+        for plant in ("kinematic", "dynamic:humvee", "dynamic4w"):
+            gp = C.GymCars(gym_doc, 2, plant, seed=1)
+            for _ in range(40):
+                s = gp.step_navigator()
+            check(gp.driving == plant.split(":")[0] and float(np.max(np.abs(s.speed))) > 0.5,
+                  f"GymCars on {plant} ({gp.driving}, {np.round(s.speed, 2)})")  # fmt: skip
+        out = os.path.join(TMP, "gym_run.npz")
+        rc = C.run(T.controller, T.PARAMS,
+                   argv=["--headless", "--frames", "20", "--gym", gym_doc, "--cars", "2",
+                         "--log", out])  # fmt: skip
+        check(rc == 0 and os.path.exists(out), f"--gym runs the template headless ({rc})")
+        z = np.load(out)
+        check(z["x"].shape[1] == 2 and json.loads(str(z["meta"]))["world"]["source"] == "gym",
+              "and logs it")  # fmt: skip
 finally:
     shutil.rmtree(TMP, ignore_errors=True)
 

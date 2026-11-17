@@ -44,6 +44,7 @@ double cosh(double x);
 double tanh(double x);
 double sin(double x); // sin, cos and tan: accurate for |x| < 1e6
 double cos(double x);
+void sincos(double x, double &s, double &c); // sin(x) and cos(x), the same bits, one reduction
 double tan(double x);
 double atan(double x);
 double atan2(double y, double x);

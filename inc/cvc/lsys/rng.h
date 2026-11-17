@@ -73,6 +73,7 @@ enum class stream : std::uint32_t {
   cloud,
   rock,
   road, // street-network generation (cvc::world::roads) — appended so existing salts never shift
+  weather, // the weather model's storm schedule (cvc::world::weather), appended likewise
   _count
 };
 

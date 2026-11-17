@@ -81,6 +81,48 @@ GCC then made the same bytes for the first three cases (2026-11-10, transfix/lib
 The roadmap (§5) says the legacy GenSeg "doesn't work properly today". These goldens record what
 it does, so the port can first match it voxel for voxel, before the port fixes it.
 
+## SegMed
+
+SegMed is `src/Segmentation/SegMed`, the paper's automatic seeding: the critical points of the
+gradient field after anisotropic gradient vector diffusion (the roadmap's §5, P6).
+
+- **What is built:** `GVF.cpp` (the diffusion and the critical points) and `inout.cpp` (the rawiv
+  reader), from copies in the build tree with two patches, each of which must apply or the
+  configure fails:
+  - `GVF_Compute`'s `return;` right after `InitGVF` (`GVF.cpp:97`) goes. It skipped everything
+    after the initial field, so at the pinned commit the diffusion, the critical points and their
+    clustering never ran: the goldens are of that dead code, which is what the port ports;
+  - `read_data` opens its file `"rb"`, not `"r"` (the same on POSIX; text mode on Windows mangles
+    the floats).
+
+  `segmed_driver.cpp` stands in for `medical_segmentation.cpp`, the XML-RPC entry. It includes the
+  patched `GVF.cpp`, so it can also read the diffused field from the legacy globals.
+  `segment.cpp` (a march from 13 voxels hard-coded for one heart dataset) and `diffuse.cpp`
+  (uncalled) are left out.
+- **Inputs:** `inputs/segmed/<case>.raw` (float32, little-endian, x fastest) and `<case>.json`
+  (dimensions and `tlow`, on the 0..255 scale the legacy reader rescales to). `make_inputs.py
+  --only segmed` wrote them.
+- **Goldens:** for each case, in `src/cvc/tests/data/volrover-goldens/segmed/`:
+  - `<case>.critical.txt`: `GVF_Compute`'s critical list, `x y z` a line, in its order (its
+    field's minima above `tlow`, each 26-connected run thinned to one voxel in 21);
+  - `<case>.field.f32`: the field `gvfflow()` leaves, x, y, z float32 per voxel. `--check`
+    compares it to within 1e-6, not byte for byte: the legacy `exp()` is the platform's `expf`;
+  - `<case>.json`: the case, the volrover commit, the platform, the count and the SHA-256.
+
+| Case | Size | What it covers |
+|---|---|---|
+| `many_blobs` | 20³ | eight small blobs, every source (`tlow` -1): 22 points, 41 before the thinning |
+| `plateau` | 20³ | a flat-topped plateau, every source: the background is one long run, thinned |
+| `noisy_blob` | 18³ | a broad blob under heavy noise, `tlow` 20 |
+| `noisy_slab` | 20³ | a noisy flat-topped slab, `tlow` 20 |
+
+`critical_points_test` (`MatchSegMed`) checks `cvc::gradient_vector_diffusion` on SegMed's
+initial field against the field (bit for bit on MSVC), and `cvc::critical_point_seeds` with
+SegMed's parameters (`cp_field` gradient_magnitude, `cp_weights` initial, `cp_sample` 20,
+`cp_background_threshold` the `tlow`) against the list, point for point.
+
+**Platforms:** the SegMed goldens were made on Windows with MSVC 2022.
+
 ## Skeletonization
 
 Skeletonization is `src/Skeletonization`, the skeleton of a point cloud (the roadmap's §2). It

@@ -160,6 +160,9 @@ struct WorldRT {
   bool show_water = true;
   std::vector<std::weak_ptr<LodGraphicsNode>> water;
   std::weak_ptr<GeometryNode> water_texture;
+  // The sea past a shore-edged world (world::outer_sea), under <id>_water too: made the first time
+  // a world has one, emptied for a world that has none.
+  std::weak_ptr<GeometryNode> outer_sea;
   std::shared_ptr<WorldJob> job; // the running job, or null
   int task = -1;                 // its sliced task's pid
   // A made world going into the scene a piece at a time (put_world_step), or null. The job stays
@@ -422,6 +425,28 @@ void make_chunk(SceneGraph &sg, const std::string &id, WorldRT &rt, const world:
   in.water.push_back(wn);
 }
 
+// The shown world's sea past its edge (world::outer_sea): a world with a shore edge has one, drawn
+// as its water is but in its own colours (no texture); any other edge empties the node.
+void put_outer_sea(SceneGraph &sg, const std::string &id, WorldRT &rt,
+                   const world::generated_world &w) {
+  const cvc::geometry g = world::outer_sea(w);
+  auto n = rt.outer_sea.lock();
+  if (!n) {
+    if (g.const_points().empty() || !rt.show_water)
+      return;
+    std::shared_ptr<GraphicsNode> waterGroup = sg.getGraphics(id + "_water");
+    if (!waterGroup)
+      waterGroup = sg.addGraphics(id + "_water");
+    n = std::dynamic_pointer_cast<GeometryNode>(
+        waterGroup->createChild<GeometryNode>("outer_sea", cvc::geometry()));
+    rt.outer_sea = n;
+    if (!n)
+      return;
+  }
+  n->setGeometry(g);
+  style_water(*n, {}); // after setGeometry, as make_mesh's
+}
+
 // A merged mesh of the new world as a hidden child of its holder; none when the world has none.
 std::weak_ptr<GeometryNode> make_mesh(GeometryNode &holder, const std::string &name,
                                       const cvc::geometry &g,
@@ -656,6 +681,7 @@ void swap_world(SceneGraph &sg, const std::string &id, WorldRT &rt) {
   rt.w = in.job->world;
   rt.color = in.job->color;
   *rt.field = *rt.w->terrain; // the published ground follows the world
+  put_outer_sea(sg, id, rt, *rt.w);
   if (rt.bodies) {            // only a node with a body: needs them
     rt.colliders->geometry = ari::generated_world_colliders(*rt.w);
     ++rt.colliders->revision;
