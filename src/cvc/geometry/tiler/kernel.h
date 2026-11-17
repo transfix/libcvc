@@ -31,8 +31,8 @@
 //    (cvc::exact), where CGAL::Cartesian<double> evaluated them in floating point. The two agree
 //    except on input so close to degenerate that rounding decides it.
 //  * Constructions (an intersection point, a projection) round, as they did.
-//  * Point_2 compares x and y only (operator==), and hashes x, y and z, as Point_25_ did; Point_3
-//    compares all three.
+//  * Point_2 compares and hashes x and y only, as the legacy Point_2 did; Point_3 compares and
+//    hashes all three.
 //
 // Nothing here holds state: no statics, no globals.
 
@@ -398,19 +398,20 @@ inline Point_2::operator Point_3() const { return point_3(); }
 inline Vector_3 operator-(const Point_3 &p, Origin) { return Vector_3(p.x(), p.y(), p.z()); }
 inline Point_3 operator+(Origin, const Vector_3 &v) { return Point_3(v.x(), v.y(), v.z()); }
 
+// The hashes the legacy library's containers saw: with CGAL 6, its Point_2 was CGAL::Point_2 of
+// its kernel (holding a Point_25_), hashed by CGAL's hash_value, x and y only, which agrees with its
+// x-and-y equality; Point_25.cpp's x-y-z hash was never chosen. The same arithmetic here, so
+// boost::unordered containers keyed by points iterate in the legacy order.
 inline std::size_t hash_value(const Point_2 &p) {
-  std::size_t seed = 0;
-  boost::hash_combine(seed, p.x());
-  boost::hash_combine(seed, p.y());
-  boost::hash_combine(seed, p.z());
-  return seed;
+  std::size_t result = boost::hash_value(p.x());
+  boost::hash_combine(result, boost::hash_value(p.y()));
+  return result;
 }
 inline std::size_t hash_value(const Point_3 &p) {
-  std::size_t seed = 0;
-  boost::hash_combine(seed, p.x());
-  boost::hash_combine(seed, p.y());
-  boost::hash_combine(seed, p.z());
-  return seed;
+  std::size_t result = boost::hash_value(p.x());
+  boost::hash_combine(result, boost::hash_value(p.y()));
+  boost::hash_combine(result, boost::hash_value(p.z()));
+  return result;
 }
 
 inline bool xy_equal(const Point_2 &a, const Point_2 &b) { return a.x() == b.x() && a.y() == b.y(); }
@@ -830,16 +831,14 @@ private:
 };
 
 inline std::size_t hash_value(const Segment_2 &s) {
-  std::size_t seed = 0;
-  boost::hash_combine(seed, hash_value(s.source()));
-  boost::hash_combine(seed, hash_value(s.target()));
-  return seed;
+  std::size_t result = hash_value(s.source());
+  boost::hash_combine(result, hash_value(s.target()));
+  return result;
 }
 inline std::size_t hash_value(const Segment_3 &s) {
-  std::size_t seed = 0;
-  boost::hash_combine(seed, hash_value(s.source()));
-  boost::hash_combine(seed, hash_value(s.target()));
-  return seed;
+  std::size_t result = hash_value(s.source());
+  boost::hash_combine(result, hash_value(s.target()));
+  return result;
 }
 
 // ============================================================================================

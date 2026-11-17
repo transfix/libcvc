@@ -1,0 +1,13 @@
+{
+  "library": "ContourTiler",
+  "series": "branch/branch.ser",
+  "first": 0,
+  "last": 7,
+  "vertices": 432,
+  "parameters": {
+    "curation_delta": 0.01,
+    "collinear_epsilon": 1e-15,
+    "z_scale": 1
+  },
+  "made_by": "tools/volrover-goldens/make_inputs.py"
+}

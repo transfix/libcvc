@@ -67,3 +67,5 @@ target_compile_definitions(critical_points_test PRIVATE
 # tiler_test also checks the vendored tiler's internals (src/cvc/geometry/tiler), as the legacy
 # library's own tests did.
 target_include_directories(tiler_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../geometry/tiler)
+target_compile_definitions(tiler_test PRIVATE
+  CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")

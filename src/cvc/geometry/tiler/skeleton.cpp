@@ -282,6 +282,13 @@ Number_type partition(const Polygon_2& P, Out_iter out)
       ring.push_back(q);
     }
     for (const planar::ring& piece : planar::convex_partition(planar::polygon(ring))) {
+      // The pieces are convex on the grid. A vertex the tiler constructed (an augmenting point)
+      // sits between grid points, so where three vertices are nearly collinear the turn the
+      // original coordinates make can differ from the grid's: the check is on the grid.
+      for (std::size_t i = 0; i < piece.size(); ++i)
+        if (planar::orientation(piece[i], piece[(i + 1) % piece.size()],
+                                piece[(i + 2) % piece.size()]) < 0)
+          throw logic_error("planar::convex_partition gave a piece that is not convex");
       Polygon_2 p;
       for (const planar::point& q : piece)
         p.push_back(back.at(std::make_pair(q.x, q.y)));
@@ -298,10 +305,6 @@ Number_type partition(const Polygon_2& P, Out_iter out)
   for (Partition_polygons::iterator it = partition_polygons.begin(); it != partition_polygons.end(); ++it)
   {
     Polygon_2 p(it->vertices_begin(), it->vertices_end());
-    if (!p.is_convex()) {
-      throw logic_error("Somehow a non-convex polygon made it here: " + pp(p) +
-                        " Original polygon: " + pp(P));
-    }
     *out++ = p;
     if (p.area() > max_area) {
       max_area = p.area();
@@ -414,7 +417,7 @@ void medial_axis_stable(const Untiled_region& r, Number_type zmid, Tile_iterator
     Number_type max_area = partition(P, std::back_inserter(polygons));
   }
   catch (logic_error& e) {
-    TILER_ERROR(logger, "Failed to partition polygon - aborting medial axis tile: " << pp(P));
+    TILER_ERROR(logger, "Failed to partition polygon - aborting medial axis tile: " << e.what() << ": " << pp(P));
     TILER_ERROR(logger, "Original: " << pp(old_P));
     return;
   }

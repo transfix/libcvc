@@ -26,9 +26,12 @@
 // create_exterior_skeleton_and_offset_polygons_2 and arrange_offset_polygons_2, all GPL) became
 // cvc::planar::wavefront_offset, which steps Clipper2 through the skeleton's events and returns
 // the arranged polygons with holes; tools/cgal_ab finds it equal to CGAL's skeleton offsets in all
-// 50 of its cases. fix_simple() quantised CGAL's inexact constructions to 10 decimal places; the
-// planar module's output is exact on its grid, so only the duplicate removal stays.
+// 50 of its cases. fix_simple() still rounds the result to 10 decimal places, as the legacy did: a
+// contour dilated and eroded back by curation then gets its own vertices back (to within the
+// rounding), so a contour no other one touches is unchanged.
 
+#include <algorithm>
+#include <cmath>
 #include <iterator>
 #include <sstream>
 #include <string>
@@ -40,21 +43,44 @@
 
 namespace cvc::tiler {
 
+Number_type temp_round(Number_type d, int dec) {
+  d *= pow((Number_type)10, (Number_type)dec);
+  d = (d < 0) ? ceil(d-0.5) : floor(d+0.5);
+  d /= pow((Number_type)10, (Number_type)dec);
+  return d;
+}
+
+void temp_round(Polygon_2& p, int dec) {
+  Polygon_2::Vertex_iterator vit;
+  for (vit = p.vertices_begin(); vit != p.vertices_end(); ++vit) {
+    Point_2 pnt = *vit;
+    pnt = Point_2(temp_round(pnt.x(), dec), temp_round(pnt.y(), dec), pnt.z(), pnt.id());
+    p.set(vit, pnt);
+  }
+
+  p = Polygon_2(p.vertices_begin(), unique(p.vertices_begin(), p.vertices_end()));
+}
+
 //------------------------------------------------------------
 // fix_simple
 //
-// Removes vertices equal to the previous one or to the first.
+// Some points are so close that is_simple() is returning false.
+// Quantize the points and remove duplicates.  Quantize to 10 decimal
+// places (10 is arbitrary).
 //------------------------------------------------------------
 Polygon_2 fix_simple(const Polygon_2& P) 
 {
+  Polygon_2 ret(P);
+  temp_round(ret, 10);
   Polygon_2 temp;
-  for (Polygon_2::Vertex_const_iterator it = P.vertices_begin(); it != P.vertices_end(); ++it) {
+  for (Polygon_2::Vertex_const_iterator it = ret.vertices_begin(); it != ret.vertices_end(); ++it) {
     Point_2 p = *it;
     if (temp.size() == 0 || (!xy_equal(temp[temp.size()-1], p) && !xy_equal(temp[0], p))) {
       temp.push_back(p);
     }
   }
-  return temp;
+  ret = temp;
+  return ret;
 }
 
 Polygon_with_holes_2 fix_simple(const Polygon_with_holes_2& P) 

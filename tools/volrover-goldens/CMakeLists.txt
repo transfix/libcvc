@@ -8,7 +8,8 @@ project(volrover_goldens CXX)
 set(VOLROVER_DIR "" CACHE PATH "A transfix/volrover checkout at the sha in volrover.sha")
 if(NOT EXISTS "${VOLROVER_DIR}/src/Segmentation/GenSeg/segment.cpp" AND
    NOT EXISTS "${VOLROVER_DIR}/src/Segmentation/SegMed/GVF.cpp" AND
-   NOT EXISTS "${VOLROVER_DIR}/src/Skeletonization/Skeletonization.cpp")
+   NOT EXISTS "${VOLROVER_DIR}/src/Skeletonization/Skeletonization.cpp" AND
+   NOT EXISTS "${VOLROVER_DIR}/src/ContourTiler/tiler.cpp")
   message(FATAL_ERROR "VOLROVER_DIR (${VOLROVER_DIR}) is not a volrover checkout with a library "
                       "this directory builds")
 endif()
@@ -143,5 +144,97 @@ if(EXISTS "${VOLROVER_DIR}/src/Skeletonization/Skeletonization.cpp")
     message(STATUS "volrover-goldens: Skeletonization with CGAL ${CGAL_VERSION}")
   else()
     message(STATUS "volrover-goldens: no CGAL or Boost, so no Skeletonization")
+  endif()
+endif()
+
+# ContourTiler (src/ContourTiler), when the checkout has it and CGAL is found, as for
+# Skeletonization. Its library sources are compiled as they are, but for its tools (ecs, smfconvert,
+# its command line), contour_graph.cpp (unused; its reader needs ContourFilter) and minkowski.cpp
+# (unused), with tiler_driver.cpp in place of main.cpp. shim/log4cplus stands in for log4cplus and
+# logs nothing. Four files are compiled from patched copies in the build tree, and each patch must
+# apply, or configuring fails:
+#   - print_utils.cpp: raw_print_tiles_impl writes coordinates with 17 digits (its commented-out
+#     setprecision, back in), instead of the stream's default 6, and a vertex's z as the tiler's own
+#     (a contour vertex's is its section index), instead of (z + 0.5) * z_scale;
+#   - offset_polygon.cpp and skeleton.cpp: CGAL 6's straight-skeleton functions return
+#     std::shared_ptr where CGAL 5 returned boost::shared_ptr;
+#   - tiler_output.cpp: Callback::untiled_region (the debug output hook, called for every untiled
+#     region) falls off its end without returning its bool, undefined behaviour that clang's code
+#     aborts on; it returns true, as Callback::tile_added does.
+# MSVC's standard library leaves out std::ptr_fun and std::unary_function under C++17, which
+# xml/Ser_reader.cpp and interp.cpp use; _HAS_AUTO_PTR_ETC brings them back (libstdc++ keeps them). MSVC itself cannot compile the legacy kernel (Cartesian_25's conversions); clang-cl can.
+if(EXISTS "${VOLROVER_DIR}/src/ContourTiler/tiler.cpp")
+  find_package(CGAL CONFIG QUIET)
+  find_package(Boost QUIET)
+  if(CGAL_FOUND AND Boost_FOUND)
+    set(_ct_dir "${VOLROVER_DIR}/src/ContourTiler")
+    set(_ct_out "${CMAKE_CURRENT_BINARY_DIR}/tiler_src")
+    file(MAKE_DIRECTORY "${_ct_out}")
+    set(_ct_files CGAL_hash Contour Contour2 Hierarchy tiler_operations contour_utils polygon_utils
+      Correspondences Tiling_region Composite_tiling_region All_tiling_region Point_tiling_region
+      Wedge skeleton Point_25 Boundary_slice_chords theorems projection Tiler_workspace tiler
+      tiler_output Tiles mtiler_operations segment_utils intersection cut augment Polyline
+      triangle_utils remove_contour_intersections offset_polygon polygon_difference
+      polygon_intersection Slice Slice2 Z_adjustments interp arrange_polygons perturb print_utils
+      intersection/Segment_3_Segment_3 intersection/Line_3_Line_3 xml/Ser_reader xml/tinyxml
+      xml/tinystr xml/tinyxmlerror xml/tinyxmlparser)
+    # file|old text|new text, with %SEMI% for ';' and %Q% for '"'; every occurrence is replaced
+    set(_ct_patches
+      "print_utils|  // ss << std::setprecision(24)%SEMI%|  ss << std::setprecision(17)%SEMI%"
+      "print_utils|ss << t.x() << %Q% %Q% << t.y() << %Q% %Q% << (t.z()+0.5) * z_scale%SEMI%|ss << t.x() << %Q% %Q% << t.y() << %Q% %Q% << t.z()%SEMI%"
+      "offset_polygon|boost::shared_ptr|std::shared_ptr"
+      "skeleton|boost::shared_ptr|std::shared_ptr"
+      "tiler_output|    out.close()%SEMI%\n  }\n}|    out.close()%SEMI%\n  }\n  return true%SEMI%\n}")
+    set(_ct_sources "")
+    foreach(_f ${_ct_files})
+      set(_in "${_ct_dir}/${_f}.cpp")
+      set(_patched OFF)
+      foreach(_p ${_ct_patches})
+        string(REPLACE "|" ";" _parts "${_p}")
+        list(GET _parts 0 _pf)
+        if(_pf STREQUAL _f)
+          if(NOT _patched)
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_in}")
+            file(READ "${_in}" _text)
+            set(_patched ON)
+          endif()
+          list(GET _parts 1 _old)
+          list(GET _parts 2 _new)
+          foreach(_v _old _new)
+            string(REPLACE "%SEMI%" ";" ${_v} "${${_v}}")
+            string(REPLACE "%Q%" "\"" ${_v} "${${_v}}")
+          endforeach()
+          string(FIND "${_text}" "${_old}" _at)
+          if(_at EQUAL -1)
+            message(FATAL_ERROR "volrover-goldens: the patch for ${_f}.cpp does not apply: ${_old}")
+          endif()
+          string(REPLACE "${_old}" "${_new}" _text "${_text}")
+        endif()
+      endforeach()
+      if(_patched)
+        file(WRITE "${_ct_out}/${_f}.cpp" "${_text}")
+        list(APPEND _ct_sources "${_ct_out}/${_f}.cpp")
+      else()
+        list(APPEND _ct_sources "${_in}")
+      endif()
+    endforeach()
+    add_executable(tiler_legacy tiler_driver.cpp ${_ct_sources})
+    volrover_legacy(tiler_legacy)
+    target_link_libraries(tiler_legacy PRIVATE CGAL::CGAL)
+    target_include_directories(tiler_legacy PRIVATE ${Boost_INCLUDE_DIRS})
+    target_compile_definitions(tiler_legacy PRIVATE TIXML_USE_STL _USE_MATH_DEFINES
+      _HAS_AUTO_PTR_ETC=1)
+    set_target_properties(tiler_legacy PROPERTIES CXX_STANDARD 17)
+    if(MSVC)
+      # xml/Ser_reader.cpp uses std::ptr_fun without <functional>, which libstdc++ brings in anyway.
+      set_source_files_properties("${_ct_dir}/xml/Ser_reader.cpp" PROPERTIES COMPILE_OPTIONS
+        "/FIfunctional")
+    endif()
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+      target_compile_options(tiler_legacy PRIVATE -frounding-math)
+    endif()
+    message(STATUS "volrover-goldens: ContourTiler with CGAL ${CGAL_VERSION}")
+  else()
+    message(STATUS "volrover-goldens: no CGAL or Boost, so no ContourTiler")
   endif()
 endif()
