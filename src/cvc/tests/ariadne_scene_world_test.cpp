@@ -19,6 +19,7 @@
 #include <cvc/ariadne/scene_generated_world.h>
 #include <cvc/ariadne/scene_geometry.h>
 #include <cvc/ariadne/scene_water.h>
+#include <cvc/ariadne/scene_weather.h>
 #include <cvc/ariadne/scene_wind.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/server_document.h>
@@ -34,12 +35,16 @@
 #include <cvc/ocean/shore.h>
 #include <cvc/physics/backend.h>
 #include <cvc/physics/world.h>
+#include <cvc/physics/world_geometry.h> // wet_friction
 #include <cvc/state/state.h>
+#include <cvc/world/surface.h>
+#include <cvc/world/weather.h>
 #include <cvc/world/world_geometry.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <limits>
+#include <map>
 #include <optional>
 #include <string>
 #include <thread>
@@ -4041,4 +4046,128 @@ TEST(AriadneSceneWorld, TheWorldsEdgeIsALiveSetting) {
   ASSERT_NE(w->generated_world("world"), nullptr);
   EXPECT_EQ(w->generated_world("world")->params.edge, int(cvc::world::world_edge::wall));
   EXPECT_EQ(w->bodies_of("world").size(), collide_items(*w->generated_world("world")) + kEdgeWalls);
+}
+
+// O20 (F6): the rain's friction is the scene's world's (WeatherFriction), set inside the physics
+// step on the world clock's ticks. So a world without a renderer applies it, and it changes at the
+// same clock tick whatever the frames: one run takes a frame per clock quantum (every step seen),
+// another uneven 0.137 s frames, and wherever the second is looked at it has the first's friction.
+// weather.friction 0 gives the surfaces their dry friction back at the next step.
+TEST(AriadneSceneWeather, TheRainsFrictionIsSetInTheStepOnTheClocksTicks) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const cvc::world::surface_registry &surfaces = cvc::world::surface_registry::builtin();
+  const cvc::world::surface_class &asphalt = surfaces[surfaces.by_name("asphalt")];
+  const float dry = static_cast<float>(asphalt.mu);
+  const float soaked = static_cast<float>(cvc::physics::wet_friction(asphalt, 1.0));
+  ASSERT_LT(soaked, dry);
+  // A full storm born over the terrain at t = 0; the weather runs 50 times the world's time, so its
+  // rain soaks the ground (2 weather seconds) well inside the first half second.
+  cvc::world::weather_event e;
+  e.t = 0.0;
+  e.x = 0.0;
+  e.y = 0.0;
+  e.radius = 400.0;
+  e.peak = 1.0;
+  e.life = 3000.0;
+  const std::string events = cvc::world::format_weather_events({e});
+  struct sample {
+    std::uint64_t tick;
+    float friction;
+  };
+  struct run_result {
+    std::vector<sample> samples;
+    double wetness = -1.0;
+    std::string published;
+    float off = 0.0f; // the friction a frame after weather.friction went to 0
+  };
+  const auto run = [&](double frame_dt, double seconds) {
+    LoadResult r = fresh_load(kScene);
+    EXPECT_TRUE(r.ok) << r.error;
+    SceneNode wn;
+    wn.id = "weather";
+    wn.type = "weather";
+    wn.props.kind = Value::Kind::Map;
+    for (const auto &[k, v] :
+         std::vector<std::pair<const char *, std::string>>{{"chance", "0"},
+                                                           {"area", "100"},
+                                                           {"soak", "2"},
+                                                           {"dry", "600"},
+                                                           {"time_scale", "50"},
+                                                           {"events", events}}) {
+      Value s;
+      s.kind = Value::Kind::Scalar;
+      s.scalar = v;
+      wn.props.entries.emplace_back(k, s);
+    }
+    r.scene.nodes.push_back(wn);
+    cvc::app app;
+    std::vector<std::string> warnings;
+    std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+    run_result out;
+    if (!w || w->weathers().size() != 1) {
+      ADD_FAILURE() << "no world, or not one weather runtime";
+      return out;
+    }
+    const cvc::physics::material_id m =
+        w->world().add_material({"asphalt", dry, 0.0f, asphalt.rolling_resistance});
+    SceneClockDriver clock(app, resolved_clock(r.scene));
+    while (app.world_clock().t() < seconds) {
+      clock.drive(frame_dt);
+      w->follow(app.world_clock());
+      out.samples.push_back({app.world_clock().tick(), w->world().get_material(m).friction});
+    }
+    out.wetness = w->weathers()[0]->applied();
+    out.published = val(app, "weather.wetness");
+    cvc::state::instance(app)("weather.friction").value(0.0);
+    clock.drive(frame_dt);
+    w->follow(app.world_clock());
+    out.off = w->world().get_material(m).friction;
+    return out;
+  };
+  cvc::app probe;
+  const double quantum = probe.world_clock().fixed_dt();
+  const run_result fine = run(quantum, 3.0);
+  const run_result coarse = run(0.137, 3.0);
+  ASSERT_FALSE(fine.samples.empty());
+  ASSERT_FALSE(coarse.samples.empty());
+
+  // The rain lowered the friction, with no renderer, to the wet ground's at the wetness it applied
+  // (the storm, steered on, has left the point and the ground has begun to dry), and said so.
+  EXPECT_GT(fine.wetness, 0.5);
+  EXPECT_LE(fine.wetness, 1.0);
+  EXPECT_EQ(fine.samples.back().friction,
+            static_cast<float>(cvc::physics::wet_friction(asphalt, fine.wetness)));
+  EXPECT_LT(fine.samples.back().friction, dry);
+  EXPECT_GE(fine.samples.back().friction, soaked);
+  EXPECT_EQ(std::stod(fine.published), fine.wetness);
+  EXPECT_EQ(coarse.wetness, fine.wetness);
+  // It changed on the clock: on the first step of a half second (none before it), never between.
+  std::uint64_t first = 0;
+  for (const sample &s : fine.samples)
+    if (s.friction != dry) {
+      first = s.tick;
+      break;
+    }
+  ASSERT_GT(first, 0u);
+  const double t_first = static_cast<double>(first) * quantum;
+  EXPECT_NEAR(std::fmod(t_first, WeatherFriction::kWetPeriod), 0.0, 0.05)
+      << "the friction first changed at t = " << t_first << " s";
+  // The coarse frames saw the same friction at every tick they were looked at.
+  std::map<std::uint64_t, float> by_tick;
+  for (const sample &s : fine.samples)
+    by_tick[s.tick] = s.friction;
+  int compared = 0;
+  for (const sample &s : coarse.samples) {
+    const auto it = by_tick.find(s.tick);
+    if (it == by_tick.end())
+      continue;
+    ++compared;
+    EXPECT_EQ(s.friction, it->second) << "at tick " << s.tick;
+  }
+  EXPECT_GT(compared, 10);
+  // Off: dry again at the next step.
+  EXPECT_EQ(fine.off, dry);
+  EXPECT_EQ(coarse.off, dry);
 }

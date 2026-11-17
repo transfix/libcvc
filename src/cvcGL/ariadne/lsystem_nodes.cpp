@@ -589,7 +589,7 @@ float cloudStormAt(vec2 p) {
 // metres a weather second, weather seconds since its birth, to its end: negative once gone);
 // cloudFogC = (the fog's colour, its density per metre).
 std::string rainGlsl() {
-  std::string s = "uniform vec4 cloudRainK;\nuniform vec4 cloudFogC;\n";
+  std::string s = "uniform vec4 cloudRainK;\nuniform vec4 cloudFogC;\nuniform vec4 cloudFlash;\n";
   for (int k = 0; k < MAX_STORMS; ++k)
     s += "uniform vec4 cloudWetA" + std::to_string(k) + ";\nuniform vec4 cloudWetB" +
          std::to_string(k) + ";\n";
@@ -631,6 +631,13 @@ vec3 cloudFog(vec3 col, vec3 pVC) {
   if (cloudFogC.w <= 0.0) return col;
   return mix(col, cloudFogC.rgb, 1.0 - exp(-cloudFogC.w * length(pVC)));
 }
+// A lightning flash's light at world point w (O20): cloudFlash = (the strike under the cloud base,
+// its brightness), falling off over about a kilometre.
+float cloudFlashAt(vec3 w) {
+  if (cloudFlash.w <= 0.0) return 0.0;
+  vec3 d = w - cloudFlash.xyz;
+  return cloudFlash.w / (1.0 + dot(d, d) / 810000.0);
+}
 )";
   return s;
 }
@@ -642,9 +649,11 @@ vec3 cloudFog(vec3 col, vec3 pVC) {
 // it needs nothing of the mesh), and the fog. cloudSunVC is the sun in view coordinates.
 const char *const LIT_GLSL = R"(uniform vec4 cloudWetK;
 uniform vec3 cloudSunVC;
-vec4 cloudLit(vec3 amb, vec3 dif, vec3 spec, float op, vec3 pVC) {
+vec4 cloudLit(vec3 amb, vec3 dif, vec3 spec, float op, vec3 pVC, vec3 alb) {
   float sh = cloudShade(pVC);
   vec3 c = amb * cloudAmbient(pVC) + sh * (dif + spec);
+  if (cloudShadeOn > 0.0 && cloudFlash.w > 0.0) // a lightning flash: a light from everywhere above
+    c += alb * 1.5 * cloudFlashAt((cloudVCWC * vec4(pVC, 1.0)).xyz);
   if (cloudShadeOn > 0.0 && cloudWetK.x > 0.0) {
     vec3 w = (cloudVCWC * vec4(pVC, 1.0)).xyz;
     float wet = cloudWetK.x * cloudWet(w.xy);
@@ -658,6 +667,9 @@ vec4 cloudLit(vec3 amb, vec3 dif, vec3 spec, float op, vec3 pVC) {
     }
   }
   return vec4(cloudShadeOn > 0.0 ? cloudFog(c, pVC) : c, op);
+}
+float cloudFlashLit(vec3 pVC) {
+  return cloudShadeOn > 0.0 ? 1.5 * cloudFlashAt((cloudVCWC * vec4(pVC, 1.0)).xyz) : 0.0;
 }
 // Raindrop rings on water (O19), procedural: hashed cells of RING_CELL metres, a share of them as
 // large as the rain rate here holding a drop that falls every 1.2 to 2.2 s, its ring spreading at
@@ -718,7 +730,8 @@ float cloudShade(vec3 pVC) {
          std::to_string(AMB_DROP) + " * cloudStormAt(w.xy);\n}\n" + rainGlsl() + rainConsts() +
          LIT_GLSL;
 }
-const char *const SHADE_SUM = "cloudLit(ambientColor, diffuse, specular, opacity, vertexVC.xyz)";
+const char *const SHADE_SUM =
+    "cloudLit(ambientColor, diffuse, specular, opacity, vertexVC.xyz, diffuseColor)";
 
 // The far clouds are a VolSliceNode: its volume the deck's coarse opacity, sliced by distance
 // (VolSliceNode::setDistanceSlicing): planes facing the camera, cut to the deck's box and blended
@@ -834,6 +847,7 @@ CLOUD_CUTS  for (int i = 0; i < CLOUD_SAMPLES; ++i) {
       tq *= len / float(CLOUD_LIGHT_SAMPLES);
     }
     float l = exp(-cloudSun.w * tq);
+    l = min(1.0, l + 2.0 * cloudFlashAt(q)); // a lightning flash lights the cloud round it (O20)
     if (dk > 0.0) {
       // The sky hidden by the cloud above (a storm's dark base): two taps up the deck, as
       // ABYSSAL's (Clouds.js, MIT), the deck's depth 0.1 and 0.34 above.
@@ -995,6 +1009,9 @@ struct SkyRT {
   bool bgRead = false;
   double bg[2][3] = {{0, 0, 0}, {0, 0, 0}}; // the scene's background, before the fog
   bool shafts = false; // rain under the deck: the far slices reach down to shaftFloor
+  // O20: a lightning flash (sky.flash, "x y z intensity", as a weather node writes it).
+  std::string flashKey, flashText;
+  std::array<float, 4> flash{0.0f, 0.0f, 0.0f, 0.0f};
   double shaftFloor = 0.0;
   // The deck the props built (the cumulus's): its depth, layers and far slices. A deeper deck is
   // a storm deck, built off the frame (deckTask, a sliced task) and swapped in when done.
@@ -1628,6 +1645,8 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
   ari::read_or_seed<std::string>(app0, rt->rainKey, std::string());
   ari::read_or_seed<std::string>(app0, rt->rainKKey, std::string());
   rt->fogKey = seed_key(app0, pref, n, "sky.fog", std::max(0.0, n.props.num("fog", 0.0)));
+  rt->flashKey = ari::resolve_bind(pref, ari::node_key(n, "sky.flash"));
+  ari::read_or_seed<std::string>(app0, rt->flashKey, std::string());
   ari::read_or_seed<std::string>(app0, rt->stormsKey, std::string());
   rt->sunAzKey = ari::resolve_bind(pref, "lighting.key_azimuth"); // the rig's: not seeded here
   rt->sunElKey = ari::resolve_bind(pref, "lighting.key_elevation");
@@ -2010,6 +2029,17 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
         in.f4["cloudWetB" + std::to_string(k)] = {w[4], w[5], w[6], w[7]};
       }
       in.f4["cloudShaft"] = {float(r.shaftFloor), r.shafts ? 1.0f : 0.0f, 0.0f, 0.0f};
+      // O20: a lightning flash.
+      if (const std::string ft = ari::read_or<std::string>(app, r.flashKey, std::string());
+          ft != r.flashText) {
+        r.flashText = ft;
+        std::vector<std::vector<double>> rows;
+        r.flash = {0.0f, 0.0f, 0.0f, 0.0f};
+        if (parseRows(ft, 4, rows) && !rows.empty())
+          r.flash = {float(rows[0][0]), float(rows[0][1]), float(rows[0][2]),
+                     float(std::max(0.0, rows[0][3]))};
+      }
+      in.f4["cloudFlash"] = r.flash;
       // The sun in view coordinates, for the wet ground's glint.
       vtkMatrix4x4 *mv = cam->GetModelViewTransformMatrix();
       double sv[3];
@@ -2024,10 +2054,14 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
         ren->GetBackground2(r.bg[1]);
       }
       const double fb = 1.0 - std::exp(-fogD * 3000.0);
+      const double fl = 0.5 * std::min(1.0, double(r.flash[3])); // a flash whitens the sky
+      constexpr double FLASH_SKY[3] = {0.85, 0.88, 1.0};
       double b0[3], b1[3];
       for (int c = 0; c < 3; ++c) {
         b0[c] = r.bg[0][c] + (fog[c] - r.bg[0][c]) * fb;
         b1[c] = r.bg[1][c] + (fog[c] - r.bg[1][c]) * fb;
+        b0[c] += (FLASH_SKY[c] - b0[c]) * fl;
+        b1[c] += (FLASH_SKY[c] - b1[c]) * fl;
       }
       ren->SetBackground(b0);
       ren->SetBackground2(b1);

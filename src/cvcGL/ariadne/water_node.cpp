@@ -647,8 +647,9 @@ const char *const kWaterFsLight =
 
 // The water's lighting: in a cloud_sky's shade (`shaded`: the sky has wired its inputs into the
 // mesh, so cloudShade() is declared) or in full sun. In the shade it also takes the weather the sky
-// carries (O18, O19): the ambient drops under a storm (cloudAmbient), raindrop rings tilt its
-// normal (cloudRainNormal, procedural, no texture) and the fog thickens in the rain (cloudFog).
+// carries (O18, O19, O20): the ambient drops under a storm (cloudAmbient), lightning lights it
+// (cloudFlashLit), raindrop rings tilt its normal (cloudRainNormal, procedural, no texture) and the
+// fog thickens in the rain (cloudFog).
 // Each goes where the lighting has the line it follows, and is left out if that line is not there.
 std::string water_light(bool shaded) {
   std::string s = kWaterFsLight;
@@ -662,7 +663,8 @@ std::string water_light(bool shaded) {
     const std::string normal = "  N = normalize(vec3(N.xy/max(N.z, 1e-3) - wk.xy, 1.0));\n";
     swap(normal, normal + "  N = cloudRainNormal(vWaterRest, N);\n");
     swap("float lit = 0.30 + 0.70*NdotL*sunShade;",
-         "float lit = 0.30*cloudAmbient(vertexVC.xyz) + 0.70*NdotL*sunShade;");
+         "float lit = 0.30*cloudAmbient(vertexVC.xyz) + 0.70*NdotL*sunShade + "
+         "cloudFlashLit(vertexVC.xyz);");
     swap("gl_FragData[0] = vec4(col, 1.0);",
          "gl_FragData[0] = vec4(cloudFog(col, vertexVC.xyz), 1.0);");
   }

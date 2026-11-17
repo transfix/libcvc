@@ -40,7 +40,7 @@ repository.
 
 Compiled into libcvc (its wave spectrum, `cvc/ocean/spectrum.h`, the wind's gusts and the currents,
 `cvc/algo/wind_field.h` and `cvc/ocean/current.h`, and the cumulonimbus maps of
-`cvc/world/cloud_layer.h`), cvcGL (the cloud deck's dark storm bases, the rain's streaks) and the cvcGL examples:
+`cvc/world/cloud_layer.h`), cvcGL (the cloud deck's dark storm bases, the rain's streaks, the lightning bolts) and the cvcGL examples:
 [ABYSSAL](#abyssal).
 
 Installed with cvcGL (`share/libcvc/fonts`) and embedded in the browser hosts (arigl-web, cyprty):
@@ -984,7 +984,12 @@ events (`src/cvc/world/weather.cpp`) follow the design of `src/weather/Director.
 no code of it is copied. The rain's streaks in `src/cvcGL/ariadne/weather_node.cpp`
 port its `Rain` (`src/weather/Precipitation.js:6-265` at 849ff7f4): drops placed and
 moved in the vertex shader as a closed form of time, drawn as shutter-length
-streaks at least a pixel wide. Upstream's `LICENSE`:
+streaks at least a pixel wide. The lightning bolts in the same file port its
+`Lightning` (`src/weather/Lightning.js` at 849ff7f4): the channel's recursive
+midpoint displacement, its fading forks and in-cloud crawlers, and the bolt's hot
+core and blue-white glow. The strike schedule in `src/cvc/world/weather.cpp`
+(strikes once a storm passes an intensity, more as it grows) follows the design
+of its `Director.js`; no code of it is copied. Upstream's `LICENSE`:
 
 ```
 MIT License

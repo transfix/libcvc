@@ -1279,8 +1279,8 @@ the node's root (`weather.` unless `keys:`): `events` (the authored events, `sto
 and `calm`, as text), `time_scale` (weather seconds per world second; a change is a `rate` event),
 `request` (`upwind`, `overhead` or `calm`, emptied once read), and what it publishes: `state`,
 `storminess`, `cells`, `storms` (the cells as discs), `rain` (mm/h at the ground's centre) and
-`deck`. The panel is `weather_controls.ari`. The storm wind, lightning and wet-ground friction (O20)
-will read the cells, `weather::rain_rate(x, y)` and `weather::wetness(t, x, y, ...)`.
+`deck`. The panel is `weather_controls.ari`. Its rain, lightning and wet-ground friction are below;
+the storm wind (F4) waits for O14's scene wind.
 
 **Rain** (OCEAN-AND-WEATHER-ROADMAP.md §9 F3, O19). Under a storm it rains where the field passes
 `rain_onset`, at up to `rain_max` mm/h. Everything below is uniforms or a fixed mesh, so no sampler
@@ -1307,6 +1307,36 @@ joins the ground, the buildings, the roads, the trees or the water.
   - The weather node writes `sky.rain` (the recent storms' tracks: "x y rain_radius vx vy age left",
     split by `;`) and `sky.rain_k` (the rain's constants: "onset rain_max soak dry rings fog wet").
   - `sky.fog` (`fog:`, default 0) is a haze of the scene's own, its density per kilometre.
+
+**Lightning** (OCEAN-AND-WEATHER-ROADMAP.md §9 F5, O20). A storm past `flash_onset` (0.55) of its
+peak strikes, more often as it grows, up to `flash_rate` (0.05) a weather second, within its rain;
+`ground_share` (0.6) of the strikes reach the ground, the rest stay in the cloud. The strikes are
+the weather's (`weather::strikes(t, window)`), a function of its seed, the time and the events, so
+every client sees the same strike at the same moment. Each has one to four strokes.
+
+- **The bolt.** The weather node's mesh `<id>_bolt` draws the brightest strike of the moment, a port
+  of ABYSSAL's `Lightning`: a channel from the cloud base to the ground, forking, and crawlers in the
+  cloud, grown from the strike's id, as camera-facing ribbons with a hot core and a blue-white glow.
+  List it among the sky's `receivers:` with the rain's mesh, so it draws after the clouds.
+- **The flash.** The weather node writes `sky.flash` ("x y z intensity": the strike under the cloud
+  base). The sky hands it to its receivers, the water and its far clouds as a uniform: the ground,
+  the buildings, the roads, the trees and the water light up within a kilometre or so, the far
+  clouds round it glow, and the background goes toward a blue white. No sampler is added.
+- **Keys.** `weather.lightning` (0..2, `lightning:`, default 1) scales the bolt and the flash;
+  `weather.flash` publishes the brightest flash now.
+
+**Wet friction** (§9 F6, O20). When the scene has a physics world, the weather sets the friction of
+its surface materials (the ones `add_world_geometry` names after a surface class) to their friction
+at the weather's wetness where the vehicles are (their mean; the ground's centre with none):
+`cvc::physics::apply_wetness`, from each class's dry `mu` toward its `mu_wet` (wet asphalt 0.55,
+wet grass 0.3; indoor floors keep theirs). The scene's world sets it
+([`scene_weather.h`](../inc/cvc/ariadne/scene_weather.h), `WeatherFriction`), inside the physics
+step: on the first step of each half second of world time, counted in the world clock's ticks,
+and only when the wetness has moved by 1/64. So it changes at the same physics step whatever the
+frame rate, offscreen or in a window, and a headless host (ari, a test) applies it too. Every
+plant reads the one material table, so tires and boxes both feel it, and it dries back with the
+ground. `weather.friction` (`friction:`, default 1; 0 restores the dry friction at the next step)
+turns it off, and `weather.wetness` publishes the wetness it last applied.
 
 **Water.** `water` draws everything below `level` on a ground (`world:` a `generated_world`, or
 `ground:` any height-field node) as the GPU FFT sea of OCEAN-AND-WEATHER-ROADMAP.md (§11.2, O15):
@@ -4241,7 +4271,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `world_controls` | a `generated_world` node (§5.4; arg `keys`) |
 | `water_controls` | a `water` node (arg `keys`, default `water`) |
 | `boat_controls` | a `boat` node's helm: drive, throttle, rudder, goal, and what it does (arg `keys`, default `boat`: the node's id or `keys:`) |
-| `weather_controls` | a `weather` node: the weather now, a storm started upwind or overhead, the sky cleared, the weather's time scale (arg `keys`, default `weather`) |
+| `weather_controls` | a `weather` node: the weather now, a storm started upwind or overhead, the sky cleared, the weather's time scale, the rain's effects, the lightning and the wet friction (arg `keys`, default `weather`) |
 | `wind_controls` | the scene's one wind (`wind.speed`, `wind.dir`, `wind.gustiness`; §5.4 "Wind") |
 | `mesh_tools` | a `mesh_lab` node (§5.4; arg `node`, default `mesh`) |
 | `fe_controls` | an `fe_lab` node (§5.4; arg `node`, default `domain`) |
