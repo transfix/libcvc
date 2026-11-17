@@ -203,6 +203,10 @@ bool adjacent(const Polygon_2 &P, const Point_2 &a, const Point_2 &b) {
 
 template <typename Polyline_iter>
 Polyline_iter find_last_adj(Polyline_iter begin, Polyline_iter end, const Polygon_2 &p) {
+  // trim() calls this with begin == end once its cuts reach the polyline's end; the legacy then
+  // read past the end (begin + 1, *end). An empty range has no adjacency: end.
+  if (begin == end)
+    return end;
   Polyline_iter it = begin;
   Polyline_iter next = it + 1;
   while (next != end && adjacent(p, *it, *next)) {
