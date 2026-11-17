@@ -28,7 +28,6 @@
 #include "print_utils.h"
 #include "sweep_line_visitors.h"
 
-// #include <CGAL/Sweep_line_empty_visitor.h>  // Removed in CGAL 5.x - not used in this file
 
 namespace cvc::tiler {
 

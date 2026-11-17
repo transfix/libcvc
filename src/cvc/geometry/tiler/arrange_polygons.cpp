@@ -36,12 +36,6 @@
 // #include <boost/tuple/tuple.hpp>
 // #include <boost/unordered_map.hpp>
 
-// #include <CGAL/Gmpz.h>
-// #include <CGAL/Lazy_exact_nt.h>
-// #include <CGAL/Cartesian.h>
-// #include <CGAL/Polygon_2.h>
-// #include <CGAL/Polygon_with_holes_2.h>
-// #include <CGAL/Boolean_set_operations_2.h>
 
 // namespace cvc::tiler {
 
