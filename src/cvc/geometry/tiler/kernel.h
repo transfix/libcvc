@@ -931,11 +931,12 @@ class Polygon_2 {
 public:
   typedef Point_2 Point_type;
   typedef std::vector<Point_2> Container;
-  // Constant, as CGAL's are: a vertex changes through set().
-  typedef Container::const_iterator Vertex_const_iterator;
-  typedef Vertex_const_iterator Vertex_iterator;
-  typedef Vertex_const_iterator const_iterator;
-  typedef Vertex_const_iterator iterator;
+  // As CGAL's Polygon_2 has them: both iterator types are the container's mutable iterator, even
+  // from a const polygon (the vendored code writes a vertex's z and id through them).
+  typedef Container::iterator Vertex_iterator;
+  typedef Vertex_iterator Vertex_const_iterator;
+  typedef Vertex_iterator const_iterator;
+  typedef Vertex_iterator iterator;
 
   // A circulator over a container: ++ past the end goes to the start, -- before the start to the
   // end. Compares by position.
@@ -1000,8 +1001,8 @@ public:
     Cont *_c;
     It _it;
   };
-  typedef circulator<const Container, Vertex_const_iterator> Vertex_const_circulator;
-  typedef Vertex_const_circulator Vertex_circulator;
+  typedef circulator<Container, Vertex_iterator> Vertex_circulator;
+  typedef Vertex_circulator Vertex_const_circulator;
 
   // The edges in order: edge i runs from vertex i to vertex i + 1 (the last to the first).
   class Edge_const_iterator {
@@ -1122,14 +1123,12 @@ public:
     return Vertex_circulator(&_v, it);
   }
   Vertex_iterator erase(Vertex_iterator first, Vertex_iterator last) { return _v.erase(first, last); }
-  void set(Vertex_iterator pos, const Point_2 &p) { _v[pos - _v.cbegin()] = p; }
-  void set(Vertex_circulator pos, const Point_2 &p) { set(pos.current_iterator(), p); }
+  void set(Vertex_iterator pos, const Point_2 &p) { *pos = p; }
+  void set(Vertex_circulator pos, const Point_2 &p) { *pos.current_iterator() = p; }
 
-  Vertex_const_iterator vertices_begin() const { return _v.cbegin(); }
-  Vertex_const_iterator vertices_end() const { return _v.cend(); }
-  Vertex_const_circulator vertices_circulator() const {
-    return Vertex_const_circulator(&_v, _v.cbegin());
-  }
+  Vertex_iterator vertices_begin() const { return _v.begin(); }
+  Vertex_iterator vertices_end() const { return _v.end(); }
+  Vertex_circulator vertices_circulator() const { return Vertex_circulator(&_v, _v.begin()); }
   Edge_const_iterator edges_begin() const { return Edge_const_iterator(&_v, 0); }
   Edge_const_iterator edges_end() const { return Edge_const_iterator(&_v, _v.size()); }
   Edge_const_circulator edges_circulator() const { return Edge_const_circulator(&_v, 0); }
@@ -1174,7 +1173,7 @@ public:
   bool operator!=(const Polygon_2 &o) const { return !(*this == o); }
 
 private:
-  Container _v;
+  mutable Container _v;
 };
 
 inline Number_type polygon_area_2(Polygon_2::Vertex_const_iterator b,

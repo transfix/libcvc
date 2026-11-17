@@ -19,6 +19,7 @@ set(CVC_PORT_TESTS
   contour_stack_test
   point_classes_test
   planar_test
+  tiler_test
   segmentation_test
   segmentation_intrinsics_test
   gradient_vector_diffusion_test
@@ -62,3 +63,7 @@ target_compile_definitions(segmentation_test PRIVATE
   CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
 target_compile_definitions(critical_points_test PRIVATE
   CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
+
+# tiler_test also checks the vendored tiler's internals (src/cvc/geometry/tiler), as the legacy
+# library's own tests did.
+target_include_directories(tiler_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../geometry/tiler)

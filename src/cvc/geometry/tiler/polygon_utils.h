@@ -49,6 +49,12 @@ typedef Right_enum<Polygon_relation_def> Polygon_relation;
 /// FORCE_CCW - forces all orientation to be CCW.  This is the most efficient policy
 ///   for later operations.
 /// NATURAL - leaves orientations unchanged
+// <windows.h> defines STRICT (a type-checking switch it reads only when included); the policy
+// below uses the name.
+#ifdef STRICT
+#undef STRICT
+#endif
+
 struct Hierarchy_policy_def
 {
   enum type { STRICT, FORCE, FORCE_CCW, NATURAL };

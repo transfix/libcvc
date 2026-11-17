@@ -89,6 +89,28 @@ private:
 struct tiler_context {
   tiler_log log;
   Logger logger(const char *name) { return Logger(&log, name); }
+
+  // Where the work is, for tile_stepper's phase() and progress(): the phase's name, its share
+  // [lo, hi] of the whole, and what it is on ("slices 3 - 4"). progress never goes back.
+  const char *phase = "snapping";
+  double progress = 0;
+  std::string label;
+  void stage(const char *name, double lo, double hi) {
+    phase = name;
+    _lo = lo;
+    _hi = hi;
+    advance(0);
+  }
+  // `within` of the current phase is done.
+  void advance(double within) {
+    const double w = within < 0 ? 0 : (within > 1 ? 1 : within);
+    const double p = _lo + (_hi - _lo) * w;
+    if (p > progress)
+      progress = p;
+  }
+
+private:
+  double _lo = 0, _hi = 0;
 };
 
 } // namespace cvc::tiler
