@@ -45,6 +45,79 @@ vec3 rotate(const quat &q, const vec3 &v) {
   return v + t * q.w + cross(u, t);
 }
 
+quat mul(const quat &a, const quat &b) {
+  quat q;
+  q.w = a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z;
+  q.x = a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y;
+  q.y = a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x;
+  q.z = a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w;
+  return q;
+}
+
+// A vehicle's start on ground that is not flat: tilted onto the plane fitted to the ground under
+// its chassis, its body origin `h` above that plane, then lifted clear of the highest ground under
+// its chassis and its wheels. A vehicle placed level at one sample of a slope starts with its
+// uphill end in the ground, and a body that starts below a height field falls through it: the
+// wheels' rays start under the surface and miss it, and the chassis is pushed out downward.
+// false (the pose untouched): the ground is level under the chassis, or not finite there.
+bool ground_pose(const vehicle_desc &d, double yaw, double h,
+                 const std::function<double(double, double)> &ground, vec3 &origin, quat &q) {
+  const double c = det::cos(yaw), s = det::sin(yaw);
+  const double hx = d.half_extents.x, hy = d.half_extents.y, hz = d.half_extents.z;
+  const double ox = origin.x, oy = origin.y;
+  auto at = [&](double u, double v) { return ground(ox + c * u - s * v, oy + s * u + c * v); };
+  // The ground at the chassis' corners, edge midpoints and centre, in the vehicle's frame.
+  double z[3][3];
+  bool level = true;
+  for (int i = 0; i < 3; ++i)
+    for (int j = 0; j < 3; ++j) {
+      z[i][j] = at((i - 1) * hx, (j - 1) * hy);
+      if (!std::isfinite(z[i][j]))
+        return false;
+      level = level && z[i][j] == z[0][0];
+    }
+  if (level || !(hx > 0.0) || !(hy > 0.0))
+    return false;
+  // The least-squares plane z0 + gx u + gy v over the nine (a symmetric pattern, so in closed
+  // form): its slope ahead (gx) and to the left (gy).
+  double z0 = 0.0, fx = 0.0, fy = 0.0;
+  for (int k = 0; k < 3; ++k) {
+    fx += z[2][k] - z[0][k];
+    fy += z[k][2] - z[k][0];
+    for (int m = 0; m < 3; ++m)
+      z0 += z[k][m];
+  }
+  z0 /= 9.0;
+  const double gx = fx / (6.0 * hx), gy = fy / (6.0 * hy);
+  // Pitched nose up by atan(gx) about its y axis, then rolled about its new x axis so its y axis
+  // lies in the plane too: tan(roll) = gy cos(pitch).
+  const double pitch = det::atan(gx), roll = det::atan(gy / std::sqrt(1.0 + gx * gx));
+  const quat qy{det::cos(0.5 * yaw), 0.0, 0.0, det::sin(0.5 * yaw)};
+  const quat qp{det::cos(-0.5 * pitch), 0.0, det::sin(-0.5 * pitch), 0.0};
+  const quat qr{det::cos(0.5 * roll), det::sin(0.5 * roll), 0.0, 0.0};
+  q = mul(mul(qy, qp), qr);
+  // h along the plane's normal is h / cos(tilt) straight up.
+  origin.z = z0 + h * std::sqrt(1.0 + gx * gx + gy * gy);
+  // Clear of the ground under the chassis' underside and the wheels at full reach (the plane
+  // is an average: a crest under the chassis, or a bump under a wheel, can stand above it).
+  constexpr double kClear = 0.03;
+  double lift = 0.0;
+  auto clear = [&](const vec3 &local) {
+    const vec3 p = origin + rotate(q, local);
+    const double g = ground(p.x, p.y);
+    if (std::isfinite(g))
+      lift = std::max(lift, g + kClear - p.z);
+  };
+  for (int i = 0; i < 3; ++i)
+    for (int j = 0; j < 3; ++j)
+      clear({(i - 1) * hx, (j - 1) * hy, -hz});
+  for (const axle_desc &a : d.axles)
+    for (const double side : {-1.0, 1.0})
+      clear({a.x, side * a.half_track, a.z - a.suspension_max - a.wheel_radius});
+  origin.z += lift;
+  return true;
+}
+
 // The rearmost unsteered axle's x (vehicle_desc::wheelbase()'s rear axle); 0 without one.
 double rear_axle_x(const vehicle_desc &d) {
   double rear = 0.0;
@@ -249,10 +322,12 @@ void nav_plant::place(const cvc::nav::plant_state &start, const vehicle_desc &de
     const double c = det::cos(yaw), s = det::sin(yaw);
     const double h = _o.spawn_height >= 0.0 ? _o.spawn_height : resting_height(a.desc);
     const double gz = _o.ground_height ? _o.ground_height(p.x, p.y) : _o.ground_z;
-    const vec3 origin{p.x - c * a.rear_x, p.y - s * a.rear_x, gz + h};
+    vec3 origin{p.x - c * a.rear_x, p.y - s * a.rear_x, gz + h};
     quat q;
     q.w = det::cos(0.5 * yaw);
     q.z = det::sin(0.5 * yaw);
+    if (_o.ground_height) // on a slope or uneven ground: onto it, and nowhere in it
+      ground_pose(a.desc, yaw, h, _o.ground_height, origin, q);
     a.vehicle = _w.add_vehicle(a.desc, origin, q);
     const physics::vehicle_state vs = _w.vehicle_state(a.vehicle);
     a.chassis = vs.chassis;

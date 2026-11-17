@@ -38,6 +38,8 @@
 
 #include <cstdint>
 #include <cvc/physics/types.h>
+#include <functional>
+#include <memory>
 #include <vector>
 
 namespace cvc {
@@ -74,6 +76,18 @@ public:
   }
   virtual vec3 velocity_with(const vec3 &p, double t, surface_memo &) const {
     return velocity(p, t);
+  }
+  // Runs fn(0) .. fn(n - 1) in any order, on any threads, and returns when all have run.
+  using parallel_run =
+      std::function<void(std::size_t n, const std::function<void(std::size_t)> &fn)>;
+  // This surface at time t with its per-time work done (as tasks of `run`, when given) and held,
+  // for many reads at t from several threads at once (world_config::field_threads): its
+  // height_with and velocity_with at t give this surface's values, without what each read of this
+  // one locks or counts. Null (the default): read this one.
+  virtual std::shared_ptr<const fluid_surface> at(double t, const parallel_run &run) const {
+    (void)t;
+    (void)run;
+    return nullptr;
   }
 };
 

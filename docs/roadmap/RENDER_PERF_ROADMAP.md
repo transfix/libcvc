@@ -272,6 +272,17 @@ work lands. Measured guidance from PR #249's WATER-RENDERING-ROADMAP:
     profiled.
   - Test: `cvcgl_volume_finish` (the node's mapper has it off; the pixels
     are the same with it on and off).
+  - Found: terrain_lab.ari, 1280×720, Intel Arc iGPU (Windows, MSVC Release),
+    timed in-process around `AriRuntime::frame` and `render` and sampled
+    every millisecond: the wait was 45–48 % of all samples, about 25 ms of
+    a 45 ms offscreen frame. Skipping it (in a trial since dropped: a
+    process-wide glFinish swap) took the offscreen frame to 18 ms and the
+    window's (`arigl run`) from 63 ms to 27 ms, with byte-identical pixels.
+  - What is left: the shadow bake every 4th frame (about 30 ms of `render`
+    on those frames against 5–6 ms on the rest, much of it VTK rebuilding
+    each mapper's shader strings as the render passes change), mappers'
+    `GetBounds` updating their pipelines for three callers a frame (about
+    3 ms), and the scene's physics step (#1322).
 
 ## Phase 7 — Async streaming / on-demand tile load
 

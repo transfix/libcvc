@@ -48,10 +48,16 @@ public:
   // a[p] <- sum over m of a[m] exp(sign 2 pi i m p / n), unnormalized. sign +1 is the transform
   // OceanFFT's butterflies run (wavenumbers to positions); -1 the opposite.
   void run(double *re_im, std::size_t stride, int sign) const;
-  // n x n values, row-major: every row, then every column.
+  // n x n values, row-major: every row, then every column. The same bits as run() over each row
+  // and then each column, a block of them at a time.
   void run_2d(double *re_im, int sign) const;
 
 private:
+  static constexpr std::size_t kBlock = 8; // rows or columns transformed abreast by run_2d
+  // run()'s stages over kBlock transforms at once: re and im hold n places of kBlock values each,
+  // already in bit-reversed order.
+  void run_block(double *re, double *im, int sign) const;
+
   int _n = 0;
   std::vector<double> _cos, _sin; // cos and sin of 2 pi j / n, j < n / 2
   std::vector<int> _rev;          // the bit-reversed index of each j < n

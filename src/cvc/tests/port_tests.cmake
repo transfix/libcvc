@@ -21,6 +21,9 @@ set(CVC_PORT_TESTS
   planar_test
   segmentation_test
   segmentation_intrinsics_test
+  gradient_vector_diffusion_test
+  critical_points_test
+  seed_generators_test
   volume_slice_test
   tabs_list_test
 )
@@ -53,6 +56,9 @@ target_link_libraries(tet_complex_test PRIVATE cvc_permissive_geometry)
 target_compile_definitions(skeleton_test PRIVATE
   CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
 
-# segmentation_test compares the GenSeg port with the legacy library's goldens the same way.
+# segmentation_test compares the GenSeg port with the legacy library's goldens the same way, and
+# critical_points_test the paper mode with SegMed's.
 target_compile_definitions(segmentation_test PRIVATE
+  CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
+target_compile_definitions(critical_points_test PRIVATE
   CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")

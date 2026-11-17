@@ -38,7 +38,9 @@ comes from the cvcpkg `mujoco` package, whose licence and third-party notices in
 `mujoco-menagerie` bundle (BSD-3-Clause), is read from that package at run time and is not in this
 repository.
 
-Compiled into libcvc (its wave spectrum, `cvc/ocean/spectrum.h`) and the cvcGL examples:
+Compiled into libcvc (its wave spectrum, `cvc/ocean/spectrum.h`, the wind's gusts and the currents,
+`cvc/algo/wind_field.h` and `cvc/ocean/current.h`, and the cumulonimbus maps of
+`cvc/world/cloud_layer.h`), cvcGL (the cloud deck's dark storm bases) and the cvcGL examples:
 [ABYSSAL](#abyssal).
 
 Installed with cvcGL (`share/libcvc/fonts`) and embedded in the browser hosts (arigl-web, cyprty):
@@ -967,7 +969,14 @@ Donelan-Banner spreading, the fetch law and the swell term), ports ABYSSAL's
 `src/weather/Weather.js:107-110`, and the current's shape in `inc/cvc/ocean/current.h`
 and `src/cvc/ocean/current.cpp` (the curl of noise at two scales, drifting) follows
 `src/ocean/OceanSampleGLSL.js:31-41` and `src/gfx/ProceduralTextures.js`'s curl bake, at
-the same commit. Upstream's `LICENSE`:
+the same commit. The storm deck ports two parts of
+`src/sky/Clouds.js` at 849ff7f4: the cumulonimbus height profile (the tower and
+the anvil, and the anvil's spread cover) that `src/cvc/world/cloud_layer.cpp`
+grows its storm maps with, and the sky hidden by the cloud above a sample (its
+`skyVis`, two taps up the deck) that darkens a storm's base in
+`src/cvcGL/ariadne/lsystem_nodes.cpp`. The weather model's states and authored
+events (`src/cvc/world/weather.cpp`) follow the design of `src/weather/Director.js`;
+no code of it is copied. Upstream's `LICENSE`:
 
 ```
 MIT License

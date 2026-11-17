@@ -135,9 +135,72 @@ def test_the_job_steps_and_cancels():
     print("  ok: the job, phases", phases)
 
 
+def test_the_papers_automatic_mode():
+    """seed_mode::critical_points (P6): critical_point_seeds, its job, and segment_seeded with no
+    point classes."""
+    vol = blobs()
+    seeds = pycvc.critical_point_seeds(vol)
+    assert list(seeds.class_names()) == ["feature", "background"], seeds.class_names()
+    feature = seeds.class_index("feature")
+    assert feature == 0
+    # the two touching blobs make one peak, in the middle
+    assert [12, 12, 12] in [list(p) for p in seeds.points("feature")]
+    # Keywords, an enum by name (hyphens read as underscores), and the params class.
+    moved = pycvc.critical_point_seeds(vol, cp_feature_threshold=100.0)
+    assert len(moved.points("feature")) == 0
+    p = pycvc.seeded_segmentation_params(cp_iterations=4, cp_sample=20)
+    p.set_text("cp_field", "gradient_magnitude")
+    p.set_text("cp_weights", "initial")
+    assert p.validate() == [] and p.get_text("cp_field") == "gradient_magnitude"
+    pycvc.critical_point_seeds(vol, p)
+    try:
+        pycvc.critical_point_seeds(vol, cp_k=-1.0)
+        raise AssertionError("no ValueError")
+    except ValueError as e:
+        assert "cp_k" in str(e), e
+    # The job.
+    job = pycvc.critical_point_seeds_job(vol)
+    while not job.step(256):
+        pass
+    assert list(job.result().class_names()) == ["feature", "background"]
+    # The fully automatic segmentation: no point classes at all.
+    r = pycvc.segment_seeded(vol, pycvc.point_classes(), automatic="critical-points")
+    assert r.class_names == ["feature", "background"], r.class_names
+    labels = r.labels_array()
+    assert labels[12, 12, 9] == 0 and labels[0, 0, 0] == 1
+    assert r.automatic_seeds == r.classified_seeds > 0
+    print("  ok: the paper's mode,", len(seeds.points("feature")), "feature seeds")
+
+
+def test_the_seed_generators():
+    """VolUtils' seed generators (transfix/libcvc#123): capsid_critical_points, rotated_seeds."""
+    vol = blobs()
+    c = pycvc.capsid_critical_points(vol, t_low=30, h=1, k=1)
+    assert list(c.class_names()) == ["maxima", "saddles"]
+    assert [12, 12, 12] in c.points("maxima")
+    p = pycvc.capsid_seed_params(h=3, k=0)
+    assert p.validate() == []
+    pycvc.capsid_critical_points(vol, p)
+    try:
+        pycvc.capsid_critical_points(vol, h=0, k=0)
+        raise AssertionError("no ValueError")
+    except ValueError as e:
+        assert "h, k" in str(e), e
+    one = pycvc.point_classes()
+    one.add("s", 12, 12, 12)
+    four = pycvc.rotated_seeds(one, vol, folds=4)
+    assert list(four.class_names()) == ["Class 0", "Class 1", "Class 2", "Class 3"]
+    assert four.points("Class 1") == [[11, 12, 12]], four.points("Class 1")
+    two = pycvc.rotated_seeds(one, vol, folds=2, axis=[1.0, 0.0, 0.0], center=[0.0, 0.0, 0.0])
+    assert two.points("Class 1") == [], "a half turn about x through the origin leaves the volume"
+    print("  ok: the seed generators,", len(c.points("maxima")), "maxima")
+
+
 if __name__ == "__main__":
     test_keywords_and_the_result()
     test_bad_input_raises()
     test_other_threads_run_meanwhile()
     test_the_job_steps_and_cancels()
+    test_the_papers_automatic_mode()
+    test_the_seed_generators()
     print("test_pycvc_segmentation: all passed")

@@ -67,13 +67,19 @@ double cos_reduced(double r) {
   return p;
 }
 
-// x = k pi/2 + r, |r| <= pi/4, and the quadrant k mod 4 in [0, 4).
+// x = k pi/2 + r, |r| <= pi/4, and the quadrant k mod 4 in [0, 4). Below 2^53 k is an integer
+// that fits a long long, and its integer remainder is fmod's exact one (fmod is slow); above, fmod.
 double reduce(double x, int &quadrant) {
   const double k = std::floor(x * kInvPio2 + 0.5);
-  double q = std::fmod(k, 4.0);
-  if (q < 0.0)
-    q += 4.0;
-  quadrant = static_cast<int>(q);
+  if (std::fabs(k) < 9007199254740992.0) {
+    const long long m = static_cast<long long>(k) % 4;
+    quadrant = static_cast<int>(m < 0 ? m + 4 : m);
+  } else {
+    double q = std::fmod(k, 4.0);
+    if (q < 0.0)
+      q += 4.0;
+    quadrant = static_cast<int>(q);
+  }
   return (x - k * kPio2Hi) - k * kPio2Lo;
 }
 
@@ -342,6 +348,34 @@ double cos(double x) {
     return -cos_reduced(r);
   default:
     return sin_reduced(r);
+  }
+}
+
+void sincos(double x, double &s, double &c) {
+  if (!std::isfinite(x)) {
+    s = c = x - x;
+    return;
+  }
+  int q = 0;
+  const double r = reduce(x, q);
+  const double sr = sin_reduced(r), cr = cos_reduced(r);
+  switch (q) {
+  case 0:
+    s = sr;
+    c = cr;
+    break;
+  case 1:
+    s = cr;
+    c = -sr;
+    break;
+  case 2:
+    s = -sr;
+    c = -cr;
+    break;
+  default:
+    s = -cr;
+    c = sr;
+    break;
   }
 }
 

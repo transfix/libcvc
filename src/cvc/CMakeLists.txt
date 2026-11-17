@@ -62,6 +62,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_cluster_membership.h
   ../../inc/cvc/state/state_hybrid_time.h
   ../../inc/cvc/core/world_clock.h
+  ../../inc/cvc/core/sim_tick.h
   ../../inc/cvc/core/input_trace.h
   ../../inc/cvc/core/clock_follower.h
   ../../inc/cvc/core/clock_driver.h
@@ -170,6 +171,10 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/point_class_intrinsics.h
   ../../inc/cvc/volume/segmentation.h
   ../../inc/cvc/volume/segmentation_params.h
+  ../../inc/cvc/volume/gradient_vector_diffusion.h
+  ../../inc/cvc/volume/gradient_vector_diffusion_params.h
+  ../../inc/cvc/volume/seed_generators.h
+  ../../inc/cvc/volume/seed_generators_params.h
   ../../inc/cvc/volume/segmentation_intrinsics.h
   ../../inc/cvc/model/model.h
   ../../inc/cvc/model/model_file_io.h
@@ -262,6 +267,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/world/terrain_lod.h
   ../../inc/cvc/world/road_grade.h
   ../../inc/cvc/world/cloud_layer.h
+  ../../inc/cvc/world/weather.h
   ../../inc/cvc/world/water_bodies.h
   ../../inc/cvc/algo/distance_transform.h
   ../../inc/cvc/algo/det_math.h
@@ -327,7 +333,10 @@ set(SOURCE_FILES
   volume/point_classes.cpp
   volume/point_class_intrinsics.cpp
   volume/segmentation/genseg.cpp
+  volume/segmentation/critical_points.cpp
+  volume/segmentation/seed_generators.cpp
   volume/segmentation/segmentation.cpp
+  volume/gradient_vector_diffusion.cpp
   volume/segmentation/segmentation_intrinsics.cpp
   image/image.cpp
   image/image_decode.cpp
@@ -559,6 +568,7 @@ set(SOURCE_FILES
   world/terrain_lod.cpp
   world/road_grade.cpp
   world/cloud_layer.cpp
+  world/weather.cpp
   world/water_bodies.cpp
   ocean/spectrum.cpp
   ocean/h0.cpp
@@ -727,7 +737,11 @@ endif()
 # The VolumeRover GenSeg port (volume/segmentation/) matches the legacy library's labels voxel for
 # voxel on every platform (VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.7 T1): its fast marches compare
 # float arrival times, and an FMA-contracted step flips which front wins a tie.
-set(_cvc_genseg_exact_sources volume/segmentation/genseg.cpp volume/segmentation/segmentation.cpp)
+# The paper mode's critical points (critical_points.cpp) and the shared gradient vector diffusion
+# match SegMed's in the same way: the critical points are the signs of float dot products.
+set(_cvc_genseg_exact_sources volume/segmentation/genseg.cpp volume/segmentation/segmentation.cpp
+                              volume/segmentation/critical_points.cpp
+                              volume/gradient_vector_diffusion.cpp)
 if(NOT MSVC)
   set_source_files_properties(${_cvc_genseg_exact_sources}
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
@@ -1615,7 +1629,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_re
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/files.cpp ariadne/file_picker.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_repeat.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/scene_water.cpp ariadne/scene_wind.cpp ariadne/world_vehicles.cpp ariadne/world_spawns.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/rich_text.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp ariadne/chart_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/files.cpp ariadne/file_picker.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_repeat.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/scene_water.cpp ariadne/scene_wind.cpp ariadne/world_vehicles.cpp ariadne/world_spawns.cpp ariadne/world_gym.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/rich_text.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp ariadne/chart_emit.cpp)
 # A document set fetched from a URL, and a runtime's browser page loading one (arigl-web, ari).
 list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 # The document a relay runs (arisrv --doc) and the namespaces it publishes.

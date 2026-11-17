@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cvc/ariadne/world_rules.h> // vehicle_archetype
 #include <cvc/ariadne/world_spawns.h>
+#include <cvc/nav/detail/dyn_4w.h> // the models a twin steps: dyn4_params, dyn_bike_params, bike_veh
 #include <cvc/physics/types.h>
 #include <cvc/physics/vehicle.h> // vehicle_desc
 #include <limits>
@@ -50,7 +51,7 @@ namespace ariadne {
 // controller (nav@1, the navigator with a policy of its own, or none: it holds still) and its
 // settings within the archetype's ranges. Its body is in the world's own physics world, so it
 // collides with the scene's bodies (their buildings too), and it steps on the world clock with
-// them, on its archetype's plant:
+// them, on its archetype's plant (or its spawn's own):
 //
 //   jolt       a Jolt vehicle (nav_plant, which commands it; the world steps it)
 //   dynamic    the dynamic single-track model (dyn_bike_plant), its chassis box a body
@@ -112,6 +113,9 @@ struct entity_spec {
   std::map<std::string, std::string> metadata;      // the user's own; nothing reads it
   // nav@1, none or external (its intent alone drives it); "" the archetype's first
   std::string controller;
+  // Its plant (jolt, dynamic, dynamic4w or kinematic, as WorldVehicles runs them); "" its
+  // archetype's.
+  std::string plant;
   std::string policy, policy_sha256; // nav@1's policy (a .cvcnav); "" the default policy
   double mass = 0.0, max_speed = 0.0;
   // Where it starts: (x, y) in world metres facing `yaw` (rad; not finite: toward its goal), when
@@ -131,8 +135,8 @@ struct entity_spec {
 //   force    m/s^2 in world x and y, added to the drive's force (the goal's pull and the walls'
 //            push) as cvc::nav::ext_force adds one: it speeds, slows and (with force_steers)
 //            steers the drive, under any command but replace, which takes the drive's place.
-//            The drive has one steering switch for every vehicle: it is on while any entity's
-//            force asks for it.
+//            Each plant's drive has one steering switch for its vehicles: it is on while any
+//            of their forces asks for it.
 struct entity_intent {
   enum class mode { off, replace, blend };
   mode command = mode::off;
@@ -168,11 +172,70 @@ struct entity_info {
   double wheel_load = 0.0, aero_force = 0.0; // N: the wheels' push on the ground, the drag
   int gear = 0;
   double rpm = 0.0, throttle = 0.0, brake = 0.0;
-  bool reached = false; // at its goal (nav@1 then draws another)
-  std::string plant;    // its archetype's: jolt, dynamic, dynamic4w or kinematic
+  double vx = 0.0, vy = 0.0;         // m/s, the chassis's velocity in the world
+  double steer = 0.0;                // rad, + left: the steering's bicycle angle now
+  double goal_x = 0.0, goal_y = 0.0; // world metres: where it drives (none: where it parks)
+  double reach = 0.0;                // m from its goal that counts as there
+  bool reached = false;              // at its goal (nav@1 then draws another, unless held)
+  std::string plant;                 // jolt, dynamic, dynamic4w or kinematic (as spec.plant)
+  // Its chassis's contacts over the physics steps since the navigator's last tick (each step's
+  // contact events, begun or, when the scene's physics reports them, persisting): with the
+  // world's bodies other than the ground (buildings, walls, props), and with another vehicle. A
+  // kinematic box's obstacles are its footprint on the grid's blocked cells.
+  int obstacle_contacts = 0;
+  bool vehicle_contact = false;
   // The command its plant took on the last navigator tick: rad and m/s^2, as entity_intent's.
   double command_steer = 0.0, command_accel = 0.0;
   entity_intent intent; // as of the last navigator tick
+};
+
+// What drives an entity, as a model that a differentiable twin of the world steps (WorldGym::
+// plants, L4's twin; ARIADNE_WORLDS.md §14). In SI: world metres, seconds, kg, rad. The models are
+// cvc::nav::diff's, and on the dynamic plants they are the plants' own: their parameters, step
+// limits and state as the plant holds them.
+struct entity_plant {
+  std::uint64_t id = 0;
+  std::string plant;          // jolt, kinematic, dynamic or dynamic4w
+  physics::vehicle_desc desc; // its body
+  double rear_x = 0.0;        // the rear axle along the body from the chassis's centre (m)
+  bool placed = false;        // in the world; nothing below is set otherwise
+  // The model that stands for the plant:
+  //   dyn4      dynamic4w: the plant's own (physics::dyn_4w_plant), `exact`. jolt: the four-wheel
+  //             model with the vehicle's own numbers (nav_plant::dyn4_si_of), its pose and twist
+  //             read from the chassis, its heave 0 and its drive state 0 (not `exact`).
+  //   dyn_bike  dynamic: the plant's own (physics::dyn_bike_plant), `exact`.
+  //   bike      kinematic: nav's bicycle; `bike_state` holds the rear axle, the heading and the
+  //             speed (as vx), `limits` its limits.
+  std::string model;
+  bool exact = false;
+  nav::diff::dyn4_params dyn4{};
+  nav::diff::dyn4_state<double> dyn4_state{};
+  nav::diff::dyn_bike_params bike{};
+  nav::diff::dyn_state<double> bike_state{};
+  nav::diff::bike_veh limits{}; // the model step's limits (hdt: one model step)
+  int substeps = 1;             // model steps per navigator tick
+  // dyn4: the model's heights are the ground's less this (m), as dyn_4w_plant measures them.
+  double ground_reference = 0.0;
+  double mu = 0.9; // the ground's grip the model drives on
+  // The last tick: nav's command (the steering's angle, rad; the acceleration along the heading,
+  // m/s^2) and, on the dynamic plants, what the model took of it in each model step after the
+  // driver (m/s^2), with the grade (the sine along the heading) for dyn_bike. Away from a
+  // collision, replaying the model from the tick's first state with these gives its last state.
+  double steer_command = 0.0, accel_command = 0.0;
+  std::vector<double> applied_accel, applied_grade;
+  int collisions_tick = 0; // model steps of the last tick a collision corrected (exact models)
+};
+
+// The navigator the entities drive with, as a twin of the drive takes it: nav's normalized units
+// per metre, its tick (s), the arrival radius (m), and its vehicle in normalized units (the
+// largest and fastest any archetype may be; each vehicle's own envelope is in entity_plant).
+struct navigator_params {
+  bool ready = false; // a grid, and the navigator built for it
+  double scale = 0.0, tick = 0.0, reach = 0.0;
+  float rr = 0.0f, d_hat = 0.0f, dt = 0.0f, vmax = 0.0f, L = 0.0f, delta_max = 0.0f, a_max = 0.0f,
+        a_lat_max = 0.0f, k_steer = 0.0f;
+  int nsub = 1;
+  bool allow_reverse = true;
 };
 
 class WorldVehicles {
@@ -199,9 +262,10 @@ public:
                   std::vector<physics::body_id> ground_bodies,
                   const std::string &world_name = std::string(),
                   std::shared_ptr<const cvc::world::world_geometry> world = nullptr);
-  // The physics world was made afresh (SceneWorld::restart): every vehicle is gone from it. Each
-  // entity goes back to its spawn point, at rest.
-  void world_reset();
+  // The physics world was made afresh (SceneWorld::restart): every vehicle is gone from it, and
+  // the ground is `ground_bodies` (a node whose colliders are made at run time, a generated
+  // world's, has new body ids). Each entity goes back to its spawn point, at rest.
+  void world_reset(std::vector<physics::body_id> ground_bodies);
 
   // The spawn points: a spawn without a place of its own starts at the one their policy picks
   // (a free point of the grid when none applies).
@@ -238,9 +302,46 @@ public:
   // does). Then the dynamic models' substep, and the kinematic boxes a step along the bicycle's
   // path. After it: the dynamic models take back what the step's contacts did.
   void before_step();
+  // After it, too: the step's contacts, counted on the vehicles they touch.
   void after_step();
   // The entities' keys and the selection's, now.
   void publish();
+
+  // ---- what a gym drives (WorldGym, L4) ----
+  // The draws from here on: the free points spawns and goals are drawn at, and the spawn
+  // policy's (random's draw, round_robin's turn), as a runtime made now with `seed` would draw
+  // them. With no entities, ids start again at 1.
+  void reseed(std::uint64_t seed);
+  // Whether nav@1 draws another goal when it reaches one (on by default). Off, it parks there.
+  void set_wander(bool wander);
+  // Entity `id`'s command for the navigator's next tick only, in place of its controller's: the
+  // steering's bicycle angle (rad, + left) and the acceleration along its heading (m/s^2), held to
+  // its envelope as the navigator's own command is. Either not finite: its controller drives that
+  // tick. False when it is not in the world.
+  bool command(std::uint64_t id, double steer, double accel);
+  // Drive entity `id` to (x, y) world metres. False when it is not in the world.
+  bool set_goal(std::uint64_t id, double x, double y);
+  // The navigator's tick, in seconds and in physics steps (a whole number of them); 0 without a
+  // grid.
+  double tick_seconds() const;
+  int steps_per_tick() const;
+  // The navigator's tick to use (s), cvc::kSimTick by default: the one simulation tick every host
+  // shares (cvc/core/sim_tick.h). It takes effect when the navigator is next built (a new grid, a
+  // restart: WorldGym::reset), held to the nearest whole number of physics steps (the status says
+  // when it is not one). Throws std::invalid_argument for a tick that is not finite and > 0.
+  void set_tick(double seconds);
+  double tick() const;
+  // The navigator's grid of the world on (null without one).
+  std::shared_ptr<const nav::world_grid> grid() const;
+
+  // ---- what a twin of the world reads (WorldGym::fields, WorldGym::plants) ----
+  // Each entity's plant as a model (entity_plant), in the order entities() gives them.
+  std::vector<entity_plant> plants() const;
+  // The navigator's own settings (not ready without a grid).
+  navigator_params navigator() const;
+  // The navigator's signed distance (m) on its grid (cvc::nav::signed_distance of grid()), rows *
+  // cols; empty without a grid.
+  const std::vector<float> &sdf() const;
 
   std::vector<entity_info> entities() const;
   // Entity `id`'s wheels as drawn (entity_wheel), as of the last step: a view poses each one.

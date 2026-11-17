@@ -13,6 +13,14 @@ add_executable(ariadne_doc_fetch_test ariadne_doc_fetch_test.cpp)
 add_executable(ariadne_scene_tf_test ariadne_scene_tf_test.cpp)
 add_executable(ariadne_runtime_test ariadne_runtime_test.cpp)
 add_executable(ariadne_scene_world_test ariadne_scene_world_test.cpp)
+# AriadneWorldGym.ThePlantsAreModelsATwinReplays replays the dynamic4w plant (built with
+# -ffp-contract=off) with its model called inline here, bit for bit: build it the same way, or clang
+# contracts this copy into FMAs on aarch64 (the macOS arm64 lanes) and the last bits differ.
+if(NOT MSVC)
+  set_source_files_properties(ariadne_scene_world_test.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(ariadne_scene_world_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 add_executable(ariadne_server_document_test ariadne_server_document_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
@@ -359,6 +367,7 @@ add_executable(world_road_raster_test world_road_raster_test.cpp)
 add_executable(world_raster_test world_raster_test.cpp)
 add_executable(world_generated_test world_generated_test.cpp)
 add_executable(world_cloud_test world_cloud_test.cpp)
+add_executable(world_weather_test world_weather_test.cpp)
 add_executable(world_water_bodies_test world_water_bodies_test.cpp)
 add_executable(algo_distance_transform_test algo_distance_transform_test.cpp)
 add_executable(algo_det_math_test algo_det_math_test.cpp)
@@ -626,6 +635,7 @@ set(TEST_TARGETS
   world_raster_test
   world_generated_test
   world_cloud_test
+  world_weather_test
   world_water_bodies_test
   algo_distance_transform_test
   algo_det_math_test
@@ -1600,7 +1610,7 @@ target_link_libraries(vis_tiler_test
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_ewave_test ocean_wind_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_weather_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_ewave_test ocean_wind_test)
   target_link_libraries(${_lsys_test} PRIVATE cvc GTest::gtest GTest::gtest_main)
   target_compile_features(${_lsys_test} PRIVATE cxx_std_17)
 endforeach()
@@ -3198,7 +3208,7 @@ cvc_discover_tests(vis_tiler_test)
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_wind_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_weather_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_wind_test)
   cvc_discover_tests(${_lsys_test})
 endforeach()
 # The water's long runs (a channel's walls, a thin wall, a moving source's wake) take 105-195 s
