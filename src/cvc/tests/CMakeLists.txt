@@ -22,6 +22,8 @@ else()
   set_source_files_properties(ariadne_scene_world_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 add_executable(ariadne_scene_quality_test ariadne_scene_quality_test.cpp)
+# A document's swarm of navigating vehicles, run headless (scene_swarm.h).
+add_executable(ariadne_scene_swarm_test ariadne_scene_swarm_test.cpp)
 add_executable(ariadne_server_document_test ariadne_server_document_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
@@ -417,6 +419,7 @@ set(TEST_TARGETS
   ariadne_runtime_test
   ariadne_scene_world_test
   ariadne_scene_quality_test
+  ariadne_scene_swarm_test
   ariadne_server_document_test
   ariadne_bind_test
   ariadne_ftxui_test
@@ -849,6 +852,13 @@ target_link_libraries(ariadne_scene_world_test
 )
 
 target_link_libraries(ariadne_scene_quality_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_scene_swarm_test
   PRIVATE
     cvc
     GTest::gtest
@@ -3147,6 +3157,7 @@ cvc_discover_tests(ariadne_runtime_test)
 # the scene's wind runs as long: 900 s each, as the segmentation action test has.
 cvc_discover_tests(ariadne_scene_world_test PROPERTIES TIMEOUT 900)
 cvc_discover_tests(ariadne_scene_quality_test)
+cvc_discover_tests(ariadne_scene_swarm_test)
 cvc_discover_tests(ariadne_server_document_test)
 cvc_discover_tests(ariadne_ftxui_test)
 cvc_discover_tests(ariadne_chart_test)
