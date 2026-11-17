@@ -1,9 +1,10 @@
 // The scripting engines' seam (script_engine.h; docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §3.1,
 // §8.3–8.7), through a stub engine: registration and its block key, a document's block handed to
-// the engine with the document's lane, unload on a reload, activations run as processes of the
-// program lane (slices charged as steps under the lane's caps, frames yielded, the language's
-// frame budget, calls into the lane's functions and their narrowing, awaits, errors, stop and
-// teardown), and the hooks (an on: event, every frame, a value that changes).
+// the engine with the document's lane (two documents on one app, each with its own exports),
+// unload on a reload, activations run as processes of the program lane (slices charged as steps
+// under the lane's caps, frames yielded, the language's frame budget, calls into the lane's
+// functions and their narrowing, awaits, errors, stop and teardown), and the hooks (an on: event,
+// every frame, a value that changes).
 
 #include <algorithm>
 #include <chrono>
@@ -213,6 +214,67 @@ TEST_F(ScriptEngineTest, ADocumentsBlockReachesItsEngineWithTheLane) {
   EXPECT_EQ(val(app, "ui.se.x"), "5") << "init: called the block's export";
   EXPECT_TRUE(any_contains(warns, "from the stub's block"));
   EXPECT_FALSE(any_contains(warns, "stub-add")) << "the load's scan saw the export";
+}
+
+// Two documents on one app, each with a runtime that uses the engine, export the same names, and
+// both load before either runs: each document's programs reach its own exports (an action, the
+// -async form, its init: on a reload), and a third document that exports nothing has none of
+// them.
+TEST_F(ScriptEngineTest, TwoDocumentsOnOneAppEachCallTheirOwnExports) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime first(app, "ui.s1");
+  AppRuntime second(app, "ui.s2");
+  AppRuntime bare(app, "ui.s3");
+  first.use_script_engine(engine);
+  second.use_script_engine(engine);
+  engine->on_load = [](const ScriptBlock &block, ScriptLane &lane, std::vector<std::string> &) {
+    const std::string who = block.prefix; // which document's export answered
+    lane.export_function("stub-who",
+                         [who](std::span<const se::value_t>) { return se::value_t(who); });
+    lane.export_activation("stub-who-later", [who](std::span<const se::value_t>) {
+      return std::make_shared<ScriptedActivation>([who](ScriptSlice &s, int n) {
+        if (n == 0)
+          s.yield_frame();
+        else
+          s.finish(se::value_t(who));
+      });
+    });
+  };
+  const std::string doc = "requires: [stub-who, stub-who-later]\n"
+                          "stubscript: hi\n"
+                          "init: (state-set \"boot\" (stub-who-later))\n"
+                          "root:\n"
+                          "  - text: hi\n";
+  ASSERT_NO_THROW(first.load(write_doc("who1", doc).string()));
+  ASSERT_NO_THROW(second.load(write_doc("who2", doc).string()));
+  ASSERT_NO_THROW(bare.load(write_doc("who3", "root:\n  - text: hi\n").string()));
+  const auto run = [](AppRuntime &art, const std::string &program) {
+    bool ended = false;
+    std::string how = "unset";
+    art.run_program(program, [&](const std::string &h) {
+      ended = true;
+      how = h;
+    });
+    drain_until(art, [&] { return ended; });
+    return how;
+  };
+  const std::string calls = "(state-set \"now\" (stub-who))\n"
+                            "(state-set \"later\" (stub-who-later))\n"
+                            "(state-set \"future\" (await (stub-who-later-async)))";
+  EXPECT_EQ(run(first, calls), "");
+  EXPECT_EQ(run(second, calls), "");
+  for (const std::string prefix : {"ui.s1", "ui.s2"}) {
+    EXPECT_EQ(val(app, prefix + ".now"), prefix) << "a function";
+    EXPECT_EQ(val(app, prefix + ".later"), prefix) << "an activation";
+    EXPECT_EQ(val(app, prefix + ".future"), prefix) << "its -async form";
+  }
+
+  // The first document again, the second still loaded: its init: reaches its own export.
+  ASSERT_NO_THROW(first.load(write_doc("who1", doc).string()));
+  EXPECT_EQ(val(app, "ui.s1.boot"), "ui.s1");
+  EXPECT_EQ(run(bare, "(state-set \"has\" (if (has? \"stub-who\") \"yes\" \"no\"))"), "");
+  EXPECT_EQ(val(app, "ui.s3.has"), "no") << "a document that exports nothing sees the others'";
 }
 
 // A runtime that does not use the engine leaves the block alone (the scripting hosts attach their

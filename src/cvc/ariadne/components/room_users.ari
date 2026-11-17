@@ -21,7 +21,10 @@
 #     on_tick: (room-users-step "peer" (state-get "conf.room") "chat")   # every tick, once joined
 #
 # (room-users-step ROWS ROOM CHAT) rebuilds the rows from (room-roster ROOM), self excluded, each
-# tick, in pid order. A row's local controls (von / aon / vol) belong to the PERSON: they are
+# tick, in pid order. Below them are the room's bridged users (another chat system's, which the
+# relay's program bridges in: ARIADNE_CHAT.md), from (room-roster ROOM "bridged"), rebuilt only
+# when (room-bridged-rev ROOM) moves and at most every 30 ticks, at most 100 rows: a name, their system, and a message
+# button; no camera, microphone or volume, and no camera window (cam_<i> follows ROWS only). A row's local controls (von / aon / vol) belong to the PERSON: they are
 # parked under ctl.<pid>.* before the rebuild and given back to whichever row that pid lands in.
 # What it reads and writes besides the rows (the conference host publishes the media keys):
 #   self.pid                    your pid (the host sets it)
@@ -29,6 +32,9 @@
 #   self.talking, self.dot,     your row: talking, the size the relay sends you video at, that as a
 #   self.video_in, self.count   sentence when it is reduced, and how many are in the room
 #   ROWS.count, ROWS.<i>.*      pid name cam talking video_off dot ping down up unread von aon vol
+#   ROWS_b.count, ROWS_b.<j>.*  the bridged rows: pid name via; ROWS_b.total how many there are,
+#                               ROWS_b.more "and N more" past the 100 shown, ROWS_b.rev the
+#                               bridge rev they were built at, ROWS_b.wait ticks since
 #   ctl.<pid>.{von,aon,vol,win} the parked local controls, and whether their camera window
 #                               (tree.cam_<i>.open, a document's repeated cam_<i>) is open
 # The dot is the size the relay sends that person video at, adapted to THEIR link: green full, red
@@ -93,7 +99,31 @@ functions: |
                 (set idx (+ idx 1))
                 (set total (+ total 1))))))
         (state-set (str-concat rows ".count") (str idx))
-        (state-set "self.count" (str total)))))
+        ; the bridged users, rebuilt only when the relay's bridge rev moves, and then at most
+        ; every 30 ticks (a room may bridge in thousands, coming and going): their pid, name and
+        ; system, at most 100 rows
+        (set brev (str (room-bridged-rev room)))
+        (set bwait (state-get (str-concat rows "_b.wait")))
+        (set bwait (if (or (is-null bwait) (= bwait "")) 30 (+ 1 (int bwait))))
+        (state-set (str-concat rows "_b.wait") (str bwait))
+        (if (or (= brev (state-get (str-concat rows "_b.rev"))) (< bwait 30)) #f
+          (begin
+            (state-set (str-concat rows "_b.rev") brev)
+            (state-set (str-concat rows "_b.wait") "0")
+            (set bidx 0)
+            (set btotal (room-bridged-count room))
+            (for p (room-roster room "bridged" 100)
+              (begin
+                (set row (str-concat rows "_b." bidx "."))
+                (state-set (str-concat row "pid") (get-attr p "pid"))
+                (state-set (str-concat row "name") (get-attr p "name"))
+                (state-set (str-concat row "via") (get-attr p "via"))
+                (set bidx (+ bidx 1))))
+            (state-set (str-concat rows "_b.count") (str bidx))
+            (state-set (str-concat rows "_b.total") (str btotal))
+            (state-set (str-concat rows "_b.more")
+              (if (> btotal bidx) (str-concat "and " (str (- btotal bidx)) " more") ""))))
+        (state-set "self.count" (str (+ total (int (state-get (str-concat rows "_b.total")))))))))
 
 units:
   room_users:
@@ -203,6 +233,28 @@ units:
               - text: ""
                 bind: "{rows}.{i}.unread"
                 color: [1.0, 0.8, 0.3]
+      # The bridged users (room-users-step fills {rows}_b): the name, their system where the link
+      # is, and a direct message; they have no camera, microphone or volume here.
+      - type: group
+        repeat: (state-get "{rows}_b.count")
+        layout: { kind: grid, col_widths: [16, 96, 52, 46, 46, 30, 30, 72, 88] }
+        children:
+          - text: ""
+          - text: ""
+            bind: "{rows}_b.{i}.name"
+          - text: ""
+            bind: "{rows}_b.{i}.via"
+            color: [0.6, 0.6, 0.6]
+          - text: ""
+          - text: ""
+          - text: ""
+          - text: ""
+          - text: ""
+          - type: button
+            label: "msg"
+            on: (chat-ui-open "{chat}" (state-get "{rows}_b.{i}.pid") (state-get "{rows}_b.{i}.name"))
+      - text: ""
+        bind: "{rows}_b.more"
 
   room_users_compact:
     args: { id: users, title: Users, rows: peer, chat: chat, self: conf.self }
@@ -239,3 +291,17 @@ units:
               - text: ""
                 bind: "{rows}.{i}.unread"
                 color: [1.0, 0.8, 0.3]
+      - type: group
+        repeat: (state-get "{rows}_b.count")
+        layout: { kind: grid, col_widths: [16, 120, 96] }
+        children:
+          - text: ""
+            bind: "{rows}_b.{i}.via"
+            color: [0.6, 0.6, 0.6]
+          - text: ""
+            bind: "{rows}_b.{i}.name"
+          - type: button
+            label: "msg"
+            on: (chat-ui-open "{chat}" (state-get "{rows}_b.{i}.pid") (state-get "{rows}_b.{i}.name"))
+      - text: ""
+        bind: "{rows}_b.more"

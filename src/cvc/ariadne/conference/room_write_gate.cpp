@@ -91,8 +91,9 @@ bool relay_owned(const std::vector<std::string> &rest) {
 room_write_gate::room_write_gate(std::string room) : _room(std::move(room)) {}
 
 bool room_write_gate::own_path(const std::string &pid, const std::string &path) const {
-  // One identifier segment: a node id like "bob.pose" would otherwise own bob's pose.
-  if (!cvc::state::isValidStateName(pid))
+  // One identifier segment: a node id like "bob.pose" would otherwise own bob's pose. And not a
+  // bridged user's ('_' first, room_intrinsics.h): the relay writes those, for its program.
+  if (!cvc::state::isValidStateName(pid) || pid[0] == '_')
     return false;
   const std::vector<std::string> segs = canonical_segments(path);
   const std::vector<std::string> own = canonical_segments(room_participant_path(_room, pid));

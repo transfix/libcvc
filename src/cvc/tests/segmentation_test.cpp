@@ -11,7 +11,8 @@
 // cvc::segment_seeded (cvc/volume/segmentation.h), the VolumeRover GenSeg port
 // (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §5, P5): legacy parity (T1), the pieces (T2),
 // known shapes (T3), invariants (T4), bad input (T5), no singletons (T6), resumable (T7) and the
-// parameter table (T8). Runs natively and under node (the ports lane).
+// parameter table (T8). Runs natively and under node (the ports lane). With CVC_VOLROVER_DATA set,
+// also legacy parity and agreement with the published segmentations on the group's real maps.
 
 #include "resumable_harness.h"
 
@@ -19,6 +20,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
@@ -29,6 +31,7 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <random>
 #include <sstream>
 #include <string>
@@ -945,6 +948,211 @@ TEST(Segmentation, ParameterTable) {
   EXPECT_FALSE(bad.ok());
   EXPECT_NE(bad.message().find("automatic"), std::string::npos) << bad.message();
   EXPECT_NE(bad.message().find("gamma"), std::string::npos) << bad.message();
+}
+
+// ---- Real maps (opt-in) ---------------------------------------------------------------------
+//
+// The group's own cryo-EM maps, the kind the legacy library was written for, are not in the
+// repository. Set CVC_VOLROVER_DATA to the directory that holds them (its Ribosome/ and
+// Zeyun-Segmented-Maps/ folders) and these run; without it they are skipped. The expected labels
+// and border voxels are the legacy library's: tools/volrover-goldens' genseg_legacy on the same
+// map, seeds and thresholds (2026-11-16), fingerprinted here since the maps cannot be copied in.
+
+// FNV-1a, 64 bits.
+std::uint64_t fnv1a(const unsigned char *p, std::size_t n,
+                    std::uint64_t h = 0xcbf29ce484222325ull) {
+  for (std::size_t i = 0; i < n; ++i) {
+    h ^= p[i];
+    h *= 0x100000001b3ull;
+  }
+  return h;
+}
+
+// The labels, one byte a voxel, x fastest.
+std::uint64_t labels_fingerprint(const cvc::seeded_segmentation &r) {
+  return fnv1a(labels_of(r), r.labels.XDim() * r.labels.YDim() * r.labels.ZDim());
+}
+
+// The border voxels in their order, each as three little-endian uint32 (i, j, k).
+std::uint64_t border_fingerprint(const std::vector<std::array<int, 3>> &border) {
+  std::uint64_t h = 0xcbf29ce484222325ull;
+  for (const auto &b : border)
+    for (int c : b) {
+      const auto u = static_cast<std::uint32_t>(c);
+      const unsigned char le[4] = {
+          static_cast<unsigned char>(u), static_cast<unsigned char>(u >> 8),
+          static_cast<unsigned char>(u >> 16), static_cast<unsigned char>(u >> 24)};
+      h = fnv1a(le, 4, h);
+    }
+  return h;
+}
+
+// `rel` under CVC_VOLROVER_DATA, or "" with the reason to skip in `why`.
+std::string real_map(const std::string &rel, std::string &why) {
+  const char *dir = std::getenv("CVC_VOLROVER_DATA");
+  if (!dir || !*dir) {
+    why = "set CVC_VOLROVER_DATA to the group's map directory to run this";
+    return {};
+  }
+  const std::string path = std::string(dir) + "/" + rel;
+  if (!std::ifstream(path, std::ios::binary)) {
+    why = path + " is not there";
+    return {};
+  }
+  return path;
+}
+
+std::size_t labelled_voxels(const cvc::seeded_segmentation &r) {
+  std::size_t n = 0;
+  for (std::size_t c : r.class_voxels)
+    n += c;
+  return n;
+}
+
+// The ribosome EMD-1056 (130^3) with one seed in each subunit, at the thresholds the 30S/50S
+// split was published with (its images are named _110_180): the legacy library's labels and
+// border, and close to that split (Dice 0.901 and 0.929, measured).
+TEST(SegmentationRealMaps, RibosomeAsTheLegacyLibraryAndThePublishedSplit) {
+  std::string why;
+  const std::string map = real_map("Ribosome/FromEM/emd_1056.rawiv", why);
+  const std::string s30 =
+      map.empty() ? "" : real_map("Ribosome/FromEM/emd_1056_subunit_30s.rawiv", why);
+  const std::string s50 =
+      s30.empty() ? "" : real_map("Ribosome/FromEM/emd_1056_subunit_50s.rawiv", why);
+  if (s50.empty())
+    GTEST_SKIP() << why;
+  cvc::app a;
+  const cvc::volume vol(a, map);
+  cvc::seeded_segmentation_params p;
+  p.t_low = 110;
+  p.t_high = 180;
+  p.normalized_thresholds = true;
+  p.class_volumes = false;
+  const cvc::seeded_segmentation r =
+      cvc::segment_seeded(vol, classes_of({{0, 124, 65, 74}, {1, 78, 79, 39}}), p);
+  EXPECT_EQ(r.class_voxels, (std::vector<std::size_t>{54585, 75792}));
+  EXPECT_EQ(r.border.size(), 58032u);
+  EXPECT_EQ(r.automatic_seeds, 415u);
+  EXPECT_EQ(r.classified_seeds, 415u);
+  EXPECT_EQ(labels_fingerprint(r), 0x89fc5160f3adf5f8ull) << "labels differ from the legacy run";
+  EXPECT_EQ(border_fingerprint(r.border), 0xd7f70063fc5ee087ull)
+      << "border voxels differ from the legacy run";
+
+  // Against the published split: the subunits' densities, zero outside each.
+  const cvc::volume sub[2] = {cvc::volume(a, s30), cvc::volume(a, s50)};
+  const unsigned char *lab = labels_of(r);
+  const std::size_t n = vol.XDim() * vol.YDim() * vol.ZDim();
+  for (int c = 0; c < 2; ++c) {
+    ASSERT_EQ(sub[c].XDim() * sub[c].YDim() * sub[c].ZDim(), n);
+    std::size_t ref = 0, got = 0, both = 0;
+    for (std::size_t v = 0; v < n; ++v) {
+      const bool in_ref = sub[c](v) != 0.0, in_got = lab[v] == c;
+      ref += in_ref;
+      got += in_got;
+      both += in_ref && in_got;
+    }
+    const double dice = 2.0 * double(both) / double(ref + got);
+    std::cout << (c == 0 ? "30S" : "50S") << ": " << ref << " voxels published, " << got
+              << " labelled, Dice " << dice << "\n";
+    EXPECT_GE(dice, c == 0 ? 0.89 : 0.92);
+  }
+}
+
+// The capsid layer of EMD-1011 (256^3) cut into its 252 capsomers, one seed in each: the
+// densest voxel of the capsomer whose 3x3x3 neighbourhood lies inside it, by the capsomer index
+// the legacy virus pipeline wrote. With 252 classes and no automatic seeds, the legacy library's
+// labels and border. Against that index, the default gamma traps most fronts (18.6% of the
+// index in the same capsomer, measured): a seed on a density peak sits behind steep flanks while
+// flat ground floods first. At gamma -0.04 the fronts share the layer out (48.0%, 73% of what
+// the run labels; the index also covers voxels outside the layer the run is given).
+TEST(SegmentationRealMaps, VirusCapsidInto252CapsomersAsTheLegacyLibrary) {
+  std::string why;
+  const std::string capsid =
+      real_map("Zeyun-Segmented-Maps/emd_1011/Subunit/emd_1011_capsid.rawiv", why);
+  const std::string index =
+      capsid.empty()
+          ? ""
+          : real_map("Zeyun-Segmented-Maps/emd_1011/Subunit/emd_1011_capsid_index.rawiv", why);
+  if (index.empty())
+    GTEST_SKIP() << why;
+  cvc::app a;
+  const cvc::volume vol(a, capsid);
+  const cvc::volume idx(a, index);
+  const int nx = int(vol.XDim()), ny = int(vol.YDim()), nz = int(vol.ZDim());
+  const std::size_t n = std::size_t(nx) * ny * nz;
+  ASSERT_EQ(idx.XDim() * idx.YDim() * idx.ZDim(), n);
+  constexpr int background = 1000; // the index marks voxels outside every capsomer 10000
+  std::vector<int> region(n);
+  for (std::size_t v = 0; v < n; ++v)
+    region[v] = int(idx(v));
+  std::map<int, std::size_t> seed_of; // capsomer -> its seed voxel
+  const std::size_t sy = std::size_t(nx), sz = std::size_t(nx) * ny;
+  for (int k = 1; k < nz - 1; ++k)
+    for (int j = 1; j < ny - 1; ++j)
+      for (int i = 1; i < nx - 1; ++i) {
+        const std::size_t v = k * sz + j * sy + i;
+        const int c = region[v];
+        if (c >= background)
+          continue;
+        auto it = seed_of.find(c);
+        if (it != seed_of.end() && vol(v) <= vol(it->second))
+          continue;
+        bool inside = true;
+        for (int dk = -1; dk <= 1 && inside; ++dk)
+          for (int dj = -1; dj <= 1 && inside; ++dj)
+            for (int di = -1; di <= 1 && inside; ++di)
+              inside = region[v + dk * sz + dj * sy + di] == c;
+        if (inside)
+          seed_of[c] = v;
+      }
+  ASSERT_EQ(seed_of.size(), 252u);
+  std::vector<std::array<int, 4>> seeds;
+  std::vector<int> capsomer_of_class;
+  for (const auto &[c, v] : seed_of) {
+    seeds.push_back({int(seeds.size()), int(v % sy), int((v / sy) % ny), int(v / sz)});
+    capsomer_of_class.push_back(c);
+  }
+  const cvc::point_classes pc = classes_of(seeds);
+
+  cvc::seeded_segmentation_params p;
+  p.t_low = 1; // the layer is zero outside the capsid
+  p.t_high = 255;
+  p.normalized_thresholds = true;
+  p.class_volumes = false;
+  const cvc::seeded_segmentation r = cvc::segment_seeded(vol, pc, p);
+  EXPECT_EQ(r.automatic_seeds, 0u);
+  EXPECT_EQ(labelled_voxels(r), 1981954u);
+  EXPECT_EQ(r.border.size(), 407841u);
+  EXPECT_EQ(labels_fingerprint(r), 0x1570c18876a8bdbcull) << "labels differ from the legacy run";
+  EXPECT_EQ(border_fingerprint(r.border), 0x4bfe23ecde106732ull)
+      << "border voxels differ from the legacy run";
+
+  // The share of the index's voxels that land in their own capsomer, and of the labelled ones.
+  const auto agreement = [&](const cvc::seeded_segmentation &s, double &of_labelled) {
+    const unsigned char *lab = labels_of(s);
+    std::size_t in_index = 0, labelled = 0, same = 0;
+    for (std::size_t v = 0; v < n; ++v) {
+      if (region[v] >= background)
+        continue;
+      ++in_index;
+      if (lab[v] == cvc::seeded_segmentation::unlabelled)
+        continue;
+      ++labelled;
+      same += capsomer_of_class[lab[v]] == region[v];
+    }
+    of_labelled = double(same) / double(labelled);
+    return double(same) / double(in_index);
+  };
+  double default_of_labelled = 0, gentle_of_labelled = 0;
+  const double at_default = agreement(r, default_of_labelled);
+  p.gamma = -0.04;
+  p.automatic = cvc::seed_mode::none;
+  const double gentle = agreement(cvc::segment_seeded(vol, pc, p), gentle_of_labelled);
+  std::cout << "capsomers as the index: gamma -0.12 " << at_default << " (" << default_of_labelled
+            << " of the labelled), gamma -0.04 " << gentle << " (" << gentle_of_labelled << ")\n";
+  EXPECT_GE(gentle, 0.47);
+  EXPECT_GE(gentle_of_labelled, 0.72);
+  EXPECT_GT(gentle, at_default);
 }
 
 } // namespace

@@ -1,0 +1,126 @@
+# orthoslicer.ari — the classic three-plane orthoslicer beside a raycast volume: the signed
+# distance field of the embedded Stanford bunny, raycast by a `volren` node with its zero level set
+# as a see-through surface, cut by three `volume_slice` planes (one down each axis), and a slice
+# view that looks straight down whichever axis the View switch picks. Click in the slice view to
+# probe a voxel; drag to pan, wheel to zoom about the pointer, the sliders move the planes, and
+# the transfer-function editor colours all three planes (docs/ARIADNE.md §5.4, §5.18).
+#
+#   ariadne_hello examples/ariadne/documents/orthoslicer.ari --component-path src/cvc/ariadne
+#   arigl run --component-path src/cvc/ariadne examples/ariadne/documents/orthoslicer.ari
+
+meta:
+  name: Orthoslicer (Ariadne)
+  author: cvc
+  min_libcvc: 3.7.0
+
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+
+# The transfer-function editor (the ColorTable2 port), on the z plane's model: the x and y planes
+# colour through the same key (volume_of: slice_z).
+import:
+  - cvc://components/transfer_function.ari
+
+# The main view opens on the volume from further out than the scene's own bounds (which the host
+# frames tightly once the scene is realized, after init:), so the planes and the bunny show beside
+# the panels: a frame request on the first tick, once.
+on_tick: |
+  (if (!= (state-get "ortho.opened") "1")
+      (begin (state-set "viewers.main.camera.frame" "-120 -120 -40 120 120 140")
+             (state-set "ortho.opened" "1")))
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - window: Orthoslicer
+    id: orthoslicer
+    pos: [16, 16]
+    size: [420, 600]
+    children:
+      - radio_row: View
+        bind: ortho.view
+        options: [XY, XZ, ZY]
+        values: [xy, xz, zy]
+      # One view down the axis the switch picks: VolumeGridRover's view switch. It shows the plane
+      # on that axis (the other two are left out) and a click writes the voxel under it.
+      - type: viewport
+        view: slice
+        mode: slice
+        axis: { bind: ortho.view }
+        input: pick
+        pick: ortho.pick
+        chrome: false
+        clear_color: [0.04, 0.045, 0.06]
+        width: 400
+        height: 320
+        caption: "click: probe   drag: pan   wheel: zoom"
+      - slider_int: X plane
+        bind: graphics.root.children.slice_x.slice.index
+        lo: 0
+        hi: 63
+      - slider_int: Y plane
+        bind: graphics.root.children.slice_y.slice.index
+        lo: 0
+        hi: 63
+      - slider_int: Z plane
+        bind: graphics.root.children.slice_z.slice.index
+        lo: 0
+        hi: 63
+      - separator: {}
+      - text: Voxel i
+        bind: ortho.pick.i
+      - text: Voxel j
+        bind: ortho.pick.j
+      - text: Voxel k
+        bind: ortho.pick.k
+      - text: Distance
+        bind: ortho.pick.value
+  - include: transfer_function
+    args: { node: slice_z, title: Slice transfer function }
+    pos: [450, 16]
+    size: [400, 250]
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    # The bunny raycast, its surface (the SDF's zero level set) see-through so the planes show.
+    - node: bunny_volume
+      type: volren
+      source: { sdf: { mesh: stanford.bunny, dim: 64 } }
+      fit: { height: 100, up: y }
+      volren:
+        distance_field: true
+        ambient: 0.35
+        steps: 256
+        resolution_scale: 0.6
+        isosurfaces:
+          - { value: 0.0, color: [0.85, 0.82, 0.88], opacity: 0.35, shininess: 24 }
+        lights:
+          - { color: [1.0, 1.0, 1.0], direction: [-0.4, -0.3, -0.85] }
+    # The three planes, over the same SDF (computed once, by slice_z) and its transfer function:
+    # negative (inside the bunny) warm, positive (outside) cool, white at the surface.
+    - node: slice_z
+      type: volume_slice
+      source: { sdf: { mesh: stanford.bunny, dim: 64 } }
+      fit: { height: 100, up: y }
+      axis: z
+      transfer_function:
+        domain: [-20, 20]
+        color: [[0, 0.75, 0.25, 0.05], [0.42, 1.0, 0.75, 0.35], [0.5, 1.0, 1.0, 1.0],
+                [0.58, 0.45, 0.7, 1.0], [1, 0.05, 0.1, 0.35]]
+    - node: slice_y
+      type: volume_slice
+      volume_of: slice_z
+      axis: y
+    - node: slice_x
+      type: volume_slice
+      volume_of: slice_z
+      axis: x
+  lights:
+    - rig: three_point
+      key: { intensity: 1.6, azimuth: -38, elevation: 52 }

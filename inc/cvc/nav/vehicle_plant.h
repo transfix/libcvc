@@ -36,6 +36,8 @@ class vehicle_plant {
 public:
   virtual ~vehicle_plant() = default;
   virtual plant_kind kind() const = 0;
+  // What its vehicles move on: land unless the plant says otherwise (a boat plant: water).
+  virtual plant_medium medium() const { return plant_medium::land; }
 
   // Bind to a sim_world's n agents, starting at `start` ([n], normalized), in its frame, at
   // its tick of dt seconds. Called by sim_world::set_plant.

@@ -32,7 +32,8 @@
 #   C.channel            "" (the room) or the peer's pid: the channel shown
 #   C.pick               the picker's label; C.channels the labels and C.channel_ids their
 #                        channels, newline-joined, rewritten only when they change
-#   C.view.text          the channel's lines, "[HH:MM] name: text" (the text_view's bind)
+#   C.view.text          the channel's lines, "[HH:MM] name: text" (the text_view's bind), and
+#                        "[HH:MM] name (nmdc): text" for a bridged user's (ARIADNE_CHAT.md)
 #   C.view.status        "loading older messages...", "the start of ...", or ""
 #   C.view.error         why the last post was refused (shown in red under the log)
 #   C.draft              the message being written (the message_input's bind)
@@ -49,7 +50,7 @@ functions: |
   (defun chat-ui-get (c k) (if (is-null (state-get (chat-ui-key c k))) "" (state-get (chat-ui-key c k))))
   (defun chat-ui-put (c k v) (if (= (state-get (chat-ui-key c k)) v) #f (state-set (chat-ui-key c k) v)))
   (defun chat-ui-slot (ch) (if (= ch "") "_room" ch))
-  (defun chat-ui-line (m) (str-concat "[" (get-attr m "clock") "] " (get-attr m "name") ": " (string.replace (get-attr m "text") "\n" "\n        ")))
+  (defun chat-ui-line (m) (str-concat "[" (get-attr m "clock") "] " (get-attr m "name") (if (= (get-attr m "via") "") "" (str-concat " (" (get-attr m "via") ")")) ": " (string.replace (get-attr m "text") "\n" "\n        ")))
   (defun chat-ui-label (name unread) (if (> unread 0) (str-concat name " (" (str unread) ")") name))
   (defun chat-ui-count (c ch head)
     (if (= ch (chat-ui-get c "channel")) 0
