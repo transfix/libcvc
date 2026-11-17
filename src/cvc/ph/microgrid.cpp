@@ -110,6 +110,44 @@ double peak_line_current(const microgrid &g, const std::vector<vecd> &x) {
   return peak;
 }
 
+std::vector<int> voltage_channels(const microgrid &g) {
+  std::vector<int> c;
+  for (int i : g.buses)
+    c.push_back(g.system.state_offset(i));
+  return c;
+}
+
+std::vector<int> dgu_current_channels(const microgrid &g) {
+  std::vector<int> c;
+  for (int i : g.buses)
+    c.push_back(g.system.state_offset(i) + 1);
+  return c;
+}
+
+std::vector<int> line_current_channels(const microgrid &g) {
+  std::vector<int> c;
+  for (int l : g.lines)
+    c.push_back(g.system.state_offset(l));
+  return c;
+}
+
+void microgrid_prior(const microgrid &g, vecd &mean, vecd &scale) {
+  mean.assign(g.system.state_dim(), 0.0);
+  scale.assign(g.system.state_dim(), 1.0);
+  for (int c : voltage_channels(g)) {
+    mean[c] = 1.0;
+    scale[c] = 0.4;
+  }
+  for (int c : dgu_current_channels(g)) {
+    mean[c] = 0.1;
+    scale[c] = 0.3;
+  }
+  for (int c : line_current_channels(g)) {
+    mean[c] = 0.0;
+    scale[c] = 0.2;
+  }
+}
+
 grid_errors compare_trajectories(const microgrid &g, const std::vector<vecd> &a,
                                  const std::vector<vecd> &b) {
   if (a.size() != b.size())

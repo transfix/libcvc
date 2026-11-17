@@ -502,3 +502,62 @@ TEST(OceanSea, ThePhysicsSeaIsCalmInTheLeeRuffledByGustsAndCarriedByTheCurrent) 
   const sea_surface ruffled(gusty, p, g, nullptr, windy);
   EXPECT_NE(ruffled.height(x, y, t), lee.height(x, y, t));
 }
+
+// The wind's paths through the physics step's reads (sea_surface::at, the per-time tasks): a sea
+// mid-crossfade, scaled by two fetch maps, its ripples gusting and carried by the current, reads
+// the same bits through a held time whose fields were computed task by task in another order as
+// through the plain, cached reads.
+TEST(OceanSea, TheWindsSeaAtATimeReadsTheSameValues) {
+  const std::shared_ptr<shore_grid> g = islandGrid();
+  const sea_state a = windSea(9.0, 0.0), b = windSea(13.0, 0.5);
+  const std::vector<cascade> cs = make_cascades({251.0, 83.0, 29.0}, 0xC0A57ull);
+  const double F = spectrum_fetch(13.0, b.wind.fetch_m);
+  auto forcing = std::make_shared<sea_forcing>();
+  forcing->t0 = 15.0;
+  forcing->t1 = 19.0;
+  forcing->fetch = std::make_shared<fetch_field>(build_fetch(*g, 0.5, b.wind.fetch_m, nullptr, 2));
+  forcing->fetch_from =
+      std::make_shared<fetch_field>(build_fetch(*g, 0.0, a.wind.fetch_m, nullptr, 2));
+  forcing->wind = {13.0, 0.5, 0.5};
+  forcing->current.speed_mps = 0.5;
+  std::vector<sea_cascade> sc;
+  for (std::size_t i = 0; i < cs.size(); ++i) {
+    sea_cascade c{build_h0(64, cs[i], b), 0.0, 0.0};
+    c.h0_from = build_h0(64, cs[i], a);
+    c.full_fetch_m = band_full_fetch(13.0, cs[i].k_min, F);
+    c.full_fetch_from_m = band_full_fetch(9.0, cs[i].k_min, F);
+    sc.push_back(std::move(c));
+  }
+  sc[0].decay_k = 0.025;
+  sc[2].gust = 1.0;
+  sc[1].advect = sc[2].advect = true;
+  // Every task, last first: the order they run in must change nothing.
+  const sea_surface::parallel_run backwards = [](std::size_t n,
+                                                 const std::function<void(std::size_t)> &fn) {
+    for (std::size_t i = n; i-- > 0;)
+      fn(i);
+  };
+  for (double cell : {0.0, 0.5}) {
+    sea_params p;
+    p.band = {32, 64};
+    p.chop = 1.15;
+    p.source_cell_m = cell;
+    const sea_surface plain(sc, p, g, nullptr, forcing), tasked(sc, p, g, nullptr, forcing);
+    const double t = 17.25; // mid-crossfade
+    const sea_surface::at_time held = tasked.at(t, backwards);
+    for (int i = 0; i < 300; ++i) { // across the island's lee and the open water upwind
+      const double x = kIslandX - 400.0 + 2.9 * i, y = kIslandY - 60.0 + (i % 13) * 9.5;
+      const double z = -0.2 - 0.03 * (i % 40);
+      sea_surface::source_memo m1, m2;
+      const double h1 = plain.height(x, y, t, m1), h2 = held.height(x, y, m2);
+      EXPECT_EQ(std::memcmp(&h1, &h2, sizeof h1), 0) << "height at " << x << ", " << y;
+      const std::array<double, 3> v1 = plain.velocity(x, y, z, t, m1),
+                                  v2 = held.velocity(x, y, z, m2);
+      EXPECT_EQ(std::memcmp(v1.data(), v2.data(), sizeof v1), 0)
+          << "velocity at " << x << ", " << y;
+    }
+    // The band the residual check reads is the same fields as well.
+    const sea_surface::band_frame b1 = plain.band(2, t), b2 = tasked.band(2, t);
+    EXPECT_EQ(std::memcmp(b1.eta.data(), b2.eta.data(), b1.eta.size() * sizeof(double)), 0);
+  }
+}

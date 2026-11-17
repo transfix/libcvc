@@ -31,6 +31,7 @@ threads, and named-mutex hub used throughout libcvc.*
   - [Scoped Locks](#scoped-locks)
   - [Mutex Debugging](#mutex-debugging)
 - [Program Execution (state_exec)](#program-execution-state_exec)
+  - [Ariadne hosts and the frame pump](#ariadne-hosts-and-the-frame-pump)
 - [Type Registration](#type-registration)
   - [Registering Type Names](#registering-type-names)
   - [Registering Type Enums](#registering-type-enums)
@@ -969,7 +970,8 @@ says which host and lane runs on which scheduler, and
 
 - `exec_scheduler()`: the app's one `async_scheduler`, group 0. Ariadne's actions and residents,
   `AppRuntime`'s verbs and the app's posting hosts (sliced tasks, net and stream intrinsics) run
-  on it, one timeline for every document. Building it reads `state_exec.policy` and
+  on it, one timeline for every document, except an isolated document's, which run in its own
+  group ([below](#ariadne-hosts-and-the-frame-pump)). Building it reads `state_exec.policy` and
   `state_exec.process_class`, and makes the lock manager below if nothing has yet. It has its own
   cycle registry and `math.random` stream, which it binds whichever thread drives it, and draws its
   pids from `exec_pid_source()`.
@@ -1057,6 +1059,85 @@ for (;;) {
   // ... events, posts to sim.sched() ...
   app.exec_pump_frame();                       // group 0 and `sim`, one pump_all, 0.1 s at most
   // ... read results, render ...
+}
+```
+
+### Ariadne hosts and the frame pump
+
+An Ariadne document's programs run on `exec_scheduler()`, or on an execution group of the
+document's own when the app tree's `ariadne.exec.isolate_documents` isolates it
+([ARIADNE.md](ARIADNE.md) 2.5). Its Runtime (`<cvc/ariadne/ariadne.h>`) and `AppRuntime`
+(`<cvc/ariadne/app_runtime.h>`) meet the frame pump here:
+
+- `Runtime::drain()` is `drain_begin()` then `drain_end()`. `drain_begin()` is the frame's host
+  work (the queued events and key bindings, the actions and residents submitted, the frame's tick
+  posted) and notes `exec_pump_generation()`. `drain_end()` pumps the document's scheduler (group
+  0 a bounded slice, when the document used it or anything lives on it; the document's group, if
+  it has one, through `exec_pool().pump_all`, 200000 steps and a 0.1 s deadline) unless
+  `exec_pump_generation()` moved since this Runtime's `drain_begin()`, that is, unless the host
+  called `exec_pump_frame()` in between; then it sweeps what finished. `drain_end()` alone runs
+  `drain_begin()` first.
+- `AppRuntime::drain_begin()` and `drain_end()` are the Runtime's, with the scene work, the
+  warnings and the frame hooks after `drain_end()`; `AppRuntime::drain()` is both.
+- **A host with several documents** calls `drain_begin()` on each, `exec_pump_frame()` once, then
+  `drain_end()` on each: group 0 is pumped once a frame (its budget 200000 steps a frame, not one
+  per document, and an await crosses one frame), every isolated document's group, which its
+  Runtime registered as a frame group, is pumped in the same `pump_all`, and each `drain_end()`
+  only sweeps. A host does that or calls `drain()` on each, not both: `drain()` beside
+  `exec_pump_frame()` pumps a document's group twice a frame. `cvc::pump_exec_frame` is no
+  substitute: it does not advance `exec_pump_generation()`, so every `drain_end()` would pump
+  again. A host with one document keeps calling `drain()`.
+- **Workers.** For an isolated document to run on a worker, the pool needs workers and a shared
+  lock manager: give the pool options before anything calls `exec_scheduler()` or
+  `lock_manager()` (an `AppRuntime`'s `load()`, its verb registrations and `enable_net` build the
+  scheduler), or set `state_exec.threads` in the tree.
+- `AppRuntime::declare_thread_affine_prefix(prefix)` declares that a subscriber the host connected
+  at or under `prefix` must run on the host thread; an isolated document whose prefix is at, above
+  or under a declared one is then pumped on the host thread (`Runtime::declare_thread_affine_prefix`
+  underneath). Call it before `load()`; a later call has the placement decided again.
+- `AppRuntime::use_script_engine(engine)` keeps an isolated document on the host thread
+  (`Runtime::require_host_thread`): an engine's activations run its language inline in their
+  steps. Call it before `load()`, as a scripting host's `attach` does.
+- `AppRuntime::wait_idle()` waits, without cancelling anything, until no async kernel of the
+  document is queued or running: on `exec_async_host()`, and on its group's host when the document
+  is isolated. It reads the group the document is in now (`Runtime::current_group()`) and decides
+  nothing, so it never builds, moves or destroys the document's group (it may build group 0, as
+  `exec_async_host()` does, though `load()` has built it already). `AppRuntime::idle()` counts the
+  group's calls and runnable processes the same way. Both also count the kernels still running in
+  a group a move retired (`Runtime::retired_calls_in_flight()`, `wait_retired_calls()`): `idle()`
+  is false while one runs and `wait_idle()` waits for it, so a host that waits before letting go
+  of what its async functions use waits for those too; a later `drain_begin` destroys the retired
+  group once they end. Host thread, outside a frame.
+- Every one of these, like `load()`, `set_root()`, the `set_*_program` calls, `post_input`,
+  `post_signal` and the destructors, is a host-thread call made outside a pump: never from a
+  native, a callback or a host verb that the app's pool runs (`run_program` only queues, so it may
+  be called from inside one). Tearing a Runtime down, or moving its document out of its group,
+  while a `pump_all` of the app's pool holds that group is refused in every build, from any thread
+  (printed and logged, then the process aborts); a document in group 0, or one whose group no pump
+  holds, is not refused.
+- **Registrations.** An `AppRuntime`'s verbs and functions, and providers
+  (`register_action_intrinsics`), are registered before `load()` or before the first frame. One
+  registered once the document's programs run moves an isolated document only the first time
+  nothing of it runs (no live action, resident, mount tick or spawned child), at the latest at its
+  next restart (a load, `set_root` or a lane's program); until then a late `host_only` name is a
+  `NameError` in its `any` group (logged once).
+
+```cpp
+cvc::app app;
+cvc::pool_options po;
+po.threads = cvc::pool_options::auto_threads;
+app.exec_pool(po);                                        // first: the lock manager is shared
+app.root()("ariadne.exec.isolate_documents").value("1");
+std::vector<std::unique_ptr<cvc::ariadne::AppRuntime>> docs;
+for (int i = 0; i < 4; ++i) {
+  docs.push_back(std::make_unique<cvc::ariadne::AppRuntime>(app, "docs.d" + std::to_string(i)));
+  docs.back()->load(path);                                // decides where the document runs
+}
+for (;;) {
+  for (auto &d : docs) d->drain_begin();
+  app.exec_pump_frame();                                  // group 0 once, and each document's group
+  for (auto &d : docs) d->drain_end();
+  // ... render each document ...
 }
 ```
 

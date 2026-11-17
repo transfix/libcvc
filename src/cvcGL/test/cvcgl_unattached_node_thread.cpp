@@ -39,6 +39,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vtkMatrix4x4.h>
 
 using cvc::gl::GraphicsNode;
 using cvc::gl::LightNode;
@@ -183,6 +184,44 @@ void test_a_node_outliving_its_scene_keeps_off_thread_writes_off_the_writer() {
   std::printf("  ok: a node outliving its scene keeps off-thread writes off the writer\n");
 }
 
+// A node with no scene writes its own pose to state directly, and the handler that write fires
+// inline drops it as the node's echo. The mark is the writing thread's: a matrix another thread
+// writes while the node's own write is still running (a worker's, a publisher's flush) is not the
+// echo. It waits for the node's thread, which then follows it, as the tree ends on it.
+void test_another_threads_matrix_during_the_nodes_own_pose_write_is_not_its_echo() {
+  cvc::app app;
+  auto node = std::make_shared<cvc::gl::NullGraphicNode>(app, "echomark.node", "node");
+  const double own[16] = {1, 0, 0, 1, 0, 1, 0, 2, 0, 0, 1, 3, 0, 0, 0, 1};
+  const double other[16] = {1, 0, 0, 7, 0, 1, 0, 8, 0, 0, 1, 9, 0, 0, 0, 1};
+  const std::string matrix = node->getState("matrix").fullName();
+
+  // Connected after the node's own slot, so this runs inside the node's write, once the node has
+  // dropped its echo, while the write is still marked as its own.
+  bool wrote = false;
+  boost::signals2::scoped_connection c =
+      node->getState().childChanged.connect([&](const std::string &child) {
+        if (child != "matrix" || wrote)
+          return;
+        wrote = true;
+        offThread([&] {
+          cvc::state::instance(app)(matrix).value(cvc::gl::state_publisher::format_matrix(other));
+        });
+      });
+  node->setPoseMatrix(own);
+  assert(wrote);
+  assert(node->getTransform()->GetElement(0, 3) == 1.0 && "the node's own pose applied");
+  assert(cvc::state::instance(app)(matrix).value() ==
+             cvc::gl::state_publisher::format_matrix(other) &&
+         "the tree ends on the other thread's matrix");
+
+  // The node's own thread drains what was held for it before its next own work.
+  cvc::state::instance(app)(node->getState("probe").fullName()).value(std::string("1"));
+  assert(node->getTransform()->GetElement(0, 3) == 7.0 &&
+         node->getTransform()->GetElement(2, 3) == 9.0 &&
+         "another thread's matrix is not the node's echo: the node follows it");
+  std::printf("  ok: another thread's matrix during the node's own pose write is not its echo\n");
+}
+
 } // namespace
 
 int main() {
@@ -192,6 +231,7 @@ int main() {
   test_own_thread_write_still_applies_inline();
   test_a_removed_node_keeps_off_thread_writes_off_the_writer();
   test_a_node_outliving_its_scene_keeps_off_thread_writes_off_the_writer();
+  test_another_threads_matrix_during_the_nodes_own_pose_write_is_not_its_echo();
   std::printf("cvcGL unattached node threading: OK\n");
   return 0;
 }

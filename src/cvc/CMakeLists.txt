@@ -203,6 +203,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/ph/compose.h
   ../../inc/cvc/ph/mat3.h
   ../../inc/cvc/ph/microgrid.h
+  ../../inc/cvc/ph/query.h
   ../../inc/cvc/ph/optim.h
   ../../inc/cvc/ph/rff.h
   ../../inc/cvc/ph/rng.h
@@ -267,6 +268,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/world/terrain_lod.h
   ../../inc/cvc/world/road_grade.h
   ../../inc/cvc/world/cloud_layer.h
+  ../../inc/cvc/world/weather.h
   ../../inc/cvc/world/water_bodies.h
   ../../inc/cvc/algo/distance_transform.h
   ../../inc/cvc/algo/det_math.h
@@ -522,6 +524,7 @@ set(SOURCE_FILES
   nav/dyn4_ledger.cpp
   ph/compose.cpp
   ph/microgrid.cpp
+  ph/query.cpp
   ph/se2_data.cpp
   ph/se2_model.cpp
   ph/se2_train.cpp
@@ -568,6 +571,7 @@ set(SOURCE_FILES
   world/terrain_lod.cpp
   world/road_grade.cpp
   world/cloud_layer.cpp
+  world/weather.cpp
   world/water_bodies.cpp
   ocean/spectrum.cpp
   ocean/h0.cpp

@@ -2781,6 +2781,65 @@ TEST(AriadneWorldGym, ThePlantsAreModelsATwinReplays) {
   EXPECT_GT(w.dyn4_state.vx, 1.0);
 }
 
+// What a twin replays of the drive: each agent's coefficients, carrot and the external force it
+// summed (an intent's), reported after a tick; capturing it changes nothing the drive does.
+TEST(AriadneWorldGym, TheDriveATwinReplaysAndTheForceItSummed) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  gym_options o;
+  for (int k = 0; k < 2; ++k) {
+    entity_spec sp;
+    sp.archetype = "humvee";
+    sp.controller = "nav@1";
+    sp.plant = "dynamic4w";
+    sp.placed = true;
+    sp.x = -30.0;
+    sp.y = -10.0 + 20.0 * k;
+    sp.yaw = 0.0;
+    o.agents.push_back(sp);
+  }
+  const std::string path = write_doc("gym_drive", gym_doc(false, false)).string();
+  gym_options off = o;
+  off.drive_telemetry = false;
+  WorldGym a(path, o), b(path, off);
+  const std::vector<double> nan(2, std::numeric_limits<double>::quiet_NaN());
+  for (WorldGym *g : {&a, &b}) {
+    g->reset(9);
+    EXPECT_FALSE(g->plants()[0].drive.known);
+    entity_intent in;
+    in.force_x = 0.5;
+    in.force_y = 1.5;
+    ASSERT_TRUE(g->vehicles().set_intent(g->observe().id[0], in));
+  }
+  EXPECT_TRUE(a.vehicles().drive_telemetry());
+  EXPECT_FALSE(b.vehicles().drive_telemetry());
+  for (int i = 0; i < 30; ++i) {
+    const gym_step sa = a.step(nan, nan), sb = b.step(nan, nan);
+    for (std::size_t k = 0; k < 2; ++k) { // the same drive, captured or not
+      EXPECT_EQ(sa.observation.x[k], sb.observation.x[k]) << "tick " << i;
+      EXPECT_EQ(sa.observation.y[k], sb.observation.y[k]) << "tick " << i;
+    }
+  }
+  const std::vector<entity_plant> pa = a.plants(), pb = b.plants();
+  ASSERT_EQ(pa.size(), 2u);
+  EXPECT_FALSE(pb[0].drive.known);
+  for (const entity_plant &p : pa) {
+    EXPECT_TRUE(p.drive.known);
+    EXPECT_GT(p.drive.beta, 0.0);
+    EXPECT_GT(p.drive.gamma, 0.0);
+    EXPECT_TRUE(std::isfinite(p.drive.goal_x) && std::isfinite(p.drive.goal_y));
+  }
+  EXPECT_NEAR(pa[0].drive.force_x, 0.5, 1e-6);
+  EXPECT_NEAR(pa[0].drive.force_y, 1.5, 1e-6);
+  EXPECT_EQ(pa[1].drive.force_x, 0.0);
+  EXPECT_EQ(pa[1].drive.force_y, 0.0);
+  // The carrot is ahead of the agent, toward its goal.
+  const gym_observation &ob = a.observe();
+  EXPECT_LT(std::hypot(pa[1].drive.goal_x - ob.goal_x[1], pa[1].drive.goal_y - ob.goal_y[1]),
+            std::hypot(ob.x[1] - ob.goal_x[1], ob.y[1] - ob.goal_y[1]));
+}
+
 // Vehicles on different plants meet in the one physics world. Nav's bicycle is a kinematic box,
 // which no building stops: it touches what is blocked in the grid.
 TEST(AriadneWorldGym, VehiclesOnOtherPlantsAndTheBicycleTouch) {

@@ -60,10 +60,25 @@
 // cloud sooner. The pattern drifts over the ground (set_drift), so a cloud forms as it reaches a
 // mountain's windward side and dies past the crest; the deck gathers on the windward flanks while
 // a high peak stands through it.
+// Storms (set_storms, OCEAN-AND-WEATHER-ROADMAP.md §9 F2): discs over the ground, each with an
+// intensity, give each cell a storm share (its `storm`, the discs' field over the cell's copy
+// nearest the ground's centre). A stormy cell gathers cloud in the automaton, leads the ranking,
+// and is held besides the coverage asked for (the coverage is the fair weather's, a storm's
+// footprint closes up), and its shade and far opacity grow with its share: an overcast, denser
+// deck under the storm. The renderer darkens it by the same share.
+// A storm deck (set_deck, live): a deck deeper than its cumulus (`cumulus`) holds cumulonimbus,
+// each map the cumulus at the bottom as it was, a tower rising from its core with its puffs stacked
+// up it, and an anvil spreading under the top (the height profile of ABYSSAL's Clouds.js,
+// Token-Gremlin/natural-disasters, MIT). Its self-shade marches the sun across the tall voxels,
+// so a tower's base sits in the optical depth of the whole tower: a dark base. Rebuilding the maps
+// takes about 150 ms for terrain_lab's deck, so a renderer builds them away from its frame
+// (prepare_deck; run on another thread, or step a share a frame; adopt_deck).
 #ifndef CVC_WORLD_CLOUD_LAYER_H
 #define CVC_WORLD_CLOUD_LAYER_H
 
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace cvc {
@@ -86,6 +101,9 @@ struct cloud_layer_params {
   int far_texels = 16;    // far-density texels per cell (fewer when a slice would pass 256)
   int far_layers = 10;    // far-density slices between base and top
   int depth = 6;          // the cloud grammar's recursion cap (cvc::lsys::cloud_params::depth)
+  // The cumulus's own depth, metres (0: the whole deck's). A deck deeper than it is a storm deck of
+  // cumulonimbus maps (set_deck).
+  double cumulus = 0.0;
   // The evolving coverage: seconds per automaton step at rate 1 (evolve's `rate` scales it), a
   // cloud's fade in or out (seconds), the heading the wind blows toward (degrees, as sun_az: 90 is
   // +x), and the strength of the orographic coupling (0: none; 1: a steep windward flank nearly
@@ -109,8 +127,16 @@ struct cloud_cell {
   double presence = 0.0;     // its crossfade, 0..1: moves toward `occupied` over fade_s
   double cloud = 0.0;        // the share of its column's bits that are cloud
   double forcing = 0.0;      // the orographic forcing under it at the last step, -1..1
+  double storm = 0.0;        // the storms' field over it, 0..1 (set_storms)
   // The weight its cloud is drawn and shades with: a smoothstep of the presence.
   double weight() const { return presence * presence * (3.0 - 2.0 * presence); }
+};
+
+// A storm over the ground, as the weather gives it: its centre (world metres), radius and
+// intensity (0..1). Its field is cvc::world::weather's: the intensity over its core (half its
+// radius), falling to 0 at its radius.
+struct storm_disc {
+  double x = 0.0, y = 0.0, r = 0.0, intensity = 0.0;
 };
 
 class cloud_layer {
@@ -159,6 +185,38 @@ public:
   // cells, their morphs and the automaton are kept, so the clouds do not jump. A few tens of
   // milliseconds; nothing when the sun is unchanged.
   void set_sun(double az_deg, double el_deg);
+  // The deck's heights, live: the maps are made again for [base, top] (a storm deck of cumulonimbus
+  // when it is deeper than its cumulus), on nz layers with far_layers far slices (0: as they are),
+  // then their self-shade, shadow patches and far opacity, as set_sun; the cells, their morphs and
+  // the automaton are kept. A deck changed this way shades and draws exactly as one built so.
+  void set_deck(double base, double top, int nz = 0, int far_layers = 0);
+  bool deep() const; // a storm deck: deeper than its cumulus
+  // The same, built away from the layer: prepare_deck copies what the build reads (no reference to
+  // the layer is kept), run() builds it on any thread, and adopt_deck swaps it in on the layer's
+  // thread, true when it did. A job made before the layer's layout or sun changed is refused (the
+  // caller prepares another); a job for the deck the layer has is adopted at no cost.
+  // step(job, budget) builds a share at a time, for a renderer with no thread to give it (a
+  // cvc::sliced_job, single-threaded wasm): about `budget` units (a variant's map, one layer of its
+  // self-shade, one row of its shade...; 0 runs to the end), true once built. run() builds it all
+  // at once, and a deck built in steps is the deck built so. phase() names the next unit's kind
+  // and progress() is in [0, 1].
+  struct deck_job;
+  std::shared_ptr<deck_job> prepare_deck(double base, double top, int nz = 0,
+                                         int far_layers = 0) const;
+  static void run(deck_job &job);
+  static bool step(deck_job &job, std::size_t budget);
+  static const char *phase(const deck_job &job);
+  static double progress(const deck_job &job);
+  bool adopt_deck(deck_job &job);
+
+  // ── Storms
+  // The storms over the ground now, in world coordinates: each cell's storm share is the discs'
+  // field over its copy nearest the ground's centre (cell_world), and the targets are ranked again
+  // at once. The shares follow the drift at every step. Empty: fair weather.
+  void set_storms(const std::vector<storm_disc> &storms);
+  const std::vector<storm_disc> &storms() const { return m_storms; }
+  // The discs' field at world (x, y): 1 - prod(1 - I f), f 1 over a disc's core and 0 past it.
+  double storm_at(double x, double y) const;
   // The ground under the deck, for orographic coupling: rows x cols heights, row-major, sample
   // (r, c) at (x0 + c dx, y0 + r dy) (cvc::height_field's layout). It is kept box-averaged to
   // about an eighth of a cloud. Empty: no ground, no coupling.
@@ -200,6 +258,11 @@ public:
   // the cloud and away from the sun. A crossfade of two variants' depths, as cell_field's density.
   void cell_sun_tau(const cloud_cell &c, double m, std::vector<float> &out) const;
   const std::vector<float> &variant_sun_tau(int v) const { return m_sun[v]; }
+  // The cloud above each voxel: the optical depth straight up to the map's top (as cell_sun_tau,
+  // toward the zenith), what hides the sky from a storm's base (ABYSSAL's skyVis, §10.7). A
+  // renderer darkens a storm cloud's light by it.
+  void cell_up_tau(const cloud_cell &c, double m, std::vector<float> &out) const;
+  const std::vector<float> &variant_up_tau(int v) const { return m_up[v]; }
 
   // The periodic shadow mask at morph clock m: shadow_size()^2 bytes, row-major (x fastest), texel
   // (tx, ty) centred on the pattern point ((tx + 0.5), (ty + 0.5)) * period_m() / shadow_size().
@@ -236,6 +299,10 @@ public:
   static constexpr int CA_LAYERS = 32;
   // The steps warm() runs after a new layout.
   static constexpr int WARM_STEPS = 200;
+  // A full storm's cell shades with 1 + STORM_SHADE times its cloud's optical depth and is drawn
+  // with 1 + STORM_DENSE times its opacity (the far slices here; a renderer's near volume, its
+  // transfer function), each scaled by the cell's storm share.
+  static constexpr double STORM_SHADE = 1.5, STORM_DENSE = 0.8;
 
 private:
   cloud_layer_params m_p;
@@ -260,8 +327,16 @@ private:
   int m_f = 16;        // far texels per cell
   std::vector<cloud_cell> m_cells;
   std::vector<std::vector<float>> m_maps; // per variant, lumped and normalized
+  // The cumulus fields the maps grow from (cvc::lsys::cloud_field's, per variant), kept with what
+  // they were grown for (base, top, layers, sun azimuth and elevation): a deck changed between its
+  // cumulus and a storm deck over the same base and sun grows none of them again.
+  std::vector<std::shared_ptr<const std::vector<float>>> m_src;
+  std::vector<double> m_srcKey;
   std::vector<std::vector<float>> m_sun;  // per variant, the optical depth toward the sun
+  std::vector<std::vector<float>> m_up;   // per variant, the optical depth straight up
   void build_sun();
+  std::vector<storm_disc> m_storms;
+  void storm_shares();
   // Per variant: the optical depth over the base plane around the cloud (m_tau_n^2, even, centred
   // on the cloud), and its coarse slices (m_far_n^2 * far_layers, centred).
   int m_tau_n = 0, m_far_n = 0;
