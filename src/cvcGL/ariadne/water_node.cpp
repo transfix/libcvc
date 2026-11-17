@@ -467,10 +467,10 @@ const char *const kWaterFsDec =
     "uniform highp float uLodFoam; uniform highp float uLodShade; uniform highp float uFarReach;\n"
     "uniform highp float uFoamReach;\n"
     "uniform highp float uWindU; uniform highp vec3 uWindDir; uniform highp float uCell;\n"
-    "uniform highp vec3 uCutMin; uniform highp vec3 uCutMax;\n"    // the far grid gives way inside
-                                                                   // the near one
-    "uniform highp vec3 uClipMin; uniform highp vec3 uClipMax;\n"  // no water past the world,
-                                                                   // unless its rim is sea
+    "uniform highp vec3 uCutMin; uniform highp vec3 uCutMax;\n"   // the far grid gives way inside
+                                                                  // the near one
+    "uniform highp vec3 uClipMin; uniform highp vec3 uClipMax;\n" // no water past the world,
+                                                                  // unless its rim is sea
     // Up to four hulls the water stays out of (D5): each its origin and heading (x, y, yaw), its
     // half length, half beam and sheer's height, and its bottom's height (none while the half
     // length is 0). Uniforms, not a texture: a WebGL2 draw has 16 texture units, and the
@@ -869,7 +869,7 @@ struct WaterRT {
   std::vector<cvc::ocean::h0_field> h0Mix;
   bool ready = false, failed = false;
   double level = 0.0, nearHalf = 192.0, cell = 2.0;
-  std::size_t hulls = 0;     // the hulls the water keeps out of this frame (tick_hulls)
+  std::size_t hulls = 0;              // the hulls the water keeps out of this frame (tick_hulls)
   double ring1 = 64.0, ring2 = 128.0; // the near grid's rings (ring_coords)
   std::string lodWavesKey;
   double cx = 0.0, cy = 0.0; // the near grid's centre (whole cells)
