@@ -2,7 +2,12 @@
 # Runs the suites of ci.yml's `sanitizers` jobs, from the repository root, after the build:
 #   - every executable named in SAN_CXX_TESTS, from build/bin, one process each, without its
 #     Stress suites (locks-deep.yml runs LocksStress and LocksModelStress; ci.yml's STRESS_REGEX
-#     keeps them off the PR lanes too, and under TSan LocksStress alone outlasts run_one's hour);
+#     keeps them off the PR lanes too, and under TSan LocksStress alone outlasts run_one's hour).
+#     SAN_CXX_RUNS (ci.yml's matrix `cxx_runs`) gives some of them an environment and arguments of
+#     their own, one line a binary: `<name>: [VAR=VALUE ...] [--option ...]`. That binary runs with
+#     the variables set and the options passed; a --gtest_filter among them gets *Stress* added to
+#     its negative patterns, so the Stress suites stay out. The others run bare. A line naming a
+#     binary SAN_CXX_TESTS does not run is an error;
 #   - every pycvc script named in SAN_PY_TESTS, with the sanitizer runtime the build linked
 #     preloaded into the interpreter, which was not built with it, except those py_skip (below)
 #     names for the sanitizer. gcc links its runtimes as shared libraries, found with ldd; clang
@@ -111,8 +116,50 @@ run_one() { # name command...
   rows+=("| $name | $st | $reports | $((SECONDS - t0)) |")
 }
 
+# SAN_CXX_RUNS: a binary's own variables and options, its line's text after the name.
+declare -A cxx_run=()
+while IFS= read -r line; do
+  [ -n "${line// /}" ] || continue
+  name=${line%%:*}
+  name=${name//[[:space:]]/}
+  known=0
+  for t in $SAN_CXX_TESTS; do
+    [ "$t" = "$name" ] && known=1
+  done
+  if [ "$known" -eq 0 ]; then
+    failed=1
+    echo "::error::SAN_CXX_RUNS names '$name', which SAN_CXX_TESTS does not run"
+    continue
+  fi
+  cxx_run[$name]=${line#*:}
+done <<< "${SAN_CXX_RUNS:-}"
+
 for t in $SAN_CXX_TESTS; do
-  run_one "$t" "$bin/$t" --gtest_filter='-*Stress*'
+  if [ -z "${cxx_run[$t]+set}" ]; then
+    run_one "$t" "$bin/$t" --gtest_filter='-*Stress*'
+    continue
+  fi
+  # read -a splits on whitespace without expanding globs (a filter's *).
+  read -ra words <<< "${cxx_run[$t]}"
+  vars=()
+  opts=()
+  filter='-*Stress*'
+  for w in "${words[@]}"; do
+    if [[ $w =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      vars+=("$w")
+    elif [[ $w == --gtest_filter=* ]]; then
+      f=${w#--gtest_filter=}
+      if [[ $f == *-* ]]; then
+        filter="$f:*Stress*" # more negative patterns
+      else
+        filter="$f-*Stress*" # positive patterns only
+      fi
+    else
+      opts+=("$w")
+    fi
+  done
+  echo "$t: ${vars[*]} --gtest_filter=$filter ${opts[*]}"
+  run_one "$t" env "${vars[@]}" "$bin/$t" --gtest_filter="$filter" "${opts[@]}"
 done
 
 # A run whose points were all skipped exits 0: SAN_REQUIRED names the points' lines. The list is
