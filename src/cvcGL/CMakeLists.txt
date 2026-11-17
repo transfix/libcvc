@@ -1005,6 +1005,11 @@ add_test(NAME cvcgl_light_node COMMAND cvcgl_light_node)
 add_executable(cvcgl_ariadne_realize test/cvcgl_ariadne_realize.cpp)
 target_link_libraries(cvcgl_ariadne_realize PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_realize COMMAND cvcgl_ariadne_realize)
+# The whole realize suite in one process: 71 s in a Windows Release job, 250.6 s in a Linux Debug
+# job (Xvfb, llvmpipe; transfix/libcvc#1301, 2026-11-17), and past ctest's 300 s on all three
+# attempts of a slower runner's Debug job (#1309, where PhConvoy and Ewave also ran ~1.3x longer).
+# Its own budget, as cvcgl_ewave's and cvcgl_volren_node's, so only a real hang fails.
+set_tests_properties(cvcgl_ariadne_realize PROPERTIES TIMEOUT 1200)
 
 # Ariadne §5.4 repeat: on a scene node: copies made and taken as the count (a number, a key, a
 # read-lane expression) changes, with RealizedScene's lists kept in step. Part 2 runs a document in
