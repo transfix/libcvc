@@ -51,13 +51,35 @@ struct param_table<seeded_segmentation_params> : param_fields<seeded_segmentatio
             doc("front speed exp(gamma * |grad I|), |grad I| rescaled to 0..255: fronts slow at "
                 "edges")),
       field("automatic", &P::automatic,
-            doc("automatic seeds added to the point classes' (none, local_maxima)")),
+            doc("automatic seeds added to the point classes' (none, local_maxima, or "
+                "critical_points: the paper's feature and background classes)")),
       field("variable", &P::variable, range(0, none),
             doc("the point classes of this variable seed the run")),
       field("timestep", &P::timestep, range(0, none),
             doc("the point classes of this timestep seed the run")),
       field("class_volumes", &P::class_volumes,
             doc("also output a volume per class: its voxels' values, zero elsewhere")),
+      field("cp_iterations", &P::cp_iterations, range(0, 100000),
+            doc("critical_points: iterations of the gradient vector diffusion")),
+      field("cp_k", &P::cp_k, range(0.0, 1000.0),
+            doc("critical_points: Eq. 3's k, a neighbour weighing exp(k (cos a - 1)), a the "
+                "angle between the two vectors")),
+      field("cp_feature_threshold", &P::cp_feature_threshold, unit("data"),
+            doc("critical_points: a maximum below this joins the background (data units, or "
+                "0..255 with normalized_thresholds; -inf: none does)")),
+      field("cp_background_threshold", &P::cp_background_threshold, unit("data"),
+            doc("critical_points: a minimum above this joins the feature (data units, or 0..255 "
+                "with normalized_thresholds; inf: none does)")),
+      field("cp_field", &P::cp_field,
+            doc("critical_points: the critical points of the gradient of the volume (image, the "
+                "paper) or of its gradient magnitude (gradient_magnitude, SegMed: the maxima, on "
+                "edges, are dropped)")),
+      field("cp_weights", &P::cp_weights,
+            doc("critical_points: the field whose angles weigh the diffusion's neighbours, the "
+                "one being diffused (current, the paper) or the first (initial, SegMed)")),
+      field("cp_sample", &P::cp_sample, range(0, none),
+            doc("critical_points: thin each connected run of critical voxels to one seed in "
+                "every cp_sample + 1 (SegMed: 20; 0, the paper's: keep every voxel)")),
   };
   static void check(const P &p, std::vector<std::string> &problems) {
     if (std::isinf(p.t_low))

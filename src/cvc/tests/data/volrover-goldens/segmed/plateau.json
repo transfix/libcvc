@@ -1,0 +1,18 @@
+{
+  "library": "SegMed",
+  "volrover": "1cf0fbd72c7539e415a4f0fbc58c6bfce3d3caf8",
+  "case": "plateau",
+  "input": "tools/volrover-goldens/inputs/segmed/plateau.raw",
+  "input_sha256": "49300dead500d959f3c40a575223fe16c6693fa59fdf512421ba0b7a0d8c0c6b",
+  "dims": [
+    20,
+    20,
+    20
+  ],
+  "tlow": -1,
+  "critical_points": 9,
+  "critical_sha256": "9f1afbf1e8f130d6da5ac825e5f25d0c5b09925f3a41f301c2b39eac64a5732d",
+  "field_sha256": "d3afc52effe3edcf9efd9ed03b02c8d1c9c8e84e814523c2f6ec1b9ad3e9621d",
+  "made_by": "tools/volrover-goldens/make_goldens.py",
+  "platform": "Windows AMD64, Windows-11, Python 3.13.3"
+}

@@ -1004,6 +1004,115 @@ TEST_F(VolrenCudaTest, EachAppHasItsOwnResidentCache) {
   EXPECT_EQ(cvc::volren::raycast_cuda_cache_of(later).uploaded(), 0u);
 }
 
+// Apps the host hands one cuda_device_caches share its blocks: a volume one app
+// staged is not uploaded again for the other, a budget set through one is the
+// other's, and the caches outlive the app that made them.  An app not handed
+// them still stages its own.
+TEST_F(VolrenCudaTest, AppsHandedOneDeviceCachesShareTheirBlocks) {
+  volume_settings vs;
+  vs.shaded = false;
+  vs.unshaded = true;
+  vs.tf = rampTF(0.0, 1.0, 1.f, 1.f, 1.f, 1.f);
+  vs.tf_auto_domain = false;
+  const std::size_t volume_bytes = std::size_t(kGrid) * kGrid * kGrid * sizeof(float);
+  const auto render_in = [&](cvc::app &app, const cvc::volume &vol) {
+    raycaster rc(app);
+    rc.view() = orthoCam();
+    rc.settings().steps = 64;
+    rc.add_volume(vol, vs);
+    rc.set_backend(backend::cuda);
+    const frame f = rc.render();
+    EXPECT_EQ(int(rc.backend_used()), int(backend::cuda));
+    return f;
+  };
+
+  cvc::app b, outsider;
+  const cvc::volume vol = makeSphereVolume(b, kGrid); // one voxel buffer, shown in every app
+  std::shared_ptr<cvc::volren::cuda_device_caches> shared;
+  frame from_a;
+  {
+    cvc::app a;
+    shared = cvc::volren::raycast_cuda_cache_of(a).caches();
+    cvc::volren::raycast_cuda_cache_of(b).share(shared);
+    EXPECT_EQ(cvc::volren::raycast_cuda_cache_of(b).caches(), shared);
+
+    from_a = render_in(a, vol);
+    const std::uint64_t after_a = shared->uploaded();
+    EXPECT_GE(after_a, volume_bytes) << "the first app's render did not upload";
+
+    const frame from_b = render_in(b, vol);
+    EXPECT_EQ(shared->uploaded(), after_a) << "the second app uploaded a block the first staged";
+    EXPECT_EQ(framesDiffer(from_a, from_b), 0) << "a shared block changed the image";
+
+    cvc::volren::raycast_cuda_cache_of(b).set_budget(volume_bytes * 3);
+    EXPECT_EQ(cvc::volren::raycast_cuda_cache_of(a).budget(), volume_bytes * 3);
+  }
+  // The first app is gone; its blocks are the caches', which b still holds.
+  const std::uint64_t before = shared->uploaded();
+  EXPECT_EQ(framesDiffer(render_in(b, vol), from_a), 0);
+  EXPECT_EQ(shared->uploaded(), before) << "the caches lost their blocks with the first app";
+
+  // An app not handed the caches stages its own copy and leaves the shared ones alone.
+  render_in(outsider, vol);
+  EXPECT_GE(cvc::volren::raycast_cuda_cache_of(outsider).uploaded(), volume_bytes);
+  EXPECT_EQ(shared->uploaded(), before);
+  EXPECT_NE(cvc::volren::raycast_cuda_cache_of(outsider).caches(), shared);
+}
+
+// Two apps sharing caches and one voxel buffer, each announcing an in-place
+// write: the stamps come from the shared caches' counter, so neither app's can
+// match a block staged before the other's write.  (Counters of each app's own
+// would both have drawn 1 here, and the second render would have been served
+// the first's stale block.)
+TEST_F(VolrenCudaTest, SharedCachesNeverServeAStaleBlockAcrossApps) {
+  volume_settings vs;
+  vs.shaded = false;
+  vs.unshaded = true;
+  vs.tf = rampTF(0.0, 1.0, 1.f, 1.f, 1.f, 1.f);
+  vs.tf_auto_domain = false;
+  cvc::app a, b;
+  cvc::volren::raycast_cuda_cache_of(b).share(cvc::volren::raycast_cuda_cache_of(a).caches());
+  cvc::volume vol = makeSphereVolume(a, kGrid);
+  raycaster ra(a), rb(b);
+  for (raycaster *rc : {&ra, &rb}) {
+    rc->view() = orthoCam();
+    rc->settings().steps = 64;
+    rc->add_volume(vol, vs);
+    rc->set_backend(backend::cuda);
+  }
+  const auto scale_in_place = [&](float s) { // the unchecked escape hatch: no copy-on-write
+    float *v = reinterpret_cast<float *>(vol.data_ptr());
+    for (std::size_t i = 0; i < std::size_t(kGrid) * kGrid * kGrid; ++i)
+      v[i] *= s;
+  };
+  const auto fresh = [&] { // what the buffer holds now, rendered by an app with nothing cached
+    cvc::app clean;
+    raycaster rc(clean);
+    rc.view() = orthoCam();
+    rc.settings().steps = 64;
+    rc.add_volume(vol, vs);
+    rc.set_backend(backend::cuda);
+    return rc.render();
+  };
+
+  ra.render();
+  scale_in_place(0.5f);
+  ra.invalidate_device_volume(0);
+  const frame a_after_first = ra.render();
+  EXPECT_EQ(framesDiffer(a_after_first, fresh()), 0) << "a's announced write was not re-uploaded";
+
+  scale_in_place(0.5f);
+  rb.invalidate_device_volume(0);
+  const frame b_after_second = rb.render();
+  ASSERT_EQ(int(rb.backend_used()), int(backend::cuda));
+  EXPECT_GT(framesDiffer(b_after_second, a_after_first), 0) << "the second write changed nothing";
+  EXPECT_EQ(framesDiffer(b_after_second, fresh()), 0)
+      << "b was served the block staged before its write";
+  // a never announced the second write, but its stamp no longer matches the
+  // block b staged, so it re-uploads the current bytes instead of reusing it.
+  EXPECT_EQ(framesDiffer(ra.render(), fresh()), 0);
+}
+
 // ---------------------------------------------------------------------------
 // Supersampled anti-aliasing: the resolve is per pixel, in one thread, so the
 // two backends have to agree on the sub-sample GRID as well as on the march.
