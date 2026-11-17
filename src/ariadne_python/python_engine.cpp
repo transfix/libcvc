@@ -584,8 +584,8 @@ PyObject *arihost_next_event(PyObject *self, PyObject *) {
 }
 
 // room(): the relay's room, which the bridge ops below name.
-PyObject *arihost_room(PyObject *self, PyObject *) {
-  ServerLink *link = server_link(self);
+PyObject *arihost_room(PyObject *, PyObject *) {
+  ServerLink *link = server_link();
   if (!link)
     return nullptr;
   const std::string room = link->room();
@@ -597,12 +597,12 @@ PyObject *arihost_room(PyObject *self, PyObject *) {
 //   bridge_presence(via, uid, name, detail)
 //   bridge_absent(via, uid)
 //   bridge_post(via, uid, name, text, to)        to: "" the room, or a participant's pid
-PyObject *arihost_bridge_presence(PyObject *self, PyObject *args) {
+PyObject *arihost_bridge_presence(PyObject *, PyObject *args) {
   const char *via = nullptr, *uid = nullptr, *name = nullptr, *detail = nullptr;
   Py_ssize_t vl = 0, ul = 0, nl = 0, dl = 0;
   if (!PyArg_ParseTuple(args, "s#s#s#s#", &via, &vl, &uid, &ul, &name, &nl, &detail, &dl))
     return nullptr;
-  ServerLink *link = server_link(self);
+  ServerLink *link = server_link();
   if (!link)
     return nullptr;
   ServerLink::BridgeOp op;
@@ -615,12 +615,12 @@ PyObject *arihost_bridge_presence(PyObject *self, PyObject *args) {
   Py_RETURN_NONE;
 }
 
-PyObject *arihost_bridge_absent(PyObject *self, PyObject *args) {
+PyObject *arihost_bridge_absent(PyObject *, PyObject *args) {
   const char *via = nullptr, *uid = nullptr;
   Py_ssize_t vl = 0, ul = 0;
   if (!PyArg_ParseTuple(args, "s#s#", &via, &vl, &uid, &ul))
     return nullptr;
-  ServerLink *link = server_link(self);
+  ServerLink *link = server_link();
   if (!link)
     return nullptr;
   ServerLink::BridgeOp op;
@@ -631,12 +631,12 @@ PyObject *arihost_bridge_absent(PyObject *self, PyObject *args) {
   Py_RETURN_NONE;
 }
 
-PyObject *arihost_bridge_post(PyObject *self, PyObject *args) {
+PyObject *arihost_bridge_post(PyObject *, PyObject *args) {
   const char *via = nullptr, *uid = nullptr, *name = nullptr, *text = nullptr, *to = nullptr;
   Py_ssize_t vl = 0, ul = 0, nl = 0, tl = 0, ol = 0;
   if (!PyArg_ParseTuple(args, "s#s#s#s#s#", &via, &vl, &uid, &ul, &name, &nl, &text, &tl, &to, &ol))
     return nullptr;
-  ServerLink *link = server_link(self);
+  ServerLink *link = server_link();
   if (!link)
     return nullptr;
   ServerLink::BridgeOp op;
@@ -651,11 +651,11 @@ PyObject *arihost_bridge_post(PyObject *self, PyObject *args) {
 }
 
 // listen_chat(room, dms): which of the room's posts reach the program as "room_chat" events.
-PyObject *arihost_listen_chat(PyObject *self, PyObject *args) {
+PyObject *arihost_listen_chat(PyObject *, PyObject *args) {
   int room = 0, dms = 0;
   if (!PyArg_ParseTuple(args, "pp", &room, &dms))
     return nullptr;
-  ServerLink *link = server_link(self);
+  ServerLink *link = server_link();
   if (!link)
     return nullptr;
   link->listen_chat(room != 0, dms != 0);
