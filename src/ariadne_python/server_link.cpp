@@ -245,6 +245,34 @@ bool ServerLink::request(std::string kind, cvc::state_exec::value_t value,
   return w->ok;
 }
 
+void ServerLink::set_room(std::string room) {
+  std::lock_guard<std::mutex> lk(bridge_mu_);
+  room_ = std::move(room);
+}
+
+std::string ServerLink::room() const {
+  std::lock_guard<std::mutex> lk(bridge_mu_);
+  return room_;
+}
+
+void ServerLink::bridge(BridgeOp op) {
+  std::lock_guard<std::mutex> lk(bridge_mu_);
+  bridge_ops_.push_back(std::move(op));
+}
+
+std::vector<ServerLink::BridgeOp> ServerLink::take_bridge_ops(std::size_t max) {
+  std::lock_guard<std::mutex> lk(bridge_mu_);
+  std::vector<BridgeOp> out;
+  if (max == 0 || bridge_ops_.size() <= max) {
+    out.swap(bridge_ops_);
+    return out;
+  }
+  const auto end = bridge_ops_.begin() + static_cast<std::ptrdiff_t>(max);
+  out.assign(std::make_move_iterator(bridge_ops_.begin()), std::make_move_iterator(end));
+  bridge_ops_.erase(bridge_ops_.begin(), end);
+  return out;
+}
+
 void ServerLink::disconnect(std::string principal) {
   std::lock_guard<std::mutex> lk(disconnects_mu_);
   disconnects_.push_back(std::move(principal));
