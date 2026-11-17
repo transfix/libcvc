@@ -30,9 +30,12 @@
 #include <cvc/nav/world_grid.h>
 #include <cvc/physics/dyn_4w_plant.h>
 #include <cvc/physics/dyn_bike_plant.h>
+#include <cvc/physics/dyn_boat_plant.h>
+#include <cvc/physics/field.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
+#include <cvc/volume/volume.h>
 #include <cvc/world/world_geometry.h>
 #include <exception>
 #include <filesystem>
@@ -253,7 +256,47 @@ bool parse_intent_mode(const std::string &s, entity_intent::mode &out) {
   return true;
 }
 
+ph::dyn_boat_desc boat_desc_of(const vehicle_archetype &a, double mass, double max_speed) {
+  if (a.preset != "launch" && a.preset != "jonboat")
+    throw std::invalid_argument("vehicle '" + a.id + "': '" + a.preset + "' is not a boat preset");
+  ph::dyn_boat_desc b = ph::dyn_boat_desc::preset(a.preset);
+  for (const auto &[k, v] : a.overrides) {
+    if (k == "mass")
+      b.boat.hull.mass = v;
+    else if (k == "max_speed")
+      b.max_speed = v;
+  }
+  b.boat.hull.mass = clamp_to(a, "mass", mass > 0.0 ? mass : b.boat.hull.mass);
+  b.max_speed = clamp_to(a, "max_speed", max_speed > 0.0 ? max_speed : b.max_speed);
+  return b;
+}
+
+// A boat as a vehicle_desc, for what reads one (vehicle_desc_of).
+static ph::vehicle_desc boat_stand_in(const ph::dyn_boat_desc &b) {
+  ph::vehicle_desc d;
+  double lo[3] = {1e300, 1e300, 1e300}, hi[3] = {-1e300, -1e300, -1e300};
+  for (const ph::vec3 &v : b.boat.hull.hull->vertices) {
+    const double p[3] = {v.x, v.y, v.z};
+    for (int k = 0; k < 3; ++k) {
+      lo[k] = std::min(lo[k], p[k]);
+      hi[k] = std::max(hi[k], p[k]);
+    }
+  }
+  d.half_extents = {0.5 * (hi[0] - lo[0]), 0.5 * (hi[1] - lo[1]), 0.5 * (hi[2] - lo[2])};
+  d.center_of_mass = {};
+  d.mass = b.boat.hull.mass;
+  d.max_speed = b.max_speed;
+  d.max_accel = b.boat.propeller.max_thrust / d.mass;
+  d.max_decel = b.boat.propeller.max_reverse_thrust / d.mass;
+  d.max_steer = std::atan((hi[0] - lo[0]) / b.turn_radius);
+  d.axles.clear();
+  d.engine_max_torque = 0.0;
+  return d;
+}
+
 ph::vehicle_desc vehicle_desc_of(const vehicle_archetype &a, double mass, double max_speed) {
+  if (vehicle_plant_floats(a.plant))
+    return boat_stand_in(boat_desc_of(a, mass, max_speed));
   ph::vehicle_desc d;
   if (a.preset == "humvee")
     d = ph::vehicle_desc::humvee();
@@ -436,6 +479,7 @@ struct WorldVehicles::impl {
     std::unique_ptr<ph::nav_plant> jolt;
     std::unique_ptr<ph::dyn_bike_plant> bike;
     std::unique_ptr<ph::dyn_4w_plant> four;
+    std::unique_ptr<ph::dyn_boat_plant> boat;
     // kinematic: each agent's box (by its index), and the poses it moves between over the tick's
     // steps (x, y of its centre, z, yaw): where the bicycle was, and where the tick took it
     std::vector<ph::body_id> boxes;
@@ -487,6 +531,8 @@ struct WorldVehicles::impl {
   std::map<std::uint64_t, entity_intent> intents;
   std::set<std::uint64_t> live;
   std::string ikey; // the intents table (world: vehicles: intents:), "" none
+  // The still water this runtime added for its boats (ensure_water), invalid when none.
+  ph::field_id still_water;
 
   static void sample_force(void *user, int i, int, float, float, float *fx, float *fy) {
     const fleet *f = static_cast<const fleet *>(user);
@@ -540,6 +586,9 @@ struct WorldVehicles::impl {
       } else if (f.four) {
         p.chassis = f.four->chassis(i);
         p.speed = f.four->body(i).vx;
+      } else if (f.boat) {
+        p.chassis = f.boat->hull(i);
+        p.speed = f.boat->state(i).speed / kScale;
       } else {
         p.chassis = f.boxes.at(static_cast<std::size_t>(i));
         p.speed = f.sim->speeds_normalized()[i] / kScale;
@@ -610,8 +659,11 @@ struct WorldVehicles::impl {
       return *slot;
     auto f = std::make_unique<fleet>();
     f->plant = plant;
+    // A boat's navigator plans on the water deep enough for the deepest boat, land blocked.
+    const std::shared_ptr<const cvc::nav::world_grid> plan =
+        vehicle_plant_floats(plant) ? boat_grid() : grid;
     f->sim = std::make_unique<cvc::nav::sim_world>(
-        cfg, grid->occupancy.data(), grid->occupancy.data(), cvc::nav::coef_mlp::default_biased(),
+        cfg, plan->occupancy.data(), plan->occupancy.data(), cvc::nav::coef_mlp::default_biased(),
         nullptr, nullptr, nullptr, 0);
     f->sim->set_capture_drive_telemetry(drive_tel);
     ph::nav_plant_options o;
@@ -640,10 +692,109 @@ struct WorldVehicles::impl {
       b.step_world = false;
       f->four = std::make_unique<ph::dyn_4w_plant>(first, std::move(b));
       f->sim->set_plant(f->four.get());
+    } else if (vehicle_plant_floats(plant)) {
+      make_boat_fleet(*f, o);
     } // kinematic: nav's bicycle, and a kinematic box each in the world
     slot = std::move(f);
     return *slot;
   }
+
+  // The boats' water deep enough for the deepest boat archetype's draft and keel clearance: the
+  // ground their navigator plans on (WorldSpawns' medium grid).
+  std::shared_ptr<const cvc::nav::world_grid> boat_grid() const {
+    spawn_need n;
+    n.medium = cvc::nav::plant_medium::water;
+    n.draft = deepest_draft();
+    return spawns->ground_for(n).grid;
+  }
+  double deepest_draft() const {
+    double deepest = 0.0;
+    for (const vehicle_archetype &a : archetypes)
+      if (vehicle_plant_floats(a.plant)) {
+        const ph::dyn_boat_desc b = boat_desc_of(a);
+        deepest = std::max(deepest, ph::dyn_boat_plant::draft(b.boat, b.boat.hull.mass, 1000.0));
+      }
+    return deepest;
+  }
+
+  // A boat fleet: a dyn_boat_plant that the world steps (step_world off), on the world's water.
+  void make_boat_fleet(fleet &f, const ph::nav_plant_options &o) {
+    ensure_water();
+    ph::dyn_boat_plant_options b;
+    b.plant = o;
+    b.physics = world;
+    b.step_world = false;
+    f.boat = std::make_unique<ph::dyn_boat_plant>(
+        std::vector<ph::dyn_boat_desc>{ph::dyn_boat_desc::launch()}, std::move(b));
+    f.sim->set_plant(f.boat.get());
+  }
+
+  // The water a boat floats on. The world's own (a scene's water node's field) where it covers the
+  // grid's water; else a still field at the grid's water level over the grid, from below its lowest
+  // ground, added once per grid and world (it needs the app for its volume; without one the boats
+  // find no water and are refused).
+  void ensure_water() {
+    if (still_water.valid() || !grid || !grid->has_water() || !app)
+      return;
+    const double h = grid->cell();
+    for (std::size_t i = 0; i < grid->water_depth.size(); ++i)
+      if (grid->water_depth[i] > 0.5) {
+        const double x = grid->min_x + static_cast<double>(i % grid->cols) * h,
+                     y = grid->min_y + static_cast<double>(i / grid->cols) * h;
+        if (world->water_at({x, y, grid->water_level - 0.25}).density > 0.0)
+          return; // the world has water there
+        break;
+      }
+    double lowest = grid->water_level;
+    for (const float z : grid->height)
+      lowest = std::min(lowest, static_cast<double>(z));
+    auto box = std::make_shared<cvc::volume>(*app, cvc::dimension(2, 2, 2), cvc::Float,
+                                             cvc::bounding_box(grid->min_x, grid->min_y,
+                                                               lowest - 1.0, grid->max_x,
+                                                               grid->max_y, grid->water_level));
+    box->fill(1000.0); // kg/m^3
+    ph::field f;
+    f.kind = ph::field_kind::fluid;
+    f.volume = box;
+    f.drag_coefficient = 1.0;
+    f.damping = 1.0e4;
+    still_water = world->add_field(f);
+  }
+  void drop_still_water() {
+    if (still_water.valid())
+      try {
+        world->remove_field(still_water);
+      } catch (const std::exception &) {
+      }
+    still_water = ph::field_id{};
+  }
+
+  // Each archetype's need of its start (WorldSpawns::set_needs): its medium its plant's
+  // (vehicle_plant::medium()), and a boat's draft (the deepest boat's: they share a navigator) and
+  // half its hull's length.
+  void update_needs() {
+    std::map<std::string, spawn_need> needs;
+    const double deepest = deepest_draft();
+    for (const vehicle_archetype &a : archetypes) {
+      spawn_need n;
+      try {
+        if (const cvc::nav::vehicle_plant *p = fleet_for(a.plant).sim->plant())
+          n.medium = p->medium();
+      } catch (const std::exception &) {
+      }
+      if (n.medium == cvc::nav::plant_medium::water) {
+        n.draft = deepest;
+        n.half_length = vehicle_desc_of(a).half_extents.x;
+      }
+      needs[a.id] = n;
+    }
+    spawns->set_needs(std::move(needs));
+  }
+  // The ground entity `e` starts and aims on: its archetype's medium's.
+  WorldSpawns::start_ground ground_of(const entity &e) const {
+    return spawns->ground_for(e.spec.archetype);
+  }
+  bool floats(const entity &e) const { return vehicle_plant_floats(e.plant); }
 
   // An entity out of its fleet: its vehicle (or box) out of the world.
   void remove_from_fleet(entity &e) {
@@ -795,6 +946,8 @@ struct WorldVehicles::impl {
       steer = 0.45;
       accel = 2.5;
     }
+    if (!(wheelbase > 0.0)) // boats alone: no wheels; their plant plans each one's bicycle
+      wheelbase = 0.7 * length;
     if (!(top > 0.0))
       top = 30.0;
     const double k = std::max(0.1, length / 4.84);
@@ -839,9 +992,12 @@ struct WorldVehicles::impl {
     if (!ready)
       return "waiting for the world's grid";
     const double clearance = std::hypot(e.desc.half_extents.x, e.desc.half_extents.y) + 0.5;
+    if (floats(e) && !ground_of(e).any())
+      return "no water deep and open enough for " + e.spec.archetype;
     if (!e.started) {
       double px = 0.0, py = 0.0, ph = 0.0;
-      if (e.spec.placed && free_at(e.spec.x, e.spec.y, 0.0)) {
+      // A start off its medium (a car's in a lake, a boat's ashore) moves to a free point.
+      if (e.spec.placed && free_at(e, e.spec.x, e.spec.y)) {
         e.sx = e.spec.x;
         e.sy = e.spec.y;
       } else if (!e.spec.placed && spawns &&
@@ -860,7 +1016,7 @@ struct WorldVehicles::impl {
       }
       e.syaw = e.spec.yaw;
       e.started = true;
-    } else if (!free_at(e.sx, e.sy, 0.0)) { // a new world where its start is blocked
+    } else if (!free_at(e, e.sx, e.sy)) { // a new world where its start is blocked
       const std::array<double, 2> p = draw_point(clearance, &e);
       e.sx = p[0];
       e.sy = p[1];
@@ -897,6 +1053,9 @@ struct WorldVehicles::impl {
         a.vehicle = f.bike->add_desc(e.desc);
       else if (f.four)
         a.vehicle = f.four->add_desc(e.desc);
+      else if (f.boat)
+        a.vehicle =
+            f.boat->add_desc(boat_desc_of(*find(e.spec.archetype), e.desc.mass, e.desc.max_speed));
       if (e.spec.controller == "nav@1" && !e.spec.policy.empty()) {
         cvc::nav::policy_library::entry p =
             policies.get(cvc::nav::policy_ref{e.spec.policy, e.spec.policy_sha256});
@@ -939,6 +1098,8 @@ struct WorldVehicles::impl {
           f->bike->world_gone();
         if (f->four)
           f->four->world_gone();
+        if (f->boat)
+          f->boat->world_gone();
         f->boxes.clear();
       }
       for (entity &e : ents)
@@ -968,6 +1129,8 @@ struct WorldVehicles::impl {
         f->bike->before_world_step();
       else if (f->four)
         f->four->before_world_step();
+      else if (f->boat)
+        f->boat->before_world_step();
       else if (!f->jolt) {
         const double t = std::min(1.0, (f->sub + 1.0) / every);
         for (std::size_t i = 0; i < f->boxes.size(); ++i) {
@@ -991,6 +1154,8 @@ struct WorldVehicles::impl {
         f->bike->after_world_step();
       else if (f->four)
         f->four->after_world_step();
+      else if (f->boat)
+        f->boat->after_world_step();
     }
     count_contacts();
   }
@@ -1173,6 +1338,9 @@ struct WorldVehicles::impl {
       } else if (f->four) {
         drive = f->four->last_tick(i).drive;
         total = f->four->books(i).drive;
+      } else if (f->boat) {
+        drive = f->boat->last_tick(i).drive;
+        total = f->boat->books(i).drive;
       }
       out.power_kw = tick > 0.0 ? drive / tick / 1000.0 : 0.0;
       out.energy_wh = total / 3600.0;
@@ -1292,20 +1460,30 @@ struct WorldVehicles::impl {
   float nx(double x) const { return static_cast<float>((x - grid->center_x()) * kScale); }
   float ny(double y) const { return static_cast<float>((y - grid->center_y()) * kScale); }
 
-  bool free_at(double x, double y, double clearance) const {
-    if (!grid || grid->occupied(x, y))
+  // Whether entity `e` may start at (x, y): free on its medium's ground (a boat's with its
+  // clearance from the shore).
+  bool free_at(const entity &e, double x, double y) const {
+    const WorldSpawns::start_ground g = ground_of(e);
+    if (!g.grid || g.grid->occupied(x, y))
       return false;
     int r = 0, c = 0;
-    grid->sample_of(x, y, r, c);
-    return sdf.empty() || sdf[static_cast<std::size_t>(r) * grid->cols + c] >= clearance;
+    g.grid->sample_of(x, y, r, c);
+    return !g.sdf || (*g.sdf)[static_cast<std::size_t>(r) * g.grid->cols + c] >=
+                         (floats(e) ? g.clearance : 0.0);
   }
-  // A free point at least `clearance` from anything blocked, kept kSpacing from the placed
-  // entities' starts (when it can be), drawn the same way on every platform.
+  // A free point of its medium's ground at least `clearance` from anything blocked (a boat's at
+  // least its own), kept kSpacing from the placed entities' starts (when it can be), drawn the
+  // same way on every platform.
   std::array<double, 2> draw_point(double clearance, const entity *self) {
     std::array<double, 2> best{grid->center_x(), grid->center_y()};
+    const WorldSpawns::start_ground g = ground_of(*self);
+    const cvc::nav::world_grid &on = g.grid ? *g.grid : *grid;
+    const std::vector<float> &dist = g.sdf ? *g.sdf : sdf;
+    if (floats(*self))
+      clearance = std::max(clearance, g.clearance);
     for (int attempt = 0; attempt < 24; ++attempt) {
       const std::vector<std::array<double, 2>> p =
-          cvc::nav::free_points(*grid, sdf, 0x9e3779b97f4a7c15ull ^ (++draws), 1, clearance, 0.0);
+          cvc::nav::free_points(on, dist, 0x9e3779b97f4a7c15ull ^ (++draws), 1, clearance, 0.0);
       if (p.empty())
         break;
       best = p[0];
@@ -1331,6 +1509,7 @@ struct WorldVehicles::impl {
       const vehicle_stats s = vehicle_stats_of(d);
       put(at + "plant", a.plant);
       put(at + "preset", a.preset);
+      put(at + "medium", vehicle_plant_floats(a.plant) ? "water" : "land");
       std::string ctl;
       for (const std::string &c : a.controllers)
         ctl += (ctl.empty() ? "" : "\n") + c;
@@ -1569,6 +1748,7 @@ void WorldVehicles::set_ground(std::shared_ptr<const nav::world_grid> grid,
                                std::shared_ptr<const cvc::world::world_geometry> world) {
   impl &d = *_impl;
   d.unplace_all(false);
+  d.drop_still_water(); // the boats' still water was the old grid's
   d.terrain = world ? world->terrain() : nullptr;
   d.spawns->set_world(world_name, grid, std::move(world));
   d.grid = std::move(grid);
@@ -1576,6 +1756,8 @@ void WorldVehicles::set_ground(std::shared_ptr<const nav::world_grid> grid,
   d.status = d.grid ? "ready" : "waiting for the world's grid";
   try {
     d.build_navigator();
+    if (d.ready)
+      d.update_needs();
   } catch (const std::exception &ex) {
     d.fleets.clear();
     d.ready = false;
@@ -1588,9 +1770,12 @@ void WorldVehicles::set_ground(std::shared_ptr<const nav::world_grid> grid,
 void WorldVehicles::world_reset(std::vector<ph::body_id> ground_bodies) {
   impl &d = *_impl;
   d.unplace_all(true);
+  d.still_water = ph::field_id{}; // it went with the old world
   d.ground = std::move(ground_bodies);
   try {
     d.build_navigator();
+    if (d.ready)
+      d.update_needs();
   } catch (const std::exception &ex) {
     d.fleets.clear();
     d.ready = false;
@@ -1914,9 +2099,10 @@ std::vector<entity_plant> WorldVehicles::plants() const {
       o.delta = vs.steer;
       p.steer_command = vs.steer_command;
     } else {
-      // Nav's bicycle: the rear axle, the heading and the speed, in world metres.
+      // Nav's bicycle: the rear axle, the heading and the speed, in world metres. A boat's is the
+      // bicycle nav plans it with; dyn_boat_plant drives it, so the bicycle is not `exact` there.
       p.model = "bike";
-      p.exact = true;
+      p.exact = !g->boat;
       const int n = g->sim->size();
       std::vector<float> pos(2 * static_cast<std::size_t>(n)), head(n), speed(n);
       g->sim->snapshot(pos.data(), head.data(), speed.data(), nullptr, nullptr);

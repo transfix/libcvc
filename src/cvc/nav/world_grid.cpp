@@ -10,10 +10,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cvc/geometry/height_field.h>
 #include <cvc/nav/grid_nav.h>
 #include <cvc/nav/world_grid.h>
 #include <cvc/nav/world_planes.h>
+#include <cvc/world/surface.h>
 #include <cvc/world/world_geometry.h>
 #include <stdexcept>
 
@@ -22,16 +24,17 @@ namespace nav {
 
 namespace {
 
-void wall(world_grid &g) {
+void wall(const world_grid &g, std::vector<std::uint8_t> &occupancy) {
   for (int c = 0; c < g.cols; ++c) {
-    g.occupancy[c] = 1;
-    g.occupancy[static_cast<std::size_t>(g.rows - 1) * g.cols + c] = 1;
+    occupancy[c] = 1;
+    occupancy[static_cast<std::size_t>(g.rows - 1) * g.cols + c] = 1;
   }
   for (int r = 0; r < g.rows; ++r) {
-    g.occupancy[static_cast<std::size_t>(r) * g.cols] = 1;
-    g.occupancy[static_cast<std::size_t>(r) * g.cols + g.cols - 1] = 1;
+    occupancy[static_cast<std::size_t>(r) * g.cols] = 1;
+    occupancy[static_cast<std::size_t>(r) * g.cols + g.cols - 1] = 1;
   }
 }
+void wall(world_grid &g) { wall(g, g.occupancy); }
 
 void size_grid(world_grid &g, double min_x, double min_y, double max_x, double max_y, double cell) {
   if (!(cell > 0.0) || !std::isfinite(cell))
@@ -78,6 +81,43 @@ bool world_grid::occupied(double x, double y) const {
   return occupancy[static_cast<std::size_t>(r) * cols + c] != 0;
 }
 
+double world_grid::depth_at(double x, double y) const {
+  if (water_depth.empty())
+    return 0.0;
+  int r = 0, c = 0;
+  sample_of(x, y, r, c);
+  return water_depth[static_cast<std::size_t>(r) * cols + c];
+}
+
+void set_water(world_grid &g, double level) {
+  if (!std::isfinite(level))
+    throw std::invalid_argument("world_grid: the water level must be finite");
+  const std::size_t n = static_cast<std::size_t>(g.rows) * g.cols;
+  g.water_level = level;
+  g.water_depth.assign(n, 0.0f);
+  for (std::size_t i = 0; i < n; ++i)
+    g.water_depth[i] = static_cast<float>(level - (i < g.height.size() ? g.height[i] : 0.0f));
+}
+
+world_grid medium_grid(const world_grid &g, plant_medium medium, double depth_m) {
+  world_grid out = g;
+  const std::size_t n = static_cast<std::size_t>(g.rows) * g.cols;
+  const bool water = g.water_depth.size() == n;
+  if (medium == plant_medium::land) {
+    if (water)
+      for (std::size_t i = 0; i < n; ++i)
+        if (g.water_depth[i] > depth_m)
+          out.occupancy[i] = 1;
+  } else {
+    const std::vector<std::uint8_t> &solid = g.solid.size() == n ? g.solid : g.occupancy;
+    for (std::size_t i = 0; i < n; ++i)
+      out.occupancy[i] = water && g.water_depth[i] >= depth_m && !solid[i] ? 0 : 1;
+  }
+  if (n > 0)
+    wall(out);
+  return out;
+}
+
 std::size_t world_grid::occupied_count() const {
   return static_cast<std::size_t>(
       std::count_if(occupancy.begin(), occupancy.end(), [](std::uint8_t v) { return v != 0; }));
@@ -93,7 +133,14 @@ world_grid make_grid(const cvc::world::world_geometry &world, double min_x, doub
   const std::size_t n = static_cast<std::size_t>(g.rows) * g.cols;
   g.occupancy.resize(n, 0);
   g.height.resize(n, 0.0f);
+  // Solid: blocked by something that is not water (a water surface's rf_material is "water").
+  const cvc::world::surface_registry &surfaces = world.surfaces();
+  g.solid.assign(n, 0);
+  for (std::size_t i = 0; i < n; ++i)
+    g.solid[i] = g.occupancy[i] && !(i < p.surface.size() &&
+                                     std::strcmp(surfaces.rf_material(p.surface[i]), "water") == 0);
   wall(g);
+  wall(g, g.solid);
   return g;
 }
 

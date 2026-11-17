@@ -1610,6 +1610,8 @@ scene:
           look: { file: racer.glb, scale: 1, yaw: 90, z: 0 } # default: the chassis box
         truck:
           plant: dynamic4w:humvee                            # the four-wheel model, a Humvee
+        boat:
+          plant: dynamicboat:launch                          # a boat: launch or jonboat
   ```
 
   - **Archetypes.** Each names its plant, its body (a preset, with `mass`, `max_speed`,
@@ -1625,6 +1627,7 @@ scene:
     | `dynamic` (`dynamic:<preset>`) | the dynamic single-track model: tires, load transfer, actuator lag, with its energy books | its chassis box, which the world's contacts push back into the model |
     | `dynamic4w` (`dynamic4w:<preset>`) | the four-wheel model with suspension: each wheel on the ground under it | as `dynamic`'s |
     | `kinematic` | nav's bicycle | a kinematic box: it pushes what it meets, and nothing stops it (the navigator keeps it off the buildings) |
+    | `dynamicboat` (`dynamicboat:<preset>`, `launch` or `jonboat`) | a boat (`dyn_boat_plant`): a hull, a propeller and a rudder or outboard, on the world's water (a `water` node's field, or still water at the world's water level the runtime adds without one); its navigator plans on the water deep enough for it, the land blocked. `vehicle:` overrides only `mass` and `max_speed` | its hull, afloat |
 
     `dynamic:<preset>` names the vehicle as `vehicle: <preset>` does. The dynamic models take one
     substep of each world step, so they step with everything else; each plant's entities have a
@@ -1716,6 +1719,9 @@ scene:
     spawns:
       policy: round_robin      # fixed | random | round_robin | nearest_free
       scope: team              # the draw and the turn kept per team, per archetype, or for all
+      ford_depth: 0.3          # m of water a land vehicle may start in
+      keel_clearance: 0.3      # m of water a boat needs under its draft
+      shore_clearance: 0       # m of open water a boat needs past half its length
       points:
         - { at: [-60, -60], heading: 45, team: 0, world: flat }   # heading: degrees from +x
         - { at: [60, 60], heading: -135, team: 1, archetype: humvee }
@@ -1726,14 +1732,25 @@ scene:
     every world), so the table follows the world on. A point off the world, on anything blocked
     in the world's grid, or within 6 m of another is refused; one the grid blocks after a
     Regenerate is shown blocked and not taken.
+  - **The medium.** Each archetype starts on its plant's medium (`vehicle_plant::medium()`): a
+    car, on land, where the grid is free and the still water (the grid's water layer: a `water`
+    node's level, or a generated world's, less the ground) is no deeper than `ford_depth`; a boat
+    (`plant: dynamicboat`), on water, where it is at least the boat's draft and `keel_clearance`
+    deep and open for half its length and `shore_clearance` round it. An untagged point serves
+    only the archetypes whose medium it is on, and a tagged one off its archetype's medium serves
+    nothing. A start a spawn gives (`at`) off its medium, a car's in a lake or a boat's ashore,
+    moves to a free point of its medium, as a blocked one does.
   - **The policy.** A spawn takes a point from the free points whose tags match it: `fixed` the
     first, `random` any (the same draw on every platform), `round_robin` each in turn,
     `nearest_free` the first no vehicle is near. A point a vehicle sits on moves the new vehicle
     aside along the point's normal. With no point to take, a vehicle starts at a free point of
-    the grid.
+    the grid, on its medium.
   - **Suggestions.** `spawns.suggest.request` samples points along the world's roads (a generated
     world's road mesh; a terrain or a flat ground has none): one per `suggest.spacing` metres
-    square, at most `suggest.count`, free in the grid, each heading along its road.
+    square, at most `suggest.count`, free in the grid and out of water deeper than a ford, each
+    heading along its road. When `tag.archetype` is a boat, it samples the water deep and open
+    enough for it instead, each body of water with room taking points in turn, each heading
+    along its shore.
     `accept.request` adds them, tagged with `tag.team` and `tag.archetype`.
   - **Editing from keys.** A viewport with `input: pick` and `pick: spawns.pick` is a minimap:
     each press that hits runs `spawns.tool` at the point. `add` makes a point facing
@@ -1741,7 +1758,8 @@ scene:
     `tag` retags it. `clear.request` removes the world on's points. From C++:
     `WorldVehicles::spawns()` (`add`, `remove`, `tag`, `choose`, `suggest`, `accept`).
   - **What the runtime publishes.** Under `spawns`: `ids`, `count`, `summary`,
-    `points.<id>.{x, y, z, heading, team, archetype, world, free}`, `suggestions.{count,
+    `points.<id>.{x, y, z, heading, team, archetype, world, free, medium}` (`medium`: land,
+    water, both, or empty for neither), `suggestions.{count,
     summary}`, `world`, `policy`, `scope`, `status` and `rev`.
   - **Drawing.** cvcGL draws each point as a pad in its team's colour (white for any team, dark
     when blocked) with a pointer along its heading, and each suggestion grey, all tagged
