@@ -1687,6 +1687,18 @@ scene:
       - `jolt`: the four-wheel model with the vehicle's own numbers (`nav_plant::dyn4_si_of`).
         Its state is read back from the chassis, so `exact` is false.
       - `kinematic`: nav's bicycle, its rear axle, heading and speed, and its limits in metres.
+      - On every plant, `drive`: what the navigator's drive did on the last tick
+        (`entity_drive`): its policy's coefficients (`alpha`, `beta`, `gamma`), the point it
+        steered for (`goal_x`, `goal_y`: its carrot, world m) and the external force it summed
+        (`force_x`, `force_y`: an intent's, m/s², world frame). `known` is false until a tick
+        has run. The gym keeps the drive's telemetry for it (`drive_telemetry=True`, the
+        default; `WorldVehicles::set_drive_telemetry`), which changes nothing the drive does.
+        With these a twin replays the gym's own controller on a tick, a force included.
+    - `set_intent(id, steer=, accel=, mode=, weight=, force=(fx, fy), force_steers=)`,
+      `intent(id)` and `clear_intent(id)` are an agent's intent, as `pycvc.WorldEntities` sets
+      one: from the next step until changed, so a force (m/s², world frame) acts on the drive
+      while the navigator drives (a step's finite command still takes that step in its place).
+      A reset clears every agent's.
     - GRL-SNAM's `grl_snam.gym_twin` is the torch twin built on them.
 - **Terrain transforms.** A terrain follows its node's position but not its rotation or scale.
   Draw a ground you collide with unrotated and unscaled.
