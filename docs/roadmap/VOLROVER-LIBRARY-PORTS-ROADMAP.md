@@ -1018,6 +1018,34 @@ a few files:
      fewer pieces, from a Delaunay rather than a plain constrained triangulation underneath). An
      untiled region's interior vertices will differ from the legacy's; its boundary, and every
      tile outside untiled regions, need not.
+   - **What P3b built (2026-11-17).** The tiler is vendored into `src/cvc/geometry/tiler/`
+     (`cvc::tile_contours`, `inc/cvc/geometry/tiler.h`). CGAL's kernel is the tiler's own
+     (`kernel.h`: points with z and id, segments, lines, rays, polygons, all on Shewchuk's exact
+     predicates), and the GPL calls go through `cvc::planar` on a grid fitted per call. Against the
+     legacy library's own runs (`tools/volrover-goldens`, three committed Reconstruct series):
+     - a tube tiled between contour vertices is the legacy surface, triangle for triangle;
+     - with caps, branches and an annulus, every tile between contour vertices is the legacy's;
+       the untiled regions' fill is within 0.13 of the slice spacing, with the same topology;
+     - where curation rebuilds overlapping contours (Clipper2 in place of CGAL's exact Booleans),
+       the surfaces are within 1.03 times the curation distance, with the same topology.
+
+     What it took, beyond the rewrites the table above lists:
+     - **The legacy hashes.** Under CGAL 6 the legacy `Point_2` is `CGAL::Point_2` of its
+       kernel, so its unordered containers hash points by x and y only (CGAL's `hash_value`),
+       never by `Point_25.cpp`'s x, y and z. With an x-y-z hash the interpolated heights of the
+       untiled fill were never found again. The port's kernel hashes as CGAL 6 does, so the
+       containers also iterate in the legacy order.
+     - **`fix_simple`'s rounding stays.** The legacy rounds every curated contour to 10 decimal
+       places. That rounding returns a contour that no other one touches to its own vertices
+       after the dilation and erosion, so it is kept.
+     - **The legacy crashed on every untiled region** when clang built it: its debug hook
+       `Callback::untiled_region` returns no value. The goldens build patches that (and two
+       CGAL 6 API changes), and MSVC cannot compile the legacy kernel at all.
+     - **Absolute tolerances.** The legacy code keeps tolerances of 1e-5 to 1e-11 world units, so
+       it works for coordinates of order 1 to 10^4 (Reconstruct's micron traces), not far below.
+     - **The legacy tests** (12 CppUnitLite2 files): 58 of their tests run on gtest. The others
+       read `test_data/`, which volrover never committed, or call a harness the legacy itself had
+       commented out (`tiler_legacy_test.cpp` lists each one).
 
 **ContourTiler's other rough edges, and what the port does with them**
 
@@ -1525,7 +1553,7 @@ not as follow-ups.
 | P1 Skeleton core | M | `cvc::tet_complex`, libcvc's own exact incremental Delaunay on Shewchuk's predicates (settled 2026-11-12; Qhull only as the general-position cross-check), with its adapter, and its first PR proving the incremental build against the batch build and CGAL's (§2, transfix/libcvc#1157); vendor into `src/cvc/geometry/skeleton/` with the shared cocone core and `skeleton_context`; the §2 fixes; `skeleton_stepper` with every phase sliced, `cvc::skeletonize` and its job; `cvc skeleton`; pycvc; `skeleton.compute`; §2's tests | P0a–P0c |
 | P2 Skeleton in Ariadne | S | The `mesh_lab` `skeleton` request, children and `mesh_tools` section; a demo document with a golden image, native and in arigl-web | P1 |
 | P3a Planar module | M | `cvc::planar`: the snapping grid, predicates, polygons, Clipper2 Booleans and offsets, CDT, the Boost.Polygon medial axis, Sibson interpolation; T2 against brute force | P0c |
-| P3b Tiler core | L | Vendor ContourTiler into `src/cvc/geometry/tiler/` on `cvc::planar`, with the context-held logger; in-memory output, const input; `tile_stepper` slicing within a slice pair (§3); its 12 tests as gtest; `cvc tile`; pycvc; `tiler.tile`; §3's tests | P3a, P0d |
+| P3b Tiler core | L | Vendor ContourTiler into `src/cvc/geometry/tiler/` on `cvc::planar`, with the context-held logger; in-memory output, const input; `tile_stepper` slicing within a slice pair (§3); its 12 tests as gtest; `cvc tile`; pycvc; `tiler.tile`; §3's tests. *Built:* the core, `tiler_test` and `tiler_legacy_test`, and the legacy goldens (§3, "What P3b built"); `cvc tile`, pycvc and `tiler.tile` follow in their own PR | P3a, P0d |
 | P4 Tiler in Ariadne | S | `contour_lab`, reading a file or another node's contours, and `contour_tiler.ari`, with a demo on a small redistributable Reconstruct series (find one), native and in arigl-web | P3b |
 | P5 Segmentation core | M | §5 steps 1–2: GenSeg vendored into `src/cvc/volume/segmentation/` with `genseg_context` and in-memory input and output; `segment_stepper` with every phase sliced (§5); voxel-for-voxel parity, then the clean-up; `cvc segment`; pycvc; `segment.seeded`; §5's tests | P0a, P0b, P0d |
 | P6 Paper mode | S–M | §5 steps 3–4: the SegMed audit, `cvc::gradient_vector_diffusion` as a stepper, `seed_mode::critical_points` and `critical_point_seeds`, `segment.critical-points`, and #123's seed generators. The default-seeding switch is its own later PR (§5 step 5) | P5 |
