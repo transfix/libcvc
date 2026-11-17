@@ -398,7 +398,7 @@ nondeterministic and disturbs any other `rand()` user.
 | Skeletonization | the global `bounding_box` vector, never cleared; `srand(0)` / `rand()` for colours; degenerate-case debug files in the current directory |
 | ContourTiler | log4cplus: 156 `getInstance` calls and 104 function-static loggers in 48 files; ContourFilter's `Controls::instance()`, which the app's `.ser` reader goes through; static counters naming debug files |
 | GenSeg | about 25 globals; `extern VolMagick::VolumeFileInfo loadedVolumeInfo`, set by the reader; output files in the current directory |
-| SegMed | not audited yet (P6 does it) |
+| SegMed | audited in P6 (2026-11-15): 36 namespace-scope statics (9 in `GVF.cpp`, 18 in `segment.cpp`, 9 in `inout.cpp`); `read_data` exits on a bad file (three `exit()`s) and `gvfflow` on each of six failed mallocs; `write_data` writes six fixed names into the current directory (`heart_component_01..04.rawiv`, `heart_component_all.rawiv`, `heart_segment.rawv`) and the XML-RPC entry `<input>.seg.rawiv` beside its input. `GVF_Compute` returns right after its initial field (`GVF.cpp:97`), so the diffusion, the critical points and their clustering never ran, `velocity` leaked and the critical list came back unset; `Segment` ignores it anyway and marches from 13 voxels hard-coded for one heart dataset (z up to 320, out of bounds on anything smaller). `GVF_Cluster` recurses once per voxel of a run. All of it goes: the port (`genseg::critical_seeds`, `cvc::gradient_vector_diffusion`) keeps its state on the stepper |
 | VolumeGridRover | nothing carries over; its `QSettings` cache directory and temp files stay behind |
 
 ContourTiler's logging goes through a shim whose logger is a member of `tiler_context`. Each
@@ -1280,6 +1280,20 @@ the same paper. Its `GVF_Compute` (`GVF.cpp:69`) finds the critical points of th
 gradient field, and its `Segment` marches from them into `<file>.seg.rawiv`. Nothing in
 VolumeRover2 calls it.
 
+*What P6 found (§1.3's table has the audit):* `GVF_Compute` returns right after its initial field,
+so none of its diffusion or critical points ever ran, and `Segment` marches from seeds hard-coded
+for one heart dataset. The dead code is still the paper's method, with two differences from the
+paper: it diffuses the gradient of |∇I| (the paper's f = I is for the critical points), and it
+keeps only its field's minima above `tlow` (flat bright regions), thinned to one voxel in 21 of each
+26-connected run. Its diffusion weighs neighbours by the angles of the field *before* diffusion
+(SecStruct's copy uses the field being diffused). P6 ports it with both choices as parameters
+(`cp_field`, `cp_weights`, `cp_sample`): the paper's are the defaults, and SegMed's reproduce its
+field bit for bit and its critical list point for point (T1, on the dead code built with the early
+return patched out, `tools/volrover-goldens`). Around an extremum the 26-neighbour test marks the
+whole 3x3x3 block, and SegMed's thinning keeps the block's first voxel in x-fastest order; on a
+steep peak that voxel's step cost is past `MAX_TIME`, so its front never moves. The paper mode
+keeps every critical voxel instead (`cp_sample = 0`).
+
 **Why it doesn't work properly today**
 
 - **Dangling pointers:** `generalSegmentation` keeps `string(params[0]).c_str()` and
@@ -1367,6 +1381,13 @@ to draw. It never reads them while a chunk is writing them.
      SecStruct, SegMonomer and the paper's §2.3 volumetric skeletons use the same field.
 4. **Seed generators:** fold in transfix/libcvc#123's seed generators (`criticalPntsToSeed`,
    `SeedProduce*`).
+   - *Done in P6 part 2* (`inc/cvc/volume/seed_generators.h`): `capsid_critical_points` is
+     `criticalPntsToSeed` (SegSubunit's `FindCriticalPoints`: maxima kept for a capsid's T-number,
+     and the gradient magnitude's maxima when they are few), a sliced stepper; `rotated_seeds` is
+     `SeedProduce` and `SeedProduceRegardingAxis` (N-fold rotational copies about an axis). Both
+     are on the CLI (`cvc capsid-seeds`, `cvc rotate-seeds`) and in pycvc. VolUtils left
+     volrover's master (#19) before the pinned commit, so they have no T1 goldens: their tests
+     check the legacy definitions.
 5. **The default seeding** (settled 2026-11-08): `volume_grid` and the CLI keep GenSeg's local
    maxima until the paper mode matches the legacy results on real maps. Then the default switches
    to `critical_points`, in its own PR, with the comparison in its description.
@@ -1374,8 +1395,8 @@ to draw. It never reads them while a chunk is writing them.
 **Surfaces**
 
 - **CLI:** `cvc segment in.rawiv --seeds classes.vgr --tlow 40 --thigh 200 -o out`. It writes the
-  labels volume and the per-class volumes. `--auto critical-points` runs the paper's mode with no
-  seeds file.
+  labels volume and the per-class volumes. `--automatic critical-points` runs the paper's mode
+  with no seeds file (the `--cp-*` flags tune it).
 - **pycvc:** `pycvc.segment_seeded(vol, seeds, t_low=40, ...)`, `segment_seeded_job` and
   `critical_point_seeds`.
 - **DSL:** `(segment.seeded vol classes params)` and `(segment.critical-points vol params)`, each

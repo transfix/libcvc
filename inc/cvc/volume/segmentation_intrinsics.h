@@ -8,8 +8,9 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-// segment.seeded, cvc::segment_seeded in the DSL (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md
-// §1.6, §5), in the three forms cvc/core/job_intrinsics.h gives every port's op:
+// segment.seeded and segment.critical-points, cvc::segment_seeded and cvc::critical_point_seeds in
+// the DSL (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.6, §5), in the three forms
+// cvc/core/job_intrinsics.h gives every port's op:
 //
 //   (segment.seeded vol classes [params])         the segmentation: the calling process waits on
 //                                                 the job
@@ -22,8 +23,10 @@
 // `vol` is a cvc::volume and `classes` a cvc::point_classes (cvc/volume/point_classes.h): each a
 // data object holding one, or a state path naming the node whose data channel does. `params` is a
 // dict of seeded_segmentation_params' fields (cvc/volume/segmentation_params.h: "t_low", "t_high",
-// "normalized_thresholds", "gamma", "automatic", "variable", "timestep", "class_volumes"), or nil
-// for the defaults; (params.defaults "segment.seeded") lists them. The result is a dict:
+// "normalized_thresholds", "gamma", "automatic", "variable", "timestep", "class_volumes" and the
+// critical points' "cp_*"), or nil for the defaults; (params.defaults "segment.seeded") lists them.
+// With "automatic" "critical_points" the classes may be empty (point-classes.remove nil ...): the
+// paper's feature and background seeds then seed the run alone. The result is a dict:
 //   "labels"         a data object holding the labels, a UChar cvc::volume (255: no class)
 //   "classes"        a list of data objects, a cvc::volume per class (empty without
 //                    class_volumes)
@@ -35,6 +38,18 @@
 //   "warnings"       a list of strings
 // A failure (no seeds, a seed outside the volume, a constant volume, a bad parameter) raises at
 // the call. Like every intrinsic, none of these reads or writes a file.
+//
+// segment.critical-points, cvc::critical_point_seeds (the paper's seeds, as seed_mode::
+// critical_points makes them), in the same three forms:
+//
+//   (segment.critical-points vol [params])
+//   (segment.critical-points-async vol [params])
+//   (segment.critical-points-start vol [params] target)
+//
+// `params` is the same dict (its "cp_*" fields, "normalized_thresholds", "variable" and
+// "timestep" are the ones it reads). The result is a data object holding cvc::point_classes: two
+// classes, "feature" then "background" (point-classes.points reads them), ready for segment.seeded
+// or a volume_grid's points.
 
 #ifndef CVC_VOLUME_SEGMENTATION_INTRINSICS_H
 #define CVC_VOLUME_SEGMENTATION_INTRINSICS_H
@@ -49,10 +64,12 @@ namespace state_exec {
 struct intrinsics_context;
 }
 
-// The op, for a host that registers ops itself.
+// The ops, for a host that registers ops itself.
 job_op segment_seeded_op(sliced_threading threading = sliced_threading::automatic);
+job_op critical_point_seeds_op(sliced_threading threading = sliced_threading::automatic);
 
-// segment.seeded's three forms, and job.cancel and params.*, in `env`.
+// segment.seeded's and segment.critical-points' three forms, and job.cancel and params.*, in
+// `env`.
 void register_segmentation_intrinsics(state_exec::environment_ptr env,
                                       state_exec::intrinsics_context &ictx, cvc::app &app);
 
