@@ -362,8 +362,8 @@ Polyline_2 xz_swap_neg(const Polyline_2 &p) {
 // Point_3 rotate_x(const Point_3& p, Number_type q)
 // {
 //   return Point_3(p.x(),
-// 		 p.y() * cos(q) - p.z() * sin(q),
-// 		 p.y() * sin(q) + p.z() * cos(q));
+// p.y() * cos(q) - p.z() * sin(q),
+// p.y() * sin(q) + p.z() * cos(q));
 // }
 
 // Polygon_2 rotate_x(const Polygon_2& p, Number_type q)
@@ -412,7 +412,7 @@ bool is_legal(
 
 // template <typename Polygon, typename Triangle_iter>
 // void triangulate_convex(const Polygon& polygon, Triangle_iter triangles,
-// 		 const boost::unordered_map<Point_3, list<Segment_3_undirected> >& point2edges)
+// const boost::unordered_map<Point_3, list<Segment_3_undirected> >& point2edges)
 // {
 //   if (!polygon.is_convex())
 //     throw logic_error("Polygon is not convex");
@@ -480,7 +480,7 @@ Polygon_2 cut_ear(
     Polygon_2::Vertex_circulator pp = p - 1;
     if (!is_legal(*pp, *p, *c, point2edges) && can_cut(polygon, p, c, n, point2edges))
     //     if (!is_legal(*pp, *p, *c, point2edges) &&
-    // 	is_legal(*p, *c, *n, point2edges))
+    // is_legal(*p, *c, *n, point2edges))
     {
       *triangles++ = Triangle(*p, *c, *n);
       ret.erase(c);
@@ -489,7 +489,7 @@ Polygon_2 cut_ear(
     Polygon_2::Vertex_circulator ppp = pp - 1;
     if (!is_legal(*pp, *p, *c, point2edges) && can_cut(polygon, ppp, pp, p, point2edges))
     //     if (!is_legal(*pp, *p, *c, point2edges) &&
-    // 	is_legal(*p, *c, *n, point2edges))
+    // is_legal(*p, *c, *n, point2edges))
     {
       *triangles++ = Triangle(*ppp, *pp, *p);
       ret.erase(pp);
@@ -591,7 +591,7 @@ void triangulate_safe(
   //   typedef std::list<PT::Polygon_2> Partition_polygons;
   //   Partition_polygons partition_polygons;
   //   CGAL::approx_convex_partition_2(polygon.vertices_begin(), polygon.vertices_end(),
-  // 				  std::back_inserter(partition_polygons));
+  // std::back_inserter(partition_polygons));
 
   //   for (Partition_polygons::iterator it = partition_polygons.begin(); it !=
   //   partition_polygons.end(); ++it)
@@ -645,7 +645,7 @@ int distance(const Point_2 &p, const Point_2 &q, const Polygon_2 &P) {
 //   typedef std::list<PT::Polygon_2> Partition_polygons;
 //   Partition_polygons partition_polygons;
 //   CGAL::approx_convex_partition_2(P.vertices_begin(), P.vertices_end(),
-// 				  std::back_inserter(partition_polygons));
+// std::back_inserter(partition_polygons));
 
 //   list<Polygon_2> polygons;
 //   list<Segment_2> segments;
@@ -674,25 +674,25 @@ int distance(const Point_2 &p, const Point_2 &q, const Polygon_2 &P) {
 
 // template
 // void get_boundary_intersections(vector<Polygon_2>::iterator begin, vector<Polygon_2>::iterator
-// end, 				back_insert_iterator<vector<Point_2> > intersecting_points, bool report_endpoints);
+// end, back_insert_iterator<vector<Point_2> > intersecting_points, bool report_endpoints);
 
 // template
 // void get_boundary_intersections(vector<Polygon_2>::iterator begin, vector<Polygon_2>::iterator
-// end, 				back_insert_iterator<list<Point_2> > intersecting_points, bool report_endpoints);
+// end, back_insert_iterator<list<Point_2> > intersecting_points, bool report_endpoints);
 
 // template
 // void get_boundary_intersections(list<Polygon_2>::iterator begin, list<Polygon_2>::iterator end,
-// 				back_insert_iterator<list<Point_2> > intersecting_points, bool
+// back_insert_iterator<list<Point_2> > intersecting_points, bool
 // report_endpoints);
 
 // template
 // void get_boundary_intersections(vector<Polygon_2>::const_iterator begin,
-// vector<Polygon_2>::const_iterator end, 				back_insert_iterator<vector<Point_2> >
+// vector<Polygon_2>::const_iterator end, back_insert_iterator<vector<Point_2> >
 // intersecting_points, bool report_endpoints);
 
 // template
 // void get_boundary_intersections(list<Polygon_2>::const_iterator begin,
-// list<Polygon_2>::const_iterator end, 				back_insert_iterator<list<Point_2> > intersecting_points,
+// list<Polygon_2>::const_iterator end, back_insert_iterator<list<Point_2> > intersecting_points,
 // bool report_endpoints);
 
 template void triangulate_safe(

@@ -28,7 +28,6 @@
 #include "print_utils.h"
 #include "sweep_line_visitors.h"
 
-
 namespace cvc::tiler {
 
 template <typename V1, typename V2> class Fork_visitor {

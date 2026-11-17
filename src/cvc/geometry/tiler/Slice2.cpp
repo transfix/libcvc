@@ -40,7 +40,7 @@
 //       Polygon_with_holes_2& pwh = *pit;
 //       Polygon_with_holes_2 new_pwh(cvc::tiler::remove_collinear(pwh.outer_boundary(), epsilon));
 //       for (Polygon_with_holes_2::Hole_iterator hit = pwh.holes_begin(); hit != pwh.holes_end();
-//       ++hit) { 	Polygon_2& p = *hit; 	new_pwh.add_hole(cvc::tiler::remove_collinear(p, epsilon));
+//       ++hit) { Polygon_2& p = *hit; new_pwh.add_hole(cvc::tiler::remove_collinear(p, epsilon));
 //       }
 //       pwh = new_pwh;
 //     }
@@ -60,8 +60,8 @@
 //   // for (Slice2::iterator it = slice.begin(); it != slice.end(); ++it) {
 //   //   Contour_container& comp_contours = it->second;
 //   //   for (Contour_iterator c_it = comp_contours.begin();
-//   // 	 c_it != comp_contours.end();
-//   // 	 ++c_it)
+//   // c_it != comp_contours.end();
+//   // ++c_it)
 //   //   {
 //   //     Contour_handle c = *c_it;
 //   //     all_contours.push_back(c);
@@ -71,12 +71,12 @@
 //   // for (Slice2::iterator it = slice.begin(); it != slice.end(); ++it) {
 //   //   Contour_container& comp_contours = it->second;
 //   //   for (Contour_iterator c_it = comp_contours.begin();
-//   // 	 c_it != comp_contours.end();
-//   // 	 ++c_it)
+//   // c_it != comp_contours.end();
+//   // ++c_it)
 //   //   {
 //   //     Contour_handle c = *c_it;
 //   //     if (!c->polygon().is_simple()) {
-//   // 	throw logic_error("Contour is not simple before intersection removal...");
+//   // throw logic_error("Contour is not simple before intersection removal...");
 //   //     }
 //   //     contours.push_back(c);
 //   //   }
@@ -120,8 +120,8 @@
 // //   {
 // //     const Contour_container& comp_contours = it->second;
 // //     for (Contour_const_iterator c_it = comp_contours.begin();
-// // 	 c_it != comp_contours.end();
-// // 	 ++c_it)
+// // c_it != comp_contours.end();
+// // ++c_it)
 // //     {
 // //       Contour_handle c = *c_it;
 // //       return c->slice();
@@ -136,8 +136,8 @@
 // //   {
 // //     const Contour_container& comp_contours = it->second;
 // //     for (Contour_const_iterator c_it = comp_contours.begin();
-// // 	 c_it != comp_contours.end();
-// // 	 ++c_it)
+// // c_it != comp_contours.end();
+// // ++c_it)
 // //     {
 // //       Contour_handle c = *c_it;
 // //       Polygon_2& p = c->polygon();
@@ -145,23 +145,23 @@
 // //       Polygon_2::Edge_const_circulator begin = p.edges_circulator();
 // //       Polygon_2::Edge_const_circulator ci = begin;
 // //       do {
-// // 	Segment_2 seg = *ci;
-// // 	Segment_3_undirected useg(Segment_3(seg.source(), seg.target()));
-// // 	if (edge2points.find(useg) == edge2points.end()) {
-// // 	  newp.push_back(seg.source());
-// // 	}
-// // 	else {
-// // 	  // There are points on this edge that need to be augmented.
-// // 	  list<Point_3> points = edge2points.find(useg)->second;
-// // 	  points.sort(Distance_functor<Point_3>(seg.source()));
-// // 	  points.push_front(seg.source());
-// // 	  list<Point_3>::iterator new_end = unique(points.begin(), points.end());
-// // 	  new_end = remove(points.begin(), new_end, seg.target());
-// // 	  for (list<Point_3>::iterator p_it = points.begin(); p_it != new_end; ++p_it) {
-// // 	    newp.push_back(*p_it);
-// // 	  }
-// // 	}
-// // 	++ci;
+// // Segment_2 seg = *ci;
+// // Segment_3_undirected useg(Segment_3(seg.source(), seg.target()));
+// // if (edge2points.find(useg) == edge2points.end()) {
+// // newp.push_back(seg.source());
+// // }
+// // else {
+// // // There are points on this edge that need to be augmented.
+// // list<Point_3> points = edge2points.find(useg)->second;
+// // points.sort(Distance_functor<Point_3>(seg.source()));
+// // points.push_front(seg.source());
+// // list<Point_3>::iterator new_end = unique(points.begin(), points.end());
+// // new_end = remove(points.begin(), new_end, seg.target());
+// // for (list<Point_3>::iterator p_it = points.begin(); p_it != new_end; ++p_it) {
+// // newp.push_back(*p_it);
+// // }
+// // }
+// // ++ci;
 // //       } while (ci != begin);
 // //       p = newp;
 // //     }
@@ -178,8 +178,8 @@
 // //     ss << component << ": ";
 // //     const Contour_container& comp_contours = it->second;
 // //     for (Contour_const_iterator c_it = comp_contours.begin();
-// // 	 c_it != comp_contours.end();
-// // 	 ++c_it)
+// // c_it != comp_contours.end();
+// // ++c_it)
 // //     {
 // //       Contour_handle c = *c_it;
 // //       ss << pp(c->polygon()) << " ";

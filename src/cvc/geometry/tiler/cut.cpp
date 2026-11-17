@@ -403,7 +403,7 @@ void cut_polygon_with_polylines(const Polygon_2 &p, Polyline_iter cuts_begin,
             const Polyline_2 &cut = subcuts[0];
             Polygon_2 a, b;
             boost::tie(a, b) = cut_polygon_with_polyline(polygon, cut);
-            // 	    if (a.size() > 2)
+            // if (a.size() > 2)
             {
               if (a.size() < 3 || b.size() < 3) // || !a.is_simple() || !b.is_simple())
                 throw logic_error("Error in cutting polygons");
@@ -627,8 +627,8 @@ cut_polygon_with_polylines(const Polygon_2 &p,
 
 // template
 // void cut_polygon_with_polylines(const Polygon_2& p,
-// 		       boost::unordered_set<Polyline_2>::iterator cuts_begin,
-// boost::unordered_set<Polyline_2>::iterator cuts_end, 		       back_insert_iterator<list<Polygon_2> >
+// boost::unordered_set<Polyline_2>::iterator cuts_begin,
+// boost::unordered_set<Polyline_2>::iterator cuts_end, back_insert_iterator<list<Polygon_2> >
 // polys);
 
 template void cut_polygon_with_polylines(const Polygon_2 &p,

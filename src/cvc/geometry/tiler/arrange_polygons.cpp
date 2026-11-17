@@ -36,7 +36,6 @@
 // #include <boost/tuple/tuple.hpp>
 // #include <boost/unordered_map.hpp>
 
-
 // namespace cvc::tiler {
 
 // typedef boost::shared_ptr<Polygon_2> Polygon_handle;

@@ -167,9 +167,9 @@ Segment_3 to_3(const Segment_2 &s) { return Segment_3(s.source(), s.target()); }
 
 // template <typename Out_iter>
 // void remove_intersections(TW_handle tw_yellow,
-// 			  TW_handle tw_green,
-// 			  Number_type yz, Number_type gz,
-// 			  Out_iter new_yellow, Out_iter new_green, Number_type epsilon)
+// TW_handle tw_green,
+// Number_type yz, Number_type gz,
+// Out_iter new_yellow, Out_iter new_green, Number_type epsilon)
 // {
 // }
 
@@ -258,7 +258,7 @@ void remove_intersections(TW_handle tw_yellow, TW_handle tw_green, Tile_iter yel
 
       TILER_TRACE(logger, "Polygon to triangulate for component " << i << ": " << pp(p));
       //       if (!p.is_simple()) {
-      // 	TILER_ERROR(logger, "  Polygon is not simple");
+      // TILER_ERROR(logger, "  Polygon is not simple");
       //       }
       list<Triangle> nt;
       try {
@@ -330,7 +330,7 @@ Intersections<typename std::iterator_traits<Tile_iter>::value_type> get_intersec
         Segment_3_ e = edge(j, *tile_h);
         ret.insert(e, tile_h, i);
         edge_set[i].insert(e);
-        // 	edges[i].push_back(to_2(e.orig_segment()));
+        // edges[i].push_back(to_2(e.orig_segment()));
         Point_3 v = vertex(j, *tile_h);
         vertex2tiles[v].push_back(tile_h);
       }
@@ -815,7 +815,7 @@ Polyline_2 find_exit(TW_handle tw_yellow, TW_handle tw_green, Tile_handle tg, Ti
                        "ye0", pp(ye0), "ye1", pp(ye1), "ye2", pp(ye2), "ty", pp_tri(*ty), "tg",
                        pp_tri(*tg));
         gn3 = find_nearest_vertex(tg, ye2);
-        // 	throw logic_error("There should be an intersection");
+        // throw logic_error("There should be an intersection");
       }
       TILER_TRACE(logger, "Adding exit point: " << pp(gn3));
       if (gn3 == gn1) {
@@ -1007,20 +1007,20 @@ void get_polyline_cuts(TW_handle tw_yellow, TW_handle tw_green, Intersections<Ti
                         "Found polyline cut (green tile) for " << pp(pg) << ": " << pp(cut));
             TILER_TRACE(logger, "      tile = " << pp_tri(*tg));
             if (is_required(cut, ig, z_adjustments)) {
-              // 	      if (!contains(tg, cut)) {
-              // 		TILER_ERROR(logger, "  Cut not contained in tile (" << cut.size() <<
-              // ")"); 		TILER_ERROR(logger, "    Cut = " << pp(cut)); 		TILER_ERROR(logger, "    tg = "
-              // << pp_tri(*tg)); 		TILER_ERROR(logger, "    ty = " << pp_tri(*ty));
-              // 		TILER_ERROR(logger, "    pg = " << pp(pg));
-              // 	      }
+              // if (!contains(tg, cut)) {
+              // TILER_ERROR(logger, "  Cut not contained in tile (" << cut.size() <<
+              // ")"); TILER_ERROR(logger, "    Cut = " << pp(cut)); TILER_ERROR(logger, "    tg = "
+              // << pp_tri(*tg)); TILER_ERROR(logger, "    ty = " << pp_tri(*ty));
+              // TILER_ERROR(logger, "    pg = " << pp(pg));
+              // }
               TILER_TRACE(logger,
                           "Inserting polyline cut (green tile) for " << pp(pg) << ": " << pp(cut));
-              // 	      for (Polyline_2::iterator cut_iter = cut.begin(); cut_iter !=
-              // cut.end(); ++cut_iter) { 		if (!cut_iter->is_valid()) { 		  cut_iter->id() =
+              // for (Polyline_2::iterator cut_iter = cut.begin(); cut_iter !=
+              // cut.end(); ++cut_iter) { if (!cut_iter->is_valid()) { cut_iter->id() =
               // tw_green->vertices.unique_id();
-              // 		}
-              // 	      }
-              // 	      tw_green->ensure_z_home(cut, ints.z_home(cut[0], ig));
+              // }
+              // }
+              // tw_green->ensure_z_home(cut, ints.z_home(cut[0], ig));
               for (Polyline_2::iterator cit = cut.begin(); cit != cut.end(); ++cit) {
                 if (!cit->is_valid()) {
                   TILER_ERROR(logger, "Cut point: no valid id(): " << pp(*cit));
@@ -1044,20 +1044,20 @@ void get_polyline_cuts(TW_handle tw_yellow, TW_handle tw_green, Intersections<Ti
                         "Found polyline cut (yellow tile) for " << pp(py) << ": " << pp(cut));
             TILER_TRACE(logger, "      tile = " << pp_tri(*ty));
             if (is_required(cut, iy, z_adjustments)) {
-              // 	      if (!contains(ty, cut)) {
-              // 		TILER_ERROR(logger, "  Cut not contained in tile (" << cut.size() <<
-              // ")"); 		TILER_ERROR(logger, "    Cut = " << pp(cut)); 		TILER_ERROR(logger, "    ty = "
-              // << pp_tri(*ty)); 		TILER_ERROR(logger, "    tg = " << pp_tri(*tg));
-              // 		TILER_ERROR(logger, "    py = " << pp(py));
-              // 	      }
+              // if (!contains(ty, cut)) {
+              // TILER_ERROR(logger, "  Cut not contained in tile (" << cut.size() <<
+              // ")"); TILER_ERROR(logger, "    Cut = " << pp(cut)); TILER_ERROR(logger, "    ty = "
+              // << pp_tri(*ty)); TILER_ERROR(logger, "    tg = " << pp_tri(*tg));
+              // TILER_ERROR(logger, "    py = " << pp(py));
+              // }
               TILER_TRACE(logger,
                           "Inserting polyline cut (yellow tile) for " << pp(py) << ": " << pp(cut));
-              // 	      for (Polyline_2::iterator cut_iter = cut.begin(); cut_iter !=
-              // cut.end(); ++cut_iter) { 		if (!cut_iter->is_valid()) { 		  cut_iter->id() =
+              // for (Polyline_2::iterator cut_iter = cut.begin(); cut_iter !=
+              // cut.end(); ++cut_iter) { if (!cut_iter->is_valid()) { cut_iter->id() =
               // tw_yellow->vertices.unique_id();
-              // 		}
-              // 	      }
-              // 	      tw_yellow->ensure_z_home(cut, ints.z_home(cut[0], iy));
+              // }
+              // }
+              // tw_yellow->ensure_z_home(cut, ints.z_home(cut[0], iy));
               for (Polyline_2::iterator cit = cut.begin(); cit != cut.end(); ++cit) {
                 if (!cit->is_valid()) {
                   TILER_ERROR(logger, "Cut point: no valid id(): " << pp(*cit));
@@ -1148,8 +1148,8 @@ typedef std::back_insert_iterator<std::vector<Triangle_handle>> bii;
 
 // template
 // void remove_intersections(TW_handle tw_yellow, TW_handle tw_green,
-// 			  Number_type yz, Number_type gz,
-// 			  bii new_yellow, bii new_green, Number_type epsilon);
+// Number_type yz, Number_type gz,
+// bii new_yellow, bii new_green, Number_type epsilon);
 
 template void
 remove_intersections(TW_handle tw_yellow, TW_handle tw_green, lti yellow_begin, lti yellow_end,
