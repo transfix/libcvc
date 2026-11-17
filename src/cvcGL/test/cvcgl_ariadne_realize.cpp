@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring> // strstr: WebGL2's units, a draw that ran out
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/scene_water.h> // scene_water_spec: the scene wind's case (O14)
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
 #include <cvc/core/async_lane.h> // field colours: pump the scheduler their overlay tasks run on
@@ -2035,6 +2036,98 @@ int main() {
              tum->GetNumberOfTextureUnits());
       chk(held == 0, "no texture unit is held between frames (the water, the swash, the shade)");
     }
+    for (const std::string &w : warnings)
+      printf("  warning: %s\n", w.c_str());
+  }
+
+  // ── O14: one key turns everything: the scene's wind drives the water, the clouds, the trees ──
+  // A scene with `wind:` seeds wind.speed / wind.dir / wind.gustiness; the water's spectrum wind,
+  // the cloud deck's drift and the forest's lean all follow them, and turn together when wind.dir
+  // does; with wind.speed cleared each falls back to its own keys.
+  {
+    printf("== the scene's wind: one key turns the water, the clouds and the trees ==\n");
+    SceneGraph sg(app, "o14");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    scene.wind.present = true;
+    scene.wind.speed = 9.0;
+    scene.wind.dir = 30.0;
+    scene.wind.gustiness = 0.25;
+    auto node = [](const char *id, const char *type,
+                   std::vector<std::pair<const char *, std::string>> props) {
+      SceneNode n;
+      n.id = id;
+      n.type = type;
+      n.props.kind = Value::Kind::Map;
+      for (auto &p : props) {
+        Value v;
+        v.kind = Value::Kind::Scalar;
+        v.scalar = p.second;
+        n.props.entries.emplace_back(p.first, v);
+      }
+      return n;
+    };
+    scene.nodes.push_back(node("world", "generated_world",
+                               {{"seed", "5"},
+                                {"half", "150"},
+                                {"trees", "0"},
+                                {"rocks", "0"},
+                                {"buildings", "0"},
+                                {"amp", "40"},
+                                {"water_level", "0"},
+                                {"water", "0"},
+                                {"texture", "256"}}));
+    const SceneNode waterNode =
+        node("water", "water",
+             {{"world", "world"}, {"level", "0"}, {"wind_speed", "3"}, {"wind_dir", "-90"}});
+    scene.nodes.push_back(waterNode);
+    scene.nodes.push_back(node("sky", "cloud_sky",
+                               {{"ground", "world"},
+                                {"extent", "60"},
+                                {"base", "120"},
+                                {"top", "180"},
+                                {"coverage", "0.5"},
+                                {"near", "2"}}));
+    scene.nodes.push_back(node("forest", "forest_trees",
+                               {{"ground", "world"},
+                                {"count", "12"},
+                                {"span", "200"},
+                                {"species", "pine"},
+                                {"sea_level", "0"}}));
+    std::vector<std::string> warnings;
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "o14", &warnings);
+    auto st = [&](const char *k) -> cvc::state & {
+      return cvc::state::instance(app)(cvc::ariadne::resolve_bind("o14", k));
+    };
+    auto tick = [&]() {
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer());
+    };
+    tick();
+    tick();
+    auto lean = [&]() { return st("forest.lean_dir").value(); };
+    auto drift = [&]() { return st("sky.drift_az").value<double>(); };
+    auto water = [&]() { return cvc::ariadne::scene_water_spec(app, waterNode, "o14"); };
+    chk(approx(st("wind.speed").value<double>(), 9.0) &&
+            approx(st("wind.dir").value<double>(), 30.0),
+        "the scene's wind: seeded its keys from `wind:`");
+    chk(approx(water().wind_dir, 30.0) && approx(water().wind_speed, 9.0) &&
+            approx(st("water.wind_dir").value<double>(), -90.0),
+        "the water follows the scene's wind; its own keys stay, unused");
+    chk(approx(drift(), 120.0), "the clouds drift along the scene's wind (heading dir + 90)");
+    chk(!lean().empty() && approx(std::stod(lean()), 30.0), "the trees lean along it");
+    // One key: the waves, the clouds and the trees turn together, on the next tick.
+    st("wind.dir").value(120.0);
+    tick();
+    chk(approx(water().wind_dir, 120.0) && approx(drift(), 210.0) && !lean().empty() &&
+            approx(std::stod(lean()), 120.0),
+        "one key (wind.dir) turns the water, the clouds and the trees together");
+    // No scene wind: each falls back to its own.
+    st("wind.speed").value(std::string());
+    tick();
+    chk(approx(water().wind_dir, -90.0) && approx(water().wind_speed, 3.0) &&
+            approx(drift(), st("sky.wind_az").value<double>()) && lean().empty(),
+        "without wind.speed each node takes its own wind again");
     for (const std::string &w : warnings)
       printf("  warning: %s\n", w.c_str());
   }

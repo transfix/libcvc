@@ -79,6 +79,10 @@ holon::holon(holon_role role, holon_config cfg)
       _world = std::make_unique<avatar_world>(_clock.fixed_dt(), _cfg.rules.avatar().body,
                                               _cfg.rules.policy.energy);
       _world->set_gravity(_cfg.rules.physics.gravity);
+      const world_physics &wp = _cfg.rules.physics; // the room's wind (O14)
+      _world->set_wind(
+          {wp.wind_speed, wp.wind_dir * 3.14159265358979323846 / 180.0, wp.wind_gustiness},
+          wp.wind_base);
     } catch (const std::exception &e) {
       std::fprintf(stderr,
                    "holon: no avatar physics in this build (%s); avatars move kinematically and "
@@ -173,6 +177,26 @@ avatar_intent holon::finite_intent(const avatar_intent &in) {
     out.yaw = 0.0;
   else if (out.yaw > kPi || out.yaw < -kPi)
     out.yaw = std::remainder(out.yaw, 2.0 * kPi);
+  return out;
+}
+
+avatar_intent holon::blown(const avatar_intent &in, const cvc::physics::vec3 &feet,
+                           std::uint64_t tick) {
+  const world_rules &r = rules_at(tick);
+  const world_physics &wp = r.physics;
+  if (!(wp.wind_speed > 0.0))
+    return in;
+  if (!_kinematic_wind || !(wp == _kinematic_wind_for)) {
+    _kinematic_wind = std::make_shared<const cvc::physics::wind_flow>(
+        cvc::algo::wind_state{wp.wind_speed, wp.wind_dir * 3.14159265358979323846 / 180.0,
+                              wp.wind_gustiness},
+        wp.wind_base);
+    _kinematic_wind_for = wp;
+  }
+  avatar_intent out = in;
+  out.move =
+      out.move + avatar_wind_drift(*_kinematic_wind, r.avatar().body, r.policy.energy.force_max,
+                                   feet, double(tick) * _clock.fixed_dt());
   return out;
 }
 
@@ -324,8 +348,13 @@ void holon::apply_world_rules(const world_rules &r) {
     return;
   if (r.avatar().body != _applied.avatar().body)
     _world->set_body(r.avatar().body);
-  if (!(r.physics == _applied.physics))
+  if (!(r.physics == _applied.physics)) {
     _world->set_gravity(r.physics.gravity);
+    const world_physics &wp = r.physics; // the room's wind (O14)
+    _world->set_wind(
+        {wp.wind_speed, wp.wind_dir * 3.14159265358979323846 / 180.0, wp.wind_gustiness},
+        wp.wind_base);
+  }
   if (r.policy.energy != _applied.policy.energy)
     _world->set_energy_policy(r.policy.energy);
   _applied = r;
@@ -682,6 +711,7 @@ void holon::world_step_client(const std::string &self, const avatar_intent &in,
     if (!kv.second.local && _world->has_avatar(kv.first))
       _world->move_kinematic(kv.first, display_pose(kv.first));
   _world->drive(self, veto(in, _applied.policy));
+  _world->set_time(double(tick) * _clock.fixed_dt()); // the wind's gusts at the tick's time
   _world->step();
 }
 
@@ -763,6 +793,7 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
           }
           _world->drive(kv.first, veto(p.intent, _applied.policy));
         }
+        _world->set_time(double(tick) * dt); // the wind's gusts at the tick's time, as the clients
         _world->step();
         for (auto &kv : _participants)
           if (_world->state(kv.first).position.z < _cfg.respawn_below_z)
@@ -800,7 +831,7 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
           p.intent = p.queued.front().second;
           p.queued.pop_front();
         }
-        p.sim.step(veto(p.intent, rules_at(tick).policy), dt);
+        p.sim.step(blown(veto(p.intent, rules_at(tick).policy), p.sim.state().position, tick), dt);
       }
     } else if (p.local) {
       // Client prediction: predict the local avatar one quantum at a time, tagging
@@ -809,7 +840,9 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
         const std::uint64_t tick = f.step.first_tick + 1 + static_cast<std::uint64_t>(i);
         p.render_prev = p.predicted.state();
         p.have_render_prev = true;
-        p.predicted.predict(tick, veto(p.intent, rules_at(tick).policy), dt);
+        p.predicted.predict(
+            tick, blown(veto(p.intent, rules_at(tick).policy), p.predicted.state().position, tick),
+            dt);
       }
     }
     // Peers integrate nothing: they are driven by apply_authoritative samples.

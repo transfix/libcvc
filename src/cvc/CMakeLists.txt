@@ -72,6 +72,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/shape.h
   ../../inc/cvc/physics/field.h
   ../../inc/cvc/physics/fluid_surface.h
+  ../../inc/cvc/physics/flow_velocity.h
   ../../inc/cvc/physics/hull.h
   ../../inc/cvc/physics/immersion.h
   ../../inc/cvc/physics/ocean_surface.h
@@ -401,6 +402,7 @@ set(SOURCE_FILES
   physics/field_step.cpp
   physics/immersion.cpp
   physics/fluid_surface.cpp
+  physics/flow_velocity.cpp
   physics/ocean_surface.cpp
   physics/vehicle.cpp
   physics/boat.cpp
@@ -723,7 +725,8 @@ endif()
 # get the same flag on their own target (below).
 set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/boat.cpp
     physics/field_step.cpp physics/immersion.cpp
-    physics/fluid_surface.cpp physics/ocean_surface.cpp physics/null_backend.cpp
+    physics/fluid_surface.cpp physics/flow_velocity.cpp physics/ocean_surface.cpp
+    physics/null_backend.cpp
     physics/nav_plant.cpp
     physics/dyn_bike_plant.cpp physics/dyn_4w_plant.cpp physics/dyn_boat_plant.cpp
     physics/dyn_world.cpp

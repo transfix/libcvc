@@ -31,17 +31,19 @@ units:
         lo: 0.0
         hi: 30.0
         fmt: "%.1f"
+        tooltip: "the water's own wind; unused while the scene has a wind (the Wind panel drives it then)"
       - slider_float: Wind direction
         bind: "{keys}.wind_dir"
         lo: -180.0
         hi: 180.0
         fmt: "%.0f deg"
+        tooltip: "the way the water's own wind blows; unused while the scene has a wind"
       - slider_float: Gustiness
         bind: "{keys}.gustiness"
         lo: 0.0
         hi: 1.0
         fmt: "%.2f"
-        tooltip: "gusts ruffle the ripples and roughen the water in racing patches (cat's paws)"
+        tooltip: "gusts ruffle the ripples and roughen the water in racing patches (cat's paws); the scene wind's gustiness while it has one"
       - checkbox: Lee
         bind: "{keys}.lee"
         tooltip: "the water downwind of land is calm: each wave band grows with its fetch"

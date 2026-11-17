@@ -1224,7 +1224,11 @@ clouds), `far_reach` (how far the far clouds reach toward the horizon; out of th
 clouds) and `shadow` (0 starts the shade off). Live keys under the node's root (`sky.` unless
 `keys:`): `drift`, `morph`, `evolve`, `orographic`, `shadow`, `coverage` (the cells' targets are
 ranked again at once, and the clouds fade in or out to them), `wind_az` and `darkness`, all on
-`sky_controls.ari`, and `base`, `top` and `storms` (below).
+`sky_controls.ari`, and `base`, `top` and `storms` (below). In a scene with a wind (`wind:`,
+below) the deck drifts with it instead: its
+heading is the wind's and its speed the wind's at the deck's `base` (the height profile) times the
+gusts' mean, times `drift`; `wind_az` and the fixed 3 m/s are then unused. The deck publishes what
+it drifts with as `sky.drift_az` (degrees) and `sky.drift_speed` (m/s).
 
 The sun is the light rig's key once the scene has one (`lighting.key_azimuth` /
 `key_elevation`, the Stage lighting panel), followed live: a new sun relights the cloud maps and
@@ -1363,13 +1367,14 @@ them the water is flat blue. Live keys under the node's root (`water.` unless `k
 `wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`, `foam_fray`, `foam_decay`, `shore_fade`,
 `swell_height`, `swell_period`, `swell_dir`, `shore_foam`, `wake`, `wake_foam`, `lod_foam`,
 `lod_shade`, `lod_waves`, `quality` and `profile`, most on `water_controls.ari`. `quality` (-1)
-follows the scene's adaptive quality (below); 0 to 4 holds the water at that tier. `profile` 1
-times the node's work each frame, section by section, into `water.stats.<section>_ms` (2 also
-waits for the GPU after each, slowing the frame). A change to the swell rebuilds the shore layer
-once the keys have held for ten frames (12 ms for a 401² grid). The wind
-(OCEAN-AND-WEATHER-ROADMAP.md O13) is read through one place,
-[`scene_wind.h`](../inc/cvc/ariadne/scene_wind.h) (today the node's `wind_speed`, `wind_dir` and
-`gustiness`; the scene's one wind later). The sea lags it: its wind follows with a `sea_lag`
+follows the scene's adaptive quality (below); 0 to 4 holds the water at that tier. `profile` 1 times
+the node's work each frame, section by section, into `water.stats.<section>_ms` (2 also waits for
+the GPU after each, slowing the frame). A change to the swell rebuilds the shore layer once the keys
+have held for ten frames (12 ms for a 401² grid). The wind (OCEAN-AND-WEATHER-ROADMAP.md O13) is
+read through one place, [`scene_wind.h`](../inc/cvc/ariadne/scene_wind.h): the scene's wind
+(`wind.*`, below) when it has one, else the node's own `wind_speed`, `wind_dir` and `gustiness`,
+which a scene wind leaves alone and unused (they come back if `wind.speed` is cleared). The sea lags
+it: its wind follows with a `sea_lag`
 seconds' time constant (20; a compressed scale), and each new state of it crossfades in over
 `sea_fade` seconds (4), so a wind change never pops. With `lee` (1) the water downwind of land is
 calm: each wave band is scaled by the square root of its fetch, the distance the wind has blown
@@ -1395,6 +1400,51 @@ receivers. Each wave's front runs up to the shore layer's runup and drains back,
 with a lace of foam under it, the sand dark and glossy behind it until it dries. The physics sea
 carries the same swash, so a body on the sand is lifted by the film drawn there. `swash: 0` leaves
 it out of both.
+
+**Wind.** A scene's `wind:` is its one wind (OCEAN-AND-WEATHER-ROADMAP.md E5, O14;
+[`scene_wind.h`](../inc/cvc/ariadne/scene_wind.h)). The water, the cloud deck, the trees and the
+physics all read it, so one key turns them together:
+
+```yaml
+scene:
+  wind: { speed: 9, dir: 30, gustiness: 0.25, base: 0 }
+```
+
+- **Keys.** It seeds three live keys under the document's prefix, drawn or headless:
+  `wind.speed` (m/s, the mean wind 10 m up), `wind.dir` (degrees, the way it blows, from +x toward
+  +y, as the water's `wind_dir`) and `wind.gustiness` (0 for steady). `base` (m, 0) is the level
+  the wind is measured over, the ground's or the sea's; it is read once. `wind_controls.ari` is
+  the panel for the three keys.
+- **While `wind.speed` is set** the scene has a wind, and every reader follows it:
+  - the `water`'s sea and its physics sea, through its `sea_lag` (its own `wind_speed`,
+    `wind_dir` and `gustiness` keys are left alone and unused);
+  - the `cloud_sky` deck's drift and its orographic slopes, which take the wind's heading in
+    place of `wind_az`, and its speed at the deck's base (`sky.drift_az`, `sky.drift_speed`);
+  - the `forest_trees`' sway: each tree leans downwind as well as swaying, by the wind's speed
+    over 9 m/s times `forest.wind`, in the gusts at the tree (`forest.lean_dir` is the way they
+    lean);
+  - the scene's physics world, when it has one: a flow field of air everywhere, the same gusts
+    times a height profile (`cvc::physics::wind_flow`, PHYSICS_API.md "The wind"), so every
+    dynamic body feels drag against it. A beach ball dropped from 40 m in a 12 m/s wind rides it
+    some 50 m in 4 s as it falls, and the world's vehicles and avatars feel it (below). Its field follows the keys from the next step, and `sim.restart` keeps it.
+  Clearing `wind.speed` puts every node back on its own wind.
+- **Vehicles.** A `jolt` vehicle's aero drag reads the wind at its centre of mass in physics. The
+  other plants (`dynamic`, `dynamic4w`, `kinematic`) take the wind's share of the drag, the drag in
+  the moving air less the drag in still air, ½ ρ C_d A from the vehicle's description, as a push on
+  their drive each navigator tick. `WorldVehicles::info(id)` gives it as `wind_fx`, `wind_fy` (N).
+  A Humvee at 25 m/s in a 15 m/s crosswind is pushed about 400 N aside, 0.15 m/s².
+- **Avatars on arisrv.** The document's `wind:` (as loaded) is the room's: the rules' `physics`
+  section carries `wind.{speed, dir, gustiness, base}`, replicated to every client. A dynamic
+  avatar (the server's, and a client's own) stands in a flow field of that wind in its avatar
+  world, and its walker (840 N) holds against a breeze: in 9 m/s it moves 5 mm in 2 s, in
+  75 m/s 13.6 m. A kinematic avatar holds while the wind's drag on it is within what its
+  walker grips and slides downwind past it: still in 9 m/s, 23.1 m in 1 s in 90 m/s. The drift is
+  folded into its intent, so the server, a client's prediction and a replay agree bit for bit.
+- **A floating body** feels the wind on its part above the water, but the water's damping (the
+  `water` node's field, set so a body follows the waves) holds it: a crate drifts millimetres a
+  second.
+- **Not yet.** Spray and rain slant (Phase F has neither yet), and the weather's steering wind
+  (O18) does not read it yet.
 
 **Adaptive quality.** A host that knows each frame's wall time (cvcGL's `AriRuntime`: `arigl run`,
 the browser, pycvc_gl) runs a closed loop on it ([`scene_quality.h`](../inc/cvc/ariadne/scene_quality.h),
@@ -1636,6 +1686,8 @@ scene:
           look: { file: racer.glb, scale: 1, yaw: 90, z: 0 } # default: the chassis box
         truck:
           plant: dynamic4w:humvee                            # the four-wheel model, a Humvee
+        boat:
+          plant: dynamicboat:launch                          # a boat: launch or jonboat
   ```
 
   - **Archetypes.** Each names its plant, its body (a preset, with `mass`, `max_speed`,
@@ -1651,6 +1703,7 @@ scene:
     | `dynamic` (`dynamic:<preset>`) | the dynamic single-track model: tires, load transfer, actuator lag, with its energy books | its chassis box, which the world's contacts push back into the model |
     | `dynamic4w` (`dynamic4w:<preset>`) | the four-wheel model with suspension: each wheel on the ground under it | as `dynamic`'s |
     | `kinematic` | nav's bicycle | a kinematic box: it pushes what it meets, and nothing stops it (the navigator keeps it off the buildings) |
+    | `dynamicboat` (`dynamicboat:<preset>`, `launch` or `jonboat`) | a boat (`dyn_boat_plant`): a hull, a propeller and a rudder or outboard, on the world's water (a `water` node's field, or still water at the world's water level the runtime adds without one); its navigator plans on the water deep enough for it, the land blocked. `vehicle:` overrides only `mass` and `max_speed` | its hull, afloat |
 
     `dynamic:<preset>` names the vehicle as `vehicle: <preset>` does. The dynamic models take one
     substep of each world step, so they step with everything else; each plant's entities have a
@@ -1742,6 +1795,9 @@ scene:
     spawns:
       policy: round_robin      # fixed | random | round_robin | nearest_free
       scope: team              # the draw and the turn kept per team, per archetype, or for all
+      ford_depth: 0.3          # m of water a land vehicle may start in
+      keel_clearance: 0.3      # m of water a boat needs under its draft
+      shore_clearance: 0       # m of open water a boat needs past half its length
       points:
         - { at: [-60, -60], heading: 45, team: 0, world: flat }   # heading: degrees from +x
         - { at: [60, 60], heading: -135, team: 1, archetype: humvee }
@@ -1752,14 +1808,25 @@ scene:
     every world), so the table follows the world on. A point off the world, on anything blocked
     in the world's grid, or within 6 m of another is refused; one the grid blocks after a
     Regenerate is shown blocked and not taken.
+  - **The medium.** Each archetype starts on its plant's medium (`vehicle_plant::medium()`): a
+    car, on land, where the grid is free and the still water (the grid's water layer: a `water`
+    node's level, or a generated world's, less the ground) is no deeper than `ford_depth`; a boat
+    (`plant: dynamicboat`), on water, where it is at least the boat's draft and `keel_clearance`
+    deep and open for half its length and `shore_clearance` round it. An untagged point serves
+    only the archetypes whose medium it is on, and a tagged one off its archetype's medium serves
+    nothing. A start a spawn gives (`at`) off its medium, a car's in a lake or a boat's ashore,
+    moves to a free point of its medium, as a blocked one does.
   - **The policy.** A spawn takes a point from the free points whose tags match it: `fixed` the
     first, `random` any (the same draw on every platform), `round_robin` each in turn,
     `nearest_free` the first no vehicle is near. A point a vehicle sits on moves the new vehicle
     aside along the point's normal. With no point to take, a vehicle starts at a free point of
-    the grid.
+    the grid, on its medium.
   - **Suggestions.** `spawns.suggest.request` samples points along the world's roads (a generated
     world's road mesh; a terrain or a flat ground has none): one per `suggest.spacing` metres
-    square, at most `suggest.count`, free in the grid, each heading along its road.
+    square, at most `suggest.count`, free in the grid and out of water deeper than a ford, each
+    heading along its road. When `tag.archetype` is a boat, it samples the water deep and open
+    enough for it instead, each body of water with room taking points in turn, each heading
+    along its shore.
     `accept.request` adds them, tagged with `tag.team` and `tag.archetype`.
   - **Editing from keys.** A viewport with `input: pick` and `pick: spawns.pick` is a minimap:
     each press that hits runs `spawns.tool` at the point. `add` makes a point facing
@@ -1767,7 +1834,8 @@ scene:
     `tag` retags it. `clear.request` removes the world on's points. From C++:
     `WorldVehicles::spawns()` (`add`, `remove`, `tag`, `choose`, `suggest`, `accept`).
   - **What the runtime publishes.** Under `spawns`: `ids`, `count`, `summary`,
-    `points.<id>.{x, y, z, heading, team, archetype, world, free}`, `suggestions.{count,
+    `points.<id>.{x, y, z, heading, team, archetype, world, free, medium}` (`medium`: land,
+    water, both, or empty for neither), `suggestions.{count,
     summary}`, `world`, `policy`, `scope`, `status` and `rev`.
   - **Drawing.** cvcGL draws each point as a pad in its team's colour (white for any team, dark
     when blocked) with a pointer along its heading, and each suggestion grey, all tagged
@@ -4167,6 +4235,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `world_controls` | a `generated_world` node (§5.4; arg `keys`) |
 | `water_controls` | a `water` node (arg `keys`, default `water`) |
 | `weather_controls` | a `weather` node: the weather now, a storm started upwind or overhead, the sky cleared, the weather's time scale, the rain's effects, the lightning and the wet friction (arg `keys`, default `weather`) |
+| `wind_controls` | the scene's one wind (`wind.speed`, `wind.dir`, `wind.gustiness`; §5.4 "Wind") |
 | `mesh_tools` | a `mesh_lab` node (§5.4; arg `node`, default `mesh`) |
 | `fe_controls` | an `fe_lab` node (§5.4; arg `node`, default `domain`) |
 | `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `scene`, `show`, `hide`, `mode`, `camera`, `chrome`, `shadows`, `caption`, `width`, `height`, `title`, `id`) |

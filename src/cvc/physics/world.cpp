@@ -288,7 +288,7 @@ struct world::impl {
     guarded([&] {
       fields.apply(*be, cfg, field_time());
       tf = std::chrono::steady_clock::now();
-      vehicles.pre_step(*be, fields, cfg, materials);
+      vehicles.pre_step(*be, fields, cfg, materials, field_time());
       boats.pre_step(*be, fields, cfg, field_time());
       te0 = std::chrono::steady_clock::now();
       be->step(contacts, r);

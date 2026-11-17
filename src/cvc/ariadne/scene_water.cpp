@@ -405,6 +405,11 @@ const std::shared_ptr<SceneColliders> &WaterRuntime::colliders() const { return 
 std::shared_ptr<const SceneWaterShore> WaterRuntime::shore() const { return _impl->shore; }
 std::shared_ptr<const cvc::ocean::sea_surface> WaterRuntime::sea() const { return _impl->sea; }
 std::shared_ptr<const cvc::physics::field> WaterRuntime::field() const { return _impl->field; }
+double WaterRuntime::level() const {
+  const impl &d = *_impl;
+  return d.built.empty() ? scene_water_spec(*d.app, d.node, d.prefix).level : d.built[0];
+}
+
 std::shared_ptr<const SceneWaterSea> WaterRuntime::keyframes() const { return _impl->clock.sea(); }
 
 bool WaterRuntime::tick() {

@@ -420,6 +420,45 @@ TEST(PhysicsVehicle, TheAeroTakesTheFlowFieldsWind) {
   EXPECT_LT(dot(s.aero_force, u), 0.0); // against the relative air
 }
 
+// The scene's wind (flow_velocity.h, O14): a crosswind pushes a car at highway speed aside,
+// modestly. A Humvee at 25 m/s along +x in a steady 15 m/s wind across it (toward +y): the air at
+// its centre of mass is the wind there (its profile at the centre's height), and the drag against
+// the relative air has a side part of 1/2 rho C_d A |u| u_y.
+TEST(PhysicsVehicle, ACrosswindPushesTheCarAside) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  flat_ground(w, 0.9);
+  field air;
+  air.kind = field_kind::flow;
+  air.wind = std::make_shared<wind_flow>(cvc::algo::wind_state{15.0, 1.5707963267948966, 0.0});
+  w.add_field(air);
+  const vehicle_id v = settled_humvee(w, -1200.0, 0.0);
+  accelerate_to(w, v, 25.0);
+  w.step();
+  const vehicle_state s = w.vehicle_state(v);
+  const vehicle_desc d = vehicle_desc::humvee();
+  // The centre of mass in the world: q v q*, v' = v + 2 w (q x v) + 2 q x (q x v).
+  const auto crossp = [](const vec3 &a, const vec3 &b) {
+    return vec3{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+  };
+  const quat &q = s.body.rotation;
+  const vec3 qv{q.x, q.y, q.z}, cm = d.center_of_mass;
+  const vec3 tq = crossp(qv, cm) * 2.0;
+  const vec3 com = s.body.position + cm + tq * q.w + crossp(qv, tq);
+  const vec3 want_air = air.wind->velocity(com, w.field_time());
+  EXPECT_NEAR(s.air_velocity.y, want_air.y, 0.01 * want_air.y);
+  EXPECT_GT(s.air_velocity.y, 7.0) << "the 15 m/s wind at a Humvee's centre of mass, 0.75 m up";
+  const vec3 u = s.body.linear_velocity - s.air_velocity;
+  const double un = std::sqrt(dot(u, u));
+  const double side = -0.5 * d.air_density * d.drag_coefficient * d.frontal_area * un * u.y;
+  std::printf("  a Humvee at %.1f m/s in a 15 m/s crosswind (%.1f m/s at its centre): %.0f N "
+              "aside (%.2f m/s^2), the model %.0f N\n",
+              s.speed, s.air_velocity.y, s.aero_force.y, s.aero_force.y / d.mass, side);
+  EXPECT_NEAR(s.aero_force.y, side, 0.02 * std::fabs(side));
+  EXPECT_GT(s.aero_force.y, 0.0) << "pushed downwind";
+  EXPECT_LT(s.aero_force.y / d.mass, 0.5) << "a modest push: under 0.05 g";
+}
+
 // --- determinism -----------------------------------------------------------------------------
 
 // Gate (9): the same drive twice gives the same hash; a save, restore into a fresh world and

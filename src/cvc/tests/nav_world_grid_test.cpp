@@ -162,3 +162,60 @@ TEST(NavWorldGrid, RefusesWhatItCannotGrid) {
   EXPECT_THROW(make_grid(world_geometry{}, 1.0), std::invalid_argument);
   EXPECT_THROW(flat_grid(0.0, 1.0), std::invalid_argument);
 }
+
+// The water layer (set_water) and the grids by medium (medium_grid): the town's ground rises 0.1 m
+// a metre east from 0, its water at 1 m stands 1 m deep at x = 0 and dries out at x = 10. A car's
+// grid blocks the water deeper than a 0.3 m ford (x < 7); a boat's frees the water at least 0.5 m
+// deep (x < 5) and blocks the rest, and a pier in the water (solid) as well. A terrain whose
+// surface is deep water is blocked in the grid (a hard surface) and solid nowhere, so a boat's grid
+// frees it.
+TEST(NavWorldGrid, TheWaterLayerAndTheGridsByMedium) {
+  world_geometry w = town();
+  auto pier = std::make_shared<cvc::geometry>();
+  add_box(*pier, 2.0, 14.0, 4.0, 16.0, -2.0, 4.0);
+  w.add({"pier", pier, w.surfaces().by_name("building_concrete")});
+  world_grid g = make_grid(w, 1.0);
+  EXPECT_FALSE(g.has_water());
+  EXPECT_EQ(g.depth_at(2.0, 5.0), 0.0);
+  set_water(g, 1.0);
+  ASSERT_TRUE(g.has_water());
+  EXPECT_DOUBLE_EQ(g.water_level, 1.0);
+  EXPECT_NEAR(g.depth_at(2.0, 5.0), 0.8, 1e-6);
+  EXPECT_NEAR(g.depth_at(15.0, 5.0), -0.5, 1e-6);
+  EXPECT_EQ(g.solid.size(), g.occupancy.size());
+  EXPECT_FALSE(g.occupied(3.0, 5.0)) << "the grid itself leaves the water to its surfaces";
+
+  const world_grid land = medium_grid(g, plant_medium::land, 0.3);
+  EXPECT_TRUE(land.occupied(3.0, 5.0)) << "0.7 m of water: deeper than a ford";
+  EXPECT_FALSE(land.occupied(8.0, 5.0)) << "0.2 m: a car fords it";
+  EXPECT_FALSE(land.occupied(15.0, 5.0));
+  EXPECT_TRUE(land.occupied(10.0, 10.0)) << "the building";
+
+  const world_grid boat = medium_grid(g, plant_medium::water, 0.5);
+  EXPECT_FALSE(boat.occupied(2.0, 5.0)) << "0.8 m deep";
+  EXPECT_TRUE(boat.occupied(6.0, 5.0)) << "0.4 m: too shallow";
+  EXPECT_TRUE(boat.occupied(15.0, 5.0)) << "land";
+  EXPECT_TRUE(boat.occupied(3.0, 15.0)) << "the pier, in 0.7 m of water";
+  EXPECT_TRUE(boat.occupied(0.0, 5.0)) << "the wall";
+  EXPECT_EQ(boat.height, g.height);
+  EXPECT_EQ(boat.water_depth, g.water_depth);
+
+  // No water: a car's grid is the grid, a boat's is blocked everywhere.
+  const world_grid dry = make_grid(town(), 1.0);
+  EXPECT_EQ(medium_grid(dry, plant_medium::land, 0.3).occupancy, dry.occupancy);
+  EXPECT_EQ(medium_grid(dry, plant_medium::water, 0.5).occupied_count(),
+            static_cast<std::size_t>(dry.rows) * dry.cols);
+
+  // A terrain whose surface is deep water: hard, so blocked, but not solid.
+  world_geometry sea;
+  std::vector<float> h(21 * 21, -3.0f);
+  sea.add({"terrain", std::make_shared<cvc::height_field>(21, 21, 0.0, 0.0, 1.0, 1.0, h),
+           sea.surfaces().by_name("water_deep")});
+  world_grid s = make_grid(sea, 1.0);
+  set_water(s, 0.0);
+  EXPECT_TRUE(s.occupied(10.0, 10.0));
+  EXPECT_EQ(s.solid[static_cast<std::size_t>(10) * s.cols + 10], 0);
+  EXPECT_FALSE(medium_grid(s, plant_medium::water, 0.5).occupied(10.0, 10.0));
+  EXPECT_TRUE(medium_grid(s, plant_medium::land, 0.3).occupied(10.0, 10.0));
+  EXPECT_THROW(set_water(s, std::nan("")), std::invalid_argument);
+}
