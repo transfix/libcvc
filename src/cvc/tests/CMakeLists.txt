@@ -3079,7 +3079,14 @@ endfunction()
 
 cvc_discover_tests(app_test)
 foreach(_cvc_port_test IN LISTS CVC_PORT_TESTS)
-  cvc_discover_tests(${_cvc_port_test})
+  if(_cvc_port_test STREQUAL "segmentation_intrinsics_test")
+    # AnActionStartsItUnderTheDefaultLimits runs a 160^3 segmentation through an action's frame
+    # loop: 93-101 s in a Debug job, and past ctest's 300 s on a loaded runner (three times over in
+    # one job). The test's own loop allows 900 s too.
+    cvc_discover_tests(${_cvc_port_test} PROPERTIES TIMEOUT 900)
+  else()
+    cvc_discover_tests(${_cvc_port_test})
+  endif()
 endforeach()
 cvc_discover_tests(thread_pool_test)
 cvc_discover_tests(thread_class_test)
