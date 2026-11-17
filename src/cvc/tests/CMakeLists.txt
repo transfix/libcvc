@@ -13,6 +13,14 @@ add_executable(ariadne_doc_fetch_test ariadne_doc_fetch_test.cpp)
 add_executable(ariadne_scene_tf_test ariadne_scene_tf_test.cpp)
 add_executable(ariadne_runtime_test ariadne_runtime_test.cpp)
 add_executable(ariadne_scene_world_test ariadne_scene_world_test.cpp)
+# AriadneWorldGym.ThePlantsAreModelsATwinReplays replays the dynamic4w plant (built with
+# -ffp-contract=off) with its model called inline here, bit for bit: build it the same way, or clang
+# contracts this copy into FMAs on aarch64 (the macOS arm64 lanes) and the last bits differ.
+if(NOT MSVC)
+  set_source_files_properties(ariadne_scene_world_test.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(ariadne_scene_world_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 add_executable(ariadne_server_document_test ariadne_server_document_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
@@ -3082,7 +3090,14 @@ endfunction()
 
 cvc_discover_tests(app_test)
 foreach(_cvc_port_test IN LISTS CVC_PORT_TESTS)
-  cvc_discover_tests(${_cvc_port_test})
+  if(_cvc_port_test STREQUAL "segmentation_intrinsics_test")
+    # AnActionStartsItUnderTheDefaultLimits runs a 160^3 segmentation through an action's frame
+    # loop: 93-101 s in a Debug job, and past ctest's 300 s on a loaded runner (three times over in
+    # one job). The test's own loop allows 900 s too.
+    cvc_discover_tests(${_cvc_port_test} PROPERTIES TIMEOUT 900)
+  else()
+    cvc_discover_tests(${_cvc_port_test})
+  endif()
 endforeach()
 cvc_discover_tests(thread_pool_test)
 cvc_discover_tests(thread_class_test)

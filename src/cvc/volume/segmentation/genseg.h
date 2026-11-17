@@ -140,6 +140,8 @@ struct voxel_at {
   std::size_t v;
 };
 
+class critical_seeds; // critical_points.h
+
 struct INTVEC {
   int x;
   int y;
@@ -188,6 +190,16 @@ public:
   float minraw = 0.0f, maxraw = 0.0f; // read_data's
 
   task run();
+  // read_data's normalisation of dataset (and of tlow and thigh with data_unit_thresholds), and
+  // GetGradient(), which SegMed's GVF.cpp shares line for line: |grad| of dataset on 0..255 into
+  // edge_mag. Each is a part of run(); critical_point_seeds_stepper runs them on their own.
+  task normalise();
+  task GetGradient(float *edge_mag);
+
+  // seed_mode::critical_points (critical_points.h): when set, "seeding" runs it on the normalised
+  // dataset and appends its two classes (feature, background) to seed_list. Their seeds are
+  // placed before the point classes' seeds, which win a voxel they share.
+  critical_seeds *critical = nullptr;
 
   // ---- the legacy globals that are left ----
   buffer<unsigned char> seed_index; // each voxel's class, 254 an automatic seed, 255 none
@@ -207,8 +219,6 @@ private:
   // each clamped to the volume: at an edge, c itself stands in for the missing neighbour.
   void neighbours(const voxel_at &c, voxel_at out[6]) const;
 
-  task normalise();
-  task GetGradient(float *edge_mag);
   task step_costs();
   task GetSeeds(unsigned char *result);
   task Segment();

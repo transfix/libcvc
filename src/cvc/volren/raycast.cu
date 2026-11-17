@@ -1622,17 +1622,43 @@ struct cache_block {
   bool current = false; // still the block `key` resolves to
 };
 
-// One app's cache (raycast_cuda_cache::impl holds it; raycast_cuda_cache_of(app) is the app's).
+// Makes `device` current for its scope and puts the caller's device back.  The
+// calls that may free blocks from any thread (clear, forget_host, set_budget,
+// the destructor) run under one, so a block is freed on the device it was
+// allocated on.  Failures are swallowed: these paths never throw.
+class device_scope {
+public:
+  explicit device_scope(int device) {
+    if (cudaGetDevice(&_previous) == cudaSuccess && _previous != device)
+      _restore = cudaSetDevice(device) == cudaSuccess;
+    (void)cudaGetLastError();
+  }
+  ~device_scope() {
+    if (_restore)
+      cudaSetDevice(_previous);
+    (void)cudaGetLastError();
+  }
+  device_scope(const device_scope &) = delete;
+  device_scope &operator=(const device_scope &) = delete;
+
+private:
+  int _previous = 0;
+  bool _restore = false;
+};
+
+// One device's cache, in a cuda_device_caches (one app's, or shared by the
+// apps the host handed it to: raycast_cuda_cache::share).
 class volume_cache {
 public:
-  volume_cache() = default;
+  volume_cache(int device, std::size_t budget) : _device(device), _budget(budget) {}
   volume_cache(const volume_cache &) = delete;
   volume_cache &operator=(const volume_cache &) = delete;
 
-  // Frees every device block when its app goes.  Errors are swallowed on
+  // Frees every device block when its caches go.  Errors are swallowed on
   // purpose: by then the primary context may already be gone, and cudaFree
   // then reports a failure that nothing can act on.
   ~volume_cache() {
+    device_scope on(_device);
     for (auto &kv : _blocks)
       cudaFree(kv.second.dptr);
     (void)cudaGetLastError();
@@ -1710,18 +1736,16 @@ public:
   }
 
   void clear() {
+    device_scope on(_device);
     std::lock_guard<std::mutex> lock(_mutex);
     evict_locked(std::size_t(-1));
   }
 
   void set_budget(std::size_t bytes) {
+    device_scope on(_device);
     std::lock_guard<std::mutex> lock(_mutex);
     _budget = bytes;
     evict_locked(0);
-  }
-  std::size_t budget() {
-    std::lock_guard<std::mutex> lock(_mutex);
-    return _budget;
   }
   std::size_t resident() {
     std::lock_guard<std::mutex> lock(_mutex);
@@ -1749,6 +1773,7 @@ public:
   void forget_host(const void *host) {
     if (host == nullptr)
       return;
+    device_scope on(_device);
     std::lock_guard<std::mutex> lock(_mutex);
     for (auto it = _index.begin(); it != _index.end();) {
       if (it->first.host == host) {
@@ -1795,11 +1820,12 @@ private:
     }
   }
 
+  const int _device; // every block here is on it
   std::mutex _mutex;
   std::map<std::uint64_t, cache_block> _blocks; // every live allocation, by id
   std::map<cache_key, std::uint64_t> _index;    // the CURRENT block per key
   std::size_t _resident = 0;
-  std::size_t _budget = cuda_limits::default_cache_bytes;
+  std::size_t _budget;
   std::uint64_t _clock = 0;
   std::uint64_t _next_id = 0;
   std::uint64_t _uploaded = 0; // voxel bytes ever pushed H2D
@@ -1837,12 +1863,34 @@ bool raycast_cuda_available() {
   return cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
 }
 
-struct raycast_cuda_cache::impl {
-  volume_cache cache;
+// One volume_cache per device, made the first time a render runs on it.
+struct cuda_device_caches::impl {
+  std::mutex mutex; // guards the map and the budget, not the caches in it
+  std::map<int, std::unique_ptr<volume_cache>> devices;
+  std::size_t budget = cuda_limits::default_cache_bytes;
+
+  volume_cache &on(int device) {
+    std::lock_guard<std::mutex> lock(mutex);
+    std::unique_ptr<volume_cache> &c = devices[device];
+    if (!c)
+      c = std::make_unique<volume_cache>(device, budget);
+    return *c;
+  }
+
+  // Each device's cache, for the calls that act on all of them.  A cache is
+  // never removed from the map before the caches go, so the pointers stay good.
+  std::vector<volume_cache *> all() {
+    std::lock_guard<std::mutex> lock(mutex);
+    std::vector<volume_cache *> out;
+    out.reserve(devices.size());
+    for (auto &kv : devices)
+      out.push_back(kv.second.get());
+    return out;
+  }
 };
 
-raycast_cuda_cache::raycast_cuda_cache() : _impl(std::make_unique<impl>()) {}
-raycast_cuda_cache::~raycast_cuda_cache() = default;
+cuda_device_caches::cuda_device_caches() : _impl(std::make_unique<impl>()) {}
+cuda_device_caches::~cuda_device_caches() = default;
 
 frame raycast_cuda(raycast_cuda_cache &cache, const raycast_cuda_request &req) {
   // Validate everything BEFORE the first allocation (the drive.cu convention),
@@ -2026,7 +2074,10 @@ frame raycast_cuda(raycast_cuda_cache &cache, const raycast_cuda_request &req) {
   // small, change with the settings, and are staged contiguously so the whole
   // scene's tables cost ONE copy.  The lease releases the cache entries even
   // if anything below throws, and the transient buffers are RAII.
-  cache_lease lease(cache.get()->cache);
+  // The render holds the app's caches for its whole length (a share() meanwhile
+  // swaps the app's handle, not these), and stages in this device's cache.
+  const std::shared_ptr<cuda_device_caches> caches = cache.caches();
+  cache_lease lease(caches->get()->on(device));
   std::vector<dev_volume> dv(req.volume_count);
   std::vector<float> lut_host(lut_floats);
 
@@ -2171,17 +2222,43 @@ frame raycast_cuda(raycast_cuda_cache &cache, const raycast_cuda_request &req) {
   return out;
 }
 
-void raycast_cuda_cache::set_budget(std::size_t bytes) { _impl->cache.set_budget(bytes); }
+void cuda_device_caches::set_budget(std::size_t bytes) {
+  {
+    std::lock_guard<std::mutex> lock(_impl->mutex); // a device cache made from now on takes it
+    _impl->budget = bytes;
+  }
+  for (volume_cache *c : _impl->all())
+    c->set_budget(bytes);
+}
 
-std::size_t raycast_cuda_cache::budget() { return _impl->cache.budget(); }
+std::size_t cuda_device_caches::budget() {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return _impl->budget;
+}
 
-std::size_t raycast_cuda_cache::resident() { return _impl->cache.resident(); }
+std::size_t cuda_device_caches::resident() {
+  std::size_t total = 0;
+  for (volume_cache *c : _impl->all())
+    total += c->resident();
+  return total;
+}
 
-std::uint64_t raycast_cuda_cache::uploaded() { return _impl->cache.uploaded(); }
+std::uint64_t cuda_device_caches::uploaded() {
+  std::uint64_t total = 0;
+  for (volume_cache *c : _impl->all())
+    total += c->uploaded();
+  return total;
+}
 
-void raycast_cuda_cache::forget_host(const void *host) { _impl->cache.forget_host(host); }
+void cuda_device_caches::forget_host(const void *host) {
+  for (volume_cache *c : _impl->all())
+    c->forget_host(host);
+}
 
-void raycast_cuda_cache::clear() { _impl->cache.clear(); }
+void cuda_device_caches::clear() {
+  for (volume_cache *c : _impl->all())
+    c->clear();
+}
 
 } // namespace volren
 } // namespace cvc

@@ -185,6 +185,13 @@ public:
   const Stats &stats() const { return m_stats; }
   void resetStats() { m_stats = Stats{}; }
 
+  // The texture units the draw under way takes for its vertex data. VTK's low-memory mapper
+  // emulates each array it draws from (positions, normals, texture coordinates, ids, ...) as a
+  // texture, bound in RenderPieceStart and activated in the draw, after UpdateShaderEvent. Where
+  // VTK has 16 units in all (WebGL2's GL_MAX_TEXTURE_IMAGE_UNITS) they share them with the shader's
+  // own textures. 0 before the first draw.
+  int arrayTextureUnits() const { return static_cast<int>(this->Arrays.size()); }
+
   // Test instrumentation: when set, the replica of `app`'s mappers reports where
   // each stage of a draw begins and ends (the cvcgl_lowmem_fastdraw GL trace
   // interleaves these with the GL calls to cut a trace into draws and cell-type
