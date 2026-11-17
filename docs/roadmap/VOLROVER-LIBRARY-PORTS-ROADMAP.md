@@ -28,6 +28,10 @@ predicates that builds CGAL's triangulation cell for cell (transfix/libcvc#1157)
 Qhull stays only as the general-position cross-check in `tet_complex_test` and `cgal_ab_test`
 (§1.2, §2).
 
+Revised on 2026-11-17 for Joe's answer on ContourTiler's parity ("Tolerance (Recommended)"): T1
+compares the tiler's surfaces by topology and a Hausdorff tolerance, exactly away from untiled
+regions, and P3b does not reproduce CGAL's convex partition (§3, §9 item 2).
+
 Nothing of the ports has landed. §9 lists the decisions still open.
 **Based on:** libcvc `origin/master @ 921c4254` (§1's facts) and `@ 7a09366f` (the rest),
 transfix/libcvc#1080 (libcvc without CGAL), and volrover `master @ b4a172c` (the legacy
@@ -168,7 +172,8 @@ node type with a component, native and wasm.
     Segment button follows GenSeg.
 - **Decisions for Joe** (§9):
   - how the new libraries arrive (done as recommended in cy-pca/cvcpkg#578);
-  - how close ContourTiler must match its legacy output;
+  - how close ContourTiler must match its legacy output: settled 2026-11-17 as topology and a
+    Hausdorff tolerance, exact away from untiled regions;
   - the API break P0a needs: settled 2026-11-09 as one 4.0 release, costing 8 downstream call
     sites;
   - names;
@@ -999,7 +1004,7 @@ a few files:
    rationals, so the untiled regions' fill and the intersection removal can differ slightly from
    the legacy. T1 therefore compares surfaces by topology (genus and components per surface) and
    by Hausdorff distance below a tolerance. Tiles away from untiled regions should match exactly.
-   §9 item 2 asks whether that is enough.
+   That is enough (§9 item 2, settled 2026-11-17).
    - **What P3a found (2026-11-11).** ContourTiler's live untiled-region code does not use the
      straight skeleton. `medial_axis_stable` (`skeleton.cpp`, called from
      `tiler_operations.cpp:1509`) splits each untiled region into convex pieces with
@@ -1593,10 +1598,11 @@ not as follow-ups.
    - Qhull and Clipper2 are cy-pca/cvcpkg#578.
    - The header-only CDT, Shewchuk's predicates and nanoflann are cy-pca/cvcpkg#597.
    - nanoflann's vendored copy (#1080) goes once its package is published.
-2. **How close ContourTiler must match the legacy.** The medial axis replaces the straight
-   skeleton, and integer coordinates replace exact rationals, so untiled regions can fill
-   slightly differently (§3). **Recommended:** T1 by topology and a Hausdorff tolerance, exact
-   away from untiled regions. If exact parity matters for some dataset, say which.
+2. **How close ContourTiler must match the legacy. Settled 2026-11-17:** T1 by topology and a
+   Hausdorff tolerance, exact away from untiled regions (Joe: "Tolerance (Recommended)"). P3b
+   does not reproduce CGAL's convex partition, and no dataset needs exact parity.
+   - The question: the medial axis replaces the straight skeleton, and integer coordinates
+     replace exact rationals, so untiled regions can fill slightly differently (§3).
    - P3a's A/B (2026-11-11) shifts where the difference comes from: the tiler's live fill uses a
      convex partition, not the straight skeleton, and cvc::planar's partition has different and
      fewer pieces than CGAL's (§3, "What P3a found"). Exact parity in untiled regions would mean
