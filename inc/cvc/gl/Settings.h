@@ -4,6 +4,7 @@
 #include <cvc/state/state_object.h>
 #include <functional>
 #include <string>
+#include <thread>
 
 namespace cvc {
 class app;
@@ -41,6 +42,9 @@ private:
   void seedState();
   Values m_v;
   std::function<void(Values)> m_apply;
+  // The thread that built this, so connected it: the only one a state change may reach
+  // handleStateChanged on (debug-asserted; STATE_EXEC_THREADED.md 4.8).
+  std::thread::id m_homeThread = std::this_thread::get_id();
 };
 
 // UI settings for an ImGuiOverlay: "<scene prefix>.viewers.<viewer>.ui".
@@ -79,6 +83,9 @@ private:
   // otherwise hand it these defaults (an overlay's touch mode and UI size lost before its first
   // frame), and set() a mix of new and old keys.
   bool m_writing = false;
+  // The thread that built this, so connected it: the only one a state change may reach
+  // handleStateChanged on (debug-asserted; STATE_EXEC_THREADED.md 4.8).
+  std::thread::id m_homeThread = std::this_thread::get_id();
 };
 
 // Layout of a Viewport within its ViewportManager window:
@@ -112,6 +119,9 @@ private:
   // region is four correlated keys, so a partial read mid-write would corrupt
   // the ones not yet written.
   bool m_writing = false;
+  // The thread that built this, so connected it: the only one a state change may reach
+  // handleStateChanged on (debug-asserted; STATE_EXEC_THREADED.md 4.8).
+  std::thread::id m_homeThread = std::this_thread::get_id();
 };
 
 } // namespace gl

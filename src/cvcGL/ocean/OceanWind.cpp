@@ -32,8 +32,10 @@ namespace gl {
 
 namespace {
 
-const char *const kOceanWindGLSL =
-    "uniform highp sampler2D uWindFetch; uniform highp vec3 uWindFetchGrid;\n"
+// The fetch maps' texture and their read, left out when the caller reads its own (glsl(true)).
+const char *const kFetchDec =
+    "uniform highp sampler2D uWindFetch; uniform highp vec3 uWindFetchGrid;\n";
+const char *const kOceanWindUniforms =
     "uniform highp vec3 uFetchFull; uniform highp vec3 uFetchFullFrom; uniform highp float "
     "uSeaMix;\n"
     "uniform highp vec3 uGustW; uniform highp vec3 uAdvect;\n"
@@ -42,8 +44,9 @@ const char *const kOceanWindGLSL =
     "uniform highp vec3 uCurrent; uniform highp vec3 uCurDriftL; uniform highp vec3 uCurDriftS;\n"
     "uniform highp vec3 uFlowTau; uniform highp vec3 uFlowW;\n"
     "uniform highp vec3 uFlowOff0; uniform highp vec3 uFlowOff1;\n"
-    "vec2 owFlow = vec2(0.0);\n" // the current where the cascades are read (owDisp)
-    // the old and the new keyframe's fetch at p (m), bilinear by hand, clamped to the map
+    "vec2 owFlow = vec2(0.0);\n"; // the current where the cascades are read (owDisp)
+// the old and the new keyframe's fetch at p (m), bilinear by hand, clamped to the map
+const char *const kFetchRead =
     "vec2 owFetch(vec2 p){\n"
     "  ivec2 sz = textureSize(uWindFetch, 0);\n"
     "  vec2 f = (p - uWindFetchGrid.xy) / uWindFetchGrid.z;\n"
@@ -55,7 +58,8 @@ const char *const kOceanWindGLSL =
     "  vec2 b = mix(texelFetch(uWindFetch, ivec2(i0.x, i1.y), 0).rg, texelFetch(uWindFetch, i1, "
     "0).rg, fr.x);\n"
     "  return mix(a, b, fr.y);\n"
-    "}\n"
+    "}\n";
+const char *const kOceanWindFuncs =
     "float owScale(float F, float full){\n"
     "  return full > 0.0 ? clamp(sqrt(max(F, 0.0)/full), 0.0, 1.0) : 1.0;\n"
     "}\n"
@@ -90,7 +94,10 @@ const char *const kOceanWindGLSL =
 
 } // namespace
 
-std::string OceanWind::glsl() { return std::string(WindGLSL::glsl()) + kOceanWindGLSL; }
+std::string OceanWind::glsl(bool ownFetch) {
+  return std::string(WindGLSL::glsl()) + (ownFetch ? "" : kFetchDec) + kOceanWindUniforms +
+         (ownFetch ? "" : kFetchRead) + kOceanWindFuncs;
+}
 
 OceanWind::frame OceanWind::at(const cvc::ocean::sea_forcing &f, const cascades &c, double t) {
   frame o;

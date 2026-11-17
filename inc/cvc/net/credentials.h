@@ -47,7 +47,12 @@ public:
   // Put a fresh token in the store. `rejected` is the token a server just refused, or "" before a
   // send: when the store holds another token by then, a renewal raced this one, and nothing more
   // is done. "" when the store now holds a token worth sending, else why not (never quoting one).
-  virtual std::string renew(const std::string &rejected) = 0;
+  // `cancelled` is asked while the refresh is in flight, as HttpRequest::cancelled is (empty:
+  // never): a caller whose wait someone else may end (an async call's kernel) passes its own.
+  virtual std::string renew(const std::string &rejected,
+                            const std::function<bool()> &cancelled) = 0;
+  // renew() that nothing cancels.
+  std::string renew(const std::string &rejected) { return renew(rejected, {}); }
   // renew() for a caller that must not block: a browser page's frame loop, where requests are
   // started rather than sent (cvc::net::http_starts_async). `done` gets what renew() would return,
   // later, from the browser's event loop, on the thread that called this. By default it calls

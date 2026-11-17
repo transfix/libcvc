@@ -113,7 +113,7 @@ windows:
     closable: true
   - include: water_controls
     pos: [754, 196]
-    size: [370, 345]
+    size: [370, 420]
     closable: true
   - include: weather_controls
     pos: [754, 551]
@@ -184,10 +184,11 @@ scene:
       body: {}             # its ground, buildings, rocks and trees collide (rebuilt on Regenerate)
     # The water: the world's sea, lakes and ponds as the GPU FFT ocean (three wave cascades for the
     # wind, fading out toward the shore) and a swell that breaks on the beaches facing it, the near
-    # water displaced around the camera and the rest flat; whitecaps where the waves fold. The Water
-    # panel (Settings) drives the waves and swell; the scene's wind (above) drives its wind. Its
-    # body: is the water in the physics world, the same sea, so a body floats on the waves drawn,
-    # and the bodies in it make waves.
+    # water displaced around the camera and the rest flat; whitecaps where the waves fold, and the
+    # foam the long waves leave thinning over seconds. The Water panel (Settings) drives the waves,
+    # swell, foam and the level of detail; the scene's wind (above) drives its wind. Its body: is
+    # the water in the physics world, the same sea, so a body floats on the waves drawn, and the
+    # bodies in it make waves.
     - node: water
       type: water
       world: world         # the generated_world whose ground it fills below `level`
