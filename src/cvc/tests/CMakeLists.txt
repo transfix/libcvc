@@ -215,6 +215,7 @@ add_executable(physics_pose_tracker_test physics_pose_tracker_test.cpp)
 add_executable(physics_plant_host_test physics_plant_host_test.cpp)
 add_executable(physics_dyn_bike_plant_test physics_dyn_bike_plant_test.cpp)
 add_executable(physics_dyn_4w_plant_test physics_dyn_4w_plant_test.cpp)
+add_executable(physics_dyn_boat_plant_test physics_dyn_boat_plant_test.cpp)
 # StepsAsTheDynamicPlantDoes (and the four-wheel StepsAsTheFourWheelPlantDoes) hold the plant
 # (built with -ffp-contract=off) to its model called inline here, bit for bit: build them the same
 # way, or clang contracts this copy into FMAs on aarch64 (the macOS arm64 lanes) and the last bits
@@ -528,6 +529,7 @@ set(TEST_TARGETS
   physics_plant_host_test
   physics_dyn_bike_plant_test
   physics_dyn_4w_plant_test
+  physics_dyn_boat_plant_test
   physics_mujoco_robot_test
   geometry_height_field_test
   world_geometry_test
@@ -2546,6 +2548,12 @@ target_link_libraries(physics_dyn_4w_plant_test
     GTest::gtest
     GTest::gtest_main
 )
+target_link_libraries(physics_dyn_boat_plant_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 target_link_libraries(physics_mujoco_robot_test
   PRIVATE
     cvc
@@ -2932,6 +2940,7 @@ target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
 target_compile_features(physics_plant_host_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_bike_plant_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_4w_plant_test PRIVATE cxx_std_17)
+target_compile_features(physics_dyn_boat_plant_test PRIVATE cxx_std_17)
 target_compile_features(physics_mujoco_robot_test PRIVATE cxx_std_17)
 target_compile_features(geometry_height_field_test PRIVATE cxx_std_17)
 target_compile_features(world_geometry_test PRIVATE cxx_std_17)
@@ -3492,7 +3501,11 @@ cvc_discover_tests(nav_potential_test)
 cvc_discover_tests(ph_compose_test)
 cvc_discover_tests(ph_compose_parity_test)
 cvc_discover_tests(ph_microgrid_test)
-cvc_discover_tests(ph_convoy_test)
+# The convoy's two full runs (the composite against the formation; the follow laws on a step and
+# a stop) take ~95 s each in a Debug build, and a PR's Debug ctest gives a test without a TIMEOUT
+# of its own 300 s (ci.yml), which a busy runner misses: both timed out on #1288's run on
+# 2026-11-16. Their own budget, as ocean_ewave_test has, so a slow box fails on a real hang only.
+cvc_discover_tests(ph_convoy_test PROPERTIES TIMEOUT 1200)
 cvc_discover_tests(ph_se2_test)
 cvc_discover_tests(ph_se2_train_test)
 cvc_discover_tests(nav_terrain_test)
@@ -3507,6 +3520,7 @@ cvc_discover_tests(physics_pose_tracker_test)
 cvc_discover_tests(physics_plant_host_test)
 cvc_discover_tests(physics_dyn_bike_plant_test)
 cvc_discover_tests(physics_dyn_4w_plant_test)
+cvc_discover_tests(physics_dyn_boat_plant_test)
 cvc_discover_tests(physics_mujoco_robot_test)
 cvc_discover_tests(geometry_height_field_test)
 cvc_discover_tests(world_geometry_test)

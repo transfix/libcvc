@@ -127,6 +127,7 @@ depends:
   build:
     # libcvc SDK (find_package(cvc CONFIG)) + VTK (the scene backend).
     - name: libcvc
+      version: "^4.0"
     - name: vtk
     # Dear ImGui — cvcGL's overlay (cvc::gl::ImGuiOverlay), the imgui-w32 package's build (a
     # 32-bit ImWchar, so its text holds emoji). find_package(imgui-w32) in
@@ -147,6 +148,7 @@ depends:
   runtime:
     # cvcGL's public interface links cvc::cvc and the VTK modules.
     - name: libcvc
+      version: "^4.0"
     - name: vtk
     # cvcGL's export links imgui-w32::imgui (re-found via find_dependency(imgui-w32) in
     # cvcGLConfig.cmake), so a consumer of cvc::cvcGL must have imgui-w32 in its prefix.

@@ -295,6 +295,12 @@ public:
   // What the fields did to `id` in the last step: zero for a body no field
   // touched, and for a static, kinematic or sleeping body.
   field_load field_load_on(body_id id) const;
+  // The water at a world point at the field time (field_time()): the first fluid field, in
+  // id order, whose box holds the point in x and y and reaches below it, as a boat's
+  // propeller and rudder read it. Dry and still (wet false, density 0) where none does;
+  // above the water's top it is dry with a negative depth. Its surface's height, density
+  // and velocity, or its box's top and velocity volumes without a surface.
+  water_sample water_at(const vec3 &p) const;
   // The ruts a medium with field::ruts keeps; empty for one without.
   rut_map field_ruts(field_id id) const;
 
