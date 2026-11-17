@@ -234,22 +234,20 @@ bool is_illegal(const Point_3& u2, const Point_3& v2,
 }
 
 template <typename ContourIterator>
-OTV_table build_OTV_table(ContourIterator contours_begin, ContourIterator contours_end,
+step_task build_OTV_table_steps(ContourIterator contours_begin, ContourIterator contours_end,
 			  ContourIterator c1_begin, ContourIterator c1_end,
 			  ContourIterator c2_begin, ContourIterator c2_end,
 			  const Vertices& vertices,
 			  const Correspondences& correspondences,
 			  const Vertex_map<HTiling_region>& tiling_regions,
 			  const Hierarchies& h,
-			  Banned& banned)
+			  Banned& banned, OTV_table& otv_table)
 {
 
   typedef Correspondences::const_iterator corr_iterator;
   typedef Polygon_2::Vertex_iterator Vertex_iterator;
 
   using namespace std;
-
-  OTV_table otv_table;
 
   for (ContourIterator it = contours_begin; it != contours_end; ++it)
   {
@@ -264,6 +262,7 @@ OTV_table build_OTV_table(ContourIterator contours_begin, ContourIterator contou
     // according to distance from v.
     for (Vertex_iterator vit = contour->polygon().vertices_begin(); vit != contour->polygon().vertices_end(); ++vit)
     {
+      SK_UNIT;
       Point_3 vertex = vertices.get(contour, vit);
       TILER_TRACE(logger, "Finding OTV for " << pp(vertex));
 
@@ -313,9 +312,32 @@ OTV_table build_OTV_table(ContourIterator contours_begin, ContourIterator contou
     }
   }
 
+}
+
+template <typename ContourIterator>
+OTV_table build_OTV_table(ContourIterator contours_begin, ContourIterator contours_end,
+			  ContourIterator c1_begin, ContourIterator c1_end,
+			  ContourIterator c2_begin, ContourIterator c2_end,
+			  const Vertices& vertices,
+			  const Correspondences& correspondences,
+			  const Vertex_map<HTiling_region>& tiling_regions,
+			  const Hierarchies& h,
+			  Banned& banned)
+{
+  OTV_table otv_table;
+  run_to_end(build_OTV_table_steps(contours_begin, contours_end, c1_begin, c1_end, c2_begin, c2_end,
+                                   vertices, correspondences, tiling_regions, h, banned, otv_table));
   return otv_table;
 }
 
+template step_task build_OTV_table_steps(std::vector<Contour_handle>::iterator contours_begin, std::vector<Contour_handle>::iterator contours_end,
+				   std::vector<Contour_handle>::iterator c1_begin, std::vector<Contour_handle>::iterator c1_end,
+				   std::vector<Contour_handle>::iterator c2_begin, std::vector<Contour_handle>::iterator c2_end,
+				   const Vertices& vertices,
+				   const Correspondences& correspondences,
+				   const Vertex_map<HTiling_region>& tiling_regions,
+				   const Hierarchies& h,
+				   Banned& banned, OTV_table& otv_table);
 template OTV_table build_OTV_table(std::vector<Contour_handle>::iterator contours_begin, std::vector<Contour_handle>::iterator contours_end,
 				   std::vector<Contour_handle>::iterator c1_begin, std::vector<Contour_handle>::iterator c1_end,
 				   std::vector<Contour_handle>::iterator c2_begin, std::vector<Contour_handle>::iterator c2_end,
@@ -502,14 +524,14 @@ HTiling_region tiling_region(Polygon_2::Vertex_circulator vertex, /*const Contou
 }
 
 template <typename ContourIterator>
-Vertex_map<HTiling_region> find_tiling_regions(ContourIterator start1, ContourIterator end1, const Hierarchy& h1, 
+step_task find_tiling_regions_steps(ContourIterator start1, ContourIterator end1, const Hierarchy& h1,
 					       ContourIterator start2, ContourIterator end2, const Hierarchy& h2,
 					       Number_type z1, Number_type z2,
-					       const Vertices& vertices)
+					       const Vertices& vertices, Vertex_map<HTiling_region>& regions)
 {
   typedef Polygon_2::Vertex_circulator Vertex_circulator;
 
-  Vertex_map<HTiling_region> regions(10000);
+  regions = Vertex_map<HTiling_region>(10000);
 
 //   Number_type z1 = (*start1)->slice();
 //   Number_type z2 = (*start2)->slice();
@@ -524,6 +546,7 @@ Vertex_map<HTiling_region> find_tiling_regions(ContourIterator start1, ContourIt
       Point_3 v = vertices.get(contour, it);
       regions[v] = tiling_region(it, /*contour,*/ h1, h2, z1, z2);
       ++it;
+      SK_UNIT;
     } while (it != beg);
   }
 
@@ -537,11 +560,29 @@ Vertex_map<HTiling_region> find_tiling_regions(ContourIterator start1, ContourIt
       Point_3 v = vertices.get(contour, it);
       regions[v] = tiling_region(it, /*contour,*/ h2, h1, z2, z1);
       ++it;
+      SK_UNIT;
     } while (it != beg);
   }
+}
 
+template <typename ContourIterator>
+Vertex_map<HTiling_region> find_tiling_regions(ContourIterator start1, ContourIterator end1, const Hierarchy& h1,
+					       ContourIterator start2, ContourIterator end2, const Hierarchy& h2,
+					       Number_type z1, Number_type z2,
+					       const Vertices& vertices)
+{
+  Vertex_map<HTiling_region> regions;
+  run_to_end(find_tiling_regions_steps(start1, end1, h1, start2, end2, h2, z1, z2, vertices, regions));
   return regions;
 }
+
+template
+step_task find_tiling_regions_steps(std::vector<Contour_handle>::iterator start1, std::vector<Contour_handle>::iterator end1,
+					       const Hierarchy& h1,
+					       std::vector<Contour_handle>::iterator start2, std::vector<Contour_handle>::iterator end2,
+					       const Hierarchy& h2,
+					       Number_type z1, Number_type z2,
+					       const Vertices& vertices, Vertex_map<HTiling_region>& regions);
 
 template
 Vertex_map<HTiling_region> find_tiling_regions(std::vector<Contour_handle>::iterator start1, std::vector<Contour_handle>::iterator end1, 
@@ -1082,7 +1123,7 @@ bool case2_4(int target_optimality, const Point_3& u2, const Point_3& v2, Number
 }
 
 /// pass 2, 3 or 4
-void pass2_4(size_t case_num, Tiler_workspace& w)
+step_task pass2_4_steps(size_t case_num, Tiler_workspace& w)
 {
 
 //   Boundary_slice_chord chords
@@ -1113,6 +1154,7 @@ void pass2_4(size_t case_num, Tiler_workspace& w)
 	seg_z = tmp_bsc.seg_z();
 
 	keep_going = case2_4(case_num, u2, v2, seg_z, dir, w);
+	SK_UNIT;
 
 	if (keep_going)
 	{
@@ -1455,7 +1497,7 @@ void build_tiling_table(Tiler_workspace& w)
   build_tiling_table_phase2(w);
 }
 
-void build_tiling_table_phase1(Tiler_workspace& w)
+step_task build_tiling_table_phase1_steps(Tiler_workspace& w)
 {
 
   TILER_TRACE(logger, "Pass 1 (cases 1-3)...");
@@ -1473,18 +1515,24 @@ void build_tiling_table_phase1(Tiler_workspace& w)
     case1_3(u2, v2, Walk_direction::FORWARD, w);
     TILER_TRACE(logger, "OTV pair " << u2.id() << " " << v2.id() << " BACKWARD");
     case1_3(u2, v2, Walk_direction::BACKWARD, w);
+    SK_UNIT;
   }
 
   TILER_TRACE(logger, "Pass 2 (case 4)...");
-  pass2_4(4, w);
+  SK_RUN(pass2_4_steps(4, w));
   TILER_TRACE(logger, "Pass 3 (case 5)...");
-  pass2_4(5, w);
+  SK_RUN(pass2_4_steps(5, w));
   TILER_TRACE(logger, "Pass 4 (case 6)...");
-  pass2_4(6, w);
+  SK_RUN(pass2_4_steps(6, w));
 
 }
 
-void build_tiling_table_phase2(Tiler_workspace& w)
+void build_tiling_table_phase1(Tiler_workspace& w)
+{
+  run_to_end(build_tiling_table_phase1_steps(w));
+}
+
+step_task build_tiling_table_phase2_steps(Tiler_workspace& w)
 {
 
   // trace out new contours
@@ -1518,7 +1566,13 @@ void build_tiling_table_phase2(Tiler_workspace& w)
     }
 
     ++idx;
+    SK_UNIT;
   }
+}
+
+void build_tiling_table_phase2(Tiler_workspace& w)
+{
+  run_to_end(build_tiling_table_phase2_steps(w));
 }
 
 } // namespace cvc::tiler

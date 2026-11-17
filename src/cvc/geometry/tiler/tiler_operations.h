@@ -41,6 +41,7 @@
 #include "Vertex_completion_map.h"
 #include "tiler_defines.h"
 #include "Tiler_workspace.h"
+#include "stepping.h"
 
 namespace cvc::tiler {
 
@@ -98,20 +99,32 @@ bool can_tile(Contour_handle c1, Contour_handle c2, const Hierarchy& h1, const H
 /// Finds all contours that can be tiled to the given contour
 /// Yes, I know the return value looks scary, but it is simply a map of contour handles to a 
 /// list of contour handles:
+//
+// A unit per pair of contours tested.
 template <typename ContourIterator>
-Correspondences find_correspondences(ContourIterator start1, ContourIterator end1, const Hierarchy& h1, 
-		     ContourIterator start2, ContourIterator end2, const Hierarchy& h2, Number_type overlap)
+step_task find_correspondences_steps(ContourIterator start1, ContourIterator end1, const Hierarchy& h1,
+		     ContourIterator start2, ContourIterator end2, const Hierarchy& h2, Number_type overlap,
+		     Correspondences& correspondences)
 {
 
-  Correspondences correspondences;
   size_t count = 0;
   for (ContourIterator it1 = start1; it1 != end1; ++it1)
-    for (ContourIterator it2 = start2; it2 != end2; ++it2)
+    for (ContourIterator it2 = start2; it2 != end2; ++it2) {
       if (can_tile(*it1, *it2, h1, h2, overlap)) {
 	correspondences.add(*it1, *it2);
 	++count;
       }
+      SK_UNIT;
+    }
   TILER_TRACE(logger, "Number of correspondences: " << count);
+}
+
+template <typename ContourIterator>
+Correspondences find_correspondences(ContourIterator start1, ContourIterator end1, const Hierarchy& h1,
+		     ContourIterator start2, ContourIterator end2, const Hierarchy& h2, Number_type overlap)
+{
+  Correspondences correspondences;
+  run_to_end(find_correspondences_steps(start1, end1, h1, start2, end2, h2, overlap, correspondences));
   return correspondences;
 }
 
@@ -120,10 +133,16 @@ Correspondences find_correspondences(ContourIterator start1, ContourIterator end
 
 /// ContourIterator iterates over contours
 template <typename ContourIterator>
-Vertex_map<HTiling_region> find_tiling_regions(ContourIterator start1, ContourIterator end1, const Hierarchy& h1, 
+Vertex_map<HTiling_region> find_tiling_regions(ContourIterator start1, ContourIterator end1, const Hierarchy& h1,
 					       ContourIterator start2, ContourIterator end2, const Hierarchy& h2,
 					       Number_type z1, Number_type z2,
 					       const Vertices& vertices);
+/// The same, a unit per contour vertex.
+template <typename ContourIterator>
+step_task find_tiling_regions_steps(ContourIterator start1, ContourIterator end1, const Hierarchy& h1,
+					       ContourIterator start2, ContourIterator end2, const Hierarchy& h2,
+					       Number_type z1, Number_type z2,
+					       const Vertices& vertices, Vertex_map<HTiling_region>& regions);
 // {
 //   typedef Polygon_2::Vertex_circulator Vertex_circulator;
 
@@ -189,6 +208,16 @@ OTV_table build_OTV_table(ContourIterator contours_begin, ContourIterator contou
 			  const Vertex_map<HTiling_region>& tiling_regions,
 			  const Hierarchies& h,
 			  Banned& banned);
+/// The same, a unit per contour vertex.
+template <typename ContourIterator>
+step_task build_OTV_table_steps(ContourIterator contours_begin, ContourIterator contours_end,
+			  ContourIterator c1_begin, ContourIterator c1_end,
+			  ContourIterator c2_begin, ContourIterator c2_end,
+			  const Vertices& vertices,
+			  const Correspondences& correspondences,
+			  const Vertex_map<HTiling_region>& tiling_regions,
+			  const Hierarchies& h,
+			  Banned& banned, OTV_table& otv_table);
 
 
 // {
@@ -245,10 +274,13 @@ int optimality(const Point_3& u2, const Point_3& u3, const Point_3& v2, const Po
 
 void find_banned(Tiler_workspace& w);
 
+//
+// Units: one per hierarchy, then those of find_correspondences_steps, find_tiling_regions_steps
+// and build_OTV_table_steps. The workspace is `w` once it returns.
 template <typename ContourIterator>
-boost::shared_ptr<Tiler_workspace> pre_tile(ContourIterator bottom_start, ContourIterator bottom_end, 
-					    ContourIterator top_start, ContourIterator top_end, 
-					    bool do_augment, Number_type overlap)
+step_task pre_tile_steps(ContourIterator bottom_start, ContourIterator bottom_end,
+					    ContourIterator top_start, ContourIterator top_end,
+					    bool do_augment, Number_type overlap, boost::shared_ptr<Tiler_workspace>& w)
 {
   typedef std::vector<Contour_handle> Contours;
 
@@ -297,8 +329,10 @@ boost::shared_ptr<Tiler_workspace> pre_tile(ContourIterator bottom_start, Contou
   TILER_TRACE(logger, "Creating hierarchies...");
   TILER_TRACE(logger, "Creating bottom augmented hierarchy...");
   bottom_h = Hierarchy(bottom.begin(), bottom.end(), Hierarchy_policy::FORCE_CCW);
+  SK_UNIT;
   TILER_TRACE(logger, "Creating top augmented hierarchy...");
   top_h = Hierarchy(top.begin(), top.end(), Hierarchy_policy::FORCE_CCW);
+  SK_UNIT;
 
 //   hierarchies[bottom[0]->slice()] = bottom_h;
 //   hierarchies[top[0]->slice()] = top_h;
@@ -310,38 +344,47 @@ boost::shared_ptr<Tiler_workspace> pre_tile(ContourIterator bottom_start, Contou
 
   // Get correspondences
   TILER_TRACE(logger, "Finding correspondences...");
-  correspondences = find_correspondences(bottom.begin(), bottom.end(), bottom_h, top.begin(), top.end(), top_h, overlap);
+  SK_RUN(find_correspondences_steps(bottom.begin(), bottom.end(), bottom_h, top.begin(), top.end(), top_h, overlap, correspondences));
 
   // Get the tiling regions
   TILER_TRACE(logger, "Finding tiling regions...");
-  tiling_regions = find_tiling_regions(bottom.begin(), bottom.end(), bottom_h, 
-				       top.begin(), top.end(), top_h, 
+  SK_RUN(find_tiling_regions_steps(bottom.begin(), bottom.end(), bottom_h,
+				       top.begin(), top.end(), top_h,
 				       bottomz, topz,
-				       vertices);
+				       vertices, tiling_regions));
     
   Banned banned;
 
   // Build the OTV table
   TILER_TRACE(logger, "Building OTV table...");
-  otv_table = build_OTV_table(all.begin(), all.end(), bottom.begin(), bottom.end(), top.begin(), top.end(), vertices, correspondences, tiling_regions, hierarchies, banned);
-    
-  TW_handle w = Tiler_workspace::create(all, bottom, top, correspondences, vertices, tiling_regions, otv_table, hierarchies, midz);
+  SK_RUN(build_OTV_table_steps(all.begin(), all.end(), bottom.begin(), bottom.end(), top.begin(), top.end(), vertices, correspondences, tiling_regions, hierarchies, banned, otv_table));
+
+  w = Tiler_workspace::create(all, bottom, top, correspondences, vertices, tiling_regions, otv_table, hierarchies, midz);
 
   // Finding banned vertices
   TILER_TRACE(logger, "Finding banned vertices...");
   w->set_banned(banned);
-//   find_banned(*w);
-    
+}
+
+template <typename ContourIterator>
+boost::shared_ptr<Tiler_workspace> pre_tile(ContourIterator bottom_start, ContourIterator bottom_end,
+					    ContourIterator top_start, ContourIterator top_end,
+					    bool do_augment, Number_type overlap)
+{
+  boost::shared_ptr<Tiler_workspace> w;
+  run_to_end(pre_tile_steps(bottom_start, bottom_end, top_start, top_end, do_augment, overlap, w));
   return w;
-//   return boost::shared_ptr<Tiler_workspace>(w);
-  
 }
 
 void build_tiling_table(Tiler_workspace& workspace);
 
 void build_tiling_table_phase1(Tiler_workspace& workspace);
+/// A unit per OTV pair, and per chord step in passes 2-4.
+step_task build_tiling_table_phase1_steps(Tiler_workspace& workspace);
 
 void build_tiling_table_phase2(Tiler_workspace& workspace);
+/// A unit per untiled region (each filled in one piece: its partition and interpolation).
+step_task build_tiling_table_phase2_steps(Tiler_workspace& workspace);
 
 template <typename ContourIterator>
 Tiles build_tiling_table(ContourIterator s1_begin, ContourIterator s1_end,

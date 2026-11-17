@@ -306,20 +306,17 @@ void remove_intersections(TW_handle tw_yellow,
     }
   }
 
-  static int total_num_tiles = 0;
+  // (The legacy counted the tiles in a function static, a debug statistic; gone.)
   for (typename list<Tile_handle>::iterator it = new_tiles[0].begin(); it != new_tiles[0].end(); ++it)
   {
     *new_yellow = *it;
     ++new_yellow;
-    total_num_tiles++;
   }
   for (typename list<Tile_handle>::iterator it = new_tiles[1].begin(); it != new_tiles[1].end(); ++it)
   {
     *new_green = *it;
     ++new_green;
-    total_num_tiles++;
   }
-//   TILER_DEBUG(logger, "Final total number of tiles: " << total_num_tiles);
 }
 
 
@@ -521,12 +518,7 @@ get_intersections(TW_handle tw_yellow, TW_handle tw_green,
   TILER_TRACE(logger, "Num tiles:  [0] = " << num_tiles[0] << " [1] = " << num_tiles[1]);
   TILER_TRACE(logger, "Num intersections:  [0] = " << num_intersections);
 
-  static int total_num_tiles = 0;
-  static int total_num_intersections = 0;
-  total_num_tiles += num_tiles[0] + num_tiles[1];
-  total_num_intersections += num_intersections;
-//   TILER_DEBUG(logger, "Total num tiles:  " << total_num_tiles);
-  TILER_DEBUG(logger, "Total num intersections:  " << total_num_intersections);
+  // (The legacy kept running totals in function statics, a debug statistic; gone.)
 
   return ret;
 }

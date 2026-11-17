@@ -39,27 +39,28 @@ namespace cvc::tiler {
 //
 /// Tiles one component across two slices
 //------------------------------------------------------------------------------
+//
+// The workspace is `workspace` once it returns. Its units are pre_tile_steps',
+// build_tiling_table_phase1_steps' and build_tiling_table_phase2_steps'.
 template <typename Contour_iter>
-TW_handle tile_one_component(Contour_iter bottom_begin, Contour_iter bottom_end,
+step_task tile_one_component(Contour_iter bottom_begin, Contour_iter bottom_end,
 	       Contour_iter top_begin, Contour_iter top_end,
-	       const Tiler_options& options, tiler_context& ctx)
+	       const Tiler_options& options, tiler_context& ctx, TW_handle& workspace)
 {
   using namespace std;
 
   // Pre-tile: augment, generate hierarchy, get correspondences, build otv table
-  TW_handle workspace = pre_tile(bottom_begin, bottom_end, top_begin, top_end, false, options.correspondence_overlap());
+  SK_RUN(pre_tile_steps(bottom_begin, bottom_end, top_begin, top_end, false, options.correspondence_overlap(), workspace));
   Tiler_workspace& w = *workspace;
   w.set_log(&ctx.log);
 
   // Perform tiling phase 1
   boost::shared_ptr<Tiler_callback> callback(new Tiler_callback());
   w.set_callback(callback);
-  build_tiling_table_phase1(w);
+  SK_RUN(build_tiling_table_phase1_steps(w));
 
   // Perform tiling phase 2
-  build_tiling_table_phase2(w);//, options.interp_untiled_regions());
-
-  return workspace;
+  SK_RUN(build_tiling_table_phase2_steps(w));//, options.interp_untiled_regions());
 }
 
 class Tiler_intersection
@@ -305,14 +306,14 @@ step_task tile(vector<Slice>& slices, const Tiler_options& options, tiler_contex
     {
       const string& component = *it;
 
-      TW_handle w = tile_one_component(bottom.begin(component), bottom.end(component),
+      TW_handle w;
+      SK_RUN(tile_one_component(bottom.begin(component), bottom.end(component),
 			 top.begin(component), top.end(component),
-			 options, ctx);
+			 options, ctx, w));
 
       slice_workspaces.push_back(w);
       list<Triangle_handle> t(w->tiles_begin(), w->tiles_end());
       tiles.push_back(t);
-      SK_UNIT;
     }
 
     // After tiling is complete, remove any intersections between slices

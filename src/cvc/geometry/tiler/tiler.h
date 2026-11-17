@@ -40,16 +40,14 @@
 
 #include <boost/shared_ptr.hpp>
 
-#include "../skeleton/stepping.h"
 #include "Contour.h"
 #include "Slice.h"
 #include "Tile.h"
 #include "Tiler_options.h"
 #include "Tiler_workspace.h"
+#include "stepping.h"
 
 namespace cvc::tiler {
-
-using cocone::step_task;
 
 // What tile() makes: each component's triangles, decomposed where intersection removal put points
 // on their edges.
