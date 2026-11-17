@@ -1,13 +1,35 @@
-#include <ContourTiler/augment.h>
-#include <ContourTiler/Segment_3_undirected.h>
-#include <ContourTiler/print_utils.h>
-#include <ContourTiler/sweep_line_visitors.h>
-#include <ContourTiler/Distance_functor.h>
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
 
-#include <CGAL/Sweep_line_2_algorithms.h>
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
+#include "augment.h"
+#include "Segment_3_undirected.h"
+#include "print_utils.h"
+#include "sweep_line_visitors.h"
+#include "Distance_functor.h"
+
 // #include <CGAL/Sweep_line_empty_visitor.h>  // Removed in CGAL 5.x - not used in this file
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 template <typename V1, typename V2>
 class Fork_visitor
@@ -43,10 +65,9 @@ Fork_visitor<V1, V2> fork_visitor(V1 v1, V2 v2)
 
 void insert_if(list<Point_2>& points, const Point_2& p, bool force)
 {
-  log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.augment");
 
   if (p.y() == 0) {
-    LOG4CPLUS_ERROR(logger, "Bad point! " << pp(p));
+    TILER_DEBUG(logger, "Bad point! " << pp(p));
   }
 
   if (points.empty())
@@ -56,48 +77,48 @@ void insert_if(list<Point_2>& points, const Point_2& p, bool force)
     Point_2 front = points.front();
     Point_2 back = points.back();
     if (xy_equal(p, back)) {
-      LOG4CPLUS_WARN(logger, "Equal point (back)! " << pp(p));
+      TILER_DEBUG(logger, "Equal point (back)! " << pp(p));
     }
     else if (xy_equal(p, front)) {
-      LOG4CPLUS_WARN(logger, "Equal point (front)! " << pp(p));
+      TILER_DEBUG(logger, "Equal point (front)! " << pp(p));
     }
-    // if (CGAL::compare_squared_distance(p, back, 0.0000000001) == CGAL::SMALLER) {
+    // if (compare_squared_distance(p, back, 0.0000000001) == SMALLER) {
     //   set_pp_precision(15);
-    //   LOG4CPLUS_ERROR(logger, "Really close points: " << pp(p) << " " << pp(back));
+    //   TILER_ERROR(logger, "Really close points: " << pp(p) << " " << pp(back));
     //   restore_pp_precision();
     // }
-//     if (CGAL::compare_squared_distance(p, back, 0.00000001) == CGAL::SMALLER)
+//     if (compare_squared_distance(p, back, 0.00000001) == SMALLER)
 //     {
 //       if (force)
 //       {
-// 	LOG4CPLUS_TRACE(logger, "Erased point that was too close: " << pp(back));
+// 	TILER_TRACE(logger, "Erased point that was too close: " << pp(back));
 // 	points.pop_back();
 // 	points.push_back(p);
 //       }
 //       else
 //       {
 // 	// Don't insert the point
-// 	LOG4CPLUS_TRACE(logger, "Failing to insert point: " << pp(p));
+// 	TILER_TRACE(logger, "Failing to insert point: " << pp(p));
 //       }
 //     }
 // //     else if (xy_equal(p, front))
-//     else if (CGAL::compare_squared_distance(p, front, 0.00000001) == CGAL::SMALLER)
+//     else if (compare_squared_distance(p, front, 0.00000001) == SMALLER)
 //     {
 //       if (force)
 //       {
-// 	LOG4CPLUS_TRACE(logger, "Erased point that was too close: " << pp(front));
+// 	TILER_TRACE(logger, "Erased point that was too close: " << pp(front));
 // 	points.pop_front();
 // 	points.push_back(p);
 //       }
 //       else
 //       {
 // 	// Don't insert the point
-// 	LOG4CPLUS_TRACE(logger, "Failing to insert point: " << pp(p));
+// 	TILER_TRACE(logger, "Failing to insert point: " << pp(p));
 //       }
 //     }
     else {
       points.push_back(p);
-      LOG4CPLUS_TRACE(logger, "Inserted point: " << pp(p));
+      TILER_TRACE(logger, "Inserted point: " << pp(p));
     }
   }
 }
@@ -111,10 +132,9 @@ void insert_if(list<Point_2>& points, Points_iter begin, Points_iter end, bool f
 
 pair<Polygon_2, Polygon_2> augment1(const Polygon_2& P, const Polygon_2& Q)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.augment");
 
-  LOG4CPLUS_TRACE(logger, "Augmenting poly1 = " << pp(P));
-  LOG4CPLUS_TRACE(logger, "Augmenting poly2 = " << pp(Q));
+  TILER_TRACE(logger, "Augmenting poly1 = " << pp(P));
+  TILER_TRACE(logger, "Augmenting poly2 = " << pp(Q));
 
   // Get all segment intersections and put them in map,
   // that maps segments to their interior intersection points.
@@ -148,15 +168,15 @@ pair<Polygon_2, Polygon_2> augment1(const Polygon_2& P, const Polygon_2& Q)
     has_intersections = has_intersections || !points.empty();
     for (list<Point_2>::iterator p_it = points.begin(); p_it != points.end(); ++p_it)
     {
-      LOG4CPLUS_TRACE(logger, "Augmented point: " << pp(*p_it) << "(" << pp(segment) << ")");
+      TILER_TRACE(logger, "Augmented point: " << pp(*p_it) << "(" << pp(segment) << ")");
     }
   }
 
   if (has_intersections)
   {
-    LOG4CPLUS_TRACE(logger, "Augmenting:");
-    LOG4CPLUS_TRACE(logger, "  P = " << pp(P));
-    LOG4CPLUS_TRACE(logger, "  Q = " << pp(Q));
+    TILER_TRACE(logger, "Augmenting:");
+    TILER_TRACE(logger, "  P = " << pp(P));
+    TILER_TRACE(logger, "  Q = " << pp(Q));
   }
 
   Number_type Pz = P[0].z();
@@ -192,8 +212,8 @@ pair<Polygon_2, Polygon_2> augment1(const Polygon_2& P, const Polygon_2& Q)
     Polygon_2::Vertex_circulator p = c;
     Polygon_2::Vertex_circulator n = c;
     p--; n++;
-    if (CGAL::collinear(Point_2(*p), Point_2(*c), Point_2(*n))) {
-      LOG4CPLUS_TRACE(logger, "Collinear point: " << pp(*c));
+    if (collinear(Point_2(*p), Point_2(*c), Point_2(*n))) {
+      TILER_TRACE(logger, "Collinear point: " << pp(*c));
     }
     c++;
   } while (c != begin);
@@ -204,17 +224,17 @@ pair<Polygon_2, Polygon_2> augment1(const Polygon_2& P, const Polygon_2& Q)
     Polygon_2::Vertex_circulator p = c;
     Polygon_2::Vertex_circulator n = c;
     p--; n++;
-    if (CGAL::collinear(Point_2(*p), Point_2(*c), Point_2(*n))) {
-      LOG4CPLUS_TRACE(logger, "Collinear: " << pp(*c));
+    if (collinear(Point_2(*p), Point_2(*c), Point_2(*n))) {
+      TILER_TRACE(logger, "Collinear: " << pp(*c));
     }
     c++;
   } while (c != begin);
 
-  LOG4CPLUS_TRACE(logger, "Augmented:");
-  LOG4CPLUS_TRACE(logger, "  P = " << pp(Pn));
-  LOG4CPLUS_TRACE(logger, "  Q = " << pp(Qn));
+  TILER_TRACE(logger, "Augmented:");
+  TILER_TRACE(logger, "  P = " << pp(Pn));
+  TILER_TRACE(logger, "  Q = " << pp(Qn));
 
   return make_pair(Pn, Qn);
 }
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler

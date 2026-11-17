@@ -1,18 +1,41 @@
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
 #ifndef __INTERSECTION_H__
 #define __INTERSECTION_H__
 
 #include <boost/unordered_map.hpp>
 
-#include <ContourTiler/common.h>
-#include <ContourTiler/mtiler_operations.h>
-#include <ContourTiler/Segment_3_undirected.h>
-#include <ContourTiler/Intersections.h>
-#include <ContourTiler/triangle_utils.h>
-#include <ContourTiler/Polyline.h>
-#include <ContourTiler/Distance_functor.h>
-#include <ContourTiler/Z_adjustments.h>
+#include "common.h"
+#include "mtiler_operations.h"
+#include "Segment_3_undirected.h"
+#include "Intersections.h"
+#include "triangle_utils.h"
+#include "Polyline.h"
+#include "Distance_functor.h"
+#include "Z_adjustments.h"
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 Polyline_2 trim_forward(const Polygon_2& p, const Polyline_2& c);
 Polyline_2 trim_backward(const Polygon_2& p, const Polyline_2& c);
@@ -68,6 +91,6 @@ map_point2edges(Tile_handle tile,
 		Cuts_iter cuts_begin, Cuts_iter cuts_end,
 		const Intersections<Tile_handle>& ints, int i);
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler
 
 #endif

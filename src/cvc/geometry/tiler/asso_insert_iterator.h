@@ -16,9 +16,9 @@
 #include <algorithm>
 #include <iterator>
 
-#include <ContourTiler/config.h>
+#include "common.h"
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 /* template class for insert iterator for associative containers
  */
@@ -65,6 +65,6 @@ inline asso_insert_iterator<Container> asso_inserter (Container& c)
     return asso_insert_iterator<Container>(c);
 }
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler
 
 #endif

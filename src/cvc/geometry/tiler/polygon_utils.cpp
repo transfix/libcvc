@@ -1,18 +1,37 @@
-#include <ContourTiler/polygon_utils.h>
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
 
-#include <CGAL/Sweep_line_2_algorithms.h>
-#include <CGAL/Constrained_Delaunay_triangulation_2.h>
-#include <CGAL/Triangulation_vertex_base_with_info_2.h>
-#include <CGAL/partition_2.h>
+  This file is part of libcvc.
 
-#include <ContourTiler/triangle_utils.h>
-#include <ContourTiler/print_utils.h>
-#include <ContourTiler/sweep_line_visitors.h>
-#include <ContourTiler/set_utils.h>
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
+#include "polygon_utils.h"
+
+
+#include "triangle_utils.h"
+#include "print_utils.h"
+#include "sweep_line_visitors.h"
+#include "set_utils.h"
 
 #include <boost/foreach.hpp>
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 // /// Returns true if there are any polygon boundary intersections.
 // /// Precondition: InputIterator iterates over CGAL::Polygon_2 objects.
@@ -38,7 +57,6 @@ CONTOURTILER_BEGIN_NAMESPACE
 /// Precondition: InputIterator iterates over CGAL::Polygon_2 objects.
 boost::unordered_set<Point_2> get_boundary_intersections(const std::list<Segment_2>& segments, bool report_endpoints)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("boundary_intersections");
 
   list<SL_intersection> ints;
   get_intersections(segments.begin(), segments.end(), back_inserter(ints), report_endpoints, report_endpoints);
@@ -91,15 +109,10 @@ bool intersects_boundary(const Polygon_2& P, const Segment_2& s, bool end_intern
 
 bool intersects_boundary(const Point_2& point, const Polygon_2& P)
 {
-  typedef Kernel K;
-  typedef K::Point_2 Point_2;
-  typedef CGAL::Arr_polyline_traits_2<CGAL::Arr_segment_traits_2<K> > Polyline;
-  typedef Polyline::Curve_2 Curve;
-
   Polygon_2::Edge_const_iterator it = P.edges_begin();
   for (; it != P.edges_end(); ++it)
   {
-    if (CGAL::do_intersect(point, *it))
+    if (do_intersect(point, *it))
       return true;
   }
   return false;
@@ -107,7 +120,7 @@ bool intersects_boundary(const Point_2& point, const Polygon_2& P)
 
 bool do_intersect(const Polygon_2& P, const Polygon_2& Q)
 {
-//   return CGAL::do_intersect(P, Q);
+//   return do_intersect(P, Q);
   if (boundaries_intersect(P, Q, true))
     return true;
   return P.has_on_positive_side(Q[0]) || Q.has_on_positive_side(P[0]);
@@ -116,13 +129,12 @@ bool do_intersect(const Polygon_2& P, const Polygon_2& Q)
 bool collinear(const Polygon_2& P) {
   return false;
   // Need to find the root of the problem.
-  // return CGAL::orientation_2(P.vertices_begin(), P.vertices_end()) == CGAL::COLLINEAR;
+  // return CGAL::orientation_2(P.vertices_begin(), P.vertices_end()) == COLLINEAR;
 }
 
 Polygon_relation relation(const Polygon_2& subject, const Polygon_2& relative, bool proper)
 {
-  typedef Polygon_2::Traits K;
-  typedef CGAL::Polygon_with_holes_2<K> Polygon_with_holes;
+  typedef Polygon_with_holes_2 Polygon_with_holes;
 
   Polygon_relation ret = Polygon_relation::BOUNDARY_INTERSECT;
 
@@ -142,7 +154,7 @@ Polygon_relation relation(const Polygon_2& subject, const Polygon_2& relative, b
 //   if (do_intersect(subject, relative))
 //   {
 //     std::list<Polygon_with_holes> result;
-//     CGAL::intersection(subject, relative, std::back_inserter(result));
+//     intersection(subject, relative, std::back_inserter(result));
 //     Polygon_with_holes& intersection = result.front();
 //     if (result.size() > 1 || intersection.holes_begin() != intersection.holes_end() || boundaries_intersect(subject, relative))
 //     {
@@ -171,13 +183,11 @@ Polygon_relation relation(const Polygon_2& subject, const Polygon_2& relative, b
   return ret;
 }
 
-typedef Kernel::Triangle_2                  Triangle_2;
 
 Polygon_2 remove_collinear(const Polygon_2& p, Number_type epsilon)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("polygon_utils.remove_collinear");
 
-  LOG4CPLUS_TRACE(logger, pp(p));
+  TILER_TRACE(logger, pp(p));
 
   if (!p.is_simple()) {
     stringstream ss;
@@ -197,10 +207,10 @@ Polygon_2 remove_collinear(const Polygon_2& p, Number_type epsilon)
     Triangle_2 t(*prev, *c, *n);
     Number_type a = abs(t.area());
     if (a > epsilon)
-//     if (!CGAL::collinear(*prev, *c, *n))
+//     if (!collinear(*prev, *c, *n))
       newp.push_back(*c);
     else
-      LOG4CPLUS_TRACE(logger, "Removing collinearity at " << pp(*c) << " area = " << a);
+      TILER_TRACE(logger, "Removing collinearity at " << pp(*c) << " area = " << a);
     ++prev;
     ++c;
     ++n;
@@ -212,24 +222,24 @@ Polygon_2 remove_collinear(const Polygon_2& p, Number_type epsilon)
 class Cross_checker
 {
 public:
-  Cross_checker() : _side(CGAL::ON_BOUNDARY), _crosses(false) {}
+  Cross_checker() : _side(ON_BOUNDARY), _crosses(false) {}
 
   bool crosses() { return _crosses; }
-  void add(CGAL::Bounded_side side)
+  void add(Bounded_side side)
   {
     // We already know that we cross -- no need to check more
     if (_crosses) return;
     // Something on the boundary gives us no information
-    if (side == CGAL::ON_BOUNDARY) return;
+    if (side == ON_BOUNDARY) return;
 
-    if (_side == CGAL::ON_BOUNDARY)
+    if (_side == ON_BOUNDARY)
       _side = side;
     else
       _crosses = (_side != side);
   }
   
 private:
-  CGAL::Bounded_side _side;
+  Bounded_side _side;
   bool _crosses;
 };
 
@@ -239,21 +249,20 @@ private:
 /// and outside of the boundary of the polygon.
 bool intersects_proper(const Segment_2& segment, const Polygon_2& polygon)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.intersects_proper");
 
   Point_2 seg_pts[] = { segment.source(), segment.target() };
 
   // Get intersection points between segment and polygon
-  LOG4CPLUS_TRACE(logger, "Doing a line sweep: " << pp(segment));
+  TILER_TRACE(logger, "Doing a line sweep: " << pp(segment));
   list<Segment_2> segments(polygon.edges_begin(), polygon.edges_end());
   segments.push_back(segment);
   list<Point_2> points;
   get_intersection_points(segments.begin(), segments.end(), back_inserter(points), true, false);
 
-  CGAL::Bounded_side side1 = polygon.bounded_side(seg_pts[0]);
-  CGAL::Bounded_side side2 = polygon.bounded_side(seg_pts[1]);
+  Bounded_side side1 = polygon.bounded_side(seg_pts[0]);
+  Bounded_side side2 = polygon.bounded_side(seg_pts[1]);
 
-  LOG4CPLUS_TRACE(logger, "Checking with cross checker");
+  TILER_TRACE(logger, "Checking with cross checker");
   if (points.size() == 0)
     return false;
   Cross_checker checker;
@@ -414,9 +423,8 @@ bool is_vertical(const Polygon_2& p)
 bool is_legal(const Point_3& a, const Point_3& b, const Point_3& c,
 	      const boost::unordered_map<Point_3, boost::unordered_set<Segment_3_undirected> >& point2edges)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("polygon_utils.is_legal");
 
-  LOG4CPLUS_TRACE(logger, "is_legal: " << pp(a) << " " << pp(b) << " " << pp(c));
+  TILER_TRACE(logger, "is_legal: " << pp(a) << " " << pp(b) << " " << pp(c));
 
   if (point2edges.find(a) == point2edges.end())
     return true;
@@ -455,88 +463,6 @@ bool is_legal(const Point_3& a, const Point_3& b, const Point_3& c,
 //   } while (n != start);
 // }
 
-template <typename Polygon, typename Triangle_iter>
-void triangulate(const Polygon& polygon, Triangle_iter triangles, 
-		 const boost::unordered_map<Point_3, boost::unordered_set<Segment_3_undirected> >& point2edges)
-{
-  typedef CGAL::Triangulation_vertex_base_2<Kernel>                     Vb;
-  typedef CGAL::Triangulation_vertex_base_with_info_2<bool, Kernel, Vb>     Info;
-  typedef CGAL::Constrained_triangulation_face_base_2<Kernel>           Fb;
-  typedef CGAL::Triangulation_data_structure_2<Info,Fb>              TDS;
-  typedef CGAL::Exact_predicates_tag                               Itag;
-  typedef CGAL::Constrained_Delaunay_triangulation_2<Kernel, TDS, Itag> CDT;
-
-  static log4cplus::Logger tlogger = log4cplus::Logger::getInstance("polygon_utils");
-
-  LOG4CPLUS_TRACE(tlogger, "Triangulating " << pp(polygon));
-
-  if (polygon.size() < 3) return;
-
-  Polygon p = polygon;
-  bool vertical = is_vertical(p);
-  if (vertical)
-  {
-    LOG4CPLUS_TRACE(tlogger, "Polygon is vertical.  Rotating.");
-    p = yz_swap_neg(p);
-  }
-
-  bool reverse = !p.is_counterclockwise_oriented();
-
-  // THIS IS BAD, BAD, BAD!
-  {
-    typename Polygon::Vertex_circulator start = p.vertices_circulator();
-    typename Polygon::Vertex_circulator c = start;
-    typename Polygon::Vertex_circulator n = c;
-    typename Polygon::Vertex_circulator prev = c;
-    ++n;
-    --prev;
-    Polygon_2 newp;
-    do
-    {
-      if (!CGAL::collinear(*prev, *c, *n))
-	newp.push_back(*c);
-      ++prev;
-      ++c;
-      ++n;
-    } while (c != start);
-    p = newp;
-  }
-
-  CDT cdt;
-  typename Polygon::Vertex_circulator start = p.vertices_circulator();
-  typename Polygon::Vertex_circulator c = start;
-  typename Polygon::Vertex_circulator n = c;
-  do
-  {
-    cdt.insert_constraint(*c, *n);
-    ++c;
-    ++n;
-  } while (c != start);
-
-  // Loop through the triangulation and store the vertices of each triangle
-  for (CDT::Finite_faces_iterator ffi = cdt.finite_faces_begin();
-       ffi != cdt.finite_faces_end();
-       ++ffi)
-  {
-    Triangle t;
-    Point_3 center = centroid(ffi->vertex(0)->point(), ffi->vertex(1)->point(), ffi->vertex(2)->point());
-    if (p.has_on_bounded_side(center) && 
-	is_legal(ffi->vertex(0)->point(), ffi->vertex(1)->point(), ffi->vertex(2)->point(), point2edges))
-    {
-      for (int i = 0; i < 3; ++i)
-      {
-	int idx = reverse ? 2-i : i;
-	if (!vertical)
-	  t[idx] = ffi->vertex(i)->point();
-	else
-	  t[idx] = yz_swap_pos(ffi->vertex(i)->point());
-      }
-      LOG4CPLUS_TRACE(tlogger, "Adding tile: " << pp_tri(t));
-      *triangles = t;
-      ++triangles;
-    }
-  }
-}
 
 
 bool is_strictly_convex(const Polygon_2& polygon, 
@@ -550,7 +476,7 @@ bool is_strictly_convex(const Polygon_2& polygon,
   ++n;
   do
   {
-    if (!CGAL::left_turn(*p, *c, *n) || 
+    if (!left_turn(*p, *c, *n) || 
 	!is_legal(*p, *c, *n, point2edges))
       return false;
 
@@ -566,7 +492,7 @@ bool can_cut(const Polygon_2& polygon, Polygon_2::Vertex_circulator p, Polygon_2
 {
   Segment_2 seg(*p, *n);
   Point_2 mid((p->x()+n->x())/2.0, (p->y()+n->y())/2.0);
-  return (CGAL::left_turn(*p, *c, *n) &&
+  return (left_turn(*p, *c, *n) &&
 	  is_legal(*p, *c, *n, point2edges) &&
 	  !intersects_boundary(polygon, seg, true, false) &&
 	  polygon.has_on_bounded_side(mid));
@@ -576,9 +502,8 @@ template <typename Triangle_iter>
 Polygon_2 cut_ear(const Polygon_2& polygon, Triangle_iter triangles, 
 		  const boost::unordered_map<Point_3, boost::unordered_set<Segment_3_undirected> >& point2edges)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("polygon_utils");
 
-  LOG4CPLUS_TRACE(logger, "Cutting ear of " << pp(polygon));;
+  TILER_TRACE(logger, "Cutting ear of " << pp(polygon));;
 
   Polygon_2 ret(polygon);
   Polygon_2::Vertex_circulator start = ret.vertices_circulator();
@@ -642,9 +567,9 @@ Polygon_2 cut_ear(const Polygon_2& polygon, Triangle_iter triangles,
     ++n;
   } while (c != start);
 
-  LOG4CPLUS_DEBUG(logger, "Polygon is not strictly convex");
-  LOG4CPLUS_DEBUG(logger, "  Original: " << pp(polygon));
-  LOG4CPLUS_DEBUG(logger, "   Current: " << pp(ret));
+  TILER_DEBUG(logger, "Polygon is not strictly convex");
+  TILER_DEBUG(logger, "  Original: " << pp(polygon));
+  TILER_DEBUG(logger, "   Current: " << pp(ret));
   throw logic_error("Polygon is not strictly convex");
 }
 
@@ -652,10 +577,9 @@ template <typename Triangle_iter>
 void triangulate_convex(const Polygon_2& P, Triangle_iter triangles,
 		      const boost::unordered_map<Point_3, boost::unordered_set<Segment_3_undirected> >& point2edges)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("polygon_utils.triangulate_convex");
 
   if (!is_strictly_convex(P, point2edges)) {
-    LOG4CPLUS_TRACE(logger, "Attempting to triangulate non-convex polygon: " << pp(P));
+    TILER_TRACE(logger, "Attempting to triangulate non-convex polygon: " << pp(P));
 //     throw logic_error("Polygon is not strictly convex");
   }
   
@@ -670,19 +594,16 @@ template <typename Triangle_iter>
 void triangulate_safe(const Polygon_2& P, Triangle_iter triangles,
 		      const boost::unordered_map<Point_3, boost::unordered_set<Segment_3_undirected> >& point2edges)
 {
-  typedef CGAL::Partition_traits_2<Kernel> PT;
-
-  static log4cplus::Logger tlogger = log4cplus::Logger::getInstance("polygon_utils");
 
   Polygon_2 polygon(P);
-  LOG4CPLUS_TRACE(tlogger, "Triangulating " << pp(polygon));
+  TILER_TRACE(tlogger, "Triangulating " << pp(polygon));
   if (polygon.size() < 3) return;
 
   bool vertical_yz = is_vertical(polygon);
   bool vertical_xz = false;
   if (vertical_yz)
   {
-    LOG4CPLUS_TRACE(tlogger, "Polygon is vertical.  Rotating.");
+    TILER_TRACE(tlogger, "Polygon is vertical.  Rotating.");
     Polygon_2 temp = yz_swap_neg(polygon);
     vertical_xz = is_vertical(temp);
     if (vertical_xz) {
@@ -694,16 +615,16 @@ void triangulate_safe(const Polygon_2& P, Triangle_iter triangles,
 
   if (!polygon.is_simple())
   {
-    LOG4CPLUS_WARN(tlogger, "Attempting (and failing) to triangulate non-simple polygon " << pp(polygon));
-    LOG4CPLUS_DEBUG(tlogger, "Attempting (and failing) to triangulate non-simple polygon " << pp(polygon));
-    return;
+    // The legacy logged this and returned; both callers catch the error and warn, so the polygon is
+    // skipped as before and the warning reaches the caller's log.
+    throw logic_error("Attempting (and failing) to triangulate non-simple polygon " + pp(polygon));
   }
 
   bool reverse = !polygon.is_counterclockwise_oriented();
   if (reverse)
     polygon.reverse_orientation();
   if (!polygon.is_counterclockwise_oriented())
-    LOG4CPLUS_TRACE(tlogger, "Unexpected polygon orientation: " << polygon.orientation());
+    TILER_TRACE(tlogger, "Unexpected polygon orientation: " << polygon.orientation());
 
   list<Triangle> tris;
 
@@ -734,137 +655,8 @@ void triangulate_safe(const Polygon_2& P, Triangle_iter triangles,
       else
 	t[idx] = (*it)[i];
     }
-    LOG4CPLUS_TRACE(tlogger, "Adding tile: " << pp_tri(t));
+    TILER_TRACE(tlogger, "Adding tile: " << pp_tri(t));
     *triangles++ = t;
-  }
-}
-
-template <typename Cut_iter, typename Out_iter>
-void triangulate(const Polygon_2& polygon, 
-		 Cut_iter cuts_begin, Cut_iter cuts_end,
-		 const boost::unordered_map<Point_3, boost::unordered_set<Segment_3_undirected> >& point2edges,
-		 Out_iter triangles)
-{
-  typedef CGAL::Triangulation_vertex_base_2<Kernel>                     Vb;
-  typedef CGAL::Triangulation_vertex_base_with_info_2<Point_3, Kernel, Vb>     Info;
-  typedef CGAL::Constrained_triangulation_face_base_2<Kernel>           Fb;
-  typedef CGAL::Triangulation_data_structure_2<Info,Fb>              TDS;
-  typedef CGAL::Exact_predicates_tag                               Itag;
-  typedef CGAL::Constrained_Delaunay_triangulation_2<Kernel, TDS, Itag> CDT;
-  typedef CDT::Vertex_handle Vertex_handle;
-
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("polygon_utils");
-
-  Polygon_2 p(polygon);
-  LOG4CPLUS_TRACE(logger, "Triangulating " << pp(p));
-  if (p.size() < 3) return;
-
-  bool vertical = is_vertical(p);
-  if (vertical)
-  {
-    LOG4CPLUS_TRACE(logger, "Polygon is vertical.  Rotating.");
-    p = yz_swap_neg(p);
-  }
-
-  bool reverse = !p.is_counterclockwise_oriented();
-  if (reverse)
-    p.reverse_orientation();
-
-  CDT cdt;
-
-  boost::unordered_map<Point_3, Vertex_handle> point2handle;
-  for (Polygon_2::Vertex_iterator it = p.vertices_begin(); it != p.vertices_end(); ++it)
-  {
-    Vertex_handle h = cdt.insert(*it);
-    point2handle[*it] = h;
-    h->info() = *it;//it->z();
-  }
-
-  Polygon_2::Vertex_circulator start = p.vertices_circulator();
-  Polygon_2::Vertex_circulator c = start;
-  Polygon_2::Vertex_circulator n = c;
-  ++n;
-  do
-  {
-    Vertex_handle ch = point2handle[*c];//cdt.insert(*c);
-    Vertex_handle nh = point2handle[*n];//cdt.insert(*n);
-//     ch->info() = c->z();
-//     nh->info() = n->z();
-//     cdt.insert_constraint(*c, *n);
-    cdt.insert_constraint(ch, nh);
-    ++c;
-    ++n;
-  } while (c != start);
-
-  for (Cut_iter c_it = cuts_begin; c_it != cuts_end; ++c_it)
-  {
-    Polyline_2 cut = *c_it;
-    LOG4CPLUS_TRACE(logger, "Adding cut: " << pp(cut));
-    if (vertical)
-      cut = yz_swap_neg(cut);
-    for (Polyline_2::const_iterator c = cut.begin(); c != cut.end(); ++c)
-    {
-      Polyline_2::const_iterator n = c;
-      ++n;
-      if (n != cut.end())
-      {
-	const Point_3& cp = *c;
-	const Point_3& np = *n;
-	if (point2handle.find(cp) == point2handle.end())
-	{
-	  Vertex_handle h = cdt.insert(cp);
-	  point2handle[cp] = h;
-	  h->info() = cp;//cp.z();
-	}
-	if (point2handle.find(np) == point2handle.end())
-	{
-	  Vertex_handle h = cdt.insert(np);
-	  point2handle[np] = h;
-	  h->info() = np;//np.z();
-	}
-
-	Vertex_handle ch = point2handle[*c];//cdt.insert(*c);
-	Vertex_handle nh = point2handle[*n];//cdt.insert(*n);
-// 	ch->info() = c->z();
-// 	nh->info() = n->z();
-// 	cdt.insert_constraint(*c, *n);
-	cdt.insert_constraint(ch, nh);
-	LOG4CPLUS_TRACE(logger, "  " << pp(Segment_2(*c, *n)));
-      }
-    }
-  }
-
-  // Loop through the triangulation and store the vertices of each triangle
-  for (CDT::Finite_faces_iterator ffi = cdt.finite_faces_begin();
-       ffi != cdt.finite_faces_end();
-       ++ffi)
-  {
-    Triangle t;
-    Point_3 center = centroid(ffi->vertex(0)->info(), ffi->vertex(1)->info(), ffi->vertex(2)->info());
-    if (p.has_on_bounded_side(center) && 
-	is_legal(ffi->vertex(0)->info(), ffi->vertex(1)->info(), ffi->vertex(2)->info(), point2edges))
-    {
-      for (int i = 0; i < 3; ++i)
-      {
-	int idx = reverse ? 2-i : i;
-	if (!vertical)
-	{
-// 	  Point_3 p(ffi->vertex(i)->point());
-// 	  p = Point_3(p.x(), p.y(), ffi->vertex(i)->info());
-	  Point_3 p(ffi->vertex(i)->info());
-	  t[idx] = p;
-	}
-	else
-	{
-// 	  Point_3 p(ffi->vertex(i)->point());
-// 	  p = Point_3(p.x(), p.y(), ffi->vertex(i)->info());
-	  Point_3 p(ffi->vertex(i)->info());
-	  t[idx] = yz_swap_pos(p);
-	}
-      }
-      LOG4CPLUS_TRACE(logger, "Adding tile: " << pp_tri(t));
-      *triangles++ = t;
-    }
   }
 }
 
@@ -879,14 +671,14 @@ int distance(const Point_2& p, const Point_2& q, const Polygon_2& P)
     return -1;
   }
 
-  Diff pbeg = CGAL::iterator_distance(P.vertices_begin(), pit);
-  Diff qbeg = CGAL::iterator_distance(P.vertices_begin(), qit);
+  Diff pbeg = std::distance(P.vertices_begin(), pit);
+  Diff qbeg = std::distance(P.vertices_begin(), qit);
   if (qbeg < pbeg) {
     std::swap(pit, qit);
     std::swap(pbeg, qbeg);
   }
-  Diff pq = CGAL::iterator_distance(pit, qit);
-  Diff qend = CGAL::iterator_distance(qit, P.vertices_end());
+  Diff pq = std::distance(pit, qit);
+  Diff qend = std::distance(qit, P.vertices_end());
   
   return (int) min(pbeg+qend, pq);
 }
@@ -906,7 +698,7 @@ int distance(const Point_2& p, const Point_2& q, const Polygon_2& P)
 //   {
 //     Polygon_2 p(it->vertices_begin(), it->vertices_end());
 //     polygons.push_back(p);
-//     LOG4CPLUS_TRACE(logger, "Convex polygon: " << pp(p));
+//     TILER_TRACE(logger, "Convex polygon: " << pp(p));
 
 //     segments.insert(segments.end(), p.edges_begin(), p.edges_end());
 //   }
@@ -944,13 +736,7 @@ int distance(const Point_2& p, const Point_2& q, const Polygon_2& P)
 // void get_boundary_intersections(list<Polygon_2>::const_iterator begin, list<Polygon_2>::const_iterator end, 
 // 				back_insert_iterator<list<Point_2> > intersecting_points, bool report_endpoints);
 
-template
-void triangulate(const Polygon_2& polygon, back_insert_iterator<list<Triangle> > triangles, 
-		 const boost::unordered_map<Point_3, boost::unordered_set<Segment_3_undirected> >& point2edges);
 
-template
-void triangulate(const Polygon_2& polygon, back_insert_iterator<vector<Triangle> > triangles, 
-		 const boost::unordered_map<Point_3, boost::unordered_set<Segment_3_undirected> >& point2edges);
 
 template
 void triangulate_safe(const Polygon_2& P, back_insert_iterator<list<Triangle> > triangles, 
@@ -960,11 +746,6 @@ template
 void triangulate_safe(const Polygon_2& P, back_insert_iterator<vector<Triangle> > triangles, 
 		      const boost::unordered_map<Point_3, boost::unordered_set<Segment_3_undirected> >& point2edges);
 
-template
-void triangulate(const Polygon_2& polygon, 
-		 list<Polyline_2>::iterator cuts_begin, list<Polyline_2>::iterator cuts_end,
-		 const boost::unordered_map<Point_3, boost::unordered_set<Segment_3_undirected> >& point2edges,
-		 back_insert_iterator<list<Triangle> > triangles);
 
 //------------------------------------------------------------
 // split_nonsimple
@@ -997,14 +778,61 @@ Segment_2 pop_outgoing(const Point_2& p, std::map<Point_2, set<Segment_2> >& sou
   return s;
 }
 
+//------------------------------------------------------------
+// compute_subcurves
+//
+// In place of CGAL::compute_subcurves: the segments cut at every point where they meet another,
+// so that no two pieces meet except at their ends. Each piece keeps its segment's direction; a
+// piece that two collinear segments share is kept once.
+//------------------------------------------------------------
+template <typename Seg_iter, typename Out_iter>
+void compute_subcurves(Seg_iter begin, Seg_iter end, Out_iter out)
+{
+  const std::vector<Segment_2> segs(begin, end);
+  std::set<Segment_2> seen;
+  for (std::size_t i = 0; i < segs.size(); ++i) {
+    const Segment_2& s = segs[i];
+    if (s.is_degenerate())
+      continue;
+    // Where the others meet s, ordered from its source.
+    std::vector<Point_2> cuts;
+    for (std::size_t j = 0; j < segs.size(); ++j) {
+      if (j == i)
+        continue;
+      Object o = intersection(s, segs[j]);
+      Point_2 p;
+      Segment_2 overlap;
+      if (assign(p, o)) {
+        cuts.push_back(p);
+      } else if (assign(overlap, o)) {
+        cuts.push_back(overlap.source());
+        cuts.push_back(overlap.target());
+      }
+    }
+    const Vector_2 d = s.to_vector();
+    std::sort(cuts.begin(), cuts.end(), [&](const Point_2& a, const Point_2& b) {
+      return (a - s.source()) * d < (b - s.source()) * d;
+    });
+    Point_2 from = s.source();
+    cuts.push_back(s.target());
+    for (const Point_2& c : cuts) {
+      if (xy_equal(c, from) || !s.has_on(c))
+        continue;
+      const Segment_2 piece(from, c);
+      if (seen.find(piece) == seen.end() && seen.find(piece.opposite()) == seen.end()) {
+        seen.insert(piece);
+        *out++ = piece;
+      }
+      from = c;
+    }
+  }
+}
+
 // Takes a non-simple polygon and splits it into multiple simple polygons
 template <typename Out_iter>
 void split_nonsimple(const Polygon_2& P, Out_iter out)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("split_nonsimple");
   
-  typedef CGAL::Direction_2<Kernel> Direction_2;
-  typedef CGAL::Vector_2<Kernel> Vector_2;
 
   std::set<Segment_2> segments;
   segments.insert(P.edges_begin(), P.edges_end());
@@ -1012,7 +840,7 @@ void split_nonsimple(const Polygon_2& P, Out_iter out)
   // Compute the subsegments, such that there are no interior pairwise
   // intersections between subsegments.
   std::list<Segment_2> subsegments_list;
-  CGAL::compute_subcurves(segments.begin(), segments.end(), back_inserter(subsegments_list));
+  compute_subcurves(segments.begin(), segments.end(), back_inserter(subsegments_list));
 
   // Index the subsegments by their source and target points.
   std::map<Point_2, set<Segment_2> > source2sub, target2sub;
@@ -1042,7 +870,7 @@ void split_nonsimple(const Polygon_2& P, Out_iter out)
       Q.reverse_orientation();
     }
     *out++ = Q;
-    LOG4CPLUS_TRACE(logger, "Q = " << pp(Q));
+    TILER_TRACE(logger, "Q = " << pp(Q));
   }
 }
 
@@ -1064,7 +892,7 @@ void split_nonsimple(const Polygon_2& P,
 //      a
 //
 // Finds which side of a--b that y should be moved to.
-CGAL::Oriented_side find_side(const Polygon_2& P, const Number_type delta, 
+Oriented_side find_side(const Polygon_2& P, const Number_type delta, 
                             const int yi, const int ai, const int bi)
 {
   const int n = P.size();
@@ -1075,20 +903,20 @@ CGAL::Oriented_side find_side(const Polygon_2& P, const Number_type delta,
   
   int zi = -1;
   for (int i = (yi+1)%n; zi == -1 && i != ai; i = (i+1)%n) {
-    // if (CGAL::squared_distance(P[i], l) > delta2 && CGAL::squared_distance(P[i], s) > delta2) {
-    if (CGAL::squared_distance(P[i], s) > delta2) {
+    // if (squared_distance(P[i], l) > delta2 && squared_distance(P[i], s) > delta2) {
+    if (squared_distance(P[i], s) > delta2) {
       zi = i;
     }
   }
   for (int i = (yi+n-1)%n; zi == -1 && i != bi; i = (i+n-1)%n) {
-    // if (CGAL::squared_distance(P[i], l) > delta2 && CGAL::squared_distance(P[i], s) > delta2) {
-    if (CGAL::squared_distance(P[i], s) > delta2) {
+    // if (squared_distance(P[i], l) > delta2 && squared_distance(P[i], s) > delta2) {
+    if (squared_distance(P[i], s) > delta2) {
       zi = i;
     }
   }
   if (zi == -1) {
     // choose arbitrarily
-    return CGAL::ON_NEGATIVE_SIDE;
+    return ON_NEGATIVE_SIDE;
   }
   return l.oriented_side(P[zi]);
 }
@@ -1123,9 +951,6 @@ CGAL::Oriented_side find_side(const Polygon_2& P, const Number_type delta,
 
 Polygon_2 adjust_nonsimple_polygon(const Polygon_2& P, const Number_type delta, map<Point_2, Point_2>& old2new)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("adjust_nonsimple_polygon");
-  typedef CGAL::Vector_2<Kernel> Vector_2;
-  set_pp_precision(12);
 
   const Number_type delta2 = delta*delta;
   const int n = P.size();
@@ -1137,29 +962,28 @@ Polygon_2 adjust_nonsimple_polygon(const Polygon_2& P, const Number_type delta, 
         const Point_2& b = P[(j+1)%n];
         const Line_2 l(a, b);
         const Segment_2 s(a, b);
-        if (CGAL::squared_distance(y, s) < delta2) {
-          LOG4CPLUS_TRACE(logger, "close: " << pp(y));
+        if (squared_distance(y, s) < delta2) {
+          TILER_TRACE(logger, "close: " << pp(y));
 
           // Get the side of l that y should be on
-          const CGAL::Oriented_side side = find_side(P, delta, i, j, (j+1)%n);
-          if (side == CGAL::ON_ORIENTED_BOUNDARY) {
-            LOG4CPLUS_ERROR(logger, "Didn't expect z to be on boundary.  P = " << pp(P));
-            throw logic_error("Didn't expect z to be on boundary");
+          const Oriented_side side = find_side(P, delta, i, j, (j+1)%n);
+          if (side == ON_ORIENTED_BOUNDARY) {
+            throw logic_error("Didn't expect z to be on boundary.  P = " + pp(P));
           }
 
           const Vector_2 v = l.to_vector();
-          Vector_2 n = v.perpendicular(CGAL::COUNTERCLOCKWISE);
-          if (side == CGAL::ON_NEGATIVE_SIDE) {
-            n = v.perpendicular(CGAL::CLOCKWISE);
+          Vector_2 n = v.perpendicular(COUNTERCLOCKWISE);
+          if (side == ON_NEGATIVE_SIDE) {
+            n = v.perpendicular(CLOCKWISE);
           }
           // normalize
           n = n / sqrt(n.squared_length());
 
           // Find intersection of line in direction of n passing 
           // through y with l.
-          const CGAL::Object result = CGAL::intersection(Line_2(y, n), l);
+          const Object result = intersection(Line_2(y, n), l);
           Point_2 y_int;
-          if (const CGAL::Point_2<Kernel> *ipoint = CGAL::object_cast<CGAL::Point_2<Kernel> >(&result)) {
+          if (const Point_2 *ipoint = object_cast<Point_2 >(&result)) {
             y_int = *ipoint;
           } 
           else {
@@ -1170,9 +994,9 @@ Polygon_2 adjust_nonsimple_polygon(const Polygon_2& P, const Number_type delta, 
           Point_2 y_new = y_int + delta * n;
           y_new.z() = y.z();
           old2new[y] = y_new;
-          LOG4CPLUS_TRACE(logger, "Old = " << pp(y));
-          LOG4CPLUS_TRACE(logger, "a-b = " << pp(s));
-          LOG4CPLUS_TRACE(logger, "New = " << pp(y_new));
+          TILER_TRACE(logger, "Old = " << pp(y));
+          TILER_TRACE(logger, "a-b = " << pp(s));
+          TILER_TRACE(logger, "New = " << pp(y_new));
         }
       }
     }
@@ -1181,7 +1005,7 @@ Polygon_2 adjust_nonsimple_polygon(const Polygon_2& P, const Number_type delta, 
   if (!old2new.empty()) {
     typedef pair<Point_2, Point_2> Pair;
     for (const auto& oldnew : old2new) {
-      LOG4CPLUS_TRACE(logger, "old->new: " << pp(oldnew.first) << " " << pp(oldnew.second));
+      TILER_TRACE(logger, "old->new: " << pp(oldnew.first) << " " << pp(oldnew.second));
     }
 
     Polygon_2 new_P;
@@ -1194,10 +1018,8 @@ Polygon_2 adjust_nonsimple_polygon(const Polygon_2& P, const Number_type delta, 
         new_P.push_back(p);
       }
     }
-    restore_pp_precision();
     return new_P;
   }
-  restore_pp_precision();
   return P;
 }
 
@@ -1215,4 +1037,4 @@ Polygon_2 remove_duplicate_vertices(const Polygon_2& P)
   return Q;
 }
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler

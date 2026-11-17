@@ -1,379 +1,52 @@
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
 #include <limits>
 
 #include <boost/foreach.hpp>
 
-#include <ContourTiler/common.h>
-#include <ContourTiler/print_utils.h>
+#include "common.h"
+#include "print_utils.h"
 #include <float.h>
-#include <ContourTiler/theorems.h>
-#include <ContourTiler/sweep_line_visitors.h>
-#include <ContourTiler/triangle_utils.h>
-#include <ContourTiler/xy_pred.h>
-#include <ContourTiler/Vertices.h>
-#include <ContourTiler/interp.h>
+#include "theorems.h"
+#include "sweep_line_visitors.h"
+#include "triangle_utils.h"
+#include "xy_pred.h"
+#include "Vertices.h"
+#include "interp.h"
 
 #include <time.h>
-//-------------------------------------------------
-// <CGAL>
-#include <boost/shared_ptr.hpp>
-#include <boost/mpl/equal_to.hpp>
+#include "planar_bridge.h"
 
-#include <CGAL/basic.h>
-#include <CGAL/Cartesian.h>
-#include <CGAL/Polygon_2.h>
-#include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
-#include <CGAL/Straight_skeleton_builder_2.h>
-#include <CGAL/Polygon_offset_builder_2.h>
-#include <CGAL/compute_outer_frame_margin.h>
-#include <CGAL/Constrained_Delaunay_triangulation_2.h>
-#include <CGAL/Triangulation_vertex_base_with_info_2.h>
-#include <CGAL/centroid.h>
-#include <CGAL/partition_2.h>
-#include <CGAL/Bbox_2.h>
-#include <CGAL/utility.h>
-#include <CGAL/natural_neighbor_coordinates_2.h>
-#include <CGAL/Delaunay_triangulation_2.h>
+// Ported: the straight-skeleton fill (triangulate_to_medial_axis and its helpers, on CGAL's
+// Straight_skeleton_2) was never called, as P3a found, and is gone. The live fill,
+// medial_axis_stable(), keeps its shape: CGAL's approx_convex_partition_2 (and Greene's as the
+// fallback) became cvc::planar::convex_partition, Hertel-Mehlhorn on CDT's triangulation, whose
+// pieces are fewer and different (the roadmap's §3 and §9 item 2: untiled regions' interior
+// vertices differ from the legacy's), and interpolate() is natural-neighbour interpolation on
+// cvc::planar (interp.cpp).
 
-typedef CGAL::Straight_skeleton_2<Kernel> Ss;
-
-typedef Ss::Face_iterator Face_iterator;
-typedef Ss::Face_handle Face_handle;
-typedef Ss::Halfedge_iterator Halfedge_iterator;
-typedef Ss::Halfedge_handle   Halfedge_handle;
-typedef Ss::Vertex_handle     Vertex_handle;
-
-typedef CGAL::Straight_skeleton_builder_traits_2<Kernel>      SsBuilderTraits;
-typedef CGAL::Straight_skeleton_builder_2<SsBuilderTraits,Ss> SsBuilder;
-
-typedef CGAL::Polygon_offset_builder_traits_2<Kernel>                  OffsetBuilderTraits;
-typedef CGAL::Polygon_offset_builder_2<Ss,OffsetBuilderTraits,Polygon_2> OffsetBuilder;
-
-typedef CGAL::Triangulation_vertex_base_2<Kernel>                     Vb;
-typedef CGAL::Triangulation_vertex_base_with_info_2<bool, Kernel, Vb>     Info;
-typedef CGAL::Constrained_triangulation_face_base_2<Kernel>           Fb;
-typedef CGAL::Triangulation_data_structure_2<Info,Fb>              TDS;
-typedef CGAL::Exact_predicates_tag                               Itag;
-typedef CGAL::Constrained_Delaunay_triangulation_2<Kernel, TDS, Itag> CDT;
-
-// </CGAL>
-//-------------------------------------------------
-
-typedef CGAL::Partition_traits_2<Kernel> PT;
-typedef std::set<Point_2, bool(*)(const Point_2&, const Point_2&)> Overlapping;
-
-extern string out_dir;
-
-CONTOURTILER_BEGIN_NAMESPACE
-
-void attempt_insert(const Point_3& p0, const Point_3& p1, const Point_3& p2, Tiler_workspace& w)
-{
-  if (test_all(Segment_3(p0, p1), w) && test_all(Segment_3(p0, p2), w) && test_all(Segment_3(p1, p2), w))
-    w.add_tile(p0, p1, p2);
-}
-
-template <typename Polygon_t>
-void triangulate(const Polygon_t& polygon, const Overlapping& doubles, Number_type midz, Tiler_workspace& w, bool reverse)
-{
-  static log4cplus::Logger logger_skel = log4cplus::Logger::getInstance("tiler.skeleton");
-
-  CDT cdt;
-  cdt.insert(polygon.vertices_begin(), polygon.vertices_end());
-
-  // Loop through the triangulation and store the vertices of each triangle
-  for (CDT::Finite_faces_iterator ffi = cdt.finite_faces_begin();
-       ffi != cdt.finite_faces_end();
-       ++ffi)
-  {
-    Point_2 p[3];
-    for (int i = 0; i < 3; ++i)
-    {
-      p[i] = ffi->vertex(i)->point();
-      LOG4CPLUS_TRACE(logger_skel, "Triangulation from skeleton: " << pp(p[i]));
-    }
-
-    if (reverse)
-      attempt_insert(p[2].point_3(), p[1].point_3(), p[0].point_3(), w);
-    else
-      attempt_insert(p[0].point_3(), p[1].point_3(), p[2].point_3(), w);
-  }
-}
-
-// void ensure_same_contour(Polygon_2& sub_polygon, double midz, const Overlapping& doubles, Tiler_workspace& w)
-// {
-// }
-
-void check_z(Polygon_2& sub_polygon, Number_type midz, const Overlapping& doubles, Tiler_workspace& w)
-{
-  // Find the two points on contours.  We are guaranteed that there will be only
-  // two as these are generated from skeletonization of a polygon.
-  //                 _____________
-  //                /p1          m1
-  //               /
-  // _____________/
-  // m0          p0
-  Point_2 point[2];
-  Polygon_2::Vertex_circulator pnt[2];
-  Polygon_2::Vertex_circulator midpnt[2];
-  Polygon_2::Vertex_circulator first = sub_polygon.vertices_circulator();
-  Polygon_2::Vertex_circulator it = first;
-  // Find the two points and the points next to them
-  do
-  {
-    if (it->z() != midz)
-    {
-      pnt[0] = it;
-      if ((it+1)->z() != midz)
-      {
-	pnt[1] = it + 1;
-	midpnt[0] = it - 1;
-	midpnt[1] = it + 2;
-      }
-      else
-      {
-	pnt[1] = it - 1;
-	midpnt[0] = it + 1;
-	midpnt[1] = it - 2;
-      }
-      break;
-    }
-    ++it;
-  } while (it != first);
-
-  point[0] = *pnt[0];
-  point[1] = *pnt[1];
-
-  // Let's do some sanity checks
-  {
-    Polygon_2::Vertex_circulator cfirst = sub_polygon.vertices_circulator();
-    Polygon_2::Vertex_circulator cit = first;
-    // Find the two points and the points next to them
-    do
-    {
-      if (*it != *pnt[0] && *it != *pnt[1])
-      {
-	if (it->z() != midz)
-	  throw std::logic_error("Unexpected point in slice");
-      }
-    } while (cit != cfirst);
-    if (midpnt[0]->z() != midz || midpnt[1]->z() != midz)
-      throw std::logic_error("Unexpected point in slice");
-    if (pnt[0]->z() == midz || pnt[1]->z() == midz)
-      throw std::logic_error("Unexpected point in mid slice");
-  } // end sanity checks
-
-  Overlapping::const_iterator dbl[2];
-  dbl[0] = doubles.find(*(pnt[0]));
-  dbl[1] = doubles.find(*(pnt[1]));
-
-  // both doubles
-  if (dbl[0] != doubles.end() && dbl[1] != doubles.end())
-  {
-    // Use the z value for which the two points are adjacent on the contour
-//     if (w.vertices->contour(*pnt[0]) == w.vertices->contour(*dbl[1]))
-    if (w.vertices.adjacent(*pnt[0], *dbl[1]))
-      sub_polygon.set(pnt[1], *dbl[1]);
-//     else if (w.vertices->contour(*dbl[0]) == w.vertices->contour(*pnt[1]))
-    else if (w.vertices.adjacent(*dbl[0], *pnt[1]))
-      sub_polygon.set(pnt[0], *dbl[0]);
-//     else if (w.vertices->contour(*dbl[0]) == w.vertices->contour(*dbl[1]))
-    else if (w.vertices.adjacent(*dbl[0], *dbl[1]))
-    {
-      sub_polygon.set(pnt[0], *dbl[0]);
-      sub_polygon.set(pnt[1], *dbl[1]);
-    }
-  }
-  else
-  {
-    for (int i = 0; i < 2; ++i)
-    {
-      if (dbl[i] != doubles.end())
-      {
-	if (pnt[i]->z() != pnt[1-i]->z())
-	  sub_polygon.set(pnt[i], *(dbl[i]));
-      }
-    }
-  }
-
-  for (int i = 0; i < 2; ++i)
-  {
-    if (dbl[i] != doubles.end())
-    {
-//        attempt_insert(*pnt[i], *dbl[i], *midpnt[i], w);
-      attempt_insert(point[i], *dbl[i], *midpnt[i], w);
-    }
-  }
-}
-
-template <typename Polygon_iterator>
-void get_sub_polygons(boost::shared_ptr<Ss> ss, Number_type midz, Polygon_iterator polygons, const Overlapping& doubles, Tiler_workspace& w)
-{
-  for (Face_iterator fi = ss->faces_begin(); fi != ss->faces_end(); ++fi)
-  {
-    Polygon_2 polygon;
-    Halfedge_handle halfedge = fi->halfedge();
-    Halfedge_handle first = halfedge;
-    do
-    {
-      Vertex_handle v = halfedge->vertex();
-      Point_2 point(v->point());
-      if (!v->is_contour())
-	point.z() = midz;
-      polygon.push_back(point);
-
-      halfedge = halfedge->next();
-    } while (halfedge != first);
-    check_z(polygon, midz, doubles, w);
-    *polygons = polygon;
-    ++polygons;
-  }
-}
-
-std::list<PT::Polygon_2> convex_partition(const Polygon_2& polygon)
-{
-  std::list<PT::Polygon_2> output_polys;
-  CGAL::approx_convex_partition_2(polygon.vertices_begin(), polygon.vertices_end(), 
-				  std::back_inserter(output_polys));
-  return output_polys;
-}
-
-int compare_2d(const Point_2& a, const Point_2& b)
-{
-  // Can't just return a.x()-b.x() because the value is rounded
-  // to an int, and if a.x()-b.x() == -0.5 then 0 will be returned.
-  if (a.x() < b.x())
-    return -1;
-  if (a.x() > b.x())
-    return 1;
-  if (a.y() < b.y())
-    return -1;
-  if (a.y() > b.y())
-    return 1;
-  return 0;
-}
-
-bool less_than_2d(const Point_2& a, const Point_2& b)
-{
-  return compare_2d(a, b) < 0;
-}
-
-bool equals_2d(const Point_2& a, const Point_2& b)
-{
-  return compare_2d(a, b) == 0;
-}
-
-// void plot_polygon(const Polygon_2& polygon)
-// {
-//   static int count = 0;
-//   std::stringstream ss_out;
-//   ss_out << out_dir << "/out_skel_" << count << ".g";
-//   ++count;
-//   ofstream out(ss_out.str().c_str());
-//   gnuplot_print_polygon(out, polygon);
-//   out.close();
-// }
-
-/// Steps:
-///  1. Convert contour to a polygon_2
-///   1a. Build a map of all co-incident 2D vertices (vertices with same x,y but different z) -
-///       only include one of them in the polygon_2
-///  2. Skeletonize the polygon_2
-///  3. For each sub-polygon_2 P generated during skeletonization
-///   3a. For each convex sub-sub-polygon_2 Q in P
-///    3ai. Triangulate Q
-void triangulate_to_medial_axis(const Untiled_region& contour, Vertices& vertices, Tiler_workspace& w)
-{
-  static log4cplus::Logger logger_skel = log4cplus::Logger::getInstance("tiler.skeleton");
-  using namespace std;
-
-  // Step 1.  Convert contour to a polygon
-  Polygon_2 polygon;
-  Number_type maxz = -1;
-  Number_type minz = DBL_MAX;
-  Overlapping doubles(less_than_2d);
-  for (Untiled_region::const_iterator it = contour.begin(); it != contour.end(); ++it)
-  {
-    Point_2 p = it->point_2();
-    if (polygon.size() > 0 && equals_2d(polygon[polygon.size()-1], p))
-    {
-      LOG4CPLUS_TRACE(logger_skel, "Adding to doubles: " << pp(p));
-      doubles.insert(p); // Step 1a
-    }
-    else
-      polygon.push_back(p);
-//     LOG4CPLUS_TRACE(logger_skel, "Adding to polygon to be triangulated: " << pp(p));
-    maxz = (maxz > p.z()) ? maxz : p.z();
-    minz = (minz < p.z()) ? minz : p.z();
-  }
-  LOG4CPLUS_TRACE(logger_skel, "Polygon to be triangulated: " << pp(polygon));
-
-//   Number_type midz = (minz + maxz) / 2.0;
-  Number_type midz = w.midz;
-
-  // Contour may possibly have bad orientation
-  bool reverse = false;
-  if (polygon.is_clockwise_oriented())
-  {
-    reverse = true;
-    polygon.reverse_orientation();
-  }
-
-  // Step 2. Skeletonize polygon and get all sub-polygons
-  SsBuilder ssb;
-  ssb.enter_contour(polygon.vertices_begin(), polygon.vertices_end());
-  boost::shared_ptr<Ss> ss = ssb.construct_skeleton();
-  std::list<Polygon_2> sub_polygons;
-  if (ss)
-    get_sub_polygons(ss, midz, back_inserter(sub_polygons), doubles, w);
-  else
-  {
-    if (!polygon.is_convex() || !polygon.is_simple())
-    {
-      LOG4CPLUS_TRACE(logger_skel, "Issues getting skeleton");
-      std::list<PT::Polygon_2> test;
-      CGAL::approx_convex_partition_2(polygon.vertices_begin(), polygon.vertices_end(), 
-				      std::back_inserter(test));
-      for (std::list<PT::Polygon_2>::iterator it = test.begin(); it != test.end(); ++it)
-      {
-	Polygon_2 t(it->vertices_begin(), it->vertices_end());
-	LOG4CPLUS_TRACE(logger_skel, pp(t));
-      }
-      throw std::runtime_error("Failed to skeletonize and unable to recover: " + pp(polygon));
-    }
-    sub_polygons.push_back(polygon);
-  }
-
-  // Print out sub-polygons
-//   std::for_each(sub_polygons.begin(), sub_polygons.end(), plot_polygon);
-
-  // Step 3
-  for (std::list<Polygon_2>::iterator it = sub_polygons.begin();
-       it != sub_polygons.end();
-       ++it)
-  {
-
-    // TODO: We may be triangulating non-convex polygons which may account for some of our
-    // normal problems.
-
-    // Step 3a
-//     std::list<PT::Polygon_2> sub_sub_polygons;
-//     CGAL::approx_convex_partition_2(it->vertices_begin(), it->vertices_end(), 
-// 				    std::back_inserter(sub_sub_polygons));
-//     a += (clock() - t);
-
-//     t = clock();
-//     for (std::list<PT::Polygon_2>::iterator ssp_it = sub_sub_polygons.begin();
-// 	 ssp_it != sub_sub_polygons.end();
-// 	 ++ssp_it)
-    for (std::list<Polygon_2>::iterator ssp_it = sub_polygons.begin();
-	 ssp_it != sub_polygons.end();
-	 ++ssp_it)
-    {
-      // Step 3ai
-      triangulate(*ssp_it, doubles, midz, w, reverse);
-    }
-  }
-
-}
+namespace cvc::tiler {
 
 Point_3 centroid(const Polygon_2& P, Number_type z)
 {
@@ -440,14 +113,13 @@ Untiled_region::const_iterator prev(Untiled_region::const_iterator it, const Unt
 
 Polygon_2 to_polygon(const Untiled_region& region, map<Point_2, Point_2>& old2new)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.to_polygon");
 
   Polygon_2 polygon;
   for (Untiled_region::const_iterator it = region.begin(); it != region.end(); ++it) {
     Point_2 p = *it;
     Point_2 n = *(next(it, region));
     if (!xy_equal(p, n)) {
-      LOG4CPLUS_TRACE(logger, "Adding to polygon: " << pp(p));
+      TILER_TRACE(logger, "Adding to polygon: " << pp(p));
       polygon.push_back(p);
     }
   }
@@ -498,8 +170,7 @@ bool mid_int(const Segment_2& a, const Segment_2& b, Point_2& ia)
 
 Point_3 midpoint(const Segment_2_undirected& s, const Segment_2& cross, Number_type z)
 {
-  log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.medial_axis_stable");
-//   LOG4CPLUS_TRACE(logger, "Midpoint: " << pp(s.lesser()) << " " << pp(s.greater()));
+//   TILER_TRACE(logger, "Midpoint: " << pp(s.lesser()) << " " << pp(s.greater()));
   Point_2 ia;
   if (mid_int(s.segment(), cross, ia))
     return Point_3(ia.x(), ia.y(), z);
@@ -542,7 +213,7 @@ public:
 
 //   bool operator()(const Segment_2_undirected& a, const Segment_2_undirected& b)
 //   {
-//     typedef CGAL::Direction_2<Kernel> Direction_2;
+//     typedef Direction_2 Direction_2;
 //     Direction_2 pd(as_source(a, _segment.source()).direction());
 //     Direction_2 qd(as_source(b, _segment.source()).direction());
 //     Direction_2 d(_segment.direction());
@@ -556,7 +227,6 @@ public:
       return a.id() < b.id();
     }
 
-    typedef CGAL::Direction_2<Kernel> Direction_2;
     Direction_2 pd(Segment_2(_segment.source(), a).direction());
     Direction_2 qd(Segment_2(_segment.source(), b).direction());
     Direction_2 d(_segment.direction());
@@ -570,10 +240,9 @@ private:
 Triangle make_triangle(Point_3 a, Point_3 b, Point_3 c, bool reverse, 
                        map<Point_2, Point_2>& new2old)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.make_triangle");
 
   if (new2old.find(a) != new2old.end()) {
-    LOG4CPLUS_TRACE(logger, "changing " << pp(a) << " to " << pp(new2old[a]));
+    TILER_TRACE(logger, "changing " << pp(a) << " to " << pp(new2old[a]));
     a = new2old[a];
   }
   if (new2old.find(b) != new2old.end()) b = new2old[b];
@@ -587,52 +256,40 @@ Triangle make_triangle(Point_3 a, Point_3 b, Point_3 c, bool reverse,
 template <typename Out_iter>
 Number_type partition(const Polygon_2& P, Out_iter out)
 {
-  log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.partition");
 //   if (P.is_convex()) {
 //     *out++ = P;
 //     return;
 //   }
-//   LOG4CPLUS_TRACE(logger, "Not convex: " << pp(P));
+//   TILER_TRACE(logger, "Not convex: " << pp(P));
 
-  LOG4CPLUS_TRACE(logger, "partition(): " << pp(P));
+  TILER_TRACE(logger, "partition(): " << pp(P));
 
   if (!P.is_simple()) {
-    LOG4CPLUS_ERROR(logger, "Polygon given to partition is not simple" << pp(P));
-    throw logic_error("Polygon given to partition is not simple");
+    throw logic_error("Polygon given to partition is not simple: " + pp(P));
   }
 
-  // Split the polygon into convex polygons
-  typedef std::list<PT::Polygon_2> Partition_polygons;
+  // Split the polygon into convex polygons. The pieces keep the polygon's vertices, so each piece
+  // vertex maps back to the original point (with its z and id).
+  typedef std::list<Polygon_2> Partition_polygons;
   Partition_polygons partition_polygons;
-  bool valid = true;
-  // try {
-    CGAL::approx_convex_partition_2(P.vertices_begin(), P.vertices_end(), 
-				    std::back_inserter(partition_polygons));
-  // }
-  // catch(...) {
-  //   valid = false;
-  // }
-
-  valid = valid && CGAL::convex_partition_is_valid_2(P.vertices_begin(), P.vertices_end(),
-						     partition_polygons.begin(), partition_polygons.end());
-
-  if (!valid)
-  {
-    LOG4CPLUS_DEBUG(logger, "Approximate convex partition failed: " << pp(P) << ".  Attempting Greene's algorithm.");
-
-    partition_polygons.clear();
-    valid = true;
-    CGAL::greene_approx_convex_partition_2(P.vertices_begin(), P.vertices_end(), 
-					   std::back_inserter(partition_polygons));
-    valid = valid && CGAL::convex_partition_is_valid_2(P.vertices_begin(), P.vertices_end(),
-						       partition_polygons.begin(), partition_polygons.end());
+  try {
+    const planar::grid g = fit_grid(P.bbox());
+    std::map<std::pair<planar::coord, planar::coord>, Point_2> back;
+    planar::ring ring;
+    for (Polygon_2::Vertex_const_iterator it = P.vertices_begin(); it != P.vertices_end(); ++it) {
+      const planar::point q = to_planar(*it, g);
+      back[std::make_pair(q.x, q.y)] = *it;
+      ring.push_back(q);
+    }
+    for (const planar::ring& piece : planar::convex_partition(planar::polygon(ring))) {
+      Polygon_2 p;
+      for (const planar::point& q : piece)
+        p.push_back(back.at(std::make_pair(q.x, q.y)));
+      partition_polygons.push_back(p);
+    }
   }
-
-  if (!valid)
-  {
-    // Failed again.  Bail.
-    LOG4CPLUS_ERROR(logger, "Convex partition failed: " << pp(P));
-    throw logic_error("Convex partition failed");
+  catch (const std::exception& e) {
+    throw logic_error("Convex partition failed: " + std::string(e.what()) + ": " + pp(P));
   }
 
   list<Polygon_2> polygons;
@@ -642,8 +299,8 @@ Number_type partition(const Polygon_2& P, Out_iter out)
   {
     Polygon_2 p(it->vertices_begin(), it->vertices_end());
     if (!p.is_convex()) {
-      LOG4CPLUS_ERROR(logger, "Somehow a non-convex polygon made it here: " << pp(p) << " Original polygon: " << pp(P));
-      throw logic_error("Somehow a non-convex polygon made it here");
+      throw logic_error("Somehow a non-convex polygon made it here: " + pp(p) +
+                        " Original polygon: " + pp(P));
     }
     *out++ = p;
     if (p.area() > max_area) {
@@ -652,130 +309,15 @@ Number_type partition(const Polygon_2& P, Out_iter out)
 //     partition(p, out);
 
 //     if (!p.is_convex()) {
-//       LOG4CPLUS_ERROR(logger, "Somehow a non-convex polygon made it here: " << pp(p) << " Original polygon: " << pp(P));
+//       TILER_ERROR(logger, "Somehow a non-convex polygon made it here: " << pp(p) << " Original polygon: " << pp(P));
 //       throw logic_error("Somehow a non-convex polygon made it here");
 //     }
 //     polygons.push_back(p);
-//     LOG4CPLUS_TRACE(logger, "Convex polygon: " << pp(p));
+//     TILER_TRACE(logger, "Convex polygon: " << pp(p));
 
 //     segments.insert(segments.end(), p.edges_begin(), p.edges_end());
   }
   return max_area;
-}
-
-Point_3 find_bad_vertex(const Untiled_region& r) {
-  log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.find_bad_vertex");
-
-  list<SL_intersection> intersections;
-  map<Point_2, Point_2> old2new;
-  Polygon_2 P = to_polygon(r, old2new);
-  get_intersections(P.edges_begin(), P.edges_end(), back_inserter(intersections), true, false);
-  boost::unordered_set<Segment_2> seg_set;
-  Segment_2 main_seg;
-  Point_2 bad_vertex;
-  for (list<SL_intersection>::iterator it = intersections.begin(); it != intersections.end(); ++it) {
-    const list<Segment_2>& interiors = it->interiors();
-    if (interiors.size() == 0) {
-      LOG4CPLUS_ERROR(logger, "Can't currently handle end-end intersections");
-      throw logic_error("Can't currently handle end-end intersections");
-    }
-    if (interiors.size() == 2) {
-      LOG4CPLUS_ERROR(logger, "Can't currently handle int-int intersections");
-      throw logic_error("Can't currently handle int-int intersections");
-    }
-    for (list<Segment_2>::const_iterator in = interiors.begin(); in != interiors.end(); ++in) {
-      if (seg_set.find(*in) != seg_set.end()) {
-	LOG4CPLUS_TRACE(logger, "Main segment: " << pp(*in));
-	seg_set.erase(*in);
-	main_seg = *in;
-      }
-      else {
-	seg_set.insert(*in);
-      }
-    }
-    const list<Segment_2>& ends = it->ends();
-    for (list<Segment_2>::const_iterator end = ends.begin(); end != ends.end(); ++end) {
-      seg_set.insert(*end);
-    }
-    LOG4CPLUS_TRACE(logger, "Bad vertex: " << pp(it->point()));
-    bad_vertex = it->point();
-  }
-  
-  if (seg_set.empty()) {
-    LOG4CPLUS_ERROR(logger, "No intersection found");
-    throw logic_error("No intersection found");
-  }
-
-  Line_2 line = main_seg.supporting_line();
-  Segment_2 seg = *seg_set.begin();
-  Point_2 off_point = seg.source();
-  if (off_point == bad_vertex) {
-    off_point = seg.target();
-  }
-  CGAL::Vector_2<Kernel> v(bad_vertex, off_point);
-  double len = sqrt(v.squared_length());
-  double frac = 0.001/len;
-  CGAL::Direction_2<Kernel> d = v.direction();
-
-  Polygon_2 Q(P);
-  // Polygon_2::Vertex_iterator it = find(Q.vertices_begin(), Q.vertices_end(), bad_vertex);
-  Untiled_region rr;
-  for (Untiled_region::const_iterator it = r.begin(); it != r.end(); ++it) {
-    if (it->id() == bad_vertex.id()) {
-      // rr.push_back(Point_3(it->x()+0.001, it->y(), it->z()));
-      rr.push_back(Point_3(it->x()+d.dx()*frac, it->y()+d.dy()*frac, it->z()));
-      LOG4CPLUS_TRACE(logger, "  xxx: " << pp(Point_3(it->x()+d.dx()*frac, it->y()+d.dy()*frac, it->z())));
-    }
-    else {
-      rr.push_back(*it);
-      LOG4CPLUS_TRACE(logger, "  xxx: " << pp(*it));
-    }
-  }
-  // Untiled_region::iterator it = find(rr.begin(), rr.end(), bad_vertex);
-  // LOG4CPLUS_TRACE(logger, "Found bad: " << pp((Point_2)*it));
-  // it->x() += 0.02;
-  // LOG4CPLUS_TRACE(logger, "Fixed: " << pp(rr));
-
-  return Point_3();
-
-  // Polygon_2 Q;
-  // Polygon_2::Vertex_const_circulator first = P.vertices_circulator();
-  // Polygon_2::Vertex_const_circulator c = P.vertices_circulator();
-  // Polygon_2::Vertex_const_circulator bad = first;
-  // do {
-  //   Q.push_back(*c);
-  //   LOG4CPLUS_TRACE(logger, "Temp polygon size: " << Q.size());
-  //   if (Q.size() >= 3) {
-  //     if (!Q.is_simple()) {
-  // 	LOG4CPLUS_TRACE(logger, "Not simple");
-  // 	bad = c;
-  //     }
-  //   }
-  //   c++;
-  // } while (c != first && bad == first);
-
-  // if (c == first) {
-  //   throw logic_error("Should have reached bad vertex");
-  // }
-
-  // return *c;
-
-  // first = bad;
-  // c = bad;
-  
-  // do {
-  //   Q.push_back(*c);
-  //   if (Q.size() >= 3) {
-  //     if (!Q.is_simple()) {
-  // 	bad = c;
-  //     }
-  //   }
-  //   c--;
-  // } while (c != first && bad == first);
-
-  // if (c == first) {
-  //   throw logic_error("Should have reached bad vertex");
-  // }
 }
 
 string pp(const Triangle& T)
@@ -791,29 +333,24 @@ template <typename Tile_iterator, typename ID_factory>
 void medial_axis_stable(const Untiled_region& r, Number_type zmid, Tile_iterator tiles, 
 			ID_factory& id_factory, Tiler_workspace& tw)
 {
-  log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.medial_axis_stable");
 
+  Logger logger = tw.logger("tiler.medial_axis_stable");
   Untiled_region region(r);
   map<Point_2, Point_2> old2new, new2old;
 
   // Simplify the region into a polygon with no degenerate points.
   Polygon_2 P = to_polygon(region, old2new);
 
-  LOG4CPLUS_TRACE(logger, "medial_axis_stable called with: " << pp(P));
+  TILER_TRACE(logger, "medial_axis_stable called with: " << pp(P));
 
   // Basic error checking
   if (!P.is_simple()) {
-    LOG4CPLUS_ERROR(logger, "Polygon being given to the medial axis splitter is not simple: " << pp(P));
-    try {
-      LOG4CPLUS_ERROR(logger, "Bad point: " << pp(find_bad_vertex(region)));
-    } catch (logic_error& e) {
-      LOG4CPLUS_ERROR(logger, "Failed to find bad point: " << e.what());
-    }
+    TILER_WARN(logger, "Polygon being given to the medial axis splitter is not simple: " << pp(P));
     return;
   }
 
   if (P.size() == 0) {
-    LOG4CPLUS_WARN(logger, "Polygon being given to the medial axis splitter is empty");
+    TILER_WARN(logger, "Polygon being given to the medial axis splitter is empty");
     return;
   }
 
@@ -823,13 +360,13 @@ void medial_axis_stable(const Untiled_region& r, Number_type zmid, Tile_iterator
     const Point_2& v = *v_it;
     planar = (v.z() == planar_z);
   }
-  LOG4CPLUS_TRACE(logger, "planar = " << planar);
+  TILER_TRACE(logger, "planar = " << planar);
   
   try {
     tw.propagate_z_home(P.vertices_begin(), P.vertices_end());
   }
   catch (logic_error& e) {
-    LOG4CPLUS_ERROR(logger, "Failed to propagate z_home - aborting medial axis tile: " << pp(P));
+    TILER_ERROR(logger, "Failed to propagate z_home - aborting medial axis tile: " << pp(P));
     return;
   }
 
@@ -845,7 +382,7 @@ void medial_axis_stable(const Untiled_region& r, Number_type zmid, Tile_iterator
   // Ensure validity (ccw)
   bool reverse = P.is_clockwise_oriented();
   if (reverse) {
-    LOG4CPLUS_TRACE(logger, "Reversing untiled region polygon");
+    TILER_TRACE(logger, "Reversing untiled region polygon");
     region.reverse_orientation();
     old2new.clear();
     P = to_polygon(region, old2new);
@@ -863,12 +400,12 @@ void medial_axis_stable(const Untiled_region& r, Number_type zmid, Tile_iterator
       old2new[p] = p;
     }
     else {
-      LOG4CPLUS_TRACE(logger, "old = " << pp(p) << " new = " << pp(old2new[p]));
+      TILER_TRACE(logger, "old = " << pp(p) << " new = " << pp(old2new[p]));
     }
     new2old[old2new[p]] = p;
   }
 
-  LOG4CPLUS_TRACE(logger, "Splitting polygon: " << pp(P));
+  TILER_TRACE(logger, "Splitting polygon: " << pp(P));
 
   // Split the polygon into convex polygons
   list<Polygon_2> polygons;
@@ -877,13 +414,13 @@ void medial_axis_stable(const Untiled_region& r, Number_type zmid, Tile_iterator
     Number_type max_area = partition(P, std::back_inserter(polygons));
   }
   catch (logic_error& e) {
-    LOG4CPLUS_ERROR(logger, "Failed to partition polygon - aborting medial axis tile: " << pp(P));
-    LOG4CPLUS_ERROR(logger, "Original: " << pp(old_P));
+    TILER_ERROR(logger, "Failed to partition polygon - aborting medial axis tile: " << pp(P));
+    TILER_ERROR(logger, "Original: " << pp(old_P));
     return;
   }
   for (const auto& p : polygons) {
     segments.insert(segments.end(), p.edges_begin(), p.edges_end());
-    LOG4CPLUS_TRACE(logger, "convex polygon area = " << p.area());
+    TILER_TRACE(logger, "convex polygon area = " << p.area());
   }
 
   const Number_type zdiff = tw.zmax() - tw.zmin();
@@ -926,14 +463,14 @@ void medial_axis_stable(const Untiled_region& r, Number_type zmid, Tile_iterator
     const size_t id = id_factory.unique_id();
 
     if (!p.has_on_bounded_side(center)) {
-      LOG4CPLUS_TRACE(logger, "Not simple.  Polygon: " << pp(p));
-      LOG4CPLUS_TRACE(logger, "Not simple.  Area: " << p.area());
-      CGAL::Bbox_2 bb = p.bbox();
+      TILER_TRACE(logger, "Not simple.  Polygon: " << pp(p));
+      TILER_TRACE(logger, "Not simple.  Area: " << p.area());
+      Bbox_2 bb = p.bbox();
       center = Point_3((bb.xmin() + bb.xmax())/2.0, (bb.ymin() + bb.ymax())/2.0, zmid);
     }
     center.id() = id;
     tw.set_z_home(center, z_home);
-    LOG4CPLUS_TRACE(logger, "center: " << pp(center) << " " << pp(p));
+    TILER_TRACE(logger, "center: " << pp(center) << " " << pp(p));
 
     for (Polygon_2::Edge_const_iterator e_it = p.edges_begin(); e_it != p.edges_end(); ++e_it) {
       edge2center[*e_it] = center;
@@ -983,7 +520,7 @@ void medial_axis_stable(const Untiled_region& r, Number_type zmid, Tile_iterator
 // 	Point_3 midpnt = midpoint(a, Segment_2(center1, center2), zmid);
 	Point_3 midpnt = midpoint(a, Segment_2(center1, center2), (center1.z() + center2.z())/2.0);
 	midpnt.id() = id_factory.unique_id();
-        LOG4CPLUS_TRACE(logger, "midpnt: " << pp(midpnt) << " " << pp(Segment_2(center1, center2)));
+        TILER_TRACE(logger, "midpnt: " << pp(midpnt) << " " << pp(Segment_2(center1, center2)));
 	tw.set_z_home(midpnt, z_home);
 	centers.push_back(midpnt);
 
@@ -995,7 +532,7 @@ void medial_axis_stable(const Untiled_region& r, Number_type zmid, Tile_iterator
 	vertex2extras[a.greater()].push_back(center1);
 	vertex2extras[a.greater()].push_back(center2);
 
-	LOG4CPLUS_TRACE(logger, "Inserting common edge: " << pp(a.orig_segment()));
+	TILER_TRACE(logger, "Inserting common edge: " << pp(a.orig_segment()));
       }
     }
   }
@@ -1017,23 +554,23 @@ void medial_axis_stable(const Untiled_region& r, Number_type zmid, Tile_iterator
 
   for (const auto& c : centers) {
     if (c.z() > anchor_max || c.z() < anchor_min) {
-      LOG4CPLUS_ERROR(logger, "Bad interpolation: failing.  z = " << c.z()
+      TILER_ERROR(logger, "Bad interpolation: failing.  z = " << c.z()
         	      << ", min = " << anchor_min << ", max = " << anchor_max << "  Anchors:");
       for (const auto& a : anchors) {
-        LOG4CPLUS_DEBUG(logger, "  Anchors = " << pp(a));
+        TILER_DEBUG(logger, "  Anchors = " << pp(a));
       }
       for (const auto& p : polygons) {
-        LOG4CPLUS_DEBUG(logger, "  Polygon = " << pp(p));
+        TILER_DEBUG(logger, "  Polygon = " << pp(p));
       }
-      LOG4CPLUS_DEBUG(logger, "  Original polygon = " << pp(P));
+      TILER_DEBUG(logger, "  Original polygon = " << pp(P));
       return;
-      // LOG4CPLUS_TRACE(logger, "Bad interpolation: failing.  z = " << c.z()
+      // TILER_TRACE(logger, "Bad interpolation: failing.  z = " << c.z()
       //   	      << ", min = " << anchor_min << ", max = " << anchor_max << "  Anchors:");
       // for (const auto& a : anchors) {
-      //   LOG4CPLUS_TRACE(logger, "  " << pp(a));
+      //   TILER_TRACE(logger, "  " << pp(a));
       // }
       // for (const auto& p : polygons) {
-      //   LOG4CPLUS_TRACE(logger, "  " << pp(p));
+      //   TILER_TRACE(logger, "  " << pp(p));
       // }
       // point2z[c] = anchor_mid;
     }
@@ -1056,7 +593,7 @@ void medial_axis_stable(const Untiled_region& r, Number_type zmid, Tile_iterator
       // debug
       if (vertex.id() == 1397 && previous.id() == 1398) {
         for (const auto& p : extras) {
-          LOG4CPLUS_TRACE(logger, "Extra: " << pp(p));
+          TILER_TRACE(logger, "Extra: " << pp(p));
         }
       }
       // /debug
@@ -1069,7 +606,7 @@ void medial_axis_stable(const Untiled_region& r, Number_type zmid, Tile_iterator
   // Create the tiles by iterating over the original untiled region.
   Iter begin = region.begin();
   while (!valid_as_start(begin, region, vertex2extras, old2new)) {
-    LOG4CPLUS_TRACE(logger, "Not valid as start: " << pp(*begin));
+    TILER_TRACE(logger, "Not valid as start: " << pp(*begin));
     ++begin;
   }
 
@@ -1083,7 +620,7 @@ void medial_axis_stable(const Untiled_region& r, Number_type zmid, Tile_iterator
     const Point_2& source = edge.source();
     const Point_2& target = edge.target();
 
-    LOG4CPLUS_TRACE(logger, "Tiling edge: " << pp(edge));
+    TILER_TRACE(logger, "Tiling edge: " << pp(edge));
 
     // If the source and target are equal, it's a double: tile
     // to the current point (centroid of the polygon)
@@ -1094,11 +631,11 @@ void medial_axis_stable(const Untiled_region& r, Number_type zmid, Tile_iterator
           *tiles++ = T;
         }
         else {
-          LOG4CPLUS_WARN(logger, "Refused to add degenerate triangle: " << pp(T));
+          TILER_WARN(logger, "Refused to add degenerate triangle: " << pp(T));
         }
-	LOG4CPLUS_TRACE(logger, "Made triangle: " << pp(T));
+	TILER_TRACE(logger, "Made triangle: " << pp(T));
       } catch(std::logic_error& e) {
-	LOG4CPLUS_WARN(logger, "Failed to make triangle: " << pp(source) <<
+	TILER_WARN(logger, "Failed to make triangle: " << pp(source) <<
                        " " << pp(target) << " " << pp(cur) <<
                        " " << e.what());
       }
@@ -1116,11 +653,11 @@ void medial_axis_stable(const Untiled_region& r, Number_type zmid, Tile_iterator
           *tiles++ = T;
         }
         else {
-          LOG4CPLUS_WARN(logger, "Refused to add degenerate triangle: " << pp(T));
+          TILER_WARN(logger, "Refused to add degenerate triangle: " << pp(T));
         }
-	LOG4CPLUS_TRACE(logger, "Made triangle: " << pp(T));
+	TILER_TRACE(logger, "Made triangle: " << pp(T));
       } catch(std::logic_error& e) {
-	LOG4CPLUS_WARN(logger, "Failed to make triangle: " << pp(source) << 
+	TILER_WARN(logger, "Failed to make triangle: " << pp(source) << 
                        " " << pp(target) << " " << pp(cur) <<
                        " " << e.what());
       }
@@ -1141,11 +678,11 @@ void medial_axis_stable(const Untiled_region& r, Number_type zmid, Tile_iterator
               *tiles++ = T;
             }
             else {
-              LOG4CPLUS_WARN(logger, "Refused to add degenerate triangle: " << pp(T));
+              TILER_WARN(logger, "Refused to add degenerate triangle: " << pp(T));
             }
-            LOG4CPLUS_TRACE(logger, "Made triangle: " << pp(T));
+            TILER_TRACE(logger, "Made triangle: " << pp(T));
 	  } catch(std::logic_error& e) {
-	    LOG4CPLUS_WARN(logger, "Failed to make triangle: " << pp(target) << 
+	    TILER_WARN(logger, "Failed to make triangle: " << pp(target) << 
                        " " << pp(next) << " " << pp(cur) <<
                        " " << e.what());
 	  }
@@ -1170,7 +707,7 @@ void medial_axis_stable(const Untiled_region& region, Number_type zmid,
 // {
 //   log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.to_simple");
 
-//   LOG4CPLUS_TRACE(logger, "Beginning polygon");
+//   TILER_TRACE(logger, "Beginning polygon");
 
 //   Polygon_2 P = to_polygon(region);
 //   typedef Polygon_2::iterator Iter;
@@ -1178,8 +715,8 @@ void medial_axis_stable(const Untiled_region& region, Number_type zmid,
 //     Iter next = it;
 //     ++next;
 //     if (find_if(next, P.vertices_end(), xy_pred(*it)) != P.vertices_end()) 
-//       LOG4CPLUS_TRACE(logger, pp(*it));
+//       TILER_TRACE(logger, pp(*it));
 //   }
 // }
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler

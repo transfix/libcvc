@@ -1,24 +1,47 @@
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
 #ifndef __ARRANGE_POLYGONS_H__
 #define __ARRANGE_POLYGONS_H__
 
-#include <ContourTiler/common.h>
+#include "common.h"
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 template <typename InputPolygonIterator, typename OutputPolygonWithHolesIterator>
 void arrange_polygons (InputPolygonIterator           begin,
 		       InputPolygonIterator           end,
 		       OutputPolygonWithHolesIterator out);
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler
 
 
 //--------------------------------------------------------------------
 // Implementation
 
-#include <ContourTiler/print_utils.h>
-#include <ContourTiler/polygon_utils.h>
-#include <ContourTiler/Contour.h>
+#include "print_utils.h"
+#include "polygon_utils.h"
+#include "Contour.h"
 
 #include <iostream>
 #include <vector>
@@ -30,14 +53,8 @@ CONTOURTILER_END_NAMESPACE
 #include <boost/tuple/tuple.hpp>
 #include <boost/unordered_map.hpp>
 
-#include <CGAL/Gmpz.h>
-#include <CGAL/Lazy_exact_nt.h>
-#include <CGAL/Cartesian.h>
-#include <CGAL/Polygon_2.h>
-#include <CGAL/Polygon_with_holes_2.h>
-#include <CGAL/Boolean_set_operations_2.h>
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 typedef boost::shared_ptr<Polygon_2> Polygon_handle;
 typedef boost::weak_ptr<Polygon_2>                      Child_handle;
@@ -151,18 +168,17 @@ void arrange_polygons(InputPolygonIterator begin,
 		      InputPolygonIterator end,
 		      OutputPolygonWithHolesIterator out)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.arrange_polygons");
 
   // Throw if any boundaries of any polygons intersect
   list<Point_2> pts;
   get_boundary_intersections<InputPolygonIterator, back_insert_iterator<list<Point_2> > >(begin, end, std::back_inserter(pts), false);
   if (pts.size() > 0) {
-    LOG4CPLUS_TRACE(logger, "The polygons' boundaries intersect at these points: ");
+    TILER_TRACE(logger, "The polygons' boundaries intersect at these points: ");
     for (list<Point_2>::const_iterator it = pts.begin(); it != pts.end(); ++it)
-      LOG4CPLUS_TRACE(logger, "  " <<  pp(*it));
-    LOG4CPLUS_TRACE(logger, "Polygons: ");
+      TILER_TRACE(logger, "  " <<  pp(*it));
+    TILER_TRACE(logger, "Polygons: ");
     for (InputPolygonIterator it = begin; it != end; ++it)
-      LOG4CPLUS_TRACE(logger, "  " <<  pp((*it)));;
+      TILER_TRACE(logger, "  " <<  pp((*it)));;
     throw runtime_error("The polygons' boundaries intersect");
   }
 
@@ -206,14 +222,14 @@ void arrange_polygons(InputPolygonIterator begin,
 	pwh.add_hole(*child);
       }
 
-      LOG4CPLUS_TRACE(logger, pp(pwh));
+      TILER_TRACE(logger, pp(pwh));
       
       *out++ = pwh;
     }
   }
 }
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler
 
 
 #endif

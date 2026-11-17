@@ -1,10 +1,33 @@
-#include <ContourTiler/theorems.h>
-#include <ContourTiler/projection.h>
-#include <ContourTiler/intersection/Segment_3_Segment_3.h>
-#include <ContourTiler/print_utils.h>
-#include <ContourTiler/sweep_line_visitors.h>
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
 
-CONTOURTILER_BEGIN_NAMESPACE
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
+#include "theorems.h"
+#include "projection.h"
+#include "intersection/Segment_3_Segment_3.h"
+#include "print_utils.h"
+#include "sweep_line_visitors.h"
+
+namespace cvc::tiler {
 
 bool test_all(const Segment_3& chord, const Tiler_workspace& w)
 {
@@ -16,8 +39,7 @@ bool test_all(const Segment_3& chord, const Tiler_workspace& w)
 
 bool test_theorem2(const Segment_3& chord, const Tiler_workspace& w)
 {
-  log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.theorems.2");
-  LOG4CPLUS_TRACE(logger, pp_id(chord));
+  TILER_TRACE(logger, pp_id(chord));
 
   Point_3 v0 = chord.source();
   Point_3 v1 = chord.target();
@@ -28,8 +50,7 @@ bool test_theorem2(const Segment_3& chord, const Tiler_workspace& w)
 
 bool test_theorem3(const Segment_3& segment, const Point_3& opposite, Tiler_workspace& w)
 {
-  log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.theorems.3");
-  LOG4CPLUS_TRACE(logger, pp_id(segment) << " " << opposite.id());
+  TILER_TRACE(logger, pp_id(segment) << " " << opposite.id());
 
   if (xy_equal(opposite, segment.source()) ||
       xy_equal(opposite, segment.target()))
@@ -91,8 +112,7 @@ bool test_theorem3(const Segment_3& segment, const Point_3& opposite, Tiler_work
 // is a degenerate polygon in 2D (because of the collinearity of def).
 bool test_theorem4(const Segment_3& segment, const Point_3& opposite, Tiler_workspace& w)
 {
-  log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.theorems.4");
-  LOG4CPLUS_TRACE(logger, pp_id(segment) << " " << opposite.id());
+  TILER_TRACE(logger, pp_id(segment) << " " << opposite.id());
 
   typedef Tiler_workspace::Contours::const_iterator Iter;
   typedef list<SL_intersection>::const_iterator I_iter;
@@ -136,7 +156,7 @@ bool test_theorem4(const Segment_3& segment, const Point_3& opposite, Tiler_work
   }
 
   for (S_it it = segs.begin(); it != segs.end(); ++it) {
-    LOG4CPLUS_TRACE(logger, "Contour segment intersects with chord: " << pp(it->segment()));
+    TILER_TRACE(logger, "Contour segment intersects with chord: " << pp(it->segment()));
     S_it n = it;
     ++n;
     if (n != segs.end()) {
@@ -153,7 +173,7 @@ bool test_theorem4(const Segment_3& segment, const Point_3& opposite, Tiler_work
     if (points.find(segs.begin()->lesser()) == points.end() &&
 	points.find(segs.rbegin()->greater()) == points.end())
       return false;
-    LOG4CPLUS_TRACE(logger, "Endpoint matches");
+    TILER_TRACE(logger, "Endpoint matches");
   }
 
   return true;
@@ -162,15 +182,14 @@ bool test_theorem4(const Segment_3& segment, const Point_3& opposite, Tiler_work
 /// Returns false if the chords fail the test of Theorem 5, described in bajaj96.
 bool test_theorem5(const Segment_3& chord0, const Segment_3& chord1)
 {
-  log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.theorems.5");
 
-  CGAL::Object result;
-  CGAL::Point_2<Kernel> ipoint;
-  CGAL::Point_3<Kernel> ipoint_3;
-  CGAL::Segment_2<Kernel> iseg;
-  CGAL::Segment_3<Kernel> iseg_3;
+  Object result;
+  Point_2 ipoint;
+  Point_3 ipoint_3;
+  Segment_2 iseg;
+  Segment_3 iseg_3;
 
-  LOG4CPLUS_TRACE(logger, "Testing: " << pp_id(chord0) << "  " << pp_id(chord1));
+  TILER_TRACE(logger, "Testing: " << pp_id(chord0) << "  " << pp_id(chord1));
 
   if (chord0 == chord1 || chord0 == chord1.opposite()) return true;
   if (chord0.source() == chord1.source() ||
@@ -185,7 +204,7 @@ bool test_theorem5(const Segment_3& chord0, const Segment_3& chord1)
 //       (xy_equal(chord0.source(), chord1.target()) &&
 //        xy_equal(chord0.target(), chord1.source())))
 //   {
-//     LOG4CPLUS_TRACE(logger, "Projections are equal: " << pp_id(chord0) << "  " << pp_id(chord1));
+//     TILER_TRACE(logger, "Projections are equal: " << pp_id(chord0) << "  " << pp_id(chord1));
 //     return false;
 //   }
 
@@ -196,32 +215,31 @@ bool test_theorem5(const Segment_3& chord0, const Segment_3& chord1)
      xy_equal(chord0.target(), chord1.target()));
 
   Segment_2 proj0(projection_z(chord0));
-  result = CGAL::intersection(proj0, projection_z(chord1));
-  if (!endpoint_intersection_2D && CGAL::assign(ipoint, result))
+  result = intersection(proj0, projection_z(chord1));
+  if (!endpoint_intersection_2D && assign(ipoint, result))
   {
-    LOG4CPLUS_TRACE(logger, "2D intersection: " << pp_id(chord0) << "  " << pp_id(chord1));
+    TILER_TRACE(logger, "2D intersection: " << pp_id(chord0) << "  " << pp_id(chord1));
     return false;
   }
-  if (CGAL::assign(iseg, result))
+  if (assign(iseg, result))
   {
     // Check 3D intersection by projecting along the x and y axes
     result = CEP::intersection::intersection(chord0, chord1);
-    if (CGAL::assign(ipoint_3, result) || CGAL::assign(iseg_3, result))
+    if (assign(ipoint_3, result) || assign(iseg_3, result))
     {
-      LOG4CPLUS_TRACE(logger, "3D intersection: " << pp_id(chord0) << "  " << pp_id(chord1));
+      TILER_TRACE(logger, "3D intersection: " << pp_id(chord0) << "  " << pp_id(chord1));
       return false;
     }
   }
 
-  LOG4CPLUS_TRACE(logger, "No intersection: " << pp_id(chord0) << "  " << pp_id(chord1));
+  TILER_TRACE(logger, "No intersection: " << pp_id(chord0) << "  " << pp_id(chord1));
 
   return true;
 }
 
 bool test_theorem5(const Segment_3& chord, const Boundary_slice_chords& bscs)
 {
-  log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.theorems.5");
-  LOG4CPLUS_TRACE(logger, pp_id(chord));
+  TILER_TRACE(logger, pp_id(chord));
 
   list<Boundary_slice_chord> chords;
   bscs.all(back_inserter(chords));
@@ -236,8 +254,7 @@ bool test_theorem5(const Segment_3& chord, const Boundary_slice_chords& bscs)
 
 bool test_theorem5(const Segment_3& chord0, const Segment_3& chord1, const Boundary_slice_chords& bscs)
 {
-  log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.theorems.5");
-  LOG4CPLUS_TRACE(logger, pp_id(chord0) << " " << pp_id(chord1));
+  TILER_TRACE(logger, pp_id(chord0) << " " << pp_id(chord1));
 
   list<Boundary_slice_chord> chords;
   bscs.all(back_inserter(chords));
@@ -255,8 +272,7 @@ bool test_theorem8(const Segment_3& segment, const Point_3& opposite, const Tile
 {
   return true;
 
-  log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.theorems.8");
-  LOG4CPLUS_TRACE(logger, pp_id(segment) << " " << opposite.id());
+  TILER_TRACE(logger, pp_id(segment) << " " << opposite.id());
 
   Point_3 source = segment.source();
   Point_3 target = segment.target();
@@ -295,13 +311,12 @@ bool test_theorem9(const Segment_3& segment, const Point_3& opposite, Tiler_work
 {
   return true;
 
-  log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.theorems.9");
-  LOG4CPLUS_TRACE(logger, pp_id(segment) << " " << opposite.id());
+  TILER_TRACE(logger, pp_id(segment) << " " << opposite.id());
 
   const Hierarchy& h = w.hierarchies.find(segment.source().z())->second;
   const Hierarchy& h_ = w.hierarchies.find(opposite.z())->second;
   Contour_handle contour = w.vertices.contour(segment[0]);
-  CGAL::Orientation orientation = h.orientation(contour);
+  Orientation orientation = h.orientation(contour);
 //   Point_2 opposite_2 = opposite.point_2();
 //   Line_2 line = projection_z(segment).supporting_line();
 
@@ -331,4 +346,4 @@ bool test_theorem9(const Segment_3& segment, const Point_3& opposite, Tiler_work
 }
 
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler

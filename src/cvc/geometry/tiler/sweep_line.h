@@ -1,13 +1,36 @@
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
 #ifndef __SWEEP_LINE_H__
 #define __SWEEP_LINE_H__
 
 #include <boost/unordered_set.hpp>
 
-#include <ContourTiler/common.h>
-#include <ContourTiler/print_utils.h>
-#include <ContourTiler/Distance_functor.h>
+#include "common.h"
+#include "print_utils.h"
+#include "Distance_functor.h"
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 inline bool point_intersection_2(const Segment_2& a, const Segment_2& b, Point_2& ia)
 {
@@ -75,11 +98,9 @@ public:
 
   bool operator<(const SL_point& p) const
   { 
-    static log4cplus::Logger logger = log4cplus::Logger::getInstance("sweep_line");
-    Kernel::Compare_xy_2 c;
-    CGAL::Comparison_result r = c(_point, p.point());
-    if (r != CGAL::EQUAL)
-      return r == CGAL::SMALLER; 
+    Comparison_result r = compare_xy(_point, p.point());
+    if (r != EQUAL)
+      return r == SMALLER; 
     return _lesser && !p._lesser;
   }
 
@@ -101,7 +122,7 @@ bool has_on(const Segment& s, const Point& p)
 // #ifdef CONTOUR_EXACT_ARITHMETIC
   return s.has_on(p);
 // #else
-//   return CGAL::squared_distance(s, p) == 0;//< std::numeric_limits<double>::min();
+//   return squared_distance(s, p) == 0;//< std::numeric_limits<double>::min();
 // #endif
 }
 
@@ -119,9 +140,8 @@ bool do_intersection(const Segment_2& segment, size_t id,
 		     const Segment_2& test_segment, size_t test_id, 
 		     Visitor& v)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("sweep_line.do_intersection");
 
-  if (!CGAL::do_intersect(segment, test_segment))
+  if (!do_intersect(segment, test_segment))
     return true;
 
 //   bool intersects = false;
@@ -183,26 +203,26 @@ bool do_intersection(const Segment_2& segment, size_t id,
   // If no endpoints intersect, check interiors
   if (intersects.size() == 0)
   {
-    CGAL::Point_2<Kernel> ipoint;
-    CGAL::Segment_2<Kernel> iseg;
-    CGAL::Object result = CGAL::intersection(segment, test_segment);
+    Point_2 ipoint;
+    Segment_2 iseg;
+    Object result = intersection(segment, test_segment);
     // First try our more robust test
     if (point_intersection_2(segment, test_segment, ipoint)) {
       if (ipoint.y() == 0) {
-	LOG4CPLUS_ERROR(logger, "Bad point: " << pp(ipoint) << " - " << pp(segment) << " - " << pp(test_segment));
+	TILER_DEBUG(logger, "Bad point: " << pp(ipoint) << " - " << pp(segment) << " - " << pp(test_segment));
       }
       if (!v.int_int(ipoint, segment, id, test_segment, test_id))
 	return false;
     }
     // ...now CGAL
-    else if (CGAL::assign(ipoint, result)) {
+    else if (assign(ipoint, result)) {
       if (ipoint.y() == 0) {
-	LOG4CPLUS_ERROR(logger, "Bad point: " << pp(ipoint) << " - " << pp(segment) << " - " << pp(test_segment));
+	TILER_DEBUG(logger, "Bad point: " << pp(ipoint) << " - " << pp(segment) << " - " << pp(test_segment));
       }
       if (!v.int_int(ipoint, segment, id, test_segment, test_id))
 	return false;
     }
-    else if (CGAL::assign(iseg, result)) 
+    else if (assign(iseg, result)) 
       throw logic_error("Any segment intersects should have been found previously");
     else
       throw logic_error("No intersection was found");
@@ -217,7 +237,6 @@ template <typename SL_point_iter, typename Visitor>
 Visitor sweep_line_single_comp(SL_point_iter points_begin, SL_point_iter points_end, 
 			vector<Segment_2>& segments, Visitor v)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("sweep_line");
 
   typedef boost::unordered_set<size_t> In_set;
   typedef vector<In_set> In_set_arr;
@@ -243,12 +262,12 @@ Visitor sweep_line_single_comp(SL_point_iter points_begin, SL_point_iter points_
 	  return v;
       }
 
-      LOG4CPLUS_TRACE(logger, "Adding " << segment_idx);
+      TILER_TRACE(logger, "Adding " << segment_idx);
       in.insert(segment_idx);
     }
     else
     {
-      LOG4CPLUS_TRACE(logger, "Removing " << segment_idx);
+      TILER_TRACE(logger, "Removing " << segment_idx);
       in.erase(segment_idx);
     }
   }
@@ -264,7 +283,6 @@ Visitor sweep_line_multi_comp(SL_point_iter points_begin, SL_point_iter points_e
 			vector<Segment_2>& segments, size_t num_components,
 			Visitor v)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("sweep_line");
 
   typedef boost::unordered_set<size_t> In_set;
   typedef vector<In_set> In_set_arr;
@@ -299,12 +317,12 @@ Visitor sweep_line_multi_comp(SL_point_iter points_begin, SL_point_iter points_e
 	}
       }
 
-      LOG4CPLUS_TRACE(logger, "Adding " << segment_idx);
+      TILER_TRACE(logger, "Adding " << segment_idx);
       in.insert(segment_idx);
     }
     else
     {
-      LOG4CPLUS_TRACE(logger, "Removing " << segment_idx);
+      TILER_TRACE(logger, "Removing " << segment_idx);
       in.erase(segment_idx);
     }
   }
@@ -318,9 +336,8 @@ Visitor sweep_line_multi_comp(SL_point_iter points_begin, SL_point_iter points_e
 template <typename Segment_iter, typename Visitor>
 Visitor sweep_line(Segment_iter segments_begin, Segment_iter segments_end, Visitor v)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("sweep_line");
 
-  LOG4CPLUS_TRACE(logger, "Single-component sweep line");
+  TILER_TRACE(logger, "Single-component sweep line");
 
   typedef vector<Segment_2> Segments;
   typedef vector<Line_2> Lines;
@@ -351,9 +368,8 @@ Visitor sweep_line(Segment_iter segments0_begin, Segment_iter segments0_end,
 		   Segment_iter segments1_begin, Segment_iter segments1_end, 
 		   Visitor v)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("sweep_line");
 
-  LOG4CPLUS_TRACE(logger, "Multi-component sweep line");
+  TILER_TRACE(logger, "Multi-component sweep line");
 
   typedef vector<Segment_2> Segments;
   typedef vector<Line_2> Lines;
@@ -404,7 +420,6 @@ template <typename Visitor>
 Visitor sweep_line_multi(const std::vector<Polygon_2>& polygons, 
 		   Visitor v)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("sweep_line");
 
   typedef vector<Segment_2> Segments;
   typedef vector<Line_2> Lines;
@@ -436,6 +451,6 @@ Visitor sweep_line_multi(const std::vector<Polygon_2>& polygons,
   return sweep_line_multi_comp(points.begin(), points.end(), segments, id, v);
 }
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler
 
 #endif

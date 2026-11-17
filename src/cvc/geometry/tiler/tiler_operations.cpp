@@ -1,4 +1,27 @@
-#include <ContourTiler/tiler_operations.h>
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
+#include "tiler_operations.h"
 
 #include <sstream>
 #include <limits>
@@ -6,31 +29,25 @@
 
 #include <boost/shared_array.hpp>
 
-#include <log4cplus/logger.h>
-#include <log4cplus/loggingmacros.h>
 
-#include <CGAL/intersections.h>
-#include <CGAL/squared_distance_2.h>
-#include <CGAL/Direction_2.h>
 
-#include <ContourTiler/Boundary_slice_chords.h>
-#include <ContourTiler/print_utils.h>
-#include <ContourTiler/intersection/Segment_3_Segment_3.h>
-#include <ContourTiler/skeleton.h>
-#include <ContourTiler/theorems.h>
-#include <ContourTiler/Untiled_region.h>
-#include <ContourTiler/augment.h>
-#include <ContourTiler/Distance_functor.h>
-#include <ContourTiler/xy_pred.h>
-#include <ContourTiler/Tiling_region.h>
-#include <ContourTiler/Composite_tiling_region.h>
-#include <ContourTiler/All_tiling_region.h>
-#include <ContourTiler/Wedge.h>
-#include <ContourTiler/polygon_intersection.h>
+#include "Boundary_slice_chords.h"
+#include "print_utils.h"
+#include "intersection/Segment_3_Segment_3.h"
+#include "skeleton.h"
+#include "theorems.h"
+#include "Untiled_region.h"
+#include "augment.h"
+#include "Distance_functor.h"
+#include "xy_pred.h"
+#include "Tiling_region.h"
+#include "Composite_tiling_region.h"
+#include "All_tiling_region.h"
+#include "Wedge.h"
+#include "polygon_intersection.h"
 
-using namespace log4cplus;
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 /// Modifies the given polygons in place so that the contours are augmented
 void augment(Polygon_2& P, Polygon_2& Q)
@@ -61,10 +78,10 @@ bool is_backwards_new(const Point_2& u2, const Point_2& u3,
 //   if (!xy_equal(u2, v2))
 //     return false;
 
-  if (CGAL::left_turn(u3, u2, v3))
-    return (CGAL::angle(u3, u2, v3) == CGAL::OBTUSE);
-  if (CGAL::left_turn(v3, u2, u3))
-    return (CGAL::angle(v3, u2, u3) == CGAL::OBTUSE);
+  if (left_turn(u3, u2, v3))
+    return (angle(u3, u2, v3) == OBTUSE);
+  if (left_turn(v3, u2, u3))
+    return (angle(v3, u2, u3) == OBTUSE);
   return true;
 }
 
@@ -226,7 +243,6 @@ OTV_table build_OTV_table(ContourIterator contours_begin, ContourIterator contou
 			  const Hierarchies& h,
 			  Banned& banned)
 {
-  Logger logger = Logger::getInstance("tiler.build_OTV_table");
 
   typedef Correspondences::const_iterator corr_iterator;
   typedef Polygon_2::Vertex_iterator Vertex_iterator;
@@ -249,20 +265,20 @@ OTV_table build_OTV_table(ContourIterator contours_begin, ContourIterator contou
     for (Vertex_iterator vit = contour->polygon().vertices_begin(); vit != contour->polygon().vertices_end(); ++vit)
     {
       Point_3 vertex = vertices.get(contour, vit);
-      LOG4CPLUS_TRACE(logger, "Finding OTV for " << pp(vertex));
+      TILER_TRACE(logger, "Finding OTV for " << pp(vertex));
 
       sort(points.begin(), points.end(), Distance_functor_2(vertex));
 
-      LOG4CPLUS_TRACE(logger, "  Candidates in order: ");
+      TILER_TRACE(logger, "  Candidates in order: ");
       for (vector<Point_3>::iterator test_it = points.begin(); test_it != points.end(); ++test_it)
-	LOG4CPLUS_TRACE(logger, "    " << test_it->id());
+	TILER_TRACE(logger, "    " << test_it->id());
 
       // loop through sorted vertices until we find a valid point
       bool found = false;
       for (typename vector<Point_3>::const_iterator pit = points.begin(); !found && pit != points.end(); ++pit)
       {
 	const Point_3& test_vertex = *pit;
-	LOG4CPLUS_TRACE(logger, "  Testing " << test_vertex.id());
+	TILER_TRACE(logger, "  Testing " << test_vertex.id());
 	Point_2 test_point = test_vertex.point_2();
 // 	found = (test_point == vertex.point_2());
 	found = (test_point == vertex.point_2() && tiling_regions[vertex]->contains(test_point));
@@ -287,11 +303,10 @@ OTV_table build_OTV_table(ContourIterator contours_begin, ContourIterator contou
 	if (found)
 	{
 	  otv_table[vertex] = test_vertex;
-	  LOG4CPLUS_TRACE(logger, "  Assigning " << test_vertex.id());
+	  TILER_TRACE(logger, "  Assigning " << test_vertex.id());
 	  if (vertex.z() == test_vertex.z())
 	  {
-	    LOG4CPLUS_ERROR(logger, "OTV is in the same slice.  Points: " << pp(vertex) << " " << pp(test_vertex));
-	    throw std::logic_error("OTV is in the same slice");
+	    throw std::logic_error("OTV is in the same slice.  Points: " + pp(vertex) + " " + pp(test_vertex));
 	  }
 	}
       }
@@ -328,8 +343,8 @@ bool can_tile_disjoint(Contour_handle c1, Contour_handle c2, const Hierarchy& h1
 
   const Polygon_2& polygon1 = c1->polygon();
   const Polygon_2& polygon2 = c2->polygon();
-  CGAL::Orientation orientation1 = h1.orientation(c1);
-  CGAL::Orientation orientation2 = h2.orientation(c2);
+  Orientation orientation1 = h1.orientation(c1);
+  Orientation orientation2 = h2.orientation(c2);
   Contour_handle NEC1 = h1.NEC(c1), NEC2 = h2.NEC(c2);
 
   bool has_neg_vertex1 = false, has_neg_vertex2 = false;
@@ -369,8 +384,8 @@ bool can_tile_nested(Contour_handle c1, Contour_handle c2, const Hierarchy& h1, 
 
   const Polygon_2& polygon1 = c1->polygon();
   const Polygon_2& polygon2 = c2->polygon();
-  CGAL::Orientation orientation1 = h1.orientation(c1);
-  CGAL::Orientation orientation2 = h2.orientation(c2);
+  Orientation orientation1 = h1.orientation(c1);
+  Orientation orientation2 = h2.orientation(c2);
   Contour_handle NEC1 = h1.NEC(c1), NEC2 = h2.NEC(c2);
 
   bool has_neg_vertex1 = false, has_pos_vertex2 = false;
@@ -402,8 +417,7 @@ bool can_tile_nested(Contour_handle c1, Contour_handle c2, const Hierarchy& h1, 
 /// according to the requirements given in Bajaj96, theorem 6.
 bool can_tile(Contour_handle c1, Contour_handle c2, const Hierarchy& h1, const Hierarchy& h2, Number_type overlap)
 {
-  Logger logger = Logger::getInstance("tiler.can_tile");
-  LOG4CPLUS_TRACE(logger, "Testing if tiling can exist: " << pp(c1->polygon()) << " " << pp(c2->polygon()));
+  TILER_TRACE(logger, "Testing if tiling can exist: " << pp(c1->polygon()) << " " << pp(c2->polygon()));
 
   typedef Polygon_2::Vertex_iterator Vertex_iterator;
 
@@ -425,25 +439,25 @@ bool can_tile(Contour_handle c1, Contour_handle c2, const Hierarchy& h1, const H
       ret = area > overlap;
     }
     if (ret)
-      LOG4CPLUS_TRACE(logger, "Boundaries intersect");
+      TILER_TRACE(logger, "Boundaries intersect");
   }
   // Theorem 6.2
   else if (rel == Polygon_relation::SIBLING)
   {
     ret = can_tile_disjoint(c1, c2, h1, h2);
-    LOG4CPLUS_TRACE(logger, "Sibling");
+    TILER_TRACE(logger, "Sibling");
   }
   // Theorem 6.3
   else if (rel == Polygon_relation::PARENT)
   {
     ret = can_tile_nested(c2, c1, h2, h1);
-    LOG4CPLUS_TRACE(logger, "Parent");
+    TILER_TRACE(logger, "Parent");
   }
   // Theorem 6.3
   else
   {
     ret = can_tile_nested(c1, c2, h1, h2);
-    LOG4CPLUS_TRACE(logger, "Child");
+    TILER_TRACE(logger, "Child");
   }
 
   return ret;
@@ -453,7 +467,6 @@ HTiling_region tiling_region(Polygon_2::Vertex_circulator vertex, /*const Contou
 			     const Hierarchy& h, const Hierarchy& h_opp,
 			     Number_type z, Number_type z_opp)
 {
-  Logger logger = Logger::getInstance("tiler.tiling_region");
 
   typedef Polygon_2::Vertex_circulator Vertex_circulator;
 
@@ -483,7 +496,7 @@ HTiling_region tiling_region(Polygon_2::Vertex_circulator vertex, /*const Contou
 					       *(V_opp-1), *V_opp, *(V_opp+1));
   }
   
-  LOG4CPLUS_TRACE(logger, pp(*vertex) << " -- " << region->z_home_nothrow());
+  TILER_TRACE(logger, pp(*vertex) << " -- " << region->z_home_nothrow());
 
   return region;
 }
@@ -732,36 +745,35 @@ bool test31(const Segment_3& segment, const Point_3& opposite, Tiler_workspace& 
 /// @param opposite vertex opposite the segment, that is, vertex lying in the other slice
 bool add_if_possible(const Segment_3& segment, const Point_3& opposite, Tiler_workspace& w)
 {
-  Logger logger = Logger::getInstance("tiler.add_if_possible");
   
   if (w.vertices.adjacent(segment.source(), Walk_direction::FORWARD, w.hierarchies) != segment.target())
     throw std::logic_error("segment must be in contour ordering");
 
-  LOG4CPLUS_TRACE(logger, "Testing " << pp(segment, opposite));
+  TILER_TRACE(logger, "Testing " << pp(segment, opposite));
 
   if (w.completion_map.is_complete(segment)) {
-    LOG4CPLUS_TRACE(logger, "Failed to add tile " << pp(segment, opposite) << ": segment is already part of a tile" );
+    TILER_TRACE(logger, "Failed to add tile " << pp(segment, opposite) << ": segment is already part of a tile" );
     return false;
   }
 
 //   if (!test31(segment, opposite, w)) {
-//     LOG4CPLUS_TRACE(logger, "Failed to add tile " << pp(segment, opposite) << ": test31 failed" );
+//     TILER_TRACE(logger, "Failed to add tile " << pp(segment, opposite) << ": test31 failed" );
 //     return false;
 //   }
 //   if (!test31(segment, opposite, w)) {
-//     LOG4CPLUS_TRACE(logger, "Failed to add tile " << pp(segment, opposite) << ": test31 failed" );
+//     TILER_TRACE(logger, "Failed to add tile " << pp(segment, opposite) << ": test31 failed" );
 //     return false;
 //   }
 //   if (w.is_banned(segment.source())) {
-//     LOG4CPLUS_TRACE(logger, "Failed to add tile " << pp(segment, opposite) << ": " << pp(segment.source()) << " is banned");
+//     TILER_TRACE(logger, "Failed to add tile " << pp(segment, opposite) << ": " << pp(segment.source()) << " is banned");
 //     return false;
 //   }
 //   if (w.is_banned(segment.target())) {
-//     LOG4CPLUS_TRACE(logger, "Failed to add tile " << pp(segment, opposite) << ": " << pp(segment.target()) << " is banned");
+//     TILER_TRACE(logger, "Failed to add tile " << pp(segment, opposite) << ": " << pp(segment.target()) << " is banned");
 //     return false;
 //   }
 //   if (w.is_banned(opposite)) {
-//     LOG4CPLUS_TRACE(logger, "Failed to add tile " << pp(segment, opposite) << ": " << pp(opposite) << " is banned");
+//     TILER_TRACE(logger, "Failed to add tile " << pp(segment, opposite) << ": " << pp(opposite) << " is banned");
 //     return false;
 //   }
 
@@ -789,7 +801,7 @@ bool add_if_possible(const Segment_3& segment, const Point_3& opposite, Tiler_wo
 
   if (add)
   {
-    LOG4CPLUS_TRACE(logger, "Added tile " << pp(segment, opposite));
+    TILER_TRACE(logger, "Added tile " << pp(segment, opposite));
     w.add_tile(segment.source(), segment.target(), opposite);
     w.completion_map.put(segment);
     Boundary_slice_chord bsc0(source_chord, Walk_direction::BACKWARD, segment.source().z());
@@ -798,12 +810,12 @@ bool add_if_possible(const Segment_3& segment, const Point_3& opposite, Tiler_wo
     add_chord(bsc1, w.bscs);
   }
   else
-    LOG4CPLUS_TRACE(logger, "Failed to add tile " << pp(segment, opposite) << ": " 
+    TILER_TRACE(logger, "Failed to add tile " << pp(segment, opposite) << ": " 
 		    << pass2s << " " << pass2t << " " << pass3 << " " 
 		    << pass4 << " " << pass5 << " " 
 		    << pass8 << " " << pass9 << " " << pass10);
 
-//   LOG4CPLUS_TRACE(logger, "add_if_possible returning: " << add);
+//   TILER_TRACE(logger, "add_if_possible returning: " << add);
   return add;
 }
 
@@ -842,7 +854,6 @@ void test31_swap(const Point_3& u2, const Point_3& v2, Point_3& u3, Point_3& v3,
 void case1_3(const Point_3& u2, const Point_3& v2, Walk_direction dir,
 	   Tiler_workspace& w)
 {
-  static Logger logger = Logger::getInstance("tiler.stage1.case1_3");
 
   Point_3 u1 = w.vertices.adjacent(u2, opposite(dir), w.hierarchies);
   Point_3 v1 = w.vertices.adjacent(v2, opposite(dir), w.hierarchies);
@@ -850,36 +861,36 @@ void case1_3(const Point_3& u2, const Point_3& v2, Walk_direction dir,
   Point_3 v3 = w.vertices.adjacent(v2, dir, w.hierarchies);
 
 //   if (is_OTV_pair(u3, v1, w.otv_table)) {
-//     LOG4CPLUS_TRACE(logger, "swapping v3");
+//     TILER_TRACE(logger, "swapping v3");
 //     swap(v1, v3);
 //   }
 
 //   if (is_backwards_new(u2, u3, v2, v3)) {
-//     LOG4CPLUS_TRACE(logger, "     \\/  OTV pair");
-//     LOG4CPLUS_TRACE(logger, "u2: " << setw(2) << u2.id() << " u3: " << setw(2) << u3.id());
-//     LOG4CPLUS_TRACE(logger, "v2: " << setw(2) << v2.id() << " v3: " << setw(2) << v3.id());
+//     TILER_TRACE(logger, "     \\/  OTV pair");
+//     TILER_TRACE(logger, "u2: " << setw(2) << u2.id() << " u3: " << setw(2) << u3.id());
+//     TILER_TRACE(logger, "v2: " << setw(2) << v2.id() << " v3: " << setw(2) << v3.id());
 //     v3 = w.vertices.adjacent(v2, opposite(dir), w.hierarchies);
-//     LOG4CPLUS_TRACE(logger, "swapping v3");
+//     TILER_TRACE(logger, "swapping v3");
 //   }
 
 //   test31_swap(u2, v2, u3, v3, dir, w);
 
-  LOG4CPLUS_TRACE(logger, "     \\/  OTV pair");
-//   LOG4CPLUS_TRACE(logger, "u2: " << pp(u2) << " u3: " << pp(u3));
-//   LOG4CPLUS_TRACE(logger, "v2: " << pp(v2) << " v3: " << pp(v3));
-  LOG4CPLUS_TRACE(logger, "u2: " << setw(2) << u2.id() << " u3: " << setw(2) << u3.id());
-  LOG4CPLUS_TRACE(logger, "v2: " << setw(2) << v2.id() << " v3: " << setw(2) << v3.id());
-//   LOG4CPLUS_TRACE(logger, "u2: " << pp(u2) << " v2: " << pp(v2) << " (OTV pair)");
-//   LOG4CPLUS_TRACE(logger, "u3: " << pp(u3) << " v3: " << pp(v3));
-  LOG4CPLUS_TRACE(logger, "dir: " << pp(dir));
+  TILER_TRACE(logger, "     \\/  OTV pair");
+//   TILER_TRACE(logger, "u2: " << pp(u2) << " u3: " << pp(u3));
+//   TILER_TRACE(logger, "v2: " << pp(v2) << " v3: " << pp(v3));
+  TILER_TRACE(logger, "u2: " << setw(2) << u2.id() << " u3: " << setw(2) << u3.id());
+  TILER_TRACE(logger, "v2: " << setw(2) << v2.id() << " v3: " << setw(2) << v3.id());
+//   TILER_TRACE(logger, "u2: " << pp(u2) << " v2: " << pp(v2) << " (OTV pair)");
+//   TILER_TRACE(logger, "u3: " << pp(u3) << " v3: " << pp(v3));
+  TILER_TRACE(logger, "dir: " << pp(dir));
 
   int optimal = optimality(u2, u3, v2, v3, w);
   int optimal_r = optimality(v2, v3, u2, u3, w);
 
-  LOG4CPLUS_TRACE(logger, "opt1: " << optimal << " opt2: " << optimal_r);
+  TILER_TRACE(logger, "opt1: " << optimal << " opt2: " << optimal_r);
 
-  Number_type v2u3 = CGAL::squared_distance(v2.point_2().point_2(), u3.point_2().point_2());
-  Number_type u2v3 = CGAL::squared_distance(u2.point_2().point_2(), v3.point_2().point_2());
+  Number_type v2u3 = squared_distance(v2.point_2().point_2(), u3.point_2().point_2());
+  Number_type u2v3 = squared_distance(u2.point_2().point_2(), v3.point_2().point_2());
   bool v2u3_shorter = (v2u3 < u2v3);
   if (v2u3 == u2v3) {
     // If u3 and v3 are OTV and have already been tiled, then we must use
@@ -944,7 +955,6 @@ void init(boost::shared_array<Point_3>& pts, const Point_3& p0, const Point_3& p
 pair<Point_3, Point_3> get_u3v3(const Point_3& u2, const Point_3& v2, Number_type seg_z, 
 	     Walk_direction dir, Tiler_workspace& w)
 {
-  static Logger logger = Logger::getInstance("tiler.stage1.case2_4.get_u3v3");
 
   Point_3 u3 = w.vertices.adjacent(u2, dir, w.hierarchies);
   Point_3 v3 = w.vertices.adjacent(v2, dir, w.hierarchies);
@@ -959,28 +969,28 @@ pair<Point_3, Point_3> get_u3v3(const Point_3& u2, const Point_3& v2, Number_typ
 //       xy_equal(u2, v2))
 //   {
 //     v3 = w.vertices.adjacent(v2, opposite(dir), w.hierarchies);
-//     LOG4CPLUS_TRACE(logger, "Changing v3.  u2 = " << pp(u2) << " v2 = " << pp(v2) << " seg_z = " << seg_z);
+//     TILER_TRACE(logger, "Changing v3.  u2 = " << pp(u2) << " v2 = " << pp(v2) << " seg_z = " << seg_z);
 //   }
 //   else if (v2.z() == seg_z && 
 // 	   is_backwards(u2, w.vertices.contour(v2), w.vertices, w.hierarchies) &&
 // 	   xy_equal(u2, v2))
 //   {
 //     u3 = w.vertices.adjacent(u2, opposite(dir), w.hierarchies);
-//     LOG4CPLUS_TRACE(logger, "Changing u3.  u2 = " << pp(u2) << " v2 = " << pp(v2) << " seg_z = " << seg_z);
+//     TILER_TRACE(logger, "Changing u3.  u2 = " << pp(u2) << " v2 = " << pp(v2) << " seg_z = " << seg_z);
 //   }
   if (u2.z() == seg_z && 
       is_backwards(v2, w.vertices.contour(u2), w.vertices, w.hierarchies) &&
       xy_equal(u2, v2))
   {
     v3 = w.vertices.adjacent(v2, opposite(dir), w.hierarchies);
-    LOG4CPLUS_TRACE(logger, "Changing v3.  u2 = " << pp(u2) << " v2 = " << pp(v2) << " seg_z = " << seg_z);
+    TILER_TRACE(logger, "Changing v3.  u2 = " << pp(u2) << " v2 = " << pp(v2) << " seg_z = " << seg_z);
   }
   else if (v2.z() == seg_z && 
 	   is_backwards(u2, w.vertices.contour(v2), w.vertices, w.hierarchies) &&
 	   xy_equal(u2, v2))
   {
     u3 = w.vertices.adjacent(u2, opposite(dir), w.hierarchies);
-    LOG4CPLUS_TRACE(logger, "Changing u3.  u2 = " << pp(u2) << " v2 = " << pp(v2) << " seg_z = " << seg_z);
+    TILER_TRACE(logger, "Changing u3.  u2 = " << pp(u2) << " v2 = " << pp(v2) << " seg_z = " << seg_z);
   }
   return make_pair(u3, v3);
 }
@@ -989,7 +999,6 @@ pair<Point_3, Point_3> get_u3v3(const Point_3& u2, const Point_3& v2, Number_typ
 bool case2_4(int target_optimality, const Point_3& u2, const Point_3& v2, Number_type seg_z, 
 	     Walk_direction dir, Tiler_workspace& w)
 {
-  static Logger logger = Logger::getInstance("tiler.stage1.case2_4");
 
 //   Point_3 u3, v3;
 //   boost::tie(u3, v3) = get_u3v3(u2, v2, seg_z, dir, w);
@@ -998,11 +1007,11 @@ bool case2_4(int target_optimality, const Point_3& u2, const Point_3& v2, Number
 
 //   if (is_backwards_new(u2, u3, v2, v3)) {
 //     if (u2.z() == seg_z) {
-//       LOG4CPLUS_TRACE(logger, "swapping v3");
+//       TILER_TRACE(logger, "swapping v3");
 //       v3 = w.vertices.adjacent(v2, opposite(dir), w.hierarchies);
 //     }
 //     else {
-//       LOG4CPLUS_TRACE(logger, "swapping u3");
+//       TILER_TRACE(logger, "swapping u3");
 //       u3 = w.vertices.adjacent(u2, opposite(dir), w.hierarchies);
 //     }
 //   }
@@ -1010,22 +1019,22 @@ bool case2_4(int target_optimality, const Point_3& u2, const Point_3& v2, Number
 
   int optimal = optimality(u2, u3, v2, v3, w);
   int optimal_r = optimality(v2, v3, u2, u3, w);
-  bool v2u3_shorter = (CGAL::squared_distance(v2.point_2().point_2(), u3.point_2().point_2()) <
-		       CGAL::squared_distance(u2.point_2().point_2(), v3.point_2().point_2()));
+  bool v2u3_shorter = (squared_distance(v2.point_2().point_2(), u3.point_2().point_2()) <
+		       squared_distance(u2.point_2().point_2(), v3.point_2().point_2()));
   bool u2_complete = w.completion_map.is_complete(u2, dir);
   bool v2_complete = w.completion_map.is_complete(v2, dir);
   // Whether to tile the upper or lower tile.  See figure 12 in bajaj96.
   bool upper = false, lower = false;
   bool added = false;
 
-//   LOG4CPLUS_TRACE(logger, "u2: " << pp(u2) << " u3: " << pp(u3));
-//   LOG4CPLUS_TRACE(logger, "v2: " << pp(v2) << " v3: " << pp(v3));
-  LOG4CPLUS_TRACE(logger, "u2: " << setw(2) << u2.id() << " u3: " << setw(2) << u3.id());
-  LOG4CPLUS_TRACE(logger, "v2: " << setw(2) << v2.id() << " v3: " << setw(2) << v3.id());
-  LOG4CPLUS_TRACE(logger, "dir: " << pp(dir) << " seg_z point: " << ((u2.z() == seg_z) ? u2.id() : v2.id()));
-  LOG4CPLUS_TRACE(logger, "optimal: " << optimal << " optimal_r: " << optimal_r);
-  LOG4CPLUS_TRACE(logger, "u2_complete: " << u2_complete << " v2_complete: " << v2_complete);
-  LOG4CPLUS_TRACE(logger, "v2u3_shorter: " << v2u3_shorter);
+//   TILER_TRACE(logger, "u2: " << pp(u2) << " u3: " << pp(u3));
+//   TILER_TRACE(logger, "v2: " << pp(v2) << " v3: " << pp(v3));
+  TILER_TRACE(logger, "u2: " << setw(2) << u2.id() << " u3: " << setw(2) << u3.id());
+  TILER_TRACE(logger, "v2: " << setw(2) << v2.id() << " v3: " << setw(2) << v3.id());
+  TILER_TRACE(logger, "dir: " << pp(dir) << " seg_z point: " << ((u2.z() == seg_z) ? u2.id() : v2.id()));
+  TILER_TRACE(logger, "optimal: " << optimal << " optimal_r: " << optimal_r);
+  TILER_TRACE(logger, "u2_complete: " << u2_complete << " v2_complete: " << v2_complete);
+  TILER_TRACE(logger, "v2u3_shorter: " << v2u3_shorter);
 
 
   boost::shared_array<Point_3> preferred, secondary;
@@ -1047,26 +1056,26 @@ bool case2_4(int target_optimality, const Point_3& u2, const Point_3& v2, Number
   if (lower)
   {
     added = add_if_possible(v2, v3, u2, w);
-//     LOG4CPLUS_TRACE(logger, "1: " << added);
+//     TILER_TRACE(logger, "1: " << added);
   }
   if (upper)
   {
     added = added || add_if_possible(u3, u2, v2, w);
-//     LOG4CPLUS_TRACE(logger, "2: " << added);
+//     TILER_TRACE(logger, "2: " << added);
   }
 
   if (preferred)
   {
     added = added || add_if_possible(preferred.get(), w);
-//     LOG4CPLUS_TRACE(logger, "3: " << added);
+//     TILER_TRACE(logger, "3: " << added);
   }
   if (secondary)
   {
-//     LOG4CPLUS_TRACE(logger, "4a: " << added);
+//     TILER_TRACE(logger, "4a: " << added);
     bool tb = add_if_possible(secondary.get(), w);
-//     LOG4CPLUS_TRACE(logger, "4b: " << tb);
+//     TILER_TRACE(logger, "4b: " << tb);
     added = added || tb;//add_if_possible(secondary.get(), w);
-//     LOG4CPLUS_TRACE(logger, "4c: " << added);
+//     TILER_TRACE(logger, "4c: " << added);
   }
   
   return added;
@@ -1075,7 +1084,6 @@ bool case2_4(int target_optimality, const Point_3& u2, const Point_3& v2, Number
 /// pass 2, 3 or 4
 void pass2_4(size_t case_num, Tiler_workspace& w)
 {
-  static Logger logger = Logger::getInstance("tiler.stage1.pass2_4");
 
 //   Boundary_slice_chord chords
   list<Boundary_slice_chord> chords;
@@ -1086,7 +1094,7 @@ void pass2_4(size_t case_num, Tiler_workspace& w)
     const Boundary_slice_chord& bsc = *it;
     if (w.bscs.contains(bsc))
     {
-      LOG4CPLUS_TRACE(logger, "Checking boundary slice chord: " << pp(bsc.segment()));
+      TILER_TRACE(logger, "Checking boundary slice chord: " << pp(bsc.segment()));
       Walk_direction dir = bsc.direction();
       Segment_3 segment = bsc.segment();
       Point_3 u2 = segment.source();
@@ -1096,7 +1104,7 @@ void pass2_4(size_t case_num, Tiler_workspace& w)
       bool keep_going = true;
       while (keep_going)
       {
-	LOG4CPLUS_TRACE(logger, "Continuing from last addition: " << pp(Segment_2(u2, v2)));
+	TILER_TRACE(logger, "Continuing from last addition: " << pp(Segment_2(u2, v2)));
 
 	bool u2_complete = w.completion_map.is_complete(u2, dir);
 	bool v2_complete = w.completion_map.is_complete(v2, dir);
@@ -1129,7 +1137,7 @@ void pass2_4(size_t case_num, Tiler_workspace& w)
     }
     else
     {
-      LOG4CPLUS_TRACE(logger, "Boundary slice chord already removed: " << pp(bsc.segment()));
+      TILER_TRACE(logger, "Boundary slice chord already removed: " << pp(bsc.segment()));
     }
   }
 }
@@ -1138,15 +1146,15 @@ void pass2_4(size_t case_num, Tiler_workspace& w)
 /// is not on the boundary of the given polygon.  The relation of this point
 /// to the polygon is given.
 template <typename PointIterator>
-CGAL::Oriented_side side(PointIterator begin, PointIterator end, const Polygon_2& polygon)
+Oriented_side side(PointIterator begin, PointIterator end, const Polygon_2& polygon)
 {
   for (PointIterator it = begin; it != end; ++it)
   {
-    CGAL::Oriented_side s = polygon.oriented_side(it->point_2());
-    if (s != CGAL::ON_ORIENTED_BOUNDARY)
+    Oriented_side s = polygon.oriented_side(it->point_2());
+    if (s != ON_ORIENTED_BOUNDARY)
       return s;
   }
-  return CGAL::ON_ORIENTED_BOUNDARY;
+  return ON_ORIENTED_BOUNDARY;
 }
 
 class Point_on_polygon
@@ -1178,7 +1186,6 @@ private:
 template <typename PointIterator>
 PointIterator last_not_on(PointIterator begin, PointIterator end, const Polygon_2& polygon)
 {
-  static Logger logger = Logger::getInstance("tiler.last_not_on");
   return find_if(begin, end, Point_on_polygon(polygon));
 }
 
@@ -1199,7 +1206,7 @@ PointIterator last_not_on(PointIterator begin, PointIterator end, const Polygon_
 //   // Trace untiled regions bounded by boundary slice chords
 //   while (w.bscs.size() > 0)
 //   {
-//     LOG4CPLUS_TRACE(logger, "Beginning untiled trace");
+//     TILER_TRACE(logger, "Beginning untiled trace");
 
 //     Boundary_slice_chord first_chord = w.bscs.first();
 
@@ -1211,13 +1218,13 @@ PointIterator last_not_on(PointIterator begin, PointIterator end, const Polygon_
 //     Number_type midz = (first.z() + cur.z()) / 2.0;
 //     Untiled_region vertices;
 //     vertices.push_back(first);
-//     LOG4CPLUS_TRACE(logger, pp(first));
+//     TILER_TRACE(logger, pp(first));
 //     bool from_chord = true;
 
 //     while (!xyz_equal(cur, first))
 //     {
 //       vertices.push_back(cur);
-//       LOG4CPLUS_TRACE(logger, pp(cur));
+//       TILER_TRACE(logger, pp(cur));
 
 //       Point_3 next = w.vertices.adjacent(cur, dir, w.hierarchies);
 //       std::vector<Boundary_slice_chord> chords = w.bscs.on_vertex(cur);
@@ -1246,7 +1253,7 @@ PointIterator last_not_on(PointIterator begin, PointIterator end, const Polygon_
 // 	if (chords.size() > 1)
 // 	{
 // 	  const Polygon_2& polygon = w.vertices.contour(cur)->polygon();
-// 	  CGAL::Oriented_side s = side(vertices.rbegin(), vertices.rend(), polygon);
+// 	  Oriented_side s = side(vertices.rbegin(), vertices.rend(), polygon);
 // 	  for (std::vector<Boundary_slice_chord>::const_iterator it = chords.begin();
 // 	       it != chords.end();
 // 	       ++it)
@@ -1271,7 +1278,7 @@ PointIterator last_not_on(PointIterator begin, PointIterator end, const Polygon_
 //       cur = next;
 //     }
 
-//     LOG4CPLUS_TRACE(logger, "Ending untiled trace");
+//     TILER_TRACE(logger, "Ending untiled trace");
 //     polygons.push_back(vertices);
 //   }
 
@@ -1308,12 +1315,11 @@ PointIterator last_not_on(PointIterator begin, PointIterator end, const Polygon_
 Untiled_region trace_untiled_region(Point_3 cur, Untiled_region vertices, 
 				     Walk_direction dir, Tiler_workspace& w)
 {
-  static Logger logger = Logger::getInstance("tiler.trace_untiled_region");
 
   typedef std::vector<Boundary_slice_chord>::const_iterator BSC_iter;
 
-  LOG4CPLUS_TRACE(logger, "cur = " << pp(cur));
-  LOG4CPLUS_TRACE(logger, "  dir = " << dir);
+  TILER_TRACE(logger, "cur = " << pp(cur));
+  TILER_TRACE(logger, "  dir = " << dir);
 
   // Check if we've completed the loop
   if (vertices.size() > 1) {
@@ -1323,7 +1329,7 @@ Untiled_region trace_untiled_region(Point_3 cur, Untiled_region vertices,
     }
     // Illegal cycle
     else if (find(vertices.begin(), vertices.end(), cur) != vertices.end()) {
-      LOG4CPLUS_TRACE(logger, "Illegal cycle detected in trace_untiled_region: " << pp(cur));
+      TILER_TRACE(logger, "Illegal cycle detected in trace_untiled_region: " << pp(cur));
       throw logic_error("Illegal cycle detected in trace_untiled_region");
     }
   }
@@ -1335,7 +1341,7 @@ Untiled_region trace_untiled_region(Point_3 cur, Untiled_region vertices,
 
   Point_3 next;
   if (chords.empty()) {
-    LOG4CPLUS_TRACE(logger, "contour segment");
+    TILER_TRACE(logger, "contour segment");
     next = w.vertices.adjacent(cur, dir, w.hierarchies);
     Segment_3 segment;
     if (dir == Walk_direction::FORWARD) {
@@ -1349,7 +1355,7 @@ Untiled_region trace_untiled_region(Point_3 cur, Untiled_region vertices,
     return vertices;
   }
   else {
-    LOG4CPLUS_TRACE(logger, "chord");
+    TILER_TRACE(logger, "chord");
     for (BSC_iter it = chords.begin(); it != chords.end(); ++it) {
       next = it->segment().target();
       try {
@@ -1361,7 +1367,7 @@ Untiled_region trace_untiled_region(Point_3 cur, Untiled_region vertices,
 	// Swallow and try the next one
       }
     }
-    LOG4CPLUS_TRACE(logger, "No chord was legal");
+    TILER_TRACE(logger, "No chord was legal");
     throw logic_error("No chord was legal");
   }
 }
@@ -1376,7 +1382,7 @@ Untiled_region trace_untiled_region(Point_3 cur, Untiled_region vertices,
 ///    point is on the same oriented side as the last point that appeared in that slice.
 list<Untiled_region> trace_untiled_regions(Tiler_workspace& w)
 {
-  static Logger logger = Logger::getInstance("tiler.trace_untiled_regions");
+  Logger logger = w.logger("tiler.trace_untiled_regions");
 
   typedef std::vector<Boundary_slice_chord>::const_iterator BSC_iter;
 
@@ -1385,7 +1391,7 @@ list<Untiled_region> trace_untiled_regions(Tiler_workspace& w)
   // Trace untiled regions bounded by boundary slice chords
   while (w.bscs.size() > 0)
   {
-    LOG4CPLUS_TRACE(logger, "Beginning untiled trace");
+    TILER_TRACE(logger, "Beginning untiled trace");
 
     Boundary_slice_chord first_chord = w.bscs.first();
 
@@ -1397,19 +1403,19 @@ list<Untiled_region> trace_untiled_regions(Tiler_workspace& w)
     Number_type midz = (first.z() + cur.z()) / 2.0;
     Untiled_region vertices;
     // vertices.push_back(first);
-    LOG4CPLUS_TRACE(logger, "cur = " << pp(first));
-    LOG4CPLUS_TRACE(logger, "  dir = " << dir);
+    TILER_TRACE(logger, "cur = " << pp(first));
+    TILER_TRACE(logger, "  dir = " << dir);
 
     vertices.push_back(first);
     try {
       vertices = trace_untiled_region(cur, vertices, dir, w);
     }
     catch (logic_error& e) {
-      LOG4CPLUS_ERROR(logger, "Failed to trace untiled region: " << e.what());
+      TILER_ERROR(logger, "Failed to trace untiled region: " << e.what());
       return polygons;
     }
 
-    LOG4CPLUS_TRACE(logger, "Ending untiled trace");
+    TILER_TRACE(logger, "Ending untiled trace");
     polygons.push_back(vertices);
   }
 
@@ -1451,9 +1457,8 @@ void build_tiling_table(Tiler_workspace& w)
 
 void build_tiling_table_phase1(Tiler_workspace& w)
 {
-  Logger logger = Logger::getInstance("tiler.build_tiling_table_phase1");
 
-  LOG4CPLUS_TRACE(logger, "Pass 1 (cases 1-3)...");
+  TILER_TRACE(logger, "Pass 1 (cases 1-3)...");
 
   // pass 1
   std::list<OTV_pair> otv_pairs;
@@ -1464,30 +1469,29 @@ void build_tiling_table_phase1(Tiler_workspace& w)
     // v = bottom
     Point_3 u2 = it->top();
     Point_3 v2 = it->bottom();
-    LOG4CPLUS_TRACE(logger, "OTV pair " << u2.id() << " " << v2.id() << " FORWARD");
+    TILER_TRACE(logger, "OTV pair " << u2.id() << " " << v2.id() << " FORWARD");
     case1_3(u2, v2, Walk_direction::FORWARD, w);
-    LOG4CPLUS_TRACE(logger, "OTV pair " << u2.id() << " " << v2.id() << " BACKWARD");
+    TILER_TRACE(logger, "OTV pair " << u2.id() << " " << v2.id() << " BACKWARD");
     case1_3(u2, v2, Walk_direction::BACKWARD, w);
   }
 
-  LOG4CPLUS_TRACE(logger, "Pass 2 (case 4)...");
+  TILER_TRACE(logger, "Pass 2 (case 4)...");
   pass2_4(4, w);
-  LOG4CPLUS_TRACE(logger, "Pass 3 (case 5)...");
+  TILER_TRACE(logger, "Pass 3 (case 5)...");
   pass2_4(5, w);
-  LOG4CPLUS_TRACE(logger, "Pass 4 (case 6)...");
+  TILER_TRACE(logger, "Pass 4 (case 6)...");
   pass2_4(6, w);
 
 }
 
 void build_tiling_table_phase2(Tiler_workspace& w)
 {
-  Logger logger = Logger::getInstance("tiler.build_tiling_table_phase2");
 
   // trace out new contours
-  LOG4CPLUS_TRACE(logger, "Tracing untiled contours...");
+  TILER_TRACE(logger, "Tracing untiled contours...");
   list<Untiled_region> contours = trace_untiled_regions(w);
 
-  LOG4CPLUS_TRACE(logger, "Tiling untiled regions...");
+  TILER_TRACE(logger, "Tiling untiled regions...");
   int idx = 0;
   for (list<Untiled_region>::iterator it = contours.begin(); it != contours.end(); ++it)
   {
@@ -1495,7 +1499,7 @@ void build_tiling_table_phase2(Tiler_workspace& w)
     w._callback->untiled_region(region);
 
     // if (region.size() < 3) {
-    //   LOG4CPLUS_WARN(logger, "Untiled region of size " << region.size() << " -- skipping");
+    //   TILER_WARN(logger, "Untiled region of size " << region.size() << " -- skipping");
     // }
     // else if (region.size() == 3) {
     if (region.size() == 3) {
@@ -1517,4 +1521,4 @@ void build_tiling_table_phase2(Tiler_workspace& w)
   }
 }
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler

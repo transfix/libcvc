@@ -1,7 +1,30 @@
-#include <ContourTiler/Hierarchy.h>
-#include <ContourTiler/print_utils.h>
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
 
-CONTOURTILER_BEGIN_NAMESPACE
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
+#include "Hierarchy.h"
+#include "print_utils.h"
+
+namespace cvc::tiler {
 
 // A contour given to this class will be forced to CCW upon instantiation
 // of this object and will be restored to it's original orientation when
@@ -26,7 +49,6 @@ private:
 template <typename ContourIterator>
 Hierarchy::Hierarchy(ContourIterator start, ContourIterator end, Hierarchy_policy policy)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.Hierarchy");
   using namespace std;
 
   // Make a list of the original polygons
@@ -38,9 +60,7 @@ Hierarchy::Hierarchy(ContourIterator start, ContourIterator end, Hierarchy_polic
     // Make sure the polygons are simple
     if (!p.is_simple())
     {
-      set_pp_precision(12);
-      LOG4CPLUS_ERROR(logger, "The polygon is not simple: " << pp(p));
-      throw runtime_error("The polygon is not simple");
+      throw runtime_error("The polygon is not simple: " + pp(p));
     }
 
     polygons.push_back(p);
@@ -48,16 +68,17 @@ Hierarchy::Hierarchy(ContourIterator start, ContourIterator end, Hierarchy_polic
 
   // Throw if any boundaries of any polygons intersect
   list<Point_2> pts;
-  CONTOURTILER_NAMESPACE::get_boundary_intersections(polygons.begin(), polygons.end(), std::back_inserter(pts), false);
+  cvc::tiler::get_boundary_intersections(polygons.begin(), polygons.end(), std::back_inserter(pts), false);
   if (pts.size() > 0)
   {
-    LOG4CPLUS_ERROR(logger, "The polygons' boundaries intersect at these points: ");
+    std::stringstream ss;
+    ss << "The polygons' boundaries intersect at these points:";
     for (list<Point_2>::const_iterator it = pts.begin(); it != pts.end(); ++it)
-      LOG4CPLUS_ERROR(logger, "  " <<  pp(*it));
-    LOG4CPLUS_ERROR(logger, "Polygons: ");
+      ss << " " << pp(*it);
+    ss << "; polygons:";
     for (ContourIterator it = start; it != end; ++it)
-      LOG4CPLUS_ERROR(logger, "  " <<  pp((*it)->polygon()));;
-    throw runtime_error("The polygons' boundaries intersect");
+      ss << " " << pp((*it)->polygon());
+    throw runtime_error(ss.str());
   }
 
   _root = Contour::create(super_polygon(polygons.begin(), polygons.end()));
@@ -167,10 +188,10 @@ const Contour_handle Hierarchy::NEC(Point_2 point) const
 }
 
 /// Infers the orientation from the hierarchy of the contour
-CGAL::Orientation Hierarchy::orientation(Contour_handle contour) const
+Orientation Hierarchy::orientation(Contour_handle contour) const
 {
-  if (is_CCW(contour)) return CGAL::COUNTERCLOCKWISE;
-  return CGAL::CLOCKWISE;
+  if (is_CCW(contour)) return COUNTERCLOCKWISE;
+  return CLOCKWISE;
 }
 
 /// Infers the orientation from the hierarchy of the contour
@@ -187,7 +208,6 @@ bool Hierarchy::is_CW(const Contour_handle& contour) const
 
 boost::tuple<Contour_handle, Contour_handle, Polygon_2::Vertex_circulator> Hierarchy::is_overlapping(const Point_2& point) const
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.Hierarchy.is_overlapping");
 
   Contour_handle nec = NEC(point);
   Contour_handle contour = is_overlapping(point, nec);
@@ -206,18 +226,18 @@ boost::tuple<Contour_handle, Contour_handle, Polygon_2::Vertex_circulator> Hiera
     } while (ci != contour->polygon().vertices_circulator());
 
     if (!found) {
-      LOG4CPLUS_DEBUG(logger, "Numerical error caused a false positive overlapping point: " << pp(point));
+      TILER_DEBUG(logger, "Numerical error caused a false positive overlapping point: " << pp(point));
       contour.reset();
     }
   }
   return boost::make_tuple(contour, nec, overlapped_point);
 }
 
-boost::tuple<Vertex_sign, Contour_handle> Hierarchy::vertex_sign(const Point_2& point, CGAL::Orientation point_orientation) const
+boost::tuple<Vertex_sign, Contour_handle> Hierarchy::vertex_sign(const Point_2& point, Orientation point_orientation) const
 {
   Contour_handle parent = NEC(point);
   Vertex_sign sign = Vertex_sign::POSITIVE;
-  CGAL::Orientation parent_orientation = parent ? orientation(parent) : CGAL::CLOCKWISE;
+  Orientation parent_orientation = parent ? orientation(parent) : CLOCKWISE;
   // Check for overlapping vertex
   if (is_overlapping(point, parent))
     sign = Vertex_sign::OVERLAPPING;
@@ -279,7 +299,7 @@ const Contour_handle Hierarchy::find_parent(const Point_2& point, Contour_handle
 
   Contour_handle parent;
   // Need to find the root of the problem
-  // if (CGAL::orientation_2(ancestor->polygon().vertices_begin(), ancestor->polygon().vertices_end()) != CGAL::COLLINEAR &&
+  // if (CGAL::orientation_2(ancestor->polygon().vertices_begin(), ancestor->polygon().vertices_end()) != COLLINEAR &&
   //     ancestor->polygon().has_on_positive_side(point))
   if (ancestor->polygon().has_on_positive_side(point))
   {
@@ -379,4 +399,4 @@ bool Hierarchy::is_even(int level) const
   return (level % 2) == 0;
 }
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler

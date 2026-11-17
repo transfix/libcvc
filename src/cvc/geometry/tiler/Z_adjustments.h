@@ -1,3 +1,26 @@
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
 #ifndef __VERTEX_CHANGES_H__
 #define __VERTEX_CHANGES_H__
 
@@ -6,10 +29,11 @@
 #include <list>
 #include <boost/unordered_map.hpp>
 
-#include <ContourTiler/common.h>
-#include <ContourTiler/print_utils.h>
+#include "common.h"
+#include "print_utils.h"
+#include "triangle_utils.h"
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 template <typename T>
 inline int sgn(T a)
@@ -25,7 +49,6 @@ inline int sgn(T a)
 /// x = (-b - sqrt(b*b - 4 * a * c)) / (2 * a)
 inline bool solve_quad(Number_type a, Number_type b, Number_type c, Number_type& r1, Number_type& r2, Number_type& c1, Number_type& c2)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("solve_quad");
 
   bool ret = false;
 
@@ -60,8 +83,8 @@ inline bool solve_quad(Number_type a, Number_type b, Number_type c, Number_type&
     ret = false;
   }
 
-  LOG4CPLUS_TRACE(logger, "a = " << a << " b = " << b << " c = " << c << " r1,r2 = " << r1 << " c1 = " << c1);
-//   LOG4CPLUS_TRACE(logger, "discriminant = " << dis << " r1,r2 = " << r1 << " c1 = " << c1);
+  TILER_TRACE(logger, "a = " << a << " b = " << b << " c = " << c << " r1,r2 = " << r1 << " c1 = " << c1);
+//   TILER_TRACE(logger, "discriminant = " << dis << " r1,r2 = " << r1 << " c1 = " << c1);
   return ret;
 }
 
@@ -100,9 +123,8 @@ public:
   typedef typename Tile_container::const_iterator Tile_const_iterator;
 
 public:
-  Z_adjustments() : ilogger(log4cplus::Logger::getInstance("Z_adjustments")) {}
+  Z_adjustments() {}
   Z_adjustments(Number_type z0, Number_type z1, Number_type epsilon)
-    : ilogger(log4cplus::Logger::getInstance("Z_adjustments"))
   { 
 //     set_z_home(z0, z1); 
     _epsilon = epsilon;
@@ -177,7 +199,7 @@ public:
       if (changes.find(vertex) != changes.end())
       {
 	vertex = changes.find(vertex)->second;
-// 	LOG4CPLUS_TRACE(logger, "Changed vertex (" << i << "): " << pp(vertex_adjustments[i].find((*tile)[j])->second));
+// 	TILER_TRACE(logger, "Changed vertex (" << i << "): " << pp(vertex_adjustments[i].find((*tile)[j])->second));
       }
     }
     return ret;
@@ -292,9 +314,8 @@ private:
 //   Number_type _z_home[2];
   Point2tiles _point2tiles[2];
 
-  log4cplus::Logger ilogger;
 };
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler
 
 #endif

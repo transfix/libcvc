@@ -1,3 +1,26 @@
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
 #ifndef __CONTOUR_UTILS_H__
 #define __CONTOUR_UTILS_H__
 
@@ -5,21 +28,13 @@
 
 #include <boost/unordered_map.hpp>
 
-#include <CGAL/Cartesian.h>
-#include <CGAL/Boolean_set_operations_2.h>
-#include <CGAL/Polygon_2.h>
-#include <CGAL/Polygon_with_holes_2.h>
-#include <CGAL/Bbox_2.h>
-#include <CGAL/Arr_polyline_traits_2.h>
-#include <CGAL/Arr_segment_traits_2.h>
-#include <CGAL/Sweep_line_2_algorithms.h>
 
-#include <ContourTiler/Right_enum.h>
-#include <ContourTiler/Statistics.h>
-#include <ContourTiler/polygon_utils.h>
-#include <ContourTiler/Contour.h>
+#include "Right_enum.h"
+#include "Statistics.h"
+#include "polygon_utils.h"
+#include "Contour.h"
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 /// Returns true if the segment intersects any contour's boundary.
 /// Precondition: no contours intersect
@@ -148,6 +163,6 @@ size_t vertex_idx(Contour_handle contour, Polygon_2::Vertex_circulator vertex);
 template <typename InputIterator, typename OutputIterator>
 void get_intersecting_pairs(InputIterator begin, InputIterator end, OutputIterator intersecting_pairs);
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler
 
 #endif

@@ -1,16 +1,39 @@
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
 #ifndef __INTERSECTIONS_H__
 #define __INTERSECTIONS_H__
 
-#include <ContourTiler/common.h>
-#include <ContourTiler/mtiler_operations.h>
-#include <ContourTiler/Segment_3_undirected.h>
-#include <ContourTiler/print_utils.h>
-#include <ContourTiler/Polyline.h>
-#include <ContourTiler/Distance_functor.h>
-#include <ContourTiler/triangle_utils.h>
+#include "common.h"
+#include "mtiler_operations.h"
+#include "Segment_3_undirected.h"
+#include "print_utils.h"
+#include "Polyline.h"
+#include "Distance_functor.h"
+#include "triangle_utils.h"
 // #include "Z_home.h"
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 //------------------------------------------------------------------------------
 // Z_home_functor class
@@ -114,9 +137,12 @@ public:
   // constructor
   //--------------------------------------
   Intersections() 
-    : /*_z_home((Number_type[2]){0,0}),*/ ilogger(log4cplus::Logger::getInstance("intersection"))
   {
   }
+
+  // Where the warnings go: the tiler context's log (a default Logger drops them).
+  void set_logger(const Logger& logger) { ilogger = logger; }
+  const Logger& logger() const { return ilogger; }
 
   //--------------------------------------
   // constructor
@@ -161,13 +187,13 @@ public:
 
     if (!xy_equal(p, opposite))
     {
-      LOG4CPLUS_WARN(ilogger, "Point and its opposite counterpart are not xy equal: " << pp(p) << ", " << pp(opposite));
+      TILER_WARN(ilogger, "Point and its opposite counterpart are not xy equal: " << pp(p) << ", " << pp(opposite));
       throw logic_error("Point and its opposite counterpart are not xy equal");
     }
 
     if (!p.is_valid() || !opposite.is_valid())
     {
-      LOG4CPLUS_ERROR(ilogger, "Point or its opposite counterpart: no valid id: " << pp(p) << ", " << pp(opposite));
+      TILER_ERROR(ilogger, "Point or its opposite counterpart: no valid id: " << pp(p) << ", " << pp(opposite));
       throw logic_error("Point or its opposite counterpart: no valid id");
     }
 
@@ -246,9 +272,9 @@ public:
     Ordered_points::const_iterator p_iter = points.find(p);
     if (p_iter == points.end())
     {
-      LOG4CPLUS_WARN(ilogger, "Unexpectedly didn't find point in edge's points: " << pp(p));
+      TILER_WARN(ilogger, "Unexpectedly didn't find point in edge's points: " << pp(p));
       for (Ordered_points::const_iterator it = points.begin(); it != points.end(); ++it)
-      {	LOG4CPLUS_WARN(ilogger, "  " << pp(*it)); }
+      {	TILER_WARN(ilogger, "  " << pp(*it)); }
       throw logic_error("Unexpectedly didn't find point in edge's points");
     }
 
@@ -429,9 +455,9 @@ private:
     Point_map::const_iterator it = _point_map[i].find(p);
     if (it == _point_map[i].end())
     {
-      LOG4CPLUS_WARN(ilogger, "Point not found in map: " << pp(p) << ", i = " << i);
+      TILER_WARN(ilogger, "Point not found in map: " << pp(p) << ", i = " << i);
       for (typename Point_map::const_iterator it = _point_map[i].begin(); it != _point_map[i].end(); ++it)
-	LOG4CPLUS_TRACE(ilogger, "  " << pp(it->first));
+	TILER_TRACE(ilogger, "  " << pp(it->first));
       throw logic_error("Point not found in map");
     }
     return it->second;
@@ -442,9 +468,9 @@ private:
     typename Edge_map::const_iterator it = _edge_map[i].find(e);
     if (it == _edge_map[i].end())
     {
-      LOG4CPLUS_WARN(ilogger, "Edge not found in map: " << pp(e) << ", i = " << i);
+      TILER_WARN(ilogger, "Edge not found in map: " << pp(e) << ", i = " << i);
       for (typename Edge_map::const_iterator it = _edge_map[i].begin(); it != _edge_map[i].end(); ++it)
-	LOG4CPLUS_TRACE(ilogger, "  " << pp(it->first));
+	TILER_TRACE(ilogger, "  " << pp(it->first));
       throw logic_error("Edge not found in map");
     }
     return it->second;
@@ -459,12 +485,12 @@ private:
 //   Number_type _z_home[2];
 //   Z_home _z_home;
 
-  mutable log4cplus::Logger ilogger;
+  mutable Logger ilogger;
 
 public:
   boost::unordered_map<Tile_handle, int> tile2idx;
 };
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler
 
 #endif

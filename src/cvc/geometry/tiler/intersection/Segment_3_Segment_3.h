@@ -1,42 +1,44 @@
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
 #ifndef CEP_INTERSECTION_SEGMENT_3_SEGMENT_3_H
 #define CEP_INTERSECTION_SEGMENT_3_SEGMENT_3_H
 
-#include <CGAL/Segment_3.h>
-#include <CGAL/Object.h>
-#include <CGAL/Point_3.h>
-#include <CGAL/predicates_on_points_3.h>
-#include <CGAL/Object.h>
+#include "Segment_3_Point_3.h"
+#include "Line_3_Line_3.h"
 
-#include <ContourTiler/intersection/Segment_3_Point_3.h>
-#include <ContourTiler/intersection/Line_3_Line_3.h>
+#include "../common.h"
 
-
-namespace CEP {  
+namespace cvc::tiler { namespace CEP {
 namespace intersection {
 
-//     using CGAL::Segment_3;
-
-//     using CGAL::make_object;
-//     using CGAL::collinear;
-//     using CGAL::collinear_are_ordered_along_line;
-//     using CGAL::coplanar;
-//     using CGAL::coplanar_orientation;
-
-
-    template <class R>
     inline
     bool
-    collinear_do_intersect( const CGAL::Segment_3<R>& s1, 
-                            const CGAL::Segment_3<R>& s2 )
+    collinear_do_intersect( const Segment_3& s1, 
+                            const Segment_3& s2 )
     {
-        CGAL_exactness_precondition( collinear(s1,s2.source()) );
-        CGAL_exactness_precondition( collinear(s1,s2.target()) );
-
-        // segment 1     s-------------t
-        // segment 2  *----*
-        // cases      *--------------------*
-        //                  *------*
-        //                     *-----------*
+        
+        
 
         return collinear_are_ordered_along_line
                ( s1.source(), s2.source(), s1.target() )
@@ -46,24 +48,15 @@ namespace intersection {
                ( s2.source(), s1.source(), s2.target() );
     }
 
-
-    template <class R>
+    inline
     bool
-    coplanar_do_intersect( const CGAL::Segment_3<R>& s1,
-                           const CGAL::Segment_3<R>& s2 )
+    coplanar_do_intersect( const Segment_3& s1,
+                           const Segment_3& s2 )
     {
         if ( s1.is_degenerate() )
             return s2.has_on(s1.source());
         if ( s2.is_degenerate() )
             return s1.has_on(s2.source());
-
-        CGAL_exactness_precondition ( coplanar(s1.source(),s1.target(),
-                                               s2.source(),s2.target()) );
-
-        // If two non-degenerate segments intersect, the intersection
-        // either contains a segment endpoint (four possibilities to
-        // check) or it is a point on the relative interior of both
-        // segments.  We perform the first check now.
 
         if ( s1.has_on(s2.source()) ||
              s1.has_on(s2.target()) ||
@@ -71,45 +64,27 @@ namespace intersection {
              s2.has_on(s1.target()) )
             return true;
 
-        // At this point, the segments are guaranteed to be
-        // non-degenerate, coplanar, and no endpoint lies on the other
-        // segment.  The coplanar_orientation function requires that the
-        // first three arguments (that define the plane and its orientation)
-        // are NOT collinear.  In the case that the three points are
-        // collinear, we can rule out an intersection, because such
-        // an intersection would contain at least one segment endpoint,
-        // and so would have been caught by the above tests.
-
         if ( collinear( s1.source(), s1.target(), s2.source() ) ||
              collinear( s2.source(), s2.target(), s1.source() ) )
             return false;
 
         return coplanar_orientation( s1.source(), s1.target(),
                                      s2.source(), s2.target() ) 
-               == CGAL::NEGATIVE
+               == NEGATIVE
             && coplanar_orientation( s2.source(), s2.target(),
                                      s1.source(), s1.target() ) 
-               == CGAL::NEGATIVE;
+               == NEGATIVE;
     }
 
-
-    template <class R>
+    inline
     bool
-    do_intersect( const CGAL::Segment_3<R>& s1,
-                  const CGAL::Segment_3<R>& s2 )
+    do_intersect( const Segment_3& s1,
+                  const Segment_3& s2 )
     {
         if ( s1.is_degenerate() )
             return s2.has_on(s1.source());
         if ( s2.is_degenerate() )
             return s1.has_on(s2.source());
-
-        // If two non-degenerate segments intersect, the intersection
-        // either contains a segment endpoint (four possibilities to
-        // check) or it is a point on the relative interior of both
-        // segments.  The latter case is determined by checking (a) that
-        // all four endpoints are coplanar, and (b) that the line through
-        // a segment separates the two endpoints of the other segment (in
-        // the common plane).
 
         if ( s1.has_on(s2.source()) ||
              s1.has_on(s2.target()) ||
@@ -121,62 +96,51 @@ namespace intersection {
                        s2.source(),s2.target()) )
             return false;
 
-        // At this point, the segments are guaranteed to be
-        // non-degenerate, coplanar, and no endpoint lies on the other
-        // segment.  The coplanar_orientation function requires that the
-        // first three arguments (that define the plane and its orientation)
-        // are NOT collinear.  In the case that the three points are
-        // collinear, we can rule out an intersection, because such
-        // an intersection would contain at least two segment endpoints,
-        // and so would have been caught by the above tests.
-
         if ( collinear( s1.source(), s1.target(), s2.source() ) ||
              collinear( s2.source(), s2.target(), s1.source() ) )
             return false;
 
         return coplanar_orientation( s1.source(), s1.target(),
                                      s2.source(), s2.target() ) 
-               == CGAL::NEGATIVE
+               == NEGATIVE
             && coplanar_orientation( s2.source(), s2.target(),
                                      s1.source(), s1.target() ) 
-               == CGAL::NEGATIVE;
+               == NEGATIVE;
     }
-
 
     namespace Segment_3_Segment_3 {
         
-        template <class R>
-        int classify_point( const CGAL::Segment_3<R>& S,
-                            const CGAL::Point_3<R>& p )
+        inline
+        int classify_point( const Segment_3& S,
+                            const Point_3& p )
         {
-            CGAL_exactness_precondition( collinear(S,p) );
+            
 
-            const CGAL::Point_3<R>& s = S.source();
-            const CGAL::Point_3<R>& t = S.target();
+            const Point_3& s = S.source();
+            const Point_3& t = S.target();
 
             if ( p == s )  return 2;
             if ( p == t )  return 4;
             
             if ( collinear_are_ordered_along_line( p, s, t ) )  return 1;
             if ( collinear_are_ordered_along_line( s, p, t ) )  return 3;
-            CGAL_exactness_assertion( collinear_are_ordered_along_line( s,t,p ) );
+            
             return 5;
         }
     }
 
-
-    template <class R>
-    CGAL::Object
-    collinear_intersection( const CGAL::Segment_3<R>& seg1,
-                            const CGAL::Segment_3<R>& seg2 )
+    inline
+    Object
+    collinear_intersection( const Segment_3& seg1,
+                            const Segment_3& seg2 )
     {
-        const CGAL::Point_3<R>& s1 = seg1.source();
-        const CGAL::Point_3<R>& t1 = seg1.target();
-        const CGAL::Point_3<R>& s2 = seg2.source();
-        const CGAL::Point_3<R>& t2 = seg2.target();
+        const Point_3& s1 = seg1.source();
+        const Point_3& t1 = seg1.target();
+        const Point_3& s2 = seg2.source();
+        const Point_3& t2 = seg2.target();
 
-        CGAL_exactness_precondition( collinear(seg1,s2) );
-        CGAL_exactness_precondition( collinear(seg1,t2) );
+        
+        
 
         int s1_class = Segment_3_Segment_3::classify_point( seg2, s1 );
         int t1_class = Segment_3_Segment_3::classify_point( seg2, t1 );
@@ -184,62 +148,58 @@ namespace intersection {
         switch( s1_class ) {
         case 1: 
             switch( t1_class ) {
-            case 1: return CGAL::Object();
-            case 2: return CGAL::make_object( s2 );
-            case 3: return CGAL::make_object( CGAL::Segment_3<R>(s2,t1) );
+            case 1: return Object();
+            case 2: return make_object( s2 );
+            case 3: return make_object( Segment_3(s2,t1) );
             case 4: // fall through
-            case 5: return CGAL::make_object( seg2 );
+            case 5: return make_object( seg2 );
             }
         case 2: 
             switch( t1_class ) {
             case 1: // fall through
-            case 2: return CGAL::make_object( s2 );
+            case 2: return make_object( s2 );
             case 3: // fall through
-            case 4: return CGAL::make_object( seg1 );
-            case 5: return CGAL::make_object( seg2 );
+            case 4: return make_object( seg1 );
+            case 5: return make_object( seg2 );
             }
         case 3: 
             switch( t1_class ) {
             case 1: // fall through
-            case 2: return CGAL::make_object( CGAL::Segment_3<R>(s2,s1) );
+            case 2: return make_object( Segment_3(s2,s1) );
             case 3: // fall through
-            case 4: return CGAL::make_object( seg1 );
-            case 5: return CGAL::make_object( CGAL::Segment_3<R>(s1,t2) );
+            case 4: return make_object( seg1 );
+            case 5: return make_object( Segment_3(s1,t2) );
             }
         case 4: 
             switch( t1_class ) {
             case 1: // fall through
-            case 2: return CGAL::make_object( seg2 );
-            case 3: return CGAL::make_object( seg1 );
+            case 2: return make_object( seg2 );
+            case 3: return make_object( seg1 );
             case 4: // fall through
-            case 5: return CGAL::make_object( t2 );
+            case 5: return make_object( t2 );
             }
         case 5: 
             switch( t1_class ) {
             case 1: // fall through
-            case 2: return CGAL::make_object( seg2 );
-            case 3: return CGAL::make_object( CGAL::Segment_3<R>(t1,t2) );
-            case 4: return CGAL::make_object( t2 );
-            case 5: return CGAL::Object();
+            case 2: return make_object( seg2 );
+            case 3: return make_object( Segment_3(t1,t2) );
+            case 4: return make_object( t2 );
+            case 5: return Object();
             }
         }
-        CGAL_assertion_msg(false, "internal error");
-        return CGAL::Object();
+        
+        return Object();
     }
 
-
-
-    template <class R>
-    CGAL::Object
-    intersection( const CGAL::Segment_3<R>& s1,
-                  const CGAL::Segment_3<R>& s2 )
+    inline
+    Object
+    intersection( const Segment_3& s1,
+                  const Segment_3& s2 )
     {
         if ( s1.is_degenerate() ) 
             return CEP::intersection::intersection( s2, s1.source() );
         if ( s2.is_degenerate() )
             return CEP::intersection::intersection( s1, s2.source() );
-
-        // Check all cases of collinear endpoints
 
         if ( collinear( s1, s2.source() )) {
             if ( collinear( s1, s2.target() )) {
@@ -255,74 +215,25 @@ namespace intersection {
             return CEP::intersection::intersection( s2, s1.target() );
         }
 
-        // If no three points are collinear, the intersection can only
-        // be a point in the relative interior of each segment, which
-        // implies that the segments must be coplanar, and that the
-        // line through a segment separates the endpoints of the
-        // other, in the plane.
-
         if ( !coplanar(s1.source(),s1.target(),
                        s2.source(),s2.target()) )
-            return CGAL::Object();
+            return Object();
 
         if (    coplanar_orientation( s1.source(), s1.target(),
                                       s2.source(), s2.target() ) 
-                != CGAL::NEGATIVE
+                != NEGATIVE
              || coplanar_orientation( s2.source(), s2.target(),
                                       s1.source(), s1.target() ) 
-                != CGAL::NEGATIVE )
-            return CGAL::Object();
+                != NEGATIVE )
+            return Object();
 
         return 
            CEP::intersection::Line_3_Line_3::coplanar_nonparallel_intersection
             ( s1.source(), s1.target(), s2.source(), s2.target() );
     }
 
-
 }
 }
-// namespace CEP {
-// namespace intersection {
-
-//     using CGAL::Segment_3;
-
-
-// template <class R>
-// bool
-// collinear_do_intersect( const Segment_3<R>& s1, 
-//                         const Segment_3<R>& s2 );
-
-
-// template <class R>
-// CGAL::Object
-// collinear_intersection( const Segment_3<R>& s1, 
-//                         const Segment_3<R>& s2 );
-
-
-// template <class R>
-// bool
-// coplanar_do_intersect( const Segment_3<R>& s1,
-//                        const Segment_3<R>& s2 );
-
-
-// template <class R>
-// bool
-// do_intersect( const Segment_3<R>& s1,
-//               const Segment_3<R>& s2 );
-
-
-// template <class R>
-// CGAL::Object
-// intersection( const Segment_3<R>& s1,
-//               const Segment_3<R>& s2 );
-
-
-// }
-// }
-
-
-// //#ifdef CGAL_CFG_NO_AUTOMATIC_TEMPLATE_INCLUSION
-// #  include <intersection/Segment_3_Segment_3.cpp>
-// //#endif
+} // namespace cvc::tiler
 
 #endif

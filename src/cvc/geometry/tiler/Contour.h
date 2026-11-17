@@ -1,3 +1,26 @@
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
 #ifndef __CONTOUR_H__
 #define __CONTOUR_H__
 
@@ -10,12 +33,12 @@
 #include <boost/weak_ptr.hpp>
 #include <boost/lexical_cast.hpp>
 
-#include <ContourTiler/common.h>
+#include "common.h"
 
-#include <ContourTiler/polygon_utils.h>
-#include <ContourTiler/Contour_info.h>
+#include "polygon_utils.h"
+#include "Contour_info.h"
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 /// Walk_direction is in the direction of the contour.  For example,
 /// if walk_direction is FORWARD and the contour is CCW, then the
@@ -59,7 +82,7 @@ public:
   typedef Contour_info<Number_type>                     Info;
   typedef Contour                                       Self;
   typedef boost::shared_ptr<Self>                       Handle;
-  typedef CGAL::Polygon_2<PolygonTraits>                Polygon;
+  typedef Polygon_2                Polygon;
   typedef PolygonTraits                                 Kernel;
   typedef Info                                          Info_type;
   typedef PolygonTraits::Point_2                        Point;
@@ -164,6 +187,6 @@ typedef Contour::Handle Contour_handle;
 std::ostream& operator<<(std::ostream& out, const Contour& contour);
 std::ostream& operator<<(std::ostream& out, boost::shared_ptr<Contour> contour);
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler
 
 #endif

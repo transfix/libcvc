@@ -1,17 +1,39 @@
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
 #include <boost/lexical_cast.hpp>
 #include <boost/foreach.hpp>
 
-#include <ContourTiler/tiler.h>
-#include <ContourTiler/tiler_operations.h>
-#include <ContourTiler/print_utils.h>
-#include <ContourTiler/sweep_line_visitors.h>
-#include <ContourTiler/set_utils.h>
-#include <ContourTiler/tiler_output.h>
-#include <ContourTiler/intersection.h>
-#include <ContourTiler/cut.h>
-#include <ContourTiler/perturb.h>
+#include "tiler.h"
+#include "tiler_operations.h"
+#include "print_utils.h"
+#include "sweep_line_visitors.h"
+#include "set_utils.h"
+#include "tiler_output.h"
+#include "intersection.h"
+#include "cut.h"
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 template <typename Contour_iter>
 TW_handle tile(Contour_iter bottom_begin, Contour_iter bottom_end,
@@ -109,7 +131,6 @@ std::size_t hash_value(const Tiler_intersection& t)
 template <typename TW_iter, typename Out_iter>
 void get_intersections(TW_iter tw_begin, TW_iter tw_end, Out_iter pairs)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("get_intersections");
 
   vector<Segment_2> segments;
   vector<SL_point> points;
@@ -134,7 +155,7 @@ void get_intersections(TW_iter tw_begin, TW_iter tw_end, Out_iter pairs)
 
   sort(points.begin(), points.end());
   for (vector<SL_point>::iterator it = points.begin(); it != points.end(); ++it) {
-    LOG4CPLUS_TRACE(logger, it->point());
+    TILER_TRACE(logger, it->point());
   }
 
   typedef list<SL_intersection> Intersection_list;
@@ -159,7 +180,7 @@ void get_intersections(TW_iter tw_begin, TW_iter tw_end, Out_iter pairs)
 
 //     if (a_z != (int)a_z)
 //     {
-//       LOG4CPLUS_ERROR(logger, "z_home returned not on a slice: " << a_z << " " << pp(a_seg) << " " << a_id);
+//       TILER_ERROR(logger, "z_home returned not on a slice: " << a_z << " " << pp(a_seg) << " " << a_id);
 //       a_z = tws[a_id]->zhome(a_seg.source(), a_seg.target());
 //     }
 
@@ -169,10 +190,10 @@ void get_intersections(TW_iter tw_begin, TW_iter tw_end, Out_iter pairs)
 //     b_z = tws[b_id]->zhome(b_seg.source(), b_seg.target());
 
 //     if (b_z != (int)b_z)
-//       LOG4CPLUS_ERROR(logger, "z_home returned not on a slice: " << b_z << " " << pp(b_seg) << " " << b_id);
+//       TILER_ERROR(logger, "z_home returned not on a slice: " << b_z << " " << pp(b_seg) << " " << b_id);
 
-//     LOG4CPLUS_TRACE(logger, "z_home for: " << a_id << " = " << a_z);
-//     LOG4CPLUS_TRACE(logger, "z_home for: " << b_id << " = " << b_z);
+//     TILER_TRACE(logger, "z_home for: " << a_id << " = " << a_z);
+//     TILER_TRACE(logger, "z_home for: " << b_id << " = " << b_z);
 
 //     Tiler_intersection ti(a_id, b_id, a_z, b_z);
     Tiler_intersection ti(a_id, b_id, 0, 1);
@@ -188,7 +209,6 @@ void get_intersections(TW_iter tw_begin, TW_iter tw_end, Out_iter pairs)
 template <typename Slice_iter>
 bool augment_slices(Slice_iter slices_begin, Slice_iter slices_end)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("augment_slices");
 
   Slice_iter it0 = slices_begin;
   Slice_iter it1 = it0;
@@ -251,7 +271,7 @@ void round(Polygon_2& p, int dec) {
   Polygon_2::Vertex_iterator vit;
   for (vit = p.vertices_begin(); vit != p.vertices_end(); ++vit) {
     Point_2 pnt = *vit;
-    pnt = Point_25_<Kernel>(round(pnt.x(), dec), round(pnt.y(), dec), pnt.z(), pnt.id());
+    pnt = Point_2(round(pnt.x(), dec), round(pnt.y(), dec), pnt.z(), pnt.id());
     p.set(vit, pnt);
   }
 
@@ -293,7 +313,6 @@ void tile(Slice_iter slices_begin, Slice_iter slices_end,
 	  const Tiler_options& options)
 {
   using namespace std;
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.tile");
 
   typedef boost::shared_ptr<Triangle> Triangle_handle;
 
@@ -310,37 +329,37 @@ void tile(Slice_iter slices_begin, Slice_iter slices_end,
   // Contours after intersection removal may be very slightly different
   // even if there were no intersections since intersection removal
   // performs an expansion and contraction of each contour.
-  LOG4CPLUS_INFO(logger, "Removing 2D contour intersections");
+  TILER_INFO(logger, "Removing 2D contour intersections");
   for (Slice_iter it = slices_begin; it != slices_end; ++it) {
     Slice& s = *it;
-    LOG4CPLUS_TRACE(logger, "Preprocessing slice: " << s.to_string());
+    TILER_TRACE(logger, "Preprocessing slice: " << s.to_string());
     if (!s.empty()) {
-      LOG4CPLUS_DEBUG(logger, "Removing 2D contour intersections in slice " << s.z());
+      TILER_DEBUG(logger, "Removing 2D contour intersections in slice " << s.z());
     }
     s.validate();
     s.remove_collinear(options.collinear_epsilon());
     s.validate();
-    LOG4CPLUS_TRACE(logger, "Removed collinear points in slice " << s.z());
+    TILER_TRACE(logger, "Removed collinear points in slice " << s.z());
 
     if (options.contour_curation_delta() > 0) {
-      LOG4CPLUS_TRACE(logger, "ri1: " << s.to_string());
+      TILER_TRACE(logger, "ri1: " << s.to_string());
       s.remove_intersections(options.contour_curation_delta());
-      LOG4CPLUS_TRACE(logger, "ri2: " << s.to_string());
+      TILER_TRACE(logger, "ri2: " << s.to_string());
       s.validate();
-      LOG4CPLUS_TRACE(logger, "Removed intersections in slice " << s.z());
+      TILER_TRACE(logger, "Removed intersections in slice " << s.z());
 
       // round(s, 5);
       // perturb(s, 0.000001);
       s.validate();
-      LOG4CPLUS_TRACE(logger, "Rounded in slice " << s.z());
+      TILER_TRACE(logger, "Rounded in slice " << s.z());
     }
-    LOG4CPLUS_TRACE(logger, "Finished preprocessing slice: " << s.to_string());
+    TILER_TRACE(logger, "Finished preprocessing slice: " << s.to_string());
   }
 
   int aug = 1;
-  LOG4CPLUS_DEBUG(logger, "Augmenting contours - iteration " << aug++);
+  TILER_DEBUG(logger, "Augmenting contours - iteration " << aug++);
   while (augment_slices(slices_begin, slices_end)) {
-    LOG4CPLUS_DEBUG(logger, "Augmenting contours - iteration " << aug++);
+    TILER_DEBUG(logger, "Augmenting contours - iteration " << aug++);
   }
 
   // Iterate through the slices
@@ -352,13 +371,13 @@ void tile(Slice_iter slices_begin, Slice_iter slices_end,
 
     if (!bottom.empty() || !top.empty()) {
       if (bottom.empty()) {
-        LOG4CPLUS_INFO(logger, "Tiling slice " << top.z());
+        TILER_INFO(logger, "Tiling slice " << top.z());
       }
       else if (bottom.empty()) {
-        LOG4CPLUS_INFO(logger, "Tiling slice " << bottom.z());
+        TILER_INFO(logger, "Tiling slice " << bottom.z());
       }
       else {
-        LOG4CPLUS_INFO(logger, "Tiling slices " << bottom.z() << " - " << top.z());
+        TILER_INFO(logger, "Tiling slices " << bottom.z() << " - " << top.z());
       }
     }
 
@@ -386,7 +405,7 @@ void tile(Slice_iter slices_begin, Slice_iter slices_end,
       contours[0].insert(contours[0].end(), bottom.begin(component), bottom.end(component));
       contours[1].insert(contours[1].end(), top.begin(component), top.end(component));
 
-      LOG4CPLUS_DEBUG(logger, "Tiling " << component << " slices " 
+      TILER_DEBUG(logger, "Tiling " << component << " slices " 
 		      << bottom.z() << " - " << top.z());
       TW_handle w = tile_one_component(bottom.begin(component), bottom.end(component), 
 			 top.begin(component), top.end(component), 
@@ -402,7 +421,7 @@ void tile(Slice_iter slices_begin, Slice_iter slices_end,
     if (options.remove_intersections())
     {
       if (!bottom.empty() && !top.empty()) {
-        LOG4CPLUS_INFO(logger, "Removing intersections between slices " << bottom.z() << " - " << top.z());
+        TILER_INFO(logger, "Removing intersections between slices " << bottom.z() << " - " << top.z());
       }
 
       // Find all tiles that intersect between components
@@ -428,11 +447,11 @@ void tile(Slice_iter slices_begin, Slice_iter slices_end,
 	Number_type zmin = min(twa->zmin(), twb->zmin());
 	Number_type zmax = max(twa->zmax(), twb->zmax());
  	Number_type zdelta = fabs(zmax - zmin) * options.contour_curation_delta() / options.z_scale();
-	LOG4CPLUS_TRACE(logger, "z values: " << fabs(zmax-zmin) << " " 
+	TILER_TRACE(logger, "z values: " << fabs(zmax-zmin) << " " 
 			<< options.contour_curation_delta() << " " 
 			<< options.z_scale() << " " << zdelta);
 
-	LOG4CPLUS_DEBUG(logger, "Removing intersections between " 
+	TILER_DEBUG(logger, "Removing intersections between " 
 			<< components[a] << " - " << components[b] << " slices " 
 			<< zmin << " - " << zmax);
 
@@ -451,21 +470,21 @@ void tile(Slice_iter slices_begin, Slice_iter slices_end,
 	    tiles[b].clear();
 	    tiles[b].insert(tiles[b].end(), new_green.begin(), new_green.end());
 	  } catch (std::logic_error& e) {
-	    LOG4CPLUS_ERROR(logger, "Removing intersections between " 
+	    TILER_ERROR(logger, "Removing intersections between " 
 			  << components[a] << " - " << components[b] << " slices " 
 			  << zmin << " - " << zmax);
-	    LOG4CPLUS_ERROR(logger, "Failed to remove intersections: " << e.what());
+	    TILER_ERROR(logger, "Failed to remove intersections: " << e.what());
 	  }
 	}
 	else {
-	  LOG4CPLUS_ERROR(logger, "Removing intersections between " 
+	  TILER_ERROR(logger, "Removing intersections between " 
 			  << components[a] << " - " << components[b] << " slices " 
 			  << zmin << " - " << zmax);
           TW_handle twa = slice_workspaces[a];
           TW_handle twb = slice_workspaces[b];
-	  LOG4CPLUS_ERROR(logger, twa->zmin() << " - " << twa->zmax());
-	  LOG4CPLUS_ERROR(logger, twb->zmin() << " - " << twb->zmax());
-	  LOG4CPLUS_ERROR(logger, "Intersection occurred on same slice.  Failing to remove intersections. ");
+	  TILER_ERROR(logger, twa->zmin() << " - " << twa->zmax());
+	  TILER_ERROR(logger, twb->zmin() << " - " << twb->zmax());
+	  TILER_ERROR(logger, "Intersection occurred on same slice.  Failing to remove intersections. ");
 	}
       }
     }
@@ -494,7 +513,7 @@ void tile(Slice_iter slices_begin, Slice_iter slices_end,
       }
     }
 
-    LOG4CPLUS_DEBUG(logger, "Total number of tiles for slices " 
+    TILER_DEBUG(logger, "Total number of tiles for slices " 
 		    << bottom.z() << " - " << top.z() << ": " << total_tiles);
 
     ++it0;
@@ -531,7 +550,7 @@ void tile(Slice_iter slices_begin, Slice_iter slices_end,
 	decompose_triangle(tri, edge2points, back_inserter(new_triangles));
       }
       catch (logic_error& e) {
-	LOG4CPLUS_ERROR(logger, "Decomposing of triangle failed: " << e.what());
+	TILER_ERROR(logger, "Decomposing of triangle failed: " << e.what());
 	failed = true;
       }
       if (!failed && new_triangles.size() > 1) {
@@ -542,7 +561,7 @@ void tile(Slice_iter slices_begin, Slice_iter slices_end,
       else {
         // // debug
         // if (abs(tri[0].x() - 5.2767) < 0.0001 || abs(tri[1].x() - 5.2767) < 0.0001) {
-        //   LOG4CPLUS_WARN(logger, "looking for this? " << pp(tri[0]) << " " << pp(tri[1]) << " " << pp(tri[2]));
+        //   TILER_WARN(logger, "looking for this? " << pp(tri[0]) << " " << pp(tri[1]) << " " << pp(tri[2]));
         // }
         // // /debug
 	for (int k = 0; k < 3; ++k) {
@@ -581,4 +600,4 @@ template
 void tile(vector<Slice>::iterator slices_begin, vector<Slice>::iterator slices_end, 
 	  const boost::unordered_map<string, Color>& comp2color, const Tiler_options& options);
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler

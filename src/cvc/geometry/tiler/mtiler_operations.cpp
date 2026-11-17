@@ -1,3 +1,26 @@
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
 //-----------------------
 // Multi-tiler operations
 //-----------------------
@@ -6,19 +29,17 @@
 #include <list>
 #include <map>
 
-#include <CGAL/Direction_2.h>
-#include <CGAL/Kernel/global_functions_2.h>
 
-#include <ContourTiler/mtiler_operations.h>
-#include <ContourTiler/tiler_operations.h>
-#include <ContourTiler/print_utils.h>
-#include <ContourTiler/segment_utils.h>
-#include <ContourTiler/Intersections.h>
-#include <ContourTiler/intersection.h>
-#include <ContourTiler/cut.h>
-#include <ContourTiler/Z_adjustments.h>
+#include "mtiler_operations.h"
+#include "tiler_operations.h"
+#include "print_utils.h"
+#include "segment_utils.h"
+#include "Intersections.h"
+#include "intersection.h"
+#include "cut.h"
+#include "Z_adjustments.h"
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 using namespace std;
 
@@ -81,7 +102,7 @@ typedef boost::shared_ptr<Triangle> Triangle_handle;
 // //   typedef Tile::Skeletons::iterator Skel_iter;
 
 //   static log4cplus::Logger logger = log4cplus::Logger::getInstance("multitiler");
-//   LOG4CPLUS_INFO(logger, "Multi-tiling");
+//   TILER_INFO(logger, "Multi-tiling");
 
 //   Tiler_workspace::Contours all1;
 //   Tiler_workspace::Contours all2;
@@ -160,4 +181,4 @@ typedef boost::shared_ptr<Triangle> Triangle_handle;
 // 			 Number_type epsilon);
 
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler

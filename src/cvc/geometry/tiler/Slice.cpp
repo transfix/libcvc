@@ -1,12 +1,35 @@
-#include <ContourTiler/Slice.h>
-#include <ContourTiler/remove_contour_intersections.h>
-#include <ContourTiler/print_utils.h>
-#include <ContourTiler/polygon_utils.h>
-#include <ContourTiler/Distance_functor.h>
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
+#include "Slice.h"
+#include "remove_contour_intersections.h"
+#include "print_utils.h"
+#include "polygon_utils.h"
+#include "Distance_functor.h"
 
 #include <sstream>
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 void Slice::remove_collinear(Number_type epsilon)
 {
@@ -18,14 +41,14 @@ void Slice::remove_collinear(Number_type epsilon)
 	 ++c_it)
     {
       Contour_handle c = *c_it;
-      c->polygon() = CONTOURTILER_NAMESPACE::remove_collinear(c->polygon(), epsilon);
+      c->polygon() = cvc::tiler::remove_collinear(c->polygon(), epsilon);
     }
   }
 }
 
-void Slice::remove_intersections(Number_type delta)
+void Slice::remove_intersections(Number_type delta, tiler_context& ctx)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("slice.remove_intersections");
+  Logger logger = ctx.logger("tiler.Slice.remove_intersections");
 
   // Put all polygons in the slice into polys, regardless of component.
   vector<Contour_handle> contours;
@@ -57,12 +80,12 @@ void Slice::remove_intersections(Number_type delta)
       if (!c->polygon().is_simple()) {
 	throw logic_error("Contour is not simple before intersection removal...");
       }
-      // LOG4CPLUS_TRACE(logger, "Contour is at level " << h.level(c));
+      // TILER_TRACE(logger, "Contour is at level " << h.level(c));
       // if (!c->is_counterclockwise_oriented())
       // if (h.parent(c)) {
       // 	nested.push_back(c);
       // 	// c->reverse_orientation();
-      // 	LOG4CPLUS_DEBUG(logger, "Nested polygon -- not included in remove_intersections: " << pp(c->polygon()));
+      // 	TILER_DEBUG(logger, "Nested polygon -- not included in remove_intersections: " << pp(c->polygon()));
       // }
       // else {
 	contours.push_back(c);
@@ -73,24 +96,24 @@ void Slice::remove_intersections(Number_type delta)
   // Remove all contour intersections by dilating, removing
   // intersections, then eroding.
   list<Contour_handle> new_contours;
-  remove_contour_intersections(contours.begin(), contours.end(), delta, back_inserter(new_contours));
+  remove_contour_intersections(contours.begin(), contours.end(), delta, back_inserter(new_contours), ctx);
 
   _map.clear();
   // insert(new_contours.begin(), new_contours.end());
   for (list<Contour_handle>::const_iterator it = new_contours.begin(); it != new_contours.end(); ++it) {
     Contour_handle ch = *it;
     if (ch->polygon().size() < 3) {
-      LOG4CPLUS_WARN(logger, "Contour " << ch->info().name() << " is not simple after intersection removal: " << pp(ch->polygon()) << " -- skipping");
+      TILER_WARN(logger, "Contour " << ch->info().name() << " is not simple after intersection removal: " << pp(ch->polygon()) << " -- skipping");
     }
     else if (!ch->polygon().is_simple()) {
-      LOG4CPLUS_WARN(logger, "Contour " << ch->info().name() << " is not simple after intersection removal: " << pp(ch->polygon()) << " -- skipping");
+      TILER_WARN(logger, "Contour " << ch->info().name() << " is not simple after intersection removal: " << pp(ch->polygon()) << " -- skipping");
     }
     else {
       push_back(ch);
     }
 
     // if (ch->info().name() == "a359") {
-    //   LOG4CPLUS_TRACE(logger, "a359: " << pp(ch->polygon()));
+    //   TILER_TRACE(logger, "a359: " << pp(ch->polygon()));
     // }
   }
 
@@ -99,7 +122,6 @@ void Slice::remove_intersections(Number_type delta)
 
 void Slice::validate()
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("slice.validate");
 
   for (Map::iterator it = _map.begin(); it != _map.end(); ++it)
   {
@@ -110,9 +132,8 @@ void Slice::validate()
     {
       Contour_handle c = *c_it;
       if (!c->polygon().is_simple()) {
-	LOG4CPLUS_ERROR(logger, "Polygon is not simple.  Component = " << c->info().object_name() 
-			<< " Polygon = " << pp(c->polygon()));
-	throw logic_error("Contour is not simple");
+	throw logic_error("Contour is not simple: component " + c->info().object_name() + ": " +
+	                  pp(c->polygon()));
       }
     }
   }
@@ -192,5 +213,5 @@ string Slice::to_string() const
   return ss.str();
 }
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler
 

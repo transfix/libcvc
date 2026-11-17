@@ -1,12 +1,35 @@
-// #include <ContourTiler/Slice2.h>
-// #include <ContourTiler/remove_contour_intersections.h>
-// #include <ContourTiler/print_utils.h>
-// #include <ContourTiler/polygon_utils.h>
-// #include <ContourTiler/Distance_functor.h>
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
+// #include "Slice2.h"
+// #include "remove_contour_intersections.h"
+// #include "print_utils.h"
+// #include "polygon_utils.h"
+// #include "Distance_functor.h"
 
 // #include <sstream>
 
-// CONTOURTILER_BEGIN_NAMESPACE
+// namespace cvc::tiler {
 
 // void remove_collinear(Slice2& slice, Number_type epsilon)
 // {
@@ -15,10 +38,10 @@
 
 //     for (Contour2::Polygon_iterator pit = contour->begin(); pit != contour->end(); ++pit) {
 //       Polygon_with_holes_2& pwh = *pit;
-//       Polygon_with_holes_2 new_pwh(CONTOURTILER_NAMESPACE::remove_collinear(pwh.outer_boundary(), epsilon));
+//       Polygon_with_holes_2 new_pwh(cvc::tiler::remove_collinear(pwh.outer_boundary(), epsilon));
 //       for (Polygon_with_holes_2::Hole_iterator hit = pwh.holes_begin(); hit != pwh.holes_end(); ++hit) {
 //       	Polygon_2& p = *hit;
-//       	new_pwh.add_hole(CONTOURTILER_NAMESPACE::remove_collinear(p, epsilon));
+//       	new_pwh.add_hole(cvc::tiler::remove_collinear(p, epsilon));
 //       }
 //       pwh = new_pwh;
 //     }
@@ -72,7 +95,7 @@
 //   remove_contour_intersections2(contours.begin(), contours.end(), delta, back_inserter(new_contours), back_inserter(failures));
 
 //   for (list<string>::const_iterator it = failures.begin(); it != failures.end(); ++it) {
-//     LOG4CPLUS_WARN(logger, "Failed to remove contour intersections: " << *it);
+//     TILER_WARN(logger, "Failed to remove contour intersections: " << *it);
 //   }
 
 //   slice.clear();
@@ -164,5 +187,5 @@
 // //   return ss.str();
 // // }
 
-// CONTOURTILER_END_NAMESPACE
+// } // namespace cvc::tiler
 

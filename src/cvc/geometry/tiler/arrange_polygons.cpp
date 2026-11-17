@@ -1,4 +1,27 @@
-#include <ContourTiler/arrange_polygons.h>
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
+#include "arrange_polygons.h"
 // #include "print_utils.h"
 // #include "polygon_utils.h"
 // #include "Contour.h"
@@ -20,7 +43,7 @@
 // #include <CGAL/Polygon_with_holes_2.h>
 // #include <CGAL/Boolean_set_operations_2.h>
 
-// CONTOURTILER_BEGIN_NAMESPACE
+// namespace cvc::tiler {
 
 // typedef boost::shared_ptr<Polygon_2> Polygon_handle;
 // typedef boost::weak_ptr<Polygon_2>                      Child_handle;
@@ -140,12 +163,12 @@
 //   list<Point_2> pts;
 //   get_boundary_intersections<InputPolygonIterator, back_insert_iterator<list<Point_2> > >(begin, end, std::back_inserter(pts), false);
 //   if (pts.size() > 0) {
-//     LOG4CPLUS_ERROR(logger, "The polygons' boundaries intersect at these points: ");
+//     TILER_ERROR(logger, "The polygons' boundaries intersect at these points: ");
 //     for (list<Point_2>::const_iterator it = pts.begin(); it != pts.end(); ++it)
-//       LOG4CPLUS_ERROR(logger, "  " <<  pp(*it));
-//     LOG4CPLUS_ERROR(logger, "Polygons: ");
+//       TILER_ERROR(logger, "  " <<  pp(*it));
+//     TILER_ERROR(logger, "Polygons: ");
 //     for (InputPolygonIterator it = begin; it != end; ++it)
-//       LOG4CPLUS_ERROR(logger, "  " <<  pp((*it)));;
+//       TILER_ERROR(logger, "  " <<  pp((*it)));;
 //     throw runtime_error("The polygons' boundaries intersect");
 //   }
 
@@ -189,7 +212,7 @@
 // 	pwh.add_hole(*child);
 //       }
 
-//       LOG4CPLUS_TRACE(logger, pp(pwh));
+//       TILER_TRACE(logger, pp(pwh));
       
 //       *out++ = pwh;
 //     }
@@ -209,4 +232,4 @@
 // // 			       vector<Polygon_2>::const_iterator end,
 // // 			       back_insert_iterator<list<Polygon_with_holes_2> > out);
 
-// CONTOURTILER_END_NAMESPACE
+// } // namespace cvc::tiler

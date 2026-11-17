@@ -1,3 +1,26 @@
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
 #ifndef __HIERARCHY_H__
 #define __HIERARCHY_H__
 
@@ -11,19 +34,13 @@
 #include <boost/tuple/tuple.hpp>
 #include <boost/unordered_map.hpp>
 
-#include <CGAL/Gmpz.h>
-#include <CGAL/Lazy_exact_nt.h>
-#include <CGAL/Cartesian.h>
-#include <CGAL/Polygon_2.h>
-#include <CGAL/Polygon_with_holes_2.h>
-#include <CGAL/Boolean_set_operations_2.h>
 
-#include <ContourTiler/polygon_utils.h>
-#include <ContourTiler/Contour.h>
-#include <ContourTiler/contour_utils.h>
+#include "polygon_utils.h"
+#include "Contour.h"
+#include "contour_utils.h"
 //#include "print_utils.h"
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 std::string pp(const Point_2& point);
 std::string pp(const Polygon_2& poly);
@@ -82,7 +99,7 @@ public:
   const Contour_handle NEC(Point_2 point) const;
 
   /// Infers the orientation from the hierarchy of the contour
-  CGAL::Orientation orientation(Contour_handle contour) const;
+  Orientation orientation(Contour_handle contour) const;
 
   /// Infers the orientation from the hierarchy of the contour
   bool is_CCW(const Contour_handle& contour) const;
@@ -92,7 +109,7 @@ public:
 
   boost::tuple<Contour_handle, Contour_handle, Polygon_2::Vertex_circulator> is_overlapping(const Point_2& point) const;
 
-  boost::tuple<Vertex_sign, Contour_handle> vertex_sign(const Point_2& point, CGAL::Orientation point_orientation) const;
+  boost::tuple<Vertex_sign, Contour_handle> vertex_sign(const Point_2& point, Orientation point_orientation) const;
 
 private:
 
@@ -150,6 +167,6 @@ private:
 
 typedef std::map<Number_type, Hierarchy> Hierarchies;
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler
 
 #endif

@@ -1,7 +1,30 @@
-#include <ContourTiler/contour_utils.h>
-#include <ContourTiler/sweep_line_visitors.h>
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
 
-CONTOURTILER_BEGIN_NAMESPACE
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
+#include "contour_utils.h"
+#include "sweep_line_visitors.h"
+
+namespace cvc::tiler {
 
 size_t vertex_idx(Contour_handle contour, Polygon_2::Vertex_iterator vertex)
 {
@@ -19,7 +42,6 @@ size_t vertex_idx(Contour_handle contour, Polygon_2::Vertex_circulator vertex)
 template <typename InputIterator, typename OutputIterator>
 void get_intersecting_pairs(InputIterator begin, InputIterator end, OutputIterator intersecting_pairs)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("get_intersecting_pairs");
 
   std::list<Segment_2> segments;
   boost::unordered_map<Segment_2, Contour_handle> seg2Contour;
@@ -84,4 +106,4 @@ void get_intersecting_pairs(vector<Contour_handle>::iterator begin,
 			    vector<Contour_handle>::iterator end, 
 			    back_insert_iterator<list<pair<Contour_handle, Contour_handle> > > intersecting_pairs);
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler

@@ -1,26 +1,48 @@
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
 #ifndef __TILER_OPERATIONS_H__
 #define __TILER_OPERATIONS_H__
 
 #include <list>
 #include <map>
 #include <iostream>
-#include <ContourTiler/contour_utils.h>
-#include <ContourTiler/Hierarchy.h>
-#include <ContourTiler/Tiling_region.h>
-#include <ContourTiler/Vertex_map.h>
-#include <ContourTiler/Contour.h>
+#include "contour_utils.h"
+#include "Hierarchy.h"
+#include "Tiling_region.h"
+#include "Vertex_map.h"
+#include "Contour.h"
 #include <boost/unordered_map.hpp>
-#include <ContourTiler/Correspondences.h>
+#include "Correspondences.h"
 
-#include <CGAL/intersections.h>
 #include <boost/shared_ptr.hpp>
 
-#include <ContourTiler/Tiles.h>
-#include <ContourTiler/Vertex_completion_map.h>
-#include <ContourTiler/tiler_defines.h>
-#include <ContourTiler/Tiler_workspace.h>
+#include "Tiles.h"
+#include "Vertex_completion_map.h"
+#include "tiler_defines.h"
+#include "Tiler_workspace.h"
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 /// Augments the given polygons in place
 void augment(Polygon_2& P, Polygon_2& Q);
@@ -80,7 +102,6 @@ template <typename ContourIterator>
 Correspondences find_correspondences(ContourIterator start1, ContourIterator end1, const Hierarchy& h1, 
 		     ContourIterator start2, ContourIterator end2, const Hierarchy& h2, Number_type overlap)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.find_correspondences");
 
   Correspondences correspondences;
   size_t count = 0;
@@ -90,7 +111,7 @@ Correspondences find_correspondences(ContourIterator start1, ContourIterator end
 	correspondences.add(*it1, *it2);
 	++count;
       }
-  LOG4CPLUS_TRACE(logger, "Number of correspondences: " << count);
+  TILER_TRACE(logger, "Number of correspondences: " << count);
   return correspondences;
 }
 
@@ -146,12 +167,12 @@ public:
 
   bool operator()(const Point_2& a, const Point_2& b)
   {
-    return CGAL::has_smaller_distance_to_point(_point, a, b);
+    return has_smaller_distance_to_point(_point, a, b);
   }
 
 //   bool operator()(const Point_3& a, const Point_3& b)
 //   {
-//     return CGAL::has_smaller_distance_to_point(_point, a.point(), b.point());
+//     return has_smaller_distance_to_point(_point, a.point(), b.point());
 //   }
 
 private:
@@ -258,11 +279,10 @@ boost::shared_ptr<Tiler_workspace> pre_tile(ContourIterator bottom_start, Contou
 //   Number_type topz = (*top_start)->polygon()[0].z();
   Number_type midz = (topz + bottomz) / 2.0;
 
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("tiler.pre_tile");
 
   if (do_augment)
   {
-    LOG4CPLUS_TRACE(logger, "Augmenting contours...");
+    TILER_TRACE(logger, "Augmenting contours...");
     augment(bottom_start, bottom_end, top_start, top_end, back_inserter(bottom), back_inserter(top));
   }
   else
@@ -274,10 +294,10 @@ boost::shared_ptr<Tiler_workspace> pre_tile(ContourIterator bottom_start, Contou
   all.insert(all.end(), bottom.begin(), bottom.end());
   all.insert(all.end(), top.begin(), top.end());
 
-  LOG4CPLUS_TRACE(logger, "Creating hierarchies...");
-  LOG4CPLUS_TRACE(logger, "Creating bottom augmented hierarchy...");
+  TILER_TRACE(logger, "Creating hierarchies...");
+  TILER_TRACE(logger, "Creating bottom augmented hierarchy...");
   bottom_h = Hierarchy(bottom.begin(), bottom.end(), Hierarchy_policy::FORCE_CCW);
-  LOG4CPLUS_TRACE(logger, "Creating top augmented hierarchy...");
+  TILER_TRACE(logger, "Creating top augmented hierarchy...");
   top_h = Hierarchy(top.begin(), top.end(), Hierarchy_policy::FORCE_CCW);
 
 //   hierarchies[bottom[0]->slice()] = bottom_h;
@@ -285,15 +305,15 @@ boost::shared_ptr<Tiler_workspace> pre_tile(ContourIterator bottom_start, Contou
   hierarchies[bottomz] = bottom_h;
   hierarchies[topz] = top_h;
 
-  LOG4CPLUS_TRACE(logger, "Creating vertices...");
+  TILER_TRACE(logger, "Creating vertices...");
   vertices = Vertices::create(all.begin(), all.end());
 
   // Get correspondences
-  LOG4CPLUS_TRACE(logger, "Finding correspondences...");
+  TILER_TRACE(logger, "Finding correspondences...");
   correspondences = find_correspondences(bottom.begin(), bottom.end(), bottom_h, top.begin(), top.end(), top_h, overlap);
 
   // Get the tiling regions
-  LOG4CPLUS_TRACE(logger, "Finding tiling regions...");
+  TILER_TRACE(logger, "Finding tiling regions...");
   tiling_regions = find_tiling_regions(bottom.begin(), bottom.end(), bottom_h, 
 				       top.begin(), top.end(), top_h, 
 				       bottomz, topz,
@@ -302,13 +322,13 @@ boost::shared_ptr<Tiler_workspace> pre_tile(ContourIterator bottom_start, Contou
   Banned banned;
 
   // Build the OTV table
-  LOG4CPLUS_TRACE(logger, "Building OTV table...");
+  TILER_TRACE(logger, "Building OTV table...");
   otv_table = build_OTV_table(all.begin(), all.end(), bottom.begin(), bottom.end(), top.begin(), top.end(), vertices, correspondences, tiling_regions, hierarchies, banned);
     
   TW_handle w = Tiler_workspace::create(all, bottom, top, correspondences, vertices, tiling_regions, otv_table, hierarchies, midz);
 
   // Finding banned vertices
-  LOG4CPLUS_TRACE(logger, "Finding banned vertices...");
+  TILER_TRACE(logger, "Finding banned vertices...");
   w->set_banned(banned);
 //   find_banned(*w);
     
@@ -340,6 +360,6 @@ Tiles build_tiling_table(ContourIterator s1_begin, ContourIterator s1_end,
   return tiles;
 }
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler
 
 #endif

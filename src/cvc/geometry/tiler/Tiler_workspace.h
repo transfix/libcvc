@@ -1,20 +1,43 @@
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
 #ifndef TILER_WORKSPACE
 #define TILER_WORKSPACE
 
-#include <ContourTiler/common.h>
-#include <ContourTiler/tiler_defines.h>
-#include <ContourTiler/Boundary_slice_chords.h>
-#include <ContourTiler/Untiled_region.h>
-#include <ContourTiler/Vertices.h>
-#include <ContourTiler/triangle_utils.h>
-#include <ContourTiler/Tiler_callback.h>
-#include <ContourTiler/Polyline.h>
+#include "common.h"
+#include "tiler_defines.h"
+#include "Boundary_slice_chords.h"
+#include "Untiled_region.h"
+#include "Vertices.h"
+#include "triangle_utils.h"
+#include "Tiler_callback.h"
+#include "Polyline.h"
 
 #include <boost/shared_ptr.hpp>
 #include <boost/unordered_map.hpp>
 #include <boost/unordered_set.hpp>
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 typedef std::list<Segment_3> Chord_list;
 typedef boost::unordered_set<Segment_3> Chord_set;
@@ -100,6 +123,13 @@ public:
   void set_callback(boost::shared_ptr<Tiler_callback> callback)
   { _callback = callback; }
 
+  // Where this workspace's warnings go: the tiler context's log (tiler_context.h). Without one,
+  // they are dropped.
+  void set_log(tiler_log* log)
+  { _log = log; }
+  Logger logger(const char* name) const
+  { return Logger(_log, name); }
+
   Tile_list& tiles(Contour_handle c) { return _contour2tile[c]; }
 
   const Tile_list& tiles(Contour_handle c) const { return _contour2tile.find(c)->second; }
@@ -180,11 +210,12 @@ private:
   boost::unordered_map<Contour_handle, Tile_list> _contour2tile;
   Number_type _zmin, _zmax;
   Banned _banned;
+  tiler_log* _log = nullptr;
   boost::unordered_map<size_t, Number_type> _z_home;
 };
 
 typedef Tiler_workspace::TW_handle TW_handle;
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler
 
 #endif

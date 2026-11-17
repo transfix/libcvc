@@ -1,9 +1,32 @@
-#include <ContourTiler/Contour2.h>
-#include <ContourTiler/arrange_polygons.h>
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
+#include "Contour2.h"
+#include "arrange_polygons.h"
 
 #include "boost/lexical_cast.hpp"
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 Contour2::Handle Contour2::create()
 {
@@ -108,24 +131,21 @@ Contour2::~Contour2()
 
 void Contour2::validate() const
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("Contour2.validate");
 
   for (Polygon_const_iterator it = begin(); it != end(); ++it) {
     const Polygon_with_holes_2& pwh = *it;
     if (!pwh.outer_boundary().is_simple()) {
-      LOG4CPLUS_ERROR(logger, "Outer boundary is not simple.  Component = " << info().object_name() 
-		      << " Polygon = " << pp(pwh.outer_boundary()));
-      throw logic_error("Contour is not simple");
+      throw logic_error("Contour is not simple: outer boundary of component " +
+                        info().object_name() + ": " + pp(pwh.outer_boundary()));
     }
     for (Polygon_with_holes_2::Hole_const_iterator hit = pwh.holes_begin(); hit != pwh.holes_end(); ++hit) {
       const Polygon_2& p = *hit;
       if (!p.is_simple()) {
-	LOG4CPLUS_ERROR(logger, "Hole is not simple.  Component = " << info().object_name() 
-			<< " Polygon = " << pp(p));
-	throw logic_error("Contour is not simple");
+	throw logic_error("Contour is not simple: hole of component " + info().object_name() +
+	                  ": " + pp(p));
       }
     }
   }
 }
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler

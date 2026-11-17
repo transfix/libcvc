@@ -1,11 +1,33 @@
-#include <ContourTiler/Tiler_workspace.h>
-#include <ContourTiler/print_utils.h>
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
+#include "Tiler_workspace.h"
+#include "print_utils.h"
 #include <iostream>
-#include <ContourTiler/segment_utils.h>
+#include "segment_utils.h"
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
-log4cplus::Logger logger_tw = log4cplus::Logger::getInstance("tiler.workspace");
 
 void Tiler_workspace::add_tile(Point_3 p0, Point_3 p1, Point_3 p2)
 {
@@ -17,7 +39,7 @@ void Tiler_workspace::add_tile(Point_3 p0, Point_3 p1, Point_3 p2)
   // if it is a contour-to-midslice tile
   if (c0 && c1 && c2 && c0 == c1 && p0.z() > p2.z())
   {
-    LOG4CPLUS_TRACE(logger_tw, "Swapping before tile insert" << pp(p0) << ", " << pp(p2));
+    TILER_TRACE(logger_tw, "Swapping before tile insert" << pp(p0) << ", " << pp(p2));
     std::swap(p0, p2);
   }
 
@@ -37,7 +59,7 @@ void Tiler_workspace::add_tile(Tile_handle t)
   }
 
   Tile& tile = *t;
-  LOG4CPLUS_TRACE(logger_tw, "Inserted tile: " << pp(tile[0]) << ", " << pp(tile[1]) << ", " << pp(tile[2]));
+  TILER_TRACE(logger_tw, "Inserted tile: " << pp(tile[0]) << ", " << pp(tile[1]) << ", " << pp(tile[2]));
 
   _callback->tile_added(*this);
 }
@@ -130,7 +152,6 @@ Number_type Tiler_workspace::z_home_nothrow(const Point_3& p)
 
 Number_type Tiler_workspace::z_home(Tile_handle tile)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("tw.z_home");
 
   Tile& t = *tile;
   int invalid = -1;
@@ -156,10 +177,10 @@ Number_type Tiler_workspace::z_home(Tile_handle tile)
 	found = true;
       }
       else if (!region) {
-	LOG4CPLUS_TRACE(logger, "No region: " + pp_tri(*tile));
+	TILER_TRACE(logger, "No region: " + pp_tri(*tile));
       }
       else {
-	LOG4CPLUS_TRACE(logger, "No z_home: " + pp_tri(*tile));
+	TILER_TRACE(logger, "No z_home: " + pp_tri(*tile));
 	overlapping = i;
       }
     }
@@ -256,7 +277,7 @@ void Tiler_workspace::ensure_z_home(Polyline_2& cut, Number_type home)
 //     if (h.is_CCW(c) && !c->polygon().has_on_negative_side(p))
 //       return z;
 //   }
-//   LOG4CPLUS_ERROR(logger, "Didn't expect to be here: " << pp(p));
+//   TILER_ERROR(logger, "Didn't expect to be here: " << pp(p));
 //   throw logic_error("Didn't expect to be here");
 // }
 
@@ -285,12 +306,12 @@ void Tiler_workspace::ensure_z_home(Polyline_2& cut, Number_type home)
 //   {
 //     Point_2 r((p.x()+q.x())/2, (p.y()+q.y())/2, (p.z()+q.z())/2);
 //     return zhome(r);
-// //     LOG4CPLUS_ERROR(logger, "P and Q are both in two contours: " << pp(p) << " " << pp(q));
+// //     TILER_ERROR(logger, "P and Q are both in two contours: " << pp(p) << " " << pp(q));
 // //     throw logic_error("P and Q are both in two contours");
 //   }
 //   if (p_contours.size() == 1 && q_contours.size() == 1 && p_contours.front() != q_contours.front())
 //   {
-//     LOG4CPLUS_ERROR(logger, "P and Q are both in one contour but have different z values: " << pp(p) << " " << pp(q));
+//     TILER_ERROR(logger, "P and Q are both in one contour but have different z values: " << pp(p) << " " << pp(q));
 //     throw logic_error("P and Q are both in one contour but have different z values: ");
 //   }
 //   if (p_contours.size() == 1)
@@ -298,4 +319,4 @@ void Tiler_workspace::ensure_z_home(Polyline_2& cut, Number_type home)
 //   return q_contours.front();
 // }
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler

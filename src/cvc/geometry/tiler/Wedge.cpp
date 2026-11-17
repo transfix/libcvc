@@ -1,13 +1,35 @@
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
 #include <stdexcept>
 
-#include <CGAL/Direction_2.h>
 
-#include <ContourTiler/Wedge.h>
-#include <ContourTiler/print_utils.h>
-#include <ContourTiler/projection.h>
-#include <ContourTiler/Point_tiling_region.h>
+#include "Wedge.h"
+#include "print_utils.h"
+#include "projection.h"
+#include "Point_tiling_region.h"
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 HWedge Wedge::whitelist(const Wedge& wedge, const Point_3& p)
 { 
@@ -15,7 +37,6 @@ HWedge Wedge::whitelist(const Wedge& wedge, const Point_3& p)
   return HWedge(new Wedge(wedge, whitelisted)); 
 }
 
-typedef CGAL::Direction_2<Kernel> Direction_2;
 
 bool Wedge::contains(const Point_3& point3) const
 {
@@ -53,17 +74,17 @@ bool Wedge::contains(const Segment_3& segment3) const
     return false;
     
   int intersections = 0;
-  CGAL::Object result;
+  Object result;
   Point_2 ipoint;
 
-  result = CGAL::intersection(_ray1, segment);
-  if (CGAL::assign(ipoint, result))
+  result = intersection(_ray1, segment);
+  if (assign(ipoint, result))
   {
     if (!_closed || !is_boundary(ipoint, segment, _ray1))
       ++intersections;
   }
-  result = CGAL::intersection(_ray2, segment);
-  if (CGAL::assign(ipoint, result))
+  result = intersection(_ray2, segment);
+  if (assign(ipoint, result))
   {
     if (!_closed || !is_boundary(ipoint, segment, _ray2))
       ++intersections;
@@ -179,5 +200,5 @@ std::ostream& operator<<(std::ostream& out, const Wedge& wedge)
   return out;
 }
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler
 

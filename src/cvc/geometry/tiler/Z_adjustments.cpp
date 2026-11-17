@@ -1,8 +1,31 @@
-#include <ContourTiler/Z_adjustments.h>
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
+#include "Z_adjustments.h"
 
 #define FIXED_EPSILON 0
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 //--------------------------------------
 // is_legal
@@ -40,8 +63,7 @@ Number_type Z_adjustments<Tile_handle>::epsilon(const Point_3& A, const Point_3&
 #ifdef FIXED_EPSILON
   return _epsilon;
 #else
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("Z_adjustments.epsilon");
-  LOG4CPLUS_TRACE(logger, "A = " << pp(A) << " B = " << pp(B) << " delta = " << delta);
+  TILER_TRACE(logger, "A = " << pp(A) << " B = " << pp(B) << " delta = " << delta);
 
   Number_type d = delta;
   Number_type a = pow(A.y() + B.y(), 2) + pow(A.x() + B.x(), 2) - d*d;
@@ -88,14 +110,14 @@ template <typename Tile_handle>
 void Z_adjustments<Tile_handle>::add(const Point_3& py, const Point_3& pg, int yi, int gi, const Point_3& qy,
 				     Number_type y_z_home, Number_type g_z_home)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("Z_adjustments.add");
 
   if (y_z_home == g_z_home) {
-    LOG4CPLUS_ERROR(logger, " y_z_home = " << y_z_home << " g_z_home = " << g_z_home);
-    throw logic_error("y_z_home == g_z_home");
+    std::stringstream ss;
+    ss << "y_z_home == g_z_home: y_z_home = " << y_z_home << " g_z_home = " << g_z_home;
+    throw logic_error(ss.str());
   }
 
-  LOG4CPLUS_TRACE(logger, "py = " << pp(py) << " pg = " << pp(pg) << 
+  TILER_TRACE(logger, "py = " << pp(py) << " pg = " << pp(pg) << 
 		  " yi = " << yi << " gi = " << gi << " qy = " << pp(qy));
 
   Number_type zmid = (pg.z() + py.z()) / (Number_type) 2.0; // halfway between two z values
@@ -132,8 +154,10 @@ void Z_adjustments<Tile_handle>::add(const Point_3& py, const Point_3& pg, int y
       throw logic_error("overshot green");
     }
     if (ydiff2 != gsign) {
-      LOG4CPLUS_ERROR(logger, "_epsilon = " << _epsilon << " yz = " << yz << " gz = " << gz << " y_z_home = " << y_z_home << " g_z_home = " << g_z_home);
-      throw logic_error("overshot yellow");
+      std::stringstream ss;
+      ss << "overshot yellow: _epsilon = " << _epsilon << " yz = " << yz << " gz = " << gz
+         << " y_z_home = " << y_z_home << " g_z_home = " << g_z_home;
+      throw logic_error(ss.str());
     }
   }
 
@@ -179,8 +203,10 @@ void Z_adjustments<Tile_handle>::add(const Point_3& py, const Point_3& pg, int y
       throw logic_error("overshot green");
     }
     if (ydiff2 != gsign) {
-      LOG4CPLUS_ERROR(logger, "_epsilon = " << _epsilon << " yz = " << yz << " gz = " << gz << " y_z_home = " << y_z_home << " g_z_home = " << g_z_home);
-      throw logic_error("overshot yellow");
+      std::stringstream ss;
+      ss << "overshot yellow: _epsilon = " << _epsilon << " yz = " << yz << " gz = " << gz
+         << " y_z_home = " << y_z_home << " g_z_home = " << g_z_home;
+      throw logic_error(ss.str());
     }
   }
 
@@ -225,7 +251,7 @@ void Z_adjustments<Tile_handle>::add(const Point_3& py, const Point_3& pg, int y
 //       throw logic_error("overshot green");
 //     }
 //     if (ydiff2 != gsign) {
-//       LOG4CPLUS_ERROR(logger, "_epsilon = " << _epsilon << " yz = " << yz << " gz = " << gz << " y_z_home = " << y_z_home << " g_z_home = " << g_z_home);
+//       TILER_ERROR(logger, "_epsilon = " << _epsilon << " yz = " << yz << " gz = " << gz << " y_z_home = " << y_z_home << " g_z_home = " << g_z_home);
 //       throw logic_error("overshot yellow");
 //     }
 //   }
@@ -256,7 +282,7 @@ void Z_adjustments<Tile_handle>::add(const Point_3& py, const Point_3& pg, int y
   Point_3 py_bar(py.x(), py.y(), yz);
 
   if (!is_legal(py, pg, qy, y_z_home, g_z_home)) {
-//     LOG4CPLUS_TRACE(logger, "Not legal.  _epsilon = " << _epsilon << " epsilon = " << e << 
+//     TILER_TRACE(logger, "Not legal.  _epsilon = " << _epsilon << " epsilon = " << e << 
 // 		    " old pg = " << pp(pg) << " new pg = " << pg_bar);
     _adjustments[gi][pg] = pg_bar;
     _adjustments[yi][py] = py_bar;
@@ -269,4 +295,4 @@ void Z_adjustments<Tile_handle>::add(const Point_3& py, const Point_3& pg, int y
 
 template class Z_adjustments<boost::shared_ptr<Triangle> >;
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler

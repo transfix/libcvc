@@ -1,38 +1,33 @@
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
 #ifndef __SWEEP_LINE_VISITORS_H__
 #define __SWEEP_LINE_VISITORS_H__
 
-#include <ContourTiler/common.h>
-#include <ContourTiler/sweep_line.h>
+#include "common.h"
+#include "sweep_line.h"
 
-CONTOURTILER_BEGIN_NAMESPACE
-
-//------------------------------------------------------------------------------
-//------------------------------------------------------------------------------
-class Debug_visitor
-{
-public:
-  Debug_visitor() {}
-  ~Debug_visitor() {}
-
-  bool end_end(const Point_2& p, const Segment_2& a, size_t a_id, const Segment_2& b, size_t b_id)
-  {
-    log4cplus::Logger logger = log4cplus::Logger::getInstance("sweep_line");
-    LOG4CPLUS_INFO(logger, "end-end intersection: " << pp(p) << " " << pp(a) << " " << pp(b));
-    return true;
-  }
-  bool end_int(const Point_2& p, const Segment_2& a, size_t a_id, const Segment_2& b, size_t b_id)
-  {
-    log4cplus::Logger logger = log4cplus::Logger::getInstance("sweep_line");
-    LOG4CPLUS_INFO(logger, "end-int intersection: " << pp(p) << " " << pp(a) << " " << pp(b));
-    return true;
-  }
-  bool int_int(const Point_2& p, const Segment_2& a, size_t a_id, const Segment_2& b, size_t b_id)
-  {
-    log4cplus::Logger logger = log4cplus::Logger::getInstance("sweep_line");
-    LOG4CPLUS_INFO(logger, "int-int intersection: " << pp(p) << " " << pp(a) << " " << pp(b));
-    return true;
-  }
-};
+namespace cvc::tiler {
 
 //------------------------------------------------------------------------------
 //------------------------------------------------------------------------------
@@ -138,7 +133,6 @@ template <typename Intersection_iter>
 void get_interior_only(Intersection_iter begin, Intersection_iter end, 
 		       boost::unordered_map<Segment_2, list<Point_2> >& map)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("sweep_line");
   typedef boost::unordered_map<Segment_2, list<Point_2> > Map;
 
   for (Intersection_iter it = begin; it != end; ++it)
@@ -147,11 +141,11 @@ void get_interior_only(Intersection_iter begin, Intersection_iter end,
     const list<Segment_2>& interior = i.interiors();
     const list<Segment_2>& ends = i.ends();
     typedef list<Segment_2>::const_iterator l_iter;
-//     LOG4CPLUS_TRACE(logger, pp(i.point()) << " Interiors: " << interior.size() << " Ends: " << ends.size());
+//     TILER_TRACE(logger, pp(i.point()) << " Interiors: " << interior.size() << " Ends: " << ends.size());
 //     for (l_iter sit = interior.begin(); sit != interior.end(); ++sit)
-//       LOG4CPLUS_TRACE(logger, "  " << pp(*sit));
+//       TILER_TRACE(logger, "  " << pp(*sit));
 //     for (l_iter sit = ends.begin(); sit != ends.end(); ++sit)
-//       LOG4CPLUS_TRACE(logger, "  " << pp(*sit));
+//       TILER_TRACE(logger, "  " << pp(*sit));
     for (l_iter ii = interior.begin(); ii != interior.end(); ++ii)
       map[*ii].push_back(i.point());
   }
@@ -304,6 +298,6 @@ bool has_intersection(Segment_iter segments_begin0, Segment_iter segments_end0,
   return fv.visitor().has_intersection();
 }
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler
 
 #endif

@@ -1,17 +1,40 @@
-#include <ContourTiler/segment_utils.h>
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
 
-CONTOURTILER_BEGIN_NAMESPACE
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
+#include "segment_utils.h"
+
+namespace cvc::tiler {
 
 Segment_2 lexicographically_ordered(const Segment_2& s)
 {
-  if (CGAL::lexicographically_xy_smaller(s.source(), s.target()))
+  if (lexicographically_xy_smaller(s.source(), s.target()))
     return s;
   return s.opposite();
 }
 
 Segment_3 lexicographically_ordered(const Segment_3& s)
 {
-  if (CGAL::lexicographically_xyz_smaller(s.source(), s.target()))
+  if (lexicographically_xyz_smaller(s.source(), s.target()))
     return s;
   return s.opposite();
 }
@@ -36,4 +59,4 @@ Segment_2 project_2(const Segment_3& s)
   return Segment_2(s.source().point_2(), s.target().point_2());
 }
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler

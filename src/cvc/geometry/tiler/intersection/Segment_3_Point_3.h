@@ -1,56 +1,62 @@
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
 #ifndef CEP_INTERSECTION_SEGMENT_3_POINT_3_H
 #define CEP_INTERSECTION_SEGMENT_3_POINT_3_H
 
-#include <CGAL/Object.h>
-#include <CGAL/Segment_3.h>
-#include <CGAL/Point_3.h>
-#include <CGAL/predicates_on_points_3.h>
+#include "../common.h"
 
-
-namespace CEP {
+namespace cvc::tiler { namespace CEP {
   namespace intersection {
 
-
-    //     using CGAL::Segment_3;
-    //     using CGAL::Point_3;
-
-
-
-    template <class R>
     inline
     bool
-    do_intersect( const CGAL::Segment_3<R>& s, 
-		  const CGAL::Point_3<R>& p )
+    do_intersect( const Segment_3& s, 
+		  const Point_3& p )
     {
       return s.has_on(p);
     }
 
-
-
-    template <class R>
     inline
-    CGAL::Object
-    intersection( const CGAL::Segment_3<R>& s, 
-		  const CGAL::Point_3<R>& p )
+    Object
+    intersection( const Segment_3& s, 
+		  const Point_3& p )
     {
       if ( CEP::intersection::do_intersect(s,p) )
-        return CGAL::make_object(p);
-      return CGAL::Object();
+        return make_object(p);
+      return Object();
     }
 
-
-    template <class R>
     inline 
     bool
-    collinear( const CGAL::Segment_3<R>& s, 
-	       const CGAL::Point_3<R>& p )
+    collinear( const Segment_3& s, 
+	       const Point_3& p )
     {
-      //     return CGAL::collinear( s.source(), s.target(), p );
-      typedef typename R::Collinear_3 fo;
-      return fo()( s.source(), s.target(), p );
+      return tiler::collinear( s.source(), s.target(), p );
     }
 
   }
 }
+} // namespace cvc::tiler
 
 #endif

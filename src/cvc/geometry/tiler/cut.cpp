@@ -1,10 +1,33 @@
-#include <ContourTiler/cut.h>
-#include <ContourTiler/triangle_utils.h>
-#include <ContourTiler/print_utils.h>
-#include <ContourTiler/segment_utils.h>
-#include <ContourTiler/Distance_functor.h>
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
 
-CONTOURTILER_BEGIN_NAMESPACE
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
+#include "cut.h"
+#include "triangle_utils.h"
+#include "print_utils.h"
+#include "segment_utils.h"
+#include "Distance_functor.h"
+
+namespace cvc::tiler {
 
 using namespace std;
 
@@ -16,7 +39,6 @@ using namespace std;
 //------------------------------------------------------------------------------
 Polygon_2 make_poly(const Triangle& triangle, const boost::unordered_map<Segment_3_, boost::unordered_set<Point_3> >& seg2points)
 {
-  log4cplus::Logger cut_logger = log4cplus::Logger::getInstance("intersection.cut.make_poly");
 
   Polygon_2 poly;
 
@@ -33,11 +55,11 @@ Polygon_2 make_poly(const Triangle& triangle, const boost::unordered_map<Segment
     if (it != seg2points.end())
     {
       boost::unordered_set<Point_3> seg_pts = it->second;
-      LOG4CPLUS_TRACE(cut_logger, "  Augmenting tile with points.  Segment = " << pp(seg.segment()));
+      TILER_TRACE(cut_logger, "  Augmenting tile with points.  Segment = " << pp(seg.segment()));
       seg_pts.erase(seg.segment().source());
       seg_pts.erase(seg.segment().target());
       for (boost::unordered_set<Point_3>::iterator it = seg_pts.begin(); it != seg_pts.end(); ++it)
-	LOG4CPLUS_TRACE(cut_logger, "    Point: " << pp(*it));
+	TILER_TRACE(cut_logger, "    Point: " << pp(*it));
       points.insert(points.end(), seg_pts.begin(), seg_pts.end());
     }
 
@@ -212,7 +234,6 @@ Polyline_iter find_first_on(Polyline_iter begin, Polyline_iter end, const Polygo
 template <typename Out_iter>
 void/*Polyline_2*/ trim(const Polygon_2& p, const Polyline_2& c, Out_iter cuts)
 {
-  log4cplus::Logger cut_logger = log4cplus::Logger::getInstance("intersection.cut.trim");
 
   typedef Polygon_2::Vertex_const_iterator Polygon_iter;
   typedef Polyline_2::const_iterator Polyline_2_iter;
@@ -230,7 +251,7 @@ void/*Polyline_2*/ trim(const Polygon_2& p, const Polyline_2& c, Out_iter cuts)
 //       throw logic_error("Cut has intermediate adjacencies");
 
       *cuts++ = Polyline_2(beg, end);
-      LOG4CPLUS_TRACE(cut_logger, "trim adding cut: " << pp(Polyline_2(beg, end)));
+      TILER_TRACE(cut_logger, "trim adding cut: " << pp(Polyline_2(beg, end)));
     }
     beg = find_last_adj(end, c.end(), p);
   }
@@ -262,7 +283,6 @@ void/*Polyline_2*/ trim(const Polygon_2& p, const Polyline_2& c, Out_iter cuts)
 // vertices, then switch direction of cut.
 Polyline_2 order(const Polygon_2& p, Polyline_2 cut)
 {
-  log4cplus::Logger cut_logger = log4cplus::Logger::getInstance("intersection.cut.order");
 
   typedef Polygon_2::Vertex_iterator Iter;
   Iter source = find(p.vertices_begin(), p.vertices_end(), cut.source());
@@ -277,7 +297,7 @@ Polyline_2 order(const Polygon_2& p, Polyline_2 cut)
   {
     cut = Polyline_2(cut.rbegin(), cut.rend());
     swap(source, target);
-    LOG4CPLUS_TRACE(cut_logger, "Swapping source and target");
+    TILER_TRACE(cut_logger, "Swapping source and target");
   }
 
   return cut;
@@ -293,9 +313,8 @@ Polyline_2 order(const Polygon_2& p, Polyline_2 cut)
 //------------------------------------------------------------------------------
 pair<Polygon_2, Polygon_2> cut_polygon_with_polyline(const Polygon_2& p, const Polyline_2& c)
 {
-  log4cplus::Logger cut_logger = log4cplus::Logger::getInstance("intersection.cut.cut_polygon_with_polyline");
 
-  LOG4CPLUS_TRACE(cut_logger, "Cutting polygon " << pp(p) << " with cut " << pp(c));
+  TILER_TRACE(cut_logger, "Cutting polygon " << pp(p) << " with cut " << pp(c));
 
   typedef Polygon_2::Vertex_iterator Iter;
   typedef Polygon_2::Vertex_circulator Circulator;
@@ -308,7 +327,7 @@ pair<Polygon_2, Polygon_2> cut_polygon_with_polyline(const Polygon_2& p, const P
 //   if (cut != *trimmed.begin())
 //     throw logic_error("Cut has not been trimmed");
 
-  LOG4CPLUS_TRACE(cut_logger, "After trimming: " << pp(cut));
+  TILER_TRACE(cut_logger, "After trimming: " << pp(cut));
 
   if (cut.size() > 1)
   {
@@ -324,9 +343,9 @@ pair<Polygon_2, Polygon_2> cut_polygon_with_polyline(const Polygon_2& p, const P
     ret1.insert(ret1.vertices_end(), cut.rbegin(), cut.rend());
   }
 
-  LOG4CPLUS_TRACE(cut_logger, "  Results: ");
-  LOG4CPLUS_TRACE(cut_logger, "    " << pp(ret0));
-  LOG4CPLUS_TRACE(cut_logger, "    " << pp(ret1));
+  TILER_TRACE(cut_logger, "  Results: ");
+  TILER_TRACE(cut_logger, "    " << pp(ret0));
+  TILER_TRACE(cut_logger, "    " << pp(ret1));
 
   return make_pair(ret0, ret1);
 }
@@ -378,9 +397,8 @@ void simplify(const Polygon_2& p, Out_iter sub_polygons)
 template <typename Polyline_iter, typename Polygon_iter>
 void cut_polygon_with_polylines(const Polygon_2& p, Polyline_iter cuts_begin, Polyline_iter cuts_end, Polygon_iter polys)
 {
-  log4cplus::Logger cut_logger = log4cplus::Logger::getInstance("intersection.cut.cut_polygon_with_polylines");
 
-  LOG4CPLUS_TRACE(cut_logger, "Cutting " << pp(p) << " into polygons");
+  TILER_TRACE(cut_logger, "Cutting " << pp(p) << " into polygons");
   
   list<Polygon_2> sum;
   sum.push_back(p);
@@ -390,23 +408,23 @@ void cut_polygon_with_polylines(const Polygon_2& p, Polyline_iter cuts_begin, Po
   {
     Polyline_2 c = cuts.front();
     cuts.pop_front();
-    LOG4CPLUS_TRACE(cut_logger, "  Cut: " << pp(c));
+    TILER_TRACE(cut_logger, "  Cut: " << pp(c));
     if (c.size() > 1)
     {
       for (list<Polygon_2>::iterator p_it = sum.begin(); p_it != sum.end(); ++p_it)
       {
 	const Polygon_2& polygon = *p_it;
-	LOG4CPLUS_TRACE(cut_logger, "  Polygon: " << pp(polygon));
+	TILER_TRACE(cut_logger, "  Polygon: " << pp(polygon));
 	if (find(p_it->vertices_begin(), p_it->vertices_end(), c.source()) != p_it->vertices_end() &&
 	    find(p_it->vertices_begin(), p_it->vertices_end(), c.target()) != p_it->vertices_end())
 	{
 	  vector<Polyline_2> subcuts;
 	  trim(polygon, c, back_inserter(subcuts));
-	  LOG4CPLUS_TRACE(cut_logger, "Number of cuts returned from trim(): " << subcuts.size());
+	  TILER_TRACE(cut_logger, "Number of cuts returned from trim(): " << subcuts.size());
 	  for (int i = 1; i < subcuts.size(); ++i)
 	  {
 	    cuts.push_back(subcuts[i]);
-	    LOG4CPLUS_TRACE(cut_logger, "Adding subcut: " << pp(subcuts[i]));
+	    TILER_TRACE(cut_logger, "Adding subcut: " << pp(subcuts[i]));
 	  }
 
 	  if (subcuts.size() > 0)
@@ -438,15 +456,15 @@ void cut_polygon_with_polylines(const Polygon_2& p, Polyline_iter cuts_begin, Po
 
 bool xy_close(const Point_3& p1, const Point_3& p2)
 {
-  return CGAL::abs(p1.x()-p2.x()) < 0.000001 && CGAL::abs(p1.y()-p2.y()) < 0.000001;
+  return std::abs(p1.x()-p2.x()) < 0.000001 && std::abs(p1.y()-p2.y()) < 0.000001;
     
 }
 
 bool xyz_close(const Point_3& p1, const Point_3& p2)
 {
-  return CGAL::abs(p1.x()-p2.x()) < 0.000001 && 
-    CGAL::abs(p1.y()-p2.y()) < 0.000001 &&
-    CGAL::abs(p1.z()-p2.z()) < 0.000001;
+  return std::abs(p1.x()-p2.x()) < 0.000001 && 
+    std::abs(p1.y()-p2.y()) < 0.000001 &&
+    std::abs(p1.z()-p2.z()) < 0.000001;
     
 }
 
@@ -484,9 +502,8 @@ void cut_tile_with_polylines(Tile_handle tile,
 		       const Intersections<Tile_handle>& ints, int i,
 		       boost::unordered_map<Point_3, boost::unordered_set<Segment_3_undirected> >& point2edges)
 {
-  log4cplus::Logger cut_logger = log4cplus::Logger::getInstance("intersection.cut.cut_tile_with_polylines");
 
-  LOG4CPLUS_TRACE(cut_logger, "Cutting tile: " << pp_tri(*tile));
+  TILER_TRACE(cut_logger, "Cutting tile: " << pp_tri(*tile));
 
   // First get all the induced points from the cuts and make a polygon out of
   // the tile
@@ -495,14 +512,14 @@ void cut_tile_with_polylines(Tile_handle tile,
   {
     const Polyline_2& cut = *it;
 
-    LOG4CPLUS_TRACE(cut_logger, "Updating polygon with cut = " << pp(cut));
+    TILER_TRACE(cut_logger, "Updating polygon with cut = " << pp(cut));
 
     for (Polyline_2::const_iterator p_it = cut.begin(); p_it != cut.end(); ++p_it)
     {
       const Point_2& p = *p_it;
       if (ints.has_point(p, i) && !xyz_close(p, *tile))
       {
-	LOG4CPLUS_TRACE(cut_logger, "  Adding point " << pp(p));
+	TILER_TRACE(cut_logger, "  Adding point " << pp(p));
 	pt2seg[p] = *ints.edges_begin(p, i);
 	point2edges[p].insert(ints.edges_begin(p, i), ints.edges_end(p, i));
       }
@@ -530,9 +547,8 @@ void cut_tile_with_polylines(Tile_handle tile,
 template <typename Polyline_iter, typename Triangle_iter>
 void cut_into_triangles(const Polygon_2& p, Polyline_iter cuts_begin, Polyline_iter cuts_end, Triangle_iter triangles)
 {
-  log4cplus::Logger cut_logger = log4cplus::Logger::getInstance("intersection.cut.cut_into_triangles");
 
-  LOG4CPLUS_TRACE(cut_logger, "Cutting " << pp(p) << " into triangles");
+  TILER_TRACE(cut_logger, "Cutting " << pp(p) << " into triangles");
 
   list<Polygon_2> polygons;
   cut_polygon_with_polylines(p, cuts_begin, cuts_end, back_inserter(polygons));
@@ -543,7 +559,7 @@ void cut_into_triangles(const Polygon_2& p, Polyline_iter cuts_begin, Polyline_i
       triangulate_safe(*it, triangles, map);
     }
     catch (logic_error& e) {
-      LOG4CPLUS_WARN(cut_logger, "Failed to cut " << pp(p) << " into triangles: " << e.what());
+      TILER_DEBUG(cut_logger, "Failed to cut " << pp(p) << " into triangles: " << e.what());
     }
   }
 }
@@ -586,8 +602,7 @@ std::pair<Triangle, Triangle> decompose_triangle(const Triangle& triangle,
 						 const Segment_3& edge,
 						 const Point_3& point)
 {
-  log4cplus::Logger cut_logger = log4cplus::Logger::getInstance("intersection.cut.decompose_triangle");
-  LOG4CPLUS_TRACE(cut_logger, "Decomposing " << pp_tri(triangle) << " into triangles");
+  TILER_TRACE(cut_logger, "Decomposing " << pp_tri(triangle) << " into triangles");
   int e = index(edge, triangle);
   int i0 = e;
   int i1 = next_idx(i0);
@@ -605,8 +620,7 @@ void decompose_triangle(const Triangle& triangle,
 			const boost::unordered_map<Segment_3_undirected, list<Point_3> >& edge2points,
 			Out_iter output)
 {
-  log4cplus::Logger cut_logger = log4cplus::Logger::getInstance("intersection.cut.decompose_triangle");
-  LOG4CPLUS_TRACE(cut_logger, "Decomposing " << pp_tri(triangle) << " into triangles");
+  TILER_TRACE(cut_logger, "Decomposing " << pp_tri(triangle) << " into triangles");
 
   int edge_idx = -1;
   for (int i = 0; i < 3; ++i) {
@@ -700,4 +714,4 @@ void cut_into_triangles(Tile_handle_int tile,
 			list<Polyline_2>::iterator cuts_begin, list<Polyline_2>::iterator cuts_end,
 			back_insert_iterator<list<Tile_handle_int> > new_tiles,
 			const Intersections<Tile_handle_int>& ints, int i);
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler

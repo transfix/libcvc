@@ -1,3 +1,26 @@
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
 #ifndef __POLYGON_UTILS_H__
 #define __POLYGON_UTILS_H__
 
@@ -6,21 +29,13 @@
 #include <boost/unordered_map.hpp>
 #include <boost/unordered_set.hpp>
 
-#include <CGAL/Cartesian.h>
-#include <CGAL/Boolean_set_operations_2.h>
-#include <CGAL/Polygon_2.h>
-#include <CGAL/Polygon_with_holes_2.h>
-#include <CGAL/Bbox_2.h>
-#include <CGAL/Arr_polyline_traits_2.h>
-#include <CGAL/Arr_segment_traits_2.h>
-#include <CGAL/Sweep_line_2_algorithms.h>
 
-#include <ContourTiler/common.h>
-#include <ContourTiler/Right_enum.h>
-#include <ContourTiler/Statistics.h>
-#include <ContourTiler/Segment_3_undirected.h>
+#include "common.h"
+#include "Right_enum.h"
+#include "Statistics.h"
+#include "Segment_3_undirected.h"
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 struct Polygon_relation_def
 {
@@ -60,7 +75,6 @@ boost::unordered_set<Point_2> get_boundary_intersections(const std::list<Segment
 template <typename PolyIterator, typename OutputIterator>
 void get_boundary_intersections(PolyIterator begin, PolyIterator end, OutputIterator intersecting_points, bool report_endpoints)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("boundary_intersections");
 
   std::list<Segment_2> segments;
   for (PolyIterator it = begin; it != end; ++it)
@@ -119,13 +133,13 @@ Polygon_2 super_polygon(PolyIterator start, PolyIterator end)
 //     return Polygon_2();
 
 //   // First, find the bounding box of all polygons and make a virtual contour
-//   CGAL::Bbox_2 bb = start->bbox();
+//   Bbox_2 bb = start->bbox();
 //   for (PolyIterator it = start; it != end; ++it)
 //   {
 //     bb = bb + it->bbox();
 //   }
 //   // make the bounding box just a little bigger
-//   bb = bb + CGAL::Bbox_2(bb.xmin() - 0.1, bb.ymin() - 0.1, bb.xmax() + 0.1, bb.ymax() + 0.1);
+//   bb = bb + Bbox_2(bb.xmin() - 0.1, bb.ymin() - 0.1, bb.xmax() + 0.1, bb.ymax() + 0.1);
 //   Point_2 points[] = { Point_2(bb.xmin(), bb.ymin(), 0), 
 // 		       Point_2(bb.xmax(), bb.ymin(), 0), 
 // 		       Point_2(bb.xmax(), bb.ymax(), 0), 
@@ -135,7 +149,7 @@ Polygon_2 super_polygon(PolyIterator start, PolyIterator end)
   // can fit in the number type.
   Number_type min_val = -numeric_limits<Number_type>::max()/8;
   Number_type max_val = numeric_limits<Number_type>::max()/8;
-  CGAL::Bbox_2 bb(min_val, min_val, max_val, max_val);
+  Bbox_2 bb(min_val, min_val, max_val, max_val);
   Point_2 points[] = { Point_2(bb.xmin(), bb.ymin(), 0), 
 		       Point_2(bb.xmax(), bb.ymin(), 0), 
 		       Point_2(bb.xmax(), bb.ymax(), 0), 
@@ -150,19 +164,11 @@ Polygon_2::Vertex_const_iterator next(Polygon_2::Vertex_const_iterator iter, con
 // Point_3 rotate_x(const Point_3& p, Number_type q);
 // Polygon_2 rotate_x(const Polygon_2& p, Number_type q);
 
-template <typename Polygon, typename Triangle_iter>
-void triangulate(const Polygon& polygon, Triangle_iter triangles,
-		 const boost::unordered_map<Point_3, boost::unordered_set<Segment_3_undirected> >& point2edges);
 
 template <typename Triangle_iter>
 void triangulate_safe(const Polygon_2& P, Triangle_iter triangles,
 		      const boost::unordered_map<Point_3, boost::unordered_set<Segment_3_undirected> >& point2edges);
 
-template <typename Cut_iter, typename Out_iter>
-void triangulate(const Polygon_2& polygon, 
-		 Cut_iter cuts_begin, Cut_iter cuts_end,
-		 const boost::unordered_map<Point_3, boost::unordered_set<Segment_3_undirected> >& point2edges,
-		 Out_iter triangles);
 
 /// If the triangle formed by three consecutive points has an area
 /// less than or equal to epsilon then the points are considered
@@ -210,6 +216,6 @@ Polygon_2 adjust_nonsimple_polygon(const Polygon_2& P, const Number_type delta, 
 
 Polygon_2 remove_duplicate_vertices(const Polygon_2& P);
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler
 
 #endif

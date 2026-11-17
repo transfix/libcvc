@@ -1,13 +1,35 @@
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
 #ifndef __TRIANGLE_UTILS_H__
 #define __TRIANGLE_UTILS_H__
 
 #include <sstream>
 
-#include <ContourTiler/common.h>
-#include <CGAL/constructions/kernel_ftC3.h>
-#include <ContourTiler/Segment_3_undirected.h>
+#include "common.h"
+#include "Segment_3_undirected.h"
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 class Triangle
 {
@@ -109,7 +131,6 @@ std::string tri_pp(const Segment_3& segment);
 template <typename Triangle>
 int other_edge(const Segment_3& e, const Point_3& v, const Triangle& t)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("intersection.triangle_utils.other_edge");
 
   int ei = index(e, t);
   int vi = index(v, t);
@@ -117,10 +138,8 @@ int other_edge(const Segment_3& e, const Point_3& v, const Triangle& t)
     return prev_idx(ei);
   if (vi != next_idx(ei))
   {
-    LOG4CPLUS_ERROR(logger, "Edge and vertex are not adjacent.");
-    LOG4CPLUS_ERROR(logger, "  Edge (" << ei << "): " << tri_pp(e));
-    LOG4CPLUS_ERROR(logger, "  Vertex (" << vi << "): " << tri_pp(v));
-    throw logic_error("edge and vertex are not adjacent");
+    throw logic_error("edge and vertex are not adjacent: edge (" + std::to_string(ei) + "): " +
+                      tri_pp(e) + ", vertex (" + std::to_string(vi) + "): " + tri_pp(v));
   }
   return next_idx(ei);
 }
@@ -134,7 +153,6 @@ int other_edge(const Segment_3_undirected& e, const Point_3& v, const Triangle& 
 template <typename Triangle>
 int other_vertex(const Point_3& v, const Segment_3& e, const Triangle& t)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("intersection.triangle_utils.other_vertex");
 
   int ei = index(e, t);
   int vi = index(v, t);
@@ -142,10 +160,8 @@ int other_vertex(const Point_3& v, const Segment_3& e, const Triangle& t)
     return next_idx(vi);
   if (vi != next_idx(ei))
   {
-    LOG4CPLUS_ERROR(logger, "Edge and vertex are not adjacent.");
-    LOG4CPLUS_ERROR(logger, "  Edge (" << ei << "): " << tri_pp(e));
-    LOG4CPLUS_ERROR(logger, "  Vertex (" << vi << "): " << tri_pp(v));
-    throw logic_error("edge and vertex are not adjacent");
+    throw logic_error("edge and vertex are not adjacent: edge (" + std::to_string(ei) + "): " +
+                      tri_pp(e) + ", vertex (" + std::to_string(vi) + "): " + tri_pp(v));
   }
   return prev_idx(vi);
 }
@@ -210,16 +226,18 @@ template <typename Triangle>
 Number_type get_z(const Triangle& t, const Point_2& point)
 {
   Point_3 p = t[0], q = t[1], r = t[2];
-  Number_type a, b, c, d;
-  CGAL::plane_from_pointsC3(p.x(), p.y(), p.z(),
-			    q.x(), q.y(), q.z(),
-			    r.x(), r.y(), r.z(),
-			    a, b, c, d);
+  // The plane through p, q, r: its normal (p - r) x (q - r).
+  const Number_type rpx = p.x() - r.x(), rpy = p.y() - r.y(), rpz = p.z() - r.z();
+  const Number_type rqx = q.x() - r.x(), rqy = q.y() - r.y(), rqz = q.z() - r.z();
+  const Number_type a = rpy * rqz - rqy * rpz;
+  const Number_type b = rpz * rqx - rqz * rpx;
+  const Number_type c = rpx * rqy - rqx * rpy;
+  const Number_type d = -a * r.x() - b * r.y() - c * r.z();
 
   // ax + by + cz + d = 0
   return (a * point.x() + b * point.y() + d) / -c;
 }
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler
 
 #endif

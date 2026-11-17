@@ -1,30 +1,53 @@
-#include <ContourTiler/intersection.h>
-#include <ContourTiler/common.h>
-#include <list>
-#include <ContourTiler/triangle_utils.h>
-#include <ContourTiler/print_utils.h>
-#include <ContourTiler/segment_utils.h>
-#include <ContourTiler/XY_equal_predicate.h>
-#include <ContourTiler/sweep_line_visitors.h>
-#include <ContourTiler/cut.h>
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
 
-CONTOURTILER_BEGIN_NAMESPACE
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
+#include "intersection.h"
+#include "common.h"
+#include <list>
+#include "triangle_utils.h"
+#include "print_utils.h"
+#include "segment_utils.h"
+#include "XY_equal_predicate.h"
+#include "sweep_line_visitors.h"
+#include "cut.h"
+
+namespace cvc::tiler {
 
 using namespace std;
 
 template <typename Iter>
-void parameter_dump(log4cplus::Logger& logger, Iter begin, Iter end)
+void parameter_dump(Logger& logger, Iter begin, Iter end)
 {
   for (Iter it = begin; it != end; ++it)
   {
     string name = *it;
     string value = *(++it);
     if (name != "")
-      LOG4CPLUS_DEBUG(logger, "  " << name << " = " << value);
+      TILER_DEBUG(logger, "  " << name << " = " << value);
   }
 }
 
-void parameter_dump(log4cplus::Logger& logger, 
+void parameter_dump(Logger& logger, 
 		    const string& n1, const string& p1, const string& n2, const string& p2,
 		    const string& n3, const string& p3, const string& n4, const string& p4,
 		    const string& n5, const string& p5, const string& n6, const string& p6,
@@ -35,7 +58,7 @@ void parameter_dump(log4cplus::Logger& logger,
   parameter_dump(logger, values, values+18);
 }
 
-void parameter_dump(log4cplus::Logger& logger, 
+void parameter_dump(Logger& logger, 
 		    const string& n1, const string& p1, const string& n2, const string& p2,
 		    const string& n3, const string& p3, const string& n4, const string& p4,
 		    const string& n5, const string& p5, const string& n6, const string& p6,
@@ -45,7 +68,7 @@ void parameter_dump(log4cplus::Logger& logger,
   parameter_dump(logger, values, values+16);
 }
 
-void parameter_dump(log4cplus::Logger& logger, 
+void parameter_dump(Logger& logger, 
 		    const string& n1, const string& p1, const string& n2, const string& p2,
 		    const string& n3, const string& p3, const string& n4, const string& p4,
 		    const string& n5, const string& p5, const string& n6, const string& p6,
@@ -55,7 +78,7 @@ void parameter_dump(log4cplus::Logger& logger,
   parameter_dump(logger, values, values+14);
 }
 
-void parameter_dump(log4cplus::Logger& logger, 
+void parameter_dump(Logger& logger, 
 		    const string& n1, const string& p1, const string& n2, const string& p2,
 		    const string& n3, const string& p3, const string& n4, const string& p4,
 		    const string& n5, const string& p5, const string& n6, const string& p6)
@@ -64,7 +87,7 @@ void parameter_dump(log4cplus::Logger& logger,
   parameter_dump(logger, values, values+12);
 }
 
-void parameter_dump(log4cplus::Logger& logger, 
+void parameter_dump(Logger& logger, 
 		    const string& n1, const string& p1, const string& n2, const string& p2,
 		    const string& n3, const string& p3, const string& n4, const string& p4,
 		    const string& n5, const string& p5)
@@ -184,11 +207,11 @@ void remove_intersections(TW_handle tw_yellow,
 			  Out_iter new_yellow, Out_iter new_green, Number_type epsilon,
 			  boost::unordered_map<Segment_3_undirected, list<Point_3> >& edge2points)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("intersection.multitiler");
+  Logger logger = tw_yellow->logger("tiler.intersection");
 
   typedef typename iterator_traits<Tile_iter>::value_type Tile_handle;
 
-  LOG4CPLUS_TRACE(logger, "removing intersections; home_z = " << yz << " " << gz);
+  TILER_TRACE(logger, "removing intersections; home_z = " << yz << " " << gz);
   Z_adjustments<Tile_handle> z_adjustments(yz, gz, epsilon);
   Intersections<Tile_handle> ints = get_intersections(tw_yellow, tw_green, yellow_begin, yellow_end, green_begin, green_end, z_adjustments);
 
@@ -220,12 +243,12 @@ void remove_intersections(TW_handle tw_yellow,
     int i = ints.tile2idx[tile];
     new_tiles[i].remove(tile);
 
-    LOG4CPLUS_TRACE(logger, "Cutting tile for component " << i << ": " << pp_tri(*tile));
+    TILER_TRACE(logger, "Cutting tile for component " << i << ": " << pp_tri(*tile));
 
     // debug
-    LOG4CPLUS_TRACE(logger, "  Cuts:");
+    TILER_TRACE(logger, "  Cuts:");
     for (boost::unordered_set<Polyline_2>::const_iterator c_it = c.begin(); c_it != c.end(); ++c_it) {
-      LOG4CPLUS_TRACE(logger, "   " << pp(*c_it));
+      TILER_TRACE(logger, "   " << pp(*c_it));
     }
 
     typedef boost::unordered_set<Segment_3_undirected> EdgeSet;
@@ -254,16 +277,16 @@ void remove_intersections(TW_handle tw_yellow,
       Polygon_2& p = *p_it;
       Number_type z_home = tws[i]->z_home(p.vertices_begin(), p.vertices_end());
 
-      LOG4CPLUS_TRACE(logger, "Polygon to triangulate for component " << i << ": " << pp(p));
+      TILER_TRACE(logger, "Polygon to triangulate for component " << i << ": " << pp(p));
 //       if (!p.is_simple()) {
-// 	LOG4CPLUS_ERROR(logger, "  Polygon is not simple");
+// 	TILER_ERROR(logger, "  Polygon is not simple");
 //       }
       list<Triangle> nt;
       try {
 	triangulate_safe(p, back_inserter(nt), point2edges);
       }
       catch (logic_error& e) {
-	LOG4CPLUS_WARN(logger, "Failed to cut " << pp(p) << " into triangles: " << e.what());
+	TILER_WARN(logger, "Failed to cut " << pp(p) << " into triangles: " << e.what());
       }
       for (list<Triangle>::iterator t_it = nt.begin(); t_it != nt.end(); ++t_it)
       {
@@ -277,7 +300,7 @@ void remove_intersections(TW_handle tw_yellow,
 	  tws[i]->set_z_home(vertex, z_home);
 	}
 
-	LOG4CPLUS_TRACE(logger, "Final tile for component " << i << ": " << pp_tri(*t));
+	TILER_TRACE(logger, "Final tile for component " << i << ": " << pp_tri(*t));
 	new_tiles[i].push_back(t);
       }
     }
@@ -296,7 +319,7 @@ void remove_intersections(TW_handle tw_yellow,
     ++new_green;
     total_num_tiles++;
   }
-//   LOG4CPLUS_DEBUG(logger, "Final total number of tiles: " << total_num_tiles);
+//   TILER_DEBUG(logger, "Final total number of tiles: " << total_num_tiles);
 }
 
 
@@ -310,13 +333,14 @@ get_intersections(TW_handle tw_yellow, TW_handle tw_green,
 		  Tile_iter ybegin, Tile_iter yend, Tile_iter gbegin, Tile_iter gend, 
 		  Z_adjustments<typename std::iterator_traits<Tile_iter>::value_type>& z_adjustments)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("intersection.get_intersections");
+  Logger logger = tw_yellow->logger("tiler.intersection");
 
   typedef typename iterator_traits<Tile_iter>::value_type Tile_handle;
   typedef boost::unordered_set<Tile_handle>               Tile_set;
   typedef boost::unordered_set<Segment_3_>                Edge_set;
 
   Intersections<Tile_handle> ret;
+  ret.set_logger(logger);
   Tile_iter begin[] = { ybegin, gbegin };
   Tile_iter end[] = { yend, gend };
   Edge_set edge_set[2];
@@ -377,7 +401,7 @@ get_intersections(TW_handle tw_yellow, TW_handle tw_green,
 
       // edge0 and edge1 intersect at points p0 and p1
       if (!xy_equal(p[0], p[1])) {
-	LOG4CPLUS_WARN(logger, "Intersection points are not xy-equal: " << pp(p[0]) << " " << pp(p[1]));
+	TILER_WARN(logger, "Intersection points are not xy-equal: " << pp(p[0]) << " " << pp(p[1]));
 	throw logic_error("Intersection points are not xy-equal");
       }
 
@@ -400,8 +424,8 @@ get_intersections(TW_handle tw_yellow, TW_handle tw_green,
       Number_type y_z_home = tw_yellow->z_home(ytile);
       Number_type g_z_home = tw_green->z_home(gtile);
       if (y_z_home == g_z_home) {
-	LOG4CPLUS_ERROR(logger, " y_z_home = " << y_z_home << " g_z_home = " << g_z_home);
-	LOG4CPLUS_ERROR(logger, "tiles: " << pp_tri(*ytile) << " " << pp_tri(*gtile));
+	TILER_ERROR(logger, " y_z_home = " << y_z_home << " g_z_home = " << g_z_home);
+	TILER_ERROR(logger, "tiles: " << pp_tri(*ytile) << " " << pp_tri(*gtile));
 	Number_type ty_z_home = tw_yellow->z_home(ytile);
 	Number_type tg_z_home = tw_green->z_home(gtile);
 	throw logic_error("y_z_home == g_z_home");
@@ -420,7 +444,7 @@ get_intersections(TW_handle tw_yellow, TW_handle tw_green,
 
       bool intersects_3d = !z_adjustments.is_legal(py, pg, qy, y_z_home, g_z_home);
       if (intersects_3d) {
-	LOG4CPLUS_TRACE(logger, "Intersection (3d): " << pp(p[yi]) << " " << pp(p[gi]) << " "
+	TILER_TRACE(logger, "Intersection (3d): " << pp(p[yi]) << " " << pp(p[gi]) << " "
 			<< y_z_home << " " << g_z_home);
 	temp.insert(p[0]);
 
@@ -428,14 +452,14 @@ get_intersections(TW_handle tw_yellow, TW_handle tw_green,
 	++num_intersections;
       }
       else {
-	LOG4CPLUS_TRACE(logger, "Intersection (2d): " << pp(p[0]) << " " << pp(p[1]));
+	TILER_TRACE(logger, "Intersection (2d): " << pp(p[0]) << " " << pp(p[1]));
       }
 
       // Associate each 2D point (xy_equal(p[0], p[1]) == true) with the two
       // edges forming the intersection.
       for (int i = 0; i < 2; ++i) {
 	ret.insert(p[i], segments[i], p[1-i], i, tws[i]->z_home(*(tiles[i].begin())));
-	LOG4CPLUS_TRACE(logger, "  Segment: " << pp(segments[i]));
+	TILER_TRACE(logger, "  Segment: " << pp(segments[i]));
       }
     }
   }
@@ -454,13 +478,13 @@ get_intersections(TW_handle tw_yellow, TW_handle tw_green,
 	for (Tile_iter g_it = begin[tgi]; g_it != end[tgi]; ++g_it)
 	{
 	  Tile_handle gt = *g_it;
-	  CGAL::Triangle_2<Kernel> gtri((*gt)[0], (*gt)[1], (*gt)[2]);
-	  if (gtri.orientation() == CGAL::CLOCKWISE)
+	  Triangle_2 gtri((*gt)[0], (*gt)[1], (*gt)[2]);
+	  if (gtri.orientation() == CLOCKWISE)
 	    gtri = gtri.opposite();
 	  if (gtri.has_on_positive_side(yv))
 	  {
 	    Point_3 pg = Point_3(yv.x(), yv.y(), get_z(*gt, yv));
-	    LOG4CPLUS_TRACE(logger, "Testing for inside intersection yv: " << pp(yv) << " pg: " << pp(pg) << " gt: " << pp_tri(*gt));
+	    TILER_TRACE(logger, "Testing for inside intersection yv: " << pp(yv) << " pg: " << pp(pg) << " gt: " << pp_tri(*gt));
 
 	    Point_3 py = yv;
 	    Number_type y_z_home = tws[tyi]->z_home(yt);
@@ -484,7 +508,7 @@ get_intersections(TW_handle tw_yellow, TW_handle tw_green,
 	      gtiles.push_back(gt);
 
 	      z_adjustments.add(py, pg, tyi, tgi, qy, ytiles.begin(), ytiles.end(), gtiles.begin(), gtiles.end(), y_z_home, g_z_home);
-	      LOG4CPLUS_TRACE(logger, "Intersection (3d - inside): " << pp(py) << " " << pp(pg) << " " << y_z_home << " " << g_z_home);
+	      TILER_TRACE(logger, "Intersection (3d - inside): " << pp(py) << " " << pp(pg) << " " << y_z_home << " " << g_z_home);
 	      temp.insert(py);
 	      ++num_intersections;
 	    }
@@ -494,15 +518,15 @@ get_intersections(TW_handle tw_yellow, TW_handle tw_green,
     }
   }
 
-  LOG4CPLUS_TRACE(logger, "Num tiles:  [0] = " << num_tiles[0] << " [1] = " << num_tiles[1]);
-  LOG4CPLUS_TRACE(logger, "Num intersections:  [0] = " << num_intersections);
+  TILER_TRACE(logger, "Num tiles:  [0] = " << num_tiles[0] << " [1] = " << num_tiles[1]);
+  TILER_TRACE(logger, "Num intersections:  [0] = " << num_intersections);
 
   static int total_num_tiles = 0;
   static int total_num_intersections = 0;
   total_num_tiles += num_tiles[0] + num_tiles[1];
   total_num_intersections += num_intersections;
-//   LOG4CPLUS_DEBUG(logger, "Total num tiles:  " << total_num_tiles);
-  LOG4CPLUS_DEBUG(logger, "Total num intersections:  " << total_num_intersections);
+//   TILER_DEBUG(logger, "Total num tiles:  " << total_num_tiles);
+  TILER_DEBUG(logger, "Total num intersections:  " << total_num_intersections);
 
   return ret;
 }
@@ -518,7 +542,6 @@ get_intersections(TW_handle tw_yellow, TW_handle tw_green,
 template <typename Tile_handle>
 bool neighbor(Tile_handle green, Tile_handle yellow, const Point_3& gp, int g, Point_3& gn, const Intersections<Tile_handle>& intersections)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("intersection.neighbor");
 
   int y = 1-g;
   const Point_2& yp = intersections.first_opposite(gp, g);
@@ -529,18 +552,18 @@ bool neighbor(Tile_handle green, Tile_handle yellow, const Point_3& gp, int g, P
   {
     const Point_3& yn = *n_it;
     gn = intersections.first_opposite(yn, y);
-//     LOG4CPLUS_TRACE(logger, "Testing neighbor yn: " << pp(yn) << "  gn: " << pp(gn));
-//     LOG4CPLUS_TRACE(logger, "  green tile: " << pp_tri(*green));
+//     TILER_TRACE(logger, "Testing neighbor yn: " << pp(yn) << "  gn: " << pp(gn));
+//     TILER_TRACE(logger, "  green tile: " << pp_tri(*green));
     list<Tile_handle> tiles;
     intersections.tiles(gn, g, back_inserter(tiles));
 
 //     for (typename list<Tile_handle>::const_iterator it = tiles.begin(); it != tiles.end(); ++it)
-//       LOG4CPLUS_TRACE(logger, "  gn tile: " << pp_tri(**it));
+//       TILER_TRACE(logger, "  gn tile: " << pp_tri(**it));
 
     if (find(tiles.begin(), tiles.end(), green) != tiles.end())
       return true;
   }
-  LOG4CPLUS_TRACE(logger, "No neighbor found");
+  TILER_TRACE(logger, "No neighbor found");
   return false;
 }
 
@@ -555,16 +578,15 @@ bool neighbor(Tile_handle green, Tile_handle yellow, const Point_3& gp, int g, P
 template <typename Tile_handle>
 bool neighbor_inside(Tile_handle gt, Tile_handle yt, const Point_3& gp, int gi, Point_3& yn, Segment_3_& yseg, const Intersections<Tile_handle>& ints)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("intersection.neighbor");
 
   int yi = 1-gi;
   const Point_2& yp = ints.first_opposite(gp, gi);
 
-  CGAL::Triangle_2<Kernel> cgal_tri((*gt)[0], (*gt)[1], (*gt)[2]);
+  Triangle_2 cgal_tri((*gt)[0], (*gt)[1], (*gt)[2]);
   if (cgal_tri.is_degenerate())
     return false;
 
-  if (cgal_tri.orientation() == CGAL::CLOCKWISE)
+  if (cgal_tri.orientation() == CLOCKWISE)
     cgal_tri = cgal_tri.opposite();
 
   list<Segment_3_> ye_list(ints.edges_begin(yp, yi), ints.edges_end(yp, yi));
@@ -582,7 +604,7 @@ bool neighbor_inside(Tile_handle gt, Tile_handle yt, const Point_3& gp, int gi, 
 	    idx > -1 && xyz_equal(p, (*yt)[idx]) &&
 	    !xy_equal(p, yp))
 	{
-	  LOG4CPLUS_TRACE(logger, "Found point inside: " << pp(p) << " seg = " << pp(yseg) << " yp = " << pp(yp));
+	  TILER_TRACE(logger, "Found point inside: " << pp(p) << " seg = " << pp(yseg) << " yp = " << pp(yp));
 	  yn = p;
 	  return true;
 	}
@@ -602,7 +624,6 @@ bool neighbor_inside(Tile_handle gt, Tile_handle yt, const Point_3& gp, int gi, 
 template <typename Tile_handle>
 bool find_edge_intersection(Tile_handle gt, const Segment_3_& ye, int yi, Point_3& gp, const Intersections<Tile_handle>& ints)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("intersection.find_edge_intersection");
 
   if (ints.has_edge(ye, yi))
   {
@@ -611,14 +632,14 @@ bool find_edge_intersection(Tile_handle gt, const Segment_3_& ye, int yi, Point_
     ints.intersections(ye, yi, gt, back_inserter(points));
     if (points.size() == 0)
     {
-      LOG4CPLUS_TRACE(logger, "Intersection but no points found for " << pp(ye) << " " << yi << " gt = " << pp_tri(*gt));
+      TILER_TRACE(logger, "Intersection but no points found for " << pp(ye) << " " << yi << " gt = " << pp_tri(*gt));
       return false;
     }
     gp = points[0];
-    LOG4CPLUS_TRACE(logger, "Intersection found for " << pp(ye) << " " << yi << ": " << pp(gp));
+    TILER_TRACE(logger, "Intersection found for " << pp(ye) << " " << yi << ": " << pp(gp));
     return true;
   }
-  LOG4CPLUS_TRACE(logger, "No intersection found for " << pp(ye) << " " << yi);
+  TILER_TRACE(logger, "No intersection found for " << pp(ye) << " " << yi);
   return false;
 }
 
@@ -632,7 +653,6 @@ template <typename Tile_handle>
 Point_3 get_new_point(TW_handle tw_yellow, TW_handle tw_green, Tile_handle gt, Tile_handle yt, const Point_3& py, int yi, const Intersections<Tile_handle>& ints, 
 		      Z_adjustments<Tile_handle>& z_adjustments)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("intersection.get_new_point");
 
   int gi = 1 - yi;
   Point_3 pg;
@@ -646,9 +666,9 @@ Point_3 get_new_point(TW_handle tw_yellow, TW_handle tw_green, Tile_handle gt, T
     // Same as py but with z adjusted so that pg lies on the green tile
     pg = Point_3(pg.x(), pg.y(), get_z(*gt, pg));
 
-    LOG4CPLUS_TRACE(logger, "Created new point inside triangle: " << pp(pg));
-    LOG4CPLUS_TRACE(logger, "                        Component: " << gi);
-    LOG4CPLUS_TRACE(logger, "       Opposite component's point: " << pp(py));
+    TILER_TRACE(logger, "Created new point inside triangle: " << pp(pg));
+    TILER_TRACE(logger, "                        Component: " << gi);
+    TILER_TRACE(logger, "       Opposite component's point: " << pp(py));
 
 //     Number_type y_z_home;
 //     Number_type g_z_home;
@@ -663,7 +683,7 @@ Point_3 get_new_point(TW_handle tw_yellow, TW_handle tw_green, Tile_handle gt, T
     // TODO: replace
 //     Point_3 qy = z_adjustments.get_qy(py, pg, yi, gi, yt, gt, y_z_home);
 //     if (!z_adjustments.is_legal(py, pg, qy, y_z_home, g_z_home)) {
-//       LOG4CPLUS_TRACE(logger, "Intersection (3d - inside): " << pp(py) << " " << pp(pg) << " " << y_z_home << " " << g_z_home);
+//       TILER_TRACE(logger, "Intersection (3d - inside): " << pp(py) << " " << pp(pg) << " " << y_z_home << " " << g_z_home);
 //       z_adjustments.add(py, pg, yi, gi, yt, gt, y_z_home, g_z_home);
 //     }
   }
@@ -673,7 +693,7 @@ Point_3 get_new_point(TW_handle tw_yellow, TW_handle tw_green, Tile_handle gt, T
 template <typename Tile_handle>
 bool is_vertical(Tile_handle t)
 {
-//   return CGAL::collinear((Point_2)vertex(0, *t), (Point_2)vertex(1, *t), (Point_2)vertex(2, *t));
+//   return collinear((Point_2)vertex(0, *t), (Point_2)vertex(1, *t), (Point_2)vertex(2, *t));
   return (xy_equal((*t)[0], (*t)[1]) ||
 	  xy_equal((*t)[0], (*t)[2]) ||
 	  xy_equal((*t)[1], (*t)[2]));
@@ -686,12 +706,12 @@ Point_2 find_nearest_vertex(Tile_handle t, const Segment_3& seg)
 {
   Segment_2 s(seg.source(), seg.target());
   int closest = 0;
-  int dist = CGAL::squared_distance(s, (Point_2)(*t)[0]);
+  int dist = squared_distance(s, (Point_2)(*t)[0]);
   for (int i = 1; i < 2; ++i)
   {
-    if (CGAL::squared_distance(s, (Point_2)(*t)[i]) < dist)
+    if (squared_distance(s, (Point_2)(*t)[i]) < dist)
     {
-      dist = CGAL::squared_distance(s, (Point_2)(*t)[i]);
+      dist = squared_distance(s, (Point_2)(*t)[i]);
       closest = i;
     }
   }
@@ -720,7 +740,7 @@ template <typename Tile_handle>
 Polyline_2 find_exit(TW_handle tw_yellow, TW_handle tw_green, Tile_handle tg, Tile_handle ty, const Point_3& pg, int ig, const Intersections<Tile_handle>& ints,
 		     Z_adjustments<Tile_handle>& z_adjustments)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("intersection.find_exit");
+  Logger logger = tw_yellow->logger("tiler.intersection");
 
   Polyline_2 ret;
   int yi = 1 - ig;
@@ -728,29 +748,29 @@ Polyline_2 find_exit(TW_handle tw_yellow, TW_handle tw_green, Tile_handle tg, Ti
   Point_3 gn0 = pg;
   Number_type epsilon = 0.00000001;
 
-  LOG4CPLUS_TRACE(logger, "Adding original point: " << pp(pg));
+  TILER_TRACE(logger, "Adding original point: " << pp(pg));
   ret.push_back(pg);
 
   // This case handles where the green tile's 2D projection is a line.
-//   if (CGAL::collinear((Point_2)vertex(0, *tg), (Point_2)vertex(1, *tg), (Point_2)vertex(2, *tg)))
+//   if (collinear((Point_2)vertex(0, *tg), (Point_2)vertex(1, *tg), (Point_2)vertex(2, *tg)))
   if (is_vertical(tg))
   {
-    LOG4CPLUS_TRACE(logger, "Green tile's 2D projection is collinear");
+    TILER_TRACE(logger, "Green tile's 2D projection is collinear");
     return ret;
   }
 
   // This case handles where the yellow tile's 2D projection is a line.
-//   if (CGAL::collinear((Point_2)vertex(0, *ty), (Point_2)vertex(1, *ty), (Point_2)vertex(2, *ty)))
+//   if (collinear((Point_2)vertex(0, *ty), (Point_2)vertex(1, *ty), (Point_2)vertex(2, *ty)))
   if (is_vertical(ty))
   {
-    LOG4CPLUS_TRACE(logger, "Yellow tile's 2D projection is collinear");
+    TILER_TRACE(logger, "Yellow tile's 2D projection is collinear");
     return ret;
   }
 
   // The intersection point is a vertex on either the yellow or green tiles.
 //   if (index(yp, *ty) > -1 || index(pg, *tg) > -1)
 //   {
-//     LOG4CPLUS_TRACE(logger, "Intersection point is a vertex");
+//     TILER_TRACE(logger, "Intersection point is a vertex");
 //     return ret;
 //   }
 
@@ -759,12 +779,12 @@ Polyline_2 find_exit(TW_handle tw_yellow, TW_handle tw_green, Tile_handle tg, Ti
   {
     if (!xy_close(gn0, gn1, epsilon))
     {
-      LOG4CPLUS_TRACE(logger, "Adding exit point: " << pp(gn1));
+      TILER_TRACE(logger, "Adding exit point: " << pp(gn1));
       ret.push_back(gn1);
     }
     else
     {
-      LOG4CPLUS_TRACE(logger, "Entry and exit points are identical.  Returning single point " << pp(gn1));
+      TILER_TRACE(logger, "Entry and exit points are identical.  Returning single point " << pp(gn1));
     }
   }
   else
@@ -793,10 +813,10 @@ Polyline_2 find_exit(TW_handle tw_yellow, TW_handle tw_green, Tile_handle tg, Ti
     ye0 = edge(index(yseg0, *ty), *ty);
     // There exists some yellow vertex (yn0) inside the green tile.
     Point_3 gn1 = get_new_point(tw_yellow, tw_green, tg, ty, yn1, yi, ints, z_adjustments);
-    LOG4CPLUS_TRACE(logger, "Adding interior vertex point: " << pp(gn1) << ", yn1 = " << pp(yn1));
+    TILER_TRACE(logger, "Adding interior vertex point: " << pp(gn1) << ", yn1 = " << pp(yn1));
     if (xy_close(gn0, gn1, epsilon))
     {
-      LOG4CPLUS_WARN(logger, "Exit point error: gn0 == gn1: skipping point");
+      TILER_WARN(logger, "Exit point error: gn0 == gn1: skipping point");
       parameter_dump(logger, "gn0", pp(gn0), "gn1", pp(gn1),
 		     "ye0", pp(ye0), "ty", pp_tri(*ty), "tg", pp_tri(*tg));
     }
@@ -805,20 +825,20 @@ Polyline_2 find_exit(TW_handle tw_yellow, TW_handle tw_green, Tile_handle tg, Ti
 
     int ye1_idx = other_edge(yseg0, yn1, *ty);
     Segment_3 ye1 = edge(ye1_idx, *ty);
-    LOG4CPLUS_TRACE(logger, "Examining ye1: " << pp(ye1) << " of tile " << pp_tri(*ty) << " index = " << ye1_idx);
+    TILER_TRACE(logger, "Examining ye1: " << pp(ye1) << " of tile " << pp_tri(*ty) << " index = " << ye1_idx);
     Point_3 gn2;
     if (find_edge_intersection(tg, ye1, yi, gn2, ints))
     {
-      LOG4CPLUS_TRACE(logger, "Adding exit point: " << pp(gn2));
+      TILER_TRACE(logger, "Adding exit point: " << pp(gn2));
       if (gn1 == gn2)
       {
-	LOG4CPLUS_WARN(logger, "Exit point error: gn1 == gn2: skipping point");
+	TILER_WARN(logger, "Exit point error: gn1 == gn2: skipping point");
 	parameter_dump(logger, "gn0", pp(gn0), "gn1", pp(gn1), "gn2", pp(gn2),
 		       "ye0", pp(ye0), "ye1", pp(ye1), "ty", pp_tri(*ty), "tg", pp_tri(*tg));
       }
       else if (gn0 == gn2)
       {
-	LOG4CPLUS_WARN(logger, "Exit point error: gn0 == gn2 -- returning polyline with single point");
+	TILER_WARN(logger, "Exit point error: gn0 == gn2 -- returning polyline with single point");
 	parameter_dump(logger, "gn0", pp(gn0), "gn1", pp(gn1), "gn2", pp(gn2),
 		       "ye0", pp(ye0), "ye1", pp(ye1), "ty", pp_tri(*ty), "tg", pp_tri(*tg));
 	return Polyline_2(gn2);
@@ -845,7 +865,7 @@ Polyline_2 find_exit(TW_handle tw_yellow, TW_handle tw_green, Tile_handle tg, Ti
       int yn2_idx = other_vertex(yn1, ye1, *ty);
       Point_3 yn2 = vertex(yn2_idx, *(ty));
       Point_3 gn2 = get_new_point(tw_yellow, tw_green, tg, ty, yn2, yi, ints, z_adjustments);
-      LOG4CPLUS_TRACE(logger, "Adding second interior vertex point: " << pp(gn2));
+      TILER_TRACE(logger, "Adding second interior vertex point: " << pp(gn2));
       ret.push_back(gn2);
 
       if (xy_equal(gn2, (*tg)[0]) || xy_equal(gn2, (*tg)[1]) || xy_equal(gn2, (*tg)[2]))
@@ -853,34 +873,34 @@ Polyline_2 find_exit(TW_handle tw_yellow, TW_handle tw_green, Tile_handle tg, Ti
 
       int ye2_idx = other_edge(ye1, yn2, *ty);
       Segment_3 ye2 = edge(ye2_idx, *ty);
-      LOG4CPLUS_TRACE(logger, "Examining edge: " << pp(ye2) << " of tile " << pp_tri(*ty) << " index = " << ye2_idx);
+      TILER_TRACE(logger, "Examining edge: " << pp(ye2) << " of tile " << pp_tri(*ty) << " index = " << ye2_idx);
       Point_3 gn3;
       if (!find_edge_intersection(tg, ye2, yi, gn3, ints))
       {
-	LOG4CPLUS_ERROR(logger, "Found no exit point for " << pp(pg));
+	TILER_ERROR(logger, "Found no exit point for " << pp(pg));
 	parameter_dump(logger, "gn0", pp(gn0), "gn1", pp(gn1), "gn2", pp(gn2), "gn3", pp(gn3), 
 		     "ye0", pp(ye0), "ye1", pp(ye1), "ye2", pp(ye2), "ty", pp_tri(*ty), "tg", pp_tri(*tg));
 	gn3 = find_nearest_vertex(tg, ye2);
 // 	throw logic_error("There should be an intersection");
       }
-      LOG4CPLUS_TRACE(logger, "Adding exit point: " << pp(gn3));
+      TILER_TRACE(logger, "Adding exit point: " << pp(gn3));
       if (gn3 == gn1)
       {
-	LOG4CPLUS_WARN(logger, "Exit point error: gn3 == gn1: failing");
+	TILER_WARN(logger, "Exit point error: gn3 == gn1: failing");
 	parameter_dump(logger, "gn0", pp(gn0), "gn1", pp(gn1), "gn2", pp(gn2), "gn3", pp(gn3), 
 		     "ye0", pp(ye0), "ye1", pp(ye1), "ye2", pp(ye2), "ty", pp_tri(*ty), "tg", pp_tri(*tg));
 	throw logic_error("Exit point error: gn3 == gn2 || gn3 == gn1");
       }
       else if (gn3 == gn2)
       {
-	LOG4CPLUS_WARN(logger, "Exit point error: gn3 == gn2: skipping");
+	TILER_WARN(logger, "Exit point error: gn3 == gn2: skipping");
 	parameter_dump(logger, "gn0", pp(gn0), "gn1", pp(gn1), "gn2", pp(gn2), "gn3", pp(gn3), 
 		     "ye0", pp(ye0), "ye1", pp(ye1), "ye2", pp(ye2), "ty", pp_tri(*ty), "tg", pp_tri(*tg));
       }
       else if (gn0 == gn3)
       {
 	// *********** THIS MAY NEED TO CHANGE BACK **************
-	LOG4CPLUS_WARN(logger, "Exit point error: gn0 == gn3: NOT skipping");
+	TILER_WARN(logger, "Exit point error: gn0 == gn3: NOT skipping");
 	parameter_dump(logger, "gn0", pp(gn0), "gn1", pp(gn1), "gn2", pp(gn2), "gn3", pp(gn3), 
 		       "ye0", pp(ye0), "ye1", pp(ye1), "ye2", pp(ye2), "ty", pp_tri(*ty), "tg", pp_tri(*tg));
 	ret.push_back(gn3);
@@ -900,10 +920,9 @@ Polyline_2 find_exit(TW_handle tw_yellow, TW_handle tw_green, Tile_handle tg, Ti
 template <typename Tile_handle>
 void trace_tile(Tile_handle t, string prefix)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("intersection");
 
   for (int i = 0; i < 3; ++i)
-    LOG4CPLUS_TRACE(logger, prefix << i << ": " << pp(edge(i, *t)));
+    TILER_TRACE(logger, prefix << i << ": " << pp(edge(i, *t)));
 }
 
 //------------------------------------------------------------------------------
@@ -914,7 +933,7 @@ void trace_tile(Tile_handle t, string prefix)
 template <typename Tile_handle>
 Tile_handle get_tile(const Intersections<Tile_handle>& intersections, const Point_3& a, const Point_3& b, int i)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("intersection");
+  Logger logger = intersections.logger();
 
   const list<Tile_handle>& tiles_a = intersections.tiles(a, i);
   const list<Tile_handle>& tiles_b = intersections.tiles(b, i);
@@ -924,7 +943,7 @@ Tile_handle get_tile(const Intersections<Tile_handle>& intersections, const Poin
       return *it;
   }
 
-  LOG4CPLUS_WARN(logger, "Points don't share a tile: " << pp(a) << ", " << pp(b));
+  TILER_WARN(logger, "Points don't share a tile: " << pp(a) << ", " << pp(b));
   for (typename list<Tile_handle>::const_iterator it = tiles_a.begin(); it != tiles_a.end(); ++it)
     trace_tile(*it, " a: ");
   for (typename list<Tile_handle>::const_iterator it = tiles_b.begin(); it != tiles_b.end(); ++it)
@@ -941,9 +960,8 @@ Tile_handle get_tile(const Intersections<Tile_handle>& intersections, const Poin
 template <typename Tile_handle>
 Tile_handle other_tile(const Intersections<Tile_handle>& intersections, const Segment_3_& e, int i, Tile_handle t)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("intersection");
 
-//   LOG4CPLUS_TRACE(logger, "Searching for other tile: " << pp(p));
+//   TILER_TRACE(logger, "Searching for other tile: " << pp(p));
   const list<Tile_handle>& tiles = intersections.tiles(e, i);
   for (typename list<Tile_handle>::const_iterator it = tiles.begin(); it != tiles.end(); ++it)
     if (*it != t)
@@ -956,7 +974,6 @@ void induce_last(const Polyline_2& cut, int gi, Tile_handle tg, const Intersecti
 		 Z_adjustments<Tile_handle>& z_adjustments,
 		 boost::unordered_map<Tile_handle, boost::unordered_set<Polyline_2> >& cuts)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("intersection.induce_adjacent");
   if (cut.size() > 1)
   {
     {
@@ -968,12 +985,12 @@ void induce_last(const Polyline_2& cut, int gi, Tile_handle tg, const Intersecti
       Tile_handle adj = other_tile(ints, adj_e, gi, tg);
       if (adj)
       {
-	LOG4CPLUS_TRACE(logger, "Adjacent tile for " << pp(cut.target()) << ": " << pp_tri(*adj));
+	TILER_TRACE(logger, "Adjacent tile for " << pp(cut.target()) << ": " << pp_tri(*adj));
 	cuts[adj].insert(Polyline_2(cut.target()));
 	z_adjustments.add(adj);
       }
       else
-	LOG4CPLUS_TRACE(logger, "No adjacent tile for " << pp(cut.target()));
+	TILER_TRACE(logger, "No adjacent tile for " << pp(cut.target()));
     }
     }
 
@@ -986,12 +1003,12 @@ void induce_last(const Polyline_2& cut, int gi, Tile_handle tg, const Intersecti
       Tile_handle adj = other_tile(ints, adj_e, gi, tg);
       if (adj)
       {
-	LOG4CPLUS_TRACE(logger, "Adjacent tile for " << pp(cut.source()) << ": " << pp_tri(*adj));
+	TILER_TRACE(logger, "Adjacent tile for " << pp(cut.source()) << ": " << pp_tri(*adj));
 	cuts[adj].insert(Polyline_2(cut.source()));
 	z_adjustments.add(adj);
       }
       else
-	LOG4CPLUS_TRACE(logger, "No adjacent tile for " << pp(cut.source()));
+	TILER_TRACE(logger, "No adjacent tile for " << pp(cut.source()));
 
     }
     }
@@ -1034,7 +1051,7 @@ void get_polyline_cuts(TW_handle tw_yellow, TW_handle tw_green, Intersections<Ti
 		       boost::unordered_map<Tile_handle, boost::unordered_set<Polyline_2> >& cuts,
 		       Z_adjustments<Tile_handle>& z_adjustments)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("intersection.get_polyline_cuts");
+  Logger logger = tw_yellow->logger("tiler.intersection");
 
   typedef typename boost::unordered_set<Tile_handle> Tile_set;
   typedef typename Tile_set::const_iterator Tile_set_iter;
@@ -1055,11 +1072,11 @@ void get_polyline_cuts(TW_handle tw_yellow, TW_handle tw_green, Intersections<Ti
   {
     const Point_3& py = *it;
     const Point_3& pg = ints.first_opposite(py, iy);
-    LOG4CPLUS_TRACE(logger, "Getting polyline cut for " << 
+    TILER_TRACE(logger, "Getting polyline cut for " << 
 		    pp(py) << "(" << iy << ") and " << 
 		    pp(pg) << "(" << ig << ")");
       
-    LOG4CPLUS_TRACE(logger, "  Intersection check " << cur++ << " of " << total);
+    TILER_TRACE(logger, "  Intersection check " << cur++ << " of " << total);
       
     boost::unordered_set<Tile_handle> ytiles, gtiles;
     ints.tiles(py, iy, inserter(ytiles, gtiles.end()));
@@ -1069,23 +1086,23 @@ void get_polyline_cuts(TW_handle tw_yellow, TW_handle tw_green, Intersections<Ti
       Tile_handle tg = *tg_it;
       for (tile_it ty_it = ytiles.begin(); ty_it != ytiles.end(); ++ty_it) {
 	Tile_handle ty = *ty_it;
-	LOG4CPLUS_TRACE(logger, "  Yellow tile: " << pp_tri(*ty));
-	LOG4CPLUS_TRACE(logger, "  Green tile: " << pp_tri(*tg));
+	TILER_TRACE(logger, "  Yellow tile: " << pp_tri(*ty));
+	TILER_TRACE(logger, "  Green tile: " << pp_tri(*tg));
 	if (added_points.find(pg) == added_points.end()) {
 	  // Get yellow's cut through the green tile
 	  try {
 	    Polyline_2 cut = find_exit(tw_yellow, tw_green, tg, ty, pg, ig, ints, z_adjustments);
-	    LOG4CPLUS_TRACE(logger, "Found polyline cut (green tile) for " << pp(pg) << ": " << pp(cut));
-	    LOG4CPLUS_TRACE(logger, "      tile = " << pp_tri(*tg));
+	    TILER_TRACE(logger, "Found polyline cut (green tile) for " << pp(pg) << ": " << pp(cut));
+	    TILER_TRACE(logger, "      tile = " << pp_tri(*tg));
 	    if (is_required(cut, ig, z_adjustments)) {
 // 	      if (!contains(tg, cut)) {
-// 		LOG4CPLUS_ERROR(logger, "  Cut not contained in tile (" << cut.size() << ")");
-// 		LOG4CPLUS_ERROR(logger, "    Cut = " << pp(cut));
-// 		LOG4CPLUS_ERROR(logger, "    tg = " << pp_tri(*tg));
-// 		LOG4CPLUS_ERROR(logger, "    ty = " << pp_tri(*ty));
-// 		LOG4CPLUS_ERROR(logger, "    pg = " << pp(pg));
+// 		TILER_ERROR(logger, "  Cut not contained in tile (" << cut.size() << ")");
+// 		TILER_ERROR(logger, "    Cut = " << pp(cut));
+// 		TILER_ERROR(logger, "    tg = " << pp_tri(*tg));
+// 		TILER_ERROR(logger, "    ty = " << pp_tri(*ty));
+// 		TILER_ERROR(logger, "    pg = " << pp(pg));
 // 	      }
-	      LOG4CPLUS_TRACE(logger, "Inserting polyline cut (green tile) for " << pp(pg) << ": " << pp(cut));
+	      TILER_TRACE(logger, "Inserting polyline cut (green tile) for " << pp(pg) << ": " << pp(cut));
 // 	      for (Polyline_2::iterator cut_iter = cut.begin(); cut_iter != cut.end(); ++cut_iter) {
 // 		if (!cut_iter->is_valid()) {
 // 		  cut_iter->id() = tw_green->vertices.unique_id();
@@ -1094,34 +1111,34 @@ void get_polyline_cuts(TW_handle tw_yellow, TW_handle tw_green, Intersections<Ti
 // 	      tw_green->ensure_z_home(cut, ints.z_home(cut[0], ig));
 	      for (Polyline_2::iterator cit = cut.begin(); cit != cut.end(); ++cit) {
 		if (!cit->is_valid()) {
-		  LOG4CPLUS_ERROR(logger, "Cut point: no valid id(): " << pp(*cit));
+		  TILER_ERROR(logger, "Cut point: no valid id(): " << pp(*cit));
 		}
 	      }
-	      LOG4CPLUS_TRACE(logger, "Green unique " << tw_green->vertices.unique_id());
+	      TILER_TRACE(logger, "Green unique " << tw_green->vertices.unique_id());
 	      cuts[tg].insert(cut);
 	      induce_last(cut, ig, tg, ints, z_adjustments, cuts);
 	    }
 	    else {
-	      LOG4CPLUS_TRACE(logger, "  Polyline cut is not required");
+	      TILER_TRACE(logger, "  Polyline cut is not required");
 	    }
 	  } catch (std::logic_error& e)
-	  { LOG4CPLUS_ERROR(logger, e.what());}
+	  { TILER_ERROR(logger, e.what());}
 	}
 	if (added_points.find(py) == added_points.end()) {
 	  // Get green's cut through the yellow tile
 	  try {
 	    Polyline_2 cut = find_exit(tw_yellow, tw_green, ty, tg, py, iy, ints, z_adjustments);
-	    LOG4CPLUS_TRACE(logger, "Found polyline cut (yellow tile) for " << pp(py) << ": " << pp(cut));
-	    LOG4CPLUS_TRACE(logger, "      tile = " << pp_tri(*ty));
+	    TILER_TRACE(logger, "Found polyline cut (yellow tile) for " << pp(py) << ": " << pp(cut));
+	    TILER_TRACE(logger, "      tile = " << pp_tri(*ty));
 	    if (is_required(cut, iy, z_adjustments)) {
 // 	      if (!contains(ty, cut)) {
-// 		LOG4CPLUS_ERROR(logger, "  Cut not contained in tile (" << cut.size() << ")");
-// 		LOG4CPLUS_ERROR(logger, "    Cut = " << pp(cut));
-// 		LOG4CPLUS_ERROR(logger, "    ty = " << pp_tri(*ty));
-// 		LOG4CPLUS_ERROR(logger, "    tg = " << pp_tri(*tg));
-// 		LOG4CPLUS_ERROR(logger, "    py = " << pp(py));
+// 		TILER_ERROR(logger, "  Cut not contained in tile (" << cut.size() << ")");
+// 		TILER_ERROR(logger, "    Cut = " << pp(cut));
+// 		TILER_ERROR(logger, "    ty = " << pp_tri(*ty));
+// 		TILER_ERROR(logger, "    tg = " << pp_tri(*tg));
+// 		TILER_ERROR(logger, "    py = " << pp(py));
 // 	      }
-	      LOG4CPLUS_TRACE(logger, "Inserting polyline cut (yellow tile) for " << pp(py) << ": " << pp(cut));
+	      TILER_TRACE(logger, "Inserting polyline cut (yellow tile) for " << pp(py) << ": " << pp(cut));
 // 	      for (Polyline_2::iterator cut_iter = cut.begin(); cut_iter != cut.end(); ++cut_iter) {
 // 		if (!cut_iter->is_valid()) {
 // 		  cut_iter->id() = tw_yellow->vertices.unique_id();
@@ -1130,18 +1147,18 @@ void get_polyline_cuts(TW_handle tw_yellow, TW_handle tw_green, Intersections<Ti
 // 	      tw_yellow->ensure_z_home(cut, ints.z_home(cut[0], iy));
 	      for (Polyline_2::iterator cit = cut.begin(); cit != cut.end(); ++cit) {
 		if (!cit->is_valid()) {
-		  LOG4CPLUS_ERROR(logger, "Cut point: no valid id(): " << pp(*cit));
+		  TILER_ERROR(logger, "Cut point: no valid id(): " << pp(*cit));
 		}
 	      }
-	      LOG4CPLUS_TRACE(logger, "Yellow unique " << tw_yellow->vertices.unique_id());
+	      TILER_TRACE(logger, "Yellow unique " << tw_yellow->vertices.unique_id());
 	      cuts[ty].insert(cut);
 	      induce_last(cut, iy, ty, ints, z_adjustments, cuts);
 	    }
 	    else {
-	      LOG4CPLUS_TRACE(logger, "  Polyline cut is not required");
+	      TILER_TRACE(logger, "  Polyline cut is not required");
 	    }
 	  } catch (std::logic_error& e)
-	  { LOG4CPLUS_ERROR(logger, e.what());}
+	  { TILER_ERROR(logger, e.what());}
 	}
       }
     }
@@ -1245,4 +1262,4 @@ void remove_intersections(TW_handle tw_yellow, TW_handle tw_green,
 			  boost::unordered_map<Segment_3_undirected, list<Point_3> >& edge2points);
 
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler

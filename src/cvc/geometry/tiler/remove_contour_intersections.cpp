@@ -1,17 +1,40 @@
-#include <ContourTiler/remove_contour_intersections.h>
-#include <ContourTiler/print_utils.h>
-#include <ContourTiler/sweep_line_visitors.h>
-#include <ContourTiler/offset_polygon.h>
-#include <ContourTiler/polygon_difference.h>
-#include <ContourTiler/Contour_info.h>
-#include <ContourTiler/contour_utils.h>
-#include <ContourTiler/Contour2.h>
+/*
+  Copyright 2008-2012, 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// Vendored from VolumeRover's ContourTiler (John Edwards, UT Austin; transfix/volrover
+// src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
+// (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
+
+#include "remove_contour_intersections.h"
+#include "print_utils.h"
+#include "sweep_line_visitors.h"
+#include "offset_polygon.h"
+#include "polygon_difference.h"
+#include "Contour_info.h"
+#include "contour_utils.h"
+#include "Contour2.h"
 
 #include <deque>
 
 #include <boost/foreach.hpp>
 
-CONTOURTILER_BEGIN_NAMESPACE
+namespace cvc::tiler {
 
 // Takes an original contour and finds all derivative contours resulting from
 // the difference operation on the original contour.
@@ -21,11 +44,10 @@ template <typename OutputIterator, typename Contour_handle>
 void get_current_contours(const boost::unordered_map<Contour_handle, list<Contour_handle> >& changing, 
 			  Contour_handle orig, OutputIterator current)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("get_current_contours");
 
   if (changing.find(orig) != changing.end()) {
     if (orig->info().name() == "a100") {
-      LOG4CPLUS_TRACE(logger, "final a100 - changing");
+      TILER_TRACE(logger, "final a100 - changing");
     }
 
     for (const auto& c : changing.find(orig)->second) {
@@ -41,19 +63,18 @@ void get_current_contours(const boost::unordered_map<Contour_handle, list<Contou
       *current++ = orig;
 
       if (orig->info().name() == "a100") {
-        LOG4CPLUS_TRACE(logger, "final a100 - final");
+        TILER_TRACE(logger, "final a100 - final");
       }
     }
   }
 }
 
 template <typename Out_iter>
-void new_contours(const Polygon_2& p, const Contour::Info& info, Out_iter out)
+void new_contours(const Polygon_2& p, const Contour::Info& info, Logger& logger, Out_iter out)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("new_contours");
 
   if (p.size() < 3) {
-    LOG4CPLUS_WARN(logger, "Non-simple polygon: " << pp(p) << " - using empty contour");
+    TILER_WARN(logger, "Non-simple polygon: " << pp(p) << " - using empty contour");
     return;
   }
 
@@ -63,17 +84,17 @@ void new_contours(const Polygon_2& p, const Contour::Info& info, Out_iter out)
 
     // debug
     if (info.name() == "a100") {
-      // LOG4CPLUS_TRACE(logger, "a100 contour: " << pp(p));
-      LOG4CPLUS_TRACE(logger, "a100 splitting non-simple");
+      // TILER_TRACE(logger, "a100 contour: " << pp(p));
+      TILER_TRACE(logger, "a100 splitting non-simple");
       // for (const auto& sp : polygons) {
-      //   // LOG4CPLUS_TRACE(logger, "  result: " << pp(sp));
-      //   LOG4CPLUS_TRACE(logger, "  result: " << pp(sp));
+      //   // TILER_TRACE(logger, "  result: " << pp(sp));
+      //   TILER_TRACE(logger, "  result: " << pp(sp));
       // }
     }
   }
   else {
     if (info.name() == "a100") {
-      LOG4CPLUS_TRACE(logger, "a100 simple");
+      TILER_TRACE(logger, "a100 simple");
     }
     polygons.push_back(p);
   }
@@ -84,21 +105,21 @@ void new_contours(const Polygon_2& p, const Contour::Info& info, Out_iter out)
 
     // debug
     if (info.name() == "a100") {
-      LOG4CPLUS_TRACE(logger, "  adding " << newc->size() << " (" << newc.get() << ")");
+      TILER_TRACE(logger, "  adding " << newc->size() << " (" << newc.get() << ")");
     }
   }
 }
 
 template <typename Out_iter>
 void diffed_contours(const list<Polygon_with_holes_2>& polygons, const Contour::Info& info, 
-                     log4cplus::Logger& logger, Out_iter out)
+                     Logger& logger, Out_iter out)
 {
   for (const auto& pwh : polygons) {
-    new_contours(pwh.outer_boundary(), info, out);
+    new_contours(pwh.outer_boundary(), info, logger, out);
     for (auto hole_it = pwh.holes_begin(); hole_it != pwh.holes_end(); ++hole_it) {
       Polygon_2 hole = *hole_it;
       hole.reverse_orientation();
-      new_contours(hole, info, out);
+      new_contours(hole, info, logger, out);
     }
   }
 }
@@ -107,9 +128,9 @@ void diffed_contours(const list<Polygon_with_holes_2>& polygons, const Contour::
 // each contour in the other list.  The changing map will be updated accordingly.
 template <typename InputIterator>
 void remove_differences(InputIterator pairs_begin, InputIterator pairs_end,
-			boost::unordered_map<Contour_handle, list<Contour_handle> >& changing)
+			boost::unordered_map<Contour_handle, list<Contour_handle> >& changing,
+			Logger& logger)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("remove_differences");
 
   typedef pair<Contour_handle, Contour_handle> Pair;
   deque<Pair> pairs(pairs_begin, pairs_end);
@@ -133,9 +154,9 @@ void remove_differences(InputIterator pairs_begin, InputIterator pairs_end,
       if (p->info().name() == "a100") {
         list<Contour_handle> a100;
         get_current_contours(changing, p, back_inserter(a100));
-        LOG4CPLUS_TRACE(logger, "a100 " << p.get() << " children");
+        TILER_TRACE(logger, "a100 " << p.get() << " children");
         for (const auto& c : a100) {
-          LOG4CPLUS_TRACE(logger, "  size = " << c->size() << " (" << c.get() << ")");
+          TILER_TRACE(logger, "  size = " << c->size() << " (" << c.get() << ")");
         }
       }
     }
@@ -146,7 +167,7 @@ void remove_differences(InputIterator pairs_begin, InputIterator pairs_end,
     }
     else {
       if (p->info().name() == "a100") {
-        LOG4CPLUS_TRACE(logger, p->info().name() << " - " << q->info().name() << " (" << p.get() << ")");
+        TILER_TRACE(logger, p->info().name() << " - " << q->info().name() << " (" << p.get() << ")");
       }
 
       // Go ahead and do difference - p nor q has changed.
@@ -154,12 +175,12 @@ void remove_differences(InputIterator pairs_begin, InputIterator pairs_end,
       polygon_difference(p->polygon(), q->polygon(), back_inserter(pdiff), back_inserter(qdiff));
       
       if (p->info().name() == "a100") {
-        LOG4CPLUS_TRACE(logger, "  p -> " << pdiff.size());
+        TILER_TRACE(logger, "  p -> " << pdiff.size());
         if (pdiff.size() == 3) {
-          LOG4CPLUS_TRACE(logger, "  origp = " << pp(p->polygon()));
-          LOG4CPLUS_TRACE(logger, "  origq = " << pp(q->polygon()));
+          TILER_TRACE(logger, "  origp = " << pp(p->polygon()));
+          TILER_TRACE(logger, "  origq = " << pp(q->polygon()));
           for (const auto& pwh : pdiff) {
-            LOG4CPLUS_TRACE(logger, "  " << pp(pwh.outer_boundary()));
+            TILER_TRACE(logger, "  " << pp(pwh.outer_boundary()));
           }
         }
       }
@@ -174,9 +195,9 @@ void remove_differences(InputIterator pairs_begin, InputIterator pairs_end,
 template <typename Contour_iter, typename Out_iter>
 void remove_contour_intersections(Contour_iter begin, Contour_iter end, 
 				  Number_type delta, 
-				  Out_iter out)
+				  Out_iter out, tiler_context& ctx)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("slice.remove_contour_intersections");
+  Logger logger = ctx.logger("tiler.remove_contour_intersections");
 
   Number_type delta2 = delta / 2.0;
 
@@ -188,13 +209,13 @@ void remove_contour_intersections(Contour_iter begin, Contour_iter end,
     }
     Contour_handle c = (*it)->copy();
     try {
-      LOG4CPLUS_TRACE(logger, "Dilating: " << pp(c->polygon()));
+      TILER_TRACE(logger, "Dilating: " << pp(c->polygon()));
       Polygon_with_holes_2 polys = offset_polygon_positive(c->polygon(), delta2);
       for (Polygon_with_holes_2::Hole_const_iterator hit = polys.holes_begin(); hit != polys.holes_end(); ++hit) {
 	contours.push_back(Contour::create(*hit, c->info()));
       }
       c->polygon() = polys.outer_boundary();
-      LOG4CPLUS_TRACE(logger, "Result: " << pp(c->polygon()));
+      TILER_TRACE(logger, "Result: " << pp(c->polygon()));
     }
     catch (logic_error& e) {
       throw logic_error("Component = " + c->info().object_name() + "  " + e.what());
@@ -212,7 +233,7 @@ void remove_contour_intersections(Contour_iter begin, Contour_iter end,
   
   list<pair<Contour_handle, Contour_handle> > pairs;
   get_intersecting_pairs(contours.begin(), contours.end(), back_inserter(pairs));
-  remove_differences(pairs.begin(), pairs.end(), changing);
+  remove_differences(pairs.begin(), pairs.end(), changing, logger);
 
   list<Contour_handle> temp;
   for (const auto& c : contours) {
@@ -222,9 +243,9 @@ void remove_contour_intersections(Contour_iter begin, Contour_iter end,
     if (c->info().name() == "a100") {
       list<Contour_handle> a100;
       get_current_contours(changing, c, back_inserter(a100));
-      LOG4CPLUS_TRACE(logger, "Final a100 contours");
+      TILER_TRACE(logger, "Final a100 contours");
       for (const auto& c100 : a100) {
-        LOG4CPLUS_TRACE(logger, "  " << pp(c100->polygon()));
+        TILER_TRACE(logger, "  " << pp(c100->polygon()));
       }
     }
   }
@@ -243,29 +264,27 @@ void remove_contour_intersections(Contour_iter begin, Contour_iter end,
   // for (Iter p = contours.begin(); p != contours.end(); ++p) {
   //   Contour_handle c = *p;
   for (const auto& c : contours) {
-    LOG4CPLUS_TRACE(logger, "Eroding: " << pp(c->polygon()));
+    TILER_TRACE(logger, "Eroding: " << pp(c->polygon()));
 
     list<Polygon_with_holes_2> polys;
     try {
       offset_polygon_negative(c->polygon(), -delta2, back_inserter(polys));
     }
     catch (logic_error& e) {
-      LOG4CPLUS_ERROR(logger, "Discarded polygon in contour " << c->info().name());
-      throw e;
+      throw logic_error("Discarded polygon in contour " + c->info().name() + ": " + e.what());
     }
     for (const auto& pwh : polys) {
       if (pwh.holes_begin() != pwh.holes_end()) {
-        LOG4CPLUS_ERROR(logger, "Can't yet handle polygons with holes when eroding: " << pp(c->polygon()));
+        TILER_ERROR(logger, "Can't yet handle polygons with holes when eroding: " << pp(c->polygon()));
         // return;
       }
       const Polygon_2 p = pwh.outer_boundary();
       // c->polygon() = pwh.outer_boundary();
-      LOG4CPLUS_TRACE(logger, "Result: " << pp(p));
+      TILER_TRACE(logger, "Result: " << pp(p));
       if (p.size() > 0) {
         if (!p.is_simple()) {
-          LOG4CPLUS_ERROR(logger, "Polygon is not simple after intersection removal -- skipping");
-          LOG4CPLUS_ERROR(logger, "  Component = " << c->info().object_name());
-          LOG4CPLUS_ERROR(logger, "  Polygon = " << pp(p));
+          TILER_ERROR(logger, "Polygon is not simple after intersection removal -- skipping."
+                      << "  Component = " << c->info().object_name() << "  Polygon = " << pp(p));
           // throw logic_error("Polygon is not simple!");
         }
         else {
@@ -281,25 +300,25 @@ template
 void remove_contour_intersections(vector<Contour_handle>::iterator begin, 
 				  vector<Contour_handle>::iterator end, 
 				  Number_type delta,
-				  back_insert_iterator<list<Contour_handle> > out);
+				  back_insert_iterator<list<Contour_handle> > out, tiler_context& ctx);
 
 template
 void remove_contour_intersections(vector<Contour_handle>::iterator begin, 
 				  vector<Contour_handle>::iterator end, 
 				  Number_type delta,
-				  back_insert_iterator<vector<Contour_handle> > out);
+				  back_insert_iterator<vector<Contour_handle> > out, tiler_context& ctx);
 
 template
 void remove_contour_intersections(list<Contour_handle>::iterator begin, 
 				  list<Contour_handle>::iterator end, 
 				  Number_type delta,
-				  back_insert_iterator<list<Contour_handle> > out);
+				  back_insert_iterator<list<Contour_handle> > out, tiler_context& ctx);
 
 template
 void remove_contour_intersections(list<Contour_handle>::iterator begin, 
 				  list<Contour_handle>::iterator end, 
 				  Number_type delta,
-				  back_insert_iterator<vector<Contour_handle> > out);
+				  back_insert_iterator<vector<Contour_handle> > out, tiler_context& ctx);
 
 
 //----------------------------------------------------------------------
@@ -369,7 +388,6 @@ void remove_differences2(InputIterator pairs_begin, InputIterator pairs_end,
 template <typename InputIterator, typename OutputIterator>
 void get_intersecting_polygon_pairs(InputIterator begin, InputIterator end, OutputIterator intersecting_pairs)
 {
-  static log4cplus::Logger logger = log4cplus::Logger::getInstance("get_intersecting_polygon_pairs");
 
   boost::unordered_map<Segment_2, Polygon_ext_handle> seg2Polygon;
   vector<Polygon_2> polygons;
@@ -493,14 +511,14 @@ void get_intersecting_polygon_pairs(InputIterator begin, InputIterator end, Outp
 //     //   Polygon_with_holes_2 polys = offset_polygon(c->polygon(), -delta2);
 
 //     //   c->polygon() = polys.outer_boundary();
-//     //   LOG4CPLUS_TRACE(logger, "Result: " << pp(c->polygon()));
+//     //   TILER_TRACE(logger, "Result: " << pp(c->polygon()));
 //     // }
 //     // catch (logic_error& e) {
 //     //   throw logic_error("Component = " + c->info().object_name() + "  " + e.what());
 //     // }
 //     // if (c->size() > 0) {
 //     //   if (!c->polygon().is_simple()) {
-//     // 	LOG4CPLUS_ERROR(logger, "Polygon is not simple after intersection removal.  Component = " << c->info().object_name() 
+//     // 	TILER_ERROR(logger, "Polygon is not simple after intersection removal.  Component = " << c->info().object_name() 
 //     // 			<< " Polygon = " << pp(c->polygon()));
 //     // 	throw logic_error("Polygon is not simple!");
 //     //   }
@@ -515,5 +533,5 @@ void get_intersecting_polygon_pairs(InputIterator begin, InputIterator end, Outp
 // 					    back_insert_iterator<list<string> > failures);
 
 
-CONTOURTILER_END_NAMESPACE
+} // namespace cvc::tiler
 
