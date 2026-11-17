@@ -29,56 +29,48 @@
 namespace cvc::tiler {
 
 template <typename InputPolygonIterator, typename OutputPolygonWithHolesIterator>
-void arrange_polygons (InputPolygonIterator           begin,
-		       InputPolygonIterator           end,
-		       OutputPolygonWithHolesIterator out);
+void arrange_polygons(InputPolygonIterator begin, InputPolygonIterator end,
+                      OutputPolygonWithHolesIterator out);
 
 } // namespace cvc::tiler
-
 
 //--------------------------------------------------------------------
 // Implementation
 
-#include "print_utils.h"
-#include "polygon_utils.h"
 #include "Contour.h"
-
-#include <iostream>
-#include <vector>
-#include <list>
-#include <stdexcept>
+#include "polygon_utils.h"
+#include "print_utils.h"
 
 #include <boost/shared_ptr.hpp>
-#include <boost/weak_ptr.hpp>
 #include <boost/tuple/tuple.hpp>
 #include <boost/unordered_map.hpp>
-
+#include <boost/weak_ptr.hpp>
+#include <iostream>
+#include <list>
+#include <stdexcept>
+#include <vector>
 
 namespace cvc::tiler {
 
 typedef boost::shared_ptr<Polygon_2> Polygon_handle;
-typedef boost::weak_ptr<Polygon_2>                      Child_handle;
-typedef boost::weak_ptr<Polygon_2>                      Parent_handle;
-typedef std::list<Child_handle>                       Children_container;
-typedef boost::unordered_map<Polygon_handle, Children_container>  Children_map;
-typedef boost::unordered_map<Polygon_handle, Parent_handle>       Parent_map;
-typedef Children_container::iterator                  iterator;
-typedef Children_container::const_iterator            const_iterator;
-  
-inline const Polygon_handle find_parent(const Point_2& point, Polygon_handle ancestor, const Children_map& _children)
-{
+typedef boost::weak_ptr<Polygon_2> Child_handle;
+typedef boost::weak_ptr<Polygon_2> Parent_handle;
+typedef std::list<Child_handle> Children_container;
+typedef boost::unordered_map<Polygon_handle, Children_container> Children_map;
+typedef boost::unordered_map<Polygon_handle, Parent_handle> Parent_map;
+typedef Children_container::iterator iterator;
+typedef Children_container::const_iterator const_iterator;
+
+inline const Polygon_handle find_parent(const Point_2 &point, Polygon_handle ancestor,
+                                        const Children_map &_children) {
   Polygon_handle parent;
-  if (ancestor->has_on_positive_side(point))
-  {
+  if (ancestor->has_on_positive_side(point)) {
     // Loop through all children of the ancestor until we find a parent.
     // This function relies on the fact that all polygons are either
-    // parent-child or sibling -- that there are no intersections of 
+    // parent-child or sibling -- that there are no intersections of
     // polygon boundaries.
-    const Children_container& children = _children.find(ancestor)->second;
-    for (const_iterator it = children.begin(); 
-	 !parent && it != children.end(); 
-	 ++it)
-    {
+    const Children_container &children = _children.find(ancestor)->second;
+    for (const_iterator it = children.begin(); !parent && it != children.end(); ++it) {
       Polygon_handle child(*it);
       parent = find_parent(point, child, _children);
     }
@@ -90,8 +82,8 @@ inline const Polygon_handle find_parent(const Point_2& point, Polygon_handle anc
 
 /// Finds polygon's parent given another polygon ancestor
 /// that is guaranteed to contain polygon.
-inline const Polygon_handle find_parent(Polygon_handle polygon, Polygon_handle ancestor, const Children_map& _children)
-{
+inline const Polygon_handle find_parent(Polygon_handle polygon, Polygon_handle ancestor,
+                                        const Children_map &_children) {
   // Call find_parent with one of the vertices
   Point_2 point = *(polygon->vertices_begin());
   return find_parent(point, ancestor, _children);
@@ -99,32 +91,32 @@ inline const Polygon_handle find_parent(Polygon_handle polygon, Polygon_handle a
 
 /// All elements in children container that are children of polygon are added to filtered.
 template <typename OutputIterator>
-void filter_children(Polygon_handle polygon, const Children_container& children, OutputIterator filtered)
-{
+void filter_children(Polygon_handle polygon, const Children_container &children,
+                     OutputIterator filtered) {
   for (const_iterator it = children.begin(); it != children.end(); ++it) {
     Polygon_handle child(*it);
-    const Point_2& child_point = *(child->vertices_begin());
+    const Point_2 &child_point = *(child->vertices_begin());
     if (polygon->has_on_positive_side(child_point)) {
       *filtered++ = *it;
     }
   }
 }
 
-inline void add_child(Polygon_handle child, Polygon_handle parent, Children_map& _children, Parent_map& _parents)
-{ 
-  // Transfer any children of the parent that should 
+inline void add_child(Polygon_handle child, Polygon_handle parent, Children_map &_children,
+                      Parent_map &_parents) {
+  // Transfer any children of the parent that should
   // now be children of the child
   Children_container lost_children;
   // find_children(child, parent, std::back_inserter(lost_children), _children);
   filter_children(child, _children[parent], std::back_inserter(lost_children));
-  Children_container& children = _children[parent];
+  Children_container &children = _children[parent];
   for (iterator it = lost_children.begin(); it != lost_children.end(); ++it) {
     Polygon_handle lost_child(*it);
     for (iterator it2 = children.begin(); it2 != children.end(); ++it2) {
       Polygon_handle tmp(*it2);
       if (lost_child == tmp) {
-	children.erase(it2);
-	break;
+        children.erase(it2);
+        break;
       }
     }
     // children.erase(find(children.begin(), children.end(), lost_child));
@@ -141,11 +133,9 @@ inline void add_child(Polygon_handle child, Polygon_handle parent, Children_map&
   }
 }
 
-inline bool is_even(int level)
-{ return (level % 2) == 0; }
+inline bool is_even(int level) { return (level % 2) == 0; }
 
-inline void force_orientations(Polygon_handle polygon, int level, Children_map& _children)
-{ 
+inline void force_orientations(Polygon_handle polygon, int level, Children_map &_children) {
   // A polygon at level 0 should be CCW, enclosing CW polygons at level 1.
   // So: even = CCW; odd = CW
   bool even = is_even(level);
@@ -153,32 +143,32 @@ inline void force_orientations(Polygon_handle polygon, int level, Children_map& 
     polygon->reverse_orientation();
   else if (polygon->is_clockwise_oriented() && even)
     polygon->reverse_orientation();
-  for (iterator it = _children[polygon].begin(); it != _children[polygon].end(); ++it)
-  {
+  for (iterator it = _children[polygon].begin(); it != _children[polygon].end(); ++it) {
     Polygon_handle child(*it);
-    force_orientations(child, level+1, _children);
+    force_orientations(child, level + 1, _children);
   }
 }
 
-inline void force_orientations(Polygon_handle root, Children_map& _children)
-{ force_orientations(root, -1, _children); }
+inline void force_orientations(Polygon_handle root, Children_map &_children) {
+  force_orientations(root, -1, _children);
+}
 
 template <class InputPolygonIterator, class OutputPolygonWithHolesIterator>
-void arrange_polygons(InputPolygonIterator begin,
-		      InputPolygonIterator end,
-		      OutputPolygonWithHolesIterator out)
-{
+void arrange_polygons(InputPolygonIterator begin, InputPolygonIterator end,
+                      OutputPolygonWithHolesIterator out) {
 
   // Throw if any boundaries of any polygons intersect
   list<Point_2> pts;
-  get_boundary_intersections<InputPolygonIterator, back_insert_iterator<list<Point_2> > >(begin, end, std::back_inserter(pts), false);
+  get_boundary_intersections<InputPolygonIterator, back_insert_iterator<list<Point_2>>>(
+      begin, end, std::back_inserter(pts), false);
   if (pts.size() > 0) {
     TILER_TRACE(logger, "The polygons' boundaries intersect at these points: ");
     for (list<Point_2>::const_iterator it = pts.begin(); it != pts.end(); ++it)
-      TILER_TRACE(logger, "  " <<  pp(*it));
+      TILER_TRACE(logger, "  " << pp(*it));
     TILER_TRACE(logger, "Polygons: ");
     for (InputPolygonIterator it = begin; it != end; ++it)
-      TILER_TRACE(logger, "  " <<  pp((*it)));;
+      TILER_TRACE(logger, "  " << pp((*it)));
+    ;
     throw runtime_error("The polygons' boundaries intersect");
   }
 
@@ -218,18 +208,17 @@ void arrange_polygons(InputPolygonIterator begin,
       Polygon_with_holes_2 pwh(*polygon);
 
       for (iterator it = _children[polygon].begin(); it != _children[polygon].end(); ++it) {
-	Polygon_handle child(*it);
-	pwh.add_hole(*child);
+        Polygon_handle child(*it);
+        pwh.add_hole(*child);
       }
 
       TILER_TRACE(logger, pp(pwh));
-      
+
       *out++ = pwh;
     }
   }
 }
 
 } // namespace cvc::tiler
-
 
 #endif

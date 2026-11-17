@@ -22,12 +22,12 @@
 // (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
 
 #include "triangle_utils.h"
+
 #include "print_utils.h"
 
 namespace cvc::tiler {
 
-void Triangle::check_valid() const
-{
+void Triangle::check_valid() const {
 
   // if (_points[0] == _points[1] || _points[1] == _points[2] || _points[0] == _points[2]) {
   //   // throw logic_error("Triangle is degenerate: " + pp_tri(*this));
@@ -52,36 +52,21 @@ void Triangle::check_valid() const
   // }
 }
 
-bool Triangle::is_degenerate() const
-{
+bool Triangle::is_degenerate() const {
   for (int i = 0; i < 3; ++i) {
-    if (xyz_equal(_points[i], _points[(i+1)%3])) {
+    if (xyz_equal(_points[i], _points[(i + 1) % 3])) {
       return true;
     }
   }
   return false;
 }
 
-std::string tri_pp(const Point_2& point)
-{
-  return pp(point);
-}
+std::string tri_pp(const Point_2 &point) { return pp(point); }
 
-std::string tri_pp(const Point_3& point)
-{
-  return pp(point);
-}
+std::string tri_pp(const Point_3 &point) { return pp(point); }
 
-std::string tri_pp(const Segment_2& segment)
-{
-  return pp(segment);
-}
+std::string tri_pp(const Segment_2 &segment) { return pp(segment); }
 
-std::string tri_pp(const Segment_3& segment)
-{
-  return pp(segment);
-}
-
+std::string tri_pp(const Segment_3 &segment) { return pp(segment); }
 
 } // namespace cvc::tiler
-

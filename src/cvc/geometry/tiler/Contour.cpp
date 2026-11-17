@@ -25,13 +25,9 @@
 
 namespace cvc::tiler {
 
-Contour::Handle Contour::create(const Polygon& polygon)
-{
-  return create(polygon, Info());
-}
+Contour::Handle Contour::create(const Polygon &polygon) { return create(polygon, Info()); }
 
-Contour::Handle Contour::create(const Polygon& polygon, const Info& info)
-{
+Contour::Handle Contour::create(const Polygon &polygon, const Info &info) {
   Handle instance(new Contour(polygon, info));
   // Why can't I access _self from here?  Even though this function
   // is static it seems like I should still be able to...  Ah, the
@@ -42,46 +38,35 @@ Contour::Handle Contour::create(const Polygon& polygon, const Info& info)
 }
 
 /// Create a copy of this contour
-Contour::Handle Contour::copy()
-{
-  return create(polygon(), info());
-}
+Contour::Handle Contour::copy() { return create(polygon(), info()); }
 
 /// Implementation detail.  Do not call.
-void Contour::set_self(Self_handle self)
-{ 
+void Contour::set_self(Self_handle self) {
   if (self.lock().get() != this)
     throw std::logic_error("Illegal self handle");
-  _self = self; 
+  _self = self;
 }
 
-Contour::Contour()
-{
-}
+Contour::Contour() {}
 
 // Defined in print_utils.cpp
-std::string pp(const Polygon_2& polygon);
+std::string pp(const Polygon_2 &polygon);
 
-Contour::Contour(const Polygon& polygon, const Info& info) : _polygon(polygon), _info(info)
-{
-  
+Contour::Contour(const Polygon &polygon, const Info &info) : _polygon(polygon), _info(info) {
+
   if (!polygon.is_simple()) {
     throw Contour_exception("Polygon is not simple in contour " + info.object_name(), info);
   }
 }
 
-Contour::~Contour()
-{
-}
+Contour::~Contour() {}
 
-std::ostream& operator<<(std::ostream& out, const Contour& contour)
-{
+std::ostream &operator<<(std::ostream &out, const Contour &contour) {
   out << contour.polygon();
   return out;
 }
 
-std::ostream& operator<<(std::ostream& out, boost::shared_ptr<Contour> contour)
-{
+std::ostream &operator<<(std::ostream &out, boost::shared_ptr<Contour> contour) {
   out << *contour;
   return out;
 }

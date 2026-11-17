@@ -209,9 +209,7 @@ public:
   Vector_2 vector() const { return Vector_2(_dx, _dy); }
   Vector_2 to_vector() const { return vector(); }
   Direction_2 operator-() const { return Direction_2(-_dx, -_dy); }
-  Direction_2 perpendicular(Orientation o) const {
-    return Direction_2(vector().perpendicular(o));
-  }
+  Direction_2 perpendicular(Orientation o) const { return Direction_2(vector().perpendicular(o)); }
   // Two directions are equal when one is a positive multiple of the other.
   bool operator==(const Direction_2 &d) const {
     return exact_orient2d(0, 0, _dx, _dy, d._dx, d._dy) == 0 && (_dx * d._dx + _dy * d._dy) > 0;
@@ -340,8 +338,12 @@ public:
   bool operator>(const Point_2 &p) const { return p < *this; }
 
   Vector_2 operator-(const Point_2 &q) const { return Vector_2(x() - q.x(), y() - q.y()); }
-  Point_2 operator+(const Vector_2 &v) const { return Point_2(x() + v.x(), y() + v.y(), z(), id()); }
-  Point_2 operator-(const Vector_2 &v) const { return Point_2(x() - v.x(), y() - v.y(), z(), id()); }
+  Point_2 operator+(const Vector_2 &v) const {
+    return Point_2(x() + v.x(), y() + v.y(), z(), id());
+  }
+  Point_2 operator-(const Vector_2 &v) const {
+    return Point_2(x() - v.x(), y() - v.y(), z(), id());
+  }
 
   bool is_valid() const { return id() != DEFAULT_ID(); }
   Bbox_2 bbox() const { return Bbox_2(x(), y(), x(), y()); }
@@ -399,8 +401,8 @@ inline Vector_3 operator-(const Point_3 &p, Origin) { return Vector_3(p.x(), p.y
 inline Point_3 operator+(Origin, const Vector_3 &v) { return Point_3(v.x(), v.y(), v.z()); }
 
 // The hashes the legacy library's containers saw: with CGAL 6, its Point_2 was CGAL::Point_2 of
-// its kernel (holding a Point_25_), hashed by CGAL's hash_value, x and y only, which agrees with its
-// x-and-y equality; Point_25.cpp's x-y-z hash was never chosen. The same arithmetic here, so
+// its kernel (holding a Point_25_), hashed by CGAL's hash_value, x and y only, which agrees with
+// its x-and-y equality; Point_25.cpp's x-y-z hash was never chosen. The same arithmetic here, so
 // boost::unordered containers keyed by points iterate in the legacy order.
 inline std::size_t hash_value(const Point_2 &p) {
   std::size_t result = boost::hash_value(p.x());
@@ -414,7 +416,9 @@ inline std::size_t hash_value(const Point_3 &p) {
   return result;
 }
 
-inline bool xy_equal(const Point_2 &a, const Point_2 &b) { return a.x() == b.x() && a.y() == b.y(); }
+inline bool xy_equal(const Point_2 &a, const Point_2 &b) {
+  return a.x() == b.x() && a.y() == b.y();
+}
 inline bool xyz_equal(const Point_2 &a, const Point_2 &b) {
   return a.x() == b.x() && a.y() == b.y() && a.z() == b.z();
 }
@@ -510,8 +514,7 @@ inline Angle angle(const Point_2 &p, const Point_2 &q, const Point_2 &r) {
 }
 
 // For collinear p, q, r: is q on the closed segment [p, r]? (strictly between, for the second)
-inline bool collinear_are_ordered_along_line(const Point_2 &p, const Point_2 &q,
-                                             const Point_2 &r) {
+inline bool collinear_are_ordered_along_line(const Point_2 &p, const Point_2 &q, const Point_2 &r) {
   if (p.x() < q.x())
     return !(r.x() < q.x());
   if (q.x() < p.x())
@@ -715,7 +718,9 @@ public:
   Vector_2 to_vector() const { return _second - _s; }
   Direction_2 direction() const { return Direction_2(to_vector()); }
   Line_2 supporting_line() const { return Line_2(_s, _second); }
-  Ray_2 opposite() const { return Ray_2(_s, Point_2(2 * _s.x() - _second.x(), 2 * _s.y() - _second.y())); }
+  Ray_2 opposite() const {
+    return Ray_2(_s, Point_2(2 * _s.x() - _second.x(), 2 * _s.y() - _second.y()));
+  }
   bool is_degenerate() const { return _s == _second; }
   // p on the ray: collinear with it and not behind its source.
   bool has_on(const Point_2 &p) const {
@@ -745,7 +750,8 @@ public:
   Number_type area() const { return tiler::area(_v[0], _v[1], _v[2]); }
   Bounded_side bounded_side(const Point_2 &p) const {
     const Orientation o = orientation();
-    const Orientation o1 = tiler::orientation(_v[0], _v[1], p), o2 = tiler::orientation(_v[1], _v[2], p),
+    const Orientation o1 = tiler::orientation(_v[0], _v[1], p),
+                      o2 = tiler::orientation(_v[1], _v[2], p),
                       o3 = tiler::orientation(_v[2], _v[0], p);
     if (o == COLLINEAR)
       return ON_UNBOUNDED_SIDE;
@@ -768,7 +774,8 @@ public:
     const Orientation o = orientation();
     if (o == COLLINEAR)
       return ON_ORIENTED_BOUNDARY;
-    return ((b == ON_BOUNDED_SIDE) == (o == COUNTERCLOCKWISE)) ? ON_POSITIVE_SIDE : ON_NEGATIVE_SIDE;
+    return ((b == ON_BOUNDED_SIDE) == (o == COUNTERCLOCKWISE)) ? ON_POSITIVE_SIDE
+                                                               : ON_NEGATIVE_SIDE;
   }
   bool has_on_positive_side(const Point_2 &p) const { return oriented_side(p) == ON_POSITIVE_SIDE; }
   bool has_on_negative_side(const Point_2 &p) const { return oriented_side(p) == ON_NEGATIVE_SIDE; }
@@ -821,7 +828,9 @@ public:
   Line_3(const Point_3 &p, const Vector_3 &v) : _p(p), _v(v) {}
   explicit Line_3(const Segment_3 &s) : _p(s.source()), _v(s.to_vector()) {}
   Point_3 point() const { return _p; }
-  Point_3 point(double t) const { return Point_3(_p.x() + t * _v.x(), _p.y() + t * _v.y(), _p.z() + t * _v.z()); }
+  Point_3 point(double t) const {
+    return Point_3(_p.x() + t * _v.x(), _p.y() + t * _v.y(), _p.z() + t * _v.z());
+  }
   Vector_3 to_vector() const { return _v; }
   bool has_on(const Point_3 &q) const { return collinear(_p, point(1.0), q); }
 
@@ -848,7 +857,9 @@ inline Number_type squared_distance(const Point_2 &p, const Line_2 &l) {
   const double d = l.a() * p.x() + l.b() * p.y() + l.c();
   return d * d / (l.a() * l.a() + l.b() * l.b());
 }
-inline Number_type squared_distance(const Line_2 &l, const Point_2 &p) { return squared_distance(p, l); }
+inline Number_type squared_distance(const Line_2 &l, const Point_2 &p) {
+  return squared_distance(p, l);
+}
 
 inline Number_type squared_distance(const Point_2 &p, const Segment_2 &s) {
   const Vector_2 d = s.target() - s.source();
@@ -862,7 +873,9 @@ inline Number_type squared_distance(const Point_2 &p, const Segment_2 &s) {
   const double cr = d.x() * w.y() - d.y() * w.x();
   return cr * cr / dd;
 }
-inline Number_type squared_distance(const Segment_2 &s, const Point_2 &p) { return squared_distance(p, s); }
+inline Number_type squared_distance(const Segment_2 &s, const Point_2 &p) {
+  return squared_distance(p, s);
+}
 
 inline Number_type squared_distance(const Point_3 &p, const Segment_3 &s) {
   const Vector_3 d = s.target() - s.source();
@@ -1043,8 +1056,12 @@ public:
       _i += n;
       return *this;
     }
-    Edge_const_iterator operator+(difference_type n) const { return Edge_const_iterator(_c, _i + n); }
-    Edge_const_iterator operator-(difference_type n) const { return Edge_const_iterator(_c, _i - n); }
+    Edge_const_iterator operator+(difference_type n) const {
+      return Edge_const_iterator(_c, _i + n);
+    }
+    Edge_const_iterator operator-(difference_type n) const {
+      return Edge_const_iterator(_c, _i - n);
+    }
     difference_type operator-(const Edge_const_iterator &o) const {
       return difference_type(_i) - difference_type(o._i);
     }
@@ -1110,7 +1127,9 @@ public:
   void clear() { _v.clear(); }
   void push_back(const Point_2 &p) { _v.push_back(p); }
   Vertex_iterator insert(Vertex_iterator pos, const Point_2 &p) { return _v.insert(pos, p); }
-  template <class It> void insert(Vertex_iterator pos, It first, It last) { _v.insert(pos, first, last); }
+  template <class It> void insert(Vertex_iterator pos, It first, It last) {
+    _v.insert(pos, first, last);
+  }
   Vertex_iterator insert(Vertex_circulator pos, const Point_2 &p) {
     return _v.insert(pos.current_iterator(), p);
   }
@@ -1121,7 +1140,9 @@ public:
       it = _v.begin();
     return Vertex_circulator(&_v, it);
   }
-  Vertex_iterator erase(Vertex_iterator first, Vertex_iterator last) { return _v.erase(first, last); }
+  Vertex_iterator erase(Vertex_iterator first, Vertex_iterator last) {
+    return _v.erase(first, last);
+  }
   void set(Vertex_iterator pos, const Point_2 &p) { *pos = p; }
   void set(Vertex_circulator pos, const Point_2 &p) { *pos.current_iterator() = p; }
 
@@ -1192,7 +1213,8 @@ public:
   Polygon_with_holes_2() {}
   explicit Polygon_with_holes_2(const Polygon_2 &outer) : _outer(outer) {}
   template <class It>
-  Polygon_with_holes_2(const Polygon_2 &outer, It first, It last) : _outer(outer), _holes(first, last) {}
+  Polygon_with_holes_2(const Polygon_2 &outer, It first, It last)
+      : _outer(outer), _holes(first, last) {}
 
   Polygon_2 &outer_boundary() { return _outer; }
   const Polygon_2 &outer_boundary() const { return _outer; }

@@ -28,11 +28,10 @@
 
 namespace cvc::tiler {
 
-class xy_pred
-{
+class xy_pred {
 public:
-  xy_pred(const Point_2& p) : _p(p) {}
-  bool operator()(const Point_2& q) { return xy_equal(_p, q); }
+  xy_pred(const Point_2 &p) : _p(p) {}
+  bool operator()(const Point_2 &q) { return xy_equal(_p, q); }
   Point_2 _p;
 };
 

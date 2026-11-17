@@ -29,6 +29,9 @@
 #ifndef __COMMON_H__
 #define __COMMON_H__
 
+#include "kernel.h"
+#include "tiler_context.h"
+
 #include <iostream>
 #include <limits>
 #include <list>
@@ -36,9 +39,6 @@
 #include <set>
 #include <string>
 #include <vector>
-
-#include "kernel.h"
-#include "tiler_context.h"
 
 namespace cvc::tiler {
 

@@ -29,14 +29,13 @@ namespace cvc::tiler {
 class Tiler_workspace;
 class Untiled_region;
 
-class Tiler_callback
-{
+class Tiler_callback {
 public:
   Tiler_callback() {}
   virtual ~Tiler_callback() {}
 
-  virtual bool untiled_region(const Untiled_region& r) { return true; }
-  virtual bool tile_added(const Tiler_workspace& w) { return true; }
+  virtual bool untiled_region(const Untiled_region &r) { return true; }
+  virtual bool tile_added(const Tiler_workspace &w) { return true; }
 };
 
 } // namespace cvc::tiler

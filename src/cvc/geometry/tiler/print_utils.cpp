@@ -21,10 +21,10 @@
 // src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
 // (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
 
+#include "print_utils.h"
+
 #include <iomanip>
 #include <sstream>
-
-#include "print_utils.h"
 
 namespace cvc::tiler {
 
@@ -32,8 +32,7 @@ namespace {
 constexpr int pp_precision = 6;
 }
 
-std::string pp(const Point_2& point)
-{
+std::string pp(const Point_2 &point) {
   std::stringstream out;
   out << std::setprecision(pp_precision);
   if (point.id() != DEFAULT_ID())
@@ -44,8 +43,7 @@ std::string pp(const Point_2& point)
   return out.str();
 }
 
-std::string pp(const Point_3& point)
-{
+std::string pp(const Point_3 &point) {
   std::stringstream out;
   out << std::setprecision(pp_precision);
   if (point.id() != DEFAULT_ID())
@@ -55,24 +53,21 @@ std::string pp(const Point_3& point)
   return out.str();
 }
 
-std::string pp(const Segment_2& segment)
-{
+std::string pp(const Segment_2 &segment) {
   std::stringstream out;
   out << std::setprecision(pp_precision);
   out << "[" << pp(segment.source()) << ", " << pp(segment.target()) << "]";
   return out.str();
 }
 
-std::string pp(const Segment_3& segment)
-{
+std::string pp(const Segment_3 &segment) {
   std::stringstream out;
   out << std::setprecision(pp_precision);
   out << "[" << pp(segment.source()) << ", " << pp(segment.target()) << "]";
   return out.str();
 }
 
-std::string pp_id(const Segment_2& segment)
-{
+std::string pp_id(const Segment_2 &segment) {
   std::stringstream out;
   size_t a = segment.source().id();
   size_t b = segment.target().id();
@@ -82,8 +77,7 @@ std::string pp_id(const Segment_2& segment)
   return out.str();
 }
 
-std::string pp_id(const Segment_3& segment)
-{
+std::string pp_id(const Segment_3 &segment) {
   std::stringstream out;
   size_t a = segment.source().id();
   size_t b = segment.target().id();
@@ -93,14 +87,12 @@ std::string pp_id(const Segment_3& segment)
   return out.str();
 }
 
-std::string pp(const Point_3& v0, const Point_3& v1)
-{
+std::string pp(const Point_3 &v0, const Point_3 &v1) {
   Segment_3 segment(v0.point_3(), v1.point_3());
   return pp(segment);
 }
 
-std::string pp(const Tiling_region& region)
-{
+std::string pp(const Tiling_region &region) {
   std::stringstream out;
   out << std::setprecision(pp_precision);
   out << region;
@@ -120,8 +112,7 @@ std::string pp(const Tiling_region& region)
 //   return out.str();
 // }
 
-std::string pp(const Polygon_2& P)
-{
+std::string pp(const Polygon_2 &P) {
   Polygon_2::Vertex_const_iterator vit;
   std::stringstream out;
   out << std::setprecision(pp_precision);
@@ -133,18 +124,17 @@ std::string pp(const Polygon_2& P)
   return out.str();
 }
 
-std::string pp(const Polygon_with_holes_2& pwh)
-{
+std::string pp(const Polygon_with_holes_2 &pwh) {
   std::stringstream out;
   out << "[Outer boundary: " << pp(pwh.outer_boundary()) << "]  ";
-  for (Polygon_with_holes_2::Hole_const_iterator it = pwh.holes_begin(); it != pwh.holes_end(); ++it) {
+  for (Polygon_with_holes_2::Hole_const_iterator it = pwh.holes_begin(); it != pwh.holes_end();
+       ++it) {
     out << "Hole: " << pp(*it) << "  ";
   }
   return out.str();
 }
 
-std::string pp(const Polyline_2& polyline)
-{
+std::string pp(const Polyline_2 &polyline) {
   Polyline_2::const_iterator vit;
   std::stringstream out;
   out << std::setprecision(pp_precision);
@@ -156,8 +146,7 @@ std::string pp(const Polyline_2& polyline)
   return out.str();
 }
 
-std::string pp(const Polyline_3& polyline)
-{
+std::string pp(const Polyline_3 &polyline) {
   Polyline_3::const_iterator vit;
   std::stringstream out;
   out << std::setprecision(pp_precision);
@@ -169,26 +158,19 @@ std::string pp(const Polyline_3& polyline)
   return out.str();
 }
 
-std::string pp(const Slice& slice)
-{
+std::string pp(const Slice &slice) {
   std::stringstream out;
   out << std::setprecision(pp_precision);
 
   list<string> components;
   slice.components(back_inserter(components));
-  for (list<string>::const_iterator it = components.begin();
-       it != components.end();
-       ++it)
-  {
+  for (list<string>::const_iterator it = components.begin(); it != components.end(); ++it) {
     out << *it << ": ";
-    for (Slice::Contour_const_iterator cit = slice.begin(*it);
-	 cit != slice.end(*it);
-	 ++cit)
-    {
+    for (Slice::Contour_const_iterator cit = slice.begin(*it); cit != slice.end(*it); ++cit) {
       out << pp((*cit)->polygon());
     }
   }
-  
+
   return out.str();
 }
 

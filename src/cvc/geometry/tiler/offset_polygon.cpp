@@ -30,27 +30,28 @@
 // contour dilated and eroded back by curation then gets its own vertices back (to within the
 // rounding), so a contour no other one touches is unchanged.
 
+#include "offset_polygon.h"
+
+#include "common.h"
+#include "planar_bridge.h"
+#include "print_utils.h"
+
 #include <algorithm>
 #include <cmath>
 #include <iterator>
 #include <sstream>
 #include <string>
 
-#include "common.h"
-#include "offset_polygon.h"
-#include "planar_bridge.h"
-#include "print_utils.h"
-
 namespace cvc::tiler {
 
 Number_type temp_round(Number_type d, int dec) {
   d *= pow((Number_type)10, (Number_type)dec);
-  d = (d < 0) ? ceil(d-0.5) : floor(d+0.5);
+  d = (d < 0) ? ceil(d - 0.5) : floor(d + 0.5);
   d /= pow((Number_type)10, (Number_type)dec);
   return d;
 }
 
-void temp_round(Polygon_2& p, int dec) {
+void temp_round(Polygon_2 &p, int dec) {
   Polygon_2::Vertex_iterator vit;
   for (vit = p.vertices_begin(); vit != p.vertices_end(); ++vit) {
     Point_2 pnt = *vit;
@@ -68,14 +69,13 @@ void temp_round(Polygon_2& p, int dec) {
 // Quantize the points and remove duplicates.  Quantize to 10 decimal
 // places (10 is arbitrary).
 //------------------------------------------------------------
-Polygon_2 fix_simple(const Polygon_2& P) 
-{
+Polygon_2 fix_simple(const Polygon_2 &P) {
   Polygon_2 ret(P);
   temp_round(ret, 10);
   Polygon_2 temp;
   for (Polygon_2::Vertex_const_iterator it = ret.vertices_begin(); it != ret.vertices_end(); ++it) {
     Point_2 p = *it;
-    if (temp.size() == 0 || (!xy_equal(temp[temp.size()-1], p) && !xy_equal(temp[0], p))) {
+    if (temp.size() == 0 || (!xy_equal(temp[temp.size() - 1], p) && !xy_equal(temp[0], p))) {
       temp.push_back(p);
     }
   }
@@ -83,8 +83,7 @@ Polygon_2 fix_simple(const Polygon_2& P)
   return ret;
 }
 
-Polygon_with_holes_2 fix_simple(const Polygon_with_holes_2& P) 
-{
+Polygon_with_holes_2 fix_simple(const Polygon_with_holes_2 &P) {
   Polygon_with_holes_2 ret(fix_simple(P.outer_boundary()));
   for (Polygon_with_holes_2::Hole_const_iterator it = P.holes_begin(); it != P.holes_end(); ++it) {
     ret.add_hole(fix_simple(*it));
@@ -99,11 +98,11 @@ Polygon_with_holes_2 fix_simple(const Polygon_with_holes_2& P)
 // polygon (with any holes the dilation closes off) the outward offset makes.
 //------------------------------------------------------------
 template <typename Out_iter>
-void offset_polygon(const Polygon_2& polygon, Number_type offset, Out_iter out) {
+void offset_polygon(const Polygon_2 &polygon, Number_type offset, Out_iter out) {
   if (polygon.size() < 3 || !polygon.is_simple()) {
     stringstream ss;
     ss << "offset_polygon: input polygon is not simple:"
-       << "  polygon = " << pp(polygon) ;
+       << "  polygon = " << pp(polygon);
     throw logic_error(ss.str());
   }
 
@@ -127,13 +126,15 @@ void offset_polygon(const Polygon_2& polygon, Number_type offset, Out_iter out) 
     offset_polygons = planar::polygon_set{offset_polygons[best]};
   }
 
-  for (const planar::polygon& op : offset_polygons) {
+  for (const planar::polygon &op : offset_polygons) {
     Polygon_with_holes_2 ret = fix_simple(from_planar(op, g, z));
     if (ret.outer_boundary().size() > 0 && !ret.outer_boundary().is_simple()) {
       stringstream ss;
-      ss << "Offset polygon is not simple.  offset = " << offset 
-         << "   Original polygon = " << pp(polygon) << "  Offset polygon = " << pp(ret.outer_boundary())
-         << "\n\n***** This is probably failing because some of the points are collinear.  Try removing "
+      ss << "Offset polygon is not simple.  offset = " << offset
+         << "   Original polygon = " << pp(polygon)
+         << "  Offset polygon = " << pp(ret.outer_boundary())
+         << "\n\n***** This is probably failing because some of the points are collinear.  Try "
+            "removing "
          << "collinear points in the contours first.  This can be done using the -e option.";
       throw runtime_error(ss.str());
     }
@@ -141,25 +142,22 @@ void offset_polygon(const Polygon_2& polygon, Number_type offset, Out_iter out) 
   }
 }
 
-Polygon_with_holes_2 offset_polygon_positive(const Polygon_2& polygon, Number_type offset)
-{
+Polygon_with_holes_2 offset_polygon_positive(const Polygon_2 &polygon, Number_type offset) {
   vector<Polygon_with_holes_2> polys;
   offset_polygon(polygon, offset, back_inserter(polys));
-  if (polys.size() != 1) throw logic_error("unexpected number of polygons");
+  if (polys.size() != 1)
+    throw logic_error("unexpected number of polygons");
   return polys[0];
 }
 
 template <typename Out_iter>
-void offset_polygon_negative(const Polygon_2& polygon, Number_type offset, Out_iter out)
-{
+void offset_polygon_negative(const Polygon_2 &polygon, Number_type offset, Out_iter out) {
   offset_polygon(polygon, offset, out);
 }
 
-template
-void offset_polygon_negative(const Polygon_2& polygon, Number_type offset, 
-                             back_insert_iterator<list<Polygon_with_holes_2> > out);
-template
-void offset_polygon_negative(const Polygon_2& polygon, Number_type offset, 
-                             back_insert_iterator<vector<Polygon_with_holes_2> > out);
+template void offset_polygon_negative(const Polygon_2 &polygon, Number_type offset,
+                                      back_insert_iterator<list<Polygon_with_holes_2>> out);
+template void offset_polygon_negative(const Polygon_2 &polygon, Number_type offset,
+                                      back_insert_iterator<vector<Polygon_with_holes_2>> out);
 
 } // namespace cvc::tiler

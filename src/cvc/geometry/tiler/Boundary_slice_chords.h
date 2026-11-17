@@ -31,8 +31,7 @@ namespace cvc::tiler {
 /// Stores boundary slice chords such that if a chord is added
 /// and it already exists, it is removed.  This way, interior
 /// chords are removed as new boundaries are added.
-class Boundary_slice_chords
-{
+class Boundary_slice_chords {
 private:
   typedef boost::unordered_map<Boundary_slice_chord, bool> Container;
 
@@ -41,51 +40,43 @@ public:
 
   ~Boundary_slice_chords() {}
 
-  void put(const Boundary_slice_chord& chord);
+  void put(const Boundary_slice_chord &chord);
 
-  void erase(const Boundary_slice_chord& chord);
+  void erase(const Boundary_slice_chord &chord);
 
   size_t size() const;
 
-  bool contains(const Boundary_slice_chord& chord);
+  bool contains(const Boundary_slice_chord &chord);
 
-  bool retired(const Segment_3& chord);
+  bool retired(const Segment_3 &chord);
 
-  template <typename OutputIterator>
-  void all(OutputIterator chords)
-  {
-    for (Container::iterator it = _chords.begin(); it != _chords.end(); ++it)
-    {
+  template <typename OutputIterator> void all(OutputIterator chords) {
+    for (Container::iterator it = _chords.begin(); it != _chords.end(); ++it) {
       *chords = it->first;
       ++chords;
     }
   }
 
-  template <typename OutputIterator>
-  void all(OutputIterator chords) const
-  {
-    for (Container::const_iterator it = _chords.begin(); it != _chords.end(); ++it)
-    {
+  template <typename OutputIterator> void all(OutputIterator chords) const {
+    for (Container::const_iterator it = _chords.begin(); it != _chords.end(); ++it) {
       *chords = it->first;
       ++chords;
     }
   }
 
-  const Boundary_slice_chord& first() const
-  {
-    for (Container::const_iterator it = _chords.begin(); it != _chords.end(); ++it)
-    {
-      const Segment_3& segment = it->first.segment();
+  const Boundary_slice_chord &first() const {
+    for (Container::const_iterator it = _chords.begin(); it != _chords.end(); ++it) {
+      const Segment_3 &segment = it->first.segment();
       if (!xy_equal(segment.source(), segment.target()))
-	return it->first;
+        return it->first;
     }
-    return _chords.begin()->first; 
+    return _chords.begin()->first;
   }
 
-  bool contains(const Point_3& p, const Point_3& q) const
-  {
+  bool contains(const Point_3 &p, const Point_3 &q) const {
     Segment_3 s(p, q);
-    Container::const_iterator it = _chords.find(Boundary_slice_chord(s, Walk_direction::FORWARD, 1));
+    Container::const_iterator it =
+        _chords.find(Boundary_slice_chord(s, Walk_direction::FORWARD, 1));
     if (it != _chords.end())
       return true;
 
@@ -97,10 +88,10 @@ public:
     return false;
   }
 
-  const Boundary_slice_chord& get_chord(const Point_3& p, const Point_3& q) const
-  {
+  const Boundary_slice_chord &get_chord(const Point_3 &p, const Point_3 &q) const {
     Segment_3 s(p, q);
-    Container::const_iterator it = _chords.find(Boundary_slice_chord(s, Walk_direction::FORWARD, 1));
+    Container::const_iterator it =
+        _chords.find(Boundary_slice_chord(s, Walk_direction::FORWARD, 1));
     if (it != _chords.end())
       return it->first;
 
@@ -112,16 +103,14 @@ public:
     throw logic_error("Chord not found");
   }
 
-  /// If the given vertex lies on any boundary slice chord, then 
+  /// If the given vertex lies on any boundary slice chord, then
   /// all boundary slice chords containing it are returned.
-  std::vector<Boundary_slice_chord> on_vertex(const Point_3& vertex) const
-  {
+  std::vector<Boundary_slice_chord> on_vertex(const Point_3 &vertex) const {
     std::vector<Boundary_slice_chord> chords;
-    for (Container::const_iterator it = _chords.begin(); it != _chords.end(); ++it)
-    {
-      const Boundary_slice_chord& chord = it->first;
+    for (Container::const_iterator it = _chords.begin(); it != _chords.end(); ++it) {
+      const Boundary_slice_chord &chord = it->first;
       if (chord.is_source(vertex))
-	chords.push_back(chord);
+        chords.push_back(chord);
     }
     return chords;
   }

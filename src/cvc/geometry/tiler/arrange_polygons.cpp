@@ -53,19 +53,20 @@
 // typedef boost::unordered_map<Polygon_handle, Parent_handle>       Parent_map;
 // typedef Children_container::iterator                  iterator;
 // typedef Children_container::const_iterator            const_iterator;
-  
-// const Polygon_handle find_parent(const Point_2& point, Polygon_handle ancestor, const Children_map& _children)
+
+// const Polygon_handle find_parent(const Point_2& point, Polygon_handle ancestor, const
+// Children_map& _children)
 // {
 //   Polygon_handle parent;
 //   if (ancestor->has_on_positive_side(point))
 //   {
 //     // Loop through all children of the ancestor until we find a parent.
 //     // This function relies on the fact that all polygons are either
-//     // parent-child or sibling -- that there are no intersections of 
+//     // parent-child or sibling -- that there are no intersections of
 //     // polygon boundaries.
 //     const Children_container& children = _children.find(ancestor)->second;
-//     for (const_iterator it = children.begin(); 
-// 	 !parent && it != children.end(); 
+//     for (const_iterator it = children.begin();
+// 	 !parent && it != children.end();
 // 	 ++it)
 //     {
 //       Polygon_handle child(*it);
@@ -79,7 +80,8 @@
 
 // /// Finds polygon's parent given another polygon ancestor
 // /// that is guaranteed to contain polygon.
-// const Polygon_handle find_parent(Polygon_handle polygon, Polygon_handle ancestor, const Children_map& _children)
+// const Polygon_handle find_parent(Polygon_handle polygon, Polygon_handle ancestor, const
+// Children_map& _children)
 // {
 //   // Call find_parent with one of the vertices
 //   Point_2 point = *(polygon->vertices_begin());
@@ -88,7 +90,8 @@
 
 // /// All elements in children container that are children of polygon are added to filtered.
 // template <typename OutputIterator>
-// void filter_children(Polygon_handle polygon, const Children_container& children, OutputIterator filtered)
+// void filter_children(Polygon_handle polygon, const Children_container& children, OutputIterator
+// filtered)
 // {
 //   for (const_iterator it = children.begin(); it != children.end(); ++it) {
 //     Polygon_handle child(*it);
@@ -99,9 +102,10 @@
 //   }
 // }
 
-// void add_child(Polygon_handle child, Polygon_handle parent, Children_map& _children, Parent_map& _parents)
-// { 
-//   // Transfer any children of the parent that should 
+// void add_child(Polygon_handle child, Polygon_handle parent, Children_map& _children, Parent_map&
+// _parents)
+// {
+//   // Transfer any children of the parent that should
 //   // now be children of the child
 //   Children_container lost_children;
 //   // find_children(child, parent, std::back_inserter(lost_children), _children);
@@ -134,7 +138,7 @@
 // { return (level % 2) == 0; }
 
 // void force_orientations(Polygon_handle polygon, int level, Children_map& _children)
-// { 
+// {
 //   // A polygon at level 0 should be CCW, enclosing CW polygons at level 1.
 //   // So: even = CCW; odd = CW
 //   bool even = is_even(level);
@@ -161,8 +165,8 @@
 
 //   // Throw if any boundaries of any polygons intersect
 //   list<Point_2> pts;
-//   get_boundary_intersections<InputPolygonIterator, back_insert_iterator<list<Point_2> > >(begin, end, std::back_inserter(pts), false);
-//   if (pts.size() > 0) {
+//   get_boundary_intersections<InputPolygonIterator, back_insert_iterator<list<Point_2> > >(begin,
+//   end, std::back_inserter(pts), false); if (pts.size() > 0) {
 //     TILER_ERROR(logger, "The polygons' boundaries intersect at these points: ");
 //     for (list<Point_2>::const_iterator it = pts.begin(); it != pts.end(); ++it)
 //       TILER_ERROR(logger, "  " <<  pp(*it));
@@ -213,7 +217,7 @@
 //       }
 
 //       TILER_TRACE(logger, pp(pwh));
-      
+
 //       *out++ = pwh;
 //     }
 //   }

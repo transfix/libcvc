@@ -153,8 +153,8 @@ Object intersection(const Line_2 &a, const Line_2 &b) {
       return make_object(a);
     return Object();
   }
-  return make_object(Point_2((a.b() * b.c() - b.b() * a.c()) / det,
-                             (b.a() * a.c() - a.a() * b.c()) / det));
+  return make_object(
+      Point_2((a.b() * b.c() - b.b() * a.c()) / det, (b.a() * a.c() - a.a() * b.c()) / det));
 }
 
 Object intersection(const Segment_2 &s, const Line_2 &l) {

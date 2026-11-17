@@ -21,7 +21,6 @@
 // src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
 // (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
 
-
 /*! \file symmetric_difference.cpp
  * Computing the symmetric difference of two polygons with holes.
  *
@@ -30,11 +29,11 @@
  * holes clockwise) without collinear vertices; verify() still splits a ring that touches itself.
  */
 
-#include <list>
-
 #include "common.h"
 #include "planar_bridge.h"
 #include "print_utils.h"
+
+#include <list>
 
 namespace cvc::tiler {
 
@@ -42,9 +41,8 @@ namespace {
 
 // P minus Q, at height z.
 template <typename Out_iter>
-void difference(const planar::polygon_set &P, const planar::polygon_set &Q,
-                const planar::grid &g, Number_type z, Out_iter out)
-{
+void difference(const planar::polygon_set &P, const planar::polygon_set &Q, const planar::grid &g,
+                Number_type z, Out_iter out) {
   for (const planar::polygon &p : planar::subtract(P, Q))
     *out++ = from_planar(p, g, z);
 }
@@ -52,9 +50,7 @@ void difference(const planar::polygon_set &P, const planar::polygon_set &Q,
 } // namespace
 
 // Split polygon at any point that there is a shared point.
-template <typename Out_iter>
-void split_at_coincident(const Polygon_2& p, Out_iter out)
-{
+template <typename Out_iter> void split_at_coincident(const Polygon_2 &p, Out_iter out) {
   // Find all coincident points
   const int n = p.size();
   map<Point_2, int> point_set;
@@ -78,11 +74,11 @@ void split_at_coincident(const Polygon_2& p, Out_iter out)
   Polygon_2 p1, p2;
   do {
     p1.push_back(p[cur]);
-    cur = (cur+1)%n;
+    cur = (cur + 1) % n;
   } while (p[cur] != p[beg]);
   do {
     p2.push_back(p[cur]);
-    cur = (cur+1)%n;
+    cur = (cur + 1) % n;
   } while (p[cur] != p[beg]);
 
   // recurse
@@ -90,60 +86,59 @@ void split_at_coincident(const Polygon_2& p, Out_iter out)
   split_at_coincident(p2, out);
 }
 
-void verify(list<Polygon_with_holes_2>& polygons)
-{
+void verify(list<Polygon_with_holes_2> &polygons) {
   typedef list<Polygon_with_holes_2>::iterator Iter;
   Iter it = polygons.begin();
   while (it != polygons.end()) {
     if (it->outer_boundary().size() == 0) {
       it = polygons.erase(it);
-    }
-    else {
+    } else {
       // First fix any non-simple holes
 
       // Erase all original holes (keep all_holes as a copy)
       list<Polygon_2> all_holes(it->holes_begin(), it->holes_end());
       while (it->holes_begin() != it->holes_end()) {
-	it->erase_hole(it->holes_begin());
+        it->erase_hole(it->holes_begin());
       }
 
       // Now go through the holes, fix each and re-add result to polygon_with_holes.
-      for (list<Polygon_2>::const_iterator hole_it = all_holes.begin(); hole_it != all_holes.end(); ++hole_it) {
-	if (!hole_it->is_simple()) {
-	  list<Polygon_2> temp;
-	  split_at_coincident(*hole_it, back_inserter(temp));
-	  for (list<Polygon_2>::const_iterator new_it = temp.begin(); new_it != temp.end(); ++new_it) {
-	    it->add_hole(*new_it);
-	  }
-	}
-	else {
-	  it->add_hole(*hole_it);
-	}
+      for (list<Polygon_2>::const_iterator hole_it = all_holes.begin(); hole_it != all_holes.end();
+           ++hole_it) {
+        if (!hole_it->is_simple()) {
+          list<Polygon_2> temp;
+          split_at_coincident(*hole_it, back_inserter(temp));
+          for (list<Polygon_2>::const_iterator new_it = temp.begin(); new_it != temp.end();
+               ++new_it) {
+            it->add_hole(*new_it);
+          }
+        } else {
+          it->add_hole(*hole_it);
+        }
       }
 
       // Now fix the outer boundary if it is non-simple.  This code currently does not
       // support fixing the outer boundary if there are holes.
       if (!it->outer_boundary().is_simple()) {
-	if (it->holes_begin() != it->holes_end()) {
-	  throw runtime_error("fixing non-simple outer boundaries not yet supported when there are holes");
-	}
-	list<Polygon_2> temp;
-	split_at_coincident(it->outer_boundary(), back_inserter(temp));
-	it = polygons.erase(it);
-	for (list<Polygon_2>::const_iterator new_it = temp.begin(); new_it != temp.end(); ++new_it) {
-	  polygons.push_back(Polygon_with_holes_2(*new_it));
-	}
-      }
-      else {
-	++it;
+        if (it->holes_begin() != it->holes_end()) {
+          throw runtime_error(
+              "fixing non-simple outer boundaries not yet supported when there are holes");
+        }
+        list<Polygon_2> temp;
+        split_at_coincident(it->outer_boundary(), back_inserter(temp));
+        it = polygons.erase(it);
+        for (list<Polygon_2>::const_iterator new_it = temp.begin(); new_it != temp.end();
+             ++new_it) {
+          polygons.push_back(Polygon_with_holes_2(*new_it));
+        }
+      } else {
+        ++it;
       }
     }
   }
 }
 
 template <typename Out_iter>
-void polygon_difference(const Polygon_2& P, const Polygon_2& Q, 
-			Out_iter P_out, Out_iter Q_out) {
+void polygon_difference(const Polygon_2 &P, const Polygon_2 &Q, Out_iter P_out, Out_iter Q_out) {
   TILER_TRACE(logger, "P = " << pp(P));
   TILER_TRACE(logger, "Q = " << pp(Q));
 
@@ -172,16 +167,16 @@ void polygon_difference(const Polygon_2& P, const Polygon_2& Q,
   }
 }
 
-template
-void polygon_difference(const Polygon_2& P, const Polygon_2& Q, 
-			back_insert_iterator<vector<Polygon_with_holes_2> > P_out, back_insert_iterator<vector<Polygon_with_holes_2> > Q_out);
-template
-void polygon_difference(const Polygon_2& P, const Polygon_2& Q, 
-			back_insert_iterator<list<Polygon_with_holes_2> > P_out, back_insert_iterator<list<Polygon_with_holes_2> > Q_out);
+template void polygon_difference(const Polygon_2 &P, const Polygon_2 &Q,
+                                 back_insert_iterator<vector<Polygon_with_holes_2>> P_out,
+                                 back_insert_iterator<vector<Polygon_with_holes_2>> Q_out);
+template void polygon_difference(const Polygon_2 &P, const Polygon_2 &Q,
+                                 back_insert_iterator<list<Polygon_with_holes_2>> P_out,
+                                 back_insert_iterator<list<Polygon_with_holes_2>> Q_out);
 
 template <typename Out_iter>
-void polygon_difference(const Polygon_with_holes_2& P, const Polygon_with_holes_2& Q, 
-			Out_iter P_out, Out_iter Q_out) {
+void polygon_difference(const Polygon_with_holes_2 &P, const Polygon_with_holes_2 &Q,
+                        Out_iter P_out, Out_iter Q_out) {
   Number_type z = P.outer_boundary()[0].z();
   const planar::grid g = fit_grid(P.bbox() + Q.bbox());
   const planar::polygon_set bso_P{to_planar(P, g)};
@@ -204,8 +199,8 @@ void polygon_difference(const Polygon_with_holes_2& P, const Polygon_with_holes_
   }
 }
 
-template
-void polygon_difference(const Polygon_with_holes_2& P, const Polygon_with_holes_2& Q, 
-			back_insert_iterator<list<Polygon_with_holes_2> > P_out, back_insert_iterator<list<Polygon_with_holes_2> > Q_out);
+template void polygon_difference(const Polygon_with_holes_2 &P, const Polygon_with_holes_2 &Q,
+                                 back_insert_iterator<list<Polygon_with_holes_2>> P_out,
+                                 back_insert_iterator<list<Polygon_with_holes_2>> Q_out);
 
 } // namespace cvc::tiler

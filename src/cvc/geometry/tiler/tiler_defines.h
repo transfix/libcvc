@@ -24,14 +24,13 @@
 #ifndef __TILER_DEFINES_H__
 #define __TILER_DEFINES_H__
 
-#include "common.h"
-#include "common.h"
-#include "Vertex_map.h"
 #include "Correspondences.h"
+#include "OTV_pair.h"
 #include "Tiling_region.h"
 #include "Vertex_completion_map.h"
-#include "OTV_pair.h"
+#include "Vertex_map.h"
 #include "Vertices.h"
+#include "common.h"
 
 namespace cvc::tiler {
 

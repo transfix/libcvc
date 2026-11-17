@@ -21,63 +21,50 @@
 // src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
 // (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
 
-#ifndef CEP_INTERSECTION_LINE_3_LINE_3_H    // -*- C++ -*-
+#ifndef CEP_INTERSECTION_LINE_3_LINE_3_H // -*- C++ -*-
 #define CEP_INTERSECTION_LINE_3_LINE_3_H
 
 #include "../common.h"
 
-namespace cvc::tiler { namespace CEP {
+namespace cvc::tiler {
+namespace CEP {
 namespace intersection {
 
-    namespace Line_3_Line_3 {
+namespace Line_3_Line_3 {
 
-        inline
-        Object
-        coplanar_nonparallel_intersection( const Point_3& p,
-                                           const Point_3& q,
-                                           const Point_3& r,
-                                           const Point_3& s )
-        {
-            
+inline Object coplanar_nonparallel_intersection(const Point_3 &p, const Point_3 &q,
+                                                const Point_3 &r, const Point_3 &s) {
 
-            typedef Number_type FT;
+  typedef Number_type FT;
 
-            Vector_3 d1 = q - p;
-            Vector_3 d2 = s - r;
-            Vector_3 b = r - p;
+  Vector_3 d1 = q - p;
+  Vector_3 d2 = s - r;
+  Vector_3 b = r - p;
 
-            FT num = (d2*d2) * (d1*b) - (d1*d2) * (d2*b);
-            FT den = (d1*d1) * (d2*d2) - (d1*d2) * (d1*d2);
+  FT num = (d2 * d2) * (d1 * b) - (d1 * d2) * (d2 * b);
+  FT den = (d1 * d1) * (d2 * d2) - (d1 * d2) * (d1 * d2);
 
-            FT zero(0);
-            
+  FT zero(0);
 
-            Point_3 i_point = p + d1 * num / den;
-            return make_object(i_point);
-        }
-
-        inline
-        Object
-        coplanar_intersection( const Point_3& p,
-                               const Point_3& q,
-                               const Point_3& r,
-                               const Point_3& s )
-        {
-            
-    
-            Vector_3 d1 = q-p;
-            Vector_3 d2 = s-r;
-
-            if ( cross_product(d1, d2) == Vector_3(0, 0, 0) )
-                return Object();
-
-            return coplanar_nonparallel_intersection(p,q,r,s);
-        }
-        
-        
-    }
+  Point_3 i_point = p + d1 * num / den;
+  return make_object(i_point);
 }
+
+inline Object coplanar_intersection(const Point_3 &p, const Point_3 &q, const Point_3 &r,
+                                    const Point_3 &s) {
+
+  Vector_3 d1 = q - p;
+  Vector_3 d2 = s - r;
+
+  if (cross_product(d1, d2) == Vector_3(0, 0, 0))
+    return Object();
+
+  return coplanar_nonparallel_intersection(p, q, r, s);
 }
+
+} // namespace Line_3_Line_3
+} // namespace intersection
+} // namespace CEP
 } // namespace cvc::tiler
 
 #endif

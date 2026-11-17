@@ -22,56 +22,51 @@
 // (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
 
 #include "Boundary_slice_chords.h"
+
 #include "print_utils.h"
 
 namespace cvc::tiler {
 
-void Boundary_slice_chords::put(const Boundary_slice_chord& chord)
-{
-  if (!contains(chord))
-  {
-    TILER_TRACE(_logger, "Adding (" << chord.segment().source().id() << "--" 
-		    << chord.segment().target().id() << " - " << chord.seg_z() << ")");
+void Boundary_slice_chords::put(const Boundary_slice_chord &chord) {
+  if (!contains(chord)) {
+    TILER_TRACE(_logger, "Adding (" << chord.segment().source().id() << "--"
+                                    << chord.segment().target().id() << " - " << chord.seg_z()
+                                    << ")");
     _chords[chord] = true;
-  }
-  else
-  {
-    TILER_TRACE(_logger, "Removing (" << chord.segment().source().id() << "--" 
-		    << chord.segment().target().id() << " - " << chord.seg_z() << ")");
+  } else {
+    TILER_TRACE(_logger, "Removing (" << chord.segment().source().id() << "--"
+                                      << chord.segment().target().id() << " - " << chord.seg_z()
+                                      << ")");
     erase(chord);
   }
   dump();
 }
 
-void Boundary_slice_chords::erase(const Boundary_slice_chord& chord)
-{
+void Boundary_slice_chords::erase(const Boundary_slice_chord &chord) {
   _chords.erase(chord);
   _chords.erase(chord.opposite());
 
   _retired[chord.segment()] = true;
 }
 
-bool Boundary_slice_chords::retired(const Segment_3& chord)
-{
-  return (_retired.find(chord) != _retired.end() || _retired.find(chord.opposite()) != _retired.end());
+bool Boundary_slice_chords::retired(const Segment_3 &chord) {
+  return (_retired.find(chord) != _retired.end() ||
+          _retired.find(chord.opposite()) != _retired.end());
 }
 
-size_t Boundary_slice_chords::size() const
-{ return _chords.size(); }
+size_t Boundary_slice_chords::size() const { return _chords.size(); }
 
-bool Boundary_slice_chords::contains(const Boundary_slice_chord& chord)
-{
+bool Boundary_slice_chords::contains(const Boundary_slice_chord &chord) {
   return (_chords.find(chord) != _chords.end() || _chords.find(chord.opposite()) != _chords.end());
 }
 
-void Boundary_slice_chords::dump() const
-{
+void Boundary_slice_chords::dump() const {
   stringstream ss;
   ss << "Boundary slice chords: [";
-  for (Container::const_iterator it = _chords.begin(); it != _chords.end(); ++it)
-  {
+  for (Container::const_iterator it = _chords.begin(); it != _chords.end(); ++it) {
     if (it->second)
-      ss << " (" << it->first.segment().source().id() << "--" << it->first.segment().target().id() << ")";
+      ss << " (" << it->first.segment().source().id() << "--" << it->first.segment().target().id()
+         << ")";
   }
   ss << " ]";
   TILER_TRACE(_logger, ss.str());

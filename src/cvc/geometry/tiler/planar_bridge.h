@@ -29,9 +29,9 @@
 #ifndef CVC_GEOMETRY_TILER_PLANAR_BRIDGE_H
 #define CVC_GEOMETRY_TILER_PLANAR_BRIDGE_H
 
-#include <cvc/geometry/planar.h>
-
 #include "common.h"
+
+#include <cvc/geometry/planar.h>
 
 namespace cvc::tiler {
 

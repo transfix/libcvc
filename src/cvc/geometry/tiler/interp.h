@@ -28,10 +28,11 @@
 
 namespace cvc::tiler {
 
-Number_type interpolate(const Polygon_2& P, const Point_3& p);
+Number_type interpolate(const Polygon_2 &P, const Point_3 &p);
 
 template <typename Poly_iter, typename Iter>
-Number_type interpolate(Poly_iter poly_begin, Poly_iter poly_end, Iter points_begin, Iter points_end, Number_type zmid);
+Number_type interpolate(Poly_iter poly_begin, Poly_iter poly_end, Iter points_begin,
+                        Iter points_end, Number_type zmid);
 
 } // namespace cvc::tiler
 

@@ -27,21 +27,19 @@
 // same weights to 1e-14). The legacy file also set up CGAL's QP solver and Sibson gradient fitting,
 // which it never used; they are gone.
 
+#include "interp.h"
+
+#include "planar_bridge.h"
+#include "print_utils.h"
+
 #include <iterator>
 #include <limits>
 #include <list>
 #include <vector>
 
-#include "interp.h"
-#include "planar_bridge.h"
-#include "print_utils.h"
-
 namespace cvc::tiler {
 
-Number_type interpolate(const Polygon_2& P, const Point_3& point)
-{
-  return 0;
-}
+Number_type interpolate(const Polygon_2 &P, const Point_3 &point) { return 0; }
 
 //------------------------------------------------------------------------------
 // interpolate
@@ -50,8 +48,8 @@ Number_type interpolate(const Polygon_2& P, const Point_3& point)
 /// interpolation of the z values of the polygon's vertices and of the points already given one.
 //------------------------------------------------------------------------------
 template <typename Poly_iter, typename Iter>
-Number_type interpolate(Poly_iter poly_begin, Poly_iter poly_end, Iter points_begin, Iter points_end, Number_type zmid)
-{
+Number_type interpolate(Poly_iter poly_begin, Poly_iter poly_end, Iter points_begin,
+                        Iter points_end, Number_type zmid) {
   const Number_type nan = std::numeric_limits<Number_type>::quiet_NaN();
   typedef typename iterator_traits<Iter>::value_type point_type;
 
@@ -71,13 +69,13 @@ Number_type interpolate(Poly_iter poly_begin, Poly_iter poly_end, Iter points_be
   }
 
   for (Iter it = points_begin; it != points_end; ++it) {
-    point_type& p = *it;
+    point_type &p = *it;
     p.z() = nan;
   }
 
   for (Iter it = points_begin; it != points_end; ++it) {
     TILER_TRACE(logger, "interpolating point: " << pp(*it));
-    point_type& p = *it;
+    point_type &p = *it;
     std::vector<planar::point> pts = known;
     std::vector<double> values = known_z;
     for (Iter o_it = points_begin; o_it != points_end; ++o_it) {
@@ -92,11 +90,13 @@ Number_type interpolate(Poly_iter poly_begin, Poly_iter poly_end, Iter points_be
   return 0;
 }
 
-template
-Number_type interpolate(Polygon_2::Vertex_iterator poly_begin, Polygon_2::Vertex_iterator poly_end, 
-			list<Point_2>::iterator points_begin, list<Point_2>::iterator points_end, Number_type zmid);
-template
-Number_type interpolate(list<Point_2>::iterator poly_begin, list<Point_2>::iterator poly_end, 
-			list<Point_2>::iterator points_begin, list<Point_2>::iterator points_end, Number_type zmid);
+template Number_type interpolate(Polygon_2::Vertex_iterator poly_begin,
+                                 Polygon_2::Vertex_iterator poly_end,
+                                 list<Point_2>::iterator points_begin,
+                                 list<Point_2>::iterator points_end, Number_type zmid);
+template Number_type interpolate(list<Point_2>::iterator poly_begin,
+                                 list<Point_2>::iterator poly_end,
+                                 list<Point_2>::iterator points_begin,
+                                 list<Point_2>::iterator points_end, Number_type zmid);
 
 } // namespace cvc::tiler

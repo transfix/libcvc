@@ -27,7 +27,7 @@
 #include "common.h"
 namespace cvc::tiler {
 
-std::pair<Polygon_2, Polygon_2> augment1(const Polygon_2& P, const Polygon_2& Q);
+std::pair<Polygon_2, Polygon_2> augment1(const Polygon_2 &P, const Polygon_2 &Q);
 
 } // namespace cvc::tiler
 

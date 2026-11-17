@@ -24,19 +24,17 @@
 #ifndef __CONTOUR_H__
 #define __CONTOUR_H__
 
-#include <iostream>
-#include <vector>
-#include <list>
-#include <stdexcept>
+#include "Contour_info.h"
+#include "common.h"
+#include "polygon_utils.h"
 
+#include <boost/lexical_cast.hpp>
 #include <boost/shared_ptr.hpp>
 #include <boost/weak_ptr.hpp>
-#include <boost/lexical_cast.hpp>
-
-#include "common.h"
-
-#include "polygon_utils.h"
-#include "Contour_info.h"
+#include <iostream>
+#include <list>
+#include <stdexcept>
+#include <vector>
 
 namespace cvc::tiler {
 
@@ -44,29 +42,26 @@ namespace cvc::tiler {
 /// if walk_direction is FORWARD and the contour is CCW, then the
 /// direction to walk is CCW.  If walk_direction is backward and the
 /// contour is CCW, then the direction to walk is CW.
-struct Walk_direction_def
-{
+struct Walk_direction_def {
   enum type { FORWARD, BACKWARD };
 };
 
 typedef Right_enum<Walk_direction_def> Walk_direction;
 
-class Contour_exception : public std::runtime_error
-{
+class Contour_exception : public std::runtime_error {
 public:
   template <typename Info>
-  Contour_exception(const std::string& error, const Info& info) : std::runtime_error(error)
-  {
+  Contour_exception(const std::string &error, const Info &info) : std::runtime_error(error) {
     _slice = boost::lexical_cast<std::string>(info.slice());
     _object_name = info.object_name();
   }
 
   ~Contour_exception() throw() {}
 
-  std::string& slice() { return _slice; }
-  const std::string& slice() const { return _slice; }
-  std::string& object_name() { return _object_name; }
-  const std::string& object_name() const { return _object_name; }
+  std::string &slice() { return _slice; }
+  const std::string &slice() const { return _slice; }
+  std::string &object_name() { return _object_name; }
+  const std::string &object_name() const { return _object_name; }
 
 private:
   std::string _slice;
@@ -76,27 +71,26 @@ private:
 //--------------------------------------------------------
 // Contour class
 //--------------------------------------------------------
-class Contour
-{
+class Contour {
 public:
-  typedef Contour_info<Number_type>                     Info;
-  typedef Contour                                       Self;
-  typedef boost::shared_ptr<Self>                       Handle;
-  typedef Polygon_2                Polygon;
-  typedef PolygonTraits                                 Kernel;
-  typedef Info                                          Info_type;
-  typedef PolygonTraits::Point_2                        Point;
+  typedef Contour_info<Number_type> Info;
+  typedef Contour Self;
+  typedef boost::shared_ptr<Self> Handle;
+  typedef Polygon_2 Polygon;
+  typedef PolygonTraits Kernel;
+  typedef Info Info_type;
+  typedef PolygonTraits::Point_2 Point;
 
 private:
-  typedef boost::weak_ptr<Self>                         Self_handle;
+  typedef boost::weak_ptr<Self> Self_handle;
 
 public:
   //--------------------------------------------------------
   // Lifetime
   //--------------------------------------------------------
 
-  static Handle create(const Polygon& polygon);
-  static Handle create(const Polygon& polygon, const Info& info);
+  static Handle create(const Polygon &polygon);
+  static Handle create(const Polygon &polygon, const Info &info);
 
   /// Create a copy of this contour
   Handle copy();
@@ -108,69 +102,58 @@ public:
   ~Contour();
 
 private:
-  Contour(const Polygon& polygon, const Info& info);
+  Contour(const Polygon &polygon, const Info &info);
 
 public:
-
   //--------------------------------------------------------
   // Accessors
   //--------------------------------------------------------
 
-  Polygon& polygon()
-  { return _polygon; }
-  
-  const Polygon& polygon() const
-  { return _polygon; }
-  
-  const size_t size() const
-  { return _polygon.size(); }
+  Polygon &polygon() { return _polygon; }
 
-  Info& info()
-  { return _info; }
+  const Polygon &polygon() const { return _polygon; }
 
-  const Info& info() const
-  { return _info; }
+  const size_t size() const { return _polygon.size(); }
 
-  Number_type slice() const
-  { return _info.slice(); }
+  Info &info() { return _info; }
+
+  const Info &info() const { return _info; }
+
+  Number_type slice() const { return _info.slice(); }
 
   //--------------------------------------------------------
   // Modifiers
   //--------------------------------------------------------
 
-  void force_counterclockwise()
-  { if (is_clockwise_oriented()) reverse_orientation(); }
+  void force_counterclockwise() {
+    if (is_clockwise_oriented())
+      reverse_orientation();
+  }
 
-  void force_clockwise()
-  { if (is_counterclockwise_oriented()) reverse_orientation(); }
+  void force_clockwise() {
+    if (is_counterclockwise_oriented())
+      reverse_orientation();
+  }
 
   //--------------------------------------------------------
   // Convenience functions
   //--------------------------------------------------------
-  
-  bool is_counterclockwise_oriented()
-  { return _polygon.is_counterclockwise_oriented(); }
 
-  bool is_clockwise_oriented()
-  { return _polygon.is_clockwise_oriented(); }
+  bool is_counterclockwise_oriented() { return _polygon.is_counterclockwise_oriented(); }
 
-  bool is_collinear_oriented()
-  { return _polygon.is_collinear_oriented(); }
+  bool is_clockwise_oriented() { return _polygon.is_clockwise_oriented(); }
 
-  bool has_on_positive_side(Point q)
-  { return _polygon.has_on_positive_side(q); }
+  bool is_collinear_oriented() { return _polygon.is_collinear_oriented(); }
 
-  bool has_on_negative_side(Point q)
-  { return _polygon.has_on_negative_side(q); }
+  bool has_on_positive_side(Point q) { return _polygon.has_on_positive_side(q); }
 
-  bool has_on_boundary(Point q)
-  { return _polygon.has_on_boundary(q); }
+  bool has_on_negative_side(Point q) { return _polygon.has_on_negative_side(q); }
 
-  bool has_on_bounded_side(Point q) 
-  { return _polygon.has_on_bounded_side(q); }
+  bool has_on_boundary(Point q) { return _polygon.has_on_boundary(q); }
 
-  void reverse_orientation()
-  { _polygon.reverse_orientation(); }
+  bool has_on_bounded_side(Point q) { return _polygon.has_on_bounded_side(q); }
+
+  void reverse_orientation() { _polygon.reverse_orientation(); }
 
 private:
   Polygon _polygon;
@@ -184,8 +167,8 @@ typedef Contour::Handle Contour_handle;
 // Other functions
 //-------------------------------------
 
-std::ostream& operator<<(std::ostream& out, const Contour& contour);
-std::ostream& operator<<(std::ostream& out, boost::shared_ptr<Contour> contour);
+std::ostream &operator<<(std::ostream &out, const Contour &contour);
+std::ostream &operator<<(std::ostream &out, boost::shared_ptr<Contour> contour);
 
 } // namespace cvc::tiler
 

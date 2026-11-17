@@ -33,42 +33,33 @@ namespace cvc::tiler {
 ///
 /// No checks are made for overflow!  This class should not be used for critical
 /// calculations.
-template <typename T>
-class Statistics
-{
+template <typename T> class Statistics {
 public:
   Statistics() : _N(0), _sum(0), _squares(0) {}
   ~Statistics() {}
 
-  void add(T sample)
-  {
+  void add(T sample) {
     ++_N;
     _sum += sample;
     _squares += (sample * sample);
-    _min = (_min<sample)?_min:sample;
-    _max = (_max>sample)?_max:sample;
+    _min = (_min < sample) ? _min : sample;
+    _max = (_max > sample) ? _max : sample;
   }
 
-  size_t N() const
-  { return _N; }
+  size_t N() const { return _N; }
 
-  T mean() const
-  { return _sum / (T) _N; }
+  T mean() const { return _sum / (T)_N; }
 
-  T variance() const
-  {
+  T variance() const {
     T avg = mean();
-    return _squares / (T) _N - avg * avg;
+    return _squares / (T)_N - avg * avg;
   }
 
-  T std_dev() const
-  { return sqrt(variance()); }
+  T std_dev() const { return sqrt(variance()); }
 
-  T min() const
-  { return _min; }
+  T min() const { return _min; }
 
-  T max() const
-  { return _max; }
+  T max() const { return _max; }
 
 private:
   size_t _N;
@@ -78,11 +69,10 @@ private:
   T _max;
 };
 
-template <typename T>
-std::ostream& operator<<(std::ostream& out, const Statistics<T>& stats)
-{
-  out << "Sample size = " << stats.N() << " Average = " << stats.mean() << " Standard deviation = " << stats.std_dev()
-    << " Min = " << stats.min() << " Max = " << stats.max();
+template <typename T> std::ostream &operator<<(std::ostream &out, const Statistics<T> &stats) {
+  out << "Sample size = " << stats.N() << " Average = " << stats.mean()
+      << " Standard deviation = " << stats.std_dev() << " Min = " << stats.min()
+      << " Max = " << stats.max();
   return out;
 }
 

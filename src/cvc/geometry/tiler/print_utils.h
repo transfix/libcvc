@@ -29,36 +29,34 @@
 #ifndef CVC_TILER_PRINT_UTILS_H
 #define CVC_TILER_PRINT_UTILS_H
 
-#include <sstream>
-#include <string>
-
 #include "Contour.h"
 #include "Polyline.h"
 #include "Segment_3_undirected.h"
 #include "Slice.h"
 #include "Tiling_region.h"
 
+#include <sstream>
+#include <string>
+
 namespace cvc::tiler {
 
-std::string pp(const Point_2& point);
-std::string pp(const Point_3& point);
-std::string pp(const Segment_2& segment);
-std::string pp(const Segment_3& segment);
-inline std::string pp(const Segment_3_undirected& segment) { return pp(segment.segment()); }
-std::string pp_id(const Segment_2& segment);
-std::string pp_id(const Segment_3& segment);
-inline std::string pp_id(const Segment_3_undirected& segment) { return pp_id(segment.segment()); }
-std::string pp(const Point_3& v0, const Point_3& v1);
-std::string pp(const Tiling_region& region);
-std::string pp(const Polygon_2& polygon);
-std::string pp(const Polygon_with_holes_2& pwh);
-std::string pp(const Polyline_2& polyline);
-std::string pp(const Polyline_3& polyline);
-std::string pp(const Slice& slice);
+std::string pp(const Point_2 &point);
+std::string pp(const Point_3 &point);
+std::string pp(const Segment_2 &segment);
+std::string pp(const Segment_3 &segment);
+inline std::string pp(const Segment_3_undirected &segment) { return pp(segment.segment()); }
+std::string pp_id(const Segment_2 &segment);
+std::string pp_id(const Segment_3 &segment);
+inline std::string pp_id(const Segment_3_undirected &segment) { return pp_id(segment.segment()); }
+std::string pp(const Point_3 &v0, const Point_3 &v1);
+std::string pp(const Tiling_region &region);
+std::string pp(const Polygon_2 &polygon);
+std::string pp(const Polygon_with_holes_2 &pwh);
+std::string pp(const Polyline_2 &polyline);
+std::string pp(const Polyline_3 &polyline);
+std::string pp(const Slice &slice);
 
-template <typename Tri>
-std::string pp_tri(const Tri& triangle)
-{
+template <typename Tri> std::string pp_tri(const Tri &triangle) {
   std::stringstream out;
   out << "[ ";
   for (int i = 0; i < 3; ++i)
@@ -67,9 +65,7 @@ std::string pp_tri(const Tri& triangle)
   return out.str();
 }
 
-template <typename Curve>
-std::string pp_curve(const Curve& curve)
-{
+template <typename Curve> std::string pp_curve(const Curve &curve) {
   typename Curve::const_iterator vit;
   std::stringstream out;
   out << "[ ";

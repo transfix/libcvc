@@ -5,11 +5,23 @@
 
 #include <log4cplus/logger.h>
 
-#define LOG4CPLUS_TRACE(logger, msg) do { } while (0)
-#define LOG4CPLUS_DEBUG(logger, msg) do { } while (0)
-#define LOG4CPLUS_INFO(logger, msg) do { } while (0)
-#define LOG4CPLUS_WARN(logger, msg) do { } while (0)
-#define LOG4CPLUS_ERROR(logger, msg) do { } while (0)
-#define LOG4CPLUS_FATAL(logger, msg) do { } while (0)
+#define LOG4CPLUS_TRACE(logger, msg)                                                               \
+  do {                                                                                             \
+  } while (0)
+#define LOG4CPLUS_DEBUG(logger, msg)                                                               \
+  do {                                                                                             \
+  } while (0)
+#define LOG4CPLUS_INFO(logger, msg)                                                                \
+  do {                                                                                             \
+  } while (0)
+#define LOG4CPLUS_WARN(logger, msg)                                                                \
+  do {                                                                                             \
+  } while (0)
+#define LOG4CPLUS_ERROR(logger, msg)                                                               \
+  do {                                                                                             \
+  } while (0)
+#define LOG4CPLUS_FATAL(logger, msg)                                                               \
+  do {                                                                                             \
+  } while (0)
 
 #endif

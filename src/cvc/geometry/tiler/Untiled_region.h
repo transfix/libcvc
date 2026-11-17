@@ -25,16 +25,17 @@
 #define __UNTILED_REGION_H__
 
 #include "common.h"
+
 #include <list>
 
 namespace cvc::tiler {
 
 /// Basically is a collection of points representing a polygon.
 /// Useful when it needs to support points directly above another.
-class Untiled_region
-{
+class Untiled_region {
 private:
   typedef std::list<Point_3> Container;
+
 public:
   typedef Container::iterator iterator;
   typedef Container::const_iterator const_iterator;
@@ -42,22 +43,18 @@ public:
 public:
   Untiled_region() {}
 
-  template <typename PointIterator>
-  Untiled_region(PointIterator begin, PointIterator end)
-  {
+  template <typename PointIterator> Untiled_region(PointIterator begin, PointIterator end) {
     insert(begin, end);
   }
 
   ~Untiled_region() {}
 
-  template <typename PointIterator>
-  void insert(PointIterator begin, PointIterator end)
-  {
+  template <typename PointIterator> void insert(PointIterator begin, PointIterator end) {
     for (PointIterator it = begin; it != end; ++it)
       push_back(it->point_3());
   }
 
-  void push_back(const Point_3& point) { _points.push_back(point); }
+  void push_back(const Point_3 &point) { _points.push_back(point); }
 
   iterator begin() { return _points.begin(); }
   const_iterator begin() const { return _points.begin(); }
@@ -69,10 +66,7 @@ public:
   Container::reverse_iterator rend() { return _points.rend(); }
   Container::const_reverse_iterator rend() const { return _points.rend(); }
 
-  void reverse_orientation()
-  {
-    _points = Container(_points.rbegin(), _points.rend());
-  }
+  void reverse_orientation() { _points = Container(_points.rbegin(), _points.rend()); }
 
   size_t size() const { return _points.size(); }
   bool empty() const { return _points.empty(); }

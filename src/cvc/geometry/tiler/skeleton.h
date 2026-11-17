@@ -24,20 +24,19 @@
 #ifndef __SKELETON_H__
 #define __SKELETON_H__
 
-#include <list>
-
-#include "common.h"
 #include "Tiler_workspace.h"
 #include "Untiled_region.h"
+#include "common.h"
+
+#include <list>
 
 namespace cvc::tiler {
 
-
 template <typename Tile_iterator, typename ID_factory>
-void medial_axis_stable(const Untiled_region& region, Number_type zmid, Tile_iterator tiles, 
-			ID_factory& id_factory, Tiler_workspace& tw);
+void medial_axis_stable(const Untiled_region &region, Number_type zmid, Tile_iterator tiles,
+                        ID_factory &id_factory, Tiler_workspace &tw);
 
-void to_simple(const Untiled_region& region);
+void to_simple(const Untiled_region &region);
 
 } // namespace cvc::tiler
 

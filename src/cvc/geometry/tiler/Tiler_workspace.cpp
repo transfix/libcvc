@@ -22,54 +22,49 @@
 // (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
 
 #include "Tiler_workspace.h"
+
 #include "print_utils.h"
-#include <iostream>
 #include "segment_utils.h"
+
+#include <iostream>
 
 namespace cvc::tiler {
 
-
-void Tiler_workspace::add_tile(Point_3 p0, Point_3 p1, Point_3 p2)
-{
+void Tiler_workspace::add_tile(Point_3 p0, Point_3 p1, Point_3 p2) {
   Contour_handle c0 = contour(p0);
   Contour_handle c1 = contour(p1);
   Contour_handle c2 = contour(p2);
 
   // Only swap if we're doing a contour-to-contour tile.  Don't do anything
   // if it is a contour-to-midslice tile
-  if (c0 && c1 && c2 && c0 == c1 && p0.z() > p2.z())
-  {
+  if (c0 && c1 && c2 && c0 == c1 && p0.z() > p2.z()) {
     TILER_TRACE(logger_tw, "Swapping before tile insert" << pp(p0) << ", " << pp(p2));
     std::swap(p0, p2);
   }
 
-//   add_tile(Tile_handle(new Tile(p0, p1, p2, *this)));
+  //   add_tile(Tile_handle(new Tile(p0, p1, p2, *this)));
   add_tile(Tile_handle(new Tile(p0, p1, p2)));
 }
 
-void Tiler_workspace::add_tile(Tile_handle t)
-{
+void Tiler_workspace::add_tile(Tile_handle t) {
   _tiles.push_back(t);
   Contour_list contours = find_contours(t);
-  for (Contour_list::iterator it = contours.begin();
-       it != contours.end();
-       ++it)
-  {
+  for (Contour_list::iterator it = contours.begin(); it != contours.end(); ++it) {
     _contour2tile[*it].push_back(t);
   }
 
-  Tile& tile = *t;
-  TILER_TRACE(logger_tw, "Inserted tile: " << pp(tile[0]) << ", " << pp(tile[1]) << ", " << pp(tile[2]));
+  Tile &tile = *t;
+  TILER_TRACE(logger_tw,
+              "Inserted tile: " << pp(tile[0]) << ", " << pp(tile[1]) << ", " << pp(tile[2]));
 
   _callback->tile_added(*this);
 }
 
 /// Returns all unique contours touching this tile
-Contour_list Tiler_workspace::find_contours(Tile_handle tile_h)
-{
+Contour_list Tiler_workspace::find_contours(Tile_handle tile_h) {
   Contour_list contours;
 
-  Tile& tile = *tile_h;
+  Tile &tile = *tile_h;
   Contour_handle c0 = contour(tile[0]);
   Contour_handle c1 = contour(tile[1]);
   Contour_handle c2 = contour(tile[2]);
@@ -82,8 +77,7 @@ Contour_list Tiler_workspace::find_contours(Tile_handle tile_h)
   return contours;
 }
 
-void Tiler_workspace::remove(Tile_handle tile)
-{
+void Tiler_workspace::remove(Tile_handle tile) {
   _tiles.remove(tile);
 
   Contour_list contours = find_contours(tile);
@@ -91,8 +85,7 @@ void Tiler_workspace::remove(Tile_handle tile)
     _contour2tile[*it].remove(tile);
 }
 
-void Tiler_workspace::set_z_home(const Point_3& p, Number_type z_home)
-{
+void Tiler_workspace::set_z_home(const Point_3 &p, Number_type z_home) {
   if (!p.is_valid()) {
     throw logic_error("Point must have a valid ID for the z_home to be set");
   }
@@ -105,20 +98,17 @@ void Tiler_workspace::set_z_home(const Point_3& p, Number_type z_home)
     if (!region) {
       _z_home[p.id()] = z_home;
     }
-  }
-  else {
+  } else {
     _z_home[p.id()] = z_home;
   }
 }
 
-bool Tiler_workspace::has_z_home(const Point_3& p)
-{
+bool Tiler_workspace::has_z_home(const Point_3 &p) {
   Number_type z_home = z_home_nothrow(p);
   return z_home == z_home;
 }
 
-Number_type Tiler_workspace::z_home(const Point_3& p)
-{
+Number_type Tiler_workspace::z_home(const Point_3 &p) {
   if (!has_z_home(p))
     throw logic_error("No z_home");
 
@@ -126,8 +116,7 @@ Number_type Tiler_workspace::z_home(const Point_3& p)
 }
 
 template <typename Point_iter>
-Number_type Tiler_workspace::z_home(Point_iter begin, Point_iter end)
-{
+Number_type Tiler_workspace::z_home(Point_iter begin, Point_iter end) {
   for (Point_iter it = begin; it != end; ++it) {
     if (has_z_home(*it)) {
       return z_home(*it);
@@ -136,12 +125,10 @@ Number_type Tiler_workspace::z_home(Point_iter begin, Point_iter end)
   throw logic_error("No z_home in container");
 }
 
-Number_type Tiler_workspace::z_home_nothrow(const Point_3& p)
-{
+Number_type Tiler_workspace::z_home_nothrow(const Point_3 &p) {
   if (_z_home.find(p.id()) != _z_home.end()) {
     return _z_home[p.id()];
-  }
-  else if (tiling_regions.contains(p)) {
+  } else if (tiling_regions.contains(p)) {
     HTiling_region region = tiling_regions[p];
     if (region) {
       return region->z_home_nothrow();
@@ -150,10 +137,9 @@ Number_type Tiler_workspace::z_home_nothrow(const Point_3& p)
   return Tiling_region::AMBIGUOUS_Z_HOME;
 }
 
-Number_type Tiler_workspace::z_home(Tile_handle tile)
-{
+Number_type Tiler_workspace::z_home(Tile_handle tile) {
 
-  Tile& t = *tile;
+  Tile &t = *tile;
   int invalid = -1;
   int overlapping = -1;
 
@@ -169,36 +155,32 @@ Number_type Tiler_workspace::z_home(Tile_handle tile)
       z_home = _z_home[t[i].id()];
       found = true;
     }
-//     else if (t[i].is_valid()) {
+    //     else if (t[i].is_valid()) {
     else if (tiling_regions.contains(t[i])) {
       HTiling_region region = tiling_regions[t[i]];
       if (region && region->has_z_home()) {
-	z_home = region->z_home();
-	found = true;
+        z_home = region->z_home();
+        found = true;
+      } else if (!region) {
+        TILER_TRACE(logger, "No region: " + pp_tri(*tile));
+      } else {
+        TILER_TRACE(logger, "No z_home: " + pp_tri(*tile));
+        overlapping = i;
       }
-      else if (!region) {
-	TILER_TRACE(logger, "No region: " + pp_tri(*tile));
-      }
-      else {
-	TILER_TRACE(logger, "No z_home: " + pp_tri(*tile));
-	overlapping = i;
-      }
-    }
-    else {
+    } else {
       invalid = i;
     }
   }
 
   if (invalid != -1 && overlapping != -1 && !found) {
-    const Point_3& ip = t[invalid];
-    const Point_3& op = t[overlapping];
-    
+    const Point_3 &ip = t[invalid];
+    const Point_3 &op = t[overlapping];
+
     Contour_handle c = contour(op);
     if (!c->polygon().has_on_negative_side(ip)) {
       z_home = c->slice();
       found = true;
-    }
-    else {
+    } else {
       z_home = (c->slice() == zmin()) ? zmax() : zmin();
       found = true;
     }
@@ -217,14 +199,13 @@ Number_type Tiler_workspace::z_home(Tile_handle tile)
 }
 
 template <typename Point_iter>
-void Tiler_workspace::propagate_z_home(Point_iter begin, Point_iter end)
-{
+void Tiler_workspace::propagate_z_home(Point_iter begin, Point_iter end) {
   Number_type zhome;
   bool found = false;
   for (Point_iter it = begin; it != end; ++it) {
     if (has_z_home(*it)) {
       if (found && z_home(*it) != zhome) {
-	throw logic_error("Inconsistent z_home");
+        throw logic_error("Inconsistent z_home");
       }
       zhome = z_home(*it);
       found = true;
@@ -237,24 +218,22 @@ void Tiler_workspace::propagate_z_home(Point_iter begin, Point_iter end)
 }
 
 template <typename Point_iter>
-void Tiler_workspace::propagate_z_home(Point_iter begin, Point_iter end, Number_type z_home)
-{
+void Tiler_workspace::propagate_z_home(Point_iter begin, Point_iter end, Number_type z_home) {
   for (Point_iter it = begin; it != end; ++it) {
     set_z_home(*it, z_home);
   }
 }
 
-template
-Number_type Tiler_workspace::z_home(Polygon_2::Vertex_iterator begin, Polygon_2::Vertex_iterator end);
+template Number_type Tiler_workspace::z_home(Polygon_2::Vertex_iterator begin,
+                                             Polygon_2::Vertex_iterator end);
 
-template
-void Tiler_workspace::propagate_z_home(Polygon_2::Vertex_iterator begin, Polygon_2::Vertex_iterator end);
+template void Tiler_workspace::propagate_z_home(Polygon_2::Vertex_iterator begin,
+                                                Polygon_2::Vertex_iterator end);
 
-template
-void Tiler_workspace::propagate_z_home(Polygon_2::Vertex_iterator begin, Polygon_2::Vertex_iterator end, Number_type z_home);
+template void Tiler_workspace::propagate_z_home(Polygon_2::Vertex_iterator begin,
+                                                Polygon_2::Vertex_iterator end, Number_type z_home);
 
-void Tiler_workspace::ensure_z_home(Polyline_2& cut, Number_type home)
-{
+void Tiler_workspace::ensure_z_home(Polyline_2 &cut, Number_type home) {
   for (Polyline_2::iterator cut_iter = cut.begin(); cut_iter != cut.end(); ++cut_iter) {
     if (!cut_iter->is_valid()) {
       cut_iter->id() = vertices.unique_id();
@@ -309,10 +288,12 @@ void Tiler_workspace::ensure_z_home(Polyline_2& cut, Number_type home)
 // //     TILER_ERROR(logger, "P and Q are both in two contours: " << pp(p) << " " << pp(q));
 // //     throw logic_error("P and Q are both in two contours");
 //   }
-//   if (p_contours.size() == 1 && q_contours.size() == 1 && p_contours.front() != q_contours.front())
+//   if (p_contours.size() == 1 && q_contours.size() == 1 && p_contours.front() !=
+//   q_contours.front())
 //   {
-//     TILER_ERROR(logger, "P and Q are both in one contour but have different z values: " << pp(p) << " " << pp(q));
-//     throw logic_error("P and Q are both in one contour but have different z values: ");
+//     TILER_ERROR(logger, "P and Q are both in one contour but have different z values: " << pp(p)
+//     << " " << pp(q)); throw logic_error("P and Q are both in one contour but have different z
+//     values: ");
 //   }
 //   if (p_contours.size() == 1)
 //     return p_contours.front();

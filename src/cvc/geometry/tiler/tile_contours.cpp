@@ -25,18 +25,17 @@
 #include <cvc/geometry/tiler.h>
 
 #ifdef CVC_WITH_PLANAR
-#include <cvc/geometry/planar.h>
-
 #include "Contour.h"
 #include "Slice.h"
 #include "tiler.h"
-#endif
 
-#include <boost/regex.hpp>
+#include <cvc/geometry/planar.h>
+#endif
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <boost/regex.hpp>
 #include <cmath>
 #include <cstdio>
 #include <exception>
@@ -48,10 +47,11 @@ namespace cvc {
 std::vector<std::string> tile_params_problems(const tile_params &p) {
   std::vector<std::string> problems;
   if (p.z_first >= 0 && p.z_last >= 0 && p.z_first > p.z_last)
-    problems.push_back("z_first = " + std::to_string(p.z_first) + " is after z_last = " +
-                       std::to_string(p.z_last));
+    problems.push_back("z_first = " + std::to_string(p.z_first) +
+                       " is after z_last = " + std::to_string(p.z_last));
   for (const char *field : {"include", "exclude"}) {
-    const std::vector<std::string> &patterns = std::string(field) == "include" ? p.include : p.exclude;
+    const std::vector<std::string> &patterns =
+        std::string(field) == "include" ? p.include : p.exclude;
     for (std::size_t i = 0; i < patterns.size(); ++i) {
       try {
         boost::regex r(patterns[i], boost::regex::perl);
@@ -63,8 +63,7 @@ std::vector<std::string> tile_params_problems(const tile_params &p) {
     }
   }
   if (!p.color.empty() && p.color.size() != 3)
-    problems.push_back("color: " + std::to_string(p.color.size()) +
-                       " values, not three (r, g, b)");
+    problems.push_back("color: " + std::to_string(p.color.size()) + " values, not three (r, g, b)");
   for (double c : p.color)
     if (!(c >= 0 && c <= 1))
       problems.push_back("color: each value must be in [0, 1]");
@@ -222,8 +221,8 @@ step_task tile_stepper::impl::build_slices() {
           continue;
         }
         if (!P.is_simple()) {
-          TILER_WARN(logger, "Skipping non-simple contour: slice = " << k << " component = "
-                                                                     << name);
+          TILER_WARN(logger,
+                     "Skipping non-simple contour: slice = " << k << " component = " << name);
           continue;
         }
         if (P.is_clockwise_oriented())
@@ -444,8 +443,7 @@ std::string tile_stepper::status() const {
   if (_impl->finished) {
     char buf[160];
     std::snprintf(buf, sizeof buf, "done: %zu surfaces, %zu triangles, %zu warnings",
-                  _impl->result.components.size(), _impl->triangles,
-                  _impl->result.warnings.size());
+                  _impl->result.components.size(), _impl->triangles, _impl->result.warnings.size());
     return buf;
   }
   char buf[160];

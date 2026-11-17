@@ -33,13 +33,6 @@
 #ifndef __TILER_H__
 #define __TILER_H__
 
-#include <list>
-#include <map>
-#include <string>
-#include <vector>
-
-#include <boost/shared_ptr.hpp>
-
 #include "Contour.h"
 #include "Slice.h"
 #include "Tile.h"
@@ -47,18 +40,24 @@
 #include "Tiler_workspace.h"
 #include "stepping.h"
 
+#include <boost/shared_ptr.hpp>
+#include <list>
+#include <map>
+#include <string>
+#include <vector>
+
 namespace cvc::tiler {
 
 // What tile() makes: each component's triangles, decomposed where intersection removal put points
 // on their edges.
 struct tile_output {
-  std::map<std::string, std::list<Triangle> > triangles;
+  std::map<std::string, std::list<Triangle>> triangles;
 };
 
 // Tiles every component across consecutive slices (all of them, empty ones included: a component
 // absent from one slice of a pair is capped there). The slices are curated and augmented in place.
-step_task tile(std::vector<Slice>& slices, const Tiler_options& options, tiler_context& ctx,
-               tile_output& out);
+step_task tile(std::vector<Slice> &slices, const Tiler_options &options, tiler_context &ctx,
+               tile_output &out);
 
 } // namespace cvc::tiler
 

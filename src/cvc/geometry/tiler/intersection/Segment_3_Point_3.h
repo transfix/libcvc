@@ -26,37 +26,24 @@
 
 #include "../common.h"
 
-namespace cvc::tiler { namespace CEP {
-  namespace intersection {
+namespace cvc::tiler {
+namespace CEP {
+namespace intersection {
 
-    inline
-    bool
-    do_intersect( const Segment_3& s, 
-		  const Point_3& p )
-    {
-      return s.has_on(p);
-    }
+inline bool do_intersect(const Segment_3 &s, const Point_3 &p) { return s.has_on(p); }
 
-    inline
-    Object
-    intersection( const Segment_3& s, 
-		  const Point_3& p )
-    {
-      if ( CEP::intersection::do_intersect(s,p) )
-        return make_object(p);
-      return Object();
-    }
-
-    inline 
-    bool
-    collinear( const Segment_3& s, 
-	       const Point_3& p )
-    {
-      return tiler::collinear( s.source(), s.target(), p );
-    }
-
-  }
+inline Object intersection(const Segment_3 &s, const Point_3 &p) {
+  if (CEP::intersection::do_intersect(s, p))
+    return make_object(p);
+  return Object();
 }
+
+inline bool collinear(const Segment_3 &s, const Point_3 &p) {
+  return tiler::collinear(s.source(), s.target(), p);
+}
+
+} // namespace intersection
+} // namespace CEP
 } // namespace cvc::tiler
 
 #endif

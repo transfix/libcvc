@@ -25,19 +25,19 @@
 // Multi-tiler operations
 //-----------------------
 
-#include <vector>
-#include <list>
-#include <map>
-
-
 #include "mtiler_operations.h"
-#include "tiler_operations.h"
+
+#include "Intersections.h"
+#include "Z_adjustments.h"
+#include "cut.h"
+#include "intersection.h"
 #include "print_utils.h"
 #include "segment_utils.h"
-#include "Intersections.h"
-#include "intersection.h"
-#include "cut.h"
-#include "Z_adjustments.h"
+#include "tiler_operations.h"
+
+#include <list>
+#include <map>
+#include <vector>
 
 namespace cvc::tiler {
 
@@ -70,7 +70,7 @@ typedef boost::shared_ptr<Triangle> Triangle_handle;
 
 //   //
 //   // Output original
-//   // 
+//   //
 //   list<Colored_point_3> orig;
 //   for (list<Triangle_handle>::iterator it = yellow.begin(); it != yellow.end(); ++it)
 //     for (int i = 0; i < 3; ++i)
@@ -124,7 +124,6 @@ typedef boost::shared_ptr<Triangle> Triangle_handle;
 
 //   Hierarchy h1(all1.begin(), all1.end(), Hierarchy_policy::FORCE_CCW);
 //   Hierarchy h2(all2.begin(), all2.end(), Hierarchy_policy::FORCE_CCW);
-  
 
 //   Correspondences correspondences = find_correspondences(all1.begin(), all1.end(), h1,
 // 							 all2.begin(), all2.end(), h2);
@@ -173,12 +172,11 @@ typedef boost::shared_ptr<Triangle> Triangle_handle;
 //   }
 // }
 
-// template void multi_test(std::vector<boost::shared_ptr<Tiler_workspace> >::iterator begin, 
-// 			 std::vector<boost::shared_ptr<Tiler_workspace> >::iterator end, 
+// template void multi_test(std::vector<boost::shared_ptr<Tiler_workspace> >::iterator begin,
+// 			 std::vector<boost::shared_ptr<Tiler_workspace> >::iterator end,
 // 			 Number_type epsilon);
-// template void multi_test(std::list<boost::shared_ptr<Tiler_workspace> >::iterator begin, 
-// 			 std::list<boost::shared_ptr<Tiler_workspace> >::iterator end, 
+// template void multi_test(std::list<boost::shared_ptr<Tiler_workspace> >::iterator begin,
+// 			 std::list<boost::shared_ptr<Tiler_workspace> >::iterator end,
 // 			 Number_type epsilon);
-
 
 } // namespace cvc::tiler

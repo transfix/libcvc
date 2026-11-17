@@ -24,19 +24,18 @@
 #ifndef __CONTOUR2_H__
 #define __CONTOUR2_H__
 
-#include <iostream>
-#include <vector>
-#include <list>
-#include <stdexcept>
+#include "Contour.h"
+#include "Contour_info.h"
+#include "common.h"
+#include "polygon_utils.h"
 
+#include <boost/lexical_cast.hpp>
 #include <boost/shared_ptr.hpp>
 #include <boost/weak_ptr.hpp>
-#include <boost/lexical_cast.hpp>
-
-#include "common.h"
-#include "Contour.h"
-#include "polygon_utils.h"
-#include "Contour_info.h"
+#include <iostream>
+#include <list>
+#include <stdexcept>
+#include <vector>
 
 namespace cvc::tiler {
 
@@ -76,15 +75,14 @@ namespace cvc::tiler {
 //--------------------------------------------------------
 // Contour class
 //--------------------------------------------------------
-class Contour2
-{
+class Contour2 {
 public:
-  typedef Contour_info<Number_type>                     Info;
-  typedef Contour2                                      Self;
-  typedef boost::shared_ptr<Self>                       Handle;
+  typedef Contour_info<Number_type> Info;
+  typedef Contour2 Self;
+  typedef boost::shared_ptr<Self> Handle;
   // typedef Polygon_2                Polygon;
   // typedef PolygonTraits                                 Kernel;
-  typedef Info                                          Info_type;
+  typedef Info Info_type;
   // typedef PolygonTraits::Point_2                        Point;
 
   typedef list<Polygon_with_holes_2> Container;
@@ -92,7 +90,7 @@ public:
   typedef Container::const_iterator Polygon_const_iterator;
 
 private:
-  typedef boost::weak_ptr<Self>                         Self_handle;
+  typedef boost::weak_ptr<Self> Self_handle;
 
 public:
   //--------------------------------------------------------
@@ -100,19 +98,16 @@ public:
   //--------------------------------------------------------
 
   static Handle create();
-  static Handle create(const Info& info);
-  static Handle create(const Polygon_2& polygon);
-  static Handle create(const Polygon_2& polygon, const Info& info);
+  static Handle create(const Info &info);
+  static Handle create(const Polygon_2 &polygon);
+  static Handle create(const Polygon_2 &polygon, const Info &info);
 
-  template <typename Poly_iter>
-  static Handle create(Poly_iter begin, Poly_iter end)
-  {
+  template <typename Poly_iter> static Handle create(Poly_iter begin, Poly_iter end) {
     return create(begin, end, Info());
   }
 
   template <typename Poly_iter>
-  static Handle create(Poly_iter begin, Poly_iter end, const Info& info)
-  {
+  static Handle create(Poly_iter begin, Poly_iter end, const Info &info) {
     Handle instance(new Contour2(begin, end, info));
     // Why can't I access _self from here?  Even though this function
     // is static it seems like I should still be able to...  Ah, the
@@ -122,15 +117,12 @@ public:
     return instance;
   }
 
-  template <typename Poly_iter>
-  static Handle create_from_pwhs(Poly_iter begin, Poly_iter end)
-  {
+  template <typename Poly_iter> static Handle create_from_pwhs(Poly_iter begin, Poly_iter end) {
     return create_from_pwhs(begin, end, Info());
   }
 
   template <typename Poly_iter>
-  static Handle create_from_pwhs(Poly_iter begin, Poly_iter end, const Info& info)
-  {
+  static Handle create_from_pwhs(Poly_iter begin, Poly_iter end, const Info &info) {
     list<Polygon_2> empty;
     Handle instance(new Contour2(empty.begin(), empty.end(), info));
     instance->_polygons.insert(instance->_polygons.end(), begin, end);
@@ -153,13 +145,12 @@ public:
 
 private:
   template <typename Poly_iter>
-  Contour2(Poly_iter begin, Poly_iter end, const Info& info);// : _info(info)
+  Contour2(Poly_iter begin, Poly_iter end, const Info &info); // : _info(info)
   // {
   //   arrange_polygons(begin, end, back_inserter(_polygons));
   // }
 
 public:
-
   //--------------------------------------------------------
   // Accessors
   //--------------------------------------------------------
@@ -172,21 +163,18 @@ public:
 
   // Polygon_2& polygon()
   // { return _polygon; }
-  
+
   // const Polygon_2& polygon() const
   // { return _polygon; }
-  
+
   // const size_t size() const
   // { return _polygon.size(); }
 
-  Info& info()
-  { return _info; }
+  Info &info() { return _info; }
 
-  const Info& info() const
-  { return _info; }
+  const Info &info() const { return _info; }
 
-  Number_type slice() const
-  { return _info.slice(); }
+  Number_type slice() const { return _info.slice(); }
 
   void validate() const;
 
@@ -203,7 +191,7 @@ public:
   //--------------------------------------------------------
   // Convenience functions
   //--------------------------------------------------------
-  
+
   // bool is_counterclockwise_oriented()
   // { return _polygon.is_counterclockwise_oriented(); }
 

@@ -19,6 +19,8 @@
 // and contours that curation rebuilt (Clipper2's Booleans in place of CGAL's exact ones) are
 // compared by topology and Hausdorff distance under a tolerance.
 
+#include "resumable_harness.h"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -36,8 +38,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-
-#include "resumable_harness.h"
 
 #ifndef CVC_REPO_DIR
 #define CVC_REPO_DIR "."
@@ -245,7 +245,9 @@ double one_sided(const mesh &a, const mesh &b) {
   return worst;
 }
 
-double hausdorff(const mesh &a, const mesh &b) { return std::max(one_sided(a, b), one_sided(b, a)); }
+double hausdorff(const mesh &a, const mesh &b) {
+  return std::max(one_sided(a, b), one_sided(b, a));
+}
 
 // The signed volume a closed, consistently oriented surface encloses.
 double volume(const mesh &m) {
@@ -449,7 +451,8 @@ TEST(Tiler, ACylinderIsAClosedGenusZeroTube) {
   // Without caps it is an open tube: genus 0 with two boundary loops.
   cvc::tile_params p;
   p.cap_ends = false;
-  const topo open = topology(from_geometry(cvc::tile_contours(cylinder(5), p).components.at("tube")));
+  const topo open =
+      topology(from_geometry(cvc::tile_contours(cylinder(5), p).components.at("tube")));
   EXPECT_EQ(open.euler, 0) << open;
   EXPECT_EQ(open.boundary_loops, 2u) << open;
 }

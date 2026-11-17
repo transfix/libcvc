@@ -24,30 +24,28 @@
 #ifndef __TRIANGLE_UTILS_H__
 #define __TRIANGLE_UTILS_H__
 
-#include <sstream>
-
-#include "common.h"
 #include "Segment_3_undirected.h"
+#include "common.h"
+
+#include <sstream>
 
 namespace cvc::tiler {
 
-class Triangle
-{
+class Triangle {
 public:
   Triangle() {}
 
-//   Triangle(const Point_3& a, const Point_3& b, const Point_3& c)
-//     : _points((Point_3[]){ a, b, c }) {}
-  Triangle(const Point_3& a, const Point_3& b, const Point_3& c)
-  {
+  //   Triangle(const Point_3& a, const Point_3& b, const Point_3& c)
+  //     : _points((Point_3[]){ a, b, c }) {}
+  Triangle(const Point_3 &a, const Point_3 &b, const Point_3 &c) {
     _points[0] = a;
     _points[1] = b;
     _points[2] = c;
     check_valid();
   }
 
-  const Point_3& operator[](size_t i) const { return _points[i]; }
-  Point_3& operator[](size_t i) { return _points[i]; }
+  const Point_3 &operator[](size_t i) const { return _points[i]; }
+  Point_3 &operator[](size_t i) { return _points[i]; }
 
   bool is_degenerate() const;
 
@@ -75,26 +73,20 @@ private:
 //
 //------------------------------------------------------------------------------
 
-template <typename Triangle>
-const Point_3& vertex(size_t i, const Triangle& t)
-{ return t[i%3]; }
+template <typename Triangle> const Point_3 &vertex(size_t i, const Triangle &t) { return t[i % 3]; }
 
-template <typename Triangle>
-Segment_3 edge(size_t i, const Triangle& t)
-{ return Segment_3(vertex(i, t), vertex(i+1, t)); }
+template <typename Triangle> Segment_3 edge(size_t i, const Triangle &t) {
+  return Segment_3(vertex(i, t), vertex(i + 1, t));
+}
 
-template <typename Triangle>
-int index(const Point_3& v, const Triangle& t)
-{
+template <typename Triangle> int index(const Point_3 &v, const Triangle &t) {
   for (size_t i = 0; i < 3; ++i)
-    if (t[i] == v) 
+    if (t[i] == v)
       return i;
   return -1;
 }
 
-template <typename Triangle>
-int index(const Segment_3& e, const Triangle& t)
-{
+template <typename Triangle> int index(const Segment_3 &e, const Triangle &t) {
   int so = index(e.source(), t);
   int ta = index(e.target(), t);
   if (so == -1 || ta == -1)
@@ -104,114 +96,88 @@ int index(const Segment_3& e, const Triangle& t)
   return 2;
 }
 
-template <typename Triangle>
-int index(const Segment_3_undirected& e, const Triangle& t)
-{
+template <typename Triangle> int index(const Segment_3_undirected &e, const Triangle &t) {
   return index(e.segment(), t);
 }
 
-inline size_t next_idx(size_t i)
-{ return (i+1)%3; }
+inline size_t next_idx(size_t i) { return (i + 1) % 3; }
 
-inline size_t prev_idx(size_t i)
-{ return (i+2)%3; }
+inline size_t prev_idx(size_t i) { return (i + 2) % 3; }
 
-inline size_t inc_idx(size_t i, int inc)
-{ 
+inline size_t inc_idx(size_t i, int inc) {
   if (inc < 0)
-    inc = ((inc%3)+3)%3;
-  return (i+inc)%3; 
+    inc = ((inc % 3) + 3) % 3;
+  return (i + inc) % 3;
 }
 
-std::string tri_pp(const Point_2& point);
-std::string tri_pp(const Point_3& point);
-std::string tri_pp(const Segment_2& segment);
-std::string tri_pp(const Segment_3& segment);
+std::string tri_pp(const Point_2 &point);
+std::string tri_pp(const Point_3 &point);
+std::string tri_pp(const Segment_2 &segment);
+std::string tri_pp(const Segment_3 &segment);
 
 template <typename Triangle>
-int other_edge(const Segment_3& e, const Point_3& v, const Triangle& t)
-{
+int other_edge(const Segment_3 &e, const Point_3 &v, const Triangle &t) {
 
   int ei = index(e, t);
   int vi = index(v, t);
   if (vi == ei)
     return prev_idx(ei);
-  if (vi != next_idx(ei))
-  {
-    throw logic_error("edge and vertex are not adjacent: edge (" + std::to_string(ei) + "): " +
-                      tri_pp(e) + ", vertex (" + std::to_string(vi) + "): " + tri_pp(v));
+  if (vi != next_idx(ei)) {
+    throw logic_error("edge and vertex are not adjacent: edge (" + std::to_string(ei) +
+                      "): " + tri_pp(e) + ", vertex (" + std::to_string(vi) + "): " + tri_pp(v));
   }
   return next_idx(ei);
 }
 
 template <typename Triangle>
-int other_edge(const Segment_3_undirected& e, const Point_3& v, const Triangle& t)
-{
+int other_edge(const Segment_3_undirected &e, const Point_3 &v, const Triangle &t) {
   return other_edge(e.segment(), v, t);
 }
 
 template <typename Triangle>
-int other_vertex(const Point_3& v, const Segment_3& e, const Triangle& t)
-{
+int other_vertex(const Point_3 &v, const Segment_3 &e, const Triangle &t) {
 
   int ei = index(e, t);
   int vi = index(v, t);
   if (vi == ei)
     return next_idx(vi);
-  if (vi != next_idx(ei))
-  {
-    throw logic_error("edge and vertex are not adjacent: edge (" + std::to_string(ei) + "): " +
-                      tri_pp(e) + ", vertex (" + std::to_string(vi) + "): " + tri_pp(v));
+  if (vi != next_idx(ei)) {
+    throw logic_error("edge and vertex are not adjacent: edge (" + std::to_string(ei) +
+                      "): " + tri_pp(e) + ", vertex (" + std::to_string(vi) + "): " + tri_pp(v));
   }
   return prev_idx(vi);
 }
 
 template <typename Triangle>
-int other_vertex(const Point_3& v, const Segment_3_undirected& e, const Triangle& t)
-{
+int other_vertex(const Point_3 &v, const Segment_3_undirected &e, const Triangle &t) {
   return other_vertex(v, e.segment(), t);
 }
 
-inline bool in_order(size_t i, size_t j)
-{ return next_idx(i) == j; }
+inline bool in_order(size_t i, size_t j) { return next_idx(i) == j; }
 
-template <typename Triangle>
-size_t index_ignore_order(const Segment_3& e, const Triangle& t)
-{
+template <typename Triangle> size_t index_ignore_order(const Segment_3 &e, const Triangle &t) {
   size_t a = index(e.source(), t);
   size_t b = index(e.source(), t);
   return min(a, b);
 }
 
-template <typename Triangle>
-bool has_edge_ignore_order(const Segment_3& e, const Triangle& t)
-{ return index_ignore_order(e, t) != -1; }
+template <typename Triangle> bool has_edge_ignore_order(const Segment_3 &e, const Triangle &t) {
+  return index_ignore_order(e, t) != -1;
+}
 
 /// Returns the index of the triangle vertex opposite to the i'th edge
-inline
-size_t opposite_vertex(size_t i)
-{
-  return (i+2)%3;
-}
+inline size_t opposite_vertex(size_t i) { return (i + 2) % 3; }
 
 /// Returns the index of the edge opposite the i'th vertex.
-inline
-size_t opposite_edge(size_t i)
-{
-  return (i+1)%3;
-}
+inline size_t opposite_edge(size_t i) { return (i + 1) % 3; }
 
 /// Returns the vertex of the triangle vertex opposite to edge e
-template <typename Triangle>
-const Point_3& opposite_vertex(const Segment_3& e, const Triangle& t)
-{
+template <typename Triangle> const Point_3 &opposite_vertex(const Segment_3 &e, const Triangle &t) {
   return vertex(opposite_vertex(index(e, t)), t);
 }
 
 /// Returns the edge opposite vertex v
-template <typename Triangle>
-const Segment_3& opposite_edge(const Point_3& v, const Triangle& t)
-{
+template <typename Triangle> const Segment_3 &opposite_edge(const Point_3 &v, const Triangle &t) {
   return edge(opposite_edge(index(v, t)), t);
 }
 
@@ -222,9 +188,7 @@ const Segment_3& opposite_edge(const Point_3& v, const Triangle& t)
 /// check is made to ensure that p lies within t, and if it doesn't a z value
 /// outside the z range of the triangle may be returned.
 //------------------------------------------------------------------------------
-template <typename Triangle>
-Number_type get_z(const Triangle& t, const Point_2& point)
-{
+template <typename Triangle> Number_type get_z(const Triangle &t, const Point_2 &point) {
   Point_3 p = t[0], q = t[1], r = t[2];
   // The plane through p, q, r: its normal (p - r) x (q - r).
   const Number_type rpx = p.x() - r.x(), rpy = p.y() - r.y(), rpz = p.z() - r.z();

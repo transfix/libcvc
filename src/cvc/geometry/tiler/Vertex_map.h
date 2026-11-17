@@ -24,18 +24,16 @@
 #ifndef __VERTEX_MAP_H__
 #define __VERTEX_MAP_H__
 
-#include <vector>
-#include <map>
-#include <boost/unordered_map.hpp>
+#include "Contour.h"
 #include "common.h"
 
-#include "Contour.h"
+#include <boost/unordered_map.hpp>
+#include <map>
+#include <vector>
 
 namespace cvc::tiler {
 
-template <typename T>
-class Vertex_map
-{
+template <typename T> class Vertex_map {
   //--------------------------------------------------------
   // Vertex_map class
   //--------------------------------------------------------
@@ -45,36 +43,25 @@ private:
 public:
   typedef typename Values::iterator iterator;
   typedef typename Values::const_iterator const_iterator;
-  
+
 public:
   Vertex_map() : _values(10000) {}
-  Vertex_map(size_t size) : _values(size) 
-  {
-    _values.resize(size);
-  }
-  ~Vertex_map() 
-  {
-  }
+  Vertex_map(size_t size) : _values(size) { _values.resize(size); }
+  ~Vertex_map() {}
 
-  typename Values::const_reference operator[](const Point_3& vertex) const
-  {
+  typename Values::const_reference operator[](const Point_3 &vertex) const {
     return _values[vertex.id()];
   }
 
-  typename Values::reference operator[](const Point_3& vertex)
-  {
-    _values.reserve((vertex.id()+1)*2);
+  typename Values::reference operator[](const Point_3 &vertex) {
+    _values.reserve((vertex.id() + 1) * 2);
     return _values[vertex.id()];
   }
 
-  bool contains(const Point_3& vertex) const
-  {
-    return vertex.id() < _values.size();
-  }
+  bool contains(const Point_3 &vertex) const { return vertex.id() < _values.size(); }
 
-  void set(const Point_3& vertex, const T& value)
-  {
-    _values.reserve(vertex.id()+1);
+  void set(const Point_3 &vertex, const T &value) {
+    _values.reserve(vertex.id() + 1);
     _values[vertex.id()] = value;
   }
 
