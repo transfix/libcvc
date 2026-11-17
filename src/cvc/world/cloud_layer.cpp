@@ -18,6 +18,12 @@
   You should have received a copy of the GNU Lesser General Public
   License along with this library; if not, write to the Free Software
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+
+  ---------------------------------------------------------------------------
+  The cumulonimbus height profile (cumulonimbus(): the tower, the anvil and its spread cover) ports
+  ABYSSAL's (github.com/Token-Gremlin/natural-disasters, src/sky/Clouds.js at 849ff7f4:
+  heightProfile and cloudDensity), MIT licensed, Copyright (c) 2026 Davi (Token-Gremlin).
+  MIT notice retained; see THIRD_PARTY_NOTICES.md.
 */
 
 // cloud_layer.cpp — the world-scale cloud deck (see cloud_layer.h).
@@ -44,6 +50,19 @@ constexpr int FAR_MAX = 256;           // the far slices' largest side, texels
 constexpr double SHADOW_SOFT_M = 40.0; // the shadow's softening, metres (blur passes x texel)
 // Cell draws sit apart from the variant maps' (element ids 0..variants) on the cloud stream.
 constexpr std::uint64_t CELL_SALT = 1ull << 52;
+// A cumulonimbus map's own draws (its tower's height), apart from both.
+constexpr std::uint64_t TOWER_SALT = 1ull << 49;
+// Storms. A full storm's cell: its humidity and activation gain as a windward flank's do, its
+// extinction is held off, it leads the ranking by STORM_LEAD (more than any cloud share), and its
+// shade and far opacity are 1 + STORM_SHADE and 1 + STORM_DENSE times its cloud's (cloud_layer.h).
+constexpr double STORM_GAIN = 2.0, STORM_LEAD = 2.0;
+constexpr double STORM_SHADE = cloud_layer::STORM_SHADE, STORM_DENSE = cloud_layer::STORM_DENSE;
+// A storm deck: the cumulus its cumulonimbus grow from is made on CU_NZ layers; a tower reaches
+// between TOWER_LO and 1 of the deck's height; a shadow patch reaches TAU_REACH half-widths
+// down-sun of its cloud (a tower's long shade past that is left out, or a 4 km tower's patches
+// would span kilometres).
+constexpr int CU_NZ = 28;
+constexpr double TOWER_LO = 0.8, TAU_REACH = 2.0;
 // The automaton's draws: a step's per cell, and the starting state's.
 constexpr std::uint64_t STEP_SALT = 1ull << 51;
 constexpr std::uint64_t INIT_SALT = 1ull << 50;
@@ -137,6 +156,424 @@ double sample_map(const std::vector<float> &f, int n, int nz, double extent, dou
   const double c11 = V(x0, y1, z1) * (1 - tx) + V(x1, y1, z1) * tx;
   return (c00 * (1 - ty) + c10 * ty) * (1 - tz) + (c01 * (1 - ty) + c11 * ty) * tz;
 }
+
+double smooth01(double u) {
+  u = std::min(1.0, std::max(0.0, u));
+  return u * u * (3.0 - 2.0 * u);
+}
+double smoothstep(double a, double b, double x) { return smooth01((x - a) / (b - a)); }
+
+// The opacity table (cloud_layer_params::opacity) at density v.
+double opacity_in(const std::vector<double> &t, double v) {
+  if (t.empty())
+    return v;
+  if (v <= t[0])
+    return t[1];
+  for (std::size_t k = 2; k + 1 < t.size(); k += 2)
+    if (v <= t[k]) {
+      const double u = t[k] > t[k - 2] ? (v - t[k - 2]) / (t[k] - t[k - 2]) : 1.0;
+      return t[k - 1] + u * (t[k + 1] - t[k - 1]);
+    }
+  return t[t.size() - 1];
+}
+
+void sun_vector(const cloud_layer_params &p, double &x, double &y, double &z) {
+  const double az = p.sun_az * kPi / 180.0, el = p.sun_el * kPi / 180.0;
+  x = std::cos(el) * std::sin(az);
+  y = -std::cos(el) * std::cos(az);
+  z = std::sin(el);
+}
+
+// A storm deck: deeper than its cumulus.
+bool is_deep(const cloud_layer_params &p) {
+  return p.cumulus > 0.0 && p.top - p.base > p.cumulus * (1.0 + 1e-9);
+}
+
+// A cumulonimbus from the cumulus cu (n x n x nzc over [base, base + cumulus]) on an n x n x nz
+// grid over [base, top]. The cumulus stays at the bottom as it was; a tower rises from its dense
+// core, narrowing as it climbs, its puffs the cumulus's middle layers stacked up it; an anvil
+// spreads from the tower under the top, wider than the cloud below. The profile is ABYSSAL's
+// (Token-Gremlin/natural-disasters, src/sky/Clouds.js heightProfile and cloudDensity, MIT): the
+// tower smoothstep(0, .04, h)(1 - smoothstep(.88, 1, h)), the anvil smoothstep(.58, .74, h)
+// (1 - smoothstep(.9, 1, h)) with its cover 1.8 c + .24, here over the tower's height h.
+std::vector<float> cumulonimbus(const std::vector<float> &cu, int n, int nzc, int nz,
+                                double cu_share, double tower) {
+  const std::size_t layer = static_cast<std::size_t>(n) * n;
+  float peak = 0.0f;
+  for (float v : cu)
+    peak = std::max(peak, v);
+  const double inv = peak > 0.0f ? 1.0 / peak : 0.0;
+  // The cloud's plan: its column's densest voxel, and that softened (the anvil's spread).
+  std::vector<float> plan(layer, 0.0f);
+  for (int z = 0; z < nzc; ++z)
+    for (std::size_t i = 0; i < layer; ++i)
+      plan[i] = std::max(plan[i], static_cast<float>(cu[z * layer + i] * inv));
+  std::vector<float> wide = plan;
+  soften(wide, n, std::max(2, n / 8));
+  float wpeak = 0.0f;
+  for (float v : wide)
+    wpeak = std::max(wpeak, v);
+  if (wpeak > 0.0f)
+    for (float &v : wide)
+      v /= wpeak;
+  // The cumulus at height fraction u of itself (0 bottom, 1 top), linear between its layers.
+  auto at = [&](std::size_t i, double u) {
+    const double fz = std::min(1.0, std::max(0.0, u)) * (nzc - 1);
+    const int z0 = std::min(nzc - 2, static_cast<int>(fz));
+    const double t = fz - z0;
+    return (cu[z0 * layer + i] * (1.0 - t) + cu[(z0 + 1) * layer + i] * t) * inv;
+  };
+  std::vector<float> out(layer * nz, 0.0f);
+  for (int z = 0; z < nz; ++z) {
+    const double h = double(z) / (nz - 1); // the deck's height fraction
+    const double ht = h / tower;           // the tower's
+    // The puffs up the tower: the cumulus's middle layers, there and back every 1.5 cumuli.
+    const double cyc = h / (1.5 * cu_share);
+    const double tri = std::fabs(2.0 * (cyc - std::floor(cyc)) - 1.0);
+    const double up = 0.25 + 0.5 * tri;
+    const double towerP = smoothstep(0.0, 0.04, ht) * (1.0 - smoothstep(0.88, 1.0, ht));
+    const double anvilP = smoothstep(0.58, 0.74, ht) * (1.0 - smoothstep(0.90, 1.0, ht));
+    const double lo = 0.3 + 0.25 * std::min(1.0, ht); // the core narrows as it climbs
+    for (std::size_t i = 0; i < layer; ++i) {
+      double v = h <= cu_share ? at(i, h / cu_share) : 0.0;
+      if (towerP > 0.0 || anvilP > 0.0) {
+        const double puff = at(i, up);
+        const double core = smoothstep(lo, lo + 0.3, plan[i]);
+        v = std::max(v, 0.9 * core * towerP * std::min(1.0, 0.35 + 1.1 * puff));
+        const double cover = smoothstep(0.05, 0.5, wide[i]) * std::min(1.0, 1.8 * wide[i] + 0.24);
+        v = std::max(v, cover * anvilP * std::min(1.0, 0.4 + at(i, 0.5)));
+      }
+      out[z * layer + i] = static_cast<float>(v);
+    }
+  }
+  return out;
+}
+
+// What a deck's cumulus fields are grown for: the base, the cumulus's top and layers, the sun (the
+// seed, the grid's width, the half-width and the grammar's depth are the layer's for good).
+std::vector<double> source_key(const cloud_layer_params &p) {
+  const bool deep = is_deep(p);
+  return {p.base, deep ? p.base + p.cumulus : p.top, double(deep ? CU_NZ : p.nz), p.sun_az,
+          p.sun_el};
+}
+
+// The variants' maps for a deck, a variant at a time: each scaled to its own peak (the grammar
+// grows some variants much fainter than others, and a cell showing one must still hold a cloud),
+// then lumped: clear sky below LUMP_FLOOR, squared above. A crossfade of two is what a cell shows,
+// and its optical depth is the crossfade of theirs. A map grows from its cumulus field
+// (grow_source): the deck's own on a cumulus deck, its cumulus's on a storm deck.
+std::shared_ptr<const std::vector<float>> grow_source(const cloud_layer_params &p,
+                                                      const std::vector<double> &key, int v) {
+  lsys::cloud_params cp;
+  cp.seed = p.seed;
+  cp.variant = static_cast<std::uint32_t>(v);
+  cp.n = p.n;
+  cp.nz = static_cast<int>(key[2]);
+  cp.half = p.extent;
+  cp.base = key[0];
+  cp.top = key[1];
+  cp.sun_az = p.sun_az;
+  cp.sun_el = p.sun_el;
+  cp.depth = p.depth;
+  return std::make_shared<const std::vector<float>>(lsys::cloud_field(cp));
+}
+
+std::vector<float> grow_map(const cloud_layer_params &p, const std::vector<float> &src, int v) {
+  const int n = p.n, nz = p.nz;
+  std::vector<float> f = src;
+  if (is_deep(p)) {
+    const double tower = lsys::uni(p.seed, lsys::stream::cloud,
+                                   static_cast<std::uint64_t>(v) ^ TOWER_SALT, 0, TOWER_LO, 1.0);
+    f = cumulonimbus(f, n, CU_NZ, nz, p.cumulus / (p.top - p.base), tower);
+  }
+  // A round taper over the outer part of the footprint. The grammar clamps its turtle at the
+  // grid's y edges (it wraps x), so a cloud that wanders there piles puffs against the face,
+  // and the grid's own window cuts that pile off in a few voxels: a straight edge along the
+  // volume's box. The taper also keeps the clouds from reading square.
+  for (int gy = 0; gy < n; ++gy)
+    for (int gx = 0; gx < n; ++gx) {
+      const double u = 2.0 * gx / (n - 1) - 1.0, w = 2.0 * gy / (n - 1) - 1.0;
+      const double t = (std::sqrt(u * u + w * w) - TAPER_FROM) / (1.0 - TAPER_FROM);
+      const float k = static_cast<float>(t <= 0.0   ? 1.0
+                                         : t >= 1.0 ? 0.0
+                                                    : 1.0 - t * t * (3.0 - 2.0 * t));
+      for (int gz = 0; gz < nz; ++gz)
+        f[lsys::cloud_index(n, gx, gy, gz)] *= k;
+    }
+  const float peak = f.empty() ? 0.0f : *std::max_element(f.begin(), f.end());
+  for (float &x : f) {
+    const double r = peak > 0.0f ? x / peak : 0.0;
+    const double l = std::min(1.0, std::max(0.0, (r - LUMP_FLOOR) / (1.0 - LUMP_FLOOR)));
+    x = static_cast<float>(l * l);
+  }
+  return f;
+}
+
+// `src` holds the cumulus fields the maps grow from when `key` says they were grown for this deck
+// (source_key); else they are let go of, `key` set, and each grown when its variant is.
+void check_sources(const cloud_layer_params &p,
+                   std::vector<std::shared_ptr<const std::vector<float>>> &src,
+                   std::vector<double> &key) {
+  const std::vector<double> want = source_key(p);
+  if (key != want || src.size() != static_cast<std::size_t>(p.variants)) {
+    src.assign(static_cast<std::size_t>(p.variants), nullptr);
+    key = want;
+  }
+}
+
+std::vector<std::vector<float>>
+grow_maps(const cloud_layer_params &p, std::vector<std::shared_ptr<const std::vector<float>>> &src,
+          std::vector<double> &key) {
+  check_sources(p, src, key);
+  std::vector<std::vector<float>> maps;
+  for (int v = 0; v < p.variants; ++v) {
+    if (!src[v])
+      src[v] = grow_source(p, key, v);
+    maps.push_back(grow_map(p, *src[v], v));
+  }
+  return maps;
+}
+
+std::vector<float> opacity_map(const cloud_layer_params &p, const std::vector<float> &f) {
+  std::vector<float> op(f.size());
+  for (std::size_t k = 0; k < f.size(); ++k)
+    op[k] = static_cast<float>(opacity_in(p.opacity, f[k]));
+  return op;
+}
+
+// Each map's optical depth toward the sun, swept from the top layer down a layer at a time
+// (sun_layer): a voxel's is that of the point one layer up along the sun ray (bilinear in that
+// layer; 0 past the map's sides, where there is no cloud) plus the opacity between the two. One
+// pass over the voxels; the interpolation softens the self-shade by about a voxel per layer
+// climbed. On a storm deck a layer is tens of metres and the ray crosses many voxels sideways
+// climbing one, so the opacity between is marched a voxel at a time (the trapezoid of the two ends
+// on a cumulus deck, as before).
+struct sun_geometry {
+  int n = 0, nz = 0;
+  double l = 0.0, ox = 0.0, oy = 0.0; // the path a layer up, and where it comes out (voxels)
+  int sub = 1;                        // its steps through the layer
+};
+
+sun_geometry sun_geom(const cloud_layer_params &p) {
+  sun_geometry g;
+  g.n = p.n;
+  g.nz = p.nz;
+  double sx, sy, sz;
+  sun_vector(p, sx, sy, sz);
+  const double hx = 2.0 * p.extent / (g.n - 1), hz = (p.top - p.base) / (g.nz - 1);
+  g.l = hz / sz;
+  g.ox = g.l * sx / hx;
+  g.oy = g.l * sy / hx;
+  g.sub = is_deep(p)
+              ? std::max(1, static_cast<int>(std::ceil(std::max(std::fabs(g.ox), std::fabs(g.oy)))))
+              : 1;
+  return g;
+}
+
+void sun_layer(const sun_geometry &g, const std::vector<float> &op, std::vector<float> &tau,
+               int gz) {
+  const int n = g.n;
+  const std::size_t layer = static_cast<std::size_t>(n) * n;
+  auto bilinear = [n, layer](const std::vector<float> &a, int z, double fx, double fy) {
+    if (fx < 0.0 || fy < 0.0 || fx > n - 1 || fy > n - 1)
+      return 0.0;
+    const int x0 = std::min(static_cast<int>(fx), n - 2),
+              y0 = std::min(static_cast<int>(fy), n - 2);
+    const double tx = fx - x0, ty = fy - y0;
+    const float *L = a.data() + z * layer;
+    auto V = [&](int x, int y) { return double(L[static_cast<std::size_t>(y) * n + x]); };
+    return (V(x0, y0) * (1 - tx) + V(x0 + 1, y0) * tx) * (1 - ty) +
+           (V(x0, y0 + 1) * (1 - tx) + V(x0 + 1, y0 + 1) * tx) * ty;
+  };
+  for (int gy = 0; gy < n; ++gy)
+    for (int gx = 0; gx < n; ++gx) {
+      const double fx = gx + g.ox, fy = gy + g.oy;
+      const std::size_t i = lsys::cloud_index(n, gx, gy, gz);
+      double between = 0.5 * (op[i] + bilinear(op, gz + 1, fx, fy));
+      if (g.sub > 1) {
+        for (int j = 1; j < g.sub; ++j) {
+          const double u = double(j) / g.sub, ax = gx + g.ox * u, ay = gy + g.oy * u;
+          between += (1.0 - u) * bilinear(op, gz, ax, ay) + u * bilinear(op, gz + 1, ax, ay);
+        }
+        between /= g.sub;
+      }
+      tau[i] = static_cast<float>(bilinear(tau, gz + 1, fx, fy) + between * g.l);
+    }
+}
+
+std::vector<std::vector<float>> sun_depths(const cloud_layer_params &p,
+                                           const std::vector<std::vector<float>> &maps) {
+  const sun_geometry g = sun_geom(p);
+  std::vector<std::vector<float>> out;
+  for (const std::vector<float> &f : maps) {
+    const std::vector<float> op = opacity_map(p, f);
+    std::vector<float> tau(f.size(), 0.0f);
+    for (int gz = g.nz - 2; gz >= 0; --gz)
+      sun_layer(g, op, tau, gz);
+    out.push_back(std::move(tau));
+  }
+  return out;
+}
+
+// A map's optical depth straight up, swept from the top layer down: a voxel's is the one above's
+// plus the trapezoid of the opacity between them.
+std::vector<float> up_depth(const cloud_layer_params &p, const std::vector<float> &f) {
+  const int n = p.n, nz = p.nz;
+  const double hz = (p.top - p.base) / (nz - 1);
+  const std::size_t layer = static_cast<std::size_t>(n) * n;
+  std::vector<float> up(f.size(), 0.0f);
+  for (int gz = nz - 2; gz >= 0; --gz)
+    for (std::size_t i = 0; i < layer; ++i) {
+      const std::size_t k = gz * layer + i;
+      up[k] = static_cast<float>(
+          up[k + layer] +
+          0.5 * (opacity_in(p.opacity, f[k]) + opacity_in(p.opacity, f[k + layer])) * hz);
+    }
+  return up;
+}
+
+std::vector<std::vector<float>> up_depths(const cloud_layer_params &p,
+                                          const std::vector<std::vector<float>> &maps) {
+  std::vector<std::vector<float>> out;
+  for (const std::vector<float> &f : maps)
+    out.push_back(up_depth(p, f));
+  return out;
+}
+
+// Each map's optical depth over the base plane, around the cloud (tau_n^2 texels of c / s metres,
+// even, centred on it), a row at a time (tau_row), then softened (tau_soften). The ray from a
+// base-plane point climbs the deck toward the sun, travelling `travel` metres sideways, so the
+// patch spans the cloud plus that on every side; on a storm deck the climb is cut where the ray
+// has gone TAU_REACH half-widths sideways.
+struct tau_geometry {
+  double sx = 0.0, sy = 0.0, sz = 1.0, ts = 1.0, ds = 0.0;
+  int tau_n = 0;
+};
+
+tau_geometry tau_geom(const cloud_layer_params &p, double c, int s) {
+  tau_geometry g;
+  sun_vector(p, g.sx, g.sy, g.sz);
+  double path = (p.top - p.base) / g.sz;
+  const double sh = std::sqrt(g.sx * g.sx + g.sy * g.sy);
+  if (is_deep(p) && sh > 0.0)
+    path = std::min(path, TAU_REACH * p.extent / sh);
+  const double travel = path * sh;
+  g.ts = c / s;
+  g.tau_n = 2 * static_cast<int>(std::ceil((p.extent + travel) / g.ts));
+  g.ds = path / TAU_STEPS;
+  return g;
+}
+
+void tau_row(const cloud_layer_params &p, const tau_geometry &g, const std::vector<float> &f,
+             std::vector<float> &tau, int py) {
+  const int n = p.n, nz = p.nz, N = g.tau_n;
+  const double by = (py - N / 2 + 0.5) * g.ts;
+  for (int px = 0; px < N; ++px) {
+    const double bx = (px - N / 2 + 0.5) * g.ts;
+    double t = 0.0;
+    for (int k = 0; k < TAU_STEPS; ++k) {
+      const double l = (k + 0.5) * g.ds;
+      t += opacity_in(p.opacity, sample_map(f, n, nz, p.extent, p.base, p.top, bx + l * g.sx,
+                                            by + l * g.sy, p.base + l * g.sz));
+    }
+    tau[static_cast<std::size_t>(py) * N + px] = static_cast<float>(t * g.ds);
+  }
+}
+
+void tau_soften(const tau_geometry &g, std::vector<float> &tau) {
+  soften(tau, g.tau_n, std::max(1, static_cast<int>(std::lround(SHADOW_SOFT_M / g.ts))));
+}
+
+std::vector<std::vector<float>> tau_patches(const cloud_layer_params &p,
+                                            const std::vector<std::vector<float>> &maps, double c,
+                                            int s, int &tau_n) {
+  const tau_geometry g = tau_geom(p, c, s);
+  tau_n = g.tau_n;
+  std::vector<std::vector<float>> out;
+  for (const std::vector<float> &f : maps) {
+    std::vector<float> tau(static_cast<std::size_t>(g.tau_n) * g.tau_n);
+    for (int py = 0; py < g.tau_n; ++py)
+      tau_row(p, g, f, tau, py);
+    tau_soften(g, tau);
+    out.push_back(std::move(tau));
+  }
+  return out;
+}
+
+// A map's coarse slices, box-filtered from the map: what a far shell at that height shows
+// (far_n^2 * far_layers, centred, texels of c / f metres).
+int far_size_of(const cloud_layer_params &p, double c, int f) {
+  return 2 * static_cast<int>(std::ceil(p.extent / (c / f)));
+}
+
+std::vector<float> far_slice(const cloud_layer_params &p, const std::vector<float> &m, double c,
+                             int f, double amax) {
+  const int n = p.n, nz = p.nz;
+  const double ft = c / f;
+  const int far_n = far_size_of(p, c, f);
+  const int L = p.far_layers;
+  const double dz = (p.top - p.base) / L;
+  std::vector<float> far(static_cast<std::size_t>(far_n) * far_n * L);
+  for (int k = 0; k < L; ++k)
+    for (int py = 0; py < far_n; ++py)
+      for (int px = 0; px < far_n; ++px) {
+        double acc = 0.0;
+        for (int a = 0; a < FAR_SUB; ++a)
+          for (int b = 0; b < FAR_SUB; ++b)
+            for (int e = 0; e < FAR_SUB; ++e) {
+              const double x = (px - far_n / 2 + (a + 0.5) / FAR_SUB) * ft;
+              const double y = (py - far_n / 2 + (b + 0.5) / FAR_SUB) * ft;
+              const double z = p.base + (k + (e + 0.5) / FAR_SUB) * dz;
+              acc += opacity_in(p.opacity, sample_map(m, n, nz, p.extent, p.base, p.top, x, y, z));
+            }
+        far[(static_cast<std::size_t>(k) * far_n + py) * far_n + px] =
+            static_cast<float>(acc / (FAR_SUB * FAR_SUB * FAR_SUB) / amax);
+      }
+  return far;
+}
+
+std::vector<std::vector<float>> far_slices(const cloud_layer_params &p,
+                                           const std::vector<std::vector<float>> &maps, double c,
+                                           int f, double amax, int &far_n) {
+  far_n = far_size_of(p, c, f);
+  std::vector<std::vector<float>> out;
+  for (const std::vector<float> &m : maps)
+    out.push_back(far_slice(p, m, c, f, amax));
+  return out;
+}
+
+// A storm's footprint at distance d from its centre: 1 over its core, 0 at its radius (as
+// cvc::world::weather::footprint).
+double storm_footprint(double d, double r) {
+  return r > 0.0 ? 1.0 - smooth01((d - 0.5 * r) / (0.5 * r)) : 0.0;
+}
+} // namespace
+
+// A deck built away from the layer: what the build reads, and what it makes.
+struct cloud_layer::deck_job {
+  cloud_layer_params p; // the layer's params with the new deck's heights, layers and slices
+  double c = 0.0;       // the layout it is built for: cell size, shadow and far texels a cell
+  int s = 0, f = 0;
+  double amax = 1.0;
+  bool same = false; // the deck the layer has: nothing to build
+  bool built = false;
+  std::vector<std::vector<float>> maps, sun, up, tau, far;
+  int tau_n = 0, far_n = 0;
+  std::vector<std::shared_ptr<const std::vector<float>>> src; // the layer's cumulus, or new ones
+  std::vector<double> srcKey;
+  // Where step() is: the stage (STAGES), the variant, and the layer (the self-shade, from the top)
+  // or row (the shade) within it; the variant's opacity for its self-shade; the units done and in
+  // all, for progress().
+  int stage = 0, v = 0, k = -1;
+  bool started = false;
+  std::vector<float> op;
+  std::size_t units = 0, total = 1;
+};
+
+namespace {
+// The stages of a deck's build, and what step() and phase() call them.
+enum { GROW, SELF_SHADE, SKY, SHADE, FAR, BUILT };
+const char *const STAGE_NAMES[] = {"grow", "self-shade", "sky", "shade", "far", "built"};
 } // namespace
 
 cloud_layer::cloud_layer(const cloud_layer_params &p) : m_p(p) {
@@ -187,88 +624,189 @@ void cloud_layer::set_sun(double az_deg, double el_deg) {
     build_far();
 }
 
-void cloud_layer::make_maps() {
-  // The maps: each scaled to its own peak (the grammar grows some variants much fainter than
-  // others, and a cell showing one must still hold a cloud), then lumped: clear sky below
-  // LUMP_FLOOR, squared above. A crossfade of two is what a cell shows, and its optical depth is
-  // the crossfade of theirs.
-  m_maps.clear();
-  const int n = m_p.n, nz = m_p.nz;
-  for (int v = 0; v < m_p.variants; ++v) {
-    lsys::cloud_params cp;
-    cp.seed = m_p.seed;
-    cp.variant = static_cast<std::uint32_t>(v);
-    cp.n = n;
-    cp.nz = nz;
-    cp.half = m_p.extent;
-    cp.base = m_p.base;
-    cp.top = m_p.top;
-    cp.sun_az = m_p.sun_az;
-    cp.sun_el = m_p.sun_el;
-    cp.depth = m_p.depth;
-    std::vector<float> f = lsys::cloud_field(cp);
-    // A round taper over the outer part of the footprint. The grammar clamps its turtle at the
-    // grid's y edges (it wraps x), so a cloud that wanders there piles puffs against the face,
-    // and the grid's own window cuts that pile off in a few voxels: a straight edge along the
-    // volume's box. The taper also keeps the clouds from reading square.
-    for (int gy = 0; gy < n; ++gy)
-      for (int gx = 0; gx < n; ++gx) {
-        const double u = 2.0 * gx / (n - 1) - 1.0, v = 2.0 * gy / (n - 1) - 1.0;
-        const double t = (std::sqrt(u * u + v * v) - TAPER_FROM) / (1.0 - TAPER_FROM);
-        const float w = static_cast<float>(t <= 0.0   ? 1.0
-                                           : t >= 1.0 ? 0.0
-                                                      : 1.0 - t * t * (3.0 - 2.0 * t));
-        for (int gz = 0; gz < nz; ++gz)
-          f[lsys::cloud_index(n, gx, gy, gz)] *= w;
+void cloud_layer::make_maps() { m_maps = grow_maps(m_p, m_src, m_srcKey); }
+
+void cloud_layer::build_sun() {
+  m_sun = sun_depths(m_p, m_maps);
+  m_up = up_depths(m_p, m_maps);
+}
+
+bool cloud_layer::deep() const { return is_deep(m_p); }
+
+std::shared_ptr<cloud_layer::deck_job> cloud_layer::prepare_deck(double base, double top, int nz,
+                                                                 int far_layers) const {
+  auto job = std::make_shared<deck_job>();
+  job->p = m_p;
+  job->p.base = base;
+  job->p.top = std::max(base + 1.0, top);
+  job->p.nz = nz > 0 ? std::max(2, nz) : m_p.nz;
+  job->p.far_layers = far_layers > 0 ? far_layers : m_p.far_layers;
+  job->c = m_c;
+  job->s = m_s;
+  job->f = m_f;
+  job->amax = m_amax;
+  job->src = m_src; // shared, never written: grow_maps replaces them when they do not fit
+  job->srcKey = m_srcKey;
+  job->same = job->p.base == m_p.base && job->p.top == m_p.top && job->p.nz == m_p.nz &&
+              job->p.far_layers == m_p.far_layers;
+  job->built = job->same;
+  return job;
+}
+
+void cloud_layer::run(deck_job &job) { step(job, 0); }
+
+bool cloud_layer::step(deck_job &job, std::size_t budget) {
+  if (job.built)
+    return true;
+  const cloud_layer_params &p = job.p;
+  const int V = p.variants;
+  const sun_geometry sg = sun_geom(p);
+  const tau_geometry tg = tau_geom(p, job.c, job.s);
+  if (!job.started) {
+    job.started = true;
+    check_sources(p, job.src, job.srcKey);
+    for (auto *a : {&job.maps, &job.sun, &job.up, &job.tau, &job.far})
+      a->assign(static_cast<std::size_t>(V), std::vector<float>());
+    job.tau_n = tg.tau_n;
+    job.far_n = far_size_of(p, job.c, job.f);
+    job.total = static_cast<std::size_t>(V) * (3 + (p.nz - 1) + tg.tau_n);
+  }
+  // One unit at a time, in run()'s order: a variant's map (its cumulus grown first if it is not
+  // kept), one layer of a variant's self-shade, a variant's sky depth, one row of a variant's
+  // shade (softened after its last), a variant's far slices.
+  for (std::size_t did = 0; job.stage != BUILT && (budget == 0 || did < budget);
+       ++did, ++job.units) {
+    const int v = job.v;
+    switch (job.stage) {
+    case GROW:
+      if (!job.src[v])
+        job.src[v] = grow_source(p, job.srcKey, v);
+      job.maps[v] = grow_map(p, *job.src[v], v);
+      if (++job.v == V) {
+        job.stage = SELF_SHADE;
+        job.v = 0;
+        job.k = -1;
       }
-    const float peak = f.empty() ? 0.0f : *std::max_element(f.begin(), f.end());
-    for (float &x : f) {
-      const double r = peak > 0.0f ? x / peak : 0.0;
-      const double l = std::min(1.0, std::max(0.0, (r - LUMP_FLOOR) / (1.0 - LUMP_FLOOR)));
-      x = static_cast<float>(l * l);
+      break;
+    case SELF_SHADE:
+      if (job.k < 0) {
+        job.op = opacity_map(p, job.maps[v]);
+        job.sun[v].assign(job.maps[v].size(), 0.0f);
+        job.k = p.nz - 2;
+      }
+      sun_layer(sg, job.op, job.sun[v], job.k);
+      if (--job.k < 0 && ++job.v == V) {
+        job.stage = SKY;
+        job.v = 0;
+        job.op.clear();
+      }
+      break;
+    case SKY:
+      job.up[v] = up_depth(p, job.maps[v]);
+      if (++job.v == V) {
+        job.stage = SHADE;
+        job.v = 0;
+        job.k = 0;
+      }
+      break;
+    case SHADE:
+      if (job.k == 0)
+        job.tau[v].assign(static_cast<std::size_t>(tg.tau_n) * tg.tau_n, 0.0f);
+      tau_row(p, tg, job.maps[v], job.tau[v], job.k);
+      if (++job.k == tg.tau_n) {
+        tau_soften(tg, job.tau[v]);
+        job.k = 0;
+        if (++job.v == V) {
+          job.stage = FAR;
+          job.v = 0;
+        }
+      }
+      break;
+    case FAR:
+      job.far[v] = far_slice(p, job.maps[v], job.c, job.f, job.amax);
+      if (++job.v == V) {
+        job.stage = BUILT;
+        job.built = true;
+      }
+      break;
     }
-    m_maps.push_back(std::move(f));
+  }
+  return job.built;
+}
+
+const char *cloud_layer::phase(const deck_job &job) {
+  return STAGE_NAMES[job.built ? BUILT : std::min<int>(job.stage, BUILT)];
+}
+
+double cloud_layer::progress(const deck_job &job) {
+  if (job.built)
+    return 1.0;
+  return std::min(0.999, double(job.units) / double(std::max<std::size_t>(1, job.total)));
+}
+
+bool cloud_layer::adopt_deck(deck_job &job) {
+  if (!job.built)
+    return false;
+  if (job.same)
+    return job.p.base == m_p.base && job.p.top == m_p.top && job.p.nz == m_p.nz &&
+           job.p.far_layers == m_p.far_layers;
+  // Built for this layout and this sun, or not at all.
+  if (job.c != m_c || job.s != m_s || job.f != m_f || job.p.sun_az != m_p.sun_az ||
+      job.p.sun_el != m_p.sun_el || job.p.n != m_p.n || job.p.variants != m_p.variants ||
+      job.p.extent != m_p.extent || job.p.cumulus != m_p.cumulus || job.p.seed != m_p.seed)
+    return false;
+  m_p.base = job.p.base;
+  m_p.top = job.p.top;
+  m_p.nz = job.p.nz;
+  m_p.far_layers = job.p.far_layers;
+  m_maps = std::move(job.maps);
+  m_src = std::move(job.src);
+  m_srcKey = std::move(job.srcKey);
+  m_sun = std::move(job.sun);
+  m_up = std::move(job.up);
+  m_tau = std::move(job.tau);
+  m_far = std::move(job.far);
+  m_tau_n = job.tau_n;
+  m_far_n = job.far_n;
+  job.built = false; // spent
+  return true;
+}
+
+void cloud_layer::set_deck(double base, double top, int nz, int far_layers) {
+  std::shared_ptr<deck_job> job = prepare_deck(base, top, nz, far_layers);
+  run(*job);
+  adopt_deck(*job);
+}
+
+// ─────────────────────── storms
+
+double cloud_layer::storm_at(double x, double y) const {
+  double clear = 1.0;
+  for (const storm_disc &d : m_storms)
+    clear *= 1.0 - std::min(1.0, std::max(0.0, d.intensity)) *
+                       storm_footprint(std::hypot(x - d.x, y - d.y), d.r);
+  return 1.0 - clear;
+}
+
+void cloud_layer::storm_shares() {
+  for (cloud_cell &c : m_cells) {
+    if (m_storms.empty()) {
+      c.storm = 0.0;
+      continue;
+    }
+    double x, y;
+    cell_world(c, x, y);
+    c.storm = storm_at(x, y);
   }
 }
 
-void cloud_layer::build_sun() {
-  // Each map's optical depth toward the sun, swept from the top layer down: a voxel's is that of
-  // the point one layer up along the sun ray (bilinear in that layer; 0 past the map's sides,
-  // where there is no cloud) plus the trapezoid of the opacity between the two. One pass over
-  // the voxels; the interpolation softens the self-shade by about a voxel per layer climbed.
-  const int n = m_p.n, nz = m_p.nz;
-  double sx, sy, sz;
-  sun_dir(sx, sy, sz);
-  const double hx = 2.0 * m_p.extent / (n - 1), hz = (m_p.top - m_p.base) / (nz - 1);
-  const double l = hz / sz;                        // the path from one layer to the next up
-  const double ox = l * sx / hx, oy = l * sy / hx; // where it comes out, in voxels
-  const std::size_t layer = static_cast<std::size_t>(n) * n;
-  auto bilinear = [n, layer](const std::vector<float> &a, int gz, double fx, double fy) {
-    if (fx < 0.0 || fy < 0.0 || fx > n - 1 || fy > n - 1)
-      return 0.0;
-    const int x0 = std::min(static_cast<int>(fx), n - 2),
-              y0 = std::min(static_cast<int>(fy), n - 2);
-    const double tx = fx - x0, ty = fy - y0;
-    const float *L = a.data() + gz * layer;
-    auto V = [&](int x, int y) { return double(L[static_cast<std::size_t>(y) * n + x]); };
-    return (V(x0, y0) * (1 - tx) + V(x0 + 1, y0) * tx) * (1 - ty) +
-           (V(x0, y0 + 1) * (1 - tx) + V(x0 + 1, y0 + 1) * tx) * ty;
-  };
-  m_sun.clear();
-  for (const std::vector<float> &f : m_maps) {
-    std::vector<float> op(f.size()), tau(f.size(), 0.0f);
-    for (std::size_t k = 0; k < f.size(); ++k)
-      op[k] = static_cast<float>(opacity_of(f[k]));
-    for (int gz = nz - 2; gz >= 0; --gz)
-      for (int gy = 0; gy < n; ++gy)
-        for (int gx = 0; gx < n; ++gx) {
-          const double fx = gx + ox, fy = gy + oy;
-          const std::size_t i = lsys::cloud_index(n, gx, gy, gz);
-          tau[i] = static_cast<float>(bilinear(tau, gz + 1, fx, fy) +
-                                      0.5 * (op[i] + bilinear(op, gz + 1, fx, fy)) * l);
-        }
-    m_sun.push_back(std::move(tau));
-  }
+void cloud_layer::set_storms(const std::vector<storm_disc> &storms) {
+  if (storms.empty() && m_storms.empty())
+    return;
+  m_storms = storms;
+  storm_shares();
+  if (!m_cells.empty())
+    rank_cells(); // the targets now; the presences fade to them over fade_s
 }
 
 void cloud_layer::set_area(double area) {
@@ -310,81 +848,11 @@ void cloud_layer::set_area(double area) {
     build_far();
 }
 
-void cloud_layer::build_far() {
-  // Each map's coarse slices, box-filtered from the map: what a far shell at that height shows.
-  m_far.clear();
-  const int n = m_p.n, nz = m_p.nz;
-  const double ft = m_c / m_f;
-  m_far_n = 2 * static_cast<int>(std::ceil(m_p.extent / ft));
-  const int L = m_p.far_layers;
-  const double dz = (m_p.top - m_p.base) / L;
-  for (const std::vector<float> &f : m_maps) {
-    std::vector<float> far(static_cast<std::size_t>(m_far_n) * m_far_n * L);
-    for (int k = 0; k < L; ++k)
-      for (int py = 0; py < m_far_n; ++py)
-        for (int px = 0; px < m_far_n; ++px) {
-          double acc = 0.0;
-          for (int a = 0; a < FAR_SUB; ++a)
-            for (int b = 0; b < FAR_SUB; ++b)
-              for (int c = 0; c < FAR_SUB; ++c) {
-                const double x = (px - m_far_n / 2 + (a + 0.5) / FAR_SUB) * ft;
-                const double y = (py - m_far_n / 2 + (b + 0.5) / FAR_SUB) * ft;
-                const double z = m_p.base + (k + (c + 0.5) / FAR_SUB) * dz;
-                acc += opacity_of(sample_map(f, n, nz, m_p.extent, m_p.base, m_p.top, x, y, z));
-              }
-          far[(static_cast<std::size_t>(k) * m_far_n + py) * m_far_n + px] =
-              static_cast<float>(acc / (FAR_SUB * FAR_SUB * FAR_SUB) / m_amax);
-        }
-    m_far.push_back(std::move(far));
-  }
-}
+void cloud_layer::build_far() { m_far = far_slices(m_p, m_maps, m_c, m_f, m_amax, m_far_n); }
 
-void cloud_layer::build_tau() {
-  const int n = m_p.n, nz = m_p.nz;
-  m_tau.clear();
-  // Each map's optical depth over the base plane. The ray from a base-plane point b climbs the
-  // deck toward the sun, travelling `travel` metres sideways, so the patch spans the cloud plus
-  // that on every side.
-  double sx, sy, sz;
-  sun_dir(sx, sy, sz);
-  const double path = (m_p.top - m_p.base) / sz;
-  const double travel = path * std::sqrt(sx * sx + sy * sy);
-  const double ts = m_c / m_s;
-  m_tau_n = 2 * static_cast<int>(std::ceil((m_p.extent + travel) / ts));
-  const double ds = path / TAU_STEPS;
-  for (const std::vector<float> &f : m_maps) {
-    std::vector<float> tau(static_cast<std::size_t>(m_tau_n) * m_tau_n);
-    for (int py = 0; py < m_tau_n; ++py) {
-      const double by = (py - m_tau_n / 2 + 0.5) * ts;
-      for (int px = 0; px < m_tau_n; ++px) {
-        const double bx = (px - m_tau_n / 2 + 0.5) * ts;
-        double t = 0.0;
-        for (int s = 0; s < TAU_STEPS; ++s) {
-          const double l = (s + 0.5) * ds;
-          t += opacity_of(sample_map(f, n, nz, m_p.extent, m_p.base, m_p.top, bx + l * sx,
-                                     by + l * sy, m_p.base + l * sz));
-        }
-        tau[static_cast<std::size_t>(py) * m_tau_n + px] = static_cast<float>(t * ds);
-      }
-    }
-    soften(tau, m_tau_n, std::max(1, static_cast<int>(std::lround(SHADOW_SOFT_M / ts))));
-    m_tau.push_back(std::move(tau));
-  }
-}
+void cloud_layer::build_tau() { m_tau = tau_patches(m_p, m_maps, m_c, m_s, m_tau_n); }
 
-double cloud_layer::opacity_of(double v) const {
-  const std::vector<double> &t = m_p.opacity;
-  if (t.empty())
-    return v;
-  if (v <= t[0])
-    return t[1];
-  for (std::size_t k = 2; k + 1 < t.size(); k += 2)
-    if (v <= t[k]) {
-      const double u = t[k] > t[k - 2] ? (v - t[k - 2]) / (t[k] - t[k - 2]) : 1.0;
-      return t[k - 1] + u * (t[k + 1] - t[k - 1]);
-    }
-  return t[t.size() - 1];
-}
+double cloud_layer::opacity_of(double v) const { return opacity_in(m_p.opacity, v); }
 
 int cloud_layer::occupied() const {
   int k = 0;
@@ -416,6 +884,8 @@ void cloud_layer::step() {
   const int M = m_m;
   const double str = m_p.orographic;
   const bool oro = str > 0.0 && has_ground();
+  if (!m_storms.empty())
+    storm_shares(); // the drift has moved the cells under the storms
   for (int j = 0; j < M; ++j)
     for (int i = 0; i < M; ++i) {
       const std::size_t k = static_cast<std::size_t>(j) * M + i;
@@ -444,7 +914,9 @@ void cloud_layer::step() {
         up = str * std::max(0.0, c.forcing);
         down = str * std::max(0.0, -c.forcing);
       }
-      nc &= ~s.bernoulli(P_EXT * (1.0 + EXT_GAIN * down));
+      // A storm over the cell feeds it as a windward flank does and holds off its extinction.
+      up += STORM_GAIN * c.storm;
+      nc &= ~s.bernoulli(P_EXT * (1.0 + EXT_GAIN * down) * (1.0 - c.storm));
       nh |= s.bernoulli(P_HUM * (1.0 + HUM_GAIN * up));
       na |= s.bernoulli(P_ACT * (1.0 + ACT_GAIN * up));
       m_hum[k] = nh;
@@ -462,14 +934,20 @@ void cloud_layer::rank_cells() {
   // least one when coverage > 0), so a small world is never left clear by chance. A held cloud
   // leads by HYSTERESIS, so two cells with much the same cloud do not trade places; ties go by a
   // hashed draw.
+  // A storm's cells are held besides: the coverage is the fair weather's, and the cells under a
+  // storm close up (their shares, summed, join the count), the stormiest first.
   const int ncell = static_cast<int>(m_cells.size());
-  int want = static_cast<int>(std::lround(m_p.coverage * ncell));
-  if (m_p.coverage > 0.0)
+  double stormy = 0.0;
+  for (const cloud_cell &c : m_cells)
+    stormy += c.storm;
+  int want = static_cast<int>(std::lround(m_p.coverage * ncell + (1.0 - m_p.coverage) * stormy));
+  want = std::min(ncell, want);
+  if (m_p.coverage > 0.0 || stormy > 0.0)
     want = std::max(1, want);
   std::vector<double> score(ncell);
   for (int k = 0; k < ncell; ++k) {
     const cloud_cell &c = m_cells[k];
-    score[k] = c.cloud + (c.occupied ? HYSTERESIS : 0.0) +
+    score[k] = c.cloud + (c.occupied ? HYSTERESIS : 0.0) + STORM_LEAD * c.storm +
                1e-6 * lsys::uni(m_p.seed, lsys::stream::cloud, cell_el(c.i, c.j), 0);
   }
   std::vector<int> order(ncell);
@@ -608,12 +1086,7 @@ void cloud_layer::cell_world(const cloud_cell &c, double &x, double &y) const {
   y += P * std::round((oy - y) / P);
 }
 
-void cloud_layer::sun_dir(double &x, double &y, double &z) const {
-  const double az = m_p.sun_az * kPi / 180.0, el = m_p.sun_el * kPi / 180.0;
-  x = std::cos(el) * std::sin(az);
-  y = -std::cos(el) * std::cos(az);
-  z = std::sin(el);
-}
+void cloud_layer::sun_dir(double &x, double &y, double &z) const { sun_vector(m_p, x, y, z); }
 
 void cloud_layer::base_point(double x, double y, double z, double &bx, double &by) const {
   double sx, sy, sz;
@@ -655,6 +1128,15 @@ void cloud_layer::cell_field(const cloud_cell &c, double m, std::vector<float> &
     out[k] = w * A[k] + u * B[k];
 }
 
+void cloud_layer::cell_up_tau(const cloud_cell &c, double m, std::vector<float> &out) const {
+  const morph_state s = cell_morph(c, m);
+  const std::vector<float> &A = m_up[s.a], &B = m_up[s.b];
+  out.resize(A.size());
+  const float u = static_cast<float>(s.u), w = 1.0f - u;
+  for (std::size_t k = 0; k < A.size(); ++k)
+    out[k] = w * A[k] + u * B[k];
+}
+
 void cloud_layer::cell_sun_tau(const cloud_cell &c, double m, std::vector<float> &out) const {
   const morph_state s = cell_morph(c, m);
   const std::vector<float> &A = m_sun[s.a], &B = m_sun[s.b];
@@ -672,7 +1154,8 @@ void cloud_layer::add_shadow(double m, std::size_t first, std::size_t count,
   const std::size_t last = std::min(m_cells.size(), first + count);
   for (std::size_t ci = first; ci < last; ++ci) {
     const cloud_cell &c = m_cells[ci];
-    const float cw = static_cast<float>(c.weight()); // its crossfade in or out
+    // Its crossfade in or out, and a storm's deeper shade.
+    const float cw = static_cast<float>(c.weight() * (1.0 + STORM_SHADE * c.storm));
     if (cw <= 0.0f)
       continue;
     const morph_state s = cell_morph(c, m);
@@ -723,7 +1206,8 @@ void cloud_layer::add_far(double m, std::size_t first, std::size_t count,
   const std::size_t last = std::min(m_cells.size(), first + count);
   for (std::size_t ci = first; ci < last; ++ci) {
     const cloud_cell &c = m_cells[ci];
-    const float wt = (ci < weight.size() ? weight[ci] : 1.0f) * static_cast<float>(c.weight());
+    const float wt = (ci < weight.size() ? weight[ci] : 1.0f) *
+                     static_cast<float>(c.weight() * (1.0 + STORM_DENSE * c.storm));
     if (wt <= 0.0f)
       continue;
     const morph_state s = cell_morph(c, m);

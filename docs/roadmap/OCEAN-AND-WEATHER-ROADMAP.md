@@ -1058,7 +1058,7 @@ This phase builds on terrain_lab's `cloud_sky` (§1.5), not on the older demo cl
   - terrain_lab.ari drops its copy of the sun's angles.
 - **The water as a receiver.** `water` replaces VTK's lighting, so the deck's rewrite of the lighting sum finds nothing in it. Once the sky has wired its inputs into a water mesh, that mesh switches to lighting that multiplies its sun and glints by `cloudShade()`. terrain_lab.ari lists `water` among the receivers.
 - **Checks:** `cvcgl_ariadne_realize` checks the seeded keys, the shade wired into both water meshes, and the sun following the rig (`cloudSunR` at elevation 28, then at the rig's 50).
-- **Not done:** `base` / `top` (live, they would mean a new deck and new nodes) and `darkness` (a darker low end of the self-shade ramp). Both belong with F2's storm decks.
+- **Not done here:** `base` / `top` live and `darkness`. O18 built both with F2's storm decks (as built, below).
 
 **F2. The weather model.** It is standard library only and deterministic: a function of the seed and world time (R2).
 - **Weather state:** clear, building, storm, clearing. Transitions are scheduled or authored, in the style of ABYSSAL's Director (§10, item 7).
@@ -1067,6 +1067,60 @@ This phase builds on terrain_lab's `cloud_sky` (§1.5), not on the older demo cl
   - **Clouds:** `cloud_layer`'s `forcing` (the orographic hook) raises coverage and density in the cell's footprint.
   - **Darkness:** the cell's intensity raises it. A deeper deck has more optical depth toward the sun, so its base goes dark grey through the same `exp(−k·tau)` ramp [C `lsystem_nodes.cpp:585`]. That is the physical reason storm clouds are dark, and the ramp needs only a darker low end.
   - **Height:** a storm deck needs tops of several kilometres, against today's 300–520 m. Taller cloud maps for cumulonimbus are a variant of the existing 60×60×28 maps. The far shells already reach 4 km.
+
+**As built (O18).**
+- **The model** is `cvc::world::weather` (`inc/cvc/world/weather.h`), standard library only. It sits in cvc::world beside `cloud_layer`, GL-free, so a headless scene, pycvc and arisrv can run it (§11.1, item 4). It is a pure function of its parameters (the seed among them), the world time and the authored events:
+  - `at(t)` computes the cells alive at t from scratch. Nothing is stepped or remembered, so a client that joins late, seeks or replays sees what the others see. A frame's call costs about 2.4 µs with 32 events (O(cells + events)).
+  - **States:** clear, building, storm, clearing. The state is the strongest live cell's phase.
+  - **Cells:** a birthplace, a radius (widening as the cell grows, and 15 % more as it decays) and a peak intensity. The intensity is a smoothstep up over the first `growth` share of the life (0.3), holds, and falls over the last `decay` share (0.35). Lives are 20–60 weather minutes.
+  - **The schedule:** weather time is cut into slots (`interval`, 1 h); a hashed draw on the seed decides whether a slot holds a storm (`chance`), and its life, radius, peak, start and sideways miss. A storm never outlives its slot, so scheduled storms run clear → building → storm → clearing → clear without overlapping. None is born before `quiet` (600 s), so a world opens clear.
+  - **Placement:** a scheduled storm is born upwind of the area it serves, timed so the steering wind at its birth brings it across the centre (within `miss` half-widths) in the middle of its maturity. It builds upwind, walks over the world and clears past it.
+  - **Authored events** (`weather.events`, as text that reads back exactly): `storm` (a place, or upwind as scheduled), `steer` (the steering wind from t on), `rate` (weather seconds per world second: a time-lapse of the storms alone) and `calm` (every live cell starts clearing). Any event may carry `tau`, the weather time it takes effect at. `compact(t)` anchors the events it keeps and drops the ones that can no longer change the weather from t on (28 events to 7 in the test, the weather after t unchanged).
+  - **Hooks for O19 and O20:** the cells with their phases and motion, the storm field `intensity(x, y)`, and `rain_rate(x, y)` in mm/h (none below an intensity of 0.35, 50 mm/h at full).
+- **The steering wind is the scene's wind** (R5, the owner's ask): one accessor, `steeringWind()` in the weather node, reads cloud_sky's wind (`sky.wind_az` at the deck's drift speed, 3 m/s × `sky.drift`), so a storm keeps to the clouds drawn. O14 points it at `wind.speed` / `wind.dir`. A change that has held for ten frames is logged as a `steer` event, so the tracks stay a function of the events.
+- **`cloud_layer` storms** (`set_storms`, discs over the ground):
+  - Each cell takes the discs' field over its copy nearest the ground's centre (its `storm` share). A stormy cell gains humidity and activation as a windward flank does, its extinction is held off, and it leads the ranking.
+  - Its share joins the count besides `coverage`, which stays the fair weather's, so a storm's footprint closes up. Its shade's optical depth grows by up to 2.5 times and its far opacity by up to 1.8.
+  - Test: a full storm 2 km in radius over a 6 × 6 deck at coverage 0.3. All 8 cells under it hold a cloud, 20 of 36 against 11. After 60 steps they hold 1.00 of their columns' bits as cloud against 0.44. The shade is 3.6 times the fair deck's and the far opacity 2.7 times. The storm gone, the deck holds 11 again.
+  - The deck's pattern repeats every few kilometres (3.1 km on terrain_lab), so a storm wider than that covers every cell. The cells take their share where they are over the world, and the far clouds darken by the discs at their own world point, so a storm upwind reads darker before it arrives.
+- **Live `base` / `top` (F1's leftover), and cumulonimbus.**
+  - `set_deck(base, top, nz, far_layers)` makes the maps again as `set_sun` does. A deck changed live shades and draws exactly as one built so, both ways (`WorldCloudLayer.ADeckChangedLiveIsOneBuiltSo`).
+  - A deck deeper than its cumulus (`cumulus`, the props' depth) grows cumulonimbus maps. The cumulus stays at the bottom; a tower rises from its dense core, narrowing as it climbs, the cumulus's middle layers stacked up it; an anvil spreads under the top. The profile is ABYSSAL's (`Clouds.js` heightProfile, MIT).
+  - On a storm deck the self-shade marches the sun across the tall voxels, a voxel at a time. The base of a 3 km deck sits in 2.9 to 6 times a cumulus base's optical depth toward the sun.
+  - A storm deck's shadow patches reach two cloud half-widths down-sun. A tower's long shade past that is left out, or a 4 km tower's patches would span kilometres.
+  - **Built off the frame:** `prepare_deck` copies what the build reads, and `adopt_deck` swaps the result in. A job made before the layout or the sun changed is refused, and the caller prepares another. In between, `run` builds it on any thread, or `step(job, budget)` builds a few units at a time: a variant's map, one layer of its self-shade, one row of its shade. A deck built in steps is the deck built at once (`ADeckBuiltInStepsIsTheDeckBuiltAtOnce`). The cumulus fields the maps grow from are kept, so neither way grows them again: terrain_lab's 3 km deck takes about 150 ms to build and the way back about 30 ms, against the seconds growing the cumulus takes (`AStormDecksBuildIsTimed`).
+  - **cloud_sky builds it as a sliced task**, the mechanism `generated_world` rebuilds with (#984, `cvc/core/sliced_task.h`), and swaps it in when done. Natively the task runs on the background pool. In single-threaded wasm, where `std::async` cannot start a thread, it runs a few milliseconds a frame on the scheduler thread. `deck_threading: cooperative` forces that path natively; `cvcgl_ariadne_realize` runs the storm both ways, and the sliced build takes several frames.
+  - The near volumes take the new box (more layers, up to 64; the far slices up to 24), their opacity corrected for the box's longer opacity unit so a metre of cloud stays as opaque.
+- **Darkness (F1's other leftover) and dark bases (§10.7).**
+  - `sky.darkness` moves the colour ramp toward a storm ramp: dark grey shade, dulled tops. A cell's storm share darkens its own cloud further.
+  - Where a cloud is darkened, its light also dims as the cloud above it hides the sky, by up to 0.84 (ABYSSAL's `mix(0.16, 1, skyVis)`). The near volumes use a new upward optical depth (`cell_up_tau`, built beside `cell_sun_tau`); the far shells take two taps up the deck, ABYSSAL's. A tower's base (an upward depth 70 to 90 times a cumulus base's) goes dark; a cumulus's stays light. In fair weather, at darkness 0, nothing changes.
+  - The roadmap's `cell_up_tau` mix as an ambient term is folded into the light the ramp reads: the ramp's low end is the cloud's ambient colour.
+- **cloud_sky:**
+  - Live keys `sky.base`, `sky.top`, `sky.darkness` and `sky.storms` (discs as text).
+  - **No new volumes:** a storm deck is drawn by the same near volumes and far shells (the two-volume ceiling).
+  - **No new samplers** on the receivers: up to four storm discs and the darkness go to the far shells and the receivers as uniforms. A receiver's ambient drops by up to 0.55 under a storm (`cloudAmbient`); its direct light dims through the shade, which the storm deepens. The water's shaded lighting uses `cloudShade()` only, so the water's ambient does not drop yet (it is in `water_node.cpp`, not touched here).
+  - On a storm deck the far shells march a slab at least every 60 m and cut the light march where it has gone two cloud widths sideways. With a cumulus deck's settings the towers were faceted and banded with stray shade.
+- **The `weather` node** (`src/cvcGL/ariadne/weather_node.cpp`):
+  - It owns the model over its `ground:` node's extent and evaluates it at the world clock each frame.
+  - It drives the `cloud_sky` named by `sky:`. It writes `sky.storms`. It raises `sky.top` toward `storm_top` in four steps while a storm is within `reach` (4 km) of the ground, so the cumulonimbus maps are built a few times a storm and only while one is about; the deck goes back to its cumulus when the storm leaves. It raises `sky.darkness` toward `darkness` (0.6).
+  - It publishes `weather.state`, `.storminess`, `.cells`, `.storms`, `.rain` (at the ground's centre) and `.deck`.
+  - `weather.request` starts a storm upwind or overhead, or calms the sky. `weather.time_scale` is the time-lapse.
+  - Its panel is `weather_controls.ari`. terrain_lab.ari has one, storms of 1000–1600 m radius topping out at 3 km.
+- **Checks:**
+  - `WorldWeather.*`: a golden hash over 147 times with all four kinds of event (`19e696666ebdfd0d`; the digest rounds positions to 0.1 mm and intensities to 1e-7, so an ulp of sin or cos does not move it; measured on Windows); a scheduled storm's life on schedule; upwind placement; an authored storm and a calm; cells riding a turning wind and a time-lapse; the rain; the events' text; `compact`.
+  - `WorldCloudLayer.*`: a storm closes the deck; a deck changed live equals one built so; a storm deck towers and darkens its base; the build's timing.
+  - `cvcgl_ariadne_realize`: a weather node starts a storm overhead; the sky has its discs and darkness as uniforms; the storm deck comes in off the frame (the near volumes' box rises to 600 m); a settled change of the sky's wind becomes a steer event; a calm clears it all and the cumulus deck comes back.
+  - `AriadneComponents.NodeComponentsTakeTheirNodeAsAnArg` covers `weather_controls`.
+- **Renders** (arigl snapshots of terrain_lab at 1280×720): clear; a storm building upwind (the deck risen, lighter); a storm overhead (the deck dark slate, the ground under it dimmed), from the opening view and from the side.
+- **Frame cost** (native, rough):
+  - arigl snapshots of terrain_lab at 1280×720 (Windows, MSVC Release, an RTX 4070 Laptop GPU). The per-frame time is the 720-frame run's time minus the 120-frame run's, over 600 frames, three runs each, interleaved: master (8b2d2ffd8), this branch with a clear sky, and this branch with a storm overhead (`--set weather.request=overhead`: the storm deck, its discs and darkness).
+  - Medians: 148 ms on master, 94 ms clear, 94 ms with the storm. The runs spread 96–374, 83–141 and 93–153 ms: three other agents were building on the machine, so the frames were about twice O15's 55 ms and the spread swamps any difference. Within that noise the clear sky and the storm cost no more than master.
+  - By construction: no new volume or sampler; the weather is O(cells) a frame (2.4 µs); a storm deck is built off the frame (150 ms on a worker); the far shells' storm-deck march takes at most CLOUD_SAMPLES samples a slab, as before, and their two upward taps run only where a cloud is darkened.
+  - Not measured: a quiet machine, GPU timer queries, the browser.
+- **Not done:**
+  - The towers are columns of stacked cumulus puffs on a 28-layer source, and every cloud in view becomes one while a storm is about. Taller maps per cell (cumulus away from the storm, towers under it) would need a second map set or a taller near box per cell.
+  - The pattern's period limits how local a storm can look (above).
+  - Rain, shafts and fog (O19); the gust front, lightning and wet ground (O20); the water's ambient under a storm; the browser (WebGL2) and Linux/macOS runs.
 
 **F3. Rain.** Under each cell, a rain rate R(x, y, t) wherever the cloud is thick enough. It shows in five places:
 - **Near the camera:** streak particles in a GPU ping-pong state texture, lit by the sun's transmittance through the deck, slanted by the wind, with density ∝ R. This is a port (§10, item 6).
