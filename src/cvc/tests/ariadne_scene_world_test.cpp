@@ -4073,10 +4073,16 @@ TEST(AriadneSceneWeather, TheRainsFrictionIsSetInTheStepOnTheClocksTicks) {
   ASSERT_FALSE(fine.samples.empty());
   ASSERT_FALSE(coarse.samples.empty());
 
-  // The rain lowered the friction to the soaked ground's, with no renderer, and said so.
-  EXPECT_EQ(fine.wetness, 1.0);
-  EXPECT_EQ(fine.samples.back().friction, soaked);
-  EXPECT_EQ(fine.published, "1");
+  // The rain lowered the friction, with no renderer, to the wet ground's at the wetness it applied
+  // (the storm, steered on, has left the point and the ground has begun to dry), and said so.
+  EXPECT_GT(fine.wetness, 0.5);
+  EXPECT_LE(fine.wetness, 1.0);
+  EXPECT_EQ(fine.samples.back().friction,
+            static_cast<float>(cvc::physics::wet_friction(asphalt, fine.wetness)));
+  EXPECT_LT(fine.samples.back().friction, dry);
+  EXPECT_GE(fine.samples.back().friction, soaked);
+  EXPECT_EQ(std::stod(fine.published), fine.wetness);
+  EXPECT_EQ(coarse.wetness, fine.wetness);
   // It changed on the clock: on the first step of a half second (none before it), never between.
   std::uint64_t first = 0;
   for (const sample &s : fine.samples)
