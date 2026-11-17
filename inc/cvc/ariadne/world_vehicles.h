@@ -20,8 +20,8 @@
 #include <cstdint>
 #include <cvc/ariadne/world_rules.h> // vehicle_archetype
 #include <cvc/ariadne/world_spawns.h>
-#include <cvc/physics/dyn_boat_plant.h> // dyn_boat_desc
 #include <cvc/nav/detail/dyn_4w.h> // the models a twin steps: dyn4_params, dyn_bike_params, bike_veh
+#include <cvc/physics/dyn_boat_plant.h> // dyn_boat_desc
 #include <cvc/physics/types.h>
 #include <cvc/physics/vehicle.h> // vehicle_desc
 #include <limits>
