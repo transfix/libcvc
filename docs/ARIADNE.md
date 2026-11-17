@@ -1375,6 +1375,25 @@ with a lace of foam under it, the sand dark and glossy behind it until it dries.
 carries the same swash, so a body on the sand is lifted by the film drawn there. `swash: 0` leaves
 it out of both.
 
+**Boats.** `type: boat` is a boat on the water: a hull, a propeller and a rudder or an outboard in
+the scene's physics world, afloat on a `water` node's sea (OCEAN-AND-WEATHER-ROADMAP.md D6;
+[`scene_boat.h`](../inc/cvc/ariadne/scene_boat.h)). `preset:` is `launch` (a 4 m box hull of 900
+kg with a shaft propeller and a rudder) or `jonboat` (a 3.6 m flat box of 350 kg with an outboard
+that steers), with `mass:` and `max_speed:` over it; `water:` names the water node it floats on (the
+scene's first by default); the transform gives its x, y and heading, and it floats at its draft on
+the water there, the sea's height its z. It goes in once the water's grid is ready, and runs with or
+without a renderer, stepping with the world. Its keys, under its id (or its `keys:`): `drive` (`keys`
+or `nav`), `throttle` and `rudder` (each -1 to 1; a + rudder turns it left) under `drive: keys`, and
+`goal` (`"x,y"`, world metres; seeded from `goal: [x, y]`) under `drive: nav`, where the navigator
+takes it there over the water deep enough for it; and its telemetry `x`, `y`, `z`, `heading`
+(degrees), `speed` (m/s through the water), `thrust` (N), `reached`, `placed` and `status`.
+`boat_controls.ari` is its helm. Drawn, it is its hull at its boat's pose: an open boat, white
+topsides over a blue stripe at the waterline and a dark wet bottom, with a teak sole. The water
+node keeps its water out of the boats nearest the camera (at most four, their footprints between
+their bottom and their sheer, passed to the water's shaders as uniforms, not a texture), its boats
+and the world's boat vehicles alike, and the boats make waves in its wake window. `terrain_lab.ari` has a launch on the
+lake beside the crates (Settings > Launch).
+
 **Wind.** A scene's `wind:` is its one wind (OCEAN-AND-WEATHER-ROADMAP.md E5, O14;
 [`scene_wind.h`](../inc/cvc/ariadne/scene_wind.h)). The water, the cloud deck, the trees and the
 physics all read it, so one key turns them together:
@@ -4218,6 +4237,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `forest_controls`, `sea_controls`, `sky_controls` | a `forest_trees` / `wave_sea` / `cloud_sky` node (arg `keys`, below) |
 | `world_controls` | a `generated_world` node (§5.4; arg `keys`) |
 | `water_controls` | a `water` node (arg `keys`, default `water`) |
+| `boat_controls` | a `boat` node's helm: drive, throttle, rudder, goal, and what it does (arg `keys`, default `boat`: the node's id or `keys:`) |
 | `weather_controls` | a `weather` node: the weather now, a storm started upwind or overhead, the sky cleared, the weather's time scale (arg `keys`, default `weather`) |
 | `wind_controls` | the scene's one wind (`wind.speed`, `wind.dir`, `wind.gustiness`; §5.4 "Wind") |
 | `mesh_tools` | a `mesh_lab` node (§5.4; arg `node`, default `mesh`) |

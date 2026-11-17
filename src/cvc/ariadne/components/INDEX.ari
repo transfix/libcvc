@@ -161,6 +161,12 @@ catalog:
     binds: "<prefix>.{keys}.{drift,morph,evolve,orographic,shadow,coverage,wind_az,darkness}"   # read every frame by the cloud_sky realizer (wind_az only without a scene wind)
     for: "a `type: cloud_sky` node"
     args: { keys: sky, title: Sky, id: sky_controls }   # defaults; keys = the node's `keys:` prop
+  - component: boat_controls
+    file: boat_controls.ari
+    unit: boat_controls
+    binds: "<prefix>.{keys}.{drive,throttle,rudder,goal}"   # read every step by the scene's boat (scene_boat.h)
+    for: "a `type: boat` node"
+    args: { keys: boat, title: Boat, id: boat_controls }   # defaults; keys = the node's `keys:` prop, else its id
   - component: water_controls
     file: water_controls.ari
     unit: water_controls

@@ -1491,6 +1491,14 @@ void GeometryNode::setShaderUniformi(const std::string &name, int v) {
       sg->requestRender();
   });
 }
+bool GeometryNode::shaderUniform3f(const std::string &name, std::array<float, 3> &out) const {
+  const auto it = m_uniforms3F.find(name);
+  if (it == m_uniforms3F.end())
+    return false;
+  out = it->second;
+  return true;
+}
+
 void GeometryNode::setShaderUniform3f(const std::string &name, float x, float y, float z) {
   runOnMainThread([this, name, x, y, z]() {
     m_uniforms3F[name] = {x, y, z};

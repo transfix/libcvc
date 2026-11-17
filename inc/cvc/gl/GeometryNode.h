@@ -196,6 +196,9 @@ public:
   void setShaderUniformf(const std::string &name, float v);
   void setShaderUniformi(const std::string &name, int v);
   void setShaderUniform3f(const std::string &name, float x, float y, float z);
+  // The value setShaderUniform3f gave `name` (what a test reads back; shaderUniformf, below, a
+  // float's); false for none.
+  bool shaderUniform3f(const std::string &name, std::array<float, 3> &out) const;
   void setShaderTexture(const std::string &name, vtkTextureObject *tex); // nullptr unbinds
 
   // Shader inputs SHARED by many meshes and changed in one place: a node that owns a scene-wide

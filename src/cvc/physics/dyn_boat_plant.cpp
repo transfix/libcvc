@@ -562,6 +562,19 @@ cvc::nav::plant_limits dyn_boat_plant::limits(int i) const {
   return l;
 }
 
+void dyn_boat_plant::hold_controls(int i, const boat_controls &c) {
+  agent &a = _agents.at(static_cast<std::size_t>(i));
+  need(std::isfinite(c.throttle) && std::isfinite(c.rudder) && std::fabs(c.throttle) <= 1.0 &&
+           std::fabs(c.rudder) <= 1.0,
+       "hold_controls: the throttle and rudder must be in [-1, 1]");
+  a.hold = true;
+  a.helm = c;
+}
+
+void dyn_boat_plant::release_controls(int i) {
+  _agents.at(static_cast<std::size_t>(i)).hold = false;
+}
+
 void dyn_boat_plant::command(int i, float steer, float accel) {
   agent &a = _agents.at(static_cast<std::size_t>(i));
   a.steer_cmd = clamp(static_cast<double>(steer), -a.max_steer, a.max_steer);
@@ -588,7 +601,10 @@ void dyn_boat_plant::drive(agent &a, double h) {
 
   const double m = a.props.mass;
   double throttle = 0.0, rudder = 0.0;
-  if (!_o.driver) {
+  if (a.hold) {
+    throttle = a.helm.throttle;
+    rudder = a.helm.rudder;
+  } else if (!_o.driver) {
     const double rated =
         a.accel_cmd >= 0.0 ? b.propeller.max_thrust : b.propeller.max_reverse_thrust;
     throttle = rated > 0.0 ? clamp(a.accel_cmd * m / rated, -1.0, 1.0) : 0.0;
