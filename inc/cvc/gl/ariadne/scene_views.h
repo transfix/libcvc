@@ -14,6 +14,7 @@
 //             view: overview          # its camera is <prefix>.viewers.overview.camera
 //             show: [sim]             # the untagged nodes and those tagged sim
 //             camera: map             # orbit (default) | fly | map | track (with track: NODE)
+//                                     # | slice (with axis: x | y | z or { bind: KEY })
 //             override:               # restyled in this view only, by node id, tag or "*"
 //               city: { drawstyle: wireframe, opacity: 0.4 }
 //             width: 320
@@ -33,7 +34,11 @@
 // viewport there, so the view sits where the widget is, scrolls and moves with its window, and is
 // hidden on any frame the widget is not drawn (a closed or collapsed window, another tab).
 // Dragging in it orbits its camera (the middle or right button pans), the wheel zooms, and a
-// double-click puts the camera back where azimuth: / elevation: / zoom: start it.
+// double-click puts the camera back where azimuth: / elevation: / zoom: start it. In mode: slice
+// (CameraController::Mode::Slice) it looks straight down one axis: drags pan, the wheel zooms
+// about the pointer, it is framed on the volume_slice nodes on its axis, and it leaves out those
+// on the other two; a pick meets the plane of its slice exactly and writes the voxel (i, j, k)
+// and its value.
 //
 // A view's camera is its own unless it names one: `camera: <id>` draws from a camera the scene
 // declares (`scene: cameras:`), so every viewport bound to it moves together, and `camera: main`
@@ -112,6 +117,13 @@ public:
     bool hit = false;
     double world[3] = {0.0, 0.0, 0.0};
     std::string node; // the realized node's id ("" when the prop is no node's)
+    // On a volume_slice node: the voxel the point lies in and its value. In a slice view the
+    // pick meets the plane of the slice on the view's axis exactly; `world` is that point even
+    // past the volume's edge (then hit and voxel are false), so a drag keeps reporting.
+    bool plane = false; // the point lies on a slice's plane
+    bool voxel = false;
+    long long ijk[3] = {0, 0, 0};
+    double value = 0.0;
   };
   // Pick in view `view` at (x, y) in VTK display coordinates (framebuffer pixels from the lower
   // left), against what the view drew last frame: what an `input: pick` viewport's left button
