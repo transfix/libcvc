@@ -81,8 +81,9 @@ check("nav.vehicle.vmax" in head["settings"], "the settings")
 check(pycvc.nav_run_log_ticks(log) == 120, "a tick a frame, headless")
 a = pycvc.nav_run_log_arrays(log)
 legs = pycvc.nav_run_log_legs(log)
-check([g["tick"] for g in legs] == [0, 60], f"a leg from 3 s: {[g['tick'] for g in legs]}")
-check(np.all(a["goal_x"][60] == a["goal_x"][60, 0]), "every arm's goals moved on the same tick")
+R = round(3.0 / C.DT)  # the retarget's tick: 3 s on the sim tick
+check([g["tick"] for g in legs] == [0, R], f"a leg from 3 s: {[g['tick'] for g in legs]}")
+check(np.all(a["goal_x"][R] == a["goal_x"][R, 0]), "every arm's goals moved on the same tick")
 check(np.array_equal(a["x"][:, 1], a["x"][:, 2]), "the same policy twice: the same run")
 check(np.abs(a["book.residual"]).max() < 1e-5, "the books close")
 
@@ -92,8 +93,8 @@ starts, goals = L.starts_and_goals(world, 2, 0)
 check(np.allclose(head["start"][0][:2], starts[0], atol=1e-3), "the arms' start is the seed's")
 alone = C.Cars(world, 2, "kinematic", navigator=True, nav_weights=TRAINED, starts=starts,
                goals=goals)  # fmt: skip
-xs = [alone.step_navigator().x.copy() for _ in range(60)]
-check(np.array_equal(np.array(xs), a["x"][:60, 1]), "the trained arm, tick for tick, alone")
+xs = [alone.step_navigator().x.copy() for _ in range(R)]
+check(np.array_equal(np.array(xs), a["x"][:R, 1]), "the trained arm, tick for tick, alone")
 
 # 4. the replay shows what the live run showed
 from pycvc_gl.ariadne import Host  # noqa: E402
