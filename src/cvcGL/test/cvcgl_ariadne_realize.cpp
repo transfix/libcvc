@@ -12,6 +12,7 @@
 #include <chrono> // mesh_lab test: bounded waits on the node's worker lane
 #include <cmath>
 #include <cstdio>
+#include <cstring> // strstr: WebGL2's units, a draw that ran out
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
@@ -28,6 +29,7 @@
 #include <cvc/gl/LowMemoryPolyDataMapper.h> // clip test: the low-memory mapper honours no planes
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/gl/ViewportManager.h> // WebGL2's units: limitTextureUnits
 #include <cvc/gl/VolRenNode.h>
 #include <cvc/gl/VolSliceNode.h>
 #include <cvc/gl/VolumeNode.h>
@@ -54,8 +56,10 @@
 #include <vtkLightCollection.h>
 #include <vtkMapper.h> // field colours: an opacity curve is an RGBA colour array
 #include <vtkNew.h>
+#include <vtkObjectFactory.h>      // WebGL2's units: a counter of VTK's out-of-units warning
 #include <vtkOpenGLRenderWindow.h> // water + sky: no texture unit held between frames
-#include <vtkPlane.h>              // clip test: the planes handed to a node's renderer
+#include <vtkOutputWindow.h>
+#include <vtkPlane.h> // clip test: the planes handed to a node's renderer
 #include <vtkPlaneCollection.h>
 #include <vtkPointData.h>
 #include <vtkPolyData.h>
@@ -92,6 +96,26 @@ static void chk(bool ok, const std::string &w) {
     ++fails;
 }
 static bool approx(double a, double b) { return std::fabs(a - b) < 1e-3; }
+
+// Counts vtkOpenGLState's "Hardware does not support the number of textures defined" (a draw
+// that ran out of texture units) while it is VTK's output window.
+class TextureUnitWarnings : public vtkOutputWindow {
+public:
+  static TextureUnitWarnings *New();
+  vtkTypeMacro(TextureUnitWarnings, vtkOutputWindow);
+  int count = 0;
+  void DisplayText(const char *t) override { note(t); }
+  void DisplayErrorText(const char *t) override { note(t); }
+  void DisplayWarningText(const char *t) override { note(t); }
+  void DisplayGenericWarningText(const char *t) override { note(t); }
+
+private:
+  void note(const char *t) {
+    if (t && std::strstr(t, "number of textures defined"))
+      ++count;
+  }
+};
+vtkStandardNewMacro(TextureUnitWarnings);
 
 // Walk the renderer's lights, counting positional vs directional and capturing the
 // (single) positional light's position.
@@ -1990,6 +2014,120 @@ int main() {
     }
     for (const std::string &w : warnings)
       printf("  warning: %s\n", w.c_str());
+  }
+
+  // ── WebGL2's texture units: the water, the swash and the sky's shade draw in 16 ────────────────
+  // In the browser VTK has 16 texture units in all (GL_MAX_TEXTURE_IMAGE_UNITS), and its
+  // low-memory mapper, the browser's, takes some of them every draw for its vertex data. Here the
+  // same scene draws with that mapper and a 16-unit table, and no draw runs out. The deployed
+  // terrain_lab ran out in every water draw, and the warnings it logged locked the page up.
+  {
+    printf("== WebGL2's 16 texture units: the water, the swash and the shade ==\n");
+    const cvc::gl::LowMemoryMapperPolicy policy = cvc::gl::lowMemoryMapperPolicy(app);
+    cvc::gl::setLowMemoryMapperPolicy(app, cvc::gl::LowMemoryMapperPolicy::Force);
+    {
+      SceneGraph sg(app, "webgl");
+      SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+      Scene scene;
+      auto node = [](const char *id, const char *type,
+                     std::vector<std::pair<const char *, std::string>> props) {
+        SceneNode n;
+        n.id = id;
+        n.type = type;
+        n.props.kind = Value::Kind::Map;
+        for (auto &p : props) {
+          Value v;
+          v.kind = Value::Kind::Scalar;
+          v.scalar = p.second;
+          n.props.entries.emplace_back(p.first, v);
+        }
+        return n;
+      };
+      scene.nodes.push_back(node("world", "generated_world",
+                                 {{"seed", "5"},
+                                  {"half", "150"},
+                                  {"trees", "0"},
+                                  {"rocks", "0"},
+                                  {"buildings", "0"},
+                                  {"amp", "40"},
+                                  {"water_level", "0"},
+                                  {"water", "0"},
+                                  {"texture", "256"}}));
+      scene.nodes.push_back(
+          node("water", "water", {{"world", "world"}, {"level", "0"}, {"swell_height", "1"}}));
+      SceneNode sky = node("sky", "cloud_sky",
+                           {{"ground", "world"},
+                            {"extent", "60"},
+                            {"base", "120"},
+                            {"top", "180"},
+                            {"coverage", "0.5"},
+                            {"near", "2"}});
+      Value rec;
+      rec.kind = Value::Kind::Sequence;
+      Value item;
+      item.kind = Value::Kind::Scalar;
+      item.scalar = "water";
+      rec.items.push_back(item);
+      sky.props.entries.emplace_back("receivers", rec);
+      scene.nodes.push_back(sky);
+      // terrain_lab's light: a three-point rig whose key is a directional sun, its one shadow
+      // caster, so the shadow pass holds its map's unit through every draw.
+      SceneLight rig;
+      rig.id = "sun";
+      rig.rig = "three_point";
+      rig.has_sun = true;
+      rig.sun = true;
+      rig.has_key = true;
+      rig.key_intensity = 1.3f;
+      rig.key_azimuth = -60.0f;
+      rig.key_elevation = 28.0f;
+      rig.key_cone = 62.0f;
+      scene.lights.push_back(rig);
+      scene.has_shadows = true;
+      scene.shadows_enabled = true;
+      std::vector<std::string> warnings;
+      auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "webgl", &warnings);
+      auto tick = [&]() {
+        view.render();
+        cvc::gl::ariadne::tick_scene(realized, view.renderer());
+      };
+      view.viewportManager().limitTextureUnits(16); // WebGL2's, as VTK counts them
+      auto *win = vtkOpenGLRenderWindow::SafeDownCast(view.renderer()->GetRenderWindow());
+      vtkNew<TextureUnitWarnings> counter;
+      vtkSmartPointer<vtkOutputWindow> before = vtkOutputWindow::GetInstance();
+      int heard = 0; // the counter hears VTK's warning (vtkOpenGLState's, as it words it)
+      int units = 0;
+      if (win) {
+        vtkOutputWindow::SetInstance(counter);
+        vtkGenericWarningMacro("Hardware does not support the number of textures defined.");
+        heard = counter->count;
+        counter->count = 0;
+        for (int i = 0; i < 17; ++i) // past the 10 frames the swell's keys hold before the swash
+          tick();
+        vtkOutputWindow::SetInstance(before);
+        units = win->GetTextureUnitManager()->GetNumberOfTextureUnits();
+      }
+      auto group = sg.getGraphics("water");
+      auto near =
+          group ? std::dynamic_pointer_cast<cvc::gl::GeometryNode>(group->findChildByName("near"))
+                : nullptr;
+      if (!win) {
+        printf("  SKIP: no OpenGL window\n");
+      } else if (!near || !near->isVisible()) {
+        printf("  SKIP: the water's cascades are not up (no float render targets)\n");
+      } else {
+        printf("  the low-memory mapper: %s; %d texture units; out of units: %d warnings\n",
+               near->usesLowMemoryMapper() ? "yes" : "no", units, counter->count);
+        chk(near->usesLowMemoryMapper() && units == 16,
+            "the water draws with the low-memory mapper, in 16 texture units");
+        chk(heard == 1, "the count hears vtkOpenGLState's out-of-units warning");
+        chk(counter->count == 0,
+            "no draw runs out of WebGL2's 16 units (the water, the swash, the shade)");
+      }
+      for (const std::string &w : warnings)
+        printf("  warning: %s\n", w.c_str());
+    }
+    cvc::gl::setLowMemoryMapperPolicy(app, policy);
   }
 
   // ── a generated terrain as a geometry source (source: { terrain: {...} }) ─────────────────
