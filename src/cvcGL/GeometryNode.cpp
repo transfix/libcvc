@@ -1491,6 +1491,14 @@ void GeometryNode::setShaderUniformi(const std::string &name, int v) {
       sg->requestRender();
   });
 }
+bool GeometryNode::shaderUniform3f(const std::string &name, std::array<float, 3> &out) const {
+  const auto it = m_uniforms3F.find(name);
+  if (it == m_uniforms3F.end())
+    return false;
+  out = it->second;
+  return true;
+}
+
 void GeometryNode::setShaderUniform3f(const std::string &name, float x, float y, float z) {
   runOnMainThread([this, name, x, y, z]() {
     m_uniforms3F[name] = {x, y, z};
@@ -1670,6 +1678,19 @@ std::shared_ptr<const GeometryNode::ShaderInputs>
 GeometryNode::sharedShaderInputs(const std::string &key) const {
   const auto it = m_sharedInputs.find(key);
   return it == m_sharedInputs.end() ? nullptr : it->second;
+}
+
+bool GeometryNode::shaderUniformf(const std::string &name, float &v) const {
+  const auto it = m_uniformsF.find(name);
+  if (it == m_uniformsF.end())
+    return false;
+  v = it->second;
+  return true;
+}
+
+vtkTextureObject *GeometryNode::shaderTexture(const std::string &name) const {
+  const auto it = m_shaderTextures.find(name);
+  return it == m_shaderTextures.end() ? nullptr : it->second.Get();
 }
 
 void GeometryNode::setShaderTexture(const std::string &name, vtkTextureObject *tex) {

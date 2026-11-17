@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring> // strstr: WebGL2's units, a draw that ran out
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/scene_water.h> // scene_water_spec: the scene wind's case (O14)
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
 #include <cvc/core/async_lane.h> // field colours: pump the scheduler their overlay tasks run on
@@ -2037,6 +2038,310 @@ int main() {
       printf("  warning: %s\n", w.c_str());
   }
 
+  // ── O14: one key turns everything: the scene's wind drives the water, the clouds, the trees ──
+  // A scene with `wind:` seeds wind.speed / wind.dir / wind.gustiness; the water's spectrum wind,
+  // the cloud deck's drift and the forest's lean all follow them, and turn together when wind.dir
+  // does; with wind.speed cleared each falls back to its own keys.
+  {
+    printf("== the scene's wind: one key turns the water, the clouds and the trees ==\n");
+    SceneGraph sg(app, "o14");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    scene.wind.present = true;
+    scene.wind.speed = 9.0;
+    scene.wind.dir = 30.0;
+    scene.wind.gustiness = 0.25;
+    auto node = [](const char *id, const char *type,
+                   std::vector<std::pair<const char *, std::string>> props) {
+      SceneNode n;
+      n.id = id;
+      n.type = type;
+      n.props.kind = Value::Kind::Map;
+      for (auto &p : props) {
+        Value v;
+        v.kind = Value::Kind::Scalar;
+        v.scalar = p.second;
+        n.props.entries.emplace_back(p.first, v);
+      }
+      return n;
+    };
+    constexpr double kPiD = 3.14159265358979323846;
+    scene.nodes.push_back(node("world", "generated_world",
+                               {{"seed", "5"},
+                                {"half", "150"},
+                                {"trees", "24"}, // the world's own trees sway too
+                                {"rocks", "0"},
+                                {"buildings", "0"},
+                                {"amp", "40"},
+                                {"water_level", "0"},
+                                {"water", "0"},
+                                {"texture", "256"}}));
+    const SceneNode waterNode =
+        node("water", "water",
+             {{"world", "world"}, {"level", "0"}, {"wind_speed", "3"}, {"wind_dir", "-90"}});
+    scene.nodes.push_back(waterNode);
+    scene.nodes.push_back(node("sky", "cloud_sky",
+                               {{"ground", "world"},
+                                {"extent", "60"},
+                                {"base", "120"},
+                                {"top", "180"},
+                                {"coverage", "0.5"},
+                                {"near", "2"}}));
+    scene.nodes.push_back(node("forest", "forest_trees",
+                               {{"ground", "world"},
+                                {"count", "12"},
+                                {"span", "200"},
+                                {"species", "pine"},
+                                {"sea_level", "0"}}));
+    std::vector<std::string> warnings;
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "o14", &warnings);
+    auto st = [&](const char *k) -> cvc::state & {
+      return cvc::state::instance(app)(cvc::ariadne::resolve_bind("o14", k));
+    };
+    auto tick = [&]() {
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer());
+    };
+    tick();
+    tick();
+    auto lean = [&]() { return st("forest.lean_dir").value(); };
+    auto drift = [&]() { return st("sky.drift_az").value<double>(); };
+    auto water = [&]() { return cvc::ariadne::scene_water_spec(app, waterNode, "o14"); };
+    chk(approx(st("wind.speed").value<double>(), 9.0) &&
+            approx(st("wind.dir").value<double>(), 30.0),
+        "the scene's wind: seeded its keys from `wind:`");
+    chk(approx(water().wind_dir, 30.0) && approx(water().wind_speed, 9.0) &&
+            approx(st("water.wind_dir").value<double>(), -90.0),
+        "the water follows the scene's wind; its own keys stay, unused");
+    chk(approx(drift(), 120.0), "the clouds drift along the scene's wind (heading dir + 90)");
+    chk(!lean().empty() && approx(std::stod(lean()), 30.0), "the trees lean along it");
+    // The generated world's trees (its prop meshes, every rung): the sway's code and the world's
+    // shared uniforms on each, normals carrying the height above the ground, world.lean_dir.
+    using cvc::gl::GeometryNode;
+    using cvc::gl::GraphicsNode;
+    using cvc::gl::LodGraphicsNode;
+    std::vector<GeometryNode *> swayed;
+    std::function<void(GraphicsNode &)> collect = [&](GraphicsNode &g) {
+      if (auto *m = dynamic_cast<GeometryNode *>(&g);
+          m && m->hasSharedShaderInputs("cvc.foliage_wind"))
+        swayed.push_back(m);
+      if (auto *l = dynamic_cast<LodGraphicsNode *>(&g))
+        for (int k = 0; k < l->rungCount(); ++k)
+          if (auto r = l->rung(k); r && r.get() != &g)
+            collect(*r);
+      for (const std::shared_ptr<GraphicsNode> &c : g.getGraphicsChildren())
+        if (c)
+          collect(*c);
+    };
+    for (const char *part : {"world_props", "world_foliage", "world_needles"})
+      if (auto g = sg.getGraphics(part))
+        collect(*g);
+    std::sort(swayed.begin(), swayed.end());
+    swayed.erase(std::unique(swayed.begin(), swayed.end()), swayed.end());
+    auto worldLean = [&]() { return st("world.lean_dir").value(); };
+    auto fw = [&]() -> std::shared_ptr<const GeometryNode::ShaderInputs> {
+      return swayed.empty() ? nullptr : swayed.front()->sharedShaderInputs("cvc.foliage_wind");
+    };
+    double tallest = 0.0; // the most height above the ground a vertex's normal carries (m)
+    for (GeometryNode *m : swayed)
+      if (const cvc::geometry *g = m->getGeometry())
+        for (const auto &v : g->const_normals())
+          tallest =
+              std::max(tallest, (std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) - 1.0) * 64.0);
+    printf("  %zu prop meshes sway; the tallest vertex is %.1f m over the ground\n", swayed.size(),
+           tallest);
+    chk(!swayed.empty() && fw() && fw()->skip_shadow_bake && fw()->f.count("uFwOn") &&
+            fw()->f.at("uFwOn") == 1.0f && fw()->f3.count("uFwDir") &&
+            approx(fw()->f3.at("uFwDir")[0], std::cos(30.0 * kPiD / 180.0)) &&
+            approx(fw()->f3.at("uFwDir")[1], std::sin(30.0 * kPiD / 180.0)) &&
+            fw()->f3.count("uWindGust") && fw()->f3.count("uFwEye") && tallest > 3.0,
+        "the world's trees sway in the scene's wind (uniforms on every prop mesh, out of the "
+        "bake)");
+    chk(!worldLean().empty() && approx(std::stod(worldLean()), 30.0),
+        "world.lean_dir: the world's trees lean along it");
+    // One key: the waves, the clouds and the trees turn together, on the next tick.
+    st("wind.dir").value(120.0);
+    tick();
+    chk(approx(water().wind_dir, 120.0) && approx(drift(), 210.0) && !lean().empty() &&
+            approx(std::stod(lean()), 120.0) && !worldLean().empty() &&
+            approx(std::stod(worldLean()), 120.0) && fw() &&
+            approx(fw()->f3.at("uFwDir")[0], std::cos(120.0 * kPiD / 180.0)),
+        "one key (wind.dir) turns the water, the clouds and the trees together");
+    // No scene wind: each falls back to its own.
+    st("wind.speed").value(std::string());
+    tick();
+    chk(approx(water().wind_dir, -90.0) && approx(water().wind_speed, 3.0) &&
+            approx(drift(), st("sky.wind_az").value<double>()) && lean().empty() &&
+            worldLean().empty() && fw() && fw()->f.at("uFwOn") == 0.0f,
+        "without wind.speed each node takes its own wind again (the world's trees stand still)");
+    for (const std::string &w : warnings)
+      printf("  warning: %s\n", w.c_str());
+  }
+
+  // ── O5: the water's persistent foam, its thresholds and its level of detail ─────────────────
+  // The long and middle cascades' turbulence is one 512 x 256 atlas (two 256^2 tiles: one sampler)
+  // on both meshes, stepped with the world's clock (its two atlases alternate). Both foam
+  // thresholds are found off the frame (a sliced task on the app's scheduler) and replace the
+  // guess the whitecaps start with. water.foam_decay 0 stops the atlas and finds the whitecaps'
+  // threshold alone, as before O5. The far grid draws the foam's mean cover only, and the level of
+  // detail's distances are live keys.
+  {
+    printf("== water: persistent foam, its thresholds, level of detail ==\n");
+    SceneGraph sg(app, "o5");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    auto node = [](const char *id, const char *type,
+                   std::vector<std::pair<const char *, std::string>> props) {
+      SceneNode n;
+      n.id = id;
+      n.type = type;
+      n.props.kind = Value::Kind::Map;
+      for (auto &p : props) {
+        Value v;
+        v.kind = Value::Kind::Scalar;
+        v.scalar = p.second;
+        n.props.entries.emplace_back(p.first, v);
+      }
+      return n;
+    };
+    scene.nodes.push_back(node("world", "generated_world",
+                               {{"seed", "5"},
+                                {"half", "150"},
+                                {"trees", "0"},
+                                {"rocks", "0"},
+                                {"buildings", "0"},
+                                {"amp", "40"},
+                                {"water_level", "0"},
+                                {"water", "0"},
+                                {"texture", "256"}}));
+    scene.nodes.push_back(
+        node("water", "water", {{"world", "world"}, {"level", "0"}, {"wind_speed", "12"}}));
+    scene.clock.present = true; // the world's clock runs with the frames
+    std::vector<std::string> warnings;
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "o5", &warnings);
+    auto st = [&](const char *k) -> cvc::state & {
+      return cvc::state::instance(app)(cvc::ariadne::resolve_bind("o5", k));
+    };
+    chk(approx(st("water.foam_decay").value<double>(), 2.5) &&
+            approx(st("water.lod_foam").value<double>(), 150.0) &&
+            approx(st("water.lod_shade").value<double>(), 1500.0),
+        "water seeded water.foam_decay, water.lod_foam and water.lod_shade");
+    auto tick = [&]() {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5)); // the clock moves on
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer());
+      cvc::pump_exec_frame(app.exec_scheduler()); // the thresholds' task
+    };
+    tick();
+    tick();
+    auto group = sg.getGraphics("water");
+    auto near =
+        group ? std::dynamic_pointer_cast<cvc::gl::GeometryNode>(group->findChildByName("near"))
+              : nullptr;
+    auto far = group
+                   ? std::dynamic_pointer_cast<cvc::gl::GeometryNode>(group->findChildByName("far"))
+                   : nullptr;
+    if (near && far && near->isVisible()) {
+      auto uf = [](cvc::gl::GeometryNode &g, const char *name) {
+        float v = -1.0f;
+        g.shaderUniformf(name, v);
+        return v;
+      };
+      vtkTextureObject *a0 = near->shaderTexture("uFoamTex");
+      bool alternates = false;
+      for (int i = 0; i < 5; ++i) {
+        tick();
+        alternates = alternates || near->shaderTexture("uFoamTex") != a0;
+      }
+      vtkTextureObject *a1 = near->shaderTexture("uFoamTex");
+      chk(a1 && a1->GetWidth() == 512 && a1->GetHeight() == 256 &&
+              far->shaderTexture("uFoamTex") == a1 && uf(*near, "uFoamOn") == 1.0f,
+          "the persistent foam: one 512 x 256 atlas, bound to both meshes");
+      chk(alternates, "the foam's atlas steps with the world's clock (its two atlases alternate)");
+      chk(uf(*near, "uFoamDetail") == 1.0f && uf(*far, "uFoamDetail") == 0.0f,
+          "the near grid draws the foam's detail, the far grid its mean cover only");
+      // The thresholds: the whitecaps start at the guess (0.75) and take the calibration's. The
+      // task can finish within the frames above on a fast runner, so the guess is the constant,
+      // not the first value read here.
+      constexpr float kGuess = 0.75f;
+      float bias = uf(*near, "uFoamBias");
+      int frames = 0;
+      for (; frames < 1500 && bias == kGuess; ++frames) {
+        tick();
+        bias = uf(*near, "uFoamBias");
+      }
+      printf("  the thresholds landed after %d more frames: whitecaps %.4f (the guess %.2f)\n",
+             frames, bias, kGuess);
+      chk(bias != kGuess && bias > 0.6f && bias < 0.9f,
+          "the thresholds are found off the frame and replace the whitecaps' guess");
+      st("water.lod_foam").value(42.0);
+      st("water.lod_shade").value(420.0);
+      tick();
+      chk(uf(*near, "uLodFoam") == 42.0f && uf(*far, "uLodShade") == 420.0f,
+          "water.lod_foam and water.lod_shade are live");
+      // The samplers (WebGL2 has 16 a draw): the cascades in one atlas, the coast in another.
+      vtkTextureObject *disp = near->shaderTexture("uDisp");
+      chk(disp && disp->GetWidth() == 3 * 256 && disp->GetHeight() == 256 &&
+              near->shaderTexture("uCoast") && far->shaderTexture("uDisp") == disp &&
+              !near->shaderTexture("uDisp0") && !near->shaderTexture("uShoreGrid") &&
+              !near->shaderTexture("cvcHF"),
+          "the cascades' displacement in one atlas (uDisp) and the coast in one (uCoast)");
+      // The wind's fetch maps (O13) are in the coast atlas, past its planes: no sampler of their
+      // own (uWindFetch), so the water stays under 16 with a cloud_sky's shade and the shadows.
+      vtkTextureObject *coast = near->shaderTexture("uCoast");
+      const float coastN = uf(*near, "uCoastN"), coastRows = uf(*near, "uCoastRows");
+      chk(coast && !near->shaderTexture("uWindFetch") && !far->shaderTexture("uWindFetch") &&
+              far->shaderTexture("uCoast") == coast && coastN >= 1.0f && coastRows >= 1.0f &&
+              float(coast->GetWidth()) > coastN && float(coast->GetHeight()) >= coastRows,
+          "the wind's fetch maps sit in the coast atlas beside its planes (no uWindFetch)");
+      // Adaptive quality (O21): the scene's tier and scale (quality.tier, quality.scale: what
+      // AriRuntime's loop writes), or water.quality's own tier, pick what the water draws.
+      chk(approx(st("water.quality").value<double>(), -1.0),
+          "water.quality is seeded at -1: the scene's tier");
+      st("quality.tier").value(1.0);
+      st("quality.scale").value(0.5);
+      tick();
+      chk(uf(*near, "uLodShade") == 105.0f && uf(*near, "uFoamReach") == 0.25f &&
+              uf(*near, "uLodWaves") == 75.0f && uf(*far, "uFarReach") == 0.5f &&
+              uf(*near, "uFoamOn") == 1.0f && uf(*near, "uLodFoam") == 42.0f,
+          "tier 1 at half scale: the shading to a quarter (105 m), the persistent foam's reads to "
+          "a quarter of lod_foam, the short cascade and the far normal to half; the foam stays on");
+      st("water.quality").value(3.0); // the node's own tier, whatever the scene's
+      tick();
+      const float aloneBias = uf(*near, "uFoamBias");
+      chk(uf(*near, "uLodShade") == 1e-3f && uf(*near, "uLodWaves") == -1.0f &&
+              uf(*near, "uFoamOn") == 0.0f && uf(*near, "uFoamReach") == 0.0f &&
+              uf(*far, "uFarReach") == 0.5f,
+          "water.quality 3: the simple shading, no short cascade, no persistent foam");
+      chk(aloneBias > bias,
+          "... the whitecaps alone take the higher threshold that covers Monahan's share");
+      st("water.quality").value(-1.0);
+      st("quality.tier").value(0.0);
+      st("quality.scale").value(1.0);
+      tick();
+      chk(uf(*near, "uLodShade") == 420.0f && uf(*near, "uLodWaves") == 150.0f &&
+              uf(*near, "uFoamOn") == 1.0f && uf(*near, "uFoamReach") == 1.0f &&
+              uf(*near, "uFoamBias") == bias,
+          "tier 0 again: everything back as the keys have it");
+      // foam_decay 0: the atlas stops, and the whitecaps' threshold is found alone (once the key
+      // has held for 10 frames), as before O5.
+      st("water.foam_decay").value(0.0);
+      for (int i = 0; i < 14; ++i)
+        tick();
+      vtkTextureObject *s0 = near->shaderTexture("uFoamTex");
+      tick();
+      tick();
+      const float alone = uf(*near, "uFoamBias");
+      printf("  with foam_decay 0 the whitecaps' threshold is %.4f\n", alone);
+      chk(uf(*near, "uFoamOn") == 0.0f && near->shaderTexture("uFoamTex") == s0 && alone > bias,
+          "water.foam_decay 0: no persistent foam, the whitecaps' threshold alone (higher)");
+    } else {
+      printf("  SKIP the persistent foam: the water's cascades are not up (no float targets)\n");
+    }
+    for (const std::string &w : warnings)
+      printf("  warning: %s\n", w.c_str());
+  }
+
   // ── O18: the weather node and its storms in the sky ──────────────────────────────────────────
   // A weather node starts a storm when asked; the sky it drives closes and darkens under it, its
   // deck rises into cumulonimbus (built off the frame, then swapped in) while the storm is about,
@@ -2140,6 +2445,13 @@ int main() {
             num("sky.darkness") > 0.55,
         "the deck rises to the storm's top and darkens");
     chk(num("weather.rain") > 0.0, "it rains at the ground's centre");
+    // O19: the rain's keys are seeded, and the weather hands the sky its tracks and constants.
+    chk(approx(num("weather.streaks"), 1.0) && approx(num("weather.rings"), 1.0) &&
+            approx(num("weather.fog"), 1.0) && approx(num("weather.wet"), 1.0) &&
+            approx(num("weather.rain_quality"), 1.0),
+        "the rain's keys are seeded (streaks, rings, fog, wet, rain_quality)");
+    chk(!str("sky.rain").empty() && !str("sky.rain_k").empty(),
+        "the sky has the storm's rain track (sky.rain) and the rain's constants (sky.rain_k)");
     tick();
     {
       auto ground = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("world"));
@@ -2159,6 +2471,12 @@ int main() {
       const bool dark = in && in->f.count("cloudDark") && in->f.at("cloudDark") > 0.55f;
       chk(storm && dark,
           "the receivers and the far clouds have the storm and the darkness (uniforms)");
+      // O19: the wet ground's track and the rain's constants: uniforms, no texture.
+      const bool track = in && in->f4.count("cloudWetA0") && in->f4.at("cloudWetA0")[2] > 0.0f &&
+                         in->f4.count("cloudRainK") && in->f4.at("cloudRainK")[1] > 0.0f;
+      const std::size_t samplers = in ? in->tex.size() : 99;
+      chk(track && samplers == 2,
+          "the receivers have the rain's track as uniforms (still the shade's 2 samplers)");
     }
     // The storm deck is built as a sliced task and swapped in: the near volumes' boxes rise.
     // Its process on the scheduler names how it runs: cloud_sky/threaded or cloud_sky/cooperative.
@@ -2206,6 +2524,8 @@ int main() {
     chk(str("weather.state") == "clear" && str("sky.storms").empty() &&
             approx(num("sky.top"), 180.0) && approx(num("sky.darkness"), 0.0),
         "cleared: no storms, the deck as authored, no darkness");
+    chk(!str("sky.rain").empty(),
+        "the gone storm's track stays in sky.rain while the ground dries");
     chk(waitTop(180.0), "the cumulus deck came back (the near volumes span 180 m again)");
     for (const std::string &w : warnings)
       printf("  warning: %s\n", w.c_str());
@@ -2250,6 +2570,8 @@ int main() {
                                   {"texture", "256"}}));
       scene.nodes.push_back(
           node("water", "water", {{"world", "world"}, {"level", "0"}, {"swell_height", "1"}}));
+      // O19: a storm raining on it all: the wet ground, the rings and the fog in the receivers'
+      // uniforms, and the streaks' own mesh.
       SceneNode sky = node("sky", "cloud_sky",
                            {{"ground", "world"},
                             {"extent", "60"},
@@ -2263,8 +2585,17 @@ int main() {
       item.kind = Value::Kind::Scalar;
       item.scalar = "water";
       rec.items.push_back(item);
+      item.scalar = "weather_rain";
+      rec.items.push_back(item);
       sky.props.entries.emplace_back("receivers", rec);
       scene.nodes.push_back(sky);
+      scene.nodes.push_back(node("weather", "weather",
+                                 {{"ground", "world"},
+                                  {"sky", "sky"},
+                                  {"chance", "0"},
+                                  {"radius_min", "500"},
+                                  {"radius_max", "500"},
+                                  {"storm_top", "600"}}));
       // terrain_lab's light: a three-point rig whose key is a directional sun, its one shadow
       // caster, so the shadow pass holds its map's unit through every draw.
       SceneLight rig;
@@ -2282,8 +2613,20 @@ int main() {
       scene.shadows_enabled = true;
       std::vector<std::string> warnings;
       auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "webgl", &warnings);
+      cvc::state::instance(app)(cvc::ariadne::resolve_bind("webgl", "weather.request"))
+          .value(std::string("overhead"));
+      bool placed = false;
       auto tick = [&]() {
+        cvc::pump_exec_frame(app.exec_scheduler());
         view.render();
+        if (!placed) { // in the rain, near the ground, looking along it
+          placed = true;
+          vtkCamera *c = view.renderer()->GetActiveCamera();
+          c->SetPosition(0.0, -20.0, 25.0);
+          c->SetFocalPoint(60.0, 40.0, 5.0);
+          c->SetViewUp(0.0, 0.0, 1.0);
+          view.renderer()->ResetCameraClippingRange();
+        }
         cvc::gl::ariadne::tick_scene(realized, view.renderer());
       };
       view.viewportManager().limitTextureUnits(16); // WebGL2's, as VTK counts them
@@ -2318,6 +2661,21 @@ int main() {
         chk(heard == 1, "the count hears vtkOpenGLState's out-of-units warning");
         chk(counter->count == 0,
             "no draw runs out of WebGL2's 16 units (the water, the swash, the shade)");
+        auto wgroup = sg.getGraphics("weather");
+        auto streaks = wgroup ? std::dynamic_pointer_cast<cvc::gl::GeometryNode>(
+                                    wgroup->findChildByName("weather_rain"))
+                              : nullptr;
+        auto win2 = near ? near->sharedShaderInputs("cloud_sky") : nullptr;
+        printf("  the rain's streaks: %s, the low-memory mapper %s\n",
+               streaks && streaks->isVisible() ? "drawn" : "not drawn",
+               streaks && streaks->usesLowMemoryMapper() ? "yes" : "no");
+        chk(streaks && streaks->isVisible(),
+            "the rain's streaks draw too, in the same 16 units (the camera is in the rain)");
+        chk(streaks && streaks->hasSharedShaderInputs("cloud_sky"),
+            "the sky found the streaks among its receivers (a mesh inside the weather's node)");
+        chk(win2 && win2->f4.count("cloudFogC") && win2->f4.at("cloudFogC")[3] > 0.0f &&
+                win2->tex.size() == 2,
+            "the water has the rain's fog as a uniform, its sky samplers still 2");
       }
       for (const std::string &w : warnings)
         printf("  warning: %s\n", w.c_str());

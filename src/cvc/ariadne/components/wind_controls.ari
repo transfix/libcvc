@@ -1,0 +1,40 @@
+# wind_controls.ari — a REUSABLE Ariadne component: live controls for the scene's one wind
+# (OCEAN-AND-WEATHER-ROADMAP.md E5, O14). The sliders bind the scene's wind keys, wind.speed,
+# wind.dir and wind.gustiness, which a document's `scene: wind:` seeds and every node the wind
+# moves reads each frame: the water's spectrum (through its sea's lag), the cloud deck's drift, the
+# trees' lean and sway, and the physics' air, which pushes every body in it (floating crates,
+# vehicles, avatars). One slider turns them all.
+#
+# Args (every one has a default, so a bare include works):
+#   title  the window's title (default Wind)
+#   id     the instance id: the window's geometry persists under tree.<id> (default wind_controls)
+#
+# Use it:
+#     import: cvc://components/wind_controls.ari
+#     windows:
+#       - include: wind_controls
+
+units:
+  wind_controls:
+    args: { title: Wind, id: wind_controls }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slider_float: Speed (m/s)
+        bind: wind.speed
+        lo: 0.0
+        hi: 40.0
+        fmt: "%.1f"
+        tooltip: "the mean wind 10 m up (U10); the clouds' base and a body's height read it through a height profile"
+      - slider_float: Direction
+        bind: wind.dir
+        lo: -180.0
+        hi: 180.0
+        fmt: "%.0f deg"
+        tooltip: "the way it blows, from +x toward +y: the waves, the clouds, the trees and the push on bodies turn with it"
+      - slider_float: Gustiness
+        bind: wind.gustiness
+        lo: 0.0
+        hi: 1.0
+        fmt: "%.2f"
+        tooltip: "gusts riding the wind: one field the water's ripples, the trees and the physics all sample"

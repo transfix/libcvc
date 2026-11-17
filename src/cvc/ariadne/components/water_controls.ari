@@ -3,9 +3,12 @@
 # frame: the wind and its gusts (the sea follows the wind with a lag, crossfading to each new state
 # over a few seconds), the lee behind the land, the current, the waves' chop and height, the
 # whitecaps' cover (a share of Monahan's for the wind; the threshold that gives it is found again
-# once the sliders rest), how far the waves fade toward the shore, the swell that breaks on the
-# beaches (its shore layer is found again once the sliders rest), the foam at the waterline, and
-# the waves floating bodies make (a water node with body:). Seeded from the node's .ari props.
+# once the sliders rest), how long the foam a breaking wave leaves lasts, how far the waves fade
+# toward the shore, the swell that breaks on the beaches (its shore layer is found again once the
+# sliders rest), the foam at the waterline, the waves floating bodies make (a water node with
+# body:), and the level of detail: how far from the camera the foam keeps its detail, the water its
+# full shading and the short waves reach, and the water's quality tier (by default the scene's
+# adaptive quality). Seeded from the node's .ari props.
 #
 # Args (every one has a default, so a bare include works):
 #   keys   the water node's state key root: its `keys:` prop, else water (the default).
@@ -28,17 +31,19 @@ units:
         lo: 0.0
         hi: 30.0
         fmt: "%.1f"
+        tooltip: "the water's own wind; unused while the scene has a wind (the Wind panel drives it then)"
       - slider_float: Wind direction
         bind: "{keys}.wind_dir"
         lo: -180.0
         hi: 180.0
         fmt: "%.0f deg"
+        tooltip: "the way the water's own wind blows; unused while the scene has a wind"
       - slider_float: Gustiness
         bind: "{keys}.gustiness"
         lo: 0.0
         hi: 1.0
         fmt: "%.2f"
-        tooltip: "gusts ruffle the ripples and roughen the water in racing patches (cat's paws)"
+        tooltip: "gusts ruffle the ripples and roughen the water in racing patches (cat's paws); the scene wind's gustiness while it has one"
       - checkbox: Lee
         bind: "{keys}.lee"
         tooltip: "the water downwind of land is calm: each wave band grows with its fetch"
@@ -75,6 +80,12 @@ units:
         lo: 0.0
         hi: 3.0
         fmt: "%.2f x Monahan"
+      - slider_float: Foam lasts (s)
+        bind: "{keys}.foam_decay"
+        lo: 0.0
+        hi: 8.0
+        fmt: "%.1f"
+        tooltip: "how long the foam a breaking wave leaves takes to thin (0: the whitecaps alone)"
       - slider_float: Shore fade (m)
         bind: "{keys}.shore_fade"
         lo: 0.5
@@ -108,3 +119,27 @@ units:
         lo: 0.0
         hi: 2.0
         fmt: "%.2f"
+      - slider_float: Foam detail to (m)
+        bind: "{keys}.lod_foam"
+        lo: 0.0
+        hi: 400.0
+        fmt: "%.0f"
+        tooltip: "the foam's detail ends this far from the camera; the sea's mean cover beyond"
+      - slider_float: Full shading to (m)
+        bind: "{keys}.lod_shade"
+        lo: 0.0
+        hi: 3000.0
+        fmt: "%.0f"
+        tooltip: "the full water shading ends this far from the camera; a simpler one beyond"
+      - slider_float: Short waves to (m)
+        bind: "{keys}.lod_waves"
+        lo: 0.0
+        hi: 400.0
+        fmt: "%.0f"
+        tooltip: "the metre-long waves fade out this far from the camera"
+      - slider_float: Quality tier
+        bind: "{keys}.quality"
+        lo: -1.0
+        hi: 4.0
+        fmt: "%.0f"
+        tooltip: "-1: the scene's adaptive quality (quality.tier); 0 everything .. 4 the least"

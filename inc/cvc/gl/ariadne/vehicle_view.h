@@ -18,11 +18,18 @@
 
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/world_rules.h> // vehicle_look
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace cvc {
+namespace physics {
+struct boat_desc;
+}
 namespace gl {
+class GeometryNode;
+class GraphicsNode;
+class SceneGraph;
 namespace ariadne {
 
 struct RealizedScene;
@@ -50,8 +57,20 @@ cvc::ariadne::SceneNode vehicle_scene_node(const std::string &id,
                                            const vehicle_shape &shape, const float color[3],
                                            const float color2[3]);
 
+// A boat's hull as drawn (OCEAN-AND-WEATHER-ROADMAP.md D5): its hull_mesh, flat-shaded, about the
+// hull body's origin. Its topsides are `topsides`, with a band of `stripe` just over the waterline
+// it floats at in fresh water; below that line it is a dark red, the hull darker where it is wet. A
+// box hull (the presets) is drawn open: no deck, and a teak sole 0.12 m over the waterline, so the
+// water node's exclusion is what keeps a wave out of its cockpit. The GeometryNode `id` under
+// `parent` (top level, registered, when null). Null without a hull_mesh.
+std::shared_ptr<GeometryNode> add_hull_node(SceneGraph &sg, const std::string &id,
+                                            GraphicsNode *parent,
+                                            const cvc::physics::boat_desc &boat,
+                                            const float topsides[3], const float stripe[3]);
+
 // Each frame after the world steps (tick_scene): when the vehicles' revision has moved, the
-// entities' drawings are built again and bound to their chassis bodies.
+// entities' drawings are built again and bound to their chassis bodies. A boat's (dynamicboat)
+// box look is its hull (add_hull_node), in its colours.
 void sync_vehicle_markers(RealizedScene &realized, std::vector<std::string> *warnings);
 // Each frame after the world steps: a box look's wheels, each where its plant has it
 // (WorldVehicles::wheels): its height on its suspension or the ground under it, the front ones

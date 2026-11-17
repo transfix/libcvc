@@ -54,6 +54,17 @@
 // about 2 sqrt(rho g A m) / V_sub (A the waterplane area, m the mass, V_sub the
 // volume under water); 1e4 N s/m^4 suits a body of a metre or so.
 //
+// That damping acts in every direction, so it also holds a body to the water's velocity
+// sideways: the body follows the waves' orbital motion and the current, but resists any drift
+// through the water as strongly as it resists heaving (a 1 m crate in a 10 m/s wind drifts about
+// a millimetre a second). A fluid with `inertial` set is moved sideways as a real one moves a
+// small floating body: its damping acts on the vertical alone (the heave it stands for), and
+// sideways the body is pushed by the water's acceleration over its immersed volume (the
+// Froude-Krylov force, rho V du/dt at the immersed part's centroid, du/dt read from the water's
+// velocity a step either side) and drags against the water's velocity (C_d). So it rides the
+// waves and drifts with the current, and a wind blows it through the water at the speed where
+// the air's drag on it balances the water's.
+//
 // A medium supports elastically. A flat footprint A sunk d metres into a medium of
 // modulus k carries k A d (a Winkler foundation, Bekker's n = 1), and the medium
 // pushes the body back out as it rises. A medium that keeps ruts is later work.
@@ -63,6 +74,15 @@
 // then also clipped below the surface over its centre, at the world's field time, and its
 // drag and damping use the surface's water velocity (the waves' orbital motion, a current)
 // in place of the velocity volumes. Make the box tall enough to hold the crests.
+//
+// A flow may have a wind (field::wind, flow_velocity.h): its velocity, changing in space and
+// time, in place of the velocity volumes, read at the world's field time once per body: at its
+// centre of mass (the gusts vary over tens of metres; so the wind costs O(bodies) a step), times
+// the wind's height profile at each cell, and only above the wind's base (the water or the
+// ground: a cell is clipped to it as to a free surface). Each cell's drag is taken against it;
+// the air is not counted in field_load::immersed_volume.
+// A vehicle's aero drag reads it at the vehicle's centre of mass (vehicle.h), as it reads a
+// flow's velocity volumes.
 //
 // A body with a hull (body_desc::hull, hull.h) is pushed by fluids on its hull's triangles in
 // place of its cells: hydrostatic pressure split at the waterline, friction, pressure drag and
@@ -80,6 +100,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cvc/physics/flow_velocity.h>
 #include <cvc/physics/fluid_surface.h>
 #include <cvc/physics/types.h>
 #include <memory>
@@ -110,6 +131,9 @@ struct field {
   std::array<std::shared_ptr<const cvc::volume>, 3> velocity;
   double drag_coefficient = 1.0; // fluid, flow: C_d
   double damping = 0.0;          // every kind: c, N s/m^4
+  // fluid: damp the vertical only, and move a body sideways by the water's acceleration and its
+  // drag (above). Off: the damping acts in every direction, as it always has.
+  bool inertial = false;
   // medium: the friction a vehicle's tire finds in it (snow ~0.3, mud ~0.4), in place of the
   // ground's; 0 keeps the ground's. A vehicle's wheels also sink into a medium and ride on it
   // (vehicle.h).
@@ -127,6 +151,11 @@ struct field {
   // the step's thread and folds its digest into state_hash(), so it must not change while a
   // field holds it; set_field with a new surface to change the sea.
   std::shared_ptr<const fluid_surface> surface;
+  // flow: its wind (flow_velocity.h): the air's velocity in space and time, in place of the
+  // velocity volumes. Null keeps them. Folded into state_hash() and held immutable, as `surface`.
+  // A flow with a wind may have no `volume`: it is then air of 1.225 kg/m^3 everywhere (10^7 m
+  // each way), the scene-wide wind.
+  std::shared_ptr<const flow_velocity> wind;
 };
 
 // A medium's ruts (world::field_ruts): the depth (m) the surface has been pressed down, per cell

@@ -111,6 +111,17 @@ double wind_gust(const gust_frame &f, double x, double y, double fine = 1.0);
 // The wind's velocity at (x, y) at time t (m/s, along x and y): the mean wind times the gust.
 std::array<double, 2> wind_velocity(const wind_state &w, double x, double y, double t);
 
+// The gust factor's mean over space at one time: 1 + gustiness x 0.5 pulse (the noise part
+// averages out). What a thing too big to feel one point's gust drifts with: a cloud deck.
+double wind_gust_mean(const gust_frame &f);
+
+// The wind's speed h metres above the ground, as a share of the speed at 10 m (U10, what
+// wind_state::speed_mps is): the power law (h / 10)^(1/7) of an open surface layer, held at its
+// 500 m value above 500 m, and ramping linearly from 0 at the ground to its 0.1 m value (0.52)
+// below 0.1 m: 0.72 at 1 m, 1.26 at 50 m. 0 at or below the ground. What both a body near the
+// ground and a cloud deck at its base read.
+double wind_profile(double h);
+
 } // namespace algo
 } // namespace cvc
 

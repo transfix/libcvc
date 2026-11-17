@@ -21,6 +21,7 @@ if(NOT MSVC)
 else()
   set_source_files_properties(ariadne_scene_world_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
+add_executable(ariadne_scene_quality_test ariadne_scene_quality_test.cpp)
 add_executable(ariadne_server_document_test ariadne_server_document_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
@@ -415,6 +416,7 @@ set(TEST_TARGETS
   ariadne_scene_tf_test
   ariadne_runtime_test
   ariadne_scene_world_test
+  ariadne_scene_quality_test
   ariadne_server_document_test
   ariadne_bind_test
   ariadne_ftxui_test
@@ -838,6 +840,13 @@ target_link_libraries(ariadne_scene_world_test
     GTest::gtest_main
 )
 
+target_link_libraries(ariadne_scene_quality_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(ariadne_server_document_test
   PRIVATE
     cvc
@@ -860,6 +869,9 @@ target_link_libraries(ariadne_chart_test
 )
 # Three tests load GL-free documents from the repo's examples/ tree.
 target_compile_definitions(ariadne_ftxui_test PRIVATE
+  CVC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../examples")
+# ariadne_scene_world_test runs terrain_lab.ari's world headless (its boat on the lake).
+target_compile_definitions(ariadne_scene_world_test PRIVATE
   CVC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../examples")
 # room_scene_test pins the stock world documents to their C++ twins.
 target_compile_definitions(room_scene_test PRIVATE
@@ -3116,6 +3128,7 @@ cvc_discover_tests(ariadne_doc_fetch_test)
 cvc_discover_tests(ariadne_scene_tf_test)
 cvc_discover_tests(ariadne_runtime_test)
 cvc_discover_tests(ariadne_scene_world_test)
+cvc_discover_tests(ariadne_scene_quality_test)
 cvc_discover_tests(ariadne_server_document_test)
 cvc_discover_tests(ariadne_ftxui_test)
 cvc_discover_tests(ariadne_chart_test)

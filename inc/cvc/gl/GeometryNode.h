@@ -196,6 +196,9 @@ public:
   void setShaderUniformf(const std::string &name, float v);
   void setShaderUniformi(const std::string &name, int v);
   void setShaderUniform3f(const std::string &name, float x, float y, float z);
+  // The value setShaderUniform3f gave `name` (what a test reads back; shaderUniformf, below, a
+  // float's); false for none.
+  bool shaderUniform3f(const std::string &name, std::array<float, 3> &out) const;
   void setShaderTexture(const std::string &name, vtkTextureObject *tex); // nullptr unbinds
 
   // Shader inputs SHARED by many meshes and changed in one place: a node that owns a scene-wide
@@ -219,6 +222,10 @@ public:
   bool hasSharedShaderInputs(const std::string &key) const;
   // The inputs shared under `key` (null if none): what a test reads back.
   std::shared_ptr<const ShaderInputs> sharedShaderInputs(const std::string &key) const;
+  // What setShaderUniformf / setShaderTexture last set under `name`, as a test reads it back:
+  // false / null when nothing is.
+  bool shaderUniformf(const std::string &name, float &v) const;
+  vtkTextureObject *shaderTexture(const std::string &name) const;
 
   // Disable VTK's VBO coordinate shift/scale so `vertexMC` in a custom shader is
   // the mesh's ACTUAL (world/model) coordinates rather than an internally-shifted

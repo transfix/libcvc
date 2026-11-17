@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/core/world_clock.h>
@@ -780,6 +781,274 @@ TEST(PhysicsOceanSurface, CrossPlatformGoldenHash) {
   std::printf("[physics-golden] ocean scene after 300 steps: %016llx\n",
               static_cast<unsigned long long>(h));
   EXPECT_EQ(h, 0xbe86208109133b1aull) << std::hex << "state hash " << h;
+}
+
+// --- the scene's wind (flow_velocity.h, O14) ------------------------------------------------
+
+// A flow with a wind and no volume is air (1.225 kg/m^3) everywhere. A ball held in it 10 m up
+// (the profile's reference height, where the wind is its U10) is carried along drag's curve,
+// v(t) = U - 1 / (1/U + k t), k = rho C_d pi r^2 / (2 m), as in a flow of velocity volumes.
+TEST(PhysicsField, TheSceneWindCarriesABallAlongTheDragCurve) {
+  REQUIRE_JOLT();
+  world_config c = jolt_config();
+  c.gravity = {0.0, 0.0, 0.0};
+  world w(c);
+  const double rho = 1.225, cd = 0.5, wind = 10.0;
+  field air;
+  air.kind = field_kind::flow;
+  air.drag_coefficient = cd;
+  air.wind = std::make_shared<wind_flow>(cvc::algo::wind_state{wind, 0.0, 0.0}, 0.0);
+  w.add_field(air);
+  body_desc d;
+  d.shape = sphere{0.5};
+  d.mass = 1.0;
+  d.position = {0.0, 0.0, 10.0};
+  d.linear_damping = 0.0;
+  d.angular_damping = 0.0;
+  d.allow_sleeping = false;
+  const body_id b = w.add_body(d);
+  const double k = 0.5 * rho * cd * 3.14159265358979 * 0.25 / 1.0;
+  for (const int steps : {50, 100, 200}) {
+    w.step(static_cast<std::uint64_t>(steps - static_cast<int>(w.tick())));
+    const double t = w.time();
+    const double expected = wind - 1.0 / (1.0 / wind + k * t);
+    const body_state s = w.state(b);
+    EXPECT_NEAR(s.linear_velocity.x, expected, 0.01 * expected) << "t = " << t;
+    EXPECT_NEAR(s.linear_velocity.y, 0.0, 1e-6);
+    EXPECT_NEAR(s.linear_velocity.z, 0.0, 1e-6);
+  }
+  std::printf("  a ball 10 m up in a 10 m/s wind: %.3f m/s after %.2f s (drag's curve %.3f)\n",
+              w.state(b).linear_velocity.x, w.time(), wind - 1.0 / (1.0 / wind + k * w.time()));
+  // Under the wind's base (here 0: under the water, below the ground) there is none.
+  EXPECT_EQ(air.wind->velocity({0.0, 0.0, -1.0}, 0.0).x, 0.0);
+  // Its profile: 0.72 of U10 at 1 m, 1.26 at 50 m.
+  EXPECT_NEAR(air.wind->velocity({0.0, 0.0, 1.0}, 0.0).x / wind, 0.7197, 1e-3);
+  EXPECT_NEAR(air.wind->velocity({0.0, 0.0, 50.0}, 0.0).x / wind, 1.2585, 1e-3);
+}
+
+namespace {
+
+// A crate 1 x 1 x 0.5 m at density 500 (it floats upright at half draft; a cube at that density
+// floats on an edge) on calm water 120 m across, flowing at `current`, in a wind of `wind` m/s
+// toward +y over the water's level, for `seconds`. Its velocity at the end, and the immersed
+// volume and greatest tilt on the way.
+struct crate_run {
+  vec3 velocity;
+  double immersed = 0.0, tilted = 0.0;
+};
+crate_run float_crate(double damping, bool inertial, const vec3 &current, double wind,
+                      double seconds) {
+  world w(jolt_config());
+  field sea_f;
+  sea_f.kind = field_kind::fluid;
+  sea_f.volume = uniform(1000.0, {-60, -60, -5}, {60, 60, 1});
+  sea_f.damping = damping;
+  sea_f.inertial = inertial;
+  sea_f.surface = std::make_shared<still_surface>(0.0, current);
+  w.add_field(sea_f);
+  if (wind > 0.0) {
+    field air;
+    air.kind = field_kind::flow;
+    air.wind = std::make_shared<wind_flow>(cvc::algo::wind_state{wind, 1.5707963267948966, 0.0});
+    w.add_field(air);
+  }
+  body_desc d;
+  d.shape = box{{0.5, 0.5, 0.25}};
+  d.density = 500.0;
+  d.position = {0.0, 0.0, 0.0};
+  d.linear_damping = 0.0; // the fields' drag alone
+  d.allow_sleeping = false;
+  const body_id b = w.add_body(d);
+  crate_run out;
+  const int n = static_cast<int>(seconds / w.config().fixed_dt + 0.5);
+  for (int i = 0; i < n; ++i) {
+    w.step();
+    out.tilted = std::max(out.tilted, tilt(w.state(b).rotation));
+  }
+  out.immersed = w.field_load_on(b).immersed_volume;
+  out.velocity = w.state(b).linear_velocity;
+  return out;
+}
+
+// The speed a crate drifts at through the water where the air's drag on its top half balances
+// the water's on its bottom half (the crate's 4 layers of cells of 0.125 m, the top two in the
+// air; its 0.5 m^2 across, C_d 1, in both): rho_air sum_l (1/4) (U p(z_l) - v)^2 =
+// rho_water (1/2) v^2.
+double leeway(double U) {
+  auto air_minus_water = [U](double v) {
+    double air_drag = 0.0;
+    for (int l = 0; l < 2; ++l) {
+      const double u = U * cvc::algo::wind_profile(0.0625 + 0.125 * l) - v;
+      air_drag += 0.25 * u * std::fabs(u);
+    }
+    return 1.225 * air_drag - 1000.0 * 0.5 * v * v;
+  };
+  double lo = 0.0, hi = U;
+  for (int i = 0; i < 60; ++i)
+    (air_minus_water(0.5 * (lo + hi)) > 0.0 ? lo : hi) = 0.5 * (lo + hi);
+  return 0.5 * (lo + hi);
+}
+
+} // namespace
+
+// A floating crate drifts downwind (leeway): the wind's drag on its half above the water, read
+// up its height through the profile, against the water's drag on its half below. The air is
+// not counted as immersed. With the water's drag alone the crate drifts at the speed the two
+// balance at. A damping in every direction (1e4 N s/m^4, which makes a body follow the waves)
+// holds it to millimetres a second; an inertial fluid's damping is on the vertical only, so the
+// crate drifts as on drag alone.
+TEST(PhysicsField, AFloatingCrateDriftsDownwind) {
+  REQUIRE_JOLT();
+  const double U = 10.0, balance = leeway(U);
+  const crate_run loose = float_crate(0.0, false, {}, U, 30.0);
+  std::printf("  a floating crate in a %.0f m/s wind drifts %.3f m/s (the balance %.3f)\n", U,
+              loose.velocity.y, balance);
+  EXPECT_NEAR(loose.velocity.y, balance, 0.1 * balance);
+  EXPECT_NEAR(loose.velocity.x, 0.0, 0.01 * balance);
+  EXPECT_NEAR(loose.immersed, 0.25, 0.0125)
+      << "half its 0.5 m^3: the air is not counted as immersed";
+  EXPECT_LT(loose.tilted, 0.1) << "it floats upright";
+  const crate_run damped = float_crate(1.0e4, false, {}, U, 30.0);
+  const crate_run inertial = float_crate(1.0e4, true, {}, U, 30.0);
+  std::printf("  damped in every direction %.4f m/s; inertial %.3f m/s; tilted at most %.3f rad\n",
+              damped.velocity.y, inertial.velocity.y, inertial.tilted);
+  EXPECT_GT(damped.velocity.y, 0.0);
+  EXPECT_LT(damped.velocity.y, 0.01);
+  EXPECT_NEAR(inertial.velocity.y, balance, 0.1 * balance) << "the damping does not hold it";
+  EXPECT_LT(inertial.tilted, 0.1);
+}
+
+// An inertial fluid carries a floating body on its current, and a wind blows it across the
+// current at the leeway it has in still water: its velocity is the current plus the leeway.
+TEST(PhysicsField, AnInertialCrateDriftsWithTheCurrent) {
+  REQUIRE_JOLT();
+  const vec3 current{0.5, 0.0, 0.0};
+  const crate_run carried = float_crate(1.0e4, true, current, 0.0, 60.0);
+  const crate_run both = float_crate(1.0e4, true, current, 10.0, 60.0);
+  std::printf("  in a 0.5 m/s current: %.3f m/s after 60 s; with a 10 m/s wind across it "
+              "(%.3f, %.3f) m/s, the leeway %.3f\n",
+              carried.velocity.x, both.velocity.x, both.velocity.y, leeway(10.0));
+  EXPECT_NEAR(carried.velocity.x, current.x, 0.1 * current.x) << "it takes the current";
+  EXPECT_NEAR(carried.velocity.y, 0.0, 0.005);
+  EXPECT_NEAR(both.velocity.x, current.x, 0.1 * current.x);
+  EXPECT_NEAR(both.velocity.y, leeway(10.0), 0.15 * leeway(10.0)) << "and the wind's leeway";
+}
+
+// An inertial fluid's damping is on the vertical only, and sideways the water's acceleration
+// carries a floating body: in a swell a body heaves with the surface as a fully damped one does
+// (ABoxHeavesWithTheSwell), and its velocity along the swell follows the water's orbital
+// velocity at its centre.
+TEST(PhysicsFluidSurface, AnInertialBodyRidesTheSwell) {
+  REQUIRE_JOLT();
+  const auto s = swell(0.2, 4.0);
+  world w(jolt_config());
+  field f = sea(s);
+  f.inertial = true;
+  w.add_field(f);
+  body_desc d = slab(500.0, 0.0);
+  d.linear_damping = 0.0;
+  const body_id b = w.add_body(d);
+  w.step(400);                                         // settle in
+  const double ux = std::cos(0.3), uy = std::sin(0.3); // along the swell
+  std::vector<double> z, eta, v, u;
+  vec3 start = w.state(b).position;
+  for (int i = 0; i < 1600; ++i) { // 16 s, four periods
+    w.step();
+    const body_state st = w.state(b);
+    z.push_back(st.position.z);
+    eta.push_back(s->height(st.position.x, st.position.y, w.field_time()));
+    v.push_back(st.linear_velocity.x * ux + st.linear_velocity.y * uy);
+    const vec3 wv = s->velocity(st.position, w.field_time());
+    u.push_back(wv.x * ux + wv.y * uy);
+  }
+  auto corr = [](const std::vector<double> &a, const std::vector<double> &b, double &ratio) {
+    double ma = 0.0, mb = 0.0;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+      ma += a[i] / double(a.size());
+      mb += b[i] / double(b.size());
+    }
+    double saa = 0.0, sbb = 0.0, sab = 0.0;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+      saa += (a[i] - ma) * (a[i] - ma);
+      sbb += (b[i] - mb) * (b[i] - mb);
+      sab += (a[i] - ma) * (b[i] - mb);
+    }
+    ratio = std::sqrt(saa / sbb);
+    return sab / std::sqrt(saa * sbb);
+  };
+  double heave = 0.0, sway = 0.0;
+  const double cz = corr(z, eta, heave), cv = corr(v, u, sway);
+  const body_state end = w.state(b);
+  const double moved = (end.position.x - start.x) * ux + (end.position.y - start.y) * uy;
+  std::printf("  inertial in a swell: heave %.2f of the surface's (r %.3f); along the swell its "
+              "velocity %.2f of the water's (r %.3f); moved %.2f m in 16 s\n",
+              heave, cz, sway, cv, moved);
+  EXPECT_GT(cz, 0.97) << "in phase with the surface";
+  EXPECT_NEAR(heave, 1.0, 0.15) << "heaving about as high as the swell";
+  EXPECT_GT(cv, 0.9) << "carried back and forth with the water";
+  EXPECT_NEAR(sway, 1.0, 0.25);
+  EXPECT_LT(std::fabs(moved), 2.0) << "the waves move it to and fro, not away";
+}
+
+// The wind is part of the world's state: two worlds with one wind hash alike, a different wind
+// hashes differently and its state does not restore into the other, and a world with no wind
+// hashes as it always did.
+TEST(PhysicsField, TheSceneWindIsInTheStateHash) {
+  world_config c;
+  c.backend = backend::null;
+  auto with = [&](double speed) {
+    auto w = std::make_unique<world>(c);
+    field air;
+    air.kind = field_kind::flow;
+    air.wind = std::make_shared<wind_flow>(cvc::algo::wind_state{speed, 0.3, 0.25}, 0.0);
+    w->add_field(air);
+    return w;
+  };
+  const std::unique_ptr<world> a = with(9.0), b = with(9.0), x = with(12.0);
+  EXPECT_EQ(a->state_hash(), b->state_hash());
+  EXPECT_NE(a->state_hash(), x->state_hash());
+  const std::vector<std::uint8_t> s = a->save();
+  EXPECT_NO_THROW(b->restore(s));
+  EXPECT_THROW(x->restore(s), cvc::physics_error);
+  // No wind: the hash of a world that never had one.
+  world plain(c), fresh(c);
+  EXPECT_EQ(plain.state_hash(), fresh.state_hash());
+  EXPECT_NE(plain.state_hash(), a->state_hash());
+  // Refusals: a wind on a fluid; a flow with neither a volume nor a wind.
+  world r(c);
+  field wet;
+  wet.kind = field_kind::fluid;
+  wet.volume = uniform(1000.0, {-1, -1, -1}, {1, 1, 0});
+  wet.wind = std::make_shared<wind_flow>(cvc::algo::wind_state{5.0, 0.0, 0.0});
+  EXPECT_THROW(r.add_field(wet), cvc::physics_error);
+  field bare;
+  bare.kind = field_kind::flow;
+  EXPECT_THROW(r.add_field(bare), cvc::physics_error);
+  EXPECT_THROW(wind_flow(cvc::algo::wind_state{-1.0, 0.0, 0.0}), std::invalid_argument);
+}
+
+// The wind's velocity is a pure function of the point and the time, the same on every platform.
+TEST(PhysicsField, TheSceneWindIsTheSameOnEveryPlatform) {
+  const wind_flow f(cvc::algo::wind_state{9.0, 0.6, 0.3}, 2.0);
+  std::uint64_t h = 1469598103934665603ull;
+  auto add = [&h](double v) {
+    unsigned char b[sizeof v];
+    std::memcpy(b, &v, sizeof v);
+    for (unsigned char x : b)
+      h = (h ^ x) * 1099511628211ull;
+  };
+  for (int k = 0; k < 5; ++k)
+    for (int i = 0; i < 40; ++i) {
+      // integer inputs: exact, so no platform contracts them differently
+      const vec3 v = f.velocity({-300.0 + 17.0 * i, 120.0 - 9.0 * i, 2.0 + (i % 7)}, 11.0 * k);
+      add(v.x);
+      add(v.y);
+      add(v.z);
+    }
+  std::printf("  wind digest 0x%016llx, samples 0x%016llx\n",
+              static_cast<unsigned long long>(f.digest()), static_cast<unsigned long long>(h));
+  EXPECT_EQ(f.digest(), 0xc7ec24178041550eull) << std::hex << "wind_flow digest 0x" << f.digest();
+  EXPECT_EQ(h, 0x3ec1c28ca0601404ull) << std::hex << "wind samples 0x" << h;
 }
 
 // The fields' surface reads on worker threads (world_config::field_threads) give the same run:

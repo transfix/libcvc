@@ -177,6 +177,19 @@ public:
 
   // The weather at world time t: the live cells and the state. O(cells + events).
   weather_now at(double t) const;
+  // The cells born by t whose life reached into the last `window` weather seconds, alive or not, as
+  // at(t) evaluates them (a gone cell's intensity is 0, its centre where the steering has carried
+  // it): what the ground's drying reads (O19), the tracks of the storms that rained on it.
+  std::vector<storm_cell> recent(double t, double window) const;
+  // A cell's rain footprint: the radius within which its field passes the rain onset at intensity
+  // `intensity` (0 when it does not), for its radius r.
+  double rain_radius(double r, double intensity) const;
+  // How wet the ground at (x, y) is at world time t, 0..1 (the wet roads O19 draws, the friction
+  // O20 will read): for each storm of the last 4 `dry` weather seconds, how long its rain lay over
+  // the point over `soak` seconds (at most 1), times exp(-(weather seconds since its rain left) /
+  // dry); the wettest. A storm's rain covers its rain radius at its peak, along its track as its
+  // motion now runs it back (cloud_sky's shader computes the same, cloudWet).
+  double wetness(double t, double x, double y, double soak, double dry) const;
 
   // A cell's footprint at distance d from its centre: 1 over its core, falling to 0 at its radius.
   static double footprint(double d, double r);

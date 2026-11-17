@@ -314,6 +314,78 @@ weather_now weather::at(double t) const {
   return w;
 }
 
+std::vector<storm_cell> weather::recent(double t, double window) const {
+  const double tau = weather_time(t), from = tau - std::max(0.0, window);
+  std::vector<storm_cell> out;
+  auto keep = [&](storm_cell &c) {
+    evaluate(c, tau);
+    if (c.age >= 0.0 && c.end > from)
+      out.push_back(c);
+  };
+  storm_cell c;
+  if (m_p.interval > 0.0) {
+    // A scheduled storm lives inside its slot: the slots from `from`'s to tau's.
+    const long k0 = static_cast<long>(std::floor(from / m_p.interval));
+    const long k1 = static_cast<long>(std::floor(tau / m_p.interval));
+    for (long k = std::max(k0, k1 - 64); k <= k1; ++k)
+      if (scheduled(k, c))
+        keep(c);
+  }
+  for (const weather_event &e : m_ev)
+    if (authored(e, c))
+      keep(c);
+  return out;
+}
+
+double weather::rain_radius(double r, double intensity) const {
+  // footprint(d, r) = 1 - smooth((d - r/2) / (r/2)); the rain needs intensity * footprint > onset.
+  const double onset = std::min(0.999, std::max(0.0, m_p.rain_onset));
+  if (!(r > 0.0) || intensity <= onset)
+    return 0.0;
+  const double target = 1.0 - onset / intensity; // smooth(u) = target, u in [0, 1]
+  double lo = 0.0, hi = 1.0;
+  for (int k = 0; k < 40; ++k) {
+    const double u = 0.5 * (lo + hi);
+    (smooth(u) < target ? lo : hi) = u;
+  }
+  return 0.5 * r * (1.0 + 0.5 * (lo + hi));
+}
+
+double weather::wetness(double t, double x, double y, double soak, double dry) const {
+  soak = std::max(1.0, soak);
+  dry = std::max(1.0, dry);
+  const double tau = weather_time(t);
+  double wet = 0.0;
+  for (const storm_cell &c : recent(t, 4.0 * dry)) {
+    const double rr = rain_radius(c.radius, c.peak);
+    if (!(rr > 0.0))
+      continue;
+    // Its centre at weather time s from now is (c.x, c.y) + v s: it rained on the point while that
+    // lay within rr, from its birth (s = -age) to its end (s = end - tau) or now.
+    const double dx = x - c.x, dy = y - c.y, vv = c.vx * c.vx + c.vy * c.vy;
+    double sIn, sOut;
+    if (vv < 1e-8) {
+      if (dx * dx + dy * dy >= rr * rr)
+        continue;
+      sIn = -c.age;
+      sOut = std::min(c.end - tau, 0.0);
+    } else {
+      const double s0 = (dx * c.vx + dy * c.vy) / vv;
+      const double qx = dx - c.vx * s0, qy = dy - c.vy * s0;
+      const double h2 = rr * rr - (qx * qx + qy * qy);
+      if (h2 <= 0.0)
+        continue;
+      const double hs = std::sqrt(h2 / vv);
+      sIn = std::max(s0 - hs, -c.age);
+      sOut = std::min(std::min(s0 + hs, c.end - tau), 0.0);
+    }
+    if (sOut <= sIn)
+      continue;
+    wet = std::max(wet, std::min(1.0, (sOut - sIn) / soak) * std::exp(sOut / dry));
+  }
+  return wet;
+}
+
 void weather::compact(double t) {
   const double tau = weather_time(t);
   // Anchor every event at the weather time it has now, so the rate events can go.
