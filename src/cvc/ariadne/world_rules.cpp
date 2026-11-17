@@ -245,11 +245,13 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
       warn(warnings, at + " unknown key '" + key + "', ignored");
     }
   }
-  // dynamic:<preset> and dynamic4w:<preset> name the vehicle too, as plant_host's names do.
+  // dynamic:<preset>, dynamic4w:<preset> and dynamicboat:<preset> name the vehicle too, as
+  // plant_host's names do.
   if (const std::size_t colon = v.plant.find(':'); colon != std::string::npos) {
     const std::string kind = v.plant.substr(0, colon), preset = v.plant.substr(colon + 1);
-    if (kind != "dynamic" && kind != "dynamic4w")
-      return at + " plant: '" + v.plant + "': only dynamic and dynamic4w name a preset";
+    if (kind != "dynamic" && kind != "dynamic4w" && kind != "dynamicboat")
+      return at + " plant: '" + v.plant +
+             "': only dynamic, dynamic4w and dynamicboat name a preset";
     if (named && preset != v.preset)
       return at + " plant: '" + v.plant + "' names preset '" + preset + "', vehicle: '" + v.preset +
              "'";
@@ -298,13 +300,21 @@ std::string parse_vehicles(const Value &v, std::vector<vehicle_archetype> &out,
 std::string parse_spawns(const Value &v, spawn_rules &out, std::vector<std::string> *warnings) {
   const std::string where = "world: spawns:";
   if (!v.is_map())
-    return where + " expects a map (policy:, scope:, points:)";
+    return where + " expects a map (policy:, scope:, ford_depth:, keel_clearance:, "
+                   "shore_clearance:, points:)";
   std::string why;
   for (const auto &[key, val] : v.entries) {
     if (key == "policy") {
       out.policy = val.as_string();
     } else if (key == "scope") {
       out.scope = val.as_string();
+    } else if (key == "ford_depth" || key == "keel_clearance" || key == "shore_clearance") {
+      double n = 0.0;
+      if (!number(val, where + " " + key + ":", n, why))
+        return why;
+      (key == "ford_depth"       ? out.ford_depth
+       : key == "keel_clearance" ? out.keel_clearance
+                                 : out.shore_clearance) = n;
     } else if (key == "points") {
       if (!val.is_seq())
         return where + " points: expects a list of points";
@@ -501,6 +511,8 @@ const vehicle_archetype *world_rules::find_vehicle(const std::string &id) const 
 }
 
 std::vector<std::string> vehicle_presets() { return {"humvee", "roboracer"}; }
+std::vector<std::string> boat_presets() { return {"launch", "jonboat"}; }
+bool vehicle_plant_floats(const std::string &plant) { return plant == "dynamicboat"; }
 
 bool vehicle_controller_known(const std::string &id) {
   return id == "nav@1" || id == "none" || id == "external";
@@ -516,7 +528,8 @@ bool spawn_scope_known(const std::string &scope) {
 }
 
 bool vehicle_plant_known(const std::string &plant) {
-  return plant == "jolt" || plant == "kinematic" || plant == "dynamic" || plant == "dynamic4w";
+  return plant == "jolt" || plant == "kinematic" || plant == "dynamic" || plant == "dynamic4w" ||
+         plant == "dynamicboat";
 }
 
 world_rules default_world_rules() { return world_rules{}; }
@@ -581,12 +594,19 @@ std::string check_world_rules(const world_rules &r) {
     if (!vehicles.insert(v.id).second)
       return at + " is defined twice";
     if (!vehicle_plant_known(v.plant))
-      return at + ": plant '" + v.plant + "' is not one of jolt, kinematic, dynamic, dynamic4w";
+      return at + ": plant '" + v.plant +
+             "' is not one of jolt, kinematic, dynamic, dynamic4w, dynamicboat";
+    const bool boat = vehicle_plant_floats(v.plant);
     bool preset = false;
-    for (const std::string &p : vehicle_presets())
+    for (const std::string &p : boat ? boat_presets() : vehicle_presets())
       preset = preset || p == v.preset;
     if (!preset)
-      return at + ": vehicle '" + v.preset + "' is not a preset (humvee, roboracer)";
+      return at + ": vehicle '" + v.preset + "' is not a " +
+             (boat ? "boat preset (launch, jonboat)" : "preset (humvee, roboracer)");
+    if (boat)
+      for (const auto &[k, x] : v.overrides)
+        if (k != "mass" && k != "max_speed")
+          return at + ": vehicle: " + k + " is not a boat's (mass, max_speed)";
     for (const auto &[k, x] : v.overrides)
       if (k == "max_speed" ? !finite_nonnegative(x) : !finite_positive(x))
         return at + ": vehicle: " + k + " must be " +
@@ -610,6 +630,9 @@ std::string check_world_rules(const world_rules &r) {
            "' is not one of fixed, random, round_robin, nearest_free";
   if (!spawn_scope_known(r.spawns.scope))
     return "spawns: scope '" + r.spawns.scope + "' is not one of team, archetype, all";
+  if (!finite_nonnegative(r.spawns.ford_depth) || !finite_nonnegative(r.spawns.keel_clearance) ||
+      !finite_nonnegative(r.spawns.shore_clearance))
+    return "spawns: ford_depth, keel_clearance and shore_clearance must be zero or more";
   for (const spawn_point &sp : r.spawns.points) {
     if (!std::isfinite(sp.x) || !std::isfinite(sp.y) || !std::isfinite(sp.heading))
       return "spawns: a point's at: and heading: must be finite";

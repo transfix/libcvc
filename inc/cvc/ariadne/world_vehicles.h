@@ -21,6 +21,7 @@
 #include <cvc/ariadne/world_rules.h> // vehicle_archetype
 #include <cvc/ariadne/world_spawns.h>
 #include <cvc/nav/detail/dyn_4w.h> // the models a twin steps: dyn4_params, dyn_bike_params, bike_veh
+#include <cvc/physics/dyn_boat_plant.h> // dyn_boat_desc
 #include <cvc/physics/types.h>
 #include <cvc/physics/vehicle.h> // vehicle_desc
 #include <limits>
@@ -59,6 +60,13 @@ namespace ariadne {
 //   dynamic4w  the four-wheel model with suspension (dyn_4w_plant), its chassis box a body
 //   kinematic  nav's bicycle, its chassis box a kinematic body that pushes what it meets (nav
 //              keeps it off the buildings; nothing stops it)
+//   dynamicboat  a boat (dyn_boat_plant), its hull a body afloat on the world's water: the field
+//              a scene's water node puts in the world, or, where the world has none over the
+//              grid's water, a still one at the water's level that WorldVehicles adds. Its
+//              navigator plans on the water deep enough for the deepest boat (land blocked).
+//
+// Each archetype starts and aims on its medium (its plant's vehicle_plant::medium(); WorldSpawns'
+// needs): a car out of water deeper than a ford, a boat in water deep and open enough for it.
 //
 // The dynamic models take one substep of each world step, so they step on the world's clock with
 // everything else. The entities on each plant have a navigator of their own (a navigator drives
@@ -74,10 +82,17 @@ namespace ariadne {
 // drives.
 
 // An archetype's vehicle: its preset with the archetype's overrides on top, then a spawn's mass
-// and top speed (0: the archetype's), each held to the archetype's range. Throws
+// and top speed (0: the archetype's), each held to the archetype's range. A boat's (dynamicboat)
+// is a stand-in for what reads a vehicle: its hull's box, mass, top speed, the thrusts per unit
+// mass as its acceleration and braking, the lock of its plan, and no wheels. Throws
 // std::invalid_argument for a preset that is not one.
 physics::vehicle_desc vehicle_desc_of(const vehicle_archetype &a, double mass = 0.0,
                                       double max_speed = 0.0);
+// A boat archetype's boat (dynamicboat): its preset (launch, jonboat) with the archetype's mass and
+// max_speed overrides, then a spawn's, held to its ranges. Throws std::invalid_argument for a
+// preset that is not a boat's.
+physics::dyn_boat_desc boat_desc_of(const vehicle_archetype &a, double mass = 0.0,
+                                    double max_speed = 0.0);
 
 // A vehicle model's file by name (`humvee`: Humvee.glb; any other name is taken as the file's
 // name), where the vehicle-humvee cvcpkg package installs it: beside $CVC_NAV_BUNDLE (in it, or
@@ -183,7 +198,8 @@ struct entity_info {
   double goal_x = 0.0, goal_y = 0.0; // world metres: where it drives (none: where it parks)
   double reach = 0.0;                // m from its goal that counts as there
   bool reached = false;              // at its goal (nav@1 then draws another, unless held)
-  std::string plant;                 // jolt, dynamic, dynamic4w or kinematic (as spec.plant)
+  std::string plant;                 // jolt, dynamic, dynamic4w, kinematic or dynamicboat (as
+                                     // spec.plant)
   // Its chassis's contacts over the physics steps since the navigator's last tick (each step's
   // contact events, begun or, when the scene's physics reports them, persisting): with the
   // world's bodies other than the ground (buildings, walls, props), and with another vehicle. A
@@ -213,7 +229,7 @@ struct entity_drive {
 // limits and state as the plant holds them.
 struct entity_plant {
   std::uint64_t id = 0;
-  std::string plant;          // jolt, kinematic, dynamic or dynamic4w
+  std::string plant;          // jolt, kinematic, dynamic, dynamic4w or dynamicboat
   physics::vehicle_desc desc; // its body
   double rear_x = 0.0;        // the rear axle along the body from the chassis's centre (m)
   bool placed = false;        // in the world; nothing below is set otherwise
@@ -222,8 +238,9 @@ struct entity_plant {
   //             model with the vehicle's own numbers (nav_plant::dyn4_si_of), its pose and twist
   //             read from the chassis, its heave 0 and its drive state 0 (not `exact`).
   //   dyn_bike  dynamic: the plant's own (physics::dyn_bike_plant), `exact`.
-  //   bike      kinematic: nav's bicycle; `bike_state` holds the rear axle, the heading and the
-  //             speed (as vx), `limits` its limits.
+  //   bike      kinematic: nav's bicycle, `exact`; `bike_state` holds the rear axle, the heading
+  //             and the speed (as vx), `limits` its limits. dynamicboat: the bicycle nav plans the
+  //             boat with (physics::dyn_boat_plant drives it; not `exact`).
   std::string model;
   bool exact = false;
   nav::diff::dyn4_params dyn4{};

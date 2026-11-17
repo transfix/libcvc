@@ -225,7 +225,7 @@ scene:
     - node: sky
       type: cloud_sky
       ground: world        # the deck covers this node's extent, live, and shades its meshes
-      receivers: [world_buildings, world_roads, world_props, world_foliage, water]
+      receivers: [world_buildings, world_roads, world_props, world_foliage, water, weather_rain]
       extent: 250          # a cloud's half-width, metres: small fair-weather cumulus
       base: 300
       top: 520
@@ -244,7 +244,9 @@ scene:
     # thicken and darken, the deck rises into cumulonimbus while a storm is in view (live:
     # sky.top), and the ground under it dims. Its life is 20 to 60 minutes of weather time (the
     # panel's Time scale speeds it up). Every client with the same weather.* keys sees the same
-    # storms.
+    # storms. It rains under a storm (rain shafts in the distance, streaks near the camera, rings
+    # on the lakes, the ground and the roads wet and drying after it, and fog): the streaks are its
+    # mesh weather_rain, which the sky lists among its receivers, so they draw after the clouds.
     - node: weather
       type: weather
       ground: world        # the storms are timed to cross this node's extent

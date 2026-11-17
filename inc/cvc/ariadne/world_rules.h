@@ -108,9 +108,11 @@ struct vehicle_look {
 //
 //   plant        what drives it, in the world's own physics: jolt (the Jolt vehicle), kinematic
 //                (nav's bicycle), dynamic (the single-track model), dynamic4w (the four-wheel
-//                model with suspension); dynamic:<preset> and dynamic4w:<preset> name the vehicle
-//                as well, as `vehicle: <preset>` would
-//   vehicle      its body: a preset (humvee, roboracer), with any of `overrides` on top
+//                model with suspension), dynamicboat (a boat, cvc::physics::dyn_boat_plant, on the
+//                world's water); dynamic:<preset>, dynamic4w:<preset> and dynamicboat:<preset>
+//                name the vehicle as well, as `vehicle: <preset>` would
+//   vehicle      its body: a preset (humvee, roboracer; a boat's launch or jonboat), with any of
+//                `overrides` on top (a boat takes mass and max_speed)
 //   look         how it is drawn
 //   ranges       what a spawn may set, by setting: mass (kg) and max_speed (m/s), each [lo, hi]
 //   controllers  what may drive it: nav@1 (the navigator), none (it holds still), external (its
@@ -128,9 +130,13 @@ struct vehicle_archetype {
 };
 
 // The vehicle presets a `vehicle:` may name, and the controllers and plants a vehicle may have.
+// A dynamicboat's presets are the boats' (boat_presets()), every other plant's the vehicles'.
 std::vector<std::string> vehicle_presets();
+std::vector<std::string> boat_presets();
 bool vehicle_controller_known(const std::string &id);
 bool vehicle_plant_known(const std::string &plant);
+// Whether `plant` is a boat's (dynamicboat): its vehicles move on water, not land.
+bool vehicle_plant_floats(const std::string &plant);
 
 // Where vehicles start (ARIADNE_WORLDS.md §14, L3, the `spawns` section): points with a heading
 // (degrees from +x, counter-clockwise), and tags a spawn is matched on: a team (-1: any) and an
@@ -148,16 +154,30 @@ struct spawn_point {
 // is near), with the random draw and the round-robin cursor kept per `scope`: team, archetype or
 // all.
 //
+// Each vehicle starts on its medium (its plant's, cvc::nav::plant_medium), by the depth of the
+// still water there (nav::world_grid's water layer):
+//   land   no water deeper than `ford_depth` (m): a car does not start in a lake;
+//   water  at least its draft and `keel_clearance` (m) of water, and open water round it for
+//          half its hull's length and `shore_clearance` (m) more: a boat does not start aground.
+// A point tagged with an archetype serves it where its medium allows; an untagged one serves only
+// the archetypes whose medium it is on.
+//
 //   world:
 //     spawns:
 //       policy: round_robin
 //       scope: team
+//       ford_depth: 0.3
+//       keel_clearance: 0.3
+//       shore_clearance: 0
 //       points:
 //         - { at: [10, 5], heading: 90, team: 1, archetype: humvee, world: flat }
 struct spawn_rules {
   std::vector<spawn_point> points;
   std::string policy = "random";
   std::string scope = "team";
+  double ford_depth = 0.3;
+  double keel_clearance = 0.3;
+  double shore_clearance = 0.0;
   bool operator==(const spawn_rules &) const = default;
 };
 bool spawn_policy_known(const std::string &policy);

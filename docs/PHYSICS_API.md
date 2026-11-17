@@ -883,8 +883,11 @@ cars on land.
   heading its way, upright and at rest, floating at its draft on the water there:
   `float_height(desc, mass, density)` is how far the origin rides over the waterline when the
   `hull_mesh` displaces the hull's mass. A start with no fluid field under it
-  (`world::water_at`), water shallower than the draft, or a hull too heavy to float is refused,
-  and a refused attach leaves none of its boats. Nav's point is the hull's origin: `state()` is
+  (`world::water_at`), water shallower than the draft (the field's box, or a body without mass,
+  such as the terrain, that a ray from the hull's top meets above the boat's deepest point), or a
+  hull too heavy to float is refused, and a refused attach leaves none of its boats.
+  `draft(desc, mass, density)` is how deep the boat reaches below the waterline: its keel, or its
+  propeller or rudder where they reach deeper. Nav's point is the hull's origin: `state()` is
   its position, the forward axis's heading and its velocity over the ground along it.
 - **The driver.** Nav's command is a bicycle angle and an acceleration, as for the wheeled plants.
   Every world step the plant turns it into `set_boat_controls`. The throttle is the thrust per
