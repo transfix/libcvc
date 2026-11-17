@@ -1445,6 +1445,10 @@ Most of the GL-viewer work is already on master. What exists, and what is new:
    slice.
    - `mode: map` is a top-down view along z only, and it orbits, so it is not enough.
    - The camera controller already has the parallel-projection plumbing for `map`.
+   - *Built in P7:* `CameraController::Mode::Slice` (`setSliceAxis`, `frameSlice`,
+     `mouseWheelAt`; state `slice.*`; `cvcgl_camera_slice`) and the viewport's `mode: slice` with
+     `axis:` a name or `{ bind: <key> }`; a slice view frames on its axis's `volume_slice` nodes and
+     leaves out the other axes' (`cvcgl_ariadne_slice_view`).
 3. **Pointer events from a viewport to state** (`input: pick`, `pick: <key>`, `on_pick:`). A click
    or drag in the view writes where it landed, and the left button no longer turns the camera.
    Middle and right still pan, and the wheel still zooms.
@@ -1456,8 +1460,9 @@ Most of the GL-viewer work is already on master. What exists, and what is new:
    - This is the "click-to-world picking in a viewport" item already on the libcvc list (L0d).
      Build it once, here.
    - *Built for orbit views (L0d):* `input: pick`, `pick:` (`x`, `y`, `z`, `hit`, `node`, `button`,
-     `mods`, `phase`, `view`, `seq`) and `on_pick:`. The slice mode's `{i,j,k}` and `value` come
-     with the slice camera mode.
+     `mods`, `phase`, `view`, `seq`) and `on_pick:`. *Built in P7:* `i`, `j`, `k` and `value`; a
+     slice view meets its slice's plane exactly and reports the plane's point past the volume's
+     edge, and an orbit view's pick on a `volume_slice` node names its voxel too.
 4. **Overlays that stay on top of a slice:** point glyphs, polylines and crosshairs drawn as child
    geometry nodes of the slice, with a coincident-topology offset (or a later render layer) so
    they never z-fight the textured quad. `point_size` / `line_width` already exist as override
@@ -1469,6 +1474,10 @@ Most of the GL-viewer work is already on master. What exists, and what is new:
    colour picker for a class colour, radio buttons for the tool, and a tab bar or segmented
    buttons bound to a key for the view switch. Anything missing is a small ImGui widget in
    `ImGuiBackend.cpp` with an FTXUI placeholder.
+   - *Checked in P7:* `color:` (an `r,g,b` key) and `radio:` / `radio_row:` were there. *Built in
+     P7:* `tabs:` (a tab container over its children, or a bar over `options:`, bound to a key)
+     and `list:` (rows of a state array with a selection, Add and Remove), each an ImGui widget
+     with a radio-and-buttons fallback in the other backends (ARIADNE.md §5.3).
 
 Items 2 and 3 are the critical path for VolumeGridRover. Item 1 is the bulk of the rendering
 work. Items 4 and 5 are small. All of them run in arigl-web too.
@@ -1494,7 +1503,7 @@ not as follow-ups.
 | P4 Tiler in Ariadne | S | `contour_lab`, reading a file or another node's contours, and `contour_tiler.ari`, with a demo on a small redistributable Reconstruct series (find one), native and in arigl-web | P3b |
 | P5 Segmentation core | M | §5 steps 1–2: GenSeg vendored into `src/cvc/volume/segmentation/` with `genseg_context` and in-memory input and output; `segment_stepper` with every phase sliced (§5); voxel-for-voxel parity, then the clean-up; `cvc segment`; pycvc; `segment.seeded`; §5's tests | P0a, P0b, P0d |
 | P6 Paper mode | S–M | §5 steps 3–4: the SegMed audit, `cvc::gradient_vector_diffusion` as a stepper, `seed_mode::critical_points` and `critical_point_seeds`, `segment.critical-points`, and #123's seed generators. The default-seeding switch is its own later PR (§5 step 5) | P5 |
-| P7 Viewport pieces | M | §6: the `volume_slice` node, `mode: slice` with a bindable axis, `input: pick` / `pick:` / `on_pick:`, the overlay offset, the missing widgets. Each with tests, plus an orthoslicer demo next to `volren_bunny`, native and in arigl-web | P0a |
+| P7 Viewport pieces | M | §6: the `volume_slice` node, `mode: slice` with a bindable axis, `input: pick` / `pick:` / `on_pick:`, the overlay offset, the missing widgets. Each with tests, plus an orthoslicer demo next to `volren_bunny`, native and in arigl-web. *Built:* `examples/ariadne/documents/orthoslicer.ari` (golden `src/cvcGL/test/golden/orthoslicer.ari`, arigl-web smoke case `orthoslicer.ari` in the docset) | P0a |
 | P8 volume_grid v1 | M | Navigation, the view switch and the quad layout, probe, point classes (mark, select, move, delete, save, load), sessions, the transfer function; parameters from tables and data on the data channel; golden images and scripted-pick tests; two grids in one document (T6) | P7, P0d |
 | P9 volume_grid v2 | M | Segmentation tab: `segment`, labels on the slices, class surfaces in the 3D view, `save_segments` | P8, P5 |
 | P10 volume_grid v3 | M | Contours: draw and edit per object, linear and spline, export; `tile` puts surfaces in the 3D view | P8, P3b |
