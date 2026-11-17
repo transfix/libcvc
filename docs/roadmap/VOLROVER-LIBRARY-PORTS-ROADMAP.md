@@ -1043,6 +1043,13 @@ a few files:
        CGAL 6 API changes), and MSVC cannot compile the legacy kernel at all.
      - **Absolute tolerances.** The legacy code keeps tolerances of 1e-5 to 1e-11 world units, so
        it works for coordinates of order 1 to 10^4 (Reconstruct's micron traces), not far below.
+     - **The same surfaces on every platform.** The legacy's choices follow its containers'
+       iteration order and `std::sort`'s order of ties. Ported as they were, they gave other
+       branch surfaces on wasm32 and on macOS arm64 (CI, 2026-11-17). So the port hashes with
+       Boost's 64-bit arithmetic everywhere: where `size_t` has 32 bits, it folds each hash the
+       way Boost.Unordered folds a 64-bit one when it picks a bucket, so the buckets and their
+       order are the 64-bit ones. It also sorts stably, and compiles the tiler without FMA
+       contraction.
      - **The legacy tests** (12 CppUnitLite2 files): 58 of their tests run on gtest. The others
        read `test_data/`, which volrover never committed, or call a harness the legacy itself had
        commented out (`tiler_legacy_test.cpp` lists each one).

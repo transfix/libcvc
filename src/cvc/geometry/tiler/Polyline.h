@@ -92,18 +92,19 @@ private:
 typedef Polyline<Point_2> Polyline_2;
 typedef Polyline<Point_3> Polyline_3;
 
+// As the points' hashes (kernel.h): Boost's 64-bit arithmetic, folded for the container.
 inline std::size_t hash_value(const Polyline_2 &p) {
-  std::size_t seed = 0;
+  std::uint64_t seed = 0;
   for (Polyline_2::const_iterator it = p.begin(); it != p.end(); ++it)
-    boost::hash_combine(seed, hash_value(*it));
-  return seed;
+    hash64::combine(seed, hash64_value(*it));
+  return hash64::fold(seed);
 }
 
 inline std::size_t hash_value(const Polyline_3 &p) {
-  std::size_t seed = 0;
+  std::uint64_t seed = 0;
   for (Polyline_3::const_iterator it = p.begin(); it != p.end(); ++it)
-    boost::hash_combine(seed, hash_value(*it));
-  return seed;
+    hash64::combine(seed, hash64_value(*it));
+  return hash64::fold(seed);
 }
 
 } // namespace cvc::tiler
