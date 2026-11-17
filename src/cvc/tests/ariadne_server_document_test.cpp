@@ -424,6 +424,53 @@ scene:
   EXPECT_EQ(cvc::ariadne::conference::read_room_entities(app, kRoom).size(), 6u);
 }
 
+// The stock server world with vehicles (cvc://worlds/traffic.ari, arisrv --doc): it loads on the
+// relay, its eighteen vehicles start and drive between its blocks.
+TEST(ServerDocumentTest, TheStockTrafficWorldRuns) {
+  if (!ari::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  const fs::path path =
+      fs::path(__FILE__).parent_path().parent_path() / "ariadne" / "worlds" / "traffic.ari";
+  if (!fs::exists(path))
+    GTEST_SKIP() << "no source tree beside this test: " << path.string();
+  cvc::app app;
+  ari::ServerDocument doc(app, kRoom);
+  ASSERT_EQ(doc.read(path.string()), "");
+  EXPECT_GE(doc.scene().nodes.size(), 13u) << "the ground and twelve blocks";
+  const std::vector<std::string> warnings = doc.load(path.string());
+  for (const std::string &w : warnings)
+    ADD_FAILURE() << "traffic.ari warns: " << w;
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt))
+    GTEST_SKIP() << "no Jolt in this build";
+  ari::SceneWorld *world = doc.runtime().scene_world();
+  ASSERT_NE(world, nullptr);
+  ari::WorldVehicles *vehicles = world->vehicles();
+  ASSERT_NE(vehicles, nullptr);
+  ASSERT_EQ(vehicles->size(), 18u);
+  std::uint64_t tick = 0;
+  const auto steps = [&](double seconds) {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+    while (std::chrono::steady_clock::now() < until) {
+      ++tick;
+      doc.step(tick, tick / 120.0);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  };
+  steps(0.2);
+  const std::vector<ari::entity_info> start = vehicles->entities();
+  int placed = 0;
+  for (const ari::entity_info &e : start)
+    placed += e.placed ? 1 : 0;
+  EXPECT_EQ(placed, 18) << "every one at a free point between the blocks";
+  steps(2.0);
+  const std::vector<ari::entity_info> later = vehicles->entities();
+  ASSERT_EQ(later.size(), start.size());
+  int moving = 0;
+  for (std::size_t i = 0; i < later.size(); ++i)
+    moving += std::hypot(later[i].x - start[i].x, later[i].y - start[i].y) > 1.0 ? 1 : 0;
+  EXPECT_GE(moving, 12) << "most of them drive";
+}
+
 // The document's own state is never published, whatever prefix it binds under: an entry that is
 // that prefix, holds it or lies inside it is refused (the default prefix is under ui, refused by
 // name already).

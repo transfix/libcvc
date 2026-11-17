@@ -68,6 +68,7 @@
 #include <cvc/ariadne/stream_intrinsics.h> // a server document's streams and rasters
 #include <cvc/ariadne/uri.h>               // cvc://worlds/... (register_cvc_uri_handler)
 #include <cvc/ariadne/world_rules.h>       // the world: block (world_rules_from)
+#include <cvc/ariadne/world_vehicles.h>    // ... and how many it runs
 #include <cvc/core/app.h>
 #include <cvc/media/media_router.h> // protocol-agnostic media hub (WS + gRPC + future protocols)
 #include <cvc/net/fast_lane_rtc.h>  // the unreliable lane (WebRTC data channels)
@@ -712,6 +713,17 @@ int main(int argc, char **argv) {
     if (docPath.empty()) {
       std::fprintf(stderr, "arisrv: --doc expects a path\n");
       return 2;
+    }
+    // A stock server world by its URI (cvc://worlds/traffic.ari): the file libcvc installs.
+    if (docPath.rfind("cvc://", 0) == 0) {
+      cvc::ariadne::register_cvc_uri_handler(app);
+      const cvc::ariadne::UriResult found = cvc::ariadne::resolve(app, docPath);
+      if (!found.ok || found.canonical.empty()) {
+        std::fprintf(stderr, "arisrv: --doc: %s: %s\n", docPath.c_str(),
+                     found.error.empty() ? "not found" : found.error.c_str());
+        return 2;
+      }
+      docPath = found.canonical;
     }
     serverDoc = std::make_unique<cvc::ariadne::ServerDocument>(app, room);
     std::vector<std::string> warnings;
@@ -1490,6 +1502,13 @@ int main(int argc, char **argv) {
                   "publishes %s\n",
                   docPath.c_str(), serverDoc->prefix().c_str(),
                   published.empty() ? "nothing" : (published + " (to every client)").c_str());
+      // Its world, run here: the vehicles it starts with go to every client as the room's
+      // entities (room_entities.h).
+      if (const cvc::ariadne::SceneWorld *w = serverDoc->runtime().scene_world())
+        if (const cvc::ariadne::WorldVehicles *v = w->vehicles())
+          std::printf("[arisrv] server document's world: %zu vehicles of %zu archetypes running, "
+                      "sent to every client as the room's entities\n",
+                      v->size(), v->archetypes().size());
     } catch (const std::exception &e) {
       std::fprintf(stderr, "arisrv: --doc: %s\n", e.what());
       docFailed = true;
