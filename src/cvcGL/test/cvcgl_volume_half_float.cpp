@@ -7,9 +7,14 @@
 // 16F while the volume draws. Desktop GL never needs it, so this forces it on
 // (VolumeNode::setHalfFloatTextures(1) on the node) and checks, natively:
 //   * the volume renders the same with 16F tables as with 32F ones (no lost colour or opacity);
-//   * with it on, the volume's tables really are 16F textures, and with it off none are;
+//   * with it on, VTK asks GL for the volume's tables as 16F textures, and with it off for none.
+//     That is read where VTK asks, at glTexImage2D, through VTK's glad pointer;
+//   * GL keeps them as 16F textures. Apple's software renderer (the macOS CI runners) reports a
+//     texture asked for as 16F in the matching 32F format, so there GL's formats cannot show the
+//     fallback: that check alone is skipped, and the skip says why;
 //   * the defaults are put back after the draw, so the rest of the scene stays 32F.
-// Skipped when the build cannot rasterise offscreen.
+// Skipped when the build cannot rasterise offscreen. GLES cannot ask a texture its format and has
+// no glad, so the format checks are desktop GL only.
 //
 // cvcpkg builds tests Release, where NDEBUG makes assert() expand to nothing. Undefine it.
 #undef NDEBUG
@@ -22,6 +27,8 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/volume/volume.h>
+#include <map>
+#include <string>
 #include <vector>
 #include <vtkOpenGLRenderWindow.h>
 #include <vtkOpenGLState.h>
@@ -36,36 +43,131 @@ namespace {
 
 struct Frame {
   std::vector<unsigned char> rgb;
-  int halfTextures = 0; // R16F / RG16F / RGB16F / RGBA16F textures alive after the draw
+  std::string renderer;  // GL_RENDERER
+  int made = 0;          // 2-D textures VTK made in the draw (glTexImage2D, level 0)
+  int asked16 = 0;       // live ones VTK asked GL to keep as R16F / RG16F / RGB16F / RGBA16F
+  int halfTextures = 0;  // live 2-D textures GL says it keeps as 16F (-1: GLES cannot say)
+  bool keptAs32 = false; // GL keeps every one asked for as 16F as the matching 32F format
+  std::string kept;      // what GL keeps each one asked for as 16F as
   bool restored = false;
 };
 
-// Count the context's live textures in 16-bit float formats (desktop GL can ask a texture its
-// format; GLES cannot, so -1 there).
-int halfFloatTextures(vtkOpenGLRenderWindow *win) {
+#ifndef GL_ES_VERSION_3_0
+bool isHalf(GLint f) { return f == GL_R16F || f == GL_RG16F || f == GL_RGB16F || f == GL_RGBA16F; }
+
+// The 32F format with a 16F format's channels.
+GLint fullOf(GLint f) {
+  switch (f) {
+  case GL_R16F:
+    return GL_R32F;
+  case GL_RG16F:
+    return GL_RG32F;
+  case GL_RGB16F:
+    return GL_RGB32F;
+  case GL_RGBA16F:
+    return GL_RGBA32F;
+  default:
+    return 0;
+  }
+}
+
+std::string formatName(GLint f) {
+  switch (f) {
+  case GL_R16F:
+    return "R16F";
+  case GL_RG16F:
+    return "RG16F";
+  case GL_RGB16F:
+    return "RGB16F";
+  case GL_RGBA16F:
+    return "RGBA16F";
+  case GL_R32F:
+    return "R32F";
+  case GL_RG32F:
+    return "RG32F";
+  case GL_RGB32F:
+    return "RGB32F";
+  case GL_RGBA32F:
+    return "RGBA32F";
+  default: {
+    char hex[16];
+    std::snprintf(hex, sizeof(hex), "0x%04X", static_cast<unsigned>(f));
+    return hex;
+  }
+  }
+}
+
+// The internal format VTK gave glTexImage2D for each 2-D texture, by name: what it asked for,
+// whatever GL then keeps.
+std::map<GLuint, GLint> g_asked;
+int g_made = 0;
+decltype(glad_glTexImage2D) g_texImage2D = nullptr;
+
+void GLAD_API_PTR recordTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei w,
+                                   GLsizei h, GLint border, GLenum format, GLenum type,
+                                   const void *data) {
+  if (target == GL_TEXTURE_2D && level == 0) {
+    GLint bound = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+    g_asked[static_cast<GLuint>(bound)] = internalFormat;
+    ++g_made;
+  }
+  g_texImage2D(target, level, internalFormat, w, h, border, format, type, data);
+}
+#endif
+
+// Starts recording what VTK asks for. Call once VTK has loaded GL for this window: VTK loads glad
+// once per new context, which puts the driver's glTexImage2D back.
+void recordTextures(SceneRenderer &sr) {
+#ifdef GL_ES_VERSION_3_0
+  (void)sr;
+#else
+  sr.renderWindow()->Initialize(); // the context, and glad loaded for it
+  g_asked.clear();
+  g_made = 0;
+  if (glad_glTexImage2D && glad_glTexImage2D != recordTexImage2D) {
+    g_texImage2D = glad_glTexImage2D;
+    glad_glTexImage2D = recordTexImage2D;
+  }
+#endif
+}
+
+// Ask GL what it keeps the context's live 2-D textures as, next to what VTK asked for.
+void readFormats(vtkOpenGLRenderWindow *win, Frame &f) {
 #ifdef GL_ES_VERSION_3_0
   (void)win;
-  return -1;
+  f.halfTextures = -1;
 #else
   win->MakeCurrent();
-  int n = 0;
+  while (glGetError() != GL_NO_ERROR) {
+  }
+  if (const GLubyte *r = glGetString(GL_RENDERER))
+    f.renderer = reinterpret_cast<const char *>(r);
+  f.made = g_made;
   GLint was = 0;
   glGetIntegerv(GL_TEXTURE_BINDING_2D, &was);
-  for (GLuint t = 1; t < 512; ++t) {
+  bool allAs32 = true;
+  for (GLuint t = 1; t < 4096; ++t) {
     if (!glIsTexture(t))
       continue;
     glBindTexture(GL_TEXTURE_2D, t);
     if (glGetError() != GL_NO_ERROR) // not a 2-D texture
       continue;
-    GLint f = 0;
-    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &f);
-    if (f == GL_R16F || f == GL_RG16F || f == GL_RGB16F || f == GL_RGBA16F)
-      ++n;
+    GLint kept = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &kept);
+    if (isHalf(kept))
+      ++f.halfTextures;
+    const auto asked = g_asked.find(t);
+    if (asked == g_asked.end() || !isHalf(asked->second))
+      continue;
+    ++f.asked16;
+    allAs32 = allAs32 && kept == fullOf(asked->second);
+    f.kept += (f.kept.empty() ? "" : ", ") + formatName(asked->second) + " as " + formatName(kept);
   }
+  f.keptAs32 = f.asked16 > 0 && allAs32;
   glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(was));
   while (glGetError() != GL_NO_ERROR) {
   }
-  return n;
 #endif
 }
 
@@ -94,11 +196,12 @@ Frame render(int halfMode) {
   SceneRenderer sr(sg, 128, 128, /*offscreen=*/true);
   sr.setBackground(0.0, 0.0, 0.0);
   sr.resetCamera();
+  recordTextures(sr);
   Frame f;
   f.rgb = sr.frameRGB();
   auto *win = vtkOpenGLRenderWindow::SafeDownCast(sr.renderer()->GetRenderWindow());
   if (win) {
-    f.halfTextures = halfFloatTextures(win);
+    readFormats(win, f);
     f.restored = win->GetState()->GetDefaultTextureInternalFormat(VTK_FLOAT, 1, false, true,
                                                                   false) == GL_R32F &&
                  win->GetState()->GetDefaultTextureInternalFormat(VTK_FLOAT, 3, false, true,
@@ -141,12 +244,25 @@ int main() {
   assert(litHalf > litFull * 9 / 10);
   assert(mean < 1.0);
   std::printf("  ok: the volume draws the same with 16-bit float tables\n");
-  std::printf("  16F textures alive: %d (32F run) vs %d (16F run)\n", full.halfTextures,
-              half.halfTextures);
   if (half.halfTextures >= 0) {
+    std::printf("  GL: %s; VTK made %d 2-D textures (32F run) and %d (16F run)\n",
+                half.renderer.c_str(), full.made, half.made);
+    assert(full.made > 0 && half.made > 0); // the glTexImage2D hook saw VTK make them
+    std::printf("  asked for as 16F: %d (32F run) vs %d (16F run)\n", full.asked16, half.asked16);
+    assert(full.asked16 == 0);
+    assert(half.asked16 >= 2); // the colour table and the opacity table at least
+    std::printf("  ok: forced on, VTK asks for the volume's tables as 16F textures; off, none\n");
+    std::printf("  16F textures alive: %d (32F run) vs %d (16F run); kept: %s\n", full.halfTextures,
+                half.halfTextures, half.kept.c_str());
     assert(full.halfTextures == 0);
-    assert(half.halfTextures >= 2); // the colour table and the opacity table at least
-    std::printf("  ok: forced on, the volume's tables are 16F textures; off, none are\n");
+    if (half.halfTextures == 0 && half.keptAs32) {
+      std::printf("  skipped: %s keeps 16F textures as 32F ones, so its formats cannot show "
+                  "the 16F tables\n",
+                  half.renderer.c_str());
+    } else {
+      assert(half.halfTextures >= 2);
+      std::printf("  ok: and GL keeps them as 16F textures\n");
+    }
   }
   assert(full.restored && half.restored);
   std::printf("  ok: the context's default float formats are 32F again after the draw\n");

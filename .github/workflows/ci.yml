@@ -3044,6 +3044,20 @@ jobs:
                run && /^(  \((OpenGL renderer|section [0-9])|  U [0-9.]+ m\/s: the row maxima|Test time|Test (Passed|Failed))/
                /^"cvcgl_wake" end time:/ { run = 0 }' "$log"
 
+      # cvcgl_volume_half_float prints the formats VTK asks GL for and the
+      # formats GL keeps. Apple's software renderer reports a texture asked for
+      # as 16F in the 32F format, and the test skips that one check there: print
+      # its lines from LastTest.log on every run, so the skip and its reason show.
+      - name: cvcgl_volume_half_float formats
+        if: always() && matrix.kind == 'libcvc'
+        shell: bash
+        run: |
+          log=build/Testing/Temporary/LastTest.log
+          [ -f "$log" ] || { echo "no $log"; exit 0; }
+          awk '/^"cvcgl_volume_half_float" start time:/ { run = 1; print "-- attempt " ++n }
+               run && /^(  (lit px|GL: |asked for|16F textures|ok: |skipped: )|Assertion|Test (Passed|Failed))/
+               /^"cvcgl_volume_half_float" end time:/ { run = 0 }' "$log"
+
       # cvcgl_ari_golden prints each document's renderer and how far its frame
       # is from the golden (docs/ARIADNE.md section 12). --output-on-failure
       # hides that on a pass, so print it from LastTest.log on every run: it is
