@@ -1674,6 +1674,7 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
             cvc::ariadne::resolve_bind(bind_prefix, scene.vehicle_intents));
       out.world->bind_boats(scene, bind_prefix, warnings); // boat nodes: their boats run here
       out.world->bind_wind(scene, bind_prefix); // the scene's wind pushes its bodies (O14)
+      out.world->bind_weather(scene, bind_prefix); // the rain's friction, in the steps (O20)
     }
     if (out.physics)
       out.clock.present = true;

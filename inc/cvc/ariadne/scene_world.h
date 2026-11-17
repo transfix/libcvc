@@ -106,6 +106,7 @@ struct vehicle_archetype;
 struct spawn_rules;
 class WorldVehicles;
 class BoatRuntime;
+class WeatherFriction;
 
 // Whether a scene has a world to run: a `physics:` block, a `world:` block, or a node (at any
 // depth) with a `body:` or a `world:` (a data node's bodies come with its dataset, so its body
@@ -296,6 +297,14 @@ public:
   void bind_wind(const Scene &scene, const std::string &bind_prefix);
   // The wind's flow field now (invalid without a scene wind).
   cvc::physics::field_id wind_field() const;
+  // Take on the scene's weather nodes (type: weather, at any depth; scene_weather.h): a
+  // WeatherFriction each, its keys under `bind_prefix`, which sets the surface materials'
+  // friction from the rain inside the physics step, on the world clock's ticks, so every host
+  // applies the same friction at the same step. from_scene does this itself; a renderer that
+  // build()s the world calls it.
+  void bind_weather(const Scene &scene, const std::string &bind_prefix);
+  // The weather nodes' friction runtimes, in the document's order.
+  const std::vector<std::unique_ptr<WeatherFriction>> &weathers() const;
 
   // The warnings follow()'s syncs gathered since the last call.
   std::vector<std::string> take_warnings();

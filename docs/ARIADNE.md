@@ -1329,10 +1329,14 @@ every client sees the same strike at the same moment. Each has one to four strok
 its surface materials (the ones `add_world_geometry` names after a surface class) to their friction
 at the weather's wetness where the vehicles are (their mean; the ground's centre with none):
 `cvc::physics::apply_wetness`, from each class's dry `mu` toward its `mu_wet` (wet asphalt 0.55,
-wet grass 0.3; indoor floors keep theirs). It changes at most twice a world second, and only when
-the wetness has moved by 1/64. Every plant reads the one material table, so tires and boxes both
-feel it, and it dries back with the ground. `weather.friction` (`friction:`, default 1; 0 restores
-the dry friction) turns it off, and `weather.wetness` publishes the wetness it last applied.
+wet grass 0.3; indoor floors keep theirs). The scene's world sets it
+([`scene_weather.h`](../inc/cvc/ariadne/scene_weather.h), `WeatherFriction`), inside the physics
+step: on the first step of each half second of world time, counted in the world clock's ticks,
+and only when the wetness has moved by 1/64. So it changes at the same physics step whatever the
+frame rate, offscreen or in a window, and a headless host (ari, a test) applies it too. Every
+plant reads the one material table, so tires and boxes both feel it, and it dries back with the
+ground. `weather.friction` (`friction:`, default 1; 0 restores the dry friction at the next step)
+turns it off, and `weather.wetness` publishes the wetness it last applied.
 
 **Water.** `water` draws everything below `level` on a ground (`world:` a `generated_world`, or
 `ground:` any height-field node) as the GPU FFT sea of OCEAN-AND-WEATHER-ROADMAP.md (§11.2, O15):

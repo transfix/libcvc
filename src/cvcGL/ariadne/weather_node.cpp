@@ -57,9 +57,11 @@
 // as a bolt while it shows (its mesh `<id>_bolt`, listed among the sky's receivers like the rain's)
 // and handed to the sky as a flash (sky.flash) that lights the receivers, the water and the far
 // clouds; weather.lightning scales it and weather.flash publishes it. The wet ground's friction
-// (O20): the scene's physics world's surface materials take their friction at the weather's
-// wetness under the vehicles (cvc::physics::apply_wetness); weather.friction turns it off and
-// weather.wetness publishes the wetness. The storm wind (F4) waits for O14's scene wind.
+// (O20) is physics, so the scene's world sets it, inside the physics step on the world clock's
+// ticks, with or without a renderer (cvc::ariadne::WeatherFriction, scene_weather.h:
+// weather.friction, weather.wetness); this node reads its props the same way
+// (scene_weather_params), so the friction follows the storms it draws. The storm wind (F4) waits
+// for O14's scene wind.
 //
 // The steering wind the cells ride is the scene's one wind (R5), read through steeringWind(): until
 // one scene wind exists (O14's wind.speed / wind.dir) it is the cloud deck's, sky.wind_az at the
@@ -75,6 +77,7 @@
 #include <cstdio>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/scene_weather.h> // scene_weather_params: the storms' props, as the world reads them
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h>
@@ -84,7 +87,6 @@
 #include <cvc/gl/ariadne/lsystem_nodes.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/world_nodes.h>
-#include <cvc/physics/world_geometry.h> // apply_wetness: the rain into the scene's friction
 #include <cvc/world/weather.h>
 #include <limits>
 #include <memory>
@@ -107,7 +109,9 @@ constexpr double STORM_TOP = 3200.0, STORM_DARK = 0.6, REACH = 4000.0;
 // The rain (O19): a downpour is RAIN_FULL mm/h (full streaks); the ground is soaked by SOAK weather
 // seconds of rain and dries by 1/e in DRY; a track counts while it is younger than 4 DRY; the
 // streaks are at most RAIN_COUNT, in a box RAIN_BOX metres around the camera and RAIN_HIGH high.
-constexpr double RAIN_FULL = 25.0, SOAK = 300.0, DRY = 900.0, RAIN_BOX = 80.0, RAIN_HIGH = 52.0;
+constexpr double RAIN_FULL = 25.0, RAIN_BOX = 80.0, RAIN_HIGH = 52.0;
+constexpr double SOAK = ari::kWeatherSoak,
+                 DRY = ari::kWeatherDry; // the world's friction reads them too
 constexpr int RAIN_COUNT = 12000, MAX_TRACKS = 4;
 const char *const RAIN_INPUTS = "weather_rain"; // the streaks' own shader inputs
 
@@ -426,14 +430,12 @@ struct WeatherRT {
   int rainCount = RAIN_COUNT;
   // O20: the lightning (its strength key; the flash, published; the bolt's mesh, the strike it
   // shows) and the rain in the scene's friction (weather.friction; the wetness it set).
-  std::string lightningKey, flashKey, frictionKey, wetHereKey, skyFlash;
+  std::string lightningKey, flashKey, skyFlash;
   std::weak_ptr<cvc::gl::GeometryNode> bolt;
   std::shared_ptr<cvc::gl::GeometryNode::ShaderInputs> boltIn;
   std::uint64_t boltId = 0;
   bool boltShown = false, boltShaded = false;
   double lastFlash = -1.0, lastSkyFlash = -1.0, flashT = -1.0;
-  double frictionAt = -1e9;  // the world time the friction was last set
-  double frictionWet = -1.0; // the wetness it was set for
   bool rainShaded = false;
   double lastRainHere = -1.0;
 };
@@ -795,45 +797,6 @@ void lightning(WeatherRT &r, vtkRenderer *ren) {
   }
 }
 
-// The rain into the scene's friction (O20, F6): the wetness where the vehicles are (their mean;
-// the ground's centre with none) runs every surface material's friction toward its wet value
-// (cvc::physics::apply_wetness), at most twice a world second and only when it has moved by
-// 1/64. The wetness is the weather's, a function of the seed, the time and the events.
-void friction(WeatherRT &r, RealizedScene &rs) {
-  cvc::app &app = *r.app;
-  if (!rs.physics)
-    return;
-  if (ari::read_or<double>(app, r.frictionKey, 1.0) == 0.0) {
-    // Turned off: the surfaces dry at once, and are wetted again when it is turned back on.
-    if (r.frictionWet > 0.0) {
-      cvc::physics::apply_wetness(*rs.physics, 0.0);
-      put(app, r.wetHereKey, 0.0);
-    }
-    r.frictionWet = 0.0;
-    r.frictionAt = -1e9;
-    return;
-  }
-  const double t = app.world_clock().t();
-  if (std::fabs(t - r.frictionAt) < 0.5)
-    return;
-  r.frictionAt = t;
-  const cvc::physics::world_snapshot snap = rs.physics->snapshot();
-  double wet = 0.0;
-  if (snap.vehicles.empty()) {
-    wet = r.model.wetness(t, r.cx, r.cy, r.soak, r.dry);
-  } else {
-    for (const cvc::physics::vehicle_snapshot &v : snap.vehicles)
-      wet += r.model.wetness(t, v.state.body.position.x, v.state.body.position.y, r.soak, r.dry);
-    wet /= double(snap.vehicles.size());
-  }
-  wet = std::round(wet * 64.0) / 64.0;
-  if (wet == r.frictionWet)
-    return;
-  r.frictionWet = wet;
-  cvc::physics::apply_wetness(*rs.physics, wet);
-  put(app, r.wetHereKey, wet);
-}
-
 // type: weather — the scene's weather (see above).
 // props: ground (the node whose extent the storms serve; default world, else `area` around
 // (`cx`, `cy`)), sky (the cloud_sky's key root to drive: default sky; "" drives none), seed,
@@ -854,40 +817,11 @@ std::shared_ptr<GraphicsNode> realize_weather(SceneGraph &sg, const ari::SceneNo
   auto rt = std::make_shared<WeatherRT>();
   cvc::app &app = sg.appContext();
   rt->app = &app;
-  cvc::world::weather_params p;
-  p.seed = static_cast<std::uint64_t>(n.props.num("seed", 1.0));
-  // The area: the ground's box, or the props'.
-  const std::string ground = n.props.str("ground").empty() ? "world" : n.props.str("ground");
-  if (const auto it = out.height_fields.find(ground);
-      !n.props.has("area") && it != out.height_fields.end() && it->second) {
-    const cvc::height_field &g = *it->second;
-    p.cx = 0.5 * (g.x0() + g.max_x());
-    p.cy = 0.5 * (g.y0() + g.max_y());
-    p.area = 0.5 * std::max(g.max_x() - g.x0(), g.max_y() - g.y0());
-  } else {
-    p.cx = n.props.num("cx", 0.0);
-    p.cy = n.props.num("cy", 0.0);
-    p.area = std::max(1.0, n.props.num("area", p.area));
-  }
-  p.interval = std::max(1.0, n.props.num("interval", p.interval));
-  p.chance = std::clamp(n.props.num("chance", p.chance), 0.0, 1.0);
-  p.quiet = n.props.num("quiet", p.quiet);
-  p.life_min = std::max(1.0, n.props.num("life_min", p.life_min));
-  p.life_max = std::max(p.life_min, n.props.num("life_max", p.life_max));
-  p.growth = std::clamp(n.props.num("growth", p.growth), 0.0, 1.0);
-  p.decay = std::clamp(n.props.num("decay", p.decay), 0.0, 1.0 - p.growth);
-  p.radius_min = std::max(1.0, n.props.num("radius_min", p.radius_min));
-  p.radius_max = std::max(p.radius_min, n.props.num("radius_max", p.radius_max));
-  p.peak_min = std::clamp(n.props.num("peak_min", p.peak_min), 0.0, 1.0);
-  p.peak_max = std::clamp(n.props.num("peak_max", p.peak_max), p.peak_min, 1.0);
-  p.miss = std::max(0.0, n.props.num("miss", p.miss));
-  p.rain_onset = std::clamp(n.props.num("rain_onset", p.rain_onset), 0.0, 0.999);
-  p.rain_max = std::max(0.0, n.props.num("rain_max", p.rain_max));
-  p.calm_s = std::max(1.0, n.props.num("calm", p.calm_s));
-  p.flash_rate = std::max(0.0, n.props.num("flash_rate", p.flash_rate));
-  p.flash_onset = std::clamp(n.props.num("flash_onset", p.flash_onset), 0.0, 0.999);
-  p.ground_share = std::clamp(n.props.num("ground_share", p.ground_share), 0.0, 1.0);
-  p.rate = std::max(0.0, n.props.num("time_scale", 1.0));
+  // The storms' props, read as the scene's world reads them (its friction follows these storms).
+  const std::string ground = ari::scene_weather_ground(n);
+  const auto groundIt = out.height_fields.find(ground);
+  const cvc::world::weather_params p = ari::scene_weather_params(
+      n, groundIt != out.height_fields.end() ? groundIt->second.get() : nullptr);
   rt->model.set_params(p);
   rt->cx = p.cx;
   rt->cy = p.cy;
@@ -945,10 +879,10 @@ std::shared_ptr<GraphicsNode> realize_weather(SceneGraph &sg, const ari::SceneNo
                             std::clamp(n.props.num("rain_quality", 1.0), 0.0, 1.0));
   rt->skyRain = ari::resolve_bind(pref, root + ".rain");
   rt->skyRainK = ari::resolve_bind(pref, root + ".rain_k");
-  rt->soak = std::max(1.0, n.props.num("soak", SOAK));
-  rt->dry = std::max(1.0, n.props.num("dry", DRY));
-  if (const auto it = out.height_fields.find(ground); it != out.height_fields.end())
-    rt->ground = it->second;
+  rt->soak = ari::scene_weather_soak(n);
+  rt->dry = ari::scene_weather_dry(n);
+  if (groundIt != out.height_fields.end())
+    rt->ground = groundIt->second;
   rt->rainCount = std::clamp(static_cast<int>(n.props.num("rain_count", RAIN_COUNT)), 0, 65536);
   std::shared_ptr<GraphicsNode> node = parent ? parent->createChild(n.id) : sg.addGraphics(n.id);
   if (rt->rainCount > 0 && node) {
@@ -974,10 +908,10 @@ std::shared_ptr<GraphicsNode> realize_weather(SceneGraph &sg, const ari::SceneNo
   // list it among the sky's receivers too), and the rain's friction.
   rt->lightningKey = key(pref, n, "weather.lightning");
   rt->flashKey = key(pref, n, "weather.flash");
-  rt->frictionKey = key(pref, n, "weather.friction");
-  rt->wetHereKey = key(pref, n, "weather.wetness");
   ari::read_or_seed<double>(app, rt->lightningKey, std::max(0.0, n.props.num("lightning", 1.0)));
-  ari::read_or_seed<double>(app, rt->frictionKey, n.props.num("friction", 1.0) != 0.0 ? 1.0 : 0.0);
+  // weather.friction (the Weather panel's): the scene's world reads it (WeatherFriction).
+  ari::read_or_seed<double>(app, key(pref, n, "weather.friction"),
+                            n.props.num("friction", 1.0) != 0.0 ? 1.0 : 0.0);
   rt->skyFlash = ari::resolve_bind(pref, root + ".flash");
   if (node) {
     std::vector<BoltSeg> none;
@@ -1001,8 +935,6 @@ std::shared_ptr<GraphicsNode> realize_weather(SceneGraph &sg, const ari::SceneNo
       rt->bolt = mesh;
     }
   }
-  out.scene_ticks.push_back([rt](vtkRenderer *, RealizedScene &rs,
-                                 const cvc::world_clock::step_result &) { friction(*rt, rs); });
 
   out.custom_ticks.push_back([rt](vtkRenderer *ren) { tick(*rt, ren); });
   // A node of its own (the rain's mesh under it), so the scene lists it and a host can find it.
