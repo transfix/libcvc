@@ -106,8 +106,9 @@ public:
   bool should_close() const;    // a host `quit` OR the window closed
   void run(double fps = 120.0); // optional blocking host loop until should_close()
   void request_close();
-  // Wait until no async call is running on the app's async host (async_host::wait_idle): before
-  // a host lets go of what its async functions use (an interpreter, the app). Not from a frame.
+  // Wait until no async call is running on the app's async host, or on the document's group host
+  // when it is isolated, or in a group a move retired (AppRuntime::wait_idle): before a host lets
+  // go of what its async functions use (an interpreter, the app). Not from a frame.
   void wait_idle();
 
   // --- input seam (document-level on_key/on_pointer residents; VTK-sourced, never SDL) ---

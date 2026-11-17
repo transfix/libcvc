@@ -401,8 +401,10 @@ shore_layer::sample shore_layer::evaluate(double x, double y, double t) const {
   for (const shore_train &tr : trains) {
     const double th = omega * tr.ratio * t - tr.ratio * P + tr.phase;
     const double thr = omega * tr.ratio * t + tr.ratio * P + tr.phase_reflected;
-    out.eta += tr.amplitude * (A * det::cos(th) + Ar * det::cos(thr));
-    const double h = tr.amplitude * Q * A * det::sin(th);
+    double sth, cth;
+    det::sincos(th, sth, cth);
+    out.eta += tr.amplitude * (A * cth + Ar * det::cos(thr));
+    const double h = tr.amplitude * Q * A * sth;
     out.dx += h * ux;
     out.dy += h * uy;
   }
@@ -441,10 +443,13 @@ shore_layer::flow shore_layer::velocity(double x, double y, double z, double dep
     }
     const double th = wr * t - tr.ratio * P + tr.phase; // evaluate()'s phases
     const double thr = wr * t + tr.ratio * P + tr.phase_reflected;
-    along += tr.amplitude * wr * ch * (A * det::cos(th) - Ar * det::cos(thr));
-    out.w -= tr.amplitude * wr * sh * (A * det::sin(th) + Ar * det::sin(thr));
-    if (det::cos(th) > crest) {
-      crest = det::cos(th);
+    double sth, cth, sthr, cthr;
+    det::sincos(th, sth, cth);
+    det::sincos(thr, sthr, cthr);
+    along += tr.amplitude * wr * ch * (A * cth - Ar * cthr);
+    out.w -= tr.amplitude * wr * sh * (A * sth + Ar * sthr);
+    if (cth > crest) {
+      crest = cth;
       kr0 = kr;
     }
   }

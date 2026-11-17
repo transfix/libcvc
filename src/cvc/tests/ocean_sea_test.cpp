@@ -187,6 +187,34 @@ TEST(OceanFft, TwoDimensionsAndBackAgain) {
   EXPECT_THROW(fft_plan(12), std::invalid_argument);
 }
 
+// run_2d transforms its rows and columns a block at a time, and skips rows of +0: the same bits as
+// run() over every row and then every column, for every size, both signs, and data with rows of
+// +0, rows of -0 and lone zeros of either sign.
+TEST(OceanFft, TheBlockedTransformIsRunsBitForBit) {
+  lcg r(23);
+  for (int n = 1; n <= 128; n *= 2) {
+    const fft_plan plan(n);
+    for (int sign : {+1, -1}) {
+      std::vector<double> a(std::size_t(n) * n * 2);
+      for (double &v : a)
+        v = r.next();
+      for (int row = 0; row < n; row += 3) // rows of +0 (and every third of them -0)
+        for (int c = 0; c < n * 2; ++c)
+          a[std::size_t(row) * n * 2 + c] = (row % 9 == 0) ? -0.0 : 0.0;
+      if (n > 2)
+        a[5] = -0.0;
+      std::vector<double> want = a;
+      for (int row = 0; row < n; ++row)
+        plan.run(want.data() + std::size_t(row) * n * 2, 1, sign);
+      for (int c = 0; c < n; ++c)
+        plan.run(want.data() + std::size_t(c) * 2, std::size_t(n), sign);
+      plan.run_2d(a.data(), sign);
+      ASSERT_EQ(std::memcmp(a.data(), want.data(), a.size() * sizeof(double)), 0)
+          << "n " << n << " sign " << sign;
+    }
+  }
+}
+
 // ── the physics band (B2) ────────────────────────────────────────────────────────────────────────
 
 // The band's fields are the sums of its modes, computed here from build_h0's texels directly: the
@@ -797,6 +825,32 @@ TEST(OceanSea, ReportsWhatAPointCosts) {
       std::printf("[ocean-point] %s: %.2f us for a height and a velocity, %s (%g)\n",
                   cell > 0.0 ? "on the 0.5 m lattice" : "exact", us,
                   share ? "sharing a memo" : "apart", sink);
+    }
+  }
+}
+
+// The sea held at one time (sea_surface::at) reads what the sea reads at that time, bit for bit,
+// over the open sea, the beach and the swash, with and without the source lattice.
+TEST(OceanSea, TheSeaAtATimeReadsTheSameValues) {
+  const auto grid = beachGrid();
+  const auto layer = beachLayer(*grid);
+  for (double cell : {0.0, 0.5}) {
+    sea_params p;
+    p.band = {32, 64};
+    p.chop = 1.15;
+    p.source_cell_m = cell;
+    const sea_surface s(coastCascades(64), p, grid, layer);
+    const double t = 3.25;
+    const sea_surface::at_time held = s.at(t);
+    EXPECT_EQ(held.t(), t);
+    for (int i = 0; i < 400; ++i) {
+      const double x = -10.0 + 0.37 * i, y = 1.0 + (i % 9) * 0.6, z = -0.3 - 0.01 * (i % 50);
+      sea_surface::source_memo m1, m2;
+      const double h1 = s.height(x, y, t, m1), h2 = held.height(x, y, m2);
+      EXPECT_EQ(std::memcmp(&h1, &h2, sizeof h1), 0) << "height at " << x << ", " << y;
+      const auto v1 = s.velocity(x, y, z, t, m1), v2 = held.velocity(x, y, z, m2);
+      EXPECT_EQ(std::memcmp(v1.data(), v2.data(), sizeof v1), 0)
+          << "velocity at " << x << ", " << y;
     }
   }
 }

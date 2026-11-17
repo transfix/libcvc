@@ -7,6 +7,7 @@
 #include <cvc/net/e2ee.h>
 #include <cvc/state/state_exec/async_host.h> // register_async_fn
 #include <cvc/state/state_exec/builtins.h>   // builtin_json_parse
+#include <cvc/state/state_exec/intrinsics.h> // ictx.host: the calling program's async host
 #include <cvc/state/state_exec/types.h>
 #include <mutex>
 #include <optional>
@@ -472,10 +473,14 @@ void use_store(cvc::app &app, std::shared_ptr<cvc::net::E2eeStore> store, std::s
   // register_net_intrinsics does).
   app.computePool();
   app.exec_scheduler();
-  se::async_host &host = app.exec_async_host();
+  app.exec_async_host();
   E2eeHost *hp = &h; // the slot lives as long as the app, and the provider goes with it
+  cvc::app *app_ptr = &app; // the provider goes with the app
   register_action_intrinsics(
-      app, [hp, &host](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+      app, [hp, app_ptr](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
+        // The calling program's async host (td 4.9, B30): the app's in group 0, its own group's
+        // for an isolated document, the init lane's inline one in init:.
+        se::async_host &host = ictx.host ? *ictx.host : app_ptr->exec_async_host();
         std::shared_ptr<cvc::net::E2eeStore> store;
         std::string unavailable;
         {

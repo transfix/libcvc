@@ -597,6 +597,52 @@ std::shared_ptr<const cvc::ocean::sea_surface> open_sea(double level = 0.0, doub
       std::vector<cvc::ocean::sea_cascade>{{cvc::ocean::build_h0(64, c, s), 0.0, 0.025}}, p);
 }
 
+// open_sea under the wind's forcing (O13): crossfading from a 9 m/s sea to a 13 m/s one over field
+// time 16.5..18.5 s, each cascade scaled by the fetch maps of an island 25 m upwind, and a ripple
+// cascade that gusts and rides a 0.5 m/s current.
+std::shared_ptr<const cvc::ocean::sea_surface> windy_sea(double cell) {
+  namespace oc = cvc::ocean;
+  oc::sea_state from, to;
+  from.wind.speed_mps = 9.0;
+  from.wind.dir_rad = 0.0;
+  to.wind.speed_mps = 13.0;
+  to.wind.dir_rad = 0.4;
+  auto g = std::make_shared<oc::shore_grid>(); // the island, for the fetch maps only
+  g->rows = g->cols = 81;
+  g->min_x = g->min_y = -40.0;
+  g->depth.resize(g->count());
+  g->shore_m.assign(g->count(), 1.0e4f);
+  g->normal_x.assign(g->count(), 0.0f);
+  g->normal_y.assign(g->count(), 0.0f);
+  for (int r = 0; r < g->rows; ++r)
+    for (int c = 0; c < g->cols; ++c)
+      g->depth[std::size_t(r) * std::size_t(g->cols) + std::size_t(c)] =
+          std::hypot(g->x(c) + 25.0, g->y(r)) < 5.0 ? -1.0f : 20.0f;
+  auto forcing = std::make_shared<oc::sea_forcing>();
+  forcing->t0 = 16.5;
+  forcing->t1 = 18.5;
+  forcing->fetch = std::make_shared<oc::fetch_field>(oc::build_fetch(*g, 0.4, 2000.0));
+  forcing->fetch_from = std::make_shared<oc::fetch_field>(oc::build_fetch(*g, 0.0, 2000.0));
+  forcing->wind = {13.0, 0.4, 0.5};
+  forcing->current.speed_mps = 0.5;
+  const std::vector<oc::cascade> cs = oc::make_cascades({251.0, 83.0, 29.0}, 0xC0A57ull);
+  std::vector<oc::sea_cascade> sc;
+  for (int i : {0, 2}) {
+    oc::sea_cascade c{oc::build_h0(64, cs[std::size_t(i)], to), 0.0, i == 0 ? 0.025 : 0.0};
+    c.h0_from = oc::build_h0(64, cs[std::size_t(i)], from);
+    c.full_fetch_m = 500.0;
+    c.full_fetch_from_m = 300.0;
+    sc.push_back(std::move(c));
+  }
+  sc[1].gust = 1.0;
+  sc[1].advect = true;
+  oc::sea_params p;
+  p.band = {32, 64};
+  p.chop = 1.15;
+  p.source_cell_m = cell;
+  return std::make_shared<oc::sea_surface>(std::move(sc), p, nullptr, nullptr, forcing);
+}
+
 // Water 20 m across, from z = -8 up to a box top of 3 (above the crests), its top the sea.
 field ocean_water(std::shared_ptr<const fluid_surface> surface) {
   field f;
@@ -734,4 +780,57 @@ TEST(PhysicsOceanSurface, CrossPlatformGoldenHash) {
   std::printf("[physics-golden] ocean scene after 300 steps: %016llx\n",
               static_cast<unsigned long long>(h));
   EXPECT_EQ(h, 0xbe86208109133b1aull) << std::hex << "state hash " << h;
+}
+
+// The fields' surface reads on worker threads (world_config::field_threads) give the same run:
+// several bodies on the sea, with and without the source lattice, at 0, 1 and 3 workers, and the
+// workers changed mid-run by reconfigure; on the plain sea and under the wind's forcing (the
+// crossfade, the fetch, the gusts and the current).
+TEST(PhysicsOceanSurface, TheFieldThreadsChangeNoValue) {
+  REQUIRE_JOLT();
+  std::uint64_t first[4] = {};
+  for (int run = 0; run < 4; ++run) {
+    const double cell = run % 2 == 0 ? 0.0 : 0.5;
+    const bool windy = run >= 2;
+    std::uint64_t h[4];
+    for (int k = 0; k < 4; ++k) {
+      world_config c = jolt_config();
+      c.field_threads = k == 3 ? 0 : (k == 0 ? 0 : (k == 1 ? 1 : 3));
+      world w(c);
+      w.add_field(ocean_water(
+          std::make_shared<ocean_surface>(windy ? windy_sea(cell) : open_sea(0.0, cell))));
+      w.add_body(slab(500.0, 0.0));
+      w.add_body(ball_at(2.5, -1.5, 0.3));
+      w.add_body(ball_at(-3.0, 2.0, 0.1));
+      body_desc tilted = slab(420.0, 0.2);
+      tilted.position = {-1.0, -3.0, 0.2};
+      const double half = 0.2; // 0.4 rad about (0.6, 0.8, 0)
+      tilted.rotation = {std::cos(half), 0.6 * std::sin(half), 0.8 * std::sin(half), 0.0};
+      w.add_body(tilted);
+      w.set_field_time(17.0);
+      if (k == 3) { // switched on and off as it runs
+        w.step(60);
+        c.field_threads = 2;
+        w.reconfigure(c);
+        w.step(80);
+        c.field_threads = 0;
+        w.reconfigure(c);
+        w.step(60);
+      } else {
+        w.step(200);
+      }
+      h[k] = w.state_hash();
+    }
+    for (int k = 1; k < 4; ++k)
+      EXPECT_EQ(h[0], h[k]) << std::hex << (windy ? "windy, " : "") << "cell " << cell << ", run "
+                            << k << ": " << h[0] << " against " << h[k];
+    first[run] = h[0];
+  }
+  EXPECT_NE(first[2], first[0]) << "the wind moves the bodies differently";
+  EXPECT_NE(first[3], first[1]);
+  world_config bad = jolt_config();
+  bad.field_threads = -1;
+  EXPECT_THROW(world w(bad), cvc::physics_error);
+  bad.field_threads = 65;
+  EXPECT_THROW(world w(bad), cvc::physics_error);
 }

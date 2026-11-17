@@ -52,6 +52,13 @@ class state_data_hydrator;
 //   Signal callbacks from boost::signals2 are dispatched on the
 //   mutating thread; journal/router operations are guarded by an
 //   internal mutex distinct from those owned by the journal/router.
+//   The slots are not safe for writers on other threads, though
+//   (STATE_EXEC_THREADED.md 4.8): they re-walk the tree from the root
+//   with raw, creating lookups, and read `_attached` unlocked. In
+//   threaded Stage 1 only host-thread writers reach the subtree it
+//   observes (`conf.*`: host_proxied natives and host code). Pinned
+//   walks and an atomic `_attached` are the follow-up before a
+//   worker-pumped group may write there.
 //
 // Scope:
 //   This unit deliberately knows nothing about the wire protocol or
@@ -225,6 +232,8 @@ private:
       nullptr; // not owned; resolves blob-ref data() payloads (may be null)
 
   mutable std::mutex _mutex;
+  // Written under _mutex, but the slots read it unlocked on the writing thread: a race once a
+  // writer is not the host thread (STATE_EXEC_THREADED.md 4.8's follow-up makes it atomic).
   bool _attached;
   std::unordered_map<std::string, connection_set> _connections;
 

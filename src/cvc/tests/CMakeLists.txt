@@ -204,6 +204,7 @@ endif()
 add_executable(ph_compose_test ph_compose_test.cpp)
 add_executable(ph_compose_parity_test ph_compose_parity_test.cpp)
 add_executable(ph_microgrid_test ph_microgrid_test.cpp)
+add_executable(ph_query_test ph_query_test.cpp)
 add_executable(ph_convoy_test ph_convoy_test.cpp)
 add_executable(ph_se2_test ph_se2_test.cpp)
 add_executable(ph_se2_train_test ph_se2_train_test.cpp)
@@ -367,6 +368,7 @@ add_executable(world_road_raster_test world_road_raster_test.cpp)
 add_executable(world_raster_test world_raster_test.cpp)
 add_executable(world_generated_test world_generated_test.cpp)
 add_executable(world_cloud_test world_cloud_test.cpp)
+add_executable(world_weather_test world_weather_test.cpp)
 add_executable(world_water_bodies_test world_water_bodies_test.cpp)
 add_executable(algo_distance_transform_test algo_distance_transform_test.cpp)
 add_executable(algo_det_math_test algo_det_math_test.cpp)
@@ -519,6 +521,7 @@ set(TEST_TARGETS
   ph_compose_test
   ph_compose_parity_test
   ph_microgrid_test
+  ph_query_test
   ph_convoy_test
   ph_se2_test
   ph_se2_train_test
@@ -634,6 +637,7 @@ set(TEST_TARGETS
   world_raster_test
   world_generated_test
   world_cloud_test
+  world_weather_test
   world_water_bodies_test
   algo_distance_transform_test
   algo_det_math_test
@@ -1608,7 +1612,7 @@ target_link_libraries(vis_tiler_test
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_ewave_test ocean_wind_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_weather_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_ewave_test ocean_wind_test)
   target_link_libraries(${_lsys_test} PRIVATE cvc GTest::gtest GTest::gtest_main)
   target_compile_features(${_lsys_test} PRIVATE cxx_std_17)
 endforeach()
@@ -2443,6 +2447,13 @@ target_link_libraries(ph_microgrid_test
     GTest::gtest_main
 )
 
+target_link_libraries(ph_query_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(ph_se2_test
   PRIVATE
     cvc
@@ -2931,6 +2942,7 @@ target_compile_features(nav_potential_test PRIVATE cxx_std_17)
 target_compile_features(ph_compose_test PRIVATE cxx_std_17)
 target_compile_features(ph_compose_parity_test PRIVATE cxx_std_17)
 target_compile_features(ph_microgrid_test PRIVATE cxx_std_17)
+target_compile_features(ph_query_test PRIVATE cxx_std_17)
 target_compile_features(ph_convoy_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_train_test PRIVATE cxx_std_17)
@@ -3206,7 +3218,7 @@ cvc_discover_tests(vis_tiler_test)
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_wind_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_weather_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_wind_test)
   cvc_discover_tests(${_lsys_test})
 endforeach()
 # The water's long runs (a channel's walls, a thin wall, a moving source's wake) take 105-195 s
@@ -3514,6 +3526,9 @@ cvc_discover_tests(nav_potential_test)
 cvc_discover_tests(ph_compose_test)
 cvc_discover_tests(ph_compose_parity_test)
 cvc_discover_tests(ph_microgrid_test)
+# The candidate query and the history fit roll out RK4 references (about 4.5 s and 3 s in Release):
+# the same budget as the convoy's, below, so a slow Debug runner fails on a real hang only.
+cvc_discover_tests(ph_query_test PROPERTIES TIMEOUT 1200)
 # The convoy's two full runs (the composite against the formation; the follow laws on a step and
 # a stop) take ~95 s each in a Debug build, and a PR's Debug ctest gives a test without a TIMEOUT
 # of its own 300 s (ci.yml), which a busy runner misses: both timed out on #1288's run on
@@ -3588,6 +3603,16 @@ set_property(DIRECTORY APPEND PROPERTY CVC_REGISTERED_TESTS physics_replay_test)
 # answers, against each other, and on two threads at once.
 add_test(NAME permissive_libs_test COMMAND permissive_libs_test)
 set_property(DIRECTORY APPEND PROPERTY CVC_REGISTERED_TESTS permissive_libs_test)
+# Threaded Stage 1's AR-1: the two Ariadne suites whole, again, with CVC_EXEC_THREADS=auto, so the
+# app's pool has workers and its lock manager is shared. With no document opted in, nothing may
+# change. AppLockManager.* is left out: it asserts the single manager CVC_EXEC_THREADS turns off.
+# One entry per binary, so each gets its own timeout, above ctest's default for one case.
+foreach(_cvc_ari_suite ariadne_runtime_test ariadne_host_test)
+  add_test(NAME ${_cvc_ari_suite}_threads_auto
+           COMMAND ${_cvc_ari_suite} --gtest_filter=-AppLockManager.*)
+  set_tests_properties(${_cvc_ari_suite}_threads_auto PROPERTIES
+                       ENVIRONMENT "CVC_EXEC_THREADS=auto" TIMEOUT 1800)
+endforeach()
 # state_exec_bench (plain main()): --smoke runs every scenario once at tiny sizes and fails on a
 # program that returned the wrong thing, so the benchmarks can't rot between real runs.
 if(TARGET state_exec_bench)

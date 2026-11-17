@@ -161,6 +161,9 @@ struct gym_options {
   double range_m = 60.0;
   // How long the constructor waits for the world (a generated world being made), s.
   double ready_timeout = 120.0;
+  // The navigators keep their drive's telemetry (WorldVehicles::set_drive_telemetry), so plants()
+  // reports what each agent's drive did on the last step. It does not change the drive.
+  bool drive_telemetry = true;
 };
 
 // One row per agent per step (and one per agent at each reset, step 0), every episode since the

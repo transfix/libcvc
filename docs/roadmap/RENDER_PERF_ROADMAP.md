@@ -245,6 +245,31 @@ work lands. Measured guidance from PR #249's WATER-RENDERING-ROADMAP:
   needs `vtkGPUVolumeRayCastMapper` reading opaque depth, which
   `SceneGraph.cpp:1044-1074` wires but has never been exercised with 500 m
   of mountain inside a cloud slab — a **named risk with a screenshot test**.
+- **VTK's GPU ray caster waits for the GPU at the end of every draw.**
+  `vtkOpenGLGPUVolumeRayCastMapper::GPURender` ends with `glFinish()` so
+  that the CPU timer around it measures the GPU's work for auto-adjusting
+  the sample distance. The CPU then waits for the whole frame queued so
+  far, and the CPU's and the GPU's times add instead of overlapping. Only
+  an auto-adjusting draw (an interactive render: the window's desired
+  update rate at or above the mapper's interactive rate) uses that time.
+  - terrain_lab.ari, 1280×720, Intel Arc iGPU (Windows, MSVC Release),
+    timed in-process around `AriRuntime::frame` and `render` and sampled
+    every millisecond: the wait was 45–48 % of all samples, about 25 ms of
+    a 45 ms offscreen frame. Skipping it (in a trial since dropped) took
+    the offscreen frame to 18 ms and the window's (`arigl run`) from 63 ms
+    to 27 ms, with byte-identical pixels.
+  - The fix goes into VTK, not libcvc, which keeps no process-wide state to
+    work around it. cvcpkg's VTK gets an opt-in
+    `vtkGPUVolumeRayCastMapper::FinishEveryRender` (and
+    `vtkSmartVolumeMapper`'s, forwarded to its GPU mapper), written to go
+    upstream. On, the default, every render waits as before; off, only a
+    render that adjusts its sample distance waits. VolumeNode then turns it
+    off per mapper, where the VTK it is built against has it.
+  - What is left: the shadow bake every 4th frame (about 30 ms of `render`
+    on those frames against 5–6 ms on the rest, much of it VTK rebuilding
+    each mapper's shader strings as the render passes change), mappers'
+    `GetBounds` updating their pipelines for three callers a frame (about
+    3 ms), and the scene's physics step (#1322).
 
 ## Phase 7 — Async streaming / on-demand tile load
 

@@ -158,7 +158,7 @@ catalog:
   - component: sky_controls
     file: sky_controls.ari
     unit: sky_controls
-    binds: "<prefix>.{keys}.{drift,morph,evolve,orographic,shadow,coverage,wind_az}"   # read every frame by the cloud_sky realizer
+    binds: "<prefix>.{keys}.{drift,morph,evolve,orographic,shadow,coverage,wind_az,darkness}"   # read every frame by the cloud_sky realizer
     for: "a `type: cloud_sky` node"
     args: { keys: sky, title: Sky, id: sky_controls }   # defaults; keys = the node's `keys:` prop
   - component: water_controls
@@ -167,6 +167,12 @@ catalog:
     binds: "<prefix>.{keys}.{wind_speed,wind_dir,chop,wave_amp,whitecaps,shore_fade,swell_height,swell_period,swell_dir,shore_foam,wake,wake_foam}"   # read every frame by the water realizer
     for: "a `type: water` node"
     args: { keys: water, title: Water, id: water_controls }   # defaults; keys = the node's `keys:` prop
+  - component: weather_controls
+    file: weather_controls.ari
+    unit: weather_controls
+    binds: "<prefix>.{keys}.{state,storminess,cells,rain,request,time_scale}"   # read and written every frame by the weather realizer
+    for: "a `type: weather` node: the weather now, a storm started upwind or overhead, the sky cleared, and the weather's time scale"
+    args: { keys: weather, title: Weather, id: weather_controls }   # defaults; keys = the node's `keys:` prop
   - component: mesh_tools
     file: mesh_tools.ari
     unit: mesh_tools
