@@ -683,6 +683,66 @@ scene:
   EXPECT_LT(midWeight, 0.8);
 }
 
+// The water node's field is inertial (field.h): sideways it carries a floating body by the water's
+// acceleration and holds it by drag, so a crate on it drifts in the scene's wind at about its
+// leeway. The same field damped in every direction, as it was before, holds the crate.
+TEST(AriadneSceneWorld, ACrateOnTheWaterDriftsInTheScenesWind) {
+  REQUIRE_YAML();
+  LoadResult r = fresh_load(R"(
+scene:
+  wind: { speed: 10, dir: 0, gustiness: 0 }
+  nodes:
+    - node: water
+      type: water
+      ground: deep
+      level: 0
+      wave_amp: 0.1
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode &n = r.scene.nodes.front();
+  cvc::app app;
+  seed_scene_wind(app, r.scene, "");
+  const int N = 201;
+  auto deep = std::make_shared<cvc::height_field>(N, N, -600.0, -600.0, 6.0, 6.0,
+                                                  std::vector<float>(std::size_t(N) * N, -20.0f));
+  WaterRuntime rt(app, n, "", [deep] { return deep; });
+  ASSERT_NE(rt.field(), nullptr);
+  EXPECT_TRUE(rt.field()->inertial);
+  const std::optional<SceneWind> sw = scene_wind_set(app, "");
+  ASSERT_TRUE(sw.has_value());
+  if (!jolt())
+    return;
+  auto run = [&](bool inertial) {
+    cvc::physics::world_config c;
+    c.backend = cvc::physics::backend::jolt;
+    cvc::physics::world w(c);
+    cvc::physics::field water = *rt.field();
+    water.inertial = inertial;
+    w.add_field(water);
+    cvc::physics::field air;
+    air.kind = cvc::physics::field_kind::flow;
+    air.wind = scene_wind_flow(*sw, 0.0);
+    w.add_field(air);
+    cvc::physics::body_desc d;
+    d.shape = cvc::physics::box{{0.5, 0.5, 0.25}};
+    d.density = 500.0;
+    d.position = {0.0, 0.0, 0.0};
+    d.linear_damping = 0.0;
+    d.allow_sleeping = false;
+    const cvc::physics::body_id b = w.add_body(d);
+    w.step(static_cast<std::uint64_t>(30.0 / c.fixed_dt + 0.5)); // 30 s
+    return w.state(b).position;
+  };
+  const cvc::physics::vec3 drifted = run(true), held = run(false);
+  std::printf("[water] a crate on the water in a 10 m/s wind, 30 s: %.2f m downwind (%.2f m "
+              "across); damped in every direction, %.2f m\n",
+              drifted.x, drifted.y, held.x);
+  EXPECT_GT(drifted.x, 3.0) << "it drifts downwind, about 0.15 m/s";
+  // The waves' spread of directions carries it to and fro across the wind too.
+  EXPECT_LT(std::fabs(drifted.y), 0.5 * drifted.x);
+  EXPECT_LT(std::fabs(held.x), 0.5) << "the old damping held it";
+}
+
 TEST(AriadneSceneWorld, RegenerateMakesANewWorldAndSwapsItsBodies) {
   REQUIRE_YAML();
   LoadResult r = fresh_load(kGenerated);

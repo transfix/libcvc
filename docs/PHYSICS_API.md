@@ -278,11 +278,55 @@ w.set_field_time(t);                           // or follow(clock): the time the
     8.285 m/s downwind in 2 s, against 8.279 m/s on the drag curve;
   - a floating crate, 1 × 1 × 0.5 m at density 500, in a 10 m/s wind drifts 0.154 m/s on the
     water's drag alone, against 0.156 m/s where the wind's drag on its top half balances the
-    water's on its bottom half; with the water's damping at 1e4 N s/m⁴, 0.0013 m/s;
+    water's on its bottom half; with the water's damping at 1e4 N s/m⁴ in every direction,
+    0.0013 m/s, and in an inertial fluid with that damping, 0.154 m/s (below);
   - a Humvee at 25 m/s in a 15 m/s crosswind is pushed 406 N aside (0.15 m/s²), the air at its
     centre of mass, 0.75 m up, 10.4 m/s;
   - the state hash moves with the wind, a world without one hashes as before, and `restore()`
     refuses another wind.
+
+### Floating bodies: an inertial fluid (`field::inertial`)
+
+A fluid's `damping` stands for the waves a floating body radiates, so a body stops bobbing. It
+acts in every direction, though, so it also holds the body to the water's velocity sideways: the
+body follows the waves and the current, but resists any drift through the water as hard as it
+resists heaving. A 1 m crate in a 10 m/s wind on water damped at 1e4 N s/m⁴ drifts about a
+millimetre a second.
+
+```cpp
+cvc::physics::field sea;
+sea.kind = cvc::physics::field_kind::fluid;
+sea.volume = water;          // kg/m^3 over the sea's box
+sea.surface = ocean;         // the waves and the current (fluid_surface.h)
+sea.damping = 1.0e4;         // now on the vertical only: the heave
+sea.inertial = true;
+```
+
+- **Vertical.** The damping acts on the vertical alone, as before on the heave. It is also left out
+  of the rate the horizontal drag is scaled by, as a hull's damping is.
+- **Sideways.** The body is pushed by the water's acceleration over its immersed volume: the
+  Froude–Krylov force ρ V du/dt, at the immersed part's centroid, where du/dt is the water's
+  velocity a step either side (two `velocity()` reads per body per step). It drags against the
+  water's velocity, the waves' orbital motion plus the current, with the fluid's C_d. A floating
+  body weighs what it displaces, so the water's acceleration moves it as it moves the water: it
+  rides the waves. Drag alone brings it to the current, and a wind blows it through the water at
+  the speed where the air's drag on its freeboard balances the water's on its hull.
+- **The default is off**, so a world that doesn't set it steps and hashes exactly as before. A
+  hull (`hull.h`) is unaffected: its triangles take the water's pressure, which already moves it
+  sideways. The Ariadne `water` node's field is inertial.
+- **Measured** (`physics_field_test`):
+  - the 1 × 1 × 0.5 m crate of the wind's measurements above, at damping 1e4: 0.0013 m/s
+    downwind in a 10 m/s wind when damped in every direction; 0.154 m/s when inertial, against
+    0.156 m/s from the drag balance (`AFloatingCrateDriftsDownwind`);
+  - in a 0.5 m/s current it reaches 0.469 m/s in 60 s from rest, on drag alone; with a 10 m/s
+    wind across the current it moves at (0.483, 0.155) m/s, the current plus its 0.156 m/s leeway
+    (`AnInertialCrateDriftsWithTheCurrent`);
+  - in a 0.2 m, 4 s swell, a slab heaves 1.04 times the surface (correlation 1.000) as a fully
+    damped one does, its velocity along the swell is 0.99 of the water's orbital velocity
+    (correlation 0.991), and it moves 0.01 m in 16 s: to and fro with the waves, not away
+    (`PhysicsFluidSurface.AnInertialBodyRidesTheSwell`);
+  - a world without `inertial` hashes as before: every pinned hash and the replay trace pass
+    unchanged.
 
 ### Threads
 

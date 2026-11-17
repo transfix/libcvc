@@ -111,6 +111,7 @@ compiled_field compile(const field &f) {
   need(std::isfinite(f.traction) && f.traction >= 0.0, "traction must be finite and >= 0");
   need(!f.surface || f.kind == field_kind::fluid, "only a fluid has a free surface");
   need(!f.wind || f.kind == field_kind::flow, "only a flow has a wind");
+  need(!f.inertial || f.kind == field_kind::fluid, "only a fluid is inertial");
   const int components =
       (f.velocity[0] ? 1 : 0) + (f.velocity[1] ? 1 : 0) + (f.velocity[2] ? 1 : 0);
   need(components == 0 || components == 3, "give all three velocity components or none");
@@ -1217,7 +1218,8 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
     // for stability below.
     vec3 push_f, push_t, drag_f, drag_t;
     double rate = 0.0, immersed = 0.0;
-    bool felt = false; // a field pushed on one of its cells
+    double rate_heave = 0.0; // the part of rate an inertial fluid's damping gives the vertical
+    bool felt = false;       // a field pushed on one of its cells
     // A hull's triangles take the fluids' push in place of the cells (hull.h).
     const bool hull = fb.hull.desc != nullptr;
     push_sums hs;
@@ -1250,6 +1252,12 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
           bw.prof[j] = wind->profile(bw.z[j]);
         }
       }
+      const fluid_surface *surface = cf.desc.surface.get();
+      // An inertial fluid (field.h): its damping on the vertical only, and the water's
+      // acceleration over the immersed part, from its displaced mass and centroid.
+      const bool inertial = cf.desc.inertial && cf.desc.kind == field_kind::fluid;
+      double displaced = 0.0; // kg of water the body displaces in this field
+      vec3 displaced_at;      // their moment, kg m
       // The cells' reads: done above for a free surface (a fluid's, never a wind's), else here.
       const cell_read *pre = nullptr;
       if (run_at < runs.size() && runs[run_at].body == bi && runs[run_at].cf == &cf)
@@ -1271,6 +1279,10 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
           const vec3 b = g * (-cr.value * fv);
           push_f = push_f + b;
           push_t = push_t + cross(arm, b);
+          if (inertial) {
+            displaced += cr.value * fv;
+            displaced_at = displaced_at + at * (cr.value * fv);
+          }
         } else if (cf.desc.kind == field_kind::medium) {
           const vec3 b = up * (cr.value * fv);
           push_f = push_f + b;
@@ -1279,6 +1291,16 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
 
         const vec3 u = cr.w - (s.linear_velocity + cross(s.angular_velocity, arm));
         double c_i = cf.desc.damping * fv; // kg/s: the force is c_i u
+        if (inertial) {                    // the damping on the vertical only
+          if (c_i > 0.0) {
+            const vec3 d{0.0, 0.0, u.z * c_i};
+            drag_f = drag_f + d;
+            drag_t = drag_t + cross(arm, d);
+            rate += c_i;
+            rate_heave += c_i;
+          }
+          c_i = 0.0;
+        }
         if (cf.desc.kind != field_kind::medium) {
           const double speed = norm(u);
           if (speed > 0.0)
@@ -1291,6 +1313,17 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
           drag_t = drag_t + cross(arm, d);
           rate += c_i;
         }
+      }
+      // The water's acceleration pushes what it holds (Froude-Krylov): rho V du/dt sideways at
+      // the immersed part's centroid, du/dt the water's velocity a step either side.
+      if (inertial && displaced > 0.0 && surface) {
+        const vec3 at = displaced_at * (1.0 / displaced);
+        const double h = cfg.fixed_dt;
+        const vec3 dudt =
+            (surface->velocity(at, t + h) - surface->velocity(at, t - h)) * (1.0 / (2.0 * h));
+        const vec3 fk{displaced * dudt.x, displaced * dudt.y, 0.0};
+        push_f = push_f + fk;
+        push_t = push_t + cross(at - com, fk);
       }
     }
     if (hull) {
@@ -1318,11 +1351,13 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
     }
     field_load load;
     load.force = push_f + drag_f * k;
-    if (hull && hs.rate_heave > 0.0) {
-      // A hull's damping acts on vertical motion only, so the horizontal drag is scaled in the
-      // rate without it: the damping does not slow a towed hull. Each axis still stops short of
-      // the water's velocity, since only z carries the damping's force.
-      const double xh = (rate - hs.rate_heave) * cfg.fixed_dt / fb.mass;
+    const double heave = (hull ? hs.rate_heave : 0.0) + rate_heave;
+    if (heave > 0.0) {
+      // A hull's damping, and an inertial fluid's, acts on vertical motion only, so the
+      // horizontal drag is scaled in the rate without it: the damping does not slow a towed hull
+      // or a drifting crate. Each axis still stops short of the water's velocity, since only z
+      // carries the damping's force.
+      const double xh = (rate - heave) * cfg.fixed_dt / fb.mass;
       const double kh = xh > 1e-9 ? -det::expm1(-xh) / xh : 1.0;
       load.force.x = push_f.x + drag_f.x * kh;
       load.force.y = push_f.y + drag_f.y * kh;
