@@ -21,6 +21,8 @@
 #include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
 #include <limits>
+#include <memory>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -2646,7 +2648,8 @@ TEST_F(VolrenRenderTest, ShadingGainAndSpecularAreNeutralAtTheirDefaults) {
 }
 
 // ---------------------------------------------------------------------------
-// Several apps: each has its own device cache and generation counter
+// Several apps: each has its own device caches and generation counter, unless
+// the host hands one app's caches to another (raycast_cuda_cache::share)
 // ---------------------------------------------------------------------------
 
 // What one app's render of an n^3 sphere volume (its own, in that app) shows: its summed color and
@@ -2659,7 +2662,7 @@ std::uint64_t renderSphereIn(cvc::app &app, unsigned n) {
   tf.add(transfer_point{0.0, 1.f, 1.f, 1.f, 0.f});
   tf.add(transfer_point{1.0, 1.f, 1.f, 1.f, 1.f});
   rc.add_volume(makeSphereVolume(app, n), unshadedSettings(tf));
-  rc.invalidate_device_volume(0); // draws a stamp from the app's counter
+  rc.invalidate_device_volume(0); // draws a stamp from the app's caches' counter
   const frame f = rc.render();
   return sumRGB(f) * 1000 + std::uint64_t(countAlphaPositive(f));
 }
@@ -2711,6 +2714,71 @@ TEST(VolrenMultiApp, ALaterAppStartsWithAnEmptyCache) {
   EXPECT_EQ(cvc::volren::raycast_cuda_cache_of(later).resident(), std::size_t(0));
   EXPECT_EQ(cvc::volren::raycast_cuda_cache_of(later).uploaded(), 0u);
   EXPECT_NE(cvc::volren::raycast_cuda_cache_of(later).budget(), std::size_t(12345));
+}
+
+// The host decides who shares device caches.  An app handed another's caches()
+// renders with them and draws its content-generation stamps from their counter,
+// so two apps sharing a voxel buffer never stamp two contents alike; an app not
+// handed them keeps its own.  Sharing moves where blocks live, never what an
+// app draws.  (With a CUDA device the shared blocks themselves are checked in
+// volren_cuda_test's AppsHandedOneDeviceCachesShareTheirBlocks.)
+TEST(VolrenMultiApp, AppsShareDeviceCachesOnlyWhenHandedThem) {
+  namespace vr = cvc::volren;
+  cvc::app a, b, outsider;
+  const std::shared_ptr<vr::cuda_device_caches> shared = vr::raycast_cuda_cache_of(a).caches();
+  vr::raycast_cuda_cache_of(b).share(shared);
+  EXPECT_EQ(vr::raycast_cuda_cache_of(b).caches(), shared);
+  EXPECT_NO_THROW(vr::raycast_cuda_cache_of(b).share(shared)); // the same caches: nothing to do
+  EXPECT_NE(vr::raycast_cuda_cache_of(outsider).caches(), shared);
+
+  // renderSphereIn announces an in-place write: one stamp per render.
+  const std::uint64_t fa = renderSphereIn(a, 24);
+  const std::uint64_t fb = renderSphereIn(b, 32);
+  EXPECT_EQ(shared->generations(), 2u) << "both apps' stamps come from the shared counter";
+  const std::uint64_t fo = renderSphereIn(outsider, 24);
+  EXPECT_EQ(shared->generations(), 2u) << "the outsider stamped the shared counter";
+  EXPECT_EQ(vr::raycast_cuda_cache_of(outsider).caches()->generations(), 1u);
+
+  cvc::app alone_a, alone_b;
+  EXPECT_EQ(fa, renderSphereIn(alone_a, 24));
+  EXPECT_EQ(fb, renderSphereIn(alone_b, 32));
+  EXPECT_EQ(fo, fa);
+
+  // Too late once the app has stamped with its own caches: its raycasters hold
+  // stamps that mean nothing in the shared ones.  Null is refused.
+  EXPECT_THROW(vr::raycast_cuda_cache_of(outsider).share(shared), std::logic_error);
+  EXPECT_NE(vr::raycast_cuda_cache_of(outsider).caches(), shared);
+  cvc::app fresh;
+  EXPECT_THROW(vr::raycast_cuda_cache_of(fresh).share(nullptr), std::invalid_argument);
+}
+
+// Shared caches belong to whoever holds them, not to the app that made them,
+// and apps sharing them can render at once on threads, each as it would alone.
+TEST(VolrenMultiApp, SharedDeviceCachesOutliveTheirMakerAndServeThreadsAtOnce) {
+  namespace vr = cvc::volren;
+  std::shared_ptr<vr::cuda_device_caches> shared;
+  {
+    cvc::app maker;
+    shared = vr::raycast_cuda_cache_of(maker).caches();
+  }
+  constexpr int kApps = 3;
+  std::uint64_t alone[kApps], together[kApps];
+  for (int i = 0; i < kApps; ++i) {
+    cvc::app app;
+    alone[i] = renderSphereIn(app, 16 + 8 * unsigned(i));
+  }
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kApps; ++i)
+    threads.emplace_back([i, &together, &shared] {
+      cvc::app app;
+      vr::raycast_cuda_cache_of(app).share(shared);
+      together[i] = renderSphereIn(app, 16 + 8 * unsigned(i));
+    });
+  for (std::thread &t : threads)
+    t.join();
+  for (int i = 0; i < kApps; ++i)
+    EXPECT_EQ(together[i], alone[i]) << "app " << i;
+  EXPECT_EQ(shared->generations(), std::uint64_t(kApps));
 }
 
 } // namespace

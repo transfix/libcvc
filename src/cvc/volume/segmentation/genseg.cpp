@@ -54,12 +54,17 @@ University of Texas at Austin for a different license.
 //     stuck at MAX_TIME can reach); and the threshold sweep stops once the threshold is below 0,
 //     where every voxel passes and every later search would find nothing again (the legacy loop
 //     went on down to tlow);
-//   - with automatic_seeds off, GetSeeds() marks no voxel.
+//   - with automatic_seeds off, GetSeeds() marks no voxel;
+//   - seed_mode::critical_points (critical_points.h, SegMed's seeds): "seeding" appends their two
+//     classes to seed_list after the point classes and places their seeds first, so a point
+//     class's seed wins a voxel they share.
 // The heap is still the legacy binary heap, sift rules and all. Ties are everywhere (every seed
 // starts at time 0, every border voxel waits at MAX_TIME + 1), the order in which they come out
 // decides the labels where fronts meet, and any other heap breaks the parity.
 
 #include "genseg.h"
+
+#include "critical_points.h"
 
 #include <cmath>
 #include <cstring>
@@ -219,6 +224,22 @@ task genseg_context::Segment() {
   seed_index.allocate(n);
   GS_RUN(GetSeeds(seed_index.data()));
 
+  // seed_mode::critical_points: the feature and background classes after the point classes'.
+  const std::size_t user_classes = seed_list.size();
+  if (critical) {
+    GS_RUN(critical->run(*this));
+    for (int c = 0; c < 2; c++) {
+      const std::vector<std::size_t> &cls = c == 0 ? critical->feature : critical->background;
+      seed_list.emplace_back();
+      seed_list.back().reserve(cls.size());
+      for (std::size_t s = 0; s < cls.size(); s++) {
+        const voxel_at p = at(cls[s]);
+        seed_list.back().push_back(INTVEC{p.x, p.y, p.z});
+        GS_UNIT();
+      }
+    }
+  }
+
   heap.allocate(n);
   tdata.allocate(n);
   SeedNum = 0;
@@ -233,8 +254,10 @@ task genseg_context::Segment() {
   seeds_found = SeedNum;
 
   // The point classes' seeds. (The legacy code also pushed them on the heap, which the sweep
-  // and the final march each cleared before using it.)
-  for (std::size_t num = 0; num < seed_list.size(); num++) {
+  // and the final march each cleared before using it.) The critical points' classes, after the
+  // point classes in seed_list, are placed first, so a point class's seed wins a shared voxel.
+  for (std::size_t o = 0; o < seed_list.size(); o++) {
+    const std::size_t num = (o + user_classes) % seed_list.size();
     for (const INTVEC &seed : seed_list[num]) {
       v = (std::size_t(seed.z) * YDIM + std::size_t(seed.y)) * XDIM + std::size_t(seed.x);
       if (seed_index[v] == 254) {
