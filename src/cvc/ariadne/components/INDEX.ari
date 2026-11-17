@@ -170,8 +170,8 @@ catalog:
   - component: weather_controls
     file: weather_controls.ari
     unit: weather_controls
-    binds: "<prefix>.{keys}.{state,storminess,cells,rain,request,time_scale}"   # read and written every frame by the weather realizer
-    for: "a `type: weather` node: the weather now, a storm started upwind or overhead, the sky cleared, and the weather's time scale"
+    binds: "<prefix>.{keys}.{state,storminess,cells,rain,rain_here,request,time_scale,streaks,rain_quality,rings,fog,wet}"   # read and written every frame by the weather realizer
+    for: "a `type: weather` node: the weather now, a storm started upwind or overhead, the sky cleared, the weather's time scale, and the rain's streaks, rings, fog and wet ground"
     args: { keys: weather, title: Weather, id: weather_controls }   # defaults; keys = the node's `keys:` prop
   - component: mesh_tools
     file: mesh_tools.ari

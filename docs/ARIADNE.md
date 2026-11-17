@@ -1275,8 +1275,34 @@ the node's root (`weather.` unless `keys:`): `events` (the authored events, `sto
 and `calm`, as text), `time_scale` (weather seconds per world second; a change is a `rate` event),
 `request` (`upwind`, `overhead` or `calm`, emptied once read), and what it publishes: `state`,
 `storminess`, `cells`, `storms` (the cells as discs), `rain` (mm/h at the ground's centre) and
-`deck`. The panel is `weather_controls.ari`. The rain (O19) and the storm wind, lightning and wet
-ground (O20) will read the cells and `weather::rain_rate(x, y)`.
+`deck`. The panel is `weather_controls.ari`. The storm wind, lightning and wet-ground friction (O20)
+will read the cells, `weather::rain_rate(x, y)` and `weather::wetness(t, x, y, ...)`.
+
+**Rain** (OCEAN-AND-WEATHER-ROADMAP.md §9 F3, O19). Under a storm it rains where the field passes
+`rain_onset`, at up to `rain_max` mm/h. Everything below is uniforms or a fixed mesh, so no sampler
+joins the ground, the buildings, the roads, the trees or the water.
+
+- **Streaks.** The weather node's mesh `<id>_rain` holds `rain_count` drops (12000). Each drop is
+  a quad placed and moved in the vertex shader as a closed form of time, a port of ABYSSAL's `Rain`:
+  in a box around the camera, slanted by the scene wind, as many as the rain at the camera calls
+  for times `weather.rain_quality`, and none above the cloud base. List the mesh among the sky's
+  `receivers:` so the deck lights and fogs it and it draws after the clouds, and put the weather
+  node after the sky in the document.
+- **Rain shafts.** The sky's far shells draw grey curtains below the cloud base while a storm rains.
+- **Wet ground.** The receivers go darker and glossy where a storm's rain has lain, along the tracks
+  of the last few storms, and dry after. `soak` (300) weather seconds of rain soak the ground, and it
+  dries by 1/e every `dry` (900), as `weather::wetness` computes it on the CPU.
+- **Rings.** The water gets raindrop rings in its normal, procedural, within 70 m of the camera.
+- **Fog.** It thickens with the rain at the camera, and the scene's background goes toward its grey.
+- **The weather node's keys.**
+  - `weather.streaks`, `weather.rings`, `weather.fog` and `weather.wet` (0..2, default 1) scale each
+    effect. `weather.rain_quality` (0..1) is the share of the streaks a downpour draws.
+    `weather.rain_here` publishes the rain at the camera in mm/h.
+  - The props `rain_count`, `rain_quality`, `soak` and `dry` set the same at load.
+- **The sky's keys.**
+  - The weather node writes `sky.rain` (the recent storms' tracks: "x y rain_radius vx vy age left",
+    split by `;`) and `sky.rain_k` (the rain's constants: "onset rain_max soak dry rings fog wet").
+  - `sky.fog` (`fog:`, default 0) is a haze of the scene's own, its density per kilometre.
 
 **Water.** `water` draws everything below `level` on a ground (`world:` a `generated_world`, or
 `ground:` any height-field node) as the GPU FFT sea of OCEAN-AND-WEATHER-ROADMAP.md (§11.2, O15):

@@ -1135,6 +1135,54 @@ This phase builds on terrain_lab's `cloud_sky` (§1.5), not on the older demo cl
 - **On every water body:** animated raindrop rings in the water's normal (a ripple texture, density ∝ R). Ponds benefit most. Optional: rain as wake-layer sources inside the window.
 - **In the light:** the sun is dimmed by the deck's transmittance (the shade mask already computes it), the ambient light drops, the gradient sky darkens toward the storm, and a **distance fog / haze** thickens in rain. Fog is new: none exists today (§1.5).
 
+**As built (O19).** Every piece reads O18's storms: the cells, `weather::rain_rate` and the scene wind's one accessor. Nothing new is a texture on the receivers.
+- **The model** (`cvc::world::weather`):
+  - `recent(t, window)` gives the cells whose life reached into the window, alive or gone, so the ground can dry along the tracks of storms that have passed.
+  - `rain_radius(r, I)` is the radius within which a cell's field passes the rain onset.
+  - `wetness(t, x, y, soak, dry)` is how wet a point is. For each recent storm it takes how long its rain lay over the point, along its track as its motion now runs back, over `soak` seconds (at most 1), times `exp(-(seconds since the rain left) / dry)`. The wettest storm counts. It is the CPU twin of the shader's wet ground, and the friction O20 will read.
+  - Tests: `WorldWeather.RecentCellsOutliveTheirRain` and `TheGroundWetsAndDries`. The latter checks a storm crossing a point at 4 m/s: wetness rises while the rain lies on it, is half at half the soak time, is soaked by the time the rain leaves, falls by 1/e every `dry` seconds after, and is 0 beside the track.
+- **The weather node** hands cloud_sky two keys:
+  - `sky.rain`: the tracks of up to four recent storms, the latest first (centre, rain radius at their peak, motion, age, time to their end);
+  - `sky.rain_k`: the rain's constants (onset, rain_max, `soak` 300 s and `dry` 900 s by default, and the strengths of the rings, the fog and the wet ground).
+  - It also publishes `weather.rain_here`, the rain at the camera.
+  - Its keys `weather.streaks`, `.rings`, `.fog`, `.wet` (0..2) and `.rain_quality` are on the Weather panel.
+- **Streaks near the camera:** a port of ABYSSAL's `Rain` (`Precipitation.js:6-265`, MIT).
+  - ABYSSAL's rain is not a ping-pong state texture: it is "entirely in the vertex shader", and so is ours.
+  - Each quad of a mesh is a drop. Its slot in a box that travels with the camera (80 m, 52 m high, pushed ahead along the view) is a hash of its index. It falls at its own terminal velocity (4–9 m/s), and the scene wind (`steeringWind()`, the one accessor O14 repoints) carries it sideways, so the slant is the clouds' wind. It wraps the box's height. The field is a closed form of time: no state, no texture, no CPU work, the same in WebGL2.
+  - A streak is the shutter's length of the fall, at least a pixel wide, its opacity scaled by the widening, so far rain is a veil.
+  - The share of slots holding a drop is ∝ R at the camera. There are none above the cloud base or below the ground, at most `rain_count` (12000) × `weather.rain_quality`.
+  - Streaks are lit by the deck's transmittance (`cloudShade()`) and fogged. The mesh is one of the sky's receivers and draws in the volume layer after the clouds: cloud_sky keeps receivers that draw with the volumes after its near volumes. It finds a receiver anywhere in the scene, not only among the top-level nodes, since the mesh sits inside the weather's node. It has no texture of its own; the sky's two shade samplers are its only ones.
+  - ABYSSAL's curtain noise and env-map refraction are left out.
+- **Rain shafts at a distance:** in the existing far shells, no new volume.
+  - While a storm rains, the shells' box reaches down to the ground's lowest point. The stretch of each slab below the cloud base holds a grey veil as thick as the rain there (`cloudRainAt`, the strongest storm's rate from the storm discs), thinning over the last 60 m above the ground.
+  - A near volume's cut-out leaves the shaft under it.
+- **The wet ground**, in the receivers (ground, buildings, roads, props, foliage), uniforms only:
+  - `cloudWet()` is `weather::wetness` per fragment from the tracks.
+  - A wet surface goes up to 45 % darker, with a sheen of the fog's sky at grazing angles and the sun's glint. Its normal is the fragment's own facet, from `dFdx`/`dFdy`, so it needs nothing of the mesh or its mapper.
+  - Rendered: just after a storm crossed the city the ground and roads are visibly darker. 1800 s later (two dry times) they are back to nearly the clear-sky frame.
+  - **Puddles are not built** (they would need the surface classes on the GPU, a texture the ground does not have).
+- **Raindrop rings on water,** procedural, through the sky's shader inputs (`cloudRainNormal()`, uniforms only):
+  - Cells of 1 m are hashed. A share of them, as large as the rain rate, holds a drop every 1.2–2.2 s. Its ring spreads at 0.45 m/s, a few crests 0.22 m apart, fading. Their slopes tilt the water's normal within 70 m of the camera.
+  - The water's shaded lighting gains the rings, the ambient drop under the storm (O18's leftover) and the fog. These are three string swaps in `water_light(shaded)`, each skipped if the line it follows has moved.
+- **Fog:**
+  - The density is `sky.fog` (a haze of the scene's own, per km, default 0) plus 0.001 a metre at 25 mm/h of rain at the camera (visibility about 3 km). Its colour runs from a fair grey toward a storm grey with the deck's darkness.
+  - It fogs the receivers, the water, the streaks and the far clouds. The scene's gradient background goes toward the fog's colour, and back when the rain stops. The near cloud volumes are not fogged (VTK's volume shader).
+- **WebGL2's budget:** `cvcgl_ariadne_realize`'s 16-unit section (the low-memory mapper forced, VTK's table capped at 16, #1313's commit cherry-picked) now runs an overhead storm with the camera in the rain. The streaks draw, and the water and the ground have the rain's fog and tracks as uniforms with their two sky samplers. No draw runs out of units.
+- **Single-threaded wasm:** nothing here is off the frame. The rain is shader work over a fixed mesh, and the tracks are O(cells).
+- **Renders** (terrain_lab, 1280×720):
+  - a storm overhead from a low camera: fog, streaks, the ground dark;
+  - the city's lake close up: rings and streaks;
+  - a storm upwind: a rain shaft under its deck;
+  - the city just after a storm, and 1800 s later.
+- **Frame cost:** arigl snapshots of terrain_lab at 1280×720 from a low camera over the city (the streaks drawn), (720 − 120 frames) / 600, three interleaved runs, medians: 79 ms clear, 83 ms with a storm overhead and the rain's effects off, 74 ms raining. The runs spread 74–92, 67–83 and 70–116 ms (other agents were building), so the rain costs nothing measurable within that noise.
+- **The browser's budget, natively on terrain_lab:** with `CVCGL_LOWMEM_MAPPER=force CVCGL_TEXTURE_UNITS=16`, a storm overhead and the camera in the rain logged no "no texture unit left" warning in 120 frames.
+- **Not done:**
+  - puddles;
+  - the wetness's effect on traction (O20 reads `wetness`);
+  - ABYSSAL's curtain noise;
+  - the near volumes' fog;
+  - the browser run, Linux and macOS.
+
 **F4. Wind in a storm.**
 - A gust front runs ahead of each cell. Wind speed rises and veers (E5), the wind sea builds after its lag (E4), whitecaps and spray increase, and trees bend harder.
 - The physics flow field gusts.

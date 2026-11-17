@@ -384,3 +384,71 @@ TEST(WorldWeather, AFrameIsCheap) {
   EXPECT_LT(us, 200.0);
 #endif
 }
+
+// O19: the storms that rained recently, alive or gone (the ground dries along their tracks), and a
+// cell's rain footprint.
+TEST(WorldWeather, RecentCellsOutliveTheirRain) {
+  weather w(quiet());
+  w.add_event(storm_at(0.0, 0.0, 0.0, 1200.0, 2000.0, 1.0));
+  EXPECT_TRUE(w.recent(-10.0, 600.0).empty()); // not born yet
+  ASSERT_EQ(w.recent(600.0, 600.0).size(), 1u);
+  EXPECT_GT(w.recent(600.0, 600.0)[0].intensity, 0.9);
+  const std::vector<storm_cell> gone = w.recent(1500.0, 600.0); // ended at 1200, 300 s ago
+  ASSERT_EQ(gone.size(), 1u);
+  EXPECT_EQ(gone[0].intensity, 0.0);
+  EXPECT_DOUBLE_EQ(gone[0].end, 1200.0);
+  EXPECT_TRUE(w.at(1500.0).cells.empty());      // at() keeps only the living
+  EXPECT_TRUE(w.recent(2000.0, 600.0).empty()); // past the window
+  // A scheduled storm's too, from an earlier slot.
+  weather_params p;
+  p.seed = 3;
+  p.chance = 1.0;
+  const weather s(p);
+  storm_cell c;
+  double born = 0.0;
+  ASSERT_TRUE(first_storm(s, c, born));
+  const double after = born + c.life + 100.0;
+  ASSERT_EQ(s.recent(after, 200.0).size(), 1u);
+  EXPECT_EQ(s.recent(after, 200.0)[0].id, c.id);
+  // The rain footprint: none below the onset, between half the radius and the radius above it.
+  EXPECT_EQ(w.rain_radius(2000.0, 0.3), 0.0);
+  const double rr = w.rain_radius(2000.0, 1.0);
+  EXPECT_GT(rr, 1000.0);
+  EXPECT_LT(rr, 2000.0);
+  // ...where the field crosses the onset.
+  EXPECT_NEAR(1.0 * weather::footprint(rr, 2000.0), w.params().rain_onset, 1e-6);
+}
+
+// O19: the ground wets under the rain, soaks in `soak` seconds of it, and dries by 1/e every `dry`
+// seconds once the rain has passed (the same as cloud_sky's shader draws).
+TEST(WorldWeather, TheGroundWetsAndDries) {
+  weather_params p = quiet();
+  p.steer_speed = 4.0; // toward +x
+  weather w(p);
+  // A full storm 1000 m in radius born 3 km upwind of the origin, crossing it.
+  w.add_event(storm_at(0.0, -3000.0, 0.0, 2400.0, 1000.0, 1.0));
+  const double soak = 300.0, dry = 600.0;
+  EXPECT_EQ(w.wetness(-1.0, 0.0, 0.0, soak, dry), 0.0);
+  EXPECT_EQ(w.wetness(100.0, 0.0, 0.0, soak, dry), 0.0); // its rain has not reached the origin
+  // The rain radius at the peak, and when the origin is under it: the centre passes at 750 s.
+  const double rr = w.rain_radius(1000.0, 1.0);
+  const double in = (3000.0 - rr) / 4.0, out = (3000.0 + rr) / 4.0;
+  std::printf("rain over the origin from %.0f s to %.0f s\n", in, out);
+  double last = 0.0;
+  for (double t = in + 10.0; t < out; t += 20.0) { // it wets as the rain lies on it
+    const double wt = w.wetness(t, 0.0, 0.0, soak, dry);
+    EXPECT_GE(wt, last - 1e-12);
+    last = wt;
+  }
+  EXPECT_NEAR(w.wetness(in + 0.5 * soak, 0.0, 0.0, soak, dry), 0.5, 0.02);
+  EXPECT_NEAR(w.wetness(out - 1.0, 0.0, 0.0, soak, dry), 1.0, 1e-9); // soaked
+  // ...and dries once it has passed: 1/e every `dry` seconds.
+  const double w1 = w.wetness(out + 100.0, 0.0, 0.0, soak, dry);
+  const double w2 = w.wetness(out + 100.0 + dry, 0.0, 0.0, soak, dry);
+  EXPECT_NEAR(w2 / w1, std::exp(-1.0), 1e-6);
+  EXPECT_NEAR(w1, std::exp(-100.0 / dry), 1e-6);
+  // Beside the track, out of the rain, it stays dry.
+  EXPECT_EQ(w.wetness(out, 0.0, 2.0 * rr, soak, dry), 0.0);
+  // Long after (past 4 dry times), the storm is forgotten.
+  EXPECT_EQ(w.wetness(2400.0 + 5.0 * dry, 0.0, 0.0, soak, dry), 0.0);
+}

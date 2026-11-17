@@ -40,7 +40,7 @@ repository.
 
 Compiled into libcvc (its wave spectrum, `cvc/ocean/spectrum.h`, the wind's gusts and the currents,
 `cvc/algo/wind_field.h` and `cvc/ocean/current.h`, and the cumulonimbus maps of
-`cvc/world/cloud_layer.h`), cvcGL (the cloud deck's dark storm bases) and the cvcGL examples:
+`cvc/world/cloud_layer.h`), cvcGL (the cloud deck's dark storm bases, the rain's streaks) and the cvcGL examples:
 [ABYSSAL](#abyssal).
 
 Installed with cvcGL (`share/libcvc/fonts`) and embedded in the browser hosts (arigl-web, cyprty):
@@ -981,7 +981,10 @@ grows its storm maps with, and the sky hidden by the cloud above a sample (its
 `skyVis`, two taps up the deck) that darkens a storm's base in
 `src/cvcGL/ariadne/lsystem_nodes.cpp`. The weather model's states and authored
 events (`src/cvc/world/weather.cpp`) follow the design of `src/weather/Director.js`;
-no code of it is copied. Upstream's `LICENSE`:
+no code of it is copied. The rain's streaks in `src/cvcGL/ariadne/weather_node.cpp`
+port its `Rain` (`src/weather/Precipitation.js:6-265` at 849ff7f4): drops placed and
+moved in the vertex shader as a closed form of time, drawn as shutter-length
+streaks at least a pixel wide. Upstream's `LICENSE`:
 
 ```
 MIT License
