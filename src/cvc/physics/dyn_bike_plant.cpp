@@ -426,6 +426,8 @@ void dyn_bike_plant::step_model(agent &a, std::size_t i, double hs, const double
   const double accel = _o.driver ? dyn::drive(a.driver, a.desc, a.accel_cmd, a.s.vx, grade,
                                               _o.gravity, a.p.tau_drive, hs)
                                  : a.accel_cmd;
+  a.applied.push_back(accel);
+  a.applied_grade.push_back(grade);
   // With side_slope, gravity along and across the heading from the ground's gradient, a
   // potential in the books (the driver still reads the sine along the heading).
   const ground_sampler ground{&_o.plant};
@@ -577,6 +579,8 @@ void dyn_bike_plant::advance() {
       a.statics_tick = 0;
       a.touched = -1;
       a.touch_depth = 0.0;
+      a.applied.clear();
+      a.applied_grade.clear();
     }
     _ticking = true;
     return;
@@ -597,6 +601,8 @@ void dyn_bike_plant::advance() {
     a.statics_tick = 0;
     a.touched = -1;
     a.touch_depth = 0.0;
+    a.applied.clear();
+    a.applied_grade.clear();
   }
   const bool world = _chassis->on();
   const double h = _dt / _nsub;

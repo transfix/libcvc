@@ -10,14 +10,39 @@
 //   r.class_names, r.class_voxels, r.border_array(), r.warnings
 //   pycvc.segment_seeded(vol, seeds, automatic="none", normalized_thresholds=True, t_low=40)
 //
-// An enum field (automatic) takes its name as text, or pycvc.seed_mode_none / _local_maxima.
-// pycvc.segment_seeded_job(vol, seeds, ...) is the same as a resumable job (pycvc_jobs.i). Bad
-// input (no seeds, a seed outside the volume, a constant volume, bad parameters) raises ValueError.
-// The stepper is not wrapped: the job is how Python steps it.
+// An enum field (automatic) takes its name as text, or pycvc.seed_mode_none / _local_maxima /
+// _critical_points. pycvc.segment_seeded_job(vol, seeds, ...) is the same as a resumable job
+// (pycvc_jobs.i). Bad input (no seeds, a seed outside the volume, a constant volume, bad
+// parameters) raises ValueError. The steppers are not wrapped: the jobs are how Python steps them.
+//
+// The paper's automatic mode (seed_mode::critical_points, §5 step 3):
+//
+//   r = pycvc.segment_seeded(vol, pycvc.point_classes(), automatic="critical_points")
+//   r.class_names                  # ['feature', 'background']
+//   seeds = pycvc.critical_point_seeds(vol, cp_feature_threshold=0.3)   # the seeds alone
+//   pycvc.critical_point_seeds_job(vol, ...)                            # as a job (pycvc_jobs.i)
+//
+// VolUtils' seed generators (cvc/volume/seed_generators.h, transfix/libcvc#123):
+//
+//   pycvc.capsid_critical_points(vol, h=2, k=1, t_low=40)   # classes "maxima", "saddles"
+//   pycvc.rotated_seeds(seeds, vol, folds=5, axis=[0, 0, 1]) # classes "Class 0" .. "Class 4"
 %{
+#include <cvc/volume/gradient_vector_diffusion.h>
+#include <cvc/volume/seed_generators.h>
+#include <cvc/volume/seed_generators_params.h>
 #include <cvc/volume/segmentation.h>
 #include <cvc/volume/segmentation_params.h>
 %}
+
+// cvc/volume/gradient_vector_diffusion.h for its enums (seeded_segmentation_params' cp_weights,
+// critical_kind); the diffusion itself is C++ only for now.
+%ignore cvc::gradient_vector_diffusion_error;
+%ignore cvc::vector_field;
+%ignore cvc::gradient_vector_diffusion;
+%ignore cvc::gradient_vector_diffusion_stepper;
+%ignore cvc::gradient_vector_diffusion_job;
+%ignore cvc::critical_point_at;
+%include "cvc/volume/gradient_vector_diffusion.h"
 
 // The result's parts are copies Python owns: the member variables' own getters would hand out
 // views into the struct, which dangle once it is collected. (Volume copies share their voxels.)
@@ -100,6 +125,20 @@
 %ignore cvc::segment_stepper;
 %ignore cvc::segment_seeded_stepper;
 %ignore cvc::segment_seeded_job; // pycvc_jobs.i wraps it
+%ignore cvc::critical_point_seeds_stepper;
+%ignore cvc::critical_point_seeds_job; // pycvc_jobs.i wraps it
+
+%exception cvc::critical_point_seeds {
+  try {
+    pycvc::gil_release pycvc_nogil;
+    $action
+  } catch (const cvc::segmentation_error &e) {
+    SWIG_exception(SWIG_ValueError, e.what());
+  } catch (const std::exception &e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  }
+}
+%rename(_critical_point_seeds) cvc::critical_point_seeds;
 
 // A segmentation takes a while: other Python threads run meanwhile. Bad input raises ValueError.
 %exception cvc::segment_seeded {
@@ -115,6 +154,40 @@
 %rename(_segment_seeded) cvc::segment_seeded;
 %include "cvc/volume/segmentation.h"
 PYCVC_PARAM_TABLE(seeded_segmentation_params, cvc::seeded_segmentation_params)
+
+// The seed generators: the blocking functions, keywords through their tables (the stepper and the
+// job are C++ only for now).
+%ignore cvc::capsid_critical_points_stepper;
+%ignore cvc::capsid_critical_points_job;
+%ignore cvc::rotated_seeds(const cvc::point_classes &, const cvc::dimension &,
+                           const cvc::bounding_box &, const cvc::volume &,
+                           const cvc::rotation_seed_params &);
+%naturalvar cvc::rotation_seed_params::axis;
+%naturalvar cvc::rotation_seed_params::center;
+%exception cvc::capsid_critical_points {
+  try {
+    pycvc::gil_release pycvc_nogil;
+    $action
+  } catch (const cvc::segmentation_error &e) {
+    SWIG_exception(SWIG_ValueError, e.what());
+  } catch (const std::exception &e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  }
+}
+%exception cvc::rotated_seeds {
+  try {
+    $action
+  } catch (const cvc::segmentation_error &e) {
+    SWIG_exception(SWIG_ValueError, e.what());
+  } catch (const std::exception &e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  }
+}
+%rename(_capsid_critical_points) cvc::capsid_critical_points;
+%rename(_rotated_seeds) cvc::rotated_seeds;
+%include "cvc/volume/seed_generators.h"
+PYCVC_PARAM_TABLE(capsid_seed_params, cvc::capsid_seed_params)
+PYCVC_PARAM_TABLE(rotation_seed_params, cvc::rotation_seed_params)
 
 %pythoncode %{
 def _seeded_segmentation_params(params, keywords, fn):
@@ -141,4 +214,47 @@ def segment_seeded(vol, seeds, params=None, **keywords):
     keywords. `seeds` is a point_classes; the classes of `variable` and `timestep` seed the run."""
     return _segment_seeded(vol, seeds,
                            _seeded_segmentation_params(params, keywords, "segment_seeded"))
+
+
+def _params_from(cls, params, keywords, fn):
+    """A params object from `params` or keywords (an enum or a list as text works too)."""
+    if params is not None:
+        if keywords:
+            raise TypeError(fn + ": pass a " + cls.__name__ + " or keywords, not both")
+        return params
+    valid = cls.fields()
+    for k in keywords:
+        if k not in valid:
+            raise TypeError("%s: unknown keyword '%s'; valid: %s" % (fn, k, ", ".join(valid)))
+    p = cls(**{k: v for k, v in keywords.items() if not isinstance(v, str)})
+    for k, v in keywords.items():
+        if isinstance(v, str):
+            p.set_text(k, v)
+    return p
+
+
+def capsid_critical_points(vol, params=None, **keywords):
+    """Seeds for a virus map (VolUtils' criticalPntsToSeed): a point_classes of "maxima" (the
+    local maxima kept for the capsid's T-number) and "saddles" (the gradient magnitude's, when the
+    maxima are few). capsid_critical_points(vol, h=2, k=1, t_low=40) or with a capsid_seed_params."""
+    return _capsid_critical_points(vol, _params_from(capsid_seed_params, params, keywords,
+                                                     "capsid_critical_points"))
+
+
+def rotated_seeds(seeds, vol, params=None, **keywords):
+    """The N-fold rotational copies of `seeds` (on `vol`'s grid) about an axis (VolUtils'
+    SeedProduce): class "Class n" holds the n-th rotation. rotated_seeds(seeds, vol, folds=5,
+    axis=[0, 0, 1], center=[...]) or with a rotation_seed_params."""
+    return _rotated_seeds(seeds, vol, _params_from(rotation_seed_params, params, keywords,
+                                                   "rotated_seeds"))
+
+
+def critical_point_seeds(vol, params=None, **keywords):
+    """The paper's seeds of a volume (seed_mode::critical_points): a point_classes of two classes,
+    "feature" (the diffused gradient's maxima) then "background" (its minima), after the cp_*
+    fields' thresholds and thinning. critical_point_seeds(vol, seeded_segmentation_params(...)) or
+    critical_point_seeds(vol, cp_feature_threshold=..., ...) with the params' fields as keywords."""
+    return _critical_point_seeds(vol,
+                                 _seeded_segmentation_params(params, keywords,
+                                                             "critical_point_seeds"))
 %}
