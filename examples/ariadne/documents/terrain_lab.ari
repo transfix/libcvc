@@ -42,6 +42,8 @@ customs:
     required: true
   - node: water
     required: true
+  - node: weather
+    required: true
 
 import:
   - cvc://components/world_controls.ari
@@ -50,6 +52,7 @@ import:
   - cvc://components/sim_transport.ari
   - cvc://components/sky_controls.ari
   - cvc://components/water_controls.ari
+  - cvc://components/weather_controls.ari
 
 # Only the Terrain Lab panel opens at first, so the world fills the view; Settings opens the rest.
 init: |
@@ -58,6 +61,7 @@ init: |
   (state-set "tree.sim_transport.open" "0")
   (state-set "tree.sky_controls.open" "0")
   (state-set "tree.water_controls.open" "0")
+  (state-set "tree.weather_controls.open" "0")
 
 menubar:
   - menu: Sim
@@ -79,6 +83,8 @@ menubar:
         bind: tree.sky_controls.open
       - menu_item: Water
         bind: tree.water_controls.open
+      - menu_item: Weather
+        bind: tree.weather_controls.open
 
 windows:
   - include: world_controls
@@ -104,6 +110,10 @@ windows:
   - include: water_controls
     pos: [754, 196]
     size: [370, 420]
+    closable: true
+  - include: weather_controls
+    pos: [754, 551]
+    size: [370, 230]
     closable: true
 
 scene:
@@ -213,3 +223,17 @@ scene:
       wind_az: 90          # the wind blows toward +x (live: sky.wind_az)
       evolve: 1            # a weather step every 5 s; 0 holds the clouds
       orographic: 1        # windward flanks gather cloud
+    # The weather: storm cells on a schedule (and the ones the Weather panel starts), riding the
+    # sky's wind. A storm builds upwind and walks over the world: the clouds under it close up,
+    # thicken and darken, the deck rises into cumulonimbus while a storm is in view (live:
+    # sky.top), and the ground under it dims. Its life is 20 to 60 minutes of weather time (the
+    # panel's Time scale speeds it up). Every client with the same weather.* keys sees the same
+    # storms.
+    - node: weather
+      type: weather
+      ground: world        # the storms are timed to cross this node's extent
+      sky: sky             # the cloud_sky they drive (sky.storms, sky.top, sky.darkness)
+      seed: 5
+      radius_min: 1000     # metres: a storm cell's radius at maturity
+      radius_max: 1600
+      storm_top: 3000      # the deck's top in a full storm
