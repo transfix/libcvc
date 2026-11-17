@@ -148,6 +148,83 @@ compiled_field compile(const field &f) {
   return c;
 }
 
+// What one cell reads of a field: whether any of it is in the stuff (immersed, the stuff's value
+// there > 0), and then the immersed part's centre, its share of the cell, the value and the
+// stuff's velocity there. A pure function of its arguments (a surface's reads are, and its memo
+// is the cell's own), so cells can be read in any order and on any thread.
+struct cell_read {
+  bool in = false;
+  double p[3] = {0.0, 0.0, 0.0};
+  double f = 0.0;
+  double value = 0.0;
+  vec3 w;
+};
+
+// A flow's wind over one body (flow_velocity.h): its reference at the body's centre of mass, since
+// the gusts vary over tens of metres, and its profile at kProfiles heights from its base (or the
+// body's bottom) to the body's top, spaced as the squares. Made once per body and field, so the
+// wind costs O(bodies) a step; at() is the reference times the profile at a cell's height.
+struct body_wind {
+  vec3 reference;
+  double floor = 0.0; // the air starts here: the wind's base
+  double z0 = 0.0, span = 0.0;
+  double z[kProfiles] = {}, prof[kProfiles] = {};
+  vec3 at(double pz) const {
+    const double u = std::min(std::max((pz - z0) / span, 0.0), 1.0);
+    const int j = std::min(static_cast<int>((kProfiles - 1) * std::sqrt(u)), kProfiles - 2);
+    const double gap = z[j + 1] - z[j];
+    const double fr = gap > 0.0 ? std::min(std::max((pz - z[j]) / gap, 0.0), 1.0) : 0.0;
+    return reference * (prof[j] + (prof[j + 1] - prof[j]) * fr);
+  }
+};
+
+cell_read read_cell(const vec3 &local, const body_state &s, const mat3 &r, const double ext[3],
+                    const compiled_field &cf, const fluid_surface *surface, double t,
+                    const body_wind *wind = nullptr) {
+  cell_read out;
+  const vec3 c = s.position + r * local;
+  // The immersed part of the cell: its world box clipped to the field's, and below a free
+  // surface's height over the clipped centre (x and y come first). The velocity below is read at
+  // that centre too, so the two reads share the cell's memo.
+  surface_memo memo;
+  double p[3], f = 1.0;
+  bool in = true;
+  for (int k = 0; k < 3 && in; ++k) {
+    double top = cf.scalar.hi[k];
+    if (k == 2 && surface)
+      top = std::min(top, surface->height_with(p[0], p[1], t, memo));
+    double bottom = cf.scalar.lo[k];
+    if (k == 2 && wind) // the air starts at the wind's base
+      bottom = std::max(bottom, wind->floor);
+    const double lo = std::max(component(c, k) - ext[k], bottom);
+    const double hi = std::min(component(c, k) + ext[k], top);
+    in = hi > lo;
+    p[k] = 0.5 * (lo + hi);
+    f *= (hi - lo) / (2.0 * ext[k]);
+  }
+  if (!in)
+    return out;
+  const double value = cf.scalar.at(p);
+  if (!(value > 0.0))
+    return out;
+  out.in = true;
+  out.p[0] = p[0];
+  out.p[1] = p[1];
+  out.p[2] = p[2];
+  out.f = f;
+  out.value = value;
+  const vec3 at{p[0], p[1], p[2]};
+  if (surface)
+    out.w = surface->velocity_with(at, t, memo);
+  else if (wind) // the body's wind, times its profile at the cell's height
+    out.w = wind->at(p[2]);
+  else if (cf.moving)
+    out.w = {cf.velocity[0].contains(p) ? cf.velocity[0].at(p) : 0.0,
+             cf.velocity[1].contains(p) ? cf.velocity[1].at(p) : 0.0,
+             cf.velocity[2].contains(p) ? cf.velocity[2].at(p) : 0.0};
+  return out;
+}
+
 // The world box of a body's cells, from its state.
 void body_box(const field_body &fb, const body_state &s, double lo[3], double hi[3]) {
   const mat3 r = rotation(s.rotation);
@@ -944,6 +1021,82 @@ bool field_set::medium_under(const vec3 &p, wheel_medium &out) const {
   return found;
 }
 
+// ── field_workers ──
+
+field_workers::field_workers(int threads) : _wanted(threads) {
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+  threads = 0; // no threads in this build: run() runs every index here
+#endif
+  for (int i = 0; i < threads; ++i)
+    _threads.emplace_back([this] { loop(); });
+}
+
+field_workers::~field_workers() {
+  {
+    std::lock_guard<std::mutex> lock(_m);
+    _stop = true;
+  }
+  _go.notify_all();
+  for (std::thread &th : _threads)
+    th.join();
+}
+
+void field_workers::work() {
+  for (std::size_t i; (i = _next.fetch_add(1)) < _n;) {
+    try {
+      (*_fn)(i);
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(_m);
+      if (!_error)
+        _error = std::current_exception();
+    }
+  }
+}
+
+void field_workers::loop() {
+  std::uint64_t seen = 0;
+  for (;;) {
+    {
+      std::unique_lock<std::mutex> lock(_m);
+      _go.wait(lock, [&] { return _stop || _generation != seen; });
+      if (_stop)
+        return;
+      seen = _generation;
+    }
+    work();
+    std::lock_guard<std::mutex> lock(_m);
+    if (--_busy == 0)
+      _done.notify_one();
+  }
+}
+
+void field_workers::run(std::size_t n, const std::function<void(std::size_t)> &fn) {
+  if (_threads.empty() || n < 2) {
+    for (std::size_t i = 0; i < n; ++i)
+      fn(i);
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> lock(_m);
+    _fn = &fn;
+    _n = n;
+    _next.store(0);
+    _error = nullptr;
+    _busy = static_cast<int>(_threads.size());
+    ++_generation;
+  }
+  _go.notify_all();
+  work(); // this thread takes indices too
+  std::unique_lock<std::mutex> lock(_m);
+  _done.wait(lock, [&] { return _busy == 0; });
+  _fn = nullptr;
+  if (_error) {
+    std::exception_ptr e = _error;
+    _error = nullptr;
+    std::rethrow_exception(e);
+  }
+}
+
 field_load field_set::load(body_id id) const {
   const auto it = _bodies.find(id.value);
   return it == _bodies.end() ? field_load{} : it->second.load;
@@ -961,20 +1114,104 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
   std::vector<double> depth; // its triangles' submerged areas this step
   std::vector<double> wet;
 
-  for (auto &entry : _bodies) {
+  // The awake bodies and where they are now, read once, in id order.
+  struct placed {
     body_id id;
-    id.value = entry.first;
-    field_body &fb = entry.second;
-    const body_state s = be.state(id);
-    if (!s.active)
-      continue;
-    const mat3 r = rotation(s.rotation);
-    const vec3 com = s.position + r * fb.center_of_mass;
-    // A cell's world box: the box around the rotated cell.
-    const vec3 e = r.abs_times(fb.cell * 0.5);
-    const double ext[3] = {e.x, e.y, e.z};
+    field_body *fb = nullptr;
+    body_state s;
+    mat3 r;
+    double ext[3]; // a cell's world box: the box around the rotated cell
     double blo[3], bhi[3];
-    body_box(fb, s, blo, bhi);
+  };
+  std::vector<placed> awake;
+  awake.reserve(_bodies.size());
+  for (auto &entry : _bodies) {
+    placed pb;
+    pb.id.value = entry.first;
+    pb.fb = &entry.second;
+    pb.s = be.state(pb.id);
+    if (!pb.s.active)
+      continue;
+    pb.r = rotation(pb.s.rotation);
+    const vec3 e = pb.r.abs_times(pb.fb->cell * 0.5);
+    pb.ext[0] = e.x;
+    pb.ext[1] = e.y;
+    pb.ext[2] = e.z;
+    body_box(*pb.fb, pb.s, pb.blo, pb.bhi);
+    awake.push_back(pb);
+  }
+
+  // The cells' reads of free surfaces, first: each cell's (read_cell) into its own slot, on the
+  // field workers when world_config::field_threads asks for them. The sums below take them in the
+  // cells' order, so the same values add up in the same order with or without workers.
+  struct surface_cells {
+    std::size_t body; // in awake
+    const compiled_field *cf;
+    std::size_t first;       // its first cell's slot in reads
+    const fluid_surface *at; // the surface at t, held (fluid_surface::at), or the field's own
+  };
+  std::vector<std::shared_ptr<const fluid_surface>> held; // one per field, as first needed
+  std::vector<surface_cells> runs;
+  std::vector<cell_read> reads;
+  fluid_surface::parallel_run par; // the workers, once some cell needs a surface read
+  for (std::size_t bi = 0; bi < awake.size(); ++bi) {
+    const placed &pb = awake[bi];
+    if (pb.fb->hull.desc != nullptr)
+      continue; // a hull's triangles take the fluids' push (push_hull)
+    for (const auto &fe : _fields) {
+      const compiled_field &cf = fe.second; // a surface is a fluid's (compile)
+      if (!cf.desc.surface || !overlaps(pb.blo, pb.bhi, cf.scalar))
+        continue;
+      const fluid_surface *own = cf.desc.surface.get();
+      const fluid_surface *at = own;
+      for (std::size_t k = 0; k < runs.size() && at == own; ++k)
+        if (runs[k].cf == &cf)
+          at = runs[k].at;
+      if (at == own) {
+        if (!par) {
+          if (!_workers || _workers->threads() != cfg.field_threads)
+            _workers = std::make_unique<field_workers>(cfg.field_threads);
+          par = [this](std::size_t n, const std::function<void(std::size_t)> &fn) {
+            _workers->run(n, fn);
+          };
+        }
+        held.push_back(own->at(t, par)); // its per-time work, as tasks for the workers
+        if (held.back())
+          at = held.back().get();
+      }
+      runs.push_back({bi, &cf, reads.size(), at});
+      reads.resize(reads.size() + pb.fb->cells.size());
+    }
+  }
+  if (!reads.empty()) {
+    constexpr std::size_t kChunk = 32;
+    _workers->run((reads.size() + kChunk - 1) / kChunk, [&](std::size_t k) {
+      const std::size_t i0 = k * kChunk, i1 = std::min(reads.size(), i0 + kChunk);
+      std::size_t ri = std::size_t(std::upper_bound(runs.begin(), runs.end(), i0,
+                                                    [](std::size_t i, const surface_cells &sc) {
+                                                      return i < sc.first;
+                                                    }) -
+                                   runs.begin()) -
+                       1;
+      for (std::size_t i = i0; i < i1; ++i) {
+        while (ri + 1 < runs.size() && i >= runs[ri + 1].first)
+          ++ri;
+        const surface_cells &sc = runs[ri];
+        const placed &pb = awake[sc.body];
+        reads[i] = read_cell(pb.fb->cells[i - sc.first], pb.s, pb.r, pb.ext, *sc.cf, sc.at, t);
+      }
+    });
+  }
+
+  std::size_t run_at = 0;
+  for (std::size_t bi = 0; bi < awake.size(); ++bi) {
+    const placed &pb = awake[bi];
+    const body_id id = pb.id;
+    field_body &fb = *pb.fb;
+    const body_state &s = pb.s;
+    const mat3 &r = pb.r;
+    const vec3 com = s.position + r * fb.center_of_mass;
+    const double *ext = pb.ext;
 
     // Buoyancy and support (push) apart from drag and damping, which are scaled
     // for stability below.
@@ -990,98 +1227,62 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
       const compiled_field &cf = fe.second;
       if (fb.vehicle && cf.desc.kind == field_kind::flow)
         continue; // a vehicle's aero is its drag (vehicle.h)
-      if (!overlaps(blo, bhi, cf.scalar))
+      if (!overlaps(pb.blo, pb.bhi, cf.scalar))
         continue;
       if (hull && cf.desc.kind == field_kind::fluid) {
         push_hull(fb, s, r, com, cf, gn, cfg.fixed_dt, t, world_v, depth, wet, hs);
         continue;
       }
-      // A flow's wind is read once per body (flow_velocity.h): its reference at the centre of
-      // mass, since the gusts vary over tens of metres, and its profile at kProfiles heights from
-      // its base (or the body's bottom) to the body's top, spaced as the squares. The wind costs
-      // O(bodies) a step.
+      // A flow's wind, once per body (body_wind, flow_velocity.h).
       const flow_velocity *wind = cf.desc.wind.get();
-      vec3 body_wind;
-      double wind_floor = 0.0, prof_z0 = 0.0, prof_span = 0.0;
-      double prof_z[kProfiles] = {}, prof[kProfiles] = {};
+      body_wind bw;
       if (wind) {
-        wind_floor = wind->base();
-        const double zlo = std::max(blo[2], wind_floor);
-        if (!(bhi[2] > zlo))
+        bw.floor = wind->base();
+        const double zlo = std::max(pb.blo[2], bw.floor);
+        if (!(pb.bhi[2] > zlo))
           continue; // all of the body is below the air (under the water or the ground)
-        body_wind = wind->reference(com, t);
-        prof_z0 = zlo;
-        prof_span = bhi[2] - zlo;
+        bw.reference = wind->reference(com, t);
+        bw.z0 = zlo;
+        bw.span = pb.bhi[2] - zlo;
         for (int j = 0; j < kProfiles; ++j) {
-          const double s = static_cast<double>(j) / (kProfiles - 1);
-          prof_z[j] = zlo + prof_span * s * s;
-          prof[j] = wind->profile(prof_z[j]);
+          const double sj = static_cast<double>(j) / (kProfiles - 1);
+          bw.z[j] = zlo + bw.span * sj * sj;
+          bw.prof[j] = wind->profile(bw.z[j]);
         }
       }
-      const fluid_surface *surface = cf.desc.surface.get();
-      for (const vec3 &local : fb.cells) {
-        const vec3 c = s.position + r * local;
-        // The immersed part of the cell: its world box clipped to the field's, and below a
-        // free surface's height over the clipped centre (x and y come first). The velocity
-        // below is read at that centre too, so the two reads share the cell's memo.
-        surface_memo memo;
-        double p[3], f = 1.0;
-        bool in = true;
-        for (int k = 0; k < 3 && in; ++k) {
-          double top = cf.scalar.hi[k];
-          if (k == 2 && surface)
-            top = std::min(top, surface->height_with(p[0], p[1], t, memo));
-          double bottom = cf.scalar.lo[k];
-          if (k == 2 && wind) // the air starts at the wind's base
-            bottom = std::max(bottom, wind_floor);
-          const double lo = std::max(component(c, k) - ext[k], bottom);
-          const double hi = std::min(component(c, k) + ext[k], top);
-          in = hi > lo;
-          p[k] = 0.5 * (lo + hi);
-          f *= (hi - lo) / (2.0 * ext[k]);
-        }
-        if (!in)
+      // The cells' reads: done above for a free surface (a fluid's, never a wind's), else here.
+      const cell_read *pre = nullptr;
+      if (run_at < runs.size() && runs[run_at].body == bi && runs[run_at].cf == &cf)
+        pre = reads.data() + runs[run_at++].first;
+      for (std::size_t ci = 0; ci < fb.cells.size(); ++ci) {
+        const cell_read cr = pre ? pre[ci]
+                                 : read_cell(fb.cells[ci], s, r, ext, cf, cf.desc.surface.get(), t,
+                                             wind ? &bw : nullptr);
+        if (!cr.in)
           continue;
-        const double value = cf.scalar.at(p);
-        if (!(value > 0.0))
-          continue;
-        const double fv = f * fb.cell_volume;
-        const vec3 at{p[0], p[1], p[2]};
+        const double fv = cr.f * fb.cell_volume;
+        const vec3 at{cr.p[0], cr.p[1], cr.p[2]};
         const vec3 arm = at - com;
         felt = true;
         if (!wind) // a body is not immersed in the air
           immersed += fv;
 
         if (cf.desc.kind == field_kind::fluid) {
-          const vec3 b = g * (-value * fv);
+          const vec3 b = g * (-cr.value * fv);
           push_f = push_f + b;
           push_t = push_t + cross(arm, b);
         } else if (cf.desc.kind == field_kind::medium) {
-          const vec3 b = up * (value * fv);
+          const vec3 b = up * (cr.value * fv);
           push_f = push_f + b;
           push_t = push_t + cross(arm, b);
         }
 
-        vec3 w;
-        if (surface)
-          w = surface->velocity_with(at, t, memo);
-        else if (wind) { // the body's wind, times its profile at the cell's height
-          const double s = std::min(std::max((p[2] - prof_z0) / prof_span, 0.0), 1.0);
-          const int j = std::min(static_cast<int>((kProfiles - 1) * std::sqrt(s)), kProfiles - 2);
-          const double gap = prof_z[j + 1] - prof_z[j];
-          const double fr =
-              gap > 0.0 ? std::min(std::max((p[2] - prof_z[j]) / gap, 0.0), 1.0) : 0.0;
-          w = body_wind * (prof[j] + (prof[j + 1] - prof[j]) * fr);
-        } else if (cf.moving)
-          w = {cf.velocity[0].contains(p) ? cf.velocity[0].at(p) : 0.0,
-               cf.velocity[1].contains(p) ? cf.velocity[1].at(p) : 0.0,
-               cf.velocity[2].contains(p) ? cf.velocity[2].at(p) : 0.0};
-        const vec3 u = w - (s.linear_velocity + cross(s.angular_velocity, arm));
+        const vec3 u = cr.w - (s.linear_velocity + cross(s.angular_velocity, arm));
         double c_i = cf.desc.damping * fv; // kg/s: the force is c_i u
         if (cf.desc.kind != field_kind::medium) {
           const double speed = norm(u);
           if (speed > 0.0)
-            c_i += 0.5 * value * cf.desc.drag_coefficient *
+            c_i += 0.5 * cr.value * cf.desc.drag_coefficient *
                    area_across(fb, r.inverse(u * (1.0 / speed))) * (fv / fb.volume) * speed;
         }
         if (c_i > 0.0) {

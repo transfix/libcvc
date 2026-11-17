@@ -89,6 +89,7 @@ const body_state s = w.state(c);
 | `velocity_steps`, `position_steps` | 10, 2 | yes |
 | `penetration_slop` | 0.002 m | yes |
 | `threads` | 0 (no worker threads) | no |
+| `field_threads` | 0 (the stepping thread reads the fields alone) | yes |
 | `determinism` | `cross_platform` | no |
 | `friction`, `restitution` (combine rules) | `product`, `max` | yes |
 | `contacts` (reporting) | `added_removed` | yes |
@@ -158,8 +159,16 @@ The physics headers stay standard-library only by forward-declaring the two type
 - **Stepping:** `step()` advances `fixed_dt`, and `step(n)` runs n steps under one lock.
 - **Following a clock:** `follow(clock)` runs the steps due on a `cvc::world_clock` since the last
   call. `fixed_dt` must be a whole number of the clock's quanta.
-- **Reports:** `last_report()` returns the last step's `step_report`. It carries wall time, active
-  bodies, the number of contact events, and `saturated` when an engine buffer filled.
+- **Reports:** `last_report()` returns the last step's `step_report`. It carries wall time (and
+  how much of it the fields' pushes, `fields_ms`, and the engine's own step, `engine_ms`, took),
+  active bodies, the number of contact events, and `saturated` when an engine buffer filled.
+- **Field threads:** a fluid with a free surface reads the surface's height and velocity at every
+  cell of every body in it, every step: the field step's main cost. `field_threads` reads them on
+  that many worker threads beside the stepping thread (and does the surface's per-time work, an
+  ocean surface's transforms, as their tasks too). Each cell's reads land in its own slot and the
+  sums run over them in the cells' order, so a run's values, and its `state_hash`, do not depend
+  on it. A build without threads (single-threaded WebAssembly) ignores it. An Ariadne scene's
+  world (`SceneWorld`) uses up to three.
 
 ### Determinism, save and restore
 
