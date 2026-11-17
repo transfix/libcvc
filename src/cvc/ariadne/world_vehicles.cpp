@@ -905,7 +905,7 @@ struct WorldVehicles::impl {
     // mass, added to the drive as an intent's force is. Its share is the drag in the moving air
     // less the drag in still air, which the dynamic models already charge (nav_plant's si.drag), so
     // a calm wind adds nothing. A jolt vehicle's aero drag reads the wind in physics, and so does a
-    // boat: its hull is a dynamic body, and the wind's flow field drags on it where it is in the air.
+    // boat: its hull is a dynamic body, which the wind's flow field already drags on in the air.
     if (wind && !f.jolt && !f.boat) {
       const double t = world->field_time();
       for (entity &e : ents) {
