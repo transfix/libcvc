@@ -432,9 +432,9 @@ void get_intersecting_polygon_pairs(InputIterator begin, InputIterator end,
 
 // template <typename Contour_iter, typename Out_iter, typename Failure_iter>
 // void remove_contour_intersections2(Contour_iter begin, Contour_iter end,
-// 				   Number_type delta,
-// 				   Out_iter out,
-// 				   Failure_iter failures) {
+// Number_type delta,
+// Out_iter out,
+// Failure_iter failures) {
 //   static log4cplus::Logger logger =
 //   log4cplus::Logger::getInstance("slice.remove_contour_intersections");
 
@@ -447,15 +447,15 @@ void get_intersecting_polygon_pairs(InputIterator begin, InputIterator end,
 //     for (Contour2::Polygon_iterator pit = (*it)->begin(); pit != (*it)->end(); ++pit) {
 //       list<Polygon_with_holes_2> pwh;
 //       try {
-// 	offset_polygon(*pit, delta2, back_inserter(pwh));;
+// offset_polygon(*pit, delta2, back_inserter(pwh));;
 //       }
 //       catch (exception& e) {
-// 	*failures++ = "Component = " + (*it)->info().object_name() + "  " + e.what();
+// *failures++ = "Component = " + (*it)->info().object_name() + "  " + e.what();
 //       }
 //       for (list<Polygon_with_holes_2>::iterator pwhit = pwh.begin(); pwhit != pwh.end(); ++pwhit)
 //       {
-// 	Polygon_ext_handle ph(new Polygon_ext(*pwhit, (*it)->info()));
-// 	polygons.push_back(ph);
+// Polygon_ext_handle ph(new Polygon_ext(*pwhit, (*it)->info()));
+// polygons.push_back(ph);
 //       }
 //     }
 //   }
@@ -490,7 +490,7 @@ void get_intersecting_polygon_pairs(InputIterator begin, InputIterator end,
 //       offset_polygon(ph->polygon(), -delta2, back_inserter(pwh));;
 //       for (list<Polygon_with_holes_2>::iterator pwhit = pwh.begin(); pwhit != pwh.end(); ++pwhit)
 //       {
-// 	map[ph->info()].push_back(*pwhit);
+// map[ph->info()].push_back(*pwhit);
 //       }
 //     }
 //     catch (exception& e) {
@@ -513,10 +513,10 @@ void get_intersecting_polygon_pairs(InputIterator begin, InputIterator end,
 //     // }
 //     // if (c->size() > 0) {
 //     //   if (!c->polygon().is_simple()) {
-//     // 	TILER_ERROR(logger, "Polygon is not simple after intersection removal.  Component =
+//     // TILER_ERROR(logger, "Polygon is not simple after intersection removal.  Component =
 //     " << c->info().object_name()
-//     // 			<< " Polygon = " << pp(c->polygon()));
-//     // 	throw logic_error("Polygon is not simple!");
+//     // << " Polygon = " << pp(c->polygon()));
+//     // throw logic_error("Polygon is not simple!");
 //     //   }
 //     //   *out++ = c;
 //     // }
@@ -524,8 +524,8 @@ void get_intersecting_polygon_pairs(InputIterator begin, InputIterator end,
 // }
 
 // template void remove_contour_intersections2(list<Contour2_handle>::iterator begin,
-// list<Contour2_handle>::iterator end, 					    Number_type delta,
-// 					    back_insert_iterator<list<Contour2_handle> > out,
-// 					    back_insert_iterator<list<string> > failures);
+// list<Contour2_handle>::iterator end, Number_type delta,
+// back_insert_iterator<list<Contour2_handle> > out,
+// back_insert_iterator<list<string> > failures);
 
 } // namespace cvc::tiler

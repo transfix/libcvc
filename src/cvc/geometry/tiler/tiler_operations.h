@@ -378,7 +378,6 @@ void build_tiling_table_phase2(Tiler_workspace &workspace);
 /// A unit per untiled region (each filled in one piece: its partition and interpolation).
 step_task build_tiling_table_phase2_steps(Tiler_workspace &workspace);
 
-
 } // namespace cvc::tiler
 
 #endif
