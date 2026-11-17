@@ -204,6 +204,7 @@ endif()
 add_executable(ph_compose_test ph_compose_test.cpp)
 add_executable(ph_compose_parity_test ph_compose_parity_test.cpp)
 add_executable(ph_microgrid_test ph_microgrid_test.cpp)
+add_executable(ph_query_test ph_query_test.cpp)
 add_executable(ph_convoy_test ph_convoy_test.cpp)
 add_executable(ph_se2_test ph_se2_test.cpp)
 add_executable(ph_se2_train_test ph_se2_train_test.cpp)
@@ -520,6 +521,7 @@ set(TEST_TARGETS
   ph_compose_test
   ph_compose_parity_test
   ph_microgrid_test
+  ph_query_test
   ph_convoy_test
   ph_se2_test
   ph_se2_train_test
@@ -2445,6 +2447,13 @@ target_link_libraries(ph_microgrid_test
     GTest::gtest_main
 )
 
+target_link_libraries(ph_query_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(ph_se2_test
   PRIVATE
     cvc
@@ -2933,6 +2942,7 @@ target_compile_features(nav_potential_test PRIVATE cxx_std_17)
 target_compile_features(ph_compose_test PRIVATE cxx_std_17)
 target_compile_features(ph_compose_parity_test PRIVATE cxx_std_17)
 target_compile_features(ph_microgrid_test PRIVATE cxx_std_17)
+target_compile_features(ph_query_test PRIVATE cxx_std_17)
 target_compile_features(ph_convoy_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_train_test PRIVATE cxx_std_17)
@@ -3516,6 +3526,9 @@ cvc_discover_tests(nav_potential_test)
 cvc_discover_tests(ph_compose_test)
 cvc_discover_tests(ph_compose_parity_test)
 cvc_discover_tests(ph_microgrid_test)
+# The candidate query and the history fit roll out RK4 references (about 4.5 s and 3 s in Release):
+# the same budget as the convoy's, below, so a slow Debug runner fails on a real hang only.
+cvc_discover_tests(ph_query_test PROPERTIES TIMEOUT 1200)
 # The convoy's two full runs (the composite against the formation; the follow laws on a step and
 # a stop) take ~95 s each in a Debug build, and a PR's Debug ctest gives a test without a TIMEOUT
 # of its own 300 s (ci.yml), which a busy runner misses: both timed out on #1288's run on
