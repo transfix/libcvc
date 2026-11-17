@@ -425,6 +425,7 @@ struct WorldVehicles::impl {
   std::uint64_t steps = 0; // physics steps since the navigator was built
   std::uint64_t draws = 0; // goals drawn (each draw's seed)
   bool wander = true;      // nav@1 draws another goal at each one it reaches
+  bool drive_tel = false;  // the navigators capture their drive (set_drive_telemetry)
 
   // A fleet: the entities on one plant, with a navigator of their own over the grid (a navigator
   // drives one plant). Their bodies are all in the one physics world, so they meet each other and
@@ -443,6 +444,9 @@ struct WorldVehicles::impl {
     // The drive's external force on each agent (normalized), for the tick: the drive's threads
     // read it while sim->step runs.
     std::vector<std::array<float, 2>> force;
+    // A tick has run since its navigator began capturing its drive (drive_tel): plants() reads
+    // the drive's telemetry.
+    bool tel_fresh = false;
   };
   std::map<std::string, std::unique_ptr<fleet>> fleets; // by plant, made as entities need them
 
@@ -609,6 +613,7 @@ struct WorldVehicles::impl {
     f->sim = std::make_unique<cvc::nav::sim_world>(
         cfg, grid->occupancy.data(), grid->occupancy.data(), cvc::nav::coef_mlp::default_biased(),
         nullptr, nullptr, nullptr, 0);
+    f->sim->set_capture_drive_telemetry(drive_tel);
     ph::nav_plant_options o;
     o.step_world = false; // the world steps on the clock; the plant commands and reads
     o.ground_bodies = ground;
@@ -1068,6 +1073,7 @@ struct WorldVehicles::impl {
             if (const int i = index(e); i >= 0)
               f->from[static_cast<std::size_t>(i)] = bicycle_box(*f, i, e.desc);
       f->sim->step(1);
+      f->tel_fresh = f->sim->capture_drive_telemetry();
       if (f->plant == "kinematic") {
         for (const entity &e : ents)
           if (fleet_of(e) == f.get())
@@ -1763,6 +1769,16 @@ void WorldVehicles::reseed(std::uint64_t seed) {
 
 void WorldVehicles::set_wander(bool wander) { _impl->wander = wander; }
 
+void WorldVehicles::set_drive_telemetry(bool on) {
+  impl &d = *_impl;
+  d.drive_tel = on;
+  for (auto &kv : d.fleets) {
+    kv.second->sim->set_capture_drive_telemetry(on);
+    kv.second->tel_fresh = false;
+  }
+}
+bool WorldVehicles::drive_telemetry() const { return _impl->drive_tel; }
+
 bool WorldVehicles::command(std::uint64_t id, double steer, double accel) {
   for (impl::entity &e : _impl->ents)
     if (e.id == id) {
@@ -1920,6 +1936,20 @@ std::vector<entity_plant> WorldVehicles::plants() const {
       p.limits.hdt = static_cast<float>(vp.dt / std::max(1, vp.nsub));
       p.limits.allow_reverse = vp.allow_reverse ? 1 : 0;
       p.substeps = std::max(1, vp.nsub);
+    }
+    // The drive that gave the last command, when its navigator captured it.
+    if (const nav::drive_telemetry *t = g->tel_fresh ? g->sim->drive_telemetry_data() : nullptr) {
+      std::vector<float> carrots(2 * static_cast<std::size_t>(g->sim->size()));
+      g->sim->carrots_world(carrots.data());
+      const nav::drive_telemetry &ti = t[i];
+      p.drive.known = true;
+      p.drive.alpha = ti.alpha;
+      p.drive.beta = ti.beta;
+      p.drive.gamma = ti.gamma;
+      p.drive.goal_x = carrots[2 * static_cast<std::size_t>(i)];
+      p.drive.goal_y = carrots[2 * static_cast<std::size_t>(i) + 1];
+      p.drive.force_x = ti.ext_fx / kScale;
+      p.drive.force_y = ti.ext_fy / kScale;
     }
     out.push_back(std::move(p));
   }

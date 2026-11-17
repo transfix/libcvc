@@ -2039,6 +2039,170 @@ int main() {
       printf("  warning: %s\n", w.c_str());
   }
 
+  // ── O5: the water's persistent foam, its thresholds and its level of detail ─────────────────
+  // The long and middle cascades' turbulence is one 512 x 256 atlas (two 256^2 tiles: one sampler)
+  // on both meshes, stepped with the world's clock (its two atlases alternate). Both foam
+  // thresholds are found off the frame (a sliced task on the app's scheduler) and replace the
+  // guess the whitecaps start with. water.foam_decay 0 stops the atlas and finds the whitecaps'
+  // threshold alone, as before O5. The far grid draws the foam's mean cover only, and the level of
+  // detail's distances are live keys.
+  {
+    printf("== water: persistent foam, its thresholds, level of detail ==\n");
+    SceneGraph sg(app, "o5");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    auto node = [](const char *id, const char *type,
+                   std::vector<std::pair<const char *, std::string>> props) {
+      SceneNode n;
+      n.id = id;
+      n.type = type;
+      n.props.kind = Value::Kind::Map;
+      for (auto &p : props) {
+        Value v;
+        v.kind = Value::Kind::Scalar;
+        v.scalar = p.second;
+        n.props.entries.emplace_back(p.first, v);
+      }
+      return n;
+    };
+    scene.nodes.push_back(node("world", "generated_world",
+                               {{"seed", "5"},
+                                {"half", "150"},
+                                {"trees", "0"},
+                                {"rocks", "0"},
+                                {"buildings", "0"},
+                                {"amp", "40"},
+                                {"water_level", "0"},
+                                {"water", "0"},
+                                {"texture", "256"}}));
+    scene.nodes.push_back(
+        node("water", "water", {{"world", "world"}, {"level", "0"}, {"wind_speed", "12"}}));
+    scene.clock.present = true; // the world's clock runs with the frames
+    std::vector<std::string> warnings;
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "o5", &warnings);
+    auto st = [&](const char *k) -> cvc::state & {
+      return cvc::state::instance(app)(cvc::ariadne::resolve_bind("o5", k));
+    };
+    chk(approx(st("water.foam_decay").value<double>(), 2.5) &&
+            approx(st("water.lod_foam").value<double>(), 150.0) &&
+            approx(st("water.lod_shade").value<double>(), 1500.0),
+        "water seeded water.foam_decay, water.lod_foam and water.lod_shade");
+    auto tick = [&]() {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5)); // the clock moves on
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer());
+      cvc::pump_exec_frame(app.exec_scheduler()); // the thresholds' task
+    };
+    tick();
+    tick();
+    auto group = sg.getGraphics("water");
+    auto near =
+        group ? std::dynamic_pointer_cast<cvc::gl::GeometryNode>(group->findChildByName("near"))
+              : nullptr;
+    auto far = group
+                   ? std::dynamic_pointer_cast<cvc::gl::GeometryNode>(group->findChildByName("far"))
+                   : nullptr;
+    if (near && far && near->isVisible()) {
+      auto uf = [](cvc::gl::GeometryNode &g, const char *name) {
+        float v = -1.0f;
+        g.shaderUniformf(name, v);
+        return v;
+      };
+      vtkTextureObject *a0 = near->shaderTexture("uFoamTex");
+      bool alternates = false;
+      for (int i = 0; i < 5; ++i) {
+        tick();
+        alternates = alternates || near->shaderTexture("uFoamTex") != a0;
+      }
+      vtkTextureObject *a1 = near->shaderTexture("uFoamTex");
+      chk(a1 && a1->GetWidth() == 512 && a1->GetHeight() == 256 &&
+              far->shaderTexture("uFoamTex") == a1 && uf(*near, "uFoamOn") == 1.0f,
+          "the persistent foam: one 512 x 256 atlas, bound to both meshes");
+      chk(alternates, "the foam's atlas steps with the world's clock (its two atlases alternate)");
+      chk(uf(*near, "uFoamDetail") == 1.0f && uf(*far, "uFoamDetail") == 0.0f,
+          "the near grid draws the foam's detail, the far grid its mean cover only");
+      // The thresholds: the whitecaps start at the guess (0.75) and take the calibration's. The
+      // task can finish within the frames above on a fast runner, so the guess is the constant,
+      // not the first value read here.
+      constexpr float kGuess = 0.75f;
+      float bias = uf(*near, "uFoamBias");
+      int frames = 0;
+      for (; frames < 1500 && bias == kGuess; ++frames) {
+        tick();
+        bias = uf(*near, "uFoamBias");
+      }
+      printf("  the thresholds landed after %d more frames: whitecaps %.4f (the guess %.2f)\n",
+             frames, bias, kGuess);
+      chk(bias != kGuess && bias > 0.6f && bias < 0.9f,
+          "the thresholds are found off the frame and replace the whitecaps' guess");
+      st("water.lod_foam").value(42.0);
+      st("water.lod_shade").value(420.0);
+      tick();
+      chk(uf(*near, "uLodFoam") == 42.0f && uf(*far, "uLodShade") == 420.0f,
+          "water.lod_foam and water.lod_shade are live");
+      // The samplers (WebGL2 has 16 a draw): the cascades in one atlas, the coast in another.
+      vtkTextureObject *disp = near->shaderTexture("uDisp");
+      chk(disp && disp->GetWidth() == 3 * 256 && disp->GetHeight() == 256 &&
+              near->shaderTexture("uCoast") && far->shaderTexture("uDisp") == disp &&
+              !near->shaderTexture("uDisp0") && !near->shaderTexture("uShoreGrid") &&
+              !near->shaderTexture("cvcHF"),
+          "the cascades' displacement in one atlas (uDisp) and the coast in one (uCoast)");
+      // The wind's fetch maps (O13) are in the coast atlas, past its planes: no sampler of their
+      // own (uWindFetch), so the water stays under 16 with a cloud_sky's shade and the shadows.
+      vtkTextureObject *coast = near->shaderTexture("uCoast");
+      const float coastN = uf(*near, "uCoastN"), coastRows = uf(*near, "uCoastRows");
+      chk(coast && !near->shaderTexture("uWindFetch") && !far->shaderTexture("uWindFetch") &&
+              far->shaderTexture("uCoast") == coast && coastN >= 1.0f && coastRows >= 1.0f &&
+              float(coast->GetWidth()) > coastN && float(coast->GetHeight()) >= coastRows,
+          "the wind's fetch maps sit in the coast atlas beside its planes (no uWindFetch)");
+      // Adaptive quality (O21): the scene's tier and scale (quality.tier, quality.scale: what
+      // AriRuntime's loop writes), or water.quality's own tier, pick what the water draws.
+      chk(approx(st("water.quality").value<double>(), -1.0),
+          "water.quality is seeded at -1: the scene's tier");
+      st("quality.tier").value(1.0);
+      st("quality.scale").value(0.5);
+      tick();
+      chk(uf(*near, "uLodShade") == 105.0f && uf(*near, "uFoamReach") == 0.25f &&
+              uf(*near, "uLodWaves") == 75.0f && uf(*far, "uFarReach") == 0.5f &&
+              uf(*near, "uFoamOn") == 1.0f && uf(*near, "uLodFoam") == 42.0f,
+          "tier 1 at half scale: the shading to a quarter (105 m), the persistent foam's reads to "
+          "a quarter of lod_foam, the short cascade and the far normal to half; the foam stays on");
+      st("water.quality").value(3.0); // the node's own tier, whatever the scene's
+      tick();
+      const float aloneBias = uf(*near, "uFoamBias");
+      chk(uf(*near, "uLodShade") == 1e-3f && uf(*near, "uLodWaves") == -1.0f &&
+              uf(*near, "uFoamOn") == 0.0f && uf(*near, "uFoamReach") == 0.0f &&
+              uf(*far, "uFarReach") == 0.5f,
+          "water.quality 3: the simple shading, no short cascade, no persistent foam");
+      chk(aloneBias > bias,
+          "... the whitecaps alone take the higher threshold that covers Monahan's share");
+      st("water.quality").value(-1.0);
+      st("quality.tier").value(0.0);
+      st("quality.scale").value(1.0);
+      tick();
+      chk(uf(*near, "uLodShade") == 420.0f && uf(*near, "uLodWaves") == 150.0f &&
+              uf(*near, "uFoamOn") == 1.0f && uf(*near, "uFoamReach") == 1.0f &&
+              uf(*near, "uFoamBias") == bias,
+          "tier 0 again: everything back as the keys have it");
+      // foam_decay 0: the atlas stops, and the whitecaps' threshold is found alone (once the key
+      // has held for 10 frames), as before O5.
+      st("water.foam_decay").value(0.0);
+      for (int i = 0; i < 14; ++i)
+        tick();
+      vtkTextureObject *s0 = near->shaderTexture("uFoamTex");
+      tick();
+      tick();
+      const float alone = uf(*near, "uFoamBias");
+      printf("  with foam_decay 0 the whitecaps' threshold is %.4f\n", alone);
+      chk(uf(*near, "uFoamOn") == 0.0f && near->shaderTexture("uFoamTex") == s0 && alone > bias,
+          "water.foam_decay 0: no persistent foam, the whitecaps' threshold alone (higher)");
+    } else {
+      printf("  SKIP the persistent foam: the water's cascades are not up (no float targets)\n");
+    }
+    for (const std::string &w : warnings)
+      printf("  warning: %s\n", w.c_str());
+  }
+
   // ── O18: the weather node and its storms in the sky ──────────────────────────────────────────
   // A weather node starts a storm when asked; the sky it drives closes and darkens under it, its
   // deck rises into cumulonimbus (built off the frame, then swapped in) while the storm is about,

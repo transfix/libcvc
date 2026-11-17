@@ -145,17 +145,21 @@ imports phast and copies none of it.
        order all 16 candidate pairs as the reference does.
    - Not here: the paper's learned DGU family (2,407 parameters). It is not in phast; it would
      come with Shubham's checkpoints (Phase 4).
-3. **The query.**
-   - `InitializeState` as the voltage-history fit: least squares over the prior-scaled
-     physical state at the window start, propagated through the frozen transition, with
-     success, optimality and data-Jacobian rank reported;
-   - `AssignState` (retain by identity map, add supplied states, optional reset);
-   - candidate rollouts with the six accounting channels;
-   - action cards (peak current, voltage range, accumulated loss);
-   - the certified ranking (admission `g + dg <= 0`, strict separation of score bounds).
-     Its outcome is "certified", "inconclusive" or "abstain".
-
-   Exposed as `cvc ph query` and pycvc.
+3. **The query (in review, stacked on Phase 2).**
+   - `InitializeState`: `fit_history`, the voltage-history fit (Eq. 204). Levenberg-Marquardt over
+     the prior-scaled physical state at the window start, through the frozen transition (scipy's
+     trust-region reflective solver in the paper). It reports success, optimality and
+     data-Jacobian rank, with the admission predicate, and a Laplace posterior
+     (`posterior_states`).
+   - `AssignState`: `assign_state` (Phase 2).
+   - Candidate rollouts with the accounting channels (`consequences`, Eq. 19); action cards
+     (`make_card`, Fig. 3); the certified ranking (`rank_candidates`, Eq. 45 and Prop. F.5);
+     sampled bounds (`sampled_bounds`).
+   - Measured on the four-DGU chain: the fit's forecasts are 0.29 mV / 26 mA / 22 mA at 0.5 s
+     (Table 8: 0.36 mV / 26 mA / 25 mA), and a symmetric cycle loses one rank. No certificate is
+     wrong; voltage-only queries are mostly inconclusive, full-state ones certify.
+   - pycvc: `fit_history`, `card`, `ph_rank`. Still to do: a `cvc ph query` subcommand (it needs
+     a query file format); the paper's analytic bounds (Prop. F.7/F.8) in place of sampled ones.
 4. **Training, if needed.** Either native, as `cvc::ph::se2_train` does (Adam on
    hand-written gradients through the split step), or export from phast's PyTorch into
    `"cvc-ph-law/1"`. Which one depends on whether Shubham's trained checkpoints can be

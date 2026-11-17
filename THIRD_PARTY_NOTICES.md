@@ -964,7 +964,12 @@ for both directions) are a C++/VTK port of ABYSSAL
 `cvcgl_ocean_fft`, `cvcgl_ocean_band` and `cvcgl_ewave` tests. The wave spectrum it is fed, `inc/cvc/ocean/spectrum.h` and
 `src/cvc/ocean/spectrum.cpp` in libcvc itself (JONSWAP with the TMA correction,
 Donelan-Banner spreading, the fetch law and the swell term), ports ABYSSAL's
-`src/ocean/OceanFFT.js` at 849ff7f4. The gusts' pulse over time in
+`src/ocean/OceanFFT.js` at 849ff7f4. The persistent foam and the water's shading in
+`src/cvcGL/ocean/OceanFoam.h` and `OceanFoam.cpp` (the turbulence integration of
+`src/ocean/OceanFFT.js`'s assemble pass; the windrow-carved foam, the footprint roughness and the
+light through crests of `src/ocean/OceanMesh.js`; the GGX, Smith and Fresnel terms of
+`src/gfx/ShadingGLSL.js`), used by the Ariadne `water` node and `lsystem_coast`, port the same
+commit. The gusts' pulse over time in
 `inc/cvc/algo/wind_field.h` and `src/cvc/algo/wind_field.cpp` ports
 `src/weather/Weather.js:107-110`, and the current's shape in `inc/cvc/ocean/current.h`
 and `src/cvc/ocean/current.cpp` (the curl of noise at two scales, drifting) follows
@@ -1009,6 +1014,12 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+Also from ABYSSAL at 849ff7f4, under the license above: `src/cvcGL/ocean/OceanCascades.h` and
+`OceanCascades.cpp` run OceanFFT's port for several cascades in one set of passes, and the
+adaptive quality loop in libcvc itself, `inc/cvc/ariadne/scene_quality.h` and
+`src/cvc/ariadne/scene_quality.cpp` (run by cvcGL's `AriRuntime`), ports `Quality.tick` in
+`src/core/Quality.js`.
 
 ## DejaVu Sans Mono 2.37
 

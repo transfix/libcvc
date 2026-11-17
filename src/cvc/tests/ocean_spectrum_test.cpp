@@ -429,6 +429,175 @@ TEST(OceanWhitecaps, TheBiasGivesMonahansShareOnTheCoastsSea) {
   }
 }
 
+// ── persistent foam (section 10.2, O5) ──────────────────────────────────────────────────────────
+
+// Foam builds while a texel folds and decays at its rate after: after the fold is gone it is
+// exp(-t / decay_s) of what it was, whatever the frame rate. Bubbles build at bubble_gain of the
+// rate and decay over bubble_decay_s; the crest is the injection; spray latches it and decays in a
+// sixth of a second. A stall's long step integrates at most max_dt_s.
+TEST(OceanFoam, BuildsWhileItFoldsAndDecaysAtItsRate) {
+  foam_persistence p; // decay 2.5 s, build 4 / s, bubbles 6 s at 0.55
+  foam_state s;
+  for (int i = 0; i < 6; ++i) // 0.1 s of a full fold: 0.4 of foam, 0.22 of bubbles
+    foam_step(s, 1.0, 1.0 / 60.0, p);
+  EXPECT_NEAR(s.foam, 0.4, 0.01);
+  EXPECT_NEAR(s.bubbles, 0.22, 0.01);
+  EXPECT_DOUBLE_EQ(s.crest, 1.0);
+  EXPECT_DOUBLE_EQ(s.spray, 1.0);
+  for (int i = 0; i < 30; ++i) // 0.5 s more: white (clamped at 1)
+    foam_step(s, 1.0, 1.0 / 60.0, p);
+  EXPECT_DOUBLE_EQ(s.foam, 1.0);
+  // The fold is gone: 2.5 s later the foam is e^-1 of 1, at 60 or at 25 frames a second.
+  foam_state a = s, b = s;
+  for (int i = 0; i < 150; ++i)
+    foam_step(a, 0.0, 1.0 / 60.0, p);
+  for (int i = 0; i < 62; ++i)
+    foam_step(b, 0.0, 0.04, p);
+  foam_step(b, 0.0, 0.02, p);
+  std::printf("[foam] after the fold: foam %.6f / %.6f (e^-1 %.6f), bubbles %.4f, spray %.2e\n",
+              a.foam, b.foam, std::exp(-1.0), a.bubbles, a.spray);
+  EXPECT_NEAR(a.foam, std::exp(-1.0), 1e-9);
+  EXPECT_NEAR(b.foam, std::exp(-1.0), 1e-9);
+  EXPECT_NEAR(a.bubbles, s.bubbles * std::exp(-2.5 / 6.0), 1e-9);
+  EXPECT_DOUBLE_EQ(a.crest, 0.0);
+  EXPECT_NEAR(a.spray, std::exp(-2.5 * 6.0), 1e-9);
+  // A 3 s stall integrates 0.25 s.
+  foam_state c = s;
+  foam_step(c, 0.0, 3.0, p);
+  EXPECT_NEAR(c.foam, std::exp(-0.25 / 2.5), 1e-12);
+  // A half-folded texel injects smoothstep: J = bias - ramp / 2 gives 0.5.
+  EXPECT_NEAR(foam_inject(0.75, 0.8, 0.1), 0.5, 1e-12);
+  EXPECT_DOUBLE_EQ(foam_inject(0.85, 0.8, 0.1), 0.0);
+  EXPECT_DOUBLE_EQ(foam_inject(0.65, 0.8, 0.1), 1.0);
+}
+
+// Aging foam thins into windrow streaks: fresh foam is white over most of the windrow noise, half
+// of it only where the noise is high, and it is gone below about 0.2 whatever the noise.
+TEST(OceanFoam, AgingFoamThinsIntoStreaks) {
+  int fresh = 0, half = 0;
+  for (int i = 0; i <= 100; ++i) {
+    const double w = i / 100.0;
+    fresh += foam_look(1.0, w) > 0.9 ? 1 : 0;
+    half += foam_look(0.5, w) > 0.9 ? 1 : 0;
+    EXPECT_DOUBLE_EQ(foam_look(0.2, w), 0.0) << w;
+    EXPECT_LE(foam_look(0.4, w), foam_look(0.6, w) + 1e-12) << w;
+  }
+  std::printf("[foam] white over %d %% of the windrow noise when fresh, %d %% at half\n", fresh,
+              half);
+  EXPECT_GT(fresh, 60);
+  EXPECT_LT(half, 50);
+  EXPECT_GT(half, 5);
+}
+
+namespace {
+std::vector<h0_field> coast_sea(double u) {
+  const std::vector<cascade> cs = make_cascades({251.0, 83.0, 29.0}, 0xC0A57ull);
+  sea_state s;
+  s.wind.speed_mps = u;
+  s.wind.fetch_m = 120000.0;
+  s.wind.dir_rad = std::atan2(0.55, 1.0);
+  std::vector<h0_field> hs;
+  for (const cascade &c : cs)
+    hs.push_back(build_h0(256, c, s));
+  return hs;
+}
+foam_params coast_foam() {
+  foam_params p;
+  p.ramp = 0.1;
+  p.fray = 0.12;
+  p.mesh_m = 2.0 * 220.0 / 223.0;
+  return p;
+}
+} // namespace
+
+// The history is deterministic: the same sea and parameters give the same bits, however its
+// Jacobians are stepped (all at once, or one at a time as a sliced task would).
+TEST(OceanFoam, TheHistoryIsDeterministic) {
+  const std::vector<h0_field> hs = coast_sea(12.0);
+  foam_params p = coast_foam();
+  p.mesh_m = 6.0; // a coarse lattice: this is about the bits, not the share
+  foam_persistence q;
+  foam_history a(hs, p, q), b(hs, p, q);
+  EXPECT_THROW(a.coverage({}), std::logic_error);
+  EXPECT_FALSE(a.ready());
+  a.step(0);
+  std::size_t calls = 0;
+  while (!b.step(1))
+    ++calls;
+  EXPECT_EQ(calls + 1, b.units());
+  ASSERT_TRUE(a.ready() && b.ready());
+  for (double bias : {0.7, 0.8, 0.9}) {
+    const foam_biases fb{bias, bias + 0.1};
+    const double ca = a.coverage(fb), cb = b.coverage(fb);
+    EXPECT_EQ(std::memcmp(&ca, &cb, sizeof ca), 0) << bias;
+    EXPECT_GE(ca + 1e-12, a.active(fb.whitecaps)) << bias;
+    EXPECT_GE(ca + 1e-12, a.persistent(fb.persistent)) << bias;
+  }
+  EXPECT_LT(a.persistent(0.8), a.persistent(0.9));
+  EXPECT_LT(a.active(0.7), a.active(0.8));
+  foam_persistence bad;
+  bad.decay_s = 0.0;
+  EXPECT_THROW(foam_history(hs, p, bad), std::invalid_argument);
+  bad = q;
+  bad.share = 1.0;
+  EXPECT_THROW(foam_history(hs, p, bad), std::invalid_argument);
+}
+
+// With persistent foam the drawn foam still covers Monahan's share for the wind on lsystem_coast's
+// sea: the aging foam alone draws its share of it (0.6), and the whitecaps' bias, lower than for
+// the whitecaps alone, makes up the rest.
+TEST(OceanFoam, TheBiasesGiveMonahansShareWithPersistentFoam) {
+  for (double u : {4.0, 9.0, 15.0, 25.0}) {
+    const std::vector<h0_field> hs = coast_sea(u);
+    const foam_params p = coast_foam();
+    const foam_persistence q;
+    const auto t0 = std::chrono::steady_clock::now();
+    foam_history h(hs, p, q);
+    h.step(0);
+    const auto t1 = std::chrono::steady_clock::now();
+    const double w = monahan_coverage(u);
+    const foam_biases b = h.biases_for(w);
+    const auto t2 = std::chrono::steady_clock::now();
+    const double inst = foam_field(hs, p).bias_for(w);
+    const double ms1 = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    const double ms2 = std::chrono::duration<double, std::milli>(t2 - t1).count();
+    const double cov = h.coverage(b), pers = h.persistent(b.persistent),
+                 act = h.active(b.whitecaps);
+    std::printf("[foam] U %4.1f m/s: Monahan %.4f %%: whitecaps' bias %.4f (alone %.4f), the "
+                "aging foam's %.4f; drawn %.4f %%, the aging foam %.4f %%, the whitecaps %.4f %% "
+                "(%zu Jacobians %.0f ms, the biases %.0f ms)\n",
+                u, 100.0 * w, b.whitecaps, inst, b.persistent, 100.0 * cov, 100.0 * pers,
+                100.0 * act, h.units(), ms1, ms2);
+    EXPECT_NEAR(cov / w, 1.0, 0.02) << u;
+    EXPECT_NEAR(pers / (q.share * w), 1.0, 0.03) << u;
+    EXPECT_LT(b.whitecaps, inst) << u;
+  }
+}
+
+// The history's time step: the long cascades' Jacobians every 0.4 s and 0.23 s, J a spline between,
+// give nearly the aging foam a history four times finer (and so near the GPU's frame-by-frame
+// integration) gives.
+TEST(OceanFoam, TheHistorysStepIsFineEnough) {
+  const std::vector<h0_field> hs = coast_sea(9.0);
+  const foam_params p = coast_foam();
+  const foam_persistence q;
+  foam_history coarse(hs, p, q);
+  foam_history_params fine_p;
+  fine_p.step_s = 0.1;
+  fine_p.dt_s = 1.0 / 60.0;
+  foam_history fine(hs, p, q, fine_p);
+  coarse.step(0);
+  fine.step(0);
+  const foam_biases b = coarse.biases_for(monahan_coverage(9.0));
+  const double c = coarse.persistent(b.persistent), f = fine.persistent(b.persistent);
+  const double cc = coarse.coverage(b), fc = fine.coverage(b);
+  std::printf("[foam] at the 9 m/s biases the 0.4 s history's aging foam covers %.4f %% (drawn "
+              "%.4f %%), a 0.1 s one's %.4f %% (%.4f %%); %zu and %zu Jacobians\n",
+              100.0 * c, 100.0 * cc, 100.0 * f, 100.0 * fc, coarse.units(), fine.units());
+  EXPECT_NEAR(c / f, 1.0, 0.1);
+  EXPECT_NEAR(cc / fc, 1.0, 0.1);
+}
+
 TEST(OceanH0, RejectsABadTile) {
   cascade c;
   sea_state s;

@@ -1209,25 +1209,36 @@ pycvc's state_exec scripts with the sanitizer runtime preloaded into the interpr
 
 | Leg | Compiler, flags | Runs |
 |---|---|---|
-| `tsan` | the runner's gcc 13, `-fsanitize=thread` | every binary in `SAN_CXX_TESTS` (the lock, scheduler, async, coordinator, Ariadne and hazards suites, Stage 0's state_exec suites, `state_exec_groups_test`, `exec_pool_test`), every script in `SAN_PY_TESTS`, `mt.multi_exec` and `mt.groups` |
+| `tsan` | the runner's gcc 13, `-fsanitize=thread` | every binary in `SAN_CXX_TESTS` (the lock, scheduler, async, coordinator, Ariadne and hazards suites, Stage 0's state_exec suites, `state_exec_groups_test`, `exec_pool_test`, `stream_test`, `net_ws_client_test`, `ariadne_host_test`), every script in `SAN_PY_TESTS`, `mt.multi_exec` and `mt.groups` |
 | `asan-ubsan` | the runner's gcc 13, `-fsanitize=address,undefined` | the same |
-| `clang-tsan` | the runner's clang (S1-Q9), `-fsanitize=thread` | `state_exec_groups_test`, `exec_pool_test`, `state_exec_hazards_test`, the scheduler, async, async-call, lane, thread-pool and lock binaries, every script in `SAN_PY_TESTS`, and `mt.groups` |
+| `clang-tsan` | the runner's clang (S1-Q9), `-fsanitize=thread` | `state_exec_groups_test`, `exec_pool_test`, `state_exec_hazards_test`, the scheduler, async, async-call, lane, thread-pool and lock binaries, `ariadne_runtime_test` with `CVC_EXEC_THREADS=4` and `--gtest_filter=-AppLockManager.*`, `state_lifetime_stress_test`, `stream_test`, `net_ws_client_test`, every script in `SAN_PY_TESTS`, and `mt.groups` |
+
+Each C++ binary runs bare (`--gtest_filter=-*Stress*`), unless the leg's `cxx_runs` (run.sh's
+`SAN_CXX_RUNS`) gives it variables and options of its own, one line a binary, `<name>: [VAR=VALUE
+...] [--option ...]`: the clang leg's `ariadne_runtime_test: CVC_EXEC_THREADS=4
+--gtest_filter=-AppLockManager.*` runs Ariadne with a pool built from the tree at up to four
+workers (three on the 4-vCPU runner, the pool clamping to `hardware_concurrency() - 1`; a case that
+sizes its own pool keeps it) and the lock manager's `auto` mode shared (the `AppLockManager` cases
+assert the single one and are left out, as in CTest's `ariadne_runtime_test_threads_auto`).
+`run.sh` adds `*Stress*` to such a filter's negative patterns.
 
 gcc links its sanitizer runtimes as shared libraries, which `run.sh` finds with `ldd` and preloads;
 clang links TSan's into each executable, so for the interpreter `run.sh` preloads clang's shared
 `libclang_rt.tsan`. Suppressions go in `.github/sanitizers/*.supp`, each naming the race it hides
-and why it is not a bug; phase L3 and threaded execution's Stages 0 and 1a added none. Each job
+and why it is not a bug; phase L3 and threaded execution's Stages 0, 1a and 1b added none. Each job
 names the cases it is there for, one `<run>: <text>` line each that the run's log must contain
 (gtest's `OK ]` line, the pycvc script's `ok:` line, a bench point's params), so a case renamed,
 skipped or filtered out fails the job instead of leaving it green: the matrix's `required`, per
-leg, and Stage 1a's `SAN_REQUIRED_S1A`, which every leg appends to its own.
+leg, and Stage 1a's `SAN_REQUIRED_S1A` and Stage 1b's `SAN_REQUIRED_S1B`, which every leg appends
+to its own.
 
 | Work | Legs | Required |
 |---|---|---|
 | Phase L3 | `tsan` | `LocksThreads`' LT-2, LT-3, LT-3b, LT-4, LT-10, LD-6, PI-7, PI-10, LX-5, LX-7, LX-10 and LX-11; the model check's two- and three-home configurations at bound 2 (`LocksModel.Homes*`, `LocksModel.TwoHomes*`); pycvc's LT-1, LT-3, LT-7, LT-8, LT-10 smoke and LD-5 |
 | Phase L3 | `asan-ubsan` | LT-2, LT-3b on each scheduler (a post racing its scheduler's destruction), LX-7, LT-10; `LocksModel.Homes*`, `LocksModel.TwoHomes*` |
 | Threaded Stage 0 (td 8.1) | `tsan`, `asan-ubsan` | the HZ-1..HZ-14 cases (read-only built-in class dicts, `state-data-set`'s copies and refusals, deletes against readers, chrooted watch roots, fork in an `Exec` and an Ariadne action, bus-thread controls, whole `print` lines, the pins that release the chroot or target first, stops from another thread, futures awaited twice, the init lane's app-host future) in the exceptions, intrinsics, hazards, data-step, lifetime, scheduler, async, async-call, coordinator and Ariadne binaries and their pycvc twins; `mt.multi_exec`'s three points (HZ-10) |
-| Threaded Stage 1a (S1.md 4) | `tsan`, `clang-tsan`, `asan-ubsan` | every case of `state_exec_groups_test`, 28 (RX-1..RX-3, BF-1, BF-1a, PO-2, GR-1..GR-12, RB-1, AS-1, OC-1, DT-1, DT-2, GL-1, GL-2, PA-1, FF-1, FF-2), and of `exec_pool_test`, 33 (the pool, the group and the app's pool, with the review rounds' regression cases, its three `ExecGroupDeathTest` cases among them): a case added to either adds its line; KO-1 and KO-2 (`state_exec_async_test`); the foreign-future cases of `state_exec_async_calls_test` (another scheduler's threaded future raises, its inline one is its value, `await-all` refuses one before it waits, a gone scheduler's raises); pycvc's GR-5, IS-2, AR-4, FF-3 and PO-1 (`test_pycvc_exec_pool.py`), `test_pycvc_exec.py`'s `ExecPool` cases (order, async functions and the first failure; the idle limit; `close()` and the calls refused during a batch; frame yields keeping a program alive; the size following the pool's threads; frame waiters waiting for the frame) and its registry case (`Exec.collect_cycles`), and `test_pycvc_state_exec_locks.py`'s pump-owner cases (`run()` holds the owner to its return); `mt.groups`' three points at `t=8 groups=8` |
+| Threaded Stage 1a (S1.md 4) | `tsan`, `clang-tsan`, `asan-ubsan` | every case of `state_exec_groups_test`, 28 (RX-1..RX-3, BF-1, BF-1a, PO-2, GR-1..GR-12, RB-1, AS-1, OC-1, DT-1, DT-2, GL-1, GL-2, PA-1, FF-1, FF-2), and of `exec_pool_test`, 34 (the pool, the group and the app's pool, with the review rounds' regression cases, its three `ExecGroupDeathTest` cases among them): a case added to either adds its line; KO-1 and KO-2 (`state_exec_async_test`); the foreign-future cases of `state_exec_async_calls_test` (another scheduler's threaded future raises, its inline one is its value, `await-all` refuses one before it waits, a gone scheduler's raises); pycvc's GR-5, IS-2, AR-4, FF-3 and PO-1 (`test_pycvc_exec_pool.py`), `test_pycvc_exec.py`'s `ExecPool` cases (order, async functions and the first failure; the idle limit; `close()` and the calls refused during a batch; frame yields keeping a program alive; the size following the pool's threads; frame waiters waiting for the frame) and its registry case (`Exec.collect_cycles`), and `test_pycvc_state_exec_locks.py`'s pump-owner cases (`run()` holds the owner to its return); `mt.groups`' three points at `t=8 groups=8` |
+| Threaded Stage 1b (S1.md 4) | `tsan`, `clang-tsan`, `asan-ubsan` | every Stage 1b case of `ariadne_runtime_test`, `state_lifetime_stress_test` and `state_exec_async_calls_test`, 40 (a case added to them adds its line): in `ariadne_runtime_test`, section 4's IS-1b, AR-1, AR-2, AR-3, AR-3b (so in both TSan legs), SP-1, EL-1, FF-3's init half and HZ-8 (the teardown reap, S1-Q8; once a leg, moved from Stage 0's lists), and the implementers' own: one pump of group 0 a frame, the init lane's registry, a reload's reaped resident, providers by kind, isolated documents (`idle` and `wait_idle`, eligibility, moves and the streams that follow them, late host verbs, teardown) with the three `AriadneIsolatedDocsDeathTest` refusals, net's cancelled transfer and started requests, and streams posting to their opener's group; PIN-1's two in `state_lifetime_stress_test` (`uri_state`'s chains and a stream's descriptor pins release the leaf first); a started call's finisher and a shutdown's cancel hook in `state_exec_async_calls_test`. Plus the two cross-thread Stage 1b cases of binaries no leg ran before: `stream_test`'s producer-thread posts to the opener's group and `net_ws_client_test`'s two threads sending whole messages on one connection. `ariadne_host_test` runs in the gcc legs for ASan, with no required line |
 
 The death tests use gtest's `threadsafe` style: the child re-runs the binary for its one case,
 and gtest itself (a cvcpkg dependency) is not instrumented. The sanitizers leave `SIGABRT` alone
@@ -1239,7 +1250,7 @@ seen: gtest keeps the child's output unless the case fails.
 TS-2 (MSVC's `/fsanitize=address` over the GR and IS cases) and TS-3 (a Windows debug run of
 GR-1..GR-12 with `CVC_EXEC_VERIFY=1`) are local runs, recorded in the PR (S1-Q9). The clang leg's
 first run is a baseline on a scratch branch: a report in code Stage 1 does not touch is fixed if
-small, else recorded; nothing is suppressed.
+small, else recorded; nothing is suppressed. Its first Ariadne run (Stage 1b's) is one again.
 
 ### The Deep Runs (locks-deep.yml)
 

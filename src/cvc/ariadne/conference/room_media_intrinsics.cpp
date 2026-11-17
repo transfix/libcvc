@@ -23,6 +23,7 @@
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h> // default_for / local_node_id (the publisher's pid)
+#include <cvc/state/state_exec/async_host.h> // ictx.host->parking_scheduler(): the caller's group
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/types.h>
@@ -157,9 +158,11 @@ bool room_publish(cvc::app &app, sx::stream_bridge &bridge, const std::string &l
   return true;
 }
 
-std::unique_ptr<sx::stream> room_subscribe(cvc::app &app, sx::stream_bridge &bridge,
-                                           const std::string &room_id,
-                                           const std::string &target_pid, const std::string &kind) {
+namespace {
+// room_subscribe, with the proxy's events posted to `sched` (null: group 0, the app's).
+std::unique_ptr<sx::stream> subscribe_on(cvc::app &app, sx::stream_bridge &bridge,
+                                         const std::string &room_id, const std::string &target_pid,
+                                         const std::string &kind, se::async_scheduler *sched) {
   const std::string base = stream_desc_path(room_id, target_pid, kind);
   const std::string endpoint = read_str(app, field(base, "endpoint"));
   const std::string id = read_str(app, field(base, "id"));
@@ -174,6 +177,7 @@ std::unique_ptr<sx::stream> room_subscribe(cvc::app &app, sx::stream_bridge &bri
   // on).
   sx::stream_params p = read_descriptor_params(app, base);
   p.subscriber_depth = 8; // room for a downstream ring subscription (player / widget)
+  p.scheduler = sched;
   std::unique_ptr<sx::stream> proxy = sx::stream::open(app, p);
   if (!proxy)
     return nullptr; // unsized/duplicate
@@ -182,6 +186,13 @@ std::unique_ptr<sx::stream> room_subscribe(cvc::app &app, sx::stream_bridge &bri
     return nullptr;
   }
   return proxy;
+}
+} // namespace
+
+std::unique_ptr<sx::stream> room_subscribe(cvc::app &app, sx::stream_bridge &bridge,
+                                           const std::string &room_id,
+                                           const std::string &target_pid, const std::string &kind) {
+  return subscribe_on(app, bridge, room_id, target_pid, kind, nullptr);
 }
 
 void room_relay_tick(cvc::app &app, const std::string &room_id, sx::stream_relay &relay,
@@ -227,9 +238,13 @@ void register_room_media_intrinsics(cvc::app &app, sx::stream_bridge &bridge,
                                     const std::string &local_endpoint,
                                     const std::string &relay_endpoint) {
   register_action_intrinsics(
-      app, [&app, &bridge, local_endpoint, relay_endpoint](std::shared_ptr<se::environment> env,
-                                                           se::intrinsics_context &ictx) {
+      app,
+      [&app, &bridge, local_endpoint, relay_endpoint](std::shared_ptr<se::environment> env,
+                                                      se::intrinsics_context &ictx) {
         se::document_scope *doc = ictx.document;
+        // The calling program's group, where a subscribed proxy posts its events (td 4.9); null
+        // (an inline host): group 0. The host-side bridge and relay streams stay on group 0.
+        se::async_scheduler *group = ictx.host ? ictx.host->parking_scheduler() : nullptr;
 
         // (room-publish ROOM {kind token}) -> { ok kind token }.
         se::builtins::register_fn(
@@ -270,7 +285,7 @@ void register_room_media_intrinsics(cvc::app &app, sx::stream_bridge &bridge,
         // (room-subscribe ROOM PID KIND) -> { ok token pid kind }.
         se::builtins::register_fn(
             env, "room-subscribe",
-            [&app, &bridge, doc](std::span<const se::value_t> args) -> se::value_t {
+            [&app, &bridge, doc, group](std::span<const se::value_t> args) -> se::value_t {
               if (!doc)
                 return err("room-subscribe: no document scope");
               if (args.size() < 3)
@@ -281,7 +296,7 @@ void register_room_media_intrinsics(cvc::app &app, sx::stream_bridge &bridge,
               if (room_id.empty() || target_pid.empty() || kind.empty())
                 return err("room-subscribe: ROOM handle, PID and KIND are required");
               std::unique_ptr<sx::stream> proxy =
-                  room_subscribe(app, bridge, room_id, target_pid, kind);
+                  subscribe_on(app, bridge, room_id, target_pid, kind, group);
               if (!proxy)
                 return err("room-subscribe: no such published stream (or the pull failed)");
               // Hand the proxy to the document so stream-play-audio / a stream_view can consume it.
@@ -293,7 +308,11 @@ void register_room_media_intrinsics(cvc::app &app, sx::stream_bridge &bridge,
                   {"kind", se::value_t(kind)},
               });
             });
-      });
+      },
+      // host_proxied (S1-Q7): the verbs write the app-global room tree raw and drive the bridge,
+      // so in an `any` group they run on the host thread. The body reads only the context and
+      // binds natives into the new env, so a spawned child may run it on a worker.
+      se::provider_affinity::host_proxied);
 }
 
 } // namespace conference

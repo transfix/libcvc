@@ -13,7 +13,9 @@ Checks:
   5. rewiring the same laws (the line to the other bus) changes the future;
   6. a DC microgrid of nonlinear DGUs: ph_microgrid_json, system_json read back, storage()
      from voltages and currents, and its books;
-  7. errors: a wrong-sized state, an unknown scheme, a malformed file.
+  7. a query: fit_history from bus voltages alone, a candidate's card, and ph_rank's certified,
+     inconclusive and abstaining outcomes;
+  8. errors: a wrong-sized state, an unknown scheme, a malformed file.
 Script-style, like the other pycvc tests; self-skips (exit 0) when the running pycvc predates the
 bindings.
 """
@@ -126,7 +128,33 @@ if hasattr(pycvc, "ph_microgrid_json"):
     else:
         raise AssertionError("an unknown DGU kind did not raise")
 
-# 7. Errors.
+# 7. A query: the state from bus voltages alone, a candidate's card, and the certified ranking.
+if hasattr(pycvc.ph_composite, "fit_history") and hasattr(pycvc, "ph_rank"):
+    grid3 = pycvc.ph_composite(pycvc.ph_microgrid_json(3, edges=[(0, 1), (1, 2)], line_r=[0.3, 0.5], line_l=[0.8]))
+    truth_e = [1.1, 0.1, 0.9, -0.05, 1.2, 0.2, 0.05, -0.02]
+    xt = grid3.storage(truth_e)["x"]
+    u3 = [-0.1, 1.0, -0.12, 1.05, -0.08, 0.95]
+    run = grid3.simulate(xt, u3, steps=100, dt=0.01)["x"]
+    volts = [0, 2, 4]  # readout indices of the bus voltages
+    steps = list(range(0, 101, 5))
+    samples = [[grid3.effort(run[k])[c] for c in volts] for k in steps]
+    mean = [1.0, 0.1, 1.0, 0.1, 1.0, 0.1, 0.0, 0.0]
+    scale = [0.4, 0.3, 0.4, 0.3, 0.4, 0.3, 0.2, 0.2]
+    fit = grid3.fit_history([u3] * 100, steps, volts, samples, mean, scale)
+    check(fit["admitted"] and fit["rank"] == 8 and fit["evals"] <= 20, f"fit: {fit}")
+    e_now, e_true = grid3.effort(fit["x_now"]), grid3.effort(run[100])
+    check(max(abs(e_now[c] - e_true[c]) for c in volts) < 1e-3, "the fit pins the bus voltages")
+    card = grid3.card(fit["x_now"], u3, 100, [("peak", "max_abs", [6, 7]), ("vmin", "min", volts),
+                                             ("loss", "total_loss", [])])
+    check(set(card) == {"peak", "vmin", "loss"} and card["loss"] > 0, f"card: {card}")
+    r = pycvc.ph_rank([{"peak": 0.5, "loss": 1.0}, {"peak": 0.6, "loss": 2.0}, {"peak": 1.5, "loss": 0.1}],
+                      [{"peak": 0.1, "loss": 0.1}] * 3, [("peak", 1.0)], {"loss": 1.0})
+    check(r["best"] == 0 and r["outcome"] == "certified" and r["feasible"] == ["admitted", "admitted", "rejected"]
+          and r["order"][0][1] == 1, f"ranking: {r}")
+    r = pycvc.ph_rank([{"peak": 2.0, "loss": 1.0}], [{}], [("peak", 1.0)], {"loss": 1.0})
+    check(r["outcome"] == "abstain" and r["best"] is None, f"abstain: {r}")
+
+# 8. Errors.
 for bad, what in ((lambda: g.energy([1.0, 2.0]), "a wrong-sized state"),
                   (lambda: g.simulate(x0, u0, coupling="trapezoid"), "an unknown coupling"),
                   (lambda: pycvc.ph_composite('{"format": "cvc-ph-system/9"}'), "a wrong format"),
