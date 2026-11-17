@@ -636,6 +636,9 @@ struct ConferenceSession {
   // SceneGraph; the camera orbits our avatar. Made by attach_view (window mode only); room_view_
   // is declared after holon_ and torn down first (stop()).
   std::unique_ptr<cvc::ariadne::holon> holon_;
+  // The room's entities (the vehicles the relay's document runs; room_entities.h), played out from
+  // the same pose snapshots by a holon of their own, and drawn by room_view.
+  std::unique_ptr<cvc::ariadne::entity_playout> entities_;
   std::unique_ptr<gla::room_view> room_view_;
   // The Avatar window's model: our avatar's settings, energy budget and ledger, with their recent
   // history, published to the document as self.avatar.* (avatar_panel.h).
@@ -1191,6 +1194,7 @@ struct ConferenceSession {
       return;
     holon_ = std::make_unique<cvc::ariadne::holon>(cvc::ariadne::holon_role::client,
                                                    cvc::ariadne::room_holon_config());
+    entities_ = std::make_unique<cvc::ariadne::entity_playout>(cvc::ariadne::room_holon_config());
     set_lead(0.06); // until the first round trip is measured (net_step)
     room_view_ =
         std::make_unique<gla::room_view>(view, *app_, room_, pid_, view.scene().getStatePrefix());
@@ -1334,10 +1338,12 @@ struct ConferenceSession {
       lane_samples.swap(lane_pose_samples_);
     }
     for (const cvc::pose_snapshot &snap : snaps)
-      cvc::ariadne::apply_pose_snapshot(*holon_, pose_decoder_, snap);
+      cvc::ariadne::apply_pose_snapshot(*holon_, pose_decoder_, snap, entities_.get());
     for (const auto &[tick, samples] : lane_samples) // decoded (and acked) on the pose lane
-      cvc::ariadne::apply_pose_samples(*holon_, samples, tick);
+      cvc::ariadne::apply_pose_samples(*holon_, samples, tick, entities_.get());
     cvc::ariadne::client_pump(*holon_, *app_, room_, pid_, f.wall_dt);
+    if (entities_)
+      entities_->pump(*app_, room_, f.wall_dt);
     avatar_panel_.update(*holon_, *app_, room_, pid_, f.wall_dt);
     if (avatar_panel_.sampled())
       avatar_panel_.publish(*app_, prefix_);

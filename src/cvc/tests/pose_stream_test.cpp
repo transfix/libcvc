@@ -4,10 +4,13 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cvc/ariadne/conference/room_entities.h>
 #include <cvc/ariadne/conference/room_pose_relay.h>
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/holon_sync.h>
 #include <cvc/ariadne/pose_stream.h>
+#include <cvc/core/app.h>
+#include <cvc/state/state.h>
 #include <cvc/state/state_transport.h>
 #include <gtest/gtest.h>
 #include <map>
@@ -295,4 +298,119 @@ TEST(PoseStream, AClientAppliesItsSnapshotsToItsHolon) {
   EXPECT_EQ(cvc::ariadne::apply_pose_snapshot(client, dec, s), 2u);
   EXPECT_TRUE(client.pose_known("peer"));
   EXPECT_NEAR(client.state("peer").position.x, 5.2, 1e-9);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The room's entities (room_entities.h, WD3): who they are in the room tree's entities section,
+// where they are on the pose stream beside the participants, played out by a client of its own.
+
+namespace {
+namespace rc = cvc::ariadne::conference;
+
+rc::room_entity entity(std::uint64_t id, const std::string &name) {
+  rc::room_entity e;
+  e.id = id;
+  e.name = name;
+  e.archetype = "rover";
+  e.plant = "kinematic";
+  e.controller = "nav@1";
+  e.team = 2;
+  e.color = {0.1f, 0.2f, 0.3f};
+  e.size = {4.6, 2.1, 1.8};
+  e.look.kind = "file";
+  e.look.path = "rover.glb";
+  e.look.scale = 2.0;
+  return e;
+}
+} // namespace
+
+TEST(RoomEntities, TheirPidsAreNoParticipants) {
+  EXPECT_EQ(rc::entity_pid(7), "~e7");
+  EXPECT_EQ(rc::entity_key(7), "e7");
+  std::uint64_t id = 0;
+  ASSERT_TRUE(rc::parse_entity_pid("~e42", id));
+  EXPECT_EQ(id, 42u);
+  EXPECT_FALSE(rc::is_entity_pid("e42"));
+  EXPECT_FALSE(rc::is_entity_pid("~e"));
+  EXPECT_FALSE(rc::is_entity_pid("~ex"));
+  EXPECT_FALSE(rc::is_entity_pid("alice"));
+}
+
+TEST(RoomEntities, TheSectionCarriesThemAndMarksTheOnesThatWent) {
+  cvc::app app;
+  EXPECT_FALSE(rc::read_room_entities_stamp(app, "r").written());
+  const cvc::ariadne::section_stamp first =
+      rc::write_room_entities(app, "r", {entity(1, "lead"), entity(3, "wing")});
+  EXPECT_TRUE(first.written());
+  const std::vector<rc::room_entity> got = rc::read_room_entities(app, "r");
+  ASSERT_EQ(got.size(), 2u);
+  EXPECT_EQ(got[0], entity(1, "lead"));
+  EXPECT_EQ(got[1], entity(3, "wing"));
+  // One goes: it stays in the tree, not present; the revision moves.
+  rc::write_room_entities(app, "r", {entity(3, "wing")});
+  const std::vector<rc::room_entity> after = rc::read_room_entities(app, "r");
+  ASSERT_EQ(after.size(), 1u);
+  EXPECT_EQ(after[0].id, 3u);
+  EXPECT_FALSE(rc::read_room_entities_stamp(app, "r").same(first));
+  EXPECT_EQ(cvc::state::instance(app)(rc::room_entities_path("r") + ".e1.present").value(), "0");
+}
+
+// The relay sends every viewer the entities with the participants, each at most every
+// entity_interval_ticks; a client plays them out by the section, and drops the one that went.
+TEST(RoomEntities, TheRelaySendsThemAndAClientPlaysThemOut) {
+  using cvc::ariadne::holon;
+  using cvc::ariadne::holon_role;
+  holon server(holon_role::server);
+  server.add_participant("viewer", false, walking(0, 0, 0, 0));
+  capture_transport tp;
+  tp.connected = {"viewer"};
+  rc::room_pose_relay relay;
+  relay.add_transport(&tp);
+  relay.set_rtt("viewer", 20.0); // a snapshot every step
+  cvc::app app;                  // the client's replica of the room tree
+  rc::write_room_entities(app, "r", {entity(1, "lead"), entity(2, "wing")});
+  holon client(holon_role::client);
+  cvc::ariadne::entity_playout playout;
+  pose_stream_decoder dec;
+  const double dt = server.clock().fixed_dt();
+  double x1 = 0.0, x2 = 10.0;
+  int entity_entries = 0, snapshots = 0;
+  const auto run = [&](int steps, bool with_wing) {
+    for (int i = 0; i < steps; ++i) {
+      server.advance(2 * dt); // a room step: two ticks
+      x1 += 2 * dt * 3.0;
+      x2 += 2 * dt * 1.0;
+      std::vector<pose_subject> ents = {subject("~e1", walking(x1, 0, 3.0, 0))};
+      if (with_wing)
+        ents.push_back(subject("~e2", walking(x2, 5, 1.0, 0)));
+      tp.sent.clear();
+      relay.step(server, static_cast<std::uint64_t>(i), nullptr, &ents);
+      for (const auto &[viewer, snap] : tp.sent) {
+        ++snapshots;
+        std::vector<cvc::ariadne::pose_sample> out;
+        ASSERT_TRUE(dec.decode(snap, out));
+        for (const auto &smp : out)
+          entity_entries += rc::is_entity_pid(smp.pid) ? 1 : 0;
+        cvc::ariadne::apply_pose_samples(client, out, snap.server_tick, &playout);
+      }
+      playout.pump(app, "r", 2 * dt);
+    }
+  };
+  run(40, true);
+  EXPECT_EQ(playout.shown(), (std::vector<std::uint64_t>{1, 2}));
+  ASSERT_NE(playout.find(2), nullptr);
+  EXPECT_EQ(playout.find(2)->name, "wing");
+  // At most every 4 ticks (two room steps) an entity's entry, with the keyframe's.
+  EXPECT_GT(snapshots, 0);
+  EXPECT_LE(entity_entries, 2 * (40 / 2 + 2));
+  EXPECT_GE(entity_entries, 2 * (40 / 2 - 2));
+  cvc::physics::pose p1;
+  ASSERT_TRUE(playout.pose(1, p1));
+  EXPECT_GT(p1.position.x, 1.0) << "it moves";
+  EXPECT_LT(std::fabs(p1.position.x - x1), 2.0) << "behind its newest by the playout's delay";
+  // The wing goes: off the stream and out of the section; the client drops it.
+  rc::write_room_entities(app, "r", {entity(1, "lead")});
+  run(10, false);
+  EXPECT_EQ(playout.shown(), (std::vector<std::uint64_t>{1}));
+  EXPECT_EQ(playout.entities().size(), 1u);
 }
