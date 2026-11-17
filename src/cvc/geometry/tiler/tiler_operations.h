@@ -378,20 +378,6 @@ void build_tiling_table_phase2(Tiler_workspace &workspace);
 /// A unit per untiled region (each filled in one piece: its partition and interpolation).
 step_task build_tiling_table_phase2_steps(Tiler_workspace &workspace);
 
-template <typename ContourIterator>
-Tiles build_tiling_table(ContourIterator s1_begin, ContourIterator s1_end, ContourIterator s2_begin,
-                         ContourIterator s2_end, const Correspondences &correspondences,
-                         const Vertex_map<Tiling_region> &tiling_regions,
-                         const OTV_table &otv_table, const Hierarchies &hierarchies) {
-  Tiles tiles;
-  Tiler_workspace workspace(correspondences, tiling_regions, otv_table, hierarchies, tiles);
-  build_tiling_table(workspace);
-  //   for (ContourIterator cit = s1_begin; cit != s1_end; ++cit)
-  //   {
-  //     build_tiling_table(*cit, correspondences, tiling_regions, otv_table, hierarchies, tiles);
-  //   }
-  return tiles;
-}
 
 } // namespace cvc::tiler
 
