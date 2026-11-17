@@ -1,6 +1,6 @@
 # Physics-Aware Water, Wind and Weather — Roadmap
 
-**Status:** revision 1 (2026-11-09), being built. On master: O1–O4, O6 and O7 (the water bodies, the CPU spectrum and h0, the shore damping and shore layer, physics fields with a free surface, and debris riding the sea). In review: O8–O11, O2b and O5's whitecap cover (the wake solver, bodies making waves, forces at a point, hulls and a drivable boat, the sea's height for its wind, and whitecaps covering Monahan's share, §8 E0b). Not started: the rest of O5, and O12 on (shading and persistent foam, the boat plant, wind and sea state, weather, the Ariadne node and arisrv). §12 has the order. It follows `OCEAN-AND-VOLUMETRIC-TERRAIN-NOTES.md` (how the FFT ocean was ported), `WATER-RENDERING-ROADMAP.md` (inland water, W1–W10), `WORLD-GEOMETRY-ROADMAP.md` (G6 fields), `GENERATED-WORLD-ROADMAP.md`, `ARIADNE_WORLDS.md` and `WORLD-CLOCK-SYNC-ROADMAP.md`. Where this document and one of those disagree about what is built, the code wins. Where they disagree about a plan, raise it as a decision (§15).
+**Status:** revision 1 (2026-11-09), being built. On master: O1–O4, O2b, O5's whitecap cover, O6–O11, O15 and O17 (the water bodies, the CPU spectrum and h0, the sea's height for its wind, whitecaps covering Monahan's share (§8 E0b), the shore damping and shore layer, physics fields with a free surface, debris riding the sea, the wake solver, bodies making waves, forces at a point, hulls and a drivable boat in lsystem_coast, the Ariadne `water` node in terrain_lab.ari that draws the water with the swell breaking on its coast, floats bodies and lets them make waves (§11.2), and the live sky with the clouds' shade on the water (§9 F1)). Not started on master: the rest of O5 (shading and persistent foam), O12–O14 (the boat plant, wind and sea state), O16 (arisrv; it waits on §11.4's prerequisites, and a room still leaves a `generated_world` out) and O18–O21 (weather, rain, storms, adaptive quality). §12 has the order. It follows `OCEAN-AND-VOLUMETRIC-TERRAIN-NOTES.md` (how the FFT ocean was ported), `WATER-RENDERING-ROADMAP.md` (inland water, W1–W10), `WORLD-GEOMETRY-ROADMAP.md` (G6 fields), `GENERATED-WORLD-ROADMAP.md`, `ARIADNE_WORLDS.md` and `WORLD-CLOCK-SYNC-ROADMAP.md`. Where this document and one of those disagree about what is built, the code wins. Where they disagree about a plan, raise it as a decision (§15).
 
 **Goal.** Water, wind and weather become parts of the world model. The terrain generator decides where the sea, lakes, ponds and streams are. Waves react to every shore. Bodies float on, and push through, the same waves that are drawn. Boats leave wakes. Wind and storms change the water, the sky, the ground and the physics together. The same scene runs **locally** (arigl, arigl-web) and **hosted** (arisrv), and every client draws the same water.
 
@@ -159,6 +159,12 @@ W0 is the seam between that roadmap's hydrology and this one's dynamics. Nothing
 It is rebuilt on regeneration. It is CPU-sampleable for physics and uploaded as an RGBA32F texture beside the seabed `HeightFieldTexture`. The phase P depends on the swell's period, so it is built with the shore layer (O4), not with the grid.
 
 **As built (O1).** `cvc/world/water_bodies.h`: `build_water_bodies` from ground samples, and `generated_world::water` built in a `world_builder` stage (`shore`) from the terrain mesh's samples, roads graded in, at most 1025 a side. Native cost: 4 ms on the 1.2 km world, 70–105 ms on the 5 km and 10 km worlds (a 1001² grid); not yet measured in wasm. terrain_lab's debug view is the world panel's Colour by → Water bodies, and the panel lists the bodies (`world.stats.water`).
+
+**Waterline slivers (2026-11-15).** A dry ridge one terrain sample wide and just over the level drew as a ruler-straight hairline out of the water.
+- The case: on terrain_lab's 5 m mesh, two samples at (565, 555) and (565, 560), 0.03 and 0.01 m over the level with water 0.9–1.6 m deep round them, drew a 5 m line across the north-east bay.
+- `lower_waterline_slivers` (`water_bodies.h`) lowers every dry sample less than `generated_world_params::waterline_sliver_m` (0.5 m) over the level that has water on both sides along x or y. It goes to the mean of those wet neighbours, in passes until none is left. A road's bed is kept.
+- `world_builder` runs it at the end of `grade`, once the mesh has its final heights: a road's grade re-samples the base relief near it, which brought slivers back when the pass ran earlier. So the drawn ground, physics, nav, the water bodies and the water node's bed all read the cleaned mesh.
+- On terrain_lab's world it lowers 141 samples (`generated_world::waterline_slivers`), and no thin sample within 0.5 m of the level is left (`WorldGenerated.NoWaterlineSliversOnTheTerrainMesh`).
 
 **W0.3 Wave content per body:**
 
@@ -443,6 +449,30 @@ The swell scene's state hash is pinned in `PhysicsFluidSurface.CrossPlatformGold
 - A surface's digest changes when a spectrum knob changes.
 
 **Exit.** Crates and barrels dropped in lsystem_coast ride the swell, get carried by the swash, and settle on calm lake water at the lake's own level. Met by O7c ("As built (O7c)" above), on a crater lake carved into the summit for it.
+
+**As built (the field step's cost).** terrain_lab's physics step was the largest cost the water's profiling (#1321) found: about 16 ms of CPU a frame in arigl. Measured, then cut without changing a value. Every pinned hash is the same: the ocean and swell scenes' `CrossPlatformGoldenHash`, `IsTheSameOnEveryPlatform`, the source lattice's, ewave's digests, and terrain_lab's own state hash after 400 frames.
+- **Where it went** (a headless harness: terrain_lab's world from `SceneWorld::from_scene`, the snapshot's fixed 1/30 s a frame, four steps of 1/120 s each):
+  - Jolt's own step took 0.01 ms. The fields' pushes took the rest (`step_report` now carries `fields_ms` and `engine_ms`).
+  - Of a frame's 9 ms or so (timed with scratch counters, which add a little):
+    - the sea's per-time fields, about 3.8 ms: each step's three cascades' modes (1.4 ms) and transforms (2.4 ms);
+    - the cells' height reads, 4.2 ms: 6144 a frame, each with its source point;
+    - their velocity reads, 1.5 ms: 3444 a frame.
+  - The three crates have 512 cells each, and each cell reads the sea at every step.
+- **Same arithmetic, less of it:**
+  - `det::sin` and `det::cos` take the quadrant from an integer remainder below 2⁵³ (`fmod` above). `det::sincos` shares one reduction; the sea's modes and the shore layer's trains use it.
+  - The Catmull-Rom stencil wraps its lattice index the same way.
+  - `fft_plan::run_2d` transforms eight rows or columns abreast (run()'s butterflies, operation for operation, so the inner loop vectorises). It leaves a block of +0 rows as it is: a +0 row transforms to itself bit for bit, and the long cascades fill a few rows of 64.
+- **On threads:** `world_config::field_threads` reads the cells on worker threads beside the stepping thread, and runs the sea's per-time work (each cascade's modes, each of its transforms) as their tasks.
+  - Each cell's reads land in a slot of their own, and the sums take them in the cells' order. A run's values do not depend on the worker count; `PhysicsOceanSurface.TheFieldThreadsChangeNoValue` checks 0, 1 and 3 workers and switching mid-run.
+  - The reads go through the sea held at the step's time (`sea_surface::at`, `fluid_surface::at`), without the cache's lock and count. The source lattice's corners are read under a shared lock.
+  - `SceneWorld` uses up to three workers. A build without threads ignores the setting.
+  - The wind's forcing (O13) goes through the same tasks and reads: the crossfade's h0 mix in each cascade's modes task, and the fetch maps, the gusts and the current in the held reads. `OceanSea.TheWindsSeaAtATimeReadsTheSameValues` (a sea mid-crossfade with all four, its tasks run last first) and the windy runs of `PhysicsOceanSurface.TheFieldThreadsChangeNoValue` check them.
+- **Measured:**
+  - Headless, terrain_lab's physics frame went from 8.6–9.0 ms on master to 3.3–4.0 ms (medians of 400 frames, three runs each; 26–27 million cycles on the stepping thread against 8–10, its workers beside it). Without workers it is 7.2 ms.
+  - In one process drawing terrain_lab as arigl does (1280 × 720, the crate lake), master's arithmetic without workers (behind a scratch switch; still through the held sea) against this with three, alternated in blocks of 10 frames: the physics steps went from 16.3 ms a frame to 6.2 ms, and `tick_scene` from 25.8 ms to 16.9 ms. The frames themselves are bound by the Intel Arc iGPU these were drawn on (74 → 63 ms).
+- **Not done:**
+  - Fewer cells or a coarser sea read: these change what a body feels, and so the pinned hashes.
+  - A tighter skip of cells above or below the sea: a bound over the whole tile is ±5 m on terrain_lab's lake, and a local one needs a bound on the source point that the lattice does not give.
 
 ---
 
@@ -783,6 +813,27 @@ It is a new outline kind in `field_set` that carries a hull triangle list, separ
 
 **D4. A boat plant.** `dyn_boat_plant` sits beside the 4-wheel and bike plants, takes a nav command through a driver model, is selectable by `plant_host`, and keeps the same energy ledger. This puts watercraft in GRL-SNAM's reach.
 
+**As built (O12: the boat plant).** `cvc/physics/dyn_boat_plant.h`; `docs/PHYSICS_API.md`, "Boats as nav's plant".
+- **What it is.** A `cvc::nav::vehicle_plant` whose agents drive O11b's boats in a borrowed physics world that holds their water. Its `kind()` is `dynamic`. Its `medium()` is the new `cvc::nav::plant_medium::water` (`plant_types.h`; `vehicle_plant::medium()` is `land` for every other plant), so a spawner can tell a boat plant from a wheeled one. Agent i drives `descs[i % size]`, a `dyn_boat_desc`: a `boat_desc` whose hull has a `hull_mesh`, plus `max_speed` and `turn_radius`, which nav plans with.
+- **Attach.** Each agent's boat goes in with its hull's origin over the agent's start, heading its way, upright and at rest, at the draft the `hull_mesh` gives (`float_height`: the waterline, by bisection, at which the mesh displaces the hull's mass). The water is the world's (`world::water_at`, new: the first fluid field over a point at the field time, as the propeller reads it; `water_sample` moved to `field.h`). A start with no fluid field under it, water shallower than the draft, or a hull too heavy to float is refused, and a refused attach leaves none of its boats. Nav's point is the hull's origin.
+- **The driver.** Every world step, nav's bicycle angle and acceleration become `set_boat_controls`:
+  - The throttle is the thrust per unit mass for the acceleration, as `dyn_driver.h` takes it (half the last step's miss and an integral trim at 2/s), over the propeller's thrust at the boat's speed through the water, T_max·(1 − u/u_max). Unlike a car's, the trim is not restarted when the command changes sign, since the water holds the boat back either way: restarting it held the swell runs 3–5 % slow, as nav's command crossed zero with each wave. With no command at a crawl it holds the boat still on the propeller.
+  - The rudder holds the bicycle's yaw rate r = u·tan δ / L (L the hull's length): the rudder share tan δ / tan(max_steer) for that curvature, plus a proportional and an integral term (1/s) on the yaw rate's error as a curvature, (r_cmd − r)/u, both times `turn_radius`. A rudder works reversed astern, and so does that curvature.
+  - `state().steer` is the bicycle angle the driver holds (nav's command within the lock), not the rudder. Reported as the rudder, the driver's own corrections went into nav's steering-rate limit (the drive keeps its command within `steer_now` ± `steer_rate`·dt), and the launch chattered from side to side instead of turning round.
+- **The plan** (`limits()`): wheelbase L and lock atan(L / `turn_radius`); the rudder's rate, the lock over the actuators' time constant; braking on `max_reverse_thrust`/m within `brake_margin`; the latency plus the actuators' time constant; with `plan_with_vehicle`, `accel_margin`·`max_thrust`/m, `max_speed`, `max_speed`²/`turn_radius` (no more than `lateral_g`), and the hull's outline about its origin.
+- **The books** (`dyn_boat_books`), every world step: kinetic now = kinetic at attach + drive − brake − rudder − damping + water + gravity + residual. Kinetic is the rigid hull's ½m|v|² + ½ω·Iω, the inertia the collision shape's (a box's or a sphere's exactly, a convex hull's from the `hull_mesh` as a solid). Drive and brake are the thrust's T·u_a through the water; rudder the rudder force's work against the water past it; damping the hull body's own; water the field load's work (`field_load_on`) plus the water's own motion's push on the propeller and rudder; gravity m·g along the centre of mass's fall. Each force works at the step's mean velocity, so the residual is the integrator's (and a collision's). `energy_step` is the tick's drive.
+- **plant_host.** `dynamicboat` (the launch) and `dynamicboat:<presets>` (`launch`, `jonboat`), in a world of the geometry (no flat ground) and `set_water(field)`'s fluid field. Without water the boats are refused after the old plant has gone, and the agents are back on the bicycle; without Jolt the name falls back to the bicycle.
+- **Stepping and the rest.** With `step_world` off a host steps the world between `before_world_step()` and `after_world_step()`, as with the dynamic plants; `world_gone()`, `add_vehicle`, `remove_vehicle` and `add_desc` are there for a scene's world vehicles. `sample()` fills the plant ledger (velocities, yaw rate, steering, attitude, roll rate, accelerations, contacts with static geometry and with other boats; no wheels or load transfer).
+- **Tests** (`physics_dyn_boat_plant_test`, Windows MSVC Release; water with C_d = 1 and damping 10⁴):
+  - **The presets** (`PresetsDoWhatTheySay`). The launch (`physics_boat_test`'s 4 m box boat) tops out at 3.1915 m/s, and at full rudder and full throttle turns at 0.2067 rad/s and 3.182 m/s, a 15.39 m radius: `max_speed` 3.19, `turn_radius` 15.4. The jonboat (a 3.6 × 1.4 × 0.5 m flat box of 350 kg, a 1.5 kN outboard that swings 0.5 rad, a 0.03 m² leg) tops out at 4.0054 m/s and turns at 0.8151 rad/s and 3.361 m/s, 4.12 m: 4.0 and 4.1.
+  - **Holding a speed and a yaw rate.** Nav's commands for 2.5 m/s straight, then 2.5 m/s at 0.08 rad/s: on calm water both boats hold 2.5000 m/s and 0.08000 rad/s. On a 0.3 m, 5 s swell from 0.6 rad, over whole periods, the launch holds 2.5082 m/s straight (0.0021 rad/s of yaw) and 2.4780 m/s at 0.07946 rad/s, the jonboat 2.5129 m/s (0.0034 rad/s) and 2.4968 m/s at 0.07984 rad/s.
+  - **The books.** A 45 s weave up to 2.5 m/s and a stop astern: the residual is 6.0·10⁻⁸ (launch) and 1.7·10⁻⁷ (jonboat) of the flow on calm water, 3.5·10⁻⁵ and 2.6·10⁻⁶ on the swell; drive, brake and rudder are positive and the water takes energy overall. Steady at 2.5 m/s on calm water for 6 s, the launch's thrust delivers 11 305.28 J, the rudder takes 56.25 J and the water 11 248.80 J: 0.24 J apart.
+  - **Nav drives the boats** (the exit). In a `sim_world` over open water (nav's trained metric, 1 unit = 20 m) a launch and a jonboat start at rest 120 m west of their goals and both reach them in 37.9 s. Sent on to goals behind them and to the side (about 100 m back and 40 m further out), both turn round and reach them in 61.0 s, the launch at its full lock. Their books' residuals are 1.1·10⁻⁶ and 5.1·10⁻⁷ of the flow.
+  - **plant_host** puts three agents on launches, which drive 52.5 m east in 18 s; cycles `jonboat,launch`; refuses `dynamicboat:tug` and keeps the plant; refuses boats without water and leaves the agents on the bicycle.
+  - **Hosting, contacts and refusals.** A host stepping the world runs two boats on the swell to the same `state_hash` every tick for 250 ticks, with the same books. A launch driven into a pier counts one contact with static geometry, at 10.3 s, and none on open water before it. On the null backend: the refusals (no world, no boats, no `hull_mesh`, a bad `max_speed` or `turn_radius`, `add_boat`'s own, a bad frame; no water, a start past the water, a tick that is not whole steps, a 0.1 m pond, a 5 t launch), the draft (0.15 m for the launch, to 10⁻⁹), placement, the envelope, a re-attach, and boats added and removed.
+  - **Pinned.** `DynBoatPlant.CrossPlatformGoldenHash`, a launch and a jonboat on a 0.2 m, 4 s swell under libm-free scripted commands, after 300 steps: `96abfc30fcae4fd4`, measured on Windows MSVC; to be confirmed by CI on Linux and macOS. No existing hash moved: the world's step is unchanged.
+- **Not in O12.** pycvc does not bind the plant: it binds no boats yet (`boat_desc`, `hull_mesh` and `boat_state` would come first). Ariadne's world vehicles do not spawn boats, and nothing yet keeps boats' spawns on water: `world::water_at` reads a field's box, which says nothing about the terrain in it, so a spawner needs the water bodies (§3), or the water's top against the ground's height and the boat's draft. `snapshot()`, `physics_codec` and a plant save and restore do not carry the plant's driver or books.
+
 **D5. Drawing.**
 - **No water inside the hull.** The water shader discards inside the hull's waterline footprint, passed as a small signed-distance texture or polygon uniform. Without this, the sea shows through the deck.
 - Bow spray uses the spray particles (§10, item 5), spawned where the wake breaks.
@@ -923,13 +974,34 @@ In lsystem_coast:
 - Scale the wind-sea cascades by `sqrt(F_local / F_spectrum)`, clamped. Height grows as the square root of fetch [L], so the island's lee goes calm and a small lake stays small.
 - This is an amplitude scaling only; a shorter fetch also shortens the peak period, which this ignores [P]. It is probably the most visible wind effect on an island.
 
+**As built (O13).** `cvc/ocean/fetch.h`.
+- **The march** is one sweep, not a march per texel: column by column (or row by row, whichever axis the wind runs more along) from the upwind edge, each sample takes the fetch of the point one column upwind, read linearly between the two samples there (dry reads 0), plus the step. It is O(rows × cols) for any wind. The lee's edge comes out soft over a few samples and widens with distance. Past the grid's edge over water the fetch is the open fetch (`water.fetch`); each sample is capped by its body's open extent (`water_body::fetch_m` for a lake or pond).
+- **Coarse, and rebuilt only when the wind turns.** The map is at most 256 samples a side over the shore grid (`build_fetch`'s stride). It depends on the direction only, so a speed change keeps it. It is rebuilt with the sea's keyframe (E4) when the keyframe's direction moved: at most once per crossfade, never per frame. terrain_lab's 241² coast gives a 241² map; a 401² test coast a 201² one (85 ms with the keyframe's three h0).
+- **Decision: each cascade's own clamp.** The roadmap's `sqrt(F_local / F_spectrum)` holds for the long cascade. A shorter band is fully grown sooner: once the fetch has carried JONSWAP's peak (ω_p = 22 (g²/UF)^⅓) below the band's lowest frequency, the band is in the spectrum's equilibrium tail and grows no more. So cascade c is scaled by `clamp(sqrt(F / F_full,c), 0, 1)`, `F_full,c = min(F_spectrum, g² / (U (ω_min,c / 22)³))` (`band_full_fetch`). At 9 m/s the three cascades are fully grown at 120, 22.2 and 4.6 km. A 400 m lake scales them 0.058, 0.134 and 0.295; the ripples come back within a few hundred metres of a lee shore, where the long waves wait for the open sea.
+- **Both seas.** `sea_surface`'s forcing (`sea_forcing`) multiplies each cascade's weight by its scale at the point the cascades are read; the drawn sea reads the same map from one RG32F texture (the old and the new keyframe's maps) and the same `F_full`s.
+- **Measured.** Behind a round island 150 m in radius on a 5 m grid (`OceanFetch.TheLeeOfAnIslandIsCalmAndGrowsAsTheRootOfTheFetch`), the fetch 10, 50, 100, 200, 400 and 800 m downwind reads 15, 55, 105, 205, 405 and 805 m (the shore sits half a cell out), the long cascade's scale 0.011 there and 0.058 at 400 m: four times as far, twice the waves. In the physics sea, 30 m behind the island the RMS height is 0.011 m against 0.476 m without the lee and 0.803 m ahead of it (`OceanSea.ThePhysicsSeaIsCalm...`). On the water node (`AWaterNodesLeeIsCalmerThanItsOpenWater`, a 9 m/s wind past a round island): 0.014 m RMS 40 m behind it, 0.715 m upwind, 0.543 m with `lee: 0`; a 2 m crate floating there heaves 0.009 m RMS against 0.625 m in the open.
+
 **E3. Gusts.**
 - A low-frequency noise drifts with the wind and modulates the ripple cascade's weight and the shading roughness, giving cat's paws: dark, ruffled patches racing across calm water.
 - It is the same field the trees sway in, and ABYSSAL's `gustiness` sets its strength (§10, item 4).
 
+**As built (O13).** `cvc/algo/wind_field.h`, for every reader of the wind.
+- **One function of (x, y, t)**, `cvc::algo::wind_gust`: the factor on the mean wind there, `max(0, 1 + gustiness (2.4 (n − 0.5) + 0.5 pulse(t)))`, where n is value noise at two scales (120 m gusts at the wind's speed, 37 m cat's paws at 0.8 of it, so the pattern changes as it travels) and pulse is ABYSSAL's three sines. It is in cvc::algo because the water, the clouds, the trees and physics may all depend on it. The noise is integer-hashed, its lattice periodic every 4096 cells, so the drift is reduced in double precision (`wind_drift`) and a float shader (`cvc/gl/WindGLSL.h`) reads the same pattern after hours of wind. Deterministic: `OceanWind.TheGustsAreDeterministicAndRideTheWind` pins its hash, and checks that the large scale at x + U t is the pattern that was at x.
+- **What it moves.** The ripple cascade's weight, in both seas (`sea_cascade::gust` 1 for it, 0 for the others). The drawn water's roughness: where the gust is above 1 a ruffled patch mirrors less sky (darker, everywhere), and near the camera a fine ripple tilts the normal, faded out from 80 m to 300 m. `water.gustiness` (0.25) sets it.
+- **Level of detail.** The gusts are evaluated per vertex (the near grid's 2 m, the far grid's coarse cells) and handed to the fragments; the cat's paws' fine scale fades out toward the near grid's edge and is off on the far grid. No texture.
+
 **E4. The sea lags the wind.**
 - U₁₀ ramps toward its target with a time constant. Duration-limited growth takes hours; a compressed scale is a knob.
 - h0 crossfades from the old spectrum to the new one over seconds, instead of today's single-frame respectralize.
+
+**As built (O13).** `cvc/ocean/sea_lag.h`; `SceneWaterSeaClock` in `scene_water.h`.
+- **The lag.** The sea's wind follows the wind with `water.sea_lag` seconds' time constant (20): its speed exponentially, its direction along the shorter arc; its fetch at once.
+- **Keyframes, not a rebuild per frame.** build_h0 takes tens of milliseconds, so the sea steps along its lagged wind by keyframes. One is made when no crossfade is running and the lagged wind has moved a step from the last keyframe's (5 % of the speed or 0.25 m/s, 3°, 2 % of the fetch); once within a step of the wind, the last keyframe takes the wind itself, so the sea lands where the wind is. Each crossfades from the last over `water.sea_fade` seconds (4), a smoothstep in time. At most one keyframe per crossfade: a slider dragged back and forth makes one every 4 s. That is the debounce for everything a keyframe rebuilds (h0, and the fetch map when its direction moved). A wind from 9 to 15 m/s with a 20 s lag makes 8 keyframes, the last at 41.6 s.
+- **No pop.** h0(k) = g(k) √S(k) dk / 2 with the same noise g at every wind, so the old and new h0 are in phase texel by texel, and their linear crossfade moves each mode's amplitude monotonically without touching its phase. Measured (`OceanSeaLag.TheCrossfadeIsContinuousNoStepInHeight`: 9 m/s toward 0° turning to 15 m/s toward 30°, four points): an instant rebuild jumps 0.571 m; crossfaded, the sea at the change is the old one bit for bit, the first frame moves 0.021 m, and the worst frame in the fade 0.037 m, under the waves' own worst frame (0.048 m).
+- **Both seas in phase.** The physics sea mixes the two h0 per mode by the weight at its own time (`sea_surface`, `sea_cascade::h0_from`, `sea_forcing::t0` / `t1`); its field is rebuilt once per keyframe. The drawn node mixes the same two on the CPU by the weight at the world clock's time and uploads them, only while a crossfade runs, then the new h0 once (`OceanWind::mix_h0`; OceanFFT is unchanged). Both run on the world's clock, so drawn and felt waves stay in phase through the fade.
+- **The whitecaps' threshold** follows the new keyframe's wind (found again once it has held for 10 frames, as before), so a lagged ramp finds it once per keyframe (110–250 ms each).
+
+**E5 and O14.** O13 reads the wind through one place, `scene_wind.h` (`scene_wind`, `kWaterWindKeys`: today the water node's `water.wind_speed`, `water.wind_dir` and `water.gustiness`), and the gusts through `cvc::algo::wind_gust`, so O14 points that one function at `wind.speed`, `wind.dir` and `wind.gustiness` and every reader follows.
 
 **E5. One scene wind** (R5). `wind.speed`, `wind.dir` and `wind.gustiness`, plus the storm modulation (Phase F), drive:
 - tree sway;
@@ -942,6 +1014,24 @@ In lsystem_coast:
 - A slowly varying curl-noise flow advects the small cascades, which breaks up their tiling.
 - The same flow, plus stream velocities from `water_bodies`, feeds `field::velocity`, so a drifting body moves the way the drawn water does.
 
+**As built (O13).** `cvc/ocean/current.h`.
+- **The flow** is the curl of a stream function, value noise at two scales (`scale_m`, 600 m, and 0.41 of it at 0.45 of the weight, ABYSSAL's two taps), drifting slowly: divergence-free exactly, and a physical speed, `water.current` its RMS (0 by default). Measured: the divergence by central differences is at most 2.5e-8 /s against gradients up to 6e-3 /s, and the RMS over 2 × 10⁵ points is the asked speed to 1e-4 (`OceanCurrent.IsDivergenceFreeAndItsSpeedIsTheRMS`). Its hash is pinned. ABYSSAL normalises its curl to a direction and uses it as a 26 m domain warp, neither divergence-free nor a velocity (§10.3); here one field is both what the drawn waves move with and what a body drifts on.
+- **The short cascades are carried** (the 83 m and 29 m tiles) by a two-phase flow map: each is read at `p − v(p)(τ_i − T/2) + o_i tile`, the phases half a period (`flow_period_s`, 12 s) apart, each with a random offset drawn at its restart, blended by triangle weights divided by `sqrt(w0² + w1²)` so the sea's variance holds through the blend (0.544 m RMS carried against 0.500 m not, at 0.5 m/s). Neighbouring tiles see different currents, so the same tile is read at different offsets across the sea: the tiling breaks up while the waves move with the water.
+- **Physics.** `sea_surface::velocity` adds the current at every depth wherever there is water, so a floating body drifts as the small waves drawn do (`OceanSea.ThePhysicsSea...`: the velocity is the waves' plus the current exactly).
+- **Not built: stream velocities.** `water_bodies` has no flow grid until hydrology (W1), so the current is the curl noise alone; `sea_forcing` is where a stream's velocity plane would join it.
+- **Drawn.** The current is evaluated per vertex (no texture) and the far grid's middle cascade reads through it too.
+
+**What O13 costs a frame, and the GPU's budget.**
+- Samplers: one new one, `uWindFetch` (RG32F, the two keyframes' fetch maps, at most 256² × 8 bytes). The gusts and the current are hashed noise in the shader, no texture. Each water stage had 8 samplers (three cascades, the bed, the shore distance, the shore layer's two planes, the wake) and has 9; a stage in a cloud_sky's shade adds the deck's as before.
+- Uniforms: 15 vec3s and floats more per stage.
+- Per vertex: the gust (two noise lattices), the current (two, with derivatives), the fetch weights (one bilinear read), and two more cascade reads for each of the two carried cascades. The far grid's height reads skip the cascades it does not draw.
+- CPU per frame: the uniforms only, except while a crossfade runs (the three h0 mixed and uploaded, 3 × 256² × 4 floats).
+- Measured, and not resolved. terrain_lab, arigl snapshots at 1280×720, (720-frame run − 120-frame run) / 600, seven rounds of master's arigl and this branch's, interleaved and alternating. The machine was shared with three other agents' builds and tests (six compilers, about 66 % CPU).
+  - Per frame, master read 58–247 ms (median 145) and this branch 49–247 ms (median 122).
+  - The per-round difference (branch − master) has a median of −9 ms and a spread of ±100 ms.
+  - The quietest round read 57.8 ms on master (the 54.9 ms of §11.2's quiet machine) and 49.0 ms here.
+  - So the change costs less than this machine could resolve that day. A clean measurement, with GPU timer queries, and the browser's are still to do.
+
 ---
 
 ## 9. Phase F — dark rain clouds, rain and storms
@@ -953,6 +1043,18 @@ This phase builds on terrain_lab's `cloud_sky` (§1.5), not on the older demo cl
 - Coverage is already a target count for the cellular automaton (`rank_cells`), so it can change live without a rebuild.
 - Read the sun from the light rig (`lighting.*`) instead of `sun_az` / `sun_el` props. The sun baked into the maps is rebuilt when it changes.
 
+**As built (O17, with A4's cloud shade on the water).**
+- **`cloud_layer`:**
+  - `set_coverage` ranks the cells' targets again at once, and the clouds fade to them; the automaton is untouched.
+  - `set_sun` makes the maps again (the grammar bakes a little top-light into its field), then their self-shade, shadow patches and far opacity. The cells and the automaton are kept. A deck relit this way shades and draws exactly as one built under the new sun (`WorldCloudLayer.CoverageAndSunChangeLive`).
+- **`cloud_sky`:**
+  - It reads `sky.coverage` and `sky.wind_az` every frame (two more sliders on `sky_controls.ari`).
+  - Its sun is the rig's `lighting.key_azimuth` / `key_elevation` when the scene has a rig, else the props. A change relights the deck and re-composites the shade and the far clouds at once.
+  - terrain_lab.ari drops its copy of the sun's angles.
+- **The water as a receiver.** `water` replaces VTK's lighting, so the deck's rewrite of the lighting sum finds nothing in it. Once the sky has wired its inputs into a water mesh, that mesh switches to lighting that multiplies its sun and glints by `cloudShade()`. terrain_lab.ari lists `water` among the receivers.
+- **Checks:** `cvcgl_ariadne_realize` checks the seeded keys, the shade wired into both water meshes, and the sun following the rig (`cloudSunR` at elevation 28, then at the rig's 50).
+- **Not done here:** `base` / `top` live and `darkness`. O18 built both with F2's storm decks (as built, below).
+
 **F2. The weather model.** It is standard library only and deterministic: a function of the seed and world time (R2).
 - **Weather state:** clear, building, storm, clearing. Transitions are scheduled or authored, in the style of ABYSSAL's Director (§10, item 7).
 - **Storm cells:** each has a centre that moves with the steering wind, a radius, and an intensity that runs through growth, maturity and decay over a compressed 20–60 minutes.
@@ -960,6 +1062,60 @@ This phase builds on terrain_lab's `cloud_sky` (§1.5), not on the older demo cl
   - **Clouds:** `cloud_layer`'s `forcing` (the orographic hook) raises coverage and density in the cell's footprint.
   - **Darkness:** the cell's intensity raises it. A deeper deck has more optical depth toward the sun, so its base goes dark grey through the same `exp(−k·tau)` ramp [C `lsystem_nodes.cpp:585`]. That is the physical reason storm clouds are dark, and the ramp needs only a darker low end.
   - **Height:** a storm deck needs tops of several kilometres, against today's 300–520 m. Taller cloud maps for cumulonimbus are a variant of the existing 60×60×28 maps. The far shells already reach 4 km.
+
+**As built (O18).**
+- **The model** is `cvc::world::weather` (`inc/cvc/world/weather.h`), standard library only. It sits in cvc::world beside `cloud_layer`, GL-free, so a headless scene, pycvc and arisrv can run it (§11.1, item 4). It is a pure function of its parameters (the seed among them), the world time and the authored events:
+  - `at(t)` computes the cells alive at t from scratch. Nothing is stepped or remembered, so a client that joins late, seeks or replays sees what the others see. A frame's call costs about 2.4 µs with 32 events (O(cells + events)).
+  - **States:** clear, building, storm, clearing. The state is the strongest live cell's phase.
+  - **Cells:** a birthplace, a radius (widening as the cell grows, and 15 % more as it decays) and a peak intensity. The intensity is a smoothstep up over the first `growth` share of the life (0.3), holds, and falls over the last `decay` share (0.35). Lives are 20–60 weather minutes.
+  - **The schedule:** weather time is cut into slots (`interval`, 1 h); a hashed draw on the seed decides whether a slot holds a storm (`chance`), and its life, radius, peak, start and sideways miss. A storm never outlives its slot, so scheduled storms run clear → building → storm → clearing → clear without overlapping. None is born before `quiet` (600 s), so a world opens clear.
+  - **Placement:** a scheduled storm is born upwind of the area it serves, timed so the steering wind at its birth brings it across the centre (within `miss` half-widths) in the middle of its maturity. It builds upwind, walks over the world and clears past it.
+  - **Authored events** (`weather.events`, as text that reads back exactly): `storm` (a place, or upwind as scheduled), `steer` (the steering wind from t on), `rate` (weather seconds per world second: a time-lapse of the storms alone) and `calm` (every live cell starts clearing). Any event may carry `tau`, the weather time it takes effect at. `compact(t)` anchors the events it keeps and drops the ones that can no longer change the weather from t on (28 events to 7 in the test, the weather after t unchanged).
+  - **Hooks for O19 and O20:** the cells with their phases and motion, the storm field `intensity(x, y)`, and `rain_rate(x, y)` in mm/h (none below an intensity of 0.35, 50 mm/h at full).
+- **The steering wind is the scene's wind** (R5, the owner's ask): one accessor, `steeringWind()` in the weather node, reads cloud_sky's wind (`sky.wind_az` at the deck's drift speed, 3 m/s × `sky.drift`), so a storm keeps to the clouds drawn. O14 points it at `wind.speed` / `wind.dir`. A change that has held for ten frames is logged as a `steer` event, so the tracks stay a function of the events.
+- **`cloud_layer` storms** (`set_storms`, discs over the ground):
+  - Each cell takes the discs' field over its copy nearest the ground's centre (its `storm` share). A stormy cell gains humidity and activation as a windward flank does, its extinction is held off, and it leads the ranking.
+  - Its share joins the count besides `coverage`, which stays the fair weather's, so a storm's footprint closes up. Its shade's optical depth grows by up to 2.5 times and its far opacity by up to 1.8.
+  - Test: a full storm 2 km in radius over a 6 × 6 deck at coverage 0.3. All 8 cells under it hold a cloud, 20 of 36 against 11. After 60 steps they hold 1.00 of their columns' bits as cloud against 0.44. The shade is 3.6 times the fair deck's and the far opacity 2.7 times. The storm gone, the deck holds 11 again.
+  - The deck's pattern repeats every few kilometres (3.1 km on terrain_lab), so a storm wider than that covers every cell. The cells take their share where they are over the world, and the far clouds darken by the discs at their own world point, so a storm upwind reads darker before it arrives.
+- **Live `base` / `top` (F1's leftover), and cumulonimbus.**
+  - `set_deck(base, top, nz, far_layers)` makes the maps again as `set_sun` does. A deck changed live shades and draws exactly as one built so, both ways (`WorldCloudLayer.ADeckChangedLiveIsOneBuiltSo`).
+  - A deck deeper than its cumulus (`cumulus`, the props' depth) grows cumulonimbus maps. The cumulus stays at the bottom; a tower rises from its dense core, narrowing as it climbs, the cumulus's middle layers stacked up it; an anvil spreads under the top. The profile is ABYSSAL's (`Clouds.js` heightProfile, MIT).
+  - On a storm deck the self-shade marches the sun across the tall voxels, a voxel at a time. The base of a 3 km deck sits in 2.9 to 6 times a cumulus base's optical depth toward the sun.
+  - A storm deck's shadow patches reach two cloud half-widths down-sun. A tower's long shade past that is left out, or a 4 km tower's patches would span kilometres.
+  - **Built off the frame:** `prepare_deck` copies what the build reads, and `adopt_deck` swaps the result in. A job made before the layout or the sun changed is refused, and the caller prepares another. In between, `run` builds it on any thread, or `step(job, budget)` builds a few units at a time: a variant's map, one layer of its self-shade, one row of its shade. A deck built in steps is the deck built at once (`ADeckBuiltInStepsIsTheDeckBuiltAtOnce`). The cumulus fields the maps grow from are kept, so neither way grows them again: terrain_lab's 3 km deck takes about 150 ms to build and the way back about 30 ms, against the seconds growing the cumulus takes (`AStormDecksBuildIsTimed`).
+  - **cloud_sky builds it as a sliced task**, the mechanism `generated_world` rebuilds with (#984, `cvc/core/sliced_task.h`), and swaps it in when done. Natively the task runs on the background pool. In single-threaded wasm, where `std::async` cannot start a thread, it runs a few milliseconds a frame on the scheduler thread. `deck_threading: cooperative` forces that path natively; `cvcgl_ariadne_realize` runs the storm both ways, and the sliced build takes several frames.
+  - The near volumes take the new box (more layers, up to 64; the far slices up to 24), their opacity corrected for the box's longer opacity unit so a metre of cloud stays as opaque.
+- **Darkness (F1's other leftover) and dark bases (§10.7).**
+  - `sky.darkness` moves the colour ramp toward a storm ramp: dark grey shade, dulled tops. A cell's storm share darkens its own cloud further.
+  - Where a cloud is darkened, its light also dims as the cloud above it hides the sky, by up to 0.84 (ABYSSAL's `mix(0.16, 1, skyVis)`). The near volumes use a new upward optical depth (`cell_up_tau`, built beside `cell_sun_tau`); the far shells take two taps up the deck, ABYSSAL's. A tower's base (an upward depth 70 to 90 times a cumulus base's) goes dark; a cumulus's stays light. In fair weather, at darkness 0, nothing changes.
+  - The roadmap's `cell_up_tau` mix as an ambient term is folded into the light the ramp reads: the ramp's low end is the cloud's ambient colour.
+- **cloud_sky:**
+  - Live keys `sky.base`, `sky.top`, `sky.darkness` and `sky.storms` (discs as text).
+  - **No new volumes:** a storm deck is drawn by the same near volumes and far shells (the two-volume ceiling).
+  - **No new samplers** on the receivers: up to four storm discs and the darkness go to the far shells and the receivers as uniforms. A receiver's ambient drops by up to 0.55 under a storm (`cloudAmbient`); its direct light dims through the shade, which the storm deepens. The water's shaded lighting uses `cloudShade()` only, so the water's ambient does not drop yet (it is in `water_node.cpp`, not touched here).
+  - On a storm deck the far shells march a slab at least every 60 m and cut the light march where it has gone two cloud widths sideways. With a cumulus deck's settings the towers were faceted and banded with stray shade.
+- **The `weather` node** (`src/cvcGL/ariadne/weather_node.cpp`):
+  - It owns the model over its `ground:` node's extent and evaluates it at the world clock each frame.
+  - It drives the `cloud_sky` named by `sky:`. It writes `sky.storms`. It raises `sky.top` toward `storm_top` in four steps while a storm is within `reach` (4 km) of the ground, so the cumulonimbus maps are built a few times a storm and only while one is about; the deck goes back to its cumulus when the storm leaves. It raises `sky.darkness` toward `darkness` (0.6).
+  - It publishes `weather.state`, `.storminess`, `.cells`, `.storms`, `.rain` (at the ground's centre) and `.deck`.
+  - `weather.request` starts a storm upwind or overhead, or calms the sky. `weather.time_scale` is the time-lapse.
+  - Its panel is `weather_controls.ari`. terrain_lab.ari has one, storms of 1000–1600 m radius topping out at 3 km.
+- **Checks:**
+  - `WorldWeather.*`: a golden hash over 147 times with all four kinds of event (`19e696666ebdfd0d`; the digest rounds positions to 0.1 mm and intensities to 1e-7, so an ulp of sin or cos does not move it; measured on Windows); a scheduled storm's life on schedule; upwind placement; an authored storm and a calm; cells riding a turning wind and a time-lapse; the rain; the events' text; `compact`.
+  - `WorldCloudLayer.*`: a storm closes the deck; a deck changed live equals one built so; a storm deck towers and darkens its base; the build's timing.
+  - `cvcgl_ariadne_realize`: a weather node starts a storm overhead; the sky has its discs and darkness as uniforms; the storm deck comes in off the frame (the near volumes' box rises to 600 m); a settled change of the sky's wind becomes a steer event; a calm clears it all and the cumulus deck comes back.
+  - `AriadneComponents.NodeComponentsTakeTheirNodeAsAnArg` covers `weather_controls`.
+- **Renders** (arigl snapshots of terrain_lab at 1280×720): clear; a storm building upwind (the deck risen, lighter); a storm overhead (the deck dark slate, the ground under it dimmed), from the opening view and from the side.
+- **Frame cost** (native, rough):
+  - arigl snapshots of terrain_lab at 1280×720 (Windows, MSVC Release, an RTX 4070 Laptop GPU). The per-frame time is the 720-frame run's time minus the 120-frame run's, over 600 frames, three runs each, interleaved: master (8b2d2ffd8), this branch with a clear sky, and this branch with a storm overhead (`--set weather.request=overhead`: the storm deck, its discs and darkness).
+  - Medians: 148 ms on master, 94 ms clear, 94 ms with the storm. The runs spread 96–374, 83–141 and 93–153 ms: three other agents were building on the machine, so the frames were about twice O15's 55 ms and the spread swamps any difference. Within that noise the clear sky and the storm cost no more than master.
+  - By construction: no new volume or sampler; the weather is O(cells) a frame (2.4 µs); a storm deck is built off the frame (150 ms on a worker); the far shells' storm-deck march takes at most CLOUD_SAMPLES samples a slab, as before, and their two upward taps run only where a cloud is darkened.
+  - Not measured: a quiet machine, GPU timer queries, the browser.
+- **Not done:**
+  - The towers are columns of stacked cumulus puffs on a 28-layer source, and every cloud in view becomes one while a storm is about. Taller maps per cell (cumulus away from the storm, towers under it) would need a second map set or a taller near box per cell.
+  - The pattern's period limits how local a storm can look (above).
+  - Rain, shafts and fog (O19); the gust front, lightning and wet ground (O20); the water's ambient under a storm; the browser (WebGL2) and Linux/macOS runs.
 
 **F3. Rain.** Under each cell, a rain rate R(x, y, t) wherever the cloud is thick enough. It shows in five places:
 - **Near the camera:** streak particles in a GPU ping-pong state texture, lit by the sun's transmittance through the deck, slanted by the wind, with density ∝ R. This is a port (§10, item 6).
@@ -1204,6 +1360,62 @@ The pattern follows the existing nodes [C `scene_realize.h:275-282`; `extensions
 - **Keys and panel:** `water.*`, with a `water_controls.ari` panel and an `INDEX.ari` entry.
 - **It supersedes `wave_sea`** (the depth-volume sea, re-filled from `cvc::lsys::sea_field` [C `lsystem_nodes.cpp:338-386`]), which stays until the scenes that use it move over.
 
+**As built (O15, the drawing; `src/cvcGL/ariadne/water_node.cpp`).** OceanFFT, EWave and WakeSource moved into the cvcGL library first. Then:
+- **Meshes, not the world's rungs.** The world's `<id>_water` rungs are flat chunks of 5 m cells and coarser, and the short cascade's waves are shorter than that. So the node draws two meshes of its own, and terrain_lab's world sets `water: 0`:
+  - near: a grid ±`near` (192 m) around the camera, a vertex every 2 m, displaced by the cascades and faded to flat at its edge. It moves with the camera by whole cells.
+  - far: a flat grid over the ground (160 cells a side) with the same shading, discarded inside the near square.
+  - Both discard dry fragments against the bed (a HeightFieldTexture of the ground, sampled per fragment, so the far grid's coarse cells still give a sharp shoreline), and both stay out of the scene's bounds.
+- **Shading and foam.** Shading is lsystem_coast's Fresnel sea without the boat. The whitecaps' threshold comes from `foam_field` for Monahan's share (§8 E0b), on the near grid's 2 m vertices. It is found again after the wind, chop, ramp, fray or `water.whitecaps` have held for 10 frames. The swell's breakers foam on their crests, and a band at the waterline foams too, faint where no swell reaches (`water.shore_foam`).
+- **The coast (A2, A3).** `scene_water_shore` builds a shore grid over the ground's samples (`cvc::world::water_bodies`, at most 1025 a side) and, with `swell_height` above 0, the swell's shore layer on it. Both the drawn water and the physics sea read them:
+  - each cascade fades out as the still water shoals, over half its band's peak wavelength and at most `shore_fade` (lsystem_coast's `cascadeFade`);
+  - a sideways move stays under 0.8 of the way to the shore;
+  - the swell refracts, shoals and breaks.
+  - When the rim is sea and there is a swell, the grid goes one deep-water wavelength past the rim (at most 512 m) at the rim's depth, so the swell enters before it meets the coast. Past the grid both the GPU and the CPU read its edge.
+  - A swell change rebuilds the layer once the keys have held for 10 frames.
+  - Measured: 12–14 ms for a 401² grid.
+  - The textures: the shore distance (R32F) and, with a swell, the layer's two RGBA32F planes, 16.8 MB each at 1025².
+- **The far grid's normal.** It is computed per fragment from the long and middle cascades and the swell. The middle cascade fades out by 3 `near` and the rest by 10 `near`, since the cascades' texels are read nearest and would sparkle in pixels wider than a texel. Seen from high above, the near square still reads darker than the far grid: it keeps the short cascade and the whitecaps.
+- **The world's edge.** When the ground's whole rim is under water (a `generated_world` with `edge: shore`, an island), the far grid runs `outer` (6 km, as `world::outer_sea`) past it, the bed clamped to the rim's depth. Otherwise both grids clip to the ground's rectangle (a wall, or the world falling away). It is checked again after each regenerate, so the Edge picker switches it live. The outer sea widens the camera's clipping range, as `world::outer_sea` does: about 0.1 % of the farthest corner for the near plane.
+- **A GL lesson.** `disableCoordinateShiftScale` must come before a mesh's first draw. Set after it, the far grid kept its shifted buffer, and its fragments missed both the bed and the near-square cut.
+- **Floating bodies (O15, part 3).** `water` with `body: {}` is one fluid field (`inc/cvc/ariadne/scene_water.h`, `WaterRuntime`). Its volume covers the water's extent (with the outer sea when the rim is sea) from below the deepest ground to 15 m over the level, and its surface is `ocean_surface` over a `sea_surface` built from the same cascades' h0, so bodies float on the waves drawn. The drawn node and `SceneWorld::from_scene` both run it. `SceneWorld::apply` now swaps a tracked node's fields with its bodies; before, a field added through a node's colliders was never removed, and leaked on each new revision.
+  - Headless test: a flooded world with a density-400 raft at z 200.25 after 10 s (level 200) and a density-3000 anchor sunk to 182; one field after a wind change rebuilds it.
+  - terrain_lab.ari now has `physics: {}` and three crates on the big lake. Headless after 10 s they sit at z 0.23, −0.12 and 0.98 over 17–20 m of water.
+  - The physics sea reads the same coast: the cascades fade with the same fades, the swell's shore layer is in it, and so is its swash on the beach (below), unless `swash: 0`.
+  - Test `AWaterNodesSeaFadesAtTheShoreAndCarriesTheSwell`, over a beach at 1 in 10 with a 9 m/s wind:
+    - The wind sea's RMS is 0.794 m in 15 m of water and 0.011 m in 0.3 m.
+    - A 1 m swell is 0.245 m RMS in 15 m of water (0.25 in theory) and 0.076 m where it breaks in 0.5 m. The RMS is taken over 300 s, because the trains' periods are 6 % apart and come in sets about 170 s long.
+- **The wake window (C2–C4, C6).** With `body:`, an eWave window (EWave: 256² cells of 0.5 m, lsystem_coast's sea window) sits around the camera's target, or around the camera when the target is past half the near grid. It moves by whole cells once the target is 16 cells off.
+  - Each frame, each moving body is added to its source (WakeSource, `add_immersion`), at its drawn pose, in the field at the field time of that pose. The bodies come from `SceneWorld::bodies()`: `SceneWorldBody::desc` now keeps a node's body description, so its outline is known.
+  - The window steps by the world time since the last frame.
+    - The world clock moves in whole quanta of 1/120 s, so that step takes only a few values. EWave keeps each step table (the exact step's coefficients, the symmetric step's multipliers, the real-space factors: n² modes of `det::` math each) for the last six steps it was worked out for, and works one out again only for a new step or when what it depends on changes (the depth, the mask).
+    - It used to keep one table per kind, for the last step only. With the wall clock of `arigl run` the step changed nearly every frame, and the tables were remade each time. terrain_lab in a window (1280×720, Intel Arc iGPU, four interleaved runs each, median [range of the runs' medians]): `AriRuntime::frame` 42.9 → 38.3 ms, the whole frame 86.0 [79.5–89.0] → 79.3 [78.8–81.7] ms. The machine was slower that day than for the other frame times here, and the frame still carries VTK's volume wait (RENDER_PERF_ROADMAP.md Phase 6). Offscreen, on the fixed 1/30 s clock, the step never changes: 62.1 → 60.3 ms, within the runs' spread.
+    - Test: `cvcgl_ewave` section 2b. Twelve steps of 1/30 s and 1/40 s in turn work out four tables and follow the CPU's exact step (relative RMS about 1e-5). A new depth works the coefficients out again.
+  - Its mask is lsystem_coast's: beaches absorb over the last 3 m, and steep shores (the shore layer's K_r, or the ground's slope) reflect. Its depth is its wet cells' mean.
+  - Its height moves the near grid's vertices (the [1 2 1] tent at the grid's 2 m), and its slope and foam shade both grids.
+  - The foam weight is `water.wake_foam`, 0.35. At lsystem_coast's 1, terrain_lab's 2–3 m crates bobbing in a 9 m/s sea left white smears round each crate.
+  - The node reaches the scene's world through `RealizedScene::scene_ticks`: closures run after the custom ticks with the realized scene and the frame's clock step, since the scene moves after realize.
+  - Rendered: a ring with foam round each crate 2.5 s after it lands, and rings still spreading at 10 s. The crates float edge-up, as a cube of density between 0.21 and 0.79 does.
+  - The waves are drawn only: they do not push the bodies back (C5). Vehicles are not sources (their chassis is not a node's body).
+- **Frame cost (native, rough).** These are arigl snapshots of terrain_lab.ari at 1280×720 (Windows, MSVC Release, an RTX 4070 Laptop GPU), on a machine also running other builds. The per-frame time is the 720-frame run's time minus the 120-frame run's, over 600 frames, three runs each, interleaved.
+  - Medians: 54.9 ms with the water, 49.8 ms without the water node, 48.9 ms with `water.wake: 0`, 57.1 ms with `water.swell_height: 0`.
+  - Runs varied by about ±5 ms. So the node costs about 5 ms of a 50 ms frame, and the wake and the swell are within the noise.
+  - Not measured: GPU timer queries per pass, and the browser.
+- **The swash on the beach (A3, decision D4).** With a swell, the node draws lsystem_coast's swash in the ground's own fragment shader. It is wired into every mesh under the `world:` / `ground:` node, again whenever the scene's tree changes (regenerated chunks, LOD rungs made late), as the cloud deck wires its receivers. Each wave's front runs up to the runup and drains back, with a film and a lace of foam; the sand stays dark and glossy behind it for the layer's dry time.
+  - The physics sea carries the same swash (`sea_params::swash`). `swash: 0` leaves it out of both.
+  - Test: on sand 0.3 m over the level, 3 m up the 1 in 10 beach, a 1 m swell's swash covers it 78 % of the time, and 0 % with `swash: 0`.
+  - `cvcgl_ariadne_realize`: with a swell, the swash is on all 21 of the test world's ground meshes, and out of the shadow bake.
+  - **What the ground's shader taught.**
+    - The fragment's world position is its view position times the inverse of the camera's model-view, as the cloud deck finds it, so the ground's own coordinates do not matter.
+    - The code runs at `//VTK::Picking::Impl`, after VTK's texture. At `//VTK::TCoord::Impl` the ground lost its colour texture.
+    - The swash reads its own RG32F texture (phase, runup).
+    - The swash's inputs stay out of the shadow maps' bake, through `GeometryNode::ShaderInputs::skip_shadow_bake`, new. In the bake the fragment's colour is the occluder's depth (StridedShadowBaker's 1 + exp(c·depth)), and the swash rewrote it. Worse, the bake draws from the light, so the view-to-world matrix was the wrong camera's. The shadow map came out wrong and the whole ground fell into shade. The set's uniforms are never set in the bake's program, so `uSwashOn` reads 0 there.
+  - Renders:
+    - terrain_lab's north-east bay: the film and lace on its shores.
+    - A copy flooded to 30 m: the film on the island beaches that face the swell, none on the lee shores.
+    - With a 1.5 m swell on that low island, the wet band covers much of it: the runup is up to 2.5 H₀, carried up to 30 m inland.
+  - A straight sliver of land in the bay (seen in the renders, from before the swash too) is the generated ground's own. Two neighbouring 5 m samples, (565, 555) and (565, 560), stand 0.03 and 0.01 m over the level with water all round them, so the edge between them pokes out of the water as a straight line. The world builder now lowers such one-sample slivers under the water after grading (`lower_waterline_slivers`, #1271; §3).
+- **Not yet:** persistent foam (§10.2); wake waves acting on bodies (C5); the browser (WebGL2) build.
+
 **`weather`.**
 - It holds the weather model (F2) and publishes `wind.*` (E5) and `weather.*` (storm cells, rain rate, lightning).
 - `cloud_sky` and `water` read those keys. `cloud_sky` also gets its forcing from the storm cells (F2), its live keys (F1) and its sun from `lighting.*`.
@@ -1280,9 +1492,9 @@ Each piece below is one PR with its own tests. The work starts in lsystem_coast 
 | O12 | `dyn_boat_plant` + plant_host | D4 | O11 | cvc::physics | nav drives the boat |
 | O13 | fetch/lee map, gust field, sea lag, currents (E2–E4, E6, §10.3–10.4) | E | O1, O2 | library + demo | the lee goes calm; no pop on a wind change |
 | O14 | one scene wind (E5) for trees, `cloud_sky`, water, physics flow | E | O13 | Ariadne + physics | one key turns everything |
-| O15 | canonize: the Ariadne water node in terrain_lab.ari (§11) | — | O1–O7 at least | Ariadne | terrain_lab's sea, lakes and ponds animate and float bodies |
+| O15 | canonize: the Ariadne water node in terrain_lab.ari (§11); drawing, the coast and swell, floating bodies and their wakes as built (§11.2) | — | O1–O7 at least | Ariadne | terrain_lab's sea, lakes and ponds animate, float bodies and take their wakes |
 | O16 | arisrv: replicate inputs, rebuild on clients (§11) | — | O15 | Ariadne / arisrv | two clients draw the same waves and wakes |
-| O17 | live sky keys, the sun from the light rig, the water as a shade receiver (F1, A4) | F | — | Ariadne | **quick win, can land any time** |
+| O17 | live sky keys, the sun from the light rig, the water as a shade receiver (F1, A4); as built (§9 F1) | F | — | Ariadne | **quick win, can land any time** |
 | O18 | the weather model, storm cells, dark bases (F2, §10.7) | F | O17 | cvc::world + Ariadne | a storm builds, darkens and clears |
 | O19 | rain: streaks, rings, wetness, shafts, fog (F3, §10.6) | F | O18, O4 (wetness) | cvcGL | the F exit, measured in the browser |
 | O20 | storm wind, lightning, friction into physics (F4–F6) | F | O14, O18 | all | traction drops in the rain |

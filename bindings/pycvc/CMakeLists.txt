@@ -337,6 +337,8 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_skeleton:test_pycvc_skeleton.py
              pycvc_contours:test_pycvc_contours.py
              pycvc_point_classes:test_pycvc_point_classes.py
+             pycvc_segmentation:test_pycvc_segmentation.py
+             pycvc_volume_slice:test_pycvc_volume_slice.py
              pycvc_image:test_pycvc_image.py
              pycvc_model:test_pycvc_model.py
              pycvc_state:test_pycvc_state.py
@@ -347,7 +349,9 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_exec_pool:test_pycvc_exec_pool.py
              pycvc_ariadne:test_pycvc_ariadne.py
              pycvc_ariadne_server:test_pycvc_ariadne_server.py
+             pycvc_gym:test_pycvc_gym.py
              pycvc_ariadne_harness:test_pycvc_ariadne_harness.py
+             pycvc_ariadne_bridge:test_pycvc_ariadne_bridge.py
              pycvc_world_entities:test_pycvc_world_entities.py
              pycvc_state_exec:test_pycvc_state_exec.py
              pycvc_state_exec_sched:test_pycvc_state_exec_sched.py
@@ -358,6 +362,8 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_state_exec_locks:test_pycvc_state_exec_locks.py
              pycvc_world_clock:test_pycvc_world_clock.py
              pycvc_input_trace:test_pycvc_input_trace.py
+             pycvc_nav_lab:test_pycvc_nav_lab.py
+             pycvc_ph:test_pycvc_ph.py
              pycvc_world_units:test_pycvc_world_units.py
              pycvc_dataprep:test_pycvc_dataprep.py
              pycvc_volslice:test_pycvc_volslice.py
@@ -395,6 +401,20 @@ if(CVC_BUILD_PYCVC_CORE)
   add_test(NAME pycvc_physics
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_physics.py)
   set_tests_properties(pycvc_physics PROPERTIES ENVIRONMENT "${_pycvc_physics_env}")
+  # cvc::physics::mujoco_robot (docs/MUJOCO.md). With CVC_WITH_MUJOCO the test drives the Go2 from
+  # cvcpkg's mujoco-menagerie, whose directory it gets in CVC_MUJOCO_MENAGERIE_DIR; without it, it
+  # checks that the robot refuses.
+  set(_pycvc_mujoco_env "${_pycvc_test_env}")
+  if(CVC_WITH_MUJOCO)
+    find_path(CVC_MUJOCO_MENAGERIE_DIR unitree_go2/scene.xml PATH_SUFFIXES share/mujoco-menagerie
+              NO_SYSTEM_ENVIRONMENT_PATH NO_CMAKE_SYSTEM_PATH)
+    if(CVC_MUJOCO_MENAGERIE_DIR)
+      list(APPEND _pycvc_mujoco_env "CVC_MUJOCO_MENAGERIE_DIR=${CVC_MUJOCO_MENAGERIE_DIR}")
+    endif()
+  endif()
+  add_test(NAME pycvc_mujoco
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_mujoco.py)
+  set_tests_properties(pycvc_mujoco PROPERTIES ENVIRONMENT "${_pycvc_mujoco_env}")
 endif() # CVC_BUILD_PYCVC_CORE
 
 # ── pycvc_gl — direct wrap of the cvcGL scene graph (scriptable; needs VTK) ──
@@ -542,7 +562,7 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_ari
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_ari.py)
   set_tests_properties(pycvc_ari PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
-  # pycvc_gl.ariadne.Host, the Python host: data both ways, callbacks, errors and re-entrancy
+  # pycvc.ari.Host, the Python host: data both ways, callbacks, errors and re-entrancy
   # headless, then (in a child; skipped without GL unless CVC_REQUIRE_RENDER) a published picture and
   # a stream in the frame, and the examples/ariadne/python programs offscreen.
   add_test(NAME pycvc_gl_ariadne_host
@@ -558,6 +578,11 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_gl_cars
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_cars.py)
   set_tests_properties(pycvc_gl_cars PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
+  # pycvc_gl.nav_lab: libcvc's policies side by side (arms, the Stats and Ledger windows, the run
+  # log) and a run log played back, headless; offscreen when GL is there.
+  add_test(NAME pycvc_gl_nav_lab
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_nav_lab.py)
+  set_tests_properties(pycvc_gl_nav_lab PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
   # VTK Python bridge test — skips gracefully unless the vtk-python wrappers
   # (vtkmodules) are importable; runs the vtkProp<->vtkActor round trip when they are.
   add_test(NAME pycvc_vtk

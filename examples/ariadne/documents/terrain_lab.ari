@@ -40,6 +40,10 @@ requires:
 customs:
   - node: generated_world
     required: true
+  - node: water
+    required: true
+  - node: weather
+    required: true
 
 import:
   - cvc://components/world_controls.ari
@@ -47,6 +51,8 @@ import:
   - cvc://components/viewer_settings.ari     # frame rate, UI size, grid / axis, camera, shadows
   - cvc://components/sim_transport.ari
   - cvc://components/sky_controls.ari
+  - cvc://components/water_controls.ari
+  - cvc://components/weather_controls.ari
 
 # Only the Terrain Lab panel opens at first, so the world fills the view; Settings opens the rest.
 init: |
@@ -54,6 +60,8 @@ init: |
   (state-set "tree.viewer_settings.open" "0")
   (state-set "tree.sim_transport.open" "0")
   (state-set "tree.sky_controls.open" "0")
+  (state-set "tree.water_controls.open" "0")
+  (state-set "tree.weather_controls.open" "0")
 
 menubar:
   - menu: Sim
@@ -73,6 +81,10 @@ menubar:
         bind: tree.sim_transport.open
       - menu_item: Sky
         bind: tree.sky_controls.open
+      - menu_item: Water
+        bind: tree.water_controls.open
+      - menu_item: Weather
+        bind: tree.weather_controls.open
 
 windows:
   - include: world_controls
@@ -93,12 +105,23 @@ windows:
     closable: true
   - include: sky_controls
     pos: [754, 16]
-    size: [370, 116]
+    size: [370, 170]
+    closable: true
+  - include: water_controls
+    pos: [754, 196]
+    size: [370, 345]
+    closable: true
+  - include: weather_controls
+    pos: [754, 551]
+    size: [370, 230]
     closable: true
 
 scene:
   chrome: false
   clock: { scale: 1.0, paused: false }
+  # A physics world on the clock: the world's ground and buildings collide, the water floats what
+  # is lighter than it (the crates on the lake below).
+  physics: {}
   # A daylight sky: pale and hazy at the horizon, bluer overhead.
   background: { top: [0.38, 0.54, 0.78], bottom: [0.78, 0.83, 0.88] }
   shadows:
@@ -141,10 +164,44 @@ scene:
       tree_gen: 5
       amp: 90              # relief, metres
       water_level: 0       # metres from sea level (the shoreline); everything below is water
+      water: 0             # the water node below draws it (the world's own flat water rungs off)
       color: material      # material | risk | occupancy | height | water (the water bodies)
       look: soft           # soft (demo3's matte daylight) | classic (the C++ lab's)
       material: { opaque: true }
       shader: { preset: terrain_bump }   # value-noise fBm ground detail
+      body: {}             # its ground, buildings, rocks and trees collide (rebuilt on Regenerate)
+    # The water: the world's sea, lakes and ponds as the GPU FFT ocean (three wave cascades for the
+    # wind, fading out toward the shore) and a swell that breaks on the beaches facing it, the near
+    # water displaced around the camera and the rest flat; whitecaps where the waves fold. The Water
+    # panel (Settings) drives the wind, waves and swell. Its body: is the water in the physics world,
+    # the same sea, so a body floats on the waves drawn, and the bodies in it make waves.
+    - node: water
+      type: water
+      world: world         # the generated_world whose ground it fills below `level`
+      level: 0             # as the world's water_level
+      wind_speed: 9        # m/s
+      wind_dir: 30         # degrees: the way the waves travel, from +x toward +y
+      swell_height: 0.8    # m: a swell from offshore that refracts, shoals and breaks on the beaches
+      swell_period: 9      # s
+      swell_dir: 200       # degrees: the way it travels
+      body: {}
+    # Three wooden crates dropped on the big lake north of the city (seed 5's world; on another
+    # world they land where they land): they bob on its waves.
+    - node: crate_a
+      source: { box: { size: [3, 3, 3] } }
+      transform: { position: [22, 176, 6] }
+      material: { color: [0.62, 0.42, 0.22] }
+      body: { density: 450 }
+    - node: crate_b
+      source: { box: { size: [2, 2, 2] } }
+      transform: { position: [32, 186, 8] }
+      material: { color: [0.55, 0.36, 0.18] }
+      body: { density: 500 }
+    - node: crate_c
+      source: { box: { size: [2.5, 2.5, 2.5] } }
+      transform: { position: [14, 188, 10] }
+      material: { color: [0.68, 0.48, 0.26] }
+      body: { density: 400 }
     # The clouds: a deck of L-system cumulus scattered over the whole world, drifting and slowly
     # changing shape. The ones near the camera are volumes, the rest one coarse sliced volume.
     # Their shade dims the sun on the ground, the buildings, the roads and the trees; it is drawn
@@ -154,14 +211,28 @@ scene:
     - node: sky
       type: cloud_sky
       ground: world        # the deck covers this node's extent, live, and shades its meshes
-      receivers: [world_buildings, world_roads, world_props, world_foliage]
+      receivers: [world_buildings, world_roads, world_props, world_foliage, water]
       extent: 250          # a cloud's half-width, metres: small fair-weather cumulus
       base: 300
       top: 520
-      coverage: 0.6        # the share of the sky's cells holding a cloud
+      coverage: 0.6        # the share of the sky's cells holding a cloud (live: sky.coverage)
       near: 6              # the clouds nearest the camera drawn as volumes; the rest sliced
-      sun_az: -60          # the key light's: the clouds cast along it
-      sun_el: 28
-      wind_az: 90          # the wind blows toward +x
+      # The sun is the light rig's key (lighting.key_azimuth / key_elevation, the Stage lighting
+      # panel): the clouds are lit from it and cast their shade along it, live.
+      wind_az: 90          # the wind blows toward +x (live: sky.wind_az)
       evolve: 1            # a weather step every 5 s; 0 holds the clouds
       orographic: 1        # windward flanks gather cloud
+    # The weather: storm cells on a schedule (and the ones the Weather panel starts), riding the
+    # sky's wind. A storm builds upwind and walks over the world: the clouds under it close up,
+    # thicken and darken, the deck rises into cumulonimbus while a storm is in view (live:
+    # sky.top), and the ground under it dims. Its life is 20 to 60 minutes of weather time (the
+    # panel's Time scale speeds it up). Every client with the same weather.* keys sees the same
+    # storms.
+    - node: weather
+      type: weather
+      ground: world        # the storms are timed to cross this node's extent
+      sky: sky             # the cloud_sky they drive (sky.storms, sky.top, sky.darkness)
+      seed: 5
+      radius_min: 1000     # metres: a storm cell's radius at maturity
+      radius_max: 1600
+      storm_top: 3000      # the deck's top in a full storm

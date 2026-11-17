@@ -757,11 +757,13 @@ The built-in top-level keys (`is_builtin_block`,
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs  requires
 init  on_tick  on_key  on_pointer  on_signal  keys  units  import  channels  lint  args
-windows_menu  tests  functions  data  assets  scenes
+windows_menu  tests  functions  data  assets  scenes  clock  menu_collapse  notifications
 ```
 
-`tests:` is read only by `ari test` (§13). `assets:` and `scenes:` are §5.18's shared meshes and
-scenes of their own.
+`tests:` is read only by `ari test` (§13). `clock:` is the tray's clock (§5.22).
+`menu_collapse:` says when the menu bar's menus fold into one (§5.23). `notifications:` shows
+the tray's bell or not (§5.24). `assets:` and
+`scenes:` are §5.18's shared meshes and scenes of their own.
 
 Any **other** top-level key is dispatched to a parser registered via
 `register_ari_block`, or — if none is registered — **silently ignored**. This is
@@ -933,6 +935,48 @@ optional `on:` run after each pick:
 
 A backend with no radio buttons draws a radio as a combo.
 
+**Tabs.** A `tabs:` widget is a tab bar bound to a key. Over its `children:` it is a tab container:
+each child is one tab, titled by its `tab:` (else its `label:`, else its place), and only the
+selected tab's subtree is drawn under the bar. Over `options:` alone (with `values:`, as a radio
+takes them) it is a bar and nothing more, a switch. `bind:` holds the selected tab's title (or its
+value); a write to the key from anywhere selects that tab, and `on:` runs after the user picks
+one. Without `bind:` the selection is kept at `tree.<id>.tab`.
+
+```yaml
+      - type: tabs
+        id: side_panel
+        bind: grid.panel                  # Probe | Point classes | Segmentation
+        children:
+          - { type: group, tab: Probe, children: [ ... ] }
+          - { type: group, tab: Point classes, children: [ ... ] }
+          - { type: group, tab: Segmentation, children: [ ... ] }
+      - tabs: View                        # VolumeGridRover's view switch
+        bind: grid.view
+        options: [XY, XZ, ZY]
+        values: [xy, xz, zy]
+```
+
+**Lists.** A `list:` shows the rows of a state array, as `repeat:` counts it: the row count at
+`bind:` and row `i`'s fields at `<bind>.<i>.<field>` (what `host.set_table` and
+`state-from-json` write). Each row shows its `field:` (`name` by default); a click selects it,
+writing its index to `current:` (default `<bind>.current`, `-1` for none) and running `on:`.
+`add: true` gives an Add button that appends a row, its fields from `new_item:` (`{n}` in a value
+is the row's number from 1), and selects it; `remove: true` gives a Remove button that deletes the
+selected row, moving the rows after it up (their whole subtrees). `on_add:` and `on_remove:` run
+after an edit, `rows:` (6) is how many rows show at once.
+
+```yaml
+      - list: Point classes
+        bind: grid.classes
+        add: true
+        remove: true
+        new_item: { name: "class {n}", color: "1,0,0", radius: 2 }
+```
+
+A backend with no tab bar draws `tabs:` as a row of radio buttons, and one with no list draws a
+`list:` as stacked radio buttons with the two buttons under them, so a terminal host shows both.
+(`tabs_list_test`, `cvcgl_imgui_tabs_list`.)
+
 ### 5.4 `scene:` sources and custom node types
 
 A `scene:` node's `type:` is a built-in (`geometry`, `volume`, `volren`, `volslice`,
@@ -942,8 +986,14 @@ types behind one call, `register_cvcgl_extensions`
 ([`extensions.h`](../inc/cvc/gl/ariadne/extensions.h)), which both `ariadne_hello` and
 `AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`,
 `generated_world` (terrain_lab's world, [`world_nodes.h`](../inc/cvc/gl/ariadne/world_nodes.h)),
-and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and `fe_lab`. Keys the built-in parser
-does not know land in the node's `props`, which a custom realizer reads; most realizers
+`volume_slice` (one axis-aligned plane of a volume, below), `water` (its sea, lakes and ponds as the
+GPU FFT ocean, below), `weather` (the scene's storms, below), `ribbon` and `draped_link` (lines
+drawn from data, below), and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and
+`fe_lab`. Keys the built-in parser
+does not know land in the node's `props`, which a custom realizer reads. So does a `source:` the
+built-ins have no field for, `{ state: <key> }` or `{ stream: <token> }`, as written. A
+`source: { data }` node is drawn as a data node (§5.17) unless its type was registered with
+`NodeTypeOptions::reads_data`, which hands the node to its realizer instead. Most realizers
 **seed** state keys from them (`forest.*` for `forest_trees`, the node's own subtree for
 `mesh_lab` / `fe_lab`), so a document's prop is the starting value a bound component then
 edits live. A document that cannot run without a custom type says so
@@ -982,8 +1032,8 @@ scene:
   counted as a widget's is. A key that holds no number counts 0. The most is 4096.
 - **Each copy** is the template with `{i}`, its 0-based index, filled in: in its id (`marker_0`,
   `marker_1`, ...), its `visible:` bind, its tags, its `source:` (a file, an asset, a dataset and
-  its item), its `material: { texture }`, its clips' bound offsets, every string in its props (a
-  custom type's keys), and its children's. An id without `{i}` gets `_{i}`. A copy keeps the
+  its item), its `material: { texture }` (an image, or a live texture's `stream:`), its clips'
+  bound offsets, every string in its props (a custom type's keys), and its children's. An id without `{i}` gets `_{i}`. A copy keeps the
   template's `transform:`, `tags:`, `visible:`, material, `shader:` and children.
 - **The count is live.** At each frame `tick_scene` counts every repeated node again and adds or
   removes copies to match, the last copies going first, without a reload. A copy that goes takes
@@ -1172,7 +1222,113 @@ is cast along and the clouds are lit from), `shade_k` / `shade_floor`, `horizon`
 clouds), `far_reach` (how far the far clouds reach toward the horizon; out of the camera's bounds),
 `evolve` (the weather's speed: 1 is a step every 5 s, a cloud lasting some 8 minutes; 0 holds the
 clouds) and `shadow` (0 starts the shade off). Live keys under the node's root (`sky.` unless
-`keys:`): `drift`, `morph`, `evolve`, `orographic` and `shadow`, all on `sky_controls.ari`.
+`keys:`): `drift`, `morph`, `evolve`, `orographic`, `shadow`, `coverage` (the cells' targets are
+ranked again at once, and the clouds fade in or out to them), `wind_az` and `darkness`, all on
+`sky_controls.ari`, and `base`, `top` and `storms` (below).
+
+The sun is the light rig's key once the scene has one (`lighting.key_azimuth` /
+`key_elevation`, the Stage lighting panel), followed live: a new sun relights the cloud maps and
+re-composites the shade and the far clouds. `sun_az` / `sun_el` are used only without a rig. A
+`water` node listed in `receivers:` takes the shade too: its sunlight and glints dim under a cloud.
+
+Storms (OCEAN-AND-WEATHER-ROADMAP.md §9 F2, O18). `sky.storms` holds storm discs, `"x y r
+intensity"` entries split by `;` in world metres, as a `weather` node writes them. Each cell takes
+the discs' field over it: a stormy cell gathers cloud, is held besides the `coverage` (which is the
+fair weather's), and its shade and far opacity deepen (up to 2.5 and 1.8 times). Its near volume
+thickens and darkens with it. The far clouds and the receivers read up to four discs as uniforms:
+the far clouds darken over a storm, and a receiver's ambient light drops by up to 0.55 under one. No
+sampler joins the receivers. `sky.darkness` (0..1, `darkness:`) moves the clouds' colour ramp toward
+a storm's dark grey, and a storm cell's own share darkens it further. Where a cloud is darkened, its
+light also dims as the cloud above it hides the sky (ABYSSAL's dark bases), so a tower's base goes
+dark and a cumulus's stays light. `sky.base` and `sky.top` are live. A deck deeper than the props'
+is a storm deck: its maps are cumulonimbus (the cumulus at the bottom, a tower from its core, an
+anvil under the top) on up to 64 layers and 24 far slices, and their self-shade marches the sun
+through the tower. The new maps are built as a sliced task (`cvc/core/sliced_task.h`, as
+`generated_world` rebuilds), off the frame, and swapped in when done: natively on the background
+pool, and in single-threaded wasm a few milliseconds a frame on the scheduler thread.
+`deck_threading: cooperative` builds them that way natively too (or `threaded`; `automatic` by
+default, which `CVC_SLICED_THREADING=cooperative` also turns cooperative). A build takes about 150 ms
+for terrain_lab's 3 km deck. The cumulus the maps grow from is kept, so the way back is about 30 ms.
+The near volumes then take the new box, their opacity corrected so a metre of cloud is as opaque as
+before.
+
+**Weather.** `weather` holds the scene's weather model (`cvc::world::weather`,
+[`weather.h`](../inc/cvc/world/weather.h)): storm cells on a hashed schedule, and the storms people
+start. It is a pure function of its props, the world clock's time and the events in
+`weather.events`, so every client holding those keys sees the same storms (decision D5). A cell is
+born upwind of the `ground:` node's extent (or `area` around `cx`, `cy`), timed to cross it in the
+middle of its maturity. It grows to its peak, holds it and decays over a life of `life_min` to
+`life_max` weather seconds (1200 to 3600), its centre riding the steering wind. Its phase is the
+weather's state: `clear`, `building`, `storm`, `clearing`. Weather time is cut into slots of
+`interval` seconds (3600); a `chance` share of them (0.5) holds a storm, none before `quiet` (600).
+Other props: `seed`, `growth` / `decay` (the shares of a life spent on each), `radius_min` /
+`radius_max`, `peak_min` / `peak_max`, `miss` (how far to the side of the centre a storm passes, in
+half-widths), `rain_onset` / `rain_max` (mm/h), `calm` (a calm's fade, seconds) and `time_scale`.
+The node drives the `cloud_sky` whose key root `sky:` names (default `sky`; `""` drives none). It
+writes the storms to `sky.storms`. It raises `sky.top` toward `storm_top` (3200) in four steps while
+a storm is within `reach` metres (4000) of the ground, so the cumulonimbus maps are built a few times
+a storm and only while one is about. It raises `sky.darkness` toward `darkness` (0.6), and
+`storm_base` lowers the base too. The steering wind is the scene's wind: until one scene wind exists
+(O14) it is the sky's, `sky.wind_az` at the deck's drift speed, so the storms keep to the clouds
+drawn. A change of it is logged as a `steer` event once it has held for ten frames. Live keys under
+the node's root (`weather.` unless `keys:`): `events` (the authored events, `storm`, `steer`, `rate`
+and `calm`, as text), `time_scale` (weather seconds per world second; a change is a `rate` event),
+`request` (`upwind`, `overhead` or `calm`, emptied once read), and what it publishes: `state`,
+`storminess`, `cells`, `storms` (the cells as discs), `rain` (mm/h at the ground's centre) and
+`deck`. The panel is `weather_controls.ari`. The rain (O19) and the storm wind, lightning and wet
+ground (O20) will read the cells and `weather::rain_rate(x, y)`.
+
+**Water.** `water` draws everything below `level` on a ground (`world:` a `generated_world`, or
+`ground:` any height-field node) as the GPU FFT sea of OCEAN-AND-WEATHER-ROADMAP.md (§11.2, O15):
+three wave cascades for the wind (`wind_speed`, `wind_dir`, `fetch`), and a swell
+(`swell_height` m, 0 for none; `swell_period`, `swell_dir`) carried by the shore layer, which
+refracts it over the bottom, shoals it, and breaks it on the beaches that face it. Both follow the
+coast: a shore grid over the ground (still-water depth, distance to the shore, normal). Each cascade
+fades out as the water shoals, over half its peak wavelength and at most `shore_fade` metres of
+depth, and no point moves sideways more than 0.8 of the way to the shore. A grid `near` metres each
+way from the camera (`cells` vertices a side) is displaced by the cascades and the swell, and moves
+with the camera by whole cells. A flat grid over the ground (`far_cells` a side) draws the rest
+and gives way inside the near one; its normal is the long waves' and the swell's, per fragment,
+fading out by ten times `near`. Both shade as a Fresnel sea with shallows tinted by depth and
+whitecaps where the waves fold, the threshold found so they cover Monahan's share of the sea for
+the wind (`whitecaps` scales it; `foam_bias` at 0 or above fixes it), plus the swell's breakers and
+a foam band at the waterline (`shore_foam`), faint where no swell reaches. Both stay out of the
+scene's bounds, so the ground frames the view. When the ground's whole rim is under water (a
+`generated_world` with `edge: shore`, an island) the sea goes on `outer` metres past it (6000);
+otherwise it stops at the ground's edge. A `generated_world` under a water node wants `water: 0`,
+so its own flat water rungs do not draw over it. The cascades need float render targets; without
+them the water is flat blue. Live keys under the node's root (`water.` unless `keys:`):
+`wind_speed`, `wind_dir`, `gustiness`, `fetch`, `lee`, `sea_lag`, `sea_fade`, `current`, `chop`,
+`wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`, `foam_fray`, `shore_fade`, `swell_height`,
+`swell_period`, `swell_dir`, `shore_foam`, `wake` and `wake_foam`, most on `water_controls.ari`. A
+change to the swell rebuilds the shore layer once the keys have held for ten frames (12 ms for a
+401² grid). The wind (OCEAN-AND-WEATHER-ROADMAP.md O13) is read through one place,
+[`scene_wind.h`](../inc/cvc/ariadne/scene_wind.h) (today the node's `wind_speed`, `wind_dir` and
+`gustiness`; the scene's one wind later). The sea lags it: its wind follows with a `sea_lag`
+seconds' time constant (20; a compressed scale), and each new state of it crossfades in over
+`sea_fade` seconds (4), so a wind change never pops. With `lee` (1) the water downwind of land is
+calm: each wave band is scaled by the square root of its fetch, the distance the wind has blown over
+water, up to where the band is fully grown, from a coarse fetch map built when the wind turns. The
+gusts (`gustiness`, 0.25) ripple and roughen racing patches of water (cat's paws), and `current`
+(m/s, 0) is a slowly varying flow that carries the short waves and floating bodies alike. With `body: {}` the water is in the scene's
+physics world, with or without a renderer ([`scene_water.h`](../inc/cvc/ariadne/scene_water.h)).
+It is one fluid field over the water's extent, its surface the same sea computed on the CPU (the
+cascades fading at the same coast, the same swell), so a body lighter than water floats on the
+waves the picture shows and a heavier one sinks: calm in the lee, crossfading with the drawn sea, and
+drifting on the current. The field is rebuilt when the sea takes a new state of its wind, the chop,
+wave height, swell, gusts or current change, or the ground regenerates, and the scene's world swaps it as it swaps a
+generated world's bodies. The bodies make waves: an eWave window of 128 m of 0.5 m cells around the
+camera's target takes each moving body's immersed columns as its source, so a dropped crate makes a
+ring and a bobbing one keeps radiating. Its waves move the near grid and shade both grids, foaming
+where they are sharp or fast (`wake_foam`). Beaches absorb them and steep shores reflect them
+(`wake: 0` turns the window off). They are drawn only: they do not push the bodies back. With a
+swell, the swash runs up the beach on the ground itself. The node adds it to the fragment shader
+of every mesh under its ground node (the `world:` / `ground:` node, found by id at the top of the
+scene, its LOD rungs and regenerated chunks included), as the cloud deck adds its shade to its
+receivers. Each wave's front runs up to the shore layer's runup and drains back, a film of water
+with a lace of foam under it, the sand dark and glossy behind it until it dries. The physics sea
+carries the same swash, so a body on the sand is lifted by the film drawn there. `swash: 0` leaves
+it out of both.
 
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the
@@ -1313,7 +1469,14 @@ scene:
     `<prefix>.sim.restarts`, so a program or a host can reset state of its own.
   - pycvc's `AriApp` has `step_world(n)` and `restart_world()`.
 - **A generated world's body.** `body: {}` on a `generated_world` node is the world's colliders:
-  its terrain and its buildings, each a static body (`shape:` and `motion:` do not apply). The
+  its terrain and its buildings, each a static body (`shape:` and `motion:` do not apply), and
+  invisible walls just outside the terrain's edge, so nothing leaves the world over it; a vehicle
+  touching one has hit an obstacle. That is the node's `edge: wall`, the default; `edge: shore`
+  lines the world with a beach instead, the ground falling under the sea over a band at the rim
+  (20 % of `half`, 50-300 m), its corners rounded and its coastline wandering, with the sea drawn
+  on past the world, and no walls; `edge: none` leaves the edge open. It is live too: `world.edge`
+  (0 wall, 1 shore, 2 none), the World panel's Edge, which Regenerate applies. A data node's world
+  always has the walls. The
   world is made in core libcvc ([`scene_generated_world.h`](../inc/cvc/ariadne/scene_generated_world.h)),
   so headless the scene's world runs the node itself: it seeds the `world.*` keys, makes the
   world as the document says, publishes `world.stats.*`, and makes a new world at once on
@@ -1375,7 +1538,7 @@ scene:
   - **Restart.** `sim.restart` rebuilds only the world on.
 - **Vehicles.** The document's top-level `world:` block lists the vehicles it offers
   ([`world_rules.h`](../inc/cvc/ariadne/world_rules.h)), and the scene's world runtime spawns
-  them as Jolt vehicles into the scene's own physics world, headless or drawn
+  them into the scene's own physics world, headless or drawn
   ([`world_vehicles.h`](../inc/cvc/ariadne/world_vehicles.h)). They collide with the scene's
   bodies, step on the world clock with them, and drive on the world that is on:
 
@@ -1390,13 +1553,33 @@ scene:
         racer:
           vehicle: { preset: roboracer, max_speed: 6 }       # a preset with overrides
           look: { file: racer.glb, scale: 1, yaw: 90, z: 0 } # default: the chassis box
+        truck:
+          plant: dynamic4w:humvee                            # the four-wheel model, a Humvee
   ```
 
-  - **Archetypes.** Each names its plant (`jolt`; `kinematic`, `dynamic` and `dynamic4w` are
-    accepted but not run in a scene world yet), its body (a preset, with `mass`, `max_speed`,
+  - **Archetypes.** Each names its plant, its body (a preset, with `mass`, `max_speed`,
     `max_accel`, `max_decel` or `max_steer` over it), its look, the ranges a spawn's settings are
     held to, and its controllers: `nav@1`, the navigator, `none`, or `external` (its intent
     alone drives it).
+  - **Plants.** Every plant runs in the scene's world, on its clock, and meets its bodies (the
+    buildings, the props, the other vehicles):
+
+    | `plant:` | The vehicle | Its body in the world |
+    |---|---|---|
+    | `jolt` (the default) | a Jolt vehicle: wheels, suspension, engine and gearbox | the vehicle's chassis |
+    | `dynamic` (`dynamic:<preset>`) | the dynamic single-track model: tires, load transfer, actuator lag, with its energy books | its chassis box, which the world's contacts push back into the model |
+    | `dynamic4w` (`dynamic4w:<preset>`) | the four-wheel model with suspension: each wheel on the ground under it | as `dynamic`'s |
+    | `kinematic` | nav's bicycle | a kinematic box: it pushes what it meets, and nothing stops it (the navigator keeps it off the buildings) |
+
+    `dynamic:<preset>` names the vehicle as `vehicle: <preset>` does. The dynamic models take one
+    substep of each world step, so they step with everything else; each plant's entities have a
+    navigator of their own on the world's grid. The kinematic bicycle steers each of its
+    substeps, so it has no one command to blend with: there a `blend` intent replaces.
+
+    A spawn may name a plant other than its archetype's (`vehicles.spawn.plant`,
+    `entity_spec::plant`), as a gym's agents do. A kinematic box meets no building in the
+    physics world, so its obstacle contacts are its footprint on the grid's blocked cells, and
+    two kinematic boxes touch when they overlap.
   - **Looks.** With no `look:`, a humvee is the real Humvee, the vehicle-humvee package's
     `Humvee.glb`, when it is installed (`find_vehicle_model`: beside `$CVC_NAV_BUNDLE`, else in
     `share/cvc-scenes/shared` or `share/cvc-scenes/*/` under `$CVC_PREFIX`, `$CVCPKG_PREFIX`,
@@ -1418,12 +1601,14 @@ scene:
     `selected` and `selection.*` (the selected archetype as a spawn would make it now), and
     `status`. Under `entities`: `ids`, `count`, `rev`, `summary`, and for each entity its
     identity, pose (`x`, `y`, `z`, `yaw`), `speed`, `power_kw`, `energy_wh`, `wh_per_km`,
-    `distance`, `wheel_load`, `aero_force` and `gear`, and `command.steer` / `command.accel`
+    `distance`, `wheel_load`, `aero_force` and `gear` (the dynamic models give their books'
+    power and energy, and an odometer), and `command.steer` / `command.accel`
     (what its plant took on the last navigator tick) with `command.by` (its controller, `intent`,
-    `blend`, or `hold`). `physics.stats.vehicles` has a line per vehicle.
+    `blend`, or `hold`). `physics.stats.vehicles` has a line per vehicle, its plant named.
   - **Intents.** Any entity can be steered from outside. A document, a script or a server writes
     its keys, and a C++ or Python host calls `WorldVehicles::set_intent` (`pycvc.WorldEntities`,
-    below). Each navigator tick (20 Hz) reads them, and a change replaces the intent it had:
+    below). Each navigator tick (0.06 s by default, `cvc::kSimTick`) reads them, and a change
+    replaces the intent it had:
 
     | Key, under `entities.<id>` | What it is |
     |---|---|
@@ -1432,7 +1617,7 @@ scene:
     | `intent.accel` | m/s² along its heading (from rest a negative one backs it up), held to its top speed as the navigator's command is |
     | `intent.weight` | the blend's share, 0 to 1 (default 0.5) |
     | `force.x`, `force.y` | m/s², world frame: a push added to the drive's force (the goal's pull and the walls' push), as `cvc::nav::ext_force` adds one. It works under any command but `replace` |
-    | `force.steer` | `0` keeps the force out of the drive's steering (default `1`). The drive has one such switch, on while any entity's force asks for it |
+    | `force.steer` | `0` keeps the force out of the drive's steering (default `1`). Each plant's drive has one such switch, on while any of its entities' force asks for it |
 
     An `external` entity has no command of its own: `replace` and `blend` both drive it, and with
     no intent (or `off`) it brakes to a stop and holds there. `world: vehicles: intents: <path>`
@@ -1449,7 +1634,9 @@ scene:
     `vehicles.spawn.request`. The result is in `vehicles.spawn.status`. `vehicles.remove.id`
     with `remove.request` removes one, and `clear.request` removes them all.
   - **Drawing.** cvcGL draws each entity on its chassis, posed between steps as the other moving
-    bodies are. A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
+    bodies are. The box look poses each wheel where its plant has it
+    (`WorldVehicles::wheels`): a Jolt wheel on its suspension, a dynamic4w wheel on the ground
+    under it, the front ones steered (Ackermann's on a dynamic4w). A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
     `spin:` in degrees a second) draws the selected archetype in the spawn's colours.
   - **The panel.** `vehicle_selector.ari`: the vehicle, its stats, a preview viewport onto a
     `scenes:` entry holding a `vehicle_preview` node (its header shows one), the settings, the
@@ -1508,6 +1695,91 @@ scene:
     scope, Suggest along roads and Accept, and the points.
   - **The demo.** `examples/ariadne/documents/world_lab.ari` has the three worlds, a Humvee and a
     RoboRacer, a studio scene, four team points on the flat square, and every panel.
+- **The gym.** A world document driven one control tick at a time: `reset`, `step`, `observe`, a
+  reward and an episode log, headless ([`world_gym.h`](../inc/cvc/ariadne/world_gym.h),
+  `pycvc.WorldGym`). Each gym loads its document on an app of its own and pauses its clock, so
+  one process runs many side by side and nothing steps the world but `step()`:
+
+  ```python
+  gym = pycvc.WorldGym("world_gym.ari", world="flat", count=4, max_steps=1200)
+  obs = gym.reset(seed=7)               # a dict of numpy arrays, one entry per agent
+  while True:
+      steer, accel = my_policy(obs)     # (n,) each, rad and m/s^2; NaN: nav@1 drives that agent
+      obs, reward, terminated, truncated, info = gym.step(steer, accel)
+      if terminated or truncated:
+          break
+  gym.save_log("episode.csv")           # or gym.log(), a dict of numpy arrays
+  ```
+
+  - **Agents.** Each reset makes the world afresh as the document built it (the clock at tick 0),
+    seeds every draw with the reset's seed (starts, goals, the spawn policy's), and spawns the
+    agents: `count` of the first archetype with `nav@1`, or `agents=[{archetype, plant, name,
+    team, controller, x, y, yaw, ...}]` (any of the four plants). Starts come from the
+    document's spawn points when it has them. A seed and a list of commands give the same
+    episode every time, in any gym.
+  - **A world per episode.** With `regenerate=True` each reset makes a generated world on again
+    from its seed (the node's `world.seed`): another seed, another world; the same seed, the same
+    world.
+  - **A step** is one navigator tick: `tick=` (`gym_options::tick`), by default libcvc's one
+    simulation tick, 0.06 s (`cvc::kSimTick`, `pycvc.SIM_TICK`; cvc/core/sim_tick.h). It is a whole
+    number of physics steps: a world with vehicles runs its clock at the 0.01 s simulation quantum,
+    so physics steps at 100 Hz and a tick is 6 of them. An agent takes
+    its command for that tick in place of its controller's (`WorldVehicles::command`, held to its
+    envelope); a NaN leaves it to its controller, so NaN everywhere is the navigator's baseline.
+    Goals are held for the episode (`wander=False`); `set_goal(id, x, y)` moves one.
+  - **Contacts.** A world's terrain is its ground; its buildings are not, so touching one is
+    `hit_obstacle`.
+  - **The observation**, per agent: `id`, the chassis's `x`, `y`, `z`, `yaw`, `speed`, `vx`,
+    `vy`, `steer`; `goal_x`, `goal_y`, `goal_dist`, `reach`, `reached`; `hit_obstacle` (the
+    world's bodies other than its ground), `hit_vehicle` and `collided` over the tick; `out` (off
+    the grid, or 5 m below its ground); `plant`; `ranges` (n x rays) to anything blocked in the grid, at
+    `ray_angles` off the heading, up to `range_m`; and the body and envelope (`length`, `width`,
+    `wheelbase`, `max_steer`, `max_accel`, `max_decel`, `max_speed`).
+  - **The end.** `terminated` when every agent with a goal (`nav@1`; `none` parks at its start)
+    is at it, or one is out; `truncated` at `max_steps`.
+  - **The reward** is yours: `set_reward(fn(before, steer, accel, after) -> (n,))`. The default
+    pays each agent its progress toward its goal (m), less 1 for a tick it collided, plus 10 when
+    it arrives.
+  - **The log**: a row per agent at each reset and step (episode, step, id, time, pose, speed,
+    the commands, the goal distance, the reward, the flags), as numpy arrays or CSV.
+  - **Keys.** Under `gym`: `episode`, `step`, `time`, `return`, `done`, `agents`, `status`.
+  - **The example.** `examples/ariadne/python/world_gym.ari` holds world_lab's worlds, vehicles
+    and spawn points and requires only `scene.physics`; `world_gym.py` drives it with a policy of
+    its own or `--navigator`. Open the document in arigl to watch the same world drawn.
+  - **`pycvc_gl.cars` on it.** `GymCars` runs the cars template's controllers in a world
+    document (docs/CARS.md, "In a world document").
+  - **A differentiable twin** reads the world from the gym (ARIADNE_WORLDS.md §14, "As built
+    (L4's twin)"). Neither Jolt nor a physics world is differentiated, so a trainer steps a
+    model of the gym instead, as P8 did for the Jolt vehicle (NAV-VEHICLE-PHYSICS-ROADMAP), and
+    the gym judges the result.
+    - `fields()` gives the navigator's grid (`occupancy`), its `height`, the ground's grip `mu`,
+      the navigator's signed distance `sdf` with its gradient `sdf_dx` and `sdf_dy`, the
+      `bounds` and `cell`, and the navigator's own settings (`navigator`: nav's scale, its tick,
+      the arrival radius, its vehicle in normalized units).
+    - `plants()` gives each agent's plant as a model, in the observation's order, in SI
+      (`entity_plant`, `WorldVehicles::plants`):
+      - `dynamic4w`: the plant's own four-wheel model (`diff::dyn4_plant`), with its parameters,
+        step limits, substeps, ground reference and state. It also gives what the model took of the
+        last command in each substep, after the driver (`applied_accel`). Away from a
+        collision, replaying the model from the state before a tick with that command gives the
+        state after it, to the last bit.
+      - `dynamic`: the single-track model, the same way, with each step's grade.
+      - `jolt`: the four-wheel model with the vehicle's own numbers (`nav_plant::dyn4_si_of`).
+        Its state is read back from the chassis, so `exact` is false.
+      - `kinematic`: nav's bicycle, its rear axle, heading and speed, and its limits in metres.
+      - On every plant, `drive`: what the navigator's drive did on the last tick
+        (`entity_drive`): its policy's coefficients (`alpha`, `beta`, `gamma`), the point it
+        steered for (`goal_x`, `goal_y`: its carrot, world m) and the external force it summed
+        (`force_x`, `force_y`: an intent's, m/s², world frame). `known` is false until a tick
+        has run. The gym keeps the drive's telemetry for it (`drive_telemetry=True`, the
+        default; `WorldVehicles::set_drive_telemetry`), which changes nothing the drive does.
+        With these a twin replays the gym's own controller on a tick, a force included.
+    - `set_intent(id, steer=, accel=, mode=, weight=, force=(fx, fy), force_steers=)`,
+      `intent(id)` and `clear_intent(id)` are an agent's intent, as `pycvc.WorldEntities` sets
+      one: from the next step until changed, so a force (m/s², world frame) acts on the drive
+      while the navigator drives (a step's finite command still takes that step in its place).
+      A reset clears every agent's.
+    - GRL-SNAM's `grl_snam.gym_twin` is the torch twin built on them.
 - **Terrain transforms.** A terrain follows its node's position but not its rotation or scale.
   Draw a ground you collide with unrotated and unscaled.
 - **Reading physics.** `RealizedScene::physics` is the world (`RealizedScene::world` the
@@ -1682,6 +1954,178 @@ thread, or deferred onto it in a single-threaded wasm build — and apply result
 per-frame tick. A job captures only its own hand-off struct, never the node's runtime
 (which owns the lane), and teardown cancels it; tearing a scene down still waits for a
 running tet-mesh or Poisson solve to finish.
+
+**`type: volume_slice`** ([`volume_slice_nodes.h`](../inc/cvc/gl/ariadne/volume_slice_nodes.h),
+[`VolumeSliceNode.h`](../inc/cvc/gl/VolumeSliceNode.h)) is one axis-aligned plane of a volume: a
+textured quad coloured through the node's transfer function, as VolumeGridRover's slice views and
+the classic three-plane orthoslicer show a volume. It reads `source: { file }` or `{ sdf }` (with
+`fit:`) like a `volren` node.
+
+```yaml
+- node: ct_z
+  type: volume_slice
+  source: { file: head.rawiv }
+  axis: z                          # x | y | z, or a view's name: xy (z), xz (y), zy (x)
+  index: 40                        # the plane along the axis; -1 (the default) the middle one
+  transfer_function: { preset: grayscale }
+  children:                        # overlays: drawn on top of the plane
+    - { node: mark, source: { plane: { size: 2 } }, transform: { position: [10, 12, 0] } }
+```
+
+The plane's axes, right then up, are VolumeGridRover's: looking down z, x right and y up (its XY
+view); down y, x right and z up (XZ); down x, z right and y up (ZY). Each voxel draws as a square
+centred on it (the quad reaches half a voxel past the outer ones), unlit: the texture is the
+colour. Its keys live under the node's own state:
+
+| key | meaning | seeded from prop |
+|---|---|---|
+| `slice.axis` | the axis the plane looks down: `x`, `y` or `z` | `axis` |
+| `slice.index` | the plane's number along the axis, from 0. `-1` is the middle one, written back as its number; an index past the last plane draws the last and is written back. Its `max` property is the last plane's number, so a slider takes its range from it | `index` |
+| `slice.filter` | `nearest` (each voxel a sharp square, the default) or `linear` | `filter` |
+| `slice.opaque` | `1` (the default): every voxel in its colour at full opacity; `0`: the transfer function's opacity, so the plane blends | `opaque` |
+| `slice.overlay_offset` | how far back in depth the plane draws (polygon-offset units, 2 by default), so the overlays in its plane stay on top | `overlay_offset` |
+| `slice.count`, `slice.position` | published: how many planes the axis has, and where this one lies along it | — |
+| `slice.status` | published: `""`, or what is wrong (a key that does not parse, a failed read) | — |
+| `info.dims`, `info.min`, `info.max`, `info.span`, `info.box`, `info.file` | published: the volume's dimensions, data range, voxel spacing, bounding box and file | — |
+| `transfer_function` | the `cvc::tf::model` the voxels are coloured through, over the volume's data range unless its domain is explicit; a `tf_editor` edits it and shows the volume's histogram | `transfer_function:` — `preset:` (grayscale by default) and the model's own keys (`color`, `alpha`, `isocontours`, `domain`, `opacity_cubed`, `resolution`), each replacing the preset's |
+
+The keys carry `cvc::volume_slice_params`' parameter table
+([`volume_slice.h`](../inc/cvc/volume/volume_slice.h)): `doc`, `unit`, `min`, `max` and `choices`
+as properties. Each change of plane, axis or transfer function colours the plane on the CPU and
+uploads one 2D texture; a new plane the same size as the last is written into the same texture.
+So stepping through a large volume never puts the volume on the GPU. `region_reads: auto` (the
+default) reads a file of more than 64 Mi voxels one plane at a time (`cvc::slice_source`, the
+last eight planes kept), so a volume larger than memory can be scrubbed; `true` always reads that
+way, `false` never. Read plane by plane, the editor's histogram is the first plane's, over the
+file's range. **Overlays** are the node's children: point glyphs, polylines, crosshairs. The plane
+is pushed back by `slice.overlay_offset`, so anything drawn in its plane shows on top of it in
+every view. `VolumeSliceNode::pickRay` meets a world ray with the plane exactly and names the
+voxel and its value (`cvcgl_volume_slice`, and `volume_slice_test` for the slicing itself).
+
+`volume_of: <id>` in place of `source:` makes the node another plane of the volume that the
+`volume_slice` node `<id>` (realized before it) draws, coloured through `<id>.transfer_function`:
+the volume is read or computed once, and one editor colours every plane. The classic three-plane
+orthoslicer is one node with a source and two with `volume_of:`.
+`examples/ariadne/documents/orthoslicer.ari` puts them beside a `volren` of the same volume, with
+a slice view down the axis a switch picks (§5.18) and the transfer-function editor on the first
+plane.
+
+#### Lines from data: `type: ribbon` and `type: draped_link`
+
+Two custom types draw lines whose points come from data
+([`ribbon_nodes.h`](../inc/cvc/gl/ariadne/ribbon_nodes.h)): a vehicle's track that grows every
+tick, a planned route replaced on each re-plan, a link between two moving things coloured by how
+well it carries. Both are streaming nodes (`cvc::gl::RibbonNode`, `cvc::gl::DrapedLinkNode`), so a
+change uploads only what changed and the node is never rebuilt. Each is a node of its own, updated
+only when its data changes; `visible:`, `tags:` (and so views, §5.18), `transform:` and
+`casts_shadow:` apply as to any node.
+
+```yaml
+scene:
+  nodes:
+    - node: ground
+      source: { terrain: { size: 1200 } }
+    - node: track_a
+      type: ribbon
+      source: { state: tracks.a }      # a list of numbers, three a point
+      width: 3
+      color: c1
+      ground: ground                   # each point's z from the ground, plus lift:
+      lift: 0.4
+      window: { tail: 300, units: m }  # only its last 300 m
+    - node: route_a
+      type: ribbon
+      source: { state: routes.a }
+      color: [0.2, 0.9, 0.3]
+      window: { from: routes.a_done, units: m }   # the driven front hidden as the car advances
+    - node: link_ab
+      type: draped_link
+      ground: ground
+      between: [car_a, car_b]
+      value: links.ab.quality
+      ramp: quality
+```
+
+**A ribbon's points** come from `source:`:
+
+- `{ state: <key> }`: the key's `data()` when it holds floats
+  (`std::shared_ptr<const std::vector<float>>`, which is read without a copy of the key's value, or
+  `std::vector<float>`, `std::vector<double>`, float32 bytes, a mesh's points), else its value as
+  text: numbers separated by commas, spaces, semicolons or brackets. The key is read again only
+  when it was written.
+- `{ data: <name>, item: <output> }`: an output of a dataset of the document's `data:` block
+  (§5.17), read like a state key; a lazy dataset loads when the ribbon asks for it.
+- `{ stream: <token>, replace: false, depth: 4 }`: a stream of float32 frames, by its token or its
+  id (opened by the document, or at the root). Each frame's points are appended; with
+  `replace: true` each frame is the whole line. A stream opened after the scene is realized is
+  picked up when it opens.
+- `points: [[x, y, z], ...]` instead of `source:`: a fixed line written in the document.
+
+`fields:` says what each point's numbers are, in order: `x` and `y`, and any of `z`, `w` (that
+point's full width) and `v` (its value). The default is `xyz`; `xy` puts the points at z = 0, or on
+the ground.
+
+What is drawn follows the data, and only what changed is written:
+
+- A list that grew appends its new points: each uploads its own two vertices and re-mitres the one
+  before (48 bytes a point).
+- A list whose tail changed (a last point that is the live position) is written from the first
+  point that differs.
+- Anything else is written again whole, as one sub-range upload.
+- A key that was not written since the last frame is not read.
+- Past the ribbon's `capacity:` (256 points by default) it grows to twice that, one full upload.
+
+**Width, colour and style.**
+
+- `width:` is the ribbon's full width in metres (2 by default); a `w` field overrides it per point,
+  and a segment tapers between its points' widths.
+- `color:` is `[r, g, b]` (0 to 1), `"#rrggbb"`, or a style slot `c0` to `c7` (the chart's
+  categorical colours: blue, orange, aqua, yellow, magenta, green, violet, red). The ribbon is drawn
+  flat, unlit, in that colour; a `material:` block draws it lit instead.
+- With a `v` field, `ramp:` colours each point by its value, blended along each segment: `quality`
+  (red to yellow to green over 0 to 1), `heat` (blue to yellow to red), or up to eight
+  `[value, colour]` stops. A named ramp runs over `range: [lo, hi]` when given. The values sit in a
+  float texture beside the points, and a point written uploads its own texel.
+- `opacity:` and `depth_offset:` (polygon offset toward the camera, for a line laid on a surface)
+  are per node.
+
+**On the ground.** `ground: <node>` names a heightfield or terrain node (or a `generated_world`)
+declared before this one. Each point then sits on it: its z is the ground's height there (the
+triangle under the point, clamped onto the grid) plus `lift:`. Without a ground, `lift:` is added to
+the points' own z. The ground is sampled in its own coordinates: put the ribbon under the ground
+node, or give it the same transform. When the ground is made again (a regenerated world), the ribbon
+is draped on the new one.
+
+**`window:`** draws part of the line, with no upload: a draw range and a cut at a fraction of a
+segment.
+
+- `{ from: <a>, to: <b> }` draws from `a` to `b`. Each is a number or a state key read each frame;
+  `to: end` (or no `to:`) runs to the last point.
+- `{ tail: <n> }` draws the last `n`.
+- `units: point` (the default) counts points, fractionally; `units: m` counts metres along the line.
+
+**A draped link** is a strip between two ground points that follows the terrain, placed in the
+vertex shader over the ground's heights (a float texture shared by every link on that ground).
+Moving, widening or recolouring it changes uniforms and uploads nothing.
+
+- Its ends:
+  - `between: [<node>, <node>]` follows two nodes each frame: their origins, anywhere in the scene.
+    A world entity's node is `vehicle_<id>`; it is found again when the world draws it anew;
+  - `from: [x, y]` and `to: [x, y]`, each a literal or a state key holding `x, y`;
+  - or `source:` (as for a ribbon) holding `x0, y0, x1, y1`.
+- `ground:` as for a ribbon. Without one the link lies on a flat ground at z = 0 under the scene.
+- `width:` (2), `lift:` (0.5 m above the ground) and `stations:` (24 points along it).
+- `color:` as for a ribbon, or `value:` (a number or a state key) through `ramp:` (`range:` too):
+  the link's colour by a quality read each frame.
+- `opacity:`, a number or a state key.
+
+Coordinates are the node's own: give it the ground's transform, or nest it under the ground.
+
+[`cvcgl_ariadne_ribbons`](../src/cvcGL/test/cvcgl_ariadne_ribbons.cpp) covers these from a document,
+drawn for real. It counts the uploads of each append, both in the node and at the driver: one quad,
+nothing made, never the whole node. It moves a window and a link and checks that nothing is
+uploaded, and it checks the pixels, the value colours on both VTK mapper families, the streams and
+a regenerated ground.
 
 ### 5.5 Commands as a request key
 
@@ -2596,10 +3040,19 @@ adds the verbs to the action lanes. `ROOM` is the `room-join` handle (or its tok
 |---|---|
 | `(chat-post ROOM TEXT [TO])` | `{ok}`, or `{ok #f error}`: TEXT is empty or longer than 2000 bytes once cleaned, or there is no relay to send it to. TO `""` posts to the room, a pid is a direct message. The relay may still refuse it (its rate limit, TO not in the room): `chat-info`'s `error` says so. |
 | `(chat-info ROOM [CHANNEL])` | `{available rev count oldest newest head first more loading error}`. `rev` changes whenever the messages held change; `oldest`..`newest` is the contiguous run held (`count` of them); `head` is the next seq and `first` the oldest the relay keeps; `more` says older ones are kept; `loading` says a page is on its way. It also asks for the newest page the first time a channel is read, and again when a push was lost. |
-| `(chat-messages ROOM [CHANNEL [AFTER]])` | the run, oldest first, as `{seq from name text t clock mine}` (`clock` is the local "HH:MM", `mine` is #t for your own), or with AFTER only those after that seq. |
+| `(chat-messages ROOM [CHANNEL [AFTER]])` | the run, oldest first, as `{seq from name text t clock mine via}` (`clock` is the local "HH:MM", `mine` is #t for your own, `via` a bridged user's system or `""`), or with AFTER only those after that seq. |
 | `(chat-more ROOM [CHANNEL])` | `{ok loading more}`: asks for the page before the oldest message held. One request per channel is in flight; one unanswered for 3 s is sent again. |
 | `(chat-conversations ROOM)` | the direct-message conversations: `{peer name head present}`. |
 | `(chat-rev ROOM)` | a number that changes with every push the relay makes to you. |
+| `(room-roster ROOM [KIND [LIMIT]])` | who is in the room: `"participants"` (the default), `"bridged"` (another chat system's users, below) or `"all"` (the participants, then the bridged), with at most LIMIT bridged users. Each entry has `pid`, `name` and `bridged` (`"0"` or `"1"`); a bridged one adds `via`, `uid` and `detail`. |
+| `(room-bridged-count ROOM)` | how many bridged users are in the room. |
+| `(room-bridged-rev ROOM)` | a number that moves whenever a bridged user comes, goes or changes. |
+
+**Bridged users.** The relay's program can put another chat system's users in the room (an NMDC
+hub's, say: §9.8.7). They are in `(room-roster ROOM "all")`, post to the room's chat (their
+messages carry `via`), and take and send direct messages under their pid (`_nmdc_Zed_2eZ`), with no
+camera, microphone or avatar. The users list shows them in rows of their own. The layout and rules
+are in [ARIADNE_CHAT.md](roadmap/ARIADNE_CHAT.md), "Bridged users".
 
 The shipped component `chat.ari` (§6.5) builds a chat window from these verbs, in the DSL:
 - a channel picker, the room and each conversation, with what came since you last looked;
@@ -2747,8 +3200,9 @@ needs no host code. The `scene_view` component (§6.5) is the widget in a window
 
 The demos in `examples/ariadne/documents/`: `scene_views.ari` (an overview map and a view whose
 layers a menu picks), `viewer_grid.ari` (four cameras on one scene), `viewer_looks.ari` (one scene
-drawn four ways), `viewer_scenes.ari` (three scenes from one set of assets) and
-`viewer_groups.ari` (two tagged groups of one scene).
+drawn four ways), `viewer_scenes.ari` (three scenes from one set of assets),
+`viewer_groups.ari` (two tagged groups of one scene) and `orthoslicer.ari` (a slice view down the
+axis a switch picks, over three `volume_slice` planes).
 
 ```yaml
 scene:
@@ -2784,7 +3238,8 @@ windows:
 | `show` | Tags, as a list or one string (`show: "sim debug"`). The view draws the untagged nodes and the nodes that carry one of these tags. When unset, it draws every tag. |
 | `hide` | Tags the view leaves out, whatever `show` says. |
 | `bind` | A state key whose value is the tag list to show (space- or comma-separated), read every frame. Use it for a layers menu: a widget writes the key, and the view follows. |
-| `mode` | Its own camera's mode: `orbit` (the default), `fly`, `map` (top-down, framed on what the view shows), or `track` with `track: <node id>`. (`camera: map` and the other three mode names still mean the mode.) |
+| `mode` | Its own camera's mode: `orbit` (the default), `fly`, `map` (top-down, framed on what the view shows), `track` with `track: <node id>`, or `slice` (straight down one axis, below). (`camera: map` and the other mode names still mean the mode.) |
+| `axis` | With `mode: slice`, the axis it looks down: `x`, `y` or `z`, or a view's name, `xy` (z), `xz` (y) or `zy` (x). `axis: { bind: <key> }` reads it from a state key every frame, so one view follows a switch. Defaults to `z`. |
 | `camera` | Draw from a named camera instead of its own: one the scene declares (`scene: cameras:`, below), or `main`, the main view's. |
 | `scene` | The scene it shows: a `scenes:` entry's name (below). Unset (or `""`): the document's `scene:`. |
 | `shadows` | `true` (the default) draws the scene's shadows from the maps the scene's own renderer bakes. `own` bakes maps of its own from what this view draws, so a node it leaves out casts nothing there and a node the main view leaves out still casts; it costs one more bake. `false` draws none. |
@@ -2806,6 +3261,8 @@ under the `pick:` key:
 - `x`, `y`, `z`: the world point it hit, empty for a miss;
 - `hit`: `1` or `0`;
 - `node`: the id of the node it hit;
+- `i`, `j`, `k` and `value`: on a `volume_slice` node, the voxel the point lies in and its value
+  (empty elsewhere);
 - `button` (`1`), `mods` (`shift`, `ctrl`, `alt`, `super`, comma-separated), `phase` (`down`,
   `drag` or `up`) and `view`;
 - `seq` last: one more on each pick, so a watcher sees two identical clicks.
@@ -2814,6 +3271,31 @@ under the `pick:` key:
 example, so a tool such as a spawn-point editor is a program. A host can ask for the same hit test
 at any point with `SceneViews::pick(view, x, y, hit)`. A terrain, a generated world and a body are
 nodes like any other, so a click on the ground gives a point on it. (`cvcgl_ariadne_pick`.)
+
+**Slice views.** `mode: slice` is a parallel view straight down one axis with no rotation
+(`CameraController::Mode::Slice`): the plane a `volume_slice` node (§5.4) lies in, with the
+screen's axes VolumeGridRover's — down z, x right and y up (its XY view); down y, x right and z up
+(XZ); down x, z right and y up (ZY). A drag pans (any button that does not pick), the wheel zooms
+about the pointer, and a double-click (without `input: pick`) frames the view again. The view is
+framed on the `volume_slice` nodes on its axis that it shows, and it leaves out those on the other
+two axes, overlays and all: seen edge-on, each would only draw a line across its own. Its camera
+keeps its pose under `<prefix>.viewers.<view>.camera.slice.*` (`axis`, `center.{x,y,z}`, `scale`).
+
+```yaml
+- type: viewport
+  view: slicer
+  mode: slice
+  axis: { bind: grid.view }        # xy | xz | zy, written by a switch
+  input: pick
+  pick: grid.pick
+```
+
+A pick in a slice view meets the plane of the nearest `volume_slice` node on its axis exactly,
+not a cell under a tolerance, and an overlay drawn on top of the plane does not get in the way. It
+writes `i`, `j`, `k` and `value` with `x`, `y`, `z`; past the volume's edge it still writes the
+point on the plane (`x`, `y`, `z`), with `hit` 0 and no voxel, so a drag keeps reporting. In any
+other view a pick that lands on a `volume_slice` node writes its voxel too. (`cvcgl_ariadne_slice_view`,
+`cvcgl_camera_slice`.)
 
 **Refresh rate.** A view draws the scene a second time, every frame: a mirror of the main view
 draws every node again, with its own camera, so a map beside a busy scene can cost as much as the
@@ -3183,6 +3665,261 @@ drawn for real:
 - that a still frame rasterises nothing again;
 - an entity's name label.
 
+### 5.22 The tray: icons and a clock at the menu bar's right end
+
+The menu bar's right end is a tray, like a desktop's system tray: icons with a count on them,
+and a clock. The menus stay on the left.
+
+```yaml
+clock: true                    # top level: show the clock, whatever the host's default
+menubar:
+  - menu: File
+    items: [...]
+  - tray_icon: mail             # a named icon, or any text
+    badge: (state-get "inbox.unread")
+    tooltip: New messages
+    on: inbox.open              # a click raises it ...
+  - tray_icon: warning
+    badge: (state-get "warns.count")
+    tone: warn                  # info (the default), warn or error: the badge's colour
+    items:                      # ... or, with items:, opens them as a menu
+      - text: (state-get "warns.latest")
+      - menu_item: Clear
+        on: (state-set "warns.count" "0")
+  - clock                       # here among the icons, instead of last
+```
+
+- **`tray_icon:`** goes in a `menubar:`, among its menus. The tray draws the bar's icons in the
+  order written, after every menu and the Windows menu (§5.9).
+  - Its value is a named icon or any text drawn as written. The names are `warning`, `error`,
+    `info`, `check`, `gear`, `mail`, `sync`, `user`, `network`, `star`, `clock`, `menu` and
+    `bell` (`cvc/ariadne/icons.h`), glyphs the UI fonts carry rather than emoji, which need a
+    colour emoji font. `bell` is the exception: terminals draw it as the 🔔 emoji, and ImGui,
+    whose fonts have no bell, draws one (`TrayIcon::icon`). A backend that can't draw the glyphs (the Linux console, a
+    dumb or VT terminal: `Backend::unicode_glyphs`) draws each name's ASCII stand-in, `!` for
+    `warning` and so on.
+  - `badge:` is a text, or an expression giving one each frame, as a picture's badge is (§5.11).
+    It is drawn over the icon's top right corner. "" and "0" show no badge.
+  - `tone:` (`info`, `warn` or `error`, or an expression giving one) colours the badge: blue,
+    amber or red.
+  - `tooltip:`, `visible_when:` and `id:` work as on any widget.
+  - A click raises `on:`. An icon with `items:` opens them as a menu instead, hanging left from
+    the icon so it stays on the screen.
+- **When the bar is too narrow**, the menus fold into one first (§5.23). If the tray still has
+  too little room, its icons leave from the left, the end nearest the menus. They go into a `»`
+  icon at the tray's left end. Its badge sums the hidden badges, its tone is the strongest of
+  theirs, and its menu lists each hidden icon with its badge and tooltip. The menus, folded or
+  not, never yield to the tray: with no room for even the `»`, the tray is not drawn. So the
+  rightmost icon is the one kept longest.
+- **The clock** shows the local time as HH:MM. Its tooltip is the date and the time to the
+  second.
+  - It goes last, at the bar's right end, unless a `- clock` entry in the menubar places it.
+  - The host decides whether it shows by default (`Runtime::set_clock`): arigl and ari show it in
+    `run`, never in `snapshot` or `check`, whose frames must not change with the time of day.
+  - A document's top-level `clock: true|false` overrides the host.
+  - The user's choice overrides both: arigl's *Settings > Show clock* toggles the state key
+    `ariadne.tray.clock`, which the runtime seeds from the document or the host and reads every
+    frame.
+  - A host or test pins the time it reads with `Runtime::set_wall_clock`.
+  - **Joined to a relay** (a `relay:` block or `--relay`, §9.8.3), the tooltip adds the relay's
+    time on a second line: "wss://relay/room: 14:05:11 (+2.50 s, round trip 18 ms)", the relay's
+    clock minus this host's and the round trip the reading came from, its error bound.
+    - The transport's link probe measures it. A Pong carries the answerer's wall clock
+      (`Pong.wall_ns`, `state_transport.proto`), and the Ping's sender takes it as read half a
+      round trip before the Pong arrived (`state_link_stats::note_peer_clock`).
+    - Of the last 8 readings, the one with the shortest round trip is kept, as NTP picks. WS and
+      gRPC both carry it; a peer that sends no wall time (an older one) gives no reading.
+    - The relay session writes the reading once a second while joined
+      (`cvc/core/server_clock.h`, one per `cvc::app`), and clears it when it leaves or loses the
+      relay. A reading not renewed for 15 s is stale and not shown.
+- **Per backend:**
+  - ImGui draws the tray in its main menu bar, with the glyphs a little larger than the bar's
+    text and each badge a pill.
+  - FTXUI puts the tray after the bar's filler, each badge in its tone's colour. A click on a
+    button fires it. A menu icon is a menubar title: F10 and Left / Right reach it as they reach
+    the menus.
+  - tvision draws the tray over the right end of its menu bar's row, where tvision's own demo
+    puts its clock. A click on a menu icon opens a popup menu under it. The pointer resting on
+    an icon shows its tooltip in the status line. `FtxuiBackend::hosted_tray` is the model it
+    draws from.
+  - A backend with no tray (`Backend::begin_tray`'s default) gets each icon as an ordinary menu
+    at the end of the bar, titled by its glyph and badge, so every backend shows the icons.
+- **A document with two bars of its own** shows them as one: the second bar's menus follow the
+  first one's, and its tray icons go left of the first one's tray. The clock and the bell are the
+  first bar's only. ImGui appends a bar begun again to the same strip, and FTXUI keeps the first
+  bar's menus and tray and continues them (it used to keep only the last bar).
+- `ariadne_runtime_test`'s `Tray*` tests check the order, badges, tones, overflow, clicks and the
+  clock's three settings. `ariadne_ftxui_test`'s tray tests check the right-aligned layout, the
+  overflow, a click, a menu that stays on the screen and the hosted model.
+  `examples/ariadne/documents/tray_demo.ari` shows three icons and the clock.
+
+### 5.23 A narrow menu bar folds its menus into one
+
+When the menu bar is too narrow for its menus and its whole tray (§5.22), the menus fold into one
+menu at the bar's left end, titled `≡` (the `menu` icon; `=` without the glyphs). Its items are
+the bar's menus, each a submenu under its own title, the Windows menu (§5.9) included. The tray
+keeps the bar's right end.
+
+```yaml
+menu_collapse: never            # top level: auto (the default), never or always
+menubar:
+  - menu: File
+    items: [...]
+```
+
+- **`menu_collapse:`** at the top level, or `collapse:` on a `- menubar:` entry, decides.
+  - `auto`, the default, folds the menus while they don't fit beside the tray, and unfolds them
+    when the bar is wide enough again. It decides afresh every frame, so a window resized past
+    the point flips the bar.
+  - `never` keeps the menus in the bar whatever the room; the tray gives way instead, as §5.22
+    says. `false` reads as `never`.
+  - `always` folds them however much room there is.
+  - Any other value warns and reads as `auto`.
+- **How it decides.** Each frame, right after `begin_main_menu_bar`, the core gives
+  `Backend::menus_fit` the titles the bar's menus show, in order, and the tray's icons. The
+  backend answers whether they fit across its bar. A backend that can't measure its bar keeps
+  the default, which answers yes, so its menus never fold.
+- **Per backend:**
+  - ImGui measures each title as `BeginMenu` lays out a bar's titles, and the tray as its
+    `begin_tray` does. The `≡` menu opens the menus as ImGui's own nested submenus.
+  - FTXUI counts columns: each title takes its width and two, the tray its icons' columns and one
+    between them. Its `≡` dropdown lists each menu's items under the menu's title.
+  - tvision measures against its own screen. The hosted model gives each menu inside `≡` as a
+    `HostedMenuItem` with `submenu` set, followed by its items one `depth` deeper, and tvision
+    nests them as its own submenus. The `≡` title has no Alt key.
+- `ariadne_runtime_test`'s `TheMenusFoldIntoOne…` and `ADocumentSetsWhetherTheMenusFold`, the
+  loader's `MenuCollapseSetting`, and `ariadne_ftxui_test`'s `ANarrowBarFoldsItsMenusIntoOne`
+  and `AFoldedBarIsOneMenuOfSubmenus` check it.
+
+### 5.24 Notifications: the host's feed and the tray's bell
+
+Every host has one notification feed, kept on its `cvc::app` (`cvc/core/notify.h`), so two apps
+in one process never share one. Everything that runs in the app posts to it: the outermost
+document, every document it loads, the host, and the jobs they start. The menu bar shows it as a
+bell in the tray (§5.22), before the clock.
+
+```yaml
+notifications: false            # top level: no bell, whatever the host's default
+on_tick: |
+  (if (> (int (state-get "mesh.holes")) 0)
+    (notify "The mesh has holes" "warn" "(state-set \"tree.mesh.open\" 1)")
+    #f)
+menubar:
+  - menu: File
+    items: [...]
+  - bell                        # here among the icons, instead of before the clock
+```
+
+- **There is nothing to propagate.** A loaded document (`load:`, §6) posts to the same feed as
+  the document that loaded it, and the outermost document's bar shows it. Each entry is named
+  by the document that posted it: its `meta.name`, else its mount id (the outermost document's
+  are named by no one), as its menu is (§5.25). The runtime takes the name from the program's
+  scope, so one document cannot post as another.
+- **Posting from a document:**
+  - `(notify TEXT [LEVEL [ON]])` posts and returns the entry's id. LEVEL is `info` (the
+    default), `warn` or `error`. ON is a program run when the entry is clicked, in the scope and
+    with the functions of the document that posted it.
+  - `(notify-read ID)` and `(notify-clear ID)` mark one entry read or drop it, giving `#t` when
+    there was one.
+  - `(notify-read-all)` marks every entry read.
+  - `(notify-clear-all)` drops the entries this document posted, its loaded documents' included,
+    and says how many.
+  - `(notify-status)` gives `{count unread worst rev}`, and `(notify-list [N])` the newest N
+    entries (all of them by default), newest first, each `{id text level source time read
+    repeat}`. A program is confined to its document's state, so these are how it reads the feed.
+- **Posting from C++:** `cvc::notify(app, cvc::notification{...})`, safe from any thread. Its
+  `path` (the state path of what posted it) is what the bell names it by.
+- **What posts on its own:**
+  - Every runtime warning (a broken expression, a resident that stopped, `AppRuntime`'s own),
+    at level warn, named by the document that raised it.
+  - A job started with `cvc::schedule_published_job` (§1.9 of the library ports roadmap: the
+    DSL's `-start` forms, fe_lab's jobs) when it ends: a failure always, as an error; a job that
+    ran a second or more, as info; a cancelled one never. Its text is "<what>: <status>", where
+    <what> is the last name of the job's keys ("segment").
+  - The chat component (§5.16, `components/chat.ari`) posts a direct message that comes while its
+    conversation is not shown; a click opens the conversation. The room's own chat does not post,
+    since that would be every line. Each client posts into its own feed: the feed lives outside the
+    conference's shared tree (`conf.*`), so nothing in it replicates to another peer.
+- **The feed.** It keeps the newest 100 entries. A post identical to the newest entry while that
+  is unread (the same text, level and source) counts as a repeat of it ("(x3)") rather than a new
+  entry. It mirrors itself into the state tree, for a widget to bind app-root-absolute
+  (`bind: /notify.unread`): `notify.count`, `notify.unread`, `notify.worst` (`info`, `warn`,
+  `error`, or "" when none is unread), `notify.rev`, and
+  `notify.items.<id>.{text, level, source, time, read, repeat}`.
+- **The bell** shows while the feed has entries. Its badge is the unread count, and its tone is
+  the worst unread level. Its menu lists the newest 8 entries: an unread mark, the level's icon,
+  the source, the text's first line and the time. A click on an entry marks it read and runs its
+  ON. Then come *Mark all read*, *Clear all*, and *Show all...*, which opens the Notifications
+  window with every entry (`tree._notifications.open`; its X closes it).
+  - The host decides whether it shows by default (`Runtime::set_notifications`, on unless a host
+    turns it off).
+  - A document's top-level `notifications: true|false` overrides the host.
+  - The user's choice overrides both: arigl's *Settings > Show notifications* toggles the state
+    key `ariadne.tray.bell`.
+  - Opening the menu does not mark anything read: a hosted backend (tvision) has every menu open
+    to every walk.
+- **Per backend:** ImGui draws the bell itself (a dome, rim, knob and clapper in the text's
+  colour), its fonts having no bell. FTXUI and tvision draw 🔔, and `*` without the glyphs.
+- `ariadne_runtime_test`'s `Notify.TheFeedIsEachAppsOwnAndMirrorsItself`,
+  `TheBellShowsTheFeedInTheTray`, `ProgramsAndWarningsPostToTheFeedFromTheirDocument` and
+  `ADocumentPlacesOrTurnsOffTheBell`, and `result_job_test`'s `JobKeys` failure and stop tests,
+  check it. `examples/ariadne/documents/tray_demo.ari` has a Notify menu.
+
+### 5.25 Loaded documents as applications: their menus in the outer bar
+
+The outermost document owns the menu bar. A document it loads (`load:`, §6.3) that has a
+`menubar:` of its own is an application: its bar is not drawn where it is, but becomes one menu of
+the outer bar.
+
+```yaml
+menubar:
+  - menu: File
+    items: [...]
+root:
+  - load: fe_lab.ari            # meta: { name: FE Lab }, with a menubar of its own
+    as: fe
+```
+
+gives the bar `File  FE Lab  Windows`, where *FE Lab* holds FE Lab's menus as submenus, then
+*Restart FE Lab* and *Quit FE Lab*.
+
+- **Its name** is the loaded document's `meta.name`, else its mount id (`as:`, or the one the
+  loader derives). Two mounts of one document are told apart by their mount ids: "Counter
+  (counter)", "Counter (counter_2)". Its notifications are named the same way (§5.24).
+- **Where it goes:** after the outer document's menus, before the Windows menu (§5.9), in tree
+  order, nested mounts included. The menus fold into `≡` with the rest (§5.23).
+- **What it holds:** the loaded bar's entries, drawn in the mount's scope and with its functions,
+  so its items bind and run as they would in its own bar. A `windows_menu`, `clock` or `bell` entry
+  in a loaded bar is ignored: those are the outer document's.
+- **Its tray icons** join the outer bar's tray, after the outer document's own and before the bell
+  and the clock. They are worked out in the mount's scope, so a badge reads the mount's state.
+- **Quit** takes the application away: its windows, its menu and its tray icons go, and its
+  `on_tick:` and the programs it started stop. Its state stays.
+- **Restart** quits it, drops its state subtree and its notifications, and starts it again as when
+  it was first loaded: its `link:` holes are planted, its `init:` runs, and its `on_tick:` starts.
+- **Windows > Applications** lists every application, ticked while it runs. Untick one to quit it;
+  tick a quit one to open it again as it was. A quit application's windows are not listed until it
+  comes back. A quit stays for the run; nothing persists it.
+- **No menubar of its own:** a document with none still gets a bar when it loads applications, as
+  it does for its Windows menu. That bar holds the applications' menus, the Windows menu, and the
+  applications' tray icons, with no clock or bell, since it is not the document's own bar.
+- **Window identity:** inside a mount, the id a window gives the backend carries the mount's
+  prefix (`count@ui.includes.counter`), so a document loaded twice has two windows, not one. Its
+  state keys (`tree.<id>.*`) are the mount's own, as before.
+- **A repeated mount** (`repeat:`) is an application per instance, named "<name> 1", "<name> 2"
+  and so on, each in its instance's scope (`includes.<as>.<i>`). Each can be quit and restarted on
+  its own. How many there are is worked out each frame, as the repeat's count is.
+- **Mechanism:** `plan_windows_menu` walks the tree with each node's composed scope. It records
+  each mount's first menubar (the mount, its bar, its name, its prefix and its functions), and a
+  repeated mount's from its template. Each frame `plan_frame_apps` expands the repeated ones into
+  their instances, each with a per-instance copy of its bar. The walk skips a menubar in place when
+  it is drawn in an application's scope.
+- `ariadne_runtime_test`'s `ALoadedDocumentsMenubarIsOneMenuOfTheOuterBar`,
+  `QuitKeepsALoadedDocumentsStateAndRestartResetsIt`, `TwoMountsOfOneDocumentAreToldApart` and
+  `ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus`, and the loader's
+  `ALoadedDocumentIsNamedByItsMeta`, check it. `examples/ariadne/documents/apps_demo.ari` loads
+  `tray_demo.ari` and `apps/counter.ari` twice.
+
 ## 6. Composition: include / import / load
 
 Three mechanisms compose documents. They differ in **isolation**, not in how they
@@ -3301,6 +4038,10 @@ the parent's fields, and two modules could not both decide what Ctrl-C does. A m
 own widgets. When it needs more, the parent handles the event and passes on what the module needs
 through a `link:` hole, which the module's `on_tick:` can read.
 
+A module with a `menubar:` of its own is an application: its bar becomes one menu of the outer
+bar, with Restart and Quit, and its tray icons join the outer tray (§5.25). The loader names it
+by the fragment's `meta.name` (`Widget::app_name`), else by the mount id.
+
 ### 6.4 The URI resolver
 
 All external references (`import:`, `load:`, scene `source:`, `fetch`) go through one
@@ -3338,16 +4079,20 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `viewer_settings` | a viewer (arg `viewer`, default `main`): the frame-rate readout, UI size, grid / origin axis / scene bounds, camera and shadows in one window |
 | `stage_lighting`, `scene_controls`, `camera_controls` | a `rig:` light, `shadows:`, a viewer's camera (arg `viewer`) |
 | `display_toggles`, `sim_transport`, `raster_view` | `show.*` layer keys, `sim.*` + host verbs, a host-published image (arg `keys`, default `raster`) |
+| `nav_lab_stats`, `nav_lab_ledger` | several navigation policies side by side: their Stats and Ledger from a run log at a tick, written by cvc::nav's `publish_tables` / `publish_charts` (host verbs `arms.retarget`, `arms.seek`; [NAV_LAB.md](NAV_LAB.md)) |
+| `nav_lab_scrub`, `nav_lab_training`, `nav_lab_episode` (`nav_lab_scrub.ari`) | the checkpoint scrubber: checkpoint k beside step 0, the deployed metric, the training curve, the episode's time, written by `cvc::nav::scrub_view` (host verbs `scrub.prev`, `scrub.next`, `scrub.pick_step`) |
 | `volren_controls`, `volslice_controls` | a `volren` / `volslice` node (arg `node`, default `bunny_volume`) |
 | `forest_controls`, `sea_controls`, `sky_controls` | a `forest_trees` / `wave_sea` / `cloud_sky` node (arg `keys`, below) |
 | `world_controls` | a `generated_world` node (§5.4; arg `keys`) |
+| `water_controls` | a `water` node (arg `keys`, default `water`) |
+| `weather_controls` | a `weather` node: the weather now, a storm started upwind or overhead, the sky cleared, the weather's time scale (arg `keys`, default `weather`) |
 | `mesh_tools` | a `mesh_lab` node (§5.4; arg `node`, default `mesh`) |
 | `fe_controls` | an `fe_lab` node (§5.4; arg `node`, default `domain`) |
 | `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `scene`, `show`, `hide`, `mode`, `camera`, `chrome`, `shadows`, `caption`, `width`, `height`, `title`, `id`) |
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
-| `room_users`, `room_users_compact` | everyone in a room from `room-roster`, with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
+| `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
 
 Each window component also takes `title` and `id` args, and every arg has a default, so a bare
 `include:` works. A document with two nodes of a kind includes the panel twice, each with its
@@ -3668,6 +4413,7 @@ standalone configure refuses an SDK without gRPC. For a build of your own, gRPC 
 ```
 arigl run      [--terminal] [flags] doc.ari [document args...]
 arigl snapshot --png out.png [flags] doc.ari [document args...]       # offscreen window frame
+arigl snapshot --mp4 out.mp4 --seconds S [flags] doc.ari [...]        # the scene running, recorded
 arigl snapshot --terminal [--ansi] [--png scene.png] doc.ari [...]    # a terminal frame as text
 arigl check    [flags] doc.ari
 ```
@@ -3677,8 +4423,66 @@ arigl check    [flags] doc.ari
 stream and media verbs, and the `stream_view` widget (ImGui in a window, the terminal one
 with `--terminal`). In both modes it routes OS signals to `on_signal:` and exits 128 + N
 for one the document does not handle. A snapshot's frames run at `--fps` (20 by default),
-so a live stream delivers into them; in a window the scene clock is fixed, so its frames
-are reproducible. The cvcGL examples
+so a live stream delivers into them; in a window the scene clock steps a fixed 1/30 s a
+frame rather than the wall time, so its frames are reproducible.
+
+**The camera from the command line.** The main view's camera is state under
+`viewers.main.camera` (`CameraController.h`): `mode` (0 orbit, 1 fly, 2 track, 3 map), the orbit
+pose `orbit.center.x|y|z`, `orbit.distance`, `orbit.azimuth`, `orbit.elevation` (degrees), the fly
+pose `fly.position.x|y|z`, `fly.yaw`, `fly.pitch`, and the chase camera's `track.target` (a scene
+node's id), `track.back`, `track.height`. `--set` writes the `viewers.` keys a second time once the
+document has loaded, after the scene's first framing, so they hold:
+
+```
+arigl snapshot --png lake.png --set viewers.main.camera.orbit.center.x=22 \
+  --set viewers.main.camera.orbit.center.y=180 --set viewers.main.camera.orbit.distance=40 \
+  --set viewers.main.camera.orbit.elevation=15 examples/ariadne/documents/terrain_lab.ari
+arigl snapshot --png crate.png --set viewers.main.camera.mode=2 \
+  --set viewers.main.camera.track.target=crate_b --set viewers.main.camera.track.back=14 \
+  --set viewers.main.camera.track.height=5 examples/ariadne/documents/terrain_lab.ari
+```
+
+**Recording a video.** `arigl snapshot --mp4 out.mp4 --seconds S` runs the document's scene
+on its clock for S seconds of scene time and records it: `S × fps` frames, `--fps` a second
+(30 by default), offscreen at `--width × --height` (1024 × 768 by default; both even). Each
+frame steps the scene clock by exactly 1/fps, however long it takes to render, so the
+physics, the clock's tickers (the water's waves, the clouds) and the custom nodes' ticks
+advance with it, and a slow machine makes the same video, only more slowly. The frames are
+paced no faster than real time, as a snapshot's are. `--png FILE` beside it also writes the
+last frame; `--frames N` first runs N frames unrecorded (a world still building, say), each
+1/fps of scene time too. `--seconds` without `--mp4` runs the same frames and writes only the
+`--png`. The video is encoded
+([`video_writer.h`](../inc/cvc/media/video_writer.h)) in process through the FFmpeg libraries
+cvcMedia links for its player, as H.264 where they have libx264 or libopenh264; else by an
+`ffmpeg` program on PATH, fed raw RGB on its stdin (its MP4 default: H.264 with libx264);
+else in process as MPEG-4 Part 2 (cvcpkg's ffmpeg-lgpl has no H.264 encoder), which most
+players play but a browser may not. arigl says which it used. With none of them it exits 2
+before loading the document, saying why. `--mp4` and `--seconds` are for a window's snapshot:
+`--terminal`, `run` and `check` refuse them, as do `ari` and the browser shell. Aim the
+camera with `--set`, as above; track mode follows a node through the recording:
+
+```
+arigl snapshot --mp4 crates.mp4 --seconds 5 --width 1280 --height 720 \
+  --set viewers.main.camera.mode=2 --set viewers.main.camera.track.target=crate_b \
+  --set viewers.main.camera.track.back=14 --set viewers.main.camera.track.height=5 \
+  examples/ariadne/documents/terrain_lab.ari
+```
+
+**The browser's texture units, natively.** VTK sizes its texture-unit table from
+`GL_MAX_TEXTURE_IMAGE_UNITS`: 32 or more on a desktop GL, 16 in WebGL2. In the browser the
+low-memory mapper also takes a unit for each vertex array it draws from (positions, normals,
+texture coordinates, ids), so a node's own shader textures (`setShaderTexture`, shared shader
+inputs) get what is left. A draw that runs out goes without the texture, and VTK logs it every
+draw. `CVCGL_LOWMEM_MAPPER=force CVCGL_TEXTURE_UNITS=16` draws natively with the browser's mapper
+and its 16 units (`ViewportManager::limitTextureUnits`), and cvcGL names the first texture each
+node runs out of:
+
+```
+CVCGL_LOWMEM_MAPPER=force CVCGL_TEXTURE_UNITS=16 \
+  arigl snapshot --png lab.png examples/ariadne/documents/terrain_lab.ari
+```
+
+The cvcGL examples
 (`ariadne_hello`, `ariadne_stream`, `ariadne_conference`, `ariadne_terminal`) still build;
 `arigl` is meant to replace them once it does everything they do.
 
@@ -3887,10 +4691,13 @@ return rt.exit_code();
 
 To route OS signals as well, install your handlers in `RunOptions::on_start` (it runs after
 FTXUI has installed its own), restore them in `on_stop`, and return pending signal names
-from `take_signal`. [`host_signals.h`](../inc/cvc/ariadne/host_signals.h) has the
-`sigaction` traps `ari` uses (`install_signal_traps`, `restore_signal_traps`,
-`take_trapped_signal`, `signal_number`). Signal handlers are process-wide, so libcvc never
-installs them by itself: a host program opts in around its own loop.
+from `take_signal`. [`host_signals.h`](../inc/cvc/ariadne/host_signals.h) has what `ari` uses:
+a `signal_route` in trap mode, made in `on_start` and dropped in `on_stop`, sends the signals to
+one app, and `signals_of(app).take_trapped()` takes them; `signal_number` maps a name to its
+number. The signals an app takes, and its stop flag (a route in stop mode, which `arisrv` and
+`cvc serve` use), are the app's own; only the route, the one pointer a signal handler follows,
+is the process's. Signal handlers are process-wide, so libcvc never routes them by itself: a
+host program opts in around its own loop.
 
 Give the document its command line with `rt.set_document_args(args, "myhost run doc.ari")`
 before `load()`. When the arguments don't match its `args:` block, `load()` throws
@@ -4331,7 +5138,7 @@ unless `MPLBACKEND` or a matplotlibrc names another; `matplotlib.use()` selects 
   `image: src: figure-1`, or by the name `pycvc_gl.ariadne_mpl.bind(fig, "name")` gives it.
 - `draw_idle()` draws once in the next frame, and timers, so `FuncAnimation`, tick on the frames.
   `plt.pause()` runs the host's frames for its interval, where the program runs them.
-- `display(obj)`, predefined in a `python:` block and in `pycvc_gl.ariadne`, shows an object's
+- `display(obj)`, predefined in a `python:` block and in `pycvc.ari`, shows an object's
   richest form in a figures.ari window as IPython's does: a figure, a numpy picture, a PIL image
   or `_repr_png_` as a picture, else markdown or plain text. Where there is no such window (a
   document of its own, `arix`, `ariglx --terminal`, `arisrvx`) it prints the text/plain form, as
@@ -4613,6 +5420,93 @@ on_tick: |
   own SIGTERM, and a `python:` block in the server document itself (arisrvx runs the operator's
   Python beside the relay instead, §9.8).
 
+#### 9.7.1 Clients' programs: `room-run`
+
+A client can send its relay a DSL program to run there as the client's own (the roadmap's §6.3,
+tier 2; [`server_document.h`](../inc/cvc/ariadne/server_document.h)). The server document opts in:
+
+```yaml
+server:
+  client_programs: { steps: 2000, time: 0.02 }   # or `on`: the action lane's caps
+```
+
+```lisp
+(room-run "(state-set (nth args 1) (+ (car args) 1)) (+ (car args) 1)" 41 "score")   ; 42
+```
+
+- **The call.** `(room-run "source" arg ...)` parks the program until the value of the source's
+  last form comes back. `(room-run-async ...)` returns a future for `(await f)`, and
+  `(room-run-opts (dict "timeout" S) "source" arg ...)` sets how long to wait. In the program,
+  `args` is the list of the arguments. The source and the values ride `room-call`'s path (§9.8.1),
+  typed the same way, so this needs bound writes too: arisrv refuses to start a document with
+  `client_programs:` under `--bind-writes off`.
+- **Where it runs.** On the relay's loop, as one of the document's actions, under the action
+  lane's caps (`ariadne.limits.action_max_steps`, `action_max_time` and `action_max_memory`,
+  §2.2). `client_programs:`'s `steps`, `time` (seconds) and `memory_mb` can only lower them. It
+  runs in a stock arisrv as it does in arisrvx, and never in Python.
+- **What it reaches.** Its chroot is its sender's own participant,
+  `conf.rooms.<room>.participants.<pid>`. It reads and writes there and nowhere else: it has no
+  `room` view, no published namespace, and none of the document's own state or functions. A
+  write must be one the client could make itself: `state-set`, `state-data-set` and the atomics
+  (`state-incr`, `state-cas`, `state-swap`), never on a key the relay owns there (`pose`,
+  `device`, `net.relay`, a stream's `ready`) or on a path the tree would trim onto one. Any other
+  write is a `PermissionError`.
+- **Its environment** is default-deny. It holds the read lane's builtins (§2.1), those writers
+  and `args`, and nothing that spawns, sends or receives messages, watches, locks, sleeps, opens
+  a file or the network, or stops the relay.
+- **One at a time.** A second program from a client whose first is still running is answered
+  `rate_limited`.
+- **Errors** raise as `room-call`'s do (§9.8.1), with these codes:
+  - `unavailable`: the relay runs no document with `client_programs:`, or its document hasn't
+    loaded.
+  - `invalid`: the source doesn't parse on its own, or is over 64 KiB.
+  - `rate_limited`.
+  - `failed`: the program raised. The message is its report.
+  - `resource_exhausted`: a cap stopped it.
+  - `too_large`: its value is over `--call-result-max`.
+  - `internal`: its value doesn't cross the wire (a function, say).
+
+#### 9.7.2 Clients' WebAssembly guests: `room-run` with a module
+
+In arisrvx built with wasmtime, a client can send a WebAssembly module in place of the source (the
+roadmap's §6.3 and §8.6, phase G4; [`wasm_engine.h`](../src/ariadne_wasm/wasm_engine.h) has the
+guest ABI). The server document opts in with its own key:
+
+```yaml
+server:
+  client_guests: { steps: 2000, time: 0.05, memory_mb: 8 }   # or `on`
+```
+
+```lisp
+(room-run (guest-bytes) 41 "score")                       ; its export `run`, with (41 "score")
+(room-run-opts (dict "export" "score" "timeout" 2) (guest-bytes) 41)
+```
+
+- **The call.** The first argument is the module's bytes (a `b"\0asm..."` literal, or bytes the
+  client read), and the rest are its arguments. It calls the module's export `run`, or the one
+  `"export"` names, with the CBOR list of the arguments, and returns its value. It rides
+  `room-call`'s path as a program does, as the call's `guest` and `export`.
+- **As its client's program.** The guest is run by a program of its client's (§9.7.1): the same
+  chroot, the same environment (its `call` and its state imports reach only the read lane's
+  builtins and the five writers, each held to the bound-writes rule), the same caps, and the same
+  one at a time with that client's programs. Its gas is charged as steps, so `steps` caps it.
+  `memory_mb` caps its linear memory too, 16 MiB without it, and never above
+  `ariadne.limits.wasm_max_memory`. It can read the host objects in its participant
+  (`data.read`), and makes none (`data.write` is a `PermissionError`). It has WASI's stubs alone
+  (§8.6.1's grants are the server's guests'), no `ari_init` and no hooks.
+- **Off the loop.** The relay compiles the module on the app's pool, and starts the guest's
+  program only once it has compiled, so the wait costs none of its caps; meanwhile the client
+  counts as running, and a module that takes over 10 s to compile ends `resource_exhausted`. The
+  last 16 modules stay compiled, so the same bytes sent again start at once. Its instance is its
+  own, made when it starts and gone when it ends; its `_initialize` and each `ari_alloc` get a
+  thousand steps of gas, charged to it.
+- **What it refuses.** `invalid`: bytes that aren't a module, a module over 1 MiB, or one with a
+  start function (which would run to its end as the instance is made: export `_initialize`
+  instead). `failed`: a module that doesn't compile, or doesn't export the function, and every
+  trap, `fail()`, `PermissionError` and `MemoryError`. `unavailable`: no `client_guests:`, or a
+  relay without WebAssembly. Stock arisrv refuses to start a document with `client_guests:`, and
+  arisrvx refuses one under `--bind-writes off`.
+
 ### 9.8 Python beside the relay: `arisrvx`
 
 `arisrvx` is arisrv with an embedded CPython 3.12 ([`server_link.h`](../src/ariadne_python/server_link.h),
@@ -4644,7 +5538,7 @@ host.run()                          # until SIGTERM; the app's shutdown, then th
   program keeps each task it starts (`host.loop.create_task`) until the task is done: asyncio holds
   tasks only weakly, so one waiting on a stream of its own (`asyncio.open_connection`) is freed by
   the next full garbage collection, mid-await, and its work never finishes.
-- **Writes.** `host.set`, `set_tree`, `set_series` and `set_plot` (as `pycvc_gl.ariadne.Host`'s)
+- **Writes.** `host.set`, `set_tree`, `set_series` and `set_plot` (as `pycvc.ari.Host`'s)
   take paths from the tree's root and are queued. The relay applies them on its next room step
   (60 Hz), ahead of the server document's programs, coalesced per path and in the order of each path's last write
   (a section's fields, then its `rev`). `--script-write-budget N` caps a step at N bytes (65536 by
@@ -4917,9 +5811,78 @@ assert alice.get("cyprov.public.status") == "up"     # what the relay would send
   - The scope is asked at each connect, and again on `host.refresh_scope`.
 - **Closing.** `host.disconnect(principal_id)` closes that principal's clients: their calls are
   `unavailable`.
+- **The room's chat** (§9.8.7). `ServerHarness(room="nmdc")` names the relay's room
+  (`host.room`; `standup` by default), and each connected client is a participant in it, named
+  `connect(..., name=)`. `client.chat_post(text, to=None)` posts as the relay takes a post (a
+  refusal raises `ChatRefused` with the relay's reason) and runs the program's `on_room_chat` /
+  `on_room_dm` hooks to the end. `client.chat_messages(channel="")` and `harness.room_messages()`
+  read the history, the program's bridged posts included; `client.roster(kind)` is
+  `(room-roster ROOM KIND)`; `client.leave()` takes the client out of the room. The program's
+  `room_presence` and `room_chat_post` land at once, where arisrvx applies them a room step later.
 - **Not modeled.**
   - The relay's result cap (`--call-result-max`).
-  - The room's own tree (`conf`), where each participant's own subtree is.
+  - The room's own tree (`conf`), where each participant's own subtree is, and the chat's rate limit
+    and pages.
+
+#### 9.8.7 Another chat system in the room: bridged users
+
+A program can bridge another chat system into the relay's room: an NMDC hub's users, say, listed in
+the room's roster and chatting with its participants both ways ([roadmap/ARIADNE_CHAT.md](roadmap/ARIADNE_CHAT.md),
+"Bridged users"). The relay keeps them and their messages; the program says who is there, posts
+for them, and hears what the participants say:
+
+```python
+from pycvc.ariadne import Host
+
+host = Host()
+ROOM = host.room                      # the relay's --room
+
+def joined(nick, description):        # the hub said a user joined
+    host.room_presence(ROOM, nick, {"name": nick, "detail": description}, via="nmdc")
+
+def said(nick, text):                 # the hub's main chat
+    host.room_chat_post(ROOM, text, sender_id=nick, via="nmdc")
+
+@host.on_room_chat(ROOM)
+async def to_hub(msg):                # a participant posted to the room
+    await hub.say(f"<{msg.name}> {msg.text}")
+
+@host.on_room_dm(ROOM)
+async def to_user(msg):               # a participant wrote to a hub user
+    await hub.private(msg.to, msg.name, msg.text)
+```
+
+- **`host.room_presence(room, user_id, info=None, *, via="bridge")`**: user `user_id` of system
+  `via` is in the room, shown as `info["name"]` (the id without one) with `info["detail"]` (a line
+  about them, optional). A repeat updates them. It returns the user's pid, `bridged_pid(user_id,
+  via=via)`: `_<via>_` and the id with each byte that is not an ASCII letter or digit written `_xx`.
+  `via` is a lowercase letter, then up to 15 lowercase letters and digits.
+- **`host.room_absent(room, user_id, *, via="bridge")`**: the user left (nothing when it was not
+  there). `host.room_bridged(room)` lists the users the program has said are present.
+- **`host.room_chat_post(room, text, *, sender_id, name=None, via="bridge", to=None)`**: post as
+  the user: to the room, where the relay stamps it, keeps it and pushes it to every participant
+  marked with `via`, or with `to` (a participant's pid) a direct message from a present user. A
+  sender need not be present to post to the room (a hub's own messages); `name` overrides the name
+  its presence gave. The text is cleaned and limited as a participant's post is (2000 bytes), but not
+  rate-limited.
+- **`@host.on_room_chat(room)`** hears every message a participant posts to the room, and
+  **`@host.on_room_dm(room)`** every direct message a participant sends a bridged user, each as a
+  `RoomChatMessage`: `room`, `seq`, `pid` (the sender's), `name`, `text`, `t`, and for a DM `to` (the
+  user's id), `to_pid` and `via`. A hook may be sync or async and runs on the loop, in order;
+  several are allowed. The program never hears its own posts. Without an `on_room_dm` hook the relay
+  refuses a DM to a bridged user. The events are JSON, so they need no pycvc beside arisrvx.
+- **The room.** In arisrvx the room is the relay's (`host.room`, its `--room`); another raises
+  `ValueError`. The calls are queued and the relay applies them on its next room steps, in order
+  (at most 128 a step, so a hub's login burst of thousands drains over a second), and a post after
+  a `room_presence` shows the name it gave. What the relay would refuse raises at the
+  call: a bad `via`, a blank id or one over 128 bytes, a name over 128 or a detail over 256 bytes,
+  an empty or too long post, a DM from an absent user or to a participant who is not there, more
+  than 10000 bridged users. A refusal the program could not see (the participant left meanwhile)
+  is logged by the relay.
+- **Clients.** `(room-roster ROOM "all")` lists them after the participants, marked `bridged`;
+  `room_users.ari` shows them in rows of their own; their messages carry `via`, which `chat.ari`
+  shows after the name (§5.16). Bridged users linger as absent nodes, as participants do, until the
+  relay restarts.
 
 ---
 
@@ -5451,8 +6414,8 @@ when unknown). The options (an unknown one is an error):
 |---|---|
 | `accept` | what may be picked, as an HTML `<input accept>` lists it: a list (or one comma-separated string) of `".ext"`, `"type/subtype"` and `"type/*"`. Default: any file |
 | `multiple` | `#t`: the user may pick more than one (the composed window below picks one at a time) |
-| `title` | the picker's title; default `Open file` |
-| `dir` | the folder a native or composed picker starts in; default the working folder |
+| `title` | the picker's title: the composed window's (default `Open file`), and the system dialog's where it shows one (default: the system's own, in the user's language). A browser's picker has none |
+| `dir` | the folder the picker starts in. The composed window's default is the working folder; the system dialog's is the system's own choice, usually the folder last used there. A browser's picker starts where the browser chooses |
 
 One picker is open at a time: a second `file-pick` while one is open raises. Call it from an
 action (a button's `on:`), not from `init:`. A browser opens its picker only within a user's
@@ -5528,7 +6491,9 @@ bigger file goes in chunks. The file is read a slice at a time, so a chunked upl
 chunk in memory. In a browser build without threads (§10.2), each slice is read from the page's
 File and each request is started rather than sent. Each answer, from the browser's event loop,
 starts the next, so the frames go on while the file goes out, and a killed program aborts the
-request in flight. Natively the upload runs on the background pool.
+request in flight. The answers are the browser's own events (the slice's promise, the request's
+reply), not a timer's, so an upload keeps its pace in a background tab, where the browser runs
+timers about once a second. Natively the upload runs on the background pool.
 
 txwtf, for example, takes a small file as `multipart` at `/social/files`, and a big one in
 chunks at the URL its `/social/files/resumable` call returns:

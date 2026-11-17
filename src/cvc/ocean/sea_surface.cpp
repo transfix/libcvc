@@ -23,8 +23,10 @@
 #include <cmath>
 #include <cstring>
 #include <cvc/algo/det_math.h>
+#include <cvc/ocean/sea_lag.h> // crossfade_weight
 #include <cvc/ocean/sea_surface.h>
 #include <limits>
+#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -77,6 +79,14 @@ void catmull_rom(double t, double w[4]) {
   w[3] = 0.5 * (t3 - t2);
 }
 
+// fmod(f, g) of an integer-valued f, as a long long: below 2^53 f fits one, and its integer
+// remainder is fmod's exact one (fmod is slow, and a read builds several stencils).
+long long wrap_floor(double f, int g) {
+  if (std::fabs(f) < 9007199254740992.0)
+    return static_cast<long long>(f) % g;
+  return static_cast<long long>(std::fmod(f, double(g)));
+}
+
 // A 4 x 4 Catmull-Rom stencil on a periodic grid x grid lattice of a tile.
 struct stencil {
   int ix[4], iy[4];
@@ -89,8 +99,7 @@ struct stencil {
     catmull_rom(fx - flx, wx);
     catmull_rom(fy - fly, wy);
     // Wrap without overflow for any finite coordinate: reduce the floor modulo g first.
-    const long long cx = static_cast<long long>(std::fmod(flx, double(g))),
-                    cy = static_cast<long long>(std::fmod(fly, double(g)));
+    const long long cx = wrap_floor(flx, g), cy = wrap_floor(fly, g);
     for (int i = 0; i < 4; ++i) {
       ix[i] = int(((cx - 1 + i) % g + g) % g);
       iy[i] = int(((cy - 1 + i) % g + g) % g);
@@ -131,20 +140,26 @@ sea_params checked(const sea_params &p) {
 
 } // namespace
 
-struct sea_surface::frame {
+struct sea_surface_frame {
   double t = 0.0;
-  std::vector<band_frame> bands;
+  double mix = 1.0;           // E4: the new keyframe's share
+  cvc::algo::gust_frame gust; // E3
+  current_frame current;      // E6
+  std::vector<sea_surface::band_frame> bands;
   // With source_cell_m: the move x - x0 at the lattice corners found so far at this time, keyed
   // by the corner's index pair. Each is a pure function of the corner and t, so the order in
   // which reads fill them (and from which threads) changes no value.
-  mutable std::mutex lattice_mutex;
+  // (Reads of the found corners share the lock: a step's cells read them from several threads.)
+  mutable std::shared_mutex lattice_mutex;
   mutable std::unordered_map<std::uint64_t, std::array<double, 2>> lattice;
 };
 
 sea_surface::sea_surface(std::vector<sea_cascade> cascades, const sea_params &p,
                          std::shared_ptr<const shore_grid> grid,
-                         std::shared_ptr<const shore_layer> layer)
-    : _p(checked(p)), _fft(_p.band.grid), _grid(std::move(grid)), _layer(std::move(layer)) {
+                         std::shared_ptr<const shore_layer> layer,
+                         std::shared_ptr<const sea_forcing> forcing)
+    : _p(checked(p)), _fft(_p.band.grid), _grid(std::move(grid)), _layer(std::move(layer)),
+      _forcing(std::move(forcing)) {
   if (_grid) {
     const shore_grid &g = *_grid;
     if (g.rows < 2 || g.cols < 2 || !(g.cell > 0.0) || !finite(g.cell) || !finite(g.min_x) ||
@@ -182,6 +197,19 @@ sea_surface::sea_surface(std::vector<sea_cascade> cascades, const sea_params &p,
     b.tile_m = c.h0.tile_m;
     b.fade_m = c.fade_m;
     b.decay_k = c.decay_k;
+    if (_forcing) {
+      b.from = !c.h0_from.texels.empty();
+      if (b.from && (c.h0_from.n != n || c.h0_from.texels.size() != c.h0.texels.size() ||
+                     c.h0_from.tile_m != c.h0.tile_m))
+        throw std::invalid_argument("sea_surface: a cascade's h0_from must match its h0");
+      if (!(c.full_fetch_m >= 0.0) || !(c.full_fetch_from_m >= 0.0) || !finite(c.gust))
+        throw std::invalid_argument("sea_surface: a cascade's full fetches must be >= 0");
+      b.full = c.full_fetch_m;
+      b.full_from = c.full_fetch_from_m > 0.0 ? c.full_fetch_from_m : c.full_fetch_m;
+      b.gust = c.gust;
+      b.advect = c.advect;
+      _advects = _advects || (c.advect && _forcing->current.speed_mps > 0.0);
+    }
     // The modes |m| < modes / 2 along each axis: a set closed under k -> -k, so each field the
     // packing reads is real.
     for (int r = 0; r < n; ++r) {
@@ -193,7 +221,9 @@ sea_surface::sea_surface(std::vector<sea_cascade> cascades, const sea_params &p,
         if (mx <= -half || mx >= half)
           continue;
         const float *tx = c.h0.texel(col, r);
-        if (tx[0] == 0.0f && tx[1] == 0.0f && tx[2] == 0.0f && tx[3] == 0.0f)
+        const float *fx = b.from ? c.h0_from.texel(col, r) : tx;
+        if (tx[0] == 0.0f && tx[1] == 0.0f && tx[2] == 0.0f && tx[3] == 0.0f && fx[0] == 0.0f &&
+            fx[1] == 0.0f && fx[2] == 0.0f && fx[3] == 0.0f)
           continue;
         mode m;
         m.kx = texel_k(col, n, b.tile_m);
@@ -209,6 +239,10 @@ sea_surface::sea_surface(std::vector<sea_cascade> cascades, const sea_params &p,
         m.h0i = tx[1];
         m.hcr = tx[2];
         m.hci = tx[3];
+        m.f0r = fx[0];
+        m.f0i = fx[1];
+        m.fcr = fx[2];
+        m.fci = fx[3];
         m.gx = (mx + G) % G;
         m.gy = (my + G) % G;
         b.modes.push_back(m);
@@ -219,7 +253,30 @@ sea_surface::sea_surface(std::vector<sea_cascade> cascades, const sea_params &p,
     d.add(b.fade_m);
     d.add(b.decay_k);
     d.add(c.h0.texels);
+    if (_forcing) { // only then, so every surface without one keeps its digest
+      d.add(std::int64_t((b.from ? 1 : 0) | (b.advect ? 2 : 0)));
+      if (b.from)
+        d.add(c.h0_from.texels);
+      d.add(b.full);
+      d.add(b.full_from);
+      d.add(b.gust);
+    }
     _cascades.push_back(std::move(b));
+  }
+  if (_forcing) {
+    const sea_forcing &F = *_forcing;
+    d.bytes("sea_forcing v1", 14);
+    d.add(F.t0);
+    d.add(F.t1);
+    d.add(F.wind.speed_mps);
+    d.add(F.wind.dir_rad);
+    d.add(F.wind.gustiness);
+    d.add(F.current.speed_mps);
+    d.add(F.current.scale_m);
+    d.add(F.current.flow_period_s);
+    d.add(std::int64_t(F.current.seed));
+    d.add(std::int64_t(F.fetch ? F.fetch->digest() : 0));
+    d.add(std::int64_t(F.fetch_from ? F.fetch_from->digest() : 0));
   }
   if (_grid) {
     d.add(std::int64_t(_grid->rows));
@@ -252,21 +309,41 @@ sea_surface::sea_surface(std::vector<sea_cascade> cascades, const sea_params &p,
   _digest = d.h;
 }
 
-std::shared_ptr<sea_surface::frame> sea_surface::compute(double t) const {
+std::shared_ptr<sea_surface_frame> sea_surface::compute(double t, const parallel_run &run) const {
   auto f = std::make_shared<frame>();
   f->t = t;
+  if (_forcing) {
+    f->mix = crossfade_weight(t, _forcing->t0, _forcing->t1);
+    f->gust = cvc::algo::gust_frame_at(_forcing->wind, t);
+    f->current = current_frame_at(_forcing->current, t);
+  }
   const int G = _p.band.grid;
-  const std::size_t cells = std::size_t(G) * std::size_t(G);
-  std::vector<double> a1(cells * 2), a2(cells * 2), a3(cells * 2);
-  for (const cascade_band &b : _cascades) {
-    std::fill(a1.begin(), a1.end(), 0.0);
-    std::fill(a2.begin(), a2.end(), 0.0);
-    std::fill(a3.begin(), a3.end(), 0.0);
+  const std::size_t cells = std::size_t(G) * std::size_t(G), C = _cascades.size();
+  // Each cascade's three transforms' inputs: its modes at time t, summed onto the lattice.
+  std::vector<std::array<std::vector<double>, 3>> work(C);
+  const double w = f->mix; // E4: the new keyframe's share, read by every cascade's task
+  const auto modes = [&](std::size_t ci) {
+    const cascade_band &b = _cascades[ci];
+    std::vector<double> &a1 = work[ci][0], &a2 = work[ci][1], &a3 = work[ci][2];
+    a1.assign(cells * 2, 0.0);
+    a2.assign(cells * 2, 0.0);
+    a3.assign(cells * 2, 0.0);
+    // E4: (1 - w) h0_from + w h0 while the crossfade runs; h0 alone outside it.
+    const bool mixing = b.from && w < 1.0;
     for (const mode &m : b.modes) {
-      const double ph = m.omega * t, c = det::cos(ph), s = det::sin(ph);
+      const double ph = m.omega * t;
+      double s, c;
+      det::sincos(ph, s, c);
+      double h0r = m.h0r, h0i = m.h0i, hcr = m.hcr, hci = m.hci;
+      if (mixing) {
+        h0r = m.f0r + (m.h0r - m.f0r) * w;
+        h0i = m.f0i + (m.h0i - m.f0i) * w;
+        hcr = m.fcr + (m.hcr - m.fcr) * w;
+        hci = m.fci + (m.hci - m.fci) * w;
+      }
       // h = h0 e^(i w t) + conj h0(-k) e^(-i w t), and dh/dt = i w (h0 e^(i w t) - ...).
-      const double ar = m.h0r * c - m.h0i * s, ai = m.h0r * s + m.h0i * c;
-      const double br = m.hcr * c + m.hci * s, bi = m.hci * c - m.hcr * s;
+      const double ar = h0r * c - h0i * s, ai = h0r * s + h0i * c;
+      const double br = hcr * c + hci * s, bi = hci * c - hcr * s;
       const double hr = ar + br, hi = ai + bi;
       const double dr = -m.omega * (ai - bi), di = m.omega * (ar - br);
       const std::size_t i = (std::size_t(m.gy) * std::size_t(G) + std::size_t(m.gx)) * 2;
@@ -278,12 +355,22 @@ std::shared_ptr<sea_surface::frame> sea_surface::compute(double t) const {
       a3[i] += -di * m.knx - dr * m.kny;
       a3[i + 1] += dr * m.knx - di * m.kny;
     }
-    _fft.run_2d(a1.data(), +1);
-    _fft.run_2d(a2.data(), +1);
-    _fft.run_2d(a3.data(), +1);
+  };
+  const auto transform = [&](std::size_t j) { _fft.run_2d(work[j / 3][j % 3].data(), +1); };
+  if (run) { // every task's arithmetic is its own, so the order they run in changes nothing
+    run(C, modes);
+    run(3 * C, transform);
+  } else {
+    for (std::size_t ci = 0; ci < C; ++ci)
+      modes(ci);
+    for (std::size_t j = 0; j < 3 * C; ++j)
+      transform(j);
+  }
+  for (std::size_t ci = 0; ci < C; ++ci) {
+    const std::vector<double> &a1 = work[ci][0], &a2 = work[ci][1], &a3 = work[ci][2];
     band_frame out;
     out.grid = G;
-    out.tile_m = b.tile_m;
+    out.tile_m = _cascades[ci].tile_m;
     for (std::vector<double> *v : {&out.eta, &out.dx, &out.dy, &out.u, &out.v, &out.w})
       v->resize(cells);
     for (std::size_t i = 0; i < cells; ++i) {
@@ -299,13 +386,14 @@ std::shared_ptr<sea_surface::frame> sea_surface::compute(double t) const {
   return f;
 }
 
-std::shared_ptr<const sea_surface::frame> sea_surface::frame_at(double t) const {
+std::shared_ptr<const sea_surface::frame> sea_surface::frame_at(double t,
+                                                                const parallel_run &run) const {
   {
     std::lock_guard<std::mutex> lock(_cache_mutex);
     if (_cache && same_bits(_cache->t, t))
       return _cache;
   }
-  std::shared_ptr<const frame> f = compute(t); // outside the lock: a pure function of t
+  std::shared_ptr<const frame> f = compute(t, run); // outside the lock: a pure function of t
   std::lock_guard<std::mutex> lock(_cache_mutex);
   _cache = f;
   return f;
@@ -328,18 +416,91 @@ double sea_surface::depth(double x, double y) const {
   return _grid ? grid_sample(_grid->depth, x, y) : kInf;
 }
 
+sea_surface::at_time sea_surface::at(double t, const parallel_run &run) const {
+  at_time a;
+  a._sea = this;
+  a._f = frame_at(t, run);
+  a._t = t;
+  return a;
+}
+
+double sea_surface::at_time::height(double x, double y, source_memo &memo) const {
+  return _sea->height_from(_f.get(), x, y, _t, memo);
+}
+
+std::array<double, 3> sea_surface::at_time::velocity(double x, double y, double z,
+                                                     source_memo &memo) const {
+  return _sea->velocity_from(_f.get(), x, y, z, _t, memo);
+}
+
+sea_surface::point_forcing sea_surface::forcing_at(const frame &f, double x, double y) const {
+  point_forcing pf;
+  if (!_forcing)
+    return pf;
+  pf.gust = cvc::algo::wind_gust(f.gust, x, y);
+  if (_forcing->fetch) {
+    pf.fetch = _forcing->fetch->sample(x, y);
+    pf.fetch_from = _forcing->fetch_from ? _forcing->fetch_from->sample(x, y) : pf.fetch;
+  }
+  if (_advects)
+    pf.v = current_velocity(f.current, x, y);
+  return pf;
+}
+
+double sea_surface::weight(const frame &f, std::size_t c, double d, const point_forcing &pf) const {
+  const cascade_band &b = _cascades[c];
+  const double fade = !(d > 0.0) ? 0.0 : b.fade_m > 0.0 ? smoothstep(0.0, b.fade_m, d) : 1.0;
+  if (!_forcing || !(fade > 0.0))
+    return fade;
+  double k = fade;
+  if (_forcing->fetch && b.full > 0.0) {
+    const double s1 = fetch_scale(pf.fetch, b.full);
+    const double s0 = fetch_scale(pf.fetch_from, b.full_from);
+    k *= f.mix < 1.0 ? s0 + (s1 - s0) * f.mix : s1;
+  }
+  if (b.gust != 0.0)
+    k *= std::max(0.0, 1.0 + b.gust * (pf.gust - 1.0));
+  return k;
+}
+
+int sea_surface::taps(const frame &f, std::size_t c, double x, double y, const point_forcing &pf,
+                      double *qx, double *qy, double *w) const {
+  const cascade_band &b = _cascades[c];
+  if (!_advects || !b.advect) {
+    qx[0] = x;
+    qy[0] = y;
+    w[0] = 1.0;
+    return 1;
+  }
+  const current_frame &cf = f.current;
+  int n = 0;
+  for (int i = 0; i < 2; ++i) {
+    if (!(cf.weight[i] > 0.0))
+      continue;
+    qx[n] = x - pf.v[0] * cf.tau[i] + cf.offset[i][0] * b.tile_m;
+    qy[n] = y - pf.v[1] * cf.tau[i] + cf.offset[i][1] * b.tile_m;
+    w[n] = cf.weight[i];
+    ++n;
+  }
+  return n;
+}
+
 std::array<double, 2> sea_surface::move(const frame &f, double x, double y, double t) const {
   const double d = depth(x, y);
+  const point_forcing pf = forcing_at(f, x, y);
   double dx = 0.0, dy = 0.0;
   for (std::size_t c = 0; c < _cascades.size(); ++c) {
-    const cascade_band &b = _cascades[c];
-    const double fade = !(d > 0.0) ? 0.0 : b.fade_m > 0.0 ? smoothstep(0.0, b.fade_m, d) : 1.0;
-    if (!(fade > 0.0))
+    const double k = weight(f, c, d, pf);
+    if (!(k > 0.0))
       continue;
     const band_frame &bf = f.bands[c];
-    const stencil st(x, y, bf.tile_m, bf.grid);
-    dx += fade * st(bf.dx);
-    dy += fade * st(bf.dy);
+    double qx[2], qy[2], w[2];
+    const int n = taps(f, c, x, y, pf, qx, qy, w);
+    for (int i = 0; i < n; ++i) {
+      const stencil st(qx[i], qy[i], bf.tile_m, bf.grid);
+      dx += k * w[i] * st(bf.dx);
+      dy += k * w[i] * st(bf.dy);
+    }
   }
   dx *= _p.chop;
   dy *= _p.chop;
@@ -390,7 +551,7 @@ std::array<double, 2> sea_surface::find_source(const frame &f, double x, double 
   std::array<double, 2> o[4];
   bool have[4] = {false, false, false, false};
   {
-    std::lock_guard<std::mutex> lock(f.lattice_mutex);
+    std::shared_lock<std::shared_mutex> lock(f.lattice_mutex);
     for (int k = 0; k < 4; ++k) {
       const auto it = f.lattice.find(key(i0 + (k & 1), j0 + (k >> 1)));
       if (it != f.lattice.end()) {
@@ -406,7 +567,7 @@ std::array<double, 2> sea_surface::find_source(const frame &f, double x, double 
     const double cx = double(i) * h, cy = double(j) * h;
     const std::array<double, 2> p = source_exact(f, cx, cy, t);
     o[k] = {cx - p[0], cy - p[1]};
-    std::lock_guard<std::mutex> lock(f.lattice_mutex);
+    std::unique_lock<std::shared_mutex> lock(f.lattice_mutex);
     f.lattice.emplace(key(i, j), o[k]);
   }
   const double ox =
@@ -495,6 +656,11 @@ double sea_surface::height(double x, double y, double t) const {
 }
 
 double sea_surface::height(double x, double y, double t, source_memo &memo) const {
+  return height_from(nullptr, x, y, t, memo);
+}
+
+double sea_surface::height_from(const frame *pre, double x, double y, double t,
+                                source_memo &memo) const {
   if (_grid) {
     const double d = depth(x, y);
     if (std::isnan(d))
@@ -505,17 +671,25 @@ double sea_surface::height(double x, double y, double t, source_memo &memo) cons
       return _p.level;
     }
   }
-  const std::shared_ptr<const frame> f = frame_at(t);
+  std::shared_ptr<const frame> held; // the cache's, when the caller holds none
+  if (!pre) {
+    held = frame_at(t);
+    pre = held.get();
+  }
+  const frame *f = pre;
   const std::array<double, 2> x0 = source(*f, x, y, t, memo);
   const double d0 = depth(x0[0], x0[1]);
+  const point_forcing pf = forcing_at(*f, x0[0], x0[1]);
   double h = 0.0;
   for (std::size_t c = 0; c < _cascades.size(); ++c) {
-    const cascade_band &b = _cascades[c];
-    const double fade = !(d0 > 0.0) ? 0.0 : b.fade_m > 0.0 ? smoothstep(0.0, b.fade_m, d0) : 1.0;
-    if (!(fade > 0.0))
+    const double k = weight(*f, c, d0, pf);
+    if (!(k > 0.0))
       continue;
     const band_frame &bf = f->bands[c];
-    h += fade * stencil(x0[0], x0[1], bf.tile_m, bf.grid)(bf.eta);
+    double qx[2], qy[2], w[2];
+    const int n = taps(*f, c, x0[0], x0[1], pf, qx, qy, w);
+    for (int i = 0; i < n; ++i)
+      h += k * w[i] * stencil(qx[i], qy[i], bf.tile_m, bf.grid)(bf.eta);
   }
   h *= _p.wave_amp;
   if (_layer)
@@ -530,6 +704,11 @@ std::array<double, 3> sea_surface::velocity(double x, double y, double z, double
 
 std::array<double, 3> sea_surface::velocity(double x, double y, double z, double t,
                                             source_memo &memo) const {
+  return velocity_from(nullptr, x, y, z, t, memo);
+}
+
+std::array<double, 3> sea_surface::velocity_from(const frame *pre, double x, double y, double z,
+                                                 double t, source_memo &memo) const {
   if (_grid) {
     const double d = depth(x, y);
     if (std::isnan(d))
@@ -555,26 +734,42 @@ std::array<double, 3> sea_surface::velocity(double x, double y, double z, double
       return {speed * ux, speed * uy, speed * slope};
     }
   }
-  const std::shared_ptr<const frame> f = frame_at(t);
+  std::shared_ptr<const frame> held; // the cache's, when the caller holds none
+  if (!pre) {
+    held = frame_at(t);
+    pre = held.get();
+  }
+  const frame *f = pre;
   const std::array<double, 2> x0 = source(*f, x, y, t, memo);
   const double d0 = depth(x0[0], x0[1]);
   const double zrel = z - _p.level, zc = std::min(zrel, 0.0);
+  const point_forcing pf = forcing_at(*f, x0[0], x0[1]);
   double u = 0.0, v = 0.0, w = 0.0;
   for (std::size_t c = 0; c < _cascades.size(); ++c) {
     const cascade_band &b = _cascades[c];
-    const double fade = !(d0 > 0.0) ? 0.0 : b.fade_m > 0.0 ? smoothstep(0.0, b.fade_m, d0) : 1.0;
-    if (!(fade > 0.0))
+    const double k = weight(*f, c, d0, pf);
+    if (!(k > 0.0))
       continue;
     const double decay = b.decay_k > 0.0 ? det::exp(b.decay_k * zc) : 1.0;
     const band_frame &bf = f->bands[c];
-    const stencil st(x0[0], x0[1], bf.tile_m, bf.grid);
-    u += fade * decay * st(bf.u);
-    v += fade * decay * st(bf.v);
-    w += fade * decay * st(bf.w);
+    double qx[2], qy[2], tw[2];
+    const int n = taps(*f, c, x0[0], x0[1], pf, qx, qy, tw);
+    for (int i = 0; i < n; ++i) {
+      const stencil st(qx[i], qy[i], bf.tile_m, bf.grid);
+      u += k * decay * tw[i] * st(bf.u);
+      v += k * decay * tw[i] * st(bf.v);
+      w += k * decay * tw[i] * st(bf.w);
+    }
   }
   u *= _p.chop;
   v *= _p.chop;
   w *= _p.wave_amp;
+  // E6: the current carries the water, at every depth, wherever there is water.
+  if (_forcing && _forcing->current.speed_mps > 0.0 && d0 > 0.0) {
+    const std::array<double, 2> cv = _advects ? pf.v : current_velocity(f->current, x0[0], x0[1]);
+    u += cv[0];
+    v += cv[1];
+  }
   if (_layer) {
     const double layerDepth = _grid ? d0 : _p.depth_m;
     const shore_layer::flow fl = _layer->velocity(x0[0], x0[1], zrel, layerDepth, t, _p.bores);

@@ -28,8 +28,9 @@ namespace {
 
 // libcurl's global init is not thread-safe on its first call; do it exactly once before any easy
 // handle. libcurl's global state is the process's, one whatever the number of apps, so this flag
-// is not per app (each app's client is: http_client.cpp). curl_global_cleanup is intentionally not
-// called: an app's transfer may still be running on a thread as another app goes.
+// is not per app (each app's client is: http_client.cpp). It is libcvc's one flag for it: the
+// WebSocket client calls it too (detail::curl_global_init_once). curl_global_cleanup is
+// intentionally not called: an app's transfer may still be running on a thread as another app goes.
 void ensure_curl_global() {
   static std::once_flag once;
   std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
@@ -274,6 +275,7 @@ public:
 
 namespace detail {
 std::unique_ptr<HttpClient> make_default_backend() { return std::make_unique<CurlHttpClient>(); }
+void curl_global_init_once() { ensure_curl_global(); }
 } // namespace detail
 
 } // namespace net

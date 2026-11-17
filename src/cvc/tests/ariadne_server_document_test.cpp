@@ -14,19 +14,27 @@
 */
 
 // The document a relay runs (cvc/ariadne/server_document.h, arisrv --doc): its server: block, the
-// namespaces it publishes through holes in its chroot, the room it reads, and what a relay's shard
-// scoped by it sends. room_relay_integration_test.cpp has the same over a relay's transports.
+// namespaces it publishes through holes in its chroot, the room it reads, what a relay's shard
+// scoped by it sends, and the programs and guests its clients send it to run (client_programs:,
+// client_guests:, the latter with a fake engine here).
+// room_relay_integration_test.cpp has the same over a relay's transports.
 
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <cvc/ariadne/script_engine.h> // a client guest's engine (client_guests:)
 #include <cvc/ariadne/server_document.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_exec/exceptions.h> // dsl_error
+#include <cvc/state/state_exec/types.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <initializer_list>
+#include <memory>
 #include <random>
 #include <set>
 #include <stdexcept>
@@ -379,4 +387,500 @@ init: |
     EXPECT_NE(what.find("relay"), std::string::npos) << what;
     EXPECT_NE(what.find("arisrv --doc"), std::string::npos) << what;
   }
+}
+
+// client_programs: on or off, or a map of caps, which turns them on.
+TEST(ServerBlockTest, ClientProgramsTakeOnOffOrCaps) {
+  ari::ServerBlock b;
+  EXPECT_EQ(ari::parse_server_block(map({{"publish", seq({"board"})}}), b), "");
+  EXPECT_FALSE(b.client_programs.on) << "off unless asked for";
+  EXPECT_EQ(ari::parse_server_block(map({{"client_programs", scalar("on")}}), b), "");
+  EXPECT_TRUE(b.client_programs.on);
+  EXPECT_EQ(b.client_programs.max_steps, 0u) << "the action lane's caps";
+  EXPECT_EQ(ari::parse_server_block(map({{"client_programs", scalar("off")}}), b), "");
+  EXPECT_FALSE(b.client_programs.on);
+  std::vector<std::string> warnings;
+  EXPECT_EQ(ari::parse_server_block(map({{"client_programs", map({{"steps", scalar("200")},
+                                                                  {"time", scalar("0.02")},
+                                                                  {"memory_mb", scalar("1")},
+                                                                  {"lanes", scalar("2")}})}}),
+                                    b, &warnings),
+            "");
+  EXPECT_TRUE(b.client_programs.on);
+  EXPECT_EQ(b.client_programs.max_steps, 200u);
+  EXPECT_DOUBLE_EQ(b.client_programs.max_time, 0.02);
+  EXPECT_EQ(b.client_programs.max_memory, 1024u * 1024u);
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_NE(warnings[0].find("lanes"), std::string::npos) << warnings[0];
+  EXPECT_NE(ari::parse_server_block(map({{"client_programs", scalar("maybe")}}), b), "");
+  EXPECT_NE(ari::parse_server_block(map({{"client_programs", map({{"steps", scalar("-1")}})}}), b),
+            "");
+  EXPECT_NE(ari::parse_server_block(map({{"client_programs", seq({"on"})}}), b), "");
+}
+
+namespace {
+// A server document that runs its clients' programs, under a step cap of its own.
+const char *const kClientProgramsDoc = R"(meta: { name: client programs, min_libcvc: 3.7.5 }
+server:
+  client_programs: { steps: 2000 }
+init: (state-set "status" "up")
+)";
+
+struct ClientRun {
+  bool done = false;
+  ari::ServerDocument::ClientOutcome outcome;
+};
+
+// Start `source` as `pid`'s program; its outcome lands in the returned run.
+std::shared_ptr<ClientRun> run_client(ari::ServerDocument &doc, const std::string &pid,
+                                      const std::string &source,
+                                      cvc::state_exec::value_t args = cvc::state_exec::value_t()) {
+  auto run = std::make_shared<ClientRun>();
+  doc.run_client_program(pid, source, std::move(args),
+                         [run](const ari::ServerDocument::ClientOutcome &o) {
+                           run->done = true;
+                           run->outcome = o;
+                         });
+  return run;
+}
+
+// Step the document until every run has its outcome (or a few steps have gone by).
+void step_until_done(ari::ServerDocument &doc,
+                     std::initializer_list<std::shared_ptr<ClientRun>> runs) {
+  for (int i = 0; i < 20; ++i) {
+    bool all = true;
+    for (const auto &r : runs)
+      all = all && r->done;
+    if (all)
+      return;
+    doc.step(240 + i, (240 + i) / 120.0);
+  }
+}
+
+std::string text(const cvc::state_exec::value_t &v) { return cvc::state_exec::to_string(v); }
+} // namespace
+
+// A client's program runs as the document's action, chrooted to the client's own participant: it
+// reads and writes there, gets its arguments as `args`, and returns its last form's value.
+TEST(ServerDocumentTest, RunsAClientProgramInItsOwnParticipant) {
+  if (!ari::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  namespace se = cvc::state_exec;
+  TempDir dir;
+  const std::string path = dir.write("server.ari", kClientProgramsDoc);
+  cvc::app app;
+  cvc::state::instance(app)("conf.rooms.standup.topic").value(std::string("standup at ten"));
+  cvc::state::instance(app)("conf.rooms.standup.participants.p2.score").value(std::string("7"));
+  ari::ServerDocument doc(app, kRoom);
+  ASSERT_EQ(doc.read(path), "");
+  EXPECT_TRUE(doc.block().client_programs.on);
+  doc.load(path);
+
+  const auto r =
+      run_client(doc, "p1",
+                 "(state-set \"score\" (+ (car args) 1))\n"
+                 "(state-set \"seen\" (if (is-null (state-get \"topic\")) \"nothing\" "
+                 "\"the topic\"))  ; not its to see\n"
+                 "(list (+ (car args) 1) (nth args 1))",
+                 se::make_list({se::value_t(std::int64_t(41)), se::value_t(std::string("hi"))}));
+  step_until_done(doc, {r});
+  ASSERT_TRUE(r->done);
+  ASSERT_TRUE(r->outcome.ok) << r->outcome.code << ": " << r->outcome.message;
+  EXPECT_EQ(text(r->outcome.value),
+            text(se::make_list({se::value_t(std::int64_t(42)), se::value_t(std::string("hi"))})));
+  EXPECT_EQ(value_at(app, "conf.rooms.standup.participants.p1.score"), "42")
+      << "written in the client's own participant";
+  EXPECT_EQ(value_at(app, "conf.rooms.standup.participants.p1.seen"), "nothing")
+      << "the room's topic is outside its chroot";
+  EXPECT_EQ(value_at(app, "conf.rooms.standup.participants.p2.score"), "7");
+  EXPECT_EQ(value_at(app, "score"), "<absent>");
+  EXPECT_EQ(value_at(app, "ui.docs.arisrv.score"), "<absent>");
+  EXPECT_EQ(value_at(app, "ui.docs.arisrv.status"), "up");
+}
+
+// Its writes are the ones the client could make itself: never a key the relay owns.
+TEST(ServerDocumentTest, AClientProgramWritesOnlyWhatItsClientMay) {
+  if (!ari::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  TempDir dir;
+  const std::string path = dir.write("server.ari", kClientProgramsDoc);
+  cvc::app app;
+  cvc::state::instance(app)("conf.rooms.standup.participants.p1.pose").value(std::string("relay"));
+  ari::ServerDocument doc(app, kRoom);
+  ASSERT_EQ(doc.read(path), "");
+  doc.load(path);
+
+  const auto pose = run_client(doc, "p1", "(state-set \"pose\" \"teleported\")");
+  const auto padded = run_client(doc, "p2", "(state-set \"device \" \"x\")");
+  step_until_done(doc, {pose, padded});
+  ASSERT_TRUE(pose->done && padded->done);
+  EXPECT_FALSE(pose->outcome.ok);
+  EXPECT_EQ(pose->outcome.code, "failed");
+  EXPECT_NE(pose->outcome.message.find("PermissionError"), std::string::npos)
+      << pose->outcome.message;
+  EXPECT_EQ(value_at(app, "conf.rooms.standup.participants.p1.pose"), "relay");
+  EXPECT_FALSE(padded->outcome.ok) << "a path the tree would trim onto the relay's key";
+  EXPECT_EQ(value_at(app, "conf.rooms.standup.participants.p2.device"), "<absent>");
+}
+
+// Its environment is default-deny: nothing that spawns, messages, watches or stops the relay.
+TEST(ServerDocumentTest, AClientProgramHasNoWayOut) {
+  if (!ari::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  TempDir dir;
+  const std::string path = dir.write("server.ari", kClientProgramsDoc);
+  cvc::app app;
+  ari::ServerDocument doc(app, kRoom);
+  ASSERT_EQ(doc.read(path), "");
+  doc.load(path);
+  const char *const sources[] = {"(spawn \"(state-set \\\"/escaped\\\" 1)\")",
+                                 "(quit 3)",
+                                 "(msg-send \"/ui\" \"hi\")",
+                                 "(state-watch \"score\" (lambda (p) p))",
+                                 "(state-delete \"score\")",
+                                 "(sleep 1)"};
+  int i = 0;
+  for (const char *src : sources) {
+    const auto r = run_client(doc, "p" + std::to_string(i++), src);
+    step_until_done(doc, {r});
+    ASSERT_TRUE(r->done) << src;
+    EXPECT_FALSE(r->outcome.ok) << src << " ran";
+    EXPECT_EQ(r->outcome.code, "failed") << src;
+  }
+  EXPECT_FALSE(doc.should_close()) << "(quit) is the document's, not a client's";
+  EXPECT_EQ(value_at(app, "escaped"), "<absent>");
+}
+
+// The refusals: a document that did not opt in, one that has not loaded, a program that does not
+// parse, a second program while the client's first runs, and one stopped by its cap.
+TEST(ServerDocumentTest, AClientProgramsRefusalsAndCaps) {
+  if (!ari::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  TempDir dir;
+  const std::string off = dir.write("off.ari", R"(meta: { name: no clients, min_libcvc: 3.7.5 }
+server:
+  publish: [board]
+)");
+  {
+    cvc::app app;
+    ari::ServerDocument doc(app, kRoom);
+    ASSERT_EQ(doc.read(off), "");
+    doc.load(off);
+    const auto r = run_client(doc, "p1", "1");
+    ASSERT_TRUE(r->done) << "refused at once";
+    EXPECT_EQ(r->outcome.code, "unavailable");
+  }
+
+  const std::string path = dir.write("server.ari", kClientProgramsDoc);
+  cvc::app app;
+  ari::ServerDocument doc(app, kRoom);
+  ASSERT_EQ(doc.read(path), "");
+  const auto early = run_client(doc, "p1", "1");
+  ASSERT_TRUE(early->done);
+  EXPECT_EQ(early->outcome.code, "unavailable") << "before the document loads";
+  doc.load(path);
+
+  const auto bad = run_client(doc, "p1", "(+ 1");
+  ASSERT_TRUE(bad->done);
+  EXPECT_EQ(bad->outcome.code, "invalid");
+  const auto closer = run_client(doc, "p1", "1)) (quit 4) ((");
+  ASSERT_TRUE(closer->done) << "a program that closes the wrapper does not parse on its own";
+  EXPECT_EQ(closer->outcome.code, "invalid");
+  const auto huge =
+      run_client(doc, "p1", std::string(ari::ServerDocument::kClientProgramMax + 1, ' '));
+  ASSERT_TRUE(huge->done);
+  EXPECT_EQ(huge->outcome.code, "invalid");
+
+  const auto first = run_client(doc, "p1", "(state-set \"n\" 1) 1");
+  const auto second = run_client(doc, "p1", "2");
+  const auto other = run_client(doc, "p2", "3");
+  ASSERT_TRUE(second->done) << "refused at once";
+  EXPECT_EQ(second->outcome.code, "rate_limited");
+  step_until_done(doc, {first, other});
+  EXPECT_TRUE(first->outcome.ok) << first->outcome.message;
+  EXPECT_TRUE(other->outcome.ok) << other->outcome.message;
+  const auto after = run_client(doc, "p1", "4");
+  step_until_done(doc, {after});
+  EXPECT_TRUE(after->outcome.ok) << "its first has ended";
+
+  const auto spin = run_client(doc, "p1", "(while (= 1 1) (state-set \"n\" 2))");
+  step_until_done(doc, {spin});
+  ASSERT_TRUE(spin->done);
+  EXPECT_EQ(spin->outcome.code, "resource_exhausted") << spin->outcome.message;
+  EXPECT_FALSE(doc.should_close());
+}
+
+// client_guests: as client_programs: takes, and on its own.
+TEST(ServerBlockTest, ClientGuestsTakeOnOffOrCaps) {
+  ari::ServerBlock b;
+  EXPECT_EQ(ari::parse_server_block(map({{"client_programs", scalar("on")}}), b), "");
+  EXPECT_FALSE(b.client_guests.on) << "programs are not guests";
+  std::vector<std::string> warnings;
+  EXPECT_EQ(ari::parse_server_block(map({{"client_guests", map({{"steps", scalar("300")},
+                                                                {"memory_mb", scalar("4")},
+                                                                {"lanes", scalar("2")}})}}),
+                                    b, &warnings),
+            "");
+  EXPECT_TRUE(b.client_guests.on);
+  EXPECT_FALSE(b.client_programs.on);
+  EXPECT_EQ(b.client_guests.max_steps, 300u);
+  EXPECT_EQ(b.client_guests.max_memory, 4u * 1024u * 1024u);
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_NE(warnings[0].find("client_guests"), std::string::npos) << warnings[0];
+  EXPECT_EQ(ari::parse_server_block(map({{"client_guests", scalar("off")}}), b), "");
+  EXPECT_FALSE(b.client_guests.on);
+  const std::string bad = ari::parse_server_block(map({{"client_guests", scalar("maybe")}}), b);
+  EXPECT_NE(bad.find("client_guests"), std::string::npos) << bad;
+}
+
+namespace {
+namespace se = cvc::state_exec;
+
+// A client's code for these tests' engine, in place of a WebAssembly guest (ariadne_wasm_test runs
+// the real one): its entry says what the activation does through the slice, as a guest's imports
+// would.
+//   echo   finish with its arguments
+//   write  (state-set "score" 42), then finish with (state-get "score"), both called in the slice
+//   call   call (car args) with (cdr args), then finish with (ok value) or (#f "Class: message")
+//   spin   charge its budget, and never finish
+//   held   echo, once the engine's `compiled` is set: not ready() till then
+class FakeClientCode : public ari::ScriptActivation {
+public:
+  FakeClientCode(std::string entry, se::value_t args, std::shared_ptr<std::atomic<bool>> compiled)
+      : entry_(std::move(entry)), args_(std::move(args)), compiled_(std::move(compiled)) {}
+  bool ready() const override { return entry_ != "held" || compiled_->load(); }
+  void step(ari::ScriptSlice &s) override {
+    const auto &items = *std::get<se::list_ptr>(args_.v);
+    if (entry_ == "echo" || entry_ == "held")
+      return s.finish(args_);
+    if (entry_ == "write") {
+      const se::value_t set[] = {se::value_t(std::string("score")), se::value_t(std::int64_t(42))};
+      if (!s.call_now("state-set", set) || s.failed())
+        throw se::dsl_error("RuntimeError", "state-set: " + s.error());
+      const se::value_t get[] = {se::value_t(std::string("score"))};
+      if (!s.call_now("state-get", get) || s.failed())
+        throw se::dsl_error("RuntimeError", "state-get: " + s.error());
+      return s.finish(s.reply());
+    }
+    if (entry_ == "call") {
+      if (!s.has_reply()) {
+        const std::string fn = std::get<std::string>(items.at(0).v);
+        return s.call(fn, std::vector<se::value_t>(items.begin() + 1, items.end()));
+      }
+      return s.finish(s.failed() ? se::make_list({se::value_t(false), se::value_t(s.error())})
+                                 : se::make_list({se::value_t(true), s.reply()}));
+    }
+    s.charge(s.budget()); // spin
+  }
+
+private:
+  std::string entry_;
+  se::value_t args_;
+  std::shared_ptr<std::atomic<bool>> compiled_;
+};
+
+class FakeEngine : public ari::ScriptEngine {
+public:
+  std::string language() const override { return "fake"; }
+  void load_block(const ari::ScriptBlock &, ari::ScriptLane &,
+                  std::vector<std::string> &) override {}
+  std::shared_ptr<ari::ScriptActivation> client_activation(cvc::app &, ari::ClientCode code,
+                                                           se::value_t args,
+                                                           std::string &error) override {
+    last_memory = code.max_memory;
+    if (code.bytes != "fake code") {
+      error = "not fake code";
+      return nullptr;
+    }
+    return std::make_shared<FakeClientCode>(
+        code.entry, args.is_nil() ? se::make_list() : std::move(args), compiled);
+  }
+  std::uint64_t last_memory = 0;
+  std::shared_ptr<std::atomic<bool>> compiled = std::make_shared<std::atomic<bool>>(false);
+};
+
+const char *const kClientGuestsDoc = R"(meta: { name: client guests, min_libcvc: 3.7.5 }
+server:
+  client_programs: { steps: 2000 }
+  client_guests: { steps: 2000, memory_mb: 4 }
+init: (state-set "status" "up")
+)";
+
+std::shared_ptr<ClientRun> run_guest(ari::ServerDocument &doc, const std::string &pid,
+                                     const std::string &entry, se::value_t args = se::value_t(),
+                                     std::string module = "fake code") {
+  auto run = std::make_shared<ClientRun>();
+  doc.run_client_guest(pid, std::move(module), entry, std::move(args),
+                       [run](const ari::ServerDocument::ClientOutcome &o) {
+                         run->done = true;
+                         run->outcome = o;
+                       });
+  return run;
+}
+} // namespace
+
+// A client's guest runs as its client's program: in the participant's chroot, its value back, and
+// the memory cap the document set handed to the engine.
+TEST(ServerDocumentTest, AClientGuestRunsAsItsClientsProgram) {
+  if (!ari::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  TempDir dir;
+  const std::string path = dir.write("server.ari", kClientGuestsDoc);
+  cvc::app app;
+  ari::ServerDocument doc(app, kRoom);
+  ASSERT_EQ(doc.read(path), "");
+  EXPECT_TRUE(doc.block().client_guests.on);
+  const auto engine = std::make_shared<FakeEngine>();
+  doc.use_client_guests(engine);
+  doc.load(path);
+
+  const auto echo =
+      run_guest(doc, "p1", "echo",
+                se::make_list({se::value_t(std::int64_t(41)), se::value_t(std::string("hi"))}));
+  const auto write = run_guest(doc, "p2", "write");
+  step_until_done(doc, {echo, write});
+  ASSERT_TRUE(echo->done && write->done);
+  ASSERT_TRUE(echo->outcome.ok) << echo->outcome.code << ": " << echo->outcome.message;
+  EXPECT_EQ(text(echo->outcome.value),
+            text(se::make_list({se::value_t(std::int64_t(41)), se::value_t(std::string("hi"))})));
+  EXPECT_EQ(engine->last_memory, 4u * 1024u * 1024u) << "client_guests: memory_mb";
+  ASSERT_TRUE(write->outcome.ok) << write->outcome.code << ": " << write->outcome.message;
+  EXPECT_EQ(text(write->outcome.value), "\"42\"");
+  EXPECT_EQ(value_at(app, "conf.rooms.standup.participants.p2.score"), "42");
+  EXPECT_EQ(value_at(app, "score"), "<absent>");
+  EXPECT_EQ(value_at(app, "ui.docs.arisrv.score"), "<absent>");
+}
+
+// Its calls reach what its client's program has, and no more: no spawn, not the natives that run
+// it, no key the relay owns, nothing outside its participant.
+TEST(ServerDocumentTest, AClientGuestsCallsReachOnlyItsProgramsEnvironment) {
+  if (!ari::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  TempDir dir;
+  const std::string path = dir.write("server.ari", kClientGuestsDoc);
+  cvc::app app;
+  cvc::state::instance(app)("conf.rooms.standup.topic").value(std::string("standup at ten"));
+  ari::ServerDocument doc(app, kRoom);
+  ASSERT_EQ(doc.read(path), "");
+  doc.use_client_guests(std::make_shared<FakeEngine>());
+  doc.load(path);
+
+  const auto call = [&](const std::string &pid, std::vector<se::value_t> args) {
+    const auto r = run_guest(doc, pid, "call", se::make_list(std::move(args)));
+    step_until_done(doc, {r});
+    EXPECT_TRUE(r->done);
+    EXPECT_TRUE(r->outcome.ok) << r->outcome.code << ": " << r->outcome.message;
+    return text(r->outcome.value);
+  };
+  const std::string spawn = call(
+      "p1", {se::value_t(std::string("spawn")), se::value_t(std::string("(state-set \"/x\" 1)"))});
+  EXPECT_NE(spawn.find("NameError"), std::string::npos) << spawn;
+  const std::string result =
+      call("p2", {se::value_t(std::string("__client-result")), se::value_t(std::int64_t(1))});
+  EXPECT_NE(result.find("PermissionError"), std::string::npos) << result;
+  const std::string guest = call("p3", {se::value_t(std::string("__client-guest"))});
+  EXPECT_NE(guest.find("PermissionError"), std::string::npos) << guest;
+  const std::string pose =
+      call("p4", {se::value_t(std::string("state-set")), se::value_t(std::string("pose")),
+                  se::value_t(std::int64_t(1))});
+  EXPECT_NE(pose.find("PermissionError"), std::string::npos) << pose;
+  const std::string topic =
+      call("p5", {se::value_t(std::string("state-get")), se::value_t(std::string("topic"))});
+  EXPECT_EQ(topic, "(#t nil)") << "the room's topic is outside its chroot";
+  EXPECT_EQ(value_at(app, "x"), "<absent>");
+  EXPECT_EQ(value_at(app, "conf.rooms.standup.participants.p4.pose"), "<absent>");
+}
+
+// The refusals: no client_guests:, no engine, not loaded, code the engine won't take, too large, no
+// export, a second run while the client's first runs (a program or a guest), and its cap.
+TEST(ServerDocumentTest, AClientGuestsRefusalsAndCaps) {
+  if (!ari::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  TempDir dir;
+  const std::string programs = dir.write("programs.ari", kClientProgramsDoc);
+  {
+    cvc::app app;
+    ari::ServerDocument doc(app, kRoom);
+    ASSERT_EQ(doc.read(programs), "");
+    doc.use_client_guests(std::make_shared<FakeEngine>());
+    doc.load(programs);
+    const auto r = run_guest(doc, "p1", "echo");
+    ASSERT_TRUE(r->done) << "refused at once";
+    EXPECT_EQ(r->outcome.code, "unavailable") << "client_programs: is not client_guests:";
+  }
+  const std::string path = dir.write("server.ari", kClientGuestsDoc);
+  {
+    cvc::app app;
+    ari::ServerDocument doc(app, kRoom);
+    ASSERT_EQ(doc.read(path), "");
+    doc.load(path);
+    const auto r = run_guest(doc, "p1", "echo");
+    ASSERT_TRUE(r->done);
+    EXPECT_EQ(r->outcome.code, "unavailable") << "no engine";
+    EXPECT_NE(r->outcome.message.find("arisrvx"), std::string::npos) << r->outcome.message;
+  }
+  cvc::app app;
+  ari::ServerDocument doc(app, kRoom);
+  ASSERT_EQ(doc.read(path), "");
+  doc.use_client_guests(std::make_shared<FakeEngine>());
+  const auto early = run_guest(doc, "p1", "echo");
+  ASSERT_TRUE(early->done);
+  EXPECT_EQ(early->outcome.code, "unavailable") << "before the document loads";
+  doc.load(path);
+
+  const auto foreign = run_guest(doc, "p1", "echo", se::value_t(), "not fake code");
+  ASSERT_TRUE(foreign->done);
+  EXPECT_EQ(foreign->outcome.code, "invalid");
+  EXPECT_EQ(foreign->outcome.message, "not fake code") << "the engine's own reason";
+  const auto huge = run_guest(doc, "p1", "echo", se::value_t(),
+                              std::string(ari::ServerDocument::kClientGuestMax + 1, 'x'));
+  ASSERT_TRUE(huge->done);
+  EXPECT_EQ(huge->outcome.code, "invalid");
+  const auto unnamed = run_guest(doc, "p1", "");
+  ASSERT_TRUE(unnamed->done);
+  EXPECT_EQ(unnamed->outcome.code, "invalid");
+
+  const auto program = run_client(doc, "p1", "(state-set \"n\" 1) 1");
+  const auto guest = run_guest(doc, "p1", "echo");
+  ASSERT_TRUE(guest->done) << "refused at once";
+  EXPECT_EQ(guest->outcome.code, "rate_limited") << "one program or guest per client";
+  step_until_done(doc, {program});
+  EXPECT_TRUE(program->outcome.ok) << program->outcome.message;
+
+  const auto spin = run_guest(doc, "p1", "spin");
+  step_until_done(doc, {spin});
+  ASSERT_TRUE(spin->done);
+  EXPECT_EQ(spin->outcome.code, "resource_exhausted") << spin->outcome.message;
+  const auto after = run_guest(doc, "p1", "echo");
+  step_until_done(doc, {after});
+  EXPECT_TRUE(after->outcome.ok) << "the capped one has ended";
+}
+
+// A guest whose activation isn't ready (its module still compiling) is held, its program not yet
+// started, so the wait costs none of its caps; meanwhile it counts as running; it starts at the
+// first step() after it is ready.
+TEST(ServerDocumentTest, AClientGuestIsHeldUntilItIsReady) {
+  if (!ari::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  TempDir dir;
+  const std::string path = dir.write("server.ari", kClientGuestsDoc);
+  cvc::app app;
+  ari::ServerDocument doc(app, kRoom);
+  ASSERT_EQ(doc.read(path), "");
+  const auto engine = std::make_shared<FakeEngine>();
+  doc.use_client_guests(engine);
+  doc.load(path);
+
+  const auto held = run_guest(doc, "p1", "held", se::make_list({se::value_t(std::int64_t(7))}));
+  for (int i = 0; i < 50; ++i)
+    doc.step(240 + i, (240 + i) / 120.0);
+  EXPECT_FALSE(held->done) << "held while its module compiles, however many steps go by";
+  const auto again = run_guest(doc, "p1", "echo");
+  ASSERT_TRUE(again->done) << "refused at once";
+  EXPECT_EQ(again->outcome.code, "rate_limited");
+  engine->compiled->store(true);
+  step_until_done(doc, {held});
+  ASSERT_TRUE(held->done);
+  ASSERT_TRUE(held->outcome.ok) << held->outcome.code << ": " << held->outcome.message;
+  EXPECT_EQ(text(held->outcome.value), text(se::make_list({se::value_t(std::int64_t(7))})));
 }

@@ -18,10 +18,12 @@
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_generated_world.h>
 #include <cvc/ariadne/scene_geometry.h>
+#include <cvc/ariadne/scene_water.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
 #include <cvc/core/clock_follower.h>
+#include <cvc/core/sim_tick.h>
 #include <cvc/core/world_clock_binding.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
@@ -35,6 +37,7 @@
 #include <optional>
 #include <set>
 #include <sstream>
+#include <thread>
 
 namespace cvc {
 namespace ariadne {
@@ -269,6 +272,13 @@ struct SceneWorld::impl {
   cvc::app *app = nullptr;
   std::unique_ptr<ph::world> world;
   std::vector<SceneWorldBody> bodies;
+  // A tracked node's fields (its colliders' volumes: a water node's water), swapped with its
+  // bodies, so a new revision does not leave the old field in the world.
+  struct node_field {
+    std::string node;
+    ph::field_id id;
+  };
+  std::vector<node_field> node_fields;
   std::string stats; // "<stats_key>.stats", or empty
   std::optional<cvc::clock_follower> follower;
   ph::step_report last;
@@ -284,6 +294,7 @@ struct SceneWorld::impl {
   };
   std::vector<tracked> tracked_nodes;
   std::vector<std::unique_ptr<GeneratedWorldRuntime>> generated; // run here (from_scene)
+  std::vector<std::unique_ptr<WaterRuntime>> waters;             // run here (from_scene)
   std::vector<std::string> warnings;                             // follow()'s syncs'
 
   // The scene's worlds (bind_worlds): each by name, its nodes and what each is, in the document's
@@ -316,6 +327,16 @@ struct SceneWorld::impl {
       if (w.name == name)
         return &w;
     return nullptr;
+  }
+  // The ground the vehicles drive on: the bodies of the world on's nodes, as they are now.
+  std::vector<ph::body_id> ground_bodies() const {
+    std::vector<ph::body_id> out;
+    if (const world_def *w = find_world(on))
+      for (const std::string &node : w->nodes)
+        for (const SceneWorldBody &b : bodies)
+          if (b.node == node && b.ground)
+            out.push_back(b.id);
+    return out;
   }
   void remove_bodies_of(const std::string &node) {
     for (auto it = bodies.begin(); it != bodies.end();) {
@@ -386,6 +407,14 @@ struct SceneWorld::impl {
         ++it;
       }
     }
+    for (auto it = node_fields.begin(); it != node_fields.end();) {
+      if (it->node == t.node) {
+        world->remove_field(it->id);
+        it = node_fields.erase(it);
+      } else {
+        ++it;
+      }
+    }
     t.applied = t.colliders->revision;
     if (!t.colliders->geometry)
       return;
@@ -396,9 +425,24 @@ struct SceneWorld::impl {
         body.node = t.node;
         body.id = b.second;
         body.moves = false;
+        body.ground = false;
+        for (const cvc::world::geometry_item &it : t.colliders->geometry->items())
+          if (it.name == b.first && it.height_field())
+            body.ground = true;
         body.body_from_visual = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
         bodies.push_back(body);
       }
+      for (const ph::body_id id : made.edges) { // the terrain's edge: the node's, not ground
+        SceneWorldBody body;
+        body.node = t.node;
+        body.id = id;
+        body.moves = false;
+        body.ground = false;
+        body.body_from_visual = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        bodies.push_back(body);
+      }
+      for (const auto &f : made.fields)
+        node_fields.push_back({t.node, f.second});
     } catch (const std::exception &e) {
       warn(w, "ari: scene node '" + t.node + "': body: " + e.what());
     }
@@ -450,6 +494,10 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
                          " s quanta; using " + std::to_string(steps * quantum) + " s");
   }
   cfg.fixed_dt = steps * quantum;
+  // The fields' free-surface reads (a water node's floating bodies) on up to three workers
+  // beside the stepping thread: the same values in the same order, so a run is the same.
+  const unsigned hw = std::thread::hardware_concurrency();
+  cfg.field_threads = hw > 1 ? static_cast<int>(std::min(3u, hw - 1)) : 0;
 
   std::unique_ptr<SceneWorld> out(new SceneWorld());
   out->_impl->app = &app;
@@ -656,6 +704,7 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
     // body_from_visual = translate(-centre) x scale, row-major.
     made.body_from_visual = {s[0], 0, 0,    -centre.x, 0, s[1], 0, -centre.y,
                              0,    0, s[2], -centre.z, 0, 0,    0, 1};
+    made.desc = std::make_shared<const ph::body_desc>(d);
     out->_impl->bodies.push_back(made);
     impl::entry ent;
     ent.desc = d;
@@ -707,11 +756,22 @@ void SceneWorld::restart(std::vector<std::string> *warnings) {
   d.follower.reset(); // the next follow() anchors on the clock again
   d.last = ph::step_report{};
   d.step_history.clear();
-  if (d.vehicles) { // the vehicles went with the old world: each back to its start
-    d.vehicles->world_reset();
+  if (d.vehicles) { // the vehicles went with the old world: each back to its start, on its ground
+    d.vehicles->world_reset(d.ground_bodies());
     d.vehicles->publish();
   }
   publish_stats();
+}
+
+void SceneWorld::use_vehicle_clock(cvc::app &app, const Scene &scene,
+                                   std::vector<std::string> *warnings) {
+  // The vehicles' tick (cvc::kSimTick) and a 100 Hz physics step are whole numbers of the 0.01 s
+  // quantum; the scenes' default 1/120 s divides neither. A clock that has ticked keeps its
+  // quantum, and the tick is then held to whole physics steps of it.
+  if (!scene.vehicles.empty() && !cvc::adopt_sim_clock(app.world_clock()))
+    warn(warnings, "ari: world: vehicles: the clock has already run at " +
+                       std::to_string(app.world_clock().fixed_dt()) +
+                       " s quanta; the vehicles' tick is held to whole physics steps of it");
 }
 
 std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &scene,
@@ -730,6 +790,7 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
       data(n);
     return nullptr;
   }
+  use_vehicle_clock(app, scene, warnings);
   std::map<const SceneNode *, std::array<double, 16>> matrices;
   scene_world_matrices(scene, matrices);
 
@@ -739,6 +800,7 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
   std::set<std::string> failed_assets;
 
   std::vector<std::unique_ptr<GeneratedWorldRuntime>> generated;
+  std::vector<std::unique_ptr<WaterRuntime>> waters;
   const std::function<void(const SceneNode &)> visit = [&](const SceneNode &n) {
     if (n.type == "generated_world" && n.source_data.empty()) {
       // The world runs the node: its world made now, its keys seeded as a renderer's would be.
@@ -748,6 +810,38 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
         in.spec = &n;
         in.world = matrices[&n];
         in.colliders = generated.back()->colliders();
+        inputs.push_back(std::move(in));
+      }
+    } else if (n.type == "water" && n.body.present) {
+      // The water's field (scene_water.h) over its ground: a generated world named earlier in the
+      // document (`world:`), followed through its regenerates, or a height-field node's
+      // (`ground:`).
+      const std::string world = n.props.str("world");
+      const std::string groundId = n.props.str("ground").empty() ? world : n.props.str("ground");
+      std::function<std::shared_ptr<const cvc::height_field>()> ground;
+      for (const auto &g : generated)
+        if (g->node() == groundId) {
+          const GeneratedWorldRuntime *gw = g.get();
+          ground = [gw]() -> std::shared_ptr<const cvc::height_field> {
+            const auto w = gw->world();
+            return w ? w->terrain : nullptr;
+          };
+        }
+      if (!ground)
+        if (auto f = fields.find(groundId); f != fields.end()) {
+          std::shared_ptr<const cvc::height_field> hf = f->second;
+          ground = [hf]() { return hf; };
+        }
+      if (!ground) {
+        warn(warnings, "ari: scene node '" + n.id + "' (water): no ground '" + groundId +
+                           "' before it (world: a generated_world, or ground: a height field "
+                           "with a body:); no water in the world");
+      } else {
+        waters.push_back(std::make_unique<WaterRuntime>(app, n, bind_prefix, std::move(ground)));
+        SceneBodyInput in;
+        in.spec = &n;
+        in.world = matrices[&n];
+        in.colliders = waters.back()->colliders();
         inputs.push_back(std::move(in));
       }
     } else if (n.body.present && !n.source_data.empty()) {
@@ -809,6 +903,7 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
   std::unique_ptr<SceneWorld> out = build(app, scene.physics, inputs, fields, stats_key, warnings);
   if (out) {
     out->_impl->generated = std::move(generated);
+    out->_impl->waters = std::move(waters);
     out->bind_worlds(scene, resolve_bind(bind_prefix, "scene.world"), warnings);
     out->bind_vehicles(scene.vehicles, resolve_bind(bind_prefix, "vehicles"),
                        resolve_bind(bind_prefix, "entities"), scene.spawns,
@@ -916,6 +1011,8 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
   }
   for (const auto &g : d.generated)
     g->tick(warnings);
+  for (const auto &w : d.waters) // after the worlds: a regenerated ground is their ground
+    w->tick();
   cvc::state *root = d.app ? &cvc::state::instance(*d.app) : nullptr;
   for (impl::tracked &t : d.tracked_nodes) {
     if (!t.data_path.empty() && root) {
@@ -944,7 +1041,7 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
     // grid (a switch, a Regenerate, a reload) places the vehicles again.
     std::shared_ptr<const cvc::nav::world_grid> g;
     std::shared_ptr<const cvc::world::world_geometry> made; // its roads, for the spawn points
-    std::vector<ph::body_id> ground;
+    std::vector<ph::body_id> ground = d.ground_bodies();
     if (const impl::world_def *w = d.find_world(d.on)) {
       const double cell = d.grid_cell > 0.0 ? d.grid_cell : 2.0;
       for (const std::string &node : w->nodes) {
@@ -952,9 +1049,6 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
           g = grid(node, cell, d.grid_half, nullptr);
         if (!made)
           made = world_geometry(node);
-        for (const SceneWorldBody &b : d.bodies)
-          if (b.node == node)
-            ground.push_back(b.id);
       }
     }
     if (g != d.ground_grid || !d.ground_given) {
@@ -1029,6 +1123,25 @@ void SceneWorld::bind_vehicles(const std::vector<vehicle_archetype> &archetypes,
 
 WorldVehicles *SceneWorld::vehicles() { return _impl->vehicles.get(); }
 const WorldVehicles *SceneWorld::vehicles() const { return _impl->vehicles.get(); }
+
+bool SceneWorld::regenerate_world(double seed) {
+  impl &d = *_impl;
+  const impl::world_def *w = d.find_world(d.on);
+  if (!w || !d.app)
+    return false;
+  bool asked = false;
+  for (const std::unique_ptr<GeneratedWorldRuntime> &g : d.generated) {
+    if (std::find(w->nodes.begin(), w->nodes.end(), g->node()) == w->nodes.end())
+      continue;
+    const GeneratedWorldKeys &k = g->keys();
+    if (read_or<double>(*d.app, k.seed, std::nan("")) == seed)
+      continue;
+    write<double>(*d.app, k.seed, seed);
+    write<std::string>(*d.app, k.request, "regenerate");
+    asked = true;
+  }
+  return asked;
+}
 
 bool SceneWorld::set_world(const std::string &name, std::vector<std::string> *warnings) {
   impl &d = *_impl;
@@ -1146,6 +1259,8 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
     if (d.vehicles)
       d.vehicles->before_step();
     d.last = d.world->step();
+    if (d.vehicles)
+      d.vehicles->after_step();
     d.step_history.push_back(d.last.step_ms);
     if (d.step_history.size() > 120)
       d.step_history.pop_front();

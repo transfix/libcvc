@@ -1,0 +1,110 @@
+# water_controls.ari — a REUSABLE Ariadne component: live controls for a `water` node (the GPU FFT
+# sea, OCEAN-AND-WEATHER-ROADMAP.md §11.2). The sliders bind water.* keys the water node reads every
+# frame: the wind and its gusts (the sea follows the wind with a lag, crossfading to each new state
+# over a few seconds), the lee behind the land, the current, the waves' chop and height, the
+# whitecaps' cover (a share of Monahan's for the wind; the threshold that gives it is found again
+# once the sliders rest), how far the waves fade toward the shore, the swell that breaks on the
+# beaches (its shore layer is found again once the sliders rest), the foam at the waterline, and
+# the waves floating bodies make (a water node with body:). Seeded from the node's .ari props.
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the water node's state key root: its `keys:` prop, else water (the default).
+#   title  the window's title (default Water)
+#   id     the instance id: the window's geometry persists under tree.<id> (default water_controls)
+#
+# Use it:
+#     import: cvc://components/water_controls.ari
+#     windows:
+#       - include: water_controls
+
+units:
+  water_controls:
+    args: { keys: water, title: Water, id: water_controls }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slider_float: Wind (m/s)
+        bind: "{keys}.wind_speed"
+        lo: 0.0
+        hi: 30.0
+        fmt: "%.1f"
+      - slider_float: Wind direction
+        bind: "{keys}.wind_dir"
+        lo: -180.0
+        hi: 180.0
+        fmt: "%.0f deg"
+      - slider_float: Gustiness
+        bind: "{keys}.gustiness"
+        lo: 0.0
+        hi: 1.0
+        fmt: "%.2f"
+        tooltip: "gusts ruffle the ripples and roughen the water in racing patches (cat's paws)"
+      - checkbox: Lee
+        bind: "{keys}.lee"
+        tooltip: "the water downwind of land is calm: each wave band grows with its fetch"
+      - slider_float: Sea lag (s)
+        bind: "{keys}.sea_lag"
+        lo: 0.0
+        hi: 120.0
+        fmt: "%.0f"
+        tooltip: "how slowly the sea follows the wind (a compressed scale: a real sea takes hours)"
+      - slider_float: Sea fade (s)
+        bind: "{keys}.sea_fade"
+        lo: 0.0
+        hi: 15.0
+        fmt: "%.1f"
+        tooltip: "each new sea state crossfades in over this, so a wind change never pops"
+      - slider_float: Current (m/s)
+        bind: "{keys}.current"
+        lo: 0.0
+        hi: 2.0
+        fmt: "%.2f"
+        tooltip: "a slowly varying flow that carries the short waves and floating bodies"
+      - slider_float: Chop
+        bind: "{keys}.chop"
+        lo: 0.0
+        hi: 2.0
+        fmt: "%.2f"
+      - slider_float: Wave height
+        bind: "{keys}.wave_amp"
+        lo: 0.0
+        hi: 3.0
+        fmt: "%.2f"
+      - slider_float: Whitecaps
+        bind: "{keys}.whitecaps"
+        lo: 0.0
+        hi: 3.0
+        fmt: "%.2f x Monahan"
+      - slider_float: Shore fade (m)
+        bind: "{keys}.shore_fade"
+        lo: 0.5
+        hi: 20.0
+        fmt: "%.1f"
+      - slider_float: Swell height (m)
+        bind: "{keys}.swell_height"
+        lo: 0.0
+        hi: 4.0
+        fmt: "%.2f"
+      - slider_float: Swell period (s)
+        bind: "{keys}.swell_period"
+        lo: 4.0
+        hi: 16.0
+        fmt: "%.1f"
+      - slider_float: Swell direction
+        bind: "{keys}.swell_dir"
+        lo: -180.0
+        hi: 360.0
+        fmt: "%.0f deg"
+      - slider_float: Shore foam
+        bind: "{keys}.shore_foam"
+        lo: 0.0
+        hi: 2.0
+        fmt: "%.2f"
+      - checkbox: Wakes
+        bind: "{keys}.wake"
+        tooltip: "the waves floating bodies make (a water node with body:)"
+      - slider_float: Wake foam
+        bind: "{keys}.wake_foam"
+        lo: 0.0
+        hi: 2.0
+        fmt: "%.2f"

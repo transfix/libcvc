@@ -12,10 +12,11 @@
 #include <cvc/ariadne/oidc_host.h>
 #include <cvc/ariadne/requires.h> // requires:, free_heads (what a document needs from its host)
 #include <cvc/ariadne/script_engine.h> // a scripting host's engines: their blocks and lanes
-#include <cvc/ariadne/uri.h>      // register_cvc_uri_handler
+#include <cvc/ariadne/uri.h>           // register_cvc_uri_handler
 #include <cvc/ariadne/world_rules.h>    // the world: block's vehicles
 #include <cvc/ariadne/world_vehicles.h> // resolve_vehicle_looks
 #include <cvc/core/app.h>
+#include <cvc/core/notify.h>              // §5.24 its own warnings to the app's feed
 #include <cvc/core/world_clock_binding.h> // world_clock_keys (the scene clock's step key)
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h>      // register_async_fn
@@ -68,6 +69,11 @@ void AppRuntime::step_world(std::uint64_t n) {
                    read_or<long long>(app_, stepKey_, 0) + static_cast<long long>(n));
 }
 
+void AppRuntime::pause_world(bool paused) {
+  if (!pausedKey_.empty())
+    write<long long>(app_, pausedKey_, paused ? 1 : 0);
+}
+
 bool AppRuntime::restart_world() {
   app_.world_clock().reset();
   std::vector<std::string> warns;
@@ -96,7 +102,7 @@ AppRuntime::~AppRuntime() {
         e.engine->unload(*e.lane);
       } catch (...) {
       }
-  // The provider outlives us in the registry: it must bind nothing of ours.
+  // The providers are rt_'s, which goes after us: they must bind nothing of ours meanwhile.
   Verbs dropped; // goes after the lock
   {
     std::lock_guard<std::mutex> lock(verbs_->mutex);
@@ -552,16 +558,18 @@ void AppRuntime::ensure_intrinsics() {
   intrinsicsRegistered_ = true;
   cvc::app *app = &app_;
   app->exec_async_host(); // build the host on this thread, before a program env needs it
-  // register_action_intrinsics providers run each time a program env is built. Share the verb
-  // table rather than copy it, so every verb registered so far is bound, not only the first.
+  // The document's own providers (Runtime::add_program_intrinsics), not the app's: they run each
+  // time one of this runtime's program envs is built, and in no other runtime's, so another
+  // document on the app never reaches these verbs and functions, nor this document another's.
+  // Share the verb table rather than copy it, so every verb registered so far is bound, not only
+  // the first.
   std::shared_ptr<Verbs> verbs = verbs_;
   namespace se = cvc::state_exec;
   // Seven providers, in the order the one provider bound them before (S1-Q7, STATE_EXEC_THREADED.md
   // 4.9), so a name two of them bind resolves as it did, the later one winning; an isolated
   // document whose group a worker may pump installs each by its kind.
   // 1. The host's verbs, host_only: arbitrary host code, run in the calling step.
-  register_action_intrinsics(
-      app_,
+  rt_.add_program_intrinsics(
       [verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         std::vector<std::pair<std::string, std::function<void()>>> sync;
         {
@@ -579,8 +587,7 @@ void AppRuntime::ensure_intrinsics() {
       },
       se::provider_affinity::host_only);
   // 2. (quit [code]), host_proxied: it writes quit_ and exitCode_.
-  register_action_intrinsics(
-      app_,
+  rt_.add_program_intrinsics(
       [verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         std::function<void(int)> quit;
         {
@@ -620,8 +627,7 @@ void AppRuntime::ensure_intrinsics() {
   };
   // 3. The host's async verbs, any: libcvc's own marshal, the work on the background task pool, on
   // the program's own host (*ictx.host).
-  register_action_intrinsics(
-      app_,
+  rt_.add_program_intrinsics(
       [app, verbs, done_poster](std::shared_ptr<se::environment> env,
                                 se::intrinsics_context &ictx) {
         se::async_host &host = ictx.host ? *ictx.host : app->exec_async_host();
@@ -656,8 +662,7 @@ void AppRuntime::ensure_intrinsics() {
       se::provider_affinity::any);
   // 4. The (data-*) verbs, host_proxied: they walk the tree raw (data.cpp). The body runs on a
   // spawned child's pumping thread, so it reads the tree only through a pinned walk.
-  register_action_intrinsics(
-      app_,
+  rt_.add_program_intrinsics(
       [app, verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
         // The (data-*) verbs (data.h), for programs in this runtime's app: (data-load NAME URI [AS
         // [PATH]]) points the document's data.NAME at a request and starts it (the scene's nodes
@@ -753,8 +758,7 @@ void AppRuntime::ensure_intrinsics() {
       },
       se::provider_affinity::host_proxied);
   // 5. The host's functions, host_only: inline on the drain thread, like a sync verb.
-  register_action_intrinsics(
-      app_,
+  rt_.add_program_intrinsics(
       [verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         std::map<std::string, se::native_fn> functions;
         {
@@ -767,8 +771,7 @@ void AppRuntime::ensure_intrinsics() {
       se::provider_affinity::host_only);
   // 6. The host's async functions, host_only: the host's marshal runs in the calling step (pycvc's
   // takes the GIL, a C++ host's is unaudited), on the program's own host.
-  register_action_intrinsics(
-      app_,
+  rt_.add_program_intrinsics(
       [app, verbs, done_poster](std::shared_ptr<se::environment> env,
                                 se::intrinsics_context &ictx) {
         se::async_host &host = ictx.host ? *ictx.host : app->exec_async_host();
@@ -806,8 +809,7 @@ void AppRuntime::ensure_intrinsics() {
   // the calling program's own (master's #1105). A host whose calls can't park (init:'s, which runs
   // them inline, S1-Q2) gets the blocking form instead, when there is one; its -async form raises
   // RuntimeError there.
-  register_action_intrinsics(
-      app_,
+  rt_.add_program_intrinsics(
       [app, verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
         std::map<std::string, Verbs::AsyncWork> work;
         {
@@ -815,7 +817,7 @@ void AppRuntime::ensure_intrinsics() {
           work = verbs->async_work_functions;
         }
         if (work.empty())
-          return; // a runtime that has gone binds nothing (its app may be gone too)
+          return; // a runtime that is going has emptied them (its app may be going too)
         se::async_host &host = ictx.host ? *ictx.host : app->exec_async_host();
         const bool parks = host.parking_scheduler() != nullptr;
         for (const auto &[name, entry] : work) {
@@ -1024,7 +1026,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   if (!lr.ok)
     throw std::runtime_error(lr.error.empty() ? ("AppRuntime.load: failed to load " + path)
                                               : lr.error);
-  ensure_intrinsics(); // the (data-*) verbs are every document's
+  ensure_intrinsics(); // the (data-*) verbs are every document's, each its own
   rt_.refresh_program_names();
   run_script_blocks(lr, path);            // a scripting host's python: block, before requires:
   for (const LoadHook &hook : loadHooks_) // ... and the host extensions' parts
@@ -1071,11 +1073,14 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   seed_keys(lr.keys, new_document);
 
   std::vector<std::string> initErrors;
-  // §init: seeds win over widget defaults. It runs with the document's functions (§6.6).
+  // §init: seeds win over widget defaults. It runs with the document's functions (§6.6), and with
+  // this runtime's verbs and host functions, as an action has them.
   const std::string init = lr.init_script.empty() || !lr.root.functions
                                ? lr.init_script
                                : lr.root.functions->prelude + lr.init_script;
-  run_init(app_, prefix_, init, &initErrors, [this](const std::string &n) { return rt_.has(n); });
+  run_init(
+      app_, prefix_, init, &initErrors, [this](const std::string &n) { return rt_.has(n); },
+      rt_.program_intrinsics());
   for (std::string &e : initErrors) // a failed init: is not fatal, but it must not be silent
     lr.warnings.push_back(std::move(e));
   rt_.set_tick_program(lr.on_tick_script);          // empty = no resident (safe)
@@ -1103,6 +1108,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   world_.reset();
   stepKey_.clear();
   restartsKey_.clear();
+  pausedKey_.clear();
   // The world: block's vehicles go to the scene, whose world runtime spawns them (a relay reads
   // the rest of the block itself).
   if (const Value *world = find_world_block(lr)) {
@@ -1129,6 +1135,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
     c.time_key = resolve_bind(prefix_, c.time_key);
     c.tick_key = resolve_bind(prefix_, c.tick_key);
     stepKey_ = scene_clock_keys(c).step;
+    pausedKey_ = scene_clock_keys(c).paused;
     const std::string leaf = std::string(cvc::state::SEPARATOR) + "step";
     if (stepKey_.size() > leaf.size() &&
         stepKey_.compare(stepKey_.size() - leaf.size(), leaf.size(), leaf) == 0)
@@ -1232,12 +1239,15 @@ void AppRuntime::drain_end() {
   if (world_) {
     try {
       world_->follow(app_.world_clock());
-      for (std::string &w : world_->take_warnings()) // a regenerated world's, a dataset's bodies
+      for (std::string &w : world_->take_warnings()) { // a regenerated world's, a dataset's bodies
+        post_warning(w);
         pendingWarnings_.push_back(std::move(w));
+      }
     } catch (const std::exception &e) {
       // A clock whose quantum changed under the world: stop stepping rather than throw out of
       // every frame.
       pendingWarnings_.push_back(std::string("ari: physics stopped: ") + e.what());
+      post_warning(pendingWarnings_.back());
       world_.reset();
     }
   }
@@ -1324,7 +1334,16 @@ void AppRuntime::set_warning_listener(std::function<void(const std::string &)> l
   warningListener_ = std::move(listener);
 }
 
+// §5.24 a warning of the AppRuntime's own (the Runtime posts its own) to the app's feed.
+void AppRuntime::post_warning(const std::string &warning) {
+  cvc::notification n;
+  n.text = warning;
+  n.level = 1;
+  cvc::notify(app_, std::move(n));
+}
+
 void AppRuntime::add_warning(std::string warning) {
+  post_warning(warning);
   pendingWarnings_.push_back(std::move(warning));
   if (warningListener_)
     warningListener_(pendingWarnings_.back());

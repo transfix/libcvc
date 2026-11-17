@@ -28,6 +28,10 @@ predicates that builds CGAL's triangulation cell for cell (transfix/libcvc#1157)
 Qhull stays only as the general-position cross-check in `tet_complex_test` and `cgal_ab_test`
 (§1.2, §2).
 
+Revised on 2026-11-17 for Joe's answer on ContourTiler's parity ("Tolerance (Recommended)"): T1
+compares the tiler's surfaces by topology and a Hausdorff tolerance, exactly away from untiled
+regions, and P3b does not reproduce CGAL's convex partition (§3, §9 item 2).
+
 Nothing of the ports has landed. §9 lists the decisions still open.
 **Based on:** libcvc `origin/master @ 921c4254` (§1's facts) and `@ 7a09366f` (the rest),
 transfix/libcvc#1080 (libcvc without CGAL), and volrover `master @ b4a172c` (the legacy
@@ -168,7 +172,8 @@ node type with a component, native and wasm.
     Segment button follows GenSeg.
 - **Decisions for Joe** (§9):
   - how the new libraries arrive (done as recommended in cy-pca/cvcpkg#578);
-  - how close ContourTiler must match its legacy output;
+  - how close ContourTiler must match its legacy output: settled 2026-11-17 as topology and a
+    Hausdorff tolerance, exact away from untiled regions;
   - the API break P0a needs: settled 2026-11-09 as one 4.0 release, costing 8 downstream call
     sites;
   - names;
@@ -398,7 +403,7 @@ nondeterministic and disturbs any other `rand()` user.
 | Skeletonization | the global `bounding_box` vector, never cleared; `srand(0)` / `rand()` for colours; degenerate-case debug files in the current directory |
 | ContourTiler | log4cplus: 156 `getInstance` calls and 104 function-static loggers in 48 files; ContourFilter's `Controls::instance()`, which the app's `.ser` reader goes through; static counters naming debug files |
 | GenSeg | about 25 globals; `extern VolMagick::VolumeFileInfo loadedVolumeInfo`, set by the reader; output files in the current directory |
-| SegMed | not audited yet (P6 does it) |
+| SegMed | audited in P6 (2026-11-15): 36 namespace-scope statics (9 in `GVF.cpp`, 18 in `segment.cpp`, 9 in `inout.cpp`); `read_data` exits on a bad file (three `exit()`s) and `gvfflow` on each of six failed mallocs; `write_data` writes six fixed names into the current directory (`heart_component_01..04.rawiv`, `heart_component_all.rawiv`, `heart_segment.rawv`) and the XML-RPC entry `<input>.seg.rawiv` beside its input. `GVF_Compute` returns right after its initial field (`GVF.cpp:97`), so the diffusion, the critical points and their clustering never ran, `velocity` leaked and the critical list came back unset; `Segment` ignores it anyway and marches from 13 voxels hard-coded for one heart dataset (z up to 320, out of bounds on anything smaller). `GVF_Cluster` recurses once per voxel of a run. All of it goes: the port (`genseg::critical_seeds`, `cvc::gradient_vector_diffusion`) keeps its state on the stepper |
 | VolumeGridRover | nothing carries over; its `QSettings` cache directory and temp files stay behind |
 
 ContourTiler's logging goes through a shim whose logger is a member of `tiler_context`. Each
@@ -410,10 +415,10 @@ vendored function that logs gets the context passed in, which is a mechanical ch
   pycvc and the vendored libraries, list the writable data symbols: `nm` on Linux, the `.data` /
   `.bss` symbols, including function-local statics and their guard variables. Fail on any that
   is not on the allowlist.
-  - The allowlist holds libcvc's own objects still to move; third-party libraries' statics are
+  - The allowlist holds libcvc's own process-wide objects; third-party libraries' statics are
     left out and only counted. It never gains an entry: CI fails a change that adds one
     (`tools/singleton_scan/ratchet.py`; Joe, 2026-11-11: no singletons in code we control). P0a
-    empties it.
+    takes it down to §9 item 5's list.
   - This catches what a grep misses: a static inside a macro, or a vendored template.
 - **Concurrency tests** (§1.7 T6): two jobs with different parameters on two threads give exactly
   what each gives alone, under the TSan lane (`sanitizers / tsan`).
@@ -999,7 +1004,7 @@ a few files:
    rationals, so the untiled regions' fill and the intersection removal can differ slightly from
    the legacy. T1 therefore compares surfaces by topology (genus and components per surface) and
    by Hausdorff distance below a tolerance. Tiles away from untiled regions should match exactly.
-   §9 item 2 asks whether that is enough.
+   That is enough (§9 item 2, settled 2026-11-17).
    - **What P3a found (2026-11-11).** ContourTiler's live untiled-region code does not use the
      straight skeleton. `medial_axis_stable` (`skeleton.cpp`, called from
      `tiler_operations.cpp:1509`) splits each untiled region into convex pieces with
@@ -1280,6 +1285,20 @@ the same paper. Its `GVF_Compute` (`GVF.cpp:69`) finds the critical points of th
 gradient field, and its `Segment` marches from them into `<file>.seg.rawiv`. Nothing in
 VolumeRover2 calls it.
 
+*What P6 found (§1.3's table has the audit):* `GVF_Compute` returns right after its initial field,
+so none of its diffusion or critical points ever ran, and `Segment` marches from seeds hard-coded
+for one heart dataset. The dead code is still the paper's method, with two differences from the
+paper: it diffuses the gradient of |∇I| (the paper's f = I is for the critical points), and it
+keeps only its field's minima above `tlow` (flat bright regions), thinned to one voxel in 21 of each
+26-connected run. Its diffusion weighs neighbours by the angles of the field *before* diffusion
+(SecStruct's copy uses the field being diffused). P6 ports it with both choices as parameters
+(`cp_field`, `cp_weights`, `cp_sample`): the paper's are the defaults, and SegMed's reproduce its
+field bit for bit and its critical list point for point (T1, on the dead code built with the early
+return patched out, `tools/volrover-goldens`). Around an extremum the 26-neighbour test marks the
+whole 3x3x3 block, and SegMed's thinning keeps the block's first voxel in x-fastest order; on a
+steep peak that voxel's step cost is past `MAX_TIME`, so its front never moves. The paper mode
+keeps every critical voxel instead (`cp_sample = 0`).
+
 **Why it doesn't work properly today**
 
 - **Dangling pointers:** `generalSegmentation` keeps `string(params[0]).c_str()` and
@@ -1367,6 +1386,13 @@ to draw. It never reads them while a chunk is writing them.
      SecStruct, SegMonomer and the paper's §2.3 volumetric skeletons use the same field.
 4. **Seed generators:** fold in transfix/libcvc#123's seed generators (`criticalPntsToSeed`,
    `SeedProduce*`).
+   - *Done in P6 part 2* (`inc/cvc/volume/seed_generators.h`): `capsid_critical_points` is
+     `criticalPntsToSeed` (SegSubunit's `FindCriticalPoints`: maxima kept for a capsid's T-number,
+     and the gradient magnitude's maxima when they are few), a sliced stepper; `rotated_seeds` is
+     `SeedProduce` and `SeedProduceRegardingAxis` (N-fold rotational copies about an axis). Both
+     are on the CLI (`cvc capsid-seeds`, `cvc rotate-seeds`) and in pycvc. VolUtils left
+     volrover's master (#19) before the pinned commit, so they have no T1 goldens: their tests
+     check the legacy definitions.
 5. **The default seeding** (settled 2026-11-08): `volume_grid` and the CLI keep GenSeg's local
    maxima until the paper mode matches the legacy results on real maps. Then the default switches
    to `critical_points`, in its own PR, with the comparison in its description.
@@ -1374,8 +1400,8 @@ to draw. It never reads them while a chunk is writing them.
 **Surfaces**
 
 - **CLI:** `cvc segment in.rawiv --seeds classes.vgr --tlow 40 --thigh 200 -o out`. It writes the
-  labels volume and the per-class volumes. `--auto critical-points` runs the paper's mode with no
-  seeds file.
+  labels volume and the per-class volumes. `--automatic critical-points` runs the paper's mode
+  with no seeds file (the `--cp-*` flags tune it).
 - **pycvc:** `pycvc.segment_seeded(vol, seeds, t_low=40, ...)`, `segment_seeded_job` and
   `critical_point_seeds`.
 - **DSL:** `(segment.seeded vol classes params)` and `(segment.critical-points vol params)`, each
@@ -1435,12 +1461,20 @@ Most of the GL-viewer work is already on master. What exists, and what is new:
    - Today the only axis-aligned cut is fe_lab's `<id>_slice`, an FE field on tetrahedra.
      `volslice` slices face the camera, which is a different thing.
    - Useful on its own: the classic three-plane orthoslicer next to a `volren`.
+   - *Built in P7:* `cvc::slice_source`, `extract_slice` and `color_slice`
+     (`inc/cvc/volume/volume_slice.h`, with `volume_slice_params`' table; `volume_slice_test` in the
+     ports lane), cvcGL's `VolumeSliceNode` and the `volume_slice` node type
+     (`volume_slice_nodes.h`, in `register_cvcgl_extensions`; `cvcgl_volume_slice`).
 2. **A slice camera mode for the viewport** (`mode: slice`, `axis: x | y | z`, the axis bindable
    to a key so one viewport can follow the view switch): parallel projection looking down the
    axis, no rotation; drag pans, the wheel zooms about the pointer, and double-click refits the
    slice.
    - `mode: map` is a top-down view along z only, and it orbits, so it is not enough.
    - The camera controller already has the parallel-projection plumbing for `map`.
+   - *Built in P7:* `CameraController::Mode::Slice` (`setSliceAxis`, `frameSlice`,
+     `mouseWheelAt`; state `slice.*`; `cvcgl_camera_slice`) and the viewport's `mode: slice` with
+     `axis:` a name or `{ bind: <key> }`; a slice view frames on its axis's `volume_slice` nodes and
+     leaves out the other axes' (`cvcgl_ariadne_slice_view`).
 3. **Pointer events from a viewport to state** (`input: pick`, `pick: <key>`, `on_pick:`). A click
    or drag in the view writes where it landed, and the left button no longer turns the camera.
    Middle and right still pan, and the wheel still zooms.
@@ -1452,17 +1486,24 @@ Most of the GL-viewer work is already on master. What exists, and what is new:
    - This is the "click-to-world picking in a viewport" item already on the libcvc list (L0d).
      Build it once, here.
    - *Built for orbit views (L0d):* `input: pick`, `pick:` (`x`, `y`, `z`, `hit`, `node`, `button`,
-     `mods`, `phase`, `view`, `seq`) and `on_pick:`. The slice mode's `{i,j,k}` and `value` come
-     with the slice camera mode.
+     `mods`, `phase`, `view`, `seq`) and `on_pick:`. *Built in P7:* `i`, `j`, `k` and `value`; a
+     slice view meets its slice's plane exactly and reports the plane's point past the volume's
+     edge, and an orbit view's pick on a `volume_slice` node names its voxel too.
 4. **Overlays that stay on top of a slice:** point glyphs, polylines and crosshairs drawn as child
    geometry nodes of the slice, with a coincident-topology offset (or a later render layer) so
    they never z-fight the textured quad. `point_size` / `line_width` already exist as override
    fields.
+   - *Built in P7:* a `volume_slice` node's children are its overlays; the quad is pushed back by
+     `slice.overlay_offset` (a relative polygon offset, 2 units by default).
 5. **Widgets the side panel needs** (check each against the backend before planning around it):
    a list bound to a state array with add and remove (the `repeat:` the card component uses), a
    colour picker for a class colour, radio buttons for the tool, and a tab bar or segmented
    buttons bound to a key for the view switch. Anything missing is a small ImGui widget in
    `ImGuiBackend.cpp` with an FTXUI placeholder.
+   - *Checked in P7:* `color:` (an `r,g,b` key) and `radio:` / `radio_row:` were there. *Built in
+     P7:* `tabs:` (a tab container over its children, or a bar over `options:`, bound to a key)
+     and `list:` (rows of a state array with a selection, Add and Remove), each an ImGui widget
+     with a radio-and-buttons fallback in the other backends (ARIADNE.md §5.3).
 
 Items 2 and 3 are the critical path for VolumeGridRover. Item 1 is the bulk of the rendering
 work. Items 4 and 5 are small. All of them run in arigl-web too.
@@ -1488,7 +1529,7 @@ not as follow-ups.
 | P4 Tiler in Ariadne | S | `contour_lab`, reading a file or another node's contours, and `contour_tiler.ari`, with a demo on a small redistributable Reconstruct series (find one), native and in arigl-web | P3b |
 | P5 Segmentation core | M | §5 steps 1–2: GenSeg vendored into `src/cvc/volume/segmentation/` with `genseg_context` and in-memory input and output; `segment_stepper` with every phase sliced (§5); voxel-for-voxel parity, then the clean-up; `cvc segment`; pycvc; `segment.seeded`; §5's tests | P0a, P0b, P0d |
 | P6 Paper mode | S–M | §5 steps 3–4: the SegMed audit, `cvc::gradient_vector_diffusion` as a stepper, `seed_mode::critical_points` and `critical_point_seeds`, `segment.critical-points`, and #123's seed generators. The default-seeding switch is its own later PR (§5 step 5) | P5 |
-| P7 Viewport pieces | M | §6: the `volume_slice` node, `mode: slice` with a bindable axis, `input: pick` / `pick:` / `on_pick:`, the overlay offset, the missing widgets. Each with tests, plus an orthoslicer demo next to `volren_bunny`, native and in arigl-web | P0a |
+| P7 Viewport pieces | M | §6: the `volume_slice` node, `mode: slice` with a bindable axis, `input: pick` / `pick:` / `on_pick:`, the overlay offset, the missing widgets. Each with tests, plus an orthoslicer demo next to `volren_bunny`, native and in arigl-web. *Built:* `examples/ariadne/documents/orthoslicer.ari` (golden `src/cvcGL/test/golden/orthoslicer.ari`, arigl-web smoke case `orthoslicer.ari` in the docset) | P0a |
 | P8 volume_grid v1 | M | Navigation, the view switch and the quad layout, probe, point classes (mark, select, move, delete, save, load), sessions, the transfer function; parameters from tables and data on the data channel; golden images and scripted-pick tests; two grids in one document (T6) | P7, P0d |
 | P9 volume_grid v2 | M | Segmentation tab: `segment`, labels on the slices, class surfaces in the 3D view, `save_segments` | P8, P5 |
 | P10 volume_grid v3 | M | Contours: draw and edit per object, linear and spline, export; `tile` puts surfaces in the 3D view | P8, P3b |
@@ -1578,10 +1619,11 @@ not as follow-ups.
    - Qhull and Clipper2 are cy-pca/cvcpkg#578.
    - The header-only CDT, Shewchuk's predicates and nanoflann are cy-pca/cvcpkg#597.
    - nanoflann's vendored copy (#1080) goes once its package is published.
-2. **How close ContourTiler must match the legacy.** The medial axis replaces the straight
-   skeleton, and integer coordinates replace exact rationals, so untiled regions can fill
-   slightly differently (§3). **Recommended:** T1 by topology and a Hausdorff tolerance, exact
-   away from untiled regions. If exact parity matters for some dataset, say which.
+2. **How close ContourTiler must match the legacy. Settled 2026-11-17:** T1 by topology and a
+   Hausdorff tolerance, exact away from untiled regions (Joe: "Tolerance (Recommended)"). P3b
+   does not reproduce CGAL's convex partition, and no dataset needs exact parity.
+   - The question: the medial axis replaces the straight skeleton, and integer coordinates
+     replace exact rationals, so untiled regions can fill slightly differently (§3).
    - P3a's A/B (2026-11-11) shifts where the difference comes from: the tiler's live fill uses a
      convex partition, not the straight skeleton, and cvc::planar's partition has different and
      fewer pieces than CGAL's (§3, "What P3a found"). Exact parity in untiled regions would mean
@@ -1652,3 +1694,26 @@ not as follow-ups.
      duplicated per app), and it is on the list.
    - Writes to the environment or the working directory go wherever an explicit argument can
      replace them.
+
+   **Settled 2026-11-14.** Joe took the recommended option on each of four questions:
+   - Process resources: "Documented list (Recommended)". They are the scan's permanent, documented
+     allowlist, each wrapped so libcvc keeps only a once flag, a lock or a reference count. The
+     two curl once flags are now one. Signal state is one pointer, the route a handler follows to
+     its app; the stop flag and the trapped signals are the app's (`host_signals.h`).
+   - state_exec's 19 built-in exception classes: "Keep, read-only (Recommended)". They stay a
+     built-once, read-only table.
+   - `g_next_serial_run`: "Keep as an ID source (Recommended)". It holds no app state, only a
+     source of unique numbers, and stays as one listed atomic.
+   - Executables: "Only OS-forced globals (Recommended)". An executable keeps a global only where
+     an OS callback needs one, such as a signal handler's. Everything else moves onto the app:
+     the hosts' `g_python` and `g_wasm`, their stop flags, and the examples' globals (the demo
+     menu's state, terrain_lab's extents and building library, the nav city demos' frame state).
+   - The allowlist ends at these entries (`tools/singleton_scan/allowlist.txt` says why each
+     stays), and the ratchet stays.
+   - The CUDA volume cache is per device, and the apps the host hands it to share it. A
+     `cuda_device_caches` holds one cache per device, each with its own budget;
+     `raycast_cuda_cache_of(app).share(caches)` points an app at one before its first render, and
+     an app not handed one keeps its own. The option had it "on the list", but nothing about it is
+     process-wide: the host owns it, as it owns the device, so it adds no allowlist line. The
+     content-generation stamps come from the caches' counter, so apps sharing a voxel buffer never
+     stamp two contents alike.

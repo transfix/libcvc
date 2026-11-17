@@ -102,7 +102,9 @@ public:
   // calls this gets the window too. Applied by the next load() or set_root().
   void set_host_mouse(MouseControls mouse);
 
-  // Register a host verb the .ari program can call. register_verb is SYNCHRONOUS (fn runs
+  // Register a host verb the .ari program can call. Verbs and host functions (below) are this
+  // runtime's own: its documents' programs call them, and those of another runtime on the same
+  // app don't, whatever names that one registers. register_verb is SYNCHRONOUS (fn runs
   // inline on the drain thread, no args/return).
   //
   // Every registration below is made on the host thread, outside a frame (not from a verb or a
@@ -318,9 +320,14 @@ public:
   // Problems warn (take_warnings). False when there was no world to rebuild (the clock and the
   // counter still restart).
   bool restart_world();
+  // Pause or run the scene's clock through its pause key (<prefix>.sim.paused by default), as a
+  // document's pause button does. Paused, it runs only the steps step_world asks for, so N
+  // requests run the same N steps however fast the host drains (a gym, a test). Nothing happens
+  // for a document with no scene.
+  void pause_world(bool paused);
 
 private:
-  void ensure_intrinsics(); // lazily install the register_action_intrinsics provider
+  void ensure_intrinsics(); // lazily install the verbs' providers (rt_.add_program_intrinsics)
 
   cvc::app &app_;
   std::string prefix_;
@@ -330,7 +337,7 @@ private:
   std::unique_ptr<SceneClockDriver> worldClock_;
   // The scene clock's step key and the restart counter beside it (step_world, restart_world);
   // empty for a document with no scene.
-  std::string stepKey_, restartsKey_;
+  std::string stepKey_, restartsKey_, pausedKey_;
   // use_script_engine: each engine, its lane, and whether it has run a block since its last unload.
   // Before rt_, so the lanes outlive the document's processes: an activation is cancelled while
   // its engine and lane are still there.
@@ -348,9 +355,10 @@ private:
   int exitCode_ = 0; // the first close request's code
   bool intrinsicsRegistered_ = false;
   bool netEnabled_ = false; // enable_net turned the network on: the destructor turns it off
-  // The host verbs, shared with the program-lane provider so a verb registered after the first
-  // is still bound when the next program env is built. Emptied by the destructor: the provider
-  // lives on in the app's list, and must not reach this AppRuntime's handlers after it.
+  // The host verbs, shared with the program-lane providers so a verb registered after the first
+  // is still bound when the next program env is built. The providers are rt_'s own, so only this
+  // runtime's programs get them. Emptied by the destructor: rt_ goes after it, and nothing it
+  // binds meanwhile may reach this AppRuntime's handlers.
   struct Verbs {
     std::vector<std::pair<std::string, std::function<void()>>> sync;
     std::vector<std::tuple<std::string, std::string, std::function<std::string()>>> async;
@@ -381,6 +389,7 @@ private:
   std::vector<std::string> pendingWarnings_; // read-lane diagnostics drain() collected
   std::vector<std::string> threadAffinePrefixes_;            // declare_thread_affine_prefix
   std::function<void(const std::string &)> warningListener_; // set_warning_listener
+  void post_warning(const std::string &warning);             // §5.24 to the app's feed
   void collect_warnings(); // the Runtime's new warnings -> pendingWarnings_, each to the listener
   std::vector<Widget> hostMenus_;            // set_host_menus: put in every mounted tree
   UiSizeControl hostUiSize_;                 // set_host_ui_size: the Controls window's first row

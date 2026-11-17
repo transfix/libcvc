@@ -150,6 +150,42 @@ TEST(AriadneHostCli, SettleIsSecondsAboveZero) {
   }
 }
 
+TEST(AriadneHostCli, Mp4AndSecondsRecordASnapshot) {
+  const char *ok[] = {"arigl", "snapshot", "--mp4", "out.mp4",  "--seconds", "1.5",
+                      "--fps", "24",       "--png", "last.png", "d.ari"};
+  const HostOptions o = parse_host_args(11, ok);
+  EXPECT_TRUE(o.error.empty()) << o.error;
+  EXPECT_EQ(o.mp4, "out.mp4");
+  EXPECT_DOUBLE_EQ(o.seconds, 1.5);
+  EXPECT_EQ(o.fps, 24);
+  EXPECT_EQ(o.png, "last.png"); // the last frame, beside the video
+  EXPECT_EQ(o.doc, "d.ari");
+  const char *eq[] = {"arigl", "snapshot", "--mp4=a b.mp4", "--seconds=2", "d.ari"};
+  const HostOptions e = parse_host_args(5, eq);
+  EXPECT_TRUE(e.error.empty()) << e.error;
+  EXPECT_EQ(e.mp4, "a b.mp4");
+  EXPECT_DOUBLE_EQ(e.seconds, 2.0);
+  const char *none[] = {"arigl", "snapshot", "d.ari"};
+  EXPECT_TRUE(parse_host_args(3, none).mp4.empty());
+  EXPECT_DOUBLE_EQ(parse_host_args(3, none).seconds, 0.0); // not given: a plain snapshot
+  for (const char *bad : {"0", "-1", "soon", "2s", "inf", "nan"}) {
+    const char *argv[] = {"arigl", "snapshot", "--seconds", bad, "d.ari"};
+    EXPECT_NE(parse_host_args(5, argv).error.find("--seconds needs a number of seconds"),
+              std::string::npos)
+        << bad;
+  }
+  const char *missing[] = {"arigl", "snapshot", "--mp4"};
+  EXPECT_NE(parse_host_args(3, missing).error.find("--mp4 needs a value"), std::string::npos)
+      << parse_host_args(3, missing).error;
+  // After the document they are the document's own.
+  const char *after[] = {"arigl", "snapshot", "d.ari", "--mp4", "x.mp4"};
+  const HostOptions a = parse_host_args(5, after);
+  EXPECT_TRUE(a.mp4.empty());
+  EXPECT_NE(misplaced_flag_note("arigl", a.doc_args).find("'--mp4'"), std::string::npos);
+  EXPECT_NE(host_flags_help().find("--mp4 FILE"), std::string::npos);
+  EXPECT_NE(host_flags_help().find("--seconds S"), std::string::npos);
+}
+
 TEST(AriadneHostCli, TimeoutIsSecondsAboveZero) {
   const char *ok[] = {"ari", "test", "--timeout", "2.5", "a.ari", "b.ari"};
   HostOptions o = parse_host_args(6, ok, {"--tap"});
@@ -382,6 +418,36 @@ TEST(AriadneHostCli, SetWritesStateKeysBeforeTheDocument) {
   EXPECT_EQ(st("ui.docs.t.world.preset").value(), "2");
   EXPECT_EQ(st("abs.key").value(), "a=b") << "a leading '/' is from the app's root";
   EXPECT_DOUBLE_EQ(st("ui.docs.t.world.preset").value<double>(), 2.0);
+}
+
+// The views' --set keys (under viewers., relative or absolute) are the ones a scene host writes
+// again after the load, over the first framing of the camera; the rest are not, so nothing the
+// document changed while it loaded is undone.
+TEST(AriadneHostCli, ViewSetsAreTheOnesUnderViewers) {
+  const std::vector<std::pair<std::string, std::string>> sets = {
+      {"world.preset", "2"},
+      {"viewers.main.camera.orbit.center.x", "22"},
+      {"/ui.docs.ari.viewers.main.camera.mode", "0"},
+      {"/viewers.side.camera.orbit.distance", "40"},
+      {"myviewers.x", "1"},
+      {"/abs.key", "a"},
+      {"viewers.main.camera.orbit.distance", "30"}};
+  const auto views = view_state_sets(sets);
+  ASSERT_EQ(views.size(), 4u);
+  EXPECT_EQ(views[0].first, "viewers.main.camera.orbit.center.x");
+  EXPECT_EQ(views[1].first, "/ui.docs.ari.viewers.main.camera.mode");
+  EXPECT_EQ(views[2].first, "/viewers.side.camera.orbit.distance");
+  EXPECT_EQ(views[3].first, "viewers.main.camera.orbit.distance") << "in --set's order";
+
+  // Written again after something overwrote them (the framing), they hold --set's values.
+  cvc::app app;
+  apply_state_sets(app, "ui.docs.t", sets);
+  auto &st = cvc::state::instance(app);
+  st("ui.docs.t.viewers.main.camera.orbit.center.x").value(std::string("150"));
+  st("ui.docs.t.world.preset").value(std::string("3")); // the document's own change
+  apply_state_sets(app, "ui.docs.t", views);
+  EXPECT_EQ(st("ui.docs.t.viewers.main.camera.orbit.center.x").value(), "22");
+  EXPECT_EQ(st("ui.docs.t.world.preset").value(), "3") << "a key outside viewers. is left alone";
 }
 
 // --exec-policy names the app scheduler's policy, which apply_exec_policy puts where the app reads

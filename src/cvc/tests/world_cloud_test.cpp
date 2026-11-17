@@ -32,6 +32,8 @@
 #include <cvc/lsys/cloud.h>
 #include <cvc/world/cloud_layer.h>
 #include <gtest/gtest.h>
+#include <string>
+#include <thread>
 #include <vector>
 
 using cvc::world::cloud_cell;
@@ -83,6 +85,40 @@ TEST(WorldCloudLayer, PeriodCoversTheWorldAndHoldsTheCoverage) {
   std::vector<unsigned char> mask;
   G.shadow_mask(0.0, 0.13, 0.3, mask);
   EXPECT_EQ(mask.size(), std::size_t(G.shadow_size()) * G.shadow_size());
+}
+
+// F1, the live sky: the coverage and the sun change on a built deck. A new coverage ranks the
+// cells' targets again at once (36 cells at 0.3: 11 of them); a new sun relights the deck, and it
+// then shades and draws exactly as a deck built under that sun, its cells and automaton kept.
+TEST(WorldCloudLayer, CoverageAndSunChangeLive) {
+  cloud_layer L(small(1000.0));
+  EXPECT_EQ(L.occupied(), 22);
+  L.set_coverage(0.3);
+  EXPECT_EQ(L.occupied(), 11);
+  L.set_coverage(1.5); // clamped
+  EXPECT_EQ(L.occupied(), 36);
+  L.set_coverage(0.6);
+  EXPECT_EQ(L.occupied(), 22);
+
+  cloud_layer A(small());
+  cloud_layer_params q = small();
+  q.sun_az = 40.0;
+  q.sun_el = 60.0;
+  const cloud_layer B(q);
+  std::vector<unsigned char> ma, mb, fa, fb;
+  A.shadow_mask(0.7, 0.13, 0.3, ma);
+  B.shadow_mask(0.7, 0.13, 0.3, mb);
+  EXPECT_NE(ma, mb); // another sun, another shadow
+  A.set_sun(40.0, 60.0);
+  EXPECT_DOUBLE_EQ(A.params().sun_az, 40.0);
+  EXPECT_DOUBLE_EQ(A.params().sun_el, 60.0);
+  A.shadow_mask(0.7, 0.13, 0.3, ma);
+  EXPECT_EQ(ma, mb);
+  A.far_density(0.7, {}, fa);
+  B.far_density(0.7, {}, fb);
+  EXPECT_EQ(fa, fb);
+  A.set_sun(40.0, 95.0); // elevation clamped to 89, as at construction
+  EXPECT_DOUBLE_EQ(A.params().sun_el, 89.0);
 }
 
 TEST(WorldCloudLayer, IsDeterministic) {
@@ -572,5 +608,275 @@ TEST(WorldCloudLayer, AStepIsCheap) {
   EXPECT_LT(ms, 20.0);
 #else
   EXPECT_LT(ms, 100.0);
+#endif
+}
+
+// ─────────────────────── storms and storm decks (F2)
+
+namespace {
+double mean(const std::vector<float> &v) {
+  double s = 0.0;
+  for (float x : v)
+    s += x;
+  return v.empty() ? 0.0 : s / v.size();
+}
+} // namespace
+
+// A storm over the deck: the cells under it gather cloud and are held besides the fair weather's
+// coverage, their shade and far opacity deepen, and the deck goes back to its fair coverage once
+// the storm has passed.
+TEST(WorldCloudLayer, AStormClosesTheDeckUnderIt) {
+  cloud_layer_params p = small(1000.0); // 6 x 6 cells of 375 m
+  p.coverage = 0.3;
+  cloud_layer L(p);
+  ASSERT_EQ(L.occupied(), 11);
+  // A full storm 4 km across over the pattern's middle: its core (2 km) covers several cells.
+  const double mid = 0.5 * L.period_m();
+  L.set_storms({{mid, mid, 2000.0, 1.0}});
+  EXPECT_DOUBLE_EQ(L.storm_at(mid, mid), 1.0);
+  EXPECT_DOUBLE_EQ(L.storm_at(mid + 2050.0, mid), 0.0);
+  int under = 0, held = 0;
+  double stormy = 0.0;
+  for (const cloud_cell &c : L.cells()) {
+    stormy += c.storm;
+    if (c.storm > 0.9) {
+      ++under;
+      held += c.occupied ? 1 : 0;
+    }
+  }
+  std::printf("storm: %d cells under it, %d held; %d occupied of %zu (fair 11)\n", under, held,
+              L.occupied(), L.cells().size());
+  ASSERT_GE(under, 4);
+  EXPECT_EQ(held, under); // every cell under the storm holds a cloud
+  EXPECT_EQ(L.occupied(), static_cast<int>(std::lround(0.3 * 36 + 0.7 * stormy)));
+  // The automaton feeds them too: after a while they hold far more cloud bits than the rest.
+  for (int s = 0; s < 60; ++s)
+    L.step();
+  double in = 0.0, out = 0.0;
+  int nin = 0, nout = 0;
+  for (const cloud_cell &c : L.cells())
+    if (c.storm > 0.9) {
+      in += c.cloud;
+      ++nin;
+    } else if (c.storm < 0.1) {
+      out += c.cloud;
+      ++nout;
+    }
+  ASSERT_GT(nin, 0);
+  ASSERT_GT(nout, 0);
+  std::printf("cloud bits: %.2f under the storm, %.2f in fair weather\n", in / nin, out / nout);
+  EXPECT_GT(in / nin, out / nout + 0.2);
+  // Its shade and its far opacity deepen against the same deck without the storm: more clouds
+  // held, each denser.
+  cloud_layer fair = L;
+  fair.set_storms({});
+  EXPECT_EQ(fair.occupied(), 11); // the storm passes: the fair coverage again
+  for (const cloud_cell &c : fair.cells())
+    EXPECT_EQ(c.storm, 0.0);
+  L.snap();
+  fair.snap();
+  std::vector<float> ts, tf, fs, ff;
+  L.shadow_tau(0.4, ts);
+  fair.shadow_tau(0.4, tf);
+  L.add_far(0.4, 0, L.cells().size(), {}, fs);
+  fair.add_far(0.4, 0, fair.cells().size(), {}, ff);
+  std::printf("shade %.3f (storm) %.3f (fair), far %.4f / %.4f\n", mean(ts), mean(tf), mean(fs),
+              mean(ff));
+  EXPECT_GT(mean(ts), 1.5 * mean(tf));
+  EXPECT_GT(mean(fs), 1.5 * mean(ff));
+}
+
+// The deck's heights change live (a storm deck rising out of the cumulus and settling back): the
+// deck then shades and draws exactly as one built with those heights, layers and slices, built
+// here or on another thread; a job made before the sun moved is refused.
+TEST(WorldCloudLayer, ADeckChangedLiveIsOneBuiltSo) {
+  cloud_layer_params fair = small();
+  fair.cumulus = fair.top - fair.base; // 48 m of cumulus
+  cloud_layer A(fair);
+  EXPECT_FALSE(A.deep());
+  cloud_layer_params tall = fair;
+  tall.top = 900.0;
+  tall.nz = 30;
+  tall.far_layers = 9;
+  const cloud_layer B(tall);
+  EXPECT_TRUE(B.deep());
+  auto same = [](const cloud_layer &a, const cloud_layer &b) {
+    std::vector<unsigned char> ma, mb, fa, fb;
+    a.shadow_mask(0.7, 0.13, 0.3, ma);
+    b.shadow_mask(0.7, 0.13, 0.3, mb);
+    a.far_density(0.7, {}, fa);
+    b.far_density(0.7, {}, fb);
+    std::vector<float> ca, cb, sa, sb;
+    a.cell_field(a.cells()[3], 0.7, ca);
+    b.cell_field(b.cells()[3], 0.7, cb);
+    a.cell_sun_tau(a.cells()[3], 0.7, sa);
+    b.cell_sun_tau(b.cells()[3], 0.7, sb);
+    return ma == mb && fa == fb && ca == cb && sa == sb;
+  };
+  EXPECT_FALSE(same(A, B));
+  A.set_deck(tall.base, tall.top, tall.nz, tall.far_layers);
+  EXPECT_TRUE(A.deep());
+  EXPECT_EQ(A.params().nz, 30);
+  EXPECT_EQ(A.params().far_layers, 9);
+  EXPECT_TRUE(same(A, B));
+  // ...and back to the cumulus: as it was built.
+  const cloud_layer C(fair);
+  A.set_deck(fair.base, fair.top, fair.nz, fair.far_layers);
+  EXPECT_FALSE(A.deep());
+  EXPECT_TRUE(same(A, C));
+  // Built on another thread, adopted here.
+  std::shared_ptr<cloud_layer::deck_job> job =
+      A.prepare_deck(tall.base, tall.top, tall.nz, tall.far_layers);
+  std::thread worker([job] { cloud_layer::run(*job); });
+  worker.join();
+  EXPECT_TRUE(A.adopt_deck(*job));
+  EXPECT_TRUE(same(A, B));
+  // A job for the deck the layer has costs nothing; one made before the sun moved is refused.
+  std::shared_ptr<cloud_layer::deck_job> again =
+      A.prepare_deck(tall.base, tall.top, tall.nz, tall.far_layers);
+  EXPECT_TRUE(A.adopt_deck(*again));
+  std::shared_ptr<cloud_layer::deck_job> stale = A.prepare_deck(fair.base, fair.top, 0, 0);
+  cloud_layer::run(*stale);
+  A.set_sun(10.0, 50.0);
+  EXPECT_FALSE(A.adopt_deck(*stale));
+  EXPECT_TRUE(A.deep());
+}
+
+// A storm deck's maps are cumulonimbus: cloud up the tower (where the cumulus deck has none above
+// its top), and a base deep in the tower's shade: the base's optical depth toward the sun is 2.5 to
+// 6 times a cumulus base's (measured), which turns it dark grey through the renderer's ramp.
+TEST(WorldCloudLayer, AStormDeckTowersAndDarkensItsBase) {
+  cloud_layer_params fair = small();
+  fair.n = 32;
+  fair.nz = 16;
+  fair.extent = 250.0;
+  fair.base = 300.0;
+  fair.top = 520.0;
+  fair.cumulus = fair.top - fair.base;
+  fair.sun_el = 28.0;
+  fair.opacity = {0.0, 0.0, 0.22, 0.0, 0.55, 0.26, 1.0, 0.54}; // cloud_sky's table
+  cloud_layer_params tall = fair;
+  tall.top = 3500.0;
+  tall.nz = 48;
+  const cloud_layer F(fair), T(tall);
+  const int n = fair.n;
+  const std::size_t layer = std::size_t(n) * n;
+  int towered = 0;
+  for (int v = 0; v < fair.variants; ++v) {
+    const std::vector<float> &m = T.variant_map(v), &s = T.variant_sun_tau(v);
+    const std::vector<float> &fm = F.variant_map(v), &fs = F.variant_sun_tau(v);
+    // Cloud in the upper half of the storm deck: the tower and its anvil.
+    double up = 0.0;
+    for (int z = tall.nz / 2; z < tall.nz; ++z)
+      for (std::size_t i = 0; i < layer; ++i)
+        up += m[z * layer + i];
+    towered += up > 1.0 ? 1 : 0;
+    // The base: the optical depth toward the sun at each column's lowest voxel that holds cloud.
+    auto base_tau = [&](const std::vector<float> &map, const std::vector<float> &tau) {
+      const int nz = static_cast<int>(map.size() / layer);
+      double acc = 0.0;
+      int k = 0;
+      for (std::size_t i = 0; i < layer; ++i)
+        for (int z = 0; z < nz; ++z)
+          if (map[z * layer + i] > 0.2) {
+            acc += tau[z * layer + i];
+            ++k;
+            break;
+          }
+      return k ? acc / k : 0.0;
+    };
+    const double tf = base_tau(fm, fs), tt = base_tau(m, s);
+    // ...and the cloud above it, which hides the sky from it (cell_up_tau): many times more.
+    const double uf = base_tau(fm, F.variant_up_tau(v)), ut = base_tau(m, T.variant_up_tau(v));
+    std::printf("variant %d: base optical depth toward the sun %.1f (cumulus) %.1f (storm deck), "
+                "up %.1f / %.1f, upper cloud %.1f\n",
+                v, tf, tt, uf, ut, up);
+    EXPECT_GT(tt, 2.5 * tf);
+    EXPECT_GT(ut, 5.0 * uf);
+    // The top layer has nothing above it.
+    const std::vector<float> &u = T.variant_up_tau(v);
+    for (std::size_t i = 0; i < layer; ++i)
+      ASSERT_EQ(u[(tall.nz - 1) * layer + i], 0.0f);
+  }
+  EXPECT_EQ(towered, fair.variants);
+}
+
+// A storm deck built a unit at a time (as a renderer with no thread to give it steps it, a share a
+// frame: single-threaded wasm) is the deck built at once. Its phases come in order and its progress
+// climbs to 1.
+TEST(WorldCloudLayer, ADeckBuiltInStepsIsTheDeckBuiltAtOnce) {
+  cloud_layer_params fair = small();
+  fair.cumulus = fair.top - fair.base;
+  cloud_layer A(fair), B(fair);
+  std::shared_ptr<cloud_layer::deck_job> ja = A.prepare_deck(fair.base, 900.0, 30, 9);
+  cloud_layer::run(*ja);
+  ASSERT_TRUE(A.adopt_deck(*ja));
+  std::shared_ptr<cloud_layer::deck_job> jb = B.prepare_deck(fair.base, 900.0, 30, 9);
+  EXPECT_EQ(std::string(cloud_layer::phase(*jb)), "grow");
+  std::vector<std::string> phases;
+  double last = -1.0;
+  int steps = 0;
+  while (!cloud_layer::step(*jb, 1)) {
+    ++steps;
+    const double pr = cloud_layer::progress(*jb);
+    EXPECT_GE(pr, last);
+    EXPECT_LT(pr, 1.0);
+    last = pr;
+    const std::string ph = cloud_layer::phase(*jb);
+    if (phases.empty() || phases.back() != ph)
+      phases.push_back(ph);
+  }
+  std::printf("a storm deck in %d steps of one unit\n", steps + 1);
+  EXPECT_GT(steps, 50);
+  EXPECT_EQ(cloud_layer::progress(*jb), 1.0);
+  EXPECT_EQ(std::string(cloud_layer::phase(*jb)), "built");
+  EXPECT_EQ(phases, (std::vector<std::string>{"grow", "self-shade", "sky", "shade", "far"}));
+  EXPECT_TRUE(cloud_layer::step(*jb, 1)); // built: nothing more to do
+  ASSERT_TRUE(B.adopt_deck(*jb));
+  std::vector<unsigned char> ma, mb, fa, fb;
+  A.shadow_mask(0.7, 0.13, 0.3, ma);
+  B.shadow_mask(0.7, 0.13, 0.3, mb);
+  EXPECT_EQ(ma, mb);
+  A.far_density(0.7, {}, fa);
+  B.far_density(0.7, {}, fb);
+  EXPECT_EQ(fa, fb);
+  for (int v = 0; v < fair.variants; ++v) {
+    EXPECT_EQ(A.variant_map(v), B.variant_map(v));
+    EXPECT_EQ(A.variant_sun_tau(v), B.variant_sun_tau(v));
+    EXPECT_EQ(A.variant_up_tau(v), B.variant_up_tau(v));
+  }
+}
+
+// What a storm deck costs to build (terrain_lab's deck: 60 x 60 maps of 250 m half-width, the
+// cumulus 300 to 520 m, the storm deck to 3000 m on 64 layers with 24 far slices). The cloud_sky
+// builds it on a thread of its own, so this is how long a storm's deck takes to come in, not a
+// frame's hitch. The cumulus the maps grow from is kept, so neither way grows it again (growing it
+// is the seconds the deck's construction takes).
+TEST(WorldCloudLayer, AStormDecksBuildIsTimed) {
+  cloud_layer_params p;
+  p.extent = 250.0;
+  p.base = 300.0;
+  p.top = 520.0;
+  p.cumulus = p.top - p.base;
+  p.area = 1264.0;
+  p.sun_az = -60.0;
+  p.sun_el = 28.0;
+  p.opacity = {0.0, 0.0, 0.22, 0.0, 0.55, 0.26, 1.0, 0.54};
+  cloud_layer L(p);
+  auto timed = [&L](double top, int nz, int layers) {
+    const auto t0 = std::chrono::steady_clock::now();
+    std::shared_ptr<cloud_layer::deck_job> job = L.prepare_deck(300.0, top, nz, layers);
+    cloud_layer::run(*job);
+    const double ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    EXPECT_TRUE(L.adopt_deck(*job));
+    return ms;
+  };
+  const double up = timed(3000.0, 64, 24), down = timed(520.0, 28, 10);
+  std::printf("terrain_lab's storm deck: %.0f ms to build, %.0f ms back to the cumulus\n", up,
+              down);
+#if defined(__OPTIMIZE__) || (defined(_MSC_VER) && !defined(_DEBUG))
+  EXPECT_LT(up, 3000.0); // 153 ms measured (Windows, Release, a loaded machine)
+  EXPECT_LT(down, 3000.0);
 #endif
 }

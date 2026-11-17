@@ -3,7 +3,8 @@
 
 Run once; the files it writes are committed, so the goldens never depend on how this machine's libm
 rounds a Gaussian or a sine. Each GenSeg case is inputs/genseg/<case>.raw (float32, little-endian,
-x fastest) and <case>.json (its dimensions, thresholds and seeds); each Skeletonization case is
+x fastest) and <case>.json (its dimensions, thresholds and seeds); each SegMed case is
+inputs/segmed/<case>.raw and <case>.json (its dimensions and tlow); each Skeletonization case is
 inputs/skeleton/<case>.pts (a point a line) and <case>.json. Pure Python, no numpy.
 
     python3 tools/volrover-goldens/make_inputs.py                  # every library
@@ -11,6 +12,7 @@ inputs/skeleton/<case>.pts (a point a line) and <case>.json. Pure Python, no num
     python3 tools/volrover-goldens/make_inputs.py --only genseg --case auto_seeds_sweep
                                                                    # one case (the rest as
                                                                    # committed)
+    python3 tools/volrover-goldens/make_inputs.py --only segmed    # SegMed's cases
 """
 
 import json
@@ -29,9 +31,10 @@ def lcg(seed):
         yield state / 4294967296.0
 
 
-def volume(n, blobs, background=0.02, noise=0.0, seed=1, shells=()):
-    """n^3 floats: Gaussian blobs (centre, sigma, height) and spherical shells (centre, radius,
-    sigma, height: a Gaussian profile across the shell) over a background, plus uniform noise."""
+def volume(n, blobs, background=0.02, noise=0.0, seed=1, shells=(), plateaus=()):
+    """n^3 floats: Gaussian blobs (centre, sigma, height), spherical shells (centre, radius,
+    sigma, height: a Gaussian profile across the shell) and flat-topped plateaus (centre, radius,
+    sharpness p, height: h / (1 + (d / r)^p)) over a background, plus uniform noise."""
     rnd = lcg(seed)
     out = []
     for k in range(n):
@@ -44,6 +47,9 @@ def volume(n, blobs, background=0.02, noise=0.0, seed=1, shells=()):
                 for (cx, cy, cz), r, s, h in shells:
                     d = math.sqrt((i - cx) ** 2 + (j - cy) ** 2 + (k - cz) ** 2) - r
                     v += h * math.exp(-d * d / (2.0 * s * s))
+                for (cx, cy, cz), r, pw, h in plateaus:
+                    d = math.sqrt((i - cx) ** 2 + (j - cy) ** 2 + (k - cz) ** 2)
+                    v += h / (1.0 + (d / r) ** pw)
                 if noise:
                     v += noise * (next(rnd) - 0.5)
                 out.append(max(v, 0.0))
@@ -114,6 +120,52 @@ CASES = {
         seeds=[(0, 7, 12, 12), (1, 17, 12, 12), (2, 12, 12, 18)],
     ),
 }
+
+
+# ---- SegMed: the paper's critical points (GVF_Compute) ----
+# Each case is inputs/segmed/<case>.raw (float32, little-endian, x fastest) and <case>.json (its
+# dimensions and tlow, on the 0..255 scale the legacy reader rescales the volume to). SegMed keeps
+# its field's minima above tlow (the field is the diffused gradient of |grad I|, so its minima are
+# the flat regions), then thins each 26-connected run of them to one in 21.
+SEGMED_CASES = {
+    # Eight small blobs and every source (tlow -1): the blobs' cores and the background's flat
+    # stretches between them.
+    "many_blobs": dict(n=20, blobs=[((4, 4, 4), 1.5, 1.0), ((10, 4, 6), 1.5, 0.9),
+                                    ((15, 5, 4), 1.5, 0.8), ((5, 12, 8), 1.5, 0.95),
+                                    ((12, 12, 12), 1.5, 1.0), ((16, 15, 15), 1.5, 0.85),
+                                    ((6, 16, 15), 1.5, 0.9), ((14, 8, 16), 1.5, 0.7)],
+                       noise=0.02, tlow=-1),
+    # A flat-topped plateau and every source: the background around it is one long run of
+    # sources, which the thinning samples one in 21.
+    "plateau": dict(n=20, blobs=[], plateaus=[((10, 10, 10), 7.0, 6.0, 1.0)], noise=0.02,
+                    tlow=-1),
+    # A broad blob under heavy noise: sources everywhere, tlow keeping the brighter.
+    "noisy_blob": dict(n=18, blobs=[((9, 9, 9), 5.0, 1.0)], noise=0.6, tlow=20),
+    # A noisy flat-topped slab: runs of sources on its top and around it.
+    "noisy_slab": dict(n=20, blobs=[], plateaus=[((10, 10, 10), 8.0, 4.0, 1.0)], noise=0.3,
+                       tlow=20),
+}
+
+
+def write_segmed_inputs():
+    out_dir = os.path.join(HERE, "inputs", "segmed")
+    os.makedirs(out_dir, exist_ok=True)
+    for name, c in SEGMED_CASES.items():
+        vals = volume(c["n"], c["blobs"], noise=c["noise"], seed=len(name) + 100,
+                      shells=c.get("shells", ()), plateaus=c.get("plateaus", ()))
+        with open(os.path.join(out_dir, name + ".raw"), "wb") as f:
+            f.write(struct.pack("<%df" % len(vals), *vals))
+        meta = {
+            "library": "SegMed",
+            "dims": [c["n"]] * 3,
+            "dtype": "float32-le",
+            "tlow": c["tlow"],
+            "made_by": "tools/volrover-goldens/make_inputs.py",
+        }
+        with open(os.path.join(out_dir, name + ".json"), "w", newline="\n") as f:
+            json.dump(meta, f, indent=2)
+            f.write("\n")
+        print("wrote segmed", name, c["n"], "^3")
 
 
 # ---- Skeletonization: point clouds sampled from closed surfaces ----
@@ -238,14 +290,16 @@ def write_skeleton_inputs():
 def main():
     import argparse
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--only", choices=["genseg", "skeleton"],
+    ap.add_argument("--only", choices=["genseg", "segmed", "skeleton"],
                     help="write only one library's inputs (the others stay as committed)")
     ap.add_argument("--case", action="append",
                     help="write only this GenSeg case (repeatable; the others stay as committed)")
     args = ap.parse_args()
-    if args.only != "genseg":
+    if args.only in (None, "skeleton"):
         write_skeleton_inputs()
-    if args.only == "skeleton":
+    if args.only in (None, "segmed"):
+        write_segmed_inputs()
+    if args.only in ("skeleton", "segmed"):
         return
     out_dir = os.path.join(HERE, "inputs", "genseg")
     os.makedirs(out_dir, exist_ok=True)

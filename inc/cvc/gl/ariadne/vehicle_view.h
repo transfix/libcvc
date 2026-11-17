@@ -53,6 +53,11 @@ cvc::ariadne::SceneNode vehicle_scene_node(const std::string &id,
 // Each frame after the world steps (tick_scene): when the vehicles' revision has moved, the
 // entities' drawings are built again and bound to their chassis bodies.
 void sync_vehicle_markers(RealizedScene &realized, std::vector<std::string> *warnings);
+// Each frame after the world steps: a box look's wheels, each where its plant has it
+// (WorldVehicles::wheels): its height on its suspension or the ground under it, the front ones
+// steered. A dynamic4w's four wheels each follow the ground under them. A mesh look's wheels are
+// the mesh's.
+void pose_vehicle_wheels(RealizedScene &realized);
 
 // Each frame after the world steps: when the spawn points' revision has moved, their markers are
 // built again: a pad in its team's colour with a pointer along its heading (white for any team),

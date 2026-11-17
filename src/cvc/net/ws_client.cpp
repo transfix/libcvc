@@ -21,6 +21,8 @@
 #include <emscripten/websocket.h>
 #define CVC_NET_WS_WEB 1
 #elif defined(CVC_NET_HAVE_CURL)
+#include "http_backends.h" // detail::curl_global_init_once
+
 #include <curl/curl.h>
 #if LIBCURL_VERSION_NUM >= 0x075600 // curl_ws_* arrived in 7.86.0
 #define CVC_NET_WS_CURL 1
@@ -159,10 +161,8 @@ int close_code(const std::string &payload) {
 
 #if defined(CVC_NET_WS_CURL)
 
-void ensure_curl_global() {
-  static std::once_flag once;
-  std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
-}
+// libcurl's global init, with the HTTP client's one flag (http_client_curl.cpp).
+void ensure_curl_global() { detail::curl_global_init_once(); }
 
 class CurlWsConnection : public WsConnection {
 public:

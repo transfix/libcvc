@@ -16,6 +16,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib> // std::exit: AppLockManager.AutoIsSharedForAThreadedHost's child
+#include <ctime>   // §5.22 the tray clock tests: a local time to pin it at
 #include <cvc/ariadne/app_runtime.h> // AppRuntime: host menus, the scene between documents
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
@@ -28,8 +29,10 @@
 #include <cvc/ariadne/uri.h>               // §13.8 (fetch uri): register a custom scheme handler
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
-#include <cvc/core/async_task.h> // launch_pool_task generalization test
-#include <cvc/core/exec_pool.h>  // Stage 1b: the app's pool, its workers' pumps (AR-1, AR-3)
+#include <cvc/core/async_task.h>   // launch_pool_task generalization test
+#include <cvc/core/exec_pool.h>    // Stage 1b: the app's pool, its workers' pumps (AR-1, AR-3)
+#include <cvc/core/notify.h>       // §5.24 the notification feed and the tray's bell
+#include <cvc/core/server_clock.h> // §5.22 the relay's time in the clock's tooltip
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
 #include <cvc/net/browser.h>      // OIDC: a fake browser, a browser page
 #include <cvc/net/credentials.h>  // the ws-send test's CredentialStore
@@ -45,9 +48,9 @@
 #include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context.root_path (pool-task test)
 #include <cvc/state/state_exec/lock_manager.h>    // the app lock manager (Locks.*)
 #include <cvc/state/state_exec/state_value_codec.h>
-#include <cvc/state/state_exec/types.h>           // value_t
-#include <cvc/tf/model.h>                         // §10 tf_editor: the model the widget edits
-#include <cvc/tf/overlays.h>                      // §10 tf_editor: the layers published beside it
+#include <cvc/state/state_exec/types.h> // value_t
+#include <cvc/tf/model.h>               // §10 tf_editor: the model the widget edits
+#include <cvc/tf/overlays.h>            // §10 tf_editor: the layers published beside it
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -1079,6 +1082,67 @@ TEST(AriadneIsolatedDocs, ProvidersAreInstalledByTheirKind) {
   EXPECT_EQ(isolated_value(app, "docs.kinds.has"), "no");
 }
 
+// A Runtime's own providers (add_program_intrinsics, master's #1305) install by kind as the app's
+// do: in an isolated document's `any` group a host_proxied one runs on the frame's thread while a
+// worker pumps the program, and a host_only one that binds anything pumps the document's group on
+// the host thread. Another Runtime on the app sees none of them.
+TEST(AriadneIsolatedDocs, ARuntimesOwnProvidersInstallByKind) {
+  namespace se = cvc::state_exec;
+  isolated_env_var force("CVC_EXEC_FORCE_MOVE", "1"); // the group alternates between threads
+  cvc::app app;
+  isolate_documents(app, 2);
+  const std::thread::id frame_thread = std::this_thread::get_id();
+  std::mutex mu;
+  std::set<std::thread::id> proxied_threads;
+  Runtime rt(app, "docs.own");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_channel_policy({}, {}, /*strict=*/true, /*quiet=*/true);
+  rt.add_program_intrinsics(
+      [](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        se::builtins::register_fn(env, "own-any", [](std::span<const se::value_t>) {
+          return se::value_t(std::string("any"));
+        });
+      },
+      se::provider_affinity::any);
+  rt.add_program_intrinsics(
+      [&](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        se::builtins::register_fn(env, "own-proxied", [&](std::span<const se::value_t>) {
+          std::lock_guard<std::mutex> lock(mu);
+          proxied_threads.insert(std::this_thread::get_id());
+          return se::value_t(std::string("proxied"));
+        });
+      },
+      se::provider_affinity::host_proxied);
+  rt.set_root(group({text("own")}));
+  rt.set_tick_program("(begin (state-set \"a\" (own-any)) (state-set \"p\" (own-proxied)))");
+  ASSERT_NE(rt.isolated_group(), nullptr) << rt.isolation_reason();
+  EXPECT_EQ(rt.isolated_group()->opts().affinity, se::group_affinity::any);
+  for (int frame = 0; frame < 20; ++frame)
+    isolated_frame(app, rt);
+  EXPECT_EQ(isolated_value(app, "docs.own.a"), "any");
+  EXPECT_EQ(isolated_value(app, "docs.own.p"), "proxied");
+  EXPECT_EQ(proxied_threads, std::set<std::thread::id>{frame_thread})
+      << "the host_proxied native ran off the frame's thread";
+
+  Runtime other(app, "docs.other");
+  MockBackend mb2;
+  other.set_backend(&mb2);
+  other.set_channel_policy({}, {}, /*strict=*/true, /*quiet=*/true);
+  other.add_program_intrinsics( // no kind: host_only
+      [](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        se::builtins::register_fn(env, "own-host",
+                                  [](std::span<const se::value_t>) { return se::value_t{}; });
+      });
+  other.set_root(group({text("other")}));
+  ASSERT_NE(other.isolated_group(), nullptr) << other.isolation_reason();
+  EXPECT_EQ(other.isolated_group()->opts().affinity, se::group_affinity::host);
+  EXPECT_TRUE(other.has_function("own-host"));
+  EXPECT_FALSE(other.has_function("own-any")) << "rt's own";
+  EXPECT_TRUE(rt.has_function("own-any"));
+  EXPECT_FALSE(rt.has_function("own-host")) << "other's own";
+}
+
 // AppRuntime::idle() and wait_idle() count an isolated document's group (S1.9): its programs'
 // async calls run on its own host, not the app's.
 TEST(AriadneIsolatedDocs, IdleAndWaitIdleCountTheDocumentsGroup) {
@@ -1196,6 +1260,69 @@ TEST(AriadneIsolatedDocs, TheBackendsVerbsRunOnTheFramesThread) {
   EXPECT_TRUE(wb.full);
   EXPECT_EQ(backend_threads, std::set<std::thread::id>{frame_thread})
       << "a backend verb ran off the frame's thread";
+  const unsigned threads = app.exec_pool().threads();
+  std::printf("pool threads %u; the program ran on %zu thread(s)\n", threads,
+              program_threads.size());
+  if (threads > 0) // a worker pumped the program in some frames, so the verbs were proxied
+    EXPECT_TRUE(std::any_of(program_threads.begin(), program_threads.end(),
+                            [&](std::thread::id t) { return t != frame_thread; }));
+}
+
+// The notify verbs (master's #1241) mirror the app's feed into its notify.* subtree raw, on the
+// caller's thread: in an `any` group they are host_proxied, so they run on the frame's thread while
+// a worker pumps the program that calls them. A child it spawns, made on the thread that pumps the
+// group, binds them from its parent's notify scope (mount_names is the host thread's), and posts as
+// its parent's scope.
+TEST(AriadneIsolatedDocs, TheNotifyVerbsRunOnTheFramesThread) {
+  namespace se = cvc::state_exec;
+  isolated_env_var force("CVC_EXEC_FORCE_MOVE", "1"); // the group alternates between threads
+  cvc::app app;
+  isolate_documents(app, 2);
+  const std::thread::id frame_thread = std::this_thread::get_id();
+  std::mutex mu;
+  std::set<std::thread::id> program_threads, feed_threads;
+  register_action_intrinsics(
+      app,
+      [&](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        se::builtins::register_fn(env, "probe-thread", [&](std::span<const se::value_t>) {
+          std::lock_guard<std::mutex> lock(mu);
+          program_threads.insert(std::this_thread::get_id());
+          return se::value_t{};
+        });
+      },
+      se::provider_affinity::any);
+  cvc::state &root = cvc::state::instance(app);
+  boost::signals2::scoped_connection conn =
+      root(cvc::notify_root).childChanged.connect([&](const std::string &) {
+        std::lock_guard<std::mutex> lock(mu);
+        feed_threads.insert(std::this_thread::get_id());
+      });
+  Runtime rt(app, "docs.feed");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_channel_policy({}, {}, /*strict=*/true, /*quiet=*/true);
+  rt.set_root(group({text("feed")}));
+  rt.set_tick_program(
+      R"S((begin (probe-thread) (notify "tick")
+           (if (state-get "spawned") #f
+               (begin (state-set "spawned" "1") (spawn "(notify \"from the child\")")))))S");
+  ASSERT_NE(rt.isolated_group(), nullptr) << rt.isolation_reason();
+  EXPECT_EQ(rt.isolated_group()->opts().affinity, se::group_affinity::any);
+  for (int frame = 0; frame < 20; ++frame)
+    isolated_frame(app, rt);
+  EXPECT_EQ(isolated_value(app, "docs.feed.spawned"), "1");
+  bool tick = false, child = false;
+  for (const cvc::notification_entry &e : cvc::notifications(app)) {
+    tick = tick || e.text == "tick";
+    if (e.text == "from the child") {
+      child = true;
+      EXPECT_EQ(e.path, "docs.feed") << "the child posts as its parent's scope";
+    }
+  }
+  EXPECT_TRUE(tick);
+  EXPECT_TRUE(child);
+  EXPECT_EQ(feed_threads, std::set<std::thread::id>{frame_thread})
+      << "the feed was written off the frame's thread";
   const unsigned threads = app.exec_pool().threads();
   std::printf("pool threads %u; the program ran on %zu thread(s)\n", threads,
               program_threads.size());
@@ -6632,44 +6759,73 @@ TEST(AriadneAsyncFn, ActionCapsAreTreeSettingsAndChargeAsyncCalls) {
   MockBackend mb;
   rt.set_backend(&mb);
   auto &root = cvc::state::instance(app);
-  // 20 rounds, 344 steps: far under both default caps even in a loaded debug build, and over the
-  // 100-step cap below. 200 rounds (3,224 steps) ran out of the 0.1 s on Linux debug CI.
-  rt.set_root(group({button("Loop", "(begin (set i 0) (while (< i 20) (set i (+ i 1))) "
+  rt.set_root(group({button("Loop", "(begin (set i 0) (while (< i 200) (set i (+ i 1))) "
                                     "(state-set \"r.loop\" (str i)))"),
-                     button("Spin", "(state-set \"r.spin\" (spin))")}));
-  const auto click = [&](const char *key) {
+                     button("Spin", "(state-set \"r.spin\" (spin))"),
+                     // The same spin under another key: a kill warns once per message.
+                     button("Spin again", "(state-set \"r.spin2\" (spin))"),
+                     button("Long", "(begin (set i 0) (while (< i 10000000) (set i (+ i 1))) "
+                                    "(state-set \"r.long\" (str i)))")}));
+  // Each button (clicked alone, by its label) sets its key; the key reads "-" until it does. The
+  // waits are long because a loaded Debug runner can take seconds of wall time over a few
+  // milliseconds of work.
+  const auto press = [&](const char *label, const char *key) {
+    rt.take_reactive_warnings(); // an earlier click's
     root(key).value(std::string("-"));
-    mb.button_click = true;
+    mb.click_button = label;
     rt.render();
     rt.drain();
-    mb.button_click = false;
-    pump_until(rt, [&] { return root(key).value() != "-"; }, 1000);
-    for (int i = 0; i < 3; ++i) { // let the sweep report a kill
-      rt.render();
-      rt.drain();
-    }
+    mb.click_button.clear();
+  };
+  // A click that finishes: the value it set.
+  const auto run = [&](const char *label, const char *key) {
+    press(label, key);
+    pump_until(rt, [&] { return root(key).value() != "-"; }, 30000);
     return root(key).value();
   };
+  // A click the caps kill: the kill's warning, with the key left unset.
+  const auto killed = [&](const char *label, const char *key) {
+    press(label, key);
+    std::vector<std::string> warns;
+    pump_until(
+        rt,
+        [&] {
+          for (auto &w : rt.take_reactive_warnings())
+            warns.push_back(std::move(w));
+          return !warns.empty();
+        },
+        30000);
+    EXPECT_EQ(root(key).value(), "-") << key;
+    return warns.empty() ? std::string("(no warning)") : warns.back();
+  };
+  const auto npos = std::string::npos;
 
-  // The defaults: the loop fits in 5000 steps; the spin's CPU doesn't.
-  EXPECT_EQ(click("r.loop"), "20");
-  EXPECT_EQ(click("r.spin"), "-");
-  auto warns = rt.take_reactive_warnings();
-  ASSERT_FALSE(warns.empty());
-  EXPECT_NE(warns.back().find("max_steps_exceeded"), std::string::npos) << warns.back();
+  // The default step cap: the loop fits in 5000 steps; the spin's CPU doesn't. The time cap is
+  // raised for this, since it is wall time and a loaded Debug runner can spend 0.1 s on the loop.
+  root("ariadne.limits.action_max_time").value(std::string("30"));
+  EXPECT_EQ(run("Loop", "r.loop"), "200");
+  std::string why = killed("Spin", "r.spin");
+  EXPECT_NE(why.find("max_steps_exceeded"), npos) << why;
 
   // A step cap below the loop's needs kills it too.
   root("ariadne.limits.action_max_steps").value(std::string("100"));
-  EXPECT_EQ(click("r.loop"), "-");
+  why = killed("Loop", "r.loop");
+  EXPECT_NE(why.find("max_steps_exceeded"), npos) << why;
   // No limit on either: the spin finishes.
   root("ariadne.limits.action_max_steps").value(std::string("0"));
   root("ariadne.limits.action_max_time").value(std::string("0"));
-  EXPECT_EQ(click("r.spin"), "spun");
-  // Unparsable values keep the defaults.
+  EXPECT_EQ(run("Spin", "r.spin"), "spun");
+  // Unparsable values keep the defaults: 5000 steps...
   root("ariadne.limits.action_max_steps").value(std::string("lots"));
+  root("ariadne.limits.action_max_time").value(std::string("30"));
+  EXPECT_EQ(run("Loop", "r.loop"), "200");
+  why = killed("Spin again", "r.spin2");
+  EXPECT_NE(why.find("max_steps_exceeded"), npos) << why;
+  // ...and 0.1 s, which ten million rounds with no step cap run into on any machine.
+  root("ariadne.limits.action_max_steps").value(std::string("0"));
   root("ariadne.limits.action_max_time").value(std::string("soon"));
-  EXPECT_EQ(click("r.loop"), "20");
-  EXPECT_EQ(click("r.spin"), "-");
+  why = killed("Long", "r.long");
+  EXPECT_NE(why.find("time_limit_exceeded"), npos) << why;
 }
 
 // A `closable: true` window renders with a close button, persists tree.<id>.open, is skipped once
@@ -7045,6 +7201,749 @@ TEST(AriadneRuntime, WindowsMenuListsEachRepeatedWindowUnderItsTitle) {
   rt.render();
   EXPECT_FALSE(mb.saw_prefix("toggle:ann"));
   EXPECT_FALSE(mb.saw("separator")) << "no separator over an empty list";
+}
+
+// §5.22 the menubar's tray. A backend with a tray: it fits the last `fit` icons (all, when < 0),
+// and logs each icon it is asked to draw as "tray_button:<glyph>|<badge>|<tone>" or
+// "tray_menu:...". A button named in `click` reports a click; a menu named in `open` is open.
+struct TrayBackend : MockBackend {
+  int fit = -1;
+  bool unicode = true;
+  std::string click, open;
+  std::string pick; // §5.24 a menu item whose label starts with it is clicked
+  bool menu_item_action(const char *l) override {
+    MockBackend::menu_item_action(l);
+    return !pick.empty() && std::string(l).rfind(pick, 0) == 0;
+  }
+  std::vector<TrayIcon> asked; // what begin_tray was given
+  bool fits = true;            // §5.23 what menus_fit says
+  std::vector<std::string> titles;
+  std::vector<TrayIcon> fit_tray; // what menus_fit was given
+  int fit_asked = 0;
+  static std::string spec(const TrayIcon &t) {
+    return t.glyph + "|" + t.badge + "|" + std::to_string(t.tone);
+  }
+  std::string dump() const { // the log, for a failure's message
+    std::string out;
+    for (const std::string &s : log)
+      out += s + "\n";
+    return out;
+  }
+  bool unicode_glyphs() const override { return unicode; }
+  int begin_tray(const std::vector<TrayIcon> &icons) override {
+    asked = icons;
+    rec("begin_tray:" + std::to_string(icons.size()));
+    return fit < 0 ? static_cast<int>(icons.size()) : fit;
+  }
+  bool tray_button(const TrayIcon &t) override {
+    rec("tray_button:" + spec(t));
+    return t.glyph == click;
+  }
+  bool begin_tray_menu(const TrayIcon &t) override {
+    rec("tray_menu:" + spec(t));
+    return t.glyph == open;
+  }
+  void end_tray_menu() override { rec("end_tray_menu"); }
+  void end_tray() override { rec("end_tray"); }
+  bool menus_fit(const std::vector<std::string> &t, const std::vector<TrayIcon> &tray) override {
+    titles = t;
+    fit_tray = tray;
+    ++fit_asked;
+    return fits;
+  }
+};
+
+TEST(AriadneRuntime, TrayIconsComeAfterTheMenusAndTheWindowsMenu) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("ui.demo.warns").value("3");
+  Widget warn = tray_icon("warning", "(state-get \"warns\")");
+  warn.tone = "warn";
+  rt.set_root(
+      group({menubar({menu("File", {menu_action("Quit", "quit")}), warn, tray_icon("Z", "0")}),
+             window_with_id("Alpha", "a", true)}));
+  rt.render();
+  // The menus, the Windows menu, then the tray: a named icon's glyph, its badge from its
+  // expression, its tone; a badge of "0" shows none.
+  ASSERT_GE(log_index(mb, "begin_tray:2"), 0);
+  EXPECT_LT(log_index(mb, "begin_menu:File"), log_index(mb, "begin_tray:2"));
+  EXPECT_LT(log_index(mb, "begin_menu:Windows"), log_index(mb, "begin_tray:2"));
+  EXPECT_TRUE(mb.saw("tray_button:\xE2\x9A\xA0|3|1")) << mb.dump();
+  EXPECT_TRUE(mb.saw("tray_button:Z||0")) << mb.dump();
+  EXPECT_LT(log_index(mb, "tray_button:\xE2\x9A\xA0|3|1"), log_index(mb, "tray_button:Z||0"));
+  EXPECT_LT(log_index(mb, "tray_button:Z||0"), log_index(mb, "end_tray"));
+  EXPECT_LT(log_index(mb, "end_tray"), log_index(mb, "end_menubar"));
+  // Without the glyphs, a named icon draws its ASCII stand-in.
+  mb.unicode = false;
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("tray_button:!|3|1")) << mb.dump();
+}
+
+TEST(AriadneRuntime, TrayButtonRunsItsOnAndATrayMenuOpensItsItems) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  int fired = 0;
+  rt.on("mail.read", [&] { ++fired; });
+  rt.set_root(group({menubar({tray_icon("M", "", "mail.read"),
+                              tray_icon("J", "2", "", {menu_action("Show jobs", "jobs")})})}));
+  mb.click = "M";
+  rt.render();
+  mb.click.clear();
+  rt.drain();
+  EXPECT_EQ(fired, 1);
+  // A menu icon's items are emitted only while it is open.
+  EXPECT_TRUE(mb.saw("tray_menu:J|2|0"));
+  EXPECT_FALSE(mb.saw("menu_action:Show jobs"));
+  mb.open = "J";
+  mb.log.clear();
+  rt.render();
+  EXPECT_LT(log_index(mb, "tray_menu:J|2|0"), log_index(mb, "menu_action:Show jobs"));
+  EXPECT_LT(log_index(mb, "menu_action:Show jobs"), log_index(mb, "end_tray_menu"));
+}
+
+TEST(AriadneRuntime, TrayIconsWithNoRoomGoInAnOverflowMenu) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  mb.fit = 1; // room for the last icon only
+  rt.set_backend(&mb);
+  Widget err = tray_icon("E", "2");
+  err.tone = "error";
+  err.tooltip = "Errors";
+  rt.set_root(group({menubar({menu("File", {}), err, tray_icon("W", "3"), tray_icon("C")})}));
+  mb.open = "\xC2\xBB";
+  rt.render();
+  // The overflow icon first: its badge sums the hidden badges, its tone is the strongest of
+  // theirs, and its menu lists them in order, each with its badge and tooltip. Then the icon that
+  // fits.
+  EXPECT_TRUE(mb.saw("tray_menu:\xC2\xBB|5|2")) << mb.dump();
+  EXPECT_LT(log_index(mb, "tray_menu:\xC2\xBB|5|2"), log_index(mb, "menu_action:E 2  Errors"));
+  EXPECT_LT(log_index(mb, "menu_action:E 2  Errors"), log_index(mb, "menu_action:W 3"));
+  EXPECT_LT(log_index(mb, "menu_action:W 3"), log_index(mb, "tray_button:C||0"));
+  EXPECT_FALSE(mb.saw("tray_button:E|2|2"));
+}
+
+TEST(AriadneRuntime, ABackendWithoutATrayShowsEachIconAsAMenu) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb; // begin_tray's default: no tray
+  rt.set_backend(&mb);
+  rt.set_root(group({menubar({menu("File", {}), tray_icon("W", "3", "warns")})}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_menu:W 3"));
+  EXPECT_LT(log_index(mb, "begin_menu:File"), log_index(mb, "begin_menu:W 3"));
+}
+
+namespace {
+// 14:05 today, local time.
+std::chrono::system_clock::time_point five_past_two() {
+  const std::time_t now = std::time(nullptr);
+  std::tm tm{};
+#ifdef _WIN32
+  localtime_s(&tm, &now);
+#else
+  localtime_r(&now, &tm);
+#endif
+  tm.tm_hour = 14;
+  tm.tm_min = 5;
+  tm.tm_sec = 9;
+  return std::chrono::system_clock::from_time_t(std::mktime(&tm));
+}
+} // namespace
+
+TEST(AriadneRuntime, TheTrayClockFollowsTheHostAndTheUser) {
+  {
+    // Off unless the host turns it on (a snapshot's frames must not change with the time).
+    cvc::app app;
+    Runtime rt(app, "ui.demo");
+    TrayBackend mb;
+    rt.set_backend(&mb);
+    rt.set_wall_clock(five_past_two);
+    rt.set_root(group({menubar({menu("File", {}), tray_icon("W")})}));
+    rt.render();
+    EXPECT_FALSE(mb.saw_prefix("tray_button:14:05")) << mb.dump();
+  }
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  rt.set_wall_clock(five_past_two);
+  // The host's default: the clock goes last, at the bar's right end, showing the local time.
+  rt.set_clock(true);
+  rt.set_root(group({menubar({menu("File", {}), tray_icon("W")})}));
+  rt.render();
+  ASSERT_TRUE(mb.saw("tray_button:14:05||0")) << mb.dump();
+  EXPECT_LT(log_index(mb, "tray_button:W||0"), log_index(mb, "tray_button:14:05||0"));
+  // The user's choice turns it off.
+  cvc::state::instance(app)("ui.demo.ariadne.tray.clock").value("0");
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("tray_button:14:05||0"));
+}
+
+// §5.23 the bar's menus, Windows menu included, fold into one menu under the "menu" icon when the
+// backend finds they do not fit beside the tray, which stays where it was, at the bar's right end.
+TEST(AriadneRuntime, TheMenusFoldIntoOneWhenTheyDoNotFitBesideTheTray) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({menubar({menu("File", {menu_action("Quit", "quit")}),
+                              menu("View", {menu_action("Zoom", "zoom")}), tray_icon("warning")}),
+                     window_with_id("Alpha", "a", true)}));
+  rt.render();
+  // It asked with the titles the bar shows, in order, and the whole tray.
+  EXPECT_EQ(mb.titles, (std::vector<std::string>{"File", "View", "Windows"}));
+  ASSERT_EQ(mb.fit_tray.size(), 1u);
+  EXPECT_EQ(mb.fit_tray[0].glyph, "\xE2\x9A\xA0");
+  EXPECT_FALSE(mb.saw("begin_menu:\xE2\x89\xA1")) << "they fit: the bar as it was";
+
+  mb.fits = false;
+  mb.log.clear();
+  rt.render();
+  const int burger = log_index(mb, "begin_menu:\xE2\x89\xA1");
+  ASSERT_GE(burger, 0) << mb.dump();
+  EXPECT_EQ(mb.times("begin_menu:\xE2\x89\xA1"), 1);
+  EXPECT_LT(log_index(mb, "begin_menubar"), burger);
+  EXPECT_LT(burger, log_index(mb, "begin_menu:File"));
+  EXPECT_LT(log_index(mb, "begin_menu:View"), log_index(mb, "begin_menu:Windows"));
+  EXPECT_TRUE(mb.saw("toggle:Alpha")) << mb.dump();
+  // The tray after the folded menus, still in the bar.
+  EXPECT_LT(log_index(mb, "toggle:Alpha"), log_index(mb, "begin_tray:1"));
+  EXPECT_LT(log_index(mb, "end_tray"), log_index(mb, "end_menubar"));
+
+  // Without the glyphs, the ASCII stand-in.
+  mb.unicode = false;
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_menu:=")) << mb.dump();
+}
+
+// §5.23 the document decides: `collapse: never` keeps the menus in the bar whatever the room (the
+// backend is not asked), `always` folds them however much room there is. A menu of the bar titled
+// as the Windows menu still takes its items when folded, and there is one of it.
+TEST(AriadneRuntime, ADocumentSetsWhetherTheMenusFold) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  mb.fits = false;
+  Widget bar = menubar({menu("File", {menu_action("Quit", "quit")}),
+                        menu("Windows", {menu_action("Tile", "tile")})});
+  bar.collapse = "never";
+  rt.set_root(group({bar, window_with_id("Alpha", "a", true)}));
+  rt.render();
+  EXPECT_EQ(mb.fit_asked, 0);
+  EXPECT_FALSE(mb.saw("begin_menu:\xE2\x89\xA1")) << mb.dump();
+  EXPECT_TRUE(mb.saw("begin_menu:File"));
+
+  bar.collapse = "always";
+  mb.fits = true;
+  rt.set_root(group({bar, window_with_id("Alpha", "a", true)}));
+  mb.log.clear();
+  rt.render();
+  EXPECT_LT(log_index(mb, "begin_menu:\xE2\x89\xA1"), log_index(mb, "begin_menu:File"))
+      << mb.dump();
+  EXPECT_EQ(mb.times("begin_menu:Windows"), 1) << mb.dump();
+  EXPECT_LT(log_index(mb, "begin_menu:Windows"), log_index(mb, "toggle:Alpha")) << mb.dump();
+}
+
+// §5.24 the feed is the app's own: two apps never share one. It mirrors its totals and entries
+// into the state tree, counts an identical unread post as a repeat, and keeps the newest 100.
+TEST(Notify, TheFeedIsEachAppsOwnAndMirrorsItself) {
+  cvc::app a, b;
+  cvc::notification n;
+  n.text = "Meshing finished";
+  n.source = "fe_lab";
+  n.path = "ui.fe_lab";
+  const std::uint64_t id = cvc::notify(a, n);
+  EXPECT_GT(id, 0u);
+  EXPECT_EQ(cvc::notify_status(a).count, 1u);
+  EXPECT_EQ(cvc::notify_status(b).count, 0u) << "another app's feed";
+  EXPECT_EQ(cvc::notify(a, n), id) << "the same, unread: a repeat";
+  ASSERT_EQ(cvc::notifications(a).size(), 1u);
+  EXPECT_EQ(cvc::notifications(a)[0].repeat, 2);
+  cvc::notification w;
+  w.text = "a broken expression";
+  w.level = 1;
+  w.path = "ui";
+  cvc::notify(a, w);
+  EXPECT_EQ(sval(a, "notify.unread"), "2");
+  EXPECT_EQ(sval(a, "notify.worst"), "warn");
+  EXPECT_EQ(sval(a, ("notify.items." + std::to_string(id) + ".source").c_str()), "fe_lab");
+  EXPECT_TRUE(cvc::notify_read(a, id));
+  EXPECT_EQ(sval(a, "notify.unread"), "1");
+  EXPECT_EQ(cvc::notify(a, n), id + 2) << "read: a new entry, not a repeat";
+  // The entries under a path go together (a document that restarts); ui.fe_lab is under ui.
+  EXPECT_EQ(cvc::notify_clear_under(a, "ui.fe_lab"), 2u);
+  EXPECT_EQ(cvc::notify_status(a).count, 1u);
+  EXPECT_TRUE(cvc::state::instance(a)("notify.items").childNames().size() == 1u);
+  for (int i = 0; i < 150; ++i) {
+    cvc::notification k;
+    k.text = "job " + std::to_string(i);
+    cvc::notify(a, k);
+  }
+  const auto all = cvc::notifications(a);
+  ASSERT_EQ(all.size(), cvc::notify_capacity);
+  EXPECT_EQ(all.back().text, "job 149");
+  EXPECT_EQ(all.front().text, "job 50") << "the oldest went first";
+  cvc::notify_clear_all(a);
+  EXPECT_EQ(sval(a, "notify.count"), "0");
+  EXPECT_EQ(sval(a, "notify.worst"), "");
+}
+
+// §5.24 the bell: in the tray while the feed has entries, before the clock; its badge the unread
+// count, its tone the worst unread level. Its menu lists the newest entries, named by the document
+// that posted them, then Mark all read, Clear all and Show all..., which opens a window.
+TEST(AriadneRuntime, TheBellShowsTheFeedInTheTray) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  rt.set_wall_clock(five_past_two);
+  rt.set_clock(true);
+  rt.set_root(group({menubar({menu("File", {})})}));
+  rt.render();
+  EXPECT_FALSE(mb.saw_prefix("tray_menu:\xF0\x9F\x94\x94")) << "an empty feed: no bell";
+  cvc::notification n;
+  n.text = "Meshing finished";
+  cvc::notify(app, n);
+  n.text = "the mesh has holes";
+  n.level = 2;
+  n.path = "ui.demo";
+  cvc::notify(app, n);
+  mb.open = "\xF0\x9F\x94\x94";
+  mb.log.clear();
+  rt.render();
+  ASSERT_TRUE(mb.saw("tray_menu:\xF0\x9F\x94\x94|2|2")) << mb.dump();
+  ASSERT_FALSE(mb.asked.empty());
+  EXPECT_EQ(mb.asked[0].icon, "bell");
+  EXPECT_LT(log_index(mb, "tray_menu:\xF0\x9F\x94\x94|2|2"), log_index(mb, "tray_button:14:05||0"))
+      << "the clock stays rightmost";
+  // The newest first, then the bell's own items. (An entry's time is when it was posted, by the
+  // system clock, not the pinned one.)
+  const auto first_with = [&](const std::string &p) {
+    for (std::size_t i = 0; i < mb.log.size(); ++i)
+      if (mb.log[i].rfind(p, 0) == 0)
+        return static_cast<int>(i);
+    return -1;
+  };
+  const int holes = first_with("menu_action:\xE2\x80\xA2 \xE2\x9C\x96 the mesh has holes  ");
+  ASSERT_GE(holes, 0) << mb.dump();
+  EXPECT_LT(holes, first_with("menu_action:\xE2\x80\xA2 Meshing finished  ")) << mb.dump();
+  EXPECT_TRUE(mb.saw("menu_action:Mark all read"));
+  EXPECT_TRUE(mb.saw("menu_action:Clear all"));
+  // Mark all read: no badge, the bell stays.
+  mb.pick = "Mark all read";
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("tray_menu:\xF0\x9F\x94\x94||0")) << mb.dump();
+  // Show all... opens the Notifications window.
+  mb.pick = "Show all...";
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_window:Notifications(closable)")) << mb.dump();
+  EXPECT_TRUE(mb.saw_prefix("text_line:  Meshing finished")) << mb.dump();
+  // Clear all: the feed is empty, and the bell goes.
+  mb.pick = "Clear all";
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  mb.log.clear();
+  rt.render();
+  EXPECT_EQ(cvc::notify_status(app).count, 0u);
+  EXPECT_FALSE(mb.saw_prefix("tray_menu:\xF0\x9F\x94\x94")) << mb.dump();
+}
+
+// §5.24 (notify TEXT [LEVEL [ON]]) posts from the program's document: a loaded one's entries are
+// named by its mount, the outer document's by no one. A click on one runs its ON in that scope.
+// A warning goes to the feed from where it was raised.
+TEST(AriadneRuntime, ProgramsAndWarningsPostToTheFeedFromTheirDocument) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  Widget fe =
+      group({button("Go", "(notify \"meshed\" \"warn\" \"(state-set \\\"opened\\\" 1)\")")});
+  fe.scope = "fe_lab";
+  rt.set_root(group({menubar({menu("File", {})}), button("Go", "(notify \"hello\")"), fe}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+  ASSERT_TRUE(pump_until(rt, [&] { return cvc::notify_status(app).count >= 2; }));
+  std::vector<cvc::notification_entry> all = cvc::notifications(app);
+  ASSERT_EQ(all.size(), 2u);
+  const auto meshed =
+      std::find_if(all.begin(), all.end(), [](auto &e) { return e.text == "meshed"; });
+  const auto hello =
+      std::find_if(all.begin(), all.end(), [](auto &e) { return e.text == "hello"; });
+  ASSERT_NE(meshed, all.end());
+  ASSERT_NE(hello, all.end());
+  EXPECT_EQ(meshed->source, "fe_lab");
+  EXPECT_EQ(meshed->level, 1);
+  EXPECT_EQ(hello->source, "");
+  // A click on the entry: read, and its program runs in fe_lab's scope.
+  mb.open = "\xF0\x9F\x94\x94";
+  mb.pick = "\xE2\x80\xA2 \xE2\x9A\xA0 fe_lab: meshed";
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  ASSERT_TRUE(pump_until(rt, [&] { return !sval(app, "ui.demo.fe_lab.opened").empty(); }));
+  EXPECT_EQ(sval(app, "ui.demo.fe_lab.opened"), "1");
+  for (const auto &e : cvc::notifications(app))
+    if (e.text == "meshed")
+      EXPECT_TRUE(e.read);
+  // A broken expression's warning, raised in fe_lab: in the feed, named by it.
+  Widget bad = group({text("x")});
+  bad.children[0].visible_when = "(> (int"; // unbalanced: a parse error, warned once
+  bad.scope = "fe_lab";
+  rt.set_root(group({menubar({menu("File", {})}), bad}));
+  rt.render();
+  bool warned = false;
+  mb.log.clear();
+  for (const auto &e : cvc::notifications(app))
+    if (e.level == 1 && e.path == "ui.demo.fe_lab") {
+      warned = true;
+      mb.log.clear();
+      rt.render();
+      EXPECT_TRUE(mb.saw_prefix("menu_action:\xE2\x80\xA2 \xE2\x9A\xA0 fe_lab: ")) << mb.dump();
+    }
+  EXPECT_TRUE(warned);
+}
+
+// §5.24 `notifications: false` keeps the bell out of the tray whatever the feed holds; `- bell`
+// places it among the tray's icons.
+TEST(AriadneRuntime, ADocumentPlacesOrTurnsOffTheBell) {
+  {
+    cvc::app app;
+    Runtime rt(app, "ui.demo");
+    TrayBackend mb;
+    rt.set_backend(&mb);
+    cvc::notification n;
+    n.text = "x";
+    cvc::notify(app, n);
+    rt.set_root(group({menubar({tray_bell(), tray_icon("W")})}));
+    rt.render();
+    EXPECT_LT(log_index(mb, "tray_menu:\xF0\x9F\x94\x94|1|0"), log_index(mb, "tray_button:W||0"))
+        << mb.dump();
+    EXPECT_EQ(mb.times("tray_menu:\xF0\x9F\x94\x94|1|0"), 1);
+  }
+  {
+    cvc::app app;
+    Runtime rt(app, "ui.demo");
+    TrayBackend mb;
+    rt.set_backend(&mb);
+    cvc::notification n;
+    n.text = "x";
+    cvc::notify(app, n);
+    rt.set_root(group({menubar({tray_icon("W")}), tray_bell(false)}));
+    rt.render();
+    EXPECT_FALSE(mb.saw_prefix("tray_menu:\xF0\x9F\x94\x94")) << mb.dump();
+  }
+}
+
+// §5.25 a loaded document with its own menubar, as the loader makes it: a mount (scope, the
+// document's name, its init:) around the fragment, whose bar has a menu and a tray icon.
+Widget fe_lab_mount() {
+  Widget frag =
+      group({menubar({menu("Mesh", {menu_action("Remesh", "(state-set \"remeshed\" \"1\")")}),
+                      tray_icon("J", "(state-get \"jobs\")")}),
+             window_with_id("FE", "fe", true)});
+  Widget m = group({frag});
+  m.scope = "includes.fe_lab";
+  m.app_name = "FE Lab";
+  m.init_script = "(state-set \"seeded\" \"1\")";
+  return m;
+}
+
+// §5.25 the outer document owns the bar. A loaded document's menubar is not drawn where it is: it
+// is one menu of the outer bar, under the document's name, after the outer document's menus and
+// before Windows, holding its menus as submenus, then Restart and Quit. Its tray icons join the
+// outer tray, worked out in its scope, and its items run there. Windows lists it under
+// Applications.
+TEST(AriadneRuntime, ALoadedDocumentsMenubarIsOneMenuOfTheOuterBar) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("ui.demo.includes.fe_lab.jobs").value("4");
+  rt.set_root(group({menubar({menu("File", {})}), fe_lab_mount()}));
+  rt.render();
+  EXPECT_EQ(mb.times("begin_menubar"), 1) << "one bar\n" << mb.dump();
+  const int file = log_index(mb, "begin_menu:File");
+  const int app_menu = log_index(mb, "begin_menu:FE Lab");
+  ASSERT_GE(app_menu, 0) << mb.dump();
+  EXPECT_LT(file, app_menu);
+  EXPECT_LT(app_menu, log_index(mb, "begin_menu:Mesh"));
+  EXPECT_LT(log_index(mb, "menu_action:Remesh"), log_index(mb, "menu_action:Restart FE Lab"));
+  EXPECT_LT(log_index(mb, "menu_action:Restart FE Lab"), log_index(mb, "menu_action:Quit FE Lab"));
+  EXPECT_LT(log_index(mb, "menu_action:Quit FE Lab"), log_index(mb, "begin_menu:Windows"));
+  EXPECT_TRUE(mb.saw("text_line:Applications")) << mb.dump();
+  EXPECT_TRUE(mb.toggle_shown["FE Lab"]) << "ticked: running";
+  EXPECT_TRUE(mb.saw("tray_button:J|4|0")) << "its badge read in its scope\n" << mb.dump();
+  // Its item runs in its scope.
+  mb.pick = "Remesh";
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  ASSERT_TRUE(
+      pump_until(rt, [&] { return !sval(app, "ui.demo.includes.fe_lab.remeshed").empty(); }));
+  EXPECT_TRUE(sval(app, "ui.demo.remeshed").empty());
+}
+
+// §5.25 Quit takes the loaded document away (its window, its menu, its icons) and keeps its state;
+// ticking it under Windows > Applications brings it back as it was. Restart drops its state and
+// starts it again: its init: runs anew.
+TEST(AriadneRuntime, QuitKeepsALoadedDocumentsStateAndRestartResetsIt) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({menubar({menu("File", {})}), fe_lab_mount()}));
+  rt.render();
+  rt.drain();
+  ASSERT_TRUE(pump_until(rt, [&] { return sval(app, "ui.demo.includes.fe_lab.seeded") == "1"; }));
+  cvc::state::instance(app)("ui.demo.includes.fe_lab.work").value("kept");
+  EXPECT_TRUE(mb.saw("begin_window:FE(closable)")) << mb.dump();
+
+  mb.pick = "Quit FE Lab";
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("begin_window:FE(closable)")) << mb.dump();
+  EXPECT_FALSE(mb.saw("begin_menu:FE Lab")) << mb.dump();
+  EXPECT_FALSE(mb.saw("toggle:FE")) << "its window is not listed while it is quit";
+  EXPECT_FALSE(mb.toggle_shown["FE Lab"]) << "unticked: quit";
+  EXPECT_EQ(sval(app, "ui.demo.includes.fe_lab.work"), "kept");
+
+  mb.click_toggle = "FE Lab"; // Windows > Applications > FE Lab
+  rt.render();
+  rt.drain();
+  mb.click_toggle.clear();
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_window:FE(closable)")) << mb.dump();
+  EXPECT_TRUE(mb.saw("begin_menu:FE Lab"));
+  EXPECT_EQ(sval(app, "ui.demo.includes.fe_lab.work"), "kept");
+
+  mb.pick = "Restart FE Lab";
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  rt.render();
+  rt.drain();
+  ASSERT_TRUE(pump_until(rt, [&] { return sval(app, "ui.demo.includes.fe_lab.seeded") == "1"; }));
+  EXPECT_TRUE(sval(app, "ui.demo.includes.fe_lab.work").empty()) << "its state went";
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_window:FE(closable)")) << mb.dump();
+}
+
+// §5.25 Quit in an isolated document (S1b): the application's actions run in the document's
+// group, so Quit kills them there (quit_app, on current_sched()), not on group 0, and the sweep
+// reaps them.
+TEST(AriadneIsolatedDocs, QuitKillsALoadedDocumentsActionsInItsGroup) {
+  cvc::app app;
+  isolate_documents(app, 2);
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  rt.set_channel_policy({}, {}, /*strict=*/true, /*quiet=*/true);
+  Widget frag = group({menubar({menu("Mesh", {menu_action("Remesh", R"S((begin
+                                    (state-set "remeshed" "started") (sleep 600)
+                                    (state-set "remeshed" "done")))S")})}),
+                       window_with_id("FE", "fe", true)});
+  Widget m = group({frag});
+  m.scope = "includes.fe_lab";
+  m.app_name = "FE Lab";
+  rt.set_root(group({menubar({menu("File", {})}), m}));
+  ASSERT_NE(rt.isolated_group(), nullptr) << rt.isolation_reason();
+  const auto frames_until = [&](auto pred) {
+    for (int frame = 0; frame < 200 && !pred(); ++frame) {
+      rt.render();
+      isolated_frame(app, rt);
+    }
+    return pred();
+  };
+  mb.pick = "Remesh";
+  rt.render();
+  isolated_frame(app, rt);
+  mb.pick.clear();
+  ASSERT_TRUE(frames_until(
+      [&] { return isolated_value(app, "ui.demo.includes.fe_lab.remeshed") == "started"; }));
+  cvc::state_exec::async_scheduler &sched = rt.isolated_group()->sched();
+  EXPECT_EQ(sched.process_count(), 1) << "the Remesh action, asleep";
+  mb.pick = "Quit FE Lab";
+  rt.render();
+  isolated_frame(app, rt);
+  mb.pick.clear();
+  EXPECT_TRUE(frames_until([&] { return sched.process_count() == 0; }))
+      << "Quit killed the action in the document's group";
+  EXPECT_EQ(isolated_value(app, "ui.demo.includes.fe_lab.remeshed"), "started");
+}
+
+// §5.25 a document with no menubar of its own still shows its loaded documents' menus: in the bar
+// it gets for its Windows menu, with their tray icons but no clock or bell of its own.
+// §5.25 two mounts of one document: each menu is told apart by its mount id.
+TEST(AriadneRuntime, TwoMountsOfOneDocumentAreToldApart) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  Widget a = fe_lab_mount();
+  Widget b = fe_lab_mount();
+  b.scope = "includes.fe_lab_2";
+  rt.set_root(group({menubar({menu("File", {})}), a, b}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_menu:FE Lab (fe_lab)")) << mb.dump();
+  EXPECT_TRUE(mb.saw("begin_menu:FE Lab (fe_lab_2)")) << mb.dump();
+}
+
+// §5.25 a repeated loaded document is an application per instance, "<name> <n>", each in its
+// instance's scope; its bar is not drawn where it is. Quit takes one instance away.
+TEST(AriadneRuntime, ARepeatedLoadedDocumentIsAnApplicationPerInstance) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  Widget m = fe_lab_mount();
+  m.repeat = "(int 2)";
+  m.scope = "includes.cam";
+  m.app_name = "Camera";
+  cvc::state::instance(app)("ui.demo.includes.cam.1.jobs").value("7");
+  rt.set_root(group({menubar({menu("File", {})}), m}));
+  rt.render();
+  EXPECT_EQ(mb.times("begin_menubar"), 1) << mb.dump();
+  EXPECT_LT(log_index(mb, "begin_menu:Camera 1"), log_index(mb, "begin_menu:Camera 2"))
+      << mb.dump();
+  EXPECT_EQ(mb.times("begin_menu:Mesh"), 2);
+  EXPECT_TRUE(mb.saw("tray_button:J|7|0")) << "instance 2's badge, read in its scope\n"
+                                           << mb.dump();
+  mb.pick = "Remesh"; // both instances' items carry the label: the first one's is picked
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  ASSERT_TRUE(
+      pump_until(rt, [&] { return !sval(app, "ui.demo.includes.cam.0.remeshed").empty(); }));
+  mb.pick = "Quit Camera 2";
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_menu:Camera 1")) << mb.dump();
+  EXPECT_FALSE(mb.saw("begin_menu:Camera 2")) << mb.dump();
+  EXPECT_EQ(mb.times("begin_window:FE(closable)"), 1) << "instance 2's window went";
+  EXPECT_FALSE(mb.toggle_shown["Camera 2"]);
+}
+
+// A document with two bars of its own: one clock and one bell, in the first; the loaded documents'
+// menus once, in the first too.
+TEST(AriadneRuntime, TwoBarsOfADocumentShareOneClockAndBell) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  rt.set_clock(true);
+  rt.set_wall_clock(five_past_two);
+  cvc::notification n;
+  n.text = "x";
+  cvc::notify(app, n);
+  rt.set_root(group(
+      {menubar({menu("File", {})}), menubar({menu("Edit", {}), tray_icon("E")}), fe_lab_mount()}));
+  rt.render();
+  EXPECT_EQ(mb.times("begin_menubar"), 2) << mb.dump();
+  EXPECT_EQ(mb.times("tray_button:14:05||0"), 1) << mb.dump();
+  EXPECT_EQ(mb.times("tray_menu:\xF0\x9F\x94\x94|1|0"), 1) << mb.dump();
+  EXPECT_EQ(mb.times("begin_menu:FE Lab"), 1) << mb.dump();
+  EXPECT_LT(log_index(mb, "begin_menu:FE Lab"), log_index(mb, "begin_menu:Edit"))
+      << "in the first bar";
+  EXPECT_TRUE(mb.saw("tray_button:E||0")) << "the second bar's own icon";
+}
+
+TEST(AriadneRuntime, ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  rt.set_clock(true);
+  rt.set_wall_clock(five_past_two);
+  cvc::state::instance(app)("ui.demo.includes.fe_lab.jobs").value("2");
+  rt.set_root(group({fe_lab_mount()}));
+  rt.render();
+  EXPECT_EQ(mb.times("begin_menubar"), 1) << mb.dump();
+  EXPECT_LT(log_index(mb, "begin_menu:FE Lab"), log_index(mb, "begin_menu:Windows")) << mb.dump();
+  EXPECT_TRUE(mb.saw("tray_button:J|2|0")) << mb.dump();
+  EXPECT_FALSE(mb.saw("tray_button:14:05||0")) << "not the document's bar: no clock";
+}
+
+// §5.22 joined to a relay, the clock's tooltip gives the relay's time too: this host's time plus
+// the offset its link measured (cvc/core/server_clock.h), with the offset and the round trip.
+TEST(AriadneRuntime, TheClocksTooltipGivesTheRelaysTime) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  rt.set_wall_clock(five_past_two);
+  rt.set_clock(true);
+  rt.set_root(group({menubar({menu("File", {})})}));
+  rt.render();
+  ASSERT_FALSE(mb.asked.empty());
+  EXPECT_EQ(mb.asked.back().tooltip.find('\n'), std::string::npos) << "no relay: the local time";
+  cvc::set_server_clock(app, 2500.0, 18.0, "wss://relay.test/room");
+  mb.log.clear();
+  rt.render();
+  ASSERT_FALSE(mb.asked.empty());
+  const std::string tip = mb.asked.back().tooltip;
+  EXPECT_NE(tip.find("\nwss://relay.test/room: 14:05:11 (+2.50 s, round trip 18 ms)"),
+            std::string::npos)
+      << tip;
+  cvc::clear_server_clock(app);
+  rt.render();
+  EXPECT_EQ(mb.asked.back().tooltip.find('\n'), std::string::npos) << "left: the local time";
+}
+
+TEST(AriadneRuntime, ADocumentPlacesOrTurnsOffTheTrayClock) {
+  {
+    cvc::app app;
+    Runtime rt(app, "ui.demo");
+    TrayBackend mb;
+    rt.set_backend(&mb);
+    rt.set_wall_clock(five_past_two);
+    rt.set_clock(true);
+    // `- clock` among the tray's icons: there, not last.
+    rt.set_root(group({menubar({tray_clock(), tray_icon("W")})}));
+    rt.render();
+    EXPECT_LT(log_index(mb, "tray_button:14:05||0"), log_index(mb, "tray_button:W||0"))
+        << mb.dump();
+    EXPECT_EQ(mb.times("tray_button:14:05||0"), 1);
+  }
+  {
+    cvc::app app;
+    Runtime rt(app, "ui.demo");
+    TrayBackend mb;
+    rt.set_backend(&mb);
+    rt.set_wall_clock(five_past_two);
+    rt.set_clock(true);
+    // `clock: false` at the top level: none, whatever the host's default.
+    rt.set_root(group({menubar({tray_icon("W")}), tray_clock(false)}));
+    rt.render();
+    EXPECT_FALSE(mb.saw("tray_button:14:05||0")) << mb.dump();
+  }
 }
 
 // ── Phase-2 PR6: cvc::ariadne::stream DSL surface (stream-open/stream-info/stream-close) ──

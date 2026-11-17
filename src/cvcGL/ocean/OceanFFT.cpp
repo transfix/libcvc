@@ -32,7 +32,7 @@ constexpr float kG = 9.80665f;
 // The vertex shader is OceanButterfly.cpp's (kOceanQuadVS), as are the butterfly passes.
 
 // ── time evolution -> buffer 0 (Dx+iDz, Dy+iDyDx) ────────────────────────────
-const char *kTime0FS =
+const char *const kTime0FS =
     "//VTK::System::Dec\n"
     "uniform sampler2D uH0;\n"
     "uniform int uN;\n"
@@ -62,7 +62,7 @@ const char *kTime0FS =
     "}\n";
 
 // ── time evolution -> buffer 1 (DyDz+iDxDx, DzDz+iDxDz) for the foam Jacobian ─
-const char *kTime1FS =
+const char *const kTime1FS =
     "//VTK::System::Dec\n"
     "uniform sampler2D uH0;\n"
     "uniform int uN;\n"
@@ -89,28 +89,30 @@ const char *kTime1FS =
     "}\n";
 
 // ── assemble: permute, extract real fields, choppy displacement + Jacobian ───
-const char *kAssembleFS = "//VTK::System::Dec\n"
-                          "uniform sampler2D uBuf0, uBuf1;\n"
-                          "uniform int uN;\n"
-                          "uniform float uLambda;\n"
-                          "//VTK::Output::Dec\n"
-                          "void main(){\n"
-                          "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
-                          "  float perm = (((c.x + c.y) & 1) == 0) ? 1.0 : -1.0;\n"
-                          "  vec4 b0 = texelFetch(uBuf0, c, 0) * perm;\n"
-                          "  vec4 b1 = texelFetch(uBuf1, c, 0) * perm;\n"
-                          "  float Dx = b0.x, Dz = b0.y, Dy = b0.z;\n"
-                          "  float DxDx = b1.y, DzDz = b1.z, DxDz = b1.w;\n"
-                          "  float lx = uLambda*DxDx, lz = uLambda*DzDz, lxz = uLambda*DxDz;\n"
-                          "  float jac = (1.0+lx)*(1.0+lz) - lxz*lxz;\n"
-                          "  gl_FragData[0] = vec4(uLambda*Dx, Dy, uLambda*Dz, jac);\n"
-                          "}\n";
+const char *const kAssembleFS =
+    "//VTK::System::Dec\n"
+    "uniform sampler2D uBuf0, uBuf1;\n"
+    "uniform int uN;\n"
+    "uniform float uLambda;\n"
+    "//VTK::Output::Dec\n"
+    "void main(){\n"
+    "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
+    "  float perm = (((c.x + c.y) & 1) == 0) ? 1.0 : -1.0;\n"
+    "  vec4 b0 = texelFetch(uBuf0, c, 0) * perm;\n"
+    "  vec4 b1 = texelFetch(uBuf1, c, 0) * perm;\n"
+    "  float Dx = b0.x, Dz = b0.y, Dy = b0.z;\n"
+    "  float DxDx = b1.y, DzDz = b1.z, DxDz = b1.w;\n"
+    "  float lx = uLambda*DxDx, lz = uLambda*DzDz, lxz = uLambda*DxDz;\n"
+    "  float jac = (1.0+lx)*(1.0+lz) - lxz*lxz;\n"
+    "  gl_FragData[0] = vec4(uLambda*Dx, Dy, uLambda*Dz, jac);\n"
+    "}\n";
 
-const char *kSelfTestFS = "//VTK::System::Dec\n"
-                          "uniform sampler2D uSrc;\n"
-                          "//VTK::Output::Dec\n"
-                          "void main(){ gl_FragData[0] = texelFetch(uSrc, ivec2(gl_FragCoord.xy), "
-                          "0) + vec4(1.0,2.0,3.0,4.0); }\n";
+const char *const kSelfTestFS =
+    "//VTK::System::Dec\n"
+    "uniform sampler2D uSrc;\n"
+    "//VTK::Output::Dec\n"
+    "void main(){ gl_FragData[0] = texelFetch(uSrc, ivec2(gl_FragCoord.xy), "
+    "0) + vec4(1.0,2.0,3.0,4.0); }\n";
 
 } // namespace
 

@@ -48,6 +48,8 @@ public:
   // The height and velocity share the sea's source point (sea_surface::source_memo).
   double height_with(double x, double y, double t, surface_memo &memo) const override;
   vec3 velocity_with(const vec3 &p, double t, surface_memo &memo) const override;
+  // The sea's fields for time t held (sea_surface::at_time).
+  std::shared_ptr<const fluid_surface> at(double t, const parallel_run &run) const override;
 
   const cvc::ocean::sea_surface &sea() const noexcept { return *_sea; }
 

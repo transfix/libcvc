@@ -33,6 +33,7 @@
 #ifndef CVC_VOLREN_RAYCASTER_CUDA_H
 #define CVC_VOLREN_RAYCASTER_CUDA_H
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cvc/core/types.h>
@@ -40,6 +41,7 @@
 #include <cvc/volren/raycaster.h>
 #include <cvc/volren/types.h>
 #include <memory>
+#include <mutex>
 
 namespace cvc {
 namespace volren {
@@ -82,9 +84,9 @@ inline constexpr int max_iso_hits_per_ray = 32;
 // covers the scenes this renderer is actually driven with (VolRenNode's 3x3
 // instancing grid tops out at 9) with headroom, not because of occupancy.
 inline constexpr int max_volumes = 16;
-// Default byte budget of the resident device volume cache.  One 512^3 UShort
+// Default byte budget of each device's resident volume cache.  One 512^3 UShort
 // volume is 256 MB, so this holds a couple of large volumes or a whole grid of
-// instanced small ones; raycast_cuda_set_cache_budget() overrides it.
+// instanced small ones; cuda_device_caches::set_budget() overrides it.
 inline constexpr std::size_t default_cache_bytes = std::size_t(1) << 29; // 512 MB
 // Light-view shadow maps carried by one device render.  The kernel holds their
 // light-view FRAMES by value in its parameter block (~128 bytes each, well
@@ -339,27 +341,87 @@ frame raycast_cuda(raycast_cuda_cache &cache, const raycast_cuda_request &req);
 // therefore report voxels AND shadow rasters, and the two compete for one
 // budget under one LRU.
 //
-// Entries are evicted least-recently-used once the resident total would exceed
-// the budget; an entry in use by an in-flight render is never evicted.
+// Each CUDA device has a cache of its own with a budget of its own: entries are
+// evicted least-recently-used once that device's resident total would exceed
+// it, and an entry in use by an in-flight render is never evicted.
 //
-// ONE CACHE PER APP: every raycaster of a cvc::app shares that app's
-// (raycast_cuda_cache_of), and it goes with the app; two apps never see each
-// other's blocks, budget or counters.  Without CUDA every call below is a
+// WHO SHARES THEM: a cuda_device_caches holds one cache per device.  Every app
+// starts with a cuda_device_caches of its own (raycast_cuda_cache_of), so two
+// apps never see each other's blocks, budget or counters -- unless the host
+// hands one cuda_device_caches to both (raycast_cuda_cache::share), and then
+// the apps on a device share its blocks: a volume one app staged is not
+// uploaded again for the other.  No process-wide cache exists; the host that
+// owns the device decides who shares it.  Without CUDA every call below is a
 // no-op that reports 0.
-class raycast_cuda_cache {
+class cuda_device_caches {
 public:
-  static constexpr const char *app_slot = "cvc.volren.cuda_volume_cache";
-  raycast_cuda_cache();
+  cuda_device_caches();
   // Frees every device block (errors swallowed: the context may be gone).
-  ~raycast_cuda_cache();
-  raycast_cuda_cache(const raycast_cuda_cache &) = delete;
-  raycast_cuda_cache &operator=(const raycast_cuda_cache &) = delete;
+  ~cuda_device_caches();
+  cuda_device_caches(const cuda_device_caches &) = delete;
+  cuda_device_caches &operator=(const cuda_device_caches &) = delete;
 
+  // Each device's budget, the ones used so far and any used later.
   void set_budget(std::size_t bytes);
   std::size_t budget();
   // Bytes currently resident across every device (0 without CUDA).
   std::size_t resident();
-  // Bytes actually pushed host-to-device since the cache was made.  This counts
+  // Bytes pushed host-to-device since these caches were made, every device.
+  std::uint64_t uploaded();
+  // Retire any resident block staged from `host`, on every device.
+  void forget_host(const void *host);
+  // Free every cached block not in use by an in-flight render.
+  void clear();
+
+  // A content-generation stamp (raycaster::invalidate_device_volume) unique
+  // among the apps sharing these caches.  The stamps must come from the caches
+  // they are compared in: two apps drawing from counters of their own could
+  // stamp different contents of one shared buffer with the same number, and
+  // the second would be served the first's block.
+  std::uint64_t next_generation() noexcept {
+    return _generations.fetch_add(1, std::memory_order_relaxed) + 1;
+  }
+  // How many stamps have been drawn (0 until the first).
+  std::uint64_t generations() const noexcept {
+    return _generations.load(std::memory_order_relaxed);
+  }
+
+  struct impl; // raycast.cu's; null without CUDA
+  impl *get() { return _impl.get(); }
+
+private:
+  std::unique_ptr<impl> _impl;
+  std::atomic<std::uint64_t> _generations{0};
+};
+
+// An app's handle on the device caches its renders use: its own, or the ones
+// the host shared with it.  The calls below act on those caches, so on caches
+// shared with other apps they report and set what all of them share.
+class raycast_cuda_cache {
+public:
+  static constexpr const char *app_slot = "cvc.volren.cuda_volume_cache";
+  raycast_cuda_cache(); // device caches of the app's own
+  ~raycast_cuda_cache();
+  raycast_cuda_cache(const raycast_cuda_cache &) = delete;
+  raycast_cuda_cache &operator=(const raycast_cuda_cache &) = delete;
+
+  // Render from now on with `caches`, shared with whatever other apps the host
+  // hands them to (pass another app's caches() to share that app's).  Call it
+  // before the app's first render: it throws std::logic_error once the app's
+  // caches have staged a block or drawn a content-generation stamp, because
+  // the stamps its raycasters hold came from those caches' counter and mean
+  // nothing in another's.  Throws std::invalid_argument for null.
+  void share(std::shared_ptr<cuda_device_caches> caches);
+  // The caches this app's renders use.  A render holds them for its length, so
+  // a share() during one does not pull blocks out from under it.
+  std::shared_ptr<cuda_device_caches> caches() const;
+
+  // These act on caches(); see cuda_device_caches.
+  void set_budget(std::size_t bytes);
+  std::size_t budget();
+  // Bytes currently resident across every device (0 without CUDA).
+  std::size_t resident();
+  // Bytes actually pushed host-to-device since the caches were made.  This counts
   // EVERY block the resident cache stages, not only voxels: shadow-map depth
   // rasters and deep profiles share the same cache and the same counter.  A
   // render that only moved the camera adds nothing to it -- which is the whole
@@ -384,11 +446,9 @@ public:
   // without a device; never throws.
   void clear();
 
-  struct impl; // raycast.cu's; null without CUDA
-  impl *get() { return _impl.get(); }
-
 private:
-  std::unique_ptr<impl> _impl;
+  mutable std::mutex _mutex; // guards _caches: share() may race a render
+  std::shared_ptr<cuda_device_caches> _caches;
 };
 
 // `app`'s cache, made at its first use (raycaster.cpp).

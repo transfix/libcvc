@@ -125,6 +125,20 @@
 // A call back into the guest from inside one of its own host calls, made in the same process, is
 // refused with a RecursionError.
 //
+// Clients' guests (§6.3, §8.6; G4): client_activation runs a module a relay's client sent (arisrvx,
+// ServerDocument::run_client_guest) as that client's program. Its bytes must be a binary module
+// with no start function (a start would run at instantiation, to its end, on the start's own 100M
+// gas); anything else is refused before a step. It is compiled on the app's pool, off the relay's
+// loop: the activation isn't ready() until then (the relay holds it, and one started earlier
+// yields its frames), and the last 16 clients' modules are kept compiled, so the same bytes sent
+// again aren't compiled again. Its instance is its own, made in
+// its first slice and gone with it, under the caller's memory cap (ClientCode::max_memory, never
+// above ariadne.limits.wasm_max_memory). Its _initialize and each ari_alloc get 1M gas each, a
+// thousand steps, charged to its program. Its call, its state imports and its data reads reach
+// only the process it runs in, which the relay chroots and narrows; data.write is refused (a
+// client's program makes no host object). WASI is the stubs alone, argv just "client <pid>". It
+// runs `entry` once: no ari_init, no hooks, no other export.
+//
 // Limits: a slice is ariadne.limits.wasm_slice_steps (64) DSL steps at
 // ariadne.limits.wasm_gas_per_step (1000) units of gas each, what the gas pass counts (meter.h),
 // the same natively and in the browser. What a slice uses is charged as steps to the process it
