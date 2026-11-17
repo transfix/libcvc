@@ -38,6 +38,7 @@
 #include <cstdint>
 #include <cvc/ariadne/bind.h> // live node params: read_or_seed / read_or / resolve_bind
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/scene_wind.h> // the scene's one wind (O14)
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
 #include <cvc/core/sliced_task.h> // a storm deck's build: on the pool, or sliced between frames
@@ -186,6 +187,9 @@ struct ForestRT {
   cvc::lsys::forest_wind wind;                            // current wind re-pose data
   std::string sig; // last structural signature (regen trigger)
   cvc::app *app = nullptr;
+  // The scene's wind (scene_wind.h, O14): its keys' root, and where the way the trees lean now is
+  // published (forest.lean_dir, degrees; empty without a scene wind).
+  std::string prefix, leanKey, leanNow;
 };
 // Read the live forest params from the bound keys (falling back to the authored defaults).
 cvc::lsys::forest_params read_live_fp(ForestRT &rt) {
@@ -269,6 +273,8 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
   rt->k.branches = seed_key(app, pref, n, "forest.branches", rt->base.branches);
   rt->k.pine_scale = seed_key(app, pref, n, "forest.pine_scale", rt->base.pine_scale);
   rt->k.wind = seed_key(app, pref, n, "forest.wind", windDef);
+  rt->prefix = pref;
+  rt->leanKey = ari::resolve_bind(pref, ari::node_key(n, "forest.lean_dir"));
 
   // Grow the initial forest — ALWAYS with wind records, so enabling wind live later works.
   const cvc::lsys::forest_params fp0 = read_live_fp(*rt);
@@ -331,12 +337,31 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
       }
     }
     // Wind re-pose every frame (world/sim time, so Paused freezes the sway). windLive == 0 holds
-    // the bind pose; the branchy trees have no sway records and sit untouched.
+    // the bind pose; the branchy trees have no sway records and sit untouched. With a scene wind
+    // (O14) the pines lean downwind in it and sway about the lean, harder in a stronger wind and
+    // in the gusts at each tree (the one gust field the water and the physics read).
+    const std::optional<ari::SceneWind> sw = ari::scene_wind_set(*rt->app, rt->prefix);
+    const std::string lean = sw ? std::to_string(sw->dir) : std::string();
+    if (lean != rt->leanNow) {
+      rt->leanNow = lean;
+      cvc::app &app = *rt->app;
+      cvc::state::instance(app)(rt->leanKey).value(lean);
+    }
     if (windLive != 0.0 && !rt->wind.trees.empty()) {
       const double t = rt->app->world_clock().t();
       rt->workW = rt->woodBind;
       rt->workN = rt->needleBind;
-      cvc::lsys::repose_forest(rt->wind, t, windLive, rt->workW, rt->workN);
+      if (sw) {
+        constexpr double kRefWind = 9.0; // m/s: the authored sway's wind
+        const double rad = sw->dir * 3.14159265358979323846 / 180.0;
+        const cvc::algo::gust_frame gf = cvc::algo::gust_frame_at(sw->state(), t);
+        cvc::lsys::repose_forest_in_wind(
+            rt->wind, t, windLive * sw->speed / kRefWind, std::cos(rad), std::sin(rad),
+            [&gf](double x, double y) { return cvc::algo::wind_gust(gf, x, y); }, rt->workW,
+            rt->workN);
+      } else {
+        cvc::lsys::repose_forest(rt->wind, t, windLive, rt->workW, rt->workN);
+      }
       w->updateVertices(rt->workW);
       if (auto nn = rt->needle.lock())
         nn->updateVertices(rt->workN);
@@ -951,6 +976,9 @@ struct SkyRT {
   // F1, the live sky: coverage and the wind's heading (sky.*), and the sun: the light rig's key
   // (lighting.key_azimuth / key_elevation) when the scene has one, else the props.
   std::string coverageKey, windKey, sunAzKey, sunElKey;
+  // The scene's wind (scene_wind.h, O14): its keys' root, and where the deck's drift now is
+  // published (sky.drift_az, its heading in degrees; sky.drift_speed, m/s).
+  std::string prefix, driftAzKey, driftSpeedKey, driftNow;
   // F2, the storms: the deck's heights (sky.base / sky.top), its darkness (sky.darkness) and the
   // storms over it (sky.storms, "x y r intensity; ..." in world metres, as a weather node writes).
   std::string baseKey, topKey, darkKey, stormsKey;
@@ -1587,6 +1615,9 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
   rt->oroKey = seed_key(app0, pref, n, "sky.orographic", p.orographic);
   rt->coverageKey = seed_key(app0, pref, n, "sky.coverage", p.coverage);
   rt->windKey = seed_key(app0, pref, n, "sky.wind_az", p.wind_az);
+  rt->prefix = pref;
+  rt->driftAzKey = ari::resolve_bind(pref, ari::node_key(n, "sky.drift_az"));
+  rt->driftSpeedKey = ari::resolve_bind(pref, ari::node_key(n, "sky.drift_speed"));
   rt->baseKey = seed_key(app0, pref, n, "sky.base", p.base);
   rt->topKey = seed_key(app0, pref, n, "sky.top", p.top);
   rt->darkKey =
@@ -1621,11 +1652,29 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     // s), the wind's heading, and the sun from the light rig. A new sun relights the maps and
     // re-composites the shade and the far clouds at once.
     L.set_coverage(read_key(app, r.coverageKey, L.params().coverage));
-    if (const double w = read_key(app, r.windKey, L.params().wind_az); w != L.params().wind_az) {
+    // The wind: the scene's one wind when it has one (O14: its heading, and its speed at the
+    // deck's base through the profile the physics reads, times the gusts' mean, which the whole
+    // deck drifts with), else the node's own sky.wind_az at CLOUD_DRIFT.
+    const std::optional<ari::SceneWind> sw = ari::scene_wind_set(app, r.prefix);
+    if (const double w = sw ? sw->azimuth() : read_key(app, r.windKey, L.params().wind_az);
+        w != L.params().wind_az) {
       constexpr double kPi = 3.14159265358979323846;
       L.set_wind(w);
       r.windX = std::sin(w * kPi / 180.0);
       r.windY = -std::cos(w * kPi / 180.0);
+    }
+    const double driftSpeed =
+        sw ? sw->speed * cvc::algo::wind_profile(L.params().base) *
+                 cvc::algo::wind_gust_mean(cvc::algo::gust_frame_at(sw->state(), t))
+           : CLOUD_DRIFT;
+    { // published when it changes (the speed to a tenth of a m/s), not every frame
+      const double shown = std::round(driftSpeed * 10.0) / 10.0;
+      if (const std::string now = std::to_string(L.params().wind_az) + "|" + std::to_string(shown);
+          now != r.driftNow) {
+        r.driftNow = now;
+        cvc::state::instance(app)(r.driftAzKey).value(L.params().wind_az);
+        cvc::state::instance(app)(r.driftSpeedKey).value(shown);
+      }
     }
     {
       const double az = read_key(app, r.sunAzKey, L.params().sun_az);
@@ -1709,7 +1758,7 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
         }
       }
     }
-    const double ds = dt * CLOUD_DRIFT * read_key(app, r.driftKey, 1.0);
+    const double ds = dt * driftSpeed * read_key(app, r.driftKey, 1.0);
     r.driftX += ds * r.windX;
     r.driftY += ds * r.windY;
     r.morph += dt / CLOUD_MORPH_S * read_key(app, r.morphKey, 1.0);

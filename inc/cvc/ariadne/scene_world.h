@@ -66,6 +66,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cvc/core/world_clock.h>
+#include <cvc/physics/field.h>
 #include <cvc/physics/types.h>
 #include <functional>
 #include <map>
@@ -285,6 +286,16 @@ public:
   // The boat nodes' runtimes, in the document's order, and one by its node's id (null for none).
   const std::vector<std::unique_ptr<BoatRuntime>> &boats() const;
   BoatRuntime *boat(const std::string &node);
+  // Take on the scene's wind (scene_wind.h, O14): seed its keys from `scene: wind:` and, while
+  // wind.speed is set under bind_prefix, keep a flow field of air (1.225 kg/m^3, C_d 1) whose
+  // velocity is that wind (cvc::physics::wind_flow, its profile over the document's wind base)
+  // in the world, so every dynamic body in the air is pushed by it and a vehicle's aero drag
+  // reads it; a kinematic or model-driven vehicle feels it through WorldVehicles::set_wind.
+  // sync() follows the keys (a change swaps the field). from_scene does this itself; a renderer
+  // that build()s the world calls it.
+  void bind_wind(const Scene &scene, const std::string &bind_prefix);
+  // The wind's flow field now (invalid without a scene wind).
+  cvc::physics::field_id wind_field() const;
 
   // The warnings follow()'s syncs gathered since the last call.
   std::vector<std::string> take_warnings();
@@ -293,6 +304,8 @@ private:
   SceneWorld();
   // The scene.world keys, when the world on changed since the last time (or `force`).
   void publish_worlds(bool force);
+  // The wind's field after the scene wind's keys (bind_wind).
+  void sync_wind();
   struct impl;
   std::unique_ptr<impl> _impl;
 };

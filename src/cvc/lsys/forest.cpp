@@ -567,5 +567,53 @@ void repose_forest(const forest_wind &w, double t, double wind_scale, std::vecto
   }
 }
 
+void repose_forest_in_wind(const forest_wind &w, double t, double strength, double dir_x,
+                           double dir_y, const std::function<double(double, double)> &gust,
+                           std::vector<double> &wood_buf, std::vector<double> &needle_buf) {
+  // The world axis a downwind lean turns about: across the wind, horizontal (z tilts toward the
+  // wind's way under a positive turn about it).
+  const double ax = -dir_y, ay = dir_x;
+  auto put = [](std::vector<double> &buf, int off, const vec3 &v) {
+    if (static_cast<std::size_t>(off) * 3 + 2 < buf.size()) {
+      buf[off * 3] = v.x;
+      buf[off * 3 + 1] = v.y;
+      buf[off * 3 + 2] = v.z;
+    }
+  };
+  for (const forest_wind::tree &tree : w.trees) {
+    if (tree.mods.empty())
+      continue;
+    const Mat4 root = from_array(tree.mods.front().hang);
+    const double g = gust ? gust(root.at(0, 3), root.at(1, 3)) : 1.0;
+    const double a = tree.sway * strength * g * (0.6 + 0.4 * std::sin(1.3 * t + tree.phase));
+    std::vector<Mat4> world(tree.mods.size());
+    for (std::size_t i = 0; i < tree.mods.size(); ++i) {
+      const forest_wind::mod_rec &m = tree.mods[i];
+      const Mat4 hang = from_array(m.hang);
+      const Mat4 frame =
+          m.parent < 0 ? hang : mMul(world[static_cast<std::size_t>(m.parent)], hang);
+      Mat4 local = hang;
+      if (m.swayer) {
+        // The world axis in this module's frame: its rotation's transpose times the axis.
+        double lx = frame.at(0, 0) * ax + frame.at(1, 0) * ay;
+        double ly = frame.at(0, 1) * ax + frame.at(1, 1) * ay;
+        double lz = frame.at(0, 2) * ax + frame.at(1, 2) * ay;
+        const double len = std::sqrt(lx * lx + ly * ly + lz * lz);
+        if (len > 1e-12) {
+          lx /= len, ly /= len, lz /= len;
+          local = mMul(hang, mRot(a, lx, ly, lz));
+        }
+      }
+      world[i] = (m.parent < 0) ? local : mMul(world[static_cast<std::size_t>(m.parent)], local);
+      int wo = m.w_off;
+      for (const vec3 &p : m.local_wood)
+        put(wood_buf, wo++, xform(world[i], p));
+      int no = m.n_off;
+      for (const vec3 &p : m.local_needle)
+        put(needle_buf, no++, xform(world[i], p));
+    }
+  }
+}
+
 } // namespace lsys
 } // namespace cvc

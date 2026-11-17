@@ -17,6 +17,7 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/physics/backend.h` | `backend`, capability bits, `available_backends()` |
 | `cvc/physics/world.h` | `world_config`, `world`, `contact_event`, `ray_hit`, `step_report` |
 | `cvc/physics/field.h` | `field` (a `cvc::volume` as water, snow or wind), `field_load`, `water_sample` (`world::water_at`) |
+| `cvc/physics/flow_velocity.h` | `flow_velocity`, a flow field's velocity in space and time (`field::wind`), and `wind_flow`, the scene's wind: `cvc::algo`'s gusts and height profile (below, and OCEAN-AND-WEATHER-ROADMAP.md E5, O14) |
 | `cvc/physics/fluid_surface.h` | `fluid_surface`, a fluid field's free surface (its level, waves and water velocity, read at `world::field_time()`); `still_surface`, `wave_train_surface` (linear Airy trains). A field reads a cell's height and velocity with `height_with` / `velocity_with` and a `surface_memo` it owns, so a surface can share work between the two reads |
 | `cvc/physics/hull.h` | `hull_mesh`, `box_hull()`: a boat's hull, a closed triangle list apart from the collision shape, that a fluid pushes on triangle by triangle (hydrostatic pressure split at the waterline, ITTC-57 friction, pressure drag, slamming) in place of the body's sample cells |
 | `cvc/physics/immersion.h` | `immersion_body` (a body's outline as the water sees it: its box, sphere or convex hull, or its `hull_mesh`), `immersion_water` (a fluid field's surface, time and box), `immersion_grid`, `add_immersion()`: a body's columns of immersed depth zeta over a grid window's cells, from its shape, its pose and the water, as the field step immerses it. The wake windows' sources (OCEAN-AND-WEATHER-ROADMAP.md C2, O9), computable without a world (a renderer, a client from a replicated pose); the same bits on every platform |
@@ -219,9 +220,69 @@ The physics headers stay standard-library only by forward-declaring the two type
   before. `restore()` refuses a world whose boats differ. `PhysicsBoat.CrossPlatformGoldenHash`
   pins a boat under way and turning on a swell (`bb8e1b22f58136b2`, measured on Windows MSVC; to
   be confirmed by CI on Linux and macOS).
+- **Winds:** a flow field's `wind` (below) is hashed as a free surface is: its `digest()` goes into
+  the section after the bodies with the field time, so `state_hash()` covers the wind, and
+  `restore()` refuses a world whose winds differ from the state's. A world without winds or free
+  surfaces saves and hashes exactly as before. `PhysicsField.TheSceneWindIsTheSameOnEveryPlatform`
+  pins a `wind_flow`'s digest (`c7ec24178041550e`) and its velocities at points and times
+  (`581744564ad471ef`), measured on Windows MSVC; to be confirmed by CI on Linux and macOS.
 - **Restoring:** `save()` returns the state as bytes. `restore()` takes them on a world holding the
   same bodies, created in the same order, with the same materials. A restored world continues
   exactly as the original did.
+
+### The wind: a flow field's `flow_velocity`
+
+```cpp
+#include <cvc/physics/field.h>          // flow_velocity.h with it
+
+cvc::physics::field air;
+air.kind = cvc::physics::field_kind::flow;
+air.drag_coefficient = 1.0;
+air.wind = std::make_shared<cvc::physics::wind_flow>(
+    cvc::algo::wind_state{15.0, 1.5708, 0.25}, // m/s 10 m up, toward +y, gustiness
+    0.0);                                      // the ground's or the water's level
+const cvc::physics::field_id id = w.add_field(air);
+w.set_field_time(t);                           // or follow(clock): the time the wind is read at
+```
+
+- **The hook.** `field::wind` (a flow only) is a `flow_velocity`: `velocity(p, t)` in m/s and a
+  `digest()` of everything it depends on. It replaces the flow's velocity volumes. It must be
+  deterministic (`det::` maths, no libm) and immutable once a field holds it; `set_field` with
+  another changes the wind.
+- **No volume.** A flow with a wind may leave `volume` empty: it is then air of 1.225 kg/m³
+  everywhere (10⁷ m each way), the scene-wide wind. With a volume it blows in that box only, at
+  the volume's density.
+- **What it pushes.** Every dynamic body, with the flow's quadratic drag cell by cell,
+  ½ ρ C_d a |u| u, u the wind minus the cell's velocity and a the cell's share of the body's area
+  across u, so torques follow.
+- **Read once per body.** A step costs O(bodies) calls into the hook, not one per cell. The hook
+  says how: its velocity is `reference(p, t)` times `profile(p.z)`, and the flow fills only the
+  space above `base()` (the defaults: `velocity()` itself, at every height, everywhere). The step
+  reads `reference()` at the body's centre of mass at `world::field_time()` (the gusts vary over
+  tens of metres) and `profile()` at nine heights from the base (or the body's bottom) to its top,
+  closer together near the bottom, and a cell's wind is the reference times the profile
+  interpolated at its height. A cell is clipped to the base as to a free surface, so a floating
+  body feels the wind on its part above the water only. The air does not count in
+  `field_load::immersed_volume`.
+- **Vehicles.** A vehicle's chassis is not dragged by flow fields; its own aero drag reads the
+  wind's `velocity()` at its centre of mass (`vehicle_desc::drag_coefficient`, `frontal_area`),
+  so a car feels a crosswind as `aero_force` and `vehicle_state::air_velocity`.
+- **`wind_flow`** is the scene's wind of `cvc/algo/wind_field.h`: the mean wind (`wind_state`:
+  speed 10 m up, direction in radians from +x toward +y, gustiness) times the gust factor at
+  (x, y, t), times `wind_profile(z − base_z)`, horizontal. The profile is the open surface layer's
+  power law, (h / 10)^(1/7), linear below 0.1 m, held above 500 m, 0 at and below `base_z`: 0.52
+  of the 10 m wind at 0.1 m, 0.72 at 1 m, 1.26 at 50 m. The water, the clouds and the trees read
+  the same gusts (OCEAN-AND-WEATHER-ROADMAP.md E3, E5).
+- **Measured** (`physics_field_test`, `physics_vehicle_test`):
+  - a 1 kg ball 0.5 m in radius, 10 m up in a 10 m/s wind (C_d 0.5, no gravity), reaches
+    8.285 m/s downwind in 2 s, against 8.279 m/s on the drag curve;
+  - a floating crate, 1 × 1 × 0.5 m at density 500, in a 10 m/s wind drifts 0.154 m/s on the
+    water's drag alone, against 0.156 m/s where the wind's drag on its top half balances the
+    water's on its bottom half; with the water's damping at 1e4 N s/m⁴, 0.0013 m/s;
+  - a Humvee at 25 m/s in a 15 m/s crosswind is pushed 406 N aside (0.15 m/s²), the air at its
+    centre of mass, 0.75 m up, 10.4 m/s;
+  - the state hash moves with the wind, a world without one hashes as before, and `restore()`
+    refuses another wind.
 
 ### Threads
 
@@ -330,7 +391,8 @@ model rolls over the world's bodies. The chassis frame is x forward, y left, z u
   terrain cell or mesh face under it, the table every plant reads.
 - **Resistance**, applied to the chassis each step from the last step's wheels:
   - aero, −½ ρ C_d A |u| u, with u relative to a flow field's wind where one covers the chassis
-    (a vehicle's chassis is not dragged by flow fields otherwise);
+    (a vehicle's chassis is not dragged by flow fields otherwise), read at its centre of mass at
+    the field time, a `flow_velocity`'s where the flow has one (the wind, above);
   - rolling, C_rr times each wheel's load, with C_rr from the ground material's
     `rolling_resistance` (the vehicle's own when the material has none).
 - **Snow, mud and sand.** In a medium field (`field.h`), a wheel sinks to the rigid-wheel Bekker

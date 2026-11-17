@@ -34,6 +34,7 @@ namespace cvc {
 class app;
 namespace physics {
 class world;
+class flow_velocity;
 }
 namespace nav {
 struct world_grid;
@@ -185,6 +186,11 @@ struct entity_info {
   double speed = 0.0;                          // m/s along its heading
   double power_kw = 0.0, energy_wh = 0.0, wh_per_km = 0.0, distance = 0.0;
   double wheel_load = 0.0, aero_force = 0.0; // N: the wheels' push on the ground, the drag
+  // N, world x and y: the scene wind's push on it, its share of the air's drag (the drag in the
+  // moving air less the drag in still air at the same speed). A jolt vehicle's aero drag reads the
+  // wind in physics; a kinematic or model-driven one's drive is pushed by it (set_wind). 0 without
+  // a wind.
+  double wind_fx = 0.0, wind_fy = 0.0;
   int gear = 0;
   double rpm = 0.0, throttle = 0.0, brake = 0.0;
   double vx = 0.0, vy = 0.0;         // m/s, the chassis's velocity in the world
@@ -322,6 +328,16 @@ public:
   // server document's program steers the entities of the worlds its clients run. "" none.
   void set_intents_key(std::string key);
   const std::string &intents_key() const;
+
+  // The scene's wind (scene_wind.h, O14), or null. A jolt vehicle feels it in physics already
+  // (its aero drag reads the air's velocity, the world's wind field). The kinematic plant (nav's
+  // bicycle and a kinematic box) and the dynamic models (their own integrators, the box following
+  // them) feel no field, so each navigator tick adds the wind's drag on each of their vehicles to
+  // its drive, as an intent's force is added (cvc::nav::ext_force, steering too):
+  // 1/2 rho C_d A |u| u over its mass, u the wind at its chassis minus its velocity, with its
+  // vehicle_desc's air density, drag coefficient and frontal area. So a crosswind pushes it
+  // aside and its navigator steers back against it. Costs a wind read per vehicle per tick.
+  void set_wind(std::shared_ptr<const physics::flow_velocity> wind);
 
   // Read the request keys: the selected archetype and settings (its keys follow), a spawn, a
   // removal, a clear.

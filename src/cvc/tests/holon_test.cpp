@@ -1414,3 +1414,69 @@ TEST(HolonRulesTest, GravityIsThePhysicsSections) {
   run(server, 60);
   EXPECT_NEAR(server.state("A").position.z, 5.0 - 0.5 * 1.62 * 0.25, 0.02);
 }
+
+// ── the room's wind (world_physics' wind, O14) ─────────────────────────────────────────────
+
+// Without physics an avatar is kinematic: it holds its ground in a breeze (its drag under what its
+// controller pushes with) and slides downwind in a hurricane, the server and the client's
+// prediction alike. (The default person's middle is 0.85 m up, where the wind is 0.70 of its 10 m
+// speed; an 840 N walker holds to about 40 m/s there, about 57 m/s at 10 m.)
+TEST(HolonTest, KinematicAvatarsHoldInABreezeAndDriftInAGale) {
+  auto run = [](double speed) {
+    holon_config cfg;
+    cfg.rules.physics.wind_speed = speed;
+    cfg.rules.physics.wind_dir = 0.0;
+    holon server(holon_role::server, cfg);
+    holon client(holon_role::client, cfg);
+    server.add_participant("A");
+    client.add_participant("A", /*local=*/true);
+    const double dt = server.clock().fixed_dt();
+    for (int i = 0; i < 120; ++i) { // 1 s, standing still
+      server.set_intent("A", avatar_intent{});
+      client.set_intent("A", avatar_intent{});
+      server.advance(dt);
+      client.advance(dt);
+      client.apply_authoritative("A", server.state("A"), server.tick());
+    }
+    expect_pos_bit_eq(client.state("A").position, server.state("A").position);
+    return server.state("A").position;
+  };
+  const vec3 breeze = run(9.0), gale = run(90.0);
+  std::printf("  standing 1 s: %.3f m in a 9 m/s wind, %.2f m in a 90 m/s one\n", breeze.x, gale.x);
+  EXPECT_EQ(breeze.x, 0.0) << "a person holds against a breeze";
+  EXPECT_GT(gale.x, 10.0) << "and slides downwind in a hurricane (63 m/s at its middle)";
+  EXPECT_NEAR(gale.y, 0.0, 1e-9);
+  const cvc::physics::wind_flow w(cvc::algo::wind_state{90.0, 0.0, 0.0});
+  const vec3 d = cvc::ariadne::avatar_wind_drift(w, cvc::ariadne::avatar_body{}, 840.0,
+                                                 vec3{0.0, 0.0, 0.0}, 0.0);
+  EXPECT_GT(d.x, 10.0);
+  EXPECT_EQ(cvc::ariadne::avatar_wind_drift(w, cvc::ariadne::avatar_body{}, 1.0e6,
+                                            vec3{0.0, 0.0, 0.0}, 0.0)
+                .x,
+            0.0)
+      << "a grip stronger than the wind holds";
+}
+
+// With physics the wind is a flow field in the avatars' world: a dynamic avatar standing in a
+// gale is pushed past what its walker holds; in a breeze it leans into it and stays put.
+TEST(HolonPhysicsTest, TheWindPushesADynamicAvatar) {
+  auto stand = [](double speed) -> double {
+    holon_config cfg = physics_config();
+    cfg.rules.physics.wind_speed = speed;
+    holon server(holon_role::server, cfg);
+    if (!server.physics())
+      return std::nan("");
+    server.set_statics(room_statics(), 1);
+    server.add_participant("A", false, at(-8.0, 3.0, 0.0)); // clear of the cube
+    run(server, 60);                                        // settle
+    const double x0 = server.state("A").position.x;
+    run(server, 240); // 2 s
+    return server.state("A").position.x - x0;
+  };
+  const double breeze = stand(9.0), gale = stand(75.0); // 53 m/s at its middle: 1450 N > 840 N
+  if (std::isnan(breeze))
+    GTEST_SKIP() << "no Jolt backend in this build";
+  std::printf("  a dynamic avatar standing 2 s: %.3f m in 9 m/s, %.2f m in 75 m/s\n", breeze, gale);
+  EXPECT_LT(std::fabs(breeze), 0.05) << "the walker holds against a breeze";
+  EXPECT_GT(gale, 1.0) << "a gale pushes it past what the walker holds";
+}

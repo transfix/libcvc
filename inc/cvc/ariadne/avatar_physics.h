@@ -17,6 +17,7 @@
 #define __CVC_ARIADNE_AVATAR_PHYSICS_H__
 
 #include <cstdint>
+#include <cvc/algo/wind_field.h>
 #include <cvc/ariadne/avatar_sim.h> // avatar_intent
 #include <cvc/physics/body.h>
 #include <cvc/physics/types.h>
@@ -28,6 +29,7 @@
 namespace cvc {
 namespace physics {
 class world;
+class flow_velocity;
 } // namespace physics
 namespace ariadne {
 
@@ -149,6 +151,14 @@ public:
   // its weight under it.
   void set_gravity(const cvc::physics::vec3 &g);
   const cvc::physics::vec3 &gravity() const { return _gravity; }
+  // The room's wind (world_physics' wind, O14): a flow field of air (1.225 kg/m^3, C_d 1) whose
+  // velocity is the wind (cvc::physics::wind_flow, its height profile over `base_z`), so it pushes
+  // every dynamic avatar with drag against its box (0.5 x 1.7 m across it: 50 N at 9 m/s), and
+  // the walker leans into it within force_max. A speed of 0 takes the field out.
+  void set_wind(const cvc::algo::wind_state &w, double base_z = 0.0);
+  // The time the wind's gusts are read at (world::set_field_time): the holon sets it to its tick's,
+  // so the server and every client read the same gust at the same tick.
+  void set_time(double t);
 
   // Add an avatar standing at `feet` (dynamic: simulated; kinematic: placed by the host).
   void add_avatar(const std::string &pid, const cvc::physics::body_state &feet, bool dynamic);
@@ -205,7 +215,18 @@ private:
   std::uint32_t _avatar_material = 0;
   std::vector<std::uint32_t> _statics;
   std::map<std::string, avatar> _avatars;
+  std::uint32_t _wind_field = 0xffffffffu; // the wind's flow field (none)
 };
+
+// A kinematic avatar's drift in a wind (O14): what a body the host places, not the solver, does in
+// it. It holds its ground while the wind's drag on it (1/2 rho C_d A |w|^2, rho 1.225, C_d 1, A its
+// width times its height, as the dynamic avatar's) is under what its controller can push with
+// (force_max), as a dynamic walker does; past that it slides downwind at the speed where the drag
+// at the relative wind equals force_max. 0 below about 40 m/s for the default 70 kg person and
+// 840 N. `feet` is where it stands, t the wind's time.
+cvc::physics::vec3 avatar_wind_drift(const cvc::physics::flow_velocity &wind,
+                                     const avatar_body &body, double force_max,
+                                     const cvc::physics::vec3 &feet, double t);
 
 } // namespace ariadne
 } // namespace cvc

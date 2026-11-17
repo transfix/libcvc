@@ -542,6 +542,11 @@ std::string check_world_rules(const world_rules &r) {
   const cvc::physics::vec3 &g = r.physics.gravity;
   if (!std::isfinite(g.x) || !std::isfinite(g.y) || !std::isfinite(g.z))
     return "physics: gravity must be finite";
+  const world_physics &wp = r.physics;
+  if (!std::isfinite(wp.wind_speed) || !std::isfinite(wp.wind_dir) ||
+      !std::isfinite(wp.wind_gustiness) || !std::isfinite(wp.wind_base) || wp.wind_speed < 0.0 ||
+      wp.wind_gustiness < 0.0)
+    return "physics: the wind must be finite, its speed and gustiness >= 0";
 
   std::set<std::string> ids;
   for (const avatar_controller &c : r.controllers) {
@@ -719,6 +724,12 @@ std::string world_rules_from(const Scene &scene, const Value *world, world_rules
                              std::vector<std::string> *warnings) {
   world_rules r = default_world_rules();
   const ScenePhysics &ph = scene.physics;
+  if (scene.wind.present) { // the scene's wind pushes the room's avatars too (scene_wind.h)
+    r.physics.wind_speed = scene.wind.speed;
+    r.physics.wind_dir = scene.wind.dir;
+    r.physics.wind_gustiness = scene.wind.gustiness;
+    r.physics.wind_base = scene.wind.base;
+  }
   if (ph.present) {
     r.physics.gravity = cvc::physics::vec3{ph.gravity[0], ph.gravity[1], ph.gravity[2]};
     if (ph.fixed_dt != 0.0 && std::fabs(ph.fixed_dt - kRoomQuantum) > 1e-9)

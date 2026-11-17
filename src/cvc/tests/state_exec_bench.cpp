@@ -2516,8 +2516,18 @@ void add_bench_natives(const se::environment_ptr &env) {
 // the compute fan-outs' timings, and the latch the blocking kernel waits on. Shared with the
 // kernels by shared_ptr, so a kernel still running when a failed rep unwinds (~world waits for
 // it) never writes into freed memory.
+int current_cpu_efficiency(); // below: the efficiency class of the CPU the caller runs on, or -1
+int fastest_cpu_efficiency(); // below: the highest class the process may use, or -1
+
 struct kernel_log {
   std::unique_ptr<std::atomic<int64_t>[]> end_ns;
+  // The efficiency class of the CPU each call's kernel marked its end on (-1: unknown or not yet),
+  // so a scenario can tell a slow stretch of calls from kernels the OS moved to slower cores.
+  std::unique_ptr<std::atomic<int>[]> end_eff;
+  // When the driver made each call (its kernel built, in the step that calls) and when the kernel
+  // began on its thread: async.pool_aging splits a call into the driver's turnaround and the
+  // kernel thread's wake with them.
+  std::unique_ptr<std::atomic<int64_t>[]> issue_ns, start_ns;
   std::size_t n = 0;
   std::atomic<int> started{0};
   std::mutex mu;
@@ -2528,17 +2538,99 @@ struct kernel_log {
   bool released = false;               // guarded by mu
   void reset(std::size_t count) {
     end_ns.reset(new std::atomic<int64_t>[count ? count : 1]);
+    end_eff.reset(new std::atomic<int>[count ? count : 1]);
+    issue_ns.reset(new std::atomic<int64_t>[count ? count : 1]);
+    start_ns.reset(new std::atomic<int64_t>[count ? count : 1]);
     n = count;
-    for (std::size_t i = 0; i < n; ++i)
+    for (std::size_t i = 0; i < n; ++i) {
       end_ns[i].store(0);
+      end_eff[i].store(-1);
+      issue_ns[i].store(0);
+      start_ns[i].store(0);
+    }
+  }
+  // Now, into issue_ns or start_ns for call i.
+  void stamp(std::unique_ptr<std::atomic<int64_t>[]> &at_ns, int64_t i) {
+    if (i >= 0 && static_cast<std::size_t>(i) < n)
+      at_ns[static_cast<std::size_t>(i)].store(now_ns(), std::memory_order_relaxed);
+  }
+  // A call's legs, over calls [from, to) with every stamp set (0 calls: all -1). turnaround, the
+  // previous kernel's end to this call's issue, is handoff (that end to the first step slice
+  // starting after it, from slice_ns: the kernel thread posting the completion, the driver seeing
+  // it, the drain and wake) plus driver work (that slice's start to the issue: the steps up to the
+  // call). wake is the issue to the kernel starting (the post, and the kernel thread picking it
+  // up). Each is the mean of its middle 90 %: a mean, as the clock ticks are coarse (100 ns on
+  // Windows), without the rare call the OS preempted. And the share of wakes over 2 us, which on a
+  // Core Ultra 9 185H separates a kernel thread still spinning in its wait (about 1 us) from one
+  // the OS had to wake (about 7 us).
+  struct legs {
+    double turnaround_ns = -1, handoff_ns = -1, work_ns = -1, wake_ns = -1, slow_wake_share = -1;
+  };
+  static double middle_mean(std::vector<int64_t> v) {
+    if (v.empty())
+      return -1;
+    std::sort(v.begin(), v.end());
+    const std::size_t cut = v.size() / 20;
+    double sum = 0;
+    for (std::size_t i = cut; i < v.size() - cut; ++i)
+      sum += double(v[i]);
+    return sum / double(v.size() - 2 * cut);
+  }
+  legs split(std::size_t from, std::size_t to, const std::vector<int64_t> &slice_ns) const {
+    std::vector<int64_t> turn, handoff, work, wake;
+    std::size_t s = 0; // slice_ns is in time order, as are the calls
+    for (std::size_t i = std::max<std::size_t>(from, 1); i < to && i < n; ++i) {
+      const int64_t prev_end = end_ns[i - 1].load(), issue = issue_ns[i].load(),
+                    start = start_ns[i].load();
+      if (!prev_end || !issue || !start)
+        continue;
+      turn.push_back(issue - prev_end);
+      wake.push_back(start - issue);
+      while (s < slice_ns.size() && slice_ns[s] < prev_end)
+        ++s;
+      if (s < slice_ns.size() && slice_ns[s] <= issue) {
+        handoff.push_back(slice_ns[s] - prev_end);
+        work.push_back(issue - slice_ns[s]);
+      }
+    }
+    legs l;
+    if (!wake.empty()) {
+      l.turnaround_ns = middle_mean(turn);
+      l.handoff_ns = middle_mean(handoff);
+      l.work_ns = middle_mean(work);
+      l.wake_ns = middle_mean(wake);
+      l.slow_wake_share =
+          double(std::count_if(wake.begin(), wake.end(), [](int64_t w) { return w > 2000; })) /
+          double(wake.size());
+    }
+    return l;
   }
   void mark(int64_t i) {
-    if (i >= 0 && static_cast<std::size_t>(i) < n)
+    if (i >= 0 && static_cast<std::size_t>(i) < n) {
+      end_eff[static_cast<std::size_t>(i)].store(current_cpu_efficiency(),
+                                                 std::memory_order_relaxed);
       end_ns[static_cast<std::size_t>(i)].store(now_ns(), std::memory_order_release);
+    }
     std::lock_guard<std::mutex> lk(mu);
     threads.insert(std::this_thread::get_id());
   }
   int64_t at(std::size_t i) const { return i < n ? end_ns[i].load(std::memory_order_acquire) : 0; }
+  // The share of calls [from, to) whose kernel ended on a CPU of the fastest class, or -1 where
+  // the classes are unknown (not Windows, or a uniform part reporting one class).
+  double fast_share(std::size_t from, std::size_t to) const {
+    const int fast = fastest_cpu_efficiency();
+    if (fast <= 0 || from >= to || to > n)
+      return -1;
+    std::size_t on = 0, known = 0;
+    for (std::size_t i = from; i < to; ++i) {
+      const int e = end_eff[i].load(std::memory_order_relaxed);
+      if (e < 0)
+        continue;
+      ++known;
+      on += e == fast;
+    }
+    return known ? double(on) / double(known) : -1;
+  }
   void release() {
     {
       std::lock_guard<std::mutex> lk(mu);
@@ -2819,7 +2911,9 @@ void register_kernels(world &w, const kernel_log_ptr &log, const std::string &wh
       w.env, *w.host, "bench-noop",
       [log](std::span<const se::value_t> a) -> se::async_kernel {
         const int64_t i = int_arg(a, 0, 0);
+        log->stamp(log->issue_ns, i); // the driver, in the step that makes the call
         return [log, i](se::async_call &) -> se::value_t {
+          log->stamp(log->start_ns, i);
           log->mark(i);
           return se::value_t(i);
         };
@@ -2989,6 +3083,9 @@ struct drive_cfg {
   double slice_secs = 0.1; // async only: Ariadne's per-pump time backstop
   double timeout = 120.0;
   bool sleepers = false; // processes sleep: idle stretches are expected
+  // When set (async, not driver=group): now_ns() as each step slice begins, after the drain and
+  // wake that made a process runnable (async.pool_aging's handoff and driver work).
+  std::vector<int64_t> *slice_ns = nullptr;
 };
 
 // Pump w's scheduler until done(). The sync scheduler runs in run_steps(slice_steps) slices with
@@ -3031,8 +3128,11 @@ std::string drive(world &w, const drive_cfg &d, Done done, After after) {
       a.drain_ingress();
       a.wake_awaiting();
       runnable = a.has_runnable();
-      if (runnable)
+      if (runnable) {
+        if (d.slice_ns)
+          d.slice_ns->push_back(now_ns());
         a.sync_run_steps(d.slice_steps, d.slice_secs);
+      }
     }
     after();
     if (done())
@@ -3438,8 +3538,8 @@ std::string end_reason(world &w, int pid) {
 // Run one pre-parsed program as a single process to completion on w; the measured region is
 // submit through completion. Returns its pid.
 int run_single(world &w, point_ctx &pc, meter &m, rep_out &o, const se::value_t &ast,
-               const std::string &expect,
-               std::function<void(se::execute_options &)> tune = nullptr) {
+               const std::string &expect, std::function<void(se::execute_options &)> tune = nullptr,
+               std::vector<int64_t> *slice_ns = nullptr) {
   tracker t(1);
   step_kinds kinds;
   se::execute_options opts;
@@ -3451,7 +3551,9 @@ int run_single(world &w, point_ctx &pc, meter &m, rep_out &o, const se::value_t 
   m.begin();
   t.submit_ns[0] = now_ns();
   t.pid[0] = w.submit(ast, opts);
-  const std::string why = drive(w, driver_of(pc), [&] { return t.all_done(); }, [] {});
+  drive_cfg d = driver_of(pc);
+  d.slice_ns = slice_ns;
+  const std::string why = drive(w, d, [&] { return t.all_done(); }, [] {});
   m.end();
   o.steps_total = w.total_steps() - steps0;
   if (auto info = w.info(t.pid[0]))
@@ -3645,6 +3747,19 @@ int current_cpu_efficiency() {
   PROCESSOR_NUMBER pn{};
   GetCurrentProcessorNumberEx(&pn);
   return pn.Group == 0 ? lp_efficiency(pn.Number) : -1;
+#else
+  return -1;
+#endif
+}
+
+// The highest efficiency class among the CPUs the process may use (Windows), or -1. Called once
+// per share, after the run, so it reads the CPU sets each time rather than caching them.
+int fastest_cpu_efficiency() {
+#if defined(_WIN32)
+  int fast = -1;
+  for (const cvc::logical_cpu &c : cvc::logical_cpus())
+    fast = std::max(fast, int(c.efficiency));
+  return fast;
 #else
   return -1;
 #endif
@@ -5238,8 +5353,10 @@ std::vector<scenario> make_scenarios() {
     sc.name = "async.pool_aging";
     sc.what = "ONE program making k sequential async calls (noop kernel) on one app, at most one "
               "in flight: ns per call over the first and the last 10 % of calls (from the "
-              "kernels' end times), the OS threads the kernels ran on, and the app's thread "
-              "map before and after (entries it never erases)";
+              "kernels' end times), each call split into the driver's turnaround and the kernel "
+              "thread's wake, the OS threads the kernels ran on, the share of kernels that ended "
+              "on the fastest CPU class (P-cores), and the app's thread map before and after "
+              "(entries it never erases)";
     sc.executors = {"async"};
     sc.sizes = {{"k", {"100", "1000", "3000"}}, {"where", {"background", "lane"}}};
     sc.smoke = {{"k", {"20"}}, {"where", {"background", "lane"}}};
@@ -5257,7 +5374,9 @@ std::vector<scenario> make_scenarios() {
         m.app = app.get();
         o.iterations = k;
         o.async_calls = k;
-        run_single(w, pc, m, o, ast, istr(k));
+        std::vector<int64_t> slices;
+        slices.reserve(2 * static_cast<std::size_t>(k) + 64); // no growth on the driver's path
+        run_single(w, pc, m, o, ast, istr(k), nullptr, &slices);
         std::vector<int64_t> ends;
         for (std::size_t i = 0; i < std::size_t(k); ++i)
           ends.push_back(log->at(i));
@@ -5269,6 +5388,31 @@ std::vector<scenario> make_scenarios() {
           o.extra.d("first_ns_per_call", first)
               .d("last_ns_per_call", last)
               .d("last_over_first", first > 0 ? last / first : 0.0);
+          // Where the kernels ran: the share of calls whose kernel ended on the fastest CPU class
+          // (P-cores on a hybrid part), over the same first and last 10 % (-1: unknown).
+          o.extra.d("first_fast_cpu_share", log->fast_share(0, d + 1))
+              .d("last_fast_cpu_share", log->fast_share(ends.size() - 1 - d, ends.size()))
+              .d("fast_cpu_share", log->fast_share(0, ends.size()));
+          // A call's legs (kernel_log::split), over all calls and the same first and last 10 %.
+          // The kernel thread spins a few us in its wait before it blocks, so with a turnaround
+          // near that window the time per call is bimodal, and a few ns more driver work per call
+          // moves it, and the driver's own work, many times over: no leg is linear in the
+          // executor's cost. slow_wake_share tells calls crossing the spin from the driver's work
+          // changing (docs/STATE_EXEC_BENCH.md).
+          const kernel_log::legs all = log->split(0, ends.size(), slices);
+          const kernel_log::legs head = log->split(0, d + 1, slices);
+          const kernel_log::legs tail = log->split(ends.size() - 1 - d, ends.size(), slices);
+          o.extra.d("turnaround_ns", all.turnaround_ns)
+              .d("handoff_ns", all.handoff_ns)
+              .d("driver_work_ns", all.work_ns)
+              .d("wake_ns", all.wake_ns)
+              .d("slow_wake_share", all.slow_wake_share)
+              .d("first_driver_work_ns", head.work_ns)
+              .d("last_driver_work_ns", tail.work_ns)
+              .d("first_turnaround_ns", head.turnaround_ns)
+              .d("last_turnaround_ns", tail.turnaround_ns)
+              .d("first_slow_wake_share", head.slow_wake_share)
+              .d("last_slow_wake_share", tail.slow_wake_share);
         }
         o.extra.i("kernel_threads", int64_t(log->thread_count()));
       });

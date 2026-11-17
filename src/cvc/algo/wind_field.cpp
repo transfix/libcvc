@@ -123,5 +123,21 @@ std::array<double, 2> wind_velocity(const wind_state &w, double x, double y, dou
   return {s * det::cos(w.dir_rad), s * det::sin(w.dir_rad)};
 }
 
+double wind_gust_mean(const gust_frame &f) {
+  if (!(f.gustiness > 0.0))
+    return 1.0;
+  return std::max(0.0, 1.0 + f.gustiness * 0.5 * f.pulse);
+}
+
+double wind_profile(double h) {
+  if (!(h > 0.0))
+    return 0.0;
+  constexpr double kAlpha = 1.0 / 7.0;
+  constexpr double kFloor = 0.1; // m: linear below, up to the law's value there
+  if (h < kFloor)
+    return h / kFloor * det::pow(kFloor / 10.0, kAlpha);
+  return det::pow(std::min(h, 500.0) / 10.0, kAlpha);
+}
+
 } // namespace algo
 } // namespace cvc

@@ -54,6 +54,7 @@ import:
   - cvc://components/sky_controls.ari
   - cvc://components/water_controls.ari
   - cvc://components/boat_controls.ari
+  - cvc://components/wind_controls.ari       # the scene's one wind (scene: wind: below)
   - cvc://components/weather_controls.ari
 
 # Only the Terrain Lab panel opens at first, so the world fills the view; Settings opens the rest.
@@ -64,6 +65,7 @@ init: |
   (state-set "tree.sky_controls.open" "0")
   (state-set "tree.water_controls.open" "0")
   (state-set "tree.boat_controls.open" "0")
+  (state-set "tree.wind_controls.open" "0")
   (state-set "tree.weather_controls.open" "0")
 
 menubar:
@@ -82,6 +84,8 @@ menubar:
         bind: tree.viewer_settings.open
       - menu_item: Simulation
         bind: tree.sim_transport.open
+      - menu_item: Wind
+        bind: tree.wind_controls.open
       - menu_item: Sky
         bind: tree.sky_controls.open
       - menu_item: Water
@@ -119,10 +123,13 @@ windows:
   - include: weather_controls
     pos: [754, 551]
     size: [370, 230]
+  - include: wind_controls
+    pos: [754, 791]
+    size: [370, 120]
     closable: true
   - include: boat_controls
     args: { keys: launch, title: Launch }
-    pos: [754, 550]
+    pos: [16, 590]   # under World: the right column holds Sky, Water, Weather and Wind
     size: [370, 300]
     closable: true
 
@@ -132,6 +139,11 @@ scene:
   # A physics world on the clock: the world's ground and buildings collide, the water floats what
   # is lighter than it (the crates on the lake below).
   physics: {}
+  # The scene's one wind (Settings > Wind): the water's waves, the clouds' drift and the push on
+  # every body in the air (the crates, the vehicles) all follow wind.speed (m/s, 10 m up),
+  # wind.dir (degrees, the way it blows, from +x toward +y) and wind.gustiness, with the same gusts.
+  # Turn wind.dir and the waves (after the sea's lag), the clouds and the push turn together.
+  wind: { speed: 9, dir: 30, gustiness: 0.25 }
   # A daylight sky: pale and hazy at the horizon, bluer overhead.
   background: { top: [0.38, 0.54, 0.78], bottom: [0.78, 0.83, 0.88] }
   shadows:
@@ -183,15 +195,16 @@ scene:
     # The water: the world's sea, lakes and ponds as the GPU FFT ocean (three wave cascades for the
     # wind, fading out toward the shore) and a swell that breaks on the beaches facing it, the near
     # water displaced around the camera and the rest flat; whitecaps where the waves fold, and the
-    # foam the long waves leave thinning over seconds. The Water panel (Settings) drives the wind,
-    # waves, swell, foam and the level of detail. Its body: is the water in the physics world,
-    # the same sea, so a body floats on the waves drawn, and the bodies in it make waves.
+    # foam the long waves leave thinning over seconds. The Water panel (Settings) drives the waves,
+    # swell, foam and the level of detail; the scene's wind (above) drives its wind. Its body: is
+    # the water in the physics world, the same sea, so a body floats on the waves drawn, and the
+    # bodies in it make waves.
     - node: water
       type: water
       world: world         # the generated_world whose ground it fills below `level`
       level: 0             # as the world's water_level
-      wind_speed: 9        # m/s
-      wind_dir: 30         # degrees: the way the waves travel, from +x toward +y
+      wind_speed: 9        # m/s: its own wind, used only if the scene's wind.speed is cleared
+      wind_dir: 30         # degrees: the way the waves travel, from +x toward +y (likewise)
       swell_height: 0.8    # m: a swell from offshore that refracts, shoals and breaks on the beaches
       swell_period: 9      # s
       swell_dir: 200       # degrees: the way it travels
@@ -239,7 +252,10 @@ scene:
       near: 6              # the clouds nearest the camera drawn as volumes; the rest sliced
       # The sun is the light rig's key (lighting.key_azimuth / key_elevation, the Stage lighting
       # panel): the clouds are lit from it and cast their shade along it, live.
-      wind_az: 90          # the wind blows toward +x (live: sky.wind_az)
+      # The deck drifts with the scene's wind (above), at its speed at the deck's base (about
+      # 1.6 times the 10 m wind) times `drift`. wind_az is its own heading (toward +x), used only
+      # if the scene's wind.speed is cleared.
+      wind_az: 90
       evolve: 1            # a weather step every 5 s; 0 holds the clouds
       orographic: 1        # windward flanks gather cloud
     # The weather: storm cells on a schedule (and the ones the Weather panel starts), riding the

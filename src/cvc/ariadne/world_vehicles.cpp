@@ -506,6 +506,7 @@ struct WorldVehicles::impl {
     // Its intent keys as last read: its own, the intents table's by id, and by name.
     std::array<std::string, 3> seen_intent{no_intent_keys(), no_intent_keys(), no_intent_keys()};
     entity_intent applied;  // the intent the last navigator tick used
+    double wind_fx = 0.0, wind_fy = 0.0; // the wind's drag on it at the last tick (N), set_wind
     std::string command_by; // who commanded it then: its controller, intent, blend, hold or gym
     // A gym's command for the next tick (command()); not finite: the controller's.
     double cmd_steer = std::numeric_limits<double>::quiet_NaN();
@@ -531,6 +532,8 @@ struct WorldVehicles::impl {
   std::map<std::uint64_t, entity_intent> intents;
   std::set<std::uint64_t> live;
   std::string ikey; // the intents table (world: vehicles: intents:), "" none
+  // The scene's wind (set_wind), for the plants that feel no field.
+  std::shared_ptr<const ph::flow_velocity> wind;
   // The still water this runtime added for its boats (ensure_water), invalid when none.
   ph::field_id still_water;
 
@@ -897,6 +900,42 @@ struct WorldVehicles::impl {
         pushed = true;
         steers = steers || in.force_steers;
       }
+    }
+    // The scene's wind on the plants that feel no field (set_wind): its share of the drag, over the
+    // mass, added to the drive as an intent's force is. Its share is the drag in the moving air
+    // less the drag in still air, which the dynamic models already charge (nav_plant's si.drag), so
+    // a calm wind adds nothing. A jolt vehicle's aero drag reads the wind in physics, and so does a
+    // boat: its hull is a dynamic body, which the wind's flow field already drags on in the air.
+    if (wind && !f.jolt && !f.boat) {
+      const double t = world->field_time();
+      for (entity &e : ents) {
+        if (fleet_of(e) != &f)
+          continue;
+        const int i = index(e);
+        if (i < 0)
+          continue;
+        const pose p = pose_of(f, i);
+        const ph::vec3 w = wind->velocity(p.position, t);
+        const double vx = p.speed * std::cos(p.yaw), vy = p.speed * std::sin(p.yaw);
+        const double ux = w.x - vx, uy = w.y - vy;
+        const double u = std::sqrt(ux * ux + uy * uy), v = std::fabs(p.speed);
+        const double half_cda =
+            0.5 * e.desc.air_density * e.desc.drag_coefficient * e.desc.frontal_area;
+        e.wind_fx = half_cda * (u * ux + v * vx);
+        e.wind_fy = half_cda * (u * uy + v * vy);
+        const double m = std::max(e.desc.mass, 1.0);
+        if (!(e.wind_fx != 0.0 || e.wind_fy != 0.0))
+          continue;
+        std::array<float, 2> &fi = f.force[static_cast<std::size_t>(i)];
+        fi[0] += static_cast<float>(e.wind_fx / m * kScale);
+        fi[1] += static_cast<float>(e.wind_fy / m * kScale);
+        pushed = true;
+        steers = true;
+      }
+    } else {
+      for (entity &e : ents)
+        if (fleet_of(e) == &f)
+          e.wind_fx = e.wind_fy = 0.0;
     }
     if (pushed) {
       cvc::nav::ext_force ef;
@@ -1294,6 +1333,8 @@ struct WorldVehicles::impl {
     out.placed = true;
     const pose p = pose_of(*f, i);
     out.chassis = p.chassis;
+    out.wind_fx = e.wind_fx;
+    out.wind_fy = e.wind_fy;
     out.x = p.position.x;
     out.y = p.position.y;
     out.z = p.position.z;
@@ -1323,6 +1364,14 @@ struct WorldVehicles::impl {
       out.aero_force =
           std::sqrt(vs.aero_force.x * vs.aero_force.x + vs.aero_force.y * vs.aero_force.y +
                     vs.aero_force.z * vs.aero_force.z);
+      if (wind) { // its drag against the air, less the drag in still air: the wind's share
+        const double half_cda =
+            0.5 * e.desc.air_density * e.desc.drag_coefficient * e.desc.frontal_area;
+        const double vx = p.speed * std::cos(p.yaw), vy = p.speed * std::sin(p.yaw);
+        const double v = std::fabs(p.speed);
+        out.wind_fx = vs.aero_force.x + half_cda * v * vx;
+        out.wind_fy = vs.aero_force.y + half_cda * v * vy;
+      }
       out.gear = vs.gear;
       out.rpm = vs.engine_rpm;
       out.throttle = vs.throttle;
@@ -1877,6 +1926,9 @@ entity_intent WorldVehicles::intent(std::uint64_t id) const {
 }
 
 void WorldVehicles::set_intents_key(std::string key) { _impl->ikey = std::move(key); }
+void WorldVehicles::set_wind(std::shared_ptr<const physics::flow_velocity> wind) {
+  _impl->wind = std::move(wind);
+}
 const std::string &WorldVehicles::intents_key() const { return _impl->ikey; }
 
 WorldSpawns &WorldVehicles::spawns() { return *_impl->spawns; }
