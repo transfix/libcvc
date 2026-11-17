@@ -1,0 +1,50 @@
+# weather_controls.ari — a REUSABLE Ariadne component: live controls for a `weather` node (the
+# scene's weather model, OCEAN-AND-WEATHER-ROADMAP.md §9 F2). It shows the weather now (its state,
+# the strongest storm, how many cells, the rain at the ground's centre) and starts a storm: Storm
+# upwind starts one that builds upwind and walks over the ground; Storm overhead one in its prime
+# over the ground now; Clear sky starts every storm clearing. Time scale is weather seconds per
+# world second, a time-lapse of the storms alone (the clouds still drift at the wind's pace; a
+# storm's life is 20 to 60 weather minutes). Each of these is an event under weather.events, so a
+# replay or another client sees the same weather. The storms ride the scene's wind: the Sky
+# panel's Wind heading and Drift speed.
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the weather node's state key root: its `keys:` prop, else weather (the default).
+#   title  the window's title (default Weather)
+#   id     the instance id: the window's geometry persists under tree.<id> (default weather_controls)
+#
+# Use it:
+#     import: cvc://components/weather_controls.ari
+#     windows:
+#       - include: weather_controls
+
+units:
+  weather_controls:
+    args: { keys: weather, title: Weather, id: weather_controls }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - text: "weather"
+        bind: "{keys}.state"
+      - text: "strongest storm"
+        bind: "{keys}.storminess"
+      - text: "storm cells"
+        bind: "{keys}.cells"
+      - text: "rain here (mm/h)"
+        bind: "{keys}.rain"
+      - separator
+      - button: Storm upwind
+        on: (state-set "{keys}.request" "upwind")
+        tooltip: "a storm cell born upwind now, timed to cross the ground in its prime"
+      - button: Storm overhead
+        on: (state-set "{keys}.request" "overhead")
+        tooltip: "a storm cell in its prime over the ground's centre now"
+      - button: Clear sky
+        on: (state-set "{keys}.request" "calm")
+        tooltip: "every storm alive starts clearing now"
+      - slider_float: Time scale
+        bind: "{keys}.time_scale"
+        lo: 0.0
+        hi: 120.0
+        fmt: "%.0f x"
+        tooltip: "weather seconds per world second: a storm's 20 to 60 minutes in seconds; 0 holds the weather"

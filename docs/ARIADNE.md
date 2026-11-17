@@ -907,8 +907,9 @@ types behind one call, `register_cvcgl_extensions`
 `AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`,
 `generated_world` (terrain_lab's world, [`world_nodes.h`](../inc/cvc/gl/ariadne/world_nodes.h)),
 `volume_slice` (one axis-aligned plane of a volume, below), `water` (its sea, lakes and ponds as the
-GPU FFT ocean, below), `ribbon` and `draped_link` (lines drawn from data, below), and — on a libcvc
-built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and `fe_lab`. Keys the built-in parser
+GPU FFT ocean, below), `weather` (the scene's storms, below), `ribbon` and `draped_link` (lines
+drawn from data, below), and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and
+`fe_lab`. Keys the built-in parser
 does not know land in the node's `props`, which a custom realizer reads. So does a `source:` the
 built-ins have no field for, `{ state: <key> }` or `{ stream: <token> }`, as written. A
 `source: { data }` node is drawn as a data node (§5.17) unless its type was registered with
@@ -1142,14 +1143,60 @@ clouds), `far_reach` (how far the far clouds reach toward the horizon; out of th
 `evolve` (the weather's speed: 1 is a step every 5 s, a cloud lasting some 8 minutes; 0 holds the
 clouds) and `shadow` (0 starts the shade off). Live keys under the node's root (`sky.` unless
 `keys:`): `drift`, `morph`, `evolve`, `orographic`, `shadow`, `coverage` (the cells' targets are
-ranked again at once, and the clouds fade in or out to them) and `wind_az`, all on
-`sky_controls.ari`.
+ranked again at once, and the clouds fade in or out to them), `wind_az` and `darkness`, all on
+`sky_controls.ari`, and `base`, `top` and `storms` (below).
 
 The sun is the light rig's key once the scene has one (`lighting.key_azimuth` /
 `key_elevation`, the Stage lighting panel), followed live: a new sun relights the cloud maps and
 re-composites the shade and the far clouds. `sun_az` / `sun_el` are used only without a rig. A
 `water` node listed in `receivers:` takes the shade too: its sunlight and glints dim under a cloud.
-`base` and `top` are still read once at realize.
+
+Storms (OCEAN-AND-WEATHER-ROADMAP.md §9 F2, O18). `sky.storms` holds storm discs, `"x y r
+intensity"` entries split by `;` in world metres, as a `weather` node writes them. Each cell takes
+the discs' field over it: a stormy cell gathers cloud, is held besides the `coverage` (which is the
+fair weather's), and its shade and far opacity deepen (up to 2.5 and 1.8 times). Its near volume
+thickens and darkens with it. The far clouds and the receivers read up to four discs as uniforms:
+the far clouds darken over a storm, and a receiver's ambient light drops by up to 0.55 under one. No
+sampler joins the receivers. `sky.darkness` (0..1, `darkness:`) moves the clouds' colour ramp toward
+a storm's dark grey, and a storm cell's own share darkens it further. Where a cloud is darkened, its
+light also dims as the cloud above it hides the sky (ABYSSAL's dark bases), so a tower's base goes
+dark and a cumulus's stays light. `sky.base` and `sky.top` are live. A deck deeper than the props'
+is a storm deck: its maps are cumulonimbus (the cumulus at the bottom, a tower from its core, an
+anvil under the top) on up to 64 layers and 24 far slices, and their self-shade marches the sun
+through the tower. The new maps are built as a sliced task (`cvc/core/sliced_task.h`, as
+`generated_world` rebuilds), off the frame, and swapped in when done: natively on the background
+pool, and in single-threaded wasm a few milliseconds a frame on the scheduler thread.
+`deck_threading: cooperative` builds them that way natively too (or `threaded`; `automatic` by
+default, which `CVC_SLICED_THREADING=cooperative` also turns cooperative). A build takes about 150 ms
+for terrain_lab's 3 km deck. The cumulus the maps grow from is kept, so the way back is about 30 ms.
+The near volumes then take the new box, their opacity corrected so a metre of cloud is as opaque as
+before.
+
+**Weather.** `weather` holds the scene's weather model (`cvc::world::weather`,
+[`weather.h`](../inc/cvc/world/weather.h)): storm cells on a hashed schedule, and the storms people
+start. It is a pure function of its props, the world clock's time and the events in
+`weather.events`, so every client holding those keys sees the same storms (decision D5). A cell is
+born upwind of the `ground:` node's extent (or `area` around `cx`, `cy`), timed to cross it in the
+middle of its maturity. It grows to its peak, holds it and decays over a life of `life_min` to
+`life_max` weather seconds (1200 to 3600), its centre riding the steering wind. Its phase is the
+weather's state: `clear`, `building`, `storm`, `clearing`. Weather time is cut into slots of
+`interval` seconds (3600); a `chance` share of them (0.5) holds a storm, none before `quiet` (600).
+Other props: `seed`, `growth` / `decay` (the shares of a life spent on each), `radius_min` /
+`radius_max`, `peak_min` / `peak_max`, `miss` (how far to the side of the centre a storm passes, in
+half-widths), `rain_onset` / `rain_max` (mm/h), `calm` (a calm's fade, seconds) and `time_scale`.
+The node drives the `cloud_sky` whose key root `sky:` names (default `sky`; `""` drives none). It
+writes the storms to `sky.storms`. It raises `sky.top` toward `storm_top` (3200) in four steps while
+a storm is within `reach` metres (4000) of the ground, so the cumulonimbus maps are built a few times
+a storm and only while one is about. It raises `sky.darkness` toward `darkness` (0.6), and
+`storm_base` lowers the base too. The steering wind is the scene's wind: until one scene wind exists
+(O14) it is the sky's, `sky.wind_az` at the deck's drift speed, so the storms keep to the clouds
+drawn. A change of it is logged as a `steer` event once it has held for ten frames. Live keys under
+the node's root (`weather.` unless `keys:`): `events` (the authored events, `storm`, `steer`, `rate`
+and `calm`, as text), `time_scale` (weather seconds per world second; a change is a `rate` event),
+`request` (`upwind`, `overhead` or `calm`, emptied once read), and what it publishes: `state`,
+`storminess`, `cells`, `storms` (the cells as discs), `rain` (mm/h at the ground's centre) and
+`deck`. The panel is `weather_controls.ari`. The rain (O19) and the storm wind, lightning and wet
+ground (O20) will read the cells and `weather::rain_rate(x, y)`.
 
 **Water.** `water` draws everything below `level` on a ground (`world:` a `generated_world`, or
 `ground:` any height-field node) as the GPU FFT sea of OCEAN-AND-WEATHER-ROADMAP.md (§11.2, O15):
@@ -3946,6 +3993,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `forest_controls`, `sea_controls`, `sky_controls` | a `forest_trees` / `wave_sea` / `cloud_sky` node (arg `keys`, below) |
 | `world_controls` | a `generated_world` node (§5.4; arg `keys`) |
 | `water_controls` | a `water` node (arg `keys`, default `water`) |
+| `weather_controls` | a `weather` node: the weather now, a storm started upwind or overhead, the sky cleared, the weather's time scale (arg `keys`, default `weather`) |
 | `mesh_tools` | a `mesh_lab` node (§5.4; arg `node`, default `mesh`) |
 | `fe_controls` | an `fe_lab` node (§5.4; arg `node`, default `domain`) |
 | `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `scene`, `show`, `hide`, `mode`, `camera`, `chrome`, `shadows`, `caption`, `width`, `height`, `title`, `id`) |
