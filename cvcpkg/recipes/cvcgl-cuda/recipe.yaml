@@ -60,9 +60,11 @@ depends:
     # The GPU libcvc SDK (find_package(cvc CONFIG) resolves libcvc-cuda, whose
     # cvc::cvc interface carries CVC_USING_CUDA) + VTK (the scene backend).
     - name: libcvc-cuda
+      version: "^3.7"
     - name: vtk
   runtime:
     - name: libcvc-cuda
+      version: "^3.7"
     - name: vtk
   host_tools:
     - cmake
