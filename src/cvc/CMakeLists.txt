@@ -1637,6 +1637,9 @@ list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 # The document a relay runs (arisrv --doc) and the namespaces it publishes.
 list(APPEND SOURCE_FILES ariadne/server_document.cpp)
 list(APPEND INCLUDE_FILES ../../inc/cvc/ariadne/server_document.h)
+# Adaptive quality (OCEAN-AND-WEATHER-ROADMAP.md §10.10, O21): the frame-time loop and its tiers.
+list(APPEND SOURCE_FILES ariadne/scene_quality.cpp)
+list(APPEND INCLUDE_FILES ../../inc/cvc/ariadne/scene_quality.h)
 # The world's rules (ARIADNE_WORLDS.md WD2): revisioned sections, the world: block, and the four
 # rules sections on a room's wire.
 list(APPEND SOURCE_FILES ariadne/section.cpp ariadne/world_rules.cpp ariadne/conference/room_rules.cpp)

@@ -24,6 +24,9 @@
 
 namespace cvc {
 class app;
+namespace ariadne {
+class AdaptiveQuality; // scene_quality.h
+}
 namespace gl {
 class SceneRenderer;
 class CameraController;
@@ -159,6 +162,12 @@ private:
   // fixed clock the camera and the views move by the time that has really passed (frameDt).
   double lastFrameAt_ = -1.0;
   double frameDt(double dt_seconds);
+  // Adaptive quality (cvc/ariadne/scene_quality.h, O21): the loop on the frame's wall time, which
+  // frame() ticks while the fixed clock is off (a capture's frames stay as asked for) and which
+  // publishes quality.tier, quality.scale and quality.frame_ms under prefix().
+  std::unique_ptr<cvc::ariadne::AdaptiveQuality> quality_;
+  bool qualityHeld_ = true; // quality.adaptive was 0 (or nothing has run yet)
+  void tickQuality(double frame_s);
 };
 
 } // namespace ariadne

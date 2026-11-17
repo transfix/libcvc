@@ -1290,8 +1290,17 @@ way from the camera (`cells` vertices a side) is displaced by the cascades and t
 with the camera by whole cells. A flat grid over the ground (`far_cells` a side) draws the rest
 and gives way inside the near one; its normal is the long waves' and the swell's, per fragment,
 fading out by ten times `near`. Both shade as a Fresnel sea with shallows tinted by depth and
-whitecaps where the waves fold, the threshold found so they cover Monahan's share of the sea for
-the wind (`whitecaps` scales it; `foam_bias` at 0 or above fixes it), plus the swell's breakers and
+whitecaps where the waves fold. The long waves' folds leave foam that thins over `foam_decay`
+seconds (2.5; 0: the whitecaps alone), carved into streaks downwind as it ages; the whitecaps and
+this foam together cover Monahan's share of the sea for the wind (`whitecaps` scales it;
+`foam_bias` at 0 or above fixes the whitecaps' threshold), both thresholds found off the frame.
+The shading near the camera (O5) is a GGX sun on the roughness the waves the mesh cannot carry give
+it (from the wind), with Fresnel softening as it roughens, light through backlit crests and the
+bubbles a breaker leaves; past `lod_shade` metres (1500) it gives way to the plain Fresnel sea.
+The foam keeps its detail within `lod_foam` metres (150) on the near grid; past it, and on the far
+grid, the water takes the foam's mean cover. The near grid is three rings, its vertices twice as
+far apart past a third of the way out and four times past two thirds, and the short cascade's
+metre-long waves fade out by `lod_waves` metres (150). Then the swell's breakers and
 a foam band at the waterline (`shore_foam`), faint where no swell reaches. Both stay out of the
 scene's bounds, so the ground frames the view. When the ground's whole rim is under water (a
 `generated_world` with `edge: shore`, an island) the sea goes on `outer` metres past it (6000);
@@ -1299,18 +1308,23 @@ otherwise it stops at the ground's edge. A `generated_world` under a water node 
 so its own flat water rungs do not draw over it. The cascades need float render targets; without
 them the water is flat blue. Live keys under the node's root (`water.` unless `keys:`):
 `wind_speed`, `wind_dir`, `gustiness`, `fetch`, `lee`, `sea_lag`, `sea_fade`, `current`, `chop`,
-`wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`, `foam_fray`, `shore_fade`, `swell_height`,
-`swell_period`, `swell_dir`, `shore_foam`, `wake` and `wake_foam`, most on `water_controls.ari`. A
-change to the swell rebuilds the shore layer once the keys have held for ten frames (12 ms for a
-401² grid). The wind (OCEAN-AND-WEATHER-ROADMAP.md O13) is read through one place,
+`wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`, `foam_fray`, `foam_decay`, `shore_fade`,
+`swell_height`, `swell_period`, `swell_dir`, `shore_foam`, `wake`, `wake_foam`, `lod_foam`,
+`lod_shade`, `lod_waves`, `quality` and `profile`, most on `water_controls.ari`. `quality` (-1)
+follows the scene's adaptive quality (below); 0 to 4 holds the water at that tier. `profile` 1
+times the node's work each frame, section by section, into `water.stats.<section>_ms` (2 also
+waits for the GPU after each, slowing the frame). A change to the swell rebuilds the shore layer
+once the keys have held for ten frames (12 ms for a 401² grid). The wind
+(OCEAN-AND-WEATHER-ROADMAP.md O13) is read through one place,
 [`scene_wind.h`](../inc/cvc/ariadne/scene_wind.h) (today the node's `wind_speed`, `wind_dir` and
 `gustiness`; the scene's one wind later). The sea lags it: its wind follows with a `sea_lag`
 seconds' time constant (20; a compressed scale), and each new state of it crossfades in over
 `sea_fade` seconds (4), so a wind change never pops. With `lee` (1) the water downwind of land is
-calm: each wave band is scaled by the square root of its fetch, the distance the wind has blown over
-water, up to where the band is fully grown, from a coarse fetch map built when the wind turns. The
-gusts (`gustiness`, 0.25) ripple and roughen racing patches of water (cat's paws), and `current`
-(m/s, 0) is a slowly varying flow that carries the short waves and floating bodies alike. With `body: {}` the water is in the scene's
+calm: each wave band is scaled by the square root of its fetch, the distance the wind has blown
+over water, up to where the band is fully grown, from a coarse fetch map built when the wind turns.
+The gusts (`gustiness`, 0.25) ripple and roughen racing patches of water (cat's paws), and
+`current` (m/s, 0) is a slowly varying flow that carries the short waves and floating bodies
+alike. With `body: {}` the water is in the scene's
 physics world, with or without a renderer ([`scene_water.h`](../inc/cvc/ariadne/scene_water.h)).
 It is one fluid field over the water's extent, its surface the same sea computed on the CPU (the
 cascades fading at the same coast, the same swell), so a body lighter than water floats on the
@@ -1329,6 +1343,21 @@ receivers. Each wave's front runs up to the shore layer's runup and drains back,
 with a lace of foam under it, the sand dark and glossy behind it until it dries. The physics sea
 carries the same swash, so a body on the sand is lifted by the film drawn there. `swash: 0` leaves
 it out of both.
+
+**Adaptive quality.** A host that knows each frame's wall time (cvcGL's `AriRuntime`: `arigl run`,
+the browser, pycvc_gl) runs a closed loop on it ([`scene_quality.h`](../inc/cvc/ariadne/scene_quality.h),
+OCEAN-AND-WEATHER-ROADMAP.md §10.10, O21) and steps down how much the scene draws until it holds
+`quality.target_fps` (30): a GPU that cannot keep up is back at the frame rate in seconds. Keys
+under the scene's prefix: `quality.adaptive` (1; 0 holds the tier and scale, which can then be set
+by hand), `quality.target_fps`, and what the loop writes: `quality.tier` (0, everything, to 4, the
+least), `quality.scale` (0.5 to 1: how far out each tier's detail is drawn) and `quality.frame_ms`
+(the last window's mean frame time). A tier comes back after a calm spell. Only drawing changes,
+never the physics, so a run is the same at every tier. On a fixed clock (`arigl snapshot`, a test)
+the loop does not run and everything draws at tier 0. The water reads them (its `quality` key
+overrides): tier 1 draws the full shading and the persistent foam to half their distance and the
+wake's window at half its reach (64 m); 2 also the shading to a quarter, the short cascade and the
+far grid's waves to half, and no persistent foam (the whitecaps alone take Monahan's share); 3 the
+plain Fresnel sea, no wake, and two cascades; 4 the far grid's waves to a quarter.
 
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the

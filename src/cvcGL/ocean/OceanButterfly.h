@@ -61,9 +61,14 @@ public:
   OceanButterfly &operator=(const OceanButterfly &) = delete;
 
   // Builds the (log2 N x N) twiddle/index LUT and the pass's program. n a power of two. The
-  // context must be current. False if either fails.
-  bool init(vtkOpenGLRenderWindow *rw, int n);
+  // context must be current. False if either fails. With `tiles` > 1 the textures are that many
+  // n x n tiles side by side (n tiles x n texels), each transformed on its own in the same passes:
+  // one pass does a stage of every tile (OceanCascades: all the cascades' buffers at once).
+  bool init(vtkOpenGLRenderWindow *rw, int n, int tiles = 1);
   void release();
+  // With tiles, how many of them (from the left) the passes transform; the rest are left as they
+  // were. All of them after init.
+  void setActiveTiles(int t) { m_active = t < 1 ? 1 : (t > m_tiles ? m_tiles : t); }
 
   int stages() const { return m_log2n; } // log2 N: passes per direction
   int passes() const { return 2 * m_log2n; }
@@ -86,6 +91,7 @@ public:
 private:
   long long m_passesRun = 0;
   int m_n = 0;
+  int m_tiles = 1, m_active = 1;
   int m_log2n = 0;
   vtkOpenGLRenderWindow *m_rw = nullptr;   // not owned
   vtkSmartPointer<vtkTextureObject> m_lut; // (log2N x N): xy = twiddle exp(+i ang), zw = indices
