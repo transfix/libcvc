@@ -122,7 +122,7 @@ void get_intersections(TW_iter tw_begin, TW_iter tw_end, Out_iter pairs) {
     ++comp_id;
   }
 
-  sort(points.begin(), points.end());
+  std::stable_sort(points.begin(), points.end()); // ties in input order
 
   typedef list<SL_intersection> Intersection_list;
   typedef Intersection_visitor<back_insert_iterator<Intersection_list>> Visitor;

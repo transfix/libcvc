@@ -247,7 +247,9 @@ step_task build_OTV_table_steps(ContourIterator contours_begin, ContourIterator 
       Point_3 vertex = vertices.get(contour, vit);
       TILER_TRACE(logger, "Finding OTV for " << pp(vertex));
 
-      sort(points.begin(), points.end(), Distance_functor_2(vertex));
+      // Stable: candidates at the same distance stay in their order, as on every standard
+      // library (std::sort's order of ties is each library's own).
+      std::stable_sort(points.begin(), points.end(), Distance_functor_2(vertex));
 
       TILER_TRACE(logger, "  Candidates in order: ");
       for (vector<Point_3>::iterator test_it = points.begin(); test_it != points.end(); ++test_it)

@@ -64,7 +64,7 @@ make_poly(const Triangle &triangle,
       points.insert(points.end(), seg_pts.begin(), seg_pts.end());
     }
 
-    sort(points.begin(), points.end(), dist_functor(s));
+    std::stable_sort(points.begin(), points.end(), dist_functor(s)); // ties in input order
     poly.insert(poly.vertices_end(), points.begin(), points.end());
   }
   return poly;

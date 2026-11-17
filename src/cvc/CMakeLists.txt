@@ -2611,6 +2611,14 @@ if(CVC_WITH_CLIPPER2 AND CVC_WITH_CDT AND CVC_WITH_SHEWCHUK)
     geometry/tiler/tiler_operations.cpp
     geometry/tiler/triangle_utils.cpp
   )
+  # The tiler compares computed coordinates exactly, and its legacy goldens hold on every
+  # platform, so no FMA contraction (as nav, lsys and world): the compilers' default contracts a
+  # multiply-add on targets with FMA (aarch64 macOS).
+  if(NOT MSVC)
+    get_target_property(_cvc_tiler_sources cvc SOURCES)
+    list(FILTER _cvc_tiler_sources INCLUDE REGEX "^geometry/tiler/")
+    set_source_files_properties(${_cvc_tiler_sources} PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+  endif()
 else()
   set(CVC_WITH_PLANAR OFF)
   message(STATUS "cvc::planar DISABLED: it needs Clipper2, CDT and Shewchuk's predicates")

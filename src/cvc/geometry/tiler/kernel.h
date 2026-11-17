@@ -44,6 +44,8 @@
 #include <boost/functional/hash.hpp>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <iterator>
 #include <limits>
 #include <ostream>
@@ -404,17 +406,53 @@ inline Point_3 operator+(Origin, const Vector_3 &v) { return Point_3(v.x(), v.y(
 // its kernel (holding a Point_25_), hashed by CGAL's hash_value, x and y only, which agrees with
 // its x-and-y equality; Point_25.cpp's x-y-z hash was never chosen. The same arithmetic here, so
 // boost::unordered containers keyed by points iterate in the legacy order.
-inline std::size_t hash_value(const Point_2 &p) {
-  std::size_t result = boost::hash_value(p.x());
-  boost::hash_combine(result, boost::hash_value(p.y()));
+//
+// The legacy algorithm's choices depend on that order, so it is the same on every platform: the
+// hashes are Boost 1.86's 64-bit hash_value(double) and hash_combine, computed in 64 bits. Where
+// size_t has 64 bits that is boost's own value. Where it has 32 (wasm32), fold() hands the
+// container lo32 + hi32, which is what Boost.Unordered's 64-bit bucket placement reduces a hash to
+// (prime_fmod_size::position), so the buckets, and the iteration order, are the 64-bit ones.
+namespace hash64 {
+inline std::uint64_t mix(std::uint64_t x) { // boost::hash_detail::hash_mix_impl<64>
+  const std::uint64_t m = 0xe9846af9b1a615dULL;
+  x ^= x >> 32;
+  x *= m;
+  x ^= x >> 32;
+  x *= m;
+  x ^= x >> 28;
+  return x;
+}
+inline std::uint64_t of(double v) { // boost::hash_value(double): its bits, -0 as +0
+  v = v + 0;
+  std::uint64_t w;
+  std::memcpy(&w, &v, sizeof w);
+  return w;
+}
+inline void combine(std::uint64_t &seed, std::uint64_t h) { // boost::hash_combine
+  seed = mix(seed + 0x9e3779b9 + h);
+}
+inline std::size_t fold(std::uint64_t h) {
+  if constexpr (sizeof(std::size_t) >= sizeof(std::uint64_t))
+    return static_cast<std::size_t>(h);
+  else
+    return static_cast<std::size_t>(static_cast<std::uint32_t>(h) +
+                                    static_cast<std::uint32_t>(h >> 32));
+}
+} // namespace hash64
+
+inline std::uint64_t hash64_value(const Point_2 &p) {
+  std::uint64_t result = hash64::of(p.x());
+  hash64::combine(result, hash64::of(p.y()));
   return result;
 }
-inline std::size_t hash_value(const Point_3 &p) {
-  std::size_t result = boost::hash_value(p.x());
-  boost::hash_combine(result, boost::hash_value(p.y()));
-  boost::hash_combine(result, boost::hash_value(p.z()));
+inline std::uint64_t hash64_value(const Point_3 &p) {
+  std::uint64_t result = hash64::of(p.x());
+  hash64::combine(result, hash64::of(p.y()));
+  hash64::combine(result, hash64::of(p.z()));
   return result;
 }
+inline std::size_t hash_value(const Point_2 &p) { return hash64::fold(hash64_value(p)); }
+inline std::size_t hash_value(const Point_3 &p) { return hash64::fold(hash64_value(p)); }
 
 inline bool xy_equal(const Point_2 &a, const Point_2 &b) {
   return a.x() == b.x() && a.y() == b.y();
@@ -839,16 +877,18 @@ private:
   Vector_3 _v;
 };
 
-inline std::size_t hash_value(const Segment_2 &s) {
-  std::size_t result = hash_value(s.source());
-  boost::hash_combine(result, hash_value(s.target()));
+inline std::uint64_t hash64_value(const Segment_2 &s) {
+  std::uint64_t result = hash64_value(s.source());
+  hash64::combine(result, hash64_value(s.target()));
   return result;
 }
-inline std::size_t hash_value(const Segment_3 &s) {
-  std::size_t result = hash_value(s.source());
-  boost::hash_combine(result, hash_value(s.target()));
+inline std::uint64_t hash64_value(const Segment_3 &s) {
+  std::uint64_t result = hash64_value(s.source());
+  hash64::combine(result, hash64_value(s.target()));
   return result;
 }
+inline std::size_t hash_value(const Segment_2 &s) { return hash64::fold(hash64_value(s)); }
+inline std::size_t hash_value(const Segment_3 &s) { return hash64::fold(hash64_value(s)); }
 
 // ============================================================================================
 // Distances to lines and segments

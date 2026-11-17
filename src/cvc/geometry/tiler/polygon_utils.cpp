@@ -763,7 +763,7 @@ void compute_subcurves(Seg_iter begin, Seg_iter end, Out_iter out) {
       }
     }
     const Vector_2 d = s.to_vector();
-    std::sort(cuts.begin(), cuts.end(), [&](const Point_2 &a, const Point_2 &b) {
+    std::stable_sort(cuts.begin(), cuts.end(), [&](const Point_2 &a, const Point_2 &b) {
       return (a - s.source()) * d < (b - s.source()) * d;
     });
     Point_2 from = s.source();
