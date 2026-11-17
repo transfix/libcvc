@@ -30,6 +30,7 @@
 #include <cvc/gl/physics_scene_binding.h>
 #include <cvc/model/model.h>
 #include <cvc/model/model_file_io.h>
+#include <cvc/physics/dyn_boat_plant.h>
 #include <cvc/state/state.h>
 #include <exception>
 #include <map>
@@ -263,6 +264,88 @@ ari::SceneNode vehicle_scene_node(const std::string &id, const ari::vehicle_look
   return g;
 }
 
+std::shared_ptr<GeometryNode> add_hull_node(SceneGraph &sg, const std::string &id,
+                                            GraphicsNode *parent,
+                                            const cvc::physics::boat_desc &boat,
+                                            const float topsides[3], const float stripe[3]) {
+  if (!boat.hull.hull || boat.hull.hull->triangles.empty())
+    return nullptr;
+  const cvc::physics::hull_mesh &h = *boat.hull.hull;
+  // The waterline it floats at, body z (fresh water); its mass the engine's when the hull names
+  // none (the shape's volume at its density).
+  double waterline = 0.0;
+  try {
+    double mass = boat.hull.mass;
+    if (!(mass > 0.0))
+      if (const auto *b = std::get_if<cvc::physics::box>(&boat.hull.shape))
+        mass = boat.hull.density * 8.0 * b->half_extents.x * b->half_extents.y * b->half_extents.z;
+    waterline = -cvc::physics::dyn_boat_plant::float_height(boat, mass, 1000.0);
+  } catch (const std::exception &) {
+  }
+  static const float bottom[3] = {0.36f, 0.08f, 0.07f}; // wet antifouling
+  cvc::geometry g(sg.appContext());
+  auto &pts = g.points();
+  auto &nrm = g.normals();
+  auto &col = g.colors();
+  auto &tris = g.tris();
+  using idx = cvc::geometry::index_t;
+  // A box hull is drawn as an open boat: no deck, a sole (its cockpit's floor) 0.12 m over the
+  // waterline, so the water it keeps out of its hull (the water node's exclusion) is what would
+  // otherwise show in the cockpit on a wave.
+  const auto *hull_box = std::get_if<cvc::physics::box>(&boat.hull.shape);
+  double top = -1e300, low = 1e300, x0 = 1e300, x1 = -1e300, y0 = 1e300, y1 = -1e300;
+  for (const cvc::physics::vec3 &v : h.vertices) {
+    top = std::max(top, v.z);
+    low = std::min(low, v.z);
+    x0 = std::min(x0, v.x);
+    x1 = std::max(x1, v.x);
+    y0 = std::min(y0, v.y);
+    y1 = std::max(y1, v.y);
+  }
+  // Each triangle its own corners, so the faces shade flat.
+  for (const auto &t : h.triangles) {
+    const cvc::physics::vec3 &a = h.vertices[t[0]], &b = h.vertices[t[1]], &c = h.vertices[t[2]];
+    const double ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
+    const double vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+    double nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const double len = std::sqrt(nx * nx + ny * ny + nz * nz);
+    if (len > 0.0) {
+      nx /= len;
+      ny /= len;
+      nz /= len;
+    }
+    if (hull_box && nz > 0.9 && a.z >= top - 1e-9 && b.z >= top - 1e-9 && c.z >= top - 1e-9)
+      continue; // the deck: open
+    const idx base = static_cast<idx>(pts.size());
+    for (const cvc::physics::vec3 *p : {&a, &b, &c}) {
+      pts.push_back({p->x, p->y, p->z});
+      nrm.push_back({nx, ny, nz});
+      const double z = p->z - waterline;
+      const float *rgb = z < 0.02 ? bottom : z < 0.10 ? stripe : topsides;
+      col.push_back({rgb[0], rgb[1], rgb[2]});
+    }
+    tris.push_back({base, static_cast<idx>(base + 1), static_cast<idx>(base + 2)});
+  }
+  if (hull_box) { // the sole, teak, inside the hull's sides
+    static const float teak[3] = {0.55f, 0.40f, 0.24f};
+    const double z = std::min(std::max(waterline + 0.12, low + 0.05), top - 0.05), m = 0.04;
+    const idx base = static_cast<idx>(pts.size());
+    for (const auto &p :
+         {std::array<double, 2>{x0 + m, y0 + m}, std::array<double, 2>{x1 - m, y0 + m},
+          std::array<double, 2>{x1 - m, y1 - m}, std::array<double, 2>{x0 + m, y1 - m}}) {
+      pts.push_back({p[0], p[1], z});
+      nrm.push_back({0.0, 0.0, 1.0});
+      col.push_back({teak[0], teak[1], teak[2]});
+    }
+    tris.push_back({base, static_cast<idx>(base + 1), static_cast<idx>(base + 2)});
+    tris.push_back({base, static_cast<idx>(base + 2), static_cast<idx>(base + 3)});
+  }
+  std::shared_ptr<GeometryNode> node =
+      parent ? parent->createChild<GeometryNode>(id, g)
+             : std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(id, g));
+  return node;
+}
+
 void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) {
   if (!r.world || !r.sg || !r.physics_binding)
     return;
@@ -290,6 +373,27 @@ void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) 
     if (!a)
       continue;
     const std::string id = "vehicle_" + std::to_string(e.id);
+    if (ari::vehicle_plant_floats(a->plant) && (a->look.kind.empty() || a->look.kind == "box")) {
+      // A boat: its hull, in its colours, bound to its hull body.
+      std::shared_ptr<GraphicsNode> group = sg.addGraphics(id);
+      try {
+        const cvc::physics::dyn_boat_desc b = ari::boat_desc_of(*a, e.spec.mass, e.spec.max_speed);
+        add_hull_node(sg, id + "_hull", group.get(), b.boat, e.spec.color.data(),
+                      e.spec.color2.data());
+        r.physics_binding->bind(e.chassis, group);
+      } catch (const std::exception &ex) {
+        if (warnings)
+          warnings->push_back("ari: vehicle " + std::to_string(e.id) + ": " + ex.what());
+      }
+      apply_entity_label(sg, group, r.entity_labels,
+                         {{"name", e.spec.name},
+                          {"id", std::to_string(e.id)},
+                          {"archetype", e.spec.archetype},
+                          {"team", std::to_string(e.spec.team)}},
+                         r.bind_prefix, warnings);
+      r.vehicle_markers.emplace_back(id, e.chassis);
+      continue;
+    }
     const vehicle_shape shape = shape_of(ari::vehicle_desc_of(*a, e.spec.mass, e.spec.max_speed));
     ari::Scene one;
     one.nodes.push_back(

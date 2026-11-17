@@ -15,6 +15,7 @@
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/requires.h>
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/scene_boat.h>
 #include <cvc/ariadne/scene_generated_world.h>
 #include <cvc/ariadne/scene_geometry.h>
 #include <cvc/ariadne/scene_water.h>
@@ -2737,6 +2738,161 @@ TEST(AriadneWorldBoats, TheWorldBlockTakesBoatsAndTheSpawnKnobs) {
   EXPECT_DOUBLE_EQ(boat_desc_of(a).boat.hull.mass, 900.0);
   a.preset = "humvee";
   EXPECT_THROW(boat_desc_of(a), std::invalid_argument);
+}
+
+// --- the boat node (OCEAN-AND-WEATHER-ROADMAP.md D6) -------------------------------------------
+
+namespace {
+
+// The lake of kLake's world, with a launch as a boat node at its west side.
+const char *kBoatNode = R"(
+scene:
+  physics: {}
+  nodes:
+    - node: terrain
+      source:
+        heightfield:
+          size: 300
+          resolution: 151
+          layers:
+            - { kind: dome, amplitude: -6, radius: 40 }
+      body: static
+    - node: water
+      type: water
+      ground: terrain
+      level: -1
+      wind_speed: 0.5
+      wave_amp: 0.1
+      body: {}
+    - node: skiff
+      type: boat
+      water: water
+      preset: launch
+      transform: { position: [-30, 0, 0] }
+      goal: [30, 10]
+)";
+
+} // namespace
+
+// The node puts its boat in the world at its draft once the water's grid is ready; its keys drive
+// it (a helm: it moves and turns); drive: nav takes it to its goal across the lake without water
+// under it shallower than its draft; a restart puts it back where it started.
+TEST(AriadneBoatNode, FloatsSteersFromItsKeysAndNavTakesItToItsGoal) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = fresh_load(kBoatNode);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  EXPECT_TRUE(warnings.empty()) << warnings.front();
+  ASSERT_EQ(w->boats().size(), 1u);
+  BoatRuntime *b = w->boat("skiff");
+  ASSERT_NE(b, nullptr);
+  ASSERT_TRUE(b->placed()) << b->status();
+  EXPECT_EQ(val(app, "skiff.placed"), "1");
+  EXPECT_EQ(val(app, "skiff.drive"), "keys");
+  EXPECT_NEAR(b->draft(), 0.2, 1e-9);
+  cvc::physics::boat_state s = b->state();
+  EXPECT_NEAR(s.body.position.x, -30.0, 1e-6);
+  EXPECT_NEAR(s.body.position.z, -1.0 + 0.15, 0.01) << "afloat at its draft";
+
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  const auto run = [&](double seconds) {
+    for (int i = 0; i < static_cast<int>(seconds * 60.0); ++i) {
+      clock.drive(1.0 / 60.0);
+      w->follow(app.world_clock());
+    }
+  };
+  run(2.0);
+  s = b->state();
+  EXPECT_NEAR(s.body.position.z, -1.0 + 0.15, 0.05) << "still afloat, at rest";
+  EXPECT_LT(std::fabs(s.speed), 0.05);
+  // The helm: full ahead and half rudder (left).
+  cvc::state &st = cvc::state::instance(app);
+  st("skiff.throttle").value(1.0);
+  st("skiff.rudder").value(0.5);
+  const double h0 = s.heading;
+  run(12.0);
+  s = b->state();
+  std::printf("[boat node] on the helm for 12 s: at (%.1f, %.1f), %.2f m/s, turned %.2f rad\n",
+              s.body.position.x, s.body.position.y, s.speed, s.heading - h0);
+  EXPECT_GT(s.speed, 1.5);
+  EXPECT_GT(std::remainder(s.heading - h0, 2.0 * 3.14159265358979), 0.5) << "turned left";
+  EXPECT_GT(std::hypot(s.body.position.x + 30.0, s.body.position.y), 5.0);
+  EXPECT_NE(val(app, "skiff.speed"), "");
+
+  // drive: nav, to its goal.
+  st("skiff.drive").value(std::string("nav"));
+  double shallowest = 1e9;
+  int frames = 0;
+  for (; frames < 60 * 120 && val(app, "skiff.reached") != "1"; ++frames) {
+    clock.drive(1.0 / 60.0);
+    w->follow(app.world_clock());
+    const cvc::physics::vec3 p = b->state().body.position;
+    shallowest = std::min(shallowest, lake_depth(p.x, p.y));
+  }
+  s = b->state();
+  std::printf("[boat node] nav took it to (%.1f, %.1f) in %.1f s; the shallowest water under it "
+              "%.2f m\n",
+              s.body.position.x, s.body.position.y, frames / 60.0, shallowest);
+  EXPECT_EQ(val(app, "skiff.reached"), "1");
+  EXPECT_LT(std::hypot(s.body.position.x - 30.0, s.body.position.y - 10.0), 8.0);
+  EXPECT_GT(shallowest, 0.2);
+
+  // A restart: the boat back where it started, at rest.
+  w->restart(&warnings);
+  w->sync(&warnings);
+  ASSERT_TRUE(b->placed());
+  s = b->state();
+  EXPECT_NEAR(s.body.position.x, -30.0, 1e-6);
+  EXPECT_NEAR(s.body.position.y, 0.0, 1e-6);
+}
+
+// terrain_lab.ari's launch (D6): run headless, it floats on the lake by the crates, on the water
+// node's 9 m/s sea with its 0.8 m swell, and nav takes it to its goal 45 m across the lake, clear
+// of the crates (the navigator's grid has the lake's shores, not its floating bodies).
+TEST(AriadneBoatNode, NavTakesTerrainLabsLaunchAcrossTheLake) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const fs::path doc = fs::path(CVC_EXAMPLES_DIR) / "ariadne" / "documents" / "terrain_lab.ari";
+  LoadResult r = fresh_load_file(doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  BoatRuntime *b = w->boat("launch");
+  ASSERT_NE(b, nullptr);
+  ASSERT_TRUE(b->placed()) << b->status();
+  const auto g = w->grid("world", 2.0, 0.0);
+  ASSERT_NE(g, nullptr);
+  EXPECT_GT(g->depth_at(0.0, 170.0), 5.0);
+  EXPECT_GT(g->depth_at(40.0, 150.0), 5.0);
+  cvc::physics::boat_state s = b->state();
+  EXPECT_NEAR(s.body.position.x, 0.0, 1e-6);
+  EXPECT_NEAR(s.body.position.z, 0.15, 1.0) << "on the sea's surface, at its draft";
+  cvc::state::instance(app)("launch.drive").value(std::string("nav"));
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  double shallowest = 1e9;
+  int frames = 0;
+  for (; frames < 60 * 150 && val(app, "launch.reached") != "1"; ++frames) {
+    clock.drive(1.0 / 60.0);
+    w->follow(app.world_clock());
+    const cvc::physics::vec3 p = b->state().body.position;
+    shallowest = std::min(shallowest, g->depth_at(p.x, p.y));
+  }
+  s = b->state();
+  std::printf("[boat node] terrain_lab's launch reached (%.1f, %.1f) in %.1f s; the shallowest "
+              "water under it %.1f m\n",
+              s.body.position.x, s.body.position.y, frames / 60.0, shallowest);
+  EXPECT_EQ(val(app, "launch.reached"), "1");
+  EXPECT_GT(shallowest, 1.0);
 }
 
 // ---------------------------------------------------------------------------------------------

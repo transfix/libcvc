@@ -42,6 +42,7 @@ customs:
     required: true
   - node: water
     required: true
+  - node: boat
   - node: weather
     required: true
 
@@ -52,6 +53,7 @@ import:
   - cvc://components/sim_transport.ari
   - cvc://components/sky_controls.ari
   - cvc://components/water_controls.ari
+  - cvc://components/boat_controls.ari
   - cvc://components/wind_controls.ari       # the scene's one wind (scene: wind: below)
   - cvc://components/weather_controls.ari
 
@@ -62,6 +64,7 @@ init: |
   (state-set "tree.sim_transport.open" "0")
   (state-set "tree.sky_controls.open" "0")
   (state-set "tree.water_controls.open" "0")
+  (state-set "tree.boat_controls.open" "0")
   (state-set "tree.wind_controls.open" "0")
   (state-set "tree.weather_controls.open" "0")
 
@@ -87,6 +90,8 @@ menubar:
         bind: tree.sky_controls.open
       - menu_item: Water
         bind: tree.water_controls.open
+      - menu_item: Launch
+        bind: tree.boat_controls.open
       - menu_item: Weather
         bind: tree.weather_controls.open
 
@@ -121,6 +126,11 @@ windows:
   - include: wind_controls
     pos: [754, 791]
     size: [370, 120]
+    closable: true
+  - include: boat_controls
+    args: { keys: launch, title: Launch }
+    pos: [16, 590]   # under World: the right column holds Sky, Water, Weather and Wind
+    size: [370, 300]
     closable: true
 
 scene:
@@ -216,6 +226,15 @@ scene:
       transform: { position: [14, 188, 10] }
       material: { color: [0.68, 0.48, 0.26] }
       body: { density: 400 }
+    # A launch on the lake beside the crates (a 4 m box hull with a shaft propeller and a rudder),
+    # afloat on the water node's sea. Settings > Launch is its helm: Drive keys and the Throttle and
+    # Rudder sliders (launch.throttle, launch.rudder), or Drive nav to its goal (launch.goal).
+    - node: launch
+      type: boat
+      water: water
+      preset: launch
+      transform: { position: [0, 170, 0] }
+      goal: [40, 150]
     # The clouds: a deck of L-system cumulus scattered over the whole world, drifting and slowly
     # changing shape. The ones near the camera are volumes, the rest one coarse sliced volume.
     # Their shade dims the sun on the ground, the buildings, the roads and the trees; it is drawn
