@@ -161,6 +161,28 @@ def segment_seeded_job(vol, seeds, params=None, **keywords):
     return _segment_seeded_job(vol, seeds,
                                _seeded_segmentation_params(params, keywords, "segment_seeded_job"))
 %}
+// The paper's seeds as a job: pycvc.critical_point_seeds_job(vol, cp_feature_threshold=0.3, ...).
+PYCVC_RESULT_JOB(result_job_point_classes, cvc::point_classes)
+%exception _critical_point_seeds_job {
+  try {
+    $action
+  } catch (const std::exception &e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  }
+}
+%inline %{
+std::unique_ptr<cvc::result_job<cvc::point_classes>>
+_critical_point_seeds_job(const cvc::volume &vol, const cvc::seeded_segmentation_params &p) {
+  return cvc::critical_point_seeds_job(vol, p);
+}
+%}
+%pythoncode %{
+def critical_point_seeds_job(vol, params=None, **keywords):
+    """critical_point_seeds as a resumable job: step(budget), progress(), phase(), cancel(),
+    result()."""
+    return _critical_point_seeds_job(vol, _seeded_segmentation_params(params, keywords,
+                                                                     "critical_point_seeds_job"))
+%}
 // The skeleton job (cvc/geometry/skeleton.h; pycvc_skeleton.i wraps the result and its
 // parameters): pycvc.skeletonize_job(g, robust=True, ...) or (g, pycvc.skeleton_params(...)).
 PYCVC_RESULT_JOB(result_job_skeleton, cvc::skeleton)

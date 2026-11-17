@@ -25,16 +25,18 @@ frame raycast_cuda(raycast_cuda_cache &, const raycast_cuda_request &) {
 
 // The cache controls are no-ops rather than errors: raycaster::invalidate_
 // device_volume() and application teardown call them unconditionally, and a
-// CPU-only build simply has nothing resident to invalidate.
-struct raycast_cuda_cache::impl {};
-raycast_cuda_cache::raycast_cuda_cache() = default;
-raycast_cuda_cache::~raycast_cuda_cache() = default;
-void raycast_cuda_cache::set_budget(std::size_t) {}
-std::size_t raycast_cuda_cache::budget() { return 0; }
-std::size_t raycast_cuda_cache::resident() { return 0; }
-std::uint64_t raycast_cuda_cache::uploaded() { return 0; }
-void raycast_cuda_cache::forget_host(const void *) {}
-void raycast_cuda_cache::clear() {}
+// CPU-only build simply has nothing resident to invalidate.  (The app's handle,
+// raycast_cuda_cache, and the generation counter are the same in both builds:
+// raycaster.cpp and the header.)
+struct cuda_device_caches::impl {};
+cuda_device_caches::cuda_device_caches() = default;
+cuda_device_caches::~cuda_device_caches() = default;
+void cuda_device_caches::set_budget(std::size_t) {}
+std::size_t cuda_device_caches::budget() { return 0; }
+std::size_t cuda_device_caches::resident() { return 0; }
+std::uint64_t cuda_device_caches::uploaded() { return 0; }
+void cuda_device_caches::forget_host(const void *) {}
+void cuda_device_caches::clear() {}
 
 #endif // !CVC_USING_CUDA
 

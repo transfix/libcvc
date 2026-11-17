@@ -918,6 +918,11 @@ add_test(NAME cvcgl_camera_idle COMMAND cvcgl_camera_idle)
 add_executable(cvcgl_camera_map test/cvcgl_camera_map.cpp)
 target_link_libraries(cvcgl_camera_map PRIVATE cvcGL)
 add_test(NAME cvcgl_camera_map COMMAND cvcgl_camera_map)
+# Slice mode: a parallel view down one axis with VolumeGridRover's screen axes, its state keys,
+# its pan, and the wheel zooming about the pointer. Headless.
+add_executable(cvcgl_camera_slice test/cvcgl_camera_slice.cpp)
+target_link_libraries(cvcgl_camera_slice PRIVATE cvcGL)
+add_test(NAME cvcgl_camera_slice COMMAND cvcgl_camera_slice)
 
 # Numeric parity: the push-fed Track controller reproduces pymod_gl/camera.py's
 # ChaseCamera (the two-stage EMA follow) to floating point, so the C++ and Python
@@ -957,6 +962,11 @@ add_test(NAME cvcgl_light_node COMMAND cvcgl_light_node)
 add_executable(cvcgl_ariadne_realize test/cvcgl_ariadne_realize.cpp)
 target_link_libraries(cvcgl_ariadne_realize PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_realize COMMAND cvcgl_ariadne_realize)
+# The whole realize suite in one process: 71 s in a Windows Release job, 250.6 s in a Linux Debug
+# job (Xvfb, llvmpipe; transfix/libcvc#1301, 2026-11-17), and past ctest's 300 s on all three
+# attempts of a slower runner's Debug job (#1309, where PhConvoy and Ewave also ran ~1.3x longer).
+# Its own budget, as cvcgl_ewave's and cvcgl_volren_node's, so only a real hang fails.
+set_tests_properties(cvcgl_ariadne_realize PROPERTIES TIMEOUT 1200)
 
 # Ariadne §5.4 repeat: on a scene node: copies made and taken as the count (a number, a key, a
 # read-lane expression) changes, with RealizedScene's lists kept in step. Part 2 runs a document in
@@ -976,6 +986,13 @@ add_test(NAME cvcgl_room_view COMMAND cvcgl_room_view)
 add_executable(cvcgl_ari_switch test/cvcgl_ari_switch.cpp)
 target_link_libraries(cvcgl_ari_switch PRIVATE cvcGL)
 add_test(NAME cvcgl_ari_switch COMMAND cvcgl_ari_switch)
+
+# arigl snapshot --mp4 / --seconds (record_frames): a falling ball recorded 1 s at 10 fps, the
+# video decoded back and the scene clock and the body checked. Skips without a video encoder.
+add_executable(cvcgl_ari_record test/cvcgl_ari_record.cpp)
+target_link_libraries(cvcgl_ari_record PRIVATE cvcGL)
+add_test(NAME cvcgl_ari_record COMMAND cvcgl_ari_record)
+set_tests_properties(cvcgl_ari_record PROPERTIES SKIP_REGULAR_EXPRESSION "cvcgl_ari_record: SKIP")
 
 # The terminal extension (TerminalScene, roadmap §16.6): a scene rendered offscreen becomes the
 # terminal backend's background under the widgets, and a background drag turns the camera.
@@ -1000,6 +1017,11 @@ target_link_libraries(cvcgl_imgui_windows_menu PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_windows_menu COMMAND cvcgl_imgui_windows_menu)
 # A radio stacks its options and a radio_row lines them up; a click through ImGui's own input
 # stores the option (or its mapped value) and runs the on:. No window, no GL.
+# ImGuiBackend's tab bar and list (Kind::Tabs, Kind::List) through ImGui's own mouse input, on a
+# bare context (no GL).
+add_executable(cvcgl_imgui_tabs_list test/cvcgl_imgui_tabs_list.cpp)
+target_link_libraries(cvcgl_imgui_tabs_list PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_tabs_list COMMAND cvcgl_imgui_tabs_list)
 add_executable(cvcgl_imgui_radio test/cvcgl_imgui_radio.cpp)
 target_link_libraries(cvcgl_imgui_radio PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
@@ -1144,6 +1166,15 @@ if(NOT EMSCRIPTEN)
   add_executable(cvcgl_ariadne_pick test/cvcgl_ariadne_pick.cpp)
   target_link_libraries(cvcgl_ariadne_pick PRIVATE cvcGL)
   add_test(NAME cvcgl_ariadne_pick COMMAND cvcgl_ariadne_pick)
+endif()
+
+# A viewport in mode: slice: its axis bound to a key, the other axes' volume_slice nodes left out,
+# picks that name the voxel and its value, the wheel zooming about the pointer. Offscreen; skips
+# where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_slice_view test/cvcgl_ariadne_slice_view.cpp)
+  target_link_libraries(cvcgl_ariadne_slice_view PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_slice_view COMMAND cvcgl_ariadne_slice_view)
 endif()
 
 # The volume_slice node (VolumeSliceNode.h): its keys, region reads, pickRay, and (offscreen) its
@@ -1524,4 +1555,4 @@ endif()
 # (CMake/CvcHostStack.cmake). Names not built here are skipped.
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
-                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat)
+                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ari_record)

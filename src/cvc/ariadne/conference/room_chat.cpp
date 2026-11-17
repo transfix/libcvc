@@ -248,6 +248,30 @@ std::string encode_chat_message(const chat_message &m) {
   put_json_string(out, m.text);
   out += ",\"e\":";
   put_json_string(out, m.epoch);
+  if (!m.via.empty()) {
+    out += ",\"via\":";
+    put_json_string(out, m.via);
+  }
+  out += '}';
+  return out;
+}
+
+std::string encode_chat_event(const std::string &room, const chat_event &e) {
+  std::string out = "{\"room\":";
+  put_json_string(out, room);
+  for (const auto &[k, v] :
+       {std::make_pair(",\"to\":", &e.to), std::make_pair(",\"to_uid\":", &e.to_uid),
+        std::make_pair(",\"to_via\":", &e.to_via), std::make_pair(",\"from\":", &e.m.from),
+        std::make_pair(",\"name\":", &e.m.name)}) {
+    out += k;
+    put_json_string(out, *v);
+  }
+  char t[64];
+  std::snprintf(t, sizeof(t),
+                ",\"seq\":%llu,\"t\":%.3f,\"text\":", static_cast<unsigned long long>(e.m.seq),
+                e.m.t);
+  out += t;
+  put_json_string(out, e.m.text);
   out += '}';
   return out;
 }
@@ -261,6 +285,7 @@ bool decode_chat_message(const std::string &json, chat_message &out) {
   out.t = num_field(obj, "t");
   out.text = str_field(obj, "text");
   out.epoch = str_field(obj, "e");
+  out.via = str_field(obj, "via");
   return !out.from.empty();
 }
 
@@ -345,6 +370,8 @@ struct room_chat_relay::impl {
   std::uint64_t rev = 0; // every push carries the next one, so a client's chat.rev always moves
   double last_dm_heads = -1.0;
   stats st;
+  listener heard; // set_listener's
+  bool hear_room = false, hear_dms = false;
 
   impl(cvc::app &a, cvc::state_cluster_shard &s, std::string r, chat_limits l)
       : app(a), shard(s), room(std::move(r)), limits(l) {
@@ -462,13 +489,20 @@ struct room_chat_relay::impl {
     std::string text = str_field(req, "text"), why;
     if (!clean_chat_text(text, limits.text_max, why))
       return refuse(pid, cseq, to, why);
+    room_bridged_user bridged_to;
     if (!to.empty()) {
       if (!limits.dms)
         return refuse(pid, cseq, to, "direct messages are off on this relay");
       if (to == pid)
         return refuse(pid, cseq, to, "you cannot send a direct message to yourself");
-      if (!present.count(to))
+      if (is_bridged_pid(to)) {
+        if (!room_bridged_user_of(app, room, to, bridged_to))
+          return refuse(pid, cseq, to, "they are not in the room");
+        if (!heard || !hear_dms)
+          return refuse(pid, cseq, to, "they cannot get direct messages here");
+      } else if (!present.count(to)) {
         return refuse(pid, cseq, to, "they are not in the room");
+      }
     }
     if (!take_token(pid, now_s))
       return refuse(pid, cseq, to, "you are sending too fast; wait a moment");
@@ -480,43 +514,71 @@ struct room_chat_relay::impl {
     m.text = std::move(text);
     m.epoch = epoch;
     if (to.empty()) {
-      append(room_log, m, limits.room_keep);
-      ++st.posts;
-      for (const auto &[p, name] : present) {
-        std::vector<snapshot_entry> e;
-        message_entry(e, "", m);
-        push(p, std::move(e));
+      append_room(m, present);
+      if (heard && hear_room) {
+        ++st.heard;
+        heard(chat_event{"", "", "", m});
       }
-      publish_room_counters();
       return;
     }
-    const std::string key = pair_key(pid, to);
+    std::string why2;
+    if (!append_dm(pid, to, m, why2))
+      return refuse(pid, cseq, to, why2);
+    if (is_bridged_pid(to)) {
+      ++st.heard;
+      heard(chat_event{to, bridged_to.uid, bridged_to.via, m});
+    }
+  }
+
+  // Append M to the room's history and push it to every present participant.
+  void append_room(chat_message &m, const std::map<std::string, std::string> &present) {
+    append(room_log, m, limits.room_keep);
+    ++st.posts;
+    for (const auto &[p, name] : present) {
+      std::vector<snapshot_entry> e;
+      message_entry(e, "", m);
+      push(p, std::move(e));
+    }
+    publish_room_counters();
+  }
+
+  // Append M to the conversation of FROM and TO, and push it to each of the two that is a
+  // participant (each holds it under the other's pid; the sender's copy is its confirmation). False
+  // with WHY when a new conversation would pass either's limit.
+  bool append_dm(const std::string &from, const std::string &to, chat_message &m,
+                 std::string &why) {
+    const std::string key = pair_key(from, to);
     auto it = dms.find(key);
     if (it == dms.end()) {
       const auto count = [&](const std::string &p) {
         auto pi = peers.find(p);
         return pi == peers.end() ? std::size_t(0) : pi->second.size();
       };
-      if (count(pid) >= limits.dm_channels_max)
-        return refuse(pid, cseq, to, "you have too many conversations");
-      if (count(to) >= limits.dm_channels_max)
-        return refuse(pid, cseq, to, "they have too many conversations");
+      if (count(from) >= limits.dm_channels_max) {
+        why = "you have too many conversations";
+        return false;
+      }
+      if (count(to) >= limits.dm_channels_max) {
+        why = "they have too many conversations";
+        return false;
+      }
       it = dms.emplace(key, channel_log{}).first;
-      peers[pid].push_back(to);
-      peers[to].push_back(pid);
+      peers[from].push_back(to);
+      peers[to].push_back(from);
     }
     append(it->second, m, limits.dm_keep);
     ++st.posts;
     ++st.dms;
-    // Each of the two holds the conversation under the other's pid; the sender's copy is its
-    // confirmation.
-    for (const auto &[holder, peer] : {std::make_pair(pid, to), std::make_pair(to, pid)}) {
+    for (const auto &[holder, peer] : {std::make_pair(from, to), std::make_pair(to, from)}) {
+      if (is_bridged_pid(holder))
+        continue; // no connection holds a bridged user's pid
       std::vector<snapshot_entry> e;
       message_entry(e, peer, m);
       dm_entries(e, peer, it->second);
       e.push_back(dms_entry(holder));
       push(holder, std::move(e));
     }
+    return true;
   }
 
   void page(const std::string &pid, const se::value_t &req,
@@ -627,6 +689,10 @@ void room_chat_relay::participant_left(const std::string &pid) {
   std::set<std::string> present;
   for (const room_participant &p : room_roster(d.app, d.room))
     present.insert(p.pid);
+  room_bridged_user probe; // a bridged peer still in the room can read the conversation too
+  for (const std::string &peer : it->second)
+    if (is_bridged_pid(peer) && room_bridged_user_of(d.app, d.room, peer, probe))
+      present.insert(peer);
   const std::vector<std::string> list = it->second;
   for (const std::string &peer : list) {
     if (present.count(peer))
@@ -642,6 +708,71 @@ void room_chat_relay::participant_left(const std::string &pid) {
     }
   }
   d.buckets.erase(pid);
+}
+
+void room_chat_relay::set_listener(listener fn, bool room, bool dms) {
+  _impl->heard = std::move(fn);
+  _impl->hear_room = room;
+  _impl->hear_dms = dms;
+}
+
+bool room_chat_relay::post_bridged(const std::string &via, const std::string &uid,
+                                   const std::string &name, const std::string &text,
+                                   const std::string &to, std::string &why, std::uint64_t *seq) {
+  impl &d = *_impl;
+  const std::string pid = bridged_pid(via, uid);
+  if (pid.empty()) {
+    why = uid.empty() ? "the user id is empty" : "via '" + via + "' is not a system's name";
+    return false;
+  }
+  std::string t = text;
+  if (!clean_chat_text(t, d.limits.text_max, why))
+    return false;
+  room_bridged_user self;
+  const bool present = room_bridged_user_of(d.app, d.room, pid, self);
+  std::string shown = sanitize_utf8(name);
+  for (char &c : shown)
+    if (static_cast<unsigned char>(c) < 0x20 || c == 0x7F)
+      c = ' ';
+  if (shown.find_first_not_of(' ') == std::string::npos)
+    shown = present && !self.name.empty() ? self.name : sanitize_utf8(uid);
+  if (shown.size() > 128)
+    shown.resize(128); // a name the roster would show cut (bridge_limits::name_max)
+  while (!shown.empty() && (static_cast<unsigned char>(shown.back()) & 0xC0) == 0x80)
+    shown.pop_back(); // never half a character
+  if (!shown.empty() && static_cast<unsigned char>(shown.back()) >= 0xC0)
+    shown.pop_back();
+  const std::map<std::string, std::string> roster = d.roster();
+  if (!to.empty()) {
+    if (!d.limits.dms) {
+      why = "direct messages are off on this relay";
+      return false;
+    }
+    if (!present) {
+      why = "a bridged user sends a direct message only while present (room_presence)";
+      return false;
+    }
+    if (!roster.count(to)) {
+      why = "participant '" + to + "' is not in the room";
+      return false;
+    }
+  }
+  chat_message m;
+  m.from = pid;
+  m.name = std::move(shown);
+  m.t = wall_seconds();
+  m.text = std::move(t);
+  m.epoch = d.epoch;
+  m.via = via;
+  if (to.empty()) {
+    d.append_room(m, roster);
+  } else if (!d.append_dm(pid, to, m, why)) {
+    return false;
+  }
+  ++d.st.bridged;
+  if (seq)
+    *seq = m.seq;
+  return true;
 }
 
 room_chat_relay::stats room_chat_relay::take_stats() {

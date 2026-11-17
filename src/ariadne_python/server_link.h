@@ -13,6 +13,10 @@
 //     types; nothing here is JSON.
 //   - Python's answers: replies to clients' calls, which the relay sends on its next room step,
 //     and answers to work the relay waits on, which settle it (a server document's export).
+//   - Bridged users (room chat, docs/roadmap/ARIADNE_CHAT.md): host.room_presence, room_absent and
+//     room_chat_post queue bridge ops here, which the relay applies on its next room step, in
+//     order; the room's posts the program listens to reach it as "room_chat" events, whose value
+//     is a JSON string (room_chat.h's encode_chat_event), so they need no pycvc.
 //   - Startup: the program says when it serves (its ASGI apps have started) or that its startup
 //     failed (ready()), and the script thread when the program has ended (finish()). The relay
 //     waits for one of them before it listens (wait_start()).
@@ -138,6 +142,30 @@ public:
   bool scope_of(const std::string &principal, std::vector<std::string> &prefixes) const;
   std::vector<std::string> take_scope_refreshes();
 
+  // ── bridged users (room chat) ────────────────────────────────────────────────────────────────
+  // The relay's room, which the program's bridge ops name. Set before the program starts.
+  void set_room(std::string room);
+  std::string room() const;
+  // What the program asks of the room's bridged users: queued on the script thread, taken by the
+  // relay on its next room step, in order.
+  struct BridgeOp {
+    enum class Kind { presence, absent, post } kind = Kind::post;
+    std::string via, uid;
+    std::string name, detail; // presence; post: the name shown ("" its presence's)
+    std::string text, to;     // post: the text, and "" the room or a participant's pid
+  };
+  void bridge(BridgeOp op);
+  // The oldest `max` of them (0: all); the rest wait for the next step, in order.
+  std::vector<BridgeOp> take_bridge_ops(std::size_t max = 0);
+  // Which of the room's posts the program hears: participants' posts to the room, and their
+  // direct messages to bridged users (which the relay refuses while it does not).
+  void listen_chat(bool room, bool dms) {
+    hears_room_.store(room);
+    hears_dms_.store(dms);
+  }
+  bool hears_room() const { return hears_room_.load(); }
+  bool hears_dms() const { return hears_dms_.load(); }
+
   // Whether Python can convert DSL values (pycvc is beside the host): the program says so as it
   // starts. Without it the relay answers clients' calls `unavailable` itself, and a server
   // document's python: block fails its load.
@@ -195,6 +223,11 @@ private:
 
   mutable std::mutex disconnects_mu_;
   std::vector<std::string> disconnects_;
+
+  mutable std::mutex bridge_mu_;
+  std::string room_;
+  std::vector<BridgeOp> bridge_ops_;
+  std::atomic<bool> hears_room_{false}, hears_dms_{false};
 
   std::atomic<bool> read_scopes_{false};
   mutable std::mutex scopes_mu_;

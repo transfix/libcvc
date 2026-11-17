@@ -24,6 +24,10 @@
 //     region_reads: auto                 # auto | true | false: read a file plane by plane
 //     transfer_function: { preset: grayscale }   # the §10.1 model form; grayscale by default
 //     children: [ ... ]                  # overlays: drawn on top of the plane
+//   - node: ct_x
+//     type: volume_slice
+//     volume_of: ct_z                    # another plane of ct_z's volume, through its
+//     axis: x                            #   transfer function (no source: of its own)
 //
 // The props seed the node's keys (<node>.slice.*, VolumeSliceNode.h); the keys are live after
 // that, so a slider bound to <node>.slice.index steps through the volume. `region_reads: auto`
@@ -32,7 +36,10 @@
 // (tf_binding.h, target volume_slice), so a tf_editor colours the plane and shows its histogram
 // (for a file read plane by plane, the histogram of the first plane shown, over the file's range).
 // `transfer_function:` takes `preset:` and the model's own keys (color, alpha, isocontours,
-// domain, opacity_cubed, resolution), each replacing the preset's.
+// domain, opacity_cubed, resolution), each replacing the preset's. A node with `volume_of: <id>`
+// shares the volume of the volume_slice node <id> (realized before it) and colours through that
+// node's <id>.transfer_function, so one editor drives every plane: the classic orthoslicer is
+// three such nodes over one volume, read or computed once.
 
 #ifndef CVC_GL_ARIADNE_VOLUME_SLICE_NODES_H
 #define CVC_GL_ARIADNE_VOLUME_SLICE_NODES_H

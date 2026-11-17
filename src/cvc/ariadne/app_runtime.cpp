@@ -65,6 +65,11 @@ void AppRuntime::step_world(std::uint64_t n) {
                    read_or<long long>(app_, stepKey_, 0) + static_cast<long long>(n));
 }
 
+void AppRuntime::pause_world(bool paused) {
+  if (!pausedKey_.empty())
+    write<long long>(app_, pausedKey_, paused ? 1 : 0);
+}
+
 bool AppRuntime::restart_world() {
   app_.world_clock().reset();
   std::vector<std::string> warns;
@@ -93,7 +98,7 @@ AppRuntime::~AppRuntime() {
         e.engine->unload(*e.lane);
       } catch (...) {
       }
-  verbs_->sync.clear(); // the provider outlives us in the registry: it must bind nothing of ours
+  verbs_->sync.clear(); // the provider is rt_'s, which goes after us: it must bind nothing of ours
   verbs_->async.clear();
   verbs_->quit = nullptr;
   verbs_->data.reset();
@@ -512,11 +517,14 @@ void AppRuntime::ensure_intrinsics() {
   intrinsicsRegistered_ = true;
   cvc::app *app = &app_;
   app->exec_async_host(); // build the host on this thread, before a program env needs it
-  // register_action_intrinsics providers run each time a program env is built. Share the verb
-  // table rather than copy it, so every verb registered so far is bound, not only the first.
+  // The document's own provider (Runtime::add_program_intrinsics), not the app's: it runs each
+  // time one of this runtime's program envs is built, and in no other runtime's, so another
+  // document on the app never reaches these verbs and functions, nor this document another's.
+  // Share the verb table rather than copy it, so every verb registered so far is bound, not only
+  // the first.
   std::shared_ptr<Verbs> verbs = verbs_;
-  register_action_intrinsics(app_, [app, verbs](std::shared_ptr<cvc::state_exec::environment> env,
-                                                cvc::state_exec::intrinsics_context &ictx) {
+  rt_.add_program_intrinsics([app, verbs](std::shared_ptr<cvc::state_exec::environment> env,
+                                          cvc::state_exec::intrinsics_context &ictx) {
     namespace se = cvc::state_exec;
     for (const auto &v : verbs->sync) {
       std::function<void()> fn = v.second;
@@ -668,8 +676,8 @@ void AppRuntime::ensure_intrinsics() {
     // A lane on the app's scheduler (an action, a resident) gets the async function, where the
     // program parks, and its sliced form for (name ...) when there is one, which runs the work as
     // the program's own; one on a scheduler of its own (init:) gets the blocking form, when there
-    // is one: there the program can't park. (Only with some: the provider of a runtime that has
-    // gone binds nothing, and its app may be gone too.)
+    // is one: there the program can't park. (Only with some: a runtime that is going has emptied
+    // them, and its app may be going too.)
     const bool parks = !verbs->async_work_functions.empty() &&
                        ictx.sched == static_cast<se::scheduler_base *>(&app->exec_scheduler());
     for (const auto &[name, entry] : verbs->async_work_functions) {
@@ -877,7 +885,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   if (!lr.ok)
     throw std::runtime_error(lr.error.empty() ? ("AppRuntime.load: failed to load " + path)
                                               : lr.error);
-  ensure_intrinsics(); // the (data-*) verbs are every document's
+  ensure_intrinsics(); // the (data-*) verbs are every document's, each its own
   rt_.refresh_program_names();
   run_script_blocks(lr, path);            // a scripting host's python: block, before requires:
   for (const LoadHook &hook : loadHooks_) // ... and the host extensions' parts
@@ -923,11 +931,14 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   seed_keys(lr.keys, new_document);
 
   std::vector<std::string> initErrors;
-  // §init: seeds win over widget defaults. It runs with the document's functions (§6.6).
+  // §init: seeds win over widget defaults. It runs with the document's functions (§6.6), and with
+  // this runtime's verbs and host functions, as an action has them.
   const std::string init = lr.init_script.empty() || !lr.root.functions
                                ? lr.init_script
                                : lr.root.functions->prelude + lr.init_script;
-  run_init(app_, prefix_, init, &initErrors, [this](const std::string &n) { return rt_.has(n); });
+  run_init(
+      app_, prefix_, init, &initErrors, [this](const std::string &n) { return rt_.has(n); },
+      rt_.program_intrinsics());
   for (std::string &e : initErrors) // a failed init: is not fatal, but it must not be silent
     lr.warnings.push_back(std::move(e));
   rt_.set_tick_program(lr.on_tick_script);          // empty = no resident (safe)
@@ -955,6 +966,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   world_.reset();
   stepKey_.clear();
   restartsKey_.clear();
+  pausedKey_.clear();
   // The world: block's vehicles go to the scene, whose world runtime spawns them (a relay reads
   // the rest of the block itself).
   if (const Value *world = find_world_block(lr)) {
@@ -981,6 +993,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
     c.time_key = resolve_bind(prefix_, c.time_key);
     c.tick_key = resolve_bind(prefix_, c.tick_key);
     stepKey_ = scene_clock_keys(c).step;
+    pausedKey_ = scene_clock_keys(c).paused;
     const std::string leaf = std::string(cvc::state::SEPARATOR) + "step";
     if (stepKey_.size() > leaf.size() &&
         stepKey_.compare(stepKey_.size() - leaf.size(), leaf.size(), leaf) == 0)

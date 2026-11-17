@@ -13,7 +13,7 @@ snapshot) with --relay URL and its own args, and waits for the relay to stop
 (the client's last call stops it). It passes when both exit 0 and the relay's output matches each
 --expect. With --client-only the relay is stopped after the client, which must exit with
 --client-status (0) and match --client-expect, and the relay's output still each --expect. --client-env sets the client's environment (its
-CVC_ARIADNE_ROOM_TOKEN, say). --client-credential has the client present the host credential NAME
+CVC_ARIADNE_ROOM_TOKEN, say; {url} in a value is the relay's URL, for arigl's CVC_ARIADNE_RELAY). --client-credential has the client present the host credential NAME
 holding TOKEN (--relay-credential), bound to the relay's origin by a policy file written here,
 as an OIDC sign-in's would be. --client-net-asgi lets the client reach the ASGI app the relay's
 program serves (--net-allow the origin its "serving ASGI on" line names). Both outputs are printed
@@ -85,7 +85,7 @@ def main() -> int:
         env = dict(os.environ)
         for kv in a.client_env:
             name, _, value = kv.partition("=")
-            env[name] = value
+            env[name] = value.replace("{url}", url)
         cred_args = []
         if a.client_credential:
             name, _, token = a.client_credential.partition("=")
