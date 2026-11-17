@@ -42,6 +42,11 @@
 // the legacy library's; the tiles between contour vertices elsewhere are the legacy's (§3, §9
 // item 2).
 //
+// Like the legacy library, the tiler keeps absolute tolerances (from 1e-5 to 1e-11 world units:
+// near points, collinearity, the rounding of curated contours to 10 decimal places), tuned for
+// coordinates of order 1 to 10^4, as Reconstruct's micron traces are; scale data far smaller than
+// that before tiling.
+//
 // Nothing here holds state outside the call: the legacy log4cplus loggers (process-wide) are a
 // log in the call's own context, and what they warned of is the result's `warnings`.
 //
