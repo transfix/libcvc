@@ -190,5 +190,25 @@ check(
     mc.mode() == CC.Mode_Map and same_pose(mc.get_pose(), map_pose),
 )
 
+print("I. Slice mode looks down one axis (headless)")
+sc = CC(app, "slice.cam")
+sc.setZoomSmoothing(0.0)
+sc.setSliceAxis(1)  # down y: x right, z up (VolumeGridRover's XZ view)
+sc.frameSlice(0, 0, 0, 10, 20, 30)
+eye, focal, up = sc.get_pose()
+check("frameSlice -> Mode_Slice, axis y", sc.mode() == CC.Mode_Slice and sc.sliceAxis() == 1)
+check(
+    "centred on the box, looking down +y, z up",
+    close3(focal, (5, 10, 15)) and eye[1] < focal[1] and close3(up, (0, 0, 1)),
+)
+check(
+    "its pose in state",
+    getf(app, "slice.cam.mode") == 4.0 and getf(app, "slice.cam.slice.center.z") == 15.0,
+)
+sc.mouseWheelAt(1.0, 0, 0)  # no renderer: as mouseWheel, about the centre
+check("the wheel zooms the slice scale", abs(getf(app, "slice.cam.slice.scale") - 13.5) < 1e-9)
+sc.toggleMode()
+check("Tab stays in Slice", sc.mode() == CC.Mode_Slice)
+
 print("\n%s (%d failures)" % ("ALL PASS" if fails == 0 else "FAILED", fails))
 sys.exit(1 if fails else 0)

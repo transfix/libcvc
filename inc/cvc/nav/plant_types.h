@@ -26,7 +26,14 @@ class vehicle_plant; // cvc/nav/vehicle_plant.h
 enum class plant_kind : std::uint8_t {
   kinematic, // the fused bicycle (no plant set): byte-identical to before the seam
   jolt,      // a cvc::physics world's vehicles
-  dynamic,   // the dynamic single-track vehicle (cvc::physics::dyn_bike_plant), no physics world
+  dynamic,   // cvc::physics's dynamic plants: dyn_bike_plant, dyn_4w_plant and dyn_boat_plant
+};
+
+// What a plant's vehicles move on (vehicle_plant::medium): the ground, or water. A spawner puts
+// an agent only where its plant's medium is (a boat on water, a car on land).
+enum class plant_medium : std::uint8_t {
+  land,  // wheels on the ground: the kinematic bicycle and every wheeled plant
+  water, // hulls afloat: cvc::physics::dyn_boat_plant
 };
 
 // One agent as nav reads it back: the rear axle (the point nav's bicycle tracks, which has
