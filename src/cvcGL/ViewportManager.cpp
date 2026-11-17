@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib> // atoi: $CVCGL_TEXTURE_UNITS
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/Viewport.h>
@@ -28,8 +29,10 @@
 #include <vtkLight.h>
 #include <vtkLightCollection.h>
 #include <vtkNew.h>
-#include <vtkObjectFactory.h> // vtkStandardNewMacro
-#include <vtkOutputWindow.h>  // route VTK's ERR/WARN to stderr, not a Win32 message box
+#include <vtkObjectFactory.h>      // vtkStandardNewMacro
+#include <vtkOpenGLRenderWindow.h> // limitTextureUnits: the window's GL state
+#include <vtkOpenGLState.h>        // ... and its texture-unit table
+#include <vtkOutputWindow.h>       // route VTK's ERR/WARN to stderr, not a Win32 message box
 #include <vtkPNGWriter.h>
 #include <vtkProp.h>
 #include <vtkPropCollection.h>
@@ -37,6 +40,7 @@
 #include <vtkRenderWindowInteractor.h>
 #include <vtkRenderer.h>
 #include <vtkSmartPointer.h>
+#include <vtkTextureUnitManager.h>
 #include <vtkUnsignedCharArray.h>
 #include <vtkVersionMacros.h> // VTK 9.6 dropped the in-render yield FrameYield::App removes
 #include <vtkWindowToImageFilter.h>
@@ -207,6 +211,25 @@ void syncMirrorProps(Viewport &mirror) {
   while (vtkLight *l = lights->GetNextLight(lit))
     dst->AddLight(l);
 }
+
+// limitTextureUnits: VTK's texture-unit table with `count` units, whatever the GL says (VTK sizes
+// its own from GL_MAX_TEXTURE_IMAGE_UNITS the first time it is asked).
+class CappedTextureUnits : public vtkTextureUnitManager {
+public:
+  static CappedTextureUnits *New();
+  vtkTypeMacro(CappedTextureUnits, vtkTextureUnitManager);
+  void setCount(int n) {
+    delete[] this->TextureUnits;
+    this->NumberOfTextureUnits = n;
+    this->TextureUnits = new bool[n](); // all free
+  }
+  int count() const { return this->NumberOfTextureUnits; }
+
+protected:
+  CappedTextureUnits() = default;
+  ~CappedTextureUnits() override = default;
+};
+vtkStandardNewMacro(CappedTextureUnits);
 } // namespace
 
 struct ViewportManager::Impl {
@@ -283,6 +306,13 @@ struct ViewportManager::Impl {
   int yieldEpoch = -1;
   int rendersThisEpoch = 0;
   unsigned long yieldObserver = 0;
+
+  // limitTextureUnits: the cap (0: none) and the window's StartEvent observer that puts a capped
+  // vtkTextureUnitManager back whenever VTK's GL state has a manager of its own (a fresh context,
+  // a state reset).
+  int unitCap = 0;
+  unsigned long unitCapObserver = 0;
+  void applyUnitCap(vtkObject *, unsigned long, void *);
 
   FrameYield effectiveYield() const {
 #ifdef __EMSCRIPTEN__
@@ -460,6 +490,8 @@ ViewportManager::ViewportManager(SceneGraph &mainScene, int width, int height, b
   m_impl->window->SetOffScreenRendering(offscreen ? 1 : 0);
   m_impl->window->SetSize(width, height);
   m_impl->window->SetNumberOfLayers(1);
+  if (const char *units = std::getenv("CVCGL_TEXTURE_UNITS"))
+    limitTextureUnits(std::atoi(units));
 #ifdef __EMSCRIPTEN__
   // ?frameyield=vtk|app: A/B the frame yield of any page without a rebuild (wins over the app,
   // but never over a lock: Module.cvcglFrameYieldLocked, from cvcgl_wasm_app on an
@@ -557,6 +589,9 @@ ViewportManager::~ViewportManager() {
     if (m_impl->window && m_impl->yieldObserver)
       m_impl->window->RemoveObserver(m_impl->yieldObserver);
     m_impl->yieldObserver = 0;
+    if (m_impl->window && m_impl->unitCapObserver)
+      m_impl->window->RemoveObserver(m_impl->unitCapObserver);
+    m_impl->unitCapObserver = 0;
     // Detach every scene BEFORE the window dies: the scenes hold actors that
     // belong to these renderers, and tearing the window down under them is how
     // offscreen backends crash at exit (see SceneRenderer::close).
@@ -992,6 +1027,30 @@ int ViewportManager::frameHeight() const {
 vtkRenderWindow *ViewportManager::renderWindow() const {
   m_impl->requireOpen();
   return m_impl->window;
+}
+
+void ViewportManager::limitTextureUnits(int n) {
+  m_impl->requireOpen();
+  m_impl->unitCap = std::max(0, n);
+  if (m_impl->unitCap > 0 && !m_impl->unitCapObserver)
+    m_impl->unitCapObserver =
+        m_impl->window->AddObserver(vtkCommand::StartEvent, m_impl.get(), &Impl::applyUnitCap);
+  m_impl->applyUnitCap(nullptr, 0, nullptr);
+}
+
+int ViewportManager::textureUnitLimit() const { return m_impl->unitCap; }
+
+void ViewportManager::Impl::applyUnitCap(vtkObject *, unsigned long, void *) {
+  auto *gl = vtkOpenGLRenderWindow::SafeDownCast(window);
+  if (unitCap <= 0 || !gl || !gl->GetState())
+    return;
+  vtkOpenGLState *state = gl->GetState();
+  vtkTextureUnitManager *now = state->GetTextureUnitManager();
+  if (auto *capped = CappedTextureUnits::SafeDownCast(now); capped && capped->count() == unitCap)
+    return;
+  vtkNew<CappedTextureUnits> capped;
+  capped->setCount(unitCap);
+  state->SetTextureUnitManager(capped);
 }
 
 void ViewportManager::setFrameYield(FrameYield mode) {

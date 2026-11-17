@@ -1012,6 +1012,11 @@ target_link_libraries(cvcgl_imgui_windows_menu PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_windows_menu COMMAND cvcgl_imgui_windows_menu)
 # A radio stacks its options and a radio_row lines them up; a click through ImGui's own input
 # stores the option (or its mapped value) and runs the on:. No window, no GL.
+# ImGuiBackend's tab bar and list (Kind::Tabs, Kind::List) through ImGui's own mouse input, on a
+# bare context (no GL).
+add_executable(cvcgl_imgui_tabs_list test/cvcgl_imgui_tabs_list.cpp)
+target_link_libraries(cvcgl_imgui_tabs_list PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_tabs_list COMMAND cvcgl_imgui_tabs_list)
 add_executable(cvcgl_imgui_radio test/cvcgl_imgui_radio.cpp)
 target_link_libraries(cvcgl_imgui_radio PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)

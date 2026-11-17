@@ -52,9 +52,9 @@
 //
 // Values as text (state keys, CLI flags): numbers in their shortest round-trip form (so a struct
 // read back from the tree is the same bit for bit), bools as 1 / 0 (true/false, yes/no and on/off
-// are read too), enums by name, lists as JSON arrays ([1, 2.5] or ["a", "b"]; a DSL-printed list
-// (1 2.5) and bare 1,2.5 or 1 2.5 are read too). Everything here is header-only and holds no
-// state of its own: the table is constexpr data.
+// are read too), enums by name (with '-' read as '_'), lists as JSON arrays ([1, 2.5] or ["a",
+// "b"]; a DSL-printed list (1 2.5) and bare 1,2.5 or 1 2.5 are read too). Everything here is
+// header-only and holds no state of its own: the table is constexpr data.
 
 #ifndef CVC_CORE_PARAM_TABLE_H
 #define CVC_CORE_PARAM_TABLE_H
@@ -312,10 +312,19 @@ template <class E> bool enum_name(E e, std::string &out) {
   return found;
 }
 
+// By name, with '-' read as '_' ("critical-points" for critical_points, as a CLI flag spells it).
 template <class E> bool enum_from_name(std::string_view s, E &out) {
   bool found = false;
+  const auto same = [](std::string_view a, std::string_view b) {
+    if (a.size() != b.size())
+      return false;
+    for (std::size_t i = 0; i < a.size(); ++i)
+      if (a[i] != b[i] && !(a[i] == '-' && b[i] == '_'))
+        return false;
+    return true;
+  };
   boost::mp11::mp_for_each<boost::describe::describe_enumerators<E>>([&](auto D) {
-    if (!found && s == D.name) {
+    if (!found && same(s, D.name)) {
       out = D.value;
       found = true;
     }

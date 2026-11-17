@@ -162,6 +162,15 @@ struct field_load {
   double immersed_volume = 0.0; // m^3, summed over the fields
 };
 
+// The water at a point (world::water_at): the first fluid field, in id order, whose box holds the
+// point in x and y and reaches below it. A boat's propeller and rudder read it too.
+struct water_sample {
+  bool wet = false;     // under the fluid's top and above its bottom, at a density > 0
+  double depth = 0.0;   // m below the top: the free surface's height, or the box's top
+  double density = 0.0; // kg/m^3
+  vec3 velocity;        // m/s, the water's: the surface's, or the velocity volumes'
+};
+
 } // namespace physics
 } // namespace cvc
 

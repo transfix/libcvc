@@ -935,6 +935,48 @@ optional `on:` run after each pick:
 
 A backend with no radio buttons draws a radio as a combo.
 
+**Tabs.** A `tabs:` widget is a tab bar bound to a key. Over its `children:` it is a tab container:
+each child is one tab, titled by its `tab:` (else its `label:`, else its place), and only the
+selected tab's subtree is drawn under the bar. Over `options:` alone (with `values:`, as a radio
+takes them) it is a bar and nothing more, a switch. `bind:` holds the selected tab's title (or its
+value); a write to the key from anywhere selects that tab, and `on:` runs after the user picks
+one. Without `bind:` the selection is kept at `tree.<id>.tab`.
+
+```yaml
+      - type: tabs
+        id: side_panel
+        bind: grid.panel                  # Probe | Point classes | Segmentation
+        children:
+          - { type: group, tab: Probe, children: [ ... ] }
+          - { type: group, tab: Point classes, children: [ ... ] }
+          - { type: group, tab: Segmentation, children: [ ... ] }
+      - tabs: View                        # VolumeGridRover's view switch
+        bind: grid.view
+        options: [XY, XZ, ZY]
+        values: [xy, xz, zy]
+```
+
+**Lists.** A `list:` shows the rows of a state array, as `repeat:` counts it: the row count at
+`bind:` and row `i`'s fields at `<bind>.<i>.<field>` (what `host.set_table` and
+`state-from-json` write). Each row shows its `field:` (`name` by default); a click selects it,
+writing its index to `current:` (default `<bind>.current`, `-1` for none) and running `on:`.
+`add: true` gives an Add button that appends a row, its fields from `new_item:` (`{n}` in a value
+is the row's number from 1), and selects it; `remove: true` gives a Remove button that deletes the
+selected row, moving the rows after it up (their whole subtrees). `on_add:` and `on_remove:` run
+after an edit, `rows:` (6) is how many rows show at once.
+
+```yaml
+      - list: Point classes
+        bind: grid.classes
+        add: true
+        remove: true
+        new_item: { name: "class {n}", color: "1,0,0", radius: 2 }
+```
+
+A backend with no tab bar draws `tabs:` as a row of radio buttons, and one with no list draws a
+`list:` as stacked radio buttons with the two buttons under them, so a terminal host shows both.
+(`tabs_list_test`, `cvcgl_imgui_tabs_list`.)
+
 ### 5.4 `scene:` sources and custom node types
 
 A `scene:` node's `type:` is a built-in (`geometry`, `volume`, `volren`, `volslice`,
@@ -4278,6 +4320,20 @@ arigl snapshot --mp4 crates.mp4 --seconds 5 --width 1280 --height 720 \
   --set viewers.main.camera.mode=2 --set viewers.main.camera.track.target=crate_b \
   --set viewers.main.camera.track.back=14 --set viewers.main.camera.track.height=5 \
   examples/ariadne/documents/terrain_lab.ari
+```
+
+**The browser's texture units, natively.** VTK sizes its texture-unit table from
+`GL_MAX_TEXTURE_IMAGE_UNITS`: 32 or more on a desktop GL, 16 in WebGL2. In the browser the
+low-memory mapper also takes a unit for each vertex array it draws from (positions, normals,
+texture coordinates, ids), so a node's own shader textures (`setShaderTexture`, shared shader
+inputs) get what is left. A draw that runs out goes without the texture, and VTK logs it every
+draw. `CVCGL_LOWMEM_MAPPER=force CVCGL_TEXTURE_UNITS=16` draws natively with the browser's mapper
+and its 16 units (`ViewportManager::limitTextureUnits`), and cvcGL names the first texture each
+node runs out of:
+
+```
+CVCGL_LOWMEM_MAPPER=force CVCGL_TEXTURE_UNITS=16 \
+  arigl snapshot --png lab.png examples/ariadne/documents/terrain_lab.ari
 ```
 
 The cvcGL examples
