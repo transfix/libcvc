@@ -4250,6 +4250,20 @@ arigl snapshot --mp4 crates.mp4 --seconds 5 --width 1280 --height 720 \
   examples/ariadne/documents/terrain_lab.ari
 ```
 
+**The browser's texture units, natively.** VTK sizes its texture-unit table from
+`GL_MAX_TEXTURE_IMAGE_UNITS`: 32 or more on a desktop GL, 16 in WebGL2. In the browser the
+low-memory mapper also takes a unit for each vertex array it draws from (positions, normals,
+texture coordinates, ids), so a node's own shader textures (`setShaderTexture`, shared shader
+inputs) get what is left. A draw that runs out goes without the texture, and VTK logs it every
+draw. `CVCGL_LOWMEM_MAPPER=force CVCGL_TEXTURE_UNITS=16` draws natively with the browser's mapper
+and its 16 units (`ViewportManager::limitTextureUnits`), and cvcGL names the first texture each
+node runs out of:
+
+```
+CVCGL_LOWMEM_MAPPER=force CVCGL_TEXTURE_UNITS=16 \
+  arigl snapshot --png lab.png examples/ariadne/documents/terrain_lab.ari
+```
+
 The cvcGL examples
 (`ariadne_hello`, `ariadne_stream`, `ariadne_conference`, `ariadne_terminal`) still build;
 `arigl` is meant to replace them once it does everything they do.
