@@ -155,6 +155,12 @@ VolumeNode::VolumeNode(cvc::app &ctx, const std::string &statePath, const std::s
   // Configure the smart volume mapper
   m_mapper->SetAutoAdjustSampleDistances(m_autoAdjustSampleDistances ? 1 : 0);
   m_mapper->SetSampleDistance(m_sampleDistance);
+#ifdef CVC_VTK_HAS_FINISH_EVERY_RENDER
+  // A still render queues its ray cast and returns, rather than waiting for the GPU to finish the
+  // frame so far (VTK's glFinish, kept only for a render that adjusts its sample distance by its
+  // time: an interactive one). The pixels are the same. RENDER_PERF_ROADMAP.md Phase 6.
+  m_mapper->FinishEveryRenderOff();
+#endif
 
   // Volumetric scattering / self-shadowing (off by default — a plain absorption
   // volume). vtkSmartVolumeMapper forwards these to its GPU ray-cast delegate.
