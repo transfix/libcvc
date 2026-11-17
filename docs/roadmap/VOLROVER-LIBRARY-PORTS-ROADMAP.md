@@ -1704,6 +1704,10 @@ not as follow-ups.
      menu's state, terrain_lab's extents and building library, the nav city demos' frame state).
    - The allowlist ends at these entries (`tools/singleton_scan/allowlist.txt` says why each
      stays), and the ratchet stays.
-   - Still open: the CUDA volume cache is one per app (`raycast_cuda_cache_of(app)`), each block
-     keyed by device, not one per device shared by the apps on it. Sharing it needs an object
-     that owns the device and that the host hands to each app.
+   - The CUDA volume cache is per device, and the apps the host hands it to share it. A
+     `cuda_device_caches` holds one cache per device, each with its own budget;
+     `raycast_cuda_cache_of(app).share(caches)` points an app at one before its first render, and
+     an app not handed one keeps its own. The option had it "on the list", but nothing about it is
+     process-wide: the host owns it, as it owns the device, so it adds no allowlist line. The
+     content-generation stamps come from the caches' counter, so apps sharing a voxel buffer never
+     stamp two contents alike.
