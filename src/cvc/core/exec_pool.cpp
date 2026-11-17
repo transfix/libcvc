@@ -103,6 +103,8 @@ struct pool_state {
   std::condition_variable purge_cv; // a host body a caller ran has ended
   // The threaded pump_all calls in progress, until each has run its deferred callbacks.
   std::vector<call_state *> calls;
+  // The threads in a pump_all of this pool now, as its caller, threaded or not (in_pump_all).
+  std::vector<std::thread::id> callers;
   std::size_t next_call = 0;        // where workers start looking among the calls (round robin)
   bool stopping = false;
   pool_stats stats;
@@ -216,6 +218,9 @@ std::optional<std::size_t> take_group(pool_state &p, call_state &c, int thread, 
     }
     p.stats.skipped += c.remaining();
     c.front = c.back;
+    // The call may be complete now: its caller may be waiting for a worker (CVC_EXEC_FORCE_MOVE
+    // refuses it the groups it pumped last), so tell it.
+    c.cv.notify_all();
     return std::nullopt;
   }
   if (p.force_move) {
@@ -485,6 +490,21 @@ std::vector<state_exec::exec_group *> exec_pool::pump_all(
            "pump_all from a host_proxied body or an on_complete callback");
   }
 #endif
+  // This thread is this pool's caller until pump_all returns, its deferred callbacks run
+  // (in_pump_all).
+  struct caller_listing {
+    pool_state &p;
+    explicit caller_listing(pool_state &pool) : p(pool) {
+      std::lock_guard<std::mutex> lock(p.m);
+      p.callers.push_back(std::this_thread::get_id());
+    }
+    ~caller_listing() {
+      std::lock_guard<std::mutex> lock(p.m);
+      p.callers.erase(std::find(p.callers.begin(), p.callers.end(), std::this_thread::get_id()));
+    }
+    caller_listing(const caller_listing &) = delete;
+    caller_listing &operator=(const caller_listing &) = delete;
+  } listed_caller(p);
   call_state c;
   c.pool = &p;
   c.seq = p.call_seq.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -739,7 +759,15 @@ std::vector<state_exec::exec_group *> exec_pool::pump_all(
           c.helpers_pending = std::max<std::size_t>(c.helpers_pending, p.threads);
           p.work_cv.notify_all();
         }
-        c.cv.wait(lk);
+        // With groups not started (only under CVC_EXEC_FORCE_MOVE: the caller takes any other),
+        // wait no longer than the deadline, then skip them here on time; a busy worker might reach
+        // the call much later, or never wake this caller. In slices of at most a second: a far
+        // deadline (time_point::max()) is not handed to wait_until, where some libraries overflow.
+        if (!drain && c.timed && c.remaining() > 0)
+          c.cv.wait_for(lk, std::min<clock_type::duration>(c.deadline - clock_type::now(),
+                                                           std::chrono::seconds(1)));
+        else
+          c.cv.wait(lk);
       }
     };
     try {
@@ -805,6 +833,19 @@ std::vector<state_exec::exec_group *> exec_pool::pump_all(
 }
 
 unsigned exec_pool::threads() const { return impl_->threads; }
+
+bool exec_pool::in_pump_all() const {
+  const std::thread::id self = std::this_thread::get_id();
+  std::lock_guard<std::mutex> lock(impl_->m);
+  if (std::find(impl_->callers.begin(), impl_->callers.end(), self) != impl_->callers.end())
+    return true;
+  // A worker pumps only a threaded call's groups, and a call is listed once its entries are built.
+  for (const call_state *c : impl_->calls)
+    for (const entry &e : c->entries)
+      if (e.pumper.v.load(std::memory_order_relaxed) == self)
+        return true;
+  return false;
+}
 
 pool_stats exec_pool::stats() const {
   std::lock_guard<std::mutex> lock(impl_->m);

@@ -19,6 +19,7 @@
 #include <cvc/ariadne/stream/stream_channel.h>
 #include <cvc/state/state.h>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,10 @@
 namespace cvc {
 
 class app;
+
+namespace state_exec {
+class async_scheduler; // stream_params::scheduler; <cvc/state/state_exec/async_scheduler.h>
+} // namespace state_exec
 
 namespace ariadne {
 namespace stream {
@@ -65,6 +70,11 @@ struct stream_params {
   std::size_t producer_working_set = 2;     // slabs reserved for the producer (double-buffer)
   std::size_t in_flight_per_subscriber = 1; // slab a consumer holds while draining/rendering
   double heartbeat_hz = 10.0;               // cap on seq-tick posts (0 => post every seq)
+  // Where the stream posts its seq and lifecycle events, from the producer thread too: the opening
+  // program's group's scheduler (its ictx.host->parking_scheduler(), STATE_EXEC_THREADED.md 4.9).
+  // Null: the app's exec scheduler (group 0), as before. It must outlive the stream, or the stream
+  // must be re-pointed elsewhere first (retarget).
+  cvc::state_exec::async_scheduler *scheduler = nullptr;
 };
 
 class stream {
@@ -81,6 +91,14 @@ public:
   // resolves the identical key. A consumer (e.g. StreamTextureBinding) that knows
   // (root_path, id) uses this to look the channel up; token() returns it.
   static std::string registry_key(const std::string &root_path, const std::string &id);
+
+  // Post from now on to `to` if this stream posts to `from`, and say whether it did: the document
+  // that owns it (stream_intrinsics' retarget_document_streams) takes it along when its programs
+  // move to another scheduler, so `from` may go once no stream names it. It returns with no post to
+  // `from` in flight; a post already made stays where it went. Host thread, between pumps.
+  bool retarget(cvc::state_exec::async_scheduler *from, cvc::state_exec::async_scheduler *to);
+  // Tests: the scheduler it posts to now.
+  cvc::state_exec::async_scheduler *scheduler_for_test();
 
   stream(const stream &) = delete;
   stream &operator=(const stream &) = delete;
@@ -133,6 +151,11 @@ private:
   stream(app &ctx, std::string id);
 
   app &ctx_;
+  // Where events go (stream_params::scheduler). Read by every post, on the producer thread too,
+  // and changed by retarget, so both hold sched_mu_: a retarget returns with no post to the old
+  // scheduler in flight.
+  std::mutex sched_mu_;
+  cvc::state_exec::async_scheduler *sched_ = nullptr;
   std::string id_;
   std::string scope_;  // root_path this stream was opened under
   std::string token_;  // == registry_key(scope_, id_): canonical descriptor path + registry key
@@ -144,7 +167,7 @@ private:
   std::atomic<std::int64_t> last_post_ns_{0};
   std::shared_ptr<frame_pool> pool_;
   std::unique_ptr<stream_channel> channel_;
-  std::vector<state::state_ptr> descriptor_pins_; // root-child..node ancestor pins (H1)
+  cvc::pin_vector descriptor_pins_; // root-child..node ancestor pins (H1), released leaf first
   state::handle descriptor_;
   state::handle stats_node_;
   // True only after a fully successful open(). A failed open() (token collision

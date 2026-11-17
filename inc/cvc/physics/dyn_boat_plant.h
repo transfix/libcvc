@@ -154,8 +154,9 @@ public:
   cvc::nav::plant_medium medium() const override { return cvc::nav::plant_medium::water; }
   // Removes the boats of an earlier attach() and adds one per agent. Throws cvc::physics_error
   // for a tick that is not a whole number of world steps, a start with no water under it, water
-  // shallower than the boat's draft, or a boat too heavy to float; a refused attach leaves none
-  // of its boats in the world (the earlier ones are gone).
+  // shallower than the boat's draft (the field's box, or a body without mass, such as the terrain,
+  // above the boat's deepest point), or a boat too heavy to float; a refused attach leaves none of
+  // its boats in the world (the earlier ones are gone).
   void attach(int n, const cvc::nav::plant_state *start,
               const cvc::world_units::normalized_frame &frame, double dt) override;
   // The hull's origin, the heading, the forward speed over the ground there, the steering (the
@@ -230,6 +231,9 @@ public:
   // (kg/m^3): the draft at which the hull_mesh displaces the hull's mass. Throws
   // cvc::physics_error for a boat without a hull_mesh, or one too heavy to float.
   static double float_height(const boat_desc &d, double mass, double density);
+  // How deep the boat reaches below the waterline there (m): its keel, or its propeller or rudder
+  // where they reach deeper. Throws as float_height does.
+  static double draft(const boat_desc &d, double mass, double density);
 
   const dyn_boat_plant_options &options() const { return _o; }
 

@@ -1672,6 +1672,19 @@ GeometryNode::sharedShaderInputs(const std::string &key) const {
   return it == m_sharedInputs.end() ? nullptr : it->second;
 }
 
+bool GeometryNode::shaderUniformf(const std::string &name, float &v) const {
+  const auto it = m_uniformsF.find(name);
+  if (it == m_uniformsF.end())
+    return false;
+  v = it->second;
+  return true;
+}
+
+vtkTextureObject *GeometryNode::shaderTexture(const std::string &name) const {
+  const auto it = m_shaderTextures.find(name);
+  return it == m_shaderTextures.end() ? nullptr : it->second.Get();
+}
+
 void GeometryNode::setShaderTexture(const std::string &name, vtkTextureObject *tex) {
   runOnMainThread([this, name, tex]() {
     if (tex)

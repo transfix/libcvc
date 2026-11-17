@@ -204,6 +204,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/ph/compose.h
   ../../inc/cvc/ph/mat3.h
   ../../inc/cvc/ph/microgrid.h
+  ../../inc/cvc/ph/query.h
   ../../inc/cvc/ph/optim.h
   ../../inc/cvc/ph/rff.h
   ../../inc/cvc/ph/rng.h
@@ -524,6 +525,7 @@ set(SOURCE_FILES
   nav/dyn4_ledger.cpp
   ph/compose.cpp
   ph/microgrid.cpp
+  ph/query.cpp
   ph/se2_data.cpp
   ph/se2_model.cpp
   ph/se2_train.cpp
@@ -1638,6 +1640,9 @@ list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 # The document a relay runs (arisrv --doc) and the namespaces it publishes.
 list(APPEND SOURCE_FILES ariadne/server_document.cpp)
 list(APPEND INCLUDE_FILES ../../inc/cvc/ariadne/server_document.h)
+# Adaptive quality (OCEAN-AND-WEATHER-ROADMAP.md §10.10, O21): the frame-time loop and its tiers.
+list(APPEND SOURCE_FILES ariadne/scene_quality.cpp)
+list(APPEND INCLUDE_FILES ../../inc/cvc/ariadne/scene_quality.h)
 # The world's rules (ARIADNE_WORLDS.md WD2): revisioned sections, the world: block, and the four
 # rules sections on a room's wire.
 list(APPEND SOURCE_FILES ariadne/section.cpp ariadne/world_rules.cpp ariadne/conference/room_rules.cpp)

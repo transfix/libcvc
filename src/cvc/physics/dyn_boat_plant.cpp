@@ -18,6 +18,7 @@
 #include <cvc/physics/dyn_boat_plant.h>
 #include <cvc/physics/hull.h>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <variant>
@@ -228,6 +229,16 @@ std::vector<std::string> dyn_boat_desc::presets() { return {"launch", "jonboat"}
 
 // ── hydrostatics ────────────────────────────────────────────────────────────────────────────
 
+double dyn_boat_plant::draft(const boat_desc &d, double mass, double density) {
+  const double fh = float_height(d, mass, density);
+  double deepest = d.propeller.position.z;
+  for (const vec3 &v : d.hull.hull->vertices)
+    deepest = std::min(deepest, v.z);
+  if (d.rudder.area > 0.0)
+    deepest = std::min(deepest, d.rudder.position.z);
+  return -(fh + deepest);
+}
+
 double dyn_boat_plant::float_height(const boat_desc &d, double mass, double density) {
   need(d.hull.hull && !d.hull.hull->triangles.empty(), "the boat's hull needs a hull_mesh");
   need(std::isfinite(mass) && mass > 0.0, "the hull's mass must be > 0");
@@ -377,13 +388,30 @@ void dyn_boat_plant::place(const cvc::nav::plant_state &start, const dyn_boat_de
   a.rear = -x0;
   a.tan_max = a.L / desc.turn_radius;
   a.max_steer = det::atan(a.tan_max);
+  // The deepest the boat reaches (its keel, propeller or rudder) and its top, body z.
+  double deepest = std::min(keel, desc.boat.propeller.position.z), top_z = keel;
+  if (desc.boat.rudder.area > 0.0)
+    deepest = std::min(deepest, desc.boat.rudder.position.z);
+  for (const vec3 &v : mesh.vertices)
+    top_z = std::max(top_z, v.z);
+  // Water under it as deep as it reaches: the field's box, and no ground in the way. The field
+  // knows its box and not the terrain inside it, so a ray from the hull's top down to its deepest
+  // point finds a shore or a shoal (a body without mass) the box would not.
+  const auto deep_enough = [&](double fh) {
+    need(w.water_at({p.x, p.y, level + fh + deepest + 1e-9}).wet,
+         "the water at the start is shallower than the boat's draft");
+    const std::optional<ray_hit> hit =
+        w.raycast({p.x, p.y, level + fh + top_z}, {p.x, p.y, level + fh + deepest});
+    need(!hit || w.get_body(hit->body).mass > 0.0,
+         "the ground at the start (" + std::to_string(p.x) + ", " + std::to_string(p.y) +
+             ") is above the boat's draft: it is aground");
+  };
   // The mass: as given, or the engine's from the density (the boat added first, then floated).
   double mass = desc.boat.hull.mass;
   const quat rot = about_z(start.heading);
   if (mass > 0.0) {
     const double fh = float_height(desc.boat, mass, top.density);
-    const water_sample under = w.water_at({p.x, p.y, level + fh + keel + 1e-9});
-    need(under.wet, "the water at the start is shallower than the boat's draft");
+    deep_enough(fh);
     a.boat = w.add_boat(desc.boat, {p.x, p.y, level + fh}, rot);
     a.hull = w.boat_state(a.boat).hull;
   } else {
@@ -393,8 +421,7 @@ void dyn_boat_plant::place(const cvc::nav::plant_state &start, const dyn_boat_de
     double fh = 0.0;
     try {
       fh = float_height(desc.boat, mass, top.density);
-      need(w.water_at({p.x, p.y, level + fh + keel + 1e-9}).wet,
-           "the water at the start is shallower than the boat's draft");
+      deep_enough(fh);
     } catch (...) {
       w.remove_boat(a.boat);
       throw;

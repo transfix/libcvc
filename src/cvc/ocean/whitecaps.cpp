@@ -23,10 +23,12 @@
 // whitecaps.cpp — the open sea's foam coverage and Monahan's threshold (see whitecaps.h).
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cvc/ocean/fft.h>
 #include <cvc/ocean/whitecaps.h>
+#include <initializer_list>
 #include <stdexcept>
 
 namespace cvc {
@@ -108,11 +110,12 @@ double smooth01(double x) {
   return x * x * (3.0 - 2.0 * x);
 }
 
-// n - 0.5 at 16 quantiles (the midpoints of 16 equal shares) of the fray noise's distribution,
-// n = 0.65 v1 + 0.35 v2, each v a smoothstep-weighted bilinear mix of four independent uniforms
-// at an independent uniform point in its cell: 4096 draws from a fixed xorshift.
-std::vector<double> fray_quantiles() {
-  std::uint64_t x = 0x9e3779b97f4a7c15ull;
+// `count` quantiles (the midpoints of equal shares) of the distribution of n = sum of w_i v_i, each
+// v a smoothstep-weighted bilinear mix of four independent uniforms at an independent uniform
+// point in its cell: 4096 draws from a fixed xorshift started at `seed`.
+std::vector<double> noise_quantiles(std::uint64_t seed, std::initializer_list<double> w,
+                                    std::size_t count) {
+  std::uint64_t x = seed;
   auto uni = [&x] {
     x ^= x << 13;
     x ^= x >> 7;
@@ -126,13 +129,36 @@ std::vector<double> fray_quantiles() {
     return lo + (hi - lo) * fy;
   };
   std::vector<double> n(4096);
-  for (double &v : n)
-    v = 0.65 * value_noise() + 0.35 * value_noise();
+  for (double &v : n) {
+    v = 0.0;
+    for (double wi : w) // in order: the draws are the fray's as they were with two weights
+      v += wi * value_noise();
+  }
   std::sort(n.begin(), n.end());
-  std::vector<double> q(16);
+  std::vector<double> q(count);
   for (std::size_t i = 0; i < q.size(); ++i)
-    q[i] = n[(2 * i + 1) * n.size() / (2 * q.size())] - 0.5;
+    q[i] = n[(2 * i + 1) * n.size() / (2 * q.size())];
   return q;
+}
+
+// n - 0.5 at 16 quantiles of the fray noise's distribution, n = 0.65 v1 + 0.35 v2.
+std::vector<double> fray_quantiles() {
+  std::vector<double> q = noise_quantiles(0x9e3779b97f4a7c15ull, {0.65, 0.35}, 16);
+  for (double &v : q)
+    v -= 0.5;
+  return q;
+}
+
+// The windrow noise's distribution (foam_look's w = 0.45 v1 + 0.3 v2 + 0.25 v3) at 64 quantiles.
+std::vector<double> windrow_quantiles() {
+  return noise_quantiles(0x5851f42d4c957f2dull, {0.45, 0.30, 0.25}, 64);
+}
+
+// A texel of an n-texel tile at world coordinate x, as the shaders pick it: the nearest, texel i
+// holding the field at i tile / n.
+int tile_texel(double x, int n, double tile_m) {
+  const long long i = static_cast<long long>(std::floor(x * double(n) / tile_m + 0.5)) % n;
+  return int(i < 0 ? i + n : i);
 }
 
 } // namespace
@@ -259,6 +285,320 @@ double foam_field::bias_for(double share) const {
 double foam_field::below(double j) const {
   const auto it = std::lower_bound(_j.begin(), _j.end(), float(j));
   return double(it - _j.begin()) / double(_j.size());
+}
+
+// ── persistent foam ─────────────────────────────────────────────────────────────────────────────
+
+double foam_inject(double j, double bias, double ramp) { return smooth01((bias - j) / ramp); }
+
+void foam_step(foam_state &s, double inject, double dt_s, const foam_persistence &p) {
+  const double dt = std::clamp(dt_s, 0.0, std::max(p.max_dt_s, 0.0));
+  inject = std::clamp(inject, 0.0, 1.0);
+  auto keep = [dt](double tau) { return tau > 0.0 ? std::exp(-dt / tau) : 0.0; };
+  const double gain = inject * std::max(p.build_per_s, 0.0) * dt;
+  s.foam = std::clamp(s.foam * keep(p.decay_s) + gain, 0.0, 1.0);
+  s.bubbles = std::clamp(s.bubbles * keep(p.bubble_decay_s) + gain * p.bubble_gain, 0.0, 1.0);
+  s.crest = inject;
+  const double x = std::clamp((inject - 0.45) / 0.5, 0.0, 1.0);
+  s.spray = std::max(s.spray * keep(p.spray_decay_s), x * x * (3.0 - 2.0 * x));
+}
+
+double foam_look(double foam, double windrow) {
+  return smooth01((foam * (0.1 + 1.6 * windrow) - 0.35) / 0.3);
+}
+
+foam_history::foam_history(const std::vector<h0_field> &cascades, const foam_params &p,
+                           const foam_persistence &q, const foam_history_params &h)
+    : _h(cascades), _p(p), _q(q), _hp(h) {
+  if (cascades.empty())
+    throw std::invalid_argument("foam_history: no cascades");
+  if (!(p.spacing_m > 0.0) || !(p.ramp > 0.0) || p.mesh_m < 0.0 || p.mesh_samples < 1)
+    throw std::invalid_argument("foam_history: spacing_m and ramp must be > 0, mesh_m >= 0");
+  if (!(q.decay_s > 0.0) || !(q.build_per_s >= 0.0) || q.cascades < 1 || !(q.share >= 0.0) ||
+      !(q.share < 1.0))
+    throw std::invalid_argument(
+        "foam_history: decay_s > 0, build_per_s >= 0, cascades >= 1 and share in [0, 1)");
+  if (!(h.step_s > 0.0) || !(h.dt_s > 0.0) || h.samples_s.empty())
+    throw std::invalid_argument("foam_history: step_s and dt_s must be > 0, samples_s not empty");
+  for (double s : h.samples_s)
+    if (!(s >= 0.0))
+      throw std::invalid_argument("foam_history: a sample before the window's end");
+  for (const h0_field &c : cascades) {
+    if (c.n < 2 || !(c.tile_m > 0.0) || c.texels.size() != std::size_t(c.n) * c.n * 4)
+      throw std::invalid_argument("foam_history: an empty or malformed cascade");
+    _side = std::max(_side, c.tile_m);
+  }
+  _np = std::min(cascades.size(), std::size_t(q.cascades));
+  _window = h.window_s > 0.0 ? h.window_s : 2.0 * q.decay_s;
+  _end = _window + *std::max_element(h.samples_s.begin(), h.samples_s.end());
+  _j.resize(_np);
+  _jmin.resize(_np);
+  for (std::size_t c = 0; c < _np; ++c) {
+    _step.push_back(h.step_s * std::sqrt(cascades[c].tile_m / _side));
+    const std::size_t evals = std::size_t(std::ceil(_end / _step.back())) + 1;
+    _j[c].resize(evals);
+    for (std::size_t e = 0; e < evals; ++e)
+      _units.push_back({c, e, false});
+  }
+  _js.assign(h.samples_s.size(), std::vector<std::vector<float>>(cascades.size()));
+  for (std::size_t s = 0; s < h.samples_s.size(); ++s)
+    for (std::size_t c = 0; c < cascades.size(); ++c)
+      _units.push_back({c, s, true});
+  if (p.fray > 0.0)
+    _fray_q = fray_quantiles();
+  const std::vector<double> w = windrow_quantiles();
+  _look.resize(257);
+  for (std::size_t i = 0; i < _look.size(); ++i) {
+    double sum = 0.0;
+    for (double v : w)
+      sum += foam_look(double(i) / 256.0, v);
+    _look[i] = sum / double(w.size());
+  }
+}
+
+bool foam_history::step(std::size_t n) {
+  std::size_t todo = units() - _done;
+  if (n > 0)
+    todo = std::min(todo, n);
+  for (; todo > 0; --todo, ++_done) {
+    const unit u = _units[_done];
+    const h0_field &h = _h[u.cascade];
+    if (u.sample) {
+      const double t = _hp.t0_s + _window + _hp.samples_s[u.index];
+      _js[u.index][u.cascade] = cascade_jacobian(h, fft_plan(h.n), _p, t);
+    } else {
+      const double t = _hp.t0_s + double(u.index) * _step[u.cascade];
+      std::vector<std::vector<float>> &js = _j[u.cascade];
+      js[u.index] = cascade_jacobian(h, fft_plan(h.n), _p, t);
+      if (u.index + 1 == js.size()) { // the history is whole: each texel's least J in it
+        std::vector<float> &m = _jmin[u.cascade];
+        m = js[0];
+        for (std::size_t k = 1; k < js.size(); ++k)
+          for (std::size_t i = 0; i < m.size(); ++i)
+            m[i] = std::min(m[i], js[k][i]);
+      }
+    }
+    if (_done + 1 == units())
+      lattice();
+  }
+  return ready();
+}
+
+void foam_history::lattice() {
+  _dt = std::min(_hp.dt_s, std::max(_q.max_dt_s, 1e-6));
+  const std::size_t ns = _hp.samples_s.size(), nc = _h.size();
+  _at.resize(ns);
+  for (std::size_t s = 0; s < ns; ++s)
+    _at[s] = std::lround((_window + _hp.samples_s[s]) / _dt);
+  // foam_field's lattice: over the largest tile (whole periods of its waves), at its spacing, or
+  // the mesh's vertices with q x q points a cell.
+  const bool mesh = _p.mesh_m > 0.0;
+  const int m = std::max(1, int(std::lround(_side / (mesh ? _p.mesh_m : _p.spacing_m))));
+  const double sp = _side / double(m);
+  const int q = mesh ? _p.mesh_samples : 1;
+  std::vector<std::array<double, 4>> pts; // x, y and, with the mesh, the place in its cell
+  for (int iy = 0; iy < m; ++iy)
+    for (int ix = 0; ix < m; ++ix)
+      for (int sy = 0; sy < q; ++sy)
+        for (int sx = 0; sx < q; ++sx) {
+          const double u = mesh ? (sx + 0.5) / q : 0.0, w = mesh ? (sy + 0.5) / q : 0.0;
+          pts.push_back({(ix + u) * sp, (iy + w) * sp, u, w});
+        }
+  auto texel_of = [&](std::size_t c, double x, double y) {
+    const int n = _h[c].n;
+    return std::size_t(tile_texel(y, n, _h[c].tile_m)) * std::size_t(n) +
+           std::size_t(tile_texel(x, n, _h[c].tile_m));
+  };
+  _texel.assign(_np, std::vector<std::uint32_t>(pts.size()));
+  for (std::size_t c = 0; c < _np; ++c)
+    for (std::size_t i = 0; i < pts.size(); ++i)
+      _texel[c][i] = std::uint32_t(texel_of(c, pts[i][0], pts[i][1]));
+  _pj.assign(ns * pts.size(), 1.0f);
+  _area.assign(ns * pts.size(), 1.0f);
+  _area_sum = 0.0;
+  std::vector<double> v(std::size_t(m + 1) * std::size_t(m + 1));
+  for (std::size_t s = 0; s < ns; ++s) {
+    auto least_at = [&](double x, double y) {
+      double least = 1e300;
+      for (std::size_t c = 0; c < nc; ++c)
+        least = std::min(least, double(_js[s][c][texel_of(c, x, y)]));
+      return least;
+    };
+    float *out = &_pj[s * pts.size()];
+    if (mesh) {
+      for (int iy = 0; iy <= m; ++iy)
+        for (int ix = 0; ix <= m; ++ix)
+          v[std::size_t(iy) * std::size_t(m + 1) + std::size_t(ix)] = least_at(ix * sp, iy * sp);
+    }
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+      if (!mesh) {
+        out[i] = float(least_at(pts[i][0], pts[i][1]));
+      } else {
+        // J linear over each cell's two triangles, split as the ocean grids are:
+        // (v, v + 1, v + row) and (v + 1, v + row + 1, v + row).
+        const std::size_t cell = i / std::size_t(q * q);
+        const std::size_t i00 =
+            (cell / std::size_t(m)) * std::size_t(m + 1) + cell % std::size_t(m);
+        const double j00 = v[i00], j10 = v[i00 + 1], j01 = v[i00 + std::size_t(m) + 1],
+                     j11 = v[i00 + std::size_t(m) + 2];
+        const double u = pts[i][2], w = pts[i][3];
+        out[i] = float(u + w <= 1.0 ? j00 + u * (j10 - j00) + w * (j01 - j00)
+                                    : j11 + (1.0 - u) * (j01 - j11) + (1.0 - w) * (j10 - j11));
+      }
+      _area[s * pts.size() + i] = std::abs(out[i]);
+      _area_sum += std::abs(double(out[i]));
+    }
+  }
+  _js.clear(); // the lattice holds what the samples are needed for
+  _js.shrink_to_fit();
+}
+
+std::vector<float> foam_history::looks(double bias) const {
+  if (!ready())
+    throw std::logic_error("foam_history: the Jacobians are not all evaluated (step)");
+  const std::size_t ns = _hp.samples_s.size();
+  const std::size_t np = _texel.empty() ? 0 : _texel[0].size();
+  const long steps = *std::max_element(_at.begin(), _at.end());
+  const double keep = std::exp(-_dt / _q.decay_s), gain = std::max(_q.build_per_s, 0.0) * _dt;
+  std::vector<float> fz(ns * np, 0.0f); // the stronger long cascade's foam at each point
+  for (std::size_t c = 0; c < _np; ++c) {
+    const std::size_t nn = std::size_t(_h[c].n) * std::size_t(_h[c].n);
+    std::vector<float> foam(ns * nn, 0.0f);
+    // Where step k reads the cascade's Jacobians: a Catmull-Rom spline through evaluations
+    // e - 1 .. e + 2 (clamped at the ends). Linear interpolation flattens each fold's dip: with
+    // ten evaluations to a wave's period it missed a quarter of the aging foam.
+    const std::size_t steps1 = std::size_t(steps) + 1, last = _j[c].size() - 1;
+    std::vector<std::array<std::size_t, 4>> e(steps1);
+    std::vector<std::array<double, 4>> w(steps1);
+    for (std::size_t k = 0; k < steps1; ++k) {
+      const double u = double(k) * _dt / _step[c];
+      const std::size_t e0 = std::min(std::size_t(u), last - 1);
+      const double t = std::min(1.0, u - double(e0)), t2 = t * t, t3 = t2 * t;
+      e[k] = {e0 > 0 ? e0 - 1 : 0, e0, e0 + 1, std::min(e0 + 2, last)};
+      w[k] = {0.5 * (-t3 + 2.0 * t2 - t), 0.5 * (3.0 * t3 - 5.0 * t2 + 2.0),
+              0.5 * (-3.0 * t3 + 4.0 * t2 + t), 0.5 * (t3 - t2)};
+    }
+    // foam_step's foam channel, texel by texel. A texel takes foam only near the evaluations
+    // where its J comes within 0.05 of the bias (the spline may dip a little under them): it is
+    // integrated from two evaluations before the first such to two after the last, and decays
+    // exactly after that; a texel with none never takes any.
+    const std::vector<std::vector<float>> &js = _j[c];
+    const double per = _step[c] / _dt; // integration steps an evaluation
+    std::vector<double> decay(steps1 + 1, 1.0);
+    for (std::size_t k = 1; k < decay.size(); ++k)
+      decay[k] = decay[k - 1] * keep;
+    for (std::size_t i = 0; i < nn; ++i) {
+      if (!(double(_jmin[c][i]) - 0.05 < bias))
+        continue;
+      std::size_t first = last + 1, final = 0;
+      for (std::size_t k = 0; k <= last; ++k)
+        if (double(js[k][i]) < bias + 0.05) {
+          first = std::min(first, k);
+          final = k;
+        }
+      if (first > last)
+        continue;
+      const std::size_t k0 = std::size_t(std::max(0.0, std::floor((double(first) - 2.0) * per)));
+      const std::size_t k1 =
+          std::min(steps1 - 1, std::size_t(std::ceil((double(final) + 2.0) * per)));
+      double v = 0.0;
+      for (std::size_t k = k0; k <= k1; ++k) {
+        const std::array<std::size_t, 4> &ek = e[k];
+        const std::array<double, 4> &wk = w[k];
+        const double j = wk[0] * double(js[ek[0]][i]) + wk[1] * double(js[ek[1]][i]) +
+                         wk[2] * double(js[ek[2]][i]) + wk[3] * double(js[ek[3]][i]);
+        v = std::clamp(v * keep + foam_inject(j, bias, _p.ramp) * gain, 0.0, 1.0);
+        for (std::size_t r = 0; r < ns; ++r)
+          if (_at[r] == long(k))
+            foam[r * nn + i] = float(v);
+      }
+      for (std::size_t r = 0; r < ns; ++r)
+        if (_at[r] > long(k1))
+          foam[r * nn + i] = float(v * decay[std::size_t(_at[r]) - k1]);
+    }
+    for (std::size_t s = 0; s < ns; ++s)
+      for (std::size_t i = 0; i < np; ++i)
+        fz[s * np + i] = std::max(fz[s * np + i], foam[s * nn + _texel[c][i]]);
+  }
+  for (float &v : fz) {
+    const double u = std::clamp(double(v), 0.0, 1.0) * 256.0;
+    const std::size_t i = std::min(std::size_t(u), std::size_t(255));
+    v = float(_look[i] + (_look[i + 1] - _look[i]) * (u - double(i)));
+  }
+  return fz;
+}
+
+double foam_history::drawn(double whitecaps, const std::vector<float> *looks) const {
+  if (!ready())
+    throw std::logic_error("foam_history: the Jacobians are not all evaluated (step)");
+  double sum = 0.0;
+  for (std::size_t i = 0; i < _pj.size(); ++i) {
+    const double fr = _fray_q.empty() ? 0.0 : _p.fray * _fray_q[i % _fray_q.size()];
+    double a = smooth01((whitecaps + fr - double(_pj[i])) / _p.ramp);
+    if (looks)
+      a = std::max(a, double((*looks)[i]));
+    sum += a * double(_area[i]);
+  }
+  return _area_sum > 0.0 ? sum / _area_sum : 0.0;
+}
+
+double foam_history::coverage(const foam_biases &b) const {
+  const std::vector<float> l = looks(b.persistent);
+  return drawn(b.whitecaps, &l);
+}
+
+double foam_history::persistent(double bias) const {
+  const std::vector<float> l = looks(bias);
+  double sum = 0.0;
+  for (std::size_t i = 0; i < l.size(); ++i)
+    sum += double(l[i]) * double(_area[i]);
+  return _area_sum > 0.0 ? sum / _area_sum : 0.0;
+}
+
+double foam_history::active(double bias) const { return drawn(bias, nullptr); }
+
+foam_biases foam_history::biases_for(double share) const {
+  if (!ready())
+    throw std::logic_error("foam_history: the Jacobians are not all evaluated (step)");
+  share = std::clamp(share, 0.0, 1.0);
+  double least_p = 1e300, least = 1e300;
+  for (const std::vector<float> &m : _jmin)
+    for (float j : m)
+      least_p = std::min(least_p, double(j));
+  for (float j : _pj)
+    least = std::min(least, double(j));
+  least = std::min(least, least_p);
+  const double fray = _fray_q.empty() ? 0.0 : _p.fray;
+  foam_biases b;
+  b.persistent = least_p;
+  b.whitecaps = least - 0.5 * fray;
+  if (share <= 0.0)
+    return b;
+  // The aging foam's bias: walk up from the least J until its share is reached, then bisect. (The
+  // integration grows with the texels that fold, so the walk keeps the biases tried low.)
+  const double target = share * _q.share;
+  std::vector<float> l;
+  if (target > 0.0) {
+    double lo = least_p - 0.05, hi = least_p;
+    while (persistent(hi) < target && hi < 2.0) {
+      lo = hi;
+      hi += 0.05;
+    }
+    for (int i = 0; i < 9; ++i) {
+      const double mid = 0.5 * (lo + hi);
+      (persistent(mid) < target ? lo : hi) = mid;
+    }
+    b.persistent = 0.5 * (lo + hi);
+    l = looks(b.persistent);
+  }
+  // The whitecaps' bias for the rest (the aging foam's looks fixed: cheap).
+  double lo = least - 0.5 * fray, hi = 1.5 + _p.ramp + 0.5 * fray;
+  for (int i = 0; i < 40 && hi - lo > 1e-6; ++i) {
+    const double mid = 0.5 * (lo + hi);
+    (drawn(mid, l.empty() ? nullptr : &l) < share ? lo : hi) = mid;
+  }
+  b.whitecaps = 0.5 * (lo + hi);
+  return b;
 }
 
 } // namespace ocean

@@ -131,6 +131,12 @@ public:
   // - "the host thread" is the caller of that pump_all: two callers run their own queues at once.
   void run_on_host(state_exec::exec_group &group, std::function<void()> fn);
 
+  // Whether the calling thread is inside one of this pool's pump_all calls: as its caller (where
+  // its natives in group 0, host_proxied bodies and on_complete callbacks run) or as a worker
+  // pumping one of its groups. Read from the pool's calls (their callers' and pumpers' thread
+  // ids), not kept per thread: another pool's pump_all on this thread is not this one's.
+  bool in_pump_all() const;
+
   // Tests (GR-9): take `seconds` as `group`'s last pump time, for the helper wake and the order.
   void set_last_pump_for_test(state_exec::exec_group &group, double seconds);
 
