@@ -1082,6 +1082,67 @@ TEST(AriadneIsolatedDocs, ProvidersAreInstalledByTheirKind) {
   EXPECT_EQ(isolated_value(app, "docs.kinds.has"), "no");
 }
 
+// A Runtime's own providers (add_program_intrinsics, master's #1305) install by kind as the app's
+// do: in an isolated document's `any` group a host_proxied one runs on the frame's thread while a
+// worker pumps the program, and a host_only one that binds anything pumps the document's group on
+// the host thread. Another Runtime on the app sees none of them.
+TEST(AriadneIsolatedDocs, ARuntimesOwnProvidersInstallByKind) {
+  namespace se = cvc::state_exec;
+  isolated_env_var force("CVC_EXEC_FORCE_MOVE", "1"); // the group alternates between threads
+  cvc::app app;
+  isolate_documents(app, 2);
+  const std::thread::id frame_thread = std::this_thread::get_id();
+  std::mutex mu;
+  std::set<std::thread::id> proxied_threads;
+  Runtime rt(app, "docs.own");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_channel_policy({}, {}, /*strict=*/true, /*quiet=*/true);
+  rt.add_program_intrinsics(
+      [](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        se::builtins::register_fn(env, "own-any", [](std::span<const se::value_t>) {
+          return se::value_t(std::string("any"));
+        });
+      },
+      se::provider_affinity::any);
+  rt.add_program_intrinsics(
+      [&](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        se::builtins::register_fn(env, "own-proxied", [&](std::span<const se::value_t>) {
+          std::lock_guard<std::mutex> lock(mu);
+          proxied_threads.insert(std::this_thread::get_id());
+          return se::value_t(std::string("proxied"));
+        });
+      },
+      se::provider_affinity::host_proxied);
+  rt.set_root(group({text("own")}));
+  rt.set_tick_program("(begin (state-set \"a\" (own-any)) (state-set \"p\" (own-proxied)))");
+  ASSERT_NE(rt.isolated_group(), nullptr) << rt.isolation_reason();
+  EXPECT_EQ(rt.isolated_group()->opts().affinity, se::group_affinity::any);
+  for (int frame = 0; frame < 20; ++frame)
+    isolated_frame(app, rt);
+  EXPECT_EQ(isolated_value(app, "docs.own.a"), "any");
+  EXPECT_EQ(isolated_value(app, "docs.own.p"), "proxied");
+  EXPECT_EQ(proxied_threads, std::set<std::thread::id>{frame_thread})
+      << "the host_proxied native ran off the frame's thread";
+
+  Runtime other(app, "docs.other");
+  MockBackend mb2;
+  other.set_backend(&mb2);
+  other.set_channel_policy({}, {}, /*strict=*/true, /*quiet=*/true);
+  other.add_program_intrinsics( // no kind: host_only
+      [](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        se::builtins::register_fn(env, "own-host",
+                                  [](std::span<const se::value_t>) { return se::value_t{}; });
+      });
+  other.set_root(group({text("other")}));
+  ASSERT_NE(other.isolated_group(), nullptr) << other.isolation_reason();
+  EXPECT_EQ(other.isolated_group()->opts().affinity, se::group_affinity::host);
+  EXPECT_TRUE(other.has_function("own-host"));
+  EXPECT_FALSE(other.has_function("own-any")) << "rt's own";
+  EXPECT_TRUE(rt.has_function("own-any"));
+  EXPECT_FALSE(rt.has_function("own-host")) << "other's own";
+}
+
 // AppRuntime::idle() and wait_idle() count an isolated document's group (S1.9): its programs'
 // async calls run on its own host, not the app's.
 TEST(AriadneIsolatedDocs, IdleAndWaitIdleCountTheDocumentsGroup) {
