@@ -2,3 +2,5 @@
 *.raw binary
 *.json -text
 *.pts -text
+# ContourTiler's Reconstruct series (.ser and numbered sections), read byte for byte.
+tiler/** -text

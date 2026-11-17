@@ -326,6 +326,7 @@ set(SOURCE_FILES
   geometry/skeleton/skel.cpp
   geometry/skeleton/skeleton.cpp
   geometry/skeleton/skeleton_intrinsics.cpp
+  geometry/tiler/tile_contours.cpp
   geometry/sliced_ldlt.cpp
   geometry/geometry_file_io.cpp
   geometry/contours.cpp
@@ -2573,6 +2574,57 @@ if(CVC_WITH_CLIPPER2 AND CVC_WITH_CDT AND CVC_WITH_SHEWCHUK)
   )
   target_compile_definitions(cvc PUBLIC CVC_WITH_PLANAR)
   message(STATUS "cvc::planar ENABLED (Clipper2, CDT, Shewchuk's predicates, Boost.Polygon)")
+  # The contour tiler (inc/cvc/geometry/tiler.h; VOLROVER-LIBRARY-PORTS-ROADMAP.md §3, P3b):
+  # VolumeRover's ContourTiler vendored onto its own kernel (geometry/tiler/kernel.h) and
+  # cvc::planar, so it is built exactly when cvc::planar is.
+  target_sources(cvc PRIVATE
+    geometry/tiler/All_tiling_region.cpp
+    geometry/tiler/Boundary_slice_chords.cpp
+    geometry/tiler/Composite_tiling_region.cpp
+    geometry/tiler/Contour.cpp
+    geometry/tiler/Contour2.cpp
+    geometry/tiler/Correspondences.cpp
+    geometry/tiler/Hierarchy.cpp
+    geometry/tiler/Point_tiling_region.cpp
+    geometry/tiler/Polyline.cpp
+    geometry/tiler/Slice.cpp
+    geometry/tiler/Slice2.cpp
+    geometry/tiler/Tiler_workspace.cpp
+    geometry/tiler/Tiles.cpp
+    geometry/tiler/Tiling_region.cpp
+    geometry/tiler/Wedge.cpp
+    geometry/tiler/Z_adjustments.cpp
+    geometry/tiler/arrange_polygons.cpp
+    geometry/tiler/augment.cpp
+    geometry/tiler/contour_utils.cpp
+    geometry/tiler/cut.cpp
+    geometry/tiler/interp.cpp
+    geometry/tiler/intersection.cpp
+    geometry/tiler/kernel.cpp
+    geometry/tiler/mtiler_operations.cpp
+    geometry/tiler/offset_polygon.cpp
+    geometry/tiler/planar_bridge.cpp
+    geometry/tiler/polygon_difference.cpp
+    geometry/tiler/polygon_intersection.cpp
+    geometry/tiler/polygon_utils.cpp
+    geometry/tiler/print_utils.cpp
+    geometry/tiler/projection.cpp
+    geometry/tiler/remove_contour_intersections.cpp
+    geometry/tiler/segment_utils.cpp
+    geometry/tiler/skeleton.cpp
+    geometry/tiler/theorems.cpp
+    geometry/tiler/tiler.cpp
+    geometry/tiler/tiler_operations.cpp
+    geometry/tiler/triangle_utils.cpp
+  )
+  # The tiler compares computed coordinates exactly, and its legacy goldens hold on every
+  # platform, so no FMA contraction (as nav, lsys and world): the compilers' default contracts a
+  # multiply-add on targets with FMA (aarch64 macOS).
+  if(NOT MSVC)
+    get_target_property(_cvc_tiler_sources cvc SOURCES)
+    list(FILTER _cvc_tiler_sources INCLUDE REGEX "^geometry/tiler/")
+    set_source_files_properties(${_cvc_tiler_sources} PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+  endif()
 else()
   set(CVC_WITH_PLANAR OFF)
   message(STATUS "cvc::planar DISABLED: it needs Clipper2, CDT and Shewchuk's predicates")

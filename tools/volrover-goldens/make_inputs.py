@@ -13,6 +13,7 @@ inputs/skeleton/<case>.pts (a point a line) and <case>.json. Pure Python, no num
                                                                    # one case (the rest as
                                                                    # committed)
     python3 tools/volrover-goldens/make_inputs.py --only segmed    # SegMed's cases
+    python3 tools/volrover-goldens/make_inputs.py --only tiler     # ContourTiler's series
 """
 
 import json
@@ -287,19 +288,129 @@ def write_skeleton_inputs():
         print("wrote", name, len(pts), "points")
 
 
+# ContourTiler's cases are Reconstruct series: inputs/tiler/<case>/<case>.ser and its sections
+# <case>.<n>, every trace closed, counterclockwise (the legacy curation requires it) and in an
+# identity transform, with coordinates multiples of 2^-8 (so they are exact in decimal, and the
+# port's snapping grid holds them unchanged); and inputs/tiler/<case>.json, the parameters and the
+# section range the legacy tiler runs on.
+def q8(v):
+    return round(v * 256) / 256.0
+
+
+def blob(cx, cy, a, b, wobble, phase, n):
+    """A wobbly ellipse, counterclockwise: n vertices at r(t) = 1 + wobble cos(3t + phase)."""
+    pts = []
+    for i in range(n):
+        t = 2 * math.pi * i / n
+        r = 1 + wobble * math.cos(3 * t + phase)
+        pts.append((q8(cx + a * r * math.cos(t)), q8(cy + b * r * math.sin(t))))
+    out = []
+    for p in pts:
+        if not out or out[-1] != p:
+            out.append(p)
+    if out[0] == out[-1]:
+        out.pop()
+    return out
+
+
+# case: {"sections": {n: [(component, points), ...]}, "first", "last", "parameters"}
+def tiler_cases():
+    cases = {}
+    # A tube that tiles between contour vertices only: no section range past its ends (no caps)
+    # and no untiled regions.
+    tube = {}
+    for k in range(1, 7):
+        tube[k] = [("a001", blob(8 + 0.25 * k, 8, 3 + 0.125 * (k % 3), 2.5, 0.08, 0.3 * k, 28))]
+    cases["tube"] = {"sections": tube, "first": 1, "last": 6,
+                     "parameters": {"curation_delta": 0.01, "collinear_epsilon": 1e-15,
+                                    "z_scale": 1}}
+    # A branching component (one contour, then two), an annulus (a contour and the hole inside it)
+    # and the caps a section range past their ends makes: correspondence, branching, tiling regions
+    # and untiled regions.
+    br = {k: [] for k in range(0, 8)}
+    for k in range(1, 4):
+        br[k].append(("d001", blob(6, 6, 3.5 - 0.25 * (k - 1), 2, 0.05, 0.4 * k, 32)))
+    for k in range(4, 7):
+        br[k].append(("d001", blob(4.25, 6, 1.5, 1.5, 0.06, 0.5 * k, 24)))
+        br[k].append(("d001", blob(7.75 + 0.125 * k, 6.25, 1.5, 1.25, 0.06, 0.7 * k, 24)))
+    for k in range(2, 6):
+        br[k].append(("r001", blob(6, 13, 3, 2.5, 0.04, 0.2 * k, 30)))
+        br[k].append(("r001", blob(6.125, 13, 1.25, 1, 0.05, 0.3 * k, 18)))
+    cases["branch"] = {"sections": br, "first": 0, "last": 7,
+                       "parameters": {"curation_delta": 0.01, "collinear_epsilon": 1e-15,
+                                      "z_scale": 1}}
+    # Two components whose traces overlap on some sections: curation pushes them apart, and
+    # intersection removal separates their tiles.
+    tc = {k: [] for k in range(1, 6)}
+    for k in range(1, 6):
+        tc[k].append(("a002", blob(6, 6, 2.5, 2.25, 0.05, 0.3 * k, 26)))
+        tc[k].append(("a003", blob(9.75 - 0.25 * k, 6.5, 2, 2.25, 0.05, 0.6 * k, 26)))
+    cases["touching"] = {"sections": tc, "first": 1, "last": 5,
+                         "parameters": {"curation_delta": 0.05, "collinear_epsilon": 1e-15,
+                                        "remove_intersections": 1, "z_scale": 1}}
+    return cases
+
+
+SER_HEAD = """<?xml version="1.0"?>
+<!DOCTYPE Series SYSTEM "series.dtd">
+
+<Series index="%d" viewport="0 0 0.00254" units="microns" defaultThickness="1">
+</Series>
+"""
+
+
+def write_tiler_inputs():
+    root = os.path.join(HERE, "inputs", "tiler")
+    os.makedirs(root, exist_ok=True)
+    for name, c in tiler_cases().items():
+        d = os.path.join(root, name)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, name + ".ser"), "w", newline="\n") as f:
+            f.write(SER_HEAD % c["first"])
+        vertices = 0
+        for k in range(c["first"], c["last"] + 1):
+            lines = ['<?xml version="1.0"?>', '<!DOCTYPE Section SYSTEM "section.dtd">', "",
+                     '<Section index="%d" thickness="1" alignLocked="true">' % k,
+                     '<Transform dim="0"', ' xcoef=" 0 1 0 0 0 0"', ' ycoef=" 0 0 1 0 0 0">']
+            for comp, pts in c["sections"].get(k, []):
+                vertices += len(pts)
+                body = ",\n\t".join("%.17g %.17g" % p for p in pts)
+                lines.append('<Contour name="%s" hidden="false" closed="true" simplified="true" '
+                             'border="1 0.5 0" fill="1 0.5 0" mode="9"' % comp)
+                lines.append(' points="%s,\n\t"/>' % body)
+            lines += ["</Transform>", "</Section>", ""]
+            with open(os.path.join(d, "%s.%d" % (name, k)), "w", newline="\n") as f:
+                f.write("\n".join(lines))
+        meta = {
+            "library": "ContourTiler",
+            "series": "%s/%s.ser" % (name, name),
+            "first": c["first"],
+            "last": c["last"],
+            "vertices": vertices,
+            "parameters": c["parameters"],
+            "made_by": "tools/volrover-goldens/make_inputs.py",
+        }
+        with open(os.path.join(root, name + ".json"), "w", newline="\n") as f:
+            json.dump(meta, f, indent=2)
+            f.write("\n")
+        print("wrote", name, vertices, "vertices")
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--only", choices=["genseg", "segmed", "skeleton"],
+    ap.add_argument("--only", choices=["genseg", "segmed", "skeleton", "tiler"],
                     help="write only one library's inputs (the others stay as committed)")
     ap.add_argument("--case", action="append",
                     help="write only this GenSeg case (repeatable; the others stay as committed)")
     args = ap.parse_args()
+    if args.only in (None, "tiler"):
+        write_tiler_inputs()
     if args.only in (None, "skeleton"):
         write_skeleton_inputs()
     if args.only in (None, "segmed"):
         write_segmed_inputs()
-    if args.only in ("skeleton", "segmed"):
+    if args.only in ("skeleton", "segmed", "tiler"):
         return
     out_dir = os.path.join(HERE, "inputs", "genseg")
     os.makedirs(out_dir, exist_ok=True)

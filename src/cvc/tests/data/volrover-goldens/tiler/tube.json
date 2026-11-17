@@ -1,0 +1,33 @@
+{
+  "library": "ContourTiler",
+  "volrover": "1cf0fbd72c7539e415a4f0fbc58c6bfce3d3caf8",
+  "case": "tube",
+  "input": "tools/volrover-goldens/inputs/tiler/tube/tube.ser",
+  "input_sha256": {
+    "tube.1": "ad377a1bb0d7978d7c63224b85e3d73fc28076876597701f15d5474c5c4db101",
+    "tube.2": "3339a84300d98bffd0902a0e63a4c755d5cac2f3cbd7ed34377e7bb51bdce3a7",
+    "tube.3": "7b3d572eda535e6e4e47dc4f3d679415b596fc879f2fce4c5250f118540eb8b7",
+    "tube.4": "b1220fd4c085848cf464dbb5781164f650a73a8bd8a5caeb086549fc5b28e510",
+    "tube.5": "9a61a0cad28ca039942b74aa7e9b2ca6a832a43cede52357cdf6857669ae58b3",
+    "tube.6": "d7d20ad01c978a3730d99e502132e0ff530d69bcd2e0097a5ab929d25cdac300",
+    "tube.ser": "c0f0baf8d3dc576040cfdb4c156105bdd97c443f8407ac21de964951647b1b11"
+  },
+  "first": 1,
+  "last": 6,
+  "parameters": {
+    "curation_delta": 0.01,
+    "collinear_epsilon": 1e-15,
+    "z_scale": 1
+  },
+  "components": {
+    "a001": {
+      "vertices": 196,
+      "triangles": 330
+    }
+  },
+  "tiles_sha256": {
+    "a001": "a54fa82c700c1e45de4b112b77163b326fbb5b7ec5c6a992889d7b680d7f83f0"
+  },
+  "made_by": "tools/volrover-goldens/make_goldens.py",
+  "platform": "Windows AMD64, Windows-11, Python 3.13.3"
+}
