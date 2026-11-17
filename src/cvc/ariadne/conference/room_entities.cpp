@@ -125,6 +125,7 @@ section_stamp write_room_entities(cvc::app &app, const std::string &room,
     w.set({k, "color"}, triple(e.color));
     w.set({k, "color2"}, triple(e.color2));
     w.set({k, "size"}, triple(e.size));
+    w.set({k, "wheels"}, triple(e.wheels));
     w.set({k, "look", "kind"}, e.look.kind);
     w.set({k, "look", "path"}, e.look.path);
     w.set_double({k, "look", "scale"}, e.look.scale);
@@ -159,6 +160,7 @@ std::vector<room_entity> read_room_entities(cvc::app &app, const std::string &ro
     read_triple(r.text({k, "color"}), e.color);
     read_triple(r.text({k, "color2"}), e.color2);
     read_triple(r.text({k, "size"}), e.size);
+    read_triple(r.text({k, "wheels"}), e.wheels);
     e.look.kind = r.text({k, "look", "kind"});
     e.look.path = r.text({k, "look", "path"});
     e.look.scale = r.number({k, "look", "scale"}, 1.0);
@@ -197,6 +199,7 @@ std::vector<room_entity> room_entities_of(const WorldVehicles &vehicles) {
       try {
         const physics::vehicle_desc d = vehicle_desc_of(a, info.spec.mass, info.spec.max_speed);
         e.size = {2.0 * d.half_extents.x, 2.0 * d.half_extents.y, 2.0 * d.half_extents.z};
+        e.wheels = {d.wheelbase(), d.track(), d.axles.empty() ? 0.0 : d.axles.front().wheel_radius};
       } catch (const std::exception &) {
       }
       break;
