@@ -218,6 +218,11 @@ private:
   }
 
   bool send_frame(const char *data, std::size_t len, unsigned int flags, std::string *error) {
+    // One frame at a time, whole: libcurl continues a partly sent frame with the next send's
+    // bytes, so two threads sending on one connection (two documents pumped on two workers, or a
+    // close beside a send) would interleave their messages on the wire. The handle's lock is
+    // still taken per chunk, so the reader goes on receiving between them.
+    std::lock_guard<std::mutex> frame(send_mutex_);
     std::size_t done = 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     // A zero-length message still needs one send.
@@ -299,6 +304,7 @@ private:
   CURL *h_;
   std::size_t max_bytes_;
   curl_socket_t sock_ = CURL_SOCKET_BAD;
+  std::mutex send_mutex_;   // held across a whole frame (send_frame), before handle_mutex_
   std::mutex handle_mutex_; // the easy handle is not thread-safe: sends and receives take turns
   std::atomic<bool> open_{false};
   std::atomic<bool> closed_by_peer_{false};

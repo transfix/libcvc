@@ -67,7 +67,13 @@ public:
   // grabbed point stays under the pointer -- and the wheel ZOOMS, and rotation is
   // impossible. For ortho "matplotlib" views where tumbling the camera only ever
   // disorients.
-  enum class Mode { Orbit = 0, Fly = 1, Track = 2, Map = 3 };
+  // Slice = a parallel view straight down one axis (setSliceAxis: x, y or z), the
+  // plane a volume slice lies in, with no rotation: the screen's right and up are
+  // VolumeGridRover's -- down z, x right and y up (its XY view); down y, x right and
+  // z up (XZ); down x, z right and y up (ZY). A drag pans, the wheel zooms about the
+  // pointer (mouseWheelAt), and the movement keys slide and zoom as in Map. Its pose
+  // is its own (state "slice.axis", "slice.center.{x,y,z}", "slice.scale").
+  enum class Mode { Orbit = 0, Fly = 1, Track = 2, Map = 3, Slice = 4 };
 
   // Canonical: state at "<viewer.scene prefix>.viewers.<viewer.name>.camera",
   // rooted in the viewer's scene app, and auto-wired to the viewer's camera,
@@ -183,6 +189,16 @@ public:
   // changes, until the user zooms and takes over.
   void frameMap(double cx, double cy, double halfHeight, double halfWidth = 0.0);
 
+  // Slice mode framing: look down the slice axis at the box's centre, its face fitted
+  // to the viewport (and kept fitted across resizes until the user zooms), the eye in
+  // front of the box. Sets Mode::Slice. frameBounds() seeds the same pose without
+  // changing the mode, and resetView() in Slice refits it.
+  void frameSlice(double minX, double minY, double minZ, double maxX, double maxY, double maxZ);
+  // The axis Slice looks down: 0 x, 1 y, 2 z (state "slice.axis": x, y or z, or a
+  // view's name, xy / xz / zy). The view keeps its centre; frame again to fit.
+  void setSliceAxis(int axis);
+  int sliceAxis() const;
+
   // Orbit center (state "orbit.center").
   void setOrbitCenter(double x, double y, double z);
   // The orbit's distance from its centre (state "orbit.distance"; the wheel changes it).
@@ -237,6 +253,11 @@ public:
   void keyUp(const std::string &keySym);
   void mouseLook(int dxPixels, int dyPixels);
   void mouseWheel(double steps);
+  // The wheel with the pointer at (x, y), VTK display coordinates (origin bottom-left
+  // of the window). In Slice the world point under the pointer stays under it, through
+  // the zoom's glide too; in the other modes it is mouseWheel(steps). The attached
+  // interactor passes the event's position.
+  void mouseWheelAt(double steps, int x, int y);
   void beginDrag();
   // The right button's drag: it turns the view (Orbit), whatever the primary drag does.
   void beginSecondaryDrag();
@@ -369,9 +390,13 @@ private:
   double mapFitScale(double halfHeight, double halfWidth) const; // parallel scale fitting a rect
   void fitMap(double cx, double cy, double halfHeight, double halfWidth); // set the map pose
   void refitMapIfResized();     // re-fit the map rect when the viewport changes shape
+  void fitSlice(const double b[6]); // the slice pose for bounds {x0,x1,y0,y1,z0,z1}
+  void refitSliceIfResized();       // the same for Slice
+  void anchorSlice();               // Slice: keep the wheel's anchor under the pointer
+  void wheelZoom(double steps);     // the wheel's zoom (mouseWheel, mouseWheelAt)
   bool applyNeeded() const;     // update(): has anything applyToCamera() derives from moved?
   bool poseMirrorStale() const; // does the pose differ from the one last mirrored to state?
-  void poseMirrorValues(double out[17]) const; // what syncPoseToState() writes, in order
+  void poseMirrorValues(double out[21]) const; // what syncPoseToState() writes, in order
 
   struct Impl;
   std::unique_ptr<Impl> m_impl;

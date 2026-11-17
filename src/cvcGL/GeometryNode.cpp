@@ -2,6 +2,7 @@
 #include <boost/lexical_cast.hpp>
 #include <cctype>
 #include <cmath>
+#include <cstdio> // bindShaderTextures: a draw that ran out of texture units
 #include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
@@ -1499,7 +1500,8 @@ void GeometryNode::setShaderUniform3f(const std::string &name, float x, float y,
   });
 }
 
-void GeometryNode::onUpdateShader(vtkObject *, unsigned long, void *clientData, void *callData) {
+void GeometryNode::onUpdateShader(vtkObject *caller, unsigned long, void *clientData,
+                                  void *callData) {
   auto *self = static_cast<GeometryNode *>(clientData);
   auto *program = static_cast<vtkShaderProgram *>(callData);
   if (!self || !program)
@@ -1554,12 +1556,13 @@ void GeometryNode::onUpdateShader(vtkObject *, unsigned long, void *clientData, 
       textures.emplace_back(kv.first, kv.second.GetPointer());
   }
   if (!textures.empty())
-    self->bindShaderTextures(program, textures);
+    self->bindShaderTextures(program, textures, caller);
 }
 
 void GeometryNode::bindShaderTextures(
     vtkShaderProgram *program,
-    const std::vector<std::pair<std::string, vtkTextureObject *>> &textures) {
+    const std::vector<std::pair<std::string, vtkTextureObject *>> &textures,
+    vtkObject *drawingMapper) {
   if (!program)
     return;
   // Bind our custom textures onto units the mapper won't reuse. The wasm
@@ -1580,11 +1583,22 @@ void GeometryNode::bindShaderTextures(
       tum = kv.second->GetContext()->GetTextureUnitManager();
       break;
     }
-  constexpr int kMapperReserve = 8; // comfortably above the mapper's emulated buffers
-  int reserved[kMapperReserve];
+  //
+  // The block is as many units as the drawing mapper's vertex data will take, when it is one of
+  // our low-memory mappers (arrayTextureUnits: its arrays are bound by now, activated after this),
+  // else 8. In WebGL2 VTK has 16 units in all (it counts GL_MAX_TEXTURE_IMAGE_UNITS), so a fixed 8
+  // left a draw 8 for its own textures, and the water's 10 did not fit: two failed every draw.
+  constexpr int kMapperReserve = 8; // a mapper that cannot say: above any emulated buffers
+  constexpr int kMaxReserve = 32;
+  int reserve = kMapperReserve;
+  vtkObject *mapper = drawingMapper ? drawingMapper : static_cast<vtkObject *>(m_mapper);
+  if (auto *lowMemory = LowMemoryPolyDataMapper::SafeDownCast(mapper))
+    if (const int n = lowMemory->arrayTextureUnits(); n > 0)
+      reserve = std::min(n, kMaxReserve);
+  int reserved[kMaxReserve];
   int nReserved = 0;
   if (tum)
-    for (int i = 0; i < kMapperReserve; ++i) {
+    for (int i = 0; i < reserve; ++i) {
       int u = tum->Allocate();
       if (u < 0)
         break;
@@ -1592,16 +1606,30 @@ void GeometryNode::bindShaderTextures(
     }
   // Each texture this activates holds its unit until the draw it is bound for is done: the
   // node's actor lets it go (GeometryActor::Render). Kept, every texture any node had ever drawn
-  // held a unit, and a scene with enough of them ran out: WebGL2 gives VTK 32 units for
-  // everything, the low-memory mapper takes some for each draw, and every draw after that failed
-  // and logged (terrain_lab with its water, in the browser). One already active (someone else's)
-  // is left as it was.
+  // held a unit, and a scene with enough of them ran out: WebGL2 gives VTK 16 units, the
+  // low-memory mapper takes some for each draw, and every draw after that failed and logged
+  // (terrain_lab with its water, in the browser). One already active (someone else's) is left as
+  // it was.
   auto *actor = GeometryActor::SafeDownCast(m_actor);
   for (auto &kv : textures) {
     if (kv.second && kv.second->GetContext() && program->IsUniformUsed(kv.first.c_str())) {
       const bool wasActive = kv.second->GetTextureUnit() >= 0;
       kv.second->Activate();
-      program->SetUniformi(kv.first.c_str(), kv.second->GetTextureUnit());
+      const int unit = kv.second->GetTextureUnit();
+      if (unit < 0) {
+        // Out of units: VTK has said so (vtkOpenGLState); say once which node and texture, and
+        // leave the sampler alone (-1 is GL_INVALID_VALUE, a second error every draw).
+        if (!m_unitsWarned) {
+          m_unitsWarned = true;
+          std::fprintf(stderr,
+                       "cvcGL: %s: no texture unit left for %s (%d in all, %d kept for the "
+                       "mapper's vertex data, %zu shader textures); it draws without it\n",
+                       getName().c_str(), kv.first.c_str(),
+                       tum ? tum->GetNumberOfTextureUnits() : 0, nReserved, textures.size());
+        }
+        continue;
+      }
+      program->SetUniformi(kv.first.c_str(), unit);
       if (!wasActive && actor)
         actor->Bound.emplace_back(kv.second);
     }
@@ -1642,6 +1670,19 @@ std::shared_ptr<const GeometryNode::ShaderInputs>
 GeometryNode::sharedShaderInputs(const std::string &key) const {
   const auto it = m_sharedInputs.find(key);
   return it == m_sharedInputs.end() ? nullptr : it->second;
+}
+
+bool GeometryNode::shaderUniformf(const std::string &name, float &v) const {
+  const auto it = m_uniformsF.find(name);
+  if (it == m_uniformsF.end())
+    return false;
+  v = it->second;
+  return true;
+}
+
+vtkTextureObject *GeometryNode::shaderTexture(const std::string &name) const {
+  const auto it = m_shaderTextures.find(name);
+  return it == m_shaderTextures.end() ? nullptr : it->second.Get();
 }
 
 void GeometryNode::setShaderTexture(const std::string &name, vtkTextureObject *tex) {

@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cvc/ph/compose.h>
 #include <cvc/ph/microgrid.h>
+#include <cvc/ph/query.h>
 
 namespace pycvc {
 
@@ -42,6 +43,51 @@ std::vector<double> ph_floats(PyObject *o, const char *what) {
   return out;
 }
 
+std::vector<std::vector<double>> ph_rows(PyObject *o, const char *what) {
+  std::vector<std::vector<double>> out;
+  if (!o || o == Py_None)
+    return out;
+  PyObject *seq = PySequence_Fast(o, what);
+  if (!seq)
+    throw std::invalid_argument(std::string(what) + " is not a sequence of rows");
+  for (Py_ssize_t i = 0; i < PySequence_Fast_GET_SIZE(seq); ++i)
+    out.push_back(ph_floats(PySequence_Fast_GET_ITEM(seq, i), what));
+  Py_DECREF(seq);
+  return out;
+}
+
+std::vector<int> ph_ints(PyObject *o, const char *what) {
+  std::vector<int> out;
+  for (double v : ph_floats(o, what))
+    out.push_back(static_cast<int>(v));
+  return out;
+}
+
+cvc::ph::summary ph_summary(const std::string &k) {
+  if (k == "max_abs")
+    return cvc::ph::summary::max_abs;
+  if (k == "min")
+    return cvc::ph::summary::min;
+  if (k == "max")
+    return cvc::ph::summary::max;
+  if (k == "final")
+    return cvc::ph::summary::final_value;
+  if (k == "total_loss")
+    return cvc::ph::summary::total_loss;
+  if (k == "total_work")
+    return cvc::ph::summary::total_work;
+  if (k == "max_residual")
+    return cvc::ph::summary::max_residual;
+  throw std::invalid_argument("unknown summary '" + k +
+                              "' (max_abs, min, max, final, total_loss, total_work, max_residual)");
+}
+
+std::string ph_str(PyObject *o, const char *what) {
+  if (!o || !PyUnicode_Check(o))
+    throw std::invalid_argument(std::string(what) + " is not a str");
+  return PyUnicode_AsUTF8(o);
+}
+
 PyObject *ph_list(const double *v, size_t n) {
   PyObject *l = PyList_New(static_cast<Py_ssize_t>(n));
   for (size_t i = 0; i < n; ++i)
@@ -59,6 +105,8 @@ PyObject *ph_list(const double *v, size_t n) {
 %feature("kwargs") pycvc::ph_composite::powers;
 %feature("kwargs") pycvc::ph_composite::storage;
 %feature("kwargs") pycvc::ph_microgrid_json;
+%feature("kwargs") pycvc::ph_composite::fit_history;
+%feature("kwargs") pycvc::ph_composite::card;
 
 %inline %{
 namespace pycvc {
@@ -196,6 +244,101 @@ public:
     return d;
   }
 
+  // fit_history (query.h): the state at the query time from measured channels over a window.
+  // inputs: one row per step; sample_steps, channels (readout indices) and samples (one row per
+  // sample step). Returns {"x_start", "x_now", "xi", "success", "optimality", "rank", "evals",
+  // "cost", "admitted"}.
+  PyObject *fit_history(PyObject *inputs, PyObject *sample_steps, PyObject *channels, PyObject *samples,
+                        PyObject *prior_mean, PyObject *prior_scale, double noise = 0.0, double dt = 0.01,
+                        const std::string &coupling = "midpoint", int substeps = 2, int max_evals = 20) const {
+    cvc::ph::history h;
+    h.inputs = ph_rows(inputs, "inputs");
+    h.sample_steps = ph_ints(sample_steps, "sample_steps");
+    h.channels = ph_ints(channels, "channels");
+    h.samples = ph_rows(samples, "samples");
+    cvc::ph::history_fit_options o;
+    o.step.dt = dt;
+    o.step.coupling = cvc::ph::coupling_scheme_of(coupling);
+    o.step.substeps = substeps;
+    o.prior_mean = ph_floats(prior_mean, "prior_mean");
+    o.prior_scale = ph_floats(prior_scale, "prior_scale");
+    o.noise = noise;
+    o.max_evals = max_evals;
+    cvc::ph::history_fit_result f;
+    std::string err;
+    Py_BEGIN_ALLOW_THREADS
+    try {
+      f = cvc::ph::fit_history(s_, h, o);
+    } catch (const std::exception &e) {
+      err = e.what();
+      if (err.empty())
+        err = "ph_composite.fit_history failed";
+    }
+    Py_END_ALLOW_THREADS
+    if (!err.empty())
+      throw std::runtime_error(err);
+    PyObject *xs = ph_list(f.x_start.data(), f.x_start.size()), *xn = ph_list(f.x_now.data(), f.x_now.size()),
+             *xi = ph_list(f.xi.data(), f.xi.size());
+    PyObject *d = Py_BuildValue("{s:O,s:O,s:O,s:O,s:d,s:i,s:i,s:d,s:O}", "x_start", xs, "x_now", xn, "xi", xi,
+                                "success", f.success ? Py_True : Py_False, "optimality", f.optimality, "rank",
+                                f.rank, "evals", f.evals, "cost", f.cost, "admitted",
+                                f.admitted(s_.state_dim()) ? Py_True : Py_False);
+    Py_DECREF(xs);
+    Py_DECREF(xn);
+    Py_DECREF(xi);
+    return d;
+  }
+
+  // A candidate's action card (make_card): roll out `steps` from x0 under u and summarize.
+  // entries: a list of (name, kind, channels), kind one of max_abs, min, max, final, total_loss,
+  // total_work, max_residual. Returns {name: value}.
+  PyObject *card(PyObject *x0, PyObject *u, int steps, PyObject *entries, double dt = 0.01,
+                 const std::string &coupling = "midpoint", int substeps = 2) const {
+    std::vector<cvc::ph::card_entry> spec;
+    PyObject *seq = PySequence_Fast(entries, "entries");
+    if (!seq)
+      throw std::invalid_argument("entries is a list of (name, kind, channels)");
+    for (Py_ssize_t i = 0; i < PySequence_Fast_GET_SIZE(seq); ++i) {
+      PyObject *e = PySequence_Fast_GET_ITEM(seq, i);
+      if (!PyTuple_Check(e) && !PyList_Check(e)) {
+        Py_DECREF(seq);
+        throw std::invalid_argument("each entry is (name, kind, channels)");
+      }
+      PyObject *t = PySequence_Fast(e, "entry");
+      const Py_ssize_t n = PySequence_Fast_GET_SIZE(t);
+      cvc::ph::card_entry ce;
+      try {
+        ce.name = ph_str(n > 0 ? PySequence_Fast_GET_ITEM(t, 0) : nullptr, "an entry's name");
+        ce.kind = ph_summary(ph_str(n > 1 ? PySequence_Fast_GET_ITEM(t, 1) : nullptr, "an entry's kind"));
+        if (n > 2)
+          ce.channels = ph_ints(PySequence_Fast_GET_ITEM(t, 2), "an entry's channels");
+      } catch (...) {
+        Py_DECREF(t);
+        Py_DECREF(seq);
+        throw;
+      }
+      Py_DECREF(t);
+      spec.push_back(ce);
+    }
+    Py_DECREF(seq);
+    cvc::ph::transition_opts o;
+    o.dt = dt;
+    o.coupling = cvc::ph::coupling_scheme_of(coupling);
+    o.substeps = substeps;
+    std::vector<double> us = ph_floats(u, "u");
+    if (us.empty())
+      us.assign(s_.input_dim(), 0.0);
+    const cvc::ph::rollout_result r = cvc::ph::rollout(s_, o, state(x0), us, steps);
+    const cvc::ph::action_card c = cvc::ph::make_card("", cvc::ph::consequences(s_, r, us), spec);
+    PyObject *d = PyDict_New();
+    for (size_t i = 0; i < c.names.size(); ++i) {
+      PyObject *v = PyFloat_FromDouble(c.values[i]);
+      PyDict_SetItemString(d, c.names[i].c_str(), v);
+      Py_DECREF(v);
+    }
+    return d;
+  }
+
   // The system as cvc-ph-system/1 text (system_json).
   std::string system_json() const { return cvc::ph::system_json(s_); }
 
@@ -269,6 +412,101 @@ std::string ph_microgrid_json(int dgus, PyObject *edges = nullptr, PyObject *lin
   else
     throw std::invalid_argument("dgu is \"reference\" or \"linear\", not " + dgu);
   return cvc::ph::system_json(cvc::ph::make_microgrid(law, dgus, lines).system);
+}
+
+// rank_candidates (query.h) over cards given as dicts: cards and bounds are lists of {entry: value}
+// (bounds: each entry's error bound, 0 when absent), limits a list of (entry, bound) for upper
+// limits or (entry, bound, "lower"), and objective {entry: weight}. Returns {"feasible" (admitted,
+// rejected or unresolved per card), "score", "score_bound", "order", "best", "outcome"
+// (certified, inconclusive or abstain), "suboptimality"}.
+PyObject *ph_rank(PyObject *cards, PyObject *bounds, PyObject *limits, PyObject *objective) {
+  if (!PySequence_Check(cards) || !PySequence_Check(bounds) || !PyDict_Check(objective))
+    throw std::invalid_argument("ph_rank(cards: list of dicts, bounds: list of dicts, limits, objective: dict)");
+  const Py_ssize_t n = PySequence_Size(cards);
+  if (PySequence_Size(bounds) != n)
+    throw std::invalid_argument("ph_rank: one bounds dict per card");
+  std::vector<cvc::ph::action_card> cs;
+  std::vector<cvc::ph::card_bounds> bs;
+  for (Py_ssize_t a = 0; a < n; ++a) {
+    PyObject *c = PySequence_GetItem(cards, a), *b = PySequence_GetItem(bounds, a);
+    if (!c || !b || !PyDict_Check(c) || !PyDict_Check(b)) {
+      Py_XDECREF(c);
+      Py_XDECREF(b);
+      throw std::invalid_argument("ph_rank: every card and bound is a dict {entry: value}");
+    }
+    cvc::ph::action_card card;
+    cvc::ph::card_bounds cb;
+    PyObject *k = nullptr, *v = nullptr;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(c, &pos, &k, &v)) {
+      card.names.push_back(ph_str(k, "a card entry"));
+      card.values.push_back(PyFloat_AsDouble(v));
+      PyObject *bv = PyDict_GetItem(b, k);
+      cb.delta.push_back(bv ? PyFloat_AsDouble(bv) : 0.0);
+    }
+    Py_DECREF(c);
+    Py_DECREF(b);
+    if (PyErr_Occurred()) {
+      PyErr_Clear();
+      throw std::invalid_argument("ph_rank: card values and bounds are floats");
+    }
+    card.candidate = std::to_string(a);
+    cs.push_back(card);
+    bs.push_back(cb);
+  }
+  std::vector<cvc::ph::card_limit> ls;
+  if (limits && limits != Py_None) {
+    PyObject *seq = PySequence_Fast(limits, "limits");
+    if (!seq)
+      throw std::invalid_argument("limits is a list of (entry, bound[, \"lower\"])");
+    for (Py_ssize_t i = 0; i < PySequence_Fast_GET_SIZE(seq); ++i) {
+      PyObject *t = PySequence_Fast(PySequence_Fast_GET_ITEM(seq, i), "a limit");
+      const Py_ssize_t m = t ? PySequence_Fast_GET_SIZE(t) : 0;
+      cvc::ph::card_limit l;
+      try {
+        if (m < 2)
+          throw std::invalid_argument("a limit is (entry, bound[, \"lower\"])");
+        l.entry = ph_str(PySequence_Fast_GET_ITEM(t, 0), "a limit's entry");
+        l.bound = PyFloat_AsDouble(PySequence_Fast_GET_ITEM(t, 1));
+        if (m > 2)
+          l.upper = ph_str(PySequence_Fast_GET_ITEM(t, 2), "a limit's side") != "lower";
+      } catch (...) {
+        Py_XDECREF(t);
+        Py_DECREF(seq);
+        throw;
+      }
+      Py_DECREF(t);
+      ls.push_back(l);
+    }
+    Py_DECREF(seq);
+  }
+  cvc::ph::card_objective obj;
+  PyObject *k = nullptr, *v = nullptr;
+  Py_ssize_t pos = 0;
+  while (PyDict_Next(objective, &pos, &k, &v)) {
+    obj.entries.push_back(ph_str(k, "an objective entry"));
+    obj.weights.push_back(PyFloat_AsDouble(v));
+  }
+  const cvc::ph::ranking r = cvc::ph::rank_candidates(cs, bs, ls, obj);
+  PyObject *feas = PyList_New(n), *order = PyList_New(n);
+  for (Py_ssize_t a = 0; a < n; ++a) {
+    PyList_SET_ITEM(feas, a, PyUnicode_FromString(cvc::ph::to_string(r.feasible[a])));
+    PyObject *row = PyList_New(n);
+    for (Py_ssize_t b = 0; b < n; ++b)
+      PyList_SET_ITEM(row, b, PyLong_FromLong(r.order[a][b]));
+    PyList_SET_ITEM(order, a, row);
+  }
+  PyObject *score = ph_list(r.score.data(), r.score.size()), *sb = ph_list(r.score_bound.data(), r.score_bound.size());
+  PyObject *best = r.best < 0 ? (Py_INCREF(Py_None), Py_None) : PyLong_FromLong(r.best);
+  PyObject *d = Py_BuildValue("{s:O,s:O,s:O,s:O,s:O,s:s,s:d}", "feasible", feas, "score", score, "score_bound", sb,
+                              "order", order, "best", best, "outcome", cvc::ph::to_string(r.outcome),
+                              "suboptimality", r.suboptimality);
+  Py_DECREF(feas);
+  Py_DECREF(order);
+  Py_DECREF(score);
+  Py_DECREF(sb);
+  Py_DECREF(best);
+  return d;
 }
 
 } // namespace pycvc

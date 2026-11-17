@@ -37,6 +37,14 @@
 //      on 0..255), so fronts slow at edges. A front stops where it meets another class's front, or
 //      a voxel below t_low.
 //
+// The paper's own seeds (seed_mode::critical_points, critical_point_seeds(); §2.1-2.2 and §4 of
+// the paper, as VolumeRover's SegMed computes them): the critical points of the volume's gradient
+// field after anisotropic gradient vector diffusion (cvc/volume/gradient_vector_diffusion.h). The
+// maxima seed a "feature" class and the minima a "background" class, saddles are dropped, and the
+// paper's §4 thresholds move dim maxima to the background and bright minima to the feature. With no
+// point classes this is the paper's fully automatic two-class segmentation; point classes add more
+// groups.
+//
 // The result has none of the legacy library's process-wide state (its ~25 globals), reads and
 // writes no file, and leaves nothing in the current directory: its labels and per-class volumes
 // come back as volumes. Its labels match the legacy library's voxel for voxel
@@ -52,8 +60,10 @@
 #include <array>
 #include <cstddef>
 #include <cvc/core/result_job.h>
+#include <cvc/volume/gradient_vector_diffusion.h>
 #include <cvc/volume/point_classes.h>
 #include <cvc/volume/volume.h>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -73,11 +83,24 @@ public:
 
 // The automatic seeds added to the point classes' own.
 enum class seed_mode {
-  none,         // only the point classes' points
-  local_maxima, // GenSeg's: the local maxima above t_high of the volume smoothed twice
+  none,            // only the point classes' points
+  local_maxima,    // GenSeg's: the local maxima above t_high of the volume smoothed twice
+  critical_points, // the paper's (SegMed's): the critical points of the diffused gradient, as two
+                   // more classes, "feature" and "background" (critical_point_seeds)
 };
 #ifndef SWIG
-BOOST_DESCRIBE_ENUM(seed_mode, none, local_maxima)
+BOOST_DESCRIBE_ENUM(seed_mode, none, local_maxima, critical_points)
+#endif
+
+// The field whose critical points seed_mode::critical_points finds.
+enum class critical_field {
+  image,              // the gradient of the volume (the paper): its maxima are the volume's
+                      // maxima, its minima the volume's minima
+  gradient_magnitude, // the gradient of |grad I| (SegMed): its minima are the flat regions, bright
+                      // or dark, and its maxima (the edges) are dropped
+};
+#ifndef SWIG
+BOOST_DESCRIBE_ENUM(critical_field, image, gradient_magnitude)
 #endif
 
 // The defaults are GenSeg's; VolumeGridRover's Segmentation tab had no defaults for the
@@ -100,6 +123,28 @@ struct seeded_segmentation_params {
   int timestep = 0;
   // Also make a volume per class (seeded_segmentation::classes).
   bool class_volumes = true;
+
+  // seed_mode::critical_points (and critical_point_seeds). cp_iterations and cp_k default to
+  // SegMed's (GVF.cpp), the rest to the paper's; SegMed's own are cp_field = gradient_magnitude,
+  // cp_weights = initial and cp_sample = 20, with cp_background_threshold its tlow.
+  //   The volume, rescaled to 0..255, gives a gradient field (cp_field), divided by its longest
+  // vector's length, which cp_iterations of gradient vector diffusion with Eq. 3's cp_k smooth
+  // (cvc::gradient_vector_diffusion, the neighbours weighed by the angles of the field cp_weights
+  // names). Each voxel where no neighbour's vector points away from it is a maximum, and where
+  // none points towards it a minimum (cvc::critical_point_at; around an extremum that is the
+  // whole 3x3x3 block). The paper's §4: a maximum below cp_feature_threshold joins the
+  // background, a minimum above cp_background_threshold the feature (in data units, or on 0..255
+  // with normalized_thresholds; the defaults move none). With cp_sample > 0 each class's
+  // 26-connected runs of critical voxels are thinned to one seed in every cp_sample + 1, as SegMed
+  // thinned them (its first in x-fastest order, which on a steep extremum can be a voxel the march
+  // cannot leave); 0, the paper's, keeps every critical voxel.
+  int cp_iterations = 10;
+  double cp_k = 2.0;
+  double cp_feature_threshold = -std::numeric_limits<double>::infinity();
+  double cp_background_threshold = std::numeric_limits<double>::infinity();
+  critical_field cp_field = critical_field::image;
+  diffusion_weights cp_weights = diffusion_weights::current;
+  int cp_sample = 0;
 };
 
 struct seeded_segmentation {
@@ -122,7 +167,8 @@ struct seeded_segmentation {
   std::vector<std::size_t> class_voxels;
   // The automatic seeds found (but for those under a point class's seed), and how many of them
   // the threshold sweep gave a class (the rest were left to the final march, which may still
-  // reach them).
+  // reach them). With seed_mode::critical_points: the critical points' seeds, every one of which
+  // has its class (feature or background), so the two are equal.
   std::size_t automatic_seeds = 0;
   std::size_t classified_seeds = 0;
   // The thresholds as the run used them, on the 0..255 scale.
@@ -137,12 +183,19 @@ struct seeded_segmentation {
 // or infinite), its voxel type is undefined, or `params` is not valid (params_validate).
 // Warnings, not errors: a seed below t_low (it labels only itself and its neighbours), a voxel
 // that is a point of two classes (the later class has it), a class with no points.
+//   With seed_mode::critical_points the critical points (critical_point_seeds) are two more
+// classes after the point classes, "feature" then "background" (so at most 252 point classes),
+// and the point classes may have no points at all: then the critical points alone seed the run
+// (it throws when there are none either). A point class's seed wins a voxel it shares with a
+// critical point.
 seeded_segmentation segment_seeded(const volume &vol, const point_classes &seeds,
                                    const seeded_segmentation_params &params = {});
 
 // segment_seeded, a slice at a time (§1.9). Phases: "checking" (the parameters and seeds, a unit
 // per seed point), "normalising" (reading the voxels, the rescale and the gradient, a unit per
-// voxel), "seeding" (the smoothing and the local-maximum scan, a unit per voxel), "classifying"
+// voxel), "seeding" (the smoothing and the local-maximum scan, a unit per voxel; with
+// seed_mode::critical_points, critical_point_seeds' gradient field, diffusion, critical points and
+// thinning, a unit per voxel, voxel update or voxel visited), "classifying"
 // (the threshold sweep: a unit per voxel visited, popped from a heap or stepped through),
 // "marching" (the final fast marching, a unit per voxel popped) and "writing" (the labels, the
 // border and the class volumes, a unit per voxel). Every unit costs about a microsecond at most,
@@ -177,6 +230,42 @@ std::unique_ptr<segment_stepper> segment_seeded_stepper(const volume &vol, point
                                                         seeded_segmentation_params params = {});
 std::unique_ptr<result_job<seeded_segmentation>>
 segment_seeded_job(const volume &vol, point_classes seeds, seeded_segmentation_params params = {});
+
+// The paper's seeds of `vol` (seed_mode::critical_points, as seeded_segmentation_params' cp_*
+// fields describe): two classes, "feature" then "background", of `params.variable` and
+// `params.timestep`, their points in x-fastest order. Either may be empty. Throws
+// segmentation_error when the volume is constant, has a voxel that is not finite, its voxel type
+// is undefined, or `params` is not valid. `params.automatic` and the march's fields (t_low, t_high,
+// gamma, class_volumes) are not used.
+point_classes critical_point_seeds(const volume &vol,
+                                   const seeded_segmentation_params &params = {});
+
+// critical_point_seeds, a slice at a time (§1.9), as segment_stepper is. Phases: "checking" (the
+// parameters), "normalising" (reading the voxels and the rescale, a unit per voxel) and "seeding"
+// (the gradient field, the diffusion, the critical points and the thinning, a unit per voxel or
+// voxel visited, each about a microsecond).
+class critical_point_seeds_stepper {
+public:
+  critical_point_seeds_stepper(const volume &vol, seeded_segmentation_params params = {});
+  ~critical_point_seeds_stepper();
+  critical_point_seeds_stepper(critical_point_seeds_stepper &&) noexcept;
+  critical_point_seeds_stepper &operator=(critical_point_seeds_stepper &&) noexcept;
+
+  bool step(std::size_t budget); // true once done; budget 0 runs to the end
+  bool done() const;
+  const char *phase() const; // as listed above, "done", or "failed"
+  double progress() const;   // in [0, 1], monotone; 1 once done
+  std::string status() const;
+  void cancel();
+  point_classes take(); // once done; moved out, so call it once
+
+private:
+  struct impl;
+  std::unique_ptr<impl> _impl;
+};
+
+std::unique_ptr<result_job<point_classes>>
+critical_point_seeds_job(const volume &vol, seeded_segmentation_params params = {});
 
 } // namespace cvc
 

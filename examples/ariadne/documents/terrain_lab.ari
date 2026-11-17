@@ -42,6 +42,8 @@ customs:
     required: true
   - node: water
     required: true
+  - node: weather
+    required: true
 
 import:
   - cvc://components/world_controls.ari
@@ -51,6 +53,7 @@ import:
   - cvc://components/sky_controls.ari
   - cvc://components/water_controls.ari
   - cvc://components/wind_controls.ari       # the scene's one wind (scene: wind: below)
+  - cvc://components/weather_controls.ari
 
 # Only the Terrain Lab panel opens at first, so the world fills the view; Settings opens the rest.
 init: |
@@ -60,6 +63,7 @@ init: |
   (state-set "tree.sky_controls.open" "0")
   (state-set "tree.water_controls.open" "0")
   (state-set "tree.wind_controls.open" "0")
+  (state-set "tree.weather_controls.open" "0")
 
 menubar:
   - menu: Sim
@@ -83,6 +87,8 @@ menubar:
         bind: tree.sky_controls.open
       - menu_item: Water
         bind: tree.water_controls.open
+      - menu_item: Weather
+        bind: tree.weather_controls.open
 
 windows:
   - include: world_controls
@@ -107,10 +113,13 @@ windows:
     closable: true
   - include: water_controls
     pos: [754, 196]
-    size: [370, 345]
+    size: [370, 420]
     closable: true
-  - include: wind_controls
+  - include: weather_controls
     pos: [754, 551]
+    size: [370, 230]
+  - include: wind_controls
+    pos: [754, 791]
     size: [370, 120]
     closable: true
 
@@ -175,10 +184,11 @@ scene:
       body: {}             # its ground, buildings, rocks and trees collide (rebuilt on Regenerate)
     # The water: the world's sea, lakes and ponds as the GPU FFT ocean (three wave cascades for the
     # wind, fading out toward the shore) and a swell that breaks on the beaches facing it, the near
-    # water displaced around the camera and the rest flat; whitecaps where the waves fold. The Water
-    # panel (Settings) drives the waves and swell; the scene's wind (above) drives its wind. Its
-    # body: is the water in the physics world, the same sea, so a body floats on the waves drawn,
-    # and the bodies in it make waves.
+    # water displaced around the camera and the rest flat; whitecaps where the waves fold, and the
+    # foam the long waves leave thinning over seconds. The Water panel (Settings) drives the waves,
+    # swell, foam and the level of detail; the scene's wind (above) drives its wind. Its body: is
+    # the water in the physics world, the same sea, so a body floats on the waves drawn, and the
+    # bodies in it make waves.
     - node: water
       type: water
       world: world         # the generated_world whose ground it fills below `level`
@@ -215,7 +225,7 @@ scene:
     - node: sky
       type: cloud_sky
       ground: world        # the deck covers this node's extent, live, and shades its meshes
-      receivers: [world_buildings, world_roads, world_props, world_foliage, water]
+      receivers: [world_buildings, world_roads, world_props, world_foliage, water, weather_rain]
       extent: 250          # a cloud's half-width, metres: small fair-weather cumulus
       base: 300
       top: 520
@@ -229,3 +239,19 @@ scene:
       wind_az: 90
       evolve: 1            # a weather step every 5 s; 0 holds the clouds
       orographic: 1        # windward flanks gather cloud
+    # The weather: storm cells on a schedule (and the ones the Weather panel starts), riding the
+    # sky's wind. A storm builds upwind and walks over the world: the clouds under it close up,
+    # thicken and darken, the deck rises into cumulonimbus while a storm is in view (live:
+    # sky.top), and the ground under it dims. Its life is 20 to 60 minutes of weather time (the
+    # panel's Time scale speeds it up). Every client with the same weather.* keys sees the same
+    # storms. It rains under a storm (rain shafts in the distance, streaks near the camera, rings
+    # on the lakes, the ground and the roads wet and drying after it, and fog): the streaks are its
+    # mesh weather_rain, which the sky lists among its receivers, so they draw after the clouds.
+    - node: weather
+      type: weather
+      ground: world        # the storms are timed to cross this node's extent
+      sky: sky             # the cloud_sky they drive (sky.storms, sky.top, sky.darkness)
+      seed: 5
+      radius_min: 1000     # metres: a storm cell's radius at maturity
+      radius_max: 1600
+      storm_top: 3000      # the deck's top in a full storm

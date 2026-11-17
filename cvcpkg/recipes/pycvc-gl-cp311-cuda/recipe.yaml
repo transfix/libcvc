@@ -74,7 +74,9 @@ depends:
   build:
     # The GPU libcvc SDK + the single (variant-invariant) cvcGL + Python + numpy + VTK.
     - name: libcvc-cuda
+      version: "^4.0"
     - name: cvcgl
+      version: "^4.0"
     - name: python311
     - name: numpy-cp311
     - name: vtk
@@ -85,8 +87,11 @@ depends:
     # The core `import pycvc` module, GPU build, so the whole stack is CUDA-
     # consistent (pycvc-cp311-cuda, not the CPU pycvc-cp311).
     - name: pycvc-cp311-cuda
+      version: "^4.0"
     - name: libcvc-cuda
+      version: "^4.0"
     - name: cvcgl
+      version: "^4.0"
     - name: python311
     - name: numpy-cp311
     - name: vtk

@@ -10,9 +10,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
+#include <cctype> // sliceAxisOf
 #include <cmath>
 #include <cstdint>
-#include <cstdlib> // std::abs(int): click slop
+#include <cstdlib>            // std::abs(int): click slop
 #include <cvc/ariadne/keys.h> // canonical_key: a binding may use SDL's key names or VTK's
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GraphicsNode.h>
@@ -22,6 +24,7 @@
 #include <set>
 #include <sstream> // a frame request's bounds
 #include <string>
+#include <thread>
 #include <utility> // std::move: the UI regions
 #include <vtkCamera.h>
 #include <vtkInteractorStyle.h>
@@ -312,6 +315,40 @@ inline void dirToYawPitch(const Basis &b, Vec3 d, double &yawDeg, double &pitchD
     yawDeg = std::atan2(dot(h, b.E), dot(h, b.N)) / kDeg2Rad;
 }
 
+// Slice mode looks down one axis (0 x, 1 y, 2 z) with the screen's right and up along two others,
+// VolumeGridRover's views: down z, x right and y up (XY); down y, x right and z up (XZ); down x,
+// z right and y up (ZY). `toEye` points from the view's centre back to the eye.
+inline void sliceBasis(int axis, Vec3 &right, Vec3 &up, Vec3 &toEye) {
+  if (axis == 0) {
+    right = {0, 0, 1};
+    up = {0, 1, 0};
+    toEye = {-1, 0, 0};
+  } else if (axis == 1) {
+    right = {1, 0, 0};
+    up = {0, 0, 1};
+    toEye = {0, -1, 0};
+  } else {
+    right = {1, 0, 0};
+    up = {0, 1, 0};
+    toEye = {0, 0, 1};
+  }
+}
+inline const char *sliceAxisName(int axis) { return axis == 0 ? "x" : axis == 1 ? "y" : "z"; }
+// An axis by name: x | y | z, 0 | 1 | 2, or a view's name (xy z, xz y, zy x); `def` otherwise.
+inline int sliceAxisOf(std::string s, int def) {
+  std::string t;
+  for (char c : s)
+    if (c != ' ')
+      t += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (t == "x" || t == "0" || t == "zy" || t == "yz")
+    return 0;
+  if (t == "y" || t == "1" || t == "xz" || t == "zx")
+    return 1;
+  if (t == "z" || t == "2" || t == "xy" || t == "yx")
+    return 2;
+  return def;
+}
+
 } // namespace
 
 // File-local interactor style: forwards VTK window events to a CameraController,
@@ -387,13 +424,19 @@ public:
       m_controller->endPan();
   }
 
-  void OnMouseWheelForward() override {
-    if (m_controller)
-      m_controller->mouseWheel(1.0);
-  }
-  void OnMouseWheelBackward() override {
-    if (m_controller)
-      m_controller->mouseWheel(-1.0);
+  // At the pointer: Slice zooms about the point under it (mouseWheelAt; the other modes as
+  // mouseWheel).
+  void OnMouseWheelForward() override { wheel(1.0); }
+  void OnMouseWheelBackward() override { wheel(-1.0); }
+  void wheel(double steps) {
+    if (!m_controller)
+      return;
+    if (this->Interactor) {
+      const int *p = this->Interactor->GetEventPosition();
+      m_controller->mouseWheelAt(steps, p[0], p[1]);
+    } else {
+      m_controller->mouseWheel(steps);
+    }
   }
 
   // ---- multi-touch gestures (desktop touchscreens) -------------------------
@@ -452,6 +495,14 @@ struct CameraController::Impl {
   // view height, in world units). Map's own pose, as orbit and fly have theirs,
   // so a trip through another mode comes back to the same map.
   double mapCenterX = 0.0, mapCenterY = 0.0, mapScale = 10.0;
+  // Slice pose: the axis it looks down (0 x, 1 y, 2 z), the point at the view's centre and the
+  // parallel scale; its own, as Map's. sliceDepth is how far back along the axis the eye stands
+  // (frameSlice puts it past the box framed), not state: a parallel view's eye only has to be in
+  // front of what it shows.
+  int sliceAxis = 2;
+  Vec3 sliceCenter{0, 0, 0};
+  double sliceScale = 10.0;
+  double sliceDepth = 1000.0;
   double moveSpeed = 5.0, sprintMultiplier = 4.0, sensitivity = 0.25;
   bool invertPitch = false, invertYaw = false, pointerCapture = false;
   bool mouseLook = false; // setMouseLookEnabled: in Orbit, the captured pointer turns the view
@@ -514,8 +565,20 @@ struct CameraController::Impl {
   // fitted at, and whether the user has since zoomed (which ends auto-fitting).
   double mapFitHalfW = 0.0, mapFitHalfH = 0.0, mapFitAspect = 0.0;
   bool mapFitUserZoomed = false;
-  bool mapProjection = false; // applyToCamera() turned parallel projection on for Map
+  // The same for Slice (frameSlice), and the wheel's anchor there (mouseWheelAt): the world point
+  // under the pointer, and its offset from the view's centre along the view's right and up in
+  // units of the parallel scale, held while the zoom glides so the point stays under the pointer.
+  double sliceFitHalfW = 0.0, sliceFitHalfH = 0.0, sliceFitAspect = 0.0;
+  bool sliceFitUserZoomed = false;
+  bool sliceAnchored = false;
+  Vec3 sliceAnchor{0, 0, 0};
+  double sliceAnchorU = 0.0, sliceAnchorV = 0.0;
+  bool mapProjection = false; // applyToCamera() turned parallel projection on (Map or Slice)
   std::atomic<bool> selfWrite{false};
+  // The thread that built this, so connected it to its state path: the render thread. Every
+  // state change must reach handleStateChanged there (debug-asserted; STATE_EXEC_THREADED.md
+  // 4.8: a document group pumped on a worker would run it on the worker).
+  std::thread::id renderThread = std::this_thread::get_id();
   // track smoothing state (harvested from ChaseCamera)
   Vec3 trackP, trackPrev, trackV, trackHead, trackEye, trackFocal;
   bool havP = false, havPrev = false, haveV = false, haveHead = false, haveEye = false;
@@ -540,6 +603,7 @@ struct CameraController::Impl {
     double eye[3] = {0, 0, 0}, focal[3] = {0, 0, 0}, up[3] = {0, 0, 0};
     double fieldOfView = 0.0;
     double mapScale = 0.0;
+    double sliceScale = 0.0;
     Mode mode = Mode::Orbit;
     vtkCamera *camera = nullptr;
     vtkRenderer *renderer = nullptr;
@@ -551,11 +615,13 @@ struct CameraController::Impl {
 
   // The values syncPoseToState() last wrote, so the throttled mirror in update()
   // can skip 17 state writes (each a path lookup) when nothing moved.
-  static constexpr int kMirrored = 17;
+  static constexpr int kMirrored = 21;
   bool mirrorValid = false;
   double mirror[kMirrored] = {};
 
   Basis basis() const { return basisFromUp(up); }
+  // Map and Slice: parallel projection, no rotation.
+  bool parallel() const { return mode == Mode::Map || mode == Mode::Slice; }
   // `k` is a binding: VTK's keysym ("space", "Shift_L") or SDL's name ("Space", "Left Shift"),
   // which the Keys window writes. `held` holds canonical names.
   bool held_has(const std::string &k) const {
@@ -648,6 +714,11 @@ void CameraController::seedState() {
   getState("map.center.x").value(s.mapCenterX);
   getState("map.center.y").value(s.mapCenterY);
   getState("map.scale").value(s.mapScale);
+  getState("slice.axis").value(std::string(sliceAxisName(s.sliceAxis)));
+  getState("slice.center.x").value(s.sliceCenter.x);
+  getState("slice.center.y").value(s.sliceCenter.y);
+  getState("slice.center.z").value(s.sliceCenter.z);
+  getState("slice.scale").value(s.sliceScale);
   getState("settings.move_speed").value(s.moveSpeed);
   getState("settings.sprint_multiplier").value(s.sprintMultiplier);
   getState("settings.mouse_sensitivity").value(s.sensitivity);
@@ -715,6 +786,9 @@ void CameraController::readAllFromState() {
   case 3:
     s.mode = Mode::Map; // not Orbit: an outside write (a settings slider) must not leave the map
     break;
+  case 4:
+    s.mode = Mode::Slice; // as Map
+    break;
   default:
     s.mode = Mode::Orbit;
   }
@@ -736,6 +810,10 @@ void CameraController::readAllFromState() {
   s.mapCenterX = d("map.center.x", s.mapCenterX);
   s.mapCenterY = d("map.center.y", s.mapCenterY);
   s.mapScale = std::max(kMinMapScale, d("map.scale", s.mapScale));
+  s.sliceAxis = sliceAxisOf(str("slice.axis", sliceAxisName(s.sliceAxis)), s.sliceAxis);
+  s.sliceCenter = {d("slice.center.x", s.sliceCenter.x), d("slice.center.y", s.sliceCenter.y),
+                   d("slice.center.z", s.sliceCenter.z)};
+  s.sliceScale = std::max(kMinMapScale, d("slice.scale", s.sliceScale));
   s.moveSpeed = d("settings.move_speed", s.moveSpeed);
   s.sprintMultiplier = d("settings.sprint_multiplier", s.sprintMultiplier);
   s.sensitivity = d("settings.mouse_sensitivity", s.sensitivity);
@@ -776,6 +854,7 @@ void CameraController::syncConfigToState() {
   Impl &s = *m_impl;
   s.selfWrite = true;
   getState("mode").value(static_cast<int>(s.mode));
+  getState("slice.axis").value(std::string(sliceAxisName(s.sliceAxis)));
   getState("up.x").value(s.up.x);
   getState("up.y").value(s.up.y);
   getState("up.z").value(s.up.z);
@@ -826,7 +905,7 @@ void CameraController::syncConfigToState() {
 }
 
 // The values syncPoseToState() writes, in its order.
-void CameraController::poseMirrorValues(double out[17]) const {
+void CameraController::poseMirrorValues(double out[21]) const {
   const Impl &s = *m_impl;
   double e[3], f[3], u[3];
   getPose(e, f, u);
@@ -846,7 +925,11 @@ void CameraController::poseMirrorValues(double out[17]) const {
                       f[2],
                       s.mapCenterX,
                       s.mapCenterY,
-                      s.mapScale};
+                      s.mapScale,
+                      s.sliceCenter.x,
+                      s.sliceCenter.y,
+                      s.sliceCenter.z,
+                      s.sliceScale};
   static_assert(sizeof(v) / sizeof(v[0]) == Impl::kMirrored, "one value per mirrored key");
   std::copy(std::begin(v), std::end(v), out);
 }
@@ -873,6 +956,10 @@ void CameraController::syncPoseToState() {
   getState("map.center.x").value(v[14]);
   getState("map.center.y").value(v[15]);
   getState("map.scale").value(v[16]);
+  getState("slice.center.x").value(v[17]);
+  getState("slice.center.y").value(v[18]);
+  getState("slice.center.z").value(v[19]);
+  getState("slice.scale").value(v[20]);
   s.selfWrite = false;
   std::copy(v, v + Impl::kMirrored, s.mirror);
   s.mirrorValid = true;
@@ -888,6 +975,8 @@ bool CameraController::poseMirrorStale() const {
 }
 
 void CameraController::handleStateChanged(const std::string &childState) {
+  assert(std::this_thread::get_id() == m_impl->renderThread &&
+         "CameraController: a state change off its render thread (STATE_EXEC_THREADED.md 4.8)");
   if (m_impl->selfWrite.load())
     return; // our own write echoing back
   // A frame request: "min_x min_y min_z max_x max_y max_z" written to <camera>.frame (a scene's
@@ -928,7 +1017,7 @@ CameraController::Mode CameraController::mode() const { return m_impl->mode; }
 void CameraController::resetTrack() {
   Impl &s = *m_impl;
   s.havP = s.havPrev = s.haveV = s.haveHead = false;
-  if (s.mode == Mode::Map) {
+  if (s.parallel()) {
     // The map camera looks straight down, a line of sight no chase view (world up
     // as its view-up) can start from: ease in from the orbit view instead.
     s.trackFocal = s.orbitCenter;
@@ -972,7 +1061,7 @@ void CameraController::setMode(Mode m) {
   // Seed the interactive modes seamlessly from the live camera pose -- unless it
   // is the map's. A view straight down has no heading to carry over, so leaving
   // Map returns Orbit and Fly to their own poses, as Map keeps its own.
-  if (s.camera && s.mode != Mode::Map && (m == Mode::Orbit || m == Mode::Fly)) {
+  if (s.camera && !s.parallel() && (m == Mode::Orbit || m == Mode::Fly)) {
     double e[3], f[3];
     s.camera->GetPosition(e);
     s.camera->GetFocalPoint(f);
@@ -1000,8 +1089,8 @@ void CameraController::setMode(Mode m) {
 // Tab toggles the two interactive modes; Track is entered explicitly (it needs a
 // target). From Track, Tab returns to Orbit.
 void CameraController::toggleMode() {
-  // Map is a deliberate 2-D lock: Tab must not tumble the view out of it.
-  if (mode() == Mode::Map)
+  // Map and Slice are deliberate 2-D locks: Tab must not tumble the view out of them.
+  if (m_impl->parallel())
     return;
   setMode(mode() == Mode::Orbit ? Mode::Fly : Mode::Orbit);
 }
@@ -1088,6 +1177,68 @@ void CameraController::frameMap(double cx, double cy, double halfHeight, double 
   applyToCamera();
 }
 
+// The slice pose showing the box's face seen down the slice axis, centred on the box, kept fitted
+// across viewport resizes (refitSliceIfResized) until the user zooms. The eye stands back along
+// the axis past the box.
+void CameraController::fitSlice(const double b[6]) {
+  Impl &s = *m_impl;
+  Vec3 right, up, toEye;
+  sliceBasis(s.sliceAxis, right, up, toEye);
+  const Vec3 lo{b[0], b[2], b[4]}, hi{b[1], b[3], b[5]};
+  const Vec3 ext = hi - lo;
+  const double diag = std::max(length(ext), 1e-6);
+  s.sliceCenter = (lo + hi) * 0.5;
+  // Half the box's extent along the view's right and up, with a floor so a flat box frames.
+  const double halfW = std::max(0.5 * std::fabs(dot(ext, right)), 0.05 * diag);
+  const double halfH = std::max(0.5 * std::fabs(dot(ext, up)), 0.05 * diag);
+  s.sliceFitHalfW = halfW;
+  s.sliceFitHalfH = halfH;
+  s.sliceFitUserZoomed = false;
+  s.sliceAnchored = false;
+  s.sliceScale = std::max(kMinMapScale, mapFitScale(halfH, halfW));
+  s.sliceFitAspect = viewportAspect();
+  s.sliceDepth = std::fabs(dot(ext, toEye)) + 2.0 * diag + 1.0;
+}
+
+void CameraController::frameSlice(double minX, double minY, double minZ, double maxX, double maxY,
+                                  double maxZ) {
+  Impl &s = *m_impl;
+  s.mode = Mode::Slice;
+  s.held.clear();
+  s.zooming = false;
+  setPointerCapture(false);
+  const double b[6] = {minX, maxX, minY, maxY, minZ, maxZ};
+  fitSlice(b);
+  syncConfigToState();
+  syncPoseToState();
+  applyToCamera();
+}
+
+void CameraController::setSliceAxis(int axis) {
+  Impl &s = *m_impl;
+  axis = std::max(0, std::min(2, axis));
+  if (axis == s.sliceAxis)
+    return;
+  s.sliceAxis = axis;
+  s.sliceAnchored = false;
+  syncConfigToState();
+  syncPoseToState();
+  applyToCamera();
+}
+int CameraController::sliceAxis() const { return m_impl->sliceAxis; }
+
+void CameraController::refitSliceIfResized() {
+  Impl &s = *m_impl;
+  if (s.mode != Mode::Slice || s.sliceFitHalfW <= 0.0 || s.sliceFitUserZoomed)
+    return;
+  const double aspect = viewportAspect();
+  if (aspect <= 0.0 || std::abs(aspect - s.sliceFitAspect) < 1e-4)
+    return;
+  s.sliceFitAspect = aspect;
+  s.sliceScale = std::max(kMinMapScale, mapFitScale(s.sliceFitHalfH, s.sliceFitHalfW));
+  syncPoseToState();
+}
+
 double CameraController::viewportAspect() const {
   const Impl &s = *m_impl;
   if (!s.renderer)
@@ -1149,6 +1300,9 @@ void CameraController::frameBounds(double minX, double minY, double minZ, double
   // (and a floor, so a flat sliver of a box still frames).
   fitMap(s.orbitCenter.x, s.orbitCenter.y, std::max(0.55 * (maxY - minY), 0.05 * diag),
          std::max(0.55 * (maxX - minX), 0.05 * diag));
+  // ...and the slice: the box's face down the slice axis.
+  const double sb[6] = {minX, maxX, minY, maxY, minZ, maxZ};
+  fitSlice(sb);
   syncConfigToState();
   syncPoseToState();
   applyToCamera();
@@ -1189,6 +1343,7 @@ bool CameraController::orbitKeys() const { return m_impl->orbitKeys; }
 void CameraController::update(double dtSeconds) {
   Impl &s = *m_impl;
   refitMapIfResized(); // cheap: only does work when the viewport changed shape
+  refitSliceIfResized();
   // Pointer capture: the browser's motion and its end of the lock; then the pointer let go when
   // mouse look was turned off (a settings write), and the window told what state now says.
   pollPointerLock();
@@ -1219,7 +1374,7 @@ void CameraController::update(double dtSeconds) {
                     rightVec(b, yaw) * (strafe * speed) + b.up * (rise * speed);
     applyToCamera();
     syncConfigToState(); // as a pan by the mouse: a later state write must not put it back
-  } else if ((s.mode == Mode::Orbit || s.mode == Mode::Map) && s.orbitKeys &&
+  } else if ((s.mode == Mode::Orbit || s.parallel()) && s.orbitKeys &&
              (fwd != 0 || strafe != 0 || rise != 0)) {
     // Orbit and Map: forward / back / left / right slide the view across the ground, at a rate
     // that is the same share of the view whatever the zoom (the orbit distance, or the map's
@@ -1238,6 +1393,17 @@ void CameraController::update(double dtSeconds) {
       s.orbitCenter = s.orbitCenter + ahead * (fwd * step) + right * (strafe * step);
       s.orbitDistance = std::max(1e-4, s.orbitDistance * std::exp(rise * kKeyZoomPerS * dt));
       syncConfigToState(); // as a pan by the mouse: a later state write must not put it back
+    } else if (s.mode == Mode::Slice) {
+      // Forward is the view's up, right its right.
+      Vec3 right, up, toEye;
+      sliceBasis(s.sliceAxis, right, up, toEye);
+      const double step = kKeyPanPerS * 2.0 * s.sliceScale * dt;
+      s.sliceCenter = s.sliceCenter + right * (strafe * step) + up * (fwd * step);
+      s.sliceScale = std::max(kMinMapScale, s.sliceScale * std::exp(rise * kKeyZoomPerS * dt));
+      if (rise != 0)
+        s.sliceFitUserZoomed = true;
+      s.sliceAnchored = false;
+      syncPoseToState();
     } else {
       // Map looks down -z with north (+y) up: forward is +y, right is +x.
       const double step = kKeyPanPerS * 2.0 * s.mapScale * dt;
@@ -1308,8 +1474,8 @@ void CameraController::update(double dtSeconds) {
   // share of the remaining ratio), and ends at the goal, or when anyone else has set the zoom
   // (or the mode has changed) since the glide last wrote it.
   if (s.zooming) {
-    const bool map = s.mode == Mode::Map;
-    double &v = map ? s.mapScale : s.orbitDistance;
+    const bool map = s.mode == Mode::Map, slice = s.mode == Mode::Slice;
+    double &v = slice ? s.sliceScale : map ? s.mapScale : s.orbitDistance;
     if (s.mode == Mode::Fly || v != s.zoomWrote || !(v > 0.0) || !(s.zoomGoal > 0.0)) {
       s.zooming = false;
     } else {
@@ -1321,8 +1487,11 @@ void CameraController::update(double dtSeconds) {
         s.zooming = false;
       }
       s.zoomWrote = v;
+      if (slice && s.sliceAnchored)
+        anchorSlice();
       if (!s.zooming) { // the glide is over: state takes the zoom it ended at
-        if (map)
+        s.sliceAnchored = false;
+        if (map || slice)
           syncPoseToState();
         syncConfigToState();
       }
@@ -1358,7 +1527,8 @@ bool CameraController::applyNeeded() const {
   if (!s.scene || !a.valid)
     return true;
   if (a.camera != s.camera || a.renderer != s.renderer || a.scene != s.scene || a.mode != s.mode ||
-      a.fieldOfView != s.fieldOfView || (s.mode == Mode::Map && a.mapScale != s.mapScale))
+      a.fieldOfView != s.fieldOfView || (s.mode == Mode::Map && a.mapScale != s.mapScale) ||
+      (s.mode == Mode::Slice && a.sliceScale != s.sliceScale))
     return true;
   double e[3], f[3], u[3];
   getPose(e, f, u);
@@ -1441,6 +1611,22 @@ void CameraController::mouseLook(int dxPixels, int dyPixels) {
       applyToCamera();
       syncPoseToState();
     }
+  } else if (s.mode == Mode::Slice) {
+    // As Map: a drag pans, the grabbed point staying under the pointer, along the view's own right
+    // and up; nothing turns.
+    if (s.dragging || s.secondaryDragging) {
+      int *sz = s.renderer ? s.renderer->GetSize() : nullptr;
+      if (!sz || sz[1] <= 0)
+        sz = s.window ? s.window->GetSize() : nullptr;
+      const double vh = (sz && sz[1] > 0) ? sz[1] : 1.0;
+      const double perPx = 2.0 * s.sliceScale / vh;
+      Vec3 right, up, toEye;
+      sliceBasis(s.sliceAxis, right, up, toEye);
+      s.sliceCenter = s.sliceCenter - right * (dxPixels * perPx) - up * (dyPixels * perPx);
+      s.sliceAnchored = false; // a glide still running zooms about the view's centre now
+      applyToCamera();
+      syncPoseToState();
+    }
   } else if (s.dragging && (s.panning || s.primaryDragPans)) {
     // PAN: slide the orbit centre across the screen plane. Scaled by orbit
     // distance so the world tracks the cursor at any zoom, and by the vertical
@@ -1500,6 +1686,45 @@ void CameraController::mouseLook(int dxPixels, int dyPixels) {
 }
 
 void CameraController::mouseWheel(double steps) {
+  m_impl->sliceAnchored = false;
+  wheelZoom(steps);
+}
+
+void CameraController::mouseWheelAt(double steps, int x, int y) {
+  Impl &s = *m_impl;
+  if (s.mode != Mode::Slice || !s.renderer) {
+    mouseWheel(steps);
+    return;
+  }
+  // Where the pointer is in the view, from its centre, in world units along its right and up.
+  const int *org = s.renderer->GetOrigin();
+  const int *sz = s.renderer->GetSize();
+  if (!org || !sz || sz[0] <= 0 || sz[1] <= 0) {
+    mouseWheel(steps);
+    return;
+  }
+  // A notch during a glide anchors at the point under the pointer as the view stands now.
+  const double perPx = 2.0 * s.sliceScale / sz[1];
+  const double ox = (x - (org[0] + 0.5 * sz[0])) * perPx;
+  const double oy = (y - (org[1] + 0.5 * sz[1])) * perPx;
+  Vec3 right, up, toEye;
+  sliceBasis(s.sliceAxis, right, up, toEye);
+  s.sliceAnchor = s.sliceCenter + right * ox + up * oy;
+  s.sliceAnchorU = ox / s.sliceScale;
+  s.sliceAnchorV = oy / s.sliceScale;
+  s.sliceAnchored = true;
+  wheelZoom(steps);
+}
+
+// Slice: the view's centre where the anchor stays under the pointer at the scale it has now.
+void CameraController::anchorSlice() {
+  Impl &s = *m_impl;
+  Vec3 right, up, toEye;
+  sliceBasis(s.sliceAxis, right, up, toEye);
+  s.sliceCenter = s.sliceAnchor - (right * s.sliceAnchorU + up * s.sliceAnchorV) * s.sliceScale;
+}
+
+void CameraController::wheelZoom(double steps) {
   Impl &s = *m_impl;
   if (s.mode == Mode::Fly) {
     s.moveSpeed = std::max(1e-4, s.moveSpeed * std::pow(1.25, steps));
@@ -1510,12 +1735,14 @@ void CameraController::mouseWheel(double steps) {
   // distance. A notch moves the goal 10%; with zoomTau > 0, update() eases the zoom to it, so a
   // run of notches is one smooth glide instead of a jump per notch. A notch during the glide
   // moves the goal on from where it was headed.
-  const bool map = s.mode == Mode::Map;
+  const bool map = s.mode == Mode::Map, slice = s.mode == Mode::Slice;
   if (map)
     s.mapFitUserZoomed = true; // their framing now — stop auto-fitting on resize
-  double &v = map ? s.mapScale : s.orbitDistance;
+  if (slice)
+    s.sliceFitUserZoomed = true;
+  double &v = slice ? s.sliceScale : map ? s.mapScale : s.orbitDistance;
   const double from = s.zooming && v == s.zoomWrote ? s.zoomGoal : v;
-  const double goal = std::max(map ? kMinMapScale : 1e-4, from * std::pow(0.9, steps));
+  const double goal = std::max(map || slice ? kMinMapScale : 1e-4, from * std::pow(0.9, steps));
   if (s.zoomTau > 0.0) {
     s.zooming = true;
     s.zoomGoal = goal;
@@ -1524,8 +1751,11 @@ void CameraController::mouseWheel(double steps) {
   }
   s.zooming = false;
   v = goal;
+  if (slice && s.sliceAnchored)
+    anchorSlice();
+  s.sliceAnchored = false;
   applyToCamera();
-  if (map)
+  if (map || slice)
     syncPoseToState();
   syncConfigToState();
 }
@@ -1951,9 +2181,9 @@ void CameraController::applyToCamera() {
   s.camera->SetPosition(e);
   s.camera->SetFocalPoint(f);
   s.camera->SetViewUp(u);
-  if (s.mode == Mode::Map) {
+  if (s.parallel()) {
     s.camera->ParallelProjectionOn();
-    s.camera->SetParallelScale(s.mapScale);
+    s.camera->SetParallelScale(s.mode == Mode::Slice ? s.sliceScale : s.mapScale);
     s.mapProjection = true;
   } else if (s.mapProjection) {
     // Leaving Map gives the 3-D modes their perspective back. Only a projection
@@ -1963,7 +2193,7 @@ void CameraController::applyToCamera() {
   }
   // Per-viewport lens: apply an explicit FoV in perspective modes only (Map is
   // parallel). 0 leaves whatever VTK/app default the camera already carries.
-  if (s.mode != Mode::Map && s.fieldOfView > 0.0)
+  if (!s.parallel() && s.fieldOfView > 0.0)
     s.camera->SetViewAngle(s.fieldOfView);
   // Read the content version BEFORE the reset, so a change racing it (another
   // thread) is seen again next frame rather than lost.
@@ -1977,6 +2207,7 @@ void CameraController::applyToCamera() {
   std::copy(u, u + 3, a.up);
   a.fieldOfView = s.fieldOfView;
   a.mapScale = s.mapScale;
+  a.sliceScale = s.sliceScale;
   a.mode = s.mode;
   a.camera = s.camera;
   a.renderer = s.renderer;
@@ -2002,6 +2233,12 @@ void CameraController::getPose(double eye[3], double focal[3], double up[3]) con
     e = {s.mapCenterX, s.mapCenterY, kMapEyeHeight};
     f = {s.mapCenterX, s.mapCenterY, 0.0};
     vu = {0.0, 1.0, 0.0};
+  } else if (s.mode == Mode::Slice) {
+    // Straight down the slice axis from in front of what it shows.
+    Vec3 right, toEye;
+    sliceBasis(s.sliceAxis, right, vu, toEye);
+    f = s.sliceCenter;
+    e = s.sliceCenter + toEye * s.sliceDepth;
   } else {
     e = s.orbitCenter + orbitOffset(b, s.orbitAzimuth, s.orbitElevation, s.orbitDistance);
     f = s.orbitCenter;

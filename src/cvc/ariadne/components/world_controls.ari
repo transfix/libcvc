@@ -128,6 +128,11 @@ units:
         hi: 100.0
         fmt: "%.1f"
         tooltip: "the water surface, from sea level (0 m, the shoreline every relief is laid against): everything below it is water. Below the relief's floor nothing is under water; above its peaks everything is"
+      - combo: Edge
+        bind: "{keys}.edge"
+        options: [Wall, Shore, None]
+        values: [0, 1, 2]
+        tooltip: "what is at the world's edge: Wall, invisible walls that keep everything in; Shore, a beach all round with the sea beyond it, and no walls; None, nothing"
       - text: "Settings changed: Regenerate to apply them."
         visible_when: (= (state-get "{keys}.pending") "1")
       - button: Regenerate

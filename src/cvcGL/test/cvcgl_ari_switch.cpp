@@ -3,9 +3,11 @@
 // type added beside its own), its free light, its lighting rig, its background and its shadows
 // gone -- and a reload of one document must not pile its nodes up. The host's menus
 // (set_host_menus) ride along into each document it loads.
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cvc/ariadne/app_runtime.h>
+#include <cvc/ariadne/bind.h> // resolve_bind
 #include <cvc/core/app.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/ImGuiOverlay.h>
@@ -16,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vtkRenderer.h>
 
 using cvc::gl::SceneGraph;
@@ -132,6 +135,42 @@ scene:
   rt.step(1.0 / 30.0);
   chk(!rt.realized(), "c has no scene");
   chk(!ui.phoneHidesPanels(), "so a phone starts with its panels shown");
+
+  // Adaptive quality (scene_quality.h, O21): the loop runs on the frames' wall time, never on the
+  // fixed clock (a capture's frames stay as asked for), and publishes quality.* under the prefix.
+  std::printf("== adaptive quality: slow frames step the tier down; the fixed clock holds it ==\n");
+  rt.load(b);
+  auto q = [&](const char *k) -> cvc::state & {
+    return cvc::state::instance(app)(cvc::ariadne::resolve_bind(rt.prefix(), k));
+  };
+  auto slow_frames = [&](double seconds) {
+    const auto end = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+    while (std::chrono::steady_clock::now() < end) {
+      rt.step(1.0 / 30.0);
+      std::this_thread::sleep_for(std::chrono::milliseconds(150)); // 6.7 fps, far under 30
+    }
+  };
+  const std::string window0 = q("quality.frame_ms").value<std::string>();
+  rt.set_fixed_clock(true);
+  slow_frames(2.6);
+  chk(q("quality.frame_ms").value<std::string>() == window0 &&
+          q("quality.tier").value<std::string>() != "1" &&
+          q("quality.tier").value<std::string>() != "2" &&
+          q("quality.tier").value<std::string>() != "3" &&
+          q("quality.tier").value<std::string>() != "4",
+      "on the fixed clock the loop does not run: no window closes, no tier drops");
+  rt.set_fixed_clock(false);
+  slow_frames(3.2); // the start's 2 s cooldown, then a window at 4.5 x the 33 ms target: a panic
+  const double tier = q("quality.tier").value<double>(), ms = q("quality.frame_ms").value<double>();
+  std::printf("  after 3.2 s at about 150 ms a frame: tier %.0f, scale %.2f, frame %.0f ms\n", tier,
+              q("quality.scale").value<double>(), ms);
+  chk(tier >= 2.0 && ms > 100.0 && q("quality.target_fps").value<double>() == 30.0,
+      "slow frames drop tiers within seconds, and the loop publishes its window's frame time");
+  q("quality.adaptive").value(0.0);
+  q("quality.tier").value(0.0);
+  slow_frames(2.6);
+  chk(q("quality.tier").value<double>() == 0.0,
+      "quality.adaptive 0 holds the tier where it is set, however slow the frames");
 
   view.close();
   std::printf("cvcgl_ari_switch: %s\n", fails ? "FAILED" : "PASSED");
