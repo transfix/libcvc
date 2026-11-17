@@ -960,8 +960,10 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
                        resolve_bind(bind_prefix, "entities"), scene.spawns,
                        resolve_bind(bind_prefix, "spawns"));
     out->bind_boats(scene, bind_prefix, warnings);
-    if (out->vehicles())
+    if (out->vehicles()) {
       out->vehicles()->set_intents_key(resolve_bind(bind_prefix, scene.vehicle_intents));
+      out->vehicles()->spawn_starts(scene.vehicle_starts, warnings);
+    }
     out->bind_wind(scene, bind_prefix);
   }
   return out;

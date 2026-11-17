@@ -582,6 +582,8 @@ struct Scene {
   std::vector<vehicle_archetype> vehicles;
   spawn_rules spawns;          // and where they start (world: spawns:)
   std::string vehicle_intents; // and a table of their intents (world: vehicles: intents:)
+  // And the ones it starts with (world: vehicles: start:).
+  std::vector<vehicle_start> vehicle_starts;
   bool has_shadows = false;
   bool shadows_enabled = false;
   bool has_shadow_resolution = false; // shadows: { resolution: <px> } — bigger = crisper map

@@ -56,6 +56,7 @@ constexpr double kScale = 0.05;  // nav's normalized units per metre, as libcvc'
 constexpr double kReach = 3.0;   // m from its goal that counts as there
 constexpr double kSpacing = 8.0; // m kept between spawns drawn from the grid
 constexpr double kPi = 3.14159265358979323846;
+constexpr int kMaxSpawnCount = 256; // vehicles.spawn.count's most at one request
 
 std::string num(double v) {
   char buf[32];
@@ -1880,6 +1881,36 @@ std::uint64_t WorldVehicles::spawn(const entity_spec &spec, std::string *why) {
   return placed.id;
 }
 
+std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts,
+                                        std::vector<std::string> *warnings) {
+  std::size_t made = 0;
+  for (std::size_t i = 0; i < starts.size(); ++i) {
+    const vehicle_start &st = starts[i];
+    for (int k = 0; k < st.count; ++k) {
+      entity_spec s;
+      s.archetype = st.archetype;
+      s.name = st.name.empty() || st.count == 1 ? st.name : st.name + " " + std::to_string(k + 1);
+      s.team = st.team;
+      s.controller = st.controller;
+      s.plant = st.plant;
+      s.policy = st.policy;
+      s.placed = st.placed;
+      s.x = st.x;
+      s.y = st.y;
+      if (st.has_heading)
+        s.yaw = st.heading * kPi / 180.0;
+      std::string why;
+      if (!spawn(s, &why)) {
+        if (warnings)
+          warnings->push_back("ari: world: vehicles: start: [" + std::to_string(i) + "]: " + why);
+        break;
+      }
+      ++made;
+    }
+  }
+  return made;
+}
+
 bool WorldVehicles::despawn(std::uint64_t id) {
   impl &d = *_impl;
   for (auto it = d.ents.begin(); it != d.ents.end(); ++it)
@@ -1948,11 +1979,33 @@ void WorldVehicles::poll() {
   }
   if (const std::string r = d.get("spawn.request"); r != d.seen_spawn) {
     d.seen_spawn = r;
-    std::string why;
-    const entity_spec s = d.spec_from_keys();
-    const std::uint64_t id = spawn(s, &why);
-    d.put(d.vkey + ".spawn.status",
-          id ? "spawned " + std::to_string(id) + ": " + d.ents.back().spec.name : why);
+    // spawn.count of them (1 when empty or not a number), each at a free point of its own when
+    // spawn.at names none; the first refusal stops the rest.
+    int count = 1;
+    try {
+      if (const std::string c = d.get("spawn.count"); !c.empty())
+        count = std::clamp(std::stoi(c), 1, kMaxSpawnCount);
+    } catch (const std::exception &) {
+    }
+    std::string why, status;
+    std::uint64_t id = 0;
+    int made = 0;
+    for (int i = 0; i < count; ++i) {
+      const entity_spec s = d.spec_from_keys();
+      const std::uint64_t got = spawn(s, &why);
+      if (!got)
+        break;
+      id = got;
+      ++made;
+    }
+    if (made == 0)
+      status = why;
+    else if (made == 1)
+      status = "spawned " + std::to_string(id) + ": " + d.ents.back().spec.name;
+    else
+      status = "spawned " + std::to_string(made) + ", the last " + std::to_string(id) + ": " +
+               d.ents.back().spec.name + (made < count ? " (" + why + ")" : std::string());
+    d.put(d.vkey + ".spawn.status", status);
     d.put(d.vkey + ".spawn.last", std::to_string(id));
   }
   if (const std::string r = d.get("remove.request"); r != d.seen_remove) {

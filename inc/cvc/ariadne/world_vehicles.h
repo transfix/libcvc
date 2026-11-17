@@ -312,6 +312,10 @@ public:
   // allow, a policy that cannot be loaded). Without a grid it is kept and placed once there is
   // one.
   std::uint64_t spawn(const entity_spec &spec, std::string *why = nullptr);
+  // The vehicles a world starts with (world: vehicles: start:), spawned in order, each as spawn()
+  // would; a refusal is a warning and stops that entry. Returns how many it spawned.
+  std::size_t spawn_starts(const std::vector<vehicle_start> &starts,
+                           std::vector<std::string> *warnings = nullptr);
   bool despawn(std::uint64_t id);
   void clear();
 
