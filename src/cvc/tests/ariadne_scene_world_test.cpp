@@ -18,6 +18,7 @@
 #include <cvc/ariadne/scene_generated_world.h>
 #include <cvc/ariadne/scene_geometry.h>
 #include <cvc/ariadne/scene_water.h>
+#include <cvc/ariadne/scene_wind.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/server_document.h>
 #include <cvc/ariadne/world_gym.h>
@@ -2739,6 +2740,181 @@ TEST(AriadneWorldBoats, TheWorldBlockTakesBoatsAndTheSpawnKnobs) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The scene's one wind (scene_wind.h, O14): `scene: wind:` seeds wind.speed / wind.dir /
+// wind.gustiness, and the physics pushes every body in the air with it.
+
+namespace {
+
+// kPlants with a 30 m/s wind toward +y (dir 90): a gale across the yard.
+LoadResult load_plants_in_wind(bool wind) {
+  std::string doc = kPlants;
+  if (wind) {
+    const std::string at = "scene:\n  physics: {}\n";
+    const std::size_t p = doc.find(at);
+    EXPECT_NE(p, std::string::npos);
+    doc.insert(p + at.size(), "  wind: { speed: 30, dir: 90, gustiness: 0 }\n");
+  }
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, doc);
+  if (r.ok)
+    if (const Value *world = find_world_block(r)) {
+      world_rules rules = default_world_rules();
+      EXPECT_EQ(parse_world_block(*world, rules), "");
+      r.scene.vehicles = rules.vehicles;
+    }
+  return r;
+}
+
+} // namespace
+
+// Every plant feels the wind: a jolt vehicle through its aero drag (physics reads the wind field),
+// the dynamic models and the kinematic bicycle through their drive (WorldVehicles::set_wind). Each
+// one's push points downwind, and each one's path over 8 s bends from the one it takes in still
+// air (its navigator steering back against the push: the four-wheeler, heaviest for its area,
+// least).
+TEST(AriadneWorldVehicles, TheSceneWindPushesEveryPlant) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const std::array<std::string, 4> kinds{"jolt", "bike", "four", "walker"};
+  struct run {
+    cvc::app app;
+    std::unique_ptr<SceneWorld> w;
+    std::array<std::uint64_t, 4> ids{};
+  };
+  auto start = [&](run &r, bool wind) {
+    LoadResult doc = load_plants_in_wind(wind);
+    ASSERT_TRUE(doc.ok) << doc.error;
+    EXPECT_EQ(doc.scene.wind.present, wind);
+    std::vector<std::string> warnings;
+    r.w = SceneWorld::from_scene(r.app, doc.scene, "", "physics", &warnings);
+    ASSERT_NE(r.w, nullptr);
+    r.w->sync(&warnings);
+    EXPECT_EQ(r.w->wind_field().valid(), wind) << "the wind is a flow field in the world";
+    for (std::size_t k = 0; k < 4; ++k)
+      r.ids[k] = spawn_one(*r.w->vehicles(), kinds[k], "nav@1", -50.0 + 25.0 * k, 40.0, -1.5);
+    SceneClockDriver clock(r.app, resolved_clock(doc.scene));
+    drive(r.app, *r.w, clock, 480); // 8 s
+  };
+  run still, blown;
+  start(still, false);
+  start(blown, true);
+  for (std::size_t k = 0; k < 4; ++k) {
+    const entity_info a = entity_of(*still.w->vehicles(), still.ids[k]);
+    const entity_info b = entity_of(*blown.w->vehicles(), blown.ids[k]);
+    const double bend = std::hypot(b.x - a.x, b.y - a.y);
+    std::printf("[wind] %s (%s): the wind's push (%.0f, %.0f) N; its path bent %.2f m in 8 s\n",
+                kinds[k].c_str(), b.plant.c_str(), b.wind_fx, b.wind_fy, bend);
+    EXPECT_EQ(a.wind_fx, 0.0) << kinds[k] << ": no push in still air";
+    EXPECT_EQ(a.wind_fy, 0.0) << kinds[k];
+    EXPECT_GT(b.wind_fy, 100.0) << kinds[k] << ": pushed downwind (+y)";
+    EXPECT_GT(bend, 0.05) << kinds[k] << ": its path bends in the wind";
+  }
+}
+
+// A body in the air is carried downwind, and turns with wind.dir: a light ball (1 kg, 1 m across, a
+// beach ball that falls at some 4 m/s) dropped from 40 m rides the wind as it falls; the water
+// follows the same wind (its own keys left alone).
+TEST(AriadneSceneWorld, TheSceneWindCarriesWhatFallsAndTurnsWithItsKey) {
+  REQUIRE_YAML();
+  LoadResult r = fresh_load(R"(
+scene:
+  physics: {}
+  wind: { speed: 12, dir: 0, gustiness: 0 }
+  nodes:
+    - node: floor
+      source: { box: { size: [400, 400, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+    - node: ball
+      source: { sphere: { radius: 0.5 } }
+      transform: { position: [0, 0, 40] }
+      body: { mass: 1 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_TRUE(r.scene.wind.present);
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  EXPECT_EQ(val(app, "wind.speed"), "12");
+  if (!jolt())
+    return;
+  ASSERT_TRUE(w->wind_field().valid());
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  for (int i = 0; i < 240; ++i) { // 4 s: it falls, carried downwind
+    clock.drive(1.0 / 60.0);
+    w->follow(app.world_clock());
+  }
+  const cvc::physics::body_state carried = w->world().state(w->body("ball"));
+  std::printf("[wind] a 1 kg ball dropped from 40 m in a 12 m/s wind, 4 s on: (%.2f, %.2f, %.2f)\n",
+              carried.position.x, carried.position.y, carried.position.z);
+  EXPECT_GT(carried.position.x, 1.0) << "carried downwind (+x)";
+  EXPECT_NEAR(carried.position.y, 0.0, 0.05);
+  // One key turns it: toward +y now; the ball, lifted back up, is carried that way.
+  cvc::state::instance(app)("wind.dir").value(90.0);
+  cvc::physics::body_state up = carried;
+  up.position = {0.0, 0.0, 40.0};
+  up.linear_velocity = {0.0, 0.0, 0.0};
+  w->world().set_state(w->body("ball"), up);
+  for (int i = 0; i < 240; ++i) {
+    clock.drive(1.0 / 60.0);
+    w->follow(app.world_clock());
+  }
+  const cvc::physics::body_state turned = w->world().state(w->body("ball"));
+  std::printf("[wind] after wind.dir 90, 4 s on: (%.2f, %.2f, %.2f)\n", turned.position.x,
+              turned.position.y, turned.position.z);
+  EXPECT_GT(turned.position.y, 1.0) << "carried toward +y";
+  // No wind: the field leaves the world.
+  cvc::state::instance(app)("wind.speed").value(std::string());
+  w->sync(&warnings);
+  EXPECT_FALSE(w->wind_field().valid());
+}
+
+// The water follows the scene's wind (scene_water_spec through scene_wind): its spectrum's wind is
+// the scene's, its own water.wind_* stay as they were, and with wind.speed cleared it takes them
+// again.
+TEST(AriadneSceneWorld, TheWaterFollowsTheScenesWind) {
+  REQUIRE_YAML();
+  LoadResult r = fresh_load(R"(
+scene:
+  wind: { speed: 11, dir: 45, gustiness: 0.4 }
+  nodes:
+    - node: water
+      type: water
+      ground: beach
+      level: 0
+      wind_speed: 4
+      wind_dir: 200
+      sea_lag: 0
+      sea_fade: 0
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  seed_scene_wind(app, r.scene, "");
+  const SceneNode &n = r.scene.nodes.front();
+  SceneWaterSpec s = scene_water_spec(app, n, "");
+  EXPECT_EQ(s.wind_speed, 11.0);
+  EXPECT_EQ(s.wind_dir, 45.0);
+  EXPECT_EQ(s.gustiness, 0.4);
+  EXPECT_EQ(val(app, "water.wind_speed"), "4") << "its own key stays";
+  const int N = 101;
+  auto flat = std::make_shared<cvc::height_field>(N, N, -100.0, -100.0, 2.0, 2.0,
+                                                  std::vector<float>(std::size_t(N) * N, -10.0f));
+  WaterRuntime rt(app, n, "", [flat] { return flat; });
+  ASSERT_NE(rt.keyframes(), nullptr);
+  EXPECT_NEAR(rt.keyframes()->to.dir_rad, 45.0 * 3.14159265358979323846 / 180.0, 1e-12);
+  cvc::state::instance(app)("wind.dir").value(-30.0);
+  EXPECT_TRUE(rt.tick());
+  EXPECT_NEAR(rt.keyframes()->to.dir_rad, -30.0 * 3.14159265358979323846 / 180.0, 1e-12)
+      << "one key turns the sea";
+  cvc::state::instance(app)("wind.speed").value(std::string());
+  s = scene_water_spec(app, n, "");
+  EXPECT_EQ(s.wind_speed, 4.0);
+  EXPECT_EQ(s.wind_dir, 200.0);
+}
+
 // The gym (ARIADNE_WORLDS.md section 14, L4): a world document driven by reset, step and observe.
 
 namespace {

@@ -602,7 +602,7 @@ void vehicle_set::set_controls(vehicle_id id, const vehicle_controls &c) {
 }
 
 void vehicle_set::pre_step(world_backend &be, const field_set &fields, const world_config &cfg,
-                           const std::vector<material> &materials) {
+                           const std::vector<material> &materials, double t) {
   const double dt = cfg.fixed_dt;
   if (!_v.empty())
     be.set_medium_reach(fields.medium_reach());
@@ -734,7 +734,7 @@ void vehicle_set::pre_step(world_backend &be, const field_set &fields, const wor
     const vec3 com = s.position + rotate(s.rotation, d.center_of_mass);
     double rho = d.air_density;
     vec3 wind;
-    fields.air_at(com, rho, wind);
+    fields.air_at(com, t, rho, wind);
     const vec3 u = s.linear_velocity - wind;
     const double un = norm(u);
     const vec3 aero = u * (-0.5 * rho * d.drag_coefficient * d.frontal_area * un);
