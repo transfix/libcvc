@@ -61,6 +61,11 @@ void VolumeSliceNode::setSource(std::shared_ptr<cvc::slice_source> src) {
   tick(); // the quad exists at once, so the scene frames on it
 }
 
+void VolumeSliceNode::setModelKey(const std::string &path) {
+  m_modelKey = path;
+  ++m_tfVersion;
+}
+
 void VolumeSliceNode::handleStateChanged(const std::string &childState) {
   if (childState == "transfer_function") {
     ++m_tfVersion;
@@ -130,6 +135,10 @@ void VolumeSliceNode::applyOffset(double offset) {
 bool VolumeSliceNode::tick() {
   if (!m_source)
     return false;
+  // A model read from another node's key is watched here, as a write to it reaches that node's
+  // handlers, not this one's.
+  if (!m_modelKey.empty() && cvc::state::instance(app())(m_modelKey).value() != m_modelText)
+    ++m_tfVersion;
   const std::uint64_t kv = m_keysVersion.load(), tv = m_tfVersion.load();
   if (m_drawn && kv == m_drawnKeys && tv == m_drawnTf && m_sourceVersion == m_drawnSource)
     return false;
@@ -163,7 +172,8 @@ bool VolumeSliceNode::tick() {
     keys("position").value(position);
 
   // The transfer function: parsed again only when its string changed.
-  const std::string text = getState("transfer_function").value();
+  const std::string text = m_modelKey.empty() ? getState("transfer_function").value()
+                                              : cvc::state::instance(app())(m_modelKey).value();
   bool recolour = false;
   if (text != m_modelText) {
     cvc::tf::model m;

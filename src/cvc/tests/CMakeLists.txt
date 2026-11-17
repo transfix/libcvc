@@ -202,6 +202,8 @@ add_executable(ph_se2_train_test ph_se2_train_test.cpp)
 add_executable(nav_terrain_test nav_terrain_test.cpp)
 add_executable(nav_binding_test nav_binding_test.cpp)
 add_executable(nav_trace_test nav_trace_test.cpp)
+add_executable(nav_arms_test nav_arms_test.cpp)
+add_executable(nav_scrub_test nav_scrub_test.cpp)
 add_executable(input_trace_test input_trace_test.cpp)
 add_executable(nav_sim_world_agents_test nav_sim_world_agents_test.cpp)
 add_executable(physics_parity_test physics_parity_test.cpp)
@@ -213,6 +215,7 @@ add_executable(physics_pose_tracker_test physics_pose_tracker_test.cpp)
 add_executable(physics_plant_host_test physics_plant_host_test.cpp)
 add_executable(physics_dyn_bike_plant_test physics_dyn_bike_plant_test.cpp)
 add_executable(physics_dyn_4w_plant_test physics_dyn_4w_plant_test.cpp)
+add_executable(physics_dyn_boat_plant_test physics_dyn_boat_plant_test.cpp)
 # StepsAsTheDynamicPlantDoes (and the four-wheel StepsAsTheFourWheelPlantDoes) hold the plant
 # (built with -ffp-contract=off) to its model called inline here, bit for bit: build them the same
 # way, or clang contracts this copy into FMAs on aarch64 (the macOS arm64 lanes) and the last bits
@@ -372,6 +375,14 @@ else()
   set_source_files_properties(ocean_sea_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 add_executable(ocean_ewave_test ocean_ewave_test.cpp)
+add_executable(ocean_wind_test ocean_wind_test.cpp)
+# The gusts', the current's and the fetch map's golden hashes are of values computed from inputs
+# computed here: build without FMA contraction, as ocean_sea_test.
+if(NOT MSVC)
+  set_source_files_properties(ocean_wind_test.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(ocean_wind_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 # EwaveDigest pins a window's digest after a fixed scenario whose inputs (the drops' points, the
 # wall's mask) are computed here: build without FMA contraction, as ocean_sea_test.
 if(NOT MSVC)
@@ -506,6 +517,8 @@ set(TEST_TARGETS
   nav_terrain_test
   nav_binding_test
   nav_trace_test
+  nav_arms_test
+  nav_scrub_test
   input_trace_test
   nav_sim_world_agents_test
   physics_parity_test
@@ -515,6 +528,7 @@ set(TEST_TARGETS
   physics_plant_host_test
   physics_dyn_bike_plant_test
   physics_dyn_4w_plant_test
+  physics_dyn_boat_plant_test
   physics_mujoco_robot_test
   geometry_height_field_test
   world_geometry_test
@@ -619,6 +633,7 @@ set(TEST_TARGETS
   ocean_shore_test
   ocean_sea_test
   ocean_ewave_test
+  ocean_wind_test
   world_bundle_test
   volren_math_test
   volren_camera_test
@@ -1585,7 +1600,7 @@ target_link_libraries(vis_tiler_test
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_ewave_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_ewave_test ocean_wind_test)
   target_link_libraries(${_lsys_test} PRIVATE cvc GTest::gtest GTest::gtest_main)
   target_compile_features(${_lsys_test} PRIVATE cxx_std_17)
 endforeach()
@@ -2459,6 +2474,18 @@ target_link_libraries(nav_trace_test
     GTest::gtest
     GTest::gtest_main
 )
+target_link_libraries(nav_arms_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(nav_scrub_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 target_link_libraries(input_trace_test
   PRIVATE
     cvc
@@ -2514,6 +2541,12 @@ target_link_libraries(physics_dyn_bike_plant_test
     GTest::gtest_main
 )
 target_link_libraries(physics_dyn_4w_plant_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(physics_dyn_boat_plant_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2896,6 +2929,8 @@ target_compile_features(ph_se2_train_test PRIVATE cxx_std_17)
 target_compile_features(nav_terrain_test PRIVATE cxx_std_17)
 target_compile_features(nav_binding_test PRIVATE cxx_std_17)
 target_compile_features(nav_trace_test PRIVATE cxx_std_17)
+target_compile_features(nav_arms_test PRIVATE cxx_std_20)
+target_compile_features(nav_scrub_test PRIVATE cxx_std_20)
 target_compile_features(input_trace_test PRIVATE cxx_std_17)
 target_compile_features(nav_sim_world_agents_test PRIVATE cxx_std_17)
 target_compile_features(physics_parity_test PRIVATE cxx_std_17)
@@ -2903,6 +2938,7 @@ target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
 target_compile_features(physics_plant_host_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_bike_plant_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_4w_plant_test PRIVATE cxx_std_17)
+target_compile_features(physics_dyn_boat_plant_test PRIVATE cxx_std_17)
 target_compile_features(physics_mujoco_robot_test PRIVATE cxx_std_17)
 target_compile_features(geometry_height_field_test PRIVATE cxx_std_17)
 target_compile_features(world_geometry_test PRIVATE cxx_std_17)
@@ -3043,7 +3079,14 @@ endfunction()
 
 cvc_discover_tests(app_test)
 foreach(_cvc_port_test IN LISTS CVC_PORT_TESTS)
-  cvc_discover_tests(${_cvc_port_test})
+  if(_cvc_port_test STREQUAL "segmentation_intrinsics_test")
+    # AnActionStartsItUnderTheDefaultLimits runs a 160^3 segmentation through an action's frame
+    # loop: 93-101 s in a Debug job, and past ctest's 300 s on a loaded runner (three times over in
+    # one job). The test's own loop allows 900 s too.
+    cvc_discover_tests(${_cvc_port_test} PROPERTIES TIMEOUT 900)
+  else()
+    cvc_discover_tests(${_cvc_port_test})
+  endif()
 endforeach()
 cvc_discover_tests(thread_pool_test)
 cvc_discover_tests(thread_class_test)
@@ -3155,7 +3198,7 @@ cvc_discover_tests(vis_tiler_test)
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_wind_test)
   cvc_discover_tests(${_lsys_test})
 endforeach()
 # The water's long runs (a channel's walls, a thin wall, a moving source's wake) take 105-195 s
@@ -3463,12 +3506,18 @@ cvc_discover_tests(nav_potential_test)
 cvc_discover_tests(ph_compose_test)
 cvc_discover_tests(ph_compose_parity_test)
 cvc_discover_tests(ph_microgrid_test)
-cvc_discover_tests(ph_convoy_test)
+# The convoy's two full runs (the composite against the formation; the follow laws on a step and
+# a stop) take ~95 s each in a Debug build, and a PR's Debug ctest gives a test without a TIMEOUT
+# of its own 300 s (ci.yml), which a busy runner misses: both timed out on #1288's run on
+# 2026-11-16. Their own budget, as ocean_ewave_test has, so a slow box fails on a real hang only.
+cvc_discover_tests(ph_convoy_test PROPERTIES TIMEOUT 1200)
 cvc_discover_tests(ph_se2_test)
 cvc_discover_tests(ph_se2_train_test)
 cvc_discover_tests(nav_terrain_test)
 cvc_discover_tests(nav_binding_test)
 cvc_discover_tests(nav_trace_test)
+cvc_discover_tests(nav_arms_test)
+cvc_discover_tests(nav_scrub_test)
 cvc_discover_tests(input_trace_test)
 cvc_discover_tests(nav_sim_world_agents_test)
 cvc_discover_tests(physics_parity_test)
@@ -3476,6 +3525,7 @@ cvc_discover_tests(physics_pose_tracker_test)
 cvc_discover_tests(physics_plant_host_test)
 cvc_discover_tests(physics_dyn_bike_plant_test)
 cvc_discover_tests(physics_dyn_4w_plant_test)
+cvc_discover_tests(physics_dyn_boat_plant_test)
 cvc_discover_tests(physics_mujoco_robot_test)
 cvc_discover_tests(geometry_height_field_test)
 cvc_discover_tests(world_geometry_test)

@@ -300,6 +300,18 @@ TEST(AriMedia, TheLeanAriHasNoPlayerAndSaysSo) {
   EXPECT_NE(r.output.find("no player in this host"), std::string::npos) << r.output;
 }
 
+// publish-cvcpkg's ari-media smoke snapshots this document at 60x20 (#1298) and greps the
+// window's last row, its status line. The Windows menubar and a blank row come above the window,
+// so a shorter snapshot cuts that row off and the publish fails although the player works (14
+// rows did, once every document got the Windows menu in #1220). The lean ari draws the same
+// chrome, so CI checks that size here, where ari-media is not built. Keep the two heights equal.
+TEST(AriMedia, TheLeanAriFitsThePlayerInThePublishSmoke) {
+  REQUIRE_ARI();
+  const AriRun r = ari("snapshot --media-play always --width 60 --height 20 " + quoted(kPlayerDoc));
+  EXPECT_EQ(r.status, 0) << r.output;
+  EXPECT_NE(r.output.find("video unsupported audio unsupported"), std::string::npos) << r.output;
+}
+
 TEST(AriMedia, AriMediaPlaysVideoAndShowsItsPictures) {
   REQUIRE_ARI();
   if (ari_media().empty())

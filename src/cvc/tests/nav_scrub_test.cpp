@@ -1,0 +1,356 @@
+/*
+  Copyright 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+*/
+
+// The checkpoint scrubber (cvc/nav/nav_scrub.h): a coef_trainer run's history and checkpoints are
+// read and deployed on one scenario; a blob deployed twice gives the same run; checkpoint 0
+// deployed is the untrained policy's arm; the runs are cached by blob and scenario; and the view
+// shows checkpoint k beside step 0 as its controls pick it.
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cvc/core/app.h>
+#include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/coef_train.h>
+#include <cvc/nav/nav_arms.h>
+#include <cvc/nav/nav_panels.h>
+#include <cvc/nav/nav_scrub.h>
+#include <cvc/nav/policy_library.h>
+#include <cvc/nav/sim_world.h>
+#include <cvc/nav/sim_world_trace.h>
+#include <filesystem>
+#include <fstream>
+#include <gtest/gtest.h>
+#include <memory>
+#include <string>
+#include <vector>
+
+using namespace cvc::nav;
+namespace fs = std::filesystem;
+
+namespace {
+
+train_config small_cfg(const std::string &dir) {
+  train_config c;
+  c.n = 16;
+  c.window = 4;
+  c.hidden = 16;
+  c.horizon = 8;
+  c.steps = 10;
+  c.lr = 3e-3f;
+  c.seed = 0;
+  c.checkpoint_every = 5;
+  c.history_path = dir + "/history.jsonl";
+  c.checkpoint_prefix = dir + "/coef";
+  return c;
+}
+
+// A coef_trainer run in its own directory: its history and three checkpoints (steps 0, 5, 10).
+struct trained {
+  std::string dir, history;
+  train_config cfg;
+};
+
+trained train_once(const std::string &name) {
+  trained t;
+  t.dir = (fs::path(::testing::TempDir()) / ("nav_scrub_" + name)).string();
+  fs::remove_all(t.dir);
+  fs::create_directories(t.dir);
+  t.cfg = small_cfg(t.dir);
+  t.history = t.cfg.history_path;
+  coef_trainer tr(t.cfg, 7);
+  tr.train(city_scene(48), false, [](const coef_mlp &, int step) { return step == 5 ? 1.0 : 0.5; });
+  return t;
+}
+
+// A run of this test's own: ctest runs each test in a process of its own, in parallel, so a
+// directory two tests shared would be one test's to delete under the other.
+trained train_here() {
+  return train_once(::testing::UnitTest::GetInstance()->current_test_info()->name());
+}
+
+bool same(double a, double b) { return (std::isnan(a) && std::isnan(b)) || a == b; }
+
+// Every value but the wall times.
+void expect_same_runs(const run_log &a, int ja, const run_log &b, int jb) {
+  ASSERT_EQ(a.ticks(), b.ticks());
+  ASSERT_EQ(a.agents(), b.agents());
+  ASSERT_EQ(a.header().agent_columns, b.header().agent_columns);
+  for (long k = 0; k < a.ticks(); ++k) {
+    for (int i = 0; i < a.agents(); ++i)
+      for (int c = 0; c < static_cast<int>(a.header().agent_columns.size()); ++c)
+        ASSERT_TRUE(same(a.at(k, ja, i, c), b.at(k, jb, i, c)))
+            << "tick " << k << " agent " << i << " " << a.header().agent_columns[c];
+    for (const char *col : {"stats.clear_min_m", "stats.clear_mean_m", "stats.pen_steps",
+                            "stats.path_m", "stats.elapsed_s", "stats.reached"})
+      ASSERT_TRUE(same(a.arm_at(k, ja, col), b.arm_at(k, jb, col))) << "tick " << k << " " << col;
+  }
+}
+
+} // namespace
+
+TEST(NavScrub, AHistoryNamesItsCheckpointsAndCurves) {
+  const trained t = train_here();
+  const training_history h = read_training_history(t.history);
+  EXPECT_EQ(h.schema, "cvc.nav.coef_train_history/v1");
+  EXPECT_EQ(h.runs, 1);
+  ASSERT_EQ(h.checkpoints.size(), 3u);
+  EXPECT_EQ(h.checkpoints[0].step, 0);
+  EXPECT_EQ(h.checkpoints[1].step, 5);
+  EXPECT_EQ(h.checkpoints[2].step, 10);
+  EXPECT_TRUE(h.checkpoints[1].selected); // the fitness's best: the end record's selected_step
+  EXPECT_FALSE(h.checkpoints[2].selected);
+  EXPECT_DOUBLE_EQ(h.checkpoints[1].fitness, 1.0);
+  EXPECT_EQ(fs::path(h.checkpoints[0].path).filename(), "coef.step000000.cvcnav");
+  const training_series *loss = h.find("step.loss");
+  ASSERT_NE(loss, nullptr);
+  EXPECT_EQ(loss->x.size(), 10u);
+  EXPECT_NE(h.find("step.grad_norm.mean"), nullptr);
+  EXPECT_NE(h.find("checkpoint.fitness"), nullptr);
+  EXPECT_NE(h.find("checkpoint.heads.alpha.mean"), nullptr);
+  EXPECT_EQ(h.find("nothing"), nullptr);
+  EXPECT_THROW(read_training_history(t.history, 3), std::runtime_error);
+  EXPECT_THROW(read_training_history(t.dir + "/none.jsonl"), std::runtime_error);
+}
+
+TEST(NavScrub, AHistoryOfAnotherTrainerAndSeveralRuns) {
+  const trained t = train_here();
+  const std::string dir = (fs::path(::testing::TempDir()) / "nav_scrub_other").string();
+  fs::create_directories(dir);
+  fs::copy_file(t.dir + "/coef.step000005.cvcnav", dir + "/a.cvcnav",
+                fs::copy_options::overwrite_existing);
+  const std::string path = dir + "/history.jsonl";
+  {
+    std::ofstream f(path);
+    f << "{\"kind\":\"header\",\"schema\":\"another/v1\"}\n"
+      << "{\"kind\":\"checkpoint\",\"epoch\":1,\"blob\":\"a.cvcnav\"}\n"
+      << "{\"kind\":\"header\",\"schema\":\"another/v1\"}\n"
+      << "{\"kind\":\"train\",\"step\":0,\"loss\":2.0}\n"
+      << "{\"kind\":\"train\",\"step\":4,\"loss\":1.0}\n"
+      << "{\"kind\":\"checkpoint\",\"step\":4,\"checkpoint\":\"a.cvcnav\",\"selected\":true,"
+         "\"best\":true}\n"
+      << "{\"kind\":\"checkpoint\",\"step\":8,\"blob\":\"gone.cvcnav\"}\n"
+      << "{\"kind\":\"checkpoint\",\"step\":9,\"blob\":\"a.cvcnav.pt\"}\n";
+  }
+  std::ofstream(dir + "/a.cvcnav.pt") << "torch";
+  const training_history last = read_training_history(path);
+  EXPECT_EQ(last.runs, 2);
+  EXPECT_EQ(last.run, 1);
+  ASSERT_EQ(last.checkpoints.size(), 1u);
+  EXPECT_EQ(last.checkpoints[0].step, 4);
+  EXPECT_TRUE(last.checkpoints[0].selected && last.checkpoints[0].best);
+  EXPECT_EQ(last.missing, std::vector<std::string>{"gone.cvcnav"});
+  EXPECT_EQ(last.skipped, std::vector<std::string>{"a.cvcnav.pt"});
+  EXPECT_EQ(last.find("train.loss")->y, (std::vector<double>{2.0, 1.0}));
+  const training_history first = read_training_history(path, 0);
+  ASSERT_EQ(first.checkpoints.size(), 1u);
+  EXPECT_EQ(first.checkpoints[0].axis, "epoch");
+  std::ofstream(dir + "/gz.jsonl", std::ios::binary) << "\x1f\x8b\x08";
+  EXPECT_THROW(read_training_history(dir + "/gz.jsonl"), std::runtime_error);
+  EXPECT_EQ(resolve_blob(path, ""), "");
+  EXPECT_EQ(resolve_blob(path, "missing.cvcnav"), "");
+}
+
+TEST(NavScrub, TheScenarioAndItsHash) {
+  const scrub_scenario s = default_scenario(3, 1, 200);
+  EXPECT_EQ(s.ticks, 200);
+  EXPECT_EQ(s.world.agents.size(), 3u);
+  EXPECT_EQ(s.name, "blocks, 3 agents, seed 1");
+  EXPECT_EQ(scenario_hash(s), scenario_hash(default_scenario(3, 1, 200)));
+  EXPECT_EQ(scenario_hash(s).size(), 16u);
+  EXPECT_NE(scenario_hash(s), scenario_hash(default_scenario(3, 2, 200)));
+  EXPECT_NE(scenario_hash(s), scenario_hash(default_scenario(3, 1, 201)));
+  EXPECT_NE(scenario_hash(s), scenario_hash(default_scenario(2, 1, 200)));
+  EXPECT_EQ(scrub_cache_path("run/h.jsonl", std::string(64, 'a'), "0123456789abcdef"),
+            (fs::path("run/h.jsonl.scrub") / (std::string(16, 'a') + "-0123456789abcdef.cvcrun"))
+                .string());
+  EXPECT_EQ(default_scenario(1, 0, 10).name, "blocks, 1 agent, seed 0");
+  EXPECT_THROW(default_scenario(0, 0, 10), std::invalid_argument);
+  // a recorded trace's world
+  const std::string trace = (fs::path(::testing::TempDir()) / "nav_scrub_scenario.trace").string();
+  {
+    cvc::input_trace tr;
+    tr.header = s.world;
+    tr.save(trace);
+  }
+  const scrub_scenario r = scenario_from_trace(trace, 200);
+  EXPECT_EQ(scenario_hash(r), scenario_hash(s));
+  EXPECT_EQ(r.name, "nav-lab:blocks, 3 agents");
+}
+
+TEST(NavScrub, OneBlobDeployedTwiceIsTheSameRun) {
+  const trained t = train_here();
+  const scrub_scenario s = default_scenario(2, 0, 150);
+  policy_library lib;
+  const std::string blob = t.dir + "/coef.step000010.cvcnav";
+  const run_log a = deploy_checkpoint(s, blob, "step 10", lib);
+  const run_log b = deploy_checkpoint(s, blob, "step 10", lib);
+  ASSERT_EQ(a.ticks(), 150);
+  EXPECT_TRUE(a.finished());
+  EXPECT_EQ(a.header().arms[0].uri, blob);
+  EXPECT_EQ(a.header().arms[0].sha256.size(), 64u);
+  expect_same_runs(a, 0, b, 0);
+}
+
+TEST(NavScrub, Checkpoint0DeployedIsTheUntrainedArm) {
+  const trained t = train_here();
+  const scrub_scenario s = default_scenario(2, 0, 150);
+  policy_library lib;
+  const run_log k0 = deploy_checkpoint(s, t.dir + "/coef.step000000.cvcnav", "step 0", lib);
+  // the untrained policy, as the trainer initializes it, in an arm of its own beside the default
+  auto untrained = std::make_shared<const coef_mlp>(coef_trainer(t.cfg, 7).to_coef_mlp());
+  std::vector<std::unique_ptr<sim_world>> worlds;
+  for (int a = 0; a < 2; ++a) {
+    worlds.push_back(std::make_unique<sim_world>(world_from_trace(s.world, lib)));
+    if (a == 1)
+      for (int i = 0; i < worlds.back()->size(); ++i)
+        worlds.back()->set_policy(i, untrained, "untrained");
+  }
+  arms_run run(std::move(worlds), {{"default"}, {"untrained"}});
+  for (long k = 0; k < s.ticks; ++k)
+    run.step(1);
+  expect_same_runs(k0, 0, run.log(), 1);
+}
+
+TEST(NavScrub, EveryCheckpointIsDeployedOnceAndCached) {
+  const trained t = train_once("cache");
+  const training_history h = read_training_history(t.history);
+  const scrub_scenario s = default_scenario(2, 0, 120);
+  std::vector<std::string> said;
+  scrub_options o;
+  o.say = [&](const std::string &line) { said.push_back(line); };
+  const std::vector<scrub_entry> first = scrub(h, s, o);
+  ASSERT_EQ(first.size(), 3u);
+  ASSERT_EQ(said.size(), 3u);
+  EXPECT_NE(said[0].find("step 0 (1/3), deployed"), std::string::npos) << said[0];
+  for (const scrub_entry &e : first) {
+    EXPECT_FALSE(e.cached);
+    EXPECT_TRUE(fs::is_regular_file(e.cache)) << e.cache;
+    EXPECT_EQ(e.sha256.size(), 64u);
+  }
+  said.clear();
+  const std::vector<scrub_entry> again = scrub(h, s, o);
+  for (std::size_t i = 0; i < again.size(); ++i) {
+    EXPECT_TRUE(again[i].cached);
+    EXPECT_EQ(again[i].cache, first[i].cache);
+    expect_same_runs(*again[i].log, 0, *first[i].log, 0);
+    EXPECT_EQ(again[i].metrics.path_m, first[i].metrics.path_m);
+  }
+  EXPECT_NE(said[2].find("cached"), std::string::npos);
+  // another scenario: deployed again, beside the first
+  const std::vector<scrub_entry> other = scrub(h, default_scenario(2, 1, 120));
+  EXPECT_FALSE(other[0].cached);
+  EXPECT_NE(other[0].cache, first[0].cache);
+  // without the cache: nothing read, nothing written
+  scrub_options none;
+  none.use_cache = false;
+  fs::remove_all(t.history + ".scrub");
+  EXPECT_FALSE(scrub(h, s, none)[1].cached);
+  EXPECT_FALSE(fs::exists(t.history + ".scrub"));
+  // the report
+  const std::string report = scrub_report_json(h, s, first);
+  EXPECT_NE(report.find("\"schema\":\"cvc.nav.scrub/v1\""), std::string::npos);
+  EXPECT_NE(report.find("\"selected\":true"), std::string::npos);
+  EXPECT_NE(report.find("\"path_m\":"), std::string::npos);
+}
+
+TEST(NavScrub, TheMetricsTheTableAndTheCharts) {
+  const trained t = train_here();
+  const training_history h = read_training_history(t.history);
+  const std::vector<scrub_entry> e = scrub(h, default_scenario(2, 0, 120));
+  const scrub_metrics &m = e[0].metrics;
+  EXPECT_GE(m.reached, 0.0);
+  EXPECT_LE(m.reached, 1.0);
+  EXPECT_GT(m.path_m, 0.0);
+  EXPECT_GT(m.goal_m, 0.0);
+  EXPECT_EQ(scrub_metric_names().size(), 7u);
+  EXPECT_TRUE(std::isnan(m.value(7)));
+  const panel_table table = scrub_table(e, 2);
+  ASSERT_EQ(table.rows.size(), 3u);
+  EXPECT_EQ(table.cell(2, "at"), ">");
+  EXPECT_EQ(table.cell(1, "flag"), "pick");
+  EXPECT_EQ(table.cell(1, "step"), "5");
+  std::string text;
+  const chart_plot c = metric_chart(e, "goal_m", &text);
+  ASSERT_EQ(c.series.size(), 2u);
+  EXPECT_EQ(c.series[1].style, "c0 dashed");
+  EXPECT_EQ(c.series[1].y, std::vector<double>(3, e[0].metrics.goal_m));
+  ASSERT_EQ(c.markers.size(), 1u);
+  EXPECT_EQ(c.markers[0].x, 5.0);
+  EXPECT_NE(text.find("left to the goal (m): step 0"), std::string::npos) << text;
+  EXPECT_NE(text.find("lowest"), std::string::npos) << text;
+  bool log_y = true;
+  const chart_plot curve = curve_chart(h, e, "step.loss", &log_y, &text);
+  ASSERT_EQ(curve.series.size(), 1u);
+  EXPECT_EQ(curve.series[0].x.size(), 10u);
+  EXPECT_NE(text.find("step.loss: 10 points"), std::string::npos) << text;
+  const chart_plot none = curve_chart(h, e, "nope", &log_y, &text);
+  EXPECT_TRUE(none.series.empty());
+  EXPECT_FALSE(log_y);
+}
+
+TEST(NavScrub, TheViewShowsCheckpointKBesideStep0) {
+  const trained t = train_here();
+  const training_history h = read_training_history(t.history);
+  std::vector<scrub_entry> e = scrub(h, default_scenario(2, 0, 120));
+  EXPECT_THROW(scrub_view(h, {}), std::invalid_argument);
+  scrub_view view(h, e, -1, "blocks");
+  EXPECT_EQ(view.checkpoint(), 1); // the pick
+  cvc::app app;
+  panel_set(app, "sim.paused", "1");
+  scrub_view::frame f = view.update(app, "doc", 0.0);
+  EXPECT_EQ(f.k, 1);
+  EXPECT_EQ(panel_get(app, "doc.scrub.labels"), "step 0\nstep 5 (pick)\nstep 10");
+  EXPECT_EQ(panel_get(app, "doc.scrub.choice"), "step 5 (pick)");
+  EXPECT_EQ(panel_get(app, "doc.scrub.pos"), "0.500000");
+  EXPECT_EQ(panel_get(app, "doc.scrub.scenario"), "blocks");
+  EXPECT_EQ(panel_get(app, "doc.scrub.curve_name"), "step.loss");
+  EXPECT_EQ(panel_get(app, "doc.arms.names"), "step 0\nstep 5");
+  EXPECT_EQ(panel_get(app, "doc.arms.stats.1.arm"), "step 5");
+  EXPECT_EQ(panel_get(app, "doc.scrub.table.1.at"), ">");
+  EXPECT_EQ(panel_get(app, "doc.scrub.metric.s"), "2");
+  EXPECT_NE(panel_get(app, "doc.scrub.now").find("checkpoint 2 of 3: step 5, the pick"),
+            std::string::npos);
+  ASSERT_EQ(f.replay.poses.size(), 2u);
+  // the slider picks
+  panel_set(app, "doc.scrub.pos", "1");
+  f = view.update(app, "doc", 0.0);
+  EXPECT_EQ(f.k, 2);
+  EXPECT_EQ(panel_get(app, "doc.arms.stats.1.arm"), "step 10");
+  // the combo picks
+  panel_set(app, "doc.scrub.choice", "step 0");
+  f = view.update(app, "doc", 0.0);
+  EXPECT_EQ(f.k, 0);
+  EXPECT_EQ(panel_get(app, "doc.arms.names"), "step 0\nstep 0 "); // the same checkpoint twice
+  // previous, next, a click on a chart
+  view.next();
+  view.next();
+  view.next();
+  EXPECT_EQ(view.checkpoint(), 2);
+  view.prev();
+  EXPECT_EQ(view.checkpoint(), 1);
+  panel_set(app, "doc.scrub.pick", "9.2");
+  view.pick_step(app, "doc");
+  EXPECT_EQ(view.checkpoint(), 2);
+  panel_set(app, "doc.scrub.pick", "x");
+  view.pick_step(app, "doc");
+  EXPECT_EQ(view.checkpoint(), 2);
+  // another metric, another curve
+  panel_set(app, "doc.scrub.metric_name", "reached");
+  panel_set(app, "doc.scrub.curve_name", "checkpoint.fitness");
+  f = view.update(app, "doc", 0.0);
+  EXPECT_NE(panel_get(app, "doc.scrub.metric_text").find("reached the goal"), std::string::npos);
+  EXPECT_NE(panel_get(app, "doc.scrub.curve_text").find("checkpoint.fitness"), std::string::npos);
+  // the play head carries over a pick
+  view.replay().head().set(3.0);
+  view.pick(0);
+  f = view.update(app, "doc", 0.0);
+  EXPECT_DOUBLE_EQ(f.replay.t, 3.0);
+}
