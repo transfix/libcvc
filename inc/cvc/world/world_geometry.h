@@ -124,10 +124,16 @@ public:
   // Every surface id some face of some item uses, ascending.
   std::vector<std::uint16_t> surfaces_used() const;
 
+  // Whether the physics walls the terrain's edge in (cvc::physics::add_world_geometry's
+  // world_bodies::edges), so nothing leaves the world over it. On by default.
+  bool edge_walls() const { return _edge_walls; }
+  void set_edge_walls(bool on) { _edge_walls = on; }
+
 private:
   const surface_registry *_surfaces;
   std::vector<geometry_item> _items;
   std::vector<volume_item> _volumes;
+  bool _edge_walls = true;
 };
 
 } // namespace world

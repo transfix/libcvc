@@ -65,6 +65,11 @@ void AppRuntime::step_world(std::uint64_t n) {
                    read_or<long long>(app_, stepKey_, 0) + static_cast<long long>(n));
 }
 
+void AppRuntime::pause_world(bool paused) {
+  if (!pausedKey_.empty())
+    write<long long>(app_, pausedKey_, paused ? 1 : 0);
+}
+
 bool AppRuntime::restart_world() {
   app_.world_clock().reset();
   std::vector<std::string> warns;
@@ -961,6 +966,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   world_.reset();
   stepKey_.clear();
   restartsKey_.clear();
+  pausedKey_.clear();
   // The world: block's vehicles go to the scene, whose world runtime spawns them (a relay reads
   // the rest of the block itself).
   if (const Value *world = find_world_block(lr)) {
@@ -987,6 +993,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
     c.time_key = resolve_bind(prefix_, c.time_key);
     c.tick_key = resolve_bind(prefix_, c.tick_key);
     stepKey_ = scene_clock_keys(c).step;
+    pausedKey_ = scene_clock_keys(c).paused;
     const std::string leaf = std::string(cvc::state::SEPARATOR) + "step";
     if (stepKey_.size() > leaf.size() &&
         stepKey_.compare(stepKey_.size() - leaf.size(), leaf.size(), leaf) == 0)

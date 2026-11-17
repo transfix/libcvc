@@ -158,6 +158,14 @@ public:
   // The ground height (m) the model's heights are measured from: the ground under the first
   // agent's start.
   double ground_reference() const { return _z0; }
+  // Agent i's command as nav last gave it (the steering's angle, rad, held to its lock; the
+  // acceleration along its heading, m/s^2), and what the model took of it in each substep of the
+  // last tick, after the driver (applied_accel, substeps() values; empty before the first tick).
+  // Away from a collision, the last tick is diff::dyn4_plant_books from the tick's first state
+  // with (steer_command, applied_accel[k]) at each substep k: what a twin of the plant replays.
+  double steer_command(int i) const { return _agents.at(i).steer_cmd; }
+  double accel_command(int i) const { return _agents.at(i).accel_cmd; }
+  const std::vector<double> &applied_accel(int i) const { return _agents.at(i).applied; }
   // The ground (m) under a world point, as the model sees it.
   double ground_height(double x, double y) const;
 
@@ -218,6 +226,8 @@ private:
     double stored0 = 0.0;   // J
     int hits_tick = 0;
     long hits = 0;
+    // The last tick's acceleration per substep, after the driver (applied_accel).
+    std::vector<double> applied;
     int statics_tick = 0;     // contacts begun with static geometry over the last tick
     int touched = -1;         // the agent it touched deepest over the last tick; -1 none
     double touch_depth = 0.0; // m

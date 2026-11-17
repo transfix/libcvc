@@ -8,8 +8,9 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-// segment.seeded (cvc/volume/segmentation_intrinsics.h): segment_seeded_job behind the generic job
-// forms of cvc/core/job_intrinsics.h.
+// segment.seeded and segment.critical-points (cvc/volume/segmentation_intrinsics.h):
+// segment_seeded_job and critical_point_seeds_job behind the generic job forms of
+// cvc/core/job_intrinsics.h.
 
 #include <cstdint>
 #include <cvc/ariadne/ariadne.h>
@@ -86,9 +87,25 @@ job_op segment_seeded_op(sliced_threading threading) {
   return op;
 }
 
+job_op critical_point_seeds_op(sliced_threading threading) {
+  job_op op = make_job_op<seeded_segmentation_params, point_classes>(
+      "segment.critical-points", 1,
+      [](const job_call &c, const seeded_segmentation_params &p) {
+        return critical_point_seeds_job(*c.input_as<volume>(0), p);
+      },
+      [](point_classes &&r) { return se::value_t(point_classes_value(std::move(r))); },
+      [](const job_call &c, const seeded_segmentation_params &) {
+        const std::string *path = std::get_if<std::string>(&c.input(0).v);
+        return path ? *path : std::string("a volume");
+      });
+  op.threading = threading;
+  return op;
+}
+
 void register_segmentation_intrinsics(se::environment_ptr env, se::intrinsics_context &ictx,
                                       cvc::app &app) {
   register_job_op(env, ictx, app, segment_seeded_op());
+  register_job_op(env, ictx, app, critical_point_seeds_op());
   register_job_intrinsics(env, app);
 }
 
