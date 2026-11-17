@@ -58,6 +58,10 @@ enum class Kind {
   Audio,          // an audio player (§5.13): the same without a picture
   TrayIcon,       // an icon at the menubar's right end (label = glyph): a click raises `on`, or
                   // opens its `children` as a menu; `badge` over its corner, `tone` its colour
+  Tabs,           // a tab bar bound to a key: over its children (one tab each, the selected one
+                  // shown under it), or over `options:` alone (a switch)
+  List,           // rows of a state array (count at bind, rows at bind.<i>), one selected, with
+                  // Add / Remove buttons that edit the array
 };
 
 // How a Kind::Image fills its box (`fit:`) and the box's shape (`shape:`); media.h fits a picture
@@ -331,6 +335,23 @@ struct Widget {
   std::string sdef; // Combo / Radio default (an option label, or — with `values` — a value)
   std::vector<std::string> options; // Combo / Radio options (the DISPLAYED labels)
   bool radio_row = false;           // Radio: the options side by side (`radio_row:`), else stacked
+  // Kind::Tabs with children: each child's tab title (its `tab:`, else its label), parallel to
+  // `children`. With none, the bar is over `options` (and `values`), as a radio is.
+  std::vector<std::string> tab_titles;
+  // Kind::List: `bind` is the array, the row count at <bind> and the rows at <bind>.<i>.<field>
+  // (what host.set_table and state-from-json write, what a repeat: counts). Each row shows its
+  // `list_field` (default name); `list_current` holds the selected row's index, -1 for none
+  // (default <bind>.current); `list_add` / `list_remove` show the Add and Remove buttons; an added
+  // row starts with the fields `list_new` gives, "{n}" in a value standing for its number from 1;
+  // `on_add` / `on_remove` run after an edit (and `on` after a selection). `list_rows` is how many
+  // rows show at once in a window backend.
+  std::string list_field = "name";
+  std::string list_current;
+  bool list_add = false;
+  bool list_remove = false;
+  std::vector<std::pair<std::string, std::string>> list_new;
+  std::string on_add, on_remove;
+  int list_rows = 6;
   // §4 Combo value mapping: a parallel list the same length as `options`, so the bound key holds
   // `values[i]` (e.g. an int) while the combo shows `options[i]`. Empty = the key holds the option
   // TEXT (the default). Ignored when `options_expr` computes the options (no parallel values).
@@ -807,6 +828,36 @@ inline Widget input_int(std::string label, std::string bind, int lo = 0, int hi 
   return w;
 }
 
+// A tab container: one tab per child, child i titled titles[i]; `bind` (optional) holds the
+// selected tab's title.
+inline Widget tabs(std::string bind, std::vector<std::string> titles, std::vector<Widget> kids) {
+  Widget w;
+  w.kind = Kind::Tabs;
+  w.bind = std::move(bind);
+  w.tab_titles = std::move(titles);
+  w.children = std::move(kids);
+  w.tab_titles.resize(w.children.size());
+  return w;
+}
+// A tab bar alone over `options` (a switch), bound to `bind`.
+inline Widget tab_bar(std::string label, std::string bind, std::vector<std::string> options) {
+  Widget w;
+  w.kind = Kind::Tabs;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.options = std::move(options);
+  return w;
+}
+// A list over the state array at `bind` (count at bind, rows at bind.<i>), with Add / Remove.
+inline Widget list(std::string label, std::string bind, bool add = false, bool remove = false) {
+  Widget w;
+  w.kind = Kind::List;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.list_add = add;
+  w.list_remove = remove;
+  return w;
+}
 inline Widget button(std::string label, std::string on) {
   Widget w;
   w.kind = Kind::Button;

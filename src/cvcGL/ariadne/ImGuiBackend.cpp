@@ -1907,6 +1907,100 @@ ariadne::IndexEdit ImGuiBackend::radio(const char *label, int current_index,
   return e;
 }
 
+ariadne::IndexEdit ImGuiBackend::tab_bar(const char *label, const char *id, int current,
+                                         const std::vector<std::string> &labels) {
+  ariadne::IndexEdit e;
+  e.index = current;
+  if (labels.empty())
+    return e;
+#ifdef CVC_ENABLE_IMGUI
+  const char *hash = std::strstr(label, "##");
+  const std::string caption = hash ? std::string(label, hash) : std::string(label);
+  if (!caption.empty())
+    ImGui::TextUnformatted(caption.c_str());
+  // A selection that is not the one last asked for came from outside (the key was written, or
+  // this is the bar's first frame): select it. ImGui applies it on a later frame, so a different
+  // tab shown meanwhile is not the user's pick.
+  auto told = m_tabSelected.find(id);
+  const bool force = told == m_tabSelected.end() || told->second != current;
+  int shown = -1;
+  if (ImGui::BeginTabBar(id)) {
+    for (std::size_t i = 0; i < labels.size(); ++i) {
+      const ImGuiTabItemFlags flags = force && static_cast<int>(i) == current
+                                          ? ImGuiTabItemFlags_SetSelected
+                                          : ImGuiTabItemFlags_None;
+      // The label shows; "###<i>" keeps two tabs of the same title apart.
+      const std::string tab = labels[i] + "###tab" + std::to_string(i);
+      if (ImGui::BeginTabItem(tab.c_str(), nullptr, flags)) {
+        shown = static_cast<int>(i);
+        ImGui::EndTabItem();
+      }
+    }
+    ImGui::EndTabBar();
+  }
+  if (force) {
+    m_tabSelected[id] = current;
+  } else if (shown >= 0 && shown != current) {
+    e.index = shown;
+    e.changed = true;
+    e.committed = true;
+    m_tabSelected[id] = shown;
+  }
+#else
+  (void)label;
+  (void)id;
+#endif
+  return e;
+}
+
+ariadne::ListEdit ImGuiBackend::list(const char *label, const char *id, int current,
+                                     const std::vector<std::string> &items,
+                                     const ariadne::ListOptions &o) {
+  ariadne::ListEdit e;
+  e.index = current;
+#ifdef CVC_ENABLE_IMGUI
+  const char *hash = std::strstr(label, "##");
+  const std::string caption = hash ? std::string(label, hash) : std::string(label);
+  ImGui::PushID(id);
+  if (!caption.empty())
+    ImGui::TextUnformatted(caption.c_str());
+  const ImGuiStyle &style = ImGui::GetStyle();
+  const float height = ImGui::GetTextLineHeightWithSpacing() * static_cast<float>(o.rows) +
+                       style.FramePadding.y * 2.0f;
+  if (ImGui::BeginListBox("##rows", ImVec2(-FLT_MIN, height))) {
+    for (std::size_t i = 0; i < items.size(); ++i) {
+      ImGui::PushID(static_cast<int>(i));
+      const bool on = static_cast<int>(i) == current;
+      if (ImGui::Selectable(items[i].empty() ? "(unnamed)" : items[i].c_str(), on) && !on) {
+        e.selected = true;
+        e.index = static_cast<int>(i);
+      }
+      if (on && ImGui::IsWindowAppearing())
+        ImGui::SetScrollHereY();
+      ImGui::PopID();
+    }
+    ImGui::EndListBox();
+  }
+  if (o.add && ImGui::Button("Add"))
+    e.add = true;
+  if (o.remove) {
+    if (o.add)
+      ImGui::SameLine();
+    ImGui::BeginDisabled(current < 0);
+    if (ImGui::Button("Remove"))
+      e.remove = true;
+    ImGui::EndDisabled();
+  }
+  ImGui::PopID();
+#else
+  (void)label;
+  (void)id;
+  (void)items;
+  (void)o;
+#endif
+  return e;
+}
+
 void ImGuiBackend::focus_next_widget() {
 #ifdef CVC_ENABLE_IMGUI
   ImGui::SetKeyboardFocusHere(); // the next widget submitted
