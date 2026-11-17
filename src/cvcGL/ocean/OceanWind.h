@@ -29,9 +29,11 @@
 //   - Currents: owCurrent(p), the curl noise with no texture, and owDisp, a cascade read through
 //     the two-phase flow map with the current owFlow (set per vertex before the reads).
 //
-// One sampler in all (uWindFetch); the gusts and the current are integer-hashed noise in the
-// shader, evaluated per vertex (the near grid's 2 m, the far grid's coarse cells) and handed to the
-// fragments. The h0 crossfade itself is the CPU's (mix_h0), only while a crossfade runs.
+// One sampler in all (uWindFetch), or none when the caller packs the fetch maps into a texture of
+// its own and reads them itself (glsl(true): the water node's coast atlas); the gusts and the
+// current are integer-hashed noise in the shader, evaluated per vertex (the near grid's 2 m, the
+// far grid's coarse cells) and handed to the fragments. The h0 crossfade itself is the CPU's
+// (mix_h0), only while a crossfade runs.
 
 #ifndef __CVC_GL_OCEAN_OCEANWIND_H__
 #define __CVC_GL_OCEAN_OCEANWIND_H__
@@ -53,8 +55,10 @@ class GeometryNode;
 
 struct OceanWind {
   // The GLSL for both stages: WindGLSL's, then the fetch weights, the current and the flow map.
-  // Needs nothing declared before it.
-  static std::string glsl();
+  // Needs nothing declared before it, unless `ownFetch`: then it declares neither uWindFetch nor
+  // uWindFetchGrid nor owFetch, and the caller defines `vec2 owFetch(vec2 p)` before it (the old
+  // and the new keyframe's fetch at p, in metres; fetch()'s texels, read bilinearly and clamped).
+  static std::string glsl(bool ownFetch = false);
 
   // Each cascade's part in the wind: its fully grown fetch (new and old keyframe), its gust weight
   // and whether the current carries it.

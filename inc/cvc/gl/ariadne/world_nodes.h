@@ -77,6 +77,10 @@ void register_water_node_types(cvc::app &app);
 // boat run by the scene's world, scene_boat.h; OCEAN-AND-WEATHER-ROADMAP.md D6). Idempotent; the
 // cvcGL extension bundle calls it.
 void register_boat_node_types(cvc::app &app);
+// Register the weather scene node type on `app` (weather_node.cpp: the scene's weather model,
+// cvc::world::weather, its storms in a cloud_sky's deck, OCEAN-AND-WEATHER-ROADMAP.md §9 F2).
+// Idempotent; the cvcGL extension bundle calls it.
+void register_weather_node_types(cvc::app &app);
 
 } // namespace ariadne
 } // namespace gl

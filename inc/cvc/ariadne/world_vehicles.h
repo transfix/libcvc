@@ -205,6 +205,18 @@ struct entity_info {
   entity_intent intent; // as of the last navigator tick
 };
 
+// The navigator's drive on an entity's last tick, as a twin replays it: the coefficients its
+// policy gave (alpha, the walls' barrier; beta, the goal's pull; gamma, the damping), the point it
+// steered for (its carrot, world metres) and the external force it summed (m/s^2, world x and y:
+// an intent's force). Known only while the navigators capture their drive
+// (WorldVehicles::set_drive_telemetry) and after a tick has run since.
+struct entity_drive {
+  bool known = false;
+  double alpha = 0.0, beta = 0.0, gamma = 0.0;
+  double goal_x = 0.0, goal_y = 0.0;
+  double force_x = 0.0, force_y = 0.0;
+};
+
 // What drives an entity, as a model that a differentiable twin of the world steps (WorldGym::
 // plants, L4's twin; ARIADNE_WORLDS.md §14). In SI: world metres, seconds, kg, rad. The models are
 // cvc::nav::diff's, and on the dynamic plants they are the plants' own: their parameters, step
@@ -241,6 +253,7 @@ struct entity_plant {
   double steer_command = 0.0, accel_command = 0.0;
   std::vector<double> applied_accel, applied_grade;
   int collisions_tick = 0; // model steps of the last tick a collision corrected (exact models)
+  entity_drive drive;      // the drive that gave that command
 };
 
 // The navigator the entities drive with, as a twin of the drive takes it: nav's normalized units
@@ -354,6 +367,11 @@ public:
   // ---- what a twin of the world reads (WorldGym::fields, WorldGym::plants) ----
   // Each entity's plant as a model (entity_plant), in the order entities() gives them.
   std::vector<entity_plant> plants() const;
+  // Whether the navigators keep their drive's telemetry each tick (cvc::nav::sim_world's
+  // set_capture_drive_telemetry), so plants() reports each entity's drive (entity_drive). Off by
+  // default; on or off, the drive steers the same.
+  void set_drive_telemetry(bool on);
+  bool drive_telemetry() const;
   // The navigator's own settings (not ready without a grid).
   navigator_params navigator() const;
   // The navigator's signed distance (m) on its grid (cvc::nav::signed_distance of grid()), rows *

@@ -223,6 +223,10 @@ public:
   bool hasSharedShaderInputs(const std::string &key) const;
   // The inputs shared under `key` (null if none): what a test reads back.
   std::shared_ptr<const ShaderInputs> sharedShaderInputs(const std::string &key) const;
+  // What setShaderUniformf / setShaderTexture last set under `name`, as a test reads it back:
+  // false / null when nothing is.
+  bool shaderUniformf(const std::string &name, float &v) const;
+  vtkTextureObject *shaderTexture(const std::string &name) const;
 
   // Disable VTK's VBO coordinate shift/scale so `vertexMC` in a custom shader is
   // the mesh's ACTUAL (world/model) coordinates rather than an internally-shifted

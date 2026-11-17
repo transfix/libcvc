@@ -1,6 +1,7 @@
 // Settings — small state_objects for classes that are not themselves
 // state_objects (see the header).
 
+#include <cassert>
 #include <cvc/core/app.h>
 #include <cvc/gl/Settings.h>
 #include <cvc/state/state.h>
@@ -40,6 +41,8 @@ void ShadowSettings::set(Values v) {
 ShadowSettings::Values ShadowSettings::get() const { return m_v; }
 
 void ShadowSettings::handleStateChanged(const std::string &) {
+  assert(std::this_thread::get_id() == m_homeThread &&
+         "ShadowSettings: a state change off its render thread (STATE_EXEC_THREADED.md 4.8)");
   try {
     m_v.enabled = getState("enabled").value<int>() != 0;
     m_v.resolution = getState("resolution").value<int>();
@@ -85,6 +88,8 @@ void UiSettings::set(Values v) {
 UiSettings::Values UiSettings::get() const { return m_v; }
 
 void UiSettings::handleStateChanged(const std::string &) {
+  assert(std::this_thread::get_id() == m_homeThread &&
+         "UiSettings: a state change off its render thread (STATE_EXEC_THREADED.md 4.8)");
   if (m_writing)
     return; // our own publish (seedState) -- not an edit from outside
   try {
@@ -140,6 +145,8 @@ void ViewportLayout::set(Values v) {
 ViewportLayout::Values ViewportLayout::get() const { return m_v; }
 
 void ViewportLayout::handleStateChanged(const std::string &) {
+  assert(std::this_thread::get_id() == m_homeThread &&
+         "ViewportLayout: a state change off its render thread (STATE_EXEC_THREADED.md 4.8)");
   if (m_writing)
     return; // our own publish (seedState) — not an external edit
   try {

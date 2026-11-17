@@ -378,6 +378,47 @@ int main() {
     }
   }
 
+  // ── 2b. The step tables are worked out once per step ──────────────────────
+  // A window stepped by a clock's frames takes a few different steps (1/30 s and 1/40 s here, in
+  // turn): each table (the exact step's coefficients, the real-space factors) is worked out once
+  // per step size and kept, and the field still follows the CPU's exact step. A new depth makes
+  // the coefficients again (the factors do not depend on it).
+  {
+    cvc::ocean::ewave_params q;
+    q.n = N;
+    q.dx = 0.25;
+    q.origin_x = q.origin_y = -32.0;
+    q.sponge_cells = 16.0;
+    q.damping = 0.02;
+    cvc::ocean::ewave ref(q);
+    EWave w(q);
+    if (!w.init(ow)) {
+      check(false, "the tables' window initialises");
+    } else {
+      const std::vector<double> drop = gaussian(ref, -2.0, 1.0, 0.1, 0.5);
+      const std::vector<double> zero(std::size_t(N) * N, 0.0);
+      w.setState(drop, zero);
+      ref.set_state(drop, zero);
+      const long long t0 = w.tablesBuilt();
+      for (int s = 0; s < 12; ++s) {
+        const double dt = s % 2 == 0 ? 1.0 / 30.0 : 1.0 / 40.0;
+        w.step(dt);
+        ref.step(dt);
+      }
+      const long long built = w.tablesBuilt() - t0;
+      const std::vector<float> z = w.readbackState();
+      const double rh = relRms(z, ref.height(), 0), rp = relRms(z, ref.phi(), 1);
+      std::printf("  (12 steps of 1/30 and 1/40 s in turn: %lld tables worked out; RMS(GPU - CPU) "
+                  "/ RMS(CPU): h %.2e, phi %.2e)\n",
+                  built, rh, rp);
+      check(built == 4, "two step sizes: the coefficients and the factors worked out once each");
+      check(rh < 1e-3 && rp < 1e-3, "... and the field follows the CPU's exact step as before");
+      w.setDepth(3.0);
+      w.step(1.0 / 30.0);
+      check(w.tablesBuilt() - t0 == 5, "a new depth works the step's coefficients out again");
+    }
+  }
+
   // ── 3. Stable on the GPU: broadband noise in a closed basin ─────────────────
   // A disc of water 12 m across with an island, on a 64^2 window of 0.25 m cells, no damping,
   // beach or sponge, from uniform noise in h (a fixed xorshift): the water's energy, the CPU's

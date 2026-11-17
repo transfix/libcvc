@@ -42,6 +42,7 @@ void register_cvcgl_extensions(cvc::app &app) {
   register_world_node_types(app);       // "generated_world"
   register_water_node_types(app);       // "water"
   register_boat_node_types(app);        // "boat"
+  register_weather_node_types(app);     // "weather"
   register_vehicle_preview_node(app);   // "vehicle_preview"
   register_ribbon_node_types(app);      // "ribbon", "draped_link"
   register_volume_slice_node_type(app); // "volume_slice"
