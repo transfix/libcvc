@@ -99,6 +99,12 @@ struct world_config {
   double penetration_slop = 0.002;  // metres two bodies may overlap before the solver pushes them
                                     // apart (Jolt's own default, 0.02, is sized for game props)
   int threads = 0; // worker threads inside step(): 0 = none (single-threaded job system)
+  // Worker threads for the fields' free-surface reads (each cell a body has in a fluid with a
+  // surface reads its height and velocity there, the field step's main cost): 0 = none, the
+  // calling thread reads them all. The same values in the same order either way, so a run's
+  // state_hash does not depend on it. A build without threads (single-threaded WebAssembly)
+  // ignores it. Free to change by reconfigure().
+  int field_threads = 0;
   physics::determinism determinism = physics::determinism::cross_platform;
   combine_rule friction = combine_rule::product;
   combine_rule restitution = combine_rule::max;
@@ -136,6 +142,8 @@ struct ray_hit {
 struct step_report {
   std::uint64_t tick = 0;   // the world's tick after the step
   double step_ms = 0.0;     // wall time the step took
+  double fields_ms = 0.0;   // ... of it, the fields' pushes (buoyancy, drag, media; field.h)
+  double engine_ms = 0.0;   // ... of it, the engine's own step (collisions and integration)
   std::size_t contacts = 0; // events in contacts()
   std::uint32_t active_bodies = 0;
   bool saturated = false; // a fixed-size engine buffer filled and contacts were dropped: raise
