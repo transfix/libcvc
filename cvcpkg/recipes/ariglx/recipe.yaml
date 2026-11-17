@@ -40,7 +40,9 @@ patches: []
 depends:
   build:
     - name: libcvc
+      version: "^3.7"
     - name: cvcgl
+      version: "^3.7"
     # ariglx itself links VTK's RenderingUI and IOImage modules (its window and --png), beyond
     # what cvcGL links.
     - name: vtk
@@ -51,13 +53,17 @@ depends:
     - name: python312
   runtime:
     - name: libcvc
+      version: "^3.7"
     - name: cvcgl
+      version: "^3.7"
     - name: vtk
     - name: imgui-w32
     - name: sdl3
     - name: python312
     - name: pycvc-cp312
+      version: "^3.7"
     - name: pycvc-gl-cp312
+      version: "^3.7"
     - name: numpy-cp312
   host_tools:
     - cmake

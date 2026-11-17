@@ -46,8 +46,10 @@ patches: []
 depends:
   build:
     - name: libcvc
+      version: "^3.7"
   runtime:
     - name: libcvc
+      version: "^3.7"
   host_tools:
     - cmake
     - ninja
