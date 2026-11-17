@@ -1456,8 +1456,9 @@ host-to-device traffic at all. The invalidation rule:
    drops) and uploads a fresh one. Registering a volume does *not* draw a new
    generation — registration is not a content change, and cvcGL's `VolRenNode`
    re-registers every volume on every frame.
-4. Eviction is least-recently-used against the app's budget
-   (`raycast_cuda_cache_of(app).set_budget()`, default 512 MB). An entry an
+4. Eviction is least-recently-used against the device's budget: each CUDA
+   device has a cache of its own (`raycast_cuda_cache_of(app).set_budget()`
+   sets every device's, default 512 MB each). An entry an
    in-flight render is using is never evicted, so
    a budget smaller than the scene is exceeded rather than corrupted, and the
    lease that marks it in use is released even when the render throws.
@@ -1471,9 +1472,28 @@ host-to-device traffic at all. The invalidation rule:
    — the generation is belt and braces at zero cost. Rasters and voxels share
    one budget under one LRU.
 
-The cache is the app's: `raycast_cuda_cache_of(app)` is shared by every
-raycaster of that `cvc::app` and goes with it, so two apps never see each
-other's blocks, budget or counters. Its `resident()` reports what is resident,
+**Who shares the caches.** A `cuda_device_caches` holds one cache per device.
+Every app starts with one of its own: `raycast_cuda_cache_of(app)` is shared by
+every raycaster of that `cvc::app`, so two apps never see each other's blocks,
+budget or counters. There is no process-wide cache. Instead the host, which owns
+the device, decides which apps share one by handing them the same caches:
+
+```cpp
+cvc::app a, b;
+cvc::volren::raycast_cuda_cache_of(b).share(cvc::volren::raycast_cuda_cache_of(a).caches());
+// a volume a staged on a device is not uploaded again when b renders it there
+```
+
+Apps that share caches share their blocks, budget and counters, and the caches
+live as long as someone holds them, not just as long as the app that made them.
+`share()` comes before the app's first render. It throws `std::logic_error` once
+the app's caches have staged a block or drawn a content-generation stamp. The
+stamps `invalidate_device_volume()` draws come from the caches' counter
+(`cuda_device_caches::next_generation()`), so two apps sharing caches and a
+voxel buffer never stamp two contents alike. A stamp drawn from another
+counter would mean nothing there.
+
+Its `resident()` reports what is resident on every device,
 `uploaded()` the bytes ever pushed H2D (the counter a "no upload on a camera
 move" assertion reads), and `clear()` frees everything not in flight.
 

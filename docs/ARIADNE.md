@@ -855,6 +855,48 @@ optional `on:` run after each pick:
 
 A backend with no radio buttons draws a radio as a combo.
 
+**Tabs.** A `tabs:` widget is a tab bar bound to a key. Over its `children:` it is a tab container:
+each child is one tab, titled by its `tab:` (else its `label:`, else its place), and only the
+selected tab's subtree is drawn under the bar. Over `options:` alone (with `values:`, as a radio
+takes them) it is a bar and nothing more, a switch. `bind:` holds the selected tab's title (or its
+value); a write to the key from anywhere selects that tab, and `on:` runs after the user picks
+one. Without `bind:` the selection is kept at `tree.<id>.tab`.
+
+```yaml
+      - type: tabs
+        id: side_panel
+        bind: grid.panel                  # Probe | Point classes | Segmentation
+        children:
+          - { type: group, tab: Probe, children: [ ... ] }
+          - { type: group, tab: Point classes, children: [ ... ] }
+          - { type: group, tab: Segmentation, children: [ ... ] }
+      - tabs: View                        # VolumeGridRover's view switch
+        bind: grid.view
+        options: [XY, XZ, ZY]
+        values: [xy, xz, zy]
+```
+
+**Lists.** A `list:` shows the rows of a state array, as `repeat:` counts it: the row count at
+`bind:` and row `i`'s fields at `<bind>.<i>.<field>` (what `host.set_table` and
+`state-from-json` write). Each row shows its `field:` (`name` by default); a click selects it,
+writing its index to `current:` (default `<bind>.current`, `-1` for none) and running `on:`.
+`add: true` gives an Add button that appends a row, its fields from `new_item:` (`{n}` in a value
+is the row's number from 1), and selects it; `remove: true` gives a Remove button that deletes the
+selected row, moving the rows after it up (their whole subtrees). `on_add:` and `on_remove:` run
+after an edit, `rows:` (6) is how many rows show at once.
+
+```yaml
+      - list: Point classes
+        bind: grid.classes
+        add: true
+        remove: true
+        new_item: { name: "class {n}", color: "1,0,0", radius: 2 }
+```
+
+A backend with no tab bar draws `tabs:` as a row of radio buttons, and one with no list draws a
+`list:` as stacked radio buttons with the two buttons under them, so a terminal host shows both.
+(`tabs_list_test`, `cvcgl_imgui_tabs_list`.)
+
 ### 5.4 `scene:` sources and custom node types
 
 A `scene:` node's `type:` is a built-in (`geometry`, `volume`, `volren`, `volslice`,
@@ -1300,7 +1342,14 @@ scene:
     `<prefix>.sim.restarts`, so a program or a host can reset state of its own.
   - pycvc's `AriApp` has `step_world(n)` and `restart_world()`.
 - **A generated world's body.** `body: {}` on a `generated_world` node is the world's colliders:
-  its terrain and its buildings, each a static body (`shape:` and `motion:` do not apply). The
+  its terrain and its buildings, each a static body (`shape:` and `motion:` do not apply), and
+  invisible walls just outside the terrain's edge, so nothing leaves the world over it; a vehicle
+  touching one has hit an obstacle. That is the node's `edge: wall`, the default; `edge: shore`
+  lines the world with a beach instead, the ground falling under the sea over a band at the rim
+  (20 % of `half`, 50-300 m), its corners rounded and its coastline wandering, with the sea drawn
+  on past the world, and no walls; `edge: none` leaves the edge open. It is live too: `world.edge`
+  (0 wall, 1 shore, 2 none), the World panel's Edge, which Regenerate applies. A data node's world
+  always has the walls. The
   world is made in core libcvc ([`scene_generated_world.h`](../inc/cvc/ariadne/scene_generated_world.h)),
   so headless the scene's world runs the node itself: it seeds the `world.*` keys, makes the
   world as the document says, publishes `world.stats.*`, and makes a new world at once on
@@ -1399,6 +1448,11 @@ scene:
     substep of each world step, so they step with everything else; each plant's entities have a
     navigator of their own on the world's grid. The kinematic bicycle steers each of its
     substeps, so it has no one command to blend with: there a `blend` intent replaces.
+
+    A spawn may name a plant other than its archetype's (`vehicles.spawn.plant`,
+    `entity_spec::plant`), as a gym's agents do. A kinematic box meets no building in the
+    physics world, so its obstacle contacts are its footprint on the grid's blocked cells, and
+    two kinematic boxes touch when they overlap.
   - **Looks.** With no `look:`, a humvee is the real Humvee, the vehicle-humvee package's
     `Humvee.glb`, when it is installed (`find_vehicle_model`: beside `$CVC_NAV_BUNDLE`, else in
     `share/cvc-scenes/shared` or `share/cvc-scenes/*/` under `$CVC_PREFIX`, `$CVCPKG_PREFIX`,
@@ -1426,7 +1480,8 @@ scene:
     `blend`, or `hold`). `physics.stats.vehicles` has a line per vehicle, its plant named.
   - **Intents.** Any entity can be steered from outside. A document, a script or a server writes
     its keys, and a C++ or Python host calls `WorldVehicles::set_intent` (`pycvc.WorldEntities`,
-    below). Each navigator tick (20 Hz) reads them, and a change replaces the intent it had:
+    below). Each navigator tick (0.06 s by default, `cvc::kSimTick`) reads them, and a change
+    replaces the intent it had:
 
     | Key, under `entities.<id>` | What it is |
     |---|---|
@@ -1435,7 +1490,7 @@ scene:
     | `intent.accel` | m/s² along its heading (from rest a negative one backs it up), held to its top speed as the navigator's command is |
     | `intent.weight` | the blend's share, 0 to 1 (default 0.5) |
     | `force.x`, `force.y` | m/s², world frame: a push added to the drive's force (the goal's pull and the walls' push), as `cvc::nav::ext_force` adds one. It works under any command but `replace` |
-    | `force.steer` | `0` keeps the force out of the drive's steering (default `1`). The drive has one such switch, on while any entity's force asks for it |
+    | `force.steer` | `0` keeps the force out of the drive's steering (default `1`). Each plant's drive has one such switch, on while any of its entities' force asks for it |
 
     An `external` entity has no command of its own: `replace` and `blend` both drive it, and with
     no intent (or `off`) it brakes to a stop and holds there. `world: vehicles: intents: <path>`
@@ -1513,6 +1568,79 @@ scene:
     scope, Suggest along roads and Accept, and the points.
   - **The demo.** `examples/ariadne/documents/world_lab.ari` has the three worlds, a Humvee and a
     RoboRacer, a studio scene, four team points on the flat square, and every panel.
+- **The gym.** A world document driven one control tick at a time: `reset`, `step`, `observe`, a
+  reward and an episode log, headless ([`world_gym.h`](../inc/cvc/ariadne/world_gym.h),
+  `pycvc.WorldGym`). Each gym loads its document on an app of its own and pauses its clock, so
+  one process runs many side by side and nothing steps the world but `step()`:
+
+  ```python
+  gym = pycvc.WorldGym("world_gym.ari", world="flat", count=4, max_steps=1200)
+  obs = gym.reset(seed=7)               # a dict of numpy arrays, one entry per agent
+  while True:
+      steer, accel = my_policy(obs)     # (n,) each, rad and m/s^2; NaN: nav@1 drives that agent
+      obs, reward, terminated, truncated, info = gym.step(steer, accel)
+      if terminated or truncated:
+          break
+  gym.save_log("episode.csv")           # or gym.log(), a dict of numpy arrays
+  ```
+
+  - **Agents.** Each reset makes the world afresh as the document built it (the clock at tick 0),
+    seeds every draw with the reset's seed (starts, goals, the spawn policy's), and spawns the
+    agents: `count` of the first archetype with `nav@1`, or `agents=[{archetype, plant, name,
+    team, controller, x, y, yaw, ...}]` (any of the four plants). Starts come from the
+    document's spawn points when it has them. A seed and a list of commands give the same
+    episode every time, in any gym.
+  - **A world per episode.** With `regenerate=True` each reset makes a generated world on again
+    from its seed (the node's `world.seed`): another seed, another world; the same seed, the same
+    world.
+  - **A step** is one navigator tick: `tick=` (`gym_options::tick`), by default libcvc's one
+    simulation tick, 0.06 s (`cvc::kSimTick`, `pycvc.SIM_TICK`; cvc/core/sim_tick.h). It is a whole
+    number of physics steps: a world with vehicles runs its clock at the 0.01 s simulation quantum,
+    so physics steps at 100 Hz and a tick is 6 of them. An agent takes
+    its command for that tick in place of its controller's (`WorldVehicles::command`, held to its
+    envelope); a NaN leaves it to its controller, so NaN everywhere is the navigator's baseline.
+    Goals are held for the episode (`wander=False`); `set_goal(id, x, y)` moves one.
+  - **Contacts.** A world's terrain is its ground; its buildings are not, so touching one is
+    `hit_obstacle`.
+  - **The observation**, per agent: `id`, the chassis's `x`, `y`, `z`, `yaw`, `speed`, `vx`,
+    `vy`, `steer`; `goal_x`, `goal_y`, `goal_dist`, `reach`, `reached`; `hit_obstacle` (the
+    world's bodies other than its ground), `hit_vehicle` and `collided` over the tick; `out` (off
+    the grid, or 5 m below its ground); `plant`; `ranges` (n x rays) to anything blocked in the grid, at
+    `ray_angles` off the heading, up to `range_m`; and the body and envelope (`length`, `width`,
+    `wheelbase`, `max_steer`, `max_accel`, `max_decel`, `max_speed`).
+  - **The end.** `terminated` when every agent with a goal (`nav@1`; `none` parks at its start)
+    is at it, or one is out; `truncated` at `max_steps`.
+  - **The reward** is yours: `set_reward(fn(before, steer, accel, after) -> (n,))`. The default
+    pays each agent its progress toward its goal (m), less 1 for a tick it collided, plus 10 when
+    it arrives.
+  - **The log**: a row per agent at each reset and step (episode, step, id, time, pose, speed,
+    the commands, the goal distance, the reward, the flags), as numpy arrays or CSV.
+  - **Keys.** Under `gym`: `episode`, `step`, `time`, `return`, `done`, `agents`, `status`.
+  - **The example.** `examples/ariadne/python/world_gym.ari` holds world_lab's worlds, vehicles
+    and spawn points and requires only `scene.physics`; `world_gym.py` drives it with a policy of
+    its own or `--navigator`. Open the document in arigl to watch the same world drawn.
+  - **`pycvc_gl.cars` on it.** `GymCars` runs the cars template's controllers in a world
+    document (docs/CARS.md, "In a world document").
+  - **A differentiable twin** reads the world from the gym (ARIADNE_WORLDS.md §14, "As built
+    (L4's twin)"). Neither Jolt nor a physics world is differentiated, so a trainer steps a
+    model of the gym instead, as P8 did for the Jolt vehicle (NAV-VEHICLE-PHYSICS-ROADMAP), and
+    the gym judges the result.
+    - `fields()` gives the navigator's grid (`occupancy`), its `height`, the ground's grip `mu`,
+      the navigator's signed distance `sdf` with its gradient `sdf_dx` and `sdf_dy`, the
+      `bounds` and `cell`, and the navigator's own settings (`navigator`: nav's scale, its tick,
+      the arrival radius, its vehicle in normalized units).
+    - `plants()` gives each agent's plant as a model, in the observation's order, in SI
+      (`entity_plant`, `WorldVehicles::plants`):
+      - `dynamic4w`: the plant's own four-wheel model (`diff::dyn4_plant`), with its parameters,
+        step limits, substeps, ground reference and state. It also gives what the model took of the
+        last command in each substep, after the driver (`applied_accel`). Away from a
+        collision, replaying the model from the state before a tick with that command gives the
+        state after it, to the last bit.
+      - `dynamic`: the single-track model, the same way, with each step's grade.
+      - `jolt`: the four-wheel model with the vehicle's own numbers (`nav_plant::dyn4_si_of`).
+        Its state is read back from the chassis, so `exact` is false.
+      - `kinematic`: nav's bicycle, its rear axle, heading and speed, and its limits in metres.
+    - GRL-SNAM's `grl_snam.gym_twin` is the torch twin built on them.
 - **Terrain transforms.** A terrain follows its node's position but not its rotation or scale.
   Draw a ground you collide with unrotated and unscaled.
 - **Reading physics.** `RealizedScene::physics` is the world (`RealizedScene::world` the
@@ -1734,6 +1862,14 @@ file's range. **Overlays** are the node's children: point glyphs, polylines, cro
 is pushed back by `slice.overlay_offset`, so anything drawn in its plane shows on top of it in
 every view. `VolumeSliceNode::pickRay` meets a world ray with the plane exactly and names the
 voxel and its value (`cvcgl_volume_slice`, and `volume_slice_test` for the slicing itself).
+
+`volume_of: <id>` in place of `source:` makes the node another plane of the volume that the
+`volume_slice` node `<id>` (realized before it) draws, coloured through `<id>.transfer_function`:
+the volume is read or computed once, and one editor colours every plane. The classic three-plane
+orthoslicer is one node with a source and two with `volume_of:`.
+`examples/ariadne/documents/orthoslicer.ari` puts them beside a `volren` of the same volume, with
+a slice view down the axis a switch picks (§5.18) and the transfer-function editor on the first
+plane.
 
 #### Lines from data: `type: ribbon` and `type: draped_link`
 
@@ -2925,8 +3061,9 @@ needs no host code. The `scene_view` component (§6.5) is the widget in a window
 
 The demos in `examples/ariadne/documents/`: `scene_views.ari` (an overview map and a view whose
 layers a menu picks), `viewer_grid.ari` (four cameras on one scene), `viewer_looks.ari` (one scene
-drawn four ways), `viewer_scenes.ari` (three scenes from one set of assets) and
-`viewer_groups.ari` (two tagged groups of one scene).
+drawn four ways), `viewer_scenes.ari` (three scenes from one set of assets),
+`viewer_groups.ari` (two tagged groups of one scene) and `orthoslicer.ari` (a slice view down the
+axis a switch picks, over three `volume_slice` planes).
 
 ```yaml
 scene:
@@ -2962,7 +3099,8 @@ windows:
 | `show` | Tags, as a list or one string (`show: "sim debug"`). The view draws the untagged nodes and the nodes that carry one of these tags. When unset, it draws every tag. |
 | `hide` | Tags the view leaves out, whatever `show` says. |
 | `bind` | A state key whose value is the tag list to show (space- or comma-separated), read every frame. Use it for a layers menu: a widget writes the key, and the view follows. |
-| `mode` | Its own camera's mode: `orbit` (the default), `fly`, `map` (top-down, framed on what the view shows), or `track` with `track: <node id>`. (`camera: map` and the other three mode names still mean the mode.) |
+| `mode` | Its own camera's mode: `orbit` (the default), `fly`, `map` (top-down, framed on what the view shows), `track` with `track: <node id>`, or `slice` (straight down one axis, below). (`camera: map` and the other mode names still mean the mode.) |
+| `axis` | With `mode: slice`, the axis it looks down: `x`, `y` or `z`, or a view's name, `xy` (z), `xz` (y) or `zy` (x). `axis: { bind: <key> }` reads it from a state key every frame, so one view follows a switch. Defaults to `z`. |
 | `camera` | Draw from a named camera instead of its own: one the scene declares (`scene: cameras:`, below), or `main`, the main view's. |
 | `scene` | The scene it shows: a `scenes:` entry's name (below). Unset (or `""`): the document's `scene:`. |
 | `shadows` | `true` (the default) draws the scene's shadows from the maps the scene's own renderer bakes. `own` bakes maps of its own from what this view draws, so a node it leaves out casts nothing there and a node the main view leaves out still casts; it costs one more bake. `false` draws none. |
@@ -2984,6 +3122,8 @@ under the `pick:` key:
 - `x`, `y`, `z`: the world point it hit, empty for a miss;
 - `hit`: `1` or `0`;
 - `node`: the id of the node it hit;
+- `i`, `j`, `k` and `value`: on a `volume_slice` node, the voxel the point lies in and its value
+  (empty elsewhere);
 - `button` (`1`), `mods` (`shift`, `ctrl`, `alt`, `super`, comma-separated), `phase` (`down`,
   `drag` or `up`) and `view`;
 - `seq` last: one more on each pick, so a watcher sees two identical clicks.
@@ -2992,6 +3132,31 @@ under the `pick:` key:
 example, so a tool such as a spawn-point editor is a program. A host can ask for the same hit test
 at any point with `SceneViews::pick(view, x, y, hit)`. A terrain, a generated world and a body are
 nodes like any other, so a click on the ground gives a point on it. (`cvcgl_ariadne_pick`.)
+
+**Slice views.** `mode: slice` is a parallel view straight down one axis with no rotation
+(`CameraController::Mode::Slice`): the plane a `volume_slice` node (§5.4) lies in, with the
+screen's axes VolumeGridRover's — down z, x right and y up (its XY view); down y, x right and z up
+(XZ); down x, z right and y up (ZY). A drag pans (any button that does not pick), the wheel zooms
+about the pointer, and a double-click (without `input: pick`) frames the view again. The view is
+framed on the `volume_slice` nodes on its axis that it shows, and it leaves out those on the other
+two axes, overlays and all: seen edge-on, each would only draw a line across its own. Its camera
+keeps its pose under `<prefix>.viewers.<view>.camera.slice.*` (`axis`, `center.{x,y,z}`, `scale`).
+
+```yaml
+- type: viewport
+  view: slicer
+  mode: slice
+  axis: { bind: grid.view }        # xy | xz | zy, written by a switch
+  input: pick
+  pick: grid.pick
+```
+
+A pick in a slice view meets the plane of the nearest `volume_slice` node on its axis exactly,
+not a cell under a tolerance, and an overlay drawn on top of the plane does not get in the way. It
+writes `i`, `j`, `k` and `value` with `x`, `y`, `z`; past the volume's edge it still writes the
+point on the plane (`x`, `y`, `z`), with `hit` 0 and no voxel, so a drag keeps reporting. In any
+other view a pick that lands on a `volume_slice` node writes its voxel too. (`cvcgl_ariadne_slice_view`,
+`cvcgl_camera_slice`.)
 
 **Refresh rate.** A view draws the scene a second time, every frame: a mirror of the main view
 draws every node again, with its own camera, so a map beside a busy scene can cost as much as the
@@ -4161,6 +4326,20 @@ arigl snapshot --mp4 crates.mp4 --seconds 5 --width 1280 --height 720 \
   --set viewers.main.camera.mode=2 --set viewers.main.camera.track.target=crate_b \
   --set viewers.main.camera.track.back=14 --set viewers.main.camera.track.height=5 \
   examples/ariadne/documents/terrain_lab.ari
+```
+
+**The browser's texture units, natively.** VTK sizes its texture-unit table from
+`GL_MAX_TEXTURE_IMAGE_UNITS`: 32 or more on a desktop GL, 16 in WebGL2. In the browser the
+low-memory mapper also takes a unit for each vertex array it draws from (positions, normals,
+texture coordinates, ids), so a node's own shader textures (`setShaderTexture`, shared shader
+inputs) get what is left. A draw that runs out goes without the texture, and VTK logs it every
+draw. `CVCGL_LOWMEM_MAPPER=force CVCGL_TEXTURE_UNITS=16` draws natively with the browser's mapper
+and its 16 units (`ViewportManager::limitTextureUnits`), and cvcGL names the first texture each
+node runs out of:
+
+```
+CVCGL_LOWMEM_MAPPER=force CVCGL_TEXTURE_UNITS=16 \
+  arigl snapshot --png lab.png examples/ariadne/documents/terrain_lab.ari
 ```
 
 The cvcGL examples

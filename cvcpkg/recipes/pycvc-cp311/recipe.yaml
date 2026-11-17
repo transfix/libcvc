@@ -59,11 +59,13 @@ depends:
   build:
     # libcvc SDK (find_package(cvc CONFIG)); Python dev interpreter + numpy C API.
     - name: libcvc
+      version: "^4.0"
     - name: python311
     - name: numpy-cp311
   runtime:
     # pycvc imports against this interpreter + numpy and loads libcvc at runtime.
     - name: libcvc
+      version: "^4.0"
     - name: python311
     - name: numpy-cp311
   host_tools:

@@ -7,7 +7,7 @@
     python cars.py --controller navigator             # libcvc's navigator, as a baseline
     python cars.py --headless --frames 1200 --log run.npz   # a batch run: no GL
 
-Made by ``python -m pycvc_gl.cars --copy DIR``: edit ``controller`` below. Every tick (0.05 s) it
+Made by ``python -m pycvc_gl.cars --copy DIR``: edit ``controller`` below. Every tick (0.06 s) it
 gets every car's state as numpy arrays and returns one (steer, accel) per car, which the cars'
 plants take in place of the navigator's. The plant is a state-tree setting, ``nav_plant.vehicle``:
 the document's Vehicle combo, its ``init:``, ``--vehicle`` or ``--set`` change it, live. So is

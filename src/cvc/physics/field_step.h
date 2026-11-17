@@ -78,14 +78,6 @@ struct field_body {
   field_load load;      // the last step's
 };
 
-// The water at a point (field_set::water_at), for a boat's propeller and rudder.
-struct water_sample {
-  bool wet = false;     // under the fluid's top and above its bottom, at a density > 0
-  double depth = 0.0;   // m below the top: the free surface's height, or the box's top
-  double density = 0.0; // kg/m^3
-  vec3 velocity;        // m/s, the water's: the surface's, or the velocity volumes'
-};
-
 class field_set {
 public:
   // Throw cvc::physics_error for a field world::add_field refuses.
@@ -122,7 +114,7 @@ public:
   }
   // The water at `p` at field time `t`: the first fluid field, in id order, whose box holds `p`
   // in x and y and reaches below it. False if none does; `out` is then dry and still.
-  bool water_at(const vec3 &p, double t, water_sample &out) const;
+  bool water_at(const vec3 &p, double t, physics::water_sample &out) const;
 
   // The air at `p` for a vehicle's aero: a flow field's density and wind where one covers
   // `p` (the first, in id order), true; else false, `rho` and `wind` untouched.

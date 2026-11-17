@@ -63,6 +63,8 @@
 #include <cvc/utility/algorithm.h>
 #include <cvc/utility/utility.h>
 #include <cvc/volume/point_classes.h>
+#include <cvc/volume/seed_generators.h>
+#include <cvc/volume/seed_generators_params.h>
 #include <cvc/volume/segmentation.h>
 #include <cvc/volume/segmentation_params.h>
 #include <cvc/volume/volume.h>
@@ -3000,10 +3002,16 @@ static int cmd_segment(cvc::app &app, int argc, char **argv) {
       "(zero elsewhere) beside it as <stem>_class_<n><ext>. The seeds come from a point-class "
       "file (--seeds: VolumeGridRover's .vgr, or .pts) or the command line (--seed). The legacy "
       "--tlow / --thigh take the thresholds on the 0..255 scale the volume is rescaled to.\n\n"
+      "--automatic critical-points is the paper's automatic mode: the critical points of the "
+      "volume's gradient field after anisotropic gradient vector diffusion seed two more "
+      "classes, \"feature\" (maxima) and \"background\" (minima), so no seeds are needed; the "
+      "--cp-* flags tune it (--cp-feature-threshold moves dim maxima to the background, "
+      "--cp-background-threshold bright minima to the feature).\n\n"
       "Examples:\n"
       "  cvc segment map.rawiv --seeds classes.vgr --tlow 40 --thigh 200 -o labels.rawiv\n"
       "  cvc segment map.mrc --seed virus:40,40,40 --seed solvent:2,2,2 --t-low 0.1 --t-high "
-      "0.8 -o labels.rawiv\n");
+      "0.8 -o labels.rawiv\n"
+      "  cvc segment map.rawiv --automatic critical-points -o labels.rawiv\n");
   desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
                                             "input volume")(
       "output,o", po::value<std::string>()->required(), "output volume for the labels")(
@@ -3049,8 +3057,9 @@ static int cmd_segment(cvc::app &app, int argc, char **argv) {
   if (vm.count("seed"))
     for (const std::string &s : vm["seed"].as<std::vector<std::string>>())
       add_seed_arg(seeds, s, p.variable, p.timestep);
-  if (seeds.point_count() == 0)
-    throw std::runtime_error("cvc segment: no seeds: give --seeds <file> or --seed name:i,j,k");
+  if (seeds.point_count() == 0 && p.automatic != cvc::seed_mode::critical_points)
+    throw std::runtime_error("cvc segment: no seeds: give --seeds <file> or --seed name:i,j,k "
+                             "(or --automatic critical-points, which needs none)");
 
   // The stepper, so a long run can report its progress.
   cvc::segment_stepper stepper(vol, std::move(seeds), p);
@@ -3095,6 +3104,101 @@ static int cmd_segment(cvc::app &app, int argc, char **argv) {
   if (!r.classes.empty())
     std::cout << ", and the class volumes to " << stem << "_class_NN" << ext;
   std::cout << "\n";
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// cvc capsid-seeds / cvc rotate-seeds: VolUtils' seed generators (cvc/volume/seed_generators.h,
+// transfix/libcvc#123)
+// ---------------------------------------------------------------------------
+
+static int cmd_capsid_seeds(cvc::app &app, int argc, char **argv) {
+  po::options_description desc(
+      "cvc capsid-seeds - seeds for a virus map (VolUtils' criticalPntsToSeed, SegSubunit's "
+      "FindCriticalPoints)\n\n"
+      "The map's local maxima above --t-low, thresholded so that about 3000 T of them are kept "
+      "(T = h^2 + hk + k^2, the capsid's triangulation number), as class \"maxima\"; when there "
+      "are few, its gradient magnitude's local maxima too, as class \"saddles\". Writes them as "
+      "point classes (.vgr, or .pts) for cvc segment --seeds or rotate-seeds.\n\n"
+      "Examples:\n"
+      "  cvc capsid-seeds map.rawiv -o seeds.vgr --h 2 --k 1 --t-low 40\n");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume")(
+      "output,o", po::value<std::string>()->required(), "output point classes (.vgr, .pts)");
+  cvc::add_param_options<cvc::capsid_seed_params>(desc);
+  po::positional_options_description pos;
+  pos.add("input", 1).add("output", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+  const auto pr = cvc::params_from_options<cvc::capsid_seed_params>(vm);
+  if (!pr.ok())
+    throw std::runtime_error("cvc capsid-seeds: " + pr.message());
+  cvc::volume vol(app);
+  vol.read(vm["input"].as<std::string>());
+  const cvc::point_classes pc = cvc::capsid_critical_points(vol, pr.value);
+  const std::string out = vm["output"].as<std::string>();
+  cvc::write_point_classes(app, pc, out);
+  std::cout << "Wrote " << pc.classes.at(0).size() << " maxima and " << pc.classes.at(1).size()
+            << " saddles to " << out << "\n";
+  return 0;
+}
+
+static int cmd_rotate_seeds(cvc::app &app, int argc, char **argv) {
+  po::options_description desc(
+      "cvc rotate-seeds - N-fold rotational copies of seeds (VolUtils' SeedProduce, "
+      "SeedProduceRegardingAxis)\n\n"
+      "Every point of --seeds, rotated by 2 pi n / --folds about an axis (--axis x,y,z through "
+      "--center x,y,z, world units; by default z through the volume's centre), as the nearest "
+      "voxel of the volume: class \"Class n\" holds the n-th rotation. --from names the volume "
+      "the seeds were marked on, when that is a cut of this one. Writes point classes.\n\n"
+      "Examples:\n"
+      "  cvc rotate-seeds map.rawiv --seeds one_unit.vgr --folds 5 -o five.vgr\n"
+      "  cvc rotate-seeds map.rawiv --seeds s.vgr --from cut.rawiv --folds 3 --axis [0,1,1] "
+      "-o three.vgr\n");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "the volume the copies are voxels of")(
+      "output,o", po::value<std::string>()->required(), "output point classes (.vgr, .pts)")(
+      "seeds,s", po::value<std::string>()->required(), "the seeds' point classes (.vgr, .pts)")(
+      "from", po::value<std::string>(), "the volume the seeds were marked on (default: input)");
+  cvc::add_param_options<cvc::rotation_seed_params>(desc);
+  po::positional_options_description pos;
+  pos.add("input", 1).add("output", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+  const auto pr = cvc::params_from_options<cvc::rotation_seed_params>(vm);
+  if (!pr.ok())
+    throw std::runtime_error("cvc rotate-seeds: " + pr.message());
+  cvc::volume vol(app);
+  vol.read(vm["input"].as<std::string>());
+  cvc::dimension from_dims = vol.voxel_dimensions();
+  cvc::bounding_box from_box = vol.boundingBox();
+  if (vm.count("from")) {
+    const cvc::volume_file_info info(app, vm["from"].as<std::string>());
+    from_dims = info.voxel_dimensions();
+    from_box = info.boundingBox();
+  }
+  cvc::point_class_read_params rp;
+  rp.dims = {int(from_dims.XDim()), int(from_dims.YDim()), int(from_dims.ZDim())};
+  rp.bbox = {from_box.minx, from_box.miny, from_box.minz,
+             from_box.maxx, from_box.maxy, from_box.maxz};
+  rp.variable = pr.value.variable;
+  rp.timestep = pr.value.timestep;
+  const cvc::point_classes seeds = cvc::read_point_classes(app, vm["seeds"].as<std::string>(), rp);
+  const cvc::point_classes pc = cvc::rotated_seeds(seeds, from_dims, from_box, vol, pr.value);
+  const std::string out = vm["output"].as<std::string>();
+  cvc::write_point_classes(app, pc, out);
+  std::cout << "Wrote " << pc.point_count() << " points in " << pc.classes.size() << " classes to "
+            << out << "\n";
   return 0;
 }
 
@@ -3156,6 +3260,8 @@ static const command_entry commands[] = {
   {"ssim",           "Analysis",        "compute SSIM between two volumes",              cmd_ssim},
   {"compare",        "Analysis",        "exact voxel comparison (nonzero exit on mismatch)", cmd_compare},
   {"segment",        "Analysis",        "seeded segmentation (GenSeg): labels and class volumes", cmd_segment},
+  {"capsid-seeds",   "Analysis",        "seeds for a virus map: maxima kept for its T-number (VolUtils)", cmd_capsid_seeds},
+  {"rotate-seeds",   "Analysis",        "N-fold rotational copies of seeds about an axis (VolUtils)", cmd_rotate_seeds},
 
   // ── Projection / Reconstruction ──
   {"project",        "Projection",      "forward ray projection",                        cmd_project},

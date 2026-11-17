@@ -13,6 +13,14 @@ add_executable(ariadne_doc_fetch_test ariadne_doc_fetch_test.cpp)
 add_executable(ariadne_scene_tf_test ariadne_scene_tf_test.cpp)
 add_executable(ariadne_runtime_test ariadne_runtime_test.cpp)
 add_executable(ariadne_scene_world_test ariadne_scene_world_test.cpp)
+# AriadneWorldGym.ThePlantsAreModelsATwinReplays replays the dynamic4w plant (built with
+# -ffp-contract=off) with its model called inline here, bit for bit: build it the same way, or clang
+# contracts this copy into FMAs on aarch64 (the macOS arm64 lanes) and the last bits differ.
+if(NOT MSVC)
+  set_source_files_properties(ariadne_scene_world_test.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(ariadne_scene_world_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 add_executable(ariadne_server_document_test ariadne_server_document_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
@@ -216,6 +224,7 @@ add_executable(physics_pose_tracker_test physics_pose_tracker_test.cpp)
 add_executable(physics_plant_host_test physics_plant_host_test.cpp)
 add_executable(physics_dyn_bike_plant_test physics_dyn_bike_plant_test.cpp)
 add_executable(physics_dyn_4w_plant_test physics_dyn_4w_plant_test.cpp)
+add_executable(physics_dyn_boat_plant_test physics_dyn_boat_plant_test.cpp)
 # StepsAsTheDynamicPlantDoes (and the four-wheel StepsAsTheFourWheelPlantDoes) hold the plant
 # (built with -ffp-contract=off) to its model called inline here, bit for bit: build them the same
 # way, or clang contracts this copy into FMAs on aarch64 (the macOS arm64 lanes) and the last bits
@@ -529,6 +538,7 @@ set(TEST_TARGETS
   physics_plant_host_test
   physics_dyn_bike_plant_test
   physics_dyn_4w_plant_test
+  physics_dyn_boat_plant_test
   physics_mujoco_robot_test
   geometry_height_field_test
   world_geometry_test
@@ -2553,6 +2563,12 @@ target_link_libraries(physics_dyn_4w_plant_test
     GTest::gtest
     GTest::gtest_main
 )
+target_link_libraries(physics_dyn_boat_plant_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 target_link_libraries(physics_mujoco_robot_test
   PRIVATE
     cvc
@@ -2940,6 +2956,7 @@ target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
 target_compile_features(physics_plant_host_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_bike_plant_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_4w_plant_test PRIVATE cxx_std_17)
+target_compile_features(physics_dyn_boat_plant_test PRIVATE cxx_std_17)
 target_compile_features(physics_mujoco_robot_test PRIVATE cxx_std_17)
 target_compile_features(geometry_height_field_test PRIVATE cxx_std_17)
 target_compile_features(world_geometry_test PRIVATE cxx_std_17)
@@ -3080,7 +3097,14 @@ endfunction()
 
 cvc_discover_tests(app_test)
 foreach(_cvc_port_test IN LISTS CVC_PORT_TESTS)
-  cvc_discover_tests(${_cvc_port_test})
+  if(_cvc_port_test STREQUAL "segmentation_intrinsics_test")
+    # AnActionStartsItUnderTheDefaultLimits runs a 160^3 segmentation through an action's frame
+    # loop: 93-101 s in a Debug job, and past ctest's 300 s on a loaded runner (three times over in
+    # one job). The test's own loop allows 900 s too.
+    cvc_discover_tests(${_cvc_port_test} PROPERTIES TIMEOUT 900)
+  else()
+    cvc_discover_tests(${_cvc_port_test})
+  endif()
 endforeach()
 cvc_discover_tests(thread_pool_test)
 cvc_discover_tests(thread_class_test)
@@ -3500,8 +3524,14 @@ cvc_discover_tests(nav_potential_test)
 cvc_discover_tests(ph_compose_test)
 cvc_discover_tests(ph_compose_parity_test)
 cvc_discover_tests(ph_microgrid_test)
-cvc_discover_tests(ph_query_test)
-cvc_discover_tests(ph_convoy_test)
+# The candidate query and the history fit roll out RK4 references (about 4.5 s and 3 s in Release):
+# the same budget as the convoy's, below, so a slow Debug runner fails on a real hang only.
+cvc_discover_tests(ph_query_test PROPERTIES TIMEOUT 1200)
+# The convoy's two full runs (the composite against the formation; the follow laws on a step and
+# a stop) take ~95 s each in a Debug build, and a PR's Debug ctest gives a test without a TIMEOUT
+# of its own 300 s (ci.yml), which a busy runner misses: both timed out on #1288's run on
+# 2026-11-16. Their own budget, as ocean_ewave_test has, so a slow box fails on a real hang only.
+cvc_discover_tests(ph_convoy_test PROPERTIES TIMEOUT 1200)
 cvc_discover_tests(ph_se2_test)
 cvc_discover_tests(ph_se2_train_test)
 cvc_discover_tests(nav_terrain_test)
@@ -3516,6 +3546,7 @@ cvc_discover_tests(physics_pose_tracker_test)
 cvc_discover_tests(physics_plant_host_test)
 cvc_discover_tests(physics_dyn_bike_plant_test)
 cvc_discover_tests(physics_dyn_4w_plant_test)
+cvc_discover_tests(physics_dyn_boat_plant_test)
 cvc_discover_tests(physics_mujoco_robot_test)
 cvc_discover_tests(geometry_height_field_test)
 cvc_discover_tests(world_geometry_test)
