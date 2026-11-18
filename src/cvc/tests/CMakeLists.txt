@@ -3190,7 +3190,9 @@ if(TARGET geometry_test)
   cvc_discover_tests(geometry_test)
 endif()
 if(TARGET tiler_bunny_test)
-  cvc_discover_tests(tiler_bunny_test)
+  # About 13 s in Release; a Debug job runs the SDF and the tiling several times slower, past
+  # ctest's 300 s on a loaded runner, so it gets 900 s as tiler_intrinsics_test does.
+  cvc_discover_tests(tiler_bunny_test PROPERTIES TIMEOUT 900)
 endif()
 if(TARGET algorithm_test)
   cvc_discover_tests(algorithm_test)

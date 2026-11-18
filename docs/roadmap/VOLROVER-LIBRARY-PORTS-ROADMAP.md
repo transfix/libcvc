@@ -1077,7 +1077,8 @@ a few files:
        surface, every tiled point above the base within 1.4 h of the bunny, and the mean
        distance is about 0.27 h. The Hausdorff distance is 3.5 h, from the tiled surface capping
        the holes in the bunny's base.
-     - **Cost:** about a minute in Release, so it runs with ci.yml's heavy suites.
+     - **Cost:** about 13 s in Release since the tiler's speedup (transfix/libcvc#1355), mostly
+       the SDF, so it runs on every PR.
 
 **ContourTiler's other rough edges, and what the port does with them**
 
