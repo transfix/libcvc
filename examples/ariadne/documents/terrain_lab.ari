@@ -228,13 +228,15 @@ scene:
       transform: { position: [14, 188, 10] }
       material: { color: [0.68, 0.48, 0.26] }
       body: { density: 400 }
-    # A launch on the lake beside the crates (a 4 m box hull with a shaft propeller and a rudder),
-    # afloat on the water node's sea. Settings > Launch is its helm: Drive keys and the Throttle and
-    # Rudder sliders (launch.throttle, launch.rudder), or Drive nav to its goal (launch.goal).
+    # A patrol boat on the lake beside the crates (the tactical preset: a 7.8 m box hull, its
+    # outboards one thrust), afloat on the water node's sea, drawn as the vehicle-tactical-boat
+    # package's TacticalBoat (its hull when that is not installed). Settings > Launch is its helm:
+    # Drive keys and the Throttle and Rudder sliders (launch.throttle, launch.rudder), or Drive nav
+    # to its goal (launch.goal).
     - node: launch
       type: boat
       water: water
-      preset: launch
+      preset: tactical
       transform: { position: [0, 170, 0] }
       goal: [40, 150]
     # The clouds: a deck of L-system cumulus scattered over the whole world, drifting and slowly
@@ -262,7 +264,7 @@ scene:
       evolve: 1            # a weather step every 5 s; 0 holds the clouds
       orographic: 1        # windward flanks gather cloud
     # The weather: storm cells on a schedule (and the ones the Weather panel starts), riding the
-    # sky's wind. A storm builds upwind and walks over the world: the clouds under it close up,
+    # scene's wind. A storm builds upwind and walks over the world: the clouds under it close up,
     # thicken and darken, the deck rises into cumulonimbus while a storm is in view (live:
     # sky.top), and the ground under it dims. Its life is 20 to 60 minutes of weather time (the
     # panel's Time scale speeds it up). Every client with the same weather.* keys sees the same
@@ -271,7 +273,10 @@ scene:
     # mesh weather_rain, which the sky lists among its receivers, so they draw after the clouds.
     # A storm in its prime throws lightning (its bolts are the mesh weather_bolt, listed the same
     # way; its flash lights the ground, the water and the clouds), and the wet ground's friction
-    # drops for the vehicles and bodies in the physics world, coming back as it dries.
+    # drops for the vehicles and bodies in the physics world, coming back as it dries. A gust
+    # front runs ahead of each storm (gust_front, 12 m/s at a full storm's front): the wind rises
+    # and veers ahead of it, the sea builds after it, the trees bend harder, the rain slants with
+    # it, and light bodies in the physics world are pushed.
     - node: weather
       type: weather
       ground: world        # the storms are timed to cross this node's extent

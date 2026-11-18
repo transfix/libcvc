@@ -1272,15 +1272,61 @@ The node drives the `cloud_sky` whose key root `sky:` names (default `sky`; `""`
 writes the storms to `sky.storms`. It raises `sky.top` toward `storm_top` (3200) in four steps while
 a storm is within `reach` metres (4000) of the ground, so the cumulonimbus maps are built a few times
 a storm and only while one is about. It raises `sky.darkness` toward `darkness` (0.6), and
-`storm_base` lowers the base too. The steering wind is the scene's wind: until one scene wind exists
-(O14) it is the sky's, `sky.wind_az` at the deck's drift speed, so the storms keep to the clouds
-drawn. A change of it is logged as a `steer` event once it has held for ten frames. Live keys under
+`storm_base` lowers the base too. The steering wind is the scene's wind (`wind:`, as authored: a
+storm is not carried by its own gust front), its heading at its speed at the deck's base times
+`sky.drift`, which is how the deck drifts; without a scene wind it is the sky's, `sky.wind_az` at the
+deck's drift speed. Either way the storms keep to the clouds drawn. A change of it is logged as a
+`steer` event once it has held for ten frames. Live keys under
 the node's root (`weather.` unless `keys:`): `events` (the authored events, `storm`, `steer`, `rate`
 and `calm`, as text), `time_scale` (weather seconds per world second; a change is a `rate` event),
-`request` (`upwind`, `overhead` or `calm`, emptied once read), and what it publishes: `state`,
+`request` (`upwind`, `overhead` or `calm`, emptied once read), `gust_front` (the storm wind's peak,
+m/s; below), and what it publishes: `state`,
 `storminess`, `cells`, `storms` (the cells as discs), `rain` (mm/h at the ground's centre) and
-`deck`. The panel is `weather_controls.ari`. Its rain, lightning and wet-ground friction are below;
-the storm wind (F4) waits for O14's scene wind.
+`deck`. The panel is `weather_controls.ari`. Its storm wind, rain, lightning and wet-ground friction
+are below.
+
+**Storm wind** (§9 F4, F6's gusts; O20). In a scene with a wind (`wind:`), each storm cell blows a
+gust front: the wind out of its downdraft, added to the scene's wind
+(`cvc::world::weather::gust_front`). It blows out of the cell's centre, from nothing there to
+`gust_front` m/s (12, a full cell's; the live key `weather.gust_front`, the Weather panel's Storm wind
+slider, 0 to 30; 0: no fronts) at the front's edge, `front_ahead` radii (1.5) ahead of the
+cell along its motion and `front_behind` (0.9) behind it, weaker behind by their ratio, and dies away
+over the next `front_width` (0.6) of that distance; past that there is none. It grows with the
+cell's intensity from `rain_onset`, as the downdraft comes with the rain. Ahead of a storm it blows
+with the steering wind, so the wind rises (a 9 m/s wind is 21 m/s at a full cell's front); beside
+it, across, so the wind veers; behind the cell's centre it blows against the wind. The scene's world
+owns it, drawn or headless ([`scene_weather.h`](../inc/cvc/ariadne/scene_weather.h)):
+
+- **Physics.** The world's air is then a `StormWindFlow`: the scene's wind with every front in it,
+  a function of the point and the time that each body reads at its centre of mass at the step's own
+  time. A front sweeps over the bodies as its storm walks, the same at every frame rate and
+  headless, and a light body under it is pushed harder and turned (a 1 kg beach ball ahead of a
+  storm, where the air is 18 m/s and the wind 6, goes at 16.6 m/s). A body asleep where a front
+  blows is woken on the first step of each half second of the clock. The world's vehicles read the
+  same air; arisrv's avatars keep the room rules' plain wind (no storms). `SceneWorld::wind()` hands
+  the air to a body outside the world, such as a MuJoCo robot (`mujoco_robot::set_wind(wind(),
+  world().field_time())`).
+- **The water and the trees** read one wind for all they draw, so they take the front where the
+  weather's storms are centred (its `ground:`'s centre, or `cx`, `cy`): before anything reads the
+  wind each frame, the world writes it to `wind.front` ("x y" m/s, empty with none), and
+  `scene_wind_now` adds it. It is the front at the start of each half second of the clock, so it
+  changes on the clock, never with a frame. The sea grows toward it through its `sea_lag` (so it
+  builds after the front and settles after the storm), its whitecaps with it. While the scene has
+  storms the physics sea steps once each half second of the clock (its crossfade at least 1 s), and a
+  keyframe's field goes in at the step after the next half second's start, so the bodies float the
+  same at every frame rate (given a sync each half second: a frame that runs the clock further warns).
+  The trees bend harder and turn. Their
+  gusts still drift with the wind as authored, so a front changes how hard and which way the wind
+  blows, not where the gusts have got to.
+- **The rain's slant** is the wind where the camera is, the front there in it.
+- **The clouds** drift, and the storms steer, by the wind as authored.
+
+A change of `weather.gust_front` reaches the physics (the air, `wind.front`, the woken bodies) at the
+start of the next half second of the clock after the scene's world reads it, so at the same step at
+every frame rate; the drawn rain's slant takes it at once.
+
+Decision: the fronts ride on the scene's wind, so a scene with storms but no `wind:` has none. A
+scene without a `weather` node steps as before, bit for bit, and never writes `wind.front`.
 
 **Rain** (OCEAN-AND-WEATHER-ROADMAP.md §9 F3, O19). Under a storm it rains where the field passes
 `rain_onset`, at up to `rain_max` mm/h. Everything below is uniforms or a fixed mesh, so no sampler
@@ -1420,8 +1466,10 @@ it out of both.
 **Boats.** `type: boat` is a boat on the water: a hull, a propeller and a rudder or an outboard in
 the scene's physics world, afloat on a `water` node's sea (OCEAN-AND-WEATHER-ROADMAP.md D6;
 [`scene_boat.h`](../inc/cvc/ariadne/scene_boat.h)). `preset:` is `launch` (a 4 m box hull of 900
-kg with a shaft propeller and a rudder) or `jonboat` (a 3.6 m flat box of 350 kg with an outboard
-that steers), with `mass:` and `max_speed:` over it; `water:` names the water node it floats on (the
+kg with a shaft propeller and a rudder), `jonboat` (a 3.6 m flat box of 350 kg with an outboard
+that steers) or `tactical` (a 7.8 m patrol boat of 2800 kg on its own V hull, baked from its
+model, its outboards one 8 kN thrust that steers: 10.5 m/s, a 32.5 m circle), with `mass:` and
+`max_speed:` over it; `water:` names the water node it floats on (the
 scene's first by default); the transform gives its x, y and heading, and it floats at its draft on
 the water there, the sea's height its z. It goes in once the water's grid is ready, and runs with or
 without a renderer, stepping with the world. Its keys, under its id (or its `keys:`): `drive` (`keys`
@@ -1430,10 +1478,17 @@ or `nav`), `throttle` and `rudder` (each -1 to 1; a + rudder turns it left) unde
 takes it there over the water deep enough for it; and its telemetry `x`, `y`, `z`, `heading`
 (degrees), `speed` (m/s through the water), `thrust` (N), `reached`, `placed` and `status`.
 `boat_controls.ari` is its helm. Drawn, it is its hull at its boat's pose: an open boat, white
-topsides over a blue stripe at the waterline and a dark wet bottom, with a teak sole. The water
-node keeps its water out of the boats nearest the camera (at most four, their footprints between
-their bottom and their sheer, passed to the water's shaders as uniforms, not a texture), its boats
-and the world's boat vehicles alike, and the boats make waves in its wake window. `terrain_lab.ari` has a launch on the
+topsides over a blue stripe at the waterline and a dark wet bottom, with a teak sole. With a
+`model:` (a file, or a name found where the vehicle models are, as `Humvee.glb` is; `.glb` is
+tried after a bare name; `none` draws the hull), it is that model instead, fitted as a vehicle's
+file look is (`fit_vehicle_geometry`: the axis a file stands on, Y-up or Z-up, is up, its length
+fitted to the boat's length overall, its keel on the hull's bottom). The `tactical` preset's model is `TacticalBoat`
+(the `vehicle-tactical-boat` package), and its hull when that is not installed; a `model:` that is
+not found warns. The water
+node keeps its water out of the boats nearest the camera (at most four, each the largest box inside
+its hull at its waterline, `BoatRuntime::cutout`, between its bottom and its sheer, passed to the
+water's shaders as uniforms, not a texture), its boats
+and the world's boat vehicles alike, and the boats make waves in its wake window. `terrain_lab.ari` has a tactical boat on the
 lake beside the crates (Settings > Launch).
 
 **Wind.** A scene's `wind:` is its one wind (OCEAN-AND-WEATHER-ROADMAP.md E5, O14;
@@ -1491,8 +1546,10 @@ scene:
   drag holds it, so it drifts at the speed where the air's drag on its freeboard balances the
   water's on its hull, plus the current. A 1 × 1 × 0.5 m crate in a 10 m/s wind drifts about
   0.15 m/s.
-- **Not yet.** Spray and rain slant (Phase F has neither yet), and the weather's steering wind
-  (O18) does not read it yet.
+- **Storms** add their gust fronts to it (Storm wind, above): the physics feel each front where it
+  is, the water and the trees the front at the weather's centre (`wind.front`), the rain's slant the
+  front at the camera. The weather's storms steer by the wind as authored.
+- **Not yet.** Spray.
 
 **Adaptive quality.** A host that knows each frame's wall time (cvcGL's `AriRuntime`: `arigl run`,
 the browser, pycvc_gl) runs a closed loop on it ([`scene_quality.h`](../inc/cvc/ariadne/scene_quality.h),
@@ -1830,9 +1887,13 @@ scene:
     own, or its adapter's): `list()` (a dict per entity: identity, pose, speed, energy, the
     command and the intent), `spawn(archetype, name=, controller=, team=, at=(x, y[, yaw°]),
     mass=, max_speed=)` (0 and `why()` when refused), `despawn(id)`, and `set_intent(id, steer=,
-    accel=, mode=, weight=, force=(fx, fy), force_steers=)`, `intent(id)`, `clear_intent(id)`.
+    accel=, mode=, weight=, force=(fx, fy), force_steers=)`, `intent(id)`, `clear_intent(id)`,
+    `set_goal(id, x, y)`, `set_wander(on)` and `grid()` (the navigator's grid, as
+    `pycvc.WorldGym.grid` gives it). Each `list()` entry also carries the entity's velocity,
+    steering, goal, `reached`, `collided` and its body (length, width, wheelbase, its limits).
     `list`, `spawn` and `despawn` run on the thread that runs frames; the intents from any
-    thread.
+    thread. `pycvc_gl.cars.HostCars` drives a host's world's vehicles with the cars template's
+    interface.
   - **One runtime per world.** Each `SceneWorld` has its own physics world, vehicles, policies
     and keys, with nothing process-wide, so a host that runs several worlds runs one each.
 - **Spawn points.** Where a vehicle spawned without a start of its own begins
@@ -1972,6 +2033,16 @@ scene:
         has run. The gym keeps the drive's telemetry for it (`drive_telemetry=True`, the
         default; `WorldVehicles::set_drive_telemetry`), which changes nothing the drive does.
         With these a twin replays the gym's own controller on a tick, a force included.
+      - On every plant but the bicycle, `plan`: the limits the drive plans each command with on
+        the plant (`entity_plan`; `sim_world::plant_plan`, the plant arm's `plant_drive`), in
+        SI. They are the vehicle's envelope (`a_max`, `vmax`, the cornering `a_lat`) and its
+        `wheelbase`; the steering lock `max_steer` (the fleet's tightest), the actuator's slew
+        `steer_rate` (rad/s) and its angle now `steer_now`; the `latency` (s) and the braking it
+        achieves `a_brake`; and its body as footprint discs (`body_rr`, `body_offsets` from the
+        rear axle, with `footprint`). `parked` says the next tick parks it: it brakes to a stop
+        at `a_brake`. `modulated` says the plant's measured state scales the drive
+        (`plant_modulation`), which these do not carry. With these a twin gives the command the
+        plant took from the control law's, not only the control law's.
     - `set_intent(id, steer=, accel=, mode=, weight=, force=(fx, fy), force_steers=)`,
       `intent(id)` and `clear_intent(id)` are an agent's intent, as `pycvc.WorldEntities` sets
       one: from the next step until changed, so a force (m/s², world frame) acts on the drive

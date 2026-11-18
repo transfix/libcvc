@@ -137,6 +137,8 @@ void validate(const material &m) {
   if (!(m.rolling_resistance >= 0.0f) || !std::isfinite(m.rolling_resistance))
     throw cvc::physics_error("material '" + m.name +
                              "': rolling_resistance must be finite and >= 0");
+  if (!(m.wet_friction >= 0.0f) || !std::isfinite(m.wet_friction))
+    throw cvc::physics_error("material '" + m.name + "': wet_friction must be finite and >= 0");
 }
 
 // 64-bit FNV-1a, the digest the Jolt smoke test prints too.

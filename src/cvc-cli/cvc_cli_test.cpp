@@ -31,6 +31,7 @@
 #include <cvc/core/input_trace.h>
 #include <cvc/core/types.h>
 #include <cvc/core/world_clock.h>
+#include <cvc/geometry/contours.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h>
@@ -2767,6 +2768,105 @@ TEST_F(CvcCliTest, SkeletonOfAPlaneFails) {
   auto bad = cvc("skeleton \"" + in + "\" -o \"" + path("p.rawc") + "\" --threshold 5");
   EXPECT_NE(0, bad.exit_code);
   EXPECT_NE(std::string::npos, bad.output.find("threshold")) << bad.output;
+}
+
+// ===========================================================================
+// cvc tile (the VolumeRover ContourTiler port; ports plan T12)
+// ===========================================================================
+
+// A Reconstruct series of `slices` sections: component "a", a wobbly tube, and, when `two`, a
+// second tube "b" beside it.
+static void write_tube_series(const std::string &ser, int slices, bool two) {
+  const double pi = 3.14159265358979323846;
+  auto q8 = [](double v) { return std::round(v * 256) / 256; };
+  auto ring = [&](double cx, double cy, double a, double phase) {
+    std::vector<double> xy;
+    for (int i = 0; i < 24; ++i) {
+      const double t = 2 * pi * i / 24, r = 1 + 0.05 * std::cos(3 * t + phase);
+      xy.push_back(q8(cx + a * r * std::cos(t)));
+      xy.push_back(q8(cy + 0.8 * a * r * std::sin(t)));
+    }
+    return xy;
+  };
+  cvc::app app;
+  cvc::contour_stack s;
+  for (int k = 1; k <= slices; ++k) {
+    s.add(k, "a", ring(8 + 0.125 * k, 8, 3 + 0.125 * (k % 2), 0.4 * k));
+    if (two)
+      s.add(k, "b", ring(24, 8, 2.5, 0.3 * k));
+  }
+  cvc::write_contours(app, s, ser);
+}
+
+// Skips when libcvc was built without cvc::planar: the command says so.
+#define SKIP_WITHOUT_TILER(r)                                                                      \
+  if ((r).output.find("without cvc::planar") != std::string::npos)                                 \
+  GTEST_SKIP() << "libcvc built without cvc::planar"
+
+TEST_F(CvcCliTest, TileHelp) {
+  auto r = cvc("tile --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--curation-delta"));
+  EXPECT_NE(std::string::npos, r.output.find("--remove-intersections"));
+  EXPECT_NE(std::string::npos, r.output.find("--outdir"));
+  EXPECT_NE(std::string::npos, r.output.find("-C -e -r -v"));
+}
+
+TEST_F(CvcCliTest, TileOfATube) {
+  const std::string ser = path("tube.ser"), out = path("tiles");
+  write_tube_series(ser, 5, false);
+  auto r = cvc("tile \"" + ser + "\" --outdir \"" + out + "\"");
+  SKIP_WITHOUT_TILER(r);
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("Wrote 1 surfaces")) << r.output;
+  EXPECT_TRUE(fs::exists(out + "/a_tiles.rawc"));
+  EXPECT_TRUE(fs::exists(out + "/_tiles.rawc"));
+  // The surface reads back: `cvc info` on it.
+  auto info = cvc("info \"" + out + "/a_tiles.rawc\"");
+  EXPECT_EQ(0, info.exit_code) << info.output;
+}
+
+TEST_F(CvcCliTest, TileTakesTheLegacyFlags) {
+  const std::string ser = path("two.ser"), out = path("legacy");
+  write_tube_series(ser, 6, true);
+  // The VolumeRover2 dialog's defaults, a component, a slice range, a base name and debug flags.
+  auto r = cvc("tile \"" + ser + "\" -C 0.01 -e 1e-15 -o raw -c a -s 2 5 -b run_ -d \"" + out +
+               "\" -i raw -B -m");
+  SKIP_WITHOUT_TILER(r);
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("-i (debug output) is accepted and ignored"))
+      << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("-m is accepted and ignored")) << r.output;
+  EXPECT_TRUE(fs::exists(out + "/run_a_tiles.rawc"));
+  EXPECT_FALSE(fs::exists(out + "/run_b_tiles.rawc")) << "-c a tiles only a";
+  // --printcomponents lists the components and tiles nothing.
+  auto list = cvc("tile \"" + ser + "\" --printcomponents");
+  ASSERT_EQ(0, list.exit_code) << list.output;
+  EXPECT_NE(std::string::npos, list.output.find("a\n")) << list.output;
+  EXPECT_NE(std::string::npos, list.output.find("b\n")) << list.output;
+  // -x skips one; both colours become the one --color gives.
+  auto skip = cvc("tile \"" + ser + "\" -x a --color 255 0 0 -d \"" + path("skip") + "\"");
+  ASSERT_EQ(0, skip.exit_code) << skip.output;
+  EXPECT_TRUE(fs::exists(path("skip") + "/b_tiles.rawc"));
+  EXPECT_FALSE(fs::exists(path("skip") + "/a_tiles.rawc"));
+}
+
+TEST_F(CvcCliTest, TileRefusesBadInput) {
+  const std::string ser = path("tube.ser");
+  write_tube_series(ser, 4, false);
+  auto gnuplot = cvc("tile \"" + ser + "\" -o gnuplot");
+  EXPECT_NE(0, gnuplot.exit_code);
+  EXPECT_NE(std::string::npos, gnuplot.output.find("not supported")) << gnuplot.output;
+  auto bad = cvc("tile \"" + ser + "\" --curation-delta -1");
+  EXPECT_NE(0, bad.exit_code);
+  EXPECT_NE(std::string::npos, bad.output.find("curation")) << bad.output;
+  // A curation distance the slices are too close for (the tiler's own check).
+  auto close = cvc("tile \"" + ser + "\" -C 2 -d \"" + path("close") + "\"");
+  SKIP_WITHOUT_TILER(close);
+  EXPECT_NE(0, close.exit_code);
+  EXPECT_NE(std::string::npos, close.output.find("curation")) << close.output;
+  auto missing = cvc("tile \"" + path("nothing.ser") + "\"");
+  EXPECT_NE(0, missing.exit_code);
 }
 
 // ===========================================================================

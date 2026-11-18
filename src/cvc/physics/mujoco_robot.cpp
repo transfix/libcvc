@@ -13,11 +13,13 @@
 #include <cmath>
 #include <cvc/core/exception.h>
 #include <cvc/geometry/height_field.h>
+#include <cvc/physics/flow_velocity.h>
 #include <cvc/physics/mujoco_robot.h>
 #include <iomanip>
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 
 namespace cvc {
 namespace physics {
@@ -237,6 +239,62 @@ void mujoco_robot::apply_force_at(int b, const vec3 &force, const vec3 &point) {
                 r.x * force.y - r.y * force.x});
 }
 void mujoco_robot::clear_wrenches() { _e->clear_wrenches(); }
+
+void mujoco_robot::set_wind(std::shared_ptr<const flow_velocity> air, double time_offset,
+                            double drag_coefficient, double density) {
+  if (!std::isfinite(time_offset) || !std::isfinite(drag_coefficient) || drag_coefficient < 0.0 ||
+      !std::isfinite(density) || !(density > 0.0))
+    throw cvc::physics_error("mujoco_robot: the wind's time offset and C_d must be finite, C_d >= "
+                             "0, and its density > 0");
+  if (!air) {
+    _e->set_air({});
+    return;
+  }
+  const double half_rho_cd = 0.5 * density * drag_coefficient;
+  _e->set_air(
+      [air, time_offset, half_rho_cd](double t, const std::vector<detail::mujoco_air_geom> &geoms,
+                                      const std::vector<vec3> &coms, std::vector<double> &wrench) {
+        const double at = t + time_offset;
+        // The flow's reference velocity once per body, at its centre of mass (the field step's way:
+        // O(bodies)), and its profile at each geom's height.
+        std::vector<vec3> ref(coms.size());
+        std::vector<char> have(coms.size(), 0);
+        const double floor = air->base();
+        for (const detail::mujoco_air_geom &g : geoms) {
+          const std::size_t b = static_cast<std::size_t>(g.body);
+          if (b >= coms.size() || !(g.centre.z > floor))
+            continue;
+          const double prof = air->profile(g.centre.z);
+          if (!(prof > 0.0))
+            continue;
+          if (!have[b]) {
+            ref[b] = air->reference(coms[b], at);
+            have[b] = 1;
+          }
+          const vec3 u = ref[b] * prof - g.velocity;
+          const double s = std::sqrt(dot(u, u));
+          if (!(s > 0.0))
+            continue;
+          const vec3 n = u * (1.0 / s);
+          // The box's area across u: each pair of faces, its area times the cosine to u.
+          const double area = 4.0 * (g.half.y * g.half.z * std::fabs(dot(n, g.axis[0])) +
+                                     g.half.x * g.half.z * std::fabs(dot(n, g.axis[1])) +
+                                     g.half.x * g.half.y * std::fabs(dot(n, g.axis[2])));
+          const vec3 f = u * (half_rho_cd * area * s);
+          const vec3 r = g.centre - coms[b];
+          double *w = wrench.data() + 6 * b;
+          w[0] += f.x;
+          w[1] += f.y;
+          w[2] += f.z;
+          w[3] += r.y * f.z - r.z * f.y;
+          w[4] += r.z * f.x - r.x * f.z;
+          w[5] += r.x * f.y - r.y * f.x;
+        }
+      });
+}
+
+vec3 mujoco_robot::wind_force() const { return _e->air_force(); }
+vec3 mujoco_robot::wind_torque() const { return _e->air_torque(); }
 
 void mujoco_robot::step() {
   guarded([&] { _e->step(); });

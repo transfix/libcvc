@@ -1438,6 +1438,7 @@ struct pycvc_py_conversion {
 %include "pycvc_contours.i"
 %include "pycvc_point_classes.i"
 %include "pycvc_segmentation.i"
+%include "pycvc_tiler.i"
 %include "pycvc_volume_slice.i"
 
 // ── UTF-8 display-width utilities (cvc::text, roadmap §17) ───────────────

@@ -2523,6 +2523,21 @@ int main() {
     chk(str("weather.events").find("steer") != std::string::npos &&
             str("weather.events").find("az=45") != std::string::npos,
         "a settled change of the sky's wind became a steer event");
+    // With a scene wind (O14) the storms steer by it, and the sky's own wind_az is left alone:
+    // wind.dir 30 settles into a steer toward az 120 (dir + 90). Cleared again, the sky's 45 is
+    // back.
+    st("wind.speed").value(9.0);
+    st("wind.dir").value(30.0);
+    st("sky.wind_az").value(60.0);
+    for (int k = 0; k < 12; ++k)
+      tick();
+    chk(str("weather.events").find("az=120") != std::string::npos &&
+            str("weather.events").find("az=60") == std::string::npos,
+        "with a scene wind the storms steer by it (a steer toward wind.dir + 90), not the sky's");
+    st("wind.speed").value(std::string());
+    st("sky.wind_az").value(45.0);
+    for (int k = 0; k < 12; ++k)
+      tick();
     // A calm: the storm clears over calm_s, and the deck goes back to its cumulus.
     st("weather.request").value(std::string("calm"));
     tick();

@@ -71,7 +71,7 @@ world_bodies add_world_geometry(world &w, const cvc::world::world_geometry &g, d
       }
     if (!found)
       id = w.add_material({c.name, c.mu, c.restitution, c.rolling_resistance,
-                           s < nav_materials.size() ? nav_materials[s] : -1});
+                           s < nav_materials.size() ? nav_materials[s] : -1, c.mu_wet});
     out.materials[s] = id;
   }
 

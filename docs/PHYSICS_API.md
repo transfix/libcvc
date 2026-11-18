@@ -19,7 +19,7 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/physics/field.h` | `field` (a `cvc::volume` as water, snow or wind), `field_load`, `water_sample` (`world::water_at`) |
 | `cvc/physics/flow_velocity.h` | `flow_velocity`, a flow field's velocity in space and time (`field::wind`), and `wind_flow`, the scene's wind: `cvc::algo`'s gusts and height profile (below, and OCEAN-AND-WEATHER-ROADMAP.md E5, O14) |
 | `cvc/physics/fluid_surface.h` | `fluid_surface`, a fluid field's free surface (its level, waves and water velocity, read at `world::field_time()`); `still_surface`, `wave_train_surface` (linear Airy trains). A field reads a cell's height and velocity with `height_with` / `velocity_with` and a `surface_memo` it owns, so a surface can share work between the two reads |
-| `cvc/physics/hull.h` | `hull_mesh`, `box_hull()`: a boat's hull, a closed triangle list apart from the collision shape, that a fluid pushes on triangle by triangle (hydrostatic pressure split at the waterline, ITTC-57 friction, pressure drag, slamming) in place of the body's sample cells |
+| `cvc/physics/hull.h` | `hull_mesh`, `box_hull()`, `loft_hull()` (a closed hull through stations, each a half-section from keel to sheer: a model's hull baked by `tools/boat_hulls/bake_loft.py`), `hull_waterline_box()` (the largest box inside a hull at a waterline, for a renderer's water cut-out): a boat's hull, a closed triangle list apart from the collision shape, that a fluid pushes on triangle by triangle (hydrostatic pressure split at the waterline, ITTC-57 friction, pressure drag, slamming) in place of the body's sample cells |
 | `cvc/physics/immersion.h` | `immersion_body` (a body's outline as the water sees it: its box, sphere or convex hull, or its `hull_mesh`), `immersion_water` (a fluid field's surface, time and box), `immersion_grid`, `add_immersion()`: a body's columns of immersed depth zeta over a grid window's cells, from its shape, its pose and the water, as the field step immerses it. The wake windows' sources (OCEAN-AND-WEATHER-ROADMAP.md C2, O9), computable without a world (a renderer, a client from a replicated pose); the same bits on every platform |
 | `cvc/physics/ocean_surface.h` | `ocean_surface`: a `cvc::ocean::sea_surface` (`cvc/ocean/sea_surface.h`) as a free surface. That is the sea a renderer draws from the same cascades and shore layer, with breakers and the swash. For many floating bodies, `sea_params::source_cell_m` (0.5 m in lsystem_coast) lets their field cells share the sea's inversions, and a cell's height and velocity share one source through the field's memo |
 | `cvc/physics/boat.h` | `boat_desc` (a hull body, `propeller_desc`, `rudder_desc`, the actuators' time constant), `boat_controls`, `boat_state`: a boat whose propeller and rudder (or outboard) the world applies every step |
@@ -29,7 +29,7 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/gl/physics_scene_binding.h` (cvcGL) | `physics_scene_binding`: a world's bodies drawn in a scene graph |
 | `cvc/physics/world_geometry.h` | `add_world_geometry`: a `cvc::world::world_geometry`'s static bodies and materials |
 | `cvc/physics/nav_plant.h` | `nav_plant`: a world's vehicles as `cvc::nav`'s plant (`cvc/nav/vehicle_plant.h`) |
-| `cvc/physics/dyn_boat_plant.h` | `dyn_boat_plant`, `dyn_boat_desc` (with `launch()`, `jonboat()`): a world's boats as `cvc::nav`'s plant, through a driver, with an energy ledger |
+| `cvc/physics/dyn_boat_plant.h` | `dyn_boat_plant`, `dyn_boat_desc` (with `launch()`, `jonboat()`, `tactical()`): a world's boats as `cvc::nav`'s plant, through a driver, with an energy ledger |
 | `cvc/physics/jolt_rollout.h` | `jolt_rollout`: the Jolt vehicle as `cvc::nav`'s training rollout (`rollout_kind::jolt`, `cvc/nav/rollout_plant.h`; NAV_TRAINING.md, "Training on Jolt") |
 | `cvc/physics/mujoco_robot.h` | `mujoco_robot`: one articulated robot (the Unitree Go2 first) simulated by MuJoCo on a `cvc::height_field`, with servo and torque commands, pushes, contacts and MuJoCo's energies; `run_mujoco_trial`. Optional (`CVC_WITH_MUJOCO`); [MUJOCO.md](MUJOCO.md) |
 
@@ -112,6 +112,10 @@ and at 32 for the RoboRacer (see [the energy ledger](#the-energy-ledger-p3)).
   from the next step. Use it for rain on a road, say.
 - **`nav_material`** records the `cvc::nav` material a surface carries, and **`rolling_resistance`**
   feeds the vehicle and the energy ledger.
+- **`wet_friction`** is the friction soaked, what a wading tire finds under water (Vehicles,
+  "Wading"); 0, the default, means not known, and the tire keeps `friction`. `add_world_geometry`
+  sets it to the surface class's `mu_wet`, the value `apply_wetness` runs `friction` toward in
+  the rain, so the rain and the water agree.
 
 ### Shapes
 
@@ -454,6 +458,9 @@ model rolls over the world's bodies. The chassis frame is x forward, y left, z u
     front wheel's, sinks no further and rolls almost free.
   - `world::field_ruts(id)` copies the map; `wheel_state::rut` is the rut a wheel found.
   - The maps are state: `save()` carries them and `state_hash()` covers them.
+- **Water.** With `vehicle_desc::wading` on, the vehicle wades: its body floods, the water drags
+  and floats its tires and underbody, soaks and aquaplanes its tires, and floods its engine past
+  its fording depth (below, "Wading"). Off, its chassis is a sealed box that floats.
 - **Save and restore** carry the actuators and the driver's memory, so a replay reproduces a
   drive (`physics_vehicle_test`).
 - **Tuning a running vehicle.** `get_vehicle(id)` returns its description and `set_vehicle(id, d)`
@@ -465,13 +472,92 @@ model rolls over the world's bodies. The chassis frame is x forward, y left, z u
     `shift_down_rpm`, `shift_up_rpm_light`, `shift_down_rpm_light`, `engine_friction_curve`,
     `clutch_strength`, `driveline_efficiency`;
   - each axle: `max_brake_torque`, `max_hand_brake_torque`, `suspension_frequency`,
-    `suspension_damping`, and `anti_roll_stiffness` on an axle that was added with a bar.
+    `suspension_damping`, and `anti_roll_stiffness` on an axle that was added with a bar;
+  - wading, all but `wading.enabled` and `wading.displacement` (fitting the deep-water kit is
+    `fording_depth` 1.52; it does not unflood an engine).
 
   A change to anything else (the chassis, the mass, the wheels' geometry, the gearing, the
-  torque and tire curves, the energy source) throws `cvc::physics_error` naming it and changes
-  nothing. Like materials, a tuning is not part of `save()`.
+  torque and tire curves, the energy source, whether it wades and its body's displacement)
+  throws `cvc::physics_error` naming it and changes nothing. Like materials, a tuning is not
+  part of `save()`.
 
   Through the tree an invalid tuning value is ignored on its own; the other knobs still apply.
+
+### Wading: `vehicle_desc::wading`
+
+```cpp
+cvc::physics::vehicle_desc d = cvc::physics::vehicle_desc::humvee(); // wades: 0.76 m
+d.wading.fording_depth = 1.52;      // with the deep-water fording kit
+const auto car = w.add_vehicle(d, {0, 0, 1.2});
+w.step();
+const auto s = w.vehicle_state(car);
+s.wheels[0].water_depth;            // m of water over its contact
+s.water_force;                      // N, the water on the tires and underbody
+s.engine_flooded;                   // past the fording depth, for good
+```
+
+Off (`wading.enabled` false, the default for a description you build), a vehicle's chassis
+meets a fluid field as a sealed box, buoyant over all of its volume: a Humvee floats off its
+wheels like a raft in 0.8 m of water, and nothing below the box feels the water. The presets
+wade. On, from the water at each wheel and under the body (`world::water_at`, at the field time,
+so a free surface's waves and a current count):
+
+- **The body floods.** Only `displacement` of the chassis box's volume displaces water (the
+  field step scales its cells' buoyancy): what is left of a soft-doored body is its solid and
+  sealed parts. A heavy vehicle stays on its wheels as it wades and sits on the bottom in water
+  over its roof, rather than floating.
+- **The tires and underbody are dragged**, 1/2 ρ C_d A |u| u, u the water's velocity (a current,
+  the waves' orbital motion) less the part's:
+  - a tire along its travel: its width times its immersed height, with `wheel_drag` (AMC 25.1591's
+    displacement drag, C_d 0.75 for an isolated tire below aquaplaning speed); across it, its
+    immersed side (a segment of its disc). That is the tire's extra rolling resistance in water,
+    and it is what pushes a vehicle sideways in a current;
+  - the underbody (axles, frame, skid plates), a slab `underbody_depth` deep under the box, with
+    `underbody_drag` on the box's width or length times its immersed height.
+
+  The drag is integrated implicitly in its own rate, as the fields' is. A vehicle standing in
+  flowing water does not fall asleep, since the water keeps pushing it.
+- **The tires float a little.** Each displaces `wheel_displacement` of its immersed cylinder (the
+  tire; the rim's dish floods), which takes that much load off it.
+- **The grip.** A tire in water is on soaked ground: its μ runs from the material's `friction` to
+  its `wet_friction` as the water over its contact deepens to 3 mm (AMC 25.1591's standing water).
+  On ground the rain has already soaked (`apply_wetness`), `friction` is `wet_friction` already,
+  so it is no slicker under water. In standing water a tire with a `tire_pressure` aquaplanes:
+  its μ falls as 1 − (v / v_p)² to 0.05 at v_p = 0.85 × 9 √p knots (p in psi; AMC 25.1591,
+  7.1.1), v its speed over the ground; the shape between the ends is ours. A tire in a medium
+  (mud, snow) keeps the medium's traction. `wheel_state::friction` reads the μ it used.
+- **The engine floods.** Once the water over the ground at the front axle (the mean of its
+  wheels) is deeper than `fording_depth`, the engine takes water and stops for good: no throttle,
+  no idle (Jolt's idle speed drops to 0 and its friction runs it down), no fuel, and the
+  automatic, without line pressure, leaves the wheels free as in neutral. The brakes still work.
+  It is state: `save()` carries it in a spare bit of a byte it already wrote, so a vehicle whose
+  engine has not flooded saves the bytes it always has.
+- **The ledger.** The water's work on the tires and underbody is the ledger's `fields`, with the
+  box's buoyancy and drag.
+- **Readbacks.** `wheel_state::water_depth` and `water_drag`, `vehicle_state::water_force` (the
+  tires' and underbody's, not the box's, which is `world::snapshot`'s field load) and
+  `engine_flooded`; the snapshot's JSON has them, and the description's `wading`.
+
+A dry vehicle that wades steps exactly as one that does not: nothing touches its loads, its
+grip or its saved bytes until a part of it is in water.
+
+What `physics_vehicle_test` measures (Windows MSVC):
+
+| Check | Model | The twin |
+|---|---|---|
+| A Humvee standing in 0.5 m: what its tires float | 3738 N | 3733 N (26222 N dry, 22489 N wading) |
+| Coasting at 3.2 m/s in 0.5 m: a tire's drag | 760 N | 757 N |
+| Coasting at 3.2 m/s in 0.5 m: its deceleration (2829 N of water on it) | 1.143 m/s² | 1.137 m/s² |
+| Pulling away for 3 s at full throttle in 0.5 m | 5.44 m/s: its traction on land at each speed, less the water's drag | 5.67 m/s (8.94 m/s on land) |
+| Standing in 1.2 m (past 0.76 m) | planted, flooded | tires carry 12518 of 26243 N; chassis 1.103 m up (1.030 m dry); engine at 0 rpm |
+| The same with wading off | floats | chassis 1.337 m up, tires carry 0 N |
+| Driving at 3 m/s from 0.5 m into 0.9 m | floods as the front axle crosses | flooded at 40.06 m, stopped at 45.06 m; with the kit it drives on |
+| A 1.5 m/s current along it, at rest in 0.6 m | 833 N | 833 N; in neutral it drifts downstream at 0.44 m/s after 5 s |
+| A 1.5 m/s current across it | 2001 N | 1994 N; its tires hold it (0.002 m/s) |
+| A 0.15 m, 5 s swell over 0.6 m (orbital speed up to 0.59 m/s) | 131 N on a held vehicle | the push swings −41 to +79 N; it rocks 2.7 cm |
+| μ on asphalt (0.9 dry, 0.55 soaked) in 2 cm at 2 m/s, 20 psi tires | 0.543 | 0.543 |
+| in 1 mm (a third soaked) | 0.780 | 0.780 |
+| in 2 cm at 14 m/s (aquaplaning, v_p 17.6 m/s) | 0.202 | 0.202 |
 
 ### The presets
 
@@ -484,6 +570,7 @@ RoboRacer. In `vehicle.cpp` every value names its source:
 - [lab], the lab's configuration (ut-av.pages.dev, ut_automata's `vesc.lua`);
 - [trx], Traxxas's listing for the chassis;
 - [doc31], the scope's spec table;
+- [AMC], EASA's AMC 25.1591, the standard method for a tire in standing water;
 - [derived], a value that follows from those;
 - [est], an estimate to replace with a measurement.
 
@@ -509,6 +596,14 @@ The two presets:
     - 2.5 kW of accessories;
     - C_d A of 2.45 m^2;
     - C_rr of 0.015.
+  - **Wading.** It fords 0.76 m (30 in) of hard-bottomed water, 1.52 m (60 in) with the
+    deep-water fording kit, which moves the intake, exhaust and tank vents up [AMG]. The tires
+    take [AMC]'s C_d of 0.75; they displace 0.8 of their cylinder (the 37 in tire round the
+    16.5 in rim) [derived]. The underbody reaches 0.16 m under the box: the box's bottom rides
+    0.57 m up, the ground clearance is 0.41 m [AMG]. Estimates: the body displaces 0.12 of the
+    box (1.1 of its 9.5 m^3: the solid of the body, frame and drivetrain, the sealed tank and
+    frame rails), the underbody's C_d of 0.5, and Goodyear's 38 psi cross-country pressure for
+    the tire (aquaplaning from 24 m/s, about the top speed).
 - **The RoboRacer.**
   - The car: 3.5 kg, a 0.324 m wheelbase, 108 mm tires and shaft-driven 4WD.
   - The motor: an ARRMA 3800 Kv motor at the VESC's current limit (an estimated 60 A, so
@@ -516,6 +611,9 @@ The two presets:
     ([derived] from `speed_to_erpm_gain`).
   - The battery: a 3S LiPo. Its 55.5 Wh is an estimate: read the pack.
   - Braking is the VESC's, an estimated 0.57 N m a wheel, 70% of it regenerated up to 150 W.
+  - Wading, all estimates: water 3 cm deep reaches the VESC and motor; the pack and electronics
+    keep 0.2 of the box dry; the foam-insert tires displace 0.3 of their cylinder and, not
+    being pneumatic, never aquaplane; the chassis plate hangs 1 cm under the box.
 
 Against the field (`physics_energy_test`, `physics_vehicle_test`, Windows MSVC, the default 2
 collision steps):
@@ -564,7 +662,7 @@ supplied + idle + fields + drivetrain_split
 | `drivetrain` | Engine and wheel damping, clutch slip, engine braking, and the drivetrain step's own damping | Exactly, from Jolt's implicit engine / clutch / wheel step |
 | `suspension` | The dampers | c v^2 on each wheel's compression rate, c as Jolt sets it |
 | `chassis_damping` | The chassis body's own damping | As Jolt applies it |
-| `fields` | Work the fields did on the chassis (buoyancy, a current) | At the mean velocity |
+| `fields` | Work the fields did on the chassis (buoyancy, a current), and a wading vehicle's water on its tires and underbody (< 0 as it drags) | At the mean velocity |
 | `stored` | The change in kinetic (chassis, wheels, engine), potential and spring energy | From the samples; `kinetic`, `potential`, `spring` are the values now |
 | `drivetrain_split` | Energy Jolt's drivetrain step makes. It solves engine, clutch and wheels with its estimate of the brake and ground torques, then undoes the estimate before the friction solve, which leaves each driven wheel dL tau / I more (dL the clutch's angular impulse, tau the estimate's) | Exactly |
 | `residual` | Everything else the simulation does not conserve | The balance |
@@ -922,7 +1020,15 @@ cars on land.
   plans with: `max_speed`, its top speed through calm water, and `turn_radius`, its circle at full
   rudder and full throttle. The presets are measured (`PresetsDoWhatTheySay`): `launch()` is
   `physics_boat_test`'s 4 m box of 900 kg with a shaft propeller and a rudder; `jonboat()` a 3.6 m
-  flat box of 350 kg with a 1.5 kN outboard that steers.
+  flat box of 350 kg with a 1.5 kN outboard that steers; `tactical()` the `vehicle-tactical-boat`
+  package's patrol boat of 2800 kg on its own V hull, baked from the model into 16 stations of 8
+  points (`loft_hull`; 242 vertices, 480 triangles; 6.85 m long, 2.33 m in beam, 7.8 m overall
+  with its outboards, `length_overall`), floating 0.49 m over its keel, its collision shape the
+  hull's convex hull; its two outboards one thrust (8 kN ahead, 3.5 kN astern, none past 18 m/s)
+  that swings 0.5 rad, steering by thrust alone, and its rudder a fixed 0.4 m² foil on the keel
+  just aft of its centre of mass: the grip sideways of its keel, chines and strakes, which the
+  hull's triangles barely give a V bottom (their pressure drag goes as the flow's normal component
+  squared), so without it the boat skids and at full lock spins on the spot.
 - **Attach.** Each agent gets a boat (`world::add_boat`) with its hull's origin over its start,
   heading its way, upright and at rest, floating at its draft on the water there:
   `float_height(desc, mass, density)` is how far the origin rides over the waterline when the
@@ -972,7 +1078,7 @@ Gates (`physics_dyn_boat_plant_test`, Windows MSVC Release):
 
 | Gate | Measured |
 |---|---|
-| The presets do what they say | The launch tops out at 3.1915 m/s and turns at full rudder and full throttle on a 15.39 m radius (`max_speed` 3.19, `turn_radius` 15.4); the jonboat 4.0054 m/s and 4.12 m (4.0, 4.1) |
+| The presets do what they say | The launch tops out at 3.1915 m/s and turns at full rudder and full throttle on a 15.39 m radius (`max_speed` 3.19, `turn_radius` 15.4); the jonboat 4.0054 m/s and 4.12 m (4.0, 4.1); the tactical boat 10.5169 m/s, and turns at full lock at 9.230 m/s and 0.2840 rad/s, a 32.50 m radius (10.5, 32.5) |
 | A speed and a yaw rate held | Nav's commands for 2.5 m/s, then 2.5 m/s at 0.08 rad/s: 2.5000 m/s and 0.08000 rad/s on calm water for both; on a 0.3 m, 5 s swell, 2.478–2.513 m/s and 0.0795–0.0798 rad/s |
 | The books balance | A weave and a stop astern: the residual 6·10⁻⁸ to 2·10⁻⁷ of the flow on calm water, up to 3.5·10⁻⁵ on the swell. Steady at 2.5 m/s, the thrust's 11 305.28 J go to the water (11 248.80 J) and the rudder (56.25 J) |
 | Nav drives the boats | A launch and a jonboat reach goals 120 m east from rest in 37.9 s, then turn round to goals about 100 m behind them and reach those in 61.0 s |

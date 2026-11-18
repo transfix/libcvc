@@ -277,6 +277,16 @@ struct veh_params {
   // THE PLANT ARM (see plant_drive above). Null (default) = the kinematic bicycle integrates.
   const plant_drive *plant = nullptr;
 
+  // STOP POINTS. Null (default) = none, byte-identical. [n*2] normalized, borrowed: the point
+  // each agent comes to rest at (its goal; a non-finite entry = none for that agent). The speed
+  // toward it is held to the speed from which the vehicle stops there, as v_stop holds it to the
+  // walls: braking at a_max (with a slope, as v_stop plans it), and on the plant arm covering the
+  // latency first and braking at a_brake where that is gentler. Only the motion that closes on
+  // it counts, so a vehicle beside or past it is not held. Without it the drive meets its goal
+  // at the speed the goal's pull leaves, which grows with the trip (a Humvee 150 m out arrives
+  // at ~19 m/s). The persistent sim_world_cuda path does not apply it.
+  const float *stop_at = nullptr;
+
   // TERRAIN (P5, cvc/nav/terrain.h). Null (default) = flat, byte-identical.
   // `slope`: two planes, dz/dx then dz/dy (m/m), sampled as grip is. With it the governors
   // take gravity along the path (H2): v_stop plans with less braking downhill (and never counts

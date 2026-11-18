@@ -35,15 +35,19 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <cvc/ariadne/host_signals.h>
 #include <cvc/core/app.h>
 #include <cvc/core/input_trace.h>
 #include <cvc/core/param_cli.h>
 #include <cvc/core/types.h>
+#include <cvc/geometry/contours.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/geometry/skeleton.h>
 #include <cvc/geometry/skeleton_params.h>
+#include <cvc/geometry/tiler.h>
+#include <cvc/geometry/tiler_params.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/nav_panels.h>
 #include <cvc/nav/nav_scrub.h>
@@ -805,6 +809,225 @@ static int cmd_layer_mesh(cvc::app &app, int argc, char **argv) {
   return 0;
 }
 #endif // CVC_ENABLE_MESHER
+
+// ---------------------------------------------------------------------------
+// cvc tile: cvc::tile_contours (cvc/geometry/tiler.h), the VolumeRover ContourTiler port
+// ---------------------------------------------------------------------------
+
+// A component name as a regular expression matching exactly it, quoted for a list flag's value.
+static std::string tile_name_item(const std::string &name) {
+  std::string re;
+  for (char ch : name) {
+    if (std::strchr("\\^$.|?*+()[]{}", ch))
+      re += '\\';
+    re += ch;
+  }
+  std::string quoted = "\"";
+  for (char ch : re) {
+    if (ch == '\\' || ch == '"')
+      quoted += '\\';
+    quoted += ch;
+  }
+  return quoted + "\"";
+}
+
+// The legacy contour_tiler's flags (its cl_options.cpp), rewritten to this command's:
+//   -C/--curationdelta d, -e/--collinearepsilon e, -r/--removeintersections and
+//   -v/--correspondoverlap a are the tiling parameters; -c/--componentname and
+//   -x/--componentskip (each repeatable, an exact name) become --include and --exclude;
+//   -s/--slices first last is --z-first and --z-last; -z/--zscale s is --z-spacing (the slice
+//   spacing); --color r g b (0-255) is --color; -d/--outdir, -b/--basename and -n/--indir keep
+//   their meaning; -o raw is --extension rawc; --printcomponents is --print-components.
+// Accepted and ignored, with a note: -f (the reader goes by the input's extension), -m (the
+// legacy read it only for its .dat inputs), -F (the legacy never read it), -S -1, and the debug
+// outputs -i -p -R (each with a value) and -B -T -O -P -V -U. Refused: -o gnuplot, -I and any
+// other -S, which the port does not do.
+static std::vector<std::string> tile_legacy_flags(int argc, char **argv,
+                                                  std::vector<std::string> &notes) {
+  std::vector<std::string> out, include, exclude;
+  auto value = [&](int &i, const std::string &flag) -> std::string {
+    if (i + 1 >= argc)
+      throw std::runtime_error("cvc tile: " + flag + " needs a value");
+    return argv[++i];
+  };
+  auto is = [](const std::string &a, const char *s, const char *l) { return a == s || a == l; };
+  // argv[0] is the command, as command_line_parser(argc, argv) skips it.
+  for (int i = 1; i < argc; ++i) {
+    const std::string a = argv[i];
+    if (is(a, "-C", "--curationdelta")) {
+      out.push_back("--curation-delta=" + value(i, a));
+    } else if (is(a, "-e", "--collinearepsilon")) {
+      out.push_back("--collinear-epsilon=" + value(i, a));
+    } else if (is(a, "-r", "--removeintersections")) {
+      out.push_back("--remove-intersections");
+    } else if (is(a, "-v", "--correspondoverlap")) {
+      out.push_back("--correspondence-overlap=" + value(i, a));
+    } else if (is(a, "-c", "--componentname")) {
+      include.push_back(tile_name_item(value(i, a)));
+    } else if (is(a, "-x", "--componentskip")) {
+      exclude.push_back(tile_name_item(value(i, a)));
+    } else if (is(a, "-s", "--slices")) {
+      out.push_back("--z-first=" + value(i, a));
+      out.push_back("--z-last=" + value(i, a));
+    } else if (is(a, "-z", "--zscale")) {
+      out.push_back("--z-spacing=" + value(i, a));
+    } else if (a == "--color") {
+      std::string c = "--color=[";
+      for (int k = 0; k < 3; ++k)
+        c += (k ? ", " : "") + boost::lexical_cast<std::string>(std::stod(value(i, a)) / 255.0);
+      out.push_back(c + "]");
+    } else if (is(a, "-d", "--outdir")) {
+      out.push_back("--outdir=" + value(i, a));
+    } else if (is(a, "-b", "--basename")) {
+      out.push_back("--basename=" + value(i, a));
+    } else if (is(a, "-n", "--indir")) {
+      out.push_back("--indir=" + value(i, a));
+    } else if (is(a, "-o", "--outformat")) {
+      const std::string f = value(i, a);
+      if (f != "raw")
+        throw std::runtime_error("cvc tile: " + a + " " + f +
+                                 " is not supported: the surfaces are geometry files "
+                                 "(--extension rawc, off, ply, ...)");
+      out.push_back("--extension=rawc");
+    } else if (a == "--printcomponents") {
+      out.push_back("--print-components");
+    } else if (is(a, "-f", "--format")) {
+      value(i, a);
+      notes.push_back(a + " is accepted and ignored: the input's extension picks its reader");
+    } else if (is(a, "-m", "--multi") || is(a, "-F", "--nointerpur")) {
+      notes.push_back(a + " is accepted and ignored, as the legacy tool ignored it for a series");
+    } else if (is(a, "-S", "--smoothingfactor")) {
+      const std::string s = value(i, a);
+      if (std::stod(s) != -1)
+        throw std::runtime_error("cvc tile: " + a + " " + s +
+                                 " is not supported: the port does not smooth contours");
+    } else if (is(a, "-I", "--2dintremove")) {
+      throw std::runtime_error("cvc tile: " + a +
+                               " (2D intersection removal only) is not supported");
+    } else if (is(a, "-i", "--intformat") || is(a, "-p", "--phaseformat") ||
+               is(a, "-R", "--defaultprecision")) {
+      value(i, a);
+      notes.push_back(a + " (debug output) is accepted and ignored");
+    } else if (is(a, "-B", "--outputbottom") || is(a, "-T", "--outputtop") ||
+               is(a, "-O", "--outputotv") || is(a, "-P", "--outputotvpairs") ||
+               is(a, "-V", "--outputvertexlabels") || is(a, "-U", "--outputuntiledregions")) {
+      notes.push_back(a + " (debug output) is accepted and ignored");
+    } else {
+      out.push_back(a);
+    }
+  }
+  auto list = [](const std::vector<std::string> &items) {
+    std::string s = "[";
+    for (std::size_t k = 0; k < items.size(); ++k)
+      s += (k ? ", " : "") + items[k];
+    return s + "]";
+  };
+  if (!include.empty())
+    out.push_back("--include=" + list(include));
+  if (!exclude.empty())
+    out.push_back("--exclude=" + list(exclude));
+  return out;
+}
+
+static int cmd_tile(cvc::app &app, int argc, char **argv) {
+  po::options_description desc(
+      "cvc tile - surfaces between the contours of a stack of slices (the VolumeRover "
+      "ContourTiler port)\n\n"
+      "Reads a contour stack (a Reconstruct .ser series, .contour, .cvcc, ...) and writes one "
+      "surface per component, <outdir>/<basename><component>_tiles.<ext>, and every component "
+      "together as <outdir>/<basename>_tiles.<ext>. .rawc keeps the colours. The legacy flags "
+      "-C -e -r -v -c -x -s -z --color -d -b -n -o raw --printcomponents are accepted (and the "
+      "debug flags, ignored).\n\n"
+      "Examples:\n"
+      "  cvc tile series.ser -d out -C 0.01 -e 1e-15 -o raw\n"
+      "  cvc tile series.ser --outdir out --include a001 --z-first 40 --z-last 80\n");
+  desc.add_options()("help,h", "show help")("input", po::value<std::string>()->required(),
+                                            "the contour stack")(
+      "outdir", po::value<std::string>()->default_value("."), "directory for the surfaces")(
+      "basename", po::value<std::string>()->default_value(""),
+      "prefix of the surfaces' file names")("indir", po::value<std::string>()->default_value(""),
+                                            "directory the input is in")(
+      "extension", po::value<std::string>()->default_value("rawc"),
+      "the surfaces' format, as a file extension (rawc, off, ply, ...)")(
+      "z-spacing", po::value<double>()->default_value(0.0),
+      "the slice spacing in world units, in place of the file's (0: the file's)")(
+      "print-components", po::bool_switch(),
+      "list the stack's components and stop")("seconds", po::value<double>()->default_value(0.0),
+                                              "report progress every this many seconds (0: never)");
+  cvc::add_param_options<cvc::tile_params>(desc);
+
+  std::vector<std::string> notes;
+  const std::vector<std::string> args = tile_legacy_flags(argc, argv, notes);
+  po::positional_options_description pos;
+  pos.add("input", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(args).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+  for (const std::string &n : notes)
+    std::cerr << "cvc tile: " << n << "\n";
+  const cvc::param_result<cvc::tile_params> pr = cvc::params_from_options<cvc::tile_params>(vm);
+  if (!pr.ok())
+    throw std::runtime_error("cvc tile: " + pr.message());
+  const cvc::tile_params &p = pr.value;
+
+  std::string input = vm["input"].as<std::string>();
+  const std::string indir = vm["indir"].as<std::string>();
+  if (!indir.empty())
+    input = (fs::path(indir) / input).string();
+  cvc::contour_read_params rp;
+  rp.first = p.z_first;
+  rp.last = p.z_last;
+  rp.include = p.include;
+  rp.exclude = p.exclude;
+  rp.z_spacing = vm["z-spacing"].as<double>();
+  const cvc::contour_stack stack = cvc::read_contours(app, input, rp);
+  if (vm["print-components"].as<bool>()) {
+    for (const std::string &name : stack.component_names())
+      std::cout << name << "\n";
+    return 0;
+  }
+  if (stack.empty())
+    throw std::runtime_error("cvc tile: " + input + " has no contours in the slices asked for");
+
+  // The stepper, so a long run can report its progress.
+  cvc::tile_stepper stepper(stack, p);
+  const double every = vm["seconds"].as<double>();
+  auto last = std::chrono::steady_clock::now();
+  while (!stepper.step(4096)) {
+    if (every > 0 &&
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - last).count() >= every) {
+      std::cerr << "cvc tile: " << stepper.status() << "\n";
+      last = std::chrono::steady_clock::now();
+    }
+  }
+  cvc::tile_result r = stepper.take();
+
+  const fs::path outdir(vm["outdir"].as<std::string>());
+  if (!outdir.empty())
+    fs::create_directories(outdir);
+  const std::string base = vm["basename"].as<std::string>();
+  const std::string ext = "." + vm["extension"].as<std::string>();
+  cvc::geometry all(app);
+  std::uint64_t triangles = 0;
+  for (auto &[name, g] : r.components) {
+    const std::string file = (outdir / (base + name + "_tiles" + ext)).string();
+    cvc::write_geometry(app, g, file);
+    std::cout << "  " << name << ": " << g.num_tris() << " triangles to " << file << "\n";
+    triangles += g.num_tris();
+    all.merge(g);
+  }
+  for (const std::string &w : r.warnings)
+    std::cerr << "cvc tile: warning: " << w << "\n";
+  const std::string file = (outdir / (base + "_tiles" + ext)).string();
+  cvc::write_geometry(app, all, file);
+  std::cout << "Wrote " << r.components.size() << " surfaces (" << triangles << " triangles) to "
+            << file << "\n";
+  return 0;
+}
 
 // ---------------------------------------------------------------------------
 // Volume arithmetic commands
@@ -3232,6 +3455,7 @@ static const command_entry commands[] = {
   {"tetrahedralize2","Geometry",        "extract dual-tet (tet2) mesh from volume",       cmd_tetrahedralize2},
   {"layer-mesh",     "Geometry",        "mesh layer between two isosurfaces",             cmd_layer_mesh},
 #endif
+  {"tile",           "Geometry",        "surfaces between a contour stack's slices",      cmd_tile},
 
   // ── Volume arithmetic ──
   {"add",            "Vol Arithmetic",  "add two volumes element-wise",                   cmd_add},
