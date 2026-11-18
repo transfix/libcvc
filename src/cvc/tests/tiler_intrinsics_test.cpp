@@ -341,7 +341,7 @@ TEST(TilerIntrinsicsAriadne, AnActionStartsItUnderTheDefaultLimits) {
   std::set<std::string> progress_seen;
   std::size_t frames = 0, frames_busy = 0;
   const auto t0 = steady::now();
-  // Past 300 s in a loaded Debug job (as the segmentation action test): ctest gives the suite 900 s.
+  // Past 300 s in a loaded Debug job, as the segmentation action test: ctest allows 900 s.
   while (std::chrono::duration<double>(steady::now() - t0).count() < 900.0) {
     rt.render();
     rt.drain();
