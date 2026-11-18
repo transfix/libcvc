@@ -3127,7 +3127,10 @@ cvc_discover_tests(ariadne_loader_test)
 cvc_discover_tests(ariadne_doc_fetch_test)
 cvc_discover_tests(ariadne_scene_tf_test)
 cvc_discover_tests(ariadne_runtime_test)
-cvc_discover_tests(ariadne_scene_world_test)
+# The boat node's tests drive a boat across a lake on the physics world's fluid (76 and 156 s in a
+# Debug job before #1318's inertial fluid; past ctest's 300 s after it), and the crate drifting in
+# the scene's wind runs as long: 900 s each, as the segmentation action test has.
+cvc_discover_tests(ariadne_scene_world_test PROPERTIES TIMEOUT 900)
 cvc_discover_tests(ariadne_scene_quality_test)
 cvc_discover_tests(ariadne_server_document_test)
 cvc_discover_tests(ariadne_ftxui_test)

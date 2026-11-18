@@ -56,6 +56,12 @@ constexpr double kScale = 0.05;  // nav's normalized units per metre, as libcvc'
 constexpr double kReach = 3.0;   // m from its goal that counts as there
 constexpr double kSpacing = 8.0; // m kept between spawns drawn from the grid
 constexpr double kPi = 3.14159265358979323846;
+// How vehicles steer around each other (set_avoid): the separation's radius and strength in units
+// of the largest vehicle's radius (cfg.veh.rr), and its pass-on-the-right share.
+constexpr float kAvoidRadius = 5.0f;
+constexpr float kAvoidGain = 1.5f;
+constexpr float kAvoidSide = 0.6f;
+constexpr float kAvoidSideRadius = 20.0f; // the turn's look-ahead, in vehicle radii
 
 std::string num(double v) {
   char buf[32];
@@ -468,6 +474,7 @@ struct WorldVehicles::impl {
   std::uint64_t steps = 0; // physics steps since the navigator was built
   std::uint64_t draws = 0; // goals drawn (each draw's seed)
   bool wander = true;      // nav@1 draws another goal at each one it reaches
+  bool avoid = true;       // vehicles steer around each other (set_avoid)
   bool drive_tel = false;  // the navigators capture their drive (set_drive_telemetry)
 
   // A fleet: the entities on one plant, with a navigator of their own over the grid (a navigator
@@ -1007,6 +1014,14 @@ struct WorldVehicles::impl {
     cfg.veh.allow_reverse = true;
     cfg.reach_tol = static_cast<float>(kReach * kScale);
     cfg.freeze_sense = true; // the world's grid is known
+    // Vehicles steer around each other: the nav demos' separation for the largest vehicle (the
+    // other plants' vehicles join in as foreign agents at each tick, navigator_tick).
+    if (avoid) {
+      cfg.sep_radius = kAvoidRadius * cfg.veh.rr;
+      cfg.sep_gain = kAvoidGain * cfg.veh.rr;
+      cfg.sep_side = kAvoidSide;
+      cfg.sep_side_radius = kAvoidSideRadius * cfg.veh.rr;
+    }
     ready = true;
   }
 
@@ -1276,6 +1291,22 @@ struct WorldVehicles::impl {
           if (fleet_of(e) == f.get())
             if (const int i = index(e); i >= 0)
               f->from[static_cast<std::size_t>(i)] = bicycle_box(*f, i, e.desc);
+      // The other plants' vehicles, for this fleet's separation to steer around.
+      if (avoid && fleets.size() > 1) {
+        std::vector<float> others;
+        for (const entity &o : ents) {
+          const fleet *of = fleet_of(o);
+          const int j = index(o);
+          if (!of || of == f.get() || j < 0)
+            continue;
+          const pose q = pose_of(*of, j);
+          others.push_back(nx(q.position.x));
+          others.push_back(ny(q.position.y));
+        }
+        f->sim->set_foreign_agents(std::move(others));
+      } else if (!f->sim->foreign_agents().empty()) {
+        f->sim->set_foreign_agents({});
+      }
       f->sim->step(1);
       f->tel_fresh = f->sim->capture_drive_telemetry();
       if (f->plant == "kinematic") {
@@ -1766,6 +1797,7 @@ WorldVehicles::WorldVehicles(cvc::app *app, ph::world &world,
     d.seed(d.vkey + ".spawn.color", "0.85,0.7,0.2");
     d.seed(d.vkey + ".spawn.color2", "0.12,0.12,0.14");
     d.seed(d.vkey + ".spawn.controller", "nav@1");
+    d.seed(d.vkey + ".avoid", d.avoid ? "1" : "0");
     d.seed(d.vkey + ".spawn.mass_t", "0.5");
     d.seed(d.vkey + ".spawn.max_speed_t", "1");
     for (const char *req : {"spawn.request", "remove.request", "clear.request"})
@@ -1946,6 +1978,9 @@ void WorldVehicles::poll() {
     d.seen_sel = sel;
     d.publish_selection();
   }
+  if (const std::string a = d.get("avoid"); a == "0" || a == "1")
+    if ((a == "1") != d.avoid)
+      set_avoid(a == "1");
   if (const std::string r = d.get("spawn.request"); r != d.seen_spawn) {
     d.seen_spawn = r;
     std::string why;
@@ -1971,6 +2006,27 @@ void WorldVehicles::poll() {
   d.put(d.vkey + ".status", d.status);
   d.put(d.vkey + ".count", std::to_string(d.ents.size()));
 }
+
+void WorldVehicles::set_avoid(bool avoid) {
+  impl &d = *_impl;
+  if (avoid == d.avoid)
+    return;
+  d.avoid = avoid;
+  if (!d.vkey.empty())
+    d.put(d.vkey + ".avoid", avoid ? "1" : "0");
+  // The separation is each navigator's: changed in place, from its next tick.
+  d.cfg.sep_radius = avoid ? kAvoidRadius * d.cfg.veh.rr : 0.0f;
+  d.cfg.sep_gain = avoid ? kAvoidGain * d.cfg.veh.rr : 0.0f;
+  d.cfg.sep_side = avoid ? kAvoidSide : 0.0f;
+  d.cfg.sep_side_radius = avoid ? kAvoidSideRadius * d.cfg.veh.rr : 0.0f;
+  for (auto &[name, f] : d.fleets)
+    if (f->sim) {
+      f->sim->set_separation(d.cfg.sep_radius, d.cfg.sep_gain);
+      f->sim->set_separation_side(d.cfg.sep_side, d.cfg.sep_side_radius);
+    }
+}
+
+bool WorldVehicles::avoid() const { return _impl->avoid; }
 
 void WorldVehicles::before_step() {
   impl &d = *_impl;

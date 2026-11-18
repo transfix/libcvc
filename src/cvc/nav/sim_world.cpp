@@ -610,18 +610,27 @@ void sim_world::step(int num_threads) {
   // steers AROUND itself instead of driving through. Reactive and per-agent, so
   // it works in every belief mode (the shared-plane scale path can't stamp peers
   // per agent). Off unless the host opts in (sep_gain > 0); the neighbour query
-  // is the same CGAL kd-tree the squad uses (grid_nav.h neighbors_within_radius).
-  if (cfg_.sep_gain > 0.0f && cfg_.sep_radius > 0.0f && n_ > 1) {
-    std::vector<double> pw(static_cast<std::size_t>(2) * n_);
+  // is the same CGAL kd-tree the squad uses (grid_nav.h neighbors_within_radius). The foreign
+  // agents (set_foreign_agents) are peers here too, after the world's own in the tree.
+  const int nf = static_cast<int>(foreign_.size() / 2);
+  if (cfg_.sep_gain > 0.0f && cfg_.sep_radius > 0.0f && n_ > 0 && n_ + nf > 1) {
+    // The pass-on-the-right look-ahead reaches further than the push (sep_side_radius).
+    const float Rs = cfg_.sep_side > 0.0f ? std::max(cfg_.sep_radius, cfg_.sep_side_radius) : 0.0f;
+    const int all = n_ + nf;
+    std::vector<double> pw(static_cast<std::size_t>(2) * all);
     for (int i = 0; i < 2 * n_; ++i)
       pw[i] = o_[i]; // separation works in the normalized frame (o_/carrot_)
-    const neighbor_csr csr = neighbors_within_radius(pw.data(), n_, cfg_.sep_radius);
+    for (int i = 0; i < 2 * nf; ++i)
+      pw[2 * n_ + i] = foreign_[i];
+    const neighbor_csr csr = neighbors_within_radius(pw.data(), all, std::max(cfg_.sep_radius, Rs));
     const float R = cfg_.sep_radius;
     for (int i = 0; i < n_; ++i) {
       float sx = 0.0f, sy = 0.0f;
+      float side = 0.0f; // the strongest pass-on-the-right weight a peer ahead asks for
       for (int k = csr.offsets[i]; k < csr.offsets[i + 1]; ++k) {
         const int j = csr.indices[k];
-        float dx = o_[2 * i] - o_[2 * j], dy = o_[2 * i + 1] - o_[2 * j + 1];
+        const float jx = static_cast<float>(pw[2 * j]), jy = static_cast<float>(pw[2 * j + 1]);
+        float dx = o_[2 * i] - jx, dy = o_[2 * i + 1] - jy;
         float d2 = dx * dx + dy * dy;
         if (d2 < 1e-10f) { // coincident: split deterministically by index
           dx = (i < j) ? 1.0f : -1.0f;
@@ -635,9 +644,25 @@ void sim_world::step(int num_threads) {
         const float inv = w * w / d; // quadratic falloff along the unit separation dir
         sx += dx * inv;
         sy += dy * inv;
+        // Passing on the right (sep_side): a peer ahead, within Rs and no further than R off this
+        // agent's line, asks it to turn right. (dx, dy) point from the peer to this agent.
+        if (Rs > 0.0f) {
+          const float ch = std::cos(th_[i]), sh = std::sin(th_[i]);
+          const float ahead = -(dx * ch + dy * sh), across = std::fabs(dx * sh - dy * ch);
+          if (ahead > 0.0f && across < R && d < Rs)
+            side = std::max(side, (Rs - d) / Rs);
+        }
       }
       carrot_[2 * i] += cfg_.sep_gain * sx;
       carrot_[2 * i + 1] += cfg_.sep_gain * sy;
+      // The turn: the carrot moved to the agent's right by sep_side * weight of its distance, so
+      // two that meet head on both swing right and pass instead of only braking toward each other.
+      if (side > 0.0f) {
+        const float cx = carrot_[2 * i] - o_[2 * i], cy = carrot_[2 * i + 1] - o_[2 * i + 1];
+        const float off = cfg_.sep_side * side * std::sqrt(cx * cx + cy * cy);
+        carrot_[2 * i] += off * std::sin(th_[i]);
+        carrot_[2 * i + 1] -= off * std::cos(th_[i]);
+      }
     }
   }
 
