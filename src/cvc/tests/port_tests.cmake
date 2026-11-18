@@ -21,6 +21,7 @@ set(CVC_PORT_TESTS
   planar_test
   tiler_test
   tiler_legacy_test
+  tiler_intrinsics_test
   segmentation_test
   segmentation_intrinsics_test
   gradient_vector_diffusion_test

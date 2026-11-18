@@ -263,7 +263,8 @@ bool parse_intent_mode(const std::string &s, entity_intent::mode &out) {
 }
 
 ph::dyn_boat_desc boat_desc_of(const vehicle_archetype &a, double mass, double max_speed) {
-  if (a.preset != "launch" && a.preset != "jonboat")
+  const std::vector<std::string> presets = ph::dyn_boat_desc::presets();
+  if (std::find(presets.begin(), presets.end(), a.preset) == presets.end())
     throw std::invalid_argument("vehicle '" + a.id + "': '" + a.preset + "' is not a boat preset");
   ph::dyn_boat_desc b = ph::dyn_boat_desc::preset(a.preset);
   for (const auto &[k, v] : a.overrides) {
@@ -1017,6 +1018,11 @@ struct WorldVehicles::impl {
     cfg.veh.allow_reverse = true;
     cfg.reach_tol = static_cast<float>(kReach * kScale);
     cfg.freeze_sense = sense != "fog"; // known: the world's grid; fog: sensed (set_sense)
+    // nav@1 comes to rest at its goal and stays there: without these a Humvee 150 m out met its
+    // goal at ~19 m/s and parked ~28 m past it (on the bicycle it drove on), so a gym's agents
+    // never were all at their goals at once.
+    cfg.stop_at_goal = true;
+    cfg.park_hold = true;
     // Vehicles steer around each other: the nav demos' separation for the largest vehicle (the
     // other plants' vehicles join in as foreign agents at each tick, navigator_tick).
     if (avoid) {
@@ -2295,6 +2301,29 @@ std::vector<entity_plant> WorldVehicles::plants() const {
       p.drive.force_x = ti.ext_fx / kScale;
       p.drive.force_y = ti.ext_fy / kScale;
     }
+    // The limits it planned with on the plant (sim_world's plant arm), normalized there.
+    nav::sim_world::plant_plan pp;
+    if (g->sim->plant_plan_of(i, pp)) {
+      static_assert(nav::sim_world::kPlantDiscs == std::tuple_size<decltype(p.plan.body_offsets)>{},
+                    "entity_plan's footprint discs are sim_world's");
+      entity_plan &pl = p.plan;
+      pl.known = true;
+      pl.a_max = pp.a_max / kScale;
+      pl.vmax = pp.vmax / kScale;
+      pl.a_lat = pp.a_lat / kScale;
+      pl.wheelbase = pp.wheelbase / kScale;
+      pl.max_steer = pp.max_steer;
+      pl.steer_rate = pp.steer_rate;
+      pl.steer_now = pp.steer_now;
+      pl.latency = pp.latency;
+      pl.a_brake = pp.a_brake / kScale;
+      pl.footprint = pp.footprint;
+      pl.body_rr = pp.body_rr / kScale;
+      for (std::size_t b = 0; b < pl.body_offsets.size(); ++b)
+        pl.body_offsets[b] = pp.body_offsets[b] / kScale;
+      pl.parked = pp.parked;
+      pl.modulated = pp.modulated;
+    }
     out.push_back(std::move(p));
   }
   return out;
@@ -2321,6 +2350,8 @@ navigator_params WorldVehicles::navigator() const {
   n.k_steer = v.k_steer;
   n.nsub = v.nsub;
   n.allow_reverse = v.allow_reverse;
+  n.stop_at_goal = d.cfg.stop_at_goal;
+  n.park_hold = d.cfg.park_hold;
   return n;
 }
 

@@ -391,17 +391,19 @@ cvc::geometry with_lift_normals(cvc::geometry g, const cvc::height_field &ground
 // This frame's wind on the trees: the scene's (none without one, or with world.sway at 0, and the
 // trees stand still). The lean grows as the wind's square, the sway as the wind, both to 9 m/s's
 // 0.03 and 0.02 rad at 10 m up times world.sway; world.lean_dir publishes the way they lean. The
-// camera (`ren`'s) is where the sway fades out from.
+// camera (`ren`'s) is where the sway fades out from. A storm's gust front (F4, scene_wind_now)
+// bends them harder and turns them; the gusts' pattern drifts with the wind as authored.
 void tick_foliage_wind(WorldRT &rt, vtkRenderer *ren) {
   cvc::app &app = *rt.app;
-  const std::optional<ari::SceneWind> sw = ari::scene_wind_set(app, rt.prefix);
+  const std::optional<ari::SceneWind> sw = ari::scene_wind_now(app, rt.prefix);
   const double strength = ari::read_or<double>(app, rt.sway_key, 1.0);
-  const bool on = sw && sw->speed > 0.0 && strength > 0.0;
+  const bool on = sw && sw->mean_speed() > 0.0 && strength > 0.0;
   GeometryNode::ShaderInputs &in = *rt.wind;
   in.f["uFwOn"] = on ? 1.0f : 0.0f;
   if (on) {
     constexpr double kPi = 3.14159265358979323846, kSwayPeriod = 2.0 * kPi / 1.3;
-    const double rad = sw->dir * kPi / 180.0, u = sw->speed / 9.0, t = app.world_clock().t();
+    const double rad = sw->mean_dir() * kPi / 180.0, u = sw->mean_speed() / 9.0,
+                 t = app.world_clock().t();
     const double lean = std::min(0.03 * u * u * strength, 0.3);
     const double sway = std::min(0.02 * u * strength, 0.2);
     in.f3["uFwDir"] = {float(std::cos(rad)), float(std::sin(rad)), 0.0f};
@@ -415,7 +417,7 @@ void tick_foliage_wind(WorldRT &rt, vtkRenderer *ren) {
       ren->GetActiveCamera()->GetPosition(eye);
     in.f3["uFwEye"] = {float(eye[0]), float(eye[1]), float(eye[2])};
   }
-  if (std::string lean = on ? std::to_string(sw->dir) : std::string(); lean != rt.lean_now) {
+  if (std::string lean = on ? std::to_string(sw->mean_dir()) : std::string(); lean != rt.lean_now) {
     rt.lean_now = lean;
     ari::write<std::string>(app, rt.lean_key, lean);
   }

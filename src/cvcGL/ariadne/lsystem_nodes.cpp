@@ -339,9 +339,10 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
     // Wind re-pose every frame (world/sim time, so Paused freezes the sway). windLive == 0 holds
     // the bind pose; the branchy trees have no sway records and sit untouched. With a scene wind
     // (O14) the pines lean downwind in it and sway about the lean, harder in a stronger wind and
-    // in the gusts at each tree (the one gust field the water and the physics read).
-    const std::optional<ari::SceneWind> sw = ari::scene_wind_set(*rt->app, rt->prefix);
-    const std::string lean = sw ? std::to_string(sw->dir) : std::string();
+    // in the gusts at each tree (the one gust field the water and the physics read), and harder
+    // and turned under a storm's gust front (F4, scene_wind_now).
+    const std::optional<ari::SceneWind> sw = ari::scene_wind_now(*rt->app, rt->prefix);
+    const std::string lean = sw ? std::to_string(sw->mean_dir()) : std::string();
     if (lean != rt->leanNow) {
       rt->leanNow = lean;
       cvc::app &app = *rt->app;
@@ -353,10 +354,10 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
       rt->workN = rt->needleBind;
       if (sw) {
         constexpr double kRefWind = 9.0; // m/s: the authored sway's wind
-        const double rad = sw->dir * 3.14159265358979323846 / 180.0;
+        const double rad = sw->mean_dir() * 3.14159265358979323846 / 180.0;
         const cvc::algo::gust_frame gf = cvc::algo::gust_frame_at(sw->state(), t);
         cvc::lsys::repose_forest_in_wind(
-            rt->wind, t, windLive * sw->speed / kRefWind, std::cos(rad), std::sin(rad),
+            rt->wind, t, windLive * sw->mean_speed() / kRefWind, std::cos(rad), std::sin(rad),
             [&gf](double x, double y) { return cvc::algo::wind_gust(gf, x, y); }, rt->workW,
             rt->workN);
       } else {

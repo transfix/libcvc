@@ -116,6 +116,8 @@ static PyObject *gym_navigator(const cvc::ariadne::navigator_params &p) {
   PYCVC_GYM_F(a_lat_max); PYCVC_GYM_F(k_steer);
   gym_put(d, "nsub", PyLong_FromLong(p.nsub));
   gym_put(d, "allow_reverse", PyBool_FromLong(p.allow_reverse));
+  gym_put(d, "stop_at_goal", PyBool_FromLong(p.stop_at_goal));
+  gym_put(d, "park_hold", PyBool_FromLong(p.park_hold));
   return d;
 }
 #undef PYCVC_GYM_F
@@ -175,6 +177,24 @@ static PyObject *gym_plant_dict(const cvc::ariadne::entity_plant &p) {
   gym_putf(drv, "force_x", p.drive.force_x);
   gym_putf(drv, "force_y", p.drive.force_y);
   gym_put(d, "drive", drv);
+  PyObject *plan = PyDict_New();
+  gym_put(plan, "known", PyBool_FromLong(p.plan.known));
+  gym_putf(plan, "a_max", p.plan.a_max);
+  gym_putf(plan, "vmax", p.plan.vmax);
+  gym_putf(plan, "a_lat", p.plan.a_lat);
+  gym_putf(plan, "wheelbase", p.plan.wheelbase);
+  gym_putf(plan, "max_steer", p.plan.max_steer);
+  gym_putf(plan, "steer_rate", p.plan.steer_rate);
+  gym_putf(plan, "steer_now", p.plan.steer_now);
+  gym_putf(plan, "latency", p.plan.latency);
+  gym_putf(plan, "a_brake", p.plan.a_brake);
+  gym_put(plan, "footprint", PyBool_FromLong(p.plan.footprint));
+  gym_putf(plan, "body_rr", p.plan.body_rr);
+  gym_put(plan, "body_offsets",
+          gym_f64(std::vector<double>(p.plan.body_offsets.begin(), p.plan.body_offsets.end())));
+  gym_put(plan, "parked", PyBool_FromLong(p.plan.parked));
+  gym_put(plan, "modulated", PyBool_FromLong(p.plan.modulated));
+  gym_put(d, "plan", plan);
   return d;
 }
 

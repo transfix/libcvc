@@ -56,10 +56,20 @@ struct SceneNode;
 
 // What a node's body: collides with when the node makes it at run time (a generated world, a
 // dataset): static geometry, replaced whole. Whoever owns it bumps `revision` with each new
-// geometry, and the scene's world swaps the node's bodies at its next sync.
+// geometry, and the scene's world swaps the node's bodies at its next sync, or, for a change timed
+// on the world clock, at the physics step that `from_tick` names.
 struct SceneColliders {
   std::shared_ptr<const cvc::world::world_geometry> geometry; // null: none
   std::uint64_t revision = 0;
+  // When this revision goes in: 0 at the world's next sync; else at the first physics step that
+  // ends past the world clock's tick `from_tick`, so every host and frame rate puts it in at the
+  // same step (a water's sea keyframe in a scene with storms, scene_water.h). One whose step has
+  // gone by (the physics was off) goes in at the next sync.
+  std::uint64_t from_tick = 0;
+  // Set by the scene's world each sync: the period (s of world-clock time) on which a runtime
+  // whose changes follow the clock makes them (the water's sea while the scene has storms:
+  // kSceneWindFrontPeriod), or 0 for whenever it ticks.
+  double clock_period = 0.0;
 };
 
 // The params a generated_world node states: its preset's counts and relief, then the counts,

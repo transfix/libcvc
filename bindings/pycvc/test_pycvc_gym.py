@@ -10,7 +10,7 @@ What a training script relies on (ARIADNE_WORLDS.md section 14, L4):
   * agents as dicts (archetype, name, team, a start of their own), and refusals;
   * what a differentiable twin reads: fields() (the grid, its ground, its signed distance and
     gradient) and plants() (each agent's plant as a model, in the observation's order, with the
-    drive that commanded it last);
+    drive that commanded it last and the limits it planned with on the plant);
   * set_intent / intent / clear_intent: an agent's intent, its force summed by the drive.
 """
 
@@ -225,6 +225,7 @@ check(f["sdf_dx"][rows // 2, 2] > 0.5 and f["sdf_dy"][2, cols // 2] > 0.5,
 nv = f["navigator"]
 check(nv["ready"] and nv["scale"] == 0.05 and abs(nv["tick"] - g3.dt()) < 1e-6,
       f"the navigator's settings ({nv['scale']}, {nv['tick']})")
+check(nv["stop_at_goal"] and nv["park_hold"], "nav@1 comes to rest at its goal and holds")
 ps = g3.plants()
 check([p["model"] for p in ps] == ["dyn4", "bike", "dyn_bike", "dyn4"],
       f"the models ({[p['model'] for p in ps]})")
@@ -236,6 +237,19 @@ check(w["applied_accel"].shape == (w["substeps"],), "a command per substep")
 check(abs(w["state"][2] - o["yaw"][3]) < 1e-6, "its heading is the observation's")
 check(ps[2]["state"].shape == (8,) and ps[2]["params"]["mu"] > 0.0, "the single-track model")
 check(ps[1]["limits"]["L"] > 2.0 and ps[1]["limits"]["hdt"] > 0.0, "the bicycle's limits, in metres")
+check([p["plan"]["known"] for p in ps] == [True, False, True, True],
+      "the drive plans with a plant's limits, and the bicycle has none")
+pw = w["plan"]
+check(abs(pw["a_brake"] - 0.8 * w["desc"]["max_decel"]) < 1e-4
+      and abs(pw["a_max"] - 0.8 * w["desc"]["max_accel"]) < 1e-4
+      and abs(pw["vmax"] - w["desc"]["max_speed"]) < 1e-4 and pw["latency"] > 0.0,
+      f"the plan's envelope, the vehicle's ({pw})")
+check(abs(pw["wheelbase"] - w["desc"]["wheelbase"]) < 1e-5
+      and abs(pw["steer_rate"] - w["params"]["steer_rate"]) < 1e-6 and pw["max_steer"] > 0.0,
+      "its wheelbase, steering rate and lock")
+check(abs(pw["steer_now"] - w["state"][12]) < 1e-6, "its steering now, the model's")
+check(pw["footprint"] and pw["body_offsets"].shape == (4,) and bool(np.all(np.diff(pw["body_offsets"]) > 0))
+      and not pw["parked"] and not pw["modulated"], "its body as discs, tail to nose; not parked")
 
 # The drive a twin replays (plants()' drive), and an intent's force from Python.
 g4 = pycvc.WorldGym(doc, agents=[{"plant": "dynamic4w", "x": -30.0, "y": -10.0 + 20.0 * k, "yaw": 0.0}

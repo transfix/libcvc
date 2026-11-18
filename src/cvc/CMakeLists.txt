@@ -29,6 +29,9 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/skeleton.h
   ../../inc/cvc/geometry/skeleton_params.h
   ../../inc/cvc/geometry/skeleton_intrinsics.h
+  ../../inc/cvc/geometry/tiler.h
+  ../../inc/cvc/geometry/tiler_params.h
+  ../../inc/cvc/geometry/tiler_intrinsics.h
   ../../inc/cvc/state/state.h
   ../../inc/cvc/state/state_key_meta.h
   ../../inc/cvc/state/state_change_journal.h
@@ -327,6 +330,7 @@ set(SOURCE_FILES
   geometry/skeleton/skeleton.cpp
   geometry/skeleton/skeleton_intrinsics.cpp
   geometry/tiler/tile_contours.cpp
+  geometry/tiler/tiler_intrinsics.cpp
   geometry/sliced_ldlt.cpp
   geometry/geometry_file_io.cpp
   geometry/contours.cpp
@@ -401,6 +405,7 @@ set(SOURCE_FILES
   core/unit_registry.cpp
   physics/world.cpp
   physics/field_step.cpp
+  physics/hull.cpp
   physics/immersion.cpp
   physics/fluid_surface.cpp
   physics/flow_velocity.cpp
@@ -725,7 +730,7 @@ endif()
 # libm-free math they call, cvc/algo/det_math.h, gets it above); the Jolt backend TUs
 # get the same flag on their own target (below).
 set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/boat.cpp
-    physics/field_step.cpp physics/immersion.cpp
+    physics/field_step.cpp physics/hull.cpp physics/immersion.cpp
     physics/fluid_surface.cpp physics/flow_velocity.cpp physics/ocean_surface.cpp
     physics/null_backend.cpp
     physics/nav_plant.cpp
