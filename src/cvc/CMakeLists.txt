@@ -407,6 +407,7 @@ set(SOURCE_FILES
   physics/field_step.cpp
   physics/hull.cpp
   physics/immersion.cpp
+  physics/field_wake.cpp
   physics/fluid_surface.cpp
   physics/flow_velocity.cpp
   physics/ocean_surface.cpp
@@ -730,7 +731,7 @@ endif()
 # libm-free math they call, cvc/algo/det_math.h, gets it above); the Jolt backend TUs
 # get the same flag on their own target (below).
 set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/boat.cpp
-    physics/field_step.cpp physics/hull.cpp physics/immersion.cpp
+    physics/field_step.cpp physics/field_wake.cpp physics/hull.cpp physics/immersion.cpp
     physics/fluid_surface.cpp physics/flow_velocity.cpp physics/ocean_surface.cpp
     physics/null_backend.cpp
     physics/nav_plant.cpp
