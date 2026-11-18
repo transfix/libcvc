@@ -305,10 +305,12 @@ void sim_world::rebuild_all_fields() {
 // The plant arm: the same controller, writing its command for the plant instead of
 // integrating (veh_params::plant). Without a plant or terrain the drive reads cfg_.veh itself.
 const veh_params &sim_world::drive_vehicle(veh_params &vplant, plant_drive &pdrive) {
-  const bool own_veh = plant_ != nullptr || terrain_on_;
+  const bool own_veh = plant_ != nullptr || terrain_on_ || cfg_.stop_at_goal;
   if (!own_veh)
     return cfg_.veh;
   vplant = cfg_.veh;
+  if (cfg_.stop_at_goal)
+    vplant.stop_at = goal_.data(); // each agent comes to rest at its goal
   if (terrain_on_) {
     if (ter_cfg_.governors) {
       vplant.slope = &ter_slope_;
@@ -579,6 +581,15 @@ void sim_world::step(int num_threads) {
   std::vector<float> phi(n_), nrm(2 * n_);
   sdf_sample(fs, o_.data(), n_, map_id_.data(), phi.data(), nrm.data(), num_threads, pool_);
   lap(prof_.sdf);
+
+  // park_hold on the kinematic arm: a parked agent's start of tick, before the FSM brakes it
+  // its own way, to hold it from after the drive.
+  std::vector<plant_state> hold_start;
+  if (cfg_.park_hold && !plant_) {
+    hold_start.resize(static_cast<std::size_t>(n_));
+    for (int i = 0; i < n_; ++i)
+      hold_start[i] = {o_[2 * i], o_[2 * i + 1], th_[i], sp_[i]};
+  }
 
   // ── CARROT FSM ──
   fsm_state s;
@@ -918,6 +929,28 @@ void sim_world::step(int num_threads) {
         th_[i] = s.heading;
         sp_[i] = s.speed;
       }
+    }
+  }
+
+  // ── park_hold (kinematic arm): a parked agent brakes to a stop at a_max and holds, straight
+  // ahead, in place of the drive's move (an override's command still takes its tick) ──
+  if (!hold_start.empty()) {
+    const float dt = cfg_.veh.dt;
+    for (int i = 0; i < n_; ++i) {
+      if (!parked_[i] || (ov_any_ && ov_on_[i]))
+        continue;
+      const plant_state &s0 = hold_start[i];
+      const float L = cfg_.veh.L_col ? cfg_.veh.L_col[i] : cfg_.veh.L;
+      const float vmax_i = cfg_.veh.vmax_col ? cfg_.veh.vmax_col[i] : cfg_.veh.vmax;
+      const float a_max_i = cfg_.veh.a_max_col ? cfg_.veh.a_max_col[i] : cfg_.veh.a_max;
+      const float sp_min = cfg_.veh.allow_reverse ? -0.25f * vmax_i : 0.0f;
+      const float acc = std::min(std::max(-s0.speed / dt, -a_max_i), a_max_i);
+      const plant_state s1 =
+          kinematic_step(s0, 0.0f, acc, L, dt, std::max(1, cfg_.veh.nsub), sp_min, vmax_i);
+      o_[2 * i] = s1.x;
+      o_[2 * i + 1] = s1.y;
+      th_[i] = s1.heading;
+      sp_[i] = s1.speed;
     }
   }
 
@@ -1777,6 +1810,14 @@ bool sim_world::plant_plan_of(int i, plant_plan &out) const {
   for (int b = 0; b < kPlantDiscs; ++b)
     out.body_offsets[b] = pl_body_off_[static_cast<std::size_t>(kPlantDiscs) * i + b];
   out.footprint = pl_fp_;
+  out.wheelbase = pl_L_[i];
+  out.max_steer = pl_max_steer_;
+  out.steer_rate = pl_steer_rate_[i];
+  out.steer_now = pl_steer_now_[i];
+  out.latency = pl_latency_[i];
+  out.a_brake = pl_a_brake_[i];
+  out.parked = parked_[i] != 0;
+  out.modulated = pl_mod_.tire_gain > 0.0f || pl_mod_.tip_gain > 0.0f;
   return true;
 }
 

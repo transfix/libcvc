@@ -79,6 +79,16 @@ public:
     double fov_rad = 6.283185307179586;
     veh_params veh;         // vehicle + integration params (rr/d_hat/dt/vmax/... /nsub)
     float reach_tol = 0.8f; // normalized "arrived" radius (also drives park)
+    // ARRIVAL (both default false = OFF, byte-identical). `stop_at_goal`: the drive holds each
+    // agent's speed toward its goal to the speed from which it stops there (veh_params::stop_at),
+    // so it comes to rest at the goal rather than meeting it at the speed the goal's pull leaves
+    // and parking past it. A goal that moves every tick (a follower's slot) is trailed by about
+    // the vehicle's stopping distance, so leave it off for those. `park_hold`: on the kinematic
+    // arm a parked agent brakes to a stop at a_max and holds, as the plant arm's park brake
+    // stops one at a_brake. Without it the parked carrot (2 v straight ahead) and the goal's
+    // pull can hold a speed: a Humvee-sized agent parked at 5.5 m/s drove on to the map's edge.
+    bool stop_at_goal = false;
+    bool park_hold = false;
     int sense_every = 4;
     bool freeze_sense = false; // static known map: skip the sense/rebuild path
     double l_occ = 2.2, l_free = -1.4, l_clamp = 8.0;
@@ -683,11 +693,25 @@ public:
   // Agent i's planning limits as the drive uses them on the plant (normalized): its a_max, vmax
   // and cornering limit, its footprint discs' radius and kPlantDiscs offsets from the rear
   // axle. False without a plant; a limit the plant leaves at zero reads back as nav's own.
+  // With the rest of the plant arm (plant_drive), a twin of the drive can give the command the
+  // plant took: its wheelbase, the plant's steering lock (the fleet's tightest; 0 = nav's
+  // delta_max alone), the actuator's slew limit and its angle now, the latency and the braking
+  // the vehicle achieves (0 = none of that limit), whether the next tick parks it (brakes to a
+  // stop at a_brake, or a_max without one) and whether the plant's measured state modulates
+  // the drive (plant_modulation's gains, not read back here).
   struct plant_plan {
     float a_max = 0.0f, vmax = 0.0f, a_lat = 0.0f;
     float body_rr = 0.0f;
     float body_offsets[kPlantDiscs] = {0.0f, 0.0f, 0.0f, 0.0f};
     bool footprint = false; // the vehicles' own size, not nav's
+    float wheelbase = 0.0f;
+    float max_steer = 0.0f;  // rad
+    float steer_rate = 0.0f; // rad/s
+    float steer_now = 0.0f;  // rad, as the plant last read back
+    float latency = 0.0f;    // s
+    float a_brake = 0.0f;
+    bool parked = false;
+    bool modulated = false;
   };
   bool plant_plan_of(int i, plant_plan &out) const;
   plant_kind plant_type() const;

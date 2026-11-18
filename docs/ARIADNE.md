@@ -2020,6 +2020,16 @@ scene:
         has run. The gym keeps the drive's telemetry for it (`drive_telemetry=True`, the
         default; `WorldVehicles::set_drive_telemetry`), which changes nothing the drive does.
         With these a twin replays the gym's own controller on a tick, a force included.
+      - On every plant but the bicycle, `plan`: the limits the drive plans each command with on
+        the plant (`entity_plan`; `sim_world::plant_plan`, the plant arm's `plant_drive`), in
+        SI. They are the vehicle's envelope (`a_max`, `vmax`, the cornering `a_lat`) and its
+        `wheelbase`; the steering lock `max_steer` (the fleet's tightest), the actuator's slew
+        `steer_rate` (rad/s) and its angle now `steer_now`; the `latency` (s) and the braking it
+        achieves `a_brake`; and its body as footprint discs (`body_rr`, `body_offsets` from the
+        rear axle, with `footprint`). `parked` says the next tick parks it: it brakes to a stop
+        at `a_brake`. `modulated` says the plant's measured state scales the drive
+        (`plant_modulation`), which these do not carry. With these a twin gives the command the
+        plant took from the control law's, not only the control law's.
     - `set_intent(id, steer=, accel=, mode=, weight=, force=(fx, fy), force_steers=)`,
       `intent(id)` and `clear_intent(id)` are an agent's intent, as `pycvc.WorldEntities` sets
       one: from the next step until changed, so a force (m/s², world frame) acts on the drive
