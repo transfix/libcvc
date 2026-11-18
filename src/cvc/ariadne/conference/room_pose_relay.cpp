@@ -9,6 +9,7 @@
 */
 
 #include <algorithm>
+#include <cmath>
 #include <cvc/ariadne/conference/room_aoi.h>
 #include <cvc/ariadne/conference/room_pose_relay.h>
 #include <cvc/ariadne/holon.h>
@@ -158,15 +159,27 @@ void room_pose_relay::step(const holon &server, std::uint64_t step, const aoi_sn
       }
       subjects.push_back(std::move(s));
     }
-    if (entities)
+    if (entities) {
+      // Where this viewer stands, for the entities' distances.
+      const cvc::physics::vec3 at = server.state(pid).position;
       for (const pose_subject &e : *entities) {
         pose_subject s = e;
         if (!key) {
+          std::uint64_t every = m.cfg.entity_interval_ticks;
+          if (m.cfg.entity_near_m > 0.0) {
+            const double d = std::hypot(e.state.position.x - at.x, e.state.position.y - at.y);
+            if (d > m.cfg.entity_near_m)
+              every = d <= std::max(m.cfg.entity_far_m, m.cfg.entity_near_m)
+                          ? m.cfg.push_interval_ticks
+                          : m.cfg.push_interval_ticks *
+                                std::max<std::uint64_t>(1, m.cfg.entity_beyond_factor);
+          }
           const std::uint64_t last = v.enc.last_sent_tick(e.pid);
-          s.due = last == 0 || tick >= last + m.cfg.entity_interval_ticks;
+          s.due = last == 0 || tick >= last + every;
         }
         subjects.push_back(std::move(s));
       }
+    }
     const cvc::pose_snapshot snap = v.enc.encode(tick, subjects, m.cfg.heartbeat_ticks);
     if (snap.entries.empty() && snap.gone.empty())
       continue; // nothing new for this viewer (it is all still, between heartbeats)

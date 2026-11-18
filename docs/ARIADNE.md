@@ -1857,7 +1857,8 @@ scene:
   - **The vehicles a world starts with.** `world: vehicles: start:` lists them, spawned when the
     world's vehicles are made, before anything asks: each entry is `archetype:` (required),
     `count:` (1 to 256), and the spawn's `name:` (numbered " 1", " 2", ... when the count is more
-    than one), `team:`, `controller:`, `plant:` and `policy:`, plus `at: [x, y]` and `heading:`
+    than one), `team:`, `controller:`, `plant:` and `policy:`, plus `at: [x, y]` (its rear axle)
+    and `heading:`
     (degrees) for a fixed start; without `at:` each takes a free point or a spawn point. A
     document's `init:` runs before the world is made, and the runtime ignores a spawn request
     already set when it starts (a reload would spawn again), so this is how a document, a server
@@ -1865,7 +1866,9 @@ scene:
   - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,
     `color`, `color2` as `r,g,b`, `metadata` as `key=value, ...`, `controller`, `policy`,
     `policy_sha256`, `mass` or `mass_t` (a fraction of the range), `max_speed` or `max_speed_t`,
-    and `at` as `x,y[,heading in degrees]`; empty: a free point), then change
+    and `at` as `x,y[,heading in degrees]`; empty: a free point. A start, and a spawn point,
+    names the vehicle's rear axle, the navigator's reference point on every plant; the entities'
+    table gives its chassis's centre, ahead of it along the heading), then change
     `vehicles.spawn.request`. `vehicles.spawn.count` spawns that many at once (1 when empty; at
     most 256), each at a free point of its own unless `at` names one. The result is in
     `vehicles.spawn.status`. `vehicles.remove.id`

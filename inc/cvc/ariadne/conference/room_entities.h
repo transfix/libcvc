@@ -16,8 +16,9 @@
 //   section, section.h), one subtree per entity under entity_key(id):
 //
 //     conf.rooms.<room>.entities.e<id>.{ present, name, archetype, plant, controller, team,
-//                                        color, color2, size, wheels, base_z, look.kind,
-//                                        look.path, look.scale, look.yaw, look.z, look.fit }
+//                                        color, color2, size, wheels, base_z, fit_length,
+//                                        look.kind, look.path, look.scale, look.yaw, look.z,
+//                                        look.fit }
 //     conf.rooms.<room>.entities.{ epoch, at, rev }
 //
 //   written when they change: a spawn, a removal, a new world (WorldVehicles::revision). An entity
@@ -56,6 +57,9 @@ struct room_entity {
   // The ground (or the water) under its chassis's centre, relative to that centre (m, negative):
   // where a fitted model's base goes.
   double base_z = -1.0;
+  // The length a model look is fitted to (m): a boat's overall length (dyn_boat_desc::
+  // length_overall), longer than its hull's box; 0 for the chassis's, size[0].
+  double fit_length = 0.0;
   // Its archetype's look; a file's or an asset's path is its file name alone (the relay's own path
   // means nothing to a client, which finds the file its own way).
   vehicle_look look;

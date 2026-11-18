@@ -317,12 +317,57 @@ rc::room_entity entity(std::uint64_t id, const std::string &name) {
   e.team = 2;
   e.color = {0.1f, 0.2f, 0.3f};
   e.size = {4.6, 2.1, 1.8};
+  e.fit_length = id == 3 ? 7.8 : 0.0; // a boat's overall length rides along
   e.look.kind = "file";
   e.look.path = "rover.glb";
   e.look.scale = 2.0;
   return e;
 }
 } // namespace
+
+// With entity_near_m, an entity far from the viewer comes as often as a far participant, a near
+// one at the entity rate.
+TEST(RoomEntities, AFarEntityComesLessOften) {
+  using cvc::ariadne::holon;
+  using cvc::ariadne::holon_role;
+  holon server(holon_role::server);
+  server.add_participant("viewer", false, walking(0, 0, 0, 0));
+  capture_transport tp;
+  tp.connected = {"viewer"};
+  rc::room_pose_relay::config cfg;
+  cfg.entity_near_m = 30.0;
+  cfg.entity_far_m = 40.0;
+  cfg.push_interval_ticks = 24;
+  cfg.keyframe_ticks = 1000000; // no keyframe after the first, to count the rates alone
+  rc::room_pose_relay relay(cfg);
+  relay.add_transport(&tp);
+  relay.set_rtt("viewer", 20.0);
+  pose_stream_decoder dec;
+  const double dt = server.clock().fixed_dt();
+  std::map<std::string, int> got;
+  double x = 0.0;
+  for (int i = 0; i < 120; ++i) {
+    server.advance(2 * dt);
+    x += 0.1;
+    const std::vector<pose_subject> ents = {subject("~e1", walking(10.0 + x, 0, 3.0, 0)),
+                                            subject("~e2", walking(35.0 + x, 0, 3.0, 0)),
+                                            subject("~e3", walking(200.0 + x, 0, 3.0, 0))};
+    tp.sent.clear();
+    relay.step(server, static_cast<std::uint64_t>(i), nullptr, &ents);
+    for (const auto &[viewer, snap] : tp.sent) {
+      std::vector<cvc::ariadne::pose_sample> out;
+      ASSERT_TRUE(dec.decode(snap, out));
+      for (const auto &smp : out)
+        ++got[smp.pid];
+    }
+  }
+  // 240 ticks: near every 4, far every 24, beyond every 96, each from its last entry.
+  EXPECT_GE(got["~e1"], 40) << "near";
+  EXPECT_LT(3 * got["~e2"], got["~e1"]) << "far: far fewer than near (" << got["~e2"] << ")";
+  EXPECT_GE(got["~e2"], 4) << "far, but still";
+  EXPECT_LT(got["~e3"], got["~e2"]) << "beyond: fewer than far (" << got["~e3"] << ")";
+  EXPECT_GE(got["~e3"], 1) << "beyond, but still";
+}
 
 TEST(RoomEntities, TheirPidsAreNoParticipants) {
   EXPECT_EQ(rc::entity_pid(7), "~e7");
