@@ -78,6 +78,10 @@ struct material {
   float restitution = 0.0f;        // 0 = no bounce, 1 = elastic
   float rolling_resistance = 0.0f; // C_rr, for the vehicle and the energy ledger
   int nav_material = -1;           // the cvc::nav material id this surface carries; -1 = none
+  // The friction soaked (surface_class::mu_wet, which add_world_geometry carries): what a wading
+  // tire finds under water (vehicle.h). 0: not known, the tire keeps `friction`. apply_wetness
+  // moves `friction` toward it with the rain and leaves it alone.
+  float wet_friction = 0.0f;
 };
 
 } // namespace physics
