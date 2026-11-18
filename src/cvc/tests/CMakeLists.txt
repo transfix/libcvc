@@ -3111,10 +3111,12 @@ endfunction()
 
 cvc_discover_tests(app_test)
 foreach(_cvc_port_test IN LISTS CVC_PORT_TESTS)
-  if(_cvc_port_test STREQUAL "segmentation_intrinsics_test")
+  if(_cvc_port_test STREQUAL "segmentation_intrinsics_test" OR
+     _cvc_port_test STREQUAL "tiler_intrinsics_test")
     # AnActionStartsItUnderTheDefaultLimits runs a 160^3 segmentation through an action's frame
     # loop: 93-101 s in a Debug job, and past ctest's 300 s on a loaded runner (three times over in
-    # one job). The test's own loop allows 900 s too.
+    # one job). The tiler's runs a contour stack through one the same way, and ran past 300 s in a
+    # Debug job too. Each test's own loop allows 900 s as well.
     cvc_discover_tests(${_cvc_port_test} PROPERTIES TIMEOUT 900)
   else()
     cvc_discover_tests(${_cvc_port_test})
