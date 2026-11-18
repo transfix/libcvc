@@ -327,7 +327,7 @@ TEST(TilerIntrinsicsAriadne, AnActionStartsItUnderTheDefaultLimits) {
   } g{app};
   cvc::add_tiler_intrinsics(app);
   // Big enough to span many frames and several 100 ms progress notes.
-  const cvc::contour_stack s = tube(30, 96);
+  const cvc::contour_stack s = tube(60, 192);
   app.root()("doc.lab.contours").data(boost::any(s));
   EXPECT_TRUE(app.root()("ariadne.limits.action_max_time").value().empty());
   EXPECT_TRUE(app.root()("ariadne.limits.action_max_steps").value().empty());
