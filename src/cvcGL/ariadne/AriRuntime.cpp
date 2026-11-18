@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cvc/ariadne/ariadne.h>                // Runtime::document_scope()
 #include <cvc/ariadne/bind.h>                   // sync_scene_visibility
+#include <cvc/ariadne/scene_quality.h>          // AdaptiveQuality (O21)
 #include <cvc/ariadne/stream/stream_channel.h>  // subscribe / deliver_mode
 #include <cvc/ariadne/stream/stream_registry.h> // stream_registry::for_app / lookup
 #include <cvc/ariadne/stream_intrinsics.h>      // register_stream_intrinsics: streams by default
@@ -27,7 +28,6 @@
 #include <cvc/gl/ariadne/stream_node.h>            // register_stream_node_type: type: stream
 #include <cvc/gl/ariadne/stream_texture_binding.h> // StreamTextureBinding (gl-bind-stream sink)
 #include <cvc/gl/ariadne/stream_verbs.h>     // StreamBindingSink / register_gl_stream_intrinsics
-#include <cvc/state/state_exec/async_host.h> // wait_idle
 #include <cvc/state/state_exec/intrinsics.h> // document_scope::slot
 #include <memory>
 #include <stdexcept>
@@ -374,6 +374,10 @@ AriRuntime::AriRuntime(SceneRenderer &view, CameraController &cam, ImGuiOverlay 
   // declared before app_rt_, so the Runtime it points at is destroyed first.
   app_rt_.set_backend(backend_);
   backend_.install(app_rt_.runtime(), *overlay_);
+  // The scene prefix is the document's (arigl), and the camera, touch, lighting, HUD and settings
+  // subscribers under it run on this, the render thread: the document is never pumped on a worker
+  // (STATE_EXEC_THREADED.md 4.8, S1-Q6). Before any load().
+  app_rt_.declare_thread_affine_prefix(view.scene().getStatePrefix());
   // (fullscreen ON) and the §5.13 fullscreen view: the window covers the screen. Natively the VTK
   // window (cvcGL's SDL window: the desktop's mode, borderless); in a browser the canvas, through
   // requestFullscreen, which the page grants within the click's user activation.
@@ -512,6 +516,8 @@ void AriRuntime::enable_streaming() {
 
 std::vector<std::string> AriRuntime::load(const std::string &path) {
   views_->clear(); // the last document's views; the new one's widgets make their own
+  if (quality_)    // the same machine, so the same tier; the start's cooldown for the new document
+    quality_->reset(quality_->tier());
   std::vector<std::string> warnings = app_rt_.load(path);
   // §5.14 on a phone the panels start hidden so a scene isn't buried; a document with no scene
   // (a feed, a form) is nothing but its panels, so it starts with them shown.
@@ -573,9 +579,38 @@ double AriRuntime::frameDt(double dt_seconds) {
   return std::clamp(now - last, 0.0, 0.25);
 }
 
+// One frame of adaptive quality: the loop's keys under the scene's prefix, read each frame and
+// written when the loop moves (and each window's mean when it closes).
+void AriRuntime::tickQuality(double frame_s) {
+  const std::string p = prefix();
+  const auto at = [&p](const char *k) { return ari::resolve_bind(p, k); };
+  if (ari::read_or_seed<double>(app_, at("quality.adaptive"), 1.0) == 0.0) {
+    qualityHeld_ = true; // quality.tier and quality.scale are the keys' own until it runs again
+    return;
+  }
+  const double fps = ari::read_or_seed<double>(app_, at("quality.target_fps"), 30.0);
+  if (!quality_)
+    quality_ = std::make_unique<ari::AdaptiveQuality>();
+  if (qualityHeld_) // (re)starting: from the tier the keys hold
+    quality_->reset(static_cast<int>(ari::read_or<double>(app_, at("quality.tier"), 0.0)));
+  quality_->set_target_ms(1000.0 / std::clamp(fps, 1.0, 1000.0));
+  const long long windows = quality_->windows();
+  const bool moved = quality_->tick(1000.0 * frame_s);
+  if (quality_->windows() != windows)
+    ari::write<double>(app_, at("quality.frame_ms"), quality_->mean_ms());
+  if (moved || qualityHeld_) {
+    ari::write<double>(app_, at("quality.tier"), static_cast<double>(quality_->tier()));
+    ari::write<double>(app_, at("quality.scale"), quality_->scale());
+  }
+  qualityHeld_ = false;
+}
+
 void AriRuntime::frame(double dt_seconds) {
   FrameGuard guard(inFrame_, "frame");
+  const bool timed = !fixedClock_ && lastFrameAt_ >= 0.0; // a wall time since the last frame
   const double moveDt = frameDt(dt_seconds); // the camera's and the views' time step
+  if (timed)
+    tickQuality(moveDt);
   view_->processUIEvents(); // VTK interactor -> ImGui (widget input + camera nav)
   if (inputPump_)
     inputPump_(); // the host's own input, delivered this frame
@@ -606,7 +641,7 @@ void AriRuntime::request_close() { app_rt_.request_close(); }
 void AriRuntime::wait_idle() {
   if (inFrame_)
     throw std::logic_error("AriRuntime::wait_idle: called from inside a frame");
-  app_.exec_async_host().wait_idle();
+  app_rt_.wait_idle(); // the app's host, and the document's group's when it is isolated
 }
 
 void AriRuntime::run(double fps) {

@@ -531,6 +531,7 @@ struct tf_binding::impl {
     case tf_target::volren:
     case tf_target::fe_lab:
     case tf_target::volslice:
+    case tf_target::volume_slice:
       if (opt.volume_source)
         follow_volume(n); // fe_lab: the volume its last load brought
       // volslice too: its window is the slice LUT's span, not the transfer function's domain.
@@ -802,6 +803,8 @@ struct tf_binding::impl {
     case tf_target::fe_lab:
       lower_fe(true); // an edit (an editor's drag) re-meshes once it settles
       break;
+    case tf_target::volume_slice:
+      break; // VolumeSliceNode reads the model key itself
     }
     applied = seen;
     dirty = false;

@@ -27,21 +27,22 @@ constexpr float kTAU = 6.28318530718f;
 // ── one butterfly stage (2 complex per texel: .rg and .ba) ────────────────────
 // The LUT holds the inverse's twiddle exp(+i ang); the forward transform conjugates it, which is
 // exact, so the two directions use the same table.
-const char *kButterflyFS =
+const char *const kButterflyFS =
     "//VTK::System::Dec\n"
     "uniform sampler2D uSrc, uButterfly;\n"
-    "uniform int uStage, uVertical, uForward;\n"
+    "uniform int uStage, uVertical, uForward, uN;\n"
     "//VTK::Output::Dec\n"
     "vec2 cmul(vec2 a, vec2 b){ return vec2(a.x*b.x-a.y*b.y, a.x*b.y+a.y*b.x); }\n"
     "void main(){\n"
     "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
-    "  int idx = (uVertical == 0) ? c.x : c.y;\n"
+    "  int base = (c.x / uN) * uN;\n" // the tile's first texel across (0 with one tile)
+    "  int idx = (uVertical == 0) ? c.x - base : c.y;\n"
     "  vec4 bf = texelFetch(uButterfly, ivec2(uStage, idx), 0);\n"
     "  vec2 w = (uForward != 0) ? vec2(bf.x, -bf.y) : bf.xy;\n"
     "  int topI = int(bf.z + 0.5); int botI = int(bf.w + 0.5);\n"
     "  vec4 a, b;\n"
-    "  if (uVertical == 0) { a = texelFetch(uSrc, ivec2(topI, c.y), 0); b = texelFetch(uSrc, "
-    "ivec2(botI, c.y), 0); }\n"
+    "  if (uVertical == 0) { a = texelFetch(uSrc, ivec2(base + topI, c.y), 0);\n"
+    "                        b = texelFetch(uSrc, ivec2(base + botI, c.y), 0); }\n"
     "  else                { a = texelFetch(uSrc, ivec2(c.x, topI), 0); b = texelFetch(uSrc, "
     "ivec2(c.x, botI), 0); }\n"
     "  gl_FragData[0] = vec4(a.rg + cmul(w, b.rg), a.ba + cmul(w, b.ba));\n"
@@ -93,12 +94,13 @@ vtkSmartPointer<vtkTextureObject> oceanFloatTexture(vtkOpenGLRenderWindow *rw, i
 OceanButterfly::OceanButterfly() = default;
 OceanButterfly::~OceanButterfly() { release(); }
 
-bool OceanButterfly::init(vtkOpenGLRenderWindow *rw, int n) {
+bool OceanButterfly::init(vtkOpenGLRenderWindow *rw, int n, int tiles) {
   release();
-  if (!rw || n < 2 || (n & (n - 1)) != 0)
+  if (!rw || n < 2 || (n & (n - 1)) != 0 || tiles < 1)
     return false;
   m_rw = rw;
   m_n = n;
+  m_tiles = m_active = tiles;
   m_log2n = static_cast<int>(std::lround(std::log2(static_cast<double>(n))));
 
   // Butterfly LUT (Cooley-Tukey DIT, bit-reversal in stage 0). x=stage, y=index.
@@ -163,12 +165,15 @@ void OceanButterfly::release() {
 void OceanButterfly::pass(vtkOpenGLFramebufferObject *fbo, vtkTextureObject *src,
                           vtkTextureObject *dst, int stage, bool vertical, bool forward) {
   oceanBeginPass(m_rw, fbo, dst, m_n);
+  if (m_tiles > 1) // every tile at once (the first m_active)
+    m_rw->GetState()->vtkglViewport(0, 0, m_n * m_active, m_n);
   m_rw->GetShaderCache()->ReadyShaderProgram(m_quad->Program);
   src->Activate();
   m_lut->Activate();
   vtkShaderProgram *p = m_quad->Program;
   p->SetUniformi("uSrc", src->GetTextureUnit());
   p->SetUniformi("uButterfly", m_lut->GetTextureUnit());
+  p->SetUniformi("uN", m_n);
   p->SetUniformi("uStage", stage);
   p->SetUniformi("uVertical", vertical ? 1 : 0);
   p->SetUniformi("uForward", forward ? 1 : 0);

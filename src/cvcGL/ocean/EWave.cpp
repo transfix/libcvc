@@ -127,7 +127,7 @@ std::vector<float> realFactors(const cvc::ocean::ewave_params &p, const std::vec
 // The same arithmetic as ewave::exact_step's mode loop, with each mode's coefficients for this
 // dt from uCoef (modeCoefficients()). The mirror of index p is (n - p) mod n, so the Nyquist
 // index n / 2 pairs with itself.
-const char *kUpdateFS =
+const char *const kUpdateFS =
     "//VTK::System::Dec\n"
     "uniform sampler2D uZ, uCoef;\n"
     "uniform int uN;\n"
@@ -148,44 +148,46 @@ const char *kUpdateFS =
 // The exact step (uSym 0): z / n^2 times the cell's factor from uFactor (realFactors() for dt), as
 // ewave::exact_step. The symmetric step's last pass (uSym 1, uScale 1) only zeroes walls, as its
 // substeps' gathers have applied the factors.
-const char *kRealFS = "//VTK::System::Dec\n"
-                      "uniform sampler2D uZ, uMask, uFactor;\n"
-                      "uniform int uSym;\n"
-                      "uniform float uScale;\n"
-                      "//VTK::Output::Dec\n"
-                      "void main(){\n"
-                      "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
-                      "  vec2 z = texelFetch(uZ, c, 0).rg * uScale;\n"
-                      "  float f = uSym != 0 ? (texelFetch(uMask, c, 0).r > 0.0 ? 1.0 : 0.0)\n"
-                      "                      : texelFetch(uFactor, c, 0).r;\n"
-                      "  gl_FragData[0] = vec4(z * f, 0.0, 0.0);\n"
-                      "}\n";
+const char *const kRealFS =
+    "//VTK::System::Dec\n"
+    "uniform sampler2D uZ, uMask, uFactor;\n"
+    "uniform int uSym;\n"
+    "uniform float uScale;\n"
+    "//VTK::Output::Dec\n"
+    "void main(){\n"
+    "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
+    "  vec2 z = texelFetch(uZ, c, 0).rg * uScale;\n"
+    "  float f = uSym != 0 ? (texelFetch(uMask, c, 0).r > 0.0 ? 1.0 : 0.0)\n"
+    "                      : texelFetch(uFactor, c, 0).r;\n"
+    "  gl_FragData[0] = vec4(z * f, 0.0, 0.0);\n"
+    "}\n";
 
 // ── a source pass: h += (a drop's bump + a field) * mask ──────────────────────
 // The bump is ewave::add_height's, amount (1 - r^2 / R^2)^3, with r and R in cells.
-const char *kSourceFS = "//VTK::System::Dec\n"
-                        "uniform sampler2D uZ, uMask, uSrc;\n"
-                        "uniform int uDrop, uField;\n"
-                        "uniform vec2 uCentre;\n"
-                        "uniform float uR2, uAmount;\n"
-                        "//VTK::Output::Dec\n"
-                        "void main(){\n"
-                        "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
-                        "  vec2 z = texelFetch(uZ, c, 0).rg;\n"
-                        "  float add = 0.0;\n"
-                        "  if (uDrop != 0) {\n"
-                        "    vec2 d = vec2(c) - uCentre;\n"
-                        "    float w = 1.0 - dot(d, d) / uR2;\n"
-                        "    if (w > 0.0) add += uAmount * (w * w * w);\n"
-                        "  }\n"
-                        "  if (uField != 0) add += texelFetch(uSrc, c, 0).r;\n"
-                        "  gl_FragData[0] = vec4(z.x + add * texelFetch(uMask, c, 0).r, z.y, 0.0, "
-                        "0.0);\n"
-                        "}\n";
+const char *const kSourceFS =
+    "//VTK::System::Dec\n"
+    "uniform sampler2D uZ, uMask, uSrc;\n"
+    "uniform int uDrop, uField;\n"
+    "uniform vec2 uCentre;\n"
+    "uniform float uR2, uAmount;\n"
+    "//VTK::Output::Dec\n"
+    "void main(){\n"
+    "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
+    "  vec2 z = texelFetch(uZ, c, 0).rg;\n"
+    "  float add = 0.0;\n"
+    "  if (uDrop != 0) {\n"
+    "    vec2 d = vec2(c) - uCentre;\n"
+    "    float w = 1.0 - dot(d, d) / uR2;\n"
+    "    if (w > 0.0) add += uAmount * (w * w * w);\n"
+    "  }\n"
+    "  if (uField != 0) add += texelFetch(uSrc, c, 0).r;\n"
+    "  gl_FragData[0] = vec4(z.x + add * texelFetch(uMask, c, 0).r, z.y, 0.0, "
+    "0.0);\n"
+    "}\n";
 
 // ── the shift pass: the window moves by whole cells, its waves stay put ───────
 // Cell c takes what was at c + uOffset; what was outside the window enters flat.
-const char *kShiftFS =
+const char *const kShiftFS =
     "//VTK::System::Dec\n"
     "uniform sampler2D uZ;\n"
     "uniform int uN;\n"
@@ -202,46 +204,46 @@ const char *kShiftFS =
 // its lower corner (i0, j0), -1 elsewhere) the weighted sum of its corners' v (uW: the weights of
 // (i0, j0), (i0 + 1, j0), (i0, j0 + 1), (i0 + 1, j0 + 1), 0 on wall corners), other walls 0.
 // v is phi_half = phi - uHalf h (uMode 0, a substep) or h (uMode 1, damping_k2's filter).
-const char *kFillFS = "//VTK::System::Dec\n"
-                      "uniform sampler2D uZ, uCorner, uW, uInvM;\n"
-                      "uniform int uMode;\n"
-                      "uniform float uHalf;\n"
-                      "//VTK::Output::Dec\n"
-                      "float val(ivec2 p) {\n"
-                      "  vec2 z = texelFetch(uZ, p, 0).rg;\n"
-                      "  return uMode == 0 ? z.y - uHalf * z.x : z.x;\n"
-                      "}\n"
-                      "void main(){\n"
-                      "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
-                      "  float v = 0.0;\n"
-                      "  if (texelFetch(uInvM, c, 0).r > 0.0) {\n"
-                      "    v = val(c);\n"
-                      "  } else {\n"
-                      "    vec2 b = texelFetch(uCorner, c, 0).rg;\n"
-                      "    if (b.x >= 0.0) {\n"
-                      "      ivec2 o = ivec2(b);\n"
-                      "      vec4 w = texelFetch(uW, c, 0);\n"
-                      "      v = w.x * val(o) + w.y * val(o + ivec2(1, 0))\n"
-                      "        + w.z * val(o + ivec2(0, 1)) + w.w * val(o + ivec2(1, 1));\n"
-                      "    }\n"
-                      "  }\n"
-                      "  gl_FragData[0] = vec4(v, 0.0, 0.0, 0.0);\n"
-                      "}\n";
+const char *const kFillFS = "//VTK::System::Dec\n"
+                            "uniform sampler2D uZ, uCorner, uW, uInvM;\n"
+                            "uniform int uMode;\n"
+                            "uniform float uHalf;\n"
+                            "//VTK::Output::Dec\n"
+                            "float val(ivec2 p) {\n"
+                            "  vec2 z = texelFetch(uZ, p, 0).rg;\n"
+                            "  return uMode == 0 ? z.y - uHalf * z.x : z.x;\n"
+                            "}\n"
+                            "void main(){\n"
+                            "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
+                            "  float v = 0.0;\n"
+                            "  if (texelFetch(uInvM, c, 0).r > 0.0) {\n"
+                            "    v = val(c);\n"
+                            "  } else {\n"
+                            "    vec2 b = texelFetch(uCorner, c, 0).rg;\n"
+                            "    if (b.x >= 0.0) {\n"
+                            "      ivec2 o = ivec2(b);\n"
+                            "      vec4 w = texelFetch(uW, c, 0);\n"
+                            "      v = w.x * val(o) + w.y * val(o + ivec2(1, 0))\n"
+                            "        + w.z * val(o + ivec2(0, 1)) + w.w * val(o + ivec2(1, 1));\n"
+                            "    }\n"
+                            "  }\n"
+                            "  gl_FragData[0] = vec4(v, 0.0, 0.0, 0.0);\n"
+                            "}\n";
 
 // ── the multiply pass: G~ (uMode 0) or damping_k2's 1 - F (uMode 1), and 1 / n^2 ───
 // Each mode's multiplier from uMul (symmetricMultipliers() for dt_s). The field is the transform
 // of a real one and the multipliers are real and even, so it stays Hermitian.
-const char *kMultiplyFS = "//VTK::System::Dec\n"
-                          "uniform sampler2D uZ, uMul;\n"
-                          "uniform int uMode;\n"
-                          "uniform float uScale;\n"
-                          "//VTK::Output::Dec\n"
-                          "void main(){\n"
-                          "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
-                          "  vec2 a = texelFetch(uMul, c, 0).rg;\n"
-                          "  float m = (uMode == 0 ? a.x : a.y) * uScale;\n"
-                          "  gl_FragData[0] = vec4(texelFetch(uZ, c, 0).rg * m, 0.0, 0.0);\n"
-                          "}\n";
+const char *const kMultiplyFS = "//VTK::System::Dec\n"
+                                "uniform sampler2D uZ, uMul;\n"
+                                "uniform int uMode;\n"
+                                "uniform float uScale;\n"
+                                "//VTK::Output::Dec\n"
+                                "void main(){\n"
+                                "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
+                                "  vec2 a = texelFetch(uMul, c, 0).rg;\n"
+                                "  float m = (uMode == 0 ? a.x : a.y) * uScale;\n"
+                                "  gl_FragData[0] = vec4(texelFetch(uZ, c, 0).rg * m, 0.0, 0.0);\n"
+                                "}\n";
 
 // ── the gather pass: R^T, 1 / M, the update and the real-space factors ───────
 // As ewave::fold and the substep's last loop: a water texel (1 / M above 0) adds to its own value
@@ -432,6 +434,9 @@ void EWave::releaseResources() {
   for (auto &z : m_z)
     z = nullptr;
   m_mask = m_src = m_ghostCorner = m_ghostW = m_invMass = m_coef = m_mul = m_factor = nullptr;
+  m_coefs.clear();
+  m_muls.clear();
+  m_factors.clear();
   m_coefStale = m_mulStale = m_factorStale = true;
   for (auto &r : m_readers)
     r = nullptr;
@@ -606,33 +611,46 @@ void EWave::setDepth(double depth) {
 // The step's tables (the opening comment), worked out again only when what they depend on has
 // changed: the exact step's coefficients on dt and the depth, the symmetric step's multipliers on
 // dt_s and the depth, the real-space factors on the step (dt or dt_s) and the mask.
-void EWave::prepareExact(double dt) {
-  if (m_coefStale || dt != m_coefDt) {
-    std::vector<float> cf = modeCoefficients(m_p, dt);
-    m_coef->Create2DFromRaw(m_p.n, m_p.n, 4, VTK_FLOAT, cf.data());
-    m_coefDt = dt;
-    m_coefStale = false;
+vtkTextureObject *EWave::stepTable(std::vector<step_table> &kept, bool &stale, double dt, int comps,
+                                   const std::function<std::vector<float>()> &make) {
+  if (stale) {
+    kept.clear();
+    stale = false;
   }
+  for (std::size_t i = 0; i < kept.size(); ++i)
+    if (kept[i].dt == dt) { // to the front: the most recent first
+      std::rotate(kept.begin(), kept.begin() + std::ptrdiff_t(i),
+                  kept.begin() + std::ptrdiff_t(i) + 1);
+      return kept.front().tex;
+    }
+  step_table t;
+  t.dt = dt;
+  if (kept.size() >= kStepTables) { // the least recent's texture, refilled
+    t.tex = kept.back().tex;
+    kept.pop_back();
+  } else {
+    t.tex = oceanFloatTexture(m_rw, m_p.n, m_p.n, comps, nullptr);
+  }
+  std::vector<float> v = make();
+  t.tex->Create2DFromRaw(m_p.n, m_p.n, comps, VTK_FLOAT, v.data());
+  ++m_tablesBuilt;
+  kept.insert(kept.begin(), t);
+  return kept.front().tex;
+}
+
+void EWave::prepareExact(double dt) {
+  m_coef = stepTable(m_coefs, m_coefStale, dt, 4, [&] { return modeCoefficients(m_p, dt); });
   prepareFactors(dt);
 }
 
 void EWave::prepareSymmetric(double dts) {
-  if (m_mulStale || dts != m_mulDts) {
-    std::vector<float> mul = symmetricMultipliers(m_p, dts);
-    m_mul->Create2DFromRaw(m_p.n, m_p.n, 2, VTK_FLOAT, mul.data());
-    m_mulDts = dts;
-    m_mulStale = false;
-  }
+  m_mul = stepTable(m_muls, m_mulStale, dts, 2, [&] { return symmetricMultipliers(m_p, dts); });
   prepareFactors(dts);
 }
 
 void EWave::prepareFactors(double dt) {
-  if (m_factorStale || dt != m_factorDt) {
-    std::vector<float> f = realFactors(m_p, m_maskHost, dt);
-    m_factor->Create2DFromRaw(m_p.n, m_p.n, 1, VTK_FLOAT, f.data());
-    m_factorDt = dt;
-    m_factorStale = false;
-  }
+  m_factor =
+      stepTable(m_factors, m_factorStale, dt, 1, [&] { return realFactors(m_p, m_maskHost, dt); });
 }
 
 void EWave::step(double dt) {

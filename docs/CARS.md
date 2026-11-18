@@ -45,7 +45,8 @@ Contents:
 
 ## Your controller
 
-Edit `controller(s, p)` in `cars.py`. It runs every tick (0.05 s), once for all the cars, and
+Edit `controller(s, p)` in `cars.py`. It runs every tick (0.06 s, libcvc's one simulation tick,
+`pycvc.SIM_TICK`), once for all the cars, and
 returns `(steer, accel)`: one front-wheel angle (rad, + left) and one acceleration along the
 heading (m/s²) per car, as numpy arrays. Each car's plant takes them in the navigator's place
 (`pycvc.nav_sim_world_override`), held to the car's steering lock, its acceleration and braking,
@@ -275,7 +276,10 @@ The knobs, with the values a Humvee run starts from:
 | `nav.ttl_s` | s | 0 .. 60 | 4 | How long an obstacle added at run time stays on the map |
 
 The template's own keys: `run.world`, `run.uri`, `run.data_path`, `run.crop` (m), `run.cars`,
-`run.controller` (`yours`, `navigator`), `run.ticks` (ticks per frame), `run.regoal`,
+`run.controller` (`yours`, `navigator`), `run.ticks` (in a live window, the speed: world seconds
+per wall second, the cars stepping the ticks world time has passed on a clock at the 0.01 s
+quantum, catching up at most 0.25 s a frame; headless or with `--frames`, ticks per frame),
+`run.regoal`,
 `run.paused`, and `view.camera`, `view.car` (the chosen car), `view.horizon` (s of predicted
 path), `view.raster_m` (the raster window, m), `show.plans`.
 

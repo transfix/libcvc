@@ -1,0 +1,14 @@
+{
+  "library": "ContourTiler",
+  "series": "touching/touching.ser",
+  "first": 1,
+  "last": 5,
+  "vertices": 260,
+  "parameters": {
+    "curation_delta": 0.05,
+    "collinear_epsilon": 1e-15,
+    "remove_intersections": 1,
+    "z_scale": 1
+  },
+  "made_by": "tools/volrover-goldens/make_inputs.py"
+}

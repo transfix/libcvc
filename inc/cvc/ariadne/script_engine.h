@@ -62,7 +62,17 @@ class app;
 namespace ariadne {
 
 class AppRuntime;
+class ScriptActivation;
 class ScriptLane;
+
+// Code a client sent its relay to run as its own (ARIADNE_SCRIPTING_HOSTS.md §6.3; G4: a client's
+// WebAssembly guest), for an engine that runs it (ScriptEngine::client_activation).
+struct ClientCode {
+  std::string bytes;            // the module, as sent
+  std::string entry;            // what to call in it (a guest's export)
+  std::string name;             // for messages: "client <pid>"
+  std::uint64_t max_memory = 0; // its memory, in bytes; 0: the engine's own cap
+};
 
 // A document's block in an engine's language, as the load found it.
 struct ScriptBlock {
@@ -94,6 +104,21 @@ public:
   // runtime is going. Let go of what load_block made for it. The lane's hooks are dropped for
   // the engine; its activations still running go on unless it stops them.
   virtual void unload(ScriptLane &lane) { (void)lane; }
+  // A client's code (§6.3, G4), as the activation that runs `code.entry` with `args` (a list) and
+  // finishes with its value. It belongs to no document: it reaches only what the process it runs
+  // in holds (run_as_program_work), so the caller decides its chroot, its functions and its caps.
+  // On `app`'s thread that drains it. Null with `error` set when the code can't be run at all (not
+  // this engine's format); a mistake found later (a module that doesn't compile) is raised from a
+  // step. Null with an error by default: an engine runs no client's code unless it says so.
+  virtual std::shared_ptr<ScriptActivation> client_activation(cvc::app &app, ClientCode code,
+                                                              cvc::state_exec::value_t args,
+                                                              std::string &error) {
+    (void)app;
+    (void)code;
+    (void)args;
+    error = language() + " runs no client's code";
+    return nullptr;
+  }
 };
 
 // Register `engine` on `app`, by its language, replacing any engine of that language there (and
@@ -200,6 +225,11 @@ public:
   // Its process ended before it finished: killed (a cap, stop(), the document going) or failed.
   // No step() follows.
   virtual void cancel() {}
+  // Whether its first step can do work now: false while what it needs is still being made off the
+  // drain's thread (a client's guest whose module compiles on the app's pool). A caller that can
+  // hold it (ServerDocument::run_client_guest) starts it once it is; one started earlier yields
+  // its frames meanwhile. Any thread may ask.
+  virtual bool ready() const { return true; }
 };
 
 // How an activation ended, for ActivationOptions::on_done.
@@ -247,6 +277,19 @@ using ScriptHook =
 using ScriptCall = std::function<std::shared_ptr<ScriptActivation>(
     std::span<const cvc::state_exec::value_t> args)>;
 
+// Run `activation` to its end as the calling program's own sliced work: what a native function
+// does with it, called as `args` is, from a step of a program on `app`'s scheduler (the first way
+// export_activation runs a call). A slice per data step of the process, charged to it, under
+// ariadne.limits.<language>_slice_steps and the language's frame budget; its call()s and
+// call_now()s reach the process's own environment, narrowed by `may_call` (null: all of it).
+// Returns what it finished with, or raises what a step threw; RuntimeError where no program's step
+// is running. `name` is for messages.
+cvc::state_exec::value_t
+run_as_program_work(cvc::app &app, cvc::state_exec::call_args args,
+                    std::shared_ptr<ScriptActivation> activation, const std::string &language,
+                    const std::string &name,
+                    std::function<bool(const std::string &function)> may_call = nullptr);
+
 // ── the lane ────────────────────────────────────────────────────────────────────────────────────
 
 // A runtime's document as one engine reaches it: AppRuntime::use_script_engine makes one for each
@@ -269,15 +312,15 @@ public:
   void export_async_function(const std::string &name, cvc::state_exec::async_marshal marshal,
                              const std::string &done_channel = std::string());
   // A function whose every call is an activation (§8.5), `make`'s, run three ways:
-  //   (name a b ...) from a program on the app's scheduler (an action, a resident) runs it as the
-  //     program's own sliced native call (a data job, data_job.h): a slice per data step of the
-  //     calling process, charged to it, so its caps are the activation's. The slice's call()s and
-  //     await()s are the program's own, made in its process (its chroot, its functions), and a
-  //     yield_frame() parks it for a frame. It returns what the activation finished with, or
-  //     raises what a step threw, with its own class. options' caps, lane, scope and priority
-  //     don't apply: the program's do. Its lock does: the program takes it around the activation,
-  //     waiting for it as with-lock waits. A call it can't run there (none of the program's steps
-  //     is running) raises RuntimeError.
+  //   (name a b ...) from a program whose host parks (an action, a resident: on group 0, or on
+  //     the document's isolated group) runs it as the program's own sliced native call (a data job,
+  //     data_job.h): a slice per data step of the calling process, charged to it, so its caps are
+  //     the activation's. The slice's call()s and await()s are the program's own, made in its
+  //     process (its chroot, its functions), and a yield_frame() parks it for a frame. It returns
+  //     what the activation finished with, or raises what a step threw, with its own class.
+  //     options' caps, lane, scope and priority don't apply: the program's do. Its lock does: the
+  //     program takes it around the activation, waiting for it as with-lock waits. A call it can't
+  //     run there (none of the program's steps is running) raises RuntimeError.
   //   (name-async ...) returns a future: the activation runs as an action of the document, in a
   //     process of its own (start), under options; a cap or a kill raises RuntimeError at the
   //     await. When the calling process goes first, the activation stops at its next slice.
@@ -303,12 +346,12 @@ public:
   // Start an activation now: the next pump runs its first slice (the drain's, when called before
   // the drain pumps: from an on: handler, or a hook). Returns its pid; throws when it can't start.
   int start(std::shared_ptr<ScriptActivation> activation, ActivationOptions options);
-  // Run an activation to its end now: start it, then pump the app's scheduler (Runtime::pump)
-  // until it ends, a frame per pump. For work that can't wait for the frame loop: a guest's
-  // ari_init at load, a call from init:. Under options.lane's caps (ProgramLane::init's for a
-  // load's work), and at most `max_seconds` of wall time, past which it is stopped. Returns how it
-  // ended (options.on_done hears it too). Throws RuntimeError from inside a step of the app's
-  // scheduler, which it would have to re-enter.
+  // Run an activation to its end now: start it, then pump the document's scheduler (its isolated
+  // group's, else the app's; Runtime::pump) until it ends, a frame per pump. For work that can't
+  // wait for the frame loop: a guest's ari_init at load, a call from init:. Under options.lane's
+  // caps (ProgramLane::init's for a load's work), and at most `max_seconds` of wall time, past
+  // which it is stopped. Returns how it ended (options.on_done hears it too). Throws RuntimeError
+  // from inside a step of either scheduler, or a frame's pump, which it would have to re-enter.
   ActivationOutcome run(std::shared_ptr<ScriptActivation> activation, ActivationOptions options,
                         double max_seconds = 30.0);
   // Stop one: its process is killed, and its on_done hears "did not complete: killed".

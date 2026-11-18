@@ -17,6 +17,7 @@
 #include <cvc/ariadne/loader.h> // register_ari_block: an engine's language is a block key
 #include <cvc/ariadne/script_engine.h>
 #include <cvc/core/app.h>
+#include <cvc/core/exec_pool.h> // in_pump_all: run() never re-enters a frame's pump
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h> // async_work: an exported call parks on its activation
 #include <cvc/state/state_exec/async_scheduler.h>
@@ -25,6 +26,7 @@
 #include <cvc/state/state_exec/detail/lock_home.h> // lock_ops_of: the caller's with-lock chroot
 #include <cvc/state/state_exec/evaluator.h>        // step_kind
 #include <cvc/state/state_exec/exceptions.h>
+#include <cvc/state/state_exec/exec_group.h> // an isolated document's group: its scheduler
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/process.h>
@@ -739,12 +741,20 @@ const char kSlicedAsk[] = "(try (list #t (if (= k \"call\") (apply f a) (await f
 
 } // namespace
 
-// An exported call from a program on the app's scheduler (export_activation): the program's own
-// deep-data work (data_job.h), one slice of the activation per data step of its process, each
-// slice's steps charged to that process, so the program's caps bound it. A call or an await a
-// slice asks for is the program's, made in its process by a closure around a try (kSlicedAsk):
-// its value or its exception comes back to the next slice instead of unwinding the job. When the
-// job goes before its activation finished (a throw, a cap, a kill), the activation is cancelled.
+// Where the document's processes, its activations among them, run: its isolated group's scheduler,
+// else the app's (group 0). current_group decides nothing and moves nothing.
+static se::async_scheduler &document_scheduler(AppRuntime &runtime) {
+  se::exec_group *const group = runtime.runtime().current_group();
+  return group ? group->sched() : runtime.app().exec_scheduler();
+}
+
+// An exported call from a program whose host parks (export_activation; group 0's, or an isolated
+// document's group's): the program's own deep-data work (data_job.h), one slice of the activation
+// per data step of its process, each slice's steps charged to that process, so the program's caps
+// bound it. A call or an await a slice asks for is the program's, made in its process by a closure
+// around a try (kSlicedAsk): its value or its exception comes back to the next slice instead of
+// unwinding the job. When the job goes before its activation finished (a throw, a cap, a kill), the
+// activation is cancelled.
 class SlicedCall : public se::data_job {
 public:
   SlicedCall(cvc::app &app, std::shared_ptr<ScriptActivation> activation, std::string name,
@@ -756,7 +766,15 @@ public:
     auto ask = std::make_shared<se::closure>();
     ask->params = {se::symbol{"k"}, se::symbol{"f"}, se::symbol{"a"}};
     ask->body = {se::parse(kSlicedAsk)};
-    ask->env_snapshot = env_;
+    // A scope of its own over the process's, with the `apply` it calls by: an environment narrowed
+    // to a few names (LaneProcess::allow: a client's program) may not hold it. What the activation
+    // calls is still only what the process holds: `f` is the value env_ has for the name it asked.
+    se::environment_ptr scope =
+        se::environment::extend(env_ ? env_ : std::make_shared<se::environment>());
+    scope->set("apply", se::value_t(se::native_fn([](se::call_args a) -> se::value_tag {
+                 return se::builtin_apply(a);
+               })));
+    ask->env_snapshot = std::move(scope);
     ask_ = se::value_t(std::move(ask));
   }
 
@@ -887,7 +905,52 @@ se::value_t locked_call(se::exec_context *ctx, std::unique_ptr<SlicedCall> job,
   return se::call_function(ctx, se::value_t(std::move(c)), args, "with-lock");
 }
 
+// The process whose step calls a native in `ctx`, for an activation run as its own work; a
+// RuntimeError naming `name` where none of a program's steps is running. It is on the group whose
+// pump runs this call (an isolated document's, S1.9), else on the app's scheduler (group 0).
+const se::process_ptr &calling_process(cvc::app &app, se::exec_context *ctx,
+                                       const std::string &name) {
+  se::detail::data_step_scope *data = ctx ? ctx->data : nullptr;
+  se::exec_group *const group = se::exec_group::current(ctx);
+  const se::process_ptr &proc = (group ? group->sched() : app.exec_scheduler()).current_process();
+  if (!data || !data->defer_allowed() || !proc)
+    throw se::dsl_error("RuntimeError",
+                        name + ": called where no program's step is running, so it can't run "
+                               "as that program's work");
+  return proc;
+}
+
+// `made` as a sliced call in the environment `env` (the calling process's), under the language's
+// slice size (`slices`, else its setting) and frame budget.
+std::unique_ptr<SlicedCall> sliced_call(cvc::app &app, std::shared_ptr<ScriptActivation> made,
+                                        const std::string &language, const std::string &name,
+                                        std::uint64_t slices,
+                                        std::function<bool(const std::string &)> may_call,
+                                        se::environment_ptr env) {
+  cvc::state &root = cvc::state::instance(app);
+  const std::uint64_t slice_steps =
+      slices ? slices
+             : count_setting(root, "ariadne.limits." + language + "_slice_steps", kSliceSteps);
+  const double frame_seconds =
+      seconds_setting(root, "ariadne.limits." + language + "_frame_budget", kFrameBudget);
+  return std::make_unique<SlicedCall>(app, std::move(made), name, slice_steps, frame_seconds,
+                                      budget_of(app, language), std::move(may_call),
+                                      std::move(env));
+}
+
 } // namespace
+
+se::value_t run_as_program_work(cvc::app &app, se::call_args args,
+                                std::shared_ptr<ScriptActivation> activation,
+                                const std::string &language, const std::string &name,
+                                std::function<bool(const std::string &)> may_call) {
+  se::exec_context *const ctx = args.context();
+  const se::process_ptr &proc = calling_process(app, ctx, name);
+  if (!activation)
+    return se::value_t();
+  return se::run_data_job(ctx, sliced_call(app, std::move(activation), language, name, 0,
+                                           std::move(may_call), proc->state.global_env));
+}
 
 void ScriptLane::export_activation(const std::string &name, ScriptCall make,
                                    ActivationOptions options) {
@@ -899,23 +962,28 @@ void ScriptLane::export_activation(const std::string &name, ScriptCall make,
   // A call that waits for its activation (a program parks on it).
   se::async_work_marshal parked = [self = self_, app, name, make,
                                    options](std::span<const se::value_t> args) {
-    se::async_work work;
+    se::async_work work; // no kernel: a call that can't park raises RuntimeError
     work.start = [self, app, name, make, options,
                   copied = std::vector<se::value_t>(args.begin(), args.end())](
                      const std::shared_ptr<se::async_call> &call) {
       ScriptLane *lane = *self;
       if (!lane)
         throw std::runtime_error(name + ": its document has gone");
-      se::async_host &host = app->exec_async_host();
+      // The host the call was made on, the calling program's (its group's in an isolated
+      // document, S1.9): the call is that host's, so its outcome goes back through it. Its
+      // finisher posts nothing once that host has shut down (a move retired the group).
+      se::async_host *const made_on = call->starting_host();
+      const se::async_host::finisher finisher =
+          (made_on ? *made_on : app->exec_async_host()).make_finisher();
       std::shared_ptr<ScriptActivation> made = make(copied);
       if (!made) {
         if (call->settle(se::value_t(), nullptr))
-          host.finish(call);
+          finisher.finish(call);
         return;
       }
       auto stop = std::make_shared<std::atomic<bool>>(false);
       ActivationOptions o = options;
-      o.on_done = [call, &host, name](const ActivationOutcome &out) {
+      o.on_done = [call, finisher, name](const ActivationOutcome &out) {
         if (call->cancel_requested())
           return;
         std::exception_ptr error;
@@ -924,14 +992,15 @@ void ScriptLane::export_activation(const std::string &name, ScriptCall make,
                       ? std::make_exception_ptr(se::dsl_exception(out.exception))
                       : std::make_exception_ptr(std::runtime_error(name + ": " + out.error));
         if (call->settle(out.ok ? out.value : se::value_t(), error))
-          host.finish(call);
+          finisher.finish(call);
       };
       lane->start(std::make_shared<CallActivation>(std::move(made), stop), std::move(o));
       call->on_cancel([stop] { stop->store(true, std::memory_order_release); });
     };
     return work;
   };
-  // A call from where the program can't park (init:): the activation, run to its end in it.
+  // A call from where the program can't park (init:, whose host runs its calls inline, S1-Q2):
+  // the activation, run to its end in it.
   se::native_fn blocking = [self = self_, name, make,
                             options](std::span<const se::value_t> args) -> se::value_t {
     ScriptLane *lane = *self;
@@ -948,7 +1017,8 @@ void ScriptLane::export_activation(const std::string &name, ScriptCall make,
       throw se::dsl_exception(out.exception);
     throw std::runtime_error(name + ": " + out.error);
   };
-  // A call from a program on the app's scheduler: the activation as the program's own sliced work.
+  // A call from a program whose host parks (group 0's, or an isolated document's group's): the
+  // activation as the program's own sliced work.
   se::native_fn sliced = [self = self_, app, language, name, make, may_call = options.may_call,
                           slices = options.slice_steps,
                           lock = options.lock](se::call_args args) -> se::value_t {
@@ -956,25 +1026,13 @@ void ScriptLane::export_activation(const std::string &name, ScriptCall make,
     if (!lane)
       throw std::runtime_error(name + ": its document has gone");
     se::exec_context *const ctx = args.context();
-    se::detail::data_step_scope *data = ctx ? ctx->data : nullptr;
-    const se::process_ptr &proc = app->exec_scheduler().current_process();
-    if (!data || !data->defer_allowed() || !proc)
-      throw se::dsl_error("RuntimeError",
-                          name + ": called where no program's step is running, so it can't run "
-                                 "as that program's work");
+    const se::process_ptr &proc = calling_process(*app, ctx, name);
     std::shared_ptr<ScriptActivation> made =
         make(std::vector<se::value_t>(args.begin(), args.end()));
     if (!made)
       return se::value_t();
-    cvc::state &root = cvc::state::instance(*app);
-    const std::uint64_t slice_steps =
-        slices ? slices
-               : count_setting(root, "ariadne.limits." + language + "_slice_steps", kSliceSteps);
-    const double frame_seconds =
-        seconds_setting(root, "ariadne.limits." + language + "_frame_budget", kFrameBudget);
-    auto job =
-        std::make_unique<SlicedCall>(*app, std::move(made), name, slice_steps, frame_seconds,
-                                     budget_of(*app, language), may_call, proc->state.global_env);
+    auto job = sliced_call(*app, std::move(made), language, name, slices, may_call,
+                           proc->state.global_env);
     if (lock.empty())
       return se::run_data_job(ctx, std::move(job));
     return locked_call(ctx, std::move(job), lock_path(lock, lane->prefix()), proc->state.global_env,
@@ -1007,7 +1065,11 @@ void ScriptLane::export_pure(const std::string &name, ScriptCall make, Activatio
 
 ActivationOutcome ScriptLane::run(std::shared_ptr<ScriptActivation> activation,
                                   ActivationOptions options, double max_seconds) {
-  if (app().exec_scheduler().current_pid() >= 0)
+  // Its pumps (Runtime::pump) would re-enter one this thread is inside: a step of the document's
+  // scheduler or of group 0's, or a frame's pump_all (exec_pump_frame, td 4.12).
+  const cvc::exec_pool *const pool = app().exec_pool_probe();
+  if (document_scheduler(runtime_).current_pid() >= 0 ||
+      app().exec_scheduler().current_pid() >= 0 || (pool && pool->in_pump_all()))
     throw se::dsl_error("RuntimeError",
                         "a " + language_ +
                             " activation can't be run to its end from inside a step of the "
@@ -1042,7 +1104,8 @@ ActivationOutcome ScriptLane::run(std::shared_ptr<ScriptActivation> activation,
       }
       break;
     }
-    if (running(pid) && app().exec_scheduler().get_stats().ready == 0)
+    // Where it runs, now that start placed the document: its group's scheduler, else group 0's.
+    if (running(pid) && document_scheduler(runtime_).get_stats().ready == 0)
       std::this_thread::sleep_for(std::chrono::milliseconds(1)); // parked: on a pool, a timer
   }
   return ended->out;
@@ -1050,13 +1113,13 @@ ActivationOutcome ScriptLane::run(std::shared_ptr<ScriptActivation> activation,
 
 void ScriptLane::stop(int pid) {
   if (pid >= 0)
-    app().exec_scheduler().kill(pid);
+    document_scheduler(runtime_).kill(pid);
 }
 
 bool ScriptLane::running(int pid) const {
   if (pid < 0)
     return false;
-  const auto info = app().exec_scheduler().get_process_info(pid);
+  const auto info = document_scheduler(runtime_).get_process_info(pid);
   return info && !se::is_finished(info->status);
 }
 

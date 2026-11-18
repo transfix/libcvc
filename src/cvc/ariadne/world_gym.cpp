@@ -23,6 +23,7 @@
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/world_gym.h>
 #include <cvc/core/app.h>
+#include <cvc/core/sim_tick.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/nav/world_grid.h>
 #include <cvc/physics/world.h>
@@ -269,6 +270,7 @@ const gym_observation &WorldGym::reset(std::uint64_t seed) {
       }
     }
   }
+  v.set_tick(d.opts.tick > 0.0 ? d.opts.tick : cvc::kSimTick); // built with the restart's navigator
   d.rt->restart_world(); // the clock at tick 0, the world as the document built it
   v.reseed(seed);
   v.set_wander(d.opts.wander);
@@ -485,7 +487,7 @@ bool WorldGym::save_log(const std::string &path) const {
 
 double WorldGym::dt() const {
   const double t = _impl->vehicles().tick_seconds();
-  return t > 0.0 ? t : 0.05;
+  return t > 0.0 ? t : (_impl->opts.tick > 0.0 ? _impl->opts.tick : cvc::kSimTick);
 }
 
 std::size_t WorldGym::agents() const { return _impl->obs.n; }

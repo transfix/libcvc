@@ -16,7 +16,8 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/physics/body.h` | `body_desc` (with an optional `hull`), `body_state` |
 | `cvc/physics/backend.h` | `backend`, capability bits, `available_backends()` |
 | `cvc/physics/world.h` | `world_config`, `world`, `contact_event`, `ray_hit`, `step_report` |
-| `cvc/physics/field.h` | `field` (a `cvc::volume` as water, snow or wind), `field_load` |
+| `cvc/physics/field.h` | `field` (a `cvc::volume` as water, snow or wind), `field_load`, `water_sample` (`world::water_at`) |
+| `cvc/physics/flow_velocity.h` | `flow_velocity`, a flow field's velocity in space and time (`field::wind`), and `wind_flow`, the scene's wind: `cvc::algo`'s gusts and height profile (below, and OCEAN-AND-WEATHER-ROADMAP.md E5, O14) |
 | `cvc/physics/fluid_surface.h` | `fluid_surface`, a fluid field's free surface (its level, waves and water velocity, read at `world::field_time()`); `still_surface`, `wave_train_surface` (linear Airy trains). A field reads a cell's height and velocity with `height_with` / `velocity_with` and a `surface_memo` it owns, so a surface can share work between the two reads |
 | `cvc/physics/hull.h` | `hull_mesh`, `box_hull()`: a boat's hull, a closed triangle list apart from the collision shape, that a fluid pushes on triangle by triangle (hydrostatic pressure split at the waterline, ITTC-57 friction, pressure drag, slamming) in place of the body's sample cells |
 | `cvc/physics/immersion.h` | `immersion_body` (a body's outline as the water sees it: its box, sphere or convex hull, or its `hull_mesh`), `immersion_water` (a fluid field's surface, time and box), `immersion_grid`, `add_immersion()`: a body's columns of immersed depth zeta over a grid window's cells, from its shape, its pose and the water, as the field step immerses it. The wake windows' sources (OCEAN-AND-WEATHER-ROADMAP.md C2, O9), computable without a world (a renderer, a client from a replicated pose); the same bits on every platform |
@@ -28,6 +29,7 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/gl/physics_scene_binding.h` (cvcGL) | `physics_scene_binding`: a world's bodies drawn in a scene graph |
 | `cvc/physics/world_geometry.h` | `add_world_geometry`: a `cvc::world::world_geometry`'s static bodies and materials |
 | `cvc/physics/nav_plant.h` | `nav_plant`: a world's vehicles as `cvc::nav`'s plant (`cvc/nav/vehicle_plant.h`) |
+| `cvc/physics/dyn_boat_plant.h` | `dyn_boat_plant`, `dyn_boat_desc` (with `launch()`, `jonboat()`): a world's boats as `cvc::nav`'s plant, through a driver, with an energy ledger |
 | `cvc/physics/jolt_rollout.h` | `jolt_rollout`: the Jolt vehicle as `cvc::nav`'s training rollout (`rollout_kind::jolt`, `cvc/nav/rollout_plant.h`; NAV_TRAINING.md, "Training on Jolt") |
 | `cvc/physics/mujoco_robot.h` | `mujoco_robot`: one articulated robot (the Unitree Go2 first) simulated by MuJoCo on a `cvc::height_field`, with servo and torque commands, pushes, contacts and MuJoCo's energies; `run_mujoco_trial`. Optional (`CVC_WITH_MUJOCO`); [MUJOCO.md](MUJOCO.md) |
 
@@ -35,7 +37,7 @@ The physics headers include only the standard library, except:
 
 - `world_binding.h`, which needs `cvc::app`;
 - `world_geometry.h`, which reads `cvc::world`;
-- `nav_plant.h`, which implements `cvc::nav`'s plant interface;
+- `nav_plant.h` and `dyn_boat_plant.h`, which implement `cvc::nav`'s plant interface;
 - `jolt_rollout.h`, which implements `cvc::nav`'s training rollout interface.
 
 No header names an engine. `cvc::nav` never includes `cvc::physics`; a configure-time check in
@@ -87,6 +89,7 @@ const body_state s = w.state(c);
 | `velocity_steps`, `position_steps` | 10, 2 | yes |
 | `penetration_slop` | 0.002 m | yes |
 | `threads` | 0 (no worker threads) | no |
+| `field_threads` | 0 (the stepping thread reads the fields alone) | yes |
 | `determinism` | `cross_platform` | no |
 | `friction`, `restitution` (combine rules) | `product`, `max` | yes |
 | `contacts` (reporting) | `added_removed` | yes |
@@ -156,8 +159,16 @@ The physics headers stay standard-library only by forward-declaring the two type
 - **Stepping:** `step()` advances `fixed_dt`, and `step(n)` runs n steps under one lock.
 - **Following a clock:** `follow(clock)` runs the steps due on a `cvc::world_clock` since the last
   call. `fixed_dt` must be a whole number of the clock's quanta.
-- **Reports:** `last_report()` returns the last step's `step_report`. It carries wall time, active
-  bodies, the number of contact events, and `saturated` when an engine buffer filled.
+- **Reports:** `last_report()` returns the last step's `step_report`. It carries wall time (and
+  how much of it the fields' pushes, `fields_ms`, and the engine's own step, `engine_ms`, took),
+  active bodies, the number of contact events, and `saturated` when an engine buffer filled.
+- **Field threads:** a fluid with a free surface reads the surface's height and velocity at every
+  cell of every body in it, every step: the field step's main cost. `field_threads` reads them on
+  that many worker threads beside the stepping thread (and does the surface's per-time work, an
+  ocean surface's transforms, as their tasks too). Each cell's reads land in its own slot and the
+  sums run over them in the cells' order, so a run's values, and its `state_hash`, do not depend
+  on it. A build without threads (single-threaded WebAssembly) ignores it. An Ariadne scene's
+  world (`SceneWorld`) uses up to three.
 
 ### Determinism, save and restore
 
@@ -209,9 +220,113 @@ The physics headers stay standard-library only by forward-declaring the two type
   before. `restore()` refuses a world whose boats differ. `PhysicsBoat.CrossPlatformGoldenHash`
   pins a boat under way and turning on a swell (`bb8e1b22f58136b2`, measured on Windows MSVC; to
   be confirmed by CI on Linux and macOS).
+- **Winds:** a flow field's `wind` (below) is hashed as a free surface is: its `digest()` goes into
+  the section after the bodies with the field time, so `state_hash()` covers the wind, and
+  `restore()` refuses a world whose winds differ from the state's. A world without winds or free
+  surfaces saves and hashes exactly as before. `PhysicsField.TheSceneWindIsTheSameOnEveryPlatform`
+  pins a `wind_flow`'s digest (`c7ec24178041550e`) and its velocities at points and times
+  (`581744564ad471ef`), measured on Windows MSVC; to be confirmed by CI on Linux and macOS.
 - **Restoring:** `save()` returns the state as bytes. `restore()` takes them on a world holding the
   same bodies, created in the same order, with the same materials. A restored world continues
   exactly as the original did.
+
+### The wind: a flow field's `flow_velocity`
+
+```cpp
+#include <cvc/physics/field.h>          // flow_velocity.h with it
+
+cvc::physics::field air;
+air.kind = cvc::physics::field_kind::flow;
+air.drag_coefficient = 1.0;
+air.wind = std::make_shared<cvc::physics::wind_flow>(
+    cvc::algo::wind_state{15.0, 1.5708, 0.25}, // m/s 10 m up, toward +y, gustiness
+    0.0);                                      // the ground's or the water's level
+const cvc::physics::field_id id = w.add_field(air);
+w.set_field_time(t);                           // or follow(clock): the time the wind is read at
+```
+
+- **The hook.** `field::wind` (a flow only) is a `flow_velocity`: `velocity(p, t)` in m/s and a
+  `digest()` of everything it depends on. It replaces the flow's velocity volumes. It must be
+  deterministic (`det::` maths, no libm) and immutable once a field holds it; `set_field` with
+  another changes the wind.
+- **No volume.** A flow with a wind may leave `volume` empty: it is then air of 1.225 kg/m³
+  everywhere (10⁷ m each way), the scene-wide wind. With a volume it blows in that box only, at
+  the volume's density.
+- **What it pushes.** Every dynamic body, with the flow's quadratic drag cell by cell,
+  ½ ρ C_d a |u| u, u the wind minus the cell's velocity and a the cell's share of the body's area
+  across u, so torques follow.
+- **Read once per body.** A step costs O(bodies) calls into the hook, not one per cell. The hook
+  says how: its velocity is `reference(p, t)` times `profile(p.z)`, and the flow fills only the
+  space above `base()` (the defaults: `velocity()` itself, at every height, everywhere). The step
+  reads `reference()` at the body's centre of mass at `world::field_time()` (the gusts vary over
+  tens of metres) and `profile()` at nine heights from the base (or the body's bottom) to its top,
+  closer together near the bottom, and a cell's wind is the reference times the profile
+  interpolated at its height. A cell is clipped to the base as to a free surface, so a floating
+  body feels the wind on its part above the water only. The air does not count in
+  `field_load::immersed_volume`.
+- **Vehicles.** A vehicle's chassis is not dragged by flow fields; its own aero drag reads the
+  wind's `velocity()` at its centre of mass (`vehicle_desc::drag_coefficient`, `frontal_area`),
+  so a car feels a crosswind as `aero_force` and `vehicle_state::air_velocity`.
+- **`wind_flow`** is the scene's wind of `cvc/algo/wind_field.h`: the mean wind (`wind_state`:
+  speed 10 m up, direction in radians from +x toward +y, gustiness) times the gust factor at
+  (x, y, t), times `wind_profile(z − base_z)`, horizontal. The profile is the open surface layer's
+  power law, (h / 10)^(1/7), linear below 0.1 m, held above 500 m, 0 at and below `base_z`: 0.52
+  of the 10 m wind at 0.1 m, 0.72 at 1 m, 1.26 at 50 m. The water, the clouds and the trees read
+  the same gusts (OCEAN-AND-WEATHER-ROADMAP.md E3, E5).
+- **Measured** (`physics_field_test`, `physics_vehicle_test`):
+  - a 1 kg ball 0.5 m in radius, 10 m up in a 10 m/s wind (C_d 0.5, no gravity), reaches
+    8.285 m/s downwind in 2 s, against 8.279 m/s on the drag curve;
+  - a floating crate, 1 × 1 × 0.5 m at density 500, in a 10 m/s wind drifts 0.154 m/s on the
+    water's drag alone, against 0.156 m/s where the wind's drag on its top half balances the
+    water's on its bottom half; with the water's damping at 1e4 N s/m⁴ in every direction,
+    0.0013 m/s, and in an inertial fluid with that damping, 0.154 m/s (below);
+  - a Humvee at 25 m/s in a 15 m/s crosswind is pushed 406 N aside (0.15 m/s²), the air at its
+    centre of mass, 0.75 m up, 10.4 m/s;
+  - the state hash moves with the wind, a world without one hashes as before, and `restore()`
+    refuses another wind.
+
+### Floating bodies: an inertial fluid (`field::inertial`)
+
+A fluid's `damping` stands for the waves a floating body radiates, so a body stops bobbing. It
+acts in every direction, though, so it also holds the body to the water's velocity sideways: the
+body follows the waves and the current, but resists any drift through the water as hard as it
+resists heaving. A 1 m crate in a 10 m/s wind on water damped at 1e4 N s/m⁴ drifts about a
+millimetre a second.
+
+```cpp
+cvc::physics::field sea;
+sea.kind = cvc::physics::field_kind::fluid;
+sea.volume = water;          // kg/m^3 over the sea's box
+sea.surface = ocean;         // the waves and the current (fluid_surface.h)
+sea.damping = 1.0e4;         // now on the vertical only: the heave
+sea.inertial = true;
+```
+
+- **Vertical.** The damping acts on the vertical alone, as before on the heave. It is also left out
+  of the rate the horizontal drag is scaled by, as a hull's damping is.
+- **Sideways.** The body is pushed by the water's acceleration over its immersed volume: the
+  Froude–Krylov force ρ V du/dt, at the immersed part's centroid, where du/dt is the water's
+  velocity a step either side (two `velocity()` reads per body per step). It drags against the
+  water's velocity, the waves' orbital motion plus the current, with the fluid's C_d. A floating
+  body weighs what it displaces, so the water's acceleration moves it as it moves the water: it
+  rides the waves. Drag alone brings it to the current, and a wind blows it through the water at
+  the speed where the air's drag on its freeboard balances the water's on its hull.
+- **The default is off**, so a world that doesn't set it steps and hashes exactly as before. A
+  hull (`hull.h`) is unaffected: its triangles take the water's pressure, which already moves it
+  sideways. The Ariadne `water` node's field is inertial.
+- **Measured** (`physics_field_test`):
+  - the 1 × 1 × 0.5 m crate of the wind's measurements above, at damping 1e4: 0.0013 m/s
+    downwind in a 10 m/s wind when damped in every direction; 0.154 m/s when inertial, against
+    0.156 m/s from the drag balance (`AFloatingCrateDriftsDownwind`);
+  - in a 0.5 m/s current it reaches 0.469 m/s in 60 s from rest, on drag alone; with a 10 m/s
+    wind across the current it moves at (0.483, 0.155) m/s, the current plus its 0.156 m/s leeway
+    (`AnInertialCrateDriftsWithTheCurrent`);
+  - in a 0.2 m, 4 s swell, a slab heaves 1.04 times the surface (correlation 1.000) as a fully
+    damped one does, its velocity along the swell is 0.99 of the water's orbital velocity
+    (correlation 0.991), and it moves 0.01 m in 16 s: to and fro with the waves, not away
+    (`PhysicsFluidSurface.AnInertialBodyRidesTheSwell`);
+  - a world without `inertial` hashes as before: every pinned hash and the replay trace pass
+    unchanged.
 
 ### Threads
 
@@ -320,7 +435,8 @@ model rolls over the world's bodies. The chassis frame is x forward, y left, z u
   terrain cell or mesh face under it, the table every plant reads.
 - **Resistance**, applied to the chassis each step from the last step's wheels:
   - aero, −½ ρ C_d A |u| u, with u relative to a flow field's wind where one covers the chassis
-    (a vehicle's chassis is not dragged by flow fields otherwise);
+    (a vehicle's chassis is not dragged by flow fields otherwise), read at its centre of mass at
+    the field time, a `flow_velocity`'s where the flow has one (the wind, above);
   - rolling, C_rr times each wheel's load, with C_rr from the ground material's
     `rolling_resistance` (the vehicle's own when the material has none).
 - **Snow, mud and sand.** In a medium field (`field.h`), a wheel sinks to the rigid-wheel Bekker
@@ -562,6 +678,11 @@ Each step:
 - **Rudder.** While wet, the water flowing past it (the water's velocity there less the rudder's point velocity v + ω × (p − com)) meets the blade, deflected by the rudder actuator times `max_angle`, at an angle of attack α in the body's horizontal plane. It makes lift ½ρAV²·C_L(α) normal to the flow and drag ½ρAV²·(`drag_coefficient` + `cross_flow_drag`·sin²α) along it. C_L = `lift_slope`·α up to `stall_angle`; past it the blade is a flat plate, C_L = `cross_flow_drag`·sin 2α / 2. Water from astern meets the trailing edge first, and α is taken from that edge, so a rudder works reversed going astern.
 - Both forces go through the backend's `add_force_at` at their points, so they torque the hull about its centre of mass.
 
+`world::water_at(point)` is the water there as the propeller and rudder read it, at `field_time()`:
+the first fluid field, in id order, whose box holds the point in x and y and reaches below it. It
+gives a `water_sample`: `wet`, `depth` below the top (negative above it), `density` and the water's
+`velocity`. Where no fluid field covers the point it is dry, still and of density 0.
+
 Not modelled: the propeller's slipstream over the rudder (at low speed an outboard steers and a rudder barely does), propeller torque and walk, ventilation of a propeller near the surface (it is wet or dry at its centre), and a partly immersed rudder. `snapshot()`, its JSON, `physics_codec` and pycvc do not carry boats yet. `physics_boat_test` checks the balance at terminal speed, backing, the turning circle against the rudder angle, a dry propeller, an outboard at low speed, pitching on a swell, and the state (docs/roadmap/OCEAN-AND-WEATHER-ROADMAP.md, "As built (O11b: boats)").
 
 ## cvc::nav's plant: `nav_plant` (P4)
@@ -754,6 +875,12 @@ plans with its vehicles' own limits.
   thread that steps the sim.
 - `plant_host_options::world.threads` puts Jolt's job system on worker threads: cheaper, and the
   same state hash (`physics_plant_host_test`).
+- `"dynamicboat"` (the launch) and `"dynamicboat:<presets>"` (`launch`, `jonboat`, cycled) put the
+  agents on boats (`dyn_boat_plant`, below; `dynamic_boat()`). Their world has no flat ground: it
+  holds the geometry, if set, and `set_water(field)`'s fluid field (still, or with a free surface
+  such as a swell). Starts with no water under them throw after the old plant has gone, and the
+  agents are then on the kinematic bicycle (`fallback()` is true). Boats need Jolt: without it
+  the name falls back to the kinematic bicycle as a preset does.
 
 The cvcGL nav demos take `--plant` (`kinematic`, `humvee`, `roboracer`), and the restart panel
 has a plant control. They use three Jolt worker threads natively and none in the browser.
@@ -768,6 +895,93 @@ has a plant control. They use three Jolt worker threads natively and none in the
 - `nav_material_demo` runs the bicycle and the Humvee side by side. The material layer keeps the
   bicycle out of the lake (0 entries) but not the Humvee (65): it was tuned on the bicycle.
 - Training through the vehicle (P8) is what would get the reactive drive through on its own.
+
+## Boats as nav's plant: `dyn_boat_plant` (O12)
+
+```cpp
+#include <cvc/physics/dyn_boat_plant.h>
+
+cvc::physics::world w;                       // Jolt
+w.add_field(sea);                            // a fluid field: still, or with a free surface
+cvc::physics::dyn_boat_plant_options o;
+o.physics = &w;
+cvc::physics::dyn_boat_plant plant({cvc::physics::dyn_boat_desc::launch(),
+                                    cvc::physics::dyn_boat_desc::jonboat()}, o);
+sim.set_plant(&plant);                       // agent i drives descs[i % 2] on the water
+for (;;) sim.step();
+plant.books(0);                              // where agent 0's energy went
+```
+
+`dyn_boat_plant` puts a `sim_world`'s agents on boats (above, "Boats") in a world that floats
+them, beside `dyn_bike_plant` and `dyn_4w_plant`, and `plant_host` selects it as `dynamicboat`.
+Its `kind()` is `dynamic`, and its `medium()` is `cvc::nav::plant_medium::water`
+(`cvc/nav/plant_types.h`): every other plant's is `land`, so a spawner can keep boats on water and
+cars on land.
+
+- **The boats.** A `dyn_boat_desc` is a `boat_desc` whose hull has a `hull_mesh`, plus what nav
+  plans with: `max_speed`, its top speed through calm water, and `turn_radius`, its circle at full
+  rudder and full throttle. The presets are measured (`PresetsDoWhatTheySay`): `launch()` is
+  `physics_boat_test`'s 4 m box of 900 kg with a shaft propeller and a rudder; `jonboat()` a 3.6 m
+  flat box of 350 kg with a 1.5 kN outboard that steers.
+- **Attach.** Each agent gets a boat (`world::add_boat`) with its hull's origin over its start,
+  heading its way, upright and at rest, floating at its draft on the water there:
+  `float_height(desc, mass, density)` is how far the origin rides over the waterline when the
+  `hull_mesh` displaces the hull's mass. A start with no fluid field under it
+  (`world::water_at`), water shallower than the draft (the field's box, or a body without mass,
+  such as the terrain, that a ray from the hull's top meets above the boat's deepest point), or a
+  hull too heavy to float is refused, and a refused attach leaves none of its boats.
+  `draft(desc, mass, density)` is how deep the boat reaches below the waterline: its keel, or its
+  propeller or rudder where they reach deeper. Nav's point is the hull's origin: `state()` is
+  its position, the forward axis's heading and its velocity over the ground along it.
+- **The driver.** Nav's command is a bicycle angle and an acceleration, as for the wheeled plants.
+  Every world step the plant turns it into `set_boat_controls`. The throttle is the thrust per
+  unit mass for the acceleration, taken as `dyn_driver.h` takes it (half of what the last step
+  missed by and an integral trim that learns what the water holds back), over the propeller's
+  thrust at the boat's speed through the water; with no command at a crawl it holds the boat
+  still. The rudder holds the yaw rate the bicycle would turn at, r = u·tan δ / L with L the
+  hull's length: the rudder share tan δ / tan(max_steer) for that curvature, plus a proportional
+  and integral term on the yaw rate's error as a curvature, (r_cmd − r)/u. A rudder works reversed
+  astern, and so does that curvature. `options.driver = false` gives the controls raw.
+- **The plan.** `limits()` is a bicycle of wheelbase L and lock atan(L / `turn_radius`), the
+  rudder's rate (the lock over the actuators' time constant), braking on `max_reverse_thrust`/m,
+  the latency plus the actuators' time constant, and with `plan_with_vehicle` `max_thrust`/m,
+  `max_speed`, the lateral acceleration of the tightest turn at top speed and the hull's outline.
+- **The books** (`dyn_boat_books`), every world step:
+  kinetic now = kinetic at attach + drive − brake − rudder − damping + water + gravity + residual.
+  `kinetic` is the rigid hull's, ½m|v|² + ½ω·Iω, its inertia the collision shape's (a box's or a
+  sphere's exactly; a convex hull's from the `hull_mesh` as a solid). `drive` and `brake` are the
+  thrust's power through the water, T·u_a with u_a the propeller's velocity through the water
+  along its push, where it drives the boat on and where it holds it back. `rudder` is the work of
+  the rudder's force against the water past it, its drag's; `damping` the hull body's own; `water`
+  what the water does to the hull (`world::field_load_on`: buoyancy, resistance, damping,
+  slamming) and its own motion's push on the propeller and the rudder (a swell's orbital
+  velocity, a current); `gravity` m·g along the centre of mass's fall. Each force's work is taken
+  at the step's mean velocity, which is what the integrator moves the hull by, so `residual` is
+  the integrator's error and any collision's. `energy_step(i)` (nav_stats' energy) is the last
+  tick's `drive`.
+- **The plant ledger.** `sample(i)` has the centre of mass's velocity in the heading's frame, the
+  yaw rate, the steering (nav's bicycle angle the driver holds), the hull's attitude and roll rate, its accelerations
+  over the tick, and its contacts with static geometry (a pier, a shore) and with the other boats;
+  no wheels and no load transfer.
+- **Stepping.** A tick is dt / `fixed_dt` world steps. With `step_world` off, a host that steps
+  the world calls `before_world_step()` and `after_world_step()` around each step and `advance()`
+  between ticks, as with `dyn_bike_plant`; `world_gone()` forgets a world rebuilt in place. Boats
+  come and go at run time (`add_vehicle`, `remove_vehicle`, `add_desc`).
+
+Gates (`physics_dyn_boat_plant_test`, Windows MSVC Release):
+
+| Gate | Measured |
+|---|---|
+| The presets do what they say | The launch tops out at 3.1915 m/s and turns at full rudder and full throttle on a 15.39 m radius (`max_speed` 3.19, `turn_radius` 15.4); the jonboat 4.0054 m/s and 4.12 m (4.0, 4.1) |
+| A speed and a yaw rate held | Nav's commands for 2.5 m/s, then 2.5 m/s at 0.08 rad/s: 2.5000 m/s and 0.08000 rad/s on calm water for both; on a 0.3 m, 5 s swell, 2.478–2.513 m/s and 0.0795–0.0798 rad/s |
+| The books balance | A weave and a stop astern: the residual 6·10⁻⁸ to 2·10⁻⁷ of the flow on calm water, up to 3.5·10⁻⁵ on the swell. Steady at 2.5 m/s, the thrust's 11 305.28 J go to the water (11 248.80 J) and the rudder (56.25 J) |
+| Nav drives the boats | A launch and a jonboat reach goals 120 m east from rest in 37.9 s, then turn round to goals about 100 m behind them and reach those in 61.0 s |
+| plant_host | `dynamicboat`, `dynamicboat:jonboat,launch`; an unknown preset refused and the plant kept; no water refused, back on the bicycle |
+| Hosting, contacts | A host stepping the world matches the plant's own stepping bit for bit; a hull hitting a pier counts a static contact |
+| Pinned | `DynBoatPlant.CrossPlatformGoldenHash` `96abfc30fcae4fd4` (Windows MSVC; CI confirms Linux and macOS) |
+
+pycvc does not bind it yet (pycvc binds no boats), and a scene's world vehicles do not spawn boats yet
+(docs/roadmap/OCEAN-AND-WEATHER-ROADMAP.md, "As built (O12: the boat plant)").
 
 ## Terrain in the navigator's energy (P5)
 

@@ -7,6 +7,7 @@
 #include <cvc/ariadne/data.h> // source: { data } — a dataset of the document's data: block
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_geometry.h> // a node's mesh from data (core)
+#include <cvc/ariadne/scene_wind.h>     // the scene's one wind (O14)
 #include <cvc/ariadne/scene_world.h>    // the scene's world: physics and bodies (core)
 #include <cvc/ariadne/uri.h> // §13.4 resolve a node source: URI to a local path (temp-file bridge)
 #include <cvc/ariadne/world_vehicles.h> // its vehicles: their intents key
@@ -120,6 +121,7 @@ struct scene_extensions {
   static constexpr const char *app_slot = "cvc.gl.ariadne.scene-extensions";
   std::mutex m;
   std::map<std::string, NodeRealizer> node_types;
+  std::set<std::string> reads_data; // NodeTypeOptions::reads_data
   std::map<std::string, ShaderPreset> shader_presets;
 };
 NodeRealizer find_node_type(cvc::app &app, const std::string &type) {
@@ -133,6 +135,12 @@ ShaderPreset find_shader_preset(cvc::app &app, const std::string &name) {
   std::lock_guard<std::mutex> lock(x.m);
   const auto it = x.shader_presets.find(name);
   return it != x.shader_presets.end() ? it->second : ShaderPreset{};
+}
+// Whether `app`'s custom `type` reads its own source: { data } (NodeTypeOptions::reads_data).
+bool type_reads_data(cvc::app &app, const std::string &type) {
+  scene_extensions &x = app.slot<scene_extensions>();
+  std::lock_guard<std::mutex> lock(x.m);
+  return x.reads_data.count(type) != 0;
 }
 bool is_builtin_scene_type(const std::string &t) {
   return t == "geometry" || t == "volume" || t == "volren" || t == "volslice" || t == "group";
@@ -725,7 +733,7 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
   }
   std::shared_ptr<GraphicsNode> node;
 
-  if (!n.source_data.empty()) {
+  if (!n.source_data.empty() && !type_reads_data(sg.appContext(), n.type)) {
     // source: { data: <name> } — an empty group now; sync_scene_data draws the dataset into it
     // once it is loaded, and again each time it changes.
     node = parent ? parent->createChild(n.id) : sg.addGraphics(n.id);
@@ -1571,6 +1579,7 @@ void realize_physics(SceneGraph &sg, const cvc::ariadne::Scene &scene,
       in.data_path = b.path;
       inputs.push_back(std::move(in));
     }
+  cvc::ariadne::SceneWorld::use_vehicle_clock(sg.appContext(), scene, warnings);
   out.world = cvc::ariadne::SceneWorld::build(sg.appContext(), scene.physics, inputs,
                                               out.height_fields, stats_key, warnings);
   if (!out.world)
@@ -1609,6 +1618,8 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   out.entity_labels = scene.entity_labels;
   if (!scene.entity_labels.empty()) // the labels' layer now, so it is this scene's (out.created)
     LabelLayerNode::of(sg);
+  // The scene's one wind (O14): its keys before any node reads its wind (scene_wind.h).
+  cvc::ariadne::seed_scene_wind(sg.appContext(), scene, bind_prefix);
   // Resolve the clock's key paths to absolute state paths now, with the host bind prefix — the SAME
   // rule widget binds use (resolve_bind) — so the clock and a sim_transport slider on `sim.speed`
   // land on one key. Resolved once here (like the visibility bindings), so tick_scene stays prefix-
@@ -1661,6 +1672,9 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
       if (out.world->vehicles())
         out.world->vehicles()->set_intents_key(
             cvc::ariadne::resolve_bind(bind_prefix, scene.vehicle_intents));
+      out.world->bind_boats(scene, bind_prefix, warnings); // boat nodes: their boats run here
+      out.world->bind_wind(scene, bind_prefix); // the scene's wind pushes its bodies (O14)
+      out.world->bind_weather(scene, bind_prefix); // the rain's friction, in the steps (O20)
     }
     if (out.physics)
       out.clock.present = true;
@@ -2067,15 +2081,27 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
   for (const std::function<void(vtkRenderer *)> &t : realized.custom_ticks)
     if (t)
       t(renderer);
+  for (const auto &t : realized.scene_ticks)
+    if (t)
+      t(renderer, realized, clock_step);
   return clock_step;
 }
 
 void register_scene_node_type(cvc::app &app, const std::string &type, NodeRealizer realizer) {
+  register_scene_node_type(app, type, std::move(realizer), NodeTypeOptions());
+}
+
+void register_scene_node_type(cvc::app &app, const std::string &type, NodeRealizer realizer,
+                              const NodeTypeOptions &options) {
   if (!realizer || is_builtin_scene_type(type)) // built-ins own their dispatch
     return;
   scene_extensions &x = app.slot<scene_extensions>();
   std::lock_guard<std::mutex> lock(x.m);
   x.node_types[type] = std::move(realizer);
+  if (options.reads_data)
+    x.reads_data.insert(type);
+  else
+    x.reads_data.erase(type);
 }
 
 bool has_scene_node_type(cvc::app &app, const std::string &type) {

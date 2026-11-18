@@ -43,6 +43,7 @@ if _sys.platform == "win32":
 #include <cvc/core/exception.h>
 #include <cvc/state/state_exec/lock_manager.h> // note_threaded_host (app_from_capsule)
 #include <cvc/core/clock_follower.h>
+#include <cvc/core/sim_tick.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/core/world_clock_binding.h>
 #include <cvc/core/world_units.h>
@@ -374,6 +375,15 @@ namespace cvc {
 // ticks_per_step / steps_due / clock_follower: a Python simulation whose step is
 // k quanta follows the shared clock the same way a C++ one does.
 %include "cvc/core/clock_follower.h"
+
+// ── The one simulation tick (cvc/core/sim_tick.h) ──
+// SIM_TICK: the navigator's step and control period every host and trainer shares by default;
+// SIM_QUANTUM: the simulation hosts' clock quantum; SIM_CATCHUP: the world time a real-time frame
+// may catch up at 1x. A Python host's live clock: world_clock(SIM_QUANTUM, speed,
+// round(SIM_CATCHUP / SIM_QUANTUM), 1, True), followed with clock_follower.for_step(clock, tick).
+%constant double SIM_TICK = cvc::kSimTick;
+%constant double SIM_QUANTUM = cvc::kSimQuantum;
+%constant double SIM_CATCHUP = cvc::kSimCatchup;
 
 // ── cvc::world_clock_binding — the clock on the state tree ──────────
 // Speed / pause / mode / single-step come from <prefix>.* keys and the shared
@@ -1279,6 +1289,16 @@ struct pycvc_py_conversion {
 // cvc/nav/sim_world_trace.h). After pycvc_physics.i: the sim_world handles are its and nav's.
 %include "pycvc_trace.i"
 
+// cvc::nav's arms, run log, panels and checkpoint scrubber, and the plant ledger's items
+// (cvc/nav/nav_arms.h, run_log.h, nav_panels.h, nav_scrub.h, plant_ledger.h). After pycvc_nav.i:
+// the sim_world handles are its.
+%include "pycvc_nav_lab.i"
+
+// ── cvc::ph composition: composed port-Hamiltonian systems ─────────────────────
+// ph_composite: a cvc-ph-system/1 file, its field, power ledger, rollouts and balance check
+// (cvc/ph/compose.h, docs/PH_COMPOSE.md).
+%include "pycvc_ph.i"
+
 // ── Direct wrap of the REAL cvc::state class (full surface, no facade) ───────
 // Like voxels/volume/geometry, the real libcvc header is %include'd here so
 // Python gets the actual cvc::state tree node — not a parallel facade. This
@@ -1417,6 +1437,8 @@ struct pycvc_py_conversion {
 %include "pycvc_skeleton.i"
 %include "pycvc_contours.i"
 %include "pycvc_point_classes.i"
+%include "pycvc_segmentation.i"
+%include "pycvc_volume_slice.i"
 
 // ── UTF-8 display-width utilities (cvc::text, roadmap §17) ───────────────
 // text_display_width / _pad_to_width / _truncate_to_width / … so a pycvc UI does

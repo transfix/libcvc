@@ -1,6 +1,6 @@
 // macOS clipboard backend for cvc::gl::clipboard (NSPasteboard).
 //
-// Clipboard.cpp has declared these two extern "C" entry points, and its
+// Clipboard.cpp has declared these two entry points, and its
 // __APPLE__ branch has called them, since the clipboard landed — but the file
 // they pointed at was never written, so libcvcGL simply did not link on macOS:
 //
@@ -33,16 +33,17 @@ extern "C" bool cvcgl_mac_clip_set(const char *text) {
   }
 }
 
-extern "C" const char *cvcgl_mac_clip_get() {
-  // The caller copies into a std::string on the next line, so the buffer only
-  // has to outlive the return. thread_local rather than a plain static so two
-  // threads reading the clipboard cannot tear each other's result.
-  static thread_local std::string buf;
+std::string cvcgl_mac_clip_get() {
+  // Copied out while the autorelease pool still holds the NSString's UTF-8
+  // bytes. The caller owns the result, so no buffer outlives the call and
+  // nothing is shared between threads or apps.
+  std::string text;
   @autoreleasepool {
     NSPasteboard *pb = [NSPasteboard generalPasteboard];
     NSString *s = [pb stringForType:NSPasteboardTypeString];
     const char *u = s ? [s UTF8String] : nullptr;
-    buf = u ? u : "";
+    if (u)
+      text = u;
   }
-  return buf.c_str();
+  return text;
 }

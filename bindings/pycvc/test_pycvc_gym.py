@@ -201,6 +201,17 @@ for _ in range(60):
 check(bool(np.all(o["x"] > -27.0)) and bool(np.all(o["speed"] > 1.0)),
       f"each plant drives ({np.round(o['x'], 1)}, {np.round(o['speed'], 1)})")
 
+# libcvc's one simulation tick: the gym steps 0.06 s by default; tick= sets another.
+check(pycvc.SIM_TICK == 0.06 and pycvc.SIM_QUANTUM == 0.01 and pycvc.SIM_CATCHUP == 0.25,
+      f"the shared tick ({pycvc.SIM_TICK}, {pycvc.SIM_QUANTUM}, {pycvc.SIM_CATCHUP})")
+check(abs(g3.dt() - pycvc.SIM_TICK) < 1e-12, f"the gym's tick is the shared one ({g3.dt()})")
+g5 = pycvc.WorldGym(doc, tick=0.05, agents=[{"plant": "kinematic", "controller": "none"}])
+g5.reset(0)
+check(abs(g5.dt() - 0.05) < 1e-12, f"tick=0.05 ({g5.dt()})")
+t0 = g5.observe()["time"]
+check(abs(g5.step(0.0, 0.0)[0]["time"] - t0 - 0.05) < 1e-9, "a step is the tick")
+del g5
+
 # What a differentiable twin reads: the world's fields and each agent's plant as a model.
 f = g3.fields()
 rows, cols = f["occupancy"].shape

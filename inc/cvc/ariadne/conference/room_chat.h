@@ -57,7 +57,9 @@ namespace conference {
 //
 // A message leaf is one JSON object, {"seq","from","name","t","text","e"}: its seq in its
 // channel, the sender's pid and its name when it posted, the relay's clock in seconds since the
-// epoch, the text, and the relay's epoch (what an earlier relay process pushed is discarded).
+// epoch, the text, and the relay's epoch (what an earlier relay process pushed is discarded). A
+// bridged user's message (one the relay's program posted for a user of another chat system,
+// room_intrinsics.h) adds "via", that system's name, and its "from" is the bridged user's pid.
 //
 // A client asks with a state_message on its OWN path, conf.rooms.<room>.participants.<pid>.chat,
 // with ttl_hops 0: the relay takes it and forwards it to no one (room_write_gate refuses a chat
@@ -84,6 +86,16 @@ struct chat_message {
   double t = 0.0;    // the relay's clock: seconds since the Unix epoch
   std::string text;  // may hold newlines
   std::string epoch; // the relay process's epoch
+  std::string via;   // the system a bridged user posted from; "" for a participant
+};
+
+// A participant's message the relay hands its program (room_chat_relay::set_listener): one posted
+// to the room, or a direct message to a bridged user.
+struct chat_event {
+  std::string to;     // "" the room; else the bridged user's pid
+  std::string to_uid; // and that user's id on its system, and the system
+  std::string to_via;
+  chat_message m;
 };
 
 // conf.rooms.<room>.chat, and a participant's request path,
@@ -95,6 +107,8 @@ std::string chat_channel_path(const std::string &room, const std::string &channe
 
 std::string encode_chat_message(const chat_message &m);
 bool decode_chat_message(const std::string &json, chat_message &out);
+// An event as one JSON object: {"room","to","to_uid","to_via","seq","from","name","t","text"}.
+std::string encode_chat_event(const std::string &room, const chat_event &e);
 
 // The requests, as messages a client's shard sends (state_cluster_shard::send_message).
 cvc::state_message make_chat_post(const std::string &room, const std::string &pid,
@@ -118,6 +132,12 @@ bool clean_chat_text(std::string &text, std::size_t text_max, std::string &why);
 // into the shard's tree, so the relay's drain fans them out with its other writes. Every ~5 s it
 // re-pushes each present participant's conversation heads, so a client notices a DM push it lost.
 //
+// Bridged users (room_intrinsics.h): post_bridged() posts as one, for the relay's program, and the
+// listener hears what participants post to the room and send bridged users, so the program carries
+// it to their system. A participant's direct message to a bridged user is taken only while the
+// listener takes them (set_listener), and is pushed to the participant alone (a bridged user has
+// no connection); a bridged user's message to the room is pushed to every participant, as any is.
+//
 // LIFETIME: the app, the shard and the added transports must outlive it.
 // THREADING: everything but the bus callback on the relay's main loop.
 class room_chat_relay {
@@ -129,7 +149,10 @@ public:
     std::uint64_t refused = 0; // posts refused (the poster is pushed chat.error)
     std::uint64_t dropped = 0; // requests never applied: malformed, not the sender's, queue full
     std::uint64_t pushes = 0;  // push frames written (one per receiving connection)
+    std::uint64_t bridged = 0; // of the posts, bridged users' (post_bridged)
+    std::uint64_t heard = 0;   // events handed to the listener
   };
+  using listener = std::function<void(const chat_event &)>;
 
   room_chat_relay(cvc::app &app, cvc::state_cluster_shard &shard, std::string room,
                   chat_limits limits = {});
@@ -145,7 +168,22 @@ public:
   void step(double now_s);
 
   // A participant left: a conversation ends (is forgotten) once neither of its two is present.
+  // A bridged user's leaving (its pid) ends its conversations the same way.
   void participant_left(const std::string &pid);
+
+  // Who hears participants' messages: FN with each room post when ROOM, and each direct message
+  // to a bridged user when DMS (which the relay refuses while it is false: no one would read it).
+  // On the relay's main loop, from step(). Null: no one.
+  void set_listener(listener fn, bool room, bool dms);
+
+  // Post TEXT as the bridged user UID on VIA, shown as NAME ("" for the name its presence gave, or
+  // UID): to the room (TO "") or, while UID is present, to participant TO as a direct message.
+  // Stamped, kept and pushed as a participant's post is, under the same text limit, without the
+  // rate limit (the program's system has its own). The listener does not hear it. True with the
+  // message's seq in its channel; false with the reason in WHY. On the relay's main loop.
+  bool post_bridged(const std::string &via, const std::string &uid, const std::string &name,
+                    const std::string &text, const std::string &to, std::string &why,
+                    std::uint64_t *seq = nullptr);
 
   stats take_stats();
   const chat_limits &limits() const noexcept;

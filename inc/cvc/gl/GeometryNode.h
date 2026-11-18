@@ -196,6 +196,9 @@ public:
   void setShaderUniformf(const std::string &name, float v);
   void setShaderUniformi(const std::string &name, int v);
   void setShaderUniform3f(const std::string &name, float x, float y, float z);
+  // The value setShaderUniform3f gave `name` (what a test reads back; shaderUniformf, below, a
+  // float's); false for none.
+  bool shaderUniform3f(const std::string &name, std::array<float, 3> &out) const;
   void setShaderTexture(const std::string &name, vtkTextureObject *tex); // nullptr unbinds
 
   // Shader inputs SHARED by many meshes and changed in one place: a node that owns a scene-wide
@@ -209,11 +212,20 @@ public:
     std::map<std::string, std::array<float, 4>> f4;
     std::map<std::string, std::array<double, 16>> m4; // row-major, as a vtkMatrix4x4
     std::map<std::string, vtkSmartPointer<vtkTextureObject>> tex;
+    // Leave this set out of a shadow map's bake (a vtkShadowMapBakerPass among the actor's render
+    // passes): there the fragment writes the occluder's depth into the colour target, so code that
+    // recolours a fragment after VTK's own (the water's swash on the ground) would corrupt the map.
+    // Never set in the bake's program, the set's uniforms read 0 there: gate such code on one.
+    bool skip_shadow_bake = false;
   };
   void setSharedShaderInputs(const std::string &key, std::shared_ptr<const ShaderInputs> in);
   bool hasSharedShaderInputs(const std::string &key) const;
   // The inputs shared under `key` (null if none): what a test reads back.
   std::shared_ptr<const ShaderInputs> sharedShaderInputs(const std::string &key) const;
+  // What setShaderUniformf / setShaderTexture last set under `name`, as a test reads it back:
+  // false / null when nothing is.
+  bool shaderUniformf(const std::string &name, float &v) const;
+  vtkTextureObject *shaderTexture(const std::string &name) const;
 
   // Disable VTK's VBO coordinate shift/scale so `vertexMC` in a custom shader is
   // the mesh's ACTUAL (world/model) coordinates rather than an internally-shifted
@@ -273,6 +285,11 @@ public:
   // is the texture `from` has now: after a new setTexture on `from`, share it again.
   void shareTexture(std::shared_ptr<const GeometryNode> from);
   void clearTexture();
+  // How the texture is sampled between texel centres: linearly (the default) or from the nearest
+  // texel, so each texel draws as a sharp square (a volume slice's voxels). Holds for the texture
+  // set now and every later one.
+  void setTextureInterpolate(bool on);
+  bool textureInterpolate() const { return m_textureInterpolate; }
   // Whether a texture is set, and its size in pixels (0 x 0 when none). Read on the owner
   // thread, where setTexture/clearTexture land.
   bool hasTexture() const;
@@ -369,9 +386,13 @@ protected:
   // hands its emulated vertex buffers (see onUpdateShader for why), setting each
   // sampler uniform that the program actually uses. For UpdateShaderEvent
   // observers; textures without a context, or unused by the program, are skipped.
-  static void
-  bindShaderTextures(vtkShaderProgram *program,
-                     const std::vector<std::pair<std::string, vtkTextureObject *>> &textures);
+  // Each texture holds its unit only for the draw under way: this node's actor
+  // releases it once that draw is done. `drawingMapper` is the mapper whose draw
+  // fired the event (default: this node's): the units its vertex data takes are
+  // kept clear (LowMemoryPolyDataMapper::arrayTextureUnits).
+  void bindShaderTextures(vtkShaderProgram *program,
+                          const std::vector<std::pair<std::string, vtkTextureObject *>> &textures,
+                          vtkObject *drawingMapper = nullptr);
 
   // Shader replacements a SUBCLASS needs for itself. Kept out of reach of the
   // public add*ShaderReplacement / clearShaderReplacements (see there), and
@@ -442,6 +463,7 @@ private:
   vtkSmartPointer<vtkImageData> m_textureImageData; // the texture's input (for texture_modified())
   boost::shared_array<unsigned char> m_textureStorage; // keeps the aliased zero-copy buffer alive
   bool m_textureFlipV; // true when a texture is active: UVs' V is flipped (top-left image -> VTK)
+  bool m_textureInterpolate = true; // setTextureInterpolate: linear (true) or nearest sampling
   bool m_forceOpaque = false; // setForceOpaque's ask, kept while the mesh is see-through
 
   boost::signals2::connection m_dataConnection;
@@ -455,6 +477,7 @@ private:
   std::map<std::string, std::shared_ptr<const ShaderInputs>> m_sharedInputs;
   vtkSmartPointer<vtkCallbackCommand> m_shaderTexCb;
   bool m_shaderTexObserverInstalled = false;
+  bool m_unitsWarned = false; // bindShaderTextures said once that a draw ran out of units
 
   // Shader replacements by (stage: 0 vertex, 1 fragment, 2 fragment after VTK's; anchor): the
   // caller's (public API) and the subclass's own. The actor's shader property holds one entry per

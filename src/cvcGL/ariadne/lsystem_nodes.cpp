@@ -18,6 +18,12 @@
   You should have received a copy of the GNU Lesser General Public
   License along with this library; if not, write to the Free Software
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+
+  ---------------------------------------------------------------------------
+  The storm deck's dark bases (the far shells' two taps up the deck, and the near volumes' light
+  dimmed by the cloud above) port ABYSSAL's skyVis (github.com/Token-Gremlin/natural-disasters,
+  src/sky/Clouds.js at 849ff7f4), MIT licensed, Copyright (c) 2026 Davi (Token-Gremlin).
+  MIT notice retained; see THIRD_PARTY_NOTICES.md.
 */
 
 // lsystem_nodes.cpp — the custom scene node realizers (see lsystem_nodes.h). Thin cvcGL wrappers:
@@ -27,12 +33,15 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cvc/ariadne/bind.h> // live node params: read_or_seed / read_or / resolve_bind
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/scene_wind.h> // the scene's one wind (O14)
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
+#include <cvc/core/sliced_task.h> // a storm deck's build: on the pool, or sliced between frames
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
@@ -49,6 +58,7 @@
 #include <cvc/volume/volume.h>
 #include <cvc/world/cloud_layer.h>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 #include <vtkCamera.h>
@@ -177,6 +187,9 @@ struct ForestRT {
   cvc::lsys::forest_wind wind;                            // current wind re-pose data
   std::string sig; // last structural signature (regen trigger)
   cvc::app *app = nullptr;
+  // The scene's wind (scene_wind.h, O14): its keys' root, and where the way the trees lean now is
+  // published (forest.lean_dir, degrees; empty without a scene wind).
+  std::string prefix, leanKey, leanNow;
 };
 // Read the live forest params from the bound keys (falling back to the authored defaults).
 cvc::lsys::forest_params read_live_fp(ForestRT &rt) {
@@ -260,6 +273,8 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
   rt->k.branches = seed_key(app, pref, n, "forest.branches", rt->base.branches);
   rt->k.pine_scale = seed_key(app, pref, n, "forest.pine_scale", rt->base.pine_scale);
   rt->k.wind = seed_key(app, pref, n, "forest.wind", windDef);
+  rt->prefix = pref;
+  rt->leanKey = ari::resolve_bind(pref, ari::node_key(n, "forest.lean_dir"));
 
   // Grow the initial forest — ALWAYS with wind records, so enabling wind live later works.
   const cvc::lsys::forest_params fp0 = read_live_fp(*rt);
@@ -322,12 +337,31 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
       }
     }
     // Wind re-pose every frame (world/sim time, so Paused freezes the sway). windLive == 0 holds
-    // the bind pose; the branchy trees have no sway records and sit untouched.
+    // the bind pose; the branchy trees have no sway records and sit untouched. With a scene wind
+    // (O14) the pines lean downwind in it and sway about the lean, harder in a stronger wind and
+    // in the gusts at each tree (the one gust field the water and the physics read).
+    const std::optional<ari::SceneWind> sw = ari::scene_wind_set(*rt->app, rt->prefix);
+    const std::string lean = sw ? std::to_string(sw->dir) : std::string();
+    if (lean != rt->leanNow) {
+      rt->leanNow = lean;
+      cvc::app &app = *rt->app;
+      cvc::state::instance(app)(rt->leanKey).value(lean);
+    }
     if (windLive != 0.0 && !rt->wind.trees.empty()) {
       const double t = rt->app->world_clock().t();
       rt->workW = rt->woodBind;
       rt->workN = rt->needleBind;
-      cvc::lsys::repose_forest(rt->wind, t, windLive, rt->workW, rt->workN);
+      if (sw) {
+        constexpr double kRefWind = 9.0; // m/s: the authored sway's wind
+        const double rad = sw->dir * 3.14159265358979323846 / 180.0;
+        const cvc::algo::gust_frame gf = cvc::algo::gust_frame_at(sw->state(), t);
+        cvc::lsys::repose_forest_in_wind(
+            rt->wind, t, windLive * sw->speed / kRefWind, std::cos(rad), std::sin(rad),
+            [&gf](double x, double y) { return cvc::algo::wind_gust(gf, x, y); }, rt->workW,
+            rt->workN);
+      } else {
+        cvc::lsys::repose_forest(rt->wind, t, windLive, rt->workW, rt->workN);
+      }
       w->updateVertices(rt->workW);
       if (auto nn = rt->needle.lock())
         nn->updateVertices(rt->workN);
@@ -462,7 +496,7 @@ std::shared_ptr<GraphicsNode> realize_wave_sea(SceneGraph &sg, const ari::SceneN
 // flanks grey.
 constexpr int SKY_N = 60, SKY_NZ = 28;
 constexpr double SKY_BASE = 74.0, SKY_TOP = 122.0, SKY_HALF = 150.0;
-constexpr double CLOUD_DRIFT = 3.0;    // m/s along the wind at drift 1
+constexpr double CLOUD_DRIFT = CLOUD_SKY_DRIFT; // m/s along the wind at drift 1
 constexpr double CLOUD_MORPH_S = 30.0; // seconds per variant change at morph 1
 constexpr double CLOUD_EMPTY = 0.22;
 constexpr double SUN_AZ = -52.0, SUN_EL = 34.0;
@@ -482,6 +516,20 @@ constexpr int REFRESH = 60;        // frames between shade and far composites (t
 constexpr int SLICES = 8;          // frames a composite's cells, then its rows, are spread over
 constexpr int AREA_STRIDE = 60;    // frames between looks at the ground's extent
 constexpr int FADE_FRAMES = 45;    // a cloud's near <-> far crossfade
+constexpr int MAX_DECK_NZ = 64;    // a storm deck's layers at most (more with its depth)
+constexpr int MAX_DECK_LAYERS = 24; // ...and its far slices
+constexpr double MARCH_STEP = 60.0; // a storm deck's far slab: a march sample at least this often
+// A storm's dark base: at full darkness a voxel's light dims by up to SKY_DARK as the cloud above
+// it hides the sky (ABYSSAL's mix(0.16, 1, skyVis)), skyVis = exp(-UP_K lightK tau_up). UP_K is set
+// so a cumulus's base keeps nearly all its light (skyVis about 0.9) and a tower's goes dark.
+constexpr double SKY_DARK = 0.84, UP_K = 0.05;
+// The rain (O19). RAIN_FULL (mm/h) is a downpour: full streaks, full fog, full rings. At it the fog
+// thickens by RAIN_FOG a metre (visibility about 3 km), toward FOG_FAIR's grey in light rain and
+// FOG_STORM's under a dark deck; a rain shaft's optical depth is SHAFT_K a metre, thinning over the
+// last SHAFT_FADE metres above the ground. A ring's cell is RING_CELL metres.
+constexpr double RAIN_FULL = 25.0, RAIN_FOG = 0.0010, SHAFT_K = 0.0012, SHAFT_FADE = 60.0;
+constexpr double RING_CELL = 1.0;
+constexpr double FOG_FAIR[3] = {0.70, 0.74, 0.79}, FOG_STORM[3] = {0.40, 0.43, 0.48};
 constexpr double FAR_REACH = 4000.0; // how far past the ground the far clouds reach, metres
 constexpr int FAR_SLICES = 64;       // the far slices, at most (VolSliceNode::distance_slicing)
 constexpr double FAR_SLICE_GROWTH = 0.06; // each far slice at least this much further than the last
@@ -508,7 +556,160 @@ const char *LIGHT_SUM = "vec4(ambientColor + diffuse + specular, opacity)";
 // cloudSunR = sun.xy / sun.z. The shade is re-composited every REFRESH frames as the clouds
 // change; it crossfades from the last composite (cloudShadePrev) to the newest over the frames
 // to the next (cloudShadeMix 0 -> 1), so the shadows change shape smoothly instead of jumping.
-const char *SHADE_DEC = R"(//VTK::Light::Dec
+//
+// The storms (F2): up to MAX_STORMS discs, cloudStormK = (centre x, y, radius, intensity), the
+// field cvc::world::weather's (the intensity over a disc's core, half its radius, falling to 0 at
+// the radius). A receiver's ambient light drops under a storm's overcast by AMB_DROP of it
+// (cloudAmbient); the direct light dims through the shade, which a storm deepens. Both are
+// uniforms: no sampler joins the receivers (WebGL2's texture units are a hard budget).
+constexpr int MAX_STORMS = 4;
+constexpr double AMB_DROP = 0.55;
+std::string stormGlsl() {
+  std::string s;
+  for (int k = 0; k < MAX_STORMS; ++k)
+    s += "uniform vec4 cloudStorm" + std::to_string(k) + ";\n";
+  s += R"(float cloudStormOne(vec2 p, vec4 c) {
+  if (c.z <= 0.0) return 0.0;
+  return c.w * (1.0 - smoothstep(0.5 * c.z, c.z, length(p - c.xy)));
+}
+float cloudStormAt(vec2 p) {
+  float clear = 1.0;
+)";
+  for (int k = 0; k < MAX_STORMS; ++k)
+    s += "  clear *= 1.0 - cloudStormOne(p, cloudStorm" + std::to_string(k) + ");\n";
+  s += "  return 1.0 - clear;\n}\n";
+  return s;
+}
+// The rain (O19, F3), uniforms only, after stormGlsl(): the rain rate under the storms now
+// (cloudRainAt, cvc::world::weather::rain_rate's, the strongest storm's at a point), how wet the
+// ground is (cloudWet: each recent storm's track, how long its rain lay over a point and how long
+// ago it left), and the distance fog (cloudFog). cloudRainK = (onset, rain_max mm/h, the seconds of
+// rain that soak the ground, the seconds it takes to dry by 1/e), all weather seconds;
+// cloudWetAk = (a recent storm's centre now, its rain radius, 0) and cloudWetBk = (its motion,
+// metres a weather second, weather seconds since its birth, to its end: negative once gone);
+// cloudFogC = (the fog's colour, its density per metre).
+std::string rainGlsl() {
+  std::string s = "uniform vec4 cloudRainK;\nuniform vec4 cloudFogC;\nuniform vec4 cloudFlash;\n";
+  for (int k = 0; k < MAX_STORMS; ++k)
+    s += "uniform vec4 cloudWetA" + std::to_string(k) + ";\nuniform vec4 cloudWetB" +
+         std::to_string(k) + ";\n";
+  s += R"(float cloudRainOne(vec2 p, vec4 c) {
+  float u = (cloudStormOne(p, c) - cloudRainK.x) / max(1.0 - cloudRainK.x, 1e-3);
+  return u > 0.0 ? cloudRainK.y * pow(min(u, 1.0), 1.5) : 0.0;
+}
+float cloudRainAt(vec2 p) {
+  return max(max(cloudRainOne(p, cloudStorm0), cloudRainOne(p, cloudStorm1)),
+             max(cloudRainOne(p, cloudStorm2), cloudRainOne(p, cloudStorm3)));
+}
+float cloudWetOne(vec2 p, vec4 a, vec4 b) {
+  float rr = a.z;
+  if (rr <= 0.0) return 0.0;
+  // Its centre at weather time s from now is a.xy + b.xy s: it rained on p while that lay within rr.
+  vec2 d = p - a.xy, v = b.xy;
+  float vv = dot(v, v), sIn, sOut;
+  if (vv < 1e-8) {
+    if (dot(d, d) >= rr * rr) return 0.0;
+    sIn = -b.z;
+    sOut = min(b.w, 0.0);
+  } else {
+    float s0 = dot(d, v) / vv;
+    vec2 q = d - v * s0;
+    float h2 = rr * rr - dot(q, q);
+    if (h2 <= 0.0) return 0.0;
+    float hs = sqrt(h2 / vv);
+    sIn = max(s0 - hs, -b.z);
+    sOut = min(min(s0 + hs, b.w), 0.0);
+  }
+  if (sOut <= sIn) return 0.0;
+  return clamp((sOut - sIn) / max(cloudRainK.z, 1.0), 0.0, 1.0) * exp(sOut / max(cloudRainK.w, 1.0));
+}
+float cloudWet(vec2 p) {
+  return max(max(cloudWetOne(p, cloudWetA0, cloudWetB0), cloudWetOne(p, cloudWetA1, cloudWetB1)),
+             max(cloudWetOne(p, cloudWetA2, cloudWetB2), cloudWetOne(p, cloudWetA3, cloudWetB3)));
+}
+vec3 cloudFog(vec3 col, vec3 pVC) {
+  if (cloudFogC.w <= 0.0) return col;
+  return mix(col, cloudFogC.rgb, 1.0 - exp(-cloudFogC.w * length(pVC)));
+}
+// A lightning flash's light at world point w (O20): cloudFlash = (the strike under the cloud base,
+// its brightness), falling off over about a kilometre.
+float cloudFlashAt(vec3 w) {
+  if (cloudFlash.w <= 0.0) return 0.0;
+  vec3 d = w - cloudFlash.xyz;
+  return cloudFlash.w / (1.0 + dot(d, d) / 810000.0);
+}
+)";
+  return s;
+}
+
+// The receivers' lighting (SHADE_SUM): the ambient under the storms' overcast and the direct light
+// through the deck's shade (O18), then the wet ground (O19: darker, and glossy, a sheen of the sky
+// at grazing angles and the sun's glint, by cloudWetK = (the wetness's strength, the time for the
+// rings, the rings' strength, 0); the normal is the fragment's own facet, from its derivatives, so
+// it needs nothing of the mesh), and the fog. cloudSunVC is the sun in view coordinates.
+const char *const LIT_GLSL = R"(uniform vec4 cloudWetK;
+uniform vec3 cloudSunVC;
+vec4 cloudLit(vec3 amb, vec3 dif, vec3 spec, float op, vec3 pVC, vec3 alb) {
+  float sh = cloudShade(pVC);
+  vec3 c = amb * cloudAmbient(pVC) + sh * (dif + spec);
+  if (cloudShadeOn > 0.0 && cloudFlash.w > 0.0) // a lightning flash: a light from everywhere above
+    c += alb * 1.5 * cloudFlashAt((cloudVCWC * vec4(pVC, 1.0)).xyz);
+  if (cloudShadeOn > 0.0 && cloudWetK.x > 0.0) {
+    vec3 w = (cloudVCWC * vec4(pVC, 1.0)).xyz;
+    float wet = cloudWetK.x * cloudWet(w.xy);
+    if (wet > 0.0) {
+      vec3 n = normalize(cross(dFdx(pVC), dFdy(pVC)));
+      vec3 v = normalize(-pVC);
+      if (dot(n, v) < 0.0) n = -n;
+      float fr = pow(1.0 - max(dot(n, v), 0.0), 5.0);
+      float gl = pow(max(dot(reflect(-v, n), cloudSunVC), 0.0), 80.0) * sh;
+      c = c * (1.0 - 0.45 * wet) + wet * (0.35 * fr * cloudFogC.rgb + 0.6 * gl * vec3(1.0, 0.97, 0.9));
+    }
+  }
+  return vec4(cloudShadeOn > 0.0 ? cloudFog(c, pVC) : c, op);
+}
+float cloudFlashLit(vec3 pVC) {
+  return cloudShadeOn > 0.0 ? 1.5 * cloudFlashAt((cloudVCWC * vec4(pVC, 1.0)).xyz) : 0.0;
+}
+// Raindrop rings on water (O19), procedural: hashed cells of RING_CELL metres, a share of them as
+// large as the rain rate here holding a drop that falls every 1.2 to 2.2 s, its ring spreading at
+// 0.45 m/s, a few crests 0.22 m apart, fading; their slopes tilt the normal n (as -dz/dx, -dz/dy over z), within 70 m.
+vec3 cloudHash3(vec2 c) {
+  vec3 p = fract(vec3(c.xyx) * vec3(0.1031, 0.1030, 0.0973));
+  p += dot(p, p.yxz + 33.33);
+  return fract((p.xxy + p.yxx) * p.zyx);
+}
+vec3 cloudRainNormal(vec2 p, vec3 n) {
+  if (cloudShadeOn <= 0.0 || cloudWetK.z <= 0.0) return n;
+  float share = min(cloudWetK.z * cloudRainAt(p) / RAIN_FULL, 1.0);
+  vec3 cam = (cloudVCWC * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+  float fade = 1.0 - smoothstep(25.0, 70.0, length(p - cam.xy));
+  if (share <= 0.0 || fade <= 0.0) return n;
+  vec2 cell = floor(p / RING_CELL), g = vec2(0.0);
+  for (int j = -1; j <= 1; ++j)
+    for (int i = -1; i <= 1; ++i) {
+      vec2 c = cell + vec2(float(i), float(j));
+      vec3 h = cloudHash3(c);
+      if (h.z > share) continue;
+      float period = 1.2 + h.y;
+      float age = mod(cloudWetK.y + h.x * period, period);
+      vec2 dv = p - (c + 0.2 + 0.6 * h.xy) * RING_CELL;
+      float d = length(dv), x = d - 0.45 * age;
+      float env = exp(-age * 1.8) * exp(-x * x / 0.012);
+      float dh = env * (-6.2831853 / 0.22 * sin(6.2831853 * x / 0.22) - 2.0 * x / 0.012 * cos(6.2831853 * x / 0.22));
+      g += 0.012 * dh * dv / max(d, 1e-3);
+    }
+  return normalize(vec3(n.xy / max(n.z, 1e-3) - fade * g, 1.0));
+}
+)";
+
+std::string rainConsts() {
+  return "const float RAIN_FULL = " + std::to_string(RAIN_FULL) +
+         ";\nconst float RING_CELL = " + std::to_string(RING_CELL) + ";\n";
+}
+
+std::string shadeDec() {
+  return std::string(R"(//VTK::Light::Dec
 uniform highp sampler2D cloudShadeTex;
 uniform highp sampler2D cloudShadePrev;
 uniform float cloudShadeMix;
@@ -523,9 +724,14 @@ float cloudShade(vec3 pVC) {
   float s = mix(texture(cloudShadePrev, uv).r, texture(cloudShadeTex, uv).r, cloudShadeMix);
   return mix(1.0, s, cloudShadeOn);
 }
-)";
-const char *SHADE_SUM =
-    "vec4(ambientColor + cloudShade(vertexVC.xyz) * (diffuse + specular), opacity)";
+)") + stormGlsl() +
+         "float cloudAmbient(vec3 pVC) {\n  if (cloudShadeOn <= 0.0) return 1.0;\n"
+         "  vec3 w = (cloudVCWC * vec4(pVC, 1.0)).xyz;\n  return 1.0 - " +
+         std::to_string(AMB_DROP) + " * cloudStormAt(w.xy);\n}\n" + rainGlsl() + rainConsts() +
+         LIT_GLSL;
+}
+const char *const SHADE_SUM =
+    "cloudLit(ambientColor, diffuse, specular, opacity, vertexVC.xyz, diffuseColor)";
 
 // The far clouds are a VolSliceNode: its volume the deck's coarse opacity, sliced by distance
 // (VolSliceNode::setDistanceSlicing): planes facing the camera, cut to the deck's box and blended
@@ -548,10 +754,27 @@ std::string shellDec() {
 uniform vec4 cloudFar;
 uniform vec4 cloudFarZ;
 uniform vec4 cloudSun;
-const int CLOUD_SAMPLES = 6; // a slab's samples at most, about 4 per deck depth of its run
+uniform float cloudDark;
+// cloudMarchN: march samples per metre of a slab's run, about 4 per deck depth on a cumulus deck
+// and on a storm deck one every MARCH_STEP metres at least; cloudLightReach: the light march's
+// longest reach, on a storm deck where it has gone two cloud widths sideways (as the shade's
+// patches), or its few samples kilometres apart band the towers with stray shade.
+uniform float cloudMarchN;
+uniform float cloudLightReach;
+// cloudShaft = (the shafts' floor z, on, 0, 0): with rain under the deck the slab reaches down to the
+// floor, and its stretch below the base holds the rain shafts.
+uniform vec4 cloudShaft;
+const int CLOUD_SAMPLES = 6; // a slab's samples at most
 )";
   s += "const int CLOUD_LIGHT_SAMPLES = " + std::to_string(LIGHT_SAMPLES) + ";\n";
+  s += "const float SKY_DARK = " + std::to_string(SKY_DARK) + ";\n";
+  s += "const float UP_K = " + std::to_string(UP_K / FAR_LIGHT) + ";\n";
+  s += "const float SHAFT_K = " + std::to_string(SHAFT_K) +
+       ";\nconst float SHAFT_FADE = " + std::to_string(SHAFT_FADE) + ";\n";
   s += rampGlsl();
+  s += stormGlsl();
+  s += rainGlsl();
+  s += rainConsts();
   for (int k = 0; k < MAX_NEAR; ++k)
     s += "uniform vec4 cloudCut" + std::to_string(k) + ";\n";
   s += R"(float cloudCut(vec2 p, vec4 c) {
@@ -566,17 +789,21 @@ vec4 cloudShell(vec3 w) {
   float seg = dot(w - e, volsliceView) * volsliceGrowth / max(dot(v, volsliceView), 0.05);
   // Only the stretch of it inside the deck holds cloud: march that (the slice may lie above or
   // below the deck: FAR_SLAB_REACH).
+  bool shafts = cloudShaft.y > 0.0;
+  float floorZ = shafts ? cloudShaft.x : cloudFarZ.x;
   float t0 = 0.0, t1 = seg;
   if (abs(v.z) > 1e-5) {
-    float ta = (cloudFarZ.x - w.z) / v.z, tb = (cloudFarZ.x + 1.0 / cloudFarZ.y - w.z) / v.z;
+    float ta = (floorZ - w.z) / v.z, tb = (cloudFarZ.x + 1.0 / cloudFarZ.y - w.z) / v.z;
     t0 = max(t0, min(ta, tb));
     t1 = min(t1, max(ta, tb));
-  } else if (w.z < cloudFarZ.x || w.z > cloudFarZ.x + 1.0 / cloudFarZ.y) {
+  } else if (w.z < floorZ || w.z > cloudFarZ.x + 1.0 / cloudFarZ.y) {
     t1 = t0;
   }
   if (t1 <= t0)
     return vec4(0.0);
   float run = t1 - t0;
+  // The ramp's darkness here: the deck's, or the storms' over this point if more (F2).
+  float dk = max(cloudDark, cloudStormAt(w.xy));
   // The sunlight. Each march sample that holds cloud marches on toward the sun to the deck's top
   // through the coarse opacity (the whole deck's, so a cloud up-sun shades this one too), as the
   // near volumes' self-shade does through their own map; cloudSun = (the sun's direction, the
@@ -586,19 +813,32 @@ vec4 cloudShell(vec3 w) {
   vec3 lit = vec3(0.0);
   // Samples by the run: far out a slab can span a whole cloud, whose sunlit top must still come
   // first; near, a slab is a few metres and one sample does.
-  float ns = clamp(ceil(4.0 * run * cloudFarZ.y), 1.0, float(CLOUD_SAMPLES));
+  float ns = clamp(ceil(run * cloudMarchN), 1.0, float(CLOUD_SAMPLES));
   float stepK = cloudFarZ.z * run / ns;
-  for (int i = 0; i < CLOUD_SAMPLES; ++i) {
+  // What the near volumes draw is left out of the clouds (cloudCutK); a rain shaft under one stays.
+  float cut = 1.0;
+CLOUD_CUTS  for (int i = 0; i < CLOUD_SAMPLES; ++i) {
     if (float(i) >= ns)
       break;
     vec3 q = w + v * (t0 + run * (float(i) + 0.5) / ns);
+    if (q.z < cloudFarZ.x) {
+      // A rain shaft (O19): a grey veil as thick as the rain under the storms, thinning to the floor.
+      float rain = min(cloudRainAt(q.xy) / RAIN_FULL, 1.5);
+      if (rain <= 0.0)
+        continue;
+      float ai = 1.0 - exp(-SHAFT_K * rain * smoothstep(floorZ, floorZ + SHAFT_FADE, q.z) * run / ns);
+      lit += tr * ai * cloudRamp(0.3, max(dk, 0.6));
+      tr *= 1.0 - ai;
+      continue;
+    }
     float hz = clamp((q.z - cloudFarZ.x) * cloudFarZ.y, 0.0, 1.0);
     float dq = texture(volsliceVolumeTex, vec3((q.xy - cloudXf.xy) * cloudXf.z, hz)).r;
     if (dq < 0.004)
       continue;
     float tq = 0.0;
     if (cloudSun.w > 0.0) {
-      float len = max(0.0, cloudFarZ.x + 1.0 / cloudFarZ.y - q.z) / max(cloudSun.z, 0.05);
+      float len = min(max(0.0, cloudFarZ.x + 1.0 / cloudFarZ.y - q.z) / max(cloudSun.z, 0.05),
+                      cloudLightReach);
       for (int j = 0; j < CLOUD_LIGHT_SAMPLES; ++j) {
         vec3 r = q + cloudSun.xyz * (len * (float(j) + 0.5) / float(CLOUD_LIGHT_SAMPLES));
         float hr = clamp((r.z - cloudFarZ.x) * cloudFarZ.y, 0.0, 1.0);
@@ -606,19 +846,35 @@ vec4 cloudShell(vec3 w) {
       }
       tq *= len / float(CLOUD_LIGHT_SAMPLES);
     }
-    float ai = 1.0 - exp(-stepK * dq);
-    lit += tr * ai * cloudRamp(exp(-cloudSun.w * tq));
+    float l = exp(-cloudSun.w * tq);
+    l = min(1.0, l + 2.0 * cloudFlashAt(q)); // a lightning flash lights the cloud round it (O20)
+    if (dk > 0.0) {
+      // The sky hidden by the cloud above (a storm's dark base): two taps up the deck, as
+      // ABYSSAL's (Clouds.js, MIT), the deck's depth 0.1 and 0.34 above.
+      float span = 1.0 / cloudFarZ.y, above = 0.0;
+      for (int j = 0; j < 2; ++j) {
+        float f = j == 0 ? 0.10 : 0.34, wgt = j == 0 ? 0.22 : 0.46;
+        float hu = clamp((q.z + f * span - cloudFarZ.x) * cloudFarZ.y, 0.0, 1.0);
+        above += texture(volsliceVolumeTex, vec3((q.xy - cloudXf.xy) * cloudXf.z, hu)).r * span * wgt;
+      }
+      l *= 1.0 - SKY_DARK * dk * (1.0 - exp(-UP_K * cloudSun.w * above));
+    }
+    float ai = (1.0 - exp(-stepK * dq)) * (shafts ? cut : 1.0);
+    lit += tr * ai * cloudRamp(l, dk);
     tr *= 1.0 - ai;
   }
-  vec3 c = tr < 0.9999 ? lit / (1.0 - tr) : cloudRamp(1.0);
+  vec3 c = tr < 0.9999 ? lit / (1.0 - tr) : cloudRamp(1.0, dk);
   float a = 1.0 - tr;
   a *= 1.0 - smoothstep(cloudFar.z, cloudFar.w, length(w.xy - cloudFar.xy));
-)";
-  for (int k = 0; k < MAX_NEAR; ++k)
-    s += "  a *= cloudCut(w.xy, cloudCut" + std::to_string(k) + ");\n";
-  s += R"(  return vec4(c, a);
+  if (!shafts)
+    a *= cut;
+  return vec4(cloudFog(c, w - e), a);
 }
 )";
+  std::string cuts;
+  for (int k = 0; k < MAX_NEAR; ++k)
+    cuts += "  cut *= cloudCut(w.xy, cloudCut" + std::to_string(k) + ");\n";
+  s.replace(s.find("CLOUD_CUTS"), 10, cuts);
   return s;
 }
 const char *SHELL_BODY = "  gl_FragData[0] = cloudShell(volsliceMC);";
@@ -627,31 +883,51 @@ const char *SHELL_BODY = "  gl_FragData[0] = cloudShell(volsliceMC);";
 // shade): the shade a grey-blue the sky still lights, the sunlit side white. The near volumes look
 // it up in their colour transfer function, the far shells compute it (cloudRamp), so a cloud
 // passing between the two keeps its colours.
+// Darkness (F2, live: sky.darkness, and each cell's storm share) moves the ramp toward
+// STORM_RAMP: a storm cloud's base, deep in the optical depth of a tall deck, goes dark grey, and
+// even its sunlit flanks dull. At darkness 0 the ramp is LIGHT_RAMP exactly.
 constexpr double LIGHT_RAMP[3][4] = {
     {0.0, 0.48, 0.53, 0.62}, {0.5, 0.78, 0.82, 0.89}, {1.0, 1.00, 1.00, 1.00}};
+constexpr double STORM_RAMP[3][4] = {
+    {0.0, 0.17, 0.18, 0.21}, {0.5, 0.42, 0.44, 0.48}, {1.0, 0.80, 0.81, 0.83}};
 
-void skyTransfer(double w, std::vector<double> &color, std::vector<double> &opacity) {
-  // The colour over the light (the volumes' first component), the opacity over the density (the
-  // second); the shadow and the shells integrate the same opacity.
+// The volumes' transfer function: the colour over the light (the first component), the opacity
+// over the density (the second); the shadow and the shells integrate the same opacity. `w` scales
+// the opacity, `dark` darkens the ramp, and `unit` is the volume's opacity unit over the one the
+// opacity was set for (a taller box has a longer one, VolumeNode::setVolume): the opacity is
+// corrected so a metre of cloud stays as opaque.
+void skyTransfer(double w, std::vector<double> &color, std::vector<double> &opacity,
+                 double dark = 0.0, double unit = 1.0) {
   color.clear();
-  for (const auto &pt : LIGHT_RAMP)
-    color.insert(color.end(), pt, pt + 4);
-  opacity = {0.0, 0.0, CLOUD_EMPTY, 0.0, 0.55, 0.26 * w, 1.0, 0.54 * w};
+  dark = std::clamp(dark, 0.0, 1.0);
+  for (int k = 0; k < 3; ++k) {
+    color.push_back(LIGHT_RAMP[k][0]);
+    for (int c = 1; c < 4; ++c)
+      color.push_back(LIGHT_RAMP[k][c] + (STORM_RAMP[k][c] - LIGHT_RAMP[k][c]) * dark);
+  }
+  auto a = [unit](double v) {
+    v = std::clamp(v, 0.0, 0.999);
+    return unit == 1.0 ? v : 1.0 - std::pow(1.0 - v, unit);
+  };
+  opacity = {0.0, 0.0, CLOUD_EMPTY, 0.0, 0.55, a(0.26 * w), 1.0, a(0.54 * w)};
 }
 
-// The ramp in GLSL, from the same table.
+// The ramp in GLSL, from the same tables: cloudRamp(light, darkness).
 std::string rampGlsl() {
   auto v3 = [](const double *c) {
     return "vec3(" + std::to_string(c[1]) + ", " + std::to_string(c[2]) + ", " +
            std::to_string(c[3]) + ")";
   };
-  auto segment = [&v3](const double *a, const double *b) {
-    return "mix(" + v3(a) + ", " + v3(b) + ", (l - " + std::to_string(a[0]) + ") / " +
-           std::to_string(b[0] - a[0]) + ")";
+  auto point = [&v3](int k) {
+    return "mix(" + v3(LIGHT_RAMP[k]) + ", " + v3(STORM_RAMP[k]) + ", d)";
   };
-  const double(&R)[3][4] = LIGHT_RAMP;
-  return "vec3 cloudRamp(float l) {\n  l = clamp(l, 0.0, 1.0);\n  return l < " +
-         std::to_string(R[1][0]) + " ? " + segment(R[0], R[1]) + " : " + segment(R[1], R[2]) +
+  auto segment = [&point](int a, int b) {
+    return "mix(" + point(a) + ", " + point(b) + ", (l - " + std::to_string(LIGHT_RAMP[a][0]) +
+           ") / " + std::to_string(LIGHT_RAMP[b][0] - LIGHT_RAMP[a][0]) + ")";
+  };
+  return std::string("vec3 cloudRamp(float l, float d) {\n") +
+         "  l = clamp(l, 0.0, 1.0);\n  d = clamp(d, 0.0, 1.0);\n  return l < " +
+         std::to_string(LIGHT_RAMP[1][0]) + " ? " + segment(0, 1) + " : " + segment(1, 2) +
          ";\n}\n";
 }
 
@@ -665,10 +941,87 @@ struct Composite {
   std::vector<unsigned char> bytes;
 };
 
+// A storm deck's build as a sliced task (cvc/core/sliced_task.h), as generated_world rebuilds:
+// natively on the background pool; in single-threaded wasm (no threads to start), or with
+// `deck_threading: cooperative`, a few milliseconds a frame on the scheduler thread, through
+// cloud_layer::step. It writes only its job, and the tick adopts the job once it is done.
+class DeckTask : public cvc::sliced_job {
+public:
+  explicit DeckTask(std::shared_ptr<cvc::world::cloud_layer::deck_job> job)
+      : m_job(std::move(job)) {}
+  bool step(std::size_t budget) override {
+    if (done())
+      return true;
+    try {
+      const bool built = cvc::world::cloud_layer::step(*m_job, budget);
+      m_phase = cvc::world::cloud_layer::phase(*m_job);
+      m_progress = cvc::world::cloud_layer::progress(*m_job);
+      if (built)
+        m_built.store(true, std::memory_order_release);
+    } catch (...) {
+      m_failed.store(true, std::memory_order_release);
+    }
+    return done();
+  }
+  bool done() const override {
+    return m_built.load(std::memory_order_acquire) || m_failed.load(std::memory_order_acquire) ||
+           m_cancelled.load();
+  }
+  void cancel() override { m_cancelled = true; }
+  bool cancelled() const override { return m_cancelled.load(); }
+  const char *phase() const override { return m_phase.load(); }
+  double progress() const override { return m_progress.load(); }
+  std::string status() const override { return built() ? "built" : "building"; }
+  bool built() const { return m_built.load(std::memory_order_acquire); }
+  bool failed() const { return m_failed.load(std::memory_order_acquire); }
+
+private:
+  std::shared_ptr<cvc::world::cloud_layer::deck_job> m_job;
+  std::atomic<const char *> m_phase{"grow"};
+  std::atomic<double> m_progress{0.0};
+  std::atomic<bool> m_built{false}, m_failed{false}, m_cancelled{false};
+};
+
 struct SkyRT {
   cvc::app *app = nullptr;
+  std::string id;
   std::unique_ptr<cvc::world::cloud_layer> layer;
   std::string driftKey, morphKey, shadowKey, evolveKey, oroKey;
+  // F1, the live sky: coverage and the wind's heading (sky.*), and the sun: the light rig's key
+  // (lighting.key_azimuth / key_elevation) when the scene has one, else the props.
+  std::string coverageKey, windKey, sunAzKey, sunElKey;
+  // The scene's wind (scene_wind.h, O14): its keys' root, and where the deck's drift now is
+  // published (sky.drift_az, its heading in degrees; sky.drift_speed, m/s).
+  std::string prefix, driftAzKey, driftSpeedKey, driftNow;
+  // F2, the storms: the deck's heights (sky.base / sky.top), its darkness (sky.darkness) and the
+  // storms over it (sky.storms, "x y r intensity; ..." in world metres, as a weather node writes).
+  std::string baseKey, topKey, darkKey, stormsKey;
+  std::string stormsText;                     // the storms last parsed
+  std::vector<cvc::world::storm_disc> storms; // ...and what they said
+  double darkness = 0.0;
+  // O19, the rain: the recent storms' tracks (sky.rain, "x y rain_radius vx vy age left; ...", as
+  // a weather node writes them), the weather's rain constants (sky.rain_k, "onset rain_max wet dry
+  // rings fog wet"), and a haze of the scene's own (sky.fog, the fog's density a kilometre).
+  std::string rainKey, rainKKey, fogKey, rainText, rainKText;
+  std::vector<std::array<float, 8>> wet;                       // per track: cloudWetA, cloudWetB
+  double rainK[7] = {0.35, 50.0, 600.0, 900.0, 1.0, 1.0, 1.0}; // as sky.rain_k
+  std::vector<std::weak_ptr<GeometryNode>> overlays; // receivers drawn after the deck (the rain)
+  bool bgRead = false;
+  double bg[2][3] = {{0, 0, 0}, {0, 0, 0}}; // the scene's background, before the fog
+  bool shafts = false; // rain under the deck: the far slices reach down to shaftFloor
+  // O20: a lightning flash (sky.flash, "x y z intensity", as a weather node writes it).
+  std::string flashKey, flashText;
+  std::array<float, 4> flash{0.0f, 0.0f, 0.0f, 0.0f};
+  double shaftFloor = 0.0;
+  // The deck the props built (the cumulus's): its depth, layers and far slices. A deeper deck is
+  // a storm deck, built off the frame (deckTask, a sliced task) and swapped in when done.
+  double fairDepth = 0.0;
+  int fairNz = SKY_NZ, fairLayers = 10;
+  std::shared_ptr<cvc::world::cloud_layer::deck_job> deckJob;
+  std::shared_ptr<DeckTask> deckTask;
+  int deckPid = -1;
+  cvc::sliced_threading deckThreading = cvc::sliced_threading::automatic;
+  double unit0 = 1.0, unit = 1.0; // the near volumes' opacity unit, built and now (skyTransfer)
   std::vector<std::string>
       receivers; // the nodes whose meshes (and their children's) take the shade
   std::shared_ptr<const cvc::height_field> ground; // its extent is the area, unless `area` is set
@@ -695,6 +1048,7 @@ struct SkyRT {
     int weight = 0; // frames into its fade-in, 0..FADE_FRAMES
     bool leaving = false;
     double shown = -1.0; // the opacity scale its transfer function was last given
+    double dark = -1.0;  // ...and the darkness
   };
   std::vector<Near> near;
   int nextMorph = 0;
@@ -706,7 +1060,7 @@ struct SkyRT {
   int shadeAt = 0;
   long shadeSwap = 0; // the frame the newest shade went up: its crossfade from the last starts
   Composite shade, far;
-  std::vector<float> field, sunTau, light;
+  std::vector<float> field, sunTau, upTau, light;
   std::vector<unsigned char> fieldBytes, lightBytes; // what a near volume is given (toBytes)
   long frame = 0;
   double lastT = -1.0, driftX = 0.0, driftY = 0.0, morph = 0.0;
@@ -762,6 +1116,14 @@ bool giveRelief(SkyRT &r) {
     return false;
   r.reliefData = h.data();
   r.reliefSize = h.size();
+  float lo = 0.0f;
+  bool any = false;
+  for (float v : h)
+    if (std::isfinite(v)) {
+      lo = any ? std::min(lo, v) : v;
+      any = true;
+    }
+  r.shaftFloor = double(lo) - 10.0; // the rain shafts reach the lowest ground
   r.layer->set_ground(h, r.relief->rows(), r.relief->cols(), r.relief->x0(), r.relief->y0(),
                       r.relief->dx(), r.relief->dy());
   return true;
@@ -770,7 +1132,10 @@ bool giveRelief(SkyRT &r) {
 // Give `g` and every mesh under it the deck's shade, once each.
 void wireReceivers(SkyRT &r, GraphicsNode &g) {
   if (auto *m = dynamic_cast<GeometryNode *>(&g); m && !m->hasSharedShaderInputs(CLOUD_INPUTS)) {
-    m->addFragmentShaderReplacement("//VTK::Light::Dec", SHADE_DEC);
+    // A receiver drawn in the volume layer (the weather's rain streaks) draws after the deck.
+    if (m->drawsWithVolumes())
+      r.overlays.push_back(std::static_pointer_cast<GeometryNode>(m->shared_from_this()));
+    m->addFragmentShaderReplacement("//VTK::Light::Dec", shadeDec());
     m->addFragmentShaderPostReplacement(LIGHT_SUM, SHADE_SUM);
     m->setSharedShaderInputs(CLOUD_INPUTS, r.inputs);
   }
@@ -805,9 +1170,15 @@ void orderDeck(SkyRT &r, vtkRenderer *ren, const double eye[3]) {
                                          (c[2] - eye[2]) * (c[2] - eye[2])),
                                p);
       }
-  // In order: the far slices, then nothing but the near volumes, far to near.
+  // The overlays (receivers in the volume layer: the rain) come last.
+  std::vector<vtkProp *> overlays;
+  for (const auto &o : r.overlays)
+    if (auto g = o.lock())
+      if (vtkProp *p = g->prop(); p && props->IsItemPresent(p))
+        overlays.push_back(p);
+  // In order: the far slices, then nothing but the near volumes, far to near, then the overlays.
   std::vector<double> after;
-  bool seen = false, ok = true;
+  bool seen = false, ok = true, over = false;
   vtkCollectionSimpleIterator it;
   props->InitTraversal(it);
   while (vtkProp *p = props->GetNextProp(it)) {
@@ -817,10 +1188,14 @@ void orderDeck(SkyRT &r, vtkRenderer *ren, const double eye[3]) {
     }
     if (!seen)
       continue;
+    if (std::find(overlays.begin(), overlays.end(), p) != overlays.end()) {
+      over = true;
+      continue;
+    }
     const auto n =
         std::find_if(nearProps.begin(), nearProps.end(),
                      [p](const std::pair<double, vtkProp *> &e) { return e.second == p; });
-    if (n == nearProps.end())
+    if (n == nearProps.end() || over)
       ok = false;
     else
       after.push_back(n->first);
@@ -839,37 +1214,126 @@ void orderDeck(SkyRT &r, vtkRenderer *ren, const double eye[3]) {
     ren->RemoveViewProp(e.second);
     ren->AddViewProp(e.second);
   }
+  for (vtkProp *p : overlays) {
+    ren->RemoveViewProp(p);
+    ren->AddViewProp(p);
+  }
 }
 
 // A near volume shows a cell's cloud at the morph clock: its sunlight (the colour) and its density
 // (the opacity), the light e^(-lightK tau) of the cloud's own optical depth toward the sun.
 void showCell(SkyRT &r, VolumeNode &vn, int cell) {
   const cvc::world::cloud_layer &L = *r.layer;
-  L.cell_field(L.cells()[cell], r.morph, r.field);
-  L.cell_sun_tau(L.cells()[cell], r.morph, r.sunTau);
+  const cvc::world::cloud_cell &c = L.cells()[cell];
+  L.cell_field(c, r.morph, r.field);
+  L.cell_sun_tau(c, r.morph, r.sunTau);
   r.light.resize(r.sunTau.size());
   for (std::size_t k = 0; k < r.sunTau.size(); ++k)
     r.light[k] = static_cast<float>(std::exp(-r.lightK * r.sunTau[k]));
+  // A storm's dark base (F2, ABYSSAL's skyVis, §10.7): the light dims, by up to SKY_DARK at full
+  // darkness, as the cloud above a voxel hides the sky from it, exp(-UP_K lightK tau_up). In fair
+  // weather (no darkness) the light is the sun's alone, as before.
+  if (const double dark = std::max(r.darkness, c.storm); dark > 0.0) {
+    L.cell_up_tau(c, r.morph, r.upTau);
+    for (std::size_t k = 0; k < r.light.size(); ++k)
+      r.light[k] *= static_cast<float>(1.0 - SKY_DARK * dark *
+                                                 (1.0 - std::exp(-UP_K * r.lightK * r.upTau[k])));
+  }
   toBytes(r.light, r.lightBytes);
   toBytes(r.field, r.fieldBytes);
   vn.updateScalars(r.lightBytes, r.fieldBytes);
 }
 
 // A near volume's opacity: its near <-> far crossfade times its cloud's own fade in or out.
+// A storm over its cell thickens it (cloud_layer::STORM_DENSE, as the far slices) and darkens it
+// (its storm share, or the deck's darkness if more).
 void setNearWeight(const SkyRT &r, SkyRT::Near &v) {
-  double w = double(v.weight) / FADE_FRAMES;
-  if (v.cell >= 0)
-    w *= r.layer->cells()[v.cell].weight();
+  double w = double(v.weight) / FADE_FRAMES, dark = r.darkness;
+  if (v.cell >= 0) {
+    const cvc::world::cloud_cell &c = r.layer->cells()[v.cell];
+    w *= c.weight() * (1.0 + cvc::world::cloud_layer::STORM_DENSE * c.storm);
+    dark = std::max(dark, c.storm);
+  }
   if (std::fabs(w - v.shown) < 0.01 && !(w == 0.0 && v.shown != 0.0) &&
-      !(w == 1.0 && v.shown != 1.0))
+      !(w == 1.0 && v.shown != 1.0) && std::fabs(dark - v.dark) < 0.01)
     return;
   v.shown = w;
+  v.dark = dark;
   if (auto vn = v.node.lock()) {
     std::vector<double> col, op;
-    skyTransfer(w, col, op);
+    skyTransfer(w, col, op, dark, r.unit / r.unit0);
     byteScalars(col, op); // the near volumes hold bytes (showCell)
     vn->setTransferFunction(col, op);
   }
+}
+
+// The storms as a weather node writes them: "x y r intensity" entries split by ';'. False (and
+// nothing changed) for malformed text.
+bool parseStorms(const std::string &text, std::vector<cvc::world::storm_disc> &out) {
+  std::vector<cvc::world::storm_disc> d;
+  std::size_t at = 0;
+  while (at <= text.size()) {
+    std::size_t end = text.find(';', at);
+    if (end == std::string::npos)
+      end = text.size();
+    std::istringstream is(text.substr(at, end - at));
+    is.imbue(std::locale::classic());
+    at = end + 1;
+    cvc::world::storm_disc s;
+    if (!(is >> s.x))
+      continue; // an empty entry
+    if (!(is >> s.y >> s.r >> s.intensity))
+      return false;
+    d.push_back(s);
+  }
+  out = std::move(d);
+  return true;
+}
+
+// Whitespace-separated numbers, split by ';' into entries of `per` each (rows that are short are
+// malformed: false, `out` untouched).
+bool parseRows(const std::string &text, std::size_t per, std::vector<std::vector<double>> &out) {
+  std::vector<std::vector<double>> rows;
+  std::size_t at = 0;
+  while (at <= text.size()) {
+    std::size_t end = text.find(';', at);
+    if (end == std::string::npos)
+      end = text.size();
+    std::istringstream is(text.substr(at, end - at));
+    is.imbue(std::locale::classic());
+    at = end + 1;
+    std::vector<double> row;
+    double v;
+    while (is >> v)
+      row.push_back(v);
+    if (row.empty())
+      continue;
+    if (row.size() < per)
+      return false;
+    rows.push_back(std::move(row));
+  }
+  out = std::move(rows);
+  return true;
+}
+
+// The near volumes' boxes and grids after the deck's heights or layers changed: each one emptied
+// onto the new box (shown again on its next refresh, which is now), its opacity corrected for the
+// box's longer opacity unit.
+void reboxNear(SkyRT &r, cvc::app &app) {
+  const cvc::world::cloud_layer_params &p = r.layer->params();
+  const std::vector<float> empty(std::size_t(p.n) * p.n * p.nz, 0.0f);
+  r.unit = std::sqrt(8.0 * p.extent * p.extent + (p.top - p.base) * (p.top - p.base)) / 100.0;
+  for (SkyRT::Near &v : r.near)
+    if (auto vn = v.node.lock()) {
+      vn->setVolume(
+          cvc::volume(app, reinterpret_cast<const unsigned char *>(empty.data()),
+                      cvc::dimension(p.n, p.n, p.nz), cvc::Float,
+                      cvc::bounding_box(-p.extent, -p.extent, p.base, p.extent, p.extent, p.top)));
+      v.shown = -1.0; // its transfer function again, for the new unit
+      setNearWeight(r, v);
+      if (v.cell >= 0)
+        showCell(r, *vn, v.cell);
+    }
 }
 
 // The near volumes go to the clouds nearest the camera (a cloud already drawn counts a little
@@ -988,14 +1452,28 @@ bool stepComposite(Composite &c, long f, double morph, bool now, std::size_t cel
 // own shade: optical depth per metre of opacity toward the sun; 0 lights them evenly), shadow (0
 // starts the shade off), wind_az (the heading the wind blows toward, degrees as sun_az: 90, the
 // default, is +x), evolve (the weather's rate: 0 holds the clouds where they are), orographic (how
-// strongly windward flanks gather cloud: 0 none, 1 the default) and fade (seconds a cloud takes to
-// come or go).
+// strongly windward flanks gather cloud: 0 none, 1 the default), fade (seconds a cloud takes to
+// come or go), darkness (0..1, the ramp's storm end; live: sky.darkness), fog (a haze of the
+// scene's own, its density per km; live: sky.fog; the rain, sky.rain and sky.rain_k from a weather
+// node, thickens it) and deck_threading (how a
+// storm deck is built off the frame: automatic, cooperative or threaded).
+// Live keys besides the props' (F1, F2): sky.coverage, sky.wind_az, sky.base / sky.top (a deck
+// deeper than the props' is a storm deck of cumulonimbus, built off the frame), sky.darkness and
+// sky.storms (storm discs, "x y r intensity; ...", which a weather node writes).
 std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::SceneNode &n,
                                                 GraphicsNode *parent, RealizedScene &out,
                                                 std::vector<std::string> *warnings) {
   auto rt = std::make_shared<SkyRT>();
   cvc::app &app0 = sg.appContext();
   rt->app = &app0;
+  rt->id = n.id;
+  // How a storm deck is built off the frame (a sliced task): automatic (on the pool where there
+  // are threads, else a share a frame), cooperative (always a share a frame, as single-threaded
+  // wasm builds it) or threaded.
+  if (const std::string t = n.props.str("deck_threading"); t == "cooperative")
+    rt->deckThreading = cvc::sliced_threading::cooperative;
+  else if (t == "threaded")
+    rt->deckThreading = cvc::sliced_threading::threaded;
   const std::string ground = n.props.str("ground").empty() ? "terrain" : n.props.str("ground");
   if (const auto it = out.height_fields.find(ground); it != out.height_fields.end())
     rt->ground = it->second;
@@ -1015,6 +1493,9 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
   p.wind_az = n.props.num("wind_az", 90.0);
   p.orographic = std::max(0.0, n.props.num("orographic", 1.0));
   p.fade_s = std::max(0.0, n.props.num("fade", 20.0));
+  p.cumulus = p.top - p.base; // the deck as authored is cumulus; a deeper one is a storm deck
+  rt->fairDepth = p.cumulus;
+  rt->fairLayers = p.far_layers;
   std::vector<double> col;
   skyTransfer(1.0, col, p.opacity); // the shadow and the shells integrate what the volume shows
   rt->relief = rt->ground;          // the orographic coupling reads it even when the area is fixed
@@ -1049,6 +1530,7 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
   // the side (a long sight line), and a cumulus that looks solid should shade like one.
   const double unit =
       std::sqrt(8.0 * p.extent * p.extent + (p.top - p.base) * (p.top - p.base)) / 100.0;
+  rt->unit0 = rt->unit = unit;
   rt->shadeK = n.props.num("shade_k", SHADE_GAIN * 1.1 / unit);
   rt->shadeFloor = n.props.num("shade_floor", SHADE_FLOOR);
   // The clouds' own shade, in the same units: LIGHT_GAIN times the volume's optical depth. As with
@@ -1148,6 +1630,26 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
   rt->shadowKey = seed_key(app0, pref, n, "sky.shadow", n.props.num("shadow", 1.0));
   rt->evolveKey = seed_key(app0, pref, n, "sky.evolve", std::max(0.0, n.props.num("evolve", 1.0)));
   rt->oroKey = seed_key(app0, pref, n, "sky.orographic", p.orographic);
+  rt->coverageKey = seed_key(app0, pref, n, "sky.coverage", p.coverage);
+  rt->windKey = seed_key(app0, pref, n, "sky.wind_az", p.wind_az);
+  rt->prefix = pref;
+  rt->driftAzKey = ari::resolve_bind(pref, ari::node_key(n, "sky.drift_az"));
+  rt->driftSpeedKey = ari::resolve_bind(pref, ari::node_key(n, "sky.drift_speed"));
+  rt->baseKey = seed_key(app0, pref, n, "sky.base", p.base);
+  rt->topKey = seed_key(app0, pref, n, "sky.top", p.top);
+  rt->darkKey =
+      seed_key(app0, pref, n, "sky.darkness", std::clamp(n.props.num("darkness", 0.0), 0.0, 1.0));
+  rt->stormsKey = ari::resolve_bind(pref, ari::node_key(n, "sky.storms"));
+  rt->rainKey = ari::resolve_bind(pref, ari::node_key(n, "sky.rain"));
+  rt->rainKKey = ari::resolve_bind(pref, ari::node_key(n, "sky.rain_k"));
+  ari::read_or_seed<std::string>(app0, rt->rainKey, std::string());
+  ari::read_or_seed<std::string>(app0, rt->rainKKey, std::string());
+  rt->fogKey = seed_key(app0, pref, n, "sky.fog", std::max(0.0, n.props.num("fog", 0.0)));
+  rt->flashKey = ari::resolve_bind(pref, ari::node_key(n, "sky.flash"));
+  ari::read_or_seed<std::string>(app0, rt->flashKey, std::string());
+  ari::read_or_seed<std::string>(app0, rt->stormsKey, std::string());
+  rt->sunAzKey = ari::resolve_bind(pref, "lighting.key_azimuth"); // the rig's: not seeded here
+  rt->sunElKey = ari::resolve_bind(pref, "lighting.key_elevation");
   rt->receivers.push_back(ground);
   if (const ari::Value *rv = n.props.find("receivers"); rv && rv->is_seq())
     for (const ari::Value &v : rv->items)
@@ -1165,7 +1667,117 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     const double t = app.world_clock().t();
     const double dt = r.lastT < 0.0 ? 0.0 : std::max(0.0, t - r.lastT);
     r.lastT = t;
-    const double ds = dt * CLOUD_DRIFT * read_key(app, r.driftKey, 1.0);
+    // The live sky (F1): the coverage (the cells' targets ranked again; the clouds fade over fade
+    // s), the wind's heading, and the sun from the light rig. A new sun relights the maps and
+    // re-composites the shade and the far clouds at once.
+    L.set_coverage(read_key(app, r.coverageKey, L.params().coverage));
+    // The wind: the scene's one wind when it has one (O14: its heading, and its speed at the
+    // deck's base through the profile the physics reads, times the gusts' mean, which the whole
+    // deck drifts with), else the node's own sky.wind_az at CLOUD_DRIFT.
+    const std::optional<ari::SceneWind> sw = ari::scene_wind_set(app, r.prefix);
+    if (const double w = sw ? sw->azimuth() : read_key(app, r.windKey, L.params().wind_az);
+        w != L.params().wind_az) {
+      constexpr double kPi = 3.14159265358979323846;
+      L.set_wind(w);
+      r.windX = std::sin(w * kPi / 180.0);
+      r.windY = -std::cos(w * kPi / 180.0);
+    }
+    const double driftSpeed =
+        sw ? sw->speed * cvc::algo::wind_profile(L.params().base) *
+                 cvc::algo::wind_gust_mean(cvc::algo::gust_frame_at(sw->state(), t))
+           : CLOUD_DRIFT;
+    { // published when it changes (the speed to a tenth of a m/s), not every frame
+      const double shown = std::round(driftSpeed * 10.0) / 10.0;
+      if (const std::string now = std::to_string(L.params().wind_az) + "|" + std::to_string(shown);
+          now != r.driftNow) {
+        r.driftNow = now;
+        cvc::state::instance(app)(r.driftAzKey).value(L.params().wind_az);
+        cvc::state::instance(app)(r.driftSpeedKey).value(shown);
+      }
+    }
+    {
+      const double az = read_key(app, r.sunAzKey, L.params().sun_az);
+      const double el = std::min(89.0, std::max(5.0, read_key(app, r.sunElKey, L.params().sun_el)));
+      if (az != L.params().sun_az || el != L.params().sun_el) {
+        L.set_sun(az, el);
+        r.fresh = true;
+      }
+    }
+    // F2: the storms over the deck and its darkness, live; a new deck's heights are built as a
+    // sliced task (on the pool, or a share a frame where there are no threads) and swapped in when
+    // done (the near volumes re-boxed, the shade and the far clouds re-composited at once). A
+    // storm deck is a deeper deck: more layers for its towers, more far slices.
+    {
+      const std::string text = ari::read_or<std::string>(app, r.stormsKey, std::string());
+      if (text != r.stormsText) {
+        r.stormsText = text;
+        std::vector<cvc::world::storm_disc> d;
+        if (parseStorms(text, d)) {
+          r.storms = std::move(d);
+          L.set_storms(r.storms);
+        }
+      }
+      r.darkness = std::clamp(read_key(app, r.darkKey, 0.0), 0.0, 1.0);
+      // O19: the rain's tracks and constants.
+      if (const std::string rk = ari::read_or<std::string>(app, r.rainKKey, std::string());
+          rk != r.rainKText) {
+        r.rainKText = rk;
+        std::vector<std::vector<double>> rows;
+        if (parseRows(rk, 7, rows) && !rows.empty())
+          for (int k = 0; k < 7; ++k)
+            r.rainK[k] = rows[0][k];
+      }
+      if (const std::string rt = ari::read_or<std::string>(app, r.rainKey, std::string());
+          rt != r.rainText) {
+        r.rainText = rt;
+        std::vector<std::vector<double>> rows;
+        if (parseRows(rt, 7, rows)) {
+          r.wet.clear();
+          for (const auto &w : rows)
+            r.wet.push_back({float(w[0]), float(w[1]), float(w[2]), 0.0f, float(w[3]), float(w[4]),
+                             float(w[5]), float(w[6])});
+        }
+      }
+      if (r.deckTask && r.deckTask->done()) {
+        if (r.deckTask->failed())
+          app.log(1, "ari: cloud_sky '" + r.id + "': a new deck failed to build\n");
+        if (r.deckTask->built() && L.adopt_deck(*r.deckJob)) {
+          reboxNear(r, app);
+          r.fresh = true;
+          r.shade.phase = r.far.phase = 0;
+        }
+        r.deckTask.reset();
+        r.deckJob.reset();
+        r.deckPid = -1;
+      }
+      const double base = read_key(app, r.baseKey, L.params().base);
+      const double top = std::max(base + 1.0, read_key(app, r.topKey, L.params().top));
+      if (!r.deckJob && (base != L.params().base || top != L.params().top)) {
+        const double deep = (top - base) / std::max(1.0, r.fairDepth);
+        const int nz = deep > 1.0 + 1e-9 ? std::clamp(int(std::lround(r.fairNz * std::sqrt(deep))),
+                                                      r.fairNz, MAX_DECK_NZ)
+                                         : r.fairNz;
+        const int layers = deep > 1.0 + 1e-9
+                               ? std::clamp(int(std::lround(r.fairLayers * std::sqrt(deep))),
+                                            r.fairLayers, MAX_DECK_LAYERS)
+                               : r.fairLayers;
+        r.deckJob = L.prepare_deck(base, top, nz, layers);
+        r.deckTask = std::make_shared<DeckTask>(r.deckJob);
+        cvc::sliced_task_options o;
+        o.kind = "cloud_sky";
+        o.subject = "deck " + r.id;
+        o.owner = "cloud_sky:" + r.id;
+        o.threading = r.deckThreading;
+        std::string why;
+        r.deckPid = cvc::schedule_sliced_job(app, r.deckTask, o, &why);
+        if (r.deckPid < 0) { // no scheduler to run it on: build it now (bounded), adopt it next
+          app.log(1,
+                  "ari: cloud_sky '" + r.id + "': building the deck in the frame (" + why + ")\n");
+          r.deckTask->step(0);
+        }
+      }
+    }
+    const double ds = dt * driftSpeed * read_key(app, r.driftKey, 1.0);
     r.driftX += ds * r.windX;
     r.driftY += ds * r.windY;
     r.morph += dt / CLOUD_MORPH_S * read_key(app, r.morphKey, 1.0);
@@ -1173,12 +1785,18 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     // New meshes under the receivers (a regenerated world, an LOD rung made late) take the shade
     // on the frame after they join the scene: adding a node anywhere in it bumps its
     // treeVersion(), so the receivers are walked then and never on a timer. The version is read
-    // before the walk, so a mesh added during it is found on the next frame.
+    // before the walk, so a mesh added during it is found on the next frame. A receiver is a
+    // node of the scene's or a mesh inside one (the weather's rain and bolt, under its node).
     if (const std::uint64_t tv = sgp->treeVersion(); tv != r.wiredTree) {
       r.wiredTree = tv;
-      for (const std::string &id : r.receivers)
-        if (auto g = sgp->getGraphics(id))
+      for (const std::string &id : r.receivers) {
+        std::shared_ptr<GraphicsNode> g = sgp->getGraphics(id);
+        if (!g)
+          if (auto top = sgp->getGraphicsRoot())
+            g = top->findChildByName(id);
+        if (g)
           wireReceivers(r, *g);
+      }
     }
     // A grown (or moved) ground re-lays the deck over it.
     if (f % AREA_STRIDE == 0) {
@@ -1237,7 +1855,7 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
           continue;
         v.weight =
             v.leaving ? std::max(0, v.weight - STRIDE) : std::min(FADE_FRAMES, v.weight + STRIDE);
-        setNearWeight(r, v); // the near crossfade and the cloud's own fade
+        setNearWeight(r, v); // the near crossfade, the cloud's own fade, its storm
         if (v.leaving && v.weight == 0) {
           v.cell = -1;
           v.leaving = false;
@@ -1282,6 +1900,16 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
         r.shadeTex[k]->SetContext(ow);
       }
     const bool shadeOn = read_key(app, r.shadowKey, 1.0) != 0.0;
+    {
+      // Rain under the deck (any storm raining): the far slices' box reaches down for the shafts.
+      bool raining = false;
+      for (const cvc::world::storm_disc &d : r.storms)
+        raining = raining || d.intensity > r.rainK[0];
+      if (raining != r.shafts) {
+        r.shafts = raining;
+        r.fresh = true;
+      }
+    }
     const bool now = r.fresh;
     r.fresh = false;
     const int S = L.shadow_size(), F = L.far_size();
@@ -1322,9 +1950,10 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
       // by world position), its box the deck's out to the far reach, which they slice.
       if (auto sh = r.shells.lock()) {
         const cvc::world::cloud_layer_params &lp = L.params();
+        const double zlo = r.shafts ? std::min(lp.base, r.shaftFloor) : lp.base;
         sh->setVolume(cvc::volume(app, r.far.bytes.data(), cvc::dimension(F, F, lp.far_layers),
                                   cvc::UChar,
-                                  cvc::bounding_box(r.ox - r.farReach, r.oy - r.farReach, lp.base,
+                                  cvc::bounding_box(r.ox - r.farReach, r.oy - r.farReach, zlo,
                                                     r.ox + r.farReach, r.oy + r.farReach, lp.top)));
         sh->setVisible(true);
       }
@@ -1350,6 +1979,93 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
                          float(FAR_LIGHT * r.lightK * L.opacity_max())};
     in.f4["cloudFarZ"] = {float(p.base), float(1.0 / (p.top - p.base)), float(r.farK),
                           float(cp[2])};
+    in.f["cloudDark"] = float(r.darkness);
+    {
+      // The march (cloudMarchN, cloudLightReach): a cumulus deck's as before (4 per depth, the
+      // light march to the top), a storm deck's finer and its light march cut.
+      const double depth = p.top - p.base;
+      const double sh = std::sqrt(std::max(1e-6, sx * sx + sy * sy));
+      in.f["cloudMarchN"] = float(std::max(4.0 / depth, L.deep() ? 1.0 / MARCH_STEP : 0.0));
+      in.f["cloudLightReach"] = float(L.deep() ? 2.0 * p.extent / sh : 1e9);
+    }
+    for (int k = 0; k < MAX_STORMS; ++k) {
+      std::array<float, 4> d{0.0f, 0.0f, 0.0f, 0.0f};
+      if (k < int(r.storms.size()))
+        d = {float(r.storms[k].x), float(r.storms[k].y), float(r.storms[k].r),
+             float(r.storms[k].intensity)};
+      in.f4["cloudStorm" + std::to_string(k)] = d;
+    }
+    // O19, the rain. Its rate at the camera (the strongest storm's, as cloudRainAt), the fog it
+    // brings, the wet ground's tracks and the rings' clock.
+    {
+      const double onset = std::clamp(r.rainK[0], 0.0, 0.999), rmax = std::max(0.0, r.rainK[1]);
+      double rainCam = 0.0;
+      for (const cvc::world::storm_disc &d : r.storms) {
+        const double dist = std::hypot(cp[0] - d.x, cp[1] - d.y);
+        const double f =
+            d.r > 0.0 ? 1.0 - std::clamp((dist - 0.5 * d.r) / (0.5 * d.r), 0.0, 1.0) : 0.0;
+        const double fs = f * f * (3.0 - 2.0 * f); // smoothstep, as the shader's footprint
+        const double u = (d.intensity * fs - onset) / (1.0 - onset);
+        if (u > 0.0)
+          rainCam = std::max(rainCam, rmax * std::pow(std::min(u, 1.0), 1.5));
+      }
+      const double fogD = std::max(0.0, read_key(app, r.fogKey, 0.0)) / 1000.0 +
+                          RAIN_FOG * std::max(0.0, r.rainK[5]) * std::min(rainCam / RAIN_FULL, 1.5);
+      const double dk = r.darkness;
+      std::array<float, 4> fog{};
+      for (int c = 0; c < 3; ++c)
+        fog[c] = float(FOG_FAIR[c] + (FOG_STORM[c] - FOG_FAIR[c]) * dk);
+      fog[3] = float(fogD);
+      in.f4["cloudFogC"] = fog;
+      in.f4["cloudRainK"] = {float(onset), float(rmax), float(std::max(1.0, r.rainK[2])),
+                             float(std::max(1.0, r.rainK[3]))};
+      in.f4["cloudWetK"] = {float(std::max(0.0, r.rainK[6])), float(std::fmod(t, 3600.0)),
+                            float(std::max(0.0, r.rainK[4])), 0.0f};
+      for (int k = 0; k < MAX_STORMS; ++k) {
+        std::array<float, 8> w{};
+        if (k < int(r.wet.size()))
+          w = r.wet[k];
+        in.f4["cloudWetA" + std::to_string(k)] = {w[0], w[1], w[2], w[3]};
+        in.f4["cloudWetB" + std::to_string(k)] = {w[4], w[5], w[6], w[7]};
+      }
+      in.f4["cloudShaft"] = {float(r.shaftFloor), r.shafts ? 1.0f : 0.0f, 0.0f, 0.0f};
+      // O20: a lightning flash.
+      if (const std::string ft = ari::read_or<std::string>(app, r.flashKey, std::string());
+          ft != r.flashText) {
+        r.flashText = ft;
+        std::vector<std::vector<double>> rows;
+        r.flash = {0.0f, 0.0f, 0.0f, 0.0f};
+        if (parseRows(ft, 4, rows) && !rows.empty())
+          r.flash = {float(rows[0][0]), float(rows[0][1]), float(rows[0][2]),
+                     float(std::max(0.0, rows[0][3]))};
+      }
+      in.f4["cloudFlash"] = r.flash;
+      // The sun in view coordinates, for the wet ground's glint.
+      vtkMatrix4x4 *mv = cam->GetModelViewTransformMatrix();
+      double sv[3];
+      for (int i = 0; i < 3; ++i)
+        sv[i] = mv->GetElement(i, 0) * sx + mv->GetElement(i, 1) * sy + mv->GetElement(i, 2) * sz;
+      in.f3["cloudSunVC"] = {float(sv[0]), float(sv[1]), float(sv[2])};
+      // The sky's colour goes toward the fog's as it thickens (the scene's background, kept as it
+      // was set before the first frame and given back when the rain stops).
+      if (!r.bgRead) {
+        r.bgRead = true;
+        ren->GetBackground(r.bg[0]);
+        ren->GetBackground2(r.bg[1]);
+      }
+      const double fb = 1.0 - std::exp(-fogD * 3000.0);
+      const double fl = 0.5 * std::min(1.0, double(r.flash[3])); // a flash whitens the sky
+      constexpr double FLASH_SKY[3] = {0.85, 0.88, 1.0};
+      double b0[3], b1[3];
+      for (int c = 0; c < 3; ++c) {
+        b0[c] = r.bg[0][c] + (fog[c] - r.bg[0][c]) * fb;
+        b1[c] = r.bg[1][c] + (fog[c] - r.bg[1][c]) * fb;
+        b0[c] += (FLASH_SKY[c] - b0[c]) * fl;
+        b1[c] += (FLASH_SKY[c] - b1[c]) * fl;
+      }
+      ren->SetBackground(b0);
+      ren->SetBackground2(b1);
+    }
   });
   return first;
 }

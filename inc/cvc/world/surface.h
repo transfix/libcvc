@@ -75,6 +75,10 @@ struct surface_class {
   float mu = 1.0f;
   float restitution = 0.0f;
   float rolling_resistance = 0.01f;
+  // The same friction soaked by rain (O20, F6: a weather's wetness runs mu toward it,
+  // cvc::physics::apply_wetness): wet pavement about 0.55, wet grass 0.3; indoor classes and
+  // those already wet keep their mu.
+  float mu_wet = 1.0f;
 };
 
 // A registry is one ontology: the ordered class table + name lookup. Variants

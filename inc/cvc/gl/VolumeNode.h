@@ -74,6 +74,12 @@ public:
   void updateScalars(const std::vector<unsigned char> &colour,
                      const std::vector<unsigned char> &opacity);
   bool hasVolume() const { return m_hasVolume; }
+  // This node draws with 16-bit float textures (the transfer-function tables VTK keeps as 32-bit
+  // float textures, and float voxels where VTK takes the context's defaults) while the context
+  // cannot filter 32-bit float textures linearly: WebGL2 without OES_texture_float_linear (iOS
+  // Safari), where a linearly filtered 32F texture samples as zero. -1 (the default) asks the
+  // context (desktop GL: never), 0 never, 1 always (a test, or a native check of how it looks).
+  void setHalfFloatTextures(int mode);
   // The voxels VTK draws: their type and components follow the last setVolume / updateScalars.
   vtkImageData *getImageData() const;
   const cvc::volume *getVolume() const { return m_volume.get(); }

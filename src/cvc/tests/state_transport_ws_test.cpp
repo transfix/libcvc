@@ -18,6 +18,7 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
 #include <chrono>
+#include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/media/media_router.h>
 #include <cvc/state/state.h>
@@ -511,6 +512,9 @@ TEST(StateTransportWsTest, LinkProbeMeasuresRoundTripAtBothEnds) {
     EXPECT_GE(r.stats.rtt_min_ms, 0.0);
     EXPECT_LT(r.stats.rtt_ms, 1000.0) << "loopback round trip";
     EXPECT_GE(r.age_s, 0.0);
+    // The Pong carries the answerer's wall clock: one machine, so the offset is about nothing.
+    EXPECT_TRUE(r.stats.peer_clock);
+    EXPECT_LT(std::abs(r.stats.clock_offset_ms), 1000.0);
   }
   tA.stop();
   S.stop();

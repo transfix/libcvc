@@ -10,12 +10,17 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/requires.h>
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/scene_boat.h>
 #include <cvc/ariadne/scene_generated_world.h>
 #include <cvc/ariadne/scene_geometry.h>
+#include <cvc/ariadne/scene_water.h>
+#include <cvc/ariadne/scene_weather.h>
+#include <cvc/ariadne/scene_wind.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/server_document.h>
 #include <cvc/ariadne/world_gym.h>
@@ -23,17 +28,24 @@
 #include <cvc/ariadne/world_spawns.h>
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
+#include <cvc/core/sim_tick.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/nav/world_grid.h>
+#include <cvc/ocean/sea_surface.h>
+#include <cvc/ocean/shore.h>
 #include <cvc/physics/backend.h>
 #include <cvc/physics/nav_plant.h> // nav_plant_options
 #include <cvc/physics/world.h>
+#include <cvc/physics/world_geometry.h> // wet_friction
 #include <cvc/state/state.h>
+#include <cvc/world/surface.h>
+#include <cvc/world/weather.h>
 #include <cvc/world/world_geometry.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <limits>
+#include <map>
 #include <optional>
 #include <string>
 #include <thread>
@@ -391,6 +403,350 @@ TEST(AriadneSceneWorld, AGeneratedWorldRunsWithoutARenderer) {
   const cvc::physics::body_state b = w->world().state(w->body("ball"));
   const double ground = gw->height(b.position.x, b.position.y);
   EXPECT_NEAR(b.position.z, ground + 0.5, 0.25);
+}
+
+// A water node with body: is one fluid field over its ground (scene_water.h), run with no
+// renderer: the world flooded to 200 m, a light crate floats at the level on the cascades' sea, a
+// dense one sinks; a new wind rebuilds the field and the world still holds one (the old one is
+// removed with the node's revision, as a regenerated world's bodies are).
+TEST(AriadneSceneWorld, AWaterNodesBodyFloatsWhatIsLighterThanWater) {
+  REQUIRE_YAML();
+  LoadResult r = fresh_load(R"(
+scene:
+  physics: {}
+  nodes:
+    - node: world
+      type: generated_world
+      seed: 5
+      half: 150
+      trees: 0
+      rocks: 0
+      buildings: 0
+      water_level: 200
+      body: {}
+    - node: water
+      type: water
+      world: world
+      level: 200
+      wind_speed: 3
+      body: {}
+    - node: raft
+      source: { box: { size: [2, 2, 2] } }
+      transform: { position: [5, 5, 204] }
+      body: { density: 400 }
+    - node: anchor
+      source: { box: { size: [1, 1, 1] } }
+      transform: { position: [-5, -5, 204] }
+      body: { density: 3000 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  if (!jolt())
+    return;
+  EXPECT_TRUE(warnings.empty()) << warnings.front();
+  EXPECT_EQ(w->world().field_count(), 1u);
+  EXPECT_EQ(val(app, "water.wind_speed"), "3"); // seeded from the node, as the drawn node does
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  for (int i = 0; i < 600; ++i) { // 10 s
+    clock.drive(1.0 / 60.0);
+    w->follow(app.world_clock());
+  }
+  const cvc::physics::body_state raft = w->world().state(w->body("raft"));
+  const cvc::physics::body_state anchor = w->world().state(w->body("anchor"));
+  std::printf("[water] after 10 s: raft at z %.3f (level 200), anchor at z %.3f\n", raft.position.z,
+              anchor.position.z);
+  // At density 400 the raft rides 40 % under: its centre 0.2 m over the water, within the 3 m/s
+  // sea's waves (about 0.25 m significant).
+  EXPECT_NEAR(raft.position.z, 200.2, 0.6);
+  EXPECT_LT(anchor.position.z, 195.0) << "the dense crate sinks";
+  // A new wind: the field is rebuilt, and the world still holds one.
+  cvc::state::instance(app)("water.wind_speed").value(6.0);
+  for (int i = 0; i < 30; ++i) {
+    clock.drive(1.0 / 60.0);
+    w->follow(app.world_clock());
+  }
+  EXPECT_EQ(w->world().field_count(), 1u);
+  EXPECT_NEAR(w->world().state(w->body("raft")).position.z, 200.2, 1.0);
+}
+
+// The physics sea is the drawn one at the coast too (scene_water.h): over a beach the wind sea's
+// cascades fade out as the water shoals, and a swell (swell_height) is in it, smaller where it
+// breaks in the shallows. No renderer, no physics backend: the runtime's sea read directly.
+TEST(AriadneSceneWorld, AWaterNodesSeaFadesAtTheShoreAndCarriesTheSwell) {
+  REQUIRE_YAML();
+  LoadResult r = fresh_load(R"(
+scene:
+  nodes:
+    - node: water
+      type: water
+      ground: beach
+      level: 0
+      wind_speed: 9
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_FALSE(r.scene.nodes.empty());
+  const SceneNode &n = r.scene.nodes.front();
+  cvc::app app;
+  // A beach rising along +x at 1 in 10: 20 m deep at x = -200, the waterline at x = 0.
+  const int N = 401;
+  std::vector<float> h(std::size_t(N) * N);
+  for (int r0 = 0; r0 < N; ++r0)
+    for (int c = 0; c < N; ++c)
+      h[std::size_t(r0) * N + c] = float(0.1 * (c - 200));
+  auto beach = std::make_shared<cvc::height_field>(N, N, -200.0, -200.0, 1.0, 1.0, h);
+  WaterRuntime rt(app, n, "", [beach] { return beach; });
+  ASSERT_NE(rt.sea(), nullptr);
+  ASSERT_NE(rt.shore(), nullptr);
+  ASSERT_NE(rt.shore()->grid, nullptr);
+  EXPECT_EQ(rt.shore()->layer, nullptr) << "no swell, no shore layer";
+  std::printf("[water] the coast in %.0f ms (%d x %d)\n", rt.shore()->build_ms,
+              rt.shore()->grid->cols, rt.shore()->grid->rows);
+  // The surface's RMS over `span` seconds at (x, 0).
+  auto rms = [&](double x, double span) {
+    double s = 0.0;
+    int k = 0;
+    for (double t = 0.0; t < span; t += 0.25, ++k) {
+      const double z = rt.sea()->height(x, 0.0, t);
+      s += z * z;
+    }
+    return std::sqrt(s / k);
+  };
+  const double deep = rms(-150.0, 20.0), shallow = rms(-3.0, 20.0); // 15 m and 0.3 m of water
+  std::printf("[water] wind sea RMS: %.3f m in 15 m of water, %.4f m in 0.3 m\n", deep, shallow);
+  EXPECT_GT(deep, 0.1);
+  EXPECT_LT(shallow, 0.1 * deep) << "the cascades fade out as the water shoals";
+
+  // A 1 m swell on a near-calm sea: the shore layer carries it. The world's clock is not running
+  // here, so the sea's wind would never move off 9 m/s (it lags the wind, O13): no lag, no fade.
+  cvc::state::instance(app)("water.sea_lag").value(0.0);
+  cvc::state::instance(app)("water.sea_fade").value(0.0);
+  cvc::state::instance(app)("water.wind_speed").value(1.0);
+  cvc::state::instance(app)("water.swell_height").value(1.0);
+  cvc::state::instance(app)("water.swell_dir").value(0.0); // toward the beach
+  EXPECT_TRUE(rt.tick());
+  ASSERT_NE(rt.shore()->layer, nullptr);
+  // Over 300 s: the trains' periods are 6 % apart, so they come in sets about 170 s long.
+  const double swellDeep = rms(-150.0, 300.0), swellShallow = rms(-5.0, 300.0); // 15 m, 0.5 m
+  std::printf("[water] swell RMS: %.3f m in 15 m of water, %.3f m in 0.5 m\n", swellDeep,
+              swellShallow);
+  EXPECT_GT(swellDeep, 0.15) << "a 1 m swell is about 0.25 m RMS";
+  EXPECT_LT(swellDeep, 0.45);
+  EXPECT_LT(swellShallow, swellDeep) << "it breaks in the shallows (H under 0.78 d)";
+  EXPECT_FALSE(rt.tick()) << "nothing changed: nothing rebuilt";
+
+  // The swash: on the dry sand 3 m up the beach (0.3 m over the level) the surface reaches over
+  // the ground as each wave runs up, and stays at the level between them; with `swash: 0` it
+  // never leaves the level there.
+  auto wetShare = [&](const WaterRuntime &w) {
+    int wet = 0, k = 0;
+    for (double t = 0.0; t < 300.0; t += 0.25, ++k)
+      if (w.sea()->height(3.0, 0.0, t) > 0.3)
+        ++wet;
+    return double(wet) / k;
+  };
+  const double wet = wetShare(rt);
+  LoadResult dry = fresh_load(R"(
+scene:
+  nodes:
+    - node: water
+      type: water
+      ground: beach
+      level: 0
+      swash: 0
+)");
+  ASSERT_TRUE(dry.ok) << dry.error;
+  WaterRuntime noSwash(app, dry.scene.nodes.front(), "", [beach] { return beach; });
+  const double wetWithout = wetShare(noSwash);
+  std::printf(
+      "[water] the sand 0.3 m over the level is under the swash %.0f %% of the time (%.0f %% "
+      "with swash: 0)\n",
+      100.0 * wet, 100.0 * wetWithout);
+  EXPECT_GT(wet, 0.05) << "the swash runs up over it";
+  EXPECT_LT(wet, 0.95) << "and drains back";
+  EXPECT_EQ(wetWithout, 0.0);
+}
+
+// The lee is calm in the physics sea too (O13, E2): a 9 m/s wind blowing toward +x past a round
+// island leaves the water just downwind of it calm, so a crate floating there moves less than one
+// in the open water upwind; with `lee: 0` the two seas are alike. Then a wind change crossfades the
+// sea over sea_fade seconds on the world's clock, and the field is rebuilt once per keyframe.
+TEST(AriadneSceneWorld, AWaterNodesLeeIsCalmerThanItsOpenWater) {
+  REQUIRE_YAML();
+  LoadResult r = fresh_load(R"(
+scene:
+  nodes:
+    - node: water
+      type: water
+      ground: island
+      level: 0
+      wind_speed: 9
+      wind_dir: 0
+      gustiness: 0
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode &n = r.scene.nodes.front();
+  cvc::app app;
+  // A round island 120 m in radius rising to 20 m, in water 20 m deep, on 1.2 km of 3 m samples.
+  const int N = 401;
+  const double cell = 3.0, x0 = -600.0;
+  std::vector<float> h(std::size_t(N) * N);
+  for (int r0 = 0; r0 < N; ++r0)
+    for (int c = 0; c < N; ++c) {
+      const double x = x0 + c * cell, y = x0 + r0 * cell, d = std::hypot(x, y);
+      h[std::size_t(r0) * N + c] = float(d < 120.0 ? 20.0 * (1.0 - d / 120.0) + 0.5 : -20.0);
+    }
+  auto island = std::make_shared<cvc::height_field>(N, N, x0, x0, cell, cell, h);
+  WaterRuntime rt(app, n, "", [island] { return island; });
+  ASSERT_NE(rt.sea(), nullptr);
+  ASSERT_NE(rt.keyframes(), nullptr);
+  ASSERT_NE(rt.keyframes()->fetch, nullptr) << "a fetch map over the coast";
+  const cvc::ocean::fetch_field &F = *rt.keyframes()->fetch;
+  std::printf("[water] the fetch map: %d x %d samples of %.1f m in %.1f ms (the keyframe)\n",
+              F.cols, F.rows, F.cell, rt.keyframes()->build_ms);
+  EXPECT_LE(std::max(F.rows, F.cols), 256) << "a coarse map";
+  const double leeX = 160.0, openX = -400.0; // 40 m behind the island; 280 m upwind of it
+  auto rms = [](const cvc::ocean::sea_surface &s, double x, double y) {
+    double s2 = 0.0;
+    int k = 0;
+    for (double t = 0.0; t < 30.0; t += 0.25, ++k) {
+      const double z = s.height(x, y, t);
+      s2 += z * z;
+    }
+    return std::sqrt(s2 / k);
+  };
+  const double lee = rms(*rt.sea(), leeX, 0.0), open = rms(*rt.sea(), openX, 0.0);
+  std::printf("[water] RMS 40 m behind the island %.3f m, upwind %.3f m\n", lee, open);
+  EXPECT_LT(lee, 0.3 * open) << "the lee is calm";
+
+  if (jolt()) {
+    // A crate in each, 20 s on the field.
+    cvc::physics::world_config c;
+    c.backend = cvc::physics::backend::jolt;
+    cvc::physics::world w(c);
+    w.add_field(*rt.field());
+    auto crate = [&](double x) {
+      cvc::physics::body_desc d;
+      d.shape = cvc::physics::box{{1.0, 1.0, 1.0}};
+      d.density = 500.0;
+      d.position = {x, 0.0, 0.2};
+      d.allow_sleeping = false;
+      return w.add_body(d);
+    };
+    const cvc::physics::body_id a = crate(leeX), b = crate(openX);
+    double za = 0.0, zb = 0.0, za2 = 0.0, zb2 = 0.0;
+    int k = 0;
+    for (int i = 0; i < 1200; ++i) {
+      w.step();
+      if (i < 180)
+        continue; // settle 3 s
+      const double ha = w.state(a).position.z, hb = w.state(b).position.z;
+      za += ha, zb += hb, za2 += ha * ha, zb2 += hb * hb, ++k;
+    }
+    const double sa = std::sqrt(std::max(za2 / k - (za / k) * (za / k), 0.0));
+    const double sb = std::sqrt(std::max(zb2 / k - (zb / k) * (zb / k), 0.0));
+    std::printf("[water] a crate's heave over 17 s: %.3f m RMS in the lee, %.3f m in the open\n",
+                sa, sb);
+    EXPECT_LT(sa, 0.5 * sb) << "the crate in the lee moves less";
+  }
+
+  // lee: 0 puts the waves back behind the island.
+  cvc::state::instance(app)("water.lee").value(0.0);
+  EXPECT_TRUE(rt.tick());
+  EXPECT_EQ(rt.keyframes()->fetch, nullptr);
+  const double noLee = rms(*rt.sea(), leeX, 0.0);
+  std::printf("[water] without the lee, 40 m behind the island: %.3f m\n", noLee);
+  EXPECT_GT(noLee, 3.0 * lee);
+
+  // A wind change on the world's clock (no lag, a 4 s fade): one keyframe, the field rebuilt for
+  // it, the sea crossfading; a second change during the fade waits for it to end.
+  cvc::state::instance(app)("water.lee").value(1.0);
+  cvc::state::instance(app)("water.sea_lag").value(0.0);
+  EXPECT_TRUE(rt.tick());
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  const std::uint64_t k0 = rt.keyframes()->keyframe;
+  cvc::state::instance(app)("water.wind_dir").value(30.0);
+  int rebuilds = 0;
+  double midWeight = -1.0;
+  for (int i = 0; i < 6 * 60; ++i) {
+    if (i == 60)
+      cvc::state::instance(app)("water.wind_speed").value(12.0);
+    clock.drive(1.0 / 60.0);
+    if (rt.tick())
+      ++rebuilds;
+    if (i == 2 * 60)
+      midWeight = rt.keyframes()->weight(app.world_clock().t());
+  }
+  std::printf(
+      "[water] two wind changes 1 s apart: %d keyframes, %d rebuilds; 2 s into the fade the "
+      "new sea's share is %.2f\n",
+      int(rt.keyframes()->keyframe - k0), rebuilds, midWeight);
+  EXPECT_EQ(rt.keyframes()->keyframe - k0, 2u) << "the second waited for the first fade";
+  EXPECT_EQ(rebuilds, 2);
+  EXPECT_GT(midWeight, 0.2);
+  EXPECT_LT(midWeight, 0.8);
+}
+
+// The water node's field is inertial (field.h): sideways it carries a floating body by the water's
+// acceleration and holds it by drag, so a crate on it drifts in the scene's wind at about its
+// leeway. The same field damped in every direction, as it was before, holds the crate.
+TEST(AriadneSceneWorld, ACrateOnTheWaterDriftsInTheScenesWind) {
+  REQUIRE_YAML();
+  LoadResult r = fresh_load(R"(
+scene:
+  wind: { speed: 10, dir: 0, gustiness: 0 }
+  nodes:
+    - node: water
+      type: water
+      ground: deep
+      level: 0
+      wave_amp: 0.1
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode &n = r.scene.nodes.front();
+  cvc::app app;
+  seed_scene_wind(app, r.scene, "");
+  const int N = 201;
+  auto deep = std::make_shared<cvc::height_field>(N, N, -600.0, -600.0, 6.0, 6.0,
+                                                  std::vector<float>(std::size_t(N) * N, -20.0f));
+  WaterRuntime rt(app, n, "", [deep] { return deep; });
+  ASSERT_NE(rt.field(), nullptr);
+  EXPECT_TRUE(rt.field()->inertial);
+  const std::optional<SceneWind> sw = scene_wind_set(app, "");
+  ASSERT_TRUE(sw.has_value());
+  if (!jolt())
+    return;
+  auto run = [&](bool inertial) {
+    cvc::physics::world_config c;
+    c.backend = cvc::physics::backend::jolt;
+    cvc::physics::world w(c);
+    cvc::physics::field water = *rt.field();
+    water.inertial = inertial;
+    w.add_field(water);
+    cvc::physics::field air;
+    air.kind = cvc::physics::field_kind::flow;
+    air.wind = scene_wind_flow(*sw, 0.0);
+    w.add_field(air);
+    cvc::physics::body_desc d;
+    d.shape = cvc::physics::box{{0.5, 0.5, 0.25}};
+    d.density = 500.0;
+    d.position = {0.0, 0.0, 0.0};
+    d.linear_damping = 0.0;
+    d.allow_sleeping = false;
+    const cvc::physics::body_id b = w.add_body(d);
+    w.step(static_cast<std::uint64_t>(30.0 / c.fixed_dt + 0.5)); // 30 s
+    return w.state(b).position;
+  };
+  const cvc::physics::vec3 drifted = run(true), held = run(false);
+  std::printf("[water] a crate on the water in a 10 m/s wind, 30 s: %.2f m downwind (%.2f m "
+              "across); damped in every direction, %.2f m\n",
+              drifted.x, drifted.y, held.x);
+  EXPECT_GT(drifted.x, 3.0) << "it drifts downwind, about 0.15 m/s";
+  // The waves' spread of directions carries it to and fro across the wind too.
+  EXPECT_LT(std::fabs(drifted.y), 0.5 * drifted.x);
+  EXPECT_LT(std::fabs(held.x), 0.5) << "the old damping held it";
 }
 
 TEST(AriadneSceneWorld, RegenerateMakesANewWorldAndSwapsItsBodies) {
@@ -788,7 +1144,7 @@ TEST(AriadneWorldVehicles, TheWorldBlockDeclaresVehicles) {
   EXPECT_NE(error("{ plant: hover }").find("plant 'hover'"), std::string::npos);
   EXPECT_NE(error("{ controllers: [walker@1] }").find("nav@1, none or external"),
             std::string::npos);
-  EXPECT_NE(error("{ plant: jolt:roboracer }").find("only dynamic and dynamic4w"),
+  EXPECT_NE(error("{ plant: jolt:roboracer }").find("only dynamic, dynamic4w and dynamicboat"),
             std::string::npos);
   EXPECT_NE(error("{ plant: dynamic4w:roboracer, vehicle: humvee }").find("names preset"),
             std::string::npos);
@@ -1381,6 +1737,12 @@ TEST(AriadneWorldVehicles, ABlendIsTheWeightedCommandAndAForcePushesTheDrive) {
   EXPECT_EQ(zero.w->world().state_hash(), plain.w->world().state_hash());
 }
 
+// Intents may be set from another thread while the world steps: a writer keeps replacing a's
+// intent (and blending b's) as the frames run, and the last one set wins. The frames start once
+// the writer has landed its first intent, and go on past 120 until another lands while the world
+// steps. A thread may start late, or be descheduled: on a busy machine all 120 frames (a few tens
+// of milliseconds) can pass before it runs. Then none of its intents reach a, which sits still,
+// and only the last 6 frames move it (0.108 m/s, what Windows CI read on #1318).
 TEST(AriadneWorldVehicles, IntentsMaybeSetFromAnotherThread) {
   REQUIRE_YAML();
   if (!jolt())
@@ -1397,28 +1759,48 @@ TEST(AriadneWorldVehicles, IntentsMaybeSetFromAnotherThread) {
   const std::uint64_t b = spawn_at(v, "nav@1", 20.0, 20.0);
   SceneClockDriver clock(app, resolved_clock(r.scene));
   std::atomic<bool> done{false};
+  std::atomic<int> landed{0}; // the writer's intents a took
   std::thread writer([&] {
     for (int i = 0; !done.load(); ++i) {
       entity_intent in;
       in.command = entity_intent::mode::replace;
       in.accel = 1.0 + (i % 3);
       in.force_x = (i % 5) * 0.5;
-      v.set_intent(a, in);
+      if (v.set_intent(a, in))
+        landed.fetch_add(1);
       in.command = entity_intent::mode::blend;
       v.set_intent(b, in);
       (void)v.intent(a);
     }
   });
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (landed.load() == 0 && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  const int before = landed.load();
   run(app, *w, clock, 120);
+  // The writer may be descheduled for all 120 frames: step on, a frame at a time, until one of its
+  // intents lands while the world steps (10 s at most).
+  const auto more = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (landed.load() == before && std::chrono::steady_clock::now() < more)
+    run(app, *w, clock, 1);
+  const int during = landed.load() - before;
   done = true;
   writer.join();
+  const std::vector<entity_info> all = v.entities();
+  const bool there =
+      std::any_of(all.begin(), all.end(), [a](const entity_info &e) { return e.id == a; });
+  const double moving = there ? entity(v, a).speed : -1.0;
+  ASSERT_GT(before, 0) << "the writer landed no intent in 10 s";
+  EXPECT_GT(during, 0) << "no intent landed while the frames ran";
   entity_intent last;
   last.command = entity_intent::mode::replace;
   last.accel = 2.5;
   ASSERT_TRUE(v.set_intent(a, last));
   run(app, *w, clock, 6);
   EXPECT_EQ(entity(v, a).intent, last);
-  EXPECT_GT(entity(v, a).speed, 0.5);
+  EXPECT_GT(entity(v, a).speed, 0.5)
+      << "after the 120 threaded frames a's speed was " << moving << " m/s, " << during
+      << " intents landed during them, and a " << (there ? "existed" : "was missing");
 }
 
 TEST(AriadneWorldVehicles, AServerDocumentSteersThroughItsPublishedNamespace) {
@@ -1994,7 +2376,767 @@ scene:
   EXPECT_LE(sp.points().size(), first.size());
 }
 
+// --- boats, and spawns by medium (ARIADNE_WORLDS.md §14; OCEAN-AND-WEATHER-ROADMAP.md D4) -----
+
+namespace {
+
+// A 300 m square of flat ground at 0 m with a bowl 6 m deep at its centre (radius 40 m), and the
+// water node's water at -1 m over it: a round lake about 107 m across, 5 m deep in the middle.
+// Points: two untagged in the lake, two untagged ashore, a boat's ashore and a car's in the lake.
+const char *kLake = R"(
+world:
+  vehicles:
+    archetypes:
+      humvee: { vehicle: humvee, controllers: [none, nav@1] }
+      launch: { plant: dynamicboat:launch, controllers: [none, nav@1] }
+  spawns:
+    policy: fixed
+    scope: all
+    points:
+      - { at: [0, 0] }
+      - { at: [-30, 10] }
+      - { at: [80, 80] }
+      - { at: [-90, 60] }
+      - { at: [100, -100], archetype: launch }
+      - { at: [10, -20], archetype: humvee }
+scene:
+  physics: {}
+  world: { source: lakeside, cell: 2 }
+  nodes:
+    - node: terrain
+      world: lakeside
+      source:
+        heightfield:
+          size: 300
+          resolution: 151
+          layers:
+            - { kind: dome, amplitude: -6, radius: 40 }
+      body: static
+    - node: water
+      type: water
+      ground: terrain
+      level: -1
+      wind_speed: 0.5
+      wave_amp: 0.1
+      body: {}
+)";
+
+// The lake's depth at (x, y): the water at -1 m over the bowl.
+double lake_depth(double x, double y) {
+  return -1.0 + 6.0 * std::exp(-(x * x + y * y) / (40.0 * 40.0));
+}
+
+std::array<double, 2> spawned_at(WorldVehicles &v, const std::string &archetype, std::string *why,
+                                 bool placed = false, double x = 0.0, double y = 0.0) {
+  entity_spec s;
+  s.archetype = archetype;
+  s.controller = "none";
+  s.placed = placed;
+  s.x = x;
+  s.y = y;
+  const std::uint64_t id = v.spawn(s, why);
+  if (!id)
+    return {1e9, 1e9};
+  for (const entity_info &e : v.entities())
+    if (e.id == id)
+      return {e.x, e.y};
+  return {1e9, 1e9};
+}
+
+} // namespace
+
+// The lake world's grid carries the water's depth (the water node's level over the terrain), and
+// the archetypes' needs come from their plants: a humvee on land, a launch on water with its draft
+// (0.2 m: its propeller's, under the keel's 0.15 m) and half its length. The points say what they
+// are free for.
+TEST(AriadneWorldBoats, TheGridCarriesTheWaterAndThePlantsSayTheirMedium) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_spawns(kLake);
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.vehicles.size(), 2u);
+  EXPECT_EQ(r.scene.vehicles[1].plant, "dynamicboat");
+  EXPECT_EQ(r.scene.vehicles[1].preset, "launch");
+  EXPECT_DOUBLE_EQ(r.scene.spawns.ford_depth, 0.3);
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  const auto g = w->grid("terrain", 2.0, 0.0);
+  ASSERT_NE(g, nullptr);
+  ASSERT_TRUE(g->has_water());
+  EXPECT_DOUBLE_EQ(g->water_level, -1.0);
+  EXPECT_NEAR(g->depth_at(0.0, 0.0), 5.0, 0.01);
+  EXPECT_LT(g->depth_at(80.0, 80.0), 0.0);
+  WorldSpawns &sp = w->vehicles()->spawns();
+  EXPECT_EQ(sp.need_of("humvee").medium, cvc::nav::plant_medium::land);
+  const spawn_need boat = sp.need_of("launch");
+  EXPECT_EQ(boat.medium, cvc::nav::plant_medium::water);
+  EXPECT_NEAR(boat.draft, 0.2, 1e-9);
+  EXPECT_NEAR(boat.half_length, 2.0, 1e-9);
+  EXPECT_EQ(val(app, "vehicles.archetypes.launch.medium"), "water");
+  const std::vector<WorldSpawns::entry> pts = sp.points();
+  ASSERT_EQ(pts.size(), 6u);
+  const char *medium[6] = {"water", "water", "land", "land", "", ""};
+  for (std::size_t i = 0; i < 6; ++i) {
+    EXPECT_EQ(pts[i].medium, medium[i]) << "point " << pts[i].id;
+    EXPECT_EQ(pts[i].free, i < 4) << "point " << pts[i].id;
+  }
+  EXPECT_EQ(val(app, "spawns.points.1.medium"), "water");
+  EXPECT_EQ(val(app, "spawns.points.5.free"), "0") << "a boat's point ashore";
+  // Edits: an untagged point in the lake is taken (a boat's), a car's in the lake is refused.
+  spawn_point p;
+  p.x = 20.0;
+  p.y = 20.0;
+  EXPECT_NE(sp.add(p), 0);
+  std::string why;
+  p.x = -20.0;
+  p.archetype = "humvee";
+  EXPECT_EQ(sp.add(p, &why), 0);
+  EXPECT_NE(why.find("humvee's ground"), std::string::npos) << why;
+}
+
+// The owner's ask: cars never start in water deeper than a ford, over many spawns and every
+// policy; boats start only on water deep enough for their draft and open for half their length
+// round them. The untagged points serve each archetype where its medium is; the tagged points
+// off their medium serve nothing.
+TEST(AriadneWorldBoats, SpawnsKeepCarsOutOfTheLakeAndBoatsInIt) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_spawns(kLake);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  WorldVehicles &v = *w->vehicles();
+  WorldSpawns &sp = v.spawns();
+  const WorldSpawns::start_ground boats = sp.ground_for("launch");
+  cvc::state &st = cvc::state::instance(app);
+  int cars = 0, launches = 0;
+  for (const char *policy : {"fixed", "random", "round_robin", "nearest_free"}) {
+    st("spawns.policy").value(std::string(policy));
+    w->sync(&warnings);
+    for (int i = 0; i < 12; ++i) {
+      std::string why;
+      const std::array<double, 2> c = spawned_at(v, "humvee", &why);
+      ASSERT_LT(c[0], 1e8) << policy << ": " << why;
+      EXPECT_LE(lake_depth(c[0], c[1]), 0.3) << policy << ": a humvee at " << c[0] << ", " << c[1];
+      ++cars;
+    }
+    for (int i = 0; i < 6; ++i) {
+      std::string why;
+      const std::array<double, 2> b = spawned_at(v, "launch", &why);
+      ASSERT_LT(b[0], 1e8) << policy << ": " << why;
+      EXPECT_GE(lake_depth(b[0], b[1]), 0.5) << policy << ": a launch at " << b[0] << ", " << b[1];
+      EXPECT_TRUE(boats.free_at(b[0], b[1])) << policy << ": " << b[0] << ", " << b[1];
+      ++launches;
+    }
+    // fixed takes the first point that fits each: the boat the lake's centre, the car (80, 80).
+    if (std::string(policy) == "fixed") {
+      bool centre = false, ashore = false;
+      for (const entity_info &e : v.entities()) {
+        centre = centre || (e.spec.archetype == "launch" && std::hypot(e.x, e.y) < 3.0);
+        ashore =
+            ashore || (e.spec.archetype == "humvee" && std::hypot(e.x - 80.0, e.y - 80.0) < 4.0);
+      }
+      EXPECT_TRUE(centre) << "an untagged point in the lake serves the launch";
+      EXPECT_TRUE(ashore) << "an untagged point ashore serves the humvee";
+    }
+    v.clear();
+  }
+  std::printf("[boats] %d humvees and %d launches over four policies, each on its medium\n", cars,
+              launches);
+
+  // No points: the free_points fallback draws each on its medium too.
+  sp.clear();
+  EXPECT_TRUE(sp.points().empty());
+  for (int i = 0; i < 8; ++i) {
+    std::string why;
+    const std::array<double, 2> c = spawned_at(v, "humvee", &why);
+    const std::array<double, 2> b = spawned_at(v, "launch", &why);
+    ASSERT_LT(c[0], 1e8) << why;
+    ASSERT_LT(b[0], 1e8) << why;
+    EXPECT_LE(lake_depth(c[0], c[1]), 0.3) << c[0] << ", " << c[1];
+    EXPECT_GE(lake_depth(b[0], b[1]), 0.5) << b[0] << ", " << b[1];
+    EXPECT_TRUE(boats.free_at(b[0], b[1]));
+  }
+}
+
+// A car placed at a point in the lake is moved, not refused: to a free point ashore, as a start
+// that is blocked has always moved (a regenerated world can flood a start a document gave). A
+// boat placed ashore is moved into the lake the same way.
+TEST(AriadneWorldBoats, AStartOffItsMediumIsMovedToIt) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_spawns(kLake);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  WorldVehicles &v = *w->vehicles();
+  std::string why;
+  const std::array<double, 2> car = spawned_at(v, "humvee", &why, true, 0.0, 0.0);
+  ASSERT_LT(car[0], 1e8) << why;
+  EXPECT_LE(lake_depth(car[0], car[1]), 0.3) << car[0] << ", " << car[1];
+  EXPECT_GT(std::hypot(car[0], car[1]), 45.0);
+  const std::array<double, 2> boat = spawned_at(v, "launch", &why, true, 80.0, 80.0);
+  ASSERT_LT(boat[0], 1e8) << why;
+  EXPECT_GE(lake_depth(boat[0], boat[1]), 0.5) << boat[0] << ", " << boat[1];
+  // A place on its medium is kept.
+  const std::array<double, 2> kept = spawned_at(v, "launch", &why, true, -20.0, -20.0);
+  EXPECT_NEAR(kept[0], -20.0, 0.5);
+  EXPECT_NEAR(kept[1], -20.0, 0.5);
+}
+
+// A boat's suggestions are over the water, free for it; a land vehicle's are along the roads, and
+// this world has none.
+TEST(AriadneWorldBoats, ABoatsSuggestionsAreOverTheWater) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_spawns(kLake);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  WorldSpawns &sp = w->vehicles()->spawns();
+  cvc::state &st = cvc::state::instance(app);
+  st("spawns.tag.archetype").value(std::string("launch"));
+  const std::vector<spawn_point> s = sp.suggest(6, 20.0);
+  ASSERT_FALSE(s.empty()) << sp.status();
+  EXPECT_LE(s.size(), 6u);
+  for (const spawn_point &p : s)
+    EXPECT_TRUE(sp.ground_for("launch").free_at(p.x, p.y)) << p.x << ", " << p.y;
+  EXPECT_NE(sp.status().find("over the water"), std::string::npos) << sp.status();
+  st("spawns.tag.archetype").value(std::string("humvee"));
+  EXPECT_TRUE(sp.suggest(6, 20.0).empty());
+  // water_spawn_points gives every body of water with room a point: two ponds, one each.
+  cvc::nav::world_grid g = cvc::nav::flat_grid(-50.0, -20.0, 50.0, 20.0, 1.0, 0.0f);
+  for (int r2 = 0; r2 < g.rows; ++r2)
+    for (int c = 0; c < g.cols; ++c) {
+      const double x = g.min_x + c, y = g.min_y + r2;
+      const bool pond = std::hypot(x + 30.0, y) < 10.0 || std::hypot(x - 30.0, y) < 6.0;
+      g.height[static_cast<std::size_t>(r2) * g.cols + c] = pond ? -2.0f : 1.0f;
+    }
+  cvc::nav::set_water(g, 0.0);
+  const cvc::nav::world_grid water = cvc::nav::medium_grid(g, cvc::nav::plant_medium::water, 0.5);
+  const std::vector<spawn_point> two = water_spawn_points(water, 2, 50.0, 2.0);
+  ASSERT_EQ(two.size(), 2u);
+  EXPECT_NE(two[0].x < 0.0, two[1].x < 0.0) << "one in each pond";
+}
+
+// The roadmap's D4 exit as a world vehicle: a launch on nav@1 starts placed in the lake and the
+// navigator drives it to goal after goal it draws on the water, never into water shallower than
+// its draft nor onto the shore (no contact with the terrain).
+TEST(AriadneWorldBoats, NavDrivesABoatAcrossTheLake) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_spawns(kLake);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  WorldVehicles &v = *w->vehicles();
+  entity_spec s;
+  s.archetype = "launch";
+  s.controller = "nav@1";
+  s.placed = true;
+  s.x = -35.0;
+  s.y = 0.0;
+  s.yaw = 0.0;
+  std::string why;
+  const std::uint64_t id = v.spawn(s, &why);
+  ASSERT_NE(id, 0u) << why;
+  const auto me = [&]() {
+    for (const entity_info &e : v.entities())
+      if (e.id == id)
+        return e;
+    return entity_info{};
+  };
+  entity_info e = me();
+  ASSERT_TRUE(e.placed);
+  EXPECT_NEAR(e.x, -35.0, 0.5);
+  EXPECT_NEAR(e.z, -1.0 + 0.15, 0.05) << "afloat at its draft";
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  double goal_x = e.goal_x, goal_y = e.goal_y, min_depth = 1e9, travelled = 0.0;
+  double px = e.x, py = e.y;
+  int goals = 0, frames = 0;
+  const double first = std::hypot(goal_x - e.x, goal_y - e.y);
+  for (; frames < 60 * 240 && goals < 2; ++frames) { // up to 4 minutes
+    const int i = frames;
+    clock.drive(1.0 / 60.0);
+    w->follow(app.world_clock());
+    if (i % 6)
+      continue;
+    e = me();
+    min_depth = std::min(min_depth, lake_depth(e.x, e.y));
+    travelled += std::hypot(e.x - px, e.y - py);
+    px = e.x;
+    py = e.y;
+    if (e.goal_x != goal_x || e.goal_y != goal_y) { // reached: nav@1 drew the next
+      ++goals;
+      goal_x = e.goal_x;
+      goal_y = e.goal_y;
+    }
+  }
+  std::printf("[boats] the launch reached %d goals in %.1f s (the first %.1f m off), travelling "
+              "%.1f m; the shallowest water under it %.2f m\n",
+              goals, frames / 60.0, first, travelled, min_depth);
+  EXPECT_GE(goals, 2) << "nav did not drive it to its goals";
+  EXPECT_GT(min_depth, 0.2) << "it reached water shallower than its draft";
+  EXPECT_GT(travelled, 40.0);
+}
+
+// A world with water and no water node (a generated world flooded to 200 m): the runtime adds
+// still water at the world's level for its boats once it has the grid, and a jonboat floats on it.
+TEST(AriadneWorldBoats, WithoutAWaterNodeTheBoatsGetStillWater) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_spawns(R"(
+world:
+  vehicles:
+    archetypes:
+      jonboat: { plant: dynamicboat, vehicle: jonboat, controllers: [none] }
+scene:
+  physics: {}
+  world: { source: sea, cell: 4 }
+  nodes:
+    - node: world
+      type: generated_world
+      world: sea
+      seed: 5
+      half: 150
+      trees: 0
+      rocks: 0
+      buildings: 0
+      water_level: 200
+      body: {}
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  EXPECT_EQ(w->world().field_count(), 0u) << "no water node";
+  w->sync(&warnings);
+  EXPECT_EQ(w->world().field_count(), 1u) << "the still water the runtime added";
+  WorldVehicles &v = *w->vehicles();
+  std::string why;
+  const std::array<double, 2> b = spawned_at(v, "jonboat", &why);
+  ASSERT_LT(b[0], 1e8) << why;
+  EXPECT_EQ(w->world().field_count(), 1u);
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  for (int i = 0; i < 300; ++i) {
+    clock.drive(1.0 / 60.0);
+    w->follow(app.world_clock());
+  }
+  for (const entity_info &e : v.entities())
+    EXPECT_NEAR(e.z, 200.0 + 0.25 - 350.0 / (3.6 * 1.4 * 1000.0), 0.05) << "afloat";
+}
+
+// The world: block takes a boat archetype and the spawns' knobs, and refuses what it cannot run.
+TEST(AriadneWorldBoats, TheWorldBlockTakesBoatsAndTheSpawnKnobs) {
+  REQUIRE_YAML();
+  const auto parse = [](const std::string &block, world_rules &out) {
+    cvc::app app;
+    register_world_block(app);
+    LoadResult lr = load_string(app, block + "\nscene:\n  nodes: []\n");
+    const Value *b = find_world_block(lr);
+    out = default_world_rules();
+    return b ? parse_world_block(*b, out) : std::string("no world: block");
+  };
+  world_rules rules;
+  EXPECT_EQ(parse(R"(world:
+  vehicles:
+    archetypes:
+      a: { plant: dynamicboat, vehicle: jonboat }
+      b: { plant: "dynamicboat:launch", vehicle: { mass: 1000, max_speed: 3 } }
+  spawns: { ford_depth: 0.5, keel_clearance: 0.2, shore_clearance: 1.5 })",
+                  rules),
+            "");
+  ASSERT_EQ(rules.vehicles.size(), 2u);
+  EXPECT_EQ(rules.vehicles[1].preset, "launch");
+  EXPECT_DOUBLE_EQ(rules.spawns.ford_depth, 0.5);
+  EXPECT_DOUBLE_EQ(rules.spawns.keel_clearance, 0.2);
+  EXPECT_DOUBLE_EQ(rules.spawns.shore_clearance, 1.5);
+  EXPECT_TRUE(vehicle_plant_floats("dynamicboat"));
+  EXPECT_FALSE(vehicle_plant_floats("dynamic"));
+  EXPECT_NE(parse("world:\n  vehicles:\n    archetypes:\n      a: { plant: dynamicboat, vehicle: "
+                  "humvee }",
+                  rules)
+                .find("boat preset"),
+            std::string::npos);
+  EXPECT_NE(parse("world:\n  vehicles:\n    archetypes:\n      a: { plant: jolt, vehicle: launch }",
+                  rules)
+                .find("is not a preset"),
+            std::string::npos);
+  EXPECT_NE(parse("world:\n  vehicles:\n    archetypes:\n      a: { plant: dynamicboat, vehicle: "
+                  "{ preset: launch, max_steer: 0.3 } }",
+                  rules)
+                .find("not a boat's"),
+            std::string::npos);
+  EXPECT_NE(parse("world:\n  spawns: { ford_depth: -1 }", rules).find("zero or more"),
+            std::string::npos);
+  // The boat's vehicle as the runtime reads one: its hull's box, mass and envelope, no wheels.
+  vehicle_archetype a;
+  a.id = "b";
+  a.plant = "dynamicboat";
+  a.preset = "launch";
+  a.ranges["mass"] = {800.0, 1000.0};
+  const cvc::physics::vehicle_desc d = vehicle_desc_of(a, 2000.0);
+  EXPECT_DOUBLE_EQ(d.mass, 1000.0) << "held to the range";
+  EXPECT_DOUBLE_EQ(d.half_extents.x, 2.0);
+  EXPECT_TRUE(d.axles.empty());
+  EXPECT_DOUBLE_EQ(boat_desc_of(a).boat.hull.mass, 900.0);
+  a.preset = "humvee";
+  EXPECT_THROW(boat_desc_of(a), std::invalid_argument);
+}
+
+// --- the boat node (OCEAN-AND-WEATHER-ROADMAP.md D6) -------------------------------------------
+
+namespace {
+
+// The lake of kLake's world, with a launch as a boat node at its west side.
+const char *kBoatNode = R"(
+scene:
+  physics: {}
+  nodes:
+    - node: terrain
+      source:
+        heightfield:
+          size: 300
+          resolution: 151
+          layers:
+            - { kind: dome, amplitude: -6, radius: 40 }
+      body: static
+    - node: water
+      type: water
+      ground: terrain
+      level: -1
+      wind_speed: 0.5
+      wave_amp: 0.1
+      body: {}
+    - node: skiff
+      type: boat
+      water: water
+      preset: launch
+      transform: { position: [-30, 0, 0] }
+      goal: [30, 10]
+)";
+
+} // namespace
+
+// The node puts its boat in the world at its draft once the water's grid is ready; its keys drive
+// it (a helm: it moves and turns); drive: nav takes it to its goal across the lake without water
+// under it shallower than its draft; a restart puts it back where it started.
+TEST(AriadneBoatNode, FloatsSteersFromItsKeysAndNavTakesItToItsGoal) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = fresh_load(kBoatNode);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  EXPECT_TRUE(warnings.empty()) << warnings.front();
+  ASSERT_EQ(w->boats().size(), 1u);
+  BoatRuntime *b = w->boat("skiff");
+  ASSERT_NE(b, nullptr);
+  ASSERT_TRUE(b->placed()) << b->status();
+  EXPECT_EQ(val(app, "skiff.placed"), "1");
+  EXPECT_EQ(val(app, "skiff.drive"), "keys");
+  EXPECT_NEAR(b->draft(), 0.2, 1e-9);
+  cvc::physics::boat_state s = b->state();
+  EXPECT_NEAR(s.body.position.x, -30.0, 1e-6);
+  EXPECT_NEAR(s.body.position.z, -1.0 + 0.15, 0.01) << "afloat at its draft";
+
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  const auto run = [&](double seconds) {
+    for (int i = 0; i < static_cast<int>(seconds * 60.0); ++i) {
+      clock.drive(1.0 / 60.0);
+      w->follow(app.world_clock());
+    }
+  };
+  run(2.0);
+  s = b->state();
+  EXPECT_NEAR(s.body.position.z, -1.0 + 0.15, 0.05) << "still afloat, at rest";
+  EXPECT_LT(std::fabs(s.speed), 0.05);
+  // The helm: full ahead and half rudder (left).
+  cvc::state &st = cvc::state::instance(app);
+  st("skiff.throttle").value(1.0);
+  st("skiff.rudder").value(0.5);
+  const double h0 = s.heading;
+  run(12.0);
+  s = b->state();
+  std::printf("[boat node] on the helm for 12 s: at (%.1f, %.1f), %.2f m/s, turned %.2f rad\n",
+              s.body.position.x, s.body.position.y, s.speed, s.heading - h0);
+  EXPECT_GT(s.speed, 1.5);
+  EXPECT_GT(std::remainder(s.heading - h0, 2.0 * 3.14159265358979), 0.5) << "turned left";
+  EXPECT_GT(std::hypot(s.body.position.x + 30.0, s.body.position.y), 5.0);
+  EXPECT_NE(val(app, "skiff.speed"), "");
+
+  // drive: nav, to its goal.
+  st("skiff.drive").value(std::string("nav"));
+  double shallowest = 1e9;
+  int frames = 0;
+  for (; frames < 60 * 120 && val(app, "skiff.reached") != "1"; ++frames) {
+    clock.drive(1.0 / 60.0);
+    w->follow(app.world_clock());
+    const cvc::physics::vec3 p = b->state().body.position;
+    shallowest = std::min(shallowest, lake_depth(p.x, p.y));
+  }
+  s = b->state();
+  std::printf("[boat node] nav took it to (%.1f, %.1f) in %.1f s; the shallowest water under it "
+              "%.2f m\n",
+              s.body.position.x, s.body.position.y, frames / 60.0, shallowest);
+  EXPECT_EQ(val(app, "skiff.reached"), "1");
+  EXPECT_LT(std::hypot(s.body.position.x - 30.0, s.body.position.y - 10.0), 8.0);
+  EXPECT_GT(shallowest, 0.2);
+
+  // A restart: the boat back where it started, at rest.
+  w->restart(&warnings);
+  w->sync(&warnings);
+  ASSERT_TRUE(b->placed());
+  s = b->state();
+  EXPECT_NEAR(s.body.position.x, -30.0, 1e-6);
+  EXPECT_NEAR(s.body.position.y, 0.0, 1e-6);
+}
+
+// terrain_lab.ari's launch (D6): run headless, it floats on the lake by the crates, on the water
+// node's 9 m/s sea with its 0.8 m swell, and nav takes it to its goal 45 m across the lake, clear
+// of the crates (the navigator's grid has the lake's shores, not its floating bodies).
+TEST(AriadneBoatNode, NavTakesTerrainLabsLaunchAcrossTheLake) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const fs::path doc = fs::path(CVC_EXAMPLES_DIR) / "ariadne" / "documents" / "terrain_lab.ari";
+  LoadResult r = fresh_load_file(doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  BoatRuntime *b = w->boat("launch");
+  ASSERT_NE(b, nullptr);
+  ASSERT_TRUE(b->placed()) << b->status();
+  const auto g = w->grid("world", 2.0, 0.0);
+  ASSERT_NE(g, nullptr);
+  EXPECT_GT(g->depth_at(0.0, 170.0), 5.0);
+  EXPECT_GT(g->depth_at(40.0, 150.0), 5.0);
+  cvc::physics::boat_state s = b->state();
+  EXPECT_NEAR(s.body.position.x, 0.0, 1e-6);
+  EXPECT_NEAR(s.body.position.z, 0.15, 1.0) << "on the sea's surface, at its draft";
+  cvc::state::instance(app)("launch.drive").value(std::string("nav"));
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  double shallowest = 1e9;
+  int frames = 0;
+  for (; frames < 60 * 150 && val(app, "launch.reached") != "1"; ++frames) {
+    clock.drive(1.0 / 60.0);
+    w->follow(app.world_clock());
+    const cvc::physics::vec3 p = b->state().body.position;
+    shallowest = std::min(shallowest, g->depth_at(p.x, p.y));
+  }
+  s = b->state();
+  std::printf("[boat node] terrain_lab's launch reached (%.1f, %.1f) in %.1f s; the shallowest "
+              "water under it %.1f m\n",
+              s.body.position.x, s.body.position.y, frames / 60.0, shallowest);
+  EXPECT_EQ(val(app, "launch.reached"), "1");
+  EXPECT_GT(shallowest, 1.0);
+}
+
 // ---------------------------------------------------------------------------------------------
+// The scene's one wind (scene_wind.h, O14): `scene: wind:` seeds wind.speed / wind.dir /
+// wind.gustiness, and the physics pushes every body in the air with it.
+
+namespace {
+
+// kPlants with a 30 m/s wind toward +y (dir 90): a gale across the yard.
+LoadResult load_plants_in_wind(bool wind) {
+  std::string doc = kPlants;
+  if (wind) {
+    const std::string at = "scene:\n  physics: {}\n";
+    const std::size_t p = doc.find(at);
+    EXPECT_NE(p, std::string::npos);
+    doc.insert(p + at.size(), "  wind: { speed: 30, dir: 90, gustiness: 0 }\n");
+  }
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, doc);
+  if (r.ok)
+    if (const Value *world = find_world_block(r)) {
+      world_rules rules = default_world_rules();
+      EXPECT_EQ(parse_world_block(*world, rules), "");
+      r.scene.vehicles = rules.vehicles;
+    }
+  return r;
+}
+
+} // namespace
+
+// Every plant feels the wind: a jolt vehicle through its aero drag (physics reads the wind field),
+// the dynamic models and the kinematic bicycle through their drive (WorldVehicles::set_wind). Each
+// one's push points downwind, and each one's path over 8 s bends from the one it takes in still
+// air (its navigator steering back against the push: the four-wheeler, heaviest for its area,
+// least).
+TEST(AriadneWorldVehicles, TheSceneWindPushesEveryPlant) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const std::array<std::string, 4> kinds{"jolt", "bike", "four", "walker"};
+  struct run {
+    cvc::app app;
+    std::unique_ptr<SceneWorld> w;
+    std::array<std::uint64_t, 4> ids{};
+  };
+  auto start = [&](run &r, bool wind) {
+    LoadResult doc = load_plants_in_wind(wind);
+    ASSERT_TRUE(doc.ok) << doc.error;
+    EXPECT_EQ(doc.scene.wind.present, wind);
+    std::vector<std::string> warnings;
+    r.w = SceneWorld::from_scene(r.app, doc.scene, "", "physics", &warnings);
+    ASSERT_NE(r.w, nullptr);
+    r.w->sync(&warnings);
+    EXPECT_EQ(r.w->wind_field().valid(), wind) << "the wind is a flow field in the world";
+    for (std::size_t k = 0; k < 4; ++k)
+      r.ids[k] = spawn_one(*r.w->vehicles(), kinds[k], "nav@1", -50.0 + 25.0 * k, 40.0, -1.5);
+    SceneClockDriver clock(r.app, resolved_clock(doc.scene));
+    drive(r.app, *r.w, clock, 480); // 8 s
+  };
+  run still, blown;
+  start(still, false);
+  start(blown, true);
+  for (std::size_t k = 0; k < 4; ++k) {
+    const entity_info a = entity_of(*still.w->vehicles(), still.ids[k]);
+    const entity_info b = entity_of(*blown.w->vehicles(), blown.ids[k]);
+    const double bend = std::hypot(b.x - a.x, b.y - a.y);
+    std::printf("[wind] %s (%s): the wind's push (%.0f, %.0f) N; its path bent %.2f m in 8 s\n",
+                kinds[k].c_str(), b.plant.c_str(), b.wind_fx, b.wind_fy, bend);
+    EXPECT_EQ(a.wind_fx, 0.0) << kinds[k] << ": no push in still air";
+    EXPECT_EQ(a.wind_fy, 0.0) << kinds[k];
+    EXPECT_GT(b.wind_fy, 100.0) << kinds[k] << ": pushed downwind (+y)";
+    EXPECT_GT(bend, 0.05) << kinds[k] << ": its path bends in the wind";
+  }
+}
+
+// A body in the air is carried downwind, and turns with wind.dir: a light ball (1 kg, 1 m across, a
+// beach ball that falls at some 4 m/s) dropped from 40 m rides the wind as it falls; the water
+// follows the same wind (its own keys left alone).
+TEST(AriadneSceneWorld, TheSceneWindCarriesWhatFallsAndTurnsWithItsKey) {
+  REQUIRE_YAML();
+  LoadResult r = fresh_load(R"(
+scene:
+  physics: {}
+  wind: { speed: 12, dir: 0, gustiness: 0 }
+  nodes:
+    - node: floor
+      source: { box: { size: [400, 400, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+    - node: ball
+      source: { sphere: { radius: 0.5 } }
+      transform: { position: [0, 0, 40] }
+      body: { mass: 1 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_TRUE(r.scene.wind.present);
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  EXPECT_EQ(val(app, "wind.speed"), "12");
+  if (!jolt())
+    return;
+  ASSERT_TRUE(w->wind_field().valid());
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  for (int i = 0; i < 240; ++i) { // 4 s: it falls, carried downwind
+    clock.drive(1.0 / 60.0);
+    w->follow(app.world_clock());
+  }
+  const cvc::physics::body_state carried = w->world().state(w->body("ball"));
+  std::printf("[wind] a 1 kg ball dropped from 40 m in a 12 m/s wind, 4 s on: (%.2f, %.2f, %.2f)\n",
+              carried.position.x, carried.position.y, carried.position.z);
+  EXPECT_GT(carried.position.x, 1.0) << "carried downwind (+x)";
+  EXPECT_NEAR(carried.position.y, 0.0, 0.05);
+  // One key turns it: toward +y now; the ball, lifted back up, is carried that way.
+  cvc::state::instance(app)("wind.dir").value(90.0);
+  cvc::physics::body_state up = carried;
+  up.position = {0.0, 0.0, 40.0};
+  up.linear_velocity = {0.0, 0.0, 0.0};
+  w->world().set_state(w->body("ball"), up);
+  for (int i = 0; i < 240; ++i) {
+    clock.drive(1.0 / 60.0);
+    w->follow(app.world_clock());
+  }
+  const cvc::physics::body_state turned = w->world().state(w->body("ball"));
+  std::printf("[wind] after wind.dir 90, 4 s on: (%.2f, %.2f, %.2f)\n", turned.position.x,
+              turned.position.y, turned.position.z);
+  EXPECT_GT(turned.position.y, 1.0) << "carried toward +y";
+  // No wind: the field leaves the world.
+  cvc::state::instance(app)("wind.speed").value(std::string());
+  w->sync(&warnings);
+  EXPECT_FALSE(w->wind_field().valid());
+}
+
+// The water follows the scene's wind (scene_water_spec through scene_wind): its spectrum's wind is
+// the scene's, its own water.wind_* stay as they were, and with wind.speed cleared it takes them
+// again.
+TEST(AriadneSceneWorld, TheWaterFollowsTheScenesWind) {
+  REQUIRE_YAML();
+  LoadResult r = fresh_load(R"(
+scene:
+  wind: { speed: 11, dir: 45, gustiness: 0.4 }
+  nodes:
+    - node: water
+      type: water
+      ground: beach
+      level: 0
+      wind_speed: 4
+      wind_dir: 200
+      sea_lag: 0
+      sea_fade: 0
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  seed_scene_wind(app, r.scene, "");
+  const SceneNode &n = r.scene.nodes.front();
+  SceneWaterSpec s = scene_water_spec(app, n, "");
+  EXPECT_EQ(s.wind_speed, 11.0);
+  EXPECT_EQ(s.wind_dir, 45.0);
+  EXPECT_EQ(s.gustiness, 0.4);
+  EXPECT_EQ(val(app, "water.wind_speed"), "4") << "its own key stays";
+  const int N = 101;
+  auto flat = std::make_shared<cvc::height_field>(N, N, -100.0, -100.0, 2.0, 2.0,
+                                                  std::vector<float>(std::size_t(N) * N, -10.0f));
+  WaterRuntime rt(app, n, "", [flat] { return flat; });
+  ASSERT_NE(rt.keyframes(), nullptr);
+  EXPECT_NEAR(rt.keyframes()->to.dir_rad, 45.0 * 3.14159265358979323846 / 180.0, 1e-12);
+  cvc::state::instance(app)("wind.dir").value(-30.0);
+  EXPECT_TRUE(rt.tick());
+  EXPECT_NEAR(rt.keyframes()->to.dir_rad, -30.0 * 3.14159265358979323846 / 180.0, 1e-12)
+      << "one key turns the sea";
+  cvc::state::instance(app)("wind.speed").value(std::string());
+  s = scene_water_spec(app, n, "");
+  EXPECT_EQ(s.wind_speed, 4.0);
+  EXPECT_EQ(s.wind_dir, 200.0);
+}
+
 // The gym (ARIADNE_WORLDS.md section 14, L4): a world document driven by reset, step and observe.
 
 namespace {
@@ -2063,7 +3205,7 @@ TEST(AriadneWorldGym, ResetStepAndObserve) {
   if (!jolt())
     GTEST_SKIP() << "no Jolt in this build";
   WorldGym gym(write_doc("gym", gym_doc(true, true)).string(), agents(2));
-  EXPECT_NEAR(gym.dt(), 0.05, 0.01);
+  EXPECT_NEAR(gym.dt(), cvc::kSimTick, 1e-12);                      // libcvc's one simulation tick
   EXPECT_THROW(gym.step({0.0, 0.0}, {0.0, 0.0}), std::logic_error); // no episode yet
 
   const gym_observation o = gym.reset(1);
@@ -2296,6 +3438,41 @@ TEST(AriadneWorldGym, EveryPlantDrivesInTheWorld) {
     EXPECT_EQ(oa.x[k], ob.x[k]) << plants[k] << ": the same twice";
     EXPECT_EQ(oa.y[k], ob.y[k]) << plants[k];
   }
+}
+
+// A world with vehicles runs on the simulation hosts' clock: the 0.01 s quantum, physics at
+// 100 Hz, real time catching up 0.25 s a frame. The gym's tick is libcvc's one simulation tick,
+// 0.06 s, six physics steps; gym_options::tick sets another, held to whole physics steps.
+TEST(AriadneWorldGym, TheTickIsLibcvcsOneSimulationTick) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const std::string path = write_doc("gym_tick", gym_doc(false, false)).string();
+  WorldGym gym(path, agents(1));
+  EXPECT_EQ(gym.app().world_clock().fixed_dt(), cvc::kSimQuantum);
+  EXPECT_EQ(gym.app().world_clock().current_config().max_steps_per_advance, 25);
+  EXPECT_TRUE(gym.app().world_clock().current_config().cap_scales_with_rate);
+  EXPECT_EQ(gym.world().world().config().fixed_dt, cvc::kSimQuantum);
+  const gym_observation o0 = gym.reset(1);
+  EXPECT_NEAR(gym.dt(), cvc::kSimTick, 1e-12);
+  EXPECT_EQ(gym.vehicles().steps_per_tick(), 6);
+  const gym_step st = gym.step({kNaN}, {kNaN});
+  EXPECT_NEAR(st.observation.time - o0.time, cvc::kSimTick, 1e-9);
+
+  gym_options o = agents(1);
+  o.tick = 0.05;
+  WorldGym five(path, o);
+  five.reset(1);
+  EXPECT_NEAR(five.dt(), 0.05, 1e-12);
+  EXPECT_EQ(five.vehicles().steps_per_tick(), 5);
+
+  o.tick = 0.055; // not whole physics steps: held to the nearest, and the status says so
+  WorldGym odd(path, o);
+  odd.reset(1);
+  EXPECT_EQ(odd.vehicles().steps_per_tick(), static_cast<int>(std::lround(0.055 / 0.01)));
+  EXPECT_NE(odd.vehicles().status().find("not a whole number"), std::string::npos)
+      << odd.vehicles().status();
+  EXPECT_THROW(gym.vehicles().set_tick(0.0), std::invalid_argument);
 }
 
 // What a differentiable twin of the world reads: the navigator's own grid, its signed distance and
@@ -2978,4 +4155,128 @@ TEST(AriadneSceneWorld, TheWorldsEdgeIsALiveSetting) {
   ASSERT_NE(w->generated_world("world"), nullptr);
   EXPECT_EQ(w->generated_world("world")->params.edge, int(cvc::world::world_edge::wall));
   EXPECT_EQ(w->bodies_of("world").size(), collide_items(*w->generated_world("world")) + kEdgeWalls);
+}
+
+// O20 (F6): the rain's friction is the scene's world's (WeatherFriction), set inside the physics
+// step on the world clock's ticks. So a world without a renderer applies it, and it changes at the
+// same clock tick whatever the frames: one run takes a frame per clock quantum (every step seen),
+// another uneven 0.137 s frames, and wherever the second is looked at it has the first's friction.
+// weather.friction 0 gives the surfaces their dry friction back at the next step.
+TEST(AriadneSceneWeather, TheRainsFrictionIsSetInTheStepOnTheClocksTicks) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const cvc::world::surface_registry &surfaces = cvc::world::surface_registry::builtin();
+  const cvc::world::surface_class &asphalt = surfaces[surfaces.by_name("asphalt")];
+  const float dry = static_cast<float>(asphalt.mu);
+  const float soaked = static_cast<float>(cvc::physics::wet_friction(asphalt, 1.0));
+  ASSERT_LT(soaked, dry);
+  // A full storm born over the terrain at t = 0; the weather runs 50 times the world's time, so its
+  // rain soaks the ground (2 weather seconds) well inside the first half second.
+  cvc::world::weather_event e;
+  e.t = 0.0;
+  e.x = 0.0;
+  e.y = 0.0;
+  e.radius = 400.0;
+  e.peak = 1.0;
+  e.life = 3000.0;
+  const std::string events = cvc::world::format_weather_events({e});
+  struct sample {
+    std::uint64_t tick;
+    float friction;
+  };
+  struct run_result {
+    std::vector<sample> samples;
+    double wetness = -1.0;
+    std::string published;
+    float off = 0.0f; // the friction a frame after weather.friction went to 0
+  };
+  const auto run = [&](double frame_dt, double seconds) {
+    LoadResult r = fresh_load(kScene);
+    EXPECT_TRUE(r.ok) << r.error;
+    SceneNode wn;
+    wn.id = "weather";
+    wn.type = "weather";
+    wn.props.kind = Value::Kind::Map;
+    for (const auto &[k, v] :
+         std::vector<std::pair<const char *, std::string>>{{"chance", "0"},
+                                                           {"area", "100"},
+                                                           {"soak", "2"},
+                                                           {"dry", "600"},
+                                                           {"time_scale", "50"},
+                                                           {"events", events}}) {
+      Value s;
+      s.kind = Value::Kind::Scalar;
+      s.scalar = v;
+      wn.props.entries.emplace_back(k, s);
+    }
+    r.scene.nodes.push_back(wn);
+    cvc::app app;
+    std::vector<std::string> warnings;
+    std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+    run_result out;
+    if (!w || w->weathers().size() != 1) {
+      ADD_FAILURE() << "no world, or not one weather runtime";
+      return out;
+    }
+    const cvc::physics::material_id m =
+        w->world().add_material({"asphalt", dry, 0.0f, asphalt.rolling_resistance});
+    SceneClockDriver clock(app, resolved_clock(r.scene));
+    while (app.world_clock().t() < seconds) {
+      clock.drive(frame_dt);
+      w->follow(app.world_clock());
+      out.samples.push_back({app.world_clock().tick(), w->world().get_material(m).friction});
+    }
+    out.wetness = w->weathers()[0]->applied();
+    out.published = val(app, "weather.wetness");
+    cvc::state::instance(app)("weather.friction").value(0.0);
+    clock.drive(frame_dt);
+    w->follow(app.world_clock());
+    out.off = w->world().get_material(m).friction;
+    return out;
+  };
+  cvc::app probe;
+  const double quantum = probe.world_clock().fixed_dt();
+  const run_result fine = run(quantum, 3.0);
+  const run_result coarse = run(0.137, 3.0);
+  ASSERT_FALSE(fine.samples.empty());
+  ASSERT_FALSE(coarse.samples.empty());
+
+  // The rain lowered the friction, with no renderer, to the wet ground's at the wetness it applied
+  // (the storm, steered on, has left the point and the ground has begun to dry), and said so.
+  EXPECT_GT(fine.wetness, 0.5);
+  EXPECT_LE(fine.wetness, 1.0);
+  EXPECT_EQ(fine.samples.back().friction,
+            static_cast<float>(cvc::physics::wet_friction(asphalt, fine.wetness)));
+  EXPECT_LT(fine.samples.back().friction, dry);
+  EXPECT_GE(fine.samples.back().friction, soaked);
+  EXPECT_EQ(std::stod(fine.published), fine.wetness);
+  EXPECT_EQ(coarse.wetness, fine.wetness);
+  // It changed on the clock: on the first step of a half second (none before it), never between.
+  std::uint64_t first = 0;
+  for (const sample &s : fine.samples)
+    if (s.friction != dry) {
+      first = s.tick;
+      break;
+    }
+  ASSERT_GT(first, 0u);
+  const double t_first = static_cast<double>(first) * quantum;
+  EXPECT_NEAR(std::fmod(t_first, WeatherFriction::kWetPeriod), 0.0, 0.05)
+      << "the friction first changed at t = " << t_first << " s";
+  // The coarse frames saw the same friction at every tick they were looked at.
+  std::map<std::uint64_t, float> by_tick;
+  for (const sample &s : fine.samples)
+    by_tick[s.tick] = s.friction;
+  int compared = 0;
+  for (const sample &s : coarse.samples) {
+    const auto it = by_tick.find(s.tick);
+    if (it == by_tick.end())
+      continue;
+    ++compared;
+    EXPECT_EQ(s.friction, it->second) << "at tick " << s.tick;
+  }
+  EXPECT_GT(compared, 10);
+  // Off: dry again at the next step.
+  EXPECT_EQ(fine.off, dry);
+  EXPECT_EQ(coarse.off, dry);
 }

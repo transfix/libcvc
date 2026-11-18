@@ -14,33 +14,46 @@
 #include <algorithm>
 #include <atomic>
 #include <boost/signals2/connection.hpp> // the read-lane cache's watch on the state tree
+#include <cassert>
+#include <cctype>
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/files.h> // §10.8 (file-pick): the files the app's programs hold
+#include <cvc/ariadne/icons.h> // §5.22 a tray icon's named glyphs
 #include <cvc/ariadne/input.h>  // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
 #include <cvc/ariadne/loader.h> // is_builtin_widget_type (has?)
 #include <cvc/ariadne/media.h>  // §5.11 pictures by URI
 #include <cvc/ariadne/media_player.h> // §5.13 video: / audio: players
-#include <cvc/ariadne/net_host.h>  // net_host_status (the net capability tokens)
-#include <cvc/ariadne/oidc_host.h> // pump_oidc
-#include <cvc/ariadne/rich_text.h> // §5.20 parse_text_style
+#include <cvc/ariadne/net_host.h>     // net_host_status (the net capability tokens)
+#include <cvc/ariadne/oidc_host.h>    // pump_oidc
+#include <cvc/ariadne/requires.h>     // free_heads: the isolation rules' oidc check
+#include <cvc/ariadne/rich_text.h>    // §5.20 parse_text_style
+#include <cvc/ariadne/stream_intrinsics.h> // retarget_document_streams: a move takes its streams
 #include <cvc/core/app.h>
+#include <cvc/core/exec_pool.h>    // an isolated document's pump; in_pump_all (host-thread calls)
+#include <cvc/core/notify.h>       // §5.24 the feed the tray's bell shows
+#include <cvc/core/server_clock.h> // §5.22 the relay's time, in the clock's tooltip
 #include <cvc/state/state.h>
-#include <cvc/state/state_exec/async_host.h> // §10.8 (file-pick) parks its program on the picker
+#include <cvc/state/state_exec/async_host.h>      // ictx.host: each lane's async host (S1.9)
 #include <cvc/state/state_exec/async_scheduler.h> // §4.7 app-wide action scheduler (exec_scheduler)
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/evaluator.h> // evaluation_timeout / evaluation_interrupted
 #include <cvc/state/state_exec/exceptions.h> // dsl_error (has?)
+#include <cvc/state/state_exec/exec_group.h> // install_providers: a group installs by kind
+#include <cvc/state/state_exec/heap.h>       // the init lane's own cycle registry
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/parser.h> // parse, parse_error
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h> // §4 read-lane predicate evaluator
+#include <deque>
 #include <exception>
 #include <functional>
 #include <locale> // §11.4 geometry (de)serialize: pin std::locale::classic() so digit grouping
@@ -51,6 +64,7 @@
 #include <optional>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -207,6 +221,12 @@ Widget substitute_index(const Widget &w, int index) {
   out.hint = replace_all(out.hint, kTok, idx);
   out.send = replace_all(out.send, kTok, idx);
   out.on_change = replace_all(out.on_change, kTok, idx);
+  // A list's selection key and edit handlers, and a tab bar's titles.
+  out.list_current = replace_all(out.list_current, kTok, idx);
+  out.on_add = replace_all(out.on_add, kTok, idx);
+  out.on_remove = replace_all(out.on_remove, kTok, idx);
+  for (std::string &t : out.tab_titles)
+    t = replace_all(t, kTok, idx);
   out.visible_when = replace_all(out.visible_when, kTok, idx);
   out.enabled_when = replace_all(out.enabled_when, kTok, idx);
   out.disabled_when = replace_all(out.disabled_when, kTok, idx);
@@ -296,26 +316,77 @@ bool has_widget_type(cvc::app &app, const std::string &type) {
 // --- the init: block runner (state_exec) --------------------------------------
 
 // Host-contributed program-lane intrinsics (nav verbs et al.), each app's own list (app.slot).
-// ActionIntrinsicProvider is state_exec-typed via forward-decls.
+// ActionIntrinsicProvider is state_exec-typed via forward-decls. Each provider keeps its kind
+// (STATE_EXEC_THREADED.md 4.9, S1-Q7), and install_providers puts it into a program's env by it:
+// - In group 0 (the app scheduler), in a host-affinity group, in the init lane and in the name
+//   probes, every provider runs as it is, into the env itself.
+// - In an `any` group (an isolated document the pool's workers may pump), an `any` provider runs
+//   as it is, and a `host_only` one does not run, so its names are NameErrors. A `host_proxied`
+//   one runs into a scratch scope over the env (environment::extend), so it reads the env's
+//   bindings as it would, and what it bound there is then moved into the env: each native through
+//   exec_group::install(..., host_proxied), which wraps it to run on the pump_all caller's thread
+//   (S1.8), and anything else (a constant) as it is.
+// A provider's body runs where the env is built: on the host thread for an action, a resident and
+// the init lane, but on the pumping thread for a spawned child, which is a worker in an `any`
+// group. So a provider an `any` group runs (`any` or `host_proxied`) has a thread-safe body.
+// A `host_proxied` provider binds synchronous natives: an async one, so wrapped, would run its
+// kernel inline on the caller (its host has no running process there), uncharged. What a provider
+// binds that is not a native goes into the env as it is, so it is made fresh for each env or is
+// immutable (c-m7): two groups' programs must never share a mutable value.
 namespace {
+namespace se_reg = cvc::state_exec;
+struct registered_provider {
+  std::string key; // empty: appended, never replaced
+  ActionIntrinsicProvider provider;
+  se_reg::provider_affinity affinity = se_reg::provider_affinity::host_only;
+};
 struct action_intrinsics_table {
   static constexpr const char *app_slot = "cvc.ariadne.action_intrinsics";
   std::mutex m;
-  std::vector<std::pair<std::string, ActionIntrinsicProvider>> providers; // (key, provider)
+  std::vector<registered_provider> providers;
   // Bumped by every register / clear, so a Runtime's cached program names know when to rebuild.
   std::atomic<std::uint64_t> generation{0};
 };
 std::uint64_t action_intrinsics_generation(cvc::app &app) {
   return app.slot<action_intrinsics_table>().generation.load();
 }
-std::vector<ActionIntrinsicProvider> action_intrinsics_snapshot(cvc::app &app) {
+std::vector<registered_provider> action_intrinsics_snapshot(cvc::app &app) {
   action_intrinsics_table &t = app.slot<action_intrinsics_table>();
   std::lock_guard<std::mutex> lock(t.m);
-  std::vector<ActionIntrinsicProvider> out;
-  out.reserve(t.providers.size());
-  for (const auto &kp : t.providers)
-    out.push_back(kp.second);
-  return out;
+  return t.providers;
+}
+
+// Run each of `providers` into `env` for a program whose context is `ictx`, by kind when `group`
+// is an `any` group (above); null `group`: group 0, the init lane or a probe. A Runtime's own
+// (Runtime::add_program_intrinsics) go the same way, after the app's.
+void install_providers(const std::vector<registered_provider> &providers,
+                       const se_reg::environment_ptr &env, se_reg::intrinsics_context &ictx,
+                       se_reg::exec_group *group) {
+  const bool by_kind = group && group->opts().affinity == se_reg::group_affinity::any;
+  for (const registered_provider &p : providers) {
+    if (!p.provider)
+      continue;
+    if (!by_kind || p.affinity == se_reg::provider_affinity::any) {
+      p.provider(env, ictx);
+      continue;
+    }
+    if (p.affinity == se_reg::provider_affinity::host_only)
+      continue;
+    const se_reg::environment_ptr scratch = se_reg::environment::extend(env);
+    p.provider(scratch, ictx);
+    for (auto &[name, value] : scratch->bindings) {
+      if (auto *fn = std::get_if<se_reg::native_fn>(&value.v))
+        group->install(env, name, std::move(*fn), se_reg::provider_affinity::host_proxied);
+      else
+        env->set(name, std::move(value));
+    }
+  }
+}
+
+// `app`'s providers (register_action_intrinsics), as above.
+void install_providers(cvc::app &app, const se_reg::environment_ptr &env,
+                       se_reg::intrinsics_context &ictx, se_reg::exec_group *group) {
+  install_providers(action_intrinsics_snapshot(app), env, ictx, group);
 }
 
 // Bind (has? "name") into a program or predicate env. It answers from `has` (Runtime::has), so a
@@ -339,21 +410,35 @@ void bind_has(const std::shared_ptr<cvc::state_exec::environment> &env,
 } // namespace
 
 void register_action_intrinsics(cvc::app &app, ActionIntrinsicProvider provider) {
-  register_action_intrinsics(app, std::string(), std::move(provider));
+  register_action_intrinsics(app, std::string(), std::move(provider),
+                             cvc::state_exec::provider_affinity::host_only);
 }
 void register_action_intrinsics(cvc::app &app, const std::string &key,
                                 ActionIntrinsicProvider provider) {
+  register_action_intrinsics(app, key, std::move(provider),
+                             cvc::state_exec::provider_affinity::host_only);
+}
+void register_action_intrinsics(cvc::app &app, ActionIntrinsicProvider provider,
+                                cvc::state_exec::provider_affinity affinity) {
+  register_action_intrinsics(app, std::string(), std::move(provider), affinity);
+}
+void register_action_intrinsics(cvc::app &app, const std::string &key,
+                                ActionIntrinsicProvider provider,
+                                cvc::state_exec::provider_affinity affinity) {
   if (!provider)
     return;
   action_intrinsics_table &t = app.slot<action_intrinsics_table>();
   std::lock_guard<std::mutex> lock(t.m);
-  auto same = key.empty() ? t.providers.end()
-                          : std::find_if(t.providers.begin(), t.providers.end(),
-                                         [&key](const auto &kp) { return kp.first == key; });
-  if (same != t.providers.end())
-    same->second = std::move(provider);
-  else
-    t.providers.emplace_back(key, std::move(provider));
+  auto same = key.empty()
+                  ? t.providers.end()
+                  : std::find_if(t.providers.begin(), t.providers.end(),
+                                 [&key](const registered_provider &p) { return p.key == key; });
+  if (same != t.providers.end()) {
+    same->provider = std::move(provider);
+    same->affinity = affinity;
+  } else {
+    t.providers.push_back({key, std::move(provider), affinity});
+  }
   ++t.generation;
 }
 void clear_action_intrinsics(cvc::app &app) {
@@ -494,16 +579,25 @@ std::string program_tag(const std::string &script) {
 
 std::string run_scoped_program(cvc::app &app, const std::string &prefix, const std::string &script,
                                uint64_t max_steps, double max_seconds, uint64_t max_bytes,
-                               const std::function<bool(const std::string &)> &has = {}) {
+                               const std::function<bool(const std::string &)> &has = {},
+                               const ActionIntrinsicProvider &own = {}) {
   namespace se = cvc::state_exec;
   try {
     // All of these must outlive execute()+run(): the intrinsics capture &ictx by pointer. A
     // synchronous run-to-completion in this one scope satisfies that.
+    // The run's own cycle registry (S1.1, S1-Q3), which the scheduler binds: the script's cycles
+    // are collected and freed when the run ends, after the scheduler and the env. Declared first,
+    // so it goes last.
+    se::cycle_registry_ptr registry = se::make_cycle_registry();
     se::scheduler sched;
+    sched.set_cycle_registry(registry.get());
     // Its with-lock table is the app's (docs/STATE_EXEC_LOCKS.md 8.4), so a request meets the
     // residents' and actions' holds. This thread pumps it: not cross_thread. The home attaches
     // here and detaches with the scheduler, at the end of this scope.
     sched.set_lock_manager(app.lock_manager());
+    // Init's own inline host (S1-Q2): a provider registers its async verbs on *ictx.host, so here
+    // they run inline, charged to init's process. Declared after sched, so it goes first.
+    se::async_host init_host(&sched);
     se::memory_tracker tracker;
     auto proc = se::make_process();
     proc->pid = 1;
@@ -511,6 +605,7 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     se::intrinsics_context ictx;
     cvc::state &root = cvc::state::instance(app);
     ictx.sched = &sched;
+    ictx.host = &init_host;
     ictx.tracker = &tracker;
     ictx.proc = proc;
     ictx.pid = 1;
@@ -520,14 +615,15 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     ictx.lock_wait_allowed = false;
     ictx.lock_default_timeout = 0.0;
     // A child the script spawns copies both (so it never waits either), the chroot and this
-    // scheduler, and gets the intrinsics, the host's providers and has? (docs/STATE_EXEC_LOCKS.md
-    // 5.5). This scope's sched.run steps it, and its context goes with the scheduler. No Impl
-    // here, so no document: the library's callback, not Runtime::Impl::make_action_context.
+    // scheduler, and gets the intrinsics, the host's providers, the document's own and has?
+    // (docs/STATE_EXEC_LOCKS.md 5.5). This scope's sched.run steps it, and its context goes with
+    // the scheduler. No Impl here, so no document scope: the library's callback, not
+    // Runtime::Impl::make_action_context.
     ictx.spawn_context = se::make_spawn_context(
-        nullptr, [has, &app](const se::environment_ptr &e, se::intrinsics_context &c) {
-          for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot(app))
-            if (p)
-              p(e, c);
+        nullptr, [has, own, &app](const se::environment_ptr &e, se::intrinsics_context &c) {
+          install_providers(app, e, c, nullptr);
+          if (own)
+            own(e, c);
           bind_has(e, has);
         });
     se::apply_chroot(ictx, root, prefix); // scope writes under the document/mount prefix
@@ -535,10 +631,10 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     se::register_intrinsics(env, &ictx);
     // Let a host bind extra program-lane intrinsics (nav verbs, …) into this env — AFTER the
     // standard ones, so it can add or override. Snapshot the registry so a provider is free to
-    // register/throw without holding the lock.
-    for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot(app))
-      if (p)
-        p(env, ictx);
+    // register/throw without holding the lock. Every kind as it is: init runs on this thread.
+    install_providers(app, env, ictx, nullptr);
+    if (own) // the document's own, after the app's (Runtime::add_program_intrinsics)
+      own(env, ictx);
     bind_has(env, has);
     // Bound the run so a looping or blocking script (an accidental infinite loop, or a
     // (msg-recv ...) with no sender) can never hang: cap the process (check_limits kills a runner
@@ -570,8 +666,8 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
 } // namespace
 
 bool run_init(cvc::app &app, const std::string &prefix, const std::string &script,
-              std::vector<std::string> *errors,
-              const std::function<bool(const std::string &)> &has) {
+              std::vector<std::string> *errors, const std::function<bool(const std::string &)> &has,
+              const ActionIntrinsicProvider &own) {
   const auto err = [&](const std::string &m) {
     if (errors)
       errors->push_back(m);
@@ -582,7 +678,7 @@ bool run_init(cvc::app &app, const std::string &prefix, const std::string &scrip
   static constexpr uint64_t kInitMaxSteps = 10'000'000;
   static constexpr double kInitMaxSeconds = 5.0;
   const std::string e =
-      run_scoped_program(app, prefix, script, kInitMaxSteps, kInitMaxSeconds, 0, has);
+      run_scoped_program(app, prefix, script, kInitMaxSteps, kInitMaxSeconds, 0, has, own);
   if (!e.empty()) {
     err("ari: init: script " + e);
     return false;
@@ -1247,6 +1343,85 @@ std::shared_ptr<exec_pump_clock> pump_clock_of(cvc::app &app) {
   }
   return clock;
 }
+
+// One pump of a document's scheduler a frame (drain_end, exec_pump_frame): a quick action
+// completes within it, and the step and time backstops bound it.
+constexpr uint64_t kPumpMaxSteps = 200000;
+constexpr double kPumpMaxSeconds = 0.1;
+
+// The host-thread calls (S1.10): post_input, post_signal and render start, post to and kill
+// residents, so they run on the host thread between pumps, never inside the app pool's pump_all
+// (from a native, an on_complete callback or a host_proxied body). Debug builds check it (AR-3's
+// latch), through the probe, which never builds the pool.
+void assert_outside_pump(const cvc::app &app) {
+#ifndef NDEBUG
+  if (const cvc::exec_pool *pool = app.exec_pool_probe())
+    assert(!pool->in_pump_all() && "ariadne: a host-thread call made inside a pump");
+#else
+  (void)app;
+#endif
+}
+
+// Tearing a Runtime down and moving a document out of its group (c-m4, R1b skeptic m2) kill and
+// reap on that group's scheduler and take its group away: while a pump_all holds the group (from a
+// host verb or body of that call, or from another thread), a worker may be pumping it, and the
+// group's own teardown would abort anyway. That is refused in every build, from any thread: logged,
+// then aborted before anything is touched. A group-0 document's teardown or move is not refused.
+void refuse_if_held(cvc::app &app, cvc::state_exec::exec_group *group,
+                    const std::string &what) noexcept {
+  if (!group || group->pool_link().call.load(std::memory_order_acquire) == nullptr)
+    return; // held from its pump_all's entry until that call returns (exec_pool.cpp)
+  const std::string text = "ari: " + what +
+                           " while a pump of the app's pool holds its group: refused (host thread, "
+                           "outside a pump)";
+  std::fprintf(stderr, "%s\n", text.c_str());
+  std::fflush(stderr);
+  try {
+    app.log(1, text);
+  } catch (...) {
+  }
+  std::abort();
+}
+
+// ariadne.exec.isolate_documents (S1-Q6): on for "1" or "true".
+bool isolate_documents_on(cvc::state &root) {
+  cvc::state *node = root.findDescendant("ariadne.exec.isolate_documents");
+  if (!node)
+    return false;
+  std::string v = node->value();
+  std::transform(v.begin(), v.end(), v.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return v == "1" || v == "true";
+}
+
+// The channels a program names statically: the string-literal first argument of each (msg-send
+// ...), (msg-recv ...) and (msg-pending ...), as the loader's channel lint reads them. The walk
+// keeps its open lists on a heap stack, so any depth the parser accepts is read.
+void static_channels(const cvc::state_exec::value_t &v, std::vector<std::string> &out) {
+  namespace se = cvc::state_exec;
+  std::vector<std::pair<const std::vector<se::value_t> *, std::size_t>> stack;
+  const auto enter = [&](const se::value_t &e) {
+    const auto *lp = std::get_if<se::list_ptr>(&e.v);
+    if (!lp || !*lp)
+      return;
+    const std::vector<se::value_t> &l = **lp;
+    if (l.size() >= 2)
+      if (const auto *head = std::get_if<se::symbol>(&l[0].v))
+        if (head->name == "msg-send" || head->name == "msg-recv" || head->name == "msg-pending")
+          if (const auto *s = std::get_if<std::string>(&l[1].v))
+            out.push_back(*s);
+    stack.emplace_back(&l, 0);
+  };
+  enter(v);
+  while (!stack.empty()) {
+    auto &[elems, next] = stack.back();
+    if (next == elems->size()) {
+      stack.pop_back();
+      continue;
+    }
+    enter((*elems)[next++]); // may push, invalidating the reference
+  }
+}
 } // namespace
 
 namespace {
@@ -1270,6 +1445,23 @@ struct Runtime::Impl {
   // §10.7 the verbs the core answers from the backend: (clipboard-set TEXT) where it has a
   // clipboard, and (fullscreen [ON]) everywhere (#f where the window can't).
   void bind_backend_verbs(const std::shared_ptr<cvc::state_exec::environment> &env) const;
+  // §5.24 what a program's notify verbs (bind_notify_verbs) take from the Runtime: the scope it
+  // runs in, the source the feed names for it and a copy of the mounts' names. Taken on the host
+  // thread, where mount_names is written, when its context is made (notify_scope); a spawned
+  // child, made on the thread that pumps its group (a worker in an `any` group), binds from its
+  // parent's.
+  struct NotifyScope {
+    std::string scope;
+    std::string source;
+    std::map<std::string, std::string> mounts;
+  };
+  // bind_backend_verbs and bind_notify_verbs (for `notify`) by the kind of `group`
+  // (finish_context, the name probe): host_proxied in an `any` group, as they are elsewhere
+  // (null: group 0, the init lane). `host` is the program's async host (ictx.host), which
+  // (file-pick) parks it on.
+  void install_host_verbs(const std::shared_ptr<cvc::state_exec::environment> &env,
+                          cvc::state_exec::exec_group *group, cvc::state_exec::async_host &host,
+                          const NotifyScope &notify) const;
   // §10.8 (file-pick): whether a picker is open (one at a time), and the Runtime's own "Open
   // file" window, drawn by render() where the host has no picker. Shared with the verb, as a
   // program may outlive this Runtime. Drawn and opened on the drawing thread; `cancel` is set by a
@@ -1281,11 +1473,36 @@ struct Runtime::Impl {
     ComposedFilePicker composed;
   };
   std::shared_ptr<FilePickHub> file_pick = std::make_shared<FilePickHub>();
-  void bind_file_verbs(const std::shared_ptr<cvc::state_exec::environment> &env) const;
+  // (file-pick), (file-info) and (file-forget), bound into the program's env as they are in every
+  // group (install_host_verbs): file-info and file-forget lock the app's PickedFiles, and
+  // file-pick parks its program on `host` and opens the picker on the host thread: through the
+  // host-call queue of the pump_all holding `group` (null: group 0, the init lane, inline).
+  void bind_file_verbs(const std::shared_ptr<cvc::state_exec::environment> &env,
+                       cvc::state_exec::exec_group *group, cvc::state_exec::async_host &host) const;
+
+  // The document's own program-lane intrinsics (add_program_intrinsics), in order, each with its
+  // kind: bound after the app's into every program env this Runtime builds, and into no other
+  // Runtime's, by kind in an `any` group as the app's are (install_providers). Added on the
+  // drain's thread and read where an env is built, a spawned child's on its pumping thread, so
+  // under own_mutex: a reader copies the list and runs it unlocked (a provider binds, and adds
+  // none).
+  mutable std::mutex own_mutex;
+  std::vector<registered_provider> own_intrinsics;
+  std::vector<registered_provider> own_snapshot() const {
+    std::lock_guard<std::mutex> lock(own_mutex);
+    return own_intrinsics;
+  }
+  // `group` as install_providers takes it: null for group 0, the init lane and a probe.
+  void bind_own_intrinsics(const std::shared_ptr<cvc::state_exec::environment> &env,
+                           cvc::state_exec::intrinsics_context &ictx,
+                           cvc::state_exec::exec_group *group) const {
+    install_providers(own_snapshot(), env, ictx, group);
+  }
 
   // What this host provides (requires:, has?). The names a program can reference are read from a
   // probe env built exactly like an action's, then cached; the cache is rebuilt when a provider is
-  // registered (the registry's generation moves) or refresh_program_names() drops it.
+  // registered (the registry's generation moves), add_program_intrinsics adds one, or
+  // refresh_program_names() drops it.
   bool scene_capable = false;
   bool scene_shaders = false;
   bool relay_document = false;
@@ -1552,9 +1769,9 @@ struct Runtime::Impl {
   std::unordered_map<std::string, AnimShown> anim_shown;
 
   // §4.7 action lane: a unique owner tag for this Runtime's processes on the app-wide
-  // scheduler (app.exec_scheduler()), so teardown reaps exactly this document's process
-  // group via kill_owner. Counted per app (the scheduler is the app's), so two Runtimes on the
-  // same prefix never collide.
+  // scheduler (app.exec_scheduler()), or its own group's, so teardown reaps exactly this
+  // document's process group via kill_owner. Counted per app (the app's Runtimes share its
+  // scheduler or groups it built), so two Runtimes on the same prefix never collide.
   std::string owner_ = "ari#" + std::to_string(next_runtime_owner_id(app)) + ":" + prefix;
 
   Impl(cvc::app &a, std::string p) : app(a), prefix(std::move(p)) {}
@@ -1576,6 +1793,8 @@ struct Runtime::Impl {
     std::vector<int> children; // pids it forked that may still be running (they share ictx)
     std::function<void(const std::string &)> done; // run_program: how its own process ended
     std::string script;                            // the program's text, to say which one failed
+    std::string scope; // the prefix it runs at: a quit application's are stopped (§5.25)
+    std::shared_ptr<const NotifyScope> notify; // its notify verbs', which its children bind too
   };
   std::unordered_map<int, std::shared_ptr<ActionContext>> live_actions_;
   // Runtime::start_process while the sweep walks live_actions_ (a done that starts the next one):
@@ -1586,33 +1805,125 @@ struct Runtime::Impl {
   std::vector<int> spawned_children_;
   bool used_scheduler_ = false; // did we ever submit to the app scheduler? (gate teardown reap)
 
-  // The context an action, a resident or a child of one runs in: the app scheduler, a placeholder
-  // proc, writes chrooted to `scope_prefix`, the document's channel policy and resource scope, the
-  // intrinsics, the host's action intrinsic providers and has?, and the with-lock default (nullopt:
-  // a request with no :timeout waits as long as it takes).
+  // ---- isolated documents (threaded Stage 1, S1.10, S1-Q6) ----
+  // Where the document's programs run is decided at load (ensure_placement, again after each
+  // set_root; AppRuntime::load asks at its end): in group_, an exec_group of its own (owner
+  // owner_, a frame group of the app), when ariadne.exec.isolate_documents is on and the document
+  // is eligible; else in group 0, the app scheduler. Every process the Runtime starts, every post
+  // it makes and every kill go there. Declared after channel_policy_, doc_scope_ and the contexts,
+  // which the group's processes point at; ~Impl destroys it first anyway, after the kills and the
+  // reaps.
+  std::unique_ptr<cvc::state_exec::exec_group> group_;
+  cvc::frame_group_handle frame_handle_; // group_'s registration; goes before group_
+  bool document_set_ = false;            // set_root has given it a document
+  bool placement_decided_ = false;       // for the document set_root last gave
+  std::string isolation_reason_ = "no document has been set yet";
+  std::string logged_reason_; // the last reason decided with a document set (the log's)
+  std::vector<std::string> thread_affine_;     // declare_thread_affine_prefix
+  std::string host_thread_why_;                // require_host_thread: "" until declared
+  std::vector<std::string> document_programs_; // set_document_programs: init:, tests:
+  // Decide where the programs run: when `submitting` (a program is about to start) or a document
+  // has been set, unless that document's placement is decided already. Host thread.
+  void ensure_placement(bool submitting);
+  // A placement change (ensure_placement) moves the document: move_out kills and reaps its
+  // processes where they ran and drops their records, so its residents start again in the new
+  // place; the streams it owns are re-pointed there (retarget_document_streams). Its old group, if
+  // any, is retired: unregistered and unpumped, it keeps the contexts taken from it and is
+  // destroyed at a later drain_begin once its host has no kernel in flight (R1b skeptic m1, m5), so
+  // a move never waits for them. Only its own kernels' completions can post to it then: its
+  // processes are gone, no stream names it, the Runtime posts to the new place and its host-call
+  // queue is empty outside a pump. The contexts taken from group 0 stay until ~Impl, for a process
+  // a failed kill left there.
+  struct RetiredGroup {
+    std::unique_ptr<cvc::state_exec::exec_group> group;
+    std::vector<std::shared_ptr<ActionContext>> contexts; // go after the group
+  };
+  std::vector<RetiredGroup> retired_groups_;
+  std::vector<std::shared_ptr<ActionContext>> retired_contexts_;
+  // Kill and reap what the document runs where it runs, drop its records, and hand back the
+  // contexts taken from them.
+  std::vector<std::shared_ptr<ActionContext>> move_out();
+  // drain_begin: destroy the retired groups whose hosts have no kernel in flight.
+  void destroy_idle_retired_groups();
+  // Late registrations (R1b skeptic m3, the lead's rule): a registration after the placement
+  // (refresh_program_names, or the providers' registry moving past placement_generation_) has it
+  // decided again only when a move would kill nothing; else it waits for the document's next
+  // restart (set_root, set_*_program, a load), noted once.
+  std::uint64_t placement_generation_ = 0;  // the providers' registry when it was decided
+  bool registered_since_placement_ = false; // refresh_program_names since then
+  bool late_noted_ = false;                 // the wait is logged once per placement
+  // Nothing of the document runs where it runs: no live action, started resident or mount tick,
+  // nor spawned child.
+  bool nothing_running() const;
+  // Kill every process of the owner on `sched` and reap each one the Runtime knows of, each step
+  // catching and logging what it throws (`when`: "tearing down", "moving").
+  void kill_and_reap(cvc::state_exec::async_scheduler &sched, const char *when) noexcept;
+  // "" when the document may have a group (S1-Q6), else the first rule it fails; `host_affinity`
+  // tells whether that group must be pumped on the host thread.
+  std::string isolation_verdict(bool &host_affinity) const;
+  // Whether a host_only provider binds anything in an action's env (the group is then host).
+  bool host_only_bindings() const;
+  // Build a context like an action's, chrooted at the prefix and never run, and call `fill` with
+  // it and its env (with the intrinsics): load_names' and host_only_bindings' probes.
+  void probe_env(const std::function<void(const cvc::state_exec::environment_ptr &,
+                                          cvc::state_exec::intrinsics_context &)> &fill) const;
+  // The scheduler the document's processes run on now: its group's, or group 0's.
+  cvc::state_exec::async_scheduler &current_sched();
+  // has? in an `any` group, which a worker may pump: the facts and names drain_begin snapshotted
+  // on the host thread (S1-Q7), read under names_mutex.
+  HostFacts facts_snapshot_;
+  void snapshot_has();
+  bool has_snapshot(const std::string &name) const;
+  // has? for a program in `group` (null: group 0): live on the host thread, else the snapshot.
+  std::function<bool(const std::string &)> program_has(cvc::state_exec::exec_group *group);
+  // The drain's halves (Runtime::drain_begin/drain_end).
+  std::uint64_t begin_generation_ = 0; // app.exec_pump_generation() at drain_begin
+  bool drain_begun_ = false;
+  // Every process of the owner the Runtime knows of: its actions, their forks, its spawned
+  // children and its residents.
+  std::vector<int> own_pids() const;
+  // Teardown and moves, each step catching and logging what it throws.
+  void teardown_note(const char *when, const char *step, const char *what) noexcept;
+
+  // The context an action, a resident or a child of one runs in: the document's scheduler and
+  // host (its group's, else group 0's), a placeholder proc, writes chrooted to `scope_prefix`,
+  // the document's channel policy and resource scope, the intrinsics, the host's action intrinsic
+  // providers (by kind) and has?, and the with-lock default (nullopt: a request with no :timeout
+  // waits as long as it takes).
   std::shared_ptr<ActionContext> make_action_context(const std::string &scope_prefix,
                                                      std::optional<double> lock_default_timeout);
+  // A context's env: the intrinsics, the providers by kind for `group` (null: group 0) and has?.
+  void finish_context(ActionContext &ac, cvc::state_exec::exec_group *group);
   // The spawn_context of an action's or a resident's context (docs/STATE_EXEC_THREADED.md 4.15): a
-  // child runs in a context of its own, made like theirs, under its parent's chroot and with its
-  // parent's lock fields, so a child of an action gives up after the action's default. The
-  // child's process keeps it alive, and the child keeps the document's owner (intrinsic_spawn),
-  // so ~Impl's kill_owner reaps it.
-  cvc::state_exec::spawn_setup spawn_child(const cvc::state_exec::intrinsics_context &parent);
+  // child runs in a context of its own, made from its parent's: its scheduler and host, its
+  // chroot as the parent holds it (a child of a deleted chroot writes the parent's detached node),
+  // its lock fields, so a child of an action gives up after the action's default, and its spawn
+  // context. It runs on the pumping thread (a worker in an `any` group). The child's process
+  // keeps it alive, and the child keeps the document's owner (intrinsic_spawn), so ~Impl's
+  // kill_owner reaps it. `notify` is its parent's notify scope, taken on the host thread.
+  cvc::state_exec::spawn_setup spawn_child(const cvc::state_exec::intrinsics_context &parent,
+                                           std::shared_ptr<const NotifyScope> notify);
 
-  // Submit a program `on:` as a process on the app-wide scheduler (owner-tagged, chrooted
+  // Submit a program `on:` as a process on the document's scheduler (owner-tagged, chrooted
   // to `prefix`), keeping its ActionContext alive in live_actions_. Returns immediately.
   void submit_action(const QueuedAction &action);
-  // The scheduler drain() pumps, or nullptr to skip the pump: the app's, when this Runtime has
-  // submitted to it or any process is live on it (whoever submitted it). Never builds it.
+  // Group 0 when drain_end pumps it, or nullptr to skip: when this Runtime has submitted to it or
+  // any process is live on it (whoever submitted it). Never builds it.
   cvc::state_exec::async_scheduler *scheduler_to_pump();
   cvc::state_exec::async_scheduler *seen_scheduler_ = nullptr; // the app's, once something built it
   // Whether this pump starts the next app frame (exec_pump_clock), advancing the shared clock.
   bool starts_frame();
   std::shared_ptr<exec_pump_clock> pump_clock_; // shared by the app's Runtimes; got at first pump
   std::uint64_t pumped_at_ = 0; // the clock's frame count at this Runtime's last pump
-  // Pump `sched` a bounded slice, then sweep finished actions out of live_actions_ (reporting a
-  // killed one; a still-parked one persists to a later frame).
-  void pump_and_sweep_actions(cvc::state_exec::async_scheduler &sched);
+  // drain_end's pump, when no exec_pump_frame() ran since drain_begin: group 0 a bounded slice (as
+  // scheduler_to_pump says), and the document's group through the app's pool.
+  void pump_frame();
+  // Sweep finished actions out of live_actions_ (reporting a killed one; a still-parked one
+  // persists to a later frame), and the residents and children.
+  void sweep_actions(cvc::state_exec::async_scheduler &sched);
+  // sweep_actions where the document's processes run: its group's scheduler, else group 0's once
+  // it has used it (nothing to sweep before).
+  void sweep_document();
 
   // §7.1 resident on:tick handler. tick_script_ is the author's per-frame body (empty = none).
   // ensure_tick_resident() submits ONE long-lived process (idempotent) that loops
@@ -1669,8 +1980,8 @@ struct Runtime::Impl {
   // one frame must all arrive) onto the key channel (keyboard) or pointer channel (mouse), and
   // queue it for the tap when it takes that kind.
   void deliver_input(const InputEvent &ev);
-  // set_event_tap: the kinds it takes (read by post_input and post_signal, on any thread), and the
-  // events queued for it until the next drain hands them over (deliver_tapped).
+  // set_event_tap: the kinds it takes (read by post_input and post_signal, on the host thread),
+  // and the events queued for it until the next drain hands them over (deliver_tapped).
   std::atomic<unsigned> tap_kinds_{0};
   Runtime::EventTap tap_;
   std::mutex tapped_mutex_;
@@ -1703,6 +2014,29 @@ struct Runtime::Impl {
   std::chrono::steady_clock::time_point clock_epoch = std::chrono::steady_clock::now();
   std::optional<double> pinned_clock;
   double frame_t = 0.0;
+  // §5.22 the tray's clock: the host's default (Runtime::set_clock), the document's `clock:`
+  // (WindowsMenuPlan::clock_setting), and the time it reads (set_wall_clock; empty: the system
+  // clock).
+  bool clock_default = false;
+  std::function<std::chrono::system_clock::time_point()> wall_clock;
+  bool notify_default = true; // §5.24 set_notifications
+  // §5.24 each mount's composed prefix and its name relative to the document's (its `as:`), as the
+  // walk last met it: what the feed's entries are named by.
+  std::map<std::string, std::string> mount_names;
+  std::map<std::string, std::string> mount_functions; // each mount's functions: (prelude)
+  std::string notify_source(const std::string &path) const;
+  NotifyScope notify_scope(const std::string &scope) const; // on the host thread
+  // §5.24 the Notifications window ("Show all..." in the bell's menu), rebuilt when the feed
+  // changes, and the built-in events the bell and it raise (handled by drain, not a document).
+  static constexpr const char *kNotifyEvent = "\x1F"
+                                              "notify.";
+  static constexpr const char *kNotifyWindowId = "_notifications";
+  Widget notify_window;
+  std::uint64_t notify_window_rev = ~std::uint64_t(0);
+  void emit_notify_window();
+  bool builtin_event(const QueuedAction &a);
+  void bind_notify_verbs(const std::shared_ptr<cvc::state_exec::environment> &env,
+                         const NotifyScope &ns) const;
   bool windows_forgotten = false;
   std::set<std::string> laid_out;
 
@@ -1864,11 +2198,73 @@ struct Runtime::Impl {
     // that frame's instances, each under its own title.
     std::vector<std::pair<const Widget *, std::string>> repeated;
     std::set<std::string> toggled; // the open-state paths a menu item of the document toggles
+    // §5.22 the tray's clock: the document's `clock:` (-1 none, 0 off, 1 on), and whether a
+    // `- clock` entry in a menubar places it (else it goes last, at the bar's right end).
+    int clock_setting = -1;
+    bool clock_placed = false;
+    // §5.24 the tray's bell: the document's `notifications:` and whether `- bell` places it.
+    int bell_setting = -1;
+    bool bell_placed = false;
+    // §5.25 the loaded documents with a menubar of their own, in tree order: each is one menu of
+    // the outer bar, its bar is not drawn where it is, and its tray icons join the outer tray.
+    struct App {
+      const Widget *mount = nullptr;
+      const Widget *bar = nullptr;
+      std::string name;  // its meta.name, else its mount id
+      std::string scope; // its composed prefix
+      const FunctionScope *functions = nullptr;
+      // A repeated mount (`repeat:`): its template, and the scope the template sits in. Its
+      // instances are worked out each frame (plan_frame_apps), one application each.
+      const Widget *repeat = nullptr;
+      std::string parent_scope;
+    };
+    std::vector<App> apps;
   };
   WindowsMenuPlan windows_menu;
   int menubar_depth = 0;           // > 0 while a menubar's items are being drawn
   int menu_depth = 0;              // > 0 while a menu's items are being drawn
   bool windows_menu_drawn = false; // this frame
+  // §5.25 the applications (loaded documents with a menubar): drawn once a frame, in the first bar
+  // that is the document's own; the ones the user quit (by prefix), kept for the run.
+  bool apps_drawn = false;
+  // The first of the document's bars this frame has been drawn: the clock and the bell were its.
+  bool first_bar_drawn = false;
+  // This frame's applications: the plan's, with each repeated one expanded into its instances
+  // (their bars per-instance copies, kept here for the frame).
+  std::vector<WindowsMenuPlan::App> frame_apps;
+  std::deque<Widget> frame_app_bars;
+  void plan_frame_apps();
+  bool is_app_scope(const std::string &scope) const;
+  std::set<std::string> quit_apps;
+  int app_menu_depth = 0; // > 0 while an application's menu is being drawn
+  void emit_app_menus();
+  void quit_app(const std::string &scope);
+  void restart_app(const std::string &scope);
+  bool app_running(const std::string &scope) const;
+  static constexpr const char *kAppEvent = "\x1F"
+                                           "app.";
+  // Draw as if inside the mount at `scope` (its prefix and functions), for an application's menus
+  // and tray icons drawn in the outer bar. An empty scope changes nothing.
+  struct ScopedTo {
+    Impl &m;
+    bool on;
+    bool fns;
+    ScopedTo(Impl &impl, const std::string &scope, const FunctionScope *functions)
+        : m(impl), on(!scope.empty()), fns(on && functions) {
+      if (on)
+        m.scope_stack.push_back(scope);
+      if (fns)
+        m.fn_stack.push_back(functions);
+    }
+    ~ScopedTo() {
+      if (fns)
+        m.fn_stack.pop_back();
+      if (on)
+        m.scope_stack.pop_back();
+    }
+    ScopedTo(const ScopedTo &) = delete;
+    ScopedTo &operator=(const ScopedTo &) = delete;
+  };
   void plan_windows_menu();
   // One instance of a repeated window, as the Windows menu lists it: its title and open state.
   struct RepeatedWindow {
@@ -1878,6 +2274,33 @@ struct Runtime::Impl {
   bool windows_menu_has_items();                  // anything to list this frame
   void emit_windows_menu(const std::string &title);
   void emit_windows_menu_items();
+
+  // §5.22 the menubar's tray: its TrayIcon children and the clock, at the bar's right end
+  // (Backend::begin_tray). The clock shows while kClockKey is true, seeded from the document's
+  // `clock:`, else the host's default.
+  static constexpr const char *kClockKey = "ariadne.tray.clock";
+  bool clock_on_by_default() const;
+  static constexpr const char *kBellKey = "ariadne.tray.bell"; // §5.24
+  bool bell_on_by_default() const;
+  struct TrayEntry {
+    const Widget *w = nullptr; // null for the clock or the bell when no entry places it
+    bool clock = false;
+    bool bell = false;
+    // §5.25 a loaded document's icon: drawn in its mount's scope, with its functions
+    std::string scope;
+    const FunctionScope *functions = nullptr;
+    Backend::TrayIcon spec;
+    std::string tip;
+  };
+  Backend::TrayIcon tray_spec(const Widget &w);
+  std::vector<TrayEntry> tray_entries(const Widget &bar); // this frame's, in the bar's order
+  void emit_tray(const std::vector<TrayEntry> &icons);
+  void emit_tray_items(const TrayEntry &icon); // a tray menu's items: its children, or the bell's
+  void emit_bell_items();
+  // §5.23 the bar's menus folded into one menu under the "menu" icon, when the document lets them
+  // and they do not fit beside the tray (Backend::menus_fit).
+  std::vector<std::string> bar_titles(const Widget &bar);
+  bool collapse_menus(const Widget &bar, const std::vector<TrayEntry> &tray);
 
   // §4 read-lane: is `w` shown this frame? True when it has no visible_when; otherwise
   // the predicate's result (fail-safe HIDDEN on a broken predicate).
@@ -1909,8 +2332,15 @@ struct Runtime::Impl {
   // §3/§4: evaluate a repeat-count expression to a non-negative, capped int. Fail-safe 0.
   int eval_count(const std::string &expr);
   void warn_once(const std::string &msg) {
-    if (reactive_warned.insert(msg).second)
+    if (reactive_warned.insert(msg).second) {
       reactive_warnings.push_back(msg);
+      // §5.24 to the app's feed too, from where it was raised, so the bell names its document
+      cvc::notification n;
+      n.text = msg;
+      n.level = 1;
+      n.path = current_prefix();
+      cvc::notify(app, std::move(n));
+    }
   }
 };
 
@@ -2074,8 +2504,14 @@ void Runtime::Impl::wire_holes(const std::string &parent_prefix, const std::stri
 
 void Runtime::Impl::run_mount_init(const std::string &sub_prefix, const std::string &script) {
   std::vector<std::string> errs;
-  // (has? ...) as in the document's own init: and every action: a module's host is the same host.
-  run_init(app, sub_prefix, script, &errs, [this](const std::string &n) { return has(n); });
+  // (has? ...) and the document's own intrinsics as in its own init: and every action: a module's
+  // host is the same host.
+  run_init(
+      app, sub_prefix, script, &errs, [this](const std::string &n) { return has(n); },
+      [this](const std::shared_ptr<cvc::state_exec::environment> &env,
+             cvc::state_exec::intrinsics_context &ictx) {
+        bind_own_intrinsics(env, ictx, nullptr);
+      });
   for (const std::string &e : errs)
     warn_once("ari: mount init at '" + sub_prefix + "': " + e);
 }
@@ -2087,6 +2523,8 @@ void Runtime::Impl::emit_container(const Widget &w) {
   // (in emit() before we got here). Push the composed scope for the children walk, pop after
   // (RAII, so a backend throw cannot leave the stack unbalanced).
   const bool scoped = !w.scope.empty();
+  if (scoped && !quit_apps.empty() && !app_running(resolve_bind(current_prefix(), w.scope)))
+    return; // §5.25 an application the user quit: nothing of it is drawn, nor its tick started
   if (scoped) {
     const std::string parent_prefix = current_prefix(); // before the push
     const std::string sub_prefix = resolve_bind(parent_prefix, w.scope);
@@ -2099,6 +2537,12 @@ void Runtime::Impl::emit_container(const Widget &w) {
       run_mount_init(sub_prefix, (w.functions ? w.functions->prelude : "") + w.init_script);
     if (!w.tick_script.empty())
       ensure_mount_tick(sub_prefix, w); // after its init:, so the first tick sees the seed
+    if (!w.app_name.empty())
+      mount_names[sub_prefix] = w.app_name; // §5.25 the loaded document's name
+    else
+      mount_names[sub_prefix] = w.scope.substr(w.scope.rfind('.') + 1);
+    if (w.functions)
+      mount_functions[sub_prefix] = w.functions->prelude;
     scope_stack.push_back(sub_prefix);
   }
   // §6.6 the root's and a mount's functions are the ones programs started in its subtree get.
@@ -2274,6 +2718,8 @@ void Runtime::Impl::emit(const Widget &w) {
 }
 
 void Runtime::Impl::emit_node(const Widget &w) {
+  if (w.kind == Kind::TrayIcon) // emit_tray draws it, after the bar's menus; not here, where its
+    return;                     // tooltip and pointer handlers would land on the item before it
   Backend &b = *backend;
   // §4 read-lane: wrap the widget (and its subtree, emitted within the cases) in the
   // backend's disabled scope when a reactive enabled_when/disabled_when says so.
@@ -2284,25 +2730,52 @@ void Runtime::Impl::emit_node(const Widget &w) {
   bool inner_click = false; // a group: something inside it took this walk's click
   switch (w.kind) {
   case Kind::Menubar:
+    // §5.25 a loaded document's (a repeated one's instance too): one menu of the outer bar
+    if (!scope_stack.empty() && is_app_scope(current_prefix()))
+      break;
     if (b.begin_main_menu_bar()) {
       ++menubar_depth;
-      emit_children(w);
-      if (!windows_menu.placed) // §5.9: the Windows menu goes last unless the document placed it
-        emit_windows_menu(windows_menu.title);
+      // §5.22 seed the clock's key before the bar's menus, so a Show clock toggle among them (which
+      // seeds with its own default) finds the host's or the document's choice already there.
+      read_bool_or_seed(app, resolve(kClockKey), clock_on_by_default() ? 1 : 0);
+      read_bool_or_seed(app, resolve(kBellKey), bell_on_by_default() ? 1 : 0); // §5.24
+      const std::vector<TrayEntry> tray = tray_entries(w);
+      if (collapse_menus(w, tray)) {
+        // §5.23 one menu, its items the bar's menus as submenus. menu_depth stays 0 for it, so a
+        // menu titled as the Windows menu still takes the Windows menu's items (§5.9).
+        const std::string glyph(icon_glyph("menu", b.unicode_glyphs()));
+        if (b.begin_menu(glyph.c_str())) {
+          emit_children(w);
+          emit_app_menus();
+          if (!windows_menu.placed)
+            emit_windows_menu(windows_menu.title);
+          b.end_menu();
+        }
+      } else {
+        emit_children(w);
+        emit_app_menus();         // §5.25 the loaded documents' own, after the document's
+        if (!windows_menu.placed) // §5.9: the Windows menu goes last unless the document placed it
+          emit_windows_menu(windows_menu.title);
+      }
+      emit_tray(tray); // after every menu, at the bar's right end
+      first_bar_drawn = true;
       --menubar_depth;
       b.end_main_menu_bar();
     }
     break;
 
+  case Kind::TrayIcon: // drawn by emit_tray, after the bar's menus
+    break;
+
   case Kind::WindowsMenu: // §5.9: placed here; outside a menubar it is only the document's setting
-    if (menubar_depth > 0 && w.bdef)
+    if (menubar_depth > 0 && app_menu_depth == 0 && w.bdef)
       emit_windows_menu(w.label.empty() ? windows_menu.title : w.label);
     break;
 
   case Kind::Menu: {
     // §5.9: a menu straight in the bar with the Windows menu's title takes its items.
     const bool merge = windows_menu.merged && menubar_depth > 0 && menu_depth == 0 &&
-                       w.label == windows_menu.title;
+                       app_menu_depth == 0 && w.label == windows_menu.title;
     if (b.begin_menu(label)) {
       ++menu_depth;
       emit_children(w);
@@ -2404,7 +2877,10 @@ void Runtime::Impl::emit_node(const Widget &w) {
     if (raise)
       b.focus_next_window();
     b.next_window_resizable(w.resizable);
-    const bool visible = b.begin_window(wtitle.c_str(), id.c_str(), w.size, w.frame_border,
+    // The backend's identity for it: a mounted document's window is its own, apart from the same
+    // id in the document or in another mount of the same document (§5.25: one loaded twice).
+    const std::string backend_id = scope_stack.empty() ? id : id + "@" + current_prefix();
+    const bool visible = b.begin_window(wtitle.c_str(), backend_id.c_str(), w.size, w.frame_border,
                                         w.closable ? &open : nullptr);
     if (can_maximize && maximized != was_maximized)
       write<int>(app, max_path, maximized ? 1 : 0); // its button
@@ -2623,6 +3099,120 @@ void Runtime::Impl::emit_node(const Widget &w) {
       write<std::string>(app, path, store[e.index]); // store the mapped value (or the text)
       if (!w.on.empty())
         enqueue(w.on);
+    }
+    break;
+  }
+
+  case Kind::Tabs: {
+    // The tabs: the children's titles, or (a bar alone) the options. `bind` holds the selected
+    // tab's title (or, with values:, its value); without one the selection is kept per widget.
+    std::vector<std::string> computed;
+    if (w.children.empty() && !w.options_expr.empty())
+      computed = eval_options(w.options_expr);
+    const std::vector<std::string> &titles = !w.children.empty()      ? w.tab_titles
+                                             : w.options_expr.empty() ? w.options
+                                                                      : computed;
+    if (titles.empty())
+      break;
+    const bool mapped = w.children.empty() && !w.values.empty() && w.options_expr.empty() &&
+                        w.values.size() == titles.size();
+    const std::vector<std::string> &store = mapped ? w.values : titles;
+    const std::string id = w.id.empty() ? std::string("tabs:") + w.label : w.id;
+    const std::string path = resolve(!w.bind.empty() ? w.bind : "tree." + id + ".tab");
+    const std::string fallback = w.sdef.empty() ? store.front() : w.sdef;
+    const std::string cur = read_or_seed<std::string>(app, path, fallback);
+    int idx = 0;
+    for (std::size_t i = 0; i < store.size(); ++i)
+      if (store[i] == cur) {
+        idx = static_cast<int>(i);
+        break;
+      }
+    b.push_id(id.c_str());
+    const IndexEdit e = b.tab_bar(label, id.c_str(), idx, titles);
+    if (e.changed && e.index >= 0 && e.index < static_cast<int>(store.size()) && e.index != idx) {
+      write<std::string>(app, path, store[e.index]);
+      idx = e.index;
+      if (!w.on.empty())
+        enqueue(w.on);
+    }
+    if (!w.children.empty())
+      emit(w.children[static_cast<std::size_t>(idx)]); // only the selected tab's subtree
+    b.pop_id();
+    break;
+  }
+
+  case Kind::List: {
+    // Rows of a state array: the count at bind, row i at bind.i, each showing its list_field.
+    const std::string path = resolve(w.bind);
+    const std::string cur_path =
+        w.list_current.empty() ? path + ".current" : resolve(w.list_current);
+    constexpr int kMaxRows = 100000;
+    int count = 0;
+    try {
+      count = std::clamp(std::stoi(read_string(app, path)), 0, kMaxRows);
+    } catch (...) {
+      count = 0;
+    }
+    std::vector<std::string> items;
+    items.reserve(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i)
+      items.push_back(read_string(app, path + "." + std::to_string(i) + "." + w.list_field));
+    int current = -1;
+    try {
+      current = std::stoi(read_string(app, cur_path));
+    } catch (...) {
+      current = -1;
+    }
+    if (current >= count)
+      current = count - 1;
+    if (current < -1)
+      current = -1;
+    ListOptions o;
+    o.add = w.list_add;
+    o.remove = w.list_remove;
+    o.rows = w.list_rows;
+    const std::string id = w.id.empty() ? std::string("list:") + path : w.id;
+    b.push_id(id.c_str());
+    const ListEdit e = b.list(label, id.c_str(), current, items, o);
+    b.pop_id();
+    cvc::state &root = cvc::state::instance(app);
+    if (e.selected && e.index >= 0 && e.index < count && e.index != current) {
+      write<std::string>(app, cur_path, std::to_string(e.index));
+      current = e.index;
+      if (!w.on.empty())
+        enqueue(w.on);
+    }
+    if (e.add && w.list_add && count < kMaxRows) {
+      // A new last row: the new_item fields ("{n}": its number from 1), then the count, then the
+      // selection on it, so a watcher of the count sees the row's fields already there.
+      const std::string row = path + "." + std::to_string(count);
+      for (const auto &f : w.list_new) {
+        std::string v = f.second;
+        for (std::size_t at = v.find("{n}"); at != std::string::npos; at = v.find("{n}", at))
+          v.replace(at, 3, std::to_string(count + 1));
+        write<std::string>(app, row + "." + f.first, v);
+      }
+      if (w.list_new.empty())
+        write<std::string>(app, row + "." + w.list_field, std::to_string(count + 1));
+      write<std::string>(app, path, std::to_string(count + 1));
+      write<std::string>(app, cur_path, std::to_string(count));
+      if (!w.on_add.empty())
+        enqueue(w.on_add);
+    } else if (e.remove && w.list_remove && current >= 0 && current < count) {
+      // The selected row goes: each row after it moves up one (its subtree copied over the one
+      // before), the last row's subtree is deleted, and the count drops.
+      for (int i = current; i + 1 < count; ++i) {
+        cvc::state &dst = root(path + "." + std::to_string(i));
+        cvc::state &src = root(path + "." + std::to_string(i + 1));
+        const boost::property_tree::ptree values = src.ptree();
+        dst.reset(false); // its children destroyed: the next row's fields replace them
+        dst.ptree(values);
+      }
+      root(path).removeChild(std::to_string(count - 1));
+      write<std::string>(app, path, std::to_string(count - 1));
+      write<std::string>(app, cur_path, std::to_string(std::min(current, count - 2)));
+      if (!w.on_remove.empty())
+        enqueue(w.on_remove);
     }
     break;
   }
@@ -3826,6 +4416,11 @@ void Runtime::Impl::players_end_walk() {
 }
 
 void Runtime::Impl::render() {
+  // Render starts mount ticks and runs mount init:s, and its reconcile kills residents: on the host
+  // thread, between pumps (S1.10). A new document is placed before its tree is drawn, so its
+  // holes are planted and its mount ticks started where it runs.
+  assert_outside_pump(app);
+  ensure_placement(/*submitting=*/false);
   if (!backend)
     return;
   // §5.11: published pictures belong to the backend they went to; the cache's dropped ones go.
@@ -3881,6 +4476,9 @@ void Runtime::Impl::render() {
   scope_stack.clear(); // §12: start every frame at the document scope (RAII keeps it balanced;
                        // this is belt-and-suspenders so one bad frame can't leak into the next)
   windows_menu_drawn = false;
+  apps_drawn = false;
+  first_bar_drawn = false;
+  plan_frame_apps(); // §5.25 the repeated applications' instances this frame
   backend->begin_frame();
   clicks_fired = 0;
   instance_path.clear();
@@ -3888,14 +4486,27 @@ void Runtime::Impl::render() {
   if (!fullscreen.active || !emit_fullscreen()) {
     // §5.9: a document with no menubar but a closable window gets a menubar holding just the
     // Windows menu, so a window closed with its X can be opened again.
-    if (!windows_menu.has_menubar && windows_menu.any_closable && windows_menu.on &&
-        windows_menu_has_items() && backend->begin_main_menu_bar()) {
+    // §5.25 and one whose loaded documents have menubars gets one holding theirs.
+    if (!windows_menu.has_menubar &&
+        (!frame_apps.empty() ||
+         (windows_menu.any_closable && windows_menu.on && windows_menu_has_items())) &&
+        backend->begin_main_menu_bar()) {
       ++menubar_depth;
+      Widget bare;
+      bare.kind = Kind::Menubar;
+      std::vector<TrayEntry> tray = tray_entries(bare);
+      // only the applications' icons: this bar is not the document's, so no clock or bell
+      tray.erase(std::remove_if(tray.begin(), tray.end(),
+                                [](const TrayEntry &t) { return t.scope.empty(); }),
+                 tray.end());
+      emit_app_menus();
       emit_windows_menu(windows_menu.title);
+      emit_tray(tray);
       --menubar_depth;
       backend->end_main_menu_bar();
     }
     emit(root);
+    emit_notify_window(); // §5.24, while Show all... has it open
     // §10.8 the Runtime's own "Open file" window, over the document, while a (file-pick) waits
     // on it.
     if (file_pick->cancel.exchange(false))
@@ -3929,6 +4540,9 @@ void Runtime::Impl::plan_windows_menu() {
   // Walk the tree with the scope each node resolves its binds in (a load: mount scopes its
   // children, §12). A repeated widget is made per frame: a repeated window's instances are listed
   // as the menu is drawn (repeated_windows).
+  // `mount`: the innermost mount `w` is in, null in the document's own tree.
+  const Widget *mount = nullptr;
+  std::string mount_scope;
   std::function<void(const Widget &, const std::string &, bool)> walk =
       [&](const Widget &w, const std::string &scope, bool in_menubar) {
         if (!w.repeat.empty()) {
@@ -3936,13 +4550,70 @@ void Runtime::Impl::plan_windows_menu() {
             p.repeated.emplace_back(&w, scope);
             p.any_closable = p.any_closable || w.closable;
           }
+          // §5.25 a repeated mount with a menubar of its own: an application per instance.
+          if (!w.scope.empty()) {
+            const std::function<const Widget *(const Widget &)> first_bar =
+                [&](const Widget &n) -> const Widget * {
+              for (const Widget &c : n.children) {
+                if (c.kind == Kind::Menubar)
+                  return &c;
+                if (!c.scope.empty())
+                  continue; // a nested mount's bar is its own
+                if (const Widget *b = first_bar(c))
+                  return b;
+              }
+              return nullptr;
+            };
+            if (const Widget *bar = first_bar(w)) {
+              WindowsMenuPlan::App a;
+              a.mount = &w;
+              a.bar = bar;
+              a.name = !w.app_name.empty() ? w.app_name : w.scope.substr(w.scope.rfind('.') + 1);
+              a.functions = w.functions.get();
+              a.repeat = &w;
+              a.parent_scope = scope;
+              p.apps.push_back(std::move(a));
+            }
+          }
           return;
         }
         const std::string inner = w.scope.empty() ? scope : resolve_bind(scope, w.scope);
+        const Widget *const outer_mount = mount;
+        const std::string outer_scope = mount_scope;
+        if (!w.scope.empty()) {
+          mount = &w;
+          mount_scope = inner;
+        }
+        struct Restore {
+          const Widget *&m;
+          std::string &s;
+          const Widget *pm;
+          std::string ps;
+          ~Restore() {
+            m = pm;
+            s = ps;
+          }
+        } restore{mount, mount_scope, outer_mount, outer_scope};
         switch (w.kind) {
         case Kind::Menubar:
-          p.has_menubar = true;
           in_menubar = true;
+          if (mount) { // §5.25 a loaded document's: an application, once per mount
+            bool seen = false;
+            for (const WindowsMenuPlan::App &a : p.apps)
+              seen = seen || a.mount == mount;
+            if (!seen) {
+              WindowsMenuPlan::App a;
+              a.mount = mount;
+              a.bar = &w;
+              a.name = !mount->app_name.empty() ? mount->app_name
+                                                : mount->scope.substr(mount->scope.rfind('.') + 1);
+              a.scope = mount_scope;
+              a.functions = mount->functions.get();
+              p.apps.push_back(std::move(a));
+            }
+            break;
+          }
+          p.has_menubar = true;
           for (const Widget &c : w.children)
             if (c.kind == Kind::Menu)
               bar_menus.insert(c.label);
@@ -3951,7 +4622,22 @@ void Runtime::Impl::plan_windows_menu() {
           if (!w.bind.empty() && !is_expr(w.bind))
             toggled.insert(resolve_bind(scope, w.bind));
           break;
+        case Kind::TrayIcon: // §5.22 the clock, §5.24 the bell: placed in a menubar, else the
+                             // document's setting (a loaded document's are its own: ignored)
+          if (mount)
+            break;
+          if (w.tray_clock && in_menubar)
+            p.clock_placed = true;
+          else if (w.tray_clock)
+            p.clock_setting = w.bdef ? 1 : 0;
+          else if (w.tray_bell && in_menubar)
+            p.bell_placed = true;
+          else if (w.tray_bell)
+            p.bell_setting = w.bdef ? 1 : 0;
+          break;
         case Kind::WindowsMenu:
+          if (mount) // a loaded document's Windows menu is the outer document's
+            break;
           if (!w.bdef)
             p.on = false;
           else if (in_menubar)
@@ -3979,6 +4665,14 @@ void Runtime::Impl::plan_windows_menu() {
     if (!toggled.count(win.open_path))
       p.items.push_back(std::move(win));
   p.merged = !p.placed && bar_menus.count(p.title) != 0;
+  // §5.25 two mounts of one document share its name: each is told apart by its mount id.
+  std::map<std::string, int> named; // (a repeated one's instances are numbered instead)
+  for (const WindowsMenuPlan::App &a : p.apps)
+    if (!a.repeat)
+      ++named[a.name];
+  for (WindowsMenuPlan::App &a : p.apps)
+    if (!a.repeat && named[a.name] > 1)
+      a.name += " (" + a.mount->scope.substr(a.mount->scope.rfind('.') + 1) + ")";
   p.toggled = std::move(toggled);
   windows_menu = std::move(p);
 }
@@ -4012,7 +4706,7 @@ std::vector<Runtime::Impl::RepeatedWindow> Runtime::Impl::repeated_windows() {
 }
 
 bool Runtime::Impl::windows_menu_has_items() {
-  return !windows_menu.items.empty() ||
+  return !windows_menu.items.empty() || !frame_apps.empty() ||
          (!windows_menu.repeated.empty() && !repeated_windows().empty());
 }
 
@@ -4040,50 +4734,1160 @@ void Runtime::Impl::emit_windows_menu_items() {
     }
   };
   for (const WindowsMenuPlan::Item &it : windows_menu.items)
-    item(it.title, it.open_path, it.raise_path);
+    if (quit_apps.empty() || app_running(it.open_path)) // §5.25 a quit application's come back
+      item(it.title, it.open_path, it.raise_path);      // with it
   for (const RepeatedWindow &r : repeated_windows()) {
     b.push_id(r.id.c_str()); // two instances may share a title (the label, before their names)
     item(r.title, r.open_path, r.raise_path);
     b.pop_id();
   }
+  // §5.25 the loaded documents with a menubar: ticked while running; untick to quit one, tick to
+  // open it again as it was.
+  if (!frame_apps.empty()) {
+    b.separator();
+    b.text_line("Applications");
+    for (const WindowsMenuPlan::App &a : frame_apps) {
+      b.push_id(("##app." + a.scope).c_str());
+      const bool running = app_running(a.scope);
+      const BoolEdit e = b.menu_item_toggle(a.name.c_str(), running);
+      if (e.committed && e.value != running)
+        queued_events.push_back(
+            {kAppEvent + std::string(e.value ? "open:" : "quit:") + a.scope, prefix});
+      b.pop_id();
+    }
+  }
+}
+
+// A tray icon as the backend draws it this frame: its glyph (a named icon's, cvc/ariadne/icons.h,
+// or its label as written), its badge (a text or an expression, as a picture's badge is, §5.11; ""
+// and "0" show none) and the badge's tone.
+Backend::TrayIcon Runtime::Impl::tray_spec(const Widget &w) {
+  Backend::TrayIcon t;
+  t.glyph = std::string(icon_glyph(w.label, backend->unicode_glyphs()));
+  if (named_icon(w.label))
+    t.icon = w.label;
+  t.badge = is_expr(w.badge) ? eval_text_or_literal(w.badge) : w.badge;
+  if (t.badge == "0")
+    t.badge.clear();
+  const std::string tone = is_expr(w.tone) ? eval_text(w.tone) : w.tone;
+  t.tone = tone == "error" ? 2 : tone == "warn" ? 1 : 0;
+  t.menu = !w.children.empty();
+  return t;
+}
+
+namespace {
+// `when` in local time, as strftime formats it with `fmt`.
+std::string local_time(std::chrono::system_clock::time_point when, const char *fmt) {
+  const std::time_t t = std::chrono::system_clock::to_time_t(when);
+  std::tm tm{};
+#ifdef _WIN32
+  if (localtime_s(&tm, &t) != 0)
+    return std::string();
+#else
+  if (!localtime_r(&t, &tm))
+    return std::string();
+#endif
+  char buf[64] = "";
+  return std::strftime(buf, sizeof buf, fmt, &tm) ? std::string(buf) : std::string();
+}
+} // namespace
+
+bool Runtime::Impl::clock_on_by_default() const {
+  return windows_menu.clock_setting >= 0 ? windows_menu.clock_setting == 1 : clock_default;
+}
+
+namespace {
+// `path` is `scope` or under it.
+bool path_under(const std::string &path, const std::string &scope) {
+  return path == scope ||
+         (path.size() > scope.size() && path.compare(0, scope.size(), scope) == 0 &&
+          path[scope.size()] == cvc::state::SEPARATOR[0]);
+}
+} // namespace
+
+// §5.25 this frame's applications: the plan's, a repeated one as many as its repeat: makes now,
+// each named "<name> <n>" with its instance's scope and its bar's per-instance copy.
+void Runtime::Impl::plan_frame_apps() {
+  frame_apps.clear();
+  frame_app_bars.clear();
+  for (const WindowsMenuPlan::App &a : windows_menu.apps) {
+    if (!a.repeat) {
+      frame_apps.push_back(a);
+      continue;
+    }
+    int n = 0;
+    {
+      const ScopedTo in(*this, a.parent_scope, nullptr);
+      n = eval_count(a.repeat->repeat);
+    }
+    for (int i = 0; i < n; ++i) {
+      WindowsMenuPlan::App inst = a;
+      inst.scope = resolve_bind(a.parent_scope, a.repeat->scope + "." + std::to_string(i));
+      inst.name = a.name + " " + std::to_string(i + 1);
+      frame_app_bars.push_back(substitute_index(*a.bar, i));
+      inst.bar = &frame_app_bars.back();
+      inst.repeat = nullptr;
+      frame_apps.push_back(std::move(inst));
+    }
+  }
+}
+
+bool Runtime::Impl::is_app_scope(const std::string &scope) const {
+  for (const WindowsMenuPlan::App &a : frame_apps)
+    if (a.scope == scope)
+      return true;
+  return false;
+}
+
+bool Runtime::Impl::app_running(const std::string &path) const {
+  for (const std::string &q : quit_apps)
+    if (path_under(path, q))
+      return false;
+  return true;
+}
+
+// §5.25 the loaded documents' menus, each under its name: its menubar's entries (its menus as
+// submenus), drawn in its scope with its functions, then Restart <name> and Quit <name>. Once a
+// frame, in the first bar that is the document's own.
+void Runtime::Impl::emit_app_menus() {
+  if (apps_drawn || frame_apps.empty())
+    return;
+  apps_drawn = true;
+  Backend &b = *backend;
+  for (const WindowsMenuPlan::App &a : frame_apps) {
+    if (!app_running(a.scope))
+      continue; // reopened from Windows > Applications
+    b.push_id(("##app." + a.scope).c_str());
+    if (b.begin_menu(a.name.c_str())) {
+      {
+        const ScopedTo in(*this, a.scope, a.functions);
+        ++app_menu_depth;
+        emit_children(*a.bar);
+        --app_menu_depth;
+      }
+      b.separator();
+      if (b.menu_item_action(("Restart " + a.name).c_str()))
+        queued_events.push_back({kAppEvent + std::string("restart:") + a.scope, prefix});
+      if (b.menu_item_action(("Quit " + a.name).c_str()))
+        queued_events.push_back({kAppEvent + std::string("quit:") + a.scope, prefix});
+      b.end_menu();
+    }
+    b.pop_id();
+  }
+}
+
+// §5.25 Quit: the application's windows, menus and tray icons go, its on_tick: and the programs it
+// started stop. Its state stays, so opening it again (Windows > Applications) resumes it.
+void Runtime::Impl::quit_app(const std::string &scope) {
+  for (auto it = mount_ticks_.begin(); it != mount_ticks_.end();) {
+    if (path_under(it->first, scope)) {
+      stop_resident(it->second.resident);
+      it = mount_ticks_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  if (group_ || used_scheduler_) { // where they run: its group's scheduler, else group 0's
+    cvc::state_exec::async_scheduler &sched = current_sched();
+    for (const auto &[pid, ac] : live_actions_)
+      if (ac && !ac->ended && path_under(ac->scope, scope)) {
+        sched.kill(pid);
+        for (const int child : ac->children)
+          sched.kill(child);
+      }
+  }
+  quit_apps.insert(scope);
+}
+
+// §5.25 Restart: Quit, then a full reset. Its state is dropped, its notifications too, and it
+// starts again as when it was first loaded: its holes planted, its init: run, its on_tick: started.
+void Runtime::Impl::restart_app(const std::string &scope) {
+  quit_app(scope);
+  const std::size_t dot = scope.rfind(cvc::state::SEPARATOR[0]);
+  try {
+    if (dot == std::string::npos)
+      cvc::state::instance(app).removeChild(scope);
+    else
+      cvc::state::instance(app)(scope.substr(0, dot)).removeChild(scope.substr(dot + 1));
+  } catch (const std::exception &) {
+  }
+  for (std::set<std::string> *done : {&wired_mounts, &ran_inits})
+    for (auto it = done->begin(); it != done->end();)
+      it = path_under(*it, scope) ? done->erase(it) : std::next(it);
+  cvc::notify_clear_under(app, scope);
+  quit_apps.erase(scope);
+}
+
+bool Runtime::Impl::bell_on_by_default() const {
+  return windows_menu.bell_setting >= 0 ? windows_menu.bell_setting == 1 : notify_default;
+}
+
+namespace {
+// §5.24 who an entry posted from `path` came from: the mount `path` is in (the deepest) among
+// `mounts` (composed prefix -> name), named as the document named it; "" for the document itself
+// or the host.
+std::string mount_source(const std::map<std::string, std::string> &mounts,
+                         const std::string &path) {
+  std::string best_prefix, best;
+  for (const auto &[p, name] : mounts)
+    if ((path == p || (path.size() > p.size() && path.compare(0, p.size(), p) == 0 &&
+                       path[p.size()] == cvc::state::SEPARATOR[0])) &&
+        p.size() > best_prefix.size()) {
+      best_prefix = p;
+      best = name;
+    }
+  return best;
+}
+} // namespace
+
+std::string Runtime::Impl::notify_source(const std::string &path) const {
+  return mount_source(mount_names, path);
+}
+
+Runtime::Impl::NotifyScope Runtime::Impl::notify_scope(const std::string &scope) const {
+  return NotifyScope{scope, notify_source(scope), mount_names};
+}
+
+namespace {
+constexpr int kBellShown = 8; // the newest entries the bell's menu lists
+
+std::chrono::system_clock::time_point epoch_time(double seconds) {
+  return std::chrono::system_clock::time_point(
+      std::chrono::duration_cast<std::chrono::system_clock::duration>(
+          std::chrono::duration<double>(seconds)));
+}
+
+// An entry as a line: unread mark, level, source, its first line of text (cut at 80 characters),
+// how many times it came, and when (`time_fmt`).
+std::string notify_line(const cvc::notification_entry &e, const std::string &source, bool unicode,
+                        const char *time_fmt) {
+  std::string line = e.read ? "  " : (unicode ? "\xE2\x80\xA2 " : "* "); // a bullet: unread
+  if (e.level >= 2)
+    line += std::string(icon_glyph("error", unicode)) + " ";
+  else if (e.level == 1)
+    line += std::string(icon_glyph("warning", unicode)) + " ";
+  if (!source.empty())
+    line += source + ": ";
+  std::string text = e.text.substr(0, e.text.find('\n'));
+  if (text.size() > 80) {
+    std::size_t cut = 77;
+    while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80)
+      --cut; // not inside a UTF-8 sequence
+    text = text.substr(0, cut) + "...";
+  }
+  line += text;
+  if (e.repeat > 1)
+    line += " (x" + std::to_string(e.repeat) + ")";
+  line += "  " + local_time(epoch_time(e.time), time_fmt);
+  return line;
+}
+} // namespace
+
+void Runtime::Impl::emit_tray_items(const TrayEntry &icon) {
+  if (icon.bell)
+    emit_bell_items();
+  else if (icon.w)
+    emit_children(*icon.w);
+}
+
+// §5.24 the bell's menu: the newest entries (a click marks one read and runs its on:), then Mark
+// all read, Clear all, and Show all..., which opens the Notifications window.
+void Runtime::Impl::emit_bell_items() {
+  Backend &b = *backend;
+  const std::vector<cvc::notification_entry> all = cvc::notifications(app);
+  int shown = 0;
+  for (auto it = all.rbegin(); it != all.rend() && shown < kBellShown; ++it, ++shown) {
+    const std::string line =
+        notify_line(*it, it->source.empty() ? notify_source(it->path) : it->source,
+                    b.unicode_glyphs(), "%H:%M");
+    b.push_id(("##notify." + std::to_string(it->id)).c_str());
+    if (b.menu_item_action(line.c_str()))
+      queued_events.push_back(
+          {kNotifyEvent + std::string("open:") + std::to_string(it->id), prefix});
+    b.pop_id();
+  }
+  if (all.size() > static_cast<std::size_t>(kBellShown))
+    b.text_line(("and " + std::to_string(all.size() - kBellShown) + " more").c_str());
+  b.separator();
+  if (b.menu_item_action("Mark all read"))
+    queued_events.push_back({kNotifyEvent + std::string("read_all"), prefix});
+  if (b.menu_item_action("Clear all"))
+    queued_events.push_back({kNotifyEvent + std::string("clear_all"), prefix});
+  if (b.menu_item_action("Show all..."))
+    queued_events.push_back({kNotifyEvent + std::string("show"), prefix});
+}
+
+// §5.24 the Notifications window, while its tree._notifications.open is 1 (Show all... sets it;
+// its X clears it): every entry, newest first, under Mark all read and Clear all.
+void Runtime::Impl::emit_notify_window() {
+  const std::string open = resolve(std::string("tree.") + kNotifyWindowId + ".open");
+  if (read_bool_or_seed(app, open, 0) == 0)
+    return;
+  const cvc::notify_summary s = cvc::notify_status(app);
+  if (s.rev != notify_window_rev || notify_window.kind != Kind::Window) {
+    std::vector<Widget> kids;
+    Widget row = group({button("Mark all read", kNotifyEvent + std::string("read_all")),
+                        button("Clear all", kNotifyEvent + std::string("clear_all"))});
+    row.layout.kind = LayoutKind::Horizontal;
+    kids.push_back(std::move(row));
+    kids.push_back(separator());
+    const std::vector<cvc::notification_entry> all = cvc::notifications(app);
+    if (all.empty())
+      kids.push_back(text("No notifications."));
+    for (auto it = all.rbegin(); it != all.rend(); ++it)
+      kids.push_back(
+          text(notify_line(*it, it->source.empty() ? notify_source(it->path) : it->source,
+                           backend->unicode_glyphs(), "%d %b %H:%M:%S")));
+    Widget w = window("Notifications", std::move(kids));
+    w.id = kNotifyWindowId;
+    w.closable = true;
+    notify_window = std::move(w);
+    notify_window_rev = s.rev;
+  }
+  emit(notify_window);
+}
+
+// §5.24 the bell's and the Notifications window's own events.
+bool Runtime::Impl::builtin_event(const QueuedAction &a) {
+  const std::string_view app_tag = kAppEvent; // §5.25 an application's Quit, Restart, reopen
+  if (a.event.compare(0, app_tag.size(), app_tag) == 0) {
+    const std::string what = a.event.substr(app_tag.size());
+    const std::size_t colon = what.find(':');
+    const std::string verb = what.substr(0, colon);
+    const std::string scope = colon == std::string::npos ? std::string() : what.substr(colon + 1);
+    bool known = false;
+    for (const WindowsMenuPlan::App &app_ : frame_apps)
+      known = known || app_.scope == scope;
+    if (!known)
+      return true;
+    if (verb == "quit")
+      quit_app(scope);
+    else if (verb == "restart")
+      restart_app(scope);
+    else if (verb == "open")
+      quit_apps.erase(scope);
+    return true;
+  }
+  const std::string_view tag = kNotifyEvent;
+  if (a.event.compare(0, tag.size(), tag) != 0)
+    return false;
+  const std::string what = a.event.substr(tag.size());
+  if (what == "read_all") {
+    cvc::notify_read_all(app);
+  } else if (what == "clear_all") {
+    cvc::notify_clear_all(app);
+  } else if (what == "show") {
+    write<int>(app, resolve(std::string("tree.") + kNotifyWindowId + ".open"), 1);
+    write<std::string>(app, resolve(std::string("tree.") + kNotifyWindowId + ".raise"), "1");
+  } else if (what.rfind("open:", 0) == 0) {
+    std::uint64_t id = 0;
+    try {
+      id = std::stoull(what.substr(5));
+    } catch (const std::exception &) {
+      return true;
+    }
+    for (const cvc::notification_entry &e : cvc::notifications(app))
+      if (e.id == id) {
+        cvc::notify_read(app, id);
+        if (!e.on.empty()) { // its program, in the scope that posted it, from the next drain
+          const std::string scope = e.scope.empty() ? prefix : e.scope;
+          queued_events.push_back({e.on, scope});
+          const auto fn = mount_functions.find(scope);
+          queued_events.back().functions = fn != mount_functions.end() ? fn->second : doc_functions;
+        }
+        break;
+      }
+  }
+  return true;
+}
+
+// §5.24 the feed's verbs, for a program run in `scope`:
+//   (notify TEXT [LEVEL [ON]])  post; LEVEL info (the default), warn or error; ON a program run
+//                               in this scope when the entry is clicked. Returns its id.
+//   (notify-read ID) (notify-clear ID)   mark one read / drop it; #t when there was one
+//   (notify-read-all)                    mark every entry read
+//   (notify-clear-all)                   drop the entries this scope posted (its own and its
+//                                        mounts'); how many
+//   (notify-status)                      {count unread worst rev}
+//   (notify-list [N])                    the newest N entries (all), newest first, each
+//                                        {id text level source time read repeat}
+void Runtime::Impl::bind_notify_verbs(const std::shared_ptr<cvc::state_exec::environment> &env,
+                                      const NotifyScope &ns) const {
+  namespace se = cvc::state_exec;
+  cvc::app *const on_app = &app;
+  const std::string &scope = ns.scope;
+  const std::string &source = ns.source;
+  const auto text_arg = [](const se::value_t &v, const char *verb, const char *what) {
+    const auto *s = std::get_if<std::string>(&v.v);
+    if (!s)
+      throw se::dsl_error("TypeError",
+                          std::string(verb) + ": " + what + " is a string, not " + v.type_name());
+    return *s;
+  };
+  const auto id_arg = [](std::span<const se::value_t> args, const char *verb) -> std::uint64_t {
+    if (args.size() != 1)
+      throw se::dsl_error("TypeError", std::string(verb) + ": expected one argument, an id");
+    if (const auto *i = std::get_if<int64_t>(&args[0].v))
+      return *i > 0 ? static_cast<std::uint64_t>(*i) : 0;
+    if (const auto *d = std::get_if<double>(&args[0].v))
+      return *d > 0 ? static_cast<std::uint64_t>(*d) : 0;
+    throw se::dsl_error("TypeError", std::string(verb) + ": the id is a number");
+  };
+  se::builtins::register_fn(
+      env, "notify",
+      [on_app, scope, source, text_arg](std::span<const se::value_t> args) -> se::value_t {
+        if (args.empty() || args.size() > 3)
+          throw se::dsl_error("TypeError", "notify: (notify TEXT [LEVEL [ON]])");
+        cvc::notification n;
+        n.text = text_arg(args[0], "notify", "TEXT");
+        if (args.size() > 1 && !args[1].is_nil())
+          n.level = cvc::notify_level(text_arg(args[1], "notify", "LEVEL"));
+        if (args.size() > 2 && !args[2].is_nil())
+          n.on = text_arg(args[2], "notify", "ON");
+        n.source = source;
+        n.path = scope;
+        n.scope = scope;
+        return se::value_t(static_cast<int64_t>(cvc::notify(*on_app, std::move(n))));
+      });
+  se::builtins::register_fn(
+      env, "notify-read", [on_app, id_arg](std::span<const se::value_t> args) -> se::value_t {
+        return se::value_t(cvc::notify_read(*on_app, id_arg(args, "notify-read")));
+      });
+  se::builtins::register_fn(
+      env, "notify-clear", [on_app, id_arg](std::span<const se::value_t> args) -> se::value_t {
+        return se::value_t(cvc::notify_clear(*on_app, id_arg(args, "notify-clear")));
+      });
+  se::builtins::register_fn(
+      env, "notify-read-all", [on_app](std::span<const se::value_t> args) -> se::value_t {
+        if (!args.empty())
+          throw se::dsl_error("TypeError", "notify-read-all: expected no arguments");
+        cvc::notify_read_all(*on_app);
+        return se::value_t(true);
+      });
+  se::builtins::register_fn(
+      env, "notify-status", [on_app](std::span<const se::value_t> args) -> se::value_t {
+        if (!args.empty())
+          throw se::dsl_error("TypeError", "notify-status: expected no arguments");
+        const cvc::notify_summary s = cvc::notify_status(*on_app);
+        return se::make_dict({
+            {"count", se::value_t(static_cast<int64_t>(s.count))},
+            {"unread", se::value_t(static_cast<int64_t>(s.unread))},
+            {"worst", se::value_t(std::string(s.worst < 0 ? "" : cvc::notify_level_name(s.worst)))},
+            {"rev", se::value_t(static_cast<int64_t>(s.rev))},
+        });
+      });
+  // The mounts as they are now: a child program may outlive this Runtime, so it keeps a copy.
+  se::builtins::register_fn(
+      env, "notify-list",
+      [on_app, mounts = ns.mounts](std::span<const se::value_t> args) -> se::value_t {
+        if (args.size() > 1)
+          throw se::dsl_error("TypeError", "notify-list: expected at most one argument, a count");
+        std::size_t n = cvc::notify_capacity;
+        if (!args.empty()) {
+          if (const auto *i = std::get_if<int64_t>(&args[0].v))
+            n = *i > 0 ? static_cast<std::size_t>(*i) : 0;
+          else
+            throw se::dsl_error("TypeError", "notify-list: the count is an int");
+        }
+        const std::vector<cvc::notification_entry> all = cvc::notifications(*on_app);
+        std::vector<se::value_t> out;
+        for (auto it = all.rbegin(); it != all.rend() && out.size() < n; ++it)
+          out.push_back(se::make_dict({
+              {"id", se::value_t(static_cast<int64_t>(it->id))},
+              {"text", se::value_t(it->text)},
+              {"level", se::value_t(std::string(cvc::notify_level_name(it->level)))},
+              {"source",
+               se::value_t(it->source.empty() ? mount_source(mounts, it->path) : it->source)},
+              {"time", se::value_t(it->time)},
+              {"read", se::value_t(it->read)},
+              {"repeat", se::value_t(static_cast<int64_t>(it->repeat))},
+          }));
+        return se::make_list(std::move(out));
+      });
+  se::builtins::register_fn(
+      env, "notify-clear-all", [on_app, scope](std::span<const se::value_t> args) -> se::value_t {
+        if (!args.empty())
+          throw se::dsl_error("TypeError", "notify-clear-all: expected no arguments");
+        return se::value_t(static_cast<int64_t>(cvc::notify_clear_under(*on_app, scope)));
+      });
+}
+
+// The titles the bar's menus show this frame, in order: its entries (a repeated one once), then the
+// Windows menu when it goes last (§5.9).
+std::vector<std::string> Runtime::Impl::bar_titles(const Widget &bar) {
+  std::vector<std::string> out;
+  for (const Widget &c : bar.children) {
+    if (c.kind == Kind::TrayIcon || c.kind == Kind::Separator || !visible(c))
+      continue;
+    if (c.kind == Kind::WindowsMenu) {
+      if (c.bdef && windows_menu.on && windows_menu_has_items())
+        out.push_back(c.label.empty() ? windows_menu.title : c.label);
+      continue;
+    }
+    out.push_back(c.label);
+  }
+  if (!apps_drawn) // §5.25 the loaded documents' menus, after the document's
+    for (const WindowsMenuPlan::App &a : frame_apps)
+      if (app_running(a.scope))
+        out.push_back(a.name);
+  if (!windows_menu.placed && !windows_menu.merged && windows_menu.on && windows_menu_has_items())
+    out.push_back(windows_menu.title);
+  return out;
+}
+
+// §5.23 whether the bar's menus fold into one: always or never when the document says so, else
+// when the backend finds they do not fit beside the whole tray.
+bool Runtime::Impl::collapse_menus(const Widget &bar, const std::vector<TrayEntry> &tray) {
+  if (bar.collapse == "never")
+    return false;
+  if (bar.collapse == "always")
+    return true;
+  const std::vector<std::string> titles = bar_titles(bar);
+  if (titles.empty())
+    return false;
+  std::vector<Backend::TrayIcon> specs;
+  for (const TrayEntry &t : tray)
+    specs.push_back(t.spec);
+  return !backend->menus_fit(titles, specs);
+}
+
+// The bar's tray this frame: its TrayIcon children and the clock (§5.22), in the order the bar
+// shows them. The clock goes where a `- clock` entry places it, else last, at the right end.
+std::vector<Runtime::Impl::TrayEntry> Runtime::Impl::tray_entries(const Widget &bar) {
+  using Icon = TrayEntry;
+  const bool clock_on =
+      !first_bar_drawn && read_bool_or_seed(app, resolve(kClockKey), clock_on_by_default()) != 0;
+  const auto clock_icon = [&](const Widget *at) {
+    const auto now = wall_clock ? wall_clock() : std::chrono::system_clock::now();
+    Icon c;
+    c.w = at;
+    c.clock = true;
+    c.spec.glyph = local_time(now, "%H:%M");
+    c.spec.text = true;
+    c.tip = local_time(now, "%A %d %B %Y, %H:%M:%S");
+    // Joined to a relay: its time too, and how far its clock is from this one's.
+    if (const cvc::server_clock_reading sc = cvc::server_clock(app); sc.known) {
+      const auto there = now + std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                                   std::chrono::duration<double, std::milli>(sc.offset_ms));
+      char off[48];
+      std::snprintf(off, sizeof off, "%+.2f s, round trip %.0f ms", sc.offset_ms / 1000.0,
+                    sc.rtt_ms < 0.0 ? 0.0 : sc.rtt_ms);
+      c.tip += "\n" + sc.name + ": " + local_time(there, "%H:%M:%S") + " (" + off + ")";
+    }
+    c.spec.tooltip = c.tip;
+    return c;
+  };
+  // §5.24 the bell: while the feed has entries; its badge the unread, its tone the worst of them.
+  const cvc::notify_summary feed = cvc::notify_status(app);
+  // The clock and the bell are the document's first bar's (a second bar of its own has neither).
+  const bool bell_on = !first_bar_drawn && feed.count > 0 &&
+                       read_bool_or_seed(app, resolve(kBellKey), bell_on_by_default()) != 0;
+  const auto bell_icon = [&](const Widget *at) {
+    Icon c;
+    c.w = at;
+    c.bell = true;
+    c.spec.icon = "bell";
+    c.spec.glyph = std::string(icon_glyph("bell", backend->unicode_glyphs()));
+    c.spec.menu = true;
+    if (feed.unread > 0) {
+      c.spec.badge = std::to_string(feed.unread);
+      c.spec.tone = std::max(feed.worst, 0);
+      c.tip = std::to_string(feed.unread) +
+              (feed.unread == 1 ? " unread notification" : " unread notifications");
+    } else {
+      c.tip = "Notifications";
+    }
+    c.spec.tooltip = c.tip;
+    return c;
+  };
+  std::vector<Icon> icons;
+  for (const Widget &c : bar.children) {
+    if (c.kind != Kind::TrayIcon || !c.repeat.empty() || !visible(c))
+      continue;
+    if (c.tray_bell) {
+      if (bell_on)
+        icons.push_back(bell_icon(&c));
+      continue;
+    }
+    if (c.tray_clock) {
+      if (clock_on)
+        icons.push_back(clock_icon(&c));
+      continue;
+    }
+    Icon i;
+    i.w = &c;
+    i.spec = tray_spec(c);
+    i.tip = is_expr(c.tooltip) ? eval_text_or_literal(c.tooltip) : c.tooltip;
+    i.spec.tooltip = i.tip;
+    icons.push_back(std::move(i));
+  }
+  // §5.25 the running loaded documents' icons, after the document's own (in the first bar only),
+  // each worked out in its mount's scope.
+  if (!apps_drawn)
+    for (const WindowsMenuPlan::App &a : frame_apps) {
+      if (!app_running(a.scope))
+        continue;
+      const ScopedTo in(*this, a.scope, a.functions);
+      for (const Widget &c : a.bar->children) {
+        if (c.kind != Kind::TrayIcon || c.tray_clock || c.tray_bell || !c.repeat.empty() ||
+            !visible(c))
+          continue;
+        Icon i;
+        i.w = &c;
+        i.scope = a.scope;
+        i.functions = a.functions;
+        i.spec = tray_spec(c);
+        i.tip = is_expr(c.tooltip) ? eval_text_or_literal(c.tooltip) : c.tooltip;
+        i.spec.tooltip = i.tip;
+        icons.push_back(std::move(i));
+      }
+    }
+  if (bell_on && !windows_menu.bell_placed)
+    icons.push_back(bell_icon(nullptr));
+  if (clock_on && !windows_menu.clock_placed)
+    icons.push_back(clock_icon(nullptr));
+  return icons;
+}
+
+// The bar's tray, right-aligned after the menus. The icons the backend has no room for go, in
+// order, into an overflow menu at the tray's left end, whose badge counts what their badges count
+// and takes the strongest of their tones. A backend without a tray shows each as an ordinary menu
+// at the end of the bar.
+void Runtime::Impl::emit_tray(const std::vector<TrayEntry> &icons) {
+  using Icon = TrayEntry;
+  if (icons.empty())
+    return;
+  Backend &b = *backend;
+  std::vector<Backend::TrayIcon> specs;
+  for (const Icon &i : icons)
+    specs.push_back(i.spec);
+  const auto id_of = [&](const Icon &i, int k) {
+    if (i.clock || i.bell)
+      return std::string(i.clock ? "##tray.clock" : "##tray.bell");
+    const std::string own = i.w->id.empty() ? std::to_string(k) : i.w->id;
+    return i.scope.empty() ? own : i.scope + "/" + own; // a loaded document's: its own ids
+  };
+  // The icon as an item of a menu (the overflow menu, or a backend without a tray): its glyph and
+  // badge, then its tooltip; its own menu as a submenu.
+  const auto as_item = [&](const Icon &i) {
+    const ScopedTo in(*this, i.scope, i.functions);
+    std::string title = i.spec.glyph;
+    if (!i.spec.badge.empty())
+      title += " " + i.spec.badge;
+    if (!i.tip.empty())
+      title += "  " + i.tip;
+    if (i.spec.menu) {
+      if (b.begin_menu(title.c_str())) {
+        emit_tray_items(i);
+        b.end_menu();
+      }
+    } else if (b.menu_item_action(title.c_str()) && !i.clock && !i.w->on.empty()) {
+      enqueue(i.w->on);
+    }
+  };
+  const int n = static_cast<int>(icons.size());
+  const int fit = b.begin_tray(specs);
+  if (fit < 0) { // no tray: a menu per icon, at the end of the bar
+    for (int k = 0; k < n; ++k) {
+      const Icon &i = icons[k];
+      const ScopedTo in(*this, i.scope, i.functions);
+      b.push_id(id_of(i, k).c_str());
+      std::string title = i.spec.glyph;
+      if (!i.spec.badge.empty())
+        title += " " + i.spec.badge;
+      if (b.begin_menu(title.c_str())) {
+        if (i.spec.menu)
+          emit_tray_items(i);
+        else
+          as_item(i);
+        b.end_menu();
+      }
+      b.pop_id();
+    }
+    return;
+  }
+  const int hidden = n - std::min(fit, n);
+  if (hidden > 0) {
+    Backend::TrayIcon more;
+    more.glyph = std::string(icon_glyph("more", b.unicode_glyphs()));
+    more.menu = true;
+    long count = 0;
+    for (int k = 0; k < hidden; ++k) {
+      more.tone = std::max(more.tone, specs[k].tone);
+      try {
+        count += specs[k].badge.empty() ? 0 : std::stol(specs[k].badge);
+      } catch (const std::exception &) {
+        ++count; // a badge that is not a number counts once
+      }
+    }
+    if (count > 0)
+      more.badge = std::to_string(count);
+    b.push_id("##tray.more");
+    if (b.begin_tray_menu(more)) {
+      for (int k = 0; k < hidden; ++k) {
+        b.push_id(std::to_string(k).c_str());
+        as_item(icons[k]);
+        b.pop_id();
+      }
+      b.end_tray_menu();
+    }
+    b.pop_id();
+  }
+  for (int k = hidden; k < n; ++k) {
+    const Icon &i = icons[k];
+    const ScopedTo in(*this, i.scope, i.functions);
+    b.push_id(id_of(i, k).c_str());
+    if (i.spec.menu) {
+      if (b.begin_tray_menu(i.spec)) {
+        emit_tray_items(i);
+        b.end_tray_menu();
+      } else if (!i.tip.empty()) {
+        b.set_tooltip(i.tip.c_str());
+      }
+    } else {
+      if (b.tray_button(i.spec) && !i.clock && !i.w->on.empty())
+        enqueue(i.w->on);
+      if (!i.tip.empty())
+        b.set_tooltip(i.tip.c_str());
+    }
+    b.pop_id();
+  }
+  b.end_tray();
 }
 
 // --------------------------------------------------------------------------
 
 Runtime::Impl::~Impl() {
-  // Close anything the document left open (a (stream-open) with no (stream-close)) BEFORE reaping
-  // the process group, while the app and its state tree are still alive. Each owned resource's
-  // destructor runs here (e.g. ~stream marks its descriptor closed + releases its state pins) — the
-  // non-singleton teardown that a process-static owning table could not give (it would run at
-  // process exit against a dead app and hang). Safe to run before kill_owner: these resources live
-  // on the app scheduler/state, not this Runtime's owner_-tagged process lanes.
-  doc_scope_.clear();
-  // Reap this document's whole process group so a parked (await/sleep/msg-recv) action never
-  // lingers on the shared app scheduler after its Runtime is gone; the children its actions and
-  // residents spawned carry the same owner, so they go too. Only touch the scheduler if
-  // we ever used it (exec_scheduler() lazily builds it — don't force it at teardown otherwise).
-  if (used_scheduler_) {
-    auto &sched = app.exec_scheduler();
-    sched.kill_owner(owner_);
-    // A child's process holds its context, which points into this Runtime: erase them now.
-    for (const int pid : spawned_children_)
-      sched.reap(pid);
-    for (const auto &[pid, ac] : live_actions_)
-      for (const int child : ac->children)
-        sched.reap(child);
+  // Host thread, outside a pump: the kills below would race a worker on the group, and its
+  // destruction abort. Refused in every build, before anything is touched.
+  refuse_if_held(app, group_.get(), "tearing down the document at '" + prefix + "'");
+  // Teardown (S1.10, S1-Q8), each step catching and logging what it throws. First close anything
+  // the document left open (a (stream-open) with no (stream-close)), while the app, its state tree
+  // and the document's scheduler are still alive: each owned resource's destructor runs here
+  // (~stream marks its descriptor closed, releases its state pins and posts to the scheduler its
+  // context named) — the non-singleton teardown a process-static owning table could not give (it
+  // would run at process exit against a dead app and hang).
+  try {
+    doc_scope_.clear();
+  } catch (const std::exception &e) {
+    teardown_note("tearing down", "closing its resources", e.what());
   }
+  // Then reap the document's whole process group, so a parked (await/sleep/msg-recv) action never
+  // lingers after its Runtime is gone (kill_and_reap). Group 0 is touched only if this document
+  // used it (exec_scheduler() builds it lazily).
+  cvc::state_exec::async_scheduler *sched = nullptr;
+  try {
+    sched = group_ ? &group_->sched() : used_scheduler_ ? &app.exec_scheduler() : nullptr;
+  } catch (const std::exception &e) {
+    teardown_note("tearing down", "finding its scheduler", e.what());
+  }
+  if (sched)
+    kill_and_reap(*sched, "tearing down");
+  // Last the group, which the app's frames stop pumping first: its own teardown (S1.5) kills and
+  // reaps whatever is left, before channel_policy_ and doc_scope_ go, which its processes'
+  // contexts point at; then any retired group, waiting for its kernels as a teardown does. Both
+  // catch and log what they throw.
+  frame_handle_.reset();
+  group_.reset();
+  retired_groups_.clear();
+}
+
+void Runtime::Impl::kill_and_reap(cvc::state_exec::async_scheduler &sched,
+                                  const char *when) noexcept {
+  // kill_owner kills every process of the owner, the children its actions and residents spawned
+  // and forked included, and each is reaped, the actions' own processes too (S1-Q8: a killed one
+  // left in the table is a record whose context is gone).
+  try {
+    sched.kill_owner(owner_);
+  } catch (const std::exception &e) {
+    teardown_note(when, "killing its processes", e.what());
+  }
+  std::vector<int> pids;
+  try {
+    pids = own_pids();
+  } catch (const std::exception &e) {
+    teardown_note(when, "listing its processes", e.what());
+  }
+  for (const int pid : pids) {
+    try {
+      sched.reap(pid);
+    } catch (const std::exception &e) {
+      teardown_note(when, "reaping a process", e.what());
+    }
+  }
+}
+
+void Runtime::Impl::teardown_note(const char *when, const char *step, const char *what) noexcept {
+  try {
+    app.log(1, std::string("ari: ") + when + " the document at '" + prefix + "': " + step + ": " +
+                   what);
+  } catch (...) {
+  }
+}
+
+std::vector<int> Runtime::Impl::own_pids() const {
+  std::vector<int> pids;
+  for (const auto &[pid, ac] : live_actions_) {
+    pids.push_back(pid);
+    pids.insert(pids.end(), ac->children.begin(), ac->children.end());
+  }
+  pids.insert(pids.end(), spawned_children_.begin(), spawned_children_.end());
+  for (const Resident *r : {&tick_resident_, &key_resident_, &pointer_resident_, &signal_resident_})
+    if (r->pid >= 0)
+      pids.push_back(r->pid);
+  for (const auto &[sub_prefix, t] : mount_ticks_)
+    if (t.resident.pid >= 0)
+      pids.push_back(t.resident.pid);
+  return pids;
+}
+
+cvc::state_exec::async_scheduler &Runtime::Impl::current_sched() {
+  return group_ ? group_->sched() : app.exec_scheduler();
+}
+
+bool Runtime::Impl::nothing_running() const {
+  if (!live_actions_.empty() || !spawned_children_.empty())
+    return false;
+  for (const Resident *r : {&tick_resident_, &key_resident_, &pointer_resident_, &signal_resident_})
+    if (r->pid >= 0)
+      return false;
+  for (const auto &[sub_prefix, t] : mount_ticks_)
+    if (t.resident.pid >= 0)
+      return false;
+  return true;
+}
+
+void Runtime::Impl::ensure_placement(bool submitting) {
+  namespace se = cvc::state_exec;
+  if (!submitting && !document_set_)
+    return;
+  if (placement_decided_) {
+    // A registration since (a late host verb or provider) may change the answer: decided again
+    // only when a move would kill nothing, else at the document's next restart (m3).
+    if (!registered_since_placement_ && action_intrinsics_generation(app) == placement_generation_)
+      return;
+    if (!nothing_running()) {
+      if (!late_noted_ && group_ && group_->opts().affinity == se::group_affinity::any) {
+        late_noted_ = true;
+        app.log(1, "ari: the document at '" + prefix +
+                       "' started its programs before a host function or provider was registered: "
+                       "it binds once nothing of the document runs, or at its next load (until "
+                       "then a host_only one is a NameError in its isolated group)");
+      }
+      return;
+    }
+  }
+  placement_decided_ = true;
+  placement_generation_ = action_intrinsics_generation(app);
+  registered_since_placement_ = false;
+  late_noted_ = false;
+  bool host_affinity = false;
+  std::string reason;
+  try {
+    reason = isolation_verdict(host_affinity);
+  } catch (const std::exception &e) { // a provider that throws in the probe, say
+    reason = std::string("its eligibility could not be read: ") + e.what();
+  }
+  const se::group_affinity affinity =
+      host_affinity ? se::group_affinity::host : se::group_affinity::any;
+  const bool stays = reason.empty() ? group_ && group_->opts().affinity == affinity : !group_;
+  if (!stays) {
+    // Where its programs and streams were (null: nothing ran yet).
+    se::async_scheduler *const from = group_            ? &group_->sched()
+                                      : used_scheduler_ ? &app.exec_scheduler()
+                                                        : nullptr;
+    // A move kills and reaps on the group a worker may be pumping, and takes the group away: host
+    // thread, outside a pump. Refused in every build, before the kills, while a pump holds it.
+    refuse_if_held(app, group_.get(), "moving the document at '" + prefix + "'");
+    // What an earlier document runs, killed and reaped where it runs.
+    std::vector<std::shared_ptr<ActionContext>> taken = move_out();
+    std::unique_ptr<se::exec_group> old_group = std::move(group_);
+    frame_handle_.reset(); // the app's frames stop pumping the old group now
+    if (!old_group)        // group 0's contexts stay with the Runtime (m5)
+      retired_contexts_.insert(retired_contexts_.end(), std::make_move_iterator(taken.begin()),
+                               std::make_move_iterator(taken.end()));
+    if (reason.empty()) {
+      try {
+        se::exec_group::options o;
+        o.name = owner_;
+        o.owner = owner_;
+        o.affinity = affinity;
+        o.app = &app;
+        group_ = std::make_unique<se::exec_group>(std::move(o));
+        frame_handle_ = app.register_frame_group(*group_);
+      } catch (const std::exception &e) {
+        frame_handle_.reset();
+        group_.reset();
+        reason = std::string("its group could not be made: ") + e.what();
+      }
+    }
+    // The streams it owns post where its programs run from now on (M1: by owner, whatever their
+    // scope; no other owner's). If they cannot be re-pointed they are closed: none may be left
+    // naming the old place.
+    if (from) {
+      try {
+        retarget_document_streams(&doc_scope_, from,
+                                  group_ ? &group_->sched() : &app.exec_scheduler());
+      } catch (const std::exception &e) {
+        teardown_note("moving", "re-pointing its streams (they are closed)", e.what());
+        try {
+          close_document_streams(&doc_scope_);
+        } catch (const std::exception &e2) {
+          teardown_note("moving", "closing its streams (its resources are dropped)", e2.what());
+          doc_scope_.clear();
+        }
+      }
+    }
+    // The old group is retired, with the contexts taken from it, until its kernels end (m1).
+    if (old_group)
+      retired_groups_.push_back(RetiredGroup{std::move(old_group), std::move(taken)});
+  }
+  // Why a document stays in group 0 is logged when the reason changes (a new document's, or a
+  // first), and only when the setting asks for isolation; one reason is logged once. Not before a
+  // document is set: a process a first load starts (a guest's ari_init, an init: call) is placed
+  // before its channels are known, and the load decides again once they are (set_root).
+  if (document_set_) {
+    if (!reason.empty() && reason != logged_reason_ &&
+        isolate_documents_on(cvc::state::instance(app)))
+      app.log(1, "ari: the document at '" + prefix + "' runs in group 0: " + reason);
+    logged_reason_ = reason;
+  }
+  isolation_reason_ = reason;
+  if (!stays) {
+    std::lock_guard<std::mutex> lock(names_mutex);
+    names_valid = false; // has? and requires: see the providers as the group installs them
+  }
+  snapshot_has();
+}
+
+std::vector<std::shared_ptr<Runtime::Impl::ActionContext>> Runtime::Impl::move_out() {
+  std::vector<std::shared_ptr<ActionContext>> taken;
+  cvc::state_exec::async_scheduler *sched = group_            ? &group_->sched()
+                                            : used_scheduler_ ? &app.exec_scheduler()
+                                                              : nullptr;
+  if (!sched)
+    return taken; // nothing ran yet
+  kill_and_reap(*sched, "moving");
+  // Its records go; their contexts go with the place they ran in (the caller keeps them), for a
+  // process a failed kill left there.
+  for (auto &[pid, ac] : live_actions_) {
+    if (!ac->ended && ac->done) // run_program: told how it ended
+      ac->done("did not complete: the document moved to another group");
+    taken.push_back(ac);
+  }
+  live_actions_.clear();
+  spawned_children_.clear();
+  for (Resident *r : {&tick_resident_, &key_resident_, &pointer_resident_, &signal_resident_}) {
+    if (r->ctx)
+      taken.push_back(r->ctx);
+    *r = Resident{}; // started again where the document goes, at the next drain
+  }
+  for (auto &[sub_prefix, t] : mount_ticks_) {
+    if (t.resident.ctx)
+      taken.push_back(t.resident.ctx);
+    t.resident = Resident{};
+  }
+  used_scheduler_ = false;
+  return taken;
+}
+
+void Runtime::Impl::destroy_idle_retired_groups() {
+  std::erase_if(retired_groups_, [](const RetiredGroup &r) {
+    return !r.group || r.group->host().in_flight() == 0; // its kernels have ended: it goes now
+  });
+}
+
+std::string Runtime::Impl::isolation_verdict(bool &host_affinity) const {
+  namespace se = cvc::state_exec;
+  host_affinity = false;
+  if (!isolate_documents_on(cvc::state::instance(app)))
+    return "ariadne.exec.isolate_documents is off";
+  // S1-Q6, in order. No router until Stage 2, so its channels must all resolve under its prefix.
+  if (prefix.empty())
+    return "it has no prefix (it runs at the app root)";
+  if (!channel_policy_.enforce)
+    return "it has no channels: block enforced in strict lint mode";
+  if (!channel_policy_.global.empty())
+    return "it declares the global channel '" + channel_policy_.global.front() + "'";
+  // The programs it runs as written: its lanes, its key bindings, its functions and every program
+  // in its tree (a mount's init:, on_tick: and functions too).
+  const Widget &tree = has_pending ? pending : root;
+  std::vector<const std::string *> programs = {&tick_script_, &key_script_, &pointer_script_,
+                                               &signal_script_, &doc_functions};
+  for (const KeyBinding &b : key_bindings_)
+    programs.push_back(&b.on);
+  for (const std::string &p : document_programs_) // its init: and tests:, run elsewhere
+    programs.push_back(&p);
+  const std::function<void(const Widget &)> collect = [&](const Widget &w) {
+    for (const std::string *p : {&w.on, &w.on_click, &w.on_hover, &w.on_drag, &w.on_drag_start,
+                                 &w.on_drag_end, &w.on_top, &w.init_script, &w.tick_script})
+      programs.push_back(p);
+    if (w.functions)
+      programs.push_back(&w.functions->prelude);
+    for (const Widget &c : w.children)
+      collect(c);
+  };
+  collect(tree);
+  std::string global_channel, oidc_use;
+  for (const std::string *p : programs) {
+    if (!is_expr(*p))
+      continue;
+    std::vector<std::string> channels;
+    try {
+      static_channels(se::parse(*p), channels);
+    } catch (const std::exception &) {
+      continue; // its parse error shows when it runs
+    }
+    for (const std::string &c : channels) {
+      if (global_channel.empty() && !c.empty() && c.front() == '/')
+        global_channel = c;
+      // oidc's completions go to "oidc#NAME" on group 0 (oidc_host.cpp)
+      if (oidc_use.empty() && c.rfind("oidc#", 0) == 0)
+        oidc_use = "it waits on oidc's channel '" + c + "'";
+    }
+    if (oidc_use.empty())
+      for (const std::string &name : free_heads(*p))
+        if (name.rfind("oidc-", 0) == 0) {
+          oidc_use = "it uses oidc (" + name + ")";
+          break;
+        }
+  }
+  if (!global_channel.empty())
+    return "a program uses the app-global channel '" + global_channel + "'";
+  if (!oidc_use.empty())
+    return oidc_use;
+  // A writable link: hole whose target leaves the prefix would write outside it from the group's
+  // thread. A hole's target resolves against its mount's parent scope ('/' is the app root).
+  const std::string inside = prefix + cvc::state::SEPARATOR;
+  std::string hole;
+  const std::function<void(const Widget &, const std::string &)> holes =
+      [&](const Widget &w, const std::string &scope) {
+        std::string inner = scope;
+        if (!w.scope.empty()) {
+          inner = resolve_bind(scope, w.scope);
+          for (const LinkHole &h : w.links) {
+            const std::string target = resolve_bind(scope, h.target);
+            if (hole.empty() && h.writable && target != prefix && target.rfind(inside, 0) != 0)
+              hole = "the mount at '" + inner + "' grants '" + h.name + "' writable to '" +
+                     h.target + "', outside its prefix";
+          }
+        }
+        for (const Widget &c : w.children)
+          holes(c, inner);
+      };
+  holes(tree, prefix);
+  if (!hole.empty())
+    return hole;
+  // Eligible. Its group is pumped on the host thread when its host declared a thread-affine
+  // subscriber at or under its prefix (S1.11), when its programs run host code inline
+  // (require_host_thread: a scripting engine's activations), or when a host_only provider binds
+  // anything in its env, which an `any` group would leave out.
+  for (const std::string &p : thread_affine_)
+    if (p == prefix || p.rfind(inside, 0) == 0 || p.empty() ||
+        prefix.rfind(p + cvc::state::SEPARATOR, 0) == 0) // at, under or above: a write under the
+      host_affinity = true; // document emits childChanged on every ancestor (S-M2)
+  if (!host_thread_why_.empty())
+    host_affinity = true;
+  if (!host_affinity)
+    host_affinity = host_only_bindings();
+  return std::string();
+}
+
+void Runtime::Impl::probe_env(
+    const std::function<void(const cvc::state_exec::environment_ptr &,
+                             cvc::state_exec::intrinsics_context &)> &fill) const {
+  namespace se = cvc::state_exec;
+  // The env an action runs in (submit_action), never executed: only its bindings are read. The
+  // context mirrors a real action's, so a provider that reads it while binding sees what it would.
+  se::scheduler sched;
+  se::async_host probe_host(&sched); // inline, never called: a provider registers on *ictx.host
+  se::memory_tracker tracker;
+  auto proc = se::make_process();
+  proc->pid = 1;
+  proc->status = se::process_status::ready;
+  se::intrinsics_context ictx;
+  ictx.sched = &sched;
+  ictx.host = &probe_host;
+  ictx.tracker = &tracker;
+  ictx.proc = proc;
+  ictx.pid = 1;
+  se::apply_chroot(ictx, cvc::state::instance(app), prefix);
+  ictx.channels = const_cast<se::channel_policy *>(&channel_policy_);
+  ictx.document = const_cast<se::document_scope *>(&doc_scope_);
+  se::environment_ptr env = se::builtins::make_default_environment();
+  se::register_intrinsics(env, &ictx);
+  fill(env, ictx);
+}
+
+bool Runtime::Impl::host_only_bindings() const {
+  namespace se = cvc::state_exec;
+  bool bound = false;
+  probe_env([&](const se::environment_ptr &env, se::intrinsics_context &ictx) {
+    // The app's, then the document's own (add_program_intrinsics), as a program gets them.
+    for (const std::vector<registered_provider> &list :
+         {action_intrinsics_snapshot(app), own_snapshot()})
+      for (const registered_provider &p : list) {
+        if (!p.provider)
+          continue;
+        if (p.affinity != se::provider_affinity::host_only) {
+          p.provider(env, ictx);
+          continue;
+        }
+        const se::environment_ptr scratch = se::environment::extend(env);
+        p.provider(scratch, ictx);
+        bound = bound || !scratch->bindings.empty();
+        for (auto &[name, value] : scratch->bindings)
+          env->set(name, std::move(value));
+      }
+  });
+  return bound;
+}
+
+void Runtime::Impl::snapshot_has() {
+  if (!group_ || group_->opts().affinity != cvc::state_exec::group_affinity::any)
+    return;
+  const HostFacts f = facts();
+  std::lock_guard<std::mutex> lock(names_mutex);
+  load_names();
+  facts_snapshot_ = f;
+}
+
+bool Runtime::Impl::has_snapshot(const std::string &name) const {
+  if (is_capability_token(name)) {
+    std::lock_guard<std::mutex> lock(names_mutex);
+    return capability_holds(name, facts_snapshot_);
+  }
+  if (cvc::state_exec::stackless_evaluator::all_special_forms().count(name))
+    return true;
+  {
+    std::lock_guard<std::mutex> lock(names_mutex);
+    if (names.count(name))
+      return true;
+  }
+  return is_builtin_widget_type(name) || has_widget_type(app, name);
+}
+
+std::function<bool(const std::string &)>
+Runtime::Impl::program_has(cvc::state_exec::exec_group *group) {
+  if (group && group->opts().affinity == cvc::state_exec::group_affinity::any)
+    return [this](const std::string &n) { return has_snapshot(n); };
+  return [this](const std::string &n) { return has(n); };
 }
 
 std::shared_ptr<Runtime::Impl::ActionContext>
 Runtime::Impl::make_action_context(const std::string &scope_prefix,
                                    std::optional<double> lock_default_timeout) {
   namespace se = cvc::state_exec;
-  auto &sched = app.exec_scheduler();
-  used_scheduler_ = true;
+  ensure_placement(/*submitting=*/true);
+  se::exec_group *const group = group_.get();
+  se::async_scheduler &sched = group ? group->sched() : app.exec_scheduler();
+  if (!group)
+    used_scheduler_ = true;
   auto ac = std::make_shared<ActionContext>();
   ac->proc = se::make_process(); // placeholder for ictx.proc; the RUNNING process is the
   ac->proc->status = se::process_status::ready; // scheduler's own, reached via current_process()
   ac->ictx.sched = &sched;
+  ac->ictx.host = group ? &group->host() : &app.exec_async_host(); // its group's (S1.9, S1.10)
   ac->ictx.tracker = &ac->tracker;
   ac->ictx.proc = ac->proc;
   // Confine writes to the document/mount subtree.
@@ -4091,15 +5895,53 @@ Runtime::Impl::make_action_context(const std::string &scope_prefix,
   ac->ictx.channels = &channel_policy_; // §12 channel enforcement (no-op unless strict)
   ac->ictx.document = &doc_scope_;      // per-document owner for (stream-open) & friends
   ac->ictx.lock_default_timeout = lock_default_timeout; // with-lock with no :timeout
-  ac->env = se::builtins::make_default_environment();
-  se::register_intrinsics(ac->env, &ac->ictx);
-  // Host program-lane intrinsics (nav verbs, …), AFTER the standard ones (add or override).
-  for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot(app))
-    if (p)
-      p(ac->env, ac->ictx);
-  bind_backend_verbs(ac->env);
-  bind_has(ac->env, [this](const std::string &n) { return has(n); });
+  ac->scope = scope_prefix;
+  ac->notify = std::make_shared<const NotifyScope>(notify_scope(scope_prefix));
+  finish_context(*ac, group);
   return ac;
+}
+
+void Runtime::Impl::finish_context(ActionContext &ac, cvc::state_exec::exec_group *group) {
+  namespace se = cvc::state_exec;
+  ac.env = se::builtins::make_default_environment();
+  se::register_intrinsics(ac.env, &ac.ictx);
+  // Host program-lane intrinsics (nav verbs, …), AFTER the standard ones (add or override): the
+  // app's, then this document's own, each by its kind.
+  install_providers(app, ac.env, ac.ictx, group);
+  bind_own_intrinsics(ac.env, ac.ictx, group);
+  install_host_verbs(ac.env, group, *ac.ictx.host, *ac.notify);
+  bind_has(ac.env, program_has(group));
+}
+
+void Runtime::Impl::install_host_verbs(const cvc::state_exec::environment_ptr &env,
+                                       cvc::state_exec::exec_group *group,
+                                       cvc::state_exec::async_host &host,
+                                       const NotifyScope &notify) const {
+  namespace se = cvc::state_exec;
+  // The file verbs bind into the env as they are, in every group (bind_file_verbs): (file-info)
+  // and (file-forget) are thread-safe, and (file-pick) is async, which a host_proxied wrapper
+  // could not park; it opens its picker on the host thread itself.
+  bind_file_verbs(env, group, host);
+  // The backend's verbs drive its window and clipboard, which are the host thread's: they are
+  // host_proxied (S1-Q7). In an `any` group each native runs on the pump_all caller's thread
+  // (exec_group::install), as install_providers binds a host_proxied provider; in group 0, in a
+  // host-affinity group and in the init lane they bind as they are. The notify verbs (§5.24) go
+  // the same way: cvc::notify mirrors the app's feed into its notify.* subtree raw, on the
+  // caller's thread.
+  if (!group || group->opts().affinity != se::group_affinity::any) {
+    bind_backend_verbs(env);
+    bind_notify_verbs(env, notify);
+    return;
+  }
+  const se::environment_ptr scratch = se::environment::extend(env);
+  bind_backend_verbs(scratch);
+  bind_notify_verbs(scratch, notify);
+  for (auto &[name, value] : scratch->bindings) {
+    if (auto *fn = std::get_if<se::native_fn>(&value.v))
+      group->install(env, name, std::move(*fn), se::provider_affinity::host_proxied);
+    else
+      env->set(name, std::move(value));
+  }
 }
 
 void Runtime::Impl::bind_backend_verbs(
@@ -4134,7 +5976,6 @@ void Runtime::Impl::bind_backend_verbs(
           return se::value_t(can && b->is_fullscreen());
         return se::value_t(can && b->set_fullscreen(args[0].is_truthy()));
       });
-  bind_file_verbs(env);
 }
 
 namespace {
@@ -4223,30 +6064,38 @@ std::string handle_arg(const char *verb, std::span<const cvc::state_exec::value_
 
 } // namespace
 
-void Runtime::Impl::bind_file_verbs(
-    const std::shared_ptr<cvc::state_exec::environment> &env) const {
+void Runtime::Impl::bind_file_verbs(const std::shared_ptr<cvc::state_exec::environment> &env,
+                                    cvc::state_exec::exec_group *group,
+                                    cvc::state_exec::async_host &host) const {
   namespace se = cvc::state_exec;
   cvc::app *const app_ptr = &app;
   const std::weak_ptr<FilePickHub> weak_hub = file_pick;
   const std::weak_ptr<Backend *> ref = backend_ref;
-  se::async_host &host = app.exec_async_host();
   // The wait is the user's, not the program's: an I/O call, charged one step however long it is.
   se::async_options io;
   io.io = true;
   // (file-pick [OPTS]) / (file-pick-async ...): ask the user for a file; the program parks until
   // they pick or cancel. A list of {handle name size type}, empty when they cancelled. Bound where
-  // there is a backend, so somewhere to ask: (has? "file-pick").
+  // there is a backend, so somewhere to ask: (has? "file-pick"). The program parks on its own
+  // host (ictx.host: its group's, or the app's in group 0). The call starts on whatever thread
+  // pumps the program, a pool worker in an `any` group: it claims the hub there, under its lock,
+  // and opens the picker on the host thread (exec_pool::run_on_host for the program's group;
+  // inline when this is that thread, or in group 0), where the window and the Runtime's own picker
+  // are drawn. The group is the env's, as `host` is: both live as long as its programs. The answer
+  // goes through the
+  // host's finisher, as the host may be gone by then (an isolated document's group goes with its
+  // Runtime).
   if (backend)
     se::register_async_fn(
         env, host, "file-pick",
-        [app_ptr, weak_hub, ref, &host](std::span<const se::value_t> args) -> se::async_work {
+        [app_ptr, weak_hub, ref, group,
+         &host](std::span<const se::value_t> args) -> se::async_work {
           const FilePickRequest req = file_pick_request(args);
           se::async_work work; // no kernel: a program that can't park can't wait for the user
-          work.start = [app_ptr, weak_hub, ref, &host,
-                        req](const std::shared_ptr<se::async_call> &call) {
+          work.start = [app_ptr, weak_hub, ref, req, group,
+                        fin = host.make_finisher()](const std::shared_ptr<se::async_call> &call) {
             const std::shared_ptr<FilePickHub> hub = weak_hub.lock();
-            const std::shared_ptr<Backend *> drawing = ref.lock();
-            if (!hub || !drawing)
+            if (!hub || !ref.lock())
               throw std::runtime_error("file-pick: the document is gone");
             {
               std::lock_guard<std::mutex> lock(hub->m);
@@ -4255,10 +6104,9 @@ void Runtime::Impl::bind_file_verbs(
               hub->busy = true;
               hub->cancel = false;
             }
-            hub->composed.close(); // one a cancelled program left (busy was clear)
             auto settled = std::make_shared<std::atomic<bool>>(false);
             const std::weak_ptr<FilePickHub> weak = hub;
-            FilePickDone done = [app_ptr, &host, call, settled,
+            FilePickDone done = [app_ptr, fin, call, settled,
                                  weak](std::vector<std::shared_ptr<FileSource>> files,
                                        std::string error) {
               if (settled->exchange(true))
@@ -4288,7 +6136,7 @@ void Runtime::Impl::bind_file_verbs(
                 failure = std::current_exception();
               }
               if (call->settle(std::move(value), failure))
-                host.finish(call);
+                fin.finish(call);
             };
             call->on_cancel([weak, settled] {
               if (settled->exchange(true))
@@ -4299,15 +6147,30 @@ void Runtime::Impl::bind_file_verbs(
                 h->cancel = true; // render() closes the window
               }
             });
-            if (*drawing && (*drawing)->pick_files(req, done))
-              return; // the host's own (arigl: the system's file dialog)
-            if (browser_pick_files(req, done))
-              return; // a browser page's <input type=file>
-            if (!*drawing) {
-              done({}, "there is no window here to pick a file in");
-              return;
-            }
-            hub->composed.open(req, std::move(done)); // drawn by render() from the next frame
+            std::function<void()> open = [weak, ref, req, settled, done] {
+              if (settled->load())
+                return; // cancelled before the host thread came to it
+              const std::shared_ptr<FilePickHub> h = weak.lock();
+              const std::shared_ptr<Backend *> drawing = ref.lock();
+              if (!h || !drawing) {
+                done({}, "the document is gone");
+                return;
+              }
+              h->composed.close(); // one a cancelled program left (busy was clear)
+              if (*drawing && (*drawing)->pick_files(req, done))
+                return; // the host's own (arigl: the system's file dialog)
+              if (browser_pick_files(req, done))
+                return; // a browser page's <input type=file>
+              if (!*drawing) {
+                done({}, "there is no window here to pick a file in");
+                return;
+              }
+              h->composed.open(req, done); // drawn by render() from the next frame
+            };
+            if (group)
+              app_ptr->exec_pool().run_on_host(*group, std::move(open));
+            else
+              open();
           };
           return work;
         },
@@ -4327,16 +6190,38 @@ void Runtime::Impl::bind_file_verbs(
 }
 
 cvc::state_exec::spawn_setup
-Runtime::Impl::spawn_child(const cvc::state_exec::intrinsics_context &parent) {
-  std::shared_ptr<ActionContext> ac =
-      make_action_context(parent.root_path, parent.lock_default_timeout);
+Runtime::Impl::spawn_child(const cvc::state_exec::intrinsics_context &parent,
+                           std::shared_ptr<const NotifyScope> notify) {
+  namespace se = cvc::state_exec;
+  // Everything from the parent's context (td 4.15), nothing by path: no tree walk, so it is safe on
+  // the pumping thread, and a child of a deleted chroot keeps writing its parent's detached node,
+  // as the library's default context does.
+  auto ac = std::make_shared<ActionContext>();
+  ac->proc = se::make_process();
+  ac->proc->status = se::process_status::ready;
+  ac->ictx.sched = parent.sched;
+  ac->ictx.host = parent.host;
+  ac->ictx.tracker = &ac->tracker;
+  ac->ictx.proc = ac->proc;
+  ac->ictx.root = parent.root;
+  ac->ictx.root_pins = parent.root_pins;
+  ac->ictx.root_path = parent.root_path;
+  ac->ictx.uid = parent.uid;
+  ac->ictx.cluster_id = parent.cluster_id;
+  ac->ictx.node_id = parent.node_id;
+  ac->ictx.channels = parent.channels;
+  ac->ictx.document = parent.document;
+  ac->ictx.lock_default_timeout = parent.lock_default_timeout;
   ac->ictx.lock_wait_allowed = parent.lock_wait_allowed;
   ac->ictx.spawn_context = parent.spawn_context; // grandchildren get one too
+  ac->scope = parent.root_path;
+  ac->notify = std::move(notify); // its parent's: mount_names is the host thread's
+  se::exec_group *const group = group_ && parent.sched == &group_->sched() ? group_.get() : nullptr;
+  finish_context(*ac, group);
   // A child it forks shares `ac`, which the fork's process keeps alive too (process::keep_alive).
   ac->ictx.on_child = [this](int pid) { spawned_children_.push_back(pid); };
   // Recorded so the drain reaps it once it finishes: its process keeps `ac` alive.
-  return cvc::state_exec::spawn_setup{ac->env, ac,
-                                      [this](int pid) { spawned_children_.push_back(pid); }};
+  return se::spawn_setup{ac->env, ac, [this](int pid) { spawned_children_.push_back(pid); }};
 }
 
 void Runtime::Impl::submit_action(const QueuedAction &action) {
@@ -4349,14 +6234,14 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
   // descheduled cannot use up) is a generous anti-hang backstop; memory the §7.4 cap. Full env,
   // writes chrooted to the action's mount prefix.
   try {
-    auto &sched = app.exec_scheduler();
     cvc::state &root = cvc::state::instance(app);
     const uint64_t max_bytes = action_max_memory(root);
     std::shared_ptr<ActionContext> ac =
         make_action_context(action_prefix, action_lock_timeout(root));
+    se::async_scheduler &sched = current_sched(); // the document's: its group's, else group 0's
     // A child it spawns runs in the document's scope with the action's lock default.
-    ac->ictx.spawn_context = [this](const se::intrinsics_context &parent) {
-      return spawn_child(parent);
+    ac->ictx.spawn_context = [this, notify = ac->notify](const se::intrinsics_context &parent) {
+      return spawn_child(parent, notify);
     };
     // §4.6 event scope: a widget pointer handler runs with an `event` dict of the item's local
     // pointer coords, so the program can read (get-attr event "x"/"y"/"dx"/"dy"/"button").
@@ -4411,6 +6296,13 @@ cvc::state_exec::async_scheduler *Runtime::Impl::scheduler_to_pump() {
   return live > 0 ? seen_scheduler_ : nullptr;
 }
 
+void Runtime::Impl::sweep_document() {
+  if (cvc::state_exec::async_scheduler *sched = group_            ? &group_->sched()
+                                                : used_scheduler_ ? &app.exec_scheduler()
+                                                                  : nullptr)
+    sweep_actions(*sched);
+}
+
 bool Runtime::Impl::starts_frame() {
   if (!pump_clock_)
     pump_clock_ = pump_clock_of(app);
@@ -4422,26 +6314,38 @@ bool Runtime::Impl::starts_frame() {
   return next;
 }
 
-void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sched) {
+void Runtime::Impl::pump_frame() {
   namespace se = cvc::state_exec;
-  // Apply any cross-thread post_message() deliveries FIRST, so a delivery that readies a parked
-  // (msg-recv …) receiver is seen by sync_run's has_runnable() gate — otherwise, with everything
-  // parked, sync_run would skip stepping and never drain the ingress itself.
-  sched.drain_ingress();
-  // Frame boundary: re-ready any process parked by (await …) in a PRIOR frame. Called here, once
-  // per app frame however many Runtimes pump (starts_frame), NOT inside step()/sync_run, so an
-  // await crosses exactly one frame.
-  if (starts_frame())
-    sched.wake_awaiting();
-  // Pump a bounded slice: a quick (non-suspending) action completes within THIS drain (so a
-  // fire-then-check interaction still sees its effect immediately), while an action that parks
-  // on await/sleep/msg-recv yields and resumes on a later frame. Global step + time backstops
-  // bound the pump -- se::time_budgets, so on a loaded machine, where the OS deschedules this
-  // thread, a quick action still completes within this drain; per-process step caps kill
-  // runaways.
-  static constexpr uint64_t kPumpMaxSteps = 200000;
-  static constexpr double kPumpMaxSeconds = 0.1;
-  sched.sync_run(kPumpMaxSteps, kPumpMaxSeconds);
+  if (se::async_scheduler *sched = scheduler_to_pump()) {
+    // Apply any cross-thread post_message() deliveries FIRST, so a delivery that readies a parked
+    // (msg-recv …) receiver is seen by sync_run's has_runnable() gate — otherwise, with everything
+    // parked, sync_run would skip stepping and never drain the ingress itself.
+    sched->drain_ingress();
+    // Frame boundary: re-ready any process parked by (await …) in a PRIOR frame. Called here, once
+    // per app frame however many Runtimes pump (starts_frame), NOT inside step()/sync_run, so an
+    // await crosses exactly one frame.
+    if (starts_frame())
+      sched->wake_awaiting();
+    // Pump a bounded slice: a quick (non-suspending) action completes within THIS drain (so a
+    // fire-then-check interaction still sees its effect immediately), while an action that parks
+    // on await/sleep/msg-recv yields and resumes on a later frame. Global step + time backstops
+    // bound the pump -- se::time_budgets, so on a loaded machine, where the OS deschedules this
+    // thread, a quick action still completes within this drain; per-process step caps kill
+    // runaways.
+    sched->sync_run(kPumpMaxSteps, kPumpMaxSeconds);
+  }
+  // An isolated document's group, one pump through the app's pool, as exec_pump_frame() would
+  // pump it: a host with one Runtime that opts in may keep calling drain() (td 4.12). Its pump
+  // drains, wakes the frame-waiters and runs a slice of the same budget.
+  if (group_) {
+    se::exec_group *const groups[] = {group_.get()};
+    app.exec_pool().pump_all(groups, se::pump_budget{kPumpMaxSteps, kPumpMaxSeconds},
+                             std::chrono::steady_clock::now() + std::chrono::milliseconds(100));
+  }
+}
+
+void Runtime::Impl::sweep_actions(cvc::state_exec::async_scheduler &sched) {
+  namespace se = cvc::state_exec;
   // Sweep: a finished process is reaped (nothing reads its result), a killed or failed one is
   // reported, and a still-parked one is kept for a later frame. A run_program one's caller is told
   // how it ended instead.
@@ -4535,8 +6439,11 @@ void Runtime::Impl::retire_if_stopped(cvc::state_exec::async_scheduler &sched, R
 }
 
 void Runtime::Impl::stop_resident(Resident &r) {
-  if (r.pid >= 0)
-    app.exec_scheduler().kill(r.pid);
+  if (r.pid >= 0) { // killed and reaped (S1-Q8): its record goes with it, on a reload too
+    cvc::state_exec::async_scheduler &sched = current_sched();
+    sched.kill(r.pid);
+    sched.reap(r.pid);
+  }
   r = Resident{};
 }
 
@@ -4552,15 +6459,15 @@ void Runtime::Impl::ensure_resident(const std::string &channel, const std::strin
     return; // nothing to run, already running (residents submit ONCE), or not restarted yet
   namespace se = cvc::state_exec;
   try {
-    auto &sched = app.exec_scheduler();
     // Resident writes confined to its document or mount. A resident has no with-lock default
     // (docs/STATE_EXEC_LOCKS.md 14.2 Q1): a request with no :timeout waits as long as it takes.
     std::shared_ptr<ActionContext> ac = make_action_context(chroot, std::nullopt);
+    se::async_scheduler &sched = current_sched(); // the document's: its group's, else group 0's
     // A child it spawns runs in the resident's scope (its document's or its mount's); one it forks
     // shares the resident's context, which lives until the Runtime does. Both are reaped once they
     // end.
-    ac->ictx.spawn_context = [this](const se::intrinsics_context &parent) {
-      return spawn_child(parent);
+    ac->ictx.spawn_context = [this, notify = ac->notify](const se::intrinsics_context &parent) {
+      return spawn_child(parent, notify);
     };
     ac->ictx.on_child = [this](int pid) { spawned_children_.push_back(pid); };
     // Park-then-run loop on `channel`: msg-recv parks the process between deliveries and BINDS each
@@ -4604,8 +6511,9 @@ void Runtime::Impl::post_tick() {
   if (tick_resident_.pid < 0 && mount_ticks_.empty())
     return; // no tick resident registered
   // Wake each tick resident for one activation this frame. Post only when nothing is queued on its
-  // channel, so a resident that can't keep up doesn't accrue a backlog of ticks (coalesce).
-  auto &sched = app.exec_scheduler();
+  // channel, so a resident that can't keep up doesn't accrue a backlog of ticks (coalesce). To the
+  // document's scheduler, where the residents run, between pumps.
+  auto &sched = current_sched();
   const auto wake = [&](const std::string &channel) {
     if (sched.pending_message_count(channel) == 0)
       sched.post_message(channel, cvc::state_exec::value_t(std::string("tick")));
@@ -4707,8 +6615,8 @@ void Runtime::Impl::deliver_input(const InputEvent &ev) {
   // NO coalesce (unlike post_tick): every event must arrive. A burst in one frame FIFO-queues on
   // the channel and the resident drains them one per loop iteration during the pump.
   if (resident)
-    app.exec_scheduler().post_message(keyboard ? key_channel() : pointer_channel(),
-                                      se::make_dict(std::move(f)));
+    current_sched().post_message(keyboard ? key_channel() : pointer_channel(),
+                                 se::make_dict(std::move(f)));
 }
 
 void Runtime::Impl::deliver_tapped() {
@@ -4733,31 +6641,17 @@ void Runtime::Impl::load_names() const {
   const std::uint64_t generation = action_intrinsics_generation(app);
   if (names_valid && names_generation == generation)
     return;
-  // The env an action runs in (submit_action), never executed: only its bindings are read. The
-  // context mirrors a real action's, so a provider that reads it while binding sees what it would.
-  se::scheduler sched;
-  se::memory_tracker tracker;
-  auto proc = se::make_process();
-  proc->pid = 1;
-  proc->status = se::process_status::ready;
-  se::intrinsics_context ictx;
-  ictx.sched = &sched;
-  ictx.tracker = &tracker;
-  ictx.proc = proc;
-  ictx.pid = 1;
-  se::apply_chroot(ictx, cvc::state::instance(app), prefix);
-  ictx.channels = const_cast<se::channel_policy *>(&channel_policy_);
-  ictx.document = const_cast<se::document_scope *>(&doc_scope_);
-  se::environment_ptr env = se::builtins::make_default_environment();
-  se::register_intrinsics(env, &ictx);
-  for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot(app))
-    if (p)
-      p(env, ictx);
-  bind_backend_verbs(env);
   std::set<std::string> found;
-  for (const se::environment *e = env.get(); e; e = e->outer.get())
-    for (const auto &kv : e->bindings)
-      found.insert(kv.first);
+  const NotifyScope notify = notify_scope(prefix);
+  probe_env([&](const se::environment_ptr &env, se::intrinsics_context &ictx) {
+    // As the document's programs get them: by kind in an `any` group, the host verbs too.
+    install_providers(app, env, ictx, group_.get());
+    bind_own_intrinsics(env, ictx, group_.get());
+    install_host_verbs(env, group_.get(), *ictx.host, notify);
+    for (const se::environment *e = env.get(); e; e = e->outer.get())
+      for (const auto &kv : e->bindings)
+        found.insert(kv.first);
+  });
   found.insert("has?"); // bound per program (bind_has), not by a provider
   names = std::move(found);
   names_valid = true;
@@ -4783,6 +6677,39 @@ bool Runtime::has(const std::string &name) const { return m_->has(name); }
 void Runtime::refresh_program_names() {
   std::lock_guard<std::mutex> lock(m_->names_mutex);
   m_->names_valid = false;
+  // A host verb or function registered since the placement may need the host thread (s-m4): the
+  // placement is decided again before the next program starts if that kills nothing, else at the
+  // document's next restart (R1b skeptic m3).
+  m_->registered_since_placement_ = true;
+}
+
+void Runtime::add_program_intrinsics(ActionIntrinsicProvider provider) {
+  add_program_intrinsics(std::move(provider), cvc::state_exec::provider_affinity::host_only);
+}
+
+void Runtime::add_program_intrinsics(ActionIntrinsicProvider provider,
+                                     cvc::state_exec::provider_affinity affinity) {
+  if (!provider)
+    return;
+  {
+    std::lock_guard<std::mutex> lock(m_->own_mutex);
+    m_->own_intrinsics.push_back(registered_provider{std::string(), std::move(provider), affinity});
+  }
+  std::lock_guard<std::mutex> lock(m_->names_mutex);
+  m_->names_valid = false;
+  // As a host verb registered late (refresh_program_names): it may need the host thread, so the
+  // placement is decided again before the next program starts if that kills nothing, else at the
+  // document's next restart.
+  m_->registered_since_placement_ = true;
+}
+
+ActionIntrinsicProvider Runtime::program_intrinsics() const {
+  namespace se = cvc::state_exec;
+  const Impl *impl = m_.get();
+  // Every kind as it is: run_init builds its env, and its children's, on its own thread.
+  return [impl](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
+    impl->bind_own_intrinsics(env, ictx, nullptr);
+  };
 }
 
 void Runtime::register_read_function(const std::string &name, ReadFunction fn) {
@@ -4819,36 +6746,50 @@ void Runtime::set_root(Widget root) {
   m_->doc_functions = root.functions ? root.functions->prelude : std::string();
   m_->pending = std::move(root);
   m_->has_pending = true;
+  m_->document_set_ = true;       // a document to place (ensure_placement)
+  m_->placement_decided_ = false; // a new one is placed again, before it runs or is drawn
 }
 
 void Runtime::on(std::string event, std::function<void()> handler) {
   m_->handlers[std::move(event)] = std::move(handler);
 }
 
+// A lane's program, the channel policy and the key bindings are read by the isolation rules
+// (S1-Q6): setting one decides the placement again before the next program starts (s-m2). Host
+// thread, outside a pump (they kill residents).
 void Runtime::set_tick_program(std::string script) {
+  assert_outside_pump(m_->app);
   // Replacing the program kills any running resident so the new body starts fresh next drain.
   m_->stop_resident(m_->tick_resident_);
   m_->tick_script_ = std::move(script);
+  m_->placement_decided_ = false;
 }
 
 void Runtime::set_key_program(std::string script) {
+  assert_outside_pump(m_->app);
   m_->stop_resident(m_->key_resident_);
   m_->key_script_ = std::move(script);
+  m_->placement_decided_ = false;
 }
 
 void Runtime::set_pointer_program(std::string script) {
+  assert_outside_pump(m_->app);
   m_->stop_resident(m_->pointer_resident_);
   m_->pointer_script_ = std::move(script);
+  m_->placement_decided_ = false;
 }
 
 void Runtime::set_signal_program(std::string script) {
+  assert_outside_pump(m_->app);
   m_->stop_resident(m_->signal_resident_);
   m_->signal_script_ = std::move(script);
+  m_->placement_decided_ = false;
 }
 
 bool Runtime::has_signal_program() const { return !m_->signal_script_.empty(); }
 
 bool Runtime::post_signal(const std::string &signal, const std::string &source) {
+  assert_outside_pump(m_->app); // host thread, outside a pump (S1.10)
   const bool tapped = (m_->tap_kinds_.load() & tap_signal) != 0;
   bool resident = false;
   if (!m_->signal_script_.empty()) {
@@ -4868,7 +6809,7 @@ bool Runtime::post_signal(const std::string &signal, const std::string &source) 
   if (tapped)
     m_->tap("signal", se::make_dict(f));
   if (resident)
-    m_->app.exec_scheduler().post_message(m_->signal_channel(), se::make_dict(std::move(f)));
+    m_->current_sched().post_message(m_->signal_channel(), se::make_dict(std::move(f)));
   return true;
 }
 
@@ -4892,12 +6833,14 @@ void Runtime::set_channel_policy(std::vector<std::string> declared, std::vector<
   m_->channel_policy_.global = std::move(global);
   m_->channel_policy_.enforce = strict;
   m_->channel_policy_.quiet = quiet;
+  m_->placement_decided_ = false; // the isolation rules read it (s-m2)
 }
 
 void Runtime::post_input(const InputEvent &ev) {
   // Submit the input residents on first use so the delivered event is consumed, not dropped, then
   // deliver it. The pump in drain() steps the resident; feed input BEFORE drain() for same-frame
-  // delivery (see the header contract).
+  // delivery (see the header contract). Host thread, outside a pump (S1.10).
+  assert_outside_pump(m_->app);
   m_->ensure_input_residents();
   if (ev.kind == InputEvent::Kind::KeyDown && m_->have_key_bindings_.load()) {
     const bool capture = m_->key_capture_pending();
@@ -4918,6 +6861,7 @@ void Runtime::forget_layout() { m_->forget_layout_pending = true; }
 void Runtime::set_key_bindings(std::vector<KeyBinding> bindings) {
   m_->key_bindings_ = std::move(bindings);
   m_->have_key_bindings_.store(!m_->key_bindings_.empty());
+  m_->placement_decided_ = false; // their programs are scanned too (s-m2)
 }
 
 void Runtime::Impl::run_key_bindings() {
@@ -4967,6 +6911,11 @@ void Runtime::Impl::run_key_bindings() {
 void Runtime::render() { m_->render(); }
 
 void Runtime::set_frame_clock(std::optional<double> seconds) { m_->pinned_clock = seconds; }
+void Runtime::set_clock(bool on) { m_->clock_default = on; }
+void Runtime::set_notifications(bool on) { m_->notify_default = on; }
+void Runtime::set_wall_clock(std::function<std::chrono::system_clock::time_point()> now) {
+  m_->wall_clock = std::move(now);
+}
 double Runtime::frame_clock() const { return m_->frame_t; }
 std::uint64_t Runtime::reactive_skip_count() const { return m_->reactive_skips; }
 
@@ -4993,7 +6942,23 @@ void Runtime::run_program(std::string script, std::function<void(const std::stri
 
 int Runtime::start_process(LaneProcess p) {
   namespace se = cvc::state_exec;
-  auto &sched = m_->app.exec_scheduler();
+  // Host thread, from a step too: an exported script call and an on: hook start their activations
+  // from the calling step, which in a document that uses an engine runs on the host thread (its
+  // group 0 or host-affinity group, pumped by the frame's caller). So no assert_outside_pump.
+  // Natives of its own are host code run inline (a scripting engine's activation): the document
+  // stays on the host thread. Decided now when nothing of it runs (ensure_placement), else it is
+  // refused until then, since an `any` group's worker would run them.
+  if (p.extend) {
+    require_host_thread("a host extension's process (" + p.name + ")");
+    m_->ensure_placement(/*submitting=*/true);
+    if (m_->group_ && m_->group_->opts().affinity == se::group_affinity::any)
+      throw std::runtime_error("Runtime::start_process: '" + p.name +
+                               "' binds natives of its own, which need the host thread, and the "
+                               "document at '" +
+                               m_->prefix +
+                               "' runs in a group the pool's workers pump: it moves to the host "
+                               "thread once nothing of it runs, or at its next load");
+  }
   cvc::state &root = cvc::state::instance(m_->app);
   const bool action = p.lane != ProgramLane::resident; // an init process waits as an action does
   // A process's own cap only lowers its lane's; 0 is no cap.
@@ -5003,12 +6968,13 @@ int Runtime::start_process(LaneProcess p) {
   std::shared_ptr<Impl::ActionContext> ac = m_->make_action_context(
       p.scope.empty() ? m_->prefix : p.scope,
       action ? std::optional<double>(action_lock_timeout(root)) : std::nullopt);
-  ac->ictx.spawn_context = [this](const se::intrinsics_context &parent) {
-    return m_->spawn_child(parent);
+  ac->ictx.spawn_context = [this, notify = ac->notify](const se::intrinsics_context &parent) {
+    return m_->spawn_child(parent, notify);
   };
   ac->ictx.on_child = [raw = ac.get()](int pid) { raw->children.push_back(pid); };
   ac->done = std::move(p.done); // without one, the sweep warns of a failure as it does an action's
   ac->script = p.name;
+  se::async_scheduler &sched = m_->current_sched(); // as placed: its group's, else group 0's
   se::environment_ptr env = ac->env;
   if (!p.allow.empty()) {
     // Default-deny: a scope of its own with only the allowed names (no parent to reach the rest
@@ -5053,8 +7019,12 @@ int Runtime::start_process(LaneProcess p) {
 }
 
 void Runtime::pump() {
-  if (cvc::state_exec::async_scheduler *sched = m_->scheduler_to_pump())
-    m_->pump_and_sweep_actions(*sched);
+  // drain_end's pump and sweep, whatever exec_pump_frame did this frame: group 0 a bounded slice
+  // (as scheduler_to_pump says) and the document's group through the app's pool, then the sweep
+  // where its processes run. Host thread, outside a pump, which this would re-enter.
+  assert_outside_pump(m_->app);
+  m_->pump_frame();
+  m_->sweep_document();
 }
 
 std::uint64_t exec_frame(cvc::app &app) {
@@ -5064,48 +7034,121 @@ std::uint64_t exec_frame(cvc::app &app) {
 }
 
 void Runtime::drain() {
-  ++m_->drains_; // the residents' restart clock
+  drain_begin();
+  drain_end();
+}
+
+void Runtime::drain_begin() {
+  Impl &m = *m_;
+  m.drain_begun_ = true;
+  // A frame pump of the app between here and drain_end() pumps this document's processes.
+  m.begin_generation_ = m.app.exec_pump_generation();
+  // Where its programs run is decided once a document is set, before any of this frame's start;
+  // a group a move left goes once its kernels have ended.
+  m.ensure_placement(/*submitting=*/false);
+  if (!m.retired_groups_.empty())
+    m.destroy_idle_retired_groups();
+  ++m.drains_; // the residents' restart clock
   // A sign-in in progress (oidc_host.h) takes its step first: a reply, a browser's redirect, a
   // device poll that is due. It writes its status to the state tree on this thread.
   pump_oidc(m_->app);
   // Run the queued action events on the host thread, then clear. Never called
   // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7). The keys pressed since
   // the last drain queue theirs first.
-  m_->run_key_bindings();
-  if (m_->images) // §5.11: a build without threads loads its pictures here, a step per drain
-    m_->images->pump();
+  m.run_key_bindings();
+  if (m.images) // §5.11: a build without threads loads its pictures here, a step per drain
+    m.images->pump();
   std::vector<Impl::QueuedAction> events;
-  events.swap(m_->queued_events);
+  events.swap(m.queued_events);
   for (const Impl::QueuedAction &a : events) {
     // A program action (`on:` starting with '(', like a computed `bind:`/`tooltip:`) runs through
     // state_exec — the north-star lane: a flag toggle or reset is pure .ari, no C++ handler.
     if (a.done || is_expr(a.event)) { // a program on: (whitespace-tolerant, like a computed bind:)
-      // SUBMIT it to the app-wide scheduler (owner-tagged, chrooted to the action's mount prefix)
-      // and return — no run-to-completion inside drain(). The per-frame pump below advances it; a
-      // quick action still finishes this drain, while an (await …)/(msg-recv …)/(sleep …) parks
+      // SUBMIT it to the document's scheduler (owner-tagged, chrooted to the action's mount
+      // prefix) and return — no run-to-completion inside the drain. The frame's pump advances it;
+      // a quick action still finishes this frame, while an (await …)/(msg-recv …)/(sleep …) parks
       // and resumes on a later frame instead of blocking the UI thread (§4.7).
-      m_->submit_action(a);
+      m.submit_action(a);
       continue;
     }
-    auto it = m_->handlers.find(a.event); // a bare event name -> the host C++ handler seam
-    if (it != m_->handlers.end() && it->second)
+    if (m.builtin_event(a)) // §5.24 the bell's own
+      continue;
+    auto it = m.handlers.find(a.event); // a bare event name -> the host C++ handler seam
+    if (it != m.handlers.end() && it->second)
       it->second();
   }
   // §7.1 resident on:tick: submit the resident once (idempotent), then post it this frame's tick.
-  m_->ensure_tick_resident();
-  m_->post_tick();
+  m.ensure_tick_resident();
+  m.post_tick();
   // §4.6 input residents (on_key/on_pointer): ensure they exist (idempotent; post_input also does,
   // but a host that set a program yet fed no input this frame still gets its resident submitted).
-  m_->ensure_input_residents();
-  // The tap's events since the last drain, before the pump: what they start runs in it.
-  m_->deliver_tapped();
+  m.ensure_input_residents();
+  // The tap's events since the last drain, before the frame's pump: what they start runs in it.
+  m.deliver_tapped();
+  // has? in an `any` group reads what this thread sees now (S1-Q7).
+  m.snapshot_has();
+}
+
+void Runtime::drain_end() {
+  Impl &m = *m_;
+  if (!m.drain_begun_)
+    drain_begin(); // drain_end() alone is drain()
+  m.drain_begun_ = false;
   // Advance submitted actions + the residents — and anything still-parked from earlier frames — a
-  // bounded slice, then sweep the finished ones. Every drain once this Runtime has used the app
-  // scheduler, and otherwise whenever any process is live on it: other components run processes
-  // there too (a scene's transfer-function overlay tasks, cvc/tf/overlay_tasks.h), and only a pump
+  // bounded slice, unless the host's app.exec_pump_frame() did since drain_begin() (one pump a
+  // frame for all its Runtimes, td 4.12). Group 0 is pumped every drain once this Runtime has used
+  // it, and otherwise whenever any process is live on it: other components run processes there
+  // too (a scene's transfer-function overlay tasks, cvc/tf/overlay_tasks.h), and only a pump
   // advances them, whatever host this is. An app nothing has used is not pumped (nor built).
-  if (cvc::state_exec::async_scheduler *sched = m_->scheduler_to_pump())
-    m_->pump_and_sweep_actions(*sched);
+  if (m.app.exec_pump_generation() == m.begin_generation_)
+    m.pump_frame();
+  // Then sweep the finished ones, where the document's processes run.
+  m.sweep_document();
+}
+
+cvc::state_exec::exec_group *Runtime::isolated_group() const {
+  m_->ensure_placement(/*submitting=*/false);
+  return m_->group_.get();
+}
+
+std::string Runtime::isolation_reason() const {
+  m_->ensure_placement(/*submitting=*/false);
+  return m_->isolation_reason_;
+}
+
+void Runtime::declare_thread_affine_prefix(const std::string &prefix) {
+  m_->thread_affine_.push_back(prefix);
+  m_->placement_decided_ = false;
+}
+
+void Runtime::require_host_thread(const std::string &why) {
+  if (!m_->host_thread_why_.empty())
+    return;
+  m_->host_thread_why_ = why.empty() ? std::string("a host extension") : why;
+  // As a late registration (m3): decided again once nothing of the document runs, so a document
+  // whose programs run is not moved under them.
+  m_->registered_since_placement_ = true;
+}
+
+cvc::state_exec::exec_group *Runtime::current_group() const { return m_->group_.get(); }
+
+std::size_t Runtime::retired_calls_in_flight() const {
+  std::size_t n = 0;
+  for (const Impl::RetiredGroup &r : m_->retired_groups_)
+    if (r.group)
+      n += r.group->host().in_flight();
+  return n;
+}
+
+void Runtime::wait_retired_calls() {
+  for (Impl::RetiredGroup &r : m_->retired_groups_)
+    if (r.group)
+      r.group->host().wait_idle();
+}
+
+void Runtime::set_document_programs(std::vector<std::string> programs) {
+  m_->document_programs_ = std::move(programs);
+  m_->placement_decided_ = false; // read when the document is placed again
 }
 
 std::vector<std::string> Runtime::take_reactive_warnings() {
@@ -5117,6 +7160,28 @@ std::vector<std::string> Runtime::take_reactive_warnings() {
 // The same per-document scope submit_action/ensure_resident install on each lane as
 // ictx.document — exposed so a scene-bound host can publish a routing handle for its verbs.
 cvc::state_exec::document_scope &Runtime::document_scope() { return m_->doc_scope_; }
+
+// A backend with no list draws the rows as stacked radio buttons (the first shown picked while
+// none is) and its buttons under them.
+ListEdit Backend::list(const char *label, const char *id, int current,
+                       const std::vector<std::string> &items, const ListOptions &o) {
+  (void)id;
+  ListEdit e;
+  if (!items.empty()) {
+    const IndexEdit r = radio(label, current < 0 ? 0 : current, items, false);
+    if (r.changed && r.index >= 0) {
+      e.selected = true;
+      e.index = r.index;
+    }
+  } else if (label && *label) {
+    text_line(label);
+  }
+  if (o.add && button("Add"))
+    e.add = true;
+  if (o.remove && current >= 0 && button("Remove"))
+    e.remove = true;
+  return e;
+}
 
 } // namespace ariadne
 } // namespace cvc

@@ -1,9 +1,10 @@
 # sky_controls.ari — a REUSABLE Ariadne component: live controls for a `cloud_sky` node. The widgets
 # bind sky.* keys the cloud_sky realizer reads each frame: Drift / Morph scale the wind and the
 # speed the clouds change shape at, Weather the speed clouds come and go at (the deck's cellular
-# automaton; 0 holds them), Orographic how strongly the ground's windward flanks gather cloud, and
-# Ground shadow toggles the clouds' shade live. (The cloud SHAPES are grown once — regenerating
-# them is seconds of work, not a live slider.) Seeded from the node's props.
+# automaton; 0 holds them), Orographic how strongly the ground's windward flanks gather cloud,
+# Ground shadow toggles the clouds' shade live, and Darkness how dark their shaded side goes. (The
+# cloud SHAPES are grown once — regenerating them is seconds of work, not a live slider; a weather
+# node's storm deck is built off the frame.) Seeded from the node's props.
 #
 # Args (every one has a default, so a bare include works):
 #   keys   the cloud_sky node's state key root: its `keys:` prop, else sky (the default).
@@ -31,7 +32,7 @@ units:
         lo: 0.0
         hi: 4.0
         fmt: "%.2f"
-        tooltip: "how fast the wind carries the clouds: 1 is 3 m/s, 0 holds them still"
+        tooltip: "how fast the wind carries the clouds: 1 is the scene wind's speed at the deck (3 m/s without one), 0 holds them still"
       - slider_float: Morph speed
         bind: "{keys}.morph"
         lo: 0.0
@@ -50,3 +51,21 @@ units:
         hi: 2.0
         fmt: "%.2f"
         tooltip: "how strongly the slopes the wind climbs gather cloud (0: the ground has no say)"
+      - slider_float: Coverage
+        bind: "{keys}.coverage"
+        lo: 0.0
+        hi: 1.0
+        fmt: "%.2f"
+        tooltip: "the share of the sky's cells holding a cloud; clouds fade in or out to it"
+      - slider_float: Wind heading
+        bind: "{keys}.wind_az"
+        lo: -180.0
+        hi: 180.0
+        fmt: "%.0f deg"
+        tooltip: "the heading the wind blows toward (90: +x); the drift, the orographic slopes and a weather node's storms follow. Unused while the scene has a wind (Wind panel)"
+      - slider_float: Darkness
+        bind: "{keys}.darkness"
+        lo: 0.0
+        hi: 1.0
+        fmt: "%.2f"
+        tooltip: "how dark the clouds' shaded side goes (a storm's deck); a weather node raises it while a storm is about"

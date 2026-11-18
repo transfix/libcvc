@@ -301,3 +301,32 @@ TEST(RoomRulesTest, AShorterListLeavesNothingBehind) {
   EXPECT_EQ(back.controller().param("walk_speed", 0.0), 2.5);
   EXPECT_TRUE(back == r);
 }
+
+// The document's scene wind (scene: wind:, O14) is the room's: world_rules_from takes it into the
+// physics rules, the room's physics section carries it to every holon, and a room without one
+// writes the section it always did.
+TEST(WorldRulesTest, TheScenesWindIsTheRooms) {
+  cvc::app app;
+  ca::LoadResult doc = ca::load_string(app, R"(
+scene:
+  wind: { speed: 14, dir: 120, gustiness: 0.3, base: 2 }
+  nodes: []
+)");
+  ASSERT_TRUE(doc.ok) << doc.error;
+  ASSERT_TRUE(doc.scene.wind.present);
+  ca::world_rules r;
+  ASSERT_EQ(ca::world_rules_from(doc.scene, nullptr, r, nullptr), "");
+  EXPECT_EQ(r.physics.wind_speed, 14.0);
+  EXPECT_EQ(r.physics.wind_dir, 120.0);
+  EXPECT_EQ(r.physics.wind_gustiness, 0.3);
+  EXPECT_EQ(r.physics.wind_base, 2.0);
+  EXPECT_FALSE(r.physics == ca::default_world_rules().physics);
+  rc::write_room_rules(app, "w", r, 10);
+  ca::world_physics back;
+  ASSERT_TRUE(rc::read_room_physics(app, "w", back));
+  EXPECT_TRUE(back == r.physics) << "the room's section carries the wind";
+  // A bad wind is refused.
+  ca::world_rules bad = r;
+  bad.physics.wind_speed = -1.0;
+  EXPECT_NE(ca::check_world_rules(bad), "");
+}

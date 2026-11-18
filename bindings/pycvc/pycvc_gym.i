@@ -395,9 +395,10 @@ public:
   WorldGym(const std::string &document, const std::string &prefix, int count,
            const std::string &world, PyObject *agents, PyObject *set, bool wander,
            unsigned long long max_steps, int rays, double range_m, double ready_timeout,
-           bool regenerate, bool drive_telemetry) {
+           bool regenerate, double tick, bool drive_telemetry) {
     cvc::ariadne::gym_options o;
     o.regenerate = regenerate;
+    o.tick = tick;
     o.drive_telemetry = drive_telemetry;
     o.prefix = prefix;
     o.count = count;
@@ -687,9 +688,9 @@ class WorldGym {
 public:
   WorldGym(const std::string &document, const std::string &prefix = "", int count = 1,
            const std::string &world = "", PyObject *agents = nullptr, PyObject *set = nullptr,
-           bool wander = false, unsigned long long max_steps = 1200, int rays = 16,
+           bool wander = false, unsigned long long max_steps = 1000, int rays = 16,
            double range_m = 60.0, double ready_timeout = 120.0, bool regenerate = false,
-           bool drive_telemetry = true);
+           double tick = 0.0, bool drive_telemetry = true);
   ~WorldGym();
   PyObject *reset(unsigned long long seed = 0);
   PyObject *step(PyObject *steer, PyObject *accel);

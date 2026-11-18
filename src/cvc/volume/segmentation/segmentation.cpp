@@ -21,6 +21,7 @@
 // GenSeg (genseg_context, genseg.cpp) as the legacy entry did, and turns what it leaves behind
 // into the result's volumes, a unit at a time.
 
+#include "critical_points.h"
 #include "genseg.h"
 
 #include <atomic>
@@ -54,32 +55,6 @@ std::string fmt(const char *f, ...) {
   return buf;
 }
 
-// Voxel v of `data`, of type `t`, as a float (read_data converted each voxel the same way).
-float voxel_as_float(const unsigned char *data, data_type t, std::size_t v) {
-  switch (t) {
-  case UChar:
-    return float(data[v]);
-  case UShort:
-    return float(reinterpret_cast<const unsigned short *>(data)[v]);
-  case UInt:
-    return float(reinterpret_cast<const unsigned int *>(data)[v]);
-  case Float:
-    return reinterpret_cast<const float *>(data)[v];
-  case Double:
-    return float(reinterpret_cast<const double *>(data)[v]);
-  case UInt64:
-    return float(reinterpret_cast<const std::uint64_t *>(data)[v]);
-  case Char:
-    return float(reinterpret_cast<const signed char *>(data)[v]);
-  case Int:
-    return float(reinterpret_cast<const int *>(data)[v]);
-  case Int64:
-    return float(reinterpret_cast<const std::int64_t *>(data)[v]);
-  default:
-    return 0.0f;
-  }
-}
-
 } // namespace
 
 // The run: the stepper's state, the vendored context, and the coroutine that drives both.
@@ -94,6 +69,8 @@ struct segment_stepper::impl {
   double prog = 0.0;
 
   genseg::genseg_context ctx;
+  genseg::critical_seeds critical; // seed_mode::critical_points
+  std::size_t user_classes = 0;    // the point classes (before the critical points' two)
   std::vector<int> class_of_seed; // per seed of ctx.seed_list, flattened: its class
   std::vector<std::string> names;
   std::vector<std::string> warnings;
@@ -136,15 +113,19 @@ genseg::task segment_stepper::impl::run() {
   const std::string dims = fmt("%dx%dx%d", X, Y, Z);
 
   // The classes of the variable and timestep asked for, in order, as VolumeGridRover sent them.
+  // seed_mode::critical_points adds two after them.
+  const bool critical_mode = params.automatic == seed_mode::critical_points;
+  const std::size_t max_classes = critical_mode ? 252 : 254;
   std::size_t points = 0;
   std::unordered_map<std::size_t, std::size_t> class_at; // voxel -> the class placing it last
   for (const point_class &c : seeds.classes) {
     if (c.variable != params.variable || c.timestep != params.timestep)
       continue;
-    if (names.size() == 254)
-      throw segmentation_error(fmt("segment_seeded: more than 254 point classes of variable %d, "
-                                   "timestep %d",
-                                   params.variable, params.timestep));
+    if (names.size() == max_classes)
+      throw segmentation_error(fmt("segment_seeded: more than %zu point classes of variable %d, "
+                                   "timestep %d%s",
+                                   max_classes, params.variable, params.timestep,
+                                   critical_mode ? " (critical_points adds two)" : ""));
     const std::size_t cls = names.size();
     names.push_back(c.name);
     ctx.seed_list.emplace_back();
@@ -175,39 +156,26 @@ genseg::task segment_stepper::impl::run() {
       GS_UNIT_OF(ctx);
     }
   }
-  if (points == 0)
+  // With critical points, the point classes may have none: the critical points then seed the run
+  // alone (critical_seeds throws if there are none either).
+  if (points == 0 && !critical_mode)
     throw segmentation_error(fmt("segment_seeded: no seeds: no point class of variable %d, "
                                  "timestep %d has a point",
                                  params.variable, params.timestep));
+  user_classes = names.size();
+  if (critical_mode) {
+    names.push_back("feature");
+    names.push_back("background");
+    genseg::configure(critical, params);
+    critical.need_seeds = points == 0;
+    critical.who = "segment_seeded";
+    ctx.critical = &critical;
+  }
 
   // read_data: the voxels as floats.
   ctx.begin("normalising");
-  ctx.XDIM = X;
-  ctx.YDIM = Y;
-  ctx.ZDIM = Z;
+  GS_RUN(genseg::read_voxels(ctx, in, "segment_seeded"));
   const std::size_t n = ctx.voxel_count();
-  ctx.dataset.allocate(n);
-  {
-    const unsigned char *data = in.data_ptr();
-    const data_type t = in.voxelType();
-    bool constant = true;
-    for (std::size_t v = 0; v < n; ++v) {
-      const float f = voxel_as_float(data, t, v);
-      if (!std::isfinite(f)) {
-        const std::size_t i = v % X, j = (v / X) % Y, k = v / (std::size_t(X) * Y);
-        throw segmentation_error(fmt("segment_seeded: voxel (%zu, %zu, %zu) is %s", i, j, k,
-                                     std::isnan(f) ? "NaN" : "not finite as a float"));
-      }
-      ctx.dataset[v] = f;
-      if (f != ctx.dataset[0])
-        constant = false;
-      GS_UNIT_OF(ctx);
-    }
-    if (constant)
-      throw segmentation_error(fmt("segment_seeded: the volume is constant (every voxel is %g), "
-                                   "so it has nothing to segment",
-                                   double(ctx.dataset[0])));
-  }
   ctx.tlow = float(params.t_low);
   ctx.thigh = float(params.t_high);
   ctx.data_unit_thresholds = !params.normalized_thresholds;
@@ -240,20 +208,35 @@ genseg::task segment_stepper::impl::run() {
           GS_UNIT_OF(ctx);
         }
   }
-  // A seed below t_low labels only itself and the neighbours it stops at.
+  // A seed below t_low labels only itself and the neighbours it stops at. The critical points'
+  // seeds get one warning per class, not one each.
   {
-    for (std::size_t c = 0; c < ctx.seed_list.size(); ++c)
+    for (std::size_t c = 0; c < ctx.seed_list.size(); ++c) {
+      std::size_t below = 0;
       for (const genseg::INTVEC &p : ctx.seed_list[c]) {
         const std::size_t v = (std::size_t(p.z) * Y + p.y) * X + p.x;
-        if (ctx.dataset[v] < ctx.tlow)
-          warnings.push_back(fmt("seed (%d, %d, %d) of class '%s' is below t_low, so its front "
-                                 "stops at once",
-                                 p.x, p.y, p.z, names[c].c_str()));
+        if (ctx.dataset[v] < ctx.tlow) {
+          if (c < user_classes)
+            warnings.push_back(fmt("seed (%d, %d, %d) of class '%s' is below t_low, so its front "
+                                   "stops at once",
+                                   p.x, p.y, p.z, names[c].c_str()));
+          ++below;
+        }
         GS_UNIT_OF(ctx);
       }
+      if (c >= user_classes && below > 0)
+        warnings.push_back(fmt("%zu of the %zu critical points' seeds of class '%s' are below "
+                               "t_low, so their fronts stop at once",
+                               below, ctx.seed_list[c].size(), names[c].c_str()));
+    }
   }
-  r.automatic_seeds = std::size_t(ctx.seeds_found - ctx.seeds_displaced);
-  r.classified_seeds = std::size_t(ctx.seeds_found - ctx.seeds_displaced - ctx.seeds_left);
+  if (critical_mode) {
+    r.automatic_seeds = critical.feature.size() + critical.background.size();
+    r.classified_seeds = r.automatic_seeds;
+  } else {
+    r.automatic_seeds = std::size_t(ctx.seeds_found - ctx.seeds_displaced);
+    r.classified_seeds = std::size_t(ctx.seeds_found - ctx.seeds_displaced - ctx.seeds_left);
+  }
   r.t_low_normalized = ctx.tlow;
   r.t_high_normalized = ctx.thigh;
   ctx.tdata.release();
@@ -291,7 +274,9 @@ void segment_stepper::impl::note_progress() {
     within = double(ctx.units) / (5.0 * n);
   } else if (ph == "seeding") {
     lo = 0.2, hi = 0.35;
-    within = double(ctx.units) / ((ctx.automatic_seeds ? 7.0 : 2.0) * n);
+    within = double(ctx.units) /
+             ((ctx.automatic_seeds ? 7.0 : 2.0) * n +
+              (ctx.critical ? double(critical.expected_units(ctx.voxel_count())) : 0.0));
   } else if (ph == "classifying") {
     lo = 0.35, hi = 0.6;
     within = ctx.seeds_found > 0 ? 1.0 - double(ctx.SeedNum) / double(ctx.seeds_found) : 1.0;
