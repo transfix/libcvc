@@ -728,6 +728,14 @@ else()
   message(STATUS "SDF/Mesher disabled; skipping geometry_test")
 endif()
 
+# tiler_bunny_test: the contour tiler end to end on the Stanford bunny's signed distance field
+# (cvc::sdf, declared only with CVC_ENABLE_SDF). It skips at run time without libigl or
+# cvc::planar.
+if(CVC_ENABLE_SDF)
+  add_executable(tiler_bunny_test tiler_bunny_test.cpp)
+  list(APPEND TEST_TARGETS tiler_bunny_test)
+endif()
+
 # algorithm_test drives cvc::iso/tetrahedralize/hexahedralize which require
 # the Mesher.
 if(CVC_ENABLE_MESHER)
@@ -1157,6 +1165,11 @@ if(TARGET geometry_test)
       GTest::gtest
       GTest::gtest_main
   )
+endif()
+
+if(TARGET tiler_bunny_test)
+  target_link_libraries(tiler_bunny_test PRIVATE cvc GTest::gtest GTest::gtest_main)
+  target_compile_features(tiler_bunny_test PRIVATE cxx_std_20)
 endif()
 
 if(TARGET algorithm_test)
@@ -3113,10 +3126,10 @@ cvc_discover_tests(app_test)
 foreach(_cvc_port_test IN LISTS CVC_PORT_TESTS)
   if(_cvc_port_test STREQUAL "segmentation_intrinsics_test" OR
      _cvc_port_test STREQUAL "tiler_intrinsics_test")
-    # AnActionStartsItUnderTheDefaultLimits runs a 160^3 segmentation through an action's frame
-    # loop: 93-101 s in a Debug job, and past ctest's 300 s on a loaded runner (three times over in
-    # one job). The tiler's runs a contour stack through one the same way, and ran past 300 s in a
-    # Debug job too. Each test's own loop allows 900 s as well.
+    # AnActionStartsItUnderTheDefaultLimits runs a 160^3 segmentation (a 30-slice tube's tiling)
+    # through an action's frame loop: 93-101 s (109-111 s) in a Debug job, and past ctest's 300 s on
+    # a loaded runner (three times over in one job; the tiler's on transfix/libcvc#1351's run
+    # 44274032889, where the segmentation took 548 s). The test's own loop allows 900 s too.
     cvc_discover_tests(${_cvc_port_test} PROPERTIES TIMEOUT 900)
   else()
     cvc_discover_tests(${_cvc_port_test})
@@ -3175,6 +3188,9 @@ cvc_discover_tests(volslice_test)
 cvc_discover_tests(volslice_state_test)
 if(TARGET geometry_test)
   cvc_discover_tests(geometry_test)
+endif()
+if(TARGET tiler_bunny_test)
+  cvc_discover_tests(tiler_bunny_test)
 endif()
 if(TARGET algorithm_test)
   cvc_discover_tests(algorithm_test)
@@ -3525,7 +3541,11 @@ cvc_discover_tests(room_chat_test)
 cvc_discover_tests(room_aoi_test)
 cvc_discover_tests(room_aoi_relay_test)
 cvc_discover_tests(physics_codec_test)
-cvc_discover_tests(physics_field_test)
+# The wake's long runs (packed crates settling for 120 s, the cost on a three-cascade sea) take
+# 12-15 s each in a Release build and many times that in a Debug or sanitizer build (not measured
+# here), which may pass the 300 s a test without a TIMEOUT of its own gets there (ci.yml): their
+# own budget, as the water's.
+cvc_discover_tests(physics_field_test PROPERTIES TIMEOUT 1200)
 cvc_discover_tests(physics_hull_test)
 cvc_discover_tests(physics_immersion_test)
 cvc_discover_tests(physics_boat_test)

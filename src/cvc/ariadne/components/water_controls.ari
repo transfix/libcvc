@@ -6,9 +6,10 @@
 # once the sliders rest), how long the foam a breaking wave leaves lasts, how far the waves fade
 # toward the shore, the swell that breaks on the beaches (its shore layer is found again once the
 # sliders rest), the foam at the waterline, the waves floating bodies make (a water node with
-# body:), and the level of detail: how far from the camera the foam keeps its detail, the water its
-# full shading and the short waves reach, and the water's quality tier (by default the scene's
-# adaptive quality). Seeded from the node's .ari props.
+# body:) and whether they push the other bodies (physics), and the level of detail: how far from
+# the camera the foam keeps its detail, the water its full shading and the short waves reach, and
+# the water's quality tier (by default the scene's adaptive quality). Seeded from the node's .ari
+# props.
 #
 # Args (every one has a default, so a bare include works):
 #   keys   the water node's state key root: its `keys:` prop, else water (the default).
@@ -114,6 +115,9 @@ units:
       - checkbox: Wakes
         bind: "{keys}.wake"
         tooltip: "the waves floating bodies make (a water node with body:)"
+      - checkbox: Wakes push bodies
+        bind: "{keys}.wake_push"
+        tooltip: "physics: each floating body's waves push the others, boat on boat (off by default)"
       - slider_float: Wake foam
         bind: "{keys}.wake_foam"
         lo: 0.0

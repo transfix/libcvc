@@ -294,7 +294,8 @@ public:
   field_id add_field(const field &f);
   // New values for a field (a different volume, a stronger wind). Wakes the bodies
   // in its old and new boxes. A rutted medium keeps its ruts when the new field lays
-  // them on the same grid (the same box and rut_cell); otherwise they start over.
+  // them on the same grid (the same box and rut_cell); otherwise they start over. A
+  // fluid with the same wake (field::wake) keeps its waves; another wake starts afresh.
   void set_field(field_id id, const field &f);
   // The field as last given.
   field get_field(field_id id) const;
@@ -311,6 +312,11 @@ public:
   water_sample water_at(const vec3 &p) const;
   // The ruts a medium with field::ruts keeps; empty for one without.
   rut_map field_ruts(field_id id) const;
+  // A fluid's wake (field::wake): where its window is and which bodies make waves in it, and the
+  // height (m) of all its bodies' waves at (x, y) (0 outside the window, or without a wake). For a
+  // renderer or a test; each body reads the others' waves, not this sum.
+  wake_info field_wake_info(field_id id) const;
+  double field_wake_height(field_id id, double x, double y) const;
 
   // --- vehicles (vehicle.h) ----------------------------------------------------
 

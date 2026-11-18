@@ -33,7 +33,9 @@
 //     It is three rings: a vertex every 2 near / (cells - 1) out to a third of the way, every
 //     twice that to two thirds, every four times that past (ring_coords). It moves with the camera
 //     by the coarsest spacing, so the waves do not swim; the short cascade fades out by
-//     `lod_waves` metres from the camera.
+//     `lod_waves` metres from the camera. Its normal is the swell's per vertex and the cascades'
+//     per fragment (OceanCascades::slopes(), filtered at the pixel's footprint), so the waves
+//     shorter than its vertices' spacing still shape the light.
 //   - far: a flat grid over the ground's extent with the same shading, its normal the waves' per
 //     fragment (the two long cascades and the swell, fading with distance), for the water past the
 //     near grid; it gives way inside the near grid.
@@ -97,8 +99,8 @@
 // same at every tier.
 //
 // Samplers (WebGL2 gives a draw 16): the vertex stage reads the cascades' atlas, the coast atlas
-// (with the wind's fetch maps in it) and the wake; the fragment stage those and the foam atlas
-// (and a cloud_sky's two shade maps).
+// (with the wind's fetch maps in it) and the wake; the fragment stage those, the cascades' slope
+// layers (one array) and the foam atlas (and a cloud_sky's two shade maps).
 //
 // The cascades and the wake need float render targets (WebGL2's EXT_color_buffer_float). Without
 // them, or before the window is up, the water draws as flat blue.
@@ -289,13 +291,6 @@ const char *const kWaterCommonFuncs =
     "  vec4 c = k.z > 0.0 ? wDisp(2,w,uTile2,uAdvect.z) : vec4(0.0, 0.0, 0.0, 1.0);\n"
     "  vec3 j = vec3(1.0) + k*(vec3(a.w,b.w,c.w) - vec3(1.0));\n" // a faded fold folds less
     "  return vec4(k.x*a.xyz+k.y*b.xyz+k.z*c.xyz, min(min(j.x,j.y),j.z));\n"
-    "}\n"
-    "float wHt(vec2 w, vec3 k){\n"
-    "  float h = 0.0;\n"
-    "  if (k.x > 0.0) h += k.x*wDisp(0,w,uTile0,uAdvect.x).y;\n"
-    "  if (k.y > 0.0) h += k.y*wDisp(1,w,uTile1,uAdvect.y).y;\n"
-    "  if (k.z > 0.0) h += k.z*wDisp(2,w,uTile2,uAdvect.z).y;\n"
-    "  return h;\n"
     "}\n";
 
 // The wake (lsystem_coast's WAKE_GLSL_ON): an eWave window's state (.r the height h, .g the
@@ -423,14 +418,13 @@ const char *const kWaterVsImpl =
     // the swell at its true size: uWaveAmp scales the cascades only, so the shore layer's breaking
     // cap holds at any wave height
     "    osl = ke * oShoreLayer(w);\n"
-    // the normal from differences half the vertex's spacing either way (1 m on the inner ring)
+    // the swell's normal from differences half the vertex's spacing either way (1 m on the inner
+    // ring); the cascades' slopes are the fragment's (wSlope), which no vertex spacing limits
     "    float e = max(1.0, 0.5*sp);\n"
     "    vec2 ex = vec2(e, 0.0), ey = vec2(0.0, e);\n"
-    "    float hpx = uWaveAmp*wHt(w+ex, k) + ke*oShoreEta(w+ex);\n"
-    "    float hmx = uWaveAmp*wHt(w-ex, k) + ke*oShoreEta(w-ex);\n"
-    "    float hpy = uWaveAmp*wHt(w+ey, k) + ke*oShoreEta(w+ey);\n"
-    "    float hmy = uWaveAmp*wHt(w-ey, k) + ke*oShoreEta(w-ey);\n"
-    "    vWaterN = normalize(vec3(-(hpx-hmx)/(2.0*e), -(hpy-hmy)/(2.0*e), 1.0));\n"
+    "    float hx = ke*(oShoreEta(w+ex) - oShoreEta(w-ex));\n"
+    "    float hy = ke*(oShoreEta(w+ey) - oShoreEta(w-ey));\n"
+    "    vWaterN = normalize(vec3(-hx/(2.0*e), -hy/(2.0*e), 1.0));\n"
     "    vec2 dh = vec2(od.x, od.z) + osl.yz;\n"
     "    float dlim = 0.8*max(c0.r, 0.0), dlen = length(dh);\n"
     "    if (dlen > dlim) dh *= dlim/max(dlen, 1e-6);\n"
@@ -466,7 +460,10 @@ const char *const kWaterFsDec =
     "uniform highp float uFoamDetail; uniform highp float uFoamCover;\n"
     "uniform highp float uLodFoam; uniform highp float uLodShade; uniform highp float uFarReach;\n"
     "uniform highp float uFoamReach;\n"
-    "uniform highp float uWindU; uniform highp vec3 uWindDir; uniform highp float uCell;\n"
+    "uniform highp float uWindU; uniform highp vec3 uWindDir;\n"
+    // The cascades' slope layers (OceanCascades::slopes(): layer c cascade c's (dh/dx, dh/dy),
+    // repeating and mipmapped): the normal's waves, read through the hardware's filter.
+    "uniform highp sampler2DArray uSlope;\n"
     "uniform highp vec3 uCutMin; uniform highp vec3 uCutMax;\n"   // the far grid gives way inside
                                                                   // the near one
     "uniform highp vec3 uClipMin; uniform highp vec3 uClipMax;\n" // no water past the world,
@@ -501,24 +498,46 @@ const char *const kWaterFsFuncs =
     "             mix(whash(i+vec2(0,1)),whash(i+vec2(1,1)),f.x), f.y);\n"
     "}\n"
     // The far grid's cascade weights at distance dist: the middle cascade fades out by 3 near,
-    // the long one and the swell by 10 near (the cascades' texels are read nearest, so a pixel
-    // wider than a texel would sparkle), both nearer at adaptive quality's lower tiers
-    // (uFarReach); the short one is never in its normal.
+    // the long one and the swell by 10 near, both nearer at adaptive quality's lower tiers
+    // (uFarReach); the short one is never in its normal. What fades goes to the sun's lobe
+    // (oUnresolvedMss).
     "vec3 wFarK(float dist){\n"
     "  float r = max(uFarReach, 0.1);\n"
     "  return vec3(1.0 - smoothstep(uNearHalf, max(10.0*r, 1.01)*uNearHalf, dist),\n"
     "              1.0 - smoothstep(uNearHalf, max(3.0*r, 1.01)*uNearHalf, dist), 0.0);\n"
     "}\n"
-    // The far grid's normal: the long and middle cascades' and the swell's slopes at the fragment,
-    // the difference's step growing with distance (1 + 0.004 dist), each cascade weighted by k (the
-    // caller's: the depth's fade, wFarK's fade with distance and the lee); the swell by wFarK's.
-    "vec3 wFarNormal(vec2 p, float dist, vec3 k){\n"
+    // The far grid's swell normal at the fragment, the difference's step growing with distance
+    // (1 + 0.004 dist), weighted by wFarK's; the cascades' slopes are wSlope's.
+    "vec3 wFarNormal(vec2 p, float dist){\n"
     "  float kl = wFarK(dist).x;\n"
     "  float e = 1.0 + 0.004*dist;\n"
     "  vec2 ex = vec2(e, 0.0), ey = vec2(0.0, e);\n"
-    "  float hx = uWaveAmp*(wHt(p+ex,k) - wHt(p-ex,k)) + kl*(oShoreEta(p+ex) - oShoreEta(p-ex));\n"
-    "  float hy = uWaveAmp*(wHt(p+ey,k) - wHt(p-ey,k)) + kl*(oShoreEta(p+ey) - oShoreEta(p-ey));\n"
+    "  float hx = kl*(oShoreEta(p+ex) - oShoreEta(p-ex));\n"
+    "  float hy = kl*(oShoreEta(p+ey) - oShoreEta(p-ey));\n"
     "  return normalize(vec3(-hx/(2.0*e), -hy/(2.0*e), 1.0));\n"
+    "}\n"
+    // Cascade c's slope (dh/dx, dh/dy) at rest point p (m) from its layer of uSlope, the hardware
+    // filtering it over the pixel (dpx, dpy: p's screen derivatives) through its mipmaps, so the
+    // waves a pixel cannot resolve average away instead of aliasing. Texel i is world i tile / n,
+    // as wTexel reads the heights. Read through the current's flow map when the current carries
+    // the cascade (adv), with wDisp's two reads and weights.
+    "vec2 wSlope1(int c, vec2 p, float tile, float adv, vec2 dpx, vec2 dpy){\n"
+    "  vec2 gx = dpx/tile, gy = dpy/tile;\n"
+    "  if (adv < 0.5 || uCurrent.x <= 0.0)\n"
+    "    return textureGrad(uSlope, vec3(p/tile + uHalfTexel, float(c)), gx, gy).xy;\n"
+    "  vec2 q0 = p - owFlow*uFlowTau.x + uFlowOff0.xy*tile;\n"
+    "  vec2 q1 = p - owFlow*uFlowTau.y + uFlowOff1.xy*tile;\n"
+    "  return uFlowW.x*textureGrad(uSlope, vec3(q0/tile + uHalfTexel, float(c)), gx, gy).xy +\n"
+    "         uFlowW.y*textureGrad(uSlope, vec3(q1/tile + uHalfTexel, float(c)), gx, gy).xy;\n"
+    "}\n"
+    // The cascades' slope at p, each weighted by k (its depth fade, distance fade and lee) and the
+    // wave height's scale; a cascade whose weight is 0 is not read.
+    "vec2 wSlope(vec2 p, vec3 k, vec2 dpx, vec2 dpy){\n"
+    "  vec2 s = vec2(0.0);\n"
+    "  if (k.x > 0.0) s += k.x*wSlope1(0, p, uTile0, uAdvect.x, dpx, dpy);\n"
+    "  if (k.y > 0.0) s += k.y*wSlope1(1, p, uTile1, uAdvect.y, dpx, dpy);\n"
+    "  if (k.z > 0.0) s += k.z*wSlope1(2, p, uTile2, uAdvect.z, dpx, dpy);\n"
+    "  return uWaveAmp*s;\n"
     "}\n";
 // A persistent foam tile at p (OceanFoam's oFoamTile, so after oceanFoamGLSL()), read through the
 // current's flow map when the current carries its cascade (adv), as the cascade's waves are
@@ -566,15 +585,17 @@ const char *const kWaterFsLight =
     "  float distXY = length(uCamPos.xy - vWaterRest);\n"
     // a hull keeps the water out (after the derivatives above, taken before any branch)
     "  if (wInHull(vWaterPos)) discard;\n"
-    "  vec3 N = normalize(vWaterN);\n"
-    "  owFlow = vWaterCur;\n" // the current the far grid's cascades are read through
-    // the cascades in the normal: the near grid's per vertex (vWaterK), the far grid's here (its
-    // detail fading with distance; the lee, O13)
+    "  vec3 N = normalize(vWaterN);\n" // the near grid's swell, per vertex
+    "  owFlow = vWaterCur;\n"          // the current the cascades are read through
+    // the cascades in the normal: the near grid's weights per vertex (vWaterK), the far grid's
+    // here (its detail fading with distance; the lee, O13); their slopes per fragment, at its
+    // footprint, on both grids
     "  vec3 inN = vWaterK;\n"
     "  if (uWaves < 0.5) {\n"
     "    inN = oDepthW(vWaterRest)*wFarK(distXY)*owWindW(vWaterRest, vWaterGust);\n"
-    "    N = wFarNormal(vWaterRest, distXY, inN);\n"
+    "    N = wFarNormal(vWaterRest, distXY);\n"
     "  }\n"
+    "  N = normalize(vec3(N.xy/max(N.z, 1e-3) - wSlope(vWaterRest, inN, fdx, fdy), 1.0));\n"
     // the wake's slope adds to the sea's (both as -dz/dx, -dz/dy over z of the normal)
     "  vec3 wk = wkSlopeFoam(vWaterRest);\n"
     // Cat's paws (O13, E3): where a gust ruffles the water it roughens. Near the camera a fine
@@ -604,14 +625,13 @@ const char *const kWaterFsLight =
     "    bub = max(vWaterK.x*f0.g, vWaterK.y*f1.g)*fdp;\n"
     "  }\n"
     // The shading: A4 near (sd 1), the O15 model far (sd 0), mixed between. The cascades in the
-    // normal are the near grid's (its vertices 2 m apart) or the far grid's (its differences
-    // growing with distance, the short cascade left out).
+    // normal are read at the fragment's own footprint (wSlope), so nothing coarser than the pixel
+    // bounds what they resolve (oWaterFull's nstep 0).
     "  float sd = 1.0 - smoothstep(0.75*uLodShade, uLodShade, dist);\n"
     "  vec3 col = sd < 1.0 ? oWaterSimple(N, Vd, uSunDir, sunShade) : vec3(0.0);\n"
     "  if (sd > 0.0) {\n"
-    "    float nstep = uWaves > 0.5 ? uCell : 1.0 + 0.004*distXY;\n"
     "    vec3 full = oWaterFull(N, Vd, uSunDir, sunShade, vWaterPos.z - uLevel, bub, uWindU, fp,\n"
-    "                           nstep, vec3(uTile0, uTile1, uTile2), 0.5/uHalfTexel, inN,\n"
+    "                           0.0, vec3(uTile0, uTile1, uTile2), 0.5/uHalfTexel, inN,\n"
     "                           vWaterRest, fdx, fdy, uWindDir.xy, uTime);\n"
     "    col = sd >= 1.0 ? full : mix(col, full, sd);\n"
     "  }\n"
@@ -1175,6 +1195,7 @@ bool upload_shore(WaterRT &rt, vtkOpenGLRenderWindow *ow, GeometryNode &near, Ge
 void style_ocean(GeometryNode &g, const WaterRT &rt) {
   const char *tile[3] = {"uTile0", "uTile1", "uTile2"};
   g.setShaderTexture("uDisp", rt.fft->displacement());
+  g.setShaderTexture("uSlope", rt.fft->slopes());
   for (std::size_t i = 0; i < rt.cascades.size() && i < 3; ++i)
     g.setShaderUniformf(tile[i], static_cast<float>(rt.cascades[i].band.tile_m));
   g.setShaderUniformf("uHalfTexel", 0.5f / static_cast<float>(kFftN));

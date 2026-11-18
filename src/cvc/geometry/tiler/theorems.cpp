@@ -104,7 +104,60 @@ bool test_theorem3(const Segment_3 &segment, const Point_3 &opposite, Tiler_work
 // is disallowed here because since our algorithm can fail.  For example, suppose
 // the chord is allowed and then we end up with an untiled region abcdef.  This region
 // is a degenerate polygon in 2D (because of the collinearity of def).
+namespace {
+
+// How the sweep in test_theorem4 (get_intersections(..., true, false), the chord against the
+// contour edges) treats the chord `c` and the edge ab. The sweep tests every such pair whose x
+// ranges overlap and reports one only when do_intersect holds and the contact is more than one
+// shared endpoint of each (end_end, which those flags leave out): an endpoint inside the other
+// segment, or a crossing.
+enum class sweep_contact { none, reported, unsure };
+sweep_contact chord_edge_contact(const Segment_2 &c, const Point_2 &a, const Point_2 &b) {
+  const Point_2 &p = c.source(), &q = c.target();
+  if (std::max(a.x(), b.x()) < std::min(p.x(), q.x()) ||
+      std::min(a.x(), b.x()) > std::max(p.x(), q.x()) ||
+      std::max(a.y(), b.y()) < std::min(p.y(), q.y()) ||
+      std::min(a.y(), b.y()) > std::max(p.y(), q.y()))
+    return sweep_contact::none;
+  if (!do_intersect(c, Segment_2(a, b)))
+    return sweep_contact::none;
+  // On one line (or a degenerate chord or edge): touching or overlapping, left to the sweep.
+  if (collinear(p, q, a) && collinear(p, q, b))
+    return sweep_contact::unsure;
+  // Not on one line, so they meet at one point: a shared endpoint is all they share.
+  if (xy_equal(p, a) || xy_equal(p, b) || xy_equal(q, a) || xy_equal(q, b))
+    return sweep_contact::none;
+  return sweep_contact::reported;
+}
+
+} // namespace
+
 bool test_theorem4(const Segment_3 &segment, const Point_3 &opposite, Tiler_workspace &w) {
+  // The theorem fails exactly when the sweep below reports an intersection (its first test), so an
+  // exact pass over the same pairs answers it without the sweep: false at the first reported
+  // contact, true when there is none. Only a chord on an edge's line goes on to the sweep. This was
+  // most of phase 1's time.
+  {
+    const Segment_2 c0(segment.source(), opposite), c1(segment.target(), opposite);
+    bool unsure = false;
+    for (const Segment_2 *c : {&c0, &c1})
+      for (const Contour_handle &contour : w.contours) {
+        const Polygon_2 &polygon = contour->polygon();
+        const std::size_t n = polygon.size();
+        for (std::size_t i = 0; i < n; ++i)
+          switch (chord_edge_contact(*c, polygon[i], polygon[(i + 1) % n])) {
+          case sweep_contact::none:
+            break;
+          case sweep_contact::reported:
+            return false;
+          case sweep_contact::unsure:
+            unsure = true;
+            break;
+          }
+      }
+    if (!unsure)
+      return true;
+  }
   TILER_TRACE(logger, pp_id(segment) << " " << opposite.id());
 
   typedef Tiler_workspace::Contours::const_iterator Iter;
