@@ -728,6 +728,14 @@ else()
   message(STATUS "SDF/Mesher disabled; skipping geometry_test")
 endif()
 
+# tiler_bunny_test: the contour tiler end to end on the Stanford bunny's signed distance field
+# (cvc::sdf, declared only with CVC_ENABLE_SDF). It skips at run time without libigl or
+# cvc::planar.
+if(CVC_ENABLE_SDF)
+  add_executable(tiler_bunny_test tiler_bunny_test.cpp)
+  list(APPEND TEST_TARGETS tiler_bunny_test)
+endif()
+
 # algorithm_test drives cvc::iso/tetrahedralize/hexahedralize which require
 # the Mesher.
 if(CVC_ENABLE_MESHER)
@@ -1157,6 +1165,11 @@ if(TARGET geometry_test)
       GTest::gtest
       GTest::gtest_main
   )
+endif()
+
+if(TARGET tiler_bunny_test)
+  target_link_libraries(tiler_bunny_test PRIVATE cvc GTest::gtest GTest::gtest_main)
+  target_compile_features(tiler_bunny_test PRIVATE cxx_std_20)
 endif()
 
 if(TARGET algorithm_test)
@@ -3173,6 +3186,9 @@ cvc_discover_tests(volslice_test)
 cvc_discover_tests(volslice_state_test)
 if(TARGET geometry_test)
   cvc_discover_tests(geometry_test)
+endif()
+if(TARGET tiler_bunny_test)
+  cvc_discover_tests(tiler_bunny_test)
 endif()
 if(TARGET algorithm_test)
   cvc_discover_tests(algorithm_test)
