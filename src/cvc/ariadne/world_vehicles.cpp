@@ -351,6 +351,12 @@ std::string find_vehicle_model(const std::string &name) {
   const fs::path self = cvc::process::self_path();
   if (!self.empty())
     prefixes.push_back(self.parent_path().parent_path());
+#if defined(__EMSCRIPTEN__)
+  // In the browser there is no install prefix (self_path is empty): a web build preloads the
+  // vehicle models it ships into its file system's root, at /share/cvc-scenes/shared (arigl's
+  // CVC_WASM_VEHICLE_MODELS, src/arigl/CMakeLists.txt).
+  prefixes.emplace_back("/");
+#endif
   for (const fs::path &prefix : prefixes) {
     const fs::path scenes = prefix / "share" / "cvc-scenes";
     if (is_file(scenes / "shared" / file))
