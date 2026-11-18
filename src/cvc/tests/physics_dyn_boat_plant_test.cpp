@@ -28,6 +28,7 @@
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/physics/dyn_boat_plant.h>
+#include <cvc/physics/hull.h>
 #include <cvc/physics/plant_host.h>
 #include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
@@ -121,9 +122,12 @@ double mean(const std::vector<double> &v) {
   return s;
 }
 
-const char *name_of(int k) { return k == 0 ? "launch" : "jonboat"; }
+constexpr int kPresets = 3;
+const char *name_of(int k) { return k == 0 ? "launch" : k == 1 ? "jonboat" : "tactical"; }
 dyn_boat_desc preset_of(int k) {
-  return k == 0 ? dyn_boat_desc::launch() : dyn_boat_desc::jonboat();
+  return k == 0   ? dyn_boat_desc::launch()
+         : k == 1 ? dyn_boat_desc::jonboat()
+                  : dyn_boat_desc::tactical();
 }
 
 // Nav's commands for a speed and a yaw rate, as nav would give them: an acceleration that closes
@@ -191,6 +195,42 @@ TEST(DynBoatPlant, FloatsAtTheDraftItsHullGives) {
   boat_desc no_mesh = dyn_boat_desc::launch().boat;
   no_mesh.hull.hull.reset();
   EXPECT_THROW(dyn_boat_plant::float_height(no_mesh, 900.0, 1000.0), cvc::physics_error);
+}
+
+// The tactical preset is its model's own hull (the vehicle-tactical-boat package's TacticalBoat,
+// baked into 16 stations): a closed V hull, 6.85 m long and 2.33 m in beam, 7.8 m overall, that
+// floats 0.49 m over its keel at 2800 kg; its collision shape the hull's convex hull; its water
+// cut-out inside it at that waterline.
+TEST(DynBoatPlant, TheTacticalBoatIsItsModelsHull) {
+  const dyn_boat_desc d = dyn_boat_desc::tactical();
+  ASSERT_TRUE(d.boat.hull.hull);
+  const hull_mesh &h = *d.boat.hull.hull;
+  EXPECT_EQ(h.vertices.size(), 242u);
+  EXPECT_EQ(h.triangles.size(), 480u);
+  EXPECT_TRUE(std::holds_alternative<convex_hull>(d.boat.hull.shape));
+  EXPECT_DOUBLE_EQ(d.length_overall, 7.8);
+  double lo[3] = {1e300, 1e300, 1e300}, hi[3] = {-1e300, -1e300, -1e300};
+  for (const vec3 &v : h.vertices) {
+    const double p[3] = {v.x, v.y, v.z};
+    for (int k = 0; k < 3; ++k) {
+      lo[k] = std::min(lo[k], p[k]);
+      hi[k] = std::max(hi[k], p[k]);
+    }
+  }
+  EXPECT_NEAR(hi[0] - lo[0], 6.85, 1e-9);
+  EXPECT_NEAR(hi[1] - lo[1], 2.3296, 1e-3);
+  const double waterline = -dyn_boat_plant::float_height(d.boat, d.boat.hull.mass, 1000.0);
+  std::printf("[boat] tactical: waterline %.4f m over its keel; ", waterline - lo[2]);
+  EXPECT_NEAR(waterline - lo[2], 0.488, 0.002);
+  const auto box = hull_waterline_box(h, waterline);
+  ASSERT_TRUE(box.has_value());
+  std::printf("water cut-out: centre %+.3f m, half length %.3f m, half beam %.3f m\n", box->x,
+              box->half_length, box->half_beam);
+  EXPECT_LT(box->half_beam, 0.5 * (hi[1] - lo[1]));
+  EXPECT_GT(box->half_beam, 0.3);
+  EXPECT_GE(box->x - box->half_length, lo[0] - 1e-9);
+  EXPECT_LT(box->x + box->half_length, hi[0]) << "short of its bow";
+  EXPECT_GT(box->half_length, 2.0);
 }
 
 TEST(DynBoatPlant, RefusesBadParametersAndStartsWithoutWater) {
@@ -300,7 +340,7 @@ TEST(DynBoatPlant, RefusesBadParametersAndStartsWithoutWater) {
 // at full throttle within 3 %, and its circle at full rudder and full throttle within 10 %.
 TEST(DynBoatPlant, PresetsDoWhatTheySay) {
   REQUIRE_JOLT();
-  for (int k = 0; k < 2; ++k) {
+  for (int k = 0; k < kPresets; ++k) {
     auto w = water_world(water());
     dyn_boat_plant_options o;
     o.physics = w.get();

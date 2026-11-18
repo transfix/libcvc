@@ -83,6 +83,9 @@ struct field_body {
   double radius = 0.0;  // sphere
   vec3 half;            // box
   bool vehicle = false; // a vehicle's chassis: no flow drag (vehicle.h's aero is its drag)
+  // The share of its cells' volume that displaces a fluid: 1, but a wading vehicle's chassis
+  // (vehicle.h) floods and keeps only wading_desc::displacement.
+  double buoyancy = 1.0;
   field_hull hull;      // a fluid pushes on its triangles in place of the cells
   field_load load;      // the last step's
   // Its outline as a wake cuts it (immersion.h): its hull, else its shape, made when a wake first
@@ -146,8 +149,9 @@ public:
       it->second.mass = mass;
   }
 
-  // A vehicle's chassis (body_added first): its centre of mass, and no flow drag.
-  void mark_vehicle(body_id id, const vec3 &center_of_mass);
+  // A vehicle's chassis (body_added first): its centre of mass, no flow drag, and the share of
+  // its box that displaces a fluid (1 sealed; vehicle.h's wading).
+  void mark_vehicle(body_id id, const vec3 &center_of_mass, double buoyancy = 1.0);
 
   // Push every awake body the fields reach, for the step about to run.
   // `t` is the world's field time, at which free surfaces are read.

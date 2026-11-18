@@ -761,12 +761,13 @@ void field_set::wake_in(world_backend &be, const field_grid &box) {
   }
 }
 
-void field_set::mark_vehicle(body_id id, const vec3 &center_of_mass) {
+void field_set::mark_vehicle(body_id id, const vec3 &center_of_mass, double buoyancy) {
   auto it = _bodies.find(id.value);
   if (it == _bodies.end())
     return;
   it->second.vehicle = true;
   it->second.center_of_mass = center_of_mass;
+  it->second.buoyancy = buoyancy;
 }
 
 bool field_set::air_at(const vec3 &p, double t, double &rho, vec3 &wind) const {
@@ -1497,12 +1498,13 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
           immersed += fv;
 
         if (cf.desc.kind == field_kind::fluid) {
-          const vec3 b = g * (-cr.value * fv);
+          // A flooded chassis displaces only its share (vehicle.h's wading; 1 otherwise).
+          const vec3 b = g * (-cr.value * fv * fb.buoyancy);
           push_f = push_f + b;
           push_t = push_t + cross(arm, b);
           if (inertial) {
-            displaced += cr.value * fv;
-            displaced_at = displaced_at + at * (cr.value * fv);
+            displaced += cr.value * fv * fb.buoyancy;
+            displaced_at = displaced_at + at * (cr.value * fv * fb.buoyancy);
           }
         } else if (cf.desc.kind == field_kind::medium) {
           const vec3 b = up * (cr.value * fv);

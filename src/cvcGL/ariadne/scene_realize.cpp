@@ -2023,6 +2023,8 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
       // stepping rather than throw out of every frame.
       realized.app->log(1, std::string("ari: physics stopped: ") + e.what() + "\n");
       realized.physics_binding.reset();
+      // Its storms' gust front stops with it (the water and the trees take the wind as authored).
+      cvc::ariadne::write_scene_wind_front(*realized.app, realized.bind_prefix, 0.0, 0.0);
     }
   }
 

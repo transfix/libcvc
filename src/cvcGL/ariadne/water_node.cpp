@@ -612,7 +612,7 @@ const char *const kWaterFsLight =
     "    float nstep = uWaves > 0.5 ? uCell : 1.0 + 0.004*distXY;\n"
     "    vec3 full = oWaterFull(N, Vd, uSunDir, sunShade, vWaterPos.z - uLevel, bub, uWindU, fp,\n"
     "                           nstep, vec3(uTile0, uTile1, uTile2), 0.5/uHalfTexel, inN,\n"
-    "                           vWaterRest, uWindDir.xy, uTime);\n"
+    "                           vWaterRest, fdx, fdy, uWindDir.xy, uTime);\n"
     "    col = sd >= 1.0 ? full : mix(col, full, sd);\n"
     "  }\n"
     // a ruffled patch (the cat's paws above) mirrors less of the bright sky
@@ -852,6 +852,12 @@ struct WaterLaps {
   }
 };
 
+// A boat world vehicle's water cut-out, its sheer and its bottom (boat_box).
+struct hull_box {
+  cvc::physics::waterline_box box;
+  double sheer = 0.0, bottom = 0.0;
+};
+
 struct WaterRT {
   ari::SceneNode node; // its props and keys: (scene_water_spec)
   std::string prefix;
@@ -949,6 +955,7 @@ struct WaterRT {
            std::pair<std::shared_ptr<const cvc::physics::body_desc>,
                      std::shared_ptr<const cvc::physics::immersion_body>>>
       outlines;
+  std::map<std::string, hull_box> boat_boxes; // by archetype and mass (boat_box)
 };
 
 constexpr int kSettle = 10;
@@ -1510,6 +1517,37 @@ outline_of(WaterRT &rt, const std::shared_ptr<const cvc::physics::body_desc> &d)
   return it->second.second.get();
 }
 
+// A boat world vehicle's water cut-out (as BoatRuntime::cutout) and its sheer and bottom over its
+// hull body's origin, from its archetype's boat at its mass: made once per archetype and mass.
+const hull_box &boat_box(WaterRT &rt, const ari::vehicle_archetype &a, double mass) {
+  const std::string key = a.id + "|" + std::to_string(mass);
+  auto it = rt.boat_boxes.find(key);
+  if (it != rt.boat_boxes.end())
+    return it->second;
+  hull_box out;
+  try {
+    const cvc::physics::dyn_boat_desc b = ari::boat_desc_of(a, mass);
+    const cvc::physics::hull_mesh &h = *b.boat.hull.hull;
+    double x0 = 1e300, x1 = -1e300, y = 0.0;
+    out.bottom = 1e300;
+    out.sheer = -1e300;
+    for (const cvc::physics::vec3 &v : h.vertices) {
+      x0 = std::min(x0, v.x);
+      x1 = std::max(x1, v.x);
+      y = std::max(y, std::fabs(v.y));
+      out.bottom = std::min(out.bottom, v.z);
+      out.sheer = std::max(out.sheer, v.z);
+    }
+    out.box = {0.5 * (x0 + x1), 0.5 * (x1 - x0), y};
+    const double waterline =
+        -cvc::physics::dyn_boat_plant::float_height(b.boat, b.boat.hull.mass, 1000.0);
+    if (const auto c = cvc::physics::hull_waterline_box(h, waterline))
+      out.box = *c;
+  } catch (const std::exception &) {
+  }
+  return rt.boat_boxes.emplace(key, out).first->second;
+}
+
 // The hulls the water keeps out of (D5), each frame: the scene's boats (its boat nodes, and its
 // world vehicles on a boat plant) nearest the camera, at most four, each where it is drawn.
 void tick_hulls(WaterRT &rt, vtkRenderer *ren, RealizedScene &scene,
@@ -1542,10 +1580,13 @@ void tick_hulls(WaterRT &rt, vtkRenderer *ren, RealizedScene &scene,
         const cvc::physics::body_state st = w.state(id);
         p = cvc::physics::pose{st.position, st.rotation};
       }
-      const double dx = p->position.x - cam[0], dy = p->position.y - cam[1];
-      hulls.push_back({dx * dx + dy * dy, p->position.x, p->position.y, yaw_of(p->rotation),
-                       b->half_length(), b->half_beam(), p->position.z + b->sheer(),
-                       p->position.z + b->bottom()});
+      // The box inside its hull at its waterline, about its centre along the hull.
+      const double yaw = yaw_of(p->rotation);
+      const cvc::physics::waterline_box &c = b->cutout();
+      const double x = p->position.x + c.x * std::cos(yaw), y = p->position.y + c.x * std::sin(yaw);
+      const double dx = x - cam[0], dy = y - cam[1];
+      hulls.push_back({dx * dx + dy * dy, x, y, yaw, c.half_length, c.half_beam,
+                       p->position.z + b->sheer(), p->position.z + b->bottom()});
     }
     if (const ari::WorldVehicles *v = scene.world->vehicles())
       for (const ari::entity_info &e : v->entities()) {
@@ -1553,10 +1594,11 @@ void tick_hulls(WaterRT &rt, vtkRenderer *ren, RealizedScene &scene,
           continue;
         for (const ari::vehicle_archetype &x : v->archetypes())
           if (x.id == e.spec.archetype) {
-            const cvc::physics::vehicle_desc d = ari::vehicle_desc_of(x, e.spec.mass);
-            const double dx = e.x - cam[0], dy = e.y - cam[1];
-            hulls.push_back({dx * dx + dy * dy, e.x, e.y, e.yaw, d.half_extents.x, d.half_extents.y,
-                             e.z + d.half_extents.z, e.z - d.half_extents.z});
+            const hull_box &c = boat_box(rt, x, e.spec.mass);
+            const double bx = e.x + c.box.x * std::cos(e.yaw), by = e.y + c.box.x * std::sin(e.yaw);
+            const double dx = bx - cam[0], dy = by - cam[1];
+            hulls.push_back({dx * dx + dy * dy, bx, by, e.yaw, c.box.half_length, c.box.half_beam,
+                             e.z + c.sheer, e.z + c.bottom});
           }
       }
   }

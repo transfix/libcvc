@@ -127,6 +127,7 @@ public:
   // accessory power (W): the closed-throttle drag, and the fuel's Willans line.
   std::vector<std::pair<double, double>> engine_friction;
   double accessory_power = 0.0;
+  bool engine_off = false;                  // flooded (vehicle.h's wading): it burns no fuel
   double friction_torque(double rpm) const; // N m, flat beyond the curve; 0 with none
   // The anti-roll bars' stiffness, N/m per axle (0 for none), for their spring energy.
   std::vector<double> anti_roll;
