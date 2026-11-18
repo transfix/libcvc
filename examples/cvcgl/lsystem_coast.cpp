@@ -1434,7 +1434,7 @@ const char *OCEAN_FS_LIGHT =
     "    vec3 full = oWaterFull(N, Vd, uSunDir, 1.0, vWorldPos.z - uLevel, bub, uWindU, fp, "
     "uCell,\n"
     "                           vec3(uTile0, uTile1, uTile2), 0.5/uHalfTexel, vOceanK, vRestXY,\n"
-    "                           uWindDir.xy, uTime);\n"
+    "                           fdx, fdy, uWindDir.xy, uTime);\n"
     "    col = sd >= 1.0 ? full : mix(col, full, sd);\n"
     "  }\n"
     // Local water depth = surface z − seabed. Shallow water is TRANSLUCENT: the sandy
