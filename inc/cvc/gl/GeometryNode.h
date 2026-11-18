@@ -246,7 +246,10 @@ public:
   // (vtkProp UseBounds) and the scene's (contributesToSceneBounds, for a node at the scene's top
   // level). For something that may reach far past the scene, such as a sky drawn to the horizon,
   // that must neither zoom the view out nor push its near plane away. Set it before the mesh has
-  // its geometry: the scene's own box only grows until nodes are added or removed.
+  // its geometry: the scene's own box only grows until nodes are added or removed. Out of the
+  // bounds, the actor has none (its GetBounds is null), so VTK's frustum culler never culls it: a
+  // procedural mesh placed by its vertex shader (the rain's streaks, the water's spray) would
+  // otherwise be culled by the bounds of the vertices it was given.
   void setUseBounds(bool on);
 
   // Draw this mesh in VTK's volume layer instead of with the opaque or translucent geometry: in its

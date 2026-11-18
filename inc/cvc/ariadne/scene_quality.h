@@ -121,7 +121,7 @@ struct WaterQuality {
 //   1 high    the full shading and the persistent foam to half their distance; the wake's window
 //             a quarter the cells (half the reach: 64 m); half the spray, to half its reach
 //   2 medium  ... the full shading to a quarter; the short cascade and the far normal to half; no
-//             persistent foam (the whitecaps alone take Monahan's share), so no spray
+//             persistent foam (the whitecaps alone take Monahan's share); no spray (its own draw)
 //   3 low     the simple shading everywhere; no wake; two cascades (no short one); the far normal
 //             to half
 //   4 least   ... and the far normal to a quarter

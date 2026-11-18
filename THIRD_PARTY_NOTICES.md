@@ -40,8 +40,9 @@ repository.
 
 Compiled into libcvc (its wave spectrum, `cvc/ocean/spectrum.h`, the wind's gusts and the currents,
 `cvc/algo/wind_field.h` and `cvc/ocean/current.h`, and the cumulonimbus maps of
-`cvc/world/cloud_layer.h`), cvcGL (the cloud deck's dark storm bases, the rain's streaks, the lightning bolts) and the cvcGL examples:
-[ABYSSAL](#abyssal).
+`cvc/world/cloud_layer.h`), cvcGL (the cloud deck's dark storm bases, the rain's streaks, the lightning bolts, the wind-blown spray) and the cvcGL examples:
+[ABYSSAL](#abyssal). Compiled into cvcGL (the wind-blown spray's hash):
+[Hash without Sine](#hash-without-sine-dave-hoskins).
 
 Installed with cvcGL (`share/libcvc/fonts`) and embedded in the browser hosts (arigl-web, cyprty):
 the fonts the ImGui overlay falls back on, [DejaVu Sans Mono](#dejavu-sans-mono-237) and
@@ -1022,8 +1023,38 @@ adaptive quality loop in libcvc itself, `inc/cvc/ariadne/scene_quality.h` and
 `src/core/Quality.js`. The wind-blown spray in `src/cvcGL/ocean/OceanSpray.h` and
 `OceanSpray.cpp` (the Ariadne `water` node's) follows its spray particles
 (`src/weather/Precipitation.js:267-587`): drag toward the wind under gravity, the upward kick out of
-a breaking crest, billboards stretched by speed and the forward scattering's 0.55 + 1.9 mu^6; here
-the particles are a closed form of time in the vertex shader, not state in float targets.
+a breaking crest, billboards stretched by speed and the forward scattering (its 0.55 + 1.9 mu^6,
+drawn here as 0.9 + 0.6 mu^6, since this draws straight to the screen without its tone mapping);
+here the particles are a closed form of time in the vertex shader, not state in float targets.
+
+## Hash without Sine (Dave Hoskins)
+
+The spray's per-particle hash in `src/cvcGL/ocean/OceanSpray.cpp` (`sprayHash`) is Dave Hoskins'
+"Hash without Sine" (`hash31`, shadertoy.com/view/4djSRW), whose notice:
+
+```
+MIT License
+
+Copyright (c) 2014 David Hoskins.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ## DejaVu Sans Mono 2.37
 

@@ -219,7 +219,7 @@ TEST(WaterQuality, EachTierDrawsNoMoreThanTheOneAbove) {
     EXPECT_LE(b.cascades, a.cascades) << t;
     EXPECT_LE(b.spray, a.spray) << t;
     EXPECT_LE(b.spray_reach, a.spray_reach) << t;
-    if (!b.persistent_foam) // the spray goes with the persistent foam: tier 2 and down
+    if (t >= 2) // tiers 2 to 4 draw no spray (its own draw: what they shed)
       EXPECT_EQ(b.spray, 0.0) << t;
   }
   const ari::WaterQuality full = ari::water_quality(0, 1.0);

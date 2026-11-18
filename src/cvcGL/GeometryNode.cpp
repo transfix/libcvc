@@ -72,6 +72,13 @@ public:
   static GeometryActor *New();
   vtkTypeMacro(GeometryActor, vtkOpenGLActor);
   bool WithVolumes = false;
+  // Out of the bounds (setUseBounds(false)): no bounds at all. VTK's frustum culler reads
+  // GetBounds() whatever UseBounds says, and a procedural mesh's own (the rain's streaks, the
+  // spray: quads laid out by index, placed by their vertex shader) say nothing of where it draws,
+  // so it would be culled wherever its index pillar left the view. A prop with no bounds is never
+  // culled (vtkFrustumCoverageCuller), and the camera's fit and clipping skip it as before.
+  bool Unbounded = false;
+  double *GetBounds() override { return Unbounded ? nullptr : vtkOpenGLActor::GetBounds(); }
 
   int RenderOpaqueGeometry(vtkViewport *vp) override {
     return WithVolumes ? 0 : vtkOpenGLActor::RenderOpaqueGeometry(vp);
@@ -1433,6 +1440,8 @@ void GeometryNode::setUseBounds(bool on) {
     m_contributesToSceneBounds = on;
     if (m_actor)
       m_actor->SetUseBounds(on);
+    if (auto *a = GeometryActor::SafeDownCast(m_actor))
+      a->Unbounded = !on; // and never culled (GeometryActor::GetBounds)
     if (SceneGraph *sg = getSceneGraph()) {
       sg->markContentChanged(); // the camera's clipping range is derived from the bounds
       sg->requestRender();

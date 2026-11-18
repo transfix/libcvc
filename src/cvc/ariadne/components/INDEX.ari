@@ -170,7 +170,7 @@ catalog:
   - component: water_controls
     file: water_controls.ari
     unit: water_controls
-    binds: "<prefix>.{keys}.{wind_speed,wind_dir,gustiness,lee,sea_lag,sea_fade,current,chop,wave_amp,whitecaps,shore_fade,swell_height,swell_period,swell_dir,shore_foam,wake,wake_foam}"   # read every frame by the water realizer (its wind keys only without a scene wind)
+    binds: "<prefix>.{keys}.{wind_speed,wind_dir,gustiness,lee,sea_lag,sea_fade,current,chop,wave_amp,whitecaps,spray,shore_fade,swell_height,swell_period,swell_dir,shore_foam,wake,wake_foam}"   # read every frame by the water realizer (its wind keys only without a scene wind)
     for: "a `type: water` node"
     args: { keys: water, title: Water, id: water_controls }   # defaults; keys = the node's `keys:` prop
   - component: weather_controls

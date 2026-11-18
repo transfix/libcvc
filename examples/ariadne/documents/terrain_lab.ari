@@ -208,6 +208,8 @@ scene:
       swell_height: 0.8    # m: a swell from offshore that refracts, shoals and breaks on the beaches
       swell_period: 9      # s
       swell_dir: 200       # degrees: the way it travels
+      spray: 0             # the wind-blown spray (§10.5) off: unchecked in a browser yet; the
+                           # Water panel's Spray slider turns it on
       body: {}
     # Three wooden crates dropped on the big lake north of the city (seed 5's world; on another
     # world they land where they land): they bob on its waves.

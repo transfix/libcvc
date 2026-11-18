@@ -133,7 +133,6 @@
 #include <cvc/ariadne/scene_generated_world.h> // SceneColliders
 #include <cvc/ariadne/scene_quality.h>         // adaptive quality's tiers (O21)
 #include <cvc/ariadne/scene_water.h>           // its physics (WaterRuntime) and coast
-#include <cvc/ariadne/scene_wind.h>            // the wind the spray flies in
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
@@ -965,15 +964,19 @@ struct WaterRT {
                      std::shared_ptr<const cvc::physics::immersion_body>>>
       outlines;
   // The wind-blown spray (section 10.5, OceanSpray): its mesh and shared inputs, its particles,
-  // its keys, whether the sky shades it, and the depth grid's corner and cell and the coast it was
-  // read from.
+  // its keys, whether the sky shades it, the frames it has had nothing to draw, what its weight
+  // grid was worked out from (its corner and cell, the fade and the full fetch, the coast and the
+  // fetch map), and the wind sea's crest for the wind and fetch it was worked out for.
   std::weak_ptr<GeometryNode> spray;
   std::shared_ptr<GeometryNode::ShaderInputs> sprayIn;
   int sprayCount = 0;
   std::string sprayKey, lodSprayKey;
   bool sprayShaded = false;
-  double sprayGridX = 0.0, sprayGridY = 0.0, sprayGridCell = 0.0;
-  const ari::SceneWaterShore *sprayShore = nullptr;
+  int sprayIdle = 0;
+  std::array<double, 5> sprayGridOf{};
+  std::weak_ptr<const ari::SceneWaterShore> sprayShore;
+  std::weak_ptr<const cvc::ocean::fetch_field> sprayFetch;
+  double sprayHsU = -1.0, sprayHsF = -1.0, sprayHs = 0.0;
 };
 
 constexpr int kSettle = 10;
@@ -1804,71 +1807,104 @@ void tick_swash(cvc::app &app, WaterRT &rt, vtkRenderer *ren, double t) {
   }
 }
 
-// The wind-blown spray (section 10.5, OceanSpray): shown in a strong wind once the cascades are up,
-// at adaptive quality's share of its particles and reach; its inputs for the frame. `spec` is the
-// wind now, `bias` and `ramp` the whitecaps' threshold as the water draws them, `fade` the long
-// cascade's fade toward the shore.
+// The wind-blown spray (section 10.5, OceanSpray): drawn while its gusts could tear spray off the
+// crests (the mean wind times the strongest gust at least 9 m/s) and the cascades are up, at
+// adaptive quality's share of its particles; its inputs for the frame. Once shown it stays in the
+// renderer, drawing no particle while it can draw none, until it has drawn none for kSprayIdle
+// frames: a mesh shown again rejoins the renderer, which uploads its buffers and builds its shader
+// again. `spec` is the wind now (the gusts' mean wind), `fadeSpec` the sea's new keyframe's (the
+// waves' way, their fades and height), `cd` its cascades, `gusts` the gusts' uniforms, `bias` and
+// `ramp` the whitecaps' threshold as the water draws them.
+constexpr int kSprayIdle = 300;
 void tick_spray(cvc::app &app, WaterRT &rt, vtkRenderer *ren, const ari::WaterQuality &q,
-                const ari::SceneWaterSpec &spec, double bias, double ramp, double fade,
-                const double cam[3], const std::array<double, 3> &sun, double t) {
+                const ari::SceneWaterSpec &spec, const ari::SceneWaterSpec &fadeSpec,
+                const ari::SceneWaterCascades &cd, const WindGLSL::frame &gusts, double bias,
+                double ramp, const double cam[3], const std::array<double, 3> &sun, double t) {
   constexpr double kSprayPi = 3.14159265358979323846;
   auto mesh = rt.spray.lock();
   if (!mesh || !rt.sprayIn)
     return;
-  // The wind at the camera, its gusts on it: the scene's wind (or the node's), scene_wind.h's.
-  const ari::SceneWind wind{spec.wind_speed, spec.wind_dir, spec.gustiness};
-  const double U = spec.wind_speed * cvc::algo::wind_gust(wind.state(), cam[0], cam[1], t);
-  const double amount = std::max(key(app, rt.sprayKey, 1.0), 0.0) * oceanSprayAmount(U);
-  const double reach = std::max(key(app, rt.lodSprayKey, 160.0), 0.0) * q.spray_reach;
+  GeometryNode::ShaderInputs &in = *rt.sprayIn;
+  const double strength = std::max(key(app, rt.sprayKey, 1.0), 0.0);
+  const double reach = std::max(key(app, rt.lodSprayKey, 160.0), 0.0); // the tiles'
+  const double fadeReach = reach * std::max(q.spray_reach, 0.0);       // adaptive quality's
   const double count = std::floor(rt.sprayCount * std::clamp(q.spray, 0.0, 1.0));
-  const bool show = rt.fft && rt.fft->displacement() && rt.cascades.size() >= 2 && amount > 1e-3 &&
-                    reach >= 2.0 && count >= 1.0 && rt.shore && rt.shore->grid && ren &&
-                    ren->IsActiveCameraCreated();
-  if (mesh->isVisible() != show)
-    mesh->setVisible(show);
+  const bool can = rt.fft && rt.fft->displacement() && rt.cascades.size() >= 2 && strength > 1e-3 &&
+                   spec.wind_speed * oceanSprayGustMax(spec.gustiness) > 9.0 && reach >= 2.0 &&
+                   fadeReach >= 2.0 && count >= 1.0 && rt.shore && rt.shore->grid && ren &&
+                   ren->IsActiveCameraCreated();
+  rt.sprayIdle = can ? 0 : rt.sprayIdle + 1;
+  if (can && !mesh->isVisible())
+    mesh->setVisible(true);
+  else if (!can && mesh->isVisible() && rt.sprayIdle > kSprayIdle)
+    mesh->setVisible(false);
   // Lit and fogged by the sky once it lists the spray (or the water) among its receivers.
   if (const bool s = mesh->hasSharedShaderInputs(kCloudInputs); s != rt.sprayShaded) {
     rt.sprayShaded = s;
     mesh->addFragmentShaderReplacement("//VTK::Light::Impl", oceanSprayLight(s));
   }
-  if (!show)
+  if (!can) {
+    if (auto k = in.f4.find("sprayK"); k != in.f4.end())
+      k->second[1] = 0.0f; // no particle drawn while it waits
     return;
-  GeometryNode::ShaderInputs &in = *rt.sprayIn;
-  // The still water's depth on a grid over the spray's reach, its corner on whole cells (two cells
-  // to spare, so the snapped grid still covers the reach), read again when it moves.
+  }
+  // Where the waves may break on a grid over the tiles' reach, its corner on whole cells (two cells
+  // to spare, so the snapped grid still covers the reach): the land, the shallows as the shortest
+  // cascade drawn fades and the fetch as it grows (the sea's new keyframe's map), worked out again
+  // when one of them changes.
+  const bool shortOne = q.cascades >= 3 && rt.cascades.size() >= 3;
+  const std::size_t sc = shortOne ? 2 : 1; // the shortest cascade drawn
+  const double fullFetch = rt.sea && sc < rt.sea->full.size() ? rt.sea->full[sc] : 0.0;
+  const std::shared_ptr<const cvc::ocean::fetch_field> fetch =
+      rt.sea ? rt.sea->fetch : std::shared_ptr<const cvc::ocean::fetch_field>{};
   const double cell = 2.0 * reach / (kSprayGrid - 3);
   const double gx = (std::floor((cam[0] - reach) / cell) - 0.5) * cell,
                gy = (std::floor((cam[1] - reach) / cell) - 0.5) * cell;
-  if (gx != rt.sprayGridX || gy != rt.sprayGridY || cell != rt.sprayGridCell ||
-      rt.sprayShore != rt.shore.get()) {
-    rt.sprayGridX = gx;
-    rt.sprayGridY = gy;
-    rt.sprayGridCell = cell;
-    rt.sprayShore = rt.shore.get();
-    std::array<float, kSprayGrid * kSprayGrid> d{};
-    oceanSprayDepths(*rt.shore->grid, gx, gy, cell, d);
-    for (int k = 0; k < kSprayDepths; ++k)
-      in.f4["sprayDepth[" + std::to_string(k) + "]"] = {d[4 * k], d[4 * k + 1], d[4 * k + 2],
-                                                        d[4 * k + 3]};
+  const std::array<double, 5> of{gx, gy, cell, cd.fade_m[sc], fullFetch};
+  if (of != rt.sprayGridOf || rt.sprayShore.lock() != rt.shore || rt.sprayFetch.lock() != fetch) {
+    rt.sprayGridOf = of;
+    rt.sprayShore = rt.shore;
+    rt.sprayFetch = fetch;
+    std::array<float, kSprayGrid * kSprayGrid> w{};
+    oceanSprayWeights(*rt.shore->grid, fetch.get(), fullFetch, cd.fade_m[sc], gx, gy, cell, w);
+    for (int k = 0; k < kSprayWeights; ++k)
+      in.f4["sprayWeight[" + std::to_string(k) + "]"] = {w[4 * k], w[4 * k + 1], w[4 * k + 2],
+                                                         w[4 * k + 3]};
   }
-  in.f4["sprayGrid"] = {float(gx), float(gy), float(cell), float(std::max(fade, 0.5))};
-  // The cascades it reads (the short one only while the tier transforms it), and the speed the
-  // folding crests travel at: the phase speed of a wave a quarter of the shortest tile drawn.
-  const bool shortOne = q.cascades >= 3 && rt.cascades.size() >= 3;
-  const double shortest = rt.cascades[shortOne ? 2 : 1].band.tile_m;
+  in.f4["sprayGrid"] = {float(gx), float(gy), float(cell), 0.0f};
+  // The wind sea's crest over the level: half its significant height, as the water draws it.
+  if (fadeSpec.wind_speed != rt.sprayHsU || fadeSpec.fetch != rt.sprayHsF) {
+    rt.sprayHsU = fadeSpec.wind_speed;
+    rt.sprayHsF = fadeSpec.fetch;
+    cvc::ocean::sea_state s;
+    s.wind.speed_mps = std::max(fadeSpec.wind_speed, 0.0);
+    s.wind.fetch_m = fadeSpec.fetch;
+    s.swell.hs_m = 0.0;
+    rt.sprayHs = cvc::ocean::wind_sea_hs(s);
+  }
+  // The speed the folding crests travel at: the phase speed of a wave a quarter of the shortest
+  // tile drawn, along the waves' way (the sea's keyframe's).
+  const double shortest = rt.cascades[sc].band.tile_m;
   const double crest = std::sqrt(cvc::ocean::gravity * 0.25 * shortest / (2.0 * kSprayPi));
   vtkCamera *c = ren->GetActiveCamera();
   int *size = ren->GetSize();
   const double h = size && size[1] > 0 ? double(size[1]) : 720.0;
-  const double wd = spec.wind_dir * kSprayPi / 180.0;
+  const double wd = spec.wind_dir * kSprayPi / 180.0;     // the gusts' (the scene's wind)
+  const double sd = fadeSpec.wind_dir * kSprayPi / 180.0; // the waves'
+  const double U = std::max(spec.wind_speed, 0.0);
   in.f3["sprayCam"] = {float(cam[0]), float(cam[1]), float(cam[2])};
   in.f["sprayTime"] = float(std::fmod(t, 3600.0));
-  in.f4["sprayWind"] = {float(U * std::cos(wd)), float(U * std::sin(wd)), float(std::cos(wd)),
-                        float(std::sin(wd))};
-  in.f4["sprayK"] = {float(amount), float(count), float(reach), float(spec.wave_amp)};
+  in.f4["sprayWind"] = {float(U * std::cos(wd)), float(U * std::sin(wd)), float(std::cos(sd)),
+                        float(std::sin(sd))};
+  in.f4["sprayK"] = {float(strength), float(count), float(reach), float(fadeReach)};
   in.f4["sprayTiles"] = {float(rt.cascades[0].band.tile_m), float(rt.cascades[1].band.tile_m),
                          shortOne ? float(rt.cascades[2].band.tile_m) : 0.0f, float(kFftN)};
   in.f4["sprayFold"] = {float(bias), float(std::max(ramp, 1e-3)), float(crest), float(rt.level)};
+  in.f["sprayCrest"] = float(0.5 * rt.sprayHs * std::max(spec.wave_amp, 0.0));
+  in.f3["sprayPulse"] = oceanSprayPulse(t);
+  in.f3["uWindGust"] = gusts.gust;
+  in.f3["uWindDriftL"] = gusts.driftL;
+  in.f3["uWindDriftF"] = gusts.driftF;
   in.f["sprayPixel"] = float(2.0 * std::tan(0.5 * c->GetViewAngle() * kSprayPi / 180.0) / h);
   in.f3["spraySun"] = {float(sun[0]), float(sun[1]), float(sun[2])};
   in.f3["sprayColor"] = {0.93f, 0.95f, 0.97f};
@@ -2103,7 +2139,7 @@ void tick_water(cvc::app &app, WaterRT &rt, vtkRenderer *ren) {
     g->setShaderUniformf("uTime", static_cast<float>(t));
   }
   rt.laps.lap("uniforms");
-  tick_spray(app, rt, ren, q, spec, bias, ramp, cd.fade_m[0], cam, sun, t);
+  tick_spray(app, rt, ren, q, spec, fadeSpec, cd, wind.wind, bias, ramp, cam, sun, t);
   rt.laps.lap("spray");
   publish_laps(app, rt, rt.laps);
 }
@@ -2197,9 +2233,10 @@ std::shared_ptr<GraphicsNode> realize_water(SceneGraph &sg, const ari::SceneNode
   near->setVisible(false); // shown once the cascades are up (or the flat fallback is chosen)
   rt->near = near;
   rt->far = far;
-  // The wind-blown spray (OceanSpray): a mesh of particles in the volume layer (after the cloud
-  // deck, like the rain's streaks), out of the bounds, shown in a strong wind once the persistent
-  // foam runs.
+  // The wind-blown spray (OceanSpray): a mesh of particles in the volume layer like the rain's
+  // streaks (after the cloud deck once a cloud_sky lists the water, or the spray, among its
+  // receivers; else in the renderer's order), out of the bounds and so never culled, shown once
+  // the cascades are up in a wind whose gusts could throw spray (tick_spray).
   rt->sprayKey = seed(app, pref, n, "water.spray", n.props.num("spray", 1.0));
   rt->lodSprayKey = seed(app, pref, n, "water.lod_spray", n.props.num("lod_spray", 160.0));
   rt->sprayCount = std::clamp(static_cast<int>(n.props.num("spray_count", 8000.0)), 0, 65536);

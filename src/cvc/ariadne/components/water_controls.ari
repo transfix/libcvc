@@ -91,7 +91,7 @@ units:
         lo: 0.0
         hi: 2.0
         fmt: "%.2f"
-        tooltip: "the spray a strong wind (9 to 20 m/s and up) tears off the breaking crests (0: none)"
+        tooltip: "the spray a strong wind's gusts (9 to 20 m/s and up) tear off the breaking crests (0: none)"
       - slider_float: Shore fade (m)
         bind: "{keys}.shore_fade"
         lo: 0.5
