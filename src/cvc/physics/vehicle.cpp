@@ -630,7 +630,8 @@ void vehicle_set::pre_step(world_backend &be, const field_set &fields, const wor
         rear = a.x;
         have_rear = true;
       }
-    const double t = det::tan(v.steer);
+    // Not `t`, the field time the aero reads the air at below.
+    const double tan_steer = det::tan(v.steer);
     const double relax = std::min(1.0, dt / kMediumTime);
     std::vector<double> steer(2 * d.axles.size(), 0.0), load(2 * d.axles.size(), 0.0);
     for (std::size_t ai = 0; ai < d.axles.size(); ++ai) {
@@ -639,7 +640,7 @@ void vehicle_set::pre_step(world_backend &be, const field_set &fields, const wor
         const std::size_t w = 2 * ai + side;
         const double y = side == 0 ? a.half_track : -a.half_track;
         if (a.steered && L > 0.0)
-          steer[w] = det::atan((a.x - rear) * t / (L - y * t));
+          steer[w] = det::atan((a.x - rear) * tan_steer / (L - y * tan_steer));
         // The medium answers the load over kMediumTime: a wheel touching down settles into
         // its rut as the load builds, rather than drumming on it.
         const wheel_state &ws = v.readback.wheels[w].state;
@@ -696,10 +697,10 @@ void vehicle_set::pre_step(world_backend &be, const field_set &fields, const wor
         const double nn = std::sqrt(dot(n, n));
         if (touching > 0 && nn > 0.0) {
           n = n * (1.0 / nn);
-          vec3 t = fwd - n * dot(fwd, n); // forward, along the ground
-          const double tn = std::sqrt(dot(t, t));
+          const vec3 ground_fwd = fwd - n * dot(fwd, n); // forward, along the ground
+          const double tn = std::sqrt(dot(ground_fwd, ground_fwd));
           if (tn > 0.0)
-            grade = -dir * dot(cfg.gravity, t * (1.0 / tn));
+            grade = -dir * dot(cfg.gravity, ground_fwd * (1.0 / tn));
         }
       }
       const double u = want + grade + kGain * (want - got) + v.accel_trim;
