@@ -612,7 +612,7 @@ const char *const kWaterFsLight =
     "    float nstep = uWaves > 0.5 ? uCell : 1.0 + 0.004*distXY;\n"
     "    vec3 full = oWaterFull(N, Vd, uSunDir, sunShade, vWaterPos.z - uLevel, bub, uWindU, fp,\n"
     "                           nstep, vec3(uTile0, uTile1, uTile2), 0.5/uHalfTexel, inN,\n"
-    "                           vWaterRest, uWindDir.xy, uTime);\n"
+    "                           vWaterRest, fdx, fdy, uWindDir.xy, uTime);\n"
     "    col = sd >= 1.0 ? full : mix(col, full, sd);\n"
     "  }\n"
     // a ruffled patch (the cat's paws above) mirrors less of the bright sky

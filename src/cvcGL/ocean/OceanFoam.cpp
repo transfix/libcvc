@@ -124,23 +124,53 @@ const char *const kOceanFoamGLSL =
     "  return mss*dot(vec3(0.06, 0.30, 0.64), lost);\n"
     "}\n"
     "float oAlpha(float mss){ return clamp(sqrt(2.0*(mss + 0.0009)), 0.012, 0.62); }\n"
-    // Ripples the normal leaves out, for the sun to glitter on: six short gravity waves (1.7 m
-    // down to 0.43 m, spread about the wind wd, each moving at its own speed: sqrt(g k)), of equal
-    // steepness, scaled to an RMS slope of sigma on each axis (six unit slopes in spread
-    // directions: about sqrt(6 / 4)). Waves rather than a noise's gradient: a lattice's cells print
-    // a crosshatch on the glitter. Returns the slope (dz/dx, dz/dy).
-    "vec2 oMicroSlope(vec2 p, vec2 wd, float t, float sigma){\n"
-    "  const float L[6] = float[6](1.7, 1.23, 0.93, 0.71, 0.55, 0.43);\n"
-    "  const float A[6] = float[6](-0.87, 0.35, -0.26, 0.79, -0.52, 0.17);\n" // radians off wd
-    "  const float P[6] = float[6](0.0, 2.1, 4.4, 1.3, 5.2, 3.0);\n"
+    // Ripples the normal leaves out, for the sun to glitter on: twelve short gravity waves (1.7 m
+    // down to 0.43 m in equal ratios, spread about the wind wd by a golden-ratio sequence within
+    // 0.95 rad, at scattered phases, each moving at its own speed: sqrt(g k)), of equal
+    // steepness, scaled to an RMS slope of sigma on each axis (twelve unit slopes in spread
+    // directions: about sqrt(12 / 4)). Waves rather than a noise's gradient: a lattice's cells
+    // print a crosshatch on the glitter. Twelve, not six: six fixed waves of equal steepness sum
+    // to a pattern that repeats, read as parallel ridges near the camera and a diagonal lattice
+    // further off. Each fades out as the pixel stops resolving it, by how far its phase turns
+    // across the pixel (dpx, dpy: p's screen derivatives, m a pixel): whole within an eighth of a
+    // turn (eight pixels a crest), gone at a quarter (four). Past that a fixed wave, sampled once
+    // a pixel, aliases, and in perspective its alias is a zone plate: rings round the screen point
+    // where it is one crest a pixel (terrain_lab's lake from 140 m). It is the pixel's long axis,
+    // down the view at a grazing angle, that aliases, so each wave is measured along its own
+    // direction, not against an isotropic footprint. kept is the share of their slope variance
+    // left (the weights' squares over 12), for the caller to give the rest to the lobe. Returns
+    // the slope (dz/dx, dz/dy).
+    "vec2 oMicroSlope(vec2 p, vec2 dpx, vec2 dpy, vec2 wd, float t, float sigma, out float kept){\n"
+    // Wavelengths 1.7, 1.5, 1.32, 1.17, 1.03, 0.91, 0.803, 0.709, 0.626, 0.552, 0.487 and 0.43 m
+    // as wavenumbers K (2 pi / L) and frequencies W (sqrt(g K)); their directions off wd, 0, -0.73,
+    // 0.45, -0.28, 0.90, 0.17, -0.55, 0.62, -0.11, -0.83, 0.34 and -0.38 rad, as (cos, sin) in C.
+    "  const float K[12] = float[12](3.696, 4.189, 4.760, 5.370, 6.100, 6.905, 7.825, 8.862, "
+    "10.04, 11.38, 12.90, 14.61);\n"
+    "  const float W[12] = float[12](6.021, 6.410, 6.833, 7.258, 7.736, 8.230, 8.761, 9.324, "
+    "9.923, 10.57, 11.25, 11.97);\n"
+    "  const vec2 C[12] = vec2[12](vec2(1.0, 0.0), vec2(0.7452, -0.6669), vec2(0.9004, 0.4350),\n"
+    "    vec2(0.9611, -0.2764), vec2(0.6216, 0.7833), vec2(0.9856, 0.1692),\n"
+    "    vec2(0.8525, -0.5227), vec2(0.8139, 0.5810), vec2(0.9940, -0.1098),\n"
+    "    vec2(0.6749, -0.7379), vec2(0.9428, 0.3335), vec2(0.9287, -0.3709));\n"
+    "  const float P[12] = float[12](6.1, 4.6, 1.4, 0.3, 5.2, 6.1, 0.7, 0.8, 0.8, 4.9, 3.4, 2.1);\n"
     "  vec2 s = vec2(0.0);\n"
-    "  for (int i = 0; i < 6; ++i) {\n"
-    "    float c = cos(A[i]), sn = sin(A[i]);\n"
-    "    vec2 d = vec2(c*wd.x - sn*wd.y, sn*wd.x + c*wd.y);\n"
-    "    float k = 6.2831853/L[i];\n"
-    "    s += d*cos(k*dot(d, p) - sqrt(9.81*k)*t + P[i]);\n"
+    "  kept = 0.0;\n"
+    // A pixel too coarse for the longest wave whichever way it runs skips the loop: no direction
+    // turns less than k times the pixel's shortest axis, which is at least its area over the
+    // root of its axes' squares.
+    "  float shortest = abs(dpx.x*dpy.y - dpx.y*dpy.x)/max(length(vec4(dpx, dpy)), 1e-9);\n"
+    "  if (3.6959914*shortest >= 1.5707963) return s;\n" // 2 pi / 1.7 m
+    "  for (int i = 0; i < 12; ++i) {\n"
+    "    vec2 d = vec2(C[i].x*wd.x - C[i].y*wd.y, C[i].y*wd.x + C[i].x*wd.y);\n"
+    "    float turn = K[i]*length(vec2(dot(d, dpx), dot(d, dpy)));\n" // radians across the pixel
+    "    float w = 1.0 - smoothstep(0.7853982, 1.5707963, turn);\n"
+    "    if (w > 0.0) {\n"
+    "      kept += w*w;\n"
+    "      s += w*d*cos(K[i]*dot(d, p) - W[i]*t + P[i]);\n"
+    "    }\n"
     "  }\n"
-    "  return s*(sigma/1.2247449);\n"
+    "  kept /= 12.0;\n"
+    "  return s*(sigma/1.7320508);\n"
     "}\n"
     // The sun's GGX lobe (N, V, L unit; z up), widened by the sun's disc (0.00465 rad radius).
     "float oSunSpec(vec3 N, vec3 V, vec3 L, float a){\n"
@@ -180,20 +210,19 @@ const char *const kOceanFoamGLSL =
     // The A4 water. The slopes the normal N leaves out (the cascades' weights in it, inN; the
     // spacing of what it was differenced over, nstep) or the footprint fp covers are Cox-Munk's
     // for the wind U: ripples the pixel still resolves go into the normal for the sun to glitter
-    // on (oMicroSlope at p, fading out as the pixel grows past them), the rest widens the sun's
-    // lobe; Fresnel and the sky's reflection soften with the roughness; the body takes the light
-    // through backlit crests (crestH, m) and the bubbles; the sun's highlight rolls off rather
-    // than clipping (the colours are not HDR).
+    // on (oMicroSlope at p, each fading out as the pixel, dpx by dpy metres, grows past it), the
+    // rest widens the sun's lobe; Fresnel and the sky's reflection soften with the roughness; the
+    // body takes the light through backlit crests (crestH, m) and the bubbles; the sun's highlight
+    // rolls off rather than clipping (the colours are not HDR). dpx and dpy are p's screen
+    // derivatives, which the caller takes before any branch.
     "vec3 oWaterFull(vec3 N, vec3 V, vec3 L, float sunShade, float crestH, float bubbles,\n"
     "                float U, float fp, float nstep, vec3 tiles, float texels, vec3 inN,\n"
-    "                vec2 p, vec2 wd, float t){\n"
+    "                vec2 p, vec2 dpx, vec2 dpy, vec2 wd, float t){\n"
     "  float mss = oUnresolvedMss(U, max(fp, nstep), tiles, texels, inN);\n"
-    "  float micro = 1.0 - smoothstep(0.12, 0.5, fp);\n"
-    "  vec3 Nf = N;\n"
-    "  if (micro > 0.0)\n" // a pixel past the ripples skips them
-    "    Nf = normalize(vec3(N.xy/max(N.z, 1e-3) - oMicroSlope(p, wd, t, sqrt(0.3*mss*micro)), "
-    "1.0));\n"
-    "  float a = oAlpha(mss*(1.0 - 0.6*micro));\n"
+    "  float kept;\n" // the ripples' share of their variance the pixel resolves
+    "  vec2 ms = oMicroSlope(p, dpx, dpy, wd, t, sqrt(0.3*mss), kept);\n"
+    "  vec3 Nf = kept > 0.0 ? normalize(vec3(N.xy/max(N.z, 1e-3) - ms, 1.0)) : N;\n"
+    "  float a = oAlpha(mss*(1.0 - 0.6*kept));\n"
     "  float rough = sqrt(a);\n"
     "  float NoV = max(dot(Nf, V), 0.0);\n"
     "  vec3 R = 2.0*NoV*Nf - V;\n"
