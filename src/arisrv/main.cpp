@@ -47,8 +47,9 @@
 #include <cvc/ariadne/conference/room_avatar.h>    // seed_avatar_catalog (what avatars may wear)
 #include <cvc/ariadne/conference/room_calls.h> // room-call: clients' calls, run in arisrvx's Python
 #include <cvc/ariadne/conference/room_chat.h>  // room chat and direct messages
-#include <cvc/ariadne/conference/room_intrinsics.h>       // room_leave (retract a departed peer)
-#include <cvc/ariadne/conference/room_lane.h>             // the pose lane + lane signaling
+#include <cvc/ariadne/conference/room_entities.h>   // room_entity_relay (the document's vehicles)
+#include <cvc/ariadne/conference/room_intrinsics.h> // room_leave (retract a departed peer)
+#include <cvc/ariadne/conference/room_lane.h>       // the pose lane + lane signaling
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // room_relay_tick
 #include <cvc/ariadne/conference/room_net.h>        // per-participant + room link-quality stats
 #include <cvc/ariadne/conference/room_pose_relay.h> // room_pose_relay (avatar pose snapshots)
@@ -61,11 +62,12 @@
 #include <cvc/ariadne/host_cli.h>        // --set KEY=VALUE, as ari and arigl take it
 #include <cvc/ariadne/host_signals.h>    // SIGINT and SIGTERM stop this app's relay
 #include <cvc/ariadne/loader.h>          // load_file: the stock world documents
+#include <cvc/ariadne/scene_world.h>     // the server document's world (its vehicles)
 #include <cvc/ariadne/server_document.h> // --doc: the server document and what it publishes
 #include <cvc/ariadne/stream/stream_relay.h>
 #include <cvc/ariadne/stream_intrinsics.h> // a server document's streams and rasters
-#include <cvc/ariadne/uri.h>         // cvc://worlds/... (register_cvc_uri_handler)
-#include <cvc/ariadne/world_rules.h> // the world: block (world_rules_from)
+#include <cvc/ariadne/uri.h>               // cvc://worlds/... (register_cvc_uri_handler)
+#include <cvc/ariadne/world_rules.h>       // the world: block (world_rules_from)
 #include <cvc/core/app.h>
 #include <cvc/media/media_router.h> // protocol-agnostic media hub (WS + gRPC + future protocols)
 #include <cvc/net/fast_lane_rtc.h>  // the unreliable lane (WebRTC data channels)
@@ -1367,6 +1369,10 @@ int main(int argc, char **argv) {
     std::fflush(stdout);
   }
   const auto room_start = std::chrono::steady_clock::now();
+  // The room's entities (WD3): the vehicles the server document's world runs. Their identities go
+  // into the room tree when they change, before this step's drain publishes it, and their poses
+  // ride the viewers' pose snapshots.
+  cvc::ariadne::conference::room_entity_relay entity_relay;
   const auto room_step = [&] {
     const double now_s =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - room_start).count();
@@ -1378,11 +1384,15 @@ int main(int argc, char **argv) {
       bridge_step();
 #endif
     chat->step(now_s);
+    const cvc::ariadne::SceneWorld *docWorld =
+        serverDoc ? serverDoc->runtime().scene_world() : nullptr;
+    const std::vector<cvc::ariadne::pose_subject> &entities =
+        entity_relay.step(app, room, docWorld ? docWorld->vehicles() : nullptr);
     cvc::ariadne::conference::relay_room_step(shard, planes, aoi_relay.get(), server_holon, now_s,
                                               trimJournal);
     const std::shared_ptr<const cvc::ariadne::conference::aoi_snapshot> tiers =
         aoi_relay ? aoi_relay->snapshot() : nullptr;
-    pose_relay.step(server_holon, room_steps++, tiers.get());
+    pose_relay.step(server_holon, room_steps++, tiers.get(), &entities);
   };
   const char *room_debug_env = std::getenv("CVC_ARISRV_ROOM_DEBUG");
   const bool room_debug =

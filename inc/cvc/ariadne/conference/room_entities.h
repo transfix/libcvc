@@ -1,0 +1,110 @@
+/*
+  Copyright 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+*/
+
+// A room's entities (ARIADNE_WORLDS.md §4, WD3): what moves in the room's world besides its
+// participants, which today means the vehicles its relay's document runs (ServerDocument, its
+// SceneWorld's WorldVehicles). Two halves:
+//
+// - Who they are: the room tree's entities section, conf.rooms.<room>.entities (a revisioned
+//   section, section.h), one subtree per entity under entity_key(id):
+//
+//     conf.rooms.<room>.entities.e<id>.{ present, name, archetype, plant, controller, team,
+//                                        color, color2, size, wheels, look.kind, look.path,
+//                                        look.scale, look.yaw, look.z, look.fit }
+//     conf.rooms.<room>.entities.{ epoch, at, rev }
+//
+//   written when they change: a spawn, a removal, a new world (WorldVehicles::revision). An entity
+//   that went stays with present 0, as the room's objects do.
+// - Where they are: the pose stream (pose_stream.h), beside the participants, under entity_pid(id)
+//   ("~e<id>": no participant's pid, a state name, starts with '~'). A client plays them out with a
+//   holon of their own (holon_sync's entity_pump), the participants' playout without bodies.
+#ifndef __CVC_ARIADNE_CONFERENCE_ROOM_ENTITIES_H__
+#define __CVC_ARIADNE_CONFERENCE_ROOM_ENTITIES_H__
+
+#include <array>
+#include <cstdint>
+#include <cvc/ariadne/pose_stream.h> // pose_subject
+#include <cvc/ariadne/section.h>
+#include <cvc/ariadne/world_rules.h> // vehicle_look
+#include <string>
+#include <vector>
+
+namespace cvc {
+class app;
+namespace ariadne {
+class WorldVehicles;
+namespace conference {
+
+// An entity as a client draws it.
+struct room_entity {
+  std::uint64_t id = 0;
+  std::string name, archetype, plant, controller;
+  int team = 0;
+  std::array<float, 3> color{0.85f, 0.70f, 0.20f};
+  std::array<float, 3> color2{0.12f, 0.12f, 0.14f};
+  // Its chassis box, full extents in metres (x forward, y left, z up), as its plant has it.
+  std::array<double, 3> size{4.5, 2.0, 1.0};
+  // Its wheels: the wheelbase, the track and a wheel's radius (m); a boat's are 0.
+  std::array<double, 3> wheels{3.3, 1.82, 0.45};
+  // Its archetype's look; a file's or an asset's path is its file name alone (the relay's own path
+  // means nothing to a client, which finds the file its own way).
+  vehicle_look look;
+  bool operator==(const room_entity &) const = default;
+};
+
+// "e<id>", its subtree's name; "~e<id>", its pid on the pose stream; and back (false for a pid
+// that is not an entity's).
+std::string entity_key(std::uint64_t id);
+std::string entity_pid(std::uint64_t id);
+bool parse_entity_pid(const std::string &pid, std::uint64_t &id);
+bool is_entity_pid(const std::string &pid);
+
+// conf.rooms.<room>.entities.
+std::string room_entities_path(const std::string &room);
+
+// Write `entities` as the room's entities section: each one's fields, present 0 for every entity
+// the section has that `entities` does not, then the revision (section_writer::commit, `epoch` as
+// it takes it). Returns the stamp.
+section_stamp write_room_entities(cvc::app &app, const std::string &room,
+                                  const std::vector<room_entity> &entities,
+                                  std::uint64_t epoch = 0);
+// The present entities, by id; and the section's stamp, to tell when to read them again.
+std::vector<room_entity> read_room_entities(cvc::app &app, const std::string &room);
+section_stamp read_room_entities_stamp(cvc::app &app, const std::string &room);
+
+// The entities `vehicles` runs, as the room carries them: the placed ones, in id order.
+std::vector<room_entity> room_entities_of(const WorldVehicles &vehicles);
+// Their poses now, as the pose stream's subjects (pid entity_pid(id)): the chassis's centre, its
+// heading as a rotation about +z, and its velocity.
+std::vector<pose_subject> entity_pose_subjects(const WorldVehicles &vehicles);
+
+// The relay's half, one per room: each step(), the section rewritten when the vehicles changed,
+// and their poses for the pose stream (room_pose_relay::step's `entities`).
+class room_entity_relay {
+public:
+  // `vehicles` null (no document, or a world without vehicles): the section empties once.
+  const std::vector<pose_subject> &step(cvc::app &app, const std::string &room,
+                                        const WorldVehicles *vehicles);
+  // The section's writes so far (each a whole rewrite).
+  std::uint64_t writes() const { return _writes; }
+
+private:
+  const WorldVehicles *_vehicles = nullptr;
+  std::uint64_t _rev = 0;
+  bool _written = false;
+  std::uint64_t _writes = 0;
+  std::vector<pose_subject> _subjects;
+};
+
+} // namespace conference
+} // namespace ariadne
+} // namespace cvc
+
+#endif // __CVC_ARIADNE_CONFERENCE_ROOM_ENTITIES_H__

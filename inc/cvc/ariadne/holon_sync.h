@@ -19,11 +19,14 @@
 #include <cstdint>
 #include <cvc/ariadne/avatar_physics.h> // avatar_static
 #include <cvc/ariadne/avatar_sim.h>
-#include <cvc/ariadne/holon.h>       // holon_config
-#include <cvc/ariadne/pose_stream.h> // pose_stream_decoder
+#include <cvc/ariadne/conference/room_entities.h> // room_entity
+#include <cvc/ariadne/holon.h>                    // holon_config
+#include <cvc/ariadne/pose_stream.h>              // pose_stream_decoder
+#include <cvc/ariadne/section.h>                  // section_stamp
 #include <cvc/core/namespace.h>
 #include <cvc/physics/body.h>
 #include <cvc/state/pose_snapshot.h>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -160,12 +163,55 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
 // its playout). One the holon does not have yet (the roster has not replicated it) is skipped;
 // client_pump registers it, and its next entry is its first sample. Call it on the frame's thread,
 // before client_pump. Returns the samples applied; 0 for a snapshot out of step (decoder::gaps).
+class entity_playout;
+//
+// The room's entities ride the same snapshots under their entity pids (room_entities.h): with
+// ENTITIES, each of their samples goes to it; without, they are skipped like any pid the holon
+// does not have. They count among the samples applied.
 std::size_t apply_pose_snapshot(holon &h, pose_stream_decoder &decoder,
-                                const cvc::pose_snapshot &snap);
+                                const cvc::pose_snapshot &snap, entity_playout *entities = nullptr);
 // The same for samples decoded elsewhere (the fast lane decodes, and acknowledges, on its own
 // thread: room_lane_session::set_on_pose_samples), at the snapshot's SERVER_TICK.
 std::size_t apply_pose_samples(holon &h, const std::vector<pose_sample> &samples,
-                               std::uint64_t server_tick);
+                               std::uint64_t server_tick, entity_playout *entities = nullptr);
+
+// CLIENT: the room's entities (room_entities.h; ARIADNE_WORLDS.md WD3), played out from the pose
+// stream by a holon of their own: a client holon without physics, so each entity is shown as a
+// peer avatar is (behind its newest sample by the playout's delay, eased between samples, carried
+// on along its velocity past a late one) with no body in any world. Who they are comes from the
+// room's entities section, read again when its revision moves.
+class entity_playout {
+public:
+  explicit entity_playout(holon_config cfg = holon_config{});
+  ~entity_playout();
+  entity_playout(const entity_playout &) = delete;
+  entity_playout &operator=(const entity_playout &) = delete;
+
+  // A sample of entity pid `pid` at SERVER_TICK (apply_pose_samples gives them): the entity's first
+  // one adds it to the playout. False for a pid that is not an entity's.
+  bool apply(const std::string &pid, const cvc::physics::body_state &state,
+             std::uint64_t server_tick);
+  // One frame: the room's entities section (when its revision moved), an entity it no longer lists
+  // dropped from the playout, then the playout advanced (`wall_dt` as client_pump's).
+  void pump(cvc::app &app, const std::string &room, double wall_dt = -1.0);
+
+  // The entities the section lists as present, by id; and the one with `id` (null for none).
+  const std::vector<conference::room_entity> &entities() const { return _entities; }
+  const conference::room_entity *find(std::uint64_t id) const;
+  // The ids being played out (a sample has arrived), in id order.
+  std::vector<std::uint64_t> shown() const;
+  // Where entity `id` is shown this frame; false before its first sample.
+  bool pose(std::uint64_t id, cvc::physics::pose &out) const;
+  // Bumps whenever the section's entities or the ones shown change (a view rebuilds on it).
+  std::uint64_t revision() const { return _rev; }
+  holon &playout() { return *_holon; }
+
+private:
+  std::unique_ptr<holon> _holon;
+  section_stamp _stamp;
+  std::vector<conference::room_entity> _entities;
+  std::uint64_t _rev = 0;
+};
 
 // Propose the local avatar's intent (client side): the client holon predicts with it from its next
 // tick, and it is written to <self>.intent stamped with that tick, for the server to validate and

@@ -25,6 +25,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cvc/ariadne/conference/room_entities.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/script_engine.h> // a client guest's engine (client_guests:)
 #include <cvc/ariadne/server_document.h>
@@ -401,6 +402,26 @@ scene:
   EXPECT_EQ(vehicles->size(), 7u) << value("vehicles.spawn.status");
   EXPECT_EQ(value("vehicles.spawn.status").rfind("spawned 2, the last 7", 0), 0u)
       << value("vehicles.spawn.status");
+
+  // What the relay sends of them (room_entities.h): each one's identity in the room's entities
+  // section, and its pose for the pose stream.
+  cvc::ariadne::conference::room_entity_relay relay;
+  const std::vector<ari::pose_subject> &poses = relay.step(app, kRoom, vehicles);
+  ASSERT_EQ(poses.size(), 7u);
+  EXPECT_EQ(poses[0].pid, "~e1");
+  const std::vector<cvc::ariadne::conference::room_entity> listed =
+      cvc::ariadne::conference::read_room_entities(app, kRoom);
+  ASSERT_EQ(listed.size(), 7u);
+  EXPECT_EQ(listed[0].name, "rover 1");
+  EXPECT_EQ(listed[0].plant, "kinematic");
+  EXPECT_GT(listed[0].size[0], 0.5) << "its chassis's length";
+  EXPECT_EQ(relay.writes(), 1u);
+  relay.step(app, kRoom, vehicles);
+  EXPECT_EQ(relay.writes(), 1u) << "rewritten only when they change";
+  vehicles->despawn(listed[0].id);
+  relay.step(app, kRoom, vehicles);
+  EXPECT_EQ(relay.writes(), 2u);
+  EXPECT_EQ(cvc::ariadne::conference::read_room_entities(app, kRoom).size(), 6u);
 }
 
 // The document's own state is never published, whatever prefix it binds under: an entry that is
