@@ -459,6 +459,47 @@ TEST(PhysicsVehicle, ACrosswindPushesTheCarAside) {
   EXPECT_LT(s.aero_force.y / d.mass, 0.5) << "a modest push: under 0.05 g";
 }
 
+// The aero reads a gusting wind at the world's field time. A Humvee stands with its wheels turned
+// in a 10 m/s wind of gustiness 0.5, at field time 37 s: the air at its centre of mass is the wind
+// there at 37 s. (The vehicle step's steering tangent once shadowed the field time, so the air was
+// read at tan(steer) seconds; a steady wind, as above, never showed it.)
+TEST(PhysicsVehicle, TheAeroReadsAGustingWindAtTheFieldTime) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  flat_ground(w, 0.9);
+  const auto gusts = std::make_shared<wind_flow>(cvc::algo::wind_state{10.0, 0.4, 0.5});
+  field air;
+  air.kind = field_kind::flow;
+  air.wind = gusts;
+  w.add_field(air);
+  const vehicle_id v = settled_humvee(w);
+  w.drive(v, {0.4, 0.0}); // turn the wheels, standing on the brakes
+  w.step(200);
+  w.set_field_time(37.0);
+  const vehicle_state s0 = w.vehicle_state(v);
+  const double t0 = w.field_time();
+  w.step(); // reads the air at s0's centre of mass, at t0
+  const vehicle_state s1 = w.vehicle_state(v);
+  const auto crossp = [](const vec3 &a, const vec3 &b) {
+    return vec3{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+  };
+  const quat &q = s0.body.rotation;
+  const vec3 qv{q.x, q.y, q.z}, cm = vehicle_desc::humvee().center_of_mass;
+  const vec3 tq = crossp(qv, cm) * 2.0;
+  const vec3 com = s0.body.position + cm + tq * q.w + crossp(qv, tq);
+  const vec3 want = gusts->velocity(com, t0);
+  const vec3 wrong = gusts->velocity(com, std::tan(s1.steer));
+  std::printf("  steer %.3f rad: the air %.3f, %.3f m/s; the wind at %.0f s %.3f, %.3f, at "
+              "tan(steer) = %.3f s %.3f, %.3f\n",
+              s1.steer, s1.air_velocity.x, s1.air_velocity.y, t0, want.x, want.y,
+              std::tan(s1.steer), wrong.x, wrong.y);
+  EXPECT_NEAR(s1.steer, 0.4, 1e-9);
+  EXPECT_NEAR(s1.air_velocity.x, want.x, 1e-9);
+  EXPECT_NEAR(s1.air_velocity.y, want.y, 1e-9);
+  EXPECT_GT(std::hypot(want.x - wrong.x, want.y - wrong.y), 0.5)
+      << "the gusts at the two times differ, so the test tells them apart";
+}
+
 // --- determinism -----------------------------------------------------------------------------
 
 // Gate (9): the same drive twice gives the same hash; a save, restore into a fresh world and
