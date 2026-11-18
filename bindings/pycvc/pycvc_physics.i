@@ -1771,6 +1771,7 @@ PyObject *nav_sim_world_publish(PyObject *handle, std::shared_ptr<cvc::app> app,
 %feature("kwargs") pycvc::plant_host::plant_host;
 %feature("kwargs") pycvc::plant_host::use;
 %feature("kwargs") pycvc::plant_host::pull;
+%feature("kwargs") pycvc::plant_host::set_water;
 
 %inline %{
 namespace pycvc {
@@ -1844,7 +1845,48 @@ public:
     }
     host_ = std::make_unique<cvc::physics::plant_host>(opts_);
     host_->set_geometry(copy.get());
+    host_->set_water(water_); // the boats' water outlives a new host
     geometry_ = std::move(copy);
+  }
+
+  // The boats' water ("dynamicboat"; plant_host::set_water): a fluid field of fresh water (1000
+  // kg/m^3) with its top at `level` (m), `depth` deep, over a square of `half_size` (m; 0: the
+  // flat ground's half extent) about the origin, its top flat (set_water_surface gives it a
+  // free surface). Takes effect at the next use(). Without water under it (or a fluid field in
+  // the geometry) a boat's start is refused. `app` holds the field's volume.
+  void set_water(std::shared_ptr<cvc::app> app, double level = 0.0, double depth = 20.0,
+                 double half_size = 0.0) {
+    if (!app)
+      throw std::invalid_argument("plant_host.set_water: app is None");
+    if (!(depth > 0.0) || !std::isfinite(level))
+      throw std::invalid_argument("plant_host.set_water: depth must be positive, level finite");
+    const double h = half_size > 0.0 ? half_size : opts_.ground_half_size;
+    auto box = std::make_shared<cvc::volume>(
+        *app, cvc::dimension(2, 2, 2), cvc::Float,
+        cvc::bounding_box(-h, -h, level - depth, h, h, level));
+    box->fill(1000.0); // kg/m^3
+    auto f = std::make_shared<cvc::physics::field>();
+    f->kind = cvc::physics::field_kind::fluid;
+    f->volume = box;
+    f->drag_coefficient = 1.0;
+    f->damping = 1.0e4;
+    water_ = f;
+    host_->set_water(water_);
+  }
+  // The water's free surface (a pycvc.still_surface or wave_train_surface) in place of its flat
+  // top, from the next use(). Raises without set_water first.
+  void set_water_surface(std::shared_ptr<const cvc::physics::fluid_surface> surface) {
+    if (!water_)
+      throw std::logic_error("plant_host.set_water_surface: no water (set_water first)");
+    auto f = std::make_shared<cvc::physics::field>(*water_);
+    f->surface = std::move(surface);
+    water_ = f;
+    host_->set_water(water_);
+  }
+  // No water of the host's own (the geometry's fluid fields alone).
+  void clear_water() {
+    water_.reset();
+    host_->set_water(nullptr);
   }
 
   // Put sim's agents on `vehicle`, at their poses, at rest, in a new world. Returns what they
@@ -1869,8 +1911,10 @@ public:
   std::string vehicle() const { return host_->vehicle(); } // what use() was last asked for
   std::string driving() const { return host_->driving(); } // what the agents drive
   bool fallback() const { return host_->fallback(); }
-  // "kinematic", "jolt", "dynamic" or "dynamic4w".
+  // "kinematic", "jolt", "dynamic", "dynamic4w" or "dynamicboat".
   std::string kind() {
+    if (host_->dynamic_boat())
+      return "dynamicboat";
     if (host_->dynamic4w())
       return "dynamic4w";
     if (host_->dynamic())
@@ -1946,6 +1990,7 @@ private:
   cvc::physics::plant_host_options opts_;
   std::unique_ptr<cvc::world::world_geometry> geometry_; // borrowed by host_, so it goes after it
   std::unique_ptr<cvc::physics::plant_host> host_;
+  std::shared_ptr<const cvc::physics::field> water_; // set_water: given to every new host_
   PyObject *sim_ = nullptr;
 };
 
