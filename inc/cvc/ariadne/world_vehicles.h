@@ -360,6 +360,13 @@ public:
   void reseed(std::uint64_t seed);
   // Whether nav@1 draws another goal when it reaches one (on by default). Off, it parks there.
   void set_wander(bool wander);
+  // Whether vehicles steer around each other (on by default): each navigator's separation pushes
+  // its carrot away from every vehicle near it, its own fleet's and the other plants' alike
+  // (cvc::nav::sim_world::set_foreign_agents), at the nav demos' radius and strength for the
+  // world's largest vehicle. The vehicles.avoid key ("0" or "1") sets it too, read each poll; a
+  // document's init: may set it before the world is made.
+  void set_avoid(bool avoid);
+  bool avoid() const;
   // Entity `id`'s command for the navigator's next tick only, in place of its controller's: the
   // steering's bicycle angle (rad, + left) and the acceleration along its heading (m/s^2), held to
   // its envelope as the navigator's own command is. Either not finite: its controller drives that
