@@ -234,11 +234,46 @@ private:
   bool _crosses;
 };
 
+namespace {
+
+// Whether the sweep in intersects_proper (get_intersection_points(..., true, false) over the
+// polygon's edges and the segment) can report a point. The sweep tests every pair of segments
+// whose x ranges overlap and reports a pair only when do_intersect holds, except a contact at one
+// shared endpoint of each (end_end, which those flags leave out). A simple polygon's edges report
+// nothing among themselves (they meet only at shared endpoints). So no edge meeting the segment,
+// other than at a shared endpoint without lying on its line, means no points: intersects_proper
+// is false, and the sweep need not run. Anything else, a degenerate segment or edge included,
+// goes to the sweep. This is the OTV table's common case (a candidate segment that meets no
+// contour), and the sweep was nearly all of its time.
+bool sweep_reports_a_point(const Segment_2 &segment, const Polygon_2 &polygon) {
+  const Point_2 &p = segment.source(), &q = segment.target();
+  const Number_type x0 = std::min(p.x(), q.x()), x1 = std::max(p.x(), q.x());
+  const Number_type y0 = std::min(p.y(), q.y()), y1 = std::max(p.y(), q.y());
+  const std::size_t n = polygon.size();
+  for (std::size_t i = 0; i < n; ++i) {
+    const Point_2 &a = polygon[i], &b = polygon[(i + 1) % n];
+    if (std::max(a.x(), b.x()) < x0 || std::min(a.x(), b.x()) > x1 || std::max(a.y(), b.y()) < y0 ||
+        std::min(a.y(), b.y()) > y1)
+      continue;
+    if (!do_intersect(segment, Segment_2(a, b)))
+      continue;
+    const bool shared = xy_equal(p, a) || xy_equal(p, b) || xy_equal(q, a) || xy_equal(q, b);
+    if (shared && !(collinear(p, q, a) && collinear(p, q, b)))
+      continue;
+    return true;
+  }
+  return false;
+}
+
+} // namespace
+
 /// Returns true if the segment crosses a boundary line of the polygon.
 /// It is not enough for the segment to simply intersect the boundary
 /// line -- it must cross it such that the segment extends to both inside
 /// and outside of the boundary of the polygon.
 bool intersects_proper(const Segment_2 &segment, const Polygon_2 &polygon) {
+  if (!sweep_reports_a_point(segment, polygon))
+    return false; // the sweep's points would be empty: see sweep_reports_a_point
 
   Point_2 seg_pts[] = {segment.source(), segment.target()};
 
