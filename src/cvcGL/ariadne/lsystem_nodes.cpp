@@ -24,6 +24,9 @@
   dimmed by the cloud above) port ABYSSAL's skyVis (github.com/Token-Gremlin/natural-disasters,
   src/sky/Clouds.js at 849ff7f4), MIT licensed, Copyright (c) 2026 Davi (Token-Gremlin).
   MIT notice retained; see THIRD_PARTY_NOTICES.md.
+
+  The rain rings' hash (cloudHash3) follows Dave Hoskins' "Hash without Sine" (hash32), MIT
+  licensed, Copyright (c) 2014 David Hoskins; see THIRD_PARTY_NOTICES.md.
 */
 
 // lsystem_nodes.cpp — the custom scene node realizers (see lsystem_nodes.h). Thin cvcGL wrappers:
@@ -675,6 +678,7 @@ float cloudFlashLit(vec3 pVC) {
 // Raindrop rings on water (O19), procedural: hashed cells of RING_CELL metres, a share of them as
 // large as the rain rate here holding a drop that falls every 1.2 to 2.2 s, its ring spreading at
 // 0.45 m/s, a few crests 0.22 m apart, fading; their slopes tilt the normal n (as -dz/dx, -dz/dy over z), within 70 m.
+// After Dave Hoskins' Hash without Sine (hash32), MIT: THIRD_PARTY_NOTICES.md.
 vec3 cloudHash3(vec2 c) {
   vec3 p = fract(vec3(c.xyx) * vec3(0.1031, 0.1030, 0.0973));
   p += dot(p, p.yxz + 33.33);

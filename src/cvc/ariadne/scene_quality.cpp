@@ -130,6 +130,7 @@ WaterQuality water_quality(int tier, double scale) {
   case 1:
     q.shade = q.foam = 0.5;
     q.wake_cells = 128;
+    q.spray = q.spray_reach = 0.5;
     break;
   case 2:
     q.shade = 0.25;
@@ -137,6 +138,7 @@ WaterQuality water_quality(int tier, double scale) {
     q.waves = q.far_normal = 0.5;
     q.persistent_foam = false;
     q.wake_cells = 128;
+    q.spray = q.spray_reach = 0.0;
     break;
   case 3:
     q.shade = q.foam = q.waves = 0.0;
@@ -144,6 +146,7 @@ WaterQuality water_quality(int tier, double scale) {
     q.persistent_foam = q.wake = false;
     q.wake_cells = 128;
     q.cascades = 2;
+    q.spray = q.spray_reach = 0.0;
     break;
   default:
     q.shade = q.foam = q.waves = 0.0;
@@ -151,12 +154,14 @@ WaterQuality water_quality(int tier, double scale) {
     q.persistent_foam = q.wake = false;
     q.wake_cells = 128;
     q.cascades = 2;
+    q.spray = q.spray_reach = 0.0;
     break;
   }
   q.shade *= s;
   q.foam *= s;
   q.waves *= s;
   q.far_normal *= s;
+  q.spray_reach *= s;
   return q;
 }
 

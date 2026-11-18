@@ -21,13 +21,19 @@
 #include "OceanCascades.h"
 #include "OceanFFT.h"
 #include "OceanFoam.h"
+#include "OceanSpray.h"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
+#include <cvc/algo/wind_field.h>
 #include <cvc/core/app.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/ocean/fetch.h>
 #include <cvc/ocean/h0.h>
+#include <cvc/ocean/shore.h>
 #include <cvc/ocean/whitecaps.h>
 #include <memory>
 #include <vector>
@@ -364,6 +370,56 @@ int main() {
       all.setActive(5);
       check(all.active() == 3, "setActive clamps to the cascades there are");
     }
+  }
+
+  // OceanSpray's inputs worked out on the CPU (section 10.5): the pulse's phases, from which the
+  // shader works out the whole wind's pulse when a particle rose; the most a gust raises the wind
+  // by; the grid of where the waves may break.
+  {
+    std::printf("== OceanSpray's inputs ==\n");
+    double worst = 0.0;
+    for (double t : {0.0, 17.3, 3600.7, 86400.25, 1.0e6 + 0.3})
+      for (double age : {0.0, 0.9, 1.8}) {
+        const std::array<float, 3> ph = oceanSprayPulse(t);
+        const double p = 0.5 * std::sin(ph[0] - 0.21 * age) +
+                         0.3 * std::sin(ph[1] - 0.21 * 2.37 * age) +
+                         0.2 * std::sin(ph[2] - 0.21 * 5.1 * age);
+        worst = std::max(worst, std::fabs(p - cvc::algo::gust_pulse(t - age)));
+      }
+    std::printf("  the pulse from sprayPulse, as the shader works it out: off by %.2e at most\n",
+                worst);
+    check(worst < 1e-5, "sprayPulse gives the wind's pulse when a particle rose (gust_pulse)");
+    const cvc::algo::wind_state gusty{10.0, 0.4, 0.6};
+    double most = 0.0;
+    for (int i = 0; i < 20000; ++i)
+      most = std::max(most, cvc::algo::wind_gust(gusty, 37.0 * i, -11.0 * i, 0.37 * i, 0.0));
+    std::printf("  the strongest particle gust (no fine scale) of 20000 at gustiness 0.6: x %.3f "
+                "(bound x %.3f)\n",
+                most, oceanSprayGustMax(0.6));
+    check(most <= oceanSprayGustMax(0.6) && most > 0.9 * oceanSprayGustMax(0.6),
+          "no particle's gust passes oceanSprayGustMax, and the bound is near the most one is");
+    // A 4 x 4 shore grid 10 m a cell: land in its first two columns, 1 m deep in the third, 50 m
+    // in the fourth (and past it); the waves fade over 20 m of depth.
+    cvc::ocean::shore_grid g;
+    g.rows = g.cols = 4;
+    g.cell = 10.0;
+    for (int r = 0; r < 4; ++r)
+      for (float d : {-1.0f, -1.0f, 1.0f, 50.0f})
+        g.depth.push_back(d);
+    std::array<float, kSprayGrid * kSprayGrid> open{}, lee{};
+    oceanSprayWeights(g, nullptr, 0.0, 20.0, 0.0, 0.0, 10.0, open);
+    cvc::ocean::fetch_field f; // 100 m of fetch everywhere, against 400 m fully grown
+    f.rows = f.cols = 4;
+    f.cell = 10.0;
+    f.fetch_m.assign(16, 100.0f);
+    oceanSprayWeights(g, &f, 400.0, 20.0, 0.0, 0.0, 10.0, lee);
+    std::printf("  the weights along a row: land %.2f, 1 m deep %.2f, deep %.2f, past the grid "
+                "%.2f; in the lee (a quarter of the full fetch) %.2f\n",
+                open[0], open[2], open[3], open[15], lee[15]);
+    check(open[0] == 0.0f && open[2] == 0.0f && std::fabs(open[3] - 1.0f) < 1e-6f &&
+              std::fabs(open[15] - 1.0f) < 1e-6f && std::fabs(lee[15] - 0.5f) < 1e-6f,
+          "the spray's weights: none on land or in the shallows, all on deep water, sqrt(F / "
+          "full) in the lee");
   }
 
   std::printf("%s: cvcgl_ocean_fft (%d check%s failed)\n", g_fail == 0 ? "PASS" : "FAIL", g_fail,

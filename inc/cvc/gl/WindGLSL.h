@@ -43,7 +43,9 @@ namespace gl {
 struct WindGLSL {
   // Uniforms (vec3s): uWindGust (gustiness, pulse, 0); uWindDriftL and uWindDriftF, wind_drift's
   // large and fine (x, y, 0).
-  // Functions: cvc_lattice_hash, cvc_noise (value, d/dx, d/dy) and cvc_wind_gust(p, fine).
+  // Functions: cvc_lattice_hash, cvc_noise (value, d/dx, d/dy), cvc_wind_gust(p, fine) and
+  // cvc_wind_gust_at(p, fine, pulse) (the gust for another time's pulse: uWindGust.y is this
+  // frame's).
   static const char *glsl() {
     return "uniform highp vec3 uWindGust; uniform highp vec3 uWindDriftL; uniform highp vec3 "
            "uWindDriftF;\n"
@@ -72,14 +74,18 @@ struct WindGLSL {
            "  return vec3(ab + (cd - ab)*s.y, ds.x*((b - a) + ((d - c) - (b - a))*s.y), "
            "ds.y*(cd - ab));\n"
            "}\n"
-           // the factor on the mean wind at world p (cvc::algo::wind_gust)
-           "float cvc_wind_gust(vec2 p, float fine){\n"
+           // the factor on the mean wind at world p (cvc::algo::wind_gust) for a given pulse of
+           // the whole wind (cvc::algo::gust_pulse at some time), and for this frame's pulse
+           "float cvc_wind_gust_at(vec2 p, float fine, float pulse){\n"
            "  if (uWindGust.x <= 0.0) return 1.0;\n"
            "  float n1 = cvc_noise(p*(1.0/120.0) - uWindDriftL.xy, 0x6057u).x;\n"
            "  float f = clamp(fine, 0.0, 1.0);\n"
            "  float n2 = f > 0.0 ? cvc_noise(p*(1.0/37.0) - uWindDriftF.xy, 0x6058u).x : 0.5;\n"
            "  float n = 0.65*n1 + 0.35*(0.5 + f*(n2 - 0.5));\n"
-           "  return max(0.0, 1.0 + uWindGust.x*(2.4*(n - 0.5) + 0.5*uWindGust.y));\n"
+           "  return max(0.0, 1.0 + uWindGust.x*(2.4*(n - 0.5) + 0.5*pulse));\n"
+           "}\n"
+           "float cvc_wind_gust(vec2 p, float fine){\n"
+           "  return cvc_wind_gust_at(p, fine, uWindGust.y);\n"
            "}\n";
   }
 
