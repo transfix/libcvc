@@ -1616,6 +1616,90 @@ TEST(AriadneWorldVehicles, VehiclesSteerAroundEachOtherOnOneAndManyPlants) {
   EXPECT_FALSE(v->avoid());
 }
 
+// What the navigators know (WorldVehicles::set_sense, the vehicles.sense key): the world's grid
+// whole (known, the default), or nothing at first and what their vehicles' rays find (fog).
+TEST(AriadneWorldVehicles, UnderFogTheNavigatorsSenseTheWorld) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const char *doc = R"(
+world:
+  vehicles:
+    archetypes:
+      car: { plant: kinematic, vehicle: { preset: humvee, max_speed: 6 }, controllers: [nav@1] }
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [120, 120, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+    - { node: b1, source: { box: { size: [10, 10, 6] } }, transform: { position: [-20, 0, 3] },
+        body: static }
+    - { node: b2, source: { box: { size: [10, 10, 6] } }, transform: { position: [20, 0, 3] },
+        body: static }
+    - { node: b3, source: { box: { size: [10, 10, 6] } }, transform: { position: [0, 20, 3] },
+        body: static }
+)";
+  const auto blocked = [](const std::vector<std::uint8_t> &occ) {
+    std::size_t n = 0;
+    for (std::uint8_t c : occ)
+      n += c ? 1 : 0;
+    return n;
+  };
+  LoadResult r = load_vehicles(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles *v = w->vehicles();
+  EXPECT_EQ(v->sense(), "known");
+  EXPECT_EQ(val(app, "vehicles.sense"), "known");
+  w->sync(&warnings);
+  for (int i = 0; i < 3; ++i) {
+    entity_spec e;
+    e.archetype = "car";
+    ASSERT_NE(v->spawn(e), 0u);
+  }
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  const auto run = [&](int frames) {
+    for (int k = 0; k < frames; ++k) {
+      clock.drive(1.0 / 60.0);
+      w->follow(app.world_clock());
+    }
+  };
+  run(10);
+  std::vector<std::uint8_t> known;
+  int rows = 0, cols = 0;
+  ASSERT_TRUE(v->belief("kinematic", known, rows, cols));
+  ASSERT_EQ(known.size(), static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols));
+  const std::size_t truth = blocked(known);
+  EXPECT_GT(truth, 0u) << "known: the grid, blocks and all";
+
+  EXPECT_FALSE(v->set_sense("xray"));
+  ASSERT_TRUE(v->set_sense("fog"));
+  EXPECT_EQ(val(app, "vehicles.sense"), "fog");
+  run(1);
+  std::vector<std::uint8_t> fog;
+  ASSERT_TRUE(v->belief("kinematic", fog, rows, cols));
+  const std::size_t first = blocked(fog);
+  EXPECT_LT(first, truth) << "fog: it starts knowing less than the grid";
+  run(600);
+  ASSERT_TRUE(v->belief("kinematic", fog, rows, cols));
+  const std::size_t later = blocked(fog);
+  EXPECT_GT(later, first) << "its rays found blocks";
+  EXPECT_LE(later, truth + truth / 4) << "and what it found is (about) what is there";
+  std::printf("  fog: %zu blocked cells at first, %zu after 10 s; the grid has %zu\n", first, later,
+              truth);
+  // The key sets it back.
+  cvc::state::instance(app)("vehicles.sense").value("known");
+  v->poll();
+  EXPECT_EQ(v->sense(), "known");
+}
+
 // ---------------------------------------------------------------------------------------------
 // Entity intents (ARIADNE_WORLDS.md section 14, S1): an entity steered from outside, by its keys,
 // a table of intents, a C++ (or Python) setter and a server document's published namespace.
