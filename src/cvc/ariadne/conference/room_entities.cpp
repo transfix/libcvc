@@ -126,6 +126,7 @@ section_stamp write_room_entities(cvc::app &app, const std::string &room,
     w.set({k, "color2"}, triple(e.color2));
     w.set({k, "size"}, triple(e.size));
     w.set({k, "wheels"}, triple(e.wheels));
+    w.set_double({k, "base_z"}, e.base_z);
     w.set({k, "look", "kind"}, e.look.kind);
     w.set({k, "look", "path"}, e.look.path);
     w.set_double({k, "look", "scale"}, e.look.scale);
@@ -161,6 +162,7 @@ std::vector<room_entity> read_room_entities(cvc::app &app, const std::string &ro
     read_triple(r.text({k, "color2"}), e.color2);
     read_triple(r.text({k, "size"}), e.size);
     read_triple(r.text({k, "wheels"}), e.wheels);
+    e.base_z = r.number({k, "base_z"}, -1.0);
     e.look.kind = r.text({k, "look", "kind"});
     e.look.path = r.text({k, "look", "path"});
     e.look.scale = r.number({k, "look", "scale"}, 1.0);
@@ -190,6 +192,7 @@ std::vector<room_entity> room_entities_of(const WorldVehicles &vehicles) {
     e.team = info.spec.team;
     e.color = info.spec.color;
     e.color2 = info.spec.color2;
+    e.base_z = info.ground_z - info.z;
     for (const vehicle_archetype &a : vehicles.archetypes()) {
       if (a.id != info.spec.archetype)
         continue;

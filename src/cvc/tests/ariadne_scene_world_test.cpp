@@ -1187,8 +1187,13 @@ TEST(AriadneWorldVehicles, LooksAreFoundWhereTheyAre) {
   const std::string humvee = find_vehicle_model("humvee");
   EXPECT_NE(humvee.find("Humvee.glb"), std::string::npos) << humvee;
   EXPECT_EQ(find_vehicle_model("no_such_vehicle.glb"), "");
+  // A name without an extension is its .glb (the vehicle-tactical-boat package's TacticalBoat).
+  std::ofstream(prefix / "share" / "cvc-scenes" / "shared" / "TacticalBoat.glb") << "glb";
+  const std::string boat = find_vehicle_model("TacticalBoat");
+  EXPECT_NE(boat.find("TacticalBoat.glb"), std::string::npos) << boat;
+  EXPECT_EQ(find_vehicle_model("TacticalBoat.glb"), boat);
 
-  std::vector<vehicle_archetype> v(5);
+  std::vector<vehicle_archetype> v(6);
   v[0].id = "humvee"; // no look: the model, fitted
   v[1].id = "racer";  // no look and no model: its box
   v[1].preset = "roboracer";
@@ -1201,6 +1206,9 @@ TEST(AriadneWorldVehicles, LooksAreFoundWhereTheyAre) {
   v[4].id = "asset"; // a document asset's file
   v[4].look.kind = "asset";
   v[4].look.path = "car";
+  v[5].id = "patrol"; // no look, the tactical boat preset: its model, fitted
+  v[5].plant = "dynamicboat";
+  v[5].preset = "tactical";
   SceneAsset car;
   car.id = "car";
   car.source.source_file = "models/car.glb";
@@ -1211,6 +1219,9 @@ TEST(AriadneWorldVehicles, LooksAreFoundWhereTheyAre) {
   EXPECT_EQ(v[0].look.path, humvee);
   EXPECT_TRUE(v[0].look.fit);
   EXPECT_EQ(v[1].look.kind, "box");
+  EXPECT_EQ(v[5].look.kind, "file");
+  EXPECT_EQ(v[5].look.path, boat);
+  EXPECT_TRUE(v[5].look.fit);
   EXPECT_EQ(v[2].look.kind, "box");
   EXPECT_TRUE(any_contains(warnings, "model 'tank' is not installed"));
   EXPECT_EQ(fs::path(v[3].look.path), prefix / "doc" / "car.glb");

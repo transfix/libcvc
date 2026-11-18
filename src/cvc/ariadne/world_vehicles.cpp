@@ -324,7 +324,11 @@ ph::vehicle_desc vehicle_desc_of(const vehicle_archetype &a, double mass, double
 
 std::string find_vehicle_model(const std::string &name) {
   namespace fs = std::filesystem;
-  const std::string file = name == "humvee" ? std::string("Humvee.glb") : name;
+  // A model's name, or its file's: "humvee" is Humvee.glb, and a name without an extension is
+  // its .glb (TacticalBoat: TacticalBoat.glb).
+  std::string file = name == "humvee" ? std::string("Humvee.glb") : name;
+  if (!file.empty() && fs::path(file).extension().empty())
+    file += ".glb";
   std::error_code ec;
   const auto is_file = [&](const fs::path &p) { return fs::is_regular_file(p, ec); };
   if (const char *b = std::getenv("CVC_NAV_BUNDLE"); b && *b) {
@@ -371,8 +375,10 @@ void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std
   };
   for (vehicle_archetype &v : archetypes) {
     vehicle_look &look = v.look;
-    if (look.kind.empty()) { // the default: the Humvee model for a humvee, when it is installed
-      const std::string model = v.preset == "humvee" ? find_vehicle_model("humvee") : "";
+    if (look.kind.empty()) { // the default: a preset's model, when it is installed
+      const std::string model = v.preset == "humvee"     ? find_vehicle_model("humvee")
+                                : v.preset == "tactical" ? find_vehicle_model("TacticalBoat")
+                                                         : std::string();
       if (!model.empty()) {
         look.kind = "file";
         look.path = model;

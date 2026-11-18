@@ -10,6 +10,7 @@
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/holon_sync.h> // entity_playout
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/world_vehicles.h> // find_vehicle_model: a model look, found here
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/LodGraphicsNode.h> // lod_stats, make_view_params
 #include <cvc/gl/LodPyramidCache.h>
@@ -437,10 +438,11 @@ void room_view::update_entities(const cvc::ariadne::entity_playout &entities) {
     // What its node is built from: a change (its identity replicating, another archetype)
     // rebuilds it.
     char key[512];
-    std::snprintf(key, sizeof key, "%s|%.4g,%.4g,%.4g|%.4g,%.4g,%.4g|%.4g,%.4g,%.4g|%.4g,%.4g,%.4g",
+    std::snprintf(key, sizeof key,
+                  "%s|%.4g,%.4g,%.4g|%.4g,%.4g,%.4g|%.4g,%.4g,%.4g|%.4g,%.4g,%.4g|%s",
                   e.archetype.c_str(), e.color[0], e.color[1], e.color[2], e.color2[0], e.color2[1],
                   e.color2[2], e.size[0], e.size[1], e.size[2], e.wheels[0], e.wheels[1],
-                  e.wheels[2]);
+                  e.wheels[2], e.look.path.c_str());
     const auto built = _entity_built.find(id);
     if (built == _entity_built.end() || built->second != key) {
       if (built != _entity_built.end())
@@ -450,13 +452,34 @@ void room_view::update_entities(const cvc::ariadne::entity_playout &entities) {
       shape.wheelbase = e.wheels[0] > 0.0 ? e.wheels[0] : 0.68 * e.size[0];
       shape.track = e.wheels[1] > 0.0 ? e.wheels[1] : 0.84 * e.size[1];
       shape.wheel_radius = e.wheels[2] > 0.0 ? e.wheels[2] : 0.0;
-      // The box look: the relay's model files are its own, so a model look is drawn as its box
-      // until the client finds the model itself.
+      // A file look is the relay's model by its file's name: drawn from this host's own copy
+      // (find_vehicle_model: the cvcpkg packages it has), else as its box.
       cvc::ariadne::vehicle_look look;
       look.kind = "box";
+      if (e.look.kind == "file" && !e.look.path.empty())
+        if (const std::string local = cvc::ariadne::find_vehicle_model(e.look.path);
+            !local.empty()) {
+          look = e.look;
+          look.path = local;
+        }
       cvc::ariadne::Scene one;
       one.nodes.push_back(vehicle_scene_node(node, look, shape, e.color.data(), e.color2.data()));
       realize_scene(sg, one, _prefix, &_warnings);
+      if (look.kind == "file" && look.fit) {
+        if (!_models)
+          _models = make_vehicle_model_cache();
+        std::shared_ptr<GraphicsNode> group = sg.getGraphics(node);
+        if (!group || !attach_vehicle_model(sg.appContext(), *_models, *group, node + "_mesh", look,
+                                            shape, e.base_z, e.color.data(), &_warnings)) {
+          sg.removeGraphics(node); // the model would not read: its box
+          cvc::ariadne::vehicle_look box;
+          box.kind = "box";
+          cvc::ariadne::Scene again;
+          again.nodes.push_back(
+              vehicle_scene_node(node, box, shape, e.color.data(), e.color2.data()));
+          realize_scene(sg, again, _prefix, &_warnings);
+        }
+      }
       _entity_built[id] = key;
       _entity_posed.erase(id); // a node built again starts unposed
     }

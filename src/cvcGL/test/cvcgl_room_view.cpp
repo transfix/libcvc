@@ -462,6 +462,16 @@ int main() {
       sample(6.0, 0.0);
       frame();
       chk(sg.getGraphics(room_view::entity_node_id(4)) != nullptr, "drawn again when it returns");
+      // A model look this host does not have: its box.
+      lead.look.kind = "file";
+      lead.look.path = "NoSuchVehicleModel.glb";
+      lead.look.fit = true;
+      rs::write_room_entities(app, "ents", {lead});
+      frame();
+      std::shared_ptr<cvc::gl::GraphicsNode> g = sg.getGraphics(room_view::entity_node_id(4));
+      chk(g && g->findChildByName(room_view::entity_node_id(4) + "_wheel0") != nullptr &&
+              g->findChildByName(room_view::entity_node_id(4) + "_mesh") == nullptr,
+          "a model look the host has not installed: drawn as its box");
     }
     chk(sg.getGraphics(room_view::entity_node_id(4)) == nullptr, "teardown removes it");
   }

@@ -61,6 +61,7 @@ class LodPyramidCache;
 struct lod_stats;
 namespace ariadne {
 struct RealizedScene;
+struct vehicle_model_cache; // vehicle_view.h: the models it fits
 
 // The local avatar's intent from the held movement keys, relative to its facing YAW (radians about
 // +Z from +X, Z-up): W/S walk forward/back along the facing, A/D strafe left/right of it (right is
@@ -207,6 +208,8 @@ private:
   std::map<std::uint64_t, std::string> _entity_built;
   std::map<std::uint64_t, std::array<double, 16>> _entity_posed;
   std::map<std::string, std::string> _entity_names;
+  // The vehicle models fitted for the entities (made with the first one that has a model look).
+  std::shared_ptr<vehicle_model_cache> _models;
 };
 
 } // namespace ariadne

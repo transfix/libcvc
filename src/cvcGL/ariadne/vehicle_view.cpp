@@ -231,6 +231,17 @@ bool attach_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group
 
 } // namespace
 
+std::shared_ptr<vehicle_model_cache> make_vehicle_model_cache() {
+  return std::make_shared<vehicle_model_cache>();
+}
+
+bool attach_vehicle_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group,
+                          const std::string &id, const ari::vehicle_look &look,
+                          const vehicle_shape &shape, double base_z, const float color[3],
+                          std::vector<std::string> *warnings) {
+  return attach_model(app, cache, group, id, look, shape, base_z, color, warnings);
+}
+
 ari::SceneNode vehicle_scene_node(const std::string &id, const ari::vehicle_look &look,
                                   const vehicle_shape &s, const float color[3],
                                   const float color2[3]) {
