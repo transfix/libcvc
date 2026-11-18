@@ -336,13 +336,11 @@ struct SceneWorld::impl {
   double clock_offset = 0.0, storm_offset = 0.0;
   // The kSceneWindFrontPeriod the sleeping bodies were last woken under the fronts in.
   std::uint64_t wake_period = std::numeric_limits<std::uint64_t>::max();
-  // Whether the scene has storms that blow gust fronts (a weather node whose gust_front is on).
-  bool storms() const {
-    for (const auto &wf : weathers)
-      if (wf->model().params().front_speed > 0.0)
-        return true;
-    return false;
-  }
+  bool warned_periods = false; // a follow ran over more than one period (warned once)
+  // Whether the water's sea steps on the clock's periods: a scene wind and a weather node, whose
+  // fronts move the wind on their own. Not whether a front blows now: weather.gust_front can turn
+  // the fronts off or on mid-run, and the sea settling after them stays on the clock.
+  bool clocked() const { return wind_applied.has_value() && !weathers.empty(); }
   // Bodies asleep under a storm's gust front wake (F6). The field step pushes only the bodies that
   // are awake, and the storms' air is a function of time that is never set again, so a front
   // arriving would leave a sleeping crate at rest. On the first step of each kSceneWindFrontPeriod
@@ -1125,7 +1123,7 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
   // With storms, the runtimes whose changes follow the clock (the water's sea) make them on its
   // periods, and the world puts them in on the clock (SceneColliders::clock_period, from_tick).
   {
-    const double period = d.storms() ? kSceneWindFrontPeriod : 0.0;
+    const double period = d.clocked() ? kSceneWindFrontPeriod : 0.0;
     for (impl::tracked &t : d.tracked_nodes)
       t.colliders->clock_period = period;
   }
@@ -1596,20 +1594,42 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
   const std::uint64_t period = d.follower->period();
   std::uint64_t tick = last_tick + 1;
   tick += (d.follower->phase() + period - tick % period) % period;
+  // The water's sea, while it steps on the clock's periods, is the same at every frame rate only
+  // if the world syncs at least once a period (its sea steps, and wind.front changes, at a sync).
+  // A live host's clock runs at most a few quanta a frame; a follow that runs the clock across more
+  // than one period's start (a long seek, a stalled host) warns, once.
+  if (n > 0 && d.clocked() && !d.warned_periods) {
+    const std::uint64_t ticks = scene_clock_period_ticks(kSceneWindFrontPeriod, clock.fixed_dt());
+    const std::uint64_t last = tick + (n - 1) * period;
+    if (last / ticks > last_tick / ticks + 1) {
+      d.warned_periods = true;
+      warn(&d.warnings, "ari: storms: one frame ran the clock over more than one " +
+                            num(kSceneWindFrontPeriod) +
+                            " s period; the water's sea steps once a period, so floating bodies "
+                            "may now differ from another frame rate's run");
+    }
+  }
   for (std::uint64_t i = 1; i <= n; ++i, tick += period) {
+    // First what the clock times: a change of the colliders (a water's sea keyframe while the
+    // scene has storms) at the first step that ends past its tick, and a new storm-wind peak
+    // (weather.gust_front), the air made again with it; so the plants below read the field and
+    // the air this step has. Then the sleeping bodies under the fronts wake.
+    for (impl::tracked &t : d.tracked_nodes)
+      if (t.colliders->revision != t.applied && t.colliders->from_tick != 0 &&
+          tick > t.colliders->from_tick && !d.off.count(t.node))
+        d.apply(t, &d.warnings);
+    bool gust = false;
+    for (const auto &wf : d.weathers)
+      gust = wf->switch_gust(tick) || gust;
+    if (gust)
+      sync_wind();
+    d.wake_in_fronts(tick, clock.fixed_dt());
     if (d.vehicles)
       d.vehicles->before_step();
     for (const auto &b : d.boats)
       b->before_step();
     for (const auto &wf : d.weathers)
       wf->before_step(*d.world, tick, clock.fixed_dt());
-    // A change timed on the clock (a water's sea keyframe while the scene has storms) goes in at
-    // the first step that ends past its tick; the sleeping bodies under the fronts wake.
-    for (impl::tracked &t : d.tracked_nodes)
-      if (t.colliders->revision != t.applied && t.colliders->from_tick != 0 &&
-          tick > t.colliders->from_tick && !d.off.count(t.node))
-        d.apply(t, &d.warnings);
-    d.wake_in_fronts(tick, clock.fixed_dt());
     d.last = d.world->step();
     for (const auto &b : d.boats)
       b->after_step();

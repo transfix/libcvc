@@ -400,6 +400,7 @@ struct WeatherRT {
   cvc::app *app = nullptr;
   std::string prefix; // the scene's state prefix (its wind's keys)
   cvc::world::weather model;
+  std::string gustKey; // weather.gust_front: the storm wind's peak (the rain's slant here)
   // Its keys (weather.* or the node's keys: root).
   std::string eventsKey, scaleKey, requestKey;
   std::string stateKey, storminessKey, cellsKey, stormsKey, rainKey, deckKey;
@@ -616,6 +617,15 @@ void tick(WeatherRT &r, vtkRenderer *ren) {
     }
   }
 
+  // The storm wind's peak (weather.gust_front), for the rain's slant: at once here, a drawing; the
+  // scene's world switches its physics on the clock's period.
+  if (const double gust =
+          std::max(0.0, ari::read_or<double>(app, r.gustKey, r.model.params().front_speed));
+      gust != r.model.params().front_speed) {
+    cvc::world::weather_params p = r.model.params();
+    p.front_speed = gust;
+    r.model.set_params(p);
+  }
   // The weather now, published as it changes.
   const cvc::world::weather_now w = r.model.at(t);
   const std::string state = cvc::world::weather_state_name(w.state);
@@ -846,7 +856,8 @@ void lightning(WeatherRT &r, vtkRenderer *ren) {
 // storm's edge the deck feels it, metres); O20: flash_rate / flash_onset / ground_share (the
 // lightning's schedule, cvc::world::weather_params), lightning (its strength; live:
 // weather.lightning) and friction (0: the rain leaves the physics world's friction alone; live:
-// weather.friction); F4: gust_front (a full cell's outflow at its front's edge, m/s; 0: none),
+// weather.friction); F4: gust_front (a full cell's outflow at its front's edge, m/s; 0: none;
+// live: weather.gust_front, the panel's Storm wind),
 // front_ahead / front_behind (how far the front's edge is ahead of and behind the cell, in its
 // radii) and front_width (how far past the edge it dies away, in that distance).
 std::shared_ptr<GraphicsNode> realize_weather(SceneGraph &sg, const ari::SceneNode &n,
@@ -880,6 +891,8 @@ std::shared_ptr<GraphicsNode> realize_weather(SceneGraph &sg, const ari::SceneNo
   rt->stormsKey = key(pref, n, "weather.storms");
   rt->rainKey = key(pref, n, "weather.rain");
   rt->deckKey = key(pref, n, "weather.deck");
+  rt->gustKey = key(pref, n, "weather.gust_front");
+  ari::read_or_seed<double>(app, rt->gustKey, p.front_speed);
   ari::read_or_seed<std::string>(app, rt->eventsKey, n.props.str("events"));
   ari::read_or_seed<double>(app, rt->scaleKey, p.rate);
   ari::read_or_seed<std::string>(app, rt->requestKey, std::string());

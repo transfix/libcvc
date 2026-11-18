@@ -210,7 +210,20 @@ constexpr bool kWaterAdvect[3] = {false, true, true};
 // A water node's physics: its colliders (one fluid field), rebuilt when its keys (the chop, the
 // wave height, the swell, the gusts, the current) change, the sea takes a new keyframe of its
 // lagged wind, or its ground is regenerated. The scene's world swaps the field at its next sync,
-// as it swaps a generated world's bodies.
+// as it swaps a generated world's bodies; except a sea keyframe while the scene has storms, below.
+//
+// With storms (a scene wind and a weather node: the scene's world sets the colliders'
+// clock_period, kSceneWindFrontPeriod) the gust fronts move the wind on their own, and a sea
+// stepped each frame would keyframe where the frames fall. So the sea steps once a clock period
+// instead: in period k (the clock's tick over the period's ticks), at the first tick() in it, to
+// the start of period k + 1 with the wind of period k's start (wind.front holds the front at a
+// period's start, scene_wind.h). A keyframe's field then goes in at the first physics step that
+// ends past that start (SceneColliders::from_tick), and its crossfade starts there. The crossfade
+// is at least two periods, so a keyframe's field is in before the next keyframe can replace it,
+// whether tick() runs before the world's steps (the scene's world's own runtime, in its sync) or
+// after them (a renderer's). So the sea, and what floats on it, is the same at every frame rate,
+// headless or drawn, given one tick() and one world sync a period (the scene's world warns when a
+// frame runs the clock over more than one).
 class WaterRuntime {
 public:
   // `ground` gives the ground the water fills, now and after a regenerate (null: none yet).

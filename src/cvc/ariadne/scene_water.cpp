@@ -455,7 +455,12 @@ bool WaterRuntime::tick() {
       d.period_done = k > 0 ? k - 1 : std::numeric_limits<std::uint64_t>::max(); // a restart
     if (d.period_done == std::numeric_limits<std::uint64_t>::max() || k > d.period_done) {
       const std::uint64_t next = (k + 1) * ticks;
-      seaNew = d.clock.advance(static_cast<double>(next) * clock.fixed_dt(), s, d.shore);
+      // A crossfade of at least two periods: a keyframe's field goes in (at `next`) before the next
+      // keyframe can replace it, whether the runtime ticks before the world's steps (the world's
+      // own, in its sync) or after them (a renderer's), so both put in the same fields.
+      SceneWaterSpec sc = s;
+      sc.sea_fade = std::max(s.sea_fade, 2.0 * static_cast<double>(ticks) * clock.fixed_dt());
+      seaNew = d.clock.advance(static_cast<double>(next) * clock.fixed_dt(), sc, d.shore);
       d.period_done = k;
       if (seaNew)
         from_tick = next;

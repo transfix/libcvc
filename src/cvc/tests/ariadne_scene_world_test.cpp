@@ -4638,3 +4638,283 @@ TEST(AriadneSceneWeather, AFrontWakesASleepingBody) {
   EXPECT_TRUE(asleep) << "the crate came to rest and slept in the 6 m/s wind";
   EXPECT_GT(run.end.position.x - rest_x, 0.5) << "the front woke it and pushed it downwind";
 }
+
+namespace {
+
+// storm_scene's lake with a short crossfade (sea_fade 0.2 s, under the clock's 0.5 s period) and a
+// short lag (sea_lag 1 s), so the front's wind would keyframe the sea in periods running.
+const char *kStormLakeShortFade = R"(
+scene:
+  physics: {}
+  wind: { speed: 6, dir: 0, gustiness: 0 }
+  nodes:
+    - node: terrain
+      source:
+        heightfield:
+          size: 400
+          resolution: 81
+          layers:
+            - { kind: dome, amplitude: -30, radius: 150 }
+      body: static
+    - node: water
+      type: water
+      ground: terrain
+      level: 0
+      wave_amp: 0.3
+      sea_fade: 0.2
+      sea_lag: 1
+      body: {}
+    - node: ball
+      source: { box: { size: [1, 1, 0.5] } }
+      transform: { position: [0, 0, 0] }
+      body: { density: 500 }
+)";
+
+// The renderer's order: the world built from the bodies a host holds (SceneWorld::build), the
+// water's runtime its own, ticked after the world follows each frame (cvcGL's water node ticks it
+// after tick_scene's follow), against from_scene's, ticked in the world's sync before the steps.
+storm_run run_drawn_order(const LoadResult &r, double frame_dt, double seconds) {
+  storm_run out;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  seed_scene_wind(app, r.scene, "");
+  std::map<const SceneNode *, std::array<double, 16>> matrices;
+  scene_world_matrices(r.scene, matrices);
+  std::vector<SceneBodyInput> inputs;
+  std::map<std::string, std::shared_ptr<const cvc::height_field>> fields;
+  std::unique_ptr<WaterRuntime> water;
+  for (const SceneNode &n : r.scene.nodes) {
+    if (!n.body.present)
+      continue;
+    SceneBodyInput in;
+    in.spec = &n;
+    in.world = matrices[&n];
+    if (n.type == "water") {
+      std::shared_ptr<const cvc::height_field> hf = fields.at(n.props.str("ground"));
+      water = std::make_unique<WaterRuntime>(app, n, "", [hf] { return hf; });
+      in.colliders = water->colliders();
+    } else {
+      cvc::geometry g;
+      std::shared_ptr<const cvc::height_field> field;
+      if (!read_scene_node_geometry(app, n, g, field, &warnings)) {
+        ADD_FAILURE() << "no geometry for " << n.id;
+        return out;
+      }
+      in.geometry = std::make_shared<const cvc::geometry>(std::move(g));
+      if (field)
+        fields[n.id] = field;
+    }
+    inputs.push_back(std::move(in));
+  }
+  std::unique_ptr<SceneWorld> w =
+      SceneWorld::build(app, r.scene.physics, inputs, fields, "physics", &warnings);
+  if (!w || !water) {
+    ADD_FAILURE() << "no world or no water";
+    return out;
+  }
+  w->bind_wind(r.scene, "");
+  w->bind_weather(r.scene, "");
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  w->follow(app.world_clock());
+  water->tick();
+  while (app.world_clock().t() < seconds) {
+    clock.drive(frame_dt);
+    w->follow(app.world_clock());
+    water->tick(); // after the steps, as a renderer's water node does
+    out.frames.emplace_back(app.world_clock().tick(), w->world().state(w->body("ball")));
+    out.hashes.push_back(w->world().state_hash());
+  }
+  out.end = w->world().state(w->body("ball"));
+  if (water->keyframes())
+    out.keyframes = water->keyframes()->keyframe;
+  return out;
+}
+
+// How many of the ticks both runs looked at have a different body (position, vertical velocity).
+int differing(const storm_run &a, const storm_run &b, int *compared) {
+  std::map<std::uint64_t, std::size_t> by_tick;
+  for (std::size_t k = 0; k < a.frames.size(); ++k)
+    by_tick[a.frames[k].first] = k;
+  int differ = 0;
+  *compared = 0;
+  for (std::size_t k = 0; k < b.frames.size(); ++k) {
+    const auto it = by_tick.find(b.frames[k].first);
+    if (it == by_tick.end())
+      continue;
+    ++*compared;
+    const cvc::physics::body_state &x = a.frames[it->second].second, &y = b.frames[k].second;
+    if (x.position.x != y.position.x || x.position.z != y.position.z ||
+        x.linear_velocity.z != y.linear_velocity.z)
+      ++differ;
+  }
+  return differ;
+}
+
+} // namespace
+
+// A short crossfade (0.2 s) would let the sea keyframe in two periods running. The world's own
+// water runtime ticks before the steps and a renderer's after them, so one would replace a
+// keyframe's field before its step and the other put it in first. While the scene has storms the
+// crossfade is at least two periods, so the renderer's order and the headless world float the
+// crate alike, and their state hashes agree.
+TEST(AriadneSceneWeather, ARendersSeaAndAHeadlessOneFloatAlikeWithAShortCrossfade) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const LoadResult r = storm_scene(-1200.0, 0.0, 15.0, true, kStormLakeShortFade);
+  // Frames of 0.137 s (8 clock quanta, as the clock caps a frame), so a frame passes a period's
+  // start with steps to spare past it: where the two orders part.
+  const storm_run headless = run_storm(r, 0.137, 9.0);
+  const storm_run drawn = run_drawn_order(r, 0.137, 9.0);
+  int compared = 0;
+  const int differ = differing(headless, drawn, &compared);
+  int hashes_differ = 0;
+  for (std::size_t k = 0; k < headless.frames.size() && k < drawn.frames.size(); ++k)
+    if (headless.frames[k].first == drawn.frames[k].first && headless.hashes[k] != drawn.hashes[k])
+      ++hashes_differ;
+  std::printf("[storm] a 0.2 s crossfade: %llu sea keyframes headless, %llu in a renderer's order; "
+              "the crate differs at %d of %d ticks, the state hash at %d\n",
+              static_cast<unsigned long long>(headless.keyframes),
+              static_cast<unsigned long long>(drawn.keyframes), differ, compared, hashes_differ);
+  EXPECT_GE(headless.keyframes, 3u);
+  EXPECT_EQ(headless.keyframes, drawn.keyframes);
+  EXPECT_GT(compared, 100);
+  EXPECT_EQ(differ, 0);
+  EXPECT_EQ(hashes_differ, 0);
+}
+
+// The storm wind's peak is a live key, weather.gust_front (the Weather panel's Storm wind). A
+// change reaches the physics at the start of the clock's next period after the scene's world reads
+// it: so a run with a frame per clock quantum and one with 0.137 s frames switch at the same step
+// and agree on the ball and the whole world's state hash at every tick both looked at; and 0 turns
+// the fronts off, the air where a front blew the plain wind again.
+TEST(AriadneSceneWeather, TheStormWindsPeakIsALiveKeySwitchedOnTheClock) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const LoadResult r = storm_scene(-600.0, 0.0, 1.0);
+  cvc::app probe;
+  const double q = probe.world_clock().fixed_dt();
+  struct gust_run {
+    storm_run run;
+    std::vector<double> gust; // the weather's applied peak at each frame
+    std::uint64_t read_tick = 0;
+    bool storm_air_end = true;
+    cvc::physics::vec3 air_end, plain_end;
+  };
+  const auto run = [&](double frame_dt, double to) {
+    gust_run out;
+    cvc::app app;
+    std::vector<std::string> warnings;
+    std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+    if (!w || w->weathers().size() != 1) {
+      ADD_FAILURE() << "no world, or not one weather";
+      return out;
+    }
+    EXPECT_EQ(val(app, "weather.gust_front"), "12"); // seeded from the prop's default
+    SceneClockDriver clock(app, resolved_clock(r.scene));
+    w->follow(app.world_clock());
+    bool set = false;
+    while (app.world_clock().t() < 4.0) {
+      clock.drive(frame_dt);
+      if (set && out.read_tick == 0)
+        out.read_tick = app.world_clock().tick(); // the sync about to read it
+      w->follow(app.world_clock());
+      out.run.frames.emplace_back(app.world_clock().tick(), w->world().state(w->body("ball")));
+      out.run.hashes.push_back(w->world().state_hash());
+      out.gust.push_back(w->weathers()[0]->gust_front());
+      if (!set && app.world_clock().t() >= 2.21) { // mid-frame for the 0.137 s run
+        cvc::state::instance(app)("weather.gust_front").value(to);
+        set = true;
+      }
+    }
+    const cvc::physics::body_state b = w->world().state(w->body("ball"));
+    out.storm_air_end = dynamic_cast<const StormWindFlow *>(w->wind().get()) != nullptr;
+    out.air_end = w->wind()->velocity(b.position, w->world().field_time());
+    out.plain_end = cvc::physics::wind_flow(cvc::algo::wind_state{6.0, 0.0, 0.0}, 0.0)
+                        .velocity(b.position, w->world().field_time());
+    return out;
+  };
+  const gust_run fine = run(q, 24.0), coarse = run(0.137, 24.0);
+  ASSERT_FALSE(fine.gust.empty());
+  ASSERT_FALSE(coarse.gust.empty());
+  // Where it switched: the first step past the start of the period after the read.
+  const std::uint64_t ticks = scene_clock_period_ticks(kSceneWindFrontPeriod, q);
+  const std::uint64_t boundary = (fine.read_tick / ticks + 1) * ticks;
+  std::uint64_t switched = 0;
+  for (std::size_t k = 0; k < fine.gust.size(); ++k)
+    if (fine.gust[k] == 24.0) {
+      switched = fine.run.frames[k].first;
+      break;
+    }
+  int compared = 0;
+  const int differ = differing(fine.run, coarse.run, &compared);
+  std::map<std::uint64_t, std::uint64_t> fine_hash;
+  for (std::size_t k = 0; k < fine.run.frames.size(); ++k)
+    fine_hash[fine.run.frames[k].first] = fine.run.hashes[k];
+  int hashes_differ = 0;
+  for (std::size_t k = 0; k < coarse.run.frames.size(); ++k)
+    if (const auto it = fine_hash.find(coarse.run.frames[k].first);
+        it != fine_hash.end() && it->second != coarse.run.hashes[k])
+      ++hashes_differ;
+  std::printf("[storm] weather.gust_front 12 -> 24 read at tick %llu (%llu at 0.137 s frames): in "
+              "at tick %llu (the period's start %llu); the ball ends at %.2f m/s; %d of %d ticks "
+              "differ, %d hashes\n",
+              static_cast<unsigned long long>(fine.read_tick),
+              static_cast<unsigned long long>(coarse.read_tick),
+              static_cast<unsigned long long>(switched), static_cast<unsigned long long>(boundary),
+              fine.run.frames.back().second.linear_velocity.x, differ, compared, hashes_differ);
+  EXPECT_GT(switched, boundary);
+  EXPECT_LE(switched, boundary + 2);
+  EXPECT_GT(compared, 30);
+  EXPECT_EQ(differ, 0);
+  EXPECT_EQ(hashes_differ, 0);
+  EXPECT_GT(fine.run.frames.back().second.linear_velocity.x, 22.0); // 6 + 24 where it is
+  // 0: no fronts; the air where one blew is the plain wind.
+  const gust_run off = run(q, 0.0);
+  std::printf("[storm] weather.gust_front 0: the air at the ball %.4f m/s, the plain wind %.4f\n",
+              off.air_end.x, off.plain_end.x);
+  EXPECT_FALSE(off.storm_air_end);
+  EXPECT_EQ(off.air_end.x, off.plain_end.x);
+  EXPECT_EQ(off.air_end.y, off.plain_end.y);
+  EXPECT_LT(off.run.frames.back().second.linear_velocity.x, 8.0); // slowing to the 6 m/s wind
+}
+
+// The water steps on the clock's periods only with storms that can blow: a scene wind and a weather
+// node. Without a wind (no fronts) it steps each frame, as before. And the storms steer at the
+// sky's base as the drawn node reads it: its <sky>.base key first (a --set or a kept key), else the
+// document's cloud_sky base (none here: 300 m).
+TEST(AriadneSceneWeather, TheSeaStepsOnTheClockOnlyWithAWindAndSteersAtTheSkysKey) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  for (const bool wind : {true, false}) {
+    std::string doc = kStormLake;
+    if (!wind) {
+      const std::string line = "  wind: { speed: 6, dir: 0, gustiness: 0 }\n";
+      ASSERT_NE(doc.find(line), std::string::npos);
+      doc.erase(doc.find(line), line.size());
+    }
+    const LoadResult r = storm_scene(-1200.0, 0.0, 15.0, true, doc.c_str());
+    cvc::app app;
+    std::vector<std::string> warnings;
+    std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "", &warnings);
+    ASSERT_NE(w, nullptr);
+    w->sync(&warnings);
+    ASSERT_NE(w->water("water"), nullptr);
+    EXPECT_EQ(w->water("water")->colliders()->clock_period, wind ? kSceneWindFrontPeriod : 0.0)
+        << (wind ? "with" : "without") << " a scene wind";
+  }
+  // The sky's key, set before the scene loads, steers the headless storms.
+  cvc::app app;
+  cvc::state::instance(app)("sky.base").value(600.0);
+  const LoadResult r = storm_scene(-1200.0, 0.0, 1.0);
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "", &warnings);
+  ASSERT_NE(w, nullptr);
+  ASSERT_EQ(w->weathers().size(), 1u);
+  const double steer = w->weathers()[0]->model().params().steer_speed;
+  std::printf("[storm] steered at sky.base 600: %.4f m/s (at 300: %.4f)\n", steer,
+              6.0 * cvc::algo::wind_profile(300.0));
+  EXPECT_DOUBLE_EQ(steer, 6.0 * cvc::algo::wind_profile(600.0));
+}

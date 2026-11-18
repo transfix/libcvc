@@ -106,8 +106,10 @@ struct SceneWind {
 inline constexpr const char *kSceneWindFront = "wind.front";
 // The front in wind.front is the front at the start of each such period of the world clock (s,
 // counted in the clock's ticks), so it changes on the clock and never with a frame; the water's
-// physics sea steps on the same periods while the scene has storms (scene_water.h), so its
-// keyframes, and the field the bodies float in, are the same at every frame rate.
+// physics sea steps on the same periods while the scene has storms (WaterRuntime, scene_water.h),
+// so its keyframes, and the field the bodies float in, are the same at every frame rate. That needs
+// the scene's world to sync at least once a period (a live host's clock runs a few quanta a frame);
+// a frame that runs the clock over more than one period warns.
 inline constexpr double kSceneWindFrontPeriod = 0.5;
 // The clock ticks of `period` seconds at the clock's quantum `dt` (at least 1).
 std::uint64_t scene_clock_period_ticks(double period, double dt);

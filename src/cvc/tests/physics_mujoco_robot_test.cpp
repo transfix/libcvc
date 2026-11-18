@@ -584,7 +584,7 @@ TEST(MujocoRobotWind, StillAirAndNoDragStepAsWithoutWind) {
   EXPECT_TRUE(same_bits(a.qvel(), c.qvel()));
 }
 
-TEST(MujocoRobotWind, GustsAndTheScenesClockReachTheRobot) {
+TEST(MujocoRobotWind, GustsReachTheRobotAtItsTimeOffset) {
   NEED_MUJOCO();
   // The gusts: the wind's push on the resting crate rises and falls with them.
   {

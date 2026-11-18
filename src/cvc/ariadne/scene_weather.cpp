@@ -20,6 +20,7 @@
 #include <cvc/ariadne/scene_weather.h>
 #include <cvc/ariadne/scene_wind.h>
 #include <cvc/core/app.h>
+#include <cvc/core/world_clock.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_geometry.h> // apply_wetness
@@ -141,6 +142,12 @@ struct WeatherFriction::impl {
   std::uint64_t revision = 0; // model()'s changes
   bool steered = false;       // the scene's wind steers the storms from the start
   double steer_speed = 0.0, steer_az = 0.0;
+  // The storm wind's peak (weather.gust_front, m/s): the one the model has, the one the key last
+  // read, and the clock tick past which that goes in (the start of the clock period after the one
+  // it was read in).
+  std::string gustKey;
+  double gust = 0.0, gustPending = 0.0;
+  std::uint64_t gustFrom = 0;
 
   void params() {
     cvc::world::weather_params p = scene_weather_params(node, field.get());
@@ -148,6 +155,7 @@ struct WeatherFriction::impl {
       p.steer_speed = steer_speed;
       p.steer_az = steer_az;
     }
+    p.front_speed = gust;
     model.set_params(p);
   }
   std::string key(const std::string &prefix, const char *k) const {
@@ -165,12 +173,16 @@ WeatherFriction::WeatherFriction(cvc::app *app, const SceneNode &n, const std::s
   d.ground = scene_weather_ground(n);
   d.soak = scene_weather_soak(n);
   d.dry = scene_weather_dry(n);
+  d.gust = d.gustPending = scene_weather_params(n, nullptr).front_speed;
   if (app) {
-    // The sky it drives (its key root, as the drawn node reads it): its drift.
-    const double drift =
-        read_or<double>(*app, resolve_bind(bind_prefix, scene_weather_sky(n) + ".drift"), 1.0);
-    d.steered =
-        scene_weather_steering(*app, bind_prefix, deck_base, drift, d.steer_speed, d.steer_az);
+    // The sky it drives (its key root, as the drawn node reads it): its drift, and its base, the
+    // sky's key first (a --set or a kept key), as the drawn node reads it, else the document's.
+    const std::string sky = scene_weather_sky(n);
+    const double drift = read_or<double>(*app, resolve_bind(bind_prefix, sky + ".drift"), 1.0);
+    const double base = read_or<double>(*app, resolve_bind(bind_prefix, sky + ".base"), deck_base);
+    d.steered = scene_weather_steering(*app, bind_prefix, base, drift, d.steer_speed, d.steer_az);
+    d.gustKey = d.key(bind_prefix, "weather.gust_front");
+    d.gust = d.gustPending = std::max(0.0, read_or_seed<double>(*app, d.gustKey, d.gust));
   }
   d.params();
   d.eventsKey = d.key(bind_prefix, "weather.events");
@@ -223,6 +235,25 @@ void WeatherFriction::read_keys() {
     d.on = on;
     d.flipped = true;
   }
+  // The storm wind's peak: it goes in at the start of the next clock period (before_step), so at
+  // the same step whatever the frames.
+  const double gust = std::max(0.0, read_or<double>(*d.app, d.gustKey, d.gustPending));
+  if (gust != d.gustPending) {
+    d.gustPending = gust;
+    const cvc::world_clock &clock = d.app->world_clock();
+    const std::uint64_t ticks = scene_clock_period_ticks(kSceneWindFrontPeriod, clock.fixed_dt());
+    d.gustFrom = (clock.tick() / ticks + 1) * ticks;
+  }
+}
+
+bool WeatherFriction::switch_gust(std::uint64_t tick) {
+  impl &d = *_impl;
+  if (d.gustPending == d.gust || tick <= d.gustFrom)
+    return false;
+  d.gust = d.gustPending; // the storm wind's new peak
+  d.params();
+  ++d.revision;
+  return true;
 }
 
 void WeatherFriction::before_step(cvc::physics::world &w, std::uint64_t tick, double dt) {
@@ -277,6 +308,7 @@ void WeatherFriction::publish() {
 }
 
 double WeatherFriction::applied() const { return _impl->applied; }
+double WeatherFriction::gust_front() const { return _impl->gust; }
 const cvc::world::weather &WeatherFriction::model() const { return _impl->model; }
 std::uint64_t WeatherFriction::revision() const { return _impl->revision; }
 

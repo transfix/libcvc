@@ -111,11 +111,16 @@ public:
   void set_ground(std::shared_ptr<const cvc::height_field> field);
   bool has_ground() const;
 
-  // The keys (the frame's thread, between steps): weather.events and weather.friction.
+  // The keys (the frame's thread, between steps): weather.events, weather.friction and
+  // weather.gust_front (the storm wind's peak, seeded from the `gust_front` prop).
   void read_keys();
   // Before the physics step that ends on the world clock's tick `tick` (whose quantum is `dt`):
   // the friction on the first step of each kWetPeriod, or at once when weather.friction changed.
   void before_step(cvc::physics::world &w, std::uint64_t tick, double dt);
+  // Before that step too: a new storm-wind peak (weather.gust_front) goes into model() on the
+  // first step past the start of the clock period after the one read_keys saw it in, so at the same
+  // step whatever the frames. True when it did (the scene's world makes its air again).
+  bool switch_gust(std::uint64_t tick);
   // The world was made again (sim.restart): its materials are dry, so set them at the next step.
   void world_gone();
   // weather.wetness, when it changed.
@@ -123,6 +128,9 @@ public:
 
   // The wetness last applied (0 dry; -1 before any).
   double applied() const;
+  // The storm wind's peak model() has (m/s): weather.gust_front as last switched in, else the
+  // node's `gust_front` prop (12; 0: no gust fronts).
+  double gust_front() const;
   const cvc::world::weather &model() const;
   // Counts the changes to model() (its events, or its area once the ground came): what the scene's
   // air (StormWindFlow) is made again on.
