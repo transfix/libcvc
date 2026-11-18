@@ -1103,3 +1103,238 @@ TEST(PhysicsOceanSurface, TheFieldThreadsChangeNoValue) {
   bad.field_threads = 65;
   EXPECT_THROW(world w(bad), cvc::physics_error);
 }
+
+// --- wakes (field::wake; OCEAN-AND-WEATHER-ROADMAP.md C5, D6) ------------------------------------
+
+namespace {
+
+// Calm water 200 m across, inertial and damped as a water node's (scene_water.cpp), with a wake of
+// 64 cells of 1 m when `wake`.
+field wake_water(bool wake) {
+  field f;
+  f.kind = field_kind::fluid;
+  f.volume = uniform(1000.0, {-100, -100, -8}, {100, 100, 4});
+  f.damping = 1.0e4;
+  f.inertial = true;
+  f.surface = std::make_shared<still_surface>(0.0);
+  if (wake) {
+    f.wake.cells = 64;
+    f.wake.cell = 1.0;
+  }
+  return f;
+}
+
+// A crate 1.6 x 1.6 x 0.8 m at density 500: afloat at rest with its centre at z = 0.
+body_desc crate_at(double x, double y, double z) {
+  body_desc d;
+  d.shape = box{{0.8, 0.8, 0.4}};
+  d.density = 500.0;
+  d.position = {x, y, z};
+  d.linear_damping = 0.0; // the water's drag alone
+  return d;
+}
+
+// A crate dropped from 1.2 m at the origin beside one afloat at rest `apart` metres off along x
+// (which falls asleep), for `steps` steps of 0.01 s: the resting one's largest heave, drift and
+// tilt, the run's hash, the wake at the end and the largest wave 2 m off the drop.
+struct drop_run {
+  double heave = 0.0, drift = 0.0, rolled = 0.0;
+  std::uint64_t hash = 0;
+  wake_info info;
+  double ring = 0.0;
+  double fields_ms = 0.0; // the fields' push a step (step_report::fields_ms), the mean
+};
+drop_run drop_beside(bool wake, double apart, int steps, int threads = 0) {
+  world_config c = jolt_config();
+  c.field_threads = threads;
+  world w(c);
+  const field_id water = w.add_field(wake_water(wake));
+  w.add_body(crate_at(0.0, 0.0, 1.2));
+  const body_id resting = w.add_body(crate_at(apart, 0.0, 0.0));
+  const vec3 p0 = w.state(resting).position;
+  drop_run out;
+  for (int i = 0; i < steps; ++i) {
+    out.fields_ms += w.step().fields_ms / steps;
+    const body_state s = w.state(resting);
+    out.heave = std::max(out.heave, std::fabs(s.position.z - p0.z));
+    out.drift = std::max(out.drift, std::hypot(s.position.x - p0.x, s.position.y - p0.y));
+    out.rolled = std::max(out.rolled, tilt(s.rotation));
+    out.ring = std::max(out.ring, std::fabs(w.field_wake_height(water, 0.0, 2.0)));
+  }
+  out.hash = w.state_hash();
+  out.info = w.field_wake_info(water);
+  return out;
+}
+
+} // namespace
+
+// A wake is a fluid's with a free surface, with a window of a power of two in 8 .. 256 cells.
+TEST(PhysicsFieldWake, MalformedWakesAreRefused) {
+  world_config c;
+  c.backend = backend::null;
+  world w(c);
+  field f = wake_water(true);
+  f.wake.cells = 48;
+  EXPECT_THROW(w.add_field(f), cvc::physics_error);
+  f.wake.cells = 512;
+  EXPECT_THROW(w.add_field(f), cvc::physics_error);
+  f.wake.cells = -1;
+  EXPECT_THROW(w.add_field(f), cvc::physics_error);
+  f = wake_water(true);
+  f.wake.cell = 0.0;
+  EXPECT_THROW(w.add_field(f), cvc::physics_error);
+  f = wake_water(true);
+  f.wake.sources = 0;
+  EXPECT_THROW(w.add_field(f), cvc::physics_error);
+  f = wake_water(true);
+  f.surface = nullptr; // a flat-topped box has no waves to carry
+  EXPECT_THROW(w.add_field(f), cvc::physics_error);
+  field air;
+  air.kind = field_kind::flow;
+  air.volume = uniform(1.2, {-5, -5, 0}, {5, 5, 5});
+  air.wake.cells = 64;
+  EXPECT_THROW(w.add_field(air), cvc::physics_error);
+  EXPECT_NO_THROW(w.add_field(wake_water(true)));
+  EXPECT_NO_THROW(w.add_field(wake_water(false)));
+}
+
+// A body never reads its own waves: alone on the water, a crate dropped in makes a ring (the wake
+// has it, and its one source), but falls, bobs and settles exactly as it does with no wake.
+TEST(PhysicsFieldWake, ABodyNeverFeelsItsOwnWaves) {
+  REQUIRE_JOLT();
+  std::vector<vec3> path[2];
+  double ring = 0.0;
+  for (int k = 0; k < 2; ++k) {
+    world w(jolt_config());
+    const field_id water = w.add_field(wake_water(k == 1));
+    const body_id b = w.add_body(crate_at(0.0, 0.0, 1.2));
+    for (int i = 0; i < 400; ++i) {
+      w.step();
+      path[k].push_back(w.state(b).position);
+      if (k == 1)
+        ring = std::max(ring, std::fabs(w.field_wake_height(water, 0.0, 3.0)));
+    }
+    if (k == 1) {
+      const wake_info info = w.field_wake_info(water);
+      EXPECT_TRUE(info.placed);
+      ASSERT_EQ(info.sources.size(), 1u);
+      EXPECT_EQ(info.sources[0], b);
+      EXPECT_EQ(info.cells, 64);
+      // The window is centred on the crate, on whole cells.
+      EXPECT_DOUBLE_EQ(info.x0, -32.0);
+      EXPECT_DOUBLE_EQ(info.y0, -32.0);
+    }
+  }
+  std::printf("[wake] a crate dropped from 1.2 m: its ring is up to %.3f m high 3 m off\n", ring);
+  EXPECT_GT(ring, 0.01) << "it makes waves";
+  for (std::size_t i = 0; i < path[0].size(); ++i) {
+    ASSERT_EQ(path[0][i].x, path[1][i].x) << "step " << i;
+    ASSERT_EQ(path[0][i].y, path[1][i].y) << "step " << i;
+    ASSERT_EQ(path[0][i].z, path[1][i].z) << "step " << i;
+  }
+}
+
+// One body's waves push another: a crate dropped beside one afloat at rest (asleep by the time
+// the ring comes) rocks it with a wake, and leaves it still without one.
+TEST(PhysicsFieldWake, ADroppedCratesRingRocksItsNeighbour) {
+  REQUIRE_JOLT();
+  const drop_run off = drop_beside(false, 5.0, 900);
+  const drop_run on = drop_beside(true, 5.0, 900);
+  std::printf("[wake] the neighbour 5 m off over 9 s: without a wake heave %.5f m, drift %.5f m; "
+              "with one heave %.4f m, drift %.4f m, tilt %.4f rad (the ring %.3f m high 2 m off "
+              "the drop)\n",
+              off.heave, off.drift, on.heave, on.drift, on.rolled, on.ring);
+  std::printf("[wake] the fields' push a step: %.3f ms without a wake, %.3f ms with one (a 64^2 "
+              "window, two sources, its waves stepped every third step)\n",
+              off.fields_ms, on.fields_ms);
+  EXPECT_LT(off.heave, 1e-3);
+  EXPECT_LT(off.drift, 1e-3);
+  EXPECT_GT(on.heave, 5e-3) << "the ring lifts it";
+  EXPECT_GT(on.heave, 10.0 * off.heave);
+  EXPECT_NE(on.hash, off.hash);
+  EXPECT_EQ(on.info.sources.size(), 2u);
+}
+
+// The wake is world state: a save restores its waves, so the run goes on to the same hash; its
+// section is in the hash; a world with another wake (or none) refuses the state; and the field
+// workers change no value.
+TEST(PhysicsFieldWake, TheWakeIsWorldState) {
+  REQUIRE_JOLT();
+  const auto make = [](bool wake, world &w) {
+    w.add_field(wake_water(wake));
+    w.add_body(crate_at(0.0, 0.0, 1.2));
+    w.add_body(crate_at(4.0, 1.0, 0.0));
+  };
+  world a(jolt_config());
+  make(true, a);
+  a.step(150);
+  const std::vector<std::uint8_t> saved = a.save();
+  a.step(200);
+  const std::uint64_t straight = a.state_hash();
+  a.restore(saved);
+  a.step(200);
+  EXPECT_EQ(a.state_hash(), straight) << "the waves came back with the state";
+  world b(jolt_config());
+  make(true, b);
+  b.restore(saved);
+  b.step(200);
+  EXPECT_EQ(b.state_hash(), straight) << "and into a fresh world";
+  // Without a wake the state has no wake section; the two worlds refuse each other's states.
+  world none(jolt_config());
+  make(false, none);
+  none.step(150);
+  EXPECT_THROW(none.restore(saved), cvc::physics_error);
+  EXPECT_THROW(b.restore(none.save()), cvc::physics_error);
+  world other(jolt_config());
+  field f = wake_water(true);
+  f.wake.cells = 32;
+  other.add_field(f);
+  other.add_body(crate_at(0.0, 0.0, 1.2));
+  other.add_body(crate_at(4.0, 1.0, 0.0));
+  EXPECT_THROW(other.restore(saved), cvc::physics_error);
+  // The field workers read the waves as the stepping thread does.
+  EXPECT_EQ(drop_beside(true, 5.0, 300, 0).hash, drop_beside(true, 5.0, 300, 3).hash);
+}
+
+// set_field with the same wake keeps the waves (a new sea under them); another wake starts afresh.
+TEST(PhysicsFieldWake, TheSameWakeKeepsItsWavesAcrossASetField) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  const field_id water = w.add_field(wake_water(true));
+  w.add_body(crate_at(0.0, 0.0, 1.2));
+  w.add_body(crate_at(4.0, 1.0, 0.0));
+  w.step(150);
+  const double before = w.field_wake_height(water, 0.0, 3.0);
+  ASSERT_NE(before, 0.0);
+  w.set_field(water, wake_water(true));
+  EXPECT_EQ(w.field_wake_height(water, 0.0, 3.0), before);
+  EXPECT_TRUE(w.field_wake_info(water).placed);
+  field f = wake_water(true);
+  f.wake.damping = 0.05;
+  w.set_field(water, f);
+  EXPECT_EQ(w.field_wake_height(water, 0.0, 3.0), 0.0);
+  EXPECT_FALSE(w.field_wake_info(water).placed);
+}
+
+// The window follows the bodies by whole cells: a crate moved 40 m takes the window with it at
+// the next of the waves' steps, and it still makes waves there.
+TEST(PhysicsFieldWake, TheWindowFollowsTheBodies) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  const field_id water = w.add_field(wake_water(true));
+  body_desc d = crate_at(0.0, 0.0, 0.0);
+  d.allow_sleeping = false;
+  const body_id b = w.add_body(d);
+  w.step(10);
+  EXPECT_DOUBLE_EQ(w.field_wake_info(water).x0, -32.0);
+  body_state s = w.state(b);
+  s.position = {40.0, 0.0, 0.3}; // floating high there: it bobs down and makes waves
+  w.set_state(b, s);
+  w.step(10);
+  const wake_info info = w.field_wake_info(water);
+  EXPECT_DOUBLE_EQ(info.x0, 40.0 - 32.0);
+  EXPECT_DOUBLE_EQ(info.y0, -32.0);
+  ASSERT_EQ(info.sources.size(), 1u);
+  w.step(100);
+  EXPECT_NE(w.field_wake_height(water, 40.0, 3.0), 0.0) << "its splash there";
+}

@@ -2961,6 +2961,209 @@ TEST(AriadneBoatNode, NavTakesTerrainLabsLaunchAcrossTheLake) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// C5 (D6): with the water node's `wake_push`, the waves the floating bodies make push the others
+// (cvc::physics::field_wake), inside the physics step.
+
+namespace {
+
+// kBoatNode's lake with two launches: `runner` at its west side, heading east, and `moored` 22 m
+// on and 5 m to the north of its line, broadside to it (heading north). wake_push as given.
+std::string two_boats(bool wake_push) {
+  return std::string(R"(
+scene:
+  physics: {}
+  nodes:
+    - node: terrain
+      source:
+        heightfield:
+          size: 300
+          resolution: 151
+          layers:
+            - { kind: dome, amplitude: -6, radius: 40 }
+      body: static
+    - node: water
+      type: water
+      ground: terrain
+      level: -1
+      wind_speed: 0.5
+      wave_amp: 0.1
+      wake_push: )") +
+         (wake_push ? "1" : "0") + R"(
+      body: {}
+    - node: runner
+      type: boat
+      water: water
+      preset: launch
+      transform: { position: [-28, 0, 0] }
+    - node: moored
+      type: boat
+      water: water
+      preset: launch
+      transform: { position: [-6, 5, 0], rotation: [0, 0, 90] }
+)";
+}
+
+// The water node's field's wake, from the world's fields (an invalid id without one).
+cvc::physics::field_id wake_field(const SceneWorld &w) {
+  for (const cvc::physics::field_snapshot &f : w.world().snapshot().fields)
+    if (f.desc.wake.on())
+      return f.id;
+  return {};
+}
+
+} // namespace
+
+// The runner, at full throttle, passes the moored launch 5 m off. With wake_push its wake rocks
+// and pushes the moored one (the physics' wake has both boats as its sources); without it the
+// moored launch sits as it would alone, since the runner's wake was only ever drawn.
+TEST(AriadneBoatNode, WakePushLetsOneBoatsWakeMoveAnother) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  struct sample {
+    cvc::physics::vec3 p;
+    double tilt = 0.0;
+  };
+  struct result {
+    std::vector<sample> moored;
+    cvc::physics::vec3 runner;
+    std::size_t sources = 0;
+    bool wake = false;
+  };
+  const auto run = [&](bool push) {
+    result out;
+    LoadResult r = fresh_load(two_boats(push));
+    EXPECT_TRUE(r.ok) << r.error;
+    cvc::app app;
+    std::vector<std::string> warnings;
+    std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+    if (!w) {
+      ADD_FAILURE() << "no world";
+      return out;
+    }
+    w->sync(&warnings);
+    EXPECT_TRUE(warnings.empty()) << warnings.front();
+    BoatRuntime *runner = w->boat("runner"), *moored = w->boat("moored");
+    if (!runner || !moored || !runner->placed() || !moored->placed()) {
+      ADD_FAILURE() << "the boats are not afloat";
+      return out;
+    }
+    cvc::state::instance(app)("runner.throttle").value(1.0);
+    SceneClockDriver clock(app, resolved_clock(r.scene));
+    for (int i = 0; i < 60 * 18; ++i) {
+      clock.drive(1.0 / 60.0);
+      w->follow(app.world_clock());
+      const cvc::physics::boat_state s = moored->state();
+      const cvc::physics::quat &q = s.body.rotation;
+      out.moored.push_back(
+          {s.body.position, std::acos(std::min(1.0, 1.0 - 2.0 * (q.x * q.x + q.y * q.y)))});
+    }
+    out.runner = runner->state().body.position;
+    const cvc::physics::field_id f = wake_field(*w);
+    out.wake = f.valid();
+    if (f.valid())
+      out.sources = w->world().field_wake_info(f).sources.size();
+    return out;
+  };
+  const result off = run(false), on = run(true);
+  ASSERT_EQ(off.moored.size(), on.moored.size());
+  ASSERT_FALSE(off.moored.empty());
+  EXPECT_FALSE(off.wake);
+  EXPECT_TRUE(on.wake);
+  EXPECT_EQ(on.sources, 2u) << "both boats make waves";
+  // How far each run's moored launch strays from where it was after the first second, and how far
+  // the two runs' moored launches are apart.
+  const auto stray = [](const result &res, double &heave, double &drift, double &tilt) {
+    const cvc::physics::vec3 p0 = res.moored[60].p;
+    const double tilt0 = res.moored[60].tilt;
+    heave = drift = tilt = 0.0;
+    for (std::size_t i = 60; i < res.moored.size(); ++i) {
+      const sample &s = res.moored[i];
+      heave = std::max(heave, std::fabs(s.p.z - p0.z));
+      drift = std::max(drift, std::hypot(s.p.x - p0.x, s.p.y - p0.y));
+      tilt = std::max(tilt, std::fabs(s.tilt - tilt0));
+    }
+  };
+  double off_heave, off_drift, off_tilt, on_heave, on_drift, on_tilt;
+  stray(off, off_heave, off_drift, off_tilt);
+  stray(on, on_heave, on_drift, on_tilt);
+  double apart = 0.0;
+  for (std::size_t i = 0; i < on.moored.size(); ++i) {
+    const cvc::physics::vec3 a = on.moored[i].p, b = off.moored[i].p;
+    apart = std::max(apart, std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) +
+                                      (a.z - b.z) * (a.z - b.z)));
+  }
+  std::printf("[wake push] the runner ends at (%.1f, %.1f); the moored launch over 17 s: without "
+              "wake_push heave %.4f m, drift %.4f m, tilt %.4f rad; with it heave %.4f m, drift "
+              "%.4f m, tilt %.4f rad; the two runs %.4f m apart at most\n",
+              on.runner.x, on.runner.y, off_heave, off_drift, off_tilt, on_heave, on_drift, on_tilt,
+              apart);
+  EXPECT_GT(on.runner.x, -6.0) << "the runner went past the moored launch";
+  EXPECT_LT(off_heave, 0.01);
+  EXPECT_LT(off_tilt, 0.01);
+  EXPECT_GT(on_heave, 3.0 * off_heave + 0.01) << "its wake heaves the moored launch";
+  EXPECT_GT(on_tilt, 3.0 * off_tilt + 0.01) << "and rolls it";
+  EXPECT_GT(apart, 0.02);
+}
+
+// The wake is stepped inside the physics step on the world clock's ticks, so it is the same
+// whatever the frames: one run takes a frame per clock quantum, another uneven 0.137 s frames,
+// and wherever the second is looked at, the world (its bodies, the boats and the wake's waves,
+// all in its state hash) is the first's.
+TEST(AriadneBoatNode, TheWakesPushIsTheSameAtAnyFramePacing) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  struct result {
+    std::map<std::uint64_t, std::uint64_t> hashes; // tick -> state hash
+    std::size_t sources = 0;
+  };
+  const auto run = [&](double frame_dt, double seconds, int every) {
+    result out;
+    LoadResult r = fresh_load(two_boats(true));
+    EXPECT_TRUE(r.ok) << r.error;
+    cvc::app app;
+    std::vector<std::string> warnings;
+    std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+    if (!w) {
+      ADD_FAILURE() << "no world";
+      return out;
+    }
+    w->sync(&warnings);
+    cvc::state::instance(app)("runner.throttle").value(1.0);
+    cvc::state::instance(app)("runner.rudder").value(0.3);
+    SceneClockDriver clock(app, resolved_clock(r.scene));
+    int frame = 0;
+    while (app.world_clock().t() < seconds) {
+      clock.drive(frame_dt);
+      w->follow(app.world_clock());
+      if (++frame % every == 0)
+        out.hashes[w->world().tick()] = w->world().state_hash();
+    }
+    const cvc::physics::field_id f = wake_field(*w);
+    if (f.valid())
+      out.sources = w->world().field_wake_info(f).sources.size();
+    return out;
+  };
+  cvc::app probe;
+  const result fine = run(probe.world_clock().fixed_dt(), 12.0, 1);
+  const result coarse = run(0.137, 12.0, 1);
+  EXPECT_EQ(fine.sources, 2u);
+  EXPECT_EQ(coarse.sources, 2u);
+  int compared = 0;
+  for (const auto &[tick, hash] : coarse.hashes) {
+    const auto it = fine.hashes.find(tick);
+    if (it == fine.hashes.end())
+      continue;
+    ++compared;
+    EXPECT_EQ(hash, it->second) << "at tick " << tick;
+  }
+  std::printf("[wake push] %d ticks compared between frames of a quantum and of 0.137 s\n",
+              compared);
+  EXPECT_GT(compared, 5);
+}
+
+// ---------------------------------------------------------------------------------------------
 // The scene's one wind (scene_wind.h, O14): `scene: wind:` seeds wind.speed / wind.dir /
 // wind.gustiness, and the physics pushes every body in the air with it.
 

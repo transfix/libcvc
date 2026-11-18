@@ -1369,7 +1369,7 @@ so its own flat water rungs do not draw over it. The cascades need float render 
 them the water is flat blue. Live keys under the node's root (`water.` unless `keys:`):
 `wind_speed`, `wind_dir`, `gustiness`, `fetch`, `lee`, `sea_lag`, `sea_fade`, `current`, `chop`,
 `wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`, `foam_fray`, `foam_decay`, `shore_fade`,
-`swell_height`, `swell_period`, `swell_dir`, `shore_foam`, `wake`, `wake_foam`, `lod_foam`,
+`swell_height`, `swell_period`, `swell_dir`, `shore_foam`, `wake`, `wake_foam`, `wake_push`, `lod_foam`,
 `lod_shade`, `lod_waves`, `quality` and `profile`, most on `water_controls.ari`. `quality` (-1)
 follows the scene's adaptive quality (below); 0 to 4 holds the water at that tier. `profile` 1 times
 the node's work each frame, section by section, into `water.stats.<section>_ms` (2 also waits for
@@ -1396,7 +1396,19 @@ generated world's bodies. The bodies make waves: an eWave window of 128 m of 0.5
 camera's target takes each moving body's immersed columns as its source, so a dropped crate makes a
 ring and a bobbing one keeps radiating. Its waves move the near grid and shade both grids, foaming
 where they are sharp or fast (`wake_foam`). Beaches absorb them and steep shores reflect them
-(`wake: 0` turns the window off). They are drawn only: they do not push the bodies back. With a
+(`wake: 0` turns the window off). Those are drawn only. With `wake_push: 1` (off by default;
+`water_controls.ari`'s "Wakes push bodies") the waves push the bodies too
+(OCEAN-AND-WEATHER-ROADMAP.md C5, D6; `cvc::physics::field_wake`): the field keeps a physics wake,
+a window of `wake_push_cells` cells of `wake_push_cell` metres (64 of 1 m; `wake_push_depth` m deep,
+0 for deep water) around its boats, or around its floating bodies when it has none, stepped inside
+the physics step. Every body's immersed columns make waves in a state of its own, and every body
+is pushed by the others' waves (their height under its cells and hull, their orbital velocity and
+their acceleration), never its own, so the launches rock in each other's wakes and a crate's
+splash rocks the boat beside it while a body alone floats exactly as it did. It is physics: the
+same on every host and at every frame rate, saved and restored with the world and in its state
+hash; with it off the world is bit for bit as before. It has no shores (a wake runs on over land,
+where nothing floats, and does not reflect), and a boat's propeller and rudder read the water
+without it. With a
 swell, the swash runs up the beach on the ground itself. The node adds it to the fragment shader
 of every mesh under its ground node (the `world:` / `ground:` node, found by id at the top of the
 scene, its LOD rungs and regenerated chunks included), as the cloud deck adds its shade to its

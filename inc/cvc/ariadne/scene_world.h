@@ -26,7 +26,9 @@
 //   * a `source: { data }` node: its dataset's world, terrain or geometry, once the dataset is
 //     ready and again each time it changes (its rev). It needs the scene's physics: block.
 // Those colliders are static and placed as they were made: the node's transform does not move
-// them.
+// them. A water node's field is swapped the same way when its sea changes, except one with a wake
+// (`wake_push`, cvc::physics::field_wake), which is set in place, so it keeps its id and the wake
+// its waves.
 //
 // The world steps on the app's world clock, never on frames, so N quanta give one state whether a
 // window draws them or not.

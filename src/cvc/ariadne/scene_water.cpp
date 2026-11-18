@@ -145,6 +145,15 @@ SceneWaterSpec scene_water_spec(cvc::app &app, const SceneNode &n, const std::st
   s.swell_height = std::max(key("water.swell_height", "swell_height", s.swell_height), 0.0);
   s.swell_period = std::max(key("water.swell_period", "swell_period", s.swell_period), 3.0);
   s.swell_dir = key("water.swell_dir", "swell_dir", s.swell_dir);
+  // C5 (D6): the bodies' waves pushing each other, off unless asked for. The window's cells are
+  // a power of two (the nearest in 8 .. 256), its cell at least 5 cm.
+  s.wake_push = key("water.wake_push", "wake_push", 0.0) != 0.0;
+  const double cells = std::clamp(n.props.num("wake_push_cells", 64.0), 8.0, 256.0);
+  s.wake_push_cells = 8;
+  while (s.wake_push_cells < 256 && cells > 1.5 * s.wake_push_cells)
+    s.wake_push_cells *= 2;
+  s.wake_push_cell = std::max(n.props.num("wake_push_cell", s.wake_push_cell), 0.05);
+  s.wake_push_depth = n.props.num("wake_push_depth", s.wake_push_depth);
   return s;
 }
 
@@ -419,9 +428,22 @@ bool WaterRuntime::tick() {
     return false;
   const SceneWaterSpec s = scene_water_spec(*d.app, d.node, d.prefix);
   // The wind is not here: it reaches the field through the sea's keyframes (the clock below).
-  const std::vector<double> spec{
-      s.level,     s.chop,  s.wave_amp,          s.shore_fade,      s.swell_height, s.swell_period,
-      s.swell_dir, s.outer, s.swash ? 1.0 : 0.0, s.lee ? 1.0 : 0.0, s.gustiness,    s.current};
+  const std::vector<double> spec{s.level,
+                                 s.chop,
+                                 s.wave_amp,
+                                 s.shore_fade,
+                                 s.swell_height,
+                                 s.swell_period,
+                                 s.swell_dir,
+                                 s.outer,
+                                 s.swash ? 1.0 : 0.0,
+                                 s.lee ? 1.0 : 0.0,
+                                 s.gustiness,
+                                 s.current,
+                                 s.wake_push ? 1.0 : 0.0,
+                                 double(s.wake_push_cells),
+                                 s.wake_push_cell,
+                                 s.wake_push_depth};
   const std::vector<float> &heights = g->heights();
   const bool groundNew = heights.data() != d.groundData || heights.size() != d.groundSize;
 
@@ -474,6 +496,12 @@ bool WaterRuntime::tick() {
   item.field.damping = 1.0e4;
   item.field.inertial = true;
   item.field.surface = std::make_shared<cvc::physics::ocean_surface>(d.sea);
+  // C5: the floating bodies' waves push the others (field.h, field_wake), when asked for.
+  if (s.wake_push) {
+    item.field.wake.cells = s.wake_push_cells;
+    item.field.wake.cell = s.wake_push_cell;
+    item.field.wake.depth = s.wake_push_depth;
+  }
   d.field = std::make_shared<const cvc::physics::field>(item.field);
   auto geo = std::make_shared<cvc::world::world_geometry>();
   geo->add_volume(std::move(item));

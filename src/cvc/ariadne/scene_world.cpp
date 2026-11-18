@@ -443,8 +443,44 @@ struct SceneWorld::impl {
   };
   std::vector<entry> entries;
 
+  // A water node's one field with a wake (field::wake, C5) is set in place: it keeps its id and the
+  // wake its waves under the new sea. Without a wake a node's fields are made again, as always.
+  bool set_in_place(tracked &t, std::vector<std::string> *w) {
+    const cvc::world::world_geometry &g = *t.colliders->geometry;
+    const cvc::world::volume_item *v = nullptr;
+    int collide = 0;
+    for (const cvc::world::volume_item &it : g.volumes())
+      if (it.has(cvc::world::role_collide)) {
+        v = &it;
+        ++collide;
+      }
+    if (collide != 1 || !v->field.wake.on() || !g.items().empty())
+      return false;
+    for (const SceneWorldBody &b : bodies)
+      if (b.node == t.node)
+        return false;
+    int had = 0;
+    ph::field_id id;
+    for (const node_field &f : node_fields)
+      if (f.node == t.node) {
+        id = f.id;
+        ++had;
+      }
+    if (had != 1)
+      return false;
+    t.applied = t.colliders->revision;
+    try {
+      world->set_field(id, v->field);
+    } catch (const std::exception &e) {
+      warn(w, "ari: scene node '" + t.node + "': body: " + e.what());
+    }
+    return true;
+  }
+
   // Swap node t's bodies for its colliders' current geometry.
   void apply(tracked &t, std::vector<std::string> *w) {
+    if (t.colliders->geometry && set_in_place(t, w))
+      return;
     for (auto it = bodies.begin(); it != bodies.end();) {
       if (it->node == t.node) {
         world->remove_body(it->id);
