@@ -208,3 +208,24 @@ def skeletonize_job(geom, params=None, **keywords):
         raise TypeError("skeletonize_job: pass a skeleton_params or keywords, not both")
     return _skeletonize_job(geom, params)
 %}
+// The tiler job (cvc/geometry/tiler.h; pycvc_tiler.i wraps the result and its parameters):
+// pycvc.tile_contours_job(stack, curation_delta=0.01, ...) or (stack, pycvc.tile_params(...)).
+PYCVC_RESULT_JOB(result_job_tile_result, cvc::tile_result)
+%exception _tile_contours_job {
+  try {
+    $action
+  } catch (const std::exception &e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  }
+}
+%inline %{
+std::unique_ptr<cvc::result_job<cvc::tile_result>>
+_tile_contours_job(const cvc::contour_stack &stack, const cvc::tile_params &p) {
+  return cvc::tile_contours_job(stack, p);
+}
+%}
+%pythoncode %{
+def tile_contours_job(stack, params=None, **keywords):
+    """tile_contours as a resumable job: step(budget), progress(), phase(), cancel(), result()."""
+    return _tile_contours_job(stack, _tile_params(params, keywords, "tile_contours_job"))
+%}

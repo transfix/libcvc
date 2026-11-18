@@ -96,10 +96,9 @@ void rgb(const std::string &s, float out[3]) {
     out[i] = static_cast<float>(std::clamp(num(part, out[i]), 0.0, 1.0));
 }
 
-// A vehicle model made ready to draw on a chassis: its smallest extent up (resting on z = 0), its
-// longest forward (+x, scaled to `length`), centred, the nose the end whose top sits lower (the
-// hood), as the nav demos' load_vehicle_template and pycvc_gl's VehicleModel have it; and its
-// first base-colour texture. Read once per file and length.
+// A vehicle model made ready to draw on a chassis (fit_vehicle_geometry), as the nav demos'
+// load_vehicle_template and pycvc_gl's VehicleModel have it, and its first base-colour texture.
+// Read once per file and length.
 struct fitted_model {
   cvc::geometry geometry;
   cvc::image texture;
@@ -112,6 +111,93 @@ struct fitted_model {
 struct vehicle_model_cache {
   std::map<std::string, std::shared_ptr<const fitted_model>> models;
 };
+
+cvc::geometry fit_vehicle_geometry(cvc::geometry g, double length, const vehicle_fit_axes &axes) {
+  const auto pts = g.const_points();
+  if (pts.empty())
+    throw std::runtime_error("it has no points");
+  double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
+  for (const auto &v : pts)
+    for (int k = 0; k < 3; ++k) {
+      lo[k] = std::min(lo[k], static_cast<double>(v[k]));
+      hi[k] = std::max(hi[k], static_cast<double>(v[k]));
+    }
+  const double ext[3] = {hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]};
+  const double big = std::max({ext[0], ext[1], ext[2]});
+  const auto is_axis = [](int a) { return a >= 0 && a < 3; };
+  int up = is_axis(axes.up) ? axes.up : -1;
+  // The axis it stands on: its least coordinate 0 there, and on the other two it reaches past a
+  // tenth of its extent each way (a file built on its ground plane, centred on it).
+  for (int k = 0; k < 3 && up < 0; ++k) {
+    bool stands = std::abs(lo[k]) <= 0.02 * big;
+    for (int o = 0; o < 3; ++o)
+      if (o != k && !(lo[o] < -0.1 * ext[o] && hi[o] > 0.1 * ext[o]))
+        stands = false;
+    if (stands)
+      up = k;
+  }
+  if (up < 0) {
+    up = 0;
+    for (int k = 1; k < 3; ++k)
+      if (ext[k] < ext[up])
+        up = k;
+  }
+  int fwd = (up + 1) % 3, side = (up + 2) % 3;
+  if (is_axis(axes.forward) && axes.forward != up) {
+    fwd = axes.forward;
+    side = 3 - up - fwd;
+  } else if (ext[side] > ext[fwd]) {
+    std::swap(fwd, side);
+  }
+  const double sc = ext[fwd] > 1e-9 ? length / ext[fwd] : 1.0;
+  const double cf = 0.5 * (lo[fwd] + hi[fwd]), cs = 0.5 * (lo[side] + hi[side]);
+  int front = axes.nose > 0 ? 1 : (axes.nose < 0 ? -1 : 0);
+  if (front == 0) {
+    long n_pos = 0, n_neg = 0, tt_pos = 0, tt_neg = 0;
+    double top_pos = 0.0, top_neg = 0.0;
+    const double top = lo[up] + 0.6 * ext[up];
+    for (const auto &v : pts) {
+      const double d = v[fwd] - cf;
+      if (d > 0)
+        ++n_pos;
+      else
+        ++n_neg;
+      if (v[up] >= top) {
+        if (d > 0) {
+          top_pos += d;
+          ++tt_pos;
+        } else {
+          top_neg += d;
+          ++tt_neg;
+        }
+      }
+    }
+    front = n_pos < n_neg ? 1 : -1;
+    if (tt_pos > 8 && tt_neg > 8)
+      front = top_pos / tt_pos < std::abs(top_neg / tt_neg) ? 1 : -1;
+  }
+  // A rotation, never a mirror: an odd permutation of the axes (or a nose turned round) reflects
+  // the mesh, which mirrors it and turns its triangles inside out. Flip the side axis to undo it.
+  const bool even = (fwd + 1) % 3 == side; // (fwd, side, up) a cyclic order of (0, 1, 2)
+  const double flip = (even ? 1.0 : -1.0) * front > 0 ? 1.0 : -1.0;
+  auto &moved = g.points();
+  for (std::size_t i = 0; i < pts.size(); ++i) {
+    const auto &v = pts[i];
+    moved[i][0] = (v[fwd] - cf) * sc * front;
+    moved[i][1] = (v[side] - cs) * sc * flip;
+    moved[i][2] = (v[up] - lo[up]) * sc;
+  }
+  const auto nn = g.const_normals();
+  if (nn.size() == pts.size()) {
+    auto &turned = g.normals();
+    for (std::size_t i = 0; i < nn.size(); ++i) {
+      turned[i][0] = nn[i][fwd] * front;
+      turned[i][1] = nn[i][side] * flip;
+      turned[i][2] = nn[i][up];
+    }
+  }
+  return g;
+}
 
 namespace {
 
@@ -133,67 +219,7 @@ std::shared_ptr<const fitted_model> fitted(cvc::app &app, vehicle_model_cache &c
         f->texture = mat.base_color_texture;
         break;
       }
-    const auto pts = g.const_points();
-    double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
-    for (const auto &v : pts)
-      for (int k = 0; k < 3; ++k) {
-        lo[k] = std::min(lo[k], static_cast<double>(v[k]));
-        hi[k] = std::max(hi[k], static_cast<double>(v[k]));
-      }
-    const double ext[3] = {hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]};
-    int up = 0;
-    for (int k = 1; k < 3; ++k)
-      if (ext[k] < ext[up])
-        up = k;
-    int fwd = (up + 1) % 3, side = (up + 2) % 3;
-    if (ext[side] > ext[fwd])
-      std::swap(fwd, side);
-    const double sc = ext[fwd] > 1e-9 ? length / ext[fwd] : 1.0;
-    const double cf = 0.5 * (lo[fwd] + hi[fwd]), cs = 0.5 * (lo[side] + hi[side]);
-    long n_pos = 0, n_neg = 0, tt_pos = 0, tt_neg = 0;
-    double top_pos = 0.0, top_neg = 0.0;
-    const double top = lo[up] + 0.6 * ext[up];
-    for (const auto &v : pts) {
-      const double d = v[fwd] - cf;
-      if (d > 0)
-        ++n_pos;
-      else
-        ++n_neg;
-      if (v[up] >= top) {
-        if (d > 0) {
-          top_pos += d;
-          ++tt_pos;
-        } else {
-          top_neg += d;
-          ++tt_neg;
-        }
-      }
-    }
-    int front = n_pos < n_neg ? 1 : -1;
-    if (tt_pos > 8 && tt_neg > 8)
-      front = top_pos / tt_pos < std::abs(top_neg / tt_neg) ? 1 : -1;
-    // A rotation, never a mirror: an odd permutation of the axes (or a nose turned round)
-    // reflects the mesh, which mirrors it and turns its triangles inside out. Flip the side
-    // axis to undo it.
-    const bool even = (fwd + 1) % 3 == side; // (fwd, side, up) a cyclic order of (0, 1, 2)
-    const double flip = (even ? 1.0 : -1.0) * front > 0 ? 1.0 : -1.0;
-    auto &moved = g.points();
-    for (std::size_t i = 0; i < pts.size(); ++i) {
-      const auto &v = pts[i];
-      moved[i][0] = (v[fwd] - cf) * sc * front;
-      moved[i][1] = (v[side] - cs) * sc * flip;
-      moved[i][2] = (v[up] - lo[up]) * sc;
-    }
-    const auto nn = g.const_normals();
-    if (nn.size() == pts.size()) {
-      auto &turned = g.normals();
-      for (std::size_t i = 0; i < nn.size(); ++i) {
-        turned[i][0] = nn[i][fwd] * front;
-        turned[i][1] = nn[i][side] * flip;
-        turned[i][2] = nn[i][up];
-      }
-    }
-    f->geometry = std::move(g);
+    f->geometry = fit_vehicle_geometry(std::move(g), length);
     out = std::move(f);
   } catch (const std::exception &e) {
     if (warnings)
@@ -230,6 +256,17 @@ bool attach_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group
 }
 
 } // namespace
+
+std::shared_ptr<vehicle_model_cache> make_vehicle_model_cache() {
+  return std::make_shared<vehicle_model_cache>();
+}
+
+bool attach_vehicle_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group,
+                          const std::string &id, const ari::vehicle_look &look,
+                          const vehicle_shape &shape, double base_z, const float color[3],
+                          std::vector<std::string> *warnings) {
+  return attach_model(app, cache, group, id, look, shape, base_z, color, warnings);
+}
 
 ari::SceneNode vehicle_scene_node(const std::string &id, const ari::vehicle_look &look,
                                   const vehicle_shape &s, const float color[3],

@@ -19,7 +19,7 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/physics/field.h` | `field` (a `cvc::volume` as water, snow or wind), `field_load`, `water_sample` (`world::water_at`) |
 | `cvc/physics/flow_velocity.h` | `flow_velocity`, a flow field's velocity in space and time (`field::wind`), and `wind_flow`, the scene's wind: `cvc::algo`'s gusts and height profile (below, and OCEAN-AND-WEATHER-ROADMAP.md E5, O14) |
 | `cvc/physics/fluid_surface.h` | `fluid_surface`, a fluid field's free surface (its level, waves and water velocity, read at `world::field_time()`); `still_surface`, `wave_train_surface` (linear Airy trains). A field reads a cell's height and velocity with `height_with` / `velocity_with` and a `surface_memo` it owns, so a surface can share work between the two reads |
-| `cvc/physics/hull.h` | `hull_mesh`, `box_hull()`: a boat's hull, a closed triangle list apart from the collision shape, that a fluid pushes on triangle by triangle (hydrostatic pressure split at the waterline, ITTC-57 friction, pressure drag, slamming) in place of the body's sample cells |
+| `cvc/physics/hull.h` | `hull_mesh`, `box_hull()`, `loft_hull()` (a closed hull through stations, each a half-section from keel to sheer: a model's hull baked by `tools/boat_hulls/bake_loft.py`), `hull_waterline_box()` (the largest box inside a hull at a waterline, for a renderer's water cut-out): a boat's hull, a closed triangle list apart from the collision shape, that a fluid pushes on triangle by triangle (hydrostatic pressure split at the waterline, ITTC-57 friction, pressure drag, slamming) in place of the body's sample cells |
 | `cvc/physics/immersion.h` | `immersion_body` (a body's outline as the water sees it: its box, sphere or convex hull, or its `hull_mesh`), `immersion_water` (a fluid field's surface, time and box), `immersion_grid`, `add_immersion()`: a body's columns of immersed depth zeta over a grid window's cells, from its shape, its pose and the water, as the field step immerses it. The wake windows' sources (OCEAN-AND-WEATHER-ROADMAP.md C2, O9), computable without a world (a renderer, a client from a replicated pose); the same bits on every platform |
 | `cvc/physics/ocean_surface.h` | `ocean_surface`: a `cvc::ocean::sea_surface` (`cvc/ocean/sea_surface.h`) as a free surface. That is the sea a renderer draws from the same cascades and shore layer, with breakers and the swash. For many floating bodies, `sea_params::source_cell_m` (0.5 m in lsystem_coast) lets their field cells share the sea's inversions, and a cell's height and velocity share one source through the field's memo |
 | `cvc/physics/boat.h` | `boat_desc` (a hull body, `propeller_desc`, `rudder_desc`, the actuators' time constant), `boat_controls`, `boat_state`: a boat whose propeller and rudder (or outboard) the world applies every step |
@@ -29,7 +29,7 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/gl/physics_scene_binding.h` (cvcGL) | `physics_scene_binding`: a world's bodies drawn in a scene graph |
 | `cvc/physics/world_geometry.h` | `add_world_geometry`: a `cvc::world::world_geometry`'s static bodies and materials |
 | `cvc/physics/nav_plant.h` | `nav_plant`: a world's vehicles as `cvc::nav`'s plant (`cvc/nav/vehicle_plant.h`) |
-| `cvc/physics/dyn_boat_plant.h` | `dyn_boat_plant`, `dyn_boat_desc` (with `launch()`, `jonboat()`): a world's boats as `cvc::nav`'s plant, through a driver, with an energy ledger |
+| `cvc/physics/dyn_boat_plant.h` | `dyn_boat_plant`, `dyn_boat_desc` (with `launch()`, `jonboat()`, `tactical()`): a world's boats as `cvc::nav`'s plant, through a driver, with an energy ledger |
 | `cvc/physics/jolt_rollout.h` | `jolt_rollout`: the Jolt vehicle as `cvc::nav`'s training rollout (`rollout_kind::jolt`, `cvc/nav/rollout_plant.h`; NAV_TRAINING.md, "Training on Jolt") |
 | `cvc/physics/mujoco_robot.h` | `mujoco_robot`: one articulated robot (the Unitree Go2 first) simulated by MuJoCo on a `cvc::height_field`, with servo and torque commands, pushes, contacts and MuJoCo's energies; `run_mujoco_trial`. Optional (`CVC_WITH_MUJOCO`); [MUJOCO.md](MUJOCO.md) |
 
@@ -922,7 +922,15 @@ cars on land.
   plans with: `max_speed`, its top speed through calm water, and `turn_radius`, its circle at full
   rudder and full throttle. The presets are measured (`PresetsDoWhatTheySay`): `launch()` is
   `physics_boat_test`'s 4 m box of 900 kg with a shaft propeller and a rudder; `jonboat()` a 3.6 m
-  flat box of 350 kg with a 1.5 kN outboard that steers.
+  flat box of 350 kg with a 1.5 kN outboard that steers; `tactical()` the `vehicle-tactical-boat`
+  package's patrol boat of 2800 kg on its own V hull, baked from the model into 16 stations of 8
+  points (`loft_hull`; 242 vertices, 480 triangles; 6.85 m long, 2.33 m in beam, 7.8 m overall
+  with its outboards, `length_overall`), floating 0.49 m over its keel, its collision shape the
+  hull's convex hull; its two outboards one thrust (8 kN ahead, 3.5 kN astern, none past 18 m/s)
+  that swings 0.5 rad, steering by thrust alone, and its rudder a fixed 0.4 m² foil on the keel
+  just aft of its centre of mass: the grip sideways of its keel, chines and strakes, which the
+  hull's triangles barely give a V bottom (their pressure drag goes as the flow's normal component
+  squared), so without it the boat skids and at full lock spins on the spot.
 - **Attach.** Each agent gets a boat (`world::add_boat`) with its hull's origin over its start,
   heading its way, upright and at rest, floating at its draft on the water there:
   `float_height(desc, mass, density)` is how far the origin rides over the waterline when the
@@ -972,7 +980,7 @@ Gates (`physics_dyn_boat_plant_test`, Windows MSVC Release):
 
 | Gate | Measured |
 |---|---|
-| The presets do what they say | The launch tops out at 3.1915 m/s and turns at full rudder and full throttle on a 15.39 m radius (`max_speed` 3.19, `turn_radius` 15.4); the jonboat 4.0054 m/s and 4.12 m (4.0, 4.1) |
+| The presets do what they say | The launch tops out at 3.1915 m/s and turns at full rudder and full throttle on a 15.39 m radius (`max_speed` 3.19, `turn_radius` 15.4); the jonboat 4.0054 m/s and 4.12 m (4.0, 4.1); the tactical boat 10.5169 m/s, and turns at full lock at 9.230 m/s and 0.2840 rad/s, a 32.50 m radius (10.5, 32.5) |
 | A speed and a yaw rate held | Nav's commands for 2.5 m/s, then 2.5 m/s at 0.08 rad/s: 2.5000 m/s and 0.08000 rad/s on calm water for both; on a 0.3 m, 5 s swell, 2.478–2.513 m/s and 0.0795–0.0798 rad/s |
 | The books balance | A weave and a stop astern: the residual 6·10⁻⁸ to 2·10⁻⁷ of the flow on calm water, up to 3.5·10⁻⁵ on the swell. Steady at 2.5 m/s, the thrust's 11 305.28 J go to the water (11 248.80 J) and the rudder (56.25 J) |
 | Nav drives the boats | A launch and a jonboat reach goals 120 m east from rest in 37.9 s, then turn round to goals about 100 m behind them and reach those in 61.0 s |

@@ -19,6 +19,7 @@
 #define __CVC_PHYSICS_MUJOCO_ENGINE_H__
 
 #include <cvc/physics/mujoco_robot.h>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -26,6 +27,21 @@
 namespace cvc {
 namespace physics {
 namespace detail {
+
+// A collision geom as the air meets it at the start of a step: its bounding box (MuJoCo's, in the
+// geom's frame) placed in the world, its body, and the velocity of the box's centre.
+struct mujoco_air_geom {
+  int body = 0;
+  vec3 centre;   // world
+  vec3 axis[3];  // the box's axes, world (unit)
+  vec3 half;     // its half sizes along them
+  vec3 velocity; // of the centre, world
+};
+// The air's wrench on each body for one step, given the time at the step's start, the collision
+// geoms of the moving bodies and each body's centre of mass: 6 numbers per body (the force, then
+// the torque about its centre of mass, world axes), added to apply_wrench's for that step.
+using mujoco_air = std::function<void(double t, const std::vector<mujoco_air_geom> &geoms,
+                                      const std::vector<vec3> &coms, std::vector<double> &wrench)>;
 
 // A height field as the engine takes it: sample (r, c) at (x0 + c dx, y0 + r dy), heights
 // row-major, row 0 first, no holes.
@@ -79,6 +95,12 @@ public:
   virtual void apply_wrench(int b, const vec3 &force, const vec3 &torque) = 0;
   virtual void clear_wrenches() = 0;
   virtual vec3 body_com(int b) = 0;
+  // The air (empty: none): asked for its wrench at each step's start, which acts over that step
+  // beside apply_wrench's (and is booked with them, as external work), then is taken off again.
+  virtual void set_air(mujoco_air air) = 0;
+  // The air's force and its torque about the origin, summed over the bodies, over the last step.
+  virtual vec3 air_force() const = 0;
+  virtual vec3 air_torque() const = 0;
 
   virtual void step() = 0;
 

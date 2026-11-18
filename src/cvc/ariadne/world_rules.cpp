@@ -511,7 +511,7 @@ const vehicle_archetype *world_rules::find_vehicle(const std::string &id) const 
 }
 
 std::vector<std::string> vehicle_presets() { return {"humvee", "roboracer"}; }
-std::vector<std::string> boat_presets() { return {"launch", "jonboat"}; }
+std::vector<std::string> boat_presets() { return {"launch", "jonboat", "tactical"}; }
 bool vehicle_plant_floats(const std::string &plant) { return plant == "dynamicboat"; }
 
 bool vehicle_controller_known(const std::string &id) {
@@ -602,7 +602,7 @@ std::string check_world_rules(const world_rules &r) {
       preset = preset || p == v.preset;
     if (!preset)
       return at + ": vehicle '" + v.preset + "' is not a " +
-             (boat ? "boat preset (launch, jonboat)" : "preset (humvee, roboracer)");
+             (boat ? "boat preset (launch, jonboat, tactical)" : "preset (humvee, roboracer)");
     if (boat)
       for (const auto &[k, x] : v.overrides)
         if (k != "mass" && k != "max_speed")

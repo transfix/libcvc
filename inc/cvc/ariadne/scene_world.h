@@ -106,6 +106,7 @@ struct vehicle_archetype;
 struct spawn_rules;
 class WorldVehicles;
 class BoatRuntime;
+class WaterRuntime;
 class WeatherFriction;
 
 // Whether a scene has a world to run: a `physics:` block, a `world:` block, or a node (at any
@@ -287,6 +288,8 @@ public:
   // The boat nodes' runtimes, in the document's order, and one by its node's id (null for none).
   const std::vector<std::unique_ptr<BoatRuntime>> &boats() const;
   BoatRuntime *boat(const std::string &node);
+  // A water node's runtime this world runs (from_scene's; a renderer runs its own), or null.
+  const WaterRuntime *water(const std::string &node) const;
   // Take on the scene's wind (scene_wind.h, O14): seed its keys from `scene: wind:` and, while
   // wind.speed is set under bind_prefix, keep a flow field of air (1.225 kg/m^3, C_d 1) whose
   // velocity is that wind (cvc::physics::wind_flow, its profile over the document's wind base)
@@ -295,13 +298,22 @@ public:
   // sync() follows the keys (a change swaps the field). from_scene does this itself; a renderer
   // that build()s the world calls it.
   void bind_wind(const Scene &scene, const std::string &bind_prefix);
-  // The wind's flow field now (invalid without a scene wind).
+  // The wind's flow field now (invalid without a scene wind), and its air (null without one): a
+  // wind_flow, or a StormWindFlow with the weathers' gust fronts. What a body outside the world
+  // reads the same wind from: a MuJoCo robot's set_wind(wind(), world().field_time() at its
+  // start). The air is read at the world's field time (it adds its own offset to the clock for its
+  // storms), so pass that, not the clock's time.
   cvc::physics::field_id wind_field() const;
+  std::shared_ptr<const cvc::physics::flow_velocity> wind() const;
   // Take on the scene's weather nodes (type: weather, at any depth; scene_weather.h): a
   // WeatherFriction each, its keys under `bind_prefix`, which sets the surface materials'
   // friction from the rain inside the physics step, on the world clock's ticks, so every host
   // applies the same friction at the same step. from_scene does this itself; a renderer that
   // build()s the world calls it.
+  // With a scene wind, the weather's storms are in it too (F4): the wind's field is then a
+  // StormWindFlow (the gust fronts in space and time, read at each step's own time), and each
+  // sync() writes the front at the first weather's centre to wind.front (scene_wind.h), before
+  // the water reads its wind.
   void bind_weather(const Scene &scene, const std::string &bind_prefix);
   // The weather nodes' friction runtimes, in the document's order.
   const std::vector<std::unique_ptr<WeatherFriction>> &weathers() const;
@@ -313,8 +325,11 @@ private:
   SceneWorld();
   // The scene.world keys, when the world on changed since the last time (or `force`).
   void publish_worlds(bool force);
-  // The wind's field after the scene wind's keys (bind_wind).
+  // The wind's field after the scene wind's keys (bind_wind) and the weathers' storms.
   void sync_wind();
+  // wind.front: the storms' gust front at the first weather's centre at the start of the clock's
+  // kSceneWindFrontPeriod.
+  void publish_front();
   struct impl;
   std::unique_ptr<impl> _impl;
 };

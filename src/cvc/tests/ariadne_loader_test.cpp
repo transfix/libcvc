@@ -6278,6 +6278,40 @@ TEST(AriadneComponents, NodeComponentsTakeTheirNodeAsAnArg) {
   }
 }
 
+// weather_controls' Storm wind: a slider (0 to 30 m/s) on the weather node's weather.gust_front,
+// the gust front's peak, under the node's keys when it has some.
+TEST(AriadneComponents, WeatherControlsBindTheStormWind) {
+  SKIP_WITHOUT_YAML();
+  cvc::app app;
+  if (!register_source_components(app))
+    GTEST_SKIP() << "component sources not found";
+  LoadResult r = load_string(app, R"(
+meta: { min_libcvc: "0.0.0" }
+import: cvc://components/weather_controls.ari
+windows:
+  - include: weather_controls
+  - include: weather_controls
+    args: { keys: squall, id: squall_controls }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  std::vector<const Widget *> windows;
+  collect(r.root, Kind::Window, windows);
+  ASSERT_EQ(windows.size(), 2u);
+  for (int i = 0; i < 2; ++i) {
+    std::vector<const Widget *> sliders;
+    collect(*windows[i], Kind::SliderFloat, sliders);
+    const Widget *storm = nullptr;
+    for (const Widget *s : sliders)
+      if (s->label == "Storm wind")
+        storm = s;
+    ASSERT_NE(storm, nullptr) << "no Storm wind slider";
+    EXPECT_EQ(storm->bind, i == 0 ? "weather.gust_front" : "squall.gust_front");
+    EXPECT_EQ(storm->lo, 0.0);
+    EXPECT_EQ(storm->hi, 30.0);
+    EXPECT_FALSE(storm->tooltip.empty());
+  }
+}
+
 // viewer_settings gathers a viewer's settings in one window, reusing camera_controls' and
 // scene_controls' widgets.
 TEST(AriadneComponents, ViewerSettingsBindsTheViewersKeys) {

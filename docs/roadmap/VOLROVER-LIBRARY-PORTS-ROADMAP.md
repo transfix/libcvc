@@ -571,7 +571,7 @@ from a document carries the document's owner tag, so closing the document stops 
 | Intrinsic | Does |
 |---|---|
 | `(skeleton.compute g [params])` | Skeleton of a geometry. Returns a dict of `strands` and `sheets` data objects and `warnings` |
-| `(tiler.tile stack [params])` | Tiles a `contour_stack`. Returns a dict from component name to geometry |
+| `(tiler.tile stack [params])` | Tiles a `contour_stack`. Returns a dict of `surfaces` (component name to geometry) and `warnings` |
 | `(segment.seeded vol classes [params])` | §5's segmentation. Returns a dict of `labels`, `classes` and `border` |
 | `(segment.critical-points vol [params])` | The paper's seeds as a two-class `point_classes` |
 | `(contours.info stack)` | A `contour_stack`'s slices, counts and components. No intrinsic reads or writes files: the DSL deals with data on the state tree, and files are the rest of libcvc's (Joe, 2026-11-12) |
@@ -1054,6 +1054,21 @@ a few files:
        read `test_data/`, which volrover never committed, or call a harness the legacy itself had
        commented out (`tiler_legacy_test.cpp` lists each one).
 
+     The surfaces (P3b's second PR):
+     - **`cvc tile`** reads any contour format (`.ser`, `.contour`, `.cvcc`, ...) and writes
+       `<outdir>/<basename><component>_tiles.<ext>` per component and `<basename>_tiles.<ext>`
+       for all of them, as the legacy tool did. It takes the legacy flags: `-C -e -r -v`, `-c`
+       and `-x` (exact names, made `--include` / `--exclude` patterns), `-s first last`, `-z`
+       (the slice spacing), `--color r g b`, `-d -b -n`, `-o raw` and `--printcomponents`. The
+       debug-output flags, `-f`, `-m`, `-F` and `-S -1` are accepted and ignored with a note;
+       `-o gnuplot`, `-I` and smoothing (`-S n`) are refused.
+     - **pycvc:** `tile_contours(stack, ...)` and `tile_contours_job`, with `tile_params` as
+       keywords; the result's `surfaces` is a dict of geometries.
+     - **`tiler.tile`**, `-async` and `-start`. The result is a dict of `surfaces` and
+       `warnings`, so a skipped contour's warning is not lost; -start's keys go under its
+       target, `<node>.tiler` for a node. The keys carry the phase and percentage but not the
+       slice pair being tiled: `tile_stepper::label()` has it, for P4's node to show.
+
 **ContourTiler's other rough edges, and what the port does with them**
 
 | As it is | In libcvc |
@@ -1122,8 +1137,8 @@ smaller than a pair:
 
 **Surfaces**
 
-- **CLI:** `cvc tile in.ser -o outdir`, keeping `cl_parse`'s flags. The VolumeRover2 dialog passes
-  them as free text, by default `-C 0.01 -e 1e-15 -o raw`.
+- **CLI:** `cvc tile in.ser -d outdir`, keeping `cl_parse`'s flags (`-o` stays the legacy output
+  format). The VolumeRover2 dialog passes them as free text, by default `-C 0.01 -e 1e-15 -o raw`.
 - **pycvc:** `pycvc.tile_contours(stack, ...)` and `tile_contours_job`.
 - **DSL:** `(tiler.tile stack params)`, with `-async` and `-start` (§1.6).
 - **Ariadne:** a `contour_lab` node type. Its `tile` request runs as a sliced task and publishes
@@ -1560,7 +1575,7 @@ not as follow-ups.
 | P1 Skeleton core | M | `cvc::tet_complex`, libcvc's own exact incremental Delaunay on Shewchuk's predicates (settled 2026-11-12; Qhull only as the general-position cross-check), with its adapter, and its first PR proving the incremental build against the batch build and CGAL's (§2, transfix/libcvc#1157); vendor into `src/cvc/geometry/skeleton/` with the shared cocone core and `skeleton_context`; the §2 fixes; `skeleton_stepper` with every phase sliced, `cvc::skeletonize` and its job; `cvc skeleton`; pycvc; `skeleton.compute`; §2's tests | P0a–P0c |
 | P2 Skeleton in Ariadne | S | The `mesh_lab` `skeleton` request, children and `mesh_tools` section; a demo document with a golden image, native and in arigl-web | P1 |
 | P3a Planar module | M | `cvc::planar`: the snapping grid, predicates, polygons, Clipper2 Booleans and offsets, CDT, the Boost.Polygon medial axis, Sibson interpolation; T2 against brute force | P0c |
-| P3b Tiler core | L | Vendor ContourTiler into `src/cvc/geometry/tiler/` on `cvc::planar`, with the context-held logger; in-memory output, const input; `tile_stepper` slicing within a slice pair (§3); its 12 tests as gtest; `cvc tile`; pycvc; `tiler.tile`; §3's tests. *Built:* the core, `tiler_test` and `tiler_legacy_test`, and the legacy goldens (§3, "What P3b built"); `cvc tile`, pycvc and `tiler.tile` follow in their own PR | P3a, P0d |
+| P3b Tiler core | L | Vendor ContourTiler into `src/cvc/geometry/tiler/` on `cvc::planar`, with the context-held logger; in-memory output, const input; `tile_stepper` slicing within a slice pair (§3); its 12 tests as gtest; `cvc tile`; pycvc; `tiler.tile`; §3's tests. *Built:* the core, `tiler_test` and `tiler_legacy_test`, and the legacy goldens (§3, "What P3b built"); then `cvc tile`, pycvc and `tiler.tile` with `tiler_intrinsics_test` | P3a, P0d |
 | P4 Tiler in Ariadne | S | `contour_lab`, reading a file or another node's contours, and `contour_tiler.ari`, with a demo on a small redistributable Reconstruct series (find one), native and in arigl-web | P3b |
 | P5 Segmentation core | M | §5 steps 1–2: GenSeg vendored into `src/cvc/volume/segmentation/` with `genseg_context` and in-memory input and output; `segment_stepper` with every phase sliced (§5); voxel-for-voxel parity, then the clean-up; `cvc segment`; pycvc; `segment.seeded`; §5's tests | P0a, P0b, P0d |
 | P6 Paper mode | S–M | §5 steps 3–4: the SegMed audit, `cvc::gradient_vector_diffusion` as a stepper, `seed_mode::critical_points` and `critical_point_seeds`, `segment.critical-points`, and #123's seed generators. The default-seeding switch is its own later PR (§5 step 5) | P5 |
