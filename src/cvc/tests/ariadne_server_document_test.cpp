@@ -1061,6 +1061,9 @@ TEST(ServerDocumentTest, EachClientsLimitsLowerItsProgramsCaps) {
   cvc::app app;
   cvc::state &root = cvc::state::instance(app);
   root("ariadne.limits.action_max_steps").value(std::string("100000"));
+  // Steps alone decide here: the action lane's 0.1 s would stop the heavy program first on a slow
+  // (Debug) build, and the time it takes is no measure of the caps under test.
+  root("ariadne.limits.action_max_time").value(std::string("0"));
   ari::ServerDocument doc(app, kRoom);
   ASSERT_EQ(doc.read(path), "");
   std::vector<std::string> asked;
