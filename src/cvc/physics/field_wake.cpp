@@ -70,7 +70,9 @@ constexpr int kQ = 6;           // what a state gives a reader per cell: h, u, v
 constexpr double kFaded = 1e-6; // m: waves below this everywhere in a state are let go (zeroed)
 constexpr double kWakeHeight = 1e-3; // m: the others' waves wake a sleeping body this high
 constexpr double kFar = 1e12;        // cells: a coordinate this far off is not placed
-constexpr double kBoatWeight = 4.0;  // where the window goes, a boat counts as this many bodies
+constexpr std::int64_t kFarCell = 2000000000000; // cells: a saved window placed farther is refused
+constexpr double kBoatWeight = 4.0;    // where the window goes, a boat counts as this many bodies
+constexpr std::size_t kProposals = 64; // where the window goes: at most this many places weighed
 
 template <class T> void put(std::string &out, const T &v) {
   out.append(reinterpret_cast<const char *>(&v), sizeof(v));
@@ -237,7 +239,8 @@ void fluid_wake::advance(std::vector<wake_body> &bodies, const vec3 &lo, const v
   const std::size_t un = std::size_t(n), cells = un * un;
 
   // Nothing to do while every body sleeps and no wave is left: the surface is not read (as the
-  // step without a wake reads none then). The sleepers' columns are taken again when they wake.
+  // step without a wake reads none then). No body holds a slot meanwhile; a body awake in the
+  // window again takes one with its columns then.
   bool awake = false;
   for (const wake_body &b : bodies)
     awake = awake || (b.active && b.over);
@@ -246,7 +249,7 @@ void fluid_wake::advance(std::vector<wake_body> &bodies, const vec3 &lo, const v
     still = still && quiet(e.second.h, e.second.phi);
   if (!awake && still) {
     for (auto &e : _states)
-      e.second.rest = true;
+      e.second.source = false;
     return;
   }
 
@@ -287,9 +290,9 @@ void fluid_wake::advance(std::vector<wake_body> &bodies, const vec3 &lo, const v
   }
 
   // The window's place: where it holds the most bodies in the water, a boat counting kBoatWeight.
-  // Each body proposes the bodies within the window's inner square round it (the window less its
-  // sponge); the best proposal wins over what the window holds now only when it holds more, and
-  // the window then centres on what it holds (moving by whole cells once that is cells / 8 off).
+  // A proposal is the bodies within the window's inner square (the window less its sponge) round
+  // a body; the best proposal wins over what the window holds now only when it holds more, and the
+  // window then centres on what it holds (moving by whole cells once that is cells / 8 off).
   const double inner = std::max(0.5 * n - _p.sponge_cells, 0.25 * n) * _dx;
   const auto weight = [](const wake_body &b) { return b.hull ? kBoatWeight : 1.0; };
   // The bodies in the water within `inner` of (cx, cy): their weight and their box's middle.
@@ -314,10 +317,29 @@ void fluid_wake::advance(std::vector<wake_body> &bodies, const vec3 &lo, const v
     my = 0.5 * (y0 + y1);
     return w;
   };
-  double best = 0.0, bx = 0.0, by = 0.0;
-  for (const wake_body &b : bodies) { // id order: the first of equals wins
+  // The bodies that propose: every boat, then the first body (by id) in each occupied square of a
+  // grid `inner` wide (in the grid's order), at most kProposals in all, so placing the window costs
+  // at most kProposals x the bodies a wave step however many bodies float.
+  std::vector<const wake_body *> proposers;
+  std::map<std::pair<std::int64_t, std::int64_t>, const wake_body *> firstIn;
+  const auto square = [inner](double v) {
+    return static_cast<std::int64_t>(std::clamp(std::floor(v / inner), -1e15, 1e15));
+  };
+  for (const wake_body &b : bodies) { // id order
     if (!b.in_water || !b.outline)
       continue;
+    if (b.hull)
+      proposers.push_back(&b);
+    else
+      firstIn.emplace(std::make_pair(square(b.position.x), square(b.position.y)), &b);
+  }
+  for (const auto &e : firstIn)
+    proposers.push_back(e.second);
+  if (proposers.size() > kProposals)
+    proposers.resize(kProposals);
+  double best = 0.0, bx = 0.0, by = 0.0;
+  for (const wake_body *p : proposers) { // the first of equals wins
+    const wake_body &b = *p;
     double mx, my;
     const double w = hold(b.position.x, b.position.y, mx, my);
     if (w > best) {
@@ -415,21 +437,14 @@ void fluid_wake::advance(std::vector<wake_body> &bodies, const vec3 &lo, const v
     if (!s.source)
       continue;
     const wake_body *b = find(e.first);
-    if (!b || !b->outline || !inside(*b)) {
-      s.source = false; // gone from the world or the window: its waves fade from here
+    // Gone from the world or the window, or asleep (at rest as the world sees it, so it makes no
+    // waves): it gives its slot up, and its waves fade from here.
+    if (!b || !b->outline || !inside(*b) || !b->active) {
+      s.source = false;
       continue;
     }
     ++sourcing;
-    if (!b->active) { // asleep: at rest as the world sees it, so it makes no waves
-      s.rest = true;
-      continue;
-    }
     columns(*b, &s.h);
-    if (s.rest) { // awake again: its columns now are its last
-      s.zeta = zeta;
-      s.rest = false;
-      continue;
-    }
     for (int j = 0; j < n; ++j)
       for (int i = 0; i < n; ++i) {
         const std::size_t c = std::size_t(j) * un + std::size_t(i);
@@ -452,8 +467,8 @@ void fluid_wake::advance(std::vector<wake_body> &bodies, const vec3 &lo, const v
     zeta.resize(cells);
   }
 
-  // New sources: the awake bodies in the water and the window without one, nearest the centre
-  // first.
+  // New sources, in the slots free: the awake bodies in the water and the window without one, the
+  // boats first, then nearest the centre first.
   std::vector<const wake_body *> fresh;
   for (const wake_body &b : bodies) {
     if (!b.in_water || !b.outline || !b.active || !inside(b))
@@ -464,6 +479,8 @@ void fluid_wake::advance(std::vector<wake_body> &bodies, const vec3 &lo, const v
   }
   const double mx = x0 + 0.5 * double(n - 1) * _dx, my = y0 + 0.5 * double(n - 1) * _dx;
   std::stable_sort(fresh.begin(), fresh.end(), [&](const wake_body *a, const wake_body *b) {
+    if (a->hull != b->hull)
+      return a->hull;
     const double da =
         (a->position.x - mx) * (a->position.x - mx) + (a->position.y - my) * (a->position.y - my);
     const double db =
@@ -509,7 +526,6 @@ void fluid_wake::advance(std::vector<wake_body> &bodies, const vec3 &lo, const v
     columns(*b, &it->second.h);
     it->second.zeta = zeta;
     it->second.source = true;
-    it->second.rest = false;
     ++sourcing;
   }
 
@@ -595,10 +611,11 @@ void fluid_wake::save(std::string &out) const {
   put(out, _ci);
   put(out, _cj);
   put(out, _count);
+  put(out, std::int32_t(_outside));
   put(out, std::uint32_t(_states.size()));
   for (const auto &e : _states) {
     put(out, e.first);
-    put(out, std::uint8_t((e.second.source ? 1 : 0) | (e.second.rest ? 2 : 0)));
+    put(out, std::uint8_t(e.second.source ? 1 : 0));
     put_values(out, e.second.h);
     put_values(out, e.second.phi);
     put_values(out, e.second.w);
@@ -611,24 +628,32 @@ std::shared_ptr<fluid_wake::saved> fluid_wake::parse(const std::string &in,
   const std::size_t cells = std::size_t(_n) * std::size_t(_n);
   auto out = std::make_shared<saved>();
   std::uint8_t placed = 0;
+  std::int32_t outside = 0;
   std::uint32_t count = 0;
   get(in, pos, placed);
   get(in, pos, out->ci);
   get(in, pos, out->cj);
   get(in, pos, out->count);
+  get(in, pos, outside);
   get(in, pos, count);
-  need(placed <= 1, "the saved wake is not one");
+  need(placed <= 1 && outside >= 0, "the saved wake is not one");
+  // A window placed so far off that moving it would overflow its cells' arithmetic is no wake's:
+  // cell_of places none beyond kFar.
+  need(out->ci >= -kFarCell && out->ci <= kFarCell && out->cj >= -kFarCell && out->cj <= kFarCell,
+       "the saved wake's window is out of range");
   need(count <= std::uint32_t(_p.sources + kMaxFading),
        "the saved wake has more states than it allows");
   out->placed = placed != 0;
+  out->outside = outside;
+  int sources = 0;
   for (std::uint32_t k = 0; k < count; ++k) {
     state s;
     std::uint8_t flags = 0;
     get(in, pos, s.body);
     get(in, pos, flags);
-    need(flags <= 3, "the saved wake is not one");
-    s.source = (flags & 1) != 0;
-    s.rest = (flags & 2) != 0;
+    need(flags <= 1, "the saved wake is not one");
+    s.source = flags != 0;
+    sources += s.source ? 1 : 0;
     get_values(in, pos, s.h, cells);
     get_values(in, pos, s.phi, cells);
     get_values(in, pos, s.w, cells);
@@ -637,6 +662,7 @@ std::shared_ptr<fluid_wake::saved> fluid_wake::parse(const std::string &in,
     const std::uint32_t id = s.body;
     need(out->states.emplace(id, std::move(s)).second, "the saved wake names a body twice");
   }
+  need(sources <= _p.sources, "the saved wake has more sources than it allows");
   return out;
 }
 
@@ -645,8 +671,8 @@ void fluid_wake::commit(saved &s) {
   _ci = s.ci;
   _cj = s.cj;
   _count = s.count;
+  _outside = s.outside; // as the last wave step counted them (it needs the bodies and the sea)
   _states.swap(s.states);
-  _outside = 0;
   sum();
 }
 

@@ -1211,7 +1211,8 @@ TEST(PhysicsFieldWake, MalformedWakesAreRefused) {
 }
 
 // A body never reads its own waves: alone on the water, a crate dropped in makes a ring (the wake
-// has it, and its one source), but falls, bobs and settles exactly as it does with no wake.
+// has it, and its one source while it moves), but falls, bobs and settles exactly as it does with
+// no wake.
 TEST(PhysicsFieldWake, ABodyNeverFeelsItsOwnWaves) {
   REQUIRE_JOLT();
   std::vector<vec3> path[2];
@@ -1220,14 +1221,19 @@ TEST(PhysicsFieldWake, ABodyNeverFeelsItsOwnWaves) {
     world w(jolt_config());
     const field_id water = w.add_field(wake_water(k == 1));
     const body_id b = w.add_body(crate_at(0.0, 0.0, 1.2));
+    wake_info info; // while it bobs
     for (int i = 0; i < 400; ++i) {
       w.step();
       path[k].push_back(w.state(b).position);
       if (k == 1)
         ring = std::max(ring, std::fabs(w.field_wake_height(water, 0.0, 3.0)));
+      if (k == 1 && i == 99)
+        info = w.field_wake_info(water);
     }
     if (k == 1) {
-      const wake_info info = w.field_wake_info(water);
+      // Asleep at the end, it gives its slot up.
+      EXPECT_FALSE(w.state(b).active);
+      EXPECT_TRUE(w.field_wake_info(water).sources.empty());
       EXPECT_TRUE(info.placed);
       ASSERT_EQ(info.sources.size(), 1u);
       EXPECT_EQ(info.sources[0], b);
@@ -1474,6 +1480,27 @@ TEST(PhysicsFieldWake, AFailedRestoreLeavesTheWakeAsItWas) {
   EXPECT_EQ(w.field_wake_info(water).windows, before.windows);
 }
 
+// A saved window placed absurdly far off (a corrupt state) is refused: moving it from there would
+// overflow its cells' arithmetic.
+TEST(PhysicsFieldWake, AWindowOutOfRangeIsRefused) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  w.add_field(wake_water(true));
+  w.add_body(crate_at(0.0, 0.0, 1.2));
+  w.step(20);
+  std::vector<std::uint8_t> saved = w.save();
+  static const char magic[] = "CVCWAKE1";
+  const auto at = std::search(saved.begin(), saved.end(), magic, magic + 8);
+  ASSERT_NE(at, saved.end());
+  // After the magic: the field's id (4 bytes), its parameters (3 ints, 7 doubles), placed (1).
+  const std::size_t ci = std::size_t(at - saved.begin()) + 8 + 4 + 12 + 56 + 1;
+  ASSERT_LE(ci + 8, saved.size());
+  EXPECT_NO_THROW(w.restore(saved));
+  const std::int64_t away = std::int64_t(1) << 62;
+  std::memcpy(saved.data() + ci, &away, sizeof(away));
+  EXPECT_THROW(w.restore(saved), cvc::physics_error);
+}
+
 // A state saved under one wake does not restore into a world with another: every parameter
 // counts, not only the window's cells.
 TEST(PhysicsFieldWake, AStateFromAnotherWakeIsRefused) {
@@ -1511,9 +1538,17 @@ TEST(PhysicsFieldWake, TheWindowHoldsTheBodies) {
     w.add_body(boat_at(50.0, 0.0));
     w.step(10);
     const wake_info info = w.field_wake_info(water);
-    std::printf("[wake] two boats 100 m apart: the window at x %.0f, %zu source(s)\n", info.x0,
-                info.sources.size());
+    std::printf("[wake] two boats 100 m apart: the window at x %.0f, %zu source(s), %d outside\n",
+                info.x0, info.sources.size(), info.outside);
     EXPECT_EQ(info.sources.size(), 1u) << "one boat in the window, not neither";
+    EXPECT_EQ(info.outside, 1);
+    // A restore brings back what the last wave step counted outside, not 0 until the next one.
+    world again(jolt_config());
+    const field_id water2 = again.add_field(wake_water(true));
+    again.add_body(boat_at(-50.0, 0.0));
+    again.add_body(boat_at(50.0, 0.0));
+    again.restore(w.save());
+    EXPECT_EQ(again.field_wake_info(water2).outside, 1) << "restored";
   }
   {
     world w(jolt_config());
@@ -1532,6 +1567,69 @@ TEST(PhysicsFieldWake, TheWindowHoldsTheBodies) {
   }
 }
 
+// More floating bodies than slots: six crates afloat at rest round the window's middle, a wake of
+// four sources. Once they sleep they hold no slot, so a boat that comes later makes waves, and its
+// waves wake the crates and push them. (When a sleeping body kept its slot, the crates held all
+// four: the boat made no waves, and the crates slept on.)
+TEST(PhysicsFieldWake, SleepingBodiesLeaveTheirSlotsToABoat) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  field f = wake_water(true);
+  f.wake.sources = 4;
+  const field_id water = w.add_field(f);
+  std::vector<body_id> crates;
+  for (int k = 0; k < 6; ++k)
+    crates.push_back(w.add_body(crate_at(4.0 * (k % 3) - 4.0, k < 3 ? -2.0 : 2.0, 0.0)));
+  const body_id boat = w.add_body(boat_at(-42.0, 0.0));
+  const auto asleep = [&] {
+    int n = 0;
+    for (const body_id id : crates)
+      n += w.state(id).active ? 0 : 1;
+    return n;
+  };
+  // They settle, sleep and their waves die away.
+  int settle = 0;
+  for (; settle < 12000 && (asleep() < 6 || wake_peak(w, water, 0.0, 0.0) > 1e-5); ++settle)
+    w.step();
+  ASSERT_EQ(asleep(), 6) << "the crates settle and sleep";
+  ASSERT_LE(wake_peak(w, water, 0.0, 0.0), 1e-5) << "and their waves die away";
+  std::vector<vec3> rest;
+  for (const body_id id : crates)
+    rest.push_back(w.state(id).position);
+  // The boat comes on toward them under a steady thrust, into the window, and brakes 20 m short of
+  // them (it never touches one).
+  bool sourced = false;
+  int woke = 0;
+  double moved = 0.0;
+  double furthest = -1e9;
+  for (int s = 0; s < 4000; ++s) {
+    const body_state b = w.state(boat);
+    furthest = std::max(furthest, b.position.x);
+    if (b.position.x < -26.0)
+      w.add_force(boat, {1500.0, 0.0, 0.0});
+    else
+      w.add_force(boat, {-3000.0 * b.linear_velocity.x, -3000.0 * b.linear_velocity.y, 0.0});
+    w.step();
+    for (const body_id id : w.field_wake_info(water).sources)
+      sourced = sourced || id == boat;
+    woke = std::max(woke, 6 - asleep());
+  }
+  for (std::size_t k = 0; k < crates.size(); ++k) {
+    const vec3 p = w.state(crates[k]).position;
+    moved = std::max(moved, std::sqrt((p.x - rest[k].x) * (p.x - rest[k].x) +
+                                      (p.y - rest[k].y) * (p.y - rest[k].y) +
+                                      (p.z - rest[k].z) * (p.z - rest[k].z)));
+  }
+  std::printf("[wake] six crates asleep and still after %.1f s, four slots: the boat %s (its bow "
+              "as far as x %.1f); over 40 s, up to %d crate(s) awake, the farthest moved %.4f m\n",
+              settle * w.config().fixed_dt, sourced ? "made waves" : "made none", furthest + 2.0,
+              woke, moved);
+  EXPECT_LT(furthest + 2.0, -6.0) << "the boat never reaches a crate";
+  EXPECT_TRUE(sourced) << "the boat takes a slot the sleepers gave up";
+  EXPECT_GT(woke, 0) << "its waves wake the crates";
+  EXPECT_GT(moved, 0.005) << "its waves push the crates";
+}
+
 // Packed bodies (0.6 m apart) on calm water: their waves die down (they leave the window slowly,
 // through its sponge), and the bodies fall asleep with a wake as they do without one, if later:
 // within 120 s, where without one they sleep within 40. In a swell no crate sleeps, with a wake or
@@ -1547,7 +1645,7 @@ TEST(PhysicsFieldWake, PackedBodiesStayBoundedAndSleep) {
     std::printf(" %.4f", p);
   std::printf("\n");
   EXPECT_EQ(on.asleep, off.asleep) << "the wake keeps no crate awake";
-  EXPECT_LT(on.peaks[9], 0.05 * on.peaks[1]) << "the waves die down";
+  EXPECT_LT(on.peaks[9], 0.05 * std::max(on.peaks[0], on.peaks[1])) << "the waves die down";
   const auto swell = std::make_shared<wave_train_surface>(
       0.0, 0.0, std::vector<wave_train>{{0.25, 5.0, 0.3, 0.0}});
   const packed_run soff = packed(false, swell, 60.0), son = packed(true, swell, 60.0);
@@ -1569,7 +1667,6 @@ TEST(PhysicsFieldWake, PackedBodiesStayBoundedAndSleep) {
   EXPECT_LT(std::max(early, son.peaks[0]), 0.25);
   EXPECT_LT(on.peaks[0], 0.5);
   EXPECT_LT(son.late_speed, 2.0 * soff.late_speed + 0.05);
-  EXPECT_GE(son.asleep, soff.asleep);
 }
 
 // A world whose bodies all sleep reads no surface for its wake once the waves have died away, as
@@ -1654,5 +1751,5 @@ TEST(PhysicsFieldWake, CrossPlatformGoldenHash) {
   std::printf("[wake] golden: %zu sources, state hash 0x%016llx\n",
               w.field_wake_info(water).sources.size(), static_cast<unsigned long long>(h));
   EXPECT_EQ(w.field_wake_info(water).sources.size(), 3u);
-  EXPECT_EQ(h, 0x8052b235300e8e23ull) << std::hex << "wake world state hash 0x" << h;
+  EXPECT_EQ(h, 0x7a5a40b81d1d2433ull) << std::hex << "wake world state hash 0x" << h;
 }

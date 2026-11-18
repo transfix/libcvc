@@ -103,9 +103,11 @@
 // down, at once, and the waves take a while to refill it) and price its wave-making twice (the
 // hull's drag stands for it). So boats feel each other's wakes and the debris' rings, and the
 // debris the boats'. The window and its states are world state: saved (with every wake parameter,
-// so a world with another wake refuses the state), restored whole or not at all, and hashed; the
-// section is versioned only by its magic (CVCWAKE1). What reads the water at a point
-// (world::water_at: a boat's propeller and rudder) reads it without the wake.
+// so a world with another wake refuses the state) and hashed. restore() reads every wake's
+// section whole before any wake takes it, so a failure in it leaves the wakes as they were (the
+// world's restore as a whole is not transactional: the engine and the sections before the
+// wakes' are taken first). The section is versioned only by its magic (CVCWAKE1). What reads
+// the water at a point (world::water_at: a boat's propeller and rudder) reads it without the wake.
 //
 // Sleeping bodies are not pushed: the forces were in balance when the body fell
 // asleep. add_field and set_field wake the bodies inside the field's box, and a wake wakes a body
@@ -141,17 +143,21 @@ enum class field_kind : std::uint8_t {
 // A fluid's wake (field::wake): the window its floating bodies' waves are stepped on. `cells` 0 is
 // no wake (the default). The window (cells x cells of `cell` metres, one water depth) sits on a
 // grid of whole cells from the world's origin where it holds the most bodies in the water, a boat
-// (a body with a hull) counting as four: each such body proposes the bodies within the window's
-// inner square round it (the window less its sponge), and the window takes the best proposal over
-// what it holds only when that holds more. It centres on what it holds and moves by whole cells
-// once that is cells / 8 off its centre, the waves going with it and the strip that enters flat.
-// Bodies in the water outside it make and feel no waves (wake_info::outside counts them): two
-// groups farther apart than the window cannot share it. The waves step every `period` seconds of
-// world time, in whole physics steps (at least one), and the bodies read them at every step. A
-// sponge at the window's edge takes the waves that leave, and the window has no shores: a wake
-// runs on over land, where nothing floats to feel it, and does not reflect off the coast. At most
-// `sources` awake bodies make waves, the nearest the window's centre (a sleeping body makes none);
-// a body that leaves the window, or the world, stops making waves, and its waves are let fade.
+// (a body with a hull) counting as four: a proposal is the bodies within the window's inner
+// square (the window less its sponge) round a body, and the window takes the best proposal over
+// what it holds only when that holds more. Every boat proposes, and of the other bodies the first
+// (by id) in each occupied square of a grid as wide as that inner square, at most 64 proposals in
+// all, so placing the window costs at most 64 x the bodies in the water a wave step. It centres on
+// what it holds and moves by whole cells once that is cells / 8 off its centre, the waves going
+// with it and the strip that enters flat. Bodies in the water outside it make and feel no waves
+// (wake_info::outside counts them): two groups farther apart than the window cannot share it. The
+// waves step every `period` seconds of world time, in whole physics steps (at least one), and the
+// bodies read them at every step. A sponge at the window's edge takes the waves that leave, and
+// the window has no shores: a wake runs on over land, where nothing floats to feel it, and does
+// not reflect off the coast. At most `sources` awake bodies make waves, each holding a slot: a
+// body that falls asleep, leaves the window or leaves the world gives its slot up and its waves
+// fade on; a body awake in the window without one takes a free slot, boats first, then the
+// nearest the window's centre (by id among equals).
 //
 // Memory and cost: each body that makes waves holds a state of 80 cells^2 bytes (320 KiB at 64,
 // 1.25 MiB at 128), at most sources + 4 states (the 4 fading), and saves 32 cells^2 bytes of it

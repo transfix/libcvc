@@ -97,11 +97,12 @@ public:
 
   wake_info info() const;
 
-  // World state (world::save / restore): the window's place, its step count and the states.
+  // World state (world::save / restore): the window's place, its step count, the bodies outside it
+  // and the states.
   void save(std::string &out) const;
   // A saved wake read whole before anything changes (parse throws cvc::physics_error for a state
-  // that does not fit this wake), then taken (commit, which cannot fail): a failed restore leaves
-  // the wake as it was.
+  // that does not fit this wake), then taken (commit, which cannot fail): a failed read leaves the
+  // wake as it was.
   struct saved;
   std::shared_ptr<saved> parse(const std::string &in, std::size_t &pos) const;
   void commit(saved &s);
@@ -109,8 +110,10 @@ public:
 private:
   struct state {
     std::uint32_t body = 0;
-    bool source = true;            // its body still makes waves here
-    bool rest = false;             // its body slept at the last wave step: its columns are stale
+    // Its body makes waves here: it holds one of the `sources` slots. A body that sleeps, leaves
+    // the window or leaves the world gives its slot up (its waves fade on), and takes one again,
+    // if one is free, when it is awake in the window again.
+    bool source = true;
     std::vector<double> h, phi, w; // n^2 each
     std::vector<double> zeta;      // its body's columns at the last wave step
     std::vector<double> f;         // what it gives a reader: 6 per cell (h, u, v, w, gx, gy)
@@ -140,6 +143,7 @@ struct fluid_wake::saved {
   bool placed = false;
   std::int64_t ci = 0, cj = 0;
   std::uint64_t count = 0;
+  int outside = 0;
   std::map<std::uint32_t, state> states;
 };
 

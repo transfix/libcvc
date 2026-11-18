@@ -344,11 +344,13 @@ w.field_wake_height(id, x, y);      // all their waves' height there
 
 - **The window** sits on the world's grid of whole cells where it holds the most bodies in the
   water (a boat, a body with a hull, counting as four) and follows them by whole cells; bodies
-  outside it make and feel no waves (`wake_info::outside`). Each awake body that makes waves (at
-  most `wake.sources`, 8) has a wave state of its own there: its immersed columns over the window
-  (`immersion.h`), cut against the surface and the others' waves, are its source, and the states
-  step by `cvc::ocean::ewave`'s exact linear step every `wake.period` (1/30 s) in whole steps. A
-  sponge takes the waves that leave; the window has no shores.
+  outside it make and feel no waves (`wake_info::outside`); placing it weighs at most 64 places a
+  wave step (every boat, and one body per square of a coarse grid). Each awake body that makes
+  waves (at most `wake.sources`, 8, each holding a slot; a body that sleeps or leaves gives its slot
+  up, and a free slot goes to a boat first) has a wave state of its own there: its immersed
+  columns over the window (`immersion.h`), cut against the surface and the others' waves, are its
+  source, and the states step by `cvc::ocean::ewave`'s exact linear step every `wake.period`
+  (1/30 s) in whole steps. A sponge takes the waves that leave; the window has no shores.
 - **Each body reads the others' waves, never its own**: their height under its cells and hull,
   their orbital velocity for its drag and damping, and their acceleration for an inertial fluid's
   push. Its own, read back, would undo its heave's spring as it moves and count its wave-making
@@ -358,8 +360,10 @@ w.field_wake_height(id, x, y);      // all their waves' height there
   samples 1 .. 8. A state is 80 cells² bytes (320 KiB at 64²), at most sources + 4 of them, and a
   save carries 32 cells² bytes of each.
 - **World state:** the window and the states are saved with every wake parameter (another wake's
-  state is refused), restored whole or not at all, and hashed; `set_field` with the same wake keeps
-  the waves. `water_at` reads the water without them.
+  state is refused) and hashed; restore() reads the wakes' section whole before any wake takes it
+  (a failure in it leaves the wakes as they were; the world's restore as a whole is not
+  transactional). `set_field` with the same wake keeps the waves. `water_at` reads the water
+  without them.
 - **Measured** (`physics_field_test`, `PhysicsFieldWake.*`): a crate afloat 5 m from one dropped
   in heaves 0.038 m, drifts 0.082 m and tilts 0.035 rad with a wake, and does not move without one;
   on still water the push costs 0.14 ms a step with two sources against 0.005 ms without, and on a

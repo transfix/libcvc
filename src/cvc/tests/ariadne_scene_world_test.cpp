@@ -3167,8 +3167,9 @@ TEST(AriadneBoatNode, TheWakesPushIsTheSameAtAnyFramePacing) {
 }
 
 // The wake at uneven frame pacing that the clock does not cap (it takes at most 8 quanta a frame):
-// frames of 1, 3, 2, 5 and 7 quanta in turn, none a multiple of the waves' 3-step period, against a
-// frame per quantum, have the same state hash at every tick they share.
+// frames of 1, 3, 2, 5 and 7 quanta in turn, none a multiple of the waves' 4-step period (1/30 s at
+// the clock's 120 Hz), against a frame per quantum, have the same state hash at every tick they
+// share.
 TEST(AriadneBoatNode, TheWakesPushIsTheSameAtUnevenFrames) {
   REQUIRE_YAML();
   if (!jolt())
