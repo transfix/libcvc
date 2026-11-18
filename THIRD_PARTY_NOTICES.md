@@ -1019,7 +1019,11 @@ Also from ABYSSAL at 849ff7f4, under the license above: `src/cvcGL/ocean/OceanCa
 `OceanCascades.cpp` run OceanFFT's port for several cascades in one set of passes, and the
 adaptive quality loop in libcvc itself, `inc/cvc/ariadne/scene_quality.h` and
 `src/cvc/ariadne/scene_quality.cpp` (run by cvcGL's `AriRuntime`), ports `Quality.tick` in
-`src/core/Quality.js`.
+`src/core/Quality.js`. The wind-blown spray in `src/cvcGL/ocean/OceanSpray.h` and
+`OceanSpray.cpp` (the Ariadne `water` node's) follows its spray particles
+(`src/weather/Precipitation.js:267-587`): drag toward the wind under gravity, the upward kick out of
+a breaking crest, billboards stretched by speed and the forward scattering's 0.55 + 1.9 mu^6; here
+the particles are a closed form of time in the vertex shader, not state in float targets.
 
 ## DejaVu Sans Mono 2.37
 

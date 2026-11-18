@@ -86,6 +86,12 @@ units:
         hi: 8.0
         fmt: "%.1f"
         tooltip: "how long the foam a breaking wave leaves takes to thin (0: the whitecaps alone)"
+      - slider_float: Spray
+        bind: "{keys}.spray"
+        lo: 0.0
+        hi: 2.0
+        fmt: "%.2f"
+        tooltip: "the spray a strong wind (9 to 20 m/s and up) tears off the breaking crests (0: none)"
       - slider_float: Shore fade (m)
         bind: "{keys}.shore_fade"
         lo: 0.5

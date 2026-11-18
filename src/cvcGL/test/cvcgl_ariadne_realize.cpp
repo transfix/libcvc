@@ -2570,8 +2570,10 @@ int main() {
                                   {"water_level", "0"},
                                   {"water", "0"},
                                   {"texture", "256"}}));
+      // A gale on the water (20 m/s): its breaking crests throw spray (§10.5), its own draw.
       scene.nodes.push_back(
-          node("water", "water", {{"world", "world"}, {"level", "0"}, {"swell_height", "1"}}));
+          node("water", "water",
+               {{"world", "world"}, {"level", "0"}, {"swell_height", "1"}, {"wind_speed", "20"}}));
       // O19: a storm raining on it all: the wet ground, the rings and the fog in the receivers'
       // uniforms, and the streaks' own mesh.
       SceneNode sky = node("sky", "cloud_sky",
@@ -2678,6 +2680,46 @@ int main() {
         chk(win2 && win2->f4.count("cloudFogC") && win2->f4.at("cloudFogC")[3] > 0.0f &&
                 win2->tex.size() == 2,
             "the water has the rain's fog as a uniform, its sky samplers still 2");
+        // §10.5: the gale's spray, its own draw in the same 16 units: the cascades' displacement
+        // atlas the water reads (its one sampler of its own: the whitecaps' folds and the crests'
+        // height), the sky's two shade maps (the water is a receiver, and the spray's mesh is
+        // inside its node), and the land kept out by uniforms.
+        auto spray = group ? std::dynamic_pointer_cast<cvc::gl::GeometryNode>(
+                                 group->findChildByName("water_spray"))
+                           : nullptr;
+        auto sprayIn = spray ? spray->sharedShaderInputs("water_spray") : nullptr;
+        auto spraySky = spray ? spray->sharedShaderInputs("cloud_sky") : nullptr;
+        printf("  the spray: %s, %zu sampler(s) of its own, %zu of the sky's; amount %.2f, %.0f "
+               "particles, reach %.0f m, wave height x %.2f\n",
+               spray && spray->isVisible() ? "drawn" : "not drawn",
+               sprayIn ? sprayIn->tex.size() : 0, spraySky ? spraySky->tex.size() : 0,
+               sprayIn && sprayIn->f4.count("sprayK") ? sprayIn->f4.at("sprayK")[0] : -1.0f,
+               sprayIn && sprayIn->f4.count("sprayK") ? sprayIn->f4.at("sprayK")[1] : -1.0f,
+               sprayIn && sprayIn->f4.count("sprayK") ? sprayIn->f4.at("sprayK")[2] : -1.0f,
+               sprayIn && sprayIn->f4.count("sprayK") ? sprayIn->f4.at("sprayK")[3] : -1.0f);
+        chk(spray && spray->isVisible(), "the gale's spray draws too, in the same 16 units");
+        chk(sprayIn && sprayIn->tex.size() == 1 && sprayIn->tex.count("sprayDisp") &&
+                sprayIn->f4.count("sprayDepth[63]") && sprayIn->f4.count("sprayK") &&
+                sprayIn->f4.at("sprayK")[0] > 0.5f,
+            "the spray reads one texture of its own (the cascades' atlas the water reads) and "
+            "uniforms");
+        chk(spraySky && spraySky->tex.size() == 2,
+            "the sky shades the spray (a mesh inside the water's node), with its 2 samplers");
+        // Adaptive quality: tier 1 draws half the particles, half as far; tier 2 none.
+        cvc::state &st = cvc::state::instance(app);
+        const std::string qk = cvc::ariadne::resolve_bind("webgl", "water.quality");
+        st(qk).value(1.0);
+        tick();
+        const float half = sprayIn && sprayIn->f4.count("sprayK") ? sprayIn->f4.at("sprayK")[1] : 0;
+        st(qk).value(2.0);
+        tick();
+        const bool gone = spray && !spray->isVisible();
+        st(qk).value(-1.0);
+        tick();
+        printf("  the spray at tier 1: %.0f particles; at tier 2 %s\n", half,
+               gone ? "not drawn" : "still drawn");
+        chk(half == 4000.0f && gone && spray->isVisible(),
+            "adaptive quality halves the spray at tier 1 and drops it at tier 2");
       }
       for (const std::string &w : warnings)
         printf("  warning: %s\n", w.c_str());

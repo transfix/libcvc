@@ -109,15 +109,19 @@ struct WaterQuality {
   bool wake = true;            // the bodies' waves (the eWave window's passes and reads)
   int wake_cells = 256;        // their window's cells a side (0.5 m each: 128 m, or 64 m at 128)
   int cascades = 3;            // 2: the short cascade is not transformed or read
+  // The wind-blown spray (§10.5): its particles, a share of water.spray_count (0: none drawn), and
+  // its reach, a share of water.lod_spray. Tiers 2 to 4 draw none.
+  double spray = 1.0;
+  double spray_reach = 1.0;
 };
 
 // The tier table (tier clamped to 0 .. 4, scale to 0.5 .. 1; the distances are the tier's times
 // the scale):
 //   0 full    everything
 //   1 high    the full shading and the persistent foam to half their distance; the wake's window
-//             a quarter the cells (half the reach: 64 m)
+//             a quarter the cells (half the reach: 64 m); half the spray, to half its reach
 //   2 medium  ... the full shading to a quarter; the short cascade and the far normal to half; no
-//             persistent foam (the whitecaps alone take Monahan's share)
+//             persistent foam (the whitecaps alone take Monahan's share), so no spray
 //   3 low     the simple shading everywhere; no wake; two cascades (no short one); the far normal
 //             to half
 //   4 least   ... and the far normal to a quarter

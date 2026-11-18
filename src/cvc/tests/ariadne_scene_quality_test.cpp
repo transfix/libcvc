@@ -217,16 +217,23 @@ TEST(WaterQuality, EachTierDrawsNoMoreThanTheOneAbove) {
     EXPECT_LE(int(b.wake), int(a.wake)) << t;
     EXPECT_LE(b.wake_cells, a.wake_cells) << t;
     EXPECT_LE(b.cascades, a.cascades) << t;
+    EXPECT_LE(b.spray, a.spray) << t;
+    EXPECT_LE(b.spray_reach, a.spray_reach) << t;
+    if (!b.persistent_foam) // the spray goes with the persistent foam: tier 2 and down
+      EXPECT_EQ(b.spray, 0.0) << t;
   }
   const ari::WaterQuality full = ari::water_quality(0, 1.0);
   EXPECT_EQ(full.shade, 1.0);
   EXPECT_EQ(full.far_normal, 1.0);
   EXPECT_TRUE(full.persistent_foam && full.wake);
   EXPECT_EQ(full.cascades, 3);
+  EXPECT_EQ(full.spray, 1.0);
+  EXPECT_EQ(full.spray_reach, 1.0);
   const ari::WaterQuality least = ari::water_quality(ari::kQualityTiers - 1, 1.0);
   EXPECT_EQ(least.shade, 0.0);
   EXPECT_FALSE(least.persistent_foam || least.wake);
   EXPECT_EQ(least.cascades, 2);
+  EXPECT_EQ(least.spray, 0.0);
 }
 
 TEST(WaterQuality, TheScaleScalesTheDistancesAndIsClamped) {

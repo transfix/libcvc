@@ -1385,7 +1385,15 @@ calm: each wave band is scaled by the square root of its fetch, the distance the
 over water, up to where the band is fully grown, from a coarse fetch map built when the wind turns.
 The gusts (`gustiness`, 0.25) ripple and roughen racing patches of water (cat's paws), and
 `current` (m/s, 0) is a slowly varying flow that carries the short waves and floating bodies
-alike. With `body: {}` the water is in the scene's
+alike. In a strong wind the breaking crests throw spray (OCEAN-AND-WEATHER-ROADMAP.md §10.5): drops
+torn off the crests where the cascades fold as the whitecaps are drawn, flying downwind and
+falling back, none below a 9 m/s wind and all of it from 20 m/s, with the gusts. It is drawing only:
+a mesh of its own, `<id>_spray`, whose particles are worked out in its vertex shader from the time
+alone (no state), reading the cascades' atlas the water reads and uniforms, the land kept out by the
+still water's depth on a grid round the camera. Keys: `spray` (1; 0 none) and `lod_spray` (160 m:
+how far from the camera it reaches); the prop `spray_count` (8000) is its particles. It draws in
+the volume layer, after the cloud deck, and takes the deck's shade when the sky lists the water among
+its receivers. With `body: {}` the water is in the scene's
 physics world, with or without a renderer ([`scene_water.h`](../inc/cvc/ariadne/scene_water.h)).
 It is one fluid field over the water's extent, its surface the same sea computed on the CPU (the
 cascades fading at the same coast, the same swell), so a body lighter than water floats on the
@@ -1493,8 +1501,9 @@ least), `quality.scale` (0.5 to 1: how far out each tier's detail is drawn) and 
 never the physics, so a run is the same at every tier. On a fixed clock (`arigl snapshot`, a test)
 the loop does not run and everything draws at tier 0. The water reads them (its `quality` key
 overrides): tier 1 draws the full shading and the persistent foam to half their distance and the
-wake's window at half its reach (64 m); 2 also the shading to a quarter, the short cascade and the
-far grid's waves to half, and no persistent foam (the whitecaps alone take Monahan's share); 3 the
+wake's window at half its reach (64 m), and half the spray to half its reach; 2 also the shading to
+a quarter, the short cascade and the far grid's waves to half, and no persistent foam (the
+whitecaps alone take Monahan's share) and no spray; 3 the
 plain Fresnel sea, no wake, and two cascades; 4 the far grid's waves to a quarter.
 
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
