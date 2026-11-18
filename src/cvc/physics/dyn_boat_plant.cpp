@@ -18,6 +18,7 @@
 #include <cvc/physics/dyn_boat_plant.h>
 #include <cvc/physics/hull.h>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <variant>
@@ -55,6 +56,49 @@ vec3 mat_mul(const std::array<double, 9> &m, const vec3 &v) {
 }
 
 quat about_z(double a) { return {det::cos(0.5 * a), 0.0, 0.0, det::sin(0.5 * a)}; }
+
+// The vehicle-tactical-boat package's TacticalBoat.glb baked into its hull's stations. To bake it
+// again (a new model, more stations), run the command below and replace the table.
+// kTacticalLoft: 16 stations of 8 points, from tools/boat_hulls/bake_loft.py:
+//   TacticalBoat.glb (sha256 9e2074131994d29f...), fitted to 7.800 m (up y, length along x, nose at
+//   -x)
+//   --from -3.05 --to 3.8 --stations 16 --points 8 --sheer-max 1.3 --power 1.25
+// Each row: x, then (half width, height) from the keel to the sheer; the hull body's
+// frame (m): the model's, its heights moved down by 0.5571 m (the keel at -0.5545).
+constexpr double kTacticalLoft[16][17] = {
+    {-3.0500, 0.0000, -0.1354, 1.0533, -0.0854, 1.0585, -0.0164, 1.0647, 0.0622, 1.0713, 0.1478,
+     1.0775, 0.2389, 1.0848, 0.3347, 1.1508, 0.4346},
+    {-2.5933, 0.0000, -0.3938, 0.4832, -0.3196, 0.9664, -0.2173, 1.0535, -0.1008, 1.0638, 0.0260,
+     1.0761, 0.1610, 1.0889, 0.3031, 1.1534, 0.4512},
+    {-2.1367, 0.0000, -0.4063, 0.4705, -0.3308, 0.9080, -0.2267, 1.0538, -0.1081, 1.0636, 0.0209,
+     1.0744, 0.1584, 1.0872, 0.3029, 1.1580, 0.4537},
+    {-1.6800, 0.0000, -0.4218, 0.4170, -0.3463, 0.8227, -0.2422, 1.0521, -0.1236, 1.0628, 0.0055,
+     1.0741, 0.1429, 1.0855, 0.2875, 1.1575, 0.4382},
+    {-1.2233, 0.0000, -0.4481, 0.3561, -0.3686, 0.7234, -0.2590, 1.0529, -0.1343, 1.0634, 0.0016,
+     1.0749, 0.1462, 1.0877, 0.2983, 1.1600, 0.4569},
+    {-0.7667, 0.0000, -0.5342, 0.2244, -0.4468, 0.6879, -0.3263, 1.0466, -0.1892, 1.0594, -0.0398,
+     1.0731, 0.1192, 1.0874, 0.2864, 1.1627, 0.4608},
+    {-0.3100, 0.0000, -0.5545, 0.2329, -0.4632, 0.6748, -0.3373, 1.0407, -0.1939, 1.0551, -0.0378,
+     1.0756, 0.1284, 1.0943, 0.3032, 1.1637, 0.4855},
+    {0.1467, 0.0000, -0.5543, 0.2386, -0.4626, 0.6541, -0.3361, 1.0036, -0.1920, 1.0505, -0.0352,
+     1.0682, 0.1319, 1.0883, 0.3075, 1.1642, 0.4907},
+    {0.6033, 0.0000, -0.5485, 0.2391, -0.4558, 0.5997, -0.3281, 0.9543, -0.1826, 1.0373, -0.0243,
+     1.0603, 0.1443, 1.0842, 0.3216, 1.1646, 0.5065},
+    {1.0600, 0.0000, -0.5322, 0.2428, -0.4400, 0.5656, -0.3129, 0.9038, -0.1681, 1.0121, -0.0106,
+     1.0425, 0.1573, 1.0754, 0.3338, 1.1612, 0.5178},
+    {1.5167, 0.0000, -0.5134, 0.2411, -0.4234, 0.5008, -0.2993, 0.8290, -0.1580, 0.9715, -0.0042,
+     1.0116, 0.1596, 1.0557, 0.3319, 1.1543, 0.5116},
+    {1.9733, 0.0000, -0.4900, 0.1325, -0.4005, 0.4183, -0.2770, 0.6719, -0.1364, 0.9103, 0.0167,
+     0.9647, 0.1797, 1.0223, 0.3512, 1.1315, 0.5300},
+    {2.4300, 0.0000, -0.4346, 0.1057, -0.3489, 0.2762, -0.2309, 0.5560, -0.0965, 0.7977, 0.0498,
+     0.8863, 0.2057, 0.9528, 0.3695, 1.0657, 0.5404},
+    {2.8867, 0.0000, -0.3059, 0.1014, -0.2308, 0.2246, -0.1273, 0.4481, -0.0094, 0.6504, 0.1189,
+     0.7623, 0.2555, 0.8271, 0.3992, 0.9371, 0.5491},
+    {3.3433, 0.0000, -0.0255, 0.0995, 0.0254, 0.2219, 0.0957, 0.3541, 0.1756, 0.5132, 0.2627,
+     0.5639, 0.3554, 0.6145, 0.4529, 0.7068, 0.5545},
+    {3.8000, 0.0000, 0.4354, 0.0873, 0.4451, 0.1544, 0.4584, 0.2017, 0.4735, 0.2536, 0.4900, 0.3271,
+     0.5076, 0.3416, 0.5261, 0.3461, 0.5454},
+};
 
 // A box's hull with each face split into n x n squares, two triangles each (12 n^2), so the
 // water's push on the sides spreads along them as the boat yaws (physics_boat_test's).
@@ -216,17 +260,71 @@ dyn_boat_desc dyn_boat_desc::jonboat() {
   return d;
 }
 
+dyn_boat_desc dyn_boat_desc::tactical() {
+  dyn_boat_desc d;
+  boat_desc &b = d.boat;
+  std::vector<hull_station> stations;
+  for (const auto &row : kTacticalLoft) {
+    hull_station s;
+    s.x = row[0];
+    for (std::size_t k = 0; k < 8; ++k)
+      s.section.push_back({row[1 + 2 * k], row[2 + 2 * k]});
+    stations.push_back(std::move(s));
+  }
+  b.hull.hull = loft_hull(stations);
+  b.hull.shape = convex_hull{b.hull.hull->vertices};
+  b.hull.mass = 2800.0;
+  b.hull.linear_damping = 0.0;
+  b.hull.angular_damping = 0.0;
+  b.hull.allow_sleeping = false;
+  // Twin outboards on brackets 0.5 m aft of the transom, as one thrust at their propellers, 0.2 m
+  // over their skegs: they steer by thrust alone.
+  b.propeller.position = {-3.6, 0.0, -0.357};
+  b.propeller.max_thrust = 8000.0;
+  b.propeller.max_reverse_thrust = 3500.0;
+  b.propeller.max_inflow_speed = 18.0;
+  b.propeller.outboard_max_angle = 0.5;
+  // The rudder is the hull's own grip sideways: its keel, chines and strakes as one fixed foil
+  // (max_angle 0) on the keel just aft of the centre of mass. The hull's triangles push back on
+  // sideways flow by its normal component squared, which a 20-degree V bottom barely has, so
+  // without it the boat skids, and at full lock spins on the spot. Sized and placed by measuring
+  // (physics_dyn_boat_plant_test): from 0.4 m^2 at x -0.8 it turns at full lock in 21 m at
+  // 4.5 m/s to 32 m at 9.2 m/s, 8-11 degrees of drift; further forward it spins, further aft
+  // or larger it turns no tighter than 45-70 m.
+  b.rudder.position = {-0.8, 0.0, -0.5};
+  b.rudder.area = 0.4;
+  b.rudder.max_angle = 0.0;
+  b.actuator_time_constant = 0.5;
+  d.length_overall = 7.8;
+  d.max_speed = 10.5;
+  d.turn_radius = 32.5;
+  return d;
+}
+
 dyn_boat_desc dyn_boat_desc::preset(const std::string &name) {
   if (name == "launch")
     return launch();
   if (name == "jonboat")
     return jonboat();
-  throw cvc::physics_error("dyn_boat_desc: no boat preset named '" + name + "' (launch, jonboat)");
+  if (name == "tactical")
+    return tactical();
+  throw cvc::physics_error("dyn_boat_desc: no boat preset named '" + name +
+                           "' (launch, jonboat, tactical)");
 }
 
-std::vector<std::string> dyn_boat_desc::presets() { return {"launch", "jonboat"}; }
+std::vector<std::string> dyn_boat_desc::presets() { return {"launch", "jonboat", "tactical"}; }
 
 // ── hydrostatics ────────────────────────────────────────────────────────────────────────────
+
+double dyn_boat_plant::draft(const boat_desc &d, double mass, double density) {
+  const double fh = float_height(d, mass, density);
+  double deepest = d.propeller.position.z;
+  for (const vec3 &v : d.hull.hull->vertices)
+    deepest = std::min(deepest, v.z);
+  if (d.rudder.area > 0.0)
+    deepest = std::min(deepest, d.rudder.position.z);
+  return -(fh + deepest);
+}
 
 double dyn_boat_plant::float_height(const boat_desc &d, double mass, double density) {
   need(d.hull.hull && !d.hull.hull->triangles.empty(), "the boat's hull needs a hull_mesh");
@@ -377,13 +475,30 @@ void dyn_boat_plant::place(const cvc::nav::plant_state &start, const dyn_boat_de
   a.rear = -x0;
   a.tan_max = a.L / desc.turn_radius;
   a.max_steer = det::atan(a.tan_max);
+  // The deepest the boat reaches (its keel, propeller or rudder) and its top, body z.
+  double deepest = std::min(keel, desc.boat.propeller.position.z), top_z = keel;
+  if (desc.boat.rudder.area > 0.0)
+    deepest = std::min(deepest, desc.boat.rudder.position.z);
+  for (const vec3 &v : mesh.vertices)
+    top_z = std::max(top_z, v.z);
+  // Water under it as deep as it reaches: the field's box, and no ground in the way. The field
+  // knows its box and not the terrain inside it, so a ray from the hull's top down to its deepest
+  // point finds a shore or a shoal (a body without mass) the box would not.
+  const auto deep_enough = [&](double fh) {
+    need(w.water_at({p.x, p.y, level + fh + deepest + 1e-9}).wet,
+         "the water at the start is shallower than the boat's draft");
+    const std::optional<ray_hit> hit =
+        w.raycast({p.x, p.y, level + fh + top_z}, {p.x, p.y, level + fh + deepest});
+    need(!hit || w.get_body(hit->body).mass > 0.0,
+         "the ground at the start (" + std::to_string(p.x) + ", " + std::to_string(p.y) +
+             ") is above the boat's draft: it is aground");
+  };
   // The mass: as given, or the engine's from the density (the boat added first, then floated).
   double mass = desc.boat.hull.mass;
   const quat rot = about_z(start.heading);
   if (mass > 0.0) {
     const double fh = float_height(desc.boat, mass, top.density);
-    const water_sample under = w.water_at({p.x, p.y, level + fh + keel + 1e-9});
-    need(under.wet, "the water at the start is shallower than the boat's draft");
+    deep_enough(fh);
     a.boat = w.add_boat(desc.boat, {p.x, p.y, level + fh}, rot);
     a.hull = w.boat_state(a.boat).hull;
   } else {
@@ -393,8 +508,7 @@ void dyn_boat_plant::place(const cvc::nav::plant_state &start, const dyn_boat_de
     double fh = 0.0;
     try {
       fh = float_height(desc.boat, mass, top.density);
-      need(w.water_at({p.x, p.y, level + fh + keel + 1e-9}).wet,
-           "the water at the start is shallower than the boat's draft");
+      deep_enough(fh);
     } catch (...) {
       w.remove_boat(a.boat);
       throw;
@@ -535,6 +649,19 @@ cvc::nav::plant_limits dyn_boat_plant::limits(int i) const {
   return l;
 }
 
+void dyn_boat_plant::hold_controls(int i, const boat_controls &c) {
+  agent &a = _agents.at(static_cast<std::size_t>(i));
+  need(std::isfinite(c.throttle) && std::isfinite(c.rudder) && std::fabs(c.throttle) <= 1.0 &&
+           std::fabs(c.rudder) <= 1.0,
+       "hold_controls: the throttle and rudder must be in [-1, 1]");
+  a.hold = true;
+  a.helm = c;
+}
+
+void dyn_boat_plant::release_controls(int i) {
+  _agents.at(static_cast<std::size_t>(i)).hold = false;
+}
+
 void dyn_boat_plant::command(int i, float steer, float accel) {
   agent &a = _agents.at(static_cast<std::size_t>(i));
   a.steer_cmd = clamp(static_cast<double>(steer), -a.max_steer, a.max_steer);
@@ -561,7 +688,10 @@ void dyn_boat_plant::drive(agent &a, double h) {
 
   const double m = a.props.mass;
   double throttle = 0.0, rudder = 0.0;
-  if (!_o.driver) {
+  if (a.hold) {
+    throttle = a.helm.throttle;
+    rudder = a.helm.rudder;
+  } else if (!_o.driver) {
     const double rated =
         a.accel_cmd >= 0.0 ? b.propeller.max_thrust : b.propeller.max_reverse_thrust;
     throttle = rated > 0.0 ? clamp(a.accel_cmd * m / rated, -1.0, 1.0) : 0.0;

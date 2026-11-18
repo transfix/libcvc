@@ -33,7 +33,7 @@ unfamiliar; every binding, computed field, and handler in an `.ari` document is 
 
 ## 1. The Runtime
 
-`cvc::ariadne::Runtime` ([`inc/cvc/ariadne/ariadne.h:41`](../inc/cvc/ariadne/ariadne.h))
+`cvc::ariadne::Runtime` ([`inc/cvc/ariadne/ariadne.h`](../inc/cvc/ariadne/ariadne.h))
 is the **backend-neutral** host for a single `.ari` document. It is pure libcvc: it
 has no ImGui, VTK, or terminal knowledge. It owns exactly three things:
 
@@ -82,10 +82,13 @@ What steps each kind of program is fixed in code; no setting or flag changes it:
   a scheduler (§2.1);
 - actions, residents and the children they spawn: the app-wide `async_scheduler`,
   `app.exec_scheduler()`, shared by every document the app hosts and pumped by `Runtime::drain()`
-  (§2.2);
+  (§2.2), or, for a document the app tree's `ariadne.exec.isolate_documents` puts in a group of its
+  own, that group's scheduler (§2.5);
 - `init:`: a private synchronous scheduler, run to completion on the loading thread (at most 10
   million steps and 5 s), always `round_robin`, locking on the app's lock manager without ever
-  waiting ("Locks in the other lanes" below).
+  waiting ("Locks in the other lanes" below). It has an async host of its own, which runs an async
+  verb's work inline and charges it to the script's process; a done channel it posts goes to the
+  app scheduler.
 
 The developer guide's "Which Scheduler Runs a Program"
 ([STATE_EXEC_DEVELOPER_GUIDE.md](STATE_EXEC_DEVELOPER_GUIDE.md#which-scheduler-runs-a-program))
@@ -95,12 +98,13 @@ has the same table for every host, with the settings that apply and when they ar
 
 Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `bind` /
 `text`, `tooltip`, `options`, `repeat.count` — run in a long-lived stackless evaluator
-(`class ReactiveEngine`, [`ariadne.cpp:385`](../src/cvc/ariadne/ariadne.cpp)) over a
+(`class ReactiveEngine`, [`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)) over a
 **default-deny** environment:
 
 - The value allowlist admits arithmetic, coercion, logic, and side-effect-free state
-  *readers* only (`kAllowed`, [`ariadne.cpp:417`](../src/cvc/ariadne/ariadne.cpp)), plus
-  `(has? "name")`, which asks what the host provides
+  *readers* only (`kAllowed`, in `ReactiveEngine`'s constructor,
+  [`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)), plus `(has? "name")`, which asks what the
+  host provides
   ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)). `json-parse` and
   `json-encode` are on it ([§10.4](#104-json-replies)); `str-concat` is not, so a computed
   label joins its parts with `string.join`.
@@ -114,8 +118,8 @@ Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `b
             (if (< s 3600) "just now" (string.join (list (str (int (/ s 3600))) "h ago") "")))
   ```
 - The special-form gate admits only `if / begin / let / while / for / lambda / defun /
-  set / return / quote / yield / break / and / or` (`kAllowedForms`,
-  [`ariadne.cpp:433`](../src/cvc/ariadne/ariadne.cpp)).
+  set / return / quote / yield / break / and / or` (`kAllowedForms`, in the same constructor,
+  [`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)).
 
 Nothing that writes state, schedules, watches, sends messages, or does I/O is
 reachable. That includes the atomic updates `state-incr`, `state-cas` and `state-swap`: they
@@ -123,8 +127,8 @@ write, so they are not on the allowlist (actions may use them). Nor is `with-loc
 (docs/STATE_EXEC_LOCKS.md): a reactive slot that names it fails safe like any other
 off-allowlist symbol. An off-allowlist symbol does not error loudly — it **fails safe**: the slot
 degrades to hidden / disabled / empty / last-good value and the frame records a
-one-shot warning (`take_reactive_warnings`,
-[`ariadne.cpp:1682`](../src/cvc/ariadne/ariadne.cpp)). state_exec is always built (there is
+one-shot warning (`Runtime::take_reactive_warnings`,
+[`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)). state_exec is always built (there is
 no build option to drop it), so the engine is always present.
 
 **Locks in the other lanes.** An action may use `with-lock`. One that names no `:timeout` gives up
@@ -142,13 +146,17 @@ the document.
 **Spawned children.** A child an action or a resident `spawn`s runs in the document's scope, as
 its parent does: the intrinsics, the host's program-lane intrinsics and `(has? ...)`; its writes
 and channel keys under its parent's prefix; the document's channel policy and resources; and its
-parent's lock default, so an action's child gives up after `ariadne.exec.lock_timeout` too. It
-keeps the document's owner, so it is reaped with the document. A child an `init:` script spawns
-runs under the script's prefix with the same intrinsics and never waits for a lock either: it is
-stepped on the host thread with the script, so a busy request is as `:timeout 0` there too.
+parent's lock default, so an action's child gives up after `ariadne.exec.lock_timeout` too. Its
+context is made from its parent's (`Runtime::Impl::spawn_child`), not looked up again by path: it
+runs on its parent's scheduler (an isolated document's group, §2.5), and a child of a chroot that
+was deleted meanwhile writes into the detached node its parent still holds, never a new node at the
+old path. It keeps the document's owner, so it is reaped with the document. A child an `init:`
+script spawns runs under the script's prefix with the same intrinsics and never waits for a lock
+either: it is stepped on the host thread with the script, so a busy request is as `:timeout 0`
+there too.
 
-**The read lane never parks.** It is bounded three ways
-([`ariadne.cpp:603`](../src/cvc/ariadne/ariadne.cpp)):
+**The read lane never parks.** It is bounded three ways (`ReactiveEngine`'s constants,
+[`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)):
 
 | bound | constant | value |
 |-------|----------|-------|
@@ -201,8 +209,10 @@ Fire-once handlers (`on:` on a button, a menu item's program, or a bound widget'
 after each committed write: a checkbox or menu tick, a combo or radio pick, a slider's drag end
 or key step, a text field's Enter, a colour edit) and the resident
 handlers (`on_tick` / `on_key` / `on_pointer`) run in the action lane, on the
-**app-wide scheduler** (`app.exec_scheduler()`), **off** the render walk, inside
-`Runtime::drain()` ([`ariadne.cpp:1642`](../src/cvc/ariadne/ariadne.cpp)).
+**app-wide scheduler** (`app.exec_scheduler()`, or an isolated document's own group, §2.5),
+**off** the render walk, inside `Runtime::drain()`
+([`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)): its first half, `drain_begin()`, submits
+them, and its second, `drain_end()`, pumps the scheduler a slice and sweeps (§9.1).
 
 That scheduler's policy is the app tree's `state_exec.policy` (`round_robin`, `priority` or
 `priority_rr`), read once, when `app.exec_scheduler()` is first built, and fixed from then on; an
@@ -216,12 +226,14 @@ take it too) sets `state_exec.policy` before that. Without it the policy is `rou
 document cannot set those keys, since its programs' writes are chrooted under its own prefix. The
 app's lock manager is `single` unless pycvc is loaded in the same process (developer guide, "Single
 and shared mode"). A host that embeds Ariadne sets them on the app tree before its first
-`AppRuntime::register_quit`, `register_verb` or `enable_net`, each of which builds the scheduler.
+`AppRuntime::load`, `register_quit`, `register_verb` or `enable_net`, each of which builds the
+scheduler.
 
-A fire-once handler is *submitted* (`submit_action`,
-[`ariadne.cpp:1375`](../src/cvc/ariadne/ariadne.cpp)) with the full default environment
+A fire-once handler is *submitted* (`Runtime::Impl::submit_action`,
+[`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)) with the full default environment
 plus host intrinsics, its writes chrooted to the action's mount prefix (§7), under
-per-activation caps ([`ariadne.cpp:1382`](../src/cvc/ariadne/ariadne.cpp)):
+per-activation caps (`action_max_steps`, `action_max_time` and `action_max_memory`, read by
+`submit_action`):
 
 | bound | source | value |
 |-------|--------|-------|
@@ -242,7 +254,7 @@ raises the caps. An action that runs out is killed, and the kernel sees `cancell
 The memory budget covers the action's state-tree writes and its
 measured share of the values it holds (developer guide §7), and it bounds each native call's
 allocations: state_exec's per-step allocation limit takes what is left of `max_memory`
-(developer guide §11, "Allocation limit"). A finished action's process is reaped from the app
+(developer guide §11, "Allocation limit"). A finished action's process is reaped from its
 scheduler when the drain sweeps it, and what it left in reference cycles (a function it defined,
 say) is freed by the cycle collector.
 
@@ -254,7 +266,7 @@ A quick action completes within that drain. An action that `await`s, `sleep`s, o
 
 `on_tick` / `on_key` / `on_pointer` / `on_signal` each become **one** long-lived, owner-tagged
 process, wrapped by the runtime as `(while t (let ((event (msg-recv "chan"))) body))`
-(`ensure_resident`, [`ariadne.cpp:1458`](../src/cvc/ariadne/ariadne.cpp)):
+(`Runtime::Impl::ensure_resident`, [`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)):
 
 - **tick** is woken once per drain (coalesced — you get one tick per frame, not a
   backlog).
@@ -275,7 +287,9 @@ counted up to a sixteenth of that half. So a native step that the OS deschedules
 half the cap itself before it is killed. Single-threaded wasm has no thread CPU clock: there,
 `thread_cpu_seconds` is the steady clock, so on a loaded machine a step that checks often (a big
 `collect`, decoding a large reply) is charged for its waits too, up to a sixteenth of the half per
-check. That is why its default is higher. On teardown, residents are reaped as a group by their owner tag.
+check. That is why its default is higher. On teardown, residents are killed as a group by their
+owner tag and reaped, with the document's actions and their children; a resident that a reload
+stops (its program set again) is killed and reaped then.
 
 **A resident that stops is restarted.** A killed one (its step cap, or a syntax error read inside
 it) or a failed one (an exception it didn't catch) is reported once per message (§2.4). Then it
@@ -360,23 +374,89 @@ on_key: |
     (catch (e) (state-set "ui.last_error" (get-attr e "message"))))
 ```
 
+### 2.5 Documents in groups of their own (`isolate_documents`)
+
+A host with several documents can run each in an execution group of its own, which the app's pool
+may pump on a worker thread while the frame's thread pumps the others
+([STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) 4.12). It is the host's choice, not the
+document's: the app tree's `ariadne.exec.isolate_documents` (`1` or `true`) turns it on, and the
+app's pool needs workers (`state_exec.threads`, or the host's pool options) for a group to leave
+the frame's thread at all. With it off, the default, every document's actions and residents run
+on `app.exec_scheduler()`, as above.
+
+**What keeps a document in group 0.** With the setting on, a document gets a group of its own only
+when it passes every rule below, in this order. The first rule it fails is its reason: the host
+reads it from `Runtime::isolation_reason()`, and the app's log shows it once
+(`ari: the document at '<prefix>' runs in group 0: <reason>`).
+
+1. Its prefix is not empty (it does not run at the app root).
+2. It has a `channels:` block, enforced in strict lint mode, which is the default once the block is
+   there (`lint: channels: warn` or `off` keeps the document in group 0): only that proves it uses
+   no app-global channel (§8).
+3. No channel in it is `global: true`.
+4. None of its programs names a `/` channel in a literal: `(msg-send "/x" ...)`, `(msg-recv
+   "/x")` or `(msg-pending "/x")`. Every program counts: the lanes, the key bindings, `functions:`,
+   every widget's `on:`, `on_click`, `on_hover`, `on_drag*` and `on_top`, each module's `init:`,
+   `on_tick:` and functions, and the document's own `init:` and `tests:`. That is more than the
+   load's channel lint reads, which skips the widgets' event handlers.
+5. It uses no oidc: no `oidc-*` call and no `"oidc#..."` channel, since a sign-in's end is posted
+   where the app's other programs run.
+6. No writable `link:` hole of a module points outside the document's prefix (a read-only one, or
+   one inside, is fine).
+
+A document that passes runs in its group. Its group is pumped on the frame's thread all the same
+when its host declared a thread-affine subscriber at, above or under its prefix (`arigl` declares
+its scene prefix, which is the document's own, so every arigl document stays on the frame's
+thread), or when its programs can call a host verb or function that must run on the host thread
+(`AppRuntime::register_verb`, `register_function`, `register_async_function`, a Python host's
+functions; §9.1). Otherwise the pool's workers may pump it.
+
+**What changes for a document in its own group.**
+- Its actions, residents and the children they spawn run in the group, and every message the
+  runtime posts it (ticks, keys, pointer events, signals) goes there. Its streams post their events
+  there, and its async calls complete there.
+- It gets its own budget per frame (200000 steps and 0.1 s), not a share of the app's.
+- `ps`, `inspect` and `kill` see only its own processes; pids stay unique across the app.
+- When a worker pumps it, an action that calls a verb the host must run itself (`quit`, the
+  `data-*` verbs, `open-url`, the room and chat verbs) parks at the call and resumes at the next
+  frame, so it completes a frame later. `(has? ...)` there answers from what the frame's start saw.
+
+**When it moves.** Where a document runs is decided when it loads, and again after anything that
+rule reads changes: a reload or a new tree, a lane's program, the channel policy, the key bindings,
+or a host's declaration. If the answer changes, the document moves: its actions and the children
+they spawned, and its residents, are killed where they ran (a host's `run_program` caller is told
+"did not complete: the document moved to another group"), its residents start again in the new
+place at the next frame, and the streams it opened follow it. The move does not wait for the old
+group's async calls: that group is set aside and goes once they end. In group 0, an action survives
+a reload; across a move it does not. What it wrote to state stays.
+
+A host verb, function or provider the host registers after the load moves the document the first
+time nothing of it runs: before its first frame, or at a frame with no resident, spawned child or
+unfinished action left (a page of buttons is soon there), so the move kills nothing. While
+something of it runs, the document stays where it is, at the latest until its next load: in a group
+the pool's workers may pump, a host verb that must run on the host thread is unknown to its
+programs (a `NameError`) meanwhile, and the app's log says so once. A host registers before
+`load()`, or before the first frame, to avoid that.
+
 ---
 
 ## 3. The per-frame (deferred-intent) contract
 
-`Impl::render` ([`ariadne.cpp:1324`](../src/cvc/ariadne/ariadne.cpp)) is a **pure
+`Runtime::Impl::render` ([`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)) is a **pure
 reader**. This is the load-bearing discipline of the whole system:
 
 1. **At frame top**, any pending tree swap (from `set_root`) is applied *before any node
    is emitted* — this is the single reconcile/commit boundary. Budgets reset here.
 2. **The walk emits widgets and reads state.** Handlers never run mid-walk: a clicked
-   button or menu item does `enqueue(w.on)`
-   ([`ariadne.cpp:1101`](../src/cvc/ariadne/ariadne.cpp)); a widget `on_click` /
-   `on_hover` / `on_drag` does `enqueue_event`
-   ([`ariadne.cpp:1278`](../src/cvc/ariadne/ariadne.cpp)). `enqueue` captures the
+   button or menu item does `enqueue(w.on)` (`Runtime::Impl::emit_node`,
+   [`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)); a widget `on_click` / `on_hover` /
+   `on_drag` does `enqueue_event`
+   ([`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)). `enqueue` captures the
    current mount prefix, so a mounted fragment's handler writes its own subtree.
 3. **`drain()` runs the queued intents on the *next* frame**, then pumps the scheduler
-   and residents.
+   and residents: `drain_begin()` runs them and submits the programs, and `drain_end()`, or the
+   host's one `app.exec_pump_frame()` for all its Runtimes between the two, pumps (§9.1).
+   Render runs on the host thread between pumps, never inside one: a debug build asserts it.
 
 The consequence — the **one-frame-latency** rule — is that the render walk *cannot cause
 a state change that it then reacts to within the same frame*. A click enqueued this
@@ -657,7 +737,7 @@ substitute widgets on its own.
 ## 5. Documents and the `.ari` schema
 
 An `.ari` file is a YAML document. `load_file` / `load_string` parse it via `load_node`
-([`loader.cpp:1740`](../src/cvc/ariadne/loader.cpp)) into a `LoadResult`
+([`loader.cpp`](../src/cvc/ariadne/loader.cpp)) into a `LoadResult`
 ([`inc/cvc/ariadne/loader.h`](../inc/cvc/ariadne/loader.h)):
 
 - a `Widget root` (a Group) — the retained tree;
@@ -672,7 +752,7 @@ why the same `LoadResult` can be driven by different hosts.
 ### 5.1 Top-level keys
 
 The built-in top-level keys (`is_builtin_block`,
-[`loader.cpp:100`](../src/cvc/ariadne/loader.cpp)) are:
+[`loader.cpp`](../src/cvc/ariadne/loader.cpp)) are:
 
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs  requires
@@ -692,13 +772,13 @@ parts an older build understands.
 
 ### 5.2 `meta:` and the `min_libcvc` gate
 
-`parse_meta` ([`loader.cpp:1455`](../src/cvc/ariadne/loader.cpp)) reads `name`,
+`parse_meta` ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)) reads `name`,
 `author`, `description`, `version`, and `min_libcvc`. The version gate is checked
 **first**, before anything else in the document
-([`loader.cpp:1755`](../src/cvc/ariadne/loader.cpp)): if the running libcvc is older
+(`load_node`, [`loader.cpp`](../src/cvc/ariadne/loader.cpp)): if the running libcvc is older
 than `min_libcvc`, the load **fails with no tree** (major.minor.patch compare, ignoring
 `-pre` / `+build` suffixes; `version_at_least`,
-[`loader.cpp:73`](../src/cvc/ariadne/loader.cpp)). A missing `min_libcvc` only warns. A
+[`loader.cpp`](../src/cvc/ariadne/loader.cpp)). A missing `min_libcvc` only warns. A
 fragment pulled in by `load:` carries its own `meta` and is gated independently.
 
 ```yaml
@@ -907,8 +987,9 @@ types behind one call, `register_cvcgl_extensions`
 `AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`,
 `generated_world` (terrain_lab's world, [`world_nodes.h`](../inc/cvc/gl/ariadne/world_nodes.h)),
 `volume_slice` (one axis-aligned plane of a volume, below), `water` (its sea, lakes and ponds as the
-GPU FFT ocean, below), `ribbon` and `draped_link` (lines drawn from data, below), and — on a libcvc
-built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and `fe_lab`. Keys the built-in parser
+GPU FFT ocean, below), `weather` (the scene's storms, below), `ribbon` and `draped_link` (lines
+drawn from data, below), and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and
+`fe_lab`. Keys the built-in parser
 does not know land in the node's `props`, which a custom realizer reads. So does a `source:` the
 built-ins have no field for, `{ state: <key> }` or `{ stream: <token> }`, as written. A
 `source: { data }` node is drawn as a data node (§5.17) unless its type was registered with
@@ -1142,14 +1223,166 @@ clouds), `far_reach` (how far the far clouds reach toward the horizon; out of th
 `evolve` (the weather's speed: 1 is a step every 5 s, a cloud lasting some 8 minutes; 0 holds the
 clouds) and `shadow` (0 starts the shade off). Live keys under the node's root (`sky.` unless
 `keys:`): `drift`, `morph`, `evolve`, `orographic`, `shadow`, `coverage` (the cells' targets are
-ranked again at once, and the clouds fade in or out to them) and `wind_az`, all on
-`sky_controls.ari`.
+ranked again at once, and the clouds fade in or out to them), `wind_az` and `darkness`, all on
+`sky_controls.ari`, and `base`, `top` and `storms` (below). In a scene with a wind (`wind:`,
+below) the deck drifts with it instead: its
+heading is the wind's and its speed the wind's at the deck's `base` (the height profile) times the
+gusts' mean, times `drift`; `wind_az` and the fixed 3 m/s are then unused. The deck publishes what
+it drifts with as `sky.drift_az` (degrees) and `sky.drift_speed` (m/s).
 
 The sun is the light rig's key once the scene has one (`lighting.key_azimuth` /
 `key_elevation`, the Stage lighting panel), followed live: a new sun relights the cloud maps and
 re-composites the shade and the far clouds. `sun_az` / `sun_el` are used only without a rig. A
 `water` node listed in `receivers:` takes the shade too: its sunlight and glints dim under a cloud.
-`base` and `top` are still read once at realize.
+
+Storms (OCEAN-AND-WEATHER-ROADMAP.md §9 F2, O18). `sky.storms` holds storm discs, `"x y r
+intensity"` entries split by `;` in world metres, as a `weather` node writes them. Each cell takes
+the discs' field over it: a stormy cell gathers cloud, is held besides the `coverage` (which is the
+fair weather's), and its shade and far opacity deepen (up to 2.5 and 1.8 times). Its near volume
+thickens and darkens with it. The far clouds and the receivers read up to four discs as uniforms:
+the far clouds darken over a storm, and a receiver's ambient light drops by up to 0.55 under one. No
+sampler joins the receivers. `sky.darkness` (0..1, `darkness:`) moves the clouds' colour ramp toward
+a storm's dark grey, and a storm cell's own share darkens it further. Where a cloud is darkened, its
+light also dims as the cloud above it hides the sky (ABYSSAL's dark bases), so a tower's base goes
+dark and a cumulus's stays light. `sky.base` and `sky.top` are live. A deck deeper than the props'
+is a storm deck: its maps are cumulonimbus (the cumulus at the bottom, a tower from its core, an
+anvil under the top) on up to 64 layers and 24 far slices, and their self-shade marches the sun
+through the tower. The new maps are built as a sliced task (`cvc/core/sliced_task.h`, as
+`generated_world` rebuilds), off the frame, and swapped in when done: natively on the background
+pool, and in single-threaded wasm a few milliseconds a frame on the scheduler thread.
+`deck_threading: cooperative` builds them that way natively too (or `threaded`; `automatic` by
+default, which `CVC_SLICED_THREADING=cooperative` also turns cooperative). A build takes about 150 ms
+for terrain_lab's 3 km deck. The cumulus the maps grow from is kept, so the way back is about 30 ms.
+The near volumes then take the new box, their opacity corrected so a metre of cloud is as opaque as
+before.
+
+**Weather.** `weather` holds the scene's weather model (`cvc::world::weather`,
+[`weather.h`](../inc/cvc/world/weather.h)): storm cells on a hashed schedule, and the storms people
+start. It is a pure function of its props, the world clock's time and the events in
+`weather.events`, so every client holding those keys sees the same storms (decision D5). A cell is
+born upwind of the `ground:` node's extent (or `area` around `cx`, `cy`), timed to cross it in the
+middle of its maturity. It grows to its peak, holds it and decays over a life of `life_min` to
+`life_max` weather seconds (1200 to 3600), its centre riding the steering wind. Its phase is the
+weather's state: `clear`, `building`, `storm`, `clearing`. Weather time is cut into slots of
+`interval` seconds (3600); a `chance` share of them (0.5) holds a storm, none before `quiet` (600).
+Other props: `seed`, `growth` / `decay` (the shares of a life spent on each), `radius_min` /
+`radius_max`, `peak_min` / `peak_max`, `miss` (how far to the side of the centre a storm passes, in
+half-widths), `rain_onset` / `rain_max` (mm/h), `calm` (a calm's fade, seconds) and `time_scale`.
+The node drives the `cloud_sky` whose key root `sky:` names (default `sky`; `""` drives none). It
+writes the storms to `sky.storms`. It raises `sky.top` toward `storm_top` (3200) in four steps while
+a storm is within `reach` metres (4000) of the ground, so the cumulonimbus maps are built a few times
+a storm and only while one is about. It raises `sky.darkness` toward `darkness` (0.6), and
+`storm_base` lowers the base too. The steering wind is the scene's wind (`wind:`, as authored: a
+storm is not carried by its own gust front), its heading at its speed at the deck's base times
+`sky.drift`, which is how the deck drifts; without a scene wind it is the sky's, `sky.wind_az` at the
+deck's drift speed. Either way the storms keep to the clouds drawn. A change of it is logged as a
+`steer` event once it has held for ten frames. Live keys under
+the node's root (`weather.` unless `keys:`): `events` (the authored events, `storm`, `steer`, `rate`
+and `calm`, as text), `time_scale` (weather seconds per world second; a change is a `rate` event),
+`request` (`upwind`, `overhead` or `calm`, emptied once read), `gust_front` (the storm wind's peak,
+m/s; below), and what it publishes: `state`,
+`storminess`, `cells`, `storms` (the cells as discs), `rain` (mm/h at the ground's centre) and
+`deck`. The panel is `weather_controls.ari`. Its storm wind, rain, lightning and wet-ground friction
+are below.
+
+**Storm wind** (§9 F4, F6's gusts; O20). In a scene with a wind (`wind:`), each storm cell blows a
+gust front: the wind out of its downdraft, added to the scene's wind
+(`cvc::world::weather::gust_front`). It blows out of the cell's centre, from nothing there to
+`gust_front` m/s (12, a full cell's; the live key `weather.gust_front`, the Weather panel's Storm wind
+slider, 0 to 30; 0: no fronts) at the front's edge, `front_ahead` radii (1.5) ahead of the
+cell along its motion and `front_behind` (0.9) behind it, weaker behind by their ratio, and dies away
+over the next `front_width` (0.6) of that distance; past that there is none. It grows with the
+cell's intensity from `rain_onset`, as the downdraft comes with the rain. Ahead of a storm it blows
+with the steering wind, so the wind rises (a 9 m/s wind is 21 m/s at a full cell's front); beside
+it, across, so the wind veers; behind the cell's centre it blows against the wind. The scene's world
+owns it, drawn or headless ([`scene_weather.h`](../inc/cvc/ariadne/scene_weather.h)):
+
+- **Physics.** The world's air is then a `StormWindFlow`: the scene's wind with every front in it,
+  a function of the point and the time that each body reads at its centre of mass at the step's own
+  time. A front sweeps over the bodies as its storm walks, the same at every frame rate and
+  headless, and a light body under it is pushed harder and turned (a 1 kg beach ball ahead of a
+  storm, where the air is 18 m/s and the wind 6, goes at 16.6 m/s). A body asleep where a front
+  blows is woken on the first step of each half second of the clock. The world's vehicles read the
+  same air; arisrv's avatars keep the room rules' plain wind (no storms). `SceneWorld::wind()` hands
+  the air to a body outside the world, such as a MuJoCo robot (`mujoco_robot::set_wind(wind(),
+  world().field_time())`).
+- **The water and the trees** read one wind for all they draw, so they take the front where the
+  weather's storms are centred (its `ground:`'s centre, or `cx`, `cy`): before anything reads the
+  wind each frame, the world writes it to `wind.front` ("x y" m/s, empty with none), and
+  `scene_wind_now` adds it. It is the front at the start of each half second of the clock, so it
+  changes on the clock, never with a frame. The sea grows toward it through its `sea_lag` (so it
+  builds after the front and settles after the storm), its whitecaps with it. While the scene has
+  storms the physics sea steps once each half second of the clock (its crossfade at least 1 s), and a
+  keyframe's field goes in at the step after the next half second's start, so the bodies float the
+  same at every frame rate (given a sync each half second: a frame that runs the clock further warns).
+  The trees bend harder and turn. Their
+  gusts still drift with the wind as authored, so a front changes how hard and which way the wind
+  blows, not where the gusts have got to.
+- **The rain's slant** is the wind where the camera is, the front there in it.
+- **The clouds** drift, and the storms steer, by the wind as authored.
+
+A change of `weather.gust_front` reaches the physics (the air, `wind.front`, the woken bodies) at the
+start of the next half second of the clock after the scene's world reads it, so at the same step at
+every frame rate; the drawn rain's slant takes it at once.
+
+Decision: the fronts ride on the scene's wind, so a scene with storms but no `wind:` has none. A
+scene without a `weather` node steps as before, bit for bit, and never writes `wind.front`.
+
+**Rain** (OCEAN-AND-WEATHER-ROADMAP.md §9 F3, O19). Under a storm it rains where the field passes
+`rain_onset`, at up to `rain_max` mm/h. Everything below is uniforms or a fixed mesh, so no sampler
+joins the ground, the buildings, the roads, the trees or the water.
+
+- **Streaks.** The weather node's mesh `<id>_rain` holds `rain_count` drops (12000). Each drop is
+  a quad placed and moved in the vertex shader as a closed form of time, a port of ABYSSAL's `Rain`:
+  in a box around the camera, slanted by the scene wind, as many as the rain at the camera calls
+  for times `weather.rain_quality`, and none above the cloud base. List the mesh among the sky's
+  `receivers:` so the deck lights and fogs it and it draws after the clouds, and put the weather
+  node after the sky in the document.
+- **Rain shafts.** The sky's far shells draw grey curtains below the cloud base while a storm rains.
+- **Wet ground.** The receivers go darker and glossy where a storm's rain has lain, along the tracks
+  of the last few storms, and dry after. `soak` (300) weather seconds of rain soak the ground, and it
+  dries by 1/e every `dry` (900), as `weather::wetness` computes it on the CPU.
+- **Rings.** The water gets raindrop rings in its normal, procedural, within 70 m of the camera.
+- **Fog.** It thickens with the rain at the camera, and the scene's background goes toward its grey.
+- **The weather node's keys.**
+  - `weather.streaks`, `weather.rings`, `weather.fog` and `weather.wet` (0..2, default 1) scale each
+    effect. `weather.rain_quality` (0..1) is the share of the streaks a downpour draws.
+    `weather.rain_here` publishes the rain at the camera in mm/h.
+  - The props `rain_count`, `rain_quality`, `soak` and `dry` set the same at load.
+- **The sky's keys.**
+  - The weather node writes `sky.rain` (the recent storms' tracks: "x y rain_radius vx vy age left",
+    split by `;`) and `sky.rain_k` (the rain's constants: "onset rain_max soak dry rings fog wet").
+  - `sky.fog` (`fog:`, default 0) is a haze of the scene's own, its density per kilometre.
+
+**Lightning** (OCEAN-AND-WEATHER-ROADMAP.md §9 F5, O20). A storm past `flash_onset` (0.55) of its
+peak strikes, more often as it grows, up to `flash_rate` (0.05) a weather second, within its rain;
+`ground_share` (0.6) of the strikes reach the ground, the rest stay in the cloud. The strikes are
+the weather's (`weather::strikes(t, window)`), a function of its seed, the time and the events, so
+every client sees the same strike at the same moment. Each has one to four strokes.
+
+- **The bolt.** The weather node's mesh `<id>_bolt` draws the brightest strike of the moment, a port
+  of ABYSSAL's `Lightning`: a channel from the cloud base to the ground, forking, and crawlers in the
+  cloud, grown from the strike's id, as camera-facing ribbons with a hot core and a blue-white glow.
+  List it among the sky's `receivers:` with the rain's mesh, so it draws after the clouds.
+- **The flash.** The weather node writes `sky.flash` ("x y z intensity": the strike under the cloud
+  base). The sky hands it to its receivers, the water and its far clouds as a uniform: the ground,
+  the buildings, the roads, the trees and the water light up within a kilometre or so, the far
+  clouds round it glow, and the background goes toward a blue white. No sampler is added.
+- **Keys.** `weather.lightning` (0..2, `lightning:`, default 1) scales the bolt and the flash;
+  `weather.flash` publishes the brightest flash now.
+
+**Wet friction** (§9 F6, O20). When the scene has a physics world, the weather sets the friction of
+its surface materials (the ones `add_world_geometry` names after a surface class) to their friction
+at the weather's wetness where the vehicles are (their mean; the ground's centre with none):
+`cvc::physics::apply_wetness`, from each class's dry `mu` toward its `mu_wet` (wet asphalt 0.55,
+wet grass 0.3; indoor floors keep theirs). The scene's world sets it
+([`scene_weather.h`](../inc/cvc/ariadne/scene_weather.h), `WeatherFriction`), inside the physics
+step: on the first step of each half second of world time, counted in the world clock's ticks,
+and only when the wetness has moved by 1/64. So it changes at the same physics step whatever the
+frame rate, offscreen or in a window, and a headless host (ari, a test) applies it too. Every
+plant reads the one material table, so tires and boxes both feel it, and it dries back with the
+ground. `weather.friction` (`friction:`, default 1; 0 restores the dry friction at the next step)
+turns it off, and `weather.wetness` publishes the wetness it last applied.
 
 **Water.** `water` draws everything below `level` on a ground (`world:` a `generated_world`, or
 `ground:` any height-field node) as the GPU FFT sea of OCEAN-AND-WEATHER-ROADMAP.md (§11.2, O15):
@@ -1163,8 +1396,17 @@ way from the camera (`cells` vertices a side) is displaced by the cascades and t
 with the camera by whole cells. A flat grid over the ground (`far_cells` a side) draws the rest
 and gives way inside the near one; its normal is the long waves' and the swell's, per fragment,
 fading out by ten times `near`. Both shade as a Fresnel sea with shallows tinted by depth and
-whitecaps where the waves fold, the threshold found so they cover Monahan's share of the sea for
-the wind (`whitecaps` scales it; `foam_bias` at 0 or above fixes it), plus the swell's breakers and
+whitecaps where the waves fold. The long waves' folds leave foam that thins over `foam_decay`
+seconds (2.5; 0: the whitecaps alone), carved into streaks downwind as it ages; the whitecaps and
+this foam together cover Monahan's share of the sea for the wind (`whitecaps` scales it;
+`foam_bias` at 0 or above fixes the whitecaps' threshold), both thresholds found off the frame.
+The shading near the camera (O5) is a GGX sun on the roughness the waves the mesh cannot carry give
+it (from the wind), with Fresnel softening as it roughens, light through backlit crests and the
+bubbles a breaker leaves; past `lod_shade` metres (1500) it gives way to the plain Fresnel sea.
+The foam keeps its detail within `lod_foam` metres (150) on the near grid; past it, and on the far
+grid, the water takes the foam's mean cover. The near grid is three rings, its vertices twice as
+far apart past a third of the way out and four times past two thirds, and the short cascade's
+metre-long waves fade out by `lod_waves` metres (150). Then the swell's breakers and
 a foam band at the waterline (`shore_foam`), faint where no swell reaches. Both stay out of the
 scene's bounds, so the ground frames the view. When the ground's whole rim is under water (a
 `generated_world` with `edge: shore`, an island) the sea goes on `outer` metres past it (6000);
@@ -1172,18 +1414,38 @@ otherwise it stops at the ground's edge. A `generated_world` under a water node 
 so its own flat water rungs do not draw over it. The cascades need float render targets; without
 them the water is flat blue. Live keys under the node's root (`water.` unless `keys:`):
 `wind_speed`, `wind_dir`, `gustiness`, `fetch`, `lee`, `sea_lag`, `sea_fade`, `current`, `chop`,
-`wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`, `foam_fray`, `shore_fade`, `swell_height`,
-`swell_period`, `swell_dir`, `shore_foam`, `wake` and `wake_foam`, most on `water_controls.ari`. A
-change to the swell rebuilds the shore layer once the keys have held for ten frames (12 ms for a
-401² grid). The wind (OCEAN-AND-WEATHER-ROADMAP.md O13) is read through one place,
-[`scene_wind.h`](../inc/cvc/ariadne/scene_wind.h) (today the node's `wind_speed`, `wind_dir` and
-`gustiness`; the scene's one wind later). The sea lags it: its wind follows with a `sea_lag`
+`wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`, `foam_fray`, `foam_decay`, `shore_fade`,
+`swell_height`, `swell_period`, `swell_dir`, `shore_foam`, `wake`, `wake_foam`, `wake_push`, `lod_foam`,
+`lod_shade`, `lod_waves`, `quality` and `profile`, most on `water_controls.ari`. `quality` (-1)
+follows the scene's adaptive quality (below); 0 to 4 holds the water at that tier. `profile` 1 times
+the node's work each frame, section by section, into `water.stats.<section>_ms` (2 also waits for
+the GPU after each, slowing the frame). A change to the swell rebuilds the shore layer once the keys
+have held for ten frames (12 ms for a 401² grid). The wind (OCEAN-AND-WEATHER-ROADMAP.md O13) is
+read through one place, [`scene_wind.h`](../inc/cvc/ariadne/scene_wind.h): the scene's wind
+(`wind.*`, below) when it has one, else the node's own `wind_speed`, `wind_dir` and `gustiness`,
+which a scene wind leaves alone and unused (they come back if `wind.speed` is cleared). The sea lags
+it: its wind follows with a `sea_lag`
 seconds' time constant (20; a compressed scale), and each new state of it crossfades in over
 `sea_fade` seconds (4), so a wind change never pops. With `lee` (1) the water downwind of land is
-calm: each wave band is scaled by the square root of its fetch, the distance the wind has blown over
-water, up to where the band is fully grown, from a coarse fetch map built when the wind turns. The
-gusts (`gustiness`, 0.25) ripple and roughen racing patches of water (cat's paws), and `current`
-(m/s, 0) is a slowly varying flow that carries the short waves and floating bodies alike. With `body: {}` the water is in the scene's
+calm: each wave band is scaled by the square root of its fetch, the distance the wind has blown
+over water, up to where the band is fully grown, from a coarse fetch map built when the wind turns.
+The gusts (`gustiness`, 0.25) ripple and roughen racing patches of water (cat's paws), and
+`current` (m/s, 0) is a slowly varying flow that carries the short waves and floating bodies
+alike. In a strong wind the breaking crests throw spray (OCEAN-AND-WEATHER-ROADMAP.md §10.5): drops
+torn off the crests where the cascades fold as the whitecaps are drawn, flying downwind and
+falling back, none where a particle's wind (the mean wind times the gust where and when it rose)
+is below 9 m/s and all of it from 20 m/s. It is off by default until it has been checked in a
+browser: `spray: 1` (or the `spray` key, the Water panel's Spray slider) turns it on. On, the mesh
+is drawn whenever the mean wind times the strongest gust a particle can have (1 + 1.28 x the
+gustiness) passes 9 m/s: at 0.25 gustiness, from a mean wind of about 6.8 m/s. It is drawing
+only: a mesh of its own, `<id>_spray`, whose particles are worked out in its vertex
+shader from the time alone (no state), reading the cascades' atlas the water reads and uniforms,
+the land, the shallows and the lee kept out by a weight on a 16 x 16 grid round the camera (a cell
+of 25 m at the default reach, so near a shore its edge is out by up to that). Keys: `spray` (0
+by default; 1 is all of it) and `lod_spray` (160 m: how far from the camera it
+reaches); the prop `spray_count` (8000) is its particles. It draws in the volume layer, after the
+cloud deck when a cloud_sky lists the water (or the spray) among its receivers, and takes the
+deck's shade then. With `body: {}` the water is in the scene's
 physics world, with or without a renderer ([`scene_water.h`](../inc/cvc/ariadne/scene_water.h)).
 It is one fluid field over the water's extent, its surface the same sea computed on the CPU (the
 cascades fading at the same coast, the same swell), so a body lighter than water floats on the
@@ -1194,7 +1456,20 @@ generated world's bodies. The bodies make waves: an eWave window of 128 m of 0.5
 camera's target takes each moving body's immersed columns as its source, so a dropped crate makes a
 ring and a bobbing one keeps radiating. Its waves move the near grid and shade both grids, foaming
 where they are sharp or fast (`wake_foam`). Beaches absorb them and steep shores reflect them
-(`wake: 0` turns the window off). They are drawn only: they do not push the bodies back. With a
+(`wake: 0` turns the window off). Those are drawn only. With `wake_push: 1` (off by default;
+`water_controls.ari`'s "Wakes push bodies") the waves push the bodies too
+(OCEAN-AND-WEATHER-ROADMAP.md C5, D6; `cvc::physics::field_wake`): the field keeps a physics wake,
+a window of `wake_push_cells` cells of `wake_push_cell` metres (64 of 1 m; `wake_push_depth` m deep,
+0 for deep water) where it holds the most floating bodies (a boat counting as four), stepped inside
+the physics step. Every awake body's immersed columns make waves in a state of its own, and every body
+is pushed by the others' waves (their height under its cells and hull, their orbital velocity and
+their acceleration), never its own, so the launches rock in each other's wakes and a crate's
+splash rocks the boat beside it while a body alone floats exactly as it did. It is physics: the
+same on every host and at every frame rate, saved and restored with the world and in its state
+hash; with it off the world is bit for bit as before. It has no shores (a wake runs on over land,
+where nothing floats, and does not reflect), and a boat's propeller and rudder read the water
+without it. Bodies outside its window (a group farther away than the window is wide) make and
+feel none. With a
 swell, the swash runs up the beach on the ground itself. The node adds it to the fragment shader
 of every mesh under its ground node (the `world:` / `ground:` node, found by id at the top of the
 scene, its LOD rungs and regenerated chunks included), as the cloud deck adds its shade to its
@@ -1202,6 +1477,110 @@ receivers. Each wave's front runs up to the shore layer's runup and drains back,
 with a lace of foam under it, the sand dark and glossy behind it until it dries. The physics sea
 carries the same swash, so a body on the sand is lifted by the film drawn there. `swash: 0` leaves
 it out of both.
+
+**Boats.** `type: boat` is a boat on the water: a hull, a propeller and a rudder or an outboard in
+the scene's physics world, afloat on a `water` node's sea (OCEAN-AND-WEATHER-ROADMAP.md D6;
+[`scene_boat.h`](../inc/cvc/ariadne/scene_boat.h)). `preset:` is `launch` (a 4 m box hull of 900
+kg with a shaft propeller and a rudder), `jonboat` (a 3.6 m flat box of 350 kg with an outboard
+that steers) or `tactical` (a 7.8 m patrol boat of 2800 kg on its own V hull, baked from its
+model, its outboards one 8 kN thrust that steers: 10.5 m/s, a 32.5 m circle), with `mass:` and
+`max_speed:` over it; `water:` names the water node it floats on (the
+scene's first by default); the transform gives its x, y and heading, and it floats at its draft on
+the water there, the sea's height its z. It goes in once the water's grid is ready, and runs with or
+without a renderer, stepping with the world. Its keys, under its id (or its `keys:`): `drive` (`keys`
+or `nav`), `throttle` and `rudder` (each -1 to 1; a + rudder turns it left) under `drive: keys`, and
+`goal` (`"x,y"`, world metres; seeded from `goal: [x, y]`) under `drive: nav`, where the navigator
+takes it there over the water deep enough for it; and its telemetry `x`, `y`, `z`, `heading`
+(degrees), `speed` (m/s through the water), `thrust` (N), `reached`, `placed` and `status`.
+`boat_controls.ari` is its helm. Drawn, it is its hull at its boat's pose: an open boat, white
+topsides over a blue stripe at the waterline and a dark wet bottom, with a teak sole. With a
+`model:` (a file, or a name found where the vehicle models are, as `Humvee.glb` is; `.glb` is
+tried after a bare name; `none` draws the hull), it is that model instead, fitted as a vehicle's
+file look is (`fit_vehicle_geometry`: the axis a file stands on, Y-up or Z-up, is up, its length
+fitted to the boat's length overall, its keel on the hull's bottom). The `tactical` preset's model is `TacticalBoat`
+(the `vehicle-tactical-boat` package), and its hull when that is not installed; a `model:` that is
+not found warns. The water
+node keeps its water out of the boats nearest the camera (at most four, each the largest box inside
+its hull at its waterline, `BoatRuntime::cutout`, between its bottom and its sheer, passed to the
+water's shaders as uniforms, not a texture), its boats
+and the world's boat vehicles alike, and the boats make waves in its wake window. `terrain_lab.ari` has a tactical boat on the
+lake beside the crates (Settings > Launch).
+
+**Wind.** A scene's `wind:` is its one wind (OCEAN-AND-WEATHER-ROADMAP.md E5, O14;
+[`scene_wind.h`](../inc/cvc/ariadne/scene_wind.h)). The water, the cloud deck, the trees and the
+physics all read it, so one key turns them together:
+
+```yaml
+scene:
+  wind: { speed: 9, dir: 30, gustiness: 0.25, base: 0 }
+```
+
+- **Keys.** It seeds three live keys under the document's prefix, drawn or headless:
+  `wind.speed` (m/s, the mean wind 10 m up), `wind.dir` (degrees, the way it blows, from +x toward
+  +y, as the water's `wind_dir`) and `wind.gustiness` (0 for steady). `base` (m, 0) is the level
+  the wind is measured over, the ground's or the sea's; it is read once. `wind_controls.ari` is
+  the panel for the three keys.
+- **While `wind.speed` is set** the scene has a wind, and every reader follows it:
+  - the `water`'s sea and its physics sea, through its `sea_lag` (its own `wind_speed`,
+    `wind_dir` and `gustiness` keys are left alone and unused);
+  - the `cloud_sky` deck's drift and its orographic slopes, which take the wind's heading in
+    place of `wind_az`, and its speed at the deck's base (`sky.drift_az`, `sky.drift_speed`);
+  - the `forest_trees`' sway: each tree leans downwind as well as swaying, by the wind's speed
+    over 9 m/s times `forest.wind`, in the gusts at the tree (`forest.lean_dir` is the way they
+    lean);
+  - a `generated_world`'s own trees (its prop meshes: the wood, the leaves and the needles, on
+    every LOD rung): they lean downwind and sway in the vertex shader, from uniforms alone. A
+    vertex moves as the square of its height above the ground, so a trunk's foot stays put and a
+    rock barely stirs. Each sways at a phase set by its position, scaled by the gusts there. At
+    9 m/s a tree 12 m tall leans about 0.4 m at its top and sways about 0.3 m either side; the lean
+    grows as the wind's square. `world.sway` (from the node's `sway` prop, 1) scales it, and 0
+    holds the trees ("Tree sway" on `world_controls.ari`). `world.lean_dir` publishes the way they
+    lean. The sway fades out 300–450 m from the camera, where it is about a pixel. Their shadows
+    stay at rest, and a swaying tree is shaded as it would be at rest, so it never shadows itself
+    where it has moved. Without a scene wind the trees stand still, as before;
+  - the scene's physics world, when it has one: a flow field of air everywhere, the same gusts
+    times a height profile (`cvc::physics::wind_flow`, PHYSICS_API.md "The wind"), so every
+    dynamic body feels drag against it. A beach ball dropped from 40 m in a 12 m/s wind rides it
+    some 50 m in 4 s as it falls, and the world's vehicles and avatars feel it (below). Its field follows the keys from the next step, and `sim.restart` keeps it.
+  Clearing `wind.speed` puts every node back on its own wind.
+- **Vehicles.** A `jolt` vehicle's aero drag reads the wind at its centre of mass in physics. The
+  other plants (`dynamic`, `dynamic4w`, `kinematic`) take the wind's share of the drag, the drag in
+  the moving air less the drag in still air, ½ ρ C_d A from the vehicle's description, as a push on
+  their drive each navigator tick. `WorldVehicles::info(id)` gives it as `wind_fx`, `wind_fy` (N).
+  A Humvee at 25 m/s in a 15 m/s crosswind is pushed about 400 N aside, 0.15 m/s².
+- **Avatars on arisrv.** The document's `wind:` (as loaded) is the room's: the rules' `physics`
+  section carries `wind.{speed, dir, gustiness, base}`, replicated to every client. A dynamic
+  avatar (the server's, and a client's own) stands in a flow field of that wind in its avatar
+  world, and its walker (840 N) holds against a breeze: in 9 m/s it moves 5 mm in 2 s, in
+  75 m/s 13.6 m. A kinematic avatar holds while the wind's drag on it is within what its
+  walker grips and slides downwind past it: still in 9 m/s, 23.1 m in 1 s in 90 m/s. The drift is
+  folded into its intent, so the server, a client's prediction and a replay agree bit for bit.
+- **A floating body** feels the wind on its part above the water and drifts downwind through it.
+  The `water` node's field is inertial (PHYSICS_API.md, "Floating bodies"): its damping holds a
+  body's heave only, and sideways the water's acceleration carries the body on the waves while its
+  drag holds it, so it drifts at the speed where the air's drag on its freeboard balances the
+  water's on its hull, plus the current. A 1 × 1 × 0.5 m crate in a 10 m/s wind drifts about
+  0.15 m/s.
+- **Storms** add their gust fronts to it (Storm wind, above): the physics feel each front where it
+  is, the water and the trees the front at the weather's centre (`wind.front`), the rain's slant the
+  front at the camera. The weather's storms steer by the wind as authored.
+- **Not yet.** Spray.
+
+**Adaptive quality.** A host that knows each frame's wall time (cvcGL's `AriRuntime`: `arigl run`,
+the browser, pycvc_gl) runs a closed loop on it ([`scene_quality.h`](../inc/cvc/ariadne/scene_quality.h),
+OCEAN-AND-WEATHER-ROADMAP.md §10.10, O21) and steps down how much the scene draws until it holds
+`quality.target_fps` (30): a GPU that cannot keep up is back at the frame rate in seconds. Keys
+under the scene's prefix: `quality.adaptive` (1; 0 holds the tier and scale, which can then be set
+by hand), `quality.target_fps`, and what the loop writes: `quality.tier` (0, everything, to 4, the
+least), `quality.scale` (0.5 to 1: how far out each tier's detail is drawn) and `quality.frame_ms`
+(the last window's mean frame time). A tier comes back after a calm spell. Only drawing changes,
+never the physics, so a run is the same at every tier. On a fixed clock (`arigl snapshot`, a test)
+the loop does not run and everything draws at tier 0. The water reads them (its `quality` key
+overrides): tier 1 draws the full shading and the persistent foam to half their distance and the
+wake's window at half its reach (64 m), and half the spray to half its reach; 2 also the shading to
+a quarter, the short cascade and the far grid's waves to half, and no persistent foam (the
+whitecaps alone take Monahan's share) and no spray; 3 the
+plain Fresnel sea, no wake, and two cascades; 4 the far grid's waves to a quarter.
 
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the
@@ -1428,6 +1807,8 @@ scene:
           look: { file: racer.glb, scale: 1, yaw: 90, z: 0 } # default: the chassis box
         truck:
           plant: dynamic4w:humvee                            # the four-wheel model, a Humvee
+        boat:
+          plant: dynamicboat:launch                          # a boat: launch or jonboat
   ```
 
   - **Archetypes.** Each names its plant, its body (a preset, with `mass`, `max_speed`,
@@ -1443,6 +1824,7 @@ scene:
     | `dynamic` (`dynamic:<preset>`) | the dynamic single-track model: tires, load transfer, actuator lag, with its energy books | its chassis box, which the world's contacts push back into the model |
     | `dynamic4w` (`dynamic4w:<preset>`) | the four-wheel model with suspension: each wheel on the ground under it | as `dynamic`'s |
     | `kinematic` | nav's bicycle | a kinematic box: it pushes what it meets, and nothing stops it (the navigator keeps it off the buildings) |
+    | `dynamicboat` (`dynamicboat:<preset>`, `launch` or `jonboat`) | a boat (`dyn_boat_plant`): a hull, a propeller and a rudder or outboard, on the world's water (a `water` node's field, or still water at the world's water level the runtime adds without one); its navigator plans on the water deep enough for it, the land blocked. `vehicle:` overrides only `mass` and `max_speed` | its hull, afloat |
 
     `dynamic:<preset>` names the vehicle as `vehicle: <preset>` does. The dynamic models take one
     substep of each world step, so they step with everything else; each plant's entities have a
@@ -1500,11 +1882,35 @@ scene:
     publishes the namespace (`server: publish: [drive]`), the relay replicates it, and its program
     writes `(state-set "drive.lead.intent.accel" "2")`. The C++ setter, `set_intent`,
     `clear_intent` and `intent`, may be called from any thread.
+  - **Around each other.** Vehicles steer around each other, on one plant and across plants
+    (`WorldVehicles::set_avoid`, the `vehicles.avoid` key, on by default): each navigator's
+    separation pushes its carrot away from every vehicle near it (the other plants' vehicles
+    are its foreign agents, `cvc::nav::sim_world::set_foreign_agents`), and a vehicle ahead and
+    near its line turns it right (`sep_side`), so two meeting head on both swing right and pass.
+    It is reactive: they do not plan routes around each other.
+  - **What the navigators know.** `vehicles.sense` (`WorldVehicles::set_sense`): `known`, the
+    world's grid whole (the default), or `fog`, nothing at first and what their vehicles' rays
+    find (each plant's navigator builds a belief and plans on it, as libcvc's fog demos do).
+    Changing it makes the navigators again, and every vehicle goes back to its start.
+    `WorldVehicles::belief(plant, ...)` reads the occupancy a plant's navigator plans on.
+  - **The vehicles a world starts with.** `world: vehicles: start:` lists them, spawned when the
+    world's vehicles are made, before anything asks: each entry is `archetype:` (required),
+    `count:` (1 to 256), and the spawn's `name:` (numbered " 1", " 2", ... when the count is more
+    than one), `team:`, `controller:`, `plant:` and `policy:`, plus `at: [x, y]` (its rear axle)
+    and `heading:`
+    (degrees) for a fixed start; without `at:` each takes a free point or a spawn point. A
+    document's `init:` runs before the world is made, and the runtime ignores a spawn request
+    already set when it starts (a reload would spawn again), so this is how a document, a server
+    document included, populates its world. A gym's reset clears them and spawns its own agents.
   - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,
     `color`, `color2` as `r,g,b`, `metadata` as `key=value, ...`, `controller`, `policy`,
     `policy_sha256`, `mass` or `mass_t` (a fraction of the range), `max_speed` or `max_speed_t`,
-    and `at` as `x,y[,heading in degrees]`; empty: a free point), then change
-    `vehicles.spawn.request`. The result is in `vehicles.spawn.status`. `vehicles.remove.id`
+    and `at` as `x,y[,heading in degrees]`; empty: a free point. A start, and a spawn point,
+    names the vehicle's rear axle, the navigator's reference point on every plant; the entities'
+    table gives its chassis's centre, ahead of it along the heading), then change
+    `vehicles.spawn.request`. `vehicles.spawn.count` spawns that many at once (1 when empty; at
+    most 256), each at a free point of its own unless `at` names one. The result is in
+    `vehicles.spawn.status`. `vehicles.remove.id`
     with `remove.request` removes one, and `clear.request` removes them all.
   - **Drawing.** cvcGL draws each entity on its chassis, posed between steps as the other moving
     bodies are. The box look poses each wheel where its plant has it
@@ -1520,9 +1926,13 @@ scene:
     own, or its adapter's): `list()` (a dict per entity: identity, pose, speed, energy, the
     command and the intent), `spawn(archetype, name=, controller=, team=, at=(x, y[, yaw°]),
     mass=, max_speed=)` (0 and `why()` when refused), `despawn(id)`, and `set_intent(id, steer=,
-    accel=, mode=, weight=, force=(fx, fy), force_steers=)`, `intent(id)`, `clear_intent(id)`.
+    accel=, mode=, weight=, force=(fx, fy), force_steers=)`, `intent(id)`, `clear_intent(id)`,
+    `set_goal(id, x, y)`, `set_wander(on)` and `grid()` (the navigator's grid, as
+    `pycvc.WorldGym.grid` gives it). Each `list()` entry also carries the entity's velocity,
+    steering, goal, `reached`, `collided` and its body (length, width, wheelbase, its limits).
     `list`, `spawn` and `despawn` run on the thread that runs frames; the intents from any
-    thread.
+    thread. `pycvc_gl.cars.HostCars` drives a host's world's vehicles with the cars template's
+    interface.
   - **One runtime per world.** Each `SceneWorld` has its own physics world, vehicles, policies
     and keys, with nothing process-wide, so a host that runs several worlds runs one each.
 - **Spawn points.** Where a vehicle spawned without a start of its own begins
@@ -1534,6 +1944,9 @@ scene:
     spawns:
       policy: round_robin      # fixed | random | round_robin | nearest_free
       scope: team              # the draw and the turn kept per team, per archetype, or for all
+      ford_depth: 0.3          # m of water a land vehicle may start in
+      keel_clearance: 0.3      # m of water a boat needs under its draft
+      shore_clearance: 0       # m of open water a boat needs past half its length
       points:
         - { at: [-60, -60], heading: 45, team: 0, world: flat }   # heading: degrees from +x
         - { at: [60, 60], heading: -135, team: 1, archetype: humvee }
@@ -1544,14 +1957,25 @@ scene:
     every world), so the table follows the world on. A point off the world, on anything blocked
     in the world's grid, or within 6 m of another is refused; one the grid blocks after a
     Regenerate is shown blocked and not taken.
+  - **The medium.** Each archetype starts on its plant's medium (`vehicle_plant::medium()`): a
+    car, on land, where the grid is free and the still water (the grid's water layer: a `water`
+    node's level, or a generated world's, less the ground) is no deeper than `ford_depth`; a boat
+    (`plant: dynamicboat`), on water, where it is at least the boat's draft and `keel_clearance`
+    deep and open for half its length and `shore_clearance` round it. An untagged point serves
+    only the archetypes whose medium it is on, and a tagged one off its archetype's medium serves
+    nothing. A start a spawn gives (`at`) off its medium, a car's in a lake or a boat's ashore,
+    moves to a free point of its medium, as a blocked one does.
   - **The policy.** A spawn takes a point from the free points whose tags match it: `fixed` the
     first, `random` any (the same draw on every platform), `round_robin` each in turn,
     `nearest_free` the first no vehicle is near. A point a vehicle sits on moves the new vehicle
     aside along the point's normal. With no point to take, a vehicle starts at a free point of
-    the grid.
+    the grid, on its medium.
   - **Suggestions.** `spawns.suggest.request` samples points along the world's roads (a generated
     world's road mesh; a terrain or a flat ground has none): one per `suggest.spacing` metres
-    square, at most `suggest.count`, free in the grid, each heading along its road.
+    square, at most `suggest.count`, free in the grid and out of water deeper than a ford, each
+    heading along its road. When `tag.archetype` is a boat, it samples the water deep and open
+    enough for it instead, each body of water with room taking points in turn, each heading
+    along its shore.
     `accept.request` adds them, tagged with `tag.team` and `tag.archetype`.
   - **Editing from keys.** A viewport with `input: pick` and `pick: spawns.pick` is a minimap:
     each press that hits runs `spawns.tool` at the point. `add` makes a point facing
@@ -1559,7 +1983,8 @@ scene:
     `tag` retags it. `clear.request` removes the world on's points. From C++:
     `WorldVehicles::spawns()` (`add`, `remove`, `tag`, `choose`, `suggest`, `accept`).
   - **What the runtime publishes.** Under `spawns`: `ids`, `count`, `summary`,
-    `points.<id>.{x, y, z, heading, team, archetype, world, free}`, `suggestions.{count,
+    `points.<id>.{x, y, z, heading, team, archetype, world, free, medium}` (`medium`: land,
+    water, both, or empty for neither), `suggestions.{count,
     summary}`, `world`, `policy`, `scope`, `status` and `rev`.
   - **Drawing.** cvcGL draws each point as a pad in its team's colour (white for any team, dark
     when blocked) with a pointer along its heading, and each suggestion grey, all tagged
@@ -1640,6 +2065,28 @@ scene:
       - `jolt`: the four-wheel model with the vehicle's own numbers (`nav_plant::dyn4_si_of`).
         Its state is read back from the chassis, so `exact` is false.
       - `kinematic`: nav's bicycle, its rear axle, heading and speed, and its limits in metres.
+      - On every plant, `drive`: what the navigator's drive did on the last tick
+        (`entity_drive`): its policy's coefficients (`alpha`, `beta`, `gamma`), the point it
+        steered for (`goal_x`, `goal_y`: its carrot, world m) and the external force it summed
+        (`force_x`, `force_y`: an intent's, m/s², world frame). `known` is false until a tick
+        has run. The gym keeps the drive's telemetry for it (`drive_telemetry=True`, the
+        default; `WorldVehicles::set_drive_telemetry`), which changes nothing the drive does.
+        With these a twin replays the gym's own controller on a tick, a force included.
+      - On every plant but the bicycle, `plan`: the limits the drive plans each command with on
+        the plant (`entity_plan`; `sim_world::plant_plan`, the plant arm's `plant_drive`), in
+        SI. They are the vehicle's envelope (`a_max`, `vmax`, the cornering `a_lat`) and its
+        `wheelbase`; the steering lock `max_steer` (the fleet's tightest), the actuator's slew
+        `steer_rate` (rad/s) and its angle now `steer_now`; the `latency` (s) and the braking it
+        achieves `a_brake`; and its body as footprint discs (`body_rr`, `body_offsets` from the
+        rear axle, with `footprint`). `parked` says the next tick parks it: it brakes to a stop
+        at `a_brake`. `modulated` says the plant's measured state scales the drive
+        (`plant_modulation`), which these do not carry. With these a twin gives the command the
+        plant took from the control law's, not only the control law's.
+    - `set_intent(id, steer=, accel=, mode=, weight=, force=(fx, fy), force_steers=)`,
+      `intent(id)` and `clear_intent(id)` are an agent's intent, as `pycvc.WorldEntities` sets
+      one: from the next step until changed, so a force (m/s², world frame) acts on the drive
+      while the navigator drives (a step's finite command still takes that step in its place).
+      A reset clears every agent's.
     - GRL-SNAM's `grl_snam.gym_twin` is the torch twin built on them.
 - **Terrain transforms.** A terrain follows its node's position but not its rotation or scale.
   Draw a ground you collide with unrotated and unscaled.
@@ -3794,11 +4241,11 @@ fetch:
 
 ### 6.1 `include:` — template instantiation
 
-`expand_include` ([`loader.cpp:852`](../src/cvc/ariadne/loader.cpp)) instantiates a
+`expand_include` ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)) instantiates a
 `units:` template: it clones the unit (`YAML::Clone`) and does a single-pass `{name}`
 token substitution from the `include:`'s `args:`. Units are collected before the body,
-so instantiation is order-free. A name-keyed expansion-stack guard
-([`loader.cpp:863`](../src/cvc/ariadne/loader.cpp)) refuses recursion and fan-out; an
+so instantiation is order-free. A name-keyed expansion-stack guard (in `expand_include`,
+[`loader.cpp`](../src/cvc/ariadne/loader.cpp)) refuses recursion and fan-out; an
 unknown unit warns and renders empty. `include:` is the static counterpart of `repeat:`.
 
 A unit may declare its parameters with defaults in an `args:` map beside its widget keys; the
@@ -3853,12 +4300,12 @@ windows:
 
 ### 6.2 `import:` — shared-scope library merge
 
-`process_imports` ([`loader.cpp:761`](../src/cvc/ariadne/loader.cpp)) resolves a URI (or
+`process_imports` ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)) resolves a URI (or
 list) through the shared resolver relative to the document's `base_dir`, merges another
 `.ari`'s `units:` into scope, and recurses into that library's own imports. It dedups
-and cycle-guards on the resolved `canonical` identity
-([`loader.cpp:789`](../src/cvc/ariadne/loader.cpp)), capped at `kMaxImportDepth = 32` /
-`kMaxImports = 4096` ([`loader.cpp:758`](../src/cvc/ariadne/loader.cpp)). Local units
+and cycle-guards on the resolved `canonical` identity (in `process_imports`,
+[`loader.cpp`](../src/cvc/ariadne/loader.cpp)), capped at `kMaxImportDepth = 32` /
+`kMaxImports = 4096` (`loader.cpp`'s constants). Local units
 override imported ones. This is how a document composes a library of shipped panels.
 
 An entry may be `{uri: URI, optional: true}`: a library the host may not have (a component
@@ -3874,12 +4321,12 @@ units:
 
 ### 6.3 `load:` — isolated sub-module mount
 
-`expand_load` ([`loader.cpp:928`](../src/cvc/ariadne/loader.cpp)) mounts an external
+`expand_load` ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)) mounts an external
 fragment as an **isolated module** in a fresh sub-context (its `units:` are its own),
 based at its own directory. Guards: a resolved-URI cycle set, a per-chain depth cap
-`kMaxMountDepth = 32`, and a document-wide aggregate cap `kMaxMounts = 256`
-([`loader.cpp:882`](../src/cvc/ariadne/loader.cpp)) that catches the `K^depth` fan-out a
-depth cap alone would miss. The mount id is the explicit `as:`, else it is derived from
+`kMaxMountDepth = 32`, and a document-wide aggregate cap `kMaxMounts = 256` (checked in
+`expand_load`, [`loader.cpp`](../src/cvc/ariadne/loader.cpp)) that catches the `K^depth` fan-out
+a depth cap alone would miss. The mount id is the explicit `as:`, else it is derived from
 the URI basename, sanitized to a single state segment, with sibling duplicates
 disambiguated `_2` / `_3`. A mounted module is sandboxed to its own state sub-prefix
 (§7) and reaches the parent only through explicitly granted `link:` holes, and calls only the
@@ -3946,6 +4393,9 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `forest_controls`, `sea_controls`, `sky_controls` | a `forest_trees` / `wave_sea` / `cloud_sky` node (arg `keys`, below) |
 | `world_controls` | a `generated_world` node (§5.4; arg `keys`) |
 | `water_controls` | a `water` node (arg `keys`, default `water`) |
+| `boat_controls` | a `boat` node's helm: drive, throttle, rudder, goal, and what it does (arg `keys`, default `boat`: the node's id or `keys:`) |
+| `weather_controls` | a `weather` node: the weather now, a storm started upwind or overhead, the sky cleared, the weather's time scale, the rain's effects, the lightning and the wet friction (arg `keys`, default `weather`) |
+| `wind_controls` | the scene's one wind (`wind.speed`, `wind.dir`, `wind.gustiness`; §5.4 "Wind") |
 | `mesh_tools` | a `mesh_lab` node (§5.4; arg `node`, default `mesh`) |
 | `fe_controls` | an `fe_lab` node (§5.4; arg `node`, default `domain`) |
 | `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `scene`, `show`, `hide`, `mode`, `camera`, `chrome`, `shadows`, `caption`, `width`, `height`, `title`, `id`) |
@@ -4139,9 +4589,9 @@ Same rule, different prefix string — pick the one your host wants; nothing els
 `Widget::scope` ([`widget.h`](../inc/cvc/ariadne/widget.h)) is a relative segment. When
 the runtime emits a container it computes `sub_prefix = resolve_bind(parent_prefix,
 scope)`, pushes it (RAII `ScopeGuard`), and resolves the children against it
-([`ariadne.cpp:961`](../src/cvc/ariadne/ariadne.cpp)). A mount's *own* reactive fields
-(e.g. its `visible_when`) stay in the **parent** scope — they are evaluated before the
-push. A repeated mount gets `includes.<as>.<i>` per instance.
+(`Runtime::Impl::emit_container`, [`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)). A mount's
+*own* reactive fields (e.g. its `visible_when`) stay in the **parent** scope — they are evaluated
+before the push. A repeated mount gets `includes.<as>.<i>` per instance.
 
 ### 7.4 Default-deny and `link:` holes
 
@@ -4150,7 +4600,7 @@ A mounted module is sandboxed to its sub-prefix. Access to the parent's state is
 
 - scalar `name: target` grants read-write;
 - map `name: {to:, mode: ro|rw}` **fails closed** — only an exact `"rw"` mode is
-  writable ([`loader.cpp:1038`](../src/cvc/ariadne/loader.cpp)); anything else is
+  writable (`expand_load`, [`loader.cpp`](../src/cvc/ariadne/loader.cpp)); anything else is
   read-only. A hole whose name starts with `/` is rejected.
 
 At reconcile, `wire_holes` ([`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)) plants a
@@ -4199,7 +4649,7 @@ implicitly.
 
 Message channels (`msg-send` / `msg-recv` / `msg-pending`) are **chrooted per document,
 exactly like state**. The rule is `resolve_channel_key(root_path, channel)`
-([`intrinsics.cpp:884`](../src/cvc/state/state_exec/intrinsics.cpp)):
+([`intrinsics.cpp`](../src/cvc/state/state_exec/intrinsics.cpp)):
 
 - channel contains `#` → used verbatim (these are runtime-internal tick/key/pointer
   channels, and are policy-exempt);
@@ -4211,7 +4661,7 @@ exactly like state**. The rule is `resolve_channel_key(root_path, channel)`
 Cross-scope sharing reuses the §7 hole mechanism: a mount's `channels:` grant lowers into
 a transparent link under the reserved `channels.` subtree, and `resolve_channel` follows
 the link's **target string** — a channel key is a redirect, so the target node need not
-exist ([`intrinsics.cpp:672`](../src/cvc/state/state_exec/intrinsics.cpp)).
+exist (`resolve_channel`, [`intrinsics.cpp`](../src/cvc/state/state_exec/intrinsics.cpp)).
 
 ### 8.1 Authoring surface
 
@@ -4232,11 +4682,11 @@ documents that declare one.
 Both key off `lint.channels`:
 
 - **Load-time static lint** (`lint_channels`,
-  [`loader.cpp:1684`](../src/cvc/ariadne/loader.cpp)) walks each program lane's AST for
+  [`loader.cpp`](../src/cvc/ariadne/loader.cpp)) walks each program lane's AST for
   `(msg-* "literal")` calls, skips `#`-channels, and errors or warns on an undeclared
   channel. A `/`-prefixed reference must match a channel declared `global: true`.
 - **Runtime backstop** (`Runtime::set_channel_policy`,
-  [`ariadne.h:86`](../inc/cvc/ariadne/ariadne.h)) catches an undeclared *dynamic* channel
+  [`ariadne.h`](../inc/cvc/ariadne/ariadne.h)) catches an undeclared *dynamic* channel
   name (one the static lint could not see), fail-safe, exempting `#`-channels and
   grant-linked channels. The host feeds the policy from the `LoadResult`.
 
@@ -4398,6 +4848,97 @@ if (lr.has_channels_block)
 //   processUIEvents → cam.update → rt.drain() → sync_scene_visibility → tick_scene
 //   view.render()  (fires rt.render() via the overlay callback)
 ```
+
+**One pump a frame for several documents.** `drain()` is two halves, `drain_begin()` (the frame's
+host work: the queued events and key bindings, the actions and residents submitted, the frame's
+tick posted) and `drain_end()` (a pump of the document's scheduler, then the sweep of what
+finished). A host with one Runtime calls `drain()`. A host with several calls `drain_begin()` on
+each, then `app.exec_pump_frame()` once, then `drain_end()` on each: that one call pumps the app
+scheduler once and every isolated document's group (§2.5), in one fork-join pump of the app's pool
+with a 0.1 s deadline, and each `drain_end()` sees that the frame was pumped
+(`app.exec_pump_generation()` moved since its `drain_begin()`) and only sweeps. `AppRuntime` has
+the same pair, with its scene work, warnings and frame hooks after `drain_end()`:
+
+```cpp
+for (auto &d : docs) d->drain_begin();   // AppRuntime or Runtime
+app.exec_pump_frame();                   // group 0 once, and every document's group
+for (auto &d : docs) d->drain_end();
+for (auto &d : docs) d->runtime().render(); // or the backend's draw, between pumps
+```
+
+With several documents on `app.exec_scheduler()` this is what makes the app scheduler's budget
+200000 steps a frame, not 200000 per document. Calling `drain()` on one Runtime and the split on
+another would pump a document's group twice a frame: a host picks one. To put documents on the
+pool's workers, the host builds the app's pool with workers before anything builds the app
+scheduler or the lock manager (`app.exec_pool(opts)` first, or `state_exec.threads` in the tree;
+[STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) 4.13) and sets `ariadne.exec.isolate_documents`;
+`Runtime::isolated_group()` (null in group 0) and `isolation_reason()` say what happened to each
+document. A host with one isolated document can keep calling `drain()`, whose `drain_end()` then
+pumps the document's group through the pool itself (on the frame's thread, as nothing else is in
+that pump).
+
+**The host thread.** A Runtime's host calls are made on the host thread, between pumps, never
+from inside one (from a native, a callback or a host verb that the app's pool runs): `render`,
+`drain`/`drain_begin`/`drain_end`, `set_root`, `AppRuntime::load`, the `set_*_program` calls,
+`set_channel_policy`, `post_input`, `post_signal`, and the destructors. `post_input` and
+`post_signal` may start their residents before they post, so a host that catches an OS signal on
+another thread hands it to the host thread first. Debug builds assert it in `render`,
+`post_input`, `post_signal` and the `set_*_program` calls, which start or kill. `run_program` is
+the host thread's too, but it only queues the program for the next drain, so a host function may
+call it from inside a frame. Destroying a Runtime, or a change that moves its document out of its
+group (§2.5), while a pump of the app's pool holds that group is refused in every build, from any
+thread: it is printed and logged, then the process aborts, before anything is touched. So a host
+verb that would close or reload an isolated document records the request instead, and the host
+acts on it after the frame. A document in the app scheduler is not refused, nor one whose group no
+pump holds.
+
+**Thread-affine subscribers.** A host that connects a state subscriber which must run on the host
+thread (a renderer's camera, a HUD) under, at or above a document's prefix declares it before
+`load()`: `AppRuntime::declare_thread_affine_prefix(prefix)` (it forwards to
+`Runtime::declare_thread_affine_prefix`). An isolated document is then pumped on the host thread
+when a declared prefix is at, above or under its own: a write under the document emits
+`childChanged` on every ancestor, so a subscriber above it hears every write too. `AriRuntime`
+declares its scene prefix.
+
+**Scripting engines.** A runtime that uses a scripting engine (`AppRuntime::use_script_engine`) is
+pumped on the host thread when isolated. An activation's natives run its language inline, charged
+to its process, under a frame budget its language's activations share.
+`use_script_engine` declares `Runtime::require_host_thread`, which a host extension whose programs
+run host code inline may call too. Call it before `load()`. A later declaration follows the
+late-registration rule: the document moves once nothing of it runs, or at its next load. Until
+then `Runtime::start_process` refuses a process with natives of its own. An activation runs in
+the document's group, and `ScriptLane::stop` and `running` reach it there.
+
+An exported call (`ScriptLane::export_activation`) parks the calling program on the program's own
+host, its group's when the document is isolated. The activation then finishes the call through
+that same host.
+
+**Adding verbs.** A host adds its own natives to the documents' programs with a provider,
+`register_action_intrinsics(app, provider, affinity)` ([`ariadne.h`](../inc/cvc/ariadne/ariadne.h)),
+called once at setup, before the first load (the list is the app's own). A provider runs each time a program's env is built and
+binds natives into it. Its kind (`cvc::state_exec::provider_affinity`) says where those natives may
+run in an isolated document's group that a worker pumps:
+
+| Kind | In an isolated `any` group | Choose it when |
+|---|---|---|
+| `any` | bound as it is, run on whatever thread pumps the group | the native touches only its arguments, its own context, thread-safe tables, and the tree through `cvc::state`'s pinned lookups; an async function registered on `*ictx.host`, whose kernel runs on the background pool, qualifies |
+| `host_proxied` | wrapped: on a worker its process parks, the native runs on the frame's thread after the group's pump, and the program resumes at the next frame | the native touches host state that only one thread may (a UI, a raw tree walk, process-global tables); it must be synchronous |
+| `host_only` (the one-argument form's kind) | not bound: a call is a `NameError`; a document whose env would hold one is pumped on the host thread instead | the native needs the host thread itself (GL, SDL, a GIL-holding callback) or nobody has audited it |
+
+In the app scheduler, and in a group pumped on the host thread, every kind is bound as it is. A
+provider's body itself runs where the env is built, which for a spawned child in an `any` group is a
+worker: an `any` or `host_proxied` provider reads only its context and its own thread-safe state,
+and binds what it binds into the new env. A value it binds that is not a native is made fresh for
+each env, or is immutable. A provider that posts a message for a program (a done channel, an event)
+posts it to `ictx.host->parking_scheduler()`, the program's group, or to `app.exec_scheduler()`
+only when that is null (the `init:` lane), never to `app.exec_scheduler()` directly; and registers
+its async functions on `*ictx.host`, which every lane sets
+([STATE_EXEC_DEVELOPER_GUIDE.md](STATE_EXEC_DEVELOPER_GUIDE.md#ariadne-providers), "Ariadne
+providers"). `AppRuntime::register_verb`, `register_function` and `register_async_function` are
+`host_only`, and `register_async_verb` is `any`. Register providers and verbs before `load()`, or
+before the first frame: one registered once a document's programs run moves it only the first time
+nothing of it runs, at the latest at its next load (§2.5), so until then a late `host_only` name is
+a `NameError` in a document a worker may pump, and the app's log says so once.
 
 ### 9.2 In a terminal (`ari`, `FtxuiBackend`)
 
@@ -4636,8 +5177,8 @@ the host's `name` (`Host(name=...)`, `"ari"` by default).
 `host.function(name)` and `host.async_function(name)` make a Python callable a function the
 document's programs call with arguments (`pycvc.host_function` builds it; values convert as
 `pycvc.Exec`'s do, §10.1). A synchronous function runs inline in the frame. An async one is an
-async function on the app's async host
-([STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) section 3): its program parks while it
+async function on the calling program's async host (the app's, or an isolated document's group's,
+§2.5; [STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) section 3): its program parks while it
 runs on the app's background task pool, `(name-async ...)` returns a future,
 `with_call=True` passes the call first (`call.cancelled()`, `call.post(value)`), and
 `done_channel` also posts its value there. Their exceptions are the document's: the call raises
@@ -4684,7 +5225,9 @@ while the frame does. A callback may read and write state and queue programs, bu
 frame: `step()`, `run()`, `frame()` or `render()` from inside one raises `RuntimeError`
 (`AriRuntime` refuses it too), and `load()` from inside one waits for the frame to end.
 `close()` waits for the async functions still running, so a long one should watch
-`call.cancelled()`.
+`call.cancelled()`. Python functions are `host_only` host functions (§9.1), so a document that can
+call one never runs on a pool worker: with `ariadne.exec.isolate_documents` on, its group is pumped
+on the frame's thread, where the function takes the GIL back for its call.
 
 **Errors.** An exception in an `on()` handler, an `on_frame` hook or a `watch` callback is raised
 from the `step()`/`run()` that ran it. A function's is the document's (above); one it does not
@@ -6483,6 +7026,15 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
 - **No DSL-visible future from the pycvc async layer.** Both `register_async_fn` and
   `register_async_coro` self-park; there is no gather/join to launch *N* Python async
   calls concurrently from one process (the net verbs' `-async` futures do offer this).
+- **Documents in groups of their own gain nothing in the shipped hosts yet** (§2.5). `ari` and
+  `arigl` drive one document each with `drain()`, and an arigl document stays on the frame's
+  thread: its camera, touch, lighting, HUD and settings subscribers sit under its prefix and assume
+  the render thread ([STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) 4.8). Two more limits, for a
+  host that makes several documents: every `AppRuntime`'s host verbs and functions are bound into
+  every document's programs (the provider registry is process-global), so one `AppRuntime` with a
+  host verb keeps all its siblings' documents on the frame's thread; and `AppRuntime` has no way
+  to mark a host verb as safe off the host thread, so a host that wants one registers its own
+  provider as `any` (§9.1).
 
 ---
 

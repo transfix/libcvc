@@ -54,6 +54,17 @@
 // about 2 sqrt(rho g A m) / V_sub (A the waterplane area, m the mass, V_sub the
 // volume under water); 1e4 N s/m^4 suits a body of a metre or so.
 //
+// That damping acts in every direction, so it also holds a body to the water's velocity
+// sideways: the body follows the waves' orbital motion and the current, but resists any drift
+// through the water as strongly as it resists heaving (a 1 m crate in a 10 m/s wind drifts about
+// a millimetre a second). A fluid with `inertial` set is moved sideways as a real one moves a
+// small floating body: its damping acts on the vertical alone (the heave it stands for), and
+// sideways the body is pushed by the water's acceleration over its immersed volume (the
+// Froude-Krylov force, rho V du/dt at the immersed part's centroid, du/dt read from the water's
+// velocity a step either side) and drags against the water's velocity (C_d). So it rides the
+// waves and drifts with the current, and a wind blows it through the water at the speed where
+// the air's drag on it balances the water's.
+//
 // A medium supports elastically. A flat footprint A sunk d metres into a medium of
 // modulus k carries k A d (a Winkler foundation, Bekker's n = 1), and the medium
 // pushes the body back out as it rises. A medium that keeps ruts is later work.
@@ -64,12 +75,43 @@
 // drag and damping use the surface's water velocity (the waves' orbital motion, a current)
 // in place of the velocity volumes. Make the box tall enough to hold the crests.
 //
+// A flow may have a wind (field::wind, flow_velocity.h): its velocity, changing in space and
+// time, in place of the velocity volumes, read at the world's field time once per body: at its
+// centre of mass (the gusts vary over tens of metres; so the wind costs O(bodies) a step), times
+// the wind's height profile at each cell, and only above the wind's base (the water or the
+// ground: a cell is clipped to it as to a free surface). Each cell's drag is taken against it;
+// the air is not counted in field_load::immersed_volume.
+// A vehicle's aero drag reads it at the vehicle's centre of mass (vehicle.h), as it reads a
+// flow's velocity volumes.
+//
 // A body with a hull (body_desc::hull, hull.h) is pushed by fluids on its hull's triangles in
 // place of its cells: hydrostatic pressure split at the waterline, friction, pressure drag and
 // slamming. Media and flows still push on its cells.
 //
+// A fluid with a free surface may have a wake (field::wake, field_wake below; OCEAN-AND-WEATHER-
+// ROADMAP.md C5, D6): the waves its floating bodies make, which push the others. It is off by
+// default, and a world without one steps exactly as before. With one, the field keeps a square
+// window of cells around the bodies in its water (cvc::ocean::ewave's exact linear step) and one
+// wave state in it per body that makes waves: each awake body's immersed columns over the window
+// (immersion.h), cut against what it floats in (the surface and the others' waves, so a body
+// riding another's wave does not send it on again), are its source,
+// dh = -(zeta(t) - zeta(t - dt)). Every body
+// reads the sum of the others' waves, never its own: their height adds to the surface's under its
+// cells and hull, their velocity (grad phi sideways, dh/dt up) to the water's, and an inertial
+// fluid's Froude-Krylov push takes their acceleration (-g grad h). A body's own waves read back
+// would cancel its heave's restoring force as it moves (its source lowers the water it presses
+// down, at once, and the waves take a while to refill it) and price its wave-making twice (the
+// hull's drag stands for it). So boats feel each other's wakes and the debris' rings, and the
+// debris the boats'. The window and its states are world state: saved (with every wake parameter,
+// so a world with another wake refuses the state) and hashed. restore() reads every wake's
+// section whole before any wake takes it, so a failure in it leaves the wakes as they were (the
+// world's restore as a whole is not transactional: the engine and the sections before the
+// wakes' are taken first). The section is versioned only by its magic (CVCWAKE1). What reads
+// the water at a point (world::water_at: a boat's propeller and rudder) reads it without the wake.
+//
 // Sleeping bodies are not pushed: the forces were in balance when the body fell
-// asleep. add_field and set_field wake the bodies inside the field's box.
+// asleep. add_field and set_field wake the bodies inside the field's box, and a wake wakes a body
+// its waves reach (more than a millimetre high where it sits).
 //
 // Standard library only, like the rest of cvc/physics: cvc::volume is declared,
 // not included.
@@ -80,6 +122,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cvc/physics/flow_velocity.h>
 #include <cvc/physics/fluid_surface.h>
 #include <cvc/physics/types.h>
 #include <memory>
@@ -97,6 +140,53 @@ enum class field_kind : std::uint8_t {
   flow,   // moving air: drag only
 };
 
+// A fluid's wake (field::wake): the window its floating bodies' waves are stepped on. `cells` 0 is
+// no wake (the default). The window (cells x cells of `cell` metres, one water depth) sits on a
+// grid of whole cells from the world's origin where it holds the most bodies in the water, a boat
+// (a body with a hull) counting as four: a proposal is the bodies within the window's inner
+// square (the window less its sponge) round a body, and the window takes the best proposal over
+// what it holds only when that holds more. Every boat proposes, and of the other bodies the first
+// (by id) in each occupied square of a grid as wide as that inner square, at most 64 proposals in
+// all, so placing the window costs at most 64 x the bodies in the water a wave step. It centres on
+// what it holds and moves by whole cells once that is cells / 8 off its centre, the waves going
+// with it and the strip that enters flat. Bodies in the water outside it make and feel no waves
+// (wake_info::outside counts them): two groups farther apart than the window cannot share it. The
+// waves step every `period` seconds of world time, in whole physics steps (at least one), and the
+// bodies read them at every step. A sponge at the window's edge takes the waves that leave, and
+// the window has no shores: a wake runs on over land, where nothing floats to feel it, and does
+// not reflect off the coast. At most `sources` awake bodies make waves, each holding a slot: a
+// body that falls asleep, leaves the window or leaves the world gives its slot up and its waves
+// fade on; a body awake in the window without one takes a free slot, boats first, then the
+// nearest the window's centre (by id among equals).
+//
+// Memory and cost: each body that makes waves holds a state of 80 cells^2 bytes (320 KiB at 64,
+// 1.25 MiB at 128), at most sources + 4 states (the 4 fading), and saves 32 cells^2 bytes of it
+// (so a save and a state_hash() grow by that each). A wave step costs about one
+// cvc::ocean::ewave step per state with waves in it: 0.16-0.22 ms at 64^2, 0.6-1.0 ms at 128^2
+// (ocean_ewave_test), every `period`; the reads are bilinear lookups. The limits below keep a
+// window at most 128 cells and 16 sources: 20 states of 1.25 MiB, wave steps of about 20 ms at
+// worst.
+struct field_wake {
+  int cells = 0;            // cells a side (0: no wake; else a power of two, 8 .. 128)
+  double cell = 1.0;        // m: a cell's side (0.05 .. 100)
+  double depth = 0.0;       // m: the window's one water depth (<= 0: deep water; at most 10 km)
+  double period = 1.0 / 30; // s between two of the waves' steps (whole physics steps; (0, 10])
+  double damping_k2 = 2e-3; // m^2/s: the short waves decay as exp(-damping_k2 |k|^2 t)
+  double damping = 0.02;    // 1/s: and every wave as exp(-damping t)
+  double sponge_cells = 8;  // the edge band's width (cells, at most cells / 2)
+  double sponge_rate = 2.0; // 1/s: its damping at the edge
+  int samples = 2;          // sub-columns a side in each cell for a body's immersed depth (1 .. 8)
+  int sources = 8;          // the most bodies that make waves (1 .. 16)
+  bool on() const { return cells > 0; }
+  friend bool operator==(const field_wake &a, const field_wake &b) {
+    return a.cells == b.cells && a.cell == b.cell && a.depth == b.depth && a.period == b.period &&
+           a.damping_k2 == b.damping_k2 && a.damping == b.damping &&
+           a.sponge_cells == b.sponge_cells && a.sponge_rate == b.sponge_rate &&
+           a.samples == b.samples && a.sources == b.sources;
+  }
+  friend bool operator!=(const field_wake &a, const field_wake &b) { return !(a == b); }
+};
+
 struct field {
   field_kind kind = field_kind::fluid;
   // The field's region and strength, in world metres. The field acts inside this
@@ -110,6 +200,9 @@ struct field {
   std::array<std::shared_ptr<const cvc::volume>, 3> velocity;
   double drag_coefficient = 1.0; // fluid, flow: C_d
   double damping = 0.0;          // every kind: c, N s/m^4
+  // fluid: damp the vertical only, and move a body sideways by the water's acceleration and its
+  // drag (above). Off: the damping acts in every direction, as it always has.
+  bool inertial = false;
   // medium: the friction a vehicle's tire finds in it (snow ~0.3, mud ~0.4), in place of the
   // ground's; 0 keeps the ground's. A vehicle's wheels also sink into a medium and ride on it
   // (vehicle.h).
@@ -127,6 +220,25 @@ struct field {
   // the step's thread and folds its digest into state_hash(), so it must not change while a
   // field holds it; set_field with a new surface to change the sea.
   std::shared_ptr<const fluid_surface> surface;
+  // flow: its wind (flow_velocity.h): the air's velocity in space and time, in place of the
+  // velocity volumes. Null keeps them. Folded into state_hash() and held immutable, as `surface`.
+  // A flow with a wind may have no `volume`: it is then air of 1.225 kg/m^3 everywhere (10^7 m
+  // each way), the scene-wide wind.
+  std::shared_ptr<const flow_velocity> wind;
+  // fluid with a free surface: the waves its bodies make, pushing the others (field_wake above;
+  // off by default). world::set_field with the same wake keeps its waves; another starts afresh.
+  field_wake wake;
+};
+
+// What a fluid's wake is now (world::field_wake_info).
+struct wake_info {
+  bool placed = false;          // the window is down (once some body is in the water)
+  double x0 = 0.0, y0 = 0.0;    // its cell (0, 0)'s point, world metres
+  double cell = 0.0;            // m
+  int cells = 0;                // a side
+  int windows = 0;              // the bodies' wave states in it, those fading out included
+  std::vector<body_id> sources; // the bodies making waves now, in id order
+  int outside = 0;              // bodies in the water outside the window (at its last wave step)
 };
 
 // A medium's ruts (world::field_ruts): the depth (m) the surface has been pressed down, per cell

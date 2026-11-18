@@ -104,6 +104,41 @@ target_include_directories(cvcGL PUBLIC
 target_link_libraries(cvcGL PUBLIC cvc::cvc ${VTK_LIBRARIES})
 target_include_directories(cvcGL PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/ocean")
 
+# VTK's GPU volume ray caster ends every render with glFinish(), for a timer only an
+# auto-adjusting render uses; cvcpkg's VTK (vtk 9.5.0+cvc.5, written for upstream) adds an opt-in
+# vtkSmartVolumeMapper::FinishEveryRender to skip it. VolumeNode turns it off per mapper where the
+# VTK found has it (RENDER_PERF_ROADMAP.md Phase 6); an unpatched VTK builds and renders as before.
+#
+# The check compiles only (the header declares the property; a static-library try_compile links
+# nothing), so a link that fails for another reason, a wasm one say, cannot turn it off. It runs
+# at every configure: VTK's version stays 9.5.0 across cvcpkg's revisions, so a cached answer from
+# before the prefix's VTK changed would stick.
+include(CheckCXXSourceCompiles)
+include(CMakePushCheckState)
+unset(CVC_VTK_HAS_FINISH_EVERY_RENDER CACHE)
+cmake_push_check_state(RESET)
+set(CMAKE_REQUIRED_LIBRARIES VTK::RenderingVolumeOpenGL2)
+set(CMAKE_REQUIRED_QUIET ON)
+set(_cvc_try_compile_target_type "${CMAKE_TRY_COMPILE_TARGET_TYPE}")
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+check_cxx_source_compiles("
+#include <vtkNew.h>
+#include <vtkSmartVolumeMapper.h>
+int main() {
+  vtkNew<vtkSmartVolumeMapper> m;
+  m->FinishEveryRenderOff();
+  return m->GetFinishEveryRender() ? 1 : 0;
+}" CVC_VTK_HAS_FINISH_EVERY_RENDER)
+set(CMAKE_TRY_COMPILE_TARGET_TYPE "${_cvc_try_compile_target_type}")
+unset(_cvc_try_compile_target_type)
+cmake_pop_check_state()
+if(CVC_VTK_HAS_FINISH_EVERY_RENDER)
+  target_compile_definitions(cvcGL PRIVATE CVC_VTK_HAS_FINISH_EVERY_RENDER=1)
+  message(STATUS "cvcGL: VTK has FinishEveryRender; VolumeNode turns it off")
+else()
+  message(STATUS "cvcGL: VTK has no FinishEveryRender; volume renders keep VTK's glFinish")
+endif()
+
 # libjpeg-turbo: conference video compression (jpeg_codec.cpp / jpeg_encode_source.cpp / the mjpeg
 # stream_view decode path). Optional at build time — where the prefix has no turbojpeg the codec
 # compiles to a no-op (the "mjpeg" path then yields no video); native builds that need it ship it.
@@ -617,6 +652,14 @@ add_executable(cvcgl_volume_half_float test/cvcgl_volume_half_float.cpp)
 target_link_libraries(cvcgl_volume_half_float PRIVATE cvcGL)
 add_test(NAME cvcgl_volume_half_float COMMAND cvcgl_volume_half_float)
 
+# VolumeNode's mapper with VTK's FinishEveryRender off (where the VTK has it), the same pixels.
+add_executable(cvcgl_volume_finish test/cvcgl_volume_finish.cpp)
+target_link_libraries(cvcgl_volume_finish PRIVATE cvcGL)
+if(CVC_VTK_HAS_FINISH_EVERY_RENDER)
+  target_compile_definitions(cvcgl_volume_finish PRIVATE CVC_VTK_HAS_FINISH_EVERY_RENDER=1)
+endif()
+add_test(NAME cvcgl_volume_finish COMMAND cvcgl_volume_finish)
+
 # The explicit traversal: state stack, ORDER-DEPENDENT property semantics,
 # per-view divergence and teardown. Runs with a null renderer, so it exercises
 # the whole walk without a GL context.
@@ -962,6 +1005,11 @@ add_test(NAME cvcgl_light_node COMMAND cvcgl_light_node)
 add_executable(cvcgl_ariadne_realize test/cvcgl_ariadne_realize.cpp)
 target_link_libraries(cvcgl_ariadne_realize PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_realize COMMAND cvcgl_ariadne_realize)
+# The whole realize suite in one process: 71 s in a Windows Release job, 250.6 s in a Linux Debug
+# job (Xvfb, llvmpipe; transfix/libcvc#1301, 2026-11-17), and past ctest's 300 s on all three
+# attempts of a slower runner's Debug job (#1309, where PhConvoy and Ewave also ran ~1.3x longer).
+# Its own budget, as cvcgl_ewave's and cvcgl_volren_node's, so only a real hang fails.
+set_tests_properties(cvcgl_ariadne_realize PROPERTIES TIMEOUT 1200)
 
 # Ariadne §5.4 repeat: on a scene node: copies made and taken as the count (a number, a key, a
 # read-lane expression) changes, with RealizedScene's lists kept in step. Part 2 runs a document in

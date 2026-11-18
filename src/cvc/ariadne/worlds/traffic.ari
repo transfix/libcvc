@@ -1,0 +1,84 @@
+# traffic.ari -- a stock server world with vehicles in it (ARIADNE_WORLDS.md §14 and WD3):
+#
+#   arisrv --doc cvc://worlds/traffic.ari
+#
+# The relay runs this document's world headless (ServerDocument: its SceneWorld, physics world and
+# vehicles), and every client that joins the room sees its vehicles drive (the room's entities:
+# their identities in conf.rooms.<room>.entities, their poses on the pose stream). The ground is a
+# 160 m square with twelve blocks on a grid of streets; eighteen vehicles start at free points and
+# drive under nav@1 between goals they draw, avoiding the blocks.
+#
+# The blocks are plain boxes, so the room publishes them too (room_world_from_scene) and a client
+# draws them; the ground's box carries the physics.
+meta: { name: traffic, min_libcvc: 3.7.12 }
+
+requires: [relay, scene.physics]
+
+world:
+  vehicles:
+    archetypes:
+      rover:
+        plant: kinematic
+        vehicle: { preset: roboracer, max_speed: 7 }
+        controllers: [nav@1, none]
+      truck:
+        plant: kinematic
+        vehicle: { preset: humvee, max_speed: 9 }
+        controllers: [nav@1, none]
+    start:
+      - { archetype: rover, count: 12, name: rover, team: 1 }
+      - { archetype: truck, count: 6, name: truck, team: 2 }
+  spawns:
+    policy: random
+
+scene:
+  background: { top: [0.32, 0.45, 0.62], bottom: [0.10, 0.12, 0.16] }
+  chrome: false
+  lights:
+    - light: room_rig
+      rig: three_point
+      stage: { center: [0, 0, 1], radius: 60 }
+      key: { intensity: 0.9, azimuth: -35, elevation: 55, cone: 60 }
+      fill: 0.3
+      back: 0.25
+      warmth: 0.2
+      environment: 0.2
+      ambient: 0.15
+  shadows:
+    enabled: true
+    resolution: 2048
+    update_interval: 1
+  physics: {}
+  world: { source: ground, cell: 2 }
+  nodes:
+    - node: ground
+      world: ground
+      source: { box: { size: [160, 160, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      material: { color: [0.30, 0.32, 0.30], ambient: 0.35, diffuse: 0.85 }
+      body: static
+    # Twelve blocks, 16 m square and 6 to 14 m tall, on a 40 m grid: streets 24 m wide between.
+    - { node: block_a1, source: { box: { size: [16, 16, 8] } }, transform: { position: [-60, -20, 4] },
+        material: &block { color: [0.62, 0.60, 0.56], ambient: 0.3, diffuse: 0.8 }, body: static }
+    - { node: block_a2, source: { box: { size: [16, 16, 12] } }, transform: { position: [-60, 20, 6] },
+        material: *block, body: static }
+    - { node: block_b1, source: { box: { size: [16, 16, 6] } }, transform: { position: [-20, -60, 3] },
+        material: *block, body: static }
+    - { node: block_b2, source: { box: { size: [16, 16, 14] } }, transform: { position: [-20, -20, 7] },
+        material: *block, body: static }
+    - { node: block_b3, source: { box: { size: [16, 16, 10] } }, transform: { position: [-20, 20, 5] },
+        material: *block, body: static }
+    - { node: block_b4, source: { box: { size: [16, 16, 8] } }, transform: { position: [-20, 60, 4] },
+        material: *block, body: static }
+    - { node: block_c1, source: { box: { size: [16, 16, 12] } }, transform: { position: [20, -60, 6] },
+        material: *block, body: static }
+    - { node: block_c2, source: { box: { size: [16, 16, 8] } }, transform: { position: [20, -20, 4] },
+        material: *block, body: static }
+    - { node: block_c3, source: { box: { size: [16, 16, 14] } }, transform: { position: [20, 20, 7] },
+        material: *block, body: static }
+    - { node: block_c4, source: { box: { size: [16, 16, 6] } }, transform: { position: [20, 60, 3] },
+        material: *block, body: static }
+    - { node: block_d1, source: { box: { size: [16, 16, 10] } }, transform: { position: [60, -20, 5] },
+        material: *block, body: static }
+    - { node: block_d2, source: { box: { size: [16, 16, 8] } }, transform: { position: [60, 20, 4] },
+        material: *block, body: static }

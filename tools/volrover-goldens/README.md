@@ -177,3 +177,61 @@ box, but not the same bytes: the last digits differ, and so does the order of ti
 Its dumbbell differs more, because the cells' memory order is the allocator's: 361 segments, one
 of them not in Linux's 362, and two of Linux's missing. The port contains both platforms'
 dumbbell segments, and its test compares coordinates to 1e-9, so it passes against either set.
+
+## ContourTiler
+
+ContourTiler is `src/ContourTiler`, the contour tiler of the roadmap's §3. It needs CGAL, as
+Skeletonization does (`--libs tiler` builds it alone).
+
+- **What is built:** the library's sources, but for its tools (ecs, smfconvert, its command line),
+  `contour_graph.cpp` (unused; its reader needs ContourFilter) and `minkowski.cpp` (unused).
+  `tiler_driver.cpp` stands in for `main.cpp`: it reads a Reconstruct series with the legacy reader
+  (`xml/Ser_reader`, as the command line's `.ser` path did) and calls `tile()`.
+- **What is shimmed:** `shim/log4cplus`, a log4cplus that logs nothing, so the build needs no
+  log4cplus.
+- **What is patched** (from copies in the build tree; a patch that does not apply fails the
+  configure):
+  - `print_utils.cpp`: `raw_print_tiles_impl` writes coordinates with 17 digits (its commented-out
+    `setprecision`, back in), not the stream's default 6, and each vertex's z as the tiler's own (a
+    contour vertex's is its section index), not `(z + 0.5) * z_scale`;
+  - `offset_polygon.cpp` and `skeleton.cpp`: CGAL 6's straight-skeleton functions return
+    `std::shared_ptr` where CGAL 5's returned `boost::shared_ptr`;
+  - `tiler_output.cpp`: `Callback::untiled_region`, the debug hook called on every untiled region,
+    falls off its end without returning its `bool`. That is undefined behaviour, and clang's code
+    aborts there, on every series with an untiled region (a cap or a branch). It returns true, as
+    `Callback::tile_added` does.
+- **Compilers:** MSVC cannot compile the legacy kernel (`Cartesian_25`'s conversions to CGAL's
+  points); clang-cl and GCC can. On Windows, configure with `CXX=clang-cl` (the MSVC-built GMP and
+  MPFR link). MSVC's standard library leaves out `std::ptr_fun` and `std::unary_function` under
+  C++17; `_HAS_AUTO_PTR_ETC` and a forced `<functional>` bring them back.
+- **Inputs:** `inputs/tiler/<case>/<case>.ser` and its numbered sections, each trace closed,
+  counterclockwise (the legacy curation requires it) and in an identity transform, with
+  coordinates multiples of 2^-8, so the port's snapping grid holds them unchanged; and
+  `inputs/tiler/<case>.json`, the section range and the legacy parameters (`curation_delta`,
+  `collinear_epsilon`, `remove_intersections`, `z_scale`). `make_inputs.py --only tiler` wrote
+  them.
+- **Goldens:** for each case and component, in `src/cvc/tests/data/volrover-goldens/tiler/`:
+  - `<case>.<component>.tiles.txt`: the legacy `.rawc` without its colours: a line with the vertex
+    and triangle counts, the vertices (x y z), then the triangles (vertex indices), in the legacy
+    order;
+  - `<case>.json`: the counts, the volrover commit, the platform and the SHA-256s.
+
+| Case | Sections | What it covers |
+|---|---|---|
+| `tube` | 1-6 | one component tiled between contour vertices only: no caps, no untiled regions |
+| `branch` | 0-7 | a component that branches (one contour, then two) and an annulus (a contour and its hole), with caps where the range passes their ends: correspondence, branching, tiling regions and untiled regions; the legacy fails to trace one of the annulus's untiled regions ("No chord was legal") |
+| `touching` | 1-5 | two components whose traces overlap: curation (dilate, subtract, erode) and the removal of intersections between components' tiles |
+
+`tiler_test` (`TilerLegacy.*`) compares the port with these goldens, as the parity §9 item 2
+settled (2026-11-17):
+- **exactly** on `tube`: the same 330 triangles over the same 196 vertices;
+- **exactly away from untiled regions** on `branch`: every triangle whose corners are all contour
+  vertices is the legacy's (494 of 494 and 268 of 268), and the topology is the same; the untiled
+  regions' fill (from cvc::planar's convex partition, not CGAL's) is within a quarter of the slice
+  spacing (0.13 measured);
+- **by topology and distance** on `touching`: Clipper2's Booleans rebuild the overlapping contours
+  where the legacy used CGAL's exact ones, so the surfaces are within twice the curation distance
+  (1.03 times it measured), with the same topology.
+
+**Platforms:** the tiler goldens were made on Windows with clang-cl 19 and CGAL 6.0.1, and
+`--check` there makes the same files. GCC 16 compiles the same sources.

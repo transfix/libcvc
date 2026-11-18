@@ -72,6 +72,13 @@ public:
   static GeometryActor *New();
   vtkTypeMacro(GeometryActor, vtkOpenGLActor);
   bool WithVolumes = false;
+  // Out of the bounds (setUseBounds(false)): no bounds at all. VTK's frustum culler reads
+  // GetBounds() whatever UseBounds says, and a procedural mesh's own (the rain's streaks, the
+  // spray: quads laid out by index, placed by their vertex shader) say nothing of where it draws,
+  // so it would be culled wherever its index pillar left the view. A prop with no bounds is never
+  // culled (vtkFrustumCoverageCuller), and the camera's fit and clipping skip it as before.
+  bool Unbounded = false;
+  double *GetBounds() override { return Unbounded ? nullptr : vtkOpenGLActor::GetBounds(); }
 
   int RenderOpaqueGeometry(vtkViewport *vp) override {
     return WithVolumes ? 0 : vtkOpenGLActor::RenderOpaqueGeometry(vp);
@@ -1433,6 +1440,8 @@ void GeometryNode::setUseBounds(bool on) {
     m_contributesToSceneBounds = on;
     if (m_actor)
       m_actor->SetUseBounds(on);
+    if (auto *a = GeometryActor::SafeDownCast(m_actor))
+      a->Unbounded = !on; // and never culled (GeometryActor::GetBounds)
     if (SceneGraph *sg = getSceneGraph()) {
       sg->markContentChanged(); // the camera's clipping range is derived from the bounds
       sg->requestRender();
@@ -1491,6 +1500,14 @@ void GeometryNode::setShaderUniformi(const std::string &name, int v) {
       sg->requestRender();
   });
 }
+bool GeometryNode::shaderUniform3f(const std::string &name, std::array<float, 3> &out) const {
+  const auto it = m_uniforms3F.find(name);
+  if (it == m_uniforms3F.end())
+    return false;
+  out = it->second;
+  return true;
+}
+
 void GeometryNode::setShaderUniform3f(const std::string &name, float x, float y, float z) {
   runOnMainThread([this, name, x, y, z]() {
     m_uniforms3F[name] = {x, y, z};
@@ -1670,6 +1687,19 @@ std::shared_ptr<const GeometryNode::ShaderInputs>
 GeometryNode::sharedShaderInputs(const std::string &key) const {
   const auto it = m_sharedInputs.find(key);
   return it == m_sharedInputs.end() ? nullptr : it->second;
+}
+
+bool GeometryNode::shaderUniformf(const std::string &name, float &v) const {
+  const auto it = m_uniformsF.find(name);
+  if (it == m_uniformsF.end())
+    return false;
+  v = it->second;
+  return true;
+}
+
+vtkTextureObject *GeometryNode::shaderTexture(const std::string &name) const {
+  const auto it = m_shaderTextures.find(name);
+  return it == m_shaderTextures.end() ? nullptr : it->second.Get();
 }
 
 void GeometryNode::setShaderTexture(const std::string &name, vtkTextureObject *tex) {

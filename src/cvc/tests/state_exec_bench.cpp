@@ -68,6 +68,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cvc/ariadne/app_runtime.h>
+#include <cvc/ariadne/ariadne.h>
 #include <cvc/core/app.h>
 #include <cvc/core/async_lane.h>
 #include <cvc/core/cpu_placement.h>
@@ -91,6 +93,7 @@
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -2513,8 +2516,18 @@ void add_bench_natives(const se::environment_ptr &env) {
 // the compute fan-outs' timings, and the latch the blocking kernel waits on. Shared with the
 // kernels by shared_ptr, so a kernel still running when a failed rep unwinds (~world waits for
 // it) never writes into freed memory.
+int current_cpu_efficiency(); // below: the efficiency class of the CPU the caller runs on, or -1
+int fastest_cpu_efficiency(); // below: the highest class the process may use, or -1
+
 struct kernel_log {
   std::unique_ptr<std::atomic<int64_t>[]> end_ns;
+  // The efficiency class of the CPU each call's kernel marked its end on (-1: unknown or not yet),
+  // so a scenario can tell a slow stretch of calls from kernels the OS moved to slower cores.
+  std::unique_ptr<std::atomic<int>[]> end_eff;
+  // When the driver made each call (its kernel built, in the step that calls) and when the kernel
+  // began on its thread: async.pool_aging splits a call into the driver's turnaround and the
+  // kernel thread's wake with them.
+  std::unique_ptr<std::atomic<int64_t>[]> issue_ns, start_ns;
   std::size_t n = 0;
   std::atomic<int> started{0};
   std::mutex mu;
@@ -2525,17 +2538,99 @@ struct kernel_log {
   bool released = false;               // guarded by mu
   void reset(std::size_t count) {
     end_ns.reset(new std::atomic<int64_t>[count ? count : 1]);
+    end_eff.reset(new std::atomic<int>[count ? count : 1]);
+    issue_ns.reset(new std::atomic<int64_t>[count ? count : 1]);
+    start_ns.reset(new std::atomic<int64_t>[count ? count : 1]);
     n = count;
-    for (std::size_t i = 0; i < n; ++i)
+    for (std::size_t i = 0; i < n; ++i) {
       end_ns[i].store(0);
+      end_eff[i].store(-1);
+      issue_ns[i].store(0);
+      start_ns[i].store(0);
+    }
+  }
+  // Now, into issue_ns or start_ns for call i.
+  void stamp(std::unique_ptr<std::atomic<int64_t>[]> &at_ns, int64_t i) {
+    if (i >= 0 && static_cast<std::size_t>(i) < n)
+      at_ns[static_cast<std::size_t>(i)].store(now_ns(), std::memory_order_relaxed);
+  }
+  // A call's legs, over calls [from, to) with every stamp set (0 calls: all -1). turnaround, the
+  // previous kernel's end to this call's issue, is handoff (that end to the first step slice
+  // starting after it, from slice_ns: the kernel thread posting the completion, the driver seeing
+  // it, the drain and wake) plus driver work (that slice's start to the issue: the steps up to the
+  // call). wake is the issue to the kernel starting (the post, and the kernel thread picking it
+  // up). Each is the mean of its middle 90 %: a mean, as the clock ticks are coarse (100 ns on
+  // Windows), without the rare call the OS preempted. And the share of wakes over 2 us, which on a
+  // Core Ultra 9 185H separates a kernel thread still spinning in its wait (about 1 us) from one
+  // the OS had to wake (about 7 us).
+  struct legs {
+    double turnaround_ns = -1, handoff_ns = -1, work_ns = -1, wake_ns = -1, slow_wake_share = -1;
+  };
+  static double middle_mean(std::vector<int64_t> v) {
+    if (v.empty())
+      return -1;
+    std::sort(v.begin(), v.end());
+    const std::size_t cut = v.size() / 20;
+    double sum = 0;
+    for (std::size_t i = cut; i < v.size() - cut; ++i)
+      sum += double(v[i]);
+    return sum / double(v.size() - 2 * cut);
+  }
+  legs split(std::size_t from, std::size_t to, const std::vector<int64_t> &slice_ns) const {
+    std::vector<int64_t> turn, handoff, work, wake;
+    std::size_t s = 0; // slice_ns is in time order, as are the calls
+    for (std::size_t i = std::max<std::size_t>(from, 1); i < to && i < n; ++i) {
+      const int64_t prev_end = end_ns[i - 1].load(), issue = issue_ns[i].load(),
+                    start = start_ns[i].load();
+      if (!prev_end || !issue || !start)
+        continue;
+      turn.push_back(issue - prev_end);
+      wake.push_back(start - issue);
+      while (s < slice_ns.size() && slice_ns[s] < prev_end)
+        ++s;
+      if (s < slice_ns.size() && slice_ns[s] <= issue) {
+        handoff.push_back(slice_ns[s] - prev_end);
+        work.push_back(issue - slice_ns[s]);
+      }
+    }
+    legs l;
+    if (!wake.empty()) {
+      l.turnaround_ns = middle_mean(turn);
+      l.handoff_ns = middle_mean(handoff);
+      l.work_ns = middle_mean(work);
+      l.wake_ns = middle_mean(wake);
+      l.slow_wake_share =
+          double(std::count_if(wake.begin(), wake.end(), [](int64_t w) { return w > 2000; })) /
+          double(wake.size());
+    }
+    return l;
   }
   void mark(int64_t i) {
-    if (i >= 0 && static_cast<std::size_t>(i) < n)
+    if (i >= 0 && static_cast<std::size_t>(i) < n) {
+      end_eff[static_cast<std::size_t>(i)].store(current_cpu_efficiency(),
+                                                 std::memory_order_relaxed);
       end_ns[static_cast<std::size_t>(i)].store(now_ns(), std::memory_order_release);
+    }
     std::lock_guard<std::mutex> lk(mu);
     threads.insert(std::this_thread::get_id());
   }
   int64_t at(std::size_t i) const { return i < n ? end_ns[i].load(std::memory_order_acquire) : 0; }
+  // The share of calls [from, to) whose kernel ended on a CPU of the fastest class, or -1 where
+  // the classes are unknown (not Windows, or a uniform part reporting one class).
+  double fast_share(std::size_t from, std::size_t to) const {
+    const int fast = fastest_cpu_efficiency();
+    if (fast <= 0 || from >= to || to > n)
+      return -1;
+    std::size_t on = 0, known = 0;
+    for (std::size_t i = from; i < to; ++i) {
+      const int e = end_eff[i].load(std::memory_order_relaxed);
+      if (e < 0)
+        continue;
+      ++known;
+      on += e == fast;
+    }
+    return known ? double(on) / double(known) : -1;
+  }
   void release() {
     {
       std::lock_guard<std::mutex> lk(mu);
@@ -2816,7 +2911,9 @@ void register_kernels(world &w, const kernel_log_ptr &log, const std::string &wh
       w.env, *w.host, "bench-noop",
       [log](std::span<const se::value_t> a) -> se::async_kernel {
         const int64_t i = int_arg(a, 0, 0);
+        log->stamp(log->issue_ns, i); // the driver, in the step that makes the call
         return [log, i](se::async_call &) -> se::value_t {
+          log->stamp(log->start_ns, i);
           log->mark(i);
           return se::value_t(i);
         };
@@ -2986,6 +3083,9 @@ struct drive_cfg {
   double slice_secs = 0.1; // async only: Ariadne's per-pump time backstop
   double timeout = 120.0;
   bool sleepers = false; // processes sleep: idle stretches are expected
+  // When set (async, not driver=group): now_ns() as each step slice begins, after the drain and
+  // wake that made a process runnable (async.pool_aging's handoff and driver work).
+  std::vector<int64_t> *slice_ns = nullptr;
 };
 
 // Pump w's scheduler until done(). The sync scheduler runs in run_steps(slice_steps) slices with
@@ -3028,8 +3128,11 @@ std::string drive(world &w, const drive_cfg &d, Done done, After after) {
       a.drain_ingress();
       a.wake_awaiting();
       runnable = a.has_runnable();
-      if (runnable)
+      if (runnable) {
+        if (d.slice_ns)
+          d.slice_ns->push_back(now_ns());
         a.sync_run_steps(d.slice_steps, d.slice_secs);
+      }
     }
     after();
     if (done())
@@ -3435,8 +3538,8 @@ std::string end_reason(world &w, int pid) {
 // Run one pre-parsed program as a single process to completion on w; the measured region is
 // submit through completion. Returns its pid.
 int run_single(world &w, point_ctx &pc, meter &m, rep_out &o, const se::value_t &ast,
-               const std::string &expect,
-               std::function<void(se::execute_options &)> tune = nullptr) {
+               const std::string &expect, std::function<void(se::execute_options &)> tune = nullptr,
+               std::vector<int64_t> *slice_ns = nullptr) {
   tracker t(1);
   step_kinds kinds;
   se::execute_options opts;
@@ -3448,7 +3551,9 @@ int run_single(world &w, point_ctx &pc, meter &m, rep_out &o, const se::value_t 
   m.begin();
   t.submit_ns[0] = now_ns();
   t.pid[0] = w.submit(ast, opts);
-  const std::string why = drive(w, driver_of(pc), [&] { return t.all_done(); }, [] {});
+  drive_cfg d = driver_of(pc);
+  d.slice_ns = slice_ns;
+  const std::string why = drive(w, d, [&] { return t.all_done(); }, [] {});
   m.end();
   o.steps_total = w.total_steps() - steps0;
   if (auto info = w.info(t.pid[0]))
@@ -3642,6 +3747,19 @@ int current_cpu_efficiency() {
   PROCESSOR_NUMBER pn{};
   GetCurrentProcessorNumberEx(&pn);
   return pn.Group == 0 ? lp_efficiency(pn.Number) : -1;
+#else
+  return -1;
+#endif
+}
+
+// The highest efficiency class among the CPUs the process may use (Windows), or -1. Called once
+// per share, after the run, so it reads the CPU sets each time rather than caching them.
+int fastest_cpu_efficiency() {
+#if defined(_WIN32)
+  int fast = -1;
+  for (const cvc::logical_cpu &c : cvc::logical_cpus())
+    fast = std::max(fast, int(c.efficiency));
+  return fast;
 #else
   return -1;
 #endif
@@ -4469,6 +4587,22 @@ void flood_groups(cvc::exec_pool &pool, const std::vector<se::exec_group *> &gs,
     out.steps += gs[k]->sched().get_stats().total_steps - steps0[k];
 }
 
+// An .ari document written for a point (AppRuntime loads files only), removed when it ends.
+struct temp_ari {
+  std::filesystem::path path;
+  temp_ari(const std::string &stem, const std::string &text) {
+    path = std::filesystem::temp_directory_path() /
+           (stem + "_" + istr(now_ns()) + "_" + std::to_string(std::random_device{}()) + ".ari");
+    std::ofstream(path) << text;
+  }
+  ~temp_ari() {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+  temp_ari(const temp_ari &) = delete;
+  temp_ari &operator=(const temp_ari &) = delete;
+};
+
 std::vector<scenario> make_scenarios() {
   std::vector<scenario> all;
   const std::vector<std::string> both_sched = {"sync", "async"};
@@ -5219,8 +5353,10 @@ std::vector<scenario> make_scenarios() {
     sc.name = "async.pool_aging";
     sc.what = "ONE program making k sequential async calls (noop kernel) on one app, at most one "
               "in flight: ns per call over the first and the last 10 % of calls (from the "
-              "kernels' end times), the OS threads the kernels ran on, and the app's thread "
-              "map before and after (entries it never erases)";
+              "kernels' end times), each call split into the driver's turnaround and the kernel "
+              "thread's wake, the OS threads the kernels ran on, the share of kernels that ended "
+              "on the fastest CPU class (P-cores), and the app's thread map before and after "
+              "(entries it never erases)";
     sc.executors = {"async"};
     sc.sizes = {{"k", {"100", "1000", "3000"}}, {"where", {"background", "lane"}}};
     sc.smoke = {{"k", {"20"}}, {"where", {"background", "lane"}}};
@@ -5238,7 +5374,9 @@ std::vector<scenario> make_scenarios() {
         m.app = app.get();
         o.iterations = k;
         o.async_calls = k;
-        run_single(w, pc, m, o, ast, istr(k));
+        std::vector<int64_t> slices;
+        slices.reserve(2 * static_cast<std::size_t>(k) + 64); // no growth on the driver's path
+        run_single(w, pc, m, o, ast, istr(k), nullptr, &slices);
         std::vector<int64_t> ends;
         for (std::size_t i = 0; i < std::size_t(k); ++i)
           ends.push_back(log->at(i));
@@ -5250,6 +5388,31 @@ std::vector<scenario> make_scenarios() {
           o.extra.d("first_ns_per_call", first)
               .d("last_ns_per_call", last)
               .d("last_over_first", first > 0 ? last / first : 0.0);
+          // Where the kernels ran: the share of calls whose kernel ended on the fastest CPU class
+          // (P-cores on a hybrid part), over the same first and last 10 % (-1: unknown).
+          o.extra.d("first_fast_cpu_share", log->fast_share(0, d + 1))
+              .d("last_fast_cpu_share", log->fast_share(ends.size() - 1 - d, ends.size()))
+              .d("fast_cpu_share", log->fast_share(0, ends.size()));
+          // A call's legs (kernel_log::split), over all calls and the same first and last 10 %.
+          // The kernel thread spins a few us in its wait before it blocks, so with a turnaround
+          // near that window the time per call is bimodal, and a few ns more driver work per call
+          // moves it, and the driver's own work, many times over: no leg is linear in the
+          // executor's cost. slow_wake_share tells calls crossing the spin from the driver's work
+          // changing (docs/STATE_EXEC_BENCH.md).
+          const kernel_log::legs all = log->split(0, ends.size(), slices);
+          const kernel_log::legs head = log->split(0, d + 1, slices);
+          const kernel_log::legs tail = log->split(ends.size() - 1 - d, ends.size(), slices);
+          o.extra.d("turnaround_ns", all.turnaround_ns)
+              .d("handoff_ns", all.handoff_ns)
+              .d("driver_work_ns", all.work_ns)
+              .d("wake_ns", all.wake_ns)
+              .d("slow_wake_share", all.slow_wake_share)
+              .d("first_driver_work_ns", head.work_ns)
+              .d("last_driver_work_ns", tail.work_ns)
+              .d("first_turnaround_ns", head.turnaround_ns)
+              .d("last_turnaround_ns", tail.turnaround_ns)
+              .d("first_slow_wake_share", head.slow_wake_share)
+              .d("last_slow_wake_share", tail.slow_wake_share);
         }
         o.extra.i("kernel_threads", int64_t(log->thread_count()));
       });
@@ -6683,6 +6846,212 @@ std::vector<scenario> make_scenarios() {
             .i("helper_wakes", int64_t(s1.helper_wakes - s0.helper_wakes))
             .i("effective_threads", s1.effective_threads)
             .i("rounds", int64_t(out.rounds));
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+
+  // mt.ariadne_docs: D Ariadne documents on one app, one pump a frame (td 6.3, threaded Stage 1b).
+  {
+    scenario sc;
+    sc.name = "mt.ariadne_docs";
+    sc.what = "`docs` AppRuntimes on one app, each loading an eligible document (a prefix of its "
+              "own, a strict channels: block) with ariadne.exec.isolate_documents on, driven a "
+              "frame at a time: every document's drain_begin, app.exec_pump_frame, every "
+              "document's drain_end, with the app's exec_pool at t workers; frame=heavy gives "
+              "each document's on_tick a 500-iteration loop (a frame's pumps well over the "
+              "pool's 100 us inline_below), frame=small one state-incr (under it): ns per "
+              "frame over the three calls (no backend, no render), extra.helper_wakes, "
+              "extra.worker_pumps, extra.isolated and extra.any_groups (the documents in a group "
+              "of their own, and in an `any` one) and extra.wakeable, the most helpers a frame "
+              "could wake (S1b's gate: small frames wake no helper; td 6.3)";
+    sc.executors = {"async"};
+    sc.sizes = {{"t", {"0", "1", "2", "4", "8"}},
+                {"docs", {"1", "2", "4", "8"}},
+                {"frame", {"heavy", "small"}},
+                {"frames", {"200"}}};
+    sc.smoke = {
+        {"t", {"0", "2"}}, {"docs", {"1", "2"}}, {"frame", {"heavy", "small"}}, {"frames", {"4"}}};
+    sc.spawns_threads = true;
+    sc.accept = [](const std::string &exec, const point_ctx &pc) {
+      const std::string frame = pc.s("frame");
+      std::string why;
+      if (frame != "heavy" && frame != "small")
+        why = "frame=" + frame + " is not heavy or small";
+      else if (!cvc::ariadne::AppRuntime::have_yaml())
+        why = "libcvc was built without yaml-cpp (no .ari loader)";
+      if (why.empty())
+        return true;
+      std::printf("  %-28s %-9s %-34s skipped: %s\n", pc.sc.name.c_str(), exec.c_str(),
+                  params_text(pc.params).c_str(), why.c_str());
+      return false;
+    };
+    sc.run = [](point_ctx &pc) {
+      const unsigned workers = static_cast<unsigned>(std::max<int64_t>(0, pc.i("t")));
+      const int64_t nd = std::max<int64_t>(1, pc.i("docs"));
+      const int64_t frames = std::max<int64_t>(1, pc.i("frames"));
+      const bool heavy = pc.s("frame") == "heavy";
+      const auto note = [&](const std::string &text) {
+        std::printf("  %-28s %-9s %-34s note: %s\n", pc.sc.name.c_str(), pc.executor.c_str(),
+                    params_text(pc.params).c_str(), text.c_str());
+      };
+      auto app = make_app();
+      // The pool first, before anything builds group 0 or the lock manager: threads above 0 make
+      // the manager shared, so the workers may pump (S1-Q1). Built under unpinned_scope.
+      pool_point pp(*app, workers, pc);
+      cvc::state &root = cvc::state::instance(*app);
+      root("ariadne.exec.isolate_documents").value(std::string("1"));
+      // Eligible (S1-Q6): a prefix of its own, a channels: block (strict lint is the default), no
+      // global channel, no oidc, no link: hole. Each tick counts itself under the prefix.
+      const std::string tick =
+          heavy ? "(begin (state-incr \"ticks\") (set i 0) (while (< i 500) (set i (+ i 1))))"
+                : "(state-incr \"ticks\")";
+      const std::string head = "meta: {min_libcvc: 3.4.0}\nchannels:\n  - box\non_tick: |\n  ";
+      const temp_ari doc("state_exec_bench_ariadne_docs",
+                         head + tick + "\nroot:\n  - text: mt.ariadne_docs\n");
+      const auto prefix = [](int64_t k) { return "bench.ari.d" + istr(k); };
+      std::vector<std::unique_ptr<cvc::ariadne::AppRuntime>> docs;
+      {
+        unpinned_scope u; // what a load starts (the app's async host) floats
+        for (int64_t k = 0; k < nd; ++k) {
+          docs.push_back(std::make_unique<cvc::ariadne::AppRuntime>(*app, prefix(k)));
+          for (const std::string &w : docs.back()->load(doc.path.string()))
+            note(prefix(k) + " loaded with a warning: " + w);
+        }
+      }
+      // Where each document runs: its group, or null for group 0. Decided at load (isolated_group,
+      // said here when a document stays in group 0 or gets a host-affinity group, never failed),
+      // then read after each rep without deciding again (current_group), for the extras.
+      std::string reason;
+      int64_t any_at_load = 0;
+      for (const auto &d : docs) {
+        if (se::exec_group *g = d->runtime().isolated_group())
+          any_at_load += g->opts().affinity == se::group_affinity::any ? 1 : 0;
+        else if (reason.empty())
+          reason = d->runtime().isolation_reason();
+      }
+      if (any_at_load < nd)
+        note(istr(any_at_load) + " of " + istr(nd) + " documents in an `any` group of their own" +
+             (reason.empty() ? std::string(" (the rest are host-affinity)") : " (" + reason + ")") +
+             ": this point cannot judge the small-frames gate");
+      const auto placement = [&] {
+        std::vector<se::exec_group *> v;
+        for (const auto &d : docs)
+          v.push_back(d->runtime().current_group());
+        return v;
+      };
+      // steps_total: the steps of the schedulers the documents run on, their groups' and group
+      // 0's when a document is in it (load() has built group 0 already).
+      const auto steps = [&](const std::vector<se::exec_group *> &where) {
+        std::set<se::async_scheduler *> scheds;
+        for (se::exec_group *g : where)
+          scheds.insert(g ? &g->sched() : &app->exec_scheduler());
+        uint64_t n = 0;
+        for (se::async_scheduler *s : scheds)
+          n += s->get_stats().total_steps;
+        return n;
+      };
+      const auto frame = [&] {
+        for (const auto &d : docs)
+          d->drain_begin();
+        app->exec_pump_frame();
+        for (const auto &d : docs)
+          d->drain_end();
+      };
+      const auto ticks = [&] {
+        std::vector<int64_t> v;
+        for (int64_t k = 0; k < nd; ++k) {
+          cvc::state *n = root.findDescendant(prefix(k) + ".ticks");
+          v.push_back(n ? std::strtoll(n->value().c_str(), nullptr, 10) : 0);
+        }
+        return v;
+      };
+      const auto report_warnings = [&] {
+        for (int64_t k = 0; k < nd; ++k)
+          for (const std::string &w : docs[std::size_t(k)]->take_warnings())
+            note(prefix(k) + ": " + w);
+      };
+      // Two frames outside every meter: the residents start and take their first ticks.
+      frame();
+      frame();
+      report_warnings();
+      pc.reps([&](meter &m, rep_out &o) {
+        m.widen = false; // the workers keep their CPUs (Linux)
+        o.latency_ns.reserve(std::size_t(frames));
+        const std::vector<int64_t> before = ticks();
+        const cvc::pool_stats s0 = pp.pool.stats();
+        const uint64_t w0 = s0.worker_pumps;
+        const std::vector<se::exec_group *> where0 = placement();
+        const uint64_t steps0 = steps(where0);
+        const auto limit = static_cast<int64_t>(pc.cfg.timeout * 1e9);
+        int64_t ran = 0;
+        m.begin();
+        while (ran < frames) {
+          const int64_t f0 = now_ns();
+          frame(); // the region holds the three calls only: no backend, nothing rendered
+          const int64_t f1 = now_ns();
+          o.latency_ns.push_back(f1 - f0);
+          ++ran;
+          if (ran < frames && f1 - m.a.wall > limit)
+            break;
+        }
+        m.end();
+        const cvc::pool_stats s1 = pp.pool.stats();
+        const uint64_t w1 = s1.worker_pumps;
+        const std::vector<se::exec_group *> where1 = placement();
+        const bool moved = where1 != where0; // a group left behind may be gone: not counted
+        const uint64_t steps1 = moved ? steps0 : steps(where1);
+        const std::vector<int64_t> after = ticks();
+        report_warnings();
+        if (ran < frames)
+          o.fail("timeout: " + istr(ran) + " of " + istr(frames) + " frames");
+        if (moved)
+          o.fail("a document moved to another group during the rep");
+        // The placement after the rep: the documents in a group of their own, those in an `any`
+        // one, and whether a host-affinity group or group 0 joins exec_pump_frame's pump_all
+        // (group 0 does while a process lives in it). exec_pool's adaptive wake, once the last
+        // pumps total inline_below, wakes min(any - caller_takes, workers) helpers, caller_takes
+        // being 1 when neither does (the caller takes an `any` group itself): extra.wakeable.
+        std::set<se::exec_group *> own, any;
+        bool host_in_call = false;
+        for (se::exec_group *g : where1) {
+          if (!g)
+            continue;
+          own.insert(g);
+          if (g->opts().affinity == se::group_affinity::any)
+            any.insert(g);
+          else
+            host_in_call = true;
+        }
+        const se::scheduler_stats g0 = app->exec_scheduler().get_stats();
+        if (g0.total_processes - g0.terminated - g0.killed - g0.failed > 0)
+          host_in_call = true;
+        const auto any_groups = static_cast<int64_t>(any.size());
+        const int64_t workers_now = int64_t(s1.effective_threads);
+        const int64_t wakeable =
+            any_groups == 0 ? 0 : std::min(any_groups - (host_in_call ? 0 : 1), workers_now);
+        int64_t ticked = 0;
+        for (int64_t k = 0; k < nd; ++k) {
+          const int64_t d = after[std::size_t(k)] - before[std::size_t(k)];
+          ticked += d;
+          if (d < 1 || d > ran)
+            o.fail(prefix(k) + " ticked " + istr(d) + " times in " + istr(ran) + " frames");
+        }
+        o.iterations = ran; // ns_per_iter: ns per frame
+        o.steps_total = steps1 - steps0;
+        const auto wakes = int64_t(s1.helper_wakes - s0.helper_wakes);
+        o.extra.d("ns_per_frame", double(m.wall()) / double(ran))
+            .i("helper_wakes", wakes)
+            .d("wakes_per_frame", double(wakes) / double(ran))
+            .i("worker_pumps", int64_t(w1 - w0))
+            .i("isolated", static_cast<int64_t>(own.size()))
+            .i("any_groups", any_groups)
+            .i("wakeable", std::max<int64_t>(0, wakeable))
+            .i("pumps", int64_t(s1.pumps - s0.pumps))
+            .i("skipped", int64_t(s1.skipped - s0.skipped))
+            .i("effective_threads", s1.effective_threads)
+            .d("ticks_per_frame", double(ticked) / double(nd * ran))
+            .i("caller_cpu", pp.caller_cpu);
       });
     };
     all.push_back(std::move(sc));

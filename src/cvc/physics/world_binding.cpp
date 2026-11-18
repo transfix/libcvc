@@ -230,7 +230,8 @@ bool same_build(const world_config &a, const world_config &b) {
 
 bool same_material(const material &a, const material &b) {
   return a.friction == b.friction && a.restitution == b.restitution &&
-         a.rolling_resistance == b.rolling_resistance && a.nav_material == b.nav_material;
+         a.rolling_resistance == b.rolling_resistance && a.nav_material == b.nav_material &&
+         a.wet_friction == b.wet_friction;
 }
 
 void put_vec(cvc::app &ctx, const std::string &base, const vec3 &v) {

@@ -26,6 +26,7 @@
 #include <cvc/core/namespace.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/physics/body.h>
+#include <cvc/physics/flow_velocity.h>
 #include <cvc/physics/pose_tracker.h>
 #include <deque>
 #include <map>
@@ -457,6 +458,10 @@ private:
   // policy part (the vertical and the speed cap; each step applies it under its tick's policy).
   static avatar_intent finite_intent(const avatar_intent &in);
   static avatar_intent veto(const avatar_intent &in, const avatar_policy &p);
+  // Without physics: an avatar standing at `feet` under the rules at `tick` moves as `in` asks
+  // plus its drift in the rules' wind (avatar_wind_drift), the same on the server and in a
+  // client's prediction, at the tick's time.
+  avatar_intent blown(const avatar_intent &in, const cvc::physics::vec3 &feet, std::uint64_t tick);
 
   // CLIENT: a clock reading (apply_authoritative): slew or seek the replica toward SERVER_TICK.
   void read_clock(std::uint64_t server_tick);
@@ -492,6 +497,9 @@ private:
   world_rules _applied;           // physics: what the world runs under now
   std::uint64_t _applied_key = 0; // ... the _rules entry it came from, and its generation
   std::uint64_t _applied_gen = 0;
+  // Without physics: the rules' wind as blown() last made it, and the physics it was made from.
+  std::shared_ptr<const cvc::physics::wind_flow> _kinematic_wind;
+  world_physics _kinematic_wind_for;
   std::uint64_t _vetoes = 0;            // SERVER: intents sanitize_intent changed
   std::uint64_t _realigns = 0;          // CLIENT: clock seeks in apply_authoritative
   std::uint64_t _slews = 0;             // CLIENT: slews started in apply_authoritative

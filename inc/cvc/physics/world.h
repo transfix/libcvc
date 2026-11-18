@@ -99,6 +99,12 @@ struct world_config {
   double penetration_slop = 0.002;  // metres two bodies may overlap before the solver pushes them
                                     // apart (Jolt's own default, 0.02, is sized for game props)
   int threads = 0; // worker threads inside step(): 0 = none (single-threaded job system)
+  // Worker threads for the fields' free-surface reads (each cell a body has in a fluid with a
+  // surface reads its height and velocity there, the field step's main cost): 0 = none, the
+  // calling thread reads them all. The same values in the same order either way, so a run's
+  // state_hash does not depend on it. A build without threads (single-threaded WebAssembly)
+  // ignores it. Free to change by reconfigure().
+  int field_threads = 0;
   physics::determinism determinism = physics::determinism::cross_platform;
   combine_rule friction = combine_rule::product;
   combine_rule restitution = combine_rule::max;
@@ -136,6 +142,8 @@ struct ray_hit {
 struct step_report {
   std::uint64_t tick = 0;   // the world's tick after the step
   double step_ms = 0.0;     // wall time the step took
+  double fields_ms = 0.0;   // ... of it, the fields' pushes (buoyancy, drag, media; field.h)
+  double engine_ms = 0.0;   // ... of it, the engine's own step (collisions and integration)
   std::size_t contacts = 0; // events in contacts()
   std::uint32_t active_bodies = 0;
   bool saturated = false; // a fixed-size engine buffer filled and contacts were dropped: raise
@@ -286,7 +294,8 @@ public:
   field_id add_field(const field &f);
   // New values for a field (a different volume, a stronger wind). Wakes the bodies
   // in its old and new boxes. A rutted medium keeps its ruts when the new field lays
-  // them on the same grid (the same box and rut_cell); otherwise they start over.
+  // them on the same grid (the same box and rut_cell); otherwise they start over. A
+  // fluid with the same wake (field::wake) keeps its waves; another wake starts afresh.
   void set_field(field_id id, const field &f);
   // The field as last given.
   field get_field(field_id id) const;
@@ -303,6 +312,11 @@ public:
   water_sample water_at(const vec3 &p) const;
   // The ruts a medium with field::ruts keeps; empty for one without.
   rut_map field_ruts(field_id id) const;
+  // A fluid's wake (field::wake): where its window is and which bodies make waves in it, and the
+  // height (m) of all its bodies' waves at (x, y) (0 outside the window, or without a wake). For a
+  // renderer or a test; each body reads the others' waves, not this sum.
+  wake_info field_wake_info(field_id id) const;
+  double field_wake_height(field_id id, double x, double y) const;
 
   // --- vehicles (vehicle.h) ----------------------------------------------------
 

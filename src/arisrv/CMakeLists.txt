@@ -190,6 +190,17 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                    -P "${_srv_tests}/run_arisrv.cmake")
   set_tests_properties(arisrv_rules_from_doc arisrv_rules_flags_override PROPERTIES
                        ENVIRONMENT "CVC_ARIADNE_PATH=${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne")
+  # A server document's world runs on the relay (ARIADNE_WORLDS.md WD3): its vehicles start, and go
+  # to every client as the room's entities (RoomRelayLoopbackTest.AClientSeesTheServerWorldsVehicles
+  # Move is what a client sees). A build without Jolt skips: its world places bodies but runs none.
+  add_test(NAME arisrv_doc_vehicles
+           COMMAND ${CMAKE_COMMAND} -DARISRV=$<TARGET_FILE:arisrv>
+                   "-DARGS=--doc@@${_srv_tests}/vehicles_doc.ari@@${_srv_listen}" -DSTATUS=0
+                   "-DEXPECT1=server document's world: 4 vehicles of 1 archetypes running"
+                   -P "${_srv_tests}/run_arisrv.cmake")
+  set_tests_properties(arisrv_doc_vehicles PROPERTIES
+                       SKIP_REGULAR_EXPRESSION "built without yaml-cpp;this build has no Jolt"
+                       TIMEOUT 90)
   set_tests_properties(arisrv_doc_echo arisrv_doc_quit_code arisrv_doc_publish_conf
                        arisrv_doc_needs_bound_writes arisrv_world_from_doc arisrv_world_doc_and_scene
                        arisrv_set_after_world arisrv_rules_from_doc arisrv_rules_flags_override

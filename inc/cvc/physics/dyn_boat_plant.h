@@ -96,6 +96,10 @@ struct dyn_boat_desc {
   // The radius (m) of its steady turn at full rudder and full throttle on calm water: nav's
   // bicycle turns no tighter (max_steer = atan(L / turn_radius), L the hull's length).
   double turn_radius = 20.0;
+  // Its length overall (m), with what reaches past the hull (outboards, a stem head): the length
+  // a renderer fits the boat's model to, about the hull body's origin (cvcGL's boat node). 0: the
+  // hull_mesh's length.
+  double length_overall = 0.0;
 
   // The presets, their max_speed and turn_radius measured on water of drag_coefficient 1 and
   // damping 1e4 (physics_dyn_boat_plant_test, PresetsDoWhatTheySay):
@@ -104,9 +108,17 @@ struct dyn_boat_desc {
   //            physics_boat_test's boat. 3.19 m/s, 15.4 m.
   //   jonboat  a 3.6 x 1.4 x 0.5 m flat box of 350 kg with a 1.5 kN outboard (no thrust past
   //            9 m/s) that swings 0.5 rad to steer, its leg a 0.03 m^2 rudder. 4.0 m/s, 4.1 m.
+  //   tactical the vehicle-tactical-boat package's patrol boat: its own V hull, baked from the
+  //            model into 16 stations (loft_hull; tools/boat_hulls/bake_loft.py), 6.85 m long
+  //            and 2.33 m in beam, 7.8 m overall with its outboards; 2800 kg, floating 0.49 m
+  //            over its keel; its two outboards one thrust (8 kN ahead, 3.5 kN astern, none past
+  //            18 m/s) that swings 0.5 rad to steer, and its keel, chines and strakes one fixed
+  //            0.4 m^2 foil (the rudder, max_angle 0) for the grip sideways its triangles do not
+  //            give a V. 10.5 m/s, 32.5 m.
   static dyn_boat_desc launch();
   static dyn_boat_desc jonboat();
-  // "launch" or "jonboat"; another name throws cvc::physics_error.
+  static dyn_boat_desc tactical();
+  // "launch", "jonboat" or "tactical"; another name throws cvc::physics_error.
   static dyn_boat_desc preset(const std::string &name);
   static std::vector<std::string> presets();
 };
@@ -154,8 +166,9 @@ public:
   cvc::nav::plant_medium medium() const override { return cvc::nav::plant_medium::water; }
   // Removes the boats of an earlier attach() and adds one per agent. Throws cvc::physics_error
   // for a tick that is not a whole number of world steps, a start with no water under it, water
-  // shallower than the boat's draft, or a boat too heavy to float; a refused attach leaves none
-  // of its boats in the world (the earlier ones are gone).
+  // shallower than the boat's draft (the field's box, or a body without mass, such as the terrain,
+  // above the boat's deepest point), or a boat too heavy to float; a refused attach leaves none of
+  // its boats in the world (the earlier ones are gone).
   void attach(int n, const cvc::nav::plant_state *start,
               const cvc::world_units::normalized_frame &frame, double dt) override;
   // The hull's origin, the heading, the forward speed over the ground there, the steering (the
@@ -171,6 +184,12 @@ public:
   // top speed (no more than lateral_g) and the hull's outline about its origin.
   cvc::nav::plant_limits limits(int i) const override;
   void command(int i, float steer, float accel) override;
+  // A helm of agent i's own in place of nav's: its controls held (world::set_boat_controls) from
+  // the next world step until release_controls(i), whatever nav commands. The books go on. Throws
+  // cvc::physics_error for a throttle or rudder outside [-1, 1].
+  void hold_controls(int i, const boat_controls &c);
+  void release_controls(int i);
+  bool held(int i) const { return _agents.at(static_cast<std::size_t>(i)).hold; }
   void advance() override;
   int reference_substeps() const override { return _nsub; }
   // The drive energy of agent i's last tick (J): what its thrust delivered through the water.
@@ -230,6 +249,9 @@ public:
   // (kg/m^3): the draft at which the hull_mesh displaces the hull's mass. Throws
   // cvc::physics_error for a boat without a hull_mesh, or one too heavy to float.
   static double float_height(const boat_desc &d, double mass, double density);
+  // How deep the boat reaches below the waterline there (m): its keel, or its propeller or rudder
+  // where they reach deeper. Throws as float_height does.
+  static double draft(const boat_desc &d, double mass, double density);
 
   const dyn_boat_plant_options &options() const { return _o; }
 
@@ -266,6 +288,8 @@ private:
     double steer_cmd = 0.0;                           // rad
     double accel_cmd = 0.0;                           // m/s^2 along the heading
     driver_state driver;
+    bool hold = false; // hold_controls: `helm` in place of nav's command
+    boat_controls helm;
     double kinetic0 = 0.0;
     dyn_boat_books tick, total;
     int statics_tick = 0;

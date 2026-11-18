@@ -116,6 +116,8 @@ static PyObject *gym_navigator(const cvc::ariadne::navigator_params &p) {
   PYCVC_GYM_F(a_lat_max); PYCVC_GYM_F(k_steer);
   gym_put(d, "nsub", PyLong_FromLong(p.nsub));
   gym_put(d, "allow_reverse", PyBool_FromLong(p.allow_reverse));
+  gym_put(d, "stop_at_goal", PyBool_FromLong(p.stop_at_goal));
+  gym_put(d, "park_hold", PyBool_FromLong(p.park_hold));
   return d;
 }
 #undef PYCVC_GYM_F
@@ -165,6 +167,34 @@ static PyObject *gym_plant_dict(const cvc::ariadne::entity_plant &p) {
   gym_put(d, "applied_accel", gym_f64(p.applied_accel));
   gym_put(d, "applied_grade", gym_f64(p.applied_grade));
   gym_put(d, "collisions_tick", PyLong_FromLong(p.collisions_tick));
+  PyObject *drv = PyDict_New();
+  gym_put(drv, "known", PyBool_FromLong(p.drive.known));
+  gym_putf(drv, "alpha", p.drive.alpha);
+  gym_putf(drv, "beta", p.drive.beta);
+  gym_putf(drv, "gamma", p.drive.gamma);
+  gym_putf(drv, "goal_x", p.drive.goal_x);
+  gym_putf(drv, "goal_y", p.drive.goal_y);
+  gym_putf(drv, "force_x", p.drive.force_x);
+  gym_putf(drv, "force_y", p.drive.force_y);
+  gym_put(d, "drive", drv);
+  PyObject *plan = PyDict_New();
+  gym_put(plan, "known", PyBool_FromLong(p.plan.known));
+  gym_putf(plan, "a_max", p.plan.a_max);
+  gym_putf(plan, "vmax", p.plan.vmax);
+  gym_putf(plan, "a_lat", p.plan.a_lat);
+  gym_putf(plan, "wheelbase", p.plan.wheelbase);
+  gym_putf(plan, "max_steer", p.plan.max_steer);
+  gym_putf(plan, "steer_rate", p.plan.steer_rate);
+  gym_putf(plan, "steer_now", p.plan.steer_now);
+  gym_putf(plan, "latency", p.plan.latency);
+  gym_putf(plan, "a_brake", p.plan.a_brake);
+  gym_put(plan, "footprint", PyBool_FromLong(p.plan.footprint));
+  gym_putf(plan, "body_rr", p.plan.body_rr);
+  gym_put(plan, "body_offsets",
+          gym_f64(std::vector<double>(p.plan.body_offsets.begin(), p.plan.body_offsets.end())));
+  gym_put(plan, "parked", PyBool_FromLong(p.plan.parked));
+  gym_put(plan, "modulated", PyBool_FromLong(p.plan.modulated));
+  gym_put(d, "plan", plan);
   return d;
 }
 
@@ -227,6 +257,20 @@ static std::vector<double> gym_doubles(PyObject *o, std::size_t n, const char *w
     out.assign(v, v + PyArray_DIM(a, 0));
   Py_DECREF(a);
   return out;
+}
+
+// set_intent's optional numbers: false for None (or absent), else the value (a number or throw).
+static bool gym_intent_number(PyObject *o, const char *what, double &out) {
+  if (o == nullptr || o == Py_None)
+    return false;
+  const double v = PyFloat_AsDouble(o);
+  if (PyErr_Occurred()) {
+    PyErr_Clear();
+    throw std::invalid_argument(std::string("pycvc.WorldGym.set_intent: ") + what +
+                                " must be a number");
+  }
+  out = v;
+  return true;
 }
 
 // The Python exception set now, as the C++ error that carries it back out of step().
@@ -351,10 +395,11 @@ public:
   WorldGym(const std::string &document, const std::string &prefix, int count,
            const std::string &world, PyObject *agents, PyObject *set, bool wander,
            unsigned long long max_steps, int rays, double range_m, double ready_timeout,
-           bool regenerate, double tick) {
+           bool regenerate, double tick, bool drive_telemetry) {
     cvc::ariadne::gym_options o;
     o.regenerate = regenerate;
     o.tick = tick;
+    o.drive_telemetry = drive_telemetry;
     o.prefix = prefix;
     o.count = count;
     o.world = world;
@@ -492,6 +537,56 @@ public:
   bool set_goal(unsigned long long id, double x, double y) {
     return gym_->set_goal(id, x, y);
   }
+  // Agent `id`'s intent (WorldVehicles::set_intent), from the next step until it is changed, as
+  // pycvc.WorldEntities.set_intent takes it: `steer` (rad, + left) and `accel` (m/s^2) as the
+  // command, `mode` "replace", "blend" (with `weight`) or "off" ("": replace when a steer or an
+  // accel is given, else off), and `force` (fx, fy) in m/s^2, world frame, added to the drive's
+  // force. A step's finite command still takes that step in its place. False for an id that is
+  // not an agent in the world.
+  bool set_intent(unsigned long long id, PyObject *steer = nullptr, PyObject *accel = nullptr,
+                  const std::string &mode = "", double weight = 0.5, PyObject *force = nullptr,
+                  bool force_steers = true) {
+    cvc::ariadne::entity_intent in;
+    const bool has_steer = gym_intent_number(steer, "steer", in.steer);
+    const bool has_accel = gym_intent_number(accel, "accel", in.accel);
+    if (mode.empty())
+      in.command = has_steer || has_accel ? cvc::ariadne::entity_intent::mode::replace
+                                          : cvc::ariadne::entity_intent::mode::off;
+    else if (!cvc::ariadne::parse_intent_mode(mode, in.command))
+      throw std::invalid_argument("pycvc.WorldGym.set_intent: mode must be replace, blend or off, "
+                                  "not '" + mode + "'");
+    if (!(weight >= 0.0 && weight <= 1.0))
+      throw std::invalid_argument("pycvc.WorldGym.set_intent: weight must be in [0, 1]");
+    in.weight = weight;
+    if (force && force != Py_None) {
+      PyObject *seq = PySequence_Fast(force, "force must be (fx, fy)");
+      const bool two = seq != nullptr && PySequence_Fast_GET_SIZE(seq) == 2;
+      if (two) {
+        in.force_x = PyFloat_AsDouble(PySequence_Fast_GET_ITEM(seq, 0));
+        in.force_y = PyFloat_AsDouble(PySequence_Fast_GET_ITEM(seq, 1));
+      }
+      Py_XDECREF(seq);
+      if (!two || PyErr_Occurred()) {
+        PyErr_Clear();
+        throw std::invalid_argument("pycvc.WorldGym.set_intent: force must be (fx, fy)");
+      }
+    }
+    in.force_steers = force_steers;
+    return gym_->vehicles().set_intent(id, in);
+  }
+  // Agent `id`'s intent now: a dict of mode, steer, accel, weight, force (fx, fy), force_steers.
+  PyObject *intent(unsigned long long id) {
+    const cvc::ariadne::entity_intent in = gym_->vehicles().intent(id);
+    PyObject *d = PyDict_New();
+    gym_put(d, "mode", PyUnicode_FromString(cvc::ariadne::intent_mode_name(in.command)));
+    gym_putf(d, "steer", in.steer);
+    gym_putf(d, "accel", in.accel);
+    gym_putf(d, "weight", in.weight);
+    gym_put(d, "force", Py_BuildValue("(dd)", in.force_x, in.force_y));
+    gym_put(d, "force_steers", PyBool_FromLong(in.force_steers));
+    return d;
+  }
+  bool clear_intent(unsigned long long id) { return gym_->vehicles().clear_intent(id); }
   // The navigator's grid of the world on: occupancy (rows, cols) uint8, 1 blocked, row 0 at
   // min_y; height (rows, cols) float32; bounds (min_x, min_y, max_x, max_y), cell centres on the
   // grid points. None before the world has one.
@@ -585,6 +680,7 @@ PYCVC_ARIADNE_NOGIL(pycvc::WorldGym::~WorldGym)
 %feature("kwargs") pycvc::WorldGym::WorldGym;
 %feature("kwargs") pycvc::WorldGym::reset;
 %feature("kwargs") pycvc::WorldGym::step;
+%feature("kwargs") pycvc::WorldGym::set_intent;
 %feature("docstring") pycvc::WorldGym "A world document run headless as a gym: reset(seed), step(steer, accel), observe(), set_reward(fn), log(), save_log(path). See docs/ARIADNE.md, \"The gym\".";
 
 namespace pycvc {
@@ -594,7 +690,7 @@ public:
            const std::string &world = "", PyObject *agents = nullptr, PyObject *set = nullptr,
            bool wander = false, unsigned long long max_steps = 1000, int rays = 16,
            double range_m = 60.0, double ready_timeout = 120.0, bool regenerate = false,
-           double tick = 0.0);
+           double tick = 0.0, bool drive_telemetry = true);
   ~WorldGym();
   PyObject *reset(unsigned long long seed = 0);
   PyObject *step(PyObject *steer, PyObject *accel);
@@ -604,6 +700,11 @@ public:
   void clear_log();
   bool save_log(const std::string &path) const;
   bool set_goal(unsigned long long id, double x, double y);
+  bool set_intent(unsigned long long id, PyObject *steer = nullptr, PyObject *accel = nullptr,
+                  const std::string &mode = "", double weight = 0.5, PyObject *force = nullptr,
+                  bool force_steers = true);
+  PyObject *intent(unsigned long long id);
+  bool clear_intent(unsigned long long id);
   PyObject *grid() const;
   PyObject *fields() const;
   PyObject *plants() const;

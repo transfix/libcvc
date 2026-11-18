@@ -6,16 +6,19 @@
 // turns with the facing, a pixel picks the ground point under it, a participant whose pose is not
 // known yet has no marker (and the local avatar appears at its first pose without gliding in), the
 // room's mesh objects are LOD ladders whose rung follows the camera every frame (one build for one
-// asset, kept across a re-realize; the default room has none), and teardown removes every node
-// room_view made.
+// asset, kept across a re-realize; the default room has none), the room's entities are drawn
+// from a client's playout of them (built from their identity, posed, rebuilt on a change, gone
+// when dropped), and teardown removes every node room_view made.
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cvc/ariadne/avatar_sim.h>
 #include <cvc/ariadne/conference/room_avatar.h>
+#include <cvc/ariadne/conference/room_entities.h>
 #include <cvc/ariadne/conference/room_scene.h>
 #include <cvc/ariadne/holon.h>
+#include <cvc/ariadne/holon_sync.h> // entity_playout
 #include <cvc/ariadne/section.h> // section_epoch, section_stamp
 #include <cvc/core/app.h>
 #include <cvc/gl/CameraController.h>
@@ -395,6 +398,82 @@ int main() {
           "its marker appears at its first sample");
     }
     chk(sg.getGraphics("avatar_C") == nullptr, "teardown removes it too");
+  }
+
+  // ── the room's entities: drawn from the playout, by their identity ────────
+  {
+    SceneGraph sg(app, "room_entities");
+    SceneRenderer view(sg, 128, 128, /*offscreen=*/true, "main");
+    holon h(holon_role::client);
+    body_state a0;
+    a0.position = vec3{0.0, 0.0, 0.0};
+    h.add_participant("A", /*local=*/true, a0);
+    cvc::ariadne::entity_playout playout;
+    rs::room_entity lead;
+    lead.id = 4;
+    lead.name = "lead";
+    lead.archetype = "rover";
+    lead.color = {0.9f, 0.1f, 0.1f};
+    lead.size = {4.0, 2.0, 1.2};
+    lead.wheels = {2.6, 1.7, 0.4};
+    rs::write_room_entities(app, "ents", {lead});
+    const double dt = h.clock().fixed_dt();
+    {
+      room_view rv(view, app, "ents", "A", sg.getStatePrefix());
+      const auto sample = [&](double x, double yaw) {
+        body_state s;
+        s.position = vec3{x, 3.0, 0.6};
+        s.rotation = cvc::physics::quat{std::cos(0.5 * yaw), 0.0, 0.0, std::sin(0.5 * yaw)};
+        playout.apply(rs::entity_pid(4), s, h.tick());
+      };
+      const auto frame = [&] {
+        h.advance(dt);
+        playout.pump(app, "ents", dt);
+        rv.update(h, dt);
+        rv.update_entities(playout);
+      };
+      frame();
+      chk(rv.entity_ids().empty(), "no entity drawn before its first sample");
+      sample(5.0, 0.0);
+      frame();
+      const std::vector<std::uint64_t> ids = rv.entity_ids();
+      chk(ids.size() == 1 && ids[0] == 4, "the entity is drawn once it has a sample");
+      double pe[3];
+      chk(node_xyz(sg, room_view::entity_node_id(4), pe) && near(pe[0], 5.0, 0.05) &&
+              near(pe[1], 3.0, 0.05) && near(pe[2], 0.6, 0.05),
+          "posed at its chassis's centre");
+      std::shared_ptr<cvc::gl::GraphicsNode> group = sg.getGraphics(room_view::entity_node_id(4));
+      chk(group && group->findChildByName(room_view::entity_node_id(4) + "_wheel0") != nullptr,
+          "drawn as a vehicle: its box look with wheels");
+      // Another colour: built again.
+      lead.color = {0.1f, 0.9f, 0.1f};
+      rs::write_room_entities(app, "ents", {lead});
+      frame();
+      chk(sg.getGraphics(room_view::entity_node_id(4)) != nullptr &&
+              sg.getGraphics(room_view::entity_node_id(4)) != group,
+          "built again when its identity changes");
+      // Dropped from the section: gone from the playout and the view.
+      rs::write_room_entities(app, "ents", {});
+      frame();
+      chk(rv.entity_ids().empty() && sg.getGraphics(room_view::entity_node_id(4)) == nullptr,
+          "removed when the room drops it");
+      // Back, then torn down with the view.
+      rs::write_room_entities(app, "ents", {lead});
+      sample(6.0, 0.0);
+      frame();
+      chk(sg.getGraphics(room_view::entity_node_id(4)) != nullptr, "drawn again when it returns");
+      // A model look this host does not have: its box.
+      lead.look.kind = "file";
+      lead.look.path = "NoSuchVehicleModel.glb";
+      lead.look.fit = true;
+      rs::write_room_entities(app, "ents", {lead});
+      frame();
+      std::shared_ptr<cvc::gl::GraphicsNode> g = sg.getGraphics(room_view::entity_node_id(4));
+      chk(g && g->findChildByName(room_view::entity_node_id(4) + "_wheel0") != nullptr &&
+              g->findChildByName(room_view::entity_node_id(4) + "_mesh") == nullptr,
+          "a model look the host has not installed: drawn as its box");
+    }
+    chk(sg.getGraphics(room_view::entity_node_id(4)) == nullptr, "teardown removes it");
   }
 
   // ── the local avatar appears at its first pose, without a glide ───────────

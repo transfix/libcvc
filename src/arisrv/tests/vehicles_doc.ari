@@ -1,0 +1,22 @@
+# A server document with a world that starts with vehicles (ARIADNE_WORLDS.md WD3), for arisrv's
+# ctest: the relay runs its world, says how many vehicles it runs, and init: stops it with (quit 0)
+# once the room is up (the world is made with the load, after init: has asked to stop).
+meta: { name: arisrv vehicles document, min_libcvc: 3.7.12 }
+requires: [relay, scene.physics]
+world:
+  vehicles:
+    archetypes:
+      rover: { plant: kinematic, vehicle: roboracer, controllers: [nav@1] }
+    start:
+      - { archetype: rover, count: 4 }
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [80, 80, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+init: |
+  (quit 0)

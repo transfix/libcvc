@@ -1,0 +1,40 @@
+{
+  "library": "ContourTiler",
+  "volrover": "1cf0fbd72c7539e415a4f0fbc58c6bfce3d3caf8",
+  "case": "branch",
+  "input": "tools/volrover-goldens/inputs/tiler/branch/branch.ser",
+  "input_sha256": {
+    "branch.0": "9511c1593fdaff393d635b6ace6fc6d9ca93f51cdcfe68bb156c931831dfda26",
+    "branch.1": "9a4531c573c7f4db0976fd35ea903abac102e9fc6f8938a8a63718aa9bd43056",
+    "branch.2": "cd0f28d3aa9216198827d42b3f4245e80453ef0dddec364e065c9252b54d9afe",
+    "branch.3": "923a5a6abe2dad5bcec625ffcc18d99f2e714b19588ce0a8429ce9019d6fe69a",
+    "branch.4": "7193a7f0541ab47d0e06e63f3e29acbb31bee7fd6f14df3acab751f9c4fd3e5a",
+    "branch.5": "f6ea45158fd3b241bd772e6ed429c0a8d0a67822bab46ecf8c35b1bdeea485b4",
+    "branch.6": "eaaa8f71cd14e9aee946492222b8946b1d084feec59a965bb39b891a125016da",
+    "branch.7": "a667d57620101063fd16e60ac7ba6adf4085f84a0171138d172545a35ce3a722",
+    "branch.ser": "f00e261710d62de6a211388fea9579f2a725b0507ef0d180872abea1f333d684"
+  },
+  "first": 0,
+  "last": 7,
+  "parameters": {
+    "curation_delta": 0.01,
+    "collinear_epsilon": 1e-15,
+    "z_scale": 1
+  },
+  "components": {
+    "d001": {
+      "vertices": 304,
+      "triangles": 604
+    },
+    "r001": {
+      "vertices": 356,
+      "triangles": 668
+    }
+  },
+  "tiles_sha256": {
+    "d001": "fe3028e1e7fb533b823a5466f746fff5c2269306257538046cf820345a57e38e",
+    "r001": "940cba287e815e794148135068d704ea512b0cf078618d18cf91da76675a6d19"
+  },
+  "made_by": "tools/volrover-goldens/make_goldens.py",
+  "platform": "Windows AMD64, Windows-11, Python 3.13.3"
+}

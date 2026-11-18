@@ -18,10 +18,18 @@
 #define __CVC_PHYSICS_FIELD_STEP_H__
 
 #include "backend_impl.h"
+#include "field_wake.h"
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <exception>
+#include <functional>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace cvc {
@@ -48,6 +56,7 @@ struct compiled_field {
   rut_map ruts;              // a medium with desc.ruts: what wheels have pressed into it
   std::size_t rut_cells = 0; // cells with a rut
   double rut_deepest = 0.0;  // m
+  std::shared_ptr<fluid_wake> wake; // a fluid with desc.wake on: its bodies' waves
 };
 
 // A body's hull (hull.h) as the fluids see it, built when the body is added.
@@ -74,8 +83,49 @@ struct field_body {
   double radius = 0.0;  // sphere
   vec3 half;            // box
   bool vehicle = false; // a vehicle's chassis: no flow drag (vehicle.h's aero is its drag)
+  // The share of its cells' volume that displaces a fluid: 1, but a wading vehicle's chassis
+  // (vehicle.h) floods and keeps only wading_desc::displacement.
+  double buoyancy = 1.0;
   field_hull hull;      // a fluid pushes on its triangles in place of the cells
   field_load load;      // the last step's
+  // Its outline as a wake cuts it (immersion.h): its hull, else its shape, made when a wake first
+  // needs it (a wake may come after the body, as a scene's water does after its crates). A box or a
+  // sphere is made from `half` or `radius`; `cut_shape` keeps only a convex hull's points. Null
+  // when it would not cut (it makes no waves).
+  std::shared_ptr<const physics::shape> cut_shape;
+  std::shared_ptr<const immersion_body> cut;
+  bool cut_tried = false;
+};
+
+// Worker threads for the fields' free-surface reads (world_config::field_threads). run(n, fn)
+// hands the indices 0 .. n - 1 out to the workers and the calling thread from a shared counter
+// and returns once every one has run; fn must not depend on which thread runs an index. Without
+// workers (or in a build without threads) it runs them in turn on the calling thread. The first
+// exception an index throws is rethrown from run().
+class field_workers {
+public:
+  explicit field_workers(int threads);
+  ~field_workers();
+  field_workers(const field_workers &) = delete;
+  field_workers &operator=(const field_workers &) = delete;
+  int threads() const { return _wanted; }
+  void run(std::size_t n, const std::function<void(std::size_t)> &fn);
+
+private:
+  void loop();
+  void work();
+
+  int _wanted = 0;
+  std::vector<std::thread> _threads;
+  std::mutex _m;
+  std::condition_variable _go, _done;
+  const std::function<void(std::size_t)> *_fn = nullptr;
+  std::size_t _n = 0;
+  std::atomic<std::size_t> _next{0};
+  std::uint64_t _generation = 0;
+  int _busy = 0;
+  bool _stop = false;
+  std::exception_ptr _error;
 };
 
 class field_set {
@@ -99,8 +149,9 @@ public:
       it->second.mass = mass;
   }
 
-  // A vehicle's chassis (body_added first): its centre of mass, and no flow drag.
-  void mark_vehicle(body_id id, const vec3 &center_of_mass);
+  // A vehicle's chassis (body_added first): its centre of mass, no flow drag, and the share of
+  // its box that displaces a fluid (1 sealed; vehicle.h's wading).
+  void mark_vehicle(body_id id, const vec3 &center_of_mass, double buoyancy = 1.0);
 
   // Push every awake body the fields reach, for the step about to run.
   // `t` is the world's field time, at which free surfaces are read.
@@ -116,9 +167,10 @@ public:
   // in x and y and reaches below it. False if none does; `out` is then dry and still.
   bool water_at(const vec3 &p, double t, physics::water_sample &out) const;
 
-  // The air at `p` for a vehicle's aero: a flow field's density and wind where one covers
-  // `p` (the first, in id order), true; else false, `rho` and `wind` untouched.
-  bool air_at(const vec3 &p, double &rho, vec3 &wind) const;
+  // The air at `p` at field time `t` for a vehicle's aero: a flow field's density and wind (its
+  // flow_velocity's, or its velocity volumes') where one covers `p` (the first, in id order),
+  // true; else false, `rho` and `wind` untouched.
+  bool air_at(const vec3 &p, double t, double &rho, vec3 &wind) const;
   // The medium over a wheel's ground contact `p`: the deepest medium field above it along
   // +z, its bearing modulus at mid-depth and its traction. False if none lies over `p`.
   // Read-only: safe from the engine's worker threads during a step.
@@ -153,13 +205,28 @@ public:
   bool has_hulls() const;
   void save_hulls(std::string &out) const;
   void restore_hulls(const std::string &in, std::size_t &pos);
+  // Wakes (field::wake). Whether any fluid has one; each wake field's id and its wake's state, in
+  // id order, for world::save; and restoring them (throws cvc::physics_error if this world's
+  // wakes differ from the state's). A wake's window and the height of all its waves at (x, y).
+  bool has_wakes() const;
+  void save_wakes(std::string &out) const;
+  void restore_wakes(const std::string &in, std::size_t &pos);
+  wake_info wake(field_id id) const;
+  double wake_height(field_id id, double x, double y) const;
 
 private:
   void wake_in(world_backend &be, const field_grid &box);
+  // The wakes' waves move on and their sources go in, before the step's reads. `held` gives a
+  // field's surface held at t (fluid_surface::at, its per-time work on the field workers), the one
+  // the step's reads use after.
+  void advance_wakes(world_backend &be, const world_config &cfg, double t, double gravity,
+                     const std::function<const fluid_surface *(const compiled_field &)> &held);
+  const immersion_body *outline_of(field_body &fb);
 
   std::map<std::uint32_t, compiled_field> _fields;
   std::map<std::uint32_t, field_body> _bodies;
   std::uint32_t _next = 0;
+  std::unique_ptr<field_workers> _workers; // world_config::field_threads, made on first use
 };
 
 } // namespace detail

@@ -18,6 +18,9 @@ this module is everything under it:
 - :class:`GymCars`: the same cars in a world document (``pycvc.WorldGym``, ARIADNE_WORLDS.md
   §14, L4): the document's world, its vehicles as Jolt vehicles in its own physics world, its
   spawn points. Your controller runs on it unchanged; ``--gym DOC`` runs the template on it.
+- :class:`HostCars`: the same cars in the world a host's own document runs, so a drawn host shows
+  them as the document draws its world: your ``(steer, accel)`` as each car's intent, nav@1
+  otherwise (``pycvc.WorldEntities``).
 - :class:`CarsState`: what a controller reads each tick, as numpy arrays (SI units).
 - :func:`rollout`: a controller's own predicted paths, on nav's bicycle.
 - :func:`local_raster`: the occupancy and signed distance around a car, heading up.
@@ -57,7 +60,7 @@ except Exception:  # pragma: no cover - pycvc is what drives the cars
     pycvc = None
 
 #: The plants a world document runs its vehicles on (GymCars' ``vehicle``).
-GYM_PLANTS = ("jolt", "kinematic", "dynamic", "dynamic4w")
+GYM_PLANTS = ("jolt", "kinematic", "dynamic", "dynamic4w", "dynamicboat")
 #: The tick (s): the controller runs once per tick, and the world steps once. libcvc's one
 #: simulation tick (``pycvc.SIM_TICK``, cvc/core/sim_tick.h), 0.06 s.
 DT = float(getattr(pycvc, "SIM_TICK", 0.06)) if pycvc is not None else 0.06
@@ -843,6 +846,159 @@ class GymCars:
             goal_dist=dist, reached=dist < self.reach,
             ranges=np.asarray(o["ranges"], float), ray_angles=np.asarray(o["ray_angles"], float),
             range_max=float(o["range_m"]), collided=np.asarray(o["collided"], bool).copy(),
+            length=self.length, width=self.width, wheelbase=self.wheelbase,
+            max_steer=self.max_steer, max_accel=self.max_accel, max_decel=self.max_decel,
+            max_speed=self.max_speed, reach=self.reach, driving=self.driving,
+            world=self.world.kind, nav={},
+        )  # fmt: skip
+
+
+class HostCars:
+    """``n`` cars in the world the host's own document runs (its ``world: vehicles:``), so a drawn
+    host shows them as it shows that world: the same interface as :class:`Cars` and
+    :class:`GymCars` (:meth:`state`, :meth:`step`, :meth:`step_navigator`, :meth:`new_goals`,
+    ``world``). The world steps on the host's clock with each frame, not with :meth:`step`:
+    :meth:`step` hands each car's ``steer`` and ``accel`` to the world as its intent (a replace
+    command, kept until the next call; a NaN leaves that car to nav@1), and
+    :meth:`step_navigator` clears them. ``vehicle`` names the archetype (None: the document's
+    first that allows nav@1). The rays are cast on the world's grid (:func:`ranges`)."""
+
+    def __init__(self, host, n=6, vehicle=None, *, seed=0, navigator=False, rays=16,
+                 range_m=60.0):  # fmt: skip
+        _require()
+        self.host = host
+        self.ents = host.entities
+        if not self.ents.available():
+            raise RuntimeError("the host's document runs no world with vehicles")
+        self.n = int(max(1, n))
+        self.navigator = bool(navigator)
+        self.rng = np.random.default_rng(seed)
+        self.rays = int(rays)
+        self.range_m = float(range_m)
+        self.ray_angles = np.linspace(-np.pi, np.pi, self.rays, endpoint=False)
+        self.archetype = str(vehicle or "")
+        self.ents.set_wander(False)
+        g = self.ents.grid()
+        if g is None:
+            raise RuntimeError("the host's world has no grid yet (step a frame after load)")
+        occ = np.ascontiguousarray(g["occupancy"], np.uint8)
+        self.world = World("host", occ, tuple(g["bounds"]), None, None, {"source": "host"})
+        self.arrivals = 0
+        self.ids = []
+        self._spawn()
+
+    def _spawn(self):
+        for i in self.ids:
+            self.ents.despawn(int(i))
+        self.ids = []
+        for k in range(self.n):
+            i = self.ents.spawn(self.archetype, controller="nav@1") if self.archetype else 0
+            if not self.archetype:
+                for e in (self.host.get("vehicles.archetypes.names") or "").split("\n"):
+                    i = self.ents.spawn(e, controller="nav@1")
+                    if i:
+                        self.archetype = e
+                        break
+            if not i:
+                raise RuntimeError(f"car {k}: {self.ents.why()}")
+            self.ids.append(int(i))
+        e = self._entries()
+        for k in ("length", "width", "wheelbase", "max_steer", "max_accel", "max_decel",
+                  "max_speed"):  # fmt: skip
+            setattr(self, k, np.array([d[k] for d in e], float))
+        self.driving = e[0]["plant"] if e else ""
+        self.reach = max(3.0, 1.5 * float(np.max(self.length)))
+        self.t, self.tick = 0.0, 0
+        self.last_command = (np.zeros(self.n), np.zeros(self.n))
+        self.collisions = np.zeros(self.n, int)
+        self.new_goals()
+
+    def reset(self, seed=0) -> CarsState:
+        """The cars spawned again, at free points (or the world's spawn points), with new goals."""
+        self.rng = np.random.default_rng(seed)
+        self.arrivals = 0
+        self._spawn()
+        return self.state()
+
+    def pull(self):
+        pass
+
+    def publish(self):
+        pass
+
+    def _entries(self):
+        by = {d["id"]: d for d in self.ents.list()}
+        return [by[i] for i in self.ids if i in by]
+
+    @property
+    def goals(self) -> np.ndarray:
+        return self.state().goal.copy()
+
+    def new_goals(self, which=None):
+        """Every car (or those in ``which``, a bool mask or indices) gets a new goal, a free point
+        of the grid away from where it is. A car at its goal that gets one counts in
+        :attr:`arrivals`."""
+        s = self.state()
+        fresh = self.world.free_points(self.rng, self.n, 0.8 * float(np.max(self.length)),
+                                       4.0 * float(np.max(self.length)), avoid=s.pos,
+                                       avoid_dist=0.3 * self.world.span)  # fmt: skip
+        mask = np.ones(self.n, bool) if which is None else np.zeros(self.n, bool)
+        if which is not None:
+            mask[which] = True
+        self.arrivals += int((mask & s.reached).sum())
+        for k in np.flatnonzero(mask):
+            self.ents.set_goal(self.ids[k], float(fresh[k, 0]), float(fresh[k, 1]))
+        return self.state()
+
+    def step(self, steer, accel) -> CarsState:
+        """Each car's ``steer`` (rad, + left) and ``accel`` (m/s^2), held to its lock and envelope,
+        as its intent from the world's next tick; a NaN leaves that car to nav@1."""
+        steer = np.asarray(steer, float).reshape(self.n)
+        accel = np.asarray(accel, float).reshape(self.n)
+        steer = np.where(np.isnan(steer), np.nan, np.clip(steer, -self.max_steer, self.max_steer))
+        accel = np.where(np.isnan(accel), np.nan, np.clip(accel, -self.max_decel, self.max_accel))
+        for k, i in enumerate(self.ids):
+            if np.isnan(steer[k]) or np.isnan(accel[k]):
+                self.ents.clear_intent(i)
+            else:
+                self.ents.set_intent(i, steer=float(steer[k]), accel=float(accel[k]),
+                                     mode="replace")  # fmt: skip
+        self.last_command = (steer, accel)
+        return self._advance()
+
+    def step_navigator(self) -> CarsState:
+        """nav@1 drives every car to its goal (their intents cleared)."""
+        for i in self.ids:
+            self.ents.clear_intent(i)
+        nan = np.full(self.n, np.nan)
+        self.last_command = (nan, nan.copy())
+        return self._advance()
+
+    def _advance(self):
+        s = self.state()
+        self.collisions += s.collided
+        self.tick += 1
+        return s
+
+    def state(self) -> CarsState:
+        e = self._entries()
+        th = np.array([d["yaw"] for d in e], float)
+        wb = self.wheelbase
+        # The world gives the chassis's centre; a CarsState's (x, y) is the rear axle.
+        x = np.array([d["x"] for d in e], float) - 0.5 * wb * np.cos(th)
+        y = np.array([d["y"] for d in e], float) - 0.5 * wb * np.sin(th)
+        goal = np.array([[d["goal_x"], d["goal_y"]] for d in e], float).reshape(-1, 2)
+        dist = np.hypot(goal[:, 0] - x, goal[:, 1] - y)
+        self.t = float(self.host.get_float("sim.time", self.t) or self.t)
+        r = ranges(self.world, x, y, th, self.ray_angles, self.range_m)
+        return CarsState(
+            t=self.t, tick=self.tick, dt=DT, x=x, y=y, heading=th,
+            speed=np.array([d["speed"] for d in e], float),
+            steer=np.array([d["steer"] for d in e], float),
+            vx=np.array([d["vx"] for d in e], float), vy=np.array([d["vy"] for d in e], float),
+            goal=goal, goal_dist=dist, reached=dist < self.reach, ranges=r,
+            ray_angles=self.ray_angles, range_max=self.range_m,
+            collided=np.array([d["collided"] for d in e], bool),
             length=self.length, width=self.width, wheelbase=self.wheelbase,
             max_steer=self.max_steer, max_accel=self.max_accel, max_decel=self.max_decel,
             max_speed=self.max_speed, reach=self.reach, driving=self.driving,

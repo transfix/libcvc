@@ -200,6 +200,13 @@ public:
     (void)handle, (void)steer, (void)load, (void)forward, (void)brake, (void)hand_brake,
         (void)neutral;
   }
+  // Wading (vehicle_desc::wading), for the next step: each tire's mu times grip[w] (the water's
+  // soaking and aquaplaning; 1 leaves it), and whether the engine has flooded (it then stops:
+  // no idle, no fuel). Only called for a vehicle with wading on.
+  virtual void set_vehicle_wading(std::uint32_t handle, const std::vector<double> &grip,
+                                  bool engine_off) {
+    (void)handle, (void)grip, (void)engine_off;
+  }
   virtual void read_vehicle(std::uint32_t handle, vehicle_readback &out) const {
     (void)handle, (void)out;
   }
