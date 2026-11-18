@@ -343,6 +343,19 @@ void vehicle(writer &w, const vehicle_snapshot &v) {
     w.end_object();
   }
   w.key("energy_ledger").boolean(d.energy_ledger);
+  {
+    const wading_desc &g = d.wading;
+    w.key("wading").begin_object();
+    w.key("enabled").boolean(g.enabled);
+    w.key("displacement").number(g.displacement);
+    w.key("wheel_displacement").number(g.wheel_displacement);
+    w.key("wheel_drag").number(g.wheel_drag);
+    w.key("underbody_depth").number(g.underbody_depth);
+    w.key("underbody_drag").number(g.underbody_drag);
+    w.key("tire_pressure").number(g.tire_pressure);
+    w.key("fording_depth").number(g.fording_depth);
+    w.end_object();
+  }
   w.key("axles").begin_array();
   for (const axle_desc &a : d.axles) {
     w.begin_object();
@@ -386,6 +399,8 @@ void vehicle(writer &w, const vehicle_snapshot &v) {
   w.key("engine_rpm").number(s.engine_rpm);
   w.key("aero_force").vec(s.aero_force);
   w.key("air_velocity").vec(s.air_velocity);
+  w.key("water_force").vec(s.water_force);
+  w.key("engine_flooded").boolean(s.engine_flooded);
   {
     const vehicle_energy &e = s.energy;
     w.key("energy").begin_object();
@@ -438,6 +453,8 @@ void vehicle(writer &w, const vehicle_snapshot &v) {
     w.key("sinkage").number(h.sinkage);
     w.key("rut").number(h.rut);
     w.key("medium_resistance").number(h.medium_resistance);
+    w.key("water_depth").number(h.water_depth);
+    w.key("water_drag").number(h.water_drag);
     w.end_object();
   }
   w.end_array();
@@ -495,6 +512,7 @@ std::string to_json(const world_snapshot &s, json_bodies which) {
     w.key("restitution").number(m.restitution);
     w.key("rolling_resistance").number(m.rolling_resistance);
     w.key("nav_material").integer(m.nav_material);
+    w.key("wet_friction").number(m.wet_friction);
     w.end_object();
   }
   w.end_array();

@@ -1193,8 +1193,13 @@ TEST(AriadneWorldVehicles, LooksAreFoundWhereTheyAre) {
   const std::string humvee = find_vehicle_model("humvee");
   EXPECT_NE(humvee.find("Humvee.glb"), std::string::npos) << humvee;
   EXPECT_EQ(find_vehicle_model("no_such_vehicle.glb"), "");
+  // A name without an extension is its .glb (the vehicle-tactical-boat package's TacticalBoat).
+  std::ofstream(prefix / "share" / "cvc-scenes" / "shared" / "TacticalBoat.glb") << "glb";
+  const std::string boat = find_vehicle_model("TacticalBoat");
+  EXPECT_NE(boat.find("TacticalBoat.glb"), std::string::npos) << boat;
+  EXPECT_EQ(find_vehicle_model("TacticalBoat.glb"), boat);
 
-  std::vector<vehicle_archetype> v(5);
+  std::vector<vehicle_archetype> v(6);
   v[0].id = "humvee"; // no look: the model, fitted
   v[1].id = "racer";  // no look and no model: its box
   v[1].preset = "roboracer";
@@ -1207,6 +1212,9 @@ TEST(AriadneWorldVehicles, LooksAreFoundWhereTheyAre) {
   v[4].id = "asset"; // a document asset's file
   v[4].look.kind = "asset";
   v[4].look.path = "car";
+  v[5].id = "patrol"; // no look, the tactical boat preset: its model, fitted
+  v[5].plant = "dynamicboat";
+  v[5].preset = "tactical";
   SceneAsset car;
   car.id = "car";
   car.source.source_file = "models/car.glb";
@@ -1217,6 +1225,9 @@ TEST(AriadneWorldVehicles, LooksAreFoundWhereTheyAre) {
   EXPECT_EQ(v[0].look.path, humvee);
   EXPECT_TRUE(v[0].look.fit);
   EXPECT_EQ(v[1].look.kind, "box");
+  EXPECT_EQ(v[5].look.kind, "file");
+  EXPECT_EQ(v[5].look.path, boat);
+  EXPECT_TRUE(v[5].look.fit);
   EXPECT_EQ(v[2].look.kind, "box");
   EXPECT_TRUE(any_contains(warnings, "model 'tank' is not installed"));
   EXPECT_EQ(fs::path(v[3].look.path), prefix / "doc" / "car.glb");
@@ -1760,6 +1771,85 @@ void run(cvc::app &app, SceneWorld &w, SceneClockDriver &clock, int frames) {
 }
 
 } // namespace
+
+// world: vehicles: start: (the vehicles a world starts with): parsed in order, its archetypes
+// checked against archetypes: wherever that is, and spawned when the world's vehicles are made.
+TEST(AriadneWorldVehicles, TheWorldStartsWithItsStartVehicles) {
+  REQUIRE_YAML();
+  const auto parse = [](const std::string &start, world_rules &x) {
+    cvc::app app;
+    register_world_block(app);
+    LoadResult r = load_string(app, "world:\n  vehicles:\n    start: " + start +
+                                        "\n    archetypes:\n      v: { plant: kinematic, "
+                                        "vehicle: humvee }\nscene:\n  nodes: []\n");
+    x = default_world_rules();
+    const Value *block = find_world_block(r);
+    return block ? parse_world_block(*block, x) : std::string("no world: block");
+  };
+  world_rules x;
+  ASSERT_EQ(parse("[{archetype: v, count: 3, name: car, team: 2}, {archetype: v, at: [4, 5], "
+                  "heading: 90, controller: none}]",
+                  x),
+            "");
+  ASSERT_EQ(x.vehicle_starts.size(), 2u);
+  EXPECT_EQ(x.vehicle_starts[0].count, 3);
+  EXPECT_EQ(x.vehicle_starts[0].name, "car");
+  EXPECT_EQ(x.vehicle_starts[0].team, 2);
+  EXPECT_FALSE(x.vehicle_starts[0].placed);
+  EXPECT_TRUE(x.vehicle_starts[1].placed);
+  EXPECT_DOUBLE_EQ(x.vehicle_starts[1].x, 4.0);
+  EXPECT_TRUE(x.vehicle_starts[1].has_heading);
+  EXPECT_EQ(x.vehicle_starts[1].controller, "none");
+  EXPECT_NE(parse("[{archetype: w}]", x).find("names archetype 'w'"), std::string::npos);
+  EXPECT_NE(parse("[{count: 2}]", x).find("names no archetype"), std::string::npos);
+  EXPECT_NE(parse("[{archetype: v, count: 0}]", x).find("count: expects a whole number"),
+            std::string::npos);
+  EXPECT_NE(parse("[{archetype: v, count: 257}]", x).find("count: expects a whole number"),
+            std::string::npos);
+  EXPECT_NE(parse("[{archetype: v, plant: hover}]", x).find("plant: 'hover' is not one"),
+            std::string::npos);
+  EXPECT_NE(parse("{archetype: v}", x).find("start: expects a list"), std::string::npos);
+
+  // A headless runtime spawns them with the world, before anything asks.
+  cvc::app app;
+  AppRuntime art(app, "");
+  art.load(write_doc("start", R"(requires: [scene.physics]
+world:
+  vehicles:
+    archetypes:
+      v: { plant: kinematic, vehicle: humvee, controllers: [nav@1, none] }
+    start:
+      - { archetype: v, at: [10, -10], heading: 90, controller: none }
+      - { archetype: v, count: 3, name: car }
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [120, 120, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)")
+               .string());
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  ASSERT_NE(art.scene_world(), nullptr);
+  WorldVehicles *v = art.scene_world()->vehicles();
+  ASSERT_NE(v, nullptr);
+  art.drain();
+  const std::vector<entity_info> e = v->entities();
+  ASSERT_EQ(e.size(), 4u);
+  EXPECT_EQ(e[0].spec.name, "v 1");
+  EXPECT_EQ(e[0].spec.controller, "none");
+  // at: is the kinematic bicycle's rear axle; the table has its box's centre, ahead of it along
+  // the heading (+y) by the axle's offset.
+  EXPECT_NEAR(e[0].x, 10.0, 0.5);
+  EXPECT_GT(e[0].y, -10.5);
+  EXPECT_LT(e[0].y, -7.5);
+  EXPECT_EQ(e[1].spec.name, "car 1");
+  EXPECT_EQ(e[3].spec.name, "car 3");
+}
 
 TEST(AriadneWorldVehicles, TheWorldBlockTakesIntentsAndTheExternalController) {
   REQUIRE_YAML();

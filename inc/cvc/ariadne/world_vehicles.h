@@ -94,8 +94,9 @@ physics::vehicle_desc vehicle_desc_of(const vehicle_archetype &a, double mass = 
 physics::dyn_boat_desc boat_desc_of(const vehicle_archetype &a, double mass = 0.0,
                                     double max_speed = 0.0);
 
-// A vehicle model's file by name (`humvee`: Humvee.glb; any other name is taken as the file's
-// name), where the vehicle-humvee cvcpkg package installs it: beside $CVC_NAV_BUNDLE (in it, or
+// A vehicle model's file by name (`humvee`: Humvee.glb; any other name is the file's name, a
+// name without an extension its .glb: TacticalBoat, TacticalBoat.glb), where the vehicle-*
+// cvcpkg packages install them: beside $CVC_NAV_BUNDLE (in it, or
 // in its ../shared), then in share/cvc-scenes/shared and share/cvc-scenes/*/ under $CVC_PREFIX,
 // $CVCPKG_PREFIX, $CONDA_PREFIX and the running program's prefix. "" when there is none.
 std::string find_vehicle_model(const std::string &name);
@@ -338,6 +339,10 @@ public:
   // allow, a policy that cannot be loaded). Without a grid it is kept and placed once there is
   // one.
   std::uint64_t spawn(const entity_spec &spec, std::string *why = nullptr);
+  // The vehicles a world starts with (world: vehicles: start:), spawned in order, each as spawn()
+  // would; a refusal is a warning and stops that entry. Returns how many it spawned.
+  std::size_t spawn_starts(const std::vector<vehicle_start> &starts,
+                           std::vector<std::string> *warnings = nullptr);
   bool despawn(std::uint64_t id);
   void clear();
 

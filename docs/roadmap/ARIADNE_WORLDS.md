@@ -637,11 +637,31 @@ its own world document.
       has: a regenerated world can flood a start a document gave.
     - `dyn_boat_plant` checks the ground under a start too (a ray from the hull's top to its
       deepest point), not only the field's box, which knows nothing of the terrain in it.
-    - Not yet: boats drawn as hulls (a boat's look is its hull's box, with no wheels: roadmap D5,
-      D6); boats in pycvc; the relay.
-  - Not yet: the default worlds' built-in vehicles (`world_lab.ari` declares its own); the model from a document's
-    data package (the Austin package carries a copy, which `pycvc_gl.cars` reads); the relay
-    reading the vehicles (WD3, WD4).
+    - Boats are drawn as hulls (transfix/libcvc#1316: `add_hull_node`, a floating plant's box or
+      default look as its hull). Not yet: boats in pycvc.
+  - **The vehicles a world starts with.** `world: vehicles: start:` lists them (archetype, count up
+    to 256, name, team, controller, plant, policy, `at`/`heading`), spawned when the world's
+    vehicles are made. A document's `init:` runs before its world exists, and a spawn request
+    already set when the vehicles start is ignored (a reload would spawn again), so this is how a
+    document populates its world; `vehicles.spawn.count` spawns several at one request.
+  - **On the relay** (the hand-off, WD3's first part). A server document (`arisrv --doc`) runs its
+    scene's world headless, as any runtime without a scene adapter does, on the room's steps
+    (`ServerDocument`; its physics world is the document's, apart from the holon's). Its vehicles go
+    to every client as the room's entities (`conference::room_entities`): who they are in the
+    revisioned section `conf.rooms.<room>.entities` (name, archetype, plant, controller, team,
+    colours, chassis size, wheels, the look with a file's name alone), where they are on the pose
+    stream beside the participants under entity pids (`~e<id>`, at most 30 Hz each, in every
+    keyframe). A client plays them out with `entity_playout` (a client holon without physics: the
+    participants' peer playout, no bodies) and `room_view` draws each as its vehicle's box look.
+    `cvc://worlds/traffic.ari` is the stock server world: twelve blocks and eighteen vehicles.
+    Not yet: an area of interest for entities (every viewer gets every one), one physics world for
+    the avatars and the vehicles, a model look drawn on the client (it draws the box), the
+    controller catalog's prediction (WD4: a client interpolates server-dynamic entities, so none is
+    needed to watch them).
+  - Not yet: the default meeting worlds' built-in vehicles (a stock world named by `--scene` is
+    published, not run; `traffic.ari` is the server world with vehicles, and `world_lab.ari`
+    declares its own); the model from a document's data package (the Austin package carries a
+    copy, which `pycvc_gl.cars` reads).
 
 **The gym** is the world runtime driven from Python or headless: `reset(seed)`, `step(actions)`,
 `observe()`, a reward the user writes, and an episode log. It absorbs the glue in `pycvc_gl.cars`
@@ -680,9 +700,10 @@ headless; the same document opens in arigl to watch one.
     world's buildings are obstacles, not ground (`SceneWorldBody::ground`: the height-field
     colliders alone); and `regenerate` makes a generated world per episode from the reset's seed
     (`SceneWorld::regenerate_world`).
-  - **Not yet.** Vehicles on different plants do not steer around each other (each plant's
-    navigator sees its own); the cars template's own worlds (its data, generated and flat
-    builders) stay its own, beside the gym's.
+  - **Not yet.** Vehicles do not steer around each other: the world runtime turns on none of the
+    navigator's separation, yield or gap keeping, and freezes its sensing, so vehicles meet only
+    physically, on one plant or several; the cars template's own worlds (its data, generated and
+    flat builders) stay its own, beside the gym's.
 - **As built (L4's twin).** What a differentiable twin of the gym's world reads, so a trainer can
   backpropagate through a model of it while the gym (Jolt, the physics worlds) stays the judge, as
   P8 did for the Jolt vehicle:
@@ -730,7 +751,7 @@ GENERATED-WORLD-ROADMAP.md's.)
 | WD0 | **Done** (2026-11-07). The loose ends: `--set` after seeding, or a guard so a `--set` can't suppress the default world; the "under a sun" comment. Built as `--set` after the world and the room's policies, before a server document's `init:` (§1) | — | S |
 | WD1 | **Done** (2026-11-07). **The world document seeds the room.** `arisrv --doc world.ari` publishes the document's `scene:` (objects, lights, shadows), in one revision (`write_room_world`). `cvc://worlds/default.ari` and `large.ari` replace the C++ seeds, and `--scene` names them. The light rig and shadows move from the conference document to the world document (Q1), and the conference document drops its `scene:` block. As built: the wire gained a rig's knobs and the shadows' interval; `room_world_from_scene` leaves out, with a warning, what the wire can't hold (other node types and sources, children, textures, shaders), and publishes every body as a static until WD3; `--scene` together with a `--doc` that has a `scene:` is refused; the C++ twins are the fallback | S0 (met by transfix/libcvc#1046) | M |
 | WD2 | **Done** (2026-11-08). **The rules come from the document.** The physics, archetype, policy and controller sections (§3), with the activation tick. The holon and `room_view` read them instead of `avatar_body{}`, `kAvatarWidth`, `max_speed = 4.0` and the panel's "walker" literal. As built: the revisioned-section writer in core (`section.h`: `{epoch, at, rev}`, the revision last); the `world:` block (`world_rules.h`), whose stock worlds' twin is `default_world_rules()`; the four sections (`room_rules.h`), lists indexed since `walker@1` is no state name; the holon's rules by tick (`holon::set_physics` and the rest), the veto applied at each step, a late client's re-run from the tick, and a body change re-creating the avatars where they stand; gravity from the scene's `physics:`; `fixed_dt` stays the room's 1/120 s (a document's other value is a warning). Every avatar has the first archetype until WD4 and WD6 let a participant pick. | WD1 | M |
-| WD3 | **Entities.** The entities table (§4); server-dynamic props and NPC bodies from the document and from server programs, simulated on the relay by L0's headless runtime; their poses on the pose stream; colliders for meshes. | WD2, L0 | L |
+| WD3 | **Started** (2026-11-17: the vehicles). **Entities.** The entities table (§4); server-dynamic props and NPC bodies from the document and from server programs, simulated on the relay by L0's headless runtime; their poses on the pose stream; colliders for meshes. As built so far: a server document's world runs on the relay, and its vehicles reach every client as the room's entities (an identity section and pose-stream entries, played out and drawn: §14, "On the relay"). | WD2, L0 | L |
 | WD4 | **A controller catalog.** Kernels by `name@version`, a determinism gate per kernel, capability negotiation with an interpolation fallback; the vehicle as the second kernel. A participant picks from the archetype's list (§5k phase 3). | WD2 | L |
 | WD5 | **Generated worlds** through the world document: G5's descriptor, height-field statics on the relay. | WD1, G5 | M |
 | WD6 | **User looks and bodies.** Assets by hash, checked and rehosted by the relay; bodies clamped to the archetype (§5k phase 4). | WD2, S5 | M |

@@ -585,8 +585,8 @@ void ackermann_controller::measured_post_collide(float inDeltaTime) {
     t.supplied += engine_work;
     t.drivetrain += engine_work - torque_work;
     // Fuelled while the driver asks for torque (through a shift too) and at idle; cut on
-    // the overrun.
-    if (mForwardInput != 0.0f || mEngine.GetCurrentRPM() <= 1.1f * mEngine.mMinRPM)
+    // the overrun, and for good once the engine has flooded.
+    if (!engine_off && (mForwardInput != 0.0f || mEngine.GetCurrentRPM() <= 1.1f * mEngine.mMinRPM))
       t.indicated +=
           engine_work +
           (friction_torque(engine_damped * VehicleEngine::cAngularVelocityToRPM) * engine_damped +

@@ -60,7 +60,7 @@ except Exception:  # pragma: no cover - pycvc is what drives the cars
     pycvc = None
 
 #: The plants a world document runs its vehicles on (GymCars' ``vehicle``).
-GYM_PLANTS = ("jolt", "kinematic", "dynamic", "dynamic4w")
+GYM_PLANTS = ("jolt", "kinematic", "dynamic", "dynamic4w", "dynamicboat")
 #: The tick (s): the controller runs once per tick, and the world steps once. libcvc's one
 #: simulation tick (``pycvc.SIM_TICK``, cvc/core/sim_tick.h), 0.06 s.
 DT = float(getattr(pycvc, "SIM_TICK", 0.06)) if pycvc is not None else 0.06
