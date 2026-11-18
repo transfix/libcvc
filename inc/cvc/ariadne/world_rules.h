@@ -187,7 +187,8 @@ bool spawn_scope_known(const std::string &scope);
 // `archetype`, spawned when the world's vehicles are made, as a spawn request would make them:
 // `name` (with " 1", " 2", ... when count is more than one), `team`, `controller`, `plant` and
 // `policy`, empty for the archetype's; at (`x`, `y`) facing `heading` (degrees from +x; without one
-// toward its goal) when `placed`, else at a free point (or a spawn point, world: spawns:).
+// toward its goal) when `placed`, else at a free point (or a spawn point, world: spawns:). As for
+// every start, (x, y) is the vehicle's rear axle, the navigator's reference point.
 //
 //   world:
 //     vehicles:

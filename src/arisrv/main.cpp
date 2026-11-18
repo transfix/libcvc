@@ -1322,6 +1322,11 @@ int main(int argc, char **argv) {
   pose_cfg.push_interval_ticks = cvc::ariadne::conference::aoi_pose_push_interval_ticks(
       aoiParams, 1.0 / server_holon.clock().fixed_dt());
   pose_cfg.keyframe_ticks = 2 * pose_cfg.heartbeat_ticks;
+  // The room's entities by distance, with the area of interest's radii (off: every one near).
+  if (aoi_relay) {
+    pose_cfg.entity_near_m = aoiParams.inner_enter_m;
+    pose_cfg.entity_far_m = aoiParams.middle_enter_m;
+  }
   cvc::ariadne::conference::room_pose_relay pose_relay(pose_cfg);
   pose_relay.add_transport(&state_tp);
 #if CVC_ENABLE_WS

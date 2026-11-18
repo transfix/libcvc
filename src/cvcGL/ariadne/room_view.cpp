@@ -442,7 +442,7 @@ void room_view::update_entities(const cvc::ariadne::entity_playout &entities) {
                   "%s|%.4g,%.4g,%.4g|%.4g,%.4g,%.4g|%.4g,%.4g,%.4g|%.4g,%.4g,%.4g|%s",
                   e.archetype.c_str(), e.color[0], e.color[1], e.color[2], e.color2[0], e.color2[1],
                   e.color2[2], e.size[0], e.size[1], e.size[2], e.wheels[0], e.wheels[1],
-                  e.wheels[2], e.look.path.c_str());
+                  e.wheels[2], (e.look.path + "|" + std::to_string(e.fit_length)).c_str());
     const auto built = _entity_built.find(id);
     if (built == _entity_built.end() || built->second != key) {
       if (built != _entity_built.end())
@@ -469,8 +469,11 @@ void room_view::update_entities(const cvc::ariadne::entity_playout &entities) {
         if (!_models)
           _models = make_vehicle_model_cache();
         std::shared_ptr<GraphicsNode> group = sg.getGraphics(node);
+        vehicle_shape fit = shape; // a boat's model spans its overall length, not its hull's box
+        if (e.fit_length > 0.0)
+          fit.length = e.fit_length;
         if (!group || !attach_vehicle_model(sg.appContext(), *_models, *group, node + "_mesh", look,
-                                            shape, e.base_z, e.color.data(), &_warnings)) {
+                                            fit, e.base_z, e.color.data(), &_warnings)) {
           sg.removeGraphics(node); // the model would not read: its box
           cvc::ariadne::vehicle_look box;
           box.kind = "box";

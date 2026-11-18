@@ -136,7 +136,9 @@ struct entity_spec {
   std::string policy, policy_sha256; // nav@1's policy (a .cvcnav); "" the default policy
   double mass = 0.0, max_speed = 0.0;
   // Where it starts: (x, y) in world metres facing `yaw` (rad; not finite: toward its goal), when
-  // `placed`; else a free point of the world's grid away from the others.
+  // `placed`; else a free point of the world's grid away from the others. (x, y) is its rear axle,
+  // the navigator's reference point on every plant (a spawn point's is too); entity_info's (x, y)
+  // is its chassis's centre, ahead of it along the heading.
   bool placed = false;
   double x = 0.0, y = 0.0, yaw = std::numeric_limits<double>::quiet_NaN();
 };
