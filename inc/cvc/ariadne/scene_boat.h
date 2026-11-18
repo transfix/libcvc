@@ -15,7 +15,11 @@
 //   - node: launch
 //     type: boat
 //     water: water          # the water node it floats on (default: the scene's first)
-//     preset: launch        # launch | jonboat (cvc::physics::dyn_boat_desc)
+//     preset: launch        # launch | jonboat | tactical (cvc::physics::dyn_boat_desc)
+//     model: TacticalBoat   # drawn as this model (cvcGL's boat node): a file, or a name found
+//                           # where the vehicle models are (find_vehicle_model); none: its hull.
+//                           # The tactical preset's default is TacticalBoat (the
+//                           # vehicle-tactical-boat package), its hull when that is not there
 //     mass: 900             # optional, over the preset's
 //     max_speed: 3.19       # optional
 //     transform: { position: [10, 165, 0], rotation: [0, 0, 45] }   # x, y and the heading
@@ -44,6 +48,7 @@
 
 #include <array>
 #include <cvc/physics/dyn_boat_plant.h>
+#include <cvc/physics/hull.h> // waterline_box
 #include <memory>
 #include <string>
 #include <vector>
@@ -114,6 +119,10 @@ public:
   double half_beam() const;
   double sheer() const;
   double bottom() const;
+  // The box a renderer keeps water out of, inside its hull at the waterline it floats at in fresh
+  // water (cvc::physics::hull_waterline_box): a box hull's own box; a V hull's narrower than its
+  // beam and short of its bow, its centre `x` along the hull.
+  const physics::waterline_box &cutout() const;
   const std::string &status() const;
 
 private:

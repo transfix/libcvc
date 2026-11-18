@@ -257,7 +257,8 @@ bool parse_intent_mode(const std::string &s, entity_intent::mode &out) {
 }
 
 ph::dyn_boat_desc boat_desc_of(const vehicle_archetype &a, double mass, double max_speed) {
-  if (a.preset != "launch" && a.preset != "jonboat")
+  const std::vector<std::string> presets = ph::dyn_boat_desc::presets();
+  if (std::find(presets.begin(), presets.end(), a.preset) == presets.end())
     throw std::invalid_argument("vehicle '" + a.id + "': '" + a.preset + "' is not a boat preset");
   ph::dyn_boat_desc b = ph::dyn_boat_desc::preset(a.preset);
   for (const auto &[k, v] : a.overrides) {

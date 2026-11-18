@@ -21,6 +21,7 @@
 #include <cvc/nav/world_grid.h>
 #include <cvc/physics/world.h>
 #include <exception>
+#include <optional>
 #include <sstream>
 
 namespace cvc {
@@ -72,7 +73,7 @@ SceneBoatSpec scene_boat_spec(const SceneNode &n, const std::array<double, 16> &
   } catch (const std::exception &) {
     if (warnings)
       warnings->push_back("ari: scene node '" + n.id + "' (boat): no boat preset '" + s.preset +
-                          "' (launch, jonboat); a launch");
+                          "' (launch, jonboat, tactical); a launch");
     s.preset = "launch";
     s.desc = ph::dyn_boat_desc::launch();
   }
@@ -111,6 +112,7 @@ struct BoatRuntime::impl {
   double gx = 0.0, gy = 0.0;
   std::string seen_goal;
   double half_length = 0.0, half_beam = 0.0, sheer = 0.0, bottom = 0.0, draft = 0.0;
+  ph::waterline_box cutout;
   std::shared_ptr<const ph::body_desc> hull_desc;
 
   float nx(double x) const { return static_cast<float>((x - grid->center_x()) * kScale); }
@@ -139,6 +141,11 @@ BoatRuntime::BoatRuntime(cvc::app *app, SceneBoatSpec spec) : _impl(std::make_un
   d.sheer = hi[2];
   d.bottom = lo[2];
   d.draft = ph::dyn_boat_plant::draft(d.spec.desc.boat, d.spec.desc.boat.hull.mass, 1000.0);
+  d.cutout = {0.0, d.half_length, d.half_beam};
+  const double waterline =
+      -ph::dyn_boat_plant::float_height(d.spec.desc.boat, d.spec.desc.boat.hull.mass, 1000.0);
+  if (const std::optional<ph::waterline_box> c = ph::hull_waterline_box(mesh, waterline))
+    d.cutout = *c;
   d.hull_desc = std::make_shared<const ph::body_desc>(d.spec.desc.boat.hull);
   if (d.app) {
     read_or_seed<std::string>(*d.app, d.key("drive"), d.spec.drive);
@@ -334,6 +341,7 @@ double BoatRuntime::half_length() const { return _impl->half_length; }
 double BoatRuntime::half_beam() const { return _impl->half_beam; }
 double BoatRuntime::sheer() const { return _impl->sheer; }
 double BoatRuntime::bottom() const { return _impl->bottom; }
+const ph::waterline_box &BoatRuntime::cutout() const { return _impl->cutout; }
 const std::string &BoatRuntime::status() const { return _impl->status; }
 
 } // namespace ariadne
