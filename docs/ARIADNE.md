@@ -1454,8 +1454,10 @@ it out of both.
 **Boats.** `type: boat` is a boat on the water: a hull, a propeller and a rudder or an outboard in
 the scene's physics world, afloat on a `water` node's sea (OCEAN-AND-WEATHER-ROADMAP.md D6;
 [`scene_boat.h`](../inc/cvc/ariadne/scene_boat.h)). `preset:` is `launch` (a 4 m box hull of 900
-kg with a shaft propeller and a rudder) or `jonboat` (a 3.6 m flat box of 350 kg with an outboard
-that steers), with `mass:` and `max_speed:` over it; `water:` names the water node it floats on (the
+kg with a shaft propeller and a rudder), `jonboat` (a 3.6 m flat box of 350 kg with an outboard
+that steers) or `tactical` (a 7.8 m patrol boat of 2800 kg on its own V hull, baked from its
+model, its outboards one 8 kN thrust that steers: 10.5 m/s, a 32.5 m circle), with `mass:` and
+`max_speed:` over it; `water:` names the water node it floats on (the
 scene's first by default); the transform gives its x, y and heading, and it floats at its draft on
 the water there, the sea's height its z. It goes in once the water's grid is ready, and runs with or
 without a renderer, stepping with the world. Its keys, under its id (or its `keys:`): `drive` (`keys`
@@ -1464,10 +1466,17 @@ or `nav`), `throttle` and `rudder` (each -1 to 1; a + rudder turns it left) unde
 takes it there over the water deep enough for it; and its telemetry `x`, `y`, `z`, `heading`
 (degrees), `speed` (m/s through the water), `thrust` (N), `reached`, `placed` and `status`.
 `boat_controls.ari` is its helm. Drawn, it is its hull at its boat's pose: an open boat, white
-topsides over a blue stripe at the waterline and a dark wet bottom, with a teak sole. The water
-node keeps its water out of the boats nearest the camera (at most four, their footprints between
-their bottom and their sheer, passed to the water's shaders as uniforms, not a texture), its boats
-and the world's boat vehicles alike, and the boats make waves in its wake window. `terrain_lab.ari` has a launch on the
+topsides over a blue stripe at the waterline and a dark wet bottom, with a teak sole. With a
+`model:` (a file, or a name found where the vehicle models are, as `Humvee.glb` is; `.glb` is
+tried after a bare name; `none` draws the hull), it is that model instead, fitted as a vehicle's
+file look is (`fit_vehicle_geometry`: the axis a file stands on, Y-up or Z-up, is up, its length
+fitted to the boat's length overall, its keel on the hull's bottom). The `tactical` preset's model is `TacticalBoat`
+(the `vehicle-tactical-boat` package), and its hull when that is not installed; a `model:` that is
+not found warns. The water
+node keeps its water out of the boats nearest the camera (at most four, each the largest box inside
+its hull at its waterline, `BoatRuntime::cutout`, between its bottom and its sheer, passed to the
+water's shaders as uniforms, not a texture), its boats
+and the world's boat vehicles alike, and the boats make waves in its wake window. `terrain_lab.ari` has a tactical boat on the
 lake beside the crates (Settings > Launch).
 
 **Wind.** A scene's `wind:` is its one wind (OCEAN-AND-WEATHER-ROADMAP.md E5, O14;

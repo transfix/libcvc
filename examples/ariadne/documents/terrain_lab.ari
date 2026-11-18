@@ -226,13 +226,15 @@ scene:
       transform: { position: [14, 188, 10] }
       material: { color: [0.68, 0.48, 0.26] }
       body: { density: 400 }
-    # A launch on the lake beside the crates (a 4 m box hull with a shaft propeller and a rudder),
-    # afloat on the water node's sea. Settings > Launch is its helm: Drive keys and the Throttle and
-    # Rudder sliders (launch.throttle, launch.rudder), or Drive nav to its goal (launch.goal).
+    # A patrol boat on the lake beside the crates (the tactical preset: a 7.8 m box hull, its
+    # outboards one thrust), afloat on the water node's sea, drawn as the vehicle-tactical-boat
+    # package's TacticalBoat (its hull when that is not installed). Settings > Launch is its helm:
+    # Drive keys and the Throttle and Rudder sliders (launch.throttle, launch.rudder), or Drive nav
+    # to its goal (launch.goal).
     - node: launch
       type: boat
       water: water
-      preset: launch
+      preset: tactical
       transform: { position: [0, 170, 0] }
       goal: [40, 150]
     # The clouds: a deck of L-system cumulus scattered over the whole world, drifting and slowly

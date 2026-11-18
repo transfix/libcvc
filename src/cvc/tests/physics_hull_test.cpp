@@ -30,10 +30,14 @@
 #include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
+#include <cvc/physics/hull.h>
 #include <cvc/physics/world.h>
 #include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
+#include <map>
 #include <memory>
+#include <stdexcept>
+#include <utility>
 #include <vector>
 
 using namespace cvc::physics;
@@ -612,6 +616,113 @@ TEST(PhysicsHull, CrossPlatformGoldenHash) {
   std::printf("[physics-golden] hull swell scene after 300 steps: %016llx\n",
               static_cast<unsigned long long>(h));
   EXPECT_EQ(h, 0x2f71a1fe229afa75ull) << std::hex << "state hash " << h;
+}
+
+// --- lofted hulls (loft_hull) and their waterline boxes ---------------------------------------
+
+namespace {
+
+// The volume a mesh encloses (+ when wound outward), and whether it is closed: every edge in
+// exactly two triangles, once each way.
+double enclosed(const hull_mesh &h, bool &closed) {
+  std::map<std::pair<std::uint32_t, std::uint32_t>, int> edges;
+  double v = 0.0;
+  for (const auto &t : h.triangles) {
+    const vec3 a = h.vertices[t[0]], b = h.vertices[t[1]], c = h.vertices[t[2]];
+    v += dot(a, vec3{b.y * c.z - b.z * c.y, b.z * c.x - b.x * c.z, b.x * c.y - b.y * c.x}) / 6.0;
+    for (int e = 0; e < 3; ++e)
+      ++edges[{t[e], t[(e + 1) % 3]}];
+  }
+  closed = true;
+  for (const auto &[e, n] : edges) {
+    const auto back = edges.find({e.second, e.first});
+    closed = closed && n == 1 && back != edges.end() && back->second == 1;
+  }
+  return v;
+}
+
+// A V hull along x from -2 to 2: keel at z = -0.5, a chine 0.75 out at z = 0, a sheer 0.8 out at
+// z = 0.3, narrowing to a tenth from x = 1 to its bow.
+double v_scale(double x) { return x < 1.0 ? 1.0 : 1.0 - 0.9 * (x - 1.0); }
+std::vector<hull_station> v_stations() {
+  std::vector<hull_station> out;
+  for (int i = 0; i <= 16; ++i) {
+    hull_station s;
+    s.x = -2.0 + 0.25 * i;
+    const double k = v_scale(s.x);
+    s.section = {{0.0, -0.5}, {0.5 * k, -0.25}, {0.75 * k, 0.0}, {0.8 * k, 0.3}};
+    out.push_back(s);
+  }
+  return out;
+}
+
+} // namespace
+
+// Rectangular sections loft to their box: closed, wound outward, its volume and its waterline box
+// exactly the box's.
+TEST(PhysicsHull, ALoftOfRectanglesIsItsBox) {
+  std::vector<hull_station> st;
+  for (const double x : {-2.0, -0.5, 1.0, 2.0})
+    st.push_back({x, {{0.0, -0.3}, {0.75, -0.3}, {0.75, 0.3}}});
+  const auto h = loft_hull(st);
+  EXPECT_EQ(h->vertices.size(), 4u * 5u + 2u);
+  EXPECT_EQ(h->triangles.size(), 3u * 5u * 2u + 2u * 5u);
+  bool closed = false;
+  EXPECT_NEAR(enclosed(*h, closed), 4.0 * 1.5 * 0.6, 1e-12);
+  EXPECT_TRUE(closed);
+  const auto box = hull_waterline_box(*h, 0.0);
+  ASSERT_TRUE(box.has_value());
+  EXPECT_NEAR(box->x, 0.0, 1e-9);
+  EXPECT_NEAR(box->half_length, 2.0, 1e-9);
+  EXPECT_NEAR(box->half_beam, 0.75, 1e-12);
+  // box_hull's is its box too; no plane through it, no box.
+  const auto b = hull_waterline_box(*box_hull({2.0, 0.75, 0.3}), 0.1);
+  ASSERT_TRUE(b.has_value());
+  EXPECT_NEAR(b->half_length, 2.0, 1e-9);
+  EXPECT_NEAR(b->half_beam, 0.75, 1e-12);
+  EXPECT_FALSE(hull_waterline_box(*h, 0.5).has_value());
+}
+
+// A V hull's waterline box: inside its outline at that height (narrower than its beam, short of its
+// narrowing bow), and the loft closed and wound outward.
+TEST(PhysicsHull, AVHullsWaterlineBoxIsInsideIt) {
+  const auto h = loft_hull(v_stations());
+  bool closed = false;
+  EXPECT_GT(enclosed(*h, closed), 0.0);
+  EXPECT_TRUE(closed);
+  const double z = -0.1, half = 0.5 + 0.25 * (z + 0.25) / 0.25; // the outline at z, amidships
+  const auto box = hull_waterline_box(*h, z);
+  ASSERT_TRUE(box.has_value());
+  std::printf("[hull] V hull at z %.2f: half width %.3f amidships; box centre %.3f, half length "
+              "%.3f, half beam %.3f\n",
+              z, half, box->x, box->half_length, box->half_beam);
+  EXPECT_LE(box->half_beam, half + 1e-9);
+  EXPECT_GT(box->half_beam, 0.5 * half);
+  const double aft = box->x - box->half_length, fore = box->x + box->half_length;
+  EXPECT_GE(aft, -2.0 - 1e-9);
+  EXPECT_LT(fore, 2.0);
+  // Its corners inside the outline where the bow narrows past x = 1, to within one 5 cm bin.
+  EXPECT_GE(half * v_scale(fore) + 0.9 * half * 0.05 + 1e-9, box->half_beam);
+}
+
+TEST(PhysicsHull, BadStationsAreRefused) {
+  const std::vector<hull_station> good = v_stations();
+  EXPECT_NO_THROW(loft_hull(good));
+  EXPECT_THROW(loft_hull({}), std::invalid_argument);
+  EXPECT_THROW(loft_hull({good[0]}), std::invalid_argument);
+  std::vector<hull_station> s = good;
+  s[3].section.pop_back();
+  EXPECT_THROW(loft_hull(s), std::invalid_argument) << "unequal sections";
+  s = good;
+  s[4].x = s[3].x;
+  EXPECT_THROW(loft_hull(s), std::invalid_argument) << "x not increasing";
+  s = good;
+  s[2].section[1][0] = -0.1;
+  EXPECT_THROW(loft_hull(s), std::invalid_argument) << "a negative half width";
+  s = good;
+  for (hull_station &t : s)
+    t.section.resize(1);
+  EXPECT_THROW(loft_hull(s), std::invalid_argument) << "a section of one point";
 }
 
 // --- cost --------------------------------------------------------------------------------
