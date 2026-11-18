@@ -578,6 +578,10 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_gl_cars
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_cars.py)
   set_tests_properties(pycvc_gl_cars PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
+  # pycvc_gl.cars.HostCars: the template's cars in the world the host's own document runs.
+  add_test(NAME pycvc_gl_host_cars
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_host_cars.py)
+  set_tests_properties(pycvc_gl_host_cars PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
   # pycvc_gl.nav_lab: libcvc's policies side by side (arms, the Stats and Ledger windows, the run
   # log) and a run log played back, headless; offscreen when GL is there.
   add_test(NAME pycvc_gl_nav_lab

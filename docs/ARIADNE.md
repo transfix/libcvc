@@ -1817,9 +1817,13 @@ scene:
     own, or its adapter's): `list()` (a dict per entity: identity, pose, speed, energy, the
     command and the intent), `spawn(archetype, name=, controller=, team=, at=(x, y[, yaw°]),
     mass=, max_speed=)` (0 and `why()` when refused), `despawn(id)`, and `set_intent(id, steer=,
-    accel=, mode=, weight=, force=(fx, fy), force_steers=)`, `intent(id)`, `clear_intent(id)`.
+    accel=, mode=, weight=, force=(fx, fy), force_steers=)`, `intent(id)`, `clear_intent(id)`,
+    `set_goal(id, x, y)`, `set_wander(on)` and `grid()` (the navigator's grid, as
+    `pycvc.WorldGym.grid` gives it). Each `list()` entry also carries the entity's velocity,
+    steering, goal, `reached`, `collided` and its body (length, width, wheelbase, its limits).
     `list`, `spawn` and `despawn` run on the thread that runs frames; the intents from any
-    thread.
+    thread. `pycvc_gl.cars.HostCars` drives a host's world's vehicles with the cars template's
+    interface.
   - **One runtime per world.** Each `SceneWorld` has its own physics world, vehicles, policies
     and keys, with nothing process-wide, so a host that runs several worlds runs one each.
 - **Spawn points.** Where a vehicle spawned without a start of its own begins
