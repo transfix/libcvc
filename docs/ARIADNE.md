@@ -1434,16 +1434,18 @@ The gusts (`gustiness`, 0.25) ripple and roughen racing patches of water (cat's 
 alike. In a strong wind the breaking crests throw spray (OCEAN-AND-WEATHER-ROADMAP.md §10.5): drops
 torn off the crests where the cascades fold as the whitecaps are drawn, flying downwind and
 falling back, none where a particle's wind (the mean wind times the gust where and when it rose)
-is below 9 m/s and all of it from 20 m/s. With the gusts the mesh is drawn whenever the mean wind
-times the strongest gust passes 9 m/s: at terrain_lab's 9 m/s and 0.25 gustiness, always. It is
-drawing only: a mesh of its own, `<id>_spray`, whose particles are worked out in its vertex shader
-from the time alone (no state), reading the cascades' atlas the water reads and uniforms, the land,
-the shallows and the lee kept out by a weight on a 16 x 16 grid round the camera (a cell of 25 m at
-the default reach, so near a shore its edge is out by up to that). Keys: `spray` (1; 0 none) and
-`lod_spray` (160 m: how far from the camera it reaches); the prop `spray_count` (8000) is its
-particles. terrain_lab ships with `spray: 0` (not yet checked in a browser). It draws in the
-volume layer, after the cloud deck when a cloud_sky lists the water (or the spray) among its
-receivers, and takes the deck's shade then. With `body: {}` the water is in the scene's
+is below 9 m/s and all of it from 20 m/s. It is off by default until it has been checked in a
+browser: `spray: 1` (or the `spray` key, the Water panel's Spray slider) turns it on. On, the mesh
+is drawn whenever the mean wind times the strongest gust a particle can have (1 + 1.28 x the
+gustiness) passes 9 m/s: at 0.25 gustiness, from a mean wind of about 6.8 m/s. It is drawing
+only: a mesh of its own, `<id>_spray`, whose particles are worked out in its vertex
+shader from the time alone (no state), reading the cascades' atlas the water reads and uniforms,
+the land, the shallows and the lee kept out by a weight on a 16 x 16 grid round the camera (a cell
+of 25 m at the default reach, so near a shore its edge is out by up to that). Keys: `spray` (0
+by default; 1 is all of it) and `lod_spray` (160 m: how far from the camera it
+reaches); the prop `spray_count` (8000) is its particles. It draws in the volume layer, after the
+cloud deck when a cloud_sky lists the water (or the spray) among its receivers, and takes the
+deck's shade then. With `body: {}` the water is in the scene's
 physics world, with or without a renderer ([`scene_water.h`](../inc/cvc/ariadne/scene_water.h)).
 It is one fluid field over the water's extent, its surface the same sea computed on the CPU (the
 cascades fading at the same coast, the same swell), so a body lighter than water floats on the

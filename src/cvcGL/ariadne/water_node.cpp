@@ -1875,7 +1875,7 @@ void tick_spray(cvc::app &app, WaterRT &rt, vtkRenderer *ren, const ari::WaterQu
                    spec.wind_speed * oceanSprayGustMax(spec.gustiness) > 9.0 && reach >= 2.0 &&
                    fadeReach >= 2.0 && count >= 1.0 && rt.shore && rt.shore->grid && ren &&
                    ren->IsActiveCameraCreated();
-  rt.sprayIdle = can ? 0 : rt.sprayIdle + 1;
+  rt.sprayIdle = can ? 0 : std::min(rt.sprayIdle + 1, kSprayIdle + 1); // bounded: no overflow
   if (can && !mesh->isVisible())
     mesh->setVisible(true);
   else if (!can && mesh->isVisible() && rt.sprayIdle > kSprayIdle)
@@ -1931,13 +1931,18 @@ void tick_spray(cvc::app &app, WaterRT &rt, vtkRenderer *ren, const ari::WaterQu
   vtkCamera *c = ren->GetActiveCamera();
   int *size = ren->GetSize();
   const double h = size && size[1] > 0 ? double(size[1]) : 720.0;
-  const double wd = spec.wind_dir * kSprayPi / 180.0;     // the gusts' (the scene's wind)
-  const double sd = fadeSpec.wind_dir * kSprayPi / 180.0; // the waves'
+  // The particles' mean wind (with a storm's gust front, F4) and the gusts' drift (the wind as
+  // authored, which carries their pattern: scene_water_forcing), and the waves' way.
+  const double wd = spec.wind_dir * kSprayPi / 180.0;
+  const double sd = fadeSpec.wind_dir * kSprayPi / 180.0;
   const double U = std::max(spec.wind_speed, 0.0);
+  const double D = std::max(std::isnan(spec.gust_speed) ? spec.wind_speed : spec.gust_speed, 0.0);
+  const double dd = (std::isnan(spec.gust_dir) ? spec.wind_dir : spec.gust_dir) * kSprayPi / 180.0;
   in.f3["sprayCam"] = {float(cam[0]), float(cam[1]), float(cam[2])};
   in.f["sprayTime"] = float(std::fmod(t, 3600.0));
   in.f4["sprayWind"] = {float(U * std::cos(wd)), float(U * std::sin(wd)), float(std::cos(sd)),
                         float(std::sin(sd))};
+  in.f3["sprayDrift"] = {float(D * std::cos(dd)), float(D * std::sin(dd)), 0.0f};
   in.f4["sprayK"] = {float(strength), float(count), float(reach), float(fadeReach)};
   in.f4["sprayTiles"] = {float(rt.cascades[0].band.tile_m), float(rt.cascades[1].band.tile_m),
                          shortOne ? float(rt.cascades[2].band.tile_m) : 0.0f, float(kFftN)};
@@ -2279,7 +2284,8 @@ std::shared_ptr<GraphicsNode> realize_water(SceneGraph &sg, const ari::SceneNode
   // streaks (after the cloud deck once a cloud_sky lists the water, or the spray, among its
   // receivers; else in the renderer's order), out of the bounds and so never culled, shown once
   // the cascades are up in a wind whose gusts could throw spray (tick_spray).
-  rt->sprayKey = seed(app, pref, n, "water.spray", n.props.num("spray", 1.0));
+  // Off by default (`spray: 1` turns it on) until its shader has been checked in a browser.
+  rt->sprayKey = seed(app, pref, n, "water.spray", n.props.num("spray", 0.0));
   rt->lodSprayKey = seed(app, pref, n, "water.lod_spray", n.props.num("lod_spray", 160.0));
   rt->sprayCount = std::clamp(static_cast<int>(n.props.num("spray_count", 8000.0)), 0, 65536);
   if (rt->sprayCount > 0) {

@@ -51,17 +51,18 @@ struct fetch_field;
 // bias and ramp), or at the crest it left, carried on along the waves at their crests' speed since
 // (the fold moves with its crest while the drop flies), the harder; each fold faded by the weight
 // grid below (the shallows and the fetch: calm water in the lee throws none); times how much its
-// wind raises (oceanSprayAmount). Its wind is the mean wind times the gust where and when it rose
-// (cvc_wind_gust_at, WindGLSL.h, its fine scale left out: the gusts' pattern of now carried back
-// upwind by its age, and the whole wind's pulse of then, from sprayPulse), so one wind for its
-// whole flight. A particle shows when that beats its cycle's draw, so the spray thickens with the
-// breaking and the wind. It leaves the crest (the water's level plus the wind sea's crest, half
-// its significant height, faded by the weight below, times a draw of its own) with part of its
-// wind's speed and an upward kick of its own draw (2.5 to 9 m/s), and flies under gravity with
-// drag toward the wind, dV/dt = k (W - V) - g z, in closed form; it ends when it falls back to the
-// height it left or its cycle ends. Nothing in its flight changes while it flies. Particles past
-// the count drawn (sprayK.y) are put off screen first thing, so a mesh kept in the renderer with
-// a count of 0 costs a few instructions a vertex.
+// wind raises (none below 9 m/s, all of it from 20: Beaufort 5, where spray begins, to 8, where
+// spindrift streaks the sea, smoothstep between). Its wind is the mean wind times the gust where
+// and when it rose (cvc_wind_gust_at, WindGLSL.h, its fine scale left out: the gusts' pattern of
+// now carried back by their drift over its age, and the whole wind's pulse of then, sprayPulse),
+// so one wind for its whole flight. A particle shows when that beats its cycle's draw, so the spray
+// thickens with the breaking and the wind. It leaves the crest (the water's level plus the wind
+// sea's crest, half its significant height, faded by the weight below, times a draw of its own)
+// with part of its wind's speed and an upward kick of its own draw (2.5 to 9 m/s), and flies under
+// gravity with drag toward the wind, dV/dt = k (W - V) - g z, in closed form; it ends when it falls
+// back to the height it left or its cycle ends. Nothing in its flight changes while it flies.
+// Particles past the count drawn (sprayK.y) are put off screen first thing, so a mesh kept in the
+// renderer with a count of 0 costs a few instructions a vertex.
 //
 // Not the persistent foam's spray channel (OceanFoam's .a), which section 10.2 kept for this: the
 // persistent foam holds only the long and middle cascades' folds, and in a 24 m/s wind on
@@ -77,7 +78,8 @@ struct fetch_field;
 // water and the ground.
 //
 // Uniforms (vertex): sprayDisp (the atlas), sprayCam, sprayTime (s, wrapping each hour), sprayWind
-// (the mean wind's x, y in m/s, and the waves' unit direction), sprayK (strength, count, the tiles'
+// (the mean wind's x, y in m/s, and the waves' unit direction), sprayDrift (the gusts' drift, x, y
+// m/s: the wind as authored, without a storm's gust front), sprayK (strength, count, the tiles'
 // reach m, the fade's reach m), sprayTiles (the three tiles' sizes m, 0 for a cascade not drawn,
 // and the atlas's n), sprayFold (the whitecaps' bias and ramp, the crests' speed m/s, the water's
 // level m), sprayCrest (m over the level), sprayGrid (x0, y0, cell m), sprayWeight[64] (16 x 16
@@ -98,10 +100,8 @@ const char *oceanSprayVsImpl();
 const char *oceanSprayFsDec();
 std::string oceanSprayLight(bool shaded);
 
-// How much spray a wind (U10, m/s) tears off the crests: none below 9 m/s, all of it from 20
-// (Beaufort 5, where spray begins, to 8, where spindrift streaks the sea), smoothstep between.
-double oceanSprayAmount(double wind_mps);
-// The most a gust of cvc::algo::wind_gust can raise the mean wind by, at this gustiness (a factor).
+// The most a particle's gust (cvc::algo::wind_gust without its fine scale) raises the mean wind by,
+// at this gustiness (a factor): the mesh is drawn only when the mean wind times it passes 9 m/s.
 double oceanSprayGustMax(double gustiness);
 // The three sines' phases of the whole wind's pulse (cvc::algo::gust_pulse) at clock time t,
 // reduced modulo 2 pi in double precision: sprayPulse, from which the shader works out the pulse

@@ -41,8 +41,8 @@ repository.
 Compiled into libcvc (its wave spectrum, `cvc/ocean/spectrum.h`, the wind's gusts and the currents,
 `cvc/algo/wind_field.h` and `cvc/ocean/current.h`, and the cumulonimbus maps of
 `cvc/world/cloud_layer.h`), cvcGL (the cloud deck's dark storm bases, the rain's streaks, the lightning bolts, the wind-blown spray) and the cvcGL examples:
-[ABYSSAL](#abyssal). Compiled into cvcGL (the wind-blown spray's hash):
-[Hash without Sine](#hash-without-sine-dave-hoskins).
+[ABYSSAL](#abyssal). Compiled into cvcGL (the hash of the spray's particles, the rain's streaks and
+the rain's rings on water): [Hash without Sine](#hash-without-sine-dave-hoskins).
 
 Installed with cvcGL (`share/libcvc/fonts`) and embedded in the browser hosts (arigl-web, cyprty):
 the fonts the ImGui overlay falls back on, [DejaVu Sans Mono](#dejavu-sans-mono-237) and
@@ -1029,8 +1029,10 @@ here the particles are a closed form of time in the vertex shader, not state in 
 
 ## Hash without Sine (Dave Hoskins)
 
-The spray's per-particle hash in `src/cvcGL/ocean/OceanSpray.cpp` (`sprayHash`) is Dave Hoskins'
-"Hash without Sine" (`hash31`, shadertoy.com/view/4djSRW), whose notice:
+Dave Hoskins' "Hash without Sine" (shadertoy.com/view/4djSRW) is in three of cvcGL's shaders: the
+spray's per-particle hash in `src/cvcGL/ocean/OceanSpray.cpp` (`sprayHash`) and the rain's streaks'
+in `src/cvcGL/ariadne/weather_node.cpp` (`rainHash`) are its `hash31`, and the rain rings' cell
+hash in `src/cvcGL/ariadne/lsystem_nodes.cpp` (`cloudHash3`) follows its `hash32`. Its notice:
 
 ```
 MIT License

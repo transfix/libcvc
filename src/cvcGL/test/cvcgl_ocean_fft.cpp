@@ -353,10 +353,12 @@ int main() {
     const cvc::algo::wind_state gusty{10.0, 0.4, 0.6};
     double most = 0.0;
     for (int i = 0; i < 20000; ++i)
-      most = std::max(most, cvc::algo::wind_gust(gusty, 37.0 * i, -11.0 * i, 0.37 * i));
-    std::printf("  the strongest gust of 20000 at gustiness 0.6: x %.3f (bound x %.3f)\n", most,
-                oceanSprayGustMax(0.6));
-    check(most <= oceanSprayGustMax(0.6), "no gust raises the wind past oceanSprayGustMax");
+      most = std::max(most, cvc::algo::wind_gust(gusty, 37.0 * i, -11.0 * i, 0.37 * i, 0.0));
+    std::printf("  the strongest particle gust (no fine scale) of 20000 at gustiness 0.6: x %.3f "
+                "(bound x %.3f)\n",
+                most, oceanSprayGustMax(0.6));
+    check(most <= oceanSprayGustMax(0.6) && most > 0.9 * oceanSprayGustMax(0.6),
+          "no particle's gust passes oceanSprayGustMax, and the bound is near the most one is");
     // A 4 x 4 shore grid 10 m a cell: land in its first two columns, 1 m deep in the third, 50 m
     // in the fourth (and past it); the waves fade over 20 m of depth.
     cvc::ocean::shore_grid g;

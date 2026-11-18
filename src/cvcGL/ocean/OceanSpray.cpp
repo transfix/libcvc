@@ -34,7 +34,7 @@ uniform highp sampler2D sprayDisp;
 uniform vec3 sprayCam; uniform float sprayTime; uniform vec4 sprayWind; uniform vec4 sprayK;
 uniform vec4 sprayTiles; uniform vec4 sprayFold; uniform vec4 sprayGrid;
 uniform vec4 sprayWeight[64]; uniform vec3 sprayPulse;
-uniform float sprayPixel; uniform vec3 spraySun; uniform float sprayCrest;
+uniform float sprayPixel; uniform vec3 spraySun; uniform float sprayCrest; uniform vec3 sprayDrift;
 out vec2 vSprayUv; out float vSprayFade; out float vSprayThin; out float vSprayMu;
 // Dave Hoskins' Hash without Sine (hash31), MIT.
 vec3 sprayHash(float n) {
@@ -105,7 +105,7 @@ const char *const kVsImpl = R"(  float id = vertexMC.z;
     // its wind: the mean wind times the gust where and when it rose (the gusts' pattern then is
     // now's carried back upwind, and the whole wind's pulse then), so one wind for its whole
     // flight; and how much spray that wind tears off (9 to 20 m/s)
-    float gust = cvc_wind_gust_at(p0 + sprayWind.xy * age, 0.0, sprayPulseAt(age));
+    float gust = cvc_wind_gust_at(p0 + sprayDrift.xy * age, 0.0, sprayPulseAt(age));
     vec3 W = vec3(sprayWind.xy * gust, 0.0);
     float share = smoothstep(9.0, 20.0, length(sprayWind.xy) * gust);
     // what breaks: the whitecaps' fold at its spawn point now, or at the crest it left, carried on
@@ -212,11 +212,10 @@ std::string oceanSprayLight(bool shaded) {
   return s;
 }
 
-double oceanSprayAmount(double wind_mps) { return smooth01((wind_mps - 9.0) / (20.0 - 9.0)); }
-
 double oceanSprayGustMax(double gustiness) {
-  // cvc::algo::wind_gust: 1 + g (2.4 (n - 0.5) + 0.5 pulse), n in [0, 1), |pulse| <= 1
-  return 1.0 + std::max(gustiness, 0.0) * (1.2 + 0.5);
+  // cvc::algo::wind_gust as the particles read it, without its fine scale: 1 + g (2.4 (n - 0.5) +
+  // 0.5 pulse) with n = 0.65 n_large + 0.175 below 0.825 and |pulse| <= 1, so 1 + g (0.78 + 0.5)
+  return 1.0 + std::max(gustiness, 0.0) * (0.78 + 0.5);
 }
 
 std::array<float, 3> oceanSprayPulse(double t) {

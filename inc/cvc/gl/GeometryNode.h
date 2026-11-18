@@ -250,6 +250,15 @@ public:
   // bounds, the actor has none (its GetBounds is null), so VTK's frustum culler never culls it: a
   // procedural mesh placed by its vertex shader (the rain's streaks, the water's spray) would
   // otherwise be culled by the bounds of the vertices it was given.
+  //
+  // A null GetBounds is what a 2-D prop gives, and VTK's renderer (ComputeVisiblePropBounds), its
+  // pickers (vtkPicker, vtkPropPicker), its shadow map bake and cvcGL's own shadow fit
+  // (SceneGraph.cpp's StridedShadowBaker) and bounds walks check for it. vtkAreaPicker does not (it
+  // reads the bounds of any pickable prop with a mapper): nothing in libcvc uses it, but one that
+  // does must make such a mesh unpickable. The shadow fit leaves these meshes out: the sky's far
+  // slices (a VolSliceNode is a GeometryNode), the lightning bolt, the rain's streaks and the
+  // spray, none of which casts a shadow, so in a cloud_sky scene the box the light's shadow map is
+  // fitted to no longer takes in the far slices (and its depth range changes with it).
   void setUseBounds(bool on);
 
   // Draw this mesh in VTK's volume layer instead of with the opaque or translucent geometry: in its
