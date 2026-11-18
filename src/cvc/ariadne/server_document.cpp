@@ -84,14 +84,6 @@ std::string check_against_prefix(const ServerBlock &block, const std::string &pr
   return std::string();
 }
 
-// The nodes under `nodes` (their children too) that have a body:.
-std::size_t count_bodies(const std::vector<SceneNode> &nodes) {
-  std::size_t n = 0;
-  for (const SceneNode &node : nodes)
-    n += (node.body.present ? 1 : 0) + count_bodies(node.children);
-  return n;
-}
-
 } // namespace
 
 std::string check_published_namespace(const std::string &ns) {
@@ -232,16 +224,10 @@ ServerDocument::ServerDocument(cvc::app &app, std::string room, std::string pref
                                "]");
     block_ = std::move(b);
     plant();
-    // The scene stays here instead of in the load, which would only say it was ignored. The
-    // relay publishes it into the room (room_world_from_scene, WD1); its physics waits for the
-    // world runtime.
-    scene_ = std::move(lr.scene);
-    lr.scene = Scene{};
-    const std::size_t bodies = count_bodies(scene_.nodes);
-    if (scene_.physics.present || bodies > 0)
-      lr.warnings.push_back(path + ": its scene's physics (" + std::to_string(bodies) +
-                            " bodies) is kept but not simulated yet: the headless world runtime "
-                            "(ARIADNE_WORLDS.md §14) will make it the holon's");
+    // The relay publishes the scene into the room (room_world_from_scene, WD1) from this copy,
+    // and the load runs its world headless (SceneWorld: its physics, its world sources and
+    // vehicles, on the world clock; ARIADNE_WORLDS.md §14), apart from the holon's.
+    scene_ = lr.scene;
   });
 }
 

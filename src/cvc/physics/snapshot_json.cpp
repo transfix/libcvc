@@ -531,6 +531,12 @@ std::string to_json(const world_snapshot &s, json_bodies which) {
     w.key("damping").number(f.desc.damping);
     if (f.desc.inertial) // written only when set, so a world without one reads as it did
       w.key("inertial").boolean(true);
+    if (f.desc.wake.on()) { // likewise
+      w.key("wake").begin_object();
+      w.key("cells").integer(static_cast<std::uint64_t>(f.desc.wake.cells));
+      w.key("cell").number(f.desc.wake.cell);
+      w.end_object();
+    }
     w.key("traction").number(f.desc.traction);
     w.key("ruts").boolean(f.desc.ruts);
     w.key("rut_cell").number(f.desc.rut_cell);

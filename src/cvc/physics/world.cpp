@@ -159,6 +159,7 @@ constexpr char kRutMagic[8] = {'C', 'V', 'C', 'R', 'U', 'T', 'S', '1'};
 constexpr char kSurfaceMagic[8] = {'C', 'V', 'C', 'S', 'U', 'R', 'F', '1'};
 constexpr char kHullMagic[8] = {'C', 'V', 'C', 'H', 'U', 'L', 'L', '1'};
 constexpr char kBoatMagic[8] = {'C', 'V', 'C', 'B', 'O', 'A', 'T', '1'};
+constexpr char kWakeMagic[8] = {'C', 'V', 'C', 'W', 'A', 'K', 'E', '1'};
 
 struct state_header {
   char magic[8];
@@ -365,6 +366,11 @@ struct world::impl {
     if (boats.size() > 0) {
       trailer.append(kBoatMagic, sizeof(kBoatMagic));
       boats.save(trailer);
+    }
+    // Then, when a fluid has a wake (field::wake), its window and its bodies' waves.
+    if (fields.has_wakes()) {
+      trailer.append(kWakeMagic, sizeof(kWakeMagic));
+      fields.save_wakes(trailer);
     }
     std::vector<std::uint8_t> out(sizeof(h) + engine.size() + trailer.size());
     std::memcpy(out.data(), &h, sizeof(h));
@@ -819,6 +825,16 @@ rut_map world::field_ruts(field_id id) const {
   return guarded([&] { return _impl->fields.ruts(id); });
 }
 
+wake_info world::field_wake_info(field_id id) const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return guarded([&] { return _impl->fields.wake(id); });
+}
+
+double world::field_wake_height(field_id id, double x, double y) const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return guarded([&] { return _impl->fields.wake_height(id, x, y); });
+}
+
 vehicle_id world::add_vehicle(const vehicle_desc &d, const vec3 &position, const quat &rotation) {
   if (!finite(position) || !finite(rotation) || !unit_length(rotation))
     throw cvc::physics_error("add_vehicle: a finite position and a unit rotation are required");
@@ -1035,9 +1051,10 @@ void world::restore(const std::vector<std::uint8_t> &state) {
   const bool want_surfaces = _impl->fields.has_surfaces();
   const bool want_hulls = _impl->fields.has_hulls();
   const bool want_boats = _impl->boats.size() > 0;
+  const bool want_wakes = _impl->fields.has_wakes();
   if (want_vehicles != section(0, kVehicleMagic) ||
       (!want_vehicles && !want_ruts && !want_surfaces && !want_hulls && !want_boats &&
-       !rest.empty()))
+       !want_wakes && !rest.empty()))
     throw cvc::physics_error("restore: this world does not hold the vehicles the state was "
                              "saved with");
   guarded([&] { _impl->be->restore_engine(engine, origin); });
@@ -1076,6 +1093,12 @@ void world::restore(const std::vector<std::uint8_t> &state) {
       throw cvc::physics_error("restore: this world's boats differ from the state's");
     pos += sizeof(kBoatMagic);
     _impl->boats.restore(rest, pos);
+  }
+  if (want_wakes) {
+    if (!section(pos, kWakeMagic))
+      throw cvc::physics_error("restore: this world's wakes differ from the state's");
+    pos += sizeof(kWakeMagic);
+    _impl->fields.restore_wakes(rest, pos);
   }
   if (pos != rest.size())
     throw cvc::physics_error("restore: the state's length does not match its sections");

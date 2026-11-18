@@ -1415,7 +1415,7 @@ so its own flat water rungs do not draw over it. The cascades need float render 
 them the water is flat blue. Live keys under the node's root (`water.` unless `keys:`):
 `wind_speed`, `wind_dir`, `gustiness`, `fetch`, `lee`, `sea_lag`, `sea_fade`, `current`, `chop`,
 `wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`, `foam_fray`, `foam_decay`, `shore_fade`,
-`swell_height`, `swell_period`, `swell_dir`, `shore_foam`, `wake`, `wake_foam`, `lod_foam`,
+`swell_height`, `swell_period`, `swell_dir`, `shore_foam`, `wake`, `wake_foam`, `wake_push`, `lod_foam`,
 `lod_shade`, `lod_waves`, `quality` and `profile`, most on `water_controls.ari`. `quality` (-1)
 follows the scene's adaptive quality (below); 0 to 4 holds the water at that tier. `profile` 1 times
 the node's work each frame, section by section, into `water.stats.<section>_ms` (2 also waits for
@@ -1456,7 +1456,20 @@ generated world's bodies. The bodies make waves: an eWave window of 128 m of 0.5
 camera's target takes each moving body's immersed columns as its source, so a dropped crate makes a
 ring and a bobbing one keeps radiating. Its waves move the near grid and shade both grids, foaming
 where they are sharp or fast (`wake_foam`). Beaches absorb them and steep shores reflect them
-(`wake: 0` turns the window off). They are drawn only: they do not push the bodies back. With a
+(`wake: 0` turns the window off). Those are drawn only. With `wake_push: 1` (off by default;
+`water_controls.ari`'s "Wakes push bodies") the waves push the bodies too
+(OCEAN-AND-WEATHER-ROADMAP.md C5, D6; `cvc::physics::field_wake`): the field keeps a physics wake,
+a window of `wake_push_cells` cells of `wake_push_cell` metres (64 of 1 m; `wake_push_depth` m deep,
+0 for deep water) where it holds the most floating bodies (a boat counting as four), stepped inside
+the physics step. Every awake body's immersed columns make waves in a state of its own, and every body
+is pushed by the others' waves (their height under its cells and hull, their orbital velocity and
+their acceleration), never its own, so the launches rock in each other's wakes and a crate's
+splash rocks the boat beside it while a body alone floats exactly as it did. It is physics: the
+same on every host and at every frame rate, saved and restored with the world and in its state
+hash; with it off the world is bit for bit as before. It has no shores (a wake runs on over land,
+where nothing floats, and does not reflect), and a boat's propeller and rudder read the water
+without it. Bodies outside its window (a group farther away than the window is wide) make and
+feel none. With a
 swell, the swash runs up the beach on the ground itself. The node adds it to the fragment shader
 of every mesh under its ground node (the `world:` / `ground:` node, found by id at the top of the
 scene, its LOD rungs and regenerated chunks included), as the cloud deck adds its shade to its
@@ -1869,11 +1882,21 @@ scene:
     publishes the namespace (`server: publish: [drive]`), the relay replicates it, and its program
     writes `(state-set "drive.lead.intent.accel" "2")`. The C++ setter, `set_intent`,
     `clear_intent` and `intent`, may be called from any thread.
+  - **The vehicles a world starts with.** `world: vehicles: start:` lists them, spawned when the
+    world's vehicles are made, before anything asks: each entry is `archetype:` (required),
+    `count:` (1 to 256), and the spawn's `name:` (numbered " 1", " 2", ... when the count is more
+    than one), `team:`, `controller:`, `plant:` and `policy:`, plus `at: [x, y]` and `heading:`
+    (degrees) for a fixed start; without `at:` each takes a free point or a spawn point. A
+    document's `init:` runs before the world is made, and the runtime ignores a spawn request
+    already set when it starts (a reload would spawn again), so this is how a document, a server
+    document included, populates its world. A gym's reset clears them and spawns its own agents.
   - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,
     `color`, `color2` as `r,g,b`, `metadata` as `key=value, ...`, `controller`, `policy`,
     `policy_sha256`, `mass` or `mass_t` (a fraction of the range), `max_speed` or `max_speed_t`,
     and `at` as `x,y[,heading in degrees]`; empty: a free point), then change
-    `vehicles.spawn.request`. The result is in `vehicles.spawn.status`. `vehicles.remove.id`
+    `vehicles.spawn.request`. `vehicles.spawn.count` spawns that many at once (1 when empty; at
+    most 256), each at a free point of its own unless `at` names one. The result is in
+    `vehicles.spawn.status`. `vehicles.remove.id`
     with `remove.request` removes one, and `clear.request` removes them all.
   - **Drawing.** cvcGL draws each entity on its chassis, posed between steps as the other moving
     bodies are. The box look poses each wheel where its plant has it

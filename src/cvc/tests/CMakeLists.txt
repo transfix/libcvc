@@ -3523,7 +3523,11 @@ cvc_discover_tests(room_chat_test)
 cvc_discover_tests(room_aoi_test)
 cvc_discover_tests(room_aoi_relay_test)
 cvc_discover_tests(physics_codec_test)
-cvc_discover_tests(physics_field_test)
+# The wake's long runs (packed crates settling for 120 s, the cost on a three-cascade sea) take
+# 12-15 s each in a Release build and many times that in a Debug or sanitizer build (not measured
+# here), which may pass the 300 s a test without a TIMEOUT of its own gets there (ci.yml): their
+# own budget, as the water's.
+cvc_discover_tests(physics_field_test PROPERTIES TIMEOUT 1200)
 cvc_discover_tests(physics_hull_test)
 cvc_discover_tests(physics_immersion_test)
 cvc_discover_tests(physics_boat_test)
