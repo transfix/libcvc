@@ -1355,6 +1355,8 @@ struct ConferenceSession {
                    static_cast<unsigned long long>(logged_realigns_));
     }
     room_view_->update(*holon_, f.wall_dt);
+    if (entities_)
+      room_view_->update_entities(*entities_);
     log_lod();
     // Log who is drawn whenever that changes (the browser page shows stderr in its footer and the
     // console): the quickest check that a client sees the room the relay holds.
