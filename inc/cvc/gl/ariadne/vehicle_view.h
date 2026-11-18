@@ -57,6 +57,18 @@ cvc::ariadne::SceneNode vehicle_scene_node(const std::string &id,
                                            const vehicle_shape &shape, const float color[3],
                                            const float color2[3]);
 
+// The fitted vehicle models a view keeps (each model read and fitted once): one per view that
+// draws vehicles, made here (a realized scene has one, room_view another).
+std::shared_ptr<vehicle_model_cache> make_vehicle_model_cache();
+// A fitted file look (`look.kind` file, `look.fit`) under `group` as node `id`: the model scaled
+// to the chassis's length, its base `base_z` below the group's origin (the ground under the
+// chassis's centre, negative), turned and lifted by the look's yaw and z, in `color` when it has
+// no texture. False when the model cannot be read (a warning says why); draw the box look then.
+bool attach_vehicle_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group,
+                          const std::string &id, const cvc::ariadne::vehicle_look &look,
+                          const vehicle_shape &shape, double base_z, const float color[3],
+                          std::vector<std::string> *warnings = nullptr);
+
 // A boat's hull as drawn (OCEAN-AND-WEATHER-ROADMAP.md D5): its hull_mesh, flat-shaded, about the
 // hull body's origin. Its topsides are `topsides`, with a band of `stripe` just over the waterline
 // it floats at in fresh water; below that line it is a dark red, the hull darker where it is wet. A

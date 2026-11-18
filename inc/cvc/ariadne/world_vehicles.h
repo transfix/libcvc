@@ -94,8 +94,9 @@ physics::vehicle_desc vehicle_desc_of(const vehicle_archetype &a, double mass = 
 physics::dyn_boat_desc boat_desc_of(const vehicle_archetype &a, double mass = 0.0,
                                     double max_speed = 0.0);
 
-// A vehicle model's file by name (`humvee`: Humvee.glb; any other name is taken as the file's
-// name), where the vehicle-humvee cvcpkg package installs it: beside $CVC_NAV_BUNDLE (in it, or
+// A vehicle model's file by name (`humvee`: Humvee.glb; any other name is the file's name, a
+// name without an extension its .glb: TacticalBoat, TacticalBoat.glb), where the vehicle-*
+// cvcpkg packages install them: beside $CVC_NAV_BUNDLE (in it, or
 // in its ../shared), then in share/cvc-scenes/shared and share/cvc-scenes/*/ under $CVC_PREFIX,
 // $CVCPKG_PREFIX, $CONDA_PREFIX and the running program's prefix. "" when there is none.
 std::string find_vehicle_model(const std::string &name);
