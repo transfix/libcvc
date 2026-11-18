@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cvc/ocean/h0.h>
+#include <string>
 #include <vtkOpenGLFramebufferObject.h>
 #include <vtkOpenGLQuadHelper.h>
 #include <vtkOpenGLRenderWindow.h>
@@ -19,6 +20,7 @@
 #include <vtkPixelBufferObject.h>
 #include <vtkShaderProgram.h>
 #include <vtkTextureObject.h>
+#include <vtk_glad.h> // glGenerateMipmap: the slopes' mipmaps
 
 namespace {
 constexpr unsigned int kGL_SCISSOR_TEST = 0x0C11;
@@ -83,6 +85,28 @@ const char *const kAssembleFS =
     "  float jac = (1.0+lx)*(1.0+lz) - lxz*lxz;\n"
     "  gl_FragData[0] = vec4(uLambda*Dx, Dy, uLambda*Dz, jac);\n"
     "}\n";
+
+// Every cascade's height slopes from its two transformed buffers (the time pass's DyDx, buffer 0's
+// .w, and DyDz, buffer 1's .x, with the assemble's sign), cascade c into draw buffer c: a layer of
+// the slope array each. Written for `cascades` of them (a draw buffer each).
+std::string slope_fs(int cascades) {
+  std::string s = "//VTK::System::Dec\n"
+                  "uniform sampler2D uBuf;\n"
+                  "uniform int uN;\n"
+                  "//VTK::Output::Dec\n"
+                  "vec2 slope(int c, ivec2 p, float perm){\n"
+                  "  return perm*vec2(texelFetch(uBuf, ivec2(2*c*uN + p.x, p.y), 0).w,\n"
+                  "                   texelFetch(uBuf, ivec2((2*c + 1)*uN + p.x, p.y), 0).x);\n"
+                  "}\n"
+                  "void main(){\n"
+                  "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
+                  "  float perm = (((p.x + p.y) & 1) == 0) ? 1.0 : -1.0;\n";
+  for (int c = 0; c < cascades; ++c) {
+    const std::string i = std::to_string(c);
+    s += "  gl_FragData[" + i + "] = vec4(slope(" + i + ", p, perm), 0.0, 1.0);\n";
+  }
+  return s + "}\n";
+}
 } // namespace
 
 OceanCascades::OceanCascades(int n, int cascades)
@@ -105,11 +129,42 @@ bool OceanCascades::init(vtkOpenGLRenderWindow *rw) {
     std::fprintf(stderr, "OceanCascades: RGBA32F texture allocation failed.\n");
     return false;
   }
+  // The slope layers: half floats, repeating, filtered through their mipmaps (anisotropically
+  // where the context can).
+  m_slope = vtkSmartPointer<vtkTextureObject>::New();
+  m_slope->SetContext(m_rw);
+  m_slope->SetInternalFormat(GL_RG16F);
+  m_slope->SetWrapS(vtkTextureObject::Repeat);
+  m_slope->SetWrapT(vtkTextureObject::Repeat);
+  m_slope->SetMinificationFilter(vtkTextureObject::LinearMipmapLinear);
+  m_slope->SetMagnificationFilter(vtkTextureObject::Linear);
+  m_slope->SetMaximumAnisotropicFiltering(16.0f);
+  if (!m_slope->Create2DArrayFromRaw(m_n, m_n, 2, VTK_FLOAT, m_c, nullptr)) {
+    std::fprintf(stderr, "OceanCascades: RG16F texture array allocation failed.\n");
+    return false;
+  }
   m_fbo = vtkSmartPointer<vtkOpenGLFramebufferObject>::New();
   m_fbo->SetContext(m_rw);
+  m_slopeFbo = vtkSmartPointer<vtkOpenGLFramebufferObject>::New();
+  m_slopeFbo->SetContext(m_rw);
+  // A layer on each color attachment, by hand: vtkOpenGLFramebufferObject::AddColorAttachment
+  // attaches a texture array's layer as a 2D texture, which leaves the attachment empty.
+  m_rw->GetState()->PushFramebufferBindings();
+  m_slopeFbo->Bind();
+  for (int c = 0; c < m_c; ++c)
+    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(c),
+                              m_slope->GetHandle(), 0, c);
+  const bool slopeOk = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+  m_rw->GetState()->PopFramebufferBindings();
+  if (!slopeOk) {
+    std::fprintf(stderr, "OceanCascades: the slope layers are not a complete framebuffer.\n");
+    return false;
+  }
   m_time = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, kTimeFS, nullptr);
   m_assemble = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, kAssembleFS, nullptr);
-  if (!m_time->Program || !m_assemble->Program) {
+  m_slopePass =
+      std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, slope_fs(m_c).c_str(), nullptr);
+  if (!m_time->Program || !m_assemble->Program || !m_slopePass->Program) {
     std::fprintf(stderr, "OceanCascades: a shader program failed to build.\n");
     return false;
   }
@@ -190,13 +245,55 @@ void OceanCascades::step(double timeSeconds) {
   p->SetUniformi("uN", m_n);
   p->SetUniformf("uLambda", chop);
   m_assemble->Render();
+  ++m_passes;
+
+  // every cascade's slopes, one pass (a layer a draw buffer), then their mipmaps
+  m_slopeFbo->Bind();
+  m_slopeFbo->ActivateDrawBuffers(static_cast<unsigned int>(m_c));
+  m_rw->GetState()->vtkglViewport(0, 0, m_n, m_n);
+  cache->ReadyShaderProgram(m_slopePass->Program);
+  p = m_slopePass->Program;
+  p->SetUniformi("uBuf", buf->GetTextureUnit());
+  p->SetUniformi("uN", m_n);
+  m_slopePass->Render();
   buf->Deactivate();
   ++m_passes;
+  m_slope->Activate();
+  glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+  m_slope->Deactivate();
 
   m_rw->GetState()->PopFramebufferBindings();
 }
 
 vtkTextureObject *OceanCascades::displacement() const { return m_ready ? m_disp.Get() : nullptr; }
+
+vtkTextureObject *OceanCascades::slopes() const { return m_ready ? m_slope.Get() : nullptr; }
+
+std::vector<float> OceanCascades::readbackSlopes(int c) const {
+  std::vector<float> out;
+  if (!m_ready || c < 0 || c >= m_c)
+    return out;
+  m_rw->MakeCurrent();
+  m_rw->GetState()->PushFramebufferBindings();
+  m_slopeFbo->Bind();
+  m_slopeFbo->ActivateReadBuffer(static_cast<unsigned int>(c));
+  int extent[4] = {0, m_n - 1, 0, m_n - 1};
+  vtkSmartPointer<vtkPixelBufferObject> pbo;
+  pbo.TakeReference(m_slopeFbo->DownloadColor4(extent, VTK_FLOAT));
+  m_rw->GetState()->PopFramebufferBindings();
+  if (!pbo)
+    return out;
+  auto *data = static_cast<float *>(pbo->MapPackedBuffer());
+  if (data) {
+    out.resize(std::size_t(m_n) * m_n * 2);
+    for (std::size_t i = 0; i < std::size_t(m_n) * m_n; ++i) {
+      out[i * 2] = data[i * 4];
+      out[i * 2 + 1] = data[i * 4 + 1];
+    }
+    pbo->UnmapPackedBuffer();
+  }
+  return out;
+}
 
 std::vector<float> OceanCascades::readbackDisplacement() const {
   std::vector<float> out;
@@ -218,8 +315,9 @@ std::vector<float> OceanCascades::readbackDisplacement() const {
 void OceanCascades::releaseResources() {
   m_time.reset();
   m_assemble.reset();
+  m_slopePass.reset();
   m_fft.release();
-  m_fbo = nullptr;
-  m_h0 = m_a = m_b = m_disp = nullptr;
+  m_fbo = m_slopeFbo = nullptr;
+  m_h0 = m_a = m_b = m_disp = m_slope = nullptr;
   m_ready = false;
 }

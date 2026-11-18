@@ -44,13 +44,20 @@ struct h0_field;
 //     2 c + 1 its buffer 1 (2 cascades x n by n), two of them ping-ponged;
 //   - displacement(): tile c cascade c's displacement and Jacobian, OceanFFT's layout per tile
 //     (.x = chop Dx, .y = height, .z = chop Dz, .w = J).
+//   - slopes(): not an atlas but a 2D texture array, layer c cascade c's height slopes (.x =
+//     dh/dx, .y = dh/dz: the spectrum's own derivatives, which the time pass works out for the
+//     buffers anyway), half floats, repeating and mipmapped. A fragment reads it through the
+//     hardware's filter (textureGrad) at its own footprint, so the slopes a pixel cannot resolve
+//     average away instead of aliasing; one sampler for all the cascades. RG16F is filterable in
+//     WebGL2 and renderable with the EXT_color_buffer_float the passes need anyway.
 // One time pass writes every buffer, 2 log2 n butterfly passes transform every tile
-// (OceanButterfly with tiles), one assemble writes every displacement: 18 passes for three
-// 256^2 cascades. The atlas is nearest and clamped: a shader reads tile c at texel (c n + i, j)
-// with i, j wrapped into the tile (texelFetch), which is also one sampler for all the cascades.
-// Each cascade's tiles sit together, so the first k cascades are the atlases' left part: with
-// setActive(k) the passes cover only that (adaptive quality, scene_quality.h, drops the short
-// cascade so). Fragment ping-pong only, texelFetch only (WebGL2).
+// (OceanButterfly with tiles), one assemble writes every displacement and one more every slope
+// layer (a draw buffer a layer), then the slopes' mipmaps: 19 passes for three 256^2 cascades. The
+// atlas is nearest and clamped: a shader reads tile c at texel (c n + i, j) with i, j wrapped into
+// the tile (texelFetch), which is also one sampler for all the cascades. Each cascade's tiles sit
+// together, so the first k cascades are the atlases' left part: with setActive(k) the passes cover
+// only that (adaptive quality, scene_quality.h, drops the short cascade so). Fragment ping-pong
+// only; texelFetch only but for the slopes' filtered reads (WebGL2).
 class OceanCascades {
 public:
   // n a power of two; cascades in 1 .. 3.
@@ -70,7 +77,7 @@ public:
   // wrong resolution or cascade.
   bool setH0(int c, const cvc::ocean::h0_field &h0);
 
-  // Every active cascade to time t: 2 + 2 log2 n passes.
+  // Every active cascade to time t: 3 + 2 log2 n passes (and the slopes' mipmaps).
   void step(double timeSeconds);
 
   // How many cascades step() transforms, from the first (1 .. cascades(); all after init). The
@@ -80,6 +87,9 @@ public:
 
   vtkTextureObject *displacement() const;          // the displacement atlas (null until init)
   std::vector<float> readbackDisplacement() const; // its texels: (cascades n) x n RGBA, row-major
+  vtkTextureObject *slopes() const;                // the slope layers (null until init)
+  // Cascade c's slope layer at mip level 0: n x n (dh/dx, dh/dz) pairs, row-major; empty if none.
+  std::vector<float> readbackSlopes(int c) const;
   int resolution() const { return m_n; }
   int cascades() const { return m_c; }
   double tileSize(int c) const { return c >= 0 && c < m_c ? m_tile[std::size_t(c)] : 0.0; }
@@ -98,9 +108,10 @@ private:
   std::vector<double> m_tile;
   std::vector<std::vector<float>> m_h0Host; // each cascade's texels (empty: flat)
   OceanButterfly m_fft;
-  vtkSmartPointer<vtkTextureObject> m_h0, m_a, m_b, m_disp;
-  vtkSmartPointer<vtkOpenGLFramebufferObject> m_fbo;
-  std::unique_ptr<vtkOpenGLQuadHelper> m_time, m_assemble;
+  vtkSmartPointer<vtkTextureObject> m_h0, m_a, m_b, m_disp, m_slope;
+  // the slope pass's own framebuffer: a layer of m_slope on each of its color attachments
+  vtkSmartPointer<vtkOpenGLFramebufferObject> m_fbo, m_slopeFbo;
+  std::unique_ptr<vtkOpenGLQuadHelper> m_time, m_assemble, m_slopePass;
 };
 
 #endif // __CVC_GL_OCEAN_OCEANCASCADES_H__
