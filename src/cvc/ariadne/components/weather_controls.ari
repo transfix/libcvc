@@ -6,7 +6,9 @@
 # world second, a time-lapse of the storms alone (the clouds still drift at the wind's pace; a
 # storm's life is 20 to 60 weather minutes). Each of these is an event under weather.events, so a
 # replay or another client sees the same weather. The storms ride the scene's wind: the Sky
-# panel's Wind heading and Drift speed.
+# panel's Wind heading and Drift speed. Storm wind is the gust front's peak (weather.gust_front, m/s):
+# the wind out of a full storm ahead of it, added to the scene's wind; the physics takes a change at
+# the next half second of the clock.
 #
 # Args (every one has a default, so a bare include works):
 #   keys   the weather node's state key root: its `keys:` prop, else weather (the default).
@@ -50,6 +52,12 @@ units:
         hi: 120.0
         fmt: "%.0f x"
         tooltip: "weather seconds per world second: a storm's 20 to 60 minutes in seconds; 0 holds the weather"
+      - slider_float: Storm wind
+        bind: "{keys}.gust_front"
+        lo: 0.0
+        hi: 30.0
+        fmt: "%.1f m/s"
+        tooltip: "the wind out of a full storm at its gust front, on top of the scene's wind (0: none)"
       - separator
       - text: "Rain"
       - slider_float: Streaks

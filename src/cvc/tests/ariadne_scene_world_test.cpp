@@ -4276,3 +4276,750 @@ TEST(AriadneSceneWeather, TheRainsFrictionIsSetInTheStepOnTheClocksTicks) {
   EXPECT_EQ(fine.off, dry);
   EXPECT_EQ(coarse.off, dry);
 }
+
+// O20 (F4, F6's gusts): the storms' gust fronts are in the scene's wind. A light ball (1 kg, 1 m
+// across) floats with gravity off, 10 m up, in a 6 m/s wind toward +x, with a weather node whose
+// one authored storm (400 m across, at its peak) is centred at (cx, cy) at t = 0 (the ball starts
+// at the origin) and runs at `rate` weather seconds a world second. The scene's wind steers it
+// (scene_weather_steering): toward +x at the wind's speed at the deck's base (300 m with no sky).
+namespace {
+
+const char *kStormAir = R"(
+scene:
+  physics: { gravity: [0, 0, 0] }
+  wind: { speed: 6, dir: 0, gustiness: 0 }
+  nodes:
+    - node: ball
+      source: { sphere: { radius: 0.5 } }
+      transform: { position: [0, 0, 10] }
+      body: { mass: 1 }
+)";
+
+LoadResult storm_scene(double cx, double cy, double rate, bool storm = true,
+                       const char *doc = kStormAir) {
+  LoadResult r = fresh_load(doc);
+  EXPECT_TRUE(r.ok) << r.error;
+  std::string events;
+  if (storm) {
+    // Born 1500 weather seconds before t = 0 (mature then), where the steering has carried it to
+    // (cx, cy) by t = 0.
+    const double steer = 6.0 * cvc::algo::wind_profile(kWeatherDeckBase);
+    cvc::world::weather_event e;
+    e.t = 0.0;
+    e.tau = -1500.0;
+    e.x = cx - steer * 1500.0;
+    e.y = cy;
+    e.radius = 400.0;
+    e.peak = 1.0;
+    e.life = 3000.0;
+    events = cvc::world::format_weather_events({e});
+  }
+  SceneNode wn;
+  wn.id = "weather";
+  wn.type = "weather";
+  wn.props.kind = Value::Kind::Map;
+  for (const auto &[k, v] :
+       std::vector<std::pair<const char *, std::string>>{{"chance", "0"},
+                                                         {"area", "100"},
+                                                         {"time_scale", std::to_string(rate)},
+                                                         {"events", events}}) {
+    Value sv;
+    sv.kind = Value::Kind::Scalar;
+    sv.scalar = v;
+    wn.props.entries.emplace_back(k, sv);
+  }
+  r.scene.nodes.push_back(wn);
+  return r;
+}
+
+struct storm_run {
+  std::vector<std::pair<std::uint64_t, cvc::physics::body_state>> frames; // the ball at each frame
+  std::vector<std::uint64_t> hashes;                                      // the world's, each frame
+  cvc::physics::body_state end;
+  std::string front; // wind.front at the end
+  bool storm_flow = false;
+  double offset = -1.0; // the storm air's clock offset (StormWindFlow::clock_offset)
+  // At the end, the front at (-300, 0): the air read at the world's field time (what a body
+  // outside the world passes, mujoco_robot::set_wind), the weathers at the clock's time (the storms
+  // drawn), and the air read at the clock's time (the doubled offset a caller must not pass).
+  double front_field = 0.0, front_clock = 0.0, front_doubled = 0.0;
+  std::uint64_t keyframes = 0; // the water's sea keyframes, when the scene has a water node
+};
+
+// Each frame drives the clock, then the world follows it. The world anchors on the clock at its
+// first follow: at t = 0, as a drawn scene's first frame (its clock driven 0 s), unless `late`.
+storm_run run_storm(const LoadResult &r, double frame_dt, double seconds, bool late = false,
+                    const char *body = "ball") {
+  storm_run out;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  if (!w) {
+    ADD_FAILURE() << "no world";
+    return out;
+  }
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  if (!late)
+    w->follow(app.world_clock());
+  while (app.world_clock().t() < seconds) {
+    clock.drive(frame_dt);
+    w->follow(app.world_clock());
+    out.frames.emplace_back(app.world_clock().tick(), w->world().state(w->body(body)));
+    out.hashes.push_back(w->world().state_hash());
+  }
+  out.end = w->world().state(w->body(body));
+  if (w->wind_field().valid())
+    if (const auto *storm =
+            dynamic_cast<const StormWindFlow *>(w->world().get_field(w->wind_field()).wind.get())) {
+      out.storm_flow = true;
+      out.offset = storm->clock_offset();
+      double fx, fy;
+      storm->front(-300.0, 0.0, w->world().field_time(), fx, fy);
+      out.front_field = fx;
+      storm->front(-300.0, 0.0, app.world_clock().t(), fx, fy);
+      out.front_doubled = fx;
+      for (const cvc::world::weather &m : storm->weathers()) {
+        m.gust_front(m.at(app.world_clock().t()), -300.0, 0.0, fx, fy);
+        out.front_clock += fx;
+      }
+    }
+  if (const WaterRuntime *water = w->water("water"))
+    if (water->keyframes())
+      out.keyframes = water->keyframes()->keyframe;
+  cvc::state *f = cvc::state::instance(app).findDescendant("wind.front");
+  out.front = f ? f->value() : std::string(); // never written: no front
+  return out;
+}
+
+} // namespace
+
+// A light body is pushed by a storm's gust front (F6: gusts push light bodies): ahead of the storm,
+// at its front's edge, the 6 m/s wind is 18 m/s and the ball goes with it; beside the storm the
+// front blows across the wind, so the ball is carried off to the side. With the storm out of reach,
+// or no storm, the ball rides the 6 m/s wind alone. The world's air is a StormWindFlow then.
+TEST(AriadneSceneWeather, AStormsGustFrontPushesALightBody) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const double s = 3.0;
+  const storm_run ahead = run_storm(storm_scene(-600.0, 0.0, 1.0), 1.0 / 60.0, s);
+  const storm_run beside = run_storm(storm_scene(0.0, -600.0, 1.0), 1.0 / 60.0, s);
+  const storm_run away = run_storm(storm_scene(-9000.0, 0.0, 1.0), 1.0 / 60.0, s);
+  const storm_run none = run_storm(storm_scene(0.0, 0.0, 1.0, false), 1.0 / 60.0, s);
+  std::printf("[storm] a 1 kg ball in a 6 m/s wind, %.0f s on: ahead of a storm (%.2f, %.2f) m at "
+              "(%.2f, %.2f) m/s; beside it (%.2f, %.2f) m at (%.2f, %.2f) m/s; out of reach "
+              "(%.2f, %.2f) m; no storm (%.2f, %.2f) m\n",
+              s, ahead.end.position.x, ahead.end.position.y, ahead.end.linear_velocity.x,
+              ahead.end.linear_velocity.y, beside.end.position.x, beside.end.position.y,
+              beside.end.linear_velocity.x, beside.end.linear_velocity.y, away.end.position.x,
+              away.end.position.y, none.end.position.x, none.end.position.y);
+  EXPECT_TRUE(ahead.storm_flow);
+  EXPECT_TRUE(none.storm_flow); // a weather node: the air can carry its storms
+  // Ahead: the air is 18 m/s along the wind; the ball nearly at it.
+  EXPECT_GT(ahead.end.linear_velocity.x, 15.0);
+  EXPECT_LT(ahead.end.linear_velocity.x, 18.5);
+  EXPECT_NEAR(ahead.end.linear_velocity.y, 0.0, 0.05);
+  // Beside: across the wind, out of the storm (+y): the wind there veers.
+  EXPECT_GT(beside.end.linear_velocity.y, 4.0);
+  EXPECT_GT(std::atan2(beside.end.linear_velocity.y, beside.end.linear_velocity.x), 0.6);
+  // Out of reach, and with no storm, the 6 m/s wind alone, the same to the bit.
+  EXPECT_LT(away.end.linear_velocity.x, 6.01);
+  EXPECT_GT(away.end.linear_velocity.x, 5.0);
+  EXPECT_EQ(away.end.position.x, none.end.position.x);
+  EXPECT_EQ(away.end.position.y, none.end.position.y);
+  EXPECT_GT(ahead.end.position.x, 2.0 * none.end.position.x);
+  // The wind the water and the trees read is the front at the weather's centre (the ball's start):
+  // published as wind.front, and none without a storm near.
+  double fx = 0.0, fy = 0.0;
+  ASSERT_EQ(std::sscanf(ahead.front.c_str(), "%lf %lf", &fx, &fy), 2) << ahead.front;
+  EXPECT_GT(fx, 11.0);
+  EXPECT_NEAR(fy, 0.0, 0.01);
+  EXPECT_EQ(away.front, "");
+  EXPECT_EQ(none.front, "");
+}
+
+// The gust front is in the physics step on the clock's time, not a frame's: with the storm walking
+// at 146 m/s (a time-lapse of 15), its front sweeps up to the ball in a few seconds, and one run
+// with a frame per clock quantum and one with uneven 0.137 s frames see the ball, and the whole
+// world's state hash, the same at every tick both looked at.
+TEST(AriadneSceneWeather, TheGustFrontIsInTheStepOnTheClocksTime) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const LoadResult r = storm_scene(-1200.0, 0.0, 15.0);
+  cvc::app probe;
+  const storm_run fine = run_storm(r, probe.world_clock().fixed_dt(), 6.0);
+  const storm_run coarse = run_storm(r, 0.137, 6.0);
+  ASSERT_FALSE(fine.frames.empty());
+  ASSERT_FALSE(coarse.frames.empty());
+  // The front reached the ball: the wind it rode rose from 6 m/s.
+  double fastest = 0.0;
+  for (const auto &[tick, b] : fine.frames)
+    fastest = std::max(fastest, b.linear_velocity.x);
+  std::printf("[storm] the ball's fastest as the front swept up: %.2f m/s; %zu and %zu frames\n",
+              fastest, fine.frames.size(), coarse.frames.size());
+  EXPECT_GT(fastest, 12.0);
+  std::map<std::uint64_t, std::size_t> by_tick;
+  for (std::size_t k = 0; k < fine.frames.size(); ++k)
+    by_tick[fine.frames[k].first] = k;
+  int compared = 0;
+  for (std::size_t k = 0; k < coarse.frames.size(); ++k) {
+    const auto it = by_tick.find(coarse.frames[k].first);
+    if (it == by_tick.end())
+      continue;
+    ++compared;
+    const cvc::physics::body_state &a = fine.frames[it->second].second;
+    const cvc::physics::body_state &b = coarse.frames[k].second;
+    EXPECT_EQ(a.position.x, b.position.x) << "at tick " << it->first;
+    EXPECT_EQ(a.position.y, b.position.y) << "at tick " << it->first;
+    EXPECT_EQ(a.linear_velocity.x, b.linear_velocity.x) << "at tick " << it->first;
+    EXPECT_EQ(fine.hashes[it->second], coarse.hashes[k]) << "at tick " << it->first;
+  }
+  EXPECT_GT(compared, 10);
+  // A world that anchored on the clock late (its first follow after a 0.137 s frame) reads the
+  // storms at the clock's time all the same: its air's offset is the clock's time there.
+  const storm_run late = run_storm(r, 0.137, 0.5, true);
+  EXPECT_EQ(fine.offset, 0.0);
+  EXPECT_NEAR(late.offset, late.frames.front().first * probe.world_clock().fixed_dt(), 1e-12);
+  EXPECT_GT(late.offset, 0.05);
+  // What a body outside the world reads (a MuJoCo robot: the air at the world's field time) is the
+  // storms at the clock's time; the air read at the clock's time would add the offset twice.
+  std::printf("[storm] a late world's front at (-300, 0): %.6f m/s read at its field time, %.6f at "
+              "the clock's (the storms drawn), %.6f with the offset twice\n",
+              late.front_field, late.front_clock, late.front_doubled);
+  EXPECT_GT(late.front_clock, 1.0);
+  EXPECT_NEAR(late.front_field, late.front_clock, 1e-9 * std::fabs(late.front_clock));
+  EXPECT_GT(std::fabs(late.front_doubled - late.front_clock), 1e-4);
+}
+
+// The water reads the storm's front through its sea's lag (E4, F4): its spec's wind is the scene's
+// with the front at the weather's centre in it, while the gusts' pattern drifts with the wind as
+// authored; the sea's lagged wind then builds toward it over sea_lag seconds. A scene without a
+// weather node never writes wind.front, and its water reads the wind as authored.
+TEST(AriadneSceneWeather, TheWaterReadsTheGustFrontThroughItsLag) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build"; // the scene's world, which writes the front
+  cvc::app app;
+  LoadResult r = storm_scene(-600.0, 0.0, 1.0);
+  SceneNode water;
+  water.id = "water";
+  water.type = "water";
+  water.props.kind = Value::Kind::Map;
+  seed_scene_wind(app, r.scene, "");
+  // Without the front: the wind as authored.
+  const SceneWaterSpec calm = scene_water_spec(app, water, "");
+  EXPECT_EQ(calm.wind_speed, 6.0);
+  EXPECT_EQ(calm.wind_dir, 0.0);
+  // The scene's world writes the front at the weather's centre (its area's: the origin).
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  const std::optional<SceneWind> now = scene_wind_now(app, "");
+  ASSERT_TRUE(now.has_value());
+  std::printf("[storm] wind.front '%s': the wind %.2f m/s toward %.2f deg, as authored %.2f m/s\n",
+              val(app, "wind.front").c_str(), now->mean_speed(), now->mean_dir(), now->speed);
+  EXPECT_GT(now->mean_speed(), 17.0); // 6 + the front's 12
+  EXPECT_NEAR(now->mean_dir(), 0.0, 0.1);
+  EXPECT_EQ(now->speed, 6.0);
+  EXPECT_EQ(scene_wind_set(app, "")->front_x, 0.0); // the steering's and the clouds': as authored
+  const SceneWaterSpec stormy = scene_water_spec(app, water, "");
+  EXPECT_EQ(stormy.wind_speed, now->mean_speed());
+  EXPECT_EQ(stormy.gust_speed, 6.0);
+  EXPECT_EQ(stormy.gust_dir, 0.0);
+  // The sea builds toward it over its lag (20 s): under half way after 6 s, most of the way by 60.
+  SceneWaterSeaClock sea;
+  SceneWaterSpec lagged = stormy; // its default lag (20 s) and crossfade (4 s)
+  lagged.lee = false;
+  lagged.wind_speed = 6.0;
+  sea.advance(0.0, lagged, nullptr);
+  lagged.wind_speed = stormy.wind_speed;
+  double at6 = 0.0, build_ms = 0.0, most_ms = 0.0;
+  const std::uint64_t first = sea.sea()->keyframe;
+  for (int k = 1; k <= 120; ++k) {
+    const std::uint64_t had = sea.sea()->keyframe;
+    sea.advance(0.5 * k, lagged, nullptr);
+    if (sea.sea()->keyframe != had) { // what the front costs the sea: a keyframe's h0
+      build_ms += sea.sea()->build_ms;
+      most_ms = std::max(most_ms, sea.sea()->build_ms);
+    }
+    if (k == 12)
+      at6 = sea.sea()->to.speed_mps;
+  }
+  std::printf("[storm] the sea's wind: %.2f m/s at 6 s, %.2f m/s at 60 s; %llu keyframes, %.0f ms "
+              "in all, %.0f ms at most\n",
+              at6, sea.sea()->to.speed_mps,
+              static_cast<unsigned long long>(sea.sea()->keyframe - first), build_ms, most_ms);
+  EXPECT_GT(at6, 6.5);
+  EXPECT_LT(at6, 0.5 * (6.0 + stormy.wind_speed));
+  EXPECT_GT(sea.sea()->to.speed_mps, 0.85 * stormy.wind_speed);
+  // No weather node: no wind.front, and the water reads the wind as authored.
+  cvc::app plain;
+  LoadResult pr = fresh_load(kStormAir);
+  ASSERT_TRUE(pr.ok) << pr.error;
+  std::unique_ptr<SceneWorld> pw = SceneWorld::from_scene(plain, pr.scene, "", "", &warnings);
+  ASSERT_NE(pw, nullptr);
+  pw->sync(&warnings);
+  EXPECT_EQ(cvc::state::instance(plain).findDescendant("wind.front"), nullptr);
+  EXPECT_EQ(scene_water_spec(plain, water, "").wind_speed, 6.0);
+  ASSERT_TRUE(pw->wind_field().valid());
+  EXPECT_EQ(dynamic_cast<const StormWindFlow *>(pw->world().get_field(pw->wind_field()).wind.get()),
+            nullptr);
+}
+
+// What the storms cost the physics a step: the weather once (its cells at the step's time, cached),
+// then O(cells) a body. Timed against the plain wind on 100 bodies, with 32 events in the weather
+// (as WorldWeather.AFrameIsCheap times a frame), and where no front reaches the storm wind is the
+// plain wind's velocity bit for bit.
+TEST(AriadneSceneWeather, TheStormWindIsCheap) {
+  cvc::world::weather_params p;
+  p.chance = 0.0;
+  cvc::world::weather model(p);
+  std::vector<cvc::world::weather_event> ev;
+  for (int k = 0; k < 32; ++k) {
+    cvc::world::weather_event e;
+    e.t = 30.0 * k;
+    if (k % 4 == 0) {
+      e.x = -600.0 + 10.0 * k;
+      e.y = 0.0;
+      e.radius = 400.0;
+      e.peak = 1.0;
+      e.life = 3000.0;
+    } else {
+      e.type = cvc::world::weather_event::kind::steer;
+      e.speed = 3.0;
+      e.az = 90.0 + k;
+    }
+    ev.push_back(e);
+  }
+  model.set_events(ev);
+  const cvc::algo::wind_state w{6.0, 0.3, 0.25};
+  const StormWindFlow storm(w, 0.0, {model});
+  const cvc::physics::wind_flow plain(w, 0.0);
+  const int bodies = 100, steps = 2000;
+  const auto time = [&](const cvc::physics::flow_velocity &f) {
+    double sum = 0.0;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int s = 0; s < steps; ++s) {
+      const double t = 600.0 + s / 120.0;
+      for (int b = 0; b < bodies; ++b)
+        sum += f.reference({-500.0 + 10.0 * b, 3.0 * b, 2.0}, t).x;
+    }
+    const double us =
+        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+    EXPECT_TRUE(std::isfinite(sum));
+    return us / steps;
+  };
+  const double us_plain = time(plain), us_storm = time(storm);
+  std::printf("[storm] a step's wind on %d bodies: %.1f us plain, %.1f us with the storms (%zu "
+              "cells live)\n",
+              bodies, us_plain, us_storm, model.at(600.0).cells.size());
+  EXPECT_LT(us_storm, 2000.0); // loose: a slow, shared machine
+  // Far from every front: the plain wind's velocity to the bit.
+  for (double t : {0.0, 600.0, 1234.5}) {
+    const cvc::physics::vec3 p0{9.0e4, -7.0e4, 12.0};
+    const cvc::physics::vec3 a = storm.velocity(p0, t), b = plain.velocity(p0, t);
+    EXPECT_EQ(a.x, b.x);
+    EXPECT_EQ(a.y, b.y);
+    EXPECT_EQ(a.z, b.z);
+  }
+  // The digest names the weather: another event, another digest.
+  std::vector<cvc::world::weather_event> more = ev;
+  more.push_back(ev.front());
+  more.back().t = 2000.0;
+  cvc::world::weather other = model;
+  other.set_events(more);
+  EXPECT_NE(StormWindFlow(w, 0.0, {other}).digest(), storm.digest());
+  EXPECT_EQ(StormWindFlow(w, 0.0, {model}).digest(), storm.digest());
+  EXPECT_NE(storm.digest(), plain.digest());
+}
+
+// A crate floating on a lake (1 x 1 x 0.5 m at half the water's density) in a 6 m/s wind, with the
+// storm of storm_scene time-lapsed by 15 so its front reaches the lake's centre in a few seconds.
+const char *kStormLake = R"(
+scene:
+  physics: {}
+  wind: { speed: 6, dir: 0, gustiness: 0 }
+  nodes:
+    - node: terrain
+      source:
+        heightfield:
+          size: 400
+          resolution: 81
+          layers:
+            - { kind: dome, amplitude: -30, radius: 150 }
+      body: static
+    - node: water
+      type: water
+      ground: terrain
+      level: 0
+      wave_amp: 0.3
+      body: {}
+    - node: ball
+      source: { box: { size: [1, 1, 0.5] } }
+      transform: { position: [0, 0, 0] }
+      body: { density: 500 }
+)";
+
+// A 10 kg crate, 1 m a side (friction 0.3: 29 N), on a floor in a 6 m/s wind (9 N on it), so
+// it comes to rest and sleeps; a storm's front reaches it 10 s in (18 m/s there: 84 N).
+const char *kStormFloor = R"(
+scene:
+  physics: { materials: { slick: { friction: 0.3 } } }
+  wind: { speed: 6, dir: 0, gustiness: 0 }
+  nodes:
+    - node: floor
+      source: { box: { size: [600, 600, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+    - node: ball
+      source: { box: { size: [1, 1, 1] } }
+      transform: { position: [0, 0, 0.5] }
+      body: { mass: 10, material: slick }
+)";
+
+// In a scene with water, weather and wind, a passing front moves the water's wind on its own, and
+// the physics sea's keyframes, and the field the bodies float in, are timed on the clock: the sea
+// steps once a clock period and each keyframe's field goes in at a step the clock names. So a run
+// with a frame per clock quantum and one with 0.137 s frames float the crate alike, and the whole
+// world's state hash agrees, at every tick both looked at, across the front's arrival.
+TEST(AriadneSceneWeather, TheFrontsSeaFloatsBodiesAlikeAtEveryFrameRate) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const LoadResult r = storm_scene(-1200.0, 0.0, 15.0, true, kStormLake);
+  cvc::app probe;
+  const storm_run fine = run_storm(r, probe.world_clock().fixed_dt(), 9.0);
+  const storm_run coarse = run_storm(r, 0.137, 9.0);
+  ASSERT_FALSE(fine.frames.empty());
+  ASSERT_FALSE(coarse.frames.empty());
+  std::printf("[storm] the lake: %zu sea keyframes (%zu at 0.137 s frames); the crate ends at "
+              "(%.3f, %.3f, %.3f); %zu and %zu frames\n",
+              fine.keyframes, coarse.keyframes, fine.end.position.x, fine.end.position.y,
+              fine.end.position.z, fine.frames.size(), coarse.frames.size());
+  EXPECT_GE(fine.keyframes, 2u) << "the front grew the sea";
+  EXPECT_EQ(fine.keyframes, coarse.keyframes);
+  std::map<std::uint64_t, std::size_t> by_tick;
+  for (std::size_t k = 0; k < fine.frames.size(); ++k)
+    by_tick[fine.frames[k].first] = k;
+  int compared = 0, differ = 0;
+  for (std::size_t k = 0; k < coarse.frames.size(); ++k) {
+    const auto it = by_tick.find(coarse.frames[k].first);
+    if (it == by_tick.end())
+      continue;
+    ++compared;
+    const cvc::physics::body_state &a = fine.frames[it->second].second;
+    const cvc::physics::body_state &b = coarse.frames[k].second;
+    if (a.position.x != b.position.x || a.position.z != b.position.z ||
+        a.linear_velocity.z != b.linear_velocity.z || fine.hashes[it->second] != coarse.hashes[k])
+      ++differ;
+  }
+  EXPECT_GT(compared, 30);
+  EXPECT_EQ(differ, 0) << "of " << compared << " ticks both looked at";
+}
+
+// A body asleep where a front arrives is woken, so the front pushes it (F6): the crate rests and
+// sleeps in the 6 m/s wind, then the storm's front (time-lapsed by 15) reaches it.
+TEST(AriadneSceneWeather, AFrontWakesASleepingBody) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const LoadResult r = storm_scene(-2400.0, 0.0, 15.0, true, kStormFloor);
+  const storm_run run = run_storm(r, 1.0 / 60.0, 14.0);
+  ASSERT_FALSE(run.frames.empty());
+  // Where it rested, asleep, before the front came (by 9 s).
+  cvc::app probe;
+  const double dt = probe.world_clock().fixed_dt();
+  double rest_x = 0.0;
+  bool asleep = false;
+  for (const auto &[tick, b] : run.frames)
+    if (static_cast<double>(tick) * dt < 9.0) {
+      rest_x = b.position.x;
+      asleep = !b.active;
+    }
+  std::printf("[storm] a 10 kg crate: asleep at 9 s %s, at x %.3f; after the front, x %.3f\n",
+              asleep ? "yes" : "no", rest_x, run.end.position.x);
+  EXPECT_TRUE(asleep) << "the crate came to rest and slept in the 6 m/s wind";
+  EXPECT_GT(run.end.position.x - rest_x, 0.5) << "the front woke it and pushed it downwind";
+}
+
+namespace {
+
+// storm_scene's lake with a short crossfade (sea_fade 0.2 s, under the clock's 0.5 s period) and a
+// short lag (sea_lag 1 s), so the front's wind would keyframe the sea in periods running.
+const char *kStormLakeShortFade = R"(
+scene:
+  physics: {}
+  wind: { speed: 6, dir: 0, gustiness: 0 }
+  nodes:
+    - node: terrain
+      source:
+        heightfield:
+          size: 400
+          resolution: 81
+          layers:
+            - { kind: dome, amplitude: -30, radius: 150 }
+      body: static
+    - node: water
+      type: water
+      ground: terrain
+      level: 0
+      wave_amp: 0.3
+      sea_fade: 0.2
+      sea_lag: 1
+      body: {}
+    - node: ball
+      source: { box: { size: [1, 1, 0.5] } }
+      transform: { position: [0, 0, 0] }
+      body: { density: 500 }
+)";
+
+// The renderer's order: the world built from the bodies a host holds (SceneWorld::build), the
+// water's runtime its own, ticked after the world follows each frame (cvcGL's water node ticks it
+// after tick_scene's follow), against from_scene's, ticked in the world's sync before the steps.
+storm_run run_drawn_order(const LoadResult &r, double frame_dt, double seconds) {
+  storm_run out;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  seed_scene_wind(app, r.scene, "");
+  std::map<const SceneNode *, std::array<double, 16>> matrices;
+  scene_world_matrices(r.scene, matrices);
+  std::vector<SceneBodyInput> inputs;
+  std::map<std::string, std::shared_ptr<const cvc::height_field>> fields;
+  std::unique_ptr<WaterRuntime> water;
+  for (const SceneNode &n : r.scene.nodes) {
+    if (!n.body.present)
+      continue;
+    SceneBodyInput in;
+    in.spec = &n;
+    in.world = matrices[&n];
+    if (n.type == "water") {
+      std::shared_ptr<const cvc::height_field> hf = fields.at(n.props.str("ground"));
+      water = std::make_unique<WaterRuntime>(app, n, "", [hf] { return hf; });
+      in.colliders = water->colliders();
+    } else {
+      cvc::geometry g;
+      std::shared_ptr<const cvc::height_field> field;
+      if (!read_scene_node_geometry(app, n, g, field, &warnings)) {
+        ADD_FAILURE() << "no geometry for " << n.id;
+        return out;
+      }
+      in.geometry = std::make_shared<const cvc::geometry>(std::move(g));
+      if (field)
+        fields[n.id] = field;
+    }
+    inputs.push_back(std::move(in));
+  }
+  std::unique_ptr<SceneWorld> w =
+      SceneWorld::build(app, r.scene.physics, inputs, fields, "physics", &warnings);
+  if (!w || !water) {
+    ADD_FAILURE() << "no world or no water";
+    return out;
+  }
+  w->bind_wind(r.scene, "");
+  w->bind_weather(r.scene, "");
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  w->follow(app.world_clock());
+  water->tick();
+  while (app.world_clock().t() < seconds) {
+    clock.drive(frame_dt);
+    w->follow(app.world_clock());
+    water->tick(); // after the steps, as a renderer's water node does
+    out.frames.emplace_back(app.world_clock().tick(), w->world().state(w->body("ball")));
+    out.hashes.push_back(w->world().state_hash());
+  }
+  out.end = w->world().state(w->body("ball"));
+  if (water->keyframes())
+    out.keyframes = water->keyframes()->keyframe;
+  return out;
+}
+
+// How many of the ticks both runs looked at have a different body (position, vertical velocity).
+int differing(const storm_run &a, const storm_run &b, int *compared) {
+  std::map<std::uint64_t, std::size_t> by_tick;
+  for (std::size_t k = 0; k < a.frames.size(); ++k)
+    by_tick[a.frames[k].first] = k;
+  int differ = 0;
+  *compared = 0;
+  for (std::size_t k = 0; k < b.frames.size(); ++k) {
+    const auto it = by_tick.find(b.frames[k].first);
+    if (it == by_tick.end())
+      continue;
+    ++*compared;
+    const cvc::physics::body_state &x = a.frames[it->second].second, &y = b.frames[k].second;
+    if (x.position.x != y.position.x || x.position.z != y.position.z ||
+        x.linear_velocity.z != y.linear_velocity.z)
+      ++differ;
+  }
+  return differ;
+}
+
+} // namespace
+
+// A short crossfade (0.2 s) would let the sea keyframe in two periods running. The world's own
+// water runtime ticks before the steps and a renderer's after them, so one would replace a
+// keyframe's field before its step and the other put it in first. While the scene has storms the
+// crossfade is at least two periods, so the renderer's order and the headless world float the
+// crate alike, and their state hashes agree.
+TEST(AriadneSceneWeather, ARendersSeaAndAHeadlessOneFloatAlikeWithAShortCrossfade) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const LoadResult r = storm_scene(-1200.0, 0.0, 15.0, true, kStormLakeShortFade);
+  // Frames of 0.137 s (8 clock quanta, as the clock caps a frame), so a frame passes a period's
+  // start with steps to spare past it: where the two orders part.
+  const storm_run headless = run_storm(r, 0.137, 9.0);
+  const storm_run drawn = run_drawn_order(r, 0.137, 9.0);
+  int compared = 0;
+  const int differ = differing(headless, drawn, &compared);
+  int hashes_differ = 0;
+  for (std::size_t k = 0; k < headless.frames.size() && k < drawn.frames.size(); ++k)
+    if (headless.frames[k].first == drawn.frames[k].first && headless.hashes[k] != drawn.hashes[k])
+      ++hashes_differ;
+  std::printf("[storm] a 0.2 s crossfade: %llu sea keyframes headless, %llu in a renderer's order; "
+              "the crate differs at %d of %d ticks, the state hash at %d\n",
+              static_cast<unsigned long long>(headless.keyframes),
+              static_cast<unsigned long long>(drawn.keyframes), differ, compared, hashes_differ);
+  EXPECT_GE(headless.keyframes, 3u);
+  EXPECT_EQ(headless.keyframes, drawn.keyframes);
+  EXPECT_GT(compared, 100);
+  EXPECT_EQ(differ, 0);
+  EXPECT_EQ(hashes_differ, 0);
+}
+
+// The storm wind's peak is a live key, weather.gust_front (the Weather panel's Storm wind). A
+// change reaches the physics at the start of the clock's next period after the scene's world reads
+// it: so a run with a frame per clock quantum and one with 0.137 s frames switch at the same step
+// and agree on the ball and the whole world's state hash at every tick both looked at; and 0 turns
+// the fronts off, the air where a front blew the plain wind again.
+TEST(AriadneSceneWeather, TheStormWindsPeakIsALiveKeySwitchedOnTheClock) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const LoadResult r = storm_scene(-600.0, 0.0, 1.0);
+  cvc::app probe;
+  const double q = probe.world_clock().fixed_dt();
+  struct gust_run {
+    storm_run run;
+    std::vector<double> gust; // the weather's applied peak at each frame
+    std::uint64_t read_tick = 0;
+    bool storm_air_end = true;
+    cvc::physics::vec3 air_end, plain_end;
+  };
+  const auto run = [&](double frame_dt, double to) {
+    gust_run out;
+    cvc::app app;
+    std::vector<std::string> warnings;
+    std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+    if (!w || w->weathers().size() != 1) {
+      ADD_FAILURE() << "no world, or not one weather";
+      return out;
+    }
+    EXPECT_EQ(val(app, "weather.gust_front"), "12"); // seeded from the prop's default
+    SceneClockDriver clock(app, resolved_clock(r.scene));
+    w->follow(app.world_clock());
+    bool set = false;
+    while (app.world_clock().t() < 4.0) {
+      clock.drive(frame_dt);
+      if (set && out.read_tick == 0)
+        out.read_tick = app.world_clock().tick(); // the sync about to read it
+      w->follow(app.world_clock());
+      out.run.frames.emplace_back(app.world_clock().tick(), w->world().state(w->body("ball")));
+      out.run.hashes.push_back(w->world().state_hash());
+      out.gust.push_back(w->weathers()[0]->gust_front());
+      if (!set && app.world_clock().t() >= 2.21) { // mid-frame for the 0.137 s run
+        cvc::state::instance(app)("weather.gust_front").value(to);
+        set = true;
+      }
+    }
+    const cvc::physics::body_state b = w->world().state(w->body("ball"));
+    out.storm_air_end = dynamic_cast<const StormWindFlow *>(w->wind().get()) != nullptr;
+    out.air_end = w->wind()->velocity(b.position, w->world().field_time());
+    out.plain_end = cvc::physics::wind_flow(cvc::algo::wind_state{6.0, 0.0, 0.0}, 0.0)
+                        .velocity(b.position, w->world().field_time());
+    return out;
+  };
+  const gust_run fine = run(q, 24.0), coarse = run(0.137, 24.0);
+  ASSERT_FALSE(fine.gust.empty());
+  ASSERT_FALSE(coarse.gust.empty());
+  // Where it switched: the first step past the start of the period after the read.
+  const std::uint64_t ticks = scene_clock_period_ticks(kSceneWindFrontPeriod, q);
+  const std::uint64_t boundary = (fine.read_tick / ticks + 1) * ticks;
+  std::uint64_t switched = 0;
+  for (std::size_t k = 0; k < fine.gust.size(); ++k)
+    if (fine.gust[k] == 24.0) {
+      switched = fine.run.frames[k].first;
+      break;
+    }
+  int compared = 0;
+  const int differ = differing(fine.run, coarse.run, &compared);
+  std::map<std::uint64_t, std::uint64_t> fine_hash;
+  for (std::size_t k = 0; k < fine.run.frames.size(); ++k)
+    fine_hash[fine.run.frames[k].first] = fine.run.hashes[k];
+  int hashes_differ = 0;
+  for (std::size_t k = 0; k < coarse.run.frames.size(); ++k)
+    if (const auto it = fine_hash.find(coarse.run.frames[k].first);
+        it != fine_hash.end() && it->second != coarse.run.hashes[k])
+      ++hashes_differ;
+  std::printf("[storm] weather.gust_front 12 -> 24 read at tick %llu (%llu at 0.137 s frames): in "
+              "at tick %llu (the period's start %llu); the ball ends at %.2f m/s; %d of %d ticks "
+              "differ, %d hashes\n",
+              static_cast<unsigned long long>(fine.read_tick),
+              static_cast<unsigned long long>(coarse.read_tick),
+              static_cast<unsigned long long>(switched), static_cast<unsigned long long>(boundary),
+              fine.run.frames.back().second.linear_velocity.x, differ, compared, hashes_differ);
+  EXPECT_GT(switched, boundary);
+  EXPECT_LE(switched, boundary + 2);
+  EXPECT_GT(compared, 30);
+  EXPECT_EQ(differ, 0);
+  EXPECT_EQ(hashes_differ, 0);
+  EXPECT_GT(fine.run.frames.back().second.linear_velocity.x, 22.0); // 6 + 24 where it is
+  // 0: no fronts; the air where one blew is the plain wind.
+  const gust_run off = run(q, 0.0);
+  std::printf("[storm] weather.gust_front 0: the air at the ball %.4f m/s, the plain wind %.4f\n",
+              off.air_end.x, off.plain_end.x);
+  EXPECT_FALSE(off.storm_air_end);
+  EXPECT_EQ(off.air_end.x, off.plain_end.x);
+  EXPECT_EQ(off.air_end.y, off.plain_end.y);
+  EXPECT_LT(off.run.frames.back().second.linear_velocity.x, 8.0); // slowing to the 6 m/s wind
+}
+
+// The water steps on the clock's periods only with storms that can blow: a scene wind and a weather
+// node. Without a wind (no fronts) it steps each frame, as before. And the storms steer at the
+// sky's base as the drawn node reads it: its <sky>.base key first (a --set or a kept key), else the
+// document's cloud_sky base (none here: 300 m).
+TEST(AriadneSceneWeather, TheSeaStepsOnTheClockOnlyWithAWindAndSteersAtTheSkysKey) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  for (const bool wind : {true, false}) {
+    std::string doc = kStormLake;
+    if (!wind) {
+      const std::string line = "  wind: { speed: 6, dir: 0, gustiness: 0 }\n";
+      ASSERT_NE(doc.find(line), std::string::npos);
+      doc.erase(doc.find(line), line.size());
+    }
+    const LoadResult r = storm_scene(-1200.0, 0.0, 15.0, true, doc.c_str());
+    cvc::app app;
+    std::vector<std::string> warnings;
+    std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "", &warnings);
+    ASSERT_NE(w, nullptr);
+    w->sync(&warnings);
+    ASSERT_NE(w->water("water"), nullptr);
+    EXPECT_EQ(w->water("water")->colliders()->clock_period, wind ? kSceneWindFrontPeriod : 0.0)
+        << (wind ? "with" : "without") << " a scene wind";
+  }
+  // The sky's key, set before the scene loads, steers the headless storms.
+  cvc::app app;
+  cvc::state::instance(app)("sky.base").value(600.0);
+  const LoadResult r = storm_scene(-1200.0, 0.0, 1.0);
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "", &warnings);
+  ASSERT_NE(w, nullptr);
+  ASSERT_EQ(w->weathers().size(), 1u);
+  const double steer = w->weathers()[0]->model().params().steer_speed;
+  std::printf("[storm] steered at sky.base 600: %.4f m/s (at 300: %.4f)\n", steer,
+              6.0 * cvc::algo::wind_profile(300.0));
+  EXPECT_DOUBLE_EQ(steer, 6.0 * cvc::algo::wind_profile(600.0));
+}

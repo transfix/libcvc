@@ -102,6 +102,13 @@ struct weather_params {
   // from flash_onset, within its rain radius; a share ground_share of the strikes reach the ground
   // (the rest stay in the cloud).
   double flash_rate = 0.05, flash_onset = 0.55, ground_share = 0.6;
+  // The gust front (O20, F4): the wind out of a cell's downdraft, added to the scene's wind
+  // (gust_front). It blows out of the cell's centre, rising from 0 there to front_speed m/s (a full
+  // cell's) at the front's edge, front_ahead of the cell's radius ahead of it along its motion and
+  // front_behind behind it (weaker there by their ratio), and dies away over the next front_width
+  // of that distance: past it there is none. Its strength rises with the cell's intensity from
+  // rain_onset (the downdraft comes with the rain). 0 front_speed: no gust fronts.
+  double front_speed = 12.0, front_ahead = 1.5, front_behind = 0.9, front_width = 0.6;
 };
 
 // A lightning strike: where and when, scheduled by the weather like everything in it, so every
@@ -226,6 +233,14 @@ public:
   // The strongest cell's intensity, each cell weighted by how near it is to (x, y): 1 within its
   // radius, falling to 0 `reach` metres past it. What a deck seen from (x, y) should show.
   static double nearby(const weather_now &w, double x, double y, double reach);
+  // The gust fronts' wind at (x, y) (O20, F4): every cell's outflow (weather_params' front_*), in
+  // m/s along x and y, to add to the scene's wind. Ahead of a cell it blows along the cell's motion
+  // (the steering wind), so the wind there rises; beside it, across, so the wind there veers;
+  // behind the cell's centre, against. 0 in clear air and past every front's reach. O(cells);
+  // deterministic (an ulp of sin or cos in the cells' tracks is the only platform difference).
+  void gust_front(const weather_now &w, double x, double y, double &vx, double &vy) const;
+  // How far past a cell's centre its gust front reaches at most (ahead of it), for its radius r.
+  double front_reach(double r) const;
   // A digest of the weather at t (the cells and the state, rounded to a tenth of a millimetre and
   // 1e-7 of intensity, so one ulp of a platform's sin or cos does not move it): the golden hash.
   static std::uint64_t digest(const weather_now &w);

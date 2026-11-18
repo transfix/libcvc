@@ -495,3 +495,97 @@ TEST(WorldWeather, LightningStrikesOnSchedule) {
   weather clear(quiet());
   EXPECT_TRUE(clear.strikes(1000.0, 1000.0).empty());
 }
+
+// O20 (F4): a storm's gust front, the wind out of its downdraft. Ahead of a mature cell (along its
+// motion) it blows with the motion, from nothing at the centre to front_speed at the front's edge,
+// front_ahead radii out, dying away over the next front_width of that: so the wind there rises.
+// Behind the cell it is weaker and against the motion; beside it, across the motion, so the wind
+// there veers. None past its reach, none from a cell too young to rain, none in clear air.
+TEST(WorldWeather, AGustFrontRunsAheadOfACell) {
+  weather_params p = quiet(); // steered 3 m/s toward +x (az 90)
+  weather w(p);
+  weather_event e = storm_at(0.0, 0.0, 0.0, 3000.0, 1000.0, 1.0);
+  e.tau = -1500.0; // born 1500 weather seconds ago: mature now, 1000 m across its radius
+  w.add_event(e);
+  const weather_now now = w.at(0.0);
+  ASSERT_EQ(now.cells.size(), 1u);
+  const storm_cell &c = now.cells[0];
+  ASSERT_NEAR(c.r, 1000.0, 1e-9);
+  ASSERT_NEAR(c.intensity, 1.0, 1e-12);
+  ASSERT_NEAR(c.x, 4500.0, 1e-6); // carried 4500 m toward +x since its birth
+  EXPECT_NEAR(w.front_reach(c.r), 2400.0, 1e-9);
+  const auto front = [&](double dx, double dy, double &vx, double &vy) {
+    w.gust_front(now, c.x + dx, c.y + dy, vx, vy);
+  };
+  double vx, vy;
+  // Ahead, along the motion: rising to 12 m/s at the edge (1500 m), then dying away by the reach.
+  const double ahead[] = {0.0,    375.0,  750.0,  1125.0, 1500.0,
+                          1700.0, 2000.0, 2300.0, 2400.0, 3000.0};
+  double was = -1.0, peak = 0.0, peak_at = 0.0;
+  std::printf("gust front ahead of a mature 1000 m cell (m: m/s):");
+  for (double d : ahead) {
+    front(d, 0.0, vx, vy);
+    std::printf(" %.0f: %.2f", d, vx);
+    EXPECT_GE(vx, 0.0) << d;
+    EXPECT_NEAR(vy, 0.0, 1e-9) << d;
+    if (vx > peak) {
+      peak = vx;
+      peak_at = d;
+    }
+    if (d <= 1500.0)
+      EXPECT_GT(vx, was) << "rising toward the edge, at " << d;
+    else if (d < 2400.0)
+      EXPECT_LT(vx, was) << "dying away past the edge, at " << d;
+    else
+      EXPECT_EQ(vx, 0.0) << "none from its reach on, at " << d;
+    was = vx;
+  }
+  std::printf("\n");
+  front(0.0, 0.0, vx, vy);
+  EXPECT_EQ(vx, 0.0); // no way out at the centre itself
+  front(1500.0, 0.0, vx, vy);
+  EXPECT_NEAR(vx, p.front_speed, 1e-9);
+  EXPECT_EQ(peak_at, 1500.0);
+  front(2400.0, 0.0, vx, vy);
+  EXPECT_EQ(vx, 0.0); // its reach
+  front(1e5, 3e4, vx, vy);
+  EXPECT_EQ(vx, 0.0); // far away: none at all
+  EXPECT_EQ(vy, 0.0);
+  // Behind the cell: against the motion, weaker by front_behind / front_ahead, its edge 900 m back.
+  front(-900.0, 0.0, vx, vy);
+  EXPECT_NEAR(vx, -p.front_speed * p.front_behind / p.front_ahead, 1e-9);
+  front(-1500.0, 0.0, vx, vy);
+  EXPECT_GT(vx, -2.0);
+  EXPECT_LE(vx, 0.0);
+  // Beside it: across the motion, out of the cell; a 9 m/s wind along the motion veers there.
+  front(0.0, 1200.0, vx, vy);
+  EXPECT_NEAR(vx, 0.0, 1e-9);
+  EXPECT_NEAR(vy, p.front_speed * 0.5 * (p.front_ahead + p.front_behind) / p.front_ahead, 1e-9);
+  const double veer = std::atan2(vy, 9.0 + vx) * 180.0 / kPi;
+  front(1500.0, 0.0, vx, vy);
+  const double rise = 9.0 + vx;
+  std::printf("a 9 m/s wind along the motion: %.1f m/s ahead at the edge, veered %.1f deg beside\n",
+              rise, veer);
+  EXPECT_NEAR(rise, 21.0, 1e-9);
+  EXPECT_GT(veer, 40.0);
+  // It moves with the cell: 100 s on, the edge is 300 m further along.
+  const weather_now later = w.at(100.0);
+  w.gust_front(later, c.x + 1800.0, c.y, vx, vy);
+  EXPECT_NEAR(vx, p.front_speed, 1e-6);
+  // A young cell, below the rain's onset, has no front; nor has clear air, nor a weather without.
+  weather young(p);
+  young.add_event(storm_at(0.0, 0.0, 0.0, 3000.0, 1000.0, 1.0));
+  const weather_now y = young.at(60.0);
+  ASSERT_EQ(y.cells.size(), 1u);
+  ASSERT_LT(y.cells[0].intensity, p.rain_onset);
+  young.gust_front(y, y.cells[0].x + 700.0, y.cells[0].y, vx, vy);
+  EXPECT_EQ(vx, 0.0);
+  w.gust_front(w.at(-10.0), 1500.0, 0.0, vx, vy);
+  EXPECT_EQ(vx, 0.0);
+  weather_params off = p;
+  off.front_speed = 0.0;
+  weather none(off);
+  none.add_event(e);
+  none.gust_front(none.at(0.0), c.x + 1500.0, c.y, vx, vy);
+  EXPECT_EQ(vx, 0.0);
+}
