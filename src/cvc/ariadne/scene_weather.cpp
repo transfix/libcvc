@@ -23,6 +23,7 @@
 #include <cvc/geometry/height_field.h>
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_geometry.h> // apply_wetness
+#include <functional>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -93,6 +94,32 @@ bool scene_weather_steering(cvc::app &app, const std::string &bind_prefix, doubl
   return true;
 }
 
+std::string scene_weather_sky(const SceneNode &weather) {
+  const std::string sky = weather.props.str("sky");
+  return sky.empty() ? std::string("sky") : sky;
+}
+
+double scene_weather_deck_base(const Scene &scene, const SceneNode &weather) {
+  const std::string root = scene_weather_sky(weather);
+  const SceneNode *found = nullptr;
+  const std::function<void(const SceneNode &)> visit = [&](const SceneNode &n) {
+    if (found)
+      return;
+    if (n.type == "cloud_sky") {
+      const std::string keys = n.props.str("keys");
+      if ((keys.empty() ? std::string("sky") : keys) == root) {
+        found = &n;
+        return;
+      }
+    }
+    for (const SceneNode &c : n.children)
+      visit(c);
+  };
+  for (const SceneNode &n : scene.nodes)
+    visit(n);
+  return found ? found->props.num("base", kCloudSkyBase) : kWeatherDeckBase;
+}
+
 namespace {
 constexpr std::uint64_t kNever = std::numeric_limits<std::uint64_t>::max();
 } // namespace
@@ -140,8 +167,8 @@ WeatherFriction::WeatherFriction(cvc::app *app, const SceneNode &n, const std::s
   d.dry = scene_weather_dry(n);
   if (app) {
     // The sky it drives (its key root, as the drawn node reads it): its drift.
-    const std::string sky = n.props.str("sky").empty() ? std::string("sky") : n.props.str("sky");
-    const double drift = read_or<double>(*app, resolve_bind(bind_prefix, sky + ".drift"), 1.0);
+    const double drift =
+        read_or<double>(*app, resolve_bind(bind_prefix, scene_weather_sky(n) + ".drift"), 1.0);
     d.steered =
         scene_weather_steering(*app, bind_prefix, deck_base, drift, d.steer_speed, d.steer_az);
   }

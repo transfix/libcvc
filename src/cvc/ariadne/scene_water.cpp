@@ -391,6 +391,9 @@ struct WaterRuntime::impl {
   std::shared_ptr<const cvc::physics::field> field;
   const float *groundData = nullptr; // the ground the field was built over (a regenerate swaps it)
   std::size_t groundSize = 0;
+  // While the scene has storms (SceneColliders::clock_period): the clock period the sea last
+  // stepped in (none yet: the largest value).
+  std::uint64_t period_done = std::numeric_limits<std::uint64_t>::max();
 };
 
 WaterRuntime::WaterRuntime(cvc::app &app, const SceneNode &n, const std::string &bind_prefix,
@@ -436,10 +439,34 @@ bool WaterRuntime::tick() {
     d.shoreSig = shoreSig;
   }
   // The sea follows its lagged wind: a keyframe (h0, and the fetch map when it turned) at most
-  // once a crossfade, on the world's clock, the time physics and the renderer share.
-  const bool seaNew = d.clock.advance(d.app->world_clock().t(), s, d.shore);
+  // once a crossfade, on the world's clock, the time physics and the renderer share. While the
+  // scene has storms, whose fronts move the wind on their own, the sea steps once a clock period
+  // (the scene's world sets the period): in period k, to the next period's start with the wind of
+  // this one (wind.front holds the front at its start), and a keyframe's field goes in at the step
+  // after that start (SceneColliders::from_tick). So where the sea's keyframes fall, and the step
+  // the bodies feel each in, are the clock's alone, whatever the frames.
+  bool seaNew = false;
+  std::uint64_t from_tick = 0;
+  const cvc::world_clock &clock = d.app->world_clock();
+  if (const double period = d.colliders->clock_period; period > 0.0 && d.clock.sea()) {
+    const std::uint64_t ticks = scene_clock_period_ticks(period, clock.fixed_dt());
+    const std::uint64_t k = clock.tick() / ticks;
+    if (d.period_done != std::numeric_limits<std::uint64_t>::max() && k < d.period_done)
+      d.period_done = k > 0 ? k - 1 : std::numeric_limits<std::uint64_t>::max(); // a restart
+    if (d.period_done == std::numeric_limits<std::uint64_t>::max() || k > d.period_done) {
+      const std::uint64_t next = (k + 1) * ticks;
+      seaNew = d.clock.advance(static_cast<double>(next) * clock.fixed_dt(), s, d.shore);
+      d.period_done = k;
+      if (seaNew)
+        from_tick = next;
+    }
+  } else {
+    seaNew = d.clock.advance(clock.t(), s, d.shore);
+  }
   if (!groundNew && !seaNew && spec == d.built && d.colliders->geometry)
     return false;
+  if (groundNew || spec != d.built || !d.colliders->geometry)
+    from_tick = 0; // the ground or the keys changed: at once, as ever
 
   // The sea the renderer draws, on the CPU: the cascades fading at the shore and crossfading
   // between the keyframes, scaled by the fetch, the ripples by the gusts, the short ones carried by
@@ -482,6 +509,7 @@ bool WaterRuntime::tick() {
   auto geo = std::make_shared<cvc::world::world_geometry>();
   geo->add_volume(std::move(item));
   d.colliders->geometry = geo;
+  d.colliders->from_tick = from_tick;
   ++d.colliders->revision;
   d.built = spec;
   d.groundData = heights.data();

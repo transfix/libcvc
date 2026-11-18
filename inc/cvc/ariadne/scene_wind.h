@@ -65,6 +65,7 @@
 #ifndef __CVC_ARIADNE_SCENE_WIND_H__
 #define __CVC_ARIADNE_SCENE_WIND_H__
 
+#include <cstdint>
 #include <cvc/algo/wind_field.h>
 #include <memory>
 #include <optional>
@@ -103,6 +104,13 @@ struct SceneWind {
 // The key, under the scene's prefix, the scene's world writes the gust front at the weather's
 // centre to ("x y", m/s; empty with none).
 inline constexpr const char *kSceneWindFront = "wind.front";
+// The front in wind.front is the front at the start of each such period of the world clock (s,
+// counted in the clock's ticks), so it changes on the clock and never with a frame; the water's
+// physics sea steps on the same periods while the scene has storms (scene_water.h), so its
+// keyframes, and the field the bodies float in, are the same at every frame rate.
+inline constexpr double kSceneWindFrontPeriod = 0.5;
+// The clock ticks of `period` seconds at the clock's quantum `dt` (at least 1).
+std::uint64_t scene_clock_period_ticks(double period, double dt);
 
 // The state keys (under a node's root, honouring its `keys:`) and props a node's wind is read from.
 struct SceneWindKeys {

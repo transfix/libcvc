@@ -334,6 +334,42 @@ struct SceneWorld::impl {
   // The clock's time less the world's field time, from where the world anchored on the clock
   // (follow), and the one the storms' air was made with: the storms are the clock's.
   double clock_offset = 0.0, storm_offset = 0.0;
+  // The kSceneWindFrontPeriod the sleeping bodies were last woken under the fronts in.
+  std::uint64_t wake_period = std::numeric_limits<std::uint64_t>::max();
+  // Whether the scene has storms that blow gust fronts (a weather node whose gust_front is on).
+  bool storms() const {
+    for (const auto &wf : weathers)
+      if (wf->model().params().front_speed > 0.0)
+        return true;
+    return false;
+  }
+  // Bodies asleep under a storm's gust front wake (F6). The field step pushes only the bodies that
+  // are awake, and the storms' air is a function of time that is never set again, so a front
+  // arriving would leave a sleeping crate at rest. On the first step of each kSceneWindFrontPeriod
+  // (counted in clock ticks, so at the same step at every frame rate), each moving body asleep
+  // where a front blows (over kWakeFront) is woken (a zero force), before the step.
+  static constexpr double kWakeFront = 0.5; // m/s
+  void wake_in_fronts(std::uint64_t tick, double dt) {
+    const auto *storm = dynamic_cast<const StormWindFlow *>(wind_flow.get());
+    if (!storm || !wind_field.valid())
+      return;
+    const std::uint64_t p = tick / scene_clock_period_ticks(kSceneWindFrontPeriod, dt);
+    if (p == wake_period)
+      return;
+    wake_period = p;
+    const double t = world->field_time();
+    for (const SceneWorldBody &b : bodies) {
+      if (!b.moves)
+        continue;
+      const ph::body_state s = world->state(b.id);
+      if (s.active)
+        continue;
+      double fx, fy;
+      storm->front(s.position.x, s.position.y, t, fx, fy);
+      if (fx * fx + fy * fy > kWakeFront * kWakeFront)
+        world->add_force(b.id, {0.0, 0.0, 0.0});
+    }
+  }
   // A terrain node's field as its body has it (placed), and a node's own bodies' XY extent (min_x,
   // min_y, max_x, max_y): what grid() makes a terrain's or a flat ground's grid from.
   std::map<std::string, std::shared_ptr<const cvc::height_field>> fields;
@@ -500,7 +536,11 @@ struct SceneWorld::impl {
 };
 
 SceneWorld::SceneWorld() : _impl(std::make_unique<impl>()) {}
-SceneWorld::~SceneWorld() = default;
+SceneWorld::~SceneWorld() {
+  // Its storms' front goes with it (the app may hold another scene next).
+  if (_impl && _impl->app && _impl->wind_bound && !_impl->weathers.empty())
+    write_scene_wind_front(*_impl->app, _impl->wind_prefix, 0.0, 0.0);
+}
 
 ph::world &SceneWorld::world() { return *_impl->world; }
 const ph::world &SceneWorld::world() const { return *_impl->world; }
@@ -809,6 +849,7 @@ void SceneWorld::restart(std::vector<std::string> *warnings) {
   d.step_history.clear();
   d.wind_field = ph::field_id{}; // the wind's field went with the old world: sync adds it again
   d.wind_applied.reset();
+  d.wake_period = std::numeric_limits<std::uint64_t>::max();
   if (d.vehicles) { // the vehicles went with the old world: each back to its start, on its ground
     d.vehicles->world_reset(d.ground_bodies());
     d.vehicles->publish();
@@ -1081,6 +1122,13 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
   }
   sync_wind();     // the scene wind's field, before anything steps in it
   publish_front(); // and the storms' gust front, before the water reads its wind
+  // With storms, the runtimes whose changes follow the clock (the water's sea) make them on its
+  // periods, and the world puts them in on the clock (SceneColliders::clock_period, from_tick).
+  {
+    const double period = d.storms() ? kSceneWindFrontPeriod : 0.0;
+    for (impl::tracked &t : d.tracked_nodes)
+      t.colliders->clock_period = period;
+  }
   if (!d.world_key.empty() && d.app) {
     // The source key: another world's name switches to it.
     cvc::state *k =
@@ -1120,7 +1168,10 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
         }
       }
     }
-    if (t.colliders->revision != t.applied && !d.off.count(t.node))
+    // A change timed on the clock goes in at its step (follow), unless that step has gone by.
+    const std::uint64_t at = t.colliders->from_tick;
+    const bool due = at == 0 || !d.follower || d.follower->last_tick() > at;
+    if (t.colliders->revision != t.applied && due && !d.off.count(t.node))
       d.apply(t, warnings);
   }
   publish_worlds(false);
@@ -1285,6 +1336,13 @@ BoatRuntime *SceneWorld::boat(const std::string &node) {
   return nullptr;
 }
 
+const WaterRuntime *SceneWorld::water(const std::string &node) const {
+  for (const auto &w : _impl->waters)
+    if (w->node() == node)
+      return w.get();
+  return nullptr;
+}
+
 WorldVehicles *SceneWorld::vehicles() { return _impl->vehicles.get(); }
 const WorldVehicles *SceneWorld::vehicles() const { return _impl->vehicles.get(); }
 
@@ -1306,27 +1364,18 @@ std::shared_ptr<const ph::flow_velocity> SceneWorld::wind() const { return _impl
 void SceneWorld::bind_weather(const Scene &scene, const std::string &bind_prefix) {
   impl &d = *_impl;
   d.weathers.clear();
-  // The cloud deck's base the storms steer at (scene_weather_steering): the first cloud_sky's.
-  double deck_base = kWeatherDeckBase;
-  bool sky = false;
-  const std::function<void(const SceneNode &)> find_sky = [&](const SceneNode &n) {
-    if (!sky && n.type == "cloud_sky") {
-      sky = true;
-      deck_base = n.props.num("base", kCloudSkyBase);
-    }
-    for (const SceneNode &c : n.children)
-      find_sky(c);
-  };
-  for (const SceneNode &n : scene.nodes)
-    find_sky(n);
   const std::function<void(const SceneNode &)> visit = [&](const SceneNode &n) {
     if (n.type == "weather")
-      d.weathers.push_back(std::make_unique<WeatherFriction>(d.app, n, bind_prefix, deck_base));
+      d.weathers.push_back(std::make_unique<WeatherFriction>(d.app, n, bind_prefix,
+                                                             scene_weather_deck_base(scene, n)));
     for (const SceneNode &c : n.children)
       visit(c);
   };
   for (const SceneNode &n : scene.nodes)
     visit(n);
+  // No storms: no front, and none left from a scene this app held before.
+  if (d.weathers.empty() && d.app)
+    write_scene_wind_front(*d.app, bind_prefix, 0.0, 0.0);
 }
 
 const std::vector<std::unique_ptr<WeatherFriction>> &SceneWorld::weathers() const {
@@ -1385,13 +1434,16 @@ void SceneWorld::publish_front() {
   impl &d = *_impl;
   if (!d.wind_bound || !d.app || d.weathers.empty())
     return; // a scene without a weather node never writes wind.front
-  // The front where the first weather's storms are centred, at the clock's time (the time the
-  // water's two seas and the drawn nodes read the wind at this frame): one wind for the nodes that
-  // read one for all they draw. Without a scene wind there are no fronts.
+  // The front where the first weather's storms are centred: one wind for the nodes that read one
+  // for all they draw. It is the front at the start of the clock's kSceneWindFrontPeriod (counted
+  // in ticks), so it changes on the clock, never with a frame, and the water's physics sea, which
+  // steps on the same periods, is the same at every frame rate. Without a scene wind, none.
   double fx = 0.0, fy = 0.0;
   if (const auto *storm = dynamic_cast<const StormWindFlow *>(d.wind_flow.get())) {
     const cvc::world::weather_params &p = d.weathers.front()->model().params();
-    const double t = d.app->world_clock().t();
+    const cvc::world_clock &clock = d.app->world_clock();
+    const std::uint64_t ticks = scene_clock_period_ticks(kSceneWindFrontPeriod, clock.fixed_dt());
+    const double t = static_cast<double>(clock.tick() / ticks * ticks) * clock.fixed_dt();
     for (const cvc::world::weather &m : storm->weathers()) {
       double x, y;
       m.gust_front(m.at(t), p.cx, p.cy, x, y);
@@ -1551,6 +1603,13 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
       b->before_step();
     for (const auto &wf : d.weathers)
       wf->before_step(*d.world, tick, clock.fixed_dt());
+    // A change timed on the clock (a water's sea keyframe while the scene has storms) goes in at
+    // the first step that ends past its tick; the sleeping bodies under the fronts wake.
+    for (impl::tracked &t : d.tracked_nodes)
+      if (t.colliders->revision != t.applied && t.colliders->from_tick != 0 &&
+          tick > t.colliders->from_tick && !d.off.count(t.node))
+        d.apply(t, &d.warnings);
+    d.wake_in_fronts(tick, clock.fixed_dt());
     d.last = d.world->step();
     for (const auto &b : d.boats)
       b->after_step();

@@ -311,6 +311,21 @@ public:
     _v0.assign(d->qvel, d->qvel + nv);
     const int bad = bad_count();
     const bool air = static_cast<bool>(_air);
+    // The air's wrench is this step's only: the pushes as they were given go back when the step
+    // ends, however it ends (a throw too), unless MuJoCo reset the state, which clears them with
+    // or without air. Without this the wrench would stay in xfrc_applied and add up step by step.
+    struct put_back {
+      engine &e;
+      bool on;
+      int bad;
+      ~put_back() {
+        if (!on)
+          return;
+        const bool reset = e.bad_count() != bad && !(e._m->opt.disableflags & mjDSBL_AUTORESET);
+        if (!reset)
+          std::copy(e._user.begin(), e._user.end(), e._d->xfrc_applied);
+      }
+    } guard{*this, air, bad};
     if (air)
       push_air();
     mj_step(m, d);
@@ -318,9 +333,7 @@ public:
       throw std::runtime_error("MuJoCo found the state unusable (NaN or a runaway value in qpos, "
                                "qvel or qacc) and reset it, at t = " +
                                std::to_string(d->time));
-    book();  // the air's wrench with apply_wrench's, as external work
-    if (air) // the pushes as they were given
-      std::copy(_user.begin(), _user.end(), d->xfrc_applied);
+    book(); // the air's wrench with apply_wrench's, as external work
     read_back();
     _fresh = false;
   }
@@ -491,14 +504,17 @@ private:
   void push_air() {
     const mjModel *m = _m.get();
     mjData *d = _d.get();
+    // The pushes as given, first: what the step puts back, whatever happens after.
+    _user.assign(d->xfrc_applied, d->xfrc_applied + 6 * static_cast<std::size_t>(m->nbody));
     mj_kinematics(m, d);
     mj_comPos(m, d);
     mj_comVel(m, d);
     _air_geoms.clear();
     for (int g = 0; g < m->ngeom; ++g) {
       const int b = m->geom_bodyid[g];
-      if (b == 0 || (m->geom_contype[g] == 0 && m->geom_conaffinity[g] == 0))
-        continue; // the world's geoms (the terrain), and the visual-only ones
+      if (m->body_weldid[b] == 0 || m->body_mocapid[b] >= 0 ||
+          (m->geom_contype[g] == 0 && m->geom_conaffinity[g] == 0))
+        continue; // the world's (the terrain), bodies welded to it, mocap bodies, visual geoms
       const mjtNum *box = m->geom_aabb + 6 * g; // centre and half sizes, in the geom's frame
       const mjtNum *R = d->geom_xmat + 9 * g;   // row-major: world = R local
       const mjtNum *p = d->geom_xpos + 3 * g;
@@ -523,7 +539,6 @@ private:
       _air_coms[b] = {d->xipos[3 * b], d->xipos[3 * b + 1], d->xipos[3 * b + 2]};
     _air_wrench.assign(6 * nb, 0.0);
     _air(d->time, _air_geoms, _air_coms, _air_wrench);
-    _user.assign(d->xfrc_applied, d->xfrc_applied + 6 * nb);
     _air_f = _air_t = vec3{};
     for (std::size_t b = 1; b < nb; ++b) {
       const double *w = _air_wrench.data() + 6 * b;

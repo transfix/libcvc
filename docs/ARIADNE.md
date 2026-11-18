@@ -1299,14 +1299,20 @@ owns it, drawn or headless ([`scene_weather.h`](../inc/cvc/ariadne/scene_weather
   a function of the point and the time that each body reads at its centre of mass at the step's own
   time. A front sweeps over the bodies as its storm walks, the same at every frame rate and
   headless, and a light body under it is pushed harder and turned (a 1 kg beach ball ahead of a
-  storm rides 18 m/s where the wind is 6). The world's vehicles and avatars read the same air.
-  `SceneWorld::wind()` hands it to a body outside the world, such as a MuJoCo robot
-  (`mujoco_robot::set_wind`).
+  storm, where the air is 18 m/s and the wind 6, goes at 16.6 m/s). A body asleep where a front
+  blows is woken on the first step of each half second of the clock. The world's vehicles read the
+  same air; arisrv's avatars keep the room rules' plain wind (no storms). `SceneWorld::wind()` hands
+  the air to a body outside the world, such as a MuJoCo robot (`mujoco_robot::set_wind(wind(),
+  world().field_time())`).
 - **The water and the trees** read one wind for all they draw, so they take the front where the
   weather's storms are centred (its `ground:`'s centre, or `cx`, `cy`): before anything reads the
   wind each frame, the world writes it to `wind.front` ("x y" m/s, empty with none), and
-  `scene_wind_now` adds it. The sea grows toward it through its `sea_lag` (so it builds after the
-  front and settles after the storm), its whitecaps with it; the trees bend harder and turn. Their
+  `scene_wind_now` adds it. It is the front at the start of each half second of the clock, so it
+  changes on the clock, never with a frame. The sea grows toward it through its `sea_lag` (so it
+  builds after the front and settles after the storm), its whitecaps with it. While the scene has
+  storms the physics sea steps once each half second of the clock, and a keyframe's field goes in at
+  the step after the next half second's start, so the bodies float the same at every frame rate.
+  The trees bend harder and turn. Their
   gusts still drift with the wind as authored, so a front changes how hard and which way the wind
   blows, not where the gusts have got to.
 - **The rain's slant** is the wind where the camera is, the front there in it.

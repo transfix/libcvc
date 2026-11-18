@@ -213,8 +213,12 @@ public:
   // --- the wind ------------------------------------------------------------------------------
   // The air the robot stands in (flow_velocity.h: the scene's wind_flow, its storms' gust fronts
   // in it (cvc::ariadne::StormWindFlow), or any flow), read at each step's start at time() +
-  // time_offset (a scene passes its clock's time at the robot's start, so the robot reads the
-  // gusts the world's bodies read). Each collision geom of a moving body takes the drag
+  // time_offset, the time the flow is read at by the world that owns it. For a scene's air
+  // (SceneWorld::wind()) that is its physics world's field time at the robot's start
+  // (SceneWorld::world().field_time()), not the clock's: the air reads its storms at the field time
+  // plus its own offset to the clock, so the clock's time would read them that much ahead. Each
+  // collision geom of a body that moves (not one welded to the world, not a mocap body) takes the
+  // drag
   // 1/2 rho C_d A |u| u: u is the air at its bounding box's centre (the flow's reference velocity
   // at its body's centre of mass times the flow's height profile at the box's centre, as the
   // world's field step reads it) less the velocity of that centre, and A is the box's area across

@@ -99,14 +99,20 @@ and is held until it is replaced or cleared. `apply_force_at` applies a force at
 **Wind.** `set_wind(air, time_offset, drag_coefficient = 1, density = 1.225)` stands the robot in
 moving air (`cvc::physics::flow_velocity`): the scene's wind (`wind_flow`, its gusts and height
 profile) or the same with its storms' gust fronts (`cvc::ariadne::StormWindFlow`, which
-`SceneWorld::wind()` hands out). At each step's start every collision geom of a moving body takes
+`SceneWorld::wind()` hands out). At each step's start every collision geom of a body that moves (not
+one welded to the world, not a mocap body) takes
 the drag ½ ρ C_d A |u| u, u the air at the centre of the geom's bounding box less that centre's
 velocity, A the box's area across u. The air there is the flow's reference velocity at the body's
 centre of mass times its height profile at the box's centre, as the Jolt world's field step reads
 it. The forces and their moments about each body's centre of mass go into MuJoCo's `xfrc_applied`
 for that step, on top of `apply_wrench`'s pushes (which they neither replace nor show in), and the
-books count their work as external. The air is read at `time() + time_offset`: a scene passes its
-clock's time when the robot started, so the robot feels the gusts the world's bodies feel. The
+books count their work as external. The air is read at `time() + time_offset`, the time the world
+that owns it reads it at: for a scene's air, pass its physics world's field time when the robot
+started (`SceneWorld::world().field_time()`), not the clock's. The air adds its own offset to the
+clock when it reads its storms (they are the clock's), so the clock's time would read them that much
+ahead, for instance after `sim.restart`. Then the robot feels the gusts the world's bodies feel. The
+pushes are put back after each step however it ends, a throw included (unless MuJoCo reset the
+state, which clears them). The
 poses and velocities it reads are the step's start's (`mj_kinematics`, `mj_comPos`, `mj_comVel`,
 which `mj_step` computes again from the same state), so a robot with no air, or with no drag, steps
 to the same bits as one without. `wind_force()` and `wind_torque()` give the last step's.
@@ -174,7 +180,9 @@ above were not run on Windows, which had no Menagerie):
 | The drag on a box | at rest in 20 m/s, square to the wind: 83.94 N, the crate's 21.35 N (11.8 m/s at its centre, 0.25 m up) and the vane's 62.59 N, ½ ρ C_d A u² to 1e-9 |
 | Pushed downwind (12 m/s, 2 s) | the crate (7.7 N of wind on 2.9 N of friction) slides 3.79 m, 0 across; the vane swings to −1.18 rad; in still air neither moves. The books: 16.4 J of external work, residual 9.7e-4 J |
 | No air, no drag | never set, set to null, and a wind with C_d 0: the same bits after 500 steps, a push of the robot's own kept |
-| Gusts and the clock | gusty 10 m/s (gustiness 0.5): the push on the crate runs 5.3 to 15.3 N; air that starts at t = 5 pushes a robot given the scene's clock at 5, not one given 0 |
+| Gusts and the time offset | gusty 10 m/s (gustiness 0.5): the push on the crate runs 5.3 to 15.3 N; air that starts at t = 5 pushes a robot given an offset of 5, not one given 0 |
+| The push ends with its step | one step of 20 m/s, then 1 s of still air: the crate within 0.5 mm of one never blown (9.25 m off with the push restore removed) |
+| What takes wind | a post welded to the world and a mocap body take none (the drag test's sum is the crate's and the vane's alone) |
 
 ## Python (`pycvc.mujoco_robot`)
 

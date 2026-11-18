@@ -97,6 +97,11 @@ std::optional<SceneWind> scene_wind_set(cvc::app &app, const std::string &bind_p
   return w;
 }
 
+std::uint64_t scene_clock_period_ticks(double period, double dt) {
+  return std::max<std::uint64_t>(
+      1, static_cast<std::uint64_t>(std::llround(std::max(period, 0.0) / std::max(dt, 1e-9))));
+}
+
 std::optional<SceneWind> scene_wind_now(cvc::app &app, const std::string &bind_prefix) {
   std::optional<SceneWind> w = scene_wind_set(app, bind_prefix);
   if (!w)

@@ -530,7 +530,17 @@ void tick(WeatherRT &r, vtkRenderer *ren) {
   const double scale = std::max(0.0, ari::read_or<double>(app, r.scaleKey, r.scale));
   if (r.first) {
     // The weather starts from its props' steering and rate; what the scene has now is an event.
+    // With a scene wind it starts steered by it at the sky's base and drift, read now that the sky
+    // has seeded its keys, as the scene's world starts it (WeatherFriction,
+    // scene_weather_deck_base: the same cloud_sky's base).
     r.first = false;
+    {
+      cvc::world::weather_params p = r.model.params();
+      if (ari::scene_weather_steering(app, r.prefix, deckBase(r),
+                                      ari::read_or<double>(app, r.skyDrift, 1.0), p.steer_speed,
+                                      p.steer_az))
+        r.model.set_params(p);
+    }
     r.steerSpeed = r.model.params().steer_speed;
     r.steerAz = r.model.params().steer_az;
     r.scale = r.model.params().rate;
@@ -848,19 +858,8 @@ std::shared_ptr<GraphicsNode> realize_weather(SceneGraph &sg, const ari::SceneNo
   // The storms' props, read as the scene's world reads them (its friction follows these storms).
   const std::string ground = ari::scene_weather_ground(n);
   const auto groundIt = out.height_fields.find(ground);
-  cvc::world::weather_params p = ari::scene_weather_params(
+  const cvc::world::weather_params p = ari::scene_weather_params(
       n, groundIt != out.height_fields.end() ? groundIt->second.get() : nullptr);
-  {
-    // With a scene wind the storms start steered by it, as the scene's world starts them
-    // (WeatherFriction), at the sky's base and drift.
-    const std::string pref0 = sg.getStatePrefix();
-    const std::string sky0 = n.props.str("sky").empty() ? std::string("sky") : n.props.str("sky");
-    ari::scene_weather_steering(
-        app, pref0,
-        ari::read_or<double>(app, ari::resolve_bind(pref0, sky0 + ".base"), ari::kWeatherDeckBase),
-        ari::read_or<double>(app, ari::resolve_bind(pref0, sky0 + ".drift"), 1.0), p.steer_speed,
-        p.steer_az);
-  }
   rt->model.set_params(p);
   rt->cx = p.cx;
   rt->cy = p.cy;

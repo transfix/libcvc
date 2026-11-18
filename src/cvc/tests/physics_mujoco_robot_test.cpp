@@ -441,13 +441,17 @@ TEST(MujocoRobot, RefusesWhatItCannotBuild) {
 // --- the wind (set_wind): the scene's air on a robot, as xfrc_applied
 // ----------------------------- A model of our own, so these run without the Menagerie: a 0.5 m
 // crate (1 kg) free on the floor, and a vane (0.04 x 0.6 x 0.8 m, its face across +x) hanging from
-// a hinge along y at 1.5 m.
+// a hinge along y at 1.5 m; and a post welded to the world and a mocap kite, which do not move and
+// take no wind.
 
 namespace {
 
+// Written per test (named after it), so tests run in parallel (ctest -j) never share the file.
 std::string wind_model() {
-  static const std::string path = [] {
-    const std::string p = ::testing::TempDir() + "cvc_mujoco_wind_model.xml";
+  const ::testing::TestInfo *info = ::testing::UnitTest::GetInstance()->current_test_info();
+  const std::string p = ::testing::TempDir() + "cvc_mujoco_wind_" +
+                        (info ? std::string(info->name()) : std::string("model")) + ".xml";
+  {
     std::ofstream f(p, std::ios::binary);
     f << R"(<mujoco model="wind_test">
   <option timestep="0.002"/>
@@ -462,12 +466,17 @@ std::string wind_model() {
       <geom name="vane_box" type="box" size="0.02 0.3 0.4" pos="0 0 -0.4" mass="0.5"/>
       <geom name="vane_look" type="sphere" size="0.05" contype="0" conaffinity="0" mass="0.01"/>
     </body>
+    <body name="post" pos="-5 0 1.1">
+      <geom name="post_box" type="box" size="0.2 0.2 1"/>
+    </body>
+    <body name="kite" mocap="true" pos="-5 3 2">
+      <geom name="kite_box" type="box" size="0.3 0.3 0.3"/>
+    </body>
   </worldbody>
 </mujoco>
 )";
-    return p;
-  }();
-  return path;
+  }
+  return p;
 }
 
 mujoco_robot_options wind_robot() {
@@ -508,7 +517,8 @@ TEST(MujocoRobotWind, TheDragOnABoxIsTheDragFormula) {
   EXPECT_EQ(r.wind_force().x, 0.0); // nothing before the first step
   r.step();
   // At rest and square to the wind: 1/2 rho C_d A u^2 with A its 0.5 m face and u the wind at its
-  // centre (the profile there). The vane, face on to the wind, takes its 0.6 x 0.8 m.
+  // centre (the profile there). The vane, face on to the wind, takes its 0.6 x 0.8 m. The post and
+  // the kite, welded to the world and mocap, take none.
   const double u = 20.0 * cvc::algo::wind_profile(z);
   const double crate_f = 0.5 * 1.225 * 1.0 * 0.25 * u * u;
   const double uv = 20.0 * cvc::algo::wind_profile(1.1); // the vane's centre, 0.4 m under 1.5
@@ -598,4 +608,27 @@ TEST(MujocoRobotWind, GustsAndTheScenesClockReachTheRobot) {
   now.step(100);
   EXPECT_LT(std::fabs(late.wind_force().x), 1e-9); // its own settling through still air
   EXPECT_GT(now.wind_force().x, 1.0);
+}
+
+// The wind's wrench acts for its step only: one step of a 20 m/s wind on the crate (21 N, over
+// its 2.9 N of friction), then still air, leaves it where a robot never blown is, within the
+// step's impulse. Were the wrench left in xfrc_applied it would push on, and add up, forever.
+TEST(MujocoRobotWind, TheWindsPushEndsWithItsStep) {
+  NEED_MUJOCO();
+  mujoco_robot calm(wind_robot()), once(wind_robot());
+  const int crate = calm.body("crate");
+  const vec3 start = calm.body_position(crate);
+  once.set_wind(steady_wind(20.0));
+  once.step();
+  EXPECT_GT(once.wind_force().x, 20.0);
+  once.set_wind(nullptr);
+  calm.step();
+  calm.step(500); // 1 s
+  once.step(500);
+  const double moved = once.body_position(crate).x - start.x;
+  const double still = calm.body_position(crate).x - start.x;
+  std::printf("one step of 20 m/s, then 1 s of still air: %.5f m (never blown: %.5f m)\n", moved,
+              still);
+  EXPECT_LT(std::fabs(moved - still), 0.01);
+  EXPECT_EQ(once.wind_force().x, 0.0);
 }

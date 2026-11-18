@@ -43,6 +43,7 @@ class world;
 }
 namespace ariadne {
 
+struct Scene;
 struct SceneNode;
 
 // How long the rain takes to soak the ground and how long it takes to dry by 1/e (weather seconds;
@@ -61,11 +62,14 @@ std::string scene_weather_ground(const SceneNode &n);
 double scene_weather_soak(const SceneNode &n);
 double scene_weather_dry(const SceneNode &n);
 
-// The cloud deck's base the storms' steering is read at when the sky is not drawn: a scene's
-// cloud_sky's `base` (cvcGL's cloud_sky defaults it to kCloudSkyBase), else the weather node's own
-// fallback, kWeatherDeckBase (it reads the sky's sky.base key, 300 m without one).
+// The cloud deck's base the storms' steering is read at. The drawn weather node reads its sky's
+// `<sky>.base` key (kWeatherDeckBase, 300 m, without one), which the cloud_sky whose keys those
+// are seeds from its `base` prop (cvcGL's cloud_sky defaults it to kCloudSkyBase).
 constexpr double kCloudSkyBase = 74.0;
 constexpr double kWeatherDeckBase = 300.0;
+// The same headless, from the document: the `base` of the scene's cloud_sky (at any depth) whose
+// key root is the one the weather node's `sky:` names (default `sky`; a cloud_sky's root is its
+// `keys:`, default `sky`), else kWeatherDeckBase. So a drawn and a headless run steer alike.
 // The storms' steering in a scene with a wind (O14, F4): the scene's wind as authored
 // (scene_wind_set, no gust front: a storm is not carried by its own outflow), its heading (degrees,
 // as weather_params::steer_az: dir + 90) at its speed at the deck's base `deck_base` (m, the
@@ -75,6 +79,9 @@ constexpr double kWeatherDeckBase = 300.0;
 // speed and az untouched, when the scene has no wind.
 bool scene_weather_steering(cvc::app &app, const std::string &bind_prefix, double deck_base,
                             double drift, double &speed, double &az);
+double scene_weather_deck_base(const Scene &scene, const SceneNode &weather);
+// The key root of the sky a weather node drives (its `sky:`, default and when empty `sky`).
+std::string scene_weather_sky(const SceneNode &weather);
 
 // The rain into the scene's friction (O20, F6). Every half second of world time (kWetPeriod,
 // counted in the world clock's ticks), the wetness where the world's vehicles are (their mean; the
