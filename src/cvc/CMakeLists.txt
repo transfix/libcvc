@@ -1913,7 +1913,7 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ariadne/components
         COMPONENT libcvc
         FILES_MATCHING PATTERN "*.ari")
 # The stock worlds beside them (cvc://worlds/default.ari, large.ari): what arisrv seeds a room
-# with (ARIADNE_WORLDS.md WD1).
+# with (ARIADNE_WORLDS.md WD1); and traffic.ari, a server world with vehicles (arisrv --doc).
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ariadne/worlds
         DESTINATION ${CMAKE_INSTALL_DATADIR}/libcvc/ariadne
         COMPONENT libcvc
