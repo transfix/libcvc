@@ -637,8 +637,8 @@ room_world room_world_from_scene(const cvc::ariadne::Scene &scene,
     w.objects.push_back(std::move(n));
   }
   if (scene.physics.present)
-    warn("scene: physics: is not simulated from the document yet (the headless world runtime, "
-         "L0); the holon builds its statics from the published objects");
+    warn("scene: physics: runs in the relay's document runtime, apart from the holon, which "
+         "builds the avatars' statics from the published objects");
   return w;
 }
 

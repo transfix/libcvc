@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/conference/room_avatar.h>     // each reserve
+#include <cvc/ariadne/conference/room_entities.h>   // entity pids, the entities section
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_participant_path, room_roster
 #include <cvc/ariadne/conference/room_rules.h>      // the world rules sections
 #include <cvc/ariadne/conference/room_scene.h>      // read_scene_objects, scene_stamp
@@ -434,22 +435,99 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
 }
 
 std::size_t apply_pose_snapshot(holon &h, pose_stream_decoder &decoder,
-                                const cvc::pose_snapshot &snap) {
+                                const cvc::pose_snapshot &snap, entity_playout *entities) {
   std::vector<pose_sample> samples;
   if (!decoder.decode(snap, samples))
     return 0;
-  return apply_pose_samples(h, samples, snap.server_tick);
+  return apply_pose_samples(h, samples, snap.server_tick, entities);
 }
 
 std::size_t apply_pose_samples(holon &h, const std::vector<pose_sample> &samples,
-                               std::uint64_t server_tick) {
+                               std::uint64_t server_tick, entity_playout *entities) {
   std::size_t applied = 0;
-  for (const pose_sample &s : samples)
+  for (const pose_sample &s : samples) {
+    if (conference::is_entity_pid(s.pid)) {
+      if (entities && entities->apply(s.pid, s.state, server_tick))
+        ++applied;
+      continue;
+    }
     if (h.has_participant(s.pid)) {
       h.apply_authoritative(s.pid, s.state, server_tick);
       ++applied;
     }
+  }
   return applied;
+}
+
+namespace {
+holon_config entity_config(holon_config cfg) {
+  cfg.physics = false; // no bodies: an entity is only shown
+  return cfg;
+}
+} // namespace
+
+entity_playout::entity_playout(holon_config cfg)
+    : _holon(std::make_unique<holon>(holon_role::client, entity_config(std::move(cfg)))) {}
+entity_playout::~entity_playout() = default;
+
+bool entity_playout::apply(const std::string &pid, const cvc::physics::body_state &state,
+                           std::uint64_t server_tick) {
+  if (!conference::is_entity_pid(pid))
+    return false;
+  if (!_holon->has_participant(pid)) {
+    _holon->add_participant(pid, /*local=*/false, state, /*pose_known=*/true);
+    ++_rev;
+  }
+  _holon->apply_authoritative(pid, state, server_tick);
+  return true;
+}
+
+void entity_playout::pump(cvc::app &app, const std::string &room, double wall_dt) {
+  const section_stamp stamp = conference::read_room_entities_stamp(app, room);
+  if (!stamp.same(_stamp)) {
+    _stamp = stamp;
+    _entities = conference::read_room_entities(app, room);
+    ++_rev;
+  }
+  // An entity the section has dropped leaves the playout; until the section is written at all
+  // (it replicates after the first samples, perhaps), every sampled one stays.
+  if (_stamp.written()) {
+    std::set<std::string> present;
+    for (const conference::room_entity &e : _entities)
+      present.insert(conference::entity_pid(e.id));
+    for (const std::string &pid : _holon->participants())
+      if (!present.count(pid)) {
+        _holon->remove_participant(pid);
+        ++_rev;
+      }
+  }
+  _holon->advance(wall_dt);
+}
+
+const conference::room_entity *entity_playout::find(std::uint64_t id) const {
+  for (const conference::room_entity &e : _entities)
+    if (e.id == id)
+      return &e;
+  return nullptr;
+}
+
+std::vector<std::uint64_t> entity_playout::shown() const {
+  std::vector<std::uint64_t> out;
+  for (const std::string &pid : _holon->participants()) {
+    std::uint64_t id = 0;
+    if (conference::parse_entity_pid(pid, id))
+      out.push_back(id);
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+bool entity_playout::pose(std::uint64_t id, cvc::physics::pose &out) const {
+  const std::string pid = conference::entity_pid(id);
+  if (!_holon->has_participant(pid))
+    return false;
+  out = _holon->display_pose(pid);
+  return true;
 }
 
 std::uint64_t propose_intent(holon &h, cvc::app &app, const std::string &room,

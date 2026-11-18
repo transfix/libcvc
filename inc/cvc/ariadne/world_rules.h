@@ -183,6 +183,30 @@ struct spawn_rules {
 bool spawn_policy_known(const std::string &policy);
 bool spawn_scope_known(const std::string &scope);
 
+// Vehicles a world starts with (world: vehicles: start:): `count` (1 to 256) of archetype
+// `archetype`, spawned when the world's vehicles are made, as a spawn request would make them:
+// `name` (with " 1", " 2", ... when count is more than one), `team`, `controller`, `plant` and
+// `policy`, empty for the archetype's; at (`x`, `y`) facing `heading` (degrees from +x; without one
+// toward its goal) when `placed`, else at a free point (or a spawn point, world: spawns:).
+//
+//   world:
+//     vehicles:
+//       archetypes: { rover: { plant: kinematic, vehicle: roboracer } }
+//       start:
+//         - { archetype: rover, count: 12, team: 1 }
+//         - { archetype: rover, name: lead, at: [0, 0], heading: 90 }
+struct vehicle_start {
+  std::string archetype, name, controller, plant, policy;
+  int team = 0;
+  int count = 1;
+  bool placed = false;
+  double x = 0.0, y = 0.0;
+  bool has_heading = false;
+  double heading = 0.0;
+  bool operator==(const vehicle_start &) const = default;
+};
+constexpr int kMaxVehicleStartCount = 256;
+
 struct world_rules {
   world_physics physics;
   std::vector<avatar_archetype> archetypes{avatar_archetype{}};
@@ -195,6 +219,8 @@ struct world_rules {
   // as a bind is (a leading / outside the document's prefix), "" none. WorldVehicles reads
   // `<path>.<id or name>.intent.*` beside each entity's own keys.
   std::string vehicle_intents;
+  // The vehicles the world starts with (world: vehicles: start:), in order; none by default.
+  std::vector<vehicle_start> vehicle_starts;
   // Where they start (world: spawns:).
   spawn_rules spawns;
   // What avatar() and controller() give when the lists above are empty: the default person and

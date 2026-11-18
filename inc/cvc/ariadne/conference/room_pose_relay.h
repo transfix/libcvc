@@ -14,12 +14,14 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace cvc {
 struct pose_snapshot;
 class state_transport;
 namespace ariadne {
 class holon;
+struct pose_subject;
 namespace conference {
 class aoi_snapshot;
 
@@ -54,12 +56,18 @@ public:
 // snapshots too (its client reconciles its prediction to it). Every `keyframe_ticks` a viewer's
 // snapshot restarts its stream with every participant it sees, absolute: a client that lost its
 // place (a snapshot that went into a connection as it died) is back in step within that.
+//
+// The room's entities (room_entities.h: the vehicles the relay's document runs) ride the same
+// snapshots, under their entity pids: every viewer sees every one, each at most every
+// `entity_interval_ticks` (they move all the time, so a heartbeat never comes into it), all of
+// them in a keyframe. One that is no longer given is in the next snapshot's gone.
 class room_pose_relay {
 public:
   struct config {
     std::uint64_t heartbeat_ticks = 120;    // a still participant's entry, at least this often
     std::uint64_t push_interval_ticks = 24; // middle/outer pairs (aoi_pose_push_interval_ticks)
     std::uint64_t keyframe_ticks = 240;     // a restart of each viewer's stream, this often
+    std::uint64_t entity_interval_ticks = 4; // an entity's entry, at most this often (30 Hz)
   };
   explicit room_pose_relay(config c);
   room_pose_relay();
@@ -83,9 +91,11 @@ public:
   std::uint32_t interval_steps(const std::string &pid) const;
 
   // Room step number `step` (counting up by one), after server_pump: the due viewers' snapshots of
-  // SERVER's participants, each tiered by `aoi` (null: all inner). A viewer is any participant of
-  // SERVER; one that left is forgotten.
-  void step(const holon &server, std::uint64_t step, const aoi_snapshot *aoi);
+  // SERVER's participants, each tiered by `aoi` (null: all inner), and of `entities` (null: none;
+  // their pids are entity pids, posed as of now). A viewer is any participant of SERVER; one that
+  // left is forgotten.
+  void step(const holon &server, std::uint64_t step, const aoi_snapshot *aoi,
+            const std::vector<pose_subject> *entities = nullptr);
 
   struct stats {
     std::uint64_t snapshots = 0; // written (one per viewer's connection)

@@ -261,11 +261,77 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
   return std::string();
 }
 
+// world: vehicles: start: into `out`: "" or what is wrong. The archetypes are checked once the
+// whole block is read.
+std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out,
+                                 std::vector<std::string> *warnings) {
+  const std::string where = "world: vehicles: start:";
+  if (!v.is_seq())
+    return where + " expects a list ({archetype:, count:, name:, team:, controller:, plant:, "
+                   "policy:, at:, heading:})";
+  out.clear();
+  std::string why;
+  for (const Value &item : v.items) {
+    const std::string at = where + " [" + std::to_string(out.size()) + "]";
+    if (!item.is_map())
+      return at + " expects a map (archetype:, count:, name:, team:, controller:, plant:, "
+                  "policy:, at:, heading:)";
+    vehicle_start s;
+    for (const auto &[k, x] : item.entries) {
+      if (k == "archetype" || k == "name" || k == "controller" || k == "plant" || k == "policy") {
+        (k == "archetype"    ? s.archetype
+         : k == "name"       ? s.name
+         : k == "controller" ? s.controller
+         : k == "plant"      ? s.plant
+                             : s.policy) = x.as_string();
+      } else if (k == "count" || k == "team") {
+        double n = 0.0;
+        if (!number(x, at + " " + k + ":", n, why))
+          return why;
+        if (k == "team") {
+          s.team = static_cast<int>(n);
+        } else {
+          if (n < 1.0 || n > kMaxVehicleStartCount || n != std::floor(n))
+            return at + " count: expects a whole number from 1 to " +
+                   std::to_string(kMaxVehicleStartCount);
+          s.count = static_cast<int>(n);
+        }
+      } else if (k == "at") {
+        if (!x.is_seq() || x.items.size() < 2 || !number(x.items[0], at + " at:", s.x, why) ||
+            !number(x.items[1], at + " at:", s.y, why))
+          return at + " at: expects [x, y]";
+        s.placed = true;
+      } else if (k == "heading") {
+        if (!number(x, at + " heading:", s.heading, why))
+          return why;
+        s.has_heading = true;
+      } else {
+        warn(warnings, at + " unknown key '" + k + "', ignored");
+      }
+    }
+    if (s.archetype.empty())
+      return at + " names no archetype:";
+    if (!s.plant.empty() && !vehicle_plant_known(s.plant))
+      return at + " plant: '" + s.plant +
+             "' is not one (jolt, kinematic, dynamic, dynamic4w, dynamicboat)";
+    if (!s.controller.empty() && !vehicle_controller_known(s.controller))
+      return at + " controller: '" + s.controller + "' is not one";
+    out.push_back(std::move(s));
+  }
+  return std::string();
+}
+
 std::string parse_vehicles(const Value &v, std::vector<vehicle_archetype> &out,
-                           std::string &intents, std::vector<std::string> *warnings) {
+                           std::string &intents, std::vector<vehicle_start> &starts,
+                           std::vector<std::string> *warnings) {
   if (!v.is_map())
-    return "world: vehicles: expects a map (archetypes:, intents:)";
+    return "world: vehicles: expects a map (archetypes:, intents:, start:)";
   for (const auto &[key, val] : v.entries) {
+    if (key == "start") {
+      if (std::string e = parse_vehicle_starts(val, starts, warnings); !e.empty())
+        return e;
+      continue;
+    }
     if (key == "intents") {
       intents = val.is_scalar() ? val.scalar : std::string();
       std::string path = !intents.empty() && intents[0] == '/' ? intents.substr(1) : intents;
@@ -294,6 +360,11 @@ std::string parse_vehicles(const Value &v, std::vector<vehicle_archetype> &out,
       out.push_back(std::move(arch));
     }
   }
+  for (std::size_t i = 0; i < starts.size(); ++i)
+    if (std::none_of(out.begin(), out.end(),
+                     [&](const vehicle_archetype &a) { return a.id == starts[i].archetype; }))
+      return "world: vehicles: start: [" + std::to_string(i) + "] names archetype '" +
+             starts[i].archetype + "', which archetypes: does not define";
   return std::string();
 }
 
@@ -671,7 +742,8 @@ std::string parse_world_block(const Value &content, world_rules &rules,
     if (key == "controllers")
       continue;
     if (key == "vehicles") {
-      if (std::string e = parse_vehicles(v, rules.vehicles, rules.vehicle_intents, warnings);
+      if (std::string e = parse_vehicles(v, rules.vehicles, rules.vehicle_intents,
+                                         rules.vehicle_starts, warnings);
           !e.empty())
         return e;
       continue;

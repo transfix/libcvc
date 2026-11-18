@@ -52,6 +52,7 @@
 namespace cvc {
 class app;
 namespace ariadne {
+class entity_playout;
 class holon;
 } // namespace ariadne
 namespace gl {
@@ -60,6 +61,7 @@ class LodPyramidCache;
 struct lod_stats;
 namespace ariadne {
 struct RealizedScene;
+struct vehicle_model_cache; // vehicle_view.h: the models it fits
 
 // The local avatar's intent from the held movement keys, relative to its facing YAW (radians about
 // +Z from +X, Z-up): W/S walk forward/back along the facing, A/D strafe left/right of it (right is
@@ -72,6 +74,8 @@ cvc::ariadne::avatar_intent intent_from_keys(bool forward, bool back, bool left,
 // (eye -> focal) flattened onto the ground. A camera looking straight down has none: +Y (pi/2).
 double heading_yaw(const double eye[3], const double focal[3]);
 
+// The room's entities (room_entities.h: the vehicles the relay's document runs), drawn by
+// update_entities from a client's playout of them (holon_sync.h).
 class room_view {
 public:
   // Draws ROOM's scene and SELF_PID's view of the avatars into `view`'s SceneGraph. BIND_PREFIX is
@@ -138,6 +142,16 @@ public:
   // The pids that have an avatar marker right now, in pid order.
   std::vector<std::string> avatar_pids() const;
 
+  // Once per frame, after the playout's pump: each entity it shows drawn as its vehicle (the box
+  // look of vehicle_view: chassis, cabin and four wheels, sized from its identity, in its two
+  // colours), built again when its identity changes, posed where the playout shows it (the
+  // chassis's centre, its heading), with its name among draw_labels'. An entity with no identity
+  // yet is drawn with the defaults until its identity replicates.
+  void update_entities(const cvc::ariadne::entity_playout &entities);
+  // The entities drawn right now, by id.
+  std::vector<std::uint64_t> entity_ids() const;
+  static std::string entity_node_id(std::uint64_t id) { return "entity_" + std::to_string(id); }
+
   // The look PID's marker was last built with (its body colour, its accessory's parts); false if
   // PID has no marker.
   bool avatar_look(const std::string &pid, cvc::ariadne::conference::avatar_look &out) const;
@@ -189,6 +203,13 @@ private:
   bool _self_visible = true; // set_self_visible
   double _self_pos[3] = {0.0, 0.0, 0.0};
   std::vector<std::string> _warnings;
+  // The entities drawn: id -> the identity its node was built with (a change rebuilds it), the pose
+  // matrix it shows, and its name for the labels (under its entity pid in _heads).
+  std::map<std::uint64_t, std::string> _entity_built;
+  std::map<std::uint64_t, std::array<double, 16>> _entity_posed;
+  std::map<std::string, std::string> _entity_names;
+  // The vehicle models fitted for the entities (made with the first one that has a model look).
+  std::shared_ptr<vehicle_model_cache> _models;
 };
 
 } // namespace ariadne

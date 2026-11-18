@@ -44,9 +44,12 @@
 //   many rooms can build one each.
 // - The scene. A document whose scene: has nodes or lights is the room's world: the relay
 //   publishes it into conf.rooms.<room>.scene (conference::room_world_from_scene,
-//   ARIADNE_WORLDS.md WD1), after read() and before load(). Its physics is not simulated yet: the
-//   parsed scene is kept here (scene()) for the world runtime that will run it as the holon's one
-//   physics world (ARIADNE_WORLDS.md §14), and its load says so.
+//   ARIADNE_WORLDS.md WD1), after read() and before load(), from the copy kept here (scene()).
+//   The load runs its world headless, as any runtime without a scene adapter does (SceneWorld,
+//   runtime().scene_world(): the physics world and its bodies, the world sources, the vehicles of
+//   world: vehicles:), stepped on the app's world clock at each step(). That physics world is the
+//   document's, apart from the holon's, which builds the avatars' statics from the published
+//   objects; the entities' poses stay under the document's prefix until the relay sends them.
 // - The rules. Its world: block (world_rules.h) is kept too (world()): the avatars' archetypes,
 //   policy and controllers, which the relay publishes as the room's rules sections
 //   (conference::write_room_rules, ARIADNE_WORLDS.md WD2), with the scene's physics: gravity.

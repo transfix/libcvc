@@ -93,7 +93,8 @@ std::uint32_t room_pose_relay::interval_steps(const std::string &pid) const {
   return it == _impl->viewers.end() ? 0 : it->second.interval;
 }
 
-void room_pose_relay::step(const holon &server, std::uint64_t step, const aoi_snapshot *aoi) {
+void room_pose_relay::step(const holon &server, std::uint64_t step, const aoi_snapshot *aoi,
+                           const std::vector<pose_subject> *entities) {
   impl &m = *_impl;
   const std::vector<std::string> pids = server.participants();
   // Forget viewers that left (their next connection starts a fresh stream).
@@ -157,6 +158,15 @@ void room_pose_relay::step(const holon &server, std::uint64_t step, const aoi_sn
       }
       subjects.push_back(std::move(s));
     }
+    if (entities)
+      for (const pose_subject &e : *entities) {
+        pose_subject s = e;
+        if (!key) {
+          const std::uint64_t last = v.enc.last_sent_tick(e.pid);
+          s.due = last == 0 || tick >= last + m.cfg.entity_interval_ticks;
+        }
+        subjects.push_back(std::move(s));
+      }
     const cvc::pose_snapshot snap = v.enc.encode(tick, subjects, m.cfg.heartbeat_ticks);
     if (snap.entries.empty() && snap.gone.empty())
       continue; // nothing new for this viewer (it is all still, between heartbeats)

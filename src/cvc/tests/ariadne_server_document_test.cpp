@@ -19,13 +19,20 @@
 // client_guests:, the latter with a fake engine here).
 // room_relay_integration_test.cpp has the same over a relay's transports.
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cvc/ariadne/conference/room_entities.h>
+#include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/script_engine.h> // a client guest's engine (client_guests:)
 #include <cvc/ariadne/server_document.h>
 #include <cvc/ariadne/value.h>
+#include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
+#include <cvc/physics/backend.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_exec/exceptions.h> // dsl_error
@@ -39,6 +46,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -302,22 +310,37 @@ TEST(ServerDocumentTest, QuitAsksTheRelayToStop) {
   EXPECT_EQ(doc.exit_code(), 3);
 }
 
-// The relay publishes a document's scene as the room's world (WD1) but simulates none of its
-// physics yet: the parsed scene, its physics and bodies included, is kept from read() on for the
-// world runtime that will attach (ARIADNE_WORLDS.md §14), and the load says it is not simulated.
-TEST(ServerDocumentTest, KeepsTheSceneAndSaysItIsNotSimulated) {
+// The relay publishes a document's scene as the room's world (WD1) from the copy read() keeps,
+// and the load runs that world headless (ARIADNE_WORLDS.md §14): its physics world and bodies,
+// and its vehicles (the ones it starts with, and more on request), driven by nav@1 on the world
+// clock at each step().
+TEST(ServerDocumentTest, RunsItsScenesWorldAndItsVehicles) {
   if (!ari::AppRuntime::have_yaml())
     GTEST_SKIP() << "built without yaml-cpp";
   TempDir dir;
   const std::string path = dir.write("world.ari", R"(meta: { name: world, min_libcvc: 3.7.5 }
+requires: [relay, scene.physics]
+world:
+  vehicles:
+    archetypes:
+      rover:
+        plant: kinematic
+        vehicle: { preset: roboracer, max_speed: 6 }
+        controllers: [nav@1]
+    start:
+      - { archetype: rover, count: 5, name: rover }
 scene:
   physics: {gravity: [0, 0, -9.80665]}
+  world: { source: square, cell: 2 }
   nodes:
-    - node: ground
-      source: {plane: {size: 20}}
+    - node: square
+      world: square
+      source: {box: {size: [120, 120, 1]}}
+      transform: { position: [0, 0, -0.5] }
       body: static
     - node: crate
       source: {box: {size: [0.6, 0.6, 0.6]}}
+      transform: { position: [30, 30, 3] }
       body: {motion: dynamic, mass: 20}
 )");
   cvc::app app;
@@ -326,16 +349,126 @@ scene:
   // read() has it already, so the relay can publish the world before the document runs.
   EXPECT_EQ(doc.scene().nodes.size(), 2u);
   const std::vector<std::string> warnings = doc.load(path);
-  bool said = false;
   for (const std::string &w : warnings) {
-    said = said || w.find("physics (2 bodies) is kept but not simulated") != std::string::npos;
     EXPECT_EQ(w.find("scene ignored"), std::string::npos) << w;
+    EXPECT_EQ(w.find("not simulated"), std::string::npos) << w;
   }
-  EXPECT_TRUE(said) << "the load says the physics is not simulated";
-  EXPECT_TRUE(doc.scene().physics.present);
-  ASSERT_EQ(doc.scene().nodes.size(), 2u);
-  EXPECT_EQ(doc.scene().nodes[1].id, "crate");
+  ASSERT_EQ(doc.scene().nodes.size(), 2u) << "the relay's copy stays";
   EXPECT_TRUE(doc.scene().nodes[1].body.present);
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt))
+    GTEST_SKIP() << "no Jolt in this build";
+  ari::SceneWorld *world = doc.runtime().scene_world();
+  ASSERT_NE(world, nullptr) << "the load built the scene's world";
+  ari::WorldVehicles *vehicles = world->vehicles();
+  ASSERT_NE(vehicles, nullptr);
+
+  // The five it starts with, named in order.
+  ASSERT_EQ(vehicles->size(), 5u);
+  EXPECT_EQ(vehicles->entities()[0].spec.name, "rover 1");
+  EXPECT_EQ(vehicles->entities()[4].spec.name, "rover 5");
+
+  // The relay's steps drive them on the world clock.
+  cvc::state &root = cvc::state::instance(app);
+  const auto value = [&root](const std::string &key) {
+    return root(std::string(ari::ServerDocument::kPrefix) + "." + key).value();
+  };
+  std::uint64_t tick = 0;
+  const auto steps = [&](double seconds) {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+    while (std::chrono::steady_clock::now() < until) {
+      ++tick;
+      doc.step(tick, tick / 120.0);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  };
+  steps(0.1);
+  EXPECT_EQ(value("vehicles.count"), "5");
+  const std::vector<ari::entity_info> start = vehicles->entities();
+  steps(2.0);
+  const std::vector<ari::entity_info> later = vehicles->entities();
+  ASSERT_EQ(later.size(), start.size());
+  double moved = 0.0;
+  for (std::size_t i = 0; i < later.size(); ++i)
+    moved = std::max(moved, std::hypot(later[i].x - start[i].x, later[i].y - start[i].y));
+  EXPECT_GT(moved, 1.0) << "nav@1 drives them";
+  // Their table is under the document's prefix (entities.<id>.*), which the relay does not send.
+  EXPECT_FALSE(value("entities." + std::to_string(later[0].id) + ".x").empty());
+
+  // A request spawns spawn.count more at once.
+  root(std::string(ari::ServerDocument::kPrefix) + ".vehicles.spawn.count").value("2");
+  root(std::string(ari::ServerDocument::kPrefix) + ".vehicles.spawn.request").value("1");
+  for (int i = 0; i < 40 && vehicles->size() < 7; ++i)
+    steps(0.05);
+  EXPECT_EQ(vehicles->size(), 7u) << value("vehicles.spawn.status");
+  EXPECT_EQ(value("vehicles.spawn.status").rfind("spawned 2, the last 7", 0), 0u)
+      << value("vehicles.spawn.status");
+
+  // What the relay sends of them (room_entities.h): each one's identity in the room's entities
+  // section, and its pose for the pose stream.
+  cvc::ariadne::conference::room_entity_relay relay;
+  const std::vector<ari::pose_subject> &poses = relay.step(app, kRoom, vehicles);
+  ASSERT_EQ(poses.size(), 7u);
+  EXPECT_EQ(poses[0].pid, "~e1");
+  const std::vector<cvc::ariadne::conference::room_entity> listed =
+      cvc::ariadne::conference::read_room_entities(app, kRoom);
+  ASSERT_EQ(listed.size(), 7u);
+  EXPECT_EQ(listed[0].name, "rover 1");
+  EXPECT_EQ(listed[0].plant, "kinematic");
+  EXPECT_GT(listed[0].size[0], 0.5) << "its chassis's length";
+  EXPECT_EQ(relay.writes(), 1u);
+  relay.step(app, kRoom, vehicles);
+  EXPECT_EQ(relay.writes(), 1u) << "rewritten only when they change";
+  vehicles->despawn(listed[0].id);
+  relay.step(app, kRoom, vehicles);
+  EXPECT_EQ(relay.writes(), 2u);
+  EXPECT_EQ(cvc::ariadne::conference::read_room_entities(app, kRoom).size(), 6u);
+}
+
+// The stock server world with vehicles (cvc://worlds/traffic.ari, arisrv --doc): it loads on the
+// relay, its eighteen vehicles start and drive between its blocks.
+TEST(ServerDocumentTest, TheStockTrafficWorldRuns) {
+  if (!ari::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  const fs::path path =
+      fs::path(__FILE__).parent_path().parent_path() / "ariadne" / "worlds" / "traffic.ari";
+  if (!fs::exists(path))
+    GTEST_SKIP() << "no source tree beside this test: " << path.string();
+  cvc::app app;
+  ari::ServerDocument doc(app, kRoom);
+  ASSERT_EQ(doc.read(path.string()), "");
+  EXPECT_GE(doc.scene().nodes.size(), 13u) << "the ground and twelve blocks";
+  const std::vector<std::string> warnings = doc.load(path.string());
+  for (const std::string &w : warnings)
+    ADD_FAILURE() << "traffic.ari warns: " << w;
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt))
+    GTEST_SKIP() << "no Jolt in this build";
+  ari::SceneWorld *world = doc.runtime().scene_world();
+  ASSERT_NE(world, nullptr);
+  ari::WorldVehicles *vehicles = world->vehicles();
+  ASSERT_NE(vehicles, nullptr);
+  ASSERT_EQ(vehicles->size(), 18u);
+  std::uint64_t tick = 0;
+  const auto steps = [&](double seconds) {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+    while (std::chrono::steady_clock::now() < until) {
+      ++tick;
+      doc.step(tick, tick / 120.0);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  };
+  steps(0.2);
+  const std::vector<ari::entity_info> start = vehicles->entities();
+  int placed = 0;
+  for (const ari::entity_info &e : start)
+    placed += e.placed ? 1 : 0;
+  EXPECT_EQ(placed, 18) << "every one at a free point between the blocks";
+  steps(2.0);
+  const std::vector<ari::entity_info> later = vehicles->entities();
+  ASSERT_EQ(later.size(), start.size());
+  int moving = 0;
+  for (std::size_t i = 0; i < later.size(); ++i)
+    moving += std::hypot(later[i].x - start[i].x, later[i].y - start[i].y) > 1.0 ? 1 : 0;
+  EXPECT_GE(moving, 12) << "most of them drive";
 }
 
 // The document's own state is never published, whatever prefix it binds under: an entry that is
