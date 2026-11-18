@@ -20,7 +20,10 @@
 //   (6) a wheel in snow sinks to the Bekker depth and rides on the compacted surface;
 //   (7) the snow's compaction resistance and traction;
 //   (8) the aero takes a flow field's wind;
-//   (9) the same run twice, and a save / restore / re-run, give the same hash.
+//   (9) the same run twice, and a save / restore / re-run, give the same hash;
+//  (10) wading (vehicle_desc::wading): a Humvee in 0.5 m of water keeps its traction and slows at
+//       its tires' and underbody's drag; past its fording depth its engine floods and it stays on
+//       the bottom; a current and a swell push it; standing water soaks and aquaplanes its tires.
 // Jolt only; the refusals run on the null backend too.
 
 #include <algorithm>
@@ -1202,4 +1205,489 @@ TEST(PhysicsVehicle, RainLowersTheRoadsTractionAndItComesBackAsItDries) {
   EXPECT_NEAR(d1.second, ideal(d1.first, muWet), 0.15 * ideal(d1.first, muWet));
   EXPECT_GT(d1.second, 1.3 * d0.second);              // the wet road stops it far later
   EXPECT_NEAR(d2.second, d0.second, 0.1 * d0.second); // and dried, it stops as it did
+}
+
+// --- wading (vehicle_desc::wading) -----------------------------------------------------------
+
+namespace {
+
+constexpr double kRho = 1000.0; // the tests' water, kg/m^3
+
+// Water over the flat ground (top at z = 0) to `depth`, over x0 < x < x1 and |y| < 50, flowing at
+// `current`.
+field_id add_water(world &w, double x0, double x1, double depth, const vec3 &current = {}) {
+  field water;
+  water.kind = field_kind::fluid;
+  const vec3 lo{x0, -50.0, -1.0}, hi{x1, 50.0, depth};
+  water.volume = uniform(kRho, lo, hi);
+  if (current.x != 0.0 || current.y != 0.0 || current.z != 0.0)
+    water.velocity = {uniform(current.x, lo, hi), uniform(current.y, lo, hi),
+                      uniform(current.z, lo, hi)};
+  return w.add_field(water);
+}
+
+// The area of a circle of radius r below a chord h above its lowest point.
+double segment(double r, double h) {
+  h = std::max(0.0, std::min(2.0 * r, h));
+  return r * r * std::acos((r - h) / r) - (r - h) * std::sqrt(h * (2.0 * r - h));
+}
+
+// The water's drag on a vehicle at `s` wading `depth` deep with the water flowing past it at u
+// along (`along`) or across (!`along`) its axis (vehicle.h): every tire's displacement drag (its
+// width times its immersed height, or its immersed side) and the underbody's.
+double wading_drag(const vehicle_desc &d, const vehicle_state &s, double depth, double u,
+                   bool along) {
+  const wading_desc &g = d.wading;
+  double cda = 0.0;
+  for (const axle_desc &a : d.axles) {
+    const double h = std::min(depth, 2.0 * a.wheel_radius);
+    cda += 2.0 * g.wheel_drag * (along ? a.wheel_width * h : segment(a.wheel_radius, h));
+  }
+  const double bottom = s.body.position.z - d.half_extents.z - g.underbody_depth;
+  const double hu = std::max(0.0, std::min(g.underbody_depth, depth - bottom));
+  cda += g.underbody_drag * 2.0 * (along ? d.half_extents.y : d.half_extents.x) * hu;
+  return 0.5 * kRho * cda * u * u;
+}
+
+double total_load(const vehicle_state &s) {
+  double n = 0.0;
+  for (const wheel_state &ws : s.wheels)
+    n += ws.contact ? ws.load : 0.0;
+  return n;
+}
+
+} // namespace
+
+// A Humvee wading 0.5 m of still water (under its 0.76 m fording depth) keeps its footing: every
+// wheel on the ground, its tires carrying all but what they float, and it pulls away as on land,
+// if more slowly. Coasting, it slows at the water's drag on its tires and underbody plus their
+// rolling resistance, and the ledger still balances with that work in its `fields`.
+TEST(PhysicsVehicle, AHumveeWadingHalfAMetreSlowsButKeepsItsTraction) {
+  REQUIRE_JOLT();
+  const vehicle_desc d = vehicle_desc::humvee();
+  const double depth = 0.5;
+  // Pulling away from rest in the water and on land: 3 s at full throttle, the speed each step.
+  const auto pull_away = [&](bool wet, vehicle_state &rest, vehicle_state &after,
+                             std::vector<double> &speeds) {
+    world w(jolt_config());
+    flat_ground(w, 0.9);
+    if (wet)
+      add_water(w, -200.0, 200.0, depth);
+    const vehicle_id v = settled_humvee(w, -150.0, 0.0);
+    rest = w.vehicle_state(v);
+    vehicle_controls go;
+    go.throttle = 1.0;
+    w.set_controls(v, go);
+    speeds.assign(1, rest.speed);
+    for (int i = 0; i < static_cast<int>(3.0 / w.config().fixed_dt); ++i) {
+      w.step();
+      speeds.push_back(speed_of(w, v));
+    }
+    after = w.vehicle_state(v);
+  };
+  vehicle_state dry_rest, dry_go, wet_rest, wet_go;
+  std::vector<double> dry_v, wet_v;
+  pull_away(false, dry_rest, dry_go, dry_v);
+  pull_away(true, wet_rest, wet_go, wet_v);
+  // The tires' buoyancy: each displaces its share of the immersed cylinder.
+  double floated = 0.0;
+  for (const axle_desc &a : d.axles)
+    floated += 2.0 * kRho * kG * segment(a.wheel_radius, depth) * a.wheel_width *
+               d.wading.wheel_displacement;
+  std::printf("  at rest: tires carry %.0f N dry, %.0f N wading (%.0f N floated by the model)\n",
+              total_load(dry_rest), total_load(wet_rest), floated);
+  for (const wheel_state &ws : wet_rest.wheels) {
+    ASSERT_TRUE(ws.contact);
+    EXPECT_NEAR(ws.water_depth, depth, 0.005);
+  }
+  EXPECT_NEAR(total_load(dry_rest) - total_load(wet_rest), floated, 0.05 * floated);
+  EXPECT_FALSE(wet_go.engine_flooded);
+  // Its traction: the tires deliver what they do on land at the same speed (the dry run's
+  // acceleration there), less only the water's drag and plus the rolling resistance the floated
+  // load no longer pays. Integrated over the 3 s, that model gives the wading speed.
+  const double dt = 0.01;
+  ASSERT_EQ(dt, jolt_config().fixed_dt);
+  double m_eff = d.mass;
+  for (const axle_desc &a : d.axles)
+    m_eff += 2.0 * a.wheel_inertia / (a.wheel_radius * a.wheel_radius);
+  const auto dry_accel = [&](double v) { // the dry run's acceleration at speed v
+    for (std::size_t i = 1; i < dry_v.size(); ++i)
+      if (dry_v[i] > v)
+        return (dry_v[i] - dry_v[i - 1]) / dt;
+    return 0.0;
+  };
+  double model_v = 0.0;
+  for (std::size_t i = 1; i < wet_v.size(); ++i)
+    model_v +=
+        dt *
+        (dry_accel(model_v) +
+         (d.rolling_resistance * floated - wading_drag(d, wet_go, depth, model_v, true)) / m_eff);
+  std::printf("  3 s at full throttle: %.2f m/s on land, %.2f m/s wading (the same traction less "
+              "the water's drag: %.2f m/s)\n",
+              dry_go.speed, wet_go.speed, model_v);
+  // Slipping tires would leave it short of the model; it is a little ahead (its converter and
+  // gears at a speed differ a little with the time it took to get there).
+  EXPECT_LT(wet_go.speed, dry_go.speed);
+  EXPECT_GT(wet_go.speed, 0.95 * model_v) << "it keeps its traction";
+  EXPECT_LT(wet_go.speed, 1.1 * model_v);
+  // Its tires slip a little more on their lighter loads (dry 0.08 at most here), but none spins:
+  // at a slip of 0.3 the tire curve still holds nearly all of its peak.
+  for (const wheel_state &ws : wet_go.wheels) {
+    EXPECT_TRUE(ws.contact);
+    EXPECT_LT(std::fabs(ws.longitudinal_slip), 0.3);
+  }
+
+  // Coasting from 4 m/s in neutral.
+  world w(jolt_config());
+  flat_ground(w, 0.9);
+  add_water(w, -300.0, 300.0, depth);
+  const vehicle_id v = settled_humvee(w, -280.0, 0.0);
+  accelerate_to(w, v, 4.0);
+  vehicle_controls coast;
+  coast.neutral = true;
+  w.set_controls(v, coast);
+  w.step(30);
+  const vehicle_state s0 = w.vehicle_state(v);
+  w.step(60);
+  const vehicle_state s1 = w.vehicle_state(v);
+  const double u = 0.5 * (s0.speed + s1.speed);
+  const double decel = (s0.speed - s1.speed) / (60 * dt);
+  const double rolling = d.rolling_resistance * total_load(s0);
+  const double aero = 0.5 * d.air_density * d.drag_coefficient * d.frontal_area * u * u;
+  const double water = wading_drag(d, s0, depth, u, true);
+  const double model = (rolling + aero + water) / m_eff;
+  // The tire's drag as the readback has it, against AMC 25.1591's 1/2 rho C_d b d V^2.
+  const axle_desc &a = d.axles[0];
+  const double tire =
+      0.5 * kRho * d.wading.wheel_drag * a.wheel_width * depth * s0.speed * s0.speed;
+  std::printf("  coasting at %.2f m/s: %.0f N of water drag (%.0f N a tire, readback %.0f N), "
+              "decel %.3f m/s^2 (model %.3f)\n",
+              u, water, tire, s0.wheels[0].water_drag, decel, model);
+  EXPECT_NEAR(s0.wheels[0].water_drag, tire, 0.05 * tire);
+  EXPECT_NEAR(decel, model, 0.1 * model);
+  EXPECT_LT(s0.water_force.x, 0.0) << "the water holds it back";
+  // The ledger: the water's work is the fields' (and negative: the drag took energy out).
+  const vehicle_energy &e = s1.energy;
+  std::printf("  ledger: supplied %.0f J, fields %.0f J, residual %.0f J\n", e.supplied, e.fields,
+              e.residual);
+  EXPECT_LT(e.fields, 0.0);
+  EXPECT_LT(std::fabs(e.residual), 0.02 * (e.supplied + std::fabs(e.fields)));
+}
+
+// At 1.2 m, past its fording depth, a Humvee's engine floods and it sits on the bottom: its body
+// floods too, so the water lifts only the share it displaces, its tires keep a load and the
+// commanded drive does nothing. With wading off, its chassis is a sealed 9.5 m^3 box, which
+// floats it off its wheels.
+TEST(PhysicsVehicle, InDeepWaterAHumveeStaysOnTheBottomAndItsEngineFloods) {
+  REQUIRE_JOLT();
+  const double depth = 1.2;
+  const auto sit = [&](bool wading, vehicle_state &dry, vehicle_state &wet, double &fuel_before,
+                       double &fuel_after) {
+    vehicle_desc d = vehicle_desc::humvee();
+    d.wading.enabled = wading;
+    world a(jolt_config());
+    flat_ground(a, 0.9);
+    const vehicle_id va = a.add_vehicle(d, {0.0, 0.0, 1.2});
+    a.drive(va, {});
+    a.step(200);
+    dry = a.vehicle_state(va);
+    world w(jolt_config());
+    flat_ground(w, 0.9);
+    add_water(w, -50.0, 50.0, depth);
+    const vehicle_id v = w.add_vehicle(d, {0.0, 0.0, 1.2});
+    w.drive(v, {0.0, 1.5}); // try to drive off
+    w.step(200);
+    fuel_before = w.vehicle_state(v).energy.fuel_used;
+    w.step(300);
+    wet = w.vehicle_state(v);
+    fuel_after = wet.energy.fuel_used;
+  };
+  vehicle_state dry, wet, sealed_dry, sealed;
+  double f0 = 0.0, f1 = 0.0, g0 = 0.0, g1 = 0.0;
+  sit(true, dry, wet, f0, f1);
+  sit(false, sealed_dry, sealed, g0, g1);
+  const vehicle_desc d = vehicle_desc::humvee();
+  const double weight = d.mass * kG;
+  std::printf("  wading: chassis %.3f m (%.3f m dry), tires carry %.0f of %.0f N, engine %s at "
+              "%.0f rpm, %.2f m/s\n",
+              wet.body.position.z, dry.body.position.z, total_load(wet), weight,
+              wet.engine_flooded ? "flooded" : "running", wet.engine_rpm, wet.speed);
+  std::printf("  sealed: chassis %.3f m, tires carry %.0f N\n", sealed.body.position.z,
+              total_load(sealed));
+  for (const wheel_state &ws : wet.wheels)
+    EXPECT_TRUE(ws.contact);
+  // It rides a little higher on its springs as they unload, but it does not float.
+  EXPECT_NEAR(wet.body.position.z, dry.body.position.z, 0.15);
+  EXPECT_GT(total_load(wet), 0.3 * weight);
+  EXPECT_LT(total_load(wet), 0.7 * weight) << "the water lifts the share it displaces";
+  EXPECT_TRUE(wet.engine_flooded);
+  EXPECT_EQ(wet.throttle, 0.0);
+  EXPECT_LT(wet.engine_rpm, 1.0) << "the engine has stopped";
+  EXPECT_LT(std::fabs(wet.speed), 0.05) << "the drive command does nothing";
+  EXPECT_EQ(f1, f0) << "a flooded engine burns no fuel";
+  // Sealed, the box floats it: its tires carry next to nothing and it rides up (afloat, the box
+  // draws 2676 / (1000 x 4.84 x 2.18) = 0.25 m, so its bottom stands 0.95 m up, not 0.57).
+  EXPECT_GT(sealed.body.position.z, sealed_dry.body.position.z + 0.25);
+  EXPECT_LT(total_load(sealed), 0.05 * weight);
+  EXPECT_FALSE(sealed.engine_flooded) << "without wading it never floods";
+}
+
+// Driving through a ford: 0.5 m of water from x = 0, then 0.9 m from x = 40. The stock Humvee
+// (0.76 m) drives through the shallow half, floods as its front axle reaches the deep half and
+// coasts to a stop; one with the deep-water fording kit (1.52 m) drives on through.
+TEST(PhysicsVehicle, PastItsFordingDepthTheEngineFloodsAndAKitFordsDeeper) {
+  REQUIRE_JOLT();
+  const auto ford = [](double fording, double &flooded_at, double &stopped_at, double &rpm,
+                       double &fuel_after_flooding) {
+    vehicle_desc d = vehicle_desc::humvee();
+    d.wading.fording_depth = fording;
+    world w(jolt_config());
+    flat_ground(w, 0.9);
+    add_water(w, 0.0, 40.0, 0.5);
+    add_water(w, 40.0, 140.0, 0.9);
+    const vehicle_id v = w.add_vehicle(d, {-40.0, 0.0, 1.2});
+    w.drive(v, {});
+    w.step(200);
+    flooded_at = stopped_at = 1e9;
+    double fuel_at_flood = 0.0;
+    const int steps = static_cast<int>(80.0 / w.config().fixed_dt); // 140 m at 3 m/s, and spare
+    for (int i = 0; i < steps; ++i) {
+      const vehicle_state s = w.vehicle_state(v);
+      w.drive(v, {0.0, s.speed < 3.0 ? 1.0 : 0.0}); // about 3 m/s
+      w.step();
+      const vehicle_state n = w.vehicle_state(v);
+      if (n.engine_flooded && flooded_at > 1e8) {
+        flooded_at = n.body.position.x + d.axles[0].x; // the front axle
+        fuel_at_flood = n.energy.fuel_used;
+      }
+      if (flooded_at < 1e8 && std::fabs(n.speed) < 0.05 && stopped_at > 1e8)
+        stopped_at = n.body.position.x;
+      if (n.body.position.x > 100.0)
+        break;
+    }
+    const vehicle_state s = w.vehicle_state(v);
+    rpm = s.engine_rpm;
+    fuel_after_flooding = s.energy.fuel_used - fuel_at_flood;
+    return s.body.position.x;
+  };
+  double flooded = 0.0, stopped = 0.0, rpm = 0.0, fuel = 0.0;
+  const double stock = ford(0.76, flooded, stopped, rpm, fuel);
+  std::printf("  stock: flooded with its front axle at x = %.2f m, stopped at %.2f m, %.0f rpm\n",
+              flooded, stopped, rpm);
+  EXPECT_NEAR(flooded, 40.0, 1.0) << "as the front axle reached the deep water";
+  EXPECT_LT(stopped, 60.0);
+  EXPECT_NEAR(stock, stopped, 0.5) << "and it stays where it stopped";
+  EXPECT_LT(rpm, 1.0);
+  EXPECT_EQ(fuel, 0.0);
+  double k_flooded = 0.0, k_stopped = 0.0, k_rpm = 0.0, k_fuel = 0.0;
+  const double kit = ford(1.52, k_flooded, k_stopped, k_rpm, k_fuel);
+  std::printf("  with the kit: reached x = %.2f m\n", kit);
+  EXPECT_GT(kit, 100.0) << "it fords 0.9 m";
+  EXPECT_GT(k_flooded, 1e8) << "and never floods";
+}
+
+// The water's velocity pushes a wading vehicle: a 1.5 m/s current along its axis drifts a Humvee
+// standing in neutral downstream, against its tires' rolling resistance; one across it pushes it
+// sideways by its tires' immersed sides and its underbody's (which its tires' grip holds).
+TEST(PhysicsVehicle, ACurrentPushesAWadingHumvee) {
+  REQUIRE_JOLT();
+  const vehicle_desc d = vehicle_desc::humvee();
+  const double depth = 0.6, u = 1.5;
+  vehicle_controls loose;
+  loose.neutral = true;
+  {
+    world w(jolt_config());
+    flat_ground(w, 0.9);
+    add_water(w, -100.0, 100.0, depth, {u, 0.0, 0.0});
+    const vehicle_id v = settled_humvee(w);
+    const vehicle_state s0 = w.vehicle_state(v);
+    w.set_controls(v, loose);
+    w.step(static_cast<std::uint64_t>(5.0 / w.config().fixed_dt));
+    const vehicle_state s1 = w.vehicle_state(v);
+    std::printf("  along: pushed %.0f N at rest (model %.0f N), drifting %.2f m/s after 5 s\n",
+                s0.water_force.x, wading_drag(d, s0, depth, u, true), s1.speed);
+    EXPECT_NEAR(s0.water_force.x, wading_drag(d, s0, depth, u, true),
+                0.05 * wading_drag(d, s0, depth, u, true));
+    EXPECT_GT(s1.speed, 0.2) << "it drifts downstream";
+    EXPECT_LT(s1.speed, u) << "never faster than the water";
+  }
+  {
+    world w(jolt_config());
+    flat_ground(w, 0.9);
+    add_water(w, -100.0, 100.0, depth, {0.0, u, 0.0});
+    const vehicle_id v = settled_humvee(w);
+    w.set_controls(v, loose);
+    w.step(60);
+    const vehicle_state s = w.vehicle_state(v);
+    const double model = wading_drag(d, s, depth, u, false);
+    std::printf("  across: pushed %.0f N (model %.0f N), sideways at %.3f m/s\n", s.water_force.y,
+                model, s.body.linear_velocity.y);
+    EXPECT_NEAR(s.water_force.y, model, 0.05 * model);
+    EXPECT_LT(std::fabs(s.body.linear_velocity.y), 0.05) << "the tires hold it";
+  }
+}
+
+// The waves push it too: a swell's orbital motion (a free surface's velocity, fluid_surface.h)
+// rocks a Humvee standing in neutral in 0.6 m of water back and forth along its axis.
+TEST(PhysicsVehicle, AWadingHumveeRocksWithTheSwell) {
+  REQUIRE_JOLT();
+  const vehicle_desc d = vehicle_desc::humvee();
+  world w(jolt_config());
+  flat_ground(w, 0.9);
+  wave_train t;
+  t.amplitude = 0.15;
+  t.period_s = 5.0;
+  t.dir_rad = 0.0; // crests across the vehicle, travelling along it
+  const auto sea = std::make_shared<wave_train_surface>(0.6, 0.6, std::vector<wave_train>{t});
+  field water;
+  water.kind = field_kind::fluid;
+  water.volume = uniform(kRho, {-100.0, -50.0, -1.0}, {100.0, 50.0, 1.0});
+  water.surface = sea;
+  w.add_field(water);
+  const vehicle_id v = settled_humvee(w);
+  vehicle_controls loose;
+  loose.neutral = true;
+  w.set_controls(v, loose);
+  const int period = static_cast<int>(t.period_s / w.config().fixed_dt);
+  double f_lo = 0.0, f_hi = 0.0, x_lo = 1e9, x_hi = -1e9, u_max = 0.0;
+  for (int i = 0; i < 2 * period; ++i) {
+    w.step();
+    const vehicle_state s = w.vehicle_state(v);
+    f_lo = std::min(f_lo, s.water_force.x);
+    f_hi = std::max(f_hi, s.water_force.x);
+    // The water's orbital speed where it meets the tires, half way up the still depth.
+    u_max =
+        std::max(u_max, std::fabs(sea->velocity({s.body.position.x, 0.0, 0.3}, w.field_time()).x));
+    if (i >= period) {
+      x_lo = std::min(x_lo, s.body.position.x);
+      x_hi = std::max(x_hi, s.body.position.x);
+    }
+  }
+  // The push the orbital motion would give a vehicle held still (it is not quite: it rocks).
+  const double held = wading_drag(d, w.vehicle_state(v), 0.6, u_max, true);
+  std::printf("  orbital speed up to %.2f m/s (%.0f N on a held vehicle); the push swings %.0f to "
+              "%.0f N; it rocks %.3f m\n",
+              u_max, held, f_lo, f_hi, x_hi - x_lo);
+  // Both ways, the crests' push the harder: under a crest the water stands deeper on the tires
+  // than under a trough (0.75 m against 0.45 m).
+  EXPECT_GT(u_max, 0.3);
+  EXPECT_LT(f_lo, -0.25 * held);
+  EXPECT_GT(f_hi, 0.5 * held);
+  EXPECT_GT(f_hi, -f_lo);
+  EXPECT_GT(x_hi - x_lo, 0.005);
+}
+
+// A tire in water is on soaked ground (material::wet_friction, the rain's mu_wet), past 3 mm of
+// it in full; and in standing water it aquaplanes as it nears 0.85 x 9 sqrt(p) knots (AMC
+// 25.1591), here an underinflated 20 psi tire's 17.6 m/s. The rain's wetness and the water agree:
+// a road the rain has already soaked is no slicker under water.
+TEST(PhysicsVehicle, StandingWaterSoaksTheTiresGripAndItAquaplanes) {
+  REQUIRE_JOLT();
+  const cvc::world::surface_registry &surfaces = cvc::world::surface_registry::builtin();
+  const cvc::world::surface_class &asphalt = surfaces[surfaces.by_name("asphalt")];
+  vehicle_desc d = vehicle_desc::humvee();
+  d.wading.tire_pressure = 20.0 * 6894.757;
+  const double vp = 0.85 * 9.0 * 1852.0 / 3600.0 * std::sqrt(20.0);
+  // The tires' mu at `speed`, over `depth` of water, the road soaked by rain to `rain`.
+  const auto mu_at = [&](double depth, double speed, double rain) {
+    world w(jolt_config());
+    const material_id m = w.add_material(
+        {"asphalt", asphalt.mu, 0.0f, asphalt.rolling_resistance, -1, asphalt.mu_wet});
+    body_desc g;
+    g.shape = box{{1500.0, 1500.0, 0.5}};
+    g.motion = motion_type::static_;
+    g.position = {0.0, 0.0, -0.5};
+    g.material = m;
+    w.add_body(g);
+    apply_wetness(w, rain, surfaces);
+    if (depth > 0.0)
+      add_water(w, -1300.0, 1300.0, depth);
+    const vehicle_id v = w.add_vehicle(d, {-1200.0, 0.0, 1.2});
+    w.drive(v, {});
+    w.step(200);
+    accelerate_to(w, v, speed);
+    w.step(); // a step at the speed
+    const vehicle_state s = w.vehicle_state(v);
+    return std::make_pair(s.wheels[2].friction, s.speed); // a rear wheel: it drives, not steers
+  };
+  const double mu = asphalt.mu, wet = asphalt.mu_wet;
+  const auto slow = mu_at(0.02, 2.0, 0.0);
+  const auto film = mu_at(0.001, 2.0, 0.0);
+  const auto soaked = mu_at(0.02, 2.0, 1.0);
+  const auto fast = mu_at(0.02, 14.0, 0.0);
+  const auto dry_fast = mu_at(0.0, 14.0, 0.0);
+  // The model (vehicle.h): soaked by the share s of 3 mm the water stands, then that share of the
+  // way to its aquaplaning mu, (1 - (v / v_p)^2) of it and at least 0.05.
+  const auto model = [&](double depth, double v) {
+    const double s = std::min(1.0, depth / 0.003);
+    const double m = mu + (wet - mu) * s;
+    const double a = std::max(0.05, m * (1.0 - (v / vp) * (v / vp)));
+    return m + (std::min(a, m) - m) * s;
+  };
+  std::printf("  mu dry %.3f, soaked %.3f; in 2 cm at %.1f m/s %.3f, 1 mm %.3f, rained on %.3f; "
+              "at %.1f m/s %.3f (dry %.3f)\n",
+              mu, wet, slow.second, slow.first, film.first, soaked.first, fast.second, fast.first,
+              dry_fast.first);
+  // Applied from the step before's speed, which the readback's differs from by one step.
+  EXPECT_NEAR(slow.first, model(0.02, slow.second), 0.005);
+  EXPECT_NEAR(film.first, model(0.001, film.second), 0.005) << "a third soaked";
+  EXPECT_NEAR(soaked.first, slow.first, 0.005) << "the rain's soaking and the water's agree";
+  EXPECT_NEAR(fast.first, model(0.02, fast.second), 0.01);
+  EXPECT_LT(fast.first, 0.5 * wet) << "it aquaplanes";
+  EXPECT_NEAR(dry_fast.first, mu, 1e-6) << "out of the water nothing changes";
+}
+
+// The flooded engine is state: a save after it floods restores it, and the run replays to the
+// same hash. Wading's values are checked, and whether a vehicle wades is fixed when it is added.
+TEST(PhysicsVehicle, WadingIsStateAndItsValuesAreChecked) {
+  REQUIRE_JOLT();
+  const auto build = [](world &w) {
+    flat_ground(w, 0.85);
+    add_water(w, 10.0, 60.0, 0.4);
+    add_water(w, 60.0, 200.0, 1.0);
+    return w.add_vehicle(vehicle_desc::humvee(), {0, 0, 1.2});
+  };
+  const auto drive = [](world &w, vehicle_id v, int from, int to) {
+    for (int i = from; i < to; ++i) {
+      w.drive(v, {0.05 * std::sin(0.01 * i), 1.5});
+      w.step();
+    }
+  };
+  world a(jolt_config()), b(jolt_config());
+  const vehicle_id va = build(a), vb = build(b);
+  int flooded = -1;
+  for (int i = 0; i < 2400 && flooded < 0; i += 60) {
+    drive(a, va, i, i + 60);
+    if (a.vehicle_state(va).engine_flooded)
+      flooded = i + 60;
+  }
+  ASSERT_GT(flooded, 0) << "it reached the deep water";
+  const std::vector<std::uint8_t> mid = a.save();
+  drive(a, va, flooded, flooded + 300);
+  drive(b, vb, 0, flooded + 300);
+  EXPECT_EQ(a.state_hash(), b.state_hash());
+  world c(jolt_config());
+  const vehicle_id vc = build(c);
+  c.restore(mid);
+  EXPECT_TRUE(c.vehicle_state(vc).engine_flooded);
+  drive(c, vc, flooded, flooded + 300);
+  EXPECT_EQ(c.state_hash(), a.state_hash());
+
+  vehicle_desc bad = vehicle_desc::humvee();
+  bad.wading.displacement = 1.5;
+  EXPECT_THROW(a.add_vehicle(bad, {0, 20, 1.2}), cvc::physics_error);
+  bad = vehicle_desc::humvee();
+  bad.wading.fording_depth = -0.1;
+  EXPECT_THROW(a.add_vehicle(bad, {0, 20, 1.2}), cvc::physics_error);
+  vehicle_desc d = a.get_vehicle(va);
+  d.wading.enabled = false;
+  EXPECT_THROW(a.set_vehicle(va, d), cvc::physics_error);
+  d = a.get_vehicle(va);
+  d.wading.displacement = 0.5;
+  EXPECT_THROW(a.set_vehicle(va, d), cvc::physics_error);
+  d = a.get_vehicle(va);
+  d.wading.fording_depth = 1.52; // fitting the kit is a tuning (it does not unflood the engine)
+  d.wading.wheel_drag = 0.9;
+  EXPECT_NO_THROW(a.set_vehicle(va, d));
+  EXPECT_TRUE(a.vehicle_state(va).engine_flooded);
 }

@@ -152,6 +152,27 @@ vehicle_desc vehicle_desc::humvee() {
   d.energy.indicated_efficiency = 0.42; // [derived] the [DTIC] Willans line's slope
   d.energy.heating_value = 42.6e6;
   d.energy.accessory_power = 2500.0; // [est] the fan, alternator and steering pump
+  // Wading. [AMG] fords 0.76 m (30 in) of hard-bottomed water, 1.52 m (60 in) with the deep-water
+  // fording kit, which moves the air intake, exhaust and tank vents up; set fording_depth to 1.52
+  // for a kitted vehicle. [AMC] is EASA's AMC 25.1591 (7.1.1, 7.1.2), the standard method for a
+  // tire in standing water.
+  d.wading.enabled = true;
+  d.wading.fording_depth = 0.76;
+  // [est] The soft-doored body floods; what keeps the water out is the solid of the body, frame
+  // and drivetrain (about 0.6 m^3 of steel, aluminium, rubber and fluids in the 2676 kg) and the
+  // sealed tank, frame rails and axle housings (about 0.5 m^3): 1.1 of the box's 9.5 m^3. A sink
+  // test would measure it.
+  d.wading.displacement = 0.12;
+  d.wading.wheel_displacement = 0.8; // [derived] the 37 in tire round the 16.5 in rim: 1 - 0.45^2
+  d.wading.wheel_drag = 0.75;        // [AMC] an isolated tire below its aquaplaning speed
+  // [derived] The box's bottom rides 0.57 m up (the chassis origin about 1.02 m up, less the box's
+  // 0.45 m), and [AMG] the ground clearance is 0.41 m (16 in, under the differentials).
+  d.wading.underbody_depth = 0.16;
+  d.wading.underbody_drag = 0.5; // [est] the axles, frame and skid plates, about half the slab
+  // [est] Goodyear's cross-country pressure for its 37x12.50R16.5 military tire, 38 psi (its
+  // highway pressure is 50, the TM's limit for radials): aquaplaning from 24 m/s in standing
+  // water [AMC], about the top speed.
+  d.wading.tire_pressure = 38.0 * 6894.757;
   return d;
 }
 
@@ -216,6 +237,18 @@ vehicle_desc vehicle_desc::roboracer() {
   d.energy.motor_efficiency = 0.85;
   d.energy.regen_efficiency = 0.7;
   d.energy.max_regen_power = 150.0;
+  // Wading, all [est] until measured on the car: water over the VESC and motor, about 3 cm up,
+  // stops it; the shell over the open tub floods but the pack and electronics keep a fifth of the
+  // box dry; the foam-insert tires soak, keeping their rubber and the rim's hub; the chassis plate
+  // and diffs hang about 1 cm under the box. They are not pneumatic, so they never aquaplane.
+  d.wading.enabled = true;
+  d.wading.fording_depth = 0.03;
+  d.wading.displacement = 0.2;
+  d.wading.wheel_displacement = 0.3;
+  d.wading.wheel_drag = 0.75; // [AMC] as the Humvee's
+  d.wading.underbody_depth = 0.01;
+  d.wading.underbody_drag = 0.5;
+  d.wading.tire_pressure = 0.0;
   return d;
 }
 
@@ -329,6 +362,14 @@ void validate(const vehicle_desc &d, const char *op = "add_vehicle") {
             e.accessory_power >= 0.0),
        "fuel needs tank >= 0, indicated_efficiency in (0, 1], heating_value > 0 and "
        "accessory_power >= 0");
+  const wading_desc &g = d.wading;
+  const auto nonnegative = [](double x) { return std::isfinite(x) && x >= 0.0; };
+  need(fraction(g.displacement, true) && fraction(g.wheel_displacement, true),
+       "wading.displacement and wading.wheel_displacement must be in [0, 1]");
+  need(nonnegative(g.wheel_drag) && nonnegative(g.underbody_depth) &&
+           nonnegative(g.underbody_drag) && nonnegative(g.tire_pressure) &&
+           nonnegative(g.fording_depth),
+       "wading's drags, underbody depth, tire pressure and fording depth must be finite and >= 0");
   need(std::isfinite(d.shift_up_rpm_light) && d.shift_up_rpm_light >= 0.0 &&
            std::isfinite(d.shift_down_rpm_light) && d.shift_down_rpm_light >= 0.0,
        "the light-throttle shift points must be finite and >= 0");
@@ -404,6 +445,11 @@ std::string fixed_change(const vehicle_desc &a, const vehicle_desc &b) {
     return "energy";
   if (a.energy_ledger != b.energy_ledger)
     return "energy_ledger";
+  // The fields cut the chassis's buoyancy when the vehicle is added.
+  if (a.wading.enabled != b.wading.enabled)
+    return "wading.enabled";
+  if (a.wading.displacement != b.wading.displacement)
+    return "wading.displacement";
   return std::string();
 }
 
@@ -417,6 +463,21 @@ constexpr double kMediumTime = 0.1;
 
 // A force smoothly signed by the velocity it resists: full at |v| >> 0.1 m/s, zero at rest.
 double rolling_sign(double v) { return det::tanh(v / 0.1); }
+
+// Wading (vehicle.h). Water deeper than this over a tire's contact is standing water (AMC
+// 25.1591: a wet surface holds at most 3 mm), over which its grip runs to the soaked value.
+constexpr double kStandingWater = 0.003; // m
+// The aquaplaning speed for friction, AMC 25.1591 (7.1.1): 0.85 x 9 sqrt(p) knots, p in psi.
+constexpr double kAquaplane = 0.85 * 9.0 * 1852.0 / 3600.0; // m/s per sqrt(psi)
+constexpr double kPascalsPerPsi = 6894.757293168;
+// The friction an aquaplaning tire keeps (AMC 25.1591, past 0.85 V_P).
+constexpr double kAquaplaneMu = 0.05;
+
+// The area of a circle of radius r below a chord h above its lowest point, h in [0, 2r].
+double segment_area(double r, double h) {
+  h = std::max(0.0, std::min(2.0 * r, h));
+  return r * r * det::acos((r - h) / r) - (r - h) * std::sqrt(std::max(0.0, h * (2.0 * r - h)));
+}
 
 template <class T> void put(std::string &out, const T &v) {
   out.append(reinterpret_cast<const char *>(&v), sizeof(T));
@@ -534,12 +595,12 @@ vehicle_id vehicle_set::add(world_backend &be, field_set &fields, const vehicle_
     throw cvc::unsupported_exception("cvc::physics: this backend has no vehicles (cap_vehicles); "
                                      "use the Jolt backend");
   // The chassis as the fields see it: a box about the body origin, its own centre of mass,
-  // and no flow drag (the vehicle's aero is its drag).
+  // no flow drag (the vehicle's aero is its drag), and a wading vehicle's flooded buoyancy.
   body_desc box_desc;
   box_desc.shape = box{d.half_extents};
   box_desc.mass = d.mass;
   fields.body_added(be, chassis, box_desc);
-  fields.mark_vehicle(chassis, d.center_of_mass);
+  fields.mark_vehicle(chassis, d.center_of_mass, d.wading.enabled ? d.wading.displacement : 1.0);
 
   rt v;
   v.desc = d;
@@ -549,6 +610,8 @@ vehicle_id vehicle_set::add(world_backend &be, field_set &fields, const vehicle_
   v.rolling.assign(n, 0.0);
   v.medium.assign(n, 0.0);
   v.medium_load.assign(n, 0.0);
+  v.water_depth.assign(n, 0.0);
+  v.water_drag.assign(n, 0.0);
   v.readback.wheels.resize(n);
   if (d.energy.type == energy_source::kind::battery)
     v.energy.charge = d.energy.initial_charge;
@@ -604,6 +667,7 @@ void vehicle_set::set_controls(vehicle_id id, const vehicle_controls &c) {
 void vehicle_set::pre_step(world_backend &be, const field_set &fields, const world_config &cfg,
                            const std::vector<material> &materials, double t) {
   const double dt = cfg.fixed_dt;
+  const double field_t = t; // the loop's body has a `t` of its own
   if (!_v.empty())
     be.set_medium_reach(fields.medium_reach());
   for (auto &entry : _v) {
@@ -725,14 +789,37 @@ void vehicle_set::pre_step(world_backend &be, const field_set &fields, const wor
     if ((src.type == energy_source::kind::battery && !(v.energy.charge > 0.0)) ||
         (src.type == energy_source::kind::fuel && src.tank > 0.0 && !(v.energy.fuel_left > 0.0)))
       throttle = 0.0;
+    // Wading: the water's push on the wheels and underbody, each tire's grip and the flooded
+    // engine, from the last step's wheels. A flooded engine gives no throttle, and its automatic,
+    // without line pressure, leaves the wheels free as in neutral.
+    const vec3 com = s.position + rotate(s.rotation, d.center_of_mass);
+    vec3 water_force, water_torque;
+    std::vector<double> grip;
+    bool in_water = false, moving = false;
+    bool active = s.active;
+    if (d.wading.enabled) {
+      in_water = wade(v, s, com, steer, fields, cfg, materials, field_t, water_force, water_torque,
+                      grip, moving);
+      if (v.flooded) {
+        throttle = 0.0;
+        neutral = true;
+      }
+      // Flowing water keeps pushing: a vehicle standing in a current or the waves does not sleep.
+      if (moving && !active) {
+        be.wake(v.chassis);
+        active = true;
+      }
+    }
     v.throttle = throttle;
     v.brake = brake;
     v.hand_brake = hand_brake;
+    // Before the inputs: the engine's damping there reads the idle speed a flooded engine drops.
+    if (d.wading.enabled)
+      be.set_vehicle_wading(v.handle, grip, v.flooded);
     be.set_vehicle_inputs(v.handle, steer, load, (reverse ? -1.0 : 1.0) * throttle, brake,
                           hand_brake, neutral);
 
     // The chassis's resistance, from the last step's wheels.
-    const vec3 com = s.position + rotate(s.rotation, d.center_of_mass);
     double rho = d.air_density;
     vec3 wind;
     fields.air_at(com, t, rho, wind);
@@ -778,20 +865,29 @@ void vehicle_set::pre_step(world_backend &be, const field_set &fields, const wor
       medium_force = medium_force + fm;
       medium_torque = medium_torque + cross(arm, fm);
     }
-    if (s.active)
+    if (in_water) {
+      force = force + water_force;
+      torque = torque + water_torque;
+    }
+    if (active)
       be.add_field_load(v.chassis, force, torque);
     // What the ledger charges each cause with: the loads acting through this step (none on
     // a sleeping chassis, which the fields and this step leave alone).
     vehicle_loads loads;
-    if (s.active) {
+    if (active) {
       loads.force[0] = aero;
       loads.force[1] = rolling_force;
       loads.torque[1] = rolling_torque;
       loads.force[2] = medium_force;
       loads.torque[2] = medium_torque;
+      // The fields' work: the chassis box's (buoyancy, drag), and wading's at the wheels.
       const field_load fl = fields.load(v.chassis);
       loads.force[3] = fl.force;
       loads.torque[3] = fl.torque;
+      if (in_water) {
+        loads.force[3] = loads.force[3] + water_force;
+        loads.torque[3] = loads.torque[3] + water_torque;
+      }
     }
     be.set_vehicle_loads(v.handle, loads);
   }
@@ -896,6 +992,148 @@ void vehicle_set::account(rt &v, double dt) {
   }
 }
 
+bool vehicle_set::wade(rt &v, const body_state &s, const vec3 &com,
+                       const std::vector<double> &steer, const field_set &fields,
+                       const world_config &cfg, const std::vector<material> &materials, double t,
+                       vec3 &force, vec3 &torque, std::vector<double> &grip, bool &moving) {
+  const vehicle_desc &d = v.desc;
+  const wading_desc &g = d.wading;
+  const std::size_t n = v.readback.wheels.size();
+  grip.assign(n, 1.0);
+  v.water_force = vec3{};
+  bool any = false; // a part in water
+  moving = false;
+  const auto flows = [](const water_sample &w) {
+    return w.velocity.x != 0.0 || w.velocity.y != 0.0 || w.velocity.z != 0.0;
+  };
+  // Buoyancy (push) apart from the drag, which is scaled in its own rate below, as the fields'.
+  vec3 push_f, push_t, drag_f, drag_t;
+  double rate = 0.0; // kg/s
+  // The water's drag on a part at `at`: 1/2 rho C_d A |u| u in the plane of the unit directions
+  // `along` and `across` (u the water's velocity less the part's there), A = (|u_along| a_along +
+  // |u_across| a_across) / |u|, the part's area across u. Returns the drag's size.
+  const auto drag = [&](const vec3 &at, const water_sample &water, const vec3 &along,
+                        const vec3 &across, double a_along, double a_across, double cd) {
+    const vec3 arm = at - com;
+    const vec3 u = water.velocity - (s.linear_velocity + cross(s.angular_velocity, arm));
+    const double ua = dot(u, along), uc = dot(u, across);
+    const double un = std::sqrt(ua * ua + uc * uc);
+    if (!(un > 0.0) || !(cd > 0.0))
+      return 0.0;
+    const double c =
+        0.5 * water.density * cd * (std::fabs(ua) * a_along + std::fabs(uc) * a_across);
+    const vec3 f = (along * ua + across * uc) * c;
+    drag_f = drag_f + f;
+    drag_t = drag_t + cross(arm, f);
+    rate += c;
+    return c * un;
+  };
+
+  // The front axle, whose depth floods the engine.
+  double front = 0.0;
+  for (std::size_t ai = 0; ai < d.axles.size(); ++ai)
+    if (ai == 0 || d.axles[ai].x > front)
+      front = d.axles[ai].x;
+  double front_depth = 0.0;
+  int front_wheels = 0;
+
+  for (std::size_t w = 0; w < n; ++w) {
+    const axle_desc &a = d.axles[w / 2];
+    const vehicle_readback::wheel &rw = v.readback.wheels[w];
+    const wheel_state &ws = rw.state;
+    v.water_depth[w] = v.water_drag[w] = 0.0;
+    const double r = a.wheel_radius, b = a.wheel_width;
+    // The wheel's lowest point: its contact, or without one straight below its hub, which hangs
+    // at full droop as the engine leaves it.
+    const double y = w % 2 == 0 ? a.half_track : -a.half_track;
+    const vec3 low =
+        ws.contact
+            ? ws.contact_point
+            : s.position + rotate(s.rotation, {a.x, y, a.z - a.suspension_max}) - vec3{0.0, 0.0, r};
+    water_sample water;
+    const bool wet = fields.water_at(low, t, water) && water.wet;
+    const double depth = wet ? water.depth : 0.0;
+    if (a.x == front) {
+      front_depth += depth;
+      ++front_wheels;
+    }
+    if (!wet)
+      continue;
+    any = true;
+    moving = moving || flows(water);
+    v.water_depth[w] = depth;
+    const double h = std::min(depth, 2.0 * r); // the wheel's immersed height
+    const double side = segment_area(r, h);    // its immersed side
+    const vec3 at = low + vec3{0.0, 0.0, 0.5 * h};
+    // Along the tire's travel, its width times the immersed height (AMC 25.1591's displacement
+    // drag); across it, the immersed side.
+    const double cs = det::cos(steer[w]), sn = det::sin(steer[w]);
+    const vec3 along = rotate(s.rotation, {cs, sn, 0.0}),
+               across = rotate(s.rotation, {-sn, cs, 0.0});
+    v.water_drag[w] = drag(at, water, along, across, b * h, side, g.wheel_drag);
+    // The tire displaces its share of the immersed cylinder.
+    if (g.wheel_displacement > 0.0) {
+      const vec3 lift = cfg.gravity * (-water.density * side * b * g.wheel_displacement);
+      push_f = push_f + lift;
+      push_t = push_t + cross(at - com, lift);
+    }
+    // Grip: soaked ground over 3 mm of water, and aquaplaning in standing water. A tire in a
+    // medium keeps the medium's traction.
+    if (!ws.contact || ws.medium_depth > 0.0 || ws.contact_material >= materials.size())
+      continue;
+    const material &m = materials[ws.contact_material];
+    const double mu0 = m.friction;
+    if (!(mu0 > 0.0))
+      continue;
+    const double standing = std::min(1.0, depth / kStandingWater);
+    double mu = mu0;
+    if (m.wet_friction > 0.0f && m.wet_friction < m.friction)
+      mu += (static_cast<double>(m.wet_friction) - mu0) * standing;
+    if (g.tire_pressure > 0.0) {
+      const double vp = kAquaplane * std::sqrt(g.tire_pressure / kPascalsPerPsi);
+      const vec3 arm = ws.contact_point - com;
+      const double vl = dot(s.linear_velocity + cross(s.angular_velocity, arm), rw.longitudinal);
+      const double q = vl / vp;
+      const double aquaplaning = std::max(kAquaplaneMu, mu * (1.0 - q * q));
+      if (aquaplaning < mu)
+        mu += (aquaplaning - mu) * standing;
+    }
+    grip[w] = mu / mu0;
+  }
+
+  // The underbody: a slab under the box, as wide and long as it, `underbody_depth` deep.
+  if (g.underbody_depth > 0.0 && g.underbody_drag > 0.0) {
+    const vec3 e = d.half_extents;
+    const double z0 = -e.z - g.underbody_depth;
+    water_sample water;
+    if (fields.water_at(s.position + rotate(s.rotation, {0.0, 0.0, z0}), t, water) && water.wet) {
+      any = true;
+      moving = moving || flows(water);
+      const double h = std::min(water.depth, g.underbody_depth);
+      drag(s.position + rotate(s.rotation, {0.0, 0.0, z0 + 0.5 * h}), water,
+           rotate(s.rotation, {1.0, 0.0, 0.0}), rotate(s.rotation, {0.0, 1.0, 0.0}), 2.0 * e.y * h,
+           2.0 * e.x * h, g.underbody_drag);
+    }
+  }
+
+  // The engine floods once the water at the front axle stands over the fording depth.
+  if (g.fording_depth > 0.0 && front_wheels > 0 && front_depth / front_wheels > g.fording_depth)
+    v.flooded = true;
+  if (!any)
+    return false;
+
+  // The drag integrated implicitly in its own rate: a step never carries the vehicle past the
+  // water's velocity, however strong the current.
+  const double x = rate * cfg.fixed_dt / d.mass;
+  const double k = x > 1e-9 ? -det::expm1(-x) / x : 1.0;
+  v.water_force = push_f + drag_f * k;
+  force = v.water_force;
+  torque = push_t + drag_t * k;
+  for (double &f : v.water_drag)
+    f *= k;
+  return true;
+}
+
 vehicle_state vehicle_set::state(const world_backend &be, vehicle_id id) const {
   const rt &v = at(id);
   vehicle_state out;
@@ -912,11 +1150,15 @@ vehicle_state vehicle_set::state(const world_backend &be, vehicle_id id) const {
   out.engine_rpm = v.readback.engine_rpm;
   out.aero_force = v.aero_force;
   out.air_velocity = v.air_velocity;
+  out.water_force = v.water_force;
+  out.engine_flooded = v.flooded;
   out.wheels.reserve(v.readback.wheels.size());
   for (std::size_t w = 0; w < v.readback.wheels.size(); ++w) {
     wheel_state ws = v.readback.wheels[w].state;
     ws.rolling_resistance = v.rolling[w];
     ws.medium_resistance = v.medium[w];
+    ws.water_depth = v.water_depth[w];
+    ws.water_drag = v.water_drag[w];
     out.wheels.push_back(ws);
   }
   out.energy = v.energy;
@@ -941,7 +1183,9 @@ void vehicle_set::save(const world_backend &be, std::string &out) const {
     put(out, e.first);
     put(out, v.steer);
     put(out, v.steer_command);
-    put_flag(out, v.raw);
+    // Bit 0 set_controls rather than drive, bit 1 a flooded engine (wading): a vehicle whose
+    // engine has not flooded saves the bytes it always has, so its state_hash stands.
+    put(out, static_cast<std::uint8_t>((v.raw ? 1 : 0) | (v.flooded ? 2 : 0)));
     put(out, v.command.steer);
     put(out, v.command.accel);
     put_flag(out, v.command.reverse);
@@ -992,7 +1236,10 @@ void vehicle_set::restore(world_backend &be, const std::string &in, std::size_t 
       throw cvc::physics_error("restore: the vehicles were added in a different order");
     get(in, pos, v.steer);
     get(in, pos, v.steer_command);
-    v.raw = get_flag(in, pos);
+    std::uint8_t mode = 0;
+    get(in, pos, mode);
+    v.raw = (mode & 1) != 0;
+    v.flooded = (mode & 2) != 0;
     get(in, pos, v.command.steer);
     get(in, pos, v.command.accel);
     v.command.reverse = get_flag(in, pos);

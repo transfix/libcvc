@@ -85,12 +85,27 @@ private:
     vec3 aero_force, air_velocity;
     std::vector<double> rolling, medium; // per wheel, N
     std::vector<double> medium_load;     // per wheel, N: the load the medium has felt
+    // Wading (vehicle_desc::wading): per wheel the water over its contact (m) and its drag (N),
+    // the push on wheels and underbody, and the flooded engine (state: saved, with wading on).
+    std::vector<double> water_depth, water_drag;
+    vec3 water_force;
+    bool flooded = false;
     vehicle_readback readback;           // the last step's wheels
     vehicle_energy energy;               // the ledger since added
     double potential0 = 0.0;             // the potential energy at the first sample
     bool have_potential0 = false;
   };
   static void account(rt &v, double dt);
+  // Wading: the water's push on the wheels and underbody for the step about to run, at the
+  // chassis state `s` (centre of mass `com`) with each wheel's `steer`, into `force` / `torque`
+  // (about com); sets each wheel's grip and the flooded engine, and records the readbacks. `t` is
+  // the field time. Returns whether any part was in water (with none, `force` and `torque` are
+  // left alone), and sets `moving` when that water flows (a current, waves). It reads only what
+  // save() keeps, so a restored world wades the same.
+  static bool wade(rt &v, const body_state &s, const vec3 &com, const std::vector<double> &steer,
+                   const field_set &fields, const world_config &cfg,
+                   const std::vector<material> &materials, double t, vec3 &force, vec3 &torque,
+                   std::vector<double> &grip, bool &moving);
   rt &at(vehicle_id id);
   const rt &at(vehicle_id id) const;
 

@@ -56,6 +56,32 @@
 //            b k z^2 / 2 (Bekker).
 // Both rolling forces fade smoothly to zero at rest.
 //
+// Wading (vehicle_desc::wading, off by default). Off, the chassis box meets a fluid field as a
+// sealed box: buoyant over all of its volume, so a vehicle in water over its body floats off its
+// wheels like a raft, and nothing below the box feels the water. On, from the water at each wheel
+// and under the body (world::water_at, at the field time):
+//   chassis  only `displacement` of the box's volume displaces water: the cabin and the engine bay
+//            flood, and what is left is the body's solid and sealed parts. So a heavy vehicle stays
+//            on its wheels as it wades, and sinks rather than floats in water over its roof.
+//   wheels   the immersed part of each wheel is dragged by the water, 1/2 rho C_d A |u| u: u the
+//            water's velocity (a current, the waves' orbital motion) less the hub's, along the
+//            tire's travel and across it, A the tire's width times its immersed height along its
+//            travel (the displacement drag of AMC 25.1591, 7.1.2) and its immersed side across
+//            it. It displaces `wheel_displacement` of its immersed cylinder (the tire; the rim's
+//            dish floods), so the water lifts some of the load off the tires.
+//   underbody  the axles, frame and skid plates between the box and the ground (`underbody_depth`
+//            below the box) are dragged the same way across their immersed height.
+//   grip     a tire in water is on soaked ground: its mu runs to the material's wet_friction (the
+//            rain's soaked value, apply_wetness's surface_class::mu_wet) as the water over its
+//            contact deepens to 3 mm (standing water, AMC 25.1591). In standing water a tire with
+//            a `tire_pressure` aquaplanes: its mu falls as 1 - (v / v_p)^2 to 0.05 at
+//            v_p = 0.85 x 9 sqrt(p) kt (p in psi; AMC 25.1591, 7.1.1), v its speed over the ground.
+//   engine   water deeper than `fording_depth` over the ground at the front axle floods the engine:
+//            it stops (no throttle, no idle, the transmission without line pressure in neutral)
+//            and does not restart; the brakes still work.
+// The drag is integrated implicitly in its own rate, as the fields' is (field.h). The wading
+// forces' work is the ledger's `fields`, with the buoyancy's.
+//
 // Vehicles need a backend with cap_vehicles (Jolt); the null backend refuses them.
 // Standard library only, like the rest of cvc/physics.
 
@@ -114,6 +140,31 @@ struct energy_source {
   double indicated_efficiency = 0.4; // indicated work per chemical energy, (0, 1]
   double heating_value = 42.6e6;     // J/kg, the lower heating value (diesel)
   double accessory_power = 0.0;      // W the engine drives besides the vehicle
+};
+
+// How a vehicle meets water deeper than its tires' contact (the header's Wading). With `enabled`
+// off, the default, none of it applies and the chassis is a sealed box. The defaults below are a
+// generic road vehicle's; the presets set their own.
+struct wading_desc {
+  bool enabled = false;
+  // The share of the chassis box's volume that keeps the water out when under it: the body's solid
+  // parts and sealed members. The rest floods. In [0, 1]; 1 is the sealed box.
+  double displacement = 0.15;
+  // The share of each wheel's immersed cylinder (pi r^2 b when under) that displaces water: the
+  // tire, without the rim's open dish, about 1 - (rim / tire diameter)^2. In [0, 1].
+  double wheel_displacement = 0.6;
+  // C_d on a tire's immersed area: AMC 25.1591 takes 0.75 for an isolated tire.
+  double wheel_drag = 0.75;
+  // How far below the chassis box the underbody reaches (m; 0 = no underbody), and its C_d on the
+  // box's width (along the vehicle) or length (across it) times its immersed height: the axles,
+  // frame and skid plates are not solid, so it carries their share of that area too.
+  double underbody_depth = 0.0;
+  double underbody_drag = 0.5;
+  // The tires' inflation pressure (Pa; 0 = they never aquaplane).
+  double tire_pressure = 0.0;
+  // The depth of water over the ground at the front axle (m) past which the engine floods and stops
+  // for good: the rated fording depth. 0 = it never floods.
+  double fording_depth = 0.0;
 };
 
 struct vehicle_desc {
@@ -195,6 +246,9 @@ struct vehicle_desc {
   // through Jolt's own controller, which the measured step reproduces exactly.
   bool energy_ledger = true;
 
+  // Water at the wheels and under the body (wading_desc); off by default.
+  wading_desc wading;
+
   // The distance from the rear axle (the rearmost unsteered one) to the frontmost
   // steered one, and the steered axle's track; 0 when the axles do not define them.
   double wheelbase() const;
@@ -256,6 +310,10 @@ struct wheel_state {
   double sinkage = 0.0;            // m the wheel has sunk into it (below the fresh surface)
   double rut = 0.0;                // m of rut it found there (field::ruts), before this pass
   double medium_resistance = 0.0;  // N, its compaction resistance
+  // Wading (vehicle_desc::wading): the water over its contact (its lowest point when it has none)
+  // as of the step's start, and the water's drag on it applied this step.
+  double water_depth = 0.0; // m
+  double water_drag = 0.0;  // N
 };
 
 // A vehicle's energy ledger, in joules since it was added (P3; docs/PHYSICS_API.md).
@@ -330,6 +388,10 @@ struct vehicle_state {
   double accel_trim = 0.0; // m/s^2, the driver model's integral trim (vehicle_set's driver)
   vec3 aero_force;         // N, the drag applied
   vec3 air_velocity;       // m/s, the air's (a flow field's wind, or still)
+  // Wading: the water's push on the wheels and underbody applied this step (drag and the wheels'
+  // buoyancy, not the chassis box's, which is the fields'), and whether the engine has flooded.
+  vec3 water_force; // N
+  bool engine_flooded = false;
   std::vector<wheel_state> wheels;
   vehicle_energy energy; // its ledger since it was added
 };

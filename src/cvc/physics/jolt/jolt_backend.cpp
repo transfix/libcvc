@@ -558,6 +558,11 @@ struct jolt_vehicle {
   std::vector<double> width, diameter;
   std::vector<float> steer; // rad, per wheel, set by the facade
   bool neutral = false;
+  // Wading (set_vehicle_wading): each tire's mu factor in water, and a flooded engine, which
+  // idles at 0 rpm in place of idle_rpm (vehicle_desc::engine_min_rpm), so it stops.
+  std::vector<float> grip;
+  bool engine_off = false;
+  float idle_rpm = 0.0f;
   // The wheels' settings, which the constraint's wheels point at, and each axle's anti-roll
   // bar (-1 for none): tune_vehicle changes them in place.
   std::vector<JPH::Ref<JPH::WheelSettingsWV>> wheel_settings;
@@ -1076,6 +1081,8 @@ public:
     v->loads.assign(n, 0.0);
     v->friction.assign(n, 0.0);
     v->steer.assign(n, 0.0f);
+    v->grip.assign(n, 1.0f);
+    v->idle_rpm = static_cast<float>(d.engine_min_rpm);
 
     JPH::VehicleConstraintSettings vs;
     vs.mUp = JPH::Vec3(0, 0, 1);
@@ -1208,6 +1215,7 @@ public:
       const wheel_medium_state &ms = vp->media[wheel];
       if (ms.active && ms.traction > 0.0)
         mu = static_cast<float>(ms.traction);
+      mu *= vp->grip[wheel]; // in water (vehicle.h's wading); 1 otherwise
       vp->friction[wheel] = mu;
       lon *= mu;
       lat *= mu;
@@ -1238,7 +1246,8 @@ public:
                                                                     : d.shift_down_rpm),
                     static_cast<float>(d.shift_down_rpm)};
     ctl->GetTransmission().mClutchStrength = static_cast<float>(d.clutch_strength);
-    engine.mMinRPM = static_cast<float>(d.engine_min_rpm);
+    v.idle_rpm = static_cast<float>(d.engine_min_rpm);
+    engine.mMinRPM = v.engine_off ? 0.0f : v.idle_rpm; // a flooded engine stays stopped
     engine.mMaxRPM = static_cast<float>(d.engine_max_rpm);
     JPH::VehicleTransmission &gearbox = ctl->GetTransmission();
     gearbox.mShiftUpRPM = static_cast<float>(d.shift_up_rpm);
@@ -1376,6 +1385,19 @@ public:
     v.neutral = neutral;
     if (forward != 0.0 || changed)
       _ps->GetBodyInterface().ActivateBody(v.body);
+  }
+
+  void set_vehicle_wading(std::uint32_t handle, const std::vector<double> &grip,
+                          bool engine_off) override {
+    jolt_vehicle &v = *_vehicles.at(handle);
+    for (size_t i = 0; i < v.grip.size(); ++i)
+      v.grip[i] = i < grip.size() ? static_cast<float>(grip[i]) : 1.0f;
+    // A flooded engine: no idle speed to hold, so its friction runs it down to a stop (the
+    // facade gives it no throttle and the transmission in neutral), and it burns no fuel.
+    auto *ctl = static_cast<ackermann_controller *>(v.constraint->GetController());
+    v.engine_off = engine_off;
+    ctl->engine_off = engine_off;
+    ctl->GetEngine().mMinRPM = engine_off ? 0.0f : v.idle_rpm;
   }
 
   void set_vehicle_loads(std::uint32_t handle, const vehicle_loads &l) override {
