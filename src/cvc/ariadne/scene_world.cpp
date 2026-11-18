@@ -20,6 +20,7 @@
 #include <cvc/ariadne/scene_generated_world.h>
 #include <cvc/ariadne/scene_geometry.h>
 #include <cvc/ariadne/scene_water.h>
+#include <cvc/ariadne/scene_weather.h> // WeatherFriction: the rain's friction
 #include <cvc/ariadne/scene_wind.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/world_vehicles.h>
@@ -404,6 +405,9 @@ struct SceneWorld::impl {
   std::map<std::string, double> water_levels;
   // The boat nodes (bind_boats), and the ground of the water each floats on ("" for none).
   std::vector<std::unique_ptr<BoatRuntime>> boats;
+  // The weather nodes' friction (bind_weather): the rain into the surfaces' friction, set inside
+  // the physics step (follow) on the world clock's ticks.
+  std::vector<std::unique_ptr<WeatherFriction>> weathers;
   std::string boat_ground(const BoatRuntime &b) const {
     const std::string &water = b.spec().water;
     if (!water.empty()) {
@@ -807,6 +811,8 @@ void SceneWorld::restart(std::vector<std::string> *warnings) {
   }
   for (const auto &b : d.boats) // so did the boats: each goes in again at the next sync
     b->world_gone();
+  for (const auto &wf : d.weathers) // and its materials, dry: the friction again at the next step
+    wf->world_gone();
   publish_stats();
 }
 
@@ -965,6 +971,7 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
       out->vehicles()->spawn_starts(scene.vehicle_starts, warnings);
     }
     out->bind_wind(scene, bind_prefix);
+    out->bind_weather(scene, bind_prefix);
   }
   return out;
 }
@@ -1134,6 +1141,21 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
     b->read_keys();
     b->publish();
   }
+  // The weather nodes: each its ground's height field once there is one (the storms' area), then
+  // its keys. The friction itself is set in follow(), inside the physics step.
+  for (const auto &wf : d.weathers) {
+    if (!wf->has_ground()) {
+      std::shared_ptr<const cvc::height_field> field;
+      if (const auto g = world_geometry(wf->ground()))
+        field = g->terrain();
+      if (!field)
+        if (const auto f = d.fields.find(wf->ground()); f != d.fields.end())
+          field = f->second;
+      if (field)
+        wf->set_ground(std::move(field));
+    }
+    wf->read_keys();
+  }
 }
 
 void SceneWorld::bind_worlds(const Scene &scene, const std::string &world_key,
@@ -1256,6 +1278,23 @@ void SceneWorld::bind_wind(const Scene &scene, const std::string &bind_prefix) {
 }
 
 ph::field_id SceneWorld::wind_field() const { return _impl->wind_field; }
+
+void SceneWorld::bind_weather(const Scene &scene, const std::string &bind_prefix) {
+  impl &d = *_impl;
+  d.weathers.clear();
+  const std::function<void(const SceneNode &)> visit = [&](const SceneNode &n) {
+    if (n.type == "weather")
+      d.weathers.push_back(std::make_unique<WeatherFriction>(d.app, n, bind_prefix));
+    for (const SceneNode &c : n.children)
+      visit(c);
+  };
+  for (const SceneNode &n : scene.nodes)
+    visit(n);
+}
+
+const std::vector<std::unique_ptr<WeatherFriction>> &SceneWorld::weathers() const {
+  return _impl->weathers;
+}
 
 void SceneWorld::sync_wind() {
   impl &d = *_impl;
@@ -1416,14 +1455,23 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
       after_step();
     return 0;
   }
+  const std::uint64_t last_tick = d.follower->last_tick();
   const std::uint64_t n = d.follower->take(clock);
   if (n > 0 && !d.stepping())
     return 0; // physics off: the steps due are let go, and the world holds still
-  for (std::uint64_t i = 1; i <= n; ++i) {
+  // The clock tick each step ends on, for the work keyed to the clock rather than to how many
+  // steps a frame took (the rain's friction): the first tick a step falls due on after the last,
+  // then a step's ticks apart.
+  const std::uint64_t period = d.follower->period();
+  std::uint64_t tick = last_tick + 1;
+  tick += (d.follower->phase() + period - tick % period) % period;
+  for (std::uint64_t i = 1; i <= n; ++i, tick += period) {
     if (d.vehicles)
       d.vehicles->before_step();
     for (const auto &b : d.boats)
       b->before_step();
+    for (const auto &wf : d.weathers)
+      wf->before_step(*d.world, tick, clock.fixed_dt());
     d.last = d.world->step();
     for (const auto &b : d.boats)
       b->after_step();
@@ -1442,6 +1490,8 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
       d.vehicles->publish();
     for (const auto &b : d.boats)
       b->publish();
+    for (const auto &wf : d.weathers)
+      wf->publish();
   }
   return n;
 }

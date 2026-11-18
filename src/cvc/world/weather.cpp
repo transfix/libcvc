@@ -386,6 +386,72 @@ double weather::wetness(double t, double x, double y, double soak, double dry) c
   return wet;
 }
 
+double lightning_strike::intensity(double age) const {
+  if (age < 0.0 || age > life())
+    return 0.0;
+  double a = 0.0;
+  for (int k = 0; k < strokes && k < 4; ++k) {
+    const double u = (age - at[k]) / std::max(1e-6, dur[k]);
+    if (u >= 0.0 && u <= 1.0)
+      a = std::max(a, amp[k] * std::pow(1.0 - u, 1.7) * (0.75 + 0.25 * std::sin(u * 61.0)));
+  }
+  return std::max(a, 0.05 * std::exp(-7.0 * age)); // the ionised channel's afterglow
+}
+
+double lightning_strike::life() const {
+  const int last = std::max(0, std::min(strokes, 4) - 1);
+  return at[last] + dur[last] + 0.35;
+}
+
+std::vector<lightning_strike> weather::strikes(double t, double window) const {
+  std::vector<lightning_strike> out;
+  if (!(m_p.flash_rate > 0.0) || !(window > 0.0))
+    return out;
+  const double tau = weather_time(t), from = tau - window;
+  for (const storm_cell &c : recent(t, window)) {
+    for (long j = static_cast<long>(std::floor(from)); j <= static_cast<long>(std::floor(tau));
+         ++j) {
+      // The cell at the slot: its intensity there sets the rate.
+      storm_cell s = c;
+      evaluate(s, double(j) + 0.5);
+      if (s.age < 0.0 || double(j) + 0.5 >= s.end)
+        continue;
+      const double ramp = std::min(1.0, std::max(0.0, (s.intensity - m_p.flash_onset) /
+                                                          std::max(1e-6, 1.0 - m_p.flash_onset)));
+      const double rate = m_p.flash_rate * ramp * ramp * (3.0 - 2.0 * ramp);
+      const std::uint64_t el = (c.id * 0x9E3779B97F4A7C15ull) ^ static_cast<std::uint64_t>(j);
+      if (draw(m_p.seed ^ 0x6c696768746e696eull, el, 0) >= rate)
+        continue;
+      lightning_strike k;
+      k.id = el;
+      k.tau = double(j) + draw(m_p.seed, el ^ AUTHORED_SALT, 1);
+      if (k.tau <= from || k.tau > tau)
+        continue;
+      evaluate(s, k.tau);
+      const double rr = std::max(0.25 * s.r, rain_radius(s.r, s.intensity));
+      const double a = 2.0 * kPi * draw(m_p.seed, el ^ AUTHORED_SALT, 2);
+      const double d = rr * std::sqrt(draw(m_p.seed, el ^ AUTHORED_SALT, 3));
+      k.x = s.x + d * std::cos(a);
+      k.y = s.y + d * std::sin(a);
+      k.ground = draw(m_p.seed, el ^ AUTHORED_SALT, 4) < m_p.ground_share;
+      // Return strokes, as ABYSSAL's: 1 to 4 flashes, each dimmer and shorter than the last.
+      k.strokes = 1 + static_cast<int>(draw(m_p.seed, el ^ AUTHORED_SALT, 5) * 3.999);
+      double ts = 0.0;
+      for (int i = 0; i < k.strokes; ++i) {
+        k.at[i] = ts;
+        k.dur[i] = 0.035 + 0.09 * draw(m_p.seed, el ^ AUTHORED_SALT, 6 + 2 * i);
+        k.amp[i] = std::pow(0.62, i);
+        ts += 0.04 + 0.11 * draw(m_p.seed, el ^ AUTHORED_SALT, 7 + 2 * i);
+      }
+      out.push_back(k);
+    }
+  }
+  std::sort(out.begin(), out.end(), [](const lightning_strike &a, const lightning_strike &b) {
+    return a.tau != b.tau ? a.tau < b.tau : a.id < b.id;
+  });
+  return out;
+}
+
 void weather::compact(double t) {
   const double tau = weather_time(t);
   // Anchor every event at the weather time it has now, so the rate events can go.

@@ -30,6 +30,29 @@ field_id world_bodies::find_field(const std::string &name) const {
   return field_id{};
 }
 
+double wet_friction(const cvc::world::surface_class &c, double wetness) {
+  const double u = std::min(1.0, std::max(0.0, wetness));
+  return c.mu + (c.mu_wet - c.mu) * u;
+}
+
+std::size_t apply_wetness(world &w, double wetness, const cvc::world::surface_registry &surfaces) {
+  std::size_t changed = 0;
+  for (std::size_t i = 0; i < w.material_count(); ++i) {
+    const material_id id = static_cast<material_id>(i);
+    material m = w.get_material(id);
+    std::uint16_t s = 0;
+    if (!surfaces.find(m.name, s))
+      continue;
+    const float mu = static_cast<float>(wet_friction(surfaces[s], wetness));
+    if (mu == m.friction)
+      continue;
+    m.friction = mu;
+    w.set_material(id, m);
+    ++changed;
+  }
+  return changed;
+}
+
 world_bodies add_world_geometry(world &w, const cvc::world::world_geometry &g, double max_error,
                                 const std::vector<int> &nav_materials) {
   world_bodies out;

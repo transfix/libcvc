@@ -33,8 +33,11 @@
 #include <cvc/core/exception.h>
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_binding.h>
+#include <cvc/physics/world_geometry.h>
 #include <cvc/state/state.h>
 #include <cvc/volume/volume.h>
+#include <cvc/world/surface.h>
+#include <cvc/world/weather.h>
 #include <gtest/gtest.h>
 #include <memory>
 #include <sstream>
@@ -1092,4 +1095,70 @@ TEST(PhysicsVehicle, TheTreeTunesAFieldAndReadsItsRuts) {
   set_tree(a, "physics.fields.snow.traction", "-1"); // invalid: ignored
   EXPECT_NO_THROW(b.step());
   EXPECT_EQ(w.get_field(snow).traction, 0.3);
+}
+
+// O20 (F6), the weather into physics: a storm's rain lowers the road's friction through the one
+// material table (apply_wetness, by cvc::world::weather::wetness where the vehicle is), so it
+// stops in a longer distance on the wet road; as the road dries the distance comes back.
+TEST(PhysicsVehicle, RainLowersTheRoadsTractionAndItComesBackAsItDries) {
+  REQUIRE_JOLT();
+  const cvc::world::surface_registry &surfaces = cvc::world::surface_registry::builtin();
+  const cvc::world::surface_class &asphalt = surfaces[surfaces.by_name("asphalt")];
+  // A storm crossing the vehicle's road at (-1200, 0), a full one 1000 m in radius, at 4 m/s.
+  cvc::world::weather_params wp;
+  wp.chance = 0.0;
+  wp.steer_speed = 4.0;
+  cvc::world::weather sky(wp);
+  cvc::world::weather_event e;
+  e.t = 0.0;
+  e.x = -1200.0 - 3000.0;
+  e.y = 0.0;
+  e.life = 2400.0;
+  e.radius = 1000.0;
+  e.peak = 1.0;
+  sky.add_event(e);
+  const double soak = 300.0, dry = 600.0, rr = sky.rain_radius(1000.0, 1.0);
+  const double out = (3000.0 + rr) / 4.0; // when its rain leaves the road
+  auto stop_at = [&](double t, double &mu) {
+    world w(jolt_config());
+    // The road, a material named after its surface class, as add_world_geometry names it.
+    const material_id m = w.add_material({"asphalt", asphalt.mu, 0.0f, asphalt.rolling_resistance});
+    body_desc g;
+    g.shape = box{{1500.0, 1500.0, 0.5}};
+    g.motion = motion_type::static_;
+    g.position = {0.0, 0.0, -0.5};
+    g.material = m;
+    w.add_body(g);
+    const double wet = sky.wetness(t, -1200.0, 0.0, soak, dry);
+    apply_wetness(w, wet, surfaces);
+    mu = w.get_material(m).friction;
+    const vehicle_id v = settled_humvee(w, -1200.0, 0.0);
+    accelerate_to(w, v, 20.0);
+    const vehicle_state s0 = w.vehicle_state(v);
+    vehicle_controls stop;
+    stop.brake = 1.0;
+    w.set_controls(v, stop);
+    for (int steps = 0; speed_of(w, v) > 0.05 && steps < 3000; ++steps)
+      w.step();
+    const vehicle_state s1 = w.vehicle_state(v);
+    std::printf("  t = %.0f s: wetness %.2f, mu %.3f: stopped from %.2f m/s in %.2f m\n", t, wet,
+                mu, s0.speed,
+                std::hypot(s1.body.position.x - s0.body.position.x,
+                           s1.body.position.y - s0.body.position.y));
+    return std::make_pair(s0.speed, std::hypot(s1.body.position.x - s0.body.position.x,
+                                               s1.body.position.y - s0.body.position.y));
+  };
+  double muDry = 0.0, muWet = 0.0, muDried = 0.0;
+  const auto d0 = stop_at(0.0, muDry);               // before the storm
+  const auto d1 = stop_at(out - 1.0, muWet);         // soaked
+  const auto d2 = stop_at(out + 3.0 * dry, muDried); // three dry times after
+  EXPECT_FLOAT_EQ(muDry, asphalt.mu);
+  EXPECT_NEAR(muWet, asphalt.mu_wet, 1e-3);
+  EXPECT_LT(muWet, muDry);
+  EXPECT_GT(muDried, muDry - 0.05f);
+  // The friction limit sets the stopping distance (TheStoppingDistanceIsTheFrictionLimit).
+  auto ideal = [](double v0, double mu) { return v0 * v0 / (2.0 * mu * kG); };
+  EXPECT_NEAR(d1.second, ideal(d1.first, muWet), 0.15 * ideal(d1.first, muWet));
+  EXPECT_GT(d1.second, 1.3 * d0.second);              // the wet road stops it far later
+  EXPECT_NEAR(d2.second, d0.second, 0.1 * d0.second); // and dried, it stops as it did
 }

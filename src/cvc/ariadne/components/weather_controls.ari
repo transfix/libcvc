@@ -82,3 +82,18 @@ units:
         hi: 2.0
         fmt: "%.2f"
         tooltip: "how dark and glossy the ground goes where it has rained; it dries after"
+      - separator
+      - text: "Lightning and the wet ground"
+      - slider_float: Lightning
+        bind: "{keys}.lightning"
+        lo: 0.0
+        hi: 2.0
+        fmt: "%.2f"
+        tooltip: "how bright a strike's bolt and flash are (the weather schedules the strikes)"
+      - text: "flash"
+        bind: "{keys}.flash"
+      - checkbox: Wet friction
+        bind: "{keys}.friction"
+        tooltip: "the rain lowers the ground's and the roads' friction for the vehicles and bodies"
+      - text: "wetness under the vehicles"
+        bind: "{keys}.wetness"

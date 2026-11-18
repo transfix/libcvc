@@ -452,3 +452,46 @@ TEST(WorldWeather, TheGroundWetsAndDries) {
   // Long after (past 4 dry times), the storm is forgotten.
   EXPECT_EQ(w.wetness(2400.0 + 5.0 * dry, 0.0, 0.0, soak, dry), 0.0);
 }
+
+// O20 (F5): the weather schedules lightning, a pure function of the seed, the time and the events:
+// only a mature, intense cell strikes, at about flash_rate a second, within its rain radius; the
+// same strikes for every caller, however the windows are cut.
+TEST(WorldWeather, LightningStrikesOnSchedule) {
+  weather_params p = quiet();
+  p.steer_speed = 0.0;
+  p.flash_rate = 0.2;
+  weather w(p);
+  w.add_event(storm_at(0.0, 0.0, 0.0, 2400.0, 1000.0, 1.0));
+  // Window by window, a second at a time, over the storm's life and past it.
+  std::vector<cvc::world::lightning_strike> all;
+  for (double t = 1.0; t <= 3000.0; t += 1.0)
+    for (const auto &k : w.strikes(t, 1.0))
+      all.push_back(k);
+  // The same strikes in one window.
+  const std::vector<cvc::world::lightning_strike> once = w.strikes(3000.0, 3000.0);
+  ASSERT_EQ(all.size(), once.size());
+  for (std::size_t i = 0; i < all.size(); ++i) {
+    EXPECT_EQ(all[i].id, once[i].id);
+    EXPECT_DOUBLE_EQ(all[i].tau, once[i].tau);
+  }
+  // Mature from 720 s to 1560 s: about 0.2 a second then, fewer while it ramps, none early or late.
+  int ground = 0;
+  const double rr = w.rain_radius(1000.0, 1.0);
+  for (const auto &k : all) {
+    EXPECT_GT(k.tau, 300.0);
+    EXPECT_LT(k.tau, 2400.0);
+    EXPECT_LE(std::hypot(k.x, k.y), rr + 1e-6);
+    EXPECT_GE(k.strokes, 1);
+    EXPECT_LE(k.strokes, 4);
+    EXPECT_GT(k.intensity(0.0), 0.5);
+    EXPECT_EQ(k.intensity(k.life() + 0.01), 0.0);
+    ground += k.ground ? 1 : 0;
+  }
+  std::printf("%zu strikes, %d to the ground\n", all.size(), ground);
+  EXPECT_GT(all.size(), 0.7 * 0.2 * 840.0);
+  EXPECT_LT(all.size(), 1.6 * 0.2 * 1400.0);
+  EXPECT_NEAR(double(ground) / all.size(), p.ground_share, 0.1);
+  // No storm, no lightning.
+  weather clear(quiet());
+  EXPECT_TRUE(clear.strikes(1000.0, 1000.0).empty());
+}
