@@ -86,8 +86,9 @@ struct field_body {
   field_hull hull;      // a fluid pushes on its triangles in place of the cells
   field_load load;      // the last step's
   // Its outline as a wake cuts it (immersion.h): its hull, else its shape, made when a wake first
-  // needs it (`cut_shape` keeps the shape until then). Null when it would not cut (it makes no
-  // waves).
+  // needs it (a wake may come after the body, as a scene's water does after its crates). A box or a
+  // sphere is made from `half` or `radius`; `cut_shape` keeps only a convex hull's points. Null
+  // when it would not cut (it makes no waves).
   std::shared_ptr<const physics::shape> cut_shape;
   std::shared_ptr<const immersion_body> cut;
   bool cut_tried = false;
@@ -211,8 +212,11 @@ public:
 
 private:
   void wake_in(world_backend &be, const field_grid &box);
-  // The wakes' waves move on and their sources go in, before the step's reads.
-  void advance_wakes(world_backend &be, const world_config &cfg, double t, double gravity);
+  // The wakes' waves move on and their sources go in, before the step's reads. `held` gives a
+  // field's surface held at t (fluid_surface::at, its per-time work on the field workers), the one
+  // the step's reads use after.
+  void advance_wakes(world_backend &be, const world_config &cfg, double t, double gravity,
+                     const std::function<const fluid_surface *(const compiled_field &)> &held);
   const immersion_body *outline_of(field_body &fb);
 
   std::map<std::uint32_t, compiled_field> _fields;

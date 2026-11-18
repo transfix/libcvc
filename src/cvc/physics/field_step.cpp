@@ -102,7 +102,8 @@ field_grid grid_of(const cvc::volume &v, const char *what, bool nonnegative) {
   return g;
 }
 
-compiled_field compile(const field &f) {
+// `old`, when given, is the field this one replaces (field_set::set): the same wake is kept.
+compiled_field compile(const field &f, const compiled_field *old = nullptr) {
   need(f.kind <= field_kind::flow, "bad kind");
   need(f.volume != nullptr || (f.kind == field_kind::flow && f.wind),
        "no volume (only a flow with a wind may have none)");
@@ -150,7 +151,11 @@ compiled_field compile(const field &f) {
     c.ruts.rows = std::max(1, static_cast<int>(rows));
     c.ruts.depth.assign(static_cast<std::size_t>(c.ruts.cols) * c.ruts.rows, 0.0f);
   }
-  if (f.wake.on()) // its parameters checked here; the step gives it the world's gravity
+  // The wake: the old field's when it is the same wake (its waves under a new sea); else a new one,
+  // its parameters checked here (the step gives it the world's gravity).
+  if (f.wake.on() && old && old->wake && old->desc.wake == f.wake)
+    c.wake = old->wake;
+  else if (f.wake.on())
     c.wake = std::make_shared<fluid_wake>(f.wake, 9.80665);
   return c;
 }
@@ -623,7 +628,7 @@ field_id field_set::add(world_backend &be, const field &f) {
 void field_set::set(world_backend &be, field_id id, const field &f) {
   auto it = _fields.find(id.value);
   need(it != _fields.end(), "unknown or removed field id " + std::to_string(id.value));
-  compiled_field c = compile(f);
+  compiled_field c = compile(f, &it->second); // the same wake keeps its waves (compile)
   const rut_map &old = it->second.ruts;
   if (!c.ruts.depth.empty() && c.ruts.x0 == old.x0 && c.ruts.y0 == old.y0 &&
       c.ruts.cell == old.cell && c.ruts.cols == old.cols && c.ruts.rows == old.rows) {
@@ -631,9 +636,6 @@ void field_set::set(world_backend &be, field_id id, const field &f) {
     c.rut_cells = it->second.rut_cells;
     c.rut_deepest = it->second.rut_deepest;
   }
-  // The same wake keeps its waves (a new sea under them, the same water).
-  if (c.wake && it->second.wake && c.desc.wake == it->second.desc.wake)
-    c.wake = it->second.wake;
   wake_in(be, it->second.scalar);
   wake_in(be, c.scalar);
   it->second = std::move(c);
@@ -703,7 +705,9 @@ void field_set::body_added(const world_backend &be, body_id id, const body_desc 
   }
   if (fb.cells.empty() || !(fb.volume > 0.0))
     return;
-  if (!d.hull) // a wake cuts its shape (its hull, where it has one: outline_of)
+  // A wake cuts its hull, else its shape (outline_of): a convex hull keeps its points for that, a
+  // box or a sphere needs only `half` or `radius`.
+  if (!d.hull && fb.shape == field_body::outline::other)
     fb.cut_shape = std::make_shared<const physics::shape>(d.shape);
   fb.cell_volume = fb.volume / static_cast<double>(fb.cells.size());
   fb.mass = d.mass > 0.0 ? d.mass : d.density * fb.volume;
@@ -968,39 +972,69 @@ bool field_set::has_wakes() const {
   return false;
 }
 
+namespace {
+// A wake's parameters as its section of save() records them, each one, so a world with any other
+// wake refuses the state.
+void put_wake_params(std::string &out, const field_wake &p) {
+  const std::int32_t ints[3] = {p.cells, p.samples, p.sources};
+  const double reals[7] = {p.cell,    p.depth,        p.period,     p.damping_k2,
+                           p.damping, p.sponge_cells, p.sponge_rate};
+  out.append(reinterpret_cast<const char *>(ints), sizeof(ints));
+  out.append(reinterpret_cast<const char *>(reals), sizeof(reals));
+}
+bool get_wake_params(const std::string &in, std::size_t &pos, field_wake &p) {
+  std::int32_t ints[3];
+  double reals[7];
+  if (pos > in.size() || sizeof(ints) + sizeof(reals) > in.size() - pos)
+    return false;
+  std::memcpy(ints, in.data() + pos, sizeof(ints));
+  std::memcpy(reals, in.data() + pos + sizeof(ints), sizeof(reals));
+  pos += sizeof(ints) + sizeof(reals);
+  p.cells = ints[0];
+  p.samples = ints[1];
+  p.sources = ints[2];
+  p.cell = reals[0];
+  p.depth = reals[1];
+  p.period = reals[2];
+  p.damping_k2 = reals[3];
+  p.damping = reals[4];
+  p.sponge_cells = reals[5];
+  p.sponge_rate = reals[6];
+  return true;
+}
+} // namespace
+
 void field_set::save_wakes(std::string &out) const {
   for (const auto &fe : _fields) {
     if (!fe.second.wake)
       continue;
     const std::uint32_t id = fe.first;
-    const std::int32_t cells = fe.second.desc.wake.cells;
-    const double cell = fe.second.desc.wake.cell;
     out.append(reinterpret_cast<const char *>(&id), sizeof(id));
-    out.append(reinterpret_cast<const char *>(&cells), sizeof(cells));
-    out.append(reinterpret_cast<const char *>(&cell), sizeof(cell));
+    put_wake_params(out, fe.second.desc.wake);
     fe.second.wake->save(out);
   }
 }
 
 void field_set::restore_wakes(const std::string &in, std::size_t &pos) {
+  // Every wake read whole first, then all taken: a state that fails part-way changes no wake.
+  std::vector<std::pair<fluid_wake *, std::shared_ptr<fluid_wake::saved>>> read;
   for (const auto &fe : _fields) {
     if (!fe.second.wake)
       continue;
     std::uint32_t id = 0;
-    std::int32_t cells = 0;
-    double cell = 0.0;
-    if (pos + sizeof(id) + sizeof(cells) + sizeof(cell) > in.size())
+    field_wake p;
+    if (pos > in.size() || sizeof(id) > in.size() - pos)
       throw cvc::physics_error("restore: the wakes' state is truncated");
     std::memcpy(&id, in.data() + pos, sizeof(id));
     pos += sizeof(id);
-    std::memcpy(&cells, in.data() + pos, sizeof(cells));
-    pos += sizeof(cells);
-    std::memcpy(&cell, in.data() + pos, sizeof(cell));
-    pos += sizeof(cell);
-    if (id != fe.first || cells != fe.second.desc.wake.cells || cell != fe.second.desc.wake.cell)
+    if (!get_wake_params(in, pos, p))
+      throw cvc::physics_error("restore: the wakes' state is truncated");
+    if (id != fe.first || p != fe.second.desc.wake)
       throw cvc::physics_error("restore: this world's wakes differ from the state's");
-    fe.second.wake->restore(in, pos);
+    read.emplace_back(fe.second.wake.get(), fe.second.wake->parse(in, pos));
   }
+  for (auto &r : read)
+    r.first->commit(*r.second);
 }
 
 wake_info field_set::wake(field_id id) const {
@@ -1025,6 +1059,10 @@ const immersion_body *field_set::outline_of(field_body &fb) {
     try {
       if (fb.hull.desc)
         fb.cut = std::make_shared<const immersion_body>(*fb.hull.desc);
+      else if (fb.shape == field_body::outline::box)
+        fb.cut = std::make_shared<const immersion_body>(physics::shape{box{fb.half}});
+      else if (fb.shape == field_body::outline::sphere)
+        fb.cut = std::make_shared<const immersion_body>(physics::shape{sphere{fb.radius}});
       else if (fb.cut_shape)
         fb.cut = std::make_shared<const immersion_body>(*fb.cut_shape);
     } catch (const std::invalid_argument &) {
@@ -1035,47 +1073,46 @@ const immersion_body *field_set::outline_of(field_body &fb) {
   return fb.cut.get();
 }
 
-void field_set::advance_wakes(world_backend &be, const world_config &cfg, double t,
-                              double gravity) {
-  // Every body the fields record, awake or asleep, where it is now: in id order.
+void field_set::advance_wakes(
+    world_backend &be, const world_config &cfg, double t, double gravity,
+    const std::function<const fluid_surface *(const compiled_field &)> &held) {
+  // Every body the fields record, awake or asleep, where it is now: in id order. Read only at the
+  // steps the waves step at.
   std::vector<wake_body> bodies;
-  bodies.reserve(_bodies.size());
   std::vector<std::uint32_t> wake_up;
   for (auto &fe : _fields) {
     compiled_field &cf = fe.second;
-    if (!cf.wake)
+    double dt = 0.0;
+    if (!cf.wake || !cf.wake->begin_step(cfg.fixed_dt, dt))
       continue;
     cf.wake->set_gravity(gravity);
-    const fluid_surface *surface = cf.desc.surface.get();
     const field_grid &box = cf.scalar;
-    bodies.clear();
-    for (auto &entry : _bodies) {
-      body_id id;
-      id.value = entry.first;
-      field_body &fb = entry.second;
-      const body_state s = be.state(id);
-      wake_body b;
-      b.id = entry.first;
-      b.position = s.position;
-      b.rotation = s.rotation;
-      b.hull = fb.hull.desc != nullptr;
-      b.active = s.active;
-      body_box(fb, s, b.lo, b.hi);
-      // In the water: over the field's box, and reaching below the water's top over its position.
-      if (overlaps(b.lo, b.hi, box)) {
-        const double top = std::min(box.hi[2], surface->height(s.position.x, s.position.y, t));
-        b.in_water = b.lo[2] < top && b.hi[2] > box.lo[2];
+    if (bodies.empty() && !_bodies.empty()) {
+      bodies.reserve(_bodies.size());
+      for (auto &entry : _bodies) {
+        body_id id;
+        id.value = entry.first;
+        const body_state s = be.state(id);
+        wake_body b;
+        b.id = entry.first;
+        b.position = s.position;
+        b.rotation = s.rotation;
+        b.hull = entry.second.hull.desc != nullptr;
+        b.active = s.active;
+        body_box(entry.second, s, b.lo, b.hi);
+        bodies.push_back(b);
       }
-      if (b.in_water || cf.wake->own(b.id) >= 0)
-        b.outline = outline_of(fb);
-      bodies.push_back(b);
     }
-    immersion_water water;
-    water.surface = surface;
-    water.time = t;
-    water.lo = {box.lo[0], box.lo[1], box.lo[2]};
-    water.hi = {box.hi[0], box.hi[1], box.hi[2]};
-    cf.wake->advance(bodies, water, cfg.fixed_dt, wake_up);
+    std::size_t k = 0;
+    for (auto &entry : _bodies) {
+      wake_body &b = bodies[k++];
+      b.over = overlaps(b.lo, b.hi, box);
+      b.in_water = false;
+      b.outline = b.over ? outline_of(entry.second) : nullptr;
+    }
+    cf.wake->advance(
+        bodies, {box.lo[0], box.lo[1], box.lo[2]}, {box.hi[0], box.hi[1], box.hi[2]},
+        [&]() { return held(cf); }, t, dt, wake_up);
   }
   for (const std::uint32_t v : wake_up) {
     body_id id;
@@ -1305,10 +1342,30 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
     awake.push_back(pb);
   }
 
+  // Each field's surface held at t (fluid_surface::at: its per-time work done as tasks of the field
+  // workers), made once a step as first needed, by a wake or by the cells' reads below.
+  std::vector<std::pair<const compiled_field *, std::shared_ptr<const fluid_surface>>> held;
+  fluid_surface::parallel_run par; // the workers, once some read needs a surface
+  const auto held_of = [&](const compiled_field &cf) -> const fluid_surface * {
+    const fluid_surface *own = cf.desc.surface.get();
+    for (const auto &h : held)
+      if (h.first == &cf)
+        return h.second ? h.second.get() : own;
+    if (!par) {
+      if (!_workers || _workers->threads() != cfg.field_threads)
+        _workers = std::make_unique<field_workers>(cfg.field_threads);
+      par = [this](std::size_t n, const std::function<void(std::size_t)> &fn) {
+        _workers->run(n, fn);
+      };
+    }
+    held.emplace_back(&cf, own->at(t, par)); // its per-time work, as tasks for the workers
+    return held.back().second ? held.back().second.get() : own;
+  };
+
   // The wakes (field::wake): their waves move on and the bodies' sources go in, before the reads.
   for (const auto &fe : _fields)
     if (fe.second.wake) {
-      advance_wakes(be, cfg, t, gn);
+      advance_wakes(be, cfg, t, gn, held_of);
       break;
     }
   // What body `id` reads of field `cf`'s wake: the others' waves (none without a wake).
@@ -1331,10 +1388,8 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
     const fluid_surface *at; // the surface at t, held (fluid_surface::at), or the field's own
     wake_view wake;          // the others' waves, with a wake
   };
-  std::vector<std::shared_ptr<const fluid_surface>> held; // one per field, as first needed
   std::vector<surface_cells> runs;
   std::vector<cell_read> reads;
-  fluid_surface::parallel_run par; // the workers, once some cell needs a surface read
   for (std::size_t bi = 0; bi < awake.size(); ++bi) {
     const placed &pb = awake[bi];
     if (pb.fb->hull.desc != nullptr)
@@ -1343,24 +1398,7 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
       const compiled_field &cf = fe.second; // a surface is a fluid's (compile)
       if (!cf.desc.surface || !overlaps(pb.blo, pb.bhi, cf.scalar))
         continue;
-      const fluid_surface *own = cf.desc.surface.get();
-      const fluid_surface *at = own;
-      for (std::size_t k = 0; k < runs.size() && at == own; ++k)
-        if (runs[k].cf == &cf)
-          at = runs[k].at;
-      if (at == own) {
-        if (!par) {
-          if (!_workers || _workers->threads() != cfg.field_threads)
-            _workers = std::make_unique<field_workers>(cfg.field_threads);
-          par = [this](std::size_t n, const std::function<void(std::size_t)> &fn) {
-            _workers->run(n, fn);
-          };
-        }
-        held.push_back(own->at(t, par)); // its per-time work, as tasks for the workers
-        if (held.back())
-          at = held.back().get();
-      }
-      runs.push_back({bi, &cf, reads.size(), at, view_of(cf, pb.id)});
+      runs.push_back({bi, &cf, reads.size(), held_of(cf), view_of(cf, pb.id)});
       reads.resize(reads.size() + pb.fb->cells.size());
     }
   }

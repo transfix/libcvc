@@ -46,6 +46,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -3107,9 +3108,10 @@ TEST(AriadneBoatNode, WakePushLetsOneBoatsWakeMoveAnother) {
 }
 
 // The wake is stepped inside the physics step on the world clock's ticks, so it is the same
-// whatever the frames: one run takes a frame per clock quantum, another uneven 0.137 s frames,
-// and wherever the second is looked at, the world (its bodies, the boats and the wake's waves,
-// all in its state hash) is the first's.
+// whatever the frames: one run takes a frame per clock quantum, another frames of 0.137 s, which
+// the clock caps at 8 quanta each (world_clock::max_steps_per_advance), and wherever the second is
+// looked at, the world (its bodies, the boats and the wake's waves, all in its state hash) is the
+// first's. TheWakesPushIsTheSameAtUnevenFrames, below, takes frames of uneven length.
 TEST(AriadneBoatNode, TheWakesPushIsTheSameAtAnyFramePacing) {
   REQUIRE_YAML();
   if (!jolt())
@@ -3158,9 +3160,122 @@ TEST(AriadneBoatNode, TheWakesPushIsTheSameAtAnyFramePacing) {
     ++compared;
     EXPECT_EQ(hash, it->second) << "at tick " << tick;
   }
-  std::printf("[wake push] %d ticks compared between frames of a quantum and of 0.137 s\n",
+  std::printf("[wake push] %d ticks compared between frames of a quantum and of 0.137 s "
+              "(8 quanta)\n",
               compared);
   EXPECT_GT(compared, 5);
+}
+
+// The wake at uneven frame pacing that the clock does not cap (it takes at most 8 quanta a frame):
+// frames of 1, 3, 2, 5 and 7 quanta in turn, none a multiple of the waves' 3-step period, against a
+// frame per quantum, have the same state hash at every tick they share.
+TEST(AriadneBoatNode, TheWakesPushIsTheSameAtUnevenFrames) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const auto run = [&](const std::vector<int> &frames, double seconds) {
+    std::map<std::uint64_t, std::uint64_t> hashes;
+    LoadResult r = fresh_load(two_boats(true));
+    EXPECT_TRUE(r.ok) << r.error;
+    cvc::app app;
+    std::vector<std::string> warnings;
+    std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+    if (!w) {
+      ADD_FAILURE() << "no world";
+      return hashes;
+    }
+    w->sync(&warnings);
+    cvc::state::instance(app)("runner.throttle").value(1.0);
+    cvc::state::instance(app)("runner.rudder").value(0.3);
+    SceneClockDriver clock(app, resolved_clock(r.scene));
+    const double quantum = app.world_clock().fixed_dt();
+    for (std::size_t f = 0; app.world_clock().t() < seconds; ++f) {
+      clock.drive(frames[f % frames.size()] * quantum);
+      w->follow(app.world_clock());
+      hashes[w->world().tick()] = w->world().state_hash();
+    }
+    return hashes;
+  };
+  const auto fine = run({1}, 10.0);
+  const auto uneven = run({1, 3, 2, 5, 7}, 10.0);
+  int compared = 0;
+  std::set<std::uint64_t> gaps;
+  std::uint64_t last = 0;
+  for (const auto &[tick, hash] : uneven) {
+    if (tick > last) // a frame that ran no step (the first, the anchor) is not a gap
+      gaps.insert(tick - last);
+    last = tick;
+    const auto it = fine.find(tick);
+    if (it == fine.end())
+      continue;
+    ++compared;
+    EXPECT_EQ(hash, it->second) << "at tick " << tick;
+  }
+  std::string seen;
+  for (const std::uint64_t g : gaps)
+    seen += " " + std::to_string(g);
+  std::printf("[wake push] %d ticks compared; the uneven frames advanced by%s ticks\n", compared,
+              seen.c_str());
+  EXPECT_GT(gaps.size(), 3u) << "the frames were uneven";
+  EXPECT_GT(compared, 100);
+}
+
+// A new keyframe of the sea (the wind changed) sets the water's field in place when it has a wake:
+// the field keeps its id and the wake its waves, read the same just before and just after the
+// swap.
+TEST(AriadneBoatNode, TheWakesWavesSurviveANewSea) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = fresh_load(two_boats(true));
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  cvc::state &st = cvc::state::instance(app);
+  st("runner.throttle").value(1.0);
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  for (int i = 0; i < 60 * 6; ++i) { // the runner under way, its wake in the window
+    clock.drive(1.0 / 60.0);
+    w->follow(app.world_clock());
+  }
+  const cvc::physics::field_id id = wake_field(*w);
+  ASSERT_TRUE(id.valid());
+  const auto surface_of = [&]() -> const void * {
+    for (const cvc::physics::field_snapshot &f : w->world().snapshot().fields)
+      if (f.id == id)
+        return f.desc.surface.get();
+    return nullptr;
+  };
+  // The wind rises, the sea follows at once (no lag, a short crossfade): a new keyframe.
+  st("water.sea_lag").value(0.0);
+  st("water.sea_fade").value(0.5);
+  st("water.wind_speed").value(8.0);
+  int swaps = 0;
+  for (int i = 0; i < 60 * 4 && swaps == 0; ++i) {
+    clock.drive(1.0 / 60.0);
+    const void *before = surface_of();
+    const cvc::physics::wake_info info0 = w->world().field_wake_info(id);
+    const cvc::physics::vec3 p = w->boat("runner")->state().body.position;
+    const double h0 = w->world().field_wake_height(id, p.x - 6.0, p.y);
+    w->sync(&warnings); // the swap, if the sea took a keyframe, before any step
+    if (surface_of() != before) {
+      ++swaps;
+      const cvc::physics::wake_info info1 = w->world().field_wake_info(id);
+      EXPECT_TRUE(wake_field(*w) == id) << "the same field, set in place";
+      EXPECT_EQ(info1.windows, info0.windows);
+      EXPECT_EQ(info1.sources, info0.sources);
+      EXPECT_EQ(w->world().field_wake_height(id, p.x - 6.0, p.y), h0);
+      std::printf("[wake push] a new sea at %.2f s: the wake's %d states and its height %.4f m "
+                  "behind the runner kept\n",
+                  app.world_clock().t(), info1.windows, h0);
+      EXPECT_NE(h0, 0.0);
+    }
+    w->follow(app.world_clock());
+  }
+  EXPECT_EQ(swaps, 1) << "the wind change made a new sea";
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -13,11 +13,12 @@
 // others' waves. Private: not installed. field_step.cpp runs one per fluid field with a wake.
 //
 // One window of n x n cells of dx on the world's grid of whole cells, cell (i, j) at
-// ((ci + i) dx, (cj + j) dx), and one wave state in it per body that makes waves (its "window"
-// here): h, phi and dh/dt per cell, stepped by cvc::ocean::ewave's exact linear step (no walls)
-// one after another through one ewave (its coefficients shared). A body's source is its immersed
-// columns' change, -(zeta(t) - zeta(t - T)) smoothed [1 2 1] / 4 along x and y (it keeps the
-// volume), added to its own state. Body b reads the sum of the states less its own.
+// ((ci + i) dx, (cj + j) dx), and one wave state in it per body that makes waves: h, phi and dh/dt
+// per cell, stepped by cvc::ocean::ewave's exact linear step (no walls) one after another through
+// one ewave (its coefficients shared). A body's source is its immersed columns' change,
+// -(zeta(t) - zeta(t - T)) smoothed [1 2 1] / 4 along x and y (it keeps the volume), added to its
+// own state; the columns are cut against what it floats in, the sea and the others' waves. Body b
+// reads the sum of the states less its own.
 //
 // Deterministic: the bodies are taken in id order, the states summed in id order, ewave and
 // add_immersion give the same bits on every platform, and the module is built without FMA
@@ -31,6 +32,7 @@
 #include <cvc/physics/field.h>
 #include <cvc/physics/immersion.h>
 #include <cvc/physics/types.h>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -48,9 +50,10 @@ struct wake_body {
   quat rotation;
   // Its world box.
   double lo[3] = {0.0, 0.0, 0.0}, hi[3] = {0.0, 0.0, 0.0};
-  bool hull = false;     // a boat: the window follows these first
+  bool hull = false;     // a boat: weighs more where the window goes
   bool active = false;   // awake
-  bool in_water = false; // its box reaches below the water's top over its position
+  bool over = false;     // its box overlaps the field's
+  bool in_water = false; // and reaches below the water's top over its position (advance sets it)
 };
 
 // The others' waves at a point, for one body.
@@ -63,6 +66,9 @@ struct wake_sample {
 
 class fluid_wake {
 public:
+  // At most this many states whose bodies make no more waves are kept fading beside the sources.
+  static constexpr int kMaxFading = 4;
+
   // Throws cvc::physics_error for parameters out of range.
   fluid_wake(const field_wake &p, double gravity);
 
@@ -71,11 +77,16 @@ public:
   // kept.
   void set_gravity(double gravity);
 
-  // Before the reads of every physics step (fixed_dt s): every whole number of steps nearest the
-  // period, steps the states by that time, moves the window to the bodies, adds each body's
-  // source and works out what the bodies read. `water` is the field's water now (its surface at
-  // the field time, its box). Appends to `wake_up` the sleeping bodies the others' waves reach.
-  void advance(const std::vector<wake_body> &bodies, const immersion_water &water, double fixed_dt,
+  // Every physics step (fixed_dt s), first: counts it, and says whether the waves step at it (every
+  // whole number of steps nearest the period, at least one), and by how long (`dt`).
+  bool begin_step(double fixed_dt, double &dt);
+  // At a step where they do, before the reads: steps the states by `dt`, moves the window to the
+  // bodies, adds each awake body's source and works out what the bodies read. The field's box is
+  // lo .. hi; `sea` gives its surface held at the field time t (asked for only when the step has
+  // work to do: none when every body sleeps and no wave is left). Sets each body's in_water, and
+  // appends to `wake_up` the sleeping bodies the others' waves reach.
+  void advance(std::vector<wake_body> &bodies, const vec3 &lo, const vec3 &hi,
+               const std::function<const fluid_surface *()> &sea, double t, double dt,
                std::vector<std::uint32_t> &wake_up);
 
   // The state of body `id` (its own waves), or -1 when it has none.
@@ -88,13 +99,18 @@ public:
 
   // World state (world::save / restore): the window's place, its step count and the states.
   void save(std::string &out) const;
-  // Throws cvc::physics_error for a state that does not fit this wake.
-  void restore(const std::string &in, std::size_t &pos);
+  // A saved wake read whole before anything changes (parse throws cvc::physics_error for a state
+  // that does not fit this wake), then taken (commit, which cannot fail): a failed restore leaves
+  // the wake as it was.
+  struct saved;
+  std::shared_ptr<saved> parse(const std::string &in, std::size_t &pos) const;
+  void commit(saved &s);
 
 private:
   struct state {
     std::uint32_t body = 0;
     bool source = true;            // its body still makes waves here
+    bool rest = false;             // its body slept at the last wave step: its columns are stale
     std::vector<double> h, phi, w; // n^2 each
     std::vector<double> zeta;      // its body's columns at the last wave step
     std::vector<double> f;         // what it gives a reader: 6 per cell (h, u, v, w, gx, gy)
@@ -102,6 +118,8 @@ private:
   void derive(state &s) const;
   void sum();
   void shift(int di, int dj);
+  // The window's cell for a world coordinate (false when it is not finite or absurdly far).
+  bool cell_of(double v, std::int64_t &out) const;
 
   field_wake _p;
   int _n = 0;
@@ -115,6 +133,14 @@ private:
   std::vector<std::uint32_t> _ids;     // the states' bodies in id order (index = own())
   std::vector<const state *> _byIndex; // and the states themselves
   std::vector<double> _total;          // 6 per cell: the sum of every state's f
+  int _outside = 0; // bodies in the water but not in the window, at the last wave step
+};
+
+struct fluid_wake::saved {
+  bool placed = false;
+  std::int64_t ci = 0, cj = 0;
+  std::uint64_t count = 0;
+  std::map<std::uint32_t, state> states;
 };
 
 } // namespace detail

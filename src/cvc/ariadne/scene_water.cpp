@@ -146,14 +146,15 @@ SceneWaterSpec scene_water_spec(cvc::app &app, const SceneNode &n, const std::st
   s.swell_period = std::max(key("water.swell_period", "swell_period", s.swell_period), 3.0);
   s.swell_dir = key("water.swell_dir", "swell_dir", s.swell_dir);
   // C5 (D6): the bodies' waves pushing each other, off unless asked for. The window's cells are
-  // a power of two (the nearest in 8 .. 256), its cell at least 5 cm.
+  // a power of two (the nearest in 8 .. 128), its cell 5 cm .. 100 m, its depth at most 10 km (the
+  // wake's limits, cvc::physics::field_wake).
   s.wake_push = key("water.wake_push", "wake_push", 0.0) != 0.0;
-  const double cells = std::clamp(n.props.num("wake_push_cells", 64.0), 8.0, 256.0);
+  const double cells = std::clamp(n.props.num("wake_push_cells", 64.0), 8.0, 128.0);
   s.wake_push_cells = 8;
-  while (s.wake_push_cells < 256 && cells > 1.5 * s.wake_push_cells)
+  while (s.wake_push_cells < 128 && cells > 1.5 * s.wake_push_cells)
     s.wake_push_cells *= 2;
-  s.wake_push_cell = std::max(n.props.num("wake_push_cell", s.wake_push_cell), 0.05);
-  s.wake_push_depth = n.props.num("wake_push_depth", s.wake_push_depth);
+  s.wake_push_cell = std::clamp(n.props.num("wake_push_cell", s.wake_push_cell), 0.05, 100.0);
+  s.wake_push_depth = std::min(n.props.num("wake_push_depth", s.wake_push_depth), 1.0e4);
   return s;
 }
 

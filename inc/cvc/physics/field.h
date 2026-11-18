@@ -92,17 +92,20 @@
 // ROADMAP.md C5, D6): the waves its floating bodies make, which push the others. It is off by
 // default, and a world without one steps exactly as before. With one, the field keeps a square
 // window of cells around the bodies in its water (cvc::ocean::ewave's exact linear step) and one
-// wave state in it per body that makes waves: each body's immersed columns over the window
-// (immersion.h, against the surface) are its source, dh = -(zeta(t) - zeta(t - dt)). Every body
+// wave state in it per body that makes waves: each awake body's immersed columns over the window
+// (immersion.h), cut against what it floats in (the surface and the others' waves, so a body
+// riding another's wave does not send it on again), are its source,
+// dh = -(zeta(t) - zeta(t - dt)). Every body
 // reads the sum of the others' waves, never its own: their height adds to the surface's under its
 // cells and hull, their velocity (grad phi sideways, dh/dt up) to the water's, and an inertial
 // fluid's Froude-Krylov push takes their acceleration (-g grad h). A body's own waves read back
 // would cancel its heave's restoring force as it moves (its source lowers the water it presses
 // down, at once, and the waves take a while to refill it) and price its wave-making twice (the
 // hull's drag stands for it). So boats feel each other's wakes and the debris' rings, and the
-// debris the boats'. The window and its states are world state: saved, restored and hashed. What
-// reads the water at a point (world::water_at: a boat's propeller and rudder) reads it without
-// the wake.
+// debris the boats'. The window and its states are world state: saved (with every wake parameter,
+// so a world with another wake refuses the state), restored whole or not at all, and hashed; the
+// section is versioned only by its magic (CVCWAKE1). What reads the water at a point
+// (world::water_at: a boat's propeller and rudder) reads it without the wake.
 //
 // Sleeping bodies are not pushed: the forces were in balance when the body fell
 // asleep. add_field and set_field wake the bodies inside the field's box, and a wake wakes a body
@@ -137,25 +140,37 @@ enum class field_kind : std::uint8_t {
 
 // A fluid's wake (field::wake): the window its floating bodies' waves are stepped on. `cells` 0 is
 // no wake (the default). The window (cells x cells of `cell` metres, one water depth) sits on a
-// grid of whole cells from the world's origin, centred on the bodies in the water: its boats (the
-// bodies with a hull) where there are any, else all of them; it moves by whole cells once their
-// middle is cells / 8 off its centre, the waves going with it and the strip that enters flat. The
-// waves step every `period` seconds of world time, in whole physics steps (at least one), and the
-// bodies read them at every step. A sponge at the window's edge takes the waves that leave, and
-// the window has no shores: a wake runs on over land, where nothing floats to feel it, and does
-// not reflect off the coast. At most `sources` bodies make waves, the nearest the window's centre;
+// grid of whole cells from the world's origin where it holds the most bodies in the water, a boat
+// (a body with a hull) counting as four: each such body proposes the bodies within the window's
+// inner square round it (the window less its sponge), and the window takes the best proposal over
+// what it holds only when that holds more. It centres on what it holds and moves by whole cells
+// once that is cells / 8 off its centre, the waves going with it and the strip that enters flat.
+// Bodies in the water outside it make and feel no waves (wake_info::outside counts them): two
+// groups farther apart than the window cannot share it. The waves step every `period` seconds of
+// world time, in whole physics steps (at least one), and the bodies read them at every step. A
+// sponge at the window's edge takes the waves that leave, and the window has no shores: a wake
+// runs on over land, where nothing floats to feel it, and does not reflect off the coast. At most
+// `sources` awake bodies make waves, the nearest the window's centre (a sleeping body makes none);
 // a body that leaves the window, or the world, stops making waves, and its waves are let fade.
+//
+// Memory and cost: each body that makes waves holds a state of 80 cells^2 bytes (320 KiB at 64,
+// 1.25 MiB at 128), at most sources + 4 states (the 4 fading), and saves 32 cells^2 bytes of it
+// (so a save and a state_hash() grow by that each). A wave step costs about one
+// cvc::ocean::ewave step per state with waves in it: 0.16-0.22 ms at 64^2, 0.6-1.0 ms at 128^2
+// (ocean_ewave_test), every `period`; the reads are bilinear lookups. The limits below keep a
+// window at most 128 cells and 16 sources: 20 states of 1.25 MiB, wave steps of about 20 ms at
+// worst.
 struct field_wake {
-  int cells = 0;            // cells a side (0: no wake; else a power of two, 8 .. 256)
-  double cell = 1.0;        // m: a cell's side
-  double depth = 0.0;       // m: the window's one water depth (<= 0: deep water)
-  double period = 1.0 / 30; // s between two of the waves' steps (whole physics steps, >= 1)
+  int cells = 0;            // cells a side (0: no wake; else a power of two, 8 .. 128)
+  double cell = 1.0;        // m: a cell's side (0.05 .. 100)
+  double depth = 0.0;       // m: the window's one water depth (<= 0: deep water; at most 10 km)
+  double period = 1.0 / 30; // s between two of the waves' steps (whole physics steps; (0, 10])
   double damping_k2 = 2e-3; // m^2/s: the short waves decay as exp(-damping_k2 |k|^2 t)
   double damping = 0.02;    // 1/s: and every wave as exp(-damping t)
   double sponge_cells = 8;  // the edge band's width (cells, at most cells / 2)
   double sponge_rate = 2.0; // 1/s: its damping at the edge
-  int samples = 2;          // sub-columns a side in each cell for a body's immersed depth
-  int sources = 8;          // the most bodies that make waves (1 .. 64)
+  int samples = 2;          // sub-columns a side in each cell for a body's immersed depth (1 .. 8)
+  int sources = 8;          // the most bodies that make waves (1 .. 16)
   bool on() const { return cells > 0; }
   friend bool operator==(const field_wake &a, const field_wake &b) {
     return a.cells == b.cells && a.cell == b.cell && a.depth == b.depth && a.period == b.period &&
@@ -217,6 +232,7 @@ struct wake_info {
   int cells = 0;                // a side
   int windows = 0;              // the bodies' wave states in it, those fading out included
   std::vector<body_id> sources; // the bodies making waves now, in id order
+  int outside = 0;              // bodies in the water outside the window (at its last wave step)
 };
 
 // A medium's ruts (world::field_ruts): the depth (m) the surface has been pressed down, per cell

@@ -1400,15 +1400,16 @@ where they are sharp or fast (`wake_foam`). Beaches absorb them and steep shores
 `water_controls.ari`'s "Wakes push bodies") the waves push the bodies too
 (OCEAN-AND-WEATHER-ROADMAP.md C5, D6; `cvc::physics::field_wake`): the field keeps a physics wake,
 a window of `wake_push_cells` cells of `wake_push_cell` metres (64 of 1 m; `wake_push_depth` m deep,
-0 for deep water) around its boats, or around its floating bodies when it has none, stepped inside
-the physics step. Every body's immersed columns make waves in a state of its own, and every body
+0 for deep water) where it holds the most floating bodies (a boat counting as four), stepped inside
+the physics step. Every awake body's immersed columns make waves in a state of its own, and every body
 is pushed by the others' waves (their height under its cells and hull, their orbital velocity and
 their acceleration), never its own, so the launches rock in each other's wakes and a crate's
 splash rocks the boat beside it while a body alone floats exactly as it did. It is physics: the
 same on every host and at every frame rate, saved and restored with the world and in its state
 hash; with it off the world is bit for bit as before. It has no shores (a wake runs on over land,
 where nothing floats, and does not reflect), and a boat's propeller and rudder read the water
-without it. With a
+without it. Bodies outside its window (a group farther away than the window is wide) make and
+feel none. With a
 swell, the swash runs up the beach on the ground itself. The node adds it to the fragment shader
 of every mesh under its ground node (the `world:` / `ground:` node, found by id at the top of the
 scene, its LOD rungs and regenerated chunks included), as the cloud deck adds its shade to its

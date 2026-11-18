@@ -20,6 +20,7 @@
 // The refusals run on the null backend, everywhere.
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -1168,7 +1169,8 @@ drop_run drop_beside(bool wake, double apart, int steps, int threads = 0) {
 
 } // namespace
 
-// A wake is a fluid's with a free surface, with a window of a power of two in 8 .. 256 cells.
+// A wake is a fluid's with a free surface, with a window of a power of two in 8 .. 128 cells and
+// its other parameters within their limits.
 TEST(PhysicsFieldWake, MalformedWakesAreRefused) {
   world_config c;
   c.backend = backend::null;
@@ -1178,6 +1180,8 @@ TEST(PhysicsFieldWake, MalformedWakesAreRefused) {
   EXPECT_THROW(w.add_field(f), cvc::physics_error);
   f.wake.cells = 512;
   EXPECT_THROW(w.add_field(f), cvc::physics_error);
+  f.wake.cells = 256;
+  EXPECT_THROW(w.add_field(f), cvc::physics_error);
   f.wake.cells = -1;
   EXPECT_THROW(w.add_field(f), cvc::physics_error);
   f = wake_water(true);
@@ -1185,6 +1189,14 @@ TEST(PhysicsFieldWake, MalformedWakesAreRefused) {
   EXPECT_THROW(w.add_field(f), cvc::physics_error);
   f = wake_water(true);
   f.wake.sources = 0;
+  EXPECT_THROW(w.add_field(f), cvc::physics_error);
+  f.wake.sources = 17; // the limits keep a wake's memory and its wave steps in bounds
+  EXPECT_THROW(w.add_field(f), cvc::physics_error);
+  f = wake_water(true);
+  f.wake.period = 11.0;
+  EXPECT_THROW(w.add_field(f), cvc::physics_error);
+  f = wake_water(true);
+  f.wake.cell = 0.01;
   EXPECT_THROW(w.add_field(f), cvc::physics_error);
   f = wake_water(true);
   f.surface = nullptr; // a flat-topped box has no waves to carry
@@ -1337,4 +1349,310 @@ TEST(PhysicsFieldWake, TheWindowFollowsTheBodies) {
   ASSERT_EQ(info.sources.size(), 1u);
   w.step(100);
   EXPECT_NE(w.field_wake_height(water, 40.0, 3.0), 0.0) << "its splash there";
+}
+
+// --- wakes: the review's cases ------------------------------------------------------------------
+
+namespace {
+
+// A launch-sized box hull (4 x 1.5 x 0.6 m at density 400): a boat to the wake (it has a hull).
+body_desc boat_at(double x, double y) {
+  body_desc d;
+  d.shape = box{{2.0, 0.75, 0.3}};
+  d.hull = box_hull({2.0, 0.75, 0.3});
+  d.density = 400.0;
+  d.position = {x, y, 0.0};
+  d.linear_damping = 0.0;
+  d.allow_sleeping = false;
+  return d;
+}
+
+// Still water whose reads are counted (thread-safe), so a test can see when the step reads it.
+class counted_still : public fluid_surface {
+public:
+  double level(double, double) const override { return 0.0; }
+  double height(double, double, double) const override {
+    reads.fetch_add(1, std::memory_order_relaxed);
+    return 0.0;
+  }
+  vec3 velocity(const vec3 &, double) const override { return {}; }
+  std::uint64_t digest() const override { return 0x636f756e74656421ull; }
+  mutable std::atomic<std::uint64_t> reads{0};
+};
+
+// The sea of a water node, roughly: three cascades (251, 83 and 29 m tiles) of 64 modes in a
+// 12 m/s wind, its source on a 0.5 m lattice.
+std::shared_ptr<const cvc::ocean::sea_surface> three_cascade_sea() {
+  cvc::ocean::sea_state s;
+  s.wind.speed_mps = 12.0;
+  s.wind.dir_rad = 0.4;
+  const std::vector<cvc::ocean::cascade> cs =
+      cvc::ocean::make_cascades({251.0, 83.0, 29.0}, 0xC0A57ull);
+  std::vector<cvc::ocean::sea_cascade> sc;
+  const double decay[3] = {0.025, 0.075, 0.2};
+  for (int i = 0; i < 3; ++i)
+    sc.push_back({cvc::ocean::build_h0(64, cs[i], s), 0.0, decay[i]});
+  cvc::ocean::sea_params p;
+  p.band = {32, 64};
+  p.chop = 1.15;
+  p.source_cell_m = 0.5;
+  return std::make_shared<cvc::ocean::sea_surface>(std::move(sc), p);
+}
+
+// What a field's wake reads now at a few points round (cx, cy), the largest |height|.
+double wake_peak(const world &w, field_id water, double cx, double cy) {
+  double m = 0.0;
+  for (int j = -4; j <= 4; ++j)
+    for (int i = -4; i <= 4; ++i)
+      m = std::max(m, std::fabs(w.field_wake_height(water, cx + 2.0 * i, cy + 2.0 * j)));
+  return m;
+}
+
+// Nine crates packed 2.2 m apart (0.6 m gaps) on `surface`, dropped from 0.3 to 0.7 m, for
+// `seconds`: how many sleep at the end, their fastest speed in the last tenth, and the wake's
+// largest height over each tenth of the run.
+struct packed_run {
+  int asleep = 0;
+  double late_speed = 0.0;
+  std::vector<double> peaks;
+};
+packed_run packed(bool wake, std::shared_ptr<const fluid_surface> surface, double seconds,
+                  double apart = 2.2) {
+  world w(jolt_config());
+  field f = wake_water(wake);
+  f.surface = std::move(surface);
+  const field_id water = w.add_field(f);
+  std::vector<body_id> ids;
+  for (int j = 0; j < 3; ++j)
+    for (int i = 0; i < 3; ++i)
+      ids.push_back(
+          w.add_body(crate_at(apart * (i - 1), apart * (j - 1), 0.3 + 0.05 * (3 * j + i))));
+  const int steps = static_cast<int>(seconds / w.config().fixed_dt + 0.5);
+  packed_run out;
+  out.peaks.assign(10, 0.0);
+  for (int s = 0; s < steps; ++s) {
+    w.step();
+    const int tenth = std::min(9, 10 * s / steps);
+    if (wake && s % 10 == 0)
+      out.peaks[tenth] = std::max(out.peaks[tenth], wake_peak(w, water, 0.0, 0.0));
+    if (tenth == 9)
+      for (const body_id id : ids) {
+        const vec3 v = w.state(id).linear_velocity;
+        out.late_speed = std::max(out.late_speed, std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z));
+      }
+  }
+  for (const body_id id : ids)
+    out.asleep += w.state(id).active ? 0 : 1;
+  return out;
+}
+
+} // namespace
+
+// A restore that fails part-way through the wake's section (a truncated state) leaves the wake as
+// it was, and the world steps on from it (no state left half-read, no reader of freed states).
+TEST(PhysicsFieldWake, AFailedRestoreLeavesTheWakeAsItWas) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  const field_id water = w.add_field(wake_water(true));
+  w.add_body(crate_at(0.0, 0.0, 1.2));
+  w.add_body(crate_at(4.0, 1.0, 0.0));
+  w.step(150);
+  std::vector<std::uint8_t> saved = w.save();
+  w.step(60);
+  const wake_info before = w.field_wake_info(water);
+  const double h0 = w.field_wake_height(water, 0.0, 3.0), h1 = w.field_wake_height(water, 3.0, 0.0);
+  ASSERT_GT(before.windows, 0);
+  saved.resize(saved.size() - 100); // into the wake's last state
+  EXPECT_THROW(w.restore(saved), cvc::physics_error);
+  const wake_info after = w.field_wake_info(water);
+  EXPECT_EQ(after.windows, before.windows);
+  EXPECT_EQ(after.sources, before.sources);
+  EXPECT_EQ(after.x0, before.x0);
+  EXPECT_EQ(w.field_wake_height(water, 0.0, 3.0), h0);
+  EXPECT_EQ(w.field_wake_height(water, 3.0, 0.0), h1);
+  w.step(60); // reads the wake's states: they must be whole
+  EXPECT_EQ(w.field_wake_info(water).windows, before.windows);
+}
+
+// A state saved under one wake does not restore into a world with another: every parameter
+// counts, not only the window's cells.
+TEST(PhysicsFieldWake, AStateFromAnotherWakeIsRefused) {
+  REQUIRE_JOLT();
+  const auto make = [](world &w, double depth, double period) {
+    field f = wake_water(true);
+    f.wake.depth = depth;
+    f.wake.period = period;
+    w.add_field(f);
+    w.add_body(crate_at(0.0, 0.0, 1.2));
+  };
+  world a(jolt_config());
+  make(a, 5.0, 1.0 / 30);
+  a.step(50);
+  const std::vector<std::uint8_t> saved = a.save();
+  world same(jolt_config());
+  make(same, 5.0, 1.0 / 30);
+  EXPECT_NO_THROW(same.restore(saved));
+  world deep(jolt_config());
+  make(deep, 0.0, 1.0 / 30);
+  EXPECT_THROW(deep.restore(saved), cvc::physics_error) << "another depth";
+  world slow(jolt_config());
+  make(slow, 5.0, 1.0 / 15);
+  EXPECT_THROW(slow.restore(saved), cvc::physics_error) << "another period";
+}
+
+// The window goes where it holds the most: two boats 100 m apart (a window of 64 m holds one, not
+// the point between them), and a cluster of five crates over one boat 60 m from them.
+TEST(PhysicsFieldWake, TheWindowHoldsTheBodies) {
+  REQUIRE_JOLT();
+  {
+    world w(jolt_config());
+    const field_id water = w.add_field(wake_water(true));
+    w.add_body(boat_at(-50.0, 0.0));
+    w.add_body(boat_at(50.0, 0.0));
+    w.step(10);
+    const wake_info info = w.field_wake_info(water);
+    std::printf("[wake] two boats 100 m apart: the window at x %.0f, %zu source(s)\n", info.x0,
+                info.sources.size());
+    EXPECT_EQ(info.sources.size(), 1u) << "one boat in the window, not neither";
+  }
+  {
+    world w(jolt_config());
+    const field_id water = w.add_field(wake_water(true));
+    w.add_body(boat_at(60.0, 0.0));
+    for (int k = 0; k < 5; ++k) {
+      body_desc d = crate_at(2.5 * (k % 3) - 2.5, 2.5 * (k / 3), 0.0);
+      d.allow_sleeping = false;
+      w.add_body(d);
+    }
+    w.step(10);
+    const wake_info info = w.field_wake_info(water);
+    std::printf("[wake] a boat 60 m from five crates: the window at x %.0f, %zu source(s)\n",
+                info.x0, info.sources.size());
+    EXPECT_EQ(info.sources.size(), 5u) << "the crates' cluster, not the lone boat";
+  }
+}
+
+// Packed bodies (0.6 m apart) on calm water: their waves die down (they leave the window slowly,
+// through its sponge), and the bodies fall asleep with a wake as they do without one, if later:
+// within 120 s, where without one they sleep within 40. In a swell no crate sleeps, with a wake or
+// without, and the waves they scatter do not grow.
+TEST(PhysicsFieldWake, PackedBodiesStayBoundedAndSleep) {
+  REQUIRE_JOLT();
+  const auto still = std::make_shared<still_surface>(0.0);
+  const packed_run off = packed(false, still, 120.0), on = packed(true, still, 120.0);
+  std::printf("[wake] nine packed crates on calm water, 120 s: asleep %d of 9 without a wake, %d "
+              "with one; fastest in the last 12 s %.4f / %.4f m/s; the wake's peak by tenths:",
+              off.asleep, on.asleep, off.late_speed, on.late_speed);
+  for (double p : on.peaks)
+    std::printf(" %.4f", p);
+  std::printf("\n");
+  EXPECT_EQ(on.asleep, off.asleep) << "the wake keeps no crate awake";
+  EXPECT_LT(on.peaks[9], 0.05 * on.peaks[1]) << "the waves die down";
+  const auto swell = std::make_shared<wave_train_surface>(
+      0.0, 0.0, std::vector<wave_train>{{0.25, 5.0, 0.3, 0.0}});
+  const packed_run soff = packed(false, swell, 60.0), son = packed(true, swell, 60.0);
+  std::printf("[wake] in a 0.25 m, 5 s swell, 60 s: asleep %d / %d; fastest late %.3f / %.3f m/s; "
+              "the wake's peak by tenths:",
+              soff.asleep, son.asleep, soff.late_speed, son.late_speed);
+  for (double p : son.peaks)
+    std::printf(" %.4f", p);
+  std::printf("\n");
+  double early = 0.0, late = 0.0;
+  for (int k = 1; k < 5; ++k)
+    early = std::max(early, son.peaks[k]);
+  for (int k = 5; k < 10; ++k)
+    late = std::max(late, son.peaks[k]);
+  EXPECT_LT(late, 2.0 * early + 1e-3) << "the scattered waves do not grow";
+  // Each body cuts its columns against the sea and the others' waves, so one riding another's
+  // wave does not send it on again: the waves among the crates stay under 0.25 m (cut against the
+  // bare sea they reached 0.32 m, and 0.82 m on calm water against 0.35 m now).
+  EXPECT_LT(std::max(early, son.peaks[0]), 0.25);
+  EXPECT_LT(on.peaks[0], 0.5);
+  EXPECT_LT(son.late_speed, 2.0 * soff.late_speed + 0.05);
+  EXPECT_GE(son.asleep, soff.asleep);
+}
+
+// A world whose bodies all sleep reads no surface for its wake once the waves have died away, as
+// it reads none without one.
+TEST(PhysicsFieldWake, ASleepingWorldReadsNoSurface) {
+  REQUIRE_JOLT();
+  auto surface = std::make_shared<counted_still>();
+  world w(jolt_config());
+  field f = wake_water(true);
+  f.surface = surface;
+  w.add_field(f);
+  const body_id a = w.add_body(crate_at(0.0, 0.0, 0.0));
+  const body_id b = w.add_body(crate_at(4.0, 0.0, 0.0));
+  w.step(6000);
+  ASSERT_FALSE(w.state(a).active);
+  ASSERT_FALSE(w.state(b).active);
+  surface->reads = 0;
+  w.step(100);
+  std::printf("[wake] two crates asleep: the surface read %llu times in 100 steps\n",
+              static_cast<unsigned long long>(surface->reads.load()));
+  EXPECT_EQ(surface->reads.load(), 0u);
+}
+
+// The cost of a wake on a real sea (three cascades on 3 field workers): the fields' push a step
+// with and without one, over six crates and a boat that never sleep; three runs of each, in turn,
+// and their medians.
+TEST(PhysicsFieldWake, TheWakesCostOnTheSea) {
+  REQUIRE_JOLT();
+  const auto sea = three_cascade_sea();
+  std::vector<double> ms[2];
+  std::size_t sources = 0;
+  for (int run = 0; run < 6; ++run) {
+    const int k = run % 2;
+    world_config c = jolt_config();
+    c.field_threads = 3;
+    world w(c);
+    field f = wake_water(k == 1);
+    f.surface = std::make_shared<ocean_surface>(sea);
+    const field_id water = w.add_field(f);
+    for (int i = 0; i < 6; ++i) {
+      body_desc d = crate_at(3.0 * (i % 3) - 3.0, 3.0 * (i / 3) - 1.5, 0.0);
+      d.allow_sleeping = false;
+      w.add_body(d);
+    }
+    w.add_body(boat_at(0.0, 8.0));
+    w.set_field_time(17.0);
+    w.step(30); // the first frames and the workers
+    const int steps = 300;
+    double sum = 0.0;
+    for (int s = 0; s < steps; ++s)
+      sum += w.step().fields_ms;
+    ms[k].push_back(sum / steps);
+    if (k == 1)
+      sources = w.field_wake_info(water).sources.size();
+  }
+  for (std::vector<double> &m : ms)
+    std::sort(m.begin(), m.end());
+  std::printf("[wake] on a three-cascade sea with 3 field workers: the fields' push %.3f ms a step "
+              "without a wake (%.3f-%.3f), %.3f ms with one (%.3f-%.3f; %zu sources)\n",
+              ms[0][1], ms[0][0], ms[0][2], ms[1][1], ms[1][0], ms[1][2], sources);
+  EXPECT_EQ(sources, 7u);
+}
+
+// A world with a wake gives the same bits on every platform: a crate dropped beside another and a
+// boat under way, in a swell, with a wake, its state hash after 400 steps pinned (measured on
+// Windows, MSVC; CI checks Linux, macOS and the others).
+TEST(PhysicsFieldWake, CrossPlatformGoldenHash) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  field f = wake_water(true);
+  f.surface = std::make_shared<wave_train_surface>(
+      0.0, 20.0, std::vector<wave_train>{{0.2, 6.0, 0.4, 0.0}, {0.05, 2.5, 1.2, 1.0}});
+  const field_id water = w.add_field(f);
+  w.add_body(crate_at(0.0, 0.0, 1.2));
+  w.add_body(crate_at(4.0, 1.0, 0.0));
+  const body_id boat = w.add_body(boat_at(-8.0, -6.0));
+  for (int i = 0; i < 400; ++i) {
+    w.add_force(boat, {1500.0, 300.0, 0.0});
+    w.step();
+  }
+  const std::uint64_t h = w.state_hash();
+  std::printf("[wake] golden: %zu sources, state hash 0x%016llx\n",
+              w.field_wake_info(water).sources.size(), static_cast<unsigned long long>(h));
+  EXPECT_EQ(w.field_wake_info(water).sources.size(), 3u);
+  EXPECT_EQ(h, 0x8052b235300e8e23ull) << std::hex << "wake world state hash 0x" << h;
 }

@@ -334,31 +334,38 @@ A fluid with a free surface may keep a wake (OCEAN-AND-WEATHER-ROADMAP.md C5, D6
 floating bodies make, stepped in the physics step, pushing the other bodies. Off by default.
 
 ```cpp
-sea.wake.cells = 64; // a 64 x 64 window (a power of two, 8 .. 256; 0, the default: no wake)
+sea.wake.cells = 64; // a 64 x 64 window (a power of two, 8 .. 128; 0, the default: no wake)
 sea.wake.cell = 1.0; // of 1 m cells, deep water (wake.depth <= 0)
 w.add_field(sea);
 ...
-w.field_wake_info(id);              // where the window is, which bodies make waves
+w.field_wake_info(id);              // where the window is, which bodies make waves, who is outside
 w.field_wake_height(id, x, y);      // all their waves' height there
 ```
 
-- **The window** sits on the world's grid of whole cells around the bodies in the water (its boats,
-  the bodies with a hull, where it has any) and follows them by whole cells. Each body that makes
-  waves (at most `wake.sources`, 8) has a wave state of its own there: its immersed columns over
-  the window (`immersion.h`) are its source, and the states step by `cvc::ocean::ewave`'s exact
-  linear step every `wake.period` (1/30 s) in whole steps. A sponge takes the waves that leave; the
-  window has no shores.
+- **The window** sits on the world's grid of whole cells where it holds the most bodies in the
+  water (a boat, a body with a hull, counting as four) and follows them by whole cells; bodies
+  outside it make and feel no waves (`wake_info::outside`). Each awake body that makes waves (at
+  most `wake.sources`, 8) has a wave state of its own there: its immersed columns over the window
+  (`immersion.h`), cut against the surface and the others' waves, are its source, and the states
+  step by `cvc::ocean::ewave`'s exact linear step every `wake.period` (1/30 s) in whole steps. A
+  sponge takes the waves that leave; the window has no shores.
 - **Each body reads the others' waves, never its own**: their height under its cells and hull,
   their orbital velocity for its drag and damping, and their acceleration for an inertial fluid's
   push. Its own, read back, would undo its heave's spring as it moves and count its wave-making
-  twice. A body alone floats exactly as it does without a wake; a sleeping body the others' waves
-  reach is woken.
-- **World state:** the window and the states are saved, restored and hashed; `set_field` with the
-  same wake keeps the waves. `water_at` reads the water without them.
+  twice. A body alone floats exactly as it does without a wake; a sleeping body makes none, and one
+  the others' waves reach is woken. While every body sleeps and no wave is left, nothing is read.
+- **Limits and memory:** cells 8 .. 128, cell 0.05 .. 100 m, period (0, 10] s, sources 1 .. 16,
+  samples 1 .. 8. A state is 80 cells² bytes (320 KiB at 64²), at most sources + 4 of them, and a
+  save carries 32 cells² bytes of each.
+- **World state:** the window and the states are saved with every wake parameter (another wake's
+  state is refused), restored whole or not at all, and hashed; `set_field` with the same wake keeps
+  the waves. `water_at` reads the water without them.
 - **Measured** (`physics_field_test`, `PhysicsFieldWake.*`): a crate afloat 5 m from one dropped
-  in heaves 0.038 m, drifts 0.085 m and tilts 0.035 rad with a wake, and does not move without one;
-  the push costs 0.139 ms a step with two sources against 0.007 ms without; a world without a wake
-  hashes as before.
+  in heaves 0.038 m, drifts 0.082 m and tilts 0.035 rad with a wake, and does not move without one;
+  on still water the push costs 0.14 ms a step with two sources against 0.005 ms without, and on a
+  three-cascade sea with 3 field workers it is within the runs' spread (8.30 against 8.04 ms); a
+  world without a wake hashes as before, and one with a wake is pinned
+  (`CrossPlatformGoldenHash`).
 
 ### Threads
 
