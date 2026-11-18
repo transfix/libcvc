@@ -297,6 +297,12 @@ public:
     const mjtNum *p = _d->xipos + 3 * b;
     return {p[0], p[1], p[2]};
   }
+  void set_air(mujoco_air air) override {
+    _air = std::move(air);
+    _air_f = _air_t = vec3{};
+  }
+  vec3 air_force() const override { return _air_f; }
+  vec3 air_torque() const override { return _air_t; }
 
   void step() override {
     mjModel *m = _m.get();
@@ -304,12 +310,17 @@ public:
     const std::size_t nv = static_cast<std::size_t>(m->nv);
     _v0.assign(d->qvel, d->qvel + nv);
     const int bad = bad_count();
+    const bool air = static_cast<bool>(_air);
+    if (air)
+      push_air();
     mj_step(m, d);
     if (bad_count() != bad)
       throw std::runtime_error("MuJoCo found the state unusable (NaN or a runaway value in qpos, "
                                "qvel or qacc) and reset it, at t = " +
                                std::to_string(d->time));
-    book();
+    book();  // the air's wrench with apply_wrench's, as external work
+    if (air) // the pushes as they were given
+      std::copy(_user.begin(), _user.end(), d->xfrc_applied);
     read_back();
     _fresh = false;
   }
@@ -473,6 +484,58 @@ private:
            _d->warning[mjWARN_BADQACC].number;
   }
 
+  // The air's wrench for the step about to be taken, added to xfrc_applied (the pushes kept in
+  // _user, put back after the step). The poses and velocities it reads are the step's start's,
+  // computed here from qpos and qvel (mj_kinematics, mj_comPos, mj_comVel): mj_step computes the
+  // same again from the same state, so this changes nothing else of the step.
+  void push_air() {
+    const mjModel *m = _m.get();
+    mjData *d = _d.get();
+    mj_kinematics(m, d);
+    mj_comPos(m, d);
+    mj_comVel(m, d);
+    _air_geoms.clear();
+    for (int g = 0; g < m->ngeom; ++g) {
+      const int b = m->geom_bodyid[g];
+      if (b == 0 || (m->geom_contype[g] == 0 && m->geom_conaffinity[g] == 0))
+        continue; // the world's geoms (the terrain), and the visual-only ones
+      const mjtNum *box = m->geom_aabb + 6 * g; // centre and half sizes, in the geom's frame
+      const mjtNum *R = d->geom_xmat + 9 * g;   // row-major: world = R local
+      const mjtNum *p = d->geom_xpos + 3 * g;
+      mujoco_air_geom a;
+      a.body = b;
+      a.centre = {p[0] + R[0] * box[0] + R[1] * box[1] + R[2] * box[2],
+                  p[1] + R[3] * box[0] + R[4] * box[1] + R[5] * box[2],
+                  p[2] + R[6] * box[0] + R[7] * box[1] + R[8] * box[2]};
+      for (int k = 0; k < 3; ++k)
+        a.axis[k] = {R[k], R[3 + k], R[6 + k]};
+      a.half = {box[3], box[4], box[5]};
+      mjtNum v[6]; // at the geom's origin: angular, then linear, world axes
+      mj_objectVelocity(m, d, mjOBJ_GEOM, g, v, 0);
+      const vec3 w{v[0], v[1], v[2]}, r = a.centre - vec3{p[0], p[1], p[2]};
+      a.velocity = {v[3] + w.y * r.z - w.z * r.y, v[4] + w.z * r.x - w.x * r.z,
+                    v[5] + w.x * r.y - w.y * r.x};
+      _air_geoms.push_back(a);
+    }
+    const std::size_t nb = static_cast<std::size_t>(m->nbody);
+    _air_coms.resize(nb);
+    for (std::size_t b = 0; b < nb; ++b)
+      _air_coms[b] = {d->xipos[3 * b], d->xipos[3 * b + 1], d->xipos[3 * b + 2]};
+    _air_wrench.assign(6 * nb, 0.0);
+    _air(d->time, _air_geoms, _air_coms, _air_wrench);
+    _user.assign(d->xfrc_applied, d->xfrc_applied + 6 * nb);
+    _air_f = _air_t = vec3{};
+    for (std::size_t b = 1; b < nb; ++b) {
+      const double *w = _air_wrench.data() + 6 * b;
+      for (int k = 0; k < 6; ++k)
+        d->xfrc_applied[6 * b + k] += w[k];
+      const vec3 f{w[0], w[1], w[2]}, c = _air_coms[b];
+      _air_f = _air_f + f;
+      _air_t = _air_t + vec3{w[3] + c.y * f.z - c.z * f.y, w[4] + c.z * f.x - c.x * f.z,
+                             w[5] + c.x * f.y - c.y * f.x};
+    }
+  }
+
   // The current state's derived quantities (energies, poses), leaving the trajectory alone.
   void refresh() {
     if (_fresh)
@@ -587,6 +650,14 @@ private:
   std::vector<double> _forces;
   std::vector<mujoco_contact> _contacts;
   std::vector<mjtNum> _v0, _vbar, _tmp, _jv, _warm;
+  // The air (set_air): its function, what it reads and gives a step, the pushes kept aside, and
+  // its last step's sums.
+  mujoco_air _air;
+  std::vector<mujoco_air_geom> _air_geoms;
+  std::vector<vec3> _air_coms;
+  std::vector<double> _air_wrench;
+  std::vector<mjtNum> _user;
+  vec3 _air_f, _air_t;
 };
 
 } // namespace

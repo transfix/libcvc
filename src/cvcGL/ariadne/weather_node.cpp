@@ -60,12 +60,15 @@
 // (O20) is physics, so the scene's world sets it, inside the physics step on the world clock's
 // ticks, with or without a renderer (cvc::ariadne::WeatherFriction, scene_weather.h:
 // weather.friction, weather.wetness); this node reads its props the same way
-// (scene_weather_params), so the friction follows the storms it draws. The storm wind (F4) waits
-// for O14's scene wind.
+// (scene_weather_params), so the friction follows the storms it draws. The storm wind (F4): each
+// cell's gust front (cvc::world::weather::gust_front) is in the scene's wind, which the scene's
+// world owns too (StormWindFlow in its physics, wind.front for the water and the trees;
+// scene_wind.h); this node slants its rain by the wind at the camera, the front there in it.
 //
-// The steering wind the cells ride is the scene's one wind (R5), read through steeringWind(): until
-// one scene wind exists (O14's wind.speed / wind.dir) it is the cloud deck's, sky.wind_az at the
-// deck's drift speed, so the storms move with the clouds drawn. A change in it is logged as a
+// The steering wind the cells ride is the scene's one wind (R5), read through steeringWind(): with
+// a scene wind (O14's wind.speed / wind.dir) its heading at its speed at the deck's base, else the
+// cloud deck's own, sky.wind_az at the deck's drift speed, so the storms move with the clouds
+// drawn. A change in it is logged as a
 // steer event at the time it settles (it has held for HOLD_FRAMES frames), so the cells' tracks
 // stay a function of the events; so is a change of weather.time_scale (a rate event: weather
 // seconds per world second). weather.request starts a storm ("upwind": born upwind, timed to
@@ -78,6 +81,7 @@
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_weather.h> // scene_weather_params: the storms' props, as the world reads them
+#include <cvc/ariadne/scene_wind.h>    // the scene's wind: the steering, and the rain's slant
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h>
@@ -90,6 +94,7 @@
 #include <cvc/world/weather.h>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include <vtkCamera.h>
@@ -393,6 +398,7 @@ cvc::geometry rain_mesh(cvc::app &app, int count) {
 
 struct WeatherRT {
   cvc::app *app = nullptr;
+  std::string prefix; // the scene's state prefix (its wind's keys)
   cvc::world::weather model;
   // Its keys (weather.* or the node's keys: root).
   std::string eventsKey, scaleKey, requestKey;
@@ -450,12 +456,21 @@ void put(cvc::app &app, const std::string &path, const std::string &v) {
 void put(cvc::app &app, const std::string &path, double v) { ari::write_node(app, path).value(v); }
 
 // The scene's one wind as the storms' steering: metres per second and the heading it blows toward
-// (degrees, 90 is +x, as cloud_layer's wind_az). Until O14 adds one scene wind (wind.speed,
-// wind.dir), the cloud deck's: sky.wind_az at the deck's drift speed (CLOUD_SKY_DRIFT m/s times
-// sky.drift), so a storm keeps to the clouds drawn around it. O14 points this at wind.*.
+// (degrees, 90 is +x, as cloud_layer's wind_az). With a scene wind (O14's wind.speed, wind.dir),
+// ari::scene_weather_steering: its heading at its speed at the deck's base as authored times
+// sky.drift, how the cloud deck drifts without its gusts' pulse, so a storm keeps to the clouds
+// drawn around it, its own gust front does not carry it, and a steer is logged only when the wind
+// is changed (the weather starts from it, here and in the scene's world). Without one, the cloud
+// deck's own: sky.wind_az at CLOUD_SKY_DRIFT m/s times sky.drift.
+double deckBase(const WeatherRT &r) {
+  return r.fairRead ? r.fairBase : ari::read_or<double>(*r.app, r.skyBase, ari::kWeatherDeckBase);
+}
 void steeringWind(const WeatherRT &r, double &speed, double &az) {
+  const double drift = ari::read_or<double>(*r.app, r.skyDrift, 1.0);
+  if (ari::scene_weather_steering(*r.app, r.prefix, deckBase(r), drift, speed, az))
+    return;
   az = ari::read_or<double>(*r.app, r.skyWindAz, r.model.params().steer_az);
-  speed = CLOUD_SKY_DRIFT * ari::read_or<double>(*r.app, r.skyDrift, 1.0);
+  speed = CLOUD_SKY_DRIFT * drift;
 }
 
 // The ground's height under (x, y), at its nearest edge beyond it (a strike can land past the
@@ -707,9 +722,21 @@ void rain(WeatherRT &r, const cvc::world::weather_now &w, vtkRenderer *ren) {
   const double quality = std::clamp(ari::read_or<double>(app, r.qualityKey, 1.0), 0.0, 1.0);
   double fwd[3] = {fp[0] - cp[0], fp[1] - cp[1], fp[2] - cp[2]};
   const double fl = std::max(1e-9, std::sqrt(fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2]));
-  double speed, az;
-  steeringWind(r, speed, az);
+  // The slant: the scene's wind where the camera is, its gust front there in it (F4); without a
+  // scene wind, the steering wind (the clouds' drift).
   constexpr double kPi = 3.14159265358979323846;
+  double windX, windY;
+  if (const std::optional<ari::SceneWind> sw = ari::scene_wind_set(app, r.prefix)) {
+    double fx, fy;
+    r.model.gust_front(w, cp[0], cp[1], fx, fy);
+    windX = sw->speed * std::cos(sw->dir * kPi / 180.0) + fx;
+    windY = sw->speed * std::sin(sw->dir * kPi / 180.0) + fy;
+  } else {
+    double speed, az;
+    steeringWind(r, speed, az);
+    windX = speed * std::sin(az * kPi / 180.0);
+    windY = -speed * std::cos(az * kPi / 180.0);
+  }
   int *sz = ren->GetSize();
   const double h = sz && sz[1] > 0 ? double(sz[1]) : 720.0;
   const double ground = groundAt(r, cp[0], cp[1]);
@@ -717,8 +744,7 @@ void rain(WeatherRT &r, const cvc::world::weather_now &w, vtkRenderer *ren) {
   in.f3["rainFwd"] = {float(fwd[0] / fl), float(fwd[1] / fl), float(fwd[2] / fl)};
   in.f["rainTime"] = float(std::fmod(t, 3600.0));
   in.f["rainAmount"] = float(amount);
-  in.f4["rainWind"] = {float(speed * std::sin(az * kPi / 180.0)),
-                       float(-speed * std::cos(az * kPi / 180.0)), 0.0f, 0.0f};
+  in.f4["rainWind"] = {float(windX), float(windY), 0.0f, 0.0f};
   in.f["rainCount"] = float(r.rainCount * quality * std::min(amount * 1.2, 1.0));
   in.f4["rainBox"] = {float(RAIN_BOX), float(RAIN_HIGH), 0.0f, 0.0f};
   in.f["rainStreak"] = 0.042f;
@@ -810,7 +836,9 @@ void lightning(WeatherRT &r, vtkRenderer *ren) {
 // storm's edge the deck feels it, metres); O20: flash_rate / flash_onset / ground_share (the
 // lightning's schedule, cvc::world::weather_params), lightning (its strength; live:
 // weather.lightning) and friction (0: the rain leaves the physics world's friction alone; live:
-// weather.friction).
+// weather.friction); F4: gust_front (a full cell's outflow at its front's edge, m/s; 0: none),
+// front_ahead / front_behind (how far the front's edge is ahead of and behind the cell, in its
+// radii) and front_width (how far past the edge it dies away, in that distance).
 std::shared_ptr<GraphicsNode> realize_weather(SceneGraph &sg, const ari::SceneNode &n,
                                               GraphicsNode *parent, RealizedScene &out,
                                               std::vector<std::string> *warnings) {
@@ -820,8 +848,19 @@ std::shared_ptr<GraphicsNode> realize_weather(SceneGraph &sg, const ari::SceneNo
   // The storms' props, read as the scene's world reads them (its friction follows these storms).
   const std::string ground = ari::scene_weather_ground(n);
   const auto groundIt = out.height_fields.find(ground);
-  const cvc::world::weather_params p = ari::scene_weather_params(
+  cvc::world::weather_params p = ari::scene_weather_params(
       n, groundIt != out.height_fields.end() ? groundIt->second.get() : nullptr);
+  {
+    // With a scene wind the storms start steered by it, as the scene's world starts them
+    // (WeatherFriction), at the sky's base and drift.
+    const std::string pref0 = sg.getStatePrefix();
+    const std::string sky0 = n.props.str("sky").empty() ? std::string("sky") : n.props.str("sky");
+    ari::scene_weather_steering(
+        app, pref0,
+        ari::read_or<double>(app, ari::resolve_bind(pref0, sky0 + ".base"), ari::kWeatherDeckBase),
+        ari::read_or<double>(app, ari::resolve_bind(pref0, sky0 + ".drift"), 1.0), p.steer_speed,
+        p.steer_az);
+  }
   rt->model.set_params(p);
   rt->cx = p.cx;
   rt->cy = p.cy;
@@ -832,6 +871,7 @@ std::shared_ptr<GraphicsNode> realize_weather(SceneGraph &sg, const ari::SceneNo
   rt->reach = std::max(0.0, n.props.num("reach", REACH));
 
   const std::string pref = sg.getStatePrefix();
+  rt->prefix = pref;
   rt->eventsKey = key(pref, n, "weather.events");
   rt->scaleKey = key(pref, n, "weather.time_scale");
   rt->requestKey = key(pref, n, "weather.request");

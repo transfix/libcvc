@@ -330,6 +330,10 @@ struct SceneWorld::impl {
   std::optional<SceneWind> wind_applied;
   ph::field_id wind_field;
   std::shared_ptr<const ph::flow_velocity> wind_flow;
+  std::vector<std::uint64_t> storm_revs; // the weathers' revisions the field has (StormWindFlow)
+  // The clock's time less the world's field time, from where the world anchored on the clock
+  // (follow), and the one the storms' air was made with: the storms are the clock's.
+  double clock_offset = 0.0, storm_offset = 0.0;
   // A terrain node's field as its body has it (placed), and a node's own bodies' XY extent (min_x,
   // min_y, max_x, max_y): what grid() makes a terrain's or a flat ground's grid from.
   std::map<std::string, std::shared_ptr<const cvc::height_field>> fields;
@@ -1059,7 +1063,24 @@ std::shared_ptr<const cvc::nav::world_grid> SceneWorld::grid(const std::string &
 
 void SceneWorld::sync(std::vector<std::string> *warnings) {
   impl &d = *_impl;
-  sync_wind(); // the scene wind's field, before anything steps in it
+  // The weather nodes: each its ground's height field once there is one (the storms' area), then
+  // its keys. The friction itself is set in follow(), inside the physics step. First, so the wind
+  // below has their storms.
+  for (const auto &wf : d.weathers) {
+    if (!wf->has_ground()) {
+      std::shared_ptr<const cvc::height_field> field;
+      if (const auto g = world_geometry(wf->ground()))
+        field = g->terrain();
+      if (!field)
+        if (const auto f = d.fields.find(wf->ground()); f != d.fields.end())
+          field = f->second;
+      if (field)
+        wf->set_ground(std::move(field));
+    }
+    wf->read_keys();
+  }
+  sync_wind();     // the scene wind's field, before anything steps in it
+  publish_front(); // and the storms' gust front, before the water reads its wind
   if (!d.world_key.empty() && d.app) {
     // The source key: another world's name switches to it.
     cvc::state *k =
@@ -1139,21 +1160,25 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
     b->read_keys();
     b->publish();
   }
-  // The weather nodes: each its ground's height field once there is one (the storms' area), then
-  // its keys. The friction itself is set in follow(), inside the physics step.
+  // A weather's ground made by this sync (a generated world's first): the storms' area now, and the
+  // wind's storms with it. (wind.front follows at the next sync: the water has read this one's.)
+  bool grounded = false;
   for (const auto &wf : d.weathers) {
-    if (!wf->has_ground()) {
-      std::shared_ptr<const cvc::height_field> field;
-      if (const auto g = world_geometry(wf->ground()))
-        field = g->terrain();
-      if (!field)
-        if (const auto f = d.fields.find(wf->ground()); f != d.fields.end())
-          field = f->second;
-      if (field)
-        wf->set_ground(std::move(field));
+    if (wf->has_ground())
+      continue;
+    std::shared_ptr<const cvc::height_field> field;
+    if (const auto g = world_geometry(wf->ground()))
+      field = g->terrain();
+    if (!field)
+      if (const auto f = d.fields.find(wf->ground()); f != d.fields.end())
+        field = f->second;
+    if (field) {
+      wf->set_ground(std::move(field));
+      grounded = true;
     }
-    wf->read_keys();
   }
+  if (grounded)
+    sync_wind();
 }
 
 void SceneWorld::bind_worlds(const Scene &scene, const std::string &world_key,
@@ -1276,13 +1301,27 @@ void SceneWorld::bind_wind(const Scene &scene, const std::string &bind_prefix) {
 }
 
 ph::field_id SceneWorld::wind_field() const { return _impl->wind_field; }
+std::shared_ptr<const ph::flow_velocity> SceneWorld::wind() const { return _impl->wind_flow; }
 
 void SceneWorld::bind_weather(const Scene &scene, const std::string &bind_prefix) {
   impl &d = *_impl;
   d.weathers.clear();
+  // The cloud deck's base the storms steer at (scene_weather_steering): the first cloud_sky's.
+  double deck_base = kWeatherDeckBase;
+  bool sky = false;
+  const std::function<void(const SceneNode &)> find_sky = [&](const SceneNode &n) {
+    if (!sky && n.type == "cloud_sky") {
+      sky = true;
+      deck_base = n.props.num("base", kCloudSkyBase);
+    }
+    for (const SceneNode &c : n.children)
+      find_sky(c);
+  };
+  for (const SceneNode &n : scene.nodes)
+    find_sky(n);
   const std::function<void(const SceneNode &)> visit = [&](const SceneNode &n) {
     if (n.type == "weather")
-      d.weathers.push_back(std::make_unique<WeatherFriction>(d.app, n, bind_prefix));
+      d.weathers.push_back(std::make_unique<WeatherFriction>(d.app, n, bind_prefix, deck_base));
     for (const SceneNode &c : n.children)
       visit(c);
   };
@@ -1299,19 +1338,36 @@ void SceneWorld::sync_wind() {
   if (!d.wind_bound || !d.app || !d.world)
     return;
   const std::optional<SceneWind> w = scene_wind_set(*d.app, d.wind_prefix);
-  if (w != d.wind_applied || (w && !d.wind_field.valid())) {
+  // The weathers whose storms blow gust fronts (F4), by their models' revisions.
+  std::vector<std::uint64_t> revs;
+  for (const auto &wf : d.weathers)
+    if (wf->model().params().front_speed > 0.0)
+      revs.push_back(wf->revision());
+  if (w != d.wind_applied || (w && !d.wind_field.valid()) || (w && revs != d.storm_revs) ||
+      (w && !revs.empty() && d.storm_offset != d.clock_offset)) {
+    std::vector<cvc::world::weather> storms;
+    for (const auto &wf : d.weathers)
+      if (wf->model().params().front_speed > 0.0)
+        storms.push_back(wf->model());
     d.wind_applied = w;
+    d.storm_revs = revs;
+    d.storm_offset = d.clock_offset;
     if (!w) {
       if (d.wind_field.valid())
         d.world->remove_field(d.wind_field);
       d.wind_field = ph::field_id{};
     } else {
       // Air everywhere (a flow with a wind and no volume: 1.225 kg/m^3, field.h); the wind's
-      // profile is 0 under its base, so a body under water feels none.
+      // profile is 0 under its base, so a body under water feels none. With storms, the wind with
+      // their gust fronts in it (StormWindFlow), read by each body at the step's own time.
       ph::field f;
       f.kind = ph::field_kind::flow;
       f.drag_coefficient = 1.0;
-      f.wind = scene_wind_flow(*w, d.wind_base);
+      if (storms.empty())
+        f.wind = scene_wind_flow(*w, d.wind_base);
+      else
+        f.wind = std::make_shared<const StormWindFlow>(w->state(), d.wind_base, std::move(storms),
+                                                       d.clock_offset);
       d.wind_flow = f.wind;
       if (d.wind_field.valid())
         d.world->set_field(d.wind_field, f);
@@ -1323,6 +1379,27 @@ void SceneWorld::sync_wind() {
   }
   if (d.vehicles) // the plants that do not feel the field (WorldVehicles::set_wind)
     d.vehicles->set_wind(d.wind_flow);
+}
+
+void SceneWorld::publish_front() {
+  impl &d = *_impl;
+  if (!d.wind_bound || !d.app || d.weathers.empty())
+    return; // a scene without a weather node never writes wind.front
+  // The front where the first weather's storms are centred, at the clock's time (the time the
+  // water's two seas and the drawn nodes read the wind at this frame): one wind for the nodes that
+  // read one for all they draw. Without a scene wind there are no fronts.
+  double fx = 0.0, fy = 0.0;
+  if (const auto *storm = dynamic_cast<const StormWindFlow *>(d.wind_flow.get())) {
+    const cvc::world::weather_params &p = d.weathers.front()->model().params();
+    const double t = d.app->world_clock().t();
+    for (const cvc::world::weather &m : storm->weathers()) {
+      double x, y;
+      m.gust_front(m.at(t), p.cx, p.cy, x, y);
+      fx += x;
+      fy += y;
+    }
+  }
+  write_scene_wind_front(*d.app, d.wind_prefix, fx, fy);
 }
 
 bool SceneWorld::regenerate_world(double seed) {
@@ -1449,6 +1526,10 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
   sync(&d.warnings);
   if (!d.follower) {
     d.follower = cvc::clock_follower::for_step(clock, d.world->config().fixed_dt);
+    // The world's steps follow the clock from here: the storms in its air are read at the clock's
+    // time, as the drawn ones are (StormWindFlow's offset), however late it anchored.
+    d.clock_offset = clock.t() - d.world->field_time();
+    sync_wind();
     if (after_step)
       after_step();
     return 0;

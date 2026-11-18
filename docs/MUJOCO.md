@@ -96,6 +96,21 @@ Menagerie's Go2 has torque motors (±23.7 N m at the hips and thighs, ±45.43 N 
 **Pushes.** `apply_wrench(body, force, torque)` acts at the body's centre of mass, in world axes,
 and is held until it is replaced or cleared. `apply_force_at` applies a force at a world point.
 
+**Wind.** `set_wind(air, time_offset, drag_coefficient = 1, density = 1.225)` stands the robot in
+moving air (`cvc::physics::flow_velocity`): the scene's wind (`wind_flow`, its gusts and height
+profile) or the same with its storms' gust fronts (`cvc::ariadne::StormWindFlow`, which
+`SceneWorld::wind()` hands out). At each step's start every collision geom of a moving body takes
+the drag ½ ρ C_d A |u| u, u the air at the centre of the geom's bounding box less that centre's
+velocity, A the box's area across u. The air there is the flow's reference velocity at the body's
+centre of mass times its height profile at the box's centre, as the Jolt world's field step reads
+it. The forces and their moments about each body's centre of mass go into MuJoCo's `xfrc_applied`
+for that step, on top of `apply_wrench`'s pushes (which they neither replace nor show in), and the
+books count their work as external. The air is read at `time() + time_offset`: a scene passes its
+clock's time when the robot started, so the robot feels the gusts the world's bodies feel. The
+poses and velocities it reads are the step's start's (`mj_kinematics`, `mj_comPos`, `mj_comVel`,
+which `mj_step` computes again from the same state), so a robot with no air, or with no drag, steps
+to the same bits as one without. `wind_force()` and `wind_torque()` give the last step's.
+
 **Readouts.**
 
 - The current state: `qpos`, `qvel`, the base's pose, velocity and `base_up_z`, and
@@ -110,7 +125,7 @@ of h adds `h f . (v0 + v1) / 2`: the force that acted, against the mean of the s
 end velocities. The kinds are:
 
 - actuators;
-- pushes;
+- pushes and the wind;
 - contacts;
 - joint friction (MuJoCo's frictionloss);
 - joint limits;
@@ -149,6 +164,17 @@ about 11 s.
 | Sideways push on the base for 0.1 s, after 1 s of settling | 60 N: moves up to 1.7 cm and recovers. 150 N: up to 8 cm and recovers. 200 N: falls. 300 N: rolls over. The test checks 60 N and 300 N |
 | Energy books (3 s, 60 N push) | residual 3.0e-5 J at dt = 2 ms and 1.5e-5 J at 1 ms, against about 5.9 J of gross work. Tolerance: 2e-5 of the gross work, and the residual must halve (ratio 0.3 to 0.7) when the step halves |
 | Determinism | two runs, a run that reads the robot every step, a restored snapshot and a reset robot all end on the same bits |
+
+The wind's tests (`MujocoRobotWind.*`, on a model of their own: a 0.5 m, 1 kg crate free on the floor
+and a 0.6 × 0.8 m vane on a hinge; Windows, MSVC Release, MuJoCo 4.0.0 from cvcpkg; the Go2's tests
+above were not run on Windows, which had no Menagerie):
+
+| Test | Result |
+|---|---|
+| The drag on a box | at rest in 20 m/s, square to the wind: 83.94 N, the crate's 21.35 N (11.8 m/s at its centre, 0.25 m up) and the vane's 62.59 N, ½ ρ C_d A u² to 1e-9 |
+| Pushed downwind (12 m/s, 2 s) | the crate (7.7 N of wind on 2.9 N of friction) slides 3.79 m, 0 across; the vane swings to −1.18 rad; in still air neither moves. The books: 16.4 J of external work, residual 9.7e-4 J |
+| No air, no drag | never set, set to null, and a wind with C_d 0: the same bits after 500 steps, a push of the robot's own kept |
+| Gusts and the clock | gusty 10 m/s (gustiness 0.5): the push on the crate runs 5.3 to 15.3 N; air that starts at t = 5 pushes a robot given the scene's clock at 5, not one given 0 |
 
 ## Python (`pycvc.mujoco_robot`)
 

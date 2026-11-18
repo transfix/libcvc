@@ -9,14 +9,19 @@
 */
 
 // cvc::physics::mujoco_robot (physics/mujoco_robot.h): the Unitree Go2 from cvcpkg's
-// mujoco-menagerie, on cvc::height_field terrain. Without CVC_WITH_MUJOCO only the first test runs
-// (the constructor refuses); the rest skip.
+// mujoco-menagerie, on cvc::height_field terrain, and the scene's wind on a robot (MujocoRobotWind,
+// on a model of their own). Without CVC_WITH_MUJOCO only the first test runs (the constructor
+// refuses); the rest skip.
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cvc/algo/wind_field.h>
 #include <cvc/core/exception.h>
 #include <cvc/geometry/height_field.h>
+#include <cvc/physics/flow_velocity.h>
 #include <cvc/physics/mujoco_robot.h>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -431,4 +436,166 @@ TEST(MujocoRobot, RefusesWhatItCannotBuild) {
   off.energy = false;
   mujoco_robot quiet(off);
   EXPECT_THROW(quiet.energy(), std::logic_error);
+}
+
+// --- the wind (set_wind): the scene's air on a robot, as xfrc_applied
+// ----------------------------- A model of our own, so these run without the Menagerie: a 0.5 m
+// crate (1 kg) free on the floor, and a vane (0.04 x 0.6 x 0.8 m, its face across +x) hanging from
+// a hinge along y at 1.5 m.
+
+namespace {
+
+std::string wind_model() {
+  static const std::string path = [] {
+    const std::string p = ::testing::TempDir() + "cvc_mujoco_wind_model.xml";
+    std::ofstream f(p, std::ios::binary);
+    f << R"(<mujoco model="wind_test">
+  <option timestep="0.002"/>
+  <worldbody>
+    <geom name="floor" type="plane" size="20 20 0.1" friction="0.3 0.005 0.0001"/>
+    <body name="crate" pos="0 0 0.25">
+      <freejoint name="crate_free"/>
+      <geom name="crate_box" type="box" size="0.25 0.25 0.25" mass="1" friction="0.3 0.005 0.0001"/>
+    </body>
+    <body name="vane" pos="5 0 1.5">
+      <joint name="swing" type="hinge" axis="0 1 0" damping="0.05"/>
+      <geom name="vane_box" type="box" size="0.02 0.3 0.4" pos="0 0 -0.4" mass="0.5"/>
+      <geom name="vane_look" type="sphere" size="0.05" contype="0" conaffinity="0" mass="0.01"/>
+    </body>
+  </worldbody>
+</mujoco>
+)";
+    return p;
+  }();
+  return path;
+}
+
+mujoco_robot_options wind_robot() {
+  mujoco_robot_options o;
+  o.model = wind_model();
+  o.keyframe = ""; // the model's own qpos0
+  return o;
+}
+
+// A wind of `speed` m/s toward +x, steady unless gusty, over the floor.
+std::shared_ptr<const flow_velocity> steady_wind(double speed, double gustiness = 0.0) {
+  return std::make_shared<const wind_flow>(cvc::algo::wind_state{speed, 0.0, gustiness}, 0.0);
+}
+
+// Air that blows `speed` m/s toward +x from time `from` on, and is still before it.
+class wind_from : public flow_velocity {
+public:
+  wind_from(double speed, double from) : _speed(speed), _from(from) {}
+  vec3 velocity(const vec3 &p, double t) const override {
+    (void)p;
+    return t >= _from ? vec3{_speed, 0.0, 0.0} : vec3{};
+  }
+  std::uint64_t digest() const override { return 0x77696e64ull; }
+
+private:
+  double _speed, _from;
+};
+
+} // namespace
+
+TEST(MujocoRobotWind, TheDragOnABoxIsTheDragFormula) {
+  NEED_MUJOCO();
+  mujoco_robot r(wind_robot());
+  const int crate = r.body("crate");
+  ASSERT_GE(crate, 0);
+  const double z = r.body_position(crate).z; // the crate's centre, its box's
+  r.set_wind(steady_wind(20.0));
+  EXPECT_EQ(r.wind_force().x, 0.0); // nothing before the first step
+  r.step();
+  // At rest and square to the wind: 1/2 rho C_d A u^2 with A its 0.5 m face and u the wind at its
+  // centre (the profile there). The vane, face on to the wind, takes its 0.6 x 0.8 m.
+  const double u = 20.0 * cvc::algo::wind_profile(z);
+  const double crate_f = 0.5 * 1.225 * 1.0 * 0.25 * u * u;
+  const double uv = 20.0 * cvc::algo::wind_profile(1.1); // the vane's centre, 0.4 m under 1.5
+  const double vane_f = 0.5 * 1.225 * 1.0 * (0.6 * 0.8) * uv * uv;
+  std::printf("drag: crate %.4f N (u %.3f m/s at %.3f m), vane %.4f N; robot %.4f N\n", crate_f, u,
+              z, vane_f, r.wind_force().x);
+  EXPECT_NEAR(r.wind_force().x, crate_f + vane_f, 1e-9 * (crate_f + vane_f));
+  EXPECT_NEAR(r.wind_force().y, 0.0, 1e-12);
+  EXPECT_NEAR(r.wind_force().z, 0.0, 1e-12);
+  // A visual-only geom takes none, and drag needs a C_d: 0 makes none.
+  r.set_wind(steady_wind(20.0), 0.0, 0.0);
+  r.step();
+  EXPECT_EQ(r.wind_force().x, 0.0);
+  EXPECT_THROW(r.set_wind(steady_wind(20.0), 0.0, -1.0), cvc::physics_error);
+  EXPECT_THROW(r.set_wind(steady_wind(20.0), 0.0, 1.0, 0.0), cvc::physics_error);
+}
+
+TEST(MujocoRobotWind, TheWindPushesTheRobotDownwind) {
+  NEED_MUJOCO();
+  mujoco_robot calm(wind_robot()), blown(wind_robot());
+  blown.set_wind(steady_wind(12.0));
+  const int crate = calm.body("crate");
+  const int swing = 7; // the hinge's qpos, after the crate's free joint
+  const vec3 start = calm.body_position(crate);
+  calm.step(1000); // 2 s
+  blown.step(1000);
+  const vec3 c = calm.body_position(crate) - start, b = blown.body_position(crate) - start;
+  const double swing_calm = calm.qpos()[swing], swing_blown = blown.qpos()[swing];
+  std::printf("in 2 s: still air %.4f m, 12 m/s %.4f m downwind (across %.2e m); the vane %.4f vs "
+              "%.4f rad\n",
+              c.x, b.x, b.y, swing_calm, swing_blown);
+  // The crate (7.7 N of wind on 2.9 N of friction, under the 9.8 N that would tip it) slides
+  // downwind; in still air it stays.
+  EXPECT_LT(std::fabs(c.x), 1e-3);
+  EXPECT_GT(b.x, 1.0);
+  EXPECT_LT(std::fabs(b.y), 1e-6);
+  // The vane swings downwind (about -y: its face moves toward +x), in still air it hangs.
+  EXPECT_LT(std::fabs(swing_calm), 1e-6);
+  EXPECT_LT(swing_blown, -0.05);
+  // Over the run the wind did work on the robot, booked as external work: the books still close.
+  const mujoco_books books = blown.books();
+  std::printf("books: external %.4f J, residual %.2e J\n", books.external, books.residual());
+  EXPECT_GT(books.external, 1.0);
+  EXPECT_LT(std::fabs(books.residual()), 0.02 * books.external);
+}
+
+TEST(MujocoRobotWind, StillAirAndNoDragStepAsWithoutWind) {
+  NEED_MUJOCO();
+  // Never set, set to null, and a wind with no drag (its forces all 0, the poses read every step):
+  // the same bits.
+  mujoco_robot a(wind_robot()), b(wind_robot()), c(wind_robot());
+  b.set_wind(steady_wind(20.0));
+  b.set_wind(nullptr);
+  c.set_wind(steady_wind(20.0), 0.0, 0.0);
+  const int crate = a.body("crate");
+  for (mujoco_robot *r : {&a, &b, &c}) {
+    r->apply_wrench(crate, {0.0, 3.0, 0.0}); // a push of its own, which the wind leaves alone
+    r->step(500);
+  }
+  std::vector<double> qa = a.qpos(), qb = b.qpos(), qc = c.qpos();
+  EXPECT_TRUE(same_bits(qa, qb));
+  EXPECT_TRUE(same_bits(qa, qc));
+  EXPECT_TRUE(same_bits(a.qvel(), c.qvel()));
+}
+
+TEST(MujocoRobotWind, GustsAndTheScenesClockReachTheRobot) {
+  NEED_MUJOCO();
+  // The gusts: the wind's push on the resting crate rises and falls with them.
+  {
+    mujoco_robot r(wind_robot());
+    r.set_wind(steady_wind(10.0, 0.5));
+    double lo = 1e300, hi = 0.0;
+    for (int k = 0; k < 2500; ++k) { // 5 s
+      r.step();
+      lo = std::min(lo, r.wind_force().x);
+      hi = std::max(hi, r.wind_force().x);
+    }
+    std::printf("gusty 10 m/s: the push ran %.3f to %.3f N\n", lo, hi);
+    EXPECT_GT(hi, 1.3 * lo);
+  }
+  // The time it reads is the robot's plus the offset: air that starts blowing at t = 5 pushes a
+  // robot told the scene's clock read 5 when it started, and not one told 0.
+  mujoco_robot late(wind_robot()), now(wind_robot());
+  late.set_wind(std::make_shared<const wind_from>(15.0, 5.0));
+  now.set_wind(std::make_shared<const wind_from>(15.0, 5.0), 5.0);
+  late.step(100);
+  now.step(100);
+  EXPECT_LT(std::fabs(late.wind_force().x), 1e-9); // its own settling through still air
+  EXPECT_GT(now.wind_force().x, 1.0);
 }

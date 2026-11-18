@@ -75,6 +75,7 @@
 #include <cvc/ocean/h0.h>
 #include <cvc/ocean/sea_lag.h>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -119,6 +120,10 @@ struct SceneWaterSpec {
   double sea_lag = 20.0;      // E4: s, the sea's wind follows the wind with this time constant
   double sea_fade = 4.0;      // E4: s, a new keyframe's sea crossfades in over this
   double current = 0.0;       // E6: m/s, the current's RMS speed (0: none)
+  // The wind the gusts' pattern drifts with: the scene's wind as authored, without a storm's gust
+  // front, which wind_speed and wind_dir carry (scene_wind.h, F4). NaN: wind_speed and wind_dir.
+  double gust_speed = std::numeric_limits<double>::quiet_NaN();
+  double gust_dir = std::numeric_limits<double>::quiet_NaN();
 };
 
 // The node's spec: its props, then its live keys (seeded from the props, as the drawn node does).

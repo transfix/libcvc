@@ -17,14 +17,23 @@
 // node, with or without a renderer, and sets it inside the physics step on the world clock's ticks.
 // Every host (arigl at any frame rate, an offscreen capture, ari, a headless test) so applies the
 // same friction at the same physics step.
+//
+// The storms' gust fronts (O20, F4; F6's gusts) are physics too: in a scene with a wind and a
+// weather node, the world's air is a StormWindFlow, the scene's wind with every cell's outflow in
+// it, a function of the point and the time that each body reads at the step's own time. So a front
+// sweeps over the bodies as its storm walks, the same at every frame rate and headless.
 
 #ifndef __CVC_ARIADNE_SCENE_WEATHER_H__
 #define __CVC_ARIADNE_SCENE_WEATHER_H__
 
 #include <cstdint>
+#include <cvc/algo/wind_field.h>
+#include <cvc/physics/flow_velocity.h>
 #include <cvc/world/weather.h>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <vector>
 
 namespace cvc {
 class app;
@@ -52,6 +61,21 @@ std::string scene_weather_ground(const SceneNode &n);
 double scene_weather_soak(const SceneNode &n);
 double scene_weather_dry(const SceneNode &n);
 
+// The cloud deck's base the storms' steering is read at when the sky is not drawn: a scene's
+// cloud_sky's `base` (cvcGL's cloud_sky defaults it to kCloudSkyBase), else the weather node's own
+// fallback, kWeatherDeckBase (it reads the sky's sky.base key, 300 m without one).
+constexpr double kCloudSkyBase = 74.0;
+constexpr double kWeatherDeckBase = 300.0;
+// The storms' steering in a scene with a wind (O14, F4): the scene's wind as authored
+// (scene_wind_set, no gust front: a storm is not carried by its own outflow), its heading (degrees,
+// as weather_params::steer_az: dir + 90) at its speed at the deck's base `deck_base` (m, the
+// profile the physics reads) times `drift`, which is how the cloud deck drifts without its gusts'
+// pulse, so the storms keep to the clouds drawn. The drawn weather node steers by it, and the
+// weather starts from it, drawn or headless (WeatherFriction), so both steer alike. False, with
+// speed and az untouched, when the scene has no wind.
+bool scene_weather_steering(cvc::app &app, const std::string &bind_prefix, double deck_base,
+                            double drift, double &speed, double &az);
+
 // The rain into the scene's friction (O20, F6). Every half second of world time (kWetPeriod,
 // counted in the world clock's ticks), the wetness where the world's vehicles are (their mean; the
 // weather's centre with none) runs every surface material's friction toward its wet value
@@ -65,8 +89,10 @@ class WeatherFriction {
 public:
   static constexpr double kWetPeriod = 0.5; // s of world time between two settings
 
-  // `app` may be null (no keys: the props' events and the friction on).
-  WeatherFriction(cvc::app *app, const SceneNode &n, const std::string &bind_prefix);
+  // `app` may be null (no keys: the props' events and the friction on). With a scene wind, the
+  // storms start steered by it at the deck's base `deck_base` (scene_weather_steering).
+  WeatherFriction(cvc::app *app, const SceneNode &n, const std::string &bind_prefix,
+                  double deck_base = kWeatherDeckBase);
   ~WeatherFriction();
   WeatherFriction(const WeatherFriction &) = delete;
   WeatherFriction &operator=(const WeatherFriction &) = delete;
@@ -91,10 +117,56 @@ public:
   // The wetness last applied (0 dry; -1 before any).
   double applied() const;
   const cvc::world::weather &model() const;
+  // Counts the changes to model() (its events, or its area once the ground came): what the scene's
+  // air (StormWindFlow) is made again on.
+  std::uint64_t revision() const;
 
 private:
   struct impl;
   std::unique_ptr<impl> _impl;
+};
+
+// The scene's air with the storms in it (O20, F4; F6's gusts push light bodies): the scene's wind
+// (a cvc::physics::wind_flow's: the mean wind times the gusts, times the height profile over
+// base_z) with each weather's gust fronts (cvc::world::weather::gust_front) added before the gusts
+// and the profile, so a front gusts and thins toward the ground as the wind does:
+//   v(p, t) = g(x, y, t) (U d + front(x, y, t)) wind_profile(z - base_z).
+// A pure function of the point and the time, the weathers being pure functions of the time, so it
+// is immutable: a new one when the wind or a weather's events change. Each body reads it at its
+// centre of mass at the step's own time (the world's field time), so the fronts sweep over the
+// bodies as the storms walk, at any frame rate. The weathers are read at that time plus
+// `clock_offset`, the world clock's time less the world's field time (the scene's world sets it
+// where the world anchored on the clock), so they are the clock's storms, the ones drawn; the
+// gusts are read as wind_flow reads them. Where no front reaches, it is the wind_flow's velocity
+// bit for bit. Its digest names the wind, the base, the offset and each weather's parameters and
+// events.
+class StormWindFlow : public cvc::physics::flow_velocity {
+public:
+  // Throws std::invalid_argument for a non-finite value or a negative speed or gustiness.
+  StormWindFlow(const cvc::algo::wind_state &w, double base_z,
+                std::vector<cvc::world::weather> weathers, double clock_offset = 0.0);
+  cvc::physics::vec3 velocity(const cvc::physics::vec3 &p, double t) const override;
+  std::uint64_t digest() const override;
+  cvc::physics::vec3 reference(const cvc::physics::vec3 &p, double t) const override;
+  double profile(double z) const override;
+  double base() const override { return _base; }
+
+  // The fronts alone at (x, y) at field time t, m/s along x and y (the sum over the weathers).
+  void front(double x, double y, double t, double &vx, double &vy) const;
+  double clock_offset() const { return _offset; }
+  const std::vector<cvc::world::weather> &weathers() const { return _weathers; }
+  const cvc::algo::wind_state &wind() const { return _w; }
+
+private:
+  struct moment; // the gusts and each weather's cells at one time
+  std::shared_ptr<const moment> at(double t) const;
+  cvc::algo::wind_state _w;
+  double _base, _offset, _cx, _cy;
+  std::vector<cvc::world::weather> _weathers;
+  std::uint64_t _digest;
+  // The last time read (a cache: a pure function of t, so it changes no value).
+  mutable std::mutex _mutex;
+  mutable std::shared_ptr<const moment> _last;
 };
 
 } // namespace ariadne

@@ -131,9 +131,11 @@ SceneWaterSpec scene_water_spec(cvc::app &app, const SceneNode &n, const std::st
   // The wind, through the one place every node reads it (scene_wind.h; O14's scene wind).
   const SceneWind w =
       scene_wind(app, n, bind_prefix, kWaterWindKeys, {s.wind_speed, s.wind_dir, s.gustiness});
-  s.wind_speed = w.speed;
-  s.wind_dir = w.dir;
+  s.wind_speed = w.mean_speed(); // with a storm's gust front: what the sea grows toward (F4)
+  s.wind_dir = w.mean_dir();
   s.gustiness = w.gustiness;
+  s.gust_speed = w.speed; // the gusts' pattern drifts with the wind as authored
+  s.gust_dir = w.dir;
   s.fetch = std::max(key("water.fetch", "fetch", s.fetch), 400.0);
   s.lee = key("water.lee", "lee", 1.0) != 0.0;
   s.sea_lag = std::max(key("water.sea_lag", "sea_lag", s.sea_lag), 0.0);
@@ -345,7 +347,9 @@ std::shared_ptr<const cvc::ocean::sea_forcing> scene_water_forcing(const SceneWa
   }
   f->fetch = k.fetch;
   f->fetch_from = k.fetch_from;
-  f->wind = SceneWind{s.wind_speed, s.wind_dir, s.gustiness}.state();
+  f->wind = SceneWind{std::isnan(s.gust_speed) ? s.wind_speed : s.gust_speed,
+                      std::isnan(s.gust_dir) ? s.wind_dir : s.gust_dir, s.gustiness}
+                .state();
   f->current.speed_mps = s.current;
   return f;
 }

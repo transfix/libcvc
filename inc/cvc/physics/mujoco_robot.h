@@ -19,6 +19,7 @@
 //   go2.apply_wrench(go2.body("base"), {0, 60, 0}); // a push, held until changed
 //   go2.step(50);
 //   go2.clear_wrenches();
+//   go2.set_wind(scene_air, clock_t0);          // the scene's wind on every geom (xfrc_applied)
 //   cvc::physics::mujoco_energy e = go2.energy(); // MuJoCo's own (mjENBL_ENERGY)
 //
 // Build: CVC_WITH_MUJOCO, off by default, with MuJoCo from cvcpkg (`cvcpkg install mujoco
@@ -52,6 +53,7 @@
 namespace cvc {
 class height_field;
 namespace physics {
+class flow_velocity; // flow_velocity.h: the wind
 namespace detail {
 class mujoco_engine; // src/cvc/physics/mujoco_engine.h
 }
@@ -116,7 +118,7 @@ struct mujoco_energy {
 // integrators; under RK4 the forces read back are the last stage's, so the books are rough.
 struct mujoco_books {
   double actuators = 0.0;      // the actuators
-  double external = 0.0;       // apply_wrench's forces
+  double external = 0.0;       // apply_wrench's forces, and the wind's (set_wind)
   double contacts = 0.0;       // contact forces (soft contacts give some energy back)
   double joint_friction = 0.0; // dry friction in the joints (frictionloss)
   double joint_limits = 0.0;   // joint and tendon limits
@@ -207,6 +209,25 @@ public:
   // A force at a world point on body b: the same as its force and moment about b's centre.
   void apply_force_at(int b, const vec3 &force, const vec3 &point);
   void clear_wrenches();
+
+  // --- the wind ------------------------------------------------------------------------------
+  // The air the robot stands in (flow_velocity.h: the scene's wind_flow, its storms' gust fronts
+  // in it (cvc::ariadne::StormWindFlow), or any flow), read at each step's start at time() +
+  // time_offset (a scene passes its clock's time at the robot's start, so the robot reads the
+  // gusts the world's bodies read). Each collision geom of a moving body takes the drag
+  // 1/2 rho C_d A |u| u: u is the air at its bounding box's centre (the flow's reference velocity
+  // at its body's centre of mass times the flow's height profile at the box's centre, as the
+  // world's field step reads it) less the velocity of that centre, and A is the box's area across
+  // u. The forces and their moments about each body's centre of mass go into MuJoCo's
+  // xfrc_applied for that step, beside apply_wrench's (which they neither replace nor show in),
+  // and into the books as external work. Null: still air, the default (the robot steps as
+  // without this). Throws cvc::physics_error for a non-finite or negative C_d or a density <= 0.
+  void set_wind(std::shared_ptr<const flow_velocity> air, double time_offset = 0.0,
+                double drag_coefficient = 1.0, double density = 1.225);
+  // The air's force on the robot over the last step, summed over its bodies (N, world axes), and
+  // its torque about the world's origin (N m); 0 in still air and before the first step.
+  vec3 wind_force() const;
+  vec3 wind_torque() const;
 
   // --- stepping ------------------------------------------------------------------------------
   // One fixed step of timestep() (n of them). Throws cvc::physics_error when MuJoCo found the
