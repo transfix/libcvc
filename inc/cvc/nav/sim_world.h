@@ -104,6 +104,15 @@ public:
     // reactive drive AROUND neighbours instead of through them.
     float sep_radius = 0.0f;
     float sep_gain = 0.0f;
+    // With the separation on, a peer AHEAD within sep_radius also turns the agent right: its
+    // carrot moves to the agent's right by sep_side times the strongest such peer's weight (1 at
+    // contact, 0 at the radius) times the carrot's distance (0.5: up to about 27 degrees). Two
+    // agents meeting head on both swing right and pass, where the push along the line between them
+    // alone only slows them. Default 0 = OFF (byte-unchanged runs).
+    float sep_side = 0.0f;
+    // How far ahead a peer starts that turn (normalized units; it must also be within sep_radius
+    // of the agent's line); 0 or less than sep_radius: sep_radius.
+    float sep_side_radius = 0.0f;
 
     // HARD inter-agent de-overlap (default 0 = OFF). sep_radius/sep_gain above only NUDGE the
     // carrot, so under a forced convergence (a turn-around, a goal that moves behind the column)
@@ -466,6 +475,14 @@ public:
   // others, and shifts each agent's carrot out of the paths of those it should give way to and
   // round those in its own (yield_agent), away from walls. O(n^2) with perfect comms.
   void set_yield(const yield_config &c) { yield_cfg_ = c; }
+
+  // Agents outside this world, as points (x, y pairs) in its normalized frame: other fleets'
+  // vehicles that a host runs beside it, say. The separation (sep_radius, sep_gain) steers each
+  // agent's carrot away from them as it does from a peer; nothing moves them, and min_gap and
+  // yielding do not see them. Kept until set again; empty: none (the default), and a run without
+  // them is byte-unchanged.
+  void set_foreign_agents(std::vector<float> xy) { foreign_ = std::move(xy); }
+  const std::vector<float> &foreign_agents() const { return foreign_; }
   const yield_config &yield_settings() const { return yield_cfg_; }
   // Agent i's priority (higher goes first; all 0 by default) and team (a convoy; 0 by default),
   // as its intent carries them.
@@ -515,6 +532,10 @@ public:
   void set_separation(float radius, float gain) {
     cfg_.sep_radius = radius;
     cfg_.sep_gain = gain;
+  }
+  void set_separation_side(float side, float radius = 0.0f) { // config::sep_side, sep_side_radius
+    cfg_.sep_side = side;
+    cfg_.sep_side_radius = radius;
   }
 
   // Live-tune the step-fresh scalar knobs (sensor / policy / vehicle / separation) WITHOUT a
@@ -859,6 +880,7 @@ private:
   // SoA agent columns
   std::vector<float> o_, goal_, th_, sp_, color_, wall_entry_, pos_hist_;
   std::vector<float> carrot_; // [n*2] last tick's FSM steering target (for renderers)
+  std::vector<float> foreign_; // [m*2] set_foreign_agents: points the separation steers from
   // Yielding (set_yield): its settings, channel (null = the perfect one below), resolver, each
   // agent's priority / team / announced path override, and the last tick's intents and shifts.
   yield_config yield_cfg_{};

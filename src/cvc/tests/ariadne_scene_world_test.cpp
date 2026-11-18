@@ -1499,6 +1499,111 @@ TEST(AriadneWorldVehicles, AHeadlessAppRuntimeTakesTheDocumentsVehicles) {
   EXPECT_FALSE(any_contains(warns, "world:"));
 }
 
+// Vehicles steer around each other (WorldVehicles::set_avoid, on by default): two driving head on
+// with their goals swapped pass with more room than they do without it, on one plant and across
+// two (the other plant's vehicles are the navigator's foreign agents).
+namespace {
+const char *kAvoid = R"(
+world:
+  vehicles:
+    archetypes:
+      car: { plant: kinematic, vehicle: { preset: humvee, max_speed: 6 }, controllers: [nav@1] }
+      bike: { plant: dynamic, vehicle: { preset: humvee, max_speed: 6 }, controllers: [nav@1] }
+scene:
+  physics: {}
+  world: { source: square, cell: 1 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [120, 120, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+
+// Two vehicles driving at each other from 50 m apart, 0.5 m off one line: the closest they come,
+// and where each ends (the car drives west, the second east).
+struct pass_result {
+  double closest = 1e9, car_x = 0.0, second_x = 0.0;
+};
+pass_result closest_pass(const char *second, bool avoid) {
+  LoadResult r = load_vehicles(kAvoid);
+  EXPECT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  pass_result out;
+  if (!w)
+    return out;
+  WorldVehicles *v = w->vehicles();
+  v->set_avoid(avoid);
+  v->set_wander(false);
+  w->sync(&warnings);
+  // The second faces +x from the west; the car faces it from the east.
+  entity_spec a;
+  a.archetype = "car";
+  a.placed = true;
+  a.x = 25.0;
+  a.y = 0.5;
+  a.yaw = 3.14159265358979323846;
+  entity_spec b = a;
+  b.archetype = second;
+  b.x = -25.0;
+  b.y = 0.0;
+  b.yaw = 0.0;
+  const std::uint64_t ia = v->spawn(a), ib = v->spawn(b);
+  EXPECT_NE(ia, 0u);
+  EXPECT_NE(ib, 0u);
+  v->set_goal(ia, -30.0, 0.5);
+  v->set_goal(ib, 30.0, 0.0);
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  for (int i = 0; i < 900; ++i) {
+    clock.drive(1.0 / 60.0);
+    w->follow(app.world_clock());
+    const std::vector<entity_info> e = v->entities();
+    if (e.size() == 2 && e[0].placed && e[1].placed) {
+      out.closest = std::min(out.closest, std::hypot(e[0].x - e[1].x, e[0].y - e[1].y));
+      out.car_x = e[0].x;
+      out.second_x = e[1].x;
+    }
+  }
+  return out;
+}
+} // namespace
+
+TEST(AriadneWorldVehicles, VehiclesSteerAroundEachOtherOnOneAndManyPlants) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  for (const char *second : {"car", "bike"}) {
+    const pass_result off = closest_pass(second, false), on = closest_pass(second, true);
+    std::printf("  head on, car and %s: without avoiding closest %.2f m, ends at x %.1f and %.1f; "
+                "with, %.2f m, %.1f and %.1f\n",
+                second, off.closest, off.car_x, off.second_x, on.closest, on.car_x, on.second_x);
+    // With it, each swings right and drives on past the other, with room between them.
+    EXPECT_LT(on.car_x, -20.0) << "car and " << second << ": the car got past";
+    EXPECT_GT(on.second_x, 20.0) << "car and " << second << ": the " << second << " got past";
+    EXPECT_GT(on.closest, 2.0) << "car and " << second;
+    // Without, they meet: two kinematic boxes drive through each other, and a kinematic box
+    // shoves a dynamic chassis back the way it came.
+    if (std::string(second) == "car")
+      EXPECT_LT(off.closest, 1.0);
+    else
+      EXPECT_LT(off.second_x, 0.0) << "the bike never got past the car";
+  }
+  // The key turns it off and on, and says which.
+  LoadResult r = load_vehicles(kAvoid);
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles *v = w->vehicles();
+  EXPECT_TRUE(v->avoid());
+  EXPECT_EQ(val(app, "vehicles.avoid"), "1");
+  cvc::state::instance(app)("vehicles.avoid").value("0");
+  v->poll();
+  EXPECT_FALSE(v->avoid());
+}
+
 // ---------------------------------------------------------------------------------------------
 // Entity intents (ARIADNE_WORLDS.md section 14, S1): an entity steered from outside, by its keys,
 // a table of intents, a C++ (or Python) setter and a server document's published namespace.
