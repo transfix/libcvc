@@ -475,6 +475,7 @@ struct WorldVehicles::impl {
   std::uint64_t draws = 0; // goals drawn (each draw's seed)
   bool wander = true;      // nav@1 draws another goal at each one it reaches
   bool avoid = true;       // vehicles steer around each other (set_avoid)
+  std::string sense = "known"; // what the navigators know: known or fog (set_sense)
   bool drive_tel = false;  // the navigators capture their drive (set_drive_telemetry)
 
   // A fleet: the entities on one plant, with a navigator of their own over the grid (a navigator
@@ -672,9 +673,11 @@ struct WorldVehicles::impl {
     // A boat's navigator plans on the water deep enough for the deepest boat, land blocked.
     const std::shared_ptr<const cvc::nav::world_grid> plan =
         vehicle_plant_floats(plant) ? boat_grid() : grid;
+    // Under fog the navigator starts knowing nothing (an empty prior) and senses the grid.
+    const std::vector<std::uint8_t> unknown(sense == "fog" ? plan->occupancy.size() : 0, 0);
     f->sim = std::make_unique<cvc::nav::sim_world>(
-        cfg, plan->occupancy.data(), plan->occupancy.data(), cvc::nav::coef_mlp::default_biased(),
-        nullptr, nullptr, nullptr, 0);
+        cfg, plan->occupancy.data(), sense == "fog" ? unknown.data() : plan->occupancy.data(),
+        cvc::nav::coef_mlp::default_biased(), nullptr, nullptr, nullptr, 0);
     f->sim->set_capture_drive_telemetry(drive_tel);
     ph::nav_plant_options o;
     o.step_world = false; // the world steps on the clock; the plant commands and reads
@@ -1013,7 +1016,7 @@ struct WorldVehicles::impl {
     cfg.veh.nsub = 5;
     cfg.veh.allow_reverse = true;
     cfg.reach_tol = static_cast<float>(kReach * kScale);
-    cfg.freeze_sense = true; // the world's grid is known
+    cfg.freeze_sense = sense != "fog"; // known: the world's grid; fog: sensed (set_sense)
     // Vehicles steer around each other: the nav demos' separation for the largest vehicle (the
     // other plants' vehicles join in as foreign agents at each tick, navigator_tick).
     if (avoid) {
@@ -1798,6 +1801,7 @@ WorldVehicles::WorldVehicles(cvc::app *app, ph::world &world,
     d.seed(d.vkey + ".spawn.color2", "0.12,0.12,0.14");
     d.seed(d.vkey + ".spawn.controller", "nav@1");
     d.seed(d.vkey + ".avoid", d.avoid ? "1" : "0");
+    d.seed(d.vkey + ".sense", d.sense);
     d.seed(d.vkey + ".spawn.mass_t", "0.5");
     d.seed(d.vkey + ".spawn.max_speed_t", "1");
     for (const char *req : {"spawn.request", "remove.request", "clear.request"})
@@ -1978,6 +1982,8 @@ void WorldVehicles::poll() {
     d.seen_sel = sel;
     d.publish_selection();
   }
+  if (const std::string m = d.get("sense"); (m == "known" || m == "fog") && m != d.sense)
+    set_sense(m);
   if (const std::string a = d.get("avoid"); a == "0" || a == "1")
     if ((a == "1") != d.avoid)
       set_avoid(a == "1");
@@ -2027,6 +2033,50 @@ void WorldVehicles::set_avoid(bool avoid) {
 }
 
 bool WorldVehicles::avoid() const { return _impl->avoid; }
+
+bool WorldVehicles::set_sense(const std::string &mode) {
+  impl &d = *_impl;
+  if (mode != "known" && mode != "fog")
+    return false;
+  if (mode == d.sense)
+    return true;
+  d.sense = mode;
+  if (!d.vkey.empty())
+    d.put(d.vkey + ".sense", mode);
+  // What a navigator knows is its config and its prior: they are made again, on the grid they
+  // have, and every vehicle goes back to its start.
+  if (d.grid) {
+    d.unplace_all(false);
+    try {
+      d.build_navigator();
+      if (d.ready)
+        d.update_needs();
+    } catch (const std::exception &ex) {
+      d.fleets.clear();
+      d.ready = false;
+      d.status = std::string("the navigator could not be made: ") + ex.what();
+    }
+    d.place_all();
+  }
+  return true;
+}
+
+const std::string &WorldVehicles::sense() const { return _impl->sense; }
+
+bool WorldVehicles::belief(const std::string &plant, std::vector<std::uint8_t> &out, int &rows,
+                           int &cols) const {
+  const impl &d = *_impl;
+  const auto it = d.fleets.find(plant);
+  if (it == d.fleets.end() || !it->second || !it->second->sim || !d.grid)
+    return false;
+  rows = it->second->sim->rows();
+  cols = it->second->sim->cols();
+  const std::uint8_t *occ = it->second->sim->belief_occ(0);
+  if (!occ || rows <= 0 || cols <= 0)
+    return false;
+  out.assign(occ, occ + static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols));
+  return true;
+}
 
 void WorldVehicles::before_step() {
   impl &d = *_impl;

@@ -367,6 +367,19 @@ public:
   // document's init: may set it before the world is made.
   void set_avoid(bool avoid);
   bool avoid() const;
+  // What the navigators know of the world (the vehicles.sense key, "known" or "fog", sets it
+  // too, read each poll; a document's init: may set it before the world is made):
+  //   known  the world's grid, whole (the default): nothing to sense
+  //   fog    nothing at first: each plant's navigator builds a belief of the grid from its
+  //          vehicles' rays (60 m, 120 of them), as libcvc's fog demos do, and plans on that
+  // Changing it makes the navigators again: every vehicle goes back to its start. False for a
+  // mode it does not know.
+  bool set_sense(const std::string &mode);
+  const std::string &sense() const;
+  // The occupancy plant `plant`'s navigator plans on now (row-major, the grid's rows and cols;
+  // 1 = blocked): the grid under known, its belief under fog. False when that plant has no
+  // navigator yet.
+  bool belief(const std::string &plant, std::vector<std::uint8_t> &out, int &rows, int &cols) const;
   // Entity `id`'s command for the navigator's next tick only, in place of its controller's: the
   // steering's bicycle angle (rad, + left) and the acceleration along its heading (m/s^2), held to
   // its envelope as the navigator's own command is. Either not finite: its controller drives that

@@ -1797,6 +1797,17 @@ scene:
     publishes the namespace (`server: publish: [drive]`), the relay replicates it, and its program
     writes `(state-set "drive.lead.intent.accel" "2")`. The C++ setter, `set_intent`,
     `clear_intent` and `intent`, may be called from any thread.
+  - **Around each other.** Vehicles steer around each other, on one plant and across plants
+    (`WorldVehicles::set_avoid`, the `vehicles.avoid` key, on by default): each navigator's
+    separation pushes its carrot away from every vehicle near it (the other plants' vehicles
+    are its foreign agents, `cvc::nav::sim_world::set_foreign_agents`), and a vehicle ahead and
+    near its line turns it right (`sep_side`), so two meeting head on both swing right and pass.
+    It is reactive: they do not plan routes around each other.
+  - **What the navigators know.** `vehicles.sense` (`WorldVehicles::set_sense`): `known`, the
+    world's grid whole (the default), or `fog`, nothing at first and what their vehicles' rays
+    find (each plant's navigator builds a belief and plans on it, as libcvc's fog demos do).
+    Changing it makes the navigators again, and every vehicle goes back to its start.
+    `WorldVehicles::belief(plant, ...)` reads the occupancy a plant's navigator plans on.
   - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,
     `color`, `color2` as `r,g,b`, `metadata` as `key=value, ...`, `controller`, `policy`,
     `policy_sha256`, `mass` or `mass_t` (a fraction of the range), `max_speed` or `max_speed_t`,
