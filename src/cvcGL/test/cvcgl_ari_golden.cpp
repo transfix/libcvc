@@ -81,7 +81,8 @@ const double kBackground[3] = {0.09, 0.10, 0.12};
 // Software Renderer left 3-6 px beyond 40 on windows / menus / grid but 40 on widgets and 467 on
 // scene (edges and shading), so those two have macOS goldens (<name>.macos.png) instead. With the
 // window chrome's close and maximize glyphs it leaves 7 / 12 on menus / windows but 15 on grid,
-// so grid has one too.
+// so grid has one too. On orthoslicer it leaves 1149: the nearest-sampled slices' texel edges and
+// the volren's edges land a pixel apart. So orthoslicer has one as well.
 const Tolerance kTolerance{40, 0.00002};
 
 // A scripted pointer for documents whose interesting state needs one (an open menu, a tooltip).
