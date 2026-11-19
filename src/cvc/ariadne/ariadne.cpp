@@ -183,71 +183,75 @@ std::vector<float> parse_tracks(const std::string &s) {
   return out;
 }
 
-// Replace every occurrence of `token` in `s` with `rep`.
-std::string replace_all(std::string s, std::string_view token, const std::string &rep) {
+// Replace every occurrence of `token` in `s` with `rep`, in place: a string without it is left
+// as it is, not copied.
+void replace_in(std::string &s, std::string_view token, const std::string &rep) {
   if (token.empty())
-    return s;
+    return;
   for (std::size_t pos = s.find(token); pos != std::string::npos;
        pos = s.find(token, pos + rep.size()))
     s.replace(pos, token.size(), rep);
+}
+
+// The same, on a copy.
+std::string replace_all(std::string s, std::string_view token, const std::string &rep) {
+  replace_in(s, token, rep);
   return s;
 }
 
 // A repeat's loop-index token.
 constexpr std::string_view kIndexToken = "{i}";
 
-// §3 repeat: deep-copy a template widget, substituting the loop-index token `{i}` with the
-// 0-based `index` in every field an instance uses to address distinct state or to display
-// (id/label/bind/on and the pointer handlers/predicates/tooltip/options). Recurses into children.
-// (Single-level: a nested `repeat` shares the same `{i}` token and is not independently indexed —
-// a follow-up.)
-Widget substitute_index(const Widget &w, int index) {
-  const std::string idx = std::to_string(index);
+// §3 repeat: substitute the loop-index token `{i}` with the 0-based index `idx`, in place on an
+// instance's own copy of its template, in every field an instance uses to address distinct state
+// or to display (id/label/bind/on and the pointer handlers/predicates/tooltip/options). Recurses
+// into children. (Single-level: a nested `repeat` shares the same `{i}` token and is not
+// independently indexed — a follow-up.)
+void substitute_index_in(Widget &out, const std::string &idx) {
   constexpr std::string_view kTok = kIndexToken;
-  Widget out = w; // copies every field
-  out.id = replace_all(out.id, kTok, idx);
-  out.label = replace_all(out.label, kTok, idx);
-  out.bind = replace_all(out.bind, kTok, idx);
-  out.on = replace_all(out.on, kTok, idx);
+  replace_in(out.id, kTok, idx);
+  replace_in(out.label, kTok, idx);
+  replace_in(out.bind, kTok, idx);
+  replace_in(out.on, kTok, idx);
   // §4.6 the pointer handlers, a text_view's on_top, and a message_input's hint and send label: a
   // row's handler acts on that row (on_click: (state-set "tree.cam_{i}.open" "1")).
-  out.on_click = replace_all(out.on_click, kTok, idx);
-  out.on_hover = replace_all(out.on_hover, kTok, idx);
-  out.on_drag = replace_all(out.on_drag, kTok, idx);
-  out.on_drag_start = replace_all(out.on_drag_start, kTok, idx);
-  out.on_drag_end = replace_all(out.on_drag_end, kTok, idx);
-  out.on_hover_end = replace_all(out.on_hover_end, kTok, idx);
-  out.on_top = replace_all(out.on_top, kTok, idx);
-  out.hint = replace_all(out.hint, kTok, idx);
-  out.send = replace_all(out.send, kTok, idx);
-  out.on_change = replace_all(out.on_change, kTok, idx);
+  replace_in(out.on_click, kTok, idx);
+  replace_in(out.on_hover, kTok, idx);
+  replace_in(out.on_drag, kTok, idx);
+  replace_in(out.on_drag_start, kTok, idx);
+  replace_in(out.on_drag_end, kTok, idx);
+  replace_in(out.on_hover_end, kTok, idx);
+  replace_in(out.on_top, kTok, idx);
+  replace_in(out.hint, kTok, idx);
+  replace_in(out.send, kTok, idx);
+  replace_in(out.on_change, kTok, idx);
   // A list's selection key and edit handlers, and a tab bar's titles.
-  out.list_current = replace_all(out.list_current, kTok, idx);
-  out.on_add = replace_all(out.on_add, kTok, idx);
-  out.on_remove = replace_all(out.on_remove, kTok, idx);
+  replace_in(out.list_current, kTok, idx);
+  replace_in(out.on_add, kTok, idx);
+  replace_in(out.on_remove, kTok, idx);
   for (std::string &t : out.tab_titles)
-    t = replace_all(t, kTok, idx);
-  out.visible_when = replace_all(out.visible_when, kTok, idx);
-  out.enabled_when = replace_all(out.enabled_when, kTok, idx);
-  out.disabled_when = replace_all(out.disabled_when, kTok, idx);
-  out.tooltip = replace_all(out.tooltip, kTok, idx);
-  out.badge = replace_all(out.badge, kTok, idx); // §5.11 a picture's "+3"
-  out.options_expr = replace_all(out.options_expr, kTok, idx);
-  out.src = replace_all(out.src, kTok, idx); // §5.11: a picture per item (src: feed.{i}.png)
-  out.media_status = replace_all(out.media_status, kTok, idx);
-  out.background.src = replace_all(out.background.src, kTok, idx); // §5.12
-  out.background.bind = replace_all(out.background.bind, kTok, idx);
-  out.background.status = replace_all(out.background.status, kTok, idx);
-  out.poster = replace_all(out.poster, kTok, idx); // §5.13
-  out.emoji = replace_all(out.emoji, kTok, idx);   // §5.11 a post's own shortcodes
+    replace_in(t, kTok, idx);
+  replace_in(out.visible_when, kTok, idx);
+  replace_in(out.enabled_when, kTok, idx);
+  replace_in(out.disabled_when, kTok, idx);
+  replace_in(out.tooltip, kTok, idx);
+  replace_in(out.badge, kTok, idx); // §5.11 a picture's "+3"
+  replace_in(out.options_expr, kTok, idx);
+  replace_in(out.src, kTok, idx); // §5.11: a picture per item (src: feed.{i}.png)
+  replace_in(out.media_status, kTok, idx);
+  replace_in(out.background.src, kTok, idx); // §5.12
+  replace_in(out.background.bind, kTok, idx);
+  replace_in(out.background.status, kTok, idx);
+  replace_in(out.poster, kTok, idx); // §5.13
+  replace_in(out.emoji, kTok, idx);  // §5.11 a post's own shortcodes
   // §5.20 rich text: a row's runs (runs: feed.items.{i}.runs) and its handlers
-  out.runs_src = replace_all(out.runs_src, kTok, idx);
-  out.on_link = replace_all(out.on_link, kTok, idx);
+  replace_in(out.runs_src, kTok, idx);
+  replace_in(out.on_link, kTok, idx);
   for (TextRunSpec &r : out.runs) {
-    r.text = replace_all(r.text, kTok, idx);
-    r.href = replace_all(r.href, kTok, idx);
-    r.on_click = replace_all(r.on_click, kTok, idx);
-    r.tooltip = replace_all(r.tooltip, kTok, idx);
+    replace_in(r.text, kTok, idx);
+    replace_in(r.href, kTok, idx);
+    replace_in(r.on_click, kTok, idx);
+    replace_in(r.tooltip, kTok, idx);
   }
   // §12: a repeated MOUNT (Widget::scope set) gets a per-instance sub-prefix — append the loop
   // index so each instance's fragment binds to its OWN state subtree (includes.<as>.<i>), rather
@@ -257,16 +261,23 @@ Widget substitute_index(const Widget &w, int index) {
   // §12: and its parent-scope holes are {i}-substituted too, so an instance can grant a
   // per-instance target (link: { slot: fleet.{i} }) — mirroring the bind/on substitution above.
   for (LinkHole &h : out.links) {
-    h.name = replace_all(h.name, kTok, idx);
-    h.target = replace_all(h.target, kTok, idx);
+    replace_in(h.name, kTok, idx);
+    replace_in(h.target, kTok, idx);
   }
-  out.children.clear();
-  out.children.reserve(w.children.size());
-  for (const Widget &c : w.children)
+  for (Widget &c : out.children)
     // A nested `repeat` template is left UNtouched so its own expansion owns its `{i}` (rather
     // than the outer index clobbering the inner template's bindings). Single-level still: the
     // inner cannot also reference the outer index — the loader warns on a nested repeat.
-    out.children.push_back(c.repeat.empty() ? substitute_index(c, index) : c);
+    if (c.repeat.empty())
+      substitute_index_in(c, idx);
+}
+
+// One deep copy of the template, then the index substituted through it in place. (Copying each
+// level and then its children again copied a subtree once per level above it, each frame, for
+// every instance of a feed's repeat.)
+Widget substitute_index(const Widget &w, int index) {
+  Widget out = w;
+  substitute_index_in(out, std::to_string(index));
   return out;
 }
 
