@@ -1138,6 +1138,14 @@ void sim_world::step(int num_threads) {
   // clearance must be METRES-double (min_clearance_world / scale), not the raw
   // normalized minclr_.
   if (stats_) {
+    // The feed's scratch follows the agent count (add_agent, remove_agent).
+    st_pos_.resize(static_cast<std::size_t>(2) * n_);
+    st_head_.resize(n_);
+    st_spd_.resize(n_);
+    st_mode_.resize(n_);
+    st_reached_.resize(n_);
+    st_clr_.resize(n_, 1e30f);
+    st_clr_d_.resize(n_, 1e30);
     snapshot(st_pos_.data(), st_head_.data(), st_spd_.data(), st_mode_.data(), st_reached_.data());
     min_clearance_world(st_clr_.data()); // world metres, 1e29 sentinel preserved
     for (int i = 0; i < n_; ++i)
@@ -2215,18 +2223,15 @@ void sim_world::refresh_columns() {
 }
 
 namespace {
-void check_resizable(const vehicle_plant *plant, bool stats, const char *who) {
+void check_resizable(const vehicle_plant *plant, const char *who) {
   if (plant && !plant->resizable())
     throw std::logic_error(std::string("cvc::nav::sim_world::") + who +
                            ": this plant's vehicles are fixed when it attaches (set_plant)");
-  if (stats)
-    throw std::logic_error(std::string("cvc::nav::sim_world::") + who +
-                           ": nav_stats is armed, and its episode counts the agents it began with");
 }
 } // namespace
 
 std::uint64_t sim_world::add_agent(const agent_spec &a) {
-  check_resizable(plant_, static_cast<bool>(stats_), "add_agent");
+  check_resizable(plant_, "add_agent");
   if (!a.own_plane && (a.plane < 0 || a.plane >= M_))
     throw std::invalid_argument("cvc::nav::sim_world::add_agent: plane " + std::to_string(a.plane) +
                                 " is outside [0, " + std::to_string(M_) + ")");
@@ -2289,14 +2294,23 @@ std::uint64_t sim_world::add_agent(const agent_spec &a) {
   if (plant_)
     plant_read(); // its pose, speed and limits as the plant has them
   ++ident_rev_;
+  if (stats_) { // nav_stats counts it from here, from where it stands toward its goal
+    std::vector<float> pos(static_cast<std::size_t>(2) * n_), goal(pos.size());
+    snapshot(pos.data(), nullptr, nullptr, nullptr, nullptr);
+    goals_world(goal.data());
+    stats_->add_agent(&pos[static_cast<std::size_t>(2) * i],
+                      &goal[static_cast<std::size_t>(2) * i]);
+  }
   return ids_[i];
 }
 
 bool sim_world::remove_agent(std::uint64_t id) {
-  check_resizable(plant_, static_cast<bool>(stats_), "remove_agent");
+  check_resizable(plant_, "remove_agent");
   const int i = index_of(id);
   if (i < 0)
     return false;
+  if (stats_) // nav_stats keeps its record and moves the indices after it down
+    stats_->remove_agent(i);
   if (plant_)
     plant_->remove_vehicle(i);
   const int plane = map_id_[static_cast<std::size_t>(i)];

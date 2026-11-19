@@ -378,6 +378,16 @@ public:
   void set_identity(int i, int convoy_id, int vehicle_class, double robot_radius_m, double mass_kg,
                     int formation_parent = -1);
 
+  // A vehicle that joins mid-episode, as index n (after the others), from `start_pos` toward
+  // `goal_pos` (world metres, [2] each, as begin_episode's): its record counts from this step on
+  // (its speed mean over its own steps), with the next veh_index.
+  void add_agent(const float *start_pos, const float *goal_pos);
+  // Vehicle `i` leaves: its record, finished as finish() would finish it over its own steps, is
+  // kept (finish() lists it after the vehicles still here, and counts it in the totals), and the
+  // indices after it move down by one (as the sim's do); a touch or formation parent that named it
+  // becomes -1. False for an index that is not one.
+  bool remove_agent(int i);
+
 private:
   nav_stats_params p_;
   budget_policy budget_;
@@ -398,6 +408,15 @@ private:
   std::vector<long> tipped_n_; // ticks each has been tipped past roll_up_z, now
   std::vector<long> steer_sat_n_, brake_n_;
   std::vector<int> touching_; // the vehicle each touched last tick (-1 none)
+  // Resizing: the step each vehicle joined (0 for begin_episode's), the next veh_index, and the
+  // departed vehicles' finished records with the steps each was here.
+  std::vector<long> born_;
+  int next_index_ = 0;
+  std::vector<veh_nav_stats> departed_;
+  std::vector<long> departed_steps_;
+  // One vehicle's record finished over `steps` of its own, `elapsed` seconds (finish()'s
+  // per-vehicle part).
+  void finish_vehicle(veh_nav_stats &v, std::size_t i, double steps, double elapsed) const;
 };
 
 // ── Scorecard: aggregate a CORPUS of episodes for training-fitness tracking ──
