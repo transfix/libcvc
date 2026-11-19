@@ -1628,7 +1628,19 @@ bool ImGuiBackend::item_clicked() {
 #ifdef CVC_ENABLE_IMGUI
   if (m_groupHitId != 0 && ImGui::GetItemID() == m_groupHitId)
     return m_groupHit; // an item group: its button's tap (end_item_group)
-  return ImGui::IsItemClicked();
+  // A tap, as an item group's is: the button released over the item it went down on, the pointer
+  // not dragged further than ImGui's drag threshold. Not IsItemClicked, which is the press: a
+  // finger landing on a picture or a video to scroll a feed pressed it, so its on_click ran (the
+  // viewer opened, the video paused) before the drag became a scroll (TouchScroll). A tap moves
+  // nothing, so the item still holds the point where the button went down.
+  const ImGuiIO &io = ImGui::GetIO();
+  if (!io.MouseReleased[ImGuiMouseButton_Left] ||
+      !ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))
+    return false;
+  const ImRect r(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+  const float slop = io.MouseDragThreshold;
+  return r.Contains(io.MouseClickedPos[ImGuiMouseButton_Left]) &&
+         io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left] <= slop * slop;
 #else
   return false;
 #endif

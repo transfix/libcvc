@@ -2945,7 +2945,10 @@ windows:
   neutral placeholder of the same box until the picture arrives, so nothing moves. The fetch, the
   decode and the fit run on the app's background pool. A failure shows a darker placeholder, says
   why in its tooltip, and is tried again after 30 s. Pictures are kept in memory per runtime, up to
-  64 MiB, and dropped 30 s after the last frame that drew them. Two widgets that show the same URL
+  64 MiB, and dropped once 30 s of drawing has passed without a frame that drew them. That is
+  drawing time, not the wall's: a page that draws nothing for a while (a hidden browser tab, a
+  phone put away) ages nothing, so its pictures are all still there when it draws again, never
+  fetched a second time. Two widgets that show the same URL
   share one fetch. `ari snapshot` and `arigl snapshot` wait for the pictures they draw, those
   whose URL a reply puts in state included: they draw again until no picture is still loading
   (at most 10 s, as for requests).
@@ -3307,7 +3310,11 @@ this for every one.
   which the canvas is not. When a finger (or a pen) activates an `input_text`, the page focuses a
   hidden `<input>` placed at the field's caret, so the keyboard comes up and the browser keeps
   the field in view above it; what the keyboard types goes to the field, autocorrect and
-  composed words included, and the field's deactivation puts the keyboard away. iOS raises its
+  composed words included, and the field's deactivation puts the keyboard away. For a
+  `password: true` field the hidden input is a password field too, so the keyboard shows no
+  suggestions and learns nothing from what is typed (a text field's `autocomplete="off"` does not
+  stop a keyboard's own suggestion strip); what was typed is cleared from the hidden input when
+  the field changes and when the keyboard goes away. iOS raises its
   keyboard only for a focus made while the finger lifts, which is when the page makes it; a field
   that becomes active with no finger down (an `autofocus:` one) raises it on Android, and on iOS
   at the first tap on it. While the hidden input has the keys the canvas does not, so typing never
@@ -3878,7 +3885,9 @@ item over its whole area. A feed's card opens its post wherever it is clicked:
   `y` are measured from the group's top-left.
 - **ImGui** (arigl, the browser page): a click is a tap. It must be released over the group, and the
   pointer must not have moved further than ImGui's drag threshold, so a finger scrolling a feed
-  opens nothing. The group's area is as wide as the room it has (a card's whole row), however
+  opens nothing. A widget's own `on_click:` (a picture's, a video's, a text's) is a tap the same
+  way: the press alone runs nothing, so a finger that lands on a feed's picture to scroll it
+  scrolls, and the picture's `on_click:` runs only for a tap that went down and came up on it. The group's area is as wide as the room it has (a card's whole row), however
   narrow its content. `hover: highlight` fills that area under the content with the header-hover
   colour, or the header-active colour while it is pressed.
 - **Terminals** (FTXUI, tvision): a group with `on_click:` takes keyboard focus. Tab reaches it
