@@ -605,6 +605,21 @@ its own world document.
     a server document's program steers them), a thread-safe `WorldVehicles::set_intent`, and
     Python (`pycvc.WorldEntities`). An `external` entity is driven by its intent alone, and holds
     still without one. An intent-driven run reaches the same state hash headless and drawn.
+  - Poses (built 2026-11-19): an entity with the `pose` controller is placed from outside, by a
+    simulation the world does not run, and no plant integrates it. Its chassis is a kinematic box
+    in the world's physics world, moved to each pose at the next step, so it keeps its archetype's
+    look and label, casts shadows, is picked, pushes what it meets and is a foreign agent the
+    navigators steer around; it needs no grid. Its poses come from its keys
+    (`entities.<id>.pose.{x,y,z,heading,pitch,roll,speed,steer,t,ref}` or `.matrix`), a packed
+    value of many (`entities.poses`, a text record a line, so a relay carries it), a table the
+    world block names (`world: vehicles: poses:`, whose entries naming an archetype spawn and
+    remove the entities too), and a thread-safe `WorldVehicles::set_pose` / `set_poses` (pycvc
+    `WorldEntities.set_pose`, `set_poses` from numpy). Timed poses are drawn between the last
+    two, a tick behind; a jump is taken at once. The box look's wheels steer by the pose's steer
+    and roll at its speed. A scripted track is followed exactly, and its state hash is pinned
+    headless, drawn and under `arigl snapshot` (`physics.hash`: 1 publishes
+    `physics.stats.hash`). A drawn world now spawns `world: vehicles: start:` too, as a headless
+    one does.
   - The runtime is `WorldVehicles` ([world_vehicles.h](../../inc/cvc/ariadne/world_vehicles.h)),
     one per `SceneWorld`, with nothing process-wide: a relay that runs a world per room (RM1,
     WD3) runs one per room, and each room's panels name its keys by their root (`world_source`'s
@@ -658,6 +673,18 @@ its own world document.
     the avatars and the vehicles, a model look drawn on the client (it draws the box), the
     controller catalog's prediction (WD4: a client interpolates server-dynamic entities, so none is
     needed to watch them).
+  - **Server-simulated entities by state** (a step toward WD3's server-dynamic entities, built
+    2026-11-19 with the `pose` controller). A server that simulates its vehicles itself (a server
+    document's program, or arisrvx's Python over a simulation of its own) publishes a table of
+    poses (`server: publish: [fleet]`): an entry per vehicle naming its archetype and identity,
+    and a packed value of their poses each step. A client's own world document names the table
+    (`world: vehicles: poses: /fleet`) and its archetypes; its world spawns a `pose` entity per
+    entry and places each where the server says, timed poses drawn a tick behind, so stock
+    clients (arigl, arigl-web) draw them with the world's looks, labels and shadows, in a world
+    that also runs physics of its own. The relay replicates values, not an entry's removal, so a
+    server takes an entity out by emptying its entry's archetype. The pose stream (above) stays
+    the path for a server document's own world's vehicles in a conference room; this one needs
+    no room.
   - Not yet: the default meeting worlds' built-in vehicles (a stock world named by `--scene` is
     published, not run; `traffic.ari` is the server world with vehicles, and `world_lab.ari`
     declares its own); the model from a document's data package (the Austin package carries a
@@ -751,7 +778,7 @@ GENERATED-WORLD-ROADMAP.md's.)
 | WD0 | **Done** (2026-11-07). The loose ends: `--set` after seeding, or a guard so a `--set` can't suppress the default world; the "under a sun" comment. Built as `--set` after the world and the room's policies, before a server document's `init:` (§1) | — | S |
 | WD1 | **Done** (2026-11-07). **The world document seeds the room.** `arisrv --doc world.ari` publishes the document's `scene:` (objects, lights, shadows), in one revision (`write_room_world`). `cvc://worlds/default.ari` and `large.ari` replace the C++ seeds, and `--scene` names them. The light rig and shadows move from the conference document to the world document (Q1), and the conference document drops its `scene:` block. As built: the wire gained a rig's knobs and the shadows' interval; `room_world_from_scene` leaves out, with a warning, what the wire can't hold (other node types and sources, children, textures, shaders), and publishes every body as a static until WD3; `--scene` together with a `--doc` that has a `scene:` is refused; the C++ twins are the fallback | S0 (met by transfix/libcvc#1046) | M |
 | WD2 | **Done** (2026-11-08). **The rules come from the document.** The physics, archetype, policy and controller sections (§3), with the activation tick. The holon and `room_view` read them instead of `avatar_body{}`, `kAvatarWidth`, `max_speed = 4.0` and the panel's "walker" literal. As built: the revisioned-section writer in core (`section.h`: `{epoch, at, rev}`, the revision last); the `world:` block (`world_rules.h`), whose stock worlds' twin is `default_world_rules()`; the four sections (`room_rules.h`), lists indexed since `walker@1` is no state name; the holon's rules by tick (`holon::set_physics` and the rest), the veto applied at each step, a late client's re-run from the tick, and a body change re-creating the avatars where they stand; gravity from the scene's `physics:`; `fixed_dt` stays the room's 1/120 s (a document's other value is a warning). Every avatar has the first archetype until WD4 and WD6 let a participant pick. | WD1 | M |
-| WD3 | **Started** (2026-11-17: the vehicles). **Entities.** The entities table (§4); server-dynamic props and NPC bodies from the document and from server programs, simulated on the relay by L0's headless runtime; their poses on the pose stream; colliders for meshes. As built so far: a server document's world runs on the relay, and its vehicles reach every client as the room's entities (an identity section and pose-stream entries, played out and drawn: §14, "On the relay"). | WD2, L0 | L |
+| WD3 | **Started** (2026-11-17: the vehicles). **Entities.** The entities table (§4); server-dynamic props and NPC bodies from the document and from server programs, simulated on the relay by L0's headless runtime; their poses on the pose stream; colliders for meshes. As built so far: a server document's world runs on the relay, and its vehicles reach every client as the room's entities (an identity section and pose-stream entries, played out and drawn: §14, "On the relay"); and (2026-11-19) entities a server simulates itself reach each client's own world by state, as `pose` entities placed from a published table of poses (§14, "Server-simulated entities by state"). | WD2, L0 | L |
 | WD4 | **A controller catalog.** Kernels by `name@version`, a determinism gate per kernel, capability negotiation with an interpolation fallback; the vehicle as the second kernel. A participant picks from the archetype's list (§5k phase 3). | WD2 | L |
 | WD5 | **Generated worlds** through the world document: G5's descriptor, height-field statics on the relay. | WD1, G5 | M |
 | WD6 | **User looks and bodies.** Assets by hash, checked and rehosted by the relay; bodies clamped to the archetype (§5k phase 4). | WD2, S5 | M |

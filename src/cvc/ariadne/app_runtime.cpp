@@ -1123,6 +1123,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
       lr.scene.vehicles = rules.vehicles;
       lr.scene.spawns = rules.spawns;
       lr.scene.vehicle_intents = rules.vehicle_intents;
+      lr.scene.vehicle_poses = rules.vehicle_poses;
       lr.scene.vehicle_starts = rules.vehicle_starts;
     }
     for (std::string &w : warns)

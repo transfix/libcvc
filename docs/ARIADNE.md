@@ -1879,8 +1879,8 @@ scene:
 
   - **Archetypes.** Each names its plant, its body (a preset, with `mass`, `max_speed`,
     `max_accel`, `max_decel` or `max_steer` over it), its look, the ranges a spawn's settings are
-    held to, and its controllers: `nav@1`, the navigator, `none`, or `external` (its intent
-    alone drives it).
+    held to, and its controllers: `nav@1`, the navigator, `none`, `external` (its intent
+    alone drives it), or `pose` (an outside simulation places it; below).
   - **Plants.** Every plant runs in the scene's world, on its clock, and meets its bodies (the
     buildings, the props, the other vehicles):
 
@@ -1925,7 +1925,7 @@ scene:
     `distance`, `wheel_load`, `aero_force` and `gear` (the dynamic models give their books'
     power and energy, and an odometer), and `command.steer` / `command.accel`
     (what its plant took on the last navigator tick) with `command.by` (its controller, `intent`,
-    `blend`, or `hold`). `physics.stats.vehicles` has a line per vehicle, its plant named.
+    `blend`, `hold`, or `pose`). `physics.stats.vehicles` has a line per vehicle, its plant named.
   - **Intents.** Any entity can be steered from outside. A document, a script or a server writes
     its keys, and a C++ or Python host calls `WorldVehicles::set_intent` (`pycvc.WorldEntities`,
     below). Each navigator tick (0.06 s by default, `cvc::kSimTick`) reads them, and a change
@@ -1948,6 +1948,73 @@ scene:
     publishes the namespace (`server: publish: [drive]`), the relay replicates it, and its program
     writes `(state-set "drive.lead.intent.accel" "2")`. The C++ setter, `set_intent`,
     `clear_intent` and `intent`, may be called from any thread.
+  - **Poses: entities an outside simulation runs.** An entity with the `pose` controller is not
+    driven at all: no plant integrates it, and no navigator plans for it. Something outside says
+    where it is (a simulation of its own in the host, a server, a recorded track), and the world
+    takes it at the next physics step. Its chassis is a kinematic box in the scene's physics
+    world, moved to each pose, so it is still a part of the scene: it is drawn with its
+    archetype's look (the Humvee model or the box look) and its `entity_labels:` label, it casts
+    shadows and is picked, it pushes the dynamic bodies it meets, and the other vehicles steer
+    around it (it is one of their navigators' foreign agents). It needs no grid: it goes in at its
+    first pose (a spawn's `at:` is one) and waits, unplaced, until it has one.
+
+    | Key, under `entities.<id>.pose` | What it is |
+    |---|---|
+    | `x`, `y` | world metres: its chassis's centre (as `entities.<id>.x`), or with `ref: rear` its rear axle (as a spawn's `at:`). Both are needed |
+    | `z` | its chassis's centre; not given: standing on the ground under it, as a kinematic box stands |
+    | `heading`, `pitch`, `roll` | rad: its rotation is Rz(heading) Ry(pitch) Rx(roll); pitch + nose down, roll + right side down |
+    | `matrix` | 16 numbers, row-major (as a node's `matrix` key): its translation and rotation, in place of the six above |
+    | `speed` | m/s along its heading: listed as its speed, and its wheels roll at it |
+    | `steer` | rad, + left: its steered wheels' angle |
+    | `t` | s on the outside simulation's clock; given, the pose is drawn between the last two (below) |
+    | `ref` | `rear` (or `rear_axle`): `x`, `y` are its rear axle |
+
+    A change of any key is a new pose. Without `t` the entity is there at the end of the next
+    step. With `t` it is drawn between its last two timed poses: from the step the newer one is
+    taken at, it moves from where it is toward it, reaching it `t1 - t0` world seconds later (its
+    angles the short way round, its speed and steer between the two), and holds there if the next
+    is late. Poses that arrive one tick of the outside simulation apart are drawn smoothly, one
+    tick behind. A pose farther than 20 m from the last
+    (`WorldVehicles::set_pose_jump`) is a respawn, taken at once, and so is the first timed one
+    and one whose time went back; the same time again changes nothing. A pose entity that holds
+    still is exactly where its pose says, at rest.
+
+    For many at once there is a packed value: `entities.poses` holds a record a line, `id x y z
+    heading pitch roll speed steer t`, numbers as text (`nan` for no `z` or no `t`), and `rear`
+    last for a rear axle's point (`pack_poses` writes one, `parse_poses` reads one). Text, so a
+    relay carries it. A host calls `WorldVehicles::set_pose(id, entity_pose)` or
+    `set_poses(span<entity_pose_update>)` from any thread instead (taken at the next step, after
+    the keys); `pose(id)` is the last one given.
+
+    `world: vehicles: poses: <path>` names a table of poses, read as the entity's own keys are: by
+    id, or by name, `<path>.<id or name>.pose.*`, and its packed `<path>.poses` keyed the same way.
+    An entry that names an archetype (`<path>.<key>.archetype`, with `name`, `team`, `color` and
+    `color2` beside it) spawns a pose entity of it, named `name` (else the key), and the entry's
+    key places it whatever its name; emptying the archetype (or removing the entry) removes it,
+    and changing the archetype or the identity spawns it again. That is how a server simulates and
+    stock clients draw: a server document (or arisrvx's Python) publishes the table (`server:
+    publish: [fleet]`) and writes it each step, the relay replicates it, and each client's world
+    document, with `poses: /fleet` and the archetypes, spawns and places the entities where the
+    server has them. Over a relay, take an entity out by emptying its archetype: the relay
+    replicates a value, and a client may not see an entry's removal.
+
+    ```yaml
+    world:
+      vehicles:
+        poses: /fleet
+        archetypes:
+          humvee: { vehicle: humvee, controllers: [pose] }
+    ```
+
+    ```lisp
+    (state-set "fleet.lead.archetype" "humvee")   ; the server's program, once
+    (state-set "fleet.lead.name" "Lead")
+    (state-set "fleet.poses" "lead 12.5 4 nan 0.3 0 0 6 0.05 2.0167")   ; each step
+    ```
+
+    The world's state does not depend on frames: a pose entity's run reaches the same state hash
+    headless and drawn, and `physics.hash` set to `1` publishes it (`physics.stats.hash`, 16 hex
+    digits; it saves the whole world, so only a check asks for it).
   - **Around each other.** Vehicles steer around each other, on one plant and across plants
     (`WorldVehicles::set_avoid`, the `vehicles.avoid` key, on by default): each navigator's
     separation pushes its carrot away from every vehicle near it (the other plants' vehicles
@@ -1981,7 +2048,8 @@ scene:
   - **Drawing.** cvcGL draws each entity on its chassis, posed between steps as the other moving
     bodies are. The box look poses each wheel where its plant has it
     (`WorldVehicles::wheels`): a Jolt wheel on its suspension, a dynamic4w wheel on the ground
-    under it, the front ones steered (Ackermann's on a dynamic4w). A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
+    under it, the front ones steered (Ackermann's on a dynamic4w); a pose entity's on the ground
+    under it, steered by its pose's steer and rolled at its speed. A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
     `spin:` in degrees a second) draws the selected archetype in the spawn's colours.
   - **The panel.** `vehicle_selector.ari`: the vehicle, its stats, a preview viewport onto a
     `scenes:` entry holding a `vehicle_preview` node (its header shows one), the settings, the
@@ -1995,9 +2063,13 @@ scene:
     accel=, mode=, weight=, force=(fx, fy), force_steers=)`, `intent(id)`, `clear_intent(id)`,
     `set_goal(id, x, y)`, `set_wander(on)` and `grid()` (the navigator's grid, as
     `pycvc.WorldGym.grid` gives it). Each `list()` entry also carries the entity's velocity,
-    steering, goal, `reached`, `collided` and its body (length, width, wheelbase, its limits).
-    `list`, `spawn` and `despawn` run on the thread that runs frames; the intents from any
-    thread. `pycvc_gl.cars.HostCars` drives a host's world's vehicles with the cars template's
+    steering, goal, `reached`, `collided` and its body (length, width, wheelbase, its limits),
+    and `posed` with its `pose` (a dict) for a pose entity. A pose entity takes
+    `set_pose(id, x, y, z=None, heading=, pitch=, roll=, speed=, steer=, t=None,
+    rear_axle=False)`, or many at once `set_poses(ids, poses, rear_axle=False)` with `poses` N rows
+    of 2 to 9 numbers (`x y z heading pitch roll speed steer t`, NaN for no `z` or `t`; a numpy
+    array or nested lists), and `pose(id)` and `set_pose_jump(metres)`. `list`, `spawn` and
+    `despawn` run on the thread that runs frames; the intents and the poses from any thread. `pycvc_gl.cars.HostCars` drives a host's world's vehicles with the cars template's
     interface.
   - **One runtime per world.** Each `SceneWorld` has its own physics world, vehicles, policies
     and keys, with nothing process-wide, so a host that runs several worlds runs one each.

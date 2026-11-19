@@ -322,19 +322,20 @@ std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out
 }
 
 std::string parse_vehicles(const Value &v, std::vector<vehicle_archetype> &out,
-                           std::string &intents, std::vector<vehicle_start> &starts,
-                           std::vector<std::string> *warnings) {
+                           std::string &intents, std::string &poses,
+                           std::vector<vehicle_start> &starts, std::vector<std::string> *warnings) {
   if (!v.is_map())
-    return "world: vehicles: expects a map (archetypes:, intents:, start:)";
+    return "world: vehicles: expects a map (archetypes:, intents:, poses:, start:)";
   for (const auto &[key, val] : v.entries) {
     if (key == "start") {
       if (std::string e = parse_vehicle_starts(val, starts, warnings); !e.empty())
         return e;
       continue;
     }
-    if (key == "intents") {
-      intents = val.is_scalar() ? val.scalar : std::string();
-      std::string path = !intents.empty() && intents[0] == '/' ? intents.substr(1) : intents;
+    if (key == "intents" || key == "poses") {
+      std::string &table = key == "intents" ? intents : poses;
+      table = val.is_scalar() ? val.scalar : std::string();
+      std::string path = !table.empty() && table[0] == '/' ? table.substr(1) : table;
       bool ok = !path.empty();
       for (std::size_t at = 0; ok && at <= path.size();) {
         const std::size_t dot = std::min(path.find('.', at), path.size());
@@ -342,8 +343,9 @@ std::string parse_vehicles(const Value &v, std::vector<vehicle_archetype> &out,
         at = dot + 1;
       }
       if (!ok)
-        return "world: vehicles: intents: expects a state path (names joined by '.', a leading / "
-               "for one outside the document's prefix)";
+        return "world: vehicles: " + key +
+               ": expects a state path (names joined by '.', a leading / for one outside the "
+               "document's prefix)";
       continue;
     }
     if (key != "archetypes") {
@@ -586,7 +588,7 @@ std::vector<std::string> boat_presets() { return {"launch", "jonboat", "tactical
 bool vehicle_plant_floats(const std::string &plant) { return plant == "dynamicboat"; }
 
 bool vehicle_controller_known(const std::string &id) {
-  return id == "nav@1" || id == "none" || id == "external";
+  return id == "nav@1" || id == "none" || id == "external" || id == "pose";
 }
 
 bool spawn_policy_known(const std::string &policy) {
@@ -693,7 +695,7 @@ std::string check_world_rules(const world_rules &r) {
       return at + " allows no controller";
     for (const std::string &c : v.controllers)
       if (!vehicle_controller_known(c))
-        return at + " allows controller '" + c + "'; a vehicle has nav@1, none or external";
+        return at + " allows controller '" + c + "'; a vehicle has nav@1, none, external or pose";
   }
 
   if (!spawn_policy_known(r.spawns.policy))
@@ -743,7 +745,7 @@ std::string parse_world_block(const Value &content, world_rules &rules,
       continue;
     if (key == "vehicles") {
       if (std::string e = parse_vehicles(v, rules.vehicles, rules.vehicle_intents,
-                                         rules.vehicle_starts, warnings);
+                                         rules.vehicle_poses, rules.vehicle_starts, warnings);
           !e.empty())
         return e;
       continue;

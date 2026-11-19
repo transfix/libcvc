@@ -16,7 +16,8 @@
 // - pycvc.WorldEntities: the running world's entities (its vehicles, WorldVehicles), from
 //   AriApp.entities() or pycvc.world_entities(app, runtime) over a "cvc.ariadne.AppRuntime"
 //   capsule (a GL host's: pycvc_gl.AriRuntime.app_runtime_capsule()). It lists, spawns and
-//   removes them, and sets their intents (set_intent: a steer and acceleration, a force).
+//   removes them, sets their intents (set_intent: a steer and acceleration, a force), and places
+//   the `pose` entities an outside simulation runs (set_pose, set_poses: no plant integrates them).
 //
 // The GIL: frame()/step()/load()/run_program's drain and wait_idle() release it, so a Python
 // function the document calls (which takes it back) and an async function on a pool thread run.
@@ -87,9 +88,9 @@ host_function make_host_function(const std::string &name, PyObject *fn, bool is_
 
 // A world's entities for a Python host (WorldVehicles): over an AppRuntime it does not own, finding
 // the running world again on each call, so it follows a reload. list(), spawn() and despawn() run
-// on the thread that drains the runtime (a frame hook, a host function); set_intent(), intent()
-// and clear_intent() from any thread while the document is loaded. Without a world with vehicles,
-// list() is empty and the rest return False / 0.
+// on the thread that drains the runtime (a frame hook, a host function); set_intent(), intent(),
+// clear_intent(), set_pose(), set_poses() and pose() from any thread while the document is loaded.
+// Without a world with vehicles, list() is empty and the rest return False / 0 / None.
 class WorldEntities {
 public:
   WorldEntities(std::shared_ptr<cvc::app> app, cvc::ariadne::AppRuntime *rt)
@@ -154,6 +155,8 @@ public:
         put(d, "max_accel", PyFloat_FromDouble(body.max_accel));
         put(d, "max_decel", PyFloat_FromDouble(body.max_decel));
         put(d, "max_speed", PyFloat_FromDouble(body.max_speed));
+        put(d, "posed", PyBool_FromLong(e.posed ? 1 : 0));
+        put(d, "pose", e.posed ? pose_dict(e.pose) : (Py_INCREF(Py_None), Py_None));
         PyList_Append(out, d);
         Py_DECREF(d);
       }
@@ -252,6 +255,96 @@ public:
     cvc::ariadne::WorldVehicles *v = vehicles();
     return v && v->clear_intent(id);
   }
+  // A `pose` entity's pose (entity_pose): (x, y) its chassis's centre in world metres, or its rear
+  // axle with rear_axle=True; z None (standing on the ground) or metres; heading, pitch and roll in
+  // rad; speed (m/s, its wheels roll at it) and steer (rad, + left); t None, or the time (s) of the
+  // simulation that put it there (timed poses are drawn between the last two). Taken at the next
+  // physics step. False for an id that is not a `pose` entity; RuntimeError for a number that
+  // is not finite.
+  bool set_pose(unsigned long long id, double x, double y, PyObject *z = nullptr,
+                double heading = 0.0, double pitch = 0.0, double roll = 0.0, double speed = 0.0,
+                double steer = 0.0, PyObject *t = nullptr, bool rear_axle = false) {
+    cvc::ariadne::WorldVehicles *v = vehicles();
+    if (!v)
+      return false;
+    cvc::ariadne::entity_pose p;
+    p.x = x;
+    p.y = y;
+    number(z, "z", p.z, "set_pose");
+    p.heading = heading;
+    p.pitch = pitch;
+    p.roll = roll;
+    p.speed = speed;
+    p.steer = steer;
+    number(t, "t", p.time, "set_pose");
+    p.rear_axle = rear_axle;
+    for (const double u : {x, y, heading, pitch, roll, speed, steer})
+      if (!std::isfinite(u))
+        throw std::invalid_argument("pycvc.WorldEntities.set_pose: x, y, the angles, speed and "
+                                    "steer must be finite");
+    return v->set_pose(id, p);
+  }
+  // Many poses at once, under one lock: `ids` (N whole numbers) and `poses`, N rows of 2 to 9
+  // numbers, x y [z heading pitch roll speed steer t] (NaN for z or t: not given; a short row
+  // leaves the rest at set_pose's defaults), a numpy array or nested sequences. How many it took
+  // (a row for an id that is not a `pose` entity, or with a number that is not finite, is left).
+  unsigned long long set_poses(PyObject *ids, PyObject *poses, bool rear_axle = false) {
+    cvc::ariadne::WorldVehicles *v = vehicles();
+    if (!v)
+      return 0;
+    PyArrayObject *ia = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(ids, NPY_UINT64, 1, 1, NPY_ARRAY_IN_ARRAY | NPY_ARRAY_FORCECAST));
+    if (!ia) {
+      PyErr_Clear();
+      throw std::invalid_argument("pycvc.WorldEntities.set_poses: ids must be N whole numbers");
+    }
+    PyArrayObject *pa = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(poses, NPY_DOUBLE, 2, 2, NPY_ARRAY_IN_ARRAY | NPY_ARRAY_FORCECAST));
+    if (!pa) {
+      Py_DECREF(ia);
+      PyErr_Clear();
+      throw std::invalid_argument("pycvc.WorldEntities.set_poses: poses must be N rows of 2 to 9 "
+                                  "numbers");
+    }
+    const npy_intp n = PyArray_DIM(ia, 0), rows = PyArray_DIM(pa, 0), cols = PyArray_DIM(pa, 1);
+    if (rows != n || cols < 2 || cols > 9) {
+      Py_DECREF(ia);
+      Py_DECREF(pa);
+      throw std::invalid_argument("pycvc.WorldEntities.set_poses: poses must be one row of 2 to 9 "
+                                  "numbers per id");
+    }
+    const auto *id = static_cast<const unsigned long long *>(PyArray_DATA(ia));
+    const auto *m = static_cast<const double *>(PyArray_DATA(pa));
+    std::vector<cvc::ariadne::entity_pose_update> batch(static_cast<std::size_t>(n));
+    for (npy_intp i = 0; i < n; ++i) {
+      cvc::ariadne::entity_pose &p = batch[static_cast<std::size_t>(i)].pose;
+      batch[static_cast<std::size_t>(i)].id = id[i];
+      double *field[9] = {&p.x, &p.y, &p.z, &p.heading, &p.pitch, &p.roll, &p.speed, &p.steer,
+                          &p.time};
+      for (npy_intp c = 0; c < cols; ++c)
+        *field[c] = m[i * cols + c];
+      p.rear_axle = rear_axle;
+    }
+    Py_DECREF(ia);
+    Py_DECREF(pa);
+    return v->set_poses(batch);
+  }
+  // The pose last given to entity `id` (a dict as set_pose's arguments), or None.
+  PyObject *pose(unsigned long long id) const {
+    cvc::ariadne::WorldVehicles *v = vehicles();
+    cvc::ariadne::entity_pose p;
+    if (!v || !v->pose(id, p))
+      Py_RETURN_NONE;
+    return pose_dict(p);
+  }
+  // How far (m) a pose may be from the last for the entity to move there (farther: at once).
+  bool set_pose_jump(double metres) {
+    cvc::ariadne::WorldVehicles *v = vehicles();
+    if (!v)
+      return false;
+    v->set_pose_jump(metres);
+    return true;
+  }
   // Entity `id`'s goal (world metres), which nav@1 drives to; False for an id that is not one.
   bool set_goal(unsigned long long id, double x, double y) {
     cvc::ariadne::WorldVehicles *v = vehicles();
@@ -308,14 +401,34 @@ private:
     put(d, "force_steers", PyBool_FromLong(in.force_steers ? 1 : 0));
     return d;
   }
+  static PyObject *pose_dict(const cvc::ariadne::entity_pose &p) {
+    PyObject *d = PyDict_New();
+    const auto opt = [](double v) {
+      if (std::isnan(v))
+        Py_RETURN_NONE;
+      return PyFloat_FromDouble(v);
+    };
+    put(d, "x", PyFloat_FromDouble(p.x));
+    put(d, "y", PyFloat_FromDouble(p.y));
+    put(d, "z", opt(p.z));
+    put(d, "heading", PyFloat_FromDouble(p.heading));
+    put(d, "pitch", PyFloat_FromDouble(p.pitch));
+    put(d, "roll", PyFloat_FromDouble(p.roll));
+    put(d, "speed", PyFloat_FromDouble(p.speed));
+    put(d, "steer", PyFloat_FromDouble(p.steer));
+    put(d, "t", opt(p.time));
+    put(d, "rear_axle", PyBool_FromLong(p.rear_axle ? 1 : 0));
+    return d;
+  }
   // A Python number into `out`: false for None (not given); throws for anything else.
-  static bool number(PyObject *o, const char *name, double &out) {
+  static bool number(PyObject *o, const char *name, double &out,
+                     const char *who = "set_intent") {
     if (!o || o == Py_None)
       return false;
     const double x = PyFloat_AsDouble(o);
     if (PyErr_Occurred() || !std::isfinite(x)) {
       PyErr_Clear();
-      throw std::invalid_argument(std::string("pycvc.WorldEntities.set_intent: ") + name +
+      throw std::invalid_argument(std::string("pycvc.WorldEntities.") + who + ": " + name +
                                   " must be a finite number or None");
     }
     out = x;
@@ -504,6 +617,8 @@ host_function make_host_function(const std::string &name, PyObject *fn, bool is_
 %newobject pycvc::world_entities;
 %feature("kwargs") WorldEntities::spawn;
 %feature("kwargs") WorldEntities::set_intent;
+%feature("kwargs") WorldEntities::set_pose;
+%feature("kwargs") WorldEntities::set_poses;
 %nodefaultctor WorldEntities;
 class WorldEntities {
 public:
@@ -519,6 +634,12 @@ public:
                   bool force_steers = true);
   PyObject *intent(unsigned long long id) const;
   bool clear_intent(unsigned long long id);
+  bool set_pose(unsigned long long id, double x, double y, PyObject *z = nullptr,
+                double heading = 0.0, double pitch = 0.0, double roll = 0.0, double speed = 0.0,
+                double steer = 0.0, PyObject *t = nullptr, bool rear_axle = false);
+  unsigned long long set_poses(PyObject *ids, PyObject *poses, bool rear_axle = false);
+  PyObject *pose(unsigned long long id) const;
+  bool set_pose_jump(double metres);
   bool set_goal(unsigned long long id, double x, double y);
   bool set_wander(bool wander);
   PyObject *grid() const;
