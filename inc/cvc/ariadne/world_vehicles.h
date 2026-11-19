@@ -98,7 +98,8 @@ physics::dyn_boat_desc boat_desc_of(const vehicle_archetype &a, double mass = 0.
 // name without an extension its .glb: TacticalBoat, TacticalBoat.glb), where the vehicle-*
 // cvcpkg packages install them: beside $CVC_NAV_BUNDLE (in it, or
 // in its ../shared), then in share/cvc-scenes/shared and share/cvc-scenes/*/ under $CVC_PREFIX,
-// $CVCPKG_PREFIX, $CONDA_PREFIX and the running program's prefix. "" when there is none.
+// $CVCPKG_PREFIX, $CONDA_PREFIX and the running program's prefix (in the browser, the file
+// system's root, where a web build preloads them). "" when there is none.
 std::string find_vehicle_model(const std::string &name);
 
 struct SceneAsset;

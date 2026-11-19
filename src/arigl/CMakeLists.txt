@@ -353,6 +353,24 @@ if(EMSCRIPTEN)
     if(EXISTS "${_arigl_examples}/data") # the FEM gallery's datasets
       target_link_options(arigl PRIVATE "--preload-file=${_arigl_examples}/data@/data")
     endif()
+    # The vehicle models the gallery ships: each .glb in CVC_WASM_VEHICLE_MODELS (a cvc-scenes
+    # `shared` directory, where the vehicle-humvee and vehicle-tactical-boat packages install;
+    # examples/web/build-wasm-demo.sh points it at the deps prefix's) at /share/cvc-scenes/shared/,
+    # where cvc::ariadne::find_vehicle_model looks in the browser. So terrain_lab's tactical boat
+    # and its world vehicles draw as their models; without them, as the boat's hull and the
+    # vehicles' boxes.
+    if(CVC_WASM_VEHICLE_MODELS AND IS_DIRECTORY "${CVC_WASM_VEHICLE_MODELS}")
+      file(GLOB _arigl_vehicle_models "${CVC_WASM_VEHICLE_MODELS}/*.glb")
+      foreach(_model IN LISTS _arigl_vehicle_models)
+        get_filename_component(_model_name "${_model}" NAME)
+        target_link_options(arigl PRIVATE
+                            "--preload-file=${_model}@/share/cvc-scenes/shared/${_model_name}")
+      endforeach()
+      list(LENGTH _arigl_vehicle_models _arigl_vehicle_model_count)
+      message(STATUS "arigl wasm: ${_arigl_vehicle_model_count} vehicle model(s) from "
+                     "${CVC_WASM_VEHICLE_MODELS}")
+      set_property(TARGET arigl APPEND PROPERTY LINK_DEPENDS ${_arigl_vehicle_models})
+    endif()
     # Re-embed when a document or component changes.
     file(GLOB _arigl_embedded CONFIGURE_DEPENDS "${_arigl_examples}/ariadne/documents/*.ari"
          "${_arigl_components}/*.ari")
