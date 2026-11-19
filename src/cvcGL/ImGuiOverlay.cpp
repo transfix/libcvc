@@ -104,6 +104,7 @@ EM_JS(void, cvcgl_ime_install, (const char *sel), {
     st.last = SENT;
     try { inp.setSelectionRange(SENT.length, SENT.length); } catch (e) {}
   }
+  st.reset = reset;
   function sync() {
     var cur = inp.value, prev = st.last, p = 0, n = Math.min(cur.length, prev.length);
     while (p < n && cur.charCodeAt(p) == prev.charCodeAt(p))
@@ -139,6 +140,7 @@ EM_JS(void, cvcgl_ime_install, (const char *sel), {
     inp.focus(); // and the browser scrolls it, at the field's caret, into view
   };
   st.close = function() {
+    reset(); // nothing typed stays in the page's field (a password least of all)
     if (document.activeElement != inp)
       return;
     st.mine = true;
@@ -182,12 +184,21 @@ EM_JS(void, cvcgl_ime_install, (const char *sel), {
 
 // ImGui's text-input state, when it changes (Platform_SetImeDataFn): the input goes over the
 // caret, so the browser keeps the field in view above the keyboard, and opens or closes with it.
-EM_JS(void, cvcgl_ime_set, (const char *sel, int want, double x, double y, double h), {
+// For a password field it is type=password: a phone's keyboard then offers no suggestions and
+// learns nothing from it (a text field's autocomplete=off doesn't stop a keyboard's own
+// suggestion strip, which showed the password as it was typed). Whatever was typed is cleared
+// from it when the type changes.
+EM_JS(void, cvcgl_ime_set, (const char *sel, int want, double x, double y, double h, int pw), {
   var el = document.querySelector(UTF8ToString(sel)) || document.getElementById('canvas') ||
            document.querySelector('canvas');
   var st = el && el.__cvcglIme;
   if (!st)
     return;
+  var type = pw ? 'password' : 'text';
+  if (st.inp.type != type) {
+    st.inp.type = type;
+    st.reset();
+  }
   var r = el.getBoundingClientRect(), k = el.width > 0 ? r.width / el.width : 1;
   st.inp.style.left = (r.left + x * k) + 'px';
   st.inp.style.top = (r.top + y * k) + 'px';
@@ -1037,9 +1048,13 @@ ImGuiOverlay::ImGuiOverlay(SceneRenderer &viewer) : m_impl(new Impl) {
   // The system keyboard, for a phone (see the header): ImGui reports here, at the end of each
   // frame where it changed, whether a text field wants text and where its caret is.
   cvcgl_ime_install(kCanvas);
-  pio.Platform_SetImeDataFn = [](ImGuiContext *, ImGuiViewport *, ImGuiPlatformImeData *d) {
+  pio.Platform_SetImeDataFn = [](ImGuiContext *ctx, ImGuiViewport *, ImGuiPlatformImeData *d) {
+    // A password field (input_text with password: true): the hidden input is one too, so the
+    // phone's keyboard neither suggests nor learns what is typed in it.
+    const bool password = ctx && ctx->ActiveId != 0 && ctx->InputTextState.ID == ctx->ActiveId &&
+                          (ctx->InputTextState.Flags & ImGuiInputTextFlags_Password) != 0;
     cvcgl_ime_set(kCanvas, d->WantTextInput || d->WantVisible ? 1 : 0, d->InputPos.x, d->InputPos.y,
-                  d->InputLineHeight);
+                  d->InputLineHeight, password ? 1 : 0);
   };
 #endif
 
