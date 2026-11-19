@@ -441,6 +441,11 @@ void client_registry::write(cvc::app &app, const std::set<std::string> &present)
     mirror(app);
 }
 
+void client_registry::write_name(cvc::app &app, const std::string &pid) {
+  if (const record *rec = record_of(pid))
+    put(app, join(join(room_participant_path(_opt.room, pid), "profile"), "name"), rec->username);
+}
+
 void client_registry::mirror(cvc::app &app) {
   const std::string root = kRoot;
   for (auto it = _mirrored.begin(); it != _mirrored.end();) {

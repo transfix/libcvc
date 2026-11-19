@@ -156,6 +156,10 @@ public:
 
   // Write each PRESENT pid's profile.name from its record, and mirror every record under kRoot.
   void write(cvc::app &app, const std::set<std::string> &present);
+  // Write PID's profile.name from its record now, present or not: a rename is in the room before
+  // anything the client sends after asking for it (a chat post right after room-join, say). The
+  // roster shows no participant until its presence.joined, so an early name shows nothing.
+  void write_name(cvc::app &app, const std::string &pid);
 
   // A requested username cleaned: trimmed, 1-32 bytes of valid UTF-8 with no control characters.
   // False when nothing usable is left.

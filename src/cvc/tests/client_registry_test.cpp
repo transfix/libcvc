@@ -548,3 +548,20 @@ TEST(RconGuard, ThreeWrongTriesLockOutAndTheLockDoubles) {
   g.succeeded("1.2.3.4", "ca");
   EXPECT_EQ(g.wait("1.2.3.4", "ca", 35.0), 0.0);
 }
+
+// A rename's name is in the room at once, before the client's presence.joined has arrived, so a
+// chat post it sends right after asking carries it (arisrvx_bridge_arigl_*).
+TEST(ClientRegistry, ARenamesNameIsWrittenAtOnce) {
+  cvc::app app;
+  reg_t reg(opts());
+  reg.update({link(1, "bob")}, 1.0, "t1");
+  reg_t::refusal why;
+  ASSERT_TRUE(reg.set_username("bob", "Bob", 1.0, why));
+  const std::string name = conf::room_participant_path("r", "bob") + ".profile.name";
+  EXPECT_EQ(value_at(app, name), "<absent>");
+  reg.write_name(app, "bob"); // not present yet
+  EXPECT_EQ(value_at(app, name), "Bob");
+  reg.write_name(app, "nobody"); // no record: nothing
+  EXPECT_EQ(value_at(app, conf::room_participant_path("r", "nobody") + ".profile.name"),
+            "<absent>");
+}

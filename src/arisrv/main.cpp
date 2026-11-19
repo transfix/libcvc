@@ -1768,7 +1768,9 @@ int main(int argc, char **argv) {
         calls->fail(r, why.code, why.message);
         return;
       }
-      clients.write(app, present_pids());
+      // At once, present or not: the call can come before the presence.joined room-join wrote
+      // with it, and what the client sends next (a chat post) must carry the new name.
+      clients.write_name(app, r.pid);
       calls->result(r.pid, r.id, clients.whoami(r.pid));
       return;
     }
@@ -1909,6 +1911,23 @@ int main(int argc, char **argv) {
   // Clients' calls: to the Python program while it runs (it answers on a later step), else
   // answered here. Then the program's replies go out, each to its caller's connection.
   const auto call_step = [&] {
+    // Each client's own profile.name write (one that predates server.set), refused by the gate:
+    // granted as a rename now, every room step, so a client that joins and posts at once posts
+    // under its name, as it did when it wrote the name itself.
+    {
+      std::vector<std::pair<std::string, std::string>> asked;
+      {
+        std::lock_guard<std::mutex> lk(nameRequestsMu);
+        asked.swap(nameRequests);
+      }
+      if (!asked.empty() && clients.identity_key(asked.front().first).empty())
+        clients.update(client_links(), clients_now(), clients_wall()); // asked before a pass saw it
+      for (const auto &[pid, name] : asked) {
+        client_registry::refusal why;
+        if (clients.set_username(pid, name, clients_now(), why, /*make_unique=*/true))
+          clients.write_name(app, pid);
+      }
+    }
     std::vector<cvc::ariadne::conference::room_call_request> in = calls->take();
 #ifdef CVC_ARIADNE_PYTHON
     const bool takes = scriptThread.joinable() && !scriptStopping && !scriptLink.finished();
@@ -2194,17 +2213,6 @@ int main(int argc, char **argv) {
       clients.update(links, now_s, clients_wall());
       for (const client_registry::link_ref &l : clients.take_banned_links())
         kick_link(l);
-      {
-        std::vector<std::pair<std::string, std::string>> asked;
-        {
-          std::lock_guard<std::mutex> lk(nameRequestsMu);
-          asked.swap(nameRequests);
-        }
-        for (const auto &[pid, name] : asked) {
-          client_registry::refusal why;
-          clients.set_username(pid, name, now_s, why, /*make_unique=*/true);
-        }
-      }
       // Without bound writes the names stay the clients' own, as before: no gate keeps them out.
       clients.write(app, bindGate ? present : std::set<std::string>());
       // Each viewer's video rung for its link, to the shaper and to the room (its net.relay.video,
