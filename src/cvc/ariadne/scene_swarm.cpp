@@ -341,6 +341,7 @@ struct SceneSwarm::impl {
 
   static cvc::physics::plant_host_options plant_options() {
     cvc::physics::plant_host_options o;
+    o.world.fixed_dt = cvc::kSimQuantum; // the navigator's tick (cvc::kSimTick) is whole steps
 #if !defined(__EMSCRIPTEN__)
     const unsigned hw = std::thread::hardware_concurrency();
     o.world.threads = hw > 2 ? static_cast<int>(std::min(3u, hw - 2)) : 0;

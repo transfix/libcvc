@@ -578,7 +578,7 @@ class Cars:
             pycvc.nav_sim_world_set_pose(self.sim, i, float(on[i, 0]), float(on[i, 1]), float(h))
         if self.navigator:
             pycvc.nav_sim_world_set_capture_drive_telemetry(self.sim, 1)
-        self.host = pycvc.plant_host(fixed_dt=0.01)
+        self.host = pycvc.plant_host(fixed_dt=QUANTUM)
         if w.geometry is not None:
             self.host.set_geometry(w.geometry)
         self.driving = self.host.use(self.sim, vehicle)
