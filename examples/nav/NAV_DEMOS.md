@@ -18,6 +18,45 @@ sensor rings, fog tiers, captions — the same visual vocabulary as the original
 | **`nav_scrub`** (`examples/ariadne/nav_scrub`) | watch a policy learn: cvc::nav's coef_trainer trains 60 steps on a walled square of city blocks, every checkpoint is deployed there, and an Ariadne document shows checkpoint k beside step 0 (the deployed metric against the step, the loss curve, both runs' Stats and Ledger, their ghosts). The scrubber of [docs/NAV_LAB.md](../../docs/NAV_LAB.md); in the gallery it trains and deploys in the page. |
 | **`nav_finale`** | the flagship: 8 vehicles that already **hold the city map** converge on a drawn **staging line** (Act 1), then split into hue-matched **pursuit packs** chasing 4 hovering labelled targets (Act 2) — per-vehicle **A\* route spines** on the ground bend in place as routes retarget, engagement lines link pursuer to target, act cards narrate, and the PiP minimap draws true-position dots + route lines. Auto-probes `$CVC_NAV_BUNDLE` / `~/scenes/austin_south` for the real Austin bundle; the synthetic fallback says so on the HUD. `--view map` for a top-down ortho answer. |
 
+## The city demos as Ariadne documents
+
+`nav_city_swarm` and `nav_city_drive` are also Ariadne documents that `arigl` runs with no program of
+their own: [`nav_city_swarm.ari`](../ariadne/documents/nav_city_swarm.ari) and
+[`nav_city_drive.ari`](../ariadne/documents/nav_city_drive.ari). The city is the document's `data:`
+block (the scene-austin-south package, or `--bundle DIR`), drawn with its aerial image on the ground
+and on the buildings; the swarm is a `nav_swarm` scene node, and each thing it draws (the vehicles,
+flags, goals, trails, belief walls, the minimap's markers) a `swarm_layer` node under it with its own
+`visible:` and `tags:`; the panels are the shipped `swarm_controls` and `swarm_minimap` components; the
+chase camera, the 2-D map and the capture cameras are the document's `on_tick`
+([ARIADNE.md §5.4, "Swarms"](../../docs/ARIADNE.md)).
+
+```sh
+arigl --net-allow https://cvcpkg.org nav_city_swarm.ari        # Austin from cvcpkg.org, then the cache
+arigl nav_city_swarm.ari --bundle /path/to/austin_south          # a local bundle
+arigl nav_city_drive.ari --bundle /path/to/austin_south --follow 0
+arigl snapshot --mp4 city.mp4 --seconds 20 --width 1280 --height 720 nav_city_swarm.ari --capture orbit --no-ui
+```
+
+Their command lines take the programs' options: `--agents`, `--belief`, `--no-fog`, `--plant`,
+`--seed`, `--hz`, `--follow`, `--capture orbit|fly|follow`, `--map`, `--no-shadows`, `--no-ui`,
+`--no-pip`, and `--bench` (the frame rate on stderr every 120 frames).
+
+They draw the same scenes faster. On a laptop with an RTX 3050 Ti, at 1280 x 720 on the full Austin
+bundle, the navigator keeping its 60 steps a second in all of them:
+
+| | the program | the document |
+|---|---|---|
+| swarm: 800 vehicles, fog, grouped belief | 17 fps (19 without the minimap) | 45 fps (50 without) |
+| drive: 60 Humvees on Jolt | 29 fps | 55 fps |
+
+Where it comes from: the coarse vehicle rungs are decimated from the model welded at its texture
+seams and keep only the points their triangles use (the programs' far rung streamed 262 points a
+vehicle, the document's 115, and its middle rungs a third as many); a rung takes only vehicles big
+enough on screen to need it, so an overview streams no full-detail Humvees; an empty rung and an
+unchanged slot's colours are not sent again; the trails stream every third frame; the minimap
+redraws five times a second (and every frame while you drag in it); and the sun's shadow maps follow
+the camera.
+
 ## Headless pure-C++ companions
 
 This directory also carries three **headless** CLIs that exercise the same `cvc::nav`

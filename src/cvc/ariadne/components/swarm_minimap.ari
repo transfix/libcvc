@@ -1,0 +1,71 @@
+# swarm_minimap.ari — a REUSABLE Ariadne component: a `type: nav_swarm` swarm's minimap, the
+# picture-in-picture nav_city_swarm.cpp and nav_city_drive.cpp drew with a second renderer and an
+# ImGui overlay. It is a map view of the scene (a viewport in mode: map) in a window you drag
+# anywhere, showing the nodes tagged `{tag}` the main view leaves out (main_view: { hide: [{tag}] }):
+# the swarm's dots and rally points (swarm_layer dots / targets). It leaves out `{hide}` (the belief
+# walls), and draws {hz} times a second (5: a redraw of the whole city costs about a frame), every
+# frame while you drag in it.
+#
+# A press near a rally point grabs it, and dragging moves it: its vehicles drive to where it is let go
+# (the swarm's targets.<t>.x/y). A press anywhere else follows the vehicle nearest it (the swarm's
+# follow_at), and the document's chase camera takes it from there. `{grab}` is how near a press must
+# be, as a share of the city's span.
+#
+# Use it:
+#     import: cvc://components/swarm_minimap.ari
+#     windows:
+#       - include: swarm_minimap
+#         args: { swarm: swarm }
+
+units:
+  swarm_minimap:
+    args: { swarm: swarm, view: minimap, title: minimap, id: swarm_minimap, size: "300",
+            tag: minimap, hide: belief, hz: "5", grab: "0.05" }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - type: viewport
+        view: "{view}"
+        mode: map
+        show: ["{tag}"]
+        hide: ["{hide}"]
+        input: pick
+        pick: "{swarm}.minimap.pick"
+        chrome: false
+        shadows: false
+        clear_color: [0.02, 0.03, 0.05]
+        refresh_hz: "{hz}"
+        width: "{size}"
+        height: "{size}"
+        caption: "drag a rally point, or click to follow"
+        on_pick: |
+          (let ((ph (get-attr event "phase"))
+                (hit (get-attr event "hit"))
+                (x 0.0) (y 0.0) (k 0) (n 0) (best -1) (bd 0.0) (r 0.0) (dx 0.0) (dy 0.0)
+                (d 0.0) (dg (int (state-get "{swarm}.drag"))))
+            (if (= ph "up")
+                (state-set "{swarm}.drag" "-1")
+                (if (or (= hit "1") (= hit 1) (= hit true))
+                    (begin
+                      (set x (float (get-attr event "x")))
+                      (set y (float (get-attr event "y")))
+                      (if (= ph "down")
+                          (begin
+                            (set n (int (state-get "{swarm}.targets.count")))
+                            (set r (* {grab} (float (state-get "{swarm}.stats.span"))))
+                            (set bd (* r r))
+                            (while (< k n)
+                              (begin
+                                (set dx (- (float (state-get (str-concat "{swarm}.targets." (str k) ".x"))) x))
+                                (set dy (- (float (state-get (str-concat "{swarm}.targets." (str k) ".y"))) y))
+                                (set d (+ (* dx dx) (* dy dy)))
+                                (if (< d bd) (begin (set bd d) (set best k)))
+                                (set k (+ k 1))))
+                            (if (>= best 0)
+                                (state-set "{swarm}.drag" (str best))
+                                (state-set "{swarm}.follow_at" (str-concat (str x) "," (str y)))))
+                          (if (>= dg 0)
+                              (begin
+                                (state-set (str-concat "{swarm}.targets." (str dg) ".x") (str x))
+                                (state-set (str-concat "{swarm}.targets." (str dg) ".y") (str y))))))
+                    nil)))
