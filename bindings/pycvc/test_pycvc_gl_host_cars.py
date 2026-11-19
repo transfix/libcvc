@@ -123,4 +123,21 @@ cars.reset(seed=5)
 check(len(cars.ids) == 4 and len(host.entities.list()) == 4, "reset: four again, the old ones gone")
 
 host.close()
+
+# The template on a world document: --world-doc loads it as the host's document and drives its cars
+# with HostCars, headless here; a drawn run shows the document's world and vehicles.
+from pycvc_gl import cars_template as T  # noqa: E402
+
+out = os.path.join(tmp, "world_run.npz")
+rc = C.run(T.controller, T.PARAMS,
+           argv=["--headless", "--frames", "30", "--world-doc", path, "--cars", "3", "--log", out])
+check(rc == 0 and os.path.exists(out), f"--world-doc runs the template headless ({rc})")
+z = np.load(out)
+meta = __import__("json").loads(str(z["meta"]))
+check(z["x"].shape[1] == 3 and meta["world"]["source"] == "host", f"and logs it: {meta['world']}")
+moved = float(np.max(np.hypot(z["x"][-1] - z["x"][0], z["y"][-1] - z["y"][0])))
+check(moved > 1.0, f"headless, the world steps lockstep with the template's ticks: {moved:.2f} m")
+rc = C.run(T.controller, T.PARAMS, argv=["--headless", "--frames", "2", "--world-doc", path,
+                                         "--gym", path])  # fmt: skip
+check(rc == 2, "--world-doc and --gym together: refused")
 print(f"test_pycvc_gl_host_cars: {checks} checks OK")

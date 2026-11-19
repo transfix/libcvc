@@ -20,7 +20,9 @@ this module is everything under it:
   spawn points. Your controller runs on it unchanged; ``--gym DOC`` runs the template on it.
 - :class:`HostCars`: the same cars in the world a host's own document runs, so a drawn host shows
   them as the document draws its world: your ``(steer, accel)`` as each car's intent, nav@1
-  otherwise (``pycvc.WorldEntities``).
+  otherwise (``pycvc.WorldEntities``). ``--world-doc DOC`` runs the template on it: DOC is the
+  host's document, drawn as it draws its world and vehicles (headless, the world steps a tick per
+  frame, lockstep).
 - :class:`CarsState`: what a controller reads each tick, as numpy arrays (SI units).
 - :func:`rollout`: a controller's own predicted paths, on nav's bicycle.
 - :func:`local_raster`: the occupancy and signed distance around a car, heading up.
@@ -1377,6 +1379,10 @@ def _parse(argv, doc_default):
     p.add_argument("--gym", default=None, metavar="DOC",
                    help="drive the cars in a world document (pycvc.WorldGym, headless): its world, "
                         "its vehicles (--vehicle names an archetype) and its spawn points")  # fmt: skip
+    p.add_argument("--world-doc", default=None, metavar="DOC",
+                   help="drive the cars in this world document's own world (HostCars), loaded as "
+                        "the host's document: drawn as it draws its world and vehicles "
+                        "(--vehicle names an archetype)")  # fmt: skip
     p.add_argument("--doc", default=doc_default, help=argparse.SUPPRESS)
     ns = p.parse_args(host_ns.rest)
     for k, v in vars(host_ns).items():
@@ -1454,7 +1460,11 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
     host = Host(mode=args.mode, name="cars", width=args.width, height=args.height,
                 component_paths=[COMPONENTS])
     pycvc.data_allow_network(host.app, ["https://cvcpkg.org"])
-    host.load(args.doc)
+    if args.world_doc and args.gym:
+        print("cars: --world-doc and --gym each name the world; give one", file=sys.stderr)
+        host.close()
+        return 2
+    host.load(args.world_doc or args.doc)
     pre = host.prefix
     # The settings: the document's init:, then a params file, then --set, then the flags.
     for k, v in PARAMS_DEFAULTS(params).items():
@@ -1475,6 +1485,24 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
 
     def build(seed=None):
         n = max(1, host.get_int("run.cars", 6))
+        if args.world_doc:
+            # The host's own world: wait for its grid (a frame or a few), then spawn the cars in it.
+            nav = host.get("run.controller", "yours") == "navigator"
+            for _ in range(30):
+                if host.entities.available() and host.entities.grid() is not None:
+                    break
+                host.step(1.0 / 60.0)
+            if isinstance(st.get("cars"), HostCars):  # a rebuild: the old cars go first
+                for i in st["cars"].ids:
+                    host.entities.despawn(int(i))
+            cars = HostCars(host, n, args.vehicle, seed=args.seed if seed is None else seed,
+                            navigator=nav)  # fmt: skip
+            st.update(cars=cars, speed=[], gap=[], coef={}, world=cars.world)
+            if log is not None:
+                log.meta.update(world={"source": "host", "document": str(args.world_doc)}, cars=n,
+                                seed=args.seed if seed is None else seed,
+                                controller="navigator" if nav else "yours")  # fmt: skip
+            return
         if args.gym:
             nav = host.get("run.controller", "yours") == "navigator"
             cars = GymCars(args.gym, n, args.vehicle, seed=args.seed if seed is None else seed,
@@ -1568,7 +1596,11 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
             cars.pull()
             if not host.get_bool("run.paused"):
                 p = {k: host.get_float(f"ctl.{k}", v) for k, v in PARAMS_DEFAULTS(params).items()}
-                for _ in range(ticks_due(dt)):
+                # The host's world steps on its own clock with the frame: one command a frame.
+                # Headless, it steps a tick of world time for each, lockstep, as Cars steps.
+                for _ in range(1 if args.world_doc else ticks_due(dt)):
+                    if args.world_doc and not drawn and hasattr(host.runtime, "step_world"):
+                        host.runtime.step_world(max(1, int(round(DT / QUANTUM))))
                     s = cars.state()
                     info = {}
                     if cars.navigator:
@@ -1594,7 +1626,7 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
             st["frame"] += 1
             if drawn or st["frame"] % 3 == 0:
                 show_rasters(host, cars, controller, cost, st, params)
-            if drawn:
+            if drawn and not args.world_doc:  # a world document draws its world and vehicles
                 if st["frame"] % 15 == 1:
                     show_world(host, cars.world.kind, args.doc, city=False)
                 update_scene(host, cars, st)
