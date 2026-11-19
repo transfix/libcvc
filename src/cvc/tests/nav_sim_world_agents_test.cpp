@@ -242,10 +242,40 @@ TEST(NavSimWorldAgents, AddAndRemoveRefuseWhatTheyCannotDo) {
   bad = spec_of(s, 1);
   bad.goal_x = std::nanf("");
   EXPECT_THROW(w.add_agent(bad), std::invalid_argument);
-  w.begin_nav_stats();
-  EXPECT_THROW(w.add_agent(spec_of(s, 1)), std::logic_error);
-  EXPECT_THROW(w.remove_agent(1), std::logic_error);
   EXPECT_EQ(w.size(), 1);
+}
+
+// With nav_stats armed, agents still come and go: an added one is counted from its first step
+// (its own speed mean, the next veh_index), a removed one keeps its record (listed after the
+// agents still here, and in the totals), and the indices after it follow it down.
+TEST(NavSimWorldAgents, NavStatsCountsAgentsThatComeAndGo) {
+  const scene s = make_scene(3);
+  sim_world w = world_of(s, {0, 1});
+  w.begin_nav_stats();
+  step(w, 20);
+  const std::uint64_t third = w.add_agent(spec_of(s, 2));
+  EXPECT_EQ(third, 3u);
+  step(w, 20);
+  cvc::nav::episode_nav_stats ep = w.nav_stats();
+  ASSERT_EQ(ep.per_vehicle.size(), 3u);
+  EXPECT_EQ(ep.n_vehicles, 3);
+  EXPECT_EQ(ep.per_vehicle[2].veh_index, 2);
+  EXPECT_GT(ep.per_vehicle[2].straight_m, 0.0) << "from where it stood toward its goal";
+  EXPECT_GT(ep.per_vehicle[2].total_path_m, 0.0) << "it drove its 20 steps";
+  EXPECT_GT(ep.per_vehicle[0].total_path_m, ep.per_vehicle[2].total_path_m * 0.9)
+      << "the first ran twice as long";
+  // The first leaves: the others are 0 and 1 now; its record stays, finished, after them.
+  ASSERT_TRUE(w.remove_agent(1));
+  step(w, 10);
+  ep = w.nav_stats();
+  ASSERT_EQ(ep.per_vehicle.size(), 3u);
+  EXPECT_EQ(ep.n_vehicles, 3);
+  EXPECT_EQ(ep.per_vehicle[0].veh_index, 1);
+  EXPECT_EQ(ep.per_vehicle[1].veh_index, 2);
+  EXPECT_EQ(ep.per_vehicle[2].veh_index, 0) << "the departed one, after the agents still here";
+  EXPECT_GT(ep.per_vehicle[2].speed_mean, 0.0);
+  EXPECT_EQ(ep.ticks, 50);
+  EXPECT_EQ(w.size(), 2);
 }
 
 TEST(NavSimWorldAgents, EachPolicyDrivesItsOwnAgents) {

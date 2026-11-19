@@ -127,6 +127,10 @@ void nav_stats_collector::begin_episode(int n, double dt_s, const float *start_p
   steer_sat_n_.assign(n_, 0);
   brake_n_.assign(n_, 0);
   touching_.assign(n_, -1);
+  born_.assign(n_, 0);
+  next_index_ = n_;
+  departed_.clear();
+  departed_steps_.clear();
   for (int i = 0; i < n_; ++i) {
     auto &v = ep_.per_vehicle[i];
     v.veh_index = i;
@@ -349,63 +353,87 @@ void nav_stats_collector::step(const float *pos, const float *head, const float 
   ++step_i_;
 }
 
+void nav_stats_collector::finish_vehicle(veh_nav_stats &v, std::size_t i, double steps,
+                                         double elapsed) const {
+  v.convoy_id = conv_[i];
+  v.vehicle_class = cls_[i];
+  v.robot_radius_m = rr_[i];
+  v.mass_kg = mass_[i];
+  v.formation_parent = parent_[i];
+  v.speed_mean = speed_sum_[i] / steps;
+  v.fuel_used = v.accel_integral; // PR 1 proxy
+  v.timed_out = !v.arrived;
+  // formation holding — only when a slot sampler fed samples this episode (else all zero, off)
+  if (slot_err_cnt_[i] > 0) {
+    v.slot_error_mean_m = slot_err_sum_[i] / slot_err_cnt_[i];
+    v.slot_error_max_m = slot_err_max_[i];
+    v.formation_arrived = p_.formation_tol_m > 0 && slot_err_last_[i] < p_.formation_tol_m;
+  }
+  // drive telemetry — the *_mean fields accumulated SUMS in step(); divide the copy by the tick
+  // count. Peaks (mu_min, mrisk_max, steer_abs_max) and counts (binding_steps) are already final.
+  // No drive feed => drive_steps 0, means stay 0 and mu_min stays at the 1e30 sentinel
+  // (serialized null).
+  if (v.drive_steps > 0) {
+    const double dn = static_cast<double>(v.drive_steps);
+    v.alpha_mean /= dn;
+    v.beta_mean /= dn;
+    v.gamma_mean /= dn;
+    v.mu_mean /= dn;
+    v.mrisk_mean /= dn;
+    v.ext_force_mean /= dn;
+    v.steer_abs_mean /= dn;
+    v.lam_soft_mean /= dn;
+    v.lam_hard_mean /= dn;
+    v.curvature_abs_mean /= dn;
+  }
+  const double used_t = v.arrived ? v.time_to_goal_s : elapsed;
+  bool over = false;
+  if (budget_.time_budget_s > 0 && used_t > budget_.time_budget_s)
+    over = true;
+  if (budget_.eta_multiple > 0 && budget_.speed_ref_mps > 0) {
+    const double eta = budget_.eta_multiple * v.straight_m / budget_.speed_ref_mps;
+    if (used_t > eta)
+      over = true;
+  }
+  if (budget_.fuel_budget > 0 && v.fuel_used > budget_.fuel_budget)
+    over = true;
+  v.over_budget = over;
+  if (v.energy_tracked)
+    v.energy_per_km = v.total_path_m > 0 ? v.energy_J / (v.total_path_m / 1000.0) : 0.0;
+  if (v.plant_tracked) { // the plant ledger: the means were sums; divide the copy
+    const double pn = static_cast<double>(v.plant_steps);
+    v.steer_cmd_abs_mean /= pn;
+    v.accel_cmd_mean /= pn;
+    v.steer_sat_share = steer_sat_n_[i] / pn;
+    v.brake_share = brake_n_[i] / pn;
+  }
+}
+
 episode_nav_stats nav_stats_collector::finish() const {
   // Non-destructive: reduce a COPY of the accumulators, so finish() is a repeatable running
   // snapshot (callers poll it every tick) and step() can keep accumulating afterwards.
   episode_nav_stats ep = ep_;
   ep.ticks = step_i_;
   const double steps = step_i_ > 0 ? (double)step_i_ : 1.0;
-  const double elapsed = step_i_ * dt_;
+  // Each vehicle here finished over its own steps (begin_episode's over all of them), then the
+  // departed ones (already finished) after them; the totals over every vehicle, here or gone.
+  double vehicle_steps = 0.0;
+  for (int i = 0; i < n_; ++i) {
+    const long own = step_i_ - born_[static_cast<std::size_t>(i)];
+    const double vs = born_[static_cast<std::size_t>(i)] == 0 ? steps : (own > 0 ? own : 1.0);
+    finish_vehicle(ep.per_vehicle[i], static_cast<std::size_t>(i), vs, own * dt_);
+    vehicle_steps += vs;
+  }
+  for (std::size_t k = 0; k < departed_.size(); ++k) {
+    ep.per_vehicle.push_back(departed_[k]);
+    vehicle_steps += static_cast<double>(departed_steps_[k] > 0 ? departed_steps_[k] : 1);
+  }
+  const int count = static_cast<int>(ep.per_vehicle.size());
+  ep.n_vehicles = count;
   int arrived = 0, npen = 0, contacts = 0;
   double ttg_sum = 0, makespan = 0, ratio_sum = 0, turn_sum = 0, fuel_sum = 0;
   int ratio_n = 0;
-  for (int i = 0; i < n_; ++i) {
-    auto &v = ep.per_vehicle[i];
-    v.convoy_id = conv_[i];
-    v.vehicle_class = cls_[i];
-    v.robot_radius_m = rr_[i];
-    v.mass_kg = mass_[i];
-    v.formation_parent = parent_[i];
-    v.speed_mean = speed_sum_[i] / steps;
-    v.fuel_used = v.accel_integral; // PR 1 proxy
-    v.timed_out = !v.arrived;
-    // formation holding — only when a slot sampler fed samples this episode (else all zero, off)
-    if (slot_err_cnt_[i] > 0) {
-      v.slot_error_mean_m = slot_err_sum_[i] / slot_err_cnt_[i];
-      v.slot_error_max_m = slot_err_max_[i];
-      v.formation_arrived = p_.formation_tol_m > 0 && slot_err_last_[i] < p_.formation_tol_m;
-    }
-    // drive telemetry — the *_mean fields accumulated SUMS in step(); divide the copy by the tick
-    // count. Peaks (mu_min, mrisk_max, steer_abs_max) and counts (binding_steps) are already final.
-    // No drive feed => drive_steps 0, means stay 0 and mu_min stays at the 1e30 sentinel
-    // (serialized null).
-    if (v.drive_steps > 0) {
-      const double dn = static_cast<double>(v.drive_steps);
-      v.alpha_mean /= dn;
-      v.beta_mean /= dn;
-      v.gamma_mean /= dn;
-      v.mu_mean /= dn;
-      v.mrisk_mean /= dn;
-      v.ext_force_mean /= dn;
-      v.steer_abs_mean /= dn;
-      v.lam_soft_mean /= dn;
-      v.lam_hard_mean /= dn;
-      v.curvature_abs_mean /= dn;
-    }
-
-    const double used_t = v.arrived ? v.time_to_goal_s : elapsed;
-    bool over = false;
-    if (budget_.time_budget_s > 0 && used_t > budget_.time_budget_s)
-      over = true;
-    if (budget_.eta_multiple > 0 && budget_.speed_ref_mps > 0) {
-      const double eta = budget_.eta_multiple * v.straight_m / budget_.speed_ref_mps;
-      if (used_t > eta)
-        over = true;
-    }
-    if (budget_.fuel_budget > 0 && v.fuel_used > budget_.fuel_budget)
-      over = true;
-    v.over_budget = over;
-
+  for (const veh_nav_stats &v : ep.per_vehicle) {
     if (v.arrived) {
       ++arrived;
       ttg_sum += v.time_to_goal_s;
@@ -421,7 +449,6 @@ episode_nav_stats nav_stats_collector::finish() const {
     turn_sum += v.turn_total_rad;
     fuel_sum += v.fuel_used;
     if (v.energy_tracked) {
-      v.energy_per_km = v.total_path_m > 0 ? v.energy_J / (v.total_path_m / 1000.0) : 0.0;
       ep.energy_tracked = true;
       ep.total_energy_J += v.energy_J;
       ep.total_building_contacts += v.building_contacts;
@@ -430,12 +457,7 @@ episode_nav_stats nav_stats_collector::finish() const {
       ep.terrain_tracked = true;
       ep.total_infeasible_slope_steps += v.infeasible_slope_steps;
     }
-    if (v.plant_tracked) { // the plant ledger: the means were sums; divide the copy
-      const double pn = static_cast<double>(v.plant_steps);
-      v.steer_cmd_abs_mean /= pn;
-      v.accel_cmd_mean /= pn;
-      v.steer_sat_share = steer_sat_n_[i] / pn;
-      v.brake_share = brake_n_[i] / pn;
+    if (v.plant_tracked) {
       ep.plant_measured =
           ep.plant_tracked ? ep.plant_measured & v.plant_measured : v.plant_measured;
       ep.plant_tracked = true;
@@ -450,17 +472,96 @@ episode_nav_stats nav_stats_collector::finish() const {
   ep.arrived = arrived;
   ep.makespan_s = makespan;
   ep.mean_ttg_s = arrived > 0 ? ttg_sum / arrived : 0;
-  ep.penetration_pct = n_ > 0 ? 100.0 * npen / (n_ * steps) : 0;
+  ep.penetration_pct = count > 0 ? 100.0 * npen / vehicle_steps : 0;
   ep.total_veh_contacts = contacts;
   ep.mean_path_ratio = ratio_n > 0 ? ratio_sum / ratio_n : 0;
-  ep.mean_turn_total_rad = n_ > 0 ? turn_sum / n_ : 0;
+  ep.mean_turn_total_rad = count > 0 ? turn_sum / count : 0;
   ep.total_fuel = fuel_sum;
   bool any_over = false;
   for (const auto &v : ep.per_vehicle)
     if (v.over_budget)
       any_over = true;
-  ep.success = (n_ > 0) && (arrived == n_) && !any_over;
+  ep.success = (count > 0) && (arrived == count) && !any_over;
   return ep;
+}
+
+void nav_stats_collector::add_agent(const float *start_pos, const float *goal_pos) {
+  const auto push2 = [](std::vector<float> &v, const float *p) {
+    v.push_back(p[0]);
+    v.push_back(p[1]);
+  };
+  push2(start_pos_, start_pos);
+  push2(goal_pos_, goal_pos);
+  push2(prev_pos_, start_pos);
+  prev_head_.push_back(0.0f);
+  prev_spd_.push_back(0.0f);
+  prev_mode_.push_back(0);
+  speed_sum_.push_back(0.0);
+  conv_.push_back(0);
+  cls_.push_back(0);
+  rr_.push_back(0.0);
+  mass_.push_back(0.0);
+  parent_.push_back(-1);
+  slot_err_sum_.push_back(0.0);
+  slot_err_max_.push_back(0.0);
+  slot_err_last_.push_back(0.0);
+  slot_err_cnt_.push_back(0);
+  tipped_n_.push_back(0);
+  steer_sat_n_.push_back(0);
+  brake_n_.push_back(0);
+  touching_.push_back(-1);
+  born_.push_back(step_i_);
+  veh_nav_stats v;
+  v.veh_index = next_index_++;
+  v.straight_m = std::hypot(static_cast<double>(goal_pos[0] - start_pos[0]),
+                            static_cast<double>(goal_pos[1] - start_pos[1]));
+  v.closest_approach_m = v.straight_m;
+  ep_.per_vehicle.push_back(v);
+  ++n_;
+}
+
+bool nav_stats_collector::remove_agent(int i) {
+  if (i < 0 || i >= n_)
+    return false;
+  const auto u = static_cast<std::size_t>(i);
+  const long own = step_i_ - born_[u];
+  veh_nav_stats done = ep_.per_vehicle[u];
+  finish_vehicle(done, u, own > 0 ? static_cast<double>(own) : 1.0, own * dt_);
+  departed_.push_back(done);
+  departed_steps_.push_back(own);
+  const auto erase1 = [u](auto &v) { v.erase(v.begin() + static_cast<std::ptrdiff_t>(u)); };
+  const auto erase2 = [u](std::vector<float> &v) {
+    v.erase(v.begin() + static_cast<std::ptrdiff_t>(2 * u),
+            v.begin() + static_cast<std::ptrdiff_t>(2 * u + 2));
+  };
+  erase2(start_pos_);
+  erase2(goal_pos_);
+  erase2(prev_pos_);
+  erase1(prev_head_);
+  erase1(prev_spd_);
+  erase1(prev_mode_);
+  erase1(speed_sum_);
+  erase1(conv_);
+  erase1(cls_);
+  erase1(rr_);
+  erase1(mass_);
+  erase1(parent_);
+  erase1(slot_err_sum_);
+  erase1(slot_err_max_);
+  erase1(slot_err_last_);
+  erase1(slot_err_cnt_);
+  erase1(tipped_n_);
+  erase1(steer_sat_n_);
+  erase1(brake_n_);
+  erase1(touching_);
+  erase1(born_);
+  erase1(ep_.per_vehicle);
+  --n_;
+  // Indices that named another vehicle follow it down; one that named the departed is gone.
+  for (std::vector<int> *refs : {&touching_, &parent_})
+    for (int &j : *refs)
+      j = j == i ? -1 : (j > i ? j - 1 : j);
+  return true;
 }
 
 // ── JSON ────────────────────────────────────────────────────────────────────
