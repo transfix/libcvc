@@ -81,6 +81,35 @@ def render(template: str, **subs) -> str:
     return out
 
 
+def sha256_of(path: Path) -> str:
+    """The file's SHA-256, hex, read a megabyte at a time (a demo's wasm is tens of MB)."""
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+# How many leading hex digits of an asset's SHA-256 the page is given: its name in the browser's
+# cache. The page names each download it keeps the same way, from the bytes that came.
+ASSET_HASH_LEN = 16
+
+
+def page_assets(bin_dir: Path, demo: str) -> dict:
+    """The large files a template page loads, by content: {kind: {name, hash, size}} for the
+    <demo>.wasm, the <demo>.data package (when there is one) and the <demo>.js glue. The page keeps
+    each in Cache Storage under its name and hash, so a file whose bytes did not change is not
+    downloaded again however often the gallery is redeployed (a deploy rewrites every file, and
+    GitHub Pages' ETags are file times, so the HTTP cache downloads it all again)."""
+    assets = {}
+    for kind in ("wasm", "data", "js"):
+        path = bin_dir / f"{demo}.{kind}"
+        if path.is_file():
+            assets[kind] = {"name": path.name, "hash": sha256_of(path)[:ASSET_HASH_LEN],
+                            "size": path.stat().st_size}
+    return assets
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--bin", required=True, type=Path, help="built output dir (has <demo>.js/.wasm)")
@@ -158,7 +187,6 @@ def main() -> int:
             # per-demo page
             wasm = args.bin / (demo + ".wasm")
             wasm_mb = max(1, math.ceil(wasm.stat().st_size / 1048576))
-            asset_v = hashlib.sha256(wasm.read_bytes()).hexdigest()[:12]
             shutil.copy2(wasm, ddir / (demo + ".wasm"))
             shutil.copy2(args.bin / (demo + ".js"), ddir / (demo + ".js"))
             # The emscripten --preload-file package (bundle + weights) lands as <demo>.data
@@ -182,12 +210,16 @@ def main() -> int:
                         else:
                             shutil.copy2(src, ddir / rel)
             else:
+                assets = page_assets(args.bin, demo)
                 (ddir / "index.html").write_text(render(
                     demo_tpl,
                     DEMO=demo,
                     DESC=info.get("desc", "a cvcGL WebAssembly example"),
                     WASM_MB=wasm_mb,
-                    ASSET_V=asset_v,
+                    # The wasm's short hash, for templates that cache-bust with ?v= (a downstream
+                    # theme's); this repo's template uses ASSETS.
+                    ASSET_V=assets["wasm"]["hash"][:12],
+                    ASSETS=json.dumps(assets),
                     BOOT=json.dumps(info.get("boot")),
                 ))
             size = f"{wasm_mb} MB"
