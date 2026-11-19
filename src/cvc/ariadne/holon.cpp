@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/scene_world.h>
+#include <cvc/ariadne/world_vehicles.h>
 #include <cvc/physics/world.h>
 #include <exception>
 #include <iterator>
@@ -185,6 +186,9 @@ bool holon::attach_world(SceneWorld *world, std::string *why) {
     next->set_reserve(kv.first, energy[kv.first].reserve);
     kv.second.last_feet = it->second;
   }
+  if (_scene && _scene != world)
+    if (WorldVehicles *v = _scene->vehicles())
+      v->set_movers({}); // the avatars have left that world
   _world = std::move(next);
   _scene = world;
   _scene_world = world ? static_cast<const void *>(&world->world()) : nullptr;
@@ -199,6 +203,15 @@ void holon::scene_step() {
       feet[kv.first] = kv.second.last_feet;
     _world->move_to(_scene->world(), feet);
     _scene_world = &_scene->world();
+  }
+  // The world's navigators steer around the avatars (section 18.4), where they stood after the
+  // last step.
+  if (WorldVehicles *v = _scene->vehicles()) {
+    std::vector<std::array<double, 2>> movers;
+    for (const auto &kv : _participants)
+      if (_world->has_avatar(kv.first))
+        movers.push_back({kv.second.last_feet.position.x, kv.second.last_feet.position.y});
+    v->set_movers(std::move(movers));
   }
   _scene->follow(
       _clock, nullptr,

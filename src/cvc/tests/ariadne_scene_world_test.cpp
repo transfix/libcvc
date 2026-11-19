@@ -5750,3 +5750,69 @@ TEST(AriadneOneWorld, AttachTakesAServerWorldOnTheHolonsQuantum) {
             1e-9)
       << "back in its own world where it stood";
 }
+
+namespace {
+// A navigated car driving west past an avatar standing in its lane, the world run by a server
+// holon: the closest the car's centre came to the avatar, where the car ended, and how far the
+// avatar was moved.
+struct mover_pass {
+  double closest = 1e9, car_x = 0.0, avatar_moved = 0.0;
+};
+mover_pass pass_avatar(bool avoid) {
+  LoadResult r = load_vehicles(kAvoid);
+  EXPECT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  mover_pass out;
+  if (!w)
+    return out;
+  WorldVehicles *v = w->vehicles();
+  v->set_avoid(avoid);
+  v->set_wander(false);
+  w->sync(&warnings);
+  entity_spec a;
+  a.archetype = "car";
+  a.placed = true;
+  a.x = 25.0;
+  a.y = 0.5;
+  a.yaw = 3.14159265358979323846;
+  const std::uint64_t id = v->spawn(a);
+  EXPECT_NE(id, 0u);
+  v->set_goal(id, -30.0, 0.5);
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  EXPECT_TRUE(h.attach_world(w.get(), &why)) << why;
+  cvc::physics::body_state feet;
+  feet.position = {0.0, 0.5, 0.0};
+  h.add_participant("walker", false, feet);
+  for (int i = 0; i < 900; ++i) {
+    h.advance(1.0 / 60.0);
+    const entity_info e = entity(*v, id);
+    const cvc::physics::body_state s = h.state("walker");
+    if (e.placed) {
+      out.closest = std::min(out.closest, std::hypot(e.x - s.position.x, e.y - s.position.y));
+      out.car_x = e.x;
+    }
+  }
+  const cvc::physics::body_state end = h.state("walker");
+  out.avatar_moved = std::hypot(end.position.x, end.position.y - 0.5);
+  return out;
+}
+} // namespace
+
+// The navigators steer around the avatars (section 18.4): a car on nav@1 swings past a person
+// standing in its lane and drives on to its goal, where without avoiding it drives into them.
+TEST(AriadneOneWorld, ANavigatedCarSteersAroundAnAvatar) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const mover_pass on = pass_avatar(true), off = pass_avatar(false);
+  std::printf("  past an avatar: avoiding, closest %.2f m, the car ends at x %.1f, the avatar "
+              "moved %.2f m; not avoiding, %.2f m, x %.1f, moved %.2f m\n",
+              on.closest, on.car_x, on.avatar_moved, off.closest, off.car_x, off.avatar_moved);
+  EXPECT_LT(on.car_x, -20.0) << "the car got past";
+  EXPECT_GT(on.closest, 2.0) << "with room to spare";
+  EXPECT_LT(on.avatar_moved, 0.1) << "and never touched the avatar";
+  EXPECT_GT(off.avatar_moved, on.avatar_moved + 0.5) << "without avoiding, it drove into them";
+}
