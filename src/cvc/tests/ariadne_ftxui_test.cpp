@@ -2961,13 +2961,20 @@ TEST(AriadneFtxui, SettingsDrawsAFlatList) {
     const std::size_t a = line.find(bar), z = line.rfind(bar);
     if (a != std::string::npos && z > a) {
       std::string row = line.substr(a + bar.size(), z - a - bar.size());
+      // A slider's last, partly filled cell (U+2589..U+258F) is a space where the terminal font
+      // has no partial blocks (Windows): read it as one everywhere.
+      for (std::size_t at = row.find("\xE2\x96"); at != std::string::npos;
+           at = row.find("\xE2\x96", at + 1))
+        if (at + 2 < row.size() && static_cast<unsigned char>(row[at + 2]) >= 0x89 &&
+            static_cast<unsigned char>(row[at + 2]) <= 0x8F)
+          row.replace(at, 3, " ");
       row.erase(row.find_last_not_of(' ') + 1);
       body.push_back(row);
     }
     start = nl + 1;
   }
   // Keys first, then the groups (Navigation by its title, then world by its path); the slider's
-  // bar is its value over its range, 12.5 of 0..40.
+  // bar is its value over its range, 12.5 of 0..40 in 6 full cells.
   const std::string full = "\xE2\x96\x88"; // U+2588, a slider's filled cell
   const std::vector<std::string> golden = {
       "name: [alpha]",
@@ -2976,11 +2983,10 @@ TEST(AriadneFtxui, SettingsDrawsAFlatList) {
       "[ reset all ]",
       "nav.mode: < b >",
       "[x] nav.on",
-      "nav.vmax " + full + full + full + full + full + full + "\xE2\x96\x8F" +
-          "              12.5 m/s",
+      "nav.vmax " + full + full + full + full + full + full + "               12.5 m/s",
       "[ reset ]",
       "[world]",
-      "world.seed " + full + "\xE2\x96\x8E" + "                   7",
+      "world.seed " + full + "                    7",
   };
   EXPECT_EQ(body, golden) << t.screen;
 
