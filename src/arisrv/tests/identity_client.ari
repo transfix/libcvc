@@ -1,0 +1,39 @@
+# The client for ctest arisrv_identity (docs/roadmap/ARISRV_IDENTITY.md, ID1): stock arisrv keeps a
+# record of each client under a client id, answers server.whoami and server.set itself, owns each
+# participant's profile.name, and never sends a client its records (arisrv.clients), even one that
+# asks to mirror them. room-join's name request is room_relay_integration_test's (ari test has no
+# room-join).
+meta: { name: client identity on a relay, min_libcvc: 3.7.13 }
+relay:
+  subscribe: [arisrv]
+tests:
+  a_whoami_names_this_client: |
+    (let ((w (room-call "server.whoami")))
+      (assert (string.starts-with (get-attr w "client_id") "c") w)
+      (assert (= (string.length (get-attr w "client_id")) 32) w)
+      (assert (string.starts-with (get-attr w "username") "guest-") w)
+      (assert (not (get-attr w "admin")) w))
+  b_set_renames_it: |
+    (let ((w (room-call "server.set" (dict "username" "  ana "))))
+      (assert (= (get-attr w "username") "ana") w))
+    (assert (= (get-attr (room-call "server.whoami") "username") "ana"))
+  c_set_refuses_what_is_not_a_name: |
+    (assert (= (try (begin (room-call "server.set" (dict "username" "")) "no error")
+                    (catch (RuntimeError e) (get-attr e "code")))
+               "invalid"))
+    (assert (= (try (begin (room-call "server.set" (dict "username" 7)) "no error")
+                    (catch (RuntimeError e) (get-attr e "code")))
+               "invalid"))
+    (assert (= (try (begin (room-call "server.set" (dict "colour" "red")) "no error")
+                    (catch (RuntimeError e) (get-attr e "code")))
+               "invalid"))
+    (assert (= (try (begin (room-call "server.set") "no error")
+                    (catch (RuntimeError e) (get-attr e "code")))
+               "invalid"))
+    (assert (= (try (begin (room-call "server.nothing") "no error")
+                    (catch (RuntimeError e) (get-attr e "code")))
+               "not_found"))
+    (assert (= (get-attr (room-call "server.whoami") "username") "ana"))
+  d_its_records_never_reach_it: |
+    (sleep 1.5)
+    (assert (not (state-exists "arisrv.clients")) (state-json "arisrv"))

@@ -939,6 +939,15 @@ struct ConferenceSession {
                              "token (16-256 of [A-Za-z0-9._~-]); not sending it\n");
         roomToken.clear();
       }
+    } else if (const char *p = std::getenv("CVC_ARIADNE_GUEST_PASSWORD");
+               p != nullptr && *p != '\0') {
+      // The relay's guest password (ARISRV_IDENTITY.md, ID2; a page takes it from #password=),
+      // sent as its hash where a room token goes.
+      if (cvc::valid_guest_password(p))
+        roomToken = cvc::guest_password_bearer(p);
+      else
+        std::fprintf(stderr, "arigl: conference: CVC_ARIADNE_GUEST_PASSWORD is not a password "
+                             "(1 to 256 bytes, no control characters); not sending it\n");
     }
     // Scoped to this relay, so two relays (two operators) cannot match one device's ids.
     const std::string deviceId = cvc::scoped_device_id(cvc::default_device_id(), relayUrl);

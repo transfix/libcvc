@@ -107,6 +107,35 @@ std::string resolve_token(const std::string &spec, const std::string &doc_path, 
   return std::string();
 }
 
+// password: env:NAME or file:PATH (its first line, as it is but its line ending), the relay's guest
+// password (docs/roadmap/ARISRV_IDENTITY.md, ID2), presented as its hash
+// (guest_password_bearer) where a room token goes; "" or the problem.
+std::string resolve_password(const std::string &spec, const std::string &doc_path,
+                             std::string &out) {
+  std::string pw;
+  if (starts_with(spec, "env:")) {
+    const char *v = std::getenv(spec.substr(4).c_str());
+    if (!v || !*v)
+      return "relay: password: " + spec + ": the variable is not set";
+    pw = v;
+  } else if (starts_with(spec, "file:")) {
+    const std::string path = beside(doc_path, spec.substr(5));
+    std::ifstream in(path, std::ios::binary);
+    if (!in || !std::getline(in, pw))
+      return "relay: password: cannot read '" + path + "'";
+    while (!pw.empty() && (pw.back() == '\r' || pw.back() == '\n'))
+      pw.pop_back();
+  } else {
+    return "relay: password: is env:NAME or file:PATH, never the password itself (a document is "
+           "read by whoever has it)";
+  }
+  if (!cvc::valid_guest_password(pw))
+    return "relay: password: " + spec +
+           " is not a password (1 to 256 bytes, no control characters)";
+  out = cvc::guest_password_bearer(pw);
+  return std::string();
+}
+
 // A participant's node id: `name` as a C identifier, plus a random per-launch suffix (the relay
 // drops a write whose origin and sequence it has seen, so a relaunch under one id would be
 // ignored, as arigl's ConferenceSession explains).
@@ -133,9 +162,13 @@ std::string relay_join_from_block(const Value &block, const std::string &doc_pat
   } else if (block.is_map()) {
     for (const Value::Entry &e : block.entries) {
       const std::string &k = e.first;
-      if (k != "url" && k != "room" && k != "token" && k != "ca" && k != "subscribe")
-        return "relay: unknown key '" + k + "' (it takes url, room, token, ca, subscribe)";
+      if (k != "url" && k != "room" && k != "token" && k != "password" && k != "ca" &&
+          k != "subscribe")
+        return "relay: unknown key '" + k +
+               "' (it takes url, room, token, password, ca, subscribe)";
     }
+    if (block.find("token") && block.find("password"))
+      return "relay: token: and password: are two ways to say who may join; give one";
     if (const Value *v = block.find("url"))
       out.url = v->as_string();
     if (const Value *v = block.find("room"); v && !v->as_string().empty())
@@ -143,6 +176,9 @@ std::string relay_join_from_block(const Value &block, const std::string &doc_pat
     if (const Value *v = block.find("token"))
       if (const std::string e = resolve_token(v->as_string(), doc_path, out.token, out.credential);
           !e.empty())
+        return e;
+    if (const Value *v = block.find("password"))
+      if (const std::string e = resolve_password(v->as_string(), doc_path, out.token); !e.empty())
         return e;
     if (const Value *v = block.find("ca")) {
       const std::string path = beside(doc_path, v->as_string());
@@ -898,9 +934,14 @@ std::shared_ptr<relay_session> attach_host_relay(cvc::app &app, AppRuntime &rt,
       return nullptr;
     }
   }
-  if (!o.relay.empty() && cli.credential.empty())
+  if (!o.relay.empty() && cli.credential.empty()) {
     if (const char *t = std::getenv("CVC_ARIADNE_ROOM_TOKEN"); t && *t)
       cli.token = t;
+    // A relay's guest password (ID2), as its hash, where no room token is given.
+    else if (const char *p = std::getenv("CVC_ARIADNE_GUEST_PASSWORD");
+             p && *p && cvc::valid_guest_password(p))
+      cli.token = cvc::guest_password_bearer(p);
+  }
   if (!join) {
     register_relay_block(app);
     return std::make_shared<relay_session>(app);
