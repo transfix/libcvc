@@ -47,10 +47,10 @@ class SceneWorld;
 //
 // The agents are the world's vehicles (WorldVehicles), each a Jolt vehicle in the scene's own
 // physics world. A step gives each its command for one navigator tick (gym_options::tick, by
-// default cvc::kSimTick, 7 quanta of 1/120 s: a whole number of physics steps): the steering's bicycle angle
-// (rad, + left) and the acceleration along its heading (m/s^2). A command that is not finite leaves
-// that agent to its controller for the tick (nav@1, the navigator, drives it to its goal; none
-// holds it still), so NaN everywhere is the navigator's baseline.
+// default cvc::kSimTick, 7 quanta of 1/120 s: a whole number of physics steps): the steering's
+// bicycle angle (rad, + left) and the acceleration along its heading (m/s^2). A command that is not
+// finite leaves that agent to its controller for the tick (nav@1, the navigator, drives it to its
+// goal; none holds it still), so NaN everywhere is the navigator's baseline.
 //
 // The world steps on its clock, paused, only by step(): N steps from a reset with one seed and
 // one list of commands give the same world on every run. Each gym has its own app (state tree,

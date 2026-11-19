@@ -174,8 +174,9 @@ class SceneWorld {
 public:
   // A scene with vehicles (world: vehicles:) runs on the simulation hosts' clock (cvc/core/
   // sim_tick.h): app.world_clock() goes to the 1/120 s quantum that the vehicles' tick divides
-  // into, with real time's 0.25 s catch-up, unless it has already ticked (it warns then). Call it before the scene's physics world is made: from_scene does, and a host
-  // that builds the world itself (cvcGL's realize_scene) does too.
+  // into, with real time's 0.25 s catch-up, unless it has already ticked (it warns then). Call it
+  // before the scene's physics world is made: from_scene does, and a host that builds the world
+  // itself (cvcGL's realize_scene) does too.
   static void use_vehicle_clock(cvc::app &app, const Scene &scene,
                                 std::vector<std::string> *warnings = nullptr);
   // The world of `scene` from its spec alone: the node transforms composed, each body node's mesh

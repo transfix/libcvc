@@ -37,9 +37,9 @@
 //     (cvc::physics::plant_host: humvee, roboracer, a list, dynamic[:presets], ...).
 //
 // It steps on the app's world clock, one navigator step every veh.dt of world time (cvc::kSimTick,
-// 7 quanta of the 1/120 s suite quantum), on a worker natively (cvc::nav::sim_thread, the app's compute pool
-// for its kernels) and on the frame's thread in a browser without threads. The frame reads its
-// latest frame (update(), now()).
+// 7 quanta of the 1/120 s suite quantum), on a worker natively (cvc::nav::sim_thread, the app's
+// compute pool for its kernels) and on the frame's thread in a browser without threads. The frame
+// reads its latest frame (update(), now()).
 //
 // Its keys, under the key root (`<prefix>.swarm` for a node with no `keys:`), seeded from the
 // node's props while unset:
