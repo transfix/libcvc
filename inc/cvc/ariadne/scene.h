@@ -550,12 +550,22 @@ struct SceneAsset {
   SceneNode source;
 };
 
+// A document `data:` entry as the scene's nodes and looks name it (data.h's DataSpec, its source
+// made absolute against the document's directory): a vehicle's `look: { data: NAME, file: ... }`
+// and a boat's `model: { data: NAME, file: ... }` read their model out of its package.
+struct SceneData {
+  std::string name; // the entry's name
+  std::string uri;  // its source: cvcpkg://ORG/NAME[@VERSION], https://..., a file or directory
+  std::string path; // its `path:`, the directory inside the package its files are under
+};
+
 struct Scene {
   std::string id; // a `scenes:` entry's name ("" for the document's `scene:`)
   std::vector<SceneNode> nodes;
   // The document's assets (`assets:`), the same list in every scene: what `source: { asset }`
   // names.
   std::vector<SceneAsset> assets;
+  std::vector<SceneData> data; // the document's data: entries (SceneData)
   // main_view: { show, hide } — the tags the MAIN view draws (the untagged nodes always), as a
   // viewport's show: / hide: do. For a document whose "scenes" are tagged groups in one scene.
   bool has_main_view = false;

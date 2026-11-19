@@ -1616,6 +1616,7 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   out.main_show = scene.main_show;
   out.main_hide = scene.main_hide;
   out.entity_labels = scene.entity_labels;
+  out.data = scene.data;
   if (!scene.entity_labels.empty()) // the labels' layer now, so it is this scene's (out.created)
     LabelLayerNode::of(sg);
   // The scene's one wind (O14): its keys before any node reads its wind (scene_wind.h).

@@ -133,6 +133,16 @@ windows:
     size: [370, 300]
     closable: true
 
+# The tactical boat's model, the vehicle-tactical-boat package, pulled from cvcpkg when the boat
+# asks for it (load: lazy), not shipped with the document. Its archive is checked against the
+# registry's sha256 and kept in the data cache. Without the network (arigl --net-allow
+# https://cvcpkg.org; the web gallery allows it) a local install is used, else the boat's hull.
+data:
+  tactical_boat:
+    uri: cvcpkg://cy-pca/vehicle-tactical-boat
+    path: share/cvc-scenes/shared
+    load: lazy
+
 scene:
   chrome: false
   clock: { scale: 1.0, paused: false }
@@ -235,6 +245,7 @@ scene:
       type: boat
       water: water
       preset: tactical
+      model: { data: tactical_boat, file: TacticalBoat.glb }   # its hull until it has loaded
       transform: { position: [0, 170, 0] }
       goal: [40, 150]
     # The clouds: a deck of L-system cumulus scattered over the whole world, drifting and slowly

@@ -1844,7 +1844,16 @@ scene:
     without the package, is its chassis box in the entity's two colours, with a cabin and wheels.
     `look: { model: humvee }` names a model, `file:` a mesh beside the document and `asset:` a
     document asset; `fit: true` orients and scales a file as a model is; `scale:`, `yaw:` and
-    `z:` place it.
+    `z:` place it. `look: { data: NAME, file: FILE }` takes FILE out of the package of the
+    document's `data:` entry NAME (§5.17), so a model comes from cvcpkg rather than with the
+    document, e.g. `data: { humvee: { uri: cvcpkg://cy-pca/vehicle-humvee, path:
+    share/cvc-scenes/shared, load: lazy } }` with `look: { data: humvee, file: Humvee.glb }`. It is
+    fitted unless `fit: false`. The resolved look carries the entry's source and path (`uri`,
+    `subpath`), so it is whole without the document: a client fetches the same package. The view
+    asks the app's data store for the package (`vehicle_model_state`, `vehicle_view.h`) and draws
+    the box while it loads, then the model. When the package cannot load (the host's network is
+    off: `--net-allow https://cvcpkg.org`; no such package), a local install of the file by its
+    name is used (`find_vehicle_model`), else the box.
   - **Entities.** A spawn (`WorldVehicles::spawn`, or the keys below) is an entity with an id,
     an identity (a name, a team, two colours, key/value metadata), a controller and its
     settings. `nav@1` drives it from goal to goal across the world's grid (the scene's

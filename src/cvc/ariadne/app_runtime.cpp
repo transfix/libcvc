@@ -1119,7 +1119,8 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
     } else {
       // A look as a path the view can read wherever it draws: a model found, a document asset's
       // file, a file beside the document.
-      resolve_vehicle_looks(rules.vehicles, verbs_->doc_dir, lr.scene.assets, &warns);
+      resolve_vehicle_looks(rules.vehicles, verbs_->doc_dir, lr.scene.assets, &warns,
+                            lr.scene.data);
       lr.scene.vehicles = rules.vehicles;
       lr.scene.spawns = rules.spawns;
       lr.scene.vehicle_intents = rules.vehicle_intents;

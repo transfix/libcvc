@@ -34,7 +34,8 @@
       "desc": "the Ariadne GL runtime: every .ari demo, switched in place from its Demos menu",
       "card": false,
       "boot": {
-        "args": ["run", "--component-path", "/", "/ariadne/documents/{doc}.ari"],
+        "args": ["run", "--component-path", "/", "--net-allow", "https://cvcpkg.org",
+                 "/ariadne/documents/{doc}.ari"],
         "env": {"CVC_ARIGL_GALLERY": "/gallery.json"},
         "files": {"/gallery.json": "../gallery.json"},
         "doc": "fem_gallery"

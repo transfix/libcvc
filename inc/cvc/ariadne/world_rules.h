@@ -97,8 +97,13 @@ struct avatar_policy {
 // length, standing on the ground under the chassis. With no look:, a humvee is drawn as the
 // Humvee model when it is installed, and as its box otherwise.
 struct vehicle_look {
-  std::string kind; // box, file, asset or model; "" the default (above)
-  std::string path; // the file, the asset's id, or the model's name
+  std::string kind; // box, file, asset, model or data; "" the default (above)
+  std::string path; // the file, the asset's id, the model's name, or (data) the file in the package
+  // data: the document's data: entry it names (`look: { data: NAME, file: FILE }`); then, once
+  // resolve_vehicle_looks has run, the entry's source and its path: inside the package, so the
+  // look is whole wherever it travels (a client has no document): a view loads `uri`
+  // (cvcpkg://ORG/NAME, https://..., a file or directory), keeps `subpath`, and reads `path` there.
+  std::string data, uri, subpath;
   double scale = 1.0, yaw = 0.0, z = 0.0;
   bool fit = false;
   bool operator==(const vehicle_look &) const = default;

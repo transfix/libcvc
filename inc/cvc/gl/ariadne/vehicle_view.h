@@ -82,10 +82,23 @@ cvc::ariadne::SceneNode vehicle_scene_node(const std::string &id,
 // The fitted vehicle models a view keeps (each model read and fitted once): one per view that
 // draws vehicles, made here (a realized scene has one, room_view another).
 std::shared_ptr<vehicle_model_cache> make_vehicle_model_cache();
-// A fitted file look (`look.kind` file, `look.fit`) under `group` as node `id`: the model scaled
-// to the chassis's length, its base `base_z` below the group's origin (the ground under the
-// chassis's centre, negative), turned and lifted by the look's yaw and z, in `color` when it has
-// no texture. False when the model cannot be read (a warning says why); draw the box look then.
+// How far a fitted look's model has got, at a chassis length `length`. A file look with `fit` is
+// ready (read and fitted, once) or failed. A data look (`kind` data: `path` in the package at
+// `uri`, under `subpath`) asks the app's data store for its package (cvc::ariadne::DataStore,
+// loaded once per request and cached), and is pending while it loads: draw the box or the hull
+// meanwhile and ask again on a later frame; then ready, or, when the package cannot load (no
+// network, no such package), a local install of the file by its name
+// (cvc::ariadne::find_vehicle_model), else failed (a warning says why). Any other look has no
+// fitted model: failed. attach_vehicle_model draws a ready one.
+enum class vehicle_model_status { ready, pending, failed };
+vehicle_model_status vehicle_model_state(cvc::app &app, vehicle_model_cache &cache,
+                                         const cvc::ariadne::vehicle_look &look, double length,
+                                         std::vector<std::string> *warnings = nullptr);
+// A fitted file look (`look.kind` file, `look.fit`) or a data look under `group` as node `id`: the
+// model scaled to the chassis's length, its base `base_z` below the group's origin (the ground
+// under the chassis's centre, negative), turned and lifted by the look's yaw and z, in `color` when
+// it has no texture. False when the model is not ready (vehicle_model_state says whether it is
+// still loading or failed; a failure's warning says why); draw the box look then.
 bool attach_vehicle_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group,
                           const std::string &id, const cvc::ariadne::vehicle_look &look,
                           const vehicle_shape &shape, double base_z, const float color[3],

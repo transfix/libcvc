@@ -1250,6 +1250,75 @@ TEST(AriadneWorldVehicles, LooksAreFoundWhereTheyAre) {
   EXPECT_EQ(rules.vehicles[0].look.yaw, 180.0);
 }
 
+// A look from a document's data: entry: `look: { data: NAME, file: FILE }` parses to a data look,
+// fitted unless fit: false, and resolve_vehicle_looks copies the entry's source and path: into it,
+// so the look is whole without the document (a client draws it from the same package); the loader
+// gives the scene the entries, their relative sources made absolute.
+TEST(AriadneWorldVehicles, LooksComeFromADataPackage) {
+  REQUIRE_YAML();
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, R"(
+data:
+  humvee: { uri: cvcpkg://cy-pca/vehicle-humvee, path: share/cvc-scenes/shared, load: lazy }
+  local: { uri: models/pkg, load: lazy }
+world:
+  vehicles:
+    archetypes:
+      h: { vehicle: humvee, look: { data: humvee, file: Humvee.glb } }
+      flat: { look: { file: car.glb, data: local, fit: false } }
+      lost: { look: { data: no_such_entry, file: x.glb } }
+scene:
+  nodes: []
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.data.size(), 2u);
+  EXPECT_EQ(r.scene.data[0].name, "humvee");
+  EXPECT_EQ(r.scene.data[0].uri, "cvcpkg://cy-pca/vehicle-humvee");
+  EXPECT_EQ(r.scene.data[0].path, "share/cvc-scenes/shared");
+  world_rules rules = default_world_rules();
+  ASSERT_NE(find_world_block(r), nullptr);
+  EXPECT_EQ(parse_world_block(*find_world_block(r), rules), "");
+  ASSERT_EQ(rules.vehicles.size(), 3u);
+  EXPECT_EQ(rules.vehicles[0].look.kind, "data");
+  EXPECT_EQ(rules.vehicles[0].look.data, "humvee");
+  EXPECT_EQ(rules.vehicles[0].look.path, "Humvee.glb");
+  EXPECT_TRUE(rules.vehicles[0].look.fit);
+  EXPECT_EQ(rules.vehicles[1].look.kind, "data") << "data: and file: in either order";
+  EXPECT_FALSE(rules.vehicles[1].look.fit);
+  std::vector<std::string> warnings;
+  resolve_vehicle_looks(rules.vehicles, "", r.scene.assets, &warnings, r.scene.data);
+  EXPECT_EQ(rules.vehicles[0].look.uri, "cvcpkg://cy-pca/vehicle-humvee");
+  EXPECT_EQ(rules.vehicles[0].look.subpath, "share/cvc-scenes/shared");
+  EXPECT_EQ(rules.vehicles[0].look.path, "Humvee.glb");
+  EXPECT_EQ(rules.vehicles[2].look.kind, "box");
+  EXPECT_TRUE(any_contains(warnings, "no data: entry 'no_such_entry'"));
+  // Resolved once, it travels whole: resolving it again (a host that got it resolved) keeps it.
+  std::vector<vehicle_archetype> again = {rules.vehicles[0]};
+  resolve_vehicle_looks(again, "", {}, nullptr, {});
+  EXPECT_EQ(again[0].look.uri, "cvcpkg://cy-pca/vehicle-humvee");
+  EXPECT_EQ(again[0].look.kind, "data");
+  // data: needs file:.
+  LoadResult bad =
+      load_string(app, "world:\n  vehicles:\n    archetypes:\n      h: { look: { data: "
+                       "humvee } }\nscene:\n  nodes: []\n");
+  world_rules br = default_world_rules();
+  ASSERT_NE(find_world_block(bad), nullptr);
+  EXPECT_NE(parse_world_block(*find_world_block(bad), br).find("data: needs file:"),
+            std::string::npos);
+  // A document on disk: its relative data sources are made absolute against its directory.
+  const fs::path dir = fs::temp_directory_path() / "ariadne_data_looks";
+  fs::create_directories(dir);
+  const fs::path doc = dir / "doc.ari";
+  std::ofstream(doc) << "data:\n  local: { uri: models/pkg }\nscene:\n  nodes: []\n";
+  LoadResult onfile = load_file(app, doc.string());
+  ASSERT_TRUE(onfile.ok) << onfile.error;
+  ASSERT_EQ(onfile.scene.data.size(), 1u);
+  EXPECT_EQ(fs::path(onfile.scene.data[0].uri), (dir / "models" / "pkg").lexically_normal());
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 TEST(AriadneWorldVehicles, ArchetypeStatsAndSettings) {
   vehicle_archetype a;
   a.id = "humvee";

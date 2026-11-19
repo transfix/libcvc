@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cvc/ariadne/bind.h> // resolve_bind, read_or
+#include <cvc/ariadne/data.h> // a data look's package
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/world_spawns.h>
@@ -33,10 +34,13 @@
 #include <cvc/physics/dyn_boat_plant.h>
 #include <cvc/state/state.h>
 #include <exception>
+#include <filesystem>
 #include <map>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace cvc {
 namespace gl {
@@ -201,26 +205,32 @@ cvc::geometry fit_vehicle_geometry(cvc::geometry g, double length, const vehicle
 
 namespace {
 
-std::shared_ptr<const fitted_model> fitted(cvc::app &app, vehicle_model_cache &cache,
-                                           const std::string &path, double length,
-                                           std::vector<std::string> *warnings) {
+// A read model fitted to `length`, with its first base-colour texture. Throws when it has no
+// triangles.
+std::shared_ptr<const fitted_model> fit_read(cvc::model &m, double length) {
+  cvc::geometry g = m.merged();
+  if (g.num_tris() == 0)
+    throw std::runtime_error("it has no triangles");
+  auto f = std::make_shared<fitted_model>();
+  for (const auto &mat : m.materials)
+    if (mat.has_base_color_texture()) {
+      f->texture = mat.base_color_texture;
+      break;
+    }
+  f->geometry = fit_vehicle_geometry(std::move(g), length);
+  return f;
+}
+
+std::shared_ptr<const fitted_model> fitted_file(cvc::app &app, vehicle_model_cache &cache,
+                                                const std::string &path, double length,
+                                                std::vector<std::string> *warnings) {
   const std::string key = path + "|" + std::to_string(length);
   if (auto it = cache.models.find(key); it != cache.models.end())
     return it->second;
-  std::shared_ptr<fitted_model> out;
+  std::shared_ptr<const fitted_model> out;
   try {
     cvc::model m = cvc::read_model(app, path);
-    cvc::geometry g = m.merged();
-    if (g.num_tris() == 0)
-      throw std::runtime_error("it has no triangles");
-    auto f = std::make_shared<fitted_model>();
-    for (const auto &mat : m.materials)
-      if (mat.has_base_color_texture()) {
-        f->texture = mat.base_color_texture;
-        break;
-      }
-    f->geometry = fit_vehicle_geometry(std::move(g), length);
-    out = std::move(f);
+    out = fit_read(m, length);
   } catch (const std::exception &e) {
     if (warnings)
       warnings->push_back("ari: vehicle model '" + path + "': " + e.what() + "; drawn as its box");
@@ -229,12 +239,102 @@ std::shared_ptr<const fitted_model> fitted(cvc::app &app, vehicle_model_cache &c
   return out;
 }
 
+// The data store's request for a data look's package (its path: kept).
+ari::DataSpec data_spec_of(const ari::vehicle_look &look) {
+  ari::DataSpec s;
+  s.uri = look.uri;
+  s.path = look.subpath;
+  return s;
+}
+
+// The store node of a data look's package, its load started unless it has loaded or failed: a
+// failed load stays failed (DataStore::load would start it again, and a view polling it would
+// fetch it on every frame).
+std::string data_node_of(cvc::app &app, const ari::vehicle_look &look) {
+  const ari::DataSpec spec = data_spec_of(look);
+  const std::string node =
+      std::string(ari::kDataRoot) + cvc::state::SEPARATOR + ari::data_key(spec);
+  const std::string status = ari::data_status(app, node);
+  if (status == "ready" || status == "error")
+    return node;
+  return ari::DataStore::of(app)->load(spec);
+}
+
+// A data look's model: from its package once it has loaded (`pending` while it loads), else a
+// local install of the file by its name, else none.
+std::shared_ptr<const fitted_model> fitted_data(cvc::app &app, vehicle_model_cache &cache,
+                                                const ari::vehicle_look &look, double length,
+                                                std::vector<std::string> *warnings, bool &pending) {
+  namespace fs = std::filesystem;
+  pending = false;
+  const std::string key =
+      "data|" + look.uri + "|" + look.subpath + "|" + look.path + "|" + std::to_string(length);
+  if (auto it = cache.models.find(key); it != cache.models.end())
+    return it->second;
+  const std::string node = data_node_of(app, look);
+  const std::string status = ari::data_status(app, node);
+  const std::string what =
+      look.uri + (look.subpath.empty() ? "" : "/" + look.subpath) + "/" + look.path;
+  std::shared_ptr<const fitted_model> out;
+  if (status == "ready") {
+    ari::DataBytes bytes = ari::data_file(app, node, look.path);
+    if (!bytes) // the file by its name anywhere in the package
+      for (const std::string &f : ari::data_files(app, node))
+        if (fs::path(f).filename() == fs::path(look.path).filename()) {
+          bytes = ari::data_file(app, node, f);
+          break;
+        }
+    try {
+      if (!bytes)
+        throw std::runtime_error("the package has no " + look.path);
+      cvc::model m = cvc::read_model_from_memory(app, bytes->data(), bytes->size(),
+                                                 fs::path(look.path).extension().string());
+      out = fit_read(m, length);
+    } catch (const std::exception &e) {
+      if (warnings)
+        warnings->push_back("ari: vehicle model " + what + ": " + e.what() + "; drawn as its box");
+    }
+  } else if (status == "error") {
+    const std::string local = ari::find_vehicle_model(look.path);
+    if (!local.empty()) {
+      out = fitted_file(app, cache, local, length, warnings);
+    } else if (warnings) {
+      const std::string error = get(cvc::state::instance(app), node + ".error");
+      warnings->push_back("ari: vehicle model " + what + ": " +
+                          (error.empty() ? std::string("its package did not load") : error) +
+                          ", and it is not installed here; drawn as its box");
+    }
+  } else {
+    pending = true; // idle, fetching, unpacking or decoding
+    return nullptr;
+  }
+  cache.models[key] = out;
+  return out;
+}
+
+std::shared_ptr<const fitted_model> fitted(cvc::app &app, vehicle_model_cache &cache,
+                                           const ari::vehicle_look &look, double length,
+                                           std::vector<std::string> *warnings, bool &pending) {
+  pending = false;
+  if (look.kind == "data")
+    return fitted_data(app, cache, look, length, warnings, pending);
+  if (look.kind == "file" && look.fit)
+    return fitted_file(app, cache, look.path, length, warnings);
+  return nullptr;
+}
+
+// Whether a look is drawn as a fitted model (attach_model), not as a mesh node or boxes.
+bool fitted_look(const ari::vehicle_look &look) {
+  return (look.kind == "file" && look.fit) || look.kind == "data";
+}
+
 // The fitted model under `group`: its base `base_z` below the group's origin (the ground under a
 // chassis), turned and lifted as the look says. False when it cannot be read.
 bool attach_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group,
                   const std::string &id, const ari::vehicle_look &look, const vehicle_shape &s,
                   double base_z, const float color[3], std::vector<std::string> *warnings) {
-  std::shared_ptr<const fitted_model> m = fitted(app, cache, look.path, s.length, warnings);
+  bool pending = false;
+  std::shared_ptr<const fitted_model> m = fitted(app, cache, look, s.length, warnings, pending);
   if (!m)
     return false;
   std::shared_ptr<GeometryNode> node = group.createChild<GeometryNode>(id, m->geometry);
@@ -261,6 +361,15 @@ std::shared_ptr<vehicle_model_cache> make_vehicle_model_cache() {
   return std::make_shared<vehicle_model_cache>();
 }
 
+vehicle_model_status vehicle_model_state(cvc::app &app, vehicle_model_cache &cache,
+                                         const ari::vehicle_look &look, double length,
+                                         std::vector<std::string> *warnings) {
+  bool pending = false;
+  const std::shared_ptr<const fitted_model> m = fitted(app, cache, look, length, warnings, pending);
+  return m ? vehicle_model_status::ready
+           : (pending ? vehicle_model_status::pending : vehicle_model_status::failed);
+}
+
 bool attach_vehicle_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group,
                           const std::string &id, const ari::vehicle_look &look,
                           const vehicle_shape &shape, double base_z, const float color[3],
@@ -274,7 +383,7 @@ ari::SceneNode vehicle_scene_node(const std::string &id, const ari::vehicle_look
   ari::SceneNode g;
   g.id = id;
   g.type = "group";
-  if (look.kind == "file" && look.fit)
+  if (fitted_look(look))
     return g; // the fitted model goes in after (attach_model)
   if (look.kind == "file" && !look.path.empty()) {
     ari::SceneNode m;
@@ -387,13 +496,26 @@ void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) 
   if (!r.world || !r.sg || !r.physics_binding)
     return;
   ari::WorldVehicles *v = r.world->vehicles();
-  if (!v || v->revision() == r.vehicles_rev)
+  if (!v)
     return;
-  r.vehicles_rev = v->revision();
   if (!r.vehicle_models)
     r.vehicle_models = std::make_shared<vehicle_model_cache>();
   const std::shared_ptr<vehicle_model_cache> models = r.vehicle_models;
   SceneGraph &sg = *r.sg;
+  if (v->revision() == r.vehicles_rev) {
+    // Drawn as boxes while a look's package loads: drawn again once none is loading.
+    if (!r.vehicle_models_pending)
+      return;
+    for (const ari::vehicle_archetype &x : v->archetypes())
+      if (x.look.kind == "data") {
+        const std::string status =
+            ari::data_status(sg.appContext(), data_node_of(sg.appContext(), x.look));
+        if (status != "ready" && status != "error")
+          return;
+      }
+  }
+  r.vehicles_rev = v->revision();
+  r.vehicle_models_pending = false;
   for (const auto &[node, chassis] : r.vehicle_markers) {
     if (chassis.valid() && r.physics_binding->bound(chassis))
       r.physics_binding->unbind(chassis);
@@ -439,9 +561,12 @@ void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) 
     std::shared_ptr<GraphicsNode> node = sg.getGraphics(id);
     if (!node)
       continue;
-    if (a->look.kind == "file" && a->look.fit &&
+    if (fitted_look(a->look) &&
         !attach_model(sg.appContext(), *models, *node, id + "_mesh", a->look, shape,
                       e.ground_z - e.z, e.spec.color.data(), warnings)) {
+      if (vehicle_model_state(sg.appContext(), *models, a->look, shape.length) ==
+          vehicle_model_status::pending)
+        r.vehicle_models_pending = true;
       sg.removeGraphics(id); // no model: its box
       ari::vehicle_look box;
       box.kind = "box";
@@ -573,6 +698,8 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
   SceneGraph *graph = &sg;
   const std::string prefix = out.bind_prefix;
   auto last = std::make_shared<std::string>();
+  // The look drawn as its box while its package loads, and its length: drawn again once loaded.
+  auto loading = std::make_shared<std::optional<std::pair<ari::vehicle_look, double>>>();
   if (!out.vehicle_models)
     out.vehicle_models = std::make_shared<vehicle_model_cache>();
   const std::shared_ptr<vehicle_model_cache> models = out.vehicle_models;
@@ -580,13 +707,19 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
   out.custom_ticks.push_back([=, &app](vtkRenderer *) {
     if (held.expired())
       return;
+    if (*loading && vehicle_model_state(app, *models, (*loading)->first, (*loading)->second) !=
+                        vehicle_model_status::pending) {
+      loading->reset();
+      last->clear();
+    }
     cvc::state &st = cvc::state::instance(app);
     const std::string sel = get(st, root + ".selected");
     const std::string a = root + ".archetypes." + sel + ".";
     const std::string sig = sel + "|" + get(st, a + "length") + "|" + get(st, a + "width") + "|" +
                             get(st, a + "height") + "|" + get(st, a + "look.kind") + "|" +
-                            get(st, a + "look.path") + "|" + get(st, a + "look.fit") + "|" +
-                            get(st, root + ".spawn.color") + "|" + get(st, root + ".spawn.color2");
+                            get(st, a + "look.path") + "|" + get(st, a + "look.uri") + "|" +
+                            get(st, a + "look.fit") + "|" + get(st, root + ".spawn.color") + "|" +
+                            get(st, root + ".spawn.color2");
     if (sig != *last) {
       *last = sig;
       if (graph->getGraphics(drawn))
@@ -602,6 +735,8 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
         ari::vehicle_look look;
         look.kind = get(st, a + "look.kind");
         look.path = get(st, a + "look.path");
+        look.uri = get(st, a + "look.uri");
+        look.subpath = get(st, a + "look.subpath");
         look.scale = num(get(st, a + "look.scale"), 1.0);
         look.yaw = num(get(st, a + "look.yaw"), 0.0);
         look.z = num(get(st, a + "look.z"), 0.0);
@@ -616,7 +751,7 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
         node.position[0] = static_cast<float>(at[0]);
         node.position[1] = static_cast<float>(at[1]);
         node.position[2] = static_cast<float>(at[2] + 0.5 * s.height + s.wheel_radius);
-        const bool model = look.kind == "file" && look.fit;
+        const bool model = fitted_look(look);
         if (model) // the model stands on the set by itself: its base at the node's height
           node.position[2] = static_cast<float>(at[2]);
         one.nodes.push_back(node);
@@ -624,6 +759,9 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
         if (model)
           if (std::shared_ptr<GraphicsNode> g = graph->getGraphics(drawn))
             if (!attach_model(app, *models, *g, drawn + "_mesh", look, s, 0.0, c1, nullptr)) {
+              if (vehicle_model_state(app, *models, look, s.length) ==
+                  vehicle_model_status::pending)
+                *loading = std::make_pair(look, s.length);
               graph->removeGraphics(drawn);
               look.kind = "box";
               ari::Scene again;
