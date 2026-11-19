@@ -791,6 +791,8 @@ each builds what a WD phase needs.
 | L3b | **Built** (2026-11-16). **Boats as world vehicles, and spawns by medium.** `plant: dynamicboat` (launch, jonboat) on the world's water (a water node's field, else a still one at the water's level), its navigator on the inverse grid; the grid's water layer (`nav::world_grid::water_depth`, `nav::medium_grid`); each archetype's medium from its plant, and `world: spawns:`' `ford_depth`, `keel_clearance` and `shore_clearance`, so cars never start in a lake and boats only in water deep and open enough (§14, "Boats and spawns by medium"). | WD3 | M |
 | L4 | **Built** (2026-11-12). **The gym:** reset, step, observe, reward, episode logs, headless; `pycvc_gl.cars` moves onto it. As built: `WorldGym` (C++, and `pycvc.WorldGym`), one app per gym, the clock paused so only `step()` steps it; `reset(seed)` rebuilds the world and spawns the agents with every draw seeded; `step(steer, accel)` is a navigator tick (NaN: nav@1 drives); the observation as flat arrays (pose, goal, contacts per physics step, out of the world, ray ranges, envelope); a reward of the user's; a log per agent per step (CSV, numpy); `GymCars` and `--gym` put `pycvc_gl.cars`' controllers on it; `world_gym.ari` and `world_gym.py` are the example. | — | M |
 
+The one-world phases, **OW0** to **OW7**, are in §18.
+
 **The first cut is WD0 + WD1** for the relay, and **L0** for the lab, which can run beside it. E0
 and E1 need neither and can start any time. WD1 needs S0, which transfix/libcvc#1046 builds with
 world sections in mind:
@@ -825,8 +827,9 @@ world sections in mind:
 - **Q7. What persists, and for how long?** The state in §8, and its retention.
 - **Q8. What scale does the first persistent world need?** Users per room or cell, and the world's
   size. This decides when WD9 is needed.
-- **Q9. One simulator or two?** The holon runs avatars in Jolt at 120 Hz; `sim_world` runs nav
-  agents at its own tick and reaches Jolt through `plant_host`. Proposed: the entities table is the
+- **Q9. One simulator or two? Settled (owner, 2026-11-19): one, and the holon is the world**
+  (§18). The holon runs avatars in Jolt at 120 Hz; `sim_world` runs nav
+  agents at its own tick and reaches Jolt through `plant_host`. Proposed before: the entities table is the
   one registry, `sim_world` becomes `nav@1`'s batch kernel over the entities using it, and both run
   on the world clock. L2 builds the local half of it: `WorldVehicles` is the registry, its
   `sim_world` is `nav@1`'s batch kernel over the entities that use it, and their vehicles are in
@@ -871,3 +874,130 @@ world sections in mind:
   follows (X3DH, Double Ratchet, sender keys, sealed content keys).
 - [`../CARS.md`](../CARS.md): the multi-car controller template, whose world glue the gym (L4)
   takes over.
+
+## 18. One world: the holon is the world
+
+The owner's decision, 2026-11-19: "We need a single physics world. Everything happens in holons
+and should step at 120 hz. The server document should describe the holon scene." Cars avoid people
+and avatars, and they are also solid to each other, with real contact: a car pushes, and knocks an
+avatar about by the physics. The demos run in the holon, not in a space beside it. Entities are
+generic: a user, a navigator, or a trained navigator moves each one, so a vehicle can be a user's
+avatar, an avatar can get into a vehicle and drive it, and, where the server allows, an avatar can
+simply be a vehicle.
+
+**What this replaces.** Today there are two simulations side by side:
+
+- the holon's avatars, at 120 Hz, in a private Jolt world (`avatar_world`), with the room's
+  statics built from the published scene (`room_statics`);
+- the server document's world, `SceneWorld` with its `WorldVehicles`, in its own physics world on
+  the simulation hosts' clock (0.01 s quanta, physics at 100 Hz; WORLD-CLOCK-SYNC-ROADMAP, "One
+  tick").
+
+A car and an avatar never meet: the car's pose reaches clients beside the avatars' on the pose
+stream (WD3), and nothing collides them. Q9's proposal (`WorldVehicles` as the entity registry,
+`sim_world` as `nav@1`'s batch kernel) stands; what changes is where it runs.
+
+### 18.1 The clock: 120 Hz everywhere
+
+- **One quantum, 1/120 s,** for every host and trainer: holons, scene worlds with or without
+  vehicles, the gym, `pycvc_gl.cars` and the trainers. `kSimQuantum` becomes 1/120 s and
+  `SceneWorld::use_vehicle_clock` goes, since every scene is on the same clock.
+- **The navigator's tick is 7 quanta, 0.0583 s** (owner, 2026-11-19: "7 quanta"), the one default
+  (`kSimTick`), still configurable. 1/120 s divides neither the old 0.06 s tick nor the 0.01 s
+  quantum; 7 quanta is the nearest whole tick, 3% shorter than the 0.06 s the GRL-SNAM networks
+  were trained at. The tick is held as a count of quanta, so no host ever rounds it.
+- **Trained policies are checked at the new tick** before anything depends on them, and
+  retrained at it if they lose ground.
+- **Not changed:** the 50 Hz drift-tooling protocol (`plant_log_scene`, `cvc plant-log`), which
+  the plant fits were measured at.
+
+### 18.2 The world: the holon runs the document's scene
+
+- **The holon owns the world.** It builds a `SceneWorld` from the server document's `scene:` (or
+  the stock world `--scene` names) and steps it on its own clock, never the app's. Two holons in
+  one process keep two worlds, as they keep two clocks.
+- **Avatars are bodies in that world.** `avatar_world` keeps its controllers (the walker, the
+  energy books, the veto) but loses its private `cvc::physics::world`: it drives bodies in the
+  scene's world. Creation order stays statics first.
+- **The scene's bodies are the statics.** `room_statics` goes: the document's own `body:`s are
+  what avatars stand on, meshes, terrain and a generated world's buildings included, the same on
+  every side.
+- **Vehicles are in the same world.** `WorldVehicles` already puts every plant in the scene's
+  world (L2b); now that world is the holon's, at 120 Hz.
+- **Local is the same.** A lab, a gym or a demo with no relay runs a server-role holon in its own
+  process: the same world, the same entities, the same code path as the relay. `WorldGym`,
+  `HostCars` and the GRL-SNAM hosts move onto it.
+
+### 18.3 Contact
+
+- **Every entity is a dynamic body of its own mass:** an avatar's 70 kg box, a car's chassis at
+  its preset's mass. A car that drives into an avatar shoves it by Jolt's contact; an avatar that
+  walks into a car is stopped by it (and a heavy enough push moves a light car).
+- **The avatar stays upright.** The walker holds it upright and pulls its velocity back toward its
+  intent within its force limit, so a knock is a shove and a slide, with the walker recovering.
+  Tumbling and ragdolls are not in scope.
+- **The server is the authority** for every contact. A client predicts its own entity against the
+  others (§18.5) and is corrected by the server's poses.
+
+### 18.4 Entities: one table
+
+Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats, props.
+
+| Part | What it is |
+|---|---|
+| Archetype | The body and look: `person`, a vehicle preset, a boat. The world document's `world:` archetypes, avatars and vehicles in one list. |
+| Controller | The kernel that turns an intent into forces: `walker@1`, a vehicle drive per plant (`kinematic`, `jolt`, `dynamic`, `dynamic4w`, `dynamicboat`). |
+| Driver | Who supplies the intent: a participant, `nav@1` with the default policy, `nav@1` with a trained policy, a server program or script, or nothing. |
+| Owner | The server, or a participant. |
+| Identity | Name, team, colours, metadata (§4). |
+
+- **An intent is the controller's.** The walker's is today's `avatar_intent` (a velocity and a
+  yaw); a vehicle's is a steer and an acceleration (L2a's). The server's rules clamp either
+  (§5).
+- **A participant's avatar is the entity it owns and drives.** The participants' pose stream
+  becomes the entities' pose stream; a participant pid names its entity.
+- **Navigators avoid everything they don't drive.** `nav@1` takes every other entity as a foreign
+  agent (position, velocity, radius), avatars included, and passes on the right
+  (`sim_world::set_foreign_agents`, `WorldVehicles::set_avoid`).
+
+### 18.5 Clients: the same world, predicted where it is yours
+
+- **The replica builds the same world** from the scene it is sent (§12): the document's bodies,
+  not only the statics the wire carries today.
+- **Entities it does not drive are kinematic bodies** held where it shows them (the peers'
+  playout), so its own entity predicts bumping into them and being pushed. `entity_playout` folds
+  into the holon's peer playout.
+- **The entity it drives is predicted** with its controller (the walker, or the vehicle's plant)
+  and reconciled to the server's poses, as the avatar is today. A client without the kernel
+  interpolates its own entity (§5).
+
+### 18.6 Driving a vehicle, and being one
+
+- **Getting in is a verb.** A participant asks to drive an entity; the server checks the world's
+  rule (which archetypes a person may drive, and whether the seat is free), then moves the
+  participant's control to the vehicle. The person's body leaves the world while it drives.
+- **Getting out** puts the person back at a clear point beside the vehicle, and the vehicle goes
+  back to its driver before (a navigator, or nothing).
+- **An avatar can be a vehicle** where the world allows it: its avatar archetypes may include
+  vehicles, and a participant picks one when it joins (WD4, WD6).
+
+### 18.7 Phases
+
+| Phase | What | Size |
+|---|---|---|
+| OW0 | This section. | S |
+| OW1 | **The clock.** 1/120 s quanta everywhere, the navigator's tick 7 quanta; the trained policies checked at it. | M |
+| OW2 | **The holon runs the document's world.** `SceneWorld` on the holon's clock; avatars as bodies in it; `room_statics` replaced by the scene's bodies; vehicles beside the avatars, colliding. A test: a car shoves an avatar, an avatar stops a car. | L |
+| OW3 | **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
+| OW4 | **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
+| OW5 | **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
+| OW6 | **Getting in and out of vehicles,** and avatars that are vehicles. | M |
+| OW7 | **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
+
+**Open:**
+
+- The dynamic plants are libcvc's own C++, not Jolt, so their cross-platform determinism is not
+  pinned; a client's prediction of a vehicle may drift and be corrected. A gate per kernel (§5)
+  says how much.
+- The cost of 120 Hz with many vehicles, measured on the relay before the stock worlds grow.
+- An area of interest for entities: today every client gets every one.
