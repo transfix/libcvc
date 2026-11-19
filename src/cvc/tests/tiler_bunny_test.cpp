@@ -314,10 +314,17 @@ one_side distance_to(const cvc::geometry &from, const cvc::geometry &to, double 
   return d;
 }
 
-// About 13 s in Release (mostly the SDF; the tiling about 2.5 s since transfix/libcvc#1355), so it
-// runs on every PR. Its name stays clear of ci.yml's heavy suites (STRESS_REGEX), and its ctest
-// timeout is 900 s for Debug jobs (tests/CMakeLists.txt).
-TEST(TilerBunny, TheTiledSlicesOfItsSdfAreTheBunny) {
+// About 13 s in Release (mostly the SDF; the tiling about 2.5 s since transfix/libcvc#1355), so a
+// Release build's name stays clear of ci.yml's heavy suites (STRESS_REGEX) and every PR runs it.
+// A Debug build runs it many times slower: package-linux's libcvc-debug took about 450 s on a quiet
+// runner and ran past its 900 s timeout, three times over, on a loaded one. So in Debug its name
+// is a heavy suite's (Integration), which no PR or Debug job runs; Release pushes still do.
+#ifdef NDEBUG
+#define CVC_TILER_BUNNY_SUITE TilerBunny
+#else
+#define CVC_TILER_BUNNY_SUITE TilerBunnyIntegration
+#endif
+TEST(CVC_TILER_BUNNY_SUITE, TheTiledSlicesOfItsSdfAreTheBunny) {
 #ifndef CVC_WITH_PLANAR
   GTEST_SKIP() << "libcvc was built without cvc::planar (the tiler)";
 #endif
