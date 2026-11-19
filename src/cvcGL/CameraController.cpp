@@ -271,6 +271,41 @@ inline Vec3 ema(Vec3 prev, Vec3 nw, double dt, double tau) {
   return prev + (nw - prev) * a;
 }
 
+// Fly's spectator movement, as a Quake spectator moves (CameraController.h, "Fly"). Its numbers
+// are a Quake spectator's over a key's speed: the wish speed is capped at 1.25 of it (500 over
+// 400), friction brakes at a constant rate below a quarter of it (100) and stops the eye below
+// 1/400 of it (1), and the rates are per second, so they carry over unchanged.
+constexpr double kFlyTickHz = 77.0;       // the step: a frame's time in steps no longer than this
+constexpr double kFlyCapOfKey = 1.25;     // the wish speed's cap, over a key's speed
+constexpr double kFlyStopOfKey = 0.25;    // below this share of a key's speed friction is constant
+constexpr double kFlyRestOfKey = 0.0025;  // below this share the eye stops
+constexpr double kFlyDefaultSpeed = 10.0; // a framed scene's key speed at most, metres a second
+
+// One step of `h` seconds: friction on the velocity left from the step before (on all three axes:
+// in proportion to the speed above `stop`, at a constant rate below it, and nothing at all below
+// `rest`), then acceleration toward the wish velocity `wish` (its speed capped at `cap`) at a rate
+// in proportion to the speed wished for, never past it along the wish. Returns how far the eye
+// moves: the new velocity for the step.
+inline Vec3 spectatorStep(Vec3 &vel, Vec3 wish, double cap, double stop, double rest,
+                          double accelerate, double friction, double h) {
+  const double speed = length(vel);
+  if (speed < rest) {
+    vel = {0, 0, 0};
+  } else {
+    const double drop = std::max(speed, stop) * friction * h;
+    vel = vel * (std::max(0.0, speed - drop) / speed);
+  }
+  double w = length(wish);
+  if (w > 0.0) {
+    const Vec3 dir = wish * (1.0 / w);
+    w = std::min(w, cap);
+    const double missing = w - dot(vel, dir);
+    if (missing > 0.0)
+      vel = vel + dir * std::min(accelerate * h * w, missing);
+  }
+  return vel * h;
+}
+
 // The horizontal basis (north N = yaw-0 forward, east E = yaw-90) derived from an
 // arbitrary world up. For up=+Z this is N=+X, E=+Y (so the Z-up math is unchanged);
 // it generalises predictably to any up (e.g. +Y).
@@ -537,8 +572,17 @@ struct CameraController::Impl {
   double trackBack = 55.0, trackHeight = 40.0, trackLookAhead = 0.0, trackLookUp = 3.0;
   double trackPosTau = 0.15, trackVelTau = 0.40, trackCamTau = 0.55, trackMinSpeed = 0.05;
 
+  // Fly's spectator movement (spectatorStep): the rates, per second (state
+  // "settings.fly_accelerate" and "settings.fly_friction"), and the eye's velocity, carried from
+  // frame to frame.
+  double flyAccelerate = 10.0, flyFriction = 6.0;
+  Vec3 flyVel{0, 0, 0};
+
   // runtime (not state)
   std::set<std::string> held;
+  // The keys that went down, and that came up, since the last update(), by canonical name: a key
+  // tapped between two frames still moves the eye (key_value).
+  std::set<std::string> pressedEdge, releasedEdge;
   bool dragging = false;
   bool secondaryDragging = false; // the right button's drag: it turns the view
   // Click detection (notePointerDown/Up, takeClick).
@@ -626,6 +670,59 @@ struct CameraController::Impl {
   // which the Keys window writes. `held` holds canonical names.
   bool held_has(const std::string &k) const {
     return !k.empty() && held.count(cvc::ariadne::canonical_key(k)) > 0;
+  }
+  // How much a movement key (a binding, and an arrow key beside it, or none) counts over the time
+  // since the last update(), as Quake samples its buttons: held throughout, or pressed and still
+  // held, 1; pressed and let go again, 0.25; let go and pressed again, 0.75; up, 0.
+  double key_value(const std::string &binding, const char *arrow) const {
+    const auto in = [&](const std::set<std::string> &set) {
+      return (!binding.empty() && set.count(cvc::ariadne::canonical_key(binding)) > 0) ||
+             (arrow && set.count(cvc::ariadne::canonical_key(arrow)) > 0);
+    };
+    const bool down = in(held), pressed = in(pressedEdge), released = in(releasedEdge);
+    if (down)
+      return pressed && released ? 0.75 : 1.0;
+    return pressed && released ? 0.25 : 0.0;
+  }
+  // The same as the keys stand now.
+  double key_now(const std::string &binding, const char *arrow) const {
+    return held_has(binding) || (arrow && held_has(arrow)) ? 1.0 : 0.0;
+  }
+  // Whether Fly's movement has anything to do: a movement key held or tapped, or the eye still
+  // gliding.
+  bool spectatorBusy() const {
+    return !held.empty() || !pressedEdge.empty() || length(flyVel) > 0.0;
+  }
+  // Fly's movement over `dtSeconds`, its eye looking along (yawDeg, pitchDeg): how far it goes. A
+  // Quake spectator's (spectatorStep): forward and back along the look, pitch included; left and
+  // right across it, level; up and down along the world's up. Each key adds its speed (the move
+  // speed, times sprint's multiplier while held) along its axis, unnormalised, so a diagonal is
+  // faster until the cap. The frame's time goes in steps of at most 1/kFlyTickHz s, the first
+  // taking the keys' values over the frame (key_value: a tap counts), the rest the keys as they
+  // are now.
+  Vec3 spectatorMove(double yawDeg, double pitchDeg, double dtSeconds) {
+    const double dt = std::clamp(dtSeconds, 0.0, 1.0); // a host caps a frame at less
+    if (dt <= 0.0)
+      return {0, 0, 0};
+    const double key = moveSpeed * (held_has(kSprint) ? sprintMultiplier : 1.0);
+    const double cap = kFlyCapOfKey * key;
+    const double stop = kFlyStopOfKey * moveSpeed, rest = kFlyRestOfKey * moveSpeed;
+    const Basis b = basis();
+    const Vec3 ahead = forwardVec(b, yawDeg, pitchDeg), right = rightVec(b, yawDeg);
+    const int steps = std::max(1, static_cast<int>(std::ceil(dt * kFlyTickHz - 1e-9)));
+    const double h = dt / steps;
+    Vec3 moved{0, 0, 0};
+    for (int i = 0; i < steps; ++i) {
+      const auto value = [&](const std::string &binding, const char *arrow) {
+        return i == 0 ? key_value(binding, arrow) : key_now(binding, arrow);
+      };
+      const double f = value(kForward, "Up") - value(kBackward, "Down");
+      const double r = value(kRight, "Right") - value(kLeft, "Left");
+      const double u = value(kUp, nullptr) - value(kDown, nullptr);
+      const Vec3 wish = (ahead * f + right * r + b.up * u) * key;
+      moved = moved + spectatorStep(flyVel, wish, cap, stop, rest, flyAccelerate, flyFriction, h);
+    }
+    return moved;
   }
 };
 
@@ -754,6 +851,8 @@ void CameraController::seedState() {
   getState("track.min_speed").value(s.trackMinSpeed);
   getState("settings.field_of_view").value(s.fieldOfView);
   getState("track.widen_tau").value(s.trackWidenTau);
+  getState("settings.fly_accelerate").value(s.flyAccelerate);
+  getState("settings.fly_friction").value(s.flyFriction);
 }
 
 void CameraController::readAllFromState() {
@@ -776,6 +875,18 @@ void CameraController::readAllFromState() {
     std::string v = getState(k).value();
     return v.empty() ? def : v;
   };
+  // A pose key (one syncPoseToState mirrors, its index there) is taken from state only when someone
+  // else wrote it: its value there differs from the one this controller last put there. Otherwise
+  // the live value stays. State holds the pose only as of the last mirror (poseMirrorHz, 15 a
+  // second), so reading it all back on any outside write -- a settings slider, a key binding, the
+  // Controls window -- put the camera back where it was up to a mirror period ago: in Fly at speed,
+  // a snap back along its path.
+  auto pose = [&](const char *k, int idx, double live) {
+    const double v = d(k, live);
+    if (s.mirrorValid && std::abs(v - s.mirror[idx]) <= 1e-9 * std::max(1.0, std::abs(v)))
+      return live;
+    return v;
+  };
   switch (i("mode", static_cast<int>(s.mode))) {
   case 1:
     s.mode = Mode::Fly;
@@ -795,25 +906,26 @@ void CameraController::readAllFromState() {
   s.up = {d("up.x", s.up.x), d("up.y", s.up.y), d("up.z", s.up.z)};
   s.orbitCenter = {d("orbit.center.x", s.orbitCenter.x), d("orbit.center.y", s.orbitCenter.y),
                    d("orbit.center.z", s.orbitCenter.z)};
-  s.orbitDistance = d("orbit.distance", s.orbitDistance);
-  s.orbitAzimuth = d("orbit.azimuth", s.orbitAzimuth);
-  s.orbitElevation = d("orbit.elevation", s.orbitElevation);
+  s.orbitDistance = pose("orbit.distance", 2, s.orbitDistance);
+  s.orbitAzimuth = pose("orbit.azimuth", 0, s.orbitAzimuth);
+  s.orbitElevation = pose("orbit.elevation", 1, s.orbitElevation);
   s.minElevation = d("orbit.min_elevation", s.minElevation);
   s.maxElevation = d("orbit.max_elevation", s.maxElevation);
   s.floorOn = i("orbit.floor.on", s.floorOn ? 1 : 0) != 0;
   s.floorHeight = d("orbit.floor.height", s.floorHeight);
   s.floorClearance = d("orbit.floor.clearance", s.floorClearance);
-  s.flyPos = {d("fly.position.x", s.flyPos.x), d("fly.position.y", s.flyPos.y),
-              d("fly.position.z", s.flyPos.z)};
-  s.flyYaw = d("fly.yaw", s.flyYaw);
-  s.flyPitch = d("fly.pitch", s.flyPitch);
-  s.mapCenterX = d("map.center.x", s.mapCenterX);
-  s.mapCenterY = d("map.center.y", s.mapCenterY);
-  s.mapScale = std::max(kMinMapScale, d("map.scale", s.mapScale));
+  s.flyPos = {pose("fly.position.x", 3, s.flyPos.x), pose("fly.position.y", 4, s.flyPos.y),
+              pose("fly.position.z", 5, s.flyPos.z)};
+  s.flyYaw = pose("fly.yaw", 6, s.flyYaw);
+  s.flyPitch = pose("fly.pitch", 7, s.flyPitch);
+  s.mapCenterX = pose("map.center.x", 14, s.mapCenterX);
+  s.mapCenterY = pose("map.center.y", 15, s.mapCenterY);
+  s.mapScale = std::max(kMinMapScale, pose("map.scale", 16, s.mapScale));
   s.sliceAxis = sliceAxisOf(str("slice.axis", sliceAxisName(s.sliceAxis)), s.sliceAxis);
-  s.sliceCenter = {d("slice.center.x", s.sliceCenter.x), d("slice.center.y", s.sliceCenter.y),
-                   d("slice.center.z", s.sliceCenter.z)};
-  s.sliceScale = std::max(kMinMapScale, d("slice.scale", s.sliceScale));
+  s.sliceCenter = {pose("slice.center.x", 17, s.sliceCenter.x),
+                   pose("slice.center.y", 18, s.sliceCenter.y),
+                   pose("slice.center.z", 19, s.sliceCenter.z)};
+  s.sliceScale = std::max(kMinMapScale, pose("slice.scale", 20, s.sliceScale));
   s.moveSpeed = d("settings.move_speed", s.moveSpeed);
   s.sprintMultiplier = d("settings.sprint_multiplier", s.sprintMultiplier);
   s.sensitivity = d("settings.mouse_sensitivity", s.sensitivity);
@@ -848,6 +960,8 @@ void CameraController::readAllFromState() {
   s.trackMinSpeed = d("track.min_speed", s.trackMinSpeed);
   s.fieldOfView = d("settings.field_of_view", s.fieldOfView);
   s.trackWidenTau = d("track.widen_tau", s.trackWidenTau);
+  s.flyAccelerate = std::max(0.0, d("settings.fly_accelerate", s.flyAccelerate));
+  s.flyFriction = std::max(0.0, d("settings.fly_friction", s.flyFriction));
 }
 
 void CameraController::syncConfigToState() {
@@ -862,6 +976,7 @@ void CameraController::syncConfigToState() {
   getState("orbit.center.y").value(s.orbitCenter.y);
   getState("orbit.center.z").value(s.orbitCenter.z);
   getState("orbit.distance").value(s.orbitDistance);
+  s.mirror[2] = s.orbitDistance; // the mirrored distance is this one now (readAllFromState)
   getState("orbit.min_elevation").value(s.minElevation);
   getState("orbit.max_elevation").value(s.maxElevation);
   getState("orbit.floor.on").value(s.floorOn ? 1 : 0);
@@ -901,6 +1016,8 @@ void CameraController::syncConfigToState() {
   getState("track.min_speed").value(s.trackMinSpeed);
   getState("settings.field_of_view").value(s.fieldOfView);
   getState("track.widen_tau").value(s.trackWidenTau);
+  getState("settings.fly_accelerate").value(s.flyAccelerate);
+  getState("settings.fly_friction").value(s.flyFriction);
   s.selfWrite = false;
 }
 
@@ -1080,6 +1197,9 @@ void CameraController::setMode(Mode m) {
     resetTrack();
   s.mode = m;
   s.held.clear();
+  s.pressedEdge.clear();
+  s.releasedEdge.clear();
+  s.flyVel = {0, 0, 0}; // each mode starts at rest
   setPointerCapture(m == Mode::Fly);
   syncConfigToState();
   syncPoseToState();
@@ -1292,7 +1412,12 @@ void CameraController::frameBounds(double minX, double minY, double minZ, double
   s.orbitDistance = diag * 1.1;
   s.orbitAzimuth = -60.0;
   s.orbitElevation = 30.0;
-  s.moveSpeed = diag / 8.0;
+  // Fly's key speed: an eighth of the diagonal a second for a small scene, and at most a Quake
+  // spectator's (kFlyDefaultSpeed, metres a second): an eighth of terrain_lab's 1.7 km diagonal
+  // was 212 m/s, so a tap of a key leapt the eye tens of metres. Sprint and the wheel (in Fly) go
+  // faster.
+  s.moveSpeed = std::min(diag / 8.0, kFlyDefaultSpeed);
+  s.flyVel = {0, 0, 0};
   Basis b = s.basis();
   s.flyPos = s.orbitCenter + orbitOffset(b, s.orbitAzimuth, s.orbitElevation, s.orbitDistance);
   dirToYawPitch(b, s.orbitCenter - s.flyPos, s.flyYaw, s.flyPitch);
@@ -1358,22 +1483,19 @@ void CameraController::update(double dtSeconds) {
   const double strafe = ((s.held_has(s.kRight) || s.held_has("Right")) ? 1 : 0) -
                         ((s.held_has(s.kLeft) || s.held_has("Left")) ? 1 : 0);
   const double rise = (s.held_has(s.kUp) ? 1 : 0) - (s.held_has(s.kDown) ? 1 : 0);
-  if (s.mode == Mode::Orbit && s.orbitKeys && firstPersonLook() &&
-      (fwd != 0 || strafe != 0 || rise != 0)) {
-    // Mouse look, first person: the eye moves as Fly's does. Forward / back along the way it looks
-    // (pitch included), left / right across it in the ground's plane, up / down (Space / Ctrl)
-    // along the world's up, at the move speed. The orbit centre moves with the eye, so the view
-    // only translates.
-    double speed = s.moveSpeed * std::max(0.0, dtSeconds);
-    if (s.held_has(s.kSprint))
-      speed *= s.sprintMultiplier;
-    s.zooming = false; // the keys take the zoom from a wheel glide
-    const Basis b = s.basis();
-    const double yaw = s.orbitAzimuth + 180.0, pitch = -s.orbitElevation; // the eye's look
-    s.orbitCenter = s.orbitCenter + forwardVec(b, yaw, pitch) * (fwd * speed) +
-                    rightVec(b, yaw) * (strafe * speed) + b.up * (rise * speed);
-    applyToCamera();
-    syncConfigToState(); // as a pan by the mouse: a later state write must not put it back
+  const bool firstPerson = s.mode == Mode::Orbit && s.orbitKeys && firstPersonLook();
+  if (s.mode != Mode::Fly && !firstPerson)
+    s.flyVel = {0, 0, 0}; // the glide is Fly's and first person's: none waits to resume later
+  if (firstPerson && s.spectatorBusy()) {
+    // Mouse look, first person: the eye moves as Fly's does (spectatorMove). The orbit centre
+    // moves with the eye, so the view only translates.
+    const Vec3 moved = s.spectatorMove(s.orbitAzimuth + 180.0, -s.orbitElevation, dtSeconds);
+    if (length(moved) > 0.0) {
+      s.zooming = false; // the keys take the zoom from a wheel glide
+      s.orbitCenter = s.orbitCenter + moved;
+      applyToCamera();
+      syncConfigToState(); // as a pan by the mouse: a later state write must not put it back
+    }
   } else if ((s.mode == Mode::Orbit || s.parallel()) && s.orbitKeys &&
              (fwd != 0 || strafe != 0 || rise != 0)) {
     // Orbit and Map: forward / back / left / right slide the view across the ground, at a rate
@@ -1416,14 +1538,8 @@ void CameraController::update(double dtSeconds) {
     }
   }
   if (s.mode == Mode::Fly) {
-    if (fwd != 0 || strafe != 0 || rise != 0) {
-      double speed = s.moveSpeed * dtSeconds;
-      if (s.held_has(s.kSprint))
-        speed *= s.sprintMultiplier;
-      Basis b = s.basis();
-      s.flyPos = s.flyPos + forwardVec(b, s.flyYaw, s.flyPitch) * (fwd * speed) +
-                 rightVec(b, s.flyYaw) * (strafe * speed) + b.up * (rise * speed);
-    }
+    if (s.spectatorBusy())
+      s.flyPos = s.flyPos + s.spectatorMove(s.flyYaw, s.flyPitch, dtSeconds);
   } else if (s.mode == Mode::Track) {
     // Cinematic follow of the tracked actor (ChaseCamera math, up-axis aware).
     // Push mode (feedTrackTarget) uses the streamed position; otherwise pull the
@@ -1504,6 +1620,9 @@ void CameraController::update(double dtSeconds) {
   // overlays, for a range that cannot have changed. applyNeeded() says when it can have.
   if (applyNeeded())
     applyToCamera();
+  // The keys' edges are this frame's (key_value): the next frame starts from the keys as they are.
+  s.pressedEdge.clear();
+  s.releasedEdge.clear();
   // Mirror the live pose to state on a throttle (per-frame writes are a known
   // state-tree perf sink; poseMirrorHz<=0 disables) -- and not at all while the
   // pose is the one last mirrored, which would be 14 no-op writes.
@@ -1568,10 +1687,13 @@ void CameraController::keyDown(const std::string &keySym) {
     resetView();
     return;
   }
-  m_impl->held.insert(k);
+  if (m_impl->held.insert(k).second) // not a key's auto-repeat
+    m_impl->pressedEdge.insert(k);
 }
 void CameraController::keyUp(const std::string &keySym) {
-  m_impl->held.erase(cvc::ariadne::canonical_key(keySym));
+  const std::string k = cvc::ariadne::canonical_key(keySym);
+  if (m_impl->held.erase(k) > 0)
+    m_impl->releasedEdge.insert(k);
 }
 
 void CameraController::mouseLook(int dxPixels, int dyPixels) {

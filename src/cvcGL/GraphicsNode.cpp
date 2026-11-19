@@ -533,6 +533,10 @@ cvc::bounding_box GraphicsNode::getCombinedWorldBoundingBox() const {
   return transform_bbox(m_worldMatrix, getCombinedBoundingBox());
 }
 
+cvc::bounding_box GraphicsNode::getSceneWorldBoundingBox() const {
+  return transform_bbox(m_worldMatrix, combinedBoundingBox(true));
+}
+
 void GraphicsNode::setContributesToSceneBounds(bool on) {
   // Set at once, not through runOnMainThread: a caller that frames the scene straight after
   // creating the node (the opening view, AriRuntime::realize) must see it. The flag is only read
@@ -997,6 +1001,10 @@ std::shared_ptr<GraphicsNode> GraphicsNode::findChildByName(const std::string &n
 }
 
 cvc::bounding_box GraphicsNode::getCombinedBoundingBox() const {
+  return combinedBoundingBox(false);
+}
+
+cvc::bounding_box GraphicsNode::combinedBoundingBox(bool sceneOnly) const {
   // Every node includes its own box, except a NullGraphicNode told not to.
   const bool includeOwnBounds = m_combinedIncludesOwnBounds;
 
@@ -1023,10 +1031,14 @@ cvc::bounding_box GraphicsNode::getCombinedBoundingBox() const {
   for (const auto &child : m_graphicsChildren) {
     if (!child)
       continue;
+    // A descendant kept out of the scene's bounds (the weather's rain column, cloud_sky's near
+    // volumes), with its subtree: out of them at any depth, not only at the top.
+    if (sceneOnly && !child->contributesToSceneBounds())
+      continue;
 
     // Get child's combined bbox (includes child's descendants in child's
     // local space)
-    cvc::bounding_box childBBox = child->getCombinedBoundingBox();
+    cvc::bounding_box childBBox = child->combinedBoundingBox(sceneOnly);
 
     // Skip invalid bounding boxes
     if (childBBox[0] > childBBox[3] || childBBox[1] > childBBox[4] || childBBox[2] > childBBox[5]) {

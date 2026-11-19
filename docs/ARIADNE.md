@@ -844,17 +844,28 @@ the loader only *captures*. The host wires them:
   bound where its camera reads them: arigl's are `viewers.main.camera.settings.mouse_look`
   (*Drag to look* or *Mouse look*), `primary_drag_steers` (in a room: *Drag the floor to face
   it*), `mouse_sensitivity`, `invert_pitch` and `invert_yaw`, and *Camera distance*, the
-  camera's `orbit.distance` (the wheel changes it too). Under mouse look a click on the scene
+  camera's `orbit.distance` (the wheel changes it too), shown only in Orbit (Fly, Track and Map
+  have no orbit distance; `MouseControls::distance_when`) and on a log scale from 0.5 m to 50 km
+  (`distance_log`), since framing a world sets it in kilometres; a room keeps 1.5-40 m. Under
+  mouse look a click on the scene
   captures the pointer and the mouse turns the view with no button held, until *Free the mouse*
   (Escape; in a browser, Escape always ends its pointer lock). In a browser the page takes its
   pointer lock inside that press itself (the cursor goes, and the view keeps turning past the
   screen's edge), asking for the mouse's raw motion where the browser has it: a press on a
   window is the UI's, judged by where the press lands against the windows the overlay drew
   last frame (`CameraController::setUiRegions`), so a quick move onto a window and a click
-  there never takes the pointer. Fly (Tab) is a spectator camera: the mouse turns the view with
-  the pointer captured, W A S D move along it, Space and Left Ctrl up and down, Left Shift
-  faster, at speeds per second of wall time (arigl's camera moves by the time between frames,
-  not its nominal 1 / 120 s step). In a browser the toggle key's own keydown takes the pointer
+  there never takes the pointer. Fly (Tab) is a spectator camera, and it moves as a Quake
+  spectator does (`CameraController.h`, reimplemented from a behavioural spec of ezQuake's
+  spectator movement): the mouse turns the view at once with the pointer captured; W A S D move
+  along it (pitch included; strafing level), Space and Left Ctrl along the world's up, Left Shift
+  four times faster. The eye has a velocity: it reaches the move speed in about 0.15 s and glides
+  to a stop in about 0.4 s when the keys come up (`settings.fly_accelerate`, 10 a second;
+  `settings.fly_friction`, 6), a diagonal goes up to 1.25 times faster, and a key tapped between
+  two frames still nudges it. Speeds are per second of wall time (arigl's camera moves by the
+  time between frames, not its nominal 1 / 120 s step), stepped at no more than 1 / 77 s, so the
+  flight is the same at any frame rate. Framing a scene sets the move speed to an eighth of its
+  diagonal a second, at most 10 m/s (it was the eighth alone: 212 m/s over terrain_lab's world);
+  the wheel scales it in Fly. Orbit's first-person mouse look moves the same way. In a browser the toggle key's own keydown takes the pointer
   lock, where the browser grants it; until it holds, a drag turns the view and a bare move of the
   cursor does not, and after Escape a click on the scene takes it again. In Orbit (and Map) the
   same keys and the arrows slide the view across the ground, the same share of the view a second
