@@ -1498,8 +1498,8 @@ topsides over a blue stripe at the waterline and a dark wet bottom, with a teak 
 tried after a bare name; `none` draws the hull), it is that model instead, fitted as a vehicle's
 file look is (`fit_vehicle_geometry`: the axis a file stands on, Y-up or Z-up, is up, its length
 fitted to the boat's length overall, its keel on the hull's bottom). The `tactical` preset's model is `TacticalBoat`
-(the `vehicle-tactical-boat` package; the web gallery ships it), and its hull when that is not
-installed; a `model:` that is not found warns. The water
+(the `vehicle-tactical-boat` package), and its hull when that is not installed; a `model:` that is
+not found warns. The water
 node keeps its water out of the boats nearest the camera (at most four, each the largest box inside
 its hull at its waterline, `BoatRuntime::cutout`, between its bottom and its sheer, passed to the
 water's shaders as uniforms, not a texture), its boats
@@ -1838,8 +1838,7 @@ scene:
   - **Looks.** With no `look:`, a humvee is the real Humvee, the vehicle-humvee package's
     `Humvee.glb`, when it is installed (`find_vehicle_model`: beside `$CVC_NAV_BUNDLE`, else in
     `share/cvc-scenes/shared` or `share/cvc-scenes/*/` under `$CVC_PREFIX`, `$CVCPKG_PREFIX`,
-    `$CONDA_PREFIX` or the program's prefix; in the browser, the file system's root, where the web
-    gallery's arigl preloads the models it ships, `CVC_WASM_VEHICLE_MODELS`), with its texture. It is oriented and scaled to the
+    `$CONDA_PREFIX` or the program's prefix), with its texture. It is oriented and scaled to the
     chassis as the nav demos do it, and stands on the ground under it. Anything else, or a humvee
     without the package, is its chassis box in the entity's two colours, with a cabin and wheels.
     `look: { model: humvee }` names a model, `file:` a mesh beside the document and `asset:` a
