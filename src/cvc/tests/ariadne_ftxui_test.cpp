@@ -2925,6 +2925,73 @@ TEST(AriadneFtxui, ChartDrawsSparklinesMarkersAndTheCursor) {
   EXPECT_EQ(body, golden) << t.screen;
 }
 
+// settings: on a terminal is the default editor, a flat list of the backend's own widgets: each
+// group a "[title]" line (a "reset all" while a key under it can be reset), each key its editor
+// labelled with its path under the root, a reset beside a changed one. The golden is the
+// window's whole body.
+TEST(AriadneFtxui, SettingsDrawsAFlatList) {
+  REQUIRE_FTXUI();
+  Widget ed = settings("", "cfg");
+  ed.settings_groups = {{"nav", "Navigation", "", false}};
+  Term t(group({window("Tuning", {ed})}));
+  cvc::state &s = cvc::state::instance(t.app);
+  s("cfg.nav.vmax").value("10");
+  s("cfg.nav.vmax").property("unit", "m/s").property("min", "0").property("max", "40");
+  s("cfg.nav.on").value("1");
+  s("cfg.nav.on").property("min", "0").property("max", "1");
+  s("cfg.nav.mode").value("b");
+  s("cfg.nav.mode").property("choices", "a,b,c");
+  s("cfg.world.seed").value("7");
+  s("cfg.world.seed").property("min", "0").property("max", "99");
+  s("cfg.name").value("alpha");
+  s("cfg.speed").value("3");
+  s("cfg.speed").property("access", "telemetry").property("unit", "m/s");
+  t.width = 60;
+  t.height = 16;
+  t.draw();
+  s("cfg.nav.vmax").value("12.5");
+  t.draw();
+  // The rows between the window's side borders, trailing spaces trimmed.
+  const std::string bar = "\xE2\x94\x82"; // U+2502, the box's side
+  std::vector<std::string> body;
+  std::size_t start = 0;
+  while (start < t.screen.size()) {
+    const std::size_t nl = std::min(t.screen.find('\n', start), t.screen.size());
+    const std::string line = t.screen.substr(start, nl - start);
+    const std::size_t a = line.find(bar), z = line.rfind(bar);
+    if (a != std::string::npos && z > a) {
+      std::string row = line.substr(a + bar.size(), z - a - bar.size());
+      row.erase(row.find_last_not_of(' ') + 1);
+      body.push_back(row);
+    }
+    start = nl + 1;
+  }
+  // Keys first, then the groups (Navigation by its title, then world by its path); the slider's
+  // bar is its value over its range, 12.5 of 0..40.
+  const std::string full = "\xE2\x96\x88"; // U+2588, a slider's filled cell
+  const std::vector<std::string> golden = {
+      "name: [alpha]",
+      "speed: 3 m/s",
+      "[Navigation]",
+      "[ reset all ]",
+      "nav.mode: < b >",
+      "[x] nav.on",
+      "nav.vmax " + full + full + full + full + full + full + "\xE2\x96\x8F" +
+          "              12.5 m/s",
+      "[ reset ]",
+      "[world]",
+      "world.seed " + full + "\xE2\x96\x8E" + "                   7",
+  };
+  EXPECT_EQ(body, golden) << t.screen;
+
+  // Its widgets edit the keys: a key's reset puts back the value first shown, a checkbox flips.
+  ASSERT_TRUE(t.click("[ reset ]")) << t.screen;
+  EXPECT_EQ(s("cfg.nav.vmax").value(), "10");
+  EXPECT_FALSE(t.shows("reset")) << "nothing left to reset\n" << t.screen;
+  ASSERT_TRUE(t.click("[x] nav.on")) << t.screen;
+  EXPECT_EQ(s("cfg.nav.on").value(), "0");
+}
+
 // ---- §5.20 rich text in a terminal ---------------------------------------------------------
 
 namespace {

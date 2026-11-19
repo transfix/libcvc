@@ -10,6 +10,7 @@
 #include "chart_emit.h"     // Kind::Chart (series / marker parse caches, the pick edge)
 #include "file_picker.h"    // §10.8 the Runtime's own "Open file" window
 #include "heatmap_emit.h"   // Kind::Heatmap (the subtree read on a write, the cell events)
+#include "settings_emit.h"  // Kind::Settings (the key walk, its write watch, the edits)
 #include "tf_editor_emit.h" // Kind::TfEditor (model / overlay / view state edges)
 
 #include <algorithm>
@@ -233,6 +234,11 @@ void substitute_index_in(Widget &out, const std::string &idx) {
   replace_in(out.on_remove, kTok, idx);
   for (std::string &t : out.tab_titles)
     replace_in(t, kTok, idx);
+  // A settings editor's roots and filter (root: vehicles.{i}).
+  for (std::string &r : out.settings_roots)
+    replace_in(r, kTok, idx);
+  for (std::string &f : out.settings_filter)
+    replace_in(f, kTok, idx);
   replace_in(out.visible_when, kTok, idx);
   replace_in(out.enabled_when, kTok, idx);
   replace_in(out.disabled_when, kTok, idx);
@@ -1708,6 +1714,12 @@ struct Runtime::Impl {
   std::uint64_t chart_frame = 0;
   // Kind::Heatmap caches, one per heatmap instance (heatmap_emit.h), swept with the charts'.
   std::unordered_map<std::string, HeatmapCache> heatmap_caches;
+  // Kind::Settings: one cache per editor instance, rebuilt only after a write under its roots,
+  // which `settings_watch` counts from the tree root's childChanged (connected when the first
+  // editor is drawn, on whatever thread writes). Swept with the charts' (`chart_frame`).
+  std::unordered_map<std::string, SettingsCache> settings_caches;
+  std::shared_ptr<SettingsWatch> settings_watch;
+  boost::signals2::scoped_connection settings_watch_conn;
 
   // §5.11 pictures by URI: loaded off the frame by the cache, published to the backend under the
   // cache's names (each once per raster, tracked in `published` against the backend it went to).
@@ -3097,6 +3109,24 @@ void Runtime::Impl::emit_node(const Widget &w) {
                        chart_frame};
     if (emit_heatmap(ctx, w)) // a cell's click is the heatmap's, not a clickable card's around it
       ++clicks_fired;
+    break;
+  }
+
+  case Kind::Settings: {
+    if (!settings_watch) {
+      settings_watch = std::make_shared<SettingsWatch>();
+      settings_watch_conn = cvc::state::instance(app).childChanged.connect(
+          [watch = settings_watch](const std::string &path) { watch->note(path); });
+    }
+    SettingsContext ctx{app,
+                        b,
+                        [this](const std::string &bind) { return resolve(bind); },
+                        [this](const std::string &event) { enqueue(event); },
+                        [this](const std::string &msg) { warn_once(msg); },
+                        *settings_watch,
+                        settings_caches,
+                        chart_frame};
+    emit_settings(ctx, w);
     break;
   }
 
@@ -4603,6 +4633,8 @@ void Runtime::Impl::render() {
       sweep_chart_caches(chart_caches, chart_frame);
     if (!heatmap_caches.empty())
       sweep_heatmap_caches(heatmap_caches, chart_frame);
+    if (!settings_caches.empty())
+      sweep_settings_caches(settings_caches, chart_frame);
   }
 }
 

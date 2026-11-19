@@ -29,6 +29,7 @@ add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
 add_executable(ariadne_chart_test ariadne_chart_test.cpp)
 add_executable(ariadne_heatmap_test ariadne_heatmap_test.cpp)
+add_executable(ariadne_settings_test ariadne_settings_test.cpp)
 add_executable(ariadne_term_graphics_test ariadne_term_graphics_test.cpp)
 add_executable(ariadne_media_test ariadne_media_test.cpp)
 add_executable(ariadne_files_test ariadne_files_test.cpp)
@@ -427,6 +428,7 @@ set(TEST_TARGETS
   ariadne_ftxui_test
   ariadne_chart_test
   ariadne_heatmap_test
+  ariadne_settings_test
   ariadne_term_graphics_test
   ariadne_media_test
   ariadne_files_test
@@ -891,6 +893,13 @@ target_link_libraries(ariadne_chart_test
 )
 
 target_link_libraries(ariadne_heatmap_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_settings_test
   PRIVATE
     cvc
     GTest::gtest
@@ -3181,6 +3190,7 @@ cvc_discover_tests(ariadne_server_document_test)
 cvc_discover_tests(ariadne_ftxui_test)
 cvc_discover_tests(ariadne_chart_test)
 cvc_discover_tests(ariadne_heatmap_test)
+cvc_discover_tests(ariadne_settings_test)
 cvc_discover_tests(ariadne_term_graphics_test)
 cvc_discover_tests(ariadne_media_test)
 cvc_discover_tests(ariadne_files_test)

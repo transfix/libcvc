@@ -568,6 +568,79 @@ windows:
   EXPECT_TRUE(is_builtin_widget_type("chart")) << "so requires: and (has? \"chart\") see it";
 }
 
+// settings: an editor for every key under root: (a path, or a list of them), with filter: (a
+// pattern or a list), groups: (a key, {key: title} or {key: {title, help, open}}), search:,
+// readouts:, open:, commit: and on:. type: settings is the same widget.
+TEST(AriadneLoader, SettingsWidget) {
+  SKIP_WITHOUT_YAML();
+  const std::string doc = R"(
+meta: { name: T, min_libcvc: 3.4.0 }
+windows:
+  - window: W
+    children:
+      - settings: Tuning
+        root: cfg
+        filter: ["nav.*", "-nav.debug*"]
+        groups:
+          - world
+          - nav: Navigation
+          - plant: {title: The plant, help: what drives it, open: true}
+          - {}
+        search: true
+        readouts: false
+        open: true
+        commit: release
+        on: tuned
+      - type: settings
+        id: both
+        root: [nav.vehicle, /plant]
+        filter: seed
+      - settings: Bare
+)";
+  LoadResult r = fresh_load(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(count(r.root, Kind::Settings), 3);
+  const Widget *t = find(r.root, Kind::Settings, "Tuning");
+  ASSERT_NE(t, nullptr);
+  EXPECT_EQ(t->settings_roots, (std::vector<std::string>{"cfg"}));
+  EXPECT_EQ(t->settings_filter, (std::vector<std::string>{"nav.*", "-nav.debug*"}));
+  ASSERT_EQ(t->settings_groups.size(), 3u) << "the entry naming no key is skipped";
+  EXPECT_EQ(t->settings_groups[0].key, "world");
+  EXPECT_TRUE(t->settings_groups[0].title.empty());
+  EXPECT_EQ(t->settings_groups[1].key, "nav");
+  EXPECT_EQ(t->settings_groups[1].title, "Navigation");
+  EXPECT_EQ(t->settings_groups[2].key, "plant");
+  EXPECT_EQ(t->settings_groups[2].title, "The plant");
+  EXPECT_EQ(t->settings_groups[2].help, "what drives it");
+  EXPECT_TRUE(t->settings_groups[2].open);
+  EXPECT_TRUE(t->settings_search);
+  EXPECT_FALSE(t->settings_readouts);
+  EXPECT_TRUE(t->settings_open);
+  EXPECT_TRUE(t->commit_on_release);
+  EXPECT_EQ(t->on, "tuned");
+  std::function<const Widget *(const Widget &)> by_id = [&](const Widget &w) -> const Widget * {
+    if (w.kind == Kind::Settings && w.id == "both")
+      return &w;
+    for (const Widget &c : w.children)
+      if (const Widget *f = by_id(c))
+        return f;
+    return nullptr;
+  };
+  const Widget *both = by_id(r.root);
+  ASSERT_NE(both, nullptr);
+  EXPECT_EQ(both->settings_roots, (std::vector<std::string>{"nav.vehicle", "/plant"}));
+  EXPECT_EQ(both->settings_filter, (std::vector<std::string>{"seed"}));
+  EXPECT_FALSE(both->settings_search);
+  EXPECT_TRUE(both->settings_readouts);
+  EXPECT_FALSE(both->commit_on_release);
+  const Widget *bare = find(r.root, Kind::Settings, "Bare");
+  ASSERT_NE(bare, nullptr);
+  EXPECT_TRUE(bare->settings_roots.empty());
+  EXPECT_TRUE(has_warning(r, "settings 'Bare' has no root:"));
+  EXPECT_TRUE(has_warning(r, "settings 'Tuning' has a groups: entry that names no key"));
+  EXPECT_TRUE(is_builtin_widget_type("settings")) << "so requires: and (has? \"settings\") see it";
+}
+
 TEST(AriadneLoader, InputTextAndInputInt) {
   SKIP_WITHOUT_YAML();
   const char *doc = R"(
