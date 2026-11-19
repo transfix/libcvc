@@ -120,7 +120,7 @@ jobs:
           cvcpkg install tvision --prefix "$CVC_WASM_DEPS" \
             --platform wasm --arch wasm32 --config release --link static \
             --no-fallback-to-source || echo "  (tvision for wasm not on the catalog: no ari_tvision page)"
-          cvcpkg install scene-austin-south-small vehicle-humvee vehicle-tactical-boat grl-snam-weights \
+          cvcpkg install scene-austin-south-small vehicle-humvee grl-snam-weights \
             --prefix "$CVC_WASM_DEPS" \
             --platform any --config release --link shared \
             --no-fallback-to-source || echo "  (scene/weights bundles absent — wasm demo falls back to synthetic + default_biased)"
