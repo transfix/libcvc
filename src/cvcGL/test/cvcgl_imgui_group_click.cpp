@@ -173,15 +173,16 @@ int main() {
   chk(s.val("viewed").empty(), "a press on it runs nothing yet (" + s.val("viewed") + ")");
   s.frame(pic, false);
   s.frame(pic, false);
-  chk(s.val("viewed") == "1", "released over it, unmoved: its on_click runs (" + s.val("viewed") + ")");
+  chk(s.val("viewed") == "1",
+      "released over it, unmoved: its on_click runs (" + s.val("viewed") + ")");
   s.set("viewed", "");
   s.tap(pic, under); // pressed on it, dragged a line down before letting go
   chk(s.val("viewed").empty(),
       "a press on it that drags is a scroll, not a click (" + s.val("viewed") + ")");
   s.set("viewed", "");
   s.tap(under, pic); // pressed elsewhere, released over it
-  chk(s.val("viewed").empty(), "a press that went down elsewhere is not its click (" +
-                                   s.val("viewed") + ")");
+  chk(s.val("viewed").empty(),
+      "a press that went down elsewhere is not its click (" + s.val("viewed") + ")");
 
   chk(s.be.capabilities().item_groups, "ImGuiBackend reports item groups (ui.group_click)");
   std::printf("%s\n", failures ? "FAILED" : "PASSED");
