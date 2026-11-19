@@ -1,0 +1,46 @@
+# The client for ctest arisrv_rcon (docs/roadmap/ARISRV_IDENTITY.md, ID3): stock arisrv with
+# --rcon-password-file makes a connection that sends the password an admin, for that connection
+# only, and answers the admin's server.* calls for it alone. A forbidden call raises a
+# PermissionError, an invalid one a RuntimeError (room_calls.h).
+meta: { name: rcon on a relay, min_libcvc: 3.7.13 }
+tests:
+  a_admin_calls_need_rcon: |
+    (assert (= (try (begin (room-call "server.clients") "no error")
+                    (catch (PermissionError e) (get-attr e "code")))
+               "forbidden"))
+    (assert (not (get-attr (room-call "server.whoami") "admin")))
+  b_a_wrong_password_is_refused: |
+    (assert (= (try (begin (room-call "server.rcon" "nope") "no error")
+                    (catch (PermissionError e) (get-attr e "code")))
+               "forbidden"))
+    (assert (not (get-attr (room-call "server.whoami") "admin")))
+  c_the_right_one_makes_this_connection_an_admin: |
+    (assert (get-attr (room-call "server.rcon" "rcon test password") "admin"))
+    (let ((all (room-call "server.clients"))
+          (me (get-attr (room-call "server.whoami") "client_id")))
+      (assert (>= (length all) 1) all)
+      (assert (= (get-attr (nth all 0) "client_id") me) all)
+      (assert (get-attr (nth all 0) "admin") all))
+  d_an_admin_reads_a_record: |
+    (let ((rec (room-call "server.client" (get-attr (room-call "server.whoami") "client_id"))))
+      (assert (= (get-attr rec "rcon_failures") 1) rec)
+      (assert (>= (length (get-attr rec "connections")) 1) rec)
+      (assert (= (get-attr (nth (get-attr rec "connections") 0) "public") "127.0.0.1") rec))
+    (assert (= (try (begin (room-call "server.client" "cnobody") "no error")
+                    (catch (RuntimeError e) (get-attr e "code")))
+               "invalid"))
+  e_an_admin_renames_and_sets_limits: |
+    (let ((me (get-attr (room-call "server.whoami") "client_id")))
+      (assert (= (get-attr (room-call "server.rename" me "boss") "username") "boss"))
+      (assert (= (get-attr (room-call "server.whoami") "username") "boss"))
+      (let ((rec (room-call "server.limits" me (dict "memory_mb" 64 "guests" t))))
+        (assert (= (get-attr (get-attr rec "limits") "memory_mb") 64) rec)
+        (assert (get-attr (get-attr rec "limits") "guests") rec))
+      (assert (= (try (begin (room-call "server.limits" me (dict "colour" 1)) "no error")
+                      (catch (RuntimeError e) (get-attr e "code")))
+                 "invalid")))
+  f_logout_takes_it_back: |
+    (assert (not (get-attr (room-call "server.rcon-logout") "admin")))
+    (assert (= (try (begin (room-call "server.clients") "no error")
+                    (catch (PermissionError e) (get-attr e "code")))
+               "forbidden"))

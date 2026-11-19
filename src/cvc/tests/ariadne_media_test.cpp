@@ -391,6 +391,51 @@ TEST(MediaCache, IdlePicturesAreDroppedAndReported) {
   EXPECT_EQ(dropped[0], va.name);
 }
 
+// Idle is drawing time: a page that draws nothing for a while (a hidden browser tab draws about
+// once a minute) keeps its pictures, where the wall clock dropped every one of them and fetched
+// it again on the next frame. The same time spent drawing other pictures still ages it.
+TEST(MediaCache, APauseInDrawingDropsNothing) {
+  cvc::app app;
+  media::ImageCache cache(app);
+  media::ImageCache::Limits lim;
+  lim.idle_seconds = 1.2;
+  lim.sweep_seconds = 0.0;
+  cache.set_limits(lim);
+  const std::string png = encode(checker(8, 8), "png");
+  std::atomic<int> fetches_of_a{0};
+  cache.set_fetcher([&](const std::string &uri, const std::string &, media::FetchDone done) {
+    if (uri == "https://m.test/a.png")
+      ++fetches_of_a;
+    done({true, png, ""});
+  });
+  const media::ImageRequest a{"https://m.test/a.png", "", 8, 8, media::Fit::Contain,
+                              media::Shape::Rect};
+  media::ImageView va;
+  ASSERT_TRUE(
+      settle([&] { va = cache.image(a); }, [&] { return va.status == media::Status::Ready; }));
+  ASSERT_EQ(fetches_of_a.load(), 1);
+  // 1.5 s with no frame (more than idle_seconds of the wall), then a frame that draws `b`.
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+  media::ImageRequest b = a;
+  b.uri = "https://m.test/b.png";
+  cache.image(b);
+  EXPECT_TRUE(cache.take_dropped().empty()) << "a pause in drawing aged a picture";
+  // `a` is still there: asked for again, it is Ready at once, with no fetch.
+  EXPECT_EQ(cache.image(a).status, media::Status::Ready);
+  EXPECT_EQ(fetches_of_a.load(), 1);
+  // Drawing time does age it: frames that draw only `b`, for longer than idle_seconds.
+  const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+  std::vector<std::string> dropped;
+  while (std::chrono::steady_clock::now() < until && dropped.empty()) {
+    cache.image(b);
+    for (const std::string &n : cache.take_dropped())
+      dropped.push_back(n);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  ASSERT_EQ(dropped.size(), 1u);
+  EXPECT_EQ(dropped[0], va.name);
+}
+
 TEST(MediaCache, TheNameHoldsNoCredentialOrUrl) {
   cvc::app app;
   media::ImageCache cache(app);

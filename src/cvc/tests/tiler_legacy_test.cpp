@@ -39,6 +39,20 @@
 //
 // test_data/ was never committed to the volrover repository. The tiler as a whole is tested by
 // tiler_test.cpp, against the legacy library's own runs (tools/volrover-goldens).
+//
+// libcvc builds the tiler only with cvc::planar (Clipper2, CDT and Shewchuk's predicates), so
+// without it (CVC_WITH_PLANAR undefined) this is one skipped test, as planar_test is.
+
+#include <gtest/gtest.h>
+
+#ifndef CVC_WITH_PLANAR
+
+TEST(TilerLegacy, NotBuilt) {
+  GTEST_SKIP() << "libcvc was built without cvc::planar (Clipper2, CDT and Shewchuk's predicates), "
+                  "and so without the tiler";
+}
+
+#else
 
 #include "Contour.h"
 #include "Distance_functor.h"
@@ -61,16 +75,11 @@
 #include <boost/unordered_map.hpp>
 #include <boost/unordered_set.hpp>
 #include <cmath>
-#include <gtest/gtest.h>
 #include <list>
 #include <string>
 #include <vector>
 
 using namespace cvc::tiler;
-
-#ifndef CVC_WITH_PLANAR
-#error tiler_legacy_test needs cvc::planar (the tiler is built only with it)
-#endif
 
 // --------------------------------------------------------------------------------------------
 // From test_contour_utils.cpp
@@ -1172,3 +1181,5 @@ TEST(TilerLegacy_tile, Point_sorting1) {
   EXPECT_EQ(Point_2(6, 3, 0), points[2]);
   EXPECT_EQ(Point_2(2, 6, 0), points[3]);
 }
+
+#endif // CVC_WITH_PLANAR

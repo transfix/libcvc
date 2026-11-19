@@ -306,6 +306,7 @@ public:
   // metadata) is the authenticator's to judge, in place of auth_config's expected_token.
   void set_authenticator(state_authenticator authenticator) override;
   std::size_t disconnect_principal(const std::string &principal) override;
+  bool disconnect_connection(std::uint64_t number) override;
   // See state_transport::set_read_scope and refresh_read_scope.
   void set_read_scope(state_read_scope scope) override;
   std::size_t refresh_read_scope(const std::string &principal) override;
@@ -499,6 +500,7 @@ private:
   std::atomic<std::uint64_t> _scope_retractions{0};
   std::atomic<std::uint64_t> _inbound_rejected{0};
   std::atomic<std::uint64_t> _auth_rejected{0};
+  std::atomic<std::uint64_t> _connection_serial{0}; // the last connection admit_connection numbered
   std::atomic<std::uint64_t> _devices_verified{0};
   std::atomic<std::uint64_t> _device_proofs_refused{0};
 

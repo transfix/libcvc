@@ -13,12 +13,29 @@ name: deploy pages
 # wasm, and committing it on every master push bloated every clone to ~900MB.
 # Requires Settings -> Pages -> Source = "GitHub Actions".
 #
-# Auto-triggers on push to master (so a merged PR lands on pages within minutes)
-# plus workflow_dispatch for a manual re-run and a nightly safety-net cron.
+# Auto-triggers on a push to master that can change the gallery (so a merged PR lands on pages
+# within minutes) plus workflow_dispatch for a manual re-run and a nightly safety-net cron.
 
 on:
   push:
     branches: [master]
+    # Only a push that can change the gallery redeploys it. Every deploy rewrites every file, and
+    # GitHub Pages' ETags are file times, so the HTTP cache downloads the whole gallery again after
+    # each one (the demo pages' own cache, by content hash, does not: see
+    # examples/web/templates/demo.html.in). Left out: the docs and the top-level notes
+    # (THIRD_PARTY_NOTICES.md ships in the gallery, so it stays), CI other than this file and the
+    # script it runs, and the Python bindings (the gallery is built with CVC_BUILD_PYCVC off).
+    # Other .md files stay in: arigl.data packs examples/data, its README with it, and arigl's wasm
+    # embeds src/cvcGL/fonts, README.md and all.
+    paths:
+      - '**'
+      - '!docs/**'
+      - '!*.md'
+      - 'THIRD_PARTY_NOTICES.md'
+      - '!.github/**'
+      - '.github/workflows/deploy-pages.yml'
+      - '.github/scripts/pin-wasm-pre-jx1.sh'
+      - '!bindings/**'
   schedule:
     - cron: '30 8 * * *' # 08:30 UTC ≈ 03:30 America/Chicago (after cyberpcangel nightly)
   workflow_dispatch:
@@ -120,7 +137,7 @@ jobs:
           cvcpkg install tvision --prefix "$CVC_WASM_DEPS" \
             --platform wasm --arch wasm32 --config release --link static \
             --no-fallback-to-source || echo "  (tvision for wasm not on the catalog: no ari_tvision page)"
-          cvcpkg install scene-austin-south-small vehicle-humvee vehicle-tactical-boat grl-snam-weights \
+          cvcpkg install scene-austin-south-small vehicle-humvee grl-snam-weights \
             --prefix "$CVC_WASM_DEPS" \
             --platform any --config release --link shared \
             --no-fallback-to-source || echo "  (scene/weights bundles absent — wasm demo falls back to synthetic + default_biased)"
@@ -130,6 +147,10 @@ jobs:
             --prefix "$CVC_WASM_DEPS" \
             --platform any --config release --link shared \
             --no-fallback-to-source || echo "  (xterm-js packages absent — the configure downloads xterm.js)"
+          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
+          # Last, after every wasm install above, so none of them moves a pinned package again.
+          # Without it the link fails on freetype's __wasm_longjmp.
+          bash .github/scripts/pin-wasm-pre-jx1.sh "$CVC_WASM_DEPS" wasm
 
       - name: Build the gallery (libcvc-examples-web, single-threaded)
         # Non-pthread: matches the single-threaded wasm dep bundles + does not

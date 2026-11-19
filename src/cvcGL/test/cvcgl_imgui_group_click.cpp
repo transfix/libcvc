@@ -115,7 +115,11 @@ int main() {
   card.on_hover = "(state-set \"over\" \"1\")";
   card.on_hover_end = "(state-set \"left\" \"1\")";
   card.hover_highlight = true;
-  ari::Widget feed = ari::window("Feed", {card, ari::text("below")});
+  // A widget of its own with on_click (as a feed's picture or video is): a tap, not a press.
+  ari::Widget picture = ari::text("a picture");
+  picture.on_click = "(state-set \"viewed\" \"1\")";
+  ari::Widget feed =
+      ari::window("Feed", {card, ari::text("below"), picture, ari::text("under the picture")});
   feed.size.w = {ari::Unit::Px, 500.0f};
   feed.size.h = {ari::Unit::Px, 300.0f};
   feed.has_pos = true;
@@ -157,6 +161,28 @@ int main() {
   s.frame(ImVec2(990.0f, 690.0f), false);
   s.frame(ImVec2(990.0f, 690.0f), false);
   chk(s.val("left") == "1", "on_hover_end runs once the pointer leaves (" + s.val("left") + ")");
+
+  // A widget's own on_click (§4.6) is a tap too: a finger that lands on a picture to scroll the
+  // feed doesn't open it, though the press was on it.
+  chk(s.be.at.count("a picture") && s.be.at.count("under the picture"),
+      "the widget with on_click is drawn");
+  const ImVec2 pic = s.be.at["a picture"].centre();
+  const ImVec2 under = s.be.at["under the picture"].centre();
+  s.frame(pic, false);
+  s.frame(pic, true); // the press alone runs nothing
+  chk(s.val("viewed").empty(), "a press on it runs nothing yet (" + s.val("viewed") + ")");
+  s.frame(pic, false);
+  s.frame(pic, false);
+  chk(s.val("viewed") == "1",
+      "released over it, unmoved: its on_click runs (" + s.val("viewed") + ")");
+  s.set("viewed", "");
+  s.tap(pic, under); // pressed on it, dragged a line down before letting go
+  chk(s.val("viewed").empty(),
+      "a press on it that drags is a scroll, not a click (" + s.val("viewed") + ")");
+  s.set("viewed", "");
+  s.tap(under, pic); // pressed elsewhere, released over it
+  chk(s.val("viewed").empty(),
+      "a press that went down elsewhere is not its click (" + s.val("viewed") + ")");
 
   chk(s.be.capabilities().item_groups, "ImGuiBackend reports item groups (ui.group_click)");
   std::printf("%s\n", failures ? "FAILED" : "PASSED");

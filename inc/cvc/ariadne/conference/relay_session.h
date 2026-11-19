@@ -21,6 +21,8 @@
 //     url: grpcs://example.com:7700   # grpc://, grpcs:// (TLS), or ws:// (plain WebSocket)
 //     room: ops                       # the relay's --room (default standup)
 //     token: env:OPS_ROOM_TOKEN       # env:NAME, file:PATH, or credential:NAME / oidc:NAME
+//     password: env:OPS_GUEST_PW      # or the relay's guest password (env:NAME, file:PATH), sent
+//                                     # as its hash (guest_password_bearer); not with token:
 //     ca: certs/ops-ca.pem            # grpcs://: the CA the relay's certificate chains to
 //                                     # (default: gRPC's roots, a public CA)
 //     subscribe: [cyprov]             # published namespaces to mirror
