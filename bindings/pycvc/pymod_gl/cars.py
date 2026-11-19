@@ -64,10 +64,10 @@ except Exception:  # pragma: no cover - pycvc is what drives the cars
 #: The plants a world document runs its vehicles on (GymCars' ``vehicle``).
 GYM_PLANTS = ("jolt", "kinematic", "dynamic", "dynamic4w", "dynamicboat")
 #: The tick (s): the controller runs once per tick, and the world steps once. libcvc's one
-#: simulation tick (``pycvc.SIM_TICK``, cvc/core/sim_tick.h), 0.06 s.
-DT = float(getattr(pycvc, "SIM_TICK", 0.06)) if pycvc is not None else 0.06
+#: simulation tick (``pycvc.SIM_TICK``, cvc/core/sim_tick.h), 7 quanta of 1/120 s (0.0583 s).
+DT = float(getattr(pycvc, "SIM_TICK", 7.0 / 120.0)) if pycvc is not None else 7.0 / 120.0
 #: The live clock's quantum and its catch-up per frame at 1x (``pycvc.SIM_QUANTUM``, ``SIM_CATCHUP``).
-QUANTUM = float(getattr(pycvc, "SIM_QUANTUM", 0.01)) if pycvc is not None else 0.01
+QUANTUM = float(getattr(pycvc, "SIM_QUANTUM", 1.0 / 120.0)) if pycvc is not None else 1.0 / 120.0
 CATCHUP = float(getattr(pycvc, "SIM_CATCHUP", 0.25)) if pycvc is not None else 0.25
 #: The navigator's normalized units per metre (its trained metric, as libcvc's nav demos).
 SCALE = 0.05

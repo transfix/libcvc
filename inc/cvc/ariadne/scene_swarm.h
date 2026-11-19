@@ -36,8 +36,8 @@
 //   * the plant (`plant`): nav's kinematic bicycle, or a vehicle preset on the Jolt plant
 //     (cvc::physics::plant_host: humvee, roboracer, a list, dynamic[:presets], ...).
 //
-// It steps on the app's world clock, one navigator step every veh.dt of world time (6 quanta of
-// the 0.01 s suite quantum), on a worker natively (cvc::nav::sim_thread, the app's compute pool
+// It steps on the app's world clock, one navigator step every veh.dt of world time (cvc::kSimTick,
+// 7 quanta of the 1/120 s suite quantum), on a worker natively (cvc::nav::sim_thread, the app's compute pool
 // for its kernels) and on the frame's thread in a browser without threads. The frame reads its
 // latest frame (update(), now()).
 //

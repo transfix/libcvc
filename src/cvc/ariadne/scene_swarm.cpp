@@ -322,7 +322,7 @@ struct SceneSwarm::impl {
       : app(a), keys(std::move(k)), spec(std::move(s)), ts(cvc::nav::city_scene(spec.grid)),
         plant(plant_options()) {
     load_policy();
-    // The navigator's step is 6 quanta of the suite quantum on the scene's clock (cvc/core/
+    // The navigator's step is 7 quanta of the suite quantum on the scene's clock (cvc/core/
     // sim_tick.h), as the world's vehicles have it; a clock that has already ticked keeps its own,
     // and sim_thread refuses a step that is not a whole number of its quanta.
     cvc::adopt_sim_clock(app.world_clock());
@@ -415,7 +415,7 @@ struct SceneSwarm::impl {
     // The trainer's vehicle: the coef_mlp's normalized constants stay physical at its metric.
     cfg.veh.rr = ts.rr;
     cfg.veh.d_hat = ts.d_hat;
-    cfg.veh.dt = ts.dt;
+    cfg.veh.dt = static_cast<float>(cvc::kSimTick); // the hosts' one tick, not the trainer's 0.06 s
     cfg.veh.vmax = ts.vmax;
     cfg.freeze_sense = !r.fog;
     cfg.reach_tol = static_cast<float>(spec.reach);

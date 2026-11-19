@@ -4038,9 +4038,9 @@ TEST(AriadneWorldGym, EveryPlantDrivesInTheWorld) {
   }
 }
 
-// A world with vehicles runs on the simulation hosts' clock: the 0.01 s quantum, physics at
-// 100 Hz, real time catching up 0.25 s a frame. The gym's tick is libcvc's one simulation tick,
-// 0.06 s, six physics steps; gym_options::tick sets another, held to whole physics steps.
+// A world with vehicles runs on the simulation hosts' clock: the 1/120 s quantum, physics at
+// 120 Hz, real time catching up 0.25 s a frame. The gym's tick is libcvc's one simulation tick,
+// seven physics steps; gym_options::tick sets another, held to whole physics steps.
 TEST(AriadneWorldGym, TheTickIsLibcvcsOneSimulationTick) {
   REQUIRE_YAML();
   if (!jolt())
@@ -4048,12 +4048,12 @@ TEST(AriadneWorldGym, TheTickIsLibcvcsOneSimulationTick) {
   const std::string path = write_doc("gym_tick", gym_doc(false, false)).string();
   WorldGym gym(path, agents(1));
   EXPECT_EQ(gym.app().world_clock().fixed_dt(), cvc::kSimQuantum);
-  EXPECT_EQ(gym.app().world_clock().current_config().max_steps_per_advance, 25);
+  EXPECT_EQ(gym.app().world_clock().current_config().max_steps_per_advance, 30);
   EXPECT_TRUE(gym.app().world_clock().current_config().cap_scales_with_rate);
   EXPECT_EQ(gym.world().world().config().fixed_dt, cvc::kSimQuantum);
   const gym_observation o0 = gym.reset(1);
   EXPECT_NEAR(gym.dt(), cvc::kSimTick, 1e-12);
-  EXPECT_EQ(gym.vehicles().steps_per_tick(), 6);
+  EXPECT_EQ(gym.vehicles().steps_per_tick(), cvc::kSimTickQuanta);
   const gym_step st = gym.step({kNaN}, {kNaN});
   EXPECT_NEAR(st.observation.time - o0.time, cvc::kSimTick, 1e-9);
 
@@ -4062,12 +4062,13 @@ TEST(AriadneWorldGym, TheTickIsLibcvcsOneSimulationTick) {
   WorldGym five(path, o);
   five.reset(1);
   EXPECT_NEAR(five.dt(), 0.05, 1e-12);
-  EXPECT_EQ(five.vehicles().steps_per_tick(), 5);
+  EXPECT_EQ(five.vehicles().steps_per_tick(), 6);
 
   o.tick = 0.055; // not whole physics steps: held to the nearest, and the status says so
   WorldGym odd(path, o);
   odd.reset(1);
-  EXPECT_EQ(odd.vehicles().steps_per_tick(), static_cast<int>(std::lround(0.055 / 0.01)));
+  EXPECT_EQ(odd.vehicles().steps_per_tick(),
+            static_cast<int>(std::lround(0.055 / cvc::kSimQuantum)));
   EXPECT_NE(odd.vehicles().status().find("not a whole number"), std::string::npos)
       << odd.vehicles().status();
   EXPECT_THROW(gym.vehicles().set_tick(0.0), std::invalid_argument);
