@@ -1848,6 +1848,53 @@ void mesh_bounds(const cvc::geometry &g, double out[6]) {
   }
 }
 
+// `tint: satellite` on a data node: each vertex of the meshes it drew other than the terrain (a
+// city's buildings) coloured by the dataset's aerial image under it, over a grey floor so shaded
+// facades still read (0.30 + 0.70 x the photo; 0.32 + 0.68 for blue), as the nav demos tinted
+// Austin. The image spans the terrain `field` north up. False when the dataset has no image.
+bool tint_from_satellite(cvc::state &root, const std::string &store,
+                         const std::vector<std::shared_ptr<GraphicsNode>> &drawn,
+                         const std::string &terrain_id, const cvc::height_field &field) {
+  cvc::state *s = root.findDescendant(store + cvc::state::SEPARATOR + "satellite");
+  std::shared_ptr<const cvc::image> img;
+  if (s) {
+    try {
+      img = boost::any_cast<std::shared_ptr<const cvc::image>>(s->data());
+    } catch (const boost::bad_any_cast &) {
+    }
+  }
+  if (!img || img->empty())
+    return false;
+  const cvc::image rgba = img->converted(cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
+  const int W = rgba.width(), H = rgba.height();
+  const unsigned char *px = rgba.data();
+  const double x0 = field.x0(), y0 = field.y0();
+  const double w = field.max_x() - x0, h = field.max_y() - y0;
+  if (!px || W <= 0 || H <= 0 || w <= 0.0 || h <= 0.0)
+    return false;
+  for (const std::shared_ptr<GraphicsNode> &c : drawn) {
+    auto gn = std::dynamic_pointer_cast<GeometryNode>(c);
+    if (!gn || c->getName() == terrain_id || !gn->getGeometry())
+      continue;
+    cvc::geometry mesh = *gn->getGeometry(); // copy-on-write: only its colours are new
+    const auto &p = mesh.const_points();
+    cvc::geometry::colors_t cols(p.size());
+    for (std::size_t i = 0; i < p.size(); ++i) {
+      const double u = std::clamp((p[i][0] - x0) / w, 0.0, 1.0);
+      const double v = std::clamp((p[i][1] - y0) / h, 0.0, 1.0);
+      const int ix = std::min(W - 1, static_cast<int>(u * W));
+      const int iy = std::min(H - 1, static_cast<int>((1.0 - v) * H)); // row 0: north
+      const unsigned char *q = px + (static_cast<std::size_t>(iy) * W + ix) * 4;
+      cols[i] = {0.30 + 0.70 * q[0] / 255.0, 0.30 + 0.70 * q[1] / 255.0,
+                 0.32 + 0.68 * q[2] / 255.0};
+    }
+    mesh.colors() = std::move(cols);
+    gn->setGeometry(mesh);
+    gn->setUseSingleColor(false);
+  }
+  return true;
+}
+
 // A data node's terrain: its live texture (material: { texture: { stream } }) through UVs over the
 // field, or else the dataset's aerial image.
 void drape_terrain(RealizedScene &r, SceneDataBinding &b, const std::string &store,
@@ -1897,6 +1944,8 @@ bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
         if (auto gn = std::dynamic_pointer_cast<GeometryNode>(c);
             gn && c->getName() == n.id + "_terrain")
           drape_terrain(r, b, store, gn, *t);
+      if (n.props.str("tint") == "satellite") // and the buildings its colours
+        tint_from_satellite(cvc::state::instance(*r.app), store, b.drawn, n.id + "_terrain", *t);
     }
   } else if (const field_ptr *f = boost::any_cast<field_ptr>(&obj)) {
     auto terrain =

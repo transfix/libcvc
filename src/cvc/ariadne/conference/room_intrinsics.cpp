@@ -249,8 +249,19 @@ std::string room_join(cvc::app &app, const std::string &room_id, const std::stri
   // room_write_gate, refuses anything else). presence.joined also materializes the <pid> node so
   // the roster enumerates it even with no name.
   set_replicated(app, join_path({sp.c_str(), "presence", "joined"}), "1");
-  if (!name.empty())
-    set_replicated(app, join_path({sp.c_str(), "profile", "name"}), name);
+  if (name.empty())
+    return sp;
+  // On a relay the name is the relay's (client_registry.h; room_write_gate refuses the write), so
+  // ask it with server.set: it answers by writing profile.name, made unique if another client
+  // has the name. Without one (a mesh, or no relay joined), write it ourselves.
+  const std::shared_ptr<room_call_client> calls = room_call_client::for_app(app);
+  if (calls && calls->room() == room_id && calls->pid() == pid) {
+    calls->call("server.set", se::make_list(),
+                se::make_dict({{"username", se::value_t(name)}, {"unique", se::value_t(true)}}),
+                std::string(), 0.0, [](const room_call_client::outcome &) {});
+    return sp;
+  }
+  set_replicated(app, join_path({sp.c_str(), "profile", "name"}), name);
   return sp;
 }
 

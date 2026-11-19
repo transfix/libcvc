@@ -42,9 +42,10 @@
 #include <cstdio>
 #include <cstdlib> // std::getenv (CVC_ARISRV_ROOM_DEBUG, CVC_ARISRV_S7, CVC_ARISRV_AOI)
 #include <cstring>
-#include <cvc/ariadne/conference/room_aoi.h>       // aoi_params, the presets, write_aoi_params
-#include <cvc/ariadne/conference/room_aoi_relay.h> // room_aoi_relay, relay_room_step
-#include <cvc/ariadne/conference/room_avatar.h>    // seed_avatar_catalog (what avatars may wear)
+#include <cvc/ariadne/conference/client_registry.h> // who connected: ids, usernames, the log
+#include <cvc/ariadne/conference/room_aoi.h>        // aoi_params, the presets, write_aoi_params
+#include <cvc/ariadne/conference/room_aoi_relay.h>  // room_aoi_relay, relay_room_step
+#include <cvc/ariadne/conference/room_avatar.h>     // seed_avatar_catalog (what avatars may wear)
 #include <cvc/ariadne/conference/room_calls.h> // room-call: clients' calls, run in arisrvx's Python
 #include <cvc/ariadne/conference/room_chat.h>  // room chat and direct messages
 #include <cvc/ariadne/conference/room_entities.h>   // room_entity_relay (the document's vehicles)
@@ -247,6 +248,26 @@ int main(int argc, char **argv) {
   //                              as a cvc-token.<token> subprotocol (state_identity.h has the
   //                              rules). A client without it is refused before it is sent
   //                              anything. Unset: an open room, as before
+  // Guest password (docs/roadmap/ARISRV_IDENTITY.md, ID2; not an S7 switch):
+  //   --guest-password-file PATH admit only clients that know the password in PATH (its first
+  //                              line), or CVC_ARISRV_GUEST_PASSWORD: any text of 1 to 256 bytes
+  //                              that a person can type. A client presents a hash of it,
+  //                              guest_password_bearer (state_identity.h), where a room token goes:
+  //                              from CVC_ARIADNE_GUEST_PASSWORD, a relay: block's password:, or a
+  //                              page's #password=. One without it is refused before it is sent
+  //                              anything. A relay takes a room token or a guest password, not both
+  // rcon (ID3; not an S7 switch):
+  //   --rcon-password-file PATH  the admin password, in PATH (its first line), or
+  //                              CVC_ARISRV_RCON_PASSWORD. (room-call "server.rcon" P) makes the
+  //                              caller's connection an admin until it closes, so each new one
+  //                              sends it again. Three wrong passwords from an address or a client
+  //                              lock it out for 30 s, twice as long after each further one. An
+  //                              admin may call server.clients, server.client ID, server.kick ID,
+  //                              server.ban / server.unban ID, server.rename ID NAME and
+  //                              server.limits ID {...}, and has the role admin in arisrvx's
+  //                              ctx.principal. Unset: rcon is off
+  //   --rcon-plaintext           take rcon over a connection without TLS from another host too
+  //                              (default: only TLS, or the loopback)
   // Transport security for native clients (ARIADNE_SCRIPTING_HOSTS.md §6.5.7; not an S7 switch):
   //   --tls-cert PATH            serve the gRPC planes (state and media) over TLS, with the
   //   --tls-key PATH             certificate chain and private key in these PEM files (both or
@@ -264,6 +285,16 @@ int main(int argc, char **argv) {
   //   --device-pins PATH         keep the pins in PATH (one "<device id> <key>" line each, added
   //                              as devices first show), so they outlive a restart. Unset: pins
   //                              are kept in memory, for this run only
+  // Clients (docs/roadmap/ARISRV_IDENTITY.md, ID1). The relay keeps a record of each client it
+  // has seen, under a client id: a salted hash of its device id, or of its addresses when it sends
+  // none. A record holds its username, its device tag and a log of its connections (addresses,
+  // opened, closed, active). They are kept under arisrv.clients, which no client is sent, for this
+  // run only. A participant's profile.name is the relay's: a client asks for a name with
+  // (room-call "server.set" (dict "username" N)), which room-join does, and (room-call
+  // "server.whoami") answers its own record.
+  //   --clients-max N            the records kept (default 4096); past it, the client that left
+  //                              longest ago is forgotten
+  //   --client-log-max N         the connections kept in each record's log (default 32)
   // Per-viewer video (§5j; not an S7 switch). The relay sends each viewer every camera at a rung --
   // full (as sent), half or quarter (re-encoded smaller here, media_rungs.h), thumb (quarter at
   // 2 fps) or off -- adapted to that viewer's link (room_rung_controller). Audio is always sent.
@@ -364,6 +395,9 @@ int main(int argc, char **argv) {
   std::string pythonScript, httpListen, shutdownTimeoutArg = "10", writeBudgetArg = "65536";
   std::string slowMsArg = "50", authTimeoutArg = "5", callConcurrencyArg = "8", callRateArg = "0";
   std::string tlsCert, tlsKey, callResultMaxArg = "1048576";
+  std::string clientsMaxArg = "4096", clientLogMaxArg = "32";
+  std::string guestPasswordFile, rconPasswordFile;
+  bool guestPasswordFlag = false, rconPasswordFlag = false, rconPlaintext = false;
   bool tlsCertFlag = false, tlsKeyFlag = false; // given (even with no path)
   std::vector<std::string> pythonPath;
   std::vector<std::string> pythonFlags; // the Python flags given, which stock arisrv refuses
@@ -422,6 +456,14 @@ int main(int argc, char **argv) {
     else if (!std::strcmp(a, "--room-token-file")) {
       roomTokenFlag = true;
       roomTokenFile = next("");
+    } else if (!std::strcmp(a, "--guest-password-file")) {
+      guestPasswordFlag = true;
+      guestPasswordFile = next("");
+    } else if (!std::strcmp(a, "--rcon-password-file")) {
+      rconPasswordFlag = true;
+      rconPasswordFile = next("");
+    } else if (!std::strcmp(a, "--rcon-plaintext")) {
+      rconPlaintext = true;
     } else if (!std::strcmp(a, "--device-pins")) {
       devicePinsFlag = true;
       devicePinsFile = next("");
@@ -481,6 +523,10 @@ int main(int argc, char **argv) {
       tlsKey = next("");
     } else if (!std::strcmp(a, "--call-result-max")) {
       callResultMaxArg = next("");
+    } else if (!std::strcmp(a, "--clients-max")) {
+      clientsMaxArg = next("");
+    } else if (!std::strcmp(a, "--client-log-max")) {
+      clientLogMaxArg = next("");
     } else if (!std::strcmp(a, "--set")) {
       std::pair<std::string, std::string> kv;
       const char *v = next("");
@@ -514,10 +560,16 @@ int main(int argc, char **argv) {
       !check_count("--media-delay-ms", mediaDelayArg, mediaDelayMs) ||
       !check_count("--admission-hold-ms", admissionHoldArg, admissionHoldMs))
     return 2;
-  long viewerKbps = 0, callResultMax = 0;
+  long viewerKbps = 0, callResultMax = 0, clientsMax = 0, clientLogMax = 0;
   if (!check_count("--viewer-kbps-max", viewerKbpsArg, viewerKbps) ||
-      !check_count("--call-result-max", callResultMaxArg, callResultMax))
+      !check_count("--call-result-max", callResultMaxArg, callResultMax) ||
+      !check_count("--clients-max", clientsMaxArg, clientsMax) ||
+      !check_count("--client-log-max", clientLogMaxArg, clientLogMax))
     return 2;
+  if (clientsMax < 1 || clientLogMax < 1) {
+    std::fprintf(stderr, "arisrv: --clients-max and --client-log-max must be at least 1\n");
+    return 2;
+  }
 #ifdef CVC_ARIADNE_PYTHON
   double shutdownTimeout = 10.0, authTimeout = 5.0, callRate = 0.0;
   long writeBudget = 65536, slowMs = 50, callConcurrency = 8;
@@ -619,8 +671,20 @@ int main(int argc, char **argv) {
   const long holdMs = aoiMode != "off" ? (std::min)(admissionHoldMs, 600000L) : 0L;
   // One gate for both transports, so a pid held on one cannot be claimed on the other.
   std::shared_ptr<cvc::state_inbound_gate> bindGate;
-  if (bindWritesArg == "on")
-    bindGate = std::make_shared<cvc::ariadne::conference::room_write_gate>(room);
+  // A client's own profile.name write, which the gate refuses (the name is the relay's): queued
+  // here on a transport thread, and granted as a rename on the room loop (ARISRV_IDENTITY.md ID1),
+  // so a client that predates server.set keeps its name. At most 256 wait at once.
+  std::mutex nameRequestsMu;
+  std::vector<std::pair<std::string, std::string>> nameRequests;
+  if (bindWritesArg == "on") {
+    auto gate = std::make_shared<cvc::ariadne::conference::room_write_gate>(room);
+    gate->set_name_requests([&](const std::string &pid, const std::string &name) {
+      std::lock_guard<std::mutex> lk(nameRequestsMu);
+      if (nameRequests.size() < 256)
+        nameRequests.emplace_back(pid, name);
+    });
+    bindGate = gate;
+  }
   // The room token: from the file (its first line, trimmed), else the environment. Not taken from
   // the command line, which other users of the host can read. A token asked for must be one: a
   // flag with no path, an unreadable or blank file, or a set but empty variable stops arisrv here
@@ -645,6 +709,53 @@ int main(int argc, char **argv) {
                          "[A-Za-z0-9._~-]\n");
     return 2;
   }
+  // The guest password (ID2) and the rcon password (ID3): each from its file (its first line, as
+  // it is but its line ending), else the environment, never the command line. One asked for must be
+  // one, as for the room token. Clients present the guest password's hash as the room token.
+  const auto read_secret = [](const std::string &path, std::string &out) {
+    std::ifstream in(path, std::ios::binary);
+    if (path.empty() || !in || !std::getline(in, out))
+      return false;
+    while (!out.empty() && (out.back() == '\r' || out.back() == '\n'))
+      out.pop_back();
+    return true;
+  };
+  std::string guestPassword, rconPassword;
+  bool guestAsked = false, rconAsked = false;
+  if (guestPasswordFlag) {
+    guestAsked = true;
+    if (!read_secret(guestPasswordFile, guestPassword)) {
+      std::fprintf(stderr, "arisrv: --guest-password-file: cannot read '%s'\n",
+                   guestPasswordFile.c_str());
+      return 2;
+    }
+  } else if (const char *g = std::getenv("CVC_ARISRV_GUEST_PASSWORD")) {
+    guestAsked = true;
+    guestPassword = g;
+  }
+  if (rconPasswordFlag) {
+    rconAsked = true;
+    if (!read_secret(rconPasswordFile, rconPassword)) {
+      std::fprintf(stderr, "arisrv: --rcon-password-file: cannot read '%s'\n",
+                   rconPasswordFile.c_str());
+      return 2;
+    }
+  } else if (const char *p = std::getenv("CVC_ARISRV_RCON_PASSWORD")) {
+    rconAsked = true;
+    rconPassword = p;
+  }
+  if ((guestAsked && !cvc::valid_guest_password(guestPassword)) ||
+      (rconAsked && !cvc::valid_guest_password(rconPassword))) {
+    std::fprintf(stderr, "arisrv: a guest or rcon password is 1 to 256 bytes with no control "
+                         "characters\n");
+    return 2;
+  }
+  if (guestAsked && tokenAsked) {
+    std::fprintf(stderr, "arisrv: a relay takes a room token or a guest password, not both\n");
+    return 2;
+  }
+  if (guestAsked)
+    roomToken = cvc::guest_password_bearer(guestPassword);
   // The gRPC planes' certificate chain and key (--tls-cert, --tls-key): both, readable, or arisrv
   // stops here rather than serve in the clear.
   std::string tlsCertPem, tlsKeyPem;
@@ -1269,7 +1380,12 @@ int main(int argc, char **argv) {
               relayGate ? "on" : "off", trimJournal ? "trim (no backfill)" : "keep (backfill)",
               stallMs, mediaDelayMs, scene.c_str(),
               bindGate ? "on" : "off (any client's writes are taken)",
-              roomToken.empty() ? "off (an open room)" : "on");
+              roomToken.empty() ? "off (an open room)"
+              : guestAsked      ? "on (a guest password)"
+                                : "on");
+  std::printf("[arisrv] rcon: %s\n", rconPassword.empty() ? "off"
+                                     : rconPlaintext      ? "on, from any connection"
+                                                          : "on, over TLS or from the loopback");
   std::printf("[arisrv] chat: room%s | history in memory: %zu room messages, %zu per "
               "conversation\n",
               chatLimits.dms ? " and direct messages" : " only (direct messages need bound writes)",
@@ -1430,6 +1546,45 @@ int main(int argc, char **argv) {
   const long netPublishSteps = std::lround(cvc::ariadne::conference::net_publish_period_s);
   const int netPublishTicks = 5 * static_cast<int>(std::max(1L, netPublishSteps));
   const auto net_start = std::chrono::steady_clock::now();
+  // Who connected (docs/roadmap/ARISRV_IDENTITY.md, ID1): a record for each client id, updated from
+  // both transports' links with the net step below, and by the server.* calls.
+  using client_registry = cvc::ariadne::conference::client_registry;
+  client_registry::options clientOpts;
+  clientOpts.room = room;
+  clientOpts.max_clients = static_cast<std::size_t>(clientsMax);
+  clientOpts.max_connections = static_cast<std::size_t>(clientLogMax);
+  client_registry clients(clientOpts);
+  const auto client_links = [&] {
+    std::vector<cvc::state_link_report> links = state_tp.link_reports();
+#if CVC_ENABLE_WS
+    for (cvc::state_link_report &r : ws_tp.link_reports())
+      links.push_back(std::move(r));
+#endif
+    return links;
+  };
+  const auto clients_now = [&] {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - net_start).count();
+  };
+  const auto clients_wall = [] {
+    return client_registry::utc_iso(std::chrono::system_clock::now());
+  };
+  const auto present_pids = [&] {
+    std::set<std::string> present;
+    for (const auto &p : cvc::ariadne::conference::room_roster(app, room))
+      present.insert(p.pid);
+    return present;
+  };
+  // Close one of a client's connections (server.kick, a banned client's), on its own transport.
+  const auto kick_link = [&](const client_registry::link_ref &l) {
+    if (l.transport == "grpc")
+      return state_tp.disconnect_connection(l.connection);
+#if CVC_ENABLE_WS
+    if (l.transport == "ws")
+      return ws_tp.disconnect_connection(l.connection);
+#endif
+    return false;
+  };
+  cvc::ariadne::conference::rcon_guard rconGuard; // wrong rcon passwords, by address and client
   // The shared 3D scene (H1 slice 5, roadmap §5g), from the world chosen above (WD1): the relay is
   // its sole writer, and every client builds the room from it, its rig and shadows included (the
   // look is the world's, Q1). One revision for the whole scene. The writes are local shard
@@ -1530,9 +1685,249 @@ int main(int argc, char **argv) {
   bool scriptStopping = false;
   std::chrono::steady_clock::time_point scriptDeadline;
 #endif
+  // The relay's own functions (docs/roadmap/ARISRV_IDENTITY.md): the reserved server.* names,
+  // answered here before a call can reach Python, in stock arisrv as in arisrvx.
+  //   server.whoami                 the caller's record: {client_id, username, verified, device,
+  //                                 admin}
+  //   server.set {username, unique} rename the caller; `unique` takes "ana-2" when another client
+  //                                 has "ana", where it would be refused. Answers as whoami.
+  //   server.rcon P                 make the caller's connection an admin (ID3); server.rcon-logout
+  //                                 takes that back. An admin's: server.clients, server.client ID,
+  //                                 server.kick ID, server.ban ID, server.unban ID,
+  //                                 server.rename ID NAME, server.limits ID {key value ...}. ID is
+  //                                 a client id, or the pid of one of its connections.
+  const auto server_call = [&](const cvc::ariadne::conference::room_call_request &r) {
+    namespace se = cvc::state_exec;
+    // The links as they are now, not as the last pass saw them: a call that came before a pass
+    // saw its Hello has a record, and a pid taken over since is its new holder's, so nothing the
+    // old holder's connection was (its rcon) carries over to it.
+    clients.update(client_links(), clients_now(), clients_wall());
+    for (const client_registry::link_ref &l : clients.take_banned_links())
+      kick_link(l);
+    // The call's positional argument I as a string ("" when it is not one).
+    const auto arg_str = [&r](std::size_t i) -> std::string {
+      const se::list_ptr *l = std::get_if<se::list_ptr>(&r.args.v);
+      if (!l || !*l || (*l)->size() <= i)
+        return std::string();
+      const std::string *s = std::get_if<std::string>(&(**l)[i].v);
+      return s ? *s : std::string();
+    };
+    // A client id, or the pid of one of its connections, as the client id.
+    const auto client_of = [&](const std::string &id_or_pid) {
+      return clients.find(id_or_pid) ? id_or_pid : clients.identity_key(id_or_pid);
+    };
+    if (r.fn == "server.whoami") {
+      se::value_t who = clients.whoami(r.pid);
+      if (std::holds_alternative<std::monostate>(who.v))
+        calls->fail(r, "unavailable", "this connection has no client record yet");
+      else
+        calls->result(r.pid, r.id, who);
+      return;
+    }
+    if (r.fn == "server.set") {
+      // One dict of settings: the call's keyword arguments, or its one positional argument.
+      const se::dict_ptr *d = std::get_if<se::dict_ptr>(&r.kwargs.v);
+      if (!d || !*d || (*d)->empty()) {
+        const se::list_ptr *l = std::get_if<se::list_ptr>(&r.args.v);
+        d = l && *l && (*l)->size() == 1 ? std::get_if<se::dict_ptr>(&(**l)[0].v) : nullptr;
+      }
+      if (!d || !*d || (*d)->empty()) {
+        calls->fail(r, "invalid", "server.set takes a dict of settings (username)");
+        return;
+      }
+      std::string username;
+      bool named = false, unique = false;
+      for (const auto &[k, v] : **d) {
+        if (k == "username") {
+          const std::string *s = std::get_if<std::string>(&v.v);
+          if (!s) {
+            calls->fail(r, "invalid", "server.set: username is a string");
+            return;
+          }
+          username = *s;
+          named = true;
+        } else if (k == "unique") {
+          // The DSL's false is nil.
+          const bool *b = std::get_if<bool>(&v.v);
+          if (!b && !std::holds_alternative<std::monostate>(v.v)) {
+            calls->fail(r, "invalid", "server.set: unique is true or false");
+            return;
+          }
+          unique = b && *b;
+        } else {
+          calls->fail(r, "invalid", "server.set: " + k + " is not a setting (username)");
+          return;
+        }
+      }
+      if (!named) {
+        calls->fail(r, "invalid", "server.set: nothing to set (username)");
+        return;
+      }
+      client_registry::refusal why;
+      if (!clients.set_username(r.pid, username, clients_now(), why, unique)) {
+        calls->fail(r, why.code, why.message);
+        return;
+      }
+      // At once, present or not: the call can come before the presence.joined room-join wrote
+      // with it, and what the client sends next (a chat post) must carry the new name.
+      clients.write_name(app, r.pid);
+      calls->result(r.pid, r.id, clients.whoami(r.pid));
+      return;
+    }
+    if (r.fn == "server.rcon") {
+      // (room-call "server.rcon" P), or (dict "password" P).
+      std::string pw = arg_str(0);
+      if (pw.empty())
+        if (const se::value_t *f = se::field(r.kwargs, "password"))
+          if (const std::string *s = std::get_if<std::string>(&f->v))
+            pw = *s;
+      if (rconPassword.empty()) {
+        calls->fail(r, "forbidden", "rcon is off on this relay (--rcon-password-file)");
+        return;
+      }
+      client_registry::holder h;
+      if (!clients.holder_of(r.pid, h)) {
+        calls->fail(r, "unavailable", "this connection has no client record yet");
+        return;
+      }
+      const bool loopback = h.public_address.rfind("127.", 0) == 0 || h.public_address == "::1" ||
+                            h.public_address.rfind("::ffff:127.", 0) == 0;
+      if (!h.secure && !loopback && !rconPlaintext) {
+        calls->fail(r, "forbidden",
+                    "rcon over a connection without TLS from " + h.public_address +
+                        " is refused (serve with --tls-cert, or allow it with --rcon-plaintext)");
+        return;
+      }
+      const std::string id = clients.identity_key(r.pid);
+      const double now = clients_now();
+      if (const double w = rconGuard.wait(h.public_address, id, now); w > 0.0) {
+        calls->fail(r, "rate_limited",
+                    "too many wrong rcon passwords; try again in " +
+                        std::to_string(static_cast<long>(std::ceil(w))) + " s");
+        return;
+      }
+      if (pw.empty() || !cvc::constant_time_equal(pw, rconPassword)) {
+        rconGuard.failed(h.public_address, id, now);
+        clients.note_rcon_failure(r.pid);
+        std::printf("[arisrv] rcon: a wrong password from client %s (%s)\n", id.c_str(),
+                    h.public_address.c_str());
+        std::fflush(stdout);
+        calls->fail(r, "forbidden", "wrong rcon password");
+        return;
+      }
+      rconGuard.succeeded(h.public_address, id);
+      clients.set_admin(r.pid, true);
+      std::printf("[arisrv] rcon: client %s (%s) is an admin on this connection\n", id.c_str(),
+                  h.public_address.c_str());
+      std::fflush(stdout);
+      calls->result(r.pid, r.id, clients.whoami(r.pid));
+      return;
+    }
+    if (r.fn == "server.rcon-logout") {
+      clients.set_admin(r.pid, false);
+      calls->result(r.pid, r.id, clients.whoami(r.pid));
+      return;
+    }
+    const bool admin_call = r.fn == "server.clients" || r.fn == "server.client" ||
+                            r.fn == "server.kick" || r.fn == "server.ban" ||
+                            r.fn == "server.unban" || r.fn == "server.rename" ||
+                            r.fn == "server.limits";
+    if (admin_call && !clients.is_admin(r.pid)) {
+      calls->fail(r, "forbidden", r.fn + " is an admin's: log in with server.rcon first");
+      return;
+    }
+    if (r.fn == "server.clients") {
+      calls->result(r.pid, r.id, clients.list_value());
+      return;
+    }
+    if (admin_call && arg_str(0).empty()) {
+      calls->fail(r, "invalid", r.fn + " takes a client id (or a pid) first");
+      return;
+    }
+    const std::string target = admin_call ? client_of(arg_str(0)) : std::string();
+    if (admin_call && target.empty()) {
+      calls->fail(r, "invalid", "no client " + arg_str(0));
+      return;
+    }
+    if (r.fn == "server.client") {
+      calls->result(r.pid, r.id, clients.record_value(target));
+      return;
+    }
+    if (r.fn == "server.kick") {
+      std::int64_t n = 0;
+      for (const client_registry::link_ref &l : clients.links_of(target))
+        n += kick_link(l) ? 1 : 0;
+      std::printf("[arisrv] rcon: client %s kicked %s (%lld connection(s))\n",
+                  clients.identity_key(r.pid).c_str(), target.c_str(), static_cast<long long>(n));
+      std::fflush(stdout);
+      calls->result(r.pid, r.id, se::value_t(n));
+      return;
+    }
+    if (r.fn == "server.ban" || r.fn == "server.unban") {
+      const bool on = r.fn == "server.ban";
+      clients.ban(target, on);
+      if (on)
+        for (const client_registry::link_ref &l : clients.links_of(target))
+          kick_link(l);
+      std::printf("[arisrv] rcon: client %s %s %s\n", clients.identity_key(r.pid).c_str(),
+                  on ? "banned" : "unbanned", target.c_str());
+      std::fflush(stdout);
+      calls->result(r.pid, r.id, clients.record_value(target));
+      return;
+    }
+    if (r.fn == "server.rename") {
+      client_registry::refusal why;
+      if (!clients.rename(target, arg_str(1), why)) {
+        calls->fail(r, why.code, why.message);
+        return;
+      }
+      clients.write(app, present_pids());
+      calls->result(r.pid, r.id, clients.record_value(target));
+      return;
+    }
+    if (r.fn == "server.limits") {
+      // (room-call "server.limits" ID (dict "memory_mb" 64 "guests" true)): nil takes one back.
+      const se::list_ptr *l = std::get_if<se::list_ptr>(&r.args.v);
+      const se::dict_ptr *d =
+          l && *l && (*l)->size() == 2 ? std::get_if<se::dict_ptr>(&(**l)[1].v) : nullptr;
+      if (!d || !*d) {
+        calls->fail(r, "invalid", "server.limits takes a client id and a dict of limits");
+        return;
+      }
+      for (const auto &[k, v] : **d) {
+        client_registry::refusal why;
+        if (!clients.set_limit(target, k, v, why)) {
+          calls->fail(r, why.code, why.message);
+          return;
+        }
+      }
+      calls->result(r.pid, r.id, clients.record_value(target));
+      return;
+    }
+    calls->fail(r, "not_found",
+                r.fn + " is not one of the relay's functions (server.whoami, "
+                       "server.set, server.rcon, ...)");
+  };
   // Clients' calls: to the Python program while it runs (it answers on a later step), else
   // answered here. Then the program's replies go out, each to its caller's connection.
   const auto call_step = [&] {
+    // Each client's own profile.name write (one that predates server.set), refused by the gate:
+    // granted as a rename now, every room step, so a client that joins and posts at once posts
+    // under its name, as it did when it wrote the name itself.
+    {
+      std::vector<std::pair<std::string, std::string>> asked;
+      {
+        std::lock_guard<std::mutex> lk(nameRequestsMu);
+        asked.swap(nameRequests);
+      }
+      if (!asked.empty() && clients.identity_key(asked.front().first).empty())
+        clients.update(client_links(), clients_now(), clients_wall()); // asked before a pass saw it
+      for (const auto &[pid, name] : asked) {
+        client_registry::refusal why;
+        if (clients.set_username(pid, name, clients_now(), why, /*make_unique=*/true))
+          clients.write_name(app, pid);
+      }
+    }
     std::vector<cvc::ariadne::conference::room_call_request> in = calls->take();
 #ifdef CVC_ARIADNE_PYTHON
     const bool takes = scriptThread.joinable() && !scriptStopping && !scriptLink.finished();
@@ -1542,6 +1937,10 @@ int main(int argc, char **argv) {
         calls->fail(r, "unavailable",
                     "room-call needs bound writes (--bind-writes on): without them a connection "
                     "could call as another participant");
+        continue;
+      }
+      if (r.program.empty() && r.guest.empty() && r.fn.rfind("server.", 0) == 0) {
+        server_call(r); // the relay's own, never the program's
         continue;
       }
       if (!r.program.empty()) {
@@ -1602,6 +2001,23 @@ int main(int argc, char **argv) {
             continue;
           }
           principal = it->second;
+        }
+        // A connection rcon made an admin (ID3) has the role admin too, for its connection only,
+        // so a program's @export(roles=["admin"]) is an admin command. A copy: the principal kept
+        // for its id is unchanged.
+        if (clients.is_admin(r.pid)) {
+          std::vector<se::value_t> roles;
+          if (const se::value_t *rs = se::field(principal, "roles"))
+            if (const se::list_ptr *rl = std::get_if<se::list_ptr>(&rs->v); rl && *rl)
+              roles = **rl;
+          roles.push_back(se::value_t(std::string("admin")));
+          std::vector<std::pair<std::string, se::value_t>> entries;
+          if (const se::dict_ptr *pd = std::get_if<se::dict_ptr>(&principal.v); pd && *pd)
+            for (const auto &[k, v] : **pd)
+              if (k != "roles")
+                entries.emplace_back(k, v);
+          entries.emplace_back("roles", se::make_list(std::move(roles)));
+          principal = se::make_dict(std::move(entries));
         }
         se::set_field(call, "principal", principal);
         scriptLink.post(cvc::ariadne::python::ServerLink::Event{"call", 0, std::move(call)});
@@ -1792,6 +2208,13 @@ int main(int argc, char **argv) {
           if (r.stats.rtt_ms >= 0.0 && present.count(r.remote_node_id))
             pose_relay.set_rtt(r.remote_node_id, r.stats.rtt_ms);
       cvc::ariadne::conference::write_link_devices(app, room, links, present);
+      // Each client's record, each client's own profile.name write as a rename (one that predates
+      // server.set), and each present participant's username (ID1).
+      clients.update(links, now_s, clients_wall());
+      for (const client_registry::link_ref &l : clients.take_banned_links())
+        kick_link(l);
+      // Without bound writes the names stay the clients' own, as before: no gate keeps them out.
+      clients.write(app, bindGate ? present : std::set<std::string>());
       // Each viewer's video rung for its link, to the shaper and to the room (its net.relay.video,
       // which its client shows).
       // A viewer's video rung follows the link that carries its media: its lane's report, when it

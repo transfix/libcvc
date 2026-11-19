@@ -22,6 +22,8 @@ else()
   set_source_files_properties(ariadne_scene_world_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 add_executable(ariadne_scene_quality_test ariadne_scene_quality_test.cpp)
+# A document's swarm of navigating vehicles, run headless (scene_swarm.h).
+add_executable(ariadne_scene_swarm_test ariadne_scene_swarm_test.cpp)
 add_executable(ariadne_server_document_test ariadne_server_document_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
@@ -168,6 +170,7 @@ add_executable(room_scene_test room_scene_test.cpp)
 add_executable(world_rules_test world_rules_test.cpp)
 add_executable(room_avatar_test room_avatar_test.cpp)
 add_executable(room_chat_test room_chat_test.cpp)
+add_executable(client_registry_test client_registry_test.cpp)
 add_executable(room_aoi_test room_aoi_test.cpp)
 add_executable(room_aoi_relay_test room_aoi_relay_test.cpp)
 add_executable(physics_codec_test physics_codec_test.cpp)
@@ -417,6 +420,7 @@ set(TEST_TARGETS
   ariadne_runtime_test
   ariadne_scene_world_test
   ariadne_scene_quality_test
+  ariadne_scene_swarm_test
   ariadne_server_document_test
   ariadne_bind_test
   ariadne_ftxui_test
@@ -501,6 +505,7 @@ set(TEST_TARGETS
   world_rules_test
   room_avatar_test
   room_chat_test
+  client_registry_test
   room_aoi_test
   room_aoi_relay_test
   physics_codec_test
@@ -849,6 +854,13 @@ target_link_libraries(ariadne_scene_world_test
 )
 
 target_link_libraries(ariadne_scene_quality_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_scene_swarm_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2339,6 +2351,13 @@ target_link_libraries(room_chat_test
     GTest::gtest_main
 )
 
+target_link_libraries(client_registry_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(room_aoi_test
   PRIVATE
     cvc
@@ -2945,6 +2964,7 @@ target_compile_features(room_scene_test PRIVATE cxx_std_17)
 target_compile_features(world_rules_test PRIVATE cxx_std_20)
 target_compile_features(room_avatar_test PRIVATE cxx_std_17)
 target_compile_features(room_chat_test PRIVATE cxx_std_20)
+target_compile_features(client_registry_test PRIVATE cxx_std_20)
 target_compile_features(room_aoi_test PRIVATE cxx_std_17)
 target_compile_features(room_aoi_relay_test PRIVATE cxx_std_17)
 target_compile_features(physics_codec_test PRIVATE cxx_std_17)
@@ -3147,6 +3167,7 @@ cvc_discover_tests(ariadne_runtime_test)
 # the scene's wind runs as long: 900 s each, as the segmentation action test has.
 cvc_discover_tests(ariadne_scene_world_test PROPERTIES TIMEOUT 900)
 cvc_discover_tests(ariadne_scene_quality_test)
+cvc_discover_tests(ariadne_scene_swarm_test)
 cvc_discover_tests(ariadne_server_document_test)
 cvc_discover_tests(ariadne_ftxui_test)
 cvc_discover_tests(ariadne_chart_test)
@@ -3540,6 +3561,7 @@ cvc_discover_tests(room_scene_test)
 cvc_discover_tests(world_rules_test)
 cvc_discover_tests(room_avatar_test)
 cvc_discover_tests(room_chat_test)
+cvc_discover_tests(client_registry_test)
 cvc_discover_tests(room_aoi_test)
 cvc_discover_tests(room_aoi_relay_test)
 cvc_discover_tests(physics_codec_test)
