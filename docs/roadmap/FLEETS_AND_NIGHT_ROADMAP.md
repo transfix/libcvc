@@ -53,6 +53,8 @@ Joe, 2026-11-18, on transfix/libcvc#1358 (nav_city_swarm and nav_city_drive as A
 | Belief | One navigator per plant, one belief: shared only. The demos' grouped and private planes are missing. |
 | Spawning | One at a time through `vehicles.spawn.*`. No layout (one edge to the other), no count. |
 | Goals | `nav@1` wanders, or `set_goal` per entity. No rally points, and no colour by team. |
+| Policy | `nav@1`'s default is the **built-in** biased net (`policy_library.h`); trained weights only by URI and hash, entity by entity. The demos (and #1358) default to the **published trained** CoefMLP (`coef_mlp::default_weights_path`), and fall back to the built-in net silently: on the reference laptop both did, because the build's install prefix had no weights. |
+| Navigator metric | A world vehicle's navigator plans with its own vehicle's size and limits. The demos plan with the trainer's vehicle (`city_scene`'s rr, d_hat, vmax at 0.05 units a metre), the metric the trained CoefMLP learned in. |
 | Threading | The navigator ticks on the frame's thread inside `SceneWorld::follow`. The swarm's ran on a `sim_thread` worker. |
 | Relay | Every entity goes to every viewer at 30 Hz, each with its own identity entry. The client draws the box, never the model. |
 
@@ -83,9 +85,13 @@ world:
     fleets:
       city:
         archetype: humvee
-        plant: kinematic            # the archetype's plant unless named
+        plant: kinematic            # jolt | dynamic[:preset] | dynamic4w[:preset] | kinematic;
+                                    # a list cycles over the vehicles; per team: { 0: jolt, ... }
         count: 800
         controller: nav@1
+        policy: trained             # trained | builtin | { uri, sha256 } | a data: entry
+        policy_missing: fall_back   # fall_back (to builtin, said in stats) | fail
+        metric: trained             # trained (the trainer's vehicle) | vehicle (each plant's own)
         sense: fog                  # known | fog
         belief: grouped             # shared | grouped (max(2, n/64)) | private
         spawn: opposed              # opposed | scattered | points (world: spawns:)
@@ -98,6 +104,33 @@ world:
 - **Each vehicle is still an entity.** It has an id, an identity (team = its rally point, its
   colour), intents, a body in the physics world, and the gym's observation. Everything that works
   on entities works on a fleet's.
+- **The plant.** Any plant world vehicles run, in the scene's one physics world, so a Jolt fleet
+  collides with the city's buildings and terrain (the data node's `body: {}`), unlike #1358, whose
+  `plant_host` drove Jolt vehicles on a flat ground of its own.
+  - `jolt` is the drive's default (60 Humvees at their real size and limits). `kinematic` is the
+    swarm's: hundreds of physics vehicles do not keep up with the clock, as FL0 will measure.
+  - A list cycles over the vehicles, and a map gives each team its plant, so one fleet can mix
+    Humvees on Jolt with bicycles.
+  - `fleets.<name>.plant` switches it live, as `nav_plant.vehicle` does today: the vehicles keep
+    their poses and start at rest on the new plant.
+- **The policy: trained or not, and which weights.**
+  - `trained` is the published trained CoefMLP. It is resolved as `coef_mlp::default_weights_path`
+    resolves it: `$CVC_NAV_WEIGHTS`, then the prefix's `share/cvc/nav`, then the `grl-snam-weights`
+    package.
+  - `builtin` is `coef_mlp::default_biased()`, the constant (1, 3, 4) basin.
+  - Particular weights are named by `{ uri, sha256 }`: a file beside the document, an https URL, a
+    `cvcpkg://` package, or a `data:` entry, so they are fetched, cached and checked like the city.
+  - The fleet's choice goes through `policy_library`, so weights named twice load once. A team or a
+    single entity may name another, through the entity spec's `policy` / `policy_sha256`, which
+    already exist. That is the nav lab's arms on one city.
+  - `fleets.<name>.policy` switches it live through `sim_world::set_policy`, with no rebuild.
+  - **The fallback is visible.** `stats.policy` names what drives (`trained (<path>, sha256:...)`,
+    `builtin`, or `builtin: trained weights missing at <path>`), and `policy_missing: fail` refuses
+    to run without them.
+- **The metric.** `trained` plans with the trainer's vehicle, at the metric the weights learned
+  in, as the demos do. `vehicle` plans with each plant's own size and limits
+  (`nav_plant_options::plan_with_vehicle`), as world vehicles do today. The default follows the
+  policy: `trained` with trained weights, `vehicle` with the built-in net (D9).
 - **The navigator per fleet.** A fleet's entities share one `sim_world`, built with the fleet's
   belief mode (`sim_world::belief_mode`, which #1358's `SceneSwarm` already drives). Fog coverage
   and sensed walls come from the existing `WorldVehicles::belief`, extended per plane.
@@ -223,8 +256,8 @@ fleet, quantizes them, and sends only what a viewer's area of interest holds.
 
 | Phase | What | Needs | Size |
 |---|---|---|---|
-| **FL0** | **Measure first.** 800 kinematic world vehicles, headless: navigator tick, physics step with 800 kinematic bodies, `publish_entities`, and spawns. Decide D3 from the numbers. | — | S |
-| **FL1** | **Fleets in `WorldVehicles`.** `world: vehicles: fleets:` (count, archetype, plant, controller, sense, belief per fleet navigator, spawn layout, seed, rally points as teams and colours, goals held), summary publishing, `poses(fleet)`, fleet restart and reseed. The gym spawns a fleet. Tests: `ariadne_scene_world_test` fleets (build, step, rally move, restart, belief modes); a gym fleet episode. | L2, #1339, #1340 | L |
+| **FL0** | **Measure first.** 800 kinematic world vehicles, headless: navigator tick, physics step with 800 kinematic bodies, `publish_entities`, and spawns. Then 60, 120 and 240 on Jolt, the most that keep up with the clock. Decide D3 and the Jolt default from the numbers. | — | S |
+| **FL1** | **Fleets in `WorldVehicles`.** `world: vehicles: fleets:` (count, archetype, controller, sense, belief per fleet navigator, spawn layout, seed, rally points as teams and colours, goals held), summary publishing, `poses(fleet)`, fleet restart and reseed. Its plant: any world plant, Jolt included, a list or per team, switched live. Its policy: `trained`, `builtin` or named weights by URI and hash (a `data:` entry too), per team or entity, switched live, the fallback said in `stats.policy` or refused; its metric. The gym spawns a fleet. Tests: `ariadne_scene_world_test` fleets (build, step, rally move, restart, belief modes, a Jolt fleet against a building, a mixed fleet, each policy choice and the missing-weights fallback); a gym fleet episode. | L2, #1339, #1340 | L |
 | **FL2** | **The entity view.** `entity_layer` (bodies with LOD rungs, flags, goals, trails, path, belief, dots, targets, follow) over world vehicles; promotion of K entities to `vehicle_view` nodes; the threshold. #1358's `swarm_layer` code moves here. Test: `cvcgl_ariadne_entities`. | FL1 | M |
 | **FL3** | **The nav city documents on fleets.** nav_city_swarm/drive declare `world: data` and a fleet with entity layers. `nav_swarm` and `SceneSwarm` are removed. The minimap drags rally keys; the chase follows an entity. Perf gate: at least #1358's numbers on the reference laptop (and twice the C++ programs, measured back to back). | FL2 | M |
 | **FL4** | **Fleets on the relay.** A fleet identity section, batched quantized fleet pose packets, an area of interest for entities, and the client's entity view with model looks. `traffic.ari` becomes a fleet. Test: a relay room with 800 entities, bytes per client. | FL2, WD3 | L |
@@ -253,3 +286,8 @@ part.
   roads, or OSM later.
 - **D6. Time of day:** a scene key a client may override, or the server's world section only.
 - **D7. The shadow budget's default N:** desktop against WebGL2.
+- **D8. Without the trained weights:** fall back to the built-in net and say so (the demos'
+  behaviour, made visible), or refuse. Should `trained` fetch `grl-snam-weights` when the network
+  is on, as the city is fetched?
+- **D9. The navigator's metric by default:** the trainer's vehicle when the weights are trained, and
+  each plant's own otherwise, or one rule for every fleet.
