@@ -1314,7 +1314,10 @@ scene:
   LoadResult onfile = load_file(app, doc.string());
   ASSERT_TRUE(onfile.ok) << onfile.error;
   ASSERT_EQ(onfile.scene.data.size(), 1u);
-  EXPECT_EQ(fs::path(onfile.scene.data[0].uri), (dir / "models" / "pkg").lexically_normal());
+  // Both sides canonical: the temp directory can come as a short name (C:\Users\RUNNER~1\...)
+  // that the loader resolves to the long one.
+  EXPECT_EQ(fs::weakly_canonical(fs::path(onfile.scene.data[0].uri)),
+            fs::weakly_canonical(dir / "models" / "pkg"));
   std::error_code ec;
   fs::remove_all(dir, ec);
 }
