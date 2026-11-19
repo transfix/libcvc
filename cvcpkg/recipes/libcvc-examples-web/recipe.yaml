@@ -82,9 +82,12 @@ depends:
     # Austin scene + trained policy + vehicle model, preloaded into the nav_city demos'
     # MEMFS so the gallery shows real downtown Austin. Data-only (platform any).
     # build-wasm.sh preloads them when present and falls back to a synthetic city otherwise.
+    # The vehicle models (Humvee, the tactical boat) also go into arigl's file system, so the
+    # .ari demos draw their vehicles and boats as models (CVC_WASM_VEHICLE_MODELS).
     - name: scene-austin-south-small
     - name: grl-snam-weights
     - name: vehicle-humvee
+    - name: vehicle-tactical-boat
   # Nothing at run time: the bundle is finished page files (share/libcvc-examples-web/web/), the
   # libraries above all linked into the demos' .wasm and the scene, policy and vehicle preloaded
   # into their .data. Without this list cvcpkg records the build list as the bundle's required
