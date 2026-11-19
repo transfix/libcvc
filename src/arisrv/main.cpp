@@ -1669,6 +1669,21 @@ int main(int argc, char **argv) {
           std::printf("[arisrv] server document's world: %zu vehicles of %zu archetypes running, "
                       "sent to every client as the room's entities\n",
                       v->size(), v->archetypes().size());
+      // One world (ARIADNE_WORLDS.md section 18.2): the holon runs the document's world on its
+      // clock, and the avatars are bodies in it beside the vehicles, so they meet.
+      if (cvc::ariadne::SceneWorld *w = serverDoc->runtime().scene_world()) {
+        std::string why;
+        if (server_holon.attach_world(w, &why)) {
+          serverDoc->runtime().set_world_external(true);
+          std::printf("[arisrv] one world: the avatars are in the server document's physics "
+                      "world beside its bodies and vehicles, on the holon's clock (%.0f Hz)\n",
+                      1.0 / server_holon.clock().fixed_dt());
+        } else {
+          std::printf("[arisrv] server document's world: not the holon's (%s), so the avatars and "
+                      "its bodies do not meet\n",
+                      why.c_str());
+        }
+      }
     } catch (const std::exception &e) {
       std::fprintf(stderr, "arisrv: --doc: %s\n", e.what());
       docFailed = true;

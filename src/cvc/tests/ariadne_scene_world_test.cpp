@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cvc/ariadne/app_runtime.h>
+#include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/requires.h>
 #include <cvc/ariadne/scene.h>
@@ -5625,4 +5626,127 @@ TEST(AriadneSceneWeather, TheSeaStepsOnTheClockOnlyWithAWindAndSteersAtTheSkysKe
   std::printf("[storm] steered at sky.base 600: %.4f m/s (at 300: %.4f)\n", steer,
               6.0 * cvc::algo::wind_profile(300.0));
   EXPECT_DOUBLE_EQ(steer, 6.0 * cvc::algo::wind_profile(600.0));
+}
+
+// ----------------
+// One world (ARIADNE_WORLDS.md section 18.2): a server holon runs a scene's world
+// ----------------
+namespace {
+
+holon_config one_world_holon() {
+  holon_config c;
+  c.physics = true;
+  return c;
+}
+
+// A car driven at 2 m/s^2 from (-40, 0) along +x for `seconds`, the world run by a server holon,
+// with an avatar standing at (-25, 0) or none. Its final state, and the avatar's.
+struct shove_run {
+  entity_info car;
+  cvc::physics::body_state avatar;
+};
+shove_run shove(bool with_avatar, double seconds) {
+  LoadResult r = load_intents();
+  EXPECT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  EXPECT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t id = spawn_at(v, "external", -40.0, 0.0);
+  entity_intent go;
+  go.command = entity_intent::mode::replace;
+  go.accel = 2.0;
+  EXPECT_TRUE(v.set_intent(id, go));
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  EXPECT_TRUE(h.attach_world(w.get(), &why)) << why;
+  cvc::physics::body_state feet;
+  feet.position = {-25.0, 0.0, 0.0};
+  if (with_avatar)
+    h.add_participant("walker", false, feet);
+  const int frames = static_cast<int>(std::lround(seconds * 60.0));
+  for (int i = 0; i < frames; ++i)
+    h.advance(1.0 / 60.0);
+  shove_run out;
+  out.car = entity(v, id);
+  if (with_avatar)
+    out.avatar = h.state("walker");
+  return out;
+}
+
+} // namespace
+
+// A car and an avatar in one world: the car, driven into a standing avatar, shoves it down the
+// road (the walker can't hold a 70 kg body against a Humvee), and the avatar takes some of the
+// car's momentum, so the car ends a little behind the same run without it. Both bodies are in the
+// scene's physics world, stepped on the holon's clock; the scene's square is what the avatar
+// stands on (no room statics were given).
+TEST(AriadneOneWorld, ACarShovesAnAvatarAndTheAvatarSlowsTheCar) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  // Before the car arrives (about 3.6 s): the avatar stands on the scene's square, where it was.
+  const shove_run early = shove(true, 2.0);
+  EXPECT_NEAR(early.avatar.position.z, 0.0, 0.05) << "on the square";
+  EXPECT_LT(std::hypot(early.avatar.position.x + 25.0, early.avatar.position.y), 0.05);
+  const shove_run hit = shove(true, 6.0);
+  const shove_run clear = shove(false, 6.0);
+  std::printf("  car at 6 s: x %.3f, %.3f m/s with the avatar in its way, x %.3f, %.3f m/s "
+              "without; the avatar ends at (%.2f, %.2f), %.2f m/s\n",
+              hit.car.x, hit.car.speed, clear.car.x, clear.car.speed, hit.avatar.position.x,
+              hit.avatar.position.y,
+              std::hypot(hit.avatar.linear_velocity.x, hit.avatar.linear_velocity.y));
+  EXPECT_GT(hit.avatar.position.x, -25.0 + 2.0) << "shoved down the road";
+  EXPECT_GT(clear.car.x, -10.0) << "the car drove past where the avatar stood";
+  EXPECT_LT(hit.car.x, clear.car.x) << "the avatar took some of the car's momentum";
+}
+
+// What attach_world takes: a server holon with physics and a world on its quantum. A client, a
+// holon without physics, or a world on another step is refused and the holon is as it was;
+// detaching puts the avatars back in a world of the holon's own, where they stood.
+TEST(AriadneOneWorld, AttachTakesAServerWorldOnTheHolonsQuantum) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_intents();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  std::string why;
+  holon client(holon_role::client, one_world_holon());
+  EXPECT_FALSE(client.attach_world(w.get(), &why));
+  EXPECT_NE(why.find("client"), std::string::npos) << why;
+  holon kinematic(holon_role::server, holon_config{});
+  EXPECT_FALSE(kinematic.attach_world(w.get(), &why));
+  EXPECT_NE(why.find("physics"), std::string::npos) << why;
+  holon_config slow = one_world_holon();
+  slow.clock.fixed_dt = 1.0 / 60.0;
+  holon other(holon_role::server, slow);
+  EXPECT_FALSE(other.attach_world(w.get(), &why));
+  EXPECT_NE(why.find("quantum"), std::string::npos) << why;
+  EXPECT_EQ(other.attached_world(), nullptr);
+
+  holon h(holon_role::server, one_world_holon());
+  cvc::physics::body_state feet;
+  feet.position = {3.0, 4.0, 0.0};
+  h.add_participant("a", false, feet);
+  const std::size_t before = w->world().body_count();
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  EXPECT_EQ(h.attached_world(), w.get());
+  EXPECT_EQ(w->world().body_count(), before + 1) << "the avatar is a body in the scene's world";
+  for (int i = 0; i < 60; ++i)
+    h.advance(1.0 / 60.0);
+  const cvc::physics::body_state there = h.state("a");
+  EXPECT_NEAR(there.position.z, 0.0, 0.05) << "standing on the scene's square";
+  ASSERT_TRUE(h.attach_world(nullptr, &why)) << why;
+  EXPECT_EQ(h.attached_world(), nullptr);
+  EXPECT_EQ(w->world().body_count(), before) << "out of the scene's world again";
+  EXPECT_LT(std::hypot(h.state("a").position.x - there.position.x,
+                       h.state("a").position.y - there.position.y),
+            1e-9)
+      << "back in its own world where it stood";
 }

@@ -1610,6 +1610,12 @@ std::vector<std::string> SceneWorld::take_warnings() {
 
 std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
                                  const std::function<void()> &after_step) {
+  return follow(clock, after_step, nullptr, nullptr);
+}
+
+std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
+                                 const std::function<void()> &after_step,
+                                 const step_hook &before_each, const step_hook &after_each) {
   impl &d = *_impl;
   sync(&d.warnings);
   if (!d.follower) {
@@ -1668,11 +1674,15 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
       b->before_step();
     for (const auto &wf : d.weathers)
       wf->before_step(*d.world, tick, clock.fixed_dt());
+    if (before_each)
+      before_each(tick);
     d.last = d.world->step();
     for (const auto &b : d.boats)
       b->after_step();
     if (d.vehicles)
       d.vehicles->after_step();
+    if (after_each)
+      after_each(tick);
     d.step_history.push_back(d.last.step_ms);
     if (d.step_history.size() > 120)
       d.step_history.pop_front();
