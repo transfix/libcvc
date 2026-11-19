@@ -89,6 +89,10 @@ public:
   // Kind::Chart (chart_imgui.cpp): axes with log decades, a legend that hides and shows series,
   // a hover readout, bands, gaps, markers, the cursor and the pick, on the draw list.
   cvc::ariadne::ChartEvent chart(const char *label, const cvc::ariadne::ChartSpec &spec) override;
+  // Kind::Heatmap (heatmap_imgui.cpp): the cells, their text, marks and labels, the picked and the
+  // hovered cell outlined, and the legend, on the draw list over one item (the tooltip's).
+  cvc::ariadne::HeatmapEvent heatmap(const char *label,
+                                     const cvc::ariadne::HeatmapSpec &spec) override;
   void spinner(const char *label, double seconds, bool ascii) override; // a turning arc
   bool button(const char *label) override;
   bool menu_item_action(const char *label) override;

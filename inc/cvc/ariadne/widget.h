@@ -62,6 +62,8 @@ enum class Kind {
                   // shown under it), or over `options:` alone (a switch)
   List,           // rows of a state array (count at bind, rows at bind.<i>), one selected, with
                   // Add / Remove buttons that edit the array
+  Heatmap,        // a rows x cols grid of cells, each filled from a colour ramp by its value, with
+                  // an optional text, corner mark and tooltip; hover and click report the cell
 };
 
 // How a Kind::Image fills its box (`fit:`) and the box's shape (`shape:`); media.h fits a picture
@@ -89,6 +91,27 @@ struct ChartSeriesBind {
   std::string label;
   std::string style;
 };
+// Kind::Heatmap: one stop of its colour ramp (`ramp: [[at, colour], ...]`): a value and the
+// colour (0..1) a cell holding it is filled with. Between two stops the colour is mixed in
+// proportion; below the first and above the last it is the end stop's.
+struct HeatmapStop {
+  double at = 0.0;
+  float rgb[3] = {0.0f, 0.0f, 0.0f};
+};
+// Kind::Heatmap: where its legend goes (`legend:`; Off for `none`, the default).
+enum class HeatmapLegend { Off, Bottom, Right };
+// Kind::Heatmap's settings from the document. The cells, their count and the row and column
+// labels come from the subtree at the widget's `bind` (docs/ARIADNE.md §4).
+struct HeatmapOptions {
+  std::vector<HeatmapStop> ramp; // sorted by `at`; empty: one grey
+  float cell_size = 28.0f;       // a cell's side in px, where the backend has pixels
+  float gap = 2.0f;              // px between cells
+  bool row_labels = true; // `labels: {rows, cols}`: draw the subtree's labels when it has them
+  bool col_labels = true;
+  HeatmapLegend legend = HeatmapLegend::Off;
+  float mark_rgb[3] = {1.0f, 1.0f, 1.0f}; // `mark_color:` a marked cell's corner triangle
+};
+
 struct Background {
   std::string src;
   std::string bind;
@@ -465,6 +488,13 @@ struct Widget {
   std::string cursor;
   std::string pick;
 
+  // Kind::Heatmap: `bind` is the subtree holding rows, cols, cells.<r>.<c>.{v,text,mark,tip} and
+  // the optional row_labels / col_labels; `heatmap` the ramp and the layout. `pick` (shared with
+  // Kind::Chart) is the key a click writes the cell to (<pick>.row, <pick>.col, then <pick> =
+  // "row,col"), and the cell it names is outlined. Its `tooltip`, `on_click` and `on_hover` are the
+  // heatmap's own: per cell, with the cell in their tokens (the tooltip) or `event` (the handlers).
+  HeatmapOptions heatmap;
+
   // Kind::TextView: its height in px (0: the rest of the window; rows of 16 px in a terminal);
   // `follow` keeps it at the bottom while lines arrive, if it is already there; `wrap` wraps long
   // lines; `on_top` (an event name or a program) runs when the view is scrolled to its top, once
@@ -692,6 +722,17 @@ inline Widget chart(std::string label, std::string bind, std::vector<ChartSeries
   w.bind = std::move(bind);
   w.chart_series = std::move(series);
   w.plot_height = height;
+  return w;
+}
+
+// A heatmap grid (Kind::Heatmap) of the subtree at `bind`, coloured by `ramp`. Set the layout,
+// labels, legend and mark colour on the result's `heatmap`, and `pick` / the handlers on it.
+inline Widget heatmap(std::string label, std::string bind, std::vector<HeatmapStop> ramp = {}) {
+  Widget w;
+  w.kind = Kind::Heatmap;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.heatmap.ramp = std::move(ramp);
   return w;
 }
 
