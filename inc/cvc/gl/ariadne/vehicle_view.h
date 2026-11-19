@@ -16,6 +16,7 @@
 #ifndef __CVC_GL_ARIADNE_VEHICLE_VIEW_H__
 #define __CVC_GL_ARIADNE_VEHICLE_VIEW_H__
 
+#include <array>
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/world_rules.h> // vehicle_look
 #include <memory>
@@ -103,6 +104,35 @@ bool attach_vehicle_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNod
                           const std::string &id, const cvc::ariadne::vehicle_look &look,
                           const vehicle_shape &shape, double base_z, const float color[3],
                           std::vector<std::string> *warnings = nullptr);
+
+// ----------------
+// A scene node's model (`model:`)
+// ----------------
+// The look a scene node's `model:` value names (`where` and `instead` word its warnings: "ari:
+// scene node 'crate_a'", "its own geometry"): `{ data: NAME, file: FILE }`, FILE in the package of
+// the document's data: entry NAME (its uri and path: copied in, as resolve_vehicle_looks does); or
+// a file; or a model's name found where the vehicle models are installed (`<name>.glb` too). Kind
+// "" when it names none: `none`, or one that cannot be found (a warning says so).
+cvc::ariadne::vehicle_look node_model_look(const cvc::ariadne::Value &model,
+                                           const std::vector<cvc::ariadne::SceneData> &data,
+                                           const std::string &where, const std::string &instead,
+                                           std::vector<std::string> *warnings = nullptr);
+// How far a look's model has got, fitted into the box lo..hi (a node's own geometry's bounds, in
+// its coordinates): stood upright (glTF's +Y up turned to +Z, for a .glb or .gltf; any other file
+// is taken as +Z up already) and scaled on each axis to fill the box. Ready, pending and failed as
+// vehicle_model_state (a file or data look, kind file needing no `fit`), in the same cache.
+vehicle_model_status boxed_model_state(cvc::app &app, vehicle_model_cache &cache,
+                                       const cvc::ariadne::vehicle_look &look,
+                                       const std::array<double, 3> &lo,
+                                       const std::array<double, 3> &hi,
+                                       std::vector<std::string> *warnings = nullptr);
+// That model in place of `node`'s own geometry, its base colour texture on it (the node's colour
+// then white, so it does not tint the texture). False when it is not ready. The node keeps its
+// transform, and a body it has keeps the shape it was made with: set it after realize_physics (a
+// scene tick), so the body is the node's own geometry, not the model's.
+bool set_boxed_model(cvc::app &app, vehicle_model_cache &cache, GeometryNode &node,
+                     const cvc::ariadne::vehicle_look &look, const std::array<double, 3> &lo,
+                     const std::array<double, 3> &hi, std::vector<std::string> *warnings = nullptr);
 
 // A boat's hull as drawn (OCEAN-AND-WEATHER-ROADMAP.md D5): its hull_mesh, flat-shaded, about the
 // hull body's origin. Its topsides are `topsides`, with a band of `stripe` just over the waterline

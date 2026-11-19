@@ -32,7 +32,6 @@
 #include <cvc/gl/ariadne/world_nodes.h>
 #include <cvc/gl/physics_scene_binding.h>
 #include <exception>
-#include <filesystem>
 #include <memory>
 #include <string>
 #include <system_error>
@@ -46,64 +45,26 @@ namespace ari = cvc::ariadne;
 
 namespace {
 
-// The look boat `n` is drawn as: its `model` prop, else for the tactical preset TacticalBoat (a
-// local install). `model:` is a file, or a name found where the vehicle models are installed
-// (`<name>.glb` too), or `{ data: NAME, file: FILE }`: FILE in the package of the document's data:
-// entry NAME (cvcGL's vehicle_model_state loads it); none: its hull. A look of kind "" draws the
-// hull: none asked for, or the tactical preset's model not installed (quietly; a `model` that is
-// not found warns).
+// The look boat `n` is drawn as: its `model` prop (node_model_look: `{ data: NAME, file: FILE }`,
+// a file, a model's name, or none), else for the tactical preset TacticalBoat (a local install). A
+// look of kind "" draws the hull: none asked for, or the tactical preset's model not installed
+// (quietly; a `model` that is not found warns).
 ari::vehicle_look boat_look(const ari::SceneNode &n, const std::string &preset,
                             const std::vector<ari::SceneData> &data,
                             std::vector<std::string> *warnings) {
-  namespace fs = std::filesystem;
-  const auto warn = [&](const std::string &w) {
-    if (warnings)
-      warnings->push_back("ari: boat '" + n.id + "': " + w + "; drawn as its hull");
-  };
+  if (const ari::Value *m = n.props.find("model"))
+    return node_model_look(*m, data, "ari: boat '" + n.id + "'", "its hull", warnings);
   ari::vehicle_look look;
   look.fit = true;
-  if (const ari::Value *m = n.props.find("model"); m && m->is_map()) {
-    const ari::Value *d = m->find("data"), *f = m->find("file");
-    const std::string name = d ? d->as_string() : std::string();
-    const std::string file = f ? f->as_string() : std::string();
-    if (name.empty() || file.empty()) {
-      warn("model: expects { data: NAME, file: FILE }");
-      look.kind.clear();
-      return look;
-    }
-    for (const ari::SceneData &e : data)
-      if (e.name == name && !e.uri.empty()) {
-        look.kind = "data";
-        look.data = name;
-        look.uri = e.uri;
-        look.subpath = e.path;
-        look.path = file;
-        return look;
-      }
-    warn("model: no data: entry '" + name + "' in the document");
-    look.kind.clear();
+  if (preset != "tactical")
     return look;
+  std::string path = ari::find_vehicle_model("TacticalBoat");
+  if (path.empty())
+    path = ari::find_vehicle_model("TacticalBoat.glb");
+  if (!path.empty()) {
+    look.kind = "file";
+    look.path = path;
   }
-  const bool asked = n.props.has("model");
-  const std::string name =
-      asked ? n.props.str("model") : (preset == "tactical" ? "TacticalBoat" : std::string());
-  if (name.empty() || name == "none")
-    return look;
-  std::error_code ec;
-  std::string path;
-  if (fs::is_regular_file(fs::path(name), ec))
-    path = name;
-  else
-    path = ari::find_vehicle_model(name);
-  if (path.empty() && fs::path(name).extension().empty())
-    path = ari::find_vehicle_model(name + ".glb");
-  if (path.empty()) {
-    if (asked)
-      warn("no model '" + name + "'");
-    return look;
-  }
-  look.kind = "file";
-  look.path = path;
   return look;
 }
 

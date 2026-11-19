@@ -1693,6 +1693,20 @@ scene:
   - any other mesh as its convex hull (moving), or itself (static).
 
   `box` and `sphere` on another mesh fit its bounds, and the node's scale is baked into the shape.
+- **Drawn as a model.** A geometry node's `model:` draws a model in place of what it draws, fitted
+  into the box its own geometry spans: stood upright (a `.glb`/`.gltf` file's +Y up turned to +Z;
+  any other file is taken as +Z up) and scaled on each axis to fill the box, its base colour
+  texture on it untinted. Its body keeps the node's own shape: the model goes in from a scene tick
+  after the bodies are made, so terrain_lab's crates float as their boxes and are drawn as the
+  crate. `model:` is `{ data: NAME, file: FILE }`, FILE in the package of the document's `data:`
+  entry NAME (loaded when the scene is realized; the node draws its own geometry until the model
+  is ready, and keeps it when the package cannot load and no local install of the file is found);
+  or a file; or a model's name found where the vehicle models are installed (`cvc-scenes/shared`,
+  `<name>.glb` too). A model that cannot be had warns and leaves the node as it was. In
+  terrain_lab: `data: { crate: { uri: cvcpkg://cy-pca/prop-wooden-crate, path:
+  share/cvc-scenes/shared, load: lazy } }` and, on each crate, `model: { data: crate, file:
+  WoodenCrate.glb }` (cvcGL's `node_model_look`, `boxed_model_state`, `set_boxed_model`,
+  [`vehicle_view.h`](../inc/cvc/gl/ariadne/vehicle_view.h)).
 - **Placement.** Each body starts at its node's world pose, composed from the scene's transforms
   (a nested node's included).
 - **Stepping.** The world runs on `app.world_clock()`, driven as `clock: {}` would drive it, and
