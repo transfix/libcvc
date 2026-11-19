@@ -62,6 +62,7 @@
 #include <cstdint>
 #include <cvc/physics/types.h>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace cvc {
@@ -79,6 +80,35 @@ struct hull_mesh {
 
 // A box's hull, centred on the origin: 8 vertices and 12 triangles.
 std::shared_ptr<const hull_mesh> box_hull(const vec3 &half_extents);
+
+// One station of a lofted hull (loft_hull): where it is along the hull (body x, m), and its
+// half-section on the starboard side, (half width, height) pairs in metres from its keel (half
+// width 0) up to its sheer.
+struct hull_station {
+  double x = 0.0;
+  std::vector<std::array<double, 2>> section;
+};
+
+// A closed hull through `stations`, ordered stern to bow (x increasing), each with the same number
+// of section points (at least 2): each section mirrored to port and closed across its sheer (a
+// flat deck), neighbouring stations joined by quads split in two, and the first and last stations
+// capped (the transom and the stem's last section) by fans about their centres. Wound outward.
+// A boat model's hull baked into stations (tools/boat_hulls/bake_loft.py) floats, trims and drags
+// as its own shape does; dyn_boat_desc::tactical() is one. Throws std::invalid_argument when the
+// stations cannot make one (fewer than 2, unequal or short sections, x not increasing, a
+// non-finite number or a negative half width).
+std::shared_ptr<const hull_mesh> loft_hull(const std::vector<hull_station> &stations);
+
+// The box a renderer keeps water out of for a hull floating with its waterline at body height
+// `z`: on the hull's centre line (y = 0), the box of largest area inside the hull's outline at
+// that height (where its triangles cross the plane; the outline is read in 5 cm bins along x, so
+// where it narrows an end of the box may reach past it by up to one bin's worth), its centre `x`
+// along the hull. A box hull's is its own box; a V hull's is narrower than its beam and stops
+// short of its bow. None when no triangle crosses the plane.
+struct waterline_box {
+  double x = 0.0, half_length = 0.0, half_beam = 0.0;
+};
+std::optional<waterline_box> hull_waterline_box(const hull_mesh &h, double z);
 
 } // namespace physics
 } // namespace cvc

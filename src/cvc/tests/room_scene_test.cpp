@@ -807,7 +807,7 @@ scene:
   EXPECT_TRUE(any_warning(warnings, "'statue': its texture is not carried"));
   EXPECT_TRUE(any_warning(warnings, "'hills': the room carries a plane, box or sphere"));
   EXPECT_TRUE(any_warning(warnings, "'group': its 1 children are left out"));
-  EXPECT_TRUE(any_warning(warnings, "physics: is not simulated from the document yet"));
+  EXPECT_TRUE(any_warning(warnings, "physics: runs in the relay's document runtime"));
 
   // And it writes: the room's scene reads back as the objects it carried.
   cvc::app app;

@@ -196,6 +196,9 @@ public:
   void setShaderUniformf(const std::string &name, float v);
   void setShaderUniformi(const std::string &name, int v);
   void setShaderUniform3f(const std::string &name, float x, float y, float z);
+  // The value setShaderUniform3f gave `name` (what a test reads back; shaderUniformf, below, a
+  // float's); false for none.
+  bool shaderUniform3f(const std::string &name, std::array<float, 3> &out) const;
   void setShaderTexture(const std::string &name, vtkTextureObject *tex); // nullptr unbinds
 
   // Shader inputs SHARED by many meshes and changed in one place: a node that owns a scene-wide
@@ -219,6 +222,10 @@ public:
   bool hasSharedShaderInputs(const std::string &key) const;
   // The inputs shared under `key` (null if none): what a test reads back.
   std::shared_ptr<const ShaderInputs> sharedShaderInputs(const std::string &key) const;
+  // What setShaderUniformf / setShaderTexture last set under `name`, as a test reads it back:
+  // false / null when nothing is.
+  bool shaderUniformf(const std::string &name, float &v) const;
+  vtkTextureObject *shaderTexture(const std::string &name) const;
 
   // Disable VTK's VBO coordinate shift/scale so `vertexMC` in a custom shader is
   // the mesh's ACTUAL (world/model) coordinates rather than an internally-shifted
@@ -239,7 +246,19 @@ public:
   // (vtkProp UseBounds) and the scene's (contributesToSceneBounds, for a node at the scene's top
   // level). For something that may reach far past the scene, such as a sky drawn to the horizon,
   // that must neither zoom the view out nor push its near plane away. Set it before the mesh has
-  // its geometry: the scene's own box only grows until nodes are added or removed.
+  // its geometry: the scene's own box only grows until nodes are added or removed. Out of the
+  // bounds, the actor has none (its GetBounds is null), so VTK's frustum culler never culls it: a
+  // procedural mesh placed by its vertex shader (the rain's streaks, the water's spray) would
+  // otherwise be culled by the bounds of the vertices it was given.
+  //
+  // A null GetBounds is what a 2-D prop gives, and VTK's renderer (ComputeVisiblePropBounds), its
+  // pickers (vtkPicker, vtkPropPicker), its shadow map bake and cvcGL's own shadow fit
+  // (SceneGraph.cpp's StridedShadowBaker) and bounds walks check for it. vtkAreaPicker does not (it
+  // reads the bounds of any pickable prop with a mapper): nothing in libcvc uses it, but one that
+  // does must make such a mesh unpickable. The shadow fit leaves these meshes out: the sky's far
+  // slices (a VolSliceNode is a GeometryNode), the lightning bolt, the rain's streaks and the
+  // spray, none of which casts a shadow, so in a cloud_sky scene the box the light's shadow map is
+  // fitted to no longer takes in the far slices (and its depth range changes with it).
   void setUseBounds(bool on);
 
   // Draw this mesh in VTK's volume layer instead of with the opaque or translucent geometry: in its
@@ -380,9 +399,12 @@ protected:
   // sampler uniform that the program actually uses. For UpdateShaderEvent
   // observers; textures without a context, or unused by the program, are skipped.
   // Each texture holds its unit only for the draw under way: this node's actor
-  // releases it once that draw is done.
+  // releases it once that draw is done. `drawingMapper` is the mapper whose draw
+  // fired the event (default: this node's): the units its vertex data takes are
+  // kept clear (LowMemoryPolyDataMapper::arrayTextureUnits).
   void bindShaderTextures(vtkShaderProgram *program,
-                          const std::vector<std::pair<std::string, vtkTextureObject *>> &textures);
+                          const std::vector<std::pair<std::string, vtkTextureObject *>> &textures,
+                          vtkObject *drawingMapper = nullptr);
 
   // Shader replacements a SUBCLASS needs for itself. Kept out of reach of the
   // public add*ShaderReplacement / clearShaderReplacements (see there), and
@@ -467,6 +489,7 @@ private:
   std::map<std::string, std::shared_ptr<const ShaderInputs>> m_sharedInputs;
   vtkSmartPointer<vtkCallbackCommand> m_shaderTexCb;
   bool m_shaderTexObserverInstalled = false;
+  bool m_unitsWarned = false; // bindShaderTextures said once that a draw ran out of units
 
   // Shader replacements by (stage: 0 vertex, 1 fragment, 2 fragment after VTK's; anchor): the
   // caller's (public API) and the subclass's own. The actor's shader property holds one entry per

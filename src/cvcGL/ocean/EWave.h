@@ -14,6 +14,7 @@
 #include "OceanButterfly.h"
 
 #include <cvc/ocean/ewave.h>
+#include <functional>
 #include <memory>
 #include <vector>
 #include <vtkSmartPointer.h>
@@ -173,6 +174,9 @@ public:
   int substeps(double dt) const;
   int passesPerStep(double dt) const;
   long long passesRun() const { return m_passes; }
+  // The step tables (the exact step's coefficients, the symmetric step's multipliers, the real
+  // space factors) worked out so far: once per step size while what they depend on holds.
+  long long tablesBuilt() const { return m_tablesBuilt; }
 
   // The reader textures the gather pass reads: two readers to a texel.
   static constexpr int kReaderTextures = (cvc::ocean::ewave_max_readers + 1) / 2;
@@ -217,11 +221,24 @@ private:
   vtkSmartPointer<vtkTextureObject> m_ghostW;                   // RGBA32F
   vtkSmartPointer<vtkTextureObject> m_invMass;                  // R32F
   vtkSmartPointer<vtkTextureObject> m_readers[kReaderTextures]; // RGBA32F
-  vtkSmartPointer<vtkTextureObject> m_coef;   // RGBA32F, the exact step's update for m_coefDt
-  vtkSmartPointer<vtkTextureObject> m_mul;    // RG32F, the symmetric step's multipliers, m_mulDts
-  vtkSmartPointer<vtkTextureObject> m_factor; // R32F, the real-space factors for m_factorDt
-  double m_coefDt = 0.0, m_mulDts = 0.0, m_factorDt = 0.0;          // the step each table is for
+  vtkSmartPointer<vtkTextureObject> m_coef;   // RGBA32F, the exact step's update for this step
+  vtkSmartPointer<vtkTextureObject> m_mul;    // RG32F, the symmetric step's multipliers
+  vtkSmartPointer<vtkTextureObject> m_factor; // R32F, the real-space factors
+  // Each table for the last few steps it was worked out for, most recent first: a window stepped
+  // by the world clock's frames takes a few different steps (whole numbers of the clock's
+  // quantum), and a table is n x n modes of det:: math (milliseconds at 256^2), so each is
+  // worked out once per step and kept while what it depends on holds (the stale flags).
+  struct step_table {
+    double dt = 0.0;
+    vtkSmartPointer<vtkTextureObject> tex;
+  };
+  static constexpr std::size_t kStepTables = 6;
+  std::vector<step_table> m_coefs, m_muls, m_factors;
+  long long m_tablesBuilt = 0;
   bool m_coefStale = true, m_mulStale = true, m_factorStale = true; // to work out again
+  // The table for step dt from `kept`, made of `comps` channels by `make` when none is kept.
+  vtkTextureObject *stepTable(std::vector<step_table> &kept, bool &stale, double dt, int comps,
+                              const std::function<std::vector<float>()> &make);
   vtkSmartPointer<vtkOpenGLFramebufferObject> m_fbo;
 
   std::unique_ptr<vtkOpenGLQuadHelper> m_update;

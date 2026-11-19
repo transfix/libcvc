@@ -357,3 +357,33 @@ TEST(AlgoDetMath, Bits) {
   for (const auto &m : more)
     EXPECT_EQ(bits(m.v), m.want) << m.what << " = 0x" << std::hex << bits(m.v);
 }
+
+// sincos (one reduction for both) gives sin's and cos's bits, over the ranges the sea's mode phases
+// and the shore layer's trains take, past them, at quadrant edges, at +-0, beyond 2^53 (where the
+// quadrant comes from fmod) and at the non-finite.
+TEST(AlgoDetMath, SinCosIsSinAndCos) {
+  std::vector<double> xs = {
+      0.0,  -0.0,  1e-300, -1e-300, kInf, -kInf,   std::numeric_limits<double>::quiet_NaN(),
+      1e15, -1e15, 6.0e15, -9.1e15, 1e20, -3.5e22, 1.7976931348623157e308};
+  for (int k = -40; k <= 40; ++k) { // the quadrant edges, either side
+    const double e = k * 1.5707963267948966;
+    xs.push_back(e);
+    xs.push_back(std::nextafter(e, kInf));
+    xs.push_back(std::nextafter(e, -kInf));
+  }
+  std::uint64_t h = 0x9E3779B97F4A7C15ull;
+  for (int i = 0; i < 20000; ++i) { // spread over |x| < 1e6 and a few decades past
+    h ^= h << 13;
+    h ^= h >> 7;
+    h ^= h << 17;
+    const double u = double(h >> 11) / 9007199254740992.0; // [0, 1)
+    const double mag = std::pow(10.0, -3.0 + 12.0 * u);
+    xs.push_back((i & 1) ? mag : -mag);
+  }
+  for (double x : xs) {
+    double s = 0.0, c = 0.0;
+    det::sincos(x, s, c);
+    EXPECT_TRUE(same(s, det::sin(x))) << "sin " << x;
+    EXPECT_TRUE(same(c, det::cos(x))) << "cos " << x;
+  }
+}

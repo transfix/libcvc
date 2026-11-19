@@ -26,6 +26,7 @@
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/nav/world_grid.h>
 #include <cmath>
+#include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/state/state_exec/async_host.h>
 #include <stdexcept>
@@ -99,7 +100,10 @@ public:
   bool available() const { return vehicles() != nullptr; }
 
   // One dict per entity: id, name, archetype, team, controller, plant, placed, x, y, z, yaw, speed,
-  // power_kw, energy_wh, distance, gear, the command its plant took (steer, accel) and its intent.
+  // power_kw, energy_wh, distance, gear, the command its plant took (steer, accel) and its intent;
+  // vx, vy (m/s), steer (rad), goal_x, goal_y, reach (m), reached, collided (a contact with a
+  // body other than the ground, or another vehicle, since the last tick); and its body: length, width,
+  // wheelbase (m), max_steer (rad), max_accel, max_decel (m/s^2), max_speed (m/s).
   PyObject *list() const {
     PyObject *out = PyList_New(0);
     if (!out)
@@ -126,6 +130,30 @@ public:
         put(d, "command_steer", PyFloat_FromDouble(e.command_steer));
         put(d, "command_accel", PyFloat_FromDouble(e.command_accel));
         put(d, "intent", intent_dict(e.intent));
+        put(d, "vx", PyFloat_FromDouble(e.vx));
+        put(d, "vy", PyFloat_FromDouble(e.vy));
+        put(d, "steer", PyFloat_FromDouble(e.steer));
+        put(d, "goal_x", PyFloat_FromDouble(e.goal_x));
+        put(d, "goal_y", PyFloat_FromDouble(e.goal_y));
+        put(d, "reach", PyFloat_FromDouble(e.reach));
+        put(d, "reached", PyBool_FromLong(e.reached ? 1 : 0));
+        put(d, "collided", PyBool_FromLong(e.obstacle_contacts > 0 || e.vehicle_contact ? 1 : 0));
+        cvc::physics::vehicle_desc body = cvc::physics::vehicle_desc::humvee();
+        for (const cvc::ariadne::vehicle_archetype &a : v->archetypes())
+          if (a.id == e.spec.archetype) {
+            try {
+              body = cvc::ariadne::vehicle_desc_of(a, e.spec.mass, e.spec.max_speed);
+            } catch (const std::exception &) {
+            }
+            break;
+          }
+        put(d, "length", PyFloat_FromDouble(2.0 * body.half_extents.x));
+        put(d, "width", PyFloat_FromDouble(2.0 * body.half_extents.y));
+        put(d, "wheelbase", PyFloat_FromDouble(body.wheelbase()));
+        put(d, "max_steer", PyFloat_FromDouble(body.max_steer));
+        put(d, "max_accel", PyFloat_FromDouble(body.max_accel));
+        put(d, "max_decel", PyFloat_FromDouble(body.max_decel));
+        put(d, "max_speed", PyFloat_FromDouble(body.max_speed));
         PyList_Append(out, d);
         Py_DECREF(d);
       }
@@ -223,6 +251,42 @@ public:
   bool clear_intent(unsigned long long id) {
     cvc::ariadne::WorldVehicles *v = vehicles();
     return v && v->clear_intent(id);
+  }
+  // Entity `id`'s goal (world metres), which nav@1 drives to; False for an id that is not one.
+  bool set_goal(unsigned long long id, double x, double y) {
+    cvc::ariadne::WorldVehicles *v = vehicles();
+    return v && v->set_goal(id, x, y);
+  }
+  // Whether nav@1 draws another goal at each one it reaches (True by default); False holds them.
+  bool set_wander(bool wander) {
+    cvc::ariadne::WorldVehicles *v = vehicles();
+    if (!v)
+      return false;
+    v->set_wander(wander);
+    return true;
+  }
+  // The navigator's grid of the world on, as pycvc.WorldGym.grid gives it: occupancy (rows, cols)
+  // uint8 (1 blocked, row 0 at min_y), height (rows, cols) float32, bounds (min_x, min_y, max_x,
+  // max_y). None without a world with vehicles, or before it has a grid.
+  PyObject *grid() const {
+    cvc::ariadne::WorldVehicles *v = vehicles();
+    std::shared_ptr<const cvc::nav::world_grid> g = v ? v->grid() : nullptr;
+    if (!g)
+      Py_RETURN_NONE;
+    PyObject *d = PyDict_New();
+    npy_intp dims[2] = {g->rows, g->cols};
+    PyObject *occ = PyArray_ZEROS(2, dims, NPY_UINT8, 0);
+    if (occ && g->occupancy.size() == static_cast<std::size_t>(g->rows) * g->cols)
+      std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(occ)), g->occupancy.data(),
+                  g->occupancy.size());
+    put(d, "occupancy", occ);
+    PyObject *h = PyArray_ZEROS(2, dims, NPY_FLOAT, 0);
+    if (h && g->height.size() == g->occupancy.size() && !g->height.empty())
+      std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(h)), g->height.data(),
+                  g->height.size() * sizeof(float));
+    put(d, "height", h);
+    put(d, "bounds", Py_BuildValue("(dddd)", g->min_x, g->min_y, g->max_x, g->max_y));
+    return d;
   }
 
 private:
@@ -351,7 +415,7 @@ public:
   void wait_idle() {
     if (inFrame_)
       throw std::logic_error("AriApp::wait_idle: called from inside a frame");
-    app_->exec_async_host().wait_idle();
+    rt_->wait_idle(); // the app's host and the document's own group's (S1.9)
   }
   static bool have_yaml() { return cvc::ariadne::AppRuntime::have_yaml(); }
 
@@ -455,6 +519,9 @@ public:
                   bool force_steers = true);
   PyObject *intent(unsigned long long id) const;
   bool clear_intent(unsigned long long id);
+  bool set_goal(unsigned long long id, double x, double y);
+  bool set_wander(bool wander);
+  PyObject *grid() const;
 };
 WorldEntities *world_entities(std::shared_ptr<cvc::app> app, PyObject *runtime);
 class AriApp {

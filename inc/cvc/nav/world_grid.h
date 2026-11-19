@@ -24,12 +24,19 @@
 // The grid is world_planes' (corner samples, sample (r, c) at (min_x + c*cell, min_y + r*cell), row
 // 0 at min_y), with square cells. occupancy is world_planes' occupancy (navigate-role meshes, hard
 // ground, deep water) with the outermost rows and columns set, so no agent leaves the grid.
+//
+// Water (set_water): each sample's still-water depth, the level less the ground's height, so a
+// spawner and a boat's navigator know how deep it is, not only whether the ground is a water
+// surface. medium_grid() turns the grid into the one a vehicle on land or on water plans and starts
+// on: a car's with water deeper than a ford blocked, a boat's with land and the shallows blocked.
 
 #ifndef CVC_NAV_WORLD_GRID_H
 #define CVC_NAV_WORLD_GRID_H
 
 #include <array>
 #include <cstdint>
+#include <cvc/nav/plant_types.h> // plant_medium
+#include <limits>
 #include <vector>
 
 namespace cvc {
@@ -43,6 +50,14 @@ struct world_grid {
   double min_x = 0.0, min_y = 0.0, max_x = 0.0, max_y = 0.0;
   std::vector<std::uint8_t> occupancy; // rows*cols, row-major, row 0 at min_y; 1 = blocked
   std::vector<float> height;           // rows*cols: the terrain's height, 0 without one
+  // The still water (set_water): over each sample its depth, the level less the ground's height
+  // (> 0 under water, <= 0 on dry land), and the level; empty and NaN when the world has none.
+  std::vector<float> water_depth;
+  double water_level = std::numeric_limits<double>::quiet_NaN();
+  // What blocks each sample other than water: occupancy less the samples only a water surface
+  // blocks (a surface whose rf_material is "water": deep water), the wall included. Empty: every
+  // blocked sample is solid (occupancy).
+  std::vector<std::uint8_t> solid;
 
   double cell() const { return cols > 1 ? (max_x - min_x) / (cols - 1) : 0.0; }
   double center_x() const { return 0.5 * (min_x + max_x); }
@@ -53,6 +68,9 @@ struct world_grid {
   bool occupied(double x, double y) const;
   // The blocked samples, the wall included.
   std::size_t occupied_count() const;
+  bool has_water() const { return !water_depth.empty(); }
+  // The water's depth at the sample nearest (x, y) (<= 0 dry); 0 without water.
+  double depth_at(double x, double y) const;
 };
 
 // The grid of `world` over (min_x, min_y)-(max_x, max_y) with `cell` m samples: the extent is cut
@@ -70,6 +88,18 @@ world_grid flat_grid(double half, double cell);
 // at height `z`.
 world_grid flat_grid(double min_x, double min_y, double max_x, double max_y, double cell,
                      float z = 0.0f);
+
+// The still water at `level` (m) over g: water_depth is the level less the ground's height at
+// every sample, so a sample under the level is under water whether or not its surface is one.
+void set_water(world_grid &g, double level);
+
+// The grid a vehicle on `medium` plans and starts on, the wall kept:
+//   land   g's occupancy, and the water deeper than `depth_m` (a ford's depth) blocked too;
+//   water  the samples under at least `depth_m` of water (a draft and the clearance under its
+//          keel) free, and the rest blocked: the land, the shallows, and whatever else is solid.
+// Without water, land is g's occupancy and water is blocked everywhere. The heights and the water
+// are g's.
+world_grid medium_grid(const world_grid &g, plant_medium medium, double depth_m);
 
 // The signed distance (m) from each sample to the nearest blocked one: positive in the free
 // samples, negative inside the blocked ones (to the nearest free one). rows*cols.

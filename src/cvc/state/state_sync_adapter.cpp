@@ -225,6 +225,14 @@ void state_sync_adapter::drop_subtree(const std::string &full_path) {
   }
 }
 
+// The slots run on the writing thread and re-walk from the root by path with raw, creating lookups
+// (state::operator()), here, in attach_node, journal_value/journal_data and apply_remote; the
+// childChanged slot's removal check is a findDescendant, which makes nothing but holds nothing
+// either. A walk holds nothing, so another thread's unlink can free a node under it, and a
+// creating lookup can re-create a node that was just deleted. Safe while every writer of the
+// observed subtree is the host thread, as in threaded Stage 1 (`conf.*` is written only by
+// host_proxied natives and host code). The follow-up (STATE_EXEC_THREADED.md 4.8) is the pinned
+// walks (findDescendantShared / sharedChild).
 state_sync_adapter::connection_set state_sync_adapter::connect_node(state &node,
                                                                     const std::string &full_path) {
   connection_set cs;
@@ -425,6 +433,8 @@ bool state_sync_adapter::apply_remote(const state_mutation &m) {
     return true;
   }
 
+  // A raw, creating lookup that holds nothing (see connect_node). Hosts apply remote mutations on
+  // the host thread: arigl from its frame's transport pump.
   state &node = (m.path.empty()) ? state::instance(_ctx) : state::instance(_ctx)(m.path);
   switch (m.op) {
   case state_mutation_op::set_value:

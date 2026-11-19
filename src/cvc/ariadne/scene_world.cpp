@@ -16,13 +16,17 @@
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/data.h>
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/scene_boat.h>
 #include <cvc/ariadne/scene_generated_world.h>
 #include <cvc/ariadne/scene_geometry.h>
 #include <cvc/ariadne/scene_water.h>
+#include <cvc/ariadne/scene_weather.h> // WeatherFriction: the rain's friction
+#include <cvc/ariadne/scene_wind.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
 #include <cvc/core/clock_follower.h>
+#include <cvc/core/sim_tick.h>
 #include <cvc/core/world_clock_binding.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
@@ -30,12 +34,15 @@
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_geometry.h>
 #include <cvc/state/state.h>
+#include <cvc/world/generated_world.h>
 #include <cvc/world/world_geometry.h>
 #include <deque>
 #include <exception>
+#include <limits>
 #include <optional>
 #include <set>
 #include <sstream>
+#include <thread>
 
 namespace cvc {
 namespace ariadne {
@@ -315,6 +322,52 @@ struct SceneWorld::impl {
   std::unique_ptr<WorldVehicles> vehicles;
   std::shared_ptr<const cvc::nav::world_grid> ground_grid;
   bool ground_given = false;
+  // The scene's wind (bind_wind): its keys' root, the base its profile is over, the wind its field
+  // was made for and the field (invalid: none in the world).
+  bool wind_bound = false;
+  std::string wind_prefix;
+  double wind_base = 0.0;
+  std::optional<SceneWind> wind_applied;
+  ph::field_id wind_field;
+  std::shared_ptr<const ph::flow_velocity> wind_flow;
+  std::vector<std::uint64_t> storm_revs; // the weathers' revisions the field has (StormWindFlow)
+  // The clock's time less the world's field time, from where the world anchored on the clock
+  // (follow), and the one the storms' air was made with: the storms are the clock's.
+  double clock_offset = 0.0, storm_offset = 0.0;
+  // The kSceneWindFrontPeriod the sleeping bodies were last woken under the fronts in.
+  std::uint64_t wake_period = std::numeric_limits<std::uint64_t>::max();
+  bool warned_periods = false; // a follow ran over more than one period (warned once)
+  // Whether the water's sea steps on the clock's periods: a scene wind and a weather node, whose
+  // fronts move the wind on their own. Not whether a front blows now: weather.gust_front can turn
+  // the fronts off or on mid-run, and the sea settling after them stays on the clock.
+  bool clocked() const { return wind_applied.has_value() && !weathers.empty(); }
+  // Bodies asleep under a storm's gust front wake (F6). The field step pushes only the bodies that
+  // are awake, and the storms' air is a function of time that is never set again, so a front
+  // arriving would leave a sleeping crate at rest. On the first step of each kSceneWindFrontPeriod
+  // (counted in clock ticks, so at the same step at every frame rate), each moving body asleep
+  // where a front blows (over kWakeFront) is woken (a zero force), before the step.
+  static constexpr double kWakeFront = 0.5; // m/s
+  void wake_in_fronts(std::uint64_t tick, double dt) {
+    const auto *storm = dynamic_cast<const StormWindFlow *>(wind_flow.get());
+    if (!storm || !wind_field.valid())
+      return;
+    const std::uint64_t p = tick / scene_clock_period_ticks(kSceneWindFrontPeriod, dt);
+    if (p == wake_period)
+      return;
+    wake_period = p;
+    const double t = world->field_time();
+    for (const SceneWorldBody &b : bodies) {
+      if (!b.moves)
+        continue;
+      const ph::body_state s = world->state(b.id);
+      if (s.active)
+        continue;
+      double fx, fy;
+      storm->front(s.position.x, s.position.y, t, fx, fy);
+      if (fx * fx + fy * fy > kWakeFront * kWakeFront)
+        world->add_force(b.id, {0.0, 0.0, 0.0});
+    }
+  }
   // A terrain node's field as its body has it (placed), and a node's own bodies' XY extent (min_x,
   // min_y, max_x, max_y): what grid() makes a terrain's or a flat ground's grid from.
   std::map<std::string, std::shared_ptr<const cvc::height_field>> fields;
@@ -325,6 +378,16 @@ struct SceneWorld::impl {
       if (w.name == name)
         return &w;
     return nullptr;
+  }
+  // The ground the vehicles drive on: the bodies of the world on's nodes, as they are now.
+  std::vector<ph::body_id> ground_bodies() const {
+    std::vector<ph::body_id> out;
+    if (const world_def *w = find_world(on))
+      for (const std::string &node : w->nodes)
+        for (const SceneWorldBody &b : bodies)
+          if (b.node == node && b.ground)
+            out.push_back(b.id);
+    return out;
   }
   void remove_bodies_of(const std::string &node) {
     for (auto it = bodies.begin(); it != bodies.end();) {
@@ -369,10 +432,43 @@ struct SceneWorld::impl {
   struct grid_cache {
     std::uint64_t revision = 0;
     double cell = 0.0, half = 0.0;
+    double level = std::numeric_limits<double>::quiet_NaN(); // its water's (NaN: none)
     bool made = false; // made from these (grid null: it failed, and warned once)
     std::shared_ptr<const cvc::nav::world_grid> grid;
   };
   std::map<std::string, grid_cache> grids;
+  // Each water node's ground node (its world: or ground:), by the water node, and its level when a
+  // renderer runs the node (bind_boats reads the props; from_scene's runtimes give theirs).
+  std::map<std::string, std::string> water_ground;
+  std::map<std::string, double> water_levels;
+  // The boat nodes (bind_boats), and the ground of the water each floats on ("" for none).
+  std::vector<std::unique_ptr<BoatRuntime>> boats;
+  // The weather nodes' friction (bind_weather): the rain into the surfaces' friction, set inside
+  // the physics step (follow) on the world clock's ticks.
+  std::vector<std::unique_ptr<WeatherFriction>> weathers;
+  std::string boat_ground(const BoatRuntime &b) const {
+    const std::string &water = b.spec().water;
+    if (!water.empty()) {
+      const auto it = water_ground.find(water);
+      return it == water_ground.end() ? std::string() : it->second;
+    }
+    return water_ground.empty() ? std::string() : water_ground.begin()->second;
+  }
+  // The still water over node `id`'s ground: a water node's level on it, else a generated world's
+  // water level when it has bodies of water; NaN for none.
+  double water_level_of(const std::string &id, const cvc::world::generated_world *gw) const {
+    for (const auto &w : waters)
+      if (const auto it = water_ground.find(w->node());
+          it != water_ground.end() && it->second == id)
+        return w->level();
+    for (const auto &[water, ground] : water_ground) // a water node a renderer runs
+      if (ground == id)
+        if (const auto it = water_levels.find(water); it != water_levels.end())
+          return it->second;
+    if (gw && gw->water.wet_cells() > 0)
+      return gw->water.params.level_m;
+    return std::numeric_limits<double>::quiet_NaN();
+  }
 
   // How the world was built, for restart(): its config, its materials in order, and each body in
   // the order build() made it (a node's own, or a tracked node's colliders: its index).
@@ -385,8 +481,44 @@ struct SceneWorld::impl {
   };
   std::vector<entry> entries;
 
+  // A water node's one field with a wake (field::wake, C5) is set in place: it keeps its id and the
+  // wake its waves under the new sea. Without a wake a node's fields are made again, as always.
+  bool set_in_place(tracked &t, std::vector<std::string> *w) {
+    const cvc::world::world_geometry &g = *t.colliders->geometry;
+    const cvc::world::volume_item *v = nullptr;
+    int collide = 0;
+    for (const cvc::world::volume_item &it : g.volumes())
+      if (it.has(cvc::world::role_collide)) {
+        v = &it;
+        ++collide;
+      }
+    if (collide != 1 || !v->field.wake.on() || !g.items().empty())
+      return false;
+    for (const SceneWorldBody &b : bodies)
+      if (b.node == t.node)
+        return false;
+    int had = 0;
+    ph::field_id id;
+    for (const node_field &f : node_fields)
+      if (f.node == t.node) {
+        id = f.id;
+        ++had;
+      }
+    if (had != 1)
+      return false;
+    t.applied = t.colliders->revision;
+    try {
+      world->set_field(id, v->field);
+    } catch (const std::exception &e) {
+      warn(w, "ari: scene node '" + t.node + "': body: " + e.what());
+    }
+    return true;
+  }
+
   // Swap node t's bodies for its colliders' current geometry.
   void apply(tracked &t, std::vector<std::string> *w) {
+    if (t.colliders->geometry && set_in_place(t, w))
+      return;
     for (auto it = bodies.begin(); it != bodies.end();) {
       if (it->node == t.node) {
         world->remove_body(it->id);
@@ -413,6 +545,19 @@ struct SceneWorld::impl {
         body.node = t.node;
         body.id = b.second;
         body.moves = false;
+        body.ground = false;
+        for (const cvc::world::geometry_item &it : t.colliders->geometry->items())
+          if (it.name == b.first && it.height_field())
+            body.ground = true;
+        body.body_from_visual = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        bodies.push_back(body);
+      }
+      for (const ph::body_id id : made.edges) { // the terrain's edge: the node's, not ground
+        SceneWorldBody body;
+        body.node = t.node;
+        body.id = id;
+        body.moves = false;
+        body.ground = false;
         body.body_from_visual = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
         bodies.push_back(body);
       }
@@ -425,7 +570,11 @@ struct SceneWorld::impl {
 };
 
 SceneWorld::SceneWorld() : _impl(std::make_unique<impl>()) {}
-SceneWorld::~SceneWorld() = default;
+SceneWorld::~SceneWorld() {
+  // Its storms' front goes with it (the app may hold another scene next).
+  if (_impl && _impl->app && _impl->wind_bound && !_impl->weathers.empty())
+    write_scene_wind_front(*_impl->app, _impl->wind_prefix, 0.0, 0.0);
+}
 
 ph::world &SceneWorld::world() { return *_impl->world; }
 const ph::world &SceneWorld::world() const { return *_impl->world; }
@@ -469,6 +618,10 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
                          " s quanta; using " + std::to_string(steps * quantum) + " s");
   }
   cfg.fixed_dt = steps * quantum;
+  // The fields' free-surface reads (a water node's floating bodies) on up to three workers
+  // beside the stepping thread: the same values in the same order, so a run is the same.
+  const unsigned hw = std::thread::hardware_concurrency();
+  cfg.field_threads = hw > 1 ? static_cast<int>(std::min(3u, hw - 1)) : 0;
 
   std::unique_ptr<SceneWorld> out(new SceneWorld());
   out->_impl->app = &app;
@@ -704,6 +857,7 @@ void SceneWorld::restart(std::vector<std::string> *warnings) {
   for (const ph::material &m : d.materials)
     d.world->add_material(m);
   d.bodies.clear();
+  d.node_fields.clear(); // the fields went with the old world: none to remove from the new one
   for (impl::tracked &t : d.tracked_nodes)
     t.applied = 0;
   for (const impl::entry &e : d.entries) {
@@ -727,17 +881,36 @@ void SceneWorld::restart(std::vector<std::string> *warnings) {
   d.follower.reset(); // the next follow() anchors on the clock again
   d.last = ph::step_report{};
   d.step_history.clear();
-  if (d.vehicles) { // the vehicles went with the old world: each back to its start
-    d.vehicles->world_reset();
+  d.wind_field = ph::field_id{}; // the wind's field went with the old world: sync adds it again
+  d.wind_applied.reset();
+  d.wake_period = std::numeric_limits<std::uint64_t>::max();
+  if (d.vehicles) { // the vehicles went with the old world: each back to its start, on its ground
+    d.vehicles->world_reset(d.ground_bodies());
     d.vehicles->publish();
   }
+  for (const auto &b : d.boats) // so did the boats: each goes in again at the next sync
+    b->world_gone();
+  for (const auto &wf : d.weathers) // and its materials, dry: the friction again at the next step
+    wf->world_gone();
   publish_stats();
+}
+
+void SceneWorld::use_vehicle_clock(cvc::app &app, const Scene &scene,
+                                   std::vector<std::string> *warnings) {
+  // The vehicles' tick (cvc::kSimTick) and a 100 Hz physics step are whole numbers of the 0.01 s
+  // quantum; the scenes' default 1/120 s divides neither. A clock that has ticked keeps its
+  // quantum, and the tick is then held to whole physics steps of it.
+  if (!scene.vehicles.empty() && !cvc::adopt_sim_clock(app.world_clock()))
+    warn(warnings, "ari: world: vehicles: the clock has already run at " +
+                       std::to_string(app.world_clock().fixed_dt()) +
+                       " s quanta; the vehicles' tick is held to whole physics steps of it");
 }
 
 std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &scene,
                                                    const std::string &bind_prefix,
                                                    const std::string &stats_key,
                                                    std::vector<std::string> *warnings) {
+  seed_scene_wind(app, scene, bind_prefix); // before the water reads its wind (scene_wind.h)
   if (!scene_has_world(scene)) {
     // A data node's bodies need the physics: block (as cvcGL says when it draws the dataset).
     const std::function<void(const SceneNode &)> data = [&](const SceneNode &n) {
@@ -750,6 +923,7 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
       data(n);
     return nullptr;
   }
+  use_vehicle_clock(app, scene, warnings);
   std::map<const SceneNode *, std::array<double, 16>> matrices;
   scene_world_matrices(scene, matrices);
 
@@ -760,6 +934,7 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
 
   std::vector<std::unique_ptr<GeneratedWorldRuntime>> generated;
   std::vector<std::unique_ptr<WaterRuntime>> waters;
+  std::map<std::string, std::string> water_ground;
   const std::function<void(const SceneNode &)> visit = [&](const SceneNode &n) {
     if (n.type == "generated_world" && n.source_data.empty()) {
       // The world runs the node: its world made now, its keys seeded as a renderer's would be.
@@ -797,6 +972,7 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
                            "with a body:); no water in the world");
       } else {
         waters.push_back(std::make_unique<WaterRuntime>(app, n, bind_prefix, std::move(ground)));
+        water_ground[n.id] = groundId;
         SceneBodyInput in;
         in.spec = &n;
         in.world = matrices[&n];
@@ -863,12 +1039,18 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
   if (out) {
     out->_impl->generated = std::move(generated);
     out->_impl->waters = std::move(waters);
+    out->_impl->water_ground = std::move(water_ground);
     out->bind_worlds(scene, resolve_bind(bind_prefix, "scene.world"), warnings);
     out->bind_vehicles(scene.vehicles, resolve_bind(bind_prefix, "vehicles"),
                        resolve_bind(bind_prefix, "entities"), scene.spawns,
                        resolve_bind(bind_prefix, "spawns"));
-    if (out->vehicles())
+    out->bind_boats(scene, bind_prefix, warnings);
+    if (out->vehicles()) {
       out->vehicles()->set_intents_key(resolve_bind(bind_prefix, scene.vehicle_intents));
+      out->vehicles()->spawn_starts(scene.vehicle_starts, warnings);
+    }
+    out->bind_wind(scene, bind_prefix);
+    out->bind_weather(scene, bind_prefix);
   }
   return out;
 }
@@ -917,7 +1099,10 @@ std::shared_ptr<const cvc::nav::world_grid> SceneWorld::grid(const std::string &
   if (tracked && !geometry)
     return nullptr; // its world is still to come
   impl::grid_cache &c = _impl->grids[id];
-  if (c.made && c.revision == rev && c.cell == cell && c.half == half)
+  const std::shared_ptr<const cvc::world::generated_world> gw = generated_world(id);
+  const double level = _impl->water_level_of(id, gw.get());
+  const bool same_level = std::isnan(level) ? std::isnan(c.level) : c.level == level;
+  if (c.made && c.revision == rev && c.cell == cell && c.half == half && same_level)
     return c.grid;
   try {
     if (!geometry && field != _impl->fields.end()) { // a terrain: its field, as its body has it
@@ -926,8 +1111,10 @@ std::shared_ptr<const cvc::nav::world_grid> SceneWorld::grid(const std::string &
       geometry = terrain;
     }
     if (geometry) {
-      c.grid =
-          std::make_shared<const cvc::nav::world_grid>(cvc::nav::make_grid(*geometry, cell, half));
+      auto g = std::make_shared<cvc::nav::world_grid>(cvc::nav::make_grid(*geometry, cell, half));
+      if (std::isfinite(level)) // the water's depth over it, for spawns and boats
+        cvc::nav::set_water(*g, level);
+      c.grid = std::move(g);
     } else { // a flat ground: an open walled grid over its footprint
       std::array<double, 4> f = footprint->second;
       if (half > 0.0) {
@@ -947,11 +1134,37 @@ std::shared_ptr<const cvc::nav::world_grid> SceneWorld::grid(const std::string &
   c.revision = rev;
   c.cell = cell;
   c.half = half;
+  c.level = level;
   return c.grid;
 }
 
 void SceneWorld::sync(std::vector<std::string> *warnings) {
   impl &d = *_impl;
+  // The weather nodes: each its ground's height field once there is one (the storms' area), then
+  // its keys. The friction itself is set in follow(), inside the physics step. First, so the wind
+  // below has their storms.
+  for (const auto &wf : d.weathers) {
+    if (!wf->has_ground()) {
+      std::shared_ptr<const cvc::height_field> field;
+      if (const auto g = world_geometry(wf->ground()))
+        field = g->terrain();
+      if (!field)
+        if (const auto f = d.fields.find(wf->ground()); f != d.fields.end())
+          field = f->second;
+      if (field)
+        wf->set_ground(std::move(field));
+    }
+    wf->read_keys();
+  }
+  sync_wind();     // the scene wind's field, before anything steps in it
+  publish_front(); // and the storms' gust front, before the water reads its wind
+  // With storms, the runtimes whose changes follow the clock (the water's sea) make them on its
+  // periods, and the world puts them in on the clock (SceneColliders::clock_period, from_tick).
+  {
+    const double period = d.clocked() ? kSceneWindFrontPeriod : 0.0;
+    for (impl::tracked &t : d.tracked_nodes)
+      t.colliders->clock_period = period;
+  }
   if (!d.world_key.empty() && d.app) {
     // The source key: another world's name switches to it.
     cvc::state *k =
@@ -991,7 +1204,10 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
         }
       }
     }
-    if (t.colliders->revision != t.applied && !d.off.count(t.node))
+    // A change timed on the clock goes in at its step (follow), unless that step has gone by.
+    const std::uint64_t at = t.colliders->from_tick;
+    const bool due = at == 0 || !d.follower || d.follower->last_tick() > at;
+    if (t.colliders->revision != t.applied && due && !d.off.count(t.node))
       d.apply(t, warnings);
   }
   publish_worlds(false);
@@ -1000,7 +1216,7 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
     // grid (a switch, a Regenerate, a reload) places the vehicles again.
     std::shared_ptr<const cvc::nav::world_grid> g;
     std::shared_ptr<const cvc::world::world_geometry> made; // its roads, for the spawn points
-    std::vector<ph::body_id> ground;
+    std::vector<ph::body_id> ground = d.ground_bodies();
     if (const impl::world_def *w = d.find_world(d.on)) {
       const double cell = d.grid_cell > 0.0 ? d.grid_cell : 2.0;
       for (const std::string &node : w->nodes) {
@@ -1008,9 +1224,6 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
           g = grid(node, cell, d.grid_half, nullptr);
         if (!made)
           made = world_geometry(node);
-        for (const SceneWorldBody &b : d.bodies)
-          if (b.node == node)
-            ground.push_back(b.id);
       }
     }
     if (g != d.ground_grid || !d.ground_given) {
@@ -1020,6 +1233,39 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
     }
     d.vehicles->poll();
   }
+  // The boats: each in once its water's grid is ready, then its keys.
+  for (const auto &b : d.boats) {
+    if (!b->placed()) {
+      const std::string ground = d.boat_ground(*b);
+      std::string why;
+      if (ground.empty())
+        continue;
+      const double cell = d.grid_cell > 0.0 ? d.grid_cell : 2.0;
+      if (!b->place(*d.world, grid(ground, cell, d.grid_half, warnings), &why) && !why.empty())
+        warn(warnings, "ari: scene node '" + b->spec().node + "' (boat): " + why);
+    }
+    b->read_keys();
+    b->publish();
+  }
+  // A weather's ground made by this sync (a generated world's first): the storms' area now, and the
+  // wind's storms with it. (wind.front follows at the next sync: the water has read this one's.)
+  bool grounded = false;
+  for (const auto &wf : d.weathers) {
+    if (wf->has_ground())
+      continue;
+    std::shared_ptr<const cvc::height_field> field;
+    if (const auto g = world_geometry(wf->ground()))
+      field = g->terrain();
+    if (!field)
+      if (const auto f = d.fields.find(wf->ground()); f != d.fields.end())
+        field = f->second;
+    if (field) {
+      wf->set_ground(std::move(field));
+      grounded = true;
+    }
+  }
+  if (grounded)
+    sync_wind();
 }
 
 void SceneWorld::bind_worlds(const Scene &scene, const std::string &world_key,
@@ -1083,8 +1329,185 @@ void SceneWorld::bind_vehicles(const std::vector<vehicle_archetype> &archetypes,
                                                entities_key, spawns, spawns_key);
 }
 
+void SceneWorld::bind_boats(const Scene &scene, const std::string &bind_prefix,
+                            std::vector<std::string> *warnings) {
+  impl &d = *_impl;
+  for (const auto &b : d.boats)
+    b->world_gone();
+  d.boats.clear();
+  std::map<const SceneNode *, std::array<double, 16>> matrices;
+  scene_world_matrices(scene, matrices);
+  const std::function<void(const SceneNode &)> visit = [&](const SceneNode &n) {
+    if (n.type == "water" && n.body.present && !d.water_ground.count(n.id)) {
+      // A water node a renderer runs (from_scene runs its own): its ground and level, for the
+      // grids' water and the boats.
+      const std::string ground =
+          n.props.str("ground").empty() ? n.props.str("world") : n.props.str("ground");
+      if (!ground.empty()) {
+        d.water_ground[n.id] = ground;
+        d.water_levels[n.id] = n.props.num("level", 0.0);
+      }
+    }
+    if (n.type == "boat") {
+      const auto m = matrices.find(&n);
+      std::array<double, 16> world{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+      if (m != matrices.end())
+        world = m->second;
+      d.boats.push_back(
+          std::make_unique<BoatRuntime>(d.app, scene_boat_spec(n, world, bind_prefix, warnings)));
+    }
+    for (const SceneNode &c : n.children)
+      visit(c);
+  };
+  for (const SceneNode &n : scene.nodes)
+    visit(n);
+}
+
+const std::vector<std::unique_ptr<BoatRuntime>> &SceneWorld::boats() const { return _impl->boats; }
+
+BoatRuntime *SceneWorld::boat(const std::string &node) {
+  for (const auto &b : _impl->boats)
+    if (b->spec().node == node)
+      return b.get();
+  return nullptr;
+}
+
+const WaterRuntime *SceneWorld::water(const std::string &node) const {
+  for (const auto &w : _impl->waters)
+    if (w->node() == node)
+      return w.get();
+  return nullptr;
+}
+
 WorldVehicles *SceneWorld::vehicles() { return _impl->vehicles.get(); }
 const WorldVehicles *SceneWorld::vehicles() const { return _impl->vehicles.get(); }
+
+void SceneWorld::bind_wind(const Scene &scene, const std::string &bind_prefix) {
+  impl &d = *_impl;
+  if (!d.app)
+    return;
+  seed_scene_wind(*d.app, scene, bind_prefix);
+  d.wind_bound = true;
+  d.wind_prefix = bind_prefix;
+  d.wind_base = scene.wind.base;
+  d.wind_applied.reset();
+  sync_wind();
+}
+
+ph::field_id SceneWorld::wind_field() const { return _impl->wind_field; }
+std::shared_ptr<const ph::flow_velocity> SceneWorld::wind() const { return _impl->wind_flow; }
+
+void SceneWorld::bind_weather(const Scene &scene, const std::string &bind_prefix) {
+  impl &d = *_impl;
+  d.weathers.clear();
+  const std::function<void(const SceneNode &)> visit = [&](const SceneNode &n) {
+    if (n.type == "weather")
+      d.weathers.push_back(std::make_unique<WeatherFriction>(d.app, n, bind_prefix,
+                                                             scene_weather_deck_base(scene, n)));
+    for (const SceneNode &c : n.children)
+      visit(c);
+  };
+  for (const SceneNode &n : scene.nodes)
+    visit(n);
+  // No storms: no front, and none left from a scene this app held before.
+  if (d.weathers.empty() && d.app)
+    write_scene_wind_front(*d.app, bind_prefix, 0.0, 0.0);
+}
+
+const std::vector<std::unique_ptr<WeatherFriction>> &SceneWorld::weathers() const {
+  return _impl->weathers;
+}
+
+void SceneWorld::sync_wind() {
+  impl &d = *_impl;
+  if (!d.wind_bound || !d.app || !d.world)
+    return;
+  const std::optional<SceneWind> w = scene_wind_set(*d.app, d.wind_prefix);
+  // The weathers whose storms blow gust fronts (F4), by their models' revisions.
+  std::vector<std::uint64_t> revs;
+  for (const auto &wf : d.weathers)
+    if (wf->model().params().front_speed > 0.0)
+      revs.push_back(wf->revision());
+  if (w != d.wind_applied || (w && !d.wind_field.valid()) || (w && revs != d.storm_revs) ||
+      (w && !revs.empty() && d.storm_offset != d.clock_offset)) {
+    std::vector<cvc::world::weather> storms;
+    for (const auto &wf : d.weathers)
+      if (wf->model().params().front_speed > 0.0)
+        storms.push_back(wf->model());
+    d.wind_applied = w;
+    d.storm_revs = revs;
+    d.storm_offset = d.clock_offset;
+    if (!w) {
+      if (d.wind_field.valid())
+        d.world->remove_field(d.wind_field);
+      d.wind_field = ph::field_id{};
+    } else {
+      // Air everywhere (a flow with a wind and no volume: 1.225 kg/m^3, field.h); the wind's
+      // profile is 0 under its base, so a body under water feels none. With storms, the wind with
+      // their gust fronts in it (StormWindFlow), read by each body at the step's own time.
+      ph::field f;
+      f.kind = ph::field_kind::flow;
+      f.drag_coefficient = 1.0;
+      if (storms.empty())
+        f.wind = scene_wind_flow(*w, d.wind_base);
+      else
+        f.wind = std::make_shared<const StormWindFlow>(w->state(), d.wind_base, std::move(storms),
+                                                       d.clock_offset);
+      d.wind_flow = f.wind;
+      if (d.wind_field.valid())
+        d.world->set_field(d.wind_field, f);
+      else
+        d.wind_field = d.world->add_field(f);
+    }
+    if (!w)
+      d.wind_flow.reset();
+  }
+  if (d.vehicles) // the plants that do not feel the field (WorldVehicles::set_wind)
+    d.vehicles->set_wind(d.wind_flow);
+}
+
+void SceneWorld::publish_front() {
+  impl &d = *_impl;
+  if (!d.wind_bound || !d.app || d.weathers.empty())
+    return; // a scene without a weather node never writes wind.front
+  // The front where the first weather's storms are centred: one wind for the nodes that read one
+  // for all they draw. It is the front at the start of the clock's kSceneWindFrontPeriod (counted
+  // in ticks), so it changes on the clock, never with a frame, and the water's physics sea, which
+  // steps on the same periods, is the same at every frame rate. Without a scene wind, none.
+  double fx = 0.0, fy = 0.0;
+  if (const auto *storm = dynamic_cast<const StormWindFlow *>(d.wind_flow.get())) {
+    const cvc::world::weather_params &p = d.weathers.front()->model().params();
+    const cvc::world_clock &clock = d.app->world_clock();
+    const std::uint64_t ticks = scene_clock_period_ticks(kSceneWindFrontPeriod, clock.fixed_dt());
+    const double t = static_cast<double>(clock.tick() / ticks * ticks) * clock.fixed_dt();
+    for (const cvc::world::weather &m : storm->weathers()) {
+      double x, y;
+      m.gust_front(m.at(t), p.cx, p.cy, x, y);
+      fx += x;
+      fy += y;
+    }
+  }
+  write_scene_wind_front(*d.app, d.wind_prefix, fx, fy);
+}
+
+bool SceneWorld::regenerate_world(double seed) {
+  impl &d = *_impl;
+  const impl::world_def *w = d.find_world(d.on);
+  if (!w || !d.app)
+    return false;
+  bool asked = false;
+  for (const std::unique_ptr<GeneratedWorldRuntime> &g : d.generated) {
+    if (std::find(w->nodes.begin(), w->nodes.end(), g->node()) == w->nodes.end())
+      continue;
+    const GeneratedWorldKeys &k = g->keys();
+    if (read_or<double>(*d.app, k.seed, std::nan("")) == seed)
+      continue;
+    write<double>(*d.app, k.seed, seed);
+    write<std::string>(*d.app, k.request, "regenerate");
+    asked = true;
+  }
+  return asked;
+}
 
 bool SceneWorld::set_world(const std::string &name, std::vector<std::string> *warnings) {
   impl &d = *_impl;
@@ -1191,17 +1614,63 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
   sync(&d.warnings);
   if (!d.follower) {
     d.follower = cvc::clock_follower::for_step(clock, d.world->config().fixed_dt);
+    // The world's steps follow the clock from here: the storms in its air are read at the clock's
+    // time, as the drawn ones are (StormWindFlow's offset), however late it anchored.
+    d.clock_offset = clock.t() - d.world->field_time();
+    sync_wind();
     if (after_step)
       after_step();
     return 0;
   }
+  const std::uint64_t last_tick = d.follower->last_tick();
   const std::uint64_t n = d.follower->take(clock);
   if (n > 0 && !d.stepping())
     return 0; // physics off: the steps due are let go, and the world holds still
-  for (std::uint64_t i = 1; i <= n; ++i) {
+  // The clock tick each step ends on, for the work keyed to the clock rather than to how many
+  // steps a frame took (the rain's friction): the first tick a step falls due on after the last,
+  // then a step's ticks apart.
+  const std::uint64_t period = d.follower->period();
+  std::uint64_t tick = last_tick + 1;
+  tick += (d.follower->phase() + period - tick % period) % period;
+  // The water's sea, while it steps on the clock's periods, is the same at every frame rate only
+  // if the world syncs at least once a period (its sea steps, and wind.front changes, at a sync).
+  // A live host's clock runs at most a few quanta a frame; a follow that runs the clock across more
+  // than one period's start (a long seek, a stalled host) warns, once.
+  if (n > 0 && d.clocked() && !d.warned_periods) {
+    const std::uint64_t ticks = scene_clock_period_ticks(kSceneWindFrontPeriod, clock.fixed_dt());
+    const std::uint64_t last = tick + (n - 1) * period;
+    if (last / ticks > last_tick / ticks + 1) {
+      d.warned_periods = true;
+      warn(&d.warnings, "ari: storms: one frame ran the clock over more than one " +
+                            num(kSceneWindFrontPeriod) +
+                            " s period; the water's sea steps once a period, so floating bodies "
+                            "may now differ from another frame rate's run");
+    }
+  }
+  for (std::uint64_t i = 1; i <= n; ++i, tick += period) {
+    // First what the clock times: a change of the colliders (a water's sea keyframe while the
+    // scene has storms) at the first step that ends past its tick, and a new storm-wind peak
+    // (weather.gust_front), the air made again with it; so the plants below read the field and
+    // the air this step has. Then the sleeping bodies under the fronts wake.
+    for (impl::tracked &t : d.tracked_nodes)
+      if (t.colliders->revision != t.applied && t.colliders->from_tick != 0 &&
+          tick > t.colliders->from_tick && !d.off.count(t.node))
+        d.apply(t, &d.warnings);
+    bool gust = false;
+    for (const auto &wf : d.weathers)
+      gust = wf->switch_gust(tick) || gust;
+    if (gust)
+      sync_wind();
+    d.wake_in_fronts(tick, clock.fixed_dt());
     if (d.vehicles)
       d.vehicles->before_step();
+    for (const auto &b : d.boats)
+      b->before_step();
+    for (const auto &wf : d.weathers)
+      wf->before_step(*d.world, tick, clock.fixed_dt());
     d.last = d.world->step();
+    for (const auto &b : d.boats)
+      b->after_step();
     if (d.vehicles)
       d.vehicles->after_step();
     d.step_history.push_back(d.last.step_ms);
@@ -1215,6 +1684,10 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
     publish_stats();
     if (d.vehicles)
       d.vehicles->publish();
+    for (const auto &b : d.boats)
+      b->publish();
+    for (const auto &wf : d.weathers)
+      wf->publish();
   }
   return n;
 }

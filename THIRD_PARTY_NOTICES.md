@@ -38,8 +38,11 @@ comes from the cvcpkg `mujoco` package, whose licence and third-party notices in
 `mujoco-menagerie` bundle (BSD-3-Clause), is read from that package at run time and is not in this
 repository.
 
-Compiled into libcvc (its wave spectrum, `cvc/ocean/spectrum.h`) and the cvcGL examples:
-[ABYSSAL](#abyssal).
+Compiled into libcvc (its wave spectrum, `cvc/ocean/spectrum.h`, the wind's gusts and the currents,
+`cvc/algo/wind_field.h` and `cvc/ocean/current.h`, and the cumulonimbus maps of
+`cvc/world/cloud_layer.h`), cvcGL (the cloud deck's dark storm bases, the rain's streaks, the lightning bolts, the wind-blown spray) and the cvcGL examples:
+[ABYSSAL](#abyssal). Compiled into cvcGL (the hash of the spray's particles, the rain's streaks and
+the rain's rings on water): [Hash without Sine](#hash-without-sine-dave-hoskins).
 
 Installed with cvcGL (`share/libcvc/fonts`) and embedded in the browser hosts (arigl-web, cyprty):
 the fonts the ImGui overlay falls back on, [DejaVu Sans Mono](#dejavu-sans-mono-237) and
@@ -962,17 +965,79 @@ for both directions) are a C++/VTK port of ABYSSAL
 `cvcgl_ocean_fft`, `cvcgl_ocean_band` and `cvcgl_ewave` tests. The wave spectrum it is fed, `inc/cvc/ocean/spectrum.h` and
 `src/cvc/ocean/spectrum.cpp` in libcvc itself (JONSWAP with the TMA correction,
 Donelan-Banner spreading, the fetch law and the swell term), ports ABYSSAL's
-`src/ocean/OceanFFT.js` at 849ff7f4. The gusts' pulse over time in
+`src/ocean/OceanFFT.js` at 849ff7f4. The persistent foam and the water's shading in
+`src/cvcGL/ocean/OceanFoam.h` and `OceanFoam.cpp` (the turbulence integration of
+`src/ocean/OceanFFT.js`'s assemble pass; the windrow-carved foam, the footprint roughness and the
+light through crests of `src/ocean/OceanMesh.js`; the GGX, Smith and Fresnel terms of
+`src/gfx/ShadingGLSL.js`), used by the Ariadne `water` node and `lsystem_coast`, port the same
+commit. The gusts' pulse over time in
 `inc/cvc/algo/wind_field.h` and `src/cvc/algo/wind_field.cpp` ports
 `src/weather/Weather.js:107-110`, and the current's shape in `inc/cvc/ocean/current.h`
 and `src/cvc/ocean/current.cpp` (the curl of noise at two scales, drifting) follows
 `src/ocean/OceanSampleGLSL.js:31-41` and `src/gfx/ProceduralTextures.js`'s curl bake, at
-the same commit. Upstream's `LICENSE`:
+the same commit. The storm deck ports two parts of
+`src/sky/Clouds.js` at 849ff7f4: the cumulonimbus height profile (the tower and
+the anvil, and the anvil's spread cover) that `src/cvc/world/cloud_layer.cpp`
+grows its storm maps with, and the sky hidden by the cloud above a sample (its
+`skyVis`, two taps up the deck) that darkens a storm's base in
+`src/cvcGL/ariadne/lsystem_nodes.cpp`. The weather model's states and authored
+events (`src/cvc/world/weather.cpp`) follow the design of `src/weather/Director.js`;
+no code of it is copied. The rain's streaks in `src/cvcGL/ariadne/weather_node.cpp`
+port its `Rain` (`src/weather/Precipitation.js:6-265` at 849ff7f4): drops placed and
+moved in the vertex shader as a closed form of time, drawn as shutter-length
+streaks at least a pixel wide. The lightning bolts in the same file port its
+`Lightning` (`src/weather/Lightning.js` at 849ff7f4): the channel's recursive
+midpoint displacement, its fading forks and in-cloud crawlers, and the bolt's hot
+core and blue-white glow. The strike schedule in `src/cvc/world/weather.cpp`
+(strikes once a storm passes an intensity, more as it grows) follows the design
+of its `Director.js`; no code of it is copied. Upstream's `LICENSE`:
 
 ```
 MIT License
 
 Copyright (c) 2026 Davi (Token-Gremlin)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+Also from ABYSSAL at 849ff7f4, under the license above: `src/cvcGL/ocean/OceanCascades.h` and
+`OceanCascades.cpp` run OceanFFT's port for several cascades in one set of passes, and the
+adaptive quality loop in libcvc itself, `inc/cvc/ariadne/scene_quality.h` and
+`src/cvc/ariadne/scene_quality.cpp` (run by cvcGL's `AriRuntime`), ports `Quality.tick` in
+`src/core/Quality.js`. The wind-blown spray in `src/cvcGL/ocean/OceanSpray.h` and
+`OceanSpray.cpp` (the Ariadne `water` node's) follows its spray particles
+(`src/weather/Precipitation.js:267-587`): drag toward the wind under gravity, the upward kick out of
+a breaking crest, billboards stretched by speed and the forward scattering (its 0.55 + 1.9 mu^6,
+drawn here as 0.9 + 0.6 mu^6, since this draws straight to the screen without its tone mapping);
+here the particles are a closed form of time in the vertex shader, not state in float targets.
+
+## Hash without Sine (Dave Hoskins)
+
+Dave Hoskins' "Hash without Sine" (shadertoy.com/view/4djSRW) is in three of cvcGL's shaders: the
+spray's per-particle hash in `src/cvcGL/ocean/OceanSpray.cpp` (`sprayHash`) and the rain's streaks'
+in `src/cvcGL/ariadne/weather_node.cpp` (`rainHash`) are its `hash31`, and the rain rings' cell
+hash in `src/cvcGL/ariadne/lsystem_nodes.cpp` (`cloudHash3`) follows its `hash32`. Its notice:
+
+```
+MIT License
+
+Copyright (c) 2014 David Hoskins.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

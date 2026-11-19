@@ -29,6 +29,9 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/skeleton.h
   ../../inc/cvc/geometry/skeleton_params.h
   ../../inc/cvc/geometry/skeleton_intrinsics.h
+  ../../inc/cvc/geometry/tiler.h
+  ../../inc/cvc/geometry/tiler_params.h
+  ../../inc/cvc/geometry/tiler_intrinsics.h
   ../../inc/cvc/state/state.h
   ../../inc/cvc/state/state_key_meta.h
   ../../inc/cvc/state/state_change_journal.h
@@ -62,6 +65,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_cluster_membership.h
   ../../inc/cvc/state/state_hybrid_time.h
   ../../inc/cvc/core/world_clock.h
+  ../../inc/cvc/core/sim_tick.h
   ../../inc/cvc/core/input_trace.h
   ../../inc/cvc/core/clock_follower.h
   ../../inc/cvc/core/clock_driver.h
@@ -71,6 +75,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/shape.h
   ../../inc/cvc/physics/field.h
   ../../inc/cvc/physics/fluid_surface.h
+  ../../inc/cvc/physics/flow_velocity.h
   ../../inc/cvc/physics/hull.h
   ../../inc/cvc/physics/immersion.h
   ../../inc/cvc/physics/ocean_surface.h
@@ -170,6 +175,10 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/point_class_intrinsics.h
   ../../inc/cvc/volume/segmentation.h
   ../../inc/cvc/volume/segmentation_params.h
+  ../../inc/cvc/volume/gradient_vector_diffusion.h
+  ../../inc/cvc/volume/gradient_vector_diffusion_params.h
+  ../../inc/cvc/volume/seed_generators.h
+  ../../inc/cvc/volume/seed_generators_params.h
   ../../inc/cvc/volume/segmentation_intrinsics.h
   ../../inc/cvc/model/model.h
   ../../inc/cvc/model/model_file_io.h
@@ -198,6 +207,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/ph/compose.h
   ../../inc/cvc/ph/mat3.h
   ../../inc/cvc/ph/microgrid.h
+  ../../inc/cvc/ph/query.h
   ../../inc/cvc/ph/optim.h
   ../../inc/cvc/ph/rff.h
   ../../inc/cvc/ph/rng.h
@@ -262,6 +272,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/world/terrain_lod.h
   ../../inc/cvc/world/road_grade.h
   ../../inc/cvc/world/cloud_layer.h
+  ../../inc/cvc/world/weather.h
   ../../inc/cvc/world/water_bodies.h
   ../../inc/cvc/algo/distance_transform.h
   ../../inc/cvc/algo/det_math.h
@@ -318,6 +329,8 @@ set(SOURCE_FILES
   geometry/skeleton/skel.cpp
   geometry/skeleton/skeleton.cpp
   geometry/skeleton/skeleton_intrinsics.cpp
+  geometry/tiler/tile_contours.cpp
+  geometry/tiler/tiler_intrinsics.cpp
   geometry/sliced_ldlt.cpp
   geometry/geometry_file_io.cpp
   geometry/contours.cpp
@@ -327,7 +340,10 @@ set(SOURCE_FILES
   volume/point_classes.cpp
   volume/point_class_intrinsics.cpp
   volume/segmentation/genseg.cpp
+  volume/segmentation/critical_points.cpp
+  volume/segmentation/seed_generators.cpp
   volume/segmentation/segmentation.cpp
+  volume/gradient_vector_diffusion.cpp
   volume/segmentation/segmentation_intrinsics.cpp
   image/image.cpp
   image/image_decode.cpp
@@ -389,8 +405,11 @@ set(SOURCE_FILES
   core/unit_registry.cpp
   physics/world.cpp
   physics/field_step.cpp
+  physics/hull.cpp
   physics/immersion.cpp
+  physics/field_wake.cpp
   physics/fluid_surface.cpp
+  physics/flow_velocity.cpp
   physics/ocean_surface.cpp
   physics/vehicle.cpp
   physics/boat.cpp
@@ -405,6 +424,7 @@ set(SOURCE_FILES
   physics/nav_plant.cpp
   physics/dyn_bike_plant.cpp
   physics/dyn_4w_plant.cpp
+  physics/dyn_boat_plant.cpp
   physics/dyn_world.cpp
   physics/nav_eval.cpp
   physics/nav_es.cpp
@@ -513,6 +533,7 @@ set(SOURCE_FILES
   nav/dyn4_ledger.cpp
   ph/compose.cpp
   ph/microgrid.cpp
+  ph/query.cpp
   ph/se2_data.cpp
   ph/se2_model.cpp
   ph/se2_train.cpp
@@ -559,6 +580,7 @@ set(SOURCE_FILES
   world/terrain_lod.cpp
   world/road_grade.cpp
   world/cloud_layer.cpp
+  world/weather.cpp
   world/water_bodies.cpp
   ocean/spectrum.cpp
   ocean/h0.cpp
@@ -710,10 +732,12 @@ endif()
 # libm-free math they call, cvc/algo/det_math.h, gets it above); the Jolt backend TUs
 # get the same flag on their own target (below).
 set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/boat.cpp
-    physics/field_step.cpp physics/immersion.cpp
-    physics/fluid_surface.cpp physics/ocean_surface.cpp physics/null_backend.cpp
+    physics/field_step.cpp physics/field_wake.cpp physics/hull.cpp physics/immersion.cpp
+    physics/fluid_surface.cpp physics/flow_velocity.cpp physics/ocean_surface.cpp
+    physics/null_backend.cpp
     physics/nav_plant.cpp
-    physics/dyn_bike_plant.cpp physics/dyn_4w_plant.cpp physics/dyn_world.cpp
+    physics/dyn_bike_plant.cpp physics/dyn_4w_plant.cpp physics/dyn_boat_plant.cpp
+    physics/dyn_world.cpp
     physics/jolt_rollout.cpp)
 if(NOT MSVC)
   set_source_files_properties(${_cvc_physics_exact_sources}
@@ -726,7 +750,11 @@ endif()
 # The VolumeRover GenSeg port (volume/segmentation/) matches the legacy library's labels voxel for
 # voxel on every platform (VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.7 T1): its fast marches compare
 # float arrival times, and an FMA-contracted step flips which front wins a tie.
-set(_cvc_genseg_exact_sources volume/segmentation/genseg.cpp volume/segmentation/segmentation.cpp)
+# The paper mode's critical points (critical_points.cpp) and the shared gradient vector diffusion
+# match SegMed's in the same way: the critical points are the signs of float dot products.
+set(_cvc_genseg_exact_sources volume/segmentation/genseg.cpp volume/segmentation/segmentation.cpp
+                              volume/segmentation/critical_points.cpp
+                              volume/gradient_vector_diffusion.cpp)
 if(NOT MSVC)
   set_source_files_properties(${_cvc_genseg_exact_sources}
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
@@ -1614,12 +1642,15 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_re
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/files.cpp ariadne/file_picker.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/conference/client_registry.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_repeat.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/scene_water.cpp ariadne/scene_wind.cpp ariadne/world_vehicles.cpp ariadne/world_spawns.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/rich_text.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp ariadne/chart_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/files.cpp ariadne/file_picker.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_entities.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/conference/client_registry.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_repeat.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/scene_water.cpp ariadne/scene_boat.cpp ariadne/scene_wind.cpp ariadne/scene_weather.cpp ariadne/world_vehicles.cpp ariadne/world_spawns.cpp ariadne/world_gym.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/rich_text.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp ariadne/chart_emit.cpp)
 # A document set fetched from a URL, and a runtime's browser page loading one (arigl-web, ari).
 list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 # The document a relay runs (arisrv --doc) and the namespaces it publishes.
 list(APPEND SOURCE_FILES ariadne/server_document.cpp)
 list(APPEND INCLUDE_FILES ../../inc/cvc/ariadne/server_document.h)
+# Adaptive quality (OCEAN-AND-WEATHER-ROADMAP.md §10.10, O21): the frame-time loop and its tiers.
+list(APPEND SOURCE_FILES ariadne/scene_quality.cpp)
+list(APPEND INCLUDE_FILES ../../inc/cvc/ariadne/scene_quality.h)
 # The world's rules (ARIADNE_WORLDS.md WD2): revisioned sections, the world: block, and the four
 # rules sections on a room's wire.
 list(APPEND SOURCE_FILES ariadne/section.cpp ariadne/world_rules.cpp ariadne/conference/room_rules.cpp)
@@ -1661,6 +1692,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/conference/avatar_panel.h
   ../../inc/cvc/ariadne/conference/room_avatar.h
   ../../inc/cvc/ariadne/conference/room_scene.h
+  ../../inc/cvc/ariadne/conference/room_entities.h
   ../../inc/cvc/ariadne/conference/room_net.h
   ../../inc/cvc/ariadne/conference/room_rungs.h
   ../../inc/cvc/ariadne/conference/room_aoi.h
@@ -1888,7 +1920,7 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ariadne/components
         COMPONENT libcvc
         FILES_MATCHING PATTERN "*.ari")
 # The stock worlds beside them (cvc://worlds/default.ari, large.ari): what arisrv seeds a room
-# with (ARIADNE_WORLDS.md WD1).
+# with (ARIADNE_WORLDS.md WD1); and traffic.ari, a server world with vehicles (arisrv --doc).
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ariadne/worlds
         DESTINATION ${CMAKE_INSTALL_DATADIR}/libcvc/ariadne
         COMPONENT libcvc
@@ -2550,6 +2582,57 @@ if(CVC_WITH_CLIPPER2 AND CVC_WITH_CDT AND CVC_WITH_SHEWCHUK)
   )
   target_compile_definitions(cvc PUBLIC CVC_WITH_PLANAR)
   message(STATUS "cvc::planar ENABLED (Clipper2, CDT, Shewchuk's predicates, Boost.Polygon)")
+  # The contour tiler (inc/cvc/geometry/tiler.h; VOLROVER-LIBRARY-PORTS-ROADMAP.md §3, P3b):
+  # VolumeRover's ContourTiler vendored onto its own kernel (geometry/tiler/kernel.h) and
+  # cvc::planar, so it is built exactly when cvc::planar is.
+  target_sources(cvc PRIVATE
+    geometry/tiler/All_tiling_region.cpp
+    geometry/tiler/Boundary_slice_chords.cpp
+    geometry/tiler/Composite_tiling_region.cpp
+    geometry/tiler/Contour.cpp
+    geometry/tiler/Contour2.cpp
+    geometry/tiler/Correspondences.cpp
+    geometry/tiler/Hierarchy.cpp
+    geometry/tiler/Point_tiling_region.cpp
+    geometry/tiler/Polyline.cpp
+    geometry/tiler/Slice.cpp
+    geometry/tiler/Slice2.cpp
+    geometry/tiler/Tiler_workspace.cpp
+    geometry/tiler/Tiles.cpp
+    geometry/tiler/Tiling_region.cpp
+    geometry/tiler/Wedge.cpp
+    geometry/tiler/Z_adjustments.cpp
+    geometry/tiler/arrange_polygons.cpp
+    geometry/tiler/augment.cpp
+    geometry/tiler/contour_utils.cpp
+    geometry/tiler/cut.cpp
+    geometry/tiler/interp.cpp
+    geometry/tiler/intersection.cpp
+    geometry/tiler/kernel.cpp
+    geometry/tiler/mtiler_operations.cpp
+    geometry/tiler/offset_polygon.cpp
+    geometry/tiler/planar_bridge.cpp
+    geometry/tiler/polygon_difference.cpp
+    geometry/tiler/polygon_intersection.cpp
+    geometry/tiler/polygon_utils.cpp
+    geometry/tiler/print_utils.cpp
+    geometry/tiler/projection.cpp
+    geometry/tiler/remove_contour_intersections.cpp
+    geometry/tiler/segment_utils.cpp
+    geometry/tiler/skeleton.cpp
+    geometry/tiler/theorems.cpp
+    geometry/tiler/tiler.cpp
+    geometry/tiler/tiler_operations.cpp
+    geometry/tiler/triangle_utils.cpp
+  )
+  # The tiler compares computed coordinates exactly, and its legacy goldens hold on every
+  # platform, so no FMA contraction (as nav, lsys and world): the compilers' default contracts a
+  # multiply-add on targets with FMA (aarch64 macOS).
+  if(NOT MSVC)
+    get_target_property(_cvc_tiler_sources cvc SOURCES)
+    list(FILTER _cvc_tiler_sources INCLUDE REGEX "^geometry/tiler/")
+    set_source_files_properties(${_cvc_tiler_sources} PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+  endif()
 else()
   set(CVC_WITH_PLANAR OFF)
   message(STATUS "cvc::planar DISABLED: it needs Clipper2, CDT and Shewchuk's predicates")

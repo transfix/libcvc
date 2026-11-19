@@ -41,17 +41,22 @@
 #include <cvc/ariadne/conference/room_aoi.h>
 #include <cvc/ariadne/conference/room_aoi_relay.h>
 #include <cvc/ariadne/conference/room_calls.h>      // room-call: a client's call, the relay's reply
+#include <cvc/ariadne/conference/room_entities.h>   // the server document's vehicles, sent
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_join, room_leave, room_participant_path
 #include <cvc/ariadne/conference/room_net.h>        // room_device_tag, the device leaf
+#include <cvc/ariadne/conference/room_pose_relay.h> // the pose stream (with the entities)
 #include <cvc/ariadne/conference/room_scene.h>      // seed_default_scene, seed_large_demo_scene
 #include <cvc/ariadne/conference/room_write_gate.h> // bound writes
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/holon_sync.h>      // server_pump, client_pump, read_pose, write_intent
+#include <cvc/ariadne/scene_world.h>     // the server document's world
 #include <cvc/ariadne/server_document.h> // a server document (arisrv --doc)
+#include <cvc/ariadne/world_vehicles.h>  // its vehicles, as the relay has them
 #include <cvc/core/app.h>
 #include <cvc/media/media_frame.h>
 #include <cvc/media/media_router.h>
 #include <cvc/media/media_rungs.h>
+#include <cvc/physics/backend.h> // backend_available
 #include <cvc/physics/body.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
@@ -242,6 +247,9 @@ struct relay_options {
   bool bind_writes = true;  // each client writes only its own participant (--bind-writes)
   std::string room_token;   // admit only clients that present it (--room-token-file); "" = open
   std::string doc;          // a server document's text, run as --doc runs one ("" = none)
+  // arisrv's pose stream (room_pose_relay) on both planes, with the room's entities: the vehicles
+  // the server document's world runs (room_entity_relay), each step as arisrv steps them.
+  bool pose_stream = false;
 };
 
 // The relay, as arisrv builds it, stepped by the test.
@@ -337,6 +345,11 @@ public:
 #endif
       ra::write_aoi_params(app, kRoom, opt.aoi);
     }
+    if (opt.pose_stream) {
+      poses = std::make_unique<ra::room_pose_relay>();
+      for (cvc::state_transport *tp : planes)
+        poses->add_transport(tp);
+    }
     // And the document runs once the room is up.
     if (doc) {
       try {
@@ -351,6 +364,7 @@ public:
 
   ~test_relay() {
     // arisrv's shutdown order: the driver first, while the transports still run.
+    poses.reset();
     aoi.reset();
 #if defined(CVC_ENABLE_GRPC) && defined(CVC_ENABLE_WS)
     grpc.set_bridge(nullptr);
@@ -415,7 +429,18 @@ public:
     }
     for (auto it = _known.begin(); it != _known.end();)
       it = server.has_participant(*it) ? std::next(it) : _known.erase(it);
+    // The room's entities, as arisrv sends them: their identities before this step's drain, their
+    // poses in the viewers' snapshots after it.
+    const std::vector<cvc::ariadne::pose_subject> *entities = nullptr;
+    if (poses) {
+      const cvc::ariadne::SceneWorld *w = doc ? doc->runtime().scene_world() : nullptr;
+      entities = &entity_relay.step(app, kRoom, w ? w->vehicles() : nullptr);
+    }
     ra::relay_room_step(*shard, planes, aoi.get(), server, now_s(), opt.trim);
+    if (poses) {
+      const std::shared_ptr<const ra::aoi_snapshot> tiers = aoi ? aoi->snapshot() : nullptr;
+      poses->step(server, steps, tiers.get(), entities);
+    }
     // arisrv's device tags (its ~1 s link pass): each present participant's, from the link
     // holding its pid.
     {
@@ -599,6 +624,8 @@ public:
   cvc::media_router router; // after the transports: it goes first, clearing their sinks
   holon server{holon_role::server, cvc::ariadne::room_holon_config()};
   std::unique_ptr<ra::room_aoi_relay> aoi;
+  std::unique_ptr<ra::room_pose_relay> poses; // opt.pose_stream
+  ra::room_entity_relay entity_relay;
   std::vector<cvc::state_transport *> planes;
   std::map<std::string, std::pair<double, double>> place_on_join;
   std::map<std::string, double> joined_at; // when the server holon (and so the AOI) first had it
@@ -658,6 +685,7 @@ public:
       _grpc->register_shard(shard.get());
       _grpc->set_on_media(on_media);
       tp = _grpc.get();
+      listen();
       return _grpc->connect_to_peer(r.grpc.listen_address(), std::chrono::milliseconds(4000));
     }
 #endif
@@ -671,6 +699,7 @@ public:
       _ws->set_on_media(on_media);
       _ws->set_media_backlog_drop(0); // its uplink is lossless too
       tp = _ws.get();
+      listen();
       return _ws->connect_to_peer("ws://" + r.ws.listen_address(), std::chrono::milliseconds(4000));
     }
 #endif
@@ -706,6 +735,16 @@ public:
   // One client frame: the holon against the replicated room, the marker echo when on, then this
   // frame's own writes sent.
   void frame() {
+    if (stream) { // the snapshots since the last frame, then the room's entities
+      std::vector<cvc::pose_snapshot> got;
+      {
+        std::lock_guard<std::mutex> lk(_snap_mu);
+        got.swap(_snaps);
+      }
+      for (const cvc::pose_snapshot &snap : got)
+        cvc::ariadne::apply_pose_snapshot(h, _decoder, snap, &entities);
+      entities.pump(app, kRoom);
+    }
     cvc::ariadne::client_pump(h, app, kRoom, pid);
     if (echo)
       write_echo();
@@ -755,12 +794,27 @@ public:
   holon h{holon_role::client, cvc::ariadne::room_holon_config()};
   cvc::state_transport *tp = nullptr;
   bool echo = false;  // write arigl's avatar marker matrices into ui.docs every frame
+  // Apply the relay's pose snapshots each frame, with the room's entities played out (as arigl
+  // does). Set before connect().
+  bool stream = false;
+  cvc::ariadne::entity_playout entities;
   std::string token;  // the room token its connection presents ("" = none)
   std::string device; // the device id its Hello carries ("" = none)
   std::string seed;   // its device key's 32-byte seed (state_device_key.h; "" = no key)
   std::uint64_t cam_sent = 0, mic_sent = 0;
 
 private:
+  void listen() {
+    if (stream && tp)
+      tp->set_on_pose_snapshot([this](const cvc::pose_snapshot &snap) {
+        std::lock_guard<std::mutex> lk(_snap_mu);
+        _snaps.push_back(snap);
+      });
+  }
+  std::mutex _snap_mu;
+  std::vector<cvc::pose_snapshot> _snaps; // from the transport's thread, taken each frame
+  cvc::ariadne::pose_stream_decoder _decoder;
+
   void send(const char *stream, const char *codec, std::size_t bytes, std::uint64_t seq) {
     cvc::media_frame f;
     f.origin_node_id = pid;
@@ -1468,6 +1522,79 @@ TEST(RoomRelayLoopbackTest, ServerDocumentPublishesItsNamespaceOnly) {
 // A relay session that presents a credential (relay_session.h: relay: token: credential:NAME, an
 // OIDC sign-in's) joins once the credential holds a token, from its pump(): until then room-call
 // has no client, and a session waiting for its credential is said to.
+// The server document's world runs on the relay (ServerDocument), and a client sees its vehicles:
+// who they are in the room's entities section, where they are on the pose stream, played out and
+// moving (ARIADNE_WORLDS.md WD3; arisrv --doc cvc://worlds/traffic.ari runs the same path).
+TEST(RoomRelayLoopbackTest, AClientSeesTheServerWorldsVehiclesMove) {
+  if (!cvc::ariadne::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt))
+    GTEST_SKIP() << "no Jolt in this build";
+  relay_options o;
+  o.pose_stream = true;
+  o.doc = R"(meta: { name: traffic, min_libcvc: 3.7.5 }
+requires: [relay, scene.physics]
+world:
+  vehicles:
+    archetypes:
+      rover: { plant: kinematic, vehicle: { preset: roboracer, max_speed: 6 }, controllers: [nav@1] }
+    start:
+      - { archetype: rover, count: 6, name: rover }
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [120, 120, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+  test_relay r(o);
+  ASSERT_FALSE(HasFailure());
+  ASSERT_NE(r.doc, nullptr);
+  const std::vector<link_kind> kinds = link_kinds();
+  client_list own;
+  own.push_back(std::make_unique<test_client>("A", kinds[0]));
+  own[0]->stream = true;
+  const std::vector<test_client *> cs = ptrs(own);
+  test_client &A = *cs[0];
+  ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
+
+  const auto all_shown = [&] {
+    return A.entities.shown().size() == 6 && A.entities.entities().size() == 6;
+  };
+  ASSERT_TRUE(run_room(r, cs, 8.0, {}, all_shown))
+      << "A sees " << A.entities.shown().size() << " entities on the stream, "
+      << A.entities.entities().size() << " in the section";
+  EXPECT_EQ(A.entities.entities()[0].name, "rover 1");
+  EXPECT_EQ(A.entities.entities()[0].plant, "kinematic");
+  std::vector<cvc::physics::vec3> start;
+  for (std::uint64_t id : A.entities.shown()) {
+    cvc::physics::pose p;
+    ASSERT_TRUE(A.entities.pose(id, p));
+    start.push_back(p.position);
+  }
+  run_room(r, cs, 2.0);
+  double moved = 0.0;
+  const std::vector<std::uint64_t> ids = A.entities.shown();
+  ASSERT_EQ(ids.size(), start.size());
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    cvc::physics::pose p;
+    ASSERT_TRUE(A.entities.pose(ids[i], p));
+    moved = std::max(moved, std::hypot(p.position.x - start[i].x, p.position.y - start[i].y));
+  }
+  EXPECT_GT(moved, 1.0) << "the relay's nav@1 drives them, and A sees them move";
+  // Where A shows one is where the relay has it, but for the playout's delay.
+  const cvc::ariadne::WorldVehicles *v = r.doc->runtime().scene_world()->vehicles();
+  ASSERT_NE(v, nullptr);
+  for (const cvc::ariadne::entity_info &e : v->entities()) {
+    cvc::physics::pose p;
+    ASSERT_TRUE(A.entities.pose(e.id, p));
+    EXPECT_LT(std::hypot(p.position.x - e.x, p.position.y - e.y), 3.0) << "entity " << e.id;
+  }
+}
+
 TEST(RoomRelayLoopbackTest, ARelaySessionJoinsOnceItsCredentialHoldsAToken) {
   test_relay r(relay_options{});
   cvc::app client;

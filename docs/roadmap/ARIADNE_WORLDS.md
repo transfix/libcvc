@@ -571,13 +571,13 @@ runs many worlds at once, and in wasm under node.
 |---|---|---|---|
 | `world_source` | Picks the world: generated (today's world controls), a data bundle such as Austin, a flat square or a file. Regenerates it, with progress and a ready revision other panels wait on. | `scene.world.*` | `generated_world`; the world runtime turns the world into the navigator's rasters and the plants' colliders, buildings included |
 | `vehicle_selector` | A list of the world's vehicle archetypes. The chosen one is drawn alone on a lit, shadowed studio set in its own viewport (a `scenes:` entry). Stats from the archetype's body: size, mass, power, top speed, wheelbase. Settings within the archetype's ranges. The policy: default or a trained network. Identity: name, team, two colours, metadata. A Spawn button. | `vehicles.*` (as built: the catalog, the selection, the spawn keys), `entities.*` | §4's identity, §5's `nav@1`, runtime spawning |
-| `spawn_points` | A top-down minimap viewport: click to add a point, click one to remove or tag it (team, archetype). The policy: fixed, random, round-robin or nearest-free, per team or archetype. Points are checked against the world's occupancy; candidates are suggested along the roads. | `spawns.*` | click-to-world picking; the road graph |
+| `spawn_points` | A top-down minimap viewport: click to add a point, click one to remove or tag it (team, archetype). The policy: fixed, random, round-robin or nearest-free, per team or archetype. Points are checked against the world's occupancy and the water's depth for each archetype's medium (land or water); candidates are suggested along the roads, or over the water for a boat. | `spawns.*` | click-to-world picking; the road graph; the grid's water layer |
 | `world_physics` | Physics on or off, speed, step and restart. A table of entities: bodies, active, contacts, step time; per vehicle its energy and forces. | `physics.*`, `physics.stats.*` | stats from the world runtime; built-in step and restart |
 
 **Vehicles are archetypes.** The vehicle catalog is the world document's archetypes, beside
-`person`: each names its plant (`kinematic`, `jolt`, `dynamic`, `dynamic4w`), its body (a
-`vehicle_desc` preset or its fields), its look (a mesh, or the generated Humvee), and the
-controllers it allows. libcvc's default worlds ship the built-in vehicles; a site adds its own in
+`person`: each names its plant (`kinematic`, `jolt`, `dynamic`, `dynamic4w`, `dynamicboat`), its
+body (a `vehicle_desc` preset or its fields; a boat preset), its look (a mesh, or the generated
+Humvee), and the controllers it allows. libcvc's default worlds ship the built-in vehicles; a site adds its own in
 its own world document.
 
 - **As built (L2).** The catalog is `world: vehicles: archetypes:`, a list of its own beside
@@ -590,7 +590,8 @@ its own world document.
     chassis boxes bodies the world's contacts push back into the models. `kinematic` is nav's
     bicycle with a kinematic box that pushes what it meets. Each plant's entities have a
     navigator of their own on the grid; `physics.stats.vehicles` names each one's plant; cvcGL
-    poses a box look's wheels where its plant has them.
+    poses a box look's wheels where its plant has them. A spawn may name a plant of its own
+    (`entity_spec::plant`), as a gym's agents do (L4).
   - Looks: a humvee is the vehicle-humvee package's `Humvee.glb` when it is installed (found under
     the cvcpkg prefixes, oriented and scaled to the chassis as the nav demos do it), else its
     chassis box in the entity's colours with a cabin and wheels; `look: { model: | file: |
@@ -608,14 +609,118 @@ its own world document.
     one per `SceneWorld`, with nothing process-wide: a relay that runs a world per room (RM1,
     WD3) runs one per room, and each room's panels name its keys by their root (`world_source`'s
     `world:`, `world_physics`' `physics:`, `vehicle_selector`'s `vehicles:` and `entities:`).
-  - Not yet: the default worlds' built-in vehicles (`world_lab.ari` declares its own); the model from a document's
-    data package (the Austin package carries a copy, which `pycvc_gl.cars` reads); the relay
-    reading the vehicles (WD3, WD4).
+  - Boats and spawns by medium (L3b, built 2026-11-16). `plant: dynamicboat` (or
+    `dynamicboat:<preset>`, `launch` or `jonboat`; `vehicle:` overrides `mass` and `max_speed`) is
+    a boat on `cvc::physics::dyn_boat_plant`, its hull a body in the world's physics world afloat
+    on the world's water: the field a `water` node puts there, or, where the world has none over
+    the grid's water (a generated world's sea with no water node), a still field at the water's
+    level that `WorldVehicles` adds. The boats' navigator plans on the inverse grid: water at least
+    the deepest boat's draft and `keel_clearance` deep, land and shallows blocked.
+    - The grid's water layer: `nav::world_grid::water_depth` (the level less the ground at each
+      sample, `nav::set_water`) and `solid` (what blocks a sample other than a water surface), and
+      `nav::medium_grid(g, medium, depth)`, a car's grid with water deeper than a ford blocked or
+      a boat's with only deep enough water free. `SceneWorld::grid` sets the water from a water
+      node over the node's ground (its level) or a generated world's bodies of water.
+    - The medium: each archetype's comes from its plant (`vehicle_plant::medium()`, `land` but for
+      `dyn_boat_plant`'s `water`), with a boat's draft (`dyn_boat_plant::draft`: its keel or its
+      propeller, the deepest boat's for every boat, which share a navigator) and half its length
+      (`WorldSpawns::set_needs`). A car starts where the water is no deeper than `ford_depth`; a
+      boat where it is at least the draft and `keel_clearance` deep and open water reaches half its
+      length and `shore_clearance` more round it (`world: spawns:` knobs, 0.3, 0.3 and 0 m).
+    - The filter: `WorldSpawns::choose`, `add`, `points()` (`free`, and `medium`: land, water, both
+      or none) and the free-point fallback all take each archetype's medium's grid
+      (`WorldSpawns::ground_for`). An untagged point serves only the archetypes whose medium it is
+      on; a tagged point off its archetype's medium serves nothing. `suggest` follows the tag's
+      archetype: roads on land (out of ford-deep water), or `water_spawn_points` over the water deep
+      and open enough, spread over each body of water with room. A placed start off its medium (a
+      car in a lake, a boat ashore) moves to a free point of its medium, as a blocked start always
+      has: a regenerated world can flood a start a document gave.
+    - `dyn_boat_plant` checks the ground under a start too (a ray from the hull's top to its
+      deepest point), not only the field's box, which knows nothing of the terrain in it.
+    - Boats are drawn as hulls (transfix/libcvc#1316: `add_hull_node`, a floating plant's box or
+      default look as its hull). Not yet: boats in pycvc.
+  - **The vehicles a world starts with.** `world: vehicles: start:` lists them (archetype, count up
+    to 256, name, team, controller, plant, policy, `at`/`heading`), spawned when the world's
+    vehicles are made. A document's `init:` runs before its world exists, and a spawn request
+    already set when the vehicles start is ignored (a reload would spawn again), so this is how a
+    document populates its world; `vehicles.spawn.count` spawns several at one request.
+  - **On the relay** (the hand-off, WD3's first part). A server document (`arisrv --doc`) runs its
+    scene's world headless, as any runtime without a scene adapter does, on the room's steps
+    (`ServerDocument`; its physics world is the document's, apart from the holon's). Its vehicles go
+    to every client as the room's entities (`conference::room_entities`): who they are in the
+    revisioned section `conf.rooms.<room>.entities` (name, archetype, plant, controller, team,
+    colours, chassis size, wheels, the look with a file's name alone), where they are on the pose
+    stream beside the participants under entity pids (`~e<id>`, at most 30 Hz each, in every
+    keyframe). A client plays them out with `entity_playout` (a client holon without physics: the
+    participants' peer playout, no bodies) and `room_view` draws each as its vehicle's box look.
+    `cvc://worlds/traffic.ari` is the stock server world: twelve blocks and eighteen vehicles.
+    Not yet: an area of interest for entities (every viewer gets every one), one physics world for
+    the avatars and the vehicles, a model look drawn on the client (it draws the box), the
+    controller catalog's prediction (WD4: a client interpolates server-dynamic entities, so none is
+    needed to watch them).
+  - Not yet: the default meeting worlds' built-in vehicles (a stock world named by `--scene` is
+    published, not run; `traffic.ari` is the server world with vehicles, and `world_lab.ari`
+    declares its own); the model from a document's data package (the Austin package carries a
+    copy, which `pycvc_gl.cars` reads).
 
 **The gym** is the world runtime driven from Python or headless: `reset(seed)`, `step(actions)`,
 `observe()`, a reward the user writes, and an episode log. It absorbs the glue in `pycvc_gl.cars`
 (rasters, colliders, plants), which then becomes a thin layer over it. Training runs many worlds
 headless; the same document opens in arigl to watch one.
+
+- **As built (L4).** `cvc::ariadne::WorldGym` ([world_gym.h](../../inc/cvc/ariadne/world_gym.h))
+  and `pycvc.WorldGym`:
+  - **One app per gym.** Each loads its document headless on an app of its own (its state tree,
+    clock, physics world and vehicles), so a process runs many; it pauses the clock, so only
+    `step()` steps the world.
+  - **reset(seed).** The world rebuilt as the document built it, every draw seeded (starts,
+    goals, the spawn policy: `WorldVehicles::reseed`, `WorldSpawns::reseed`), and the agents
+    spawned (`count` of the first archetype with nav@1, or a list of specs).
+  - **step(steer, accel).** One navigator tick. Each agent's command replaces its controller's
+    for the tick (`WorldVehicles::command`); NaN leaves it to the controller, so nav@1 is the
+    baseline in the same loop. Goals are held (`set_wander(false)`).
+  - **observe().** Per agent, as flat arrays: pose, velocity, steering, goal, contacts (counted
+    after every physics step, `WorldVehicles::after_step`), out of the world, ray ranges on the
+    grid, body and envelope.
+  - **The reward and the log.** A reward the user writes, in C++ or Python (the default is
+    progress, less collisions, plus arrival); a row per agent per step, to CSV or numpy;
+    `<prefix>.gym.*` keys.
+  - **The end.** Terminated when every agent with a goal is at it or one leaves the world (off
+    its grid, or through its ground); truncated at `max_steps`.
+  - **`pycvc_gl.cars`.** `GymCars` gives the template's `CarsState` and `step` over a gym, with
+    `world_from_gym` for its rollouts and rasters; `--gym DOC` runs the template on it.
+  - **The example.** `examples/ariadne/python/world_gym.ari` and `world_gym.py`: world_lab's
+    worlds headless (`scene.physics` alone), arigl draws the same document.
+  - **Fixed on the way.** `SceneWorld::restart` gives the vehicles the new ground bodies (a
+    generated world's colliders come back with new ids), so a restart no longer counts the
+    terrain as an obstacle.
+  - **Then (the L4 follow-up).** Every plant in a scene world (`jolt`, `kinematic`, `dynamic`,
+    `dynamic4w`; `entity_spec::plant`, `vehicles.spawn.plant`), so `GymCars` runs the cars
+    template's plants in a world document (`--vehicle kinematic`, `dynamic:roboracer`); a
+    world's buildings are obstacles, not ground (`SceneWorldBody::ground`: the height-field
+    colliders alone); and `regenerate` makes a generated world per episode from the reset's seed
+    (`SceneWorld::regenerate_world`).
+  - **Not yet.** Vehicles do not steer around each other: the world runtime turns on none of the
+    navigator's separation, yield or gap keeping, and freezes its sensing, so vehicles meet only
+    physically, on one plant or several; the cars template's own worlds (its data, generated and
+    flat builders) stay its own, beside the gym's.
+- **As built (L4's twin).** What a differentiable twin of the gym's world reads, so a trainer can
+  backpropagate through a model of it while the gym (Jolt, the physics worlds) stays the judge, as
+  P8 did for the Jolt vehicle:
+  - `WorldGym::fields()`: the navigator's grid and signed distance with its gradient, the
+    ground's height and grip, and the navigator's settings;
+  - `WorldGym::plants()` (`WorldVehicles::plants`): each agent's plant as a `cvc::nav::diff`
+    model in SI, with its parameters, limits and state. On the dynamic plants it is the plant's
+    own model, with what the model took of the last command in each substep after the driver.
+    On `dynamic4w`, away from a collision, the replay is bit for bit
+    (`AriadneWorldGym.ThePlantsAreModelsATwinReplays`).
+  - GRL-SNAM's `grl_snam.gym_twin` is the torch twin over these.
+  - **Not yet:** a twin of the driver (`dyn_driver`), of contact on the four-wheel model and of
+    its `grade_force`; per-cell grip; a C++ twin rollout over a gym.
+- **The tick (2026-11-15).** A world with vehicles runs on the simulation hosts' clock (0.01 s
+  quanta, physics at 100 Hz; WORLD-CLOCK-SYNC-ROADMAP, "One tick"), and its vehicles tick at
+  libcvc's one simulation tick, 0.06 s (`cvc::kSimTick`; `WorldVehicles::set_tick`,
+  `gym_options::tick`). It was 0.05 s on the scenes' 1/120 s quanta.
 
 **What the runtime needs that isn't there** (§1):
 
@@ -646,7 +751,7 @@ GENERATED-WORLD-ROADMAP.md's.)
 | WD0 | **Done** (2026-11-07). The loose ends: `--set` after seeding, or a guard so a `--set` can't suppress the default world; the "under a sun" comment. Built as `--set` after the world and the room's policies, before a server document's `init:` (§1) | — | S |
 | WD1 | **Done** (2026-11-07). **The world document seeds the room.** `arisrv --doc world.ari` publishes the document's `scene:` (objects, lights, shadows), in one revision (`write_room_world`). `cvc://worlds/default.ari` and `large.ari` replace the C++ seeds, and `--scene` names them. The light rig and shadows move from the conference document to the world document (Q1), and the conference document drops its `scene:` block. As built: the wire gained a rig's knobs and the shadows' interval; `room_world_from_scene` leaves out, with a warning, what the wire can't hold (other node types and sources, children, textures, shaders), and publishes every body as a static until WD3; `--scene` together with a `--doc` that has a `scene:` is refused; the C++ twins are the fallback | S0 (met by transfix/libcvc#1046) | M |
 | WD2 | **Done** (2026-11-08). **The rules come from the document.** The physics, archetype, policy and controller sections (§3), with the activation tick. The holon and `room_view` read them instead of `avatar_body{}`, `kAvatarWidth`, `max_speed = 4.0` and the panel's "walker" literal. As built: the revisioned-section writer in core (`section.h`: `{epoch, at, rev}`, the revision last); the `world:` block (`world_rules.h`), whose stock worlds' twin is `default_world_rules()`; the four sections (`room_rules.h`), lists indexed since `walker@1` is no state name; the holon's rules by tick (`holon::set_physics` and the rest), the veto applied at each step, a late client's re-run from the tick, and a body change re-creating the avatars where they stand; gravity from the scene's `physics:`; `fixed_dt` stays the room's 1/120 s (a document's other value is a warning). Every avatar has the first archetype until WD4 and WD6 let a participant pick. | WD1 | M |
-| WD3 | **Entities.** The entities table (§4); server-dynamic props and NPC bodies from the document and from server programs, simulated on the relay by L0's headless runtime; their poses on the pose stream; colliders for meshes. | WD2, L0 | L |
+| WD3 | **Started** (2026-11-17: the vehicles). **Entities.** The entities table (§4); server-dynamic props and NPC bodies from the document and from server programs, simulated on the relay by L0's headless runtime; their poses on the pose stream; colliders for meshes. As built so far: a server document's world runs on the relay, and its vehicles reach every client as the room's entities (an identity section and pose-stream entries, played out and drawn: §14, "On the relay"). | WD2, L0 | L |
 | WD4 | **A controller catalog.** Kernels by `name@version`, a determinism gate per kernel, capability negotiation with an interpolation fallback; the vehicle as the second kernel. A participant picks from the archetype's list (§5k phase 3). | WD2 | L |
 | WD5 | **Generated worlds** through the world document: G5's descriptor, height-field statics on the relay. | WD1, G5 | M |
 | WD6 | **User looks and bodies.** Assets by hash, checked and rehosted by the relay; bodies clamped to the archetype (§5k phase 4). | WD2, S5 | M |
@@ -683,7 +788,8 @@ each builds what a WD phase needs.
 | L2a | **Built** (2026-11-14). **Entity intents.** A document, a script, a server document or a C++ / Python host steers any world entity: a steer and acceleration in place of its controller's command or blended with it, a planar force on its drive, and the `external` controller (its intent alone). Keys `entities.<id>.intent.*` and `.force.*`, read each navigator tick; `world: vehicles: intents:` for a published namespace; `WorldVehicles::set_intent` from any thread; `pycvc.WorldEntities`. | WD4 | S |
 | L2b | **Built** (2026-11-14). **Every plant in a scene world.** `kinematic`, `dynamic[:preset]` and `dynamic4w[:preset]` beside `jolt`, all in the scene's one physics world on its clock: the dynamic plants step there (a substep around each world step, `step_world` off) with their chassis against its buildings; the kinematic bicycle's box pushes what it meets. `physics.stats.vehicles` for each, and each look drawn (a dynamic4w wheel by wheel). | WD4 | M |
 | L3 | **Built** (2026-11-11). **`spawns.*` and `spawn_points`,** with the minimap and road suggestions. As built: `world: spawns:` (points with a heading, team and archetype tags and a world; a policy, fixed, random, round_robin or nearest_free, kept per team, archetype or all); `WorldSpawns`, one per `WorldVehicles`, keeps the points per world, checks them against the grid, picks a spawn's start by the policy (aside when a vehicle sits on it), and suggests points along a generated world's road mesh; a minimap is a `mode: map`, `input: pick` viewport whose picks add, remove or tag points; cvcGL draws them tagged `spawns`. The demo is `world_lab.ari`, with every panel. | WD3 | M |
-| L4 | **The gym:** reset, step, observe, reward, episode logs, headless; `pycvc_gl.cars` moves onto it. | — | M |
+| L3b | **Built** (2026-11-16). **Boats as world vehicles, and spawns by medium.** `plant: dynamicboat` (launch, jonboat) on the world's water (a water node's field, else a still one at the water's level), its navigator on the inverse grid; the grid's water layer (`nav::world_grid::water_depth`, `nav::medium_grid`); each archetype's medium from its plant, and `world: spawns:`' `ford_depth`, `keel_clearance` and `shore_clearance`, so cars never start in a lake and boats only in water deep and open enough (§14, "Boats and spawns by medium"). | WD3 | M |
+| L4 | **Built** (2026-11-12). **The gym:** reset, step, observe, reward, episode logs, headless; `pycvc_gl.cars` moves onto it. As built: `WorldGym` (C++, and `pycvc.WorldGym`), one app per gym, the clock paused so only `step()` steps it; `reset(seed)` rebuilds the world and spawns the agents with every draw seeded; `step(steer, accel)` is a navigator tick (NaN: nav@1 drives); the observation as flat arrays (pose, goal, contacts per physics step, out of the world, ray ranges, envelope); a reward of the user's; a log per agent per step (CSV, numpy); `GymCars` and `--gym` put `pycvc_gl.cars`' controllers on it; `world_gym.ari` and `world_gym.py` are the example. | — | M |
 
 **The first cut is WD0 + WD1** for the relay, and **L0** for the lab, which can run beside it. E0
 and E1 need neither and can start any time. WD1 needs S0, which transfix/libcvc#1046 builds with

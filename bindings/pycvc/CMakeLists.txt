@@ -338,6 +338,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_contours:test_pycvc_contours.py
              pycvc_point_classes:test_pycvc_point_classes.py
              pycvc_segmentation:test_pycvc_segmentation.py
+             pycvc_tiler:test_pycvc_tiler.py
              pycvc_volume_slice:test_pycvc_volume_slice.py
              pycvc_image:test_pycvc_image.py
              pycvc_model:test_pycvc_model.py
@@ -349,6 +350,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_exec_pool:test_pycvc_exec_pool.py
              pycvc_ariadne:test_pycvc_ariadne.py
              pycvc_ariadne_server:test_pycvc_ariadne_server.py
+             pycvc_gym:test_pycvc_gym.py
              pycvc_ariadne_harness:test_pycvc_ariadne_harness.py
              pycvc_ariadne_bridge:test_pycvc_ariadne_bridge.py
              pycvc_world_entities:test_pycvc_world_entities.py
@@ -577,6 +579,10 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_gl_cars
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_cars.py)
   set_tests_properties(pycvc_gl_cars PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
+  # pycvc_gl.cars.HostCars: the template's cars in the world the host's own document runs.
+  add_test(NAME pycvc_gl_host_cars
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_host_cars.py)
+  set_tests_properties(pycvc_gl_host_cars PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
   # pycvc_gl.nav_lab: libcvc's policies side by side (arms, the Stats and Ledger windows, the run
   # log) and a run log played back, headless; offscreen when GL is there.
   add_test(NAME pycvc_gl_nav_lab

@@ -2143,11 +2143,13 @@ and the process's next step resumes it. Two mechanisms, one contract:
     What it needs:
     - libcvc and every wasm package rebuilt with `-fwasm-exceptions`. Rust's Emscripten target
       needs the same move to link into cvcdbg's wasm build, since Rust 1.93.
-    - JSPI in the browser: Chrome has it since 137 and Safari from 27, and Firefox planned it for
-      153.
-    - The Asyncify build kept for the browsers without JSPI.
+    - JSPI in the browser: Chrome since 137, Firefox since 153 (21 July 2026) and Safari since 27
+      (September 2026).
+    - No Asyncify fallback. emsdk 5.0.7 warns that Asyncify and `-fwasm-exceptions` don't compose,
+      so a browser without JSPI gets a page that says what it needs.
 
-    It isn't planned yet (§9, item 13).
+    **Decided** (Joe, 2026-11-16): the page moves to JSPI and wasm exceptions throughout, in phases
+    JX1-JX4 of [`WASM_JSPI_EXCEPTIONS.md`](WASM_JSPI_EXCEPTIONS.md) (§9, item 13).
   - **Natively,** wasmtime would run the metered guest without the Asyncify it carries now
     (unmeasured). G3's WAMR needs the Asyncify build, so the install keeps it whatever the browser
     does.
@@ -2373,6 +2375,10 @@ hook is declared in the block's `hooks:`, or registered by `ari_init` through th
   event starts the next.
 - **Python and native code** can call a guest's exports, and a guest can call theirs. The registry
   is one.
+- **Clients' guests with hooks.** A client's resident guest on `arisrvx` is planned in
+  [`ARIADNE_RESIDENT_GUESTS.md`](ARIADNE_RESIDENT_GUESTS.md). It hooks the relay's events, may
+  outlive its client's connection, and spends gas from a per-principal ledger on the server
+  (phases RG1–RG7).
 
 ### 8.8 Installing and entering programs
 
@@ -2464,8 +2470,12 @@ hook is declared in the block's `hooks:`, or registered by `ari_init` through th
       avoids both.
     - But today's `ariglx` (Asyncify, JS exceptions) waits 11 µs a slice for a JSPI guest, so
       Asyncify stays.
-    - **Open:** moving the page to wasm exceptions and JSPI throughout. That would take Asyncify
-      out of host and guests where the browser has JSPI, and needs every wasm package rebuilt.
+    - **Decided** (Joe, 2026-11-16: "we should use JSPI and also add -fwasm-exceptions to packages
+      on cvcpkg"): the page moves to wasm exceptions and JSPI throughout, with no Asyncify
+      fallback.
+      - The plan, the mixed-link table that makes it one switch, and phases JX1-JX4 are in
+        [`WASM_JSPI_EXCEPTIONS.md`](WASM_JSPI_EXCEPTIONS.md).
+      - G3's WAMR keeps the Asyncify transform for guests only if it still needs it.
 14. **Gas calibration** (§8.5). `wasm_gas_per_step` has to be measured, as
     `limits.async_steps_per_cpu_ms` was. A wrong rate makes guests too cheap or too dear against
     DSL programs under the same caps.

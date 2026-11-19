@@ -434,6 +434,9 @@ void EWave::releaseResources() {
   for (auto &z : m_z)
     z = nullptr;
   m_mask = m_src = m_ghostCorner = m_ghostW = m_invMass = m_coef = m_mul = m_factor = nullptr;
+  m_coefs.clear();
+  m_muls.clear();
+  m_factors.clear();
   m_coefStale = m_mulStale = m_factorStale = true;
   for (auto &r : m_readers)
     r = nullptr;
@@ -608,33 +611,46 @@ void EWave::setDepth(double depth) {
 // The step's tables (the opening comment), worked out again only when what they depend on has
 // changed: the exact step's coefficients on dt and the depth, the symmetric step's multipliers on
 // dt_s and the depth, the real-space factors on the step (dt or dt_s) and the mask.
-void EWave::prepareExact(double dt) {
-  if (m_coefStale || dt != m_coefDt) {
-    std::vector<float> cf = modeCoefficients(m_p, dt);
-    m_coef->Create2DFromRaw(m_p.n, m_p.n, 4, VTK_FLOAT, cf.data());
-    m_coefDt = dt;
-    m_coefStale = false;
+vtkTextureObject *EWave::stepTable(std::vector<step_table> &kept, bool &stale, double dt, int comps,
+                                   const std::function<std::vector<float>()> &make) {
+  if (stale) {
+    kept.clear();
+    stale = false;
   }
+  for (std::size_t i = 0; i < kept.size(); ++i)
+    if (kept[i].dt == dt) { // to the front: the most recent first
+      std::rotate(kept.begin(), kept.begin() + std::ptrdiff_t(i),
+                  kept.begin() + std::ptrdiff_t(i) + 1);
+      return kept.front().tex;
+    }
+  step_table t;
+  t.dt = dt;
+  if (kept.size() >= kStepTables) { // the least recent's texture, refilled
+    t.tex = kept.back().tex;
+    kept.pop_back();
+  } else {
+    t.tex = oceanFloatTexture(m_rw, m_p.n, m_p.n, comps, nullptr);
+  }
+  std::vector<float> v = make();
+  t.tex->Create2DFromRaw(m_p.n, m_p.n, comps, VTK_FLOAT, v.data());
+  ++m_tablesBuilt;
+  kept.insert(kept.begin(), t);
+  return kept.front().tex;
+}
+
+void EWave::prepareExact(double dt) {
+  m_coef = stepTable(m_coefs, m_coefStale, dt, 4, [&] { return modeCoefficients(m_p, dt); });
   prepareFactors(dt);
 }
 
 void EWave::prepareSymmetric(double dts) {
-  if (m_mulStale || dts != m_mulDts) {
-    std::vector<float> mul = symmetricMultipliers(m_p, dts);
-    m_mul->Create2DFromRaw(m_p.n, m_p.n, 2, VTK_FLOAT, mul.data());
-    m_mulDts = dts;
-    m_mulStale = false;
-  }
+  m_mul = stepTable(m_muls, m_mulStale, dts, 2, [&] { return symmetricMultipliers(m_p, dts); });
   prepareFactors(dts);
 }
 
 void EWave::prepareFactors(double dt) {
-  if (m_factorStale || dt != m_factorDt) {
-    std::vector<float> f = realFactors(m_p, m_maskHost, dt);
-    m_factor->Create2DFromRaw(m_p.n, m_p.n, 1, VTK_FLOAT, f.data());
-    m_factorDt = dt;
-    m_factorStale = false;
-  }
+  m_factor =
+      stepTable(m_factors, m_factorStale, dt, 1, [&] { return realFactors(m_p, m_maskHost, dt); });
 }
 
 void EWave::step(double dt) {

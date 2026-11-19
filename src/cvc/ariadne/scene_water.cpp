@@ -131,9 +131,11 @@ SceneWaterSpec scene_water_spec(cvc::app &app, const SceneNode &n, const std::st
   // The wind, through the one place every node reads it (scene_wind.h; O14's scene wind).
   const SceneWind w =
       scene_wind(app, n, bind_prefix, kWaterWindKeys, {s.wind_speed, s.wind_dir, s.gustiness});
-  s.wind_speed = w.speed;
-  s.wind_dir = w.dir;
+  s.wind_speed = w.mean_speed(); // with a storm's gust front: what the sea grows toward (F4)
+  s.wind_dir = w.mean_dir();
   s.gustiness = w.gustiness;
+  s.gust_speed = w.speed; // the gusts' pattern drifts with the wind as authored
+  s.gust_dir = w.dir;
   s.fetch = std::max(key("water.fetch", "fetch", s.fetch), 400.0);
   s.lee = key("water.lee", "lee", 1.0) != 0.0;
   s.sea_lag = std::max(key("water.sea_lag", "sea_lag", s.sea_lag), 0.0);
@@ -145,6 +147,16 @@ SceneWaterSpec scene_water_spec(cvc::app &app, const SceneNode &n, const std::st
   s.swell_height = std::max(key("water.swell_height", "swell_height", s.swell_height), 0.0);
   s.swell_period = std::max(key("water.swell_period", "swell_period", s.swell_period), 3.0);
   s.swell_dir = key("water.swell_dir", "swell_dir", s.swell_dir);
+  // C5 (D6): the bodies' waves pushing each other, off unless asked for. The window's cells are
+  // a power of two (the nearest in 8 .. 128), its cell 5 cm .. 100 m, its depth at most 10 km (the
+  // wake's limits, cvc::physics::field_wake).
+  s.wake_push = key("water.wake_push", "wake_push", 0.0) != 0.0;
+  const double cells = std::clamp(n.props.num("wake_push_cells", 64.0), 8.0, 128.0);
+  s.wake_push_cells = 8;
+  while (s.wake_push_cells < 128 && cells > 1.5 * s.wake_push_cells)
+    s.wake_push_cells *= 2;
+  s.wake_push_cell = std::clamp(n.props.num("wake_push_cell", s.wake_push_cell), 0.05, 100.0);
+  s.wake_push_depth = std::min(n.props.num("wake_push_depth", s.wake_push_depth), 1.0e4);
   return s;
 }
 
@@ -345,7 +357,9 @@ std::shared_ptr<const cvc::ocean::sea_forcing> scene_water_forcing(const SceneWa
   }
   f->fetch = k.fetch;
   f->fetch_from = k.fetch_from;
-  f->wind = SceneWind{s.wind_speed, s.wind_dir, s.gustiness}.state();
+  f->wind = SceneWind{std::isnan(s.gust_speed) ? s.wind_speed : s.gust_speed,
+                      std::isnan(s.gust_dir) ? s.wind_dir : s.gust_dir, s.gustiness}
+                .state();
   f->current.speed_mps = s.current;
   return f;
 }
@@ -387,6 +401,9 @@ struct WaterRuntime::impl {
   std::shared_ptr<const cvc::physics::field> field;
   const float *groundData = nullptr; // the ground the field was built over (a regenerate swaps it)
   std::size_t groundSize = 0;
+  // While the scene has storms (SceneColliders::clock_period): the clock period the sea last
+  // stepped in (none yet: the largest value).
+  std::uint64_t period_done = std::numeric_limits<std::uint64_t>::max();
 };
 
 WaterRuntime::WaterRuntime(cvc::app &app, const SceneNode &n, const std::string &bind_prefix,
@@ -405,6 +422,11 @@ const std::shared_ptr<SceneColliders> &WaterRuntime::colliders() const { return 
 std::shared_ptr<const SceneWaterShore> WaterRuntime::shore() const { return _impl->shore; }
 std::shared_ptr<const cvc::ocean::sea_surface> WaterRuntime::sea() const { return _impl->sea; }
 std::shared_ptr<const cvc::physics::field> WaterRuntime::field() const { return _impl->field; }
+double WaterRuntime::level() const {
+  const impl &d = *_impl;
+  return d.built.empty() ? scene_water_spec(*d.app, d.node, d.prefix).level : d.built[0];
+}
+
 std::shared_ptr<const SceneWaterSea> WaterRuntime::keyframes() const { return _impl->clock.sea(); }
 
 bool WaterRuntime::tick() {
@@ -414,9 +436,22 @@ bool WaterRuntime::tick() {
     return false;
   const SceneWaterSpec s = scene_water_spec(*d.app, d.node, d.prefix);
   // The wind is not here: it reaches the field through the sea's keyframes (the clock below).
-  const std::vector<double> spec{
-      s.level,     s.chop,  s.wave_amp,          s.shore_fade,      s.swell_height, s.swell_period,
-      s.swell_dir, s.outer, s.swash ? 1.0 : 0.0, s.lee ? 1.0 : 0.0, s.gustiness,    s.current};
+  const std::vector<double> spec{s.level,
+                                 s.chop,
+                                 s.wave_amp,
+                                 s.shore_fade,
+                                 s.swell_height,
+                                 s.swell_period,
+                                 s.swell_dir,
+                                 s.outer,
+                                 s.swash ? 1.0 : 0.0,
+                                 s.lee ? 1.0 : 0.0,
+                                 s.gustiness,
+                                 s.current,
+                                 s.wake_push ? 1.0 : 0.0,
+                                 double(s.wake_push_cells),
+                                 s.wake_push_cell,
+                                 s.wake_push_depth};
   const std::vector<float> &heights = g->heights();
   const bool groundNew = heights.data() != d.groundData || heights.size() != d.groundSize;
 
@@ -427,10 +462,39 @@ bool WaterRuntime::tick() {
     d.shoreSig = shoreSig;
   }
   // The sea follows its lagged wind: a keyframe (h0, and the fetch map when it turned) at most
-  // once a crossfade, on the world's clock, the time physics and the renderer share.
-  const bool seaNew = d.clock.advance(d.app->world_clock().t(), s, d.shore);
+  // once a crossfade, on the world's clock, the time physics and the renderer share. While the
+  // scene has storms, whose fronts move the wind on their own, the sea steps once a clock period
+  // (the scene's world sets the period): in period k, to the next period's start with the wind of
+  // this one (wind.front holds the front at its start), and a keyframe's field goes in at the step
+  // after that start (SceneColliders::from_tick). So where the sea's keyframes fall, and the step
+  // the bodies feel each in, are the clock's alone, whatever the frames.
+  bool seaNew = false;
+  std::uint64_t from_tick = 0;
+  const cvc::world_clock &clock = d.app->world_clock();
+  if (const double period = d.colliders->clock_period; period > 0.0 && d.clock.sea()) {
+    const std::uint64_t ticks = scene_clock_period_ticks(period, clock.fixed_dt());
+    const std::uint64_t k = clock.tick() / ticks;
+    if (d.period_done != std::numeric_limits<std::uint64_t>::max() && k < d.period_done)
+      d.period_done = k > 0 ? k - 1 : std::numeric_limits<std::uint64_t>::max(); // a restart
+    if (d.period_done == std::numeric_limits<std::uint64_t>::max() || k > d.period_done) {
+      const std::uint64_t next = (k + 1) * ticks;
+      // A crossfade of at least two periods: a keyframe's field goes in (at `next`) before the next
+      // keyframe can replace it, whether the runtime ticks before the world's steps (the world's
+      // own, in its sync) or after them (a renderer's), so both put in the same fields.
+      SceneWaterSpec sc = s;
+      sc.sea_fade = std::max(s.sea_fade, 2.0 * static_cast<double>(ticks) * clock.fixed_dt());
+      seaNew = d.clock.advance(static_cast<double>(next) * clock.fixed_dt(), sc, d.shore);
+      d.period_done = k;
+      if (seaNew)
+        from_tick = next;
+    }
+  } else {
+    seaNew = d.clock.advance(clock.t(), s, d.shore);
+  }
   if (!groundNew && !seaNew && spec == d.built && d.colliders->geometry)
     return false;
+  if (groundNew || spec != d.built || !d.colliders->geometry)
+    from_tick = 0; // the ground or the keys changed: at once, as ever
 
   // The sea the renderer draws, on the CPU: the cascades fading at the shore and crossfading
   // between the keyframes, scaled by the fetch, the ripples by the gusts, the short ones carried by
@@ -463,12 +527,23 @@ bool WaterRuntime::tick() {
   item.field.kind = cvc::physics::field_kind::fluid;
   item.field.volume = box;
   item.field.drag_coefficient = 1.0;
-  item.field.damping = 1.0e4; // a metre-sized body follows the water within a tenth of a second
+  // A metre-sized body heaves with the water within a tenth of a second; sideways the water's
+  // acceleration carries it on the waves and the current, and its drag against the water holds
+  // it while a wind blows it through (field.h, inertial).
+  item.field.damping = 1.0e4;
+  item.field.inertial = true;
   item.field.surface = std::make_shared<cvc::physics::ocean_surface>(d.sea);
+  // C5: the floating bodies' waves push the others (field.h, field_wake), when asked for.
+  if (s.wake_push) {
+    item.field.wake.cells = s.wake_push_cells;
+    item.field.wake.cell = s.wake_push_cell;
+    item.field.wake.depth = s.wake_push_depth;
+  }
   d.field = std::make_shared<const cvc::physics::field>(item.field);
   auto geo = std::make_shared<cvc::world::world_geometry>();
   geo->add_volume(std::move(item));
   d.colliders->geometry = geo;
+  d.colliders->from_tick = from_tick;
   ++d.colliders->revision;
   d.built = spec;
   d.groundData = heights.data();

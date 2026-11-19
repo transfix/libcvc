@@ -57,15 +57,28 @@ struct StoreResult {
 // Parse a URI string. Never fails: a malformed/bare string falls back to scheme "file".
 Uri parse_uri(const std::string &s);
 
+// Asked while a handler's request is in flight, as cvc::net::HttpRequest::cancelled is: once it
+// returns true the handler gives up, an http(s) transfer aborted with "cvc::net: cancelled".
+// Empty: never. A caller whose wait someone else may end (an async call's kernel: its call's
+// cancel_requested()) passes one; a handler that sends no request ignores it.
+using UriCancelled = std::function<bool()>;
+
 // A scheme handler: resolve `u` (its scheme matches the registration), where `base` is the
-// enclosing fragment's canonical location (a directory for file, empty at the top level).
-using UriHandler = std::function<UriResult(const Uri &u, const std::string &base)>;
+// enclosing fragment's canonical location (a directory for file, empty at the top level), and
+// stop when `cancelled` says so.
+using UriHandler =
+    std::function<UriResult(const Uri &u, const std::string &base, const UriCancelled &cancelled)>;
+
+// A handler that sends no request (file, state, cvc), so has nothing to cancel: registered as a
+// UriHandler that ignores `cancelled`.
+using UriLocalHandler = std::function<UriResult(const Uri &u, const std::string &base)>;
 
 // Register (or replace) `app`'s handler for a URI scheme (e.g. "state", "http"). The built-in
 // "file" scheme is always available and need not be registered (a registration for "file"
 // overrides it). Thread-safe; register before load_*. Mirrors the register_scene_node_type /
 // register_ari_block / register_widget_type registries.
 void register_uri_handler(cvc::app &app, const std::string &scheme, UriHandler handler);
+void register_uri_handler(cvc::app &app, const std::string &scheme, UriLocalHandler handler);
 
 // Remove `app`'s handler for a scheme (no-op if none, and a no-op for the built-in "file", which
 // is not in the registry). A host tears down a handler this way before context it captured (other
@@ -100,8 +113,9 @@ cvc_uri_search_dirs(const std::vector<std::string> &extra_search_dirs = {});
 // Resolve `uri` to its bytes with `app`'s resolver. `base` is the enclosing fragment's canonical
 // location (used to resolve a relative file path); pass "" at the top level. Dispatches by scheme:
 // a handler `app` registered, else the built-in "file" handler for file/bare; an unknown scheme
-// yields an error.
-UriResult resolve(cvc::app &app, const std::string &uri, const std::string &base = std::string());
+// yields an error. `cancelled` goes to the handler (UriCancelled).
+UriResult resolve(cvc::app &app, const std::string &uri, const std::string &base = std::string(),
+                  const UriCancelled &cancelled = UriCancelled());
 
 // -------------------------------------------------------------------------------------------------
 // Resolving without blocking (docs/ARIADNE.md 10.2, L4): a scheme's handler may have a second,

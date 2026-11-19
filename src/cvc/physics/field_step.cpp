@@ -17,6 +17,7 @@
 #include <cstring>
 #include <cvc/core/exception.h>
 #include <cvc/volume/volume.h>
+#include <stdexcept>
 #include <string>
 
 namespace cvc {
@@ -28,6 +29,12 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 // Sample cells along a body's longest side.
 constexpr int kCellsAcross = 8;
+// A flow with a wind and no volume (field.h): air of this density over a box this wide.
+constexpr double kAirDensity = 1.225, kEverywhere = 1.0e7;
+// The heights across a body a wind's profile is read at (flow_velocity.h), closer together near
+// the bottom, where a profile over the ground or the water bends most; a cell's is linear between
+// them.
+constexpr int kProfiles = 9;
 
 vec3 cross(const vec3 &a, const vec3 &b) {
   return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
@@ -95,22 +102,38 @@ field_grid grid_of(const cvc::volume &v, const char *what, bool nonnegative) {
   return g;
 }
 
-compiled_field compile(const field &f) {
+// `old`, when given, is the field this one replaces (field_set::set): the same wake is kept.
+compiled_field compile(const field &f, const compiled_field *old = nullptr) {
   need(f.kind <= field_kind::flow, "bad kind");
-  need(f.volume != nullptr, "no volume");
+  need(f.volume != nullptr || (f.kind == field_kind::flow && f.wind),
+       "no volume (only a flow with a wind may have none)");
   need(std::isfinite(f.drag_coefficient) && f.drag_coefficient >= 0.0,
        "drag_coefficient must be finite and >= 0");
   need(std::isfinite(f.damping) && f.damping >= 0.0, "damping must be finite and >= 0");
   need(std::isfinite(f.traction) && f.traction >= 0.0, "traction must be finite and >= 0");
   need(!f.surface || f.kind == field_kind::fluid, "only a fluid has a free surface");
+  need(!f.wind || f.kind == field_kind::flow, "only a flow has a wind");
+  need(!f.inertial || f.kind == field_kind::fluid, "only a fluid is inertial");
+  need(f.wake.cells >= 0, "wake.cells must be 0 (no wake) or a power of two in 8 .. 256");
+  need(!f.wake.on() || (f.kind == field_kind::fluid && f.surface),
+       "only a fluid with a free surface has a wake");
   const int components =
       (f.velocity[0] ? 1 : 0) + (f.velocity[1] ? 1 : 0) + (f.velocity[2] ? 1 : 0);
   need(components == 0 || components == 3, "give all three velocity components or none");
   compiled_field c;
   c.desc = f;
-  c.scalar = grid_of(
-      *f.volume, f.kind == field_kind::medium ? "the bearing modulus volume" : "the density volume",
-      true);
+  if (f.volume) {
+    c.scalar = grid_of(
+        *f.volume,
+        f.kind == field_kind::medium ? "the bearing modulus volume" : "the density volume", true);
+  } else { // a wind without a volume: air at sea level's density, everywhere (field.h)
+    for (int k = 0; k < 3; ++k) {
+      c.scalar.n[k] = 1;
+      c.scalar.lo[k] = -kEverywhere;
+      c.scalar.hi[k] = kEverywhere;
+    }
+    c.scalar.values.assign(1, kAirDensity);
+  }
   c.moving = components == 3;
   if (c.moving)
     for (int k = 0; k < 3; ++k)
@@ -128,7 +151,106 @@ compiled_field compile(const field &f) {
     c.ruts.rows = std::max(1, static_cast<int>(rows));
     c.ruts.depth.assign(static_cast<std::size_t>(c.ruts.cols) * c.ruts.rows, 0.0f);
   }
+  // The wake: the old field's when it is the same wake (its waves under a new sea); else a new one,
+  // its parameters checked here (the step gives it the world's gravity).
+  if (f.wake.on() && old && old->wake && old->desc.wake == f.wake)
+    c.wake = old->wake;
+  else if (f.wake.on())
+    c.wake = std::make_shared<fluid_wake>(f.wake, 9.80665);
   return c;
+}
+
+// A body's view of a fluid's wake: the others' waves (fluid_wake::sample less its own state).
+struct wake_view {
+  const fluid_wake *wake = nullptr;
+  int own = -1;
+  void sample(double x, double y, wake_sample &out) const { wake->sample(own, x, y, out); }
+};
+
+// What one cell reads of a field: whether any of it is in the stuff (immersed, the stuff's value
+// there > 0), and then the immersed part's centre, its share of the cell, the value and the
+// stuff's velocity there. A pure function of its arguments (a surface's reads are, and its memo
+// is the cell's own), so cells can be read in any order and on any thread.
+struct cell_read {
+  bool in = false;
+  double p[3] = {0.0, 0.0, 0.0};
+  double f = 0.0;
+  double value = 0.0;
+  vec3 w;
+};
+
+// A flow's wind over one body (flow_velocity.h): its reference at the body's centre of mass, since
+// the gusts vary over tens of metres, and its profile at kProfiles heights from its base (or the
+// body's bottom) to the body's top, spaced as the squares. Made once per body and field, so the
+// wind costs O(bodies) a step; at() is the reference times the profile at a cell's height.
+struct body_wind {
+  vec3 reference;
+  double floor = 0.0; // the air starts here: the wind's base
+  double z0 = 0.0, span = 0.0;
+  double z[kProfiles] = {}, prof[kProfiles] = {};
+  vec3 at(double pz) const {
+    const double u = std::min(std::max((pz - z0) / span, 0.0), 1.0);
+    const int j = std::min(static_cast<int>((kProfiles - 1) * std::sqrt(u)), kProfiles - 2);
+    const double gap = z[j + 1] - z[j];
+    const double fr = gap > 0.0 ? std::min(std::max((pz - z[j]) / gap, 0.0), 1.0) : 0.0;
+    return reference * (prof[j] + (prof[j + 1] - prof[j]) * fr);
+  }
+};
+
+cell_read read_cell(const vec3 &local, const body_state &s, const mat3 &r, const double ext[3],
+                    const compiled_field &cf, const fluid_surface *surface, double t,
+                    const body_wind *wind = nullptr, const wake_view *wake = nullptr) {
+  cell_read out;
+  const vec3 c = s.position + r * local;
+  // The immersed part of the cell: its world box clipped to the field's, and below a free
+  // surface's height over the clipped centre (x and y come first), the others' waves on it with a
+  // wake. The velocity below is read at that centre too, so the two reads share the cell's memo.
+  surface_memo memo;
+  wake_sample ws;
+  double p[3], f = 1.0;
+  bool in = true;
+  for (int k = 0; k < 3 && in; ++k) {
+    double top = cf.scalar.hi[k];
+    if (k == 2 && surface) {
+      double sh = surface->height_with(p[0], p[1], t, memo);
+      if (wake) {
+        wake->sample(p[0], p[1], ws);
+        sh += ws.h;
+      }
+      top = std::min(top, sh);
+    }
+    double bottom = cf.scalar.lo[k];
+    if (k == 2 && wind) // the air starts at the wind's base
+      bottom = std::max(bottom, wind->floor);
+    const double lo = std::max(component(c, k) - ext[k], bottom);
+    const double hi = std::min(component(c, k) + ext[k], top);
+    in = hi > lo;
+    p[k] = 0.5 * (lo + hi);
+    f *= (hi - lo) / (2.0 * ext[k]);
+  }
+  if (!in)
+    return out;
+  const double value = cf.scalar.at(p);
+  if (!(value > 0.0))
+    return out;
+  out.in = true;
+  out.p[0] = p[0];
+  out.p[1] = p[1];
+  out.p[2] = p[2];
+  out.f = f;
+  out.value = value;
+  const vec3 at{p[0], p[1], p[2]};
+  if (surface) {
+    out.w = surface->velocity_with(at, t, memo);
+    if (wake) // the others' waves' surface velocity, at every depth (what it pushes floats)
+      out.w = out.w + vec3{ws.u, ws.v, ws.w};
+  } else if (wind) // the body's wind, times its profile at the cell's height
+    out.w = wind->at(p[2]);
+  else if (cf.moving)
+    out.w = {cf.velocity[0].contains(p) ? cf.velocity[0].at(p) : 0.0,
+             cf.velocity[1].contains(p) ? cf.velocity[1].at(p) : 0.0,
+             cf.velocity[2].contains(p) ? cf.velocity[2].at(p) : 0.0};
+  return out;
 }
 
 // The world box of a body's cells, from its state.
@@ -286,21 +408,30 @@ struct push_sums {
 // `depth` are scratch, one per vertex; `wet` collects each triangle's submerged area.
 void push_hull(const field_body &fb, const body_state &s, const mat3 &r, const vec3 &com,
                const compiled_field &cf, double gn, double dt, double t, std::vector<vec3> &world_v,
-               std::vector<double> &depth, std::vector<double> &wet, push_sums &sum) {
+               std::vector<double> &depth, std::vector<double> &wet, push_sums &sum,
+               const wake_view *wake) {
   const hull_mesh &h = *fb.hull.desc;
   const field_grid &box = cf.scalar;
   const fluid_surface *surface = cf.desc.surface.get();
   const std::size_t nv = h.vertices.size();
   world_v.resize(nv);
   depth.resize(nv);
-  // The water's top over each vertex, once: the surface's height or the box's top.
+  wake_sample ws;
+  // The water's top over each vertex, once: the surface's height (and the others' waves on it,
+  // with a wake) or the box's top.
   for (std::size_t i = 0; i < nv; ++i) {
     const vec3 p = s.position + r * h.vertices[i];
     world_v[i] = p;
     if (p.x >= box.lo[0] && p.x <= box.hi[0] && p.y >= box.lo[1] && p.y <= box.hi[1]) {
       double top = box.hi[2];
-      if (surface)
-        top = std::min(top, surface->height(p.x, p.y, t));
+      if (surface) {
+        double sh = surface->height(p.x, p.y, t);
+        if (wake) {
+          wake->sample(p.x, p.y, ws);
+          sh += ws.h;
+        }
+        top = std::min(top, sh);
+      }
       depth[i] = top - p.z;
     } else {
       depth[i] = -1.0; // outside the field's box: dry
@@ -379,9 +510,13 @@ void push_hull(const field_body &fb, const body_state &s, const mat3 &r, const v
 
     // The velocity terms, against the water's velocity at the submerged part's centroid.
     vec3 w;
-    if (surface)
+    if (surface) {
       w = surface->velocity(at, t);
-    else if (cf.moving)
+      if (wake) {
+        wake->sample(at.x, at.y, ws);
+        w = w + vec3{ws.u, ws.v, ws.w};
+      }
+    } else if (cf.moving)
       w = {cf.velocity[0].contains(q) ? cf.velocity[0].at(q) : 0.0,
            cf.velocity[1].contains(q) ? cf.velocity[1].at(q) : 0.0,
            cf.velocity[2].contains(q) ? cf.velocity[2].at(q) : 0.0};
@@ -493,7 +628,7 @@ field_id field_set::add(world_backend &be, const field &f) {
 void field_set::set(world_backend &be, field_id id, const field &f) {
   auto it = _fields.find(id.value);
   need(it != _fields.end(), "unknown or removed field id " + std::to_string(id.value));
-  compiled_field c = compile(f);
+  compiled_field c = compile(f, &it->second); // the same wake keeps its waves (compile)
   const rut_map &old = it->second.ruts;
   if (!c.ruts.depth.empty() && c.ruts.x0 == old.x0 && c.ruts.y0 == old.y0 &&
       c.ruts.cell == old.cell && c.ruts.cols == old.cols && c.ruts.rows == old.rows) {
@@ -570,6 +705,10 @@ void field_set::body_added(const world_backend &be, body_id id, const body_desc 
   }
   if (fb.cells.empty() || !(fb.volume > 0.0))
     return;
+  // A wake cuts its hull, else its shape (outline_of): a convex hull keeps its points for that, a
+  // box or a sphere needs only `half` or `radius`.
+  if (!d.hull && fb.shape == field_body::outline::other)
+    fb.cut_shape = std::make_shared<const physics::shape>(d.shape);
   fb.cell_volume = fb.volume / static_cast<double>(fb.cells.size());
   fb.mass = d.mass > 0.0 ? d.mass : d.density * fb.volume;
   bounds_of(fb);
@@ -622,15 +761,16 @@ void field_set::wake_in(world_backend &be, const field_grid &box) {
   }
 }
 
-void field_set::mark_vehicle(body_id id, const vec3 &center_of_mass) {
+void field_set::mark_vehicle(body_id id, const vec3 &center_of_mass, double buoyancy) {
   auto it = _bodies.find(id.value);
   if (it == _bodies.end())
     return;
   it->second.vehicle = true;
   it->second.center_of_mass = center_of_mass;
+  it->second.buoyancy = buoyancy;
 }
 
-bool field_set::air_at(const vec3 &p, double &rho, vec3 &wind) const {
+bool field_set::air_at(const vec3 &p, double t, double &rho, vec3 &wind) const {
   const double q[3] = {p.x, p.y, p.z};
   for (const auto &fe : _fields) {
     const compiled_field &cf = fe.second;
@@ -638,7 +778,9 @@ bool field_set::air_at(const vec3 &p, double &rho, vec3 &wind) const {
       continue;
     rho = cf.scalar.at(q);
     wind = vec3{};
-    if (cf.moving)
+    if (cf.desc.wind)
+      wind = cf.desc.wind->velocity(p, t);
+    else if (cf.moving)
       wind = {cf.velocity[0].contains(q) ? cf.velocity[0].at(q) : 0.0,
               cf.velocity[1].contains(q) ? cf.velocity[1].at(q) : 0.0,
               cf.velocity[2].contains(q) ? cf.velocity[2].at(q) : 0.0};
@@ -718,17 +860,37 @@ rut_map field_set::ruts(field_id id) const {
 
 bool field_set::has_surfaces() const {
   for (const auto &fe : _fields)
-    if (fe.second.desc.surface)
+    if (fe.second.desc.surface || fe.second.desc.wind)
       return true;
   return false;
 }
 
+namespace {
+// A field's time-dependent hook as (id, digest): a fluid's surface, or a flow's wind (a field has
+// at most one). A wind's id carries the top bit, so a surface and a wind never read as each other.
+constexpr std::uint32_t kWindTag = 0x80000000u;
+bool hook_of(const compiled_field &cf, std::uint32_t field, std::uint32_t &id,
+             std::uint64_t &digest) {
+  if (cf.desc.surface) {
+    id = field;
+    digest = cf.desc.surface->digest();
+    return true;
+  }
+  if (cf.desc.wind) {
+    id = field | kWindTag;
+    digest = cf.desc.wind->digest();
+    return true;
+  }
+  return false;
+}
+} // namespace
+
 void field_set::save_surfaces(std::string &out) const {
   for (const auto &fe : _fields) {
-    if (!fe.second.desc.surface)
+    std::uint32_t id = 0;
+    std::uint64_t digest = 0;
+    if (!hook_of(fe.second, fe.first, id, digest))
       continue;
-    const std::uint32_t id = fe.first;
-    const std::uint64_t digest = fe.second.desc.surface->digest();
     out.append(reinterpret_cast<const char *>(&id), sizeof(id));
     out.append(reinterpret_cast<const char *>(&digest), sizeof(digest));
   }
@@ -736,7 +898,9 @@ void field_set::save_surfaces(std::string &out) const {
 
 void field_set::check_surfaces(const std::string &in, std::size_t &pos) const {
   for (const auto &fe : _fields) {
-    if (!fe.second.desc.surface)
+    std::uint32_t want_id = 0;
+    std::uint64_t want = 0;
+    if (!hook_of(fe.second, fe.first, want_id, want))
       continue;
     std::uint32_t id = 0;
     std::uint64_t digest = 0;
@@ -744,8 +908,9 @@ void field_set::check_surfaces(const std::string &in, std::size_t &pos) const {
       throw cvc::physics_error("restore: the free-surface state is truncated");
     std::memcpy(&id, in.data() + pos, sizeof(id));
     std::memcpy(&digest, in.data() + pos + sizeof(id), sizeof(digest));
-    if (id != fe.first || digest != fe.second.desc.surface->digest())
-      throw cvc::physics_error("restore: this world's free surfaces differ from the state's");
+    if (id != want_id || digest != want)
+      throw cvc::physics_error("restore: this world's free surfaces or winds differ from the "
+                               "state's");
     pos += sizeof(id) + sizeof(digest);
   }
 }
@@ -798,6 +963,162 @@ void field_set::restore_hulls(const std::string &in, std::size_t &pos) {
     pos += sizeof(std::uint32_t) + 2 * sizeof(std::uint64_t);
     std::memcpy(h.wetted.data(), in.data() + pos, h.wetted.size() * sizeof(double));
     pos += h.wetted.size() * sizeof(double);
+  }
+}
+
+bool field_set::has_wakes() const {
+  for (const auto &fe : _fields)
+    if (fe.second.wake)
+      return true;
+  return false;
+}
+
+namespace {
+// A wake's parameters as its section of save() records them, each one, so a world with any other
+// wake refuses the state.
+void put_wake_params(std::string &out, const field_wake &p) {
+  const std::int32_t ints[3] = {p.cells, p.samples, p.sources};
+  const double reals[7] = {p.cell,    p.depth,        p.period,     p.damping_k2,
+                           p.damping, p.sponge_cells, p.sponge_rate};
+  out.append(reinterpret_cast<const char *>(ints), sizeof(ints));
+  out.append(reinterpret_cast<const char *>(reals), sizeof(reals));
+}
+bool get_wake_params(const std::string &in, std::size_t &pos, field_wake &p) {
+  std::int32_t ints[3];
+  double reals[7];
+  if (pos > in.size() || sizeof(ints) + sizeof(reals) > in.size() - pos)
+    return false;
+  std::memcpy(ints, in.data() + pos, sizeof(ints));
+  std::memcpy(reals, in.data() + pos + sizeof(ints), sizeof(reals));
+  pos += sizeof(ints) + sizeof(reals);
+  p.cells = ints[0];
+  p.samples = ints[1];
+  p.sources = ints[2];
+  p.cell = reals[0];
+  p.depth = reals[1];
+  p.period = reals[2];
+  p.damping_k2 = reals[3];
+  p.damping = reals[4];
+  p.sponge_cells = reals[5];
+  p.sponge_rate = reals[6];
+  return true;
+}
+} // namespace
+
+void field_set::save_wakes(std::string &out) const {
+  for (const auto &fe : _fields) {
+    if (!fe.second.wake)
+      continue;
+    const std::uint32_t id = fe.first;
+    out.append(reinterpret_cast<const char *>(&id), sizeof(id));
+    put_wake_params(out, fe.second.desc.wake);
+    fe.second.wake->save(out);
+  }
+}
+
+void field_set::restore_wakes(const std::string &in, std::size_t &pos) {
+  // Every wake read whole first, then all taken: a state that fails part-way changes no wake.
+  std::vector<std::pair<fluid_wake *, std::shared_ptr<fluid_wake::saved>>> read;
+  for (const auto &fe : _fields) {
+    if (!fe.second.wake)
+      continue;
+    std::uint32_t id = 0;
+    field_wake p;
+    if (pos > in.size() || sizeof(id) > in.size() - pos)
+      throw cvc::physics_error("restore: the wakes' state is truncated");
+    std::memcpy(&id, in.data() + pos, sizeof(id));
+    pos += sizeof(id);
+    if (!get_wake_params(in, pos, p))
+      throw cvc::physics_error("restore: the wakes' state is truncated");
+    if (id != fe.first || p != fe.second.desc.wake)
+      throw cvc::physics_error("restore: this world's wakes differ from the state's");
+    read.emplace_back(fe.second.wake.get(), fe.second.wake->parse(in, pos));
+  }
+  for (auto &r : read)
+    r.first->commit(*r.second);
+}
+
+wake_info field_set::wake(field_id id) const {
+  const auto it = _fields.find(id.value);
+  need(it != _fields.end(), "unknown or removed field id " + std::to_string(id.value));
+  return it->second.wake ? it->second.wake->info() : wake_info{};
+}
+
+double field_set::wake_height(field_id id, double x, double y) const {
+  const auto it = _fields.find(id.value);
+  need(it != _fields.end(), "unknown or removed field id " + std::to_string(id.value));
+  if (!it->second.wake)
+    return 0.0;
+  wake_sample ws;
+  it->second.wake->sample(-1, x, y, ws);
+  return ws.h;
+}
+
+const immersion_body *field_set::outline_of(field_body &fb) {
+  if (!fb.cut_tried) {
+    fb.cut_tried = true;
+    try {
+      if (fb.hull.desc)
+        fb.cut = std::make_shared<const immersion_body>(*fb.hull.desc);
+      else if (fb.shape == field_body::outline::box)
+        fb.cut = std::make_shared<const immersion_body>(physics::shape{box{fb.half}});
+      else if (fb.shape == field_body::outline::sphere)
+        fb.cut = std::make_shared<const immersion_body>(physics::shape{sphere{fb.radius}});
+      else if (fb.cut_shape)
+        fb.cut = std::make_shared<const immersion_body>(*fb.cut_shape);
+    } catch (const std::invalid_argument &) {
+      fb.cut.reset(); // an outline the columns cannot cut: it makes no waves
+    }
+    fb.cut_shape.reset();
+  }
+  return fb.cut.get();
+}
+
+void field_set::advance_wakes(
+    world_backend &be, const world_config &cfg, double t, double gravity,
+    const std::function<const fluid_surface *(const compiled_field &)> &held) {
+  // Every body the fields record, awake or asleep, where it is now: in id order. Read only at the
+  // steps the waves step at.
+  std::vector<wake_body> bodies;
+  std::vector<std::uint32_t> wake_up;
+  for (auto &fe : _fields) {
+    compiled_field &cf = fe.second;
+    double dt = 0.0;
+    if (!cf.wake || !cf.wake->begin_step(cfg.fixed_dt, dt))
+      continue;
+    cf.wake->set_gravity(gravity);
+    const field_grid &box = cf.scalar;
+    if (bodies.empty() && !_bodies.empty()) {
+      bodies.reserve(_bodies.size());
+      for (auto &entry : _bodies) {
+        body_id id;
+        id.value = entry.first;
+        const body_state s = be.state(id);
+        wake_body b;
+        b.id = entry.first;
+        b.position = s.position;
+        b.rotation = s.rotation;
+        b.hull = entry.second.hull.desc != nullptr;
+        b.active = s.active;
+        body_box(entry.second, s, b.lo, b.hi);
+        bodies.push_back(b);
+      }
+    }
+    std::size_t k = 0;
+    for (auto &entry : _bodies) {
+      wake_body &b = bodies[k++];
+      b.over = overlaps(b.lo, b.hi, box);
+      b.in_water = false;
+      b.outline = b.over ? outline_of(entry.second) : nullptr;
+    }
+    cf.wake->advance(
+        bodies, {box.lo[0], box.lo[1], box.lo[2]}, {box.hi[0], box.hi[1], box.hi[2]},
+        [&]() { return held(cf); }, t, dt, wake_up);
+  }
+  for (const std::uint32_t v : wake_up) {
+    body_id id;
+    id.value = v;
+    be.wake(id);
   }
 }
 
@@ -902,6 +1223,82 @@ bool field_set::medium_under(const vec3 &p, wheel_medium &out) const {
   return found;
 }
 
+// ── field_workers ──
+
+field_workers::field_workers(int threads) : _wanted(threads) {
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+  threads = 0; // no threads in this build: run() runs every index here
+#endif
+  for (int i = 0; i < threads; ++i)
+    _threads.emplace_back([this] { loop(); });
+}
+
+field_workers::~field_workers() {
+  {
+    std::lock_guard<std::mutex> lock(_m);
+    _stop = true;
+  }
+  _go.notify_all();
+  for (std::thread &th : _threads)
+    th.join();
+}
+
+void field_workers::work() {
+  for (std::size_t i; (i = _next.fetch_add(1)) < _n;) {
+    try {
+      (*_fn)(i);
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(_m);
+      if (!_error)
+        _error = std::current_exception();
+    }
+  }
+}
+
+void field_workers::loop() {
+  std::uint64_t seen = 0;
+  for (;;) {
+    {
+      std::unique_lock<std::mutex> lock(_m);
+      _go.wait(lock, [&] { return _stop || _generation != seen; });
+      if (_stop)
+        return;
+      seen = _generation;
+    }
+    work();
+    std::lock_guard<std::mutex> lock(_m);
+    if (--_busy == 0)
+      _done.notify_one();
+  }
+}
+
+void field_workers::run(std::size_t n, const std::function<void(std::size_t)> &fn) {
+  if (_threads.empty() || n < 2) {
+    for (std::size_t i = 0; i < n; ++i)
+      fn(i);
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> lock(_m);
+    _fn = &fn;
+    _n = n;
+    _next.store(0);
+    _error = nullptr;
+    _busy = static_cast<int>(_threads.size());
+    ++_generation;
+  }
+  _go.notify_all();
+  work(); // this thread takes indices too
+  std::unique_lock<std::mutex> lock(_m);
+  _done.wait(lock, [&] { return _busy == 0; });
+  _fn = nullptr;
+  if (_error) {
+    std::exception_ptr e = _error;
+    _error = nullptr;
+    std::rethrow_exception(e);
+  }
+}
+
 field_load field_set::load(body_id id) const {
   const auto it = _bodies.find(id.value);
   return it == _bodies.end() ? field_load{} : it->second.load;
@@ -919,25 +1316,130 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
   std::vector<double> depth; // its triangles' submerged areas this step
   std::vector<double> wet;
 
-  for (auto &entry : _bodies) {
+  // The awake bodies and where they are now, read once, in id order.
+  struct placed {
     body_id id;
-    id.value = entry.first;
-    field_body &fb = entry.second;
-    const body_state s = be.state(id);
-    if (!s.active)
-      continue;
-    const mat3 r = rotation(s.rotation);
-    const vec3 com = s.position + r * fb.center_of_mass;
-    // A cell's world box: the box around the rotated cell.
-    const vec3 e = r.abs_times(fb.cell * 0.5);
-    const double ext[3] = {e.x, e.y, e.z};
+    field_body *fb = nullptr;
+    body_state s;
+    mat3 r;
+    double ext[3]; // a cell's world box: the box around the rotated cell
     double blo[3], bhi[3];
-    body_box(fb, s, blo, bhi);
+  };
+  std::vector<placed> awake;
+  awake.reserve(_bodies.size());
+  for (auto &entry : _bodies) {
+    placed pb;
+    pb.id.value = entry.first;
+    pb.fb = &entry.second;
+    pb.s = be.state(pb.id);
+    if (!pb.s.active)
+      continue;
+    pb.r = rotation(pb.s.rotation);
+    const vec3 e = pb.r.abs_times(pb.fb->cell * 0.5);
+    pb.ext[0] = e.x;
+    pb.ext[1] = e.y;
+    pb.ext[2] = e.z;
+    body_box(*pb.fb, pb.s, pb.blo, pb.bhi);
+    awake.push_back(pb);
+  }
+
+  // Each field's surface held at t (fluid_surface::at: its per-time work done as tasks of the field
+  // workers), made once a step as first needed, by a wake or by the cells' reads below.
+  std::vector<std::pair<const compiled_field *, std::shared_ptr<const fluid_surface>>> held;
+  fluid_surface::parallel_run par; // the workers, once some read needs a surface
+  const auto held_of = [&](const compiled_field &cf) -> const fluid_surface * {
+    const fluid_surface *own = cf.desc.surface.get();
+    for (const auto &h : held)
+      if (h.first == &cf)
+        return h.second ? h.second.get() : own;
+    if (!par) {
+      if (!_workers || _workers->threads() != cfg.field_threads)
+        _workers = std::make_unique<field_workers>(cfg.field_threads);
+      par = [this](std::size_t n, const std::function<void(std::size_t)> &fn) {
+        _workers->run(n, fn);
+      };
+    }
+    held.emplace_back(&cf, own->at(t, par)); // its per-time work, as tasks for the workers
+    return held.back().second ? held.back().second.get() : own;
+  };
+
+  // The wakes (field::wake): their waves move on and the bodies' sources go in, before the reads.
+  for (const auto &fe : _fields)
+    if (fe.second.wake) {
+      advance_wakes(be, cfg, t, gn, held_of);
+      break;
+    }
+  // What body `id` reads of field `cf`'s wake: the others' waves (none without a wake).
+  const auto view_of = [](const compiled_field &cf, body_id id) {
+    wake_view v;
+    if (cf.wake) {
+      v.wake = cf.wake.get();
+      v.own = cf.wake->own(id.value);
+    }
+    return v;
+  };
+
+  // The cells' reads of free surfaces, first: each cell's (read_cell) into its own slot, on the
+  // field workers when world_config::field_threads asks for them. The sums below take them in the
+  // cells' order, so the same values add up in the same order with or without workers.
+  struct surface_cells {
+    std::size_t body; // in awake
+    const compiled_field *cf;
+    std::size_t first;       // its first cell's slot in reads
+    const fluid_surface *at; // the surface at t, held (fluid_surface::at), or the field's own
+    wake_view wake;          // the others' waves, with a wake
+  };
+  std::vector<surface_cells> runs;
+  std::vector<cell_read> reads;
+  for (std::size_t bi = 0; bi < awake.size(); ++bi) {
+    const placed &pb = awake[bi];
+    if (pb.fb->hull.desc != nullptr)
+      continue; // a hull's triangles take the fluids' push (push_hull)
+    for (const auto &fe : _fields) {
+      const compiled_field &cf = fe.second; // a surface is a fluid's (compile)
+      if (!cf.desc.surface || !overlaps(pb.blo, pb.bhi, cf.scalar))
+        continue;
+      runs.push_back({bi, &cf, reads.size(), held_of(cf), view_of(cf, pb.id)});
+      reads.resize(reads.size() + pb.fb->cells.size());
+    }
+  }
+  if (!reads.empty()) {
+    constexpr std::size_t kChunk = 32;
+    _workers->run((reads.size() + kChunk - 1) / kChunk, [&](std::size_t k) {
+      const std::size_t i0 = k * kChunk, i1 = std::min(reads.size(), i0 + kChunk);
+      std::size_t ri = std::size_t(std::upper_bound(runs.begin(), runs.end(), i0,
+                                                    [](std::size_t i, const surface_cells &sc) {
+                                                      return i < sc.first;
+                                                    }) -
+                                   runs.begin()) -
+                       1;
+      for (std::size_t i = i0; i < i1; ++i) {
+        while (ri + 1 < runs.size() && i >= runs[ri + 1].first)
+          ++ri;
+        const surface_cells &sc = runs[ri];
+        const placed &pb = awake[sc.body];
+        reads[i] = read_cell(pb.fb->cells[i - sc.first], pb.s, pb.r, pb.ext, *sc.cf, sc.at, t,
+                             nullptr, sc.wake.wake ? &sc.wake : nullptr);
+      }
+    });
+  }
+
+  std::size_t run_at = 0;
+  for (std::size_t bi = 0; bi < awake.size(); ++bi) {
+    const placed &pb = awake[bi];
+    const body_id id = pb.id;
+    field_body &fb = *pb.fb;
+    const body_state &s = pb.s;
+    const mat3 &r = pb.r;
+    const vec3 com = s.position + r * fb.center_of_mass;
+    const double *ext = pb.ext;
 
     // Buoyancy and support (push) apart from drag and damping, which are scaled
     // for stability below.
     vec3 push_f, push_t, drag_f, drag_t;
     double rate = 0.0, immersed = 0.0;
+    double rate_heave = 0.0; // the part of rate an inertial fluid's damping gives the vertical
+    bool felt = false;       // a field pushed on one of its cells
     // A hull's triangles take the fluids' push in place of the cells (hull.h).
     const bool hull = fb.hull.desc != nullptr;
     push_sums hs;
@@ -947,64 +1449,85 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
       const compiled_field &cf = fe.second;
       if (fb.vehicle && cf.desc.kind == field_kind::flow)
         continue; // a vehicle's aero is its drag (vehicle.h)
-      if (!overlaps(blo, bhi, cf.scalar))
+      if (!overlaps(pb.blo, pb.bhi, cf.scalar))
         continue;
+      const wake_view view = view_of(cf, id);
+      const wake_view *wv = view.wake ? &view : nullptr;
       if (hull && cf.desc.kind == field_kind::fluid) {
-        push_hull(fb, s, r, com, cf, gn, cfg.fixed_dt, t, world_v, depth, wet, hs);
+        push_hull(fb, s, r, com, cf, gn, cfg.fixed_dt, t, world_v, depth, wet, hs, wv);
         continue;
       }
-      const fluid_surface *surface = cf.desc.surface.get();
-      for (const vec3 &local : fb.cells) {
-        const vec3 c = s.position + r * local;
-        // The immersed part of the cell: its world box clipped to the field's, and below a
-        // free surface's height over the clipped centre (x and y come first). The velocity
-        // below is read at that centre too, so the two reads share the cell's memo.
-        surface_memo memo;
-        double p[3], f = 1.0;
-        bool in = true;
-        for (int k = 0; k < 3 && in; ++k) {
-          double top = cf.scalar.hi[k];
-          if (k == 2 && surface)
-            top = std::min(top, surface->height_with(p[0], p[1], t, memo));
-          const double lo = std::max(component(c, k) - ext[k], cf.scalar.lo[k]);
-          const double hi = std::min(component(c, k) + ext[k], top);
-          in = hi > lo;
-          p[k] = 0.5 * (lo + hi);
-          f *= (hi - lo) / (2.0 * ext[k]);
+      // A flow's wind, once per body (body_wind, flow_velocity.h).
+      const flow_velocity *wind = cf.desc.wind.get();
+      body_wind bw;
+      if (wind) {
+        bw.floor = wind->base();
+        const double zlo = std::max(pb.blo[2], bw.floor);
+        if (!(pb.bhi[2] > zlo))
+          continue; // all of the body is below the air (under the water or the ground)
+        bw.reference = wind->reference(com, t);
+        bw.z0 = zlo;
+        bw.span = pb.bhi[2] - zlo;
+        for (int j = 0; j < kProfiles; ++j) {
+          const double sj = static_cast<double>(j) / (kProfiles - 1);
+          bw.z[j] = zlo + bw.span * sj * sj;
+          bw.prof[j] = wind->profile(bw.z[j]);
         }
-        if (!in)
+      }
+      const fluid_surface *surface = cf.desc.surface.get();
+      // An inertial fluid (field.h): its damping on the vertical only, and the water's
+      // acceleration over the immersed part, from its displaced mass and centroid.
+      const bool inertial = cf.desc.inertial && cf.desc.kind == field_kind::fluid;
+      double displaced = 0.0; // kg of water the body displaces in this field
+      vec3 displaced_at;      // their moment, kg m
+      // The cells' reads: done above for a free surface (a fluid's, never a wind's), else here.
+      const cell_read *pre = nullptr;
+      if (run_at < runs.size() && runs[run_at].body == bi && runs[run_at].cf == &cf)
+        pre = reads.data() + runs[run_at++].first;
+      for (std::size_t ci = 0; ci < fb.cells.size(); ++ci) {
+        const cell_read cr = pre ? pre[ci]
+                                 : read_cell(fb.cells[ci], s, r, ext, cf, cf.desc.surface.get(), t,
+                                             wind ? &bw : nullptr, wv);
+        if (!cr.in)
           continue;
-        const double value = cf.scalar.at(p);
-        if (!(value > 0.0))
-          continue;
-        const double fv = f * fb.cell_volume;
-        const vec3 at{p[0], p[1], p[2]};
+        const double fv = cr.f * fb.cell_volume;
+        const vec3 at{cr.p[0], cr.p[1], cr.p[2]};
         const vec3 arm = at - com;
-        immersed += fv;
+        felt = true;
+        if (!wind) // a body is not immersed in the air
+          immersed += fv;
 
         if (cf.desc.kind == field_kind::fluid) {
-          const vec3 b = g * (-value * fv);
+          // A flooded chassis displaces only its share (vehicle.h's wading; 1 otherwise).
+          const vec3 b = g * (-cr.value * fv * fb.buoyancy);
           push_f = push_f + b;
           push_t = push_t + cross(arm, b);
+          if (inertial) {
+            displaced += cr.value * fv * fb.buoyancy;
+            displaced_at = displaced_at + at * (cr.value * fv * fb.buoyancy);
+          }
         } else if (cf.desc.kind == field_kind::medium) {
-          const vec3 b = up * (value * fv);
+          const vec3 b = up * (cr.value * fv);
           push_f = push_f + b;
           push_t = push_t + cross(arm, b);
         }
 
-        vec3 w;
-        if (surface)
-          w = surface->velocity_with(at, t, memo);
-        else if (cf.moving)
-          w = {cf.velocity[0].contains(p) ? cf.velocity[0].at(p) : 0.0,
-               cf.velocity[1].contains(p) ? cf.velocity[1].at(p) : 0.0,
-               cf.velocity[2].contains(p) ? cf.velocity[2].at(p) : 0.0};
-        const vec3 u = w - (s.linear_velocity + cross(s.angular_velocity, arm));
+        const vec3 u = cr.w - (s.linear_velocity + cross(s.angular_velocity, arm));
         double c_i = cf.desc.damping * fv; // kg/s: the force is c_i u
+        if (inertial) {                    // the damping on the vertical only
+          if (c_i > 0.0) {
+            const vec3 d{0.0, 0.0, u.z * c_i};
+            drag_f = drag_f + d;
+            drag_t = drag_t + cross(arm, d);
+            rate += c_i;
+            rate_heave += c_i;
+          }
+          c_i = 0.0;
+        }
         if (cf.desc.kind != field_kind::medium) {
           const double speed = norm(u);
           if (speed > 0.0)
-            c_i += 0.5 * value * cf.desc.drag_coefficient *
+            c_i += 0.5 * cr.value * cf.desc.drag_coefficient *
                    area_across(fb, r.inverse(u * (1.0 / speed))) * (fv / fb.volume) * speed;
         }
         if (c_i > 0.0) {
@@ -1014,10 +1537,27 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
           rate += c_i;
         }
       }
+      // The water's acceleration pushes what it holds (Froude-Krylov): rho V du/dt sideways at
+      // the immersed part's centroid, du/dt the water's velocity a step either side.
+      if (inertial && displaced > 0.0 && surface) {
+        const vec3 at = displaced_at * (1.0 / displaced);
+        const double h = cfg.fixed_dt;
+        const vec3 dudt =
+            (surface->velocity(at, t + h) - surface->velocity(at, t - h)) * (1.0 / (2.0 * h));
+        vec3 fk{displaced * dudt.x, displaced * dudt.y, 0.0};
+        if (wv) { // and the others' waves': du/dt = grad(dphi/dt) = -g grad h at the surface
+          wake_sample ws;
+          wv->sample(at.x, at.y, ws);
+          fk.x += displaced * (-gn * ws.gx);
+          fk.y += displaced * (-gn * ws.gy);
+        }
+        push_f = push_f + fk;
+        push_t = push_t + cross(at - com, fk);
+      }
     }
     if (hull) {
       fb.hull.wetted.swap(wet);
-      if (!hs.wet && !(immersed > 0.0))
+      if (!hs.wet && !felt)
         continue;
       push_f = push_f + hs.push_f;
       push_t = push_t + hs.push_t;
@@ -1025,7 +1565,7 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
       drag_t = drag_t + hs.drag_t;
       rate += hs.rate;
       immersed += hs.immersed;
-    } else if (!(immersed > 0.0)) {
+    } else if (!felt) {
       continue;
     }
     // Drag integrated implicitly in its own rate: a step never carries the body
@@ -1040,11 +1580,13 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
     }
     field_load load;
     load.force = push_f + drag_f * k;
-    if (hull && hs.rate_heave > 0.0) {
-      // A hull's damping acts on vertical motion only, so the horizontal drag is scaled in the
-      // rate without it: the damping does not slow a towed hull. Each axis still stops short of
-      // the water's velocity, since only z carries the damping's force.
-      const double xh = (rate - hs.rate_heave) * cfg.fixed_dt / fb.mass;
+    const double heave = (hull ? hs.rate_heave : 0.0) + rate_heave;
+    if (heave > 0.0) {
+      // A hull's damping, and an inertial fluid's, acts on vertical motion only, so the
+      // horizontal drag is scaled in the rate without it: the damping does not slow a towed hull
+      // or a drifting crate. Each axis still stops short of the water's velocity, since only z
+      // carries the damping's force.
+      const double xh = (rate - heave) * cfg.fixed_dt / fb.mass;
       const double kh = xh > 1e-9 ? -det::expm1(-xh) / xh : 1.0;
       load.force.x = push_f.x + drag_f.x * kh;
       load.force.y = push_f.y + drag_f.y * kh;

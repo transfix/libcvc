@@ -34,11 +34,13 @@ std::string channel_of(const std::string &query) {
 // node's _parent chain and UAF if a concurrent sweepExpired() orphaned it (the confirmed cross-node
 // hazard for a `state://` resolve on a compute-pool worker).
 struct effective {
-  cvc::state::state_ptr node;
   // The effective node PLUS its ancestor chain, kept alive so a write (value()/data() walk the
   // node's _parent chain via fullName()/childChanged()) is safe against a concurrent sweep. For a
   // followed transparent link this is the TARGET's chain; otherwise the addressed node's chain.
-  std::vector<cvc::state::state_ptr> pins;
+  // Declared before `node`, and a pin_vector: the node goes first, then its chain leaf first, so a
+  // node the pins were last to hold dies with its ancestors alive (td 4.8).
+  cvc::pin_vector pins;
+  cvc::state::state_ptr node;
   std::string path;
 };
 
@@ -49,18 +51,22 @@ struct effective {
 // the same URI (the write-through routing in state::value() only fires for a WRITABLE link).
 // `addressed_pins` is the addressed node's own ancestor chain (from the caller's navigation), used
 // when the node is not a followed link; `addressed_path` is its normalized `state://` path.
-effective effective_node(cvc::state::state_ptr node,
-                         std::vector<cvc::state::state_ptr> addressed_pins,
+effective effective_node(cvc::state::state_ptr node, cvc::pin_vector addressed_pins,
                          const std::string &addressed_path) {
   if (node && node->isLink() && node->linkMode() == cvc::state::link_mode::transparent) {
     const cvc::state::link_resolution lr = node->resolveLink();
-    if (lr.kind == cvc::state::link_resolution_kind::resolved && lr.target_owned)
+    if (lr.kind == cvc::state::link_resolution_kind::resolved && lr.target_owned) {
       // target_owned pins the terminal and target_pins its ancestor chain; visited.back() is its
       // absolute path captured during the walk (safe) — no fullName() on a possibly-orphaned node.
-      return {lr.target_owned, lr.target_pins,
-              lr.visited.empty() ? addressed_path : lr.visited.back()};
+      effective eff{lr.target_pins, lr.target_owned,
+                    lr.visited.empty() ? addressed_path : lr.visited.back()};
+      // The link node, then its chain leaf first: parameters go in no set order.
+      node.reset();
+      addressed_pins.clear();
+      return eff;
+    }
   }
-  return {std::move(node), std::move(addressed_pins), addressed_path};
+  return {std::move(addressed_pins), std::move(node), addressed_path};
 }
 
 // The `?value` / `?data` channels are served; `?children` and anything else are not (they need the
@@ -83,14 +89,15 @@ UriResult state_resolve(cvc::state &root, const Uri &u) {
   // it — or an ancestor it walks — while this resolve, which may run on a compute-pool worker,
   // reads its value/data (parent-free getters) and, for a transparent link, resolves through it
   // (resolveLink touches the start node's fullName). Canonical is built from the normalized path
-  // STRING, never a fullName() on the returned node.
-  std::vector<cvc::state::state_ptr> chain;
+  // STRING, never a fullName() on the returned node. The chain is declared before the node, and
+  // both move into `eff`, so the node always goes before its chain (td 4.8).
+  cvc::pin_vector chain;
   cvc::state::state_ptr node =
       u.path.empty() ? root.shared_from_this() : root.findDescendantShared(u.path, &chain);
   if (!node)
     return {false, std::string(), std::string(), "ari: state node '" + u.path + "' not found"};
   const effective eff =
-      effective_node(node, std::move(chain),
+      effective_node(std::move(node), std::move(chain),
                      cvc::state::normalize_path(u.path)); // follows a transparent link
   const std::string canonical = "state://" + eff.path + "?" + channel;
 
@@ -125,11 +132,13 @@ StoreResult state_store(cvc::state &root, const Uri &u, const std::string &conte
   // value()/data() internally call fullName() and parent()->childChanged(), which walk the node's
   // _parent chain — a leaf-only pin would leave those ancestors exposed to a concurrent sweep (a
   // use-after-free). The pins (eff.pins for a followed link, else `chain`) are held alive across
-  // the setter call below.
-  std::vector<cvc::state::state_ptr> chain;
+  // the setter call below. As in the read, the node moves into `eff` with its chain and goes
+  // first.
+  cvc::pin_vector chain;
   cvc::state::state_ptr node =
       u.path.empty() ? root.shared_from_this() : root.sharedChild(u.path, &chain);
-  const effective eff = effective_node(node, std::move(chain), cvc::state::normalize_path(u.path));
+  const effective eff =
+      effective_node(std::move(node), std::move(chain), cvc::state::normalize_path(u.path));
   if (channel == "data")
     eff.node->data(boost::any(content)); // store the bytes as a string blob on the data channel
   else

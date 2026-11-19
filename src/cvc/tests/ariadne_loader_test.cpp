@@ -4200,6 +4200,7 @@ windows:
   EXPECT_TRUE(by_bind.count("scene.world.rev"));
   EXPECT_TRUE(by_bind.count("scene.world.grid.summary"));
   EXPECT_TRUE(by_bind.count("island.seed")); // world_controls' widgets, on the node's keys
+  EXPECT_TRUE(by_bind.count("island.edge")); // its Edge picker
   EXPECT_TRUE(by_bind.count("island.request") || by_bind.count("island.auto"));
   EXPECT_TRUE(by_bind.count("data.austin.status"));
   EXPECT_TRUE(by_bind.count("scene.world.file"));
@@ -6243,6 +6244,7 @@ TEST(AriadneComponents, NodeComponentsTakeTheirNodeAsAnArg) {
       {"forest_controls", "{ keys: north }", "forest.", "north."},
       {"sea_controls", "{ keys: bay }", "sea.", "bay."},
       {"sky_controls", "{ keys: storm }", "sky.", "storm."},
+      {"weather_controls", "{ keys: squall }", "weather.", "squall."},
       {"world_controls", "{ keys: island }", "world.", "island."},
       {"raster_view", "{ keys: risk }", "raster.", "risk."},
       {"camera_controls", "{ viewer: inset }", "viewers.main.", "viewers.inset."},
@@ -6273,6 +6275,40 @@ TEST(AriadneComponents, NodeComponentsTakeTheirNodeAsAnArg) {
       }
       EXPECT_TRUE(named) << "no key under " << want;
     }
+  }
+}
+
+// weather_controls' Storm wind: a slider (0 to 30 m/s) on the weather node's weather.gust_front,
+// the gust front's peak, under the node's keys when it has some.
+TEST(AriadneComponents, WeatherControlsBindTheStormWind) {
+  SKIP_WITHOUT_YAML();
+  cvc::app app;
+  if (!register_source_components(app))
+    GTEST_SKIP() << "component sources not found";
+  LoadResult r = load_string(app, R"(
+meta: { min_libcvc: "0.0.0" }
+import: cvc://components/weather_controls.ari
+windows:
+  - include: weather_controls
+  - include: weather_controls
+    args: { keys: squall, id: squall_controls }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  std::vector<const Widget *> windows;
+  collect(r.root, Kind::Window, windows);
+  ASSERT_EQ(windows.size(), 2u);
+  for (int i = 0; i < 2; ++i) {
+    std::vector<const Widget *> sliders;
+    collect(*windows[i], Kind::SliderFloat, sliders);
+    const Widget *storm = nullptr;
+    for (const Widget *s : sliders)
+      if (s->label == "Storm wind")
+        storm = s;
+    ASSERT_NE(storm, nullptr) << "no Storm wind slider";
+    EXPECT_EQ(storm->bind, i == 0 ? "weather.gust_front" : "squall.gust_front");
+    EXPECT_EQ(storm->lo, 0.0);
+    EXPECT_EQ(storm->hi, 30.0);
+    EXPECT_FALSE(storm->tooltip.empty());
   }
 }
 
@@ -6343,7 +6379,8 @@ TEST(AriadneComponents, TransferFunctionDemoLoadsClean) {
 
 // Every shipped example says what it needs from its host (requires:, roadmap §7.6), so a runner
 // that lacks it refuses the load with one clear error instead of failing in the middle of a run.
-// A document with a scene: needs a scene renderer, which arigl has and ari does not.
+// A document with a scene: needs a scene renderer, which arigl has and ari does not, unless it is a
+// world that runs headless (scene.physics: its physics and bodies, on every host; world_gym.ari).
 TEST(AriadneComponents, ShippedExamplesDeclareWhatTheyNeed) {
   SKIP_WITHOUT_YAML();
   namespace fs = std::filesystem;
@@ -6364,10 +6401,13 @@ TEST(AriadneComponents, ShippedExamplesDeclareWhatTheyNeed) {
     ++seen;
     EXPECT_FALSE(r.requirements.empty()) << name << " has no requires: block";
     if (r.scene.any()) {
-      const auto it = std::find_if(r.requirements.begin(), r.requirements.end(),
-                                   [](const HostRequirement &q) { return q.name == "gl.scene"; });
-      ASSERT_NE(it, r.requirements.end()) << name << " has a scene: but does not require gl.scene";
-      EXPECT_FALSE(it->optional) << name << " lists gl.scene as optional";
+      const auto it =
+          std::find_if(r.requirements.begin(), r.requirements.end(), [](const HostRequirement &q) {
+            return q.name == "gl.scene" || q.name == "scene.physics";
+          });
+      ASSERT_NE(it, r.requirements.end())
+          << name << " has a scene: but requires neither gl.scene nor scene.physics";
+      EXPECT_FALSE(it->optional) << name << " lists " << it->name << " as optional";
     }
     // A shader: block runs only where the scene runs the document's GLSL; the example says
     // whether it can do without (optional) or not.

@@ -47,6 +47,15 @@
 // On the beach the swell runs up as the swash (shore_layer::swash): the drawn node draws it on the
 // ground node's meshes, and the physics sea carries it, so a body on the sand is lifted by the film
 // drawn there. `swash: 0` leaves it out of both.
+//
+// With `wake_push: 1` (the water.wake_push key; off by default) the field has a wake
+// (cvc::physics::field_wake, OCEAN-AND-WEATHER-ROADMAP.md C5 and D6): the waves its floating
+// bodies make are stepped inside the physics step, on a window of `wake_push_cells` cells of
+// `wake_push_cell` metres (64 of 1 m) where it holds the most floating bodies (a boat counting as
+// four), and push the other bodies, so boats feel each other's wakes and the debris' rings. It is
+// physics: the same on every host and at every frame rate, in the world's state and its hash. The
+// drawn wake (the node's eWave window) is separate and unchanged: it draws every body's waves
+// around the camera's target.
 
 //
 // The wind on the water (O13; OCEAN-AND-WEATHER-ROADMAP.md E2-E4, E6), the same in both seas:
@@ -75,6 +84,7 @@
 #include <cvc/ocean/h0.h>
 #include <cvc/ocean/sea_lag.h>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -119,6 +129,17 @@ struct SceneWaterSpec {
   double sea_lag = 20.0;      // E4: s, the sea's wind follows the wind with this time constant
   double sea_fade = 4.0;      // E4: s, a new keyframe's sea crossfades in over this
   double current = 0.0;       // E6: m/s, the current's RMS speed (0: none)
+  // C5 (D6): the waves the floating bodies make push the others (cvc::physics::field_wake): the
+  // `wake_push` key (0 / 1, off by default) and the window's props, `wake_push_cells` (a power of
+  // two, 8 .. 128), `wake_push_cell` (m) and `wake_push_depth` (m; 0: deep water).
+  bool wake_push = false;
+  int wake_push_cells = 64;
+  double wake_push_cell = 1.0;
+  double wake_push_depth = 0.0;
+  // The wind the gusts' pattern drifts with: the scene's wind as authored, without a storm's gust
+  // front, which wind_speed and wind_dir carry (scene_wind.h, F4). NaN: wind_speed and wind_dir.
+  double gust_speed = std::numeric_limits<double>::quiet_NaN();
+  double gust_dir = std::numeric_limits<double>::quiet_NaN();
 };
 
 // The node's spec: its props, then its live keys (seeded from the props, as the drawn node does).
@@ -205,7 +226,20 @@ constexpr bool kWaterAdvect[3] = {false, true, true};
 // A water node's physics: its colliders (one fluid field), rebuilt when its keys (the chop, the
 // wave height, the swell, the gusts, the current) change, the sea takes a new keyframe of its
 // lagged wind, or its ground is regenerated. The scene's world swaps the field at its next sync,
-// as it swaps a generated world's bodies.
+// as it swaps a generated world's bodies; except a sea keyframe while the scene has storms, below.
+//
+// With storms (a scene wind and a weather node: the scene's world sets the colliders'
+// clock_period, kSceneWindFrontPeriod) the gust fronts move the wind on their own, and a sea
+// stepped each frame would keyframe where the frames fall. So the sea steps once a clock period
+// instead: in period k (the clock's tick over the period's ticks), at the first tick() in it, to
+// the start of period k + 1 with the wind of period k's start (wind.front holds the front at a
+// period's start, scene_wind.h). A keyframe's field then goes in at the first physics step that
+// ends past that start (SceneColliders::from_tick), and its crossfade starts there. The crossfade
+// is at least two periods, so a keyframe's field is in before the next keyframe can replace it,
+// whether tick() runs before the world's steps (the scene's world's own runtime, in its sync) or
+// after them (a renderer's). So the sea, and what floats on it, is the same at every frame rate,
+// headless or drawn, given one tick() and one world sync a period (the scene's world warns when a
+// frame runs the clock over more than one).
 class WaterRuntime {
 public:
   // `ground` gives the ground the water fills, now and after a regenerate (null: none yet).
@@ -225,6 +259,8 @@ public:
   std::shared_ptr<const SceneWaterShore> shore() const;
   std::shared_ptr<const cvc::ocean::sea_surface> sea() const;
   std::shared_ptr<const cvc::physics::field> field() const;
+  // The still-water level (m) the field was last built for (before the first build, its spec's).
+  double level() const;
   // The sea's keyframes (O13), which the drawn node draws too.
   std::shared_ptr<const SceneWaterSea> keyframes() const;
 
