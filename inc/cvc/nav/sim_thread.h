@@ -105,6 +105,11 @@ public:
 
   // Producer API (any thread): applied at the top of the next tick.
   void retarget(int i, float gx_n, float gy_n);
+  // Run `fn` on the worker with the world it steps, at the top of its next pass (paused or not),
+  // after the edits posted before it: an edit retarget() has no verb for (set_separation, say),
+  // or a read of what only the worker may touch while it runs (the belief planes). It never runs
+  // concurrently with a step.
+  void post(std::function<void(sim_world &)> fn);
 
   // Pause THIS simulation. On the private clock (the hz form) that pauses the
   // clock. On a shared clock the clock is left alone -- pausing everything is

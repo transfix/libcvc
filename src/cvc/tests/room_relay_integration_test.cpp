@@ -36,6 +36,7 @@
 #include <cstdio>
 #include <cstdlib>                                // std::strtoull
 #include <cvc/ariadne/avatar_sim.h>               // avatar_intent
+#include <cvc/ariadne/conference/client_registry.h> // a client's record from its link
 #include <cvc/ariadne/conference/relay_session.h> // a host's join: its credential
 #include <cvc/ariadne/conference/room_aoi.h>
 #include <cvc/ariadne/conference/room_aoi_relay.h>
@@ -1831,6 +1832,92 @@ TEST(RoomRelayLoopbackTest, ARoomCallReachesTheRelayAndOnlyItsCaller) {
     std::lock_guard<std::mutex> lk(mu);
     EXPECT_TRUE(done[0].ok) << done[0].code << ": " << done[0].message;
   }
+}
+
+// A client's record (client_registry.h, ARISRV_IDENTITY.md ID1) from its real link: the relay's
+// link reports carry each connection's number, the peer address the relay saw and the local address
+// the client's Hello reported, and the registry keys the client by its device id. Each client on
+// the build's transports in turn.
+TEST(RoomRelayLoopbackTest, AClientsRecordComesFromItsLink) {
+  test_relay r(relay_options{});
+  client_list own = make_clients({"A", "B", "C"});
+  const std::vector<test_client *> cs = ptrs(own);
+  cs[0]->device = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  cs[1]->device = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"; // C sends none
+  ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
+  ra::client_registry::options o;
+  o.room = kRoom;
+  ra::client_registry reg(o);
+  std::vector<cvc::state_link_report> links;
+  for (const cvc::state_transport *tp : r.planes)
+    for (cvc::state_link_report &l : tp->link_reports())
+      links.push_back(std::move(l));
+  reg.update(links, 1.0, "t1");
+  for (test_client *c : cs) {
+    const ra::client_registry::record *rec = reg.record_of(c->pid);
+    ASSERT_NE(rec, nullptr) << c->pid;
+    // A device id keys it; with none, its two addresses do (the loopback, both).
+    EXPECT_EQ(rec->id, c->device.empty() ? reg.client_id("", "127.0.0.1", "127.0.0.1")
+                                         : reg.client_id(c->device, "", ""))
+        << c->pid;
+    ASSERT_EQ(rec->connections.size(), 1u) << c->pid;
+    const ra::client_registry::connection &k = rec->connections.front();
+    EXPECT_EQ(k.pid, c->pid);
+    EXPECT_EQ(k.public_address, "127.0.0.1") << c->pid;
+    EXPECT_EQ(k.local_address, "127.0.0.1") << c->pid << ": its Hello's local_address";
+    EXPECT_TRUE(k.active);
+  }
+  EXPECT_NE(reg.identity_key("A"), reg.identity_key("B"));
+  for (const cvc::state_link_report &l : links)
+    if (l.accepted)
+      EXPECT_NE(l.connection, 0u) << l.remote_node_id << ": numbered";
+}
+
+// room-join on a relay asks it for the name (client_registry.h): a server.set call with the name
+// and unique, and no write of its own to profile.name, which the relay owns. Without a relay's
+// call client it writes the name itself, as before.
+TEST(RoomRelayLoopbackTest, RoomJoinAsksTheRelayForItsName) {
+  namespace se = cvc::state_exec;
+  test_relay r(relay_options{});
+  ra::room_call_relay calls(*r.shard, kRoom);
+  for (cvc::state_transport *tp : r.planes)
+    calls.add_transport(tp);
+  client_list own = make_clients({"A"});
+  const std::vector<test_client *> cs = ptrs(own);
+  test_client &A = *cs[0];
+  ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
+  A.shard->set_transport(A.tp);
+  auto caller = std::make_shared<ra::room_call_client>(*A.shard, kRoom, "A");
+  ra::room_call_client::install(A.app, caller);
+  ra::room_join(A.app, kRoom, "A", "Bob");
+  std::vector<ra::room_call_request> taken;
+  ASSERT_TRUE(run_room(r, cs, 5.0, {}, [&] {
+    for (ra::room_call_request &q : calls.take()) {
+      calls.result(q.pid, q.id, se::value_t());
+      taken.push_back(std::move(q));
+    }
+    return !taken.empty();
+  })) << "room-join sent no call";
+  ASSERT_EQ(taken.size(), 1u);
+  EXPECT_EQ(taken[0].fn, "server.set");
+  const se::value_t *name = se::field(taken[0].kwargs, "username");
+  ASSERT_NE(name, nullptr);
+  EXPECT_EQ(std::get<std::string>(name->v), "Bob");
+  const se::value_t *unique = se::field(taken[0].kwargs, "unique");
+  ASSERT_NE(unique, nullptr);
+  EXPECT_TRUE(std::get<bool>(unique->v));
+  // bring_up joined it as "A" before the call client was installed; "Bob" is the relay's to write.
+  const std::string path = ra::room_participant_path(kRoom, "A") + ".profile.name";
+  cvc::state *mine = A.app.root().findDescendant(path);
+  EXPECT_TRUE(!mine || mine->value() != "Bob") << "it wrote the relay's key itself";
+  ra::room_call_client::install(A.app, nullptr);
+
+  // No relay's call client: the name is its own to write.
+  cvc::app solo;
+  ra::room_join(solo, kRoom, "A", "Bob");
+  cvc::state *n = solo.root().findDescendant(path);
+  ASSERT_NE(n, nullptr);
+  EXPECT_EQ(n->value(), "Bob");
 }
 
 // A participant's read scope (S6): its prefixes, its own subtree (where its calls' replies land)

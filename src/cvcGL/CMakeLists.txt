@@ -1404,6 +1404,11 @@ if(NOT EMSCRIPTEN)
   add_executable(cvcgl_ariadne_ribbons test/cvcgl_ariadne_ribbons.cpp test/gl_upload_counter.cpp)
   target_link_libraries(cvcgl_ariadne_ribbons PRIVATE cvcGL)
   add_test(NAME cvcgl_ariadne_ribbons COMMAND cvcgl_ariadne_ribbons)
+  # type: nav_swarm / swarm_layer (swarm_nodes.h): a swarm on the synthetic city, every layer drawn,
+  # the vehicles streamed, the model's LOD rungs, the follow node and the layers' keys.
+  add_executable(cvcgl_ariadne_swarm test/cvcgl_ariadne_swarm.cpp)
+  target_link_libraries(cvcgl_ariadne_swarm PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_swarm COMMAND cvcgl_ariadne_swarm)
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(cvcgl_streaming_races test/cvcgl_streaming_races.cpp)
     target_link_libraries(cvcgl_streaming_races PRIVATE cvcGL ${CMAKE_DL_LIBS})

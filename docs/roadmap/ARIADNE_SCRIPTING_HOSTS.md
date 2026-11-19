@@ -2375,6 +2375,10 @@ hook is declared in the block's `hooks:`, or registered by `ari_init` through th
   event starts the next.
 - **Python and native code** can call a guest's exports, and a guest can call theirs. The registry
   is one.
+- **Clients' guests with hooks.** A client's resident guest on `arisrvx` is planned in
+  [`ARIADNE_RESIDENT_GUESTS.md`](ARIADNE_RESIDENT_GUESTS.md). It hooks the relay's events, may
+  outlive its client's connection, and spends gas from a per-principal ledger on the server
+  (phases RG1–RG7).
 
 ### 8.8 Installing and entering programs
 

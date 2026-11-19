@@ -355,6 +355,8 @@ jobs:
               --platform wasm-mt --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3
           done
+          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
+          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" wasm-mt
 
       - name: Build libcvc (wasm-mt, physics only) and physics_replay_test
         if: steps.paths.outputs.run == 'true'
@@ -465,6 +467,8 @@ jobs:
               --platform wasm-mt --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3
           done
+          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
+          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" wasm-mt
 
       - name: Build libcvc (wasm-mt) and the port tests
         if: steps.paths.outputs.run == 'true'
@@ -578,6 +582,8 @@ jobs:
               --platform wasm --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3
           done
+          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
+          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" wasm
 
       - name: Build libcvc (wasm, single-threaded) and ariadne_wasm_browser_test
         if: steps.paths.outputs.run == 'true'
@@ -676,6 +682,8 @@ jobs:
               --platform wasm-mt --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3
           done
+          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
+          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" wasm-mt
 
       - name: Build libcvc (wasm-mt) and permissive_libs_test
         if: steps.paths.outputs.run == 'true'
@@ -1060,6 +1068,8 @@ jobs:
               --platform wasm --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3
           done
+          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
+          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" wasm
 
       - name: Build the ari web target (wasm, single-threaded)
         if: steps.paths.outputs.run == 'true'
@@ -1297,6 +1307,8 @@ jobs:
         run: |
           cvcpkg install-deps cvcpkg/recipes/arigl-web --prefix "$WASM_DEPS" \
             --platform wasm --arch wasm32 --config release --link static --no-fallback-to-source
+          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
+          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" wasm
           # Noarch, so not resolvable from the recipe's (static) wasm deps: the recipe says why.
           cvcpkg install xterm-js xterm-js-addon-fit xterm-js-addon-webgl --prefix "$WASM_DEPS" \
             --platform any --config release --link shared --no-fallback-to-source
@@ -1417,6 +1429,8 @@ jobs:
           cvcpkg install-deps cvcpkg/recipes/ariglx-web --prefix "$WASM_DEPS" \
             --platform ${{ matrix.platform }} --arch wasm32 --config release --link static \
             --no-fallback-to-source
+          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
+          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" ${{ matrix.platform }}
           grep -m1 '^  version: ' "$WASM_DEPS/share/libcvc-deps/python312/manifest.yaml"
 
       - name: Build ariglx-web (${{ matrix.platform }}, the lean tier) with the recipe's script

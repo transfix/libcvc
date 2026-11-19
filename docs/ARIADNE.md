@@ -988,7 +988,8 @@ types behind one call, `register_cvcgl_extensions`
 `generated_world` (terrain_lab's world, [`world_nodes.h`](../inc/cvc/gl/ariadne/world_nodes.h)),
 `volume_slice` (one axis-aligned plane of a volume, below), `water` (its sea, lakes and ponds as the
 GPU FFT ocean, below), `weather` (the scene's storms, below), `ribbon` and `draped_link` (lines
-drawn from data, below), and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and
+drawn from data, below), `nav_swarm` and `swarm_layer` (a swarm of navigating vehicles and
+what of it is drawn, below), and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and
 `fe_lab`. Keys the built-in parser
 does not know land in the node's `props`, which a custom realizer reads. So does a `source:` the
 built-ins have no field for, `{ state: <key> }` or `{ stream: <token> }`, as written. A
@@ -1581,6 +1582,71 @@ wake's window at half its reach (64 m), and half the spray to half its reach; 2 
 a quarter, the short cascade and the far grid's waves to half, and no persistent foam (the
 whitecaps alone take Monahan's share) and no spray; 3 the
 plain Fresnel sea, no wake, and two cascades; 4 the far grid's waves to a quarter.
+
+**Swarms.** A `nav_swarm` node is a swarm of navigating vehicles: libcvc's navigator
+(`cvc::nav::sim_world`) driving hundreds of them across a city toward colour-coded rally points with no
+global plan, the published trained CoefMLP steering each one. Each part of it that is drawn is a
+`swarm_layer` node under it, a node like any other, with its own `visible:`, `tags:` and
+`material: { opacity }`. `examples/ariadne/documents/nav_city_swarm.ari` (800 vehicles, 16 targets) and
+`nav_city_drive.ari` (60 Humvees on Jolt, 6 convoys) are the nav demos `nav_city_swarm` and
+`nav_city_drive` as documents. The simulation is core libcvc
+([`scene_swarm.h`](../inc/cvc/ariadne/scene_swarm.h)), the drawing cvcGL's
+([`swarm_nodes.h`](../inc/cvc/gl/ariadne/swarm_nodes.h)).
+
+```yaml
+scene:
+  clock: { scale: 3.6 }                 # 60 navigator steps a wall second
+  main_view: { hide: [minimap] }        # the map markers are a minimap's alone
+  nodes:
+    - { node: city, source: { data: city }, tint: satellite }
+    - node: swarm
+      type: nav_swarm
+      city: city                        # a data: entry: the city bundle it crosses
+      agents: 800
+      belief: grouped                   # shared | grouped | private
+      fog: true
+      targets: 16
+      plant: kinematic                  # or humvee, roboracer, ... (plant_host's names)
+      children:
+        - { node: swarm_agents, type: swarm_layer, layer: agents, look: humvee }
+        - { node: swarm_flags, type: swarm_layer, layer: flags, visible: show.flags }
+        - { node: swarm_trails, type: swarm_layer, layer: trails, width: { bind: view.path_width, default: 1.5 } }
+        - { node: swarm_belief, type: swarm_layer, layer: belief, material: { opacity: 0.55 } }
+        - { node: swarm_dots, type: swarm_layer, layer: dots, tags: [minimap] }
+        - { node: chase, type: swarm_layer, layer: follow }   # a track camera's target
+```
+
+- **The city.** `city:` names a `data:` entry; once its dataset is ready its world is rasterized onto
+  `grid` x `grid` cells (96) over the terrain's extent, at the trained metric (0.05 navigator units a
+  metre), and walled at its edge. With no `city:`, or a dataset that fails to load (no network),
+  the swarm crosses the synthetic city the trainer learns on, which the `city` layer draws.
+- **The swarm.** Its props: `agents`, `belief` (planes: shared one, grouped one a group of 64 and at
+  least 2, private one each), `fog` (sensing; off, every plane is the known map), `seed`, `spawn`
+  (`opposed`: one edge to the other; `scattered`), `targets` (1 to 64), `reach`, `separate`,
+  `sep_radius` and `sep_gain` (in vehicle radii), `plant`, `policy` (a `.cvcnav`; empty: the published
+  trained weights, else the built-in net; `default`: the built-in net), `grid`, `sense_every`, and
+  `noun` / `groups` for its status line. Each agent is sent to the target of its goal's latitude
+  band and wears its colour. It steps on the app's world clock, one navigator step every 0.06 s of
+  world time, on a worker thread (a browser without threads steps it on the frame's thread).
+- **Its keys,** under `keys:` (`swarm`), seeded from the props: `agents`, `belief`, `fog`, `plant`
+  and `seed` are what the next build makes (`request: restart`, or `reseed` for one more seed; and
+  every `sim.restart`); `separate`, `sep_gain` and `follow` (the agent the `path` and `follow` layers
+  follow, -1 none) are live; `follow_at: "x,y"` follows the agent nearest a point;
+  `targets.<t>.x`/`.y` move a rally point, and its agents drive to it; `lockstep` 1 makes each frame
+  wait for the steps due (a capture). It publishes `stats.*` (`agents`, `planes`, `arrived`, `tick`,
+  `fps`, `driving`, `policy`, `city`, `ready`, `status` (a line saying all of it), `vehicle_length`,
+  `span`, `wall_height`, `bounds` as a camera `frame` request, `center.*`), `targets.count` and each
+  target's `color`, and `follow_pose.*`. `bench` 1 prints the frame rate on stderr every 120 frames.
+- **The layers** (`layer:`): `agents` (a vehicle model, `look: humvee` or a mesh file, else arrows;
+  with `lod:` on, four quadric-decimated rungs of it picked per vehicle by its size on screen: a rung
+  takes vehicles at least `lod_px: [24, 8, 3]` pixels in radius, the finest at most `near_cap` (10),
+  and off-screen vehicles are culled), `flags`, `goals` (a beacon over each goal, sunk once it is
+  reached), `trails` (`segments`, `every` frames, `width`), `path` (the followed vehicle's trail),
+  `belief` (the walls the fleet has sensed, in the colours of the belief planes that saw them),
+  `dots` and `targets` (markers over everything, for a map view), `city` (the synthetic city), and
+  `follow` (an empty node at the followed vehicle, heading its way, which a track camera names).
+- **The panels.** `swarm_controls.ari` and `swarm_minimap.ari` (§6.5) drive the keys; a document's
+  `on_tick` points the main camera at the followed vehicle (`viewers.main.camera.track.*`).
 
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the
@@ -2879,7 +2945,10 @@ windows:
   neutral placeholder of the same box until the picture arrives, so nothing moves. The fetch, the
   decode and the fit run on the app's background pool. A failure shows a darker placeholder, says
   why in its tooltip, and is tried again after 30 s. Pictures are kept in memory per runtime, up to
-  64 MiB, and dropped 30 s after the last frame that drew them. Two widgets that show the same URL
+  64 MiB, and dropped once 30 s of drawing has passed without a frame that drew them. That is
+  drawing time, not the wall's: a page that draws nothing for a while (a hidden browser tab, a
+  phone put away) ages nothing, so its pictures are all still there when it draws again, never
+  fetched a second time. Two widgets that show the same URL
   share one fetch. `ari snapshot` and `arigl snapshot` wait for the pictures they draw, those
   whose URL a reply puts in state included: they draw again until no picture is still loading
   (at most 10 s, as for requests).
@@ -3241,7 +3310,11 @@ this for every one.
   which the canvas is not. When a finger (or a pen) activates an `input_text`, the page focuses a
   hidden `<input>` placed at the field's caret, so the keyboard comes up and the browser keeps
   the field in view above it; what the keyboard types goes to the field, autocorrect and
-  composed words included, and the field's deactivation puts the keyboard away. iOS raises its
+  composed words included, and the field's deactivation puts the keyboard away. For a
+  `password: true` field the hidden input is a password field too, so the keyboard shows no
+  suggestions and learns nothing from what is typed (a text field's `autocomplete="off"` does not
+  stop a keyboard's own suggestion strip); what was typed is cleared from the hidden input when
+  the field changes and when the keyboard goes away. iOS raises its
   keyboard only for a focus made while the finger lifts, which is when the page makes it; a field
   that becomes active with no finger down (an `autofocus:` one) raises it on Android, and on iOS
   at the first tap on it. While the hidden input has the keys the canvas does not, so typing never
@@ -3477,6 +3550,10 @@ the document's link points at another dataset. What it drew before goes, and so 
   `body:` its items are static bodies in the scene's `physics:` world;
 - a mesh or a height field becomes one mesh node;
 - a volume becomes a volume node.
+
+`tint: satellite` colours each vertex of what it drew other than the terrain (a city's buildings) by
+the dataset's aerial image under it, over a grey floor so shaded facades still read (0.3 + 0.7 of the
+photo), as the nav demos tinted Austin.
 
 `frame: true` (or `first`) frames the main view's camera on what the node drew, the first time it
 draws, and `frame: always` does so each time. It writes the bounds to the camera's `frame` request
@@ -3808,7 +3885,9 @@ item over its whole area. A feed's card opens its post wherever it is clicked:
   `y` are measured from the group's top-left.
 - **ImGui** (arigl, the browser page): a click is a tap. It must be released over the group, and the
   pointer must not have moved further than ImGui's drag threshold, so a finger scrolling a feed
-  opens nothing. The group's area is as wide as the room it has (a card's whole row), however
+  opens nothing. A widget's own `on_click:` (a picture's, a video's, a text's) is a tap the same
+  way: the press alone runs nothing, so a finger that lands on a feed's picture to scroll it
+  scrolls, and the picture's `on_click:` runs only for a tap that went down and came up on it. The group's area is as wide as the room it has (a card's whole row), however
   narrow its content. `hover: highlight` fills that area under the content with the header-hover
   colour, or the header-active colour while it is pressed.
 - **Terminals** (FTXUI, tvision): a group with `on_click:` takes keyboard focus. Tab reaches it
@@ -4392,6 +4471,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `volren_controls`, `volslice_controls` | a `volren` / `volslice` node (arg `node`, default `bunny_volume`) |
 | `forest_controls`, `sea_controls`, `sky_controls` | a `forest_trees` / `wave_sea` / `cloud_sky` node (arg `keys`, below) |
 | `world_controls` | a `generated_world` node (§5.4; arg `keys`) |
+| `swarm_controls`, `swarm_minimap` | a `nav_swarm` node (§5.4, "Swarms"; arg `swarm`, its `keys:`): what its next build makes, its layers, the chase camera and the avoidance; and its minimap, a map view where a press drags a rally point or follows a vehicle |
 | `water_controls` | a `water` node (arg `keys`, default `water`) |
 | `boat_controls` | a `boat` node's helm: drive, throttle, rudder, goal, and what it does (arg `keys`, default `boat`: the node's id or `keys:`) |
 | `weather_controls` | a `weather` node: the weather now, a storm started upwind or overhead, the sky cleared, the weather's time scale, the rain's effects, the lightning and the wet friction (arg `keys`, default `weather`) |
