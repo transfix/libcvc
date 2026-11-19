@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cvc/ariadne/ariadne.h> // has_widget_type (custom-widget load-time check)
+#include <cvc/ariadne/color_value.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/media.h>    // §5.11 image: fit / shape / URI src
 #include <cvc/ariadne/requires.h> // free_heads: a granted function brings the ones it calls
@@ -252,7 +253,8 @@ const char *const kAriSchema = R"ARISCHEMA({
         "status": {"type": "string"},
         "fit": {"enum": ["contain", "cover", "fill"]},
         "shape": {"enum": ["rect", "circle"]},
-        "background": {"type": ["string", "object"]},
+        "background": {"type": ["string", "object", "array"]},
+        "color": {"type": ["string", "array", "object"]},
         "poster": {"type": "string"},
         "controls": {"$ref": "#/$defs/flag"},
         "fullscreen": {"$ref": "#/$defs/flag"},
@@ -373,16 +375,16 @@ namespace {
 // The widget types the loader builds itself (each is a .ari key: `slider_int: Speed`). Anything
 // else is a custom type, drawn by register_widget_type / a backend-native widget.
 // ORDER MATTERS: the short-form dispatch (widget_type) takes the FIRST of these present as a key,
-// so tf_editor precedes color — a tf_editor's own config may carry a `color:` node list — and
-// progress and plot precede overlay, their caption. A chart's keys name no widget type, nor do a
-// heatmap's or a settings editor's.
+// so color comes last — a tf_editor's own config may carry a `color:` node list, and a text, radio,
+// button or menu item a `color:` of its own (§5.26) — and progress and plot precede overlay, their
+// caption. A chart's keys name no widget type, nor do a heatmap's or a settings editor's.
 constexpr const char *kBuiltinWidgetTypes[] = {
-    "group",         "menubar",      "menu",         "menu_item", "window", "progress",
-    "plot",          "chart",        "settings",     "overlay",   "panel",  "text",
-    "checkbox",      "slider_int",   "slider_float", "combo",     "radio",  "radio_row",
-    "input_text",    "input_int",    "tf_editor",    "color",     "image",  "button",
-    "separator",     "windows_menu", "spinner",      "video",     "audio",  "text_view",
-    "message_input", "tray_icon",    "tabs",         "list",      "heatmap"};
+    "group",        "menubar",    "menu",         "menu_item", "window",    "progress",
+    "plot",         "chart",      "settings",     "overlay",   "panel",     "text",
+    "checkbox",     "slider_int", "slider_float", "combo",     "radio",     "radio_row",
+    "input_text",   "input_int",  "tf_editor",    "image",     "button",    "separator",
+    "windows_menu", "spinner",    "video",        "audio",     "text_view", "message_input",
+    "tray_icon",    "tabs",       "list",         "heatmap",   "color"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {
@@ -947,12 +949,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
   }
   if (type == "text") {
     Widget w = has(n, "bind") ? text_bound(label, str(n, "bind")) : text(label);
-    // Optional fixed tint: `color: [r, g, b]` in [0,1] (same sequence convention as a layout
-    // border colour). A colour-capable backend renders it; others fall back to plain text.
-    const YAML::Node col = n["color"];
-    if (col && col.IsSequence() && col.size() >= 3)
-      w = with_text_color(w, col[0].as<float>(1.0f), col[1].as<float>(1.0f),
-                          col[2].as<float>(1.0f));
+    // Its `color:` (§5.26) is parse_widget's, as a radio's, a button's and a menu item's.
     // §5.11 emoji: a state path holding a map of shortcode names to picture URIs: a `:name:` in
     // the text that it names is drawn as that picture.
     w.emoji = str(n, "emoji");
@@ -1491,6 +1488,90 @@ bool any_descendant_repeats(const Widget &w) {
 
 // §5.12 background: on a window / overlay / group — a map (src | bind, auth, fit, opacity,
 // terminal, banner_rows, status), or a bare URI or image name for src.
+// §5.26 whether a colour's text is an expression, computed each frame: it starts with '('.
+bool is_color_expr(const std::string &s) {
+  const std::size_t at = s.find_first_not_of(" \t\n\r");
+  return at != std::string::npos && s[at] == '(';
+}
+
+// §5.26 three numbers [r, g, b] (0..1, clamped) in `c` into out; false for anything else.
+bool rgb_seq(const YAML::Node &c, float out[3]) {
+  if (!c.IsSequence() || c.size() < 3)
+    return false;
+  float v[3];
+  for (std::size_t i = 0; i < 3; ++i) {
+    if (!c[i].IsScalar())
+      return false;
+    try {
+      v[i] = c[i].as<float>();
+    } catch (const std::exception &) {
+      return false;
+    }
+  }
+  for (int i = 0; i < 3; ++i)
+    out[i] = std::clamp(v[i], 0.0f, 1.0f);
+  return true;
+}
+
+// §5.26 one colour as a document writes it: [r, g, b], "#rrggbb", c0..c7 or "r,g,b" (into
+// `fixed`), or { bind: key } read each frame, or "(expr)" computed each frame (into `src`). False
+// when it is none of them (`fixed` and `src` untouched); "none" is no colour, and true.
+bool one_color(const YAML::Node &c, ItemColor &fixed, std::string &src) {
+  if (c.IsMap()) {
+    src = str(c, "bind");
+    return !src.empty();
+  }
+  if (c.IsSequence())
+    return (fixed.set = rgb_seq(c, fixed.rgb));
+  if (!c.IsScalar())
+    return false;
+  const std::string &s = c.Scalar();
+  if (is_color_expr(s)) {
+    src = s;
+    return true;
+  }
+  if (is_no_color(s))
+    return true;
+  return (fixed.set = parse_color_text(s, fixed.rgb));
+}
+
+constexpr const char *kColorForms =
+    "[r, g, b], \"#rrggbb\", c0..c7, { bind: <key> } or an expression";
+
+// §5.26 a text's, radio's, button's or menu item's `color:`. On a radio it may also be a list, one
+// colour per option: [c0, c1, ...] or "c0;c1;...".
+void parse_item_color(Ctx &ctx, const YAML::Node &c, Widget &w) {
+  ItemColor fixed;
+  if (one_color(c, fixed, w.color_src)) {
+    w.has_text_color = fixed.set;
+    std::copy(fixed.rgb, fixed.rgb + 3, w.text_color);
+    return;
+  }
+  if (w.kind == Kind::Radio) {
+    std::vector<ItemColor> list;
+    bool ok = c.IsScalar() && parse_color_list(c.Scalar(), list);
+    if (c.IsSequence()) {
+      ok = true;
+      for (const YAML::Node &e : c) {
+        ItemColor ic;
+        std::string dynamic;
+        if (!one_color(e, ic, dynamic) || !dynamic.empty()) {
+          ok = false;
+          break;
+        }
+        list.push_back(ic);
+      }
+    }
+    if (ok) {
+      w.option_colors = std::move(list);
+      return;
+    }
+  }
+  ctx.warn("ari: '" + w.label + "' color: is " + kColorForms +
+           (w.kind == Kind::Radio ? ", or a list of colours, one per option" : "") +
+           " — drawn in the default colour");
+}
+
 void parse_background(Ctx &ctx, const YAML::Node &n, Widget &w) {
   if (w.kind != Kind::Window && w.kind != Kind::Group) {
     ctx.warn("ari: background: is for a window, overlay or group — ignored");
@@ -1501,10 +1582,18 @@ void parse_background(Ctx &ctx, const YAML::Node &n, Widget &w) {
     bg.src = n.Scalar();
     return;
   }
-  if (!n.IsMap()) {
-    ctx.warn("ari: background: must be a map (src, fit, opacity, ...) or a URL — ignored");
+  if (n.IsSequence()) { // §5.26 `background: [r, g, b]`: a fill
+    bg.color.set = rgb_seq(n, bg.color.rgb);
+    if (!bg.color.set)
+      ctx.warn("ari: background: a list is a colour, [r, g, b] — ignored");
     return;
   }
+  if (!n.IsMap()) {
+    ctx.warn("ari: background: must be a map (src, color, fit, opacity, ...) or a URL — ignored");
+    return;
+  }
+  if (const YAML::Node c = n["color"]; c && !one_color(c, bg.color, bg.color_src))
+    ctx.warn(std::string("ari: background color: is ") + kColorForms + " — ignored");
   bg.src = str(n, "src");
   bg.bind = str(n, "bind");
   bg.auth = str(n, "auth");
@@ -1522,7 +1611,7 @@ void parse_background(Ctx &ctx, const YAML::Node &n, Widget &w) {
     ctx.warn("ari: background terminal: '" + term + "' is not behind, banner or none");
   bg.banner_rows = std::clamp(static_cast<int>(num(n, "banner_rows", 6.0)), 1, 60);
   if (!bg.any())
-    ctx.warn("ari: background: has neither src: nor bind: — nothing to draw");
+    ctx.warn("ari: background: has no src:, bind: or color: — nothing to draw");
 }
 
 Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
@@ -1553,6 +1642,12 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
       w.repeat = str(n, "repeat"); // §3: a count expression -> emit this template N times
     if (has(n, "background"))
       parse_background(ctx, n["background"], w);
+    // §5.26 a colour, written here or computed each frame. The other kinds that take a `color:`
+    // key (the colour picker, whose label it is, a tf_editor, a custom type) read their own.
+    if (has(n, "color") &&
+        (w.kind == Kind::Text || w.kind == Kind::Radio || w.kind == Kind::Button ||
+         w.kind == Kind::MenuItemAction || w.kind == Kind::MenuItemToggle))
+      parse_item_color(ctx, n["color"], w);
     if (has(n, "on_click"))
       w.on_click = str(n, "on_click"); // §4.6 widget-level click handler (any kind); like `on`
     if (has(n, "on_hover"))
