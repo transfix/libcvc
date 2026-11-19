@@ -1498,9 +1498,17 @@ topsides over a blue stripe at the waterline and a dark wet bottom, with a teak 
 `model:` (a file, or a name found where the vehicle models are, as `Humvee.glb` is; `.glb` is
 tried after a bare name; `none` draws the hull), it is that model instead, fitted as a vehicle's
 file look is (`fit_vehicle_geometry`: the axis a file stands on, Y-up or Z-up, is up, its length
-fitted to the boat's length overall, its keel on the hull's bottom). The `tactical` preset's model is `TacticalBoat`
-(the `vehicle-tactical-boat` package), and its hull when that is not installed; a `model:` that is
-not found warns. The water
+fitted to the boat's length overall, its keel on the hull's bottom). `model: { data: NAME, file:
+FILE }` takes FILE out of the package of the document's `data:` entry NAME (cvcGL's
+`node_model_look`; the same as a vehicle's `look: { data, file }`): the boat shows its hull while
+the package loads and the model goes in in its place once it has (`vehicle_model_state`); when the
+package cannot load (no network, no such package) a local install of the file by its name is used,
+else the hull stays. `terrain_lab.ari`'s launch pulls `TacticalBoat.glb` from
+`cvcpkg://cy-pca/vehicle-tactical-boat` this way (a lazy `data:` entry, path
+`share/cvc-scenes/shared`), so the web gallery fetches it from cvcpkg.org at run time rather than
+shipping it (its arigl may reach `https://cvcpkg.org`, `--net-allow`). With no `model:`, the
+`tactical` preset's model is `TacticalBoat` when the `vehicle-tactical-boat` package is installed
+locally, and its hull when it is not; a `model:` that is not found warns. The water
 node keeps its water out of the boats nearest the camera (at most four, each the largest box inside
 its hull at its waterline, `BoatRuntime::cutout`, between its bottom and its sheer, passed to the
 water's shaders as uniforms, not a texture), its boats
