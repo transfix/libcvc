@@ -85,6 +85,13 @@ void sim_thread::retarget(int i, float gx_n, float gy_n) {
   cmds_.emplace_back([this, i, gx_n, gy_n]() { world_.retarget(i, gx_n, gy_n); });
 }
 
+void sim_thread::post(std::function<void(sim_world &)> fn) {
+  if (!fn)
+    return;
+  std::lock_guard<std::mutex> lk(cmd_mtx_);
+  cmds_.emplace_back([this, f = std::move(fn)]() { f(world_); });
+}
+
 void sim_thread::set_paused(bool paused) {
   paused_.store(paused);
   if (own_clock_)

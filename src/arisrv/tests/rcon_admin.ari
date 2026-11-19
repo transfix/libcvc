@@ -1,0 +1,25 @@
+# The client for ctest arisrvx_rcon_admin_role (ARISRV_IDENTITY.md, ID3): rcon makes this
+# connection an admin, so the program's @export(roles=["admin"]) answers it. Before server.rcon it
+# is forbidden, and so it is again from the same client's next connection (the relay closes this
+# one at its own server.kick, and the client dials again), which must log in again.
+meta: { name: rcon's admin role in arisrvx, min_libcvc: 3.7.13 }
+tests:
+  a_an_admin_export_is_forbidden_before_rcon: |
+    (while (not (= (state-get "relay.status") "joined")) (sleep 0.05))
+    (assert (= (try (begin (room-call "admin_only") "no error")
+                    (catch (PermissionError e) (get-attr e "code")))
+               "forbidden"))
+  b_after_rcon_it_answers_with_the_role: |
+    (assert (get-attr (room-call "server.rcon" "rcon test password") "admin"))
+    (let ((p (room-call "admin_only")))
+      (assert (get-attr p "admin") p))
+  c_a_new_connection_must_log_in_again: |
+    (assert (= (state-get "relay.joins") "1") (state-get "relay.joins"))
+    (let ((me (get-attr (room-call "server.whoami") "client_id")))
+      (try (room-call "server.kick" me) (catch (RuntimeError e) nil)))
+    (while (not (= (state-get "relay.joins") "2")) (sleep 0.05))
+    (sleep 2.5)
+    (assert (not (get-attr (room-call "server.whoami") "admin")))
+    (assert (= (try (begin (room-call "admin_only") "no error")
+                    (catch (PermissionError e) (get-attr e "code")))
+               "forbidden"))

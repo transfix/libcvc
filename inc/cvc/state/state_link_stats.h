@@ -95,6 +95,10 @@ struct state_link_report {
   std::string transport;      // "ws" | "grpc"
   std::string remote_node_id; // the peer's node id (from its Hello); "" before the Hello
   std::string remote_device_id; // the device id its Hello carried; "" when none
+  std::string remote_local_address; // the address its Hello reported for its own end; "" when none
+  std::string remote_address;       // an accepted link's peer address, as the transport saw it
+  std::uint64_t connection = 0; // the transport's number for it, unique while the transport runs
+  bool secure = false;          // it is TLS (an accepted stream on a gRPC relay with --tls-cert)
   bool accepted = false;      // this end ACCEPTED the connection (a relay's link to a client)
   // It holds its node id at the transport's inbound gate (always true without one): a relay
   // writes a participant's per-link values (net.relay, device) only from the link holding it.

@@ -1069,6 +1069,17 @@ a few files:
        target, `<node>.tiler` for a node. The keys carry the phase and percentage but not the
        slice pair being tiled: `tile_stepper::label()` has it, for P4's node to show.
 
+     End to end (2026-11-18, `tiler_bunny_test`):
+     - **Pipeline:** the Stanford bunny's SDF (`SDF_V1`, 72^3); its z slices from the ortho slicer;
+       each slice's zero isocontours (marching squares, in the test); then `tile_contours`. That
+       is 50 slices and 95 contours.
+     - **Within tolerance:** in slice spacings h, every bunny point is within 1.8 h of the tiled
+       surface, every tiled point above the base within 1.4 h of the bunny, and the mean
+       distance is about 0.27 h. The Hausdorff distance is 3.5 h, from the tiled surface capping
+       the holes in the bunny's base.
+     - **Cost:** about 13 s in Release since the tiler's speedup (transfix/libcvc#1355), mostly
+       the SDF, so it runs on every PR.
+
 **ContourTiler's other rough edges, and what the port does with them**
 
 | As it is | In libcvc |

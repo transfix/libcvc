@@ -127,6 +127,7 @@ section_stamp write_room_entities(cvc::app &app, const std::string &room,
     w.set({k, "size"}, triple(e.size));
     w.set({k, "wheels"}, triple(e.wheels));
     w.set_double({k, "base_z"}, e.base_z);
+    w.set_double({k, "fit_length"}, e.fit_length);
     w.set({k, "look", "kind"}, e.look.kind);
     w.set({k, "look", "path"}, e.look.path);
     w.set_double({k, "look", "scale"}, e.look.scale);
@@ -163,6 +164,7 @@ std::vector<room_entity> read_room_entities(cvc::app &app, const std::string &ro
     read_triple(r.text({k, "size"}), e.size);
     read_triple(r.text({k, "wheels"}), e.wheels);
     e.base_z = r.number({k, "base_z"}, -1.0);
+    e.fit_length = r.number({k, "fit_length"}, 0.0);
     e.look.kind = r.text({k, "look", "kind"});
     e.look.path = r.text({k, "look", "path"});
     e.look.scale = r.number({k, "look", "scale"}, 1.0);
@@ -203,6 +205,11 @@ std::vector<room_entity> room_entities_of(const WorldVehicles &vehicles) {
         const physics::vehicle_desc d = vehicle_desc_of(a, info.spec.mass, info.spec.max_speed);
         e.size = {2.0 * d.half_extents.x, 2.0 * d.half_extents.y, 2.0 * d.half_extents.z};
         e.wheels = {d.wheelbase(), d.track(), d.axles.empty() ? 0.0 : d.axles.front().wheel_radius};
+        if (vehicle_plant_floats(info.plant)) { // a boat's model spans its overall length
+          const physics::dyn_boat_desc b = boat_desc_of(a, info.spec.mass, info.spec.max_speed);
+          if (b.length_overall > 0.0)
+            e.fit_length = b.length_overall;
+        }
       } catch (const std::exception &) {
       }
       break;

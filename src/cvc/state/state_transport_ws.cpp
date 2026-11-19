@@ -56,6 +56,13 @@ namespace cvc {
 
 namespace {
 
+// An endpoint as "host:port", with an IPv6 address in brackets ("[::1]:5678"), as gRPC's
+// peer names it, so a reader can cut the port off (client_registry::address_host).
+template <class Endpoint> std::string endpoint_text(const Endpoint &ep) {
+  const std::string host = ep.address().to_string();
+  return (ep.address().is_v6() ? "[" + host + "]" : host) + ":" + std::to_string(ep.port());
+}
+
 namespace pb = ::cvc::transport::v1;
 
 // Match the gRPC/IPC frame ceiling so all three wire paths agree (a large set_data payload can be
@@ -439,6 +446,13 @@ public:
   std::string remote_node_id;
   std::string remote_cluster_id;
   std::string remote_device_id; // the device id of that Hello ("" when none), written the same way
+  std::string remote_local_address; // the local address that Hello reported ("" when none)
+  // Set before the connection is admitted and constant after: an accepted connection's peer
+  // address, and a dialed one's own end toward the relay, for its Hello. admit numbers each
+  // connection.
+  std::string peer_address;
+  std::string local_address;
+  std::uint64_t serial = 0;
   std::atomic<bool> identified{false};
   // The principal an authenticator admitted it as ("" without one); set before it is admitted.
   std::string principal;
@@ -856,6 +870,12 @@ void state_transport_ws::accept_loop() {
       std::lock_guard<std::mutex> lk(_inbound_gate_mu);
       conn->gate = _inbound_gate;
     }
+    {
+      beast::error_code pec;
+      const auto ep = sock.remote_endpoint(pec);
+      if (!pec)
+        conn->peer_address = endpoint_text(ep);
+    }
     conn->ws = std::make_unique<websocket::stream<tcp::socket>>(std::move(sock));
     conn->ws->read_message_max(kMaxWsMessageBytes);
     bound_blocking_writes(conn->ws->next_layer());
@@ -896,8 +916,7 @@ bool state_transport_ws::handshake_accepted(connection &c) {
   if (authenticate) { // §6.5.4: the authenticator judges the bearer instead of the room token
     beast::error_code pec;
     const auto ep = c.ws->next_layer().remote_endpoint(pec);
-    const std::string peer =
-        pec ? std::string() : ep.address().to_string() + ":" + std::to_string(ep.port());
+    const std::string peer = pec ? std::string() : endpoint_text(ep);
     std::string why;
     try {
       c.principal =
@@ -988,6 +1007,12 @@ bool state_transport_ws::connect_to_peer(const std::string &url,
     net::connect(sock, results, ec);
     if (ec)
       return false;
+    {
+      beast::error_code lec;
+      const auto lep = sock.local_endpoint(lec);
+      if (!lec)
+        conn->local_address = lep.address().to_string();
+    }
     conn->ws = std::make_unique<websocket::stream<tcp::socket>>(std::move(sock));
     conn->ws->read_message_max(kMaxWsMessageBytes);
     bound_blocking_writes(conn->ws->next_layer());
@@ -1257,6 +1282,9 @@ void state_transport_ws::deliver_inbound(connection *c, const void *data, std::s
       // An id that is not a valid_device_id (oversized, say) is ignored, not stored.
       c->remote_device_id =
           valid_device_id(in.hello().device_id()) ? in.hello().device_id() : std::string();
+      c->remote_local_address = valid_reported_address(in.hello().local_address())
+                                    ? in.hello().local_address()
+                                    : std::string();
       c->identified.store(true, std::memory_order_release);
       if (c->gate) {
         c->local_id = is_local_id(c->remote_node_id);
@@ -1871,9 +1899,12 @@ std::vector<state_link_report> state_transport_ws::link_reports() const {
       continue;
     state_link_report r;
     r.transport = "ws";
+    r.connection = c->serial;
+    r.remote_address = c->peer_address;
     if (const std::string *pid = c->peer_id()) {
       r.remote_node_id = *pid;
       r.remote_device_id = c->remote_device_id;
+      r.remote_local_address = c->remote_local_address;
       r.holds_id = !c->gate || c->gate->holder(*pid) == c.get();
       r.device_verified = c->device_verified.load(std::memory_order_relaxed);
     }
@@ -1949,6 +1980,7 @@ void state_transport_ws::ping_loop() {
 void state_transport_ws::register_connection(std::shared_ptr<connection> conn) {
   if (conn->opened_ns == 0)
     conn->opened_ns = steady_ns();
+  conn->serial = _connection_serial.fetch_add(1, std::memory_order_relaxed) + 1;
   std::lock_guard<std::mutex> lk(_conns_mu);
   _conns.push_back(std::move(conn));
 }
@@ -2026,6 +2058,28 @@ std::size_t state_transport_ws::disconnect_principal(const std::string &principa
   for (const auto &c : drop)
     c->abort_io(); // its reader ends and retracts the peer, as any close does
   return drop.size();
+#endif
+}
+
+bool state_transport_ws::disconnect_connection(std::uint64_t number) {
+#ifdef __EMSCRIPTEN__
+  // A browser accepts no connections.
+  (void)number;
+  return false;
+#else
+  std::shared_ptr<connection> drop;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns)
+      if (c && c->accepted && c->alive.load() && c->serial == number) {
+        drop = c;
+        break;
+      }
+  }
+  if (!drop)
+    return false;
+  drop->abort_io(); // its reader ends and retracts the peer, as any close does
+  return true;
 #endif
 }
 
@@ -2214,6 +2268,8 @@ void state_transport_ws::send_hello_locked(connection &c) {
   h->set_cluster_id(_cluster_id);
   if (!_device_id.empty())
     h->set_device_id(_device_id);
+  if (!c.accepted && !c.local_address.empty())
+    h->set_local_address(c.local_address);
   // A relay with a pin store challenges each client it accepts to prove its device key.
   if (c.accepted && _device_pins && device_keys_available()) {
     std::lock_guard<std::mutex> lk(c.proof_mu);

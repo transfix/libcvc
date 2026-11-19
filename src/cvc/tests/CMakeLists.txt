@@ -22,6 +22,8 @@ else()
   set_source_files_properties(ariadne_scene_world_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 add_executable(ariadne_scene_quality_test ariadne_scene_quality_test.cpp)
+# A document's swarm of navigating vehicles, run headless (scene_swarm.h).
+add_executable(ariadne_scene_swarm_test ariadne_scene_swarm_test.cpp)
 add_executable(ariadne_server_document_test ariadne_server_document_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
@@ -168,6 +170,7 @@ add_executable(room_scene_test room_scene_test.cpp)
 add_executable(world_rules_test world_rules_test.cpp)
 add_executable(room_avatar_test room_avatar_test.cpp)
 add_executable(room_chat_test room_chat_test.cpp)
+add_executable(client_registry_test client_registry_test.cpp)
 add_executable(room_aoi_test room_aoi_test.cpp)
 add_executable(room_aoi_relay_test room_aoi_relay_test.cpp)
 add_executable(physics_codec_test physics_codec_test.cpp)
@@ -417,6 +420,7 @@ set(TEST_TARGETS
   ariadne_runtime_test
   ariadne_scene_world_test
   ariadne_scene_quality_test
+  ariadne_scene_swarm_test
   ariadne_server_document_test
   ariadne_bind_test
   ariadne_ftxui_test
@@ -501,6 +505,7 @@ set(TEST_TARGETS
   world_rules_test
   room_avatar_test
   room_chat_test
+  client_registry_test
   room_aoi_test
   room_aoi_relay_test
   physics_codec_test
@@ -728,6 +733,14 @@ else()
   message(STATUS "SDF/Mesher disabled; skipping geometry_test")
 endif()
 
+# tiler_bunny_test: the contour tiler end to end on the Stanford bunny's signed distance field
+# (cvc::sdf, declared only with CVC_ENABLE_SDF). It skips at run time without libigl or
+# cvc::planar.
+if(CVC_ENABLE_SDF)
+  add_executable(tiler_bunny_test tiler_bunny_test.cpp)
+  list(APPEND TEST_TARGETS tiler_bunny_test)
+endif()
+
 # algorithm_test drives cvc::iso/tetrahedralize/hexahedralize which require
 # the Mesher.
 if(CVC_ENABLE_MESHER)
@@ -841,6 +854,13 @@ target_link_libraries(ariadne_scene_world_test
 )
 
 target_link_libraries(ariadne_scene_quality_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_scene_swarm_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1157,6 +1177,11 @@ if(TARGET geometry_test)
       GTest::gtest
       GTest::gtest_main
   )
+endif()
+
+if(TARGET tiler_bunny_test)
+  target_link_libraries(tiler_bunny_test PRIVATE cvc GTest::gtest GTest::gtest_main)
+  target_compile_features(tiler_bunny_test PRIVATE cxx_std_20)
 endif()
 
 if(TARGET algorithm_test)
@@ -2326,6 +2351,13 @@ target_link_libraries(room_chat_test
     GTest::gtest_main
 )
 
+target_link_libraries(client_registry_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(room_aoi_test
   PRIVATE
     cvc
@@ -2932,6 +2964,7 @@ target_compile_features(room_scene_test PRIVATE cxx_std_17)
 target_compile_features(world_rules_test PRIVATE cxx_std_20)
 target_compile_features(room_avatar_test PRIVATE cxx_std_17)
 target_compile_features(room_chat_test PRIVATE cxx_std_20)
+target_compile_features(client_registry_test PRIVATE cxx_std_20)
 target_compile_features(room_aoi_test PRIVATE cxx_std_17)
 target_compile_features(room_aoi_relay_test PRIVATE cxx_std_17)
 target_compile_features(physics_codec_test PRIVATE cxx_std_17)
@@ -3111,10 +3144,12 @@ endfunction()
 
 cvc_discover_tests(app_test)
 foreach(_cvc_port_test IN LISTS CVC_PORT_TESTS)
-  if(_cvc_port_test STREQUAL "segmentation_intrinsics_test")
-    # AnActionStartsItUnderTheDefaultLimits runs a 160^3 segmentation through an action's frame
-    # loop: 93-101 s in a Debug job, and past ctest's 300 s on a loaded runner (three times over in
-    # one job). The test's own loop allows 900 s too.
+  if(_cvc_port_test STREQUAL "segmentation_intrinsics_test" OR
+     _cvc_port_test STREQUAL "tiler_intrinsics_test")
+    # AnActionStartsItUnderTheDefaultLimits runs a 160^3 segmentation (a 30-slice tube's tiling)
+    # through an action's frame loop: 93-101 s (109-111 s) in a Debug job, and past ctest's 300 s on
+    # a loaded runner (three times over in one job; the tiler's on transfix/libcvc#1351's run
+    # 44274032889, where the segmentation took 548 s). The test's own loop allows 900 s too.
     cvc_discover_tests(${_cvc_port_test} PROPERTIES TIMEOUT 900)
   else()
     cvc_discover_tests(${_cvc_port_test})
@@ -3132,6 +3167,7 @@ cvc_discover_tests(ariadne_runtime_test)
 # the scene's wind runs as long: 900 s each, as the segmentation action test has.
 cvc_discover_tests(ariadne_scene_world_test PROPERTIES TIMEOUT 900)
 cvc_discover_tests(ariadne_scene_quality_test)
+cvc_discover_tests(ariadne_scene_swarm_test)
 cvc_discover_tests(ariadne_server_document_test)
 cvc_discover_tests(ariadne_ftxui_test)
 cvc_discover_tests(ariadne_chart_test)
@@ -3173,6 +3209,11 @@ cvc_discover_tests(volslice_test)
 cvc_discover_tests(volslice_state_test)
 if(TARGET geometry_test)
   cvc_discover_tests(geometry_test)
+endif()
+if(TARGET tiler_bunny_test)
+  # About 13 s in Release; a Debug job runs the SDF and the tiling several times slower, past
+  # ctest's 300 s on a loaded runner, so it gets 900 s as tiler_intrinsics_test does.
+  cvc_discover_tests(tiler_bunny_test PROPERTIES TIMEOUT 900)
 endif()
 if(TARGET algorithm_test)
   cvc_discover_tests(algorithm_test)
@@ -3520,10 +3561,15 @@ cvc_discover_tests(room_scene_test)
 cvc_discover_tests(world_rules_test)
 cvc_discover_tests(room_avatar_test)
 cvc_discover_tests(room_chat_test)
+cvc_discover_tests(client_registry_test)
 cvc_discover_tests(room_aoi_test)
 cvc_discover_tests(room_aoi_relay_test)
 cvc_discover_tests(physics_codec_test)
-cvc_discover_tests(physics_field_test)
+# The wake's long runs (packed crates settling for 120 s, the cost on a three-cascade sea) take
+# 12-15 s each in a Release build and many times that in a Debug or sanitizer build (not measured
+# here), which may pass the 300 s a test without a TIMEOUT of its own gets there (ci.yml): their
+# own budget, as the water's.
+cvc_discover_tests(physics_field_test PROPERTIES TIMEOUT 1200)
 cvc_discover_tests(physics_hull_test)
 cvc_discover_tests(physics_immersion_test)
 cvc_discover_tests(physics_boat_test)

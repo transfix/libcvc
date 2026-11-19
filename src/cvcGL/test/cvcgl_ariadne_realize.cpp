@@ -101,24 +101,69 @@ static void chk(bool ok, const std::string &w) {
 static bool approx(double a, double b) { return std::fabs(a - b) < 1e-3; }
 
 // Counts vtkOpenGLState's "Hardware does not support the number of textures defined" (a draw
-// that ran out of texture units) while it is VTK's output window.
+// that ran out of texture units), and the shader errors VTK reports (vtkShaderProgram's failed
+// compiles and links, vtkOpenGLShaderCache's), keeping the first, while it is VTK's output window.
+// Every other message goes on to `next` (the window it replaced), so unrelated errors still show.
 class TextureUnitWarnings : public vtkOutputWindow {
 public:
   static TextureUnitWarnings *New();
   vtkTypeMacro(TextureUnitWarnings, vtkOutputWindow);
   int count = 0;
-  void DisplayText(const char *t) override { note(t); }
-  void DisplayErrorText(const char *t) override { note(t); }
-  void DisplayWarningText(const char *t) override { note(t); }
-  void DisplayGenericWarningText(const char *t) override { note(t); }
+  int shaderErrors = 0;
+  std::string firstShaderError;
+  vtkSmartPointer<vtkOutputWindow> next;
+  void DisplayText(const char *t) override {
+    if (!note(t) && next)
+      next->DisplayText(t);
+  }
+  void DisplayErrorText(const char *t) override {
+    if (!note(t) && next)
+      next->DisplayErrorText(t);
+  }
+  void DisplayWarningText(const char *t) override {
+    if (!note(t) && next)
+      next->DisplayWarningText(t);
+  }
+  void DisplayGenericWarningText(const char *t) override {
+    if (!note(t) && next)
+      next->DisplayGenericWarningText(t);
+  }
 
 private:
-  void note(const char *t) {
-    if (t && std::strstr(t, "number of textures defined"))
+  // Whether `t` is one it counts.
+  bool note(const char *t) {
+    if (t && std::strstr(t, "number of textures defined")) {
       ++count;
+      return true;
+    }
+    if (t && (std::strstr(t, "vtkShaderProgram") || std::strstr(t, "vtkOpenGLShaderCache"))) {
+      if (shaderErrors++ == 0)
+        firstShaderError = t;
+      return true;
+    }
+    return false;
   }
 };
 vtkStandardNewMacro(TextureUnitWarnings);
+
+// VTK's messages over a scope, through a TextureUnitWarnings (the others passed on to the window
+// it replaced), and a check that no shader failed to compile or link in it.
+struct ShaderErrorWatch {
+  vtkNew<TextureUnitWarnings> counter;
+  vtkSmartPointer<vtkOutputWindow> before = vtkOutputWindow::GetInstance();
+  ShaderErrorWatch() {
+    counter->next = before;
+    vtkOutputWindow::SetInstance(counter);
+  }
+  ~ShaderErrorWatch() { vtkOutputWindow::SetInstance(before); }
+  ShaderErrorWatch(const ShaderErrorWatch &) = delete;
+  ShaderErrorWatch &operator=(const ShaderErrorWatch &) = delete;
+  void check(const std::string &what) {
+    printf("  shader errors: %d%s%.400s\n", counter->shaderErrors,
+           counter->shaderErrors ? ", the first: " : "", counter->firstShaderError.c_str());
+    chk(counter->shaderErrors == 0, "no shader fails to compile or link (" + what + ")");
+  }
+};
 
 // Walk the renderer's lights, counting positional vs directional and capturing the
 // (single) positional light's position.
@@ -1934,7 +1979,11 @@ int main() {
                                 {"water_level", "0"},
                                 {"water", "0"},
                                 {"texture", "256"}}));
-    scene.nodes.push_back(node("water", "water", {{"world", "world"}, {"level", "0"}}));
+    // Its spray on (off by default): in its own 9 m/s wind the gusts let it draw, with the native
+    // mapper and the sky's shade, so its shader is built here too.
+    scene.nodes.push_back(
+        node("water", "water", {{"world", "world"}, {"level", "0"}, {"spray", "1"}}));
+    ShaderErrorWatch shaders;
     SceneNode sky = node("sky", "cloud_sky",
                          {{"ground", "world"},
                           {"extent", "60"},
@@ -2035,6 +2084,14 @@ int main() {
       printf("  texture units held between frames: %d of %d\n", held,
              tum->GetNumberOfTextureUnits());
       chk(held == 0, "no texture unit is held between frames (the water, the swash, the shade)");
+    }
+    if (near && near->isVisible()) {
+      auto spray = group ? std::dynamic_pointer_cast<cvc::gl::GeometryNode>(
+                               group->findChildByName("water_spray"))
+                         : nullptr;
+      chk(spray && spray->isVisible() && spray->hasSharedShaderInputs("cloud_sky"),
+          "the spray draws here with the native mapper, shaded by the sky");
+      shaders.check("the water's, the spray's, the sky's, with the native mapper");
     }
     for (const std::string &w : warnings)
       printf("  warning: %s\n", w.c_str());
@@ -2216,8 +2273,11 @@ int main() {
                                 {"water_level", "0"},
                                 {"water", "0"},
                                 {"texture", "256"}}));
+    // Its spray on (off by default): a 12 m/s wind throws it, through the tiers below.
     scene.nodes.push_back(
-        node("water", "water", {{"world", "world"}, {"level", "0"}, {"wind_speed", "12"}}));
+        node("water", "water",
+             {{"world", "world"}, {"level", "0"}, {"wind_speed", "12"}, {"spray", "1"}}));
+    ShaderErrorWatch shaders;
     scene.clock.present = true; // the world's clock runs with the frames
     std::vector<std::string> warnings;
     auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "o5", &warnings);
@@ -2339,6 +2399,13 @@ int main() {
           "water.foam_decay 0: no persistent foam, the whitecaps' threshold alone (higher)");
     } else {
       printf("  SKIP the persistent foam: the water's cascades are not up (no float targets)\n");
+    }
+    if (near && near->isVisible()) {
+      auto spray = group ? std::dynamic_pointer_cast<cvc::gl::GeometryNode>(
+                               group->findChildByName("water_spray"))
+                         : nullptr;
+      chk(spray && spray->isVisible(), "the spray draws here too, with the native mapper");
+      shaders.check("the water's and the spray's, through the tiers, with the native mapper");
     }
     for (const std::string &w : warnings)
       printf("  warning: %s\n", w.c_str());
@@ -2585,8 +2652,13 @@ int main() {
                                   {"water_level", "0"},
                                   {"water", "0"},
                                   {"texture", "256"}}));
-      scene.nodes.push_back(
-          node("water", "water", {{"world", "world"}, {"level", "0"}, {"swell_height", "1"}}));
+      // A gale on the water (20 m/s): its breaking crests throw spray (§10.5), its own draw.
+      scene.nodes.push_back(node("water", "water",
+                                 {{"world", "world"},
+                                  {"level", "0"},
+                                  {"swell_height", "1"},
+                                  {"wind_speed", "20"},
+                                  {"spray", "1"}}));
       // O19: a storm raining on it all: the wet ground, the rings and the fog in the receivers'
       // uniforms, and the streaks' own mesh.
       SceneNode sky = node("sky", "cloud_sky",
@@ -2606,13 +2678,15 @@ int main() {
       rec.items.push_back(item);
       sky.props.entries.emplace_back("receivers", rec);
       scene.nodes.push_back(sky);
+      // Its rain in 2000 streaks (a pillar of quads 2000 m tall: the culling check below).
       scene.nodes.push_back(node("weather", "weather",
                                  {{"ground", "world"},
                                   {"sky", "sky"},
                                   {"chance", "0"},
                                   {"radius_min", "500"},
                                   {"radius_max", "500"},
-                                  {"storm_top", "600"}}));
+                                  {"storm_top", "600"},
+                                  {"rain_count", "2000"}}));
       // terrain_lab's light: a three-point rig whose key is a directional sun, its one shadow
       // caster, so the shadow pass holds its map's unit through every draw.
       SceneLight rig;
@@ -2650,16 +2724,16 @@ int main() {
       auto *win = vtkOpenGLRenderWindow::SafeDownCast(view.renderer()->GetRenderWindow());
       vtkNew<TextureUnitWarnings> counter;
       vtkSmartPointer<vtkOutputWindow> before = vtkOutputWindow::GetInstance();
+      counter->next = before; // the messages it does not count still show
       int heard = 0; // the counter hears VTK's warning (vtkOpenGLState's, as it words it)
       int units = 0;
       if (win) {
-        vtkOutputWindow::SetInstance(counter);
+        vtkOutputWindow::SetInstance(counter); // until the checks below are done
         vtkGenericWarningMacro("Hardware does not support the number of textures defined.");
         heard = counter->count;
         counter->count = 0;
         for (int i = 0; i < 17; ++i) // past the 10 frames the swell's keys hold before the swash
           tick();
-        vtkOutputWindow::SetInstance(before);
         units = win->GetTextureUnitManager()->GetNumberOfTextureUnits();
       }
       auto group = sg.getGraphics("water");
@@ -2693,7 +2767,100 @@ int main() {
         chk(win2 && win2->f4.count("cloudFogC") && win2->f4.at("cloudFogC")[3] > 0.0f &&
                 win2->tex.size() == 2,
             "the water has the rain's fog as a uniform, its sky samplers still 2");
+        // §10.5: the gale's spray, its own draw in the same 16 units: the cascades' displacement
+        // atlas the water reads (its one sampler of its own: the whitecaps' folds), the sky's two
+        // shade maps (the water is a receiver, and the spray's mesh is inside its node), and the
+        // land, the shallows and the lee kept out by uniforms.
+        auto spray = group ? std::dynamic_pointer_cast<cvc::gl::GeometryNode>(
+                                 group->findChildByName("water_spray"))
+                           : nullptr;
+        auto sprayIn = spray ? spray->sharedShaderInputs("water_spray") : nullptr;
+        auto spraySky = spray ? spray->sharedShaderInputs("cloud_sky") : nullptr;
+        const auto sprayK = [&sprayIn](int i) {
+          return sprayIn && sprayIn->f4.count("sprayK") ? sprayIn->f4.at("sprayK")[i] : -1.0f;
+        };
+        printf("  the spray: %s, %zu sampler(s) of its own, %zu of the sky's; strength %.2f, %.0f "
+               "particles, tiles to %.0f m, faded out by %.0f m\n",
+               spray && spray->isVisible() ? "drawn" : "not drawn",
+               sprayIn ? sprayIn->tex.size() : 0, spraySky ? spraySky->tex.size() : 0, sprayK(0),
+               sprayK(1), sprayK(2), sprayK(3));
+        chk(spray && spray->isVisible(), "the gale's spray draws too, in the same 16 units");
+        chk(sprayIn && sprayIn->tex.size() == 1 && sprayIn->tex.count("sprayDisp") &&
+                sprayIn->f4.count("sprayWeight[63]") && sprayIn->f3.count("sprayPulse") &&
+                sprayIn->f3.count("uWindGust") && sprayK(0) > 0.5f && sprayK(1) == 8000.0f,
+            "the spray reads one texture of its own (the cascades' atlas the water reads) and "
+            "uniforms");
+        chk(spraySky && spraySky->tex.size() == 2,
+            "the sky shades the spray (a mesh inside the water's node), with its 2 samplers");
+        // Adaptive quality: tier 1 draws half the particles, faded out at half the reach (the
+        // tiles keep theirs); tier 2 draws none, the mesh kept in the renderer (shown again, it
+        // would upload its buffers and build its shader again).
+        cvc::state &st = cvc::state::instance(app);
+        const std::string qk = cvc::ariadne::resolve_bind("webgl", "water.quality");
+        st(qk).value(1.0);
+        tick();
+        const float half = sprayK(1), halfFade = sprayK(3), tiles = sprayK(2);
+        st(qk).value(2.0);
+        tick();
+        tick();
+        const float none = sprayK(1);
+        const bool kept = spray && spray->isVisible();
+        st(qk).value(-1.0);
+        tick();
+        printf("  the spray at tier 1: %.0f particles, faded out by %.0f m (tiles to %.0f m); at "
+               "tier 2: %.0f particles, its mesh %s; back at full: %.0f particles\n",
+               half, halfFade, tiles, none, kept ? "kept" : "removed", sprayK(1));
+        chk(half == 4000.0f && approx(halfFade, 80.0) && approx(tiles, 160.0),
+            "adaptive quality halves the spray and its fade's reach at tier 1, not its tiles");
+        chk(none == 0.0f && kept && sprayK(1) == 8000.0f,
+            "at tier 2 it draws no particle and its mesh stays in the renderer");
+        // Out of the bounds, the spray and the rain's streaks are never culled: their quads are
+        // laid out by index at the origin (a pillar up the z axis, as tall as their count), so
+        // with the camera where the pillar's bounding sphere is out of the view VTK's frustum
+        // culler culled the meshes by it (a prop it culls gets a render time multiplier of 0;
+        // one with no bounds, 0.001). A camera inside that sphere is never culled, so the rain
+        // (2000 quads: a sphere 1000 m round, holding a camera up to some 220 m out) is checked
+        // 300 m out looking level, still in the storm; the spray looking along the ground 1 km
+        // out.
+        {
+          vtkCamera *c = view.renderer()->GetActiveCamera();
+          double pos[3], focal[3];
+          c->GetPosition(pos);
+          c->GetFocalPoint(focal);
+          const auto lookOut = [&](double x, double ahead, double drop) {
+            c->SetPosition(x, 0.0, 25.0);
+            c->SetFocalPoint(x + ahead, 0.0, 25.0 - drop);
+            view.renderer()->ResetCameraClippingRange();
+            tick();
+            tick();
+          };
+          lookOut(300.0, 100.0, 0.0); // level
+          const bool rainShown = streaks && streaks->isVisible();
+          const double rainCover = rainShown ? streaks->prop()->GetRenderTimeMultiplier() : 0.0;
+          lookOut(1000.0, 100.0, 20.0); // along the ground
+          const double cover = spray ? spray->prop()->GetRenderTimeMultiplier() : 0.0;
+          printf("  the camera 300 m out looking level: the rain's streaks %s, their render time "
+                 "multiplier %g; 1 km out: the spray %s, its multiplier %g\n",
+                 rainShown ? "shown" : "hidden", rainCover,
+                 spray && spray->isVisible() ? "shown" : "hidden", cover);
+          chk(spray && spray->isVisible() && cover > 0.0,
+              "the spray is not culled with the camera 1 km from the origin (it has no bounds)");
+          chk(rainShown && rainCover > 0.0,
+              "nor are the rain's streaks with the camera 300 m out in the rain");
+          c->SetPosition(pos);
+          c->SetFocalPoint(focal);
+          view.renderer()->ResetCameraClippingRange();
+          tick();
+        }
+        // VTK reports a shader that fails to compile or link through its output window (and
+        // tries again every frame); none does here.
+        printf("  shader errors: %d%s%.400s\n", counter->shaderErrors,
+               counter->shaderErrors ? ", the first: " : "", counter->firstShaderError.c_str());
+        chk(counter->shaderErrors == 0, "no shader fails to compile or link (the water's, the "
+                                        "swash's, the rain's, the spray's)");
       }
+      if (win)
+        vtkOutputWindow::SetInstance(before);
       for (const std::string &w : warnings)
         printf("  warning: %s\n", w.c_str());
     }

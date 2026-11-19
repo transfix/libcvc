@@ -1,0 +1,103 @@
+# swarm_controls.ari — a REUSABLE Ariadne component: the controls of a `type: nav_swarm` scene node
+# (docs/ARIADNE.md §5.4, "Swarms"), the window nav_city_swarm.cpp and nav_city_drive.cpp drew by hand
+# (their "Swarm controls" / "Convoy controls"). Every widget binds the swarm's keys (`{swarm}`, the
+# node's keys: root) or the scene clock's, so it drives the swarm with no host code:
+#   - what the next build makes: the agent count, the belief planes, fog (sensing) and the plant.
+#     Apply / Restart raises sim.restart, which builds the swarm again (and puts the clock back to 0);
+#   - live: the world's speed (sim.speed), the layers (show.*, the swarm_layer nodes' visible:
+#     keys), the chase camera ({chase}: the document's on_tick points the main camera at the
+#     followed vehicle), the trails' width ({width}) and the avoidance between vehicles.
+#
+# Use it:
+#     import: cvc://components/swarm_controls.ari
+#     windows:
+#       - include: swarm_controls
+#         args: { swarm: swarm, lo: 32, hi: 4000, noun: agents }
+
+units:
+  swarm_controls:
+    args: { swarm: swarm, title: Swarm controls, id: swarm_controls, lo: "32", hi: "4000",
+            noun: agents, chase: ui.chase, width: view.path_width }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - include: swarm_controls_widgets
+        args: { swarm: "{swarm}", lo: "{lo}", hi: "{hi}", noun: "{noun}", chase: "{chase}",
+                width: "{width}" }
+
+  swarm_controls_widgets:
+    args: { swarm: swarm, lo: "32", hi: "4000", noun: agents, chase: ui.chase,
+            width: view.path_width }
+    type: group
+    children:
+      - text: "{noun}"
+        bind: "{swarm}.stats.agents"
+      - text: "arrived"
+        bind: "{swarm}.stats.arrived"
+      - text: "fps"
+        bind: "{swarm}.stats.fps"
+      - text: ""
+        bind: "{swarm}.stats.city"
+      - separator
+      - slider_int: "{noun}"
+        bind: "{swarm}.agents"
+        lo: "{lo}"
+        hi: "{hi}"
+        commit: release
+        tooltip: "the next build's count (Apply / Restart)"
+      - combo: belief
+        bind: "{swarm}.belief"
+        options: [shared, grouped, private]
+        tooltip: "belief planes: one for all, one a group of 64 (at least 2), or one each"
+      - checkbox: fog (sensing)
+        bind: "{swarm}.fog"
+        tooltip: "Off = every belief plane equals the known map, so belief modes only recolour."
+      - combo: plant
+        bind: "{swarm}.plant"
+        options: [kinematic, humvee, roboracer]
+        tooltip: "What the vehicles drive on: nav's kinematic bicycle, or a vehicle on the Jolt
+          physics plant at its real size and limits (fewer vehicles keep up with the clock)."
+      - slider_float: world speed
+        bind: sim.speed
+        lo: 0.25
+        hi: 16.0
+        log: true
+        fmt: "%.2fx"
+        tooltip: "world seconds per wall second"
+      - separator
+      - text: "Display (live)"
+      - checkbox: Paths
+        bind: show.trails
+      - checkbox: Targets
+        bind: show.goals
+      - checkbox: Flags
+        bind: show.flags
+      - checkbox: Belief walls
+        bind: show.belief
+      - checkbox: Chase cam
+        bind: "{chase}"
+        tooltip: "the main camera follows the chosen vehicle; a click on the minimap picks one"
+      - input_int: "##chase"
+        bind: "{swarm}.follow"
+        lo: -1
+        hi: "{hi}"
+        visible_when: (= (state-get "{chase}") "1")
+      - slider_float: path width
+        bind: "{width}"
+        lo: 0.5
+        hi: 6.0
+        fmt: "%.1f"
+      - checkbox: Avoid others
+        bind: "{swarm}.separate"
+        tooltip: "Steer around neighbours instead of driving through them."
+      - slider_float: avoid strength
+        bind: "{swarm}.sep_gain"
+        lo: 0.0
+        hi: 5.0
+        fmt: "%.1f x rr"
+        visible_when: (= (state-get "{swarm}.separate") "1")
+      - separator
+      - button: Apply / Restart
+        on: sim.restart
+        tooltip: "builds the swarm again with the settings above"
+      - text: "{noun} / belief / fog / plant need a restart"

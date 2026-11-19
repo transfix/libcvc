@@ -21,13 +21,19 @@
 #include "OceanCascades.h"
 #include "OceanFFT.h"
 #include "OceanFoam.h"
+#include "OceanSpray.h"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
+#include <cvc/algo/wind_field.h>
 #include <cvc/core/app.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/ocean/fetch.h>
 #include <cvc/ocean/h0.h>
+#include <cvc/ocean/shore.h>
 #include <cvc/ocean/whitecaps.h>
 #include <memory>
 #include <vector>
@@ -236,9 +242,10 @@ int main() {
   }
 
   // 9. OceanCascades: three cascades side by side in atlases, every pass doing all of them, give
-  //    each cascade's OceanFFT field (the same h0, the same time), in 2 + 2 log2 N passes where
-  //    three OceanFFTs take three times 3 + 4 log2 N. A foam atlas reads their Jacobians from the
-  //    displacement atlas as from three textures.
+  //    each cascade's OceanFFT field (the same h0, the same time), in 3 + 2 log2 N passes (one of
+  //    them the slope layers, which are the heights' gradient) where three OceanFFTs take three
+  //    times 3 + 4 log2 N. A foam atlas reads their Jacobians from the displacement atlas as from
+  //    three textures.
   {
     const double tiles[3] = {251.0, 83.0, 29.0};
     OceanCascades all(N, 3);
@@ -279,8 +286,46 @@ int main() {
                   worst, scale, passes);
       check(atlas.size() == static_cast<size_t>(N) * N * 3 * 4 && worst <= 1e-4 * scale,
             "OceanCascades' tiles are each cascade's OceanFFT field");
-      check(passes == 2 + 2 * static_cast<long long>(std::lround(std::log2(N))),
-            "all three cascades in 2 + 2 log2 N passes");
+      check(passes == 3 + 2 * static_cast<long long>(std::lround(std::log2(N))),
+            "all three cascades in 3 + 2 log2 N passes (the slopes' one among them)");
+      // The slope layers are the height tiles' gradient: against central differences of the
+      // heights over a texel (tile / N), which read a wave k as sin(k dx) / (k dx) of its slope,
+      // so the spectral slope is a little steeper and, that factor varying over the band, not
+      // perfectly correlated (at N = 64 the long and middle cascades' bands, which end at
+      // 4 x 2 pi / the next tile, reach k dx = 1.2: 0.78). A wrong axis reads a correlation near
+      // 0, a wrong sign a negative one, a lost 2 pi or texel a ratio far from 1.
+      for (int c = 0; c < 2; ++c) {
+        const std::vector<float> s = all.readbackSlopes(c);
+        if (s.size() != static_cast<size_t>(N) * N * 2) {
+          check(false, "the slope layers read back");
+          break;
+        }
+        const double dx = tiles[c] / N;
+        auto h = [&](int x, int y) {
+          x = (x + N) % N;
+          y = (y + N) % N;
+          return double(atlas[(static_cast<size_t>(y) * N * 3 + c * N + x) * 4 + 1]);
+        };
+        for (int axis = 0; axis < 2; ++axis) {
+          double sd = 0.0, ss = 0.0, dd = 0.0;
+          for (int y = 0; y < N; ++y)
+            for (int x = 0; x < N; ++x) {
+              const double d = axis == 0 ? (h(x + 1, y) - h(x - 1, y)) / (2.0 * dx)
+                                         : (h(x, y + 1) - h(x, y - 1)) / (2.0 * dx);
+              const double v = s[(static_cast<size_t>(y) * N + x) * 2 + axis];
+              sd += v * d;
+              ss += v * v;
+              dd += d * d;
+            }
+          const double corr = sd / std::sqrt(std::max(ss * dd, 1e-30));
+          const double ratio = sd / std::max(dd, 1e-30); // the slope over the difference
+          std::printf("  (cascade %d's d/d%s slope vs central differences: correlation %.4f, "
+                      "ratio %.4f, rms %.3g)\n",
+                      c, axis == 0 ? "x" : "z", corr, ratio, std::sqrt(ss / (N * N)));
+          check(corr > 0.9 && ratio > 1.0 && ratio < 1.3,
+                "a slope layer is its height tile's gradient (sign, axis, scale)");
+        }
+      }
       OceanFoam foam3(N, 2);
       OceanFoam foam1(N, 2);
       if (foam3.init(ow) && foam1.init(ow)) {
@@ -325,6 +370,56 @@ int main() {
       all.setActive(5);
       check(all.active() == 3, "setActive clamps to the cascades there are");
     }
+  }
+
+  // OceanSpray's inputs worked out on the CPU (section 10.5): the pulse's phases, from which the
+  // shader works out the whole wind's pulse when a particle rose; the most a gust raises the wind
+  // by; the grid of where the waves may break.
+  {
+    std::printf("== OceanSpray's inputs ==\n");
+    double worst = 0.0;
+    for (double t : {0.0, 17.3, 3600.7, 86400.25, 1.0e6 + 0.3})
+      for (double age : {0.0, 0.9, 1.8}) {
+        const std::array<float, 3> ph = oceanSprayPulse(t);
+        const double p = 0.5 * std::sin(ph[0] - 0.21 * age) +
+                         0.3 * std::sin(ph[1] - 0.21 * 2.37 * age) +
+                         0.2 * std::sin(ph[2] - 0.21 * 5.1 * age);
+        worst = std::max(worst, std::fabs(p - cvc::algo::gust_pulse(t - age)));
+      }
+    std::printf("  the pulse from sprayPulse, as the shader works it out: off by %.2e at most\n",
+                worst);
+    check(worst < 1e-5, "sprayPulse gives the wind's pulse when a particle rose (gust_pulse)");
+    const cvc::algo::wind_state gusty{10.0, 0.4, 0.6};
+    double most = 0.0;
+    for (int i = 0; i < 20000; ++i)
+      most = std::max(most, cvc::algo::wind_gust(gusty, 37.0 * i, -11.0 * i, 0.37 * i, 0.0));
+    std::printf("  the strongest particle gust (no fine scale) of 20000 at gustiness 0.6: x %.3f "
+                "(bound x %.3f)\n",
+                most, oceanSprayGustMax(0.6));
+    check(most <= oceanSprayGustMax(0.6) && most > 0.9 * oceanSprayGustMax(0.6),
+          "no particle's gust passes oceanSprayGustMax, and the bound is near the most one is");
+    // A 4 x 4 shore grid 10 m a cell: land in its first two columns, 1 m deep in the third, 50 m
+    // in the fourth (and past it); the waves fade over 20 m of depth.
+    cvc::ocean::shore_grid g;
+    g.rows = g.cols = 4;
+    g.cell = 10.0;
+    for (int r = 0; r < 4; ++r)
+      for (float d : {-1.0f, -1.0f, 1.0f, 50.0f})
+        g.depth.push_back(d);
+    std::array<float, kSprayGrid * kSprayGrid> open{}, lee{};
+    oceanSprayWeights(g, nullptr, 0.0, 20.0, 0.0, 0.0, 10.0, open);
+    cvc::ocean::fetch_field f; // 100 m of fetch everywhere, against 400 m fully grown
+    f.rows = f.cols = 4;
+    f.cell = 10.0;
+    f.fetch_m.assign(16, 100.0f);
+    oceanSprayWeights(g, &f, 400.0, 20.0, 0.0, 0.0, 10.0, lee);
+    std::printf("  the weights along a row: land %.2f, 1 m deep %.2f, deep %.2f, past the grid "
+                "%.2f; in the lee (a quarter of the full fetch) %.2f\n",
+                open[0], open[2], open[3], open[15], lee[15]);
+    check(open[0] == 0.0f && open[2] == 0.0f && std::fabs(open[3] - 1.0f) < 1e-6f &&
+              std::fabs(open[15] - 1.0f) < 1e-6f && std::fabs(lee[15] - 0.5f) < 1e-6f,
+          "the spray's weights: none on land or in the shallows, all on deep water, sqrt(F / "
+          "full) in the lee");
   }
 
   std::printf("%s: cvcgl_ocean_fft (%d check%s failed)\n", g_fail == 0 ? "PASS" : "FAIL", g_fail,

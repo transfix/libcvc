@@ -28,6 +28,9 @@
   The lightning bolts (growBolt, boltOf, boltMesh, BOLT_FS_LIGHT) port ABYSSAL's Lightning
   (the same repository, src/weather/Lightning.js at 849ff7f4), under the same MIT licence and
   copyright; see THIRD_PARTY_NOTICES.md.
+
+  The streaks' hash (rainHash) is Dave Hoskins' "Hash without Sine" (hash31), MIT licensed,
+  Copyright (c) 2014 David Hoskins; see THIRD_PARTY_NOTICES.md.
 */
 
 // weather_node.cpp — the Ariadne `weather` node (docs/roadmap/OCEAN-AND-WEATHER-ROADMAP.md §9 F2,
@@ -135,6 +138,7 @@ uniform vec3 rainCam; uniform vec3 rainFwd; uniform float rainTime; uniform floa
 uniform vec4 rainWind; uniform vec4 rainBox; uniform float rainCount; uniform float rainStreak;
 uniform float rainPixel; uniform float rainGround; uniform float rainTop;
 out vec2 vRainUv; out float vRainFade; out float vRainThin;
+// Dave Hoskins' Hash without Sine (hash31), MIT: THIRD_PARTY_NOTICES.md.
 vec3 rainHash(float n) {
   vec3 p = fract(vec3(n) * vec3(0.1031, 0.1030, 0.0973));
   p += dot(p, p.yzx + 33.33);

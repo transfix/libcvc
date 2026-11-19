@@ -988,7 +988,8 @@ types behind one call, `register_cvcgl_extensions`
 `generated_world` (terrain_lab's world, [`world_nodes.h`](../inc/cvc/gl/ariadne/world_nodes.h)),
 `volume_slice` (one axis-aligned plane of a volume, below), `water` (its sea, lakes and ponds as the
 GPU FFT ocean, below), `weather` (the scene's storms, below), `ribbon` and `draped_link` (lines
-drawn from data, below), and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and
+drawn from data, below), `nav_swarm` and `swarm_layer` (a swarm of navigating vehicles and
+what of it is drawn, below), and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and
 `fe_lab`. Keys the built-in parser
 does not know land in the node's `props`, which a custom realizer reads. So does a `source:` the
 built-ins have no field for, `{ state: <key> }` or `{ stream: <token> }`, as written. A
@@ -1415,7 +1416,7 @@ so its own flat water rungs do not draw over it. The cascades need float render 
 them the water is flat blue. Live keys under the node's root (`water.` unless `keys:`):
 `wind_speed`, `wind_dir`, `gustiness`, `fetch`, `lee`, `sea_lag`, `sea_fade`, `current`, `chop`,
 `wave_amp`, `whitecaps`, `foam_bias`, `foam_ramp`, `foam_fray`, `foam_decay`, `shore_fade`,
-`swell_height`, `swell_period`, `swell_dir`, `shore_foam`, `wake`, `wake_foam`, `lod_foam`,
+`swell_height`, `swell_period`, `swell_dir`, `shore_foam`, `wake`, `wake_foam`, `wake_push`, `lod_foam`,
 `lod_shade`, `lod_waves`, `quality` and `profile`, most on `water_controls.ari`. `quality` (-1)
 follows the scene's adaptive quality (below); 0 to 4 holds the water at that tier. `profile` 1 times
 the node's work each frame, section by section, into `water.stats.<section>_ms` (2 also waits for
@@ -1431,7 +1432,21 @@ calm: each wave band is scaled by the square root of its fetch, the distance the
 over water, up to where the band is fully grown, from a coarse fetch map built when the wind turns.
 The gusts (`gustiness`, 0.25) ripple and roughen racing patches of water (cat's paws), and
 `current` (m/s, 0) is a slowly varying flow that carries the short waves and floating bodies
-alike. With `body: {}` the water is in the scene's
+alike. In a strong wind the breaking crests throw spray (OCEAN-AND-WEATHER-ROADMAP.md §10.5): drops
+torn off the crests where the cascades fold as the whitecaps are drawn, flying downwind and
+falling back, none where a particle's wind (the mean wind times the gust where and when it rose)
+is below 9 m/s and all of it from 20 m/s. It is off by default until it has been checked in a
+browser: `spray: 1` (or the `spray` key, the Water panel's Spray slider) turns it on. On, the mesh
+is drawn whenever the mean wind times the strongest gust a particle can have (1 + 1.28 x the
+gustiness) passes 9 m/s: at 0.25 gustiness, from a mean wind of about 6.8 m/s. It is drawing
+only: a mesh of its own, `<id>_spray`, whose particles are worked out in its vertex
+shader from the time alone (no state), reading the cascades' atlas the water reads and uniforms,
+the land, the shallows and the lee kept out by a weight on a 16 x 16 grid round the camera (a cell
+of 25 m at the default reach, so near a shore its edge is out by up to that). Keys: `spray` (0
+by default; 1 is all of it) and `lod_spray` (160 m: how far from the camera it
+reaches); the prop `spray_count` (8000) is its particles. It draws in the volume layer, after the
+cloud deck when a cloud_sky lists the water (or the spray) among its receivers, and takes the
+deck's shade then. With `body: {}` the water is in the scene's
 physics world, with or without a renderer ([`scene_water.h`](../inc/cvc/ariadne/scene_water.h)).
 It is one fluid field over the water's extent, its surface the same sea computed on the CPU (the
 cascades fading at the same coast, the same swell), so a body lighter than water floats on the
@@ -1442,7 +1457,20 @@ generated world's bodies. The bodies make waves: an eWave window of 128 m of 0.5
 camera's target takes each moving body's immersed columns as its source, so a dropped crate makes a
 ring and a bobbing one keeps radiating. Its waves move the near grid and shade both grids, foaming
 where they are sharp or fast (`wake_foam`). Beaches absorb them and steep shores reflect them
-(`wake: 0` turns the window off). They are drawn only: they do not push the bodies back. With a
+(`wake: 0` turns the window off). Those are drawn only. With `wake_push: 1` (off by default;
+`water_controls.ari`'s "Wakes push bodies") the waves push the bodies too
+(OCEAN-AND-WEATHER-ROADMAP.md C5, D6; `cvc::physics::field_wake`): the field keeps a physics wake,
+a window of `wake_push_cells` cells of `wake_push_cell` metres (64 of 1 m; `wake_push_depth` m deep,
+0 for deep water) where it holds the most floating bodies (a boat counting as four), stepped inside
+the physics step. Every awake body's immersed columns make waves in a state of its own, and every body
+is pushed by the others' waves (their height under its cells and hull, their orbital velocity and
+their acceleration), never its own, so the launches rock in each other's wakes and a crate's
+splash rocks the boat beside it while a body alone floats exactly as it did. It is physics: the
+same on every host and at every frame rate, saved and restored with the world and in its state
+hash; with it off the world is bit for bit as before. It has no shores (a wake runs on over land,
+where nothing floats, and does not reflect), and a boat's propeller and rudder read the water
+without it. Bodies outside its window (a group farther away than the window is wide) make and
+feel none. With a
 swell, the swash runs up the beach on the ground itself. The node adds it to the fragment shader
 of every mesh under its ground node (the `world:` / `ground:` node, found by id at the top of the
 scene, its LOD rungs and regenerated chunks included), as the cloud deck adds its shade to its
@@ -1550,9 +1578,75 @@ least), `quality.scale` (0.5 to 1: how far out each tier's detail is drawn) and 
 never the physics, so a run is the same at every tier. On a fixed clock (`arigl snapshot`, a test)
 the loop does not run and everything draws at tier 0. The water reads them (its `quality` key
 overrides): tier 1 draws the full shading and the persistent foam to half their distance and the
-wake's window at half its reach (64 m); 2 also the shading to a quarter, the short cascade and the
-far grid's waves to half, and no persistent foam (the whitecaps alone take Monahan's share); 3 the
+wake's window at half its reach (64 m), and half the spray to half its reach; 2 also the shading to
+a quarter, the short cascade and the far grid's waves to half, and no persistent foam (the
+whitecaps alone take Monahan's share) and no spray; 3 the
 plain Fresnel sea, no wake, and two cascades; 4 the far grid's waves to a quarter.
+
+**Swarms.** A `nav_swarm` node is a swarm of navigating vehicles: libcvc's navigator
+(`cvc::nav::sim_world`) driving hundreds of them across a city toward colour-coded rally points with no
+global plan, the published trained CoefMLP steering each one. Each part of it that is drawn is a
+`swarm_layer` node under it, a node like any other, with its own `visible:`, `tags:` and
+`material: { opacity }`. `examples/ariadne/documents/nav_city_swarm.ari` (800 vehicles, 16 targets) and
+`nav_city_drive.ari` (60 Humvees on Jolt, 6 convoys) are the nav demos `nav_city_swarm` and
+`nav_city_drive` as documents. The simulation is core libcvc
+([`scene_swarm.h`](../inc/cvc/ariadne/scene_swarm.h)), the drawing cvcGL's
+([`swarm_nodes.h`](../inc/cvc/gl/ariadne/swarm_nodes.h)).
+
+```yaml
+scene:
+  clock: { scale: 3.6 }                 # 60 navigator steps a wall second
+  main_view: { hide: [minimap] }        # the map markers are a minimap's alone
+  nodes:
+    - { node: city, source: { data: city }, tint: satellite }
+    - node: swarm
+      type: nav_swarm
+      city: city                        # a data: entry: the city bundle it crosses
+      agents: 800
+      belief: grouped                   # shared | grouped | private
+      fog: true
+      targets: 16
+      plant: kinematic                  # or humvee, roboracer, ... (plant_host's names)
+      children:
+        - { node: swarm_agents, type: swarm_layer, layer: agents, look: humvee }
+        - { node: swarm_flags, type: swarm_layer, layer: flags, visible: show.flags }
+        - { node: swarm_trails, type: swarm_layer, layer: trails, width: { bind: view.path_width, default: 1.5 } }
+        - { node: swarm_belief, type: swarm_layer, layer: belief, material: { opacity: 0.55 } }
+        - { node: swarm_dots, type: swarm_layer, layer: dots, tags: [minimap] }
+        - { node: chase, type: swarm_layer, layer: follow }   # a track camera's target
+```
+
+- **The city.** `city:` names a `data:` entry; once its dataset is ready its world is rasterized onto
+  `grid` x `grid` cells (96) over the terrain's extent, at the trained metric (0.05 navigator units a
+  metre), and walled at its edge. With no `city:`, or a dataset that fails to load (no network),
+  the swarm crosses the synthetic city the trainer learns on, which the `city` layer draws.
+- **The swarm.** Its props: `agents`, `belief` (planes: shared one, grouped one a group of 64 and at
+  least 2, private one each), `fog` (sensing; off, every plane is the known map), `seed`, `spawn`
+  (`opposed`: one edge to the other; `scattered`), `targets` (1 to 64), `reach`, `separate`,
+  `sep_radius` and `sep_gain` (in vehicle radii), `plant`, `policy` (a `.cvcnav`; empty: the published
+  trained weights, else the built-in net; `default`: the built-in net), `grid`, `sense_every`, and
+  `noun` / `groups` for its status line. Each agent is sent to the target of its goal's latitude
+  band and wears its colour. It steps on the app's world clock, one navigator step every 0.06 s of
+  world time, on a worker thread (a browser without threads steps it on the frame's thread).
+- **Its keys,** under `keys:` (`swarm`), seeded from the props: `agents`, `belief`, `fog`, `plant`
+  and `seed` are what the next build makes (`request: restart`, or `reseed` for one more seed; and
+  every `sim.restart`); `separate`, `sep_gain` and `follow` (the agent the `path` and `follow` layers
+  follow, -1 none) are live; `follow_at: "x,y"` follows the agent nearest a point;
+  `targets.<t>.x`/`.y` move a rally point, and its agents drive to it; `lockstep` 1 makes each frame
+  wait for the steps due (a capture). It publishes `stats.*` (`agents`, `planes`, `arrived`, `tick`,
+  `fps`, `driving`, `policy`, `city`, `ready`, `status` (a line saying all of it), `vehicle_length`,
+  `span`, `wall_height`, `bounds` as a camera `frame` request, `center.*`), `targets.count` and each
+  target's `color`, and `follow_pose.*`. `bench` 1 prints the frame rate on stderr every 120 frames.
+- **The layers** (`layer:`): `agents` (a vehicle model, `look: humvee` or a mesh file, else arrows;
+  with `lod:` on, four quadric-decimated rungs of it picked per vehicle by its size on screen: a rung
+  takes vehicles at least `lod_px: [24, 8, 3]` pixels in radius, the finest at most `near_cap` (10),
+  and off-screen vehicles are culled), `flags`, `goals` (a beacon over each goal, sunk once it is
+  reached), `trails` (`segments`, `every` frames, `width`), `path` (the followed vehicle's trail),
+  `belief` (the walls the fleet has sensed, in the colours of the belief planes that saw them),
+  `dots` and `targets` (markers over everything, for a map view), `city` (the synthetic city), and
+  `follow` (an empty node at the followed vehicle, heading its way, which a track camera names).
+- **The panels.** `swarm_controls.ari` and `swarm_minimap.ari` (§6.5) drive the keys; a document's
+  `on_tick` points the main camera at the followed vehicle (`viewers.main.camera.track.*`).
 
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the
@@ -1854,10 +1948,22 @@ scene:
     publishes the namespace (`server: publish: [drive]`), the relay replicates it, and its program
     writes `(state-set "drive.lead.intent.accel" "2")`. The C++ setter, `set_intent`,
     `clear_intent` and `intent`, may be called from any thread.
+  - **Around each other.** Vehicles steer around each other, on one plant and across plants
+    (`WorldVehicles::set_avoid`, the `vehicles.avoid` key, on by default): each navigator's
+    separation pushes its carrot away from every vehicle near it (the other plants' vehicles
+    are its foreign agents, `cvc::nav::sim_world::set_foreign_agents`), and a vehicle ahead and
+    near its line turns it right (`sep_side`), so two meeting head on both swing right and pass.
+    It is reactive: they do not plan routes around each other.
+  - **What the navigators know.** `vehicles.sense` (`WorldVehicles::set_sense`): `known`, the
+    world's grid whole (the default), or `fog`, nothing at first and what their vehicles' rays
+    find (each plant's navigator builds a belief and plans on it, as libcvc's fog demos do).
+    Changing it makes the navigators again, and every vehicle goes back to its start.
+    `WorldVehicles::belief(plant, ...)` reads the occupancy a plant's navigator plans on.
   - **The vehicles a world starts with.** `world: vehicles: start:` lists them, spawned when the
     world's vehicles are made, before anything asks: each entry is `archetype:` (required),
     `count:` (1 to 256), and the spawn's `name:` (numbered " 1", " 2", ... when the count is more
-    than one), `team:`, `controller:`, `plant:` and `policy:`, plus `at: [x, y]` and `heading:`
+    than one), `team:`, `controller:`, `plant:` and `policy:`, plus `at: [x, y]` (its rear axle)
+    and `heading:`
     (degrees) for a fixed start; without `at:` each takes a free point or a spawn point. A
     document's `init:` runs before the world is made, and the runtime ignores a spawn request
     already set when it starts (a reload would spawn again), so this is how a document, a server
@@ -1865,7 +1971,9 @@ scene:
   - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,
     `color`, `color2` as `r,g,b`, `metadata` as `key=value, ...`, `controller`, `policy`,
     `policy_sha256`, `mass` or `mass_t` (a fraction of the range), `max_speed` or `max_speed_t`,
-    and `at` as `x,y[,heading in degrees]`; empty: a free point), then change
+    and `at` as `x,y[,heading in degrees]`; empty: a free point. A start, and a spawn point,
+    names the vehicle's rear axle, the navigator's reference point on every plant; the entities'
+    table gives its chassis's centre, ahead of it along the heading), then change
     `vehicles.spawn.request`. `vehicles.spawn.count` spawns that many at once (1 when empty; at
     most 256), each at a free point of its own unless `at` names one. The result is in
     `vehicles.spawn.status`. `vehicles.remove.id`
@@ -3436,6 +3544,10 @@ the document's link points at another dataset. What it drew before goes, and so 
 - a mesh or a height field becomes one mesh node;
 - a volume becomes a volume node.
 
+`tint: satellite` colours each vertex of what it drew other than the terrain (a city's buildings) by
+the dataset's aerial image under it, over a grey floor so shaded facades still read (0.3 + 0.7 of the
+photo), as the nav demos tinted Austin.
+
 `frame: true` (or `first`) frames the main view's camera on what the node drew, the first time it
 draws, and `frame: always` does so each time. It writes the bounds to the camera's `frame` request
 (`<prefix>.viewers.main.camera.frame`, "min_x min_y min_z max_x max_y max_z"), which any program
@@ -4350,6 +4462,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `volren_controls`, `volslice_controls` | a `volren` / `volslice` node (arg `node`, default `bunny_volume`) |
 | `forest_controls`, `sea_controls`, `sky_controls` | a `forest_trees` / `wave_sea` / `cloud_sky` node (arg `keys`, below) |
 | `world_controls` | a `generated_world` node (§5.4; arg `keys`) |
+| `swarm_controls`, `swarm_minimap` | a `nav_swarm` node (§5.4, "Swarms"; arg `swarm`, its `keys:`): what its next build makes, its layers, the chase camera and the avoidance; and its minimap, a map view where a press drags a rally point or follows a vehicle |
 | `water_controls` | a `water` node (arg `keys`, default `water`) |
 | `boat_controls` | a `boat` node's helm: drive, throttle, rudder, goal, and what it does (arg `keys`, default `boat`: the node's id or `keys:`) |
 | `weather_controls` | a `weather` node: the weather now, a storm started upwind or overhead, the sky cleared, the weather's time scale, the rain's effects, the lightning and the wet friction (arg `keys`, default `weather`) |
