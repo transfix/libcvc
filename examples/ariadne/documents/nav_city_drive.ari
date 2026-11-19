@@ -1,0 +1,345 @@
+# nav_city_drive.ari — the cvc::nav reactive drive in a city, as an Ariadne document: the port of
+# examples/nav/nav_city_drive.cpp (docs/ARIADNE.md §5.4, "Swarms"). A handful of vehicle CONVOYS
+# cross real downtown Austin to SIX colour-coded rally points with NO global plan: pure local
+# reaction, the published trained CoefMLP driving each one (the built-in biased net where none is
+# installed). Where nav_city_swarm.ari proves "many hundreds of agents on one machine", this is its
+# legible cousin: 60 Humvees on Jolt's physics at their real size and limits, in six coloured convoys,
+# so you can WATCH each group thread the streets and converge on its objective, chase the lead with
+# the camera (a click on the minimap), and drag a rally point on the minimap to re-route its whole
+# convoy live. Under fog the belief walls light up in each convoy's colour along the corridor it has
+# actually sensed.
+#
+# The document is nav_city_swarm.ari's with the drive's numbers: what is where is said there.
+#
+# Run (the network is the host's to turn on; the first run downloads Austin, later runs read the
+# cache):
+#   arigl --net-allow https://cvcpkg.org nav_city_drive.ari
+#   arigl nav_city_drive.ari --bundle /path/to/austin_south      # a local bundle
+#   arigl nav_city_drive.ari --plant kinematic --agents 300       # nav's bicycle, more vehicles
+#   arigl snapshot --mp4 drive.mp4 --seconds 20 --width 1280 --height 720 #     nav_city_drive.ari --capture follow --follow 0 --no-ui
+
+meta:
+  name: Nav city drive (Ariadne)
+  author: cvc
+  min_libcvc: 4.0.1
+
+requires:
+  - gl.scene                       # the swarm and the city are the point: a scene renderer
+  - {name: net, optional: true}    # Austin from cvcpkg.org; without it, the synthetic city
+
+customs:
+  - node: nav_swarm
+    required: true
+  - node: swarm_layer
+    required: true
+
+import:
+  - cvc://components/swarm_controls.ari
+  - cvc://components/swarm_minimap.ari
+  - cvc://components/scene_controls.ari
+  - cvc://components/stage_lighting.ari
+  - cvc://components/camera_controls.ari
+
+args:
+  agents: {type: int, default: 60, help: number of vehicles}
+  belief: {type: string, default: grouped, help: "shared | grouped | private"}
+  fog: {type: bool, default: true, help: "sense the city (--no-fog: the static known map, the scale-benchmark path)"}
+  plant: {type: string, default: humvee, help: "humvee | roboracer (Jolt vehicles at their real size and limits; the bicycle without Jolt) | kinematic (nav's bicycle)"}
+  seed: {type: int, default: 7, help: the scatter's seed}
+  hz: {type: float, default: 60.0, help: "navigator steps per wall second (world speed = hz x 0.06 s)"}
+  bundle: {type: string, default: "", help: "a city bundle directory (terrain.json + buildings.glb) in place of the package"}
+  follow: {type: int, default: -1, help: "the vehicle to chase from the start (-1: none)"}
+  capture: {type: string, default: none, help: "none | orbit | fly | follow: a scripted camera (follow chases --follow)"}
+  map: {type: bool, help: "start on the top-down 2-D map"}
+  shadows: {type: bool, default: true, help: "--no-shadows: no shadow maps"}
+  ui: {type: bool, default: true, help: "--no-ui: no panels (a capture)"}
+  pip: {type: bool, default: true, help: "--no-pip: no minimap"}
+  bench: {type: bool, help: "print the frame rate every 120 frames"}
+
+data:
+  city:
+    uri: cvcpkg://cy-pca/scene-austin-south
+    path: share/cvc-scenes/austin_south
+    as: city_bundle
+    load: lazy                     # loaded when the city node asks, unless --bundle points it elsewhere
+
+functions: |
+  ; A state key's text, "" while it is unset.
+  (defun sv (k) (let ((v (state-get k))) (if (= v nil) "" v)))
+  ; A bool document argument.
+  (defun arg-on (name) (= (sv (str-concat "args." name)) "true"))
+  ; The main camera chases vehicle f (-1: back to the overview), its trail proportional to the
+  ; vehicle (a 4.72 m Humvee on Austin): about 12 m behind, 6 m up, aimed a little ahead of it.
+  (defun chase (f)
+    (if (>= f 0)
+        (let ((g (float (sv "swarm.stats.vehicle_length"))))
+          (begin
+            (state-set "viewers.main.camera.track.target" "chase")
+            (state-set "viewers.main.camera.track.back" (str (* g 2.5)))
+            (state-set "viewers.main.camera.track.height" (str (* g 1.2)))
+            (state-set "viewers.main.camera.track.look_ahead" (str (* g 1.2)))
+            (state-set "viewers.main.camera.track.look_up" (str (* g 0.4)))
+            (state-set "viewers.main.camera.track.min_speed" "0.5")
+            (state-set "viewers.main.camera.track.cam_tau" "0.08")
+            (state-set "viewers.main.camera.track.pos_tau" "0.06")
+            (state-set "viewers.main.camera.mode" "2")))
+        (begin
+          (state-set "viewers.main.camera.mode" (if (= (sv "ui.map") "1") "3" "0"))
+          (frame-city))))
+  ; The main camera framed on the swarm's city (its bounds, ground to the top), and the minimap
+  ; straight down on all of it: half its larger side and 5% more (a map view frames on what it
+  ; shows, the markers alone).
+  (defun frame-city ()
+    (let ((b (sv "swarm.stats.bounds")) (p nil) (w 0.0) (h 0.0))
+      (if (!= b "")
+          (begin
+            (state-set "viewers.main.camera.frame" b)
+            (set p (string.split b " "))
+            (set w (- (float (nth p 3)) (float (nth p 0))))
+            (set h (- (float (nth p 4)) (float (nth p 1))))
+            (state-set "viewers.minimap.camera.map.center.x" (sv "swarm.stats.center.x"))
+            (state-set "viewers.minimap.camera.map.center.y" (sv "swarm.stats.center.y"))
+            (state-set "viewers.minimap.camera.map.scale" (str (* 0.525 (math.max w h))))))))
+  ; A capture's scripted camera at t0 seconds: an orbit, or a fly-over that rises and dips.
+  (defun capture-camera (mode t0)
+    (let ((b (string.split (sv "swarm.stats.bounds") " "))
+          (w 0.0) (h 0.0) (rad 0.0) (az 0.0) (el 0.0) (dist 0.0))
+      (if (= (length b) 6)
+          (begin
+            (set w (- (float (nth b 3)) (float (nth b 0))))
+            (set h (- (float (nth b 4)) (float (nth b 1))))
+            (set rad (* 0.5 (math.sqrt (+ (* w w) (* h h)))))
+            (if (= mode "fly")
+                (begin
+                  (set az (+ 0.6 (* 0.15 t0)))
+                  (set el (- 34.0 (* 12.0 (math.sin (* 0.25 t0)))))
+                  (set dist (* 1.4 rad)))
+                (begin
+                  (set az (+ 0.7 (* 0.30 t0)))
+                  (set el 36.0)
+                  (set dist (* 1.75 rad))))
+            (state-set "viewers.main.camera.mode" "0")
+            (state-set "viewers.main.camera.orbit.center.x" (sv "swarm.stats.center.x"))
+            (state-set "viewers.main.camera.orbit.center.y" (sv "swarm.stats.center.y"))
+            (state-set "viewers.main.camera.orbit.center.z" (sv "swarm.stats.center.z"))
+            (state-set "viewers.main.camera.orbit.azimuth" (str (* az 57.29577951)))
+            (state-set "viewers.main.camera.orbit.elevation" (str el))
+            (state-set "viewers.main.camera.orbit.distance" (str dist))))))
+
+init: |
+  (begin
+    (state-set "swarm.agents" (sv "args.agents"))
+    (state-set "swarm.belief" (sv "args.belief"))
+    (state-set "swarm.fog" (if (arg-on "fog") "1" "0"))
+    (state-set "swarm.plant" (sv "args.plant"))
+    (state-set "swarm.seed" (sv "args.seed"))
+    (state-set "swarm.follow" (sv "args.follow"))
+    (state-set "sim.speed" (str (* (float (sv "args.hz")) 0.06)))
+    (if (!= (sv "args.bundle") "")
+        (data-load "city" (sv "args.bundle") "city_bundle"))
+    (state-set "show.trails" "1")
+    (state-set "show.goals" "1")
+    (state-set "show.flags" "1")
+    (state-set "show.belief" "1")
+    (state-set "view.path_width" "1.5")
+    (state-set "ui.map" (if (arg-on "map") "1" "0"))
+    (state-set "ui.map_was" "0")
+    (state-set "ui.chase" "0")
+    (state-set "ui.chase_was" "0")
+    (state-set "ui.follow_was" "-1")
+    (state-set "ui.city_was" "")
+    (state-set "ui.frames" "0")
+    (state-set "ui.shadows" (if (arg-on "shadows") "1" "0"))
+    (state-set "shadows.enabled" (sv "ui.shadows"))
+    (state-set "tree.scene_controls.open" "0")
+    (state-set "tree.stage_lighting.open" "0")
+    (state-set "tree.camera_controls.open" "0")
+    (if (not (arg-on "pip")) (state-set "tree.swarm_minimap.open" "0"))
+    (if (not (arg-on "ui"))
+        (begin
+          (state-set "tree.swarm_controls.open" "0")
+          (state-set "tree.swarm_minimap.open" "0")
+          (state-set "tree.swarm_status.open" "0"))))
+
+on_tick: |
+  (let ((ready (sv "swarm.stats.ready"))
+        (f (int (sv "swarm.follow")))
+        (c (sv "ui.chase"))
+        (m (sv "ui.map"))
+        (city (sv "swarm.stats.city"))
+        (cap (sv "args.capture"))
+        (n (+ 1 (int (sv "ui.frames")))))
+    (begin
+      (state-set "ui.frames" (str n))
+      (if (= ready "1")
+          (begin
+            ; A new city in (Austin, or the synthetic one): the cameras frame it, and again a
+            ; second later (a minimap whose window had no size yet frames to its size then).
+            (if (!= city (sv "ui.city_was"))
+                (begin
+                  (state-set "ui.city_was" city)
+                  (state-set "ui.reframe_at" (str (+ n 30)))
+                  (frame-city)))
+            (if (= (str n) (sv "ui.reframe_at")) (frame-city))
+            ; The chase camera follows swarm.follow (the minimap's click, the panel's index); the
+            ; Chase cam box turns it on (vehicle 0) and off.
+            (if (!= (str f) (sv "ui.follow_was"))
+                (begin
+                  (state-set "ui.follow_was" (str f))
+                  (state-set "ui.chase" (if (>= f 0) "1" "0"))
+                  (state-set "ui.chase_was" (if (>= f 0) "1" "0"))
+                  (chase f))
+                (if (!= c (sv "ui.chase_was"))
+                    (begin
+                      (state-set "ui.chase_was" c)
+                      (state-set "swarm.follow" (if (= c "1") "0" "-1")))))
+            ; A capture's scripted camera, on the frames (30 a second).
+            (if (or (= cap "orbit") (= cap "fly"))
+                (capture-camera cap (/ (float n) 30.0)))))
+      ; The 2-D map: the main camera straight down, no shadows.
+      (if (!= m (sv "ui.map_was"))
+          (begin
+            (state-set "ui.map_was" m)
+            (if (= m "1")
+                (begin (state-set "viewers.main.camera.mode" "3") (state-set "shadows.enabled" "0"))
+                (begin
+                  (state-set "viewers.main.camera.mode" "0")
+                  (state-set "shadows.enabled" (sv "ui.shadows"))
+                  (frame-city)))))
+      (if (and (arg-on "bench") (= n 1)) (state-set "swarm.bench" "1"))))
+
+keys:
+  pause:
+    label: Pause the world
+    key: P
+    on: (state-set "sim.paused" (if (= (state-get "sim.paused") "1") "0" "1"))
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Paused
+        bind: sim.paused
+      - menu_item: Step one navigator step
+        on: (state-set "sim.step" (str (+ 6 (int (state-get "sim.step")))))
+        enabled_when: (= (state-get "sim.paused") "1")
+      - separator
+      - menu_item: Restart
+        on: sim.restart
+      - menu_item: Restart (new seed)
+        on: (state-set "swarm.request" "reseed")
+      - separator
+      - menu_item: Quit
+        on: quit
+  - menu: View
+    items:
+      - menu_item: 2-D map
+        bind: ui.map
+      - menu_item: Trails
+        bind: show.trails
+      - menu_item: Goals
+        bind: show.goals
+      - menu_item: Flags
+        bind: show.flags
+      - menu_item: Belief walls
+        bind: show.belief
+      - menu_item: Minimap
+        bind: tree.swarm_minimap.open
+  - menu: Scene
+    items:
+      - menu_item: Shadows
+        bind: shadows.enabled
+      - menu_item: Scene...
+        bind: tree.scene_controls.open
+      - menu_item: Lighting...
+        bind: tree.stage_lighting.open
+  - menu: Camera
+    items:
+      - menu_item: Camera...
+        bind: tree.camera_controls.open
+      - menu_item: Chase cam
+        bind: ui.chase
+
+windows:
+  - include: swarm_controls
+    args: { swarm: swarm, title: Convoy controls, lo: "6", hi: "600", noun: vehicles }
+    pos: [10, 30]
+    closable: true
+  - include: swarm_minimap
+    args: { swarm: swarm, size: "260" }
+    pos: [10000, 10000]            # the bottom-right corner (a window opens inside the view)
+    closable: true
+  - window: status
+    id: swarm_status
+    pos: [10, 10000]               # the bottom-left corner
+    closable: true
+    children:
+      - text: ""
+        bind: swarm.stats.status
+  - include: scene_controls
+    closable: true
+  - include: stage_lighting
+    closable: true
+  - include: camera_controls
+    closable: true
+
+scene:
+  chrome: false
+  clock: { scale: 3.6 }            # world seconds per wall second: 60 navigator steps a second
+  background: { top: [0.66, 0.78, 0.92], bottom: [0.28, 0.40, 0.58] }
+  main_view: { hide: [minimap] }   # the minimap's markers are the minimap's alone
+  shadows:
+    enabled: true
+    resolution: 4096
+    update_interval: 3
+    softness: 2
+    focus: { follow: camera, min_radius: 150, max_radius: 1500, per_distance: 3, lead: 0.5,
+             lift: 20, ground: city }
+  lights:
+    - light: sun
+      rig: three_point
+      sun: true                    # a sun over the whole city, its maps spent where the camera looks
+      stage: { center: [0, 0, 90], radius: 2121 }
+      key: { intensity: 1.15, azimuth: -42, elevation: 58, cone: 62 }
+      fill: 0.55
+      back: 0
+      wash: 0
+      warmth: 0.35
+      environment: 0.5
+      ambient: 0.32
+  nodes:
+    # The city: the data: block's world, its terrain wearing the aerial image and its buildings
+    # tinted by it.
+    - node: city
+      source: { data: city }
+      tint: satellite
+    # The swarm. Its keys are under swarm.* (swarm_controls drives them); these are the starting
+    # values.
+    - node: swarm
+      type: nav_swarm
+      city: city
+      agents: 60
+      belief: grouped
+      fog: true
+      seed: 7
+      targets: 6
+      noun: vehicles
+      groups: convoys
+      spawn: opposed               # one edge of the map to the other
+      separate: true
+      sep_radius: 3.0              # vehicle radii
+      sep_gain: 1.5
+      plant: humvee                # each a Jolt vehicle: wheels, suspension, engine and gearbox
+      children:
+        - { node: swarm_city, type: swarm_layer, layer: city }
+        - { node: swarm_agents, type: swarm_layer, layer: agents, look: humvee, lod: true,
+            near_cap: 10 }
+        - { node: swarm_flags, type: swarm_layer, layer: flags, visible: show.flags }
+        - { node: swarm_goals, type: swarm_layer, layer: goals, visible: show.goals }
+        - { node: swarm_trails, type: swarm_layer, layer: trails, visible: show.trails,
+            segments: 12, every: 3, width: { bind: view.path_width, default: 1.5 } }
+        - { node: swarm_path, type: swarm_layer, layer: path, visible: show.trails }
+        - { node: swarm_belief, type: swarm_layer, layer: belief, visible: show.belief,
+            tags: [belief], material: { opacity: 0.55 }, casts_shadow: false }
+        - { node: swarm_dots, type: swarm_layer, layer: dots, tags: [minimap] }
+        - { node: swarm_targets, type: swarm_layer, layer: targets, tags: [minimap] }
+        - { node: chase, type: swarm_layer, layer: follow }

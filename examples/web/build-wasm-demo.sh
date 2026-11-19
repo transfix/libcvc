@@ -125,6 +125,13 @@ PY
     cmake --build "${_yc_work}/build" --target install
 fi
 
+# The vehicle models arigl's gallery ships (src/arigl/CMakeLists.txt): the deps prefix's
+# share/cvc-scenes/shared, where the vehicle-humvee and vehicle-tactical-boat packages install,
+# unless the caller names another directory.
+if [[ -z "${CVC_WASM_VEHICLE_MODELS:-}" && -d "${CVC_WASM_DEPS}/share/cvc-scenes/shared" ]]; then
+    CVC_WASM_VEHICLE_MODELS="${CVC_WASM_DEPS}/share/cvc-scenes/shared"
+fi
+
 emcmake cmake -G Ninja -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_FIND_ROOT_PATH="${CVC_WASM_DEPS}" \
@@ -141,6 +148,7 @@ emcmake cmake -G Ninja -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
     -DCVC_ENABLE_ASSIMP=ON \
     ${CVC_WASM_BUNDLE:+-DCVC_WASM_BUNDLE="${CVC_WASM_BUNDLE}"} \
     ${CVC_WASM_NAV_WEIGHTS:+-DCVC_WASM_NAV_WEIGHTS="${CVC_WASM_NAV_WEIGHTS}"} \
+    ${CVC_WASM_VEHICLE_MODELS:+-DCVC_WASM_VEHICLE_MODELS="${CVC_WASM_VEHICLE_MODELS}"} \
     -DCVC_ENABLE_MESHER=ON \
     -DCVC_ENABLE_SDF=ON \
     -DCVC_BUILD_CVCGL=ON \
