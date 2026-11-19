@@ -853,6 +853,10 @@ world sections in mind:
 - **Settled, headless (owner, 2026-11-07):** a headless runtime still runs physics and the whole
   world without local rendering. The world half of scene realization is core libcvc; cvcGL adds the
   view (§14). Open within it: the token's name (proposed `scene.physics`).
+- **Q17. How do loaded and generated worlds meet? Settled (owner, 2026-11-19):** a generated world
+  is a bundle (§18.8): the city bundle's format extended, one dataset path into physics, the
+  navigator and the renderer, clients sent the bytes (or generating from the seed and comparing
+  hashes), and a save in the terrain lab.
 - **Settled with C++ for the core (owner, 2026-11-07):** the world runtime is C++, behind a scene
   node and pycvc; the lab's panels are `.ari` components over it.
 
@@ -1001,3 +1005,90 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   says how much.
 - The cost of 120 Hz with many vehicles, measured on the relay before the stock worlds grow.
 - An area of interest for entities: today every client gets every one.
+
+### 18.8 World contents: a generated world is a bundle
+
+The owner's decisions, 2026-11-19: a generated world is made as if it had been saved and loaded as
+a bundle, so a loaded city (Austin) and a generated world (the terrain lab) are one kind of world
+with one path into physics, the navigator and the renderer. The city bundle's format is extended,
+not replaced. Clients get a world's bytes, and may instead generate it from its seed and compare
+hashes. The terrain lab can save its world, in the browser too, also for import into other
+software. Nav materials, water and the wall colliders are in the bundle.
+
+**What it replaces.** Today the two kinds of world are different scene nodes:
+
+- a city is a data node: `data-load ... city_bundle` decodes `terrain.json` and `buildings.glb`
+  into a dataset (`world` as `cvc::world::world_geometry`, `terrain`, `buildings`, `bounds`,
+  `satellite`), the node is `source: { data: city }`, and `SceneWorld` reads its body through the
+  dataset;
+- a generated world is a `generated_world` node: `GeneratedWorldRuntime` makes the world and its
+  own colliders, a `water` node follows it through `world:`, and cvcGL draws it with its own
+  realize (`world_nodes.cpp`), not the data node's.
+
+Both reach Jolt as a `world_geometry` through `cvc::physics::add_world_geometry`, and
+`cvc::nav::world_grid` takes either. What is doubled is the node kind, the collider feeder, the
+renderer and the contents: a generated world also has roads, props, a painted ground, water and
+nav surfaces, which a city bundle cannot carry.
+
+**The bundle, version 2.** A version 1 bundle (`terrain.json`, `buildings.glb`, optional
+`buildings_flat.glb` and `satellite.png`) still loads as it does. Version 2 adds a manifest and
+files beside them:
+
+| File | What |
+|---|---|
+| `world.json` | The manifest: `format: cvc.city_bundle`, `version: 2`; the surface table by name (ids in the files are indices into it); every item (name, file, roles, surface, placement); `edge_walls`; an optional `region` the world is cut to; the water (`level`); the generator that made it (name, version, params, seed); and the content hash. |
+| `terrain.json` | As version 1. A large world's grid may be `grid_file: terrain.f32` instead of `grid` (little-endian float32, rows x cols, north first, as `grid`). |
+| `terrain_surfaces.u16` | One surface per terrain cell (little-endian uint16, north first): the nav and contact materials. |
+| `buildings.glb` | As version 1: world metres, z up, at terrain height. |
+| `<item>.glb` | Every other mesh item (roads, props, foliage, needles, the props' coarser rungs), one primitive per surface, the material named by the surface, per-vertex colour where the item has it. |
+| `streets.json` | The street centrelines and widths the roads were extruded from. |
+| `ground.png` | The painted ground texture, where a city has `satellite.png`. |
+
+- **Nav materials** are the terrain's cell surfaces and each item's face surfaces, read through
+  the one surface table, so the renderer, the physics and the navigator read the same materials
+  (`world_grid` keeps them instead of dropping them).
+- **The water** is the level in the manifest. The loader builds the bodies of water and the
+  water's field from the stored terrain at that level, as `generated_world` does now; the
+  navigator's `set_water` and a scene `water` node read the same level, so there is one water
+  knob, and deep water is a body to a car, not ground at mu 0.10.
+- **The walls** are the manifest's `edge_walls` at the world's edge, which is the `region` when
+  there is one: the grid, the colliders and the edge walls follow the same cut, made once.
+- **Derived things are not stored:** the terrain's LOD chunks, the water's shore grid and the
+  ground under the water are rebuilt from the stored terrain on load.
+- **The hash** is SHA-256 over every file but `world.json`, in name order (each name and its
+  bytes' SHA-256), so two worlds with the same contents hash the same whatever wrote them.
+- **The meshes are written through assimp's glTF 2 exporter** (glb, to memory, so the browser
+  writes a bundle as natively does), filling the model handler's `write`, which throws today: one
+  primitive per surface, per-vertex colour, triangles and lines. Reading `buildings.glb` already
+  goes through assimp, and the published wasm builds have it. The files open in other software
+  (Blender, for one).
+
+**One path in.** A generated world is a dataset of the same shape as a decoded bundle:
+`data-generate` beside `data-load` fills `world`, `terrain`, `buildings`, `bounds`, the ground
+texture and the rest, and the node is `source: { data: world }`. Regenerate bumps the dataset's
+revision, which `SceneWorld` already follows for a data node. `generated_world` the node kind
+becomes shorthand for a `data-generate` and its data node, so documents that use it keep working.
+`SceneWorld`'s public surface (`world`, `follow`, `restart`, `generated_world(id)`, `grid`,
+`vehicles`) does not change; `generated_world(id)` reads the dataset.
+
+**One renderer.** cvcGL's generated-world renderer (terrain LOD, the props' cells and rungs, roads,
+the painted ground, cloud shade) draws any world dataset, a city's included, and the data node's
+simpler world draw goes.
+
+**Getting it to a client.** The server sends the bundle's bytes, content-addressed and cached
+(§12, AD1), and a client builds the same world from them, with no generator determinism to pin
+across platforms. A client that has the generator named in the manifest may instead generate the
+world from its params and seed, write it as a bundle in memory, and compare the hash with the
+server's; on a mismatch it takes the bytes.
+
+**Saving.** The terrain lab saves its world as a bundle: natively a directory or a zip, in the
+browser a zip handed to the browser as a download. A save for other software adds the terrain as
+a mesh (`terrain.glb`) and a 16-bit height map PNG.
+
+| Phase | What | Size |
+|---|---|---|
+| GB1 | **The bundle, version 2:** the manifest, glb export through assimp, `write_city_bundle` from a `world_geometry` and a generated world's extras, `load_city_bundle` reading version 2 (items, cell surfaces, water level, region, edge walls, hash). A test: a generated world written and read back gives the same `world_geometry` and the same `SceneWorld` state hash after N steps. | M |
+| GB2 | **One path in:** `data-generate`; a generated world as a dataset; `SceneWorld` reads only data nodes; `generated_world` as shorthand; the region and the water level on the data node. | L |
+| GB3 | **One renderer** for any world dataset. | L |
+| GB4 | **Save in the terrain lab:** a directory or zip natively, a zip download in the browser, the terrain mesh and height map for other software. | M |
+| GB5 | **Clients:** a world's bytes by content address, cached; a seed and a hash compare as the shortcut. After OW2 and with WD5, AD1. | M |
