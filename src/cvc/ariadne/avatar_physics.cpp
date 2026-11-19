@@ -98,9 +98,8 @@ void avatar_world::move_to(ph::world &shared, const std::map<std::string, ph::bo
   add_avatar_material();
   for (auto &kv : _avatars) {
     const auto it = feet.find(kv.first);
-    kv.second.id =
-        create_avatar(it != feet.end() ? it->second : ph::body_state{}, kv.second.dynamic,
-                      kv.second.mass);
+    kv.second.id = create_avatar(it != feet.end() ? it->second : ph::body_state{},
+                                 kv.second.dynamic, kv.second.mass);
   }
 }
 

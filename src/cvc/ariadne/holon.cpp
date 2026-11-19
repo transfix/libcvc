@@ -173,9 +173,8 @@ bool holon::attach_world(SceneWorld *world, std::string *why) {
                                           _applied.policy.energy);
     next->set_gravity(_applied.physics.gravity);
     const world_physics &wp = _applied.physics; // the room's wind (O14)
-    next->set_wind(
-        {wp.wind_speed, wp.wind_dir * 3.14159265358979323846 / 180.0, wp.wind_gustiness},
-        wp.wind_base);
+    next->set_wind({wp.wind_speed, wp.wind_dir * 3.14159265358979323846 / 180.0, wp.wind_gustiness},
+                   wp.wind_base);
     next->set_statics(_statics_list);
   }
   for (auto &kv : _participants) {
