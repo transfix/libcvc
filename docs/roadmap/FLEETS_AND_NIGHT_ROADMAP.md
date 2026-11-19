@@ -89,8 +89,7 @@ world:
                                     # a list cycles over the vehicles; per team: { 0: jolt, ... }
         count: 800
         controller: nav@1
-        policy: trained             # trained | builtin | { uri, sha256 } | a data: entry
-        policy_missing: fall_back   # fall_back (to builtin, said in stats) | fail
+        policy: trained             # trained | builtin | { uri, path, sha256 } | { data: <entry> }
         metric: trained             # trained (the trainer's vehicle) | vehicle (each plant's own)
         sense: fog                  # known | fog
         belief: grouped             # shared | grouped (max(2, n/64)) | private
@@ -114,23 +113,41 @@ world:
   - `fleets.<name>.plant` switches it live, as `nav_plant.vehicle` does today: the vehicles keep
     their poses and start at rest on the new plant.
 - **The policy: trained or not, and which weights.**
-  - `trained` is the published trained CoefMLP. It is resolved as `coef_mlp::default_weights_path`
-    resolves it: `$CVC_NAV_WEIGHTS`, then the prefix's `share/cvc/nav`, then the `grl-snam-weights`
-    package.
+  - `trained` (the default) is the published trained CoefMLP, downloaded by default: the
+    `grl-snam-weights` package (`cvcpkg://cvc/grl-snam-weights`, its
+    `share/grl-snam-weights/coef_sdf.cvcnav`) through the data store, checked against the
+    registry's sha256 and cached by hash, so later runs read the cache. It is looked for in this
+    order (settled, D8):
+    1. `$CVC_NAV_WEIGHTS`, when set: a local override;
+    2. a copy installed in the prefix (`coef_mlp::default_weights_path`'s `share/cvc/nav`, or the
+       package installed beside libcvc);
+    3. the download, when the host's network allows `https://cvcpkg.org` (the document lists `net`
+       as an optional requirement, as the city's package does);
+    4. none found: the built-in net, said so (below).
   - `builtin` is `coef_mlp::default_biased()`, the constant (1, 3, 4) basin.
-  - Particular weights are named by `{ uri, sha256 }`: a file beside the document, an https URL, a
-    `cvcpkg://` package, or a `data:` entry, so they are fetched, cached and checked like the city.
+  - Other weights by URI: `policy: { uri, path, sha256 }`. The URI is another cvcpkg package
+    (`cvcpkg://ORG/NAME[@VERSION]`), an https URL, or a file beside the document; `path` names the
+    `.cvcnav` inside an archive or package; `sha256` pins it. `policy: { data: <entry> }` names a
+    `data:` entry, so the document's own `data:` block can declare the weights. Each is fetched,
+    checked and cached like the city.
   - The fleet's choice goes through `policy_library`, so weights named twice load once. A team or a
     single entity may name another, through the entity spec's `policy` / `policy_sha256`, which
     already exist. That is the nav lab's arms on one city.
   - `fleets.<name>.policy` switches it live through `sim_world::set_policy`, with no rebuild.
-  - **The fallback is visible.** `stats.policy` names what drives (`trained (<path>, sha256:...)`,
-    `builtin`, or `builtin: trained weights missing at <path>`), and `policy_missing: fail` refuses
-    to run without them.
-- **The metric.** `trained` plans with the trainer's vehicle, at the metric the weights learned
-  in, as the demos do. `vehicle` plans with each plant's own size and limits
+  - **Without the weights, it falls back visibly** (settled, D8). The built-in net drives, and the
+    run says so:
+    - `stats.policy` names what drives: `trained (cvcpkg://cvc/grl-snam-weights@1.0.0+cvc.1,
+      sha256:...)`, `builtin`, or `builtin: no trained weights (<why>: not installed, the network
+      off, the download failed)`;
+    - one warning goes to the host's log;
+    - the swarm panel's status line shows it.
+
+    While a download is under way the fleet drives on the built-in net, and it switches to the
+    trained weights live (`set_policy`) once they arrive.
+- **The metric** (settled, D9). `trained` plans with the trainer's vehicle, at the metric the
+  weights learned in, as the demos do. `vehicle` plans with each plant's own size and limits
   (`nav_plant_options::plan_with_vehicle`), as world vehicles do today. The default follows the
-  policy: `trained` with trained weights, `vehicle` with the built-in net (D9).
+  policy: `trained` with trained weights, `vehicle` with the built-in net. `metric:` overrides it.
 - **The navigator per fleet.** A fleet's entities share one `sim_world`, built with the fleet's
   belief mode (`sim_world::belief_mode`, which #1358's `SceneSwarm` already drives). Fog coverage
   and sensed walls come from the existing `WorldVehicles::belief`, extended per plane.
@@ -257,7 +274,7 @@ fleet, quantizes them, and sends only what a viewer's area of interest holds.
 | Phase | What | Needs | Size |
 |---|---|---|---|
 | **FL0** | **Measure first.** 800 kinematic world vehicles, headless: navigator tick, physics step with 800 kinematic bodies, `publish_entities`, and spawns. Then 60, 120 and 240 on Jolt, the most that keep up with the clock. Decide D3 and the Jolt default from the numbers. | — | S |
-| **FL1** | **Fleets in `WorldVehicles`.** `world: vehicles: fleets:` (count, archetype, controller, sense, belief per fleet navigator, spawn layout, seed, rally points as teams and colours, goals held), summary publishing, `poses(fleet)`, fleet restart and reseed. Its plant: any world plant, Jolt included, a list or per team, switched live. Its policy: `trained`, `builtin` or named weights by URI and hash (a `data:` entry too), per team or entity, switched live, the fallback said in `stats.policy` or refused; its metric. The gym spawns a fleet. Tests: `ariadne_scene_world_test` fleets (build, step, rally move, restart, belief modes, a Jolt fleet against a building, a mixed fleet, each policy choice and the missing-weights fallback); a gym fleet episode. | L2, #1339, #1340 | L |
+| **FL1** | **Fleets in `WorldVehicles`.** `world: vehicles: fleets:` (count, archetype, controller, sense, belief per fleet navigator, spawn layout, seed, rally points as teams and colours, goals held), summary publishing, `poses(fleet)`, fleet restart and reseed. Its plant: any world plant, Jolt included, a list or per team, switched live. Its policy: `trained` (downloads `cvcpkg://cvc/grl-snam-weights` unless installed or overridden), `builtin`, or other weights by cvcpkg package, URL, file or `data:` entry, per team or entity, switched live; the visible fallback; the metric following the policy. The gym spawns a fleet. Tests: `ariadne_scene_world_test` fleets (build, step, rally move, restart, belief modes, a Jolt fleet against a building, a mixed fleet, each policy choice, the download and the visible missing-weights fallback); a gym fleet episode. | L2, #1339, #1340 | L |
 | **FL2** | **The entity view.** `entity_layer` (bodies with LOD rungs, flags, goals, trails, path, belief, dots, targets, follow) over world vehicles; promotion of K entities to `vehicle_view` nodes; the threshold. #1358's `swarm_layer` code moves here. Test: `cvcgl_ariadne_entities`. | FL1 | M |
 | **FL3** | **The nav city documents on fleets.** nav_city_swarm/drive declare `world: data` and a fleet with entity layers. `nav_swarm` and `SceneSwarm` are removed. The minimap drags rally keys; the chase follows an entity. Perf gate: at least #1358's numbers on the reference laptop (and twice the C++ programs, measured back to back). | FL2 | M |
 | **FL4** | **Fleets on the relay.** A fleet identity section, batched quantized fleet pose packets, an area of interest for entities, and the client's entity view with model looks. `traffic.ari` becomes a fleet. Test: a relay room with 800 entities, bytes per client. | FL2, WD3 | L |
@@ -286,8 +303,8 @@ part.
   roads, or OSM later.
 - **D6. Time of day:** a scene key a client may override, or the server's world section only.
 - **D7. The shadow budget's default N:** desktop against WebGL2.
-- **D8. Without the trained weights:** fall back to the built-in net and say so (the demos'
-  behaviour, made visible), or refuse. Should `trained` fetch `grl-snam-weights` when the network
-  is on, as the city is fetched?
-- **D9. The navigator's metric by default:** the trainer's vehicle when the weights are trained, and
-  each plant's own otherwise, or one rule for every fleet.
+- **D8. Settled (Joe, 2026-11-18).** Without the trained weights the fleet falls back to the
+  built-in net, visibly. `trained` downloads `cvcpkg://cvc/grl-snam-weights` by default, and a
+  fleet can name another cvcpkg package or a URL instead.
+- **D9. Settled (Joe, 2026-11-18).** The navigator's metric follows the policy: the trainer's
+  vehicle with trained weights, each plant's own with the built-in net; `metric:` overrides.
