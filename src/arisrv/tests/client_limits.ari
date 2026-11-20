@@ -1,0 +1,31 @@
+# The client for ctest arisrv_client_limits (docs/roadmap/ARISRV_IDENTITY.md, ID4): stock arisrv
+# with client_programs_server.ari (5000 steps) and --rcon-password-file runs each client's programs
+# under the limits an admin set for it (server.limits), from its next program on. The client makes
+# itself an admin and sets its own. (= 1 0) is a boolean false, which refuses the kind (the DSL's
+# false is nil, which takes a limit back); t allows what the document allows.
+meta: { name: each client's limits on a relay, min_libcvc: 4.0.0 }
+tests:
+  a_rcon: |
+    (assert (get-attr (room-call "server.rcon" "rcon test password") "admin"))
+  b_under_the_documents_caps_it_runs: |
+    (assert (= (room-run "(+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (* 6 7)") 42))
+  c_programs_false_refuses_it: |
+    (let ((me (get-attr (room-call "server.whoami") "client_id")))
+      (room-call "server.limits" me (dict "programs" (= 1 0))))
+    (assert (= (try (begin (room-run "(+ 1 1)") "no error")
+                    (catch (PermissionError e) (get-attr e "code")))
+               "forbidden"))
+  d_true_takes_the_refusal_back: |
+    (let ((me (get-attr (room-call "server.whoami") "client_id")))
+      (room-call "server.limits" me (dict "programs" t)))
+    (assert (= (room-run "(* 6 7)") 42))
+  e_its_own_steps_lower_the_documents: |
+    (let ((me (get-attr (room-call "server.whoami") "client_id")))
+      (room-call "server.limits" me (dict "steps" 5)))
+    (assert (= (try (begin (room-run "(+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (* 6 7)") "no error")
+                    (catch (RuntimeError e) (get-attr e "code")))
+               "resource_exhausted"))
+  f_zero_steps_is_the_documents_again: |
+    (let ((me (get-attr (room-call "server.whoami") "client_id")))
+      (room-call "server.limits" me (dict "steps" 0)))
+    (assert (= (room-run "(+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (+ 1 1) (* 6 7)") 42))
