@@ -1796,6 +1796,23 @@ TEST(WakeNotifier, ClearingWaitsForACallInProgress) {
   EXPECT_FALSE(w.has_notifier());
 }
 
+// K-12: a notifier installed over another asserts (debug builds): it would take the first owner's
+// place (a pool's, a host batch's) silently. Installing where none is, and clearing, are fine.
+TEST(WakeNotifierDeathTest, InstallingOverAnotherAsserts) {
+#ifdef NDEBUG
+  GTEST_SKIP() << "a debug assertion";
+#else
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  detail::wakeup w;
+  std::atomic<int> wakes{0};
+  w.set_notifier(&count_wakes, &wakes);
+  w.set_notifier(nullptr, nullptr);
+  w.set_notifier(&count_wakes, &wakes);
+  EXPECT_DEATH(w.set_notifier(&count_wakes, &wakes), "a notifier is installed already");
+  w.set_notifier(nullptr, nullptr);
+#endif
+}
+
 // S2a.1 (S2-Q15): CVC_EXEC_FUZZ, read as a scheduler is made, yields at its ingress posts, between
 // the push and the wake. Posts from four threads at once still each call the notifier once, and
 // each lands.
