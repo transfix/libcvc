@@ -340,6 +340,7 @@ app::~app() {
   // pump_all runs, and its workers stop before the async host shuts down and the background pool,
   // which their groups' kernels ran on, closes.
   assert(cvc::state_exec::detail::live_groups(*this) == 0 && "an exec_group outlived its app");
+  _execPoolBuilt.store(nullptr, std::memory_order_release); // trySubmitKernel reads it no more
   _execPool.reset();
 
   // Async calls next: their kernels run on the background pool and post to the exec scheduler,
@@ -1650,6 +1651,7 @@ cvc::exec_pool &app::exec_pool(const pool_options &opts) {
         }
       }
       _execPool = std::make_unique<cvc::exec_pool>(o);
+      _execPoolBuilt.store(_execPool.get(), std::memory_order_release); // trySubmitKernel's read
       for (std::string &text : _execPool->take_notes())
         notes.emplace_back(1, std::move(text));
     }
@@ -2492,7 +2494,9 @@ app::CpuKernelPool *app::cpuKernelPool() {
     return pool;
   if (_kernelPoolsUnsplit.load(std::memory_order_acquire))
     return nullptr;
-  const cvc::exec_pool *exec = exec_pool_probe();
+  // The exec pool as exec_pool(opts) published it: one load, not exec_pool_probe()'s
+  // _execPoolMutex, for every kernel before any exec pool exists (R2's S-m13).
+  const cvc::exec_pool *exec = _execPoolBuilt.load(std::memory_order_acquire);
   if (!exec)
     return nullptr; // no exec pool yet: the background pool, as before
   const unsigned int workers = exec->threads();

@@ -528,10 +528,14 @@ public:
 
   // Set the maximum number of concurrent threads in the pool
   // Default is hardware_concurrency() or 4 if unknown
+  // Once this app's exec pool has workers and the kernel pools have split (trySubmitKernel), it
+  // sizes the background pool, background_io, only: background_cpu, which runs the async kernels
+  // other than io calls', keeps max(1, cores - exec workers) (backgroundCpuPoolSize()).
   void setThreadPoolSize(unsigned int size);
   unsigned int getThreadPoolSize() const;
 
-  // Get thread pool statistics
+  // Get thread pool statistics (the background pool's: background_io's once the kernel pools have
+  // split, so background_cpu's tasks are not counted)
   unsigned int getActiveThreadCount() const;
   unsigned int getPendingThreadCount() const;
 
@@ -1088,7 +1092,10 @@ protected:
   // background_cpu (trySubmitKernel; app.cpp, "The kernel pools"), defined in app.cpp: made with
   // its workers once this app's exec pool has workers, under _cpuKernelPoolMutex, and published in
   // _cpuKernelPoolLive (read without the mutex). _kernelPoolsUnsplit: the exec pool was built
-  // without workers, so the pools never split.
+  // without workers, so the pools never split. _execPoolBuilt: _execPool once exec_pool(opts) has
+  // built it (cleared by ~app before it goes), so a kernel submitted before any exec pool exists
+  // reads one atomic instead of taking _execPoolMutex (R2's S-m13).
+  std::atomic<cvc::exec_pool *> _execPoolBuilt{nullptr};
   struct CpuKernelPool;
   std::unique_ptr<CpuKernelPool> _cpuKernelPool;
   std::atomic<CpuKernelPool *> _cpuKernelPoolLive{nullptr};
