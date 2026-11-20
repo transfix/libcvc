@@ -5665,7 +5665,8 @@ makes a glTF vehicle +X forward, +Z up and true to scale (as the C++ demos'
 a physics body's pose. Its planning grid is `pycvc.nav_world_rasterize(city.world(), rows, cols,
 ...)`, cvc::nav's rasterizer (no VTK), which also gives the terrain's height at each sample
 (`pycvc.nav_world_grid(world, cell)` is the same grid walled at its edge, with its signed distance
-and free points; `AriApp.grid(node, cell)` gives it for a scene's generated or data node): the
+and free points; `AriApp.grid(node, cell)` gives it for a scene's generated or data node, and
+`AriApp.world_geometry(node)` that node's world, under a drawn host too through `ari_app_attach`): the
 navigator gets the grade (`nav_sim_world_set_terrain` with the Humvee's
 `nav_plant.terrain_config_of`), and the routes keep off the slopes `nav_terrain_build` marks
 infeasible for it. The Jolt plant drives on flat ground with the buildings as boxes, as the C++
