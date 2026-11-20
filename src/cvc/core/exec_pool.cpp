@@ -996,6 +996,9 @@ bool detach_begin(state_exec::exec_group &group) noexcept {
   return group.pool_link().attached.load(std::memory_order_acquire) != nullptr;
 }
 
+// S2a.0 stub: nothing holds host_held until S2a.4.
+bool host_held_here(state_exec::exec_group &) noexcept { return false; }
+
 void detach_end(state_exec::exec_group &group) noexcept {
   se::detail::group_pool_link &link = group.pool_link();
   auto *const p = static_cast<pool_state *>(link.attached.exchange(nullptr));

@@ -291,6 +291,9 @@ bool detach_begin(state_exec::exec_group &group) noexcept;
 // its notifier is cleared (waiting for a wake in progress) and its attachment dropped. Its
 // host-queue entries stay for purge_host_calls, after the kills. Nothing when it is not attached.
 void detach_end(state_exec::exec_group &group) noexcept;
+// Whether the calling thread holds `group`'s host_held now (inside with_group, or running a host
+// body or callback of it under the token): a teardown there aborts (the amended transitions).
+bool host_held_here(state_exec::exec_group &group) noexcept;
 // run_on_host for a worker pumping `group` that then waits for `fn` to have run (a host_proxied
 // call that cannot park): the caller runs it as soon as it services the queue, while the worker
 // is blocked.
