@@ -1224,6 +1224,8 @@ windows:
         color: "#ff8000"
       - text: Slot
         color: c3
+      - text: Short
+        color: "#f80"
       - text: Off
         color: none
       - button: Go
@@ -1263,6 +1265,11 @@ windows:
   const Widget *slot = find(r.root, Kind::Text, "Slot");
   ASSERT_TRUE(slot->has_text_color); // c3: the chart's yellow, 0xeda100
   EXPECT_NEAR(slot->text_color[0], 0xed / 255.0f, 1e-6);
+  const Widget *shorthex = find(r.root, Kind::Text, "Short"); // #rgb: #f80 is #ff8800
+  ASSERT_TRUE(shorthex->has_text_color);
+  EXPECT_FLOAT_EQ(shorthex->text_color[0], 1.0f);
+  EXPECT_NEAR(shorthex->text_color[1], 0x88 / 255.0f, 1e-6);
+  EXPECT_FLOAT_EQ(shorthex->text_color[2], 0.0f);
   EXPECT_FALSE(find(r.root, Kind::Text, "Off")->has_text_color);
   EXPECT_TRUE(find(r.root, Kind::Text, "Off")->color_src.empty());
   // A `color:` beside `button:` is the button's colour, not a colour picker.

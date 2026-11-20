@@ -5,7 +5,7 @@
 //
 //   - "r,g,b" or "r g b", each channel 0..1 (what a `color` picker writes to its key);
 //   - "[r, g, b]", the same in brackets;
-//   - "#rrggbb";
+//   - "#rrggbb", or "#rgb" (each digit twice: "#f80" is "#ff8800");
 //   - "c0".."c7", the chart's categorical slots (blue, orange, aqua, yellow, magenta, green,
 //     violet, red), so a row and its curve in a chart can share one.
 //

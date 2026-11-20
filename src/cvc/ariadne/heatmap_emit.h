@@ -76,10 +76,6 @@ void sweep_heatmap_caches(std::unordered_map<std::string, HeatmapCache> &caches,
 // "" for no value), {text}, {row_label}, {col_label} and {mark} (1 or 0).
 std::string heatmap_tooltip_tokens(const std::string &tmpl, const HeatmapCellEvent &cell);
 
-// A colour as a document writes one: "#rrggbb", "#rgb", or "r,g,b" with each 0..1. False when it
-// is none of them.
-bool parse_heatmap_color(const std::string &text, float rgb[3]);
-
 } // namespace ariadne
 } // namespace cvc
 

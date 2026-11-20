@@ -35,12 +35,15 @@ bool is_no_color(std::string_view s) {
 
 bool parse_color_text(std::string_view s, float out[3]) {
   s = trim(s);
-  if (s.size() == 7 && s[0] == '#') {
+  if ((s.size() == 7 || s.size() == 4) && s[0] == '#') {
     const std::string digits(s.substr(1));
     if (!std::all_of(digits.begin(), digits.end(),
                      [](char c) { return std::isxdigit(static_cast<unsigned char>(c)) != 0; }))
       return false;
-    rgb_of(static_cast<unsigned>(std::strtoul(digits.c_str(), nullptr, 16)), out);
+    unsigned hex = static_cast<unsigned>(std::strtoul(digits.c_str(), nullptr, 16));
+    if (digits.size() == 3) // #rgb: each digit twice, #f80 = #ff8800
+      hex = ((hex >> 8) & 0xf) * 0x110000 + ((hex >> 4) & 0xf) * 0x1100 + (hex & 0xf) * 0x11;
+    rgb_of(hex, out);
     return true;
   }
   if (s.size() == 2 && (s[0] == 'c' || s[0] == 'C') && s[1] >= '0' && s[1] <= '7') {

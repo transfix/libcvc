@@ -581,7 +581,7 @@ with `(has? "heatmap")`. The cells come from a subtree at `bind`:
   are optional: children `row_labels.<i>`, or comma-separated text (`a,b,c`). A side past 256
   cells draws its first 256 and warns.
 - **`ramp:`** is a list of `[value, colour]` stops, sorted by value, each colour `"#rrggbb"`,
-  `"#rgb"` or `[r, g, b]` (0 to 1). Between two stops the colour is mixed in proportion. Below the
+  `"#rgb"`, `c0` to `c7` or `[r, g, b]` (0 to 1), as §5.26 reads one. Between two stops the colour is mixed in proportion. Below the
   first and above the last it is that end stop's colour (clamped). With no ramp every value is one
   grey. The core colours the cells, so every backend shows the same colours.
 - **The tooltip** for the hovered cell is the document's `tooltip:` with the cell's tokens filled
@@ -4655,14 +4655,14 @@ windows:
 
 **`color:`** takes one of these:
 
-- A colour written in the document: `[r, g, b]` (each 0 to 1), `"#rrggbb"`, `"r,g,b"`, or `c0`
-  to `c7`, the chart's eight slots (blue, orange, aqua, yellow, magenta, green, violet, red), so
+- A colour written in the document: `[r, g, b]` (each 0 to 1), `"#rrggbb"`, `"#rgb"`, `"r,g,b"`,
+  or `c0` to `c7`, the chart's eight slots (blue, orange, aqua, yellow, magenta, green, violet, red), so
   a row and its curve in a chart can share one. `none` is the default colour.
 - `{ bind: key }`: the key's value, read each frame.
 - `"(expr)"`: an expression on the read lane (§2.1), computed each frame.
 
 A key's value, or an expression's, is a colour in the same forms: `"r,g,b"` or `"r g b"`,
-`"[r, g, b]"`, `"#rrggbb"`, `c0` to `c7`, or, from an expression, a list of three numbers.
+`"[r, g, b]"`, `"#rrggbb"`, `"#rgb"`, `c0` to `c7`, or, from an expression, a list of three numbers.
 `""`, `none`, `default` or nil means the widget's own colour, which is how an expression turns a
 colour off. A `color` picker's key (`"r,g,b"`) can colour another widget directly.
 

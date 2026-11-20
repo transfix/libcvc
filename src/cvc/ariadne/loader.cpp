@@ -8,7 +8,7 @@
 // LOAD GATE (checked first — a document that needs a newer libcvc fails to load
 // rather than half-rendering), plus semantic validation surfaced as warnings.
 
-#include "heatmap_emit.h" // parse_heatmap_color: a heatmap's ramp stops and mark colour
+#include "heatmap_emit.h"
 
 #include <algorithm>
 #include <cctype>
@@ -556,10 +556,11 @@ std::vector<KeyBinding> parse_keys(Ctx &ctx, const YAML::Node &n) {
   return out;
 }
 
-// A colour as a document writes one: "#rrggbb", "#rgb", or [r, g, b] with each 0..1.
+// A colour as a document writes one (color_value.h): "#rrggbb", "#rgb", c0..c7, "r,g,b", or
+// [r, g, b] with each 0..1.
 bool yaml_color(const YAML::Node &n, float rgb[3]) {
   if (n && n.IsScalar())
-    return parse_heatmap_color(n.Scalar(), rgb);
+    return parse_color_text(n.Scalar(), rgb);
   if (!n || !n.IsSequence() || n.size() != 3)
     return false;
   std::string joined;
@@ -568,7 +569,7 @@ bool yaml_color(const YAML::Node &n, float rgb[3]) {
       return false;
     joined += (joined.empty() ? "" : ",") + c.Scalar();
   }
-  return parse_heatmap_color(joined, rgb);
+  return parse_color_text(joined, rgb);
 }
 
 // A `heatmap:` (Kind::Heatmap): its subtree at `bind`, the `ramp:` stops ([at, colour], sorted
