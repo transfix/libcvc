@@ -1073,13 +1073,18 @@ uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
   if (registry_ && !has_runnable() && cycle_collection_due(*registry_))
     collect_cycles(*registry_);
 
-  // The pump's report (S2-Q4), always published: what the run left, which a pool's release reads
-  // instead of the scheduler. The deadline is the earliest work no post announces: the earliest
-  // live timer (precise, as wait_for_work keeps it), the calls' next timeout or charge, the frame
-  // waiters' beat (a coarse 1 ms, as Exec.run's), and the idle collection falling due. The clock
-  // is read only for a beat.
+  // The pump's report (S2-Q4): what the run left, which a pool's release (or a host batch's wait)
+  // reads instead of the scheduler. Computed only while a wake notifier is installed, for those
+  // readers: with none it is left as it was and the run loop is master's (R2b S-m2: the timer peek
+  // below pops stale heap entries). The deadline is the earliest work no post announces: the
+  // earliest live timer (precise, as wait_for_work keeps it), the calls' next timeout or charge,
+  // the frame waiters' beat (a coarse 1 ms, as Exec.run's), and the idle collection falling due.
+  // The clock is read only for a beat.
+  if (!wakeup_->has_notifier())
+    return taken;
   run_report_.runnable = has_runnable();
   run_report_.best_runnable = procs_.best_runnable();
+  run_report_.awaiting_frame = procs_.awaiting_count() > 0;
   clock::time_point next = clock::time_point::max();
   bool precise = false;
   if (procs_.timed_count() > 0) {

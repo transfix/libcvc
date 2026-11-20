@@ -1841,8 +1841,11 @@ TEST(WakeNotifier, FuzzedPostsEachCallItOnce) {
 // environment of the world's, and (hold), an async function on the app's pool whose kernel runs
 // until its call is cancelled (the group's teardown shuts its host down, which cancels it).
 // Pumps are steps-only. No case times anything: each deadline is bounded by clock readings taken
-// around the pump, with no slack.
+// around the pump, with no slack. The world installs a wake notifier that does nothing on its
+// group, as a pool's attach would: the report is computed only while one is installed (R2b S-m2).
 namespace {
+
+void ignore_wakes(void *) noexcept {}
 
 struct report_world {
   cvc::app app;
@@ -1851,13 +1854,15 @@ struct report_world {
   environment_ptr env = builtins::make_default_environment();
   std::unique_ptr<exec_group> group;
 
-  explicit report_world(const char *policy = nullptr) {
+  explicit report_world(const char *policy = nullptr, bool notified = true) {
     if (policy)
       tree("state_exec.policy").value(std::string(policy));
     exec_group::options opts;
     opts.name = "s2a3";
     opts.app = &app;
     group = std::make_unique<exec_group>(std::move(opts));
+    if (notified)
+      group->sched().set_wake_notifier(&ignore_wakes, nullptr);
     ictx.sched = &group->sched();
     ictx.root = &tree;
     ictx.proc = make_process();
@@ -1904,6 +1909,7 @@ TEST(PumpReport, ASleepersWakeIsAPreciseDeadline) {
   EXPECT_EQ(w.status(pid), process_status::waiting);
   EXPECT_FALSE(r.runnable);
   EXPECT_FALSE(r.best_runnable.has_value());
+  EXPECT_FALSE(r.awaiting_frame);
   EXPECT_TRUE(r.deadline_precise);
   EXPECT_GE(r.next_deadline, before + kFiveS - kOneMs);
   EXPECT_LE(r.next_deadline, after + kFiveS);
@@ -1937,13 +1943,40 @@ TEST(PumpReport, AFrameWaiterIsACoarseMillisecond) {
     ASSERT_FALSE(r.failed);
     EXPECT_EQ(w.status(pid), process_status::waiting) << "frame " << frame;
     EXPECT_FALSE(r.runnable);
+    EXPECT_TRUE(r.awaiting_frame) << "frame " << frame;
     EXPECT_FALSE(r.deadline_precise) << "frame " << frame;
     EXPECT_GE(r.next_deadline, before + kOneMs) << "frame " << frame;
     EXPECT_LE(r.next_deadline, after + kOneMs) << "frame " << frame;
   }
   const pump_result r = w.pump();
   EXPECT_EQ(w.status(pid), process_status::terminated);
+  EXPECT_FALSE(r.awaiting_frame);
   EXPECT_EQ(r.next_deadline, report_clock::time_point::max());
+}
+
+// With no wake notifier installed the report is not computed (R2b S-m2): a scheduler nothing reads
+// it from runs master's loop. A pump of a group that never had one reports nothing of its sleeper;
+// a report computed under a notifier stays as it was once the notifier is cleared, though its frame
+// waiter has ended since.
+TEST(PumpReport, WithoutANotifierTheReportIsLeftAsItWas) {
+  report_world w(nullptr, /*notified=*/false);
+  const int sleeper = w.submit("(begin (sleep 5) 1)");
+  const pump_result r0 = w.pump();
+  ASSERT_FALSE(r0.failed);
+  EXPECT_EQ(w.status(sleeper), process_status::waiting);
+  EXPECT_EQ(r0.next_deadline, report_clock::time_point::max()) << "computed with no notifier";
+  EXPECT_FALSE(r0.deadline_precise);
+  const int waiter = w.submit("(begin (await 1) 2)");
+  w.group->sched().set_wake_notifier(&ignore_wakes, nullptr);
+  const pump_result r1 = w.pump();
+  ASSERT_TRUE(r1.awaiting_frame);
+  EXPECT_NE(r1.next_deadline, report_clock::time_point::max());
+  w.group->sched().set_wake_notifier(nullptr, nullptr);
+  const pump_result r2 = w.pump(); // the waiter ends
+  EXPECT_EQ(w.status(waiter), process_status::terminated);
+  EXPECT_TRUE(r2.awaiting_frame) << "computed with no notifier";
+  EXPECT_EQ(r2.next_deadline, r1.next_deadline);
+  EXPECT_EQ(r2.deadline_precise, r1.deadline_precise);
 }
 
 // A process with max_steps whose call is in flight: the call's 1 ms charge beat, coarse.
