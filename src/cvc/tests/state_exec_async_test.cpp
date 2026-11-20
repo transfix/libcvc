@@ -1683,9 +1683,11 @@ TEST(AsyncScheduler, KO02_AThrowingKillDoesNotStopTheRest) {
   }
 }
 
-// --- Stage 2a: the wake notifier and the pump's report (S2a.1, S2a.3; S2-Q2, S2-Q4) ---
+// --- Stage 2a: the wake notifier, the pump's report, the long-step monitor (S2a.1, S2a.3, S2a.7)
+// ---
 
 // The includes the cases below add to the file's own.
+#include <algorithm>
 #include <cstdlib>
 #include <cvc/state/state_exec/exec_group.h>
 #include <cvc/state/state_exec/process_table.h> // detail::wakeup
@@ -2025,6 +2027,147 @@ TEST(PumpReport, NothingPendingAndTheCollectionFallingDue) {
     EXPECT_GE(r2.next_deadline, before + std::chrono::seconds(1));
     EXPECT_LE(r2.next_deadline, after + std::chrono::seconds(1));
   }
+}
+
+// S2a.7 (S2-Q11): the long-step monitor. A step longer than the threshold (at slice_steps above 1,
+// a run's window between two of its clock readings) is counted, and reported to the sink with the
+// native it ended in, at most once a minute per name. The natives here take 5 ms or more against
+// a 1 ms threshold, which holds however loaded the machine is; other steps may be caught too on a
+// loaded machine, so counts are lower bounds and reports are checked by name.
+namespace {
+
+struct long_step_world {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  std::vector<std::string> reports;
+  async_scheduler sched;
+  environment_ptr env = builtins::make_default_environment();
+
+  explicit long_step_world(std::uint64_t slice = 1) {
+    sched.set_watch_root(&tree);
+    sched.set_slice_steps(slice);
+    sched.set_long_step_sink(
+        [this](const std::string &native, double) { reports.push_back(native); });
+    builtins::register_fn(env, "nap", [](std::span<const value_t>) -> value_t {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      return value_t(int64_t{1});
+    });
+    // A native that runs until its step's deadline cuts it (max_step_time): the step throws.
+    builtins::register_fn(env, "spin", [](call_args a) -> value_t {
+      const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+      while (std::chrono::steady_clock::now() < until)
+        eval_deadline_check(a.context(), "spin");
+      return value_t();
+    });
+  }
+  long_step_world(const long_step_world &) = delete;
+  long_step_world &operator=(const long_step_world &) = delete;
+
+  int run(const std::string &script, execute_options opts = {}) {
+    opts.env = environment::extend(env);
+    const int pid = sched.execute(script, opts);
+    sched.sync_run();
+    return pid;
+  }
+  int reported(const std::string &name) const {
+    return static_cast<int>(std::count(reports.begin(), reports.end(), name));
+  }
+  std::string all_reports() const {
+    std::string out;
+    for (const std::string &r : reports)
+      out += "[" + r + "]";
+    return out;
+  }
+};
+
+} // namespace
+
+// A group of an app logs a long step through the app, naming its native and the group.
+TEST(LongSteps, AGroupsLongNativeIsCountedAndLogged) {
+  cvc::app app;
+  const std::string log_key("s2a7_log");
+  app.data(log_key, std::string());
+  app.properties("system.log_output", log_key);
+  exec_group::options o;
+  o.name = "s2a7";
+  o.app = &app;
+  o.slice_steps = 1;
+  exec_group g(std::move(o));
+  g.sched().set_long_step_default(0.001);
+  environment_ptr env = environment::extend(builtins::make_default_environment());
+  builtins::register_fn(env, "nap", [](std::span<const value_t>) -> value_t {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    return value_t(int64_t{1});
+  });
+  execute_options eo;
+  eo.env = env;
+  const int pid = g.execute(std::string("(nap)"), eo);
+  g.pump({100000, std::numeric_limits<double>::infinity()});
+  const auto info = g.sched().get_process_info(pid);
+  ASSERT_TRUE(info && info->status == process_status::terminated);
+  EXPECT_GE(g.sched().long_steps(), 1u);
+  const std::string log = app.data<std::string>(log_key);
+  EXPECT_NE(log.find("long step: nap took "), std::string::npos) << log;
+  EXPECT_NE(log.find(" ms (group 's2a7')"), std::string::npos) << log;
+}
+
+// The tree's state_exec.long_step_ms, when set, wins over the default: 5000 ms catches no 5 ms
+// step; a value that is not a number leaves it in force; unset, the default's 1 ms catches it; 0
+// turns the monitor off.
+TEST(LongSteps, TheTreesSettingWinsOverTheDefault) {
+  long_step_world w;
+  w.sched.set_long_step_default(0.001);
+  w.tree("state_exec.long_step_ms").value(std::string("5000"));
+  w.run("(nap)");
+  EXPECT_EQ(w.sched.long_steps(), 0u) << "the tree's 5 s lost to the 1 ms default";
+  w.tree("state_exec.long_step_ms").value(std::string("soon"));
+  w.run("(nap)");
+  EXPECT_EQ(w.sched.long_steps(), 0u) << "a value that is not a number replaced the 5 s";
+  w.tree("state_exec.long_step_ms").value(std::string(""));
+  w.run("(nap)");
+  const std::uint64_t caught = w.sched.long_steps();
+  EXPECT_GE(caught, 1u) << "unset, the 1 ms default did not apply";
+  EXPECT_EQ(w.reported("nap"), 1) << w.all_reports();
+  w.tree("state_exec.long_step_ms").value(std::string("0"));
+  w.run("(nap)");
+  EXPECT_EQ(w.sched.long_steps(), caught) << "0 did not turn the monitor off";
+}
+
+// A long step that throws (its native cut by the step's deadline) is counted and named.
+TEST(LongSteps, AThrowingLongStepIsCounted) {
+  long_step_world w;
+  w.sched.set_long_step_default(0.001);
+  execute_options capped;
+  capped.max_step_time = 0.01;
+  const int pid = w.run("(spin)", capped);
+  const auto info = w.sched.get_process_info(pid);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->status, process_status::killed);
+  EXPECT_EQ(w.sched.get_exit_error(pid), "time_limit_exceeded");
+  EXPECT_GE(w.sched.long_steps(), 1u);
+  EXPECT_EQ(w.reported("spin"), 1) << w.all_reports();
+}
+
+// At slice_steps 256 the program is one run, read in windows: the long window is counted and named
+// by its last step's native, here the (nap) that ends the program.
+TEST(LongSteps, ALongWindowAtSlice256NamesItsLastNative) {
+  long_step_world w(256);
+  w.sched.set_long_step_default(0.001);
+  const int pid = w.run("(nap (+ 1 2))");
+  const auto info = w.sched.get_process_info(pid);
+  ASSERT_TRUE(info && info->status == process_status::terminated);
+  EXPECT_GT(info->step_count, 1u) << "one step: no window to read";
+  EXPECT_GE(w.sched.long_steps(), 1u);
+  EXPECT_EQ(w.reported("nap"), 1) << w.all_reports();
+}
+
+// Two long steps of one native are both counted, and reported once (once a minute per name).
+TEST(LongSteps, ANameIsReportedOnceAMinute) {
+  long_step_world w;
+  w.sched.set_long_step_default(0.001);
+  w.run("(begin (nap) (nap) 1)");
+  EXPECT_GE(w.sched.long_steps(), 2u);
+  EXPECT_EQ(w.reported("nap"), 1) << w.all_reports();
 }
 
 // --- Stage S: slices (td 4.4, 8.10; S2-Q12; S2 section 4's SL-1..SL-9) ---

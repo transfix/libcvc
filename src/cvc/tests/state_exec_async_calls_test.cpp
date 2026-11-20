@@ -2763,10 +2763,9 @@ TEST(KernelPools, ACallOnceBackgroundCpuHasStoppedRaisesAndLeavesTheHost) {
 
 // --- group 0's long-step sink (S2a.7, S2-Q11) ---
 
-// app::exec_scheduler() installs a sink that logs a long step through the app. Disabled on
-// perf/threaded-s2a-m, where set_long_step_sink only keeps the sink: it is enabled once the
-// monitor (W's S2a.7 lines in async_scheduler.cpp) is merged.
-TEST(LongStepSink, DISABLED_Group0LogsALongStepThroughTheApp) {
+// app::exec_scheduler() installs a sink that logs a long step through the app; the monitor
+// (async_scheduler.cpp) catches the step.
+TEST(LongStepSink, Group0LogsALongStepThroughTheApp) {
   cvc::app app;
   const std::string log_key("long_step_log");
   app.data(log_key, std::string());

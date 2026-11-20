@@ -187,6 +187,14 @@ exec_group::exec_group(options o) : impl_(std::make_unique<impl>()) {
   if (m.opts.slice_seconds)
     m.sched->set_slice_seconds(*m.opts.slice_seconds);
   if (app) {
+    // The long-step monitor's line (S2a.7, S2-Q11), as group 0's (app.cpp): through the app at
+    // level 2, inside the pump, interruption held off. Off unless a threshold is set (the tree's
+    // state_exec.long_step_ms, or the default a pool with workers gives the groups it pumps).
+    m.sched->set_long_step_sink([app, name = m.opts.name](const std::string &native, double s) {
+      char ms[32];
+      std::snprintf(ms, sizeof ms, "%.1f", s * 1e3);
+      note(app, 2, "long step: " + native + " took " + ms + " ms (group '" + name + "')");
+    });
     // Pids no other group or the app scheduler repeats (S1.4).
     m.sched->set_pid_source(app->exec_pid_source());
     // The app's lock manager, in its own mode, as the app scheduler attaches (S1-Q1): with-lock
