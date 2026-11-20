@@ -5724,9 +5724,9 @@ on_tick: |
 - **`requires: [relay]`** holds only in a server document. On any other host, a document that
   requires it fails to load, and the error says it runs on the relay (`arisrv --doc`).
 - **`server: publish:`** names the namespaces the document publishes.
-  - A name is a dotted path of identifiers. It may not be `conf`, `ui`, `ariadne`,
-    `state_exec` or `room`, or under one of them, and none may be inside another or overlap the
-    document's own prefix.
+  - A name is a dotted path of identifiers. It may not be `conf`, `ui`, `arisrv` (the relay's
+    own records, which no client is sent), `ariadne`, `state_exec` or `room`, or under one of
+    them, and none may be inside another or overlap the document's own prefix.
   - Each is a writable hole of the same name in the document's chroot (§7.4): `board` there is
     the tree's `board`. `state-set`, `state-set-tree` and the atomics write through it.
     `state-delete` and `state-watch` act on the physical path (§7.4), so to take entries out,
@@ -5846,9 +5846,17 @@ server:
   a file or the network, or stops the relay.
 - **One at a time.** A second program from a client whose first is still running is answered
   `rate_limited`.
+- **Each client's limits.** A relay can give each client caps of its own
+  (`ServerDocument::set_client_limits`; [roadmap/ARISRV_IDENTITY.md](roadmap/ARISRV_IDENTITY.md)
+  §2.6). They are read at each start, so a change applies to the client's next program. They
+  replace the document's caps for that client: lower, or higher up to the action lane's
+  (`ariadne.limits.action_max_*`), which hold over every process. So `client_programs:` (and
+  `client_guests:`) are what every client gets, and an admin can give one client more, or less.
+  A client whose limits refuse it programs is answered `forbidden`.
 - **Errors** raise as `room-call`'s do (§9.8.1), with these codes:
   - `unavailable`: the relay runs no document with `client_programs:`, or its document hasn't
     loaded.
+  - `forbidden`: this client's limits refuse it programs.
   - `invalid`: the source doesn't parse on its own, or is over 64 KiB.
   - `rate_limited`.
   - `failed`: the program raised. The message is its report.
@@ -5894,8 +5902,11 @@ server:
   start function (which would run to its end as the instance is made: export `_initialize`
   instead). `failed`: a module that doesn't compile, or doesn't export the function, and every
   trap, `fail()`, `PermissionError` and `MemoryError`. `unavailable`: no `client_guests:`, or a
-  relay without WebAssembly. Stock arisrv refuses to start a document with `client_guests:`, and
-  arisrvx refuses one under `--bind-writes off`.
+  relay without WebAssembly. `forbidden`: this client's limits refuse it guests. Stock arisrv
+  refuses to start a document with `client_guests:`, and arisrvx refuses one under
+  `--bind-writes off`.
+- **Each client's limits** apply as for programs (§9.7.1): its `steps`, `time` and `memory_mb`,
+  the last capping its linear memory, never above `ariadne.limits.wasm_max_memory`.
 
 ### 9.8 Python beside the relay: `arisrvx`
 
