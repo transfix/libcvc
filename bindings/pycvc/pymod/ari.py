@@ -637,8 +637,10 @@ class Host:
     @property
     def entities(self):
         """The running world's entities (its vehicles) as a ``pycvc.WorldEntities``: ``list()``,
-        ``spawn(archetype, ...)``, ``despawn(id)``, and ``set_intent(id, steer=, accel=, mode=,
-        weight=, force=(fx, fy))`` to steer one from here (ARIADNE_WORLDS.md §14, S1)."""
+        ``spawn(archetype, ...)``, ``despawn(id)``, ``set_intent(id, steer=, accel=, mode=,
+        weight=, force=(fx, fy))`` to steer one from here (ARIADNE_WORLDS.md §14, S1), and
+        ``set_pose(id, x, y, ...)`` / ``set_poses(ids, poses)`` to place the ``pose`` entities an
+        outside simulation runs."""
         self._check_open()
         if getattr(self, "_entities", None) is None:
             if isinstance(self.runtime, self._pycvc.AriApp):

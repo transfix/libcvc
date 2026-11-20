@@ -1248,6 +1248,8 @@ class _Export:
 
 _exports: dict[str, _Export] = {}
 _in_block = False  # the server document's block is loading: its load registers what it exports
+# The relay's built-in calls (docs/roadmap/ARISRV_IDENTITY.md): arisrv answers these itself.
+_RESERVED_PREFIX = "server."
 
 
 def export(fn=None, *, name=None, clients=False, roles=None, timeout=None, is_async=False):
@@ -1259,6 +1261,11 @@ def export(fn=None, *, name=None, clients=False, roles=None, timeout=None, is_as
     def mark(f):
         if not callable(f):
             raise TypeError(f"export: {f!r} is not callable")
+        named = name or f.__name__
+        if named.startswith(_RESERVED_PREFIX):
+            raise ValueError(f"export: {named!r}: names under {_RESERVED_PREFIX!r} are the "
+                             "relay's own calls (server.whoami, server.set, ...), which it "
+                             "answers before a call reaches Python, so this one could never run")
         options = {"name": name or f.__name__, "is_async": is_async, "with_call": False,
                    "done_channel": "", "clients": clients, "roles": roles, "timeout": timeout}
         f.__ari_export__ = options

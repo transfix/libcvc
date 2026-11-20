@@ -8,12 +8,16 @@
 // LOAD GATE (checked first — a document that needs a newer libcvc fails to load
 // rather than half-rendering), plus semantic validation surfaced as warnings.
 
+#include "heatmap_emit.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/ariadne.h> // has_widget_type (custom-widget load-time check)
+#include <cvc/ariadne/color_value.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/media.h>    // §5.11 image: fit / shape / URI src
 #include <cvc/ariadne/requires.h> // free_heads: a granted function brings the ones it calls
@@ -250,7 +254,8 @@ const char *const kAriSchema = R"ARISCHEMA({
         "status": {"type": "string"},
         "fit": {"enum": ["contain", "cover", "fill"]},
         "shape": {"enum": ["rect", "circle"]},
-        "background": {"type": ["string", "object"]},
+        "background": {"type": ["string", "object", "array"]},
+        "color": {"type": ["string", "array", "object"]},
         "poster": {"type": "string"},
         "controls": {"$ref": "#/$defs/flag"},
         "fullscreen": {"$ref": "#/$defs/flag"},
@@ -371,15 +376,16 @@ namespace {
 // The widget types the loader builds itself (each is a .ari key: `slider_int: Speed`). Anything
 // else is a custom type, drawn by register_widget_type / a backend-native widget.
 // ORDER MATTERS: the short-form dispatch (widget_type) takes the FIRST of these present as a key,
-// so tf_editor precedes color — a tf_editor's own config may carry a `color:` node list — and
-// progress and plot precede overlay, their caption. A chart's keys name no widget type.
+// so color comes last — a tf_editor's own config may carry a `color:` node list, and a text, radio,
+// button or menu item a `color:` of its own (§5.26) — and progress and plot precede overlay, their
+// caption. A chart's keys name no widget type, nor do a heatmap's or a settings editor's.
 constexpr const char *kBuiltinWidgetTypes[] = {
-    "group",        "menubar",      "menu",    "menu_item", "window",    "progress",
-    "plot",         "chart",        "overlay", "panel",     "text",      "checkbox",
-    "slider_int",   "slider_float", "combo",   "radio",     "radio_row", "input_text",
-    "input_int",    "tf_editor",    "color",   "image",     "button",    "separator",
-    "windows_menu", "spinner",      "video",   "audio",     "text_view", "message_input",
-    "tray_icon",    "tabs",         "list"};
+    "group",        "menubar",    "menu",         "menu_item", "window",    "progress",
+    "plot",         "chart",      "settings",     "overlay",   "panel",     "text",
+    "checkbox",     "slider_int", "slider_float", "combo",     "radio",     "radio_row",
+    "input_text",   "input_int",  "tf_editor",    "image",     "button",    "separator",
+    "windows_menu", "spinner",    "video",        "audio",     "text_view", "message_input",
+    "tray_icon",    "tabs",       "list",         "heatmap",   "color"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {
@@ -549,6 +555,95 @@ std::vector<KeyBinding> parse_keys(Ctx &ctx, const YAML::Node &n) {
     out.push_back(std::move(b));
   }
   return out;
+}
+
+// A colour as a document writes one (color_value.h): "#rrggbb", "#rgb", c0..c7, "r,g,b", or
+// [r, g, b] with each 0..1.
+bool yaml_color(const YAML::Node &n, float rgb[3]) {
+  if (n && n.IsScalar())
+    return parse_color_text(n.Scalar(), rgb);
+  if (!n || !n.IsSequence() || n.size() != 3)
+    return false;
+  std::string joined;
+  for (const YAML::Node &c : n) {
+    if (!c.IsScalar())
+      return false;
+    joined += (joined.empty() ? "" : ",") + c.Scalar();
+  }
+  return parse_color_text(joined, rgb);
+}
+
+// A `heatmap:` (Kind::Heatmap): its subtree at `bind`, the `ramp:` stops ([at, colour], sorted
+// by at), the layout (cell_size, gap, labels), the legend, the mark's colour, and pick / on:.
+// on_click, on_hover and tooltip are read with every widget's keys, and are per cell here.
+Widget parse_heatmap(Ctx &ctx, const YAML::Node &n, const std::string &label) {
+  const std::string name = "ari: heatmap '" + label + "'";
+  Widget w = heatmap(label, str(n, "bind"));
+  if (w.bind.empty())
+    ctx.warn(name + " has no bind: — it draws nothing");
+  HeatmapOptions &o = w.heatmap;
+  if (const YAML::Node r = n["ramp"]; r && !r.IsSequence()) {
+    ctx.warn(name + " ramp: must be a list of [value, colour] — one grey");
+  } else if (r) {
+    for (const YAML::Node &e : r) {
+      HeatmapStop stop;
+      bool ok = e.IsSequence() && e.size() == 2 && e[0].IsScalar();
+      if (ok) {
+        try {
+          stop.at = e[0].as<double>();
+        } catch (const std::exception &) {
+          ok = false;
+        }
+      }
+      ok = ok && std::isfinite(stop.at) && yaml_color(e[1], stop.rgb);
+      if (!ok) {
+        ctx.warn(name + " has a ramp stop that is not [value, \"#rrggbb\" or [r, g, b]] — skipped");
+        continue;
+      }
+      o.ramp.push_back(stop);
+    }
+    std::stable_sort(o.ramp.begin(), o.ramp.end(),
+                     [](const HeatmapStop &a, const HeatmapStop &b) { return a.at < b.at; });
+  }
+  if (has(n, "cell_size")) {
+    const double v = num(n, "cell_size", 28.0);
+    if (v > 0.0)
+      o.cell_size = static_cast<float>(v);
+    else
+      ctx.warn(name + " cell_size must be > 0 — 28");
+  }
+  if (has(n, "gap")) {
+    const double v = num(n, "gap", 2.0);
+    if (v >= 0.0)
+      o.gap = static_cast<float>(v);
+    else
+      ctx.warn(name + " gap must be >= 0 — 2");
+  }
+  // labels: {rows, cols} flags; or one flag for both (labels: false, or none).
+  if (const YAML::Node l = n["labels"]; l && l.IsMap()) {
+    o.row_labels = flag(l, "rows", true);
+    o.col_labels = flag(l, "cols", true);
+  } else if (l && l.IsScalar()) {
+    o.row_labels = o.col_labels = l.Scalar() != "none" && flag(n, "labels", true);
+  }
+  // legend: none (the default), bottom or right; a boolean is bottom or none.
+  if (const YAML::Node l = n["legend"]; l && l.IsScalar()) {
+    const std::string v = l.Scalar();
+    const bool t = flag(n, "legend", true), f = flag(n, "legend", false);
+    if (v == "bottom" || (t == f && t))
+      o.legend = HeatmapLegend::Bottom;
+    else if (v == "right")
+      o.legend = HeatmapLegend::Right;
+    else if (v != "none" && !(t == f && !t))
+      ctx.warn(name + " legend: '" + v + "' is not bottom, right or none — none");
+  }
+  if (has(n, "mark_color") && !yaml_color(n["mark_color"], o.mark_rgb))
+    ctx.warn(name + " mark_color: is not \"#rrggbb\" or [r, g, b] — white");
+  w.pick = str(n, "pick");
+  w.on = action(n); // optional: fired after a pick's writes
+  if (!w.on.empty() && w.pick.empty())
+    ctx.warn(name + " has on: but no pick: — on: runs after a pick; use on_click: for any click");
+  return w;
 }
 
 // A slider's `commit:` — live (the default: every change while dragged) or release (once, at the
@@ -856,12 +951,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
   }
   if (type == "text") {
     Widget w = has(n, "bind") ? text_bound(label, str(n, "bind")) : text(label);
-    // Optional fixed tint: `color: [r, g, b]` in [0,1] (same sequence convention as a layout
-    // border colour). A colour-capable backend renders it; others fall back to plain text.
-    const YAML::Node col = n["color"];
-    if (col && col.IsSequence() && col.size() >= 3)
-      w = with_text_color(w, col[0].as<float>(1.0f), col[1].as<float>(1.0f),
-                          col[2].as<float>(1.0f));
+    // Its `color:` (§5.26) is parse_widget's, as a radio's, a button's and a menu item's.
     // §5.11 emoji: a state path holding a map of shortcode names to picture URIs: a `:name:` in
     // the text that it names is drawn as that picture.
     w.emoji = str(n, "emoji");
@@ -974,6 +1064,70 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: chart '" + label + "' height must be > 0 — 160");
     w.plot_height = height > 0.0 ? height : 160.0;
     w.on = action(n); // optional: fired after a pick's write
+    return w;
+  }
+  if (type == "heatmap") { // a grid of cells from a subtree, coloured by a ramp
+    return parse_heatmap(ctx, n, label);
+  }
+  if (type == "settings") { // an editor for every key under a state subtree, from its metadata
+    Widget w = settings(label, std::string());
+    w.settings_roots.clear();
+    const auto strings = [&](const char *key) {
+      std::vector<std::string> out;
+      const YAML::Node v = n[key];
+      if (v && v.IsScalar()) {
+        out.push_back(v.Scalar());
+      } else if (v && v.IsSequence()) {
+        for (const YAML::Node &e : v)
+          if (e.IsScalar())
+            out.push_back(e.Scalar());
+          else
+            ctx.warn("ari: settings '" + label + "' " + key + ": entries must be text — skipped");
+      } else if (v) {
+        ctx.warn("ari: settings '" + label + "' " + key + ": must be text or a list — ignored");
+      }
+      return out;
+    };
+    for (std::string &r : strings("root"))
+      if (!r.empty())
+        w.settings_roots.push_back(std::move(r));
+    if (w.settings_roots.empty())
+      ctx.warn("ari: settings '" + label + "' has no root: — it shows nothing");
+    w.settings_filter = strings("filter");
+    // groups: each entry a key (its place in the order), {key: title}, or {key: {title, help,
+    // open}}.
+    if (const YAML::Node gs = n["groups"]; gs && !gs.IsSequence()) {
+      ctx.warn("ari: settings '" + label + "' groups: must be a list — ignored");
+    } else if (gs) {
+      for (const YAML::Node &e : gs) {
+        SettingsGroupSpec g;
+        if (e.IsScalar()) {
+          g.key = e.Scalar();
+        } else if (e.IsMap() && e.size() == 1) {
+          const auto kv = *e.begin();
+          g.key = kv.first.Scalar();
+          if (kv.second.IsScalar()) {
+            g.title = kv.second.Scalar();
+          } else if (kv.second.IsMap()) {
+            g.title = str(kv.second, "title");
+            g.help = str(kv.second, "help");
+            g.open = flag(kv.second, "open", false);
+          }
+        }
+        if (g.key.empty()) {
+          ctx.warn("ari: settings '" + label +
+                   "' has a groups: entry that names no key (key, {key: title} or {key: {title, "
+                   "help, open}}) — skipped");
+          continue;
+        }
+        w.settings_groups.push_back(std::move(g));
+      }
+    }
+    w.settings_search = flag(n, "search", false);
+    w.settings_readouts = flag(n, "readouts", true);
+    w.settings_open = flag(n, "open", false);
+    w.commit_on_release = commit_on_release(ctx, n, label);
+    w.on = action(n); // optional: after each committed write or reset
     return w;
   }
   if (type == "checkbox") {
@@ -1336,6 +1490,90 @@ bool any_descendant_repeats(const Widget &w) {
 
 // §5.12 background: on a window / overlay / group — a map (src | bind, auth, fit, opacity,
 // terminal, banner_rows, status), or a bare URI or image name for src.
+// §5.26 whether a colour's text is an expression, computed each frame: it starts with '('.
+bool is_color_expr(const std::string &s) {
+  const std::size_t at = s.find_first_not_of(" \t\n\r");
+  return at != std::string::npos && s[at] == '(';
+}
+
+// §5.26 three numbers [r, g, b] (0..1, clamped) in `c` into out; false for anything else.
+bool rgb_seq(const YAML::Node &c, float out[3]) {
+  if (!c.IsSequence() || c.size() < 3)
+    return false;
+  float v[3];
+  for (std::size_t i = 0; i < 3; ++i) {
+    if (!c[i].IsScalar())
+      return false;
+    try {
+      v[i] = c[i].as<float>();
+    } catch (const std::exception &) {
+      return false;
+    }
+  }
+  for (int i = 0; i < 3; ++i)
+    out[i] = std::clamp(v[i], 0.0f, 1.0f);
+  return true;
+}
+
+// §5.26 one colour as a document writes it: [r, g, b], "#rrggbb", c0..c7 or "r,g,b" (into
+// `fixed`), or { bind: key } read each frame, or "(expr)" computed each frame (into `src`). False
+// when it is none of them (`fixed` and `src` untouched); "none" is no colour, and true.
+bool one_color(const YAML::Node &c, ItemColor &fixed, std::string &src) {
+  if (c.IsMap()) {
+    src = str(c, "bind");
+    return !src.empty();
+  }
+  if (c.IsSequence())
+    return (fixed.set = rgb_seq(c, fixed.rgb));
+  if (!c.IsScalar())
+    return false;
+  const std::string &s = c.Scalar();
+  if (is_color_expr(s)) {
+    src = s;
+    return true;
+  }
+  if (is_no_color(s))
+    return true;
+  return (fixed.set = parse_color_text(s, fixed.rgb));
+}
+
+constexpr const char *kColorForms =
+    "[r, g, b], \"#rrggbb\", c0..c7, { bind: <key> } or an expression";
+
+// §5.26 a text's, radio's, button's or menu item's `color:`. On a radio it may also be a list, one
+// colour per option: [c0, c1, ...] or "c0;c1;...".
+void parse_item_color(Ctx &ctx, const YAML::Node &c, Widget &w) {
+  ItemColor fixed;
+  if (one_color(c, fixed, w.color_src)) {
+    w.has_text_color = fixed.set;
+    std::copy(fixed.rgb, fixed.rgb + 3, w.text_color);
+    return;
+  }
+  if (w.kind == Kind::Radio) {
+    std::vector<ItemColor> list;
+    bool ok = c.IsScalar() && parse_color_list(c.Scalar(), list);
+    if (c.IsSequence()) {
+      ok = true;
+      for (const YAML::Node &e : c) {
+        ItemColor ic;
+        std::string dynamic;
+        if (!one_color(e, ic, dynamic) || !dynamic.empty()) {
+          ok = false;
+          break;
+        }
+        list.push_back(ic);
+      }
+    }
+    if (ok) {
+      w.option_colors = std::move(list);
+      return;
+    }
+  }
+  ctx.warn("ari: '" + w.label + "' color: is " + kColorForms +
+           (w.kind == Kind::Radio ? ", or a list of colours, one per option" : "") +
+           " — drawn in the default colour");
+}
+
 void parse_background(Ctx &ctx, const YAML::Node &n, Widget &w) {
   if (w.kind != Kind::Window && w.kind != Kind::Group) {
     ctx.warn("ari: background: is for a window, overlay or group — ignored");
@@ -1346,10 +1584,18 @@ void parse_background(Ctx &ctx, const YAML::Node &n, Widget &w) {
     bg.src = n.Scalar();
     return;
   }
-  if (!n.IsMap()) {
-    ctx.warn("ari: background: must be a map (src, fit, opacity, ...) or a URL — ignored");
+  if (n.IsSequence()) { // §5.26 `background: [r, g, b]`: a fill
+    bg.color.set = rgb_seq(n, bg.color.rgb);
+    if (!bg.color.set)
+      ctx.warn("ari: background: a list is a colour, [r, g, b] — ignored");
     return;
   }
+  if (!n.IsMap()) {
+    ctx.warn("ari: background: must be a map (src, color, fit, opacity, ...) or a URL — ignored");
+    return;
+  }
+  if (const YAML::Node c = n["color"]; c && !one_color(c, bg.color, bg.color_src))
+    ctx.warn(std::string("ari: background color: is ") + kColorForms + " — ignored");
   bg.src = str(n, "src");
   bg.bind = str(n, "bind");
   bg.auth = str(n, "auth");
@@ -1367,7 +1613,7 @@ void parse_background(Ctx &ctx, const YAML::Node &n, Widget &w) {
     ctx.warn("ari: background terminal: '" + term + "' is not behind, banner or none");
   bg.banner_rows = std::clamp(static_cast<int>(num(n, "banner_rows", 6.0)), 1, 60);
   if (!bg.any())
-    ctx.warn("ari: background: has neither src: nor bind: — nothing to draw");
+    ctx.warn("ari: background: has no src:, bind: or color: — nothing to draw");
 }
 
 Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
@@ -1398,6 +1644,12 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
       w.repeat = str(n, "repeat"); // §3: a count expression -> emit this template N times
     if (has(n, "background"))
       parse_background(ctx, n["background"], w);
+    // §5.26 a colour, written here or computed each frame. The other kinds that take a `color:`
+    // key (the colour picker, whose label it is, a tf_editor, a custom type) read their own.
+    if (has(n, "color") &&
+        (w.kind == Kind::Text || w.kind == Kind::Radio || w.kind == Kind::Button ||
+         w.kind == Kind::MenuItemAction || w.kind == Kind::MenuItemToggle))
+      parse_item_color(ctx, n["color"], w);
     if (has(n, "on_click"))
       w.on_click = str(n, "on_click"); // §4.6 widget-level click handler (any kind); like `on`
     if (has(n, "on_hover"))
@@ -3722,7 +3974,40 @@ void lint_channels(Ctx &ctx, LoadResult &r) {
   }
 }
 
-// The data: block (data.h): a map of name -> URI, or name -> { uri, path, as, load }.
+// A YAML node as JSON text: a map as an object, a sequence as an array, a scalar as a string
+// (the readers convert: generated_world_params_from_json reads "7" as 7).
+std::string yaml_json(const YAML::Node &n) {
+  const auto quote = [](const std::string &s) {
+    std::string o = "\"";
+    for (const char c : s) {
+      if (c == '"' || c == '\\')
+        o += '\\', o += c;
+      else if (static_cast<unsigned char>(c) < 0x20) {
+        char buf[8];
+        std::snprintf(buf, sizeof buf, "\\u%04x", static_cast<unsigned char>(c));
+        o += buf;
+      } else
+        o += c;
+    }
+    return o + "\"";
+  };
+  if (n.IsMap()) {
+    std::string o = "{";
+    for (const auto &kv : n)
+      o += (o.size() > 1 ? "," : "") + quote(kv.first.Scalar()) + ":" + yaml_json(kv.second);
+    return o + "}";
+  }
+  if (n.IsSequence()) {
+    std::string o = "[";
+    for (const auto &e : n)
+      o += (o.size() > 1 ? "," : "") + yaml_json(e);
+    return o + "]";
+  }
+  return n.IsScalar() ? quote(n.Scalar()) : std::string("null");
+}
+
+// The data: block (data.h): a map of name -> URI, or name -> { uri, path, as, load }, or a made
+// dataset, name -> { generate, params, as, load } (data-generate).
 std::vector<DataSpec> parse_data(Ctx &ctx, const YAML::Node &n) {
   std::vector<DataSpec> out;
   if (!n)
@@ -3742,6 +4027,14 @@ std::vector<DataSpec> parse_data(Ctx &ctx, const YAML::Node &n) {
       d.uri = str(e, "uri");
       d.path = str(e, "path");
       d.as = str(e, "as");
+      d.generate = str(e, "generate");
+      if (const YAML::Node params = e["params"]; params) {
+        if (params.IsMap())
+          d.params = yaml_json(params);
+        else
+          ctx.warn("ari: data." + (kv.first.IsScalar() ? kv.first.Scalar() : std::string()) +
+                   ": params: is a MAP — ignored");
+      }
       const std::string load = str(e, "load", "eager");
       d.lazy = load == "lazy";
       if (load != "lazy" && load != "eager")
@@ -3752,8 +4045,14 @@ std::vector<DataSpec> parse_data(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: data: '" + d.name + "' is not a name (one word, no '.') — ignored");
       continue;
     }
-    if (d.uri.empty()) {
-      ctx.warn("ari: data." + d.name + " names no uri — ignored");
+    if (!d.generate.empty()) {
+      if (!has_data_generator(*ctx.app, d.generate)) {
+        ctx.warn("ari: data." + d.name + ": generate: " + d.generate +
+                 " is not a generator this build has — ignored");
+        continue;
+      }
+    } else if (d.uri.empty()) {
+      ctx.warn("ari: data." + d.name + " names no uri (or generate:) — ignored");
       continue;
     }
     if (!d.as.empty() && !has_data_decoder(*ctx.app, d.as))
@@ -3864,6 +4163,20 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
     r.scene = parse_scene(ctx, doc["scene"]);    // §9: the scene graph, alongside the widgets
     stamp_base_dir(r.scene.nodes, ctx.base_dir); // relative paths in a node's keys resolve here
     r.data = parse_data(ctx, doc["data"]);       // the datasets, relative to the document too
+    // The scenes' nodes and looks name the entries too (a boat's model, a vehicle's look): their
+    // sources made absolute, as the store reads them.
+    std::vector<SceneData> scene_data;
+    for (const DataSpec &d : r.data) {
+      SceneData e;
+      e.name = d.name;
+      e.uri = d.uri;
+      if (e.uri.find("://") == std::string::npos && std::filesystem::path(e.uri).is_relative() &&
+          !d.base.empty())
+        e.uri = (std::filesystem::path(d.base) / e.uri).lexically_normal().generic_string();
+      e.path = d.path;
+      scene_data.push_back(std::move(e));
+    }
+    r.scene.data = scene_data;
     // assets: { <id>: { source: ..., fit: ... } } — meshes loaded once, shared by every scene.
     std::vector<SceneAsset> assets;
     if (const YAML::Node as = doc["assets"]; as && as.IsMap()) {
@@ -3893,6 +4206,7 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
         }
         stamp_base_dir(sc.nodes, ctx.base_dir);
         sc.assets = assets;
+        sc.data = scene_data;
         r.scenes.push_back(std::move(sc));
       }
     } else if (ss) {

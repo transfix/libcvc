@@ -30,8 +30,14 @@
 // blob replaces the world's own policy for every agent, and the run is an arms_run of one arm, so
 // checkpoint 0 deployed here is the untrained arm deployed anywhere else. A run is cached at
 // `<history>.scrub/<blob sha256, 16 hex>-<scenario hash>.cvcrun`. The scenario hash covers the
-// world, the agents, the settings, the ticks, the scrubber's version and libcvc's, so any of them
-// changing deploys the checkpoints again.
+// world, the agents, the settings, the plant, the ticks, the scrubber's version and libcvc's, so
+// any of them changing deploys the checkpoints again.
+//
+// The plant: nav's kinematic bicycle has no collision response, so its agents can drive through a
+// building nav did not keep them off. A scenario's `plant` names something else to drive, which a
+// host's scrub_options::plant hook puts the agents on. cvc::physics::scrub_plant
+// (cvc/physics/scrub_plant.h) is the usual hook: Jolt vehicles ("humvee", ...) that collide with
+// the world's walls. nav itself does not depend on physics, so it has no default hook.
 
 #ifndef __CVC_NAV_NAV_SCRUB_H__
 #define __CVC_NAV_NAV_SCRUB_H__
@@ -50,10 +56,12 @@ class app;
 namespace nav {
 
 class policy_library;
+class sim_world;
 
 inline constexpr const char *kScrubReportSchema = "cvc.nav.scrub/v1";
 // Bumped when the scrubber's runs would change, so older caches are not read.
 inline constexpr int kScrubVersion = 1;
+inline constexpr const char *kScrubKinematic = "kinematic"; // nav's bicycle, no hook needed
 
 // ── training histories ─────────────────────────────────────────────────────────────────────────
 
@@ -98,18 +106,21 @@ struct scrub_scenario {
   input_trace_header world; // a complete cvc.nav.sim_world/v1 world (sim_world_trace.h)
   long ticks = 600;
   std::string name; // what it is, for the views ("blocks, 4 agents, seed 0")
+  // What the agents drive: "kinematic" (or "", nav's bicycle) or a name the deploy's
+  // scrub_options::plant hook knows (cvc::physics::scrub_plant's: "humvee", "roboracer", ...).
+  std::string plant = kScrubKinematic;
 };
 
 // The built-in scenario: a walled 120 m square with a 3 x 3 grid of buildings (each nudged and
 // sized by `seed`) and streets between them, `agents` agents from starts on its west side to goals
-// on its east (their lanes from `seed`), on nav's kinematic bicycle at 0.05 normalized units per
-// metre and 0.05 s a tick, the map known (no sensing), run for `ticks`.
+// on its east (their lanes from `seed`), at 0.05 normalized units per metre and 0.05 s a tick, the
+// map known (no sensing), run for `ticks`, on nav's kinematic bicycle (set `plant` for another).
 scrub_scenario default_scenario(int agents = 4, unsigned seed = 0, long ticks = 600);
 // A recorded input trace's world and agents (its header; its inputs are not replayed). Throws
 // std::runtime_error for a trace whose world v1 cannot rebuild.
 scrub_scenario scenario_from_trace(const std::string &trace_path, long ticks = 600);
-// A short, stable hash of the scenario (16 hex digits): its world, agents and settings, its
-// ticks, kScrubVersion and libcvc's version.
+// A short, stable hash of the scenario (16 hex digits): its world, agents and settings, its plant,
+// its ticks, kScrubVersion and libcvc's version.
 std::string scenario_hash(const scrub_scenario &s);
 // `<history>.scrub/<blob sha 16>-<scenario hash>.cvcrun`
 std::string scrub_cache_path(const std::string &history, const std::string &blob_sha256,
@@ -133,10 +144,24 @@ struct scrub_metric_info {
 std::span<const scrub_metric_info> scrub_metric_names();
 scrub_metrics metrics_of(const run_log &log, int a = 0);
 
+// What a scrub_plant_fn put the agents on: what they drive (the plant's name, or "kinematic" after
+// a fallback, in a build without the plant), and an owner of the plant (and its world) the deploy
+// keeps until its run ends.
+struct scrub_plant_attached {
+  std::string driving;
+  std::shared_ptr<void> owner;
+};
+// Puts a deployed world's agents on `plant`, at their poses, before its first tick. Throws for a
+// plant it does not know.
+using scrub_plant_fn = std::function<scrub_plant_attached(sim_world &, const std::string &plant)>;
+
 // One blob deployed on the scenario: its run log, of one arm named `name` (its meta `meta`, a JSON
-// object's text). Throws std::runtime_error for a policy that can't be loaded.
+// object's text), on the scenario's plant (`plant` attaches it; the log's plant is what the agents
+// drove). Throws std::runtime_error for a policy that can't be loaded, and std::invalid_argument
+// for a plant other than kinematic with no hook.
 run_log deploy_checkpoint(const scrub_scenario &s, const std::string &blob, const std::string &name,
-                          policy_library &lib, const std::string &meta = "{}");
+                          policy_library &lib, const std::string &meta = "{}",
+                          const scrub_plant_fn &plant = {});
 
 struct scrub_entry {
   training_checkpoint checkpoint;
@@ -150,12 +175,13 @@ struct scrub_entry {
 struct scrub_options {
   bool use_cache = true;                        // read and write the cache
   std::function<void(const std::string &)> say; // a line per checkpoint (null: quiet)
+  scrub_plant_fn plant; // puts the agents on the scenario's plant (null: kinematic only)
 };
 
 // Every checkpoint of `h` on `s`: from the cache, else deployed (and cached).
 std::vector<scrub_entry> scrub(const training_history &h, const scrub_scenario &s,
                                const scrub_options &o = {});
-// Every checkpoint's metrics as a cvc.nav.scrub/v1 report.
+// Every checkpoint's metrics as a cvc.nav.scrub/v1 report (the scenario's plant in it).
 std::string scrub_report_json(const training_history &h, const scrub_scenario &s,
                               const std::vector<scrub_entry> &entries);
 // The checkpoint table (scrub.table: at, step, flag, reached, time_s, path_m, pen_steps,
@@ -171,16 +197,30 @@ chart_plot curve_chart(const training_history &h, const std::vector<scrub_entry>
 
 // ── the view ───────────────────────────────────────────────────────────────────────────────────
 
+// The same checkpoints deployed on one plant: scrub()'s entries for a scenario whose plant is
+// `plant`.
+struct scrub_plant_runs {
+  std::string plant;
+  std::vector<scrub_entry> entries;
+};
+
 // Checkpoint k beside step 0: the controls that pick k (scrub.choice, a combo over scrub.labels;
 // scrub.pos, a slider 0..1; prev() and next(); a chart's click, scrub.pick, through pick_step()),
 // the metric chart and the table (scrub.metric_name picks the metric), the training curve
 // (scrub.curve_name, over scrub.curve_names), and the two runs over the episode: a replay_view of
-// step 0's log stacked with k's, whose tables and poses the frame carries.
+// step 0's log stacked with k's, whose tables and poses the frame carries. With the checkpoints
+// deployed on several plants, scrub.plant_choice (a combo over scrub.plant_labels;
+// scrub.plant_count of them) or use_plant() shows the same checkpoint on another plant, at the same
+// play head; scrub.plant is the plant shown.
 class scrub_view {
 public:
   // k < 0: the run's pick, else its last checkpoint. `scenario` names the scenario
   // (scrub.scenario). Throws std::invalid_argument with no entries.
   scrub_view(training_history h, std::vector<scrub_entry> entries, int k = -1,
+             std::string scenario = "");
+  // The checkpoints on each plant, the first shown first. Throws std::invalid_argument with no
+  // plant, a plant without entries, a plant named twice, or plants whose checkpoints differ.
+  scrub_view(training_history h, std::vector<scrub_plant_runs> plants, int k = -1,
              std::string scenario = "");
   struct frame {
     int k = 0;
@@ -192,19 +232,26 @@ public:
   void next() { pick(k_ + 1); }
   void pick_step(cvc::app &app, const std::string &prefix);
   int checkpoint() const { return k_; }
-  const std::vector<scrub_entry> &entries() const { return entries_; }
+  // Show plant p's runs (clamped), at the same checkpoint.
+  void use_plant(int p);
+  int plant() const { return p_; }
+  const std::vector<scrub_plant_runs> &plants() const { return plants_; }
+  // The plant shown's entries.
+  const std::vector<scrub_entry> &entries() const {
+    return plants_[static_cast<std::size_t>(p_)].entries;
+  }
   replay_view &replay() { return *replay_; }
 
 private:
   void show(cvc::app &app, const std::string &prefix, bool charts);
   training_history h_;
-  std::vector<scrub_entry> entries_;
-  std::vector<std::string> labels_;
-  int k_ = 0, shown_ = -1;
+  std::vector<scrub_plant_runs> plants_;
+  std::vector<std::string> labels_, plant_labels_;
+  int k_ = 0, shown_ = -1, p_ = 0;
   std::unique_ptr<replay_view> replay_;
   bool wrote_ = false;
   double pos_ = 0.0;
-  std::string scenario_, choice_, metric_, curve_;
+  std::string scenario_, choice_, plant_choice_, metric_, curve_;
 };
 
 } // namespace nav
