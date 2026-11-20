@@ -262,12 +262,12 @@ if(EMSCRIPTEN)
     list(APPEND _nav_swarm_bundle_flags "--preload-file=${CVC_WASM_NAV_WEIGHTS}@/coef_sdf.cvcnav")
   endif()
   foreach(_wt ${_wasm_demos} ${_wasm_extra_demos})
-    # Asyncify: each demo keeps its own while-loop and yields via emscripten_sleep.
+    # JSPI: each demo keeps its own while-loop in main and yields via emscripten_sleep, which
+    # suspends main's stack (docs/roadmap/WASM_JSPI_EXCEPTIONS.md).
     # Growable heap: the forest/sea/sky volumes and city scenes exceed the 16 MB default.
     # VTK's patched FindOpenGL injects the WebGL2/GLES3 flags; RenderingUI its js-library.
     target_link_options(${_wt} PRIVATE
-      -sASYNCIFY=1
-      -sASYNCIFY_STACK_SIZE=131072
+      -sJSPI
       -sALLOW_MEMORY_GROWTH=1
       # Austin's buildings mesh produces a ~140 MB vtkFloatArray for
       # colors/normals; the default 2 GB ceiling reachable via growth
@@ -278,7 +278,7 @@ if(EMSCRIPTEN)
       -sSTACK_SIZE=2097152
       -sEXIT_RUNTIME=0
       # cvc::net's Emscripten-fetch HTTP backend: -sFETCH links the emscripten_fetch symbols; the
-      # blocking send() spins on emscripten_sleep, which returns under the -sASYNCIFY above. Needed by
+      # blocking send() spins on emscripten_sleep, which returns under the -sJSPI above. Needed by
       # any demo that resolves an http(s):// URI (or the §13.9 HTTP cache) in the browser.
       -sFETCH=1
     )

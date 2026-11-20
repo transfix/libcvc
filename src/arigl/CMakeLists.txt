@@ -289,12 +289,11 @@ if(EMSCRIPTEN)
   target_link_libraries(cyprty PRIVATE cvc::cvcGL ${VTK_LIBRARIES})
   vtk_module_autoinit(TARGETS cyprty MODULES ${VTK_LIBRARIES})
   # The same link options as the gallery demos (examples/CMakeLists.txt): each keeps its own loop
-  # and yields with emscripten_sleep (Asyncify), the heap grows, and cvc::net fetches with -sFETCH.
+  # and yields with emscripten_sleep (JSPI), the heap grows, and cvc::net fetches with -sFETCH.
   target_link_options(cyprty PRIVATE
     -lwebsocket.js
     "--embed-file=${CVC_ARIGL_WASM_DOC}@/${_arigl_doc_name}"
-    -sASYNCIFY=1
-    -sASYNCIFY_STACK_SIZE=131072
+    -sJSPI
     -sALLOW_MEMORY_GROWTH=1
     -sMAXIMUM_MEMORY=4GB
     -sSTACK_SIZE=2097152
@@ -330,10 +329,9 @@ if(EMSCRIPTEN)
   endif()
 
   # arigl itself in a browser, linked as the gallery demos are: it keeps its own loop and yields
-  # with emscripten_sleep (Asyncify), the heap grows, and cvc::net fetches with -sFETCH.
+  # with emscripten_sleep (JSPI), the heap grows, and cvc::net fetches with -sFETCH.
   set(_arigl_wasm_link
-      -sASYNCIFY=1
-      -sASYNCIFY_STACK_SIZE=131072
+      -sJSPI
       -sALLOW_MEMORY_GROWTH=1
       -sMAXIMUM_MEMORY=4GB
       -sSTACK_SIZE=2097152
@@ -392,8 +390,7 @@ if(EMSCRIPTEN)
         "--preload-file=${_arigl_examples}/ariadne/documents@/ariadne/documents"
         "--preload-file=${_arigl_examples}/ariadne/terminal@/ariadne/terminal"
         "--preload-file=${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne/components@/components"
-        -sASYNCIFY=1
-        -sASYNCIFY_STACK_SIZE=131072
+        -sJSPI
         -sALLOW_MEMORY_GROWTH=1
         -sMAXIMUM_MEMORY=4GB
         -sSTACK_SIZE=2097152
