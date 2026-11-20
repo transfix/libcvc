@@ -723,6 +723,49 @@ void realize_repeat(SceneGraph &sg, const cvc::ariadne::SceneNode &n, RealizedSc
                     std::vector<std::string> *warnings,
                     const std::vector<cvc::ariadne::SceneAsset> &assets);
 
+// A geometry node's `model:` (node_model_look: `{ data: NAME, file: FILE }`, a file or a model's
+// name): the model fitted into the box its own geometry spans, in place of that geometry once it
+// is ready (set_boxed_model). Its body is made from its own geometry once every node is realized
+// (realize_physics), so the model goes in from a scene tick, never before: a crate floats as its
+// box and is drawn as the crate. While the model's package loads the node draws its own geometry,
+// and it keeps it when the model cannot be had (a warning says why, at realize).
+void draw_node_model(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
+                     const cvc::ariadne::Value &model, const std::shared_ptr<GeometryNode> &node,
+                     RealizedScene &out, std::vector<std::string> *warnings) {
+  const cvc::ariadne::vehicle_look look = node_model_look(
+      model, out.data, "ari: scene node '" + n.id + "'", "its own geometry", warnings);
+  const cvc::geometry *geom = node->getGeometry();
+  if (look.kind.empty() || !geom || geom->const_points().empty())
+    return;
+  std::array<double, 3> lo{1e300, 1e300, 1e300}, hi{-1e300, -1e300, -1e300};
+  for (const auto &v : geom->const_points())
+    for (int k = 0; k < 3; ++k) {
+      lo[k] = std::min(lo[k], static_cast<double>(v[k]));
+      hi[k] = std::max(hi[k], static_cast<double>(v[k]));
+    }
+  if (!out.vehicle_models)
+    out.vehicle_models = make_vehicle_model_cache();
+  // Its package starts loading now; a model that cannot be had says so now.
+  if (boxed_model_state(sg.appContext(), *out.vehicle_models, look, lo, hi, warnings) ==
+      vehicle_model_status::failed)
+    return;
+  const std::weak_ptr<GeometryNode> held = node;
+  auto done = std::make_shared<bool>(false);
+  out.scene_ticks.push_back([held, done, look, lo, hi](vtkRenderer *, RealizedScene &scene,
+                                                       const cvc::world_clock::step_result &) {
+    const std::shared_ptr<GeometryNode> g = held.lock();
+    if (*done || !g || !scene.sg || !scene.vehicle_models)
+      return;
+    cvc::app &app = scene.sg->appContext();
+    const vehicle_model_status now = boxed_model_state(app, *scene.vehicle_models, look, lo, hi);
+    if (now == vehicle_model_status::pending)
+      return;
+    *done = true; // failed: it keeps its own geometry
+    if (now == vehicle_model_status::ready)
+      set_boxed_model(app, *scene.vehicle_models, *g, look, lo, hi);
+  });
+}
+
 void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::string &bind_prefix,
                   RealizedScene &out, GraphicsNode *parent, std::vector<pending_body> &bodies,
                   const RealizeOptions &options, std::vector<std::string> *warnings,
@@ -941,6 +984,11 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
   // is shaded too. A non-geometry node (volume/group) silently ignores them.
   if (auto *g = dynamic_cast<GeometryNode *>(node.get()))
     apply_mesh_keys(*g, n, warnings);
+  if (n.type ==
+      "geometry") // model: drawn in place of its own geometry (a custom type reads its own)
+    if (const cvc::ariadne::Value *model = n.props.find("model"))
+      if (auto g = std::dynamic_pointer_cast<GeometryNode>(node))
+        draw_node_model(sg, n, *model, g, out, warnings);
   if (!n.opacity_bind.empty()) { // material: { opacity: <path> }: synced each frame
     SceneOpacityBinding ob;
     ob.source = cvc::ariadne::resolve_bind(bind_prefix, n.opacity_bind);
@@ -1616,6 +1664,7 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   out.main_show = scene.main_show;
   out.main_hide = scene.main_hide;
   out.entity_labels = scene.entity_labels;
+  out.data = scene.data;
   if (!scene.entity_labels.empty()) // the labels' layer now, so it is this scene's (out.created)
     LabelLayerNode::of(sg);
   // The scene's one wind (O14): its keys before any node reads its wind (scene_wind.h).

@@ -111,10 +111,18 @@ physics::dyn_boat_desc boat_desc_of(const vehicle_archetype &a, double mass = 0.
 std::string find_vehicle_model(const std::string &name);
 
 struct SceneAsset;
+struct SceneData;
 // Each archetype's look as a view can draw it wherever it runs: a model by name found (a fitted
-// file), a document asset's file, a file beside the document (`doc_dir`), and the default look
-// made explicit (the Humvee model for a humvee when it is installed, else the box). A look that
-// cannot be found is drawn as its box, with a warning.
+// file), a document asset's file, a file beside the document (`doc_dir`), a data: entry's package
+// (`data`: its uri and path: copied into the look, so it is whole without the document; a view
+// loads it, cvcGL's vehicle_model_state), and the default look made explicit (the Humvee model for
+// a humvee when it is installed, else the box). A look that cannot be found is drawn as its box,
+// with a warning.
+void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std::string &doc_dir,
+                           const std::vector<SceneAsset> &assets,
+                           std::vector<std::string> *warnings, const std::vector<SceneData> &data);
+// The same with no data: entries (a data look then has nowhere to come from unless it arrived
+// resolved).
 void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std::string &doc_dir,
                            const std::vector<SceneAsset> &assets,
                            std::vector<std::string> *warnings = nullptr);

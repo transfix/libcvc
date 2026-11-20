@@ -3958,6 +3958,20 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
     r.scene = parse_scene(ctx, doc["scene"]);    // §9: the scene graph, alongside the widgets
     stamp_base_dir(r.scene.nodes, ctx.base_dir); // relative paths in a node's keys resolve here
     r.data = parse_data(ctx, doc["data"]);       // the datasets, relative to the document too
+    // The scenes' nodes and looks name the entries too (a boat's model, a vehicle's look): their
+    // sources made absolute, as the store reads them.
+    std::vector<SceneData> scene_data;
+    for (const DataSpec &d : r.data) {
+      SceneData e;
+      e.name = d.name;
+      e.uri = d.uri;
+      if (e.uri.find("://") == std::string::npos && std::filesystem::path(e.uri).is_relative() &&
+          !d.base.empty())
+        e.uri = (std::filesystem::path(d.base) / e.uri).lexically_normal().generic_string();
+      e.path = d.path;
+      scene_data.push_back(std::move(e));
+    }
+    r.scene.data = scene_data;
     // assets: { <id>: { source: ..., fit: ... } } — meshes loaded once, shared by every scene.
     std::vector<SceneAsset> assets;
     if (const YAML::Node as = doc["assets"]; as && as.IsMap()) {
@@ -3987,6 +4001,7 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
         }
         stamp_base_dir(sc.nodes, ctx.base_dir);
         sc.assets = assets;
+        sc.data = scene_data;
         r.scenes.push_back(std::move(sc));
       }
     } else if (ss) {

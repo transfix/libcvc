@@ -1588,9 +1588,17 @@ topsides over a blue stripe at the waterline and a dark wet bottom, with a teak 
 `model:` (a file, or a name found where the vehicle models are, as `Humvee.glb` is; `.glb` is
 tried after a bare name; `none` draws the hull), it is that model instead, fitted as a vehicle's
 file look is (`fit_vehicle_geometry`: the axis a file stands on, Y-up or Z-up, is up, its length
-fitted to the boat's length overall, its keel on the hull's bottom). The `tactical` preset's model is `TacticalBoat`
-(the `vehicle-tactical-boat` package), and its hull when that is not installed; a `model:` that is
-not found warns. The water
+fitted to the boat's length overall, its keel on the hull's bottom). `model: { data: NAME, file:
+FILE }` takes FILE out of the package of the document's `data:` entry NAME (cvcGL's
+`node_model_look`; the same as a vehicle's `look: { data, file }`): the boat shows its hull while
+the package loads and the model goes in in its place once it has (`vehicle_model_state`); when the
+package cannot load (no network, no such package) a local install of the file by its name is used,
+else the hull stays. `terrain_lab.ari`'s launch pulls `TacticalBoat.glb` from
+`cvcpkg://cy-pca/vehicle-tactical-boat` this way (a lazy `data:` entry, path
+`share/cvc-scenes/shared`), so the web gallery fetches it from cvcpkg.org at run time rather than
+shipping it (its arigl may reach `https://cvcpkg.org`, `--net-allow`). With no `model:`, the
+`tactical` preset's model is `TacticalBoat` when the `vehicle-tactical-boat` package is installed
+locally, and its hull when it is not; a `model:` that is not found warns. The water
 node keeps its water out of the boats nearest the camera (at most four, each the largest box inside
 its hull at its waterline, `BoatRuntime::cutout`, between its bottom and its sheer, passed to the
 water's shaders as uniforms, not a texture), its boats
@@ -1849,6 +1857,20 @@ scene:
   - any other mesh as its convex hull (moving), or itself (static).
 
   `box` and `sphere` on another mesh fit its bounds, and the node's scale is baked into the shape.
+- **Drawn as a model.** A geometry node's `model:` draws a model in place of what it draws, fitted
+  into the box its own geometry spans: stood upright (a `.glb`/`.gltf` file's +Y up turned to +Z;
+  any other file is taken as +Z up) and scaled on each axis to fill the box, its base colour
+  texture on it untinted. Its body keeps the node's own shape: the model goes in from a scene tick
+  after the bodies are made, so terrain_lab's crates float as their boxes and are drawn as the
+  crate. `model:` is `{ data: NAME, file: FILE }`, FILE in the package of the document's `data:`
+  entry NAME (loaded when the scene is realized; the node draws its own geometry until the model
+  is ready, and keeps it when the package cannot load and no local install of the file is found);
+  or a file; or a model's name found where the vehicle models are installed (`cvc-scenes/shared`,
+  `<name>.glb` too). A model that cannot be had warns and leaves the node as it was. In
+  terrain_lab: `data: { crate: { uri: cvcpkg://cy-pca/prop-wooden-crate, path:
+  share/cvc-scenes/shared, load: lazy } }` and, on each crate, `model: { data: crate, file:
+  WoodenCrate.glb }` (cvcGL's `node_model_look`, `boxed_model_state`, `set_boxed_model`,
+  [`vehicle_view.h`](../inc/cvc/gl/ariadne/vehicle_view.h)).
 - **Placement.** Each body starts at its node's world pose, composed from the scene's transforms
   (a nested node's included).
 - **Stepping.** The world runs on `app.world_clock()`, driven as `clock: {}` would drive it, and
@@ -1999,7 +2021,16 @@ scene:
     without the package, is its chassis box in the entity's two colours, with a cabin and wheels.
     `look: { model: humvee }` names a model, `file:` a mesh beside the document and `asset:` a
     document asset; `fit: true` orients and scales a file as a model is; `scale:`, `yaw:` and
-    `z:` place it.
+    `z:` place it. `look: { data: NAME, file: FILE }` takes FILE out of the package of the
+    document's `data:` entry NAME (§5.17), so a model comes from cvcpkg rather than with the
+    document, e.g. `data: { humvee: { uri: cvcpkg://cy-pca/vehicle-humvee, path:
+    share/cvc-scenes/shared, load: lazy } }` with `look: { data: humvee, file: Humvee.glb }`. It is
+    fitted unless `fit: false`. The resolved look carries the entry's source and path (`uri`,
+    `subpath`), so it is whole without the document: a client fetches the same package. The view
+    asks the app's data store for the package (`vehicle_model_state`, `vehicle_view.h`) and draws
+    the box while it loads, then the model. When the package cannot load (the host's network is
+    off: `--net-allow https://cvcpkg.org`; no such package), a local install of the file by its
+    name is used (`find_vehicle_model`), else the box.
   - **Entities.** A spawn (`WorldVehicles::spawn`, or the keys below) is an entity with an id,
     an identity (a name, a team, two colours, key/value metadata), a controller and its
     settings. `nav@1` drives it from goal to goal across the world's grid (the scene's

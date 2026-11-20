@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cvc/ariadne/bind.h>
+#include <cvc/ariadne/data.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/scene_boat.h>
 #include <cvc/ariadne/scene_world.h>
@@ -1597,6 +1598,260 @@ scene:
   fs::remove_all(dir, ec);
 }
 
+// A boat's model from a document data: entry's package (here a local directory, as a cvcpkg://
+// package unpacks): drawn as its hull while the package loads, then the model in its place, fitted
+// on the hull's keel; a package that cannot load leaves the hull. vehicle_model_state says how far
+// a data look has got: pending, then ready, or failed.
+void test_boat_model_from_data() {
+  cvc::app app;
+  std::printf("test_boat_model_from_data\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt)) {
+    std::printf("  skipped: no Jolt in this build\n");
+    return;
+  }
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  const fs::path dir = fs::temp_directory_path(ec) / "cvcgl_ariadne_boat_data";
+  const fs::path shared = dir / "pkg" / "share" / "cvc-scenes" / "shared";
+  fs::create_directories(shared, ec);
+  {
+    const cvc::geometry g = y_up_boat(app);
+    std::ofstream out(shared / "y_up_boat.obj");
+    for (const auto &v : g.const_points())
+      out << "v " << v[0] << " " << v[1] << " " << v[2] << "\n";
+    for (const auto &t : g.const_tris())
+      out << "f " << t[0] + 1 << " " << t[1] + 1 << " " << t[2] + 1 << "\n";
+  }
+  if (!cvc::can_read_model_from_memory(".obj")) {
+    std::printf("  skipped: no model reader for .obj from memory in this build\n");
+    fs::remove_all(dir, ec);
+    return;
+  }
+  cvc::gl::ariadne::register_cvcgl_extensions(app);
+  const std::string doc = R"(
+meta: { min_libcvc: "0.0.0" }
+data:
+  boatpkg: { uri: ")" + (dir / "pkg").generic_string() +
+                          R"(", path: share/cvc-scenes/shared, load: lazy }
+  gone: { uri: ")" + (dir / "no_such_pkg").generic_string() +
+                          R"(", path: share/cvc-scenes/shared, load: lazy }
+scene:
+  physics: {}
+  world: { source: lake, cell: 2 }
+  nodes:
+    - node: terrain
+      world: lake
+      source:
+        heightfield:
+          size: 300
+          resolution: 151
+          layers:
+            - { kind: dome, amplitude: -6, radius: 40 }
+      body: static
+    - node: water
+      type: water
+      ground: terrain
+      level: -1
+      body: {}
+    - node: patrol
+      type: boat
+      water: water
+      preset: tactical
+      model: { data: boatpkg, file: y_up_boat.obj }
+      transform: { position: [-20, 0, 0] }
+    - node: lost
+      type: boat
+      water: water
+      preset: jonboat
+      model: { data: gone, file: y_up_boat.obj }
+      transform: { position: [15, 0, 0] }
+)";
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(app, doc);
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  CHECK(r.scene.data.size() == 2);
+  SceneGraph sg(app);
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &warnings);
+  for (const std::string &w : warnings)
+    std::printf("  warning: %s\n", w.c_str());
+  const auto child = [&](const std::string &node,
+                         const std::string &name) -> std::shared_ptr<GeometryNode> {
+    std::shared_ptr<cvc::gl::GraphicsNode> g = sg.getGraphics(node);
+    return g ? std::dynamic_pointer_cast<GeometryNode>(g->findChildByName(name)) : nullptr;
+  };
+  // Either already loaded (the model) or still loading (the hull for now), never both.
+  CHECK((child("patrol", "patrol_model") != nullptr) !=
+        (child("patrol", "patrol_hull") != nullptr));
+  // The package loads on the store's worker: wait for it, then the next frame swaps the model in.
+  cvc::ariadne::DataSpec spec;
+  spec.uri = (dir / "pkg").generic_string();
+  spec.path = "share/cvc-scenes/shared";
+  const std::shared_ptr<cvc::ariadne::DataStore> store = cvc::ariadne::DataStore::of(app);
+  CHECK(store->wait(store->load(spec), 30.0));
+  cvc::ariadne::DataSpec gone = spec;
+  gone.uri = (dir / "no_such_pkg").generic_string();
+  CHECK(!store->wait(store->load(gone), 30.0)); // failed, not ready
+  for (int i = 0; i < 5; ++i)
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  const std::shared_ptr<GeometryNode> m = child("patrol", "patrol_model");
+  CHECK(m != nullptr && child("patrol", "patrol_hull") == nullptr);
+  if (m && m->getGeometry()) {
+    const bounds b = bounds_of(*m->getGeometry());
+    CHECK(near(b.lo[0], -3.9, 1e-4) && near(b.hi[0], 3.9, 1e-4)); // the boat's length overall
+    CHECK(near(b.lo[2], 0.0, 1e-4) && near(b.hi[2], 3.0 * 7.8 / 8.0, 1e-4)); // y up in the file
+  }
+  CHECK(child("lost", "lost_hull") != nullptr && child("lost", "lost_model") == nullptr);
+  // The state a view polls.
+  cvc::ariadne::vehicle_look look;
+  look.kind = "data";
+  look.uri = spec.uri;
+  look.subpath = spec.path;
+  look.path = "y_up_boat.obj";
+  look.fit = true;
+  CHECK(ari::vehicle_model_state(app, *out.vehicle_models, look, 7.8) ==
+        ari::vehicle_model_status::ready);
+  cvc::ariadne::vehicle_look lost = look;
+  lost.uri = gone.uri;
+  std::vector<std::string> why;
+  CHECK(ari::vehicle_model_state(app, *ari::make_vehicle_model_cache(), lost, 7.8, &why) ==
+        ari::vehicle_model_status::failed);
+  CHECK(!why.empty());
+  for (const std::string &w : why)
+    std::printf("  failed as it should: %s\n", w.c_str());
+  cvc::ariadne::vehicle_look plain;
+  plain.kind = "box";
+  CHECK(ari::vehicle_model_state(app, *out.vehicle_models, plain, 4.0) ==
+        ari::vehicle_model_status::failed);
+  fs::remove_all(dir, ec);
+}
+
+// A geometry node's `model:` (a crate drawn as its model, floating as its box): the model fitted
+// into the box the node's own geometry spans, put in from a scene tick, so the node's body is made
+// from its box even when the model is ready at realize (a file); from a data: package once it has
+// loaded; a data: entry the document lacks keeps the box, with a warning.
+void test_node_model_from_data() {
+  cvc::app app;
+  std::printf("test_node_model_from_data\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt)) {
+    std::printf("  skipped: no Jolt in this build\n");
+    return;
+  }
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  const fs::path dir = fs::temp_directory_path(ec) / "cvcgl_ariadne_node_model";
+  const fs::path shared = dir / "pkg" / "share" / "cvc-scenes" / "shared";
+  fs::create_directories(shared, ec);
+  {
+    // An octahedron, 4 x 2 x 1, well away from the origin: Z up, as an OBJ is taken.
+    std::ofstream out(shared / "crate.obj");
+    out << "v 12 10 10\nv 8 10 10\nv 10 11 10\nv 10 9 10\nv 10 10 10.5\nv 10 10 9.5\n"
+           "f 1 3 5\nf 3 2 5\nf 2 4 5\nf 4 1 5\nf 3 1 6\nf 2 3 6\nf 4 2 6\nf 1 4 6\n";
+  }
+  if (!cvc::can_read_model_from_memory(".obj")) {
+    std::printf("  skipped: no model reader for .obj from memory in this build\n");
+    fs::remove_all(dir, ec);
+    return;
+  }
+  cvc::gl::ariadne::register_cvcgl_extensions(app);
+  const std::string doc = R"(
+meta: { min_libcvc: "0.0.0" }
+data:
+  crates: { uri: ")" + (dir / "pkg").generic_string() +
+                          R"(", path: share/cvc-scenes/shared, load: lazy }
+scene:
+  physics: {}
+  nodes:
+    - node: packed
+      source: { box: { size: [3, 2, 1.5] } }
+      transform: { position: [0, 0, 5] }
+      material: { color: [0.6, 0.4, 0.2] }
+      model: { data: crates, file: crate.obj }
+      body: { density: 450 }
+    - node: local
+      source: { box: { size: [2, 2, 2] } }
+      transform: { position: [6, 0, 5] }
+      model: ")" + (shared / "crate.obj").generic_string() +
+                          R"("
+      body: { density: 450 }
+    - node: lost
+      source: { box: { size: [1, 1, 1] } }
+      transform: { position: [-6, 0, 5] }
+      model: { data: no_such_entry, file: crate.obj }
+      body: { density: 450 }
+)";
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(app, doc);
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  SceneGraph sg(app);
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &warnings);
+  bool lost_warned = false;
+  for (const std::string &w : warnings) {
+    std::printf("  warning: %s\n", w.c_str());
+    lost_warned = lost_warned || (w.find("'lost'") != std::string::npos &&
+                                  w.find("no data: entry 'no_such_entry'") != std::string::npos);
+  }
+  CHECK(lost_warned);
+  const auto node = [&](const std::string &id) {
+    return std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics(id));
+  };
+  const auto tris = [&](const std::string &id) -> std::size_t {
+    const std::shared_ptr<GeometryNode> g = node(id);
+    return g && g->getGeometry() ? g->getGeometry()->num_tris() : 0;
+  };
+  // Each still its box at realize, the local file's model ready though it is, and a body each.
+  const std::size_t box_tris = tris("local");
+  CHECK(box_tris > 8);
+  CHECK(tris("packed") == box_tris && tris("lost") == box_tris);
+  bounds packed_box, local_box;
+  if (node("packed") && node("packed")->getGeometry())
+    packed_box = bounds_of(*node("packed")->getGeometry());
+  if (node("local") && node("local")->getGeometry())
+    local_box = bounds_of(*node("local")->getGeometry());
+  int bodies = 0;
+  for (const auto &[id, body] : out.bodies)
+    bodies += id == "packed" || id == "local" || id == "lost";
+  CHECK(bodies == 3);
+  // The package loads on the store's worker; then a frame puts each model in.
+  cvc::ariadne::DataSpec spec;
+  spec.uri = (dir / "pkg").generic_string();
+  spec.path = "share/cvc-scenes/shared";
+  const std::shared_ptr<cvc::ariadne::DataStore> store = cvc::ariadne::DataStore::of(app);
+  CHECK(store->wait(store->load(spec), 30.0));
+  for (int i = 0; i < 3; ++i)
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  CHECK(tris("packed") == 8 && tris("local") == 8); // the octahedron
+  CHECK(tris("lost") == box_tris);                  // its box
+  // Fitted into the box on each axis: the model's 4 x 2 x 1 spans the box's 3 x 2 x 1.5.
+  for (const auto &[id, box] : {std::pair{"packed", packed_box}, std::pair{"local", local_box}}) {
+    const std::shared_ptr<GeometryNode> g = node(id);
+    if (!g || !g->getGeometry())
+      continue;
+    const bounds b = bounds_of(*g->getGeometry());
+    for (int k = 0; k < 3; ++k)
+      CHECK(near(b.lo[k], box.lo[k], 1e-6) && near(b.hi[k], box.hi[k], 1e-6));
+  }
+  CHECK(near(packed_box.hi[0] - packed_box.lo[0], 3.0, 1e-6) &&
+        near(packed_box.hi[2] - packed_box.lo[2], 1.5, 1e-6));
+  // The state a view polls: a box look has no model.
+  cvc::ariadne::vehicle_look plain;
+  plain.kind = "box";
+  CHECK(ari::boxed_model_state(app, *ari::make_vehicle_model_cache(), plain, {0, 0, 0},
+                               {1, 1, 1}) == ari::vehicle_model_status::failed);
+  fs::remove_all(dir, ec);
+}
+
 int main() {
   test_crate_lands_on_the_drawn_ground();
   test_null_backend_places_and_holds();
@@ -1613,6 +1868,8 @@ int main() {
   test_fit_vehicle_geometry();
   test_installed_vehicle_models_fit();
   test_boat_models_drawn();
+  test_boat_model_from_data();
+  test_node_model_from_data();
   if (g_failures) {
     std::printf("cvcgl_ariadne_physics: %d FAILURE(S)\n", g_failures);
     return 1;

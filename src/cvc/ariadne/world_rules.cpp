@@ -200,7 +200,9 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
       }
     } else if (key == "look") {
       if (!val.is_map())
-        return at + " look: expects a map (box:, file:, asset:, model:, fit:, scale:, yaw:, z:)";
+        return at + " look: expects a map (box:, file:, asset:, model:, data:, fit:, scale:, yaw:, "
+                    "z:)";
+      bool fit_given = false;
       for (const auto &[k, x] : val.entries) {
         if (k == "box") {
           v.look.kind = "box";
@@ -211,7 +213,10 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
           v.look.kind = "model";
           v.look.path = x.as_string();
           v.look.fit = true;
+        } else if (k == "data") {
+          v.look.data = x.as_string();
         } else if (k == "fit") {
+          fit_given = true;
           if (!boolean(x, at + " look: fit:", v.look.fit, why))
             return why;
         } else if (k == "scale" || k == "yaw" || k == "z") {
@@ -222,6 +227,15 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
         } else {
           warn(warnings, at + " look: unknown key '" + k + "', ignored");
         }
+      }
+      // `data: NAME` with `file: FILE`: the file inside a data: entry's package, a model fitted to
+      // the chassis unless `fit: false`.
+      if (!v.look.data.empty()) {
+        if (v.look.kind != "file" || v.look.path.empty())
+          return at + " look: data: needs file: (the model's file in the package)";
+        v.look.kind = "data";
+        if (!fit_given)
+          v.look.fit = true;
       }
     } else if (key == "ranges") {
       if (!val.is_map())

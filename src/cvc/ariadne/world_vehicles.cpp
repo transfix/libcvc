@@ -546,7 +546,7 @@ std::string find_vehicle_model(const std::string &name) {
 
 void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std::string &doc_dir,
                            const std::vector<SceneAsset> &assets,
-                           std::vector<std::string> *warnings) {
+                           std::vector<std::string> *warnings, const std::vector<SceneData> &data) {
   namespace fs = std::filesystem;
   const auto warn = [&](const std::string &w) {
     if (warnings)
@@ -603,9 +603,33 @@ void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std
       }
       continue;
     }
+    if (look.kind == "data") {
+      if (!look.uri.empty()) // resolved already (a look a host passed on whole)
+        continue;
+      const SceneData *entry = nullptr;
+      for (const SceneData &d : data)
+        if (d.name == look.data)
+          entry = &d;
+      if (entry && !entry->uri.empty()) {
+        look.uri = entry->uri;
+        look.subpath = entry->path;
+      } else {
+        warn("world: vehicles: " + v.id + ": look: no data: entry '" + look.data +
+             "' in the document; it is drawn as its box");
+        look = vehicle_look{};
+        look.kind = "box";
+      }
+      continue;
+    }
     if (look.kind == "file" && !doc_dir.empty() && relative(look.path))
       look.path = (fs::path(doc_dir) / look.path).string();
   }
+}
+
+void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std::string &doc_dir,
+                           const std::vector<SceneAsset> &assets,
+                           std::vector<std::string> *warnings) {
+  resolve_vehicle_looks(archetypes, doc_dir, assets, warnings, std::vector<SceneData>{});
 }
 
 vehicle_stats vehicle_stats_of(const ph::vehicle_desc &d) {
@@ -2231,6 +2255,8 @@ struct WorldVehicles::impl {
       put(at + "wheel_radius", num(d.axles.empty() ? 0.4 : d.axles.front().wheel_radius));
       put(at + "look.kind", a.look.kind);
       put(at + "look.path", a.look.path);
+      put(at + "look.uri", a.look.uri);
+      put(at + "look.subpath", a.look.subpath);
       put(at + "look.scale", num(a.look.scale));
       put(at + "look.yaw", num(a.look.yaw));
       put(at + "look.z", num(a.look.z));
