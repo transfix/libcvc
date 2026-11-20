@@ -141,10 +141,11 @@ public:
   /// Whether a notifier is installed (any thread).
   bool has_wake_notifier() const noexcept;
 
-  /// What the last run loop left (S2-Q4), computed at its end on the pump owner's thread. It is
-  /// computed always, though nothing reads it unless a pool attached the group or a host batch
-  /// waits on it (exec_group::pump copies it into pump_result; S2.md section 8's always-on
-  /// change, "the run loop's published deadline"). Pump owner only.
+  /// What the last run loop left (S2-Q4), computed at its end on the pump owner's thread while a
+  /// wake notifier is installed (a pool attached the group, or a host batch waits on it:
+  /// ExecPool.run_all, the bench's fork-join async point), the only readers; otherwise it is left
+  /// as it was, so a scheduler with no notifier runs master's loop exactly (R2b S-m2: the timer
+  /// peek pops stale heap entries). exec_group::pump copies it into pump_result. Pump owner only.
   struct run_report {
     /// A process was ready when the run loop ended (its step or time budget ran out first).
     bool runnable = false;
@@ -160,6 +161,8 @@ public:
     bool precise = false;
     /// process_table::best_runnable() when the run loop ended.
     std::optional<int> best_runnable;
+    /// A process waits for the next frame (yield_frame) when the run loop ended.
+    bool awaiting_frame = false;
   };
   const run_report &last_run_report() const noexcept { return run_report_; }
 

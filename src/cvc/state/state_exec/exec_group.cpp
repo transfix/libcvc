@@ -354,6 +354,7 @@ pump_result exec_group::pump(const pump_budget &budget) {
     r.next_deadline = left.next_deadline;
     r.deadline_precise = left.precise;
     r.best_runnable = left.best_runnable;
+    r.awaiting_frame = left.awaiting_frame;
   } catch (...) {
     if (m.callback_threw) {
       // An on_complete callback run inline threw: the host's exception, as today.

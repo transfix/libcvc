@@ -7,9 +7,10 @@
 //   on the calling thread, and returns when all are done: outside a pump_all no worker touches
 //   any group, so host code (sweeps, get_process_info, reap, kill_owner) runs between them as it
 //   does today.
-// - Continuous (Stage 2, S2a): an attach()ed group is pumped whenever it has work, without a
-//   frame barrier; its host touches it under its token (with_group), and services its host queue
-//   in pump_host and wait_for_work. With nothing attached, the pool is Stage 1's.
+// - Continuous (Stage 2, S2a): an attach()ed group is pumped whenever it has work (and its host
+//   does not hold it), without a frame barrier; its host touches it under its token (with_group),
+//   and services its host queue in pump_host and wait_for_work. With nothing attached, the pool is
+//   Stage 1's.
 
 #include <chrono>
 #include <cstdint>
@@ -84,7 +85,7 @@ struct pool_stats {
   // Stage 2 (continuous mode, S2a):
   std::uint64_t wakes = 0;           // groups queued by wake(g) (its `scheduled` transition)
   std::uint64_t timer_wakes = 0;     // groups queued because the deadline they published came
-  std::uint64_t requeues = 0;        // releases that queued a group again (runnable, notified)
+  std::uint64_t requeues = 0;        // releases (of a pump or a hold) that queued a group again
   std::uint64_t parks = 0;           // times a worker parked on the eventcount
   std::uint64_t empty_wakes = 0;     // worker wakeups that found no group to pump (PL-4)
   std::uint64_t moves = 0;           // continuous pumps on another thread than the group's last
@@ -160,7 +161,8 @@ public:
   // thread's pump_host, wait_for_work, with_group and detach; a body runs inline when the calling
   // thread is the attaching thread itself (pumping a caller-pumped group). A body queued by a
   // worker takes the group's token on the attaching thread (with_group's rule), so it never runs
-  // beside a pump; a waiting one (run_on_host_waiting) runs under its blocked worker's token.
+  // beside a pump; a waiting one (run_on_host_waiting) runs under its blocked worker's token, at
+  // once, so it may run before an earlier non-waiting body of its group (another process's).
   void run_on_host(state_exec::exec_group &group, std::function<void()> fn);
 
   // Whether the calling thread is inside one of this pool's pump_all calls: as its caller (where
@@ -183,27 +185,29 @@ public:
 
   // --- Stage 2: continuous mode (S2a; td 4.4, 4.9, 4.12, 4.14; S2.md S2-Q2..S2-Q6) ---
   //
-  // An attached group is pumped whenever it has work, with no frame barrier: a post to it (a
-  // message, a completion, a control, a lock post) calls its scheduler's notifier, wake(g), which
-  // queues it; a worker pops it, pumps it once on the pool's budget (pump_steps, pump_seconds),
-  // queues it again while its pump says it has work, else files the deadline the pump published
-  // in the pool's timer heap (group_pool_link in exec_group.h has the state word and its frozen
-  // transitions). Workers take the ready queue by virtual time (pump time consumed; a woken
-  // group's clamped to the queue's minimum less one pump, S2-Q13), spin briefly, then park on the
-  // pool's eventcount until a wake or the earliest deadline (S2-Q3).
+  // An attached group is pumped whenever it has work and its host does not hold it (a with_group,
+  // or a hold a release handed to a host waiting to run its entries), with no frame barrier: a post
+  // to it (a message, a completion, a control, a lock post) calls its scheduler's notifier,
+  // wake(g), which queues it; a worker pops it, pumps it once on the pool's budget (pump_steps,
+  // pump_seconds), queues it again while its pump says it has work, else files the deadline the
+  // pump published in the pool's timer heap (group_pool_link in exec_group.h has the state word and
+  // its frozen transitions). Workers take the ready queue by virtual time (pump time consumed; a
+  // woken group's clamped to the queue's minimum less one pump, S2-Q13), spin briefly, then park on
+  // the pool's eventcount until a wake or the earliest deadline (S2-Q3).
   //
   // The attaching thread (the one that called attach) is "the host thread" of what it attached
   // (S2-Q5). It alone pumps its caller-pumped groups: a host-affinity group, one on a single-mode
   // lock manager, and every group of a pool with no workers or in deterministic mode (td 4.14;
-  // deterministic mode pumps them in creation order, on steps only). It runs their host-queue
-  // entries (host_proxied bodies, deferred on_complete callbacks) and finishes their failures, in
-  // pump_host, wait_for_work, with_group and detach, and never blocks without servicing that
-  // queue. It detaches what it attached before it exits (unchecked: nothing is kept per thread),
-  // and ~exec_pool asserts that nothing is attached.
+  // deterministic mode pumps them in creation order, on steps only, one pass per pump_host). It
+  // runs their host-queue entries (host_proxied bodies, deferred on_complete callbacks) and
+  // finishes their failures, in pump_host, wait_for_work, with_group and detach, and never blocks
+  // without servicing that queue. It detaches what it attached before it exits (unchecked: nothing
+  // is kept per thread), and ~exec_pool asserts that nothing is attached.
 
   // Attach `group`: the calling thread becomes its attaching thread, its scheduler's notifier is
   // installed, and it is woken once, so work posted before is seen. Refused (std::logic_error)
-  // when it is attached already, to any pool, or a pump_all holds it. pump_all refuses it from
+  // when it is attached already, to any pool, a pump_all holds it, or its scheduler has a wake
+  // notifier installed already (ExecPool.run_all's batch, say). pump_all refuses it from
   // then on (an assertion; std::logic_error in release builds) until it is detached. Its host
   // touches it only under with_group from then on (a submission, a read, a kill, a reap), since a
   // worker may pump it at any time; its own natives and callbacks run where the rules below say.
@@ -214,27 +218,36 @@ public:
   // notifier is cleared, its queued host bodies and callbacks have run on this thread, and it is
   // an unattached group again, which pump_all takes. Waits for a pump in progress, servicing this
   // thread's host queue. On its attaching thread (a debug assertion). Nothing for a group that is
-  // not attached to this pool.
+  // not attached to this pool. Refused (std::logic_error) from inside the group's own pump (an
+  // inline native or callback on the thread pumping it) or its own waiting body, either of which
+  // the wait would wait for. A failed group is detached by take_failed (or its teardown).
   void detach(state_exec::exec_group &group);
   // On an attaching thread: run its host-queue entries, then pump its queued caller-pumped
   // groups, each once on the pool's budget as a worker would, until none is queued or
-  // `max_seconds` passed (infinity: no limit; the entries run whatever it is). True when it ran an
-  // entry or pumped a group. Never from a host body, a callback or a pump.
+  // `max_seconds` passed (infinity: no limit; the entries run whatever it is). In deterministic
+  // mode it is one pass: each group queued when it began is pumped at most once, in creation
+  // order, and one whose pump left a process waiting for the next frame is due at the next call
+  // (frames are the host's calls, not the clock: td 4.4's reproducible schedule). True when it ran
+  // an entry or pumped a group. The first exception an entry or an inline on_complete threw is
+  // rethrown once it is done, as pump_all's are. Never from a host body, a callback or a pump.
   bool pump_host(double max_seconds);
   // On an attaching thread: block until it has work for pump_host (a caller-pumped group queued
   // or falling due, a host-queue entry, a failed group to take) or `seconds` passed (infinity: no
   // limit), running its host-queue entries meanwhile. True when there is work (an entry it ran
-  // counts); false when the time passed with none.
+  // counts; a failed group counts once, until it is taken); false when the time passed with none.
+  // An entry's exception is rethrown as pump_host's are.
   bool wait_for_work(double seconds);
   // Run `fn` on this thread under `group`'s token (S2-Q4). For an attached group: wait for a pump
   // in progress, or another thread's with_group or host body (servicing this thread's host
   // queue), keep workers off it while `fn` runs (one that pops it meanwhile leaves it notified),
   // and wake it afterwards, since `fn` may have submitted, killed or resumed, which posts nothing.
-  // For a group not attached, or one being detached: take the token as
-  // async_scheduler::pump_owner_scope does (throwing when another thread holds it). For touching
-  // the group's scheduler (submit, read, kill, reap), not for pumping it. `fn` may detach the
-  // group; destroying it inside `fn` aborts. An exception from `fn` propagates once the token is
-  // released.
+  // For a group not attached: take the token as async_scheduler::pump_owner_scope does (throwing
+  // when another thread holds it); one being detached: the same once the detach is over (at once
+  // on the detaching thread; a failed group's detach ends at take_failed). For touching the
+  // group's scheduler (submit, read, kill, reap), not for pumping it. `fn` may detach the group;
+  // destroying it inside `fn` aborts. Refused (std::logic_error) inside the group's own waiting
+  // body, whose worker holds the token and waits for the body. An exception from `fn` propagates
+  // once the token is released; it wins over an entry's.
   void with_group(state_exec::exec_group &group, const std::function<void()> &fn);
   // On an attaching thread: its attached groups whose pump failed (a C++ exception escaped it;
   // their processes were killed with "internal error"), each returned once, in the order they
@@ -280,8 +293,8 @@ bool defer_on_complete(state_exec::exec_group &group, std::function<void()> call
 bool in_pool_callback(const cvc::app *app) noexcept;
 // A group's teardown (S1.5): drop the group's entries from the host-call queue of the pump_all it
 // belongs to, unrun, waiting for one its caller is running now. Nothing when it belongs to none
-// (always, in practice: ~exec_group aborts while a pump_all holds its group). Stage 2: an
-// attached group's entries on its attaching thread's queue too, which detach_end leaves there.
+// (always, in practice: ~exec_group aborts while a pump_all holds its group). Stage 2: an attached
+// group's entries are dropped by detach_end instead.
 void purge_host_calls(state_exec::exec_group &group) noexcept;
 // Stage 2 (S2a): an attached group's teardown (S2-Q4; ~exec_group), steps 1 and 2: set detaching,
 // then wait for a pump in progress (and a host_held of another thread) to end, servicing the
@@ -290,10 +303,12 @@ bool detach_begin(state_exec::exec_group &group) noexcept;
 // Step 4, once the teardown holds the token and has closed the lock port: the group leaves the
 // ready queue, the next slots, its attaching thread's ready and failed lists and the timer heap,
 // its notifier is cleared (waiting for a wake in progress) and its attachment dropped. Its
-// host-queue entries stay for purge_host_calls, after the kills. Nothing when it is not attached.
+// host-queue entries are dropped unrun (once the attachment is gone nothing leads from the group
+// to them; the kills that follow settle their calls as cancelled). Nothing when it is not attached.
 void detach_end(state_exec::exec_group &group) noexcept;
 // Whether the calling thread holds `group`'s host_held now (inside with_group, or running a host
-// body or callback of it under the token): a teardown there aborts (the amended transitions).
+// body or callback of it under the token), or runs a waiting body of it under its worker's token:
+// a teardown there aborts (the amended transitions; a waiting body's would wait for its worker).
 bool host_held_here(state_exec::exec_group &group) noexcept;
 // run_on_host for a worker pumping `group` that then waits for `fn` to have run (a host_proxied
 // call that cannot park): the caller runs it as soon as it services the queue, while the worker

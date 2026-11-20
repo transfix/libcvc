@@ -85,7 +85,12 @@ struct group_pool_link {
   /// - release, under Q: clear pumping. detaching: done (the teardown waits for this). A failed
   ///   pump: see failure. pump_result::runnable, or its next_deadline due: queue g again. Else
   ///   CAS the word from exactly `scheduled` to 0, and only if that succeeds file next_deadline
-  ///   (if any) in the pool's timer heap; if it fails (a post set notified), queue g again.
+  ///   (if any) in the pool's timer heap; if it fails (a post set notified), queue g again. The
+  ///   hold handoff: a release that queues g again while a host thread is waiting to hold it now
+  ///   (a with_group blocked on it, or g's attaching thread inside pump_host, wait_for_work,
+  ///   with_group or detach with host entries for g) sets host_held to that thread on its behalf,
+  ///   so the next pop defers; a host that is not waiting gets nothing, and g goes on being pumped.
+  ///   A detach takes back a hold handed over and not taken up.
   /// - a due timer, under Q: unless g is detaching or no longer attached, as wake(g).
   /// - with_group, or a non-waiting host body, on a host thread: under Q (each time it looks):
   ///   if detaching is set or g is no longer attached, set nothing and take the token as for an
@@ -135,7 +140,8 @@ struct pump_budget {
 /// What one pump did: the steps it took, the processes wake_awaiting() woke, and whether a C++
 /// exception escaped it (the pool then fails the group, S1.6). Stage 2 (S2a, S2-Q4): what the
 /// pump left, read under the token from its run loop's end (async_scheduler::run_report), so a
-/// worker's release reads only this and the state word, never the scheduler. Unset when failed.
+/// worker's release reads only this and the state word, never the scheduler. Unset when failed,
+/// and while the group's scheduler has no wake notifier installed (nothing reads it then).
 struct pump_result {
   std::uint64_t steps = 0;
   int woken = 0;
@@ -151,6 +157,9 @@ struct pump_result {
   bool deadline_precise = false;
   /// The best effective priority among the ready processes then (process_table::best_runnable).
   std::optional<int> best_runnable;
+  /// A process waits for the next frame (yield_frame): next_deadline holds its coarse 1 ms beat,
+  /// which deterministic mode replaces with the host's next pump_host pass.
+  bool awaiting_frame = false;
 };
 
 class exec_group {
@@ -204,7 +213,8 @@ public:
   /// Stage 2 (S2-Q4): an attached group first leaves its pool, in the order group_pool_link's
   /// transitions give (detaching set, its pump waited for, the token, the lock port closed, then
   /// off the pool's queues with its notifier cleared, and only then the kills), so no worker or
-  /// wake touches it after; destroyed inside its own with_group or host body it aborts too.
+  /// wake touches it after; destroyed inside its own with_group, host body or waiting body
+  /// (exec_pool's detail::host_held_here) it aborts too.
   ~exec_group();
   exec_group(const exec_group &) = delete;
   exec_group &operator=(const exec_group &) = delete;
@@ -228,7 +238,10 @@ public:
   /// form always copies the AST's lists and dicts (td B12), so neither another group nor the host
   /// shares its quoted literals. An on_complete runs on the pump_all caller after the join when a
   /// threaded pump_all pumps the group (on a worker or on the caller), inline otherwise (threads 0,
-  /// deterministic mode, no pump_all), as exec_pool::pump_all says.
+  /// deterministic mode, no pump_all), as exec_pool::pump_all says. Stage 2: on an attached group,
+  /// from a thread that neither pumps nor holds it (a host outside with_group), it runs under
+  /// exec_pool::with_group, so it waits for a pump in progress and the group is woken after; an
+  /// on_complete then runs on the attaching thread's host queue when a worker pumps the group.
   int execute(const std::string &script, const execute_options &opts = {});
   int execute(const value_t &expr, const execute_options &opts = {});
 
