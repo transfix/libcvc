@@ -323,6 +323,13 @@ pump_result exec_group::pump(const pump_budget &budget) {
                                               ? std::optional<double>(std::max(0.0, budget.seconds))
                                               : std::nullopt;
     r.steps = s.sync_run_steps(budget.steps, seconds);
+    // What the run loop left (S2-Q4), read here under the token: a worker's release reads this,
+    // never the scheduler.
+    const async_scheduler::run_report &left = s.last_run_report();
+    r.runnable = left.runnable;
+    r.next_deadline = left.next_deadline;
+    r.deadline_precise = left.precise;
+    r.best_runnable = left.best_runnable;
   } catch (...) {
     if (m.callback_threw) {
       // An on_complete callback run inline threw: the host's exception, as today.

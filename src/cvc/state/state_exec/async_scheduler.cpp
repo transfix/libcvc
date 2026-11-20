@@ -175,6 +175,20 @@ bool async_scheduler::pumped_elsewhere() const noexcept {
   return owner != std::thread::id{} && owner != std::this_thread::get_id();
 }
 
+// Stage 2 (S2a.0): the notifier is the wakeup's, which the lock home's port shares (S2-Q2).
+void async_scheduler::set_wake_notifier(detail::wake_notifier fn, void *ctx) {
+  wakeup_->set_notifier(fn, ctx);
+}
+
+bool async_scheduler::has_wake_notifier() const noexcept { return wakeup_->has_notifier(); }
+
+// S2a.0 stubs: the monitor's settings are kept (S2a.7 reads them).
+void async_scheduler::set_long_step_sink(long_step_sink sink) { long_step_sink_ = std::move(sink); }
+
+void async_scheduler::set_long_step_default(double seconds) {
+  long_step_default_ = std::isfinite(seconds) && seconds > 0.0 ? seconds : 0.0;
+}
+
 namespace {
 // S1-Q4 (td 4.1): debug builds, or CVC_EXEC_VERIFY=1 (read as the scheduler is made,
 // detail::pump_owner_verification), check the pump owner's rule in the public mutators. A call

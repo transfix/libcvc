@@ -14,6 +14,7 @@
 #define CVC_STATE_EXEC_EXEC_GROUP_H
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cvc/core/thread_class.h>
 #include <cvc/state/state_exec/heap.h>           // cycle_registry
@@ -59,6 +60,52 @@ struct group_pool_link {
   /// one thread; a single manager also needs one thread to drive the whole app (every pump_all of
   /// its groups, group 0's drivers, direct pumps), which the host keeps.
   bool caller_only = false;
+
+  // --- Stage 2: continuous mode (S2a; td 4.4; S2.md S2-Q2, S2-Q4, S2-Q5) ---
+
+  /// The group state word, while the group is attached (exec_pool::attach); 0 otherwise. Bits:
+  static constexpr std::uint32_t scheduled = 1u; ///< in a ready queue, or being pumped
+  static constexpr std::uint32_t notified = 2u;  ///< work arrived since the pump began
+  static constexpr std::uint32_t pumping = 4u;   ///< a worker (or its attaching thread) pumps it
+  static constexpr std::uint32_t detaching = 8u; ///< its detach or teardown has begun
+  /// The transitions (S2a.0 freezes them; the pool keeps three more facts per group under its
+  /// ready-queue mutex Q, outside the word: `queued` (in a ready queue, a worker's next slot or
+  /// its attaching thread's ready list), `host_held` (a host thread holds the token, by
+  /// with_group or for a host body) and `deferred` (popped while host_held)):
+  /// - wake(g), the notifier, any thread: old = fetch_or(scheduled | notified). If old has
+  ///   scheduled or detaching, done. Else, under Q: unless detaching is set now, queue g (the
+  ///   ready queue, the waking worker's next slot, or its attaching thread's ready list when g is
+  ///   pumped by that thread only) and set queued; then, outside Q, wake one parked worker (or
+  ///   that thread).
+  /// - pop, a worker, under Q: take g, clear queued. detaching: drop it. host_held: set
+  ///   notified and deferred, and take the next. Else set pumping. Pop and pumping are one step.
+  /// - pump, no lock: clear notified, take the token (which nothing else holds now), pump on the
+  ///   pool's budget, release the token.
+  /// - release, under Q: clear pumping. detaching: done (the teardown waits for this). A failed
+  ///   pump: see failure. pump_result::runnable, or its next_deadline due: queue g again. Else
+  ///   CAS the word from exactly `scheduled` to 0, and only if that succeeds file next_deadline
+  ///   (if any) in the pool's timer heap; if it fails (a post set notified), queue g again.
+  /// - a due timer, under Q: unless g is detaching or no longer attached, as wake(g).
+  /// - with_group, or a non-waiting host body, on a host thread: under Q, wait while pumping is
+  ///   set (servicing that thread's host queue meanwhile), then set host_held; take the token,
+  ///   run, release it; under Q clear host_held, and if deferred, clear it and queue g again. A
+  ///   waiting body (run_on_host_waiting) runs under its blocked worker's token instead, taking
+  ///   nothing (the worker holds pumping and the token).
+  /// - failure (a C++ exception escaped the pump): the pumping thread kills the group's
+  ///   processes with "internal error" holding the token; under Q it clears pumping, sets
+  ///   detaching and lists g on its attaching thread's failed list; that thread finishes the
+  ///   detach in take_failed() (or the group's teardown does).
+  /// - detach and teardown (S2-Q4): (1) under Q set detaching; (2) wait for pumping (and a
+  ///   host_held of another thread) to clear, servicing the calling thread's host queue; (3) take
+  ///   the token, and the teardown closes the lock port; (4) under Q leave the ready queue, the
+  ///   next slots, the ready list, the failed list and the timer heap; then, outside Q, clear the
+  ///   notifier (which waits for a wake in progress) and drop the attachment; the word goes to 0;
+  ///   (5) the teardown kills, shuts the host down, purges and reaps; detach runs the group's
+  ///   host-queue entries instead and releases the token.
+  std::atomic<std::uint32_t> state{0};
+  /// The pool's record of the group while it is attached (exec_pool.cpp's), else null: set by
+  /// attach, cleared by detach (step 4). A group attached is in no pump_all (refused there).
+  std::atomic<void *> attached{nullptr};
 };
 /// The groups alive that were built with `app` (~app asserts in debug builds that none is): a
 /// count the app keeps, as it does each group's creation order.
@@ -78,11 +125,24 @@ struct pump_budget {
 };
 
 /// What one pump did: the steps it took, the processes wake_awaiting() woke, and whether a C++
-/// exception escaped it (the pool then fails the group, S1.6).
+/// exception escaped it (the pool then fails the group, S1.6). Stage 2 (S2a, S2-Q4): what the
+/// pump left, read under the token from its run loop's end (async_scheduler::run_report), so a
+/// worker's release reads only this and the state word, never the scheduler. Unset when failed.
 struct pump_result {
   std::uint64_t steps = 0;
   int woken = 0;
   bool failed = false;
+  /// A process was ready when the pump ended (its budget ran out first): pump it again.
+  bool runnable = false;
+  /// The earliest time the group has work of its own that no post announces (its timers, its
+  /// calls' timeouts and charge beats, its collection falling due, now + 1 ms while a process
+  /// waits for the next frame); time_point::max(): none (run_report::next_deadline).
+  std::chrono::steady_clock::time_point next_deadline =
+      std::chrono::steady_clock::time_point::max();
+  /// next_deadline is a sleeper's or a timed wait's, to be waited for precisely (S2-Q3).
+  bool deadline_precise = false;
+  /// The best effective priority among the ready processes then (process_table::best_runnable).
+  std::optional<int> best_runnable;
 };
 
 class exec_group {

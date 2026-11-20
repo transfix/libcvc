@@ -413,6 +413,14 @@ process_table::level *process_table::first_nonempty() {
   return nullptr;
 }
 
+std::optional<int> process_table::best_runnable() const {
+  // levels_ is sorted by key, the best (lowest) first.
+  for (const level &l : levels_)
+    if (l.count > 0)
+      return l.key;
+  return std::nullopt;
+}
+
 std::uint32_t process_table::kth(const level &l, std::uint32_t k) const {
   // Fenwick descent: the slot holding the (k+1)-th queued process of the level.
   std::uint32_t pos = 0;
@@ -776,6 +784,14 @@ bool process_table::check() const {
 // ---------------------------------------------------------------------------
 
 namespace detail {
+
+// S2a.0 stub (S2-Q2): the notifier is kept, under its lock; notify() does not call it yet
+// (S2a.1, the wake notifier).
+void wakeup::set_notifier(wake_notifier fn, void *ctx) {
+  std::lock_guard<std::mutex> lock(notifier_mu_);
+  notifier_ctx_ = fn ? ctx : nullptr;
+  notifier_.store(fn, std::memory_order_release);
+}
 
 #if defined(_WIN32)
 struct wakeup::impl {

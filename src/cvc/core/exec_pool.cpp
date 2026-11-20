@@ -28,6 +28,7 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -413,7 +414,7 @@ exec_pool::exec_pool(const pool_options &opts) : impl_(std::make_unique<impl>())
   p.self = this;
   p.opts = opts;
   p.deterministic = opts.deterministic || deterministic_knob();
-  p.force_move = force_move_knob();
+  p.force_move = opts.force_move || force_move_knob();
   const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
   unsigned want = opts.threads;
   if (want == pool_options::auto_threads)
@@ -463,6 +464,8 @@ exec_pool::~exec_pool() {
   {
     std::lock_guard<std::mutex> lock(p.m);
     assert(p.calls.empty() && "exec_pool destroyed during a pump_all");
+    // S2-Q5: the attaching threads detach what they attached first.
+    assert(p.stats.attached == 0 && "exec_pool destroyed with a group attached");
     p.stopping = true; // workers stop after their current pumps
   }
   p.work_cv.notify_all();
@@ -505,6 +508,14 @@ std::vector<state_exec::exec_group *> exec_pool::pump_all(
     caller_listing(const caller_listing &) = delete;
     caller_listing &operator=(const caller_listing &) = delete;
   } listed_caller(p);
+  // S2-Q4: an attached group belongs to the continuous pool, never to a pump_all (an assertion,
+  // and std::logic_error in release builds), refused before any group is taken.
+  for (se::exec_group *g : groups)
+    if (g && g->pool_link().attached.load(std::memory_order_acquire) != nullptr) {
+      assert(false && "an attached exec_group given to pump_all");
+      throw std::logic_error("exec_pool::pump_all: group '" + g->opts().name +
+                             "' is attached to a pool (detach it first; S2-Q4)");
+    }
   call_state c;
   c.pool = &p;
   c.seq = p.call_seq.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -870,6 +881,54 @@ void exec_pool::set_last_pump_for_test(state_exec::exec_group &group, double sec
   group.pool_link().last_pump_seconds = seconds;
 }
 
+// --- Stage 2: continuous mode (S2a.0 stubs; S2a.2 and S2a.4 build them) ---
+
+namespace {
+[[noreturn]] void not_built(const char *what) {
+  throw std::logic_error(std::string("exec_pool::") + what +
+                         ": continuous mode is not built yet (S2a.0 stub)");
+}
+} // namespace
+
+void exec_pool::attach(state_exec::exec_group &group) {
+  impl &p = *impl_;
+  se::detail::group_pool_link &link = group.pool_link();
+  std::lock_guard<std::mutex> membership(link.membership);
+  if (link.attached.load(std::memory_order_acquire) != nullptr)
+    throw std::logic_error("exec_pool::attach: group '" + group.opts().name +
+                           "' is attached already");
+  if (link.call.load(std::memory_order_relaxed) != nullptr)
+    throw std::logic_error("exec_pool::attach: group '" + group.opts().name +
+                           "' is held by a pump_all");
+  link.attached.store(static_cast<pool_state *>(&p), std::memory_order_release);
+  std::lock_guard<std::mutex> lock(p.m);
+  ++p.stats.attached;
+}
+
+void exec_pool::detach(state_exec::exec_group &group) {
+  if (attached(group))
+    detail::detach_end(group);
+}
+
+bool exec_pool::pump_host(double) { not_built("pump_host"); }
+
+bool exec_pool::wait_for_work(double) { not_built("wait_for_work"); }
+
+void exec_pool::with_group(state_exec::exec_group &group, const std::function<void()> &fn) {
+  if (attached(group))
+    not_built("with_group");
+  se::async_scheduler::pump_owner_scope token(group.sched());
+  if (fn)
+    fn();
+}
+
+std::vector<state_exec::exec_group *> exec_pool::take_failed() { not_built("take_failed"); }
+
+bool exec_pool::attached(const state_exec::exec_group &group) const {
+  return const_cast<se::exec_group &>(group).pool_link().attached.load(std::memory_order_acquire) ==
+         static_cast<const pool_state *>(impl_.get());
+}
+
 const pool_options &exec_pool::options() const { return impl_->opts; }
 
 bool exec_pool::deterministic() const { return impl_->deterministic; }
@@ -931,6 +990,19 @@ void purge_host_calls(state_exec::exec_group &group) noexcept {
     lk.unlock();
   } catch (...) {
   }
+}
+
+bool detach_begin(state_exec::exec_group &group) noexcept {
+  return group.pool_link().attached.load(std::memory_order_acquire) != nullptr;
+}
+
+void detach_end(state_exec::exec_group &group) noexcept {
+  se::detail::group_pool_link &link = group.pool_link();
+  auto *const p = static_cast<pool_state *>(link.attached.exchange(nullptr));
+  if (!p)
+    return;
+  std::lock_guard<std::mutex> lock(p->m);
+  --p->stats.attached;
 }
 
 void run_on_host_waiting(exec_pool &pool, state_exec::exec_group &group, std::function<void()> fn) {
