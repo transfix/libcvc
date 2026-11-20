@@ -85,12 +85,17 @@ struct group_pool_link {
   /// - release, under Q: clear pumping. detaching: done (the teardown waits for this). A failed
   ///   pump: see failure. Else, when a host waits to hold g now (a with_group linked on g as
   ///   waiting, else its attaching thread inside pump_host or wait_for_work with host entries for
-  ///   g), set host_held to that host on its behalf: the hold is handed over, and the pop that
-  ///   follows leaves g notified and deferred (whichever way the release then goes, the idling CAS
-  ///   included); a host that is not waiting gets nothing, and g goes on being pumped. Then
-  ///   pump_result::runnable, or its next_deadline due: queue g again. Else CAS the word from
-  ///   exactly `scheduled` to 0, and only if that succeeds file next_deadline (if any) in the
-  ///   pool's timer heap; if it fails (a post set notified), queue g again.
+  ///   g, and not running an entry or pumping a group of its own then), set host_held to that host
+  ///   on its behalf: the hold is handed over, and the pop that follows leaves g notified and
+  ///   deferred (whichever way the release then goes, the idling CAS included); a host that is not
+  ///   waiting gets nothing, and g goes on being pumped. Then pump_result::runnable, or its
+  ///   next_deadline due: queue g again. Else CAS the word from exactly `scheduled` to 0, and only
+  ///   if that succeeds file next_deadline (if any) in the pool's timer heap; if it fails (a post
+  ///   set notified), queue g again. A worker's pump that threw without failing g (an inline
+  ///   callback's exception, or its token held outside the pool) leaves one entry on g's attaching
+  ///   thread's host queue that rethrows it there (one per group at a time: a later one while it is
+  ///   pending is logged and dropped), and the release goes on as for a pump with no work; the
+  ///   entry's hold, at its end, wakes g again.
   /// - give-back: an attaching thread that leaves pump_host or wait_for_work with a hold handed
   ///   to it and not taken up gives it back under Q (host_held cleared, its waiters notified, and
   ///   g queued again if a pop deferred it), so a host that stops waiting freezes nothing.
@@ -250,6 +255,11 @@ public:
   /// from a thread that neither pumps nor holds it (a host outside with_group), it runs under
   /// exec_pool::with_group, so it waits for a pump in progress and the group is woken after; an
   /// on_complete then runs on the attaching thread's host queue when a worker pumps the group.
+  /// From inside a pump of the pool the group is attached to (on one of its workers, or in a
+  /// group's pump on a thread pumping it: a native or an inline callback of another group) it is
+  /// refused (std::logic_error): that wait could wait for a pump that waits for this one (two
+  /// groups submitting to each other). A group reaches another by message; S2b's router carries
+  /// cross-group work.
   int execute(const std::string &script, const execute_options &opts = {});
   int execute(const value_t &expr, const execute_options &opts = {});
 

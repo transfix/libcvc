@@ -201,7 +201,12 @@ public:
   // deterministic mode pumps them in creation order, on steps only, one pass per pump_host). It
   // runs their host-queue entries (host_proxied bodies, deferred on_complete callbacks) and
   // finishes their failures, in pump_host, wait_for_work, with_group and detach, and never blocks
-  // without servicing that queue. It detaches what it attached before it exits (unchecked: nothing
+  // without servicing that queue. An entry of a group a worker keeps busy needs the group's hold:
+  // a release hands it only to a host waiting now, which is this thread inside wait_for_work (or
+  // at pump_host's own service, not while it runs an entry or pumps a group of its own); in
+  // with_group, detach or a pump_all join only waiting bodies run beside a busy group, the others
+  // once it idles. So a frame loop calls wait_for_work when pump_host returns false (td 4.12),
+  // rather than pump_host alone. It detaches what it attached before it exits (unchecked: nothing
   // is kept per thread), and ~exec_pool asserts that nothing is attached.
 
   // Attach `group`: the calling thread becomes its attaching thread, its scheduler's notifier is
@@ -320,7 +325,10 @@ void run_on_host_waiting(exec_pool &pool, state_exec::exec_group &group, std::fu
 void long_host_wait(state_exec::exec_group &group, double seconds) noexcept;
 // Stage 2 (S2a): when `group` is attached and the calling thread neither pumps nor holds it (nor
 // runs its waiting body), run `fn` under that pool's with_group and return true; else return
-// false, running nothing (exec_group::execute from a host, exec_group.h).
+// false, running nothing (exec_group::execute from a host, exec_group.h). Refused
+// (std::logic_error) when the calling thread is inside a pump of that pool (one of its workers, or
+// a thread pumping another group: pump_host's caller-pumped pump, a pump_all's), whose with_group
+// could wait for a pump that waits for this one (K-2: two groups submitting to each other).
 bool with_attached(state_exec::exec_group &group, const std::function<void()> &fn);
 } // namespace detail
 

@@ -1074,9 +1074,13 @@ S2.md section 0 (rows 7-12) records why each was built otherwise, as below.
   group for good (CT-3 took 359 s before the handoff). So a release, before it chooses between
   queueing and idling, hands `host_held` to a host waiting to hold the group now, on its behalf: a
   `with_group` linked on it as waiting, else its attaching thread inside `pump_host` or
-  `wait_for_work` with host entries for it. The pop that follows leaves the group deferred, and the
-  host takes the hold up at its next look. A host that is not waiting gets nothing, and the group
-  goes on being pumped: a busy host freezes no group. An attaching thread that leaves `pump_host`
+  `wait_for_work` with host entries for it, and not running an entry or pumping a group of its own
+  then. The pop that follows leaves the group deferred, and the host takes the hold up at its next
+  look. A host that is not waiting gets nothing, and the group goes on being pumped: a busy host
+  freezes no group. In practice the waiting host is one inside `wait_for_work`: `pump_host` holds
+  the pool's mutex from its last look to its exit, and a thread blocked in `with_group`, `detach`
+  or a `pump_all` join runs only waiting bodies beside a busy group, its other entries once the
+  group idles. An attaching thread that leaves `pump_host`
   or `wait_for_work` with a hold handed to it and not taken up gives it back (`host_held` cleared,
   its waiters notified, and the group queued again if a pop deferred it), and a detach takes such a
   hold back at its first step.
@@ -2202,7 +2206,9 @@ from its own thread:
   thread than the group's last), `host_pumps` (pumps on an attaching thread), `long_host_waits`,
   `attached`, `active_workers` and `fuzz_points` (4.13).
 - The host's loop: `pump_host` with a small budget, else `wait_for_work` until its next frame or
-  event, and `take_failed` each turn. The attaching thread detaches what it attached before it
+  event, and `take_failed` each turn. A loop of `pump_host` alone runs an entry (a callback, a
+  body) of a group a worker keeps busy only once that group idles, since only a host waiting in
+  `wait_for_work` is handed the hold. The attaching thread detaches what it attached before it
   exits; nothing checks it, since nothing is kept per thread (S2-Q5's debug assertion would need
   a `thread_local`), and `~exec_pool` asserts that nothing is attached.
 - Which hosts (S2-Q6): Ariadne stays fork-join, since a render must never overlap a pump, and so
