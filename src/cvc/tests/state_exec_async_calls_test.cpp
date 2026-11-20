@@ -2760,3 +2760,34 @@ TEST(KernelPools, ACallOnceBackgroundCpuHasStoppedRaisesAndLeavesTheHost) {
   w.host->wait_idle();
   EXPECT_EQ(w.host->in_flight(), 0u);
 }
+
+// --- group 0's long-step sink (S2a.7, S2-Q11) ---
+
+// app::exec_scheduler() installs a sink that logs a long step through the app. Disabled on
+// perf/threaded-s2a-m, where set_long_step_sink only keeps the sink: it is enabled once the
+// monitor (W's S2a.7 lines in async_scheduler.cpp) is merged.
+TEST(LongStepSink, DISABLED_Group0LogsALongStepThroughTheApp) {
+  cvc::app app;
+  const std::string log_key("long_step_log");
+  app.data(log_key, std::string());
+  app.properties("system.log_output", log_key);
+  app.root()("state_exec.long_step_ms").value("5"); // before group 0 reads its settings
+  async_scheduler &sched = app.exec_scheduler();
+  environment_ptr env = builtins::make_default_environment();
+  builtins::register_fn(env, "probe-nap", [](std::span<const value_t>) -> value_t {
+    std::this_thread::sleep_for(30ms);
+    return value_t(int64_t{1});
+  });
+  execute_options opts;
+  opts.env = env;
+  const int pid = sched.execute(std::string("(probe-nap)"), opts);
+  const auto start = clock_type::now();
+  while (seconds_since(start) < 15.0 && !is_finished(sched.get_process_info(pid)->status)) {
+    sched.drain_ingress();
+    sched.sync_run(100000, 0.02);
+  }
+  ASSERT_TRUE(is_finished(sched.get_process_info(pid)->status));
+  EXPECT_GE(sched.long_steps(), 1u);
+  const std::string log = app.data<std::string>(log_key);
+  EXPECT_NE(log.find("long step: probe-nap took "), std::string::npos) << log;
+}

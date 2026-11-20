@@ -1353,6 +1353,18 @@ std::optional<std::string> exec_threads_knob() {
   return e ? std::optional<std::string>(e) : std::nullopt;
 }
 
+// The long-step monitor's line for group 0 (S2a.7, S2-Q11), logged through the app at level 2.
+// The monitor calls it inside a pump, so interruption is held off (log() reaches interruption
+// points), and a throw (a log target that fails) is dropped.
+void log_long_step(cvc::app &app, const std::string &native, double seconds) {
+  boost::this_thread::disable_interruption keep_interrupt_pending;
+  try {
+    app.log(2,
+            str(boost::format("long step: %s took %.1f ms (group 0)") % native % (seconds * 1e3)));
+  } catch (...) {
+  }
+}
+
 // state_exec.threads: CVC_EXEC_THREADS when set, else the tree's.
 std::string exec_threads_text(cvc::state &root) {
   if (const std::optional<std::string> knob = exec_threads_knob())
@@ -1486,6 +1498,11 @@ cvc::state_exec::async_scheduler &app::exec_scheduler() {
       _execScheduler->set_cycle_registry(_execGroup0->registry.get());
       _execScheduler->set_random_stream(&_execGroup0->random);
       _execScheduler->set_pid_source(_execGroup0->pids);
+      // The long-step monitor (S2a.7, S2-Q11) logs through the app. It is off unless the tree
+      // sets state_exec.long_step_ms: group 0 is pumped on its host's thread, not by the pool.
+      _execScheduler->set_long_step_sink([this](const std::string &native, double seconds) {
+        log_long_step(*this, native, seconds);
+      });
       // Wire it to this app's state root so state-watches (state-watch/on_change:)
       // resolve against the app tree. Processes are chrooted per-owner on submit.
       _execScheduler->set_watch_root(&root());
