@@ -183,6 +183,10 @@ struct RealizedScene {
   // capture a weak_ptr to its node (not the node), matching the volren/volslice
   // discipline, so a torn-down node's tick is a no-op.
   std::vector<std::function<void(vtkRenderer *)>> custom_ticks;
+  // Work a CUSTOM node has in flight, one probe per node: true while its job runs or a request
+  // waits (a contour_lab's tile). A host that captures a settled frame (cvcgl_ari_golden) steps
+  // until none is busy. A probe should hold its node weakly and say false once it is gone.
+  std::vector<std::function<bool()>> pending_work;
   // The same for a closure that reads the scene's world as this frame left it (the physics stepped
   // and its moving bodies posed: `world`, `physics_binding`) and the frame's clock step. The scene
   // is passed in, not captured, since it moves after realize. Run after the custom_ticks.

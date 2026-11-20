@@ -3166,9 +3166,10 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
   sn.body = parse_scene_body(n["body"]);
   // Capture every key the built-ins did NOT consume into props (a neutral Map), so a
   // custom node type registered on the cvcGL side reads its own config from there. A source the
-  // built-ins have no field for, `{ state: <key> }` or `{ stream: <token> }`, goes there too, as
-  // written: it is a custom type's own to read (a ribbon's points).
-  const bool own_source = src && src.IsMap() && (src["state"] || src["stream"]);
+  // built-ins have no field for, `{ state: <key> }`, `{ stream: <token> }` or `{ node: <id> }`,
+  // goes there too, as written: it is a custom type's own to read (a ribbon's points, a
+  // contour_lab's contours from another node).
+  const bool own_source = src && src.IsMap() && (src["state"] || src["stream"] || src["node"]);
   sn.props.kind = Value::Kind::Map;
   if (n.IsMap())
     for (const auto &kv : n) {

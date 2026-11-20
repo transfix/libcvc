@@ -1,0 +1,63 @@
+# contour_tiler.ari — golden: the contour tiler demo (examples/ariadne/documents/contour_tiler.ari)
+# at a fixed size. A contour_lab node reads the Kuwajima 2019 Reconstruct series
+# (examples/data/contours/kuwajima2019), sections 14 to 33 of the axon ax010 and its two
+# mitochondria, draws their contours and tiles them (auto_tile) as a sliced task; the harness
+# steps until the tile is done (RealizedScene::pending_work). The surfaces are see-through, so
+# the mitochondria show inside the axon; the window lists each component's triangles.
+
+meta:
+  name: golden contour tiler
+  min_libcvc: 4.0.0
+
+# The main view close over the axon, on the first tick (after the host framed the realized scene).
+on_tick: |
+  (if (!= (state-get "tiler_golden.opened") "1")
+      (begin (state-set "viewers.main.camera.mode" "0")
+             (state-set "viewers.main.camera.orbit.center.x" "14.3")
+             (state-set "viewers.main.camera.orbit.center.y" "14.4")
+             (state-set "viewers.main.camera.orbit.center.z" "1.35")
+             (state-set "viewers.main.camera.orbit.azimuth" "-35")
+             (state-set "viewers.main.camera.orbit.elevation" "20")
+             (state-set "viewers.main.camera.orbit.distance" "6")
+             (state-set "tiler_golden.opened" "1")))
+
+windows:
+  - window: Contour tiler
+    id: contour_tiler
+    pos: [16, 16]
+    size: [330, 130]
+    children:
+      - text: "status"
+        bind: graphics.root.children.axon.tiler.status
+      - progress: progress
+        bind: graphics.root.children.axon.tiler.progress
+        hi: 100
+        overlay: graphics.root.children.axon.tiler.phase
+      - type: group
+        repeat: (state-get "graphics.root.children.axon.tiler.components")
+        layout: { kind: grid, col_widths: [150, 90] }
+        children:
+          - text: ""
+            bind: graphics.root.children.axon.tiler.components.{i}.name
+          - text: ""
+            bind: graphics.root.children.axon.tiler.components.{i}.triangles
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    - node: axon
+      type: contour_lab
+      source: { file: ../../../../examples/data/contours/kuwajima2019/VYLNH_20181017.ser }
+      read: { first: 14, last: 33, include: ["ax010.*"] }
+      auto_tile: true
+      opacity: 0.5
+      line_width: 1
+      tiler: { curation_delta: 0.005 }
+      components:
+        ax010: { color: [0.40, 0.60, 1.00] }
+        ax010mito01: { color: [0.95, 0.30, 0.40] }
+        ax010mito02: { color: [0.95, 0.30, 0.75] }
+  lights:
+    - rig: three_point
+      key: { intensity: 1.6, azimuth: -38, elevation: 52 }
