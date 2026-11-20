@@ -201,6 +201,10 @@ public:
   /// freed. Never while a pump_all holds the group (from that call's host bodies or callbacks,
   /// or from another thread) nor from inside the group's own pump (an inline native or callback
   /// of it): each aborts, in every build, since the call or the run loop would go on using it.
+  /// Stage 2 (S2-Q4): an attached group first leaves its pool, in the order group_pool_link's
+  /// transitions give (detaching set, its pump waited for, the token, the lock port closed, then
+  /// off the pool's queues with its notifier cleared, and only then the kills), so no worker or
+  /// wake touches it after; destroyed inside its own with_group or host body it aborts too.
   ~exec_group();
   exec_group(const exec_group &) = delete;
   exec_group &operator=(const exec_group &) = delete;
