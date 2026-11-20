@@ -14,7 +14,8 @@
 // Widget tree from a .ari document; the state-tree layout, expressions, and the
 // full widget vocabulary follow the roadmap (docs/roadmap/CVCGL-UI-DSL-ROADMAP.md).
 
-#include <cvc/ariadne/value.h> // Widget::props for a Kind::Custom widget
+#include <cvc/ariadne/color_value.h> // ItemColor: a widget's colour (§5.26)
+#include <cvc/ariadne/value.h>       // Widget::props for a Kind::Custom widget
 #include <memory>
 #include <string>
 #include <utility>
@@ -131,7 +132,13 @@ struct Background {
   float opacity = 1.0f; // 0..1
   BackdropTerminal terminal = BackdropTerminal::Behind;
   int banner_rows = 6;
-  bool any() const { return !src.empty() || !bind.empty(); }
+  // §5.26 `color:` a solid fill behind the content (under the picture, when there is one too):
+  // `color` written in the document, or `color_src`, a state path or an expression giving one
+  // each frame.
+  ItemColor color;
+  std::string color_src;
+  bool any() const { return !src.empty() || !bind.empty() || color.set || !color_src.empty(); }
+  bool has_picture() const { return !src.empty() || !bind.empty(); }
 };
 
 // ---------------------------------------------------------------------------
@@ -419,6 +426,12 @@ struct Widget {
   // deliberately general (any Text, not a demo-specific status widget) so every HUD can reuse it.
   bool has_text_color = false;
   float text_color[3] = {1.0f, 1.0f, 1.0f};
+  // §5.26 a colour computed each frame, on a Text, a Radio, a Button or a menu item: `color_src` is
+  // a state path (`color: { bind: key }`) or an expression (`color: "(...)"`) whose value is a
+  // colour (color_value.h), or on a radio a list of them, one per option. It wins over
+  // text_color. `option_colors`: a radio's list written in the document (`color: [c0, c1]`).
+  std::string color_src;
+  std::vector<ItemColor> option_colors;
   // §5.11 Kind::Text `emoji:`: a state path holding a map of shortcode names to picture URIs. A
   // `:name:` in the text that the map names is drawn as that picture, one line tall, where the
   // backend can put a picture in a line. Empty: plain text.

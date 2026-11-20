@@ -1944,6 +1944,163 @@ TEST(AriadneTvision, IsTheHostedFtxuiBackend) {
   EXPECT_EQ(row_text(rows, 0).substr(0, 5), "[ ] A");
 }
 
+namespace {
+
+// §5.26 the escape sequences right before `needle` in an ANSI screen: the colours its first cell
+// is drawn in ("" when it is not there, or nothing set them).
+std::string sgr_before(const std::string &ansi, const std::string &needle) {
+  std::size_t p = ansi.find(needle);
+  if (p == std::string::npos)
+    return std::string();
+  std::string out;
+  while (p > 0 && ansi[p - 1] == 'm') {
+    const std::size_t q = ansi.rfind("\x1b[", p - 1);
+    if (q == std::string::npos)
+      break;
+    out = ansi.substr(q, p - q) + out;
+    p = q;
+  }
+  return out;
+}
+
+// The cell where `needle` starts in a hosted window's rows; null when it is not there.
+const TermCell *cell_at(const TermRows &rows, const std::string &needle) {
+  for (std::size_t y = 0; y < rows.size(); ++y) {
+    const std::string line = row_text(rows, y);
+    const std::size_t at = line.find(needle);
+    if (at == std::string::npos)
+      continue;
+    std::size_t col = 0;
+    for (std::size_t i = 0; i < at; ++i)
+      if ((static_cast<unsigned char>(line[i]) & 0xC0) != 0x80)
+        ++col;
+    return col < rows[y].size() ? &rows[y][col] : nullptr;
+  }
+  return nullptr;
+}
+
+// A document that colours a text past a threshold, a button from a key, a radio per option and two
+// grid cells' backgrounds, one dark and one light.
+Widget colored_widgets() {
+  Widget temp = text_bound("Temp", "temp");
+  temp.color_src = "(if (> (float (state-get \"temp\")) 80) \"1,0,0\" \"\")";
+  Widget go = button("Go", "go");
+  go.color_src = "go.color";
+  Widget follow = radio("Follow", "follow", {"red", "plain", "blue"}, "", /*row*/ true);
+  follow.color_src = "follow.colors";
+  Widget dark = group({text("dark")});
+  dark.background.color.set = true;
+  dark.background.color.rgb[0] = dark.background.color.rgb[1] = 0.0f;
+  dark.background.color.rgb[2] = 1.0f;
+  Widget light = group({text("light")});
+  light.background.color_src = "light.fill";
+  Widget own = group({with_text_color(text("own"), 1.0f, 0.0f, 0.0f)}); // keeps its red
+  own.background.color = dark.background.color;
+  Widget cells = group({dark, light, own});
+  cells.layout.kind = LayoutKind::Grid;
+  cells.layout.col_widths = {Track{Unit::Px, 96.0f}, Track{Unit::Px, 96.0f},
+                             Track{Unit::Px, 96.0f}};
+  return group({temp, go, follow, cells});
+}
+
+void seed_colors(cvc::app &app) {
+  cvc::state &st = cvc::state::instance(app);
+  st("temp").value("50");
+  st("go.color").value("0,1,0");
+  st("follow.colors").value("#ff0000;;#0000ff");
+  st("light.fill").value("1,1,0");
+}
+
+} // namespace
+
+// §5.26 the terminal snapshot: each colour as the cells' colour, at full colour as written and at
+// 256 or 16 colours as the nearest the terminal has; a cell's fill as its background, its text
+// white on the dark one and black on the light one. Under the threshold the text has no colour.
+TEST(AriadneFtxui, ComputedColorsReachTheCells) {
+  REQUIRE_FTXUI();
+  FtxuiBackend::Options o;
+  o.palette = FtxuiBackend::Options::Palette::TrueColor;
+  Term t(group({}), o);
+  seed_colors(t.app);
+  t.rt.set_root(colored_widgets());
+  t.width = 40;
+  t.height = 10;
+  t.draw();
+  EXPECT_TRUE(t.shows("Temp: 50")) << t.screen;
+  EXPECT_TRUE(t.shows("[ Go ]")) << t.screen;
+  std::string ansi = t.be.render_to_string(t.rt, 40, 10, /*ansi=*/true);
+  EXPECT_EQ(sgr_before(ansi, "Temp: 50").find("38;2;"), std::string::npos)
+      << "under the threshold: the terminal's own colour";
+  cvc::state::instance(t.app)("temp").value("95");
+  ansi = t.be.render_to_string(t.rt, 40, 10, /*ansi=*/true);
+  EXPECT_NE(sgr_before(ansi, "Temp: 95").find("38;2;255;0;0"), std::string::npos)
+      << sgr_before(ansi, "Temp: 95");
+  EXPECT_NE(sgr_before(ansi, "[ Go ]").find("38;2;0;255;0"), std::string::npos);
+  EXPECT_NE(sgr_before(ansi, "(*) red").find("38;2;255;0;0"), std::string::npos);
+  EXPECT_EQ(sgr_before(ansi, "( ) plain").find("38;2;"), std::string::npos);
+  EXPECT_NE(sgr_before(ansi, "( ) blue").find("38;2;0;0;255"), std::string::npos);
+  const std::string dark = sgr_before(ansi, "dark"), light = sgr_before(ansi, "light");
+  EXPECT_NE(dark.find("48;2;0;0;255"), std::string::npos) << dark;
+  EXPECT_NE(light.find("48;2;255;255;0"), std::string::npos) << light;
+  EXPECT_NE(dark.find("97"), std::string::npos) << "white text on the dark fill: " << dark;
+  EXPECT_NE(light.find("30"), std::string::npos) << "black text on the light fill: " << light;
+  const std::string own = sgr_before(ansi, "own");
+  EXPECT_NE(own.find("48;2;0;0;255"), std::string::npos) << own;
+  EXPECT_NE(own.find("38;2;255;0;0"), std::string::npos) << "a text's own colour wins: " << own;
+
+  // 256 colours: the nearest of xterm's palette (pure red is its 196, pure green its 46).
+  FtxuiBackend::Options o256;
+  o256.palette = FtxuiBackend::Options::Palette::Colors256;
+  Term t256(group({}), o256);
+  seed_colors(t256.app);
+  cvc::state::instance(t256.app)("temp").value("95");
+  t256.rt.set_root(colored_widgets());
+  ansi = t256.be.render_to_string(t256.rt, 40, 10, /*ansi=*/true);
+  EXPECT_NE(sgr_before(ansi, "Temp: 95").find("38;5;196"), std::string::npos)
+      << sgr_before(ansi, "Temp: 95");
+  EXPECT_NE(sgr_before(ansi, "[ Go ]").find("38;5;46"), std::string::npos)
+      << sgr_before(ansi, "[ Go ]");
+  // 16 colours: the nearest of the terminal's sixteen (bright red, 91).
+  FtxuiBackend::Options o16;
+  o16.palette = FtxuiBackend::Options::Palette::Colors16;
+  Term t16(group({}), o16);
+  seed_colors(t16.app);
+  cvc::state::instance(t16.app)("temp").value("95");
+  t16.rt.set_root(colored_widgets());
+  ansi = t16.be.render_to_string(t16.rt, 40, 10, /*ansi=*/true);
+  const std::string red16 = sgr_before(ansi, "Temp: 95");
+  EXPECT_EQ(red16.find("38;"), std::string::npos) << red16;
+  EXPECT_NE(red16.find("91"), std::string::npos) << red16;
+}
+
+// §5.26 tvision's window bodies: the cells carry each colour at full colour (tvision draws it as
+// the nearest the terminal has).
+TEST(AriadneTvision, ComputedColorsReachTheWindowCells) {
+  if (!FtxuiBackend::available())
+    GTEST_SKIP() << "libcvc built without FTXUI";
+  cvc::app app;
+  TvisionBackend be;
+  Runtime rt(app, "");
+  rt.set_backend(&be);
+  seed_colors(app);
+  cvc::state::instance(app)("temp").value("95");
+  rt.set_root(group({window("Win", {colored_widgets()})}));
+  be.render_to_string(rt, 60, 16);
+  const TermRows rows = be.render_window("Win", 40, 10);
+  const TermCell *temp = cell_at(rows, "Temp: 95");
+  ASSERT_NE(temp, nullptr) << row_text(rows, 0);
+  EXPECT_EQ(temp->fg, "38;2;255;0;0");
+  const TermCell *go = cell_at(rows, "Go");
+  ASSERT_NE(go, nullptr);
+  EXPECT_EQ(go->fg, "38;2;0;255;0");
+  const TermCell *dark = cell_at(rows, "dark");
+  ASSERT_NE(dark, nullptr);
+  EXPECT_EQ(dark->bg, "48;2;0;0;255");
+  const TermCell *light = cell_at(rows, "light");
+  ASSERT_NE(light, nullptr);
+  EXPECT_EQ(light->bg, "48;2;255;255;0");
+}
+
 TEST(AriadneFtxui, ColorEditsAChannel) {
   REQUIRE_FTXUI();
   Term t(group({color_widget("Tint", "tint", "0.5,0.5,0.5")}));

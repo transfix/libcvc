@@ -97,7 +97,8 @@ has the same table for every host, with the settings that apply and when they ar
 ### 2.1 The reactive READ lane
 
 Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `bind` /
-`text`, `tooltip`, `options`, `repeat.count` — run in a long-lived stackless evaluator
+`text`, `tooltip`, `options`, `repeat.count`, a computed `color` (§5.26) — run in a long-lived
+stackless evaluator
 (`class ReactiveEngine`, [`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)) over a
 **default-deny** environment:
 
@@ -168,7 +169,7 @@ The frame budget resets at the top of each frame, so *N* widgets cannot jointly 
 frame. Once the aggregate is spent, the rest are skipped for that frame only:
 
 - Each skipped expression keeps the value it had last frame: a `visible_when`, an `enabled_when`,
-  a computed `bind:` or text, a `tooltip`, combo `options` or a `repeat:` count.
+  a computed `bind:` or text, a `tooltip`, combo `options`, a `repeat:` count or a `color:`.
 - One that never ran yet takes its fail-safe value instead: hidden, disabled, empty or 0.
 - A skip isn't the document's fault, so it is never a reactive warning (`take_reactive_warnings`,
   the web pages' `ariadneWarning`). A real 10-post feed decoding pictures in wasm can spend the
@@ -580,7 +581,7 @@ with `(has? "heatmap")`. The cells come from a subtree at `bind`:
   are optional: children `row_labels.<i>`, or comma-separated text (`a,b,c`). A side past 256
   cells draws its first 256 and warns.
 - **`ramp:`** is a list of `[value, colour]` stops, sorted by value, each colour `"#rrggbb"`,
-  `"#rgb"` or `[r, g, b]` (0 to 1). Between two stops the colour is mixed in proportion. Below the
+  `"#rgb"`, `c0` to `c7` or `[r, g, b]` (0 to 1), as §5.26 reads one. Between two stops the colour is mixed in proportion. Below the
   first and above the last it is that end stop's colour (clamped). With no ramp every value is one
   grey. The core colours the cells, so every backend shows the same colours.
 - **The tooltip** for the hovered cell is the document's `tooltip:` with the cell's tokens filled
@@ -3386,7 +3387,8 @@ windows:
 ### 5.12 Backgrounds: `background:` on a window or group
 
 A window, an overlay or a group can have a picture behind its content: a profile's background,
-a banner behind a name.
+a banner behind a name. It can also have a solid colour, written or computed each frame
+(`background: { color: ... }`, §5.26), alone or under the picture.
 
 ```yaml
 windows:
@@ -4670,6 +4672,113 @@ gives the bar `File  FE Lab  Windows`, where *FE Lab* holds FE Lab's menus as su
   `ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus`, and the loader's
   `ALoadedDocumentIsNamedByItsMeta`, check it. `examples/ariadne/documents/apps_demo.ari` loads
   `tray_demo.ari` and `apps/counter.ari` twice.
+
+### 5.26 Colours from state: `color:` and `background: { color: }`
+
+A text, a radio or `radio_row`, a button or a menu item can be drawn in a colour, and a group or a
+window can be filled with one. The colour can be written in the document, held in a state key, or
+computed each frame. So a row can take its colour from its item, and a value can turn red past a
+threshold, without two copies of the widget switched by `visible_when`.
+
+```yaml
+meta: { min_libcvc: 4.0.0 }
+init: |
+  (state-set "palette.0" "c0")        ; the chart's slots, "#rrggbb", "r,g,b" or [r, g, b]
+  (state-set "palette.1" "#e34948")
+  (state-set "palette.2" "0.2,0.8,0.3")
+windows:
+  - window: Status
+    children:
+      - type: group                   # one row per item, in the item's colour
+        repeat: "3"
+        children:
+          - text: "Item {i}"
+            bind: items.{i}.status
+            color: { bind: "palette.{i}" }
+      - text: Temperature             # red past 80, else the default colour
+        bind: temp
+        color: '(if (> (float (state-get "temp")) 80) "1,0.2,0.2" "")'
+      - radio: Follow                 # each option in its own colour
+        bind: cam.follow
+        options: [one, two, three]
+        color: [c0, c1, c2]           # or "c0;c1;c2", or a key or an expression giving a list
+      - button: Halt
+        on: halt
+        color: "#e34948"
+  - window: Grid
+    layout: { kind: grid, col_widths: [80, 80, 80] }
+    children:
+      - type: group                   # each cell filled from the palette
+        repeat: "3"
+        background:
+          color: { bind: "palette.{i}" }
+        children:
+          - text: "{i}"
+```
+
+**`color:`** takes one of these:
+
+- A colour written in the document: `[r, g, b]` (each 0 to 1), `"#rrggbb"`, `"#rgb"`, `"r,g,b"`,
+  or `c0` to `c7`, the chart's eight slots (blue, orange, aqua, yellow, magenta, green, violet, red), so
+  a row and its curve in a chart can share one. `none` is the default colour.
+- `{ bind: key }`: the key's value, read each frame.
+- `"(expr)"`: an expression on the read lane (§2.1), computed each frame.
+
+A key's value, or an expression's, is a colour in the same forms: `"r,g,b"` or `"r g b"`,
+`"[r, g, b]"`, `"#rrggbb"`, `"#rgb"`, `c0` to `c7`, or, from an expression, a list of three numbers.
+`""`, `none`, `default` or nil means the widget's own colour, which is how an expression turns a
+colour off. A `color` picker's key (`"r,g,b"`) can colour another widget directly.
+
+- **What it colours.** A text's text; a button's label; a menu item's label (`menu_item` with
+  `on:` or `bind:`); a radio's caption, options and the dot of the picked option.
+- **A colour per option.** On a radio, a list gives each option its own colour: `[c0, c1, c2]`
+  written in the document, `"c0;c1;c2"` in a key, or a list from an expression (each entry a
+  colour's text or three numbers). An empty entry, `none` or nil leaves that option in the default
+  colour. One colour colours the whole radio. On a text, a button or a menu item, a list's first
+  entry is used.
+- **`background: { color: }`** on a group or a window fills it, under its picture if it has one
+  too, `opacity:` strong. It takes the forms `color:` takes, one colour. `background: [r, g, b]`
+  is short for a written colour. A group that is a cell of a grid (`layout: { kind: grid }`) is
+  filled to its whole cell. Any other group is filled over the area its content takes, the full
+  width available unless `size:` says otherwise. A window is filled over its inner area. The text on
+  a fill with no picture is black or white, whichever reads on it, unless the document coloured
+  that text.
+- **`{i}`** in `bind:` or in the expression is the instance's index under `repeat:`, as in a
+  bind. In a flow map (`{ ... }`) a `{i}` must be quoted: `{ bind: "palette.{i}" }`.
+- **Cost.** A key is read and its text parsed once a frame. An expression is cached the way a
+  computed `bind:` and `tooltip:` are (§2.1): it runs again only after a write to a key it read.
+- **Errors.** A broken expression, or one whose value is not a colour, draws the default colour
+  and warns once (`take_reactive_warnings`). A key holding something that is not a colour does
+  the same, and the warning names the key and its value. A `color:` that is none of the forms
+  above warns at load and draws the default colour.
+- **Which kinds.** `text`, `radio`, `radio_row`, `button` and `menu_item`, and `background:` on a
+  group, a window or an overlay. A `combo` doesn't take one. The colour picker (`color: Tint`),
+  a `tf_editor`'s `color:` and a custom type's `color:` are their own keys, as before. Since
+  `color` is the last widget type the loader looks for, `color:` beside `button:` is that button's
+  colour.
+
+**Backends.**
+
+- **ImGui** draws a text, a button's or a menu item's label in the colour (`ImGuiCol_Text`) and a
+  radio option's dot in it too (`ImGuiCol_CheckMark`). A grid cell's fill is the table cell's own
+  background (`TableSetBgColor`). Any other fill is a rectangle under the group's content.
+- **FTXUI** draws the colour as the cells' colour, and a fill as their background. FTXUI picks the
+  nearest colour the terminal has: at full colour it is the colour itself, at 256 colours the
+  nearest of xterm's palette, at 16 the nearest of the sixteen.
+  `FtxuiBackend::Options::palette` says which palette the terminal has, for a host that knows and
+  for a test. With `Auto` (the default), FTXUI reads it from `COLORTERM` and `TERM`. A terminal
+  with no colour (`--graphics mono`) draws no fill.
+- **tvision** lays its window bodies out at full colour, and tvision draws each colour as the
+  nearest the terminal has. Its own menu bar and menus are tvision's, so a menu item's colour is
+  not shown there.
+
+`ariadne_loader_test`'s `ComputedColorsParse`, `BadColorWarnsAndThePickerStays` and
+`BackgroundColorParses` check the forms. `ariadne_runtime_test`'s
+`ComputedColorTurnsRedPastAThreshold`, `RepeatedRowsTakeTheirPaletteColor`,
+`RadiosButtonsAndMenuItemsTakeTheirColor` and `GroupFillInAGridCell` check what reaches a backend.
+The terminal snapshots are `ariadne_ftxui_test`'s `ComputedColorsReachTheCells` (at full, 256 and
+16 colours) and `ComputedColorsReachTheWindowCells` (tvision's cells). ImGui's pixels are checked
+by `cvcgl_imgui_colors`.
 
 ## 6. Composition: include / import / load
 

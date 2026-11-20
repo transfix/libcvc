@@ -339,6 +339,12 @@ struct Backdrop {
   int banner_rows = 6;
   bool window = false; // the window's own background: it fills the window's inner area
   Size size;           // a group's authored size: the backdrop's area is at least this big
+  // §5.26 a solid colour under the picture (or alone, with no `image`), `opacity` strong.
+  bool has_fill = false;
+  float fill[3] = {0.0f, 0.0f, 0.0f};
+  // The group is a cell of a grid (Backend::begin_grid): where the backend can, the fill covers
+  // the whole cell, not only the area the content takes.
+  bool cell = false;
 };
 
 // How a group the document made one item (§4.6, Backend::begin_item_group) takes the pointer and
@@ -627,6 +633,11 @@ public:
     (void)rgb;
     text_value(label, value);
   }
+  // §5.26 a colour scope: the text of what is drawn between begin_text_color and end_text_color (a
+  // button's label, a menu item's, a radio's) is in `rgb`. Balanced, never nested by the core,
+  // which opens one around a single leaf. Default: no-op, the backend's own colours.
+  virtual void begin_text_color(const float rgb[3]) { (void)rgb; }
+  virtual void end_text_color() {}
   // A line of text with pictures in it (§5.11 `emoji:`): the runs one after another on one line,
   // each picture one line tall at its own shape, in `rgb` when it is not null. Returns false when
   // the backend can't put a picture in a line (the terminals: the core then draws the text as it
@@ -820,6 +831,15 @@ public:
     (void)row;
     return combo(label, current_index, options);
   }
+  // §5.26 a radio with a colour for each option: option i's text in `colors[i]` where that is set
+  // (`colors` may be shorter than `options`; the rest, and the caption, keep the backend's). The
+  // default draws the plain radio.
+  virtual IndexEdit radio_colored(const char *label, int current_index,
+                                  const std::vector<std::string> &options, bool row,
+                                  const std::vector<ItemColor> &colors) {
+    (void)colors;
+    return radio(label, current_index, options, row);
+  }
   // A single-line text field bound to a string state key (Kind::InputText; Kind::InputInt reuses it
   // with the core coercing to/from an int). `key` is the stable per-widget id (the resolved state
   // path), like the sliders, so the backend can hold the in-progress text across frames; `current`
@@ -902,8 +922,8 @@ public:
   // §5.12 a container's background: begin_backdrop comes right before a group's children (or
   // right after begin_window, with Backdrop::window, for a window's), end_backdrop right after them
   // (before end_window); balanced, nested like begin_grid. The backend draws `bd.image` behind
-  // what is emitted between them, fitted to the area they take. Default: no background, the
-  // content drawn as without one.
+  // what is emitted between them, fitted to the area they take, over `bd.fill` where has_fill
+  // (§5.26). Default: no background, the content drawn as without one.
   virtual void begin_backdrop(const Backdrop &bd) { (void)bd; }
   virtual void end_backdrop() {}
 
