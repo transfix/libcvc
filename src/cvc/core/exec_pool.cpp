@@ -115,6 +115,8 @@ struct attachment;
 struct release_waiter {
   se::detail::wakeup *wake = nullptr;
   attachment *on = nullptr; // null once a detach let it go (the record is freed)
+  std::thread::id who;      // the waiting thread
+  bool wants_hold = false;  // it waits to hold the group (with_group), not only for a pump's end
   release_waiter *next = nullptr;
 };
 
@@ -133,6 +135,7 @@ struct attachment {
   bool host_held = false; // a host thread holds its token (with_group, a host body)
   std::thread::id holder; // that thread
   bool deferred = false;  // popped while host_held: queued again at the hold's end
+  bool handed = false;    // host_held was set for `holder` by a release, not yet taken up
   bool failed = false;    // on its host's failed list
   std::thread::id detacher; // the thread finishing its detach, once detaching is set
   bool blocked = false;   // its worker waits for a host body it queued (run_on_host_waiting)
@@ -235,6 +238,7 @@ struct pool_state {
   std::vector<worker_rec *> parked; // workers parked on the eventcount
   unsigned attached_any = 0;        // attached groups the workers pump
   unsigned cv_waiters = 0;          // workers waiting on work_cv
+  unsigned spinning = 0;            // workers in the eventcount's spin, watching the epoch
   worker_rec *keeper = nullptr;     // the parked worker that waits for the timer heap's top
   clock_type::time_point keeper_until{};
   double vmin = 0.0;              // the ready queue's virtual-time floor: the last group popped
@@ -550,10 +554,15 @@ struct wake_target {
   }
 };
 
-// Under Q: an idle worker for `a`, just queued for the workers (one that did not pump it last,
-// under CVC_EXEC_FORCE_MOVE).
-wake_target idle_worker_for(pool_state &p, const attachment *a) {
+// Under Q: an idle worker for `a`, just queued for the workers, the epoch moved (one that did not
+// pump it last, under CVC_EXEC_FORCE_MOVE). None while a worker spins: it sees the epoch and pops
+// it (Tokio's searching workers), sparing a parked worker's wake; under CVC_EXEC_FORCE_MOVE only
+// when the spinner cannot be the thread that pumped `a` last (`from_releaser`: its releasing worker
+// queued it, and that worker is not spinning).
+wake_target idle_worker_for(pool_state &p, const attachment *a, bool from_releaser = false) {
   wake_target t;
+  if (p.spinning > 0 && (!p.force_move || from_releaser))
+    return t;
   if (worker_rec *w = unpark_one(p, p.force_move ? a : nullptr))
     t.worker = w;
   else if (p.cv_waiters > 0)
@@ -641,7 +650,7 @@ wake_target requeue(pool_state &p, attachment &a, const worker_rec *releaser) {
     // Work for another worker: the epoch moves (a spinning or parking worker looks again). A
     // requeue its releaser takes next moves nothing, so idle workers park beside a busy group.
     p.epoch.fetch_add(1, std::memory_order_release);
-    t = idle_worker_for(p, &a);
+    t = idle_worker_for(p, &a, releaser != nullptr);
   }
   return t;
 }
@@ -664,30 +673,37 @@ bool claim(attachment &a) {
 }
 
 // Under Q: the next group of the ready queue for worker `w`, the least virtual time first; under
-// CVC_EXEC_FORCE_MOVE (with another worker to take it) one `w` did not pump last, and `skipped`
-// says one was left for another worker.
+// CVC_EXEC_FORCE_MOVE (with another worker to take it) the first one `w` did not pump last, found
+// by popping at most 4 it did pump last and pushing them back (O(log n) each; a scan only past
+// them), and `skipped` says one was left for another worker. Never allocates.
 attachment *take_ready(pool_state &p, const worker_rec &w, bool &skipped) {
-  if (p.ready.empty())
-    return nullptr;
   const bool moving = p.force_move && p.threads > 1;
-  if (!moving || p.ready.front()->link->last_thread != w.index) {
+  attachment *left[4];
+  std::size_t n = 0;
+  attachment *got = nullptr;
+  while (!p.ready.empty()) {
     std::pop_heap(p.ready.begin(), p.ready.end(), vtime_later{});
     attachment *a = p.ready.back();
     p.ready.pop_back();
-    return a;
+    if (!moving || a->link->last_thread != w.index) {
+      got = a;
+      break;
+    }
+    left[n++] = a;
+    if (n == 4) {
+      for (std::size_t i = 0; i < p.ready.size() && !got; ++i)
+        if (p.ready[i]->link->last_thread != w.index) {
+          got = p.ready[i];
+          p.ready.erase(p.ready.begin() + static_cast<std::ptrdiff_t>(i));
+          std::make_heap(p.ready.begin(), p.ready.end(), vtime_later{});
+        }
+      break;
+    }
   }
-  skipped = true;
-  std::size_t best = p.ready.size();
-  for (std::size_t i = 0; i < p.ready.size(); ++i)
-    if (p.ready[i]->link->last_thread != w.index &&
-        (best == p.ready.size() || vtime_later{}(p.ready[best], p.ready[i])))
-      best = i;
-  if (best == p.ready.size())
-    return nullptr;
-  attachment *a = p.ready[best];
-  p.ready.erase(p.ready.begin() + static_cast<std::ptrdiff_t>(best));
-  std::make_heap(p.ready.begin(), p.ready.end(), vtime_later{});
-  return a;
+  for (std::size_t i = 0; i < n; ++i)
+    push_ready(p, *left[i]); // back where they were: the room is theirs
+  skipped = n > 0;
+  return got;
 }
 
 // Under Q: another worker's next slot, for a worker that found nothing else, so a slot whose
@@ -778,6 +794,36 @@ void notify_waiters(attachment &a) {
     r->wake->notify();
 }
 
+// Under Q, as a release queues `a` again: when a host waits to hold it (a with_group, else its
+// attaching thread with host entries for it), set host_held for that host now, on its behalf, as
+// its own look would once pumping cleared; else the worker that queues it pops it again in the
+// same critical section, and a host never finds it free. The pop that follows leaves it notified
+// and deferred (exec_group.h's pop), and the hold's end queues it again.
+void hand_hold_over(attachment &a) {
+  std::thread::id to;
+  for (release_waiter *r = a.waiters; r && to == std::thread::id(); r = r->next)
+    if (r->wants_hold)
+      to = r->who;
+  if (to == std::thread::id() && a.entries > 0)
+    to = a.host->id;
+  if (to == std::thread::id())
+    return;
+  a.host_held = true;
+  a.holder = to;
+  a.handed = true;
+}
+
+// Under Q, as detaching is set: a hold handed over and not taken up goes (its host then finds
+// detaching set, exec_group.h's host transition).
+void revoke_handed_hold(attachment &a) {
+  if (!a.handed)
+    return;
+  a.handed = false;
+  a.host_held = false;
+  a.deferred = false;
+  notify_waiters(a);
+}
+
 // What one continuous pump did.
 struct pump_outcome {
   se::pump_result r;
@@ -862,6 +908,7 @@ void release(pool_state &p, attachment &a, const pump_outcome &out, worker_rec *
       return;
     }
   }
+  hand_hold_over(a);
   const wake_target t = requeue(p, a, w);
   if (w)
     t.notify(p);
@@ -949,25 +996,27 @@ void pool_state::worker_main(int index, bool p_core, bool place) {
       if (attachment *a = pop_for_worker(*this, w, skipped)) {
         woke = spun = false;
         hand_off_timers(*this);
+        if (!ready.empty()) // more work queued: another idle worker (none while one spins)
+          idle_worker_for(*this, nullptr).notify(*this);
         lk.unlock();
         const pump_outcome out = pump_attached(*this, *a);
         lk.lock();
         release(*this, *a, out, &w);
         continue;
       }
-      if (skipped) // CVC_EXEC_FORCE_MOVE left a group for another worker
-        idle_worker_for(*this, nullptr).notify(*this);
       if (std::exchange(woke, false))
         ++stats.empty_wakes;
       if (!spun) {
         // S2-Q3: spin about 20 us watching the epoch, without the mutex, before parking.
         spun = true;
         const std::uint64_t seen = epoch.load(std::memory_order_acquire);
+        ++spinning; // a waker spares a parked worker meanwhile, moving the epoch
         lk.unlock();
         const clock_type::time_point until = clock_type::now() + std::chrono::microseconds(20);
         while (epoch.load(std::memory_order_acquire) == seen && clock_type::now() < until)
           cpu_relax();
         lk.lock();
+        --spinning;
         continue;
       }
       spun = false;
@@ -1137,9 +1186,11 @@ void queue_host_entry(attachment &a, std::function<void()> fn, bool waits) {
 // for `a`'s pump or hold to end. A detach that frees `a` orphans the link first.
 struct waiter_link {
   release_waiter node;
-  waiter_link(attachment &a, se::detail::wakeup &wake) {
+  waiter_link(attachment &a, se::detail::wakeup &wake, bool wants_hold) {
     node.wake = &wake;
     node.on = &a;
+    node.who = std::this_thread::get_id();
+    node.wants_hold = wants_hold;
     node.next = a.waiters;
     a.waiters = &node;
   }
@@ -1155,24 +1206,31 @@ struct waiter_link {
   waiter_link &operator=(const waiter_link &) = delete;
 };
 
-// Under Q: the next entry of `h`'s queue that may run now, and whether it takes its group's token.
-// A group's entries run in their order. While its worker is blocked on a body it queued, they run
-// under that worker's token, taking nothing (Stage 1's blocked handoff); else an entry takes the
-// token by with_group's rule, so it waits while the group pumps, a host holds it, or a detach has
-// begun (a detach runs it, a teardown drops it).
+// Under Q: the next entry of `h`'s queue that may run now, and whether it takes its group's token
+// (exec_group.h's host transition). A waiting body (run_on_host_waiting) runs at once under its
+// blocked worker's token, taking nothing. Any other entry takes the group's token, so it waits
+// while the group pumps (its worker blocked or not), is held by another thread (a hold handed to
+// this thread is taken up), or is being detached (detach runs it, a teardown drops it); one
+// group's such entries run in their order.
 std::optional<std::size_t> runnable_entry(const host_thread &h, bool &needs_token) {
   for (std::size_t i = 0; i < h.queue.size(); ++i) {
-    const attachment *a = h.queue[i].a;
+    const host_entry &e = h.queue[i];
+    const attachment *a = e.a;
+    if (e.waits) {
+      if (a->blocked) {
+        needs_token = false;
+        return i;
+      }
+      continue;
+    }
     bool earlier = false;
     for (std::size_t j = 0; j < i && !earlier; ++j)
-      earlier = h.queue[j].a == a;
+      earlier = h.queue[j].a == a && !h.queue[j].waits;
     if (earlier)
       continue;
-    if (a->blocked) {
-      needs_token = false;
-      return i;
-    }
-    if ((a->link->state.load(std::memory_order_acquire) & (kPumping | kDetaching)) || a->host_held)
+    if (a->link->state.load(std::memory_order_acquire) & (kPumping | kDetaching))
+      continue;
+    if (a->host_held && !(a->handed && a->holder == h.id))
       continue;
     needs_token = true;
     return i;
@@ -1195,8 +1253,12 @@ bool service_once(pool_state &p, host_thread &h, std::unique_lock<std::mutex> &l
   attachment &a = *e.a;
   --a.entries;
   if (needs_token) {
-    a.host_held = true;
-    a.holder = std::this_thread::get_id();
+    if (a.handed) {
+      a.handed = false; // a release set it for this thread
+    } else {
+      a.host_held = true;
+      a.holder = std::this_thread::get_id();
+    }
   }
   const clock_type::time_point blocked_since = a.blocked_since;
   const bool outer = std::exchange(h.in_callback, true);
@@ -1284,7 +1346,7 @@ bool service(pool_state &p, host_thread &h, std::unique_lock<std::mutex> &lk,
 // run one of the calling thread's host entries, else wait on its wakeup until a release, a hold's
 // end, a detach's end or an entry for it.
 void wait_round(pool_state &p, attachment &a, std::unique_lock<std::mutex> &lk,
-                std::exception_ptr &err, std::optional<se::detail::wakeup> &own) {
+                std::exception_ptr &err, std::optional<se::detail::wakeup> &own, bool wants_hold) {
   host_thread *h = host_of(p, std::this_thread::get_id());
   if (h && service_once(p, *h, lk, err))
     return;
@@ -1294,7 +1356,7 @@ void wait_round(pool_state &p, attachment &a, std::unique_lock<std::mutex> &lk,
       own.emplace();
     wk = &*own;
   }
-  waiter_link link(a, *wk);
+  waiter_link link(a, *wk, wants_hold);
   lk.unlock();
   wk->wait_until(clock_type::time_point::max());
   lk.lock();
@@ -1309,7 +1371,7 @@ void wait_until_free(pool_state &p, attachment &a, std::unique_lock<std::mutex> 
   std::optional<se::detail::wakeup> own;
   while (p.attachments.count(&a) &&
          ((word(a).load(std::memory_order_acquire) & kPumping) || (a.host_held && a.holder != me)))
-    wait_round(p, a, lk, err, own);
+    wait_round(p, a, lk, err, own, false);
 }
 
 // Under Q: the attaching thread `h`'s next caller-pumped group (exec_group.h's pop), claimed: in
@@ -2070,6 +2132,7 @@ void exec_pool::detach(state_exec::exec_group &group) {
            "exec_pool::detach off its attaching thread");
     word(*a).fetch_or(kDetaching, std::memory_order_acq_rel); // (1)
     a->detacher = std::this_thread::get_id();
+    revoke_handed_hold(*a);
     wait_until_free(p, *a, lk, err); // (2)
     if (!p.attachments.count(a))
       return;
@@ -2180,6 +2243,11 @@ void exec_pool::with_group(state_exec::exec_group &group, const std::function<vo
       attachment *a = attachment_in(p, group);
       if (!a)
         break; // not attached (any more): as a group not attached
+      if (a->host_held && a->holder == me && a->handed) {
+        a->handed = false; // a release set it for this thread: held now
+        held = a;
+        break;
+      }
       // Inside its own pump, or a hold of this thread's: the token nests, as unattached.
       if ((a->host_held && a->holder == me) || a->pumper.load(std::memory_order_relaxed) == me)
         break;
@@ -2187,11 +2255,11 @@ void exec_pool::with_group(state_exec::exec_group &group, const std::function<vo
       if (w & kDetaching) {
         if (a->detacher == me)
           break; // on the thread finishing the detach: as unattached, at once
-        wait_round(p, *a, lk, err, own); // until the detach is over
+        wait_round(p, *a, lk, err, own, false); // until the detach is over
         continue;
       }
       if ((w & kPumping) || a->host_held) {
-        wait_round(p, *a, lk, err, own);
+        wait_round(p, *a, lk, err, own, true);
         continue;
       }
       // Workers stay off it now: one that pops it leaves it notified and deferred (S2-Q4).
@@ -2415,6 +2483,7 @@ bool detach_begin(state_exec::exec_group &group) noexcept {
     std::unique_lock<std::mutex> lk(p.m);
     word(*a).fetch_or(kDetaching, std::memory_order_acq_rel); // (1)
     a->detacher = std::this_thread::get_id();
+    revoke_handed_hold(*a);
     wait_until_free(p, *a, lk, err); // (2)
   } catch (...) {
   }
@@ -2455,6 +2524,7 @@ void detach_end(state_exec::exec_group &group) noexcept {
     std::unique_lock<std::mutex> lk(p.m);
     word(*a).fetch_or(kDetaching, std::memory_order_acq_rel);
     a->detacher = std::this_thread::get_id();
+    revoke_handed_hold(*a);
     std::exception_ptr err;
     wait_until_free(p, *a, lk, err);
     if (!p.attachments.count(a))

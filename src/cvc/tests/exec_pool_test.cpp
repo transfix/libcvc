@@ -1522,6 +1522,58 @@ TEST(ExecPoolContinuous, AWorkerFiringATimerTakesNoParkedWorker) {
       << "~exec_pool did not join its workers: one was left waiting un-notified";
 }
 
+// A with_group waiting for a group its worker keeps re-pumping (always runnable) gets it: the
+// release that queues it again sets the hold for the waiting host (as the host's own look would),
+// where before the worker popped it again in the same critical section and the host never found
+// it free (CT-3's with_group waited minutes). The pop that follows leaves it notified, and it is
+// pumped again after the hold. A 10 s ceiling turns starvation into a failure (the case then leaks
+// what the stuck thread uses).
+TEST(ExecPoolContinuous, WithGroupGetsAGroupItsWorkerKeepsRepumping) {
+  auto *pool = new cvc::exec_pool([] {
+    cvc::pool_options po;
+    po.threads = 1;
+    return po;
+  }());
+  if (pool->threads() == 0) {
+    delete pool;
+    GTEST_SKIP() << "no worker on this machine";
+  }
+  auto *app = new cvc::app;
+  share_locks(*app);
+  std::atomic<std::uint64_t> pumps{0};
+  exec_group::options o = opts_for(*app, "busy");
+  o.pump_hook_for_test = [&pumps](exec_group &) { pumps.fetch_add(1); };
+  auto *g = new exec_group(o);
+  g->execute(std::string("(while #t nil)"));
+  pool->attach(*g);
+  ASSERT_TRUE(settles([&] { return pumps.load() >= 20; }));
+  auto done = std::make_shared<std::atomic<bool>>(false);
+  auto notified = std::make_shared<std::atomic<bool>>(false);
+  std::thread holder([pool, g, done, notified] {
+    pool->with_group(*g, [&] {
+      const auto t0 = clock_type::now();
+      while ((g->pool_link().state.load() & detail::group_pool_link::notified) == 0 &&
+             clock_type::now() - t0 < std::chrono::seconds(5))
+        std::this_thread::yield();
+      notified->store((g->pool_link().state.load() & detail::group_pool_link::notified) != 0);
+    });
+    done->store(true);
+  });
+  if (!settles([&] { return done->load(); })) {
+    holder.detach(); // starved: everything it uses stays leaked
+    FAIL() << "with_group never got the group its worker kept re-pumping";
+  }
+  holder.join();
+  const std::uint64_t at_release = pumps.load();
+  const bool pumped_after = settles([&] { return pumps.load() > at_release; });
+  pool->detach(*g);
+  EXPECT_TRUE(notified->load()) << "the worker's pop under the hold did not leave it notified";
+  EXPECT_TRUE(pumped_after) << "not pumped after the hold";
+  delete g;
+  delete pool;
+  delete app;
+}
+
 // --- R1-mid fixes (P) ---
 
 // C-M1 (S1-Q1): groups on a single-mode lock manager, given to a pool with workers built apart
