@@ -14,6 +14,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/ariadne.h> // has_widget_type (custom-widget load-time check)
 #include <cvc/ariadne/loader.h>
@@ -3816,7 +3817,40 @@ void lint_channels(Ctx &ctx, LoadResult &r) {
   }
 }
 
-// The data: block (data.h): a map of name -> URI, or name -> { uri, path, as, load }.
+// A YAML node as JSON text: a map as an object, a sequence as an array, a scalar as a string
+// (the readers convert: generated_world_params_from_json reads "7" as 7).
+std::string yaml_json(const YAML::Node &n) {
+  const auto quote = [](const std::string &s) {
+    std::string o = "\"";
+    for (const char c : s) {
+      if (c == '"' || c == '\\')
+        o += '\\', o += c;
+      else if (static_cast<unsigned char>(c) < 0x20) {
+        char buf[8];
+        std::snprintf(buf, sizeof buf, "\\u%04x", static_cast<unsigned char>(c));
+        o += buf;
+      } else
+        o += c;
+    }
+    return o + "\"";
+  };
+  if (n.IsMap()) {
+    std::string o = "{";
+    for (const auto &kv : n)
+      o += (o.size() > 1 ? "," : "") + quote(kv.first.Scalar()) + ":" + yaml_json(kv.second);
+    return o + "}";
+  }
+  if (n.IsSequence()) {
+    std::string o = "[";
+    for (const auto &e : n)
+      o += (o.size() > 1 ? "," : "") + yaml_json(e);
+    return o + "]";
+  }
+  return n.IsScalar() ? quote(n.Scalar()) : std::string("null");
+}
+
+// The data: block (data.h): a map of name -> URI, or name -> { uri, path, as, load }, or a made
+// dataset, name -> { generate, params, as, load } (data-generate).
 std::vector<DataSpec> parse_data(Ctx &ctx, const YAML::Node &n) {
   std::vector<DataSpec> out;
   if (!n)
@@ -3836,6 +3870,14 @@ std::vector<DataSpec> parse_data(Ctx &ctx, const YAML::Node &n) {
       d.uri = str(e, "uri");
       d.path = str(e, "path");
       d.as = str(e, "as");
+      d.generate = str(e, "generate");
+      if (const YAML::Node params = e["params"]; params) {
+        if (params.IsMap())
+          d.params = yaml_json(params);
+        else
+          ctx.warn("ari: data." + (kv.first.IsScalar() ? kv.first.Scalar() : std::string()) +
+                   ": params: is a MAP — ignored");
+      }
       const std::string load = str(e, "load", "eager");
       d.lazy = load == "lazy";
       if (load != "lazy" && load != "eager")
@@ -3846,8 +3888,14 @@ std::vector<DataSpec> parse_data(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: data: '" + d.name + "' is not a name (one word, no '.') — ignored");
       continue;
     }
-    if (d.uri.empty()) {
-      ctx.warn("ari: data." + d.name + " names no uri — ignored");
+    if (!d.generate.empty()) {
+      if (!has_data_generator(*ctx.app, d.generate)) {
+        ctx.warn("ari: data." + d.name + ": generate: " + d.generate +
+                 " is not a generator this build has — ignored");
+        continue;
+      }
+    } else if (d.uri.empty()) {
+      ctx.warn("ari: data." + d.name + " names no uri (or generate:) — ignored");
       continue;
     }
     if (!d.as.empty() && !has_data_decoder(*ctx.app, d.as))

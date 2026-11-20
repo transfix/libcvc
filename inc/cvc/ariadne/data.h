@@ -37,6 +37,16 @@
 // noarch build, its archive checked against the registry's sha256 and kept in a local cache),
 // state://PATH?data, and any scheme with a registered URI handler. Archives (tar, gzip or zstd
 // tar, zip) are unpacked in memory (cvc/utility/archive.h).
+//
+// A dataset can be made instead of fetched (data-generate, ARIADNE_WORLDS section 18.8): a
+// generator makes its files from params, and they are decoded as a fetched one's are. The
+// built-in generated_world makes a world (cvc::world::generate_world) and writes it as a version 2
+// city bundle, so a generated world is the same kind of dataset as a loaded city:
+//
+//   data:
+//     world:
+//       generate: generated_world
+//       params: { seed: 7, half_m: 1000, preset: 1 }
 #include <cvc/utility/archive.h>
 #include <functional>
 #include <memory>
@@ -60,6 +70,12 @@ struct DataSpec {
   std::string as;    // the decoder; empty: files for an archive or directory, else by extension
   bool lazy = false; // load: lazy: bound now, loaded when something asks for it
   std::string base;  // the document's directory, which a relative file uri is relative to
+  // A dataset made, not fetched: the generator (register_data_generator) and its params, a JSON
+  // object. Its files decode as city_bundle unless `as` says otherwise. `uri` may then name the
+  // dataset, for one its owner remakes in place (a generated_world node's: DataStore::put);
+  // without one the params name it, so the same params share one dataset.
+  std::string generate;
+  std::string params;
 };
 
 // A file's bytes, as a store node holds them.
@@ -92,6 +108,17 @@ void register_data_decoder(cvc::app &app, const std::string &as, DataDecoder dec
 bool has_data_decoder(cvc::app &app, const std::string &as);
 std::vector<std::string> data_decoders(cvc::app &app);
 
+// What a request with `generate:` runs in place of a fetch: it makes the dataset's files from
+// d.spec.params (a version 2 city bundle's, for city_bundle), on the load's worker thread and
+// holding the app as a decoder does, and may write outputs of its own under d.node (d.out), beside
+// the decoder's. d.files is empty. Throws std::exception to fail the load. Every app starts with
+// generated_world (scene_generated_world.h: the world as a version 2 bundle, and the world itself
+// as `generated`). Thread-safe, per app, as the decoders are.
+using DataGenerator = std::function<std::vector<cvc::archive::file>(DataDecode &)>;
+void register_data_generator(cvc::app &app, const std::string &name, DataGenerator generator);
+bool has_data_generator(cvc::app &app, const std::string &name);
+std::vector<std::string> data_generators(cvc::app &app);
+
 // The store key of a request: a slug of its source and a hash of the request (uri, path, as).
 std::string data_key(const DataSpec &spec);
 
@@ -117,6 +144,16 @@ public:
   // A document's entry: <prefix>.data.<name> becomes a transparent link to `spec`'s store node,
   // which is loaded now unless spec.lazy. Returns the store path.
   std::string bind(const std::string &prefix, const DataSpec &spec);
+
+  // A dataset its owner has already made (a generated_world node's world, as its bundle's files):
+  // `also` first (outputs of the owner's own, such as the made world), then `files` decoded as a
+  // load of `spec` would decode them, now and on this thread; then <prefix>.data.<spec.name>
+  // links to it. Put again under the same request, it replaces the outputs and its rev goes up.
+  // With no files only `also` writes (a build with no glb writer puts the world as it was made).
+  // reload() makes it again from spec's generator. Returns the store path; throws what the
+  // decoder throws, leaving the node in error.
+  std::string put(const std::string &prefix, const DataSpec &spec,
+                  std::vector<cvc::archive::file> files, const DataDecoder &also = nullptr);
 
   // The store node a path names: the store path itself, or a document's link to one. "" when the
   // path is neither.

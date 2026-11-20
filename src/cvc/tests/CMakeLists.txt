@@ -42,6 +42,7 @@ add_executable(x11_macro_headers_test x11_macro_headers_test.cpp)
 add_executable(net_http_client_test net_http_client_test.cpp)
 # Ariadne data (cvc/ariadne/data.h) and the archive reader it unpacks with (cvc/utility/archive.h).
 add_executable(ariadne_data_test ariadne_data_test.cpp)
+add_executable(ariadne_world_dataset_test ariadne_world_dataset_test.cpp)
 add_executable(net_ws_client_test net_ws_client_test.cpp)
 add_executable(net_policy_test net_policy_test.cpp)
 # End-to-end encrypted DMs (cvc/net/e2ee.h): e2ee.js's vectors replayed, and the e2ee-* verbs.
@@ -441,6 +442,7 @@ set(TEST_TARGETS
   x11_macro_headers_test
   net_http_client_test
   ariadne_data_test
+  ariadne_world_dataset_test
   net_ws_client_test
   net_policy_test
   e2ee_test
@@ -1021,6 +1023,13 @@ target_link_libraries(net_http_client_test
 )
 
 target_link_libraries(ariadne_data_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_world_dataset_test
   PRIVATE
     cvc
     GTest::gtest
@@ -3209,6 +3218,7 @@ cvc_discover_tests(ariadne_bind_test)
 cvc_discover_tests(x11_macro_headers_test)
 cvc_discover_tests(net_http_client_test)
 cvc_discover_tests(ariadne_data_test)
+cvc_discover_tests(ariadne_world_dataset_test PROPERTIES TIMEOUT 900)
 cvc_discover_tests(net_ws_client_test)
 cvc_discover_tests(net_policy_test)
 cvc_discover_tests(e2ee_test)
