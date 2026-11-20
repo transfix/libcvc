@@ -72,6 +72,9 @@ depends:
     # cvc's mesh_ops / fem (header-only), which the FEM gallery's fe_lab / mesh_lab nodes run on.
     - name: eigen
     - name: libigl
+    # cvc::physics' engine: without it the documents' bodies (terrain_lab's boat and crates)
+    # never move. build-wasm.sh fails the build without it.
+    - name: joltphysics
     # The `ari` page's terminal backend; only the single-threaded gallery has that page.
     - name: ftxui
       platforms: [wasm]

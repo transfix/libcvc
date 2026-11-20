@@ -8,7 +8,7 @@
 # scene and trained policy preloaded, and the .ari demos — plus, single-threaded, the
 # `ari` terminal page. There is no wasm libcvc to link: the trimmed cvc core + cvcGL
 # closure is compiled from the repo root. Deps (vtk with rendering, boost, zstd, zlib,
-# pegtl, yaml-cpp, assimp, imgui, and ftxui for the ari page) come static from
+# pegtl, yaml-cpp, assimp, imgui, joltphysics, and ftxui for the ari page) come static from
 # CVC_DEPS_PREFIX; emsdk comes from the builder via CVC_EMSDK_DIR.
 #
 #   CVC_PLATFORM=wasm     single-threaded, no COOP/COEP needed (what gh-pages serves)
@@ -46,12 +46,14 @@ fi
 # lzma, libxml2, tiff, webp, ...) comes from the declared build deps, and
 # src/cvc/CMakeLists.txt hangs it off MagickCore for every static link, so the demo link
 # resolves it. build-wasm-demo.sh fails the build if the configure did not find it.
+# Jolt ON too, and required the same way: without it the documents' bodies never move.
 WEB="$CVC_INSTALL_DIR/share/libcvc-examples-web/web"
 install -d "$WEB"
 CVC_WASM_DEPS="$CVC_DEPS_PREFIX" \
 CVC_WASM_BUILD_DIR="$CVC_BUILD_DIR" \
 CVC_WASM_GALLERY_DIR="$WEB" \
 CVC_WASM_IMAGEMAGICK=ON \
+CVC_WASM_JOLT=ON \
   bash "$CVC_SOURCE_DIR/examples/web/build-wasm-demo.sh" ${THREADS[@]+"${THREADS[@]}"}
 
 # The .wasm files embed third-party code (VTK-derived code in cvcGL, BSD-3-Clause;

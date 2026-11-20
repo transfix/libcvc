@@ -103,7 +103,11 @@ jobs:
           # eigen + libigl (header-only): cvc's mesh_ops / fem, which the FEM gallery's fe_lab and
           # mesh_lab nodes run on. Without them CVC_ENABLE_LIBIGL goes off and those nodes don't exist.
           # sdl3: keyboard and mouse for the documents' on_key / on_pointer (cvcGL's SdlInput).
-          for p in eigen libigl sdl3; do
+          # joltphysics: cvc::physics' engine (single-threaded here: jolt_backend.cpp runs Jolt's
+          # single-threaded job system without pthreads). Without it CVC_WITH_JOLT goes off, the
+          # gallery has the null backend only, and a document's bodies (terrain_lab's boat and
+          # crates) never move. build-wasm-demo.sh fails the build if the configure missed it.
+          for p in eigen libigl sdl3 joltphysics; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$CVC_WASM_DEPS" \
               --platform wasm --arch wasm32 --config release --link static \
