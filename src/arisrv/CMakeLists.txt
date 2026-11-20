@@ -297,13 +297,22 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                      "-DEXPECT1=\"doc_python: init score\" 42"
                      "-DEXPECT2=arisrvx check: the server document: ok"
                      "-DREJECT=relay up" -P "${_srv_tests}/run_arisrv.cmake")
+    # host.net (ARIADNE_NET_ENGINE.md §2.7, N2): the relay's connection engine, made on the
+    # program's first use with --net-threads I/O threads, its listener's callbacks on the loop.
+    add_test(NAME arisrvx_net
+             COMMAND ${CMAKE_COMMAND} ${_x}
+                     "-DARGS=--python@@${_srv_tests}/net_program.py@@--net-threads@@3@@${_x_path}@@${_srv_listen}"
+                     -DSTATUS=0 "-DEXPECT1=net: the connection engine runs 3 I/O thread"
+                     "-DEXPECT2=net_program: ok: .*3 I/O threads"
+                     "-DEXPECT3=net_program: closed peer_closed" "-DREJECT=FAILED"
+                     -P "${_srv_tests}/run_arisrv.cmake")
     add_test(NAME arisrvx_python_interpreter
              COMMAND arisrvx python -c "import _arihost; print(_arihost.host(), _arihost.attached())")
     set_tests_properties(arisrvx_python_interpreter PROPERTIES PASS_REGULAR_EXPRESSION
                          "arisrvx False")
     set(_x_tests arisrvx_serve arisrvx_program arisrvx_http_listen arisrvx_startup_fails arisrvx_check
                  arisrvx_check_missing_module arisrvx_doc_python arisrvx_check_doc_python
-                 arisrvx_python_interpreter)
+                 arisrvx_net arisrvx_python_interpreter)
 
     # room-call (S2, ARIADNE_SCRIPTING_HOSTS.md §6.5.5, §6.5.7): tests/relay_pair.py starts the relay
     # on loopback ports, reads its port, and runs `ari test --relay URL` with tests/call_client.ari

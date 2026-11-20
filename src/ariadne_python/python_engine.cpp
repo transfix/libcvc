@@ -259,6 +259,23 @@ PyObject *arihost_app(PyObject *self, PyObject *) {
   return capsule;
 }
 
+// The server host's connection engine ("cvc.net.net_engine"), for pycvc.net_engine.from_capsule:
+// made on the first call, owned by the host, the same engine on every call.
+PyObject *arihost_net(PyObject *self, PyObject *) {
+  const EngineState &st = state_of(self);
+  if (!st.lent.attached)
+    return not_attached();
+  if (!st.lent.handles.net) {
+    PyErr_SetString(PyExc_RuntimeError,
+                    "_arihost.net: this host has no connection engine (arisrvx has one)");
+    return nullptr;
+  }
+  PyThreadState *ts = PyEval_SaveThread(); // the first call starts its I/O threads
+  cvc::net::net_engine *engine = st.lent.handles.net();
+  PyEval_RestoreThread(ts);
+  return PyCapsule_New(engine, "cvc.net.net_engine", nullptr);
+}
+
 // The document's AppRuntime ("cvc.ariadne.AppRuntime"), for pycvc.ari_app_attach.
 PyObject *arihost_runtime(PyObject *self, PyObject *) {
   if (!state_of(self).lent.attached)
@@ -902,6 +919,8 @@ const PyMethodDef kArihostMethods[] = {
 #endif
     {"app", arihost_app, METH_NOARGS, "The host's live cvc::app, a capsule for pycvc."},
     {"runtime", arihost_runtime, METH_NOARGS, "The document's AppRuntime, a capsule for pycvc."},
+    {"net", arihost_net, METH_NOARGS,
+     "The server host's connection engine, a capsule for pycvc.net_engine.from_capsule."},
     {"gl", arihost_gl, METH_NOARGS,
      "A GL host's (AriRuntime, SceneRenderer, CameraController, ImGuiOverlay) capsules, or None."},
     {"attached", arihost_attached, METH_NOARGS, "Whether a document host has lent its objects."},
