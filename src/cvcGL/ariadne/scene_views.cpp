@@ -189,6 +189,10 @@ struct SceneViews::View {
   std::string pick_key, on_pick;
   bool picking = false; // a left press that picks is down
   long pick_seq = 0;
+  // pointer: where the pointer is, written under pointer_key (absolute) as it moves with no
+  // button down (phase "hover").
+  std::string pointer_key;
+  long pointer_seq = 0;
   bool drawn = false;  // a widget drew it this frame
   bool framed = false; // its camera has been framed on what it shows
   double region[4] = {-1.0, -1.0, -1.0, -1.0};
@@ -588,6 +592,7 @@ bool slice_hit(const VolumeSliceNode &s, const double origin[3], const double di
   for (int c = 0; c < 3; ++c)
     hit.ijk[c] = ijk[c];
   hit.value = value;
+  hit.axis = static_cast<int>(s.params().axis);
   return true;
 }
 
@@ -858,12 +863,14 @@ bool SceneViews::pick_at(View &v, double x, double y, PickHit &hit) const {
             hit.voxel = h.voxel;
             std::copy(h.ijk, h.ijk + 3, hit.ijk);
             hit.value = h.value;
+            hit.axis = h.axis;
           }
         }
   return true;
 }
 
-void SceneViews::pick(View &v, const char *phase, ari::CustomEdit &edit) {
+std::vector<std::pair<std::string, std::string>> SceneViews::pick_fields(View &v, const char *phase,
+                                                                         long &seq) const {
 #ifdef CVC_ENABLE_IMGUI
   const ImGuiIO &io = ImGui::GetIO();
   // The pointer in VTK display coordinates: framebuffer pixels from the lower left.
@@ -885,20 +892,32 @@ void SceneViews::pick(View &v, const char *phase, ari::CustomEdit &edit) {
   };
   const bool at = hit.hit || hit.plane; // a slice view reports the plane's point past its edge
   const auto ijk = [&hit](int c) { return hit.voxel ? std::to_string(hit.ijk[c]) : std::string(); };
-  std::vector<std::pair<std::string, std::string>> f = {{"x", at ? num(hit.world[0]) : ""},
-                                                        {"y", at ? num(hit.world[1]) : ""},
-                                                        {"z", at ? num(hit.world[2]) : ""},
-                                                        {"hit", hit.hit ? "1" : "0"},
-                                                        {"node", hit.node},
-                                                        {"i", ijk(0)},
-                                                        {"j", ijk(1)},
-                                                        {"k", ijk(2)},
-                                                        {"value", hit.voxel ? num(hit.value) : ""},
-                                                        {"button", "1"},
-                                                        {"mods", mods},
-                                                        {"phase", phase},
-                                                        {"view", v.name},
-                                                        {"seq", std::to_string(++v.pick_seq)}};
+  const char *axes[] = {"x", "y", "z"};
+  return {{"x", at ? num(hit.world[0]) : ""},
+          {"y", at ? num(hit.world[1]) : ""},
+          {"z", at ? num(hit.world[2]) : ""},
+          {"hit", hit.hit ? "1" : "0"},
+          {"node", hit.node},
+          {"i", ijk(0)},
+          {"j", ijk(1)},
+          {"k", ijk(2)},
+          {"value", hit.voxel ? num(hit.value) : ""},
+          {"axis", hit.plane && hit.axis >= 0 && hit.axis < 3 ? axes[hit.axis] : ""},
+          {"button", std::string(phase) == "hover" ? "0" : "1"},
+          {"mods", mods},
+          {"phase", phase},
+          {"view", v.name},
+          {"seq", std::to_string(++seq)}};
+#else
+  (void)v, (void)phase, (void)seq;
+  return {};
+#endif
+}
+
+void SceneViews::pick(View &v, const char *phase, ari::CustomEdit &edit) {
+  std::vector<std::pair<std::string, std::string>> f = pick_fields(v, phase, v.pick_seq);
+  if (f.empty())
+    return;
   SceneSlot slot;
   if (!v.pick_key.empty() && scenes_ && scenes_(v.scene, slot) && slot.sg) {
     cvc::app &app = slot.sg->appContext();
@@ -909,9 +928,15 @@ void SceneViews::pick(View &v, const char *phase, ari::CustomEdit &edit) {
     edit.fire = v.on_pick;
     edit.fields = std::move(f);
   }
-#else
-  (void)v, (void)phase, (void)edit;
-#endif
+}
+
+void SceneViews::pointer(View &v) {
+  SceneSlot slot;
+  if (v.pointer_key.empty() || !scenes_ || !scenes_(v.scene, slot) || !slot.sg)
+    return;
+  cvc::app &app = slot.sg->appContext();
+  for (const auto &kv : pick_fields(v, "hover", v.pointer_seq)) // seq last, as a pick's
+    ari::write<std::string>(app, v.pointer_key + "." + kv.first, kv.second);
 }
 
 bool SceneViews::pick(const std::string &view, double x, double y, PickHit &hit) const {
@@ -1292,6 +1317,12 @@ void SceneViews::register_widget() {
             v->pick_key = ari::resolve_bind(slot.sg->getStatePrefix(),
                                             w.props.str("pick", "viewers." + name + ".pick"));
         }
+        v->pointer_key.clear();
+        if (w.props.has("pointer")) {
+          SceneSlot slot;
+          if (scenes_ && scenes_(v->scene, slot) && slot.sg)
+            v->pointer_key = ari::resolve_bind(slot.sg->getStatePrefix(), w.props.str("pointer"));
+        }
         // Its camera: `camera: <id>` draws from a named camera (or `main`); otherwise its own,
         // which `mode:` (orbit | fly | map | track), `track:`, `azimuth:`, `elevation:` and `zoom:`
         // start. `camera: orbit` and the like name a mode, as #1005 spelled it.
@@ -1478,6 +1509,12 @@ void SceneViews::register_widget() {
               (ImGui::IsItemHovered() &&
                (io.MouseWheel != 0.0f || ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))))
             v->settle = kSettleFrames;
+        }
+        // pointer: the pointer over the view with no button down, once per frame it moves.
+        if (!v->pointer_key.empty() && ImGui::IsItemHovered() && !ImGui::IsAnyMouseDown()) {
+          const ImGuiIO &io = ImGui::GetIO();
+          if (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f || v->pointer_seq == 0)
+            pointer(*v);
         }
         if (v->settle > 0) {
           --v->settle;

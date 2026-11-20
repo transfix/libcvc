@@ -277,6 +277,11 @@ bool runDocument(const fs::path &doc, const fs::path &goldenDir, const fs::path 
   ui.setFixedDeltaTime(static_cast<float>(kDt));
 
   cvc::gl::ariadne::AriRuntime rt(view, cam, ui);
+  // cvc://components/... from the source tree, so a golden of a shipped component draws this
+  // tree's copy, not an installed one.
+  rt.add_component_path((std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+                         "cvc" / "ariadne")
+                            .string());
   const std::vector<std::string> loadWarnings = rt.load(doc.string());
   for (const std::string &w : loadWarnings)
     std::printf("  load: %s\n", w.c_str());

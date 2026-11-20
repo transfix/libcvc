@@ -1232,6 +1232,23 @@ add_executable(cvcgl_volume_slice test/cvcgl_volume_slice.cpp)
 target_link_libraries(cvcgl_volume_slice PRIVATE cvcGL)
 add_test(NAME cvcgl_volume_slice COMMAND cvcgl_volume_slice)
 
+# The volume_grid node (VolumeGridNode.h, volume_grid_nodes.h), headless: its keys and planes, picks
+# written as a slice view writes them (marks, a rubber band, a drag, navigate), its requests, rows,
+# data channel and sessions, and two grids in one document sharing nothing (T6, T13).
+add_executable(cvcgl_volume_grid test/cvcgl_volume_grid.cpp)
+target_link_libraries(cvcgl_volume_grid PRIVATE cvcGL)
+add_test(NAME cvcgl_volume_grid COMMAND cvcgl_volume_grid)
+
+# The volume_grid component over two grids in one document (switch and quad layouts), through
+# AriRuntime and the mouse: the views follow grid.view, the pointer fills the probe, clicks mark and
+# unmark, a drag selects, and each grid's views edit that grid alone. Offscreen; skips where nothing
+# rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_volume_grid test/cvcgl_ariadne_volume_grid.cpp)
+  target_link_libraries(cvcgl_ariadne_volume_grid PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_volume_grid COMMAND cvcgl_ariadne_volume_grid)
+endif()
+
 # A document's assets (read once, shared buffers) and its scenes: of their own (each a SceneGraph
 # with its own viewport, mirrored by the viewports that name it), and main_view: show. Offscreen;
 # the AriRuntime part skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.

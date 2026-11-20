@@ -92,6 +92,24 @@ std::string read_string(cvc::app &ctx, const std::string &path) {
   }
 }
 
+// A slider's `range: key`: the bound key's "min" and "max" properties over `lo` / `hi`, each kept
+// where the key has none (or one that is not a number). Follows a transparent link as reads do.
+void key_range(cvc::app &ctx, const std::string &path, double &lo, double &hi) {
+  try {
+    cvc::state *n = read_node(ctx, path);
+    if (!n)
+      return;
+    for (auto [prop, out] : {std::pair<const char *, double *>{"min", &lo}, {"max", &hi}}) {
+      const std::string t = n->property(prop);
+      char *end = nullptr;
+      const double d = std::strtod(t.c_str(), &end);
+      if (!t.empty() && end && *end == '\0' && std::isfinite(d))
+        *out = d;
+    }
+  } catch (const std::exception &) {
+  }
+}
+
 // §4 read-lane: is this bind an s-EXPRESSION (a computed value) rather than a state path?
 // State paths are dotted identifiers and never begin with '('; an s-expr always does. So the
 // first non-space character decides — no ambiguity, and no new field/key needed.
@@ -3116,7 +3134,14 @@ void Runtime::Impl::emit_node(const Widget &w) {
   case Kind::SliderInt: {
     const std::string path = resolve(w.bind);
     const int cur = read_or_seed<int>(app, path, w.idef);
-    const IntEdit e = b.slider_int(label, path.c_str(), cur, w.ilo, w.ihi);
+    int lo = w.ilo, hi = w.ihi;
+    if (w.range_from_key) {
+      double klo = lo, khi = hi;
+      key_range(app, path, klo, khi);
+      lo = static_cast<int>(std::lround(klo));
+      hi = std::max(lo, static_cast<int>(std::lround(khi)));
+    }
+    const IntEdit e = b.slider_int(label, path.c_str(), cur, lo, hi);
     if (e.committed || (e.changed && !w.commit_on_release)) // live while dragged, by default
       write<int>(app, path, e.value);
     if (e.committed && !w.on.empty()) // on: fires once per commit (drag end / key step), not
@@ -3127,9 +3152,12 @@ void Runtime::Impl::emit_node(const Widget &w) {
   case Kind::SliderFloat: {
     const std::string path = resolve(w.bind);
     const double cur = read_or_seed<double>(app, path, w.def);
-    const DoubleEdit e =
-        w.log_scale ? b.slider_double_log(label, path.c_str(), cur, w.lo, w.hi, w.fmt.c_str())
-                    : b.slider_double(label, path.c_str(), cur, w.lo, w.hi, w.fmt.c_str());
+    double lo = w.lo, hi = w.hi;
+    if (w.range_from_key)
+      key_range(app, path, lo, hi);
+    const DoubleEdit e = w.log_scale
+                             ? b.slider_double_log(label, path.c_str(), cur, lo, hi, w.fmt.c_str())
+                             : b.slider_double(label, path.c_str(), cur, lo, hi, w.fmt.c_str());
     if (e.committed || (e.changed && !w.commit_on_release))
       write<double>(app, path, e.value);
     if (e.committed && !w.on.empty())
