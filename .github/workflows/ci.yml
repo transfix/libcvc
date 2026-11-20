@@ -2864,6 +2864,21 @@ jobs:
         state_exec_async_test: OK ] LongSteps.ALongWindowAtSlice256NamesItsLastNative
         state_exec_async_test: OK ] LongSteps.ANameIsReportedOnceAMinute
         state_exec_async_calls_test: OK ] LongStepSink.Group0LogsALongStepThroughTheApp
+        exec_pool_test: OK ] ExecPoolContinuous.DetachInsideItsOwnDeferredCallbackLeavesThePoolAlone
+        exec_pool_test: OK ] ExecPoolContinuous.DetachFromADeferredOnCompleteLeavesTheGroupAlone
+        exec_pool_test: OK ] ExecPoolContinuous.DetachInsideItsOwnPumpIsRefused
+        exec_pool_test: OK ] ExecPoolContinuous.WithGroupInsideItsOwnWaitingBodyIsRefused
+        exec_pool_test: OK ] ExecPoolContinuous.AGroupWokenByABusyWorkerIsPumpedByAnIdleOne
+        exec_pool_test: OK ] ExecPoolContinuous.AQueuedCallbackDoesNotFreezeABusyGroup
+        exec_pool_test: OK ] ExecPoolContinuous.DeterministicRunsRepeatWithAFrameWaiter
+        exec_pool_test: OK ] ExecPoolContinuous.AnExecuteOutsideWithGroupRuns
+        exec_pool_test: OK ] ExecPoolContinuous.AttachRefusesASchedulerWithANotifier
+        exec_pool_test: OK ] ExecPoolContinuous.ALongHostWaitIsCountedWhileItWaits
+        exec_pool_test: OK ] ExecPoolContinuous.APumpAllOfAnAttachingThreadServicesItsHostQueue
+        exec_pool_test: OK ] ExecPoolContinuous.AFailedGroupIsWorkOnceUntilTaken
+        state_exec_async_test: OK ] PumpReport.WithoutANotifierTheReportIsLeftAsItWas
+        state_exec_async_test: OK ] LongSteps.AStepWithNoNativeIsNamedSo
+        state_exec_async_calls_test: OK ] KernelPools.BeforeAnyExecPoolAKernelTakesNoPoolLock
       # ^ SAN_REQUIRED_S2A ends here. No comment line inside the list: run.sh would read it as a
       # required line.
       # The lock tests read this and run their smaller sanitizer sizes.
