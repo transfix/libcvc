@@ -1551,3 +1551,674 @@ TEST(ExecPool, AForceMovedCallEndsAtItsDeadline) {
   EXPECT_TRUE(tight.skipped) << "the group was not skipped at the deadline";
   EXPECT_EQ(tight.skips, 1u);
 }
+
+// --- Stage 2a continuous pool (td 8.3, 8.11) ---
+//
+// S2.md section 4's PL cases for continuous mode (S2a.9): the eventcount, a parked pool, the
+// pool's timers, its virtual-time queue, a blocked worker and the long-step monitor, and the
+// pool's teardown. The attaching thread runs exec_pool.h's host loop (pump_host, then
+// wait_for_work when it had nothing to do); the cases assert counts, outcomes and thread ids, and
+// print their times (rule 7).
+
+// clang-format off
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <tlhelp32.h>
+#else
+#include <dirent.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
+#endif
+#include <cvc/state/state_exec/async_host.h>
+#include <functional>
+#include <optional>
+#include <random>
+// clang-format on
+
+namespace {
+
+// The sanitizer jobs set CVC_LOCKS_SANITIZER=1: their builds run 5-15x slower, so the long cases
+// run smaller there.
+bool s2a_under_sanitizer() {
+  const char *v = std::getenv("CVC_LOCKS_SANITIZER");
+  return v && *v && std::string(v) != "0";
+}
+
+// An environment variable set while it lives (CVC_EXEC_FUZZ, which a pool and a lock manager read
+// when they are built), and restored after.
+class s2a_env_var {
+public:
+  s2a_env_var(const char *name, const char *value) : name_(name) {
+    if (const char *old = std::getenv(name))
+      old_ = old;
+    set(value);
+  }
+  ~s2a_env_var() { set(old_ ? old_->c_str() : nullptr); }
+  s2a_env_var(const s2a_env_var &) = delete;
+  s2a_env_var &operator=(const s2a_env_var &) = delete;
+
+private:
+  void set(const char *value) {
+#ifdef _WIN32
+    _putenv_s(name_.c_str(), value ? value : "");
+#else
+    if (value)
+      setenv(name_.c_str(), value, 1);
+    else
+      unsetenv(name_.c_str());
+#endif
+  }
+  std::string name_;
+  std::optional<std::string> old_;
+};
+
+#if !defined(_WIN32)
+long s2a_entries(const char *dir) {
+  DIR *d = opendir(dir);
+  if (!d)
+    return -1;
+  long n = 0;
+  while (dirent *e = readdir(d))
+    if (e->d_name[0] != '.')
+      ++n;
+  closedir(d);
+  return n;
+}
+#endif
+
+// This process's threads, or -1 where they can't be counted.
+long s2a_thread_count() {
+#if defined(_WIN32)
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+  if (snap == INVALID_HANDLE_VALUE)
+    return -1;
+  const DWORD self = GetCurrentProcessId();
+  THREADENTRY32 te{};
+  te.dwSize = sizeof te;
+  long n = 0;
+  if (Thread32First(snap, &te)) {
+    do {
+      if (te.th32OwnerProcessID == self)
+        ++n;
+      te.dwSize = sizeof te;
+    } while (Thread32Next(snap, &te));
+  }
+  CloseHandle(snap);
+  return n;
+#elif defined(__APPLE__)
+  thread_act_array_t threads = nullptr;
+  mach_msg_type_number_t n = 0;
+  if (task_threads(mach_task_self(), &threads, &n) != KERN_SUCCESS)
+    return -1;
+  for (mach_msg_type_number_t i = 0; i < n; ++i)
+    mach_port_deallocate(mach_task_self(), threads[i]);
+  vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threads), n * sizeof(*threads));
+  return static_cast<long>(n);
+#else
+  return s2a_entries("/proc/self/task");
+#endif
+}
+
+// This process's handles (Windows) or open file descriptors, or -1 where they can't be counted.
+long s2a_handle_count() {
+#if defined(_WIN32)
+  DWORD n = 0;
+  return GetProcessHandleCount(GetCurrentProcess(), &n) ? static_cast<long>(n) : -1;
+#else
+#if defined(__APPLE__)
+  const long n = s2a_entries("/dev/fd");
+#else
+  const long n = s2a_entries("/proc/self/fd");
+#endif
+  return n < 0 ? n : n - 1; // the directory stream's own descriptor
+#endif
+}
+
+double s2a_seconds_since(clock_type::time_point t0) {
+  return std::chrono::duration<double>(clock_type::now() - t0).count();
+}
+
+// Spin (no sleep, whose granularity on Windows is a timer tick) for `us` microseconds.
+void s2a_spin_us(int us) {
+  const auto until = clock_type::now() + std::chrono::microseconds(us);
+  while (clock_type::now() < until) {
+  }
+}
+
+// The attaching thread's host loop (exec_pool.h): until done(), pump_host(pump_seconds), and
+// wait_for_work(beat) when that had nothing to do. `in_loop`, when given, is set while the thread
+// is inside either. A throw (S2a.0's stubs: "not built") or `ceiling` seconds passing fails the
+// case; true when done() held.
+bool s2a_drive(cvc::exec_pool &pool, const std::function<bool()> &done, double ceiling = 30.0,
+               double beat = 0.01, double pump_seconds = kInf,
+               std::atomic<bool> *in_loop = nullptr) {
+  const auto t0 = clock_type::now();
+  try {
+    while (!done()) {
+      if (s2a_seconds_since(t0) > ceiling) {
+        ADD_FAILURE() << "the host loop's ceiling (" << ceiling << " s) passed";
+        return false;
+      }
+      if (in_loop)
+        in_loop->store(true);
+      if (!pool.pump_host(pump_seconds))
+        pool.wait_for_work(beat);
+      if (in_loop)
+        in_loop->store(false);
+    }
+    return true;
+  } catch (const std::exception &e) {
+    if (in_loop)
+      in_loop->store(false);
+    ADD_FAILURE() << "the host loop threw: " << e.what();
+    return false;
+  }
+}
+
+// The groups a case attached, detached when it goes if still attached, so a case that fails or
+// throws leaves nothing attached (~exec_pool asserts so). Declared after the groups.
+class s2a_attached {
+public:
+  explicit s2a_attached(cvc::exec_pool &pool) : pool_(pool) {}
+  ~s2a_attached() { detach_all(); }
+  s2a_attached(const s2a_attached &) = delete;
+  s2a_attached &operator=(const s2a_attached &) = delete;
+
+  void attach(exec_group &g) {
+    pool_.attach(g);
+    groups_.push_back(&g);
+  }
+  // A group the case destroys attached (its teardown detaches it).
+  void forget(exec_group &g) {
+    groups_.erase(std::remove(groups_.begin(), groups_.end(), &g), groups_.end());
+  }
+  void detach_all() noexcept {
+    for (exec_group *g : groups_)
+      try {
+        if (pool_.attached(*g))
+          pool_.detach(*g);
+      } catch (...) {
+      }
+    groups_.clear();
+  }
+
+private:
+  cvc::exec_pool &pool_;
+  std::vector<exec_group *> groups_;
+};
+
+// A group with the intrinsics in an env of its own, chrooted at its name, built with `tweak`'s
+// options (its test hooks). A host message reaches a program's (msg-recv "/x") as "x".
+struct s2a_world {
+  intrinsics_context ictx;
+  environment_ptr env = environment::extend(builtins::make_default_environment());
+  std::unique_ptr<exec_group> group;
+
+  s2a_world(cvc::app &app, const std::string &name,
+            const std::function<void(exec_group::options &)> &tweak = {},
+            group_affinity affinity = group_affinity::any) {
+    exec_group::options o = opts_for(app, name, affinity);
+    if (tweak)
+      tweak(o);
+    group = std::make_unique<exec_group>(std::move(o));
+    ictx.sched = &group->sched();
+    ictx.proc = make_process();
+    ictx.proc->pid = 0;
+    apply_chroot(ictx, app.root(), name);
+    ictx.host = &group->host();
+    register_intrinsics(env, &ictx);
+  }
+  s2a_world(const s2a_world &) = delete;
+  s2a_world &operator=(const s2a_world &) = delete;
+
+  exec_group &g() { return *group; }
+  // Before the group is attached, or under its token (with_group).
+  int submit(const std::string &src, std::function<void(value_t)> on_complete = {}) {
+    execute_options eo;
+    eo.env = environment::extend(env);
+    eo.on_complete = std::move(on_complete);
+    return group->execute(src, eo);
+  }
+};
+
+} // namespace
+
+// PL-2 (td 8.3; S2-Q3, S2-Q15): a post between a worker's last look and its sleep, under
+// CVC_EXEC_FUZZ (the pool's fuzz points yield in the eventcount's prepare and commit). Each stream
+// is one attached group whose receiver notes message i, and a poster thread that posts message i+1
+// once i is noted: at once, or after a spin of 10-40 us for one post in four (so the posts land
+// across the worker's spin, prepare and commit), or after 200 us for one in 64 (the worker has
+// parked). Every post's receiver runs: a lost wake leaves the receiver parked, which the per-post
+// ceiling (10 s) turns into a failure. 10^6 posts in Release (2*10^4 in Debug, 10^4 under a
+// sanitizer), over up to four streams and workers, within a time budget that may end it early (the
+// count reached is printed). With workers, the workers parked (stats().parks).
+TEST(ExecPool, PL02_EventcountNeverMissesAWake) {
+  s2a_env_var fuzz("CVC_EXEC_FUZZ", "2026");
+  cvc::pool_options po;
+  po.threads = 4;
+  cvc::exec_pool pool(po); // reads CVC_EXEC_FUZZ now
+  cvc::app app;
+  share_locks(app);
+  const unsigned streams = std::max(1u, std::min(4u, pool.threads()));
+  const std::uint64_t total = s2a_under_sanitizer() ? 10000 : kDebugBuild ? 20000 : 1000000;
+  const std::uint64_t per_stream = (total + streams - 1) / streams;
+  const double budget = s2a_under_sanitizer() || kDebugBuild ? 60.0 : 15.0;
+  struct stream {
+    std::unique_ptr<s2a_world> w;
+    std::atomic<std::int64_t> got{-1};
+    std::uint64_t posted = 0;
+    std::int64_t lost_at = -1; // the post whose receiver never ran
+  };
+  std::vector<std::unique_ptr<stream>> ss;
+  for (unsigned s = 0; s < streams; ++s) {
+    auto st = std::make_unique<stream>();
+    const std::string name = "pl02s" + std::to_string(s);
+    st->w = std::make_unique<s2a_world>(app, name);
+    stream *raw = st.get();
+    builtins::register_fn(st->w->env, "got", [raw](std::span<const value_t> a) -> value_t {
+      raw->got.store(std::get<int64_t>(a[0].v), std::memory_order_release);
+      return nil_value();
+    });
+    st->w->submit("(while #t (got (msg-recv \"/" + name + "\")))");
+    ss.push_back(std::move(st));
+  }
+  s2a_attached att(pool);
+  for (auto &st : ss)
+    att.attach(st->w->g());
+  std::atomic<bool> stop{false};
+  std::atomic<unsigned> posters_done{0};
+  const auto t0 = clock_type::now();
+  std::vector<std::thread> posters;
+  for (unsigned s = 0; s < streams; ++s)
+    posters.emplace_back([&, s] {
+      stream &st = *ss[s];
+      std::mt19937 rng(1000 + s);
+      std::uniform_int_distribution<int> spin(10, 40);
+      const std::string key = "pl02s" + std::to_string(s);
+      for (std::uint64_t i = 0; i < per_stream && !stop.load(); ++i) {
+        if (i % 64 == 63)
+          s2a_spin_us(200);
+        else if (rng() % 4 == 0)
+          s2a_spin_us(spin(rng));
+        st.w->g().sched().post_message(key, value_t(static_cast<int64_t>(i)));
+        const auto p0 = clock_type::now();
+        while (st.got.load(std::memory_order_acquire) < static_cast<std::int64_t>(i) &&
+               !stop.load()) {
+          if (s2a_seconds_since(p0) > 10.0) {
+            st.lost_at = static_cast<std::int64_t>(i);
+            stop.store(true);
+            break;
+          }
+          std::this_thread::yield();
+        }
+        if (st.got.load(std::memory_order_acquire) < static_cast<std::int64_t>(i))
+          break;
+        st.posted = i + 1;
+        if (s2a_seconds_since(t0) > budget)
+          break;
+      }
+      posters_done.fetch_add(1);
+    });
+  const bool drove =
+      s2a_drive(pool, [&] { return posters_done.load() == streams; }, budget + 60.0, 0.005);
+  stop.store(true);
+  for (std::thread &t : posters)
+    t.join();
+  const double took = s2a_seconds_since(t0);
+  att.detach_all();
+  std::uint64_t posted = 0;
+  for (auto &st : ss)
+    posted += st->posted;
+  const cvc::pool_stats s = pool.stats();
+  std::printf("PL-2: %llu of %llu posts over %u stream(s) at threads %u in %.3f s; wakes %llu, "
+              "parks %llu, empty wakes %llu\n",
+              static_cast<unsigned long long>(posted), static_cast<unsigned long long>(total),
+              streams, pool.threads(), took, static_cast<unsigned long long>(s.wakes),
+              static_cast<unsigned long long>(s.parks),
+              static_cast<unsigned long long>(s.empty_wakes));
+  ASSERT_TRUE(drove);
+  for (unsigned i = 0; i < streams; ++i)
+    EXPECT_EQ(ss[i]->lost_at, -1) << "stream " << i << ": post " << ss[i]->lost_at
+                                  << "'s receiver never ran (a lost wake)";
+  EXPECT_GE(posted, total / 20) << "the budget ended PL-2 early";
+  if (pool.threads() > 0)
+    EXPECT_GT(s.parks, 0u) << "no worker parked between the posts";
+}
+
+// PL-3 (td 8.3; S2-Q3): everything parked, then a host thread posts a message: the receiver runs.
+// "Parked": the receiver waits on msg-recv, no worker is pumping (stats().active_workers) and the
+// workers have parked (stats().parks), then 20 ms more; at threads 0 the attaching thread waits in
+// wait_for_work. The time from the post to the receiver's step is printed, not asserted.
+TEST(ExecPool, PL03_AHostPostWakesAParkedPool) {
+  cvc::pool_options po;
+  po.threads = 2;
+  cvc::exec_pool pool(po);
+  cvc::app app;
+  share_locks(app);
+  std::atomic<bool> ready{false}, stop{false}, posted{false};
+  std::atomic<std::int64_t> got_ns{0}, post_ns{0};
+  std::atomic<std::uint64_t> parks_at_post{0};
+  s2a_world w(app, "pl03");
+  builtins::register_fn(w.env, "ready", [&](std::span<const value_t>) -> value_t {
+    ready.store(true);
+    return nil_value();
+  });
+  builtins::register_fn(w.env, "got", [&](std::span<const value_t>) -> value_t {
+    got_ns.store(now_ns());
+    return nil_value();
+  });
+  const int pid = w.submit("(begin (ready) (got (msg-recv \"/pl03\")) \"received\")");
+  s2a_attached att(pool);
+  att.attach(w.g());
+  std::thread poster([&] {
+    const auto t0 = clock_type::now();
+    while (!stop.load() && s2a_seconds_since(t0) < 30.0) {
+      const cvc::pool_stats s = pool.stats();
+      if (ready.load() && (pool.threads() == 0 || (s.parks > 0 && s.active_workers == 0)))
+        break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (stop.load() || s2a_seconds_since(t0) >= 30.0)
+      return;
+    std::this_thread::sleep_for(std::chrono::milliseconds(20)); // past any worker's spin
+    parks_at_post.store(pool.stats().parks);
+    post_ns.store(now_ns());
+    w.g().sched().post_message("pl03", value_t(std::string("hello")));
+    posted.store(true);
+  });
+  const bool drove = s2a_drive(pool, [&] { return got_ns.load() != 0; }, 30.0);
+  stop.store(true);
+  poster.join();
+  att.detach_all();
+  std::printf("PL-3: threads %u, parks before the post %llu; the receiver ran %.1f us after it\n",
+              pool.threads(), static_cast<unsigned long long>(parks_at_post.load()),
+              posted.load() ? static_cast<double>(got_ns.load() - post_ns.load()) / 1e3 : -1.0);
+  ASSERT_TRUE(drove);
+  EXPECT_TRUE(posted.load()) << "the pool never looked parked";
+  EXPECT_EQ(result_of(w.g(), pid), "\"received\"");
+  if (pool.threads() > 0)
+    EXPECT_GT(parks_at_post.load(), 0u) << "posted before any worker parked";
+}
+
+// PL-4 (td 8.3; S2-Q3, S2-Q4): one attached group whose one process sleeps 5 ms, nothing else, at
+// threads 2. The group is pumped once after the sleep began (the pump hook counts the pumps begun
+// between the process entering the sleep and its end), that pump finds the sleep elapsed, and no
+// worker wakeup found nothing to pump (stats().empty_wakes 0: no worker woke early, nor two at the
+// deadline). The time from the deadline to the pump is printed.
+TEST(ExecPool, PL04_ASleeperIsPumpedAtItsDeadline) {
+  cvc::pool_options po;
+  po.threads = 2;
+  cvc::exec_pool pool(po);
+  cvc::app app;
+  share_locks(app);
+  std::atomic<std::int64_t> slept_at{0}, first_after{0};
+  std::atomic<int> after{0}, pumps{0};
+  std::atomic<bool> woke{false}, completed{false};
+  s2a_world w(app, "pl04", [&](exec_group::options &o) {
+    o.pump_hook_for_test = [&](exec_group &) {
+      pumps.fetch_add(1);
+      const std::int64_t s = slept_at.load();
+      if (s != 0 && !woke.load() && after.fetch_add(1) == 0)
+        first_after.store(now_ns() - s);
+    };
+  });
+  builtins::register_fn(w.env, "mark", [&](std::span<const value_t>) -> value_t {
+    slept_at.store(now_ns());
+    return nil_value();
+  });
+  builtins::register_fn(w.env, "woke", [&](std::span<const value_t>) -> value_t {
+    woke.store(true);
+    return nil_value();
+  });
+  const int pid = w.submit("(begin (mark) (sleep 0.005) (woke) \"woke\")",
+                           [&](value_t) { completed.store(true); });
+  s2a_attached att(pool);
+  att.attach(w.g());
+  const bool drove = s2a_drive(pool, [&] { return completed.load(); }, 30.0);
+  const cvc::pool_stats s = pool.stats();
+  att.detach_all();
+  std::printf(
+      "PL-4: threads %u, %d pumps, %d after the sleep began, the first %.3f ms after it; "
+      "parks %llu, timer wakes %llu, empty wakes %llu\n",
+      pool.threads(), pumps.load(), after.load(), static_cast<double>(first_after.load()) / 1e6,
+      static_cast<unsigned long long>(s.parks), static_cast<unsigned long long>(s.timer_wakes),
+      static_cast<unsigned long long>(s.empty_wakes));
+  ASSERT_TRUE(drove);
+  EXPECT_EQ(result_of(w.g(), pid), "\"woke\"");
+  EXPECT_EQ(after.load(), 1) << "not pumped exactly once between the sleep and its end";
+  EXPECT_GE(first_after.load(), 5000000) << "pumped before the sleep's deadline";
+  EXPECT_EQ(s.empty_wakes, 0u) << "a worker woke and found nothing to pump";
+}
+
+// PL-5 (td 8.3; S2-Q13): a CPU-heavy group (always runnable: each pump takes its whole budget) and
+// a light one (a receiver of short host messages) on one worker. A host thread posts message i
+// once message i-1 was taken. The light group's wake-to-run latency, counted in heavy pumps begun
+// from the post's return to the receiver taking it, is at most 1 (the heavy pump in progress as the
+// post landed): a woken light group goes before the heavy one (virtual time, the clamp), so the
+// light group is pumped at least once per heavy pump while it has work. Counts from the pump hooks;
+// the pump counts and the latencies are printed.
+TEST(ExecPool, PL05_ALightGroupIsNotStarved) {
+  cvc::pool_options po;
+  po.threads = 1;
+  cvc::exec_pool pool(po);
+  if (pool.threads() == 0)
+    GTEST_SKIP() << "no worker on this machine";
+  cvc::app app;
+  share_locks(app);
+  std::atomic<std::uint64_t> heavy_pumps{0}, light_pumps{0};
+  s2a_world heavy(app, "pl05heavy", [&](exec_group::options &o) {
+    o.pump_hook_for_test = [&](exec_group &) { heavy_pumps.fetch_add(1); };
+  });
+  s2a_world light(app, "pl05light", [&](exec_group::options &o) {
+    o.pump_hook_for_test = [&](exec_group &) { light_pumps.fetch_add(1); };
+  });
+  const int n = s2a_under_sanitizer() || kDebugBuild ? 100 : 400;
+  std::vector<std::uint64_t> at_post(n, 0), at_take(n, 0);
+  std::atomic<int> taken{-1};
+  builtins::register_fn(light.env, "took", [&](std::span<const value_t> a) -> value_t {
+    const int i = static_cast<int>(std::get<int64_t>(a[0].v));
+    if (i >= 0 && i < n)
+      at_take[i] = heavy_pumps.load();
+    taken.store(i, std::memory_order_release);
+    return nil_value();
+  });
+  heavy.submit("(begin (set i 0) (while #t (set i (+ i 1))))");
+  light.submit("(while #t (took (msg-recv \"/pl05\")))");
+  s2a_attached att(pool);
+  att.attach(heavy.g());
+  att.attach(light.g());
+  std::atomic<bool> stop{false}, all_posted{false};
+  int lost_at = -1;
+  std::thread poster([&] {
+    const auto t0 = clock_type::now();
+    while (heavy_pumps.load() < 2 && !stop.load() && s2a_seconds_since(t0) < 30.0)
+      std::this_thread::yield();
+    for (int i = 0; i < n && !stop.load(); ++i) {
+      light.g().sched().post_message("pl05", value_t(static_cast<int64_t>(i)));
+      at_post[i] = heavy_pumps.load();
+      const auto p0 = clock_type::now();
+      while (taken.load(std::memory_order_acquire) < i && !stop.load()) {
+        if (s2a_seconds_since(p0) > 10.0) {
+          lost_at = i;
+          stop.store(true);
+          break;
+        }
+        std::this_thread::yield();
+      }
+    }
+    all_posted.store(!stop.load());
+    stop.store(true);
+  });
+  const bool drove = s2a_drive(pool, [&] { return stop.load(); }, 120.0);
+  stop.store(true);
+  poster.join();
+  att.detach_all();
+  std::int64_t worst = 0;
+  std::vector<int> spread(4, 0); // latencies 0, 1, 2, more
+  for (int i = 0; i < n && i <= taken.load(); ++i) {
+    const std::int64_t late =
+        std::max<std::int64_t>(0, static_cast<std::int64_t>(at_take[i] - at_post[i]));
+    worst = std::max(worst, late);
+    ++spread[static_cast<std::size_t>(std::min<std::int64_t>(late, 3))];
+  }
+  std::printf(
+      "PL-5: %d messages; heavy pumps %llu, light pumps %llu; latency in heavy pumps: 0 x%d, "
+      "1 x%d, 2 x%d, more x%d\n",
+      taken.load() + 1, static_cast<unsigned long long>(heavy_pumps.load()),
+      static_cast<unsigned long long>(light_pumps.load()), spread[0], spread[1], spread[2],
+      spread[3]);
+  ASSERT_TRUE(drove);
+  EXPECT_EQ(lost_at, -1) << "message " << lost_at << " was never taken";
+  EXPECT_TRUE(all_posted.load());
+  EXPECT_LE(worst, 1) << "the light group waited out more than the heavy pump in progress";
+  EXPECT_GT(heavy_pumps.load(), 2u) << "the heavy group was not pumped throughout";
+}
+
+// PL-9 (td 8.3, 4.9; S2-Q11): in one group a native blocks its worker 100 ms inline (an async
+// function on the inline executor), with two busy groups beside it, at threads 2: the busy groups
+// keep being pumped while it blocks (their pump counts move between the kernel's start and end),
+// and the long-step monitor, on for the groups a pool with workers pumps, counts the step
+// (long_steps()) and reports it to the scheduler's sink under the native's name.
+TEST(ExecPool, PL09_ABlockedWorkerBlocksOnlyItsGroup) {
+  cvc::pool_options po;
+  po.threads = 2;
+  cvc::exec_pool pool(po);
+  if (pool.threads() < 2)
+    GTEST_SKIP() << "needs two workers";
+  cvc::app app;
+  share_locks(app);
+  std::atomic<std::uint64_t> pumps_a{0}, pumps_b{0};
+  s2a_world a(app, "pl09a", [&](exec_group::options &o) {
+    o.pump_hook_for_test = [&](exec_group &) { pumps_a.fetch_add(1); };
+  });
+  s2a_world b(app, "pl09b", [&](exec_group::options &o) {
+    o.pump_hook_for_test = [&](exec_group &) { pumps_b.fetch_add(1); };
+  });
+  s2a_world blocker(app, "pl09block");
+  std::atomic<std::uint64_t> a_start{0}, b_start{0}, a_end{0}, b_end{0};
+  async_options inline_call;
+  inline_call.where = executor::inline_call();
+  inline_call.future_variant = false;
+  register_async_fn(
+      blocker.env, blocker.g().host(), "pl09-block",
+      [&](std::span<const value_t>) -> async_kernel {
+        return [&](async_call &) -> value_t {
+          a_start.store(pumps_a.load());
+          b_start.store(pumps_b.load());
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          a_end.store(pumps_a.load());
+          b_end.store(pumps_b.load());
+          return value_t(int64_t(1));
+        };
+      },
+      inline_call);
+  std::mutex m;
+  std::vector<std::pair<std::string, double>> reported;
+  blocker.g().sched().set_long_step_sink([&](const std::string &native, double seconds) {
+    std::lock_guard<std::mutex> lock(m);
+    reported.emplace_back(native, seconds);
+  });
+  std::atomic<bool> completed{false};
+  a.submit("(begin (set i 0) (while #t (set i (+ i 1))))");
+  b.submit("(begin (set i 0) (while #t (set i (+ i 1))))");
+  const int pid = blocker.submit("(begin (for i (range 10) nil) (pl09-block) \"unblocked\")",
+                                 [&](value_t) { completed.store(true); });
+  s2a_attached att(pool);
+  att.attach(a.g());
+  att.attach(b.g());
+  att.attach(blocker.g());
+  const bool drove = s2a_drive(pool, [&] { return completed.load(); }, 30.0);
+  att.detach_all();
+  const std::uint64_t caught = blocker.g().sched().long_steps();
+  std::vector<std::pair<std::string, double>> seen;
+  {
+    std::lock_guard<std::mutex> lock(m);
+    seen = reported;
+  }
+  std::printf("PL-9: while the native blocked, group a pumped %llu times and b %llu; long steps "
+              "%llu, reported %zu\n",
+              static_cast<unsigned long long>(a_end.load() - a_start.load()),
+              static_cast<unsigned long long>(b_end.load() - b_start.load()),
+              static_cast<unsigned long long>(caught), seen.size());
+  for (const auto &[native, seconds] : seen)
+    std::printf("PL-9: long step: %s, %.1f ms\n", native.c_str(), seconds * 1e3);
+  ASSERT_TRUE(drove);
+  EXPECT_EQ(result_of(blocker.g(), pid), "\"unblocked\"");
+  EXPECT_GT(a_end.load(), a_start.load()) << "group a was not pumped while the worker blocked";
+  EXPECT_GT(b_end.load(), b_start.load()) << "group b was not pumped while the worker blocked";
+  EXPECT_GE(caught, 1u) << "the long-step monitor counted nothing";
+  EXPECT_TRUE(std::any_of(seen.begin(), seen.end(), [](const auto &r) {
+    return r.first == "pl09-block";
+  })) << "the sink never heard the native's name";
+}
+
+// PL-10 (td 8.3; S2-Q5): eight busy groups attached to a pool of eight workers, each detached while
+// the workers re-pump it, the groups destroyed, then the pool: no group is pumped after its detach,
+// the groups are gone (detail::live_groups), ~exec_pool joins its workers (the process's thread
+// count falls by about the workers and is back to about where it was before the pool), and the
+// handle count is flat. The counts are one-sided with a small slack, and printed; ASan in CI checks
+// for leaks and uses after free.
+TEST(ExecPool, PL10_DestroyingABusyPool) {
+  cvc::app app;
+  share_locks(app);
+  const long threads_before = s2a_thread_count(), handles_before = s2a_handle_count();
+  cvc::pool_options po;
+  po.threads = 8;
+  auto pool = std::make_unique<cvc::exec_pool>(po);
+  const unsigned workers = pool->threads();
+  long threads_with_pool = -1;
+  bool drove = false;
+  std::vector<std::uint64_t> at_detach, later;
+  {
+    constexpr int kGroups = 8;
+    std::vector<std::unique_ptr<std::atomic<std::uint64_t>>> pumps;
+    std::vector<std::unique_ptr<s2a_world>> worlds;
+    for (int k = 0; k < kGroups; ++k) {
+      pumps.push_back(std::make_unique<std::atomic<std::uint64_t>>(0));
+      std::atomic<std::uint64_t> *count = pumps.back().get();
+      worlds.push_back(std::make_unique<s2a_world>(
+          app, "pl10g" + std::to_string(k), [count](exec_group::options &o) {
+            o.pump_hook_for_test = [count](exec_group &) { count->fetch_add(1); };
+          }));
+      worlds.back()->submit("(begin (set i 0) (while #t (set i (+ i 1))))");
+    }
+    s2a_attached att(*pool);
+    for (auto &w : worlds)
+      att.attach(w->g());
+    threads_with_pool = s2a_thread_count();
+    drove = s2a_drive(*pool, [&] {
+      return std::all_of(pumps.begin(), pumps.end(), [](const auto &c) { return c->load() >= 3; });
+    });
+    for (int k = 0; k < kGroups; ++k) {
+      pool->detach(worlds[k]->g());
+      at_detach.push_back(pumps[k]->load());
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    for (int k = 0; k < kGroups; ++k)
+      later.push_back(pumps[k]->load());
+    att.detach_all();
+  } // the groups go, detached
+  EXPECT_EQ(detail::live_groups(app), 0u);
+  EXPECT_EQ(pool->stats().attached, 0u);
+  pool.reset(); // joins
+  const long threads_after = s2a_thread_count(), handles_after = s2a_handle_count();
+  std::printf("PL-10: %u workers; threads %ld before the pool, %ld with it, %ld after; handles "
+              "%ld before, %ld after\n",
+              workers, threads_before, threads_with_pool, threads_after, handles_before,
+              handles_after);
+  ASSERT_TRUE(drove);
+  EXPECT_EQ(later, at_detach) << "a group was pumped after its detach";
+  if (threads_before >= 0 && threads_after >= 0 && threads_with_pool >= 0) {
+    EXPECT_LE(threads_after, threads_before + 2) << "the pool's workers were not joined";
+    EXPECT_GE(threads_with_pool - threads_after, static_cast<long>(workers) - 2);
+  }
+  if (handles_before >= 0 && handles_after >= 0)
+    EXPECT_LE(handles_after, handles_before + 64) << "handles leaked";
+}
