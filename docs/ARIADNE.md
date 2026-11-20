@@ -1968,6 +1968,36 @@ scene:
     document's `init:` runs before the world is made, and the runtime ignores a spawn request
     already set when it starts (a reload would spawn again), so this is how a document, a server
     document included, populates its world. A gym's reset clears them and spawns its own agents.
+  - **Fleets.** A `start:` entry with `fleet:` (a state name) is a fleet: up to 4096 vehicles,
+    named `<fleet> 1`, `<fleet> 2`, ... (or after `name:`), laid out together once the world's
+    grid exists, the way libcvc's nav swarms are:
+
+    ```yaml
+    start:
+      - { fleet: city, archetype: humvee, plant: kinematic, count: 800,
+          spawn: opposed, seed: 7, rally: { count: 16, assign: latitude } }
+    ```
+
+    - `spawn:` `opposed` starts them in the grid's west 30 % with goals in its east 30 %;
+      `scattered` (the default) draws both anywhere free; `points` starts them at the world's
+      spawn points. `seed:` (0 by default) makes the layout, the same on every platform.
+    - `rally: { count: T }` (or `rally: T`, at most 64) makes T teams by their goals' latitude.
+      Each team's rally point is the goal nearest its band's centre, and its vehicles' goal is
+      held there (they stop at it; they do not wander). Their team is the rally point's index
+      (plus the entry's `team:`), their colour hsv(t / T, 0.74, 0.98) (`colors: hsv`, the default
+      with rally points; `colors: spawn` keeps the spawn's). Without rally points each vehicle's
+      goal is its own, held as well.
+    - Its keys are `vehicles.fleets.<fleet>.*`: `count`, `placed`, `arrived`, `teams`, `seed` and
+      `status`, and `rally.count` with `rally.<t>.x`, `.y` and `.color`. Writing a rally point's
+      `x` and `y` moves its team (held to the grid). A change of `restart.request` lays the fleet
+      out again from its seed, every vehicle back at its start; `reseed.request` from the next
+      seed. `vehicles.fleets.names` lists the fleets.
+    - `keys: summary` (a fleet's default) writes no per-entity keys for its vehicles but for those
+      `vehicles.watch` names (entity ids joined by `,`: the one a camera follows, the one a panel
+      shows) and those with an intent; `entities.ids` lists the entities with keys, and
+      `entities.count` counts them all. `keys: all` writes every vehicle's.
+    - In C++: `WorldVehicles::fleets()`, `rally()`, `move_rally()` and `restart_fleet()`, and
+      `entity_info::fleet` and `rally`.
   - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,
     `color`, `color2` as `r,g,b`, `metadata` as `key=value, ...`, `controller`, `policy`,
     `policy_sha256`, `mass` or `mass_t` (a fraction of the range), `max_speed` or `max_speed_t`,

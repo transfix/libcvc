@@ -74,7 +74,8 @@ Joe, 2026-11-18, on transfix/libcvc#1358 (nav_city_swarm and nav_city_drive as A
 
 ### 2.1 Fleets: many entities, one declaration (FL1)
 
-A fleet is a block of world vehicles declared together:
+A fleet is a named `world: vehicles: start:` entry (settled: the start list grows, no new
+block). An entry with `fleet:` is laid out, coloured, grouped into teams and published as one:
 
 ```yaml
 world:
@@ -82,12 +83,12 @@ world:
     archetypes:
       humvee: { vehicle: humvee, controllers: [nav@1, none, external],
                 lights: { headlights: { cone: 30, range: 60, intensity: 1.2 } } }   # NL4
-    fleets:
-      city:
+    start:
+      - fleet: city                 # a state name: the fleet's keys are vehicles.fleets.city.*
         archetype: humvee
+        count: 800                  # up to 4096 for a fleet (256 for an unnamed entry)
         plant: kinematic            # jolt | dynamic[:preset] | dynamic4w[:preset] | kinematic;
                                     # a list cycles over the vehicles; per team: { 0: jolt, ... }
-        count: 800
         controller: nav@1
         policy: trained             # trained | builtin | { uri, path, sha256 } | { data: <entry> }
         metric: trained             # trained (the trainer's vehicle) | vehicle (each plant's own)
@@ -97,9 +98,18 @@ world:
         seed: 7
         rally: { count: 16, assign: latitude }   # teams; goals held at the team's rally point
         colors: hsv                 # each team's colour, the entity's identity colour
-        keys: summary               # summary | all: per-entity keys
+        keys: summary               # summary (a fleet's default) | all: per-entity keys
 ```
 
+- **An entry without `fleet:` is what it was:** `count:` vehicles (at most 256) spawned one by
+  one, named `name 1`, `name 2`, ..., each with its own free point and wandering goal. A fleet's
+  vehicles are named `<fleet> 1`, `<fleet> 2`, ..., unless `name:` says otherwise.
+- **Laid out together.** The fleet is placed as a whole once the world's grid exists, from its
+  `seed:`: `opposed` starts in the west 30 % and goals in the east 30 % (as the demos'
+  `scatter_free`), `scattered` both anywhere free, `points` the world's spawn points. Teams come
+  from the goals' latitude (`assign: latitude`, SceneSwarm's `assign_targets`), each team's rally
+  point the goal nearest its band's centre; every vehicle's goal is held at its team's point (no
+  wander).
 - **Each vehicle is still an entity.** It has an id, an identity (team = its rally point, its
   colour), intents, a body in the physics world, and the gym's observation. Everything that works
   on entities works on a fleet's.
@@ -110,8 +120,8 @@ world:
     swarm's: hundreds of physics vehicles do not keep up with the clock, as FL0 will measure.
   - A list cycles over the vehicles, and a map gives each team its plant, so one fleet can mix
     Humvees on Jolt with bicycles.
-  - `fleets.<name>.plant` switches it live, as `nav_plant.vehicle` does today: the vehicles keep
-    their poses and start at rest on the new plant.
+  - `vehicles.fleets.<name>.plant` switches it live, as `nav_plant.vehicle` does today: the
+    vehicles keep their poses and start at rest on the new plant.
 - **The policy: trained or not, and which weights.**
   - `trained` (the default) is the published trained CoefMLP, downloaded by default: the
     `grl-snam-weights` package (`cvcpkg://cvc/grl-snam-weights`, its
@@ -133,7 +143,8 @@ world:
   - The fleet's choice goes through `policy_library`, so weights named twice load once. A team or a
     single entity may name another, through the entity spec's `policy` / `policy_sha256`, which
     already exist. That is the nav lab's arms on one city.
-  - `fleets.<name>.policy` switches it live through `sim_world::set_policy`, with no rebuild.
+  - `vehicles.fleets.<name>.policy` switches it live through `sim_world::set_policy`, with no
+    rebuild.
   - **Without the weights, it falls back visibly** (settled, D8). The built-in net drives, and the
     run says so:
     - `stats.policy` names what drives: `trained (cvcpkg://cvc/grl-snam-weights@1.0.0+cvc.1,
@@ -151,13 +162,15 @@ world:
 - **The navigator per fleet.** A fleet's entities share one `sim_world`, built with the fleet's
   belief mode (`sim_world::belief_mode`, which #1358's `SceneSwarm` already drives). Fog coverage
   and sensed walls come from the existing `WorldVehicles::belief`, extended per plane.
-- **Rally points are keys.** `fleets.<name>.rally.<t>.{x,y,color}`. Writing one calls `set_goal`
-  for its team, which is how the minimap's drag already works. `fleets.<name>.request:
-  restart | reseed` rebuilds the fleet.
-- **Summary publishing.** `fleets.<name>.stats.*` holds count, arrived, tick, planes, status and
-  bounds. Per-entity keys are written only for `keys: all`, the selected or followed entity, and
-  entities with an intent. A view reads poses through a lock-free snapshot
-  (`WorldVehicles::poses(fleet)`), never through state.
+- **Rally points are keys.** `vehicles.fleets.<name>.rally.<t>.{x,y,color}`. Writing one calls
+  `set_goal` for its team, which is how the minimap's drag already works.
+  A change of `vehicles.fleets.<name>.restart.request` or `reseed.request` lays the fleet out
+  again (the same seed, or the next).
+- **Summary publishing.** `vehicles.fleets.<name>.*` holds count, placed, arrived, teams, seed and
+  status (FL1a; tick, planes and bounds to come); `vehicles.fleets.names` lists the fleets.
+  Per-entity keys are written only for `keys: all`, the entities `vehicles.watch` names (the
+  followed or selected one), and entities with an intent. A view reads
+  poses through a lock-free snapshot (`WorldVehicles::poses(fleet)`), never through state.
 - **Threading (D3).** A fleet's navigator tick (every 0.06 s, six physics steps) can run on a
   worker while the physics steps, with its commands taking effect a tick later. That keeps the
   render thread free, as the swarm's `sim_thread` did. It is opt-in for drawn hosts only; the gym,
@@ -274,7 +287,8 @@ fleet, quantizes them, and sends only what a viewer's area of interest holds.
 | Phase | What | Needs | Size |
 |---|---|---|---|
 | **FL0** | **Done** (2026-11-19; §3.1). `AriadneWorldGym.FleetBench` (`CVC_FLEET_BENCH=1`) times kinematic fleets of 100, 400 and 800 (map known and fog) and Jolt fleets of 60, 120 and 240, headless. Two fixes from it: `WorldVehicles::entities()` found kinematic overlaps pair by pair (quadratic; now a grid, linear), and the navigators get the app's pool. D3 decided by the numbers: yes. | — | S |
-| **FL1** | **Fleets in `WorldVehicles`.** `world: vehicles: fleets:` (count, archetype, controller, sense, belief per fleet navigator, spawn layout, seed, rally points as teams and colours, goals held), summary publishing, `poses(fleet)`, fleet restart and reseed. Its plant: any world plant, Jolt included, a list or per team, switched live. Its policy: `trained` (downloads `cvcpkg://cvc/grl-snam-weights` unless installed or overridden), `builtin`, or other weights by cvcpkg package, URL, file or `data:` entry, per team or entity, switched live; the visible fallback; the metric following the policy. The gym spawns a fleet. Tests: `ariadne_scene_world_test` fleets (build, step, rally move, restart, belief modes, a Jolt fleet against a building, a mixed fleet, each policy choice, the download and the visible missing-weights fallback); a gym fleet episode. | L2, #1339, #1340 | L |
+| **FL1a** | **Done** (2026-11-19). Fleets as named `start:` entries: `fleet:`, up to 4096 vehicles, `spawn:` (opposed, scattered, points), `seed:`, `rally: { count, assign: latitude }` (teams, hsv colours, goals held), `colors:`, `keys:` (summary, all). Laid out once the grid exists (linear: a hashed separation check); rally keys move a team; `restart.request` and `reseed.request`; `vehicles.watch`; `WorldVehicles::fleets`, `rally`, `move_rally`, `restart_fleet`; `entity_info::fleet` and `rally`. Tests: `AFleetIsANamedStartEntry`, `AFleetIsLaidOutInTeamsAtRallyPoints`, `AFleetWithoutRallyPointsHoldsItsOwnGoals`; the bench's `[fleet doc]` rows (§3.1). Left for FL1: sense, belief and policy per fleet, plant lists, the metric, `poses(fleet)`, the gym's fleet. | FL0 | M |
+| **FL1** | **Fleets in `WorldVehicles`.** Named `world: vehicles: start:` entries (`fleet:`; count, archetype, controller, sense, belief per fleet navigator, spawn layout, seed, rally points as teams and colours, goals held), summary publishing, `poses(fleet)`, fleet restart and reseed. Its plant: any world plant, Jolt included, a list or per team, switched live. Its policy: `trained` (downloads `cvcpkg://cvc/grl-snam-weights` unless installed or overridden), `builtin`, or other weights by cvcpkg package, URL, file or `data:` entry, per team or entity, switched live; the visible fallback; the metric following the policy. The gym spawns a fleet. Tests: `ariadne_scene_world_test` fleets (build, step, rally move, restart, belief modes, a Jolt fleet against a building, a mixed fleet, each policy choice, the download and the visible missing-weights fallback); a gym fleet episode. | L2, #1339, #1340 | L |
 | **FL2** | **The entity view.** `entity_layer` (bodies with LOD rungs, flags, goals, trails, path, belief, dots, targets, follow) over world vehicles; promotion of K entities to `vehicle_view` nodes; the threshold. #1358's `swarm_layer` code moves here. Test: `cvcgl_ariadne_entities`. | FL1 | M |
 | **FL3** | **The nav city documents on fleets.** nav_city_swarm/drive declare `world: data` and a fleet with entity layers. `nav_swarm` and `SceneSwarm` are removed. The minimap drags rally keys; the chase follows an entity. Perf gate: at least #1358's numbers on the reference laptop (and twice the C++ programs, measured back to back). | FL2 | M |
 | **FL4** | **Fleets on the relay.** A fleet identity section, batched quantized fleet pose packets, an area of interest for entities, and the client's entity view with model looks. `traffic.ari` becomes a fleet. Test: a relay room with 800 entities, bytes per client. | FL2, WD3 | L |
@@ -318,6 +332,18 @@ What follows:
   as #1358's swarm did with `sim_thread`. Headless hosts, the gym and the relay stay synchronous
   and bit-for-bit.
 - Under fog, sensing adds about 7 ms at 800.
+
+**FL1a's numbers** (the bench's `[fleet doc]` rows): a fleet declared in the document, 16 rally
+points, an opposed layout, a tick's six steps through the runtime (`step_world`), same machine.
+
+| Fleet | Load and layout | Tick, `keys: all` | Tick, `keys: summary` | One publish, all / summary |
+|---|---|---|---|---|
+| 800 kinematic | 48 ms | 31.4 ms (1.9x) | 11.4 ms (5.3x) | 14.6 / 0.12 ms |
+| 2000 kinematic | 250 ms | 83.5 ms | 35.6 ms (1.7x) | 36.4 / 0.35 ms |
+
+Summary publishing took 800 kinematic vehicles past the demos' 3.6x on the stepping thread, better
+than the 17 ms FL0 expected. Each tick also ran faster beyond the publish itself (20 ms less where
+the publish was 14.5 ms), since the state tree stays small.
 
 **Order.** FL0, FL1, FL2, then FL3, which completes #1358's rework. NL1 and NL2 can run beside
 FL1 and FL2. NL3 and NL4 come after FL2, and NL5 any time after NL1. FL4 goes with WD3's next
