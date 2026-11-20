@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/gl/CameraController.h>
+#include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/state/state.h>
@@ -31,6 +32,11 @@ static void check(const char *what, bool ok) {
 static double dist(const double a[3], const double b[3]) {
   double dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
   return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+// Frames with no keys until Fly's glide has stopped (two seconds is plenty).
+static void settle(CameraController &c) {
+  for (int i = 0; i < 120; ++i)
+    c.update(1.0 / 60.0);
 }
 
 int main() {
@@ -62,22 +68,31 @@ int main() {
   check("fly stands at orbit eye", dist(flyEye, orbEye) < 1e-6);
   c.setMoveSpeed(10.0);
   double d0 = dist(flyEye, orbFoc);
+  // Fly moves as a Quake spectator: a second of W at 10 is about 10 (less the 0.15 s it takes to
+  // get going), then it glides about 1.45 to a stop (A3 measures it).
   c.keyDown("w");
   c.update(1.0);
   c.keyUp("w");
+  settle(c);
   double afterW[3];
   c.getPose(afterW, f, u);
-  check("W moves 10 along look, toward center",
-        std::fabs(dist(afterW, flyEye) - 10.0) < 1e-6 && dist(afterW, orbFoc) < d0);
+  const double toFocal = dist(flyEye, orbFoc);
+  double along = 0.0; // the move's share along the look
+  for (int k = 0; k < 3; ++k)
+    along += (afterW[k] - flyEye[k]) * (orbFoc[k] - flyEye[k]) / toFocal;
+  check("W moves about 10 along look, toward center",
+        dist(afterW, flyEye) > 9.5 && dist(afterW, flyEye) < 12.0 && dist(afterW, orbFoc) < d0 &&
+            std::fabs(along - dist(afterW, flyEye)) < 1e-6);
   double bD[3];
   c.getPose(bD, f, u);
   c.keyDown("d");
   c.update(1.0);
   c.keyUp("d");
+  settle(c);
   double aD[3];
   c.getPose(aD, f, u);
-  check("D strafes 10 horizontally",
-        std::fabs(dist(aD, bD) - 10.0) < 1e-6 && std::fabs(aD[2] - bD[2]) < 1e-9);
+  check("D strafes about 10 horizontally",
+        dist(aD, bD) > 9.5 && dist(aD, bD) < 12.0 && std::fabs(aD[2] - bD[2]) < 1e-9);
   double bl[3], blf[3];
   c.getPose(bl, blf, u);
   c.mouseLook(100, 0);
@@ -132,6 +147,138 @@ int main() {
     check("drag RIGHT swings the eye horizontally, height unchanged",
           dist(h1, h0) > 1e-3 && std::fabs(h1[2] - h0[2]) < 1e-6);
     check("horizontal orbit keeps the focal point", dist(h1f, h0f) < 1e-6);
+  }
+
+  printf(
+      "A3. Fly moves as a Quake spectator: it gets going, glides to a stop, at any frame rate\n");
+  {
+    static int flights = 0;
+    struct Flight {
+      double top = 0.0, reach = -1.0, glide = 0.0, stop = -1.0, total = 0.0;
+    };
+    // Hold `keys` for `hold` seconds at `fps`, then let go: the top speed, when it got within
+    // 0.1% of it, how far it glided and in what time, and how far it went in all.
+    const auto fly = [&](double fps, double hold, std::initializer_list<const char *> keys,
+                         double topWanted) {
+      vtkNew<vtkCamera> fc;
+      CameraController sc(ctx, "test.spectator" + std::to_string(flights++));
+      sc.setCamera(fc);
+      sc.frameBounds(-50, -50, 0, 50, 50, 20);
+      sc.setMode(CameraController::Mode::Fly);
+      sc.setMoveSpeed(10.0);
+      Flight out;
+      double p0[3], pf[3], pu[3], prev[3], cur[3];
+      sc.getPose(p0, pf, pu);
+      std::copy(p0, p0 + 3, prev);
+      for (const char *k : keys)
+        sc.keyDown(k);
+      const double dt = 1.0 / fps;
+      const int frames = static_cast<int>(std::lround(hold * fps));
+      for (int i = 0; i < frames; ++i) {
+        sc.update(dt);
+        sc.getPose(cur, pf, pu);
+        const double speed = dist(cur, prev) / dt;
+        out.top = std::max(out.top, speed);
+        if (out.reach < 0.0 && speed >= 0.999 * topWanted)
+          out.reach = (i + 1) * dt;
+        std::copy(cur, cur + 3, prev);
+      }
+      double release[3];
+      std::copy(prev, prev + 3, release);
+      for (const char *k : keys)
+        sc.keyUp(k);
+      for (int i = 0; i < static_cast<int>(2.0 * fps); ++i) {
+        sc.update(dt);
+        sc.getPose(cur, pf, pu);
+        if (out.stop < 0.0 && dist(cur, prev) == 0.0)
+          out.stop = i * dt;
+        std::copy(cur, cur + 3, prev);
+      }
+      out.glide = dist(prev, release);
+      out.total = dist(prev, p0);
+      return out;
+    };
+    const Flight f60 = fly(60.0, 1.0, {"w"}, 10.0);
+    printf("  60 fps: top %.4f, reached in %.3f s, glide %.3f in %.3f s, total %.3f\n", f60.top,
+           f60.reach, f60.glide, f60.stop, f60.total);
+    check("top speed is the key's speed", f60.top <= 10.0 + 1e-9 && f60.top > 9.99);
+    check("it gets going in about 0.15 s", f60.reach > 0.1 && f60.reach < 0.25);
+    check("let go, it glides about 1.45 to a stop in about 0.4 s",
+          f60.glide > 1.2 && f60.glide < 1.8 && f60.stop > 0.3 && f60.stop < 0.6);
+    const Flight f30 = fly(30.0, 1.0, {"w"}, 10.0), f144 = fly(144.0, 1.0, {"w"}, 10.0);
+    printf("  30 fps total %.4f, 144 fps total %.4f\n", f30.total, f144.total);
+    check("the same flight at 30, 60 and 144 fps (within 1%)",
+          std::fabs(f30.total - f60.total) < 0.01 * f60.total &&
+              std::fabs(f144.total - f60.total) < 0.01 * f60.total);
+    const Flight diag = fly(60.0, 1.0, {"w", "d"}, 12.5);
+    check("a diagonal is faster, to the cap (1.25 of a key)", diag.top > 12.49 && diag.top < 12.51);
+    const Flight sprint = fly(60.0, 1.0, {"Shift_L", "w"}, 40.0);
+    check("sprint multiplies the key speed (4x)", sprint.top > 39.9 && sprint.top < 40.01);
+
+    // A key tapped between two frames still moves the eye, a little.
+    vtkNew<vtkCamera> tc;
+    CameraController tap(ctx, "test.spectator_tap");
+    tap.setCamera(tc);
+    tap.frameBounds(-50, -50, 0, 50, 50, 20);
+    tap.setMode(CameraController::Mode::Fly);
+    tap.setMoveSpeed(10.0);
+    double t0[3], t1[3], tf[3], tu[3];
+    tap.getPose(t0, tf, tu);
+    tap.keyDown("w");
+    tap.keyUp("w");
+    tap.update(1.0 / 60.0);
+    settle(tap);
+    tap.getPose(t1, tf, tu);
+    check("a tap between frames moves the eye a little", dist(t0, t1) > 1e-4 && dist(t0, t1) < 0.2);
+
+    // A settings write in mid-flight leaves the eye where it is: the pose in state is a mirror up
+    // to 1/15 s old, and reading it back snapped the eye back along its path.
+    vtkNew<vtkCamera> ec;
+    CameraController echo(ctx, "test.spectator_echo");
+    echo.setCamera(ec);
+    echo.frameBounds(-50, -50, 0, 50, 50, 20);
+    echo.setMode(CameraController::Mode::Fly);
+    echo.setMoveSpeed(10.0);
+    echo.keyDown("w");
+    for (int i = 0; i < 32; ++i) // not a whole mirror period: state is behind the eye
+      echo.update(1.0 / 60.0);
+    double e0[3], e1[3], ef[3], eu[3];
+    echo.getPose(e0, ef, eu);
+    root("test.spectator_echo.settings.mouse_sensitivity").value(0.3);
+    echo.getPose(e1, ef, eu);
+    check("a settings write in mid-flight does not move the eye", dist(e0, e1) < 1e-9);
+    root("test.spectator_echo.fly.position.x").value(e0[0] + 100.0);
+    echo.getPose(e1, ef, eu);
+    check("a write of the eye's own position still moves it",
+          std::fabs(e1[0] - (e0[0] + 100.0)) < 1e-6);
+    echo.keyUp("w");
+  }
+
+  printf("A4. a node kept out of the scene's bounds is out at any depth\n");
+  {
+    SceneGraph sg(ctx, "boundstest");
+    using P = cvc::geometry::point_t;
+    using T = cvc::geometry::tri_t;
+    const auto tri = [](double x, double y, double z) {
+      cvc::geometry g;
+      g.points().push_back(P{{x, y, z}});
+      g.points().push_back(P{{x + 10.0, y, z}});
+      g.points().push_back(P{{x, y + 10.0, z + 5.0}});
+      g.tris().push_back(T{{0, 1, 2}});
+      return g;
+    };
+    sg.addGraphics("ground", tri(0.0, 0.0, 0.0));
+    auto weather = sg.addGraphics("weather");
+    auto rain = weather ? weather->createChild<cvc::gl::GeometryNode>("weather_rain",
+                                                                      tri(0.0, 0.0, 12000.0))
+                        : nullptr;
+    if (rain)
+      rain->setContributesToSceneBounds(false); // the weather node's 12 km rain column
+    const cvc::bounding_box b = sg.computeGraphicsBounds();
+    check("a nested node kept out of the bounds is left out of them",
+          rain && !b.isNull() && b.maxz < 100.0);
+    check("its parent's own combined box still holds it",
+          weather && weather->getCombinedWorldBoundingBox().maxz > 11000.0);
   }
 
   printf("B. state -> camera (mode, orbit center)\n");
@@ -638,44 +785,50 @@ int main() {
     root("ok.camera.keys.home").value(std::string("G"));
     check("the home key rebinds through the state tree", oc.keyBinding("home") == "G");
     // Mouse look, first person: W moves the eye along the way it looks (pitch included), D
-    // strafes right across it in the ground's plane, Space rises, at the move speed.
+    // strafes right across it in the ground's plane, Space rises, as Fly's eye moves (a spectator:
+    // half a second of a key at 10 is about 5, less getting going, plus a glide of about 1.4).
     oc.setMouseLookEnabled(true);
     oc.setMoveSpeed(10.0);
     double e8[3], f8[3], u8[3];
     oc.getPose(e8, f8, u8);
     const double n8 = dist(e8, f8);
     const double l8[3] = {(f8[0] - e8[0]) / n8, (f8[1] - e8[1]) / n8, (f8[2] - e8[2]) / n8};
+    // A move of about 5 m (4.5 to 6.5) along `dir`, and nowhere else.
+    const auto along = [](const double from[3], const double to[3], const double dir[3]) {
+      double d[3] = {to[0] - from[0], to[1] - from[1], to[2] - from[2]};
+      const double a = d[0] * dir[0] + d[1] * dir[1] + d[2] * dir[2];
+      const double off = std::sqrt(std::pow(d[0] - a * dir[0], 2) + std::pow(d[1] - a * dir[1], 2) +
+                                   std::pow(d[2] - a * dir[2], 2));
+      return a > 4.5 && a < 6.5 && off < 1e-6 * a;
+    };
     oc.keyDown("w");
     oc.update(0.5);
     oc.keyUp("w");
+    settle(oc);
     double e9[3], f9[3], u9[3];
     oc.getPose(e9, f9, u9);
-    check("mouse look: W moves the eye 5 m along its look, pitch included",
-          std::fabs(e9[0] - (e8[0] + 5.0 * l8[0])) + std::fabs(e9[1] - (e8[1] + 5.0 * l8[1])) +
-                  std::fabs(e9[2] - (e8[2] + 5.0 * l8[2])) <
-              1e-6);
+    check("mouse look: W moves the eye about 5 m along its look, pitch included",
+          along(e8, e9, l8));
     check("mouse look: the look itself is unchanged",
           std::fabs((f9[0] - e9[0]) / n8 - l8[0]) + std::fabs((f9[2] - e9[2]) / n8 - l8[2]) < 1e-6);
     oc.keyDown("d");
     oc.update(0.5);
     oc.keyUp("d");
+    settle(oc);
     double e10[3], f10[3], u10[3];
     oc.getPose(e10, f10, u10);
     const double hr = std::hypot(l8[0], l8[1]);
-    const double right[2] = {l8[1] / hr, -l8[0] / hr}; // look x up, flattened
-    check("mouse look: D strafes 5 m right, level with the ground",
-          std::fabs(e10[0] - (e9[0] + 5.0 * right[0])) +
-                      std::fabs(e10[1] - (e9[1] + 5.0 * right[1])) <
-                  1e-6 &&
-              std::fabs(e10[2] - e9[2]) < 1e-9);
+    const double right[3] = {l8[1] / hr, -l8[0] / hr, 0.0}; // look x up, flattened
+    check("mouse look: D strafes about 5 m right, level with the ground",
+          along(e9, e10, right) && std::fabs(e10[2] - e9[2]) < 1e-9);
     oc.keyDown("space");
     oc.update(0.5);
     oc.keyUp("space");
+    settle(oc);
     double e11[3], f11[3], u11[3];
     oc.getPose(e11, f11, u11);
-    check("mouse look: Space rises 5 m straight up",
-          std::fabs(e11[2] - e10[2] - 5.0) < 1e-6 &&
-              std::hypot(e11[0] - e10[0], e11[1] - e10[1]) < 1e-9);
+    const double upward[3] = {0.0, 0.0, 1.0};
+    check("mouse look: Space rises about 5 m straight up", along(e10, e11, upward));
     // Third person: the keys are orbit keys again (a slide across the ground).
     oc.setMouseLookOrbits(true);
     oc.keyDown("w");

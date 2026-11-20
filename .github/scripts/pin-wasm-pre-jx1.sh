@@ -19,10 +19,13 @@ PLATFORM="${2:?usage: pin-wasm-pre-jx1.sh PREFIX PLATFORM}"
 
 # The newest wasm/wasm-mt bundle of each package from before the republish (2026-11-19). vtk's is
 # cvc.5, master's FinishEveryRender build. Its JS-exceptions wasm bundle is from 2026-11-17.
+# imagemagick is pinned ahead of its republish (JX1 bumped it, but its wasm package.files fix
+# came later): cvc.23 is the newest JS-exceptions bundle on wasm and wasm-mt.
 PINS=(
   boost==1.86.0+cvc.8
   datachannel-wasm==0.4.0+cvc.1
   freetype==2.13.3+cvc.4
+  imagemagick==7.1.2+cvc.23
   libjpeg-turbo==3.1.0+cvc.3
   libpng==1.6.44+cvc.5
   lua==5.4.9+cvc.1

@@ -27,6 +27,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -80,6 +81,14 @@ namespace ariadne {
 // document, a script or a server writes it as state (`entities.<id>.intent.*`, `.force.*`); a C++
 // or Python host calls set_intent(). The `external` controller is one that only its intent
 // drives.
+//
+// An entity with the `pose` controller is not driven at all: an outside simulation says where it
+// is (entity_pose), and no plant integrates it. Its chassis is a kinematic box in the physics
+// world, moved to each pose at the next step, so it is drawn with its archetype's look and label,
+// casts shadows, is picked, pushes what it meets and is a vehicle the others steer around. The
+// poses come from its keys (`entities.<id>.pose.*`), a packed value of many (`entities.poses`), a
+// table a world block names (world: vehicles: poses:, a relay's published namespace, whose
+// entries may spawn the entities too), or set_pose() / set_poses().
 
 // An archetype's vehicle: its preset with the archetype's overrides on top, then a spawn's mass
 // and top speed (0: the archetype's), each held to the archetype's range. A boat's (dynamicboat)
@@ -102,10 +111,18 @@ physics::dyn_boat_desc boat_desc_of(const vehicle_archetype &a, double mass = 0.
 std::string find_vehicle_model(const std::string &name);
 
 struct SceneAsset;
+struct SceneData;
 // Each archetype's look as a view can draw it wherever it runs: a model by name found (a fitted
-// file), a document asset's file, a file beside the document (`doc_dir`), and the default look
-// made explicit (the Humvee model for a humvee when it is installed, else the box). A look that
-// cannot be found is drawn as its box, with a warning.
+// file), a document asset's file, a file beside the document (`doc_dir`), a data: entry's package
+// (`data`: its uri and path: copied into the look, so it is whole without the document; a view
+// loads it, cvcGL's vehicle_model_state), and the default look made explicit (the Humvee model for
+// a humvee when it is installed, else the box). A look that cannot be found is drawn as its box,
+// with a warning.
+void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std::string &doc_dir,
+                           const std::vector<SceneAsset> &assets,
+                           std::vector<std::string> *warnings, const std::vector<SceneData> &data);
+// The same with no data: entries (a data look then has nowhere to come from unless it arrived
+// resolved).
 void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std::string &doc_dir,
                            const std::vector<SceneAsset> &assets,
                            std::vector<std::string> *warnings = nullptr);
@@ -128,7 +145,8 @@ struct entity_spec {
   std::array<float, 3> color{0.85f, 0.70f, 0.20f};  // primary, rgb in [0, 1]
   std::array<float, 3> color2{0.12f, 0.12f, 0.14f}; // secondary
   std::map<std::string, std::string> metadata;      // the user's own; nothing reads it
-  // nav@1, none or external (its intent alone drives it); "" the archetype's first
+  // nav@1, none, external (its intent alone drives it) or pose (an outside simulation places it:
+  // entity_pose); "" the archetype's first
   std::string controller;
   // Its plant (jolt, dynamic, dynamic4w or kinematic, as WorldVehicles runs them); "" its
   // archetype's.
@@ -169,13 +187,62 @@ struct entity_intent {
 const char *intent_mode_name(entity_intent::mode m);
 bool parse_intent_mode(const std::string &s, entity_intent::mode &out);
 
+// Where an outside simulation puts a `pose` entity, kept until the next:
+//
+//   x, y       world metres: its chassis's centre (entity_info's x, y), or its rear axle (the
+//              navigator's reference point, as entity_spec's) when `rear_axle`
+//   z          world metres, its chassis's centre; not finite: standing on the ground under it,
+//              as a kinematic box stands (the ground, its wheels' radius, half its height)
+//   heading    rad from +x, counter-clockwise (entity_info's yaw)
+//   pitch      rad about its own y (+ nose down), then `roll` about its own x (+ right side down):
+//              its rotation is Rz(heading) Ry(pitch) Rx(roll)
+//   speed      m/s along its heading: its speed in entity_info, and its wheels roll at it
+//   steer      rad, + left: its steered wheels' angle
+//   time       s on the outside simulation's clock; not finite: none (below)
+//
+// A pose without a time is where the entity is at the end of the next physics step. Timed poses
+// are drawn between the last two: from the step a pose timed t1 is taken at, the entity moves
+// from the one before it (t0) toward it, reaching it t1 - t0 world seconds later (its angles along
+// the shorter arc, its speed and steer between the two), and holds there if the next is late. So
+// poses that arrive one tick of the outside simulation apart are drawn smoothly, a tick behind.
+// A pose farther than WorldVehicles::pose_jump() from the last (a respawn), the first timed pose
+// and one whose time is earlier than the last's are taken at once; one with the last's time again
+// is the same pose, and changes nothing.
+struct entity_pose {
+  double x = 0.0, y = 0.0;
+  double z = std::numeric_limits<double>::quiet_NaN();
+  double heading = 0.0, pitch = 0.0, roll = 0.0;
+  double speed = 0.0, steer = 0.0;
+  double time = std::numeric_limits<double>::quiet_NaN();
+  bool rear_axle = false;
+};
+
+// One entity's pose in a batch (WorldVehicles::set_poses).
+struct entity_pose_update {
+  std::uint64_t id = 0;
+  entity_pose pose;
+};
+
+// A packed pose value's records (`entities.poses`, `<poses table>.poses`), one a line (or
+// separated by ';'): the entity's key (its id in `entities.poses`; in a table its entry's key, its
+// id or its name; no spaces, commas or ';'), then x y z heading pitch roll speed steer time,
+// numbers as text ("nan" where z or the time is not given), and `rear` last for a rear axle's
+// (x, y). Text, so a relay carries it.
+// pack_poses writes them (17 significant digits, a pose round-trips exactly); parse_poses reads
+// them, skipping a record that is not one (false when any was skipped).
+std::string pack_poses(const std::vector<std::pair<std::string, entity_pose>> &records);
+bool parse_poses(const std::string &text, std::vector<std::pair<std::string, entity_pose>> &out);
+
 // A wheel as it is drawn, in its vehicle's chassis box's frame (m from the box's centre: x
-// forward, y left, z up): its centre, its steering angle (rad, + left), and whether it is on the
-// ground. Front to back by axle, each axle's left wheel first.
+// forward, y left, z up): its centre, its steering angle (rad, + left), whether it is on the
+// ground, and how far it has rolled about its axle (rad in (-pi, pi], + forward; a `pose`
+// entity's, at its pose's speed; 0 on the plants). Front to back by axle, each axle's left wheel
+// first.
 struct entity_wheel {
   double x = 0.0, y = 0.0, z = 0.0;
   double steer = 0.0;
   bool down = true;
+  double spin = 0.0;
 };
 
 // An entity as it is now.
@@ -202,7 +269,9 @@ struct entity_info {
   double reach = 0.0;                // m from its goal that counts as there
   bool reached = false;              // at its goal (nav@1 then draws another, unless held)
   std::string plant;                 // jolt, dynamic, dynamic4w, kinematic or dynamicboat (as
-                                     // spec.plant)
+                                     // spec.plant; a `pose` entity's is its look's alone)
+  std::string fleet;                 // the fleet it was laid out in (start: fleet:), "" none
+  int rally = -1;                    // its team's rally point in its fleet, -1 none
   // Its chassis's contacts over the physics steps since the navigator's last tick (each step's
   // contact events, begun or, when the scene's physics reports them, persisting): with the
   // world's bodies other than the ground (buildings, walls, props), and with another vehicle. A
@@ -212,6 +281,11 @@ struct entity_info {
   // The command its plant took on the last navigator tick: rad and m/s^2, as entity_intent's.
   double command_steer = 0.0, command_accel = 0.0;
   entity_intent intent; // as of the last navigator tick
+  // A `pose` entity: the pose its chassis is at after the last step (between two timed poses,
+  // where it is drawn), with x, y, z and the angles its chassis's centre's; and whether it has had
+  // one (it is not placed before its first).
+  entity_pose pose;
+  bool posed = false;
 };
 
 // The navigator's drive on an entity's last tick, as a twin replays it: the coefficients its
@@ -362,6 +436,29 @@ public:
   void set_intents_key(std::string key);
   const std::string &intents_key() const;
 
+  // A `pose` entity's pose (entity_pose), from now until the next: any thread may call these. It
+  // is taken at the next physics step, after the pose keys. False for an id that is not a `pose`
+  // entity, or a pose whose x, y, angles, speed or steer are not finite. set_poses() sets many
+  // under one lock and returns how many it took; pose() is the last one given (false: none yet).
+  bool set_pose(std::uint64_t id, const entity_pose &pose);
+  std::size_t set_poses(std::span<const entity_pose_update> poses);
+  bool pose(std::uint64_t id, entity_pose &out) const;
+  // A table of poses beside the entities' own keys (world: vehicles: poses:): an absolute state
+  // path whose `<path>.<key>.pose.*` places the entity `<key>` names (its id, its name when that is
+  // a state name, or the entry it was spawned from), as `entities.<id>.pose.*` does, and whose
+  // `<path>.poses` is a packed value of many (pack_poses). An entry that names an archetype
+  // (`<path>.<key>.archetype`, with `name`, `team`, `color` and `color2` beside it) spawns a `pose`
+  // entity of it, and its removal (or an empty archetype) removes that entity: so a server
+  // document that publishes the table puts the entities it simulates in every client's world.
+  // "" none.
+  void set_poses_key(std::string key);
+  const std::string &poses_key() const;
+  // How far (m) a pose may be from the last one for the entity to move there along the way (over
+  // a step, or between two timed poses); a farther one is taken at once, as a respawn. 20 m by
+  // default; not finite or <= 0 throws std::invalid_argument.
+  void set_pose_jump(double metres);
+  double pose_jump() const;
+
   // The scene's wind (scene_wind.h, O14), or null. A jolt vehicle feels it in physics already
   // (its aero drag reads the air's velocity, the world's wind field). The kinematic plant (nav's
   // bicycle and a kinematic box) and the dynamic models (their own integrators, the box following
@@ -373,13 +470,16 @@ public:
   void set_wind(std::shared_ptr<const physics::flow_velocity> wind);
 
   // Read the request keys: the selected archetype and settings (its keys follow), a spawn, a
-  // removal, a clear.
+  // removal, a clear; and the poses table's entries, spawning and removing the entities they name.
   void poll();
-  // Around each physics step. Before it: every k-th (k = nav's tick / the step) runs the
-  // navigators' tick, which commands every vehicle for the steps until the next; that tick reads
-  // the intent keys first (an intent key's change replaces that entity's intent, as set_intent()
-  // does). Then the dynamic models' substep, and the kinematic boxes a step along the bicycle's
-  // path. After it: the dynamic models take back what the step's contacts did.
+  // Around each physics step. Before it: the `pose` entities' poses (their keys, the packed
+  // values, then set_pose's), each chassis moved to where it is at the step's end; then every k-th
+  // (k = nav's tick / the step) runs the navigators' tick, which commands every vehicle for the
+  // steps until the next; that tick reads the intent keys first (an intent key's change replaces
+  // that entity's intent, as set_intent() does). Then the dynamic models' substep, and the
+  // kinematic boxes a step along the bicycle's path. After it: the dynamic models take back what
+  // the step's contacts did. The `pose` entities need no grid: they are placed at their first
+  // pose, on the world's ground when it has one.
   void before_step();
   // After it, too: the step's contacts, counted on the vehicles they touch.
   void after_step();
@@ -452,6 +552,21 @@ public:
   // Empty for an id that is not a placed entity.
   std::vector<entity_wheel> wheels(std::uint64_t id) const;
   std::size_t size() const;
+
+  // Fleets (world: vehicles: start: entries with fleet:, spawn_starts): their names in the
+  // document's order. A fleet is laid out once the world's grid exists; its keys are
+  // `vehicles.fleets.<name>.*` (rally points, restart and reseed requests, its counts).
+  std::vector<std::string> fleets() const;
+  // Fleet `fleet`'s rally point `team` (0 to rally.count - 1): where it is, false when there is
+  // none (no such fleet or team, or not laid out yet).
+  bool rally(const std::string &fleet, int team, double &x, double &y) const;
+  // Moves it (held to the grid): its team's vehicles drive there. As writing
+  // vehicles.fleets.<fleet>.rally.<team>.x and .y.
+  bool move_rally(const std::string &fleet, int team, double x, double y);
+  // Lays fleet `fleet` out again, every vehicle back to a start: from its seed (`reseed` false),
+  // or from the next one. As changing vehicles.fleets.<fleet>.restart.request or
+  // reseed.request.
+  bool restart_fleet(const std::string &fleet, bool reseed);
   // Bumps whenever a chassis comes or goes (a spawn, a removal, a new grid, a restart): a view
   // binds its drawings to the chassis again.
   std::uint64_t revision() const;

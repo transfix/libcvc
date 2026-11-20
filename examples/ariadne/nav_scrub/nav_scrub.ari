@@ -4,8 +4,10 @@
 #
 #   nav_scrub nav_scrub.ari --component-path <repo>/src/cvc/ariadne
 #
-# - Scrub: the checkpoint (a combo, a slider, Previous and Next, or a click on a chart), the
-#   deployed metric against the step with step 0's dashed, and the table, one row per checkpoint.
+# - Scrub: the plant (the Jolt Humvee, which stops against a building, or nav's kinematic bicycle,
+#   which drives through one), the checkpoint (a combo, a slider, Previous and Next, or a click on
+#   a chart), the deployed metric against the step with step 0's dashed, and the table, one row per
+#   checkpoint.
 # - Training: a curve from the training history (Curve picks it), with the pick marked.
 # - Episode and Simulation: the two runs' time (libcvc's sim transport, a Position slider).
 # - Stats and Ledger: step 0 (blue) and checkpoint k (orange) at the play head.

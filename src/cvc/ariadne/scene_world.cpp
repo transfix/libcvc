@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/data.h>
 #include <cvc/ariadne/scene.h>
@@ -317,6 +318,7 @@ struct SceneWorld::impl {
   std::string on_sig;      // what the world on was made from at the last rev
   std::string refused;     // a source key's value that names no world, warned about once
   std::string enabled_key; // <stats_key>.enabled, or ""
+  std::string hash_key;    // <stats_key>.hash, or "": "1" publishes the state hash
   std::deque<double> step_history;
   // The vehicles (bind_vehicles), on the grid `ground_grid` of the world on.
   std::unique_ptr<WorldVehicles> vehicles;
@@ -516,6 +518,30 @@ struct SceneWorld::impl {
   }
 
   // Swap node t's bodies for its colliders' current geometry.
+  // A data node's dataset, when it is ready and new (its first load, a reload, a replacement, a
+  // generated world's Regenerate): its colliders, a revision on. False when there is nothing new.
+  bool take_dataset(tracked &t) {
+    if (t.data_path.empty() || !app)
+      return false;
+    cvc::state &root = cvc::state::instance(*app);
+    cvc::state *node = root.findThroughLinks(t.data_path);
+    if (!node)
+      return false;
+    const std::string store = node->fullName();
+    cvc::state *status = root.findDescendant(store + cvc::state::SEPARATOR + "status");
+    if (!status || status->value() != "ready")
+      return false;
+    cvc::state *rev = root.findDescendant(store + cvc::state::SEPARATOR + "rev");
+    const std::string r = rev ? rev->value() : std::string();
+    if (store == t.target && r == t.rev)
+      return false;
+    t.target = store;
+    t.rev = r;
+    t.colliders->geometry = dataset_colliders(root, store, t.item, t.node);
+    ++t.colliders->revision;
+    return true;
+  }
+
   void apply(tracked &t, std::vector<std::string> *w) {
     if (t.colliders->geometry && set_in_place(t, w))
       return;
@@ -628,6 +654,7 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
   if (!stats_key.empty()) {
     out->_impl->stats = stats_key + ".stats";
     out->_impl->enabled_key = stats_key + ".enabled";
+    out->_impl->hash_key = stats_key + ".hash";
     cvc::state &enabled = cvc::state::instance(app)(out->_impl->enabled_key);
     if (enabled.value().empty())
       enabled.value("1");
@@ -676,7 +703,10 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
       impl::entry e;
       e.tracked = static_cast<int>(out->_impl->tracked_nodes.size()) - 1;
       out->_impl->entries.push_back(std::move(e));
-      if (p.colliders && p.colliders->revision > 0)
+      // A generated world's colliders now; a dataset's now too when it is already ready (a
+      // generated world's, which its node put before the world was built), else at a sync.
+      out->_impl->take_dataset(out->_impl->tracked_nodes.back());
+      if (out->_impl->tracked_nodes.back().colliders->revision > 0)
         out->_impl->apply(out->_impl->tracked_nodes.back(), warnings);
       continue;
     }
@@ -938,12 +968,14 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
   const std::function<void(const SceneNode &)> visit = [&](const SceneNode &n) {
     if (n.type == "generated_world" && n.source_data.empty()) {
       // The world runs the node: its world made now, its keys seeded as a renderer's would be.
+      // Its body is its world's dataset (publish_generated_world), as a data node's is.
       generated.push_back(std::make_unique<GeneratedWorldRuntime>(app, n, bind_prefix, warnings));
       if (n.body.present) {
         SceneBodyInput in;
         in.spec = &n;
         in.world = matrices[&n];
-        in.colliders = generated.back()->colliders();
+        in.data_path =
+            resolve_bind(bind_prefix, std::string(kDataRoot) + "." + generated_world_data_name(n));
         inputs.push_back(std::move(in));
       }
     } else if (n.type == "water" && n.body.present) {
@@ -957,6 +989,11 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
         if (g->node() == groundId) {
           const GeneratedWorldRuntime *gw = g.get();
           ground = [gw]() -> std::shared_ptr<const cvc::height_field> {
+            // The terrain the physics has: the world's dataset's.
+            const auto c = gw->colliders();
+            if (c && c->geometry)
+              if (auto t = c->geometry->terrain())
+                return t;
             const auto w = gw->world();
             return w ? w->terrain : nullptr;
           };
@@ -1047,6 +1084,7 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
     out->bind_boats(scene, bind_prefix, warnings);
     if (out->vehicles()) {
       out->vehicles()->set_intents_key(resolve_bind(bind_prefix, scene.vehicle_intents));
+      out->vehicles()->set_poses_key(resolve_bind(bind_prefix, scene.vehicle_poses));
       out->vehicles()->spawn_starts(scene.vehicle_starts, warnings);
     }
     out->bind_wind(scene, bind_prefix);
@@ -1068,6 +1106,11 @@ SceneWorld::generated_world(const std::string &id) const {
   for (const auto &g : _impl->generated)
     if (g->node() == id)
       return g->world();
+  // A renderer runs it: the world its dataset holds (publish_generated_world's `generated`).
+  if (_impl->app)
+    for (const impl::tracked &t : _impl->tracked_nodes)
+      if (t.node == id && !t.data_path.empty())
+        return dataset_generated_world(*_impl->app, t.data_path);
   return nullptr;
 }
 
@@ -1185,25 +1228,8 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
     g->tick(warnings);
   for (const auto &w : d.waters) // after the worlds: a regenerated ground is their ground
     w->tick();
-  cvc::state *root = d.app ? &cvc::state::instance(*d.app) : nullptr;
   for (impl::tracked &t : d.tracked_nodes) {
-    if (!t.data_path.empty() && root) {
-      // A dataset that is ready and new (its first load, a reload, a replacement): its colliders.
-      if (cvc::state *node = root->findThroughLinks(t.data_path)) {
-        const std::string store = node->fullName();
-        cvc::state *status = root->findDescendant(store + cvc::state::SEPARATOR + "status");
-        if (status && status->value() == "ready") {
-          cvc::state *rev = root->findDescendant(store + cvc::state::SEPARATOR + "rev");
-          const std::string r = rev ? rev->value() : std::string();
-          if (store != t.target || r != t.rev) {
-            t.target = store;
-            t.rev = r;
-            t.colliders->geometry = dataset_colliders(*root, store, t.item, t.node);
-            ++t.colliders->revision;
-          }
-        }
-      }
-    }
+    d.take_dataset(t); // a dataset that is ready and new: its colliders
     // A change timed on the clock goes in at its step (follow), unless that step has gone by.
     const std::uint64_t at = t.colliders->from_tick;
     const bool due = at == 0 || !d.follower || d.follower->last_tick() > at;
@@ -1742,6 +1768,15 @@ void SceneWorld::publish_stats() {
   // A line per vehicle: its speed, power, energy and the wheels' load.
   if (d.vehicles)
     put("vehicles", d.vehicles->stats_lines());
+  // The world's state hash (physics::world::state_hash, 16 hex digits), while <stats_key>.hash is
+  // 1: it saves the whole world, so a test or a check asks for it.
+  if (!d.hash_key.empty())
+    if (cvc::state *h = root.findDescendant(d.hash_key); h && h->value() == "1") {
+      char buf[24];
+      std::snprintf(buf, sizeof(buf), "%016llx",
+                    static_cast<unsigned long long>(d.world->state_hash()));
+      put("hash", buf);
+    }
 }
 
 } // namespace ariadne

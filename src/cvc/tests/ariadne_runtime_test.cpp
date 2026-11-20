@@ -388,6 +388,210 @@ TEST(AriadneRuntime, ColoredTextEmitsTintedLeaf) {
   EXPECT_FLOAT_EQ(mb.last_text_rgb[2], 0.3f);
 }
 
+namespace {
+// §5.26 a backend that notes each colour the core hands it: the text-colour scope around a leaf,
+// a radio's per-option colours and a backdrop's fill.
+struct ColorBackend : MockBackend {
+  static std::string fmt(const float rgb[3]) {
+    char b[64];
+    std::snprintf(b, sizeof b, "%.2f,%.2f,%.2f", rgb[0], rgb[1], rgb[2]);
+    return b;
+  }
+  std::map<std::string, std::string> text_rgb; // a coloured text's label -> its colour
+  int open_scopes = 0;
+  void text_line_colored(const char *t, const float rgb[3]) override {
+    MockBackend::text_line_colored(t, rgb);
+    text_rgb[t] = fmt(rgb);
+  }
+  void text_value_colored(const char *l, const std::string &v, const float rgb[3]) override {
+    MockBackend::text_value_colored(l, v, rgb);
+    text_rgb[l] = fmt(rgb);
+  }
+  void begin_text_color(const float rgb[3]) override {
+    ++open_scopes;
+    rec("begin_color:" + fmt(rgb));
+  }
+  void end_text_color() override {
+    --open_scopes;
+    rec("end_color");
+  }
+  IndexEdit radio(const char *l, int idx, const std::vector<std::string> &, bool) override {
+    rec(std::string("radio:") + l);
+    return {false, false, idx};
+  }
+  IndexEdit radio_colored(const char *l, int idx, const std::vector<std::string> &, bool,
+                          const std::vector<ItemColor> &colors) override {
+    std::string c;
+    for (const ItemColor &e : colors)
+      c += (c.empty() ? "" : ";") + (e.set ? fmt(e.rgb) : std::string("-"));
+    rec(std::string("radio_colored:") + l + "=" + c);
+    return {false, false, idx};
+  }
+  void begin_backdrop(const Backdrop &bd) override {
+    rec(std::string("backdrop:") + (bd.has_fill ? fmt(bd.fill) : "none") +
+        (bd.cell ? ":cell" : ""));
+  }
+  void end_backdrop() override { rec("end_backdrop"); }
+};
+} // namespace
+
+// §5.26 a text's colour from an expression: the default below the threshold, red past it, read
+// each frame as the value changes.
+TEST(AriadneRuntime, ComputedColorTurnsRedPastAThreshold) {
+  cvc::app app;
+  Runtime rt(app, "");
+  ColorBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("temp").value("50");
+  Widget t = text_bound("Temp", "temp");
+  t.color_src = "(if (> (float (state-get \"temp\")) 80) \"1,0.2,0.2\" \"\")";
+  rt.set_root(group({t}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_value:Temp=50")) << "under the threshold: the default colour";
+  EXPECT_EQ(mb.text_rgb.count("Temp"), 0u);
+  cvc::state::instance(app)("temp").value("95");
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_value_colored:Temp=95"));
+  EXPECT_EQ(mb.text_rgb["Temp"], "1.00,0.20,0.20");
+  // Nothing it reads was written: the next frame reuses the result, it does not run again.
+  const std::uint64_t ran = rt.reactive_eval_count();
+  rt.render();
+  rt.render();
+  EXPECT_EQ(rt.reactive_eval_count(), ran) << "the colour is cached on the read lane";
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+// §5.26 rows from a palette held in state: under repeat:, `{i}` picks each row's colour, in every
+// form a colour takes. A row whose key is empty is drawn in the default colour.
+TEST(AriadneRuntime, RepeatedRowsTakeTheirPaletteColor) {
+  cvc::app app;
+  Runtime rt(app, "");
+  ColorBackend mb;
+  rt.set_backend(&mb);
+  cvc::state &st = cvc::state::instance(app);
+  st("palette.0").value("1,0,0");
+  st("palette.1").value("#00ff00");
+  st("palette.2").value("c0");
+  st("palette.3").value("");
+  st("row.0").value("a");
+  st("row.1").value("b");
+  st("row.2").value("c");
+  st("row.3").value("d");
+  Widget row = text_bound("Row {i}", "row.{i}");
+  row.color_src = "palette.{i}";
+  Widget rows = group({row});
+  rows.repeat = "4";
+  rt.set_root(group({rows}));
+  rt.render();
+  EXPECT_EQ(mb.text_rgb["Row 0"], "1.00,0.00,0.00");
+  EXPECT_EQ(mb.text_rgb["Row 1"], "0.00,1.00,0.00");
+  EXPECT_EQ(mb.text_rgb["Row 2"], "0.16,0.47,0.84"); // c0, the chart's blue 0x2a78d6
+  EXPECT_EQ(mb.text_rgb.count("Row 3"), 0u);
+  EXPECT_TRUE(mb.saw("text_value:Row 3=d"));
+  // A row's colour follows its key.
+  st("palette.3").value("[0, 0, 1]");
+  rt.render();
+  EXPECT_EQ(mb.text_rgb["Row 3"], "0.00,0.00,1.00");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+  // A value that is not a colour warns once, naming the key, and draws the default.
+  st("palette.3").value("purple");
+  mb.log.clear();
+  rt.render();
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_value:Row 3=d"));
+  const std::vector<std::string> w = rt.take_reactive_warnings();
+  ASSERT_EQ(w.size(), 1u);
+  EXPECT_NE(w[0].find("palette.3 holds 'purple'"), std::string::npos) << w[0];
+}
+
+// §5.26 a radio in one colour (a scope around it), or one per option (radio_colored); a button and
+// the menu items in a colour scope, each closed right after its leaf.
+TEST(AriadneRuntime, RadiosButtonsAndMenuItemsTakeTheirColor) {
+  cvc::app app;
+  Runtime rt(app, "");
+  ColorBackend mb;
+  rt.set_backend(&mb);
+  cvc::state &st = cvc::state::instance(app);
+  st("cam.colors").value("c1;;#ff0000");
+  st("go.color").value("0.5 0.5 0");
+  Widget whole = radio("Whole", "whole", {"p", "q"});
+  whole.color_src = "(list 1 0 1)"; // three numbers: one colour
+  Widget each = radio("Each", "cam.follow", {"a", "b", "c"});
+  each.color_src = "cam.colors";
+  Widget fixed = radio("Fixed", "fixed", {"x", "y"});
+  ItemColor red;
+  red.set = true;
+  red.rgb[1] = red.rgb[2] = 0.0f;
+  fixed.option_colors = {red, ItemColor{}};
+  Widget listed = radio("Listed", "listed", {"m", "n"});
+  listed.color_src = "(list \"c5\" (list 0 0 0.5))";
+  Widget plain = radio("Plain", "plain", {"u", "v"});
+  Widget go = button("Go", "go");
+  go.color_src = "go.color";
+  Widget act = menu_action("Act", "act");
+  act = with_text_color(act, 0.0f, 1.0f, 0.0f);
+  rt.set_root(group({whole, each, fixed, listed, plain, go, menu("M", {act})}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_color:1.00,0.00,1.00"));
+  EXPECT_TRUE(mb.saw("radio:Whole"));
+  EXPECT_TRUE(mb.saw("radio_colored:Each=0.92,0.41,0.20;-;1.00,0.00,0.00"));
+  EXPECT_TRUE(mb.saw("radio_colored:Fixed=1.00,0.00,0.00;-"));
+  EXPECT_TRUE(mb.saw("radio_colored:Listed=0.00,0.51,0.00;0.00,0.00,0.50"));
+  EXPECT_TRUE(mb.saw("radio:Plain"));
+  EXPECT_TRUE(mb.saw("begin_color:0.50,0.50,0.00"));
+  EXPECT_TRUE(mb.saw("button:Go"));
+  EXPECT_TRUE(mb.saw("begin_color:0.00,1.00,0.00"));
+  EXPECT_TRUE(mb.saw("menu_action:Act"));
+  EXPECT_EQ(mb.open_scopes, 0) << "every colour scope closed";
+  // Each scope holds exactly its one leaf.
+  const auto at = [&](const std::string &c) {
+    return std::find(mb.log.begin(), mb.log.end(), c) - mb.log.begin();
+  };
+  EXPECT_EQ(at("button:Go"), at("begin_color:0.50,0.50,0.00") + 1);
+  EXPECT_EQ(at("menu_action:Act"), at("begin_color:0.00,1.00,0.00") + 1);
+  EXPECT_EQ(mb.log[static_cast<std::size_t>(at("button:Go") + 1)], "end_color");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+// §5.26 a group's fill: a grid's cell says it is one (the backend fills the whole cell); a fill
+// from a key under repeat:, from an expression that gives none (no backdrop that frame), and
+// written in the document.
+TEST(AriadneRuntime, GroupFillInAGridCell) {
+  cvc::app app;
+  Runtime rt(app, "");
+  ColorBackend mb;
+  rt.set_backend(&mb);
+  cvc::state &st = cvc::state::instance(app);
+  st("heat.0").value("1,0,0");
+  st("heat.1").value("0,0,1");
+  st("hot").value("0");
+  Widget cell = group({text("c{i}")});
+  cell.repeat = "2";
+  cell.background.color_src = "heat.{i}";
+  Widget maybe = group({text("maybe")});
+  maybe.background.color_src = "(if (= (state-get \"hot\") \"1\") \"c7\" nil)";
+  Widget grid = group({cell, maybe});
+  grid.layout.kind = LayoutKind::Grid;
+  grid.layout.col_widths = {Track{Unit::Px, 80.0f}, Track{Unit::Px, 80.0f}};
+  Widget loose = group({text("loose")});
+  loose.background.color.set = true;
+  loose.background.color.rgb[0] = 0.25f;
+  loose.background.color.rgb[1] = 0.5f;
+  loose.background.color.rgb[2] = 0.75f;
+  rt.set_root(group({grid, loose}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("backdrop:1.00,0.00,0.00:cell"));
+  EXPECT_TRUE(mb.saw("backdrop:0.00,0.00,1.00:cell"));
+  EXPECT_TRUE(mb.saw("backdrop:0.25,0.50,0.75")) << "outside a grid: not a cell";
+  EXPECT_EQ(mb.times("end_backdrop"), 3) << "none for the cell whose colour is nil";
+  st("hot").value("1");
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("backdrop:0.89,0.29,0.28:cell")); // c7, 0xe34948
+  EXPECT_EQ(mb.times("end_backdrop"), 4);
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
 TEST(AriadneRuntime, ReconcileSwapAppliedAtRenderBoundary) {
   cvc::app app;
   Runtime rt(app, "");
@@ -4674,6 +4878,11 @@ std::string spinner_line(const MockBackend &mb, const std::string &label) {
 TEST(AriadneAction, NavStepAsAnAsyncFunctionReturnsItsResult) {
   namespace se = cvc::state_exec;
   cvc::app app;
+  // An await is charged its call's time (docs/STATE_EXEC_EXCEPTIONS.md 3.8): no cap to run out on
+  // a loaded machine. On a loaded Debug runner the kernel can run past the defaults (0.1 s, 5000
+  // steps): the caps kill the action, and nav.result is never set.
+  cvc::state::instance(app)("ariadne.limits.action_max_steps").value(std::string("0"));
+  cvc::state::instance(app)("ariadne.limits.action_max_time").value(std::string("0"));
   app.computePool();
   app.exec_scheduler();
   app.exec_async_host(); // warm them on THIS thread
@@ -4701,9 +4910,14 @@ TEST(AriadneAction, NavStepAsAnAsyncFunctionReturnsItsResult) {
   rt.render();
   rt.drain();
   mb.button_click = false;
-  const bool resumed =
-      pump_until(rt, [&] { return !cvc::state::instance(app)("nav.result").value().empty(); });
-  ASSERT_TRUE(resumed) << "the parked action never resumed";
+  const bool resumed = pump_until(
+      rt, [&] { return !cvc::state::instance(app)("nav.result").value().empty(); }, 30000);
+  if (!resumed) {
+    std::string why;
+    for (const std::string &w : rt.take_reactive_warnings())
+      why += "\n  " + w;
+    FAIL() << "the parked action never set nav.result" << (why.empty() ? " (no warning)" : why);
+  }
   EXPECT_EQ(cvc::state::instance(app)("nav.result").value(), "86");
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
 }

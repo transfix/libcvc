@@ -97,7 +97,8 @@ has the same table for every host, with the settings that apply and when they ar
 ### 2.1 The reactive READ lane
 
 Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `bind` /
-`text`, `tooltip`, `options`, `repeat.count` — run in a long-lived stackless evaluator
+`text`, `tooltip`, `options`, `repeat.count`, a computed `color` (§5.26) — run in a long-lived
+stackless evaluator
 (`class ReactiveEngine`, [`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)) over a
 **default-deny** environment:
 
@@ -168,7 +169,7 @@ The frame budget resets at the top of each frame, so *N* widgets cannot jointly 
 frame. Once the aggregate is spent, the rest are skipped for that frame only:
 
 - Each skipped expression keeps the value it had last frame: a `visible_when`, an `enabled_when`,
-  a computed `bind:` or text, a `tooltip`, combo `options` or a `repeat:` count.
+  a computed `bind:` or text, a `tooltip`, combo `options`, a `repeat:` count or a `color:`.
 - One that never ran yet takes its fail-safe value instead: hidden, disabled, empty or 0.
 - A skip isn't the document's fault, so it is never a reactive warning (`take_reactive_warnings`,
   the web pages' `ariadneWarning`). A real 10-post feed decoding pictures in wasm can spend the
@@ -553,6 +554,193 @@ cursor: x=2500
 The core parses a series only when its text changes, so a chart costs a string compare a frame
 while its data is still.
 
+A `heatmap:` widget draws a grid of cells: each one's value as a colour from a ramp, with an
+optional text, corner mark and tooltip. Hovering and clicking report the cell. Use it for a
+confusion matrix, an adjacency or quality matrix, or a schedule grid. A document can check for it
+with `(has? "heatmap")`. The cells come from a subtree at `bind`:
+
+```yaml
+- heatmap: Link quality
+  bind: links                  # the subtree (below)
+  ramp: [[0, "#c0392b"], [12.5, "#e6a23c"], [25, "#27ae60"]]
+  cell_size: 28                # px, each cell's side (the default)
+  gap: 2                       # px between cells (the default)
+  labels: {rows: true, cols: true}   # draw the subtree's labels (the default); `labels: false`
+  legend: bottom               # none (the default) | bottom | right
+  mark_color: "#ffffff"        # a marked cell's corner triangle (the default)
+  tooltip: "{row_label} to {col_label}: {v}"   # else each cell's tip
+  on_click: (state-set "view.pair" (get-attr event "row"))
+  pick: sel                    # a click writes sel.row, sel.col, then sel = "row,col"
+  on: (state-set "view.open" "1")              # after the pick's writes
+```
+
+- **The subtree** holds `rows` and `cols`, and `cells.<r>.<c>` with `v` (the value), `text` (drawn
+  on the cell), `mark` (truthy: a small triangle in the cell's top-right corner) and `tip`. A cell
+  with no children is its value alone (`cells.0.1: 12.5`). A cell with no value (empty, `nan`, or
+  absent: a matrix's diagonal) is drawn empty, in the frame colour. `row_labels` and `col_labels`
+  are optional: children `row_labels.<i>`, or comma-separated text (`a,b,c`). A side past 256
+  cells draws its first 256 and warns.
+- **`ramp:`** is a list of `[value, colour]` stops, sorted by value, each colour `"#rrggbb"`,
+  `"#rgb"`, `c0` to `c7` or `[r, g, b]` (0 to 1), as §5.26 reads one. Between two stops the colour is mixed in proportion. Below the
+  first and above the last it is that end stop's colour (clamped). With no ramp every value is one
+  grey. The core colours the cells, so every backend shows the same colours.
+- **The tooltip** for the hovered cell is the document's `tooltip:` with the cell's tokens filled
+  in: `{row}`, `{col}`, `{v}` (six significant digits; empty with no value), `{text}`,
+  `{row_label}`, `{col_label}` and `{mark}` (1 or 0). One that is an expression after that is
+  computed on the read lane (`(state-get "links.detail.{row}.{col}")`). With no `tooltip:` it is
+  the cell's `tip`, and a cell with neither has none.
+- **`on_click:` and `on_hover:`** run per cell: a click on a cell, or each frame the pointer is
+  over one. Their program gets the cell as `event`: `row` and `col` (numbers), `v` (a number, or
+  nil with no value), `text`, `row_label`, `col_label` and `mark` (1 or 0), as
+  `(get-attr event "row")`. A gap between cells is no cell. `on_hover_end:` is the widget's, with no
+  `event`.
+- **`pick:`** writes a clicked cell to `<pick>.row` and `<pick>.col`, then `"row,col"` to `<pick>`
+  itself, so one key's watcher sees both. Then `on:` runs, with the cell as `event`. The cell
+  `<pick>` names is outlined. Without `pick:`, `on:` never runs (the loader warns): use `on_click:`.
+- **It reads the subtree only when something in it was written.** A write at or under `bind`, or
+  to one of its ancestors' own values, moves the read lane's write generation for it. Until one
+  does, a frame reads nothing but the pick's two keys. A subtree reached through a `link:` hole is
+  read every frame, because a write to the link's target is signalled under the target's path.
+  `HeatmapSpec::revision` moves with each read, so a backend can keep what it derives from the
+  cells until then.
+- **ImGui** draws the column labels centred above their columns (cut to a cell's width), the row
+  labels right-aligned at the left, the cells and their text (black or white, whichever reads on
+  the cell), the marks, an outline round the picked cell and a fainter one round the hovered cell,
+  and the legend: the ramp as a bar with its stops' values, under the grid (as wide as it, at
+  least 120 px) or at its right (as tall as it, the high values up). The whole widget is one item,
+  so the tooltip attaches to it.
+- **A terminal** (FTXUI, tvision) draws each cell as columns on the ramp's colour, as wide as the
+  widest text (2 to 8), one column apart when `gap` > 0, and one row tall. A mark ends the cell in
+  `◥` (`*` without block glyphs) in the mark's colour, a cell with no value is a dim `·`, and the
+  picked cell's text is bold and underlined. The legend is a bar of colour under the grid with the
+  stops' values below it (a terminal has no room beside it, so `right` draws there too). The
+  pointer's cell is the hovered one, with its tooltip on the tooltip line. With a `pick:` or an
+  `on_click:`, the heatmap takes focus (Tab, a click). The arrows move a cursor cell, drawn
+  inverted, which is then the hovered one, and Enter or Space clicks it. Without its colours (the
+  cells and the bar are coloured spaces, the bar drawn here as `█`), the test's 2 x 2 heatmap
+  with a ramp from 0 to 20, a marked "ok" cell and a cell with no value is:
+
+```text
+Links
+   x   y
+a     ok◥
+b      ·
+  ████████████████
+  0      10     20
+```
+
+- **Any other backend** prints the label, a line of column labels, then a line for each row: its
+  label and each cell's text (else its value), `*` after a marked one and `.` for no value. With a
+  legend, a last line lists the stops (`legend: 0 #c0392b, 12.5 #e6a23c, 25 #27ae60`).
+
+A `settings:` widget edits every key under a state subtree, so a panel of settings needs no
+widget per key. Each key's editor comes from its metadata: the comment and properties a binding
+writes on its keys (`cvc/state/state_key_meta.h`'s `access`, `unit`, `min` and `max`, and
+`cvc/core/param_table.h`'s `type`, `choices` and `default`). A document checks for it with
+`(has? "settings")`.
+
+```yaml
+- settings: Tuning             # the label, drawn above it ("" or type: settings for none)
+  root: sim                    # a state path, or a list of them
+  filter: ["nav.*", "-nav.debug*"]   # optional: keys whose path under the root matches
+  groups:                      # optional: the order and names of the branches
+    - nav: Navigation
+    - world: {title: The world, help: what it is made of, open: true}
+    - plant                    # only its place in the order
+  search: true                 # a search box (its text kept at tree.<id>.search)
+  readouts: false              # leave out the read-only keys (default true)
+  open: true                   # every group open at first (default false)
+  commit: release              # sliders write once, at the release (default live)
+  on: tuned                    # after each committed write and each reset
+```
+
+- **The editor a key gets**, in this order:
+  - a read-out (its value and unit) for a read-only node or `access: telemetry`;
+  - a combo for `choices` (comma-separated);
+  - for a `type` (`param_table`'s):
+    - a checkbox for `bool`;
+    - an integer for `int`;
+    - a number for `number`;
+    - a text field for anything else.
+  - Without a `type`, a key with a `unit`, or with a `min` and a `max`, is a number:
+    - `state_key_meta` stores a unit of `""` (a count or a flag) as no unit, so with no unit it is
+      a checkbox over 0..1 and an integer otherwise;
+    - a unit of `tick` is an integer, shown as ticks;
+    - any other unit is a number, its unit shown after it (a ratio, `1`, shows none).
+  - A number whose value is not a number, and a key with neither a type nor a range, is a text
+    field.
+- **The editors**:
+  - An integer or a number with a `min` and a `max` is a slider over that range. The range is a
+    recommendation: ctrl+click an ImGui slider to type any value.
+  - The slider moves by ratio when the key's `scale` property is `log`, or when the range is
+    positive and spans 100x or more (`scale: linear` says not).
+  - Without a range it is a drag field (ImGui) or a text field (a terminal).
+  - A text field is applied on Enter; leaving it without one puts the value back.
+  - A value the key's kind does not take (a word for a number) is not written, and warns once.
+- **Groups.** Each branch under the root is a group:
+  - in ImGui a collapsing header, and a tree node below that;
+  - at each level the keys come first, in name order (a header has no end, so a key drawn after
+    one would read as under it), then the branches;
+  - `groups:` lists branches (`a.b` for a nested one) to put first among their siblings, in its
+    order, with a `title`, a `help` (the header's tooltip; else the branch's comment) and `open`;
+  - the rest follow in name order, under their names;
+  - a branch with nothing shown under it is left out, and a hidden node with everything under it.
+  - With several roots each root is a group of its own (a root that is one key is a row), and
+    the paths below start with the root as written (`nav.vehicle.vmax`).
+- **`filter:`** patterns match a key's path under the root:
+  - a pattern with `*`, `?` or `[...]` is a glob (`*` crosses dots), any other a substring;
+  - a key passes when it matches one of the patterns and none that start with `-`.
+- **The search box** narrows the list by words in a key's path or description, in any case; a
+  `-word` leaves out what has it. While a search or a filter narrows the list, every group is
+  drawn open.
+- **Reset.** A key whose value is not its default shows a reset, which writes the default back.
+  - The default is the key's `default` property, else the value the editor first saw it hold.
+  - A group with such keys shows a "reset all", which puts back each key under it.
+  - A read-out has no reset.
+- **The tooltip**, on a key's name and editor: its path, its description (the comment, else `doc`),
+  its unit, the recommended range, its default, and when a change applies (from `access`:
+  `knob` live, `build` when next built, `command` an input, `telemetry` read-only).
+- **Writes** go through the path every bound widget's do: a slider writes as it moves (once at
+  the release with `commit: release`), the other editors on their commit, and `on:` runs after
+  the commit, so the key's watchers and `on:` handlers see the new value.
+- **It reads its subtree again only when something under a root is written**: a value, a comment,
+  a property, a key added or taken away (the tree root's change signal, counted per root), or the
+  search changes. An editor at rest reads no state. A key reached through a link is read, but a
+  write to the link's target is not seen until something under the root changes.
+  - It lists at most 2000 keys and 32 levels, warning once when it cuts a subtree there.
+- **ImGui** draws each key as a row: its name, its editor from 42% of the width to the reset's
+  place, and the reset. A header's "reset all" sits at the right of its line.
+- **A terminal** (FTXUI, tvision; any backend without its own) draws a flat list of its own
+  widgets:
+  - each group is a `[title]` line, a renamed one by its title and the rest by their paths, with
+    a `reset all` button while a key under it can be reset;
+  - each key is its editor, labelled with its path under the root, with a `reset` button beside a
+    changed one.
+
+```text
+name: [alpha]
+speed: 3 m/s
+[Navigation]
+[ reset all ]
+nav.mode: < b >
+[x] nav.on
+nav.vmax ██████▏              12.5 m/s
+[ reset ]
+[world]
+world.seed █▎                   7
+```
+
+Two keys from the C++ side, described the way a binding describes its own:
+
+```cpp
+const cvc::state_key_meta kSim[] = {
+    {"vmax", "knob", "m/s", 0.5, 40.0, "the top speed"},
+    {"gain", "knob", "1", 0.01, 10.0, "the steering gain"},   // 1000x: a slider by ratio
+};
+cvc::describe_state_keys(app, "sim", kSim);
+// settings: with root: sim shows a slider for each, with its unit, range and description.
+```
+
 A `spinner:` widget says something is under way when there is no amount to show (a request, a
 search). The host turns it by its own frame clock (`Runtime::frame_clock`), not by state, so it keeps
 moving while the document's programs are parked: a program waiting on `http-get` still has a
@@ -844,17 +1032,28 @@ the loader only *captures*. The host wires them:
   bound where its camera reads them: arigl's are `viewers.main.camera.settings.mouse_look`
   (*Drag to look* or *Mouse look*), `primary_drag_steers` (in a room: *Drag the floor to face
   it*), `mouse_sensitivity`, `invert_pitch` and `invert_yaw`, and *Camera distance*, the
-  camera's `orbit.distance` (the wheel changes it too). Under mouse look a click on the scene
+  camera's `orbit.distance` (the wheel changes it too), shown only in Orbit (Fly, Track and Map
+  have no orbit distance; `MouseControls::distance_when`) and on a log scale from 0.5 m to 50 km
+  (`distance_log`), since framing a world sets it in kilometres; a room keeps 1.5-40 m. Under
+  mouse look a click on the scene
   captures the pointer and the mouse turns the view with no button held, until *Free the mouse*
   (Escape; in a browser, Escape always ends its pointer lock). In a browser the page takes its
   pointer lock inside that press itself (the cursor goes, and the view keeps turning past the
   screen's edge), asking for the mouse's raw motion where the browser has it: a press on a
   window is the UI's, judged by where the press lands against the windows the overlay drew
   last frame (`CameraController::setUiRegions`), so a quick move onto a window and a click
-  there never takes the pointer. Fly (Tab) is a spectator camera: the mouse turns the view with
-  the pointer captured, W A S D move along it, Space and Left Ctrl up and down, Left Shift
-  faster, at speeds per second of wall time (arigl's camera moves by the time between frames,
-  not its nominal 1 / 120 s step). In a browser the toggle key's own keydown takes the pointer
+  there never takes the pointer. Fly (Tab) is a spectator camera, and it moves as a Quake
+  spectator does (`CameraController.h`, reimplemented from a behavioural spec of ezQuake's
+  spectator movement): the mouse turns the view at once with the pointer captured; W A S D move
+  along it (pitch included; strafing level), Space and Left Ctrl along the world's up, Left Shift
+  four times faster. The eye has a velocity: it reaches the move speed in about 0.15 s and glides
+  to a stop in about 0.4 s when the keys come up (`settings.fly_accelerate`, 10 a second;
+  `settings.fly_friction`, 6), a diagonal goes up to 1.25 times faster, and a key tapped between
+  two frames still nudges it. Speeds are per second of wall time (arigl's camera moves by the
+  time between frames, not its nominal 1 / 120 s step), stepped at no more than 1 / 77 s, so the
+  flight is the same at any frame rate. Framing a scene sets the move speed to an eighth of its
+  diagonal a second, at most 10 m/s (it was the eighth alone: 212 m/s over terrain_lab's world);
+  the wheel scales it in Fly. Orbit's first-person mouse look moves the same way. In a browser the toggle key's own keydown takes the pointer
   lock, where the browser grants it; until it holds, a drag turns the view and a bare move of the
   cursor does not, and after Escape a click on the scene takes it again. In Orbit (and Map) the
   same keys and the arrows slide the view across the ground, the same share of the view a second
@@ -1498,9 +1697,17 @@ topsides over a blue stripe at the waterline and a dark wet bottom, with a teak 
 `model:` (a file, or a name found where the vehicle models are, as `Humvee.glb` is; `.glb` is
 tried after a bare name; `none` draws the hull), it is that model instead, fitted as a vehicle's
 file look is (`fit_vehicle_geometry`: the axis a file stands on, Y-up or Z-up, is up, its length
-fitted to the boat's length overall, its keel on the hull's bottom). The `tactical` preset's model is `TacticalBoat`
-(the `vehicle-tactical-boat` package), and its hull when that is not installed; a `model:` that is
-not found warns. The water
+fitted to the boat's length overall, its keel on the hull's bottom). `model: { data: NAME, file:
+FILE }` takes FILE out of the package of the document's `data:` entry NAME (cvcGL's
+`node_model_look`; the same as a vehicle's `look: { data, file }`): the boat shows its hull while
+the package loads and the model goes in in its place once it has (`vehicle_model_state`); when the
+package cannot load (no network, no such package) a local install of the file by its name is used,
+else the hull stays. `terrain_lab.ari`'s launch pulls `TacticalBoat.glb` from
+`cvcpkg://cy-pca/vehicle-tactical-boat` this way (a lazy `data:` entry, path
+`share/cvc-scenes/shared`), so the web gallery fetches it from cvcpkg.org at run time rather than
+shipping it (its arigl may reach `https://cvcpkg.org`, `--net-allow`). With no `model:`, the
+`tactical` preset's model is `TacticalBoat` when the `vehicle-tactical-boat` package is installed
+locally, and its hull when it is not; a `model:` that is not found warns. The water
 node keeps its water out of the boats nearest the camera (at most four, each the largest box inside
 its hull at its waterline, `BoatRuntime::cutout`, between its bottom and its sheer, passed to the
 water's shaders as uniforms, not a texture), its boats
@@ -1759,6 +1966,20 @@ scene:
   - any other mesh as its convex hull (moving), or itself (static).
 
   `box` and `sphere` on another mesh fit its bounds, and the node's scale is baked into the shape.
+- **Drawn as a model.** A geometry node's `model:` draws a model in place of what it draws, fitted
+  into the box its own geometry spans: stood upright (a `.glb`/`.gltf` file's +Y up turned to +Z;
+  any other file is taken as +Z up) and scaled on each axis to fill the box, its base colour
+  texture on it untinted. Its body keeps the node's own shape: the model goes in from a scene tick
+  after the bodies are made, so terrain_lab's crates float as their boxes and are drawn as the
+  crate. `model:` is `{ data: NAME, file: FILE }`, FILE in the package of the document's `data:`
+  entry NAME (loaded when the scene is realized; the node draws its own geometry until the model
+  is ready, and keeps it when the package cannot load and no local install of the file is found);
+  or a file; or a model's name found where the vehicle models are installed (`cvc-scenes/shared`,
+  `<name>.glb` too). A model that cannot be had warns and leaves the node as it was. In
+  terrain_lab: `data: { crate: { uri: cvcpkg://cy-pca/prop-wooden-crate, path:
+  share/cvc-scenes/shared, load: lazy } }` and, on each crate, `model: { data: crate, file:
+  WoodenCrate.glb }` (cvcGL's `node_model_look`, `boxed_model_state`, `set_boxed_model`,
+  [`vehicle_view.h`](../inc/cvc/gl/ariadne/vehicle_view.h)).
 - **Placement.** Each body starts at its node's world pose, composed from the scene's transforms
   (a nested node's included).
 - **Stepping.** The world runs on `app.world_clock()`, driven as `clock: {}` would drive it, and
@@ -1799,9 +2020,10 @@ scene:
   so headless the scene's world runs the node itself: it seeds the `world.*` keys, makes the
   world as the document says, publishes `world.stats.*`, and makes a new world at once on
   Regenerate (or on an edit while `world.auto` is on). Drawn, cvcGL's node makes it as a sliced
-  task and hands over its colliders. Either way a new world's colliders replace the old ones.
-  `SceneWorld::generated_world(id)` is the world a headless host made: its raster, roads,
-  buildings and water.
+  task. Either way each world is the node's dataset `data.<id>` (§5.17, made datasets): the
+  world written as a version 2 city bundle and read back, so the body is that dataset's world, as
+  a data node's is, and a new world replaces it in place. `SceneWorld::generated_world(id)` is
+  the world as made, headless or drawn: its raster, roads, buildings and water.
 - **A data node's body.** `body: {}` on a `source: { data }` node collides with its dataset's
   world, terrain or geometry once the dataset is ready, and again each time it changes. The
   scene's world takes them, headless or drawn, and it needs the scene's `physics:` block.
@@ -1879,8 +2101,8 @@ scene:
 
   - **Archetypes.** Each names its plant, its body (a preset, with `mass`, `max_speed`,
     `max_accel`, `max_decel` or `max_steer` over it), its look, the ranges a spawn's settings are
-    held to, and its controllers: `nav@1`, the navigator, `none`, or `external` (its intent
-    alone drives it).
+    held to, and its controllers: `nav@1`, the navigator, `none`, `external` (its intent
+    alone drives it), or `pose` (an outside simulation places it; below).
   - **Plants.** Every plant runs in the scene's world, on its clock, and meets its bodies (the
     buildings, the props, the other vehicles):
 
@@ -1909,7 +2131,16 @@ scene:
     without the package, is its chassis box in the entity's two colours, with a cabin and wheels.
     `look: { model: humvee }` names a model, `file:` a mesh beside the document and `asset:` a
     document asset; `fit: true` orients and scales a file as a model is; `scale:`, `yaw:` and
-    `z:` place it.
+    `z:` place it. `look: { data: NAME, file: FILE }` takes FILE out of the package of the
+    document's `data:` entry NAME (§5.17), so a model comes from cvcpkg rather than with the
+    document, e.g. `data: { humvee: { uri: cvcpkg://cy-pca/vehicle-humvee, path:
+    share/cvc-scenes/shared, load: lazy } }` with `look: { data: humvee, file: Humvee.glb }`. It is
+    fitted unless `fit: false`. The resolved look carries the entry's source and path (`uri`,
+    `subpath`), so it is whole without the document: a client fetches the same package. The view
+    asks the app's data store for the package (`vehicle_model_state`, `vehicle_view.h`) and draws
+    the box while it loads, then the model. When the package cannot load (the host's network is
+    off: `--net-allow https://cvcpkg.org`; no such package), a local install of the file by its
+    name is used (`find_vehicle_model`), else the box.
   - **Entities.** A spawn (`WorldVehicles::spawn`, or the keys below) is an entity with an id,
     an identity (a name, a team, two colours, key/value metadata), a controller and its
     settings. `nav@1` drives it from goal to goal across the world's grid (the scene's
@@ -1925,7 +2156,7 @@ scene:
     `distance`, `wheel_load`, `aero_force` and `gear` (the dynamic models give their books'
     power and energy, and an odometer), and `command.steer` / `command.accel`
     (what its plant took on the last navigator tick) with `command.by` (its controller, `intent`,
-    `blend`, or `hold`). `physics.stats.vehicles` has a line per vehicle, its plant named.
+    `blend`, `hold`, or `pose`). `physics.stats.vehicles` has a line per vehicle, its plant named.
   - **Intents.** Any entity can be steered from outside. A document, a script or a server writes
     its keys, and a C++ or Python host calls `WorldVehicles::set_intent` (`pycvc.WorldEntities`,
     below). Each navigator tick (0.06 s by default, `cvc::kSimTick`) reads them, and a change
@@ -1948,6 +2179,73 @@ scene:
     publishes the namespace (`server: publish: [drive]`), the relay replicates it, and its program
     writes `(state-set "drive.lead.intent.accel" "2")`. The C++ setter, `set_intent`,
     `clear_intent` and `intent`, may be called from any thread.
+  - **Poses: entities an outside simulation runs.** An entity with the `pose` controller is not
+    driven at all: no plant integrates it, and no navigator plans for it. Something outside says
+    where it is (a simulation of its own in the host, a server, a recorded track), and the world
+    takes it at the next physics step. Its chassis is a kinematic box in the scene's physics
+    world, moved to each pose, so it is still a part of the scene: it is drawn with its
+    archetype's look (the Humvee model or the box look) and its `entity_labels:` label, it casts
+    shadows and is picked, it pushes the dynamic bodies it meets, and the other vehicles steer
+    around it (it is one of their navigators' foreign agents). It needs no grid: it goes in at its
+    first pose (a spawn's `at:` is one) and waits, unplaced, until it has one.
+
+    | Key, under `entities.<id>.pose` | What it is |
+    |---|---|
+    | `x`, `y` | world metres: its chassis's centre (as `entities.<id>.x`), or with `ref: rear` its rear axle (as a spawn's `at:`). Both are needed |
+    | `z` | its chassis's centre; not given: standing on the ground under it, as a kinematic box stands |
+    | `heading`, `pitch`, `roll` | rad: its rotation is Rz(heading) Ry(pitch) Rx(roll); pitch + nose down, roll + right side down |
+    | `matrix` | 16 numbers, row-major (as a node's `matrix` key): its translation and rotation, in place of the six above |
+    | `speed` | m/s along its heading: listed as its speed, and its wheels roll at it |
+    | `steer` | rad, + left: its steered wheels' angle |
+    | `t` | s on the outside simulation's clock; given, the pose is drawn between the last two (below) |
+    | `ref` | `rear` (or `rear_axle`): `x`, `y` are its rear axle |
+
+    A change of any key is a new pose. Without `t` the entity is there at the end of the next
+    step. With `t` it is drawn between its last two timed poses: from the step the newer one is
+    taken at, it moves from where it is toward it, reaching it `t1 - t0` world seconds later (its
+    angles the short way round, its speed and steer between the two), and holds there if the next
+    is late. Poses that arrive one tick of the outside simulation apart are drawn smoothly, one
+    tick behind. A pose farther than 20 m from the last
+    (`WorldVehicles::set_pose_jump`) is a respawn, taken at once, and so is the first timed one
+    and one whose time went back; the same time again changes nothing. A pose entity that holds
+    still is exactly where its pose says, at rest.
+
+    For many at once there is a packed value: `entities.poses` holds a record a line, `id x y z
+    heading pitch roll speed steer t`, numbers as text (`nan` for no `z` or no `t`), and `rear`
+    last for a rear axle's point (`pack_poses` writes one, `parse_poses` reads one). Text, so a
+    relay carries it. A host calls `WorldVehicles::set_pose(id, entity_pose)` or
+    `set_poses(span<entity_pose_update>)` from any thread instead (taken at the next step, after
+    the keys); `pose(id)` is the last one given.
+
+    `world: vehicles: poses: <path>` names a table of poses, read as the entity's own keys are: by
+    id, or by name, `<path>.<id or name>.pose.*`, and its packed `<path>.poses` keyed the same way.
+    An entry that names an archetype (`<path>.<key>.archetype`, with `name`, `team`, `color` and
+    `color2` beside it) spawns a pose entity of it, named `name` (else the key), and the entry's
+    key places it whatever its name; emptying the archetype (or removing the entry) removes it,
+    and changing the archetype or the identity spawns it again. That is how a server simulates and
+    stock clients draw: a server document (or arisrvx's Python) publishes the table (`server:
+    publish: [fleet]`) and writes it each step, the relay replicates it, and each client's world
+    document, with `poses: /fleet` and the archetypes, spawns and places the entities where the
+    server has them. Over a relay, take an entity out by emptying its archetype: the relay
+    replicates a value, and a client may not see an entry's removal.
+
+    ```yaml
+    world:
+      vehicles:
+        poses: /fleet
+        archetypes:
+          humvee: { vehicle: humvee, controllers: [pose] }
+    ```
+
+    ```lisp
+    (state-set "fleet.lead.archetype" "humvee")   ; the server's program, once
+    (state-set "fleet.lead.name" "Lead")
+    (state-set "fleet.poses" "lead 12.5 4 nan 0.3 0 0 6 0.05 2.0167")   ; each step
+    ```
+
+    The world's state does not depend on frames: a pose entity's run reaches the same state hash
+    headless and drawn, and `physics.hash` set to `1` publishes it (`physics.stats.hash`, 16 hex
+    digits; it saves the whole world, so only a check asks for it).
   - **Around each other.** Vehicles steer around each other, on one plant and across plants
     (`WorldVehicles::set_avoid`, the `vehicles.avoid` key, on by default): each navigator's
     separation pushes its carrot away from every vehicle near it (the other plants' vehicles
@@ -1968,6 +2266,36 @@ scene:
     document's `init:` runs before the world is made, and the runtime ignores a spawn request
     already set when it starts (a reload would spawn again), so this is how a document, a server
     document included, populates its world. A gym's reset clears them and spawns its own agents.
+  - **Fleets.** A `start:` entry with `fleet:` (a state name) is a fleet: up to 4096 vehicles,
+    named `<fleet> 1`, `<fleet> 2`, ... (or after `name:`), laid out together once the world's
+    grid exists, the way libcvc's nav swarms are:
+
+    ```yaml
+    start:
+      - { fleet: city, archetype: humvee, plant: kinematic, count: 800,
+          spawn: opposed, seed: 7, rally: { count: 16, assign: latitude } }
+    ```
+
+    - `spawn:` `opposed` starts them in the grid's west 30 % with goals in its east 30 %;
+      `scattered` (the default) draws both anywhere free; `points` starts them at the world's
+      spawn points. `seed:` (0 by default) makes the layout, the same on every platform.
+    - `rally: { count: T }` (or `rally: T`, at most 64) makes T teams by their goals' latitude.
+      Each team's rally point is the goal nearest its band's centre, and its vehicles' goal is
+      held there (they stop at it; they do not wander). Their team is the rally point's index
+      (plus the entry's `team:`), their colour hsv(t / T, 0.74, 0.98) (`colors: hsv`, the default
+      with rally points; `colors: spawn` keeps the spawn's). Without rally points each vehicle's
+      goal is its own, held as well.
+    - Its keys are `vehicles.fleets.<fleet>.*`: `count`, `placed`, `arrived`, `teams`, `seed` and
+      `status`, and `rally.count` with `rally.<t>.x`, `.y` and `.color`. Writing a rally point's
+      `x` and `y` moves its team (held to the grid). A change of `restart.request` lays the fleet
+      out again from its seed, every vehicle back at its start; `reseed.request` from the next
+      seed. `vehicles.fleets.names` lists the fleets.
+    - `keys: summary` (a fleet's default) writes no per-entity keys for its vehicles but for those
+      `vehicles.watch` names (entity ids joined by `,`: the one a camera follows, the one a panel
+      shows) and those with an intent; `entities.ids` lists the entities with keys, and
+      `entities.count` counts them all. `keys: all` writes every vehicle's.
+    - In C++: `WorldVehicles::fleets()`, `rally()`, `move_rally()` and `restart_fleet()`, and
+      `entity_info::fleet` and `rally`.
   - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,
     `color`, `color2` as `r,g,b`, `metadata` as `key=value, ...`, `controller`, `policy`,
     `policy_sha256`, `mass` or `mass_t` (a fraction of the range), `max_speed` or `max_speed_t`,
@@ -1981,7 +2309,8 @@ scene:
   - **Drawing.** cvcGL draws each entity on its chassis, posed between steps as the other moving
     bodies are. The box look poses each wheel where its plant has it
     (`WorldVehicles::wheels`): a Jolt wheel on its suspension, a dynamic4w wheel on the ground
-    under it, the front ones steered (Ackermann's on a dynamic4w). A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
+    under it, the front ones steered (Ackermann's on a dynamic4w); a pose entity's on the ground
+    under it, steered by its pose's steer and rolled at its speed. A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
     `spin:` in degrees a second) draws the selected archetype in the spawn's colours.
   - **The panel.** `vehicle_selector.ari`: the vehicle, its stats, a preview viewport onto a
     `scenes:` entry holding a `vehicle_preview` node (its header shows one), the settings, the
@@ -1995,9 +2324,13 @@ scene:
     accel=, mode=, weight=, force=(fx, fy), force_steers=)`, `intent(id)`, `clear_intent(id)`,
     `set_goal(id, x, y)`, `set_wander(on)` and `grid()` (the navigator's grid, as
     `pycvc.WorldGym.grid` gives it). Each `list()` entry also carries the entity's velocity,
-    steering, goal, `reached`, `collided` and its body (length, width, wheelbase, its limits).
-    `list`, `spawn` and `despawn` run on the thread that runs frames; the intents from any
-    thread. `pycvc_gl.cars.HostCars` drives a host's world's vehicles with the cars template's
+    steering, goal, `reached`, `collided` and its body (length, width, wheelbase, its limits),
+    and `posed` with its `pose` (a dict) for a pose entity. A pose entity takes
+    `set_pose(id, x, y, z=None, heading=, pitch=, roll=, speed=, steer=, t=None,
+    rear_axle=False)`, or many at once `set_poses(ids, poses, rear_axle=False)` with `poses` N rows
+    of 2 to 9 numbers (`x y z heading pitch roll speed steer t`, NaN for no `z` or `t`; a numpy
+    array or nested lists), and `pose(id)` and `set_pose_jump(metres)`. `list`, `spawn` and
+    `despawn` run on the thread that runs frames; the intents and the poses from any thread. `pycvc_gl.cars.HostCars` drives a host's world's vehicles with the cars template's
     interface.
   - **One runtime per world.** Each `SceneWorld` has its own physics world, vehicles, policies
     and keys, with nothing process-wide, so a host that runs several worlds runs one each.
@@ -3054,7 +3387,8 @@ windows:
 ### 5.12 Backgrounds: `background:` on a window or group
 
 A window, an overlay or a group can have a picture behind its content: a profile's background,
-a banner behind a name.
+a banner behind a name. It can also have a solid colour, written or computed each frame
+(`background: { color: ... }`, §5.26), alone or under the picture.
 
 ```yaml
 windows:
@@ -3506,6 +3840,36 @@ scene:
 
 The next run reads the cache.
 
+**Made datasets (`generate:`).** A dataset can be made instead of fetched. The entry names a
+generator and its params, and the generator's files are decoded as a fetched dataset's are
+(`city_bundle` unless `as:` says otherwise):
+
+```yaml
+data:
+  world:
+    generate: generated_world                       # cvc::world::generate_world's world
+    params: { seed: 7, half_m: 600, preset: 1 }     # a preset quick-sets its counts first
+scene:
+  physics: {}
+  nodes:
+    - node: land
+      source: { data: world }
+      body: {}
+```
+
+The built-in `generated_world` makes the world and writes it as a version 2 city bundle
+(ARIADNE_WORLDS §18.8): `world.json`, the terrain's heights and cell surfaces, and a glb per
+mesh. It takes `generated_world_params`' fields by name (`seed`, `half_m`, `trees`, `rocks`,
+`buildings`, `amp_m`, `water_level_m`, `preset`, `terrain`, `city`, `terrain_file`, `edge`, ...)
+and `building_library`. A generated world is then the same kind of dataset as a loaded city, and
+its `world` is the bundle read back, so the physics is the same on every host that decodes it.
+Beside the decoder's outputs, `generated` holds the world as made (its raster, roads and props).
+The same params name the same dataset; a host adds generators with `register_data_generator`.
+
+A `type: generated_world` node is shorthand for this: each world it makes, at load and on each
+Regenerate, is its dataset `data.<id>` (or the node's `data:` prop), replaced in place with its
+`rev` one higher, and its `body:` is that dataset's world, as a data node's is.
+
 **Archives.** An archive is recognized by its bytes, whatever its name: tar (plain, gzip or zstd)
 and zip (stored or deflate). It is unpacked in memory, and only its regular files are kept.
 - `path:` keeps one directory of the archive, stripped from the paths, or names one file.
@@ -3520,7 +3884,7 @@ through it:
 
 | Under `data.city` | |
 |---|---|
-| `status` | `idle`, `fetching`, `unpacking`, `decoding`, `ready` or `error`; the node's value is the same |
+| `status` | `idle`, `fetching` (or `generating`), `unpacking`, `decoding`, `ready` or `error`; the node's value is the same |
 | `progress`, `error` | 0..1 while it loads; why it failed |
 | `rev` | 1, 2, ... each time a load completes: what a watcher polls |
 | `uri`, `canonical`, `sha256`, `size`, `as` | the request, what it resolved to (`cvcpkg://cy-pca/scene-austin-south-small@1.0.0+cvc.2`), the archive's hash and size, the decoder |
@@ -3537,7 +3901,7 @@ for an archive or a directory, and otherwise one picked by the file's extension:
 | `mesh` | `geometry`: a `cvc::geometry`, from any format `read_geometry` reads |
 | `volume` | `volume`: a `cvc::volume` |
 | `heightfield` | `terrain` (a `cvc::height_field`) and `bounds.*`, from a `terrain.json` |
-| `city_bundle` | `world` (a `world_geometry`), `terrain`, `buildings` (a `cvc::geometry`), `buildings_error`, `bounds.min_x` ... `max_y`, `satellite` (`satellite.png` decoded: the image on `data()`, its file path as the value) |
+| `city_bundle` | `world` (a `world_geometry`), `terrain`, `buildings` (a `cvc::geometry`), `buildings_error`, `bounds.min_x` ... `max_y`, `satellite` (`satellite.png` decoded: the image on `data()`, its file path as the value); for a version 2 bundle also `version`, `hash` (its content hash), `water_level`, `region` (`min_x` ... `max_y`, when it is cut to one) and `generator` (its name; `version`, `seed`, `params`) |
 
 A host adds its own with `register_data_decoder`.
 
@@ -3563,7 +3927,9 @@ or host can write as well.
 **Document logic.**
 - `(data-load NAME URI [AS [PATH]])` points `data.NAME` at a new request and starts it. The
   nodes bound to `NAME` keep drawing the old dataset until the new one is ready.
-- `(data-reload NAME)` loads it again.
+- `(data-generate NAME GENERATOR [PARAMS])` points `data.NAME` at a made dataset, PARAMS a JSON
+  object string: `(data-generate "world" "generated_world" "{\"seed\": 7}")`.
+- `(data-reload NAME)` loads it again (a made dataset is made again from its params).
 - `(data-status NAME)` returns its status.
 - `(data-files NAME)` lists its file paths.
 - `(data-file NAME PATH)` returns one file's bytes, or nil.
@@ -4306,6 +4672,113 @@ gives the bar `File  FE Lab  Windows`, where *FE Lab* holds FE Lab's menus as su
   `ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus`, and the loader's
   `ALoadedDocumentIsNamedByItsMeta`, check it. `examples/ariadne/documents/apps_demo.ari` loads
   `tray_demo.ari` and `apps/counter.ari` twice.
+
+### 5.26 Colours from state: `color:` and `background: { color: }`
+
+A text, a radio or `radio_row`, a button or a menu item can be drawn in a colour, and a group or a
+window can be filled with one. The colour can be written in the document, held in a state key, or
+computed each frame. So a row can take its colour from its item, and a value can turn red past a
+threshold, without two copies of the widget switched by `visible_when`.
+
+```yaml
+meta: { min_libcvc: 4.0.0 }
+init: |
+  (state-set "palette.0" "c0")        ; the chart's slots, "#rrggbb", "r,g,b" or [r, g, b]
+  (state-set "palette.1" "#e34948")
+  (state-set "palette.2" "0.2,0.8,0.3")
+windows:
+  - window: Status
+    children:
+      - type: group                   # one row per item, in the item's colour
+        repeat: "3"
+        children:
+          - text: "Item {i}"
+            bind: items.{i}.status
+            color: { bind: "palette.{i}" }
+      - text: Temperature             # red past 80, else the default colour
+        bind: temp
+        color: '(if (> (float (state-get "temp")) 80) "1,0.2,0.2" "")'
+      - radio: Follow                 # each option in its own colour
+        bind: cam.follow
+        options: [one, two, three]
+        color: [c0, c1, c2]           # or "c0;c1;c2", or a key or an expression giving a list
+      - button: Halt
+        on: halt
+        color: "#e34948"
+  - window: Grid
+    layout: { kind: grid, col_widths: [80, 80, 80] }
+    children:
+      - type: group                   # each cell filled from the palette
+        repeat: "3"
+        background:
+          color: { bind: "palette.{i}" }
+        children:
+          - text: "{i}"
+```
+
+**`color:`** takes one of these:
+
+- A colour written in the document: `[r, g, b]` (each 0 to 1), `"#rrggbb"`, `"#rgb"`, `"r,g,b"`,
+  or `c0` to `c7`, the chart's eight slots (blue, orange, aqua, yellow, magenta, green, violet, red), so
+  a row and its curve in a chart can share one. `none` is the default colour.
+- `{ bind: key }`: the key's value, read each frame.
+- `"(expr)"`: an expression on the read lane (§2.1), computed each frame.
+
+A key's value, or an expression's, is a colour in the same forms: `"r,g,b"` or `"r g b"`,
+`"[r, g, b]"`, `"#rrggbb"`, `"#rgb"`, `c0` to `c7`, or, from an expression, a list of three numbers.
+`""`, `none`, `default` or nil means the widget's own colour, which is how an expression turns a
+colour off. A `color` picker's key (`"r,g,b"`) can colour another widget directly.
+
+- **What it colours.** A text's text; a button's label; a menu item's label (`menu_item` with
+  `on:` or `bind:`); a radio's caption, options and the dot of the picked option.
+- **A colour per option.** On a radio, a list gives each option its own colour: `[c0, c1, c2]`
+  written in the document, `"c0;c1;c2"` in a key, or a list from an expression (each entry a
+  colour's text or three numbers). An empty entry, `none` or nil leaves that option in the default
+  colour. One colour colours the whole radio. On a text, a button or a menu item, a list's first
+  entry is used.
+- **`background: { color: }`** on a group or a window fills it, under its picture if it has one
+  too, `opacity:` strong. It takes the forms `color:` takes, one colour. `background: [r, g, b]`
+  is short for a written colour. A group that is a cell of a grid (`layout: { kind: grid }`) is
+  filled to its whole cell. Any other group is filled over the area its content takes, the full
+  width available unless `size:` says otherwise. A window is filled over its inner area. The text on
+  a fill with no picture is black or white, whichever reads on it, unless the document coloured
+  that text.
+- **`{i}`** in `bind:` or in the expression is the instance's index under `repeat:`, as in a
+  bind. In a flow map (`{ ... }`) a `{i}` must be quoted: `{ bind: "palette.{i}" }`.
+- **Cost.** A key is read and its text parsed once a frame. An expression is cached the way a
+  computed `bind:` and `tooltip:` are (§2.1): it runs again only after a write to a key it read.
+- **Errors.** A broken expression, or one whose value is not a colour, draws the default colour
+  and warns once (`take_reactive_warnings`). A key holding something that is not a colour does
+  the same, and the warning names the key and its value. A `color:` that is none of the forms
+  above warns at load and draws the default colour.
+- **Which kinds.** `text`, `radio`, `radio_row`, `button` and `menu_item`, and `background:` on a
+  group, a window or an overlay. A `combo` doesn't take one. The colour picker (`color: Tint`),
+  a `tf_editor`'s `color:` and a custom type's `color:` are their own keys, as before. Since
+  `color` is the last widget type the loader looks for, `color:` beside `button:` is that button's
+  colour.
+
+**Backends.**
+
+- **ImGui** draws a text, a button's or a menu item's label in the colour (`ImGuiCol_Text`) and a
+  radio option's dot in it too (`ImGuiCol_CheckMark`). A grid cell's fill is the table cell's own
+  background (`TableSetBgColor`). Any other fill is a rectangle under the group's content.
+- **FTXUI** draws the colour as the cells' colour, and a fill as their background. FTXUI picks the
+  nearest colour the terminal has: at full colour it is the colour itself, at 256 colours the
+  nearest of xterm's palette, at 16 the nearest of the sixteen.
+  `FtxuiBackend::Options::palette` says which palette the terminal has, for a host that knows and
+  for a test. With `Auto` (the default), FTXUI reads it from `COLORTERM` and `TERM`. A terminal
+  with no colour (`--graphics mono`) draws no fill.
+- **tvision** lays its window bodies out at full colour, and tvision draws each colour as the
+  nearest the terminal has. Its own menu bar and menus are tvision's, so a menu item's colour is
+  not shown there.
+
+`ariadne_loader_test`'s `ComputedColorsParse`, `BadColorWarnsAndThePickerStays` and
+`BackgroundColorParses` check the forms. `ariadne_runtime_test`'s
+`ComputedColorTurnsRedPastAThreshold`, `RepeatedRowsTakeTheirPaletteColor`,
+`RadiosButtonsAndMenuItemsTakeTheirColor` and `GroupFillInAGridCell` check what reaches a backend.
+The terminal snapshots are `ariadne_ftxui_test`'s `ComputedColorsReachTheCells` (at full, 256 and
+16 colours) and `ComputedColorsReachTheWindowCells` (tvision's cells). ImGui's pixels are checked
+by `cvcgl_imgui_colors`.
 
 ## 6. Composition: include / import / load
 
@@ -5724,9 +6197,9 @@ on_tick: |
 - **`requires: [relay]`** holds only in a server document. On any other host, a document that
   requires it fails to load, and the error says it runs on the relay (`arisrv --doc`).
 - **`server: publish:`** names the namespaces the document publishes.
-  - A name is a dotted path of identifiers. It may not be `conf`, `ui`, `ariadne`,
-    `state_exec` or `room`, or under one of them, and none may be inside another or overlap the
-    document's own prefix.
+  - A name is a dotted path of identifiers. It may not be `conf`, `ui`, `arisrv` (the relay's
+    own records, which no client is sent), `ariadne`, `state_exec` or `room`, or under one of
+    them, and none may be inside another or overlap the document's own prefix.
   - Each is a writable hole of the same name in the document's chroot (§7.4): `board` there is
     the tree's `board`. `state-set`, `state-set-tree` and the atomics write through it.
     `state-delete` and `state-watch` act on the physical path (§7.4), so to take entries out,
@@ -5846,9 +6319,17 @@ server:
   a file or the network, or stops the relay.
 - **One at a time.** A second program from a client whose first is still running is answered
   `rate_limited`.
+- **Each client's limits.** A relay can give each client caps of its own
+  (`ServerDocument::set_client_limits`; [roadmap/ARISRV_IDENTITY.md](roadmap/ARISRV_IDENTITY.md)
+  §2.6). They are read at each start, so a change applies to the client's next program. They
+  replace the document's caps for that client: lower, or higher up to the action lane's
+  (`ariadne.limits.action_max_*`), which hold over every process. So `client_programs:` (and
+  `client_guests:`) are what every client gets, and an admin can give one client more, or less.
+  A client whose limits refuse it programs is answered `forbidden`.
 - **Errors** raise as `room-call`'s do (§9.8.1), with these codes:
   - `unavailable`: the relay runs no document with `client_programs:`, or its document hasn't
     loaded.
+  - `forbidden`: this client's limits refuse it programs.
   - `invalid`: the source doesn't parse on its own, or is over 64 KiB.
   - `rate_limited`.
   - `failed`: the program raised. The message is its report.
@@ -5894,8 +6375,11 @@ server:
   start function (which would run to its end as the instance is made: export `_initialize`
   instead). `failed`: a module that doesn't compile, or doesn't export the function, and every
   trap, `fail()`, `PermissionError` and `MemoryError`. `unavailable`: no `client_guests:`, or a
-  relay without WebAssembly. Stock arisrv refuses to start a document with `client_guests:`, and
-  arisrvx refuses one under `--bind-writes off`.
+  relay without WebAssembly. `forbidden`: this client's limits refuse it guests. Stock arisrv
+  refuses to start a document with `client_guests:`, and arisrvx refuses one under
+  `--bind-writes off`.
+- **Each client's limits** apply as for programs (§9.7.1): its `steps`, `time` and `memory_mb`,
+  the last capping its linear memory, never above `ariadne.limits.wasm_max_memory`.
 
 ### 9.8 Python beside the relay: `arisrvx`
 
@@ -7171,8 +7655,11 @@ Measured in CI (2026-10-20):
   pixels beyond 40 (they pass), widgets had 40 and scene 467 (they fail).
 - With the window chrome's close and maximize glyphs (2026-11-14), menus had 7 and windows 12
   (they pass) but grid 15 (it fails).
-- So `widgets.macos.png`, `scene.macos.png` and `grid.macos.png` are macOS goldens, and macOS
-  compares those three against its own renderer.
+- The orthoslicer (2026-11-17) had 1,149 pixels beyond 40, all four macOS jobs the same to the
+  byte (it fails). Its nearest-sampled slices' texel edges and the volren's edges land a pixel
+  apart.
+- So `widgets.macos.png`, `scene.macos.png`, `grid.macos.png` and `orthoslicer.macos.png` are
+  macOS goldens, and macOS compares those four against its own renderer.
 
 To make or refresh a macOS golden, take `<name>.actual.png` from the failing macOS job's
 `ari-golden-macOS-<lane>` artifact, look at it, and commit it as `<name>.macos.png`.

@@ -219,6 +219,10 @@ struct RealizedScene {
   // generated_world's terrain and buildings): realize_physics hands it to the world, which swaps
   // the node's bodies whenever the node bumps its revision.
   std::map<std::string, std::shared_ptr<cvc::ariadne::SceneColliders>> colliders;
+  // A custom node whose body: is a dataset it puts (a generated_world's world, as
+  // cvc::ariadne::publish_generated_world makes it), by node id: the store path, which
+  // realize_physics hands to the world as a data node's, so the world takes each new one.
+  std::map<std::string, std::string> body_data;
 
   // The scene's world (`physics:`, or the nodes' `body:`s), null without one: core libcvc's
   // cvc::ariadne::SceneWorld, the world a headless host runs for the same document. Its bodies are
@@ -257,6 +261,11 @@ struct RealizedScene {
   std::uint64_t vehicles_rev = ~std::uint64_t(0);
   // The vehicle models this scene has read and fitted, read once each (vehicle_view.cpp).
   std::shared_ptr<struct vehicle_model_cache> vehicle_models;
+  // A vehicle drawn as its box while its look's data package loads: the vehicles are drawn again
+  // once none is loading (sync_vehicle_markers).
+  bool vehicle_models_pending = false;
+  // The document's data: entries (Scene::data), which a node's model names (a boat's `model:`).
+  std::vector<cvc::ariadne::SceneData> data;
   // The spawn points as drawn (their node ids), as of the spawn points' revision `spawns_rev`.
   std::vector<std::string> spawn_markers;
   std::uint64_t spawns_rev = ~std::uint64_t(0);

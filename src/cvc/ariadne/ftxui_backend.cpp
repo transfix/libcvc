@@ -871,6 +871,8 @@ struct FtxuiBackend::Impl {
   std::vector<std::string> wins; // windows open in the walk
   std::string cur_menu;          // the dropdown being emitted
   int disabled = 0;
+  // §5.26 begin_text_color's colours, innermost last: a leaf drawn under one takes it.
+  std::vector<fx::Color> text_colors;
   std::unordered_map<std::string, int> id_uses;
   Walk walk;  // being built
   Walk last;  // the last walk finished
@@ -993,6 +995,7 @@ struct FtxuiBackend::Impl {
   std::set<std::string> blur_commit;      // fields that lost focus with an edit pending
   std::map<std::string, double> inflight; // slider value while the mouse holds it
   std::map<std::string, int> color_chan;
+  std::map<std::string, std::pair<int, int>> heat_cursor; // a heatmap's keyboard cell (row, col)
   std::map<std::string, Win> windows;
   std::map<std::string, GridSizes> grid_sizes;
   SeamDrag seam_drag;
@@ -1146,6 +1149,8 @@ struct FtxuiBackend::Impl {
     it.menu = cur_menu;
     it.group = item_groups.empty() ? std::string() : item_groups.back();
     it.focusable = focusable && !is_disabled();
+    if (!text_colors.empty())
+      el = el | fx::color(text_colors.back());
     if (it.focusable && focus_next && cur_menu.empty()) {
       focus_next = false;
       set_focus(id); // autofocus: (focus_next_widget)
@@ -2584,6 +2589,18 @@ void FtxuiBackend::end_backdrop() {
   const bool mono = image_mode() == ImageMode::Mono; // no colours to put behind text
   if (it == m.images.end() || it->second.rgb.empty() || bd.terminal == BackdropTerminal::Off ||
       mono) {
+    // §5.26 a fill, where there is no picture to draw: the content's cells on it (dimmed toward
+    // black by opacity, as a picture is), its text black or white, whichever reads on it, where
+    // the document did not colour that text. A grid's cell fills its whole cell.
+    if (bd.has_fill && !mono) {
+      const float k = std::clamp(bd.opacity, 0.0f, 1.0f);
+      const float fill[3] = {bd.fill[0] * k, bd.fill[1] * k, bd.fill[2] * k};
+      const float lum = 0.299f * fill[0] + 0.587f * fill[1] + 0.114f * fill[2];
+      content = content | fx::color(lum > 0.55f ? fx::Color::Black : fx::Color::White) |
+                fx::bgcolor(rgb_color(fill));
+      if (bd.cell)
+        content = content | fx::xflex_grow | fx::yflex_grow;
+    }
     m.add(content); // loading, failed or not drawn in a terminal: the content alone
     return;
   }
@@ -3025,6 +3042,14 @@ void FtxuiBackend::text_value_colored(const char *label, const std::string &valu
   m_->leaf(m_->uid("t|"), false, text_block(labelled(label, value)) | fx::color(rgb_color(rgb)));
 }
 
+void FtxuiBackend::begin_text_color(const float rgb[3]) {
+  m_->text_colors.push_back(rgb_color(rgb));
+}
+void FtxuiBackend::end_text_color() {
+  if (!m_->text_colors.empty())
+    m_->text_colors.pop_back();
+}
+
 // §5.20 a rich text: one item for the paragraph (its own clicks and hover, its tooltip), and
 // before it one for each link, in Tab order as they read. A press on a link's cells is the link's
 // (Impl::link_at); Enter or Space activates the focused one. The link under the pointer or with
@@ -3328,6 +3353,12 @@ IndexEdit FtxuiBackend::combo(const char *label, int current_index,
 // the next, wrapping, like a combo's Left / Right.
 IndexEdit FtxuiBackend::radio(const char *label, int current_index,
                               const std::vector<std::string> &options, bool row) {
+  return radio_colored(label, current_index, options, row, {});
+}
+
+IndexEdit FtxuiBackend::radio_colored(const char *label, int current_index,
+                                      const std::vector<std::string> &options, bool row,
+                                      const std::vector<ItemColor> &colors) {
   Impl &m = *m_;
   const std::string id = m.uid(std::string("ra|") + label);
   const int n = static_cast<int>(options.size());
@@ -3355,6 +3386,8 @@ IndexEdit FtxuiBackend::radio(const char *label, int current_index,
   fx::Elements opts;
   for (int i = 0; i < n; ++i) {
     fx::Element o = fx::text((i == shown ? "(*) " : "( ) ") + options[static_cast<std::size_t>(i)]);
+    if (const std::size_t k = static_cast<std::size_t>(i); k < colors.size() && colors[k].set)
+      o = o | fx::color(rgb_color(colors[k].rgb)); // §5.26 the option's own colour
     if (f && i == shown)
       o = o | fx::inverted;
     o = o | fx::reflect(opt_box(i));
@@ -3799,6 +3832,185 @@ ColorEdit FtxuiBackend::color(const char *label, const float rgb[3]) {
   return e;
 }
 
+namespace {
+
+// `t` in exactly `w` columns: centred, or cut to its first `w` code points.
+std::string fit_cell(const std::string &t, int w) {
+  const int n = fx::string_width(t);
+  if (n <= w) {
+    const int left = (w - n) / 2;
+    return std::string(left, ' ') + t + std::string(w - n - left, ' ');
+  }
+  std::string out;
+  int cols = 0;
+  for (std::size_t i = 0; i < t.size() && cols < w;) {
+    std::size_t j = i + 1;
+    while (j < t.size() && (static_cast<unsigned char>(t[j]) & 0xC0) == 0x80)
+      ++j;
+    out += t.substr(i, j - i);
+    ++cols;
+    i = j;
+  }
+  return out + std::string(w - cols, ' ');
+}
+
+// Black or white, whichever reads on `rgb`.
+fx::Color text_on(const float rgb[3]) {
+  const float l = 0.2126f * rgb[0] + 0.7152f * rgb[1] + 0.0722f * rgb[2];
+  return l > 0.55f ? fx::Color::RGB(0, 0, 0) : fx::Color::RGB(255, 255, 255);
+}
+
+std::string stop_text(double v) {
+  char buf[48];
+  std::snprintf(buf, sizeof buf, "%.6g", v == 0.0 ? 0.0 : v);
+  return buf;
+}
+
+} // namespace
+
+// Kind::Heatmap: one item. Each cell is as many columns as the widest text (2 to 8), a column apart
+// when the heatmap has a gap, one row tall; the row labels at its left, the column labels above
+// (cut to a cell's width), the legend under it (a right legend too: a terminal has no room beside).
+HeatmapEvent FtxuiBackend::heatmap(const char *label, const HeatmapSpec &spec) {
+  Impl &m = *m_;
+  const std::string id = m.uid(std::string("hm|") + (label ? label : ""));
+  const std::string gid = "g|" + id;
+  HeatmapEvent ev;
+  const int rows = spec.rows, cols = spec.cols;
+  const bool uni = unicode_glyphs();
+  int cw = 2;
+  for (const HeatmapCell &c : spec.cells)
+    cw = std::max(cw, fx::string_width(c.text) + (c.mark ? 1 : 0));
+  cw = std::min(cw, 8);
+  const int pitch = cw + (spec.gap > 0.0f ? 1 : 0);
+
+  // The keyboard's cell, while it has focus: the arrows move it, Enter or Space clicks it.
+  const bool focusable = spec.interactive && rows > 0 && cols > 0;
+  std::pair<int, int> &cur = m.heat_cursor[id];
+  cur.first = std::clamp(cur.first, 0, std::max(rows - 1, 0));
+  cur.second = std::clamp(cur.second, 0, std::max(cols - 1, 0));
+  bool key_click = false;
+  if (focusable) {
+    if (m.key(id, "Left"))
+      cur.second = std::max(0, cur.second - 1);
+    else if (m.key(id, "Right"))
+      cur.second = std::min(cols - 1, cur.second + 1);
+    else if (m.key(id, "Up"))
+      cur.first = std::max(0, cur.first - 1);
+    else if (m.key(id, "Down"))
+      cur.first = std::min(rows - 1, cur.first + 1);
+    else if (m.key(id, "Return") || m.key(id, "Space"))
+      key_click = true;
+  }
+  const bool focused = focusable && m.has_focus(id);
+
+  // The pointer's cell (none over a gap); a press on one clicks it and moves the cursor there.
+  const fx::Box &g = m.boxes[gid];
+  if (!m.is_disabled() && (m.hovered == id || m.press_id == id) && inside(g, m.ptr_x, m.ptr_y)) {
+    const int dx = m.ptr_x - g.x_min, dy = m.ptr_y - g.y_min, c = dx / pitch;
+    if (dx % pitch < cw && c < cols && dy < rows) {
+      ev.hovered = true;
+      ev.row = dy;
+      ev.col = c;
+      if (m.pressed(id)) {
+        ev.clicked = true;
+        ev.click_row = dy;
+        ev.click_col = c;
+        cur = {dy, c};
+      }
+    }
+  }
+  if (!ev.hovered && focused) {
+    ev.hovered = true;
+    ev.row = cur.first;
+    ev.col = cur.second;
+  }
+  if (key_click) {
+    ev.clicked = true;
+    ev.click_row = cur.first;
+    ev.click_col = cur.second;
+  }
+
+  fx::Elements parts;
+  if (label && *label)
+    parts.push_back(fx::text(label));
+  int lw = 0;
+  for (const std::string &l : spec.row_labels)
+    lw = std::max(lw, fx::string_width(l));
+  const int lead = lw > 0 ? lw + 1 : 0;
+  if (!spec.col_labels.empty()) {
+    std::string head(static_cast<std::size_t>(lead), ' ');
+    for (int c = 0; c < cols; ++c)
+      head += fit_cell(spec.col_labels[c], cw) + std::string(pitch - cw, ' ');
+    parts.push_back(fx::text(head));
+  }
+  fx::Elements label_rows, cell_rows;
+  for (int r = 0; r < rows; ++r) {
+    if (lw > 0) {
+      const std::string &l =
+          static_cast<std::size_t>(r) < spec.row_labels.size() ? spec.row_labels[r] : std::string();
+      label_rows.push_back(fx::text(l + std::string(lw + 1 - fx::string_width(l), ' ')));
+    }
+    fx::Elements row;
+    for (int c = 0; c < cols; ++c) {
+      const HeatmapCell &cell = spec.cells[static_cast<std::size_t>(r) * cols + c];
+      const std::string t =
+          cell.text.empty() && !cell.has_value ? (uni ? "\xC2\xB7" : ".") : cell.text;
+      fx::Element body = fx::text(fit_cell(t, cell.mark ? cw - 1 : cw));
+      if (cell.has_value)
+        body = body | fx::color(text_on(cell.rgb));
+      else
+        body = body | fx::dim;
+      if (r == spec.sel_row && c == spec.sel_col)
+        body = body | fx::bold | fx::underlined;
+      if (focused && r == cur.first && c == cur.second)
+        body = body | fx::inverted;
+      fx::Elements in{body};
+      if (cell.mark)
+        in.push_back(fx::text(uni ? "\xE2\x97\xA5" : "*") | fx::color(rgb_color(spec.mark_rgb)));
+      fx::Element el = fx::hbox(std::move(in));
+      if (cell.has_value)
+        el = el | fx::bgcolor(rgb_color(cell.rgb));
+      row.push_back(el);
+      if (pitch > cw && c + 1 < cols)
+        row.push_back(fx::text(" "));
+    }
+    cell_rows.push_back(fx::hbox(std::move(row)));
+  }
+  if (rows > 0)
+    parts.push_back(fx::hbox({fx::vbox(std::move(label_rows)),
+                              fx::vbox(std::move(cell_rows)) | fx::reflect(m.boxes[gid])}));
+
+  // The legend: a bar as wide as the grid (at least 16 columns), each column the ramp's colour at
+  // its middle, and the stops' values under it where they fit.
+  if (spec.legend != HeatmapLegend::Off && !spec.ramp.empty()) {
+    const int width = std::max(16, cols > 0 ? cols * pitch - (pitch - cw) : 0);
+    const double lo = spec.ramp.front().at, hi = spec.ramp.back().at;
+    fx::Elements bar;
+    for (int i = 0; i < width; ++i) {
+      float rgb[3];
+      heatmap_color(spec.ramp, lo + (i + 0.5) / width * (hi - lo), rgb);
+      bar.push_back(fx::text(" ") | fx::bgcolor(rgb_color(rgb)));
+    }
+    std::string ticks;
+    for (const HeatmapStop &s : spec.ramp) {
+      const std::string t = stop_text(s.at);
+      const int n = static_cast<int>(t.size());
+      int at = hi > lo ? static_cast<int>(std::lround((s.at - lo) / (hi - lo) * (width - 1))) : 0;
+      at = std::clamp(at - n / 2, 0, std::max(0, width - n));
+      const int have = static_cast<int>(ticks.size());
+      if (at < have + (have > 0 ? 1 : 0))
+        continue; // it would run into the last one
+      ticks += std::string(static_cast<std::size_t>(at - have), ' ') + t;
+    }
+    parts.push_back(fx::hbox(
+        {fx::text(std::string(static_cast<std::size_t>(lead), ' ')), fx::hbox(std::move(bar))}));
+    parts.push_back(fx::text(std::string(static_cast<std::size_t>(lead), ' ') + ticks));
+  }
+  m.leaf(id, focusable, fx::vbox(std::move(parts)));
+  return ev;
+}
+
 // ---- images
 // --------------------------------------------------------------------------------------
 
@@ -3923,6 +4135,45 @@ bool FtxuiBackend::draw_image_fit(const char *name, float box_w, float box_h) {
 // ---- headless driving
 // ----------------------------------------------------------------------------
 
+namespace {
+
+fx::Terminal::Color ftxui_palette(FtxuiBackend::Options::Palette p) {
+  using P = FtxuiBackend::Options::Palette;
+  switch (p) {
+  case P::TrueColor:
+    return fx::Terminal::Color::TrueColor;
+  case P::Colors256:
+    return fx::Terminal::Color::Palette256;
+  case P::Colors16:
+    return fx::Terminal::Color::Palette16;
+  case P::Auto:
+    break;
+  }
+  return fx::Terminal::ColorSupport();
+}
+
+// FTXUI's palette for one headless draw: full colour where `true_color`, else `p` (Auto: as it
+// is), the one before restored when it ends. FTXUI picks a colour's nearest when the colour is
+// made, so it covers the walk as well as the print.
+struct PaletteScope {
+  fx::Terminal::Color saved = fx::Terminal::ColorSupport();
+  bool set = false;
+  PaletteScope(bool true_color, FtxuiBackend::Options::Palette p) {
+    if (true_color || p != FtxuiBackend::Options::Palette::Auto) {
+      fx::Terminal::SetColorSupport(true_color ? fx::Terminal::Color::TrueColor : ftxui_palette(p));
+      set = true;
+    }
+  }
+  ~PaletteScope() {
+    if (set)
+      fx::Terminal::SetColorSupport(saved);
+  }
+  PaletteScope(const PaletteScope &) = delete;
+  PaletteScope &operator=(const PaletteScope &) = delete;
+};
+
+} // namespace
+
 std::string FtxuiBackend::render_to_string(Runtime &rt, int width, int height, bool ansi) {
   Impl &m = *m_;
   m.term_w = std::max(1, width);
@@ -3930,11 +4181,8 @@ std::string FtxuiBackend::render_to_string(Runtime &rt, int width, int height, b
   // The placeholders' 24-bit colour names their image, and a terminal with the kitty protocol has
   // true colour, so lay out and print as one would. For the whole walk, not only the print: FTXUI
   // quantizes an RGB colour to the terminal's palette when the colour is made, during layout, and
-  // a palette colour names no image.
-  const bool true_color = ansi && m.mode() == ImageMode::Kitty;
-  const fx::Terminal::Color colors = fx::Terminal::ColorSupport();
-  if (true_color)
-    fx::Terminal::SetColorSupport(fx::Terminal::Color::TrueColor);
+  // a palette colour names no image. Otherwise the palette Options::palette says.
+  const PaletteScope palette(ansi && m.mode() == ImageMode::Kitty, m.opt.palette);
   rt.render(); // walk the tree -> (re)builds m.root through the methods above
   m.gfx_shown = m.gfx_last;
   fx::Screen screen =
@@ -3942,12 +4190,8 @@ std::string FtxuiBackend::render_to_string(Runtime &rt, int width, int height, b
                          height > 0 ? fx::Dimension::Fixed(height) : fx::Dimension::Fit(m.root));
   fx::Render(screen, m.root);
   m.shown = m.last; // the boxes now hold this frame's layout
-  if (ansi) {
-    std::string out = screen.ToString();
-    if (true_color)
-      fx::Terminal::SetColorSupport(colors);
-    return out;
-  }
+  if (ansi)
+    return screen.ToString();
   std::string out;
   for (int y = 0; y < screen.dimy(); ++y) {
     std::string line;
@@ -4360,8 +4604,11 @@ FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::function<
         m.term_gfx.sixel = true;
   pixels = m.pixels();
   const fx::Terminal::Color colors = fx::Terminal::ColorSupport();
-  if (m.mode() == ImageMode::Kitty) // the placeholders' 24-bit colour names their image
+  // The placeholders' 24-bit colour names their image; else the palette Options::palette says.
+  if (m.mode() == ImageMode::Kitty)
     fx::Terminal::SetColorSupport(fx::Terminal::Color::TrueColor);
+  else if (m.opt.palette != Options::Palette::Auto)
+    fx::Terminal::SetColorSupport(ftxui_palette(m.opt.palette));
   if (opts.on_start)
     opts.on_start();
   const auto period = std::chrono::milliseconds(1000 / std::max(1, opts.fps));
@@ -4510,6 +4757,9 @@ void FtxuiBackend::text_line(const char *) {}
 void FtxuiBackend::text_value(const char *, const std::string &) {}
 void FtxuiBackend::text_line_colored(const char *, const float[3]) {}
 void FtxuiBackend::text_value_colored(const char *, const std::string &, const float[3]) {}
+void FtxuiBackend::begin_text_color(const float[3]) {}
+void FtxuiBackend::end_text_color() {}
+HeatmapEvent FtxuiBackend::heatmap(const char *, const HeatmapSpec &) { return {}; }
 RichTextEvent FtxuiBackend::rich_text(const std::vector<TextRun> &, const RichTextOptions &) {
   return {};
 }
@@ -4541,6 +4791,10 @@ DoubleEdit FtxuiBackend::slider_double(const char *, const char *, double, doubl
 }
 IndexEdit FtxuiBackend::combo(const char *, int, const std::vector<std::string> &) { return {}; }
 IndexEdit FtxuiBackend::radio(const char *, int, const std::vector<std::string> &, bool) {
+  return {};
+}
+IndexEdit FtxuiBackend::radio_colored(const char *, int, const std::vector<std::string> &, bool,
+                                      const std::vector<ItemColor> &) {
   return {};
 }
 StringEdit FtxuiBackend::input_text(const char *, const char *, const std::string &, bool) {

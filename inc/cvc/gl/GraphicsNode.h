@@ -160,6 +160,10 @@ public:
   // node together with all its descendants.
   cvc::bounding_box getWorldBoundingBox() const;
   cvc::bounding_box getCombinedWorldBoundingBox() const;
+  // The same, leaving out every descendant kept out of the scene's bounds
+  // (setContributesToSceneBounds(false)) together with its subtree, at any depth: what this node
+  // adds to SceneGraph::computeGraphicsBounds.
+  cvc::bounding_box getSceneWorldBoundingBox() const;
 
   // Whether this node counts toward the scene's world bounds
   // (SceneGraph::computeGraphicsBounds). False for a light: it draws nothing,
@@ -441,6 +445,9 @@ protected:
   // may frame only its children).
   bool m_contributesToSceneBounds = true;
   bool m_combinedIncludesOwnBounds = true;
+  // getCombinedBoundingBox(), or with `sceneOnly` without the descendants kept out of the scene's
+  // bounds (getSceneWorldBoundingBox).
+  cvc::bounding_box combinedBoundingBox(bool sceneOnly) const;
   bool m_showBBox;
   std::shared_ptr<BBoxNode> m_bboxNode;
 

@@ -35,6 +35,20 @@ class SceneGraph;
 // mode (WASD along the look vector, mouse-look with the pointer captured, Space/
 // Ctrl for world up/down, Shift sprint, wheel = speed), with a runtime toggle.
 //
+// FLY MOVES AS A QUAKE SPECTATOR (reimplemented from a behavioural spec of ezQuake's spectator
+// movement, not from its source). The eye has a velocity that carries from frame to frame. Each
+// step, friction first slows it on all three axes: in proportion to its speed above a quarter of a
+// key's speed, at a constant rate below that, and it stops below 1/400 of it (state
+// "settings.fly_friction", 6 a second). Then it accelerates toward the wish velocity -- each held
+// key adds the move speed along its axis (forward along the look, pitch included; strafe level;
+// Space / Ctrl along the world's up), unnormalised, its speed capped at 1.25 of a key's -- at a
+// rate in proportion to the speed wished for, never past it (state "settings.fly_accelerate", 10 a
+// second). So the eye reaches its speed in about 0.15 s and glides to a stop in about 0.4 s. A
+// frame's time is stepped at no more than 1/77 s, so it moves the same at any frame rate. A key
+// pressed and let go between two frames still counts (a quarter of a held one). Sprint multiplies
+// the key speed and the cap. The mouse turns the view at once, with no smoothing. Orbit's
+// first-person mouse look moves its eye the same way.
+//
 // EVERYTHING IS cvc::state. CameraController is a state_object: mode, the up
 // axis, orbit center/distance/azimuth/elevation, fly position/yaw/pitch, map
 // center/scale, the movement/mouse/sprint settings, pointer-capture, AND the key
@@ -157,7 +171,8 @@ public:
   void getUpAxis(double &x, double &y, double &z) const;
 
   // Frame the whole scene: orbit center = box center, distance from its diagonal,
-  // a pleasant 3/4 default view, auto move-speed. Seeds the fly pose too, and
+  // a pleasant 3/4 default view, auto move-speed (an eighth of the diagonal a second, at most
+  // 10: a Quake spectator's key speed in metres). Seeds the fly pose too, and
   // the map pose (the box's x/y footprint, fitted like frameMap with a width).
   void frameBounds(double minX, double minY, double minZ, double maxX, double maxY, double maxZ);
 
@@ -244,8 +259,9 @@ public:
   void setWidenTau(double tau);
   double widenTau() const;
 
-  // Integrate held-key fly motion, push the pose to the camera, and mirror the
-  // live pose to state on a throttle. Call once per rendered frame.
+  // Integrate held-key fly motion (Fly's spectator movement, above), push the pose to the camera,
+  // and mirror the live pose to state on a throttle. Call once per rendered frame with the time
+  // since the last one.
   void update(double dtSeconds);
 
   // ---- manual event feed (also called by the attached interactor style) ----

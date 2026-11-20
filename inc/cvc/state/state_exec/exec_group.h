@@ -45,7 +45,9 @@ namespace detail {
 struct group_pool_link {
   std::uint64_t seq = 0;           ///< creation order in its app (deterministic mode; threads 0)
   double last_pump_seconds = 0.0;  ///< its last pump's time: the LPT order and the helper wake
-  bool skipped = false;            ///< not started before its pump_all's deadline: first next time
+  /// Not started before its pump_all's deadline, or short-changed by it (started with under half
+  /// the call left, and the deadline ended its pump with work left): first next time.
+  bool skipped = false;
   std::uint64_t skipped_since = 0; ///< the pump_all that first skipped it (the oldest goes first)
   int last_thread = -1;            ///< which thread pumped it last (CVC_EXEC_FORCE_MOVE)
   std::atomic<void *> call{nullptr}; ///< the pump_all it belongs to now, or null
@@ -77,12 +79,14 @@ struct pump_budget {
   double seconds;
 };
 
-/// What one pump did: the steps it took, the processes wake_awaiting() woke, and whether a C++
-/// exception escaped it (the pool then fails the group, S1.6).
+/// What one pump did: the steps it took, the processes wake_awaiting() woke, whether a C++
+/// exception escaped it (the pool then fails the group, S1.6), and whether a process was still
+/// runnable when it ended (a budget ended it, not a lack of work: the pool's short-changed rule).
 struct pump_result {
   std::uint64_t steps = 0;
   int woken = 0;
   bool failed = false;
+  bool runnable = false;
 };
 
 class exec_group {

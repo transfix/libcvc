@@ -2,14 +2,17 @@
 // (cvc/nav/nav_scrub.h, docs/NAV_LAB.md) on a C++ Ariadne host. With no history it trains one
 // first: cvc::nav's own coef_trainer, a few dozen steps on the scenario's own map in its frame, a
 // checkpoint every few steps. Then every checkpoint is deployed on the built-in blocks scenario,
-// headless and in this process, and nav_scrub.ari shows checkpoint k beside step 0: the deployed
-// metric against the step, the training curve, the table, the Stats and Ledger windows at the play
-// head, and the two runs' ghosts. The views are the library's (cvc::nav::scrub_view): this file
-// trains, draws the world and the ghosts, and wires the events. pycvc_gl.nav_lab scrub is the
+// headless and in this process, on each plant (--plant, more than once: by default the Jolt Humvee,
+// which collides with the buildings, and nav's kinematic bicycle, which drives through them, for
+// comparison; the Plant combo switches), and nav_scrub.ari shows checkpoint k beside step 0: the
+// deployed metric against the step, the training curve, the table, the Stats and Ledger windows at
+// the play head, and the two runs' ghosts. The views are the library's (cvc::nav::scrub_view): this
+// file trains, draws the world and the ghosts, and wires the events. pycvc_gl.nav_lab scrub is the
 // Python twin.
 //
 //   nav_scrub nav_scrub.ari --component-path <repo>/src/cvc/ariadne
 //   nav_scrub nav_scrub.ari --history run/history.jsonl          # a history of your own
+//   nav_scrub nav_scrub.ari --plant humvee                        # the Humvee alone
 //   nav_scrub nav_scrub.ari --offscreen --frames 60 --png scrub.png --component-path ...
 //
 // In the gallery (the wasm build) the document and the component library are in the page's file
@@ -40,6 +43,7 @@
 #include <cvc/nav/policy_library.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/sim_world_trace.h>
+#include <cvc/physics/scrub_plant.h>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -145,7 +149,7 @@ int main(int argc, char **argv) {
   long frames = 0;
   int width = 1280, height = 800, agents = 4, steps = 60, every = 6;
   long ticks = 500;
-  std::vector<std::string> componentPaths;
+  std::vector<std::string> componentPaths, plants;
   for (int i = 1; i < argc; ++i) {
     const char *a = argv[i];
     auto next = [&](const char *d) { return (i + 1 < argc) ? argv[++i] : d; };
@@ -172,6 +176,8 @@ int main(int argc, char **argv) {
       steps = std::atoi(next("60"));
     else if (!std::strcmp(a, "--every"))
       every = std::atoi(next("6"));
+    else if (!std::strcmp(a, "--plant"))
+      plants.push_back(next("humvee"));
     else if (a[0] != '-' && docPath.empty())
       docPath = a;
   }
@@ -186,12 +192,24 @@ int main(int argc, char **argv) {
     frames = 30;
   if (docPath.empty()) {
     std::fprintf(stderr, "usage: nav_scrub <nav_scrub.ari> [--history H] [--agents N] [--ticks T]"
-                         " [--offscreen --png P] [--component-path DIR]\n");
+                         " [--plant P ...] [--offscreen --png P] [--component-path DIR]\n");
     return 2;
   }
+  if (plants.empty()) { // the Humvee, and the bicycle to compare (the Humvee alone without Jolt)
+    plants.push_back(cvc::physics::scrub_default_plant());
+    if (plants.front() != cvc::nav::kScrubKinematic)
+      plants.push_back(cvc::nav::kScrubKinematic);
+  }
+  for (const std::string &p : plants)
+    try {
+      cvc::physics::plant_host::check(p);
+    } catch (const std::exception &e) {
+      std::fprintf(stderr, "nav_scrub: --plant %s: %s\n", p.c_str(), e.what());
+      return 2;
+    }
 
   // the scenario, and the checkpoints: a history of the user's, or one trained now on its map
-  const nav::scrub_scenario scenario = nav::default_scenario(agents, 0, ticks);
+  nav::scrub_scenario scenario = nav::default_scenario(agents, 0, ticks);
   nav::policy_library lib;
   const nav::sim_world world = nav::world_from_trace(scenario.world, lib);
   if (history.empty()) {
@@ -208,8 +226,14 @@ int main(int argc, char **argv) {
   }
   nav::scrub_options so;
   so.say = [](const std::string &line) { std::printf("nav_scrub: %s\n", line.c_str()); };
-  std::vector<nav::scrub_entry> entries = nav::scrub(h, scenario, so);
-  nav::scrub_view scrub(h, entries, -1, scenario.name + ", " + std::to_string(ticks) + " ticks");
+  so.plant = cvc::physics::scrub_plant();
+  std::vector<nav::scrub_plant_runs> runs;
+  for (const std::string &p : plants) {
+    scenario.plant = p;
+    runs.push_back({p, nav::scrub(h, scenario, so)});
+  }
+  nav::scrub_view scrub(h, std::move(runs), -1,
+                        scenario.name + ", " + std::to_string(ticks) + " ticks");
 
   cvc::app app;
   ari::register_cvc_uri_handler(app, componentPaths);
