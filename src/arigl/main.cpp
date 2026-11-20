@@ -117,6 +117,7 @@
 #include <cvc/media/media_frame.h>        // cvc::media_frame — the canonical media frame
 #include <cvc/media/media_opus.h>         // our mic in Opus, and peers' Opus mics decoded
 #include <cvc/media/voice_mixer.h>        // peers' voices: a jitter buffer each, one mix
+#include <cvc/media/web_audio.h>          // a browser's audio clock: mic and mix off frames
 #include <cvc/net/fast_lane_rtc.h>        // fast_lane_rtc_available
 #include <cvc/state/state.h>              // cvc::state::instance — conference media state keys
 #include <cvc/state/state_cluster_shard.h>
@@ -134,6 +135,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <iterator> // std::make_move_iterator — requeue the frames the audio tick leaves
 #include <map>
 #include <mutex>
 #include <optional>
@@ -797,6 +799,12 @@ struct ConferenceSession {
   std::atomic<double> self_talk_until_{0.0}; // wall time until which WE count as "talking"
   bool voice_talking_ = false; // our voice.talking leaf's value (absent = not talking)
   double now_wall_ = 0.0;      // wall-clock seconds, refreshed once per pump
+  bool in_pump_ = false;       // pump() is running (the audio tick leaves the frame its own work)
+#ifdef __EMSCRIPTEN__
+  // In a browser, the worklets' clock (cvc/media/web_audio.h): audio_tick() runs on each 20 ms
+  // block, between frames, and at full rate in a hidden tab, which draws no frames.
+  std::unique_ptr<cvc::media::web_audio::audio_clock> audio_clock_;
+#endif
   std::vector<std::string> cam_devices_, mic_devices_; // cached device names (index = device index)
   bool devices_enumerated_ = false;                    // devices listed yet (deferred past startup)
 
@@ -1148,6 +1156,12 @@ struct ConferenceSession {
       mic_run_ = true;
       mic_sender_ = std::thread([this] { mic_send_loop(); });
     }
+#ifdef __EMSCRIPTEN__
+    // Load the AudioWorklets now (asynchronous), so they are in by the time the document opens
+    // the mic and the first peer is heard; until then, and where they cannot load, SDL plays.
+    cvc::media::web_audio::prepare();
+    audio_clock_ = std::make_unique<cvc::media::web_audio::audio_clock>([this] { audio_tick(); });
+#endif
     active = true;
     return true;
   }
@@ -1528,7 +1542,37 @@ struct ConferenceSession {
   void pump() {
     if (!tp_ || !driver_)
       return;
+    in_pump_ = true;
+    struct pumping { // in_pump_ goes false however advance() returns
+      bool &on;
+      ~pumping() { on = false; }
+    } guard{in_pump_};
     driver_->advance(); // measured wall delta; fires kOrderPumpAll .. kOrderActivity in order
+  }
+
+  // A browser's audio step, on the worklets' clock (audio_clock_): send what the mic has, and
+  // hand peers' audio that has come to their jitter buffers, so neither waits for a frame. The
+  // frame loop does the same each frame (forward_streams, drain_inbox), and whichever runs first
+  // takes a chunk. A mic chunk is stamped as the native sender stamps it (mic_send_loop): the last
+  // frame's world-clock time moved on by the steady clock since, never stepping back.
+  void audio_tick() {
+    if (!active || in_pump_ || !app_ || !tp_ || !send_media_)
+      return;
+    now_wall_ =
+        std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    bool stamped = false;
+    double stamp = 0.0;
+    {
+      std::lock_guard<std::mutex> lk(mic_mu_);
+      if (clock_wall_ >= 0.0) { // a frame has stamped: the mic's stamps go on from it
+        stamp = std::max(mic_stamp_, clock_t_ + (now_wall_ - clock_wall_));
+        mic_stamp_ = stamp;
+        stamped = true;
+      }
+    }
+    if (stamped)
+      forward_streams(stamp, /*audio_only=*/true);
+    drain_inbox(/*audio_only=*/true);
   }
 
   // Register the per-frame steps as ordered observers on the driver, once, in setup(). They fire
@@ -1543,15 +1587,14 @@ struct ConferenceSession {
     driver_->add_frame_observer(kOrderNet, [this](const cf &) { net_step(); });
     // Wall-clock seconds for the talk-hold — deliberately wall time, not world time, so the hold is
     // frame-rate independent and does not freeze when the sim clock is paused or scaled.
-    // The mic's sender reads the world clock from here too: this frame's t, at now_wall_.
+    // The mic's sender (or a browser's audio tick) reads the world clock from here too: this
+    // frame's t, at now_wall_.
     driver_->add_frame_observer(kOrderWall, [this](const cf &f) {
       now_wall_ = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
                       .count();
-      if (audio_threads_) {
-        std::lock_guard<std::mutex> lk(mic_mu_);
-        clock_t_ = f.t;
-        clock_wall_ = now_wall_;
-      }
+      std::lock_guard<std::mutex> lk(mic_mu_); // the native sender, or a browser's audio tick
+      clock_t_ = f.t;
+      clock_wall_ = now_wall_;
     });
     // Pull the user-list window's per-peer volume/mute (local only, never sent).
     driver_->add_frame_observer(kOrderControls, [this](const cf &) { read_peer_controls(); });
@@ -1720,6 +1763,9 @@ struct ConferenceSession {
   }
 
   void stop() {
+#ifdef __EMSCRIPTEN__
+    audio_clock_.reset(); // no audio tick into what goes below
+#endif
     room_view_.reset(); // remove the room's nodes while the SceneGraph is still alive
     peers_.clear();     // close decode proxies before the transport/shard go away
     stop_mic_sender();  // it sends through the lane and the transport: joined before either goes
@@ -1849,12 +1895,14 @@ struct ConferenceSession {
   // Forward our local streams (camera: freshest frame; mic: every chunk in order) to the relay,
   // which fans them to the peers. EVERY outgoing frame is stamped with the common world-clock time
   // so a receiver can A/V-sync them — the sources' own pts (SDL camera vs SDL audio vs synthetic)
-  // are not comparable across streams.
-  void forward_streams(double stamp) {
+  // are not comparable across streams. AUDIO_ONLY: the mic alone (the audio tick).
+  void forward_streams(double stamp, bool audio_only = false) {
     if (!app_)
       return;
     auto &reg = cvc::ariadne::stream::stream_registry::for_app(*app_);
     for (publisher &p : pubs_) {
+      if (audio_only && !p.ring)
+        continue;
       const std::string token = cvc::state::instance(*app_)(prefix_ + "." + p.key).value();
       if (token.empty())
         continue;
@@ -2112,14 +2160,20 @@ struct ConferenceSession {
 
   // Route each queued peer frame: camera -> a pts-ordered buffer + a lazily-opened decode proxy
   // the tile renders; mic (where the audio is on the frame) -> receive_voice. Then take in what
-  // each peer's audio did (take_voice).
-  void drain_inbox() {
+  // each peer's audio did (take_voice). AUDIO_ONLY (a browser's audio tick): the mic frames; the
+  // rest stay queued, in order, for the frame.
+  void drain_inbox(bool audio_only = false) {
     std::vector<cvc::media_frame> batch;
     {
       std::lock_guard<std::mutex> lk(media_mu_);
       batch.swap(inbox_);
     }
+    std::vector<cvc::media_frame> later; // not the audio tick's
     for (cvc::media_frame &m : batch) {
+      if (audio_only && m.stream_id != "mic") {
+        later.push_back(std::move(m));
+        continue;
+      }
       if (m.origin_node_id.empty() || m.origin_node_id == pid_)
         continue; // never play/show ourselves as a peer
       if (m.stream_id == "mic") {
@@ -2150,6 +2204,11 @@ struct ConferenceSession {
           pm.vbuf.pop_front();
       }
     }
+    if (!later.empty()) { // ahead of what has come since
+      std::lock_guard<std::mutex> lk(media_mu_);
+      inbox_.insert(inbox_.begin(), std::make_move_iterator(later.begin()),
+                    std::make_move_iterator(later.end()));
+    }
     take_voice();
   }
 
@@ -2160,6 +2219,10 @@ struct ConferenceSession {
   // the target is +inf, so the freshest frame shows immediately (no added delay) instead of waiting
   // on an audio clock that has stopped.
   void sync_and_show() {
+    double out_s = out_period_s_;
+    if (mix_out_ && voice_ && voice_->rate() > 0 && voice_->channels() > 0)
+      out_s += static_cast<double>(mix_out_->queued_bytes()) /
+               (static_cast<double>(voice_->rate()) * voice_->channels() * sizeof(float));
     for (auto &kv : peers_) {
       peer_media &pm = kv.second;
       if (!pm.video_proxy)
@@ -2168,12 +2231,13 @@ struct ConferenceSession {
         pm.vbuf.clear();
         continue;
       }
-      // This peer's audio latency = what its jitter buffer holds + the output device's buffer.
-      // Show the video frame whose pts the audio has reached: last_audio_pts minus that. (With no
-      // output open nothing drains the buffers, and they say nothing of what is heard.)
+      // This peer's audio latency = what its jitter buffer holds + the output's (its device
+      // buffer, and what it holds queued: a browser's worklet ring). Show the video frame whose pts
+      // the audio has reached: last_audio_pts minus that. (With no output open nothing drains the
+      // buffers, and they say nothing of what is heard.)
       double target = 1e18;
       if (audio_fresh(pm) && mix_out_)
-        target = pm.last_audio_pts - out_period_s_ - voice_->buffered_s(kv.first);
+        target = pm.last_audio_pts - out_s - voice_->buffered_s(kv.first);
       std::shared_ptr<std::vector<std::uint8_t>> show;
       double show_pts = pm.shown_pts;
       while (!pm.vbuf.empty() &&

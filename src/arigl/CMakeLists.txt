@@ -325,6 +325,8 @@ if(EMSCRIPTEN)
   endif()
   file(GENERATE OUTPUT "$<TARGET_FILE_DIR:cyprty>/cyprty.html"
        INPUT "${CMAKE_CURRENT_SOURCE_DIR}/web/cyprty.html")
+  file(GENERATE OUTPUT "$<TARGET_FILE_DIR:cyprty>/cvc-audio-worklet.js"
+       INPUT "${CMAKE_CURRENT_SOURCE_DIR}/../cvcMedia/web/cvc-audio-worklet.js")
   if(TARGET wasm-extra-demos)
     add_dependencies(wasm-extra-demos cyprty)
   endif()
@@ -428,6 +430,9 @@ if(EMSCRIPTEN)
       file(GENERATE OUTPUT "$<TARGET_FILE_DIR:arigl>/${_f}"
            INPUT "${CMAKE_CURRENT_SOURCE_DIR}/web/${_f}")
     endforeach()
+    # cvcMedia's AudioWorklets (cvc/media/web_audio.h), served beside the page.
+    file(GENERATE OUTPUT "$<TARGET_FILE_DIR:arigl>/cvc-audio-worklet.js"
+         INPUT "${CMAKE_CURRENT_SOURCE_DIR}/../cvcMedia/web/cvc-audio-worklet.js")
 
     # ariglx-web: the same shell with an embedded Python (cvcpkg/recipes/ariglx-web;
     # docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §5): a document's python: block, and a Python program
