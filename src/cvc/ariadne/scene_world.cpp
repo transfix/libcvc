@@ -1040,9 +1040,9 @@ void SceneWorld::restart(std::vector<std::string> *warnings) {
 
 void SceneWorld::use_vehicle_clock(cvc::app &app, const Scene &scene,
                                    std::vector<std::string> *warnings) {
-  // The vehicles' tick (cvc::kSimTick) and a 100 Hz physics step are whole numbers of the 0.01 s
-  // quantum; the scenes' default 1/120 s divides neither. A clock that has ticked keeps its
-  // quantum, and the tick is then held to whole physics steps of it.
+  // The simulation clock (cvc::kSimQuantum, the scenes' own 1/120 s, with a real-time catch-up of
+  // cvc::kSimCatchup), of which the vehicles' tick (cvc::kSimTick) is whole quanta. A clock that
+  // has ticked keeps its quantum, and the tick is then held to whole physics steps of it.
   if (!scene.vehicles.empty() && !cvc::adopt_sim_clock(app.world_clock()))
     warn(warnings, "ari: world: vehicles: the clock has already run at " +
                        std::to_string(app.world_clock().fixed_dt()) +

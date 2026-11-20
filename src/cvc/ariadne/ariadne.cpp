@@ -10,6 +10,7 @@
 #include "chart_emit.h"     // Kind::Chart (series / marker parse caches, the pick edge)
 #include "file_picker.h"    // §10.8 the Runtime's own "Open file" window
 #include "heatmap_emit.h"   // Kind::Heatmap (the subtree read on a write, the cell events)
+#include "settings_emit.h"  // Kind::Settings (the key walk, its write watch, the edits)
 #include "tf_editor_emit.h" // Kind::TfEditor (model / overlay / view state edges)
 
 #include <algorithm>
@@ -69,6 +70,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility> // exchange
 #include <vector>
 
 namespace cvc {
@@ -233,6 +235,11 @@ void substitute_index_in(Widget &out, const std::string &idx) {
   replace_in(out.on_remove, kTok, idx);
   for (std::string &t : out.tab_titles)
     replace_in(t, kTok, idx);
+  // A settings editor's roots and filter (root: vehicles.{i}).
+  for (std::string &r : out.settings_roots)
+    replace_in(r, kTok, idx);
+  for (std::string &f : out.settings_filter)
+    replace_in(f, kTok, idx);
   replace_in(out.visible_when, kTok, idx);
   replace_in(out.enabled_when, kTok, idx);
   replace_in(out.disabled_when, kTok, idx);
@@ -244,6 +251,8 @@ void substitute_index_in(Widget &out, const std::string &idx) {
   replace_in(out.background.src, kTok, idx); // §5.12
   replace_in(out.background.bind, kTok, idx);
   replace_in(out.background.status, kTok, idx);
+  replace_in(out.background.color_src, kTok, idx); // §5.26
+  replace_in(out.color_src, kTok, idx);            // §5.26 a row's colour (palette.{i})
   replace_in(out.poster, kTok, idx); // §5.13
   replace_in(out.emoji, kTok, idx);  // §5.11 a post's own shortcodes
   // §5.20 rich text: a row's runs (runs: feed.items.{i}.runs) and its handlers
@@ -987,6 +996,75 @@ public:
     return out;
   }
 
+  struct ColorsOutcome {
+    std::vector<ItemColor> value; // none on failure or nil
+    std::string error;            // empty on success
+    bool skipped = false;         // not evaluated: the frame's budget was spent
+  };
+
+  // §5.26 evaluate `src` to colours: a colour's text or a ';' list of them (color_value.h), three
+  // numbers [r, g, b], or a list of colours (each a text or [r, g, b], nil unset). nil is none.
+  ColorsOutcome eval_colors(const std::string &src) {
+    const RawOutcome o = eval_raw(src);
+    if (!o.error.empty())
+      return {{}, o.error, o.skipped};
+    const auto bad = [&src]() {
+      return ColorsOutcome{{},
+                           "ari: color: \"" + src +
+                               "\" did not give a colour (r,g,b, [r, g, b], #rrggbb, c0..c7, or "
+                               "a list of them)"};
+    };
+    // Three numbers, clamped to 0..1.
+    const auto rgb_of = [](const se::list_ptr &l, float out[3]) {
+      if (!l || l->size() != 3)
+        return false;
+      for (std::size_t i = 0; i < 3; ++i) {
+        const se::value_t &e = (*l)[i];
+        if (const auto *n = std::get_if<int64_t>(&e.v))
+          out[i] = static_cast<float>(*n);
+        else if (const auto *d = std::get_if<double>(&e.v); d && std::isfinite(*d))
+          out[i] = static_cast<float>(*d);
+        else
+          return false;
+        out[i] = std::clamp(out[i], 0.0f, 1.0f);
+      }
+      return true;
+    };
+    ColorsOutcome out;
+    if (o.value.is_nil())
+      return out;
+    if (const auto *t = std::get_if<std::string>(&o.value.v)) {
+      if (!parse_color_list(*t, out.value))
+        return bad();
+      return out;
+    }
+    const auto *l = std::get_if<se::list_ptr>(&o.value.v);
+    if (!l)
+      return bad();
+    ItemColor one;
+    if ((one.set = rgb_of(*l, one.rgb))) {
+      out.value.push_back(one);
+      return out;
+    }
+    if (*l)
+      for (const se::value_t &e : **l) {
+        if (out.value.size() >= kMaxOptions)
+          break;
+        ItemColor c;
+        if (const auto *et = std::get_if<std::string>(&e.v)) {
+          if (!is_no_color(*et) && !(c.set = parse_color_text(*et, c.rgb)))
+            return bad();
+        } else if (const auto *el = std::get_if<se::list_ptr>(&e.v)) {
+          if (!(c.set = rgb_of(*el, c.rgb)))
+            return bad();
+        } else if (!e.is_nil()) {
+          return bad();
+        }
+        out.value.push_back(c);
+      }
+    return out;
+  }
+
   struct IntOutcome {
     int64_t value;        // the caller's `dflt` on any failure
     std::string error;    // empty on success
@@ -1708,6 +1786,12 @@ struct Runtime::Impl {
   std::uint64_t chart_frame = 0;
   // Kind::Heatmap caches, one per heatmap instance (heatmap_emit.h), swept with the charts'.
   std::unordered_map<std::string, HeatmapCache> heatmap_caches;
+  // Kind::Settings: one cache per editor instance, rebuilt only after a write under its roots,
+  // which `settings_watch` counts from the tree root's childChanged (connected when the first
+  // editor is drawn, on whatever thread writes). Swept with the charts' (`chart_frame`).
+  std::unordered_map<std::string, SettingsCache> settings_caches;
+  std::shared_ptr<SettingsWatch> settings_watch;
+  boost::signals2::scoped_connection settings_watch_conn;
 
   // §5.11 pictures by URI: loaded off the frame by the cache, published to the backend under the
   // cache's names (each once per raster, tracked in `published` against the backend it went to).
@@ -1758,7 +1842,7 @@ struct Runtime::Impl {
   void write_media_status(const std::string &status_path, const media::ImageView &v);
   // §5.12: open a container's background (its picture, loading through the cache) before its
   // content; true when it did, so the caller closes it with backend->end_backdrop().
-  bool open_backdrop(const Widget &w, bool window);
+  bool open_backdrop(const Widget &w, bool window, bool cell = false);
 
   // §5.13 video: / audio: players, one per widget instance (its bind:, else its place and source),
   // kept while the widget is drawn: paused at once when a walk does not draw it, dropped after 5 s.
@@ -2380,6 +2464,18 @@ struct Runtime::Impl {
   // §4 read-lane: evaluate a computed combo-options expression to a list of strings.
   // Fail-safe EMPTY list on a broken expr; warns once.
   std::vector<std::string> eval_options(const std::string &expr);
+  // §5.26 the colours a color: key holds or its expression gives this frame (a ';' list, or an
+  // expression's list). Fail-safe none on a broken one, warned once.
+  std::vector<ItemColor> eval_colors(const std::string &src);
+  std::unordered_map<std::string, std::vector<ItemColor>> last_good_colors;
+  std::set<std::string> color_warned; // the color: keys warned about a bad value
+  // §5.26 the colour, or on a radio the colours, `w` is drawn in this frame: its color: key's or
+  // expression's, else the one the document wrote. Empty: the backend's own.
+  std::vector<ItemColor> item_colors(const Widget &w);
+  // The one colour of `w` (its first) into `out`; false: the backend's own.
+  bool item_color(const Widget &w, float out[3]);
+  // §5.26 the next emit_node draws a cell of a grid: a group's fill covers the cell.
+  bool next_is_cell = false;
   // §3/§4: evaluate a repeat-count expression to a non-negative, capped int. Fail-safe 0.
   int eval_count(const std::string &expr);
   void warn_once(const std::string &msg) {
@@ -2486,6 +2582,56 @@ std::vector<std::string> Runtime::Impl::eval_options(const std::string &expr) {
   else
     keep_last(last_good_options, expr, o.value);
   return o.value;
+}
+
+std::vector<ItemColor> Runtime::Impl::eval_colors(const std::string &src) {
+  std::vector<ItemColor> out;
+  if (!is_expr(src)) { // a key: its value, read each frame
+    std::string bad;
+    if (!parse_color_list(read_string(app, resolve(src)), out, &bad) &&
+        color_warned.insert(src).second)
+      warn_once("ari: color: " + src + " holds '" + bad +
+                "', which is not r,g,b, [r, g, b], #rrggbb or c0..c7 (drawn in the default "
+                "colour)");
+    return out;
+  }
+  const ReactiveEngine::ColorsOutcome o = ensure_reactive().eval_colors(src);
+  if (o.skipped) { // last frame's colours (none: the default), not a warning
+    ++reactive_skips;
+    const auto it = last_good_colors.find(src);
+    return it != last_good_colors.end() ? it->second : std::vector<ItemColor>();
+  }
+  if (!o.error.empty())
+    warn_once(o.error);
+  else
+    keep_last(last_good_colors, src, o.value);
+  return o.value;
+}
+
+std::vector<ItemColor> Runtime::Impl::item_colors(const Widget &w) {
+  if (!w.color_src.empty())
+    return eval_colors(w.color_src);
+  if (!w.option_colors.empty())
+    return w.option_colors;
+  if (!w.has_text_color)
+    return {};
+  ItemColor c;
+  c.set = true;
+  std::copy(w.text_color, w.text_color + 3, c.rgb);
+  return {c};
+}
+
+bool Runtime::Impl::item_color(const Widget &w, float out[3]) {
+  if (w.color_src.empty()) { // what the document wrote (no list: that is a radio's)
+    if (w.has_text_color)
+      std::copy(w.text_color, w.text_color + 3, out);
+    return w.has_text_color;
+  }
+  const std::vector<ItemColor> c = eval_colors(w.color_src);
+  if (c.empty() || !c.front().set)
+    return false;
+  std::copy(c.front().rgb, c.front().rgb + 3, out);
+  return true;
 }
 
 int Runtime::Impl::eval_count(const std::string &expr) {
@@ -2669,6 +2815,7 @@ void Runtime::Impl::emit_container(const Widget &w) {
             instance_path.push_back(i);
           }
           autofocus(inst, i);
+          next_is_cell = true; // §5.26 a group's fill covers its cell
           emit_node(inst);
           if (i >= 0) {
             instance_path.pop_back();
@@ -2772,9 +2919,22 @@ void Runtime::Impl::emit_node(const Widget &w) {
   if (w.kind == Kind::TrayIcon) // emit_tray draws it, after the bar's menus; not here, where its
     return;                     // tooltip and pointer handlers would land on the item before it
   Backend &b = *backend;
+  const bool cell = std::exchange(next_is_cell, false); // a grid's cell (§5.26)
   // §4 read-lane: wrap the widget (and its subtree, emitted within the cases) in the
   // backend's disabled scope when a reactive enabled_when/disabled_when says so.
   const bool dis = disabled(w);
+  // §5.26 the colour scope around one leaf (a button's, a menu item's): drawn in the widget's
+  // colour this frame, when it has one.
+  const auto tinted = [&](auto &&draw) {
+    float rgb[3];
+    const bool tint = item_color(w, rgb);
+    if (tint)
+      b.begin_text_color(rgb);
+    const auto r = draw();
+    if (tint)
+      b.end_text_color();
+    return r;
+  };
   if (dis)
     b.begin_disabled();
   const char *label = w.label.c_str();
@@ -2846,7 +3006,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
     const std::string path = resolve(w.bind);
     const bool cur =
         read_bool_or_seed(app, path, w.bdef ? 1 : 0) != 0; // tolerant of "true"/"false"
-    const BoolEdit e = b.menu_item_toggle(label, cur);
+    const BoolEdit e = tinted([&] { return b.menu_item_toggle(label, cur); });
     if (e.committed) {
       write<int>(app, path, e.value ? 1 : 0);
       if (!w.on.empty())
@@ -2856,7 +3016,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
   }
 
   case Kind::MenuItemAction:
-    if (b.menu_item_action(label))
+    if (tinted([&] { return b.menu_item_action(label); }))
       enqueue(w.on);
     break;
 
@@ -2979,7 +3139,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
     }
     const int clicks_before = clicks_fired;
     {
-      const bool backdrop = open_backdrop(w, /*window=*/false); // §5.12
+      const bool backdrop = open_backdrop(w, /*window=*/false, cell); // §5.12, §5.26
       emit_container(w); // §3.0.3b: a group honours w.layout (grid / vertical)
       if (backdrop)
         b.end_backdrop();
@@ -3001,9 +3161,11 @@ void Runtime::Impl::emit_node(const Widget &w) {
       // §5.11 emoji: the caption's `:name:`s as pictures, where the backend draws them in a line.
       if (!w.emoji.empty() && emit_text_runs(w, "", label, true))
         break;
-      // §G? optional fixed tint (has_text_color) -> the *_colored leaf; else the plain draw.
-      if (w.has_text_color)
-        b.text_line_colored(label, w.text_color);
+      // A colour (§5.26: written, or computed this frame) -> the *_colored leaf; else the plain
+      // draw.
+      float tint[3];
+      if (item_color(w, tint))
+        b.text_line_colored(label, tint);
       else
         b.text_line(label);
     } else {
@@ -3014,8 +3176,9 @@ void Runtime::Impl::emit_node(const Widget &w) {
           is_expr(w.bind) ? eval_text(w.bind) : read_string(app, resolve(w.bind));
       if (!w.emoji.empty() && emit_text_runs(w, label, val, false))
         break;
-      if (w.has_text_color)
-        b.text_value_colored(label, val, w.text_color);
+      float tint[3];
+      if (item_color(w, tint))
+        b.text_value_colored(label, val, tint);
       else
         b.text_value(label, val);
     }
@@ -3100,6 +3263,24 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
 
+  case Kind::Settings: {
+    if (!settings_watch) {
+      settings_watch = std::make_shared<SettingsWatch>();
+      settings_watch_conn = cvc::state::instance(app).childChanged.connect(
+          [watch = settings_watch](const std::string &path) { watch->note(path); });
+    }
+    SettingsContext ctx{app,
+                        b,
+                        [this](const std::string &bind) { return resolve(bind); },
+                        [this](const std::string &event) { enqueue(event); },
+                        [this](const std::string &msg) { warn_once(msg); },
+                        *settings_watch,
+                        settings_caches,
+                        chart_frame};
+    emit_settings(ctx, w);
+    break;
+  }
+
   case Kind::Checkbox: {
     const std::string path = resolve(w.bind);
     const bool cur =
@@ -3161,8 +3342,20 @@ void Runtime::Impl::emit_node(const Widget &w) {
         idx = static_cast<int>(i);
         break;
       }
-    const IndexEdit e = w.kind == Kind::Radio ? b.radio(label, idx, opts, w.radio_row)
-                                              : b.combo(label, idx, opts); // DISPLAY the labels
+    // §5.26 a radio's colour: one for all of it, or one per option.
+    const std::vector<ItemColor> tint =
+        w.kind == Kind::Radio ? item_colors(w) : std::vector<ItemColor>();
+    IndexEdit e;
+    if (w.kind != Kind::Radio)
+      e = b.combo(label, idx, opts); // DISPLAY the labels
+    else if (tint.size() > 1)
+      e = b.radio_colored(label, idx, opts, w.radio_row, tint);
+    else if (!tint.empty() && tint.front().set) {
+      b.begin_text_color(tint.front().rgb);
+      e = b.radio(label, idx, opts, w.radio_row);
+      b.end_text_color();
+    } else
+      e = b.radio(label, idx, opts, w.radio_row);
     if (e.changed && e.index >= 0 && e.index < static_cast<int>(store.size())) {
       write<std::string>(app, path, store[e.index]); // store the mapped value (or the text)
       if (!w.on.empty())
@@ -3443,7 +3636,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
   }
 
   case Kind::Button:
-    if (b.button(label)) {
+    if (tinted([&] { return b.button(label); })) {
       enqueue(w.on);
       ++clicks_fired; // the click is the button's, not a group's around it (§4.6)
     }
@@ -3795,7 +3988,8 @@ bool Runtime::Impl::emit_text_runs(const Widget &w, const char *label, const std
   bool pictures = false;
   if (!expand_emoji(value, resolve(w.emoji), pictures_here, runs, plain, pictures, 0u, -1))
     return false;
-  const float *rgb = w.has_text_color ? w.text_color : nullptr;
+  float tint[3];
+  const float *rgb = item_color(w, tint) ? tint : nullptr; // §5.26
   if (pictures) {
     if (label && *label)
       runs.insert(runs.begin(), TextRun{std::string(label) + ": ", std::string()});
@@ -3910,7 +4104,8 @@ void Runtime::Impl::emit_rich_text(const Widget &w, const char *label, bool &inn
       runs.push_back(std::move(r));
     }
   }
-  o.rgb = w.has_text_color ? w.text_color : nullptr;
+  float tint[3];
+  o.rgb = item_color(w, tint) ? tint : nullptr; // §5.26
   o.wrap = w.wrap;
   o.max_lines = w.text_max_lines;
   if (w.size.w.unit == Unit::Px && w.size.w.value > 0.0f)
@@ -3956,15 +4151,10 @@ void Runtime::Impl::write_media_status(const std::string &status_path, const med
   }
 }
 
-bool Runtime::Impl::open_backdrop(const Widget &w, bool window) {
+bool Runtime::Impl::open_backdrop(const Widget &w, bool window, bool cell) {
   const Background &bg = w.background;
   if (!bg.any())
     return false;
-  const std::string src = is_expr(bg.src) ? eval_text(bg.src) : bg.src;
-  const std::string ref =
-      bg.bind.empty() ? src
-                      : (is_expr(bg.bind) ? eval_text(bg.bind)
-                                          : read_or<std::string>(app, resolve(bg.bind), src));
   Backdrop bd;
   bd.fit = bg.fit;
   bd.opacity = bg.opacity;
@@ -3972,6 +4162,29 @@ bool Runtime::Impl::open_backdrop(const Widget &w, bool window) {
   bd.banner_rows = bg.banner_rows;
   bd.window = window;
   bd.size = w.size;
+  bd.cell = cell;
+  // §5.26 the fill: written in the document, or its key's or expression's this frame.
+  if (!bg.color_src.empty()) {
+    const std::vector<ItemColor> c = eval_colors(bg.color_src);
+    if (!c.empty() && c.front().set) {
+      bd.has_fill = true;
+      std::copy(c.front().rgb, c.front().rgb + 3, bd.fill);
+    }
+  } else if (bg.color.set) {
+    bd.has_fill = true;
+    std::copy(bg.color.rgb, bg.color.rgb + 3, bd.fill);
+  }
+  if (!bg.has_picture()) {
+    if (!bd.has_fill)
+      return false; // no colour this frame: the content alone
+    backend->begin_backdrop(bd);
+    return true;
+  }
+  const std::string src = is_expr(bg.src) ? eval_text(bg.src) : bg.src;
+  const std::string ref =
+      bg.bind.empty() ? src
+                      : (is_expr(bg.bind) ? eval_text(bg.bind)
+                                          : read_or<std::string>(app, resolve(bg.bind), src));
   if (media::is_video_uri(ref)) {
     // §5.13 a video background (a banner, a card's back): a silent player looping by itself, its
     // frames at their own shape, fitted by the backend as a picture is.
@@ -4603,6 +4816,8 @@ void Runtime::Impl::render() {
       sweep_chart_caches(chart_caches, chart_frame);
     if (!heatmap_caches.empty())
       sweep_heatmap_caches(heatmap_caches, chart_frame);
+    if (!settings_caches.empty())
+      sweep_settings_caches(settings_caches, chart_frame);
   }
 }
 

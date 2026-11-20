@@ -871,6 +871,8 @@ struct FtxuiBackend::Impl {
   std::vector<std::string> wins; // windows open in the walk
   std::string cur_menu;          // the dropdown being emitted
   int disabled = 0;
+  // §5.26 begin_text_color's colours, innermost last: a leaf drawn under one takes it.
+  std::vector<fx::Color> text_colors;
   std::unordered_map<std::string, int> id_uses;
   Walk walk;  // being built
   Walk last;  // the last walk finished
@@ -1147,6 +1149,8 @@ struct FtxuiBackend::Impl {
     it.menu = cur_menu;
     it.group = item_groups.empty() ? std::string() : item_groups.back();
     it.focusable = focusable && !is_disabled();
+    if (!text_colors.empty())
+      el = el | fx::color(text_colors.back());
     if (it.focusable && focus_next && cur_menu.empty()) {
       focus_next = false;
       set_focus(id); // autofocus: (focus_next_widget)
@@ -2585,6 +2589,18 @@ void FtxuiBackend::end_backdrop() {
   const bool mono = image_mode() == ImageMode::Mono; // no colours to put behind text
   if (it == m.images.end() || it->second.rgb.empty() || bd.terminal == BackdropTerminal::Off ||
       mono) {
+    // §5.26 a fill, where there is no picture to draw: the content's cells on it (dimmed toward
+    // black by opacity, as a picture is), its text black or white, whichever reads on it, where
+    // the document did not colour that text. A grid's cell fills its whole cell.
+    if (bd.has_fill && !mono) {
+      const float k = std::clamp(bd.opacity, 0.0f, 1.0f);
+      const float fill[3] = {bd.fill[0] * k, bd.fill[1] * k, bd.fill[2] * k};
+      const float lum = 0.299f * fill[0] + 0.587f * fill[1] + 0.114f * fill[2];
+      content = content | fx::color(lum > 0.55f ? fx::Color::Black : fx::Color::White) |
+                fx::bgcolor(rgb_color(fill));
+      if (bd.cell)
+        content = content | fx::xflex_grow | fx::yflex_grow;
+    }
     m.add(content); // loading, failed or not drawn in a terminal: the content alone
     return;
   }
@@ -3026,6 +3042,14 @@ void FtxuiBackend::text_value_colored(const char *label, const std::string &valu
   m_->leaf(m_->uid("t|"), false, text_block(labelled(label, value)) | fx::color(rgb_color(rgb)));
 }
 
+void FtxuiBackend::begin_text_color(const float rgb[3]) {
+  m_->text_colors.push_back(rgb_color(rgb));
+}
+void FtxuiBackend::end_text_color() {
+  if (!m_->text_colors.empty())
+    m_->text_colors.pop_back();
+}
+
 // §5.20 a rich text: one item for the paragraph (its own clicks and hover, its tooltip), and
 // before it one for each link, in Tab order as they read. A press on a link's cells is the link's
 // (Impl::link_at); Enter or Space activates the focused one. The link under the pointer or with
@@ -3329,6 +3353,12 @@ IndexEdit FtxuiBackend::combo(const char *label, int current_index,
 // the next, wrapping, like a combo's Left / Right.
 IndexEdit FtxuiBackend::radio(const char *label, int current_index,
                               const std::vector<std::string> &options, bool row) {
+  return radio_colored(label, current_index, options, row, {});
+}
+
+IndexEdit FtxuiBackend::radio_colored(const char *label, int current_index,
+                                      const std::vector<std::string> &options, bool row,
+                                      const std::vector<ItemColor> &colors) {
   Impl &m = *m_;
   const std::string id = m.uid(std::string("ra|") + label);
   const int n = static_cast<int>(options.size());
@@ -3356,6 +3386,8 @@ IndexEdit FtxuiBackend::radio(const char *label, int current_index,
   fx::Elements opts;
   for (int i = 0; i < n; ++i) {
     fx::Element o = fx::text((i == shown ? "(*) " : "( ) ") + options[static_cast<std::size_t>(i)]);
+    if (const std::size_t k = static_cast<std::size_t>(i); k < colors.size() && colors[k].set)
+      o = o | fx::color(rgb_color(colors[k].rgb)); // §5.26 the option's own colour
     if (f && i == shown)
       o = o | fx::inverted;
     o = o | fx::reflect(opt_box(i));
@@ -4103,6 +4135,45 @@ bool FtxuiBackend::draw_image_fit(const char *name, float box_w, float box_h) {
 // ---- headless driving
 // ----------------------------------------------------------------------------
 
+namespace {
+
+fx::Terminal::Color ftxui_palette(FtxuiBackend::Options::Palette p) {
+  using P = FtxuiBackend::Options::Palette;
+  switch (p) {
+  case P::TrueColor:
+    return fx::Terminal::Color::TrueColor;
+  case P::Colors256:
+    return fx::Terminal::Color::Palette256;
+  case P::Colors16:
+    return fx::Terminal::Color::Palette16;
+  case P::Auto:
+    break;
+  }
+  return fx::Terminal::ColorSupport();
+}
+
+// FTXUI's palette for one headless draw: full colour where `true_color`, else `p` (Auto: as it
+// is), the one before restored when it ends. FTXUI picks a colour's nearest when the colour is
+// made, so it covers the walk as well as the print.
+struct PaletteScope {
+  fx::Terminal::Color saved = fx::Terminal::ColorSupport();
+  bool set = false;
+  PaletteScope(bool true_color, FtxuiBackend::Options::Palette p) {
+    if (true_color || p != FtxuiBackend::Options::Palette::Auto) {
+      fx::Terminal::SetColorSupport(true_color ? fx::Terminal::Color::TrueColor : ftxui_palette(p));
+      set = true;
+    }
+  }
+  ~PaletteScope() {
+    if (set)
+      fx::Terminal::SetColorSupport(saved);
+  }
+  PaletteScope(const PaletteScope &) = delete;
+  PaletteScope &operator=(const PaletteScope &) = delete;
+};
+
+} // namespace
+
 std::string FtxuiBackend::render_to_string(Runtime &rt, int width, int height, bool ansi) {
   Impl &m = *m_;
   m.term_w = std::max(1, width);
@@ -4110,11 +4181,8 @@ std::string FtxuiBackend::render_to_string(Runtime &rt, int width, int height, b
   // The placeholders' 24-bit colour names their image, and a terminal with the kitty protocol has
   // true colour, so lay out and print as one would. For the whole walk, not only the print: FTXUI
   // quantizes an RGB colour to the terminal's palette when the colour is made, during layout, and
-  // a palette colour names no image.
-  const bool true_color = ansi && m.mode() == ImageMode::Kitty;
-  const fx::Terminal::Color colors = fx::Terminal::ColorSupport();
-  if (true_color)
-    fx::Terminal::SetColorSupport(fx::Terminal::Color::TrueColor);
+  // a palette colour names no image. Otherwise the palette Options::palette says.
+  const PaletteScope palette(ansi && m.mode() == ImageMode::Kitty, m.opt.palette);
   rt.render(); // walk the tree -> (re)builds m.root through the methods above
   m.gfx_shown = m.gfx_last;
   fx::Screen screen =
@@ -4122,12 +4190,8 @@ std::string FtxuiBackend::render_to_string(Runtime &rt, int width, int height, b
                          height > 0 ? fx::Dimension::Fixed(height) : fx::Dimension::Fit(m.root));
   fx::Render(screen, m.root);
   m.shown = m.last; // the boxes now hold this frame's layout
-  if (ansi) {
-    std::string out = screen.ToString();
-    if (true_color)
-      fx::Terminal::SetColorSupport(colors);
-    return out;
-  }
+  if (ansi)
+    return screen.ToString();
   std::string out;
   for (int y = 0; y < screen.dimy(); ++y) {
     std::string line;
@@ -4540,8 +4604,11 @@ FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::function<
         m.term_gfx.sixel = true;
   pixels = m.pixels();
   const fx::Terminal::Color colors = fx::Terminal::ColorSupport();
-  if (m.mode() == ImageMode::Kitty) // the placeholders' 24-bit colour names their image
+  // The placeholders' 24-bit colour names their image; else the palette Options::palette says.
+  if (m.mode() == ImageMode::Kitty)
     fx::Terminal::SetColorSupport(fx::Terminal::Color::TrueColor);
+  else if (m.opt.palette != Options::Palette::Auto)
+    fx::Terminal::SetColorSupport(ftxui_palette(m.opt.palette));
   if (opts.on_start)
     opts.on_start();
   const auto period = std::chrono::milliseconds(1000 / std::max(1, opts.fps));
@@ -4690,6 +4757,8 @@ void FtxuiBackend::text_line(const char *) {}
 void FtxuiBackend::text_value(const char *, const std::string &) {}
 void FtxuiBackend::text_line_colored(const char *, const float[3]) {}
 void FtxuiBackend::text_value_colored(const char *, const std::string &, const float[3]) {}
+void FtxuiBackend::begin_text_color(const float[3]) {}
+void FtxuiBackend::end_text_color() {}
 HeatmapEvent FtxuiBackend::heatmap(const char *, const HeatmapSpec &) { return {}; }
 RichTextEvent FtxuiBackend::rich_text(const std::vector<TextRun> &, const RichTextOptions &) {
   return {};
@@ -4722,6 +4791,10 @@ DoubleEdit FtxuiBackend::slider_double(const char *, const char *, double, doubl
 }
 IndexEdit FtxuiBackend::combo(const char *, int, const std::vector<std::string> &) { return {}; }
 IndexEdit FtxuiBackend::radio(const char *, int, const std::vector<std::string> &, bool) {
+  return {};
+}
+IndexEdit FtxuiBackend::radio_colored(const char *, int, const std::vector<std::string> &, bool,
+                                      const std::vector<ItemColor> &) {
   return {};
 }
 StringEdit FtxuiBackend::input_text(const char *, const char *, const std::string &, bool) {

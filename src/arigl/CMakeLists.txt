@@ -195,7 +195,7 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                    --png "${CMAKE_CURRENT_BINARY_DIR}/arigl_pose_entities.png"
                    "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/tests/data/ariadne_pose_entities.ari")
   set_tests_properties(arigl_pose_entities PROPERTIES
-                       PASS_REGULAR_EXPRESSION "pose_entities: tick 60 hash 9e21a383280ccbb7 count 3"
+                       PASS_REGULAR_EXPRESSION "pose_entities: tick 60 hash cbe4b2596cd56330 count 3"
                        SKIP_REGULAR_EXPRESSION "built without yaml-cpp;this build has no Jolt"
                        RESOURCE_LOCK cvcgl_gl_context)
   # A URL names a document for the browser shell; natively arigl says so.
