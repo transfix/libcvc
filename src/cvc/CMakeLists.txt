@@ -112,6 +112,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/media/media_router.h
   ../../inc/cvc/media/media_rungs.h
   ../../inc/cvc/media/media_opus.h
+  ../../inc/cvc/media/voice_mixer.h
   ../../inc/cvc/geometry/bunny.h
   ../../inc/cvc/volume/endians.h
   ../../inc/cvc/utility/archive.h
@@ -451,6 +452,7 @@ set(SOURCE_FILES
   media/media_router.cpp
   media/media_rungs.cpp
   media/media_opus.cpp
+  media/voice_mixer.cpp
   state/state_message_bus.cpp
   state/state_peer_registry.cpp
   state/state_link_stats.cpp

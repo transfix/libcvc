@@ -984,8 +984,28 @@ Each viewer's rung adapts to its link.
     `media_frame` each (codec `opus`). Each packet gets its own `seq`, so a gap means a lost
     packet. Silence suppression still applies, and a new talk spurt resets the encoder.
   - A receiver decodes each peer with its own decoder, since Opus is stateful. It conceals up to
-    two lost packets, and cuts the result into mixer-sized chunks, because the mixer sums one chunk
-    per peer.
+    two lost packets and drops a packet at or behind the last one (a sender far behind has started
+    over, and so does its decoder).
+- **Jitter buffers (`cvc::voice_mixer`, `voice_mixer.h`).** Each peer's decoded audio goes into
+  a jitter buffer, and the playback device pulls the mix at its own pace
+  (`open_audio_output_pull`, SDL's get-callback), not the frame loop's.
+  - A peer starts playing once its target is buffered: 80 ms to start, at least the device's
+    block plus 20 ms (a browser's Web Audio block is 43 ms, so 63 ms there).
+  - When a playing peer runs dry and its audio is back within 300 ms, the audio was late, and its
+    target grows 20 ms (to 400 ms at most). After 10 s without running dry it shrinks a step.
+  - A peer that stops sending through a silence runs dry too, but nothing comes back soon, so its
+    target stands. A burst after a stall, past twice the target (and at least 120 ms past it),
+    loses its oldest audio down to the target, cross-faded across the cut.
+  - Every 10 s the client logs each heard peer's target, what it holds, how often it ran dry
+    (and how often that was late audio), and what was trimmed.
+  - Before this, the client played audio the moment it landed, into a 100 ms output it filled
+    once a frame. Over a WebSocket the audio lands in bursts, and a burst that was late left the
+    speaker with nothing to play, so the voice broke up.
+- **The mic drains its backlog each tick.** A browser delivers its mic in 43 ms blocks on the
+  main thread, and its timers skip the beats a busy frame makes them miss. The mic producer used
+  to read one 21 ms chunk a tick, so every skipped tick left a chunk behind for good, and at 80 ms
+  of backlog the capture dropped it (about 64 ms of audio each time). Now a tick reads every whole
+  chunk queued (`frame_source::more`), and the capture keeps up to 250 ms before it drops.
   - The relay forwards a mic as sent, whatever its codec, so it needs no libopus. A client
     without libopus sends f32, which every client plays. It cannot decode a peer's Opus, so it
     logs once and that peer is silent to it. Older clients are not provided for; this is not
