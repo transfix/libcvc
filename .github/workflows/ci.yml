@@ -2879,6 +2879,13 @@ jobs:
         state_exec_async_test: OK ] PumpReport.WithoutANotifierTheReportIsLeftAsItWas
         state_exec_async_test: OK ] LongSteps.AStepWithNoNativeIsNamedSo
         state_exec_async_calls_test: OK ] KernelPools.BeforeAnyExecPoolAKernelTakesNoPoolLock
+        exec_pool_test: OK ] ExecPoolContinuous.AWithGroupInsideADetachOfTheSameGroupDoesNotWaitForItsPump
+        exec_pool_test: OK ] ExecPoolContinuous.AWithGroupThatRacedADetachWaitsForItsToken
+        exec_pool_test: OK ] ExecPoolContinuous.CrossSubmitsFromTwoWorkersAreRefused
+        exec_pool_test: OK ] ExecPoolContinuous.AHostInsideWithGroupAndANativeSubmittingBackDoNotDeadlock
+        exec_pool_test: OK ] ExecPoolContinuous.AGroupFailingAfterAnotherIsTornDownIsWork
+        exec_pool_test: OK ] ExecPoolContinuous.AHostPumpingItsOwnGroupDoesNotFreezeABusyOne
+        exec_pool_test: OK ] ExecPoolContinuous.ALastGroupDetachedByAnEntryLeavesNoRecord
       # ^ SAN_REQUIRED_S2A ends here. No comment line inside the list: run.sh would read it as a
       # required line.
       # The lock tests read this and run their smaller sanitizer sizes.
