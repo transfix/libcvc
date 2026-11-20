@@ -3291,11 +3291,13 @@ static int cmd_segment(cvc::app &app, int argc, char **argv) {
     throw std::runtime_error("cvc segment: no seeds: give --seeds <file> or --seed name:i,j,k "
                              "(or --automatic critical-points, which needs none)");
 
-  // The stepper, so a long run can report its progress.
+  // The stepper, so a long run can report its progress. A step of 2^18 units is a few hundredths
+  // of a second, and big enough for the per-voxel passes to spread over the app's compute pool
+  // (a smaller one runs them on this thread).
   cvc::segment_stepper stepper(vol, std::move(seeds), p);
   const double every = vm["seconds"].as<double>();
   auto last = std::chrono::steady_clock::now();
-  while (!stepper.step(4096)) {
+  while (!stepper.step(std::size_t(1) << 18)) {
     if (every > 0 &&
         std::chrono::duration<double>(std::chrono::steady_clock::now() - last).count() >= every) {
       std::cerr << "cvc segment: " << stepper.status() << "\n";

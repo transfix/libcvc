@@ -632,6 +632,114 @@ b      ·
   label and each cell's text (else its value), `*` after a marked one and `.` for no value. With a
   legend, a last line lists the stops (`legend: 0 #c0392b, 12.5 #e6a23c, 25 #27ae60`).
 
+A `settings:` widget edits every key under a state subtree, so a panel of settings needs no
+widget per key. Each key's editor comes from its metadata: the comment and properties a binding
+writes on its keys (`cvc/state/state_key_meta.h`'s `access`, `unit`, `min` and `max`, and
+`cvc/core/param_table.h`'s `type`, `choices` and `default`). A document checks for it with
+`(has? "settings")`.
+
+```yaml
+- settings: Tuning             # the label, drawn above it ("" or type: settings for none)
+  root: sim                    # a state path, or a list of them
+  filter: ["nav.*", "-nav.debug*"]   # optional: keys whose path under the root matches
+  groups:                      # optional: the order and names of the branches
+    - nav: Navigation
+    - world: {title: The world, help: what it is made of, open: true}
+    - plant                    # only its place in the order
+  search: true                 # a search box (its text kept at tree.<id>.search)
+  readouts: false              # leave out the read-only keys (default true)
+  open: true                   # every group open at first (default false)
+  commit: release              # sliders write once, at the release (default live)
+  on: tuned                    # after each committed write and each reset
+```
+
+- **The editor a key gets**, in this order:
+  - a read-out (its value and unit) for a read-only node or `access: telemetry`;
+  - a combo for `choices` (comma-separated);
+  - for a `type` (`param_table`'s):
+    - a checkbox for `bool`;
+    - an integer for `int`;
+    - a number for `number`;
+    - a text field for anything else.
+  - Without a `type`, a key with a `unit`, or with a `min` and a `max`, is a number:
+    - `state_key_meta` stores a unit of `""` (a count or a flag) as no unit, so with no unit it is
+      a checkbox over 0..1 and an integer otherwise;
+    - a unit of `tick` is an integer, shown as ticks;
+    - any other unit is a number, its unit shown after it (a ratio, `1`, shows none).
+  - A number whose value is not a number, and a key with neither a type nor a range, is a text
+    field.
+- **The editors**:
+  - An integer or a number with a `min` and a `max` is a slider over that range. The range is a
+    recommendation: ctrl+click an ImGui slider to type any value.
+  - The slider moves by ratio when the key's `scale` property is `log`, or when the range is
+    positive and spans 100x or more (`scale: linear` says not).
+  - Without a range it is a drag field (ImGui) or a text field (a terminal).
+  - A text field is applied on Enter; leaving it without one puts the value back.
+  - A value the key's kind does not take (a word for a number) is not written, and warns once.
+- **Groups.** Each branch under the root is a group:
+  - in ImGui a collapsing header, and a tree node below that;
+  - at each level the keys come first, in name order (a header has no end, so a key drawn after
+    one would read as under it), then the branches;
+  - `groups:` lists branches (`a.b` for a nested one) to put first among their siblings, in its
+    order, with a `title`, a `help` (the header's tooltip; else the branch's comment) and `open`;
+  - the rest follow in name order, under their names;
+  - a branch with nothing shown under it is left out, and a hidden node with everything under it.
+  - With several roots each root is a group of its own (a root that is one key is a row), and
+    the paths below start with the root as written (`nav.vehicle.vmax`).
+- **`filter:`** patterns match a key's path under the root:
+  - a pattern with `*`, `?` or `[...]` is a glob (`*` crosses dots), any other a substring;
+  - a key passes when it matches one of the patterns and none that start with `-`.
+- **The search box** narrows the list by words in a key's path or description, in any case; a
+  `-word` leaves out what has it. While a search or a filter narrows the list, every group is
+  drawn open.
+- **Reset.** A key whose value is not its default shows a reset, which writes the default back.
+  - The default is the key's `default` property, else the value the editor first saw it hold.
+  - A group with such keys shows a "reset all", which puts back each key under it.
+  - A read-out has no reset.
+- **The tooltip**, on a key's name and editor: its path, its description (the comment, else `doc`),
+  its unit, the recommended range, its default, and when a change applies (from `access`:
+  `knob` live, `build` when next built, `command` an input, `telemetry` read-only).
+- **Writes** go through the path every bound widget's do: a slider writes as it moves (once at
+  the release with `commit: release`), the other editors on their commit, and `on:` runs after
+  the commit, so the key's watchers and `on:` handlers see the new value.
+- **It reads its subtree again only when something under a root is written**: a value, a comment,
+  a property, a key added or taken away (the tree root's change signal, counted per root), or the
+  search changes. An editor at rest reads no state. A key reached through a link is read, but a
+  write to the link's target is not seen until something under the root changes.
+  - It lists at most 2000 keys and 32 levels, warning once when it cuts a subtree there.
+- **ImGui** draws each key as a row: its name, its editor from 42% of the width to the reset's
+  place, and the reset. A header's "reset all" sits at the right of its line.
+- **A terminal** (FTXUI, tvision; any backend without its own) draws a flat list of its own
+  widgets:
+  - each group is a `[title]` line, a renamed one by its title and the rest by their paths, with
+    a `reset all` button while a key under it can be reset;
+  - each key is its editor, labelled with its path under the root, with a `reset` button beside a
+    changed one.
+
+```text
+name: [alpha]
+speed: 3 m/s
+[Navigation]
+[ reset all ]
+nav.mode: < b >
+[x] nav.on
+nav.vmax ██████▏              12.5 m/s
+[ reset ]
+[world]
+world.seed █▎                   7
+```
+
+Two keys from the C++ side, described the way a binding describes its own:
+
+```cpp
+const cvc::state_key_meta kSim[] = {
+    {"vmax", "knob", "m/s", 0.5, 40.0, "the top speed"},
+    {"gain", "knob", "1", 0.01, 10.0, "the steering gain"},   // 1000x: a slider by ratio
+};
+cvc::describe_state_keys(app, "sim", kSim);
+// settings: with root: sim shows a slider for each, with its unit, range and description.
+```
+
 A `spinner:` widget says something is under way when there is no amount to show (a request, a
 search). The host turns it by its own frame clock (`Runtime::frame_clock`), not by state, so it keeps
 moving while the document's programs are parked: a program waiting on `http-get` still has a
@@ -2156,6 +2264,36 @@ scene:
     document's `init:` runs before the world is made, and the runtime ignores a spawn request
     already set when it starts (a reload would spawn again), so this is how a document, a server
     document included, populates its world. A gym's reset clears them and spawns its own agents.
+  - **Fleets.** A `start:` entry with `fleet:` (a state name) is a fleet: up to 4096 vehicles,
+    named `<fleet> 1`, `<fleet> 2`, ... (or after `name:`), laid out together once the world's
+    grid exists, the way libcvc's nav swarms are:
+
+    ```yaml
+    start:
+      - { fleet: city, archetype: humvee, plant: kinematic, count: 800,
+          spawn: opposed, seed: 7, rally: { count: 16, assign: latitude } }
+    ```
+
+    - `spawn:` `opposed` starts them in the grid's west 30 % with goals in its east 30 %;
+      `scattered` (the default) draws both anywhere free; `points` starts them at the world's
+      spawn points. `seed:` (0 by default) makes the layout, the same on every platform.
+    - `rally: { count: T }` (or `rally: T`, at most 64) makes T teams by their goals' latitude.
+      Each team's rally point is the goal nearest its band's centre, and its vehicles' goal is
+      held there (they stop at it; they do not wander). Their team is the rally point's index
+      (plus the entry's `team:`), their colour hsv(t / T, 0.74, 0.98) (`colors: hsv`, the default
+      with rally points; `colors: spawn` keeps the spawn's). Without rally points each vehicle's
+      goal is its own, held as well.
+    - Its keys are `vehicles.fleets.<fleet>.*`: `count`, `placed`, `arrived`, `teams`, `seed` and
+      `status`, and `rally.count` with `rally.<t>.x`, `.y` and `.color`. Writing a rally point's
+      `x` and `y` moves its team (held to the grid). A change of `restart.request` lays the fleet
+      out again from its seed, every vehicle back at its start; `reseed.request` from the next
+      seed. `vehicles.fleets.names` lists the fleets.
+    - `keys: summary` (a fleet's default) writes no per-entity keys for its vehicles but for those
+      `vehicles.watch` names (entity ids joined by `,`: the one a camera follows, the one a panel
+      shows) and those with an intent; `entities.ids` lists the entities with keys, and
+      `entities.count` counts them all. `keys: all` writes every vehicle's.
+    - In C++: `WorldVehicles::fleets()`, `rally()`, `move_rally()` and `restart_fleet()`, and
+      `entity_info::fleet` and `rally`.
   - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,
     `color`, `color2` as `r,g,b`, `metadata` as `key=value, ...`, `controller`, `policy`,
     `policy_sha256`, `mass` or `mass_t` (a fraction of the range), `max_speed` or `max_speed_t`,
