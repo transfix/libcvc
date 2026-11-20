@@ -1015,6 +1015,20 @@ Each viewer's rung adapts to its link.
     (`opus.lib`, cvcpkg libopus cvc.8, or `libopus.dll.a`), never the MinGW `libopus.a`. The wasm
     bundle is cy-pca/cvcpkg#467; the browser client needs it to hear Opus.
   - Audio is not re-encoded per viewer: 32 kbit/s is already far below anything video sends.
+- **A native client's audio is off the frame loop.** A long frame (a loaded machine, software
+  GL) used to hold audio up both ways. A peer's mic was decoded and pushed to its jitter buffer
+  once a frame, so a stall let the device drain the buffer. Our own mic went out once a frame from
+  a ring of 8 chunks (170 ms), so a stall delayed it, and one past 170 ms dropped it.
+  - A peer's mic is decoded and pushed to `voice_mixer` on the thread it arrives on: the
+    transport's reader, or the lane's. The decoders, one per peer, are under their own mutex, since
+    the connection and the lane can both deliver one peer's packets. The frame takes each peer's
+    talk highlight and A/V clock from there.
+  - The mixer is made when the client joins, at 48 kHz mono, so the reader can feed it from the
+    first chunk. The output still opens on the frame's thread, once there is audio to play.
+  - Our mic goes out on a sender thread as the producer delivers each chunk. It is stamped with the
+    last frame's world-clock time, moved on by the steady clock since.
+  - `CVC_ARIGL_AUDIO_THREADS=0` puts both back on the frame. A browser build always has them
+    there: its transport, its audio callbacks and its frames share the page's one thread.
 
 ### 5k. Avatars: look, body, controller, energy (the frame for bring-your-own)
 
