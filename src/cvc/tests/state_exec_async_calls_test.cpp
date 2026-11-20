@@ -279,6 +279,8 @@ struct stoppable_app : cvc::app {
     std::vector<cvc::thread_ptr> workers = closeCpuKernelPool();
     joinPoolWorkers(workers);
   }
+  // The mutex that guards the app's exec pool and its build (app.h), for a test holding it.
+  boost::mutex &exec_pool_mutex() { return _execPoolMutex; }
 };
 
 // One engine's world: the app (its background pool and compute pool), a scheduler, the host
@@ -2759,6 +2761,33 @@ TEST(KernelPools, ACallOnceBackgroundCpuHasStoppedRaisesAndLeavesTheHost) {
   EXPECT_EQ(run(w, "(pool-io)").value, "1"); // an io call still runs
   w.host->wait_idle();
   EXPECT_EQ(w.host->in_flight(), 0u);
+}
+
+TEST(KernelPools, BeforeAnyExecPoolAKernelTakesNoPoolLock) {
+  // R2's S-m13: with no exec pool, whether the pools split is one atomic load, not
+  // _execPoolMutex. Another thread holds that mutex until the kernel has run (or 5 s pass): the
+  // kernel runs meanwhile.
+  std::atomic<bool> release{false};
+  world w(async_sched);
+  register_pool_probes(w, release);
+  std::atomic<bool> held{false}, ran_while_held{false};
+  std::thread holder([&] {
+    boost::mutex::scoped_lock lock(w.app.exec_pool_mutex());
+    held = true;
+    const auto until = clock_type::now() + 5s;
+    while (w.p.ended.load() == 0 && clock_type::now() < until)
+      std::this_thread::sleep_for(1ms);
+    ran_while_held = w.p.ended.load() > 0;
+  });
+  while (!held.load())
+    std::this_thread::yield();
+  release = true; // (pool-hold) returns at once
+  const int pid = w.submit("(pool-hold)");
+  w.run_to_end(pid);
+  holder.join();
+  EXPECT_TRUE(ran_while_held.load()) << "the submission waited for _execPoolMutex";
+  EXPECT_EQ(show(*w.result(pid)), "1"); // the background pool, as before
+  EXPECT_EQ(w.app.backgroundCpuPoolSize(), 0u);
 }
 
 // --- group 0's long-step sink (S2a.7, S2-Q11) ---
