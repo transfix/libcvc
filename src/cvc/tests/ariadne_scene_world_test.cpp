@@ -29,6 +29,7 @@
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
 #include <cvc/core/sim_tick.h>
+#include <cvc/core/world_clock.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/nav/world_grid.h>
 #include <cvc/ocean/sea_surface.h>
@@ -1143,7 +1144,7 @@ TEST(AriadneWorldVehicles, TheWorldBlockDeclaresVehicles) {
   };
   EXPECT_NE(error("{ vehicle: tank }").find("not a preset"), std::string::npos);
   EXPECT_NE(error("{ plant: hover }").find("plant 'hover'"), std::string::npos);
-  EXPECT_NE(error("{ controllers: [walker@1] }").find("nav@1, none or external"),
+  EXPECT_NE(error("{ controllers: [walker@1] }").find("nav@1, none, external or pose"),
             std::string::npos);
   EXPECT_NE(error("{ plant: jolt:roboracer }").find("only dynamic, dynamic4w and dynamicboat"),
             std::string::npos);
@@ -2127,6 +2128,633 @@ on_tick: |
   EXPECT_EQ(val(app, "drive.lead.intent.accel"), "2");
   EXPECT_DOUBLE_EQ(v.intent(id).accel, 2.0);
   EXPECT_GT(entity(v, id).speed, 2.0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Entity poses (the `pose` controller): an entity an outside simulation places, by its keys, a
+// packed value, a table of poses, a C++ (or Python) setter and a server document's published
+// namespace. No plant integrates it; its chassis is a kinematic box at each pose.
+
+namespace {
+
+const char *kPoses = R"(
+world:
+  vehicles:
+    poses: /fleet
+    archetypes:
+      humvee:
+        vehicle: humvee
+        controllers: [pose, nav@1]
+      racer:
+        plant: kinematic
+        vehicle: roboracer
+        controllers: [nav@1]
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [160, 160, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+    - node: crate
+      source: { box: { size: [1, 1, 1] } }
+      transform: { position: [40, 30, 0.5] }
+      body: { mass: 50 }
+)";
+
+LoadResult load_poses() {
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, kPoses);
+  if (r.ok)
+    if (const Value *world = find_world_block(r)) {
+      world_rules rules = default_world_rules();
+      EXPECT_EQ(parse_world_block(*world, rules), "");
+      r.scene.vehicles = rules.vehicles;
+      r.scene.vehicle_poses = rules.vehicle_poses;
+    }
+  return r;
+}
+
+// A `pose` humvee, with no pose yet (or at a spawn's place when `at` is given).
+std::uint64_t spawn_posed(WorldVehicles &v, const std::string &name = std::string()) {
+  entity_spec s;
+  s.archetype = "humvee";
+  s.controller = "pose";
+  s.name = name;
+  std::string why;
+  const std::uint64_t id = v.spawn(s, &why);
+  EXPECT_NE(id, 0u) << why;
+  return id;
+}
+
+// The scripted track: where entity `id`'s keys put it at frame k (exactly representable numbers).
+entity_pose track(int k) {
+  entity_pose p;
+  p.x = -20.0 + 0.25 * k;
+  p.y = 10.0 - 0.125 * k;
+  p.heading = -0.5 + 0.0078125 * k;
+  p.speed = 15.0;
+  p.steer = 0.0625 * ((k / 30) % 2 ? 1 : -1);
+  return p;
+}
+
+void write_track(cvc::state &st, std::uint64_t id, const entity_pose &p) {
+  const std::string at = "entities." + std::to_string(id) + ".pose.";
+  char buf[32];
+  const auto put = [&](const char *leaf, double v) {
+    std::snprintf(buf, sizeof(buf), "%.17g", v);
+    st(at + leaf).value(std::string(buf));
+  };
+  put("x", p.x);
+  put("y", p.y);
+  put("heading", p.heading);
+  put("speed", p.speed);
+  put("steer", p.steer);
+}
+
+// The chassis's height a kinematic box stands at on the square's top (z = 0): its wheels' radius
+// and half its height.
+double stand_height() {
+  const cvc::physics::vehicle_desc d = cvc::physics::vehicle_desc::humvee();
+  return d.half_extents.z + d.axles.front().wheel_radius;
+}
+
+} // namespace
+
+TEST(AriadneWorldVehicles, TheWorldBlockTakesPosesAndThePoseController) {
+  REQUIRE_YAML();
+  LoadResult r = load_poses();
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.scene.vehicle_poses, "/fleet");
+  ASSERT_EQ(r.scene.vehicles.size(), 2u);
+  EXPECT_EQ(r.scene.vehicles[0].controllers.front(), "pose");
+  EXPECT_TRUE(vehicle_controller_known("pose"));
+  const auto error = [](const std::string &poses) {
+    cvc::app app;
+    register_world_block(app);
+    LoadResult bad = load_string(app, "world:\n  vehicles:\n    poses: " + poses +
+                                          "\n    archetypes:\n      v: { vehicle: humvee }\n"
+                                          "scene:\n  nodes: []\n");
+    world_rules x = default_world_rules();
+    const Value *block = find_world_block(bad);
+    return block ? parse_world_block(*block, x) : std::string("no world: block");
+  };
+  EXPECT_EQ(error("fleet.cars"), "");
+  EXPECT_NE(error("\"a..b\"").find("poses: expects a state path"), std::string::npos);
+
+  // The packed records: written and read back exactly, a bad record skipped.
+  entity_pose a;
+  a.x = 1.0 / 3.0;
+  a.y = -2.5e7;
+  a.heading = 3.0;
+  a.speed = 7.25;
+  a.time = 0.06;
+  entity_pose b;
+  b.x = 4.0;
+  b.y = 5.0;
+  b.z = 1.5;
+  b.pitch = 0.1;
+  b.roll = -0.2;
+  b.steer = 0.3;
+  b.rear_axle = true;
+  const std::string text = pack_poses({{"1", a}, {"lead", b}});
+  std::vector<std::pair<std::string, entity_pose>> back;
+  EXPECT_TRUE(parse_poses(text, back));
+  ASSERT_EQ(back.size(), 2u);
+  EXPECT_EQ(back[0].first, "1");
+  EXPECT_EQ(back[0].second.x, a.x);
+  EXPECT_EQ(back[0].second.y, a.y);
+  EXPECT_TRUE(std::isnan(back[0].second.z));
+  EXPECT_EQ(back[0].second.time, 0.06);
+  EXPECT_FALSE(back[0].second.rear_axle);
+  EXPECT_EQ(back[1].first, "lead");
+  EXPECT_EQ(back[1].second.z, 1.5);
+  EXPECT_EQ(back[1].second.roll, -0.2);
+  EXPECT_TRUE(back[1].second.rear_axle);
+  EXPECT_TRUE(std::isnan(back[1].second.time));
+  EXPECT_FALSE(
+      parse_poses(text + "\nbad 1 2\n2 1 2 nan 0 0 0 0 0 nan;3 inf 0 0 0 0 0 0 0 nan", back));
+  ASSERT_EQ(back.size(), 3u) << "the good ones, the bad two left";
+  EXPECT_EQ(back[2].first, "2");
+}
+
+// Poses on the keys, each frame, with no plant integrating the entity: it is exactly where they
+// say, standing on the ground, its chassis a kinematic body there; its wheels steer and roll.
+TEST(AriadneWorldVehicles, APoseEntityFollowsAScriptedTrackExactly) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_poses();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  WorldVehicles &v = *w->vehicles();
+  EXPECT_EQ(v.poses_key(), "fleet");
+  const std::uint64_t id = spawn_posed(v, "lead");
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  const std::size_t bodies = w->world().body_count();
+
+  // No pose yet: it waits, out of the world.
+  run(app, *w, clock, 10);
+  EXPECT_FALSE(entity(v, id).placed);
+  EXPECT_FALSE(entity(v, id).posed);
+  EXPECT_EQ(val(app, "entities.1.controller"), "pose");
+
+  cvc::state &st = cvc::state::instance(app);
+  const double h = stand_height();
+  const std::uint64_t t0 = w->world().tick(); // its chassis goes in at the next step
+  for (int k = 0; k < 240; ++k) {
+    write_track(st, id, track(k));
+    run(app, *w, clock, 1);
+    const entity_info e = entity(v, id);
+    const entity_pose want = track(k);
+    ASSERT_TRUE(e.placed && e.posed) << "frame " << k;
+    // Exactly the pose, bit for bit: x, y, the heading, the speed and the steer.
+    EXPECT_EQ(e.x, want.x) << "frame " << k;
+    EXPECT_EQ(e.y, want.y) << "frame " << k;
+    EXPECT_EQ(e.yaw, want.heading) << "frame " << k;
+    EXPECT_EQ(e.speed, want.speed);
+    EXPECT_EQ(e.steer, want.steer);
+    EXPECT_EQ(e.z, h) << "standing on the square's top";
+    // Its chassis is a body there (as the physics world keeps it, in floats).
+    const cvc::physics::body_state b = w->world().state(e.chassis);
+    EXPECT_NEAR(b.position.x, want.x, 1e-4);
+    EXPECT_NEAR(b.position.y, want.y, 1e-4);
+    EXPECT_NEAR(b.position.z, h, 1e-4);
+  }
+  EXPECT_EQ(w->world().body_count(), bodies + 1) << "one body: its chassis";
+  EXPECT_EQ(val(app, "entities.1.command.by"), "pose");
+  // No plant has it, and none was made for it.
+  const std::vector<entity_plant> plants = v.plants();
+  ASSERT_EQ(plants.size(), 1u);
+  EXPECT_EQ(plants[0].model, "pose");
+  // Its wheels: the front ones steered by the pose's steer, every one rolled at its speed.
+  const std::vector<entity_wheel> wheels = v.wheels(id);
+  ASSERT_EQ(wheels.size(), 4u);
+  EXPECT_DOUBLE_EQ(wheels[0].steer, track(239).steer);
+  EXPECT_DOUBLE_EQ(wheels[3].steer, 0.0);
+  const double r0 = cvc::physics::vehicle_desc::humvee().axles.front().wheel_radius;
+  // 15 m/s, every step after the one that put it in
+  const double rolled =
+      15.0 * static_cast<double>(w->world().tick() - t0 - 1) * w->world().config().fixed_dt;
+  EXPECT_NEAR(std::cos(wheels[0].spin), std::cos(rolled / r0), 1e-6);
+  EXPECT_NEAR(std::sin(wheels[0].spin), std::sin(rolled / r0), 1e-6);
+  EXPECT_NEAR(wheels[0].z, -h + r0, 1e-9) << "on the ground under it";
+
+  // A matrix: its translation and rotation (here pitched nose down and rolled).
+  const double p = 0.1, rl = -0.05, hd = 0.75;
+  const double cp = std::cos(p), sp = std::sin(p), cr = std::cos(rl), sr = std::sin(rl),
+               ch = std::cos(hd), sh = std::sin(hd);
+  // R = Rz(hd) Ry(p) Rx(rl), row-major, with (5, -6, 1.75) its translation.
+  const double m[16] = {ch * cp,
+                        ch * sp * sr - sh * cr,
+                        ch * sp * cr + sh * sr,
+                        5.0,
+                        sh * cp,
+                        sh * sp * sr + ch * cr,
+                        sh * sp * cr - ch * sr,
+                        -6.0,
+                        -sp,
+                        cp * sr,
+                        cp * cr,
+                        1.75,
+                        0.0,
+                        0.0,
+                        0.0,
+                        1.0};
+  std::string text;
+  for (int i = 0; i < 16; ++i) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%s%.17g", i ? "," : "", m[i]);
+    text += buf;
+  }
+  st("entities.1.pose.matrix").value(text);
+  run(app, *w, clock, 30);
+  const entity_info e = entity(v, id);
+  EXPECT_NEAR(e.x, 5.0, 1e-12);
+  EXPECT_NEAR(e.y, -6.0, 1e-12);
+  EXPECT_NEAR(e.z, 1.75, 1e-12);
+  EXPECT_NEAR(e.yaw, hd, 1e-12);
+  EXPECT_NEAR(e.pose.pitch, p, 1e-12);
+  EXPECT_NEAR(e.pose.roll, rl, 1e-12);
+  const cvc::physics::quat q = w->world().state(e.chassis).rotation;
+  // Its nose (the body's +x) points along the matrix's first column.
+  const double nx = 1.0 - 2.0 * (q.y * q.y + q.z * q.z), ny = 2.0 * (q.x * q.y + q.w * q.z),
+               nz = 2.0 * (q.x * q.z - q.w * q.y);
+  EXPECT_NEAR(nx, m[0], 1e-5);
+  EXPECT_NEAR(ny, m[4], 1e-5);
+  EXPECT_NEAR(nz, m[8], 1e-5);
+
+  // A rear axle's point: its centre is ahead of it along the heading.
+  st("entities.1.pose.matrix").value("");
+  st("entities.1.pose.x").value("0");
+  st("entities.1.pose.y").value("0");
+  st("entities.1.pose.heading").value("1.5707963267948966");
+  st("entities.1.pose.ref").value("rear");
+  run(app, *w, clock, 30);
+  const entity_info rear = entity(v, id);
+  double axle = 0.0;
+  for (const cvc::physics::axle_desc &a : cvc::physics::vehicle_desc::humvee().axles)
+    axle = std::min(axle, a.x);
+  EXPECT_NEAR(rear.x, 0.0, 1e-9);
+  EXPECT_NEAR(rear.y, -axle, 1e-9);
+  entity_pose given;
+  ASSERT_TRUE(v.pose(id, given));
+  EXPECT_TRUE(given.rear_axle) << "pose() is what was given";
+  EXPECT_EQ(given.x, 0.0);
+
+  // The state after the track, pinned on every platform (a cross-platform-deterministic Jolt, as
+  // physics_world_test's golden scene): no plant, so the poses and the crate decide it.
+  const std::uint64_t hash = w->world().state_hash();
+  std::printf("[pose-track] state hash after %llu ticks: %016llx\n",
+              static_cast<unsigned long long>(w->world().tick()),
+              static_cast<unsigned long long>(hash));
+  EXPECT_EQ(w->world().tick(), 515u);
+  if (cvc::physics::backend_capabilities(cvc::physics::backend::jolt) &
+      cvc::physics::cap_determinism_cross_platform)
+    EXPECT_EQ(hash, 0xffffc2632ce76a65ull) << std::hex << "state hash " << hash;
+}
+
+// Timed poses (set_pose's): drawn between the last two, a span behind; held when the next is late;
+// a jump, a time gone back or the first one taken at once; the same time again changes nothing.
+TEST(AriadneWorldVehicles, TimedPosesAreDrawnBetweenTheLastTwo) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_poses();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  WorldVehicles &v = *w->vehicles();
+  const std::uint64_t id = spawn_posed(v);
+  const double dt = w->world().config().fixed_dt;
+  const auto step = [&](int n) {
+    for (int i = 0; i < n; ++i) {
+      v.before_step();
+      w->world().step();
+      v.after_step();
+    }
+  };
+  const auto at = [&](double x, double t, double heading = 0.0) {
+    entity_pose p;
+    p.x = x;
+    p.y = 2.0;
+    p.heading = heading;
+    p.speed = 10.0;
+    p.time = t;
+    return p;
+  };
+  EXPECT_FALSE(v.set_pose(id + 1, at(0.0, 0.0))) << "not an entity";
+  entity_pose bad = at(0.0, 0.0);
+  bad.y = std::numeric_limits<double>::infinity();
+  EXPECT_FALSE(v.set_pose(id, bad));
+  ASSERT_TRUE(v.set_pose(id, at(0.0, 0.0, 3.0)));
+  step(1);
+  EXPECT_EQ(entity(v, id).x, 0.0) << "the first: there at once";
+  // The next, 0.06 s on: over the next 0.06 s of world time it moves there, the heading the
+  // short way round (3 rad to -3 rad is 0.28 rad, not 6).
+  ASSERT_TRUE(v.set_pose(id, at(0.6, 0.06, -3.0)));
+  const double arc = std::remainder(-3.0 - 3.0, 2.0 * 3.14159265358979323846);
+  for (int k = 1; k <= 6; ++k) {
+    step(1);
+    const entity_info e = entity(v, id);
+    const double s = std::min(1.0, k * dt / 0.06);
+    EXPECT_NEAR(e.x, 0.6 * s, 1e-12) << "step " << k;
+    EXPECT_NEAR(std::remainder(e.yaw - (3.0 + s * arc), 2.0 * 3.14159265358979323846), 0.0, 1e-12);
+    EXPECT_NEAR(e.pose.time, 0.06 * s, 1e-12);
+  }
+  EXPECT_EQ(entity(v, id).x, 0.6) << "there exactly, at the span's end";
+  step(5);
+  EXPECT_EQ(entity(v, id).x, 0.6) << "the next is late: it holds";
+  // The same time again: the same pose, nothing changes.
+  ASSERT_TRUE(v.set_pose(id, at(5.0, 0.06)));
+  step(2);
+  EXPECT_EQ(entity(v, id).x, 0.6);
+  // A jump (farther than pose_jump): at once, its chassis teleported.
+  ASSERT_TRUE(v.set_pose(id, at(50.0, 0.12)));
+  step(1);
+  EXPECT_EQ(entity(v, id).x, 50.0);
+  EXPECT_NEAR(w->world().state(entity(v, id).chassis).position.x, 50.0, 1e-4);
+  // A time gone back (the outside simulation restarted): at once.
+  ASSERT_TRUE(v.set_pose(id, at(49.0, 0.0)));
+  step(1);
+  EXPECT_EQ(entity(v, id).x, 49.0);
+  // An untimed one: at the end of the next step.
+  entity_pose still = at(48.0, std::numeric_limits<double>::quiet_NaN());
+  ASSERT_TRUE(v.set_pose(id, still));
+  step(1);
+  EXPECT_EQ(entity(v, id).x, 48.0);
+  EXPECT_THROW(v.set_pose_jump(0.0), std::invalid_argument);
+  v.set_pose_jump(100.0);
+  EXPECT_EQ(v.pose_jump(), 100.0);
+}
+
+// Many at once: set_poses, the packed `entities.poses` value, and set_poses from another thread
+// while the world steps.
+TEST(AriadneWorldVehicles, ManyPosesAtOnceAndFromAnotherThread) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_poses();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  WorldVehicles &v = *w->vehicles();
+  std::vector<std::uint64_t> ids;
+  for (int i = 0; i < 8; ++i)
+    ids.push_back(spawn_posed(v));
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  std::vector<entity_pose_update> batch;
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    entity_pose p;
+    p.x = 8.0 * static_cast<double>(i) - 30.0;
+    p.y = -10.0;
+    batch.push_back({ids[i], p});
+  }
+  batch.push_back({999, entity_pose{}}); // not an entity: left
+  EXPECT_EQ(v.set_poses(batch), ids.size());
+  run(app, *w, clock, 2);
+  for (std::size_t i = 0; i < ids.size(); ++i)
+    EXPECT_EQ(entity(v, ids[i]).x, 8.0 * static_cast<double>(i) - 30.0);
+
+  // The packed value: one write for all of them.
+  std::vector<std::pair<std::string, entity_pose>> records;
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    entity_pose p;
+    p.x = 1.5 * static_cast<double>(i);
+    p.y = 20.0;
+    p.heading = 0.25;
+    records.emplace_back(std::to_string(ids[i]), p);
+  }
+  cvc::state::instance(app)("entities.poses").value(pack_poses(records));
+  run(app, *w, clock, 2);
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    const entity_info e = entity(v, ids[i]);
+    EXPECT_EQ(e.x, 1.5 * static_cast<double>(i));
+    EXPECT_EQ(e.y, 20.0);
+    EXPECT_EQ(e.yaw, 0.25);
+  }
+  // Unchanged, the packed value does not undo a setter's pose.
+  ASSERT_TRUE(v.set_pose(ids[0], batch[0].pose));
+  run(app, *w, clock, 2);
+  EXPECT_EQ(entity(v, ids[0]).x, -30.0);
+
+  // From another thread, while frames run: no tearing, and the last one holds.
+  std::atomic<bool> done{false};
+  std::thread writer([&] {
+    for (int k = 0; k <= 400; ++k) {
+      std::vector<entity_pose_update> b;
+      for (std::size_t i = 0; i < ids.size(); ++i) {
+        entity_pose p;
+        p.x = static_cast<double>(k) * 0.05;
+        p.y = static_cast<double>(i) * 6.0;
+        b.push_back({ids[i], p});
+      }
+      v.set_poses(b);
+      std::this_thread::yield();
+    }
+    done = true;
+  });
+  while (!done)
+    run(app, *w, clock, 1);
+  writer.join();
+  run(app, *w, clock, 2);
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    EXPECT_EQ(entity(v, ids[i]).x, 20.0);
+    EXPECT_EQ(entity(v, ids[i]).y, static_cast<double>(i) * 6.0);
+  }
+}
+
+// The poses table (world: vehicles: poses:): its entries that name an archetype spawn their
+// entities, its packed value places them by entry, an entry removed removes its entity; a pose
+// entity is a body the others meet: it pushes a crate, and a world restart puts it back where its
+// last pose is.
+TEST(AriadneWorldVehicles, APosesTableSpawnsAndPlacesItsEntities) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_poses();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  WorldVehicles &v = *w->vehicles();
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  cvc::state &st = cvc::state::instance(app);
+  st("fleet.alpha.archetype").value("humvee");
+  st("fleet.alpha.name").value("Alpha 1");
+  st("fleet.alpha.team").value("2");
+  st("fleet.alpha.color").value("0.1,0.2,0.3");
+  st("fleet.bravo.archetype").value("humvee");
+  st("fleet.nope.archetype").value("racer"); // no pose controller: refused, once
+  run(app, *w, clock, 2);
+  ASSERT_EQ(v.size(), 2u) << v.status();
+  EXPECT_NE(v.status().find("'nope'"), std::string::npos) << v.status();
+  std::vector<entity_info> es = v.entities();
+  EXPECT_EQ(es[0].spec.name, "Alpha 1");
+  EXPECT_EQ(es[0].spec.team, 2);
+  EXPECT_FLOAT_EQ(es[0].spec.color[2], 0.3f);
+  EXPECT_EQ(es[0].spec.controller, "pose");
+  EXPECT_EQ(es[1].spec.name, "bravo");
+  EXPECT_FALSE(es[0].placed) << "no pose yet";
+
+  // The packed value, by entry; then one's own keys, by entry too.
+  entity_pose a, b;
+  a.x = 36.0;
+  a.y = 30.0;
+  a.speed = 4.0;
+  b.x = -40.0;
+  b.y = -40.0;
+  b.heading = 1.0;
+  st("fleet.poses").value(pack_poses({{"alpha", a}, {"bravo", b}}));
+  run(app, *w, clock, 2);
+  es = v.entities();
+  EXPECT_EQ(es[0].x, 36.0);
+  EXPECT_EQ(es[1].yaw, 1.0);
+  st("fleet.bravo.pose.x").value("-41");
+  st("fleet.bravo.pose.y").value("-40");
+  run(app, *w, clock, 2);
+  EXPECT_EQ(entity(v, es[1].id).x, -41.0);
+
+  // Alpha drives into the crate (at x 40) at 4 m/s, and pushes it.
+  const std::vector<cvc::physics::body_id> crate = w->bodies_of("crate");
+  ASSERT_EQ(crate.size(), 1u);
+  const double crate_x = w->world().state(crate[0]).position.x;
+  for (int k = 1; k <= 120; ++k) {
+    a.x = 36.0 + 4.0 * k / 60.0;
+    st("fleet.poses").value(pack_poses({{"alpha", a}, {"bravo", b}}));
+    run(app, *w, clock, 1);
+  }
+  EXPECT_GT(w->world().state(crate[0]).position.x, crate_x + 2.0) << "the crate was pushed";
+
+  // A restart: the world made afresh, each pose entity back in at its last pose.
+  const std::uint64_t alpha = es[0].id;
+  w->restart(&warnings);
+  run(app, *w, clock, 2);
+  EXPECT_TRUE(entity(v, alpha).placed);
+  EXPECT_EQ(entity(v, alpha).x, a.x);
+
+  // Its entry gone: it goes; a new archetype there: another in its place.
+  st("fleet").removeChild("bravo");
+  run(app, *w, clock, 2);
+  ASSERT_EQ(v.size(), 1u);
+  EXPECT_EQ(v.entities()[0].spec.name, "Alpha 1");
+  st("fleet.alpha.name").value("Alpha One");
+  run(app, *w, clock, 2);
+  ASSERT_EQ(v.size(), 1u);
+  EXPECT_EQ(v.entities()[0].spec.name, "Alpha One");
+  EXPECT_NE(v.entities()[0].id, alpha);
+}
+
+// The pose document arigl runs offscreen (ctest arigl_pose_entities,
+// data/ariadne_pose_entities.ari), run headless: its three pose entities (two from start:, one from
+// its table) in the world with the ground and nothing else, and at tick 60 the state hash arigl
+// prints, pinned in both.
+TEST(AriadneWorldVehicles, APoseDocumentsHashIsPinned) {
+  REQUIRE_YAML();
+  const fs::path path = fs::path(__FILE__).parent_path() / "data" / "ariadne_pose_entities.ari";
+  if (!fs::exists(path))
+    GTEST_SKIP() << "no source tree beside this test: " << path.string();
+  cvc::app app;
+  AppRuntime art(app, "");
+  art.load(path.string());
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  art.drain();
+  SceneWorld *w = art.scene_world();
+  ASSERT_NE(w, nullptr);
+  ASSERT_NE(w->vehicles(), nullptr);
+  cvc::world_clock::config cc;
+  cc.fixed_dt = w->world().config().fixed_dt;
+  cvc::world_clock clock(cc);
+  w->follow(clock); // anchors, and spawns the table's entry
+  while (w->world().tick() < 60) {
+    clock.advance_ticks(1);
+    w->follow(clock);
+  }
+  ASSERT_EQ(w->world().tick(), 60u);
+  WorldVehicles &v = *w->vehicles();
+  ASSERT_EQ(v.size(), 3u) << v.status();
+  for (const entity_info &e : v.entities())
+    EXPECT_TRUE(e.placed && e.posed) << e.spec.name;
+  const entity_info third = v.entities()[2];
+  EXPECT_EQ(third.spec.name, "third");
+  EXPECT_EQ(third.x, 12.0);
+  EXPECT_EQ(third.pose.pitch, 0.0625);
+  EXPECT_EQ(w->world().body_count(), 4u) << "the ground and three chassis";
+  EXPECT_EQ(w->world().vehicle_count(), 0u);
+  EXPECT_EQ(val(app, "physics.stats.tick"), "60");
+  const std::uint64_t hash = w->world().state_hash();
+  char hex[24];
+  std::snprintf(hex, sizeof(hex), "%016llx", static_cast<unsigned long long>(hash));
+  EXPECT_EQ(val(app, "physics.stats.hash"), hex) << "published while physics.hash is 1";
+  std::printf("[pose-document] state hash at tick 60: %s\n", hex);
+  if (cvc::physics::backend_capabilities(cvc::physics::backend::jolt) &
+      cvc::physics::cap_determinism_cross_platform)
+    EXPECT_EQ(hash, 0x9e21a383280ccbb7ull) << "state hash " << hex;
+}
+
+// A server document places entities through its published namespace: its program writes the
+// table (an entry and its pose each tick); the world here reads it, as a relay client's does once
+// the relay replicates it.
+TEST(AriadneWorldVehicles, AServerDocumentPlacesThroughItsPublishedNamespace) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_poses();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  const fs::path doc = write_doc("pose_server", R"(meta: { name: placer, min_libcvc: 3.7.5 }
+server:
+  publish: [fleet]
+init: |
+  (state-set "fleet.lead.archetype" "humvee")
+on_tick: |
+  (state-set "fleet.lead.pose.x" (* 0.05 (int (state-get "sim.tick"))))
+  (state-set "fleet.lead.pose.y" "-12")
+  (state-set "fleet.lead.pose.t" (/ (int (state-get "sim.tick")) 120.0))
+)");
+  ServerDocument server(app, "garage");
+  ASSERT_EQ(server.read(doc.string()), "");
+  for (const std::string &warning : server.load(doc.string()))
+    ADD_FAILURE() << "warning: " << warning;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  WorldVehicles &v = *w->vehicles();
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  std::uint64_t tick = 0;
+  const auto steps = [&](int frames) {
+    for (int i = 0; i < frames; ++i) {
+      tick += 2; // the relay's 120 Hz under a 60 Hz frame
+      server.step(tick, tick / 120.0);
+      clock.drive(1.0 / 60.0);
+      w->follow(app.world_clock());
+    }
+  };
+  steps(120);
+  ASSERT_EQ(v.size(), 1u) << v.status();
+  const entity_info e = v.entities()[0];
+  EXPECT_EQ(e.spec.name, "lead");
+  EXPECT_TRUE(e.placed);
+  // Its timed poses, drawn a tick behind: within one step's travel of the server's last.
+  EXPECT_NEAR(e.x, 0.05 * static_cast<double>(tick), 0.05 * 2.0 + 1e-9);
+  EXPECT_EQ(e.y, -12.0);
 }
 
 // ---------------------------------------------------------------------------------------------

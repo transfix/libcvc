@@ -501,12 +501,20 @@ void pose_vehicle_wheels(RealizedScene &r) {
           best = &e;
       if (!best)
         continue;
-      // Turned about its own upright by its steer, at its centre: the per-frame pose path
-      // (change-detected, published rather than written).
+      // Turned about its own upright by its steer, at its centre, and rolled about its axle by its
+      // spin (Rz(steer) Ry(spin)): the per-frame pose path (change-detected, published rather
+      // than written).
       const double c = std::cos(best->steer), sn = std::sin(best->steer);
-      const double m[16] = {c,   -sn, 0.0, best->x, sn,  c,   0.0, best->y,
-                            0.0, 0.0, 1.0, best->z, 0.0, 0.0, 0.0, 1.0};
-      w->setPoseMatrix(m);
+      if (best->spin == 0.0) {
+        const double m[16] = {c,   -sn, 0.0, best->x, sn,  c,   0.0, best->y,
+                              0.0, 0.0, 1.0, best->z, 0.0, 0.0, 0.0, 1.0};
+        w->setPoseMatrix(m);
+      } else {
+        const double cs = std::cos(best->spin), ss = std::sin(best->spin);
+        const double m[16] = {c * cs, -sn, c * ss, best->x, sn * cs, c,   sn * ss, best->y,
+                              -ss,    0.0, cs,     best->z, 0.0,     0.0, 0.0,     1.0};
+        w->setPoseMatrix(m);
+      }
     }
   }
 }
