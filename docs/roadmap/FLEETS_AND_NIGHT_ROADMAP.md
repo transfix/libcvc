@@ -273,7 +273,7 @@ fleet, quantizes them, and sends only what a viewer's area of interest holds.
 
 | Phase | What | Needs | Size |
 |---|---|---|---|
-| **FL0** | **Measure first.** 800 kinematic world vehicles, headless: navigator tick, physics step with 800 kinematic bodies, `publish_entities`, and spawns. Then 60, 120 and 240 on Jolt, the most that keep up with the clock. Decide D3 and the Jolt default from the numbers. | — | S |
+| **FL0** | **Done** (2026-11-19; §3.1). `AriadneWorldGym.FleetBench` (`CVC_FLEET_BENCH=1`) times kinematic fleets of 100, 400 and 800 (map known and fog) and Jolt fleets of 60, 120 and 240, headless. Two fixes from it: `WorldVehicles::entities()` found kinematic overlaps pair by pair (quadratic; now a grid, linear), and the navigators get the app's pool. D3 decided by the numbers: yes. | — | S |
 | **FL1** | **Fleets in `WorldVehicles`.** `world: vehicles: fleets:` (count, archetype, controller, sense, belief per fleet navigator, spawn layout, seed, rally points as teams and colours, goals held), summary publishing, `poses(fleet)`, fleet restart and reseed. Its plant: any world plant, Jolt included, a list or per team, switched live. Its policy: `trained` (downloads `cvcpkg://cvc/grl-snam-weights` unless installed or overridden), `builtin`, or other weights by cvcpkg package, URL, file or `data:` entry, per team or entity, switched live; the visible fallback; the metric following the policy. The gym spawns a fleet. Tests: `ariadne_scene_world_test` fleets (build, step, rally move, restart, belief modes, a Jolt fleet against a building, a mixed fleet, each policy choice, the download and the visible missing-weights fallback); a gym fleet episode. | L2, #1339, #1340 | L |
 | **FL2** | **The entity view.** `entity_layer` (bodies with LOD rungs, flags, goals, trails, path, belief, dots, targets, follow) over world vehicles; promotion of K entities to `vehicle_view` nodes; the threshold. #1358's `swarm_layer` code moves here. Test: `cvcgl_ariadne_entities`. | FL1 | M |
 | **FL3** | **The nav city documents on fleets.** nav_city_swarm/drive declare `world: data` and a fleet with entity layers. `nav_swarm` and `SceneSwarm` are removed. The minimap drags rally keys; the chase follows an entity. Perf gate: at least #1358's numbers on the reference laptop (and twice the C++ programs, measured back to back). | FL2 | M |
@@ -284,6 +284,40 @@ fleet, quantizes them, and sends only what a viewer's area of interest holds.
 | **NL4** | **Headlights.** An archetype's `lights:`: real attached spots on promoted entities, lamp-field entries for instanced ones, optional ground pools; carried by the relay's archetype. | FL2, NL1 to NL3 | M |
 | **NL5** | **Night.** `sky:` time of day, sun and moon, ambient and background curves, exposure; the cloud, water and weather read it; a day-night cycle on the world clock; the time of day as a server world section; the nav city documents' Night switch. | NL1 | M |
 | NL6 | Lit windows, light-pool decals, bloom. | NL3, NL5 | M |
+
+### 3.1 FL0's numbers
+
+Headless, an open 400 m square, `nav@1` driving every vehicle, on the reference laptop. A tick is
+0.06 s of world time: at the demos' 3.6x a tick must take under 16.7 ms.
+
+| Fleet | Tick | Physics | Publishing keys | The rest | Speed it keeps |
+|---|---|---|---|---|---|
+| 100 kinematic | 3.7 ms | 0.3 | 1.2 | 2.2 | 16x |
+| 400 kinematic | 15.8 ms | 1.4 | 9.2 | 5.3 | 3.8x |
+| 800 kinematic | 32.2 ms | 2.8 | 15.2 | 14.3 | 1.9x |
+| 800 kinematic, fog | 39.2 ms | 2.9 | 15.1 | 21.2 | 1.5x |
+| 60 Jolt | 9.4 ms | 6.8 | 1.0 | 1.6 | 6.4x |
+| 120 Jolt | 20.6 ms | 15.7 | 1.9 | 3.0 | 2.9x |
+| 240 Jolt | 47.8 ms | 42.7 | 3.9 | 1.3 | 1.3x |
+
+The rest is the navigator, the per-step vehicle hooks and the gym's own observation. Before the
+overlap fix, 800 kinematic vehicles took 42 ms a tick and the rest was 26 ms. #1358's swarm held 800
+under fog at 3.6x.
+
+What follows:
+- **Publishing is the largest cost of a kinematic fleet:** about 19 µs per vehicle per tick for its
+  25 keys. FL1's summary publishing removes it, and brings 800 kinematic vehicles to about 17 ms
+  a tick, near 3.6x.
+- **Jolt costs about 0.11 to 0.18 ms per vehicle per tick,** in the physics step itself. About 60
+  keep up at 3.6x, as the C++ drive's default assumed. More need a slower world, or fewer on Jolt
+  in a mixed fleet.
+- **D3: an asynchronous fleet is needed in drawn hosts.** At 3.6x a fleet ticks 60 times a wall
+  second, so even 60 Jolt vehicles (9.4 ms a tick) take more than half of a core, and 800
+  kinematic ones all of it. On the frame's thread that is the frame rate. FL1 steps a drawn host's
+  scene world (its physics and its navigators) on a worker, the frame reading its poses lock-free,
+  as #1358's swarm did with `sim_thread`. Headless hosts, the gym and the relay stay synchronous
+  and bit-for-bit.
+- Under fog, sensing adds about 7 ms at 800.
 
 **Order.** FL0, FL1, FL2, then FL3, which completes #1358's rework. NL1 and NL2 can run beside
 FL1 and FL2. NL3 and NL4 come after FL2, and NL5 any time after NL1. FL4 goes with WD3's next
@@ -296,8 +330,9 @@ part.
   first.
 - **D2. Fleet identity on the wire.** A fleet section with per-entity overrides, against an
   identity entry per entity.
-- **D3. An asynchronous fleet navigator** in drawn hosts (commands a tick late, the render thread
-  free), against synchronous everywhere.
+- **D3. Decided by FL0 (§3.1):** a drawn host steps its scene world (physics and navigators) on a
+  worker, with the frame reading poses lock-free; headless hosts, the gym and the relay stay
+  synchronous.
 - **D4. A fleet's per-entity keys by default:** `summary` or `all`.
 - **D5. Where Austin's lamps come from:** the bundle (does it carry street lights?), generated along
   roads, or OSM later.
