@@ -2292,6 +2292,25 @@ scene:
       `vehicles.watch` names (entity ids joined by `,`: the one a camera follows, the one a panel
       shows) and those with an intent; `entities.ids` lists the entities with keys, and
       `entities.count` counts them all. `keys: all` writes every vehicle's.
+    - Its navigator is its own (one per plant, `<plant>/<fleet>` to `WorldVehicles::belief`).
+      `sense:` `known` or `fog` is what it knows (the world's `vehicles.sense` by default).
+      `belief:` is how its vehicles share what they sense: `shared` (the default, one map),
+      `grouped` (max(2, n / 64) maps, teammates together) or `private` (one each).
+      `vehicles.fleets.<fleet>.sense` and `.belief` make it again, its vehicles at rest where
+      they are, and `.planes` counts its maps.
+    - `policy:` is what drives it.
+      - `trained` (the default) is the published CoefMLP, found in this order:
+        `$CVC_NAV_WEIGHTS`, an installed copy, else downloaded from
+        `cvcpkg://cvc/grl-snam-weights` through the data store (cached by hash).
+      - `builtin` is the built-in net.
+      - A `.cvcnav`'s path, `{ uri:, path:, sha256: }` (a file, an https URL or a cvcpkg://
+        package, the `.cvcnav` inside it, and its hash), or `{ data: <entry> }` (the document's
+        `data:` entry).
+
+      `vehicles.fleets.<fleet>.policy` switches it live, and `.drives` says what drives:
+      `trained (<where>, sha256:...)`, `weights (...)`, `builtin`, `builtin: loading <uri>` while
+      the weights are on their way, or `builtin: no trained weights (<why>)`. Without the
+      weights it drives on the built-in net, and the host's log says why once.
     - In C++: `WorldVehicles::fleets()`, `rally()`, `move_rally()` and `restart_fleet()`, and
       `entity_info::fleet` and `rally`.
   - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,

@@ -293,17 +293,37 @@ std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out
                   "policy:, at:, heading:)";
     vehicle_start s;
     for (const auto &[k, x] : item.entries) {
-      if (k == "archetype" || k == "name" || k == "controller" || k == "plant" || k == "policy") {
+      if (k == "policy" && x.is_map()) {
+        // A fleet's weights: { uri:, path:, sha256: } or { data: <entry> }.
+        for (const auto &[pk, pv] : x.entries) {
+          if (pk == "uri" || pk == "path" || pk == "sha256" || pk == "data")
+            (pk == "uri"      ? s.policy
+             : pk == "path"   ? s.policy_path
+             : pk == "sha256" ? s.policy_sha256
+                              : s.policy_data) = pv.as_string();
+          else
+            warn(warnings, at + " policy: unknown key '" + pk + "', ignored");
+        }
+        if (s.policy.empty() && s.policy_data.empty())
+          return at + " policy: expects a uri: or a data: entry ({uri:, path:, sha256:} or "
+                      "{data:})";
+        if (!s.policy.empty() && !s.policy_data.empty())
+          return at + " policy: names a uri: or a data: entry, not both";
+      } else if (k == "archetype" || k == "name" || k == "controller" || k == "plant" ||
+                 k == "policy") {
         (k == "archetype"    ? s.archetype
          : k == "name"       ? s.name
          : k == "controller" ? s.controller
          : k == "plant"      ? s.plant
                              : s.policy) = x.as_string();
-      } else if (k == "fleet" || k == "spawn" || k == "colors" || k == "keys") {
+      } else if (k == "fleet" || k == "spawn" || k == "colors" || k == "keys" || k == "sense" ||
+                 k == "belief") {
         (k == "fleet"    ? s.fleet
          : k == "spawn"  ? s.layout
          : k == "colors" ? s.colors
-                         : s.keys) = x.as_string();
+         : k == "keys"   ? s.keys
+         : k == "sense"  ? s.sense
+                         : s.belief) = x.as_string();
       } else if (k == "count" || k == "team" || k == "seed") {
         double n = 0.0;
         if (!number(x, at + " " + k + ":", n, why))
@@ -361,7 +381,8 @@ std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out
         return at + " count: expects a whole number from 1 to " +
                std::to_string(kMaxVehicleStartCount) + " (name a fleet: for more)";
       for (const auto &[k, x] : item.entries)
-        if (k == "spawn" || k == "seed" || k == "rally" || k == "colors" || k == "keys")
+        if (k == "spawn" || k == "seed" || k == "rally" || k == "colors" || k == "keys" ||
+            k == "sense" || k == "belief" || (k == "policy" && x.is_map()))
           warn(warnings, at + " " + k + ": is a fleet's (fleet: names one), ignored");
       const vehicle_start plain;
       s.layout = plain.layout;
@@ -370,6 +391,14 @@ std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out
       s.assign = plain.assign;
       s.colors = plain.colors;
       s.keys = plain.keys;
+      s.sense = plain.sense;
+      s.belief = plain.belief;
+      if (!s.policy_path.empty() || !s.policy_sha256.empty() || !s.policy_data.empty()) {
+        s.policy = plain.policy;
+        s.policy_path = plain.policy_path;
+        s.policy_sha256 = plain.policy_sha256;
+        s.policy_data = plain.policy_data;
+      }
     } else {
       if (!cvc::state::isValidStateName(s.fleet))
         return at + " fleet: '" + s.fleet + "' is not a state name";
@@ -389,6 +418,11 @@ std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out
         return at + " colors: '" + s.colors + "' is not one (hsv, spawn)";
       if (!s.keys.empty() && s.keys != "summary" && s.keys != "all")
         return at + " keys: '" + s.keys + "' is not one (summary, all)";
+      if (!s.sense.empty() && s.sense != "known" && s.sense != "fog")
+        return at + " sense: '" + s.sense + "' is not one (known, fog)";
+      if (!s.belief.empty() && s.belief != "shared" && s.belief != "grouped" &&
+          s.belief != "private")
+        return at + " belief: '" + s.belief + "' is not one (shared, grouped, private)";
     }
     if (!s.plant.empty() && !vehicle_plant_known(s.plant))
       return at + " plant: '" + s.plant +
