@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/requires.h>
@@ -5624,4 +5625,84 @@ TEST(AriadneSceneWeather, TheSeaStepsOnTheClockOnlyWithAWindAndSteersAtTheSkysKe
   std::printf("[storm] steered at sky.base 600: %.4f m/s (at 300: %.4f)\n", steer,
               6.0 * cvc::algo::wind_profile(300.0));
   EXPECT_DOUBLE_EQ(steer, 6.0 * cvc::algo::wind_profile(600.0));
+}
+
+// FLEETS_AND_NIGHT_ROADMAP.md FL0: what a fleet of world vehicles costs, headless, before fleets
+// exist: N agents spawned by the gym and stepped one navigator tick at a time (nav@1 drives every
+// one), on an open 400 m square, and on a city bundle when CVC_FLEET_BENCH_BUNDLE names one. Prints
+// the spawn time and the mean tick, the map known and under fog. A benchmark, not a check: it runs
+// only with CVC_FLEET_BENCH=1.
+namespace {
+
+std::string fleet_bench_doc(const std::string &bundle) {
+  std::string doc = std::string("requires: [scene.physics]\n") + kGymVehicles;
+  if (bundle.empty())
+    return doc + R"(
+scene:
+  physics: {}
+  world: { source: square, cell: 4 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [400, 400, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+  return doc + "data:\n  city: { uri: \"" + bundle + R"(", as: city_bundle }
+scene:
+  physics: {}
+  world: { source: city, cell: 31.25 }
+  nodes:
+    - { node: city, source: { data: city }, world: city, body: {} }
+)";
+}
+
+void fleet_bench(const std::string &doc, const std::string &plant, int n, const std::string &sense,
+                 int ticks) {
+  gym_options o;
+  o.count = n;
+  o.rays = 1;
+  o.max_steps = 0;
+  o.wander = true;
+  o.drive_telemetry = false;
+  o.set["vehicles.sense"] = sense;
+  for (int i = 0; i < n; ++i) {
+    entity_spec s;
+    s.plant = plant;
+    o.agents.push_back(s);
+  }
+  using clk = std::chrono::steady_clock;
+  const auto t0 = clk::now();
+  WorldGym gym(doc, o);
+  gym.reset(1);
+  const double spawn_ms = std::chrono::duration<double, std::milli>(clk::now() - t0).count();
+  const std::vector<double> none(gym.agents(), kNaN);
+  for (int i = 0; i < 10; ++i)
+    gym.step(none, none);
+  const auto t1 = clk::now();
+  for (int i = 0; i < ticks; ++i)
+    gym.step(none, none);
+  const double tick_ms = std::chrono::duration<double, std::milli>(clk::now() - t1).count() / ticks;
+  // A tick is 0.06 s of world time: at 1x a tick under 60 ms keeps up, at the demos' 3.6x under
+  // 16.7 ms.
+  std::printf("[fleet] %-9s n=%4d sense=%-5s agents=%4zu spawn %8.1f ms  tick %7.2f ms  (%5.1fx "
+              "real time)\n",
+              plant.c_str(), n, sense.c_str(), gym.agents(), spawn_ms, tick_ms,
+              tick_ms > 0.0 ? 60.0 / tick_ms : 0.0);
+}
+
+} // namespace
+
+TEST(AriadneWorldGym, FleetBench) {
+  REQUIRE_YAML();
+  if (!std::getenv("CVC_FLEET_BENCH"))
+    GTEST_SKIP() << "a benchmark: set CVC_FLEET_BENCH=1";
+  const char *bundle = std::getenv("CVC_FLEET_BENCH_BUNDLE");
+  const std::string doc = write_doc("fleet_bench", fleet_bench_doc(bundle ? bundle : "")).string();
+  for (const char *sense : {"known", "fog"})
+    for (const int n : {100, 400, 800})
+      fleet_bench(doc, "kinematic", n, sense, 100);
+  if (jolt())
+    for (const int n : {60, 120, 240})
+      fleet_bench(doc, "jolt", n, "known", 100);
 }
