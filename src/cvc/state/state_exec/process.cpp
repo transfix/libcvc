@@ -789,6 +789,10 @@ namespace detail {
 // returns once no call of the old one runs, and none starts after.
 void wakeup::set_notifier(wake_notifier fn, void *ctx) {
   std::lock_guard<std::mutex> lock(notifier_mu_);
+  // One owner at a time (K-12; attach refuses a scheduler with one, C-m3): a second notifier would
+  // take the first's place silently, and the first owner's clear would leave the second with none.
+  assert((!fn || notifier_.load(std::memory_order_relaxed) == nullptr) &&
+         "wakeup::set_notifier: a notifier is installed already");
   notifier_ctx_ = fn ? ctx : nullptr;
   notifier_.store(fn, std::memory_order_release);
 }
