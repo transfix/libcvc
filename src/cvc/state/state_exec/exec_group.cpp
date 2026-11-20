@@ -398,16 +398,30 @@ std::function<void(value_t)> group_on_complete(exec_group *group, bool *threw,
 
 } // namespace
 
+namespace {
+
+// A submission: under the pool's with_group when the group is attached and the calling thread
+// neither pumps nor holds it (Stage 2: it waits for a pump in progress, and the group is woken
+// after, since a submission posts nothing), else here.
+int submitted(exec_group &g, const std::function<int()> &submit) {
+  int pid = 0;
+  if (!cvc::detail::with_attached(g, [&] { pid = submit(); }))
+    pid = submit();
+  return pid;
+}
+
+} // namespace
+
 int exec_group::execute(const std::string &script, const execute_options &opts) {
   impl &m = *impl_;
   if (!opts.on_complete && (!opts.owner.empty() || m.opts.owner.empty()))
-    return m.sched->execute(script, opts);
+    return submitted(*this, [&] { return m.sched->execute(script, opts); });
   execute_options o = opts;
   if (o.owner.empty())
     o.owner = m.opts.owner; // the group's owner by default (options::owner)
   if (o.on_complete)
     o.on_complete = group_on_complete(this, &m.callback_threw, std::move(o.on_complete));
-  return m.sched->execute(script, o);
+  return submitted(*this, [&] { return m.sched->execute(script, o); });
 }
 
 int exec_group::execute(const value_t &expr, const execute_options &opts) {
@@ -418,13 +432,13 @@ int exec_group::execute(const value_t &expr, const execute_options &opts) {
   // is what keeps two groups, and the host's AST, from sharing one.
   const value_t given = copy_lists_and_dicts(expr);
   if (!opts.on_complete && (!opts.owner.empty() || m.opts.owner.empty()))
-    return m.sched->execute(given, opts);
+    return submitted(*this, [&] { return m.sched->execute(given, opts); });
   execute_options o = opts;
   if (o.owner.empty())
     o.owner = m.opts.owner;
   if (o.on_complete)
     o.on_complete = group_on_complete(this, &m.callback_threw, std::move(o.on_complete));
-  return m.sched->execute(given, o);
+  return submitted(*this, [&] { return m.sched->execute(given, o); });
 }
 
 namespace {
@@ -485,7 +499,15 @@ value_t proxy_on_worker(exec_context *ctx, cvc::exec_pool &pool, exec_group &gro
     meet->cv.notify_all();
   });
   std::unique_lock<std::mutex> lock(meet->m);
-  meet->cv.wait(lock, [&] { return meet->done; });
+  const auto t0 = std::chrono::steady_clock::now();
+  if (!meet->cv.wait_for(lock, std::chrono::milliseconds(10), [&] { return meet->done; })) {
+    // Over 10 ms: counted and logged while it waits (S2-Q5, an attached group's), then waited out.
+    lock.unlock();
+    cvc::detail::long_host_wait(
+        group, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    lock.lock();
+    meet->cv.wait(lock, [&] { return meet->done; });
+  }
   if (meet->error)
     std::rethrow_exception(meet->error);
   return std::move(meet->value);
