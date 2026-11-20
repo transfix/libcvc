@@ -2791,9 +2791,9 @@ jobs:
       # Stage 2a's required lines (the matrix's `required` format), the same in every leg: the
       # cases of S2.md section 4 (PL-2..PL-5, PL-9, PL-10, CT-1..CT-4, ST-3, LG-1, LG-2, LG-6,
       # LG-7, RA-1), the implementers' unit tests (the wake notifier and the pump's report; the
-      # split kernel pools and the evaluator's native names; pycvc's batch wait; the pool's own),
-      # and mt.groups' continuous points. A case added to them adds its line; the pool's own
-      # (S2a.2, S2a.4) go at the list's end as they merge (the marked comment after it).
+      # split kernel pools and the evaluator's native names; pycvc's batch wait; the pool's own;
+      # an attached group's teardown and the long-step monitor), and mt.groups' continuous points.
+      # A case added to them adds its line.
       SAN_REQUIRED_S2A: |
         exec_pool_test: OK ] ExecPool.PL02_EventcountNeverMissesAWake
         exec_pool_test: OK ] ExecPool.PL03_AHostPostWakesAParkedPool
@@ -2838,9 +2838,34 @@ jobs:
         mt.groups: t=8 groups=8 prog=fib runs=1 pump=continuous
         mt.groups: t=8 groups=8 prog=exceptions runs=1 pump=continuous
         mt.groups: t=8 groups=8 prog=cycle runs=1 pump=continuous
-      # ^ SAN_REQUIRED_S2A: the pool's lines (P, S2a.2 and S2a.4: its exec_pool_test cases) go at
-      # its end, above this comment, as they merge. No comment line inside the list: run.sh would
-      # read it as a required line.
+        exec_pool_test: OK ] ExecPoolContinuous.AttachIsRefusedTwice
+        exec_pool_test: OK ] ExecPoolContinuous.AttachedGroupsRunOnTheWorkers
+        exec_pool_test: OK ] ExecPoolContinuous.ForceMoveGivesEachPumpAnotherWorker
+        exec_pool_test: OK ] ExecPoolContinuous.ANewGroupDoesNotStarveABusyOne
+        exec_pool_test: OK ] ExecPoolContinuous.IdleWorkersParkAndFuzzPointsAreCounted
+        exec_pool_test: OK ] ExecPoolContinuous.AttachedGroupsRunToTheirResults
+        exec_pool_test: OK ] ExecPoolContinuous.APostWakesAnIdleGroup
+        exec_pool_test: OK ] ExecPoolContinuous.AGroupPostedDuringWithGroupIsPumpedAfterIt
+        exec_pool_test: OK ] ExecPoolContinuous.OnCompleteRunsOnTheAttachingThread
+        exec_pool_test: OK ] ExecPoolContinuous.AHostProxiedBodyRunsOnTheAttachingThreadUnderTheToken
+        exec_pool_test: OK ] ExecPoolContinuous.AFailedGroupIsTakenOnItsAttachingThread
+        exec_pool_test: OK ] ExecPoolContinuous.DeterministicModeRotatesInCreationOrder
+        exec_pool_test: OK ] ExecPoolContinuous.DetachRunsTheGroupsQueuedEntries
+        exec_pool_test: OK ] ExecPoolContinuous.DetachBeginAndEndDropTheGroupsEntries
+        exec_pool_test: OK ] ExecPoolContinuous.ASubmitInsideWithGroupIsPumped
+        exec_pool_test: OK ] ExecPoolContinuous.WithGroupMayDetachTheGroup
+        exec_pool_test: OK ] ExecPoolContinuous.AFailedGroupIsReadBeforeTakeFailed
+        exec_pool_test: OK ] ExecPoolContinuous.AWorkerFiringATimerTakesNoParkedWorker
+        exec_pool_test: OK ] ExecPoolContinuous.WithGroupGetsAGroupItsWorkerKeepsRepumping
+        exec_pool_test: OK ] ExecGroupTeardown.AnAttachedGroupLeavesItsPoolBeforeTheKills
+        state_exec_async_test: OK ] LongSteps.AGroupsLongNativeIsCountedAndLogged
+        state_exec_async_test: OK ] LongSteps.TheTreesSettingWinsOverTheDefault
+        state_exec_async_test: OK ] LongSteps.AThrowingLongStepIsCounted
+        state_exec_async_test: OK ] LongSteps.ALongWindowAtSlice256NamesItsLastNative
+        state_exec_async_test: OK ] LongSteps.ANameIsReportedOnceAMinute
+        state_exec_async_calls_test: OK ] LongStepSink.Group0LogsALongStepThroughTheApp
+      # ^ SAN_REQUIRED_S2A ends here. No comment line inside the list: run.sh would read it as a
+      # required line.
       # The lock tests read this and run their smaller sanitizer sizes.
       CVC_LOCKS_SANITIZER: '1'
     steps:
