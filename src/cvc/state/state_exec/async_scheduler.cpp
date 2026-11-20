@@ -110,7 +110,8 @@ void async_scheduler::set_slice_seconds(double seconds) {
 }
 
 void async_scheduler::refresh_slice() {
-  // Read even with both slice settings given: the long-step threshold comes from the tree too.
+  // Read even with both slice settings given, for the long-step threshold: one settings lookup a
+  // run loop then, a cost accepted (R2b S-m3).
   if (!watch_root_)
     return;
   const uint64_t seen = settings_changes_.version(watch_root_); // before the reads
@@ -214,7 +215,7 @@ void async_scheduler::set_long_step_default(double seconds) {
 
 // The long-step monitor (S2a.7, S2-Q11). A step, or a run's window between two of its clock
 // readings, that took longer than the threshold is counted, and reported to the sink with the
-// native its last step applied ("" when it applied none), at most once a minute per name. The name
+// native its last step applied ("(no native)" when none), at most once a minute per name. The name
 // is copied only then. A sink that throws is dropped: the step goes on.
 void async_scheduler::time_long_step(const process &proc, clock::time_point now) noexcept {
   const double seconds = std::chrono::duration<double>(now - long_window_).count();
@@ -225,7 +226,7 @@ void async_scheduler::time_long_step(const process &proc, clock::time_point now)
   if (!long_step_sink_)
     return;
   try {
-    std::string native = proc.state.native_site ? proc.state.native_site : "";
+    std::string native = proc.state.native_site ? proc.state.native_site : "(no native)";
     const auto [last, first] = long_step_reported_.try_emplace(native, now);
     if (!first) {
       if (now - last->second < std::chrono::minutes(1))

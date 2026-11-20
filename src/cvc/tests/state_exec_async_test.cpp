@@ -2203,6 +2203,17 @@ TEST(LongSteps, ANameIsReportedOnceAMinute) {
   EXPECT_EQ(w.reported("nap"), 1) << w.all_reports();
 }
 
+// A long step that applied no native is named "(no native)" (R2b S-m9). At a 1 ns threshold the
+// loop's steps that read the clock a tick apart are long, those that applied no native among them.
+TEST(LongSteps, AStepWithNoNativeIsNamedSo) {
+  long_step_world w;
+  w.sched.set_long_step_default(1e-9);
+  w.run("(begin (set i 0) (while (< i 2000) (set i (+ i 1))) i)");
+  EXPECT_GT(w.sched.long_steps(), 0u);
+  EXPECT_EQ(w.reported("(no native)"), 1) << w.all_reports();
+  EXPECT_EQ(w.reported(""), 0) << w.all_reports();
+}
+
 // --- Stage S: slices (td 4.4, 8.10; S2-Q12; S2 section 4's SL-1..SL-9) ---
 
 // A run is up to slice_steps() consecutive steps of one process, on one step's guards, clock
