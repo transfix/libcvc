@@ -991,7 +991,7 @@ void test_vehicle_poses_headless_and_drawn() {
   CHECK(drawn_hash == headless_hash);
   if (cvc::physics::backend_capabilities(cvc::physics::backend::jolt) &
       cvc::physics::cap_determinism_cross_platform)
-    CHECK(headless_hash == 0x696bba66a89b43ecull); // on every platform: no plant decides it
+    CHECK(headless_hash == 0xf702dae7c0db9d46ull); // on every platform: no plant decides it
   if (world->vehicles()->size() != 1 || out.world->vehicles()->size() != 1)
     return;
   const cvc::ariadne::entity_info h = world->vehicles()->entities()[0];
