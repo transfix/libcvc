@@ -317,49 +317,65 @@ def test_po01_raw_call_while_another_thread_pumps():
 
 def test_bw01_a_post_is_consumed_before_a_sleeper_wakes():
     # S2a.8 (S2-Q6): between rounds run_all waits once for the whole batch, until the earliest of
-    # its groups' deadlines or a post to any of them. Pooled Exec 0's program sleeps 20 ms; pooled
-    # Exec 1's starts a Python async function, whose kernel waits for a Python thread to let it
-    # finish, and awaits it. The kernel's completion, a post to group 1, ends the batch wait, so
-    # program 1 resumes, yields a frame, and notes "posted" before program 0's sleep ends and it
-    # notes "sleeper" (an order, not a time). A wait that ignored the post would wake at the
-    # sleeper's deadline and pump both, and program 1's frame would put its note second. The batch
-    # did wait (batch_waits), and no wait timed out with a post pending (batch_wait_timeouts).
+    # its groups' deadlines or a post to any of them. Pooled Exec 0's program is the sleeper: a
+    # timed wait (await g 20) on a Python async function's future, whose kernel finishes only once
+    # the test has seen "posted". Pooled Exec 1's starts a Python async function whose kernel waits
+    # for a Python thread, and awaits it. Once the batch is waiting (stats()'s batch_waits), the
+    # thread lets that kernel finish: its completion, a post to group 1, ends the batch wait, and
+    # program 1 resumes and notes "posted" while the sleeper still sleeps, which then wakes and
+    # notes "sleeper" (an order, which no load can change). No wait timed out with the post
+    # pending (batch_wait_timeouts 0): a wait that missed it would run out at its deadline with
+    # the post queued, and be counted. Nothing here races the clock; 20 s only bounds a hang.
     app = pycvc.make_app()
     pool = pycvc.ExecPool(app, threads=2, size=2, prefix="bw01pool")
-    nap = 0.2 if SANITIZER else 0.02
     gate = threading.Event()
+    woken = threading.Event()
     started = threading.Event()
     seen = []
 
+    def note(x):
+        seen.append(x)
+        if x == "posted":
+            woken.set()  # the sleeper's kernel may finish now
+        return x
+
     def opener():
         assert started.wait(WAIT), "program 1 never started its call"
+        end = time.monotonic() + WAIT
+        while pool.stats()["batch_waits"] < 1:
+            assert time.monotonic() < end, "the batch never waited"
+            time.sleep(0.001)
         gate.set()
 
     try:
         pool.register_async_fn("bw01gate", lambda: gate.wait(6 * WAIT) and 7)
+        pool.register_async_fn("bw01wake", lambda: woken.wait(6 * WAIT) and 8)
         pool.register_fn("bw01started", lambda: started.set() or True)
-        pool.register_fn("bw01note", lambda x: seen.append(x) or x)
+        pool.register_fn("bw01note", note)
         t, out = _in_thread("bw01-open", opener)
         try:
             t0 = time.monotonic()
             res = pool.run_all([
-                f'(begin (sleep {nap}) (bw01note "sleeper"))',
-                '(begin (set f (bw01gate-async)) (bw01started) (set v (await f)) (await 0) '
-                '(bw01note "posted") v)',
+                f'(begin (set g (bw01wake-async)) (set w (await g {2 * WAIT})) (bw01note "sleeper") '
+                "w)",
+                '(begin (set f (bw01gate-async)) (bw01started) (set v (await f)) (bw01note "posted") '
+                "v)",
             ])
             took = time.monotonic() - t0
         finally:
             gate.set()
+            woken.set()
             _join(t)
         assert "error" not in out, out
         stats = pool.stats()
-        print(f"  run_all took {took:.4f} s (the sleeper {nap} s); notes {seen}; {stats}")
-        assert res == ["sleeper", "7"], res
+        print(f"  run_all took {took:.4f} s; notes {seen}; {stats}")
+        assert res == ["8", "7"], res
         assert seen == ["posted", "sleeper"], seen
         assert stats["batch_waits"] >= 1, stats
         assert stats["batch_wait_timeouts"] == 0, stats
     finally:
         gate.set()
+        woken.set()
         pool.close()
 
 
