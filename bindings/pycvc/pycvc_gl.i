@@ -352,6 +352,7 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 %ignore cvc::gl::GraphicsNode::getCombinedBoundingBox;
 %ignore cvc::gl::GraphicsNode::getWorldBoundingBox;         // opaque bbox return -> 6-tuple below
 %ignore cvc::gl::GraphicsNode::getCombinedWorldBoundingBox; // opaque bbox return -> 6-tuple below
+%ignore cvc::gl::GraphicsNode::getSceneWorldBoundingBox;    // opaque bbox return -> 6-tuple below
 %ignore cvc::gl::GraphicsNode::localToWorld;                // double[3] in/out -> vector below
 %ignore cvc::gl::GraphicsNode::worldToLocal;                // double[3] in/out -> vector below
 %ignore cvc::gl::GraphicsNode::localPointToReal;            // double[3] in -> (x,y,z,unit) tuple
@@ -465,6 +466,12 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
   }
   std::vector<double> get_combined_world_bounding_box() {
     cvc::bounding_box b = $self->getCombinedWorldBoundingBox();
+    return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
+  }
+  // The combined world box less the descendants kept out of the scene's bounds:
+  // what this node adds to the scene's bounds.
+  std::vector<double> get_scene_world_bounding_box() {
+    cvc::bounding_box b = $self->getSceneWorldBoundingBox();
     return {b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz};
   }
   // A point in this node's LOCAL frame as a real-world coordinate in the given

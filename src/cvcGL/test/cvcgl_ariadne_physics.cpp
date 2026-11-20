@@ -34,6 +34,7 @@
 #include <cvc/geometry/height_field.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
+#include <cvc/gl/LabelLayer.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/ariadne/extensions.h>
 #include <cvc/gl/ariadne/scene_realize.h>
@@ -862,6 +863,171 @@ void test_vehicle_intents_headless_and_drawn() {
   }
 }
 
+// Entity poses (the `pose` controller), scripted on the keys at fixed frames: an entity an outside
+// simulation places, with no plant integrating it, first untimed (where its keys say at the next
+// step) then timed (drawn between the last two), run headless (SceneWorld on its clock) and drawn
+// (realize_scene + tick_scene, as arigl --offscreen steps it): the same state, bit for bit, and
+// the same pinned hash; the entity exactly where the track says; its drawing on its chassis, with
+// its label, and its box look's wheels steered and rolled by the pose's steer and speed.
+const char *kPoseWorld = R"(
+meta: { min_libcvc: "0.0.0" }
+world:
+  vehicles:
+    archetypes:
+      humvee: { vehicle: humvee, controllers: [pose], look: { box: {} } }
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  entity_labels: { offset: 2.5 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [120, 120, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+
+// Where the script puts entity 1 at frame k (untimed before frame 120, timed after, 1/60 s
+// apart).
+std::array<double, 5> pose_track(int k) {
+  return {-30.0 + 0.125 * k, 5.0 + 0.0625 * k, 0.25 - 0.00390625 * k, 7.5,
+          k % 60 < 30 ? 0.125 : -0.125};
+}
+
+void pose_script(cvc::state &st, int frame) {
+  if (frame == 1) {
+    st("vehicles.spawn.controller").value("pose");
+    st("vehicles.spawn.request").value("1");
+  }
+  if (frame < 2 || frame > 240)
+    return;
+  const std::array<double, 5> p = pose_track(frame);
+  char buf[32];
+  const char *const leaves[5] = {"x", "y", "heading", "speed", "steer"};
+  for (int i = 0; i < 5; ++i) {
+    std::snprintf(buf, sizeof(buf), "%.17g", p[static_cast<std::size_t>(i)]);
+    st(std::string("entities.1.pose.") + leaves[i]).value(std::string(buf));
+  }
+  if (frame >= 120) {
+    std::snprintf(buf, sizeof(buf), "%.17g", frame / 60.0);
+    st("entities.1.pose.t").value(std::string(buf));
+  }
+}
+
+void test_vehicle_poses_headless_and_drawn() {
+  std::printf("test_vehicle_poses_headless_and_drawn\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt)) {
+    std::printf("  skipped: no Jolt in this build\n");
+    return;
+  }
+  const auto load = [](cvc::app &app) {
+    cvc::ariadne::register_world_block(app);
+    cvc::ariadne::LoadResult r = cvc::ariadne::load_string(app, kPoseWorld);
+    if (r.ok) {
+      cvc::ariadne::world_rules rules = cvc::ariadne::default_world_rules();
+      CHECK(cvc::ariadne::parse_world_block(*cvc::ariadne::find_world_block(r), rules).empty());
+      r.scene.vehicles = rules.vehicles;
+    }
+    return r;
+  };
+  constexpr int kFrames = 300; // five seconds at 60 frames per second
+
+  cvc::app drawn_app;
+  cvc::ariadne::LoadResult r = load(drawn_app);
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  SceneGraph sg(drawn_app);
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &warnings);
+  CHECK(out.world != nullptr && out.world->vehicles() != nullptr);
+  if (!out.world || !out.world->vehicles())
+    return;
+  cvc::state &dst = cvc::state::instance(drawn_app);
+  int exact = 0, untimed = 0;
+  for (int i = 0; i < kFrames; ++i) {
+    pose_script(dst, i);
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+    // Untimed, it is exactly where the keys put it, from the frame they were written in.
+    if (i >= 2 && i < 120 && out.world->vehicles()->size() == 1) {
+      const cvc::ariadne::entity_info e = out.world->vehicles()->entities()[0];
+      const std::array<double, 5> p = pose_track(i);
+      ++untimed;
+      if (e.x == p[0] && e.y == p[1] && e.yaw == p[2] && e.speed == p[3] && e.steer == p[4])
+        ++exact;
+    }
+  }
+  CHECK(untimed == 118);
+  CHECK(exact == untimed);
+
+  cvc::app headless_app;
+  std::unique_ptr<cvc::ariadne::SceneWorld> world =
+      cvc::ariadne::SceneWorld::from_scene(headless_app, r.scene, "", "physics", &warnings);
+  CHECK(world != nullptr && world->vehicles() != nullptr);
+  if (!world || !world->vehicles())
+    return;
+  cvc::state &hst = cvc::state::instance(headless_app);
+  cvc::ariadne::SceneClockDriver clock(headless_app, r.scene.clock);
+  for (int i = 0; i < kFrames; ++i) {
+    pose_script(hst, i);
+    clock.drive(1.0 / 60.0);
+    world->follow(headless_app.world_clock());
+  }
+
+  CHECK(world->vehicles()->size() == 1 && out.world->vehicles()->size() == 1);
+  CHECK(world->world().tick() == out.physics->tick());
+  CHECK(out.physics->vehicle_count() == 0); // no plant: no Jolt vehicle, a kinematic box
+  const std::uint64_t drawn_hash = out.physics->state_hash();
+  const std::uint64_t headless_hash = world->world().state_hash();
+  std::printf("  drawn %016llx, headless %016llx after %llu ticks\n",
+              static_cast<unsigned long long>(drawn_hash),
+              static_cast<unsigned long long>(headless_hash),
+              static_cast<unsigned long long>(world->world().tick()));
+  CHECK(drawn_hash == headless_hash);
+  if (cvc::physics::backend_capabilities(cvc::physics::backend::jolt) &
+      cvc::physics::cap_determinism_cross_platform)
+    CHECK(headless_hash == 0x696bba66a89b43ecull); // on every platform: no plant decides it
+  if (world->vehicles()->size() != 1 || out.world->vehicles()->size() != 1)
+    return;
+  const cvc::ariadne::entity_info h = world->vehicles()->entities()[0];
+  const cvc::ariadne::entity_info d = out.world->vehicles()->entities()[0];
+  // The track's last pose, held since frame 240 (timed, so reached a span after it came).
+  const std::array<double, 5> last = pose_track(240);
+  CHECK(h.x == last[0] && h.y == last[1] && h.yaw == last[2]);
+  CHECK(d.x == h.x && d.y == h.y && d.z == h.z && d.yaw == h.yaw);
+  CHECK(hst("entities.1.command.by").value() == "pose");
+  // Drawn on its chassis, labelled with its name.
+  std::shared_ptr<cvc::gl::GraphicsNode> node = sg.getGraphics("vehicle_1");
+  CHECK(node != nullptr);
+  CHECK(out.vehicle_markers.size() == 1);
+  if (!node || out.vehicle_markers.empty())
+    return;
+  CHECK(out.physics_binding->bound(out.vehicle_markers[0].second));
+  const vtkMatrix4x4 *m = node->getTransform();
+  CHECK(near(m->GetElement(0, 3), d.x, 1e-3));
+  CHECK(near(m->GetElement(1, 3), d.y, 1e-3));
+  CHECK(near(m->GetElement(2, 3), d.z, 1e-3));
+  const std::shared_ptr<cvc::gl::LabelLayerNode> layer = cvc::gl::LabelLayerNode::of(sg);
+  const std::vector<cvc::gl::LabelLayerNode::Id> labels = layer->labelsOf(node.get());
+  CHECK(labels.size() == 1 && layer->text(labels[0]) == d.spec.name);
+  // Its front left wheel: steered by the pose's steer, rolled by its speed (Rz(steer) Ry(spin)).
+  std::shared_ptr<cvc::gl::GraphicsNode> wheel = node->findChildByName("vehicle_1_wheel0");
+  CHECK(wheel != nullptr);
+  const std::vector<cvc::ariadne::entity_wheel> wheels = out.world->vehicles()->wheels(1);
+  CHECK(wheels.size() == 4);
+  if (wheel && wheels.size() == 4) {
+    const vtkMatrix4x4 *w = wheel->getTransform();
+    CHECK(wheels[0].spin != 0.0);
+    CHECK(near(wheels[0].steer, last[4], 1e-12));
+    CHECK(near(w->GetElement(2, 0), -std::sin(wheels[0].spin), 1e-6));
+    CHECK(near(w->GetElement(1, 0), std::sin(last[4]) * std::cos(wheels[0].spin), 1e-6));
+  }
+}
+
 // Every plant in a scene world (L2b): a Jolt Humvee, the dynamic single track, the dynamic four
 // wheels and the kinematic bicycle, spawned on the keys and run by nav@1 on a hill, reach the same
 // state headless and drawn, bit for bit; and the drawn four-wheeler's wheels are posed where its
@@ -1441,6 +1607,7 @@ int main() {
   test_worlds_drawn();
   test_vehicles_drawn();
   test_vehicle_intents_headless_and_drawn();
+  test_vehicle_poses_headless_and_drawn();
   test_every_plant_headless_and_drawn();
   test_boats_drawn();
   test_fit_vehicle_geometry();

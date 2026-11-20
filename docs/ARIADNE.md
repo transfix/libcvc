@@ -553,6 +553,85 @@ cursor: x=2500
 The core parses a series only when its text changes, so a chart costs a string compare a frame
 while its data is still.
 
+A `heatmap:` widget draws a grid of cells: each one's value as a colour from a ramp, with an
+optional text, corner mark and tooltip. Hovering and clicking report the cell. Use it for a
+confusion matrix, an adjacency or quality matrix, or a schedule grid. A document can check for it
+with `(has? "heatmap")`. The cells come from a subtree at `bind`:
+
+```yaml
+- heatmap: Link quality
+  bind: links                  # the subtree (below)
+  ramp: [[0, "#c0392b"], [12.5, "#e6a23c"], [25, "#27ae60"]]
+  cell_size: 28                # px, each cell's side (the default)
+  gap: 2                       # px between cells (the default)
+  labels: {rows: true, cols: true}   # draw the subtree's labels (the default); `labels: false`
+  legend: bottom               # none (the default) | bottom | right
+  mark_color: "#ffffff"        # a marked cell's corner triangle (the default)
+  tooltip: "{row_label} to {col_label}: {v}"   # else each cell's tip
+  on_click: (state-set "view.pair" (get-attr event "row"))
+  pick: sel                    # a click writes sel.row, sel.col, then sel = "row,col"
+  on: (state-set "view.open" "1")              # after the pick's writes
+```
+
+- **The subtree** holds `rows` and `cols`, and `cells.<r>.<c>` with `v` (the value), `text` (drawn
+  on the cell), `mark` (truthy: a small triangle in the cell's top-right corner) and `tip`. A cell
+  with no children is its value alone (`cells.0.1: 12.5`). A cell with no value (empty, `nan`, or
+  absent: a matrix's diagonal) is drawn empty, in the frame colour. `row_labels` and `col_labels`
+  are optional: children `row_labels.<i>`, or comma-separated text (`a,b,c`). A side past 256
+  cells draws its first 256 and warns.
+- **`ramp:`** is a list of `[value, colour]` stops, sorted by value, each colour `"#rrggbb"`,
+  `"#rgb"` or `[r, g, b]` (0 to 1). Between two stops the colour is mixed in proportion. Below the
+  first and above the last it is that end stop's colour (clamped). With no ramp every value is one
+  grey. The core colours the cells, so every backend shows the same colours.
+- **The tooltip** for the hovered cell is the document's `tooltip:` with the cell's tokens filled
+  in: `{row}`, `{col}`, `{v}` (six significant digits; empty with no value), `{text}`,
+  `{row_label}`, `{col_label}` and `{mark}` (1 or 0). One that is an expression after that is
+  computed on the read lane (`(state-get "links.detail.{row}.{col}")`). With no `tooltip:` it is
+  the cell's `tip`, and a cell with neither has none.
+- **`on_click:` and `on_hover:`** run per cell: a click on a cell, or each frame the pointer is
+  over one. Their program gets the cell as `event`: `row` and `col` (numbers), `v` (a number, or
+  nil with no value), `text`, `row_label`, `col_label` and `mark` (1 or 0), as
+  `(get-attr event "row")`. A gap between cells is no cell. `on_hover_end:` is the widget's, with no
+  `event`.
+- **`pick:`** writes a clicked cell to `<pick>.row` and `<pick>.col`, then `"row,col"` to `<pick>`
+  itself, so one key's watcher sees both. Then `on:` runs, with the cell as `event`. The cell
+  `<pick>` names is outlined. Without `pick:`, `on:` never runs (the loader warns): use `on_click:`.
+- **It reads the subtree only when something in it was written.** A write at or under `bind`, or
+  to one of its ancestors' own values, moves the read lane's write generation for it. Until one
+  does, a frame reads nothing but the pick's two keys. A subtree reached through a `link:` hole is
+  read every frame, because a write to the link's target is signalled under the target's path.
+  `HeatmapSpec::revision` moves with each read, so a backend can keep what it derives from the
+  cells until then.
+- **ImGui** draws the column labels centred above their columns (cut to a cell's width), the row
+  labels right-aligned at the left, the cells and their text (black or white, whichever reads on
+  the cell), the marks, an outline round the picked cell and a fainter one round the hovered cell,
+  and the legend: the ramp as a bar with its stops' values, under the grid (as wide as it, at
+  least 120 px) or at its right (as tall as it, the high values up). The whole widget is one item,
+  so the tooltip attaches to it.
+- **A terminal** (FTXUI, tvision) draws each cell as columns on the ramp's colour, as wide as the
+  widest text (2 to 8), one column apart when `gap` > 0, and one row tall. A mark ends the cell in
+  `◥` (`*` without block glyphs) in the mark's colour, a cell with no value is a dim `·`, and the
+  picked cell's text is bold and underlined. The legend is a bar of colour under the grid with the
+  stops' values below it (a terminal has no room beside it, so `right` draws there too). The
+  pointer's cell is the hovered one, with its tooltip on the tooltip line. With a `pick:` or an
+  `on_click:`, the heatmap takes focus (Tab, a click). The arrows move a cursor cell, drawn
+  inverted, which is then the hovered one, and Enter or Space clicks it. Without its colours (the
+  cells and the bar are coloured spaces, the bar drawn here as `█`), the test's 2 x 2 heatmap
+  with a ramp from 0 to 20, a marked "ok" cell and a cell with no value is:
+
+```text
+Links
+   x   y
+a     ok◥
+b      ·
+  ████████████████
+  0      10     20
+```
+
+- **Any other backend** prints the label, a line of column labels, then a line for each row: its
+  label and each cell's text (else its value), `*` after a marked one and `.` for no value. With a
+  legend, a last line lists the stops (`legend: 0 #c0392b, 12.5 #e6a23c, 25 #27ae60`).
+
 A `spinner:` widget says something is under way when there is no amount to show (a request, a
 search). The host turns it by its own frame clock (`Runtime::frame_clock`), not by state, so it keeps
 moving while the document's programs are parked: a program waiting on `http-get` still has a
@@ -844,17 +923,28 @@ the loader only *captures*. The host wires them:
   bound where its camera reads them: arigl's are `viewers.main.camera.settings.mouse_look`
   (*Drag to look* or *Mouse look*), `primary_drag_steers` (in a room: *Drag the floor to face
   it*), `mouse_sensitivity`, `invert_pitch` and `invert_yaw`, and *Camera distance*, the
-  camera's `orbit.distance` (the wheel changes it too). Under mouse look a click on the scene
+  camera's `orbit.distance` (the wheel changes it too), shown only in Orbit (Fly, Track and Map
+  have no orbit distance; `MouseControls::distance_when`) and on a log scale from 0.5 m to 50 km
+  (`distance_log`), since framing a world sets it in kilometres; a room keeps 1.5-40 m. Under
+  mouse look a click on the scene
   captures the pointer and the mouse turns the view with no button held, until *Free the mouse*
   (Escape; in a browser, Escape always ends its pointer lock). In a browser the page takes its
   pointer lock inside that press itself (the cursor goes, and the view keeps turning past the
   screen's edge), asking for the mouse's raw motion where the browser has it: a press on a
   window is the UI's, judged by where the press lands against the windows the overlay drew
   last frame (`CameraController::setUiRegions`), so a quick move onto a window and a click
-  there never takes the pointer. Fly (Tab) is a spectator camera: the mouse turns the view with
-  the pointer captured, W A S D move along it, Space and Left Ctrl up and down, Left Shift
-  faster, at speeds per second of wall time (arigl's camera moves by the time between frames,
-  not its nominal 1 / 120 s step). In a browser the toggle key's own keydown takes the pointer
+  there never takes the pointer. Fly (Tab) is a spectator camera, and it moves as a Quake
+  spectator does (`CameraController.h`, reimplemented from a behavioural spec of ezQuake's
+  spectator movement): the mouse turns the view at once with the pointer captured; W A S D move
+  along it (pitch included; strafing level), Space and Left Ctrl along the world's up, Left Shift
+  four times faster. The eye has a velocity: it reaches the move speed in about 0.15 s and glides
+  to a stop in about 0.4 s when the keys come up (`settings.fly_accelerate`, 10 a second;
+  `settings.fly_friction`, 6), a diagonal goes up to 1.25 times faster, and a key tapped between
+  two frames still nudges it. Speeds are per second of wall time (arigl's camera moves by the
+  time between frames, not its nominal 1 / 120 s step), stepped at no more than 1 / 77 s, so the
+  flight is the same at any frame rate. Framing a scene sets the move speed to an eighth of its
+  diagonal a second, at most 10 m/s (it was the eighth alone: 212 m/s over terrain_lab's world);
+  the wheel scales it in Fly. Orbit's first-person mouse look moves the same way. In a browser the toggle key's own keydown takes the pointer
   lock, where the browser grants it; until it holds, a drag turns the view and a bare move of the
   cursor does not, and after Escape a click on the scene takes it again. In Orbit (and Map) the
   same keys and the arrows slide the view across the ground, the same share of the view a second
@@ -1879,8 +1969,8 @@ scene:
 
   - **Archetypes.** Each names its plant, its body (a preset, with `mass`, `max_speed`,
     `max_accel`, `max_decel` or `max_steer` over it), its look, the ranges a spawn's settings are
-    held to, and its controllers: `nav@1`, the navigator, `none`, or `external` (its intent
-    alone drives it).
+    held to, and its controllers: `nav@1`, the navigator, `none`, `external` (its intent
+    alone drives it), or `pose` (an outside simulation places it; below).
   - **Plants.** Every plant runs in the scene's world, on its clock, and meets its bodies (the
     buildings, the props, the other vehicles):
 
@@ -1925,7 +2015,7 @@ scene:
     `distance`, `wheel_load`, `aero_force` and `gear` (the dynamic models give their books'
     power and energy, and an odometer), and `command.steer` / `command.accel`
     (what its plant took on the last navigator tick) with `command.by` (its controller, `intent`,
-    `blend`, or `hold`). `physics.stats.vehicles` has a line per vehicle, its plant named.
+    `blend`, `hold`, or `pose`). `physics.stats.vehicles` has a line per vehicle, its plant named.
   - **Intents.** Any entity can be steered from outside. A document, a script or a server writes
     its keys, and a C++ or Python host calls `WorldVehicles::set_intent` (`pycvc.WorldEntities`,
     below). Each navigator tick (0.06 s by default, `cvc::kSimTick`) reads them, and a change
@@ -1948,6 +2038,73 @@ scene:
     publishes the namespace (`server: publish: [drive]`), the relay replicates it, and its program
     writes `(state-set "drive.lead.intent.accel" "2")`. The C++ setter, `set_intent`,
     `clear_intent` and `intent`, may be called from any thread.
+  - **Poses: entities an outside simulation runs.** An entity with the `pose` controller is not
+    driven at all: no plant integrates it, and no navigator plans for it. Something outside says
+    where it is (a simulation of its own in the host, a server, a recorded track), and the world
+    takes it at the next physics step. Its chassis is a kinematic box in the scene's physics
+    world, moved to each pose, so it is still a part of the scene: it is drawn with its
+    archetype's look (the Humvee model or the box look) and its `entity_labels:` label, it casts
+    shadows and is picked, it pushes the dynamic bodies it meets, and the other vehicles steer
+    around it (it is one of their navigators' foreign agents). It needs no grid: it goes in at its
+    first pose (a spawn's `at:` is one) and waits, unplaced, until it has one.
+
+    | Key, under `entities.<id>.pose` | What it is |
+    |---|---|
+    | `x`, `y` | world metres: its chassis's centre (as `entities.<id>.x`), or with `ref: rear` its rear axle (as a spawn's `at:`). Both are needed |
+    | `z` | its chassis's centre; not given: standing on the ground under it, as a kinematic box stands |
+    | `heading`, `pitch`, `roll` | rad: its rotation is Rz(heading) Ry(pitch) Rx(roll); pitch + nose down, roll + right side down |
+    | `matrix` | 16 numbers, row-major (as a node's `matrix` key): its translation and rotation, in place of the six above |
+    | `speed` | m/s along its heading: listed as its speed, and its wheels roll at it |
+    | `steer` | rad, + left: its steered wheels' angle |
+    | `t` | s on the outside simulation's clock; given, the pose is drawn between the last two (below) |
+    | `ref` | `rear` (or `rear_axle`): `x`, `y` are its rear axle |
+
+    A change of any key is a new pose. Without `t` the entity is there at the end of the next
+    step. With `t` it is drawn between its last two timed poses: from the step the newer one is
+    taken at, it moves from where it is toward it, reaching it `t1 - t0` world seconds later (its
+    angles the short way round, its speed and steer between the two), and holds there if the next
+    is late. Poses that arrive one tick of the outside simulation apart are drawn smoothly, one
+    tick behind. A pose farther than 20 m from the last
+    (`WorldVehicles::set_pose_jump`) is a respawn, taken at once, and so is the first timed one
+    and one whose time went back; the same time again changes nothing. A pose entity that holds
+    still is exactly where its pose says, at rest.
+
+    For many at once there is a packed value: `entities.poses` holds a record a line, `id x y z
+    heading pitch roll speed steer t`, numbers as text (`nan` for no `z` or no `t`), and `rear`
+    last for a rear axle's point (`pack_poses` writes one, `parse_poses` reads one). Text, so a
+    relay carries it. A host calls `WorldVehicles::set_pose(id, entity_pose)` or
+    `set_poses(span<entity_pose_update>)` from any thread instead (taken at the next step, after
+    the keys); `pose(id)` is the last one given.
+
+    `world: vehicles: poses: <path>` names a table of poses, read as the entity's own keys are: by
+    id, or by name, `<path>.<id or name>.pose.*`, and its packed `<path>.poses` keyed the same way.
+    An entry that names an archetype (`<path>.<key>.archetype`, with `name`, `team`, `color` and
+    `color2` beside it) spawns a pose entity of it, named `name` (else the key), and the entry's
+    key places it whatever its name; emptying the archetype (or removing the entry) removes it,
+    and changing the archetype or the identity spawns it again. That is how a server simulates and
+    stock clients draw: a server document (or arisrvx's Python) publishes the table (`server:
+    publish: [fleet]`) and writes it each step, the relay replicates it, and each client's world
+    document, with `poses: /fleet` and the archetypes, spawns and places the entities where the
+    server has them. Over a relay, take an entity out by emptying its archetype: the relay
+    replicates a value, and a client may not see an entry's removal.
+
+    ```yaml
+    world:
+      vehicles:
+        poses: /fleet
+        archetypes:
+          humvee: { vehicle: humvee, controllers: [pose] }
+    ```
+
+    ```lisp
+    (state-set "fleet.lead.archetype" "humvee")   ; the server's program, once
+    (state-set "fleet.lead.name" "Lead")
+    (state-set "fleet.poses" "lead 12.5 4 nan 0.3 0 0 6 0.05 2.0167")   ; each step
+    ```
+
+    The world's state does not depend on frames: a pose entity's run reaches the same state hash
+    headless and drawn, and `physics.hash` set to `1` publishes it (`physics.stats.hash`, 16 hex
+    digits; it saves the whole world, so only a check asks for it).
   - **Around each other.** Vehicles steer around each other, on one plant and across plants
     (`WorldVehicles::set_avoid`, the `vehicles.avoid` key, on by default): each navigator's
     separation pushes its carrot away from every vehicle near it (the other plants' vehicles
@@ -2011,7 +2168,8 @@ scene:
   - **Drawing.** cvcGL draws each entity on its chassis, posed between steps as the other moving
     bodies are. The box look poses each wheel where its plant has it
     (`WorldVehicles::wheels`): a Jolt wheel on its suspension, a dynamic4w wheel on the ground
-    under it, the front ones steered (Ackermann's on a dynamic4w). A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
+    under it, the front ones steered (Ackermann's on a dynamic4w); a pose entity's on the ground
+    under it, steered by its pose's steer and rolled at its speed. A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
     `spin:` in degrees a second) draws the selected archetype in the spawn's colours.
   - **The panel.** `vehicle_selector.ari`: the vehicle, its stats, a preview viewport onto a
     `scenes:` entry holding a `vehicle_preview` node (its header shows one), the settings, the
@@ -2025,9 +2183,13 @@ scene:
     accel=, mode=, weight=, force=(fx, fy), force_steers=)`, `intent(id)`, `clear_intent(id)`,
     `set_goal(id, x, y)`, `set_wander(on)` and `grid()` (the navigator's grid, as
     `pycvc.WorldGym.grid` gives it). Each `list()` entry also carries the entity's velocity,
-    steering, goal, `reached`, `collided` and its body (length, width, wheelbase, its limits).
-    `list`, `spawn` and `despawn` run on the thread that runs frames; the intents from any
-    thread. `pycvc_gl.cars.HostCars` drives a host's world's vehicles with the cars template's
+    steering, goal, `reached`, `collided` and its body (length, width, wheelbase, its limits),
+    and `posed` with its `pose` (a dict) for a pose entity. A pose entity takes
+    `set_pose(id, x, y, z=None, heading=, pitch=, roll=, speed=, steer=, t=None,
+    rear_axle=False)`, or many at once `set_poses(ids, poses, rear_axle=False)` with `poses` N rows
+    of 2 to 9 numbers (`x y z heading pitch roll speed steer t`, NaN for no `z` or `t`; a numpy
+    array or nested lists), and `pose(id)` and `set_pose_jump(metres)`. `list`, `spawn` and
+    `despawn` run on the thread that runs frames; the intents and the poses from any thread. `pycvc_gl.cars.HostCars` drives a host's world's vehicles with the cars template's
     interface.
   - **One runtime per world.** Each `SceneWorld` has its own physics world, vehicles, policies
     and keys, with nothing process-wide, so a host that runs several worlds runs one each.
@@ -5754,9 +5916,9 @@ on_tick: |
 - **`requires: [relay]`** holds only in a server document. On any other host, a document that
   requires it fails to load, and the error says it runs on the relay (`arisrv --doc`).
 - **`server: publish:`** names the namespaces the document publishes.
-  - A name is a dotted path of identifiers. It may not be `conf`, `ui`, `ariadne`,
-    `state_exec` or `room`, or under one of them, and none may be inside another or overlap the
-    document's own prefix.
+  - A name is a dotted path of identifiers. It may not be `conf`, `ui`, `arisrv` (the relay's
+    own records, which no client is sent), `ariadne`, `state_exec` or `room`, or under one of
+    them, and none may be inside another or overlap the document's own prefix.
   - Each is a writable hole of the same name in the document's chroot (§7.4): `board` there is
     the tree's `board`. `state-set`, `state-set-tree` and the atomics write through it.
     `state-delete` and `state-watch` act on the physical path (§7.4), so to take entries out,
@@ -5876,9 +6038,17 @@ server:
   a file or the network, or stops the relay.
 - **One at a time.** A second program from a client whose first is still running is answered
   `rate_limited`.
+- **Each client's limits.** A relay can give each client caps of its own
+  (`ServerDocument::set_client_limits`; [roadmap/ARISRV_IDENTITY.md](roadmap/ARISRV_IDENTITY.md)
+  §2.6). They are read at each start, so a change applies to the client's next program. They
+  replace the document's caps for that client: lower, or higher up to the action lane's
+  (`ariadne.limits.action_max_*`), which hold over every process. So `client_programs:` (and
+  `client_guests:`) are what every client gets, and an admin can give one client more, or less.
+  A client whose limits refuse it programs is answered `forbidden`.
 - **Errors** raise as `room-call`'s do (§9.8.1), with these codes:
   - `unavailable`: the relay runs no document with `client_programs:`, or its document hasn't
     loaded.
+  - `forbidden`: this client's limits refuse it programs.
   - `invalid`: the source doesn't parse on its own, or is over 64 KiB.
   - `rate_limited`.
   - `failed`: the program raised. The message is its report.
@@ -5924,8 +6094,11 @@ server:
   start function (which would run to its end as the instance is made: export `_initialize`
   instead). `failed`: a module that doesn't compile, or doesn't export the function, and every
   trap, `fail()`, `PermissionError` and `MemoryError`. `unavailable`: no `client_guests:`, or a
-  relay without WebAssembly. Stock arisrv refuses to start a document with `client_guests:`, and
-  arisrvx refuses one under `--bind-writes off`.
+  relay without WebAssembly. `forbidden`: this client's limits refuse it guests. Stock arisrv
+  refuses to start a document with `client_guests:`, and arisrvx refuses one under
+  `--bind-writes off`.
+- **Each client's limits** apply as for programs (§9.7.1): its `steps`, `time` and `memory_mb`,
+  the last capping its linear memory, never above `ariadne.limits.wasm_max_memory`.
 
 ### 9.8 Python beside the relay: `arisrvx`
 
@@ -7201,8 +7374,11 @@ Measured in CI (2026-10-20):
   pixels beyond 40 (they pass), widgets had 40 and scene 467 (they fail).
 - With the window chrome's close and maximize glyphs (2026-11-14), menus had 7 and windows 12
   (they pass) but grid 15 (it fails).
-- So `widgets.macos.png`, `scene.macos.png` and `grid.macos.png` are macOS goldens, and macOS
-  compares those three against its own renderer.
+- The orthoslicer (2026-11-17) had 1,149 pixels beyond 40, all four macOS jobs the same to the
+  byte (it fails). Its nearest-sampled slices' texel edges and the volren's edges land a pixel
+  apart.
+- So `widgets.macos.png`, `scene.macos.png`, `grid.macos.png` and `orthoslicer.macos.png` are
+  macOS goldens, and macOS compares those four against its own renderer.
 
 To make or refresh a macOS golden, take `<name>.actual.png` from the failing macOS job's
 `ari-golden-macOS-<lane>` artifact, look at it, and commit it as `<name>.macos.png`.

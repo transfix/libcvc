@@ -1239,6 +1239,30 @@ private:
   double _phase[4];
 };
 
+// A generator's ground with its sea at the world's water level: the same relief, laid against 0 m,
+// but sea_level_m() is water_level_m, where the water is drawn. The raster's water (derived_class)
+// and each terrain cell's (cell_class) are taken against sea_level_m(): from the relief's 0 m, a
+// -4 m water level left the ground between -4 m and -0.5 m deep water (hard: the navigator kept
+// off it, and the physics drove on deep water's grip), dry and drawn dry.
+class water_level_terrain : public terrain_source {
+public:
+  water_level_terrain(std::shared_ptr<const terrain_source> inner, double level)
+      : _inner(std::move(inner)), _level(level) {}
+  double sample(double x, double y) const override { return _inner->sample(x, y); }
+  double slope_deg(double x, double y, double h_m) const override {
+    return _inner->slope_deg(x, y, h_m);
+  }
+  terrain_bounds bounds() const override { return _inner->bounds(); }
+  double sea_level_m() const override { return _level; }
+  double relief_m() const override { return _inner->relief_m(); }
+  bool has_mask(terrain_mask m) const override { return _inner->has_mask(m); }
+  double mask(terrain_mask m, double x, double y) const override { return _inner->mask(m, x, y); }
+
+private:
+  std::shared_ptr<const terrain_source> _inner;
+  double _level;
+};
+
 // The ground for p from generator g.
 std::shared_ptr<const terrain_source> terrainFrom(const terrain_generator &g,
                                                   const generated_world_params &p) {
@@ -1250,6 +1274,8 @@ std::shared_ptr<const terrain_source> terrainFrom(const terrain_generator &g,
     t = std::make_shared<const shore_terrain>(std::move(t), std::max(50.0, p.half_m),
                                               world_shore_band_m(p), world_shore_floor_m(p),
                                               p.water_level_m, p.seed);
+  if (t->sea_level_m() != p.water_level_m)
+    t = std::make_shared<const water_level_terrain>(std::move(t), p.water_level_m);
   return t;
 }
 
@@ -1451,10 +1477,11 @@ struct world_builder::impl {
 
   // Terrain cell (r, c)'s material: the raster cell's under its centre, but its water from the
   // mesh `hs`: deep water, shallow water or dry by its own height (its corners' mean) against the
-  // sea, with derived_class's depths. One raster sample stands for the whole cell, and where the
-  // raster and the mesh share their samples it is a corner: on a steep shore that corner can be dry
-  // or shallow while the cell under it is metres deep, and the navigator and the physics would
-  // take that cell for drivable shallow water. A prop's footprint keeps its own.
+  // sea (water_level_m: water_level_terrain), with derived_class's depths. One raster sample
+  // stands for the whole cell, and where the raster and the mesh share their samples it is a
+  // corner: on a steep shore that corner can be dry or shallow while the cell under it is metres
+  // deep, and the navigator and the physics would take that cell for drivable shallow water. A
+  // prop's footprint keeps its own.
   std::uint16_t cell_class(int r, int c, const std::vector<float> &hs) const {
     const int cells = terrainN - 1;
     const double u = (c + 0.5) / cells, v = (r + 0.5) / cells;
@@ -1639,25 +1666,37 @@ struct world_builder::impl {
       // The waterline's one-sample ridges under the water, now the mesh has its final heights (a
       // road's grade re-samples the base relief near it, so this comes after): the ground draws no
       // hairline out of the water. A road's bed is kept.
-      // The cells round a lowered sample take their water class again from the lowered ground.
-      std::vector<cvc::geometry::face_material_t> recl;
-      if (p.waterline_sliver_m > 0.0) {
-        const std::vector<float> before = heights;
+      if (p.waterline_sliver_m > 0.0)
         w.waterline_slivers =
             lower_waterline_slivers(heights, N, N, p.water_level_m, p.waterline_sliver_m, &roadBed);
-        if (w.waterline_slivers > 0 && terrainN == N) {
+      // The cells round a sample the grade or a sliver moved take their class again (cell_class),
+      // from the moved ground and the regraded raster: a bank a road lifted out of the water is
+      // the raster's dry gravel, not the deep water it was before the grade (hard: the navigator
+      // took the road's bank for a lake). The mesh still holds its heights from before.
+      std::vector<cvc::geometry::face_material_t> recl;
+      const std::vector<float> &before = w.terrain->heights();
+      const int cells = N - 1;
+      if (terrainN == N && before.size() == heights.size() &&
+          w.terrain->cell_materials().size() == std::size_t(cells) * cells) {
+        std::vector<std::uint8_t> moved(std::size_t(cells) * cells, 0);
+        bool any = false;
+        for (int r = 0; r < N; ++r)
+          for (int c = 0; c < N; ++c) {
+            const std::size_t i = std::size_t(r) * N + c;
+            if (heights[i] == before[i])
+              continue;
+            any = true;
+            for (int cr = std::max(0, r - 1); cr <= std::min(cells - 1, r); ++cr)
+              for (int cc = std::max(0, c - 1); cc <= std::min(cells - 1, c); ++cc)
+                moved[std::size_t(cr) * cells + cc] = 1;
+          }
+        if (any) {
           recl = w.terrain->cell_materials();
-          const int cells = N - 1;
-          for (int r = 0; r < N; ++r)
-            for (int c = 0; c < N; ++c) {
-              const std::size_t i = std::size_t(r) * N + c;
-              if (heights[i] == before[i])
-                continue;
-              for (int cr = std::max(0, r - 1); cr <= std::min(cells - 1, r); ++cr)
-                for (int cc = std::max(0, c - 1); cc <= std::min(cells - 1, c); ++cc)
-                  recl[std::size_t(cr) * cells + cc] =
-                      cvc::geometry::face_material_t(cell_class(cr, cc, heights));
-            }
+          for (int r = 0; r < cells; ++r)
+            for (int c = 0; c < cells; ++c)
+              if (moved[std::size_t(r) * cells + c])
+                recl[std::size_t(r) * cells + c] =
+                    cvc::geometry::face_material_t(cell_class(r, c, heights));
         }
       }
       roadBed = std::vector<std::uint8_t>();

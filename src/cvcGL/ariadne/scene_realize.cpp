@@ -1669,10 +1669,14 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
       out.world->bind_vehicles(scene.vehicles, cvc::ariadne::resolve_bind(bind_prefix, "vehicles"),
                                cvc::ariadne::resolve_bind(bind_prefix, "entities"), scene.spawns,
                                cvc::ariadne::resolve_bind(bind_prefix, "spawns"));
-      if (out.world->vehicles())
-        out.world->vehicles()->set_intents_key(
-            cvc::ariadne::resolve_bind(bind_prefix, scene.vehicle_intents));
       out.world->bind_boats(scene, bind_prefix, warnings); // boat nodes: their boats run here
+      // The vehicles' tables, and the ones the world starts with (as SceneWorld::from_scene does
+      // for a headless world).
+      if (cvc::ariadne::WorldVehicles *v = out.world->vehicles()) {
+        v->set_intents_key(cvc::ariadne::resolve_bind(bind_prefix, scene.vehicle_intents));
+        v->set_poses_key(cvc::ariadne::resolve_bind(bind_prefix, scene.vehicle_poses));
+        v->spawn_starts(scene.vehicle_starts, warnings);
+      }
       out.world->bind_wind(scene, bind_prefix); // the scene's wind pushes its bodies (O14)
       out.world->bind_weather(scene, bind_prefix); // the rain's friction, in the steps (O20)
     }

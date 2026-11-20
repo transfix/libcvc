@@ -299,9 +299,13 @@ Widget keys_window(const std::vector<KeyBinding> &bindings, const MouseControls 
       kids.push_back(checkbox("Invert up/down", mouse.invert_y));
     if (!mouse.invert_x.empty())
       kids.push_back(checkbox("Invert left/right", mouse.invert_x));
-    if (!mouse.distance.empty())
-      kids.push_back(slider_float("Camera distance", mouse.distance, mouse.distance_lo,
-                                  mouse.distance_hi, 10.0, "%.1f m"));
+    if (!mouse.distance.empty()) {
+      Widget d = slider_float("Camera distance", mouse.distance, mouse.distance_lo,
+                              mouse.distance_hi, 10.0, "%.1f m");
+      d.log_scale = mouse.distance_log;
+      d.visible_when = mouse.distance_when;
+      kids.push_back(std::move(d));
+    }
     if (!mouse.note.empty())
       kids.push_back(text(mouse.note));
     kids.push_back(separator());
@@ -1123,6 +1127,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
       lr.scene.vehicles = rules.vehicles;
       lr.scene.spawns = rules.spawns;
       lr.scene.vehicle_intents = rules.vehicle_intents;
+      lr.scene.vehicle_poses = rules.vehicle_poses;
       lr.scene.vehicle_starts = rules.vehicle_starts;
     }
     for (std::string &w : warns)

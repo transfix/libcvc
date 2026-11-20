@@ -8,6 +8,8 @@
 // LOAD GATE (checked first — a document that needs a newer libcvc fails to load
 // rather than half-rendering), plus semantic validation surfaced as warnings.
 
+#include "heatmap_emit.h" // parse_heatmap_color: a heatmap's ramp stops and mark colour
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -372,14 +374,15 @@ namespace {
 // else is a custom type, drawn by register_widget_type / a backend-native widget.
 // ORDER MATTERS: the short-form dispatch (widget_type) takes the FIRST of these present as a key,
 // so tf_editor precedes color — a tf_editor's own config may carry a `color:` node list — and
-// progress and plot precede overlay, their caption. A chart's keys name no widget type.
+// progress and plot precede overlay, their caption. A chart's keys name no widget type, nor
+// do a heatmap's.
 constexpr const char *kBuiltinWidgetTypes[] = {
     "group",        "menubar",      "menu",    "menu_item", "window",    "progress",
     "plot",         "chart",        "overlay", "panel",     "text",      "checkbox",
     "slider_int",   "slider_float", "combo",   "radio",     "radio_row", "input_text",
     "input_int",    "tf_editor",    "color",   "image",     "button",    "separator",
     "windows_menu", "spinner",      "video",   "audio",     "text_view", "message_input",
-    "tray_icon",    "tabs",         "list"};
+    "tray_icon",    "tabs",         "list",    "heatmap"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {
@@ -549,6 +552,94 @@ std::vector<KeyBinding> parse_keys(Ctx &ctx, const YAML::Node &n) {
     out.push_back(std::move(b));
   }
   return out;
+}
+
+// A colour as a document writes one: "#rrggbb", "#rgb", or [r, g, b] with each 0..1.
+bool yaml_color(const YAML::Node &n, float rgb[3]) {
+  if (n && n.IsScalar())
+    return parse_heatmap_color(n.Scalar(), rgb);
+  if (!n || !n.IsSequence() || n.size() != 3)
+    return false;
+  std::string joined;
+  for (const YAML::Node &c : n) {
+    if (!c.IsScalar())
+      return false;
+    joined += (joined.empty() ? "" : ",") + c.Scalar();
+  }
+  return parse_heatmap_color(joined, rgb);
+}
+
+// A `heatmap:` (Kind::Heatmap): its subtree at `bind`, the `ramp:` stops ([at, colour], sorted
+// by at), the layout (cell_size, gap, labels), the legend, the mark's colour, and pick / on:.
+// on_click, on_hover and tooltip are read with every widget's keys, and are per cell here.
+Widget parse_heatmap(Ctx &ctx, const YAML::Node &n, const std::string &label) {
+  const std::string name = "ari: heatmap '" + label + "'";
+  Widget w = heatmap(label, str(n, "bind"));
+  if (w.bind.empty())
+    ctx.warn(name + " has no bind: — it draws nothing");
+  HeatmapOptions &o = w.heatmap;
+  if (const YAML::Node r = n["ramp"]; r && !r.IsSequence()) {
+    ctx.warn(name + " ramp: must be a list of [value, colour] — one grey");
+  } else if (r) {
+    for (const YAML::Node &e : r) {
+      HeatmapStop stop;
+      bool ok = e.IsSequence() && e.size() == 2 && e[0].IsScalar();
+      if (ok) {
+        try {
+          stop.at = e[0].as<double>();
+        } catch (const std::exception &) {
+          ok = false;
+        }
+      }
+      ok = ok && std::isfinite(stop.at) && yaml_color(e[1], stop.rgb);
+      if (!ok) {
+        ctx.warn(name + " has a ramp stop that is not [value, \"#rrggbb\" or [r, g, b]] — skipped");
+        continue;
+      }
+      o.ramp.push_back(stop);
+    }
+    std::stable_sort(o.ramp.begin(), o.ramp.end(),
+                     [](const HeatmapStop &a, const HeatmapStop &b) { return a.at < b.at; });
+  }
+  if (has(n, "cell_size")) {
+    const double v = num(n, "cell_size", 28.0);
+    if (v > 0.0)
+      o.cell_size = static_cast<float>(v);
+    else
+      ctx.warn(name + " cell_size must be > 0 — 28");
+  }
+  if (has(n, "gap")) {
+    const double v = num(n, "gap", 2.0);
+    if (v >= 0.0)
+      o.gap = static_cast<float>(v);
+    else
+      ctx.warn(name + " gap must be >= 0 — 2");
+  }
+  // labels: {rows, cols} flags; or one flag for both (labels: false, or none).
+  if (const YAML::Node l = n["labels"]; l && l.IsMap()) {
+    o.row_labels = flag(l, "rows", true);
+    o.col_labels = flag(l, "cols", true);
+  } else if (l && l.IsScalar()) {
+    o.row_labels = o.col_labels = l.Scalar() != "none" && flag(n, "labels", true);
+  }
+  // legend: none (the default), bottom or right; a boolean is bottom or none.
+  if (const YAML::Node l = n["legend"]; l && l.IsScalar()) {
+    const std::string v = l.Scalar();
+    const bool t = flag(n, "legend", true), f = flag(n, "legend", false);
+    if (v == "bottom" || (t == f && t))
+      o.legend = HeatmapLegend::Bottom;
+    else if (v == "right")
+      o.legend = HeatmapLegend::Right;
+    else if (v != "none" && !(t == f && !t))
+      ctx.warn(name + " legend: '" + v + "' is not bottom, right or none — none");
+  }
+  if (has(n, "mark_color") && !yaml_color(n["mark_color"], o.mark_rgb))
+    ctx.warn(name + " mark_color: is not \"#rrggbb\" or [r, g, b] — white");
+  w.pick = str(n, "pick");
+  w.on = action(n); // optional: fired after a pick's writes
+  if (!w.on.empty() && w.pick.empty())
+    ctx.warn(name + " has on: but no pick: — on: runs after a pick; use on_click: for any click");
+  return w;
 }
 
 // A slider's `commit:` — live (the default: every change while dragged) or release (once, at the
@@ -975,6 +1066,9 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     w.plot_height = height > 0.0 ? height : 160.0;
     w.on = action(n); // optional: fired after a pick's write
     return w;
+  }
+  if (type == "heatmap") { // a grid of cells from a subtree, coloured by a ramp
+    return parse_heatmap(ctx, n, label);
   }
   if (type == "checkbox") {
     const std::string bind = str(n, "bind");

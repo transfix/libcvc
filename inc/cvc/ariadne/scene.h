@@ -582,6 +582,7 @@ struct Scene {
   std::vector<vehicle_archetype> vehicles;
   spawn_rules spawns;          // and where they start (world: spawns:)
   std::string vehicle_intents; // and a table of their intents (world: vehicles: intents:)
+  std::string vehicle_poses;   // and of their poses (world: vehicles: poses:)
   // And the ones it starts with (world: vehicles: start:).
   std::vector<vehicle_start> vehicle_starts;
   bool has_shadows = false;
