@@ -116,6 +116,7 @@
 #include <cvc/gl/playback/audio_output.h> // open_audio_output — play each peer's mic
 #include <cvc/media/media_frame.h>        // cvc::media_frame — the canonical media frame
 #include <cvc/media/media_opus.h>         // our mic in Opus, and peers' Opus mics decoded
+#include <cvc/media/voice_mixer.h>        // peers' voices: a jitter buffer each, one mix
 #include <cvc/net/fast_lane_rtc.h>        // fast_lane_rtc_available
 #include <cvc/state/state.h>              // cvc::state::instance — conference media state keys
 #include <cvc/state/state_cluster_shard.h>
@@ -719,7 +720,7 @@ struct ConferenceSession {
 
   // Consume: peers' frames arrive on the ws reader -> inbox_; pump() routes them. Per peer we keep
   // a video decode proxy + a small pts-ordered buffer of video frames (so the display can lag to
-  // the audio clock), and a queue of decoded audio chunks awaiting the mixer (below).
+  // the audio clock); its decoded audio goes to the voice mixer's jitter buffer (voice_, below).
   std::mutex media_mu_;
   std::vector<cvc::media_frame> inbox_;
   // Avatar pose snapshots from the relay (room_pose_relay), queued on the transport's thread and
@@ -739,8 +740,6 @@ struct ConferenceSession {
         video_proxy;         // what the peer's stream_view renders
     std::deque<vframe> vbuf; // buffered video frames awaiting their audio-synced display time
     double shown_pts = -1.0; // pts of the frame currently injected into video_proxy
-    std::deque<std::vector<float>> achunks; // decoded f32 chunks awaiting the mixer
-    std::vector<float> apend;               // samples short of a whole mixer chunk
     std::unique_ptr<cvc::opus_decoder> opus; // this peer's Opus mic (a decoder per peer: stateful)
     std::int64_t opus_seq = -1;              // the last Opus packet's seq, for loss concealment
     double last_audio_pts = -1.0;           // world-clock stamp of this peer's last audio chunk
@@ -752,6 +751,7 @@ struct ConferenceSession {
     bool audio_muted = false; // muted in our mix (we skip their audio)
     bool video_muted = false; // hidden locally (we stop advancing their video)
     double talk_until = 0.0; // wall time until which this peer counts as "talking" (name highlight)
+    cvc::voice_mixer::peer_stats voice_logged; // its jitter buffer's counters at the last log
   };
   std::map<std::string, peer_media> peers_; // keyed by origin pid
   bool opus_warned_ = false;                // said that this build cannot decode a peer's Opus mic
@@ -761,15 +761,19 @@ struct ConferenceSession {
   std::vector<std::string> cam_devices_, mic_devices_; // cached device names (index = device index)
   bool devices_enumerated_ = false;                    // devices listed yet (deferred past startup)
 
-  // ALL peers' audio is summed into ONE output: SDL/WebAudio multi-stream behaviour in wasm is
+  // ALL peers' audio plays through ONE output: SDL/WebAudio multi-stream behaviour in wasm is
   // uncertain and browsers cap AudioContexts, so one mixed sink works for any number of talkers.
-  // mix_audio() pops one chunk from each peer per mixed chunk and sums them (silence for an empty
-  // peer). mix_frames_ is the interleaved sample count of a chunk (all mics are
-  // 48k/1ch/1024-frame); each peer's audio is cut into chunks of that size, since an Opus packet
-  // is 20 ms (960 frames).
+  // voice_ holds a jitter buffer per peer and mixes them; the output PULLS from it at the device's
+  // pace (open_audio_output_pull), so a voice runs dry only when its audio really is late, and the
+  // buffers grow to each link's jitter. Both are made at the first peer audio's format (every mic
+  // is 48 kHz mono). voice_ is declared before mix_out_, so the output, whose callback reads
+  // voice_, goes first.
+  std::unique_ptr<cvc::voice_mixer> voice_;
   std::unique_ptr<cvc::gl::playback::audio_output> mix_out_;
-  int mix_rate_ = 0, mix_ch_ = 0;
-  std::size_t mix_frames_ = 0;
+  double out_period_s_ = 0.0;        // the output device's buffer (s): audio's latency past voice_
+  bool voice_format_warned_ = false; // said that a peer's mic is in a format the mix is not
+  double next_voice_log_s_ = 0.0;    // now_wall_ at or after which the jitter buffers are logged
+  static constexpr double kVoiceLogS = 10.0;
 
   // Voice activity: RMS of an interleaved f32 chunk (~0..1), smoothed + thresholded for the
   // "talking" name highlight.
@@ -790,10 +794,6 @@ struct ConferenceSession {
   double mic_send_until_ = 0.0; // wall s: send mic chunks until then
   // Our mic in Opus, 32 kbit/s against f32's 1.5 Mbit/s, whenever this build has libopus.
   static constexpr int kOpusBitrate = 32000;
-  static constexpr std::size_t kMixChunkFrames = 1024; // a mixer chunk when Opus sets the size
-  // A gap in a peer's audio this long (wall s) ends its talk spurt: the sender keeps sending
-  // kSendHold past its voice, so a hitch in delivery is shorter than this and keeps its samples.
-  static constexpr double kAudioGapS = 0.4;
   std::unique_ptr<cvc::opus_encoder> mic_opus_;
   std::int64_t mic_opus_seq_ = 0;
   bool video_off_ = false; // our video.off leaf's value
@@ -1652,7 +1652,8 @@ struct ConferenceSession {
   void stop() {
     room_view_.reset(); // remove the room's nodes while the SceneGraph is still alive
     peers_.clear();     // close decode proxies before the transport/shard go away
-    mix_out_.reset();
+    mix_out_.reset();   // stops the output's callback, which reads voice_
+    voice_.reset();
     for (publisher &p : pubs_)
       p.sub.reset();
     lane_.reset(); // its callbacks feed inbox_ and the shard: gone before either
@@ -1687,48 +1688,73 @@ struct ConferenceSession {
     return cvc::ariadne::conference::aoi_audio_gain(std::hypot(b.x - a.x, b.y - a.y), *aoi_);
   }
 
-  // Mix: pop one chunk from each peer that has audio queued, sum them (silence for an empty peer),
-  // clamp, and play to the single output. Produce mixed chunks while the output is below ~100 ms so
-  // it stays fed without running far ahead; stop when no peer has a chunk (output drains to
-  // silence).
+  // The mix's step each frame: hand voice_ each peer's gain, its local volume (the user's slider)
+  // times its distance gain in the room (muted: 0, consumed unheard). The output's callback does
+  // the mixing. Every kVoiceLogS, a line per peer heard since the last on how its jitter buffer is
+  // doing.
   void mix_audio() {
-    if (!mix_out_ || mix_frames_ == 0 || mix_rate_ <= 0 || mix_ch_ <= 0)
+    if (!voice_)
       return;
-    const double bps = static_cast<double>(mix_rate_) * static_cast<double>(mix_ch_) * 4.0;
-    // Each peer's gain this pump, in peers_ order: its local volume (the user's slider) times its
-    // distance gain in the room.
-    std::vector<float> gains;
-    gains.reserve(peers_.size());
     for (const auto &kv : peers_)
-      gains.push_back(kv.second.audio_muted ? 0.0f : kv.second.volume * room_gain(kv.first));
-    std::vector<float> mixed;
-    for (int guard = 0; guard < 64; ++guard) { // bound work per pump
-      if (bps > 0.0 && static_cast<double>(mix_out_->queued_bytes()) / bps >= 0.10)
-        break;
-      mixed.assign(mix_frames_, 0.0f);
-      bool any = false;
-      std::size_t gi = 0;
-      for (auto &kv : peers_) {
-        peer_media &pm = kv.second;
-        const float g = gains[gi++];
-        if (pm.achunks.empty())
-          continue;
-        const std::vector<float> &c = pm.achunks.front();
-        if (g > 0.0f) { // muted, silent or out of earshot -> consume but do not mix
-          const std::size_t n = std::min(c.size(), mixed.size());
-          for (std::size_t i = 0; i < n; ++i)
-            mixed[i] += c[i] * g;
-        }
-        pm.achunks
-            .pop_front(); // always consume, so a muted peer stays in lockstep (queue doesn't grow)
-        any = true;
-      }
-      if (!any)
-        break;
-      for (float &v : mixed)
-        v = v > 1.0f ? 1.0f : (v < -1.0f ? -1.0f : v); // clamp when several talk at once
-      mix_out_->play(mixed.data(), mixed.size() * sizeof(float));
+      voice_->set_gain(kv.first,
+                       kv.second.audio_muted ? 0.0f : kv.second.volume * room_gain(kv.first));
+    if (now_wall_ < next_voice_log_s_)
+      return;
+    next_voice_log_s_ = now_wall_ + kVoiceLogS;
+    for (auto &kv : peers_) {
+      cvc::voice_mixer::peer_stats st;
+      if (!voice_->stats(kv.first, st))
+        continue;
+      cvc::voice_mixer::peer_stats &was = kv.second.voice_logged;
+      if (st.played_frames == was.played_frames)
+        continue; // not heard since the last log
+      const double ms_per_frame = 1000.0 / static_cast<double>(voice_->rate());
+      std::fprintf(stderr,
+                   "arigl: voice %s: target %.0f ms, buffered %.0f ms, ran dry %llu (late %llu), "
+                   "trimmed %.0f ms, overflow %.0f ms in %.0f s; device %.0f ms\n",
+                   kv.first.c_str(), st.target_s * 1000.0, st.buffered_s * 1000.0,
+                   static_cast<unsigned long long>(st.underruns - was.underruns),
+                   static_cast<unsigned long long>(st.late_underruns - was.late_underruns),
+                   static_cast<double>(st.trimmed_frames - was.trimmed_frames) * ms_per_frame,
+                   static_cast<double>(st.overflow_frames - was.overflow_frames) * ms_per_frame,
+                   static_cast<double>(st.played_frames - was.played_frames) * ms_per_frame /
+                       1000.0,
+                   out_period_s_ * 1000.0);
+      was = st;
     }
+  }
+
+  // Open the ONE mixed output and its voice mixer, at the first peer audio's RATE and CH. The
+  // output pulls from the mixer on its own thread (or the page's audio callback). A device that
+  // takes its audio in large blocks (a browser's 43 ms) gets jitter buffers that hold a block and
+  // then some. A failed open (no audio device) leaves both null and is tried again with the next
+  // audio; talk and the roster do not need it.
+  void open_voice_output(int rate, int ch) {
+    auto voice = std::make_unique<cvc::voice_mixer>(rate, ch);
+    cvc::voice_mixer *v = voice.get();
+    cvc::gl::playback::audio_output_spec spec;
+    spec.sample_rate = rate;
+    spec.channels = ch;
+    cvc::gl::playback::audio_output_open opened;
+    try {
+      opened = cvc::gl::playback::open_audio_output_pull(
+          spec, [v](float *out, std::size_t frames) { v->pull(out, frames, steady_s()); });
+    } catch (...) {
+      opened = cvc::gl::playback::audio_output_open();
+    }
+    if (!opened.sink)
+      return;
+    out_period_s_ = opened.sink->device_period_s();
+    if (out_period_s_ > 0.0)
+      voice->set_delay_floor(out_period_s_ + 0.02, 2.0 * out_period_s_);
+    voice_ = std::move(voice);
+    mix_out_ = std::move(opened.sink);
+    const cvc::voice_mixer::params vp = voice_->parameters();
+    std::fprintf(stderr,
+                 "arigl: audio out %s at %d Hz x %d, device %.1f ms, jitter buffers start at %.0f "
+                 "ms (least %.0f)\n",
+                 opened.name.c_str(), rate, ch, out_period_s_ * 1000.0, vp.start_delay_s * 1000.0,
+                 vp.min_delay_s * 1000.0);
   }
 
   // Forward our local streams (camera: freshest frame; mic: every chunk in order) to the relay,
@@ -1855,6 +1881,14 @@ struct ConferenceSession {
       opus_warned_ = true;
       return out;
     }
+    // A packet at or behind the last one (a duplicate, or one overtaken on an unordered lane) is
+    // dropped; far behind, the sender started over (it reloaded), and its decoder does too.
+    if (pm.opus_seq >= 0 && m.seq <= pm.opus_seq) {
+      if (pm.opus_seq - m.seq < 50)
+        return out;
+      pm.opus = std::make_unique<cvc::opus_decoder>(rate, ch);
+      pm.opus_seq = -1;
+    }
     if (pm.opus_seq >= 0 && m.seq > pm.opus_seq + 1 && m.seq <= pm.opus_seq + 3)
       for (std::int64_t lost = pm.opus_seq + 1; lost < m.seq; ++lost) {
         const std::vector<float> c = pm.opus->conceal(rate / 50); // a 20 ms packet
@@ -1866,9 +1900,8 @@ struct ConferenceSession {
     return out;
   }
 
-  // Route each queued peer frame: mic -> a per-peer audio output (played immediately; its queue
-  // depth is the A/V clock); camera -> a pts-ordered buffer + a lazily-opened decode proxy the tile
-  // renders.
+  // Route each queued peer frame: mic -> that peer's jitter buffer in voice_ (what it holds is the
+  // A/V clock); camera -> a pts-ordered buffer + a lazily-opened decode proxy the tile renders.
   void drain_inbox() {
     std::vector<cvc::media_frame> batch;
     {
@@ -1895,39 +1928,20 @@ struct ConferenceSession {
           // no device), so "talking" works even where playback does not.
           if (chunk_rms(s, n) > kTalkThreshold)
             pm.talk_until = now_wall_ + kTalkHold;
-          // Open the ONE mixed output lazily; a failed open (no audio device) just leaves mix_out_
-          // null and the mixer no-ops — talk + roster are unaffected.
-          if (!mix_out_ && m.sample_rate > 0 && m.channels > 0) {
-            try {
-              cvc::gl::playback::audio_output_spec spec;
-              spec.sample_rate = static_cast<int>(m.sample_rate);
-              spec.channels = static_cast<int>(m.channels);
-              cvc::gl::playback::audio_output_open opened =
-                  cvc::gl::playback::open_audio_output(spec);
-              mix_out_ = std::move(opened.sink);
-              mix_rate_ = opened.sample_rate;
-              mix_ch_ = opened.channels;
-            } catch (...) {
-              mix_out_.reset();
-            }
+          // Open the ONE mixed output lazily (open_voice_output), then hand the samples to this
+          // peer's jitter buffer; the output's callback mixes them with everyone else's.
+          const int rate = m.sample_rate > 0 ? static_cast<int>(m.sample_rate) : 48000;
+          const int ch = m.channels > 0 ? static_cast<int>(m.channels) : 1;
+          if (!mix_out_)
+            open_voice_output(rate, ch);
+          if (voice_ && rate == voice_->rate() && ch == voice_->channels()) {
+            voice_->push(m.origin_node_id, s, n, now_wall_);
+          } else if (voice_ && !voice_format_warned_) {
+            std::fprintf(stderr,
+                         "arigl: a peer's mic is %d Hz x %d, the mix %d Hz x %d: not mixed\n", rate,
+                         ch, voice_->rate(), voice_->channels());
+            voice_format_warned_ = true;
           }
-          // Queue the samples for the mixer in chunks of its size (do NOT play per-peer —
-          // mix_audio() sums all peers). After a gap (the peer stopped sending through a silence)
-          // the last spurt's remainder, its quiet tail, is dropped rather than led into the next.
-          // Bound the backlog so a stuck mixer can't grow memory unbounded.
-          if (mix_frames_ == 0)
-            mix_frames_ = m.codec == "opus" ? kMixChunkFrames * (m.channels ? m.channels : 1u) : n;
-          if (pm.last_audio_wall >= 0.0 && now_wall_ - pm.last_audio_wall > kAudioGapS)
-            pm.apend.clear();
-          pm.apend.insert(pm.apend.end(), s, s + n);
-          std::size_t at = 0;
-          for (; pm.apend.size() - at >= mix_frames_; at += mix_frames_)
-            pm.achunks.emplace_back(pm.apend.begin() + static_cast<std::ptrdiff_t>(at),
-                                    pm.apend.begin() +
-                                        static_cast<std::ptrdiff_t>(at + mix_frames_));
-          pm.apend.erase(pm.apend.begin(), pm.apend.begin() + static_cast<std::ptrdiff_t>(at));
-          while (pm.achunks.size() > 16)
-            pm.achunks.pop_front();
         }
         pm.last_audio_pts = m.pts_seconds;
         pm.last_audio_wall = now_wall_;
@@ -1975,17 +1989,11 @@ struct ConferenceSession {
         pm.vbuf.clear();
         continue;
       }
-      // This peer's audio latency = what sits in its mixer queue + what is queued in the shared
-      // output. Show the video frame whose pts the audio has reached: last_audio_pts minus that.
+      // This peer's audio latency = what its jitter buffer holds + the output device's buffer.
+      // Show the video frame whose pts the audio has reached: last_audio_pts minus that.
       double target = 1e18;
-      if (audio_fresh(pm) && mix_out_ && mix_rate_ > 0 && mix_ch_ > 0 && mix_frames_ > 0) {
-        const double bps = static_cast<double>(mix_rate_) * static_cast<double>(mix_ch_) * 4.0;
-        const double out_s = bps > 0.0 ? static_cast<double>(mix_out_->queued_bytes()) / bps : 0.0;
-        const double chunk_s = static_cast<double>(mix_frames_) / static_cast<double>(mix_ch_) /
-                               static_cast<double>(mix_rate_);
-        const double peer_s = static_cast<double>(pm.achunks.size()) * chunk_s;
-        target = pm.last_audio_pts - out_s - peer_s;
-      }
+      if (audio_fresh(pm) && voice_)
+        target = pm.last_audio_pts - out_period_s_ - voice_->buffered_s(kv.first);
       std::shared_ptr<std::vector<std::uint8_t>> show;
       double show_pts = pm.shown_pts;
       while (!pm.vbuf.empty() &&
