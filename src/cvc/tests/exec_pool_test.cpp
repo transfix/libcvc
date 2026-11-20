@@ -3770,9 +3770,10 @@ struct s2a_world {
 // once i is noted: at once, or after a spin of 10-40 us for one post in four (so the posts land
 // across the worker's spin, prepare and commit), or after 200 us for one in 64 (the worker has
 // parked). Every post's receiver runs: a lost wake leaves the receiver parked, which the per-post
-// ceiling (10 s) turns into a failure. 10^6 posts in Release (2*10^4 in Debug, 10^4 under a
-// sanitizer), over up to four streams and workers, within a time budget that may end it early (the
-// count reached is printed). With workers, the workers parked (stats().parks).
+// ceiling (10 s, the only time limit: a hang guard) turns into a failure. A fixed count, every post
+// of it (posts are counted, not seconds: K-14's class): 5*10^5 in Release, about 4 s on a quiet
+// box (2*10^4 in Debug, 10^4 under a sanitizer; CVC_EXEC_PL02_POSTS), over up to four streams and
+// workers; the time is printed. With workers, the workers parked (stats().parks).
 TEST(ExecPool, PL02_EventcountNeverMissesAWake) {
   s2a_env_var fuzz("CVC_EXEC_FUZZ", "2026");
   cvc::pool_options po;
@@ -3781,9 +3782,13 @@ TEST(ExecPool, PL02_EventcountNeverMissesAWake) {
   cvc::app app;
   share_locks(app);
   const unsigned streams = std::max(1u, std::min(4u, pool.threads()));
-  const std::uint64_t total = s2a_under_sanitizer() ? 10000 : kDebugBuild ? 20000 : 1000000;
-  const std::uint64_t per_stream = (total + streams - 1) / streams;
-  const double budget = s2a_under_sanitizer() || kDebugBuild ? 60.0 : 15.0;
+  const char *const sized = std::getenv("CVC_EXEC_PL02_POSTS");
+  const std::uint64_t asked = sized && *sized         ? std::strtoull(sized, nullptr, 10)
+                              : s2a_under_sanitizer() ? 10000
+                              : kDebugBuild           ? 20000
+                                                      : 500000;
+  const std::uint64_t per_stream = (asked + streams - 1) / streams;
+  const std::uint64_t total = per_stream * streams;
   struct stream {
     std::unique_ptr<s2a_world> w;
     std::atomic<std::int64_t> got{-1};
@@ -3835,13 +3840,11 @@ TEST(ExecPool, PL02_EventcountNeverMissesAWake) {
         if (st.got.load(std::memory_order_acquire) < static_cast<std::int64_t>(i))
           break;
         st.posted = i + 1;
-        if (s2a_seconds_since(t0) > budget)
-          break;
       }
       posters_done.fetch_add(1);
     });
-  const bool drove =
-      s2a_drive(pool, [&] { return posters_done.load() == streams; }, budget + 60.0, 0.005);
+  // No overall ceiling: each post has its own (10 s), and every poster ends.
+  const bool drove = s2a_drive(pool, [&] { return posters_done.load() == streams; }, kInf, 0.005);
   stop.store(true);
   for (std::thread &t : posters)
     t.join();
@@ -3861,7 +3864,7 @@ TEST(ExecPool, PL02_EventcountNeverMissesAWake) {
   for (unsigned i = 0; i < streams; ++i)
     EXPECT_EQ(ss[i]->lost_at, -1) << "stream " << i << ": post " << ss[i]->lost_at
                                   << "'s receiver never ran (a lost wake)";
-  EXPECT_GE(posted, total / 20) << "the budget ended PL-2 early";
+  EXPECT_EQ(posted, total) << "a stream stopped early (above)";
   if (pool.threads() > 0)
     EXPECT_GT(s.parks, 0u) << "no worker parked between the posts";
 }
