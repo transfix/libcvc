@@ -2430,6 +2430,20 @@ bool detach_begin(state_exec::exec_group &group) noexcept {
   return true;
 }
 
+bool host_held_here(state_exec::exec_group &group) noexcept {
+  // Only its attaching thread frees the record (detach, take_failed, the teardown), so on that
+  // thread, or on one holding it, the record lives while this reads it under the pool's mutex.
+  auto *a = static_cast<attachment *>(group.pool_link().attached.load(std::memory_order_acquire));
+  if (!a)
+    return false;
+  try {
+    std::lock_guard<std::mutex> lock(a->pool->m);
+    return a->pool->attachments.count(a) && a->host_held && a->holder == std::this_thread::get_id();
+  } catch (...) {
+    return false;
+  }
+}
+
 void detach_end(state_exec::exec_group &group) noexcept {
   auto *a = static_cast<attachment *>(group.pool_link().attached.load(std::memory_order_acquire));
   if (!a)
@@ -2472,20 +2486,6 @@ void run_on_host_waiting(exec_pool &pool, state_exec::exec_group &group, std::fu
     return;
   }
   fn();
-}
-
-bool host_held_here(state_exec::exec_group &group) noexcept {
-  // Only its attaching thread frees the record (detach, take_failed, the teardown), so on that
-  // thread, or on one holding it, the record lives while this reads it under the pool's mutex.
-  auto *a = static_cast<attachment *>(group.pool_link().attached.load(std::memory_order_acquire));
-  if (!a)
-    return false;
-  try {
-    std::lock_guard<std::mutex> lock(a->pool->m);
-    return a->pool->attachments.count(a) && a->host_held && a->holder == std::this_thread::get_id();
-  } catch (...) {
-    return false;
-  }
 }
 
 } // namespace detail
