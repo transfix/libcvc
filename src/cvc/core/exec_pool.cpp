@@ -239,6 +239,7 @@ struct pool_state {
   unsigned attached_any = 0;        // attached groups the workers pump
   unsigned cv_waiters = 0;          // workers waiting on work_cv
   unsigned spinning = 0;            // workers in the eventcount's spin, watching the epoch
+  unsigned owed = 0;                // workers taken off the parked list, not yet back under Q
   worker_rec *keeper = nullptr;     // the parked worker that waits for the timer heap's top
   clock_type::time_point keeper_until{};
   double vmin = 0.0;              // the ready queue's virtual-time floor: the last group popped
@@ -421,6 +422,7 @@ worker_rec *unpark_one(pool_state &p, const attachment *avoid = nullptr) {
   p.parked.erase(std::find(p.parked.begin(), p.parked.end(), best));
   best->parked = false;
   best->signalled = true;
+  ++p.owed;
   return best;
 }
 
@@ -563,6 +565,12 @@ wake_target idle_worker_for(pool_state &p, const attachment *a, bool from_releas
   wake_target t;
   if (p.spinning > 0 && (!p.force_move || from_releaser))
     return t;
+  if (p.force_move && a && p.cv_waiters > 0 &&
+      std::none_of(p.parked.begin(), p.parked.end(),
+                   [&](const worker_rec *w) { return w->index != a->link->last_thread; })) {
+    t.cv = true; // every parked worker pumped `a` last: one waiting on work_cv takes it
+    return t;
+  }
   if (worker_rec *w = unpark_one(p, p.force_move ? a : nullptr))
     t.worker = w;
   else if (p.cv_waiters > 0)
@@ -928,6 +936,7 @@ void hand_off_timers(pool_state &p) {
     p.parked.erase(std::find(p.parked.begin(), p.parked.end(), k));
     k->parked = false;
     k->signalled = true;
+    ++p.owed;
   } else {
     k = unpark_one(p);
   }
@@ -1004,6 +1013,10 @@ void pool_state::worker_main(int index, bool p_core, bool place) {
         release(*this, *a, out, &w);
         continue;
       }
+      // CVC_EXEC_FORCE_MOVE left groups this worker pumped last: unless a worker is already on its
+      // way (woken, or spinning), wake one for them (a timer this worker fired, say).
+      if (skipped && !ready.empty() && owed == 0 && spinning == 0)
+        idle_worker_for(*this, nullptr).notify(*this);
       if (std::exchange(woke, false))
         ++stats.empty_wakes;
       if (!spun) {
@@ -1054,6 +1067,7 @@ void pool_state::worker_main(int index, bool p_core, bool place) {
       if (w.signalled) {
         // A waker took it off the parked list: its notify was consumed now, or lands later.
         w.signalled = false;
+        --owed;
         w.stale = !notified;
       } else if (notified && w.stale) {
         w.stale = false; // an earlier waker's late notify
