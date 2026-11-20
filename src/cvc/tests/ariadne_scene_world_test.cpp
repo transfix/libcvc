@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/app_runtime.h>
+#include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/requires.h>
 #include <cvc/ariadne/scene.h>
@@ -49,6 +50,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -5658,7 +5660,7 @@ scene:
 }
 
 void fleet_bench(const std::string &doc, const std::string &plant, int n, const std::string &sense,
-                 int ticks) {
+                 int ticks, bool avoid = true) {
   gym_options o;
   o.count = n;
   o.rays = 1;
@@ -5676,6 +5678,7 @@ void fleet_bench(const std::string &doc, const std::string &plant, int n, const 
   WorldGym gym(doc, o);
   gym.reset(1);
   const double spawn_ms = std::chrono::duration<double, std::milli>(clk::now() - t0).count();
+  gym.vehicles().set_avoid(avoid);
   const std::vector<double> none(gym.agents(), kNaN);
   for (int i = 0; i < 10; ++i)
     gym.step(none, none);
@@ -5683,12 +5686,31 @@ void fleet_bench(const std::string &doc, const std::string &plant, int n, const 
   for (int i = 0; i < ticks; ++i)
     gym.step(none, none);
   const double tick_ms = std::chrono::duration<double, std::milli>(clk::now() - t1).count() / ticks;
+  // Where a tick goes: the physics world's steps (the last 120 steps' wall time, six a tick), and
+  // one publish of the entities' keys (timed here alone).
+  double phys = 0.0;
+  int nphys = 0;
+  {
+    std::stringstream in(
+        cvc::ariadne::read_or<std::string>(gym.app(), "physics.stats.step_ms_history", ""));
+    std::string v;
+    while (std::getline(in, v, ','))
+      if (!v.empty()) {
+        phys += std::atof(v.c_str());
+        ++nphys;
+      }
+  }
+  const double phys_tick = nphys ? 6.0 * phys / nphys : 0.0;
+  const auto t2 = clk::now();
+  gym.vehicles().publish();
+  const double pub_ms = std::chrono::duration<double, std::milli>(clk::now() - t2).count();
   // A tick is 0.06 s of world time: at 1x a tick under 60 ms keeps up, at the demos' 3.6x under
   // 16.7 ms.
-  std::printf("[fleet] %-9s n=%4d sense=%-5s agents=%4zu spawn %8.1f ms  tick %7.2f ms  (%5.1fx "
-              "real time)\n",
-              plant.c_str(), n, sense.c_str(), gym.agents(), spawn_ms, tick_ms,
-              tick_ms > 0.0 ? 60.0 / tick_ms : 0.0);
+  std::printf("[fleet] %-9s n=%4d sense=%-5s avoid=%d spawn %7.1f ms  tick %7.2f ms (%5.1fx)  "
+              "physics %6.2f  publish %6.2f  rest %6.2f ms\n",
+              plant.c_str(), n, sense.c_str(), avoid ? 1 : 0, spawn_ms, tick_ms,
+              tick_ms > 0.0 ? 60.0 / tick_ms : 0.0, phys_tick, pub_ms,
+              tick_ms - phys_tick - pub_ms);
 }
 
 } // namespace
@@ -5702,7 +5724,38 @@ TEST(AriadneWorldGym, FleetBench) {
   for (const char *sense : {"known", "fog"})
     for (const int n : {100, 400, 800})
       fleet_bench(doc, "kinematic", n, sense, 100);
+  fleet_bench(doc, "kinematic", 800, "known", 100, /*avoid=*/false);
   if (jolt())
     for (const int n : {60, 120, 240})
       fleet_bench(doc, "jolt", n, "known", 100);
+}
+
+TEST(AriadneWorldGym, KinematicBoxesTouchWhenTheyOverlap) {
+  REQUIRE_YAML();
+  // Two kinematic boxes make no contact in the physics world: entities() finds their overlaps
+  // (in a grid as wide as the largest box). Two placed nose to tail overlapping, a third alone, and
+  // a pair side by side across a cell's edge.
+  gym_options o;
+  o.max_steps = 0;
+  const auto at = [](double x, double y, double yaw) {
+    entity_spec s;
+    s.plant = "kinematic";
+    s.controller = "none";
+    s.placed = true;
+    s.x = x;
+    s.y = y;
+    s.yaw = yaw;
+    return s;
+  };
+  o.agents = {at(0.0, 0.0, 0.0), at(3.0, 0.5, 0.3), at(40.0, 40.0, 0.0), at(-20.0, 9.9, 0.0),
+              at(-20.0, 11.6, 0.0)};
+  WorldGym gym(write_doc("kinematic_touch", gym_doc(false, false)).string(), o);
+  gym.reset(1);
+  const std::vector<entity_info> es = gym.vehicles().entities();
+  ASSERT_EQ(es.size(), 5u);
+  EXPECT_TRUE(es[0].vehicle_contact);
+  EXPECT_TRUE(es[1].vehicle_contact);
+  EXPECT_FALSE(es[2].vehicle_contact);
+  EXPECT_TRUE(es[3].vehicle_contact); // 1.7 m apart, side by side: a Humvee is 2.2 m wide
+  EXPECT_TRUE(es[4].vehicle_contact);
 }

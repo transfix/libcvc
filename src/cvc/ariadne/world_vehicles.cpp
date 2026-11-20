@@ -43,6 +43,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 
 namespace cvc {
@@ -687,6 +688,10 @@ struct WorldVehicles::impl {
         cfg, plan->occupancy.data(), sense == "fog" ? unknown.data() : plan->occupancy.data(),
         cvc::nav::coef_mlp::default_biased(), nullptr, nullptr, nullptr, 0);
     f->sim->set_capture_drive_telemetry(drive_tel);
+    // Its kernels on the app's pool: without one each fans out by spawning and joining threads
+    // per call, most of a tick for hundreds of vehicles (FLEETS_AND_NIGHT_ROADMAP.md FL0).
+    if (app)
+      f->sim->set_thread_pool(&app->computePool());
     ph::nav_plant_options o;
     o.step_world = false; // the world steps on the clock; the plant commands and reads
     o.ground_bodies = ground;
@@ -2421,15 +2426,39 @@ std::vector<entity_info> WorldVehicles::entities() const {
   std::vector<entity_info> out;
   for (const impl::entity &e : d.ents)
     out.push_back(d.info(e));
-  // Two kinematic boxes make no contact in the physics world: they touch when they overlap.
+  // Two kinematic boxes make no contact in the physics world: they touch when they overlap. Only
+  // boxes in the same or a neighbouring cell of a grid as wide as the largest box can overlap, so
+  // each is tested against those alone: linear in the vehicles, where every pair was quadratic
+  // (320,000 tests a call for 800, and the gym and the keys call this every tick).
+  std::vector<std::size_t> kin;
+  double cell = 0.0;
   for (std::size_t a = 0; a < out.size(); ++a)
-    for (std::size_t b = a + 1; b < out.size(); ++b) {
-      const impl::entity &ea = d.ents[a], &eb = d.ents[b];
-      if (!out[a].placed || !out[b].placed || ea.plant != "kinematic" || eb.plant != "kinematic")
-        continue;
-      if (boxes_overlap(out[a], ea.desc, out[b], eb.desc))
-        out[a].vehicle_contact = out[b].vehicle_contact = true;
+    if (out[a].placed && d.ents[a].plant == "kinematic") {
+      kin.push_back(a);
+      const auto &h = d.ents[a].desc.half_extents;
+      cell = std::max(cell, 2.0 * std::hypot(h.x, h.y));
     }
+  if (kin.size() < 2 || !(cell > 0.0))
+    return out;
+  const auto key = [cell](double x, double y) {
+    const auto ix = static_cast<std::int64_t>(std::floor(x / cell));
+    const auto iy = static_cast<std::int64_t>(std::floor(y / cell));
+    return (static_cast<std::uint64_t>(ix) << 32) ^ static_cast<std::uint32_t>(iy);
+  };
+  std::unordered_map<std::uint64_t, std::vector<std::size_t>> grid;
+  grid.reserve(kin.size());
+  for (const std::size_t a : kin)
+    grid[key(out[a].x, out[a].y)].push_back(a);
+  for (const std::size_t a : kin)
+    for (int dx = -1; dx <= 1; ++dx)
+      for (int dy = -1; dy <= 1; ++dy) {
+        const auto it = grid.find(key(out[a].x + dx * cell, out[a].y + dy * cell));
+        if (it == grid.end())
+          continue;
+        for (const std::size_t b : it->second)
+          if (b > a && boxes_overlap(out[a], d.ents[a].desc, out[b], d.ents[b].desc))
+            out[a].vehicle_contact = out[b].vehicle_contact = true;
+      }
   return out;
 }
 
