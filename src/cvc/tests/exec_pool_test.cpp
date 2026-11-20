@@ -380,6 +380,70 @@ TEST(ExecPool, APassedDeadlineSkipsGroupsAndTheyGoFirstNextTime) {
   }
 }
 
+// A group that starts every frame just before the deadline, behind one that takes nearly the
+// whole frame, is never skipped; before the short-changed rule it never went first either, and got
+// only the frame's last sliver every frame (state_exec_bench's mt.ariadne_docs, docs=2 t=0, on a
+// slow build: "bench.ari.d1 ticked 0 times in 4 frames"). "slow" takes the call until a quarter of
+// it is left, then "late" starts and the deadline cuts its endless loop: it is short-changed and
+// goes first next call, at threads 0, for host-affinity groups with workers, and in the threaded
+// LPT list, where "slow"'s longer last pump would otherwise put it first. The one timing
+// assumption is that "slow" returns before the deadline (75 ms of slack); if it does not, "late"
+// is skipped instead and still goes first, so the order check holds either way.
+TEST(ExecPool, AGroupTheDeadlineCutsShortGoesFirstNextTime) {
+  struct cfg {
+    unsigned threads;
+    group_affinity affinity;
+  };
+  for (const cfg k :
+       {cfg{0, group_affinity::any}, cfg{2, group_affinity::host}, cfg{2, group_affinity::any}}) {
+    cvc::pool_options po;
+    po.threads = k.threads;
+    po.inline_below = 1e9; // no helper: the caller takes the LPT list's groups in order
+    cvc::exec_pool pool(po);
+    cvc::app app;
+    share_locks(app);
+    std::vector<std::string> order;
+    clock_type::time_point slow_until = clock_type::time_point::min();
+    exec_group::options so = opts_for(app, "slow", k.affinity);
+    so.pump_hook_for_test = [&](exec_group &g) {
+      order.push_back(g.opts().name);
+      while (clock_type::now() < slow_until) {
+      }
+    };
+    exec_group::options lo = opts_for(app, "late", k.affinity);
+    lo.pump_hook_for_test = [&](exec_group &g) { order.push_back(g.opts().name); };
+    exec_group slow(so), late(lo);
+    late.execute(std::string("(while #t nil)"));
+    std::vector<exec_group *> groups{&slow, &late};
+    const std::string where = "threads " + std::to_string(pool.threads()) +
+                              (k.affinity == group_affinity::host ? " host" : " any");
+    // No step limit, no time budget of its own: only the deadline ends "late"'s pump.
+    const pump_budget unlimited{std::numeric_limits<std::uint64_t>::max(),
+                                std::numeric_limits<double>::infinity()};
+    const auto deadline = clock_type::now() + std::chrono::milliseconds(300);
+    slow_until = deadline - std::chrono::milliseconds(75);
+    pool.pump_all(groups, unlimited, deadline);
+    slow_until = clock_type::time_point::min();
+    const cvc::pool_stats s1 = pool.stats();
+    EXPECT_EQ(s1.short_changed + s1.skipped, 1u) << where;
+    if (order.size() == 2) {
+      EXPECT_EQ(order, (std::vector<std::string>{"slow", "late"})) << where;
+      EXPECT_EQ(s1.short_changed, 1u) << where << ": started, so cut short, not skipped";
+    }
+    // Next call: "late" first, with a time budget of its own so its loop ends.
+    order.clear();
+    const pump_budget brief{std::numeric_limits<std::uint64_t>::max(), 0.005};
+    pool.pump_all(groups, brief, far_deadline());
+    EXPECT_EQ(order, (std::vector<std::string>{"late", "slow"})) << where;
+    // Its own budget ended that pump, not a deadline: not short-changed, so creation order again.
+    EXPECT_EQ(pool.stats().short_changed, s1.short_changed) << where;
+    order.clear();
+    pool.pump_all(groups, brief, far_deadline());
+    if (k.threads == 0 || k.affinity == group_affinity::host)
+      EXPECT_EQ(order, (std::vector<std::string>{"slow", "late"})) << where;
+  }
+}
+
 TEST(ExecPool, AnExceptionEscapingAPumpFailsOnlyItsGroup) {
   for (unsigned threads : {0u, 2u}) {
     cvc::pool_options po;
