@@ -9,10 +9,11 @@
 // 1 with touch mode off, the overlay's show/hide button hidden and its panels open (a view of at
 // least 500 px on its short side, so the small-screen rule never closes them), ImGui's frame delta
 // pinned, and several frames at a fixed dt before the capture, so new windows have finished
-// appearing. The test then renders one frame more and requires it to be identical to the capture.
-// When ImGui drew exactly the same UI in both and only the rasterizer moved (the Apple Software
-// Renderer, in a process's first frames), it renders up to kRasterSettleFrames more until two
-// agree.
+// appearing; where the scene has volren nodes, more frames until each shows a finished raycast
+// (they raycast on a worker thread). The test then renders one frame more and requires it to be
+// identical to the capture. When ImGui drew exactly the same UI in both and only the rasterizer
+// moved (the Apple Software Renderer, in a process's first frames), it renders up to
+// kRasterSettleFrames more until two agree.
 //
 // Goldens are made under Mesa llvmpipe, the rasterizer of the Linux and Windows CI jobs. Other
 // rasterizers, and other Mesa versions, draw anti-aliased edges and shading a little differently,
@@ -31,6 +32,7 @@
 #include "streaming_test_util.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -40,9 +42,12 @@
 #include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/gl/VolRenNode.h>
 #include <cvc/gl/ariadne/AriRuntime.h>
+#include <cvc/gl/ariadne/scene_realize.h>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 #include <vtkOpenGLRenderWindow.h>
 #ifdef CVC_ENABLE_IMGUI
@@ -60,6 +65,9 @@ constexpr int kWidth = 960, kHeight = 720; // short side >= 500: the overlay kee
 constexpr double kDt = 1.0 / 30.0;         // the host frame step AND ImGui's frame delta
 constexpr int kMinFrames = 4;              // frames before the capture (ImGui auto-fit needs 2)
 constexpr int kRasterSettleFrames = 10;    // more frames for a rasterizer drawing one UI two ways
+// How long a volren raycast may take to land: a hang ceiling, far above the seconds a Debug build
+// with coverage takes on llvmpipe, never a measure of speed.
+constexpr auto kVolrenCeiling = std::chrono::seconds(120);
 const double kBackground[3] = {0.09, 0.10, 0.12};
 
 // One tolerance for every rasterizer, from these measurements against the goldens (Mesa 25.3.6
@@ -73,7 +81,8 @@ const double kBackground[3] = {0.09, 0.10, 0.12};
 // Software Renderer left 3-6 px beyond 40 on windows / menus / grid but 40 on widgets and 467 on
 // scene (edges and shading), so those two have macOS goldens (<name>.macos.png) instead. With the
 // window chrome's close and maximize glyphs it leaves 7 / 12 on menus / windows but 15 on grid,
-// so grid has one too.
+// so grid has one too. On orthoslicer it leaves 1149: the nearest-sampled slices' texel edges and
+// the volren's edges land a pixel apart. So orthoslicer has one as well.
 const Tolerance kTolerance{40, 0.00002};
 
 // A scripted pointer for documents whose interesting state needs one (an open menu, a tooltip).
@@ -283,6 +292,33 @@ bool runDocument(const fs::path &doc, const fs::path &goldenDir, const fs::path 
   // no X display, which imgui's GLX-based loader cannot reach) nothing here can be tested.
   if (!ui.enabled())
     return false;
+  // A volren node raycasts on a worker thread, and until its first raycast lands its quad draws
+  // opaque black across the whole view. A Debug build with coverage on llvmpipe raycasts slower
+  // than the frames above take, so step on until every volren node shows a finished raycast of
+  // the live camera (VolRenNode::converged, three frames running), as the volren tests wait. A
+  // slow machine only takes more frames here; a document with no volren node takes none.
+  int volrenFrames = 0;
+  const cvc::gl::ariadne::RealizedScene *realized = rt.realized();
+  if (realized && !realized->volren_ticks.empty()) {
+    const auto raycastsDone = [&] {
+      for (const auto &weak : realized->volren_ticks) {
+        const auto node = weak.lock();
+        if (node && (!node->converged() || node->framesRendered() == 0))
+          return false;
+      }
+      return true;
+    };
+    const auto start = std::chrono::steady_clock::now();
+    int settledFrames = 0;
+    while (settledFrames < 3 && std::chrono::steady_clock::now() - start < kVolrenCeiling) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      rt.step(kDt);
+      ++volrenFrames;
+      settledFrames = raycastsDone() ? settledFrames + 1 : 0;
+    }
+    check(settledFrames >= 3, name + ": its volren raycasts have finished",
+          std::to_string(volrenFrames) + " frames more");
+  }
   // The capture, then one frame more, which must draw the same pixels. A UI that is still changing
   // fails here. The one other way two frames differ is the rasterizer: ImGui handed GL exactly the
   // same UI (the same fingerprint) and some pixels still moved. macOS CI's Apple Software Renderer
@@ -317,8 +353,8 @@ bool runDocument(const fs::path &doc, const fs::path &goldenDir, const fs::path 
 
   const std::string renderer = glRenderer(view);
   const bool llvmpipe = renderer.find("llvmpipe") != std::string::npos;
-  std::printf("  %d frames at %dx%d on %s\n", frames + 2 + rasterFrames, kWidth, kHeight,
-              renderer.empty() ? "(unknown renderer)" : renderer.c_str());
+  std::printf("  %d frames at %dx%d on %s\n", frames + volrenFrames + 2 + rasterFrames, kWidth,
+              kHeight, renderer.empty() ? "(unknown renderer)" : renderer.c_str());
 
   check(!actual.empty() && actual.w == kWidth && actual.h == kHeight,
         name + ": captured a " + std::to_string(kWidth) + "x" + std::to_string(kHeight) + " frame");

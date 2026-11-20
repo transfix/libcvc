@@ -20,6 +20,12 @@ GenSeg (src/Segmentation/GenSeg) first. Its goldens per case:
   <case>.json         the case, the volrover sha, the platform, each class's voxel count and the
                       files' SHA-256
 
+SegMed (src/Segmentation/SegMed), the paper's critical points, per case:
+  <case>.critical.txt the legacy GVF_Compute's critical list, "x y z" a line, in its order
+  <case>.field.f32    the diffused field gvfflow() leaves (x, y, z float32 little-endian per
+                      voxel, x fastest); --check compares it to within 1e-6, not byte for byte
+  <case>.json         the case, the volrover sha, the platform, the count and the SHA-256
+
     python3 tools/volrover-goldens/make_goldens.py            # write the goldens
     python3 tools/volrover-goldens/make_goldens.py --check    # CI: they must not change
 
@@ -43,10 +49,16 @@ VOLROVER_URL = "https://github.com/transfix/volrover.git"
 # What each library needs of the legacy tree (a sparse checkout).
 SPARSE = {
     "genseg": ["src/Segmentation/GenSeg", "inc/Segmentation/GenSeg", "LICENSE", "COPYING"],
+    "segmed": ["src/Segmentation/SegMed", "inc/Segmentation/SegMed", "LICENSE", "COPYING"],
     "skeleton": ["src/Skeletonization", "inc/Skeletonization", "LICENSE", "COPYING"],
+    "tiler": ["src/ContourTiler", "inc/ContourTiler", "LICENSE", "COPYING"],
 }
 # The executable each library's legacy build makes (CMakeLists.txt).
-TARGETS = {"genseg": "genseg_legacy", "skeleton": "skeleton_legacy"}
+TARGETS = {"genseg": "genseg_legacy", "segmed": "segmed_legacy", "skeleton": "skeleton_legacy",
+           "tiler": "tiler_legacy"}
+# The largest difference --check allows between a made and a committed SegMed field: the legacy
+# code's exp() is the platform's expf, which may round a last bit differently.
+FIELD_TOLERANCE = 1e-6
 
 
 def pinned_sha():
@@ -184,6 +196,46 @@ def genseg_case(exe, inputs_dir, case, out_dir):
     return meta, counts
 
 
+def segmed_case(exe, inputs_dir, case, out_dir):
+    """Run the legacy SegMed on inputs/segmed/<case>.raw; write <case>.critical.txt and
+    <case>.field.f32 (segmed_driver.cpp) and return the case's metadata and its count."""
+    with open(os.path.join(inputs_dir, case + ".json")) as f:
+        meta = json.load(f)
+    dims = meta["dims"]
+    n = dims[0] * dims[1] * dims[2]
+    with open(os.path.join(inputs_dir, case + ".raw"), "rb") as f:
+        values = struct.unpack("<%df" % n, f.read())
+    with tempfile.TemporaryDirectory(prefix="segmed-") as tmp:
+        write_rawiv(os.path.join(tmp, "input.rawiv"), dims, values)
+        run([exe, "input.rawiv", str(meta["tlow"]), "critical.txt", "field.f32"], cwd=tmp,
+            quiet=True)
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(tmp, "critical.txt"), "rb") as src:
+            text = src.read().replace(b"\r\n", b"\n")
+        with open(os.path.join(out_dir, case + ".critical.txt"), "wb") as dst:
+            dst.write(text)
+        with open(os.path.join(tmp, "field.f32"), "rb") as src:
+            field = src.read()
+        if len(field) != 12 * n:
+            raise SystemExit("%s: the field has %d bytes, not %d" % (case, len(field), 12 * n))
+        with open(os.path.join(out_dir, case + ".field.f32"), "wb") as dst:
+            dst.write(field)
+    return meta, len(text.splitlines())
+
+
+def fields_differ(made, kept):
+    """The largest difference between two .field.f32 files (inf if their sizes differ)."""
+    with open(made, "rb") as f:
+        a = f.read()
+    with open(kept, "rb") as f:
+        b = f.read()
+    if len(a) != len(b):
+        return float("inf")
+    va = struct.unpack("<%df" % (len(a) // 4), a)
+    vb = struct.unpack("<%df" % (len(b) // 4), b)
+    return max((abs(x - y) for x, y in zip(va, vb)), default=0.0)
+
+
 def skeleton_case(exe, inputs_dir, case, out_dir):
     """Run the legacy Skeletonization on inputs/skeleton/<case>.pts; write <case>.skel.txt (what
     skeleton_driver.cpp writes) and return the case's metadata and its counts. It runs in a
@@ -208,6 +260,79 @@ def skeleton_case(exe, inputs_dir, case, out_dir):
                   "debug_files": debug}
 
 
+# How far --check lets a remade tiler golden's coordinates be from the committed one's: the
+# legacy ContourTiler runs on CGAL::Cartesian<double> (inexact predicates and constructions), and
+# its untiled-region fill interpolates, so the platform's floating point can move the last bits.
+TILES_TOLERANCE = 1e-9
+
+
+def read_rawc(path):
+    """A legacy .rawc: its vertices (x, y, z) and triangles (vertex indices)."""
+    with open(path) as f:
+        tokens = f.read().split()
+    nv, nt = int(tokens[0]), int(tokens[1])
+    at = 2
+    per = (len(tokens) - 2 - 3 * nt) // nv if nv else 3
+    verts = []
+    for _ in range(nv):
+        verts.append(tuple(float(t) for t in tokens[at:at + 3]))
+        at += per
+    tris = []
+    for _ in range(nt):
+        tris.append(tuple(int(t) for t in tokens[at:at + 3]))
+        at += 3
+    return verts, tris
+
+
+def write_tiles(path, verts, tris):
+    with open(path, "w", newline="\n") as f:
+        f.write("%d %d\n" % (len(verts), len(tris)))
+        for v in verts:
+            f.write("%.17g %.17g %.17g\n" % v)
+        for t in tris:
+            f.write("%d %d %d\n" % t)
+
+
+def tiles_differ(made, kept):
+    """The largest coordinate difference between two tiles files, or infinity when their vertex
+    counts or triangles differ."""
+    a = open(made).read().split()
+    b = open(kept).read().split()
+    if len(a) != len(b) or a[:2] != b[:2]:
+        return float("inf")
+    nv = int(a[0])
+    worst = 0.0
+    for i in range(2, 2 + 3 * nv):
+        worst = max(worst, abs(float(a[i]) - float(b[i])))
+    if a[2 + 3 * nv:] != b[2 + 3 * nv:]:
+        return float("inf")
+    return worst
+
+
+def tiler_case(exe, inputs_dir, case, out_dir):
+    """Run the legacy ContourTiler on inputs/tiler/<case>/<case>.ser, sections first to last;
+    write <case>.<component>.tiles.txt for each component it tiled (its vertices with the tiler's
+    own z, the section index on a contour, and its triangles, in the legacy order) and return the
+    case's metadata and each component's counts. It runs in a scratch directory: the legacy code
+    writes its output files there."""
+    with open(os.path.join(inputs_dir, case + ".json")) as f:
+        meta = json.load(f)
+    args = ["%s=%r" % (k, v) for k, v in sorted(meta.get("parameters", {}).items())]
+    base = os.path.join(inputs_dir, case, case)
+    counts = {}
+    os.makedirs(out_dir, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="tiler-") as tmp:
+        run([exe, base, str(meta["first"]), str(meta["last"]), tmp] + args, cwd=tmp, quiet=True)
+        for name in sorted(os.listdir(tmp)):
+            if not name.endswith("_tiles.rawc") or name == "_tiles.rawc":
+                continue
+            component = name[:-len("_tiles.rawc")]
+            verts, tris = read_rawc(os.path.join(tmp, name))
+            write_tiles(os.path.join(out_dir, "%s.%s.tiles.txt" % (case, component)), verts, tris)
+            counts[component] = {"vertices": len(verts), "triangles": len(tris)}
+    return meta, counts
+
+
 def describe_platform():
     return "%s %s, %s, Python %s" % (platform.system(), platform.machine(),
                                     platform.platform(terse=True), platform.python_version())
@@ -222,8 +347,9 @@ def main():
                                                    "volrover-goldens"))
     ap.add_argument("--check", action="store_true",
                     help="make the goldens in a scratch directory and compare them with --out")
-    ap.add_argument("--libs", default="genseg,skeleton",
-                    help="the libraries, comma-separated (genseg, skeleton; skeleton needs CGAL)")
+    ap.add_argument("--libs", default="genseg,segmed,skeleton,tiler",
+                    help="the libraries, comma-separated (genseg, segmed, skeleton, tiler; skeleton "
+                         "and tiler need CGAL)")
     args = ap.parse_args()
 
     sha = pinned_sha()
@@ -239,7 +365,9 @@ def main():
     target = os.path.join(work, "check") if args.check else args.out
     if args.check and os.path.exists(target):
         shutil.rmtree(target)
-    compared = []  # (library dir, file name) pairs --check compares
+    compared = []  # (library dir, file name) pairs --check compares byte for byte
+    near = []  # (library dir, file name) pairs --check compares to within FIELD_TOLERANCE
+    near_tiles = []  # (library dir, file name) pairs --check compares to within TILES_TOLERANCE
 
     if "genseg" in libs:
         exe = exes["genseg"]
@@ -273,6 +401,32 @@ def main():
             compared.append(("genseg", case + ".labels.u8"))
             compared.append(("genseg", case + ".indices.txt"))
 
+    if "segmed" in libs:
+        inputs_dir = os.path.join(HERE, "inputs", "segmed")
+        out_dir = os.path.join(target, "segmed")
+        for case in sorted(f[:-5] for f in os.listdir(inputs_dir) if f.endswith(".json")):
+            meta, count = segmed_case(exes["segmed"], inputs_dir, case, out_dir)
+            golden = {
+                "library": "SegMed",
+                "volrover": sha,
+                "case": case,
+                "input": "tools/volrover-goldens/inputs/segmed/%s.raw" % case,
+                "input_sha256": sha256(os.path.join(inputs_dir, case + ".raw")),
+                "dims": meta["dims"],
+                "tlow": meta["tlow"],
+                "critical_points": count,
+                "critical_sha256": sha256(os.path.join(out_dir, case + ".critical.txt")),
+                "field_sha256": sha256(os.path.join(out_dir, case + ".field.f32")),
+                "made_by": "tools/volrover-goldens/make_goldens.py",
+                "platform": describe_platform(),
+            }
+            with open(os.path.join(out_dir, case + ".json"), "w", newline="\n") as f:
+                json.dump(golden, f, indent=2)
+                f.write("\n")
+            compared.append(("segmed", case + ".critical.txt"))
+            near.append(("segmed", case + ".field.f32"))
+            print("SegMed %s: %d critical points" % (case, count))
+
     if "skeleton" in libs:
         inputs_dir = os.path.join(HERE, "inputs", "skeleton")
         out_dir = os.path.join(target, "skeleton")
@@ -300,6 +454,36 @@ def main():
                   "strips" % (case, counts["polyline_segments"], counts["stars"],
                               counts["polygons"], counts["helix_strips"]))
 
+    if "tiler" in libs:
+        inputs_dir = os.path.join(HERE, "inputs", "tiler")
+        out_dir = os.path.join(target, "tiler")
+        for case in sorted(f[:-5] for f in os.listdir(inputs_dir) if f.endswith(".json")):
+            meta, counts = tiler_case(exes["tiler"], inputs_dir, case, out_dir)
+            series = os.path.join(inputs_dir, case)
+            golden = {
+                "library": "ContourTiler",
+                "volrover": sha,
+                "case": case,
+                "input": "tools/volrover-goldens/inputs/tiler/%s/%s.ser" % (case, case),
+                "input_sha256": {n: sha256(os.path.join(series, n))
+                                 for n in sorted(os.listdir(series))},
+                "first": meta["first"],
+                "last": meta["last"],
+                "parameters": meta.get("parameters", {}),
+                "components": counts,
+                "tiles_sha256": {c: sha256(os.path.join(out_dir, "%s.%s.tiles.txt" % (case, c)))
+                                 for c in counts},
+                "made_by": "tools/volrover-goldens/make_goldens.py",
+                "platform": describe_platform(),
+            }
+            with open(os.path.join(out_dir, case + ".json"), "w", newline="\n") as f:
+                json.dump(golden, f, indent=2)
+                f.write("\n")
+            for c in counts:
+                near_tiles.append(("tiler", "%s.%s.tiles.txt" % (case, c)))
+            print("ContourTiler %s: %s" % (case, ", ".join(
+                "%s %d triangles" % (c, n["triangles"]) for c, n in sorted(counts.items()))))
+
     if args.check:
         bad = []
         for lib_dir, name in compared:
@@ -309,11 +493,32 @@ def main():
                 bad.append("%s/%s: not committed" % (lib_dir, name))
             elif sha256(made) != sha256(kept):
                 bad.append("%s/%s: differs from the committed golden" % (lib_dir, name))
+        for lib_dir, name in near:
+            made = os.path.join(target, lib_dir, name)
+            kept = os.path.join(args.out, lib_dir, name)
+            if not os.path.exists(kept):
+                bad.append("%s/%s: not committed" % (lib_dir, name))
+            else:
+                d = fields_differ(made, kept)
+                if d > FIELD_TOLERANCE:
+                    bad.append("%s/%s: differs from the committed golden by %g" %
+                               (lib_dir, name, d))
+        for lib_dir, name in near_tiles:
+            made = os.path.join(target, lib_dir, name)
+            kept = os.path.join(args.out, lib_dir, name)
+            if not os.path.exists(kept):
+                bad.append("%s/%s: not committed" % (lib_dir, name))
+            else:
+                d = tiles_differ(made, kept)
+                if d > TILES_TOLERANCE:
+                    bad.append("%s/%s: differs from the committed golden by %g" %
+                               (lib_dir, name, d))
         if bad:
             print("\n".join(bad))
             print("The made goldens are in", target)
             return 1
-        print("the goldens match (%d files: %s)" % (len(compared), ", ".join(libs)))
+        print("the goldens match (%d files: %s)" % (len(compared) + len(near) + len(near_tiles),
+                                                    ", ".join(libs)))
     return 0
 
 if __name__ == "__main__":

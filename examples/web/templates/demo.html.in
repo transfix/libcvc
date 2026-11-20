@@ -112,7 +112,9 @@
 <footer><span id="stdout"></span><span id="stderr"></span></footer>
 <script>
   const DEMO = '{{DEMO}}';
-  const WASM_MB = {{WASM_MB}}; // decompressed size shown against a gzip transfer
+  // The large files this page loads, by content (build-pages.py): {wasm, data (when the demo has a
+  // preloaded package), js}, each {name, hash: the leading hex digits of its SHA-256, size}.
+  const ASSETS = {{ASSETS}};
   // Fullscreen has to be requested from a real user-gesture handler on the
   // DOM side: the wasm app drains its events inside requestAnimationFrame, so
   // calling emscripten_request_fullscreen from there fails the browser's
@@ -180,11 +182,110 @@
       for (const [path, text] of Object.entries(bootFiles)) FS.writeFile(path, text);
     }];
   }
-  // Cache-buster keyed to the ACTUAL wasm content (a short hash baked in at
-  // page-generation time), not document.lastModified: build-pages.py emits
-  // byte-identical index.html each deploy, so its mtime never moves and the old
-  // value froze -- browsers then served a stale, cached .wasm forever.
-  const V = '{{ASSET_V}}';
+  // The wasm, its .data package and its glue are kept in the browser's Cache Storage under their
+  // name and content hash (ASSETS). GitHub Pages serves every file with max-age=600 and an ETag
+  // made from its time, and each deploy rewrites every file, so the HTTP cache downloaded all of
+  // them again after every deploy, changed or not. A file the cache holds under the hash this page
+  // names is used with no request at all; a missing one is downloaded once, kept under the hash of
+  // the bytes that came, and its other versions are dropped. Only this page is revalidated (it is
+  // small), and a deploy that changes a file changes its hash here; a copy of the page older than
+  // the deploy reloads itself (reloadOnce). Where Cache Storage is unavailable (an insecure
+  // context, some private windows, storage blocked), or with ?nocache, the page loads as it did
+  // before: the wasm revalidated, the glue and the package by their URLs.
+  const ASSET_CACHE = 'cvcgl-demo-assets';
+  const assetUrl = (a, hash) => new URL(a.name + '?v=' + (hash || a.hash), location.href).href;
+
+  async function openAssetCache() {
+    if (new URLSearchParams(location.search).has('nocache'))
+      return null;
+    try {
+      return self.caches && self.crypto && crypto.subtle ? await caches.open(ASSET_CACHE) : null;
+    } catch (e) {
+      console.warn('cvcGL demo: no Cache Storage (' + e + '); loading without it');
+      return null;
+    }
+  }
+
+  async function fromCache(cache, a) {
+    try {
+      const r = await cache.match(assetUrl(a));
+      return r ? await r.arrayBuffer() : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Downloads the assets together, revalidated (an HTTP-cached copy only if the server says it is
+  // current), with one progress line; resolves to their bytes, in order.
+  function download(list) {
+    const total = list.reduce((n, a) => n + a.size, 0);
+    const got = list.map(() => 0);
+    const what = list.map(a => a.name).join(' + ');
+    return Promise.all(list.map(async (a, i) => {
+      const resp = await fetch(a.name + '?v=' + a.hash, {cache: 'no-cache'});
+      if (!resp.ok) throw new Error('HTTP ' + resp.status + ' fetching ' + a.name);
+      const reader = resp.body.getReader();
+      const chunks = [];
+      for (;;) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        got[i] += value.length;
+        const n = got.reduce((s, g) => s + g, 0);
+        statusEl.textContent = 'Downloading ' + what + ' — ' +
+          Math.min(99, Math.round(100 * n / total)) + '% (' + (n / 1048576).toFixed(1) + ' MB)';
+      }
+      const buf = new Uint8Array(got[i]);
+      let off = 0;
+      for (const c of chunks) { buf.set(c, off); off += c.length; }
+      return buf.buffer;
+    }));
+  }
+
+  // Keeps a download under the hash of its bytes and drops the asset's other versions; resolves to
+  // that hash. A page HTTP-cached from before a deploy names the old hash and is served the new
+  // bytes, which then wait under their own hash for the page that names them. A full disk or a
+  // refused write costs only the caching.
+  async function keep(cache, a, buf) {
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', buf));
+    const hash = Array.from(digest, b => b.toString(16).padStart(2, '0')).join('')
+                   .slice(0, a.hash.length);
+    try {
+      const url = assetUrl(a, hash);
+      await cache.put(url, new Response(buf));
+      for (const k of await cache.keys(url, {ignoreSearch: true}))
+        if (k.url !== url) await cache.delete(k);
+    } catch (e) {
+      console.warn('cvcGL demo: could not cache ' + a.name + ' (' + e + ')');
+    }
+    return hash;
+  }
+
+  // Bytes that are not the file this page names mean the page is older than the deploy (the
+  // browser keeps it up to ten minutes): reload it, revalidated, and the current page finds the
+  // files just kept. Once per page version, so a CDN still mid-deploy cannot loop it; after that
+  // the page carries on with what came, as it did before.
+  function reloadOnce(stale) {
+    if (!stale.length) return false;
+    const key = 'cvcgl-demo-reload ' + location.pathname + ' ' + stale.map(a => a.hash).join(' ');
+    try {
+      if (sessionStorage.getItem(key)) return false;
+      sessionStorage.setItem(key, '1');
+    } catch (e) {
+      return false;
+    }
+    console.warn('cvcGL demo: the server has newer ' + stale.map(a => a.name).join(', ') +
+                 ' than this page names; reloading the page');
+    location.reload();
+    return true;
+  }
+
+  function loadFailed(why) {
+    const o = document.getElementById('overlay');
+    o.querySelector('.spinner').style.display = 'none';
+    statusEl.textContent = 'Load failed: ' + why + ' — try a hard reload (Ctrl+Shift+R)';
+  }
+
   async function boot() {
     try {
       for (const [path, url] of Object.entries((BOOT && BOOT.files) || {})) {
@@ -194,34 +295,49 @@
         else
           console.warn('cvcGL demo: no ' + url + ' (HTTP ' + r.status + ')');
       }
-      const resp = await fetch(DEMO + '.wasm?v=' + V, {cache: 'no-cache'});
-      if (!resp.ok) throw new Error('HTTP ' + resp.status + ' fetching ' + DEMO + '.wasm');
-      const reader = resp.body.getReader();
-      const chunks = [];
-      let got = 0;
-      for (;;) {
-        const {done, value} = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        got += value.length;
-        const mb = got / 1048576;
-        statusEl.textContent = 'Downloading ' + DEMO + '.wasm — ' +
-          Math.min(99, Math.round(100 * mb / WASM_MB)) + '% (' + mb.toFixed(1) + ' MB)';
+      const bytes = new Map(); // asset -> ArrayBuffer
+      const cache = await openAssetCache();
+      if (cache) {
+        statusEl.textContent = 'Loading ' + DEMO + '…';
+        const list = [ASSETS.wasm, ASSETS.data, ASSETS.js].filter(Boolean);
+        for (const a of list) {
+          const b = await fromCache(cache, a);
+          if (b) bytes.set(a, b);
+        }
+        const missing = list.filter(a => !bytes.has(a));
+        if (missing.length) {
+          const bufs = await download(missing);
+          statusEl.textContent = 'Keeping ' + missing.map(a => a.name).join(' + ') +
+                                 ' for next time…';
+          const hashes = await Promise.all(missing.map((a, i) => keep(cache, a, bufs[i])));
+          missing.forEach((a, i) => bytes.set(a, bufs[i]));
+          if (reloadOnce(missing.filter((a, i) => hashes[i] !== a.hash)))
+            return;
+        }
+      } else {
+        bytes.set(ASSETS.wasm, (await download([ASSETS.wasm]))[0]);
       }
-      const buf = new Uint8Array(got);
-      let off = 0;
-      for (const c of chunks) { buf.set(c, off); off += c.length; }
-      Module.wasmBinary = buf;
+      Module.wasmBinary = new Uint8Array(bytes.get(ASSETS.wasm));
+      // The package Emscripten's loader would fetch itself (it asks for it by its URL's name).
+      const data = ASSETS.data && bytes.get(ASSETS.data);
+      if (data)
+        Module.getPreloadedPackage =
+          name => name.split('/').pop() === ASSETS.data.name ? data : null;
       statusEl.textContent = 'Compiling…';
       const s = document.createElement('script');
-      s.src = DEMO + '.js?v=' + V;
-      s.onerror = () => { throw new Error('failed to load ' + DEMO + '.js'); };
+      const js = bytes.get(ASSETS.js);
+      if (js) {
+        // Run from the cached bytes. The glue then has no directory of its own and finds its files
+        // beside this page, where they are; a threaded build's workers load it by its URL.
+        s.src = URL.createObjectURL(new Blob([js], {type: 'text/javascript'}));
+        Module.mainScriptUrlOrBlob = assetUrl(ASSETS.js);
+      } else {
+        s.src = ASSETS.js.name + '?v=' + ASSETS.js.hash;
+      }
+      s.onerror = () => loadFailed('failed to load ' + ASSETS.js.name);
       document.body.appendChild(s);
     } catch (e) {
-      const o = document.getElementById('overlay');
-      o.querySelector('.spinner').style.display = 'none';
-      statusEl.textContent = 'Load failed: ' + (e && e.message || e) +
-        ' — try a hard reload (Ctrl+Shift+R)';
+      loadFailed(e && e.message || e);
     }
   }
 

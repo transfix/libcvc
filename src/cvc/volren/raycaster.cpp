@@ -19,6 +19,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 
 namespace cvc {
@@ -159,19 +160,15 @@ inline bool culled_by_planes(const std::vector<cut_plane> &planes, const vec3d &
 // volume list on every single frame (worker::run does clear_volumes() +
 // add_volume()).  Stamping there would make every frame a cache miss and undo
 // the whole point of keeping voxels resident.  Only invalidate_device_volume()
-// draws a stamp, from a counter of the app's (whose device cache it stamps:
-// raycast_cuda_cache_of) so that two raycasters of one app sharing a voxel
-// buffer cannot collide -- and a mismatch always means "re-upload the current
-// host bytes", so a disagreement costs an upload, never staleness.
+// draws a stamp, from the counter of the device caches it stamps for (the
+// app's raycast_cuda_cache_of(app).caches(), which other apps may share) so
+// that no two raycasters sharing those caches and a voxel buffer can collide --
+// and a mismatch always means "re-upload the current host bytes", so a
+// disagreement costs an upload, never staleness.
 inline constexpr std::uint64_t initial_content_generation = 0;
 
-struct content_generations {
-  static constexpr const char *app_slot = "cvc.volren.content_generations";
-  std::atomic<std::uint64_t> counter{initial_content_generation};
-};
-
 std::uint64_t next_content_generation(cvc::app &app) {
-  return app.slot<content_generations>().counter.fetch_add(1, std::memory_order_relaxed) + 1;
+  return raycast_cuda_cache_of(app).caches()->next_generation();
 }
 
 inline unsigned char to_byte(float c) {
@@ -293,6 +290,36 @@ struct shadow_context {
 } // namespace
 
 raycast_cuda_cache &raycast_cuda_cache_of(cvc::app &app) { return app.slot<raycast_cuda_cache>(); }
+
+// The handle is the same with and without CUDA; only cuda_device_caches differs
+// (raycast.cu, or raycaster_cuda_stub.cpp's no-ops).
+raycast_cuda_cache::raycast_cuda_cache() : _caches(std::make_shared<cuda_device_caches>()) {}
+raycast_cuda_cache::~raycast_cuda_cache() = default;
+
+void raycast_cuda_cache::share(std::shared_ptr<cuda_device_caches> caches) {
+  if (!caches)
+    throw std::invalid_argument("raycast_cuda_cache::share: no caches");
+  std::lock_guard<std::mutex> lock(_mutex);
+  if (caches == _caches)
+    return;
+  if (_caches->generations() != 0 || _caches->uploaded() != 0)
+    throw std::logic_error("raycast_cuda_cache::share: this app has already staged a block or "
+                           "drawn a content-generation stamp from its caches; share before its "
+                           "first render");
+  _caches = std::move(caches);
+}
+
+std::shared_ptr<cuda_device_caches> raycast_cuda_cache::caches() const {
+  std::lock_guard<std::mutex> lock(_mutex);
+  return _caches;
+}
+
+void raycast_cuda_cache::set_budget(std::size_t bytes) { caches()->set_budget(bytes); }
+std::size_t raycast_cuda_cache::budget() { return caches()->budget(); }
+std::size_t raycast_cuda_cache::resident() { return caches()->resident(); }
+std::uint64_t raycast_cuda_cache::uploaded() { return caches()->uploaded(); }
+void raycast_cuda_cache::forget_host(const void *host) { caches()->forget_host(host); }
+void raycast_cuda_cache::clear() { caches()->clear(); }
 
 raycaster::raycaster(cvc::app &ctx) : _ctx(ctx) {}
 

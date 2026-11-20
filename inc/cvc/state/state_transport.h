@@ -342,6 +342,12 @@ public:
     (void)principal;
     return 0;
   }
+  // Close the connection this relay accepted that link_reports() numbers NUMBER (a kick,
+  // client_registry.h); whether there was one. Default: false.
+  virtual bool disconnect_connection(std::uint64_t number) {
+    (void)number;
+    return false;
+  }
 
   // -------- What a peer may read (a read_scope hook, ARIADNE_SCRIPTING_HOSTS.md §6.5.6) --------
   //

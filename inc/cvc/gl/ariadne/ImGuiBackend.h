@@ -89,6 +89,10 @@ public:
   // Kind::Chart (chart_imgui.cpp): axes with log decades, a legend that hides and shows series,
   // a hover readout, bands, gaps, markers, the cursor and the pick, on the draw list.
   cvc::ariadne::ChartEvent chart(const char *label, const cvc::ariadne::ChartSpec &spec) override;
+  // Kind::Heatmap (heatmap_imgui.cpp): the cells, their text, marks and labels, the picked and the
+  // hovered cell outlined, and the legend, on the draw list over one item (the tooltip's).
+  cvc::ariadne::HeatmapEvent heatmap(const char *label,
+                                     const cvc::ariadne::HeatmapSpec &spec) override;
   void spinner(const char *label, double seconds, bool ascii) override; // a turning arc
   bool button(const char *label) override;
   bool menu_item_action(const char *label) override;
@@ -144,6 +148,15 @@ public:
                                 const std::vector<std::string> &options) override;
   cvc::ariadne::IndexEdit radio(const char *label, int current_index,
                                 const std::vector<std::string> &options, bool row) override;
+  // An ImGui tab bar. The selection follows `current` (a write to the tab's key from anywhere
+  // selects that tab); a click on another tab is reported as the pick.
+  cvc::ariadne::IndexEdit tab_bar(const char *label, const char *id, int current,
+                                  const std::vector<std::string> &labels) override;
+  // A list box of selectable rows, `o.rows` tall, with Add and Remove (disabled with nothing
+  // selected) under it.
+  cvc::ariadne::ListEdit list(const char *label, const char *id, int current,
+                              const std::vector<std::string> &items,
+                              const cvc::ariadne::ListOptions &o) override;
   void focus_next_widget() override;
   cvc::ariadne::StringEdit input_text(const char *label, const char *key,
                                       const std::string &current, bool masked) override;
@@ -376,6 +389,9 @@ private:
   // Per-key in-progress InputText / InputInt text. Follows the value in state while no field is
   // active and holds the edit while one is — the string counterpart of cache_int/cache_float.
   std::unordered_map<std::string, std::string> m_textEdits;
+  // Each tab bar's selection as this backend last asked ImGui for it (tab_bar), by bar id: a
+  // different `current` is a write from outside, which selects that tab.
+  std::unordered_map<std::string, int> m_tabSelected;
 
   // Per-key message fields: the text being written, and whether to take the focus back next frame
   // (sending a message ends ImGui's edit).

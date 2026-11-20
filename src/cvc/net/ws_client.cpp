@@ -21,6 +21,8 @@
 #include <emscripten/websocket.h>
 #define CVC_NET_WS_WEB 1
 #elif defined(CVC_NET_HAVE_CURL)
+#include "http_backends.h" // detail::curl_global_init_once
+
 #include <curl/curl.h>
 #if LIBCURL_VERSION_NUM >= 0x075600 // curl_ws_* arrived in 7.86.0
 #define CVC_NET_WS_CURL 1
@@ -159,10 +161,8 @@ int close_code(const std::string &payload) {
 
 #if defined(CVC_NET_WS_CURL)
 
-void ensure_curl_global() {
-  static std::once_flag once;
-  std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
-}
+// libcurl's global init, with the HTTP client's one flag (http_client_curl.cpp).
+void ensure_curl_global() { detail::curl_global_init_once(); }
 
 class CurlWsConnection : public WsConnection {
 public:
@@ -218,6 +218,11 @@ private:
   }
 
   bool send_frame(const char *data, std::size_t len, unsigned int flags, std::string *error) {
+    // One frame at a time, whole: libcurl continues a partly sent frame with the next send's
+    // bytes, so two threads sending on one connection (two documents pumped on two workers, or a
+    // close beside a send) would interleave their messages on the wire. The handle's lock is
+    // still taken per chunk, so the reader goes on receiving between them.
+    std::lock_guard<std::mutex> frame(send_mutex_);
     std::size_t done = 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     // A zero-length message still needs one send.
@@ -299,6 +304,7 @@ private:
   CURL *h_;
   std::size_t max_bytes_;
   curl_socket_t sock_ = CURL_SOCKET_BAD;
+  std::mutex send_mutex_;   // held across a whole frame (send_frame), before handle_mutex_
   std::mutex handle_mutex_; // the easy handle is not thread-safe: sends and receives take turns
   std::atomic<bool> open_{false};
   std::atomic<bool> closed_by_peer_{false};

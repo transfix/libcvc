@@ -14,8 +14,11 @@
 */
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <cmath>
 #include <cvc/ariadne/bind.h> // resolve_bind, read_or
+#include <cvc/ariadne/data.h> // a data look's package
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/world_spawns.h>
@@ -30,12 +33,16 @@
 #include <cvc/gl/physics_scene_binding.h>
 #include <cvc/model/model.h>
 #include <cvc/model/model_file_io.h>
+#include <cvc/physics/dyn_boat_plant.h>
 #include <cvc/state/state.h>
 #include <exception>
+#include <filesystem>
 #include <map>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace cvc {
 namespace gl {
@@ -95,10 +102,9 @@ void rgb(const std::string &s, float out[3]) {
     out[i] = static_cast<float>(std::clamp(num(part, out[i]), 0.0, 1.0));
 }
 
-// A vehicle model made ready to draw on a chassis: its smallest extent up (resting on z = 0), its
-// longest forward (+x, scaled to `length`), centred, the nose the end whose top sits lower (the
-// hood), as the nav demos' load_vehicle_template and pycvc_gl's VehicleModel have it; and its
-// first base-colour texture. Read once per file and length.
+// A vehicle model made ready to draw on a chassis (fit_vehicle_geometry), as the nav demos'
+// load_vehicle_template and pycvc_gl's VehicleModel have it, and its first base-colour texture.
+// Read once per file and length.
 struct fitted_model {
   cvc::geometry geometry;
   cvc::image texture;
@@ -112,43 +118,47 @@ struct vehicle_model_cache {
   std::map<std::string, std::shared_ptr<const fitted_model>> models;
 };
 
-namespace {
-
-std::shared_ptr<const fitted_model> fitted(cvc::app &app, vehicle_model_cache &cache,
-                                           const std::string &path, double length,
-                                           std::vector<std::string> *warnings) {
-  const std::string key = path + "|" + std::to_string(length);
-  if (auto it = cache.models.find(key); it != cache.models.end())
-    return it->second;
-  std::shared_ptr<fitted_model> out;
-  try {
-    cvc::model m = cvc::read_model(app, path);
-    cvc::geometry g = m.merged();
-    if (g.num_tris() == 0)
-      throw std::runtime_error("it has no triangles");
-    auto f = std::make_shared<fitted_model>();
-    for (const auto &mat : m.materials)
-      if (mat.has_base_color_texture()) {
-        f->texture = mat.base_color_texture;
-        break;
-      }
-    const auto pts = g.const_points();
-    double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
-    for (const auto &v : pts)
-      for (int k = 0; k < 3; ++k) {
-        lo[k] = std::min(lo[k], static_cast<double>(v[k]));
-        hi[k] = std::max(hi[k], static_cast<double>(v[k]));
-      }
-    const double ext[3] = {hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]};
-    int up = 0;
+cvc::geometry fit_vehicle_geometry(cvc::geometry g, double length, const vehicle_fit_axes &axes) {
+  const auto pts = g.const_points();
+  if (pts.empty())
+    throw std::runtime_error("it has no points");
+  double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
+  for (const auto &v : pts)
+    for (int k = 0; k < 3; ++k) {
+      lo[k] = std::min(lo[k], static_cast<double>(v[k]));
+      hi[k] = std::max(hi[k], static_cast<double>(v[k]));
+    }
+  const double ext[3] = {hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]};
+  const double big = std::max({ext[0], ext[1], ext[2]});
+  const auto is_axis = [](int a) { return a >= 0 && a < 3; };
+  int up = is_axis(axes.up) ? axes.up : -1;
+  // The axis it stands on: its least coordinate 0 there, and on the other two it reaches past a
+  // tenth of its extent each way (a file built on its ground plane, centred on it).
+  for (int k = 0; k < 3 && up < 0; ++k) {
+    bool stands = std::abs(lo[k]) <= 0.02 * big;
+    for (int o = 0; o < 3; ++o)
+      if (o != k && !(lo[o] < -0.1 * ext[o] && hi[o] > 0.1 * ext[o]))
+        stands = false;
+    if (stands)
+      up = k;
+  }
+  if (up < 0) {
+    up = 0;
     for (int k = 1; k < 3; ++k)
       if (ext[k] < ext[up])
         up = k;
-    int fwd = (up + 1) % 3, side = (up + 2) % 3;
-    if (ext[side] > ext[fwd])
-      std::swap(fwd, side);
-    const double sc = ext[fwd] > 1e-9 ? length / ext[fwd] : 1.0;
-    const double cf = 0.5 * (lo[fwd] + hi[fwd]), cs = 0.5 * (lo[side] + hi[side]);
+  }
+  int fwd = (up + 1) % 3, side = (up + 2) % 3;
+  if (is_axis(axes.forward) && axes.forward != up) {
+    fwd = axes.forward;
+    side = 3 - up - fwd;
+  } else if (ext[side] > ext[fwd]) {
+    std::swap(fwd, side);
+  }
+  const double sc = ext[fwd] > 1e-9 ? length / ext[fwd] : 1.0;
+  const double cf = 0.5 * (lo[fwd] + hi[fwd]), cs = 0.5 * (lo[side] + hi[side]);
+  int front = axes.nose > 0 ? 1 : (axes.nose < 0 ? -1 : 0);
+  if (front == 0) {
     long n_pos = 0, n_neg = 0, tt_pos = 0, tt_neg = 0;
     double top_pos = 0.0, top_neg = 0.0;
     const double top = lo[up] + 0.6 * ext[up];
@@ -168,38 +178,247 @@ std::shared_ptr<const fitted_model> fitted(cvc::app &app, vehicle_model_cache &c
         }
       }
     }
-    int front = n_pos < n_neg ? 1 : -1;
+    front = n_pos < n_neg ? 1 : -1;
     if (tt_pos > 8 && tt_neg > 8)
       front = top_pos / tt_pos < std::abs(top_neg / tt_neg) ? 1 : -1;
-    // A rotation, never a mirror: an odd permutation of the axes (or a nose turned round)
-    // reflects the mesh, which mirrors it and turns its triangles inside out. Flip the side
-    // axis to undo it.
-    const bool even = (fwd + 1) % 3 == side; // (fwd, side, up) a cyclic order of (0, 1, 2)
-    const double flip = (even ? 1.0 : -1.0) * front > 0 ? 1.0 : -1.0;
-    auto &moved = g.points();
-    for (std::size_t i = 0; i < pts.size(); ++i) {
-      const auto &v = pts[i];
-      moved[i][0] = (v[fwd] - cf) * sc * front;
-      moved[i][1] = (v[side] - cs) * sc * flip;
-      moved[i][2] = (v[up] - lo[up]) * sc;
+  }
+  // A rotation, never a mirror: an odd permutation of the axes (or a nose turned round) reflects
+  // the mesh, which mirrors it and turns its triangles inside out. Flip the side axis to undo it.
+  const bool even = (fwd + 1) % 3 == side; // (fwd, side, up) a cyclic order of (0, 1, 2)
+  const double flip = (even ? 1.0 : -1.0) * front > 0 ? 1.0 : -1.0;
+  auto &moved = g.points();
+  for (std::size_t i = 0; i < pts.size(); ++i) {
+    const auto &v = pts[i];
+    moved[i][0] = (v[fwd] - cf) * sc * front;
+    moved[i][1] = (v[side] - cs) * sc * flip;
+    moved[i][2] = (v[up] - lo[up]) * sc;
+  }
+  const auto nn = g.const_normals();
+  if (nn.size() == pts.size()) {
+    auto &turned = g.normals();
+    for (std::size_t i = 0; i < nn.size(); ++i) {
+      turned[i][0] = nn[i][fwd] * front;
+      turned[i][1] = nn[i][side] * flip;
+      turned[i][2] = nn[i][up];
     }
-    const auto nn = g.const_normals();
-    if (nn.size() == pts.size()) {
-      auto &turned = g.normals();
-      for (std::size_t i = 0; i < nn.size(); ++i) {
-        turned[i][0] = nn[i][fwd] * front;
-        turned[i][1] = nn[i][side] * flip;
-        turned[i][2] = nn[i][up];
+  }
+  return g;
+}
+
+namespace {
+
+// How a read model is fitted: to a vehicle's length (fit_vehicle_geometry), or into a box.
+struct model_fit {
+  double length = 0.0; // a vehicle's length
+  bool box = false;    // into lo..hi instead, each axis scaled to fill it
+  std::array<double, 3> lo{}, hi{};
+
+  static model_fit vehicle(double length) {
+    model_fit f;
+    f.length = length;
+    return f;
+  }
+  static model_fit into(const std::array<double, 3> &lo, const std::array<double, 3> &hi) {
+    model_fit f;
+    f.box = true;
+    f.lo = lo;
+    f.hi = hi;
+    return f;
+  }
+  // Its part of a cache key.
+  std::string key() const {
+    if (!box)
+      return std::to_string(length);
+    std::string k = "box";
+    for (int i = 0; i < 3; ++i)
+      k += " " + std::to_string(lo[i]) + " " + std::to_string(hi[i]);
+    return k;
+  }
+};
+
+// A model's geometry in the box lo..hi: stood upright (a +Y-up file, `y_up`, turned about +X, so
+// +Y goes to +Z: a rotation, never a mirror) and scaled on each axis to fill the box, its normals
+// scaled inversely and made unit again.
+cvc::geometry fit_into_box(cvc::geometry g, const std::array<double, 3> &lo,
+                           const std::array<double, 3> &hi, bool y_up) {
+  const auto pts = g.const_points();
+  if (pts.empty())
+    throw std::runtime_error("it has no points");
+  const auto turn = [y_up](double x, double y, double z) {
+    return y_up ? std::array<double, 3>{x, -z, y} : std::array<double, 3>{x, y, z};
+  };
+  double mlo[3] = {1e30, 1e30, 1e30}, mhi[3] = {-1e30, -1e30, -1e30};
+  for (const auto &v : pts) {
+    const std::array<double, 3> t = turn(v[0], v[1], v[2]);
+    for (int k = 0; k < 3; ++k) {
+      mlo[k] = std::min(mlo[k], t[k]);
+      mhi[k] = std::max(mhi[k], t[k]);
+    }
+  }
+  double s[3];
+  for (int k = 0; k < 3; ++k)
+    s[k] = mhi[k] - mlo[k] > 1e-12 ? (hi[k] - lo[k]) / (mhi[k] - mlo[k]) : 1.0;
+  auto &moved = g.points();
+  for (std::size_t i = 0; i < pts.size(); ++i) {
+    const std::array<double, 3> t = turn(pts[i][0], pts[i][1], pts[i][2]);
+    for (int k = 0; k < 3; ++k)
+      moved[i][k] = lo[k] + (t[k] - mlo[k]) * s[k];
+  }
+  const auto nn = g.const_normals();
+  if (nn.size() == pts.size()) {
+    auto &turned = g.normals();
+    for (std::size_t i = 0; i < nn.size(); ++i) {
+      std::array<double, 3> t = turn(nn[i][0], nn[i][1], nn[i][2]);
+      double len = 0.0;
+      for (int k = 0; k < 3; ++k) {
+        t[k] = std::abs(s[k]) > 1e-12 ? t[k] / s[k] : t[k];
+        len += t[k] * t[k];
       }
+      len = len > 0.0 ? std::sqrt(len) : 1.0;
+      for (int k = 0; k < 3; ++k)
+        turned[i][k] = t[k] / len;
     }
-    f->geometry = std::move(g);
-    out = std::move(f);
+  }
+  return g;
+}
+
+// A glTF file's axes: +Y up (the glTF spec's).
+bool y_up_file(const std::string &path) {
+  std::string ext = std::filesystem::path(path).extension().string();
+  std::transform(ext.begin(), ext.end(), ext.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return ext == ".glb" || ext == ".gltf";
+}
+
+// A read model (the file `path` names its format) fitted as `fit` says, with its first base-colour
+// texture. Throws when it has no triangles.
+std::shared_ptr<const fitted_model> fit_read(cvc::model &m, const model_fit &fit,
+                                             const std::string &path) {
+  cvc::geometry g = m.merged();
+  if (g.num_tris() == 0)
+    throw std::runtime_error("it has no triangles");
+  auto f = std::make_shared<fitted_model>();
+  for (const auto &mat : m.materials)
+    if (mat.has_base_color_texture()) {
+      f->texture = mat.base_color_texture;
+      break;
+    }
+  f->geometry = fit.box ? fit_into_box(std::move(g), fit.lo, fit.hi, y_up_file(path))
+                        : fit_vehicle_geometry(std::move(g), fit.length);
+  return f;
+}
+
+// What a model stands in for when it cannot be drawn, for a warning: a vehicle's box, a node's own
+// geometry.
+std::string drawn_instead(const model_fit &fit) {
+  return fit.box ? "drawn as its own geometry" : "drawn as its box";
+}
+
+std::shared_ptr<const fitted_model> fitted_file(cvc::app &app, vehicle_model_cache &cache,
+                                                const std::string &path, const model_fit &fit,
+                                                std::vector<std::string> *warnings) {
+  const std::string key = path + "|" + fit.key();
+  if (auto it = cache.models.find(key); it != cache.models.end())
+    return it->second;
+  std::shared_ptr<const fitted_model> out;
+  try {
+    cvc::model m = cvc::read_model(app, path);
+    out = fit_read(m, fit, path);
   } catch (const std::exception &e) {
     if (warnings)
-      warnings->push_back("ari: vehicle model '" + path + "': " + e.what() + "; drawn as its box");
+      warnings->push_back("ari: model '" + path + "': " + e.what() + "; " + drawn_instead(fit));
   }
   cache.models[key] = out;
   return out;
+}
+
+// The data store's request for a data look's package (its path: kept).
+ari::DataSpec data_spec_of(const ari::vehicle_look &look) {
+  ari::DataSpec s;
+  s.uri = look.uri;
+  s.path = look.subpath;
+  return s;
+}
+
+// The store node of a data look's package, its load started unless it has loaded or failed: a
+// failed load stays failed (DataStore::load would start it again, and a view polling it would
+// fetch it on every frame).
+std::string data_node_of(cvc::app &app, const ari::vehicle_look &look) {
+  const ari::DataSpec spec = data_spec_of(look);
+  const std::string node =
+      std::string(ari::kDataRoot) + cvc::state::SEPARATOR + ari::data_key(spec);
+  const std::string status = ari::data_status(app, node);
+  if (status == "ready" || status == "error")
+    return node;
+  return ari::DataStore::of(app)->load(spec);
+}
+
+// A data look's model: from its package once it has loaded (`pending` while it loads), else a
+// local install of the file by its name, else none.
+std::shared_ptr<const fitted_model> fitted_data(cvc::app &app, vehicle_model_cache &cache,
+                                                const ari::vehicle_look &look, const model_fit &fit,
+                                                std::vector<std::string> *warnings, bool &pending) {
+  namespace fs = std::filesystem;
+  pending = false;
+  const std::string key =
+      "data|" + look.uri + "|" + look.subpath + "|" + look.path + "|" + fit.key();
+  if (auto it = cache.models.find(key); it != cache.models.end())
+    return it->second;
+  const std::string node = data_node_of(app, look);
+  const std::string status = ari::data_status(app, node);
+  const std::string what =
+      look.uri + (look.subpath.empty() ? "" : "/" + look.subpath) + "/" + look.path;
+  std::shared_ptr<const fitted_model> out;
+  if (status == "ready") {
+    ari::DataBytes bytes = ari::data_file(app, node, look.path);
+    if (!bytes) // the file by its name anywhere in the package
+      for (const std::string &f : ari::data_files(app, node))
+        if (fs::path(f).filename() == fs::path(look.path).filename()) {
+          bytes = ari::data_file(app, node, f);
+          break;
+        }
+    try {
+      if (!bytes)
+        throw std::runtime_error("the package has no " + look.path);
+      cvc::model m = cvc::read_model_from_memory(app, bytes->data(), bytes->size(),
+                                                 fs::path(look.path).extension().string());
+      out = fit_read(m, fit, look.path);
+    } catch (const std::exception &e) {
+      if (warnings)
+        warnings->push_back("ari: model " + what + ": " + e.what() + "; " + drawn_instead(fit));
+    }
+  } else if (status == "error") {
+    const std::string local = ari::find_vehicle_model(look.path);
+    if (!local.empty()) {
+      out = fitted_file(app, cache, local, fit, warnings);
+    } else if (warnings) {
+      const std::string error = get(cvc::state::instance(app), node + ".error");
+      warnings->push_back("ari: model " + what + ": " +
+                          (error.empty() ? std::string("its package did not load") : error) +
+                          ", and it is not installed here; " + drawn_instead(fit));
+    }
+  } else {
+    pending = true; // idle, fetching, unpacking or decoding
+    return nullptr;
+  }
+  cache.models[key] = out;
+  return out;
+}
+
+std::shared_ptr<const fitted_model> fitted(cvc::app &app, vehicle_model_cache &cache,
+                                           const ari::vehicle_look &look, const model_fit &fit,
+                                           std::vector<std::string> *warnings, bool &pending) {
+  pending = false;
+  if (look.kind == "data")
+    return fitted_data(app, cache, look, fit, warnings, pending);
+  if (look.kind == "file" && (look.fit || fit.box))
+    return fitted_file(app, cache, look.path, fit, warnings);
+  return nullptr;
+}
+
+// Whether a look is drawn as a fitted model (attach_model), not as a mesh node or boxes.
+bool fitted_look(const ari::vehicle_look &look) {
+  return (look.kind == "file" && look.fit) || look.kind == "data";
 }
 
 // The fitted model under `group`: its base `base_z` below the group's origin (the ground under a
@@ -207,7 +426,9 @@ std::shared_ptr<const fitted_model> fitted(cvc::app &app, vehicle_model_cache &c
 bool attach_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group,
                   const std::string &id, const ari::vehicle_look &look, const vehicle_shape &s,
                   double base_z, const float color[3], std::vector<std::string> *warnings) {
-  std::shared_ptr<const fitted_model> m = fitted(app, cache, look.path, s.length, warnings);
+  bool pending = false;
+  std::shared_ptr<const fitted_model> m =
+      fitted(app, cache, look, model_fit::vehicle(s.length), warnings, pending);
   if (!m)
     return false;
   std::shared_ptr<GeometryNode> node = group.createChild<GeometryNode>(id, m->geometry);
@@ -230,13 +451,113 @@ bool attach_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group
 
 } // namespace
 
+std::shared_ptr<vehicle_model_cache> make_vehicle_model_cache() {
+  return std::make_shared<vehicle_model_cache>();
+}
+
+vehicle_model_status vehicle_model_state(cvc::app &app, vehicle_model_cache &cache,
+                                         const ari::vehicle_look &look, double length,
+                                         std::vector<std::string> *warnings) {
+  bool pending = false;
+  const std::shared_ptr<const fitted_model> m =
+      fitted(app, cache, look, model_fit::vehicle(length), warnings, pending);
+  return m ? vehicle_model_status::ready
+           : (pending ? vehicle_model_status::pending : vehicle_model_status::failed);
+}
+
+ari::vehicle_look node_model_look(const ari::Value &model, const std::vector<ari::SceneData> &data,
+                                  const std::string &where, const std::string &instead,
+                                  std::vector<std::string> *warnings) {
+  namespace fs = std::filesystem;
+  const auto warn = [&](const std::string &w) {
+    if (warnings)
+      warnings->push_back(where + ": model: " + w + "; drawn as " + instead);
+  };
+  ari::vehicle_look look;
+  look.fit = true;
+  if (model.is_map()) {
+    const ari::Value *d = model.find("data"), *f = model.find("file");
+    const std::string name = d ? d->as_string() : std::string();
+    const std::string file = f ? f->as_string() : std::string();
+    if (name.empty() || file.empty()) {
+      warn("expects { data: NAME, file: FILE }");
+      return look;
+    }
+    for (const ari::SceneData &e : data)
+      if (e.name == name && !e.uri.empty()) {
+        look.kind = "data";
+        look.data = name;
+        look.uri = e.uri;
+        look.subpath = e.path;
+        look.path = file;
+        return look;
+      }
+    warn("no data: entry '" + name + "' in the document");
+    return look;
+  }
+  const std::string name = model.as_string();
+  if (name.empty() || name == "none")
+    return look;
+  std::error_code ec;
+  std::string path;
+  if (fs::is_regular_file(fs::path(name), ec))
+    path = name;
+  else
+    path = ari::find_vehicle_model(name);
+  if (path.empty() && fs::path(name).extension().empty())
+    path = ari::find_vehicle_model(name + ".glb");
+  if (path.empty()) {
+    warn("no model '" + name + "'");
+    return look;
+  }
+  look.kind = "file";
+  look.path = path;
+  return look;
+}
+
+vehicle_model_status boxed_model_state(cvc::app &app, vehicle_model_cache &cache,
+                                       const ari::vehicle_look &look,
+                                       const std::array<double, 3> &lo,
+                                       const std::array<double, 3> &hi,
+                                       std::vector<std::string> *warnings) {
+  bool pending = false;
+  const std::shared_ptr<const fitted_model> m =
+      fitted(app, cache, look, model_fit::into(lo, hi), warnings, pending);
+  return m ? vehicle_model_status::ready
+           : (pending ? vehicle_model_status::pending : vehicle_model_status::failed);
+}
+
+bool set_boxed_model(cvc::app &app, vehicle_model_cache &cache, GeometryNode &node,
+                     const ari::vehicle_look &look, const std::array<double, 3> &lo,
+                     const std::array<double, 3> &hi, std::vector<std::string> *warnings) {
+  bool pending = false;
+  const std::shared_ptr<const fitted_model> m =
+      fitted(app, cache, look, model_fit::into(lo, hi), warnings, pending);
+  if (!m)
+    return false;
+  node.setGeometry(m->geometry);
+  if (!m->texture.empty()) {
+    node.setUseSingleColor(false);
+    node.setTexture(m->texture, false);
+    node.setColor(1.0, 1.0, 1.0); // the texture's own colours
+  }
+  return true;
+}
+
+bool attach_vehicle_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group,
+                          const std::string &id, const ari::vehicle_look &look,
+                          const vehicle_shape &shape, double base_z, const float color[3],
+                          std::vector<std::string> *warnings) {
+  return attach_model(app, cache, group, id, look, shape, base_z, color, warnings);
+}
+
 ari::SceneNode vehicle_scene_node(const std::string &id, const ari::vehicle_look &look,
                                   const vehicle_shape &s, const float color[3],
                                   const float color2[3]) {
   ari::SceneNode g;
   g.id = id;
   g.type = "group";
-  if (look.kind == "file" && look.fit)
+  if (fitted_look(look))
     return g; // the fitted model goes in after (attach_model)
   if (look.kind == "file" && !look.path.empty()) {
     ari::SceneNode m;
@@ -263,17 +584,112 @@ ari::SceneNode vehicle_scene_node(const std::string &id, const ari::vehicle_look
   return g;
 }
 
+std::shared_ptr<GeometryNode> add_hull_node(SceneGraph &sg, const std::string &id,
+                                            GraphicsNode *parent,
+                                            const cvc::physics::boat_desc &boat,
+                                            const float topsides[3], const float stripe[3]) {
+  if (!boat.hull.hull || boat.hull.hull->triangles.empty())
+    return nullptr;
+  const cvc::physics::hull_mesh &h = *boat.hull.hull;
+  // The waterline it floats at, body z (fresh water); its mass the engine's when the hull names
+  // none (the shape's volume at its density).
+  double waterline = 0.0;
+  try {
+    double mass = boat.hull.mass;
+    if (!(mass > 0.0))
+      if (const auto *b = std::get_if<cvc::physics::box>(&boat.hull.shape))
+        mass = boat.hull.density * 8.0 * b->half_extents.x * b->half_extents.y * b->half_extents.z;
+    waterline = -cvc::physics::dyn_boat_plant::float_height(boat, mass, 1000.0);
+  } catch (const std::exception &) {
+  }
+  static const float bottom[3] = {0.36f, 0.08f, 0.07f}; // wet antifouling
+  cvc::geometry g(sg.appContext());
+  auto &pts = g.points();
+  auto &nrm = g.normals();
+  auto &col = g.colors();
+  auto &tris = g.tris();
+  using idx = cvc::geometry::index_t;
+  // A box hull is drawn as an open boat: no deck, a sole (its cockpit's floor) 0.12 m over the
+  // waterline, so the water it keeps out of its hull (the water node's exclusion) is what would
+  // otherwise show in the cockpit on a wave.
+  const auto *hull_box = std::get_if<cvc::physics::box>(&boat.hull.shape);
+  double top = -1e300, low = 1e300, x0 = 1e300, x1 = -1e300, y0 = 1e300, y1 = -1e300;
+  for (const cvc::physics::vec3 &v : h.vertices) {
+    top = std::max(top, v.z);
+    low = std::min(low, v.z);
+    x0 = std::min(x0, v.x);
+    x1 = std::max(x1, v.x);
+    y0 = std::min(y0, v.y);
+    y1 = std::max(y1, v.y);
+  }
+  // Each triangle its own corners, so the faces shade flat.
+  for (const auto &t : h.triangles) {
+    const cvc::physics::vec3 &a = h.vertices[t[0]], &b = h.vertices[t[1]], &c = h.vertices[t[2]];
+    const double ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
+    const double vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+    double nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const double len = std::sqrt(nx * nx + ny * ny + nz * nz);
+    if (len > 0.0) {
+      nx /= len;
+      ny /= len;
+      nz /= len;
+    }
+    if (hull_box && nz > 0.9 && a.z >= top - 1e-9 && b.z >= top - 1e-9 && c.z >= top - 1e-9)
+      continue; // the deck: open
+    const idx base = static_cast<idx>(pts.size());
+    for (const cvc::physics::vec3 *p : {&a, &b, &c}) {
+      pts.push_back({p->x, p->y, p->z});
+      nrm.push_back({nx, ny, nz});
+      const double z = p->z - waterline;
+      const float *rgb = z < 0.02 ? bottom : z < 0.10 ? stripe : topsides;
+      col.push_back({rgb[0], rgb[1], rgb[2]});
+    }
+    tris.push_back({base, static_cast<idx>(base + 1), static_cast<idx>(base + 2)});
+  }
+  if (hull_box) { // the sole, teak, inside the hull's sides
+    static const float teak[3] = {0.55f, 0.40f, 0.24f};
+    const double z = std::min(std::max(waterline + 0.12, low + 0.05), top - 0.05), m = 0.04;
+    const idx base = static_cast<idx>(pts.size());
+    for (const auto &p :
+         {std::array<double, 2>{x0 + m, y0 + m}, std::array<double, 2>{x1 - m, y0 + m},
+          std::array<double, 2>{x1 - m, y1 - m}, std::array<double, 2>{x0 + m, y1 - m}}) {
+      pts.push_back({p[0], p[1], z});
+      nrm.push_back({0.0, 0.0, 1.0});
+      col.push_back({teak[0], teak[1], teak[2]});
+    }
+    tris.push_back({base, static_cast<idx>(base + 1), static_cast<idx>(base + 2)});
+    tris.push_back({base, static_cast<idx>(base + 2), static_cast<idx>(base + 3)});
+  }
+  std::shared_ptr<GeometryNode> node =
+      parent ? parent->createChild<GeometryNode>(id, g)
+             : std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(id, g));
+  return node;
+}
+
 void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) {
   if (!r.world || !r.sg || !r.physics_binding)
     return;
   ari::WorldVehicles *v = r.world->vehicles();
-  if (!v || v->revision() == r.vehicles_rev)
+  if (!v)
     return;
-  r.vehicles_rev = v->revision();
   if (!r.vehicle_models)
     r.vehicle_models = std::make_shared<vehicle_model_cache>();
   const std::shared_ptr<vehicle_model_cache> models = r.vehicle_models;
   SceneGraph &sg = *r.sg;
+  if (v->revision() == r.vehicles_rev) {
+    // Drawn as boxes while a look's package loads: drawn again once none is loading.
+    if (!r.vehicle_models_pending)
+      return;
+    for (const ari::vehicle_archetype &x : v->archetypes())
+      if (x.look.kind == "data") {
+        const std::string status =
+            ari::data_status(sg.appContext(), data_node_of(sg.appContext(), x.look));
+        if (status != "ready" && status != "error")
+          return;
+      }
+  }
+  r.vehicles_rev = v->revision();
+  r.vehicle_models_pending = false;
   for (const auto &[node, chassis] : r.vehicle_markers) {
     if (chassis.valid() && r.physics_binding->bound(chassis))
       r.physics_binding->unbind(chassis);
@@ -290,6 +706,27 @@ void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) 
     if (!a)
       continue;
     const std::string id = "vehicle_" + std::to_string(e.id);
+    if (ari::vehicle_plant_floats(a->plant) && (a->look.kind.empty() || a->look.kind == "box")) {
+      // A boat: its hull, in its colours, bound to its hull body.
+      std::shared_ptr<GraphicsNode> group = sg.addGraphics(id);
+      try {
+        const cvc::physics::dyn_boat_desc b = ari::boat_desc_of(*a, e.spec.mass, e.spec.max_speed);
+        add_hull_node(sg, id + "_hull", group.get(), b.boat, e.spec.color.data(),
+                      e.spec.color2.data());
+        r.physics_binding->bind(e.chassis, group);
+      } catch (const std::exception &ex) {
+        if (warnings)
+          warnings->push_back("ari: vehicle " + std::to_string(e.id) + ": " + ex.what());
+      }
+      apply_entity_label(sg, group, r.entity_labels,
+                         {{"name", e.spec.name},
+                          {"id", std::to_string(e.id)},
+                          {"archetype", e.spec.archetype},
+                          {"team", std::to_string(e.spec.team)}},
+                         r.bind_prefix, warnings);
+      r.vehicle_markers.emplace_back(id, e.chassis);
+      continue;
+    }
     const vehicle_shape shape = shape_of(ari::vehicle_desc_of(*a, e.spec.mass, e.spec.max_speed));
     ari::Scene one;
     one.nodes.push_back(
@@ -298,9 +735,12 @@ void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) 
     std::shared_ptr<GraphicsNode> node = sg.getGraphics(id);
     if (!node)
       continue;
-    if (a->look.kind == "file" && a->look.fit &&
+    if (fitted_look(a->look) &&
         !attach_model(sg.appContext(), *models, *node, id + "_mesh", a->look, shape,
                       e.ground_z - e.z, e.spec.color.data(), warnings)) {
+      if (vehicle_model_state(sg.appContext(), *models, a->look, shape.length) ==
+          vehicle_model_status::pending)
+        r.vehicle_models_pending = true;
       sg.removeGraphics(id); // no model: its box
       ari::vehicle_look box;
       box.kind = "box";
@@ -360,12 +800,20 @@ void pose_vehicle_wheels(RealizedScene &r) {
           best = &e;
       if (!best)
         continue;
-      // Turned about its own upright by its steer, at its centre: the per-frame pose path
-      // (change-detected, published rather than written).
+      // Turned about its own upright by its steer, at its centre, and rolled about its axle by its
+      // spin (Rz(steer) Ry(spin)): the per-frame pose path (change-detected, published rather
+      // than written).
       const double c = std::cos(best->steer), sn = std::sin(best->steer);
-      const double m[16] = {c,   -sn, 0.0, best->x, sn,  c,   0.0, best->y,
-                            0.0, 0.0, 1.0, best->z, 0.0, 0.0, 0.0, 1.0};
-      w->setPoseMatrix(m);
+      if (best->spin == 0.0) {
+        const double m[16] = {c,   -sn, 0.0, best->x, sn,  c,   0.0, best->y,
+                              0.0, 0.0, 1.0, best->z, 0.0, 0.0, 0.0, 1.0};
+        w->setPoseMatrix(m);
+      } else {
+        const double cs = std::cos(best->spin), ss = std::sin(best->spin);
+        const double m[16] = {c * cs, -sn, c * ss, best->x, sn * cs, c,   sn * ss, best->y,
+                              -ss,    0.0, cs,     best->z, 0.0,     0.0, 0.0,     1.0};
+        w->setPoseMatrix(m);
+      }
     }
   }
 }
@@ -432,6 +880,8 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
   SceneGraph *graph = &sg;
   const std::string prefix = out.bind_prefix;
   auto last = std::make_shared<std::string>();
+  // The look drawn as its box while its package loads, and its length: drawn again once loaded.
+  auto loading = std::make_shared<std::optional<std::pair<ari::vehicle_look, double>>>();
   if (!out.vehicle_models)
     out.vehicle_models = std::make_shared<vehicle_model_cache>();
   const std::shared_ptr<vehicle_model_cache> models = out.vehicle_models;
@@ -439,13 +889,19 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
   out.custom_ticks.push_back([=, &app](vtkRenderer *) {
     if (held.expired())
       return;
+    if (*loading && vehicle_model_state(app, *models, (*loading)->first, (*loading)->second) !=
+                        vehicle_model_status::pending) {
+      loading->reset();
+      last->clear();
+    }
     cvc::state &st = cvc::state::instance(app);
     const std::string sel = get(st, root + ".selected");
     const std::string a = root + ".archetypes." + sel + ".";
     const std::string sig = sel + "|" + get(st, a + "length") + "|" + get(st, a + "width") + "|" +
                             get(st, a + "height") + "|" + get(st, a + "look.kind") + "|" +
-                            get(st, a + "look.path") + "|" + get(st, a + "look.fit") + "|" +
-                            get(st, root + ".spawn.color") + "|" + get(st, root + ".spawn.color2");
+                            get(st, a + "look.path") + "|" + get(st, a + "look.uri") + "|" +
+                            get(st, a + "look.fit") + "|" + get(st, root + ".spawn.color") + "|" +
+                            get(st, root + ".spawn.color2");
     if (sig != *last) {
       *last = sig;
       if (graph->getGraphics(drawn))
@@ -461,6 +917,8 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
         ari::vehicle_look look;
         look.kind = get(st, a + "look.kind");
         look.path = get(st, a + "look.path");
+        look.uri = get(st, a + "look.uri");
+        look.subpath = get(st, a + "look.subpath");
         look.scale = num(get(st, a + "look.scale"), 1.0);
         look.yaw = num(get(st, a + "look.yaw"), 0.0);
         look.z = num(get(st, a + "look.z"), 0.0);
@@ -475,7 +933,7 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
         node.position[0] = static_cast<float>(at[0]);
         node.position[1] = static_cast<float>(at[1]);
         node.position[2] = static_cast<float>(at[2] + 0.5 * s.height + s.wheel_radius);
-        const bool model = look.kind == "file" && look.fit;
+        const bool model = fitted_look(look);
         if (model) // the model stands on the set by itself: its base at the node's height
           node.position[2] = static_cast<float>(at[2]);
         one.nodes.push_back(node);
@@ -483,6 +941,9 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
         if (model)
           if (std::shared_ptr<GraphicsNode> g = graph->getGraphics(drawn))
             if (!attach_model(app, *models, *g, drawn + "_mesh", look, s, 0.0, c1, nullptr)) {
+              if (vehicle_model_state(app, *models, look, s.length) ==
+                  vehicle_model_status::pending)
+                *loading = std::make_pair(look, s.length);
               graph->removeGraphics(drawn);
               look.kind = "box";
               ari::Scene again;

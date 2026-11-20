@@ -18,6 +18,7 @@
 
 #include <cvc/state/state_change_journal.h>
 #include <cvc/state/state_inbound_gate.h>
+#include <functional>
 #include <string>
 
 namespace cvc {
@@ -29,14 +30,14 @@ namespace conference {
 // ----------------
 // The room's write rule for a relay's clients (ARIADNE_CONFERENCE_ROADMAP §5d/§5e item 1): install
 // one gate on every transport of the relay (state_transport::set_inbound_gate), which binds each
-// connection to the pid of its Hello. A participant (whose pid is one identifier, no '.') may then
-// write only inside its own participant subtree, conf.rooms.<room>.participants.<pid>, and there
-// only:
+// connection to the pid of its Hello. A participant (whose pid is one identifier, no '.', and does
+// not begin with '_', the form of a bridged user's pid, room_intrinsics.h) may then write only
+// inside its own participant subtree, conf.rooms.<room>.participants.<pid>, and there only:
 //   - a value, a touch or a data() payload (no delete, reset, delegation, read-only or hidden
 //     flag: no client uses them, and each could take a key from the relay);
 //   - outside the keys the relay owns there: `pose` (the server holon's authoritative pose),
-//     `net.relay` (the relay's view of the link), `device` (its device tag) and each
-//     `streams.<kind>.ready` (SFU mode);
+//     `net.relay` (the relay's view of the link), `device` (its device tag), `profile.name` (its
+//     username, client_registry.h) and each `streams.<kind>.ready` (SFU mode);
 //   - on a canonical path (no empty or whitespace-padded segment, which the state tree would
 //     trim or skip onto another key) at most 16 segments and 512 bytes long.
 // Everything else is the relay's to write: the scene, the area of interest, the server's own
@@ -53,6 +54,13 @@ public:
   // Whether participant `pid` may write `path` with `op` (the rule above, without the binding).
   bool may_write(const std::string &pid, const std::string &path, cvc::state_mutation_op op) const;
 
+  // A client's own write of its participant's profile.name is refused (the name is the relay's,
+  // client_registry.h), and its value handed to `fn` as a rename the relay may grant, so a client
+  // that predates server.set keeps its name. `fn` runs on transport reader threads. Set it before
+  // the relay listens; null (the default) hands nothing on.
+  using name_request_fn = std::function<void(const std::string &pid, const std::string &name)>;
+  void set_name_requests(name_request_fn fn) { _name_requests = std::move(fn); }
+
   bool admit(const std::string &node_id, const cvc::state_mutation &m) const override;
   bool admit(const std::string &node_id, const cvc::state_message &m) const override;
   // A participant is the source of every value it may write (its participant subtree minus the
@@ -63,6 +71,8 @@ private:
   bool own_path(const std::string &pid, const std::string &path) const;
 
   std::string _room;
+
+  name_request_fn _name_requests;
 };
 
 } // namespace conference

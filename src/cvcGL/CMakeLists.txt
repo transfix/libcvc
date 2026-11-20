@@ -104,6 +104,41 @@ target_include_directories(cvcGL PUBLIC
 target_link_libraries(cvcGL PUBLIC cvc::cvc ${VTK_LIBRARIES})
 target_include_directories(cvcGL PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/ocean")
 
+# VTK's GPU volume ray caster ends every render with glFinish(), for a timer only an
+# auto-adjusting render uses; cvcpkg's VTK (vtk 9.5.0+cvc.5, written for upstream) adds an opt-in
+# vtkSmartVolumeMapper::FinishEveryRender to skip it. VolumeNode turns it off per mapper where the
+# VTK found has it (RENDER_PERF_ROADMAP.md Phase 6); an unpatched VTK builds and renders as before.
+#
+# The check compiles only (the header declares the property; a static-library try_compile links
+# nothing), so a link that fails for another reason, a wasm one say, cannot turn it off. It runs
+# at every configure: VTK's version stays 9.5.0 across cvcpkg's revisions, so a cached answer from
+# before the prefix's VTK changed would stick.
+include(CheckCXXSourceCompiles)
+include(CMakePushCheckState)
+unset(CVC_VTK_HAS_FINISH_EVERY_RENDER CACHE)
+cmake_push_check_state(RESET)
+set(CMAKE_REQUIRED_LIBRARIES VTK::RenderingVolumeOpenGL2)
+set(CMAKE_REQUIRED_QUIET ON)
+set(_cvc_try_compile_target_type "${CMAKE_TRY_COMPILE_TARGET_TYPE}")
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+check_cxx_source_compiles("
+#include <vtkNew.h>
+#include <vtkSmartVolumeMapper.h>
+int main() {
+  vtkNew<vtkSmartVolumeMapper> m;
+  m->FinishEveryRenderOff();
+  return m->GetFinishEveryRender() ? 1 : 0;
+}" CVC_VTK_HAS_FINISH_EVERY_RENDER)
+set(CMAKE_TRY_COMPILE_TARGET_TYPE "${_cvc_try_compile_target_type}")
+unset(_cvc_try_compile_target_type)
+cmake_pop_check_state()
+if(CVC_VTK_HAS_FINISH_EVERY_RENDER)
+  target_compile_definitions(cvcGL PRIVATE CVC_VTK_HAS_FINISH_EVERY_RENDER=1)
+  message(STATUS "cvcGL: VTK has FinishEveryRender; VolumeNode turns it off")
+else()
+  message(STATUS "cvcGL: VTK has no FinishEveryRender; volume renders keep VTK's glFinish")
+endif()
+
 # libjpeg-turbo: conference video compression (jpeg_codec.cpp / jpeg_encode_source.cpp / the mjpeg
 # stream_view decode path). Optional at build time — where the prefix has no turbojpeg the codec
 # compiles to a no-op (the "mjpeg" path then yields no video); native builds that need it ship it.
@@ -617,6 +652,14 @@ add_executable(cvcgl_volume_half_float test/cvcgl_volume_half_float.cpp)
 target_link_libraries(cvcgl_volume_half_float PRIVATE cvcGL)
 add_test(NAME cvcgl_volume_half_float COMMAND cvcgl_volume_half_float)
 
+# VolumeNode's mapper with VTK's FinishEveryRender off (where the VTK has it), the same pixels.
+add_executable(cvcgl_volume_finish test/cvcgl_volume_finish.cpp)
+target_link_libraries(cvcgl_volume_finish PRIVATE cvcGL)
+if(CVC_VTK_HAS_FINISH_EVERY_RENDER)
+  target_compile_definitions(cvcgl_volume_finish PRIVATE CVC_VTK_HAS_FINISH_EVERY_RENDER=1)
+endif()
+add_test(NAME cvcgl_volume_finish COMMAND cvcgl_volume_finish)
+
 # The explicit traversal: state stack, ORDER-DEPENDENT property semantics,
 # per-view divergence and teardown. Runs with a null renderer, so it exercises
 # the whole walk without a GL context.
@@ -918,6 +961,11 @@ add_test(NAME cvcgl_camera_idle COMMAND cvcgl_camera_idle)
 add_executable(cvcgl_camera_map test/cvcgl_camera_map.cpp)
 target_link_libraries(cvcgl_camera_map PRIVATE cvcGL)
 add_test(NAME cvcgl_camera_map COMMAND cvcgl_camera_map)
+# Slice mode: a parallel view down one axis with VolumeGridRover's screen axes, its state keys,
+# its pan, and the wheel zooming about the pointer. Headless.
+add_executable(cvcgl_camera_slice test/cvcgl_camera_slice.cpp)
+target_link_libraries(cvcgl_camera_slice PRIVATE cvcGL)
+add_test(NAME cvcgl_camera_slice COMMAND cvcgl_camera_slice)
 
 # Numeric parity: the push-fed Track controller reproduces pymod_gl/camera.py's
 # ChaseCamera (the two-stage EMA follow) to floating point, so the C++ and Python
@@ -957,6 +1005,11 @@ add_test(NAME cvcgl_light_node COMMAND cvcgl_light_node)
 add_executable(cvcgl_ariadne_realize test/cvcgl_ariadne_realize.cpp)
 target_link_libraries(cvcgl_ariadne_realize PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_realize COMMAND cvcgl_ariadne_realize)
+# The whole realize suite in one process: 71 s in a Windows Release job, 250.6 s in a Linux Debug
+# job (Xvfb, llvmpipe; transfix/libcvc#1301, 2026-11-17), and past ctest's 300 s on all three
+# attempts of a slower runner's Debug job (#1309, where PhConvoy and Ewave also ran ~1.3x longer).
+# Its own budget, as cvcgl_ewave's and cvcgl_volren_node's, so only a real hang fails.
+set_tests_properties(cvcgl_ariadne_realize PROPERTIES TIMEOUT 1200)
 
 # Ariadne §5.4 repeat: on a scene node: copies made and taken as the count (a number, a key, a
 # read-lane expression) changes, with RealizedScene's lists kept in step. Part 2 runs a document in
@@ -976,6 +1029,13 @@ add_test(NAME cvcgl_room_view COMMAND cvcgl_room_view)
 add_executable(cvcgl_ari_switch test/cvcgl_ari_switch.cpp)
 target_link_libraries(cvcgl_ari_switch PRIVATE cvcGL)
 add_test(NAME cvcgl_ari_switch COMMAND cvcgl_ari_switch)
+
+# arigl snapshot --mp4 / --seconds (record_frames): a falling ball recorded 1 s at 10 fps, the
+# video decoded back and the scene clock and the body checked. Skips without a video encoder.
+add_executable(cvcgl_ari_record test/cvcgl_ari_record.cpp)
+target_link_libraries(cvcgl_ari_record PRIVATE cvcGL)
+add_test(NAME cvcgl_ari_record COMMAND cvcgl_ari_record)
+set_tests_properties(cvcgl_ari_record PROPERTIES SKIP_REGULAR_EXPRESSION "cvcgl_ari_record: SKIP")
 
 # The terminal extension (TerminalScene, roadmap §16.6): a scene rendered offscreen becomes the
 # terminal backend's background under the widgets, and a background drag turns the camera.
@@ -1000,6 +1060,11 @@ target_link_libraries(cvcgl_imgui_windows_menu PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_windows_menu COMMAND cvcgl_imgui_windows_menu)
 # A radio stacks its options and a radio_row lines them up; a click through ImGui's own input
 # stores the option (or its mapped value) and runs the on:. No window, no GL.
+# ImGuiBackend's tab bar and list (Kind::Tabs, Kind::List) through ImGui's own mouse input, on a
+# bare context (no GL).
+add_executable(cvcgl_imgui_tabs_list test/cvcgl_imgui_tabs_list.cpp)
+target_link_libraries(cvcgl_imgui_tabs_list PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_tabs_list COMMAND cvcgl_imgui_tabs_list)
 add_executable(cvcgl_imgui_radio test/cvcgl_imgui_radio.cpp)
 target_link_libraries(cvcgl_imgui_radio PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
@@ -1051,6 +1116,11 @@ add_test(NAME cvcgl_imgui_spinner COMMAND cvcgl_imgui_spinner)
 add_executable(cvcgl_imgui_chart test/cvcgl_imgui_chart.cpp)
 target_link_libraries(cvcgl_imgui_chart PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_chart COMMAND cvcgl_imgui_chart)
+# ImGuiBackend's heatmap, by its pixels (its draw data rasterized in the test): the ramp's colours,
+# a mark's corner, the hover tooltip and the picked cell's outline (a bare ImGui context, no GL).
+add_executable(cvcgl_imgui_heatmap test/cvcgl_imgui_heatmap.cpp)
+target_link_libraries(cvcgl_imgui_heatmap PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_heatmap COMMAND cvcgl_imgui_heatmap)
 # The overlay's fonts: DejaVu Sans Mono's symbols under the UI font, and Twemoji's colour emoji
 # where ImGui has 32-bit characters and FreeType (the cvcpkg imgui 1.92.9+cvc.4). No window, no GL.
 add_executable(cvcgl_imgui_fonts test/cvcgl_imgui_fonts.cpp)
@@ -1145,6 +1215,22 @@ if(NOT EMSCRIPTEN)
   target_link_libraries(cvcgl_ariadne_pick PRIVATE cvcGL)
   add_test(NAME cvcgl_ariadne_pick COMMAND cvcgl_ariadne_pick)
 endif()
+
+# A viewport in mode: slice: its axis bound to a key, the other axes' volume_slice nodes left out,
+# picks that name the voxel and its value, the wheel zooming about the pointer. Offscreen; skips
+# where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_slice_view test/cvcgl_ariadne_slice_view.cpp)
+  target_link_libraries(cvcgl_ariadne_slice_view PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_slice_view COMMAND cvcgl_ariadne_slice_view)
+endif()
+
+# The volume_slice node (VolumeSliceNode.h): its keys, region reads, pickRay, and (offscreen) its
+# voxels' colours and an overlay drawn on top of it. The rendered part skips where nothing
+# rasterises unless CVC_REQUIRE_RENDER=1.
+add_executable(cvcgl_volume_slice test/cvcgl_volume_slice.cpp)
+target_link_libraries(cvcgl_volume_slice PRIVATE cvcGL)
+add_test(NAME cvcgl_volume_slice COMMAND cvcgl_volume_slice)
 
 # A document's assets (read once, shared buffers) and its scenes: of their own (each a SceneGraph
 # with its own viewport, mirrored by the viewports that name it), and main_view: show. Offscreen;
@@ -1323,6 +1409,11 @@ if(NOT EMSCRIPTEN)
   add_executable(cvcgl_ariadne_ribbons test/cvcgl_ariadne_ribbons.cpp test/gl_upload_counter.cpp)
   target_link_libraries(cvcgl_ariadne_ribbons PRIVATE cvcGL)
   add_test(NAME cvcgl_ariadne_ribbons COMMAND cvcgl_ariadne_ribbons)
+  # type: nav_swarm / swarm_layer (swarm_nodes.h): a swarm on the synthetic city, every layer drawn,
+  # the vehicles streamed, the model's LOD rungs, the follow node and the layers' keys.
+  add_executable(cvcgl_ariadne_swarm test/cvcgl_ariadne_swarm.cpp)
+  target_link_libraries(cvcgl_ariadne_swarm PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_swarm COMMAND cvcgl_ariadne_swarm)
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(cvcgl_streaming_races test/cvcgl_streaming_races.cpp)
     target_link_libraries(cvcgl_streaming_races PRIVATE cvcGL ${CMAKE_DL_LIBS})
@@ -1517,4 +1608,4 @@ endif()
 # (CMake/CvcHostStack.cmake). Names not built here are skipped.
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
-                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat)
+                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ari_record)

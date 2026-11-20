@@ -74,12 +74,15 @@ std::vector<std::string> canonical_segments(const std::string &path) {
 
 // Whether REST (the path below a participant) names a key the relay writes there: the server
 // holon's `pose` (holon_sync.h) and `energy` reserve (room_avatar.h), the relay's link sample
-// `net.relay` and the participant's `device` tag (room_net.h), and in SFU mode each stream's
+// `net.relay` and the participant's `device` tag (room_net.h), its username `profile.name`
+// (client_registry.h: a client asks for one with server.set), and in SFU mode each stream's
 // `streams.<kind>.ready` (room_relay_tick).
 bool relay_owned(const std::vector<std::string> &rest) {
   if (rest.empty())
     return false;
   if (rest[0] == "pose" || rest[0] == "device" || rest[0] == "energy")
+    return true;
+  if (rest[0] == "profile" && rest.size() >= 2 && rest[1] == "name")
     return true;
   if (rest[0] == "net" && rest.size() >= 2 && rest[1] == "relay")
     return true;
@@ -91,8 +94,9 @@ bool relay_owned(const std::vector<std::string> &rest) {
 room_write_gate::room_write_gate(std::string room) : _room(std::move(room)) {}
 
 bool room_write_gate::own_path(const std::string &pid, const std::string &path) const {
-  // One identifier segment: a node id like "bob.pose" would otherwise own bob's pose.
-  if (!cvc::state::isValidStateName(pid))
+  // One identifier segment: a node id like "bob.pose" would otherwise own bob's pose. And not a
+  // bridged user's ('_' first, room_intrinsics.h): the relay writes those, for its program.
+  if (!cvc::state::isValidStateName(pid) || pid[0] == '_')
     return false;
   const std::vector<std::string> segs = canonical_segments(path);
   const std::vector<std::string> own = canonical_segments(room_participant_path(_room, pid));
@@ -110,6 +114,12 @@ bool room_write_gate::may_write(const std::string &pid, const std::string &path,
 }
 
 bool room_write_gate::admit(const std::string &node_id, const cvc::state_mutation &m) const {
+  // Its own profile.name, exactly (a non-canonical spelling is only refused): a rename request.
+  if (_name_requests && m.op == cvc::state_mutation_op::set_value &&
+      cvc::state::isValidStateName(node_id) &&
+      m.path == room_participant_path(_room, node_id) + cvc::state::SEPARATOR + "profile" +
+                    cvc::state::SEPARATOR + "name")
+    _name_requests(node_id, m.string_value);
   return may_write(node_id, m.path, m.op);
 }
 

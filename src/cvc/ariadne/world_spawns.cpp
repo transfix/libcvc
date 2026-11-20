@@ -24,6 +24,7 @@
 #include <cvc/state/state.h>
 #include <cvc/world/surface.h>
 #include <cvc/world/world_geometry.h>
+#include <deque>
 #include <exception>
 #include <map>
 #include <set>
@@ -144,6 +145,116 @@ std::vector<spawn_point> road_spawn_points(const cvc::world::world_geometry &wor
   return out;
 }
 
+std::vector<spawn_point> water_spawn_points(const nav::world_grid &grid, int n, double spacing,
+                                            double clearance) {
+  std::vector<spawn_point> out;
+  if (n <= 0 || !(spacing > 0.0) || grid.rows < 3 || grid.cols < 3)
+    return out;
+  const std::vector<float> sdf = nav::signed_distance(grid);
+  const std::size_t cells = static_cast<std::size_t>(grid.rows) * grid.cols;
+  const double h = grid.cell();
+  const auto ok = [&](std::size_t i) { return !grid.occupancy[i] && sdf[i] >= clearance; };
+  // Each body of water with room for a boat: the 4-connected runs of the samples it may start on.
+  std::vector<int> body(cells, -1);
+  int bodies = 0;
+  for (std::size_t s = 0; s < cells; ++s) {
+    if (body[s] >= 0 || !ok(s))
+      continue;
+    std::deque<std::size_t> q{s};
+    body[s] = bodies;
+    while (!q.empty()) {
+      const std::size_t i = q.front();
+      q.pop_front();
+      const int r = static_cast<int>(i / grid.cols), c = static_cast<int>(i % grid.cols);
+      const int nr[4] = {r - 1, r + 1, r, r}, nc[4] = {c, c, c - 1, c + 1};
+      for (int k = 0; k < 4; ++k) {
+        if (nr[k] < 0 || nr[k] >= grid.rows || nc[k] < 0 || nc[k] >= grid.cols)
+          continue;
+        const std::size_t j = static_cast<std::size_t>(nr[k]) * grid.cols + nc[k];
+        if (body[j] < 0 && ok(j)) {
+          body[j] = bodies;
+          q.push_back(j);
+        }
+      }
+    }
+    ++bodies;
+  }
+  // One candidate per body and spacing-square bin: the sample nearest the bin's centre, heading
+  // along the shore (across the distance field's gradient).
+  struct pick {
+    double d2 = 1e300, x = 0.0, y = 0.0, heading = 0.0;
+  };
+  std::vector<std::map<std::pair<long, long>, pick>> bins(static_cast<std::size_t>(bodies));
+  for (std::size_t i = 0; i < cells; ++i) {
+    if (body[i] < 0)
+      continue;
+    const int r = static_cast<int>(i / grid.cols), c = static_cast<int>(i % grid.cols);
+    const double x = grid.min_x + c * h, y = grid.min_y + r * h;
+    const std::pair<long, long> b{static_cast<long>(std::floor(x / spacing)),
+                                  static_cast<long>(std::floor(y / spacing))};
+    const double bx = (b.first + 0.5) * spacing, by = (b.second + 0.5) * spacing;
+    const double d2 = (x - bx) * (x - bx) + (y - by) * (y - by);
+    pick &best = bins[static_cast<std::size_t>(body[i])][b];
+    if (d2 >= best.d2)
+      continue;
+    const auto at = [&](int rr, int cc) {
+      rr = std::clamp(rr, 0, grid.rows - 1);
+      cc = std::clamp(cc, 0, grid.cols - 1);
+      return static_cast<double>(sdf[static_cast<std::size_t>(rr) * grid.cols + cc]);
+    };
+    const double gx = at(r, c + 1) - at(r, c - 1), gy = at(r + 1, c) - at(r - 1, c);
+    double heading = gx == 0.0 && gy == 0.0 ? 0.0 : std::atan2(gx, -gy); // gradient turned 90 deg
+    if (heading < 0.0)
+      heading += 2.0 * kPi;
+    best = {d2, x, y, heading};
+  }
+  // The bodies in turn, each one's bins in a fixed order spread over it.
+  std::vector<std::vector<pick>> each(static_cast<std::size_t>(bodies));
+  for (int k = 0; k < bodies; ++k)
+    for (const auto &[b, p] : bins[static_cast<std::size_t>(k)])
+      each[static_cast<std::size_t>(k)].push_back(p);
+  std::vector<std::size_t> used(static_cast<std::size_t>(bodies), 0);
+  const std::size_t share =
+      std::max<std::size_t>(1, static_cast<std::size_t>(n) / std::max(1, bodies));
+  for (bool more = true; more && static_cast<int>(out.size()) < n;) {
+    more = false;
+    for (int k = 0; k < bodies && static_cast<int>(out.size()) < n; ++k) {
+      const std::vector<pick> &v = each[static_cast<std::size_t>(k)];
+      const std::size_t step = std::max<std::size_t>(1, v.size() / share);
+      const std::size_t i = used[static_cast<std::size_t>(k)] * step;
+      if (i >= v.size())
+        continue;
+      ++used[static_cast<std::size_t>(k)];
+      more = true;
+      spawn_point s;
+      s.x = v[i].x;
+      s.y = v[i].y;
+      s.heading = v[i].heading * 180.0 / kPi;
+      out.push_back(s);
+    }
+  }
+  return out;
+}
+
+bool WorldSpawns::start_ground::free_at(double x, double y) const {
+  if (!grid)
+    return true; // nothing to check against yet
+  if (grid->occupied(x, y))
+    return false;
+  int r = 0, c = 0;
+  grid->sample_of(x, y, r, c);
+  return !sdf || sdf->empty() || (*sdf)[static_cast<std::size_t>(r) * grid->cols + c] >= clearance;
+}
+
+bool WorldSpawns::start_ground::any() const {
+  if (!grid || !sdf)
+    return false;
+  for (std::size_t i = 0; i < sdf->size(); ++i)
+    if (!grid->occupancy[i] && (*sdf)[i] >= clearance)
+      return true;
+  return false;
+}
+
 struct WorldSpawns::impl {
   cvc::app *app = nullptr;
   std::string key;
@@ -158,6 +269,13 @@ struct WorldSpawns::impl {
   std::shared_ptr<const nav::world_grid> grid;
   std::shared_ptr<const cvc::world::world_geometry> geometry;
   std::vector<float> sdf;
+  std::map<std::string, spawn_need> needs; // by archetype
+  // The medium grids made so far for the world on, by medium and depth.
+  struct made {
+    std::shared_ptr<const nav::world_grid> grid;
+    std::shared_ptr<const std::vector<float>> sdf;
+  };
+  mutable std::map<std::pair<int, double>, made> grounds;
   std::vector<spawn_point> suggested;
   std::map<std::string, std::uint64_t> cursor; // round_robin, by scope group
   std::uint64_t draws = 0;
@@ -196,14 +314,44 @@ struct WorldSpawns::impl {
   }
 
   bool on_world(const spawn_point &p) const { return p.world.empty() || p.world == world_on; }
-  bool free_at(double x, double y) const {
+  spawn_need need_of(const std::string &archetype) const {
+    const auto it = needs.find(archetype);
+    return it == needs.end() ? spawn_need{} : it->second;
+  }
+  start_ground ground_for(const spawn_need &n) const {
+    start_ground g;
+    const bool water = n.medium == cvc::nav::plant_medium::water;
+    g.clearance = water ? std::max(kClearance, n.half_length + rules.shore_clearance) : kClearance;
     if (!grid)
-      return true; // nothing to check against yet
-    if (grid->occupied(x, y))
-      return false;
-    int r = 0, c = 0;
-    grid->sample_of(x, y, r, c);
-    return sdf.empty() || sdf[static_cast<std::size_t>(r) * grid->cols + c] >= kClearance;
+      return g;
+    const double depth = water ? n.draft + rules.keel_clearance : rules.ford_depth;
+    made &m = grounds[{water ? 1 : 0, depth}];
+    if (!m.grid) {
+      auto mg = std::make_shared<nav::world_grid>(nav::medium_grid(*grid, n.medium, depth));
+      m.sdf = std::make_shared<const std::vector<float>>(nav::signed_distance(*mg));
+      m.grid = std::move(mg);
+    }
+    g.grid = m.grid;
+    g.sdf = m.sdf;
+    return g;
+  }
+  // A point's archetype's ground is free there; an untagged point's, any archetype's: what it is
+  // free for, as `medium` (land, water, both or "").
+  bool free_for(const spawn_point &p, std::string *medium = nullptr) const {
+    if (!p.archetype.empty()) {
+      const spawn_need n = need_of(p.archetype);
+      const bool ok = ground_for(n).free_at(p.x, p.y);
+      if (medium)
+        *medium = !ok ? "" : n.medium == cvc::nav::plant_medium::water ? "water" : "land";
+      return ok;
+    }
+    bool land = ground_for(spawn_need{}).free_at(p.x, p.y), water = false;
+    for (const auto &[id, n] : needs)
+      if (!water && n.medium == cvc::nav::plant_medium::water)
+        water = ground_for(n).free_at(p.x, p.y);
+    if (medium)
+      *medium = land && water ? "both" : land ? "land" : water ? "water" : "";
+    return land || water;
   }
   double ground(double x, double y) const {
     if (!grid || grid->height.empty())
@@ -256,19 +404,42 @@ void WorldSpawns::set_world(const std::string &name, std::shared_ptr<const nav::
   d.grid = std::move(grid);
   d.geometry = std::move(world);
   d.sdf = d.grid ? nav::signed_distance(*d.grid) : std::vector<float>();
+  d.grounds.clear();
   d.suggested.clear();
   d.status = d.grid ? "ready" : "waiting for the world's grid";
   ++d.rev;
   publish();
 }
 
+void WorldSpawns::set_needs(std::map<std::string, spawn_need> needs) {
+  impl &d = *_impl;
+  d.needs = std::move(needs);
+  d.grounds.clear();
+  ++d.rev;
+  publish();
+}
+
+spawn_need WorldSpawns::need_of(const std::string &archetype) const {
+  return _impl->need_of(archetype);
+}
+
+WorldSpawns::start_ground WorldSpawns::ground_for(const std::string &archetype) const {
+  return _impl->ground_for(_impl->need_of(archetype));
+}
+
+WorldSpawns::start_ground WorldSpawns::ground_for(const spawn_need &need) const {
+  return _impl->ground_for(need);
+}
+
 bool WorldSpawns::choose(int team, const std::string &archetype,
                          const std::function<bool(double, double, double)> &crowded, double &x,
                          double &y, double &heading_rad) {
   impl &d = *_impl;
+  // Its medium's ground: an untagged point serves it only where that is free.
+  const start_ground ground = d.ground_for(d.need_of(archetype));
   std::vector<const impl::point *> fit;
   for (const impl::point &p : d.all)
-    if (d.on_world(p.p) && d.free_at(p.p.x, p.p.y) && (p.p.team < 0 || p.p.team == team) &&
+    if (d.on_world(p.p) && ground.free_at(p.p.x, p.p.y) && (p.p.team < 0 || p.p.team == team) &&
         (p.p.archetype.empty() || p.p.archetype == archetype))
       fit.push_back(&p);
   if (fit.empty())
@@ -300,7 +471,7 @@ bool WorldSpawns::choose(int team, const std::string &archetype,
   for (int k = 1; k <= 8 && crowded && crowded(x, y, kNear * 0.75); ++k) {
     const double step = (k % 2 ? 1.0 : -1.0) * ((k + 1) / 2) * kNear;
     const double tx = chosen->p.x + nx * step, ty = chosen->p.y + ny * step;
-    if (d.free_at(tx, ty)) {
+    if (ground.free_at(tx, ty)) {
       x = tx;
       y = ty;
     }
@@ -322,9 +493,12 @@ int WorldSpawns::add(spawn_point p, std::string *why) {
   if (d.grid &&
       (p.x < d.grid->min_x || p.x > d.grid->max_x || p.y < d.grid->min_y || p.y > d.grid->max_y))
     return refuse("(" + fixed(p.x, 1) + ", " + fixed(p.y, 1) + ") is off the world");
-  if (!d.free_at(p.x, p.y))
+  if (!d.free_for(p))
     return refuse("(" + fixed(p.x, 1) + ", " + fixed(p.y, 1) +
-                  ") is blocked, or too near something");
+                  ") is blocked, too near something, " +
+                  (p.archetype.empty() ? std::string("or on no vehicle's ground (land, or water "
+                                                     "deep and open enough for a boat)")
+                                       : "or not on " + p.archetype + "'s ground"));
   if (const int close = nearest(p.x, p.y, kNear))
     return refuse("point " + std::to_string(close) + " is within " + num(kNear) + " m");
   if (p.world.empty())
@@ -361,6 +535,11 @@ bool WorldSpawns::tag(int id, int team, const std::string &archetype) {
   return false;
 }
 
+void WorldSpawns::reseed(std::uint64_t seed) {
+  _impl->draws = mix(seed);
+  _impl->cursor.clear();
+}
+
 void WorldSpawns::clear() {
   impl &d = *_impl;
   d.all.erase(std::remove_if(d.all.begin(), d.all.end(),
@@ -387,14 +566,30 @@ int WorldSpawns::nearest(double x, double y, double r) const {
 std::vector<spawn_point> WorldSpawns::suggest(int n, double spacing) {
   impl &d = *_impl;
   d.suggested.clear();
-  if (d.grid && d.geometry)
-    for (spawn_point &p : road_spawn_points(*d.geometry, *d.grid, n, spacing, kClearance))
+  // The tagged archetype's medium: a boat's points over the water, a land vehicle's on the roads
+  // (out of water deeper than a ford).
+  const std::string archetype = d.get("tag.archetype");
+  const spawn_need need = d.need_of(archetype);
+  const start_ground ground = d.ground_for(need);
+  const bool water = need.medium == cvc::nav::plant_medium::water;
+  if (ground.grid) {
+    const std::vector<spawn_point> found =
+        water        ? water_spawn_points(*ground.grid, n, spacing, ground.clearance)
+        : d.geometry ? road_spawn_points(*d.geometry, *ground.grid, n, spacing, ground.clearance)
+                     : std::vector<spawn_point>();
+    for (spawn_point p : found)
       if (!nearest(p.x, p.y, kNear))
         d.suggested.push_back(std::move(p));
-  d.status =
-      d.suggested.empty()
-          ? std::string(d.geometry ? "no roads with room for a point" : "this world has no roads")
-          : std::to_string(d.suggested.size()) + " points suggested along the roads";
+  }
+  if (water)
+    d.status = d.suggested.empty() ? "no water deep and open enough for " + archetype
+                                   : std::to_string(d.suggested.size()) +
+                                         " points suggested over the water for " + archetype;
+  else
+    d.status =
+        d.suggested.empty()
+            ? std::string(d.geometry ? "no roads with room for a point" : "this world has no roads")
+            : std::to_string(d.suggested.size()) + " points suggested along the roads";
   ++d.rev;
   return d.suggested;
 }
@@ -486,6 +681,7 @@ void WorldSpawns::publish() {
     d.put(at + "archetype", e.point.archetype);
     d.put(at + "world", e.point.world);
     d.put(at + "free", e.free ? "1" : "0");
+    d.put(at + "medium", e.medium);
     summary +=
         (summary.empty() ? "" : "\n") + id + "  " + fixed(e.point.x, 1) + ", " +
         fixed(e.point.y, 1) + "  " + fixed(e.point.heading, 0) + " deg  " +
@@ -525,7 +721,7 @@ std::vector<WorldSpawns::entry> WorldSpawns::points() const {
       e.id = p.id;
       e.point = p.p;
       e.z = _impl->ground(p.p.x, p.p.y);
-      e.free = _impl->free_at(p.p.x, p.p.y);
+      e.free = _impl->free_for(p.p, &e.medium);
       out.push_back(std::move(e));
     }
   return out;

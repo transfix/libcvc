@@ -172,6 +172,16 @@ public:
 
   vtkRenderWindow *renderWindow() const; // escape hatch, parity with SceneRenderer
 
+  // ---- texture units -----------------------------------------------------------
+  // VTK hands out at most `n` texture units in this window (0: as many as its GL has, VTK's count
+  // being GL_MAX_TEXTURE_IMAGE_UNITS). WebGL2 gives VTK 16, where a desktop GL gives 32 or more,
+  // so a native run with 16 (and CVCGL_LOWMEM_MAPPER=force, the browser's mapper) draws within
+  // the browser's budget, and a draw that runs out logs here as it would there. Kept across a
+  // GL state reset (it is put back at the start of each render). $CVCGL_TEXTURE_UNITS sets it
+  // when the manager is made.
+  void limitTextureUnits(int n);
+  int textureUnitLimit() const;
+
   // ---- frame yield (WebAssembly) ---------------------------------------------
   // Who yields to the browser once per frame: VTK inside every render (Vtk, the
   // default) or the caller's loop (App) -- see cvc/gl/FrameYield.h. Call

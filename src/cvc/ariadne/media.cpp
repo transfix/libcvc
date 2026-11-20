@@ -377,6 +377,15 @@ struct ImageCache::Impl {
   // A build without threads: the steps to run, one per pump() (Runtime::drain, between frames).
   std::deque<std::function<void()>> steps;
   double last_sweep = 0.0;
+  // The cache's clock: drawing time, not the wall's. It moves with the time between two
+  // requests, at most kMaxStep at a time, so a page that draws nothing for a while (a hidden
+  // browser tab, which draws about once a minute; a phone put away; a host whose loop is paused)
+  // ages nothing: its pictures are all still there when it draws again, not dropped as idle and
+  // fetched again, every one, on the next frame. Idle (last_used, the sweep) is counted on it;
+  // a failure's retry stays on the wall, where the jobs stamp failed_at.
+  static constexpr double kMaxStep = 1.0;
+  double clock = 0.0;
+  double last_request = -1.0;
 
   explicit Impl(cvc::app &a) : app(a) {}
 
@@ -572,7 +581,11 @@ void ImageCache::pump() {
 
 ImageView ImageCache::image(const ImageRequest &req) {
   Impl &m = *m_;
-  const double now = now_seconds();
+  const double wall = now_seconds();
+  if (m.last_request >= 0.0)
+    m.clock += std::min(std::max(0.0, wall - m.last_request), Impl::kMaxStep);
+  m.last_request = wall;
+  const double now = m.clock; // drawing time (Impl::clock)
   const std::string vkey = Impl::variant_key(req);
   const std::string bkey = Impl::base_key(req);
   std::shared_ptr<Impl::Variant> v;
@@ -604,8 +617,8 @@ ImageView ImageCache::image(const ImageRequest &req) {
     if (!bslot)
       bslot = std::make_shared<Impl::Base>();
     b = bslot;
-    // A failure is asked again after retry_seconds.
-    if (v->status == Status::Failed && now - v->failed_at > m.limits.retry_seconds) {
+    // A failure is asked again after retry_seconds, of the wall (the jobs stamp failed_at with it).
+    if (v->status == Status::Failed && wall - v->failed_at > m.limits.retry_seconds) {
       v->status = Status::Loading;
       v->error.clear();
       if (b->status == Status::Failed) {

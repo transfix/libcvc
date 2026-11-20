@@ -200,7 +200,9 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
       }
     } else if (key == "look") {
       if (!val.is_map())
-        return at + " look: expects a map (box:, file:, asset:, model:, fit:, scale:, yaw:, z:)";
+        return at + " look: expects a map (box:, file:, asset:, model:, data:, fit:, scale:, yaw:, "
+                    "z:)";
+      bool fit_given = false;
       for (const auto &[k, x] : val.entries) {
         if (k == "box") {
           v.look.kind = "box";
@@ -211,7 +213,10 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
           v.look.kind = "model";
           v.look.path = x.as_string();
           v.look.fit = true;
+        } else if (k == "data") {
+          v.look.data = x.as_string();
         } else if (k == "fit") {
+          fit_given = true;
           if (!boolean(x, at + " look: fit:", v.look.fit, why))
             return why;
         } else if (k == "scale" || k == "yaw" || k == "z") {
@@ -222,6 +227,15 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
         } else {
           warn(warnings, at + " look: unknown key '" + k + "', ignored");
         }
+      }
+      // `data: NAME` with `file: FILE`: the file inside a data: entry's package, a model fitted to
+      // the chassis unless `fit: false`.
+      if (!v.look.data.empty()) {
+        if (v.look.kind != "file" || v.look.path.empty())
+          return at + " look: data: needs file: (the model's file in the package)";
+        v.look.kind = "data";
+        if (!fit_given)
+          v.look.fit = true;
       }
     } else if (key == "ranges") {
       if (!val.is_map())
@@ -245,11 +259,13 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
       warn(warnings, at + " unknown key '" + key + "', ignored");
     }
   }
-  // dynamic:<preset> and dynamic4w:<preset> name the vehicle too, as plant_host's names do.
+  // dynamic:<preset>, dynamic4w:<preset> and dynamicboat:<preset> name the vehicle too, as
+  // plant_host's names do.
   if (const std::size_t colon = v.plant.find(':'); colon != std::string::npos) {
     const std::string kind = v.plant.substr(0, colon), preset = v.plant.substr(colon + 1);
-    if (kind != "dynamic" && kind != "dynamic4w")
-      return at + " plant: '" + v.plant + "': only dynamic and dynamic4w name a preset";
+    if (kind != "dynamic" && kind != "dynamic4w" && kind != "dynamicboat")
+      return at + " plant: '" + v.plant +
+             "': only dynamic, dynamic4w and dynamicboat name a preset";
     if (named && preset != v.preset)
       return at + " plant: '" + v.plant + "' names preset '" + preset + "', vehicle: '" + v.preset +
              "'";
@@ -259,14 +275,81 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
   return std::string();
 }
 
+// world: vehicles: start: into `out`: "" or what is wrong. The archetypes are checked once the
+// whole block is read.
+std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out,
+                                 std::vector<std::string> *warnings) {
+  const std::string where = "world: vehicles: start:";
+  if (!v.is_seq())
+    return where + " expects a list ({archetype:, count:, name:, team:, controller:, plant:, "
+                   "policy:, at:, heading:})";
+  out.clear();
+  std::string why;
+  for (const Value &item : v.items) {
+    const std::string at = where + " [" + std::to_string(out.size()) + "]";
+    if (!item.is_map())
+      return at + " expects a map (archetype:, count:, name:, team:, controller:, plant:, "
+                  "policy:, at:, heading:)";
+    vehicle_start s;
+    for (const auto &[k, x] : item.entries) {
+      if (k == "archetype" || k == "name" || k == "controller" || k == "plant" || k == "policy") {
+        (k == "archetype"    ? s.archetype
+         : k == "name"       ? s.name
+         : k == "controller" ? s.controller
+         : k == "plant"      ? s.plant
+                             : s.policy) = x.as_string();
+      } else if (k == "count" || k == "team") {
+        double n = 0.0;
+        if (!number(x, at + " " + k + ":", n, why))
+          return why;
+        if (k == "team") {
+          s.team = static_cast<int>(n);
+        } else {
+          if (n < 1.0 || n > kMaxVehicleStartCount || n != std::floor(n))
+            return at + " count: expects a whole number from 1 to " +
+                   std::to_string(kMaxVehicleStartCount);
+          s.count = static_cast<int>(n);
+        }
+      } else if (k == "at") {
+        if (!x.is_seq() || x.items.size() < 2 || !number(x.items[0], at + " at:", s.x, why) ||
+            !number(x.items[1], at + " at:", s.y, why))
+          return at + " at: expects [x, y]";
+        s.placed = true;
+      } else if (k == "heading") {
+        if (!number(x, at + " heading:", s.heading, why))
+          return why;
+        s.has_heading = true;
+      } else {
+        warn(warnings, at + " unknown key '" + k + "', ignored");
+      }
+    }
+    if (s.archetype.empty())
+      return at + " names no archetype:";
+    if (!s.plant.empty() && !vehicle_plant_known(s.plant))
+      return at + " plant: '" + s.plant +
+             "' is not one (jolt, kinematic, dynamic, dynamic4w, dynamicboat)";
+    if (!s.controller.empty() && !vehicle_controller_known(s.controller))
+      return at + " controller: '" + s.controller + "' is not one";
+    out.push_back(std::move(s));
+  }
+  return std::string();
+}
+
 std::string parse_vehicles(const Value &v, std::vector<vehicle_archetype> &out,
-                           std::string &intents, std::vector<std::string> *warnings) {
+                           std::string &intents, std::string &poses,
+                           std::vector<vehicle_start> &starts, std::vector<std::string> *warnings) {
   if (!v.is_map())
-    return "world: vehicles: expects a map (archetypes:, intents:)";
+    return "world: vehicles: expects a map (archetypes:, intents:, poses:, start:)";
   for (const auto &[key, val] : v.entries) {
-    if (key == "intents") {
-      intents = val.is_scalar() ? val.scalar : std::string();
-      std::string path = !intents.empty() && intents[0] == '/' ? intents.substr(1) : intents;
+    if (key == "start") {
+      if (std::string e = parse_vehicle_starts(val, starts, warnings); !e.empty())
+        return e;
+      continue;
+    }
+    if (key == "intents" || key == "poses") {
+      std::string &table = key == "intents" ? intents : poses;
+      table = val.is_scalar() ? val.scalar : std::string();
+      std::string path = !table.empty() && table[0] == '/' ? table.substr(1) : table;
       bool ok = !path.empty();
       for (std::size_t at = 0; ok && at <= path.size();) {
         const std::size_t dot = std::min(path.find('.', at), path.size());
@@ -274,8 +357,9 @@ std::string parse_vehicles(const Value &v, std::vector<vehicle_archetype> &out,
         at = dot + 1;
       }
       if (!ok)
-        return "world: vehicles: intents: expects a state path (names joined by '.', a leading / "
-               "for one outside the document's prefix)";
+        return "world: vehicles: " + key +
+               ": expects a state path (names joined by '.', a leading / for one outside the "
+               "document's prefix)";
       continue;
     }
     if (key != "archetypes") {
@@ -292,19 +376,32 @@ std::string parse_vehicles(const Value &v, std::vector<vehicle_archetype> &out,
       out.push_back(std::move(arch));
     }
   }
+  for (std::size_t i = 0; i < starts.size(); ++i)
+    if (std::none_of(out.begin(), out.end(),
+                     [&](const vehicle_archetype &a) { return a.id == starts[i].archetype; }))
+      return "world: vehicles: start: [" + std::to_string(i) + "] names archetype '" +
+             starts[i].archetype + "', which archetypes: does not define";
   return std::string();
 }
 
 std::string parse_spawns(const Value &v, spawn_rules &out, std::vector<std::string> *warnings) {
   const std::string where = "world: spawns:";
   if (!v.is_map())
-    return where + " expects a map (policy:, scope:, points:)";
+    return where + " expects a map (policy:, scope:, ford_depth:, keel_clearance:, "
+                   "shore_clearance:, points:)";
   std::string why;
   for (const auto &[key, val] : v.entries) {
     if (key == "policy") {
       out.policy = val.as_string();
     } else if (key == "scope") {
       out.scope = val.as_string();
+    } else if (key == "ford_depth" || key == "keel_clearance" || key == "shore_clearance") {
+      double n = 0.0;
+      if (!number(val, where + " " + key + ":", n, why))
+        return why;
+      (key == "ford_depth"       ? out.ford_depth
+       : key == "keel_clearance" ? out.keel_clearance
+                                 : out.shore_clearance) = n;
     } else if (key == "points") {
       if (!val.is_seq())
         return where + " points: expects a list of points";
@@ -501,9 +598,11 @@ const vehicle_archetype *world_rules::find_vehicle(const std::string &id) const 
 }
 
 std::vector<std::string> vehicle_presets() { return {"humvee", "roboracer"}; }
+std::vector<std::string> boat_presets() { return {"launch", "jonboat", "tactical"}; }
+bool vehicle_plant_floats(const std::string &plant) { return plant == "dynamicboat"; }
 
 bool vehicle_controller_known(const std::string &id) {
-  return id == "nav@1" || id == "none" || id == "external";
+  return id == "nav@1" || id == "none" || id == "external" || id == "pose";
 }
 
 bool spawn_policy_known(const std::string &policy) {
@@ -516,7 +615,8 @@ bool spawn_scope_known(const std::string &scope) {
 }
 
 bool vehicle_plant_known(const std::string &plant) {
-  return plant == "jolt" || plant == "kinematic" || plant == "dynamic" || plant == "dynamic4w";
+  return plant == "jolt" || plant == "kinematic" || plant == "dynamic" || plant == "dynamic4w" ||
+         plant == "dynamicboat";
 }
 
 world_rules default_world_rules() { return world_rules{}; }
@@ -529,6 +629,11 @@ std::string check_world_rules(const world_rules &r) {
   const cvc::physics::vec3 &g = r.physics.gravity;
   if (!std::isfinite(g.x) || !std::isfinite(g.y) || !std::isfinite(g.z))
     return "physics: gravity must be finite";
+  const world_physics &wp = r.physics;
+  if (!std::isfinite(wp.wind_speed) || !std::isfinite(wp.wind_dir) ||
+      !std::isfinite(wp.wind_gustiness) || !std::isfinite(wp.wind_base) || wp.wind_speed < 0.0 ||
+      wp.wind_gustiness < 0.0)
+    return "physics: the wind must be finite, its speed and gustiness >= 0";
 
   std::set<std::string> ids;
   for (const avatar_controller &c : r.controllers) {
@@ -576,12 +681,19 @@ std::string check_world_rules(const world_rules &r) {
     if (!vehicles.insert(v.id).second)
       return at + " is defined twice";
     if (!vehicle_plant_known(v.plant))
-      return at + ": plant '" + v.plant + "' is not one of jolt, kinematic, dynamic, dynamic4w";
+      return at + ": plant '" + v.plant +
+             "' is not one of jolt, kinematic, dynamic, dynamic4w, dynamicboat";
+    const bool boat = vehicle_plant_floats(v.plant);
     bool preset = false;
-    for (const std::string &p : vehicle_presets())
+    for (const std::string &p : boat ? boat_presets() : vehicle_presets())
       preset = preset || p == v.preset;
     if (!preset)
-      return at + ": vehicle '" + v.preset + "' is not a preset (humvee, roboracer)";
+      return at + ": vehicle '" + v.preset + "' is not a " +
+             (boat ? "boat preset (launch, jonboat, tactical)" : "preset (humvee, roboracer)");
+    if (boat)
+      for (const auto &[k, x] : v.overrides)
+        if (k != "mass" && k != "max_speed")
+          return at + ": vehicle: " + k + " is not a boat's (mass, max_speed)";
     for (const auto &[k, x] : v.overrides)
       if (k == "max_speed" ? !finite_nonnegative(x) : !finite_positive(x))
         return at + ": vehicle: " + k + " must be " +
@@ -597,7 +709,7 @@ std::string check_world_rules(const world_rules &r) {
       return at + " allows no controller";
     for (const std::string &c : v.controllers)
       if (!vehicle_controller_known(c))
-        return at + " allows controller '" + c + "'; a vehicle has nav@1, none or external";
+        return at + " allows controller '" + c + "'; a vehicle has nav@1, none, external or pose";
   }
 
   if (!spawn_policy_known(r.spawns.policy))
@@ -605,6 +717,9 @@ std::string check_world_rules(const world_rules &r) {
            "' is not one of fixed, random, round_robin, nearest_free";
   if (!spawn_scope_known(r.spawns.scope))
     return "spawns: scope '" + r.spawns.scope + "' is not one of team, archetype, all";
+  if (!finite_nonnegative(r.spawns.ford_depth) || !finite_nonnegative(r.spawns.keel_clearance) ||
+      !finite_nonnegative(r.spawns.shore_clearance))
+    return "spawns: ford_depth, keel_clearance and shore_clearance must be zero or more";
   for (const spawn_point &sp : r.spawns.points) {
     if (!std::isfinite(sp.x) || !std::isfinite(sp.y) || !std::isfinite(sp.heading))
       return "spawns: a point's at: and heading: must be finite";
@@ -643,7 +758,8 @@ std::string parse_world_block(const Value &content, world_rules &rules,
     if (key == "controllers")
       continue;
     if (key == "vehicles") {
-      if (std::string e = parse_vehicles(v, rules.vehicles, rules.vehicle_intents, warnings);
+      if (std::string e = parse_vehicles(v, rules.vehicles, rules.vehicle_intents,
+                                         rules.vehicle_poses, rules.vehicle_starts, warnings);
           !e.empty())
         return e;
       continue;
@@ -696,6 +812,12 @@ std::string world_rules_from(const Scene &scene, const Value *world, world_rules
                              std::vector<std::string> *warnings) {
   world_rules r = default_world_rules();
   const ScenePhysics &ph = scene.physics;
+  if (scene.wind.present) { // the scene's wind pushes the room's avatars too (scene_wind.h)
+    r.physics.wind_speed = scene.wind.speed;
+    r.physics.wind_dir = scene.wind.dir;
+    r.physics.wind_gustiness = scene.wind.gustiness;
+    r.physics.wind_base = scene.wind.base;
+  }
   if (ph.present) {
     r.physics.gravity = cvc::physics::vec3{ph.gravity[0], ph.gravity[1], ph.gravity[2]};
     if (ph.fixed_dt != 0.0 && std::fabs(ph.fixed_dt - kRoomQuantum) > 1e-9)

@@ -65,6 +65,16 @@ def hook(cred):
 
 
 check(host.authenticate(hook) is hook and host._authenticate is hook, "authenticate keeps its hook")
+
+# A name under "server." is one of the relay's own calls, which it answers before a call reaches
+# Python, so export refuses it; a name that only starts the same way is a name like any other.
+try:
+    pycvc.ariadne.export(lambda: 1, name="server.whoami")
+    check(False, "export refuses a server. name")
+except ValueError as e:
+    check("server." in str(e), f"export refuses a server. name: {e}")
+check(callable(pycvc.ariadne.export(lambda: 1, name="serverless")), "serverless is a name")
+pycvc.ariadne._exports.pop("serverless", None)
 host.disconnect("x")
 check("bearer=<set>" in repr(pycvc.ariadne.Credential("secret", "grpc", "p")) and
       "secret" not in repr(pycvc.ariadne.Credential("secret", "grpc", "p")),

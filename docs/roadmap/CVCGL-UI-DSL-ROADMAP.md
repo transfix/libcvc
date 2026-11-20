@@ -1,6 +1,6 @@
 # Ariadne — the cvcGL UI & scene DSL (Scoping Spec v0.14, for iteration)
 
-Status: **SUBSTANTIALLY LANDED (2026-10). Verify any feature in the code, not this spec — it lags the tree.** Implemented: the `state_exec` engine, widget/layout model, reactive + action lanes, composition/URI, the scene-graph core, the streamed-source zero-copy contract + clipping, Unicode, and the backend-core split + AppRuntime refactor. Also landed despite still reading as open/planned in sections below — `input_text`/`input_int` (§3.5/§6, `loader.cpp`, #636), `RenderView`/`VisibilityMask` (§9.5, `src/cvcGL/RenderView.cpp`), the light scene node (§9.1, `LightNode.cpp`), clipboard (§17.8, `Clipboard*.{cpp,mm}`), `state_exec` async-scheduler parity (§7.1/§7.7, `receive_message`/`sleep`/`yield_frame`), JSON-Schema validator integration (§15), the **tvision** terminal backend (§16.4), the **EGL golden-image harness** (§16.6), and geometry LOD. **Genuinely remaining (verify per-item):** TF editor + `data()`-channel authoring (§10), `state_exec` program modularity `(include/load "uri")` (§19), the full YAML-free s-expr `.ari` *document* dialect (§18), the formal draft-2020-12 JSON Schema + `ari validate` CLI (§15), HTTP response-cache LRU (§13.9), pycvc URI handlers (§14.2). The version history and per-section status below are kept for provenance but are **not** authoritative; see `ARIADNE_CONFERENCE_ROADMAP.md` §13.
+Status: **SUBSTANTIALLY LANDED (2026-10). Verify any feature in the code, not this spec — it lags the tree.** Implemented: the `state_exec` engine, widget/layout model, reactive + action lanes, composition/URI, the scene-graph core, the streamed-source zero-copy contract + clipping, Unicode, and the backend-core split + AppRuntime refactor. Also landed despite still reading as open/planned in sections below — `input_text`/`input_int` (§3.5/§6, `loader.cpp`, #636), `RenderView`/`VisibilityMask` (§9.5, `src/cvcGL/RenderView.cpp`), the light scene node (§9.1, `LightNode.cpp`), clipboard (§17.8, `Clipboard*.{cpp,mm}`), `state_exec` async-scheduler parity (§7.1/§7.7, `receive_message`/`sleep`/`yield_frame`), JSON-Schema validator integration (§15), the **tvision** terminal backend (§16.4), the **EGL golden-image harness** (§16.6), and geometry LOD. **Genuinely remaining (verify per-item):** TF editor + `data()`-channel authoring (§10), `state_exec` program modularity `(include/load "uri")` (§19), the full YAML-free s-expr `.ari` *document* dialect (§18), the formal draft-2020-12 JSON Schema + `ari validate` CLI (§15), HTTP response-cache LRU (§13.9), pycvc URI handlers (§14.2), and the activity components, `processes` and `downloads` (§20, planned 2026-11-19). The version history and per-section status below are kept for provenance but are **not** authoritative; see `ARIADNE_CONFERENCE_ROADMAP.md` §13.
 
 Grounded in a full survey of
 the ImGui infrastructure (`ImGuiOverlay`, `ImGuiBinding`, `SceneRenderer`,
@@ -3456,7 +3456,11 @@ render/resolver thread**. wasm: `emscripten_fetch` is async-only (no sync on the
 > reply channel it RETURNS; a program awaits with the existing `(msg-recv <chan>)`, resuming with a
 > dict `{ ok status body(bytes) url headers(list) error }`. This is the nav_compute pattern
 > (host-intrinsic → `compute_async` → `exec_scheduler().post_message` → parked `msg-recv` woken by
-> `drain_ingress`, the delivered value threaded into the enclosing expression). The verb ALWAYS posts
+> `drain_ingress`, the delivered value threaded into the enclosing expression). (Since threaded
+> Stage 1b the post goes to the scheduler the program parks on, `ictx.host->parking_scheduler()`,
+> which is an isolated document's own group, not `exec_scheduler()`; and nav_compute's verb is an
+> async function on `*ictx.host`: STATE_EXEC_DEVELOPER_GUIDE.md, "Posting to the caller's group".)
+> The verb ALWAYS posts
 > a dict (an error dict on failure) so a parked recv never hangs; the body is `bytes` (the §13.9
 > precursor bridge). Registered host-level (needs `cvc::net` + the app), not a core builtin. Tests in
 > `ariadne_runtime_test` (AriadneNetIntrinsics: full-dict await, error-path resume, and a
@@ -4661,3 +4665,61 @@ the reactive engine) vs inheriting `global_env` — lean fresh + an explicit cap
 parent-relative, `ro`/`rw`) — reuse §12's `link:` grammar and its fail-closed/`/`-rejected rules. (d)
 the return value of `include`/`load` (nil, or the last form's value) and interaction with the scheduler
 (both run to completion within the caller's step/time budget, cycle/depth-guarded).
+
+## 20. Activity components: what a document is running and downloading — *planned*
+
+A document now does a great deal in the background:
+- it downloads cities (the nav city documents fetch a 117 MB package), datasets, weights (FLEETS_AND_NIGHT_ROADMAP.md's `policy: trained` fetches `grl-snam-weights`), components and pictures by URL, guests' modules, and a scripting host's packages;
+- it runs residents, actions, async calls and guests across its sub-documents (`load:` mounts) and its document group (threaded state_exec, Stage 1b).
+
+What a user sees today is a `progress` key per dataset, and a program sees `ps`. Two shipped components should show all of it. They have the same shape: a tree of the document and its sub-documents, a row per item under each, a filter, and actions.
+
+### 20.1 `processes`: the running DSL processes, by document
+
+- **A row per process:**
+  - pid and name (the program: `on_tick`, a button's action, a mount's `init:`);
+  - its kind: init, action, resident, async call, child, guest;
+  - status: running, waiting (on what: an async call, a message, a lock, the host's next frame), paused, ended;
+  - steps and time, last frame and in all;
+  - its priority.
+- **Grouped by owner.** Under the document, then each `load:` mount (`includes.<as>`) as a subtree. A row's owner is the document or mount whose program started it. A group's header shows where it runs (the frame's thread or the pool) and its use of the per-frame budget (200000 steps, 0.1 s).
+- **Guests** (WebAssembly modules, a scripting host's Python programs) appear under their owner with their gas (§8.5 to 8.7, G2).
+- **Actions:** kill (the `kill` verb), pause and resume, inspect (the `inspect` verb's view).
+- **What it needs:**
+  - `ps` today returns pid, name, status, priority, uid and steps. It gains `owner` (the document or mount prefix), `kind`, `waiting_on`, `time_ms` and `parent`.
+  - The runtime publishes a snapshot under `sys.activity.processes.*` (with each mount's under its own prefix) at most twice a second. It does so only while a viewer is subscribed, so a document with no panel open pays nothing.
+  - **Scope:**
+    - a document sees its own processes and its mounts', as `ps` does;
+    - a mount sees only its own;
+    - the host's view, behind a host grant (`activity: all`, as the network allowlist is granted), sees every document's.
+
+### 20.2 `downloads`: what is being fetched, and for whom
+
+- **A row per transfer:**
+  - what: a dataset's name, a package (`cvcpkg://ORG/NAME@VERSION`), a URL or a file;
+  - who asked: the document or sub-document, or the host;
+  - status: queued, resolving, fetching, checking (sha256), unpacking, decoding, ready (and from where: the network, the cache, a local file), or error (with why);
+  - bytes done and total, rate and time left;
+  - finished transfers kept for a while (the last 50), then dropped.
+- **Actions:** cancel, retry, show the error, clear the finished.
+- **One registry per app** (`app.slot<T>()`; no singleton), which every path that fetches reports into:
+  - the data store (`data:` blocks and `data-load`), which already tracks status, progress and bytes;
+  - cvcpkg resolution and archive downloads, cache hits included;
+  - `http(s)` URIs through the HTTP cache (imports, `image:` by URL, fetch);
+  - large `http-get` / `http-request` bodies (past a size threshold);
+  - weights (fleets' `policy: trained`), guests' modules, a scripting host's runtime package installs, and media files;
+  - uploads (`http-upload`, L16), as rows of their own kind.
+- **In state:** under `sys.downloads.*` (rows and totals), at the same low rate, only while a viewer is subscribed. The DSL gets `(downloads)` (the rows as dicts), `(download-cancel ID)` and `(download-retry ID)`. A document sees its own transfers and its mounts'; the host's view sees all.
+- **The tray** (§5.22 in ARIADNE.md) gets a downloads icon: the count and overall progress while anything is in flight, a click opens the component.
+- **In a browser** the page's fetches report progress through the fetch stream's reader, so the gallery shows the same rows.
+- **On a relay** a server document's downloads are its operator's (arisrvx), never its clients'.
+
+### 20.3 Phases
+
+| Phase | What | Size |
+|---|---|---|
+| AC1 | `ps` with `owner`, `kind`, `waiting_on`, `time_ms`, `parent`; the subscribed `sys.activity.processes.*` snapshot; scoping, and the host grant. | M |
+| AC2 | The `processes` component (the document → mounts tree, the columns, kill, pause, inspect), in ImGui and the terminal backends. Test: `ari test` on a document with two mounts, each row under its owner, a kill. | M |
+| AC3 | The downloads registry (`app.slot`) and its reporters: the data store, cvcpkg, the HTTP cache; `sys.downloads.*`; the verbs. | M |
+| AC4 | The `downloads` component and the tray icon. Test: `ari test` loading a `data:` entry from a local server, its row through each status, a cancel, a retry. | M |
+| AC5 | The other reporters (weights, guests' modules, package installs, media, uploads) and the browser's fetches. | M |

@@ -596,3 +596,216 @@ TEST(RoomChat, TheVerbsPostReadAndPage) {
             "");
   EXPECT_EQ(leaf(bob.app, "count"), "41");
 }
+
+// -------- bridged users (room_intrinsics.h; the relay's program posts for them) --------
+
+namespace {
+
+void bridge(harness &h, const std::string &uid, const std::string &name) {
+  std::string why;
+  ASSERT_TRUE(conf::room_bridge_presence(h.relay_app, kRoom, "nmdc", uid, name, "", why)) << why;
+}
+
+} // namespace
+
+// A bridged user's room post is stamped, kept and pushed to every participant like any post, and
+// marked with its system; the listener does not hear the program's own post.
+TEST(RoomChat, ABridgedPostReachesEveryParticipant) {
+  harness h;
+  harness::client &alice = h.join("alice", "Alice");
+  harness::client &bob = h.join("bob", "Bob");
+  std::vector<conf::chat_event> heard;
+  h.chat->set_listener([&](const conf::chat_event &e) { heard.push_back(e); }, true, true);
+  bridge(h, "Zed.Z", "Zed");
+
+  std::string why;
+  std::uint64_t seq = 99;
+  ASSERT_TRUE(h.chat->post_bridged("nmdc", "Zed.Z", "", "hi from the hub", "", why, &seq)) << why;
+  EXPECT_EQ(seq, 0u);
+  ASSERT_TRUE(h.chat->post_bridged("nmdc", "Hub-Security", "Hub-Security", "welcome", "", why))
+      << "a sender need not be present to post to the room";
+  h.sync();
+  for (harness::client *c : {&alice, &bob}) {
+    const conf::chat_message m = message_at(c->app, chat("room.m.0"));
+    EXPECT_EQ(m.from, "_nmdc_Zed_2eZ");
+    EXPECT_EQ(m.name, "Zed") << "the name its presence gave";
+    EXPECT_EQ(m.via, "nmdc");
+    EXPECT_EQ(m.text, "hi from the hub");
+    EXPECT_EQ(message_at(c->app, chat("room.m.1")).name, "Hub-Security");
+  }
+  EXPECT_EQ(leaf(h.relay_app, chat("room.head")), "2");
+  EXPECT_TRUE(heard.empty()) << "the program's own posts are not handed back";
+
+  // Kept: a late joiner pages it back.
+  harness::client &carol = h.join("carol", "Carol");
+  h.send("carol", conf::make_chat_page(kRoom, "carol", "", 2));
+  h.step();
+  EXPECT_EQ(message_at(carol.app, chat("room.m.0")).via, "nmdc");
+
+  // Under the text limit, without the rate limit.
+  EXPECT_FALSE(h.chat->post_bridged("nmdc", "Zed.Z", "", std::string(2001, 'x'), "", why));
+  EXPECT_EQ(why, "the message is longer than 2000 bytes");
+  EXPECT_FALSE(h.chat->post_bridged("nmdc", "Zed.Z", "", " \n ", "", why));
+  EXPECT_FALSE(h.chat->post_bridged("NMDC", "Zed.Z", "", "x", "", why));
+  for (int i = 0; i < 50; ++i)
+    ASSERT_TRUE(h.chat->post_bridged("nmdc", "Zed.Z", "", "flood " + std::to_string(i), "", why))
+        << why;
+  const auto st = h.chat->take_stats();
+  EXPECT_EQ(st.bridged, 52u);
+  EXPECT_EQ(st.heard, 0u);
+}
+
+// The listener hears every participant's room post, and a participant's direct message to a
+// bridged user, which is pushed to that participant alone.
+TEST(RoomChat, TheListenerHearsParticipantsPosts) {
+  harness h;
+  harness::client &alice = h.join("alice", "Alice");
+  h.join("bob", "Bob");
+  std::vector<conf::chat_event> heard;
+  bridge(h, "zed", "Zed");
+  const std::string zed = conf::bridged_pid("nmdc", "zed");
+
+  // No one takes direct messages yet: the relay refuses one.
+  h.post("alice", "anyone?", zed);
+  h.step();
+  EXPECT_NE(leaf(alice.app, chat("error")).find("cannot get direct messages"), std::string::npos)
+      << leaf(alice.app, chat("error"));
+
+  h.chat->set_listener([&](const conf::chat_event &e) { heard.push_back(e); }, true, true);
+  h.post("alice", "hello room");
+  h.post("alice", "hi zed", zed);
+  h.post("bob", "and me");
+  h.step();
+  ASSERT_EQ(heard.size(), 3u);
+  EXPECT_EQ(heard[0].to, "");
+  EXPECT_EQ(heard[0].m.from, "alice");
+  EXPECT_EQ(heard[0].m.name, "Alice");
+  EXPECT_EQ(heard[0].m.text, "hello room");
+  EXPECT_EQ(heard[0].m.seq, 0u);
+  EXPECT_EQ(heard[1].to, zed);
+  EXPECT_EQ(heard[1].to_uid, "zed");
+  EXPECT_EQ(heard[1].to_via, "nmdc");
+  EXPECT_EQ(heard[1].m.text, "hi zed");
+  EXPECT_EQ(heard[2].m.from, "bob");
+  EXPECT_EQ(message_at(alice.app, chat("dm." + zed + ".m.0")).text, "hi zed")
+      << "alice's copy is her confirmation";
+  EXPECT_TRUE(h.wire.paths_to(zed).empty()) << "no connection holds a bridged pid";
+  for (const std::string &p : h.wire.paths_to("bob"))
+    EXPECT_EQ(p.find(".dm."), std::string::npos) << p;
+  EXPECT_EQ(leaf(alice.app, chat("dms")), zed);
+
+  // An event as the program reads it.
+  const std::string json = conf::encode_chat_event(kRoom, heard[1]);
+  EXPECT_NE(json.find("\"to_uid\":\"zed\""), std::string::npos) << json;
+  EXPECT_NE(json.find("\"text\":\"hi zed\""), std::string::npos) << json;
+
+  // The room only: a DM to a bridged user is refused again.
+  heard.clear();
+  h.chat->set_listener([&](const conf::chat_event &e) { heard.push_back(e); }, true, false);
+  h.post("alice", "still there?", zed);
+  h.step();
+  EXPECT_TRUE(heard.empty());
+  // Gone: refused as for a participant who left.
+  h.chat->set_listener([&](const conf::chat_event &e) { heard.push_back(e); }, true, true);
+  conf::room_bridge_absent(h.relay_app, kRoom, "nmdc", "zed");
+  h.post("alice", "zed?", zed);
+  h.step();
+  EXPECT_TRUE(heard.empty());
+  EXPECT_NE(leaf(alice.app, chat("error")).find("not in the room"), std::string::npos);
+}
+
+// A present bridged user writes to a participant: the participant holds the conversation under
+// the bridged pid, and no one else is pushed it.
+TEST(RoomChat, ABridgedUserSendsADirectMessage) {
+  harness h;
+  harness::client &alice = h.join("alice", "Alice");
+  h.join("bob", "Bob");
+  std::string why;
+  EXPECT_FALSE(h.chat->post_bridged("nmdc", "zed", "Zed", "psst", "alice", why)) << "not present";
+  bridge(h, "zed", "Zed");
+  EXPECT_FALSE(h.chat->post_bridged("nmdc", "zed", "", "psst", "nobody", why));
+  EXPECT_NE(why.find("not in the room"), std::string::npos) << why;
+  ASSERT_TRUE(h.chat->post_bridged("nmdc", "zed", "", "psst alice", "alice", why)) << why;
+  const std::string zed = conf::bridged_pid("nmdc", "zed");
+  const conf::chat_message m = message_at(alice.app, chat("dm." + zed + ".m.0"));
+  EXPECT_EQ(m.from, zed);
+  EXPECT_EQ(m.via, "nmdc");
+  EXPECT_EQ(leaf(alice.app, chat("dm." + zed + ".head")), "1");
+  EXPECT_TRUE(h.wire.paths_to("bob").empty());
+
+  // The conversation outlives neither: the bridged user leaving, then alice, forgets it.
+  conf::room_bridge_absent(h.relay_app, kRoom, "nmdc", "zed");
+  h.chat->participant_left(zed);
+  h.leave("alice");
+  h.join("alice", "Alice");
+  h.send("alice", conf::make_chat_page(kRoom, "alice", zed, 10));
+  h.step();
+  EXPECT_EQ(h.wire.pushes.back().second.size(), 1u) << "an empty page: only chat.rev";
+}
+
+// The verbs: (room-roster ROOM KIND [LIMIT]) lists the bridged users apart or with the
+// participants, (room-bridged-count ROOM) counts them, (room-bridged-rev ROOM) moves with them, and
+// chat-messages says where a message came from.
+TEST(RoomChat, TheVerbsListBridgedUsers) {
+  harness h;
+  h.join("alice", "Alice");
+  bridge(h, "zed", "Zed");
+  std::string why;
+  ASSERT_TRUE(h.chat->post_bridged("nmdc", "zed", "", "from the hub", "", why)) << why;
+  harness::client &bob = h.join("bob", "Bob");
+  // What the relay's drain would replicate to bob.
+  ASSERT_TRUE(conf::room_bridge_presence(bob.app, kRoom, "nmdc", "zed", "Zed", "a line", why));
+  conf::room_join(bob.app, kRoom, "alice", "Alice");
+  conf::register_room_intrinsics(bob.app);
+  cvc::ariadne::Runtime rt(bob.app, "");
+  const auto run = [&](const std::string &program) {
+    std::string result = "pending";
+    rt.run_program(program, [&](const std::string &r) { result = r; });
+    for (int i = 0; i < 200 && result == "pending"; ++i)
+      rt.drain();
+    return result;
+  };
+  EXPECT_EQ(run("(begin (set h (room-join \"\" \"r\" (dict \"name\" \"Bob\")))"
+                " (state-set \"tok\" (get-attr h \"token\"))"
+                " (state-set \"n_default\" (str (length (room-roster h))))"
+                " (state-set \"n_all\" (str (length (room-roster h \"all\"))))"
+                " (set b (nth (room-roster h \"bridged\") 0))"
+                " (state-set \"b.pid\" (get-attr b \"pid\"))"
+                " (state-set \"b.name\" (get-attr b \"name\"))"
+                " (state-set \"b.bridged\" (get-attr b \"bridged\"))"
+                " (state-set \"b.via\" (get-attr b \"via\"))"
+                " (state-set \"b.detail\" (get-attr b \"detail\"))"
+                " (state-set \"b.video_off\" (get-attr b \"video_off\"))"
+                " (state-set \"p.bridged\" (get-attr (nth (room-roster h) 0) \"bridged\"))"
+                " (state-set \"rev\" (str (room-bridged-rev h)))"
+                " (state-set \"count\" (str (room-bridged-count h)))"
+                " (state-set \"n_limit\" (str (length (room-roster h \"all\" 0))))"
+                " (state-set \"bad\" (get-attr (room-roster h \"some\") \"error\"))"
+                " (chat-info h \"\"))"),
+            "");
+  EXPECT_EQ(leaf(bob.app, "n_default"), "2") << "alice and bob";
+  EXPECT_EQ(leaf(bob.app, "n_all"), "3");
+  EXPECT_EQ(leaf(bob.app, "b.pid"), "_nmdc_zed");
+  EXPECT_EQ(leaf(bob.app, "b.name"), "Zed");
+  EXPECT_EQ(leaf(bob.app, "b.bridged"), "1");
+  EXPECT_EQ(leaf(bob.app, "b.via"), "nmdc");
+  EXPECT_EQ(leaf(bob.app, "b.detail"), "a line");
+  EXPECT_EQ(leaf(bob.app, "b.video_off"), "1");
+  EXPECT_EQ(leaf(bob.app, "p.bridged"), "0");
+  EXPECT_EQ(leaf(bob.app, "rev"), std::to_string(conf::room_bridge_rev(bob.app, kRoom)));
+  EXPECT_EQ(leaf(bob.app, "count"), "1");
+  EXPECT_EQ(leaf(bob.app, "n_limit"), "2") << "LIMIT bounds the bridged users only";
+  EXPECT_NE(leaf(bob.app, "bad").find("KIND"), std::string::npos);
+  h.step();
+  EXPECT_EQ(run("(begin (chat-info (state-get \"tok\") \"\")"
+                " (state-set \"via\" (get-attr (nth (chat-messages (state-get \"tok\") \"\") 0) "
+                "\"via\")))"),
+            "");
+  EXPECT_EQ(leaf(bob.app, "via"), "nmdc");
+
+  // Gone from (room-roster h "all") once absent, rev moved.
+  conf::room_bridge_absent(bob.app, kRoom, "nmdc", "zed");
+  EXPECT_EQ(run("(state-set \"n_all\" (str (length (room-roster (state-get \"tok\") \"all\"))))"),
+            "");
+  EXPECT_EQ(leaf(bob.app, "n_all"), "2");
+}

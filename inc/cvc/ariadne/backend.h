@@ -23,6 +23,7 @@
 // write (which fans out to observers / replicated peers), not one per frame.
 
 #include <algorithm>            // min (text_view's default)
+#include <cstdint>
 #include <cstdio>               // snprintf (plot_lines' text sparkline)
 #include <cvc/ariadne/files.h>  // pick_files: FilePickRequest / FilePickDone (§10.8)
 #include <cvc/ariadne/widget.h> // Size / Layout / Extent (§3.0.3b) passed to the backend
@@ -57,6 +58,18 @@ struct IndexEdit {
   bool changed = false;
   bool committed = false;
   int index = -1;
+};
+// A list (Kind::List): what it shows besides its rows, and what the user did with it this frame.
+struct ListOptions {
+  bool add = false;    // an Add button
+  bool remove = false; // a Remove button (for the selected row)
+  int rows = 6;        // rows that show at once, where the backend scrolls
+};
+struct ListEdit {
+  bool selected = false; // a row was picked: `index`
+  int index = -1;
+  bool add = false;    // Add was pressed
+  bool remove = false; // Remove was pressed
 };
 // A single-line text edit (Kind::InputText; Kind::InputInt reuses it, the core coercing to/from an
 // int). `value` is the field's current text; `changed` = it differs from the value in state this
@@ -207,6 +220,44 @@ ChartBounds chart_bounds(const ChartSpec &spec, const std::vector<char> &shown =
 // A marker kind's name (best, elbow, plateau, note), and the kind a name says (else Note).
 const char *chart_marker_kind_name(ChartMarkerKind kind);
 ChartMarkerKind chart_marker_kind(const std::string &name);
+
+// What the core hands a backend to draw a heatmap (Kind::Heatmap): `rows` x `cols` cells, row
+// after row, each already coloured from the ramp by the core, so every backend shows the same
+// colours. A cell with no value (`has_value` false) is drawn empty, in the surface's frame colour.
+struct HeatmapCell {
+  bool has_value = false;
+  double v = 0.0;
+  float rgb[3] = {0.0f, 0.0f, 0.0f}; // the ramp's colour at v
+  std::string text;                  // drawn on the cell ("" none)
+  bool mark = false;                 // a corner triangle in HeatmapSpec::mark_rgb
+};
+struct HeatmapSpec {
+  int rows = 0, cols = 0;
+  std::vector<HeatmapCell> cells;            // rows * cols, cell (r, c) at r * cols + c
+  std::vector<std::string> row_labels;       // one per row, or empty: none drawn
+  std::vector<std::string> col_labels;       // one per column, or empty: none drawn
+  std::vector<HeatmapStop> ramp;             // the legend's stops, sorted by `at`
+  HeatmapLegend legend = HeatmapLegend::Off; // the ramp as a bar, its stops labelled
+  float cell_size = 28.0f, gap = 2.0f;       // px, where the backend has pixels
+  float mark_rgb[3] = {1.0f, 1.0f, 1.0f};
+  int sel_row = -1, sel_col = -1; // the picked cell, outlined (-1: none)
+  bool interactive = false; // a pick or an on_click: a click is wanted (a terminal takes focus)
+  // Moves each time the core reads the cells again (only after a write to the subtree), so a
+  // backend can keep what it derives from them until it does.
+  std::uint64_t revision = 0;
+};
+// The cell under the pointer this frame (`hovered`), and the one clicked (`clicked`). The core
+// writes a click to the heatmap's `pick:`, runs its on_click / on_hover with the cell, and shows
+// the hovered cell's tooltip (Backend::set_tooltip, after the call: the heatmap is the last item).
+struct HeatmapEvent {
+  bool hovered = false;
+  int row = -1, col = -1;
+  bool clicked = false;
+  int click_row = -1, click_col = -1;
+};
+// The ramp's colour at `v`: mixed between the two stops about it, the end stop's beyond them (a
+// mid grey with no stops). False (and `rgb` untouched) when `v` is not finite.
+bool heatmap_color(const std::vector<HeatmapStop> &ramp, double v, float rgb[3]);
 
 // §11.4 runtime geometry persistence. The CORE owns the state (tree.<id>.geometry /
 // tree.<id>.tracks per §11.2); the backend only SEEDS a window / split-grid from a persisted
@@ -584,6 +635,11 @@ public:
   // value and its range, a gap for a column with no finite value, then a line for each marker and
   // for the cursor, so every backend has one. Defined in chart_emit.cpp.
   virtual ChartEvent chart(const char *label, const ChartSpec &spec);
+  // A heatmap grid (Kind::Heatmap); see HeatmapSpec. Returns the hovered and clicked cells. By
+  // default text: the label, a line of column labels, then a line for each row, its label and
+  // each cell's text (else its value) with `*` after a marked one, `.` for a cell with no value,
+  // then the legend's stops, so every backend has one. Defined in heatmap_emit.cpp.
+  virtual HeatmapEvent heatmap(const char *label, const HeatmapSpec &spec);
   // A read-only progress bar at `fraction` (0..1) with `overlay` drawn over it (empty: the
   // percent). By default a text value, "[########------------] 40%", so every backend has one.
   virtual void progress_bar(const char *label, float fraction, const std::string &overlay) {
@@ -686,6 +742,19 @@ public:
                           const std::vector<std::string> &options) = 0;
   // Kind::Radio: the same choice with every option shown, side by side when `row`. A backend
   // with no radio buttons draws it as a combo.
+  // A tab bar (Kind::Tabs): `labels` side by side, `current` the selected one; returns the pick
+  // when the user selects another. `id` is the bar's identity. The default draws a row of radio
+  // buttons (a backend with no tabs).
+  virtual IndexEdit tab_bar(const char *label, const char *id, int current,
+                            const std::vector<std::string> &labels) {
+    (void)id;
+    return radio(label, current, labels, true);
+  }
+  // A list (Kind::List): `items` one row each, `current` the selected one (-1: none). Returns a
+  // selection, and whether the Add or Remove button was pressed. The default draws the rows as
+  // stacked radio buttons and the two buttons under them.
+  virtual ListEdit list(const char *label, const char *id, int current,
+                        const std::vector<std::string> &items, const ListOptions &o);
   virtual IndexEdit radio(const char *label, int current_index,
                           const std::vector<std::string> &options, bool row) {
     (void)row;

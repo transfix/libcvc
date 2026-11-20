@@ -178,6 +178,11 @@ public:
   void text_value(const char *label, const std::string &value) override;
   void text_line_colored(const char *text, const float rgb[3]) override;
   void text_value_colored(const char *label, const std::string &value, const float rgb[3]) override;
+  // Kind::Heatmap: coloured cells (a value's text in black or white on its colour, a mark's corner
+  // glyph), the labels, the legend as a bar under the grid. The pointer's cell is the hovered one;
+  // with a pick or an on_click it takes focus, the arrows move a cursor cell and Enter or Space
+  // clicks it.
+  HeatmapEvent heatmap(const char *label, const HeatmapSpec &spec) override;
   // §5.20 a paragraph laid out at its box's width; each link a stop in Tab order (Enter / Space or
   // a click activates it), underlined, inverted while it has focus.
   RichTextEvent rich_text(const std::vector<TextRun> &runs, const RichTextOptions &opts) override;
@@ -389,7 +394,7 @@ public:
     // the previous handlers back there. `take_signal` is polled every iteration and returns the
     // name of one pending signal ("SIGTERM") or "" for none; each goes to the document's
     // on_signal: (source "os") and, when the document has no handler, ends the loop. See
-    // src/ari/main.cpp for a host that wires these to sigaction.
+    // src/ari/main.cpp for a host that wires these to a signal_route (host_signals.h).
     std::function<void()> on_start;
     std::function<void()> on_stop;
     std::function<std::string()> take_signal;

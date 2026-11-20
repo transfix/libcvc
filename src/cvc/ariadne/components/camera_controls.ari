@@ -32,15 +32,16 @@ units:
         hi: 2.0
         fmt: "%.2f"
         tooltip: "degrees the view turns per pixel the mouse moves"
-      # Framing a scene sets the speed from its size (an eighth of its diagonal a second): ~200 m/s
-      # for a 1.2 km world, ~3500 m/s for a 20 km one, so the range spans both.
+      # Framing a scene sets the speed from its size: an eighth of its diagonal a second, at most
+      # 10 m/s (a Quake spectator's). Shift multiplies it (4x) and the wheel scales it in Fly, so
+      # the range still reaches a 20 km world's thousands of metres a second.
       - slider_float: Move speed
         bind: viewers.{viewer}.camera.settings.move_speed
         lo: 0.5
         hi: 5000.0
         log: true
         fmt: "%.1f"
-        tooltip: "Fly's speed, scene units (metres) a second; Shift is faster and the wheel scales it in Fly. Framing the scene sets it from the scene's size"
+        tooltip: "Fly's speed, scene units (metres) a second: a key's, where the eye gets to in about 0.15 s and glides to a stop from in about 0.4 s. Shift is faster and the wheel scales it in Fly. Framing the scene sets it from the scene's size, at most 10"
       - slider_float: Field of view
         bind: viewers.{viewer}.camera.settings.field_of_view
         lo: 0.0

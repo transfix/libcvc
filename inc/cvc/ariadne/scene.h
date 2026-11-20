@@ -434,9 +434,9 @@ SceneRepeatCount scene_repeat_count(const std::string &repeat);
 
 // Copy `index` of the repeat: template `n`: `{i}` replaced by the index (0-based) in its id, its
 // `visible:` and `material: { opacity }` binds, its tags, its sources (file, asset, data and item),
-// its texture, its clips' offset binds and every string in its props, and in its children likewise.
-// The copy's `repeat` is empty. A child that has a repeat: of its own is left as it is, so its
-// copies number themselves, as a nested widget repeat's do.
+// its texture (an image or a stream), its clips' offset binds and every string in its props, and in
+// its children likewise. The copy's `repeat` is empty. A child that has a repeat: of its own is
+// left as it is, so its copies number themselves, as a nested widget repeat's do.
 SceneNode scene_node_instance(const SceneNode &n, int index);
 
 // A scene light (§9.2). Either an explicit light (kind/pos/target/cone/intensity/
@@ -550,12 +550,22 @@ struct SceneAsset {
   SceneNode source;
 };
 
+// A document `data:` entry as the scene's nodes and looks name it (data.h's DataSpec, its source
+// made absolute against the document's directory): a vehicle's `look: { data: NAME, file: ... }`
+// and a boat's `model: { data: NAME, file: ... }` read their model out of its package.
+struct SceneData {
+  std::string name; // the entry's name
+  std::string uri;  // its source: cvcpkg://ORG/NAME[@VERSION], https://..., a file or directory
+  std::string path; // its `path:`, the directory inside the package its files are under
+};
+
 struct Scene {
   std::string id; // a `scenes:` entry's name ("" for the document's `scene:`)
   std::vector<SceneNode> nodes;
   // The document's assets (`assets:`), the same list in every scene: what `source: { asset }`
   // names.
   std::vector<SceneAsset> assets;
+  std::vector<SceneData> data; // the document's data: entries (SceneData)
   // main_view: { show, hide } — the tags the MAIN view draws (the untagged nodes always), as a
   // viewport's show: / hide: do. For a document whose "scenes" are tagged groups in one scene.
   bool has_main_view = false;
@@ -569,11 +579,22 @@ struct Scene {
   SceneClock clock; // §9 time: the simulation clock (clock.present gates it) — see SceneClock
   ScenePhysics physics; // physics: {...} — the world the nodes' bodies live in (see SceneBody)
   SceneWorldSpec world; // world: {...} — which of the nodes' worlds is on (see SceneWorldSpec)
+  // wind: { speed, dir, gustiness, base } — the scene's one wind (scene_wind.h): it seeds the
+  // live keys wind.speed (m/s), wind.dir (degrees, the way it blows, from +x toward +y) and
+  // wind.gustiness, which the water, the clouds, the trees and the physics all read; base (m) is
+  // the level its height profile is measured from.
+  struct WindSpec {
+    bool present = false;
+    double speed = 5.0, dir = 0.0, gustiness = 0.25, base = 0.0;
+  } wind;
   // The vehicles the document's top-level `world: vehicles:` offers (world_rules.h), which the
   // host copies in after the load: the world runtime spawns them into this scene's physics.
   std::vector<vehicle_archetype> vehicles;
   spawn_rules spawns;          // and where they start (world: spawns:)
   std::string vehicle_intents; // and a table of their intents (world: vehicles: intents:)
+  std::string vehicle_poses;   // and of their poses (world: vehicles: poses:)
+  // And the ones it starts with (world: vehicles: start:).
+  std::vector<vehicle_start> vehicle_starts;
   bool has_shadows = false;
   bool shadows_enabled = false;
   bool has_shadow_resolution = false; // shadows: { resolution: <px> } — bigger = crisper map

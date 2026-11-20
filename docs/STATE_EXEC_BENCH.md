@@ -166,8 +166,23 @@ over the measured reps and prints `PASS` or `FAIL`. Options:
 - `--min X --max X` together pin a value, such as a step count.
 - `--max-noise P` makes a point noisier than `P` percent `INCONCLUSIVE`.
 
-It exits 1 when a point fails, a matching point has a failed rep, or nothing matches. Otherwise it
-exits 2 when a point is inconclusive, and 0 when every point passes. Gates that are a ratio between
+A scenario whose gate could pass without judging anything has an entry in the runner's
+`GATE_GUARDS`, for the metrics it names (`mt.ariadne_docs`' `extra.helper_wakes`,
+`extra.wakes_per_frame` and `extra.worker_pumps`):
+
+- **vacuous**: metrics each row must hold at least at one of its params, else the point prints
+  `FAIL (vacuous: ...)`. For `mt.ariadne_docs`, `extra.isolated` and `extra.any_groups` at `docs`:
+  every document in an `any` group of its own;
+- **n/a**: a point whose rows all have a metric at 0 (`extra.wakeable`: no helper to wake) prints
+  `n/a`, counted neither as a pass nor as a failure. A gate where every point is n/a fails;
+- **control**: the same run's points matching a `where` that could be judged (`frame=heavy` with
+  `extra.wakeable` above 0) must have a metric's median at least a bound (`extra.worker_pumps` at
+  least 1), else the gate fails: a pool whose helpers never pump would pass small frames too.
+
+It exits 1 when a point fails, a matching point has a failed rep or leaves the gate vacuous,
+nothing matches, every point is n/a, or a control fails. Otherwise it exits 2 when a point is
+inconclusive, and 0 when every judged point passes.
+Gates that are a ratio between
 two points (one sweep value against another) are `compare --pair` runs instead. Gates on a count
 (steps, allocations) take no noise rule.
 
@@ -236,9 +251,9 @@ so the allocation count is a Release number. With a single-config generator it e
   thread) would still inherit the pin, so on Linux the scenarios that start threads
   (`async.*`, `msg.ingress`, `mt.*`; `spawns_threads` in `--list-json`) run with the driver
   unpinned, and their records say `pin_cpu: -1`. The pool scenarios (`mt.groups`,
-  `mt.groups.flood`, `mt.state_tree`) are the exception: their `exec_pool` places its workers, the
-  region leaves them placed, and a pinned driver moves for the point to the CPU the pool keeps for
-  its caller (mt.groups, "Placement").
+  `mt.groups.flood`, `mt.state_tree`, `mt.ariadne_docs`) are the exception: their `exec_pool`
+  places its workers, the region leaves them placed, and a pinned driver moves for the point to
+  the CPU the pool keeps for its caller (mt.groups, "Placement").
 - **Keep the pinned core's SMT sibling idle.** The header and the records (`pin_sibling`) name the
   other logical CPUs on the driver's core. A busy sibling slows the driver by tens of percent and
   is a large part of the rep-to-rep spread. On Windows, keep other work off it (for example
@@ -730,6 +745,34 @@ What the background executor accumulates in one app, against a lane:
   flight, so the pool never oversubscribes. `extra.first_ns_per_call` and `last_ns_per_call` are
   the mean time per call over the first and the last 10 % (from the kernels' end times), and
   `last_over_first` their ratio; `app_threads_after` is the app's thread-map entries.
+  `extra.first_fast_cpu_share`, `last_fast_cpu_share` and `fast_cpu_share` are the share of those
+  calls (and of all of them) whose kernel ended on a CPU of the fastest efficiency class: P-cores
+  on a hybrid part (Windows; -1 elsewhere or on a uniform part). The kernels' threads float, and a
+  call is mostly the OS waking one, so where they land sets the time per call more than either
+  executor does: on a Core Ultra 9 185H, stretches of calls with at least 99 % of kernels on
+  P-cores took a median 9.1 us a call, and stretches with under half on them 22.5 us. Read a
+  change in `first_ns_per_call` or `last_ns_per_call` against these shares before reading it as
+  the executor's.
+  Each call is also split: `extra.turnaround_ns`, from the previous kernel's end to this call
+  being made, is `handoff_ns` (to the first step slice after that end: the completion posted, seen,
+  drained and woken) plus `driver_work_ns` (from that slice's start to the call: the steps); and
+  `wake_ns` runs from the call being made to its kernel starting (the post, and the kernel thread
+  picking it up). Each is the mean of its middle 90 % (the clock's ticks are 100 ns on Windows,
+  and a call the OS preempted would swamp a plain mean), over all calls; `first_` and `last_`
+  forms of `driver_work_ns` and `turnaround_ns` cover the first and last 10 %. The kernel thread
+  spins a few us in its wait before it blocks, so the wake is bimodal: `slow_wake_share` (with
+  its `first_` and `last_` forms) is the share of wakes over 2 us. On a Core Ultra 9 185H with the
+  kernels on one P-core, the spin lasts about 5.2 us: a call made within it waits about 1 us for
+  its kernel, one made after it about 7 us. The driver's turnaround is about 5.1-5.3 us, right at
+  that edge, and the two feed each other: with 25 ns more driver work per call, `driver_work_ns`
+  rose about 250 ns, `slow_wake_share` 0.1-0.2 and the time per call 11-26 %; with 100 ns, about
+  400 ns, 0.1-0.4 and 15-31 % (interleaved, quiet, up in 8-10 of 10 rounds). Over a run,
+  `driver_work_ns` grows 13-19 % and `slow_wake_share` from under 0.1 to about 0.5, which is what
+  makes `last_ns_per_call` 40-50 % above `first_ns_per_call`. So neither the time per call nor any
+  leg is linear in the executor's cost: compare executors on the step scenarios (`inflight_tax`,
+  `sched.single`), and read a `pool_aging` change against `slow_wake_share`; one that moves it is
+  mostly calls crossing the spin. (S1a's pool_aging points were +6.5 % to +15.7 % slower in 15-18
+  of 20 quiet rounds, from a step cost of at most about 1 % in `inflight_tax`.)
 - `pool_batches`: `r` batches (20) of `b` (16) concurrent calls into one app: `extra.batch_ns`
   against the batch index.
 - `pool_retention`: `k` (100) sequential calls whose kernel returns a 1 MiB string that the program
@@ -1066,6 +1109,58 @@ grows while the groups do not contend (td 6.3: disjoint chrooted subtrees about 
 shared or unchrooted about 1x). Plus the pool's `pumps`, `helper_wakes`, `effective_threads` and
 `rounds`.
 
+### mt.ariadne_docs (async)
+
+Threaded execution's Stage 1b (td 4.12, 6.3; S1.md S1.14): `docs` (1, 2, 4, 8) Ariadne documents on
+one app, each an `AppRuntime` at a prefix of its own (`bench.ari.d<k>`), all loading one document
+written for the point to the temporary directory, with `ariadne.exec.isolate_documents` set to 1.
+The document is eligible for a group of its own (S1-Q6): a non-empty prefix, a `channels:` block
+(enforced in strict lint mode, the default), no `global:` channel, no oidc and no `link:` hole. A
+frame is a Stage 1 host's loop: every document's `drain_begin()`, then `app.exec_pump_frame()`,
+then every document's `drain_end()`. `t` (0, 1, 2, 4, 8) is the app's `exec_pool` workers
+(`app::exec_pool(pool_options{threads = t})`; the caller pumps as well, so unlike mt.groups' `t`
+it does not count the caller). The pool is built first, before anything builds group 0 or the lock
+manager (S1-Q1: threads above 0 make the manager shared, so the workers may pump), under
+`unpinned_scope`, with the pool scenarios' placement (mt.groups, "Placement").
+
+- `frame=heavy`: each document's `on_tick:` runs a 500-iteration loop, about 8000 steps (0.5 to 1
+  ms a document on the machine this was written on), so a frame's pumps total well over the pool's
+  `inline_below` (100 us): frames the pool spreads over its workers once the documents are
+  isolated.
+- `frame=small`: `on_tick:` is one `state-incr`, a few steps, so a frame's pumps total under it:
+  frames the pool pumps on the caller without waking a helper (td 4.4). The margin is not wide. A
+  whole small frame (both drain halves and the pump) took, at the median, about 6 us at `docs=1`,
+  12 us at 2, 22 us at 4 and 43 us at 8 (58 us at the 99th percentile), on the machine this was
+  written on with other work running: about 2x under 100 us at `docs=8`. The wake follows the
+  groups' last pump times, so one pump the OS deschedules for 100 us wakes a helper in the next
+  frame; slow frames up to about 0.5 ms were seen. Hence the gate's median of five reps below.
+
+Each tick counts itself (`state-incr "ticks"` under the document's prefix). A rep fails when a
+document did not tick, or ticked more than once a frame. A rep is `frames` (200; smoke 4) frames;
+two frames before the reps start the residents. No backend is set and nothing is rendered, so the
+region holds only the three calls: `ns_per_iter` is ns per frame, `latency_ns` each frame's time,
+and `steps_total` the steps of the schedulers the documents run on (their groups', and group 0's
+while a document is in it). Extras:
+
+- `ns_per_frame`: as `ns_per_iter`;
+- `helper_wakes`, `pumps` and `skipped`: the pool's counters over the region (`pool_stats`), and
+  `wakes_per_frame`, `helper_wakes` over the frames; `worker_pumps`, the pool's group pumps on
+  a worker (`pool_stats::worker_pumps`);
+- `isolated` and `any_groups`: the documents in a group of their own, and in an `any`-affinity one,
+  read after each rep from `Runtime::current_group()` (a rep in which a document moved fails). The
+  caller pumps group 0 and host-affinity groups itself, so documents outside `any` groups wake no
+  helper. Where fewer than `docs` documents got an `any` group at load, the point prints one
+  `note:` line, with the first `isolation_reason()` when a document stayed in group 0, and passes;
+- `wakeable`: the most helpers a frame could wake, as `exec_pool`'s adaptive wake counts them once
+  the last pumps total `inline_below`: `min(any_groups - caller_takes, effective_threads)`, where
+  `caller_takes` is 1 unless a host-affinity group or group 0 (while a process lives in it) joins
+  `exec_pump_frame`'s `pump_all`, the caller then taking that and leaving every `any` group to the
+  list. 0 at `t=0` and, with every document isolated, at `docs=1`;
+- `effective_threads`, `ticks_per_frame` (1 when every document took every frame's tick) and
+  `caller_cpu`.
+
+Where libcvc was built without yaml-cpp (no `.ari` loader) every point is skipped.
+
 ### Threaded execution's Stage 1 gates
 
 td 6.3 and S1.md section 6, on Windows (MSVC, Release) in recorded quiet windows with `--pin
@@ -1109,13 +1204,44 @@ auto`, base and candidate interleaved, two rounds of 5 reps or more ("Getting st
       --where prog=fib --metric extra.of_ceiling --min 0.9 --max-noise 10
   ```
 
+- **Small frames wake no helper** (S1b): `mt.ariadne_docs` `frame=small` wakes no helper in the
+  median rep of a `--reps 5` (or more) run in the quiet window, at every point that could wake
+  one. It is never judged on `--smoke`, whose single 4-frame rep fails on one descheduled pump,
+  and it is not a CTest gate, since a wake follows the pumps' measured times:
+
+  ```sh
+  python3 tools/bench/state_exec_bench.py run --scenario mt.ariadne_docs --reps 5 \
+      --out docs.jsonl
+  python3 tools/bench/state_exec_bench.py gate docs.jsonl --scenario mt.ariadne_docs \
+      --where frame=small --metric extra.helper_wakes --max 0
+  ```
+
+  `GATE_GUARDS` keeps it from passing without judging anything ("Runner options"). A point whose
+  documents are not all in `any` groups of their own fails as vacuous (`FAIL (vacuous:
+  extra.any_groups 2 below docs 4)`): the caller pumps them, and they never wake a helper. A point
+  that can wake no helper (`extra.wakeable` 0: `t=0`, or `docs=1`, whose lone group the caller
+  takes) prints `n/a`, so of the default sweep's 20 small points the 12 at `t>=1` and `docs>=2`
+  are judged. The run's heavy points that could wake a helper are its control: each must show
+  `extra.worker_pumps` at least 1 in the median rep, else the gate fails, since a pool whose
+  helpers never pump passes small frames too; the run must therefore hold heavy points (the
+  default sizes do). The margin at `docs=8` is thin (the small frames above), so even the median
+  has failed there on a busy machine, with one wake in 200 frames in three reps of five: the gate
+  needs the quiet window. `--stat max`, a wake in no rep, is more load-sensitive still: one
+  descheduled pump in 1000 frames fails it, and it failed 3 of 20 points in one of two runs on a
+  busy machine. `--metric extra.wakes_per_frame --max 0.02` reads the same rule as a rate (a
+  helper woken every frame, the rule broken, is 1) and holds through such stalls; it is recorded,
+  not the gate, which S1.md section 6 states as no wake.
+- **S1b's A/B** (base: master with S1a, the cut of S1b; candidate: the S1b branch):
+  - the regression family above, `msg.*` and `async.*` included (S1b changed the ingress and
+    completion posts), at the same pin (`--same-pin`);
+  - the small-frames gate, on the candidate alone: the base binary has no `mt.ariadne_docs`;
+  - `mt.ariadne_docs` heavy, recorded;
+  - the pump scope and scaling gates, optional: their code is S1a's, unchanged.
 - **Recorded, not gated**: `mt.groups` exceptions and cycle, `mt.groups.flood`, `mt.state_tree`,
-  `mt.independent` and `mt.multi_exec`.
+  `mt.ariadne_docs` heavy and its `wakes_per_frame`, `mt.independent` and `mt.multi_exec`.
 - **In CTest and CI**: `state_exec_bench_gates` pins `sched.single.*`'s `steps_total` through a
   group too ("Gates in CTest"), and the sanitizer jobs run `mt.groups` under gcc's TSan, clang's
   TSan and ASan with UBSan (docs/TESTING.md, "The Sanitizer Jobs").
-
-S1b adds `mt.ariadne_docs` and its gate (small frames wake no helper).
 
 ### Threaded execution's Stage S gates
 
@@ -1251,8 +1377,10 @@ end.
 
 The gates (design 11.2) are on the `form=single` points; the `form=nested` points are recorded.
 The two counts hold at every depth, mode, chroot, owner, threading and executor, and CTest runs
-them ("Gates in CTest"). The times, at most 60 ns over `begin` single (phase L1) and 120 ns shared
-(phase L3) for the flat key on the sync scheduler, need a Release build and 5 reps or more:
+them ("Gates in CTest"). The times need a Release build and 5 reps or more: at most 450 ns over
+`begin` single (phase L1) and 550 ns shared (phase L3), for the flat key on the sync scheduler.
+They were restated on 2026-11-12 from the measured architecture (docs/STATE_EXEC_LOCKS.md 11.3);
+they were first 60 and 120 ns.
 
 ```sh
 python3 tools/bench/state_exec_bench.py gate run.jsonl --scenario lock.uncontended \
@@ -1261,15 +1389,20 @@ python3 tools/bench/state_exec_bench.py gate run.jsonl --scenario lock.uncontend
     --where form=single --metric extra.allocs_per_lock --max 0
 python3 tools/bench/state_exec_bench.py gate run.jsonl --scenario lock.uncontended \
     --executor sync --where threading=single --where depth=1 --where chroot=0 \
-    --where form=single --where owner=short --metric extra.ns_per_lock --max 60 --max-noise 10
+    --where form=single --where owner=short --metric extra.ns_per_lock --max 450 --max-noise 10
 python3 tools/bench/state_exec_bench.py gate run.jsonl --scenario lock.uncontended \
     --executor sync --where threading=shared --where depth=1 --where chroot=0 \
-    --metric extra.ns_per_lock --max 120 --max-noise 10
+    --where form=single --metric extra.ns_per_lock --max 550 --max-noise 10
 ```
 
 The single gate names `threading=single`: records from before phase L3 carry it too (the key
-existed with that one value), so it matches them. The shared gate is L3's as its plan states it
-(docs/STATE_EXEC_LOCKS.md 11.2, 12): every mode, form and owner of the flat unchrooted key.
+existed with that one value), so it matches them. The shared gate covers every mode and owner of
+the flat unchrooted key, single form only, like the other gates. L3's plan first named every
+form. The owner confined it to the single form on 2026-11-18 (docs/STATE_EXEC_LOCKS.md 11.3),
+because the 550 ns figure was set from single-form numbers. A nested section's inner `with-lock`
+is covered by the outer hold and never reaches the manager. Even so, the evaluator spends about
+270-300 ns on it: in the quiet windows of 2026-11-17, the shared nested points measured 708-776 ns
+and the single-form ones 428-475 ns.
 
 #### lock.handoff
 
@@ -1495,7 +1628,8 @@ Phase L3 (one app, several threads) has three gates of its own (docs/STATE_EXEC_
 12; the L3 plan, section 4), measured on Windows (MSVC, Release) in recorded quiet windows with the
 driver pinned (`--pin auto`), 5 reps or more:
 
-- `lock.uncontended`, shared: at most 120 ns over `begin`, the `threading=shared` gate above.
+- `lock.uncontended`, shared: at most 550 ns over `begin` (first 120 ns), the `threading=shared`
+  gate above (single form, since 2026-11-18).
 - `lock.cross_thread`: on disjoint keys with 3 us sections at t = 4, at least 0.9 of the no-lock
   throughput; the hot key's handoff p50 at most 50 us, at each t that hands off (a point without
   `handoff_p50_ns`, t = 1, would fail a gate, so the gate names t); the mutex wait time recorded:

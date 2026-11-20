@@ -7,6 +7,7 @@
 #include <cvc/ariadne/data.h> // source: { data } — a dataset of the document's data: block
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_geometry.h> // a node's mesh from data (core)
+#include <cvc/ariadne/scene_wind.h>     // the scene's one wind (O14)
 #include <cvc/ariadne/scene_world.h>    // the scene's world: physics and bodies (core)
 #include <cvc/ariadne/uri.h> // §13.4 resolve a node source: URI to a local path (temp-file bridge)
 #include <cvc/ariadne/world_vehicles.h> // its vehicles: their intents key
@@ -722,6 +723,49 @@ void realize_repeat(SceneGraph &sg, const cvc::ariadne::SceneNode &n, RealizedSc
                     std::vector<std::string> *warnings,
                     const std::vector<cvc::ariadne::SceneAsset> &assets);
 
+// A geometry node's `model:` (node_model_look: `{ data: NAME, file: FILE }`, a file or a model's
+// name): the model fitted into the box its own geometry spans, in place of that geometry once it
+// is ready (set_boxed_model). Its body is made from its own geometry once every node is realized
+// (realize_physics), so the model goes in from a scene tick, never before: a crate floats as its
+// box and is drawn as the crate. While the model's package loads the node draws its own geometry,
+// and it keeps it when the model cannot be had (a warning says why, at realize).
+void draw_node_model(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
+                     const cvc::ariadne::Value &model, const std::shared_ptr<GeometryNode> &node,
+                     RealizedScene &out, std::vector<std::string> *warnings) {
+  const cvc::ariadne::vehicle_look look = node_model_look(
+      model, out.data, "ari: scene node '" + n.id + "'", "its own geometry", warnings);
+  const cvc::geometry *geom = node->getGeometry();
+  if (look.kind.empty() || !geom || geom->const_points().empty())
+    return;
+  std::array<double, 3> lo{1e300, 1e300, 1e300}, hi{-1e300, -1e300, -1e300};
+  for (const auto &v : geom->const_points())
+    for (int k = 0; k < 3; ++k) {
+      lo[k] = std::min(lo[k], static_cast<double>(v[k]));
+      hi[k] = std::max(hi[k], static_cast<double>(v[k]));
+    }
+  if (!out.vehicle_models)
+    out.vehicle_models = make_vehicle_model_cache();
+  // Its package starts loading now; a model that cannot be had says so now.
+  if (boxed_model_state(sg.appContext(), *out.vehicle_models, look, lo, hi, warnings) ==
+      vehicle_model_status::failed)
+    return;
+  const std::weak_ptr<GeometryNode> held = node;
+  auto done = std::make_shared<bool>(false);
+  out.scene_ticks.push_back([held, done, look, lo, hi](vtkRenderer *, RealizedScene &scene,
+                                                       const cvc::world_clock::step_result &) {
+    const std::shared_ptr<GeometryNode> g = held.lock();
+    if (*done || !g || !scene.sg || !scene.vehicle_models)
+      return;
+    cvc::app &app = scene.sg->appContext();
+    const vehicle_model_status now = boxed_model_state(app, *scene.vehicle_models, look, lo, hi);
+    if (now == vehicle_model_status::pending)
+      return;
+    *done = true; // failed: it keeps its own geometry
+    if (now == vehicle_model_status::ready)
+      set_boxed_model(app, *scene.vehicle_models, *g, look, lo, hi);
+  });
+}
+
 void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::string &bind_prefix,
                   RealizedScene &out, GraphicsNode *parent, std::vector<pending_body> &bodies,
                   const RealizeOptions &options, std::vector<std::string> *warnings,
@@ -940,6 +984,11 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
   // is shaded too. A non-geometry node (volume/group) silently ignores them.
   if (auto *g = dynamic_cast<GeometryNode *>(node.get()))
     apply_mesh_keys(*g, n, warnings);
+  if (n.type ==
+      "geometry") // model: drawn in place of its own geometry (a custom type reads its own)
+    if (const cvc::ariadne::Value *model = n.props.find("model"))
+      if (auto g = std::dynamic_pointer_cast<GeometryNode>(node))
+        draw_node_model(sg, n, *model, g, out, warnings);
   if (!n.opacity_bind.empty()) { // material: { opacity: <path> }: synced each frame
     SceneOpacityBinding ob;
     ob.source = cvc::ariadne::resolve_bind(bind_prefix, n.opacity_bind);
@@ -1578,6 +1627,7 @@ void realize_physics(SceneGraph &sg, const cvc::ariadne::Scene &scene,
       in.data_path = b.path;
       inputs.push_back(std::move(in));
     }
+  cvc::ariadne::SceneWorld::use_vehicle_clock(sg.appContext(), scene, warnings);
   out.world = cvc::ariadne::SceneWorld::build(sg.appContext(), scene.physics, inputs,
                                               out.height_fields, stats_key, warnings);
   if (!out.world)
@@ -1614,8 +1664,11 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   out.main_show = scene.main_show;
   out.main_hide = scene.main_hide;
   out.entity_labels = scene.entity_labels;
+  out.data = scene.data;
   if (!scene.entity_labels.empty()) // the labels' layer now, so it is this scene's (out.created)
     LabelLayerNode::of(sg);
+  // The scene's one wind (O14): its keys before any node reads its wind (scene_wind.h).
+  cvc::ariadne::seed_scene_wind(sg.appContext(), scene, bind_prefix);
   // Resolve the clock's key paths to absolute state paths now, with the host bind prefix — the SAME
   // rule widget binds use (resolve_bind) — so the clock and a sim_transport slider on `sim.speed`
   // land on one key. Resolved once here (like the visibility bindings), so tick_scene stays prefix-
@@ -1665,9 +1718,16 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
       out.world->bind_vehicles(scene.vehicles, cvc::ariadne::resolve_bind(bind_prefix, "vehicles"),
                                cvc::ariadne::resolve_bind(bind_prefix, "entities"), scene.spawns,
                                cvc::ariadne::resolve_bind(bind_prefix, "spawns"));
-      if (out.world->vehicles())
-        out.world->vehicles()->set_intents_key(
-            cvc::ariadne::resolve_bind(bind_prefix, scene.vehicle_intents));
+      out.world->bind_boats(scene, bind_prefix, warnings); // boat nodes: their boats run here
+      // The vehicles' tables, and the ones the world starts with (as SceneWorld::from_scene does
+      // for a headless world).
+      if (cvc::ariadne::WorldVehicles *v = out.world->vehicles()) {
+        v->set_intents_key(cvc::ariadne::resolve_bind(bind_prefix, scene.vehicle_intents));
+        v->set_poses_key(cvc::ariadne::resolve_bind(bind_prefix, scene.vehicle_poses));
+        v->spawn_starts(scene.vehicle_starts, warnings);
+      }
+      out.world->bind_wind(scene, bind_prefix); // the scene's wind pushes its bodies (O14)
+      out.world->bind_weather(scene, bind_prefix); // the rain's friction, in the steps (O20)
     }
     if (out.physics)
       out.clock.present = true;
@@ -1792,6 +1852,53 @@ void mesh_bounds(const cvc::geometry &g, double out[6]) {
   }
 }
 
+// `tint: satellite` on a data node: each vertex of the meshes it drew other than the terrain (a
+// city's buildings) coloured by the dataset's aerial image under it, over a grey floor so shaded
+// facades still read (0.30 + 0.70 x the photo; 0.32 + 0.68 for blue), as the nav demos tinted
+// Austin. The image spans the terrain `field` north up. False when the dataset has no image.
+bool tint_from_satellite(cvc::state &root, const std::string &store,
+                         const std::vector<std::shared_ptr<GraphicsNode>> &drawn,
+                         const std::string &terrain_id, const cvc::height_field &field) {
+  cvc::state *s = root.findDescendant(store + cvc::state::SEPARATOR + "satellite");
+  std::shared_ptr<const cvc::image> img;
+  if (s) {
+    try {
+      img = boost::any_cast<std::shared_ptr<const cvc::image>>(s->data());
+    } catch (const boost::bad_any_cast &) {
+    }
+  }
+  if (!img || img->empty())
+    return false;
+  const cvc::image rgba = img->converted(cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
+  const int W = rgba.width(), H = rgba.height();
+  const unsigned char *px = rgba.data();
+  const double x0 = field.x0(), y0 = field.y0();
+  const double w = field.max_x() - x0, h = field.max_y() - y0;
+  if (!px || W <= 0 || H <= 0 || w <= 0.0 || h <= 0.0)
+    return false;
+  for (const std::shared_ptr<GraphicsNode> &c : drawn) {
+    auto gn = std::dynamic_pointer_cast<GeometryNode>(c);
+    if (!gn || c->getName() == terrain_id || !gn->getGeometry())
+      continue;
+    cvc::geometry mesh = *gn->getGeometry(); // copy-on-write: only its colours are new
+    const auto &p = mesh.const_points();
+    cvc::geometry::colors_t cols(p.size());
+    for (std::size_t i = 0; i < p.size(); ++i) {
+      const double u = std::clamp((p[i][0] - x0) / w, 0.0, 1.0);
+      const double v = std::clamp((p[i][1] - y0) / h, 0.0, 1.0);
+      const int ix = std::min(W - 1, static_cast<int>(u * W));
+      const int iy = std::min(H - 1, static_cast<int>((1.0 - v) * H)); // row 0: north
+      const unsigned char *q = px + (static_cast<std::size_t>(iy) * W + ix) * 4;
+      cols[i] = {0.30 + 0.70 * q[0] / 255.0, 0.30 + 0.70 * q[1] / 255.0,
+                 0.32 + 0.68 * q[2] / 255.0};
+    }
+    mesh.colors() = std::move(cols);
+    gn->setGeometry(mesh);
+    gn->setUseSingleColor(false);
+  }
+  return true;
+}
+
 // A data node's terrain: its live texture (material: { texture: { stream } }) through UVs over the
 // field, or else the dataset's aerial image.
 void drape_terrain(RealizedScene &r, SceneDataBinding &b, const std::string &store,
@@ -1841,6 +1948,8 @@ bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
         if (auto gn = std::dynamic_pointer_cast<GeometryNode>(c);
             gn && c->getName() == n.id + "_terrain")
           drape_terrain(r, b, store, gn, *t);
+      if (n.props.str("tint") == "satellite") // and the buildings its colours
+        tint_from_satellite(cvc::state::instance(*r.app), store, b.drawn, n.id + "_terrain", *t);
     }
   } else if (const field_ptr *f = boost::any_cast<field_ptr>(&obj)) {
     auto terrain =
@@ -2016,6 +2125,8 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
       // stepping rather than throw out of every frame.
       realized.app->log(1, std::string("ari: physics stopped: ") + e.what() + "\n");
       realized.physics_binding.reset();
+      // Its storms' gust front stops with it (the water and the trees take the wind as authored).
+      cvc::ariadne::write_scene_wind_front(*realized.app, realized.bind_prefix, 0.0, 0.0);
     }
   }
 

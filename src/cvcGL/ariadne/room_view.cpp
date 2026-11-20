@@ -2,11 +2,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cvc/ariadne/conference/room_avatar.h>
+#include <cvc/ariadne/conference/room_entities.h>   // the entities' identities and pids
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_roster
 #include <cvc/ariadne/conference/room_scene.h>
 #include <cvc/ariadne/holon.h>
+#include <cvc/ariadne/holon_sync.h> // entity_playout
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/world_vehicles.h> // find_vehicle_model: a model look, found here
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/LodGraphicsNode.h> // lod_stats, make_view_params
 #include <cvc/gl/LodPyramidCache.h>
@@ -14,6 +18,7 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ariadne/room_view.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/gl/ariadne/vehicle_view.h> // vehicle_scene_node
 #include <set>
 #include <utility>
 #include <vtkRenderer.h>
@@ -113,6 +118,8 @@ room_view::~room_view() {
   clear_scene();
   while (!_avatars.empty())
     remove_marker(_avatars.begin()->first);
+  for (const auto &kv : _entity_built)
+    _view.scene().removeGraphics(entity_node_id(kv.first));
   // _lod_cache goes with the members: it cancels its queued builds and waits for a running one.
 }
 
@@ -406,6 +413,107 @@ bool room_view::avatar_look(const std::string &pid, rs::avatar_look &out) const 
   return true;
 }
 
+void room_view::update_entities(const cvc::ariadne::entity_playout &entities) {
+  namespace rc = cvc::ariadne::conference;
+  SceneGraph &sg = _view.scene();
+  const std::vector<std::uint64_t> shown = entities.shown();
+  const std::set<std::uint64_t> present(shown.begin(), shown.end());
+  for (auto it = _entity_built.begin(); it != _entity_built.end();) {
+    if (present.count(it->first)) {
+      ++it;
+      continue;
+    }
+    sg.removeGraphics(entity_node_id(it->first));
+    _entity_posed.erase(it->first);
+    _heads.erase(rc::entity_pid(it->first));
+    _entity_names.erase(rc::entity_pid(it->first));
+    it = _entity_built.erase(it);
+  }
+  for (const std::uint64_t id : shown) {
+    rc::room_entity fallback;
+    fallback.id = id;
+    const rc::room_entity *found = entities.find(id);
+    const rc::room_entity &e = found ? *found : fallback;
+    const std::string node = entity_node_id(id);
+    // What its node is built from: a change (its identity replicating, another archetype)
+    // rebuilds it.
+    char key[512];
+    std::snprintf(key, sizeof key,
+                  "%s|%.4g,%.4g,%.4g|%.4g,%.4g,%.4g|%.4g,%.4g,%.4g|%.4g,%.4g,%.4g|%s",
+                  e.archetype.c_str(), e.color[0], e.color[1], e.color[2], e.color2[0], e.color2[1],
+                  e.color2[2], e.size[0], e.size[1], e.size[2], e.wheels[0], e.wheels[1],
+                  e.wheels[2], (e.look.path + "|" + std::to_string(e.fit_length)).c_str());
+    const auto built = _entity_built.find(id);
+    if (built == _entity_built.end() || built->second != key) {
+      if (built != _entity_built.end())
+        sg.removeGraphics(node);
+      vehicle_shape shape;
+      shape.length = e.size[0], shape.width = e.size[1], shape.height = e.size[2];
+      shape.wheelbase = e.wheels[0] > 0.0 ? e.wheels[0] : 0.68 * e.size[0];
+      shape.track = e.wheels[1] > 0.0 ? e.wheels[1] : 0.84 * e.size[1];
+      shape.wheel_radius = e.wheels[2] > 0.0 ? e.wheels[2] : 0.0;
+      // A file look is the relay's model by its file's name: drawn from this host's own copy
+      // (find_vehicle_model: the cvcpkg packages it has), else as its box.
+      cvc::ariadne::vehicle_look look;
+      look.kind = "box";
+      if (e.look.kind == "file" && !e.look.path.empty())
+        if (const std::string local = cvc::ariadne::find_vehicle_model(e.look.path);
+            !local.empty()) {
+          look = e.look;
+          look.path = local;
+        }
+      cvc::ariadne::Scene one;
+      one.nodes.push_back(vehicle_scene_node(node, look, shape, e.color.data(), e.color2.data()));
+      realize_scene(sg, one, _prefix, &_warnings);
+      if (look.kind == "file" && look.fit) {
+        if (!_models)
+          _models = make_vehicle_model_cache();
+        std::shared_ptr<GraphicsNode> group = sg.getGraphics(node);
+        vehicle_shape fit = shape; // a boat's model spans its overall length, not its hull's box
+        if (e.fit_length > 0.0)
+          fit.length = e.fit_length;
+        if (!group || !attach_vehicle_model(sg.appContext(), *_models, *group, node + "_mesh", look,
+                                            fit, e.base_z, e.color.data(), &_warnings)) {
+          sg.removeGraphics(node); // the model would not read: its box
+          cvc::ariadne::vehicle_look box;
+          box.kind = "box";
+          cvc::ariadne::Scene again;
+          again.nodes.push_back(
+              vehicle_scene_node(node, box, shape, e.color.data(), e.color2.data()));
+          realize_scene(sg, again, _prefix, &_warnings);
+        }
+      }
+      _entity_built[id] = key;
+      _entity_posed.erase(id); // a node built again starts unposed
+    }
+    cvc::physics::pose p;
+    if (!entities.pose(id, p))
+      continue;
+    double m[16];
+    pose_matrix(p.rotation, p.position.x, p.position.y, p.position.z, m);
+    const auto posed = _entity_posed.find(id);
+    bool moved = posed == _entity_posed.end();
+    for (int i = 0; !moved && i < 16; ++i)
+      moved = std::fabs(m[i] - posed->second[i]) > kPoseEpsilon;
+    if (moved) {
+      std::copy(m, m + 16, _entity_posed[id].begin());
+      if (std::shared_ptr<GraphicsNode> g = sg.getGraphics(node))
+        g->setPoseMatrix(m);
+    }
+    const std::string pid = rc::entity_pid(id);
+    _heads[pid] = cvc::physics::vec3{p.position.x, p.position.y,
+                                     p.position.z + 0.5 * e.size[2] + kLabelAboveTop};
+    _entity_names[pid] = e.name;
+  }
+}
+
+std::vector<std::uint64_t> room_view::entity_ids() const {
+  std::vector<std::uint64_t> out;
+  for (const auto &kv : _entity_built)
+    out.push_back(kv.first);
+  return out;
+}
+
 std::vector<std::string> room_view::avatar_pids() const {
   std::vector<std::string> out;
   for (const auto &kv : _avatars)
@@ -462,8 +570,12 @@ void room_view::draw_labels() const {
     const double *d = r->GetDisplayPoint();
     if (d[2] < 0.0 || d[2] > 1.0) // behind the camera (or past the far plane)
       continue;
-    auto nm = _names.find(kv.first);
-    const std::string &text = (nm == _names.end() || nm->second.empty()) ? kv.first : nm->second;
+    std::string text = kv.first; // an avatar's roster name, an entity's own, else its pid
+    if (const auto nm = _names.find(kv.first); nm != _names.end() && !nm->second.empty())
+      text = nm->second;
+    else if (const auto en = _entity_names.find(kv.first);
+             en != _entity_names.end() && !en->second.empty())
+      text = en->second;
     const ImVec2 sz = ImGui::CalcTextSize(text.c_str());
     // VTK's display origin is bottom-left, ImGui's top-left.
     const ImVec2 at(static_cast<float>(d[0]) - 0.5f * sz.x, h - static_cast<float>(d[1]) - sz.y);

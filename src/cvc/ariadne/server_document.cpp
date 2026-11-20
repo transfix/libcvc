@@ -50,6 +50,7 @@ struct Reserved {
 constexpr Reserved kReserved[] = {
     {"conf", "the relay's room tree"},
     {"ui", "where documents keep their own state"},
+    {"arisrv", "the relay's own records, which no client is sent"},
     {"ariadne", "the host's settings"},
     {"state_exec", "the host's settings"},
     {"room", "the document's view of the relay's room"},
@@ -82,14 +83,6 @@ std::string check_against_prefix(const ServerBlock &block, const std::string &pr
     if (under(ns, prefix) || under(prefix, ns))
       return "server: publish: '" + ns + "' overlaps the document's own state, " + prefix;
   return std::string();
-}
-
-// The nodes under `nodes` (their children too) that have a body:.
-std::size_t count_bodies(const std::vector<SceneNode> &nodes) {
-  std::size_t n = 0;
-  for (const SceneNode &node : nodes)
-    n += (node.body.present ? 1 : 0) + count_bodies(node.children);
-  return n;
 }
 
 } // namespace
@@ -232,16 +225,10 @@ ServerDocument::ServerDocument(cvc::app &app, std::string room, std::string pref
                                "]");
     block_ = std::move(b);
     plant();
-    // The scene stays here instead of in the load, which would only say it was ignored. The
-    // relay publishes it into the room (room_world_from_scene, WD1); its physics waits for the
-    // world runtime.
-    scene_ = std::move(lr.scene);
-    lr.scene = Scene{};
-    const std::size_t bodies = count_bodies(scene_.nodes);
-    if (scene_.physics.present || bodies > 0)
-      lr.warnings.push_back(path + ": its scene's physics (" + std::to_string(bodies) +
-                            " bodies) is kept but not simulated yet: the headless world runtime "
-                            "(ARIADNE_WORLDS.md §14) will make it the holon's");
+    // The relay publishes the scene into the room (room_world_from_scene, WD1) from this copy,
+    // and the load runs its world headless (SceneWorld: its physics, its world sources and
+    // vehicles, on the world clock; ARIADNE_WORLDS.md §14), apart from the holon's.
+    scene_ = lr.scene;
   });
 }
 
@@ -345,7 +332,36 @@ constexpr const char *kClientGuest = "__client-guest";
 constexpr const char *kClientInternal = "__client-";
 constexpr const char *kDidNotComplete = "did not complete: ";
 constexpr const char *kFailed = "failed: ";
+
+// The lower of two caps, 0 being none.
+template <typename T> T lower_cap(T a, T b) { return !a ? b : !b ? a : (b < a ? b : a); }
 } // namespace
+
+std::string ServerDocument::client_caps(const std::string &pid, ClientKind kind,
+                                        const ClientLimits &document, ClientLimits &caps,
+                                        std::string &why) const {
+  caps = document;
+  if (!limits_)
+    return std::string();
+  try {
+    caps = limits_(pid, kind, document);
+  } catch (const std::exception &e) {
+    why = std::string("the relay could not read this client's limits: ") + e.what();
+    return "unavailable";
+  }
+  if (!caps.on) {
+    why = std::string("this client may not run ") +
+          (kind == ClientKind::program ? "programs" : "WebAssembly guests") +
+          " on this relay (its limits refuse them)";
+    return "forbidden";
+  }
+  if constexpr (!kClientLimitsAboveDocument) {
+    caps.max_steps = lower_cap(document.max_steps, caps.max_steps);
+    caps.max_time = lower_cap(document.max_time, caps.max_time);
+    caps.max_memory = lower_cap(document.max_memory, caps.max_memory);
+  }
+  return std::string();
+}
 
 void ServerDocument::run_client_program(const std::string &pid, const std::string &source,
                                         cvc::state_exec::value_t args,
@@ -365,6 +381,12 @@ void ServerDocument::run_client_program(const std::string &pid, const std::strin
     return refuse("unavailable", "the relay's document has not loaded yet");
   if (pid.empty() || pid.find(cvc::state::SEPARATOR) != std::string::npos)
     return refuse("invalid", "a client program needs its sender's pid, one name");
+  ClientLimits caps;
+  std::string why;
+  if (const std::string code =
+          client_caps(pid, ClientKind::program, block_.client_programs, caps, why);
+      !code.empty())
+    return refuse(code.c_str(), std::move(why));
   if (source.size() > kClientProgramMax)
     return refuse("invalid", "the program is " + std::to_string(source.size()) +
                                  " bytes, over the relay's " + std::to_string(kClientProgramMax));
@@ -379,8 +401,8 @@ void ServerDocument::run_client_program(const std::string &pid, const std::strin
   }
   // Its forms in one begin, whose value (the last form's) the wrapper keeps; the newline ends a
   // comment on its last line.
-  start_client(pid, std::string("(") + kClientResult + " (begin\n" + source + "\n))",
-               block_.client_programs, std::move(args), nullptr, std::move(done));
+  start_client(pid, std::string("(") + kClientResult + " (begin\n" + source + "\n))", caps,
+               std::move(args), nullptr, std::move(done));
 }
 
 void ServerDocument::start_client(
@@ -486,6 +508,11 @@ void ServerDocument::run_client_guest(const std::string &pid, std::string module
     return refuse("unavailable", "the relay's document has not loaded yet");
   if (pid.empty() || pid.find(cvc::state::SEPARATOR) != std::string::npos)
     return refuse("invalid", "a client's guest needs its sender's pid, one name");
+  ClientLimits caps;
+  std::string why;
+  if (const std::string code = client_caps(pid, ClientKind::guest, block_.client_guests, caps, why);
+      !code.empty())
+    return refuse(code.c_str(), std::move(why));
   if (module.size() > kClientGuestMax)
     return refuse("invalid", "the module is " + std::to_string(module.size()) +
                                  " bytes, over the relay's " + std::to_string(kClientGuestMax));
@@ -498,8 +525,7 @@ void ServerDocument::run_client_guest(const std::string &pid, std::string module
   code.bytes = std::move(module);
   code.entry = entry;
   code.name = "client " + pid;
-  code.max_memory =
-      block_.client_guests.max_memory ? block_.client_guests.max_memory : kClientGuestMemory;
+  code.max_memory = caps.max_memory ? caps.max_memory : kClientGuestMemory;
   std::string error;
   std::shared_ptr<ScriptActivation> activation =
       guests_->client_activation(app_, std::move(code), std::move(args), error);
@@ -509,11 +535,11 @@ void ServerDocument::run_client_guest(const std::string &pid, std::string module
   // wait costs it nothing of its caps. Held, it is running as far as rate_limited is concerned.
   if (!activation->ready()) {
     clients_running_.insert(pid);
-    held_guests_.push_back(HeldGuest{pid, entry, std::move(activation), std::move(done),
+    held_guests_.push_back(HeldGuest{pid, entry, std::move(activation), caps, std::move(done),
                                      std::chrono::steady_clock::now()});
     return;
   }
-  start_guest(pid, entry, std::move(activation), std::move(done));
+  start_guest(pid, entry, std::move(activation), caps, std::move(done));
 }
 
 void ServerDocument::start_held_guests() {
@@ -530,7 +556,7 @@ void ServerDocument::start_held_guests() {
     held_guests_.erase(held_guests_.begin() + static_cast<std::ptrdiff_t>(i));
     clients_running_.erase(out.pid); // start_client takes it again
     if (ready) {
-      start_guest(out.pid, out.entry, std::move(out.activation), std::move(out.done));
+      start_guest(out.pid, out.entry, std::move(out.activation), out.caps, std::move(out.done));
       continue;
     }
     ClientOutcome o;
@@ -544,6 +570,7 @@ void ServerDocument::start_held_guests() {
 
 void ServerDocument::start_guest(const std::string &pid, const std::string &entry,
                                  std::shared_ptr<ScriptActivation> activation,
+                                 const ClientLimits &caps,
                                  std::function<void(const ClientOutcome &)> done) {
   namespace se = cvc::state_exec;
   // The guest is its program's one call, made by a native only that program reaches: the guest's
@@ -562,8 +589,8 @@ void ServerDocument::start_guest(const std::string &pid, const std::string &entr
                    [](const std::string &f) { return f.rfind(kClientInternal, 0) != 0; });
              })));
   };
-  start_client(pid, std::string("(") + kClientResult + " (" + kClientGuest + "))",
-               block_.client_guests, se::value_t(), bind, std::move(done));
+  start_client(pid, std::string("(") + kClientResult + " (" + kClientGuest + "))", caps,
+               se::value_t(), bind, std::move(done));
 }
 
 } // namespace ariadne

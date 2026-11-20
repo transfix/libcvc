@@ -61,6 +61,12 @@ struct HttpRequest {
   long timeout_secs = 30;
   long max_redirects = 5;
   std::string user_agent = "cvc-net/1";
+  // Asked before the request is made and about once a second while it is in flight, on the thread
+  // sending it (native): once it returns true the transfer is aborted, and the reply is a transport
+  // failure (ok false, `error` "cvc::net: cancelled"). Empty: never. A blocking caller whose wait
+  // someone else may end (an async call's kernel: its call's cancelled()) passes one. The
+  // browser's fetch ignores it.
+  std::function<bool()> cancelled;
 };
 
 // One HTTP response. `ok` means the TRANSPORT succeeded (a request was made and a reply received) —

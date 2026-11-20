@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/conference/room_net.h>
 #include <cvc/ariadne/conference/room_rungs.h>
@@ -336,9 +337,9 @@ TEST(RoomWriteGate, AParticipantWritesOnlyItsOwnSubtree) {
   using op = cvc::state_mutation_op;
 
   // What clients write (room_join, write_intent, room_net, room_publish).
-  for (const char *key : {"presence.joined", "profile.name", "intent.move.x", "intent.yaw",
-                          "intent.tick", "net.rtt_ms", "net.in_kbps", "voice.talking", "video.off",
-                          "audio.opus", "streams.camera.endpoint", "streams.camera.token"})
+  for (const char *key : {"presence.joined", "intent.move.x", "intent.yaw", "intent.tick",
+                          "net.rtt_ms", "net.in_kbps", "voice.talking", "video.off", "audio.opus",
+                          "streams.camera.endpoint", "streams.camera.token"})
     EXPECT_TRUE(gate.may_write("alice", alice + "." + key, op::set_value)) << key;
   EXPECT_TRUE(gate.may_write("alice", alice + ".intent.move.x", op::touch));
   EXPECT_TRUE(gate.may_write("alice", alice + ".avatar", op::set_data));
@@ -348,6 +349,9 @@ TEST(RoomWriteGate, AParticipantWritesOnlyItsOwnSubtree) {
   EXPECT_FALSE(gate.may_write("alice", alice + ".pose.pos.x", op::set_value));
   EXPECT_FALSE(gate.may_write("alice", alice + ".pose.server_tick", op::touch));
   EXPECT_FALSE(gate.may_write("alice", alice + ".net.relay.rtt_ms", op::set_value));
+  // Its username is the relay's too (client_registry.h): it asks with server.set.
+  EXPECT_FALSE(gate.may_write("alice", alice + ".profile.name", op::set_value));
+  EXPECT_FALSE(gate.may_write("alice", alice + ".profile.name", op::touch));
   EXPECT_FALSE(gate.may_write("alice", alice + ".net.relay.video", op::set_value))
       << "the relay picks alice's video rung";
   EXPECT_TRUE(gate.may_write("alice", alice + ".net.relayed", op::set_value))
@@ -394,6 +398,13 @@ TEST(RoomWriteGate, AParticipantWritesOnlyItsOwnSubtree) {
   // A pid must be one identifier: "bob.pose" would otherwise own bob's pose.
   EXPECT_FALSE(gate.may_write("bob.pose", bob + ".pose.pos.x", op::set_value));
   EXPECT_FALSE(gate.may_write("", alice + ".intent.move.x", op::set_value));
+  // And not a bridged user's: no connection joins as one.
+  const std::string bridged = conf::bridged_pid("nmdc", "alice");
+  EXPECT_FALSE(gate.may_write(bridged,
+                              conf::room_participant_path("standup", bridged) + ".presence.joined",
+                              op::set_value));
+  EXPECT_FALSE(gate.may_write("alice", conf::room_bridge_path("standup") + ".rev", op::set_value))
+      << "the bridged users are the relay's to write";
 
   // Messages go on the same paths.
   cvc::state_message msg;
@@ -401,6 +412,36 @@ TEST(RoomWriteGate, AParticipantWritesOnlyItsOwnSubtree) {
   EXPECT_TRUE(gate.admit("alice", msg));
   msg.path = bob + ".voice.talking";
   EXPECT_FALSE(gate.admit("alice", msg));
+}
+
+// A client's own profile.name write (client_registry.h) is refused, and handed on as a rename the
+// relay may grant, so a client that predates server.set keeps its name. Another participant's,
+// or a non-canonical spelling of its own, is only refused.
+TEST(RoomWriteGate, AClientsOwnNameWriteIsARenameRequest) {
+  conf::room_write_gate gate("standup");
+  std::vector<std::pair<std::string, std::string>> asked;
+  gate.set_name_requests(
+      [&](const std::string &pid, const std::string &name) { asked.emplace_back(pid, name); });
+  const std::string alice = conf::room_participant_path("standup", "alice");
+  const std::string bob = conf::room_participant_path("standup", "bob");
+  const auto write = [](const std::string &path, const std::string &v,
+                        cvc::state_mutation_op op = cvc::state_mutation_op::set_value) {
+    cvc::state_mutation m;
+    m.path = path;
+    m.op = op;
+    m.string_value = v;
+    return m;
+  };
+  EXPECT_FALSE(gate.admit("alice", write(alice + ".profile.name", "Alice")));
+  ASSERT_EQ(asked.size(), 1u);
+  EXPECT_EQ(asked[0].first, "alice");
+  EXPECT_EQ(asked[0].second, "Alice");
+  EXPECT_FALSE(
+      gate.admit("alice", write(alice + ".profile.name", "", cvc::state_mutation_op::touch)));
+  EXPECT_FALSE(gate.admit("alice", write(bob + ".profile.name", "Bob")));
+  EXPECT_FALSE(gate.admit("alice", write(alice + ".profile..name", "A2")));
+  EXPECT_TRUE(gate.admit("alice", write(alice + ".presence.joined", "1")));
+  EXPECT_EQ(asked.size(), 1u) << "only its own name, set as a value, asks";
 }
 
 // A participant is the source of what it may write, so the relay's re-broadcast never sends it back
@@ -411,7 +452,8 @@ TEST(RoomWriteGate, AParticipantSourcesWhatItWrites) {
   const std::string bob = conf::room_participant_path("standup", "bob");
   EXPECT_TRUE(gate.sources("alice", alice + ".intent.move.x"));
   EXPECT_TRUE(gate.sources("alice", alice + ".intent.tick"));
-  EXPECT_TRUE(gate.sources("alice", alice + ".profile.name"));
+  EXPECT_TRUE(gate.sources("alice", alice + ".presence.joined"));
+  EXPECT_FALSE(gate.sources("alice", alice + ".profile.name")) << "the relay's username";
   EXPECT_FALSE(gate.sources("alice", alice + ".pose.pos.x")) << "the relay's pose";
   EXPECT_FALSE(gate.sources("alice", alice + ".device")) << "the relay's device tag";
   EXPECT_FALSE(gate.sources("alice", bob + ".intent.move.x")) << "another participant";
@@ -654,4 +696,114 @@ TEST(RoomRungs, OnlyAViewersHoldingLinkCounts) {
   ASSERT_EQ(sim.passes(2, 260.0), cvc::video_rung::half);
   EXPECT_TRUE(sim.ctl.step({}, sim.t + 0.5).empty());
   EXPECT_EQ(sim.pass(12.0), cvc::video_rung::full);
+}
+
+// A bridged user's pid: a state name, one per (system, id), whatever the id holds.
+TEST(RoomBridge, PidsAreStateNamesAndDistinct) {
+  EXPECT_EQ(conf::bridged_pid("nmdc", "Joe.R"), "_nmdc_Joe_2eR");
+  EXPECT_EQ(conf::bridged_pid("nmdc", "a_b"), "_nmdc_a_5fb");
+  EXPECT_NE(conf::bridged_pid("nmdc", "a_b"), conf::bridged_pid("nmdc", "a.b"));
+  EXPECT_NE(conf::bridged_pid("nmdc", "x"), conf::bridged_pid("irc", "x"));
+  for (const std::string uid : {"Joe.R", "[ops]Ann", "\xc3\xa9t\xc3\xa9", "a b", "_"})
+    EXPECT_TRUE(cvc::state::isValidStateName(conf::bridged_pid("nmdc", uid))) << uid;
+  EXPECT_TRUE(conf::is_bridged_pid(conf::bridged_pid("nmdc", "x")));
+  EXPECT_FALSE(conf::is_bridged_pid("alice"));
+  for (const char *via : {"", "NMDC", "1x", "nm-dc", "n_m", "abcdefghijklmnopq"})
+    EXPECT_EQ(conf::bridged_pid(via, "x"), "") << via;
+  EXPECT_EQ(conf::bridged_pid("nmdc", ""), "");
+  EXPECT_TRUE(conf::valid_bridge_via("abcdefghijklmnop")) << "16 characters";
+}
+
+// Bridged users are listed apart from the participants, in pid order; the relay's every change
+// moves bridge.rev, a repeat with nothing new does not, and leaving is soft.
+TEST(RoomBridge, PresenceListsThemApartAndLeavingIsSoft) {
+  cvc::app app;
+  conf::room_join(app, "standup", "alice", "Alice");
+  std::string why;
+  EXPECT_EQ(conf::room_bridge_rev(app, "standup"), 0u);
+  ASSERT_TRUE(conf::room_bridge_presence(app, "standup", "nmdc", "zed", "Zed", "DC++ 0.868", why))
+      << why;
+  ASSERT_TRUE(conf::room_bridge_presence(app, "standup", "nmdc", "Ann.B", "", "", why)) << why;
+  const std::uint64_t rev = conf::room_bridge_rev(app, "standup");
+  EXPECT_GT(rev, 0u);
+
+  const std::vector<conf::room_bridged_user> b = conf::room_bridged(app, "standup");
+  ASSERT_EQ(b.size(), 2u);
+  EXPECT_EQ(b[0].pid, "_nmdc_Ann_2eB");
+  EXPECT_EQ(b[0].uid, "Ann.B");
+  EXPECT_EQ(b[0].name, "Ann.B") << "no name: the uid";
+  EXPECT_EQ(b[1].pid, "_nmdc_zed");
+  EXPECT_EQ(b[1].name, "Zed");
+  EXPECT_EQ(b[1].via, "nmdc");
+  EXPECT_EQ(b[1].detail, "DC++ 0.868");
+  ASSERT_EQ(conf::room_roster(app, "standup").size(), 1u) << "the participants are untouched";
+
+  ASSERT_TRUE(conf::room_bridge_presence(app, "standup", "nmdc", "zed", "Zed", "DC++ 0.868", why));
+  EXPECT_EQ(conf::room_bridge_rev(app, "standup"), rev) << "nothing new";
+  ASSERT_TRUE(conf::room_bridge_presence(app, "standup", "nmdc", "zed", "Zed\nZ", "", why));
+  EXPECT_GT(conf::room_bridge_rev(app, "standup"), rev);
+  conf::room_bridged_user u;
+  ASSERT_TRUE(conf::room_bridged_user_of(app, "standup", "_nmdc_zed", u));
+  EXPECT_EQ(u.name, "Zed Z") << "one line";
+  EXPECT_EQ(u.detail, "");
+
+  EXPECT_TRUE(conf::room_bridge_absent(app, "standup", "nmdc", "zed"));
+  EXPECT_FALSE(conf::room_bridge_absent(app, "standup", "nmdc", "zed")) << "gone already";
+  EXPECT_FALSE(conf::room_bridged_user_of(app, "standup", "_nmdc_zed", u));
+  ASSERT_EQ(conf::room_bridged(app, "standup").size(), 1u);
+  cvc::state *present =
+      app.root().findDescendant("conf.rooms.standup.bridge.users._nmdc_zed.present");
+  ASSERT_NE(present, nullptr) << "soft: the node stays";
+  EXPECT_EQ(present->value(), "0");
+  ASSERT_TRUE(conf::room_bridge_presence(app, "standup", "nmdc", "zed", "Zed", "", why));
+  EXPECT_EQ(conf::room_bridged(app, "standup").size(), 2u) << "back on the same node";
+
+  // Another relay process (a new chat epoch): what the earlier one wrote is not listed.
+  app.root()("conf.rooms.standup.chat.epoch").value("another");
+  EXPECT_TRUE(conf::room_bridged(app, "standup").empty());
+  EXPECT_FALSE(conf::room_bridged_user_of(app, "standup", "_nmdc_zed", u));
+  ASSERT_TRUE(conf::room_bridge_presence(app, "standup", "nmdc", "zed", "Zed", "", why));
+  EXPECT_EQ(conf::room_bridged(app, "standup").size(), 1u);
+}
+
+// What a bridged user may not be.
+TEST(RoomBridge, PresenceRefusesWhatCannotBeOne) {
+  cvc::app app;
+  std::string why;
+  EXPECT_FALSE(conf::room_bridge_presence(app, "r", "NMDC", "x", "", "", why));
+  EXPECT_NE(why.find("via"), std::string::npos) << why;
+  EXPECT_FALSE(conf::room_bridge_presence(app, "r", "nmdc", "", "", "", why));
+  EXPECT_FALSE(conf::room_bridge_presence(app, "r", "nmdc", std::string(129, 'x'), "", "", why));
+  EXPECT_FALSE(conf::room_bridge_presence(app, "r", "nmdc", "bad\xff", "", "", why));
+  EXPECT_FALSE(conf::room_bridge_presence(app, "r", "nmdc", "x", std::string(129, 'n'), "", why));
+  conf::bridge_limits limits;
+  limits.present_max = 2;
+  ASSERT_TRUE(conf::room_bridge_presence(app, "r", "nmdc", "a", "", "", why, limits));
+  ASSERT_TRUE(conf::room_bridge_presence(app, "r", "nmdc", "b", "", "", why, limits));
+  EXPECT_FALSE(conf::room_bridge_presence(app, "r", "nmdc", "c", "", "", why, limits));
+  EXPECT_NE(why.find("2 bridged users"), std::string::npos) << why;
+  EXPECT_TRUE(conf::room_bridge_presence(app, "r", "nmdc", "a", "A", "", why, limits))
+      << "one present already may change";
+  EXPECT_TRUE(conf::room_bridged(app, "r").size() == 2u);
+}
+
+// A hub's worth (the 6000-user soak's size) log in at once and half leave: each presence keeps
+// the count without walking the others, and the roster reads them all.
+TEST(RoomBridge, AHubsWorthComeAndGo) {
+  cvc::app app;
+  std::string why;
+  const auto t0 = std::chrono::steady_clock::now();
+  for (int i = 0; i < 6000; ++i)
+    ASSERT_TRUE(
+        conf::room_bridge_presence(app, "r", "nmdc", "user" + std::to_string(i), "", "a line", why))
+        << why;
+  for (int i = 0; i < 6000; i += 2)
+    ASSERT_TRUE(conf::room_bridge_absent(app, "r", "nmdc", "user" + std::to_string(i)));
+  const auto t1 = std::chrono::steady_clock::now();
+  EXPECT_EQ(conf::room_bridged(app, "r").size(), 3000u);
+  const auto t2 = std::chrono::steady_clock::now();
+  EXPECT_EQ(app.root().findDescendant("conf.rooms.r.bridge.count")->value(), "3000");
+  std::printf("[ RoomBridge ] 6000 presences + 3000 absences: %.0f ms; a roster of 3000: %.0f ms\n",
+              std::chrono::duration<double, std::milli>(t1 - t0).count(),
+              std::chrono::duration<double, std::milli>(t2 - t1).count());
 }

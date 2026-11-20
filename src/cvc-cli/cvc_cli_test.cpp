@@ -31,11 +31,15 @@
 #include <cvc/core/input_trace.h>
 #include <cvc/core/types.h>
 #include <cvc/core/world_clock.h>
+#include <cvc/geometry/contours.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/coef_train.h>
+#include <cvc/nav/nav_arms.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/sim_world_trace.h>
 #include <cvc/ph/se2_train.h>
+#include <cvc/physics/scrub_plant.h>
 #include <cvc/state/state.h>
 #include <cvc/volume/point_classes.h>
 #include <cvc/volume/volume.h>
@@ -2392,6 +2396,28 @@ TEST_F(CvcCliTest, PhInfoSimulateAndCheckAComposedGrid) {
   EXPECT_NE(0, none.exit_code);
 }
 
+TEST_F(CvcCliTest, PhMicrogridWritesANetworkAndStartsFromVoltages) {
+  const std::string grid = path("mg.json");
+  auto mk = cvc("ph microgrid \"" + grid + "\" --dgus 3 --edges 0-1,2-1 --line-r 0.3,0.5");
+  ASSERT_EQ(0, mk.exit_code) << mk.output;
+  EXPECT_NE(std::string::npos, mk.output.find("5 blocks, state 8, ports 5, inputs 6")) << mk.output;
+  EXPECT_NE(std::string::npos, mk.output.find("pair dgu2.0 - line1.0: 1")) << mk.output;
+  auto check = cvc("ph check \"" + grid + "\"");
+  ASSERT_EQ(0, check.exit_code) << check.output;
+  auto sim = cvc("ph simulate \"" + grid +
+                 "\" --physical 1,0,1.1,0.1,0.9,0,0,0.05 --u -0.1,1,-0.1,1.1,-0.15,1 --steps 20");
+  ASSERT_EQ(0, sim.exit_code) << sim.output;
+  EXPECT_NE(std::string::npos, sim.output.find("start from efforts:")) << sim.output;
+  EXPECT_NE(std::string::npos, sim.output.find("20 steps of 0.01 s")) << sim.output;
+  auto both = cvc("ph simulate \"" + grid + "\" --physical 1,0,1,0,1,0,0,0 --x0 0,0,0,0,0,0,0,0");
+  EXPECT_NE(0, both.exit_code);
+  EXPECT_NE(std::string::npos, both.output.find("not both")) << both.output;
+  auto bad = cvc("ph microgrid \"" + path("x.json") + "\" --dgu flux-capacitor");
+  EXPECT_NE(0, bad.exit_code);
+  auto lin = cvc("ph microgrid \"" + path("lin.json") + "\" --dgus 2 --dgu linear --dgu-c 1.5");
+  ASSERT_EQ(0, lin.exit_code) << lin.output;
+}
+
 // ===========================================================================
 // ph-train: the learned port-Hamiltonian vehicle (cvc::ph) from plant logs
 // ===========================================================================
@@ -2592,6 +2618,69 @@ TEST_F(CvcCliTest, SegmentRefusesBadInput) {
   EXPECT_NE(std::string::npos, malformed.output.find("name:i,j,k")) << malformed.output;
 }
 
+TEST_F(CvcCliTest, CapsidSeedsAndRotateSeeds) {
+  // VolUtils' seed generators (transfix/libcvc#123): maxima for a T-number, then their N-fold
+  // copies, both read back as point classes.
+  const std::string in = path("blobs.rawiv"), seeds = path("capsid.vgr");
+  write_two_blobs(in);
+  auto c = cvc("capsid-seeds \"" + in + "\" -o \"" + seeds + "\" --t-low 30 --h 1 --k 1");
+  ASSERT_EQ(0, c.exit_code) << c.output;
+  EXPECT_NE(std::string::npos, c.output.find("maxima")) << c.output;
+  cvc::app ctx;
+  const cvc::point_classes pc = cvc::read_point_classes(ctx, seeds);
+  ASSERT_EQ(pc.classes.size(), 2u);
+  EXPECT_EQ(pc.classes[0].name, "maxima");
+  EXPECT_TRUE(pc.classes[0].contains(12, 12, 12)) << "the two blobs' common peak";
+  // A quarter turn about z through the centre (11.5, 11.5): (12, 12, 12) goes to (11, 12, 12).
+  {
+    cvc::point_classes one;
+    one.add("s", 12, 12, 12);
+    cvc::write_point_classes(ctx, one, path("one.vgr"));
+  }
+  auto r = cvc("rotate-seeds \"" + in + "\" --seeds \"" + path("one.vgr") + "\" --folds 4 -o \"" +
+               path("four.vgr") + "\"");
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  const cvc::point_classes four = cvc::read_point_classes(ctx, path("four.vgr"));
+  ASSERT_EQ(four.classes.size(), 4u);
+  EXPECT_EQ(four.classes[1].name, "Class 1");
+  EXPECT_TRUE(four.classes[0].contains(12, 12, 12));
+  EXPECT_TRUE(four.classes[1].contains(11, 12, 12));
+  EXPECT_TRUE(four.classes[2].contains(11, 11, 12));
+  auto bad = cvc("rotate-seeds \"" + in + "\" --seeds \"" + path("one.vgr") + "\" --folds 0 -o \"" +
+                 path("x.vgr") + "\"");
+  EXPECT_NE(0, bad.exit_code);
+  EXPECT_NE(std::string::npos, bad.output.find("folds")) << bad.output;
+}
+
+TEST_F(CvcCliTest, SegmentAutomaticCriticalPointsNeedsNoSeeds) {
+  // The paper's automatic mode (P6): no seeds file, two classes, feature and background.
+  const std::string in = path("blobs.rawiv"), out = path("auto.rawiv");
+  write_two_blobs(in);
+  auto help = cvc("segment --help");
+  EXPECT_NE(std::string::npos, help.output.find("--cp-feature-threshold")) << help.output;
+  EXPECT_NE(std::string::npos, help.output.find("critical-points")) << help.output;
+  auto r = cvc("segment \"" + in + "\" -o \"" + out + "\" --automatic critical-points");
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("Wrote the labels of 2 classes")) << r.output;
+  EXPECT_TRUE(fs::exists(path("auto_class_00.rawiv")));
+  EXPECT_TRUE(fs::exists(path("auto_class_01.rawiv")));
+  cvc::app ctx;
+  cvc::volume labels(ctx, out);
+  EXPECT_EQ(labels.voxelType(), cvc::UChar);
+  EXPECT_EQ(labels(9, 12, 12), 0.0) << "a blob's peak is feature";
+  EXPECT_EQ(labels(0, 0, 0), 1.0) << "a corner is background";
+  // With a seed, the seed's class comes first; SegMed's own settings run too.
+  auto s = cvc("segment \"" + in + "\" -o \"" + path("s.rawiv") +
+               "\" --automatic critical_points --seed left:9,12,12 --cp-field gradient_magnitude "
+               "--cp-weights initial --cp-sample 20 --class-volumes false");
+  ASSERT_EQ(0, s.exit_code) << s.output;
+  EXPECT_NE(std::string::npos, s.output.find("Wrote the labels of 3 classes")) << s.output;
+  auto bad = cvc("segment \"" + in + "\" -o \"" + path("b.rawiv") +
+                 "\" --automatic critical-points --cp-iterations -2");
+  EXPECT_NE(0, bad.exit_code);
+  EXPECT_NE(std::string::npos, bad.output.find("cp_iterations")) << bad.output;
+}
+
 // ===========================================================================
 // cvc skeleton (the VolumeRover Skeletonization port; ports plan T12)
 // ===========================================================================
@@ -2683,6 +2772,105 @@ TEST_F(CvcCliTest, SkeletonOfAPlaneFails) {
 }
 
 // ===========================================================================
+// cvc tile (the VolumeRover ContourTiler port; ports plan T12)
+// ===========================================================================
+
+// A Reconstruct series of `slices` sections: component "a", a wobbly tube, and, when `two`, a
+// second tube "b" beside it.
+static void write_tube_series(const std::string &ser, int slices, bool two) {
+  const double pi = 3.14159265358979323846;
+  auto q8 = [](double v) { return std::round(v * 256) / 256; };
+  auto ring = [&](double cx, double cy, double a, double phase) {
+    std::vector<double> xy;
+    for (int i = 0; i < 24; ++i) {
+      const double t = 2 * pi * i / 24, r = 1 + 0.05 * std::cos(3 * t + phase);
+      xy.push_back(q8(cx + a * r * std::cos(t)));
+      xy.push_back(q8(cy + 0.8 * a * r * std::sin(t)));
+    }
+    return xy;
+  };
+  cvc::app app;
+  cvc::contour_stack s;
+  for (int k = 1; k <= slices; ++k) {
+    s.add(k, "a", ring(8 + 0.125 * k, 8, 3 + 0.125 * (k % 2), 0.4 * k));
+    if (two)
+      s.add(k, "b", ring(24, 8, 2.5, 0.3 * k));
+  }
+  cvc::write_contours(app, s, ser);
+}
+
+// Skips when libcvc was built without cvc::planar: the command says so.
+#define SKIP_WITHOUT_TILER(r)                                                                      \
+  if ((r).output.find("without cvc::planar") != std::string::npos)                                 \
+  GTEST_SKIP() << "libcvc built without cvc::planar"
+
+TEST_F(CvcCliTest, TileHelp) {
+  auto r = cvc("tile --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--curation-delta"));
+  EXPECT_NE(std::string::npos, r.output.find("--remove-intersections"));
+  EXPECT_NE(std::string::npos, r.output.find("--outdir"));
+  EXPECT_NE(std::string::npos, r.output.find("-C -e -r -v"));
+}
+
+TEST_F(CvcCliTest, TileOfATube) {
+  const std::string ser = path("tube.ser"), out = path("tiles");
+  write_tube_series(ser, 5, false);
+  auto r = cvc("tile \"" + ser + "\" --outdir \"" + out + "\"");
+  SKIP_WITHOUT_TILER(r);
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("Wrote 1 surfaces")) << r.output;
+  EXPECT_TRUE(fs::exists(out + "/a_tiles.rawc"));
+  EXPECT_TRUE(fs::exists(out + "/_tiles.rawc"));
+  // The surface reads back: `cvc info` on it.
+  auto info = cvc("info \"" + out + "/a_tiles.rawc\"");
+  EXPECT_EQ(0, info.exit_code) << info.output;
+}
+
+TEST_F(CvcCliTest, TileTakesTheLegacyFlags) {
+  const std::string ser = path("two.ser"), out = path("legacy");
+  write_tube_series(ser, 6, true);
+  // The VolumeRover2 dialog's defaults, a component, a slice range, a base name and debug flags.
+  auto r = cvc("tile \"" + ser + "\" -C 0.01 -e 1e-15 -o raw -c a -s 2 5 -b run_ -d \"" + out +
+               "\" -i raw -B -m");
+  SKIP_WITHOUT_TILER(r);
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("-i (debug output) is accepted and ignored"))
+      << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("-m is accepted and ignored")) << r.output;
+  EXPECT_TRUE(fs::exists(out + "/run_a_tiles.rawc"));
+  EXPECT_FALSE(fs::exists(out + "/run_b_tiles.rawc")) << "-c a tiles only a";
+  // --printcomponents lists the components and tiles nothing.
+  auto list = cvc("tile \"" + ser + "\" --printcomponents");
+  ASSERT_EQ(0, list.exit_code) << list.output;
+  EXPECT_NE(std::string::npos, list.output.find("a\n")) << list.output;
+  EXPECT_NE(std::string::npos, list.output.find("b\n")) << list.output;
+  // -x skips one; both colours become the one --color gives.
+  auto skip = cvc("tile \"" + ser + "\" -x a --color 255 0 0 -d \"" + path("skip") + "\"");
+  ASSERT_EQ(0, skip.exit_code) << skip.output;
+  EXPECT_TRUE(fs::exists(path("skip") + "/b_tiles.rawc"));
+  EXPECT_FALSE(fs::exists(path("skip") + "/a_tiles.rawc"));
+}
+
+TEST_F(CvcCliTest, TileRefusesBadInput) {
+  const std::string ser = path("tube.ser");
+  write_tube_series(ser, 4, false);
+  auto gnuplot = cvc("tile \"" + ser + "\" -o gnuplot");
+  EXPECT_NE(0, gnuplot.exit_code);
+  EXPECT_NE(std::string::npos, gnuplot.output.find("not supported")) << gnuplot.output;
+  auto bad = cvc("tile \"" + ser + "\" --curation-delta -1");
+  EXPECT_NE(0, bad.exit_code);
+  EXPECT_NE(std::string::npos, bad.output.find("curation")) << bad.output;
+  // A curation distance the slices are too close for (the tiler's own check).
+  auto close = cvc("tile \"" + ser + "\" -C 2 -d \"" + path("close") + "\"");
+  SKIP_WITHOUT_TILER(close);
+  EXPECT_NE(0, close.exit_code);
+  EXPECT_NE(std::string::npos, close.output.find("curation")) << close.output;
+  auto missing = cvc("tile \"" + path("nothing.ser") + "\"");
+  EXPECT_NE(0, missing.exit_code);
+}
+
+// ===========================================================================
 // trace: an input trace's info, and its headless replay
 // ===========================================================================
 
@@ -2766,4 +2954,94 @@ TEST_F(CvcCliTest, TraceInfoAndVerifyReplayASession) {
   auto none = cvc("trace info \"" + path("missing.trace") + "\"");
   EXPECT_NE(0, none.exit_code);
   EXPECT_NE(std::string::npos, none.output.find("cannot open")) << none.output;
+}
+
+// ===========================================================================
+// nav: a run log's arms and Stats (cvc::nav's lab)
+// ===========================================================================
+
+TEST_F(CvcCliTest, NavLogPrintsARunLogsArmsAndStats) {
+  cvc::nav::sim_world::config c;
+  c.rows = c.cols = 32;
+  c.min_x = c.min_y = -16.0;
+  c.max_x = c.max_y = 16.0;
+  c.scale = 0.05;
+  c.veh.rr = 0.05f;
+  c.veh.d_hat = 0.2f;
+  c.veh.dt = 0.05f;
+  c.veh.vmax = 0.4f;
+  c.freeze_sense = true;
+  std::vector<std::uint8_t> occ(32 * 32, 0);
+  const float o[2] = {-0.6f, -0.1f}, goal[2] = {0.6f, 0.1f}, color[3] = {1, 0, 0};
+  std::vector<std::unique_ptr<cvc::nav::sim_world>> worlds;
+  for (int a = 0; a < 2; ++a)
+    worlds.push_back(std::make_unique<cvc::nav::sim_world>(
+        c, occ.data(), occ.data(), cvc::nav::coef_mlp::default_biased(), o, goal, color, 1));
+  cvc::nav::arms_options opt;
+  opt.scene = "cli:open32";
+  opt.log_path = path("run.cvcrun");
+  cvc::nav::arms_run run(std::move(worlds), {{"one"}, {"two"}}, opt);
+  for (int k = 0; k < 40; ++k)
+    run.step(1);
+  run.finish();
+  auto r = cvc("nav log \"" + path("run.cvcrun") + "\"");
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("2 arms, 1 agent each, 40 ticks")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("scene cli:open32 on kinematic")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("arm 1 two: the built-in policy")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("clear_min")) << r.output;
+  auto bad = cvc("nav what \"" + path("run.cvcrun") + "\"");
+  EXPECT_NE(0, bad.exit_code);
+  EXPECT_NE(std::string::npos, bad.output.find("Unknown nav operation")) << bad.output;
+  auto none = cvc("nav log \"" + path("missing.cvcrun") + "\"");
+  EXPECT_NE(0, none.exit_code);
+  EXPECT_NE(std::string::npos, none.output.find("cannot read")) << none.output;
+}
+
+TEST_F(CvcCliTest, NavScrubDeploysEveryCheckpointAndCachesIt) {
+  // a short coef_trainer run with its history and three checkpoints
+  cvc::nav::train_config cfg;
+  cfg.n = 16;
+  cfg.window = 4;
+  cfg.hidden = 16;
+  cfg.horizon = 8;
+  cfg.steps = 4;
+  cfg.checkpoint_every = 2;
+  cfg.history_path = path("history.jsonl");
+  cfg.checkpoint_prefix = path("coef");
+  cvc::nav::coef_trainer(cfg, 3).train(cvc::nav::city_scene(32));
+  const std::string report = path("scrub.json");
+  auto r = cvc("nav scrub \"" + cfg.history_path + "\" --agents 2 --ticks 60 --plant kinematic" +
+               " --report \"" + report + "\"");
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("3 checkpoints of")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("step 0 (1/3) on kinematic, deployed")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("blocks, 2 agents, seed 0, on kinematic, 60 ticks"))
+      << r.output;
+  EXPECT_TRUE(fs::is_directory(cfg.history_path + ".scrub"));
+  std::ifstream f(report);
+  std::stringstream ss;
+  ss << f.rdbuf();
+  EXPECT_NE(std::string::npos, ss.str().find("\"schema\":\"cvc.nav.scrub/v1\"")) << ss.str();
+  EXPECT_NE(std::string::npos, ss.str().find("\"plant\":\"kinematic\"")) << ss.str();
+  auto again =
+      cvc("nav scrub \"" + cfg.history_path + "\" --agents 2 --ticks 60 --plant kinematic");
+  ASSERT_EQ(0, again.exit_code) << again.output;
+  EXPECT_NE(std::string::npos, again.output.find("step 4 (3/3) on kinematic, cached"))
+      << again.output;
+  // the default plant: the Humvee with Jolt, deployed apart from the bicycle's runs
+  const std::string plant = cvc::physics::scrub_default_plant();
+  auto hv = cvc("nav scrub \"" + cfg.history_path + "\" --agents 2 --ticks 60");
+  ASSERT_EQ(0, hv.exit_code) << hv.output;
+  EXPECT_NE(std::string::npos, hv.output.find("step 4 (3/3) on " + plant + ", deployed"))
+      << hv.output;
+  auto bad = cvc("nav scrub \"" + cfg.history_path + "\" --plant nope");
+  EXPECT_NE(0, bad.exit_code);
+  EXPECT_NE(std::string::npos, bad.output.find("no vehicle preset named 'nope'")) << bad.output;
+  auto empty = cvc("nav scrub \"" + path("nothing.jsonl") + "\"");
+  EXPECT_NE(0, empty.exit_code);
+  { std::ofstream(path("none.jsonl")) << "{\"kind\":\"step\",\"step\":1,\"loss\":1}\n"; }
+  auto none = cvc("nav scrub \"" + path("none.jsonl") + "\"");
+  EXPECT_EQ(2, none.exit_code) << none.output;
+  EXPECT_NE(std::string::npos, none.output.find("names no checkpoint")) << none.output;
 }

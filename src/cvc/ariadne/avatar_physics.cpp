@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cvc/ariadne/avatar_physics.h>
+#include <cvc/physics/flow_velocity.h>
 #include <cvc/physics/world.h>
 #include <stdexcept>
 
@@ -137,6 +138,44 @@ void avatar_world::set_gravity(const ph::vec3 &g) {
   cfg.gravity = g;
   _world->reconfigure(cfg);
   _gravity = g;
+}
+
+void avatar_world::set_wind(const cvc::algo::wind_state &w, double base_z) {
+  ph::field_id id;
+  id.value = _wind_field;
+  if (!(w.speed_mps > 0.0)) {
+    if (id.valid())
+      _world->remove_field(id);
+    _wind_field = ph::field_id{}.value;
+    return;
+  }
+  // Air everywhere, moving as the wind (a flow with a wind and no volume, field.h).
+  ph::field f;
+  f.kind = ph::field_kind::flow;
+  f.drag_coefficient = 1.0;
+  f.wind = std::make_shared<const ph::wind_flow>(w, base_z);
+  if (id.valid())
+    _world->set_field(id, f);
+  else
+    _wind_field = _world->add_field(f).value;
+}
+
+void avatar_world::set_time(double t) { _world->set_field_time(t); }
+
+ph::vec3 avatar_wind_drift(const ph::flow_velocity &wind, const avatar_body &body, double force_max,
+                           const ph::vec3 &feet, double t) {
+  constexpr double kRho = 1.225, kCd = 1.0;
+  const ph::vec3 w = wind.velocity(feet + ph::vec3{0.0, 0.0, 0.5 * body.height}, t);
+  const double speed = std::sqrt(w.x * w.x + w.y * w.y);
+  const double area = body.width * body.height;
+  if (!(speed > 0.0) || !(area > 0.0))
+    return {};
+  // The relative wind at which the drag is force_max: it holds below it, slides to it above.
+  const double hold = std::sqrt(2.0 * std::max(force_max, 0.0) / (kRho * kCd * area));
+  if (!(speed > hold))
+    return {};
+  const double k = (speed - hold) / speed;
+  return {w.x * k, w.y * k, 0.0};
 }
 
 void avatar_world::add_avatar(const std::string &pid, const ph::body_state &feet, bool dynamic) {

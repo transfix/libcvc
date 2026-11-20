@@ -64,6 +64,29 @@ catalog:
     for: "pause/speed/step/restart of a host sim loop"
     args: []
     verbs: [sim.step, sim.restart]         # bare-name on: AppRuntime's own, or a host's Runtime::on
+  - component: nav_lab_stats
+    file: nav_lab_stats.ari
+    unit: nav_lab_stats
+    binds: "<prefix>.{arms,play,view.arm}.*"   # cvc::nav::publish_tables / publish_charts
+    for: "several navigation policies side by side (cvc::nav's arms): one Stats row per arm"
+    args: { title: Stats, id: nav_lab_stats }   # defaults
+    note: "a host handles arms.retarget and arms.seek (docs/NAV_LAB.md)"
+    verbs: [arms.retarget, arms.seek]
+  - component: nav_lab_ledger
+    file: nav_lab_ledger.ari
+    unit: nav_lab_ledger
+    binds: "<prefix>.{ledger,arms.names,arms.agents,play}.*"   # cvc::nav::publish_tables / publish_charts
+    for: "the same arms: coefficients, terms of U_nav, the books against it, one arm's plant ledger"
+    args: { title: Ledger, id: nav_lab_ledger }   # defaults
+    verbs: [arms.seek]
+  - component: nav_lab_scrub
+    file: nav_lab_scrub.ari
+    unit: nav_lab_scrub
+    binds: "<prefix>.{scrub,play}.*"   # cvc::nav::scrub_view
+    for: "the checkpoint scrubber: checkpoint k of a training run beside step 0"
+    args: { title: Scrub, id: nav_lab_scrub }   # defaults
+    note: "nav_lab_training (the training curve) and nav_lab_episode (the episode's time) are its other windows; with nav_lab_stats and nav_lab_ledger for the two runs"
+    verbs: [scrub.prev, scrub.next, scrub.pick_step]
   - component: raster_view
     file: raster_view.ari
     unit: raster_view
@@ -135,15 +158,33 @@ catalog:
   - component: sky_controls
     file: sky_controls.ari
     unit: sky_controls
-    binds: "<prefix>.{keys}.{drift,morph,evolve,orographic,shadow,coverage,wind_az}"   # read every frame by the cloud_sky realizer
+    binds: "<prefix>.{keys}.{drift,morph,evolve,orographic,shadow,coverage,wind_az,darkness}"   # read every frame by the cloud_sky realizer (wind_az only without a scene wind)
     for: "a `type: cloud_sky` node"
     args: { keys: sky, title: Sky, id: sky_controls }   # defaults; keys = the node's `keys:` prop
+  - component: boat_controls
+    file: boat_controls.ari
+    unit: boat_controls
+    binds: "<prefix>.{keys}.{drive,throttle,rudder,goal}"   # read every step by the scene's boat (scene_boat.h)
+    for: "a `type: boat` node"
+    args: { keys: boat, title: Boat, id: boat_controls }   # defaults; keys = the node's `keys:` prop, else its id
   - component: water_controls
     file: water_controls.ari
     unit: water_controls
-    binds: "<prefix>.{keys}.{wind_speed,wind_dir,chop,wave_amp,whitecaps,shore_fade,swell_height,swell_period,swell_dir,shore_foam,wake,wake_foam}"   # read every frame by the water realizer
+    binds: "<prefix>.{keys}.{wind_speed,wind_dir,gustiness,lee,sea_lag,sea_fade,current,chop,wave_amp,whitecaps,spray,shore_fade,swell_height,swell_period,swell_dir,shore_foam,wake,wake_foam}"   # read every frame by the water realizer (its wind keys only without a scene wind)
     for: "a `type: water` node"
     args: { keys: water, title: Water, id: water_controls }   # defaults; keys = the node's `keys:` prop
+  - component: weather_controls
+    file: weather_controls.ari
+    unit: weather_controls
+    binds: "<prefix>.{keys}.{state,storminess,cells,rain,rain_here,request,time_scale,streaks,rain_quality,rings,fog,wet,lightning,flash,friction,wetness}"   # read and written every frame by the weather realizer
+    for: "a `type: weather` node: the weather now, a storm started upwind or overhead, the sky cleared, the weather's time scale, the rain's streaks, rings, fog and wet ground, the lightning, and the wet ground's friction"
+    args: { keys: weather, title: Weather, id: weather_controls }   # defaults; keys = the node's `keys:` prop
+  - component: wind_controls
+    file: wind_controls.ari
+    unit: wind_controls
+    binds: "<prefix>.wind.{speed,dir,gustiness}"   # the scene's one wind (scene: wind:): the water, cloud_sky, forest_trees and the physics read it
+    for: "a scene with `wind:`"
+    args: { title: Wind, id: wind_controls }   # defaults
   - component: mesh_tools
     file: mesh_tools.ari
     unit: mesh_tools
@@ -222,3 +263,18 @@ catalog:
     args: { id: users, title: Users, rows: peer, chat: chat, self: conf.self }
     verbs: [room-roster]
     note: "call (room-users-step ROWS ROOM CHAT) from on_tick; room_users_compact is the same list without the media columns"
+  - component: swarm_controls
+    file: swarm_controls.ari
+    unit: swarm_controls
+    binds: "<prefix>.{swarm}.{agents,belief,fog,plant,follow,separate,sep_gain,stats.*}, <prefix>.sim.speed, <prefix>.show.{trails,goals,flags,belief}, <prefix>.{chase}, <prefix>.{width}"
+    for: "a `type: nav_swarm` scene node: what its next build makes, its layers, the chase camera and the avoidance (nav_city_swarm.ari, nav_city_drive.ari)"
+    args: { swarm: swarm, title: Swarm controls, id: swarm_controls, lo: "32", hi: "4000", noun: agents, chase: ui.chase, width: view.path_width }
+    verbs: [sim.restart]
+    note: "swarm_controls_widgets is its widgets without the window"
+  - component: swarm_minimap
+    file: swarm_minimap.ari
+    unit: swarm_minimap
+    binds: "<prefix>.{swarm}.{minimap.pick.*,drag,targets.<t>.{x,y},follow_at,stats.span}, <prefix>.viewers.{view}.camera"
+    for: "a `type: nav_swarm` swarm's minimap: a map view of the nodes tagged {tag}; drag a rally point to move it, click to follow a vehicle"
+    args: { swarm: swarm, view: minimap, title: minimap, id: swarm_minimap, size: "300", tag: minimap, hide: belief, hz: "5", grab: "0.05" }
+    note: "tag the swarm's dots and targets layers {tag}, and hide them from the main view with scene: main_view: { hide: [{tag}] }"

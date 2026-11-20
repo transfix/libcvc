@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -159,6 +160,10 @@ public:
   // node together with all its descendants.
   cvc::bounding_box getWorldBoundingBox() const;
   cvc::bounding_box getCombinedWorldBoundingBox() const;
+  // The same, leaving out every descendant kept out of the scene's bounds
+  // (setContributesToSceneBounds(false)) together with its subtree, at any depth: what this node
+  // adds to SceneGraph::computeGraphicsBounds.
+  cvc::bounding_box getSceneWorldBoundingBox() const;
 
   // Whether this node counts toward the scene's world bounds
   // (SceneGraph::computeGraphicsBounds). False for a light: it draws nothing,
@@ -440,6 +445,9 @@ protected:
   // may frame only its children).
   bool m_contributesToSceneBounds = true;
   bool m_combinedIncludesOwnBounds = true;
+  // getCombinedBoundingBox(), or with `sceneOnly` without the descendants kept out of the scene's
+  // bounds (getSceneWorldBoundingBox).
+  cvc::bounding_box combinedBoundingBox(bool sceneOnly) const;
   bool m_showBBox;
   std::shared_ptr<BBoxNode> m_bboxNode;
 
@@ -486,6 +494,15 @@ private:
   // have shed our pose, so an unchanged pose is published again instead of
   // being skipped as a no-op. See applyPoseMatrix.
   std::uint64_t m_poseDropMark = 0;
+  // The thread a scene-less publishPoseMatrix is writing this node's pose on,
+  // while the write lasts; empty otherwise. The handler that write fires runs
+  // inline on that thread, so a matrix change heard there is the node's own
+  // echo, while one heard on another thread meanwhile (a worker-pumped group's,
+  // a publisher's flush) is not (STATE_EXEC_THREADED.md 4.8). A plain bool was
+  // read on that other thread as the writer set it (a race) and dropped its
+  // write. Only the first writer claims it: another thread writing the same
+  // node at once hears its own echo as a change, which redraws the same pose.
+  std::atomic<std::thread::id> m_poseWriter{};
   std::mutex m_poseMutex;                          // guards the parked pose + m_posePending writes
   std::array<double, 16> m_parkedPose{};           // the latest off-thread pose, not yet applied
   bool m_parkedIsWorld = false;                    // it came from setWorldPoseMatrix ...
@@ -494,9 +511,6 @@ private:
   // A parked pose is waiting (and one apply is queued for it). Atomic so the
   // owner-thread fast path can see "nothing parked" without taking the lock.
   std::atomic<bool> m_posePending{false};
-  // True only while a scene-less node writes its own pose to state directly:
-  // the handler that write fires runs inline on this thread and is our echo.
-  bool m_writingPose = false;
 
   // Clip plumbing (owner thread). The vtkPlane objects are SHARED down the tree:
   // a descendant's renderer holds its ancestors' plane objects, so moving a plane

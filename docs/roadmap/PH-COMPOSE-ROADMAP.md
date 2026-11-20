@@ -127,25 +127,39 @@ imports phast and copies none of it.
    - a microgrid (linear DGUs, RL lines, a fifth DGU added at either of two buses) against
      a fine-step RK4 reference (`ph_compose_test`);
    - parity with phast on the fixtures above (`ph_compose_parity_test`).
-2. **The DC microgrid study end to end.** DGU (Eq. 21) and line laws as `canonical_law` /
-   `linear_law` presets, the paper's reference nonlinear DGU
-   (`q_C / C = 2.2 (v + v^3 / 3)`, L = 1.8 H, R = 1.2 ohm), the four-unit chain with lines
-   0.3/0.4/0.5 ohm and 0.8 H, and the added DGU and line at bus 0 or bus 2. The storage
-   inversion (`Storage`: physical voltages and currents to charge and flux, by Newton).
-   Parity: phast's Python on the network fixtures at golden tolerance. Where phast has no
-   counterpart (the nonlinear reference DGU), against an independent fine-step reference
-   (RK4 at dt/64).
-3. **The query.**
-   - `InitializeState` as the voltage-history fit: least squares over the prior-scaled
-     physical state at the window start, propagated through the frozen transition, with
-     success, optimality and data-Jacobian rank reported;
-   - `AssignState` (retain by identity map, add supplied states, optional reset);
-   - candidate rollouts with the six accounting channels;
-   - action cards (peak current, voltage range, accumulated loss);
-   - the certified ranking (admission `g + dg <= 0`, strict separation of score bounds).
-     Its outcome is "certified", "inconclusive" or "abstain".
-
-   Exposed as `cvc ph query` and pycvc.
+2. **The DC microgrid study end to end (in review, stacked on Phase 1).**
+   - DGU (Eq. 21) and line laws as presets in `cvc/ph/microgrid.h`.
+   - The paper's reference nonlinear DGU (`q_C / C = 2.2 (v + v^3 / 3)`, L = 1.8 H,
+     R = 1.2 ohm), through a capacitor curve on `canonical_law`.
+   - The four-unit chain with lines 0.3/0.4/0.5 ohm and 0.8 H, and the added DGU and line at
+     bus 0 or bus 2, assigned by `assign_state` (Eq. 53, identity reset).
+   - The storage inversion (`Storage` in Appendix I.2: physical voltages and currents to charge
+     and flux, by Newton, capped at 2, 30 iterations, 1e-9) as `storage_from_efforts`.
+   - Writing systems out (`system_json`), and `cvc ph microgrid` / `--physical`.
+   - The check:
+     - phast's Python covers the linear network (Phase 1's fixtures).
+     - phast has no counterpart for the nonlinear reference DGU, so the candidate study runs
+       against RK4 at dt/16, which gives the same scores to six digits as dt/64.
+     - With known laws, midpoint coupling is 28 to 4,200 times more accurate than Euler (voltage
+       RMSE 5.1e-7 against 7.9e-5 V; peak line-current error 5.7e-8 against 2.4e-4 A). Both
+       order all 16 candidate pairs as the reference does.
+   - Not here: the paper's learned DGU family (2,407 parameters). It is not in phast; it would
+     come with Shubham's checkpoints (Phase 4).
+3. **The query (in review, stacked on Phase 2).**
+   - `InitializeState`: `fit_history`, the voltage-history fit (Eq. 204). Levenberg-Marquardt over
+     the prior-scaled physical state at the window start, through the frozen transition (scipy's
+     trust-region reflective solver in the paper). It reports success, optimality and
+     data-Jacobian rank, with the admission predicate, and a Laplace posterior
+     (`posterior_states`).
+   - `AssignState`: `assign_state` (Phase 2).
+   - Candidate rollouts with the accounting channels (`consequences`, Eq. 19); action cards
+     (`make_card`, Fig. 3); the certified ranking (`rank_candidates`, Eq. 45 and Prop. F.5);
+     sampled bounds (`sampled_bounds`).
+   - Measured on the four-DGU chain: the fit's forecasts are 0.29 mV / 26 mA / 22 mA at 0.5 s
+     (Table 8: 0.36 mV / 26 mA / 25 mA), and a symmetric cycle loses one rank. No certificate is
+     wrong; voltage-only queries are mostly inconclusive, full-state ones certify.
+   - pycvc: `fit_history`, `card`, `ph_rank`. Still to do: a `cvc ph query` subcommand (it needs
+     a query file format); the paper's analytic bounds (Prop. F.7/F.8) in place of sampled ones.
 4. **Training, if needed.** Either native, as `cvc::ph::se2_train` does (Adam on
    hand-written gradients through the split step), or export from phast's PyTorch into
    `"cvc-ph-law/1"`. Which one depends on whether Shubham's trained checkpoints can be

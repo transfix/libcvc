@@ -1,0 +1,41 @@
+# Pose entities (world: vehicles: with the `pose` controller): vehicles an outside simulation
+# places, with no plant integrating them. Two start where the world block puts them, and a third
+# is spawned by its entry in the document's table of poses (poses: fleet) and placed, pitched and
+# rolled, by the table's packed value. The physics world holds the ground and their three
+# kinematic chassis, nothing else.
+#
+# ctest arigl_pose_entities runs it offscreen (`arigl snapshot`, whose scene clock steps a fixed
+# 1/30 s a frame) and ariadne_scene_world_test's APoseDocumentsHashIsPinned runs it headless: at
+# physics tick 60 both print or check the same state hash (physics.stats.hash), pinned in both.
+meta: { name: pose entities, min_libcvc: 4.0.1 }
+requires: [scene.physics]
+world:
+  vehicles:
+    poses: fleet
+    archetypes:
+      humvee: { vehicle: humvee, controllers: [pose], look: { box: {} } }
+    start:
+      - { archetype: humvee, name: lead, at: [-10, 5], heading: 30 }
+      - { archetype: humvee, name: wing, at: [6, -8], heading: -60 }
+init: |
+  (state-set "physics.hash" "1")
+  (state-set "fleet.third.archetype" "humvee")
+  (state-set "fleet.third.name" "third")
+  (state-set "fleet.poses" "third 12 14 nan 2 0.0625 -0.03125 4 0.125 nan")
+on_tick: |
+  (if (and (state-get "physics.stats.tick") (>= (int (state-get "physics.stats.tick")) 60))
+      (begin
+        (print (str-concat "pose_entities: tick " (state-get "physics.stats.tick")
+                           " hash " (state-get "physics.stats.hash")
+                           " count " (state-get "entities.count")))
+        (quit 0)))
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  entity_labels: { offset: 2.5 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [80, 80, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static

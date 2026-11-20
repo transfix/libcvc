@@ -93,6 +93,38 @@ after which that principal's connections are sent what they can newly read and a
 they no longer can. It needs ``host.authenticate``. Conference media and avatar poses are not tree
 state and are not scoped.
 
+Bridged users put another chat system's users (an NMDC hub's, say) in the relay's room, where
+Ariadne clients see them in the roster and chat with them both ways (ARIADNE_CHAT.md, "Bridged
+users"; ARIADNE.md 9.8.7)::
+
+    room = host.room                                      # the relay's --room
+    pid = host.room_presence(room, "Zed.Z", {"name": "Zed", "detail": "DC++"}, via="nmdc")
+    host.room_chat_post(room, "hi all", sender_id="Zed.Z", via="nmdc")
+    host.room_chat_post(room, "psst", sender_id="Zed.Z", via="nmdc", to=participant_pid)
+    host.room_absent(room, "Zed.Z", via="nmdc")
+
+    @host.on_room_chat(room)
+    async def heard(msg):                                 # a participant's room post
+        await hub.say(f"<{msg.name}> {msg.text}")
+
+    @host.on_room_dm(room)
+    def dm(msg):                                          # a participant to a bridged user
+        hub.private(msg.to, msg.name, msg.text)
+
+* A bridged user is an id on a system (``via``, a lowercase name); its pid is
+  ``bridged_pid(user_id, via=)``, ``"_nmdc_Zed_2eZ"``. ``room_presence`` lists it in the roster
+  (``(room-roster ROOM "all")``, the Users window) with no camera, microphone or avatar; a repeat
+  updates its name and detail; ``room_absent`` takes it out. ``room_bridged`` lists those present.
+* ``room_chat_post`` posts as one: to the room (stamped, kept and pushed by the relay like any post,
+  marked ``"via"``; the sender need not be present), or ``to`` a participant's pid, a direct message
+  from a present user. Same 2000-byte limit as a participant's post, no rate limit.
+* ``on_room_chat`` and ``on_room_dm`` hooks (sync or async, on the loop) get a ``RoomChatMessage``
+  (``room``, ``seq``, ``pid``, ``name``, ``text``, ``t``; a DM's ``to``, the bridged user's id,
+  ``to_pid`` and ``via``) for each participant's message, never the program's own. Without an
+  ``on_room_dm`` hook the relay refuses a DM to a bridged user.
+* In arisrvx the room is the relay's, the calls are applied on its next room step in order, and what
+  the relay would refuse raises ValueError here. The events are JSON: they need no pycvc.
+
 ``serve_asgi(app, host=, port=, **config)`` serves an ASGI app with uvicorn on ``host.loop``; several
 are allowed. Their startup (an app's lifespan startup, the bind) runs before the relay accepts
 clients, and one that fails stops arisrvx, non-zero, before it listens. ``arisrvx --python main.py
@@ -109,6 +141,10 @@ them), and read what the relay would send them::
     harness = ServerHarness(host, publish=["svc"])
     alice = harness.connect(bearer="test-token")
     assert alice.call("whoami")["id"] == "alice"
+
+It models the room's chat too (``ServerHarness(room=...)``): a client is a participant
+(``connect(name=...)``), its ``chat_post`` reaches the program's ``on_room_chat`` / ``on_room_dm``
+hooks, and ``chat_messages`` and ``roster`` read what the program posted and bridged in.
 
 Threads: a sync handler runs on the loop's thread and holds up every other caller, HTTP and the
 relay's events alike, so keep it quick and move blocking work to ``await asyncio.to_thread(...)``.
@@ -346,6 +382,109 @@ def _plot_tree(series, x=None, markers=(), max_points=2000, fmt=".6g"):
             "m": [_plot_marker(m) for m in markers]}
 
 
+# -- bridged users: the relay's rules, so a mistake raises here (room_chat.h, room_intrinsics.h) ---
+
+_CHAT_TEXT_MAX = 2000  # bytes of a post, once cleaned (chat_limits::text_max)
+_BRIDGE_UID_MAX = 128  # bridge_limits
+_BRIDGE_NAME_MAX = 128
+_BRIDGE_DETAIL_MAX = 256
+_BRIDGE_PRESENT_MAX = 10000
+
+
+def _clean_chat_text(text, text_max=_CHAT_TEXT_MAX, what="the message") -> str:
+    """``text`` cleaned as the relay cleans a post (clean_chat_text): carriage returns and every
+    ASCII control character but newline and tab dropped, trailing blanks and leading blank lines
+    trimmed. ValueError (the relay's reason) when what is left is empty or longer than
+    ``text_max`` bytes."""
+    if not isinstance(text, str):
+        raise TypeError(f"{what} is a str, not {type(text).__name__}")
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError(f"{what} is not UTF-8 text") from None
+    out = "".join(c for c in text
+                  if ord(c) >= 0x80 or c in "\n\t" or 0x20 <= ord(c) < 0x7F)
+    out = out.rstrip(" \n\t").lstrip("\n")
+    if not out.strip(" \t\n"):
+        raise ValueError(f"{what} is empty")
+    if len(out.encode("utf-8")) > text_max:
+        raise ValueError(f"{what} is longer than {text_max} bytes")
+    return out
+
+
+def _one_line(text, limit, what) -> str:
+    """A name or detail as the relay keeps it: one line, cleaned, at most ``limit`` bytes ("" for
+    none)."""
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        raise TypeError(f"{what} is a str, not {type(text).__name__}")
+    text = text.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    if not text.strip(" "):
+        return ""
+    return _clean_chat_text(text, limit, what).lstrip(" ")
+
+
+def _check_via(via) -> str:
+    if not isinstance(via, str) or not (1 <= len(via) <= 16) or not ("a" <= via[0] <= "z") or \
+            not all("a" <= c <= "z" or "0" <= c <= "9" for c in via):
+        raise ValueError(f"via={via!r} is not a system's name: a lowercase letter, then up to 15 "
+                         "lowercase letters and digits")
+    return via
+
+
+def _check_uid(user_id) -> str:
+    if not isinstance(user_id, str):
+        raise TypeError(f"a bridged user's id is a str, not {type(user_id).__name__}")
+    try:
+        n = len(user_id.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise ValueError("a bridged user's id is not UTF-8 text") from None
+    if not user_id.strip() or n > _BRIDGE_UID_MAX:
+        raise ValueError(f"a bridged user's id is blank or longer than {_BRIDGE_UID_MAX} bytes: "
+                         f"{user_id!r}")
+    return user_id
+
+
+def bridged_pid(user_id: str, *, via: str = "bridge") -> str:
+    """The pid the room knows bridged user ``user_id`` of system ``via`` by: what its roster entry,
+    its messages' ``from`` and a direct message to it name. ``"_<via>_"``, then the id with every
+    byte that is not an ASCII letter or digit written ``_xx`` (its hex)."""
+    _check_via(via)
+    _check_uid(user_id)
+    out = [f"_{via}_"]
+    for b in user_id.encode("utf-8"):
+        c = chr(b)
+        out.append(c if c.isascii() and c.isalnum() else f"_{b:02x}")
+    return "".join(out)
+
+
+class RoomChatMessage:
+    """A participant's message the relay hands the program (``host.on_room_chat``,
+    ``host.on_room_dm``): ``room``; ``seq``, its place in its channel; ``pid``, the sender's;
+    ``name``, the sender's name as it posted; ``text``; ``t``, the relay's clock (a
+    ``time.time()``); and for a direct message to a bridged user, ``to`` (that user's id),
+    ``to_pid`` and ``via`` (its system). ``to`` is None for a room post."""
+
+    __slots__ = ("room", "seq", "pid", "name", "text", "t", "to", "to_pid", "via")
+
+    def __init__(self, room, seq, pid, name, text, t, to=None, to_pid=None, via=None):
+        self.room, self.seq, self.pid, self.name, self.text, self.t = room, seq, pid, name, text, t
+        self.to, self.to_pid, self.via = to, to_pid, via
+
+    @classmethod
+    def _of(cls, e: dict) -> "RoomChatMessage":
+        to_pid = e.get("to") or None
+        return cls(str(e.get("room", "")), int(e.get("seq", 0)), str(e.get("from", "")),
+                   str(e.get("name", "")), str(e.get("text", "")), float(e.get("t", 0.0)),
+                   to=(e.get("to_uid") or None) if to_pid else None, to_pid=to_pid,
+                   via=(e.get("to_via") or None) if to_pid else None)
+
+    def __repr__(self) -> str:
+        to = f" to={self.to!r}" if self.to is not None else ""
+        return f"RoomChatMessage({self.room!r} #{self.seq} {self.name!r}{to}: {self.text!r})"
+
+
 def _exit_code(e: SystemExit) -> int:
     code = e.code
     if code is None:
@@ -408,6 +547,12 @@ class Host:
         self._read_scope = None  # host.read_scope's hook
         self._principals: dict[str, dict] = {}  # the latest principal of each id authenticate gave
         self._harness = None  # the ServerHarness testing this program under plain python, if any
+        # Bridged users (room chat): by room, {(via, user_id): {"pid", "name", "detail"}}, as the
+        # program said; and the hooks that hear the room's posts, by room.
+        self._bridged: dict[str, dict[tuple[str, str], dict]] = {}
+        self._chat_hooks: dict[str, list] = {}
+        self._dm_hooks: dict[str, list] = {}
+        self._chat_tasks: set = set()  # async hooks running
         self._stop_code = None  # stop()'s, once asked
         self._stop_event = None  # made on the loop by main()
         self._exit_code = 0
@@ -705,6 +850,153 @@ class Host:
         elif self._harness is not None:
             self._harness._link.set_scope(str(principal_id), prefixes)
 
+    # -- bridged users: another chat system's users in the room (ARIADNE_CHAT.md) -----------------
+
+    @property
+    def room(self) -> str | None:
+        """The relay's room, the one the room_* methods below name. Under plain python, the room a
+        ServerHarness models (``ServerHarness(room=...)``), else None (any room is taken)."""
+        if self._link is not None:
+            return self._link.room()
+        return self._harness.room if self._harness is not None else None
+
+    def _room_of(self, room) -> str:
+        here = self.room
+        if room is None:
+            if here is None:
+                raise ValueError("pycvc.ariadne: name the room (no relay or ServerHarness says "
+                                 "which)")
+            return here
+        if not isinstance(room, str) or not room:
+            raise ValueError(f"pycvc.ariadne: {room!r} is not a room")
+        if here is not None and room != here:
+            raise ValueError(f"pycvc.ariadne: this relay's room is {here!r}, not {room!r} "
+                             "(arisrvx --room)")
+        return room
+
+    def room_presence(self, room, user_id: str, info: Mapping | None = None, *,
+                      via: str = "bridge") -> str:
+        """Bridged user ``user_id`` of system ``via`` (``"nmdc"``) is in ``room``: listed in its
+        roster (``(room-roster ROOM "all")``, the Users window) as ``info["name"]`` (else the id),
+        with ``info["detail"]`` (a line about them, optional), and marked bridged: no camera,
+        microphone or avatar. A repeat updates the name and detail. Returns the user's pid
+        (``bridged_pid``). In arisrvx the relay applies it on its next room step."""
+        room = self._room_of(room)
+        _check_via(via)
+        _check_uid(user_id)
+        info = dict(info or {})
+        unknown = set(info) - {"name", "detail"}
+        if unknown:
+            raise ValueError(f"Host.room_presence: info takes name and detail, not "
+                             f"{', '.join(sorted(unknown))}")
+        name = _one_line(info.get("name"), _BRIDGE_NAME_MAX, "the name")
+        detail = _one_line(info.get("detail"), _BRIDGE_DETAIL_MAX, "the detail")
+        users = self._bridged.setdefault(room, {})
+        if (via, user_id) not in users and len(users) >= _BRIDGE_PRESENT_MAX:
+            raise ValueError(f"Host.room_presence: the room has {_BRIDGE_PRESENT_MAX} bridged "
+                             "users already")
+        pid = bridged_pid(user_id, via=via)
+        users[(via, user_id)] = {"pid": pid, "user_id": user_id, "via": via,
+                                 "name": name or user_id, "detail": detail}
+        if self._link is not None:
+            self._link.bridge_presence(via, user_id, name, detail)
+        return pid
+
+    def room_absent(self, room, user_id: str, *, via: str = "bridge") -> None:
+        """Bridged user ``user_id`` of ``via`` left ``room``: gone from its roster (the relay keeps
+        the node, marked absent, as it does a participant's). Nothing when it was not present."""
+        room = self._room_of(room)
+        _check_via(via)
+        _check_uid(user_id)
+        if self._bridged.get(room, {}).pop((via, user_id), None) is None:
+            return
+        if self._link is not None:
+            self._link.bridge_absent(via, user_id)
+        elif self._harness is not None:
+            self._harness._room.bridged_left(bridged_pid(user_id, via=via))
+
+    def room_bridged(self, room=None) -> list[dict]:
+        """The bridged users the program has said are in ``room``, each ``{"pid", "user_id",
+        "via", "name", "detail"}``, in pid order."""
+        room = self._room_of(room)
+        return sorted((dict(u) for u in self._bridged.get(room, {}).values()),
+                      key=lambda u: u["pid"])
+
+    def room_chat_post(self, room, text: str, *, sender_id: str, name: str | None = None,
+                       via: str = "bridge", to: str | None = None) -> None:
+        """Post ``text`` to ``room``'s chat as bridged user ``sender_id`` of ``via``: stamped and
+        kept by the relay and pushed to every participant like any post, marked ``"via"`` in its
+        JSON, under the same size limit (2000 bytes, once cleaned). ``name`` is what it shows (by
+        default the name ``room_presence`` gave, else the id); a sender need not be present to post
+        to the room (a hub's own messages). With ``to`` (a participant's pid) it is a direct
+        message, from a present bridged user only. Raises ValueError for what the relay would
+        refuse; the program does not hear its own posts. In arisrvx the relay applies it on its
+        next room step, after any room_presence before it."""
+        room = self._room_of(room)
+        _check_via(via)
+        _check_uid(sender_id)
+        text = _clean_chat_text(text)
+        shown = _one_line(name, _BRIDGE_NAME_MAX, "the name")
+        if to is not None:
+            if not isinstance(to, str) or not to:
+                raise ValueError(f"Host.room_chat_post: to={to!r} is not a participant's pid")
+            if (via, sender_id) not in self._bridged.get(room, {}):
+                raise ValueError(f"Host.room_chat_post: {sender_id!r} sends a direct message "
+                                 "only while present (room_presence)")
+            if self._link is not None and \
+                    self._link.get(f"conf.rooms.{room}.participants.{to}.presence.joined") != "1":
+                raise ValueError(f"Host.room_chat_post: participant {to!r} is not in the room")
+        if self._link is not None:
+            self._link.bridge_post(via, sender_id, shown, text, to or "")
+        elif self._harness is not None:
+            self._harness._room.post_bridged(self, room, via, sender_id, shown, text, to)
+
+    def on_room_chat(self, room=None):
+        """Decorator: ``fn(msg)`` (sync or async; a ``RoomChatMessage``) hears every message a
+        participant posts to ``room`` (the relay's, by default), on the loop, in order. Not the
+        program's own posts. Several are allowed."""
+        return self._hook(self._chat_hooks, room, "on_room_chat")
+
+    def on_room_dm(self, room=None):
+        """Decorator: ``fn(msg)`` hears every direct message a participant sends a bridged user in
+        ``room``: ``msg.to`` is that user's id, ``msg.via`` its system. While a program has none,
+        the relay refuses a direct message to a bridged user (no one would read it)."""
+        return self._hook(self._dm_hooks, room, "on_room_dm")
+
+    def _hook(self, hooks, room, what):
+        room = self._room_of(room)
+
+        def mark(fn):
+            if not callable(fn):
+                raise TypeError(f"Host.{what}: {fn!r} is not callable")
+            hooks.setdefault(room, []).append(fn)
+            if self._link is not None:
+                self._link.listen_chat(bool(self._chat_hooks), bool(self._dm_hooks))
+            return fn
+
+        return mark
+
+    def _hear(self, event: dict) -> None:
+        """A participant's message, from the relay (or a ServerHarness): to the room's hooks."""
+        msg = RoomChatMessage._of(event)
+        hooks = (self._dm_hooks if msg.to_pid else self._chat_hooks).get(msg.room, ())
+        for fn in list(hooks):
+            try:
+                r = fn(msg)
+            except Exception:  # noqa: BLE001 - the program's error, logged; the others still hear
+                log.exception("%s: %s raised on %r", "on_room_dm" if msg.to_pid else "on_room_chat",
+                              getattr(fn, "__name__", fn), msg)
+                continue
+            if inspect.isawaitable(r):
+                task = asyncio.ensure_future(r, loop=self.loop)
+                self._chat_tasks.add(task)
+                task.add_done_callback(self._chat_done)
+
+    def _chat_done(self, task) -> None:
+        self._chat_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            log.error("a room chat hook raised", exc_info=task.exception())
+
     def _on_loop_thread(self) -> bool:
         try:
             return asyncio.get_running_loop() is self.loop
@@ -956,6 +1248,8 @@ class _Export:
 
 _exports: dict[str, _Export] = {}
 _in_block = False  # the server document's block is loading: its load registers what it exports
+# The relay's built-in calls (docs/roadmap/ARISRV_IDENTITY.md): arisrv answers these itself.
+_RESERVED_PREFIX = "server."
 
 
 def export(fn=None, *, name=None, clients=False, roles=None, timeout=None, is_async=False):
@@ -967,6 +1261,11 @@ def export(fn=None, *, name=None, clients=False, roles=None, timeout=None, is_as
     def mark(f):
         if not callable(f):
             raise TypeError(f"export: {f!r} is not callable")
+        named = name or f.__name__
+        if named.startswith(_RESERVED_PREFIX):
+            raise ValueError(f"export: {named!r}: names under {_RESERVED_PREFIX!r} are the "
+                             "relay's own calls (server.whoami, server.set, ...), which it "
+                             "answers before a call reaches Python, so this one could never run")
         options = {"name": name or f.__name__, "is_async": is_async, "with_call": False,
                    "done_channel": "", "clients": clients, "roles": roles, "timeout": timeout}
         f.__ari_export__ = options
@@ -1049,6 +1348,16 @@ class _Program:
                 self.check_done.set()
             if _current is not None:
                 _current.stop(0)
+            return
+        if kind == "room_chat":  # JSON, not a DSL value: no pycvc needed
+            if _current is not None:
+                import json
+                try:
+                    event = json.loads(value)
+                except (TypeError, ValueError):
+                    log.error("room chat: an event the relay sent could not be read: %r", value)
+                    return
+                _current._hear(event)
             return
         try:
             if self.codec is None:
@@ -1354,6 +1663,93 @@ class _HarnessLink:
             fn(float(fraction), str(message))
 
 
+class ChatRefused(Exception):
+    """``HarnessClient.chat_post``: the relay refused the post. ``str(e)`` is what it would tell the
+    client (its chat.error)."""
+
+
+class _HarnessRoom:
+    """The relay's room chat, as a ServerHarness models it: the room's history, the conversations,
+    and who is in the room (the harness's connected clients and the program's bridged users). A
+    write lands at once, where arisrvx applies it a room step later."""
+
+    def __init__(self, harness, room):
+        self.harness = harness
+        self.room = room
+        self.messages: list[dict] = []  # the room's, by seq
+        self.dms: dict[frozenset, list[dict]] = {}  # by the pair of pids
+
+    def _stamp(self, log, pid, name, text, via=""):
+        m = {"seq": len(log), "from": pid, "name": name, "t": time.time(), "text": text}
+        if via:
+            m["via"] = via
+        log.append(m)
+        return m
+
+    def participant(self, pid):
+        for c in self.harness._clients:
+            if c.connected and c.pid == pid:
+                return c
+        return None
+
+    def bridged(self, pid):
+        for u in self.harness.host._bridged.get(self.room, {}).values():
+            if u["pid"] == pid:
+                return u
+        return None
+
+    def bridged_left(self, pid):
+        """A bridged user left: a conversation with no participant still in the room ends."""
+        for pair in [p for p in self.dms if pid in p]:
+            if not any(self.participant(q) for q in pair if q != pid):
+                del self.dms[pair]
+
+    def post_bridged(self, host, room, via, uid, name, text, to):
+        u = host._bridged.get(room, {}).get((via, uid))
+        pid = bridged_pid(uid, via=via)
+        shown = name or (u["name"] if u else uid)
+        if to is None:
+            self._stamp(self.messages, pid, shown, text, via)
+            return
+        if self.participant(to) is None:
+            raise ValueError(f"Host.room_chat_post: participant {to!r} is not in the room")
+        self._stamp(self.dms.setdefault(frozenset((pid, to)), []), pid, shown, text, via)
+
+    async def post(self, client, text, to):
+        """A participant's post, as the relay takes it: refused (ChatRefused) or kept, and handed
+        to the program's hooks, which are awaited."""
+        try:
+            text = _clean_chat_text(text)
+        except ValueError as e:
+            raise ChatRefused(str(e)) from None
+        host = self.harness.host
+        if to:
+            if to == client.pid:
+                raise ChatRefused("you cannot send a direct message to yourself")
+            u = self.bridged(to)
+            if u is None and self.participant(to) is None:
+                raise ChatRefused("they are not in the room")
+            if u is not None and not host._dm_hooks.get(self.room):
+                raise ChatRefused("they cannot get direct messages here")
+            m = self._stamp(self.dms.setdefault(frozenset((client.pid, to)), []), client.pid,
+                            client.name, text)
+        else:
+            u = None
+            m = self._stamp(self.messages, client.pid, client.name, text)
+        if to and u is None:
+            return dict(m)  # between two participants: the program does not hear it
+        if not to and not host._chat_hooks.get(self.room):
+            return dict(m)
+        event = dict(m, room=self.room, to=to or "", to_uid=u["user_id"] if u else "",
+                     to_via=u["via"] if u else "")
+        before = set(host._chat_tasks)
+        host._hear(event)
+        running = [t for t in host._chat_tasks if t not in before]
+        if running:
+            await asyncio.gather(*running, return_exceptions=True)
+        return dict(m)
+
+
 class ServerHarness:
     """arisrvx's side of a service, in-process, for the service's tests under plain ``python``
     (``pytest``, or FastAPI's ``TestClient`` beside it): no arisrvx and no network::
@@ -1369,7 +1765,11 @@ class ServerHarness:
 
     The program's hooks and exports run as arisrvx runs them, on ``host.loop``: the authenticate
     hook (within ``auth_timeout``), the role gates, ``ctx``, the timeouts, ``CallError`` and the
-    per-principal limits (``call_concurrency``, ``call_rate``). Arguments and results cross as the
+    per-principal limits (``call_concurrency``, ``call_rate``). The room's chat is modelled too
+    (``room``, the relay's ``--room``): each connected client is a participant, named ``name``; its
+    ``chat_post`` reaches the program's ``on_room_chat`` / ``on_room_dm`` hooks as the relay hands
+    them, and ``chat_messages`` and ``roster`` read what the program posted and who it bridged in
+    (``room_chat_post``, ``room_presence``). Arguments and results cross as the
     wire carries them, through pycvc's conversion, so a client sees the types it would (a tuple
     arrives as a list; a function doesn't cross, a TypeError). ``host.disconnect`` closes that
     principal's clients. A client reads what the relay would send it: ``publish`` names the
@@ -1379,7 +1779,7 @@ class ServerHarness:
     participant's own subtree is)."""
 
     def __init__(self, host=None, *, publish=None, call_concurrency=8, call_rate=0.0,
-                 auth_timeout=5.0, slow_ms=50.0):
+                 auth_timeout=5.0, slow_ms=50.0, room="standup"):
         host = host if host is not None else current_host()
         if host is None or host is not _current:
             raise RuntimeError("ServerHarness: make (or import) the program's Host first; it tests "
@@ -1401,6 +1801,15 @@ class ServerHarness:
         self._program.codec = codec
         self._ids = itertools.count(1)
         self._clients: list[HarnessClient] = []
+        if not isinstance(room, str) or not room:
+            raise ValueError(f"ServerHarness: {room!r} is not a room")
+        others = [r for r in set(host._bridged) | set(host._chat_hooks) | set(host._dm_hooks)
+                  if r != room]
+        if others:
+            raise ValueError(f"ServerHarness: the program uses room {others[0]!r}; model it with "
+                             f"ServerHarness(room={others[0]!r})")
+        self.room = room
+        self._room = _HarnessRoom(self, room)
         host._harness = self
 
     def _run(self, coro):
@@ -1411,17 +1820,19 @@ class ServerHarness:
         return self.host.loop.run_until_complete(coro)
 
     def connect(self, bearer: str = "", *, transport: str = "grpc", peer: str = "127.0.0.1:0",
-                pid: str | None = None) -> HarnessClient:
+                pid: str | None = None, name: str | None = None) -> HarnessClient:
         """A client that connects with ``bearer``, judged by the program's authenticate hook as the
         relay would ask it. Refused (and why) when the hook refuses it, raises or runs out of time.
-        Without a hook, the client's principal is its pid, as arisrvx's is."""
-        return self._run(self.aconnect(bearer, transport=transport, peer=peer, pid=pid))
+        Without a hook, the client's principal is its pid, as arisrvx's is. ``name`` is its name in
+        the room (its pid by default)."""
+        return self._run(self.aconnect(bearer, transport=transport, peer=peer, pid=pid, name=name))
 
     async def aconnect(self, bearer: str = "", *, transport: str = "grpc",
-                       peer: str = "127.0.0.1:0", pid: str | None = None) -> HarnessClient:
+                       peer: str = "127.0.0.1:0", pid: str | None = None,
+                       name: str | None = None) -> HarnessClient:
         pid = pid or f"harness-{next(self._ids)}"
         if self.host._authenticate is None:
-            return self.client({"id": pid, "roles": []}, pid=pid)
+            return self.client({"id": pid, "roles": []}, pid=pid, name=name)
         ident = next(self._ids)
         await self._program.authenticate(ident, {"bearer": str(bearer), "transport": transport,
                                                  "peer": peer})
@@ -1430,9 +1841,10 @@ class ServerHarness:
             raise Refused(f"unauthenticated: the relay could not judge this connection ({verdict})")
         if verdict is None:
             raise Refused("unauthenticated: the relay refused this connection")
-        return self.client(verdict, pid=pid)
+        return self.client(verdict, pid=pid, name=name)
 
-    def client(self, principal: dict, *, pid: str | None = None) -> HarnessClient:
+    def client(self, principal: dict, *, pid: str | None = None,
+               name: str | None = None) -> HarnessClient:
         """A client connected as ``principal`` (a dict with a str ``id``), as though the
         authenticate hook had admitted it so."""
         if not isinstance(principal, dict) or not isinstance(principal.get("id"), str) \
@@ -1444,14 +1856,20 @@ class ServerHarness:
         if self.host._read_scope is not None:  # what it reads, asked as an authentication asks it
             self._link.set_scope(principal["id"], self.host.scope_of(principal))
             self.host._principals[principal["id"]] = principal
-        c = HarnessClient(self, principal, pid or f"harness-{next(self._ids)}")
+        pid = pid or f"harness-{next(self._ids)}"
+        c = HarnessClient(self, principal, pid, name if name is not None else pid)
         self._clients.append(c)
         return c
 
     def _disconnect(self, principal_id: str) -> None:
         for c in self._clients:
             if c.principal["id"] == principal_id:
-                c.connected = False
+                c.leave()
+
+    def room_messages(self) -> list[dict]:
+        """The room's chat history as the relay keeps it, oldest first: each ``{"seq", "from",
+        "name", "t", "text"}``, with ``"via"`` for a bridged user's."""
+        return [dict(m) for m in self._room.messages]
 
     def close(self) -> None:
         """Stop testing the program: host.disconnect does nothing again."""
@@ -1463,10 +1881,11 @@ class HarnessClient:
     """One client of a ServerHarness: its ``principal``, its participant id ``pid``, whether it is
     still ``connected`` (``host.disconnect`` closes it), its calls and what it reads."""
 
-    def __init__(self, harness: ServerHarness, principal: dict, pid: str):
+    def __init__(self, harness: ServerHarness, principal: dict, pid: str, name: str = ""):
         self.harness = harness
         self.principal = principal
         self.pid = pid
+        self.name = name or pid  # in the room
         self.connected = True
         # By function: the (fraction, message) of its latest call's ctx.progress, as the client's
         # tree holds the latest at calls.<fn>.progress.
@@ -1507,6 +1926,52 @@ class HarnessClient:
         if reply[0] == "error":
             raise CallError(reply[1], reply[2], detail=reply[3])
         return reply[1]
+
+    # -- the room's chat ---------------------------------------------------------------------------
+
+    def leave(self) -> None:
+        """The client closes: it leaves the room, and a conversation with no one left in it ends."""
+        self.connected = False
+        for pair in [p for p in self.harness._room.dms if self.pid in p]:
+            if not any(self.harness._room.participant(q) for q in pair if q != self.pid):
+                del self.harness._room.dms[pair]
+
+    def chat_post(self, text: str, to: str | None = None) -> dict:
+        """``(chat-post ROOM TEXT [TO])``: post to the room, or a direct message to ``to`` (a
+        participant's or a bridged user's pid). The program's hooks hear it as the relay would hand
+        it them, and are run to the end. Returns the message as kept; ChatRefused for what the relay
+        would refuse."""
+        return self.harness._run(self.achat_post(text, to))
+
+    async def achat_post(self, text: str, to: str | None = None) -> dict:
+        if not self.connected:
+            raise ChatRefused("you are not in the room")
+        return await self.harness._room.post(self, text, to)
+
+    def chat_messages(self, channel: str = "") -> list[dict]:
+        """``(chat-messages ROOM [CHANNEL])``: the room's messages (``channel`` "") or this
+        client's conversation with ``channel`` (a pid), oldest first, each ``{"seq", "from",
+        "name", "t", "text", "via", "mine"}`` (``via`` "" for a participant's)."""
+        room = self.harness._room
+        log = room.messages if not channel else room.dms.get(frozenset((self.pid, channel)), [])
+        return [dict(m, via=m.get("via", ""), mine=m["from"] == self.pid) for m in log]
+
+    def roster(self, kind: str = "participants") -> list[dict]:
+        """``(room-roster ROOM [KIND])``: ``"participants"`` (the connected clients), ``"bridged"``
+        (the program's bridged users) or ``"all"`` (the participants, then the bridged), each with
+        ``pid``, ``name`` and ``bridged`` ("0" or "1"), and a bridged user's ``via``, ``uid`` and
+        ``detail``; each in pid order."""
+        if kind not in ("participants", "bridged", "all"):
+            raise ValueError('HarnessClient.roster: kind is "participants", "bridged" or "all"')
+        out = []
+        if kind != "bridged":
+            out += sorted(({"pid": c.pid, "name": c.name, "bridged": "0"}
+                           for c in self.harness._clients if c.connected), key=lambda e: e["pid"])
+        if kind != "participants":
+            out += [{"pid": u["pid"], "name": u["name"], "bridged": "1", "via": u["via"],
+                     "uid": u["user_id"], "detail": u["detail"]}
+                    for u in self.harness.host.room_bridged(self.harness.room)]
+        return out
 
     # -- what it reads -----------------------------------------------------------------------------
 
@@ -1560,7 +2025,8 @@ def _install_testing():
     testing = types.ModuleType("pycvc.ariadne.testing",
                                "ServerHarness: a service's tests without arisrvx "
                                "(ARIADNE_SCRIPTING_HOSTS.md 6.5.8).")
-    for name in ("ServerHarness", "HarnessClient", "Refused", "CallError", "CallContext"):
+    for name in ("ServerHarness", "HarnessClient", "Refused", "ChatRefused", "CallError",
+                 "CallContext"):
         setattr(testing, name, getattr(me, name))
     sys.modules.setdefault("pycvc.ariadne.testing", testing)
     me.testing = sys.modules["pycvc.ariadne.testing"]

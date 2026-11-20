@@ -8,6 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <cstring>
 #include <cvc/physics/ocean_surface.h>
 #include <stdexcept>
 #include <utility>
@@ -70,6 +71,49 @@ vec3 ocean_surface::velocity_with(const vec3 &p, double t, surface_memo &memo) c
   const std::array<double, 3> v = _sea->velocity(p.x, p.y, p.z, t, s);
   keep(memo, s);
   return {v[0], v[1], v[2]};
+}
+
+namespace {
+// The sea at one time (ocean_surface::at): reads at that time go through its held fields, any
+// other read to the sea itself.
+class held_ocean : public fluid_surface {
+public:
+  held_ocean(std::shared_ptr<const cvc::ocean::sea_surface> sea, double t,
+             const fluid_surface::parallel_run &run)
+      : _sea(std::move(sea)), _at(_sea->at(t, run)) {}
+  double level(double, double) const override { return _sea->params().level; }
+  double height(double x, double y, double t) const override { return _sea->height(x, y, t); }
+  vec3 velocity(const vec3 &p, double t) const override {
+    const std::array<double, 3> v = _sea->velocity(p.x, p.y, p.z, t);
+    return {v[0], v[1], v[2]};
+  }
+  std::uint64_t digest() const override { return _sea->digest() ^ 0x6f6365616e5f7366ull; }
+  double height_with(double x, double y, double t, surface_memo &memo) const override {
+    sea_memo s = to_sea(memo);
+    const double h = same_time(t) ? _at.height(x, y, s) : _sea->height(x, y, t, s);
+    keep(memo, s);
+    return h;
+  }
+  vec3 velocity_with(const vec3 &p, double t, surface_memo &memo) const override {
+    sea_memo s = to_sea(memo);
+    const std::array<double, 3> v =
+        same_time(t) ? _at.velocity(p.x, p.y, p.z, s) : _sea->velocity(p.x, p.y, p.z, t, s);
+    keep(memo, s);
+    return {v[0], v[1], v[2]};
+  }
+
+private:
+  bool same_time(double t) const { // the held time to the bit, as the sea's cache keys it
+    const double held = _at.t();
+    return std::memcmp(&t, &held, sizeof held) == 0;
+  }
+  std::shared_ptr<const cvc::ocean::sea_surface> _sea;
+  cvc::ocean::sea_surface::at_time _at;
+};
+} // namespace
+
+std::shared_ptr<const fluid_surface> ocean_surface::at(double t, const parallel_run &run) const {
+  return std::make_shared<held_ocean>(_sea, t, run);
 }
 
 std::uint64_t ocean_surface::digest() const {

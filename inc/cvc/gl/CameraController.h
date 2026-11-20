@@ -35,6 +35,20 @@ class SceneGraph;
 // mode (WASD along the look vector, mouse-look with the pointer captured, Space/
 // Ctrl for world up/down, Shift sprint, wheel = speed), with a runtime toggle.
 //
+// FLY MOVES AS A QUAKE SPECTATOR (reimplemented from a behavioural spec of ezQuake's spectator
+// movement, not from its source). The eye has a velocity that carries from frame to frame. Each
+// step, friction first slows it on all three axes: in proportion to its speed above a quarter of a
+// key's speed, at a constant rate below that, and it stops below 1/400 of it (state
+// "settings.fly_friction", 6 a second). Then it accelerates toward the wish velocity -- each held
+// key adds the move speed along its axis (forward along the look, pitch included; strafe level;
+// Space / Ctrl along the world's up), unnormalised, its speed capped at 1.25 of a key's -- at a
+// rate in proportion to the speed wished for, never past it (state "settings.fly_accelerate", 10 a
+// second). So the eye reaches its speed in about 0.15 s and glides to a stop in about 0.4 s. A
+// frame's time is stepped at no more than 1/77 s, so it moves the same at any frame rate. A key
+// pressed and let go between two frames still counts (a quarter of a held one). Sprint multiplies
+// the key speed and the cap. The mouse turns the view at once, with no smoothing. Orbit's
+// first-person mouse look moves its eye the same way.
+//
 // EVERYTHING IS cvc::state. CameraController is a state_object: mode, the up
 // axis, orbit center/distance/azimuth/elevation, fly position/yaw/pitch, map
 // center/scale, the movement/mouse/sprint settings, pointer-capture, AND the key
@@ -67,7 +81,13 @@ public:
   // grabbed point stays under the pointer -- and the wheel ZOOMS, and rotation is
   // impossible. For ortho "matplotlib" views where tumbling the camera only ever
   // disorients.
-  enum class Mode { Orbit = 0, Fly = 1, Track = 2, Map = 3 };
+  // Slice = a parallel view straight down one axis (setSliceAxis: x, y or z), the
+  // plane a volume slice lies in, with no rotation: the screen's right and up are
+  // VolumeGridRover's -- down z, x right and y up (its XY view); down y, x right and
+  // z up (XZ); down x, z right and y up (ZY). A drag pans, the wheel zooms about the
+  // pointer (mouseWheelAt), and the movement keys slide and zoom as in Map. Its pose
+  // is its own (state "slice.axis", "slice.center.{x,y,z}", "slice.scale").
+  enum class Mode { Orbit = 0, Fly = 1, Track = 2, Map = 3, Slice = 4 };
 
   // Canonical: state at "<viewer.scene prefix>.viewers.<viewer.name>.camera",
   // rooted in the viewer's scene app, and auto-wired to the viewer's camera,
@@ -151,7 +171,8 @@ public:
   void getUpAxis(double &x, double &y, double &z) const;
 
   // Frame the whole scene: orbit center = box center, distance from its diagonal,
-  // a pleasant 3/4 default view, auto move-speed. Seeds the fly pose too, and
+  // a pleasant 3/4 default view, auto move-speed (an eighth of the diagonal a second, at most
+  // 10: a Quake spectator's key speed in metres). Seeds the fly pose too, and
   // the map pose (the box's x/y footprint, fitted like frameMap with a width).
   void frameBounds(double minX, double minY, double minZ, double maxX, double maxY, double maxZ);
 
@@ -182,6 +203,16 @@ public:
   // (rotation, entering fullscreen), re-fitting when the viewport aspect
   // changes, until the user zooms and takes over.
   void frameMap(double cx, double cy, double halfHeight, double halfWidth = 0.0);
+
+  // Slice mode framing: look down the slice axis at the box's centre, its face fitted
+  // to the viewport (and kept fitted across resizes until the user zooms), the eye in
+  // front of the box. Sets Mode::Slice. frameBounds() seeds the same pose without
+  // changing the mode, and resetView() in Slice refits it.
+  void frameSlice(double minX, double minY, double minZ, double maxX, double maxY, double maxZ);
+  // The axis Slice looks down: 0 x, 1 y, 2 z (state "slice.axis": x, y or z, or a
+  // view's name, xy / xz / zy). The view keeps its centre; frame again to fit.
+  void setSliceAxis(int axis);
+  int sliceAxis() const;
 
   // Orbit center (state "orbit.center").
   void setOrbitCenter(double x, double y, double z);
@@ -228,8 +259,9 @@ public:
   void setWidenTau(double tau);
   double widenTau() const;
 
-  // Integrate held-key fly motion, push the pose to the camera, and mirror the
-  // live pose to state on a throttle. Call once per rendered frame.
+  // Integrate held-key fly motion (Fly's spectator movement, above), push the pose to the camera,
+  // and mirror the live pose to state on a throttle. Call once per rendered frame with the time
+  // since the last one.
   void update(double dtSeconds);
 
   // ---- manual event feed (also called by the attached interactor style) ----
@@ -237,6 +269,11 @@ public:
   void keyUp(const std::string &keySym);
   void mouseLook(int dxPixels, int dyPixels);
   void mouseWheel(double steps);
+  // The wheel with the pointer at (x, y), VTK display coordinates (origin bottom-left
+  // of the window). In Slice the world point under the pointer stays under it, through
+  // the zoom's glide too; in the other modes it is mouseWheel(steps). The attached
+  // interactor passes the event's position.
+  void mouseWheelAt(double steps, int x, int y);
   void beginDrag();
   // The right button's drag: it turns the view (Orbit), whatever the primary drag does.
   void beginSecondaryDrag();
@@ -369,9 +406,13 @@ private:
   double mapFitScale(double halfHeight, double halfWidth) const; // parallel scale fitting a rect
   void fitMap(double cx, double cy, double halfHeight, double halfWidth); // set the map pose
   void refitMapIfResized();     // re-fit the map rect when the viewport changes shape
+  void fitSlice(const double b[6]); // the slice pose for bounds {x0,x1,y0,y1,z0,z1}
+  void refitSliceIfResized();       // the same for Slice
+  void anchorSlice();               // Slice: keep the wheel's anchor under the pointer
+  void wheelZoom(double steps);     // the wheel's zoom (mouseWheel, mouseWheelAt)
   bool applyNeeded() const;     // update(): has anything applyToCamera() derives from moved?
   bool poseMirrorStale() const; // does the pose differ from the one last mirrored to state?
-  void poseMirrorValues(double out[17]) const; // what syncPoseToState() writes, in order
+  void poseMirrorValues(double out[21]) const; // what syncPoseToState() writes, in order
 
   struct Impl;
   std::unique_ptr<Impl> m_impl;

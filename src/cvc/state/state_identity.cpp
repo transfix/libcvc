@@ -139,6 +139,24 @@ bool valid_bearer_token(const std::string &token) noexcept {
   });
 }
 
+bool valid_guest_password(const std::string &password) noexcept {
+  if (password.empty() || password.size() > 256)
+    return false;
+  for (const char c : password) {
+    const unsigned char u = static_cast<unsigned char>(c);
+    if (u < 0x20 || u == 0x7F)
+      return false;
+  }
+  return true;
+}
+
+std::string guest_password_bearer(const std::string &password) {
+  std::string in = "cvc-guest-password/1";
+  in.push_back('\0');
+  in += password;
+  return sha256_hex(reinterpret_cast<const unsigned char *>(in.data()), in.size());
+}
+
 bool valid_device_id(const std::string &id) noexcept {
   if (id.empty() || id.size() > 64)
     return false;

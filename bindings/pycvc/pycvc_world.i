@@ -651,13 +651,13 @@ public:
   PyObject *info() const {
     const cvc::world::generated_world_params &p = params_;
     return Py_BuildValue(
-        "{s:K,s:d,s:i,s:i,s:i,s:i,s:d,s:d,s:i,s:i,s:d,s:i,s:i,s:s,s:s,s:s,s:n,s:O,s:d,s:n,s:d,s:d}",
+        "{s:K,s:d,s:i,s:i,s:i,s:i,s:d,s:d,s:i,s:i,s:d,s:i,s:i,s:s,s:s,s:s,s:s,s:n,s:O,s:d,s:n,s:d,s:d}",
         "seed", (unsigned long long)p.seed, "half_m", p.half_m, "trees", p.trees, "rocks",
         p.rocks, "buildings", p.buildings, "tree_gen", p.tree_gen, "amp_m", p.amp_m,
         "water_level_m", p.water_level_m, "preset", p.preset, "ontology", p.ontology, "cell_m",
         p.cell_m, "max_terrain_n", p.max_terrain_n, "raster_n", p.raster_n, "terrain",
         p.terrain.c_str(), "city", p.city.c_str(), "terrain_file", p.terrain_file.c_str(),
-        "building_count", (Py_ssize_t)building_count_, "archetypes", archetypes_ ? Py_True : Py_False,
+        "edge", cvc::world::world_edge_name(p.edge), "building_count", (Py_ssize_t)building_count_, "archetypes", archetypes_ ? Py_True : Py_False,
         "road_length", road_length_, "districts", (Py_ssize_t)districts_, "height_min",
         height_min_, "height_max", height_max_);
   }
@@ -684,7 +684,8 @@ private:
 // Generate a world. `params` is a dict of generated_world_params' fields, by their names or the
 // generated_world node's world.* keys (seed, half or half_m, trees, rocks, buildings, tree_gen,
 // amp or amp_m, water_level or water_level_m, preset, ontology, cell_m, max_terrain_n, raster_n,
-// terrain, city, terrain_file); a missing one keeps its default, an unknown one is an error.
+// terrain, city, terrain_file, edge: "wall", "shore" or "none"); a missing one keeps its default,
+// an unknown one is an error.
 // `building_library` is a buildings.glb (or a directory holding one) of archetypes for the city,
 // read with `app`'s model handlers (so app is then required); "" builds procedural massing. The
 // generators are `app`'s; without an app, the built-ins. Runs without the GIL; a big world takes
@@ -747,7 +748,11 @@ generated_world *generate_world(PyObject *params = nullptr,
         p.city = str();
       else if (k == "terrain_file")
         p.terrain_file = str();
-      else
+      else if (k == "edge") {
+        p.edge = cvc::world::world_edge_from_name(str());
+        if (p.edge < 0)
+          throw std::invalid_argument("generate_world: edge is wall, shore or none");
+      } else
         throw std::invalid_argument("generate_world: no param " + k);
     }
   }

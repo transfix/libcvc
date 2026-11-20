@@ -140,6 +140,12 @@ struct room_table {
     std::shared_ptr<const avatar_catalog> catalog;
   };
   std::unordered_map<std::string, catalog_entry> catalogs;
+  // Each room's bridged users as last read, with the bridge.rev it was read at.
+  struct bridged_entry {
+    std::uint64_t rev = 0;
+    std::shared_ptr<const std::vector<room_bridged_user>> users;
+  };
+  std::unordered_map<std::string, bridged_entry> bridged_users;
 
   void own(std::unique_ptr<room_handle> h) {
     std::lock_guard<std::mutex> lk(mu);
@@ -173,6 +179,22 @@ struct room_table {
     std::lock_guard<std::mutex> lk(mu);
     catalogs[room] = catalog_entry{rev, cat};
     return cat;
+  }
+  // ROOM's bridged users, read again only when bridge.rev moved (room_bridge_presence bumps it
+  // after the user's fields), as the catalog is: (room-roster ROOM "all") runs every tick.
+  std::shared_ptr<const std::vector<room_bridged_user>> bridged(cvc::app &app,
+                                                                const std::string &room) {
+    const std::uint64_t rev = room_bridge_rev(app, room);
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      auto it = bridged_users.find(room);
+      if (it != bridged_users.end() && it->second.rev == rev && it->second.users)
+        return it->second.users;
+    }
+    auto users = std::make_shared<const std::vector<room_bridged_user>>(room_bridged(app, room));
+    std::lock_guard<std::mutex> lk(mu);
+    bridged_users[room] = bridged_entry{rev, users};
+    return users;
   }
   ~room_table() {
     // Document teardown: retract any room the author left joined. Single-threaded (the Runtime
@@ -227,8 +249,19 @@ std::string room_join(cvc::app &app, const std::string &room_id, const std::stri
   // room_write_gate, refuses anything else). presence.joined also materializes the <pid> node so
   // the roster enumerates it even with no name.
   set_replicated(app, join_path({sp.c_str(), "presence", "joined"}), "1");
-  if (!name.empty())
-    set_replicated(app, join_path({sp.c_str(), "profile", "name"}), name);
+  if (name.empty())
+    return sp;
+  // On a relay the name is the relay's (client_registry.h; room_write_gate refuses the write), so
+  // ask it with server.set: it answers by writing profile.name, made unique if another client
+  // has the name. Without one (a mesh, or no relay joined), write it ourselves.
+  const std::shared_ptr<room_call_client> calls = room_call_client::for_app(app);
+  if (calls && calls->room() == room_id && calls->pid() == pid) {
+    calls->call("server.set", se::make_list(),
+                se::make_dict({{"username", se::value_t(name)}, {"unique", se::value_t(true)}}),
+                std::string(), 0.0, [](const room_call_client::outcome &) {});
+    return sp;
+  }
+  set_replicated(app, join_path({sp.c_str(), "profile", "name"}), name);
   return sp;
 }
 
@@ -269,12 +302,236 @@ std::vector<room_participant> room_roster(cvc::app &app, const std::string &room
   return out;
 }
 
+// -------- bridged users --------
+
+namespace {
+
+std::string bridge_users_path(const std::string &room_id) {
+  return room_bridge_path(room_id) + cvc::state::SEPARATOR + "users";
+}
+
+std::string tree_leaf(cvc::app &app, const std::string &path) {
+  cvc::state *n = app.root().findDescendant(path);
+  return n ? n->value() : std::string();
+}
+
+// A write the relay's drain fans out, skipped when the leaf holds it already. Whether it wrote.
+bool set_if_changed(cvc::app &app, const std::string &path, const std::string &val) {
+  cvc::state &n = app.root()(path);
+  if (n.value() == val)
+    return false;
+  n.touch();
+  n.value(val);
+  return true;
+}
+
+// bridge.rev: the wall clock in ms, or one past the last when that is not later, so a relay that
+// restarts goes on past the revs an earlier one gave (a client may hold them still).
+void bump_bridge_rev(cvc::app &app, const std::string &room_id) {
+  const std::string path = room_bridge_path(room_id) + cvc::state::SEPARATOR + "rev";
+  const auto now_ms =
+      static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::system_clock::now().time_since_epoch())
+                                     .count());
+  set_replicated(app, path, std::to_string(std::max(room_bridge_rev(app, room_id) + 1, now_ms)));
+}
+
+std::uint64_t leaf_u64(cvc::app &app, const std::string &path) {
+  const std::string v = tree_leaf(app, path);
+  char *end = nullptr;
+  const unsigned long long n = v.empty() ? 0 : std::strtoull(v.c_str(), &end, 10);
+  return !v.empty() && end && *end == '\0' ? static_cast<std::uint64_t>(n) : 0;
+}
+
+// bridge.count: how many are present, kept by the relay as they come and go, so a presence never
+// walks every user to check the limit (a hub has thousands, and they all log in at once).
+std::uint64_t bridge_count(cvc::app &app, const std::string &room_id) {
+  return leaf_u64(app, room_bridge_path(room_id) + cvc::state::SEPARATOR + "count");
+}
+void set_bridge_count(cvc::app &app, const std::string &room_id, std::uint64_t n) {
+  set_replicated(app, room_bridge_path(room_id) + cvc::state::SEPARATOR + "count",
+                 std::to_string(n));
+}
+
+// The relay's epoch (the chat's, room_chat.h): a bridged user an earlier relay process wrote, which
+// a client that outlived it still holds, is not this relay's.
+std::string bridge_epoch(cvc::app &app, const std::string &room_id) {
+  return tree_leaf(app, chat_root_path(room_id) + cvc::state::SEPARATOR + "epoch");
+}
+
+// TEXT as one line: cleaned as a chat post is (clean_chat_text), newlines and tabs made spaces.
+// "" when nothing is left. False, with WHY, for text that is not UTF-8 or longer than MAX.
+bool clean_line(std::string &text, std::size_t max, std::string &why) {
+  for (char &c : text)
+    if (c == '\n' || c == '\t' || c == '\r')
+      c = ' ';
+  std::string t = text;
+  if (t.find_first_not_of(' ') == std::string::npos) {
+    text.clear();
+    return true;
+  }
+  if (!clean_chat_text(t, max, why))
+    return false;
+  const std::size_t lead = t.find_first_not_of(' ');
+  text = t.substr(lead == std::string::npos ? t.size() : lead);
+  return true;
+}
+
+room_bridged_user read_bridged(cvc::app &app, const std::string &base, const std::string &pid) {
+  const auto at = [&](const char *k) {
+    return tree_leaf(app, base + cvc::state::SEPARATOR + pid + cvc::state::SEPARATOR + k);
+  };
+  room_bridged_user u;
+  u.pid = pid;
+  u.uid = at("uid");
+  u.via = at("via");
+  u.name = at("name");
+  u.detail = at("detail");
+  if (u.name.empty())
+    u.name = u.uid;
+  return u;
+}
+
+} // namespace
+
+std::string room_bridge_path(const std::string &room_id) {
+  return join_path({"conf", "rooms", room_id.c_str(), "bridge"});
+}
+
+bool valid_bridge_via(const std::string &via) {
+  if (via.empty() || via.size() > 16 || via[0] < 'a' || via[0] > 'z')
+    return false;
+  for (const char c : via)
+    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')))
+      return false;
+  return true;
+}
+
+std::string bridged_pid(const std::string &via, const std::string &uid) {
+  if (!valid_bridge_via(via) || uid.empty())
+    return std::string();
+  static const char kHex[] = "0123456789abcdef";
+  std::string out = "_" + via + "_";
+  for (const char ch : uid) {
+    const auto c = static_cast<unsigned char>(ch);
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+      out += ch;
+    } else {
+      out += '_';
+      out += kHex[c >> 4];
+      out += kHex[c & 0xF];
+    }
+  }
+  return out;
+}
+
+bool is_bridged_pid(const std::string &pid) { return !pid.empty() && pid[0] == '_'; }
+
+bool room_bridge_presence(cvc::app &app, const std::string &room_id, const std::string &via,
+                          const std::string &uid, const std::string &name,
+                          const std::string &detail, std::string &why,
+                          const bridge_limits &limits) {
+  if (!valid_bridge_via(via)) {
+    why = "via '" + via +
+          "' is not a system's name (a lowercase letter, then up to 15 lowercase "
+          "letters and digits)";
+    return false;
+  }
+  if (uid.empty() || uid.size() > limits.uid_max) {
+    why = uid.empty() ? "the user id is empty"
+                      : "the user id is longer than " + std::to_string(limits.uid_max) + " bytes";
+    return false;
+  }
+  std::string probe = uid, unused;
+  if (!clean_chat_text(probe, uid.size(), unused)) {
+    why = "the user id is blank or not UTF-8 text";
+    return false;
+  }
+  std::string n = name, d = detail;
+  if (!clean_line(n, limits.name_max, why) || !clean_line(d, limits.detail_max, why))
+    return false;
+  const std::string pid = bridged_pid(via, uid);
+  const std::string base = bridge_users_path(room_id) + cvc::state::SEPARATOR + pid;
+  const std::string present_path = base + cvc::state::SEPARATOR + "present";
+  const bool was = tree_leaf(app, present_path) == "1" &&
+                   tree_leaf(app, base + cvc::state::SEPARATOR + "e") == bridge_epoch(app, room_id);
+  const std::uint64_t count = bridge_count(app, room_id);
+  if (!was && count >= limits.present_max) {
+    why = "the room has " + std::to_string(limits.present_max) + " bridged users already";
+    return false;
+  }
+  if (!was)
+    set_bridge_count(app, room_id, count + 1);
+  bool changed = false;
+  // The fields first and `present` last, so a client that sees it present has the rest.
+  changed |= set_if_changed(app, base + cvc::state::SEPARATOR + "uid", uid);
+  changed |= set_if_changed(app, base + cvc::state::SEPARATOR + "via", via);
+  changed |= set_if_changed(app, base + cvc::state::SEPARATOR + "name", n);
+  changed |= set_if_changed(app, base + cvc::state::SEPARATOR + "detail", d);
+  changed |= set_if_changed(app, base + cvc::state::SEPARATOR + "e", bridge_epoch(app, room_id));
+  changed |= set_if_changed(app, present_path, "1");
+  if (changed)
+    bump_bridge_rev(app, room_id);
+  return true;
+}
+
+bool room_bridge_absent(cvc::app &app, const std::string &room_id, const std::string &via,
+                        const std::string &uid) {
+  const std::string pid = bridged_pid(via, uid);
+  if (pid.empty())
+    return false;
+  const std::string present_path =
+      bridge_users_path(room_id) + cvc::state::SEPARATOR + pid + cvc::state::SEPARATOR + "present";
+  if (tree_leaf(app, present_path) != "1")
+    return false;
+  set_replicated(app, present_path, "0");
+  const std::uint64_t count = bridge_count(app, room_id);
+  set_bridge_count(app, room_id, count > 0 ? count - 1 : 0);
+  bump_bridge_rev(app, room_id);
+  return true;
+}
+
+std::vector<room_bridged_user> room_bridged(cvc::app &app, const std::string &room_id) {
+  std::vector<room_bridged_user> out;
+  const std::string base = bridge_users_path(room_id);
+  cvc::pin_vector chain;
+  const cvc::state::state_ptr users = app.root().findDescendantShared(base, &chain);
+  if (!users)
+    return out;
+  std::vector<std::string> pids = users->childNames();
+  std::sort(pids.begin(), pids.end());
+  const std::string epoch = bridge_epoch(app, room_id);
+  for (const std::string &pid : pids) {
+    const std::string at = base + cvc::state::SEPARATOR + pid + cvc::state::SEPARATOR;
+    if (tree_leaf(app, at + "present") != "1" || tree_leaf(app, at + "e") != epoch)
+      continue;
+    out.push_back(read_bridged(app, base, pid));
+  }
+  return out;
+}
+
+bool room_bridged_user_of(cvc::app &app, const std::string &room_id, const std::string &pid,
+                          room_bridged_user &out) {
+  if (!is_bridged_pid(pid) || !cvc::state::isValidStateName(pid))
+    return false;
+  const std::string base = bridge_users_path(room_id);
+  const std::string at = base + cvc::state::SEPARATOR + pid + cvc::state::SEPARATOR;
+  if (tree_leaf(app, at + "present") != "1" ||
+      tree_leaf(app, at + "e") != bridge_epoch(app, room_id))
+    return false;
+  out = read_bridged(app, base, pid);
+  return true;
+}
+
+std::uint64_t room_bridge_rev(cvc::app &app, const std::string &room_id) {
+  return leaf_u64(app, room_bridge_path(room_id) + cvc::state::SEPARATOR + "rev");
+}
+
 // -------- the DSL surface (thin wrappers over the model + a document-scoped handle) --------
 
 void register_room_intrinsics(cvc::app &app) {
   register_room_call_intrinsics(app); // room-call (room_calls.h): a host that joined a relay
-  const ActionIntrinsicProvider provider = [&app](std::shared_ptr<se::environment> env,
-                                                  se::intrinsics_context &ictx) {
+  auto provider = [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
     se::document_scope *doc = ictx.document; // per-document owner; null on the init: lane
 
     // (room-join ENDPOINT ROOM-ID [PROFILE]) -> handle dict { ok room pid token endpoint }.
@@ -324,7 +581,10 @@ void register_room_intrinsics(cvc::app &app) {
           });
         });
 
-    // (room-roster ROOM) -> list of { pid name present }.
+    // (room-roster ROOM [KIND [LIMIT]]) -> list of { pid name bridged ... }. KIND: "participants"
+    // (the default: who has media and an avatar), "bridged" (the users the relay's program bridges
+    // in from another chat system, room_bridged) or "all" (the participants, then the bridged).
+    // LIMIT: at most that many bridged users (a room may bridge in thousands).
     se::builtins::register_fn(
         env, "room-roster", [&app, doc](std::span<const se::value_t> args) -> se::value_t {
           if (!doc)
@@ -341,10 +601,14 @@ void register_room_intrinsics(cvc::app &app) {
           const std::string room_id = rh ? rh->room_id : handle_token(args[0]);
           if (room_id.empty())
             return err("room-roster: ROOM must be a room-join handle or room-id");
+          const std::string kind = args.size() > 1 ? get_str(&args[1]) : "participants";
+          if (kind != "participants" && kind != "bridged" && kind != "all")
+            return err("room-roster: KIND is \"participants\", \"bridged\" or \"all\"");
+          std::vector<se::value_t> list;
           // Each entry also carries the participant's self-reported link quality (room_net.h):
           // raw numbers (negative = not measured yet) and roster-cell text.
-          std::vector<se::value_t> list;
-          for (const room_participant &p : room_roster(app, room_id)) {
+          for (const room_participant &p :
+               kind == "bridged" ? std::vector<room_participant>() : room_roster(app, room_id)) {
             net_sample net;
             read_participant_net(app, room_id, p.pid, net);
             // Its camera is off (it sends no frames: show "camera off", not its last frame), and
@@ -362,9 +626,59 @@ void register_room_intrinsics(cvc::app &app) {
                 {"ping", se::value_t(format_rtt(net.rtt_ms))},
                 {"down", se::value_t(format_rate(net.in_kbps))},
                 {"up", se::value_t(format_rate(net.out_kbps))},
+                {"bridged", se::value_t(std::string("0"))},
             }));
           }
+          // A bridged user has no camera, microphone or link to show: their camera is off, and
+          // where a participant's link is, their system (VIA) and its line about them (DETAIL).
+          const std::shared_ptr<const std::vector<room_bridged_user>> bridged =
+              kind != "participants" ? tbl->bridged(app, room_id) : nullptr;
+          std::size_t limit = bridged ? bridged->size() : 0;
+          if (args.size() > 2)
+            limit = std::min(limit, static_cast<std::size_t>(std::max(0.0, get_num(&args[2]))));
+          if (bridged)
+            for (const room_bridged_user &u : std::span(bridged->data(), limit)) {
+              list.push_back(se::make_dict({
+                  {"video_off", se::value_t(std::string("1"))},
+                  {"video", se::value_t(std::string())},
+                  {"pid", se::value_t(u.pid)},
+                  {"name", se::value_t(u.name)},
+                  {"rtt_ms", se::value_t(-1.0)},
+                  {"in_kbps", se::value_t(-1.0)},
+                  {"out_kbps", se::value_t(-1.0)},
+                  {"ping", se::value_t(std::string())},
+                  {"down", se::value_t(std::string())},
+                  {"up", se::value_t(std::string())},
+                  {"bridged", se::value_t(std::string("1"))},
+                  {"via", se::value_t(u.via)},
+                  {"uid", se::value_t(u.uid)},
+                  {"detail", se::value_t(u.detail)},
+              }));
+            }
           return se::make_list(std::move(list));
+        });
+
+    // (room-bridged-count ROOM) -> how many bridged users are in the room.
+    se::builtins::register_fn(
+        env, "room-bridged-count", [&app, doc](std::span<const se::value_t> args) -> se::value_t {
+          room_table *tbl = doc ? doc_rooms(doc) : nullptr;
+          if (!tbl || args.empty())
+            return se::value_t(std::int64_t(0));
+          room_handle *rh = tbl->find(handle_token(args[0]));
+          const auto bridged = tbl->bridged(app, rh ? rh->room_id : handle_token(args[0]));
+          return se::value_t(static_cast<std::int64_t>(bridged ? bridged->size() : 0));
+        });
+
+    // (room-bridged-rev ROOM) -> the room's bridge.rev (room_bridge_rev): it moves whenever a
+    // bridged user comes, goes or changes, so a document rebuilds what it shows of them only then.
+    se::builtins::register_fn(
+        env, "room-bridged-rev", [&app, doc](std::span<const se::value_t> args) -> se::value_t {
+          room_table *tbl = doc ? doc_rooms(doc) : nullptr;
+          if (!tbl || args.empty())
+            return se::value_t(std::int64_t(0));
+          room_handle *rh = tbl->find(handle_token(args[0]));
+          const std::string room_id = rh ? rh->room_id : handle_token(args[0]);
+          return se::value_t(static_cast<std::int64_t>(room_bridge_rev(app, room_id)));
         });
 
     // (room-leave ROOM) -> { ok #t/#f }.
@@ -563,10 +877,11 @@ void register_room_intrinsics(cvc::app &app) {
           });
         });
 
-    // (chat-messages ROOM [CHANNEL [AFTER]]) -> list of { seq from name text t clock mine }, oldest
-    // first: the contiguous run held as of the last chat-info, or with AFTER (a seq) only its
-    // messages after that one. `clock` is the local "HH:MM" of the relay's timestamp `t`; `mine` is
-    // #t for the caller's own messages.
+    // (chat-messages ROOM [CHANNEL [AFTER]]) -> list of { seq from name text t clock mine via },
+    // oldest first: the contiguous run held as of the last chat-info, or with AFTER (a seq) only
+    // its messages after that one. `clock` is the local "HH:MM" of the relay's timestamp `t`;
+    // `mine` is #t for the caller's own messages; `via` is the system a bridged user posted from
+    // ("" for a participant's message).
     se::builtins::register_fn(
         env, "chat-messages", [chat_of](std::span<const se::value_t> args) -> se::value_t {
           std::string error;
@@ -588,6 +903,7 @@ void register_room_intrinsics(cvc::app &app) {
                 {"t", se::value_t(m.t)},
                 {"clock", se::value_t(clock_text(m.t))},
                 {"mine", se::value_t(m.from == c->pid())},
+                {"via", se::value_t(m.via)},
             }));
           return se::make_list(std::move(list));
         });
@@ -622,11 +938,11 @@ void register_room_intrinsics(cvc::app &app) {
                               });
 
     // (chat-conversations ROOM) -> list of { peer name head present }: the participants the
-    // caller has direct messages with, in the order they started. `name` is the peer's current
-    // name while it is in the room, else its pid.
+    // caller has direct messages with (participants and bridged users), in the order they
+    // started. `name` is the peer's current name while it is in the room, else its pid.
     se::builtins::register_fn(
         env, "chat-conversations",
-        [&app, chat_of](std::span<const se::value_t> args) -> se::value_t {
+        [&app, doc, chat_of](std::span<const se::value_t> args) -> se::value_t {
           std::string error;
           room_chat_client *c = chat_of(args, "chat-conversations", error);
           if (!c)
@@ -634,8 +950,17 @@ void register_room_intrinsics(cvc::app &app) {
           std::map<std::string, std::string> names;
           for (const room_participant &p : room_roster(app, c->room()))
             names[p.pid] = p.name;
+          // A bridged peer's name from the room's bridged users (in pid order).
+          const auto bridged = doc_rooms(doc)->bridged(app, c->room());
           std::vector<se::value_t> list;
           for (const room_chat_client::conversation &v : c->conversations()) {
+            if (bridged && is_bridged_pid(v.peer)) {
+              auto b = std::lower_bound(
+                  bridged->begin(), bridged->end(), v.peer,
+                  [](const room_bridged_user &u, const std::string &pid) { return u.pid < pid; });
+              if (b != bridged->end() && b->pid == v.peer)
+                names[v.peer] = b->name;
+            }
             auto it = names.find(v.peer);
             const bool present = it != names.end();
             list.push_back(se::make_dict({
@@ -648,7 +973,12 @@ void register_room_intrinsics(cvc::app &app) {
           return se::make_list(std::move(list));
         });
   };
-  register_action_intrinsics(app, "cvc.ariadne.room", provider);
+  // Kind host_proxied (S1-Q7): the verbs walk and write the app-global room tree raw, and use a
+  // room_handle (its chat client) outside room_table's lock, so in an `any` group they run on the
+  // host thread. The body reads only the context and binds natives into the new env, so a spawned
+  // child may run it on a worker. Keyed: a second runtime on the app keeps one copy.
+  register_action_intrinsics(app, "cvc.ariadne.room", std::move(provider),
+                             se::provider_affinity::host_proxied);
 }
 
 } // namespace conference

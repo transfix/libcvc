@@ -128,6 +128,15 @@ forest_result grow_forest(const forest_params &p, const height_fn &height_at, cv
 void repose_forest(const forest_wind &w, double t, double wind_scale, std::vector<double> &wood_buf,
                    std::vector<double> &needle_buf);
 
+// The same in the scene's wind (O14, cvc/ariadne/scene_wind.h): each pine leans downwind and
+// sways about its lean, bending about the horizontal axis across the wind. (dir_x, dir_y) is the
+// way the wind blows (a unit vector); `strength` scales the authored sway (1 at the reference
+// wind, more in a stronger one); gust(x, y) is the gust factor at a tree's base (null: 1). A
+// tree's angle is sway x strength x gust x (0.6 + 0.4 sin(1.3 t + phase)): never upwind.
+void repose_forest_in_wind(const forest_wind &w, double t, double strength, double dir_x,
+                           double dir_y, const std::function<double(double, double)> &gust,
+                           std::vector<double> &wood_buf, std::vector<double> &needle_buf);
+
 // ── single-tree generators (building blocks; also the seam for DSL intrinsics) ───────────────
 // Grow ONE pine at base (bx,by,bz) with trunk scale `size` and grammar depth `maturity` (1..5),
 // appending to the shared `wood`/`needle` meshes. When `out_tree` is non-null its wind re-pose

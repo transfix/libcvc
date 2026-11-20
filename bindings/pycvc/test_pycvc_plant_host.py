@@ -113,6 +113,11 @@ check(a.world().has_terrain(), "its world has the terrain to collide and navigat
 expect_raises(lambda: pycvc.generate_world({"sead": 1}), "an unknown param")
 expect_raises(lambda: pycvc.generate_world({"half": "big"}), "a number param as a string")
 expect_raises(lambda: pycvc.generate_world({"terrain": "nope"}), "an unknown generator")
+check(info["edge"] == "wall", "walls at the edge by default")
+s = pycvc.generate_world({**P, "edge": "shore"})
+check(s.info()["edge"] == "shore" and s.height(199.9, 0.0) < -5.0, "a shore: the sea at the edge")
+check(s.height(0.0, 0.0) == a.height(0.0, 0.0), "a shore: the same ground inland")
+expect_raises(lambda: pycvc.generate_world({"edge": "moat"}), "an unknown edge")
 
 # 2. plant_host on the bicycle
 check(set(pycvc.plant_host.presets()) >= {"humvee", "roboracer"}, "the presets")
@@ -179,6 +184,24 @@ if pycvc.plant_host.available():
     check(host.kind() == "dynamic" and host.body(0) is not None, "the dynamic single track, live")
 else:
     print("Jolt is not available — skipping checks 3 and 4")
+
+# 4b. boats: "dynamicboat" on the host's water (set_water), refused without it
+if pycvc.plant_host.available() and hasattr(pycvc.plant_host, "set_water"):
+    wsim = make_sim(FLAT, FB, [(-20.0, 0.0)], [(20.0, 0.0)])
+    dry = pycvc.plant_host()
+    expect_raises(lambda: dry.use(wsim, "dynamicboat"), "a boat with no water under it")
+    boats = pycvc.plant_host()
+    boats.set_water(pycvc.make_app(), level=0.0, depth=10.0, half_size=60.0)
+    check(boats.use(wsim, "dynamicboat") == "dynamicboat", "a boat on the host's water")
+    check(boats.kind() == "dynamicboat", f"its plant: {boats.kind()}")
+    x0 = float(pycvc.nav_sim_world_snapshot(wsim)[0][0][0])
+    for _ in range(200):
+        pycvc.nav_sim_world_step(wsim)
+    x1 = float(pycvc.nav_sim_world_snapshot(wsim)[0][0][0])
+    check(x1 > x0 + 2.0 * S, f"the boat drives toward its goal ({x0 / S:.1f} -> {x1 / S:.1f} m)")
+    boats.clear_water()
+    expect_raises(lambda: boats.use(wsim, "dynamicboat"), "the water cleared: refused again")
+    expect_raises(lambda: boats.set_water(pycvc.make_app(), depth=0.0), "a water with no depth")
 
 # 5. lifetimes: the host drops first; the sim keeps stepping on the bicycle
 host.use(sim, "humvee" if pycvc.plant_host.available() else "kinematic")

@@ -1,0 +1,56 @@
+# boat_controls.ari — a REUSABLE Ariadne component: the helm of a `boat` node (a boat in the scene's
+# physics world, afloat on its water; scene_boat.h, OCEAN-AND-WEATHER-ROADMAP.md D6). Drive: keys
+# steers it from the Throttle and Rudder sliders (the node's throttle and rudder keys, each -1..1;
+# a + rudder turns it left); nav lets the navigator take it to its goal ("x,y", world metres). Below,
+# what the boat does now.
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the boat node's state key root: its `keys:` prop, else its id (default boat)
+#   title  the window's title (default Boat)
+#   id     the instance id: the window's geometry persists under tree.<id> (default boat_controls)
+#
+# Use it:
+#     import: cvc://components/boat_controls.ari
+#     windows:
+#       - include: boat_controls
+#         args: { keys: launch, title: Launch }
+
+units:
+  boat_controls:
+    args: { keys: boat, title: Boat, id: boat_controls }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - combo: Drive
+        bind: "{keys}.drive"
+        options: [keys, nav]
+        tooltip: "keys: the Throttle and Rudder below; nav: the navigator takes it to its goal"
+      - slider_float: Throttle
+        bind: "{keys}.throttle"
+        lo: -1.0
+        hi: 1.0
+        fmt: "%.2f"
+        tooltip: "+ ahead, - astern (under Drive: keys)"
+      - slider_float: Rudder
+        bind: "{keys}.rudder"
+        lo: -1.0
+        hi: 1.0
+        fmt: "%.2f"
+        tooltip: "+ turns it left (under Drive: keys)"
+      - input_text: Goal (x,y)
+        bind: "{keys}.goal"
+        tooltip: "where nav takes it, in world metres (under Drive: nav)"
+      - text: "speed (m/s)"
+        bind: "{keys}.speed"
+      - text: "heading (deg)"
+        bind: "{keys}.heading"
+      - text: "thrust (N)"
+        bind: "{keys}.thrust"
+      - text: "x"
+        bind: "{keys}.x"
+      - text: "y"
+        bind: "{keys}.y"
+      - text: "at its goal"
+        bind: "{keys}.reached"
+      - text: "status"
+        bind: "{keys}.status"

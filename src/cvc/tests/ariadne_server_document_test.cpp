@@ -19,13 +19,20 @@
 // client_guests:, the latter with a fake engine here).
 // room_relay_integration_test.cpp has the same over a relay's transports.
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cvc/ariadne/conference/room_entities.h>
+#include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/script_engine.h> // a client guest's engine (client_guests:)
 #include <cvc/ariadne/server_document.h>
 #include <cvc/ariadne/value.h>
+#include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
+#include <cvc/physics/backend.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_exec/exceptions.h> // dsl_error
@@ -39,6 +46,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -141,6 +149,8 @@ TEST(ServerBlockTest, RefusesWhatItCannotPublish) {
   EXPECT_NE(error_for({"conf"}).find("the relay's room tree"), std::string::npos);
   EXPECT_NE(error_for({"conf.rooms.standup.extra"}).find("under conf"), std::string::npos);
   EXPECT_NE(error_for({"ui.docs.arisrv.own"}).find("under ui"), std::string::npos);
+  EXPECT_NE(error_for({"arisrv"}).find("the relay's own records"), std::string::npos);
+  EXPECT_NE(error_for({"arisrv.clients"}).find("under arisrv"), std::string::npos);
   EXPECT_NE(error_for({"ariadne.limits"}).find("the host's settings"), std::string::npos);
   EXPECT_NE(error_for({"state_exec"}).find("the host's settings"), std::string::npos);
   EXPECT_NE(error_for({"room"}).find("view of the relay's room"), std::string::npos);
@@ -302,22 +312,37 @@ TEST(ServerDocumentTest, QuitAsksTheRelayToStop) {
   EXPECT_EQ(doc.exit_code(), 3);
 }
 
-// The relay publishes a document's scene as the room's world (WD1) but simulates none of its
-// physics yet: the parsed scene, its physics and bodies included, is kept from read() on for the
-// world runtime that will attach (ARIADNE_WORLDS.md §14), and the load says it is not simulated.
-TEST(ServerDocumentTest, KeepsTheSceneAndSaysItIsNotSimulated) {
+// The relay publishes a document's scene as the room's world (WD1) from the copy read() keeps,
+// and the load runs that world headless (ARIADNE_WORLDS.md §14): its physics world and bodies,
+// and its vehicles (the ones it starts with, and more on request), driven by nav@1 on the world
+// clock at each step().
+TEST(ServerDocumentTest, RunsItsScenesWorldAndItsVehicles) {
   if (!ari::AppRuntime::have_yaml())
     GTEST_SKIP() << "built without yaml-cpp";
   TempDir dir;
   const std::string path = dir.write("world.ari", R"(meta: { name: world, min_libcvc: 3.7.5 }
+requires: [relay, scene.physics]
+world:
+  vehicles:
+    archetypes:
+      rover:
+        plant: kinematic
+        vehicle: { preset: roboracer, max_speed: 6 }
+        controllers: [nav@1]
+    start:
+      - { archetype: rover, count: 5, name: rover }
 scene:
   physics: {gravity: [0, 0, -9.80665]}
+  world: { source: square, cell: 2 }
   nodes:
-    - node: ground
-      source: {plane: {size: 20}}
+    - node: square
+      world: square
+      source: {box: {size: [120, 120, 1]}}
+      transform: { position: [0, 0, -0.5] }
       body: static
     - node: crate
       source: {box: {size: [0.6, 0.6, 0.6]}}
+      transform: { position: [30, 30, 3] }
       body: {motion: dynamic, mass: 20}
 )");
   cvc::app app;
@@ -326,16 +351,126 @@ scene:
   // read() has it already, so the relay can publish the world before the document runs.
   EXPECT_EQ(doc.scene().nodes.size(), 2u);
   const std::vector<std::string> warnings = doc.load(path);
-  bool said = false;
   for (const std::string &w : warnings) {
-    said = said || w.find("physics (2 bodies) is kept but not simulated") != std::string::npos;
     EXPECT_EQ(w.find("scene ignored"), std::string::npos) << w;
+    EXPECT_EQ(w.find("not simulated"), std::string::npos) << w;
   }
-  EXPECT_TRUE(said) << "the load says the physics is not simulated";
-  EXPECT_TRUE(doc.scene().physics.present);
-  ASSERT_EQ(doc.scene().nodes.size(), 2u);
-  EXPECT_EQ(doc.scene().nodes[1].id, "crate");
+  ASSERT_EQ(doc.scene().nodes.size(), 2u) << "the relay's copy stays";
   EXPECT_TRUE(doc.scene().nodes[1].body.present);
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt))
+    GTEST_SKIP() << "no Jolt in this build";
+  ari::SceneWorld *world = doc.runtime().scene_world();
+  ASSERT_NE(world, nullptr) << "the load built the scene's world";
+  ari::WorldVehicles *vehicles = world->vehicles();
+  ASSERT_NE(vehicles, nullptr);
+
+  // The five it starts with, named in order.
+  ASSERT_EQ(vehicles->size(), 5u);
+  EXPECT_EQ(vehicles->entities()[0].spec.name, "rover 1");
+  EXPECT_EQ(vehicles->entities()[4].spec.name, "rover 5");
+
+  // The relay's steps drive them on the world clock.
+  cvc::state &root = cvc::state::instance(app);
+  const auto value = [&root](const std::string &key) {
+    return root(std::string(ari::ServerDocument::kPrefix) + "." + key).value();
+  };
+  std::uint64_t tick = 0;
+  const auto steps = [&](double seconds) {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+    while (std::chrono::steady_clock::now() < until) {
+      ++tick;
+      doc.step(tick, tick / 120.0);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  };
+  steps(0.1);
+  EXPECT_EQ(value("vehicles.count"), "5");
+  const std::vector<ari::entity_info> start = vehicles->entities();
+  steps(2.0);
+  const std::vector<ari::entity_info> later = vehicles->entities();
+  ASSERT_EQ(later.size(), start.size());
+  double moved = 0.0;
+  for (std::size_t i = 0; i < later.size(); ++i)
+    moved = std::max(moved, std::hypot(later[i].x - start[i].x, later[i].y - start[i].y));
+  EXPECT_GT(moved, 1.0) << "nav@1 drives them";
+  // Their table is under the document's prefix (entities.<id>.*), which the relay does not send.
+  EXPECT_FALSE(value("entities." + std::to_string(later[0].id) + ".x").empty());
+
+  // A request spawns spawn.count more at once.
+  root(std::string(ari::ServerDocument::kPrefix) + ".vehicles.spawn.count").value("2");
+  root(std::string(ari::ServerDocument::kPrefix) + ".vehicles.spawn.request").value("1");
+  for (int i = 0; i < 40 && vehicles->size() < 7; ++i)
+    steps(0.05);
+  EXPECT_EQ(vehicles->size(), 7u) << value("vehicles.spawn.status");
+  EXPECT_EQ(value("vehicles.spawn.status").rfind("spawned 2, the last 7", 0), 0u)
+      << value("vehicles.spawn.status");
+
+  // What the relay sends of them (room_entities.h): each one's identity in the room's entities
+  // section, and its pose for the pose stream.
+  cvc::ariadne::conference::room_entity_relay relay;
+  const std::vector<ari::pose_subject> &poses = relay.step(app, kRoom, vehicles);
+  ASSERT_EQ(poses.size(), 7u);
+  EXPECT_EQ(poses[0].pid, "~e1");
+  const std::vector<cvc::ariadne::conference::room_entity> listed =
+      cvc::ariadne::conference::read_room_entities(app, kRoom);
+  ASSERT_EQ(listed.size(), 7u);
+  EXPECT_EQ(listed[0].name, "rover 1");
+  EXPECT_EQ(listed[0].plant, "kinematic");
+  EXPECT_GT(listed[0].size[0], 0.5) << "its chassis's length";
+  EXPECT_EQ(relay.writes(), 1u);
+  relay.step(app, kRoom, vehicles);
+  EXPECT_EQ(relay.writes(), 1u) << "rewritten only when they change";
+  vehicles->despawn(listed[0].id);
+  relay.step(app, kRoom, vehicles);
+  EXPECT_EQ(relay.writes(), 2u);
+  EXPECT_EQ(cvc::ariadne::conference::read_room_entities(app, kRoom).size(), 6u);
+}
+
+// The stock server world with vehicles (cvc://worlds/traffic.ari, arisrv --doc): it loads on the
+// relay, its eighteen vehicles start and drive between its blocks.
+TEST(ServerDocumentTest, TheStockTrafficWorldRuns) {
+  if (!ari::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  const fs::path path =
+      fs::path(__FILE__).parent_path().parent_path() / "ariadne" / "worlds" / "traffic.ari";
+  if (!fs::exists(path))
+    GTEST_SKIP() << "no source tree beside this test: " << path.string();
+  cvc::app app;
+  ari::ServerDocument doc(app, kRoom);
+  ASSERT_EQ(doc.read(path.string()), "");
+  EXPECT_GE(doc.scene().nodes.size(), 13u) << "the ground and twelve blocks";
+  const std::vector<std::string> warnings = doc.load(path.string());
+  for (const std::string &w : warnings)
+    ADD_FAILURE() << "traffic.ari warns: " << w;
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt))
+    GTEST_SKIP() << "no Jolt in this build";
+  ari::SceneWorld *world = doc.runtime().scene_world();
+  ASSERT_NE(world, nullptr);
+  ari::WorldVehicles *vehicles = world->vehicles();
+  ASSERT_NE(vehicles, nullptr);
+  ASSERT_EQ(vehicles->size(), 18u);
+  std::uint64_t tick = 0;
+  const auto steps = [&](double seconds) {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+    while (std::chrono::steady_clock::now() < until) {
+      ++tick;
+      doc.step(tick, tick / 120.0);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  };
+  steps(0.2);
+  const std::vector<ari::entity_info> start = vehicles->entities();
+  int placed = 0;
+  for (const ari::entity_info &e : start)
+    placed += e.placed ? 1 : 0;
+  EXPECT_EQ(placed, 18) << "every one at a free point between the blocks";
+  steps(2.0);
+  const std::vector<ari::entity_info> later = vehicles->entities();
+  ASSERT_EQ(later.size(), start.size());
+  int moving = 0;
+  for (std::size_t i = 0; i < later.size(); ++i)
+    moving += std::hypot(later[i].x - start[i].x, later[i].y - start[i].y) > 1.0 ? 1 : 0;
+  EXPECT_GE(moving, 12) << "most of them drive";
 }
 
 // The document's own state is never published, whatever prefix it binds under: an entry that is
@@ -643,16 +778,26 @@ namespace se = cvc::state_exec;
 //   write  (state-set "score" 42), then finish with (state-get "score"), both called in the slice
 //   call   call (car args) with (cdr args), then finish with (ok value) or (#f "Class: message")
 //   spin   charge its budget, and never finish
-//   held   echo, once the engine's `compiled` is set: not ready() till then
+//   work   charge kWork steps over its slices, then finish with its arguments
+//   held   echo, once the engine's `compiled` is set: not ready() till then (and heldwork, work)
 class FakeClientCode : public ari::ScriptActivation {
 public:
+  static constexpr std::uint64_t kWork = 500;
   FakeClientCode(std::string entry, se::value_t args, std::shared_ptr<std::atomic<bool>> compiled)
       : entry_(std::move(entry)), args_(std::move(args)), compiled_(std::move(compiled)) {}
-  bool ready() const override { return entry_ != "held" || compiled_->load(); }
+  bool ready() const override { return entry_.rfind("held", 0) != 0 || compiled_->load(); }
   void step(ari::ScriptSlice &s) override {
     const auto &items = *std::get<se::list_ptr>(args_.v);
     if (entry_ == "echo" || entry_ == "held")
       return s.finish(args_);
+    if (entry_ == "work" || entry_ == "heldwork") {
+      const std::uint64_t n = std::min(s.budget() ? s.budget() : 1, kWork - worked_);
+      s.charge(n);
+      worked_ += n;
+      if (worked_ == kWork)
+        s.finish(args_);
+      return;
+    }
     if (entry_ == "write") {
       const se::value_t set[] = {se::value_t(std::string("score")), se::value_t(std::int64_t(42))};
       if (!s.call_now("state-set", set) || s.failed())
@@ -677,6 +822,7 @@ private:
   std::string entry_;
   se::value_t args_;
   std::shared_ptr<std::atomic<bool>> compiled_;
+  std::uint64_t worked_ = 0;
 };
 
 class FakeEngine : public ari::ScriptEngine {
@@ -883,4 +1029,155 @@ TEST(ServerDocumentTest, AClientGuestIsHeldUntilItIsReady) {
   ASSERT_TRUE(held->done);
   ASSERT_TRUE(held->outcome.ok) << held->outcome.code << ": " << held->outcome.message;
   EXPECT_EQ(text(held->outcome.value), text(se::make_list({se::value_t(std::int64_t(7))})));
+}
+
+namespace {
+// A program of `n` additions, its cost in steps a few times n.
+std::string additions(int n) {
+  std::string s;
+  for (int i = 0; i < n; ++i)
+    s += "(+ 1 1)\n";
+  return s;
+}
+
+// Step the document until `run` has its outcome, for as many steps as a long one needs.
+void step_until_one(ari::ServerDocument &doc, const std::shared_ptr<ClientRun> &run) {
+  for (int i = 0; i < 400 && !run->done; ++i)
+    doc.step(240 + i, (240 + i) / 120.0);
+}
+} // namespace
+
+// Each client's limits (set_client_limits, ARISRV_IDENTITY.md ID4a): asked at each start with the
+// document's caps, they lower one client's, refuse another its programs, and leave the rest at the
+// document's. One asking for more than the document's gets it, or is held to the document's, as
+// decision D2 has it (kClientLimitsAboveDocument), and the action lane's caps hold over both. A
+// change applies at the client's next start.
+TEST(ServerDocumentTest, EachClientsLimitsLowerItsProgramsCaps) {
+  if (!ari::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  using Kind = ari::ServerDocument::ClientKind;
+  TempDir dir;
+  const std::string path = dir.write("server.ari", kClientProgramsDoc); // steps: 2000
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  root("ariadne.limits.action_max_steps").value(std::string("100000"));
+  // Steps alone decide here: the action lane's 0.1 s would stop the heavy program first on a slow
+  // (Debug) build, and the time it takes is no measure of the caps under test.
+  root("ariadne.limits.action_max_time").value(std::string("0"));
+  ari::ServerDocument doc(app, kRoom);
+  ASSERT_EQ(doc.read(path), "");
+  std::vector<std::string> asked;
+  std::uint64_t low = 50;
+  doc.set_client_limits([&](const std::string &pid, Kind kind, const ari::ClientLimits &document) {
+    asked.push_back(pid);
+    EXPECT_EQ(kind, Kind::program);
+    EXPECT_TRUE(document.on);
+    EXPECT_EQ(document.max_steps, 2000u) << "the document's caps, as its server: block has them";
+    ari::ClientLimits caps = document;
+    if (pid == "low")
+      caps.max_steps = low;
+    else if (pid == "high")
+      caps.max_steps = 50000;
+    else if (pid == "none")
+      caps.on = false;
+    return caps;
+  });
+  doc.load(path);
+  const std::string light = additions(100);  // over 50 steps, under 2000
+  const std::string heavy = additions(1500); // over 2000 (and under 50000, the lane's here)
+
+  const auto outcome = [&](const std::string &pid, const std::string &source) {
+    const auto r = run_client(doc, pid, source);
+    step_until_one(doc, r);
+    EXPECT_TRUE(r->done) << pid;
+    return r->outcome.ok ? std::string("ok") : r->outcome.code;
+  };
+  EXPECT_EQ(outcome("mid", light), "ok");
+  EXPECT_EQ(outcome("mid", heavy), "resource_exhausted") << "the document's 2000 steps";
+  EXPECT_EQ(outcome("low", light), "resource_exhausted") << "lowered to 50";
+  if constexpr (ari::ServerDocument::kClientLimitsAboveDocument)
+    EXPECT_EQ(outcome("high", heavy), "ok") << "raised above the document's";
+  else
+    EXPECT_EQ(outcome("high", heavy), "resource_exhausted") << "held to the document's 2000";
+
+  const auto none = run_client(doc, "none", "1");
+  ASSERT_TRUE(none->done) << "refused at once";
+  EXPECT_EQ(none->outcome.code, "forbidden");
+  EXPECT_NE(none->outcome.message.find("limits"), std::string::npos) << none->outcome.message;
+
+  low = 0;
+  EXPECT_EQ(outcome("low", light), "ok")
+      << "a change applies at the next start (0: the document's)";
+  root("ariadne.limits.action_max_steps").value(std::string("50"));
+  EXPECT_EQ(outcome("mid", light), "resource_exhausted") << "the action lane's hold over both";
+  EXPECT_EQ(asked, (std::vector<std::string>{"mid", "mid", "low", "high", "none", "low", "mid"}));
+}
+
+// A guest's caps are its client's too: its memory (as D2 has it), its steps (a held
+// guest's as well, once it starts), a refusal by kind, and a function that throws refusing the
+// start.
+TEST(ServerDocumentTest, EachClientsLimitsCapItsGuests) {
+  if (!ari::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  using Kind = ari::ServerDocument::ClientKind;
+  TempDir dir;
+  const std::string path = dir.write("server.ari", kClientGuestsDoc); // guests: 2000 steps, 4 MiB
+  cvc::app app;
+  ari::ServerDocument doc(app, kRoom);
+  ASSERT_EQ(doc.read(path), "");
+  const auto engine = std::make_shared<FakeEngine>();
+  doc.use_client_guests(engine);
+  doc.set_client_limits([](const std::string &pid, Kind kind, const ari::ClientLimits &document) {
+    if (pid == "broken")
+      throw std::runtime_error("the registry is gone");
+    ari::ClientLimits caps = document;
+    if (kind == Kind::guest) {
+      EXPECT_EQ(document.max_memory, 4u << 20) << "client_guests:' memory_mb";
+      if (pid == "big")
+        caps.max_memory = 32u << 20; // over the document's 4 MiB
+      else if (pid == "lean")
+        caps.max_memory = 1u << 20;
+      else if (pid == "tight")
+        caps.max_steps = 50;
+      else if (pid == "programs-only")
+        caps.on = false;
+    }
+    return caps;
+  });
+  doc.load(path);
+
+  const auto finished = [&](const std::shared_ptr<ClientRun> &r) {
+    step_until_one(doc, r);
+    EXPECT_TRUE(r->done);
+    return r->outcome.ok ? std::string("ok") : r->outcome.code;
+  };
+  EXPECT_EQ(finished(run_guest(doc, "p1", "echo")), "ok");
+  EXPECT_EQ(engine->last_memory, 4u << 20) << "the document's";
+  EXPECT_EQ(finished(run_guest(doc, "lean", "echo")), "ok");
+  EXPECT_EQ(engine->last_memory, 1u << 20) << "its own";
+  EXPECT_EQ(finished(run_guest(doc, "big", "echo")), "ok");
+  if constexpr (ari::ServerDocument::kClientLimitsAboveDocument)
+    EXPECT_EQ(engine->last_memory, 32u << 20) << "raised above the document's";
+  else
+    EXPECT_EQ(engine->last_memory, 4u << 20) << "held to the document's";
+  EXPECT_EQ(finished(run_guest(doc, "p1", "work")), "ok") << "500 steps, under 2000";
+  EXPECT_EQ(finished(run_guest(doc, "tight", "work")), "resource_exhausted") << "50 steps";
+
+  const auto held = run_guest(doc, "tight", "heldwork");
+  for (int i = 0; i < 10; ++i)
+    doc.step(240 + i, (240 + i) / 120.0);
+  EXPECT_FALSE(held->done) << "held while it compiles";
+  engine->compiled->store(true);
+  EXPECT_EQ(finished(held), "resource_exhausted") << "started under its client's caps";
+
+  const auto refused = run_guest(doc, "programs-only", "echo");
+  ASSERT_TRUE(refused->done) << "refused at once";
+  EXPECT_EQ(refused->outcome.code, "forbidden");
+  EXPECT_EQ(finished(run_client(doc, "programs-only", "(+ 1 1)")), "ok") << "its programs may run";
+
+  const auto broken = run_guest(doc, "broken", "echo");
+  ASSERT_TRUE(broken->done) << "refused at once";
+  EXPECT_EQ(broken->outcome.code, "unavailable");
+  EXPECT_NE(broken->outcome.message.find("the registry is gone"), std::string::npos)
+      << broken->outcome.message;
 }

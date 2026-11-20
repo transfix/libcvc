@@ -305,10 +305,12 @@ void sim_world::rebuild_all_fields() {
 // The plant arm: the same controller, writing its command for the plant instead of
 // integrating (veh_params::plant). Without a plant or terrain the drive reads cfg_.veh itself.
 const veh_params &sim_world::drive_vehicle(veh_params &vplant, plant_drive &pdrive) {
-  const bool own_veh = plant_ != nullptr || terrain_on_;
+  const bool own_veh = plant_ != nullptr || terrain_on_ || cfg_.stop_at_goal;
   if (!own_veh)
     return cfg_.veh;
   vplant = cfg_.veh;
+  if (cfg_.stop_at_goal)
+    vplant.stop_at = goal_.data(); // each agent comes to rest at its goal
   if (terrain_on_) {
     if (ter_cfg_.governors) {
       vplant.slope = &ter_slope_;
@@ -580,6 +582,15 @@ void sim_world::step(int num_threads) {
   sdf_sample(fs, o_.data(), n_, map_id_.data(), phi.data(), nrm.data(), num_threads, pool_);
   lap(prof_.sdf);
 
+  // park_hold on the kinematic arm: a parked agent's start of tick, before the FSM brakes it
+  // its own way, to hold it from after the drive.
+  std::vector<plant_state> hold_start;
+  if (cfg_.park_hold && !plant_) {
+    hold_start.resize(static_cast<std::size_t>(n_));
+    for (int i = 0; i < n_; ++i)
+      hold_start[i] = {o_[2 * i], o_[2 * i + 1], th_[i], sp_[i]};
+  }
+
   // ── CARROT FSM ──
   fsm_state s;
   s.stall = stall_.data();
@@ -610,18 +621,27 @@ void sim_world::step(int num_threads) {
   // steers AROUND itself instead of driving through. Reactive and per-agent, so
   // it works in every belief mode (the shared-plane scale path can't stamp peers
   // per agent). Off unless the host opts in (sep_gain > 0); the neighbour query
-  // is the same CGAL kd-tree the squad uses (grid_nav.h neighbors_within_radius).
-  if (cfg_.sep_gain > 0.0f && cfg_.sep_radius > 0.0f && n_ > 1) {
-    std::vector<double> pw(static_cast<std::size_t>(2) * n_);
+  // is the same CGAL kd-tree the squad uses (grid_nav.h neighbors_within_radius). The foreign
+  // agents (set_foreign_agents) are peers here too, after the world's own in the tree.
+  const int nf = static_cast<int>(foreign_.size() / 2);
+  if (cfg_.sep_gain > 0.0f && cfg_.sep_radius > 0.0f && n_ > 0 && n_ + nf > 1) {
+    // The pass-on-the-right look-ahead reaches further than the push (sep_side_radius).
+    const float Rs = cfg_.sep_side > 0.0f ? std::max(cfg_.sep_radius, cfg_.sep_side_radius) : 0.0f;
+    const int all = n_ + nf;
+    std::vector<double> pw(static_cast<std::size_t>(2) * all);
     for (int i = 0; i < 2 * n_; ++i)
       pw[i] = o_[i]; // separation works in the normalized frame (o_/carrot_)
-    const neighbor_csr csr = neighbors_within_radius(pw.data(), n_, cfg_.sep_radius);
+    for (int i = 0; i < 2 * nf; ++i)
+      pw[2 * n_ + i] = foreign_[i];
+    const neighbor_csr csr = neighbors_within_radius(pw.data(), all, std::max(cfg_.sep_radius, Rs));
     const float R = cfg_.sep_radius;
     for (int i = 0; i < n_; ++i) {
       float sx = 0.0f, sy = 0.0f;
+      float side = 0.0f; // the strongest pass-on-the-right weight a peer ahead asks for
       for (int k = csr.offsets[i]; k < csr.offsets[i + 1]; ++k) {
         const int j = csr.indices[k];
-        float dx = o_[2 * i] - o_[2 * j], dy = o_[2 * i + 1] - o_[2 * j + 1];
+        const float jx = static_cast<float>(pw[2 * j]), jy = static_cast<float>(pw[2 * j + 1]);
+        float dx = o_[2 * i] - jx, dy = o_[2 * i + 1] - jy;
         float d2 = dx * dx + dy * dy;
         if (d2 < 1e-10f) { // coincident: split deterministically by index
           dx = (i < j) ? 1.0f : -1.0f;
@@ -635,9 +655,25 @@ void sim_world::step(int num_threads) {
         const float inv = w * w / d; // quadratic falloff along the unit separation dir
         sx += dx * inv;
         sy += dy * inv;
+        // Passing on the right (sep_side): a peer ahead, within Rs and no further than R off this
+        // agent's line, asks it to turn right. (dx, dy) point from the peer to this agent.
+        if (Rs > 0.0f) {
+          const float ch = std::cos(th_[i]), sh = std::sin(th_[i]);
+          const float ahead = -(dx * ch + dy * sh), across = std::fabs(dx * sh - dy * ch);
+          if (ahead > 0.0f && across < R && d < Rs)
+            side = std::max(side, (Rs - d) / Rs);
+        }
       }
       carrot_[2 * i] += cfg_.sep_gain * sx;
       carrot_[2 * i + 1] += cfg_.sep_gain * sy;
+      // The turn: the carrot moved to the agent's right by sep_side * weight of its distance, so
+      // two that meet head on both swing right and pass instead of only braking toward each other.
+      if (side > 0.0f) {
+        const float cx = carrot_[2 * i] - o_[2 * i], cy = carrot_[2 * i + 1] - o_[2 * i + 1];
+        const float off = cfg_.sep_side * side * std::sqrt(cx * cx + cy * cy);
+        carrot_[2 * i] += off * std::sin(th_[i]);
+        carrot_[2 * i + 1] -= off * std::cos(th_[i]);
+      }
     }
   }
 
@@ -896,6 +932,28 @@ void sim_world::step(int num_threads) {
     }
   }
 
+  // ── park_hold (kinematic arm): a parked agent brakes to a stop at a_max and holds, straight
+  // ahead, in place of the drive's move (an override's command still takes its tick) ──
+  if (!hold_start.empty()) {
+    const float dt = cfg_.veh.dt;
+    for (int i = 0; i < n_; ++i) {
+      if (!parked_[i] || (ov_any_ && ov_on_[i]))
+        continue;
+      const plant_state &s0 = hold_start[i];
+      const float L = cfg_.veh.L_col ? cfg_.veh.L_col[i] : cfg_.veh.L;
+      const float vmax_i = cfg_.veh.vmax_col ? cfg_.veh.vmax_col[i] : cfg_.veh.vmax;
+      const float a_max_i = cfg_.veh.a_max_col ? cfg_.veh.a_max_col[i] : cfg_.veh.a_max;
+      const float sp_min = cfg_.veh.allow_reverse ? -0.25f * vmax_i : 0.0f;
+      const float acc = std::min(std::max(-s0.speed / dt, -a_max_i), a_max_i);
+      const plant_state s1 =
+          kinematic_step(s0, 0.0f, acc, L, dt, std::max(1, cfg_.veh.nsub), sp_min, vmax_i);
+      o_[2 * i] = s1.x;
+      o_[2 * i + 1] = s1.y;
+      th_[i] = s1.heading;
+      sp_[i] = s1.speed;
+    }
+  }
+
   // ── THE PLANT: command, advance one tick, read back, and measure the drift ──
   if (plant_) {
     const float dt = cfg_.veh.dt;
@@ -1080,6 +1138,14 @@ void sim_world::step(int num_threads) {
   // clearance must be METRES-double (min_clearance_world / scale), not the raw
   // normalized minclr_.
   if (stats_) {
+    // The feed's scratch follows the agent count (add_agent, remove_agent).
+    st_pos_.resize(static_cast<std::size_t>(2) * n_);
+    st_head_.resize(n_);
+    st_spd_.resize(n_);
+    st_mode_.resize(n_);
+    st_reached_.resize(n_);
+    st_clr_.resize(n_, 1e30f);
+    st_clr_d_.resize(n_, 1e30);
     snapshot(st_pos_.data(), st_head_.data(), st_spd_.data(), st_mode_.data(), st_reached_.data());
     min_clearance_world(st_clr_.data()); // world metres, 1e29 sentinel preserved
     for (int i = 0; i < n_; ++i)
@@ -1752,6 +1818,14 @@ bool sim_world::plant_plan_of(int i, plant_plan &out) const {
   for (int b = 0; b < kPlantDiscs; ++b)
     out.body_offsets[b] = pl_body_off_[static_cast<std::size_t>(kPlantDiscs) * i + b];
   out.footprint = pl_fp_;
+  out.wheelbase = pl_L_[i];
+  out.max_steer = pl_max_steer_;
+  out.steer_rate = pl_steer_rate_[i];
+  out.steer_now = pl_steer_now_[i];
+  out.latency = pl_latency_[i];
+  out.a_brake = pl_a_brake_[i];
+  out.parked = parked_[i] != 0;
+  out.modulated = pl_mod_.tire_gain > 0.0f || pl_mod_.tip_gain > 0.0f;
   return true;
 }
 
@@ -2149,18 +2223,15 @@ void sim_world::refresh_columns() {
 }
 
 namespace {
-void check_resizable(const vehicle_plant *plant, bool stats, const char *who) {
+void check_resizable(const vehicle_plant *plant, const char *who) {
   if (plant && !plant->resizable())
     throw std::logic_error(std::string("cvc::nav::sim_world::") + who +
                            ": this plant's vehicles are fixed when it attaches (set_plant)");
-  if (stats)
-    throw std::logic_error(std::string("cvc::nav::sim_world::") + who +
-                           ": nav_stats is armed, and its episode counts the agents it began with");
 }
 } // namespace
 
 std::uint64_t sim_world::add_agent(const agent_spec &a) {
-  check_resizable(plant_, static_cast<bool>(stats_), "add_agent");
+  check_resizable(plant_, "add_agent");
   if (!a.own_plane && (a.plane < 0 || a.plane >= M_))
     throw std::invalid_argument("cvc::nav::sim_world::add_agent: plane " + std::to_string(a.plane) +
                                 " is outside [0, " + std::to_string(M_) + ")");
@@ -2223,14 +2294,23 @@ std::uint64_t sim_world::add_agent(const agent_spec &a) {
   if (plant_)
     plant_read(); // its pose, speed and limits as the plant has them
   ++ident_rev_;
+  if (stats_) { // nav_stats counts it from here, from where it stands toward its goal
+    std::vector<float> pos(static_cast<std::size_t>(2) * n_), goal(pos.size());
+    snapshot(pos.data(), nullptr, nullptr, nullptr, nullptr);
+    goals_world(goal.data());
+    stats_->add_agent(&pos[static_cast<std::size_t>(2) * i],
+                      &goal[static_cast<std::size_t>(2) * i]);
+  }
   return ids_[i];
 }
 
 bool sim_world::remove_agent(std::uint64_t id) {
-  check_resizable(plant_, static_cast<bool>(stats_), "remove_agent");
+  check_resizable(plant_, "remove_agent");
   const int i = index_of(id);
   if (i < 0)
     return false;
+  if (stats_) // nav_stats keeps its record and moves the indices after it down
+    stats_->remove_agent(i);
   if (plant_)
     plant_->remove_vehicle(i);
   const int plane = map_id_[static_cast<std::size_t>(i)];

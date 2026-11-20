@@ -19,8 +19,16 @@ set(CVC_PORT_TESTS
   contour_stack_test
   point_classes_test
   planar_test
+  tiler_test
+  tiler_legacy_test
+  tiler_intrinsics_test
   segmentation_test
   segmentation_intrinsics_test
+  gradient_vector_diffusion_test
+  critical_points_test
+  seed_generators_test
+  volume_slice_test
+  tabs_list_test
 )
 
 # One port test: cvc and googletest, and under Emscripten what node needs to run it (as
@@ -51,6 +59,16 @@ target_link_libraries(tet_complex_test PRIVATE cvc_permissive_geometry)
 target_compile_definitions(skeleton_test PRIVATE
   CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
 
-# segmentation_test compares the GenSeg port with the legacy library's goldens the same way.
+# segmentation_test compares the GenSeg port with the legacy library's goldens the same way, and
+# critical_points_test the paper mode with SegMed's.
 target_compile_definitions(segmentation_test PRIVATE
+  CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
+target_compile_definitions(critical_points_test PRIVATE
+  CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
+
+# tiler_test also checks the vendored tiler's internals (src/cvc/geometry/tiler), as the legacy
+# library's own tests did.
+target_include_directories(tiler_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../geometry/tiler)
+target_include_directories(tiler_legacy_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../geometry/tiler)
+target_compile_definitions(tiler_test PRIVATE
   CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")

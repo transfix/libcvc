@@ -421,6 +421,55 @@ TEST(NavTerrain, AParkedAgentStopsOnItsBrakes) {
   }
 }
 
+// stop_at_goal and park_hold (sim_world::config): an agent sent 150 m at a 24 m/s top speed comes
+// to rest within its reach of its goal, on the kinematic arm and on a plant (6 m/s^2 of brakes,
+// 0.1 s of latency), slowing into it. Without them it meets its goal at the speed the goal's pull
+// leaves: on a plant it parks and brakes to a stop well past the goal, and on the kinematic arm
+// it drives on.
+TEST(NavTerrain, AnAgentComesToRestAtItsGoal) {
+  std::vector<std::uint8_t> occ(static_cast<std::size_t>(R) * C, 0);
+  const double reach = 4.0, gx = 70.0;
+  for (const bool plant_arm : {false, true})
+    for (const bool on : {true, false}) {
+      sim_world::config c = config(24.0);
+      c.stop_at_goal = c.park_hold = on;
+      sim_world w = make(c, occ, -80.0, 0.0, gx, 0.0);
+      plant_limits lim;
+      lim.a_brake = static_cast<float>(6.0 * kS);
+      lim.latency = 0.1f;
+      free_plant plant(lim);
+      if (plant_arm)
+        w.set_plant(&plant);
+      double top = 0.0, v_in = -1.0;
+      int still = 0;
+      for (int t = 0; t < 900 && still < 20; ++t) {
+        w.step();
+        float p[2], h, s;
+        int m;
+        std::uint8_t rc;
+        w.snapshot(p, &h, &s, &m, &rc);
+        top = std::max(top, static_cast<double>(s));
+        if (rc && v_in < 0.0)
+          v_in = s; // m/s, as it came within its reach
+        still = v_in >= 0.0 && std::fabs(s) < 1e-3f ? still + 1 : 0;
+      }
+      const pose p = pose_of(w);
+      const double past = p.x - gx;
+      std::printf("  %s, %s: top %.1f m/s, %.1f m/s into its reach, ends %+.1f m past, %.2f m/s\n",
+                  plant_arm ? "plant" : "kinematic", on ? "stop_at_goal" : "off", top, v_in, past,
+                  p.speed);
+      ASSERT_GE(v_in, 0.0) << "it comes within its reach";
+      if (on) {
+        EXPECT_LT(std::fabs(past), reach) << "at rest within its reach";
+        EXPECT_LT(std::fabs(p.speed), 1e-3);
+        EXPECT_LT(v_in, 6.0) << "slowing into it";
+        EXPECT_GT(top, 15.0) << "at speed before it";
+      } else {
+        EXPECT_GT(past, 10.0) << "past it";
+      }
+    }
+}
+
 // H1, the soft force: with the grade cost's weight, the agent driving past a hill leans away
 // from it, onto gentler ground.
 TEST(NavTerrain, TheGradeForceLeansTowardGentlerGround) {

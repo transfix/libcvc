@@ -13,10 +13,22 @@ add_executable(ariadne_doc_fetch_test ariadne_doc_fetch_test.cpp)
 add_executable(ariadne_scene_tf_test ariadne_scene_tf_test.cpp)
 add_executable(ariadne_runtime_test ariadne_runtime_test.cpp)
 add_executable(ariadne_scene_world_test ariadne_scene_world_test.cpp)
+# AriadneWorldGym.ThePlantsAreModelsATwinReplays replays the dynamic4w plant (built with
+# -ffp-contract=off) with its model called inline here, bit for bit: build it the same way, or clang
+# contracts this copy into FMAs on aarch64 (the macOS arm64 lanes) and the last bits differ.
+if(NOT MSVC)
+  set_source_files_properties(ariadne_scene_world_test.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(ariadne_scene_world_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
+add_executable(ariadne_scene_quality_test ariadne_scene_quality_test.cpp)
+# A document's swarm of navigating vehicles, run headless (scene_swarm.h).
+add_executable(ariadne_scene_swarm_test ariadne_scene_swarm_test.cpp)
 add_executable(ariadne_server_document_test ariadne_server_document_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
 add_executable(ariadne_chart_test ariadne_chart_test.cpp)
+add_executable(ariadne_heatmap_test ariadne_heatmap_test.cpp)
 add_executable(ariadne_term_graphics_test ariadne_term_graphics_test.cpp)
 add_executable(ariadne_media_test ariadne_media_test.cpp)
 add_executable(ariadne_files_test ariadne_files_test.cpp)
@@ -159,6 +171,7 @@ add_executable(room_scene_test room_scene_test.cpp)
 add_executable(world_rules_test world_rules_test.cpp)
 add_executable(room_avatar_test room_avatar_test.cpp)
 add_executable(room_chat_test room_chat_test.cpp)
+add_executable(client_registry_test client_registry_test.cpp)
 add_executable(room_aoi_test room_aoi_test.cpp)
 add_executable(room_aoi_relay_test room_aoi_relay_test.cpp)
 add_executable(physics_codec_test physics_codec_test.cpp)
@@ -195,12 +208,16 @@ else()
 endif()
 add_executable(ph_compose_test ph_compose_test.cpp)
 add_executable(ph_compose_parity_test ph_compose_parity_test.cpp)
+add_executable(ph_microgrid_test ph_microgrid_test.cpp)
+add_executable(ph_query_test ph_query_test.cpp)
 add_executable(ph_convoy_test ph_convoy_test.cpp)
 add_executable(ph_se2_test ph_se2_test.cpp)
 add_executable(ph_se2_train_test ph_se2_train_test.cpp)
 add_executable(nav_terrain_test nav_terrain_test.cpp)
 add_executable(nav_binding_test nav_binding_test.cpp)
 add_executable(nav_trace_test nav_trace_test.cpp)
+add_executable(nav_arms_test nav_arms_test.cpp)
+add_executable(nav_scrub_test nav_scrub_test.cpp)
 add_executable(input_trace_test input_trace_test.cpp)
 add_executable(nav_sim_world_agents_test nav_sim_world_agents_test.cpp)
 add_executable(physics_parity_test physics_parity_test.cpp)
@@ -212,6 +229,7 @@ add_executable(physics_pose_tracker_test physics_pose_tracker_test.cpp)
 add_executable(physics_plant_host_test physics_plant_host_test.cpp)
 add_executable(physics_dyn_bike_plant_test physics_dyn_bike_plant_test.cpp)
 add_executable(physics_dyn_4w_plant_test physics_dyn_4w_plant_test.cpp)
+add_executable(physics_dyn_boat_plant_test physics_dyn_boat_plant_test.cpp)
 # StepsAsTheDynamicPlantDoes (and the four-wheel StepsAsTheFourWheelPlantDoes) hold the plant
 # (built with -ffp-contract=off) to its model called inline here, bit for bit: build them the same
 # way, or clang contracts this copy into FMAs on aarch64 (the macOS arm64 lanes) and the last bits
@@ -355,6 +373,7 @@ add_executable(world_road_raster_test world_road_raster_test.cpp)
 add_executable(world_raster_test world_raster_test.cpp)
 add_executable(world_generated_test world_generated_test.cpp)
 add_executable(world_cloud_test world_cloud_test.cpp)
+add_executable(world_weather_test world_weather_test.cpp)
 add_executable(world_water_bodies_test world_water_bodies_test.cpp)
 add_executable(algo_distance_transform_test algo_distance_transform_test.cpp)
 add_executable(algo_det_math_test algo_det_math_test.cpp)
@@ -371,6 +390,14 @@ else()
   set_source_files_properties(ocean_sea_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 add_executable(ocean_ewave_test ocean_ewave_test.cpp)
+add_executable(ocean_wind_test ocean_wind_test.cpp)
+# The gusts', the current's and the fetch map's golden hashes are of values computed from inputs
+# computed here: build without FMA contraction, as ocean_sea_test.
+if(NOT MSVC)
+  set_source_files_properties(ocean_wind_test.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(ocean_wind_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 # EwaveDigest pins a window's digest after a fixed scenario whose inputs (the drops' points, the
 # wall's mask) are computed here: build without FMA contraction, as ocean_sea_test.
 if(NOT MSVC)
@@ -393,10 +420,13 @@ set(TEST_TARGETS
   ariadne_scene_tf_test
   ariadne_runtime_test
   ariadne_scene_world_test
+  ariadne_scene_quality_test
+  ariadne_scene_swarm_test
   ariadne_server_document_test
   ariadne_bind_test
   ariadne_ftxui_test
   ariadne_chart_test
+  ariadne_heatmap_test
   ariadne_term_graphics_test
   ariadne_media_test
   ariadne_files_test
@@ -477,6 +507,7 @@ set(TEST_TARGETS
   world_rules_test
   room_avatar_test
   room_chat_test
+  client_registry_test
   room_aoi_test
   room_aoi_relay_test
   physics_codec_test
@@ -498,12 +529,16 @@ set(TEST_TARGETS
   nav_potential_test
   ph_compose_test
   ph_compose_parity_test
+  ph_microgrid_test
+  ph_query_test
   ph_convoy_test
   ph_se2_test
   ph_se2_train_test
   nav_terrain_test
   nav_binding_test
   nav_trace_test
+  nav_arms_test
+  nav_scrub_test
   input_trace_test
   nav_sim_world_agents_test
   physics_parity_test
@@ -513,6 +548,7 @@ set(TEST_TARGETS
   physics_plant_host_test
   physics_dyn_bike_plant_test
   physics_dyn_4w_plant_test
+  physics_dyn_boat_plant_test
   physics_mujoco_robot_test
   geometry_height_field_test
   world_geometry_test
@@ -610,6 +646,7 @@ set(TEST_TARGETS
   world_raster_test
   world_generated_test
   world_cloud_test
+  world_weather_test
   world_water_bodies_test
   algo_distance_transform_test
   algo_det_math_test
@@ -617,6 +654,7 @@ set(TEST_TARGETS
   ocean_shore_test
   ocean_sea_test
   ocean_ewave_test
+  ocean_wind_test
   world_bundle_test
   volren_math_test
   volren_camera_test
@@ -695,6 +733,14 @@ if(CVC_ENABLE_SDF AND CVC_ENABLE_MESHER)
   list(APPEND TEST_TARGETS geometry_test)
 else()
   message(STATUS "SDF/Mesher disabled; skipping geometry_test")
+endif()
+
+# tiler_bunny_test: the contour tiler end to end on the Stanford bunny's signed distance field
+# (cvc::sdf, declared only with CVC_ENABLE_SDF). It skips at run time without libigl or
+# cvc::planar.
+if(CVC_ENABLE_SDF)
+  add_executable(tiler_bunny_test tiler_bunny_test.cpp)
+  list(APPEND TEST_TARGETS tiler_bunny_test)
 endif()
 
 # algorithm_test drives cvc::iso/tetrahedralize/hexahedralize which require
@@ -809,6 +855,20 @@ target_link_libraries(ariadne_scene_world_test
     GTest::gtest_main
 )
 
+target_link_libraries(ariadne_scene_quality_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_scene_swarm_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(ariadne_server_document_test
   PRIVATE
     cvc
@@ -829,8 +889,18 @@ target_link_libraries(ariadne_chart_test
     GTest::gtest
     GTest::gtest_main
 )
+
+target_link_libraries(ariadne_heatmap_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 # Three tests load GL-free documents from the repo's examples/ tree.
 target_compile_definitions(ariadne_ftxui_test PRIVATE
+  CVC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../examples")
+# ariadne_scene_world_test runs terrain_lab.ari's world headless (its boat on the lake).
+target_compile_definitions(ariadne_scene_world_test PRIVATE
   CVC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../examples")
 # room_scene_test pins the stock world documents to their C++ twins.
 target_compile_definitions(room_scene_test PRIVATE
@@ -1116,6 +1186,11 @@ if(TARGET geometry_test)
       GTest::gtest
       GTest::gtest_main
   )
+endif()
+
+if(TARGET tiler_bunny_test)
+  target_link_libraries(tiler_bunny_test PRIVATE cvc GTest::gtest GTest::gtest_main)
+  target_compile_features(tiler_bunny_test PRIVATE cxx_std_20)
 endif()
 
 if(TARGET algorithm_test)
@@ -1583,7 +1658,7 @@ target_link_libraries(vis_tiler_test
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_ewave_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_weather_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_ewave_test ocean_wind_test)
   target_link_libraries(${_lsys_test} PRIVATE cvc GTest::gtest GTest::gtest_main)
   target_compile_features(${_lsys_test} PRIVATE cxx_std_17)
 endforeach()
@@ -2285,6 +2360,13 @@ target_link_libraries(room_chat_test
     GTest::gtest_main
 )
 
+target_link_libraries(client_registry_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(room_aoi_test
   PRIVATE
     cvc
@@ -2411,6 +2493,20 @@ target_link_libraries(ph_compose_parity_test
     GTest::gtest_main
 )
 
+target_link_libraries(ph_microgrid_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ph_query_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(ph_se2_test
   PRIVATE
     cvc
@@ -2445,6 +2541,18 @@ target_link_libraries(nav_binding_test
     GTest::gtest_main
 )
 target_link_libraries(nav_trace_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(nav_arms_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(nav_scrub_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2505,6 +2613,12 @@ target_link_libraries(physics_dyn_bike_plant_test
     GTest::gtest_main
 )
 target_link_libraries(physics_dyn_4w_plant_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(physics_dyn_boat_plant_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2859,6 +2973,7 @@ target_compile_features(room_scene_test PRIVATE cxx_std_17)
 target_compile_features(world_rules_test PRIVATE cxx_std_20)
 target_compile_features(room_avatar_test PRIVATE cxx_std_17)
 target_compile_features(room_chat_test PRIVATE cxx_std_20)
+target_compile_features(client_registry_test PRIVATE cxx_std_20)
 target_compile_features(room_aoi_test PRIVATE cxx_std_17)
 target_compile_features(room_aoi_relay_test PRIVATE cxx_std_17)
 target_compile_features(physics_codec_test PRIVATE cxx_std_17)
@@ -2880,19 +2995,24 @@ target_compile_features(nav_dyn_ph_full_test PRIVATE cxx_std_17)
 target_compile_features(nav_potential_test PRIVATE cxx_std_17)
 target_compile_features(ph_compose_test PRIVATE cxx_std_17)
 target_compile_features(ph_compose_parity_test PRIVATE cxx_std_17)
+target_compile_features(ph_microgrid_test PRIVATE cxx_std_17)
+target_compile_features(ph_query_test PRIVATE cxx_std_17)
 target_compile_features(ph_convoy_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_train_test PRIVATE cxx_std_17)
 target_compile_features(nav_terrain_test PRIVATE cxx_std_17)
 target_compile_features(nav_binding_test PRIVATE cxx_std_17)
 target_compile_features(nav_trace_test PRIVATE cxx_std_17)
+target_compile_features(nav_arms_test PRIVATE cxx_std_20)
+target_compile_features(nav_scrub_test PRIVATE cxx_std_20)
 target_compile_features(input_trace_test PRIVATE cxx_std_17)
 target_compile_features(nav_sim_world_agents_test PRIVATE cxx_std_17)
 target_compile_features(physics_parity_test PRIVATE cxx_std_17)
 target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
-target_compile_features(physics_plant_host_test PRIVATE cxx_std_17)
+target_compile_features(physics_plant_host_test PRIVATE cxx_std_20)
 target_compile_features(physics_dyn_bike_plant_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_4w_plant_test PRIVATE cxx_std_17)
+target_compile_features(physics_dyn_boat_plant_test PRIVATE cxx_std_17)
 target_compile_features(physics_mujoco_robot_test PRIVATE cxx_std_17)
 target_compile_features(geometry_height_field_test PRIVATE cxx_std_17)
 target_compile_features(world_geometry_test PRIVATE cxx_std_17)
@@ -3033,7 +3153,16 @@ endfunction()
 
 cvc_discover_tests(app_test)
 foreach(_cvc_port_test IN LISTS CVC_PORT_TESTS)
-  cvc_discover_tests(${_cvc_port_test})
+  if(_cvc_port_test STREQUAL "segmentation_intrinsics_test" OR
+     _cvc_port_test STREQUAL "tiler_intrinsics_test")
+    # AnActionStartsItUnderTheDefaultLimits runs a 160^3 segmentation (a 30-slice tube's tiling)
+    # through an action's frame loop: 93-101 s (109-111 s) in a Debug job, and past ctest's 300 s on
+    # a loaded runner (three times over in one job; the tiler's on transfix/libcvc#1351's run
+    # 44274032889, where the segmentation took 548 s). The test's own loop allows 900 s too.
+    cvc_discover_tests(${_cvc_port_test} PROPERTIES TIMEOUT 900)
+  else()
+    cvc_discover_tests(${_cvc_port_test})
+  endif()
 endforeach()
 cvc_discover_tests(thread_pool_test)
 cvc_discover_tests(thread_class_test)
@@ -3042,10 +3171,16 @@ cvc_discover_tests(ariadne_loader_test)
 cvc_discover_tests(ariadne_doc_fetch_test)
 cvc_discover_tests(ariadne_scene_tf_test)
 cvc_discover_tests(ariadne_runtime_test)
-cvc_discover_tests(ariadne_scene_world_test)
+# The boat node's tests drive a boat across a lake on the physics world's fluid (76 and 156 s in a
+# Debug job before #1318's inertial fluid; past ctest's 300 s after it), and the crate drifting in
+# the scene's wind runs as long: 900 s each, as the segmentation action test has.
+cvc_discover_tests(ariadne_scene_world_test PROPERTIES TIMEOUT 900)
+cvc_discover_tests(ariadne_scene_quality_test)
+cvc_discover_tests(ariadne_scene_swarm_test)
 cvc_discover_tests(ariadne_server_document_test)
 cvc_discover_tests(ariadne_ftxui_test)
 cvc_discover_tests(ariadne_chart_test)
+cvc_discover_tests(ariadne_heatmap_test)
 cvc_discover_tests(ariadne_term_graphics_test)
 cvc_discover_tests(ariadne_media_test)
 cvc_discover_tests(ariadne_files_test)
@@ -3084,6 +3219,12 @@ cvc_discover_tests(volslice_test)
 cvc_discover_tests(volslice_state_test)
 if(TARGET geometry_test)
   cvc_discover_tests(geometry_test)
+endif()
+if(TARGET tiler_bunny_test)
+  # About 13 s in Release; a Debug job runs the SDF and the tiling many times slower, so in Debug
+  # its suite is TilerBunnyIntegration, a heavy suite PRs skip (tiler_bunny_test.cpp). 900 s, as
+  # tiler_intrinsics_test has, for the Release pushes that run the heavy suites.
+  cvc_discover_tests(tiler_bunny_test PROPERTIES TIMEOUT 900)
 endif()
 if(TARGET algorithm_test)
   cvc_discover_tests(algorithm_test)
@@ -3145,7 +3286,7 @@ cvc_discover_tests(vis_tiler_test)
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_weather_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_wind_test)
   cvc_discover_tests(${_lsys_test})
 endforeach()
 # The water's long runs (a channel's walls, a thin wall, a moving source's wake) take 105-195 s
@@ -3431,10 +3572,15 @@ cvc_discover_tests(room_scene_test)
 cvc_discover_tests(world_rules_test)
 cvc_discover_tests(room_avatar_test)
 cvc_discover_tests(room_chat_test)
+cvc_discover_tests(client_registry_test)
 cvc_discover_tests(room_aoi_test)
 cvc_discover_tests(room_aoi_relay_test)
 cvc_discover_tests(physics_codec_test)
-cvc_discover_tests(physics_field_test)
+# The wake's long runs (packed crates settling for 120 s, the cost on a three-cascade sea) take
+# 12-15 s each in a Release build and many times that in a Debug or sanitizer build (not measured
+# here), which may pass the 300 s a test without a TIMEOUT of its own gets there (ci.yml): their
+# own budget, as the water's.
+cvc_discover_tests(physics_field_test PROPERTIES TIMEOUT 1200)
 cvc_discover_tests(physics_hull_test)
 cvc_discover_tests(physics_immersion_test)
 cvc_discover_tests(physics_boat_test)
@@ -3452,12 +3598,22 @@ cvc_discover_tests(nav_dyn_ph_full_test)
 cvc_discover_tests(nav_potential_test)
 cvc_discover_tests(ph_compose_test)
 cvc_discover_tests(ph_compose_parity_test)
-cvc_discover_tests(ph_convoy_test)
+cvc_discover_tests(ph_microgrid_test)
+# The candidate query and the history fit roll out RK4 references (about 4.5 s and 3 s in Release):
+# the same budget as the convoy's, below, so a slow Debug runner fails on a real hang only.
+cvc_discover_tests(ph_query_test PROPERTIES TIMEOUT 1200)
+# The convoy's two full runs (the composite against the formation; the follow laws on a step and
+# a stop) take ~95 s each in a Debug build, and a PR's Debug ctest gives a test without a TIMEOUT
+# of its own 300 s (ci.yml), which a busy runner misses: both timed out on #1288's run on
+# 2026-11-16. Their own budget, as ocean_ewave_test has, so a slow box fails on a real hang only.
+cvc_discover_tests(ph_convoy_test PROPERTIES TIMEOUT 1200)
 cvc_discover_tests(ph_se2_test)
 cvc_discover_tests(ph_se2_train_test)
 cvc_discover_tests(nav_terrain_test)
 cvc_discover_tests(nav_binding_test)
 cvc_discover_tests(nav_trace_test)
+cvc_discover_tests(nav_arms_test)
+cvc_discover_tests(nav_scrub_test)
 cvc_discover_tests(input_trace_test)
 cvc_discover_tests(nav_sim_world_agents_test)
 cvc_discover_tests(physics_parity_test)
@@ -3465,6 +3621,7 @@ cvc_discover_tests(physics_pose_tracker_test)
 cvc_discover_tests(physics_plant_host_test)
 cvc_discover_tests(physics_dyn_bike_plant_test)
 cvc_discover_tests(physics_dyn_4w_plant_test)
+cvc_discover_tests(physics_dyn_boat_plant_test)
 cvc_discover_tests(physics_mujoco_robot_test)
 cvc_discover_tests(geometry_height_field_test)
 cvc_discover_tests(world_geometry_test)
@@ -3519,6 +3676,16 @@ set_property(DIRECTORY APPEND PROPERTY CVC_REGISTERED_TESTS physics_replay_test)
 # answers, against each other, and on two threads at once.
 add_test(NAME permissive_libs_test COMMAND permissive_libs_test)
 set_property(DIRECTORY APPEND PROPERTY CVC_REGISTERED_TESTS permissive_libs_test)
+# Threaded Stage 1's AR-1: the two Ariadne suites whole, again, with CVC_EXEC_THREADS=auto, so the
+# app's pool has workers and its lock manager is shared. With no document opted in, nothing may
+# change. AppLockManager.* is left out: it asserts the single manager CVC_EXEC_THREADS turns off.
+# One entry per binary, so each gets its own timeout, above ctest's default for one case.
+foreach(_cvc_ari_suite ariadne_runtime_test ariadne_host_test)
+  add_test(NAME ${_cvc_ari_suite}_threads_auto
+           COMMAND ${_cvc_ari_suite} --gtest_filter=-AppLockManager.*)
+  set_tests_properties(${_cvc_ari_suite}_threads_auto PROPERTIES
+                       ENVIRONMENT "CVC_EXEC_THREADS=auto" TIMEOUT 1800)
+endforeach()
 # state_exec_bench (plain main()): --smoke runs every scenario once at tiny sizes and fails on a
 # program that returned the wrong thing, so the benchmarks can't rot between real runs.
 if(TARGET state_exec_bench)

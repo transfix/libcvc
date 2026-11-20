@@ -15,7 +15,47 @@ sensor rings, fog tiers, captions — the same visual vocabulary as the original
 |------|---------------|
 | **`nav_city_swarm`** | 800 vehicles cross a varied-height procedural city under **fog** (default `--belief grouped`, M≈12 planes): every agent's **goal pyramid** is drawn (it sinks when reached), breadcrumb **trails** accumulate the street-flow, the ground is the **fleet's fog coverage**, agents recolour by state (white = wall-follow escape, green = arrived), and a HUD counts arrivals. `--no-fog --agents 1500` is the static-map scale-benchmark path. |
 | **`nav_fog_ghost`** | the fog-of-war "ghost" story, told on a top-down **map view by default** (`--view 3d` for perspective): the ground shows the agent's honest epistemics — never-seen near-black, remembered dim, in-view lit, belief as an LED grid (WALL red, GHOST amber) — while the phantom stands as a **translucent amber 3-D wall that erodes cell-by-cell** as the sensor clears it. Blue PLAN line (the live carrot) vs yellow TRACK trail, GOAL/start markers, a 4-beat caption arc, 0.5× story pacing. |
+| **`nav_scrub`** (`examples/ariadne/nav_scrub`) | watch a policy learn: cvc::nav's coef_trainer trains 60 steps on a walled square of city blocks, every checkpoint is deployed there on the Jolt Humvee (which stops against the buildings) and on nav's kinematic bicycle (which drives through them; a Plant combo switches), and an Ariadne document shows checkpoint k beside step 0 (the deployed metric against the step, the loss curve, both runs' Stats and Ledger, their ghosts). The scrubber of [docs/NAV_LAB.md](../../docs/NAV_LAB.md); in the gallery it trains and deploys in the page. |
 | **`nav_finale`** | the flagship: 8 vehicles that already **hold the city map** converge on a drawn **staging line** (Act 1), then split into hue-matched **pursuit packs** chasing 4 hovering labelled targets (Act 2) — per-vehicle **A\* route spines** on the ground bend in place as routes retarget, engagement lines link pursuer to target, act cards narrate, and the PiP minimap draws true-position dots + route lines. Auto-probes `$CVC_NAV_BUNDLE` / `~/scenes/austin_south` for the real Austin bundle; the synthetic fallback says so on the HUD. `--view map` for a top-down ortho answer. |
+
+## The city demos as Ariadne documents
+
+`nav_city_swarm` and `nav_city_drive` are also Ariadne documents that `arigl` runs with no program of
+their own: [`nav_city_swarm.ari`](../ariadne/documents/nav_city_swarm.ari) and
+[`nav_city_drive.ari`](../ariadne/documents/nav_city_drive.ari). The city is the document's `data:`
+block (the scene-austin-south package, or `--bundle DIR`), drawn with its aerial image on the ground
+and on the buildings; the swarm is a `nav_swarm` scene node, and each thing it draws (the vehicles,
+flags, goals, trails, belief walls, the minimap's markers) a `swarm_layer` node under it with its own
+`visible:` and `tags:`; the panels are the shipped `swarm_controls` and `swarm_minimap` components; the
+chase camera, the 2-D map and the capture cameras are the document's `on_tick`
+([ARIADNE.md §5.4, "Swarms"](../../docs/ARIADNE.md)).
+
+```sh
+arigl --net-allow https://cvcpkg.org nav_city_swarm.ari        # Austin from cvcpkg.org, then the cache
+arigl nav_city_swarm.ari --bundle /path/to/austin_south          # a local bundle
+arigl nav_city_drive.ari --bundle /path/to/austin_south --follow 0
+arigl snapshot --mp4 city.mp4 --seconds 20 --width 1280 --height 720 nav_city_swarm.ari --capture orbit --no-ui
+```
+
+Their command lines take the programs' options: `--agents`, `--belief`, `--no-fog`, `--plant`,
+`--seed`, `--hz`, `--follow`, `--capture orbit|fly|follow`, `--map`, `--no-shadows`, `--no-ui`,
+`--no-pip`, and `--bench` (the frame rate on stderr every 120 frames).
+
+They draw the same scenes faster. On a laptop with an RTX 3050 Ti, at 1280 x 720 on the full Austin
+bundle, the navigator keeping its 60 steps a second in all of them:
+
+| | the program | the document |
+|---|---|---|
+| swarm: 800 vehicles, fog, grouped belief | 17 fps (19 without the minimap) | 45 fps (50 without) |
+| drive: 60 Humvees on Jolt | 29 fps | 55 fps |
+
+Where it comes from: the coarse vehicle rungs are decimated from the model welded at its texture
+seams and keep only the points their triangles use (the programs' far rung streamed 262 points a
+vehicle, the document's 115, and its middle rungs a third as many); a rung takes only vehicles big
+enough on screen to need it, so an overview streams no full-detail Humvees; an empty rung and an
+unchanged slot's colours are not sent again; the trails stream every third frame; the minimap
+redraws five times a second (and every frame while you drag in it); and the sun's shadow maps follow
+the camera.
 
 ## Headless pure-C++ companions
 

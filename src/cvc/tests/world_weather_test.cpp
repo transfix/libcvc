@@ -1,0 +1,591 @@
+/*
+  Copyright 2007-2011 The University of Texas at Austin
+
+        Authors: Joe Rivera <transfix@ices.utexas.edu>
+        Advisor: Chandrajit Bajaj <bajaj@cs.utexas.edu>
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+// cvc::world::weather — the weather model (OCEAN-AND-WEATHER-ROADMAP.md §9 F2): a pure function of
+// its parameters, the world time and the authored events; storms on a schedule run clear, building,
+// storm, clearing and clear; an authored storm starts one; cells ride the steering wind; the events
+// survive their text form; compact() keeps the weather from now on as it was.
+
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cvc/world/weather.h>
+#include <gtest/gtest.h>
+#include <vector>
+
+using cvc::world::format_weather_events;
+using cvc::world::parse_weather_events;
+using cvc::world::storm_cell;
+using cvc::world::weather;
+using cvc::world::weather_event;
+using cvc::world::weather_now;
+using cvc::world::weather_params;
+using cvc::world::weather_state;
+
+namespace {
+constexpr double kPi = 3.14159265358979323846;
+
+weather_event storm_at(double t, double x, double y, double life = 1800.0, double r = 2000.0,
+                       double peak = 1.0) {
+  weather_event e;
+  e.type = weather_event::kind::storm;
+  e.t = t;
+  e.x = x;
+  e.y = y;
+  e.life = life;
+  e.radius = r;
+  e.peak = peak;
+  return e;
+}
+
+weather_event steer_at(double t, double speed, double az) {
+  weather_event e;
+  e.type = weather_event::kind::steer;
+  e.t = t;
+  e.speed = speed;
+  e.az = az;
+  return e;
+}
+
+weather_event rate_at(double t, double scale) {
+  weather_event e;
+  e.type = weather_event::kind::rate;
+  e.t = t;
+  e.scale = scale;
+  return e;
+}
+
+weather_event calm_at(double t) {
+  weather_event e;
+  e.type = weather_event::kind::calm;
+  e.t = t;
+  return e;
+}
+
+// Only authored storms.
+weather_params quiet() {
+  weather_params p;
+  p.chance = 0.0;
+  return p;
+}
+
+// The first scheduled storm of a seed's weather: its slot's cell at its birth.
+bool first_storm(const weather &w, storm_cell &out, double &born) {
+  const weather_params &p = w.params();
+  for (int k = 0; k < 200; ++k) {
+    // Scan the slot a minute at a time for its storm's birth.
+    for (double tau = k * p.interval; tau < (k + 1) * p.interval; tau += 60.0) {
+      const weather_now n = w.at(tau);
+      for (const storm_cell &c : n.cells)
+        if (!c.authored) {
+          out = c;
+          born = c.born;
+          return true;
+        }
+    }
+  }
+  return false;
+}
+} // namespace
+
+TEST(WorldWeather, IsAPureFunctionOfTheSeedTheTimeAndTheEvents) {
+  weather_params p;
+  p.seed = 7;
+  p.chance = 0.8;
+  const std::vector<weather_event> ev = {storm_at(500.0, 100.0, -300.0),
+                                         steer_at(900.0, 5.0, 135.0), rate_at(1500.0, 4.0),
+                                         calm_at(4000.0)};
+  weather a(p), b(p);
+  a.set_events(ev);
+  b.set_events(ev);
+  // Asked in another order, after other times: the same answers (nothing is stepped or kept).
+  std::vector<double> times;
+  for (double t = -100.0; t < 20000.0; t += 137.0)
+    times.push_back(t);
+  std::vector<std::uint64_t> da, db(times.size());
+  for (double t : times)
+    da.push_back(weather::digest(a.at(t)));
+  for (std::size_t k = times.size(); k-- > 0;)
+    db[k] = weather::digest(b.at(times[k]));
+  EXPECT_EQ(da, db);
+  // Another seed: another schedule.
+  weather_params q = p;
+  q.seed = 8;
+  weather c(q);
+  c.set_events(ev);
+  int differ = 0;
+  for (std::size_t k = 0; k < times.size(); ++k)
+    differ += weather::digest(c.at(times[k])) != da[k] ? 1 : 0;
+  EXPECT_GT(differ, 10);
+  // The golden hash: the same weather on every platform and in every build. The digest rounds
+  // positions to 0.1 mm and intensities to 1e-7, so an ulp of sin or cos does not move it.
+  std::uint64_t h = 0xcbf29ce484222325ull;
+  for (std::uint64_t d : da)
+    h = (h ^ d) * 0x100000001b3ull;
+  std::printf("weather golden: %016llx\n", static_cast<unsigned long long>(h));
+  EXPECT_EQ(h, 0x19e696666ebdfd0dull);
+}
+
+TEST(WorldWeather, AScheduledStormRunsItsLifeOnSchedule) {
+  weather_params p;
+  p.seed = 3;
+  p.chance = 1.0; // every slot holds one
+  const weather w(p);
+  storm_cell c;
+  double born = 0.0;
+  ASSERT_TRUE(first_storm(w, c, born));
+  EXPECT_GE(c.born, p.quiet);
+  EXPECT_GE(c.life, p.life_min);
+  EXPECT_LE(c.life, p.life_max);
+  EXPECT_GE(c.radius, p.radius_min);
+  EXPECT_LE(c.radius, p.radius_max);
+  const double L = c.life, g = p.growth, d = p.decay;
+  const double t1 = born + g * L, t2 = born + (1.0 - d) * L, t3 = born + L;
+  // clear -> building -> storm -> clearing -> clear, at the shares of its life.
+  EXPECT_EQ(w.at(born - 1.0).state, weather_state::clear);
+  EXPECT_EQ(w.at(born + 1.0).state, weather_state::building);
+  EXPECT_EQ(w.at(t1 - 1.0).state, weather_state::building);
+  EXPECT_EQ(w.at(t1 + 1.0).state, weather_state::storm);
+  EXPECT_EQ(w.at(t2 - 1.0).state, weather_state::storm);
+  EXPECT_EQ(w.at(t2 + 1.0).state, weather_state::clearing);
+  EXPECT_EQ(w.at(t3 - 1.0).state, weather_state::clearing);
+  EXPECT_EQ(w.at(t3 + 1.0).state, weather_state::clear);
+  // Its intensity climbs to its peak, holds it and falls back to nothing.
+  EXPECT_NEAR(w.at(born).storminess, 0.0, 1e-12);
+  EXPECT_NEAR(w.at(0.5 * (t1 + t2)).storminess, c.peak, 1e-12);
+  double last = -1.0;
+  for (double t = born; t < t1; t += 10.0) {
+    const double s = w.at(t).storminess;
+    EXPECT_GE(s, last);
+    last = s;
+  }
+  EXPECT_LT(w.at(t3 - 1.0).storminess, 0.01);
+  // Its radius widens as it grows.
+  EXPECT_LT(w.at(born + 1.0).cells[0].r, w.at(t1 + 1.0).cells[0].r);
+  // It never outlives its slot, so the next scheduled storm starts from a clear sky.
+  EXPECT_LE(t3, (std::floor(born / p.interval) + 1.0) * p.interval + 1e-6);
+}
+
+TEST(WorldWeather, AScheduledStormBuildsUpwindAndCrossesTheArea) {
+  weather_params p;
+  p.seed = 11;
+  p.chance = 1.0;
+  p.cx = 200.0;
+  p.cy = -100.0;
+  p.steer_speed = 4.0;
+  p.steer_az = 60.0;
+  const weather w(p);
+  storm_cell c;
+  double born = 0.0;
+  ASSERT_TRUE(first_storm(w, c, born));
+  const double vx = 4.0 * std::sin(60.0 * kPi / 180.0), vy = -4.0 * std::cos(60.0 * kPi / 180.0);
+  // Born upwind of the area's centre...
+  EXPECT_LT((c.x0 - p.cx) * vx + (c.y0 - p.cy) * vy, 0.0);
+  // ...it passes within `miss` area half-widths of it in the middle of its maturity.
+  const double mid = born + c.life * (p.growth + 0.5 * (1.0 - p.growth - p.decay));
+  const weather_now n = w.at(mid);
+  ASSERT_EQ(n.cells.size(), 1u);
+  EXPECT_LE(std::hypot(n.cells[0].x - p.cx, n.cells[0].y - p.cy), p.miss * p.area + 1e-6);
+  EXPECT_EQ(n.state, weather_state::storm);
+}
+
+TEST(WorldWeather, AnAuthoredStormStartsOneAndACalmClearsIt) {
+  weather w(quiet());
+  EXPECT_EQ(w.at(1e5).state, weather_state::clear); // no schedule: clear forever
+  w.add_event(storm_at(300.0, 0.0, 0.0, 1200.0));
+  EXPECT_EQ(w.at(299.0).state, weather_state::clear);
+  EXPECT_EQ(w.at(301.0).state, weather_state::building);
+  EXPECT_EQ(w.at(300.0 + 600.0).state, weather_state::storm);
+  EXPECT_EQ(w.at(300.0 + 1100.0).state, weather_state::clearing);
+  EXPECT_EQ(w.at(300.0 + 1201.0).state, weather_state::clear);
+  const weather_now n = w.at(900.0);
+  ASSERT_EQ(n.cells.size(), 1u);
+  EXPECT_TRUE(n.cells[0].authored);
+  EXPECT_DOUBLE_EQ(n.storminess, 1.0);
+  // A calm at 800 s: from then it clears over calm_s, from the intensity it had.
+  w.add_event(calm_at(800.0));
+  EXPECT_EQ(w.at(799.0).state, weather_state::storm);
+  EXPECT_EQ(w.at(801.0).state, weather_state::clearing);
+  EXPECT_NEAR(w.at(800.0).storminess, 1.0, 1e-12);
+  EXPECT_GT(w.at(900.0).storminess, 0.0);
+  EXPECT_LT(w.at(900.0).storminess, 1.0);
+  EXPECT_EQ(w.at(800.0 + w.params().calm_s + 1.0).state, weather_state::clear);
+  // A storm started after the calm is not held to it.
+  w.add_event(storm_at(2000.0, 0.0, 0.0, 1200.0));
+  EXPECT_EQ(w.at(2600.0).state, weather_state::storm);
+  // Without a place it is born upwind of the area, as a scheduled one.
+  weather u(quiet());
+  weather_event e;
+  e.t = 100.0;
+  u.add_event(e);
+  const weather_now m = u.at(101.0);
+  ASSERT_EQ(m.cells.size(), 1u);
+  EXPECT_LT(m.cells[0].x, 0.0); // the default steering blows toward +x
+}
+
+TEST(WorldWeather, CellsRideTheSteeringWind) {
+  weather_params p = quiet();
+  p.steer_speed = 5.0;
+  p.steer_az = 90.0; // toward +x
+  weather w(p);
+  w.add_event(storm_at(0.0, -1000.0, 50.0, 3000.0));
+  storm_cell c = w.at(400.0).cells.at(0);
+  EXPECT_NEAR(c.x, -1000.0 + 5.0 * 400.0, 1e-9);
+  EXPECT_NEAR(c.y, 50.0, 1e-9);
+  EXPECT_NEAR(c.vx, 5.0, 1e-12);
+  // The wind turns at 1000 s toward -y (heading 0) at 2 m/s: the track bends there, unbroken.
+  w.add_event(steer_at(1000.0, 2.0, 0.0));
+  const storm_cell before = w.at(1000.0 - 1e-6).cells.at(0);
+  const storm_cell after = w.at(1000.0).cells.at(0);
+  EXPECT_NEAR(before.x, after.x, 1e-4);
+  EXPECT_NEAR(before.y, after.y, 1e-4);
+  c = w.at(1500.0).cells.at(0);
+  EXPECT_NEAR(c.x, -1000.0 + 5.0 * 1000.0, 1e-9);
+  EXPECT_NEAR(c.y, 50.0 - 2.0 * 500.0, 1e-9);
+  // The track before the turn is as it was: an event changes the weather from its time on.
+  EXPECT_NEAR(w.at(400.0).cells.at(0).x, -1000.0 + 5.0 * 400.0, 1e-9);
+  // A time-lapse: at 10 weather seconds a world second the storm lives a tenth as long and moves
+  // ten times as fast in world time, along the same track.
+  weather f(p);
+  f.add_event(rate_at(0.0, 10.0));
+  f.add_event(storm_at(0.0, -1000.0, 50.0, 3000.0));
+  EXPECT_NEAR(f.at(40.0).cells.at(0).x, -1000.0 + 5.0 * 400.0, 1e-9);
+  EXPECT_EQ(f.at(301.0).state, weather_state::clear);
+  // Rate 0 holds the weather.
+  f.add_event(rate_at(100.0, 0.0));
+  EXPECT_EQ(weather::digest(f.at(100.0)), weather::digest(f.at(5000.0)));
+}
+
+TEST(WorldWeather, TheRainFallsUnderAThickCell) {
+  weather_params p = quiet();
+  p.steer_speed = 0.0; // the cell stays where it was born
+  weather w(p);
+  w.add_event(storm_at(0.0, 0.0, 0.0, 1800.0, 2000.0, 1.0));
+  const weather_now clear = w.at(-10.0), full = w.at(900.0);
+  EXPECT_EQ(w.rain_rate(clear, 0.0, 0.0), 0.0);
+  EXPECT_NEAR(weather::intensity(full, 0.0, 0.0), 1.0, 1e-12);
+  EXPECT_NEAR(w.rain_rate(full, 0.0, 0.0), w.params().rain_max, 1e-9);
+  EXPECT_GT(w.rain_rate(full, 1000.0, 0.0), 0.0);    // within its core (half its radius)
+  EXPECT_EQ(w.rain_rate(full, 2100.0, 0.0), 0.0);    // past its radius
+  EXPECT_EQ(w.rain_rate(w.at(30.0), 0.0, 0.0), 0.0); // a young cell is not yet thick enough
+  // nearby(): 1 under the cell, fading `reach` past its edge.
+  EXPECT_DOUBLE_EQ(weather::nearby(full, 500.0, 0.0, 1000.0), 1.0);
+  EXPECT_GT(weather::nearby(full, 2500.0, 0.0, 1000.0), 0.0);
+  EXPECT_EQ(weather::nearby(full, 3500.0, 0.0, 1000.0), 0.0);
+}
+
+TEST(WorldWeather, TheEventsSurviveTheirTextForm) {
+  std::vector<weather_event> ev = {storm_at(120.25, 1.0 / 3.0, -7.5e3), steer_at(300.0, 4.0, 135.0),
+                                   rate_at(0.0, 30.0), calm_at(900.0)};
+  weather_event loose;
+  loose.t = 50.0; // a storm without place, radius, peak or life
+  ev.push_back(loose);
+  ev[2].tau = 12.5;
+  const std::string text = format_weather_events(ev);
+  std::printf("%s\n", text.c_str());
+  std::vector<weather_event> back;
+  std::string err;
+  ASSERT_TRUE(parse_weather_events(text, back, &err)) << err;
+  ASSERT_EQ(back.size(), ev.size());
+  weather a(quiet()), b(quiet());
+  a.set_events(ev);
+  b.set_events(back);
+  for (double t = 0.0; t < 4000.0; t += 97.0)
+    EXPECT_EQ(weather::digest(a.at(t)), weather::digest(b.at(t)));
+  EXPECT_EQ(format_weather_events(b.events()), format_weather_events(a.events()));
+  // Malformed text leaves the list alone and says why.
+  std::vector<weather_event> keep = back;
+  EXPECT_FALSE(parse_weather_events("storm x=1", keep, &err));
+  EXPECT_NE(err.find("without t="), std::string::npos);
+  EXPECT_FALSE(parse_weather_events("hail t=3", keep, &err));
+  EXPECT_FALSE(parse_weather_events("storm t=3 x=abc", keep, &err));
+  EXPECT_FALSE(parse_weather_events("storm t=3 colour=2", keep, &err));
+  EXPECT_EQ(keep.size(), back.size());
+  EXPECT_TRUE(parse_weather_events("", keep, &err));
+  EXPECT_TRUE(keep.empty());
+}
+
+TEST(WorldWeather, CompactKeepsTheWeatherFromNowOn) {
+  weather_params p;
+  p.seed = 5;
+  p.chance = 0.7;
+  p.interval = 2400.0;
+  weather w(p);
+  std::vector<weather_event> ev;
+  for (int k = 0; k < 12; ++k) {
+    ev.push_back(steer_at(200.0 * k + 10.0, 2.0 + k % 3, 30.0 * k));
+    ev.push_back(rate_at(200.0 * k + 50.0, 1.0 + k % 4));
+  }
+  ev.push_back(storm_at(100.0, 0.0, 0.0, 1200.0));    // gone by 2000
+  ev.push_back(storm_at(1500.0, 300.0, 0.0, 3000.0)); // alive at 2000
+  ev.push_back(calm_at(1800.0));
+  ev.push_back(storm_at(5000.0, 0.0, 0.0, 1500.0)); // still to come
+  w.set_events(ev);
+  const double now = 2000.0;
+  std::vector<std::uint64_t> before;
+  for (double t = now; t < now + 30000.0; t += 211.0)
+    before.push_back(weather::digest(w.at(t)));
+  weather c = w;
+  c.compact(now);
+  std::printf("compact: %zu events to %zu\n", w.events().size(), c.events().size());
+  EXPECT_LT(c.events().size(), w.events().size());
+  std::size_t k = 0;
+  for (double t = now; t < now + 30000.0; t += 211.0, ++k)
+    EXPECT_EQ(weather::digest(c.at(t)), before[k]) << "at t = " << t;
+  // Its text reads back to the same weather.
+  std::vector<weather_event> back;
+  ASSERT_TRUE(parse_weather_events(format_weather_events(c.events()), back));
+  weather r(p);
+  r.set_events(back);
+  k = 0;
+  for (double t = now; t < now + 30000.0; t += 211.0, ++k)
+    EXPECT_EQ(weather::digest(r.at(t)), before[k]) << "at t = " << t;
+}
+
+TEST(WorldWeather, AFrameIsCheap) {
+  // A frame asks for the weather once: a slot, the authored storms and the steering's pieces.
+  weather_params p;
+  p.chance = 1.0;
+  weather w(p);
+  std::vector<weather_event> ev;
+  for (int k = 0; k < 16; ++k) {
+    ev.push_back(storm_at(500.0 * k, 0.0, 0.0));
+    ev.push_back(steer_at(500.0 * k + 250.0, 3.0, 20.0 * k));
+  }
+  w.set_events(ev);
+  const auto t0 = std::chrono::steady_clock::now();
+  double acc = 0.0;
+  const int n = 2000;
+  for (int k = 0; k < n; ++k)
+    acc += w.at(3000.0 + k).storminess;
+  const double us =
+      std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / n;
+  std::printf("weather::at: %.2f us with 32 events (%g)\n", us, acc);
+#if defined(__OPTIMIZE__) || (defined(_MSC_VER) && !defined(_DEBUG))
+  EXPECT_LT(us, 200.0);
+#endif
+}
+
+// O19: the storms that rained recently, alive or gone (the ground dries along their tracks), and a
+// cell's rain footprint.
+TEST(WorldWeather, RecentCellsOutliveTheirRain) {
+  weather w(quiet());
+  w.add_event(storm_at(0.0, 0.0, 0.0, 1200.0, 2000.0, 1.0));
+  EXPECT_TRUE(w.recent(-10.0, 600.0).empty()); // not born yet
+  ASSERT_EQ(w.recent(600.0, 600.0).size(), 1u);
+  EXPECT_GT(w.recent(600.0, 600.0)[0].intensity, 0.9);
+  const std::vector<storm_cell> gone = w.recent(1500.0, 600.0); // ended at 1200, 300 s ago
+  ASSERT_EQ(gone.size(), 1u);
+  EXPECT_EQ(gone[0].intensity, 0.0);
+  EXPECT_DOUBLE_EQ(gone[0].end, 1200.0);
+  EXPECT_TRUE(w.at(1500.0).cells.empty());      // at() keeps only the living
+  EXPECT_TRUE(w.recent(2000.0, 600.0).empty()); // past the window
+  // A scheduled storm's too, from an earlier slot.
+  weather_params p;
+  p.seed = 3;
+  p.chance = 1.0;
+  const weather s(p);
+  storm_cell c;
+  double born = 0.0;
+  ASSERT_TRUE(first_storm(s, c, born));
+  const double after = born + c.life + 100.0;
+  ASSERT_EQ(s.recent(after, 200.0).size(), 1u);
+  EXPECT_EQ(s.recent(after, 200.0)[0].id, c.id);
+  // The rain footprint: none below the onset, between half the radius and the radius above it.
+  EXPECT_EQ(w.rain_radius(2000.0, 0.3), 0.0);
+  const double rr = w.rain_radius(2000.0, 1.0);
+  EXPECT_GT(rr, 1000.0);
+  EXPECT_LT(rr, 2000.0);
+  // ...where the field crosses the onset.
+  EXPECT_NEAR(1.0 * weather::footprint(rr, 2000.0), w.params().rain_onset, 1e-6);
+}
+
+// O19: the ground wets under the rain, soaks in `soak` seconds of it, and dries by 1/e every `dry`
+// seconds once the rain has passed (the same as cloud_sky's shader draws).
+TEST(WorldWeather, TheGroundWetsAndDries) {
+  weather_params p = quiet();
+  p.steer_speed = 4.0; // toward +x
+  weather w(p);
+  // A full storm 1000 m in radius born 3 km upwind of the origin, crossing it.
+  w.add_event(storm_at(0.0, -3000.0, 0.0, 2400.0, 1000.0, 1.0));
+  const double soak = 300.0, dry = 600.0;
+  EXPECT_EQ(w.wetness(-1.0, 0.0, 0.0, soak, dry), 0.0);
+  EXPECT_EQ(w.wetness(100.0, 0.0, 0.0, soak, dry), 0.0); // its rain has not reached the origin
+  // The rain radius at the peak, and when the origin is under it: the centre passes at 750 s.
+  const double rr = w.rain_radius(1000.0, 1.0);
+  const double in = (3000.0 - rr) / 4.0, out = (3000.0 + rr) / 4.0;
+  std::printf("rain over the origin from %.0f s to %.0f s\n", in, out);
+  double last = 0.0;
+  for (double t = in + 10.0; t < out; t += 20.0) { // it wets as the rain lies on it
+    const double wt = w.wetness(t, 0.0, 0.0, soak, dry);
+    EXPECT_GE(wt, last - 1e-12);
+    last = wt;
+  }
+  EXPECT_NEAR(w.wetness(in + 0.5 * soak, 0.0, 0.0, soak, dry), 0.5, 0.02);
+  EXPECT_NEAR(w.wetness(out - 1.0, 0.0, 0.0, soak, dry), 1.0, 1e-9); // soaked
+  // ...and dries once it has passed: 1/e every `dry` seconds.
+  const double w1 = w.wetness(out + 100.0, 0.0, 0.0, soak, dry);
+  const double w2 = w.wetness(out + 100.0 + dry, 0.0, 0.0, soak, dry);
+  EXPECT_NEAR(w2 / w1, std::exp(-1.0), 1e-6);
+  EXPECT_NEAR(w1, std::exp(-100.0 / dry), 1e-6);
+  // Beside the track, out of the rain, it stays dry.
+  EXPECT_EQ(w.wetness(out, 0.0, 2.0 * rr, soak, dry), 0.0);
+  // Long after (past 4 dry times), the storm is forgotten.
+  EXPECT_EQ(w.wetness(2400.0 + 5.0 * dry, 0.0, 0.0, soak, dry), 0.0);
+}
+
+// O20 (F5): the weather schedules lightning, a pure function of the seed, the time and the events:
+// only a mature, intense cell strikes, at about flash_rate a second, within its rain radius; the
+// same strikes for every caller, however the windows are cut.
+TEST(WorldWeather, LightningStrikesOnSchedule) {
+  weather_params p = quiet();
+  p.steer_speed = 0.0;
+  p.flash_rate = 0.2;
+  weather w(p);
+  w.add_event(storm_at(0.0, 0.0, 0.0, 2400.0, 1000.0, 1.0));
+  // Window by window, a second at a time, over the storm's life and past it.
+  std::vector<cvc::world::lightning_strike> all;
+  for (double t = 1.0; t <= 3000.0; t += 1.0)
+    for (const auto &k : w.strikes(t, 1.0))
+      all.push_back(k);
+  // The same strikes in one window.
+  const std::vector<cvc::world::lightning_strike> once = w.strikes(3000.0, 3000.0);
+  ASSERT_EQ(all.size(), once.size());
+  for (std::size_t i = 0; i < all.size(); ++i) {
+    EXPECT_EQ(all[i].id, once[i].id);
+    EXPECT_DOUBLE_EQ(all[i].tau, once[i].tau);
+  }
+  // Mature from 720 s to 1560 s: about 0.2 a second then, fewer while it ramps, none early or late.
+  int ground = 0;
+  const double rr = w.rain_radius(1000.0, 1.0);
+  for (const auto &k : all) {
+    EXPECT_GT(k.tau, 300.0);
+    EXPECT_LT(k.tau, 2400.0);
+    EXPECT_LE(std::hypot(k.x, k.y), rr + 1e-6);
+    EXPECT_GE(k.strokes, 1);
+    EXPECT_LE(k.strokes, 4);
+    EXPECT_GT(k.intensity(0.0), 0.5);
+    EXPECT_EQ(k.intensity(k.life() + 0.01), 0.0);
+    ground += k.ground ? 1 : 0;
+  }
+  std::printf("%zu strikes, %d to the ground\n", all.size(), ground);
+  EXPECT_GT(all.size(), 0.7 * 0.2 * 840.0);
+  EXPECT_LT(all.size(), 1.6 * 0.2 * 1400.0);
+  EXPECT_NEAR(double(ground) / all.size(), p.ground_share, 0.1);
+  // No storm, no lightning.
+  weather clear(quiet());
+  EXPECT_TRUE(clear.strikes(1000.0, 1000.0).empty());
+}
+
+// O20 (F4): a storm's gust front, the wind out of its downdraft. Ahead of a mature cell (along its
+// motion) it blows with the motion, from nothing at the centre to front_speed at the front's edge,
+// front_ahead radii out, dying away over the next front_width of that: so the wind there rises.
+// Behind the cell it is weaker and against the motion; beside it, across the motion, so the wind
+// there veers. None past its reach, none from a cell too young to rain, none in clear air.
+TEST(WorldWeather, AGustFrontRunsAheadOfACell) {
+  weather_params p = quiet(); // steered 3 m/s toward +x (az 90)
+  weather w(p);
+  weather_event e = storm_at(0.0, 0.0, 0.0, 3000.0, 1000.0, 1.0);
+  e.tau = -1500.0; // born 1500 weather seconds ago: mature now, 1000 m across its radius
+  w.add_event(e);
+  const weather_now now = w.at(0.0);
+  ASSERT_EQ(now.cells.size(), 1u);
+  const storm_cell &c = now.cells[0];
+  ASSERT_NEAR(c.r, 1000.0, 1e-9);
+  ASSERT_NEAR(c.intensity, 1.0, 1e-12);
+  ASSERT_NEAR(c.x, 4500.0, 1e-6); // carried 4500 m toward +x since its birth
+  EXPECT_NEAR(w.front_reach(c.r), 2400.0, 1e-9);
+  const auto front = [&](double dx, double dy, double &vx, double &vy) {
+    w.gust_front(now, c.x + dx, c.y + dy, vx, vy);
+  };
+  double vx, vy;
+  // Ahead, along the motion: rising to 12 m/s at the edge (1500 m), then dying away by the reach.
+  const double ahead[] = {0.0,    375.0,  750.0,  1125.0, 1500.0,
+                          1700.0, 2000.0, 2300.0, 2400.0, 3000.0};
+  double was = -1.0, peak = 0.0, peak_at = 0.0;
+  std::printf("gust front ahead of a mature 1000 m cell (m: m/s):");
+  for (double d : ahead) {
+    front(d, 0.0, vx, vy);
+    std::printf(" %.0f: %.2f", d, vx);
+    EXPECT_GE(vx, 0.0) << d;
+    EXPECT_NEAR(vy, 0.0, 1e-9) << d;
+    if (vx > peak) {
+      peak = vx;
+      peak_at = d;
+    }
+    if (d <= 1500.0)
+      EXPECT_GT(vx, was) << "rising toward the edge, at " << d;
+    else if (d < 2400.0)
+      EXPECT_LT(vx, was) << "dying away past the edge, at " << d;
+    else
+      EXPECT_EQ(vx, 0.0) << "none from its reach on, at " << d;
+    was = vx;
+  }
+  std::printf("\n");
+  front(0.0, 0.0, vx, vy);
+  EXPECT_EQ(vx, 0.0); // no way out at the centre itself
+  front(1500.0, 0.0, vx, vy);
+  EXPECT_NEAR(vx, p.front_speed, 1e-9);
+  EXPECT_EQ(peak_at, 1500.0);
+  front(2400.0, 0.0, vx, vy);
+  EXPECT_EQ(vx, 0.0); // its reach
+  front(1e5, 3e4, vx, vy);
+  EXPECT_EQ(vx, 0.0); // far away: none at all
+  EXPECT_EQ(vy, 0.0);
+  // Behind the cell: against the motion, weaker by front_behind / front_ahead, its edge 900 m back.
+  front(-900.0, 0.0, vx, vy);
+  EXPECT_NEAR(vx, -p.front_speed * p.front_behind / p.front_ahead, 1e-9);
+  front(-1500.0, 0.0, vx, vy);
+  EXPECT_GT(vx, -2.0);
+  EXPECT_LE(vx, 0.0);
+  // Beside it: across the motion, out of the cell; a 9 m/s wind along the motion veers there.
+  front(0.0, 1200.0, vx, vy);
+  EXPECT_NEAR(vx, 0.0, 1e-9);
+  EXPECT_NEAR(vy, p.front_speed * 0.5 * (p.front_ahead + p.front_behind) / p.front_ahead, 1e-9);
+  const double veer = std::atan2(vy, 9.0 + vx) * 180.0 / kPi;
+  front(1500.0, 0.0, vx, vy);
+  const double rise = 9.0 + vx;
+  std::printf("a 9 m/s wind along the motion: %.1f m/s ahead at the edge, veered %.1f deg beside\n",
+              rise, veer);
+  EXPECT_NEAR(rise, 21.0, 1e-9);
+  EXPECT_GT(veer, 40.0);
+  // It moves with the cell: 100 s on, the edge is 300 m further along.
+  const weather_now later = w.at(100.0);
+  w.gust_front(later, c.x + 1800.0, c.y, vx, vy);
+  EXPECT_NEAR(vx, p.front_speed, 1e-6);
+  // A young cell, below the rain's onset, has no front; nor has clear air, nor a weather without.
+  weather young(p);
+  young.add_event(storm_at(0.0, 0.0, 0.0, 3000.0, 1000.0, 1.0));
+  const weather_now y = young.at(60.0);
+  ASSERT_EQ(y.cells.size(), 1u);
+  ASSERT_LT(y.cells[0].intensity, p.rain_onset);
+  young.gust_front(y, y.cells[0].x + 700.0, y.cells[0].y, vx, vy);
+  EXPECT_EQ(vx, 0.0);
+  w.gust_front(w.at(-10.0), 1500.0, 0.0, vx, vy);
+  EXPECT_EQ(vx, 0.0);
+  weather_params off = p;
+  off.front_speed = 0.0;
+  weather none(off);
+  none.add_event(e);
+  none.gust_front(none.at(0.0), c.x + 1500.0, c.y, vx, vy);
+  EXPECT_EQ(vx, 0.0);
+}

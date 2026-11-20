@@ -26,6 +26,9 @@
 #include <boost/signals2/connection.hpp>
 #include <chrono>
 #include <cstdio>
+#include <cvc/ariadne/stream/stream.h> // PIN-1: a stream's descriptor pins
+#include <cvc/ariadne/uri.h>           // PIN-1: a state:// store
+#include <cvc/ariadne/uri_state.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_json.h>
@@ -544,4 +547,123 @@ TEST(StateLifetime, PinnedWalksAgainstConcurrentRemoveChild) {
   std::printf("reached %ld nodes over %d removals\n", reached.load(), kIters);
   EXPECT_GT(reached.load(), 0);
   EXPECT_NE(root.findDescendant("x.s.a.b"), nullptr);
+}
+
+// --- Stage 1b Ariadne (td 8.2) ---
+//
+// PIN-1 (S1.9, S1.11; td 4.8): the held chains of uri_state and of a stream's descriptor release
+// their leaf first, so each node dies with its parent alive (~state promises a dying node its
+// ancestors: a destroyed() slot may walk _parent). Modelled on ContextRootPinsReleaseTheChrootFirst
+// (state_exec_hazards_test.cpp): once the subtree is unlinked, the held chain is its last owner.
+
+namespace {
+
+// Set when the node holding it as data has had its members destroyed: its ~state() is done.
+struct pin1_gone_flag {
+  std::shared_ptr<std::atomic<bool>> gone;
+  ~pin1_gone_flag() {
+    if (gone)
+      gone->store(true);
+  }
+};
+
+std::shared_ptr<std::atomic<bool>> pin1_flag_when_freed(state &node) {
+  auto freed = std::make_shared<std::atomic<bool>>(false);
+  auto flag = std::make_shared<pin1_gone_flag>();
+  flag->gone = freed;
+  node.data(boost::any(std::move(flag)));
+  return freed;
+}
+
+// Whether `node` died, and whether its parent was already freed then.
+struct pin1_death_watch {
+  bool died = false, parent_gone = false;
+  boost::signals2::scoped_connection conn;
+  pin1_death_watch(state &node, std::shared_ptr<std::atomic<bool>> parent_freed) {
+    conn = node.destroyed.connect([this, parent_freed] {
+      died = true;
+      parent_gone = parent_freed->load();
+    });
+  }
+};
+
+// The state:// handler, registered on one app (its tree) for a scope.
+struct pin1_state_uris {
+  explicit pin1_state_uris(cvc::app &app) : app_(app) {
+    cvc::ariadne::register_state_uri_handler(app);
+  }
+  ~pin1_state_uris() { cvc::ariadne::unregister_state_uri_handler(app_); }
+  cvc::app &app_;
+};
+
+} // namespace
+
+// A state:// store (uri_state.cpp) holds the node it writes and its chain while it writes. A slot
+// on the write removes the node's parent, so the store is the last owner of both when it returns:
+// the node must die first. The same through a transparent link, whose target's chain the store
+// holds instead.
+TEST(StateLifetime, UriStateChainsReleaseTheLeafFirst) {
+  for (const bool through_link : {false, true}) {
+    SCOPED_TRACE(through_link ? "through a transparent link" : "the node itself");
+    cvc::app a;
+    auto &root = state::instance(a);
+    root("x.s").value("0");
+    if (through_link)
+      root("hole").linkTo("x.s", state::link_mode::transparent);
+    const pin1_state_uris uris(a);
+    const auto x_freed = pin1_flag_when_freed(root("x"));
+    pin1_death_watch s(root("x.s"), x_freed);
+    bool removed = false;
+    boost::signals2::scoped_connection remover =
+        root.childChanged.connect([&](const std::string &path) {
+          if (path == "x.s" && !removed) {
+            removed = true;
+            root.removeChild("x");
+          }
+        });
+    const cvc::ariadne::StoreResult r =
+        cvc::ariadne::store(a, through_link ? "state://hole?value" : "state://x.s?value", "1");
+    EXPECT_TRUE(r.ok) << r.error;
+    EXPECT_TRUE(removed);
+    EXPECT_TRUE(s.died) << "the store was the last owner of x.s";
+    EXPECT_FALSE(s.parent_gone) << "x.s died after its parent x was freed";
+    EXPECT_TRUE(x_freed->load());
+  }
+}
+
+// A stream (stream/stream.cpp) holds its descriptor node and the chain to it, down to the stats
+// node below it. The document's subtree is removed while the stream is open, so the stream is the
+// last owner of the chain when it closes: each node must die before its parent. (cam0's data is
+// its format, which the flag replaces; nothing reads it here.)
+TEST(StateLifetime, StreamDescriptorPinsReleaseTheLeafFirst) {
+  namespace st = cvc::ariadne::stream;
+  cvc::app a;
+  auto &root = state::instance(a);
+  st::stream_params p;
+  p.id = "cam0";
+  p.root_path = "doc";
+  p.format.kind = st::frame_kind::video_raw;
+  p.format.codec = "rgba8";
+  p.format.w = 4;
+  p.format.h = 2;
+  p.format.stride = 16;
+  std::unique_ptr<st::stream> s = st::stream::open(a, p);
+  ASSERT_TRUE(s);
+  ASSERT_NE(root.findDescendant("doc.streams.cam0.stats"), nullptr);
+  const auto doc_freed = pin1_flag_when_freed(root("doc"));
+  const auto streams_freed = pin1_flag_when_freed(root("doc.streams"));
+  const auto cam0_freed = pin1_flag_when_freed(root("doc.streams.cam0"));
+  pin1_death_watch streams(root("doc.streams"), doc_freed);
+  pin1_death_watch cam0(root("doc.streams.cam0"), streams_freed);
+  pin1_death_watch stats(root("doc.streams.cam0.stats"), cam0_freed);
+  ASSERT_TRUE(root.removeChild("doc")); // the document goes; the open stream still holds it
+  EXPECT_FALSE(doc_freed->load());
+  s.reset(); // closes the stream; its descriptor's pins go
+  EXPECT_TRUE(stats.died) << "the stream was the last owner of its stats node";
+  EXPECT_FALSE(stats.parent_gone) << "stats died after its parent cam0 was freed";
+  EXPECT_TRUE(cam0.died);
+  EXPECT_FALSE(cam0.parent_gone) << "cam0 died after its parent streams was freed";
+  EXPECT_TRUE(streams.died);
+  EXPECT_FALSE(streams.parent_gone) << "streams died after its parent doc was freed";
+  EXPECT_TRUE(doc_freed->load());
 }

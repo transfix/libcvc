@@ -42,9 +42,13 @@
 // SIGUSR1/2) go to the document's on_signal: in both modes; one it does not handle ends the run
 // with exit status 128 + the signal number.
 // snapshot renders N frames, paced like run so a live stream delivers into them (a window's scene
-// clock stays fixed, so its frames are reproducible): in a window, offscreen at --width x --height
-// pixels (default 1024 x 768), writing the last one to --png FILE; with --terminal, the last frame
-// as text (--ansi keeps its colours), plus the rendered scene as --png if given.
+// clock steps a fixed 1/30 s a frame, not the wall time, so its frames are reproducible): in a
+// window, offscreen at --width x --height pixels (default 1024 x 768), writing the last one to
+// --png FILE; with --terminal, the last frame as text (--ansi keeps its colours), plus the rendered
+// scene as --png if given. In a window, --seconds S runs the scene clock S seconds instead, at
+// --fps frames a second (30 by default), each frame exactly 1/fps of scene time whatever the wall
+// time; --mp4 FILE records those frames as a video (gla::record_frames, cvc::media::VideoWriter:
+// in process through cvcMedia's FFmpeg, else an ffmpeg program on PATH).
 // check loads the document as run would, offscreen, and prints its warnings.
 //
 // run in a window adds a Settings menu after the document's own (the scene's shadows, grid, axis
@@ -180,6 +184,7 @@ EM_ASYNC_JS(void, arigl_wait_frame, (), {
 #endif
 #include <cvc/gl/ariadne/TerminalScene.h>
 #include <cvc/gl/ariadne/bundles.h>
+#include <cvc/gl/ariadne/record.h> // snapshot --mp4 / --seconds: the scene on its clock, recorded
 #include <cvc/gl/ariadne/scene_panels.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/stream_view_widget.h> // jpeg_frame_decoder
@@ -199,36 +204,38 @@ namespace gla = cvc::gl::ariadne;
 
 const char *const kDefaultPrefix = "ui.docs.ari"; // the same root ari uses, in both modes
 
+// The scripting engines arigl_main() makes before any app or runtime, so they outlive every
+// runtime they are lent, handed down to the runs that lend them. Nothing in arigl itself.
+struct Scripting {
+#ifdef CVC_ARIADNE_PYTHON
+  ari::python::Engine *python = nullptr; // ariglx's Python
+#ifdef CVC_ARIADNE_WASM
+  // The WebAssembly guests' engine (src/ariadne_wasm): use_script_engine registers it on each
+  // runtime's app. Null when its runtime could not start: documents then load without their
+  // wasm: blocks run.
+  std::shared_ptr<cvc::ariadne::ScriptEngine> wasm;
+#endif
+#endif
+};
+
 #ifdef CVC_ARIADNE_PYTHON
 constexpr const char *kRuntimeName = "ariglx"; // arigl with an embedded Python
 
-// ariglx's Python, booted in arigl_main() before any app or runtime, so it outlives them.
-ari::python::Engine *g_python = nullptr;
-
 #ifdef CVC_ARIADNE_WASM
-// The WebAssembly guests' engine (src/ariadne_wasm), made for the life of arigl_main() by a
-// WasmGuests before any app or runtime, so it outlives every runtime it is given
-// (use_script_engine registers it on that runtime's app). Null when its runtime could not start:
-// documents then load without their wasm: blocks run.
-std::shared_ptr<cvc::ariadne::ScriptEngine> g_wasm;
-
-struct WasmGuests {
-  WasmGuests() {
-    std::string error;
-    g_wasm = cvc::ariadne::wasm::make_engine(error);
-    if (!g_wasm)
-      std::fprintf(stderr, "%s: no WebAssembly guests: %s\n", kRuntimeName, error.c_str());
-  }
-  ~WasmGuests() { g_wasm.reset(); }
-  WasmGuests(const WasmGuests &) = delete;
-  WasmGuests &operator=(const WasmGuests &) = delete;
-};
+// The WebAssembly guests' engine, or null (and why, on stderr) when its runtime could not start.
+std::shared_ptr<cvc::ariadne::ScriptEngine> make_wasm_guests() {
+  std::string error;
+  std::shared_ptr<cvc::ariadne::ScriptEngine> engine = cvc::ariadne::wasm::make_engine(error);
+  if (!engine)
+    std::fprintf(stderr, "%s: no WebAssembly guests: %s\n", kRuntimeName, error.c_str());
+  return engine;
+}
 #endif
 
 // Lend a window's app, document runtime and GL objects to the Python (_arihost), for the life of
 // the loan: the document's python: block runs at load, and a Python program's Host() adopts them.
 // `loop` is what the program's host.run() runs.
-ari::python::Attachment lend_python(cvc::app &app, gla::AriRuntime &rt,
+ari::python::Attachment lend_python(const Scripting &scripting, cvc::app &app, gla::AriRuntime &rt,
                                     cvc::gl::SceneRenderer &view, cvc::gl::CameraController &cam,
                                     cvc::gl::ImGuiOverlay &ui, const char *mode,
                                     std::function<int()> loop) {
@@ -242,24 +249,26 @@ ari::python::Attachment lend_python(cvc::app &app, gla::AriRuntime &rt,
   h.overlay = &ui;
   h.run_loop = std::move(loop);
   h.in_frame = [&rt] { return rt.in_frame(); }; // host.run() from a frame's hook: refused
-  ari::python::Attachment lent = g_python->attach(h);
+  ari::python::Attachment lent = scripting.python->attach(h);
 #ifdef CVC_ARIADNE_WASM
-  if (g_wasm)
-    rt.app_runtime().use_script_engine(g_wasm); // and its wasm: block, after the python: one
+  if (scripting.wasm)
+    rt.app_runtime().use_script_engine(
+        scripting.wasm); // and its wasm: block, after the python: one
 #endif
   return lent;
 }
 
 // ... and a terminal's (no GL objects: a Python program runs in a window).
-ari::python::Attachment lend_python(cvc::app &app, ari::AppRuntime &rt, const char *mode) {
+ari::python::Attachment lend_python(const Scripting &scripting, cvc::app &app, ari::AppRuntime &rt,
+                                    const char *mode) {
   ari::python::HostHandles h;
   h.app = &app;
   h.runtime = &rt;
   h.mode = mode;
-  ari::python::Attachment lent = g_python->attach(h);
+  ari::python::Attachment lent = scripting.python->attach(h);
 #ifdef CVC_ARIADNE_WASM
-  if (g_wasm)
-    rt.use_script_engine(g_wasm);
+  if (scripting.wasm)
+    rt.use_script_engine(scripting.wasm);
 #endif
   return lent;
 }
@@ -293,6 +302,12 @@ int usage(int code) {
                "it with --png FILE, or with --terminal print it as text. Everything after the\n"
                "document path is the document's own: it reads it as argv, or declares an args:\n"
                "block (then `arigl run doc.ari --help` shows its options).\n"
+               "\n"
+               "snapshot --mp4 FILE --seconds S records a video: S seconds of the scene running\n"
+               "on its clock (physics, water, clouds), --fps frames a second (default 30) at\n"
+               "--width x --height, each frame 1/fps of scene time however long it takes to\n"
+               "render. H.264 where this build's FFmpeg has an H.264 encoder, else an ffmpeg\n"
+               "program on PATH, else MPEG-4 Part 2; --png FILE also writes the last frame.\n"
                "\n"
                "info prints what this host provides, in a window or with --terminal: the GL it\n"
                "renders with, the terminal (size, colours, kitty / Sixel), what libcvc was built\n"
@@ -421,7 +436,8 @@ bool publish_images(cvc::app &app, Backend &backend, const ari::HostOptions &o) 
 }
 
 // A snapshot's frames run at the interactive loop's rate (--fps, else 20 a second), so a live
-// stream's producer has time to deliver frames into them. The window's scene clock stays fixed.
+// stream's producer has time to deliver frames into them. The window's scene clock steps a fixed
+// 1/30 s a frame (--seconds: 1/fps).
 std::chrono::duration<double> snapshot_period(const ari::HostOptions &o) {
   return std::chrono::duration<double>(1.0 / (o.fps > 0 ? o.fps : 20));
 }
@@ -443,7 +459,8 @@ ari::Widget bell_menu_item() {
 // The camera's mouse settings and distance, for the Controls window: it reads them from its own
 // state. Mouse look needs a mouse: a touch screen keeps dragging (a tap there must stay a tap on
 // the scene).
-ari::MouseControls camera_mouse(const cvc::gl::CameraController &cam, bool touch, bool room) {
+ari::MouseControls camera_mouse(const cvc::gl::CameraController &cam, bool touch, bool room,
+                                const std::string &doc_prefix) {
   const std::string at = "/" + cam.stateName() + ".settings.";
   ari::MouseControls m;
   if (!touch) {
@@ -462,7 +479,21 @@ ari::MouseControls camera_mouse(const cvc::gl::CameraController &cam, bool touch
   m.sensitivity = at + "mouse_sensitivity";
   m.invert_y = at + "invert_pitch";
   m.invert_x = at + "invert_yaw";
+  // The orbit's distance: Orbit's alone (Fly, Track and Map have none), from a metre to a world
+  // seen whole. Framing sets it from the scene (about 1.9 km for terrain_lab's 1.2 km world),
+  // which the old 1.5-40 m range, made for a room's avatar, could not show or reach. A room keeps
+  // that range.
   m.distance = "/" + cam.stateName() + ".orbit.distance";
+  // The predicate reads under the document's prefix (the read lane's root), as the camera is.
+  const std::string cam_path = cam.stateName();
+  if (!doc_prefix.empty() && cam_path.compare(0, doc_prefix.size() + 1, doc_prefix + ".") == 0)
+    m.distance_when =
+        "(= (state-get \"" + cam_path.substr(doc_prefix.size() + 1) + ".mode\") \"0\")";
+  if (!room) {
+    m.distance_lo = 0.5;
+    m.distance_hi = 50000.0;
+    m.distance_log = true;
+  }
   return m;
 }
 
@@ -492,24 +523,23 @@ std::vector<ari::KeyBinding> camera_keys(const cvc::gl::CameraController &cam) {
 // (<viewer>.avatar.keys.<action>, avatar_keys_path), each one key or more.
 struct WalkKey {
   const char *action, *label;
-  std::vector<std::string> keys;
+  const char *keys[2];
+  std::vector<std::string> default_keys() const { return {std::begin(keys), std::end(keys)}; }
 };
-const std::vector<WalkKey> &walk_keys() {
-  static const std::vector<WalkKey> keys = {{"forward", "Walk forward", {"W", "Up"}},
-                                            {"backward", "Walk back", {"S", "Down"}},
-                                            {"strafe_left", "Step left", {"A", "Left"}},
-                                            {"strafe_right", "Step right", {"D", "Right"}}};
-  return keys;
-}
+constexpr WalkKey kWalkKeys[] = {{"forward", "Walk forward", {"W", "Up"}},
+                                 {"backward", "Walk back", {"S", "Down"}},
+                                 {"strafe_left", "Step left", {"A", "Left"}},
+                                 {"strafe_right", "Step right", {"D", "Right"}}};
 std::string avatar_keys_path(const cvc::gl::SceneRenderer &view) {
   return view.scene().getStatePrefix() + ".viewers." + view.name() + ".avatar.keys.";
 }
 std::vector<ari::KeyBinding> avatar_keys(const cvc::gl::SceneRenderer &view) {
   const std::string at = "/" + avatar_keys_path(view);
   std::vector<ari::KeyBinding> keys;
-  for (const WalkKey &k : walk_keys())
+  for (const WalkKey &k : kWalkKeys)
     keys.push_back({std::string("avatar_") + k.action, k.label,
-                    "Avatar (mouse look: walk where you aim)", k.keys, "", at + k.action});
+                    "Avatar (mouse look: walk where you aim)", k.default_keys(), "",
+                    at + k.action});
   return keys;
 }
 
@@ -621,6 +651,9 @@ struct ConferenceSession {
   // SceneGraph; the camera orbits our avatar. Made by attach_view (window mode only); room_view_
   // is declared after holon_ and torn down first (stop()).
   std::unique_ptr<cvc::ariadne::holon> holon_;
+  // The room's entities (the vehicles the relay's document runs; room_entities.h), played out from
+  // the same pose snapshots by a holon of their own, and drawn by room_view.
+  std::unique_ptr<cvc::ariadne::entity_playout> entities_;
   std::unique_ptr<gla::room_view> room_view_;
   // The Avatar window's model: our avatar's settings, energy budget and ledger, with their recent
   // history, published to the document as self.avatar.* (avatar_panel.h).
@@ -721,6 +754,7 @@ struct ConferenceSession {
     double talk_until = 0.0; // wall time until which this peer counts as "talking" (name highlight)
   };
   std::map<std::string, peer_media> peers_; // keyed by origin pid
+  bool opus_warned_ = false;                // said that this build cannot decode a peer's Opus mic
   double self_talk_until_ = 0.0;            // wall time until which WE count as "talking"
   bool voice_talking_ = false;              // our voice.talking leaf's value (absent = not talking)
   double now_wall_ = 0.0;                   // wall-clock seconds, refreshed once per pump
@@ -920,6 +954,15 @@ struct ConferenceSession {
                              "token (16-256 of [A-Za-z0-9._~-]); not sending it\n");
         roomToken.clear();
       }
+    } else if (const char *p = std::getenv("CVC_ARIADNE_GUEST_PASSWORD");
+               p != nullptr && *p != '\0') {
+      // The relay's guest password (ARISRV_IDENTITY.md, ID2; a page takes it from #password=),
+      // sent as its hash where a room token goes.
+      if (cvc::valid_guest_password(p))
+        roomToken = cvc::guest_password_bearer(p);
+      else
+        std::fprintf(stderr, "arigl: conference: CVC_ARIADNE_GUEST_PASSWORD is not a password "
+                             "(1 to 256 bytes, no control characters); not sending it\n");
     }
     // Scoped to this relay, so two relays (two operators) cannot match one device's ids.
     const std::string deviceId = cvc::scoped_device_id(cvc::default_device_id(), relayUrl);
@@ -1175,6 +1218,7 @@ struct ConferenceSession {
       return;
     holon_ = std::make_unique<cvc::ariadne::holon>(cvc::ariadne::holon_role::client,
                                                    cvc::ariadne::room_holon_config());
+    entities_ = std::make_unique<cvc::ariadne::entity_playout>(cvc::ariadne::room_holon_config());
     set_lead(0.06); // until the first round trip is measured (net_step)
     room_view_ =
         std::make_unique<gla::room_view>(view, *app_, room_, pid_, view.scene().getStatePrefix());
@@ -1190,7 +1234,7 @@ struct ConferenceSession {
     }
     cam_ = &cam;
     cam.setPrimaryDragSteers(true); // the right button, or two fingers, turns the view
-    cam.setOrbitKeys(false);        // in Orbit the movement keys walk our avatar (walk_keys)
+    cam.setOrbitKeys(false);        // in Orbit the movement keys walk our avatar (kWalkKeys)
     cam.setMouseLookOrbits(true);   // mouse look is third person: the camera turns about us
     walk_keys_ = avatar_keys_path(view);
     // Peers' names over their markers: a scene annotation, so it shows with the panels hidden too
@@ -1236,14 +1280,15 @@ struct ConferenceSession {
     // Keys -> intent, only in Orbit: in Fly the same keys move the camera instead. The camera's
     // held set is dropped while the UI has the keyboard, so typing a name never walks.
     cvc::ariadne::avatar_intent in;
-    // Our walk keys as the Controls window has them (walk_keys; their defaults until the document's
-    // load seeds them): any of an action's keys held.
+    // Our walk keys as the Controls window has them (kWalkKeys; their defaults until the
+    // document's load seeds them): any of an action's keys held.
     unsigned keys = 0, bit = 1;
-    for (const WalkKey &k : walk_keys()) {
+    for (const WalkKey &k : kWalkKeys) {
       const std::string stored =
           cvc::ariadne::read_or<std::string>(*app_, walk_keys_ + k.action, std::string());
       bool down = false;
-      for (const std::string &key : stored.empty() ? k.keys : cvc::ariadne::split_keys(stored))
+      for (const std::string &key :
+           stored.empty() ? k.default_keys() : cvc::ariadne::split_keys(stored))
         down = down || cam_->keyHeld(key);
       keys |= down ? bit : 0u;
       bit <<= 1;
@@ -1317,10 +1362,12 @@ struct ConferenceSession {
       lane_samples.swap(lane_pose_samples_);
     }
     for (const cvc::pose_snapshot &snap : snaps)
-      cvc::ariadne::apply_pose_snapshot(*holon_, pose_decoder_, snap);
+      cvc::ariadne::apply_pose_snapshot(*holon_, pose_decoder_, snap, entities_.get());
     for (const auto &[tick, samples] : lane_samples) // decoded (and acked) on the pose lane
-      cvc::ariadne::apply_pose_samples(*holon_, samples, tick);
+      cvc::ariadne::apply_pose_samples(*holon_, samples, tick, entities_.get());
     cvc::ariadne::client_pump(*holon_, *app_, room_, pid_, f.wall_dt);
+    if (entities_)
+      entities_->pump(*app_, room_, f.wall_dt);
     avatar_panel_.update(*holon_, *app_, room_, pid_, f.wall_dt);
     if (avatar_panel_.sampled())
       avatar_panel_.publish(*app_, prefix_);
@@ -1332,6 +1379,8 @@ struct ConferenceSession {
                    static_cast<unsigned long long>(logged_realigns_));
     }
     room_view_->update(*holon_, f.wall_dt);
+    if (entities_)
+      room_view_->update_entities(*entities_);
     log_lod();
     // Log who is drawn whenever that changes (the browser page shows stderr in its footer and the
     // console): the quickest check that a client sees the room the relay holds.
@@ -1791,7 +1840,7 @@ struct ConferenceSession {
   }
 
   // Peer PM's Opus packet M as f32, after concealment for a packet or two lost before it.
-  static std::vector<float> decode_opus(peer_media &pm, const cvc::media_frame &m) {
+  std::vector<float> decode_opus(peer_media &pm, const cvc::media_frame &m) {
     const int rate = m.sample_rate > 0 ? static_cast<int>(m.sample_rate) : 48000;
     const int ch = m.channels > 0 ? static_cast<int>(m.channels) : 1;
     if (!pm.opus || pm.opus->rate() != rate || pm.opus->channels() != ch) {
@@ -1800,11 +1849,10 @@ struct ConferenceSession {
     }
     std::vector<float> out;
     if (!pm.opus->valid()) {
-      static bool warned = false;
-      if (!warned)
+      if (!opus_warned_)
         std::fprintf(stderr, "arigl: a peer's mic is Opus, and this build has no libopus to "
                              "decode it: that mic is silent here\n");
-      warned = true;
+      opus_warned_ = true;
       return out;
     }
     if (pm.opus_seq >= 0 && m.seq > pm.opus_seq + 1 && m.seq <= pm.opus_seq + 3)
@@ -2020,13 +2068,41 @@ void setup_media(cvc::app &app, const ari::HostOptions &o) {
   }
 }
 
-int run_window(const ari::HostOptions &o) {
+// snapshot --seconds / --mp4: what gla::record_frames runs, from the flags.
+gla::RecordOptions record_options(const ari::HostOptions &o) {
+  gla::RecordOptions r;
+  r.mp4 = o.mp4;
+  r.png = o.png;
+  r.seconds = o.seconds;
+  r.fps = o.fps > 0 ? o.fps : 30;
+  r.lead_frames = o.frames;
+  return r;
+}
+
+int run_window(const ari::HostOptions &o, [[maybe_unused]] const Scripting &scripting) {
   const bool offscreen = o.command != "run"; // snapshot and check never open a window
-  if (o.command == "snapshot" && o.png.empty()) {
-    std::fprintf(stderr, "arigl: a window snapshot needs --png FILE (or use --terminal)\n");
+  if (o.command == "snapshot" && o.png.empty() && o.mp4.empty()) {
+    std::fprintf(stderr, "arigl: a window snapshot needs --png FILE or --mp4 FILE (or use "
+                         "--terminal)\n");
     return 2;
   }
   const int width = o.width ? o.width : 1024, height = o.height ? o.height : 768;
+  if (!o.mp4.empty()) { // an encoder, and a size it takes, before the document loads
+    std::string why;
+    if (width % 2 || height % 2) {
+      std::fprintf(stderr,
+                   "arigl: --mp4 needs an even --width and --height (H.264's 4:2:0), "
+                   "not %dx%d\n",
+                   width, height);
+      return 2;
+    }
+    if (cvc::media::video_encoder(gla::record_writer_options(record_options(o), width, height),
+                                  &why)
+            .empty()) {
+      std::fprintf(stderr, "arigl: --mp4: no video encoder: %s\n", why.c_str());
+      return 2;
+    }
+  }
 
   cvc::app app;
   ari::apply_exec_policy(app, o); // --exec-policy, before anything builds the scheduler
@@ -2128,7 +2204,8 @@ int run_window(const ari::HostOptions &o) {
     for (ari::KeyBinding &k : avatar_keys(view))
       host_keys.push_back(std::move(k));
   rt.app_runtime().set_host_keys(std::move(host_keys));
-  rt.app_runtime().set_host_mouse(camera_mouse(cam, ui.touchMode(), conf.active));
+  rt.app_runtime().set_host_mouse(
+      camera_mouse(cam, ui.touchMode(), conf.active, rt.app_runtime().prefix()));
   // $CVC_ARIGL_LOOK=mouse starts in mouse look (the browser page's ?look=mouse), =drag in drag to
   // look; otherwise the camera's own setting stands.
   if (const char *look = std::getenv("CVC_ARIGL_LOOK"); look && !ui.touchMode()) {
@@ -2174,6 +2251,21 @@ int run_window(const ari::HostOptions &o) {
     if (o.command == "check")
       return rt.app_runtime().exit_code(); // an init: that called (quit code)
 
+    if (o.command == "snapshot" && o.seconds > 0) { // the scene on its clock, maybe recorded
+      gla::RecordOptions rec = record_options(o);
+      rec.before_frame = [&conf] { conf.pump(); }; // as below: a live conference must pump too
+      const gla::RecordResult r = gla::record_frames(rt, view, rec);
+      print_warnings(rt.take_warnings());
+      if (!r.ok) {
+        std::fprintf(stderr, "arigl: %s\n", r.error.c_str());
+        return 1;
+      }
+      if (!o.mp4.empty())
+        std::fprintf(stderr, "arigl: recorded %d frames (%.3g s at %d fps, %dx%d, %s) to %s\n",
+                     r.frames, r.frames / static_cast<double>(rec.fps), rec.fps, r.width, r.height,
+                     r.encoder.c_str(), o.mp4.c_str());
+      return rt.app_runtime().exit_code();
+    }
     if (o.command == "snapshot") {
       rt.set_fixed_clock(true); // reproducible: the scene clock advances 1/30 s a frame
       const int frames = std::max(1, o.frames);
@@ -2236,6 +2328,7 @@ int run_window(const ari::HostOptions &o) {
     cvc::gl::SdlInput sdl;
     sdl.init();
     std::string exit_signal;
+    ari::host_signals &osSignals = ari::signals_of(app); // trapped while signalRoute (below) lives
     rt.set_input_pump([&] {
       conf.pump(); // push this frame's room-tree writes (room-join + roster) to the relay
       touch.update();
@@ -2251,14 +2344,13 @@ int run_window(const ari::HostOptions &o) {
           continue;
         rt.post_input(to_ari(e));
       }
-      for (std::string sig = ari::take_trapped_signal(); !sig.empty();
-           sig = ari::take_trapped_signal())
+      for (std::string sig = osSignals.take_trapped(); !sig.empty(); sig = osSignals.take_trapped())
         if (!rt.post_signal(sig, "os")) { // no on_signal: the host's default is to stop
           exit_signal = sig;
           rt.request_close();
         }
     });
-    ari::install_signal_traps();
+    std::optional<ari::signal_route> signalRoute(std::in_place, app, ari::signal_route::mode::trap);
     view.setFrameYield(cvc::gl::SceneRenderer::FrameYield::App);
     const double fps = o.fps > 0 ? o.fps : 120.0;
 #ifndef __EMSCRIPTEN__
@@ -2293,7 +2385,7 @@ int run_window(const ari::HostOptions &o) {
 #endif
     }
     conf.stop(); // join the transport reader before the shard (owned by conf) is destroyed
-    ari::restore_signal_traps();
+    signalRoute.reset(); // the previous handlers
     cam.detach();
     if (!exit_signal.empty())
       return 128 + ari::signal_number(exit_signal);
@@ -2315,24 +2407,27 @@ int run_window(const ari::HostOptions &o) {
   const std::function<int()> loop = after_load;
 #endif
   const ari::python::Attachment lent =
-      lend_python(app, rt, view, cam, ui, offscreen ? "offscreen" : "window", loop);
+      lend_python(scripting, app, rt, view, cam, ui, offscreen ? "offscreen" : "window", loop);
   if (is_python_program(o.doc)) {
     bool loaded = false;
     rt.app_runtime().add_load_hook(
         [&loaded](ari::LoadResult &, const std::string &) { loaded = true; });
-    const int status = g_python->run_script(o.doc, o.doc_args);
+    ari::python::Engine &python = *scripting.python;
+    const int status = python.run_script(o.doc, o.doc_args);
 #ifndef __EMSCRIPTEN__
-    if (g_python->loop_ran())
-      return status ? status : g_python->loop_status();
+    if (python.loop_ran())
+      return status ? status : python.loop_status();
 #endif
-    return status != 0 || !loaded ? status : g_python->run_loop(after_load);
+    return status != 0 || !loaded ? status : python.run_loop(after_load);
   }
 #endif
   if (const int status = load_document(rt, o); status >= 0)
     return status;
+  // --set's view keys again: realizing the scene framed the camera over the pose they set.
+  ari::apply_state_sets(app, sg.getStatePrefix(), ari::view_state_sets(o.sets));
   note_misplaced(rt.app_runtime(), o);
 #ifdef CVC_ARIADNE_PYTHON
-  return g_python->run_loop(after_load); // the document's python: may not run another inside it
+  return scripting.python->run_loop(after_load); // the document's python: may not run another
 #else
   return after_load();
 #endif
@@ -2349,7 +2444,7 @@ public:
   }
 };
 
-int run_terminal(const ari::HostOptions &o) {
+int run_terminal(const ari::HostOptions &o, [[maybe_unused]] const Scripting &scripting) {
   if (!ari::FtxuiBackend::available()) {
     std::fprintf(stderr, "arigl: libcvc was built without FTXUI (no terminal backend)\n");
     return 1;
@@ -2385,7 +2480,7 @@ int run_terminal(const ari::HostOptions &o) {
   rt.set_backend(*backend);
 #ifdef CVC_ARIADNE_PYTHON
   const ari::python::Attachment lent =
-      lend_python(app, rt, o.command == "run" ? "terminal" : "headless");
+      lend_python(scripting, app, rt, o.command == "run" ? "terminal" : "headless");
 #endif
   if (const std::string error = rt.enable_net(o.net); !error.empty()) {
     std::fprintf(stderr, "arigl: %s\n", error.c_str());
@@ -2441,6 +2536,8 @@ int run_terminal(const ari::HostOptions &o) {
   ari::apply_state_sets(app, prefix, o.sets); // --set: before the nodes seed theirs
   if (const int status = load_document(rt, o); status >= 0)
     return status;
+  // --set's view keys again: realizing the scene framed the camera over the pose they set.
+  ari::apply_state_sets(app, prefix, ari::view_state_sets(o.sets));
   note_misplaced(rt, o);
   if (o.command == "check")
     return rt.exit_code(); // an init: that called (quit code)
@@ -2499,9 +2596,11 @@ int run_terminal(const ari::HostOptions &o) {
   if (o.fps > 0)
     run.fps = o.fps;
   run.mouse = o.mouse;
-  run.on_start = ari::install_signal_traps;
-  run.on_stop = ari::restore_signal_traps;
-  run.take_signal = ari::take_trapped_signal;
+  // The OS's signals go to this app while the terminal is the loop's (host_signals.h).
+  std::optional<ari::signal_route> signalRoute;
+  run.on_start = [&] { signalRoute.emplace(app, ari::signal_route::mode::trap); };
+  run.on_stop = [&] { signalRoute.reset(); };
+  run.take_signal = [&] { return ari::signals_of(app).take_trapped(); };
   run.background_input = [&](const ari::TermEvent &e) { return scene.handle_input(e); };
   run.notice = [&live] { return live.notice(); }; // the latest warning, for a few seconds
   // The screen is the document's: a URL the host cannot open in a browser (open-url, a sign-in)
@@ -2565,6 +2664,25 @@ int arigl_main(int argc, char **argv) {
                          "--terminal\n");
     return 2;
   }
+  if (!o.mp4.empty() || o.seconds > 0) { // a recording: a window's snapshot, natively
+#ifdef __EMSCRIPTEN__
+    std::fprintf(stderr, "arigl: --mp4 and --seconds are not available in a browser\n");
+    return 2;
+#endif
+    if (o.command != "snapshot") {
+      std::fprintf(stderr, "arigl: --mp4 and --seconds are for snapshot\n");
+      return 2;
+    }
+    if (terminal) {
+      std::fprintf(stderr, "arigl: --mp4 and --seconds run the scene in an offscreen window; "
+                           "drop --terminal\n");
+      return 2;
+    }
+    if (!o.mp4.empty() && !(o.seconds > 0)) {
+      std::fprintf(stderr, "arigl: --mp4 needs --seconds S, how long to record\n");
+      return 2;
+    }
+  }
   if (!ari::AppRuntime::have_yaml()) {
     std::fprintf(stderr, "arigl: libcvc was built without yaml-cpp, so it cannot load a .ari\n");
     return 1;
@@ -2591,9 +2709,10 @@ int arigl_main(int argc, char **argv) {
     std::fprintf(stderr, "%s: %s\n", kRuntimeName, python.error().c_str());
     return 1;
   }
-  g_python = &python;
+  Scripting scripting;
+  scripting.python = &python;
 #ifdef CVC_ARIADNE_WASM
-  const WasmGuests wasm_guests; // before any app or runtime, too
+  scripting.wasm = make_wasm_guests(); // before any app or runtime, too
 #endif
 #else
   if (!o.python_path.empty()) {
@@ -2601,8 +2720,9 @@ int arigl_main(int argc, char **argv) {
                          "has no Python\n");
     return 2;
   }
+  const Scripting scripting{};
 #endif
-  return terminal ? run_terminal(staged) : run_window(staged);
+  return terminal ? run_terminal(staged, scripting) : run_window(staged, scripting);
 }
 
 } // namespace

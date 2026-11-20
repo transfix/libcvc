@@ -49,6 +49,10 @@ namespace ariadne {
 // at host setup, before realize_scene.
 void register_lsystem_node_types(cvc::app &app);
 
+// cloud_sky's drift: the clouds move at this many metres a second along sky.wind_az at sky.drift
+// 1. The weather node's storms ride the same wind (weather_node.cpp, steeringWind).
+constexpr double CLOUD_SKY_DRIFT = 3.0;
+
 } // namespace ariadne
 } // namespace gl
 } // namespace cvc

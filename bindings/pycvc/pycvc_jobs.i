@@ -161,6 +161,28 @@ def segment_seeded_job(vol, seeds, params=None, **keywords):
     return _segment_seeded_job(vol, seeds,
                                _seeded_segmentation_params(params, keywords, "segment_seeded_job"))
 %}
+// The paper's seeds as a job: pycvc.critical_point_seeds_job(vol, cp_feature_threshold=0.3, ...).
+PYCVC_RESULT_JOB(result_job_point_classes, cvc::point_classes)
+%exception _critical_point_seeds_job {
+  try {
+    $action
+  } catch (const std::exception &e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  }
+}
+%inline %{
+std::unique_ptr<cvc::result_job<cvc::point_classes>>
+_critical_point_seeds_job(const cvc::volume &vol, const cvc::seeded_segmentation_params &p) {
+  return cvc::critical_point_seeds_job(vol, p);
+}
+%}
+%pythoncode %{
+def critical_point_seeds_job(vol, params=None, **keywords):
+    """critical_point_seeds as a resumable job: step(budget), progress(), phase(), cancel(),
+    result()."""
+    return _critical_point_seeds_job(vol, _seeded_segmentation_params(params, keywords,
+                                                                     "critical_point_seeds_job"))
+%}
 // The skeleton job (cvc/geometry/skeleton.h; pycvc_skeleton.i wraps the result and its
 // parameters): pycvc.skeletonize_job(g, robust=True, ...) or (g, pycvc.skeleton_params(...)).
 PYCVC_RESULT_JOB(result_job_skeleton, cvc::skeleton)
@@ -185,4 +207,25 @@ def skeletonize_job(geom, params=None, **keywords):
     elif keywords:
         raise TypeError("skeletonize_job: pass a skeleton_params or keywords, not both")
     return _skeletonize_job(geom, params)
+%}
+// The tiler job (cvc/geometry/tiler.h; pycvc_tiler.i wraps the result and its parameters):
+// pycvc.tile_contours_job(stack, curation_delta=0.01, ...) or (stack, pycvc.tile_params(...)).
+PYCVC_RESULT_JOB(result_job_tile_result, cvc::tile_result)
+%exception _tile_contours_job {
+  try {
+    $action
+  } catch (const std::exception &e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  }
+}
+%inline %{
+std::unique_ptr<cvc::result_job<cvc::tile_result>>
+_tile_contours_job(const cvc::contour_stack &stack, const cvc::tile_params &p) {
+  return cvc::tile_contours_job(stack, p);
+}
+%}
+%pythoncode %{
+def tile_contours_job(stack, params=None, **keywords):
+    """tile_contours as a resumable job: step(budget), progress(), phase(), cancel(), result()."""
+    return _tile_contours_job(stack, _tile_params(params, keywords, "tile_contours_job"))
 %}
