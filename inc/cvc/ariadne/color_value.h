@@ -11,6 +11,7 @@
 //
 // "", "none" and "default" are no colour: the widget's own. A list of colours (a radio's, one per
 // option) is the colours separated by ';', an entry left empty taking the default.
+#include <string>
 #include <string_view>
 #include <vector>
 
