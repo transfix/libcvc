@@ -48,6 +48,10 @@ add_executable(net_policy_test net_policy_test.cpp)
 add_executable(e2ee_test e2ee_test.cpp)
 add_executable(ariadne_e2ee_test ariadne_e2ee_test.cpp)
 add_executable(net_oidc_test net_oidc_test.cpp)
+# The connection engine (cvc/net/net_engine.h): it listens, so native only.
+if(NOT EMSCRIPTEN)
+  add_executable(net_engine_test net_engine_test.cpp)
+endif()
 add_executable(uri_http_cache_test uri_http_cache_test.cpp)
 add_executable(state_test state_test.cpp)
 add_executable(state_lifetime_stress_test state_lifetime_stress_test.cpp)
@@ -717,6 +721,9 @@ list(APPEND TEST_TARGETS
 if(NOT WIN32)
   list(APPEND TEST_TARGETS state_exec_multiprocess_test)
 endif()
+if(TARGET net_engine_test)
+  list(APPEND TEST_TARGETS net_engine_test)
+endif()
 if(TARGET state_exec_bench)
   list(APPEND TEST_TARGETS state_exec_bench)
 endif()
@@ -1043,6 +1050,15 @@ target_link_libraries(net_policy_test
     GTest::gtest
     GTest::gtest_main
 )
+
+if(TARGET net_engine_test)
+  target_link_libraries(net_engine_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+endif()
 
 target_link_libraries(e2ee_test
   PRIVATE
@@ -3203,6 +3219,11 @@ cvc_discover_tests(net_policy_test)
 cvc_discover_tests(e2ee_test)
 cvc_discover_tests(ariadne_e2ee_test)
 cvc_discover_tests(net_oidc_test)
+if(TARGET net_engine_test)
+  # The fan-out case connects 6000 loopback clients (12000 descriptors; it lowers N to fit the
+  # limit): seconds in a Release build, longer in Debug or under a sanitizer.
+  cvc_discover_tests(net_engine_test PROPERTIES TIMEOUT 600)
+endif()
 cvc_discover_tests(uri_http_cache_test)
 cvc_discover_tests(state_test)
 cvc_discover_tests(state_lifetime_stress_test)
