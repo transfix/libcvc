@@ -124,6 +124,10 @@ struct vehicle_look {
 //                intent alone: WorldVehicles::set_intent, the entity's intent keys) or pose (an
 //                outside simulation places it, and no plant integrates it: WorldVehicles::set_pose,
 //                the entity's pose keys); the first is a spawn's default
+//   drivable     whether a participant may get in and drive it (ARIADNE_WORLDS.md section 18.6;
+//                holon::set_driver), from within `reach` metres of its chassis box (3 m)
+//   controls     the control scheme a driver drives it with (controls.h): car or boat; "" by its
+//                plant (a dynamicboat's boat, every other car)
 struct vehicle_archetype {
   std::string id;
   std::string plant = "jolt";
@@ -132,8 +136,13 @@ struct vehicle_archetype {
   vehicle_look look;
   std::map<std::string, std::pair<double, double>> ranges;
   std::vector<std::string> controllers{"nav@1", "none"};
+  bool drivable = false;
+  double reach = 3.0;
+  std::string controls;
   bool operator==(const vehicle_archetype &) const = default;
 };
+// The control scheme a driver drives A with: its controls, or by its plant (boat or car).
+std::string vehicle_controls(const vehicle_archetype &a);
 
 // The vehicle presets a `vehicle:` may name, and the controllers and plants a vehicle may have.
 // A dynamicboat's presets are the boats' (boat_presets()), every other plant's the vehicles'.

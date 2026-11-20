@@ -338,8 +338,9 @@ TEST(RoomWriteGate, AParticipantWritesOnlyItsOwnSubtree) {
 
   // What clients write (room_join, write_intent, room_net, room_publish).
   for (const char *key : {"presence.joined", "intent.move.x", "intent.yaw", "intent.tick",
-                          "net.rtt_ms", "net.in_kbps", "voice.talking", "video.off", "audio.opus",
-                          "streams.camera.endpoint", "streams.camera.token"})
+                          "intent.throttle", "intent.jump", "drive", "net.rtt_ms", "net.in_kbps",
+                          "voice.talking", "video.off", "audio.opus", "streams.camera.endpoint",
+                          "streams.camera.token"})
     EXPECT_TRUE(gate.may_write("alice", alice + "." + key, op::set_value)) << key;
   EXPECT_TRUE(gate.may_write("alice", alice + ".intent.move.x", op::touch));
   EXPECT_TRUE(gate.may_write("alice", alice + ".avatar", op::set_data));
@@ -360,6 +361,10 @@ TEST(RoomWriteGate, AParticipantWritesOnlyItsOwnSubtree) {
       << "the SFU relay marks a stream ready";
   EXPECT_FALSE(gate.may_write("alice", alice + ".device", op::set_value))
       << "the relay writes the device tag";
+  EXPECT_FALSE(gate.may_write("alice", alice + ".driving", op::set_value))
+      << "the relay says what alice drives";
+  EXPECT_FALSE(gate.may_write("alice", alice + ".drive_status", op::set_value))
+      << "and answers her ask to";
 
   // Paths the state tree would trim or skip onto one of those keys.
   for (const std::string &p :

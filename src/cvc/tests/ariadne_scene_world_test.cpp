@@ -15,7 +15,9 @@
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/conference/room_entities.h>
+#include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/holon.h>
+#include <cvc/ariadne/holon_sync.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/requires.h>
 #include <cvc/ariadne/scene.h>
@@ -6982,10 +6984,10 @@ TEST(AriadneOneWorld, AParticipantGetsIntoAVehicleAndDrivesIt) {
   ASSERT_EQ(wire.size(), 1u);
   EXPECT_EQ(wire[0].driver, "ann") << "the room's entities say who drives it";
 
-  // Ann's drive axes drive it: 2 m/s^2 straight ahead for 3 s.
+  // Ann's drive axes drive it: full throttle straight ahead for 3 s.
   avatar_intent go;
   go.steer = 0.0;
-  go.accel = 2.0;
+  go.throttle = 1.0;
   h.set_intent("ann", go);
   for (int i = 0; i < 180; ++i)
     h.advance(1.0 / 60.0);
@@ -7030,6 +7032,218 @@ TEST(AriadneOneWorld, AParticipantGetsIntoAVehicleAndDrivesIt) {
   EXPECT_LT(d, 6.0);
   EXPECT_NEAR(out.position.z, 0.0, 0.1) << "standing on the square";
   EXPECT_LT(after.speed, 0.5) << "its controller (external) brought it to rest";
+}
+
+// The drive axes are shares of what the vehicle can do (section 18.6), so one scheme drives any
+// vehicle: steer of its lock; throttle of its acceleration; a brake toward a stop and never past
+// it; reverse, a car braking while it still rolls forward and backing up from there, a boat's
+// propeller astern; a boat has no brake.
+TEST(AriadneOneWorld, TheDriveAxesAreSharesOfTheVehiclesEnvelope) {
+  holon::drive_envelope car;
+  car.max_steer = 0.5;
+  car.max_accel = 3.0;
+  car.max_decel = 7.0;
+  holon::drive_envelope boat = car;
+  boat.floats = true;
+  boat.max_decel = 1.5; // its propeller astern
+  const double dt = 7.0 / 120.0;
+  const auto cmd = [&](const holon::drive_envelope &e, double steer, double throttle, double brake,
+                       double speed) {
+    avatar_intent in;
+    in.steer = steer;
+    in.throttle = throttle;
+    in.brake = brake;
+    return holon::drive_command(in, e, speed, dt);
+  };
+  EXPECT_DOUBLE_EQ(cmd(car, 1.0, 0.0, 0.0, 0.0).steer, 0.5);
+  EXPECT_DOUBLE_EQ(cmd(car, -0.5, 0.0, 0.0, 0.0).steer, -0.25);
+  EXPECT_DOUBLE_EQ(cmd(car, 0.0, 1.0, 0.0, 5.0).accel, 3.0);
+  EXPECT_DOUBLE_EQ(cmd(car, 0.0, 0.5, 0.0, 5.0).accel, 1.5);
+  // The brake: its share of max_decel at speed, only what stops it near a stop, nothing at rest.
+  EXPECT_DOUBLE_EQ(cmd(car, 0.0, 0.0, 1.0, 10.0).accel, -7.0);
+  EXPECT_DOUBLE_EQ(cmd(car, 0.0, 0.0, 0.5, 10.0).accel, -3.5);
+  EXPECT_NEAR(cmd(car, 0.0, 0.0, 1.0, 0.1).accel, -0.1 / dt, 1e-12);
+  EXPECT_DOUBLE_EQ(cmd(car, 0.0, 0.0, 1.0, 0.0).accel, 0.0) << "never past a stop";
+  EXPECT_NEAR(cmd(car, 0.0, 0.0, 1.0, -0.2).accel, 0.2 / dt, 1e-12) << "rolling back, it stops too";
+  EXPECT_DOUBLE_EQ(cmd(car, 0.0, 1.0, 1.0, 10.0).accel, -7.0) << "the brake wins";
+  // Reverse: braking while it rolls forward, then backing up.
+  EXPECT_DOUBLE_EQ(cmd(car, 0.0, -1.0, 0.0, 5.0).accel, -7.0);
+  EXPECT_DOUBLE_EQ(cmd(car, 0.0, -1.0, 0.0, 0.2).accel, -3.0);
+  EXPECT_DOUBLE_EQ(cmd(car, 0.0, -1.0, 0.0, -2.0).accel, -3.0);
+  // A boat: no brake; reverse is the propeller astern, whatever its speed.
+  EXPECT_DOUBLE_EQ(cmd(boat, 0.0, 0.0, 1.0, 5.0).accel, 0.0);
+  EXPECT_DOUBLE_EQ(cmd(boat, 0.0, -1.0, 0.0, 5.0).accel, -1.5);
+  EXPECT_DOUBLE_EQ(cmd(boat, 0.0, -1.0, 0.0, 0.0).accel, -1.5);
+  // None is none: 0.
+  const holon::drive_cmd none = holon::drive_command(avatar_intent{}, car, 3.0, dt);
+  EXPECT_DOUBLE_EQ(none.steer, 0.0);
+  EXPECT_DOUBLE_EQ(none.accel, 0.0);
+}
+
+namespace {
+// kIntents' square, with a drivable humvee (reach 3 m) and a truck no one may drive.
+const char *kDrivable = R"(
+world:
+  vehicles:
+    archetypes:
+      humvee:
+        vehicle: humvee
+        controllers: [nav@1, none, external]
+        drivable: true
+      truck:
+        vehicle: humvee
+        controllers: [external]
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [160, 160, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+
+LoadResult load_drivable() {
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, kDrivable);
+  if (r.ok)
+    if (const Value *world = find_world_block(r)) {
+      world_rules rules = default_world_rules();
+      EXPECT_EQ(parse_world_block(*world, rules), "");
+      r.scene.vehicles = rules.vehicles;
+    }
+  return r;
+}
+
+std::uint64_t spawn_kind(WorldVehicles &v, const std::string &archetype, double x, double y) {
+  entity_spec s;
+  s.archetype = archetype;
+  s.controller = "external";
+  s.placed = true;
+  s.x = x;
+  s.y = y;
+  s.yaw = 0.0;
+  std::string why;
+  const std::uint64_t id = v.spawn(s, &why);
+  EXPECT_NE(id, 0u) << why;
+  return id;
+}
+} // namespace
+
+// A driven car (section 18.6): full throttle, then the brake brings it to a stop and holds it
+// there (the brake never reverses); reverse backs it up.
+TEST(AriadneOneWorld, ACarBrakesToAStopAndOnlyReverseBacksItUp) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_drivable();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t id = spawn_kind(v, "humvee", -40.0, 0.0);
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  cvc::physics::body_state feet;
+  feet.position = {-40.0, 3.0, 0.0};
+  h.add_participant("ann", false, feet);
+  for (int i = 0; i < 30; ++i)
+    h.advance(1.0 / 60.0);
+  ASSERT_TRUE(h.get_in("ann", id, &why)) << why;
+  const auto drive = [&](double throttle, double brake, double seconds) {
+    avatar_intent in;
+    in.steer = 0.0;
+    in.throttle = throttle;
+    in.brake = brake;
+    h.set_intent("ann", in);
+    for (int i = 0; i < static_cast<int>(seconds * 60.0); ++i)
+      h.advance(1.0 / 60.0);
+    return entity(v, id);
+  };
+  const entity_info going = drive(1.0, 0.0, 3.0);
+  EXPECT_GT(going.speed, 3.0);
+  const entity_info braked = drive(0.0, 1.0, 3.0);
+  EXPECT_LT(std::fabs(braked.speed), 0.2) << "the brake stopped it";
+  const entity_info held = drive(0.0, 1.0, 2.0);
+  EXPECT_GT(held.x, braked.x - 0.1) << "and held it: the brake never backs up";
+  const entity_info backed = drive(-1.0, 0.0, 3.0);
+  std::printf("  braked from %.2f m/s to %.2f; held %.2f m; reverse: %.2f m/s, %.1f m back\n",
+              going.speed, braked.speed, held.x - braked.x, backed.speed, held.x - backed.x);
+  EXPECT_LT(backed.speed, -0.5) << "reverse backs it up";
+  EXPECT_LT(backed.x, held.x - 1.0);
+}
+
+// Getting in is the world's to rule on (section 18.6): a participant asks in the room tree
+// (request_drive) and the relay's server_pump answers. A vehicle too far away, or one whose
+// archetype is not drivable, is refused with why; a drivable one within reach lets them in, and
+// the room's entities say which may be driven.
+TEST(AriadneOneWorld, GettingInIsAskedForInTheRoomAndRuledOn) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_drivable();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t far_off = spawn_kind(v, "humvee", -40.0, 0.0);
+  const std::uint64_t truck = spawn_kind(v, "truck", 4.0, 8.0);
+  const std::uint64_t close = spawn_kind(v, "humvee", 6.5, 0.0); // its rear axle: the box from ~6.1 m
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  const std::string room = "garage";
+  conference::room_join(app, room, "ann"); // the first joiner stands at (4, 0)
+  const auto pump = [&](int frames) {
+    for (int i = 0; i < frames; ++i)
+      server_pump(h, app, room, 1.0 / 60.0);
+  };
+  pump(30);
+  const auto ask = [&](std::uint64_t entity) {
+    const std::uint64_t seq = request_drive(app, room, "ann", entity);
+    pump(1);
+    const drive_status st = read_drive_status(app, room, "ann");
+    EXPECT_EQ(st.seq, seq);
+    return st;
+  };
+  drive_status st = ask(far_off);
+  EXPECT_FALSE(st.ok);
+  EXPECT_NE(st.why.find("m away"), std::string::npos) << st.why;
+  st = ask(truck);
+  EXPECT_FALSE(st.ok);
+  EXPECT_NE(st.why.find("not drivable"), std::string::npos) << st.why;
+  EXPECT_EQ(read_driving(app, room, "ann"), 0u);
+  st = ask(close);
+  EXPECT_TRUE(st.ok) << st.why;
+  EXPECT_EQ(h.drives("ann"), close);
+  EXPECT_EQ(read_driving(app, room, "ann"), close);
+  st = ask(0);
+  EXPECT_TRUE(st.ok);
+  EXPECT_EQ(read_driving(app, room, "ann"), 0u);
+
+  bool saw_humvee = false, saw_truck = false;
+  for (const conference::room_entity &e : conference::room_entities_of(v)) {
+    if (e.id == close) {
+      saw_humvee = true;
+      EXPECT_TRUE(e.drivable);
+      EXPECT_DOUBLE_EQ(e.reach, 3.0);
+      EXPECT_EQ(e.controls, "car");
+    }
+    if (e.id == truck) {
+      saw_truck = true;
+      EXPECT_FALSE(e.drivable);
+    }
+  }
+  EXPECT_TRUE(saw_humvee && saw_truck);
 }
 
 TEST(AriadneWorldGym, FleetBench) {

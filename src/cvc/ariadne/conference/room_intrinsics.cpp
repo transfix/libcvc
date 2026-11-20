@@ -727,6 +727,56 @@ void register_room_intrinsics(cvc::app &app) {
           return se::make_dict({{"ok", se::value_t(true)}});
         });
 
+    // (room-drive HANDLE ENTITY) -> { ok #t seq N }: the caller asks to get into world entity
+    // ENTITY (its id in the room's entities) and drive it, or to get out with 0 (ARIADNE_WORLDS.md
+    // section 18.6). The relay answers under the caller's drive_status (room-driving reads it):
+    // a vehicle must be drivable and within its reach.
+    se::builtins::register_fn(
+        env, "room-drive", [&app, doc](std::span<const se::value_t> args) -> se::value_t {
+          if (!doc)
+            return err("room-drive: no document scope");
+          room_table *tbl = doc_rooms(doc);
+          if (!tbl)
+            return err("room-drive: internal: room-table slot unavailable");
+          if (args.size() < 2)
+            return err("room-drive: (room-drive HANDLE ENTITY)");
+          room_handle *rh = tbl->find(handle_token(args[0]));
+          if (!rh)
+            return err("room-drive: HANDLE must be a room-join handle (needs the caller's pid)");
+          const double entity = get_num(&args[1]);
+          if (!(entity >= 0.0) || entity != std::floor(entity))
+            return err("room-drive: ENTITY must be an entity id, or 0 to get out");
+          const std::uint64_t seq = cvc::ariadne::request_drive(
+              app, rh->room_id, rh->self_pid, static_cast<std::uint64_t>(entity));
+          return se::make_dict({{"ok", se::value_t(true)},
+                                {"seq", se::value_t(static_cast<double>(seq))}});
+        });
+
+    // (room-driving HANDLE) -> { driving N seq N ok #t/#f why "..." }: the entity the caller
+    // drives as the relay says (0: none), and its answer to the caller's last room-drive.
+    se::builtins::register_fn(
+        env, "room-driving", [&app, doc](std::span<const se::value_t> args) -> se::value_t {
+          if (!doc)
+            return err("room-driving: no document scope");
+          room_table *tbl = doc_rooms(doc);
+          if (!tbl)
+            return err("room-driving: internal: room-table slot unavailable");
+          if (args.empty())
+            return err("room-driving: (room-driving HANDLE)");
+          room_handle *rh = tbl->find(handle_token(args[0]));
+          if (!rh)
+            return err("room-driving: HANDLE must be a room-join handle (needs the caller's pid)");
+          const cvc::ariadne::drive_status st =
+              cvc::ariadne::read_drive_status(app, rh->room_id, rh->self_pid);
+          return se::make_dict({
+              {"driving", se::value_t(static_cast<double>(
+                              cvc::ariadne::read_driving(app, rh->room_id, rh->self_pid)))},
+              {"seq", se::value_t(static_cast<double>(st.seq))},
+              {"ok", se::value_t(st.ok)},
+              {"why", se::value_t(st.why)},
+          });
+        });
+
     // (room-avatar-options ROOM KIND) -> list of labels. KIND is "color" or "accessory"; the
     // labels of what the room's catalog offers (room_avatar.h), in its order, the default first.
     // Empty until the relay's catalog has arrived. ROOM is a room-join handle or a room-id.

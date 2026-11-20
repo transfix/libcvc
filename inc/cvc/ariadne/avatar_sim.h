@@ -51,11 +51,19 @@ struct avatar_intent {
   cvc::physics::vec3 move; // desired linear velocity, world metres/second
   double yaw = 0.0;        // facing: radians about +Z from +X (Z-up), chosen by the user
   // The drive axes, for the vehicle the participant drives (holon::set_driver; ARIADNE_WORLDS.md
-  // section 18.4): the steering's bicycle angle (rad, + left) and the acceleration along its
-  // heading (m/s^2), held to the vehicle's lock and speeds. Not finite: none (0 while driving).
-  // A walker ignores them.
+  // section 18.6), each a share of what the vehicle can do, so one control scheme drives any
+  // vehicle and the server holds each to that vehicle's own envelope:
+  //   steer     [-1, 1], + left: the share of its steering lock (max_steer)
+  //   throttle  [-1, 1]: forward, a share of its max_accel; negative, reverse: a car brakes to a
+  //             stop and then backs up, a boat's propeller pushes astern
+  //   brake     [0, 1]: a share of its max_decel toward a stop, never past it (a boat has none)
+  // Clamped to those ranges. Not finite: none (0 while driving). A walker ignores them.
   double steer = std::numeric_limits<double>::quiet_NaN();
-  double accel = std::numeric_limits<double>::quiet_NaN();
+  double throttle = std::numeric_limits<double>::quiet_NaN();
+  double brake = std::numeric_limits<double>::quiet_NaN();
+  // A walker with physics jumps while this is held and it stands on something (its controller's
+  // jump_speed, straight up). Without physics (avatar_sim), and while driving, nothing.
+  bool jump = false;
 };
 
 // A deterministic, headless kinematic avatar: integrate an avatar_intent over

@@ -71,6 +71,10 @@ quat unit(quat q) {
   const double n = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
   return n > 0.0 && std::isfinite(n) ? quat{q.w / n, q.x / n, q.y / n, q.z / n} : quat{};
 }
+
+// The walker's jump speed (m/s) under R: its controller's jump_speed, 4 m/s (about 0.8 m) when it
+// names none.
+double jump_speed_of(const world_rules &r) { return r.controller().param("jump_speed", 4.0); }
 } // namespace
 
 holon::holon(holon_role role, holon_config cfg)
@@ -82,6 +86,7 @@ holon::holon(holon_role role, holon_config cfg)
       _world = std::make_unique<avatar_world>(_clock.fixed_dt(), _cfg.rules.avatar().body,
                                               _cfg.rules.policy.energy);
       _world->set_gravity(_cfg.rules.physics.gravity);
+      _world->set_jump_speed(jump_speed_of(_cfg.rules));
       const world_physics &wp = _cfg.rules.physics; // the room's wind (O14)
       _world->set_wind(
           {wp.wind_speed, wp.wind_dir * 3.14159265358979323846 / 180.0, wp.wind_gustiness},
@@ -191,7 +196,87 @@ bool holon::set_driver(const std::string &pid, std::uint64_t id, std::string *wh
   v->set_driver(id, pid);
   p.drives = id;
   p.ride = ride_of(e);
+  // The envelope its drive axes are shares of (avatar_intent).
+  p.envelope = drive_envelope{};
+  for (const vehicle_archetype &a : v->archetypes())
+    if (a.id == e.spec.archetype) {
+      try {
+        const cvc::physics::vehicle_desc d = vehicle_desc_of(a, e.spec.mass, e.spec.max_speed);
+        p.envelope.max_steer = d.max_steer;
+        p.envelope.max_accel = d.max_accel;
+        p.envelope.max_decel = d.max_decel;
+      } catch (const std::exception &) {
+      }
+      p.envelope.floats = vehicle_plant_floats(e.plant.empty() ? a.plant : e.plant);
+      break;
+    }
   return true;
+}
+
+holon::drive_cmd holon::drive_command(const avatar_intent &in, const drive_envelope &env,
+                                      double speed, double dt) {
+  const auto axis = [](double x) { return std::isfinite(x) ? x : 0.0; };
+  const double steer = std::clamp(axis(in.steer), -1.0, 1.0);
+  const double throttle = std::clamp(axis(in.throttle), -1.0, 1.0);
+  const double brake = env.floats ? 0.0 : std::clamp(axis(in.brake), 0.0, 1.0);
+  drive_cmd out;
+  out.steer = steer * env.max_steer;
+  if (brake > 0.0) {
+    // Toward a stop and no further: what stops it within the tick, at most the brake's share.
+    const double cap = brake * env.max_decel;
+    out.accel = std::clamp(-speed / std::max(dt, 1e-6), -cap, cap);
+  } else if (throttle >= 0.0) {
+    out.accel = throttle * env.max_accel;
+  } else if (env.floats) {
+    out.accel = throttle * env.max_decel; // the propeller astern (a boat's max_decel)
+  } else {
+    // Reverse: braking while it still rolls forward, then backing up from rest (the plant backs
+    // up on a negative command from rest).
+    out.accel = throttle * (speed > kRollingForward ? env.max_decel : env.max_accel);
+  }
+  return out;
+}
+
+bool holon::get_in(const std::string &pid, std::uint64_t id, std::string *why) {
+  const auto fail = [&](const std::string &m) {
+    if (why)
+      *why = m;
+    return false;
+  };
+  if (id == 0 || _role != holon_role::server || !_participants.count(pid))
+    return set_driver(pid, id, why);
+  WorldVehicles *v = _scene ? _scene->vehicles() : nullptr;
+  entity_info e;
+  if (!v || !find_entity(*v, id, e) || !e.placed)
+    return set_driver(pid, id, why); // its own refusal
+  const vehicle_archetype *a = nullptr;
+  for (const vehicle_archetype &x : v->archetypes())
+    if (x.id == e.spec.archetype)
+      a = &x;
+  if (!a || !a->drivable)
+    return fail("entity " + std::to_string(id) + " (" + e.spec.archetype + ") is not drivable");
+  if (_participants.at(pid).drives != id) {
+    // Its feet to the chassis box, in the vehicle's frame, in plan.
+    double hx = 2.0, hy = 1.0;
+    try {
+      const cvc::physics::vehicle_desc d = vehicle_desc_of(*a, e.spec.mass, e.spec.max_speed);
+      hx = d.half_extents.x;
+      hy = d.half_extents.y;
+    } catch (const std::exception &) {
+    }
+    const cvc::physics::body_state feet = state(pid);
+    const double dx = feet.position.x - e.x, dy = feet.position.y - e.y;
+    const double c = std::cos(e.yaw), s = std::sin(e.yaw);
+    const double lx = c * dx + s * dy, ly = -s * dx + c * dy;
+    const double gap =
+        std::hypot(std::max(0.0, std::fabs(lx) - hx), std::max(0.0, std::fabs(ly) - hy));
+    if (gap > a->reach) {
+      char m[96];
+      std::snprintf(m, sizeof m, "%.1f m away (reach %.1f m)", gap, a->reach);
+      return fail(m);
+    }
+  }
+  return set_driver(pid, id, why);
 }
 
 std::uint64_t holon::drives(const std::string &pid) const {
@@ -321,10 +406,12 @@ bool holon::attach_world(SceneWorld *world, std::string *why) {
   if (world) {
     next = std::make_unique<avatar_world>(world->world(), _applied.avatar().body,
                                           _applied.policy.energy);
+    next->set_jump_speed(jump_speed_of(_applied));
   } else {
     next = std::make_unique<avatar_world>(_clock.fixed_dt(), _applied.avatar().body,
                                           _applied.policy.energy);
     next->set_gravity(_applied.physics.gravity);
+    next->set_jump_speed(jump_speed_of(_applied));
     const world_physics &wp = _applied.physics; // the room's wind (O14)
     next->set_wind({wp.wind_speed, wp.wind_dir * 3.14159265358979323846 / 180.0, wp.wind_gustiness},
                    wp.wind_base);
@@ -367,10 +454,14 @@ void holon::scene_step() {
       // A driver's drive axes in place of its vehicle's controller (section 18.4): the intent in
       // force now (a stamped one due by the frame's steps takes over at the next frame).
       if (p.drives != 0) {
+        const double yaw = 2.0 * std::atan2(p.ride.rotation.z, p.ride.rotation.w);
+        const double speed = p.ride.linear_velocity.x * std::cos(yaw) +
+                             p.ride.linear_velocity.y * std::sin(yaw);
+        const drive_cmd c = drive_command(p.intent, p.envelope, speed, v->tick_seconds());
         entity_intent in;
         in.command = entity_intent::mode::replace;
-        in.steer = std::isfinite(p.intent.steer) ? p.intent.steer : 0.0;
-        in.accel = std::isfinite(p.intent.accel) ? p.intent.accel : 0.0;
+        in.steer = c.steer;
+        in.accel = c.accel;
         if (v->intent(p.drives) != in)
           v->set_intent(p.drives, in);
       }
@@ -444,6 +535,13 @@ avatar_intent holon::finite_intent(const avatar_intent &in) {
     out.yaw = 0.0;
   else if (out.yaw > kPi || out.yaw < -kPi)
     out.yaw = std::remainder(out.yaw, 2.0 * kPi);
+  // The drive axes are shares (avatar_intent): held to their ranges; none stays none.
+  if (std::isfinite(out.steer))
+    out.steer = std::clamp(out.steer, -1.0, 1.0);
+  if (std::isfinite(out.throttle))
+    out.throttle = std::clamp(out.throttle, -1.0, 1.0);
+  if (std::isfinite(out.brake))
+    out.brake = std::clamp(out.brake, 0.0, 1.0);
   return out;
 }
 
@@ -624,6 +722,7 @@ void holon::apply_world_rules(const world_rules &r) {
   }
   if (r.policy.energy != _applied.policy.energy)
     _world->set_energy_policy(r.policy.energy);
+  _world->set_jump_speed(jump_speed_of(r));
   _applied = r;
 }
 

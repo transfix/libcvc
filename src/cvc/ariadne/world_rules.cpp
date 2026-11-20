@@ -255,6 +255,18 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
     } else if (key == "controllers") {
       if (!names(val, at + " controllers:", v.controllers, why))
         return why;
+    } else if (key == "drivable") {
+      if (!boolean(val, at + " drivable:", v.drivable, why))
+        return why;
+    } else if (key == "reach") {
+      if (!number(val, at + " reach:", v.reach, why))
+        return why;
+      if (!(v.reach >= 0.0))
+        return at + " reach: expects metres, 0 or more";
+    } else if (key == "controls") {
+      v.controls = val.as_string();
+      if (v.controls != "car" && v.controls != "boat")
+        return at + " controls: '" + v.controls + "' is not one (car, boat)";
     } else {
       warn(warnings, at + " unknown key '" + key + "', ignored");
     }
@@ -665,6 +677,12 @@ const vehicle_archetype *world_rules::find_vehicle(const std::string &id) const 
 std::vector<std::string> vehicle_presets() { return {"humvee", "roboracer"}; }
 std::vector<std::string> boat_presets() { return {"launch", "jonboat", "tactical"}; }
 bool vehicle_plant_floats(const std::string &plant) { return plant == "dynamicboat"; }
+
+std::string vehicle_controls(const vehicle_archetype &a) {
+  if (!a.controls.empty())
+    return a.controls;
+  return a.plant.rfind("dynamicboat", 0) == 0 ? "boat" : "car";
+}
 
 bool vehicle_controller_known(const std::string &id) {
   return id == "nav@1" || id == "none" || id == "external" || id == "pose";
