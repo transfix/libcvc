@@ -229,11 +229,12 @@ exec_group::~exec_group() {
     std::fflush(stderr);
     std::abort();
   }
-  // Nor inside its own with_group, or a host body of it, on the thread holding it (Stage 2, the
-  // amended transitions in exec_group.h): with_group would go on using it after the teardown, and
-  // its token would nest. That aborts, in every build, too.
+  // Nor inside its own with_group, host body or waiting body, on the thread holding it (Stage 2,
+  // the amended transitions in exec_group.h): the caller would go on using it after the teardown
+  // (a waiting body's worker waits for it), and its token would nest. That aborts, in every build.
   if (cvc::detail::host_held_here(*this)) {
-    std::fputs("exec_group: destroyed from inside its own with_group or host body\n", stderr);
+    std::fputs("exec_group: destroyed from inside its own with_group, host body or waiting body\n",
+               stderr);
     std::fflush(stderr);
     std::abort();
   }
