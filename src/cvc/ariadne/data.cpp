@@ -19,6 +19,7 @@
 #include <cvc/ariadne/bind.h> // read_or
 #include <cvc/ariadne/data.h>
 #include <cvc/ariadne/net_host.h>
+#include <cvc/ariadne/scene_generated_world.h> // the generated_world generator
 #include <cvc/ariadne/uri.h>
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry_file_io.h>
@@ -289,6 +290,27 @@ void decode_city_bundle(DataDecode &d) {
   }
   d.out("buildings_error").value(city.buildings_error);
   publish_bounds(d, city);
+  // A version 2 bundle's manifest (ARIADNE_WORLDS section 18.8): its content hash, its water
+  // level and region when it has them, and the generator that made it (empty for a version 1).
+  d.out("version").value(city.version);
+  d.out("hash").value(city.hash);
+  d.out("water_level")
+      .value(city.water_level ? cvc::state_exec::format_number_shortest(*city.water_level)
+                              : std::string());
+  cvc::state &region = d.out("region");
+  region.reset();
+  region.value(std::string(city.region ? "1" : ""));
+  if (city.region) {
+    region("min_x").value(city.region->min_x);
+    region("min_y").value(city.region->min_y);
+    region("max_x").value(city.region->max_x);
+    region("max_y").value(city.region->max_y);
+  }
+  cvc::state &gen = d.out("generator");
+  gen.value(city.generator.name);
+  gen("version").value(city.generator.version);
+  gen("seed").value(std::to_string(city.generator.seed));
+  gen("params").value(city.generator.params);
   // The aerial image, decoded here off the frame thread: the scene drapes it over the terrain.
   cvc::state &satellite = d.out("satellite");
   satellite.value(std::string());
@@ -349,6 +371,31 @@ DataDecoder find_decoder(cvc::app &app, const std::string &as) {
 
 // The decoder a request without as: gets: files for an archive or a directory, else by the file's
 // extension.
+// An app's generators: the built-in generated_world, then what its host registered.
+struct generator_table {
+  static constexpr const char *app_slot = "cvc.ariadne.data-generators";
+  std::mutex m;
+  std::map<std::string, DataGenerator> generators = {
+      {"generated_world", generated_world_dataset},
+  };
+};
+
+DataGenerator find_generator(cvc::app &app, const std::string &name) {
+  generator_table &t = app.slot<generator_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  const auto it = t.generators.find(name);
+  return it == t.generators.end() ? DataGenerator() : it->second;
+}
+
+std::string generator_names(cvc::app &app) {
+  generator_table &t = app.slot<generator_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  std::string s;
+  for (const auto &kv : t.generators)
+    s += (s.empty() ? "" : ", ") + kv.first;
+  return s;
+}
+
 std::string default_decoder(bool many, const std::string &name) {
   if (many)
     return "files";
@@ -655,6 +702,9 @@ std::string slug(const std::string &uri) {
 }
 
 std::string canonical_request(const DataSpec &spec) {
+  if (!spec.generate.empty()) // a made dataset: named by its uri when it has one, else its params
+    return "generate\n" + spec.generate + "\n" + (spec.uri.empty() ? spec.params : spec.uri) +
+           "\n" + spec.as;
   const Uri u = parse_uri(spec.uri);
   const std::string source = u.scheme == "file" ? resolve_file_path(u.path, spec.base) : spec.uri;
   return source + "\n" + cvc::archive::safe_path(spec.path) + "\n" + spec.as;
@@ -707,8 +757,31 @@ std::vector<std::string> data_decoders(cvc::app &app) {
   return out;
 }
 
+void register_data_generator(cvc::app &app, const std::string &name, DataGenerator generator) {
+  generator_table &t = app.slot<generator_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  if (generator)
+    t.generators[name] = std::move(generator);
+  else
+    t.generators.erase(name);
+}
+
+bool has_data_generator(cvc::app &app, const std::string &name) {
+  return static_cast<bool>(find_generator(app, name));
+}
+
+std::vector<std::string> data_generators(cvc::app &app) {
+  generator_table &t = app.slot<generator_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  std::vector<std::string> out;
+  for (const auto &kv : t.generators)
+    out.push_back(kv.first);
+  return out;
+}
+
 std::string data_key(const DataSpec &spec) {
-  return slug(spec.uri) + "_" + sha256_of(canonical_request(spec)).substr(0, 8);
+  return slug(spec.generate.empty() ? spec.uri : spec.generate) + "_" +
+         sha256_of(canonical_request(spec)).substr(0, 8);
 }
 
 std::string data_cache_dir() {
@@ -813,6 +886,62 @@ void set_status(cvc::app &app, const std::string &node, const std::string &statu
   n.value(status);
 }
 
+// A request's files under its store node's `files`, each one's bytes behind a pointer.
+void publish_files(cvc::app &app, const std::string &node,
+                   const std::vector<cvc::archive::file> &files) {
+  cvc::state &fs_node = cvc::state::instance(app)(join(node, "files"));
+  fs_node.reset();
+  for (std::size_t i = 0; i < files.size(); ++i) {
+    cvc::state &e = fs_node(std::to_string(i));
+    e.property("size", std::to_string(files[i].bytes->size()));
+    e.data(boost::any(DataBytes(files[i].bytes)));
+    e.value(files[i].path);
+  }
+  fs_node.value(std::to_string(files.size()));
+}
+
+// The decoder a request's files go through: its as:, else city_bundle for a made one, else by
+// what was fetched.
+std::string decoder_name(const DataSpec &spec, bool many,
+                         const std::vector<cvc::archive::file> &files) {
+  if (!spec.as.empty())
+    return spec.as;
+  if (!spec.generate.empty())
+    return "city_bundle";
+  return default_decoder(many, files.empty() ? std::string() : files.front().path);
+}
+
+DataDecoder need_decoder(cvc::app &app, const std::string &as) {
+  DataDecoder decoder = find_decoder(app, as);
+  if (!decoder)
+    fail("no decoder as: " + as +
+         " (known: files, bytes, text, json, mesh, heightfield, "
+         "volume, city_bundle, and any a host registered)");
+  return decoder;
+}
+
+// The outputs of a request whose files are in (`also`'s, then the decoder's), and the keys that
+// say it is ready, its rev up by one.
+void finish_decode(cvc::app &a, const DataSpec &decoded, const std::string &node,
+                   const std::vector<cvc::archive::file> &files, const DataDecoder &also,
+                   const DataDecoder &decoder, const std::string &canonical,
+                   const std::string &sha256, std::uint64_t size) {
+  DataDecode d{a, decoded, node, files};
+  if (also)
+    also(d);
+  if (decoder)
+    decoder(d);
+  cvc::state &n = cvc::state::instance(a)(node);
+  n(std::string("as")).value(decoded.as);
+  n(std::string("canonical")).value(canonical);
+  n(std::string("sha256")).value(sha256);
+  n(std::string("size")).value(std::to_string(size));
+  n(std::string("error")).value(std::string());
+  const int rev = read_or<int>(a, join(node, "rev"), 0);
+  n(std::string("rev")).value(rev + 1);
+  set_status(a, node, "ready", 1.0);
+}
+
 void run_load(std::shared_ptr<DataStoreLife> life, DataSpec spec, std::string node,
               std::string registry, Network net, Limits lim) {
   try {
@@ -825,45 +954,39 @@ void run_load(std::shared_ptr<DataStoreLife> life, DataSpec spec, std::string no
       with_app(life, [&](cvc::app &a) { r = resolve(a, uri, base); });
       return r;
     };
-    Fetched f = fetch(spec, registry, net, lim, root, with_app_resolve);
-    const std::uint64_t size = f.directory ? 0 : f.bytes.size();
-    with_app(life, [&](cvc::app &a) { set_status(a, node, "unpacking", 0.5); });
+    std::vector<cvc::archive::file> files;
     bool many = true;
-    std::vector<cvc::archive::file> files = files_of(f, root, lim, &many);
+    std::string canonical, sha256;
+    std::uint64_t size = 0;
+    if (!spec.generate.empty()) {
+      // Made, not fetched: the generator makes the files, holding the app as a decoder does.
+      with_app(life, [&](cvc::app &a) {
+        set_status(a, node, "generating", 0.1);
+        const DataGenerator generator = find_generator(a, spec.generate);
+        if (!generator)
+          fail("no generator '" + spec.generate + "' (known: " + generator_names(a) + ")");
+        const std::vector<cvc::archive::file> none;
+        DataDecode d{a, spec, node, none};
+        files = generator(d);
+      });
+      canonical = spec.uri.empty() ? "generate:" + spec.generate : spec.uri;
+    } else {
+      Fetched f = fetch(spec, registry, net, lim, root, with_app_resolve);
+      size = f.directory ? 0 : f.bytes.size();
+      canonical = f.canonical;
+      sha256 = f.sha256;
+      with_app(life, [&](cvc::app &a) { set_status(a, node, "unpacking", 0.5); });
+      files = files_of(f, root, lim, &many);
+    }
+    DataSpec decoded = spec;
+    decoded.as = decoder_name(spec, many, files);
     with_app(life, [&](cvc::app &a) {
-      cvc::state &n = cvc::state::instance(a)(node);
-      cvc::state &fs_node = n(std::string("files"));
-      fs_node.reset();
-      for (std::size_t i = 0; i < files.size(); ++i) {
-        cvc::state &e = fs_node(std::to_string(i));
-        e.property("size", std::to_string(files[i].bytes->size()));
-        e.data(boost::any(DataBytes(files[i].bytes)));
-        e.value(files[i].path);
-      }
-      fs_node.value(std::to_string(files.size()));
+      publish_files(a, node, files);
       set_status(a, node, "decoding", 0.8);
     });
-    DataSpec decoded = spec;
-    if (decoded.as.empty())
-      decoded.as = default_decoder(many, files.empty() ? std::string() : files.front().path);
-    DataDecoder decoder;
-    with_app(life, [&](cvc::app &a) { decoder = find_decoder(a, decoded.as); });
-    if (!decoder)
-      fail("no decoder as: " + decoded.as +
-           " (known: files, bytes, text, json, mesh, heightfield, "
-           "volume, city_bundle, and any a host registered)");
     with_app(life, [&](cvc::app &a) {
-      DataDecode d{a, decoded, node, files};
-      decoder(d);
-      cvc::state &n = cvc::state::instance(a)(node);
-      n(std::string("as")).value(decoded.as);
-      n(std::string("canonical")).value(f.canonical);
-      n(std::string("sha256")).value(f.sha256);
-      n(std::string("size")).value(std::to_string(size));
-      n(std::string("error")).value(std::string());
-      const int rev = read_or<int>(a, join(node, "rev"), 0);
-      n(std::string("rev")).value(rev + 1);
-      set_status(a, node, "ready", 1.0);
+      const DataDecoder decoder = need_decoder(a, decoded.as);
+      finish_decode(a, decoded, node, files, nullptr, decoder, canonical, sha256, size);
     });
   } catch (const stopped_error &) {
   } catch (const std::exception &e) {
@@ -965,6 +1088,45 @@ std::string DataStore::bind(const std::string &prefix, const DataSpec &spec) {
   }
   const std::string entry = resolve_bind(prefix, join(kDataRoot, spec.name));
   cvc::state &link = impl_->root()(entry);
+  if (link.linkTarget() != node)
+    link.linkTo(node, cvc::state::link_mode::transparent);
+  return node;
+}
+
+std::string DataStore::put(const std::string &prefix, const DataSpec &spec,
+                           std::vector<cvc::archive::file> files, const DataDecoder &also) {
+  const std::string key = data_key(spec);
+  const std::string node = join(kDataRoot, key);
+  Impl &im = *impl_;
+  {
+    std::lock_guard<std::mutex> lock(im.mu);
+    if (im.stopped)
+      return node;
+    im.lazy.erase(key);
+    im.specs[key] = spec;
+  }
+  DataSpec decoded = spec;
+  decoded.as = decoder_name(spec, true, files);
+  {
+    std::lock_guard<std::mutex> lock(im.life->mu); // as a load's decode holds it
+    if (!im.life->app)
+      return node;
+    cvc::app &a = *im.life->app;
+    try {
+      cvc::state::instance(a)(join(node, "uri")).value(spec.uri);
+      publish_files(a, node, files);
+      set_status(a, node, "decoding", 0.8);
+      const DataDecoder decoder = files.empty() ? DataDecoder() : need_decoder(a, decoded.as);
+      finish_decode(a, decoded, node, files, also, decoder,
+                    spec.uri.empty() ? "generate:" + spec.generate : spec.uri, std::string(), 0);
+    } catch (const std::exception &e) {
+      cvc::state::instance(a)(join(node, "error")).value(std::string(e.what()));
+      set_status(a, node, "error", 1.0);
+      throw;
+    }
+  }
+  const std::string entry = resolve_bind(prefix, join(kDataRoot, spec.name));
+  cvc::state &link = im.root()(entry);
   if (link.linkTarget() != node)
     link.linkTo(node, cvc::state::link_mode::transparent);
   return node;

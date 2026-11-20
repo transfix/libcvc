@@ -45,6 +45,7 @@
 #include <cvc/model/model_file_io.h>
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
+#include <cvc/world/generated_world.h>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -449,7 +450,18 @@ void test_same_generated_world_headless_and_drawn() {
     return;
   CHECK(headless_warnings == drawn_warnings);
   CHECK(world->generated_world("world") != nullptr);
-  CHECK(out.world->generated_world("world") == nullptr); // the drawn node runs it there
+  // The drawn node runs its world and puts it as its dataset (ARIADNE_WORLDS 18.8), so the drawn
+  // world reads it from there: the same world as the headless one, the same bundle hash.
+  CHECK(out.world->generated_world("world") != nullptr);
+  if (out.world->generated_world("world") && world->generated_world("world"))
+    CHECK(cvc::world::generated_world_params_json(out.world->generated_world("world")->params) ==
+          cvc::world::generated_world_params_json(world->generated_world("world")->params));
+  {
+    const std::string drawn_hash_key =
+        cvc::ariadne::resolve_bind(sg.getStatePrefix(), "data.world.hash");
+    CHECK(cvc::ariadne::read_or<std::string>(drawn_app, drawn_hash_key, "") ==
+          cvc::ariadne::read_or<std::string>(headless_app, "data.world.hash", ""));
+  }
   cvc::ariadne::SceneClockDriver clock(headless_app, r.scene.clock);
   for (int i = 0; i < kFrames; ++i) {
     clock.drive(1.0 / 60.0);

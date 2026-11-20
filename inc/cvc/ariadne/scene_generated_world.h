@@ -31,11 +31,18 @@
 //   rt.world();       // the cvc::world::generated_world: terrain, raster, roads, buildings, water
 //   rt.colliders();   // what the node's body: collides with: the terrain and the buildings
 //   rt.tick();        // a request or (world.auto) an edit makes a new world, at once
+//
+// Each world the node makes is also its dataset (ARIADNE_WORLDS section 18.8), <prefix>.data.<name>
+// (the node's `data:` prop, else its id): the world written as a version 2 city bundle and read
+// back, as `data-generate` makes one and as a loaded city is. Its physics is that dataset's
+// world, so a generated world and a loaded one reach the physics, the navigator and the renderer
+// the same way; `generated` beside it is the world as made (its raster, roads and props).
 
 #ifndef __CVC_ARIADNE_SCENE_GENERATED_WORLD_H__
 #define __CVC_ARIADNE_SCENE_GENERATED_WORLD_H__
 
 #include <cstdint>
+#include <cvc/ariadne/data.h>
 #include <cvc/world/generated_world.h>
 #include <memory>
 #include <string>
@@ -83,6 +90,42 @@ cvc::world::generated_world_params generated_world_params_from(const SceneNode &
 // procedural).
 const cvc::world::building_library &generated_world_library(cvc::app &app, const SceneNode &n,
                                                             std::vector<std::string> *warnings);
+// The same from a building_library URI (empty: none) relative to `base_dir`; `owner` names who
+// asked in a warning.
+const cvc::world::building_library &generated_world_library(cvc::app &app, const std::string &uri,
+                                                            const std::string &base_dir,
+                                                            const std::string &owner,
+                                                            std::vector<std::string> *warnings);
+
+// ── A generated world as a dataset (data.h; ARIADNE_WORLDS section 18.8) ──
+
+// The data generator `generated_world` (register_data_generator's built-in): the world for
+// d.spec.params (a JSON object: generated_world_params_json's fields, any left out the defaults,
+// a `preset` first quick-setting the counts it names, and a `building_library` URI), relative to
+// d.spec.base, as a version 2 city bundle's files; `generated` under d.node is the world as made.
+std::vector<cvc::archive::file> generated_world_dataset(DataDecode &d);
+
+// The name node n's world goes under as a dataset: its `data:` prop, else its id.
+std::string generated_world_data_name(const SceneNode &n);
+
+// World w, which node n made, as n's dataset, now: <bind_prefix>.data.<generated_world_data_name>
+// linked to it (DataStore::put), its bundle's files decoded as a loaded city's are and
+// `generated` the world as made. `bundle` is w's bundle when it was written already (off the
+// frame thread: cvc::world::generated_world_bundle), else it is written here. Where no glb can be
+// written (Assimp off), `bundle` is empty, or the bundle fails (it warns), the dataset is the
+// world as made. Returns the store path.
+std::string publish_generated_world(cvc::app &app, const std::string &bind_prefix,
+                                    const SceneNode &n,
+                                    std::shared_ptr<const cvc::world::generated_world> w,
+                                    std::vector<std::string> *warnings,
+                                    const cvc::world::city_bundle_files *bundle = nullptr);
+
+// A dataset's world (its `world`, the colliders a body on it gets) and the generated world that
+// made it (its `generated`), from its store path or a link to it; null when it has none.
+std::shared_ptr<const cvc::world::world_geometry> dataset_world(cvc::app &app,
+                                                                const std::string &path);
+std::shared_ptr<const cvc::world::generated_world> dataset_generated_world(cvc::app &app,
+                                                                           const std::string &path);
 
 // The world.* keys a world_controls panel drives, as absolute state paths: world.<k>, or under the
 // node's `keys:` prop (node_key) so two worlds keep separate panels.
@@ -162,6 +205,8 @@ public:
   std::shared_ptr<const cvc::world::generated_world> world() const;
   const std::shared_ptr<SceneColliders> &colliders() const;
   const GeneratedWorldKeys &keys() const;
+  // The world's dataset (publish_generated_world): its store path. The colliders are its world.
+  const std::string &data_path() const;
 
   // Read the keys and requests; make a new world when asked. True when one was made. A failure
   // keeps the world and says why in world.status (and in `warnings`).

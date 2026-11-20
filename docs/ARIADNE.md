@@ -2019,9 +2019,10 @@ scene:
   so headless the scene's world runs the node itself: it seeds the `world.*` keys, makes the
   world as the document says, publishes `world.stats.*`, and makes a new world at once on
   Regenerate (or on an edit while `world.auto` is on). Drawn, cvcGL's node makes it as a sliced
-  task and hands over its colliders. Either way a new world's colliders replace the old ones.
-  `SceneWorld::generated_world(id)` is the world a headless host made: its raster, roads,
-  buildings and water.
+  task. Either way each world is the node's dataset `data.<id>` (§5.17, made datasets): the
+  world written as a version 2 city bundle and read back, so the body is that dataset's world, as
+  a data node's is, and a new world replaces it in place. `SceneWorld::generated_world(id)` is
+  the world as made, headless or drawn: its raster, roads, buildings and water.
 - **A data node's body.** `body: {}` on a `source: { data }` node collides with its dataset's
   world, terrain or geometry once the dataset is ready, and again each time it changes. The
   scene's world takes them, headless or drawn, and it needs the scene's `physics:` block.
@@ -3837,6 +3838,36 @@ scene:
 
 The next run reads the cache.
 
+**Made datasets (`generate:`).** A dataset can be made instead of fetched. The entry names a
+generator and its params, and the generator's files are decoded as a fetched dataset's are
+(`city_bundle` unless `as:` says otherwise):
+
+```yaml
+data:
+  world:
+    generate: generated_world                       # cvc::world::generate_world's world
+    params: { seed: 7, half_m: 600, preset: 1 }     # a preset quick-sets its counts first
+scene:
+  physics: {}
+  nodes:
+    - node: land
+      source: { data: world }
+      body: {}
+```
+
+The built-in `generated_world` makes the world and writes it as a version 2 city bundle
+(ARIADNE_WORLDS §18.8): `world.json`, the terrain's heights and cell surfaces, and a glb per
+mesh. It takes `generated_world_params`' fields by name (`seed`, `half_m`, `trees`, `rocks`,
+`buildings`, `amp_m`, `water_level_m`, `preset`, `terrain`, `city`, `terrain_file`, `edge`, ...)
+and `building_library`. A generated world is then the same kind of dataset as a loaded city, and
+its `world` is the bundle read back, so the physics is the same on every host that decodes it.
+Beside the decoder's outputs, `generated` holds the world as made (its raster, roads and props).
+The same params name the same dataset; a host adds generators with `register_data_generator`.
+
+A `type: generated_world` node is shorthand for this: each world it makes, at load and on each
+Regenerate, is its dataset `data.<id>` (or the node's `data:` prop), replaced in place with its
+`rev` one higher, and its `body:` is that dataset's world, as a data node's is.
+
 **Archives.** An archive is recognized by its bytes, whatever its name: tar (plain, gzip or zstd)
 and zip (stored or deflate). It is unpacked in memory, and only its regular files are kept.
 - `path:` keeps one directory of the archive, stripped from the paths, or names one file.
@@ -3851,7 +3882,7 @@ through it:
 
 | Under `data.city` | |
 |---|---|
-| `status` | `idle`, `fetching`, `unpacking`, `decoding`, `ready` or `error`; the node's value is the same |
+| `status` | `idle`, `fetching` (or `generating`), `unpacking`, `decoding`, `ready` or `error`; the node's value is the same |
 | `progress`, `error` | 0..1 while it loads; why it failed |
 | `rev` | 1, 2, ... each time a load completes: what a watcher polls |
 | `uri`, `canonical`, `sha256`, `size`, `as` | the request, what it resolved to (`cvcpkg://cy-pca/scene-austin-south-small@1.0.0+cvc.2`), the archive's hash and size, the decoder |
@@ -3868,7 +3899,7 @@ for an archive or a directory, and otherwise one picked by the file's extension:
 | `mesh` | `geometry`: a `cvc::geometry`, from any format `read_geometry` reads |
 | `volume` | `volume`: a `cvc::volume` |
 | `heightfield` | `terrain` (a `cvc::height_field`) and `bounds.*`, from a `terrain.json` |
-| `city_bundle` | `world` (a `world_geometry`), `terrain`, `buildings` (a `cvc::geometry`), `buildings_error`, `bounds.min_x` ... `max_y`, `satellite` (`satellite.png` decoded: the image on `data()`, its file path as the value) |
+| `city_bundle` | `world` (a `world_geometry`), `terrain`, `buildings` (a `cvc::geometry`), `buildings_error`, `bounds.min_x` ... `max_y`, `satellite` (`satellite.png` decoded: the image on `data()`, its file path as the value); for a version 2 bundle also `version`, `hash` (its content hash), `water_level`, `region` (`min_x` ... `max_y`, when it is cut to one) and `generator` (its name; `version`, `seed`, `params`) |
 
 A host adds its own with `register_data_decoder`.
 
@@ -3894,7 +3925,9 @@ or host can write as well.
 **Document logic.**
 - `(data-load NAME URI [AS [PATH]])` points `data.NAME` at a new request and starts it. The
   nodes bound to `NAME` keep drawing the old dataset until the new one is ready.
-- `(data-reload NAME)` loads it again.
+- `(data-generate NAME GENERATOR [PARAMS])` points `data.NAME` at a made dataset, PARAMS a JSON
+  object string: `(data-generate "world" "generated_world" "{\"seed\": 7}")`.
+- `(data-reload NAME)` loads it again (a made dataset is made again from its params).
 - `(data-status NAME)` returns its status.
 - `(data-files NAME)` lists its file paths.
 - `(data-file NAME PATH)` returns one file's bytes, or nil.
