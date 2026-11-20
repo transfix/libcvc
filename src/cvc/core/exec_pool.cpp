@@ -134,6 +134,7 @@ struct attachment {
   std::thread::id holder; // that thread
   bool deferred = false;  // popped while host_held: queued again at the hold's end
   bool failed = false;    // on its host's failed list
+  std::thread::id detacher; // the thread finishing its detach, once detaching is set
   bool blocked = false;   // its worker waits for a host body it queued (run_on_host_waiting)
   clock_type::time_point blocked_since{};
   clock_type::time_point wait_noted{}; // when a long host wait was last logged (once a minute)
@@ -564,8 +565,9 @@ wake_target idle_worker_for(pool_state &p, const attachment *a) {
 // end), its virtual time clamped to at least the queue's floor less one pump (S2-Q13), its filed
 // deadline made stale. A caller-pumped group goes onto its attaching thread's ready list. A
 // worker group woken by worker `from` while `from` pumps another group goes into `from`'s next
-// slot (Go's runnext, td 4.4), whose occupant goes to the queue; else onto the ready queue.
-wake_target queue_woken(pool_state &p, attachment &a, worker_rec *from) {
+// slot (Go's runnext, td 4.4), whose occupant goes to the queue; else onto the ready queue. With
+// `tell` false no idle worker is taken for it (the calling worker pumps it next).
+wake_target queue_woken(pool_state &p, attachment &a, worker_rec *from, bool tell = true) {
   ++a.generation;
   a.queued = true;
   wake_target t;
@@ -586,7 +588,7 @@ wake_target queue_woken(pool_state &p, attachment &a, worker_rec *from) {
     return idle_worker_for(p, displaced);
   }
   push_ready(p, a);
-  return idle_worker_for(p, &a);
+  return tell ? idle_worker_for(p, &a) : t;
 }
 
 // wake(g), the notifier (exec_group.h's transitions; S2-Q2): on the posting thread, under its
@@ -611,12 +613,13 @@ void wake(attachment &a) noexcept {
 
 void wake_notifier(void *ctx) noexcept { wake(*static_cast<attachment *>(ctx)); }
 
-// Under Q: wake(g)'s transition, for a due timer or a host hold's end; the caller notifies `t`.
-bool wake_locked(pool_state &p, attachment &a, wake_target &t) {
+// Under Q: wake(g)'s transition, for a due timer or a host hold's end; the caller notifies `t` (a
+// worker taken off the parked list is owed it).
+bool wake_locked(pool_state &p, attachment &a, wake_target &t, bool tell = true) {
   const word_t old = word(a).fetch_or(kScheduled | kNotified, std::memory_order_acq_rel);
   if (old & (kScheduled | kDetaching))
     return false;
-  t = queue_woken(p, a, nullptr);
+  t = queue_woken(p, a, nullptr, tell);
   return true;
 }
 
@@ -634,9 +637,12 @@ wake_target requeue(pool_state &p, attachment &a, const worker_rec *releaser) {
     return t;
   }
   push_ready(p, a);
-  p.epoch.fetch_add(1, std::memory_order_release);
-  if (!releaser || !p.calls.empty() || (p.force_move && p.threads > 1))
+  if (!releaser || !p.calls.empty() || (p.force_move && p.threads > 1)) {
+    // Work for another worker: the epoch moves (a spinning or parking worker looks again). A
+    // requeue its releaser takes next moves nothing, so idle workers park beside a busy group.
+    p.epoch.fetch_add(1, std::memory_order_release);
     t = idle_worker_for(p, &a);
+  }
   return t;
 }
 
@@ -705,10 +711,10 @@ void drop_stale(std::vector<timer_entry> &heap) {
 }
 
 // Under Q: queue the groups whose filed deadline has come (td 4.4's timers; S2-Q4's due timer),
-// as wake(g) would (stats().timer_wakes). With `notify`, an idle worker is told of each but the
-// first (the calling worker pumps one).
+// as wake(g) would (stats().timer_wakes). With `by_worker`, an idle worker is told of each but the
+// first, which the calling worker pumps.
 void fire_due(pool_state &p, std::vector<timer_entry> &heap, clock_type::time_point now,
-              bool notify) {
+              bool by_worker) {
   unsigned fired = 0;
   for (;;) {
     drop_stale(heap);
@@ -719,11 +725,11 @@ void fire_due(pool_state &p, std::vector<timer_entry> &heap, clock_type::time_po
     std::pop_heap(heap.begin(), heap.end(), timer_later{});
     heap.pop_back();
     wake_target t;
-    if (!wake_locked(p, a, t))
+    if (!wake_locked(p, a, t, !by_worker || fired > 0))
       continue;
     ++p.stats.timer_wakes;
-    if (notify && fired++ > 0)
-      t.notify(p);
+    ++fired;
+    t.notify(p); // every worker unparked is notified; an attaching thread's own heap: itself
   }
 }
 
@@ -832,6 +838,7 @@ void release(pool_state &p, attachment &a, const pump_outcome &out, worker_rec *
     return; // its detach or teardown waits for this
   if (out.r.failed) {
     word(a).fetch_or(kDetaching, std::memory_order_acq_rel);
+    a.detacher = a.host->id; // take_failed (or the teardown) finishes it there
     a.failed = true;
     a.host->failed.push_back(&a); // room reserved at attach
     a.host->wake.notify();
@@ -1243,10 +1250,14 @@ bool service_once(pool_state &p, host_thread &h, std::unique_lock<std::mutex> &l
   if (needs_token) {
     a.host_held = false;
     notify_waiters(a);
+    wake_target t;
     if (a.deferred) { // a worker popped it meanwhile (S2-Q4): queue it again
       a.deferred = false;
-      requeue(p, a, nullptr).notify(p);
+      t = requeue(p, a, nullptr);
+    } else if (wake_locked(p, a, t)) { // what ran may have resumed a process, posting nothing
+      ++p.stats.wakes;
     }
+    t.notify(p);
   }
   if (note) {
     se::exec_group &g = *a.group;
@@ -1268,35 +1279,37 @@ bool service(pool_state &p, host_thread &h, std::unique_lock<std::mutex> &lk,
   return ran;
 }
 
-// Under Q (`lk` locked on entry and return): wait until `a` is neither pumping nor held by a host
-// (only another thread's hold, unless `any_holder`), servicing the calling thread's host queue
-// meanwhile (td 4.9's rule: a worker blocked on a body of this thread's goes on). Returns early
-// once `a` is detached (its record gone: the caller looks again).
-void wait_until_free(pool_state &p, attachment &a, std::unique_lock<std::mutex> &lk,
-                     std::exception_ptr &err, bool any_holder) {
-  const std::thread::id me = std::this_thread::get_id();
-  std::optional<se::detail::wakeup> own; // a thread with no record waits on one of its own
-  for (;;) {
-    if (!p.attachments.count(&a))
-      return;
-    const bool busy = (word(a).load(std::memory_order_acquire) & kPumping) ||
-                      (a.host_held && (any_holder || a.holder != me));
-    if (!busy)
-      return;
-    host_thread *h = host_of(p, me);
-    if (h && service_once(p, *h, lk, err))
-      continue;
-    se::detail::wakeup *wk = h ? &h->wake : nullptr;
-    if (!wk) {
-      if (!own)
-        own.emplace();
-      wk = &*own;
-    }
-    waiter_link link(a, *wk);
-    lk.unlock();
-    wk->wait_until(clock_type::time_point::max());
-    lk.lock();
+// Under Q (`lk` locked on entry and return): one round of a host thread's wait on `a` (td 4.9's
+// rule: it services its host queue meanwhile, so a worker blocked on one of its bodies goes on):
+// run one of the calling thread's host entries, else wait on its wakeup until a release, a hold's
+// end, a detach's end or an entry for it.
+void wait_round(pool_state &p, attachment &a, std::unique_lock<std::mutex> &lk,
+                std::exception_ptr &err, std::optional<se::detail::wakeup> &own) {
+  host_thread *h = host_of(p, std::this_thread::get_id());
+  if (h && service_once(p, *h, lk, err))
+    return;
+  se::detail::wakeup *wk = h ? &h->wake : nullptr;
+  if (!wk) { // a thread with no record waits on one of its own
+    if (!own)
+      own.emplace();
+    wk = &*own;
   }
+  waiter_link link(a, *wk);
+  lk.unlock();
+  wk->wait_until(clock_type::time_point::max());
+  lk.lock();
+}
+
+// Under Q (`lk` locked on entry and return): wait until `a` is neither pumping nor held by
+// another thread (detach's step 2), in wait_rounds. Returns early once `a` is detached (its record
+// gone: the caller looks again).
+void wait_until_free(pool_state &p, attachment &a, std::unique_lock<std::mutex> &lk,
+                     std::exception_ptr &err) {
+  const std::thread::id me = std::this_thread::get_id();
+  std::optional<se::detail::wakeup> own;
+  while (p.attachments.count(&a) &&
+         ((word(a).load(std::memory_order_acquire) & kPumping) || (a.host_held && a.holder != me)))
+    wait_round(p, a, lk, err, own);
 }
 
 // Under Q: the attaching thread `h`'s next caller-pumped group (exec_group.h's pop), claimed: in
@@ -1342,9 +1355,9 @@ template <typename T> void erase_value(std::vector<T *> &v, const T *x) {
 
 // Step 4 of a detach or a teardown (exec_group.h), the caller holding the group's token: `a`
 // leaves the ready queue, the next slots, its host's ready and failed lists and the timer heaps,
-// its host-queue entries move to `out`, the threads waiting on it are let go; then, outside Q,
-// its notifier is cleared (waiting for a wake in progress), the word goes to 0 and the record is
-// freed. Never throws.
+// and its host-queue entries move to `out`; then, outside Q, its notifier is cleared (waiting for
+// a wake in progress); then the threads waiting on it are let go, the attachment is dropped, the
+// word goes to 0 and the record is freed. Never throws.
 void finish_detach(pool_state &p, attachment &a, std::deque<host_entry> &out) noexcept {
   se::exec_group &g = *a.group;
   se::detail::group_pool_link &link = *a.link;
@@ -1386,25 +1399,30 @@ void finish_detach(pool_state &p, attachment &a, std::deque<host_entry> &out) no
       }
     }
     a.entries = 0;
+  }
+  // Outside Q (S2-Q2), waiting for a wake in progress (it finds detaching and queues nothing);
+  // only then is the attachment dropped and the word stored 0, so no wake comes between.
+  try {
+    g.sched().set_wake_notifier(nullptr, nullptr);
+  } catch (...) {
+  }
+  {
+    std::lock_guard<std::mutex> lock(p.m);
     for (release_waiter *r = a.waiters; r; r = r->next) {
       r->on = nullptr;
       r->wake->notify();
     }
     a.waiters = nullptr;
-    --h.attached;
+    --a.host->attached;
     if (!a.caller_pumped)
       --p.attached_any;
     --p.stats.attached;
     link.attached.store(nullptr, std::memory_order_release);
+    link.state.store(0, std::memory_order_release);
     auto it = p.attachments.find(&a);
     rec = std::move(it->second);
     p.attachments.erase(it);
   }
-  try {
-    g.sched().set_wake_notifier(nullptr, nullptr);
-  } catch (...) {
-  }
-  link.state.store(0, std::memory_order_release);
 }
 
 // Run a detached group's host entries on the calling thread, which holds its token (detach's step
@@ -2016,13 +2034,27 @@ void exec_pool::attach(state_exec::exec_group &group) {
       if (r && !r->seeded && !r->seed)
         r->seed = name_seed(group.opts().name);
     }
-    link.state.store(0, std::memory_order_relaxed);
+    // Attach takes the `scheduled` transition itself: until it queues the group below, a post's
+    // wake finds it scheduled and queues nothing, so no worker pumps it meanwhile.
+    link.state.store(kScheduled | kNotified, std::memory_order_relaxed);
     link.attached.store(a, std::memory_order_release);
   }
-  // Outside Q (S2-Q2: the pool installs no notifier holding it), then woken once, so work posted
-  // before is seen.
-  group.sched().set_wake_notifier(&wake_notifier, a);
-  wake(*a);
+  // Outside Q (S2-Q2: the pool installs no notifier holding it).
+  se::async_scheduler &s = group.sched();
+  s.set_wake_notifier(&wake_notifier, a);
+  // A lock post racing that install may have read "no notifier" under its port's mutex and
+  // signalled the bare wakeup, its pending flag stored relaxed: taking that mutex once now makes
+  // the post's flag visible to the first pump, and every later post sees the notifier.
+  if (s.has_lock_home())
+    (void)s.locks()->port()->closed();
+  // Then queued once, so work posted before is seen.
+  wake_target t;
+  {
+    std::lock_guard<std::mutex> lock(p.m);
+    t = queue_woken(p, *a, nullptr);
+    ++p.stats.wakes;
+  }
+  t.notify(p);
 }
 
 void exec_pool::detach(state_exec::exec_group &group) {
@@ -2037,7 +2069,8 @@ void exec_pool::detach(state_exec::exec_group &group) {
     assert(a->host->id == std::this_thread::get_id() &&
            "exec_pool::detach off its attaching thread");
     word(*a).fetch_or(kDetaching, std::memory_order_acq_rel); // (1)
-    wait_until_free(p, *a, lk, err, false);                   // (2)
+    a->detacher = std::this_thread::get_id();
+    wait_until_free(p, *a, lk, err); // (2)
     if (!p.attachments.count(a))
       return;
   }
@@ -2139,23 +2172,33 @@ void exec_pool::with_group(state_exec::exec_group &group, const std::function<vo
   impl &p = *impl_;
   const std::thread::id me = std::this_thread::get_id();
   std::exception_ptr err;
-  bool held = false;
+  attachment *held = nullptr;
   {
     std::unique_lock<std::mutex> lk(p.m);
-    attachment *a = attachment_in(p, group);
-    // Inside its own pump, or a hold of this thread's: the token nests, as for a group not
-    // attached.
-    if (a && ((a->host_held && a->holder == me) || a->pumper.load(std::memory_order_relaxed) == me))
-      a = nullptr;
-    while (a && ((word(*a).load(std::memory_order_acquire) & kPumping) || a->host_held)) {
-      wait_until_free(p, *a, lk, err, true);
-      a = attachment_in(p, group);
-    }
-    if (a) {
+    std::optional<se::detail::wakeup> own;
+    for (;;) { // exec_group.h's host transition, looked at again after each wait
+      attachment *a = attachment_in(p, group);
+      if (!a)
+        break; // not attached (any more): as a group not attached
+      // Inside its own pump, or a hold of this thread's: the token nests, as unattached.
+      if ((a->host_held && a->holder == me) || a->pumper.load(std::memory_order_relaxed) == me)
+        break;
+      const word_t w = word(*a).load(std::memory_order_acquire);
+      if (w & kDetaching) {
+        if (a->detacher == me)
+          break; // on the thread finishing the detach: as unattached, at once
+        wait_round(p, *a, lk, err, own); // until the detach is over
+        continue;
+      }
+      if ((w & kPumping) || a->host_held) {
+        wait_round(p, *a, lk, err, own);
+        continue;
+      }
       // Workers stay off it now: one that pops it leaves it notified and deferred (S2-Q4).
       a->host_held = true;
       a->holder = me;
-      held = true;
+      held = a;
+      break;
     }
   }
   if (!held) {
@@ -2168,7 +2211,6 @@ void exec_pool::with_group(state_exec::exec_group &group, const std::function<vo
   }
   fuzz_point(p, pool_point::hold_to_token);
   std::exception_ptr fn_error;
-  bool wants = false;
   try {
     se::async_scheduler::pump_owner_scope token(group.sched());
     try {
@@ -2177,25 +2219,22 @@ void exec_pool::with_group(state_exec::exec_group &group, const std::function<vo
     } catch (...) {
       fn_error = std::current_exception();
     }
-    // What fn did that no post announces (a submit, a kill): a pump, if it has work now.
-    try {
-      wants = group.wants_pump();
-    } catch (...) {
-      wants = true;
-    }
   } catch (...) {
     fn_error = std::current_exception(); // the token: held outside the pool
   }
   {
+    // The release: queue it again if a pop was deferred, else wake's transition, since fn may have
+    // submitted, killed or resumed, which posts nothing. If fn detached it, its record is gone
+    // and left alone (a record made since is never this thread's hold); the group is not touched.
     std::lock_guard<std::mutex> lock(p.m);
-    if (attachment *a = attachment_in(p, group)) { // its detach waits for this hold
-      a->host_held = false;
-      notify_waiters(*a);
+    if (p.attachments.count(held) && held->host_held && held->holder == me) {
+      held->host_held = false;
+      notify_waiters(*held);
       wake_target t;
-      if (a->deferred) {
-        a->deferred = false;
-        t = requeue(p, *a, nullptr);
-      } else if (wants && wake_locked(p, *a, t)) {
+      if (held->deferred) {
+        held->deferred = false;
+        t = requeue(p, *held, nullptr);
+      } else if (wake_locked(p, *held, t)) {
         ++p.stats.wakes;
       }
       t.notify(p);
@@ -2229,7 +2268,7 @@ std::vector<state_exec::exec_group *> exec_pool::take_failed() {
     std::exception_ptr err;
     {
       std::unique_lock<std::mutex> lk(p.m);
-      wait_until_free(p, *a, lk, err, false); // a with_group of another thread
+      wait_until_free(p, *a, lk, err); // a with_group of another thread
       if (!p.attachments.count(a))
         continue;
     }
@@ -2375,7 +2414,8 @@ bool detach_begin(state_exec::exec_group &group) noexcept {
   try {
     std::unique_lock<std::mutex> lk(p.m);
     word(*a).fetch_or(kDetaching, std::memory_order_acq_rel); // (1)
-    wait_until_free(p, *a, lk, err, false);                   // (2)
+    a->detacher = std::this_thread::get_id();
+    wait_until_free(p, *a, lk, err); // (2)
   } catch (...) {
   }
   if (err) {
@@ -2400,8 +2440,9 @@ void detach_end(state_exec::exec_group &group) noexcept {
     // in finds the token held and ends at once.
     std::unique_lock<std::mutex> lk(p.m);
     word(*a).fetch_or(kDetaching, std::memory_order_acq_rel);
+    a->detacher = std::this_thread::get_id();
     std::exception_ptr err;
-    wait_until_free(p, *a, lk, err, false);
+    wait_until_free(p, *a, lk, err);
     if (!p.attachments.count(a))
       return;
   } catch (...) {
@@ -2431,6 +2472,20 @@ void run_on_host_waiting(exec_pool &pool, state_exec::exec_group &group, std::fu
     return;
   }
   fn();
+}
+
+bool host_held_here(state_exec::exec_group &group) noexcept {
+  // Only its attaching thread frees the record (detach, take_failed, the teardown), so on that
+  // thread, or on one holding it, the record lives while this reads it under the pool's mutex.
+  auto *a = static_cast<attachment *>(group.pool_link().attached.load(std::memory_order_acquire));
+  if (!a)
+    return false;
+  try {
+    std::lock_guard<std::mutex> lock(a->pool->m);
+    return a->pool->attachments.count(a) && a->host_held && a->holder == std::this_thread::get_id();
+  } catch (...) {
+    return false;
+  }
 }
 
 } // namespace detail

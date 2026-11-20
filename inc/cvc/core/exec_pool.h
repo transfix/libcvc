@@ -296,6 +296,10 @@ void detach_end(state_exec::exec_group &group) noexcept;
 // call that cannot park): the caller runs it as soon as it services the queue, while the worker
 // is blocked.
 void run_on_host_waiting(exec_pool &pool, state_exec::exec_group &group, std::function<void()> fn);
+// Stage 2 (S2a): whether the calling thread holds attached `group`'s host hold, inside with_group
+// of it or running one of its host entries: its teardown there aborts, as one inside its own pump
+// does (exec_group.h's transitions). For the group's teardown, on its attaching thread.
+bool host_held_here(state_exec::exec_group &group) noexcept;
 } // namespace detail
 
 } // namespace cvc

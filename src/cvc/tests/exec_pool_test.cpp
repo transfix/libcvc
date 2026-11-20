@@ -1385,6 +1385,143 @@ TEST(ExecPoolContinuous, DetachBeginAndEndDropTheGroupsEntries) {
   EXPECT_EQ(g.pool_link().state.load(), 0u);
 }
 
+// The amended host transition (PL-1's model): with_group's release wakes the group when no pop was
+// deferred, since a submit under the token posts nothing, so a program submitted there to an idle
+// attached group runs; inside fn this thread holds the group's host hold (detail::host_held_here,
+// what the teardown's abort reads), outside it does not.
+TEST(ExecPoolContinuous, ASubmitInsideWithGroupIsPumped) {
+  cvc::pool_options po;
+  po.threads = 2;
+  cvc::exec_pool pool(po);
+  if (pool.threads() == 0)
+    GTEST_SKIP() << "no worker on this machine";
+  cvc::app app;
+  share_locks(app);
+  exec_group g(opts_for(app, "submit"));
+  pool.attach(g);
+  pool.wait_for_work(0.02); // its first pump, of nothing: idle
+  std::atomic<bool> fin{false};
+  bool held_inside = false;
+  int pid = 0;
+  pool.with_group(g, [&] {
+    held_inside = cvc::detail::host_held_here(g);
+    execute_options eo;
+    eo.env = env_with_fin(fin);
+    pid = g.execute(counting_then_fin(10), eo);
+  });
+  const bool held_after = cvc::detail::host_held_here(g);
+  const bool done = settles([&] { return fin.load(); });
+  pool.detach(g);
+  EXPECT_TRUE(held_inside);
+  EXPECT_FALSE(held_after);
+  ASSERT_TRUE(done) << "the program submitted under with_group was never pumped";
+  EXPECT_EQ(result_of(g, pid), "10");
+}
+
+// fn may detach the group: with_group's release then leaves the pool's record alone, and the group
+// is an unattached one afterwards (with_group takes its token as for any other).
+TEST(ExecPoolContinuous, WithGroupMayDetachTheGroup) {
+  cvc::pool_options po;
+  po.threads = 2;
+  cvc::exec_pool pool(po);
+  cvc::app app;
+  share_locks(app);
+  exec_group g(opts_for(app, "detached"));
+  pool.attach(g);
+  pool.with_group(g, [&] { pool.detach(g); });
+  EXPECT_FALSE(pool.attached(g));
+  EXPECT_EQ(pool.stats().attached, 0u);
+  EXPECT_EQ(g.pool_link().state.load(), 0u);
+  bool ran = false;
+  pool.with_group(g, [&] { ran = !g.pumping_here(); });
+  EXPECT_TRUE(ran);
+}
+
+// A group being detached is taken as an unattached one by with_group on the thread finishing its
+// detach (the amended transition): a failed group, before take_failed, is read at once on its
+// attaching thread, with no hold set and no wait.
+TEST(ExecPoolContinuous, AFailedGroupIsReadBeforeTakeFailed) {
+  cvc::pool_options po;
+  po.threads = 2;
+  cvc::exec_pool pool(po);
+  if (pool.threads() == 0)
+    GTEST_SKIP() << "no worker on this machine";
+  cvc::app app;
+  share_locks(app);
+  exec_group::options bad_opts = opts_for(app, "bad");
+  bad_opts.pump_hook_for_test = [](exec_group &) { throw std::runtime_error("boom"); };
+  exec_group bad(bad_opts);
+  const int pid = bad.execute(std::string("(begin (sleep 10) 1)"));
+  pool.attach(bad);
+  ASSERT_TRUE(settles([&] { return bad.failed(); }));
+  process_status status = process_status::running;
+  bool held = true;
+  pool.with_group(bad, [&] {
+    held = cvc::detail::host_held_here(bad);
+    status = bad.sched().get_process_info(pid)->status;
+  });
+  EXPECT_FALSE(held) << "a hold was set on a group being detached";
+  EXPECT_EQ(status, process_status::killed);
+  std::vector<exec_group *> taken;
+  ASSERT_TRUE(drive(pool, [&] {
+    for (exec_group *g : pool.take_failed())
+      taken.push_back(g);
+    return !taken.empty();
+  }));
+  EXPECT_EQ(taken, std::vector<exec_group *>{&bad});
+  EXPECT_FALSE(pool.attached(bad));
+}
+
+// A worker that fires a due timer at its pop pumps that group itself: it takes no parked worker for
+// it. Taking one (off the parked list, owed a notify) without notifying it left that worker in an
+// untimed wait for good, out of the eventcount's reach, so ~exec_pool's join hung. Three workers
+// start (a short group, a busy one, a frame waiter); the busy one's tiny pumps keep its worker
+// popping, so it fires the waiter's coarse deadlines while another worker is parked without one.
+// The pool then goes on a thread of its own and must join (a 30 s ceiling turns a hang into a
+// failure, leaking the pool).
+TEST(ExecPoolContinuous, AWorkerFiringATimerTakesNoParkedWorker) {
+  auto pool = std::make_unique<cvc::exec_pool>([] {
+    cvc::pool_options po;
+    po.threads = 3;
+    po.pump_steps = 50;
+    return po;
+  }());
+  if (pool->threads() < 3)
+    GTEST_SKIP() << "needs three workers";
+  cvc::app app;
+  share_locks(app);
+  exec_group extra(opts_for(app, "extra"));
+  extra.execute(std::string("(+ 1 2)"));
+  pool->attach(extra);
+  exec_group busy(opts_for(app, "busy"));
+  intrinsic_world sleeper(app, "sleeper");
+  std::atomic<int> ticks{0};
+  builtins::register_fn(sleeper.env, "tick", [&](std::span<const value_t>) -> value_t {
+    ++ticks;
+    return nil_value();
+  });
+  busy.execute(std::string("(while #t nil)"));
+  sleeper.submit("(while #t (begin (tick) (await 1)))"); // a frame waiter: a coarse 1 ms deadline
+  pool->attach(busy);
+  pool->attach(*sleeper.group);
+  const bool ran = settles([&] { return ticks.load() >= 1000; }, 30.0);
+  pool->detach(busy);
+  pool->detach(*sleeper.group);
+  pool->detach(extra);
+  const cvc::pool_stats s = pool->stats();
+  std::cout << "sleeper ticks " << ticks.load() << ", timer wakes " << s.timer_wakes << ", parks "
+            << s.parks << "\n";
+  ASSERT_TRUE(ran);
+  auto joined = std::make_shared<std::atomic<bool>>(false);
+  cvc::exec_pool *raw = pool.release();
+  std::thread([raw, joined] {
+    delete raw;
+    joined->store(true);
+  }).detach();
+  EXPECT_TRUE(settles([&] { return joined->load(); }, 30.0))
+      << "~exec_pool did not join its workers: one was left waiting un-notified";
+}
+
 // --- R1-mid fixes (P) ---
 
 // C-M1 (S1-Q1): groups on a single-mode lock manager, given to a pool with workers built apart
