@@ -737,6 +737,9 @@ private:
   long_step_sink long_step_sink_;
   double long_step_default_ = 0.0;
   std::atomic<std::uint64_t> long_steps_{0};
+  /// CVC_EXEC_FUZZ's yields at the ingress posts (S2-Q15), read as the scheduler is made; null
+  /// when it is off.
+  std::unique_ptr<detail::lock_fuzz> ingress_fuzz_;
 };
 
 } // namespace cvc::state_exec

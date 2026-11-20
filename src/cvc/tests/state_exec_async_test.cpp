@@ -1683,6 +1683,155 @@ TEST(AsyncScheduler, KO02_AThrowingKillDoesNotStopTheRest) {
   }
 }
 
+// --- Stage 2a: the wake notifier (S2a.1; S2-Q2) ---
+
+// The includes the cases below add to the file's own.
+#include <cstdlib>
+#include <cvc/state/state_exec/process_table.h> // detail::wakeup
+
+namespace {
+
+// A notifier that counts its calls in the std::atomic<int> it was installed with.
+void count_wakes(void *ctx) noexcept {
+  static_cast<std::atomic<int> *>(ctx)->fetch_add(1, std::memory_order_relaxed);
+}
+
+// A notifier whose call blocks until the case releases it.
+struct blocking_notifier {
+  std::atomic<bool> entered{false};
+  std::atomic<bool> release{false};
+  std::atomic<bool> returned{false};
+  static void call(void *ctx) noexcept {
+    auto &b = *static_cast<blocking_notifier *>(ctx);
+    b.entered.store(true);
+    while (!b.release.load())
+      std::this_thread::yield();
+    b.returned.store(true);
+  }
+};
+
+} // namespace
+
+// S2a.1 (S2-Q2): with a notifier installed, each post calls it once, though no wait_for_work is in
+// progress (idle_waiting_ unset: before, nothing was signalled): post_message,
+// post_async_completion and post_control under the ingress mutex, and a lock post through the
+// home's port, which shares the scheduler's wakeup. Once it is cleared, a post calls it no more.
+TEST(WakeNotifier, EveryPostCallsIt) {
+  async_scheduler sched;
+  std::atomic<int> wakes{0};
+  sched.set_wake_notifier(&count_wakes, &wakes);
+  ASSERT_TRUE(sched.has_wake_notifier());
+  sched.post_message("wn.a", value_t(int64_t{1}));
+  EXPECT_EQ(wakes.load(), 1) << "post_message";
+  sched.post_async_completion(std::make_shared<async_call>("wn", 0));
+  EXPECT_EQ(wakes.load(), 2) << "post_async_completion";
+  EXPECT_TRUE(sched.post_control(9999, control_cmd{}));
+  EXPECT_EQ(wakes.load(), 3) << "post_control";
+  detail::lock_home *home = sched.locks();
+  ASSERT_NE(home, nullptr);
+  EXPECT_TRUE(home->port()->post(detail::lock_post{}));
+  EXPECT_EQ(wakes.load(), 4) << "a lock post through the port";
+  sched.set_wake_notifier(nullptr, nullptr);
+  EXPECT_FALSE(sched.has_wake_notifier());
+  sched.post_message("wn.a", value_t(int64_t{2}));
+  EXPECT_EQ(wakes.load(), 4) << "a post after the notifier was cleared";
+}
+
+// S2a.1: a notify while a notifier is installed signals nothing, so no wait ends on it; once the
+// notifier is cleared, a notify signals again. (A wait whose deadline has passed returns whether a
+// notification was waiting, and consumes it.)
+TEST(WakeNotifier, ItReplacesTheSignal) {
+  using std::chrono::steady_clock;
+  detail::wakeup w;
+  std::atomic<int> wakes{0};
+  w.set_notifier(&count_wakes, &wakes);
+  w.notify();
+  EXPECT_EQ(wakes.load(), 1);
+  EXPECT_FALSE(w.wait_until(steady_clock::now(), false)) << "a notify with a notifier signalled";
+  w.notify();
+  EXPECT_FALSE(w.wait_until(steady_clock::now() + std::chrono::milliseconds(5), false))
+      << "a notify with a notifier ended a wait";
+  EXPECT_EQ(wakes.load(), 2);
+  w.set_notifier(nullptr, nullptr);
+  EXPECT_FALSE(w.has_notifier());
+  w.notify();
+  EXPECT_EQ(wakes.load(), 2);
+  EXPECT_TRUE(w.wait_until(steady_clock::now(), false)) << "cleared, a notify signals";
+}
+
+// S2a.1: set_notifier(nullptr) returns only once a call of the notifier in progress has returned,
+// so the notifier's ctx may be freed then. The call blocks until the case releases it; the
+// clearing thread is still held meanwhile, and finds the call returned once set_notifier is.
+TEST(WakeNotifier, ClearingWaitsForACallInProgress) {
+  using std::chrono::steady_clock;
+  detail::wakeup w;
+  blocking_notifier b;
+  w.set_notifier(&blocking_notifier::call, &b);
+  std::thread poster([&w] { w.notify(); });
+  const steady_clock::time_point t0 = steady_clock::now();
+  while (!b.entered.load() && steady_clock::now() - t0 < std::chrono::seconds(5))
+    std::this_thread::yield();
+  if (!b.entered.load()) {
+    poster.join();
+    FAIL() << "the notify never called the notifier";
+  }
+  std::atomic<bool> cleared{false};
+  bool returned_when_cleared = false;
+  std::thread clearer([&] {
+    w.set_notifier(nullptr, nullptr);
+    returned_when_cleared = b.returned.load();
+    cleared.store(true);
+  });
+  // A pause, which gives a clearer that does not wait the time to return early.
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  EXPECT_FALSE(cleared.load()) << "set_notifier returned while the notifier ran";
+  b.release.store(true);
+  clearer.join();
+  poster.join();
+  EXPECT_TRUE(returned_when_cleared);
+  EXPECT_FALSE(w.has_notifier());
+}
+
+// S2a.1 (S2-Q15): CVC_EXEC_FUZZ, read as a scheduler is made, yields at its ingress posts, between
+// the push and the wake. Posts from four threads at once still each call the notifier once, and
+// each lands.
+TEST(WakeNotifier, FuzzedPostsEachCallItOnce) {
+  struct fuzz_env {
+    explicit fuzz_env(const char *v) { set(v); }
+    ~fuzz_env() { set(nullptr); }
+    static void set(const char *v) {
+#ifdef _WIN32
+      _putenv_s("CVC_EXEC_FUZZ", v ? v : "");
+#else
+      if (v)
+        setenv("CVC_EXEC_FUZZ", v, 1);
+      else
+        unsetenv("CVC_EXEC_FUZZ");
+#endif
+    }
+  };
+  std::unique_ptr<async_scheduler> sched;
+  {
+    const fuzz_env fuzzed("7");
+    sched = std::make_unique<async_scheduler>(); // reads the seed now
+  }
+  std::atomic<int> wakes{0};
+  sched->set_wake_notifier(&count_wakes, &wakes);
+  constexpr int kThreads = 4, kPosts = 200;
+  std::vector<std::thread> posters;
+  for (int t = 0; t < kThreads; ++t)
+    posters.emplace_back([&sched] {
+      for (int i = 0; i < kPosts; ++i)
+        sched->post_message("wn.fuzz", value_t(int64_t{i}));
+    });
+  for (std::thread &t : posters)
+    t.join();
+  EXPECT_EQ(wakes.load(), kThreads * kPosts);
+  sched->set_wake_notifier(nullptr, nullptr);
+  sched->drain_ingress();
+  EXPECT_EQ(sched->total_pending_messages(), static_cast<std::size_t>(kThreads * kPosts));
+}
+
 // --- Stage S: slices (td 4.4, 8.10; S2-Q12; S2 section 4's SL-1..SL-9) ---
 
 // A run is up to slice_steps() consecutive steps of one process, on one step's guards, clock
