@@ -566,6 +566,7 @@ set(SOURCE_FILES
   world/terrain_source.cpp
   world/world_geometry.cpp
   world/city_bundle.cpp
+  world/world_bundle.cpp
   world/heightfield.cpp
   world/scatter.cpp
   world/roads.cpp

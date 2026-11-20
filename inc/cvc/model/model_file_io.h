@@ -132,6 +132,32 @@ model read_model_from_memory(app &ctx, const void *data, std::size_t size,
                              const std::string &extension);
 bool can_read_model_from_memory(const std::string &extension);
 
+// How read_model_from_memory treats what it reads. exact: the vertices and faces as the file
+// stores them, in its order, its lines kept, and nothing generated (no normals or tangents where
+// it has none, no vertices joined): what a writer of the same model reads back (a world bundle's
+// meshes, cvc/world/city_bundle.h). Off (the default), the import is cleaned up for drawing.
+struct model_read_options {
+  bool exact = false;
+};
+model read_model_from_memory(app &ctx, const void *data, std::size_t size,
+                             const std::string &extension, const model_read_options &options);
+
+// -----------------------
+// write_model_to_memory
+// -----------------------
+// Purpose:
+//   A model's encoded bytes in the format `extension` names (".glb", glTF 2 binary), with no
+//   file, so the browser writes the same bytes natively does. Each mesh is one glTF mesh of one
+//   primitive (its triangles; its lines, when it has them, as a second mesh), with its material's
+//   name and base colour, positions, normals and per-vertex colours where it has them; positions
+//   are 32-bit floats. The same model writes the same bytes. Throws
+//   unsupported_model_file_type when no backend writes the format (Assimp off, or an extension
+//   it cannot write); can_write_model_to_memory says which.
+// ---- Change History ----
+// 11/19/2026 -- Joe R. -- Creation (world bundles, ARIADNE_WORLDS section 18.8).
+std::string write_model_to_memory(app &ctx, const model &m, const std::string &extension);
+bool can_write_model_to_memory(const std::string &extension);
+
 // -----------
 // write_model
 // -----------
