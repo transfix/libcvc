@@ -6991,7 +6991,7 @@ std::vector<scenario> make_scenarios() {
       const int64_t nt = std::max<int64_t>(1, pc.i("t")), ng = std::max<int64_t>(1, pc.i("groups"));
       const int64_t calls = std::max<int64_t>(1, pc.i("calls"));
       const bool continuous = pc.s("pump", "fork_join") == "continuous";
-      const bool sleep = pc.s("kernel") == "sleep";
+      const bool blocks = pc.s("kernel") == "sleep";
       auto app = make_app();
       pool_point pp(*app, pool_workers_for(nt, continuous), pc);
       // Group k's latencies, appended by its pumps (under its token, on whichever thread pumps
@@ -7004,13 +7004,13 @@ std::vector<scenario> make_scenarios() {
       });
       // The natives, in each group's own base, on its own host (each group's kernels post to it).
       se::async_options ao;
-      ao.io = sleep;
+      ao.io = blocks;
       for (std::size_t k = 0; k < std::size_t(ng); ++k) {
         se::register_async_fn(
             envs[k], groups.gs[k]->host(), "bench-async",
-            [sleep](std::span<const se::value_t>) -> se::async_kernel {
-              return [sleep](se::async_call &) -> se::value_t {
-                if (sleep)
+            [blocks](std::span<const se::value_t>) -> se::async_kernel {
+              return [blocks](se::async_call &) -> se::value_t {
+                if (blocks)
                   block_1ms();
                 else
                   spin_for_ns(20000);
@@ -7085,10 +7085,10 @@ std::vector<scenario> make_scenarios() {
         "G exec_groups attached in turn to two pools of t workers built alike but for "
         "pool_options::force_move (on: every pump on another thread than the group's last), "
         "each group running prog `runs` times in pumps of `steps` steps, both pools in each "
-        "rep, in alternating order: extra.ns_per_move, the time force_move added over the "
-        "moves it added (the pools' stats().moves; extra.moves), with each pool's time, moves "
-        "and pumps. Stage 2a's gate: at most 5000 ns, judged where extra.moves is above 0 "
-        "(td 6.3)";
+        "rep, twice each, in the order off, on, on, off: extra.ns_per_move, the time force_move "
+        "added over the moves it added (the pools' stats().moves; extra.moves), with each "
+        "pool's time, moves and pumps, summed. Stage 2a's gate: at most 5000 ns, judged where "
+        "extra.moves is above 0 (td 6.3)";
     sc.executors = {"async"};
     sc.sizes = {{"t", {"2", "4", "8"}},
                 {"groups", {"16"}},
@@ -7128,46 +7128,45 @@ std::vector<scenario> make_scenarios() {
       const std::unique_ptr<cvc::exec_pool> steady = build(false), mover = build(true);
       pool_point pp(*steady, pc); // the caller's CPU, as mt.groups'
       const group_set groups(*app, ng);
-      bool move_first = false;
       pc.reps([&](meter &m, rep_out &o) {
         m.widen = false;
-        struct leg {
-          int64_t wall = 0;
-          cvc::pool_stats s0, s1;
-          groups_out out;
-        } legs[2]; // [0] force_move off, [1] on
-        const auto run_leg = [&](int which) {
+        // Each pool's runs, summed: [0] force_move off, [1] on.
+        struct side {
+          int64_t wall = 0, moves = 0, pumps = 0;
+          uint64_t steps = 0;
+        } sides[2];
+        // ABBA (off, on, on, off), so a drift across the rep, or the cost of going first, falls on
+        // both pools alike.
+        m.begin();
+        for (const int which : {0, 1, 1, 0}) {
           cvc::exec_pool &pool = which ? *mover : *steady;
           const attached_groups attached(pool, groups.gs);
-          legs[which].s0 = pool.stats();
-          legs[which].wall = run_attached(pool, groups.gs, asts, expect, {runs}, pc.cfg.timeout,
-                                          nullptr, legs[which].out);
-          legs[which].s1 = pool.stats();
-        };
-        m.begin();
-        run_leg(move_first ? 1 : 0);
-        run_leg(move_first ? 0 : 1);
+          groups_out out;
+          const cvc::pool_stats s0 = pool.stats();
+          sides[which].wall +=
+              run_attached(pool, groups.gs, asts, expect, {runs}, pc.cfg.timeout, nullptr, out);
+          const cvc::pool_stats s1 = pool.stats();
+          sides[which].moves += int64_t(s1.moves - s0.moves);
+          sides[which].pumps += int64_t(s1.pumps - s0.pumps);
+          sides[which].steps += out.steps;
+          if (!out.error.empty())
+            o.fail(out.error);
+        }
         m.end();
-        move_first = !move_first;
-        for (const leg &l : legs)
-          if (!l.out.error.empty())
-            o.fail(l.out.error);
-        const auto delta = [&](int which, std::uint64_t cvc::pool_stats::*f) {
-          return int64_t(legs[which].s1.*f - legs[which].s0.*f);
-        };
-        const int64_t added = delta(1, &cvc::pool_stats::moves) - delta(0, &cvc::pool_stats::moves);
-        o.iterations = 2 * ng * runs * p.iters;
-        o.programs = 2 * ng * runs;
-        o.steps_total = legs[0].out.steps + legs[1].out.steps;
+        const int64_t added = sides[1].moves - sides[0].moves;
+        o.iterations = 4 * ng * runs * p.iters;
+        o.programs = 4 * ng * runs;
+        o.steps_total = sides[0].steps + sides[1].steps;
         o.extra
-            .d("ns_per_move", added > 0 ? double(legs[1].wall - legs[0].wall) / double(added) : 0.0)
+            .d("ns_per_move",
+               added > 0 ? double(sides[1].wall - sides[0].wall) / double(added) : 0.0)
             .i("moves", added)
-            .i("moves_off", delta(0, &cvc::pool_stats::moves))
-            .i("moves_on", delta(1, &cvc::pool_stats::moves))
-            .i("pumps_off", delta(0, &cvc::pool_stats::pumps))
-            .i("pumps_on", delta(1, &cvc::pool_stats::pumps))
-            .i("wall_off_ns", legs[0].wall)
-            .i("wall_on_ns", legs[1].wall)
+            .i("moves_off", sides[0].moves)
+            .i("moves_on", sides[1].moves)
+            .i("pumps_off", sides[0].pumps)
+            .i("pumps_on", sides[1].pumps)
+            .i("wall_off_ns", sides[0].wall)
+            .i("wall_on_ns", sides[1].wall)
             .i("effective_threads", steady->threads());
       });
     };
