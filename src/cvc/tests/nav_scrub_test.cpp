@@ -11,7 +11,8 @@
 // The checkpoint scrubber (cvc/nav/nav_scrub.h): a coef_trainer run's history and checkpoints are
 // read and deployed on one scenario; a blob deployed twice gives the same run; checkpoint 0
 // deployed is the untrained policy's arm; the runs are cached by blob and scenario; and the view
-// shows checkpoint k beside step 0 as its controls pick it.
+// shows checkpoint k beside step 0 as its controls pick it; a scenario names its plant, which a
+// hook attaches, and the view shows the same checkpoint on each plant it was deployed on.
 
 #include <algorithm>
 #include <cmath>
@@ -229,7 +230,7 @@ TEST(NavScrub, EveryCheckpointIsDeployedOnceAndCached) {
   const std::vector<scrub_entry> first = scrub(h, s, o);
   ASSERT_EQ(first.size(), 3u);
   ASSERT_EQ(said.size(), 3u);
-  EXPECT_NE(said[0].find("step 0 (1/3), deployed"), std::string::npos) << said[0];
+  EXPECT_NE(said[0].find("step 0 (1/3) on kinematic, deployed"), std::string::npos) << said[0];
   for (const scrub_entry &e : first) {
     EXPECT_FALSE(e.cached);
     EXPECT_TRUE(fs::is_regular_file(e.cache)) << e.cache;
@@ -300,7 +301,7 @@ TEST(NavScrub, TheViewShowsCheckpointKBesideStep0) {
   const trained t = train_here();
   const training_history h = read_training_history(t.history);
   std::vector<scrub_entry> e = scrub(h, default_scenario(2, 0, 120));
-  EXPECT_THROW(scrub_view(h, {}), std::invalid_argument);
+  EXPECT_THROW(scrub_view(h, std::vector<scrub_entry>{}), std::invalid_argument);
   scrub_view view(h, e, -1, "blocks");
   EXPECT_EQ(view.checkpoint(), 1); // the pick
   cvc::app app;
@@ -353,4 +354,103 @@ TEST(NavScrub, TheViewShowsCheckpointKBesideStep0) {
   view.pick(0);
   f = view.update(app, "doc", 0.0);
   EXPECT_DOUBLE_EQ(f.replay.t, 3.0);
+}
+
+TEST(NavScrub, ThePlantIsTheScenarios) {
+  const trained t = train_here();
+  scrub_scenario s = default_scenario(2, 0, 100);
+  EXPECT_EQ(s.plant, "kinematic");
+  scrub_scenario blank = s;
+  blank.plant = "";
+  EXPECT_EQ(scenario_hash(blank), scenario_hash(s)); // "" is the bicycle
+  scrub_scenario hv = s;
+  hv.plant = "humvee";
+  EXPECT_NE(scenario_hash(hv), scenario_hash(s));
+  policy_library lib;
+  const std::string blob = t.dir + "/coef.step000010.cvcnav";
+  // another plant needs a hook: nav has none of its own
+  EXPECT_THROW(deploy_checkpoint(hv, blob, "step 10", lib), std::invalid_argument);
+  // a hook is called once a deploy, before the first tick, and its owner is kept for the run
+  int calls = 0;
+  std::weak_ptr<int> kept;
+  const scrub_plant_fn hook = [&](sim_world &w, const std::string &plant) {
+    ++calls;
+    EXPECT_EQ(plant, "humvee");
+    EXPECT_EQ(w.size(), 2);
+    auto owner = std::make_shared<int>(7);
+    kept = owner;
+    return scrub_plant_attached{"humvee (a stand-in)", owner};
+  };
+  const run_log l = deploy_checkpoint(hv, blob, "step 10", lib, "{}", hook);
+  EXPECT_EQ(calls, 1);
+  EXPECT_TRUE(kept.expired());
+  EXPECT_EQ(l.header().plant, "humvee (a stand-in)"); // what the agents drove
+  EXPECT_NE(l.header().world.find("\"plant\":\"humvee\""), std::string::npos);
+  EXPECT_EQ(deploy_checkpoint(s, blob, "step 10", lib, "{}", hook).header().plant, "kinematic");
+  EXPECT_EQ(calls, 1); // the bicycle never calls it
+  // scrub() deploys with the options' hook, and the report names the plant
+  const training_history h = read_training_history(t.history);
+  scrub_options o;
+  o.plant = hook;
+  o.use_cache = false;
+  const std::vector<scrub_entry> e = scrub(h, hv, o);
+  EXPECT_EQ(calls, 4);
+  EXPECT_NE(scrub_report_json(h, hv, e).find("\"plant\":\"humvee\""), std::string::npos);
+}
+
+TEST(NavScrub, TheViewShowsTheSameCheckpointOnAnotherPlant) {
+  const trained t = train_here();
+  const training_history h = read_training_history(t.history);
+  scrub_scenario s = default_scenario(2, 0, 120);
+  const std::vector<scrub_entry> kin = scrub(h, s);
+  scrub_options o;
+  o.plant = [](sim_world &, const std::string &p) { return scrub_plant_attached{p, nullptr}; };
+  s.plant = "other";
+  const std::vector<scrub_entry> other = scrub(h, s, o);
+  EXPECT_NE(other[1].cache, kin[1].cache);
+  EXPECT_THROW(scrub_view(h, std::vector<scrub_plant_runs>{}), std::invalid_argument);
+  EXPECT_THROW(
+      scrub_view(h, std::vector<scrub_plant_runs>{{"kinematic", kin}, {"kinematic", other}}),
+      std::invalid_argument); // named twice
+  EXPECT_THROW(
+      scrub_view(h, std::vector<scrub_plant_runs>{{"kinematic", kin}, {"other", {kin[0], kin[1]}}}),
+      std::invalid_argument); // not the same checkpoints
+  scrub_view view(h, std::vector<scrub_plant_runs>{{"kinematic", kin}, {"other", other}}, -1,
+                  "blocks");
+  cvc::app app;
+  panel_set(app, "sim.paused", "1");
+  scrub_view::frame f = view.update(app, "doc", 0.0);
+  EXPECT_EQ(panel_get(app, "doc.scrub.plant_labels"), "kinematic\nother");
+  EXPECT_EQ(panel_get(app, "doc.scrub.plant_count"), "2");
+  EXPECT_EQ(panel_get(app, "doc.scrub.plant_choice"), "kinematic");
+  EXPECT_EQ(panel_get(app, "doc.scrub.plant"), "kinematic");
+  EXPECT_EQ(view.plant(), 0);
+  EXPECT_EQ(f.k, 1);
+  // the combo: the same checkpoint and play head on the other plant
+  view.replay().head().set(2.0);
+  panel_set(app, "doc.scrub.plant_choice", "other");
+  f = view.update(app, "doc", 0.0);
+  EXPECT_EQ(view.plant(), 1);
+  EXPECT_EQ(f.k, 1);
+  EXPECT_DOUBLE_EQ(f.replay.t, 2.0);
+  EXPECT_EQ(view.entries()[1].cache, other[1].cache);
+  EXPECT_EQ(panel_get(app, "doc.scrub.plant"), "other");
+  EXPECT_NE(panel_get(app, "doc.play.title").find("on other"), std::string::npos)
+      << panel_get(app, "doc.play.title");
+  // in code, and a name it does not have is ignored
+  view.use_plant(0);
+  view.update(app, "doc", 0.0);
+  EXPECT_EQ(panel_get(app, "doc.scrub.plant_choice"), "kinematic");
+  panel_set(app, "doc.scrub.plant_choice", "nope");
+  view.update(app, "doc", 0.0);
+  EXPECT_EQ(view.plant(), 0);
+  EXPECT_EQ(panel_get(app, "doc.scrub.plant_choice"), "kinematic");
+  view.use_plant(9);
+  EXPECT_EQ(view.plant(), 1);
+  // one plant, unnamed: one, named from its runs
+  scrub_view one(h, other);
+  cvc::app app1;
+  one.update(app1, "doc", 0.0);
+  EXPECT_EQ(panel_get(app1, "doc.scrub.plant_count"), "1");
+  EXPECT_EQ(panel_get(app1, "doc.scrub.plant"), "other");
 }

@@ -29,7 +29,10 @@ scrubs; a click on a chart seeks there. Headless, nothing is drawn and no world 
 ``history_path``, or GRL-SNAM's) deployed on one scenario (the built-in blocks, or ``--scenario
 TRACE``), cached beside the history; the view shows checkpoint k beside step 0 (cvc::nav's
 ``scrub_view``): the deployed metric against the step, the training curve, the table, the two
-runs' Stats and Ledger at the play head, and their ghosts on the scenario's grid.
+runs' Stats and Ledger at the play head, and their ghosts on the scenario's grid. Each checkpoint is
+deployed on each ``--plant`` (default the Jolt Humvee, which stops against the buildings, and nav's
+kinematic bicycle, which drives through them; the Humvee alone, or the bicycle without Jolt), and
+the Scrub window's Plant combo switches between them.
 
 The windows and the replay's play head are cvc::nav's (cvc/nav/nav_panels.h): this module builds the
 worlds, draws the ghosts and wires the events. docs/NAV_LAB.md has the whole model. The shipped
@@ -559,15 +562,20 @@ def run_scrub(argv) -> int:
     p.add_argument("--no-cache", action="store_true", help="deploy every checkpoint again")
     p.add_argument("--report", default=None, help="write every checkpoint's metrics (JSON)")
     p.add_argument("--at", type=int, default=None, help="start at checkpoint k (default the pick)")
+    p.add_argument("--plant", action="append", default=None,
+                   help="what the agents drive, more than once for several (pycvc.plant_host's "
+                        "names; default humvee and kinematic, or kinematic without Jolt)")  # fmt: skip
     args = p.parse_args(ns.rest)
     for k, v in vars(ns).items():
         if k != "rest":
             setattr(args, k, v)
+    plants = list(dict.fromkeys(args.plant or (["humvee", "kinematic"]
+                                               if pycvc.plant_host.available() else ["kinematic"])))  # fmt: skip
     try:
         s = pycvc.nav_scrub_create(args.history, run=args.run, scenario=args.scenario,
                                    agents=args.agents, seed=args.seed, ticks=args.ticks,
                                    use_cache=not args.no_cache,
-                                   k=-1 if args.at is None else args.at)  # fmt: skip
+                                   k=-1 if args.at is None else args.at, plants=plants)  # fmt: skip
     except RuntimeError as e:
         return _refuse("scrub", e)
     info = pycvc.nav_scrub_info(s)
@@ -578,7 +586,7 @@ def run_scrub(argv) -> int:
               f"{info['missing'][0]})", file=sys.stderr)  # fmt: skip
     if args.report:
         Path(args.report).write_text(pycvc.nav_scrub_report(s))
-        print(f"scrub: {len(info['checkpoints'])} checkpoints to {args.report}")
+        print(f"scrub: {len(info['checkpoints'])} checkpoints on {info['plant']} to {args.report}")
     host = _host(args, SCRUB_DOC, "nav_lab")
     host.on("scrub.prev", lambda: pycvc.nav_scrub_prev(s))
     host.on("scrub.next", lambda: pycvc.nav_scrub_next(s))
@@ -603,8 +611,8 @@ def run_scrub(argv) -> int:
         if world is None:
             return
         nonlocal ghosts
-        if st["shown"] != f["checkpoint"]:  # the pair's recorded tracks
-            st["shown"] = f["checkpoint"]
+        if st["shown"] != (f["checkpoint"], f["plant"]):  # the pair's recorded tracks
+            st["shown"] = (f["checkpoint"], f["plant"])
             a0 = pycvc.nav_run_log_arrays(pycvc.nav_scrub_log(s, 0))
             ak = pycvc.nav_run_log_arrays(pycvc.nav_scrub_log(s, f["checkpoint"]))
             st["a"] = (a0, ak)

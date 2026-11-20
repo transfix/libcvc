@@ -238,6 +238,7 @@ on one scenario, headless, and shows checkpoint k beside step 0.
 ```bash
 cvc nav scrub run/history.jsonl                           # every checkpoint, a table
 cvc nav scrub run/history.jsonl --agents 8 --ticks 900 --report scrub.json
+cvc nav scrub run/history.jsonl --plant kinematic         # on nav's bicycle
 python -m pycvc_gl.nav_lab scrub run/history.jsonl        # the view
 ```
 
@@ -262,11 +263,25 @@ How the scrubber reads one:
 `cvc.nav.sim_world/v1` world with its maps embedded), its agents, and the number of ticks.
 - **The built-in one** is a walled 120 m square with a 3 x 3 grid of buildings and streets between
   them, each building nudged and sized by `--seed`. `--agents` agents (4 by default) start on its
-  west side and drive to goals on its east, on nav's kinematic bicycle, at a scale of 0.05
-  normalized units per metre and 0.05 s a tick, with the map known. Their start and goal lanes
-  come from `--seed`.
+  west side and drive to goals on its east, at a scale of 0.05 normalized units per metre and
+  0.05 s a tick, with the map known. Their start and goal lanes come from `--seed`.
 - **`--scenario TRACE`** uses a recorded input trace's world and agents. Its inputs are not
   replayed.
+
+**The plant.** `--plant` names what the agents drive.
+- **`humvee`**, the default when libcvc has Jolt, puts them on Jolt Humvees. The world's blocked
+  cells are added to the physics world as static boxes, 3 m tall (each row's runs of cells merged
+  down the rows into rectangles: 13 boxes on the built-in blocks). A Humvee that drives into a
+  building stops against it.
+- **`kinematic`** is nav's kinematic bicycle, the default without Jolt. It has no collision
+  response, so a policy that steers into a building drives through it, and the run counts the
+  ticks it spends inside (`pen_steps`).
+- Any other name `cvc::physics::plant_host` takes (`roboracer`, `dynamic:humvee`, ...) works too.
+
+nav does not depend on physics, so the plant reaches the scrubber through a hook:
+`scrub_scenario::plant` names it, and `scrub_options::plant` attaches it to each deployed world.
+`cvc::physics::scrub_plant()` (`cvc/physics/scrub_plant.h`) is the hook the CLI, the Python view
+and the browser page use.
 
 Each checkpoint's blob replaces the world's own policy for every agent, and the run is an arms run
 with one arm. So checkpoint 0 deployed here is the untrained policy's arm anywhere else, tick for
@@ -276,6 +291,7 @@ run (`NavScrub.OneBlobDeployedTwiceIsTheSameRun`).
 **The cache.** Each run is a run log, cached at
 `<history>.scrub/<blob sha256, 16 hex>-<scenario hash>.cvcrun`. The scenario's hash covers:
 - its world, agents and settings;
+- the plant;
 - the ticks;
 - the scrubber's version and libcvc's.
 
@@ -297,13 +313,18 @@ cache.
 
 ![The scrubber: checkpoint 60 beside step 0](img/nav-lab/scrub_python.jpg)
 
-*`python -m pycvc_gl.nav_lab scrub` on a 60-step coef_trainer run on the built-in blocks' own map: the ticks penetrating fall from 106 to 0 and the distance left
-to the goals from 71 m to 54 m, checkpoint 60 (orange) beside step 0 (blue).*
+*`python -m pycvc_gl.nav_lab scrub` on a 60-step coef_trainer run on the built-in blocks' own map,
+captured on the kinematic bicycle before the Humvee was the default: the ticks penetrating fall
+from 106 to 0 and the distance left to the goals from 71 m to 54 m, checkpoint 60 (orange) beside
+step 0 (blue).*
 
 **The view.** `cvc::nav::scrub_view` writes every window, so the Python view and the C++ one are
 the same. Libcvc's `nav_lab_scrub` component holds its three windows:
 
 - **`nav_lab_scrub`** holds the controls:
+  - the plant, when the checkpoints were deployed on more than one (a combo, `scrub.plant_choice`
+    over `scrub.plant_labels`). It shows the same checkpoint on the other plant, at the same play
+    head;
   - the checkpoint, picked by a combo (`scrub.choice`), a slider (`scrub.pos`), Previous and Next
     (`scrub.prev`, `scrub.next`), or a click on a chart (`scrub.pick`, then `scrub.pick_step`);
   - the deployed metric against the step, with step 0's as a dashed line (`scrub.metric`;
@@ -320,20 +341,23 @@ play head, and the play head keeps its time when another checkpoint is picked.
 **In a browser.** `examples/ariadne/nav_scrub` is a C++ Ariadne host for the scrubber, and
 libcvc's demo gallery (https://transfix.github.io/libcvc/nav_scrub/) runs it in the page. With no
 `--history`, it first trains cvc::nav's own coef_trainer for 60 steps on the built-in blocks' map,
-in that map's frame, saving a checkpoint every 6 steps. It then deploys the 11 checkpoints and
-shows `examples/ariadne/nav_scrub/nav_scrub.ari`: the same windows, written by the same
+in that map's frame, saving a checkpoint every 6 steps. It then deploys the 11 checkpoints on each
+`--plant` (by default the Humvee, then the kinematic bicycle to compare; the Plant combo switches)
+and shows `examples/ariadne/nav_scrub/nav_scrub.ari`: the same windows, written by the same
 `scrub_view`. The training, the deploys and the view all run in the page (single-threaded wasm,
 same-origin, nothing fetched); natively the whole sequence takes under 3 s. The document and the
 component library are preloaded into the page's file system.
 
 ![The scrubber in a browser page](img/nav-lab/scrub_web.jpg)
 
-*The gallery page in headless Chrome (software WebGL), after it trained and deployed in the page:
-the same numbers as the native run (step 60: path 88.8 m, 0 ticks penetrating, 53.6 m to go).*
+*The gallery page in headless Chrome (software WebGL), after it trained and deployed in the page,
+captured on the kinematic bicycle before the Humvee was the default: the same numbers as the
+native run (step 60: path 88.8 m, 0 ticks penetrating, 53.6 m to go).*
 
 ```bash
 nav_scrub examples/ariadne/nav_scrub/nav_scrub.ari --component-path src/cvc/ariadne
 nav_scrub examples/ariadne/nav_scrub/nav_scrub.ari --history run/history.jsonl --agents 8
+nav_scrub examples/ariadne/nav_scrub/nav_scrub.ari --plant humvee   # the Humvee alone
 ```
 
 ## From C++
