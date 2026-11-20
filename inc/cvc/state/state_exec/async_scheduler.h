@@ -740,6 +740,16 @@ private:
   /// CVC_EXEC_FUZZ's yields at the ingress posts (S2-Q15), read as the scheduler is made; null
   /// when it is off.
   std::unique_ptr<detail::lock_fuzz> ingress_fuzz_;
+  /// The long-step monitor (S2a.7): the threshold in force in seconds (0: off), the tree's
+  /// state_exec.long_step_ms in seconds while it is set (else the default applies), when the step
+  /// or the run's window being timed began, and when each native was last reported.
+  double long_step_seconds_ = 0.0;
+  std::optional<double> long_step_tree_;
+  clock::time_point long_window_{};
+  std::unordered_map<std::string, clock::time_point> long_step_reported_;
+  /// The step or window that began at long_window_ ends `now`: counted and reported if it was
+  /// long (async_scheduler.cpp); the next one begins `now`.
+  void time_long_step(const process &proc, clock::time_point now) noexcept;
 };
 
 } // namespace cvc::state_exec

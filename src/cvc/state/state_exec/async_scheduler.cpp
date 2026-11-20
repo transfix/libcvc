@@ -110,7 +110,8 @@ void async_scheduler::set_slice_seconds(double seconds) {
 }
 
 void async_scheduler::refresh_slice() {
-  if ((slice_steps_set_ && slice_seconds_set_) || !watch_root_)
+  // Read even with both slice settings given: the long-step threshold comes from the tree too.
+  if (!watch_root_)
     return;
   const uint64_t seen = settings_changes_.version(watch_root_); // before the reads
   if (seen == slice_seen_)
@@ -133,6 +134,14 @@ void async_scheduler::refresh_slice() {
     else if (const auto s = parse_slice_seconds(*v)) // 0 or less: 1 ms, as in set_slice_seconds
       slice_seconds_ = *s > 0.0 ? *s : 1e-3;
   }
+  // The long-step monitor's threshold (S2a.7, S2-Q11), by the same rules: state_exec.long_step_ms
+  // when set (0 or less: off), else the default (set_long_step_default).
+  const auto ms = detail::setting_value(*watch_root_, "state_exec.long_step_ms");
+  if (!ms || ms->empty())
+    long_step_tree_.reset();
+  else if (const auto v = parse_slice_seconds(*ms))
+    long_step_tree_ = *v > 0.0 ? *v / 1e3 : 0.0;
+  long_step_seconds_ = long_step_tree_.value_or(long_step_default_);
 }
 
 void async_scheduler::set_cycle_registry(cycle_registry *r) {
@@ -194,11 +203,38 @@ void async_scheduler::set_wake_notifier(detail::wake_notifier fn, void *ctx) {
 
 bool async_scheduler::has_wake_notifier() const noexcept { return wakeup_->has_notifier(); }
 
-// S2a.0 stubs: the monitor's settings are kept (S2a.7 reads them).
+// The long-step monitor's settings (S2a.7, S2-Q11): its default threshold applies while the tree
+// sets no state_exec.long_step_ms (refresh_slice).
 void async_scheduler::set_long_step_sink(long_step_sink sink) { long_step_sink_ = std::move(sink); }
 
 void async_scheduler::set_long_step_default(double seconds) {
   long_step_default_ = std::isfinite(seconds) && seconds > 0.0 ? seconds : 0.0;
+  long_step_seconds_ = long_step_tree_.value_or(long_step_default_);
+}
+
+// The long-step monitor (S2a.7, S2-Q11). A step, or a run's window between two of its clock
+// readings, that took longer than the threshold is counted, and reported to the sink with the
+// native its last step applied ("" when it applied none), at most once a minute per name. The name
+// is copied only then. A sink that throws is dropped: the step goes on.
+void async_scheduler::time_long_step(const process &proc, clock::time_point now) noexcept {
+  const double seconds = std::chrono::duration<double>(now - long_window_).count();
+  long_window_ = now;
+  if (seconds <= long_step_seconds_)
+    return;
+  long_steps_.fetch_add(1, std::memory_order_relaxed);
+  if (!long_step_sink_)
+    return;
+  try {
+    std::string native = proc.state.native_site ? proc.state.native_site : "";
+    const auto [last, first] = long_step_reported_.try_emplace(native, now);
+    if (!first) {
+      if (now - last->second < std::chrono::minutes(1))
+        return;
+      last->second = now;
+    }
+    long_step_sink_(native, seconds);
+  } catch (...) {
+  }
 }
 
 namespace {
@@ -551,6 +587,10 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
   const double chained_cpu = chain_cpu_;
   chain_valid_ = false; // until this step ends plainly
   proc.last_run_start = step_start;
+  // The long-step monitor (S2a.7) times the step, or the run's first window, from here.
+  const bool timing = long_step_seconds_ > 0.0;
+  if (timing)
+    long_window_ = step_start;
   // Async calls that run inline in this step are charged as calls (3.8), not as the step.
   proc.step_async_wall = 0.0;
   proc.step_async_cpu = 0.0;
@@ -604,6 +644,9 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
     if (max_run > 1 && !done)
       done = continue_run(proc, max_run, step_start, charged.before, charge_cpu, cpu0);
   } catch (const std::exception &e) {
+    // A long step that threw is timed first, while its native's name holds (S2a.7).
+    if (timing)
+      time_long_step(proc, clock::now());
     // A signal or watch handler's uncaught exception is raised in the program where the handler
     // interrupted it (docs/STATE_EXEC_EXCEPTIONS.md 2.4), for the program's own try to catch.
     bool raised_in_program = false;
@@ -656,6 +699,8 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
   }
 
   const clock::time_point now = clock::now();
+  if (timing)
+    time_long_step(proc, now); // the step, or the run's last window
   if (home_)
     home_->store_progress(now); // the home's last_progress, read by blocking_sinks (design 8.4)
   // A parking intrinsic (sleep / yield-frame / receive_message) already closed out this running
@@ -877,6 +922,9 @@ bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_
     const uint64_t n = run_steps_;
     if ((n & 15) == 0 || n == 2 || n == 4 || n == 8) {
       const clock::time_point t = clock::now();
+      // The long-step monitor's window (S2a.7): the steps since its last reading.
+      if (long_step_seconds_ > 0.0)
+        time_long_step(proc, t);
       if (timed && t - start >= slice)
         break;
       if (run_budget_ && run_budget_->spent(t, n - checked))

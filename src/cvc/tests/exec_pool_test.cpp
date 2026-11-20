@@ -2332,6 +2332,120 @@ TEST(ExecPool, AForceMovedCallEndsAtItsDeadline) {
   EXPECT_EQ(tight.skips, 1u);
 }
 
+// --- Stage 2a: an attached group's teardown (S2a.5; S2-Q4) ---
+
+// The includes the cases below add to the file's own.
+#include <condition_variable>
+#include <cvc/state/state_exec/async_host.h>
+#include <functional>
+#include <span>
+
+namespace {
+
+// A kernel that runs until its call is cancelled, calling `at_cancel` from the call's cancel hook
+// (which the teardown's kill runs); it counts its starts.
+async_kernel teardown_kernel(std::atomic<int> &started, std::function<void()> at_cancel) {
+  return [&started, at_cancel](async_call &call) -> value_t {
+    struct gate {
+      std::mutex m;
+      std::condition_variable cv;
+      bool cancelled = false;
+    };
+    auto g = std::make_shared<gate>();
+    call.on_cancel([g, at_cancel] {
+      at_cancel();
+      std::lock_guard<std::mutex> lock(g->m);
+      g->cancelled = true;
+      g->cv.notify_all();
+    });
+    started.fetch_add(1);
+    std::unique_lock<std::mutex> lock(g->m);
+    g->cv.wait_for(lock, std::chrono::seconds(30), [&] { return g->cancelled; });
+    return value_t(int64_t(0));
+  };
+}
+
+} // namespace
+
+// S2a.5 (S2-Q4's order): an attached group destroyed with a kernel in flight is still attached at
+// its teardown hook (once it holds the token and has closed its lock port), and has left the pool
+// by its kills: in the kernel's cancel hook, which the kill runs, it is not attached and has no
+// notifier. The pool counts nothing attached after.
+TEST(ExecGroupTeardown, AnAttachedGroupLeavesItsPoolBeforeTheKills) {
+  cvc::pool_options po;
+  po.threads = 0;
+  cvc::exec_pool pool(po);
+  cvc::app app;
+  std::atomic<int> started{0};
+  bool attached_at_hook = false, attached_at_kill = true, notifier_at_kill = true;
+  int cancels = 0;
+  exec_group::options o = opts_for(app, "s2a5");
+  o.teardown_hook_for_test = [&](exec_group &g) { attached_at_hook = pool.attached(g); };
+  auto g = std::make_unique<exec_group>(std::move(o));
+  exec_group *const raw = g.get();
+  environment_ptr env = environment::extend(builtins::make_default_environment());
+  register_async_fn(env, g->host(), "wait-cancel",
+                    [&, raw](std::span<const value_t>) -> async_kernel {
+                      return teardown_kernel(started, [&, raw] {
+                        ++cancels;
+                        attached_at_kill = pool.attached(*raw);
+                        notifier_at_kill = raw->sched().has_wake_notifier();
+                      });
+                    });
+  execute_options eo;
+  eo.env = env;
+  g->execute(std::string("(begin (wait-cancel) 1)"), eo);
+  const auto t0 = clock_type::now();
+  while (started.load() == 0 && clock_type::now() - t0 < std::chrono::seconds(10)) {
+    g->pump(kSteps);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_EQ(started.load(), 1) << "the kernel never started";
+  pool.attach(*g);
+  ASSERT_TRUE(pool.attached(*g));
+  g.reset();
+  EXPECT_TRUE(attached_at_hook) << "it left the pool before its token and the port's close";
+  EXPECT_EQ(cancels, 1) << "the teardown's kill did not cancel the call";
+  EXPECT_FALSE(attached_at_kill) << "it was still attached at its kills";
+  EXPECT_FALSE(notifier_at_kill) << "it still had its notifier at its kills";
+  EXPECT_EQ(pool.stats().attached, 0u);
+}
+
+// S2a.5 (the amended transitions): destroying an attached group inside its own with_group, on the
+// thread holding it, aborts in every build, as one inside its own pump does. Skipped until
+// with_group is built for attached groups (S2a.4).
+TEST(ExecGroupDeathTest, DestroyedInsideItsOwnWithGroupAborts) {
+  {
+    cvc::pool_options po;
+    po.threads = 0;
+    cvc::exec_pool pool(po);
+    cvc::app app;
+    exec_group g(opts_for(app, "probe"));
+    pool.attach(g);
+    bool built = true;
+    try {
+      pool.with_group(g, [] {});
+    } catch (const std::logic_error &) {
+      built = false;
+    }
+    pool.detach(g);
+    if (!built)
+      GTEST_SKIP() << "with_group is not built for attached groups yet (S2a.4)";
+  }
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_DEATH(
+      {
+        cvc::pool_options po;
+        po.threads = 0;
+        cvc::exec_pool pool(po);
+        cvc::app app;
+        auto *g = new exec_group(opts_for(app, "doomed"));
+        pool.attach(*g);
+        pool.with_group(*g, [g] { delete g; });
+      },
+      "destroyed from inside its own with_group");
+}
+
 // --- Stage 2a continuous pool (td 8.3, 8.11) ---
 //
 // S2.md section 4's PL cases for continuous mode (S2a.9): the eventcount, a parked pool, the
