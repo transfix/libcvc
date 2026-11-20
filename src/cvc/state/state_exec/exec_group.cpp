@@ -403,7 +403,8 @@ namespace {
 
 // A submission: under the pool's with_group when the group is attached and the calling thread
 // neither pumps nor holds it (Stage 2: it waits for a pump in progress, and the group is woken
-// after, since a submission posts nothing), else here.
+// after, since a submission posts nothing), else here. Refused (std::logic_error, from
+// with_attached) inside a pump of the pool it is attached to (K-2).
 int submitted(exec_group &g, const std::function<int()> &submit) {
   int pid = 0;
   if (!cvc::detail::with_attached(g, [&] { pid = submit(); }))
