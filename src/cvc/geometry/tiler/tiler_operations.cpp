@@ -230,6 +230,13 @@ step_task build_OTV_table_steps(ContourIterator contours_begin, ContourIterator 
 
   using namespace std;
 
+  // A candidate's test scans the edges of both slices' contours.
+  std::size_t edges = 0;
+  for (ContourIterator it = c1_begin; it != c1_end; ++it)
+    edges += (*it)->polygon().size();
+  for (ContourIterator it = c2_begin; it != c2_end; ++it)
+    edges += (*it)->polygon().size();
+
   for (ContourIterator it = contours_begin; it != contours_end; ++it) {
     Contour_handle contour = *it;
 
@@ -243,7 +250,7 @@ step_task build_OTV_table_steps(ContourIterator contours_begin, ContourIterator 
     // according to distance from v.
     for (Vertex_iterator vit = contour->polygon().vertices_begin();
          vit != contour->polygon().vertices_end(); ++vit) {
-      SK_UNIT;
+      TILER_UNITS(sort_units(points.size()));
       Point_3 vertex = vertices.get(contour, vit);
       TILER_TRACE(logger, "Finding OTV for " << pp(vertex));
 
@@ -271,10 +278,11 @@ step_task build_OTV_table_steps(ContourIterator contours_begin, ContourIterator 
         // 	    banned.insert(vertex);
         // 	  }
         // 	}
+        bool scanned = false;
         if (!found) {
           Segment_2 segment(vertex.point_2(), test_point);
-          found = (tiling_regions[vertex]->contains(test_point) &&
-                   !intersects_proper(segment, c1_begin, c1_end) &&
+          scanned = tiling_regions[vertex]->contains(test_point);
+          found = (scanned && !intersects_proper(segment, c1_begin, c1_end) &&
                    !intersects_proper(segment, c2_begin, c2_end));
         }
         // 	found = found && test31a(test_point, vertex, vertices, h);
@@ -289,6 +297,7 @@ step_task build_OTV_table_steps(ContourIterator contours_begin, ContourIterator 
                                    pp(test_vertex));
           }
         }
+        TILER_UNITS(scanned ? edge_test_units(edges) : 4);
       }
     }
   }
@@ -501,9 +510,17 @@ step_task find_tiling_regions_steps(ContourIterator start1, ContourIterator end1
   typedef Polygon_2::Vertex_circulator Vertex_circulator;
 
   regions = Vertex_map<HTiling_region>(10000);
+  TILER_UNITS(2 * vertex_map_units());
 
   //   Number_type z1 = (*start1)->slice();
   //   Number_type z2 = (*start2)->slice();
+
+  // A vertex's region locates it among the other slice's contours: charged by their vertices.
+  std::size_t n1 = 0, n2 = 0;
+  for (ContourIterator it1 = start1; it1 != end1; ++it1)
+    n1 += (*it1)->polygon().size();
+  for (ContourIterator it2 = start2; it2 != end2; ++it2)
+    n2 += (*it2)->polygon().size();
 
   for (ContourIterator it1 = start1; it1 != end1; ++it1) {
     Contour_handle contour = *it1;
@@ -513,7 +530,7 @@ step_task find_tiling_regions_steps(ContourIterator start1, ContourIterator end1
       Point_3 v = vertices.get(contour, it);
       regions[v] = tiling_region(it, /*contour,*/ h1, h2, z1, z2);
       ++it;
-      SK_UNIT;
+      TILER_UNITS(scan_units(n2));
     } while (it != beg);
   }
 
@@ -525,7 +542,7 @@ step_task find_tiling_regions_steps(ContourIterator start1, ContourIterator end1
       Point_3 v = vertices.get(contour, it);
       regions[v] = tiling_region(it, /*contour,*/ h2, h1, z2, z1);
       ++it;
-      SK_UNIT;
+      TILER_UNITS(scan_units(n1));
     } while (it != beg);
   }
 }
@@ -1064,7 +1081,7 @@ step_task pass2_4_steps(size_t case_num, Tiler_workspace &w) {
         seg_z = tmp_bsc.seg_z();
 
         keep_going = case2_4(case_num, u2, v2, seg_z, dir, w);
-        SK_UNIT;
+        TILER_UNITS(tile_test_units(w.vertices.size()));
 
         if (keep_going) {
           bool u2b = w.completion_map.is_complete(u2, dir);
@@ -1402,7 +1419,7 @@ step_task build_tiling_table_phase1_steps(Tiler_workspace &w) {
     case1_3(u2, v2, Walk_direction::FORWARD, w);
     TILER_TRACE(logger, "OTV pair " << u2.id() << " " << v2.id() << " BACKWARD");
     case1_3(u2, v2, Walk_direction::BACKWARD, w);
-    SK_UNIT;
+    TILER_UNITS(tile_test_units(w.vertices.size()));
   }
 
   TILER_TRACE(logger, "Pass 2 (case 4)...");
@@ -1422,6 +1439,7 @@ step_task build_tiling_table_phase2_steps(Tiler_workspace &w) {
   // trace out new contours
   TILER_TRACE(logger, "Tracing untiled contours...");
   list<Untiled_region> contours = trace_untiled_regions(w);
+  TILER_UNITS(table_units(w.vertices.size()));
 
   TILER_TRACE(logger, "Tiling untiled regions...");
   int idx = 0;
@@ -1442,7 +1460,7 @@ step_task build_tiling_table_phase2_steps(Tiler_workspace &w) {
       w.add_tile(Tile_handle(new Tile(Triangle(*i1, *i2, *i3))));
     } else {
       list<Tile> new_tiles;
-      medial_axis_stable(region, w.midz, back_inserter(new_tiles), w.vertices, w);
+      SK_RUN(medial_axis_stable_steps(region, w.midz, back_inserter(new_tiles), w.vertices, w));
 
       for (list<Tile>::iterator i = new_tiles.begin(); i != new_tiles.end(); ++i) {
         w.add_tile(Tile_handle(new Tile(*i)));
@@ -1450,7 +1468,7 @@ step_task build_tiling_table_phase2_steps(Tiler_workspace &w) {
     }
 
     ++idx;
-    SK_UNIT;
+    TILER_UNITS(region.size() > 3 ? untiled_units(region.size()) : 1);
   }
 }
 
