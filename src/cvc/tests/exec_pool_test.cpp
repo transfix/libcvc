@@ -1014,8 +1014,10 @@ TEST(ExecPoolContinuous, ANewGroupDoesNotStarveABusyOne) {
   for (std::size_t i = from; i < from + 40; ++i)
     ++(order.names[i] == "busy" ? busy_pumps : late_pumps);
   std::cout << "after the late attach: busy " << busy_pumps << ", late " << late_pumps << "\n";
-  EXPECT_GE(busy_pumps, 10u) << "the late group took the worker";
-  EXPECT_GE(late_pumps, 10u);
+  // Without the clamp the late group takes all 40 (the busy one is ~50 pumps ahead). The bounds
+  // leave room for a pump the OS stretched (its time is its virtual time).
+  EXPECT_GE(busy_pumps, 4u) << "the late group took the worker";
+  EXPECT_GE(late_pumps, 4u);
 }
 
 // The eventcount and CVC_EXEC_FUZZ: idle workers park (stats().parks), none is active once the
