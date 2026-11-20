@@ -21,10 +21,11 @@ world:
         plant: kinematic
         vehicle: { preset: roboracer, max_speed: 7 }
         controllers: [nav@1, none]
-      truck:
+      truck: # a participant may get in and drive one: walk up to it and hold E (§18.6)
         plant: kinematic
         vehicle: { preset: humvee, max_speed: 9 }
         controllers: [nav@1, none]
+        drivable: true
     start:
       - { archetype: rover, count: 12, name: rover, team: 1 }
       - { archetype: truck, count: 6, name: truck, team: 2 }

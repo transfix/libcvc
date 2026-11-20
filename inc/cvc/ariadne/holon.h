@@ -179,6 +179,9 @@ public:
   // CLIENT: the newest server tick seen from `pid` is remembered when it is removed (left_tick).
   void remove_participant(const std::string &pid);
   bool has_participant(const std::string &pid) const;
+  // Whether `pid` is this client's own, predicted avatar (added with local); false for a peer, an
+  // unknown pid, and on a server.
+  bool is_local(const std::string &pid) const;
   // CLIENT: the newest server tick seen from `pid` before it was last removed, until a sample of
   // it is applied again; 0 otherwise. The pose subtree a departed peer leaves behind in the room
   // tree carries a tick no newer, so the host (client_pump) can tell it from a pose for its rejoin.

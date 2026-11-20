@@ -509,6 +509,11 @@ bool holon::has_participant(const std::string &pid) const {
   return _participants.find(pid) != _participants.end();
 }
 
+bool holon::is_local(const std::string &pid) const {
+  const auto it = _participants.find(pid);
+  return _role == holon_role::client && it != _participants.end() && it->second.local;
+}
+
 bool holon::pose_known(const std::string &pid) const {
   auto it = _participants.find(pid);
   return it != _participants.end() && it->second.pose_known;

@@ -135,6 +135,13 @@ drive_status read_drive_status(cvc::app &app, const std::string &room, const std
 // server_pump does this for every participant.
 void serve_drive(holon &h, cvc::app &app, const std::string &room, const std::string &pid);
 
+// CLIENT: the vehicle a participant standing at FEET, facing FACING (rad from +x), would get into:
+// the nearest drivable entity the playout shows whose chassis box is within its reach, one ahead
+// of it before one behind. 0 for none; OUT_GAP gets its distance (m, feet to box, in plan).
+class entity_playout;
+std::uint64_t drive_target(const entity_playout &entities, const cvc::physics::vec3 &feet,
+                           double facing, double *out_gap = nullptr);
+
 // The holon configuration every conference room uses, on the relay and in every client (they must
 // agree: the client predicts with the server's physics): rigid-body avatars in a Jolt world, under
 // the room's rules -- the body, controller, veto, energy budget and gravity the relay publishes as
@@ -175,7 +182,9 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
 // nothing to draw) -- drop the ones that left, apply each replicated authoritative .pose (the
 // holon ignores a sample it has already seen, so re-reading an unchanged pose every frame is
 // harmless), then advance the holon one frame. Read the result with h.display_pose(pid). wall_dt
-// as in server_pump. With physics, both pumps (re)load the holon's statics from the room scene
+// as in server_pump. While the relay says SELF_PID drives a vehicle (driving, section 18.6), its
+// pose is the vehicle's, which it does not predict: it is played out from the relay's samples as a
+// peer is, and predicted again once it is out. With physics, both pumps (re)load the holon's statics from the room scene
 // whenever its revision changes, and both take each of the room's rules sections (room_rules.h)
 // whenever its stamp moves (holon::set_physics and the rest).
 void client_pump(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,

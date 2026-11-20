@@ -288,6 +288,39 @@ void serve_drive(holon &h, cvc::app &app, const std::string &room, const std::st
     set_replicated(app, driving, std::to_string(static_cast<unsigned long long>(now)));
 }
 
+std::uint64_t drive_target(const entity_playout &entities, const cvc::physics::vec3 &feet,
+                           double facing, double *out_gap) {
+  std::uint64_t best = 0;
+  double best_score = 1e300, best_gap = 0.0;
+  for (const conference::room_entity &e : entities.entities()) {
+    cvc::physics::pose at;
+    if (!e.drivable || !entities.pose(e.id, at))
+      continue;
+    // Its feet to the chassis box, in the vehicle's frame, in plan (holon::get_in's rule).
+    const cvc::physics::quat &q = at.rotation;
+    const double yaw =
+        std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+    const double dx = feet.x - at.position.x, dy = feet.y - at.position.y;
+    const double c = std::cos(yaw), s = std::sin(yaw);
+    const double lx = c * dx + s * dy, ly = -s * dx + c * dy;
+    const double gap = std::hypot(std::max(0.0, std::fabs(lx) - 0.5 * e.size[0]),
+                                  std::max(0.0, std::fabs(ly) - 0.5 * e.size[1]));
+    if (gap > e.reach)
+      continue;
+    // Ahead of it first: one behind it scores as if a reach further away.
+    const bool ahead = -dx * std::cos(facing) - dy * std::sin(facing) >= 0.0;
+    const double score = gap + (ahead ? 0.0 : e.reach);
+    if (score < best_score) {
+      best = e.id;
+      best_score = score;
+      best_gap = gap;
+    }
+  }
+  if (out_gap)
+    *out_gap = best_gap;
+  return best;
+}
+
 bool read_current_intent(cvc::app &app, const std::string &room, const std::string &pid,
                          std::uint64_t proposed_tick, avatar_intent &out) {
   avatar_intent tree;
@@ -492,6 +525,15 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
       have = false;
     // A participant the roster lists before its pose has replicated is registered pose-less: no
     // body and no marker at the placeholder origin until its first sample (holon::pose_known).
+    // Driving, our pose is the vehicle's, played out as a peer's; out, predicted again.
+    if (p.pid == self_pid && h.has_participant(p.pid)) {
+      const bool riding = read_driving(app, room, p.pid) != 0;
+      if (riding == h.is_local(p.pid)) {
+        const cvc::physics::body_state now = h.state(p.pid);
+        h.remove_participant(p.pid);
+        h.add_participant(p.pid, /*local=*/!riding, now, /*pose_known=*/true);
+      }
+    }
     if (!h.has_participant(p.pid))
       h.add_participant(p.pid, /*local=*/p.pid == self_pid, have ? s : cvc::physics::body_state{},
                         /*pose_known=*/have);

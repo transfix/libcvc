@@ -21,6 +21,7 @@
 #include <cstring>
 #include <cvc/ariadne/avatar_sim.h>
 #include <cvc/ariadne/conference/room_avatar.h>
+#include <cvc/ariadne/conference/room_entities.h>
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/conference/room_rules.h>
 #include <cvc/ariadne/conference/room_scene.h>
@@ -1221,4 +1222,66 @@ TEST(ControlSchemes, EachSchemeHasItsOwnBindings) {
   r.update(held, 0.1);
   r.drive_axes(in);
   EXPECT_DOUBLE_EQ(in.brake, 0.0);
+}
+
+// While the relay says we drive (section 18.6), our pose is the vehicle's, which we do not
+// predict: client_pump plays it out from the relay's samples as a peer's, and predicts it again
+// once we are out.
+TEST(HolonSyncTest, OurOwnPoseIsPlayedOutWhileWeDrive) {
+  cvc::app app;
+  const std::string room = "garage";
+  cvc::ariadne::conference::room_join(app, room, "ann");
+  body_state at;
+  at.position = vec3{1.0, 2.0, 0.0};
+  cvc::ariadne::write_pose(app, room, "ann", at, 100);
+  holon client(holon_role::client);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0);
+  ASSERT_TRUE(client.has_participant("ann"));
+  EXPECT_TRUE(client.is_local("ann")) << "walking: predicted";
+  cvc::state &driving =
+      app.root()(cvc::ariadne::conference::room_participant_path(room, "ann") + ".driving");
+  driving.value(std::string("5"));
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0);
+  EXPECT_TRUE(client.has_participant("ann"));
+  EXPECT_FALSE(client.is_local("ann")) << "driving: played out";
+  driving.value(std::string("0"));
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0);
+  EXPECT_TRUE(client.is_local("ann")) << "out: predicted again";
+}
+
+// The vehicle the prompt names (section 18.6): the nearest drivable one within its reach of us,
+// one ahead of us before one behind; never one that is not drivable, nor one out of reach.
+TEST(HolonSyncTest, TheDriveTargetIsTheNearestDrivableVehicleInReach) {
+  namespace conf = cvc::ariadne::conference;
+  cvc::app app;
+  const std::string room = "garage";
+  const auto vehicle = [](std::uint64_t id, bool drivable) {
+    conf::room_entity e;
+    e.id = id;
+    e.archetype = "humvee";
+    e.drivable = drivable;
+    e.reach = 3.0;
+    e.size = {4.0, 2.0, 1.5};
+    return e;
+  };
+  conf::write_room_entities(app, room,
+                            {vehicle(1, true), vehicle(2, true), vehicle(3, false), vehicle(4, true)});
+  cvc::ariadne::entity_playout playout;
+  const auto place = [&](std::uint64_t id, double x, double y) {
+    body_state s;
+    s.position = vec3{x, y, 0.75};
+    EXPECT_TRUE(playout.apply(conf::entity_pid(id), s, 10));
+  };
+  place(1, 4.0, 0.0);   // ahead of us (+x), its box from 2 m
+  place(2, -3.5, 0.0);  // behind us, its box from 1.5 m: nearer, but behind
+  place(3, 0.0, 1.5);   // right beside us, not drivable
+  place(4, 20.0, 0.0);  // drivable, out of reach
+  playout.pump(app, room, 1.0 / 60.0);
+  double gap = 0.0;
+  EXPECT_EQ(cvc::ariadne::drive_target(playout, vec3{0.0, 0.0, 0.0}, 0.0, &gap), 1u)
+      << "the one ahead";
+  EXPECT_NEAR(gap, 2.0, 0.05);
+  EXPECT_EQ(cvc::ariadne::drive_target(playout, vec3{0.0, 0.0, 0.0}, 3.14159265, &gap), 2u)
+      << "turned round, the other";
+  EXPECT_EQ(cvc::ariadne::drive_target(playout, vec3{40.0, 40.0, 0.0}, 0.0), 0u) << "none in reach";
 }
