@@ -25,7 +25,7 @@ windows:
   - window: Contour tiler
     id: contour_tiler
     pos: [16, 16]
-    size: [330, 130]
+    size: [330, 160]
     children:
       - text: "status"
         bind: graphics.root.children.axon.tiler.status
