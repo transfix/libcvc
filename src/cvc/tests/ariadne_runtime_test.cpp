@@ -1973,6 +1973,27 @@ TEST(AriadneIsolatedDocs, AHostVerbRegisteredWhileItRunsBindsAtTheNextLoad) {
   EXPECT_EQ(calls, 1);
 }
 
+// S2a.5 (S2-Q4): the teardown of a document whose group is attached (Ariadne never attaches one,
+// S2-Q6, but a host may) is not refused as a held group's: it waits for a worker's pump instead
+// (detach_begin), and the group leaves the pool.
+TEST(AriadneIsolatedDocs, AnAttachedGroupsTeardownIsNotRefused) {
+  cvc::app app;
+  isolate_documents(app, 0);
+  MockBackend mb;
+  auto doc = std::make_unique<Runtime>(app, "docs.attached");
+  doc->set_backend(&mb);
+  doc->set_channel_policy({}, {}, true, true);
+  doc->set_root(group({text("attached")}));
+  cvc::state_exec::exec_group *const g = doc->isolated_group();
+  if (!g)
+    GTEST_SKIP() << "not isolated: " << doc->isolation_reason();
+  cvc::exec_pool &pool = app.exec_pool();
+  pool.attach(*g);
+  ASSERT_TRUE(pool.attached(*g));
+  doc.reset();
+  EXPECT_EQ(pool.stats().attached, 0u);
+}
+
 // R1b-mid c-m4, R1b skeptic m2: tearing down a document whose group a pump_all holds is refused in
 // every build: logged, then aborted before anything is touched. Here a group-0 native, run while
 // exec_pump_frame pumps group 0 first, closes an isolated document whose group the same call holds.

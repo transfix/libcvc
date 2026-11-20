@@ -221,6 +221,14 @@ exec_group::~exec_group() {
     std::fflush(stderr);
     std::abort();
   }
+  // Nor inside its own with_group, or a host body of it, on the thread holding it (Stage 2, the
+  // amended transitions in exec_group.h): with_group would go on using it after the teardown, and
+  // its token would nest. That aborts, in every build, too.
+  if (cvc::detail::host_held_here(*this)) {
+    std::fputs("exec_group: destroyed from inside its own with_group or host body\n", stderr);
+    std::fflush(stderr);
+    std::abort();
+  }
   // Nor while a pump_all holds it (a host body or callback of that call, or another thread): the
   // call would go on using it after the teardown (N3). That aborts, in every build, too.
   if (m.link.call.load(std::memory_order_relaxed) != nullptr) {
@@ -239,7 +247,12 @@ exec_group::~exec_group() {
                what_of(std::current_exception()));
     }
   };
-  // The token, waiting for a pump in progress (no pool holds it outside a pump_all).
+  // An attached group (Stage 2, S2-Q4's order): (1) detaching is set and (2) a pump in progress,
+  // and another thread's with_group or host body, are waited for, servicing this thread's host
+  // queue. A group whose pump failed attached is detaching already. Nothing for one not attached.
+  cvc::detail::detach_begin(*this);
+  // (3) The token: free by now for an attached group; else waiting for a pump in progress (no pool
+  // holds it outside a pump_all).
   std::optional<async_scheduler::pump_owner_scope> token;
   for (;;) {
     try {
@@ -249,12 +262,15 @@ exec_group::~exec_group() {
       std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
   }
-  // Then, in td 4.2's order: no lock post lands from here on; the test hook (GL-2); the kills,
-  // which settle the processes' calls as cancelled; the host, waiting for its kernels; the
-  // host-call queue's entries, dropped unrun; the reap.
+  // Then, in td 4.2's order: no lock post lands from here on; the test hook (GL-2); (4) the group
+  // leaves its pool (the ready queue, the timer heap, its notifier), so nothing the kills post
+  // reaches the pool; (5) the kills, which settle the processes' calls as cancelled; the host,
+  // waiting for its kernels; the host-call queue's entries (its attaching thread's too), dropped
+  // unrun; the reap.
   step("closing the lock port", [&] { m.sched->close_lock_port(); });
   if (m.opts.teardown_hook_for_test)
     step("the teardown hook", [&] { m.opts.teardown_hook_for_test(*this); });
+  cvc::detail::detach_end(*this);
   step("listing its processes", [&] {
     for (const process_info &p : m.sched->list_processes())
       if (!is_finished(p.status))
