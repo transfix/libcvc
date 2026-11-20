@@ -2500,6 +2500,167 @@ TEST(AriadneWorldVehicles, AFleetHasPlantsAndAMetric) {
   EXPECT_NEAR(kinematic_limits("teams").rr, own, 1e-6);
 }
 
+// A fleet's poses are a snapshot (FL1d): poses(fleet) gives its placed vehicles as the last
+// publish left them (ids, chassis centres, headings, speeds, teams, the box they lie in and the
+// tick), the same the fleet's .tick and .bounds keys say. A snapshot held stays as it was while the
+// world steps on, another thread reads them without a lock, and a fleet gone has none.
+TEST(AriadneWorldVehicles, AFleetsPosesAreASnapshot) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  cvc::app app;
+  AppRuntime art(app, "");
+  art.load(write_doc("fleet_poses", kFleetDoc).string());
+  ASSERT_NE(art.scene_world(), nullptr);
+  WorldVehicles *v = art.scene_world()->vehicles();
+  art.drain();
+  art.step_world(1);
+  art.drain();
+  const std::shared_ptr<const fleet_poses> p = v->poses("city");
+  ASSERT_NE(p, nullptr);
+  ASSERT_EQ(p->size(), 64u);
+  EXPECT_EQ(p->tick, art.scene_world()->world().tick());
+  EXPECT_EQ(v->poses("solo"), nullptr); // an unnamed vehicle is no fleet's
+  EXPECT_EQ(v->poses("town"), nullptr);
+  std::vector<entity_info> city;
+  for (const entity_info &e : v->entities())
+    if (e.fleet == "city")
+      city.push_back(e);
+  ASSERT_EQ(city.size(), 64u);
+  for (std::size_t k = 0; k < 64; ++k) {
+    EXPECT_EQ(p->id[k], city[k].id) << k;
+    EXPECT_NEAR(p->x[k], city[k].x, 1e-3) << k;
+    EXPECT_NEAR(p->y[k], city[k].y, 1e-3) << k;
+    EXPECT_NEAR(p->yaw[k], city[k].yaw, 1e-4) << k;
+    EXPECT_EQ(p->team[k], city[k].rally) << k;
+    EXPECT_GE(p->x[k], p->min_x - 1e-3);
+    EXPECT_LE(p->x[k], p->max_x + 1e-3);
+    EXPECT_GE(p->y[k], p->min_y - 1e-3);
+    EXPECT_LE(p->y[k], p->max_y + 1e-3);
+  }
+  EXPECT_LT(p->max_x, -200.0 * 0.4 + 4.0); // laid out in the west 30 %
+  EXPECT_EQ(val(app, "vehicles.fleets.city.tick"), std::to_string(p->tick));
+  double b[4] = {};
+  ASSERT_EQ(std::sscanf(val(app, "vehicles.fleets.city.bounds").c_str(), "%lf,%lf,%lf,%lf", &b[0],
+                        &b[1], &b[2], &b[3]),
+            4);
+  EXPECT_NEAR(b[0], p->min_x, 1e-3);
+  EXPECT_NEAR(b[3], p->max_y, 1e-3);
+
+  // A reader on another thread while the world steps: every snapshot whole, and newer ones come.
+  const std::uint64_t held_tick = p->tick;
+  const std::vector<float> held_x = p->x;
+  std::atomic<bool> stop{false};
+  std::atomic<int> reads{0}, torn{0};
+  std::atomic<std::uint64_t> latest{0};
+  std::thread reader([&] {
+    while (!stop.load()) {
+      if (const std::shared_ptr<const fleet_poses> q = v->poses("city")) {
+        if (q->size() != 64 || q->x.size() != 64 || q->team.size() != 64)
+          ++torn;
+        latest = q->tick;
+        ++reads;
+      }
+      std::this_thread::yield();
+    }
+  });
+  art.step_world(120);
+  art.drain();
+  stop = true;
+  reader.join();
+  EXPECT_GT(reads.load(), 0);
+  EXPECT_EQ(torn.load(), 0);
+  EXPECT_GT(latest.load(), p->tick);
+  const std::shared_ptr<const fleet_poses> later = v->poses("city");
+  ASSERT_NE(later, nullptr);
+  EXPECT_GT(later->tick, p->tick);
+  EXPECT_EQ(p->tick, held_tick); // the one held is as it was
+  EXPECT_EQ(p->x, held_x);
+  EXPECT_NE(later->x, p->x); // they drove
+
+  // Its vehicles gone, it has none.
+  v->clear();
+  art.step_world(1);
+  art.drain();
+  EXPECT_EQ(v->poses("city"), nullptr);
+  EXPECT_TRUE(v->starts().empty());
+}
+
+// A gym lays a document's fleet out at each reset (FL1d, gym_options::fleets): its vehicles are
+// the agents (after any of the options' own), laid out from the fleet's seed plus the reset's, so
+// each seed has its layout and the same seed the same one. Their goals are held, and the episode
+// ends with every one of them at its own.
+TEST(AriadneWorldGym, AFleetIsTheGymsAgents) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  std::string doc = kFleetDoc;
+  const std::string entry = "{ fleet: city, archetype: v, count: 64, spawn: opposed, seed: 7, "
+                            "rally: { count: 4 },\n          policy: builtin }";
+  doc.replace(doc.find(entry), entry.size(),
+              "{ fleet: squad, archetype: v, count: 6, seed: 4, policy: builtin }");
+  const std::string path = write_doc("gym_fleet", doc).string();
+  {
+    gym_options bad;
+    bad.fleets = {"armada"};
+    try {
+      WorldGym refused(path, bad);
+      ADD_FAILURE() << "a fleet the document does not declare";
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find("has no fleet 'armada' (its fleets: squad)"),
+                std::string::npos)
+          << e.what();
+    }
+  }
+  gym_options o;
+  o.fleets = {"squad"};
+  o.max_steps = 2000;
+  WorldGym gym(path, o);
+  const gym_observation first = gym.reset(1);
+  ASSERT_EQ(first.n, 6u); // the fleet's alone: the document's solo is not an agent
+  for (std::size_t i = 0; i < first.n; ++i) {
+    EXPECT_EQ(first.plant[i], "kinematic");
+    EXPECT_GT(first.goal_dist[i], 1.0) << i;
+  }
+  EXPECT_EQ(gym.vehicles().fleets(), std::vector<std::string>{"squad"});
+  const std::vector<double> none(6, std::numeric_limits<double>::quiet_NaN());
+  gym.step(none, none);
+  EXPECT_EQ(val(gym.app(), "vehicles.fleets.squad.seed"), "5"); // its 4, plus the reset's 1
+  const gym_observation other = gym.reset(2);
+  ASSERT_EQ(other.n, 6u);
+  EXPECT_NE(other.x, first.x);
+  const gym_observation again = gym.reset(1);
+  ASSERT_EQ(again.n, 6u);
+  for (std::size_t i = 0; i < 6; ++i) {
+    EXPECT_DOUBLE_EQ(again.x[i], first.x[i]) << i;
+    EXPECT_DOUBLE_EQ(again.goal_x[i], first.goal_x[i]) << i;
+  }
+  // The navigator drives them all to their goals, and the episode ends.
+  gym_step s;
+  for (std::uint64_t k = 0; k < o.max_steps; ++k) {
+    s = gym.step(none, none);
+    if (s.terminated || s.truncated)
+      break;
+  }
+  EXPECT_TRUE(s.terminated) << "step " << s.observation.step;
+  for (std::size_t i = 0; i < 6; ++i)
+    EXPECT_EQ(s.observation.reached[i], 1) << i;
+  for (std::size_t i = 0; i < 6; ++i) // held: the goals laid out, not wandered from
+    EXPECT_DOUBLE_EQ(s.observation.goal_x[i], again.goal_x[i]) << i;
+
+  // The options' own agents come first.
+  gym_options both = o;
+  entity_spec lead;
+  lead.archetype = "v";
+  lead.name = "lead";
+  lead.controller = "none";
+  both.agents = {lead};
+  WorldGym mixed(path, both);
+  const gym_observation m = mixed.reset(1);
+  ASSERT_EQ(m.n, 7u);
+  EXPECT_EQ(mixed.vehicles().entities().front().spec.name, "lead");
+}
+
 TEST(AriadneWorldVehicles, TheWorldBlockTakesIntentsAndTheExternalController) {
   REQUIRE_YAML();
   LoadResult r = load_intents();
