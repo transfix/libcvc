@@ -2313,6 +2313,19 @@ scene:
       `trained (<where>, sha256:...)`, `weights (...)`, `builtin`, `builtin: loading <uri>` while
       the weights are on their way, or `builtin: no trained weights (<why>)`. Without the
       weights it drives on the built-in net, and the host's log says why once.
+    - `metric:` is what it plans with. `trained` is the trainer's vehicle (a 3 m disc and 18 m/s,
+      the bicycle the weights learned on; its plants plan with it too). `vehicle` is each plant's
+      own size and limits. `policy` (the default) follows the policy: `trained` while weights
+      drive it or are on their way, `vehicle` on the built-in net, its own or a fallback's.
+      `vehicles.fleets.<fleet>.metric` switches it, and `.plans` says which it plans with now.
+      A change makes its navigators again, its vehicles at rest where they are.
+    - `plant:` is one plant, a list its vehicles cycle over (`[jolt, kinematic]`), or each team's
+      (`{ 0: jolt, 2: jolt }`; a team not named is on the archetype's plant). Each plant is a
+      navigator of the fleet's own, and its plants all float (`dynamicboat`) or none do.
+      `vehicles.fleets.<fleet>.plant` switches them live, written as `jolt`, `jolt, kinematic`,
+      `0: jolt, 2: jolt` or `kinematic, 0: jolt` (team 0 on Jolt, the rest kinematic): the
+      vehicles start at rest where they are on the new plants. A plant or team that is not one is
+      said in `vehicles.status` and changes nothing.
     - In C++: `WorldVehicles::fleets()`, `rally()`, `move_rally()` and `restart_fleet()`, and
       `entity_info::fleet` and `rally`.
   - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,
