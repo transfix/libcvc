@@ -379,7 +379,8 @@ bool exec_group::wants_pump() const {
 namespace {
 
 // on_complete for a process of `m`'s group (S1.6, td 4.9): queued for the pump_all's caller when a
-// threaded pump_all pumps the group (on a worker or on its caller), else run inline, as today.
+// threaded pump_all pumps the group (on a worker or on its caller), or for its attaching thread's
+// host queue when a worker pumps it attached (Stage 2, S2-Q5), else run inline, as today.
 std::function<void(value_t)> group_on_complete(exec_group *group, bool *threw,
                                                std::function<void(value_t)> cb) {
   return [group, threw, cb = std::move(cb)](value_t result) {
@@ -448,9 +449,9 @@ struct proxied_body {
 };
 
 // Where the calling thread is a worker of `pool`: park the calling process (whose call runs in
-// `ctx`) on the body, queued for the pump_all's caller, and resume it with the body's value at the
-// group's next pump; at a point that cannot park (a generator body), block this worker until the
-// caller has run it.
+// `ctx`) on the body, queued for the pump_all's caller (an attached group's attaching thread,
+// Stage 2), and resume it with the body's value at the group's next pump; at a point that cannot
+// park (a generator body), block this worker until that thread has run it.
 value_t proxy_on_worker(exec_context *ctx, cvc::exec_pool &pool, exec_group &group,
                         const std::string &name, proxied_body body) {
   if (can_await(ctx)) {
