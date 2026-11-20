@@ -414,6 +414,7 @@ step_task medial_axis_stable_steps(const Untiled_region &r, Number_type zmid, Ti
   }
   if (!partitioned)
     co_return;
+  TILER_UNITS(untiled_units(P.size()));
   for (const auto &p : polygons) {
     segments.insert(segments.end(), p.edges_begin(), p.edges_end());
     TILER_TRACE(logger, "convex polygon area = " << p.area());

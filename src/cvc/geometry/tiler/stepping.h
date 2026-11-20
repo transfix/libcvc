@@ -78,7 +78,7 @@ inline std::size_t edge_test_units(std::size_t n) { return n / 4 + 4; }
 inline std::size_t sort_units(std::size_t n) { return n / 16 + 1; }
 // A tiling test (cases 1-6) in a workspace of n vertices.
 inline std::size_t tile_test_units(std::size_t n) { return n / 2 + 1; }
-// An untiled region's partition and the rest of its fill but the interpolation.
+// An untiled region's simplification and convex partition.
 inline std::size_t untiled_units(std::size_t n) { return 16 * n + 64; }
 // A Delaunay triangulation of n points and one natural-neighbour interpolation on it.
 inline std::size_t delaunay_units(std::size_t n) { return 4 * n; }

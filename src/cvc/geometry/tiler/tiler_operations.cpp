@@ -1468,7 +1468,7 @@ step_task build_tiling_table_phase2_steps(Tiler_workspace &w) {
     }
 
     ++idx;
-    TILER_UNITS(region.size() > 3 ? untiled_units(region.size()) : 1);
+    TILER_UNITS(sweep_units(region.size()));
   }
 }
 
