@@ -119,9 +119,10 @@ More `compare` rules, for gates:
   (on `sched.single.*`, `flood.small` and `msg.*`), and with threaded execution's Stage 0 `chroot`
   (on `native.state_get`, `native.state_set` and `sched.watch_poll`; `lock.uncontended` always had
   it) and `writes` (on `sched.watch_poll`), with Stage 1 `base` (on `sched.single.*`'s async
-  points), and with Stage S `slice_steps` (on `sched.single.*`'s and `limits.*`'s async points).
-  Every point ran at `policy=rr`, `locks=none`, `chroot=0`, `writes=none`, `base=own` and
-  `slice_steps=1` before them. A param at its implicit default is left out of the match, so a
+  points), with Stage S `slice_steps` (on `sched.single.*`'s and `limits.*`'s async points), and
+  with Stage 2a `pump` and `shape` (on `mt.groups`). Every point ran at `policy=rr`, `locks=none`,
+  `chroot=0`, `writes=none`, `base=own`, `slice_steps=1`, `pump=fork_join` and `shape=even` before
+  them. A param at its implicit default is left out of the match, so a
   record from an older binary (no such param) and one at the default are the same point.
   (`sched.single.*`'s `driver` key was there before Stage 1 gave it the value `group`: its records
   carry `driver=spin`.)
@@ -168,7 +169,8 @@ over the measured reps and prints `PASS` or `FAIL`. Options:
 
 A scenario whose gate could pass without judging anything has an entry in the runner's
 `GATE_GUARDS`, for the metrics it names (`mt.ariadne_docs`' `extra.helper_wakes`,
-`extra.wakes_per_frame` and `extra.worker_pumps`):
+`extra.wakes_per_frame` and `extra.worker_pumps`; `mt.groups`' `extra.of_ceiling` and
+`extra.speedup`; `mt.groups.move`'s `extra.ns_per_move`):
 
 - **vacuous**: metrics each row must hold at least at one of its params, else the point prints
   `FAIL (vacuous: ...)`. For `mt.ariadne_docs`, `extra.isolated` and `extra.any_groups` at `docs`:
@@ -177,7 +179,15 @@ A scenario whose gate could pass without judging anything has an entry in the ru
   `n/a`, counted neither as a pass nor as a failure. A gate where every point is n/a fails;
 - **control**: the same run's points matching a `where` that could be judged (`frame=heavy` with
   `extra.wakeable` above 0) must have a metric's median at least a bound (`extra.worker_pumps` at
-  least 1), else the gate fails: a pool whose helpers never pump would pass small frames too.
+  least 1), else the gate fails: a pool whose helpers never pump would pass small frames too;
+- **applies**: params a point must have to be judged; any other point prints `n/a (K=V:
+  recorded, not gated)`. `mt.groups`' speedup gates (`extra.of_ceiling`, `extra.speedup`) judge
+  `shape=even` only: an uneven point's speedup is bounded by its heavy group (S2a).
+
+Each key of an entry is optional, and a `vacuous` bound may be a number instead of a param:
+`mt.groups.move`'s `extra.ns_per_move` needs `extra.moves` at least 1, else the point fails as
+vacuous (`force_move` added no move: no other worker to move to, or `CVC_EXEC_FORCE_MOVE` set for
+both pools).
 
 It exits 1 when a point fails, a matching point has a failed rep or leaves the gate vacuous,
 nothing matches, every point is n/a, or a control fails. Otherwise it exits 2 when a point is
@@ -217,7 +227,14 @@ as `state_exec_bench_gates` (`src/cvc/tests/state_exec_bench_gates.cmake`, a `cm
 - the same two programs on the async scheduler at `--size slice_steps=256` (spin and group, own
   and frozen base), then the same pins with `--where slice_steps=256`: a run of up to 256 steps
   takes the steps that 256 picks of one step take (threaded execution's Stage S). The `--where`
-  makes a binary that wrote no 256 point fail rather than pass on nothing.
+  makes a binary that wrote no 256 point fail rather than pass on nothing;
+- `mt.groups --smoke` at `--size t=1,2 --size pump=fork_join,continuous --size
+  shape=even,uneven`, then `compare RUN RUN --pair pump=fork_join:continuous --metric steps_total
+  --threshold 0 --fail-on-change`: attached groups, pumped whenever they have work in pumps of the
+  pool's budget, take the steps that groups pumped by `pump_all` rounds take, point by point, on
+  the caller (t=1) and on workers (t=2), even and uneven (threaded execution's Stage 2a). A
+  fork-join point without its continuous twin, or a continuous point that failed its checks,
+  fails it.
 
 Every command must exit 0. The test is registered where the tool test is (a working Python 3),
 and only for Release and RelWithDebInfo: MSVC's Debug STL allocates for its iterator debugging,
@@ -251,7 +268,8 @@ so the allocation count is a Release number. With a single-config generator it e
   thread) would still inherit the pin, so on Linux the scenarios that start threads
   (`async.*`, `msg.ingress`, `mt.*`; `spawns_threads` in `--list-json`) run with the driver
   unpinned, and their records say `pin_cpu: -1`. The pool scenarios (`mt.groups`,
-  `mt.groups.flood`, `mt.state_tree`, `mt.ariadne_docs`) are the exception: their `exec_pool`
+  `mt.groups.async`, `mt.groups.move`, `mt.groups.flood`, `mt.state_tree`, `mt.ariadne_docs`) are
+  the exception: their `exec_pool`
   places its workers, the region leaves them placed, and a pinned driver moves for the point to
   the CPU the pool keeps for its caller (mt.groups, "Placement").
 - **Keep the pinned core's SMT sibling idle.** The header and the records (`pin_sibling`) name the
@@ -301,7 +319,7 @@ failure are recorded as rep -1). Fields that don't apply are left out.
 | `thread_count_before`, `thread_count_after`, `thread_count_teardown` | OS threads of the process before and after the region, and after the sweep point's app and schedulers were destroyed |
 | `threads_created` | threads the process started during the region, counted as they attach (Windows only: a TLS callback), so a thread that started and exited inside the region still counts |
 | `handle_count_before`, `handle_count_after`, `handle_count_teardown` | Windows handles; open file descriptors on POSIX |
-| `app_threads_before`, `app_threads_after`, `app_pool_active_after`, `app_pool_pending_after` | the app's thread map (`app::threads()`: entries it has not erased) and its background pool's active and pending counts, for the scenarios that use the background pool |
+| `app_threads_before`, `app_threads_after`, `app_pool_active_after`, `app_pool_pending_after`, `app_cpu_pool_size_after` | the app's thread map (`app::threads()`: entries it has not erased) and its background pool's active and pending counts, for the scenarios that use the background pool. Once the app's exec pool has workers the kernel pools split (threaded execution's S2a, td 4.9) and the counts are `background_io`'s only; `app_cpu_pool_size_after` is `background_cpu`'s size (`app::backgroundCpuPoolSize()`, 0 until the split) |
 | `extra` | scenario-specific figures (below) |
 | `sampled`, `sample_file`, `sample_top_file`, `samples`, `samples_waiting`, `samples_syscall`, `sample_interval_us`, `sample_timer`, `sample_depth`, `sample_held_us_mean`, `sample_held_us_max`, `samples_truncated`, `samples_unwind_stopped`, `samples_failed`, `samples_overwritten`, `sample_warning` | with `--sample` only: whether this rep was sampled, and for the sampled one its files, the stacks kept, those caught blocked in a wait and those in another system call, the mean achieved interval and the timer behind it, how long a sample held the driver suspended, and the stacks cut short ("Profiling") |
 | `pin_cpu`, `pin_sibling`, `logical_cpus`, `sleep_1ms_ns`, `smoke` | the run's conditions (`pin_cpu` -1: this point ran unpinned) |
@@ -1014,7 +1032,8 @@ The worker threads collect the cycles their runs left before they end, as mt.ind
 ### mt.groups (async)
 
 Threaded execution's Stage 1 (td 4.1, 6.3): `groups` (8, 16) `exec_group`s on the app's
-`exec_pool`, fork-join. `t` (1, 2, 4, 8, 16) is the number of pumping threads: the pool is built
+`exec_pool`, fork-join (`pump=fork_join`, the implicit default; Stage 2a's `pump=continuous` and
+`shape` are below). `t` (1, 2, 4, 8, 16) is the number of pumping threads: the pool is built
 with `t - 1` workers (`app::exec_pool(pool_options{threads = t - 1})`), and the caller, the
 driver, pumps as the pool's thread 0. Every group runs the program `runs` (5) times, one run at a
 time, each run a process of its own reaped once read: fib 18 and 2000 caught raises, as in
@@ -1066,10 +1085,81 @@ then every group, the region. `steps_total` is the region's steps in every group
   thread): they differ by what a scheduler, a group and a pump cost a program;
 - `caller_cpu`: where the driver pumped, or -1.
 
+**`pump`** (threaded execution's Stage 2a, td 4.4): `fork_join` (the default) is the loop above;
+`continuous` attaches the groups to the pool for the point (detached before they go) and drives
+them from the caller: `pump_host` with a 1 ms budget, else `wait_for_work` up to 100 ms, each run
+submitted, read and reaped only under `with_group` once its `on_complete` (an atomic flag the
+callback and the driver share) says it ended; a wait that finds nothing reads every live group,
+the backstop for a failed run, which calls no `on_complete`. `t` keeps meaning pumping threads:
+continuous mode builds the pool with `t` workers, since with workers an attaching thread pumps
+only host-affinity and single-manager groups and these are neither, and with none at t=1, where
+the caller pumps every group in `pump_host`. (With `t - 1` workers, at most 7/8 of the ceiling at
+t=8, the 0.9 gate could not pass.) The ceiling's threads then sit on the workers' CPUs. The
+reference, one group alone, runs in the same mode, so `speedup` and `of_ceiling` measure each
+mode's own scaling, and `single_group_ns_per_iter` compares the two modes' absolute cost. Continuous points add the pool's Stage 2 counters over the region:
+`extra.wakes`, `timer_wakes`, `requeues`, `parks`, `empty_wakes`, `moves` and `host_pumps`, and
+`idle_waits`, the driver's `wait_for_work` calls.
+
+**`shape`** (S2-Q6's evidence for a continuous `ExecPool`, recorded, never gated): `even` (the
+default) gives every group the same runs; `uneven` gives group 0 the program at about 11 times its
+work (fib + 5, 11 times the raises or cycles) `runs` times, and every other group the program
+itself 11 times as often, so the groups have equal work in runs of unequal length. Fork-join
+resubmits a finished run only at a round's end, so the light groups wait for the heavy group's
+pump each round; continuous mode restarts them at once. Its `speedup` is over the groups' solo
+runs summed (the heavy group alone and the light ones alone, both measured), and
+`extra.heavy_group_ns_per_iter` is beside `single_group_ns_per_iter`. The default sweep is four
+times Stage 1's (120 points): an A/B narrows it with `--size pump=... --size shape=...`.
+
 B25 (the frozen builtin classes under raise/catch on several threads) is read from
-`prog=exceptions`. The sanitizer jobs run it at `t=8 groups=8`, one run of each program
-(`--size t=8 --size groups=8 --size runs=1`), and require each point's line (`t=8 groups=8
-prog=fib runs=1`, and `exceptions` and `cycle`), as for mt.multi_exec.
+`prog=exceptions`. The sanitizer jobs run it at `t=8 groups=8`, one run of each program, in both
+modes (`--size t=8 --size groups=8 --size runs=1 --size pump=fork_join,continuous --size
+shape=even`, one line, since a scenario named twice in `SAN_BENCH` is an error), and require each
+point's line (`t=8 groups=8 prog=fib runs=1 pump=fork_join`, and `exceptions` and `cycle`, and the
+same three at `pump=continuous`), as for mt.multi_exec.
+
+### mt.groups.async (async)
+
+Threaded execution's Stage 2a (td 6.3; S2.md section 6, recorded): `groups` (8) groups on the
+app's `exec_pool`, `t` (1, 2, 4, 8) as mt.groups' (fork-join: `t - 1` workers and the caller;
+continuous: `t` workers, none at t=1), each running one program of `calls` (200) async calls in
+turn, `(bench-lat (bench-async i))`. The kernel spins 20 us (`kernel=spin`: `background_cpu` once
+the kernel pools split) or blocks 1 ms (`kernel=sleep`, an I/O call: the background pool), each
+group's on its own host, and returns when it ended; `bench-lat` takes the time since. `pump`:
+`fork_join` drives `pump_all` rounds and, when no live group wants a pump, waits up to 50 ms for a
+post on a notifier every group's scheduler calls, as pycvc's `ExecPool.run_all` waits for its
+batch (S2-Q6); `continuous` attaches the groups and drives them as mt.groups does. Smoke: t 1 and
+2, 2 groups, 5 spinning calls.
+
+`extra.lat_p50_ns` and `extra.lat_p99_ns` are a call's completion latency, from its kernel's end to
+its process running on (`latency_ns` holds every call's, so every percentile), `extra.calls_per_s`
+the throughput, then the pool's `pumps`, `worker_pumps`, `helper_wakes`, `effective_threads`, the
+driver's `rounds` and `idle_waits`, and in continuous mode the Stage 2 counters. Its records carry
+`app_cpu_pool_size_after`, which shows the split ("What a record holds"). It is the evidence for
+S2-Q11's deferred compensating worker: workers starved by inline kernels would show here.
+
+### mt.groups.move (async)
+
+Threaded execution's Stage 2a (td 4.4, 6.3): what a group's move to another thread costs in
+continuous mode. `groups` (16) groups running `prog` (fib) `runs` (5) times, in pumps of `steps`
+(2000) steps (`pool_options::pump_steps`), attached in turn to two pools of `t` (2, 4, 8) workers
+built apart from the app's (`std::make_unique<exec_pool>`), alike but for
+`pool_options::force_move` (on: every pump on another thread than the group's last). The app's
+lock manager is made shared by `state_exec.locks.threading=shared` before the first group, since
+no app pool is built. Each rep attaches the groups to one pool, runs them, detaches them, then the
+other, four legs in the order off, on, on, off, so a drift across the rep falls on both alike.
+Smoke: t 2, 4 groups, 1 run, 500 steps.
+
+`extra.ns_per_move` is the time `force_move` added over the moves it added: (`wall_on_ns` -
+`wall_off_ns`) / (`moves_on` - `moves_off`), the pools' `stats().moves`; `extra.moves` is that
+denominator, and `moves_off`, `moves_on`, `pumps_off`, `pumps_on`, `wall_off_ns`, `wall_on_ns`
+and `effective_threads` are recorded. The pool keeps a requeued group on its releasing worker, so
+`moves_off` is small, and small pumps keep the moves many against the noise; `groups` at least
+2 t keeps `force_move` from stalling a worker that may not take the one group queued. With as many
+workers as groups each forced pump hands the group to an idle worker, so the cost is the OS's wake
+latency (tens of us on a loaded Windows machine), not the migration; with more runnable groups
+than workers it is the heap work and the group's cache misses on its new core, which is what the
+gate below judges. At smoke size the difference is noise (a negative `ns_per_move` happens); the
+gate is for the A/B's medians.
 
 ### mt.groups.flood (async)
 
@@ -1198,11 +1288,15 @@ auto`, base and candidate interleaved, two rounds of 5 reps or more ("Getting st
   for each `groups` size:
 
   ```sh
-  python3 tools/bench/state_exec_bench.py run --scenario mt.groups --size t=8 --reps 5 \
-      --out groups.jsonl
+  python3 tools/bench/state_exec_bench.py run --scenario mt.groups --size t=8 \
+      --size pump=fork_join --size shape=even --reps 5 --out groups.jsonl
   python3 tools/bench/state_exec_bench.py gate groups.jsonl --scenario mt.groups --where t=8 \
-      --where prog=fib --metric extra.of_ceiling --min 0.9 --max-noise 10
+      --where prog=fib --where pump=fork_join --metric extra.of_ceiling --min 0.9 --max-noise 10
   ```
+
+  Since S2a, mt.groups' default sweep holds continuous points too, so Stage 1's gate names
+  `--where pump=fork_join` (an implicit default, so a record from before S2a matches it); without
+  it the gate judges continuous points as well.
 
 - **Small frames wake no helper** (S1b): `mt.ariadne_docs` `frame=small` wakes no helper in the
   median rep of a `--reps 5` (or more) run in the quiet window, at every point that could wake
@@ -1294,6 +1388,62 @@ recorded quiet windows, `--pin auto`, base and candidate interleaved, two rounds
 - **In CTest**: `state_exec_bench_gates` pins `sched.single.arith_loop`'s and
   `sched.single.tail_rec`'s `steps_total` at `slice_steps` 256 to the numbers at 1 ("Gates in
   CTest").
+
+### Threaded execution's Stage 2a gates
+
+S2a is the continuous pool (td 4.4; threaded-impl/S2.md section 6). The method is Stage 1's:
+Windows (MSVC, Release), recorded quiet windows, `--pin auto` with `--same-pin`, base (master at
+the cut) and candidate interleaved, two rounds of 5 reps or more, the 3 %-gated families ABBA per
+scenario.
+
+- **Regression**: `steps_total` unchanged on `eval.*`, `sched.single.*`, `flood.small` sync,
+  `native.*`, `data.*` and `limits.*` (`compare --metric steps_total --threshold 0
+  --fail-on-change`, and the CTest pins); `sched.single.*`, `flood.*`, `limits.*`, `msg.*` and
+  `async.*` at threads 0 within 3 % (`compare --fail-on-worse --max-noise 3 --same-pin`): with
+  nothing attached, no notifier and no workers S2a must cost nothing (td 5); and `mt.groups`
+  fork-join within 3 % of the base (the candidate run at `--size pump=fork_join`, which a base
+  record matches through the implicit default).
+- **Continuous scaling**: `mt.groups` `pump=continuous` fib at `t=8` at least 0.9 of
+  mt.independent's speedup in the same rep, even groups only (`GATE_GUARDS` makes an uneven point
+  `n/a`):
+
+  ```sh
+  B=tools/bench/state_exec_bench.py
+  python3 $B run --scenario mt.groups --size t=8 --size pump=continuous --size shape=even \
+      --reps 5 --out s2a_groups.jsonl
+  python3 $B gate s2a_groups.jsonl --scenario mt.groups --where pump=continuous --where t=8 \
+      --where prog=fib --metric extra.of_ceiling --min 0.9 --max-noise 10
+  ```
+
+- **A group's move** under 5 us (5000 ns), judged where `force_move` added moves (`GATE_GUARDS`:
+  `extra.moves` 0 fails as vacuous). It means the migration only with more runnable groups than
+  workers, which the default sizes are (16 groups on at most 8 workers); with as many workers as
+  groups a forced move measures the OS's wake latency (mt.groups.move):
+
+  ```sh
+  python3 $B run --scenario mt.groups.move --reps 5 --out move.jsonl
+  python3 $B gate move.jsonl --scenario mt.groups.move --metric extra.ns_per_move --max 5000
+  ```
+
+- **Recorded, not gated**: `mt.groups.async` in both modes and with both kernels; and continuous
+  against fork-join on uneven groups, S2-Q6's evidence (a continuous `ExecPool` is a follow-up
+  only if continuous is more than 10 % faster there), paired in one binary over two runs in reverse
+  order:
+
+  ```sh
+  python3 $B run --scenario mt.groups --size shape=uneven --size pump=fork_join,continuous \
+      --reps 5 --out uneven.jsonl
+  python3 $B run --scenario mt.groups --size shape=uneven --size pump=continuous,fork_join \
+      --reps 5 --out uneven.jsonl
+  python3 $B compare uneven.jsonl uneven.jsonl --pair pump=fork_join:continuous --threshold 10
+  python3 $B run --scenario mt.groups.async --reps 5 --out async_groups.jsonl
+  ```
+
+- **In CTest and CI**: `state_exec_bench_gates` runs mt.groups' smoke points in both modes and
+  pins continuous mode's `steps_total` to fork-join's, point by point ("Gates in CTest"); the
+  sanitizer jobs run mt.groups' `t=8 groups=8` points in both modes under gcc's TSan, clang's TSan
+  and ASan with UBSan, and require the continuous points' lines too (`SAN_REQUIRED_S2A`;
+  docs/TESTING.md, "The Sanitizer Jobs").
 
 ### mt.pycvc_threads (pycvc)
 
