@@ -28,7 +28,8 @@
 //
 // The templates are on the scalar so the same code can run on duals for replay and the damping
 // Newton step (C3). They are defined in coph_model.cpp, which instantiates them, so they are
-// compiled under its floating-point flags; this PR instantiates double.
+// compiled under its floating-point flags. C2 instantiated double; C3 adds coph_dual2 for the
+// replay and coph_hyper's plant for the damping fit (coph_dual.h).
 //
 // Only the demos' profile is implemented (D7): no local residual (the Wendland correction; the
 // demos never set Stage.local_residual), and the shaping is 'legacy' or 'progress'.
@@ -43,6 +44,7 @@
 
 #include <array>
 #include <cvc/nav/coph_config.h>
+#include <cvc/nav/coph_dual.h>
 #include <cvc/nav/coph_ledger.h>
 #include <optional>
 #include <span>
@@ -151,6 +153,30 @@ coph_grad_potential<double>(const coph_vec2_of<double> &, const coph_vec2 &,
 extern template coph_command_of<double>
 coph_command<double>(const coph_state_of<double> &, const coph_vec2 &, const coph_vec2_of<double> &,
                      const coph_field_view &, const std::optional<coph_shaping> &, double);
+
+// C3's: the replay on coph_dual2 (one direction per policy gain), and the plant on coph_hyper for
+// the damping Newton step (coph_dual.h).
+extern template coph_state_of<coph_dual2> coph_flow<coph_dual2>(const coph_state_of<coph_dual2> &,
+                                                                const coph_vec2_of<coph_dual2> &,
+                                                                const coph_dual2 &, double);
+extern template coph_dual2 coph_risk<coph_dual2>(const coph_vec2_of<coph_dual2> &,
+                                                 const coph_field_view &);
+extern template coph_dual2 coph_potential<coph_dual2>(const coph_vec2_of<coph_dual2> &,
+                                                      const coph_vec2 &,
+                                                      const coph_vec2_of<coph_dual2> &,
+                                                      const coph_field_view &,
+                                                      const std::optional<coph_shaping> &);
+extern template coph_vec2_of<coph_dual2>
+coph_grad_potential<coph_dual2>(const coph_vec2_of<coph_dual2> &, const coph_vec2 &,
+                                const coph_vec2_of<coph_dual2> &, const coph_field_view &,
+                                const std::optional<coph_shaping> &);
+extern template coph_command_of<coph_dual2>
+coph_command<coph_dual2>(const coph_state_of<coph_dual2> &, const coph_vec2 &,
+                         const coph_vec2_of<coph_dual2> &, const coph_field_view &,
+                         const std::optional<coph_shaping> &, double);
+extern template coph_state_of<coph_hyper> coph_flow<coph_hyper>(const coph_state_of<coph_hyper> &,
+                                                                const coph_vec2_of<coph_hyper> &,
+                                                                const coph_hyper &, double);
 
 // One agent's energy account (§4.2): the plant's balance summed step by step, the shaping jumps
 // the learner's commits make (V_new(x) - V_old(x), C3), and the work of the force the car did not
