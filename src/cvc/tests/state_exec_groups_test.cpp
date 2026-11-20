@@ -2358,10 +2358,11 @@ TEST(Groups, CT02_TeardownDuringContinuousPumps) {
     for (int k = 0; k + 1 < kGroups; ++k)
       gs[k]->submit("(begin (set i 0) (while #t (set i (+ i 1))))");
     gs[kGroups - 1]->submit("(begin (ct02-wait) \"never\")");
+    // Read before attaching: a worker may start the waiter's kernel as soon as it is attached.
+    const int target = started.load() + 1;
     s2a_attached att(w.pool);
     for (auto &gw : gs)
       att.attach(gw->g());
-    const int target = started.load() + 1;
     const bool drove = s2a_drive(
         w.pool,
         [&] {

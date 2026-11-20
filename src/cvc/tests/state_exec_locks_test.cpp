@@ -5510,6 +5510,8 @@ void lg2_grant_races(bool continuous, bool kill, int runs) {
       });
       if (!pump_until([&] { return held.load() > run; }))
         return;
+      // Read before B's submit: workers may pump B, and run its body, as soon as it is submitted.
+      const int bodies0 = bodies.load();
       on(b, [&] {
         p = b.submit(kill ? "(with-lock \"/lg02\" (begin (body) \"body\"))"
                           : "(try (with-lock \"/lg02\" :timeout 0.005 (begin (body) \"body\")) "
@@ -5525,7 +5527,6 @@ void lg2_grant_races(bool continuous, bool kill, int runs) {
           }))
         return;
       on(c, [&] { q = c.submit("(with-lock \"/lg02\" \"c\")"); });
-      const int bodies0 = bodies.load();
       const auto kill_at =
           steady::now() + std::chrono::duration_cast<steady::duration>(
                               std::chrono::duration<double>((hold + 0.002) * unit(rng)));
