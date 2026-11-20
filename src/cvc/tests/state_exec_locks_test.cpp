@@ -5576,12 +5576,14 @@ void lg2_grant_races(bool continuous, bool kill, int runs) {
               timeout, killed, killed_in_body);
 }
 
-// LG-2's second part: a lock post racing the target group's destruction, `runs` times (a 60 s
-// budget may end it early). A, attached, holds "/lg02p" until a message comes; B is made and
-// attached each run with a waiter queued behind it; the host posts A's message (A's worker then
-// releases, granting B's waiter through B's port, whose wake reaches the pool) and, after a random
-// spin, destroys B attached. Whichever comes first, nothing is left held or queued once A's holder
-// has ended, and nothing crashes (ASan, TSan in CI).
+// LG-2's second part: a lock post racing the target group's destruction, `runs` times, every one
+// of them (rounds are counted, not seconds: K-14). A, attached, holds "/lg02p" until a message
+// comes; B is made and attached each run with a waiter queued behind it; the host posts A's message
+// (A's worker then releases, granting B's waiter through B's port, whose wake reaches the pool)
+// and, after a random busy spin of 0-200 us (no yields, which a loaded box turns into whole time
+// slices), destroys B attached. Whichever comes first, nothing is left held or queued once A's
+// holder has ended, and nothing crashes (ASan, TSan in CI). A run over 60 s fails as a hang (the
+// waits inside have their own ceilings); the time is printed, not asserted.
 void lg2_post_races_destruction(std::size_t runs) {
   lg_app w(4, 200);
   lg_group a(w.app, w.tree, "lg02pa");
@@ -5593,49 +5595,54 @@ void lg2_post_races_destruction(std::size_t runs) {
   const std::shared_ptr<lock_manager> mgr = w.app.lock_manager();
   lg_attached att(w.pool);
   std::mt19937 rng(41);
-  const steady::time_point budget = deadline_after(60.0);
+  std::uniform_int_distribution<int> gap_us(0, 200);
+  constexpr double kRunCeiling = 60.0; // a hang guard per run, not a pace
   const auto t0 = steady::now();
   std::size_t run = 0;
   const int failures = lg_failures();
   try {
     att.attach(a.g());
-    for (; run < runs && lg_failures() == failures && steady::now() < budget; ++run) {
+    for (; run < runs && lg_failures() == failures; ++run) {
+      const auto r0 = steady::now();
       w.pool.with_group(a.g(), [&] {
         a.submit("(with-lock \"/lg02p\" (begin (held) (msg-recv \"/lg02p.go\") \"a\"))",
                  [&](value_t) { a_done.fetch_add(1); });
       });
-      if (!lg_drive(w.pool, [&] { return held.load() > run; }))
+      if (!lg_drive(w.pool, [&] { return held.load() > run; }, kLgCeiling, 0.0005))
         break;
       auto b = std::make_unique<lg_group>(w.app, w.tree, "lg02pb");
       b->submit("(with-lock \"/lg02p\" \"b\")");
       w.pool.attach(b->g());
-      if (!lg_drive(w.pool, [&] { return mgr->stats().queued == 1; })) {
+      if (!lg_drive(w.pool, [&] { return mgr->stats().queued == 1; }, kLgCeiling, 0.0005)) {
         w.pool.detach(b->g());
         break;
       }
-      const int spin = static_cast<int>(rng() % 400);
+      const auto gap = std::chrono::microseconds(gap_us(rng));
       a.sched().post_message("lg02p.go", value_t(std::string("go")));
-      for (int i = 0; i < spin; ++i)
-        std::this_thread::yield();
+      for (const auto s0 = steady::now(); steady::now() - s0 < gap;) {
+      }
       b.reset(); // attached: its teardown races A's release and the grant posted to its port
-      if (!lg_drive(w.pool, [&] { return a_done.load() > run; }))
+      if (!lg_drive(w.pool, [&] { return a_done.load() > run; }, kLgCeiling, 0.0005))
         break;
       const lock_stats s = mgr->stats();
       EXPECT_EQ(s.holds, 0u) << "run " << run;
       EXPECT_EQ(s.queued, 0u) << "run " << run;
+      if (seconds_since(r0) > kRunCeiling) {
+        ADD_FAILURE() << "run " << run << " took " << seconds_since(r0) << " s: over the "
+                      << kRunCeiling << " s hang guard";
+        break;
+      }
     }
   } catch (const std::exception &e) {
     ADD_FAILURE() << "threw: " << e.what();
   }
   const lock_stats s = mgr->stats();
   std::printf("LG-2, a post racing a destruction: %zu of %zu runs in %.2f s; posts %llu, dropped "
-              "%llu, discarded %llu%s\n",
+              "%llu, discarded %llu\n",
               run, runs, seconds_since(t0), static_cast<unsigned long long>(s.posts),
               static_cast<unsigned long long>(s.posts_dropped),
-              static_cast<unsigned long long>(s.posts_discarded),
-              run < runs && lg_failures() == failures ? " (the 60 s budget ended it)" : "");
-  if (lg_failures() == failures)
-    EXPECT_GE(run, runs / 20) << "the budget ended it after " << run << " runs";
+              static_cast<unsigned long long>(s.posts_discarded));
+  EXPECT_EQ(run, runs) << "a run failed (above), so the rest did not run";
   EXPECT_EQ(detail::live_groups(w.app), 1u); // A
 }
 
@@ -5700,7 +5707,7 @@ void lg2_grant_in_teardown() {
 // LG-2 (td 8.11): cross-group grant races under CVC_EXEC_FUZZ. A grant racing a kill and a timeout,
 // fork-join and continuous, 40 runs each (10 in Debug and under a sanitizer; CVC_LOCKS_LG02_RACES):
 // one outcome each, nothing lost or doubled. A lock post racing the target group's destruction,
-// 10^4 times (300 in Debug, 500 under a sanitizer; CVC_LOCKS_LG02_RUNS). A grant to a waiter of a
+// 10^4 runs (300 in Debug, 500 under a sanitizer; CVC_LOCKS_LG02_RUNS). A grant to a waiter of a
 // group in teardown, between its port's close and its kills: that waiter's kill releases it and
 // the next waiter is granted.
 TEST(LocksGroups, LG02_CrossGroupGrantRaces) {
