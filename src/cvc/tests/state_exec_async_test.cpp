@@ -1683,11 +1683,13 @@ TEST(AsyncScheduler, KO02_AThrowingKillDoesNotStopTheRest) {
   }
 }
 
-// --- Stage 2a: the wake notifier (S2a.1; S2-Q2) ---
+// --- Stage 2a: the wake notifier and the pump's report (S2a.1, S2a.3; S2-Q2, S2-Q4) ---
 
 // The includes the cases below add to the file's own.
 #include <cstdlib>
+#include <cvc/state/state_exec/exec_group.h>
 #include <cvc/state/state_exec/process_table.h> // detail::wakeup
+#include <limits>
 
 namespace {
 
@@ -1830,6 +1832,199 @@ TEST(WakeNotifier, FuzzedPostsEachCallItOnce) {
   sched->set_wake_notifier(nullptr, nullptr);
   sched->drain_ingress();
   EXPECT_EQ(sched->total_pending_messages(), static_cast<std::size_t>(kThreads * kPosts));
+}
+
+// S2a.3 (S2-Q4): what a pump left, in its pump_result (async_scheduler::run_report). A report
+// case's world: a group on an app (state_exec.policy `policy` when given), the intrinsics on an
+// environment of the world's, and (hold), an async function on the app's pool whose kernel runs
+// until its call is cancelled (the group's teardown shuts its host down, which cancels it).
+// Pumps are steps-only. No case times anything: each deadline is bounded by clock readings taken
+// around the pump, with no slack.
+namespace {
+
+struct report_world {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  intrinsics_context ictx;
+  environment_ptr env = builtins::make_default_environment();
+  std::unique_ptr<exec_group> group;
+
+  explicit report_world(const char *policy = nullptr) {
+    if (policy)
+      tree("state_exec.policy").value(std::string(policy));
+    exec_group::options opts;
+    opts.name = "s2a3";
+    opts.app = &app;
+    group = std::make_unique<exec_group>(std::move(opts));
+    ictx.sched = &group->sched();
+    ictx.root = &tree;
+    ictx.proc = make_process();
+    register_intrinsics(env, &ictx);
+    register_async_fn(env, group->host(), "hold", [](std::span<const value_t>) -> async_kernel {
+      return [](async_call &call) -> value_t {
+        while (!call.cancelled())
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        throw std::runtime_error("hold: cancelled");
+      };
+    });
+  }
+  report_world(const report_world &) = delete;
+  report_world &operator=(const report_world &) = delete;
+  ~report_world() { env.reset(); } // before the group, as a host lets go
+
+  int submit(const std::string &script, execute_options opts = {}) {
+    opts.env = environment::extend(env);
+    return group->execute(script, opts);
+  }
+  pump_result pump(std::uint64_t steps = 100000) {
+    return group->pump({steps, std::numeric_limits<double>::infinity()});
+  }
+  std::optional<process_status> status(int pid) const {
+    const auto i = group->sched().get_process_info(pid);
+    return i ? std::optional<process_status>(i->status) : std::nullopt;
+  }
+};
+
+using report_clock = std::chrono::steady_clock;
+constexpr auto kOneMs = std::chrono::milliseconds(1);
+constexpr auto kFiveS = std::chrono::seconds(5);
+
+} // namespace
+
+// A sleeper's wake is the deadline, kept precisely.
+TEST(PumpReport, ASleepersWakeIsAPreciseDeadline) {
+  report_world w;
+  const int pid = w.submit("(begin (sleep 5) 1)");
+  const report_clock::time_point before = report_clock::now();
+  const pump_result r = w.pump();
+  const report_clock::time_point after = report_clock::now();
+  ASSERT_FALSE(r.failed);
+  EXPECT_EQ(w.status(pid), process_status::waiting);
+  EXPECT_FALSE(r.runnable);
+  EXPECT_FALSE(r.best_runnable.has_value());
+  EXPECT_TRUE(r.deadline_precise);
+  EXPECT_GE(r.next_deadline, before + kFiveS - kOneMs);
+  EXPECT_LE(r.next_deadline, after + kFiveS);
+}
+
+// A timed receive's deadline ((await f 5) on the future of a call that runs on) is kept precisely
+// too. Its process has no limit, so its call has no charge beat.
+TEST(PumpReport, ATimedReceivesDeadlineIsPrecise) {
+  report_world w;
+  const int pid = w.submit("(begin (await (hold-async) 5) 1)");
+  const report_clock::time_point before = report_clock::now();
+  const pump_result r = w.pump();
+  const report_clock::time_point after = report_clock::now();
+  ASSERT_FALSE(r.failed);
+  EXPECT_EQ(w.status(pid), process_status::waiting);
+  EXPECT_FALSE(r.runnable);
+  EXPECT_TRUE(r.deadline_precise);
+  EXPECT_GE(r.next_deadline, before + kFiveS - kOneMs);
+  EXPECT_LE(r.next_deadline, after + kFiveS);
+}
+
+// A process waiting for the next frame is a coarse timer at the run's end + 1 ms (S2-Q4), pump
+// after pump, until it ends: then nothing is pending.
+TEST(PumpReport, AFrameWaiterIsACoarseMillisecond) {
+  report_world w;
+  const int pid = w.submit("(begin (await 1) (await 2) 3)");
+  for (int frame = 0; frame < 2; ++frame) {
+    const report_clock::time_point before = report_clock::now();
+    const pump_result r = w.pump();
+    const report_clock::time_point after = report_clock::now();
+    ASSERT_FALSE(r.failed);
+    EXPECT_EQ(w.status(pid), process_status::waiting) << "frame " << frame;
+    EXPECT_FALSE(r.runnable);
+    EXPECT_FALSE(r.deadline_precise) << "frame " << frame;
+    EXPECT_GE(r.next_deadline, before + kOneMs) << "frame " << frame;
+    EXPECT_LE(r.next_deadline, after + kOneMs) << "frame " << frame;
+  }
+  const pump_result r = w.pump();
+  EXPECT_EQ(w.status(pid), process_status::terminated);
+  EXPECT_EQ(r.next_deadline, report_clock::time_point::max());
+}
+
+// A process with max_steps whose call is in flight: the call's 1 ms charge beat, coarse.
+TEST(PumpReport, ALimitedProcesssCallInFlightBeatsCoarsely) {
+  report_world w;
+  execute_options limited;
+  limited.max_steps = 1000000;
+  const int pid = w.submit("(begin (hold) 1)", limited);
+  const report_clock::time_point before = report_clock::now();
+  const pump_result r = w.pump();
+  const report_clock::time_point after = report_clock::now();
+  ASSERT_FALSE(r.failed);
+  EXPECT_EQ(w.status(pid), process_status::waiting);
+  EXPECT_FALSE(r.runnable);
+  EXPECT_FALSE(r.deadline_precise);
+  EXPECT_GE(r.next_deadline, before + kOneMs);
+  EXPECT_LE(r.next_deadline, after + kOneMs);
+}
+
+// A pump whose step budget ran out leaves its process runnable, at the one level of round robin.
+TEST(PumpReport, ABudgetThatRanOutLeavesItRunnable) {
+  report_world w;
+  const int pid = w.submit("(begin (set i 0) (while (< i 100000) (set i (+ i 1))) i)");
+  const pump_result r = w.pump(10);
+  ASSERT_FALSE(r.failed);
+  EXPECT_LE(r.steps, 10u);
+  EXPECT_EQ(w.status(pid), process_status::ready);
+  EXPECT_TRUE(r.runnable);
+  EXPECT_EQ(r.best_runnable, std::optional<int>(0));
+}
+
+// best_runnable: the best (lowest) effective priority among the ready processes under the
+// priority policy (3 and -2: -2), and 0 under round robin, whose one level is 0.
+TEST(PumpReport, BestRunnableIsTheBestReadyLevel) {
+  const std::string loop = "(begin (set i 0) (while (< i 100000) (set i (+ i 1))) i)";
+  for (const char *policy : {"priority", "round_robin"}) {
+    report_world w(policy);
+    execute_options low, high;
+    low.priority = 3;
+    high.priority = -2;
+    const int a = w.submit(loop, low);
+    const int b = w.submit(loop, high);
+    const pump_result r = w.pump(2);
+    ASSERT_FALSE(r.failed) << policy;
+    EXPECT_EQ(w.status(a), process_status::ready) << policy;
+    EXPECT_EQ(w.status(b), process_status::ready) << policy;
+    EXPECT_TRUE(r.runnable) << policy;
+    EXPECT_EQ(r.best_runnable, std::optional<int>(std::string(policy) == "priority" ? -2 : 0))
+        << policy;
+  }
+}
+
+// Nothing pending: no deadline. And the cycle collection's 1 s throttle after an exit: a group
+// whose process ended and left something tracked within a second of its last collection has that
+// collection due a second after it, a coarse deadline (the first program's end collects, since
+// the group never has; the second's, a moment later, is throttled).
+TEST(PumpReport, NothingPendingAndTheCollectionFallingDue) {
+  report_world w;
+  const std::string cycle = "(begin (set d (dict)) (set-attr d \"self\" d) 1)";
+  const int first = w.submit(cycle);
+  const report_clock::time_point before = report_clock::now();
+  const pump_result r1 = w.pump();
+  const report_clock::time_point after = report_clock::now();
+  ASSERT_FALSE(r1.failed);
+  EXPECT_EQ(w.status(first), process_status::terminated);
+  EXPECT_FALSE(r1.runnable);
+  EXPECT_FALSE(r1.best_runnable.has_value());
+  EXPECT_FALSE(r1.deadline_precise);
+  EXPECT_EQ(r1.next_deadline, report_clock::time_point::max()) << "collected at the run's end";
+
+  const int second = w.submit(cycle);
+  const pump_result r2 = w.pump();
+  const report_clock::time_point end = report_clock::now();
+  ASSERT_FALSE(r2.failed);
+  EXPECT_EQ(w.status(second), process_status::terminated);
+  EXPECT_FALSE(r2.runnable);
+  const double gap = std::chrono::duration<double>(end - before).count();
+  std::printf("PumpReport: the two pumps took %.3f s\n", gap);
+  if (gap < 0.9) { // else the throttle had passed, and the second end collected too
+    EXPECT_FALSE(r2.deadline_precise);
+    EXPECT_GE(r2.next_deadline, before + std::chrono::seconds(1));
+    EXPECT_LE(r2.next_deadline, after + std::chrono::seconds(1));
+  }
 }
 
 // --- Stage S: slices (td 4.4, 8.10; S2-Q12; S2 section 4's SL-1..SL-9) ---

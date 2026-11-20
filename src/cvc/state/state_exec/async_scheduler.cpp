@@ -1024,6 +1024,43 @@ uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
   // and an unthrottled rule would walk the whole registry each frame an Ariadne action ends.
   if (registry_ && !has_runnable() && cycle_collection_due(*registry_))
     collect_cycles(*registry_);
+
+  // The pump's report (S2-Q4), always published: what the run left, which a pool's release reads
+  // instead of the scheduler. The deadline is the earliest work no post announces: the earliest
+  // live timer (precise, as wait_for_work keeps it), the calls' next timeout or charge, the frame
+  // waiters' beat (a coarse 1 ms, as Exec.run's), and the idle collection falling due. The clock
+  // is read only for a beat.
+  run_report_.runnable = has_runnable();
+  run_report_.best_runnable = procs_.best_runnable();
+  clock::time_point next = clock::time_point::max();
+  bool precise = false;
+  if (procs_.timed_count() > 0) {
+    if (const std::optional<clock::time_point> timer = procs_.next_timer()) {
+      next = *timer;
+      precise = true;
+    }
+  }
+  const auto coarse = [&next, &precise](clock::time_point t) {
+    if (t < next) {
+      next = t;
+      precise = false;
+    }
+  };
+  if (!async_calls_.empty() || procs_.awaiting_count() > 0) {
+    const clock::time_point now = clock::now();
+    if (!async_calls_.empty()) {
+      if (const std::optional<clock::time_point> charge = next_call_charge(now))
+        coarse(*charge);
+    }
+    if (procs_.awaiting_count() > 0)
+      coarse(now + std::chrono::milliseconds(1));
+  }
+  if (registry_) {
+    if (const std::optional<clock::time_point> due = cycle_collection_due_at(*registry_))
+      coarse(*due);
+  }
+  run_report_.next_deadline = next;
+  run_report_.precise = precise;
   return taken;
 }
 
