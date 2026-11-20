@@ -777,6 +777,36 @@ int main() {
             "hide [surface]: every mesh_lab's skeleton without its surface, tagged or not");
       check(in(lab, P, false, false), "show [lab]: the untagged mesh_lab's parts are out");
       check(in(lab, L, true, true), "show [lab]: the mesh_lab tagged lab is in, surface and all");
+      // show [skeleton] is framed on the skeleton, which has bounds only once its run is done:
+      // the view waits for them rather than framing on whatever else it holds first.
+      double lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};
+      bool any = false;
+      if (std::shared_ptr<cvc::gl::GraphicsNode> n = sg.getGraphics("plain"))
+        for (const char *part : {"_strands", "_sheets"})
+          if (auto c = n->findChildByName(std::string("plain") + part)) {
+            const cvc::bounding_box bb = c->getWorldBoundingBox();
+            if (bb.isNull())
+              continue;
+            const double b[6] = {bb.minx, bb.maxx, bb.miny, bb.maxy, bb.minz, bb.maxz};
+            for (int i = 0; i < 3; ++i) {
+              lo[i] = any ? std::min(lo[i], b[2 * i]) : b[2 * i];
+              hi[i] = any ? std::max(hi[i], b[2 * i + 1]) : b[2 * i + 1];
+            }
+            any = true;
+          }
+      double eye[3], focal[3], up[3];
+      vm.viewport("skeleton_only").camera().getPose(eye, focal, up);
+      double off = 0.0, size = 0.0;
+      for (int i = 0; i < 3; ++i) {
+        off = std::max(off, std::fabs(focal[i] - 0.5 * (lo[i] + hi[i])));
+        size = std::max(size, hi[i] - lo[i]);
+      }
+      check(any && off <= 0.01 * size, "show [skeleton] is framed on the skeleton, once it has one",
+            "focal (" + std::to_string(focal[0]) + ", " + std::to_string(focal[1]) + ", " +
+                std::to_string(focal[2]) + "), skeleton centre (" +
+                std::to_string(0.5 * (lo[0] + hi[0])) + ", " +
+                std::to_string(0.5 * (lo[1] + hi[1])) + ", " +
+                std::to_string(0.5 * (lo[2] + hi[2])) + ")");
     }
     rt.load(doc.string()); // back to the main document for the teardown below
     for (int f = 0; f < 3; ++f)

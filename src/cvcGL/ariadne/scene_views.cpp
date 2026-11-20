@@ -610,17 +610,41 @@ bool props_bounds(const std::unordered_set<vtkProp *> &props, double out[6]) {
 }
 
 // The world bounds of the tagged nodes `show` / `hide` let in, with their subtrees (the untagged
-// left out): what a view, or the main view, that names tags to show is framed on. False when
-// none has any.
+// left out): what a view, or the main view, that names tags to show is framed on. A node an entry
+// out of the view takes along is left out as the view leaves it out: an entry's own node, and
+// with subtree every node under it (a mesh_lab tagged lab takes its skeleton children, tagged lab
+// and skeleton, out of show: [skeleton]). False when none has any. `matched`, when given, counts
+// the nodes let in, with bounds or not.
 bool shown_bounds(const RealizedScene &rs, const std::vector<std::string> &show,
-                  const std::vector<std::string> &hide, double out[6]) {
+                  const std::vector<std::string> &hide, double out[6], int *matched = nullptr) {
+  std::vector<std::pair<const GraphicsNode *, bool>> outs; // node, subtree
+  for (const RealizedScene::TaggedNode &t : rs.nodes)
+    if (!t.tags.empty() && !in_view(t.tags, show, hide))
+      if (std::shared_ptr<GraphicsNode> n = t.node.lock())
+        outs.emplace_back(n.get(), t.subtree);
+  const auto left_out = [&outs](const GraphicsNode *n, bool subtree) {
+    for (const auto &[o, osub] : outs) {
+      if (o == n) {
+        if (osub || !subtree) // its own props out, and the entry's covered no more than those
+          return true;
+        continue;
+      }
+      if (osub)
+        for (const GraphicsNode *p = n->getParentNode(); p; p = p->getParentNode())
+          if (p == o)
+            return true;
+    }
+    return false;
+  };
   bool any = false;
   for (const RealizedScene::TaggedNode &t : rs.nodes) {
     if (t.tags.empty() || !in_view(t.tags, show, hide))
       continue;
     std::shared_ptr<GraphicsNode> n = t.node.lock();
-    if (!n)
+    if (!n || left_out(n.get(), t.subtree))
       continue;
+    if (matched)
+      ++*matched;
     const cvc::bounding_box bb =
         t.subtree ? n->getCombinedWorldBoundingBox() : n->getWorldBoundingBox();
     if (bb.isNull())
@@ -1217,9 +1241,18 @@ void SceneViews::update(double dt) {
             }
             own = true;
           }
-        if (!own && (v.show.empty() || !rs || !shown_bounds(*rs, v.show, v.hide, b)))
-          r->ComputeVisiblePropBounds(b);
-        if (valid_bounds(b)) {
+        // A view naming tags to show waits while the nodes it lets in have no bounds yet (a
+        // mesh_lab's skeleton before its run ends), rather than framing on what else it holds.
+        bool wait = false;
+        if (!own) {
+          int matched = 0;
+          if (v.show.empty() || !rs || !shown_bounds(*rs, v.show, v.hide, b, &matched)) {
+            wait = matched > 0;
+            if (!wait)
+              r->ComputeVisiblePropBounds(b);
+          }
+        }
+        if (!wait && valid_bounds(b)) {
           frame_camera(cam, b, v.start, sg, v.slice_axis);
           v.framed = true;
         }

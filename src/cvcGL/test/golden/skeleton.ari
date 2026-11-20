@@ -45,7 +45,7 @@ windows:
         show: [skeleton]
         chrome: false
         clear_color: [0.04, 0.045, 0.06]
-        zoom: 0.85
+        zoom: 0.6
         width: 500
         height: 300
 

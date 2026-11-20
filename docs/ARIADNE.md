@@ -3925,7 +3925,9 @@ it follow it too. A custom node type may tag the parts it makes on top of the no
 tag covering the surface alone, not the children under it (§5.4). So `show: [skeleton]` shows an
 untagged mesh_lab's skeleton without its surface, and `hide: [surface]` drops every mesh_lab's
 surface and keeps its skeleton. A view with a `show:` list that names neither leaves a mesh_lab
-out, as it would any tagged node.
+out, as it would any tagged node. A view that names tags to show is framed on the nodes it lets
+in, so it waits until one of them has bounds: `show: [skeleton]` is framed on the skeleton once
+the run has made one, not on what else the view held before.
 
 **Overrides.** `override:` restyles nodes in one view only. Each entry names a node id, a tag, or
 `"*"` (everything), and sets any of `drawstyle` (`surface`, `wireframe`, `points`), `opacity`,
