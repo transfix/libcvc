@@ -44,12 +44,12 @@ patches: []
 depends:
   build:
     - name: libcvc
-      version: "==4.0.1"
+      version: "==4.0.2"
     # libpython3.12 and its headers, the interpreter arisrvx embeds.
     - name: python312
   runtime:
     - name: libcvc
-      version: "==4.0.1"
+      version: "==4.0.2"
     - name: python312
   host_tools:
     - cmake

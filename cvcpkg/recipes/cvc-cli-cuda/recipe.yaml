@@ -54,11 +54,11 @@ depends:
     # The GPU libcvc SDK (find_package(cvc CONFIG) resolves libcvc-cuda) +
     # Boost.program_options (the CLI's argument parser).
     - name: libcvc-cuda
-      version: "==4.0.1"
+      version: "==4.0.2"
     - name: boost
   runtime:
     - name: libcvc-cuda
-      version: "==4.0.1"
+      version: "==4.0.2"
     - name: boost
   host_tools:
     - cmake

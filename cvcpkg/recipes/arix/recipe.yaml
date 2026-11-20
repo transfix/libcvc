@@ -56,18 +56,18 @@ patches: []
 depends:
   build:
     - name: libcvc
-      version: "==4.0.1"
+      version: "==4.0.2"
     # libpython3.12 and its headers, the interpreter arix embeds.
     - name: python312
     # wasmtime's C API, which runs a document's wasm: guests.
     - name: wasmtime
   runtime:
     - name: libcvc
-      version: "==4.0.1"
+      version: "==4.0.2"
     - name: python312
     - name: wasmtime
     - name: pycvc-cp312
-      version: "==4.0.1"
+      version: "==4.0.2"
     - name: numpy-cp312
   host_tools:
     - cmake

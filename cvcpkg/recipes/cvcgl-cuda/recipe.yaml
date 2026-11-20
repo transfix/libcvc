@@ -74,7 +74,7 @@ depends:
     # The GPU libcvc SDK (find_package(cvc CONFIG) resolves libcvc-cuda, whose
     # cvc::cvc interface carries CVC_USING_CUDA) + VTK (the scene backend).
     - name: libcvc-cuda
-      version: "==4.0.1"
+      version: "==4.0.2"
     - name: vtk
     # Dear ImGui, cvcGL's overlay (cvc::gl::ImGuiOverlay), as in cvcgl.
     - name: imgui-w32
@@ -86,7 +86,7 @@ depends:
       platforms: [linux, macos, windows]
   runtime:
     - name: libcvc-cuda
-      version: "==4.0.1"
+      version: "==4.0.2"
     - name: vtk
     # cvcGL's export links imgui-w32 and SDL3 (cvcGLConfig.cmake re-finds them),
     # so a consumer of cvc::cvcGL needs both in its prefix.

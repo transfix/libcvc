@@ -47,11 +47,11 @@ depends:
     # libcvc SDK (find_package(cvc CONFIG)) + Boost.program_options (the CLI's
     # argument parser; not part of the libcvc link interface).
     - name: libcvc
-      version: "==4.0.1"
+      version: "==4.0.2"
     - name: boost
   runtime:
     - name: libcvc
-      version: "==4.0.1"
+      version: "==4.0.2"
     - name: boost
   host_tools:
     - cmake
