@@ -701,8 +701,8 @@ bool claim(attachment &a) {
 
 // Under Q: the next group of the ready queue for worker `w`, the least virtual time first. Under
 // CVC_EXEC_FORCE_MOVE (with another worker to take it) the first one `w` did not pump last, or,
-// while every other worker is busy (none parked, woken, spinning or waiting on work_cv), one that
-// has waited a pump for them (a blocked one must not stall it: C-m10); found by popping at most 4
+// while every other worker is inside a pump, one that has waited a pump for them (a worker blocked
+// in a long step must not stall it: C-m10); found by popping at most 4
 // it may not take and pushing them back (O(log n) each; a scan only past them). `skipped` says one
 // was left, and `retry_at` when the first left becomes `w`'s. No allocation.
 attachment *take_ready(pool_state &p, const worker_rec &w, bool &skipped,
@@ -711,7 +711,12 @@ attachment *take_ready(pool_state &p, const worker_rec &w, bool &skipped,
   const clock_type::time_point now = moving ? clock_type::now() : clock_type::time_point{};
   const auto wait = std::chrono::duration_cast<clock_type::duration>(
       std::chrono::duration<double>(pump_slack(p)));
-  const bool others_busy = p.parked.empty() && p.owed == 0 && p.spinning == 0 && p.cv_waiters == 0;
+  // Every other worker inside a pump now (one blocked in a long step, say): none of them can take
+  // the group soon. A worker idle, starting, or helping a pump_all can.
+  const bool others_busy =
+      std::all_of(p.wrecs.begin(), p.wrecs.end(), [&](const std::unique_ptr<worker_rec> &o) {
+        return o.get() == &w || o->current;
+      });
   const auto may_take = [&](const attachment *a) {
     return !moving || a->link->last_thread != w.index ||
            (others_busy && now - a->queued_at >= wait);
