@@ -16,6 +16,8 @@
 #include <SDL3/SDL_stdinc.h> // SDL_free
 #include <climits>           // INT_MAX
 #include <cstdint>
+#include <utility>
+#include <vector>
 #endif
 
 namespace cvc {
@@ -29,14 +31,46 @@ namespace {
 // SDL_OpenAudioDeviceStream, also owns the device — destroying the stream closes the device) and
 // one reference to the refcounted SDL audio subsystem; both released in the dtor. Unlike a capture
 // source there is no producer thread here — play()/queued_bytes()/flush() run on whatever app
-// thread pumps the stream, using SDL calls documented thread-safe.
+// thread pumps the stream, using SDL calls documented thread-safe. A pull-mode sink also has a
+// fill function, which SDL's get-callback (on_pull) calls whenever the device needs more audio.
 class sdl_audio_output : public audio_output {
 public:
-  sdl_audio_output(SDL_AudioStream *stream, int channels) : stream_(stream), ch_(channels) {}
+  sdl_audio_output(int channels, audio_pull_fn fill) : ch_(channels), fill_(std::move(fill)) {}
+  // The stream, opened (paused) with this sink as its callback's userdata.
+  void attach(SDL_AudioStream *stream) { stream_ = stream; }
+  // The sink holds the SDL audio subsystem reference open_output took, from a successful open.
+  void own_subsystem() { owns_subsystem_ = true; }
   ~sdl_audio_output() override {
     if (stream_)
-      SDL_DestroyAudioStream(stream_); // also closes the bound playback device
-    SDL_QuitSubSystem(SDL_INIT_AUDIO); // balances the InitSubSystem open_audio_output handed us
+      SDL_DestroyAudioStream(stream_); // closes the device; no on_pull runs after this returns
+    if (owns_subsystem_)
+      SDL_QuitSubSystem(SDL_INIT_AUDIO); // balances the InitSubSystem open_output handed us
+  }
+
+  // SDL_AudioStreamCallback: the device wants ADDITIONAL more bytes than the stream holds. Ask the
+  // fill function for that many whole frames and queue them.
+  static void SDLCALL on_pull(void *self, SDL_AudioStream *stream, int additional, int /*total*/) {
+    auto *o = static_cast<sdl_audio_output *>(self);
+    if (!o || !o->fill_ || additional <= 0)
+      return;
+    const std::size_t frame_sz = static_cast<std::size_t>(o->ch_) * sizeof(float);
+    if (frame_sz == 0)
+      return;
+    const std::size_t frames = (static_cast<std::size_t>(additional) + frame_sz - 1) / frame_sz;
+    o->pull_buf_.resize(frames * static_cast<std::size_t>(o->ch_));
+    o->fill_(o->pull_buf_.data(), frames);
+    SDL_PutAudioStreamData(stream, o->pull_buf_.data(), static_cast<int>(frames * frame_sz));
+  }
+
+  double device_period_s() const override {
+    if (!stream_)
+      return 0.0;
+    SDL_AudioSpec spec;
+    int frames = 0;
+    if (!SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(stream_), &spec, &frames) ||
+        spec.freq <= 0 || frames <= 0)
+      return 0.0;
+    return static_cast<double>(frames) / static_cast<double>(spec.freq);
   }
 
   bool play(const void *data, std::size_t bytes) override {
@@ -75,13 +109,17 @@ public:
   }
 
 private:
-  SDL_AudioStream *stream_;
+  SDL_AudioStream *stream_ = nullptr;
   int ch_;
+  bool owns_subsystem_ = false;
+  audio_pull_fn fill_;
+  std::vector<float> pull_buf_; // on_pull's scratch (only SDL's audio callback touches it)
 };
 } // namespace
 #endif // CVC_MEDIA_SDL
 
-audio_output_open open_audio_output(const audio_output_spec &spec) {
+namespace {
+audio_output_open open_output(const audio_output_spec &spec, audio_pull_fn fill) {
   audio_output_open result;
 #if CVC_MEDIA_SDL
   if (spec.sample_rate <= 0 || spec.channels <= 0)
@@ -118,20 +156,28 @@ audio_output_open open_audio_output(const audio_output_spec &spec) {
     want.format = SDL_AUDIO_F32;
     want.channels = spec.channels;
     want.freq = spec.sample_rate;
-    // NULL callback -> push model: the app feeds data with SDL_PutAudioStreamData (play()).
-    SDL_AudioStream *stream = SDL_OpenAudioDeviceStream(devid, &want, nullptr, nullptr);
-    // Streams open PAUSED; a device that cannot be resumed would silently never play, so fail the
-    // open loudly (null sink) rather than hand back a dead output.
-    if (stream && !SDL_ResumeAudioStreamDevice(stream)) {
-      SDL_DestroyAudioStream(stream);
+    // No fill -> push model: the app feeds data with SDL_PutAudioStreamData (play()). A fill ->
+    // pull model: SDL's get-callback asks the sink, which asks FILL. The stream opens PAUSED, so
+    // no callback comes before attach().
+    const bool pull = static_cast<bool>(fill);
+    auto sink = std::make_unique<sdl_audio_output>(spec.channels, std::move(fill));
+    SDL_AudioStream *stream = SDL_OpenAudioDeviceStream(
+        devid, &want, pull ? &sdl_audio_output::on_pull : nullptr, pull ? sink.get() : nullptr);
+    if (stream)
+      sink->attach(stream); // the sink owns the stream (and its device) from here
+    // A device that cannot be resumed would silently never play, so fail the open loudly (null
+    // sink) rather than hand back a dead output.
+    if (stream && !SDL_ResumeAudioStreamDevice(stream))
       stream = nullptr;
-    }
     if (stream) {
       result.sample_rate = spec.sample_rate;
       result.channels = spec.channels;
       result.name = std::move(name);
-      result.sink = std::make_unique<sdl_audio_output>(stream, spec.channels);
+      sink->own_subsystem();
+      result.sink = std::move(sink);
       handed_off = true; // the sink now owns `stream` (and its device) and the subsystem ref
+    } else {
+      sink.reset(); // destroys an opened-but-dead stream, if any
     }
   }
 
@@ -139,8 +185,20 @@ audio_output_open open_audio_output(const audio_output_spec &spec) {
     SDL_QuitSubSystem(SDL_INIT_AUDIO); // nothing took the ref we added above
 #else
   (void)spec;
+  (void)fill;
 #endif
   return result;
+}
+} // namespace
+
+audio_output_open open_audio_output(const audio_output_spec &spec) {
+  return open_output(spec, nullptr);
+}
+
+audio_output_open open_audio_output_pull(const audio_output_spec &spec, audio_pull_fn fill) {
+  if (!fill)
+    return {};
+  return open_output(spec, std::move(fill));
 }
 
 bool have_audio_output() {

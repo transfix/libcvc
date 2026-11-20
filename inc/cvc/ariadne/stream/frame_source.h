@@ -66,6 +66,15 @@ public:
   // the decoded frame carries the true aspect ratio. Read right after fill() returns bytes > 0.
   virtual int cur_width() const { return 0; }
   virtual int cur_height() const { return 0; }
+
+  // Whether another whole frame is ready right now, after a fill() that produced one. A FIFO
+  // source (an SDL recording device, which captures every sample whether or not anyone reads it)
+  // says true while its backlog holds another chunk, and the producer fills again in the same tick,
+  // up to a bound. Otherwise a tick that comes late (a busy browser main thread, whose timers skip
+  // the beats they miss) would leave its chunk behind for good, and the backlog would grow until
+  // the source dropped it. A generator (a tone, a test pattern) makes a frame per tick and keeps
+  // the default, false.
+  virtual bool more() const { return false; }
 };
 
 // The size a SRC_W x SRC_H frame takes within a BUDGET_W x BUDGET_H budget: its aspect ratio kept,

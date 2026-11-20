@@ -2294,6 +2294,25 @@ scene:
       `vehicles.watch` names (entity ids joined by `,`: the one a camera follows, the one a panel
       shows) and those with an intent; `entities.ids` lists the entities with keys, and
       `entities.count` counts them all. `keys: all` writes every vehicle's.
+    - Its navigator is its own (one per plant, `<plant>/<fleet>` to `WorldVehicles::belief`).
+      `sense:` `known` or `fog` is what it knows (the world's `vehicles.sense` by default).
+      `belief:` is how its vehicles share what they sense: `shared` (the default, one map),
+      `grouped` (max(2, n / 64) maps, teammates together) or `private` (one each).
+      `vehicles.fleets.<fleet>.sense` and `.belief` make it again, its vehicles at rest where
+      they are, and `.planes` counts its maps.
+    - `policy:` is what drives it.
+      - `trained` (the default) is the published CoefMLP, found in this order:
+        `$CVC_NAV_WEIGHTS`, an installed copy, else downloaded from
+        `cvcpkg://cvc/grl-snam-weights` through the data store (cached by hash).
+      - `builtin` is the built-in net.
+      - A `.cvcnav`'s path, `{ uri:, path:, sha256: }` (a file, an https URL or a cvcpkg://
+        package, the `.cvcnav` inside it, and its hash), or `{ data: <entry> }` (the document's
+        `data:` entry).
+
+      `vehicles.fleets.<fleet>.policy` switches it live, and `.drives` says what drives:
+      `trained (<where>, sha256:...)`, `weights (...)`, `builtin`, `builtin: loading <uri>` while
+      the weights are on their way, or `builtin: no trained weights (<why>)`. Without the
+      weights it drives on the built-in net, and the host's log says why once.
     - In C++: `WorldVehicles::fleets()`, `rally()`, `move_rally()` and `restart_fleet()`, and
       `entity_info::fleet` and `rally`.
   - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,
@@ -5665,7 +5684,8 @@ makes a glTF vehicle +X forward, +Z up and true to scale (as the C++ demos'
 a physics body's pose. Its planning grid is `pycvc.nav_world_rasterize(city.world(), rows, cols,
 ...)`, cvc::nav's rasterizer (no VTK), which also gives the terrain's height at each sample
 (`pycvc.nav_world_grid(world, cell)` is the same grid walled at its edge, with its signed distance
-and free points; `AriApp.grid(node, cell)` gives it for a scene's generated or data node): the
+and free points; `AriApp.grid(node, cell)` gives it for a scene's generated or data node, and
+`AriApp.world_geometry(node)` that node's world, under a drawn host too through `ari_app_attach`): the
 navigator gets the grade (`nav_sim_world_set_terrain` with the Humvee's
 `nav_plant.terrain_config_of`), and the routes keep off the slopes `nav_terrain_build` marks
 infeasible for it. The Jolt plant drives on flat ground with the buildings as boxes, as the C++

@@ -510,8 +510,8 @@ public:
   bool set_sense(const std::string &mode);
   const std::string &sense() const;
   // The occupancy plant `plant`'s navigator plans on now (row-major, the grid's rows and cols;
-  // 1 = blocked): the grid under known, its belief under fog. False when that plant has no
-  // navigator yet.
+  // 1 = blocked): the grid under known, its belief (its first plane) under fog. A fleet's own
+  // navigator is "<plant>/<fleet>". False when that plant has no navigator yet.
   bool belief(const std::string &plant, std::vector<std::uint8_t> &out, int &rows, int &cols) const;
   // Entity `id`'s command for the navigator's next tick only, in place of its controller's: the
   // steering's bicycle angle (rad, + left) and the acceleration along its heading (m/s^2), held to
@@ -556,6 +556,13 @@ public:
   // Fleets (world: vehicles: start: entries with fleet:, spawn_starts): their names in the
   // document's order. A fleet is laid out once the world's grid exists; its keys are
   // `vehicles.fleets.<name>.*` (rally points, restart and reseed requests, its counts).
+  // Each fleet has a navigator of its own per plant ("<plant>/<fleet>"), made with its sense and
+  // belief: writing `.sense` (known, fog) or `.belief` (shared, grouped, private) makes it again,
+  // its vehicles at rest where they are; `.planes` counts its belief planes. `.policy` (trained,
+  // builtin, data:<entry> or a uri) switches what drives it live, and `.drives` says what does:
+  // "trained (<where>, sha256:...)", "weights (<uri>, sha256:...)", "builtin", "builtin: loading
+  // <uri>" while weights are on their way, or "builtin: no trained weights (<why>)", which the
+  // host's log also gets once.
   std::vector<std::string> fleets() const;
   // Fleet `fleet`'s rally point `team` (0 to rally.count - 1): where it is, false when there is
   // none (no such fleet or team, or not laid out yet).
