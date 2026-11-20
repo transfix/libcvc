@@ -83,19 +83,23 @@ struct group_pool_link {
   /// - pump, no lock: clear notified, take the token (which nothing else holds now), pump on the
   ///   pool's budget, release the token.
   /// - release, under Q: clear pumping. detaching: done (the teardown waits for this). A failed
-  ///   pump: see failure. pump_result::runnable, or its next_deadline due: queue g again. Else
-  ///   CAS the word from exactly `scheduled` to 0, and only if that succeeds file next_deadline
-  ///   (if any) in the pool's timer heap; if it fails (a post set notified), queue g again. The
-  ///   hold handoff: a release that queues g again while a host thread is waiting to hold it now
-  ///   (a with_group blocked on it, or g's attaching thread inside pump_host, wait_for_work,
-  ///   with_group or detach with host entries for g) sets host_held to that thread on its behalf,
-  ///   so the next pop defers; a host that is not waiting gets nothing, and g goes on being pumped.
-  ///   A detach takes back a hold handed over and not taken up.
+  ///   pump: see failure. Else, when a host waits to hold g now (a with_group linked on g as
+  ///   waiting, else its attaching thread inside pump_host or wait_for_work with host entries for
+  ///   g), set host_held to that host on its behalf: the hold is handed over, and the pop that
+  ///   follows leaves g notified and deferred (whichever way the release then goes, the idling CAS
+  ///   included); a host that is not waiting gets nothing, and g goes on being pumped. Then
+  ///   pump_result::runnable, or its next_deadline due: queue g again. Else CAS the word from
+  ///   exactly `scheduled` to 0, and only if that succeeds file next_deadline (if any) in the
+  ///   pool's timer heap; if it fails (a post set notified), queue g again.
+  /// - give-back: an attaching thread that leaves pump_host or wait_for_work with a hold handed
+  ///   to it and not taken up gives it back under Q (host_held cleared, its waiters notified, and
+  ///   g queued again if a pop deferred it), so a host that stops waiting freezes nothing.
   /// - a due timer, under Q: unless g is detaching or no longer attached, as wake(g).
-  /// - with_group, or a non-waiting host body, on a host thread: under Q (each time it looks):
-  ///   if detaching is set or g is no longer attached, set nothing and take the token as for an
-  ///   unattached group once the detach is over (at once on the detaching thread); else wait
-  ///   while pumping is set or another thread holds host_held (servicing this thread's host queue
+  /// - with_group, or a non-waiting host body, on a host thread: under Q (each time it looks): a
+  ///   hold a release handed this thread is taken up; else if detaching is set or g is no longer
+  ///   attached, set nothing and take the token as for an unattached group once the detach is
+  ///   over (at once on the detaching thread); else wait, linked on g as waiting to hold it, while
+  ///   pumping is set or another thread holds host_held (servicing this thread's host queue
   ///   meanwhile), then set host_held to this thread; take the token, run, release it; under Q
   ///   clear host_held, and if deferred, clear it and queue g again, else as wake(g) (what ran may
   ///   have submitted, killed or resumed under the token, which posts nothing). If what ran
@@ -107,14 +111,17 @@ struct group_pool_link {
   ///   processes with "internal error" holding the token; under Q it clears pumping, sets
   ///   detaching and lists g on its attaching thread's failed list; that thread finishes the
   ///   detach in take_failed() (or the group's teardown does).
-  /// - detach and teardown (S2-Q4): (1) under Q set detaching; (2) wait for pumping (and a
-  ///   host_held of another thread) to clear, servicing the calling thread's host queue; (3) take
-  ///   the token, and the teardown closes the lock port; (4) under Q leave the ready queue, the
-  ///   next slots, the ready list, the failed list and the timer heap; then, outside Q, clear the
-  ///   notifier (which waits for a wake in progress), and only then drop the attachment and store
-  ///   0 in the word (a wake between would queue a detached group); (5) the teardown kills, shuts
-  ///   the host down, purges and reaps; detach runs the group's host-queue entries instead and
-  ///   releases the token.
+  /// - detach and teardown (S2-Q4): (1) under Q set detaching, and take back a hold handed over
+  ///   and not yet taken up (host_held and deferred cleared, its host notified); (2) wait for
+  ///   pumping (and a host_held of another thread) to clear, servicing the calling thread's host
+  ///   queue; (3) take the token, and the teardown closes the lock port; (4) under Q leave the
+  ///   ready queue, the next slots, the ready list, the failed list and the timer heap, and take
+  ///   the group's host-queue entries off its attaching thread's queue (no waiting body is among
+  ///   them: step 2 waited for pumping); then, outside Q, clear the notifier (which waits for a
+  ///   wake in progress), and only then drop the attachment and store 0 in the word (a wake
+  ///   between would queue a detached group); (5) the teardown drops those entries unrun (the
+  ///   kills settle their calls), kills, shuts the host down, purges and reaps; detach runs them
+  ///   instead and releases the token.
   std::atomic<std::uint32_t> state{0};
   /// The pool's record of the group while it is attached (exec_pool.cpp's), else null: set by
   /// attach, cleared by detach (step 4). A group attached is in no pump_all (refused there).
