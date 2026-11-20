@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cvc/ariadne/data.h> // DataStore: a fleet's weights
 #include <cvc/ariadne/scene.h> // SceneAsset
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
@@ -798,6 +799,8 @@ struct WorldVehicles::impl {
   // the world's bodies, and it steps them on its clock.
   struct fleet {
     std::string plant; // jolt, dynamic, dynamic4w or kinematic
+    int group = -1;    // the fleet (start: fleet:) it navigates alone, -1 the plant's unnamed ones
+    std::string sense; // known or fog: what it was made knowing
     std::unique_ptr<cvc::nav::sim_world> sim;
     std::unique_ptr<ph::nav_plant> jolt;
     std::unique_ptr<ph::dyn_bike_plant> bike;
@@ -815,7 +818,8 @@ struct WorldVehicles::impl {
     // the drive's telemetry.
     bool tel_fresh = false;
   };
-  std::map<std::string, std::unique_ptr<fleet>> fleets; // by plant, made as entities need them
+  // By plant, made as entities need them; a named fleet's own by "<plant>/<fleet>".
+  std::map<std::string, std::unique_ptr<fleet>> fleets;
 
   struct entity {
     std::uint64_t id = 0;
@@ -840,6 +844,7 @@ struct WorldVehicles::impl {
     double distance = 0.0, ox = 0.0, oy = 0.0;
     bool odometer = false;
     int group = -1;    // its fleet (start: fleet:) in `groups`, -1 none
+    int member = -1;   // its index in that fleet (0 first)
     int rally = -1;    // its team's rally point in that fleet, -1 none
     bool hold = false; // its goal is held (a fleet's): it does not wander from it
     // A `pose` entity (its controller pose): no fleet, a kinematic box moved to its poses.
@@ -877,7 +882,16 @@ struct WorldVehicles::impl {
     std::vector<std::string> seen_rally;      // each team's "x|y" as last written or read
     std::string seen_restart, seen_reseed;
     std::string status;
+    // Its navigator (FL1b): what it knows and how its vehicles share it (the keys switch them).
+    std::string sense, belief, seen_sense, seen_belief;
+    // Its policy: what is asked (trained, builtin, data:<entry> or a uri; the key switches it),
+    // what drives (`model`, null: the built-in net) and that, said (`drives`). `loading` is the
+    // data store's node of weights still on their way, `file` the .cvcnav in it.
+    std::string policy, seen_policy, drives, loading, file, sha256;
+    cvc::nav::policy_library::entry model;
+    bool warned = false; // the fallback has been logged
     bool summary() const { return start.keys != "all"; }
+    std::string key(const std::string &plant) const { return plant + "/" + start.fleet; }
   };
   std::vector<fleet_group> groups;
   bool hold_placing = false; // spawn() leaves its entity unplaced (a fleet places it laid out)
@@ -921,10 +935,16 @@ struct WorldVehicles::impl {
     }
   }
 
+  // The navigator key of an entity's: its plant's, or its fleet's own.
+  std::string nav_key(const entity &e) const {
+    return e.group >= 0 && static_cast<std::size_t>(e.group) < groups.size()
+               ? groups[static_cast<std::size_t>(e.group)].key(e.plant)
+               : e.plant;
+  }
   fleet *fleet_of(const entity &e) const {
     if (e.posed) // a `pose` entity is no plant's
       return nullptr;
-    const auto it = fleets.find(e.plant);
+    const auto it = fleets.find(nav_key(e));
     return it == fleets.end() ? nullptr : it->second.get();
   }
   int index(const entity &e) const {
@@ -1061,21 +1081,49 @@ struct WorldVehicles::impl {
       f.sim->set_vehicle_kinematics(vmax.data(), amax.data(), L.data(), n);
   }
 
-  // The fleet on `plant`, made the first time an entity needs it.
-  fleet &fleet_for(const std::string &plant) {
-    std::unique_ptr<fleet> &slot = fleets[plant];
+  // What fleet `group`'s navigator knows (its sense:, else the world's), and how many belief
+  // planes it shares (1; grouped: max(2, n / 64); private: none made, each vehicle its own).
+  const std::string &sense_of(int group) const {
+    return group >= 0 && !groups[static_cast<std::size_t>(group)].sense.empty()
+               ? groups[static_cast<std::size_t>(group)].sense
+               : sense;
+  }
+  int members(int group) const {
+    int n = 0;
+    for (const entity &e : ents)
+      n += e.group == group ? 1 : 0;
+    return n;
+  }
+  int planes_of(int group) const {
+    if (group < 0 || groups[static_cast<std::size_t>(group)].belief != "grouped")
+      return 1;
+    return std::max(2, members(group) / 64);
+  }
+
+  // The navigator on `plant` (a named fleet's own, `group`), made the first time an entity needs
+  // it.
+  fleet &fleet_for(const std::string &plant, int group = -1) {
+    std::unique_ptr<fleet> &slot =
+        fleets[group >= 0 ? groups[static_cast<std::size_t>(group)].key(plant) : plant];
     if (slot)
       return *slot;
     auto f = std::make_unique<fleet>();
     f->plant = plant;
+    f->group = group;
+    f->sense = sense_of(group);
     // A boat's navigator plans on the water deep enough for the deepest boat, land blocked.
     const std::shared_ptr<const cvc::nav::world_grid> plan =
         vehicle_plant_floats(plant) ? boat_grid() : grid;
     // Under fog the navigator starts knowing nothing (an empty prior) and senses the grid.
-    const std::vector<std::uint8_t> unknown(sense == "fog" ? plan->occupancy.size() : 0, 0);
+    const bool fog = f->sense == "fog";
+    const std::vector<std::uint8_t> unknown(fog ? plan->occupancy.size() : 0, 0);
+    cvc::nav::sim_world::config c = cfg;
+    c.freeze_sense = !fog; // known: the world's grid; fog: sensed
     f->sim = std::make_unique<cvc::nav::sim_world>(
-        cfg, plan->occupancy.data(), sense == "fog" ? unknown.data() : plan->occupancy.data(),
+        c, plan->occupancy.data(), fog ? unknown.data() : plan->occupancy.data(),
         cvc::nav::coef_mlp::default_biased(), nullptr, nullptr, nullptr, 0);
+    for (int p = planes_of(group); p > 1; --p)
+      f->sim->add_plane();
     f->sim->set_capture_drive_telemetry(drive_tel);
     // Its kernels on the app's pool: without one each fans out by spawning and joining threads
     // per call, most of a tick for hundreds of vehicles (FLEETS_AND_NIGHT_ROADMAP.md FL0).
@@ -1522,7 +1570,7 @@ struct WorldVehicles::impl {
     a.name = e.spec.name;
     fleet *made = nullptr;
     try {
-      fleet &f = fleet_for(e.plant);
+      fleet &f = fleet_for(e.plant, e.group);
       made = &f;
       if (f.jolt)
         a.vehicle = f.jolt->add_desc(e.desc);
@@ -1538,6 +1586,17 @@ struct WorldVehicles::impl {
             policies.get(cvc::nav::policy_ref{e.spec.policy, e.spec.policy_sha256});
         a.policy = p.model;
         a.policy_key = p.key;
+      } else if (e.spec.controller == "nav@1" && e.group >= 0) { // its fleet's
+        const fleet_group &g = groups[static_cast<std::size_t>(e.group)];
+        a.policy = g.model.model;
+        a.policy_key = g.model.model ? g.model.key : std::string();
+      }
+      if (e.group >= 0) { // its fleet's belief: its own, its team's group, or the one
+        const fleet_group &g = groups[static_cast<std::size_t>(e.group)];
+        if (g.belief == "private")
+          a.own_plane = true;
+        else if (const int n = f.sim->planes(); n > 1)
+          a.plane = (e.rally >= 0 ? e.rally : std::max(0, e.member)) % n;
       }
       e.agent = f.sim->add_agent(a);
       const int i = f.sim->index_of(e.agent);
@@ -2110,6 +2169,7 @@ struct WorldVehicles::impl {
         e.spec.yaw = g.start.has_heading ? g.start.heading * kPi / 180.0
                                          : std::numeric_limits<double>::quiet_NaN();
       }
+    drop_navigators(gi);
     g.laid_out = false;
     if (ready)
       for (entity &e : ents)
@@ -2117,6 +2177,174 @@ struct WorldVehicles::impl {
           if (std::string why = place(e); !why.empty())
             status = "entity " + std::to_string(e.id) + ": " + why;
     ++rev;
+  }
+
+  // Fleet `gi`'s own navigators, once its vehicles have left them: made again as they are placed
+  // (what they know, and their belief planes, from the start).
+  void drop_navigators(std::size_t gi) {
+    for (auto it = fleets.begin(); it != fleets.end();)
+      it = it->second && it->second->group == static_cast<int>(gi) ? fleets.erase(it) : ++it;
+  }
+
+  // Fleet `gi` made again with what it knows now (sense, belief): its vehicles leave its
+  // navigators and are placed again where they are, at rest, on new ones.
+  void rebuild_navigators(std::size_t gi) {
+    for (entity &e : ents)
+      if (e.group == static_cast<int>(gi) && e.agent) {
+        if (const fleet *f = fleet_of(e); f && index(e) >= 0) {
+          const pose p = pose_of(*f, index(e));
+          e.sx = p.position.x;
+          e.sy = p.position.y;
+          e.syaw = p.yaw;
+        }
+        remove_from_fleet(e);
+      }
+    drop_navigators(gi);
+    if (ready)
+      for (entity &e : ents)
+        if (e.group == static_cast<int>(gi) && !e.agent)
+          if (std::string why = place(e); !why.empty())
+            status = "entity " + std::to_string(e.id) + ": " + why;
+    ++rev;
+  }
+
+  // The policy fleet `gi` asks for (FL1b): trained, builtin, data:<entry> or a uri. Resolved now
+  // where it can be (the built-in net, a file, an installed copy); a download or a data: entry
+  // starts loading, the fleet driving on the built-in net until it arrives (poll_policy). Either
+  // way `drives` says what drives, and a fallback says why, once in the host's log.
+  static constexpr const char *kTrainedUri = "cvcpkg://cvc/grl-snam-weights";
+  static constexpr const char *kTrainedPath = "share/grl-snam-weights/coef_sdf.cvcnav";
+  void fall_back(fleet_group &g, const std::string &why) {
+    g.model = {};
+    g.loading.clear();
+    g.drives = "builtin: no trained weights (" + why + ")";
+    if (!g.warned) {
+      g.warned = true;
+      std::fprintf(stderr, "ari: world: vehicles: fleet '%s': %s\n", g.start.fleet.c_str(),
+                   g.drives.c_str());
+    }
+  }
+  void load_from_store(fleet_group &g, const std::string &uri, const std::string &path,
+                       const std::string &sha256) {
+    if (!app)
+      throw std::runtime_error("no data store to fetch " + uri + " with");
+    DataSpec spec;
+    spec.uri = uri;
+    const std::size_t slash = path.find_last_of('/');
+    spec.path = slash == std::string::npos ? std::string() : path.substr(0, slash);
+    g.file = slash == std::string::npos ? path : path.substr(slash + 1);
+    g.sha256 = sha256;
+    g.loading = DataStore::of(*app)->load(spec);
+    g.drives = "builtin: loading " + uri;
+  }
+  void resolve_policy(std::size_t gi) {
+    fleet_group &g = groups[gi];
+    g.model = {};
+    g.loading.clear();
+    const std::string ask = g.policy.empty() ? "trained" : g.policy;
+    try {
+      if (ask == "builtin") {
+        g.drives = "builtin";
+      } else if (ask == "trained") {
+        // $CVC_NAV_WEIGHTS, an installed copy, else the published package (settled, D8).
+        const char *env = std::getenv("CVC_NAV_WEIGHTS");
+        const std::string installed =
+            env && *env ? std::string(env) : cvc::nav::coef_mlp::default_weights_path();
+        if (!installed.empty()) {
+          g.model = policies.get(cvc::nav::policy_ref{installed, ""});
+          g.drives = "trained (" + installed + ", " + g.model.key + ")";
+        } else {
+          load_from_store(g, kTrainedUri, kTrainedPath, "");
+        }
+      } else if (ask.rfind("data:", 0) == 0) { // the document's data: entry
+        const std::string entry = ask.substr(5);
+        if (!app || vkey.size() <= 9)
+          throw std::runtime_error("no document data: entry '" + entry + "'");
+        const std::string doc = vkey.substr(0, vkey.size() - 9); // <prefix>.vehicles
+        const std::string node = DataStore::of(*app)->resolve(doc + ".data." + entry);
+        if (node.empty())
+          throw std::runtime_error("no data: entry '" + entry + "'");
+        DataStore::of(*app)->touch(node);
+        g.loading = node;
+        g.file = g.start.policy_path;
+        g.sha256 = g.start.policy_sha256;
+        g.drives = "builtin: loading data: " + entry;
+      } else {
+        const bool own = ask == g.start.policy; // the document's: its path: and sha256: hold
+        const std::string path = own ? g.start.policy_path : std::string();
+        const std::string sha = own ? g.start.policy_sha256 : std::string();
+        if (ask.find("://") == std::string::npos || ask.rfind("file://", 0) == 0) {
+          g.model = policies.get(cvc::nav::policy_ref{ask, sha});
+          g.drives = "weights (" + ask + ", " + g.model.key + ")";
+        } else {
+          load_from_store(g, ask, path, sha);
+        }
+      }
+    } catch (const std::exception &ex) {
+      fall_back(g, ex.what());
+    }
+    apply_policy(gi);
+  }
+  // Weights on their way: taken once the store has them, else the fallback says why.
+  void poll_policy(std::size_t gi) {
+    fleet_group &g = groups[gi];
+    if (g.loading.empty() || !app)
+      return;
+    const std::string s = data_status(*app, g.loading);
+    if (s != "ready" && s != "error" && !s.empty())
+      return;
+    const std::string node = g.loading;
+    const std::string uri = g.policy.empty() || g.policy == "trained" ? kTrainedUri : g.policy;
+    try {
+      if (s != "ready") {
+        cvc::state *err = cvc::state::instance(*app).findThroughLinks(node + ".error");
+        throw std::runtime_error(err && !err->value().empty() ? err->value()
+                                                              : "could not fetch " + uri);
+      }
+      std::string file = g.file;
+      if (file.empty())
+        for (const std::string &p : data_files(*app, node))
+          if (p.size() > 7 && p.compare(p.size() - 7, 7, ".cvcnav") == 0) {
+            file = p;
+            break;
+          }
+      const DataBytes bytes = file.empty() ? nullptr : data_file(*app, node, file);
+      if (!bytes)
+        throw std::runtime_error(uri + " has no " + (file.empty() ? ".cvcnav" : file));
+      g.model = policies.get_bytes(*bytes, g.sha256, uri);
+      g.loading.clear();
+      g.drives = std::string(g.policy.empty() || g.policy == "trained" ? "trained" : "weights") +
+                 " (" + uri + ", " + g.model.key + ")";
+    } catch (const std::exception &ex) {
+      fall_back(g, ex.what());
+    }
+    apply_policy(gi);
+  }
+  // Fleet `gi`'s vehicles on nav@1 drive with its policy now (a vehicle naming its own keeps it);
+  // without a model, on the built-in net (policy 0). Weights the world can't run (a feature it
+  // doesn't provide) fall back, said.
+  void apply_policy(std::size_t gi) {
+    fleet_group &g = groups[gi];
+    try {
+      for (const entity &e : ents) {
+        if (e.group != static_cast<int>(gi) || e.spec.controller != "nav@1" ||
+            !e.spec.policy.empty())
+          continue;
+        fleet *f = fleet_of(e);
+        const int i = index(e);
+        if (!f || i < 0)
+          continue;
+        if (g.model.model)
+          f->sim->set_policy(i, g.model.model, g.model.key);
+        else
+          f->sim->reset_policy(i);
+      }
+    } catch (const std::exception &ex) {
+      if (!g.model.model)
+        throw;
+      fall_back(g, ex.what());
+      apply_policy(gi);
+    }
   }
 
   // Each fleet's request and rally keys: a change is a request, a rally point's a move.
@@ -2131,6 +2359,29 @@ struct WorldVehicles::impl {
       if (const std::string r = get(at + "reseed.request"); r != g.seen_reseed) {
         g.seen_reseed = r;
         restart_group(gi, true);
+      }
+      if (const std::string p = get(at + "policy"); p != g.seen_policy) {
+        g.seen_policy = p;
+        if (p != g.policy) {
+          g.policy = p;
+          g.warned = false;
+          resolve_policy(gi);
+        }
+      }
+      poll_policy(gi);
+      const std::string s = get(at + "sense"), b = get(at + "belief");
+      if (s != g.seen_sense || b != g.seen_belief) {
+        g.seen_sense = s;
+        g.seen_belief = b;
+        const bool sense_ok = s == "known" || s == "fog";
+        const bool belief_ok = b == "shared" || b == "grouped" || b == "private";
+        if ((sense_ok && s != g.sense) || (belief_ok && b != g.belief)) {
+          if (sense_ok)
+            g.sense = s;
+          if (belief_ok)
+            g.belief = b;
+          rebuild_navigators(gi);
+        }
       }
       for (std::size_t t = 0; t < g.rally.size() && t < g.seen_rally.size(); ++t) {
         const std::string xs = get(at + "rally." + std::to_string(t) + ".x"),
@@ -2178,6 +2429,12 @@ struct WorldVehicles::impl {
       put(at + "teams", std::to_string(g.rally.size()));
       put(at + "seed", std::to_string(g.seed));
       put(at + "status", g.status);
+      put(at + "drives", g.drives);
+      int planes = 0;
+      for (const auto &[k, nav] : fleets)
+        if (nav && nav->group == static_cast<int>(gi))
+          planes += nav->sim->planes() - (g.belief == "private" ? 1 : 0); // plane 0 unused
+      put(at + "planes", std::to_string(planes));
     }
     put(vkey + ".fleets.names", names);
   }
@@ -3055,6 +3312,22 @@ std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts
       d.groups[gi].seen_restart = d.get("fleets." + st.fleet + ".restart.request");
       d.groups[gi].seen_reseed = d.get("fleets." + st.fleet + ".reseed.request");
       d.groups[gi].status = "waiting for the world's grid";
+      // Its navigator's keys, as the start asks (writing one switches it live, poll_groups).
+      impl::fleet_group &g = d.groups[gi];
+      g.sense = st.sense;
+      g.belief = st.belief.empty() ? "shared" : st.belief;
+      g.policy = !st.policy_data.empty() ? "data:" + st.policy_data
+                 : st.policy.empty()     ? "trained"
+                                         : st.policy;
+      const std::string at = d.vkey + ".fleets." + st.fleet + ".";
+      if (!d.vkey.empty()) {
+        d.put(at + "sense", d.sense_of(static_cast<int>(gi)));
+        d.put(at + "belief", g.belief);
+        d.put(at + "policy", g.policy);
+      }
+      g.seen_sense = d.get("fleets." + st.fleet + ".sense");
+      g.seen_belief = d.get("fleets." + st.fleet + ".belief");
+      g.seen_policy = d.get("fleets." + st.fleet + ".policy");
       d.hold_placing = true;
       int got = 0;
       std::string why;
@@ -3065,15 +3338,16 @@ std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts
         s.team = st.team;
         s.controller = st.controller;
         s.plant = st.plant;
-        s.policy = st.policy;
         if (st.has_heading)
           s.yaw = st.heading * kPi / 180.0;
         if (!spawn(s, &why))
           break;
         d.ents.back().group = static_cast<int>(gi);
+        d.ents.back().member = k;
         ++got;
       }
       d.hold_placing = false;
+      d.resolve_policy(gi); // before they are placed: they start on it
       if (got < st.count && warnings)
         warnings->push_back("ari: world: vehicles: start: [" + std::to_string(i) + "]: fleet '" +
                             st.fleet + "': " + why);
@@ -3135,6 +3409,8 @@ void WorldVehicles::clear() {
   impl &d = *_impl;
   d.unplace_all(false);
   d.ents.clear();
+  for (std::size_t gi = 0; gi < d.groups.size(); ++gi) // the fleets' own navigators go with them
+    d.drop_navigators(gi);
   d.groups.clear();
   d.posed_count = 0;
   ++d.rev;
@@ -3314,6 +3590,11 @@ bool WorldVehicles::set_sense(const std::string &mode) {
   d.sense = mode;
   if (!d.vkey.empty())
     d.put(d.vkey + ".sense", mode);
+  for (impl::fleet_group &g : d.groups)
+    if (g.sense.empty() && !d.vkey.empty()) {
+      d.put(d.vkey + ".fleets." + g.start.fleet + ".sense", mode);
+      g.seen_sense = mode;
+    }
   // What a navigator knows is its config and its prior: they are made again, on the grid they
   // have, and every vehicle goes back to its start.
   if (d.grid) {

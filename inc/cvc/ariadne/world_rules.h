@@ -214,6 +214,16 @@ bool spawn_scope_known(const std::string &scope);
 // `keys: summary` (a fleet's default) publishes the fleet's keys (vehicles.fleets.<fleet>.*), and
 // per-entity keys only for the vehicles vehicles.watch names or with an intent; `keys: all`
 // publishes every vehicle's, as an unnamed entry's are.
+//
+// A fleet has a navigator of its own (FLEETS_AND_NIGHT_ROADMAP.md FL1b):
+//   sense:   known | fog: what it knows of the world ("" the world's vehicles.sense)
+//   belief:  shared (one map) | grouped (max(2, n / 64) maps, teammates together) | private
+//            (one each): how its vehicles share what they sense
+//   policy:  trained (the default: the published CoefMLP, $CVC_NAV_WEIGHTS, else an installed
+//            copy, else downloaded from cvcpkg://cvc/grl-snam-weights), builtin (the built-in net),
+//            a .cvcnav's path, or { uri:, path:, sha256: } (a file, an https URL or a cvcpkg://
+//            package, the .cvcnav inside it and its hash) or { data: <entry> } (the document's
+//            data: entry). Without the weights it drives on the built-in net and says why.
 struct vehicle_start {
   std::string archetype, name, controller, plant, policy;
   int team = 0;
@@ -230,6 +240,10 @@ struct vehicle_start {
   std::string assign; // rally: { assign: } latitude ("" latitude)
   std::string colors; // hsv | spawn ("" hsv with rally points, spawn without)
   std::string keys;   // summary | all ("" summary)
+  std::string sense;  // known | fog ("" the world's)
+  std::string belief; // shared | grouped | private ("" shared)
+  // policy: { uri:, path:, sha256: } (`policy` the uri) or { data: } (`policy_data`).
+  std::string policy_path, policy_sha256, policy_data;
   bool operator==(const vehicle_start &) const = default;
 };
 constexpr int kMaxVehicleStartCount = 256;
