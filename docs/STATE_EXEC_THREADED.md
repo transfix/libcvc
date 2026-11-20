@@ -4,7 +4,12 @@ Status: design, adopted 2026-10-26 with the decisions in section 9.2. Stage 0, t
 hazard fixes (section 7), is built. Stage 1 is built, in two parts (S1-Q12): Stage 1a, the
 execution groups, the fork-join pool and pycvc's `ExecPool`; and Stage 1b, Ariadne's half (one
 pump per frame, isolated documents, providers and posts on the caller's group, the init lane's
-own host, the teardown reap, the subscriber audit). The later stages are not built. Tracked in the
+own host, the teardown reap, the subscriber audit). Stage S, runs of several steps a pick, is built
+(`perf/threaded-ss`). Stage 2 ships in three parts (`threaded-impl/S2.md`, S2-Q1): S2a, the
+continuous pool (attached groups pumped whenever they have work, the split kernel pools and the
+long-step monitor), is built in `perf/threaded-s2a`; S2b (the router and process control across
+groups) and S2c (priority across groups, the weights, the coordinator) are not, nor are Stages 3,
+4 and M. Section 9.2 records the S2 decisions. Tracked in the
 `state-exec-perf` workstream, as its third track. The first two are the benchmark suite
 (transfix/libcvc#834) and the single-thread optimizations (branches `perf/sched`, `perf/async` and
 `perf/eval`).
@@ -661,8 +666,10 @@ like `exec_scheduler()`, 4.12):
     `get_process_info`, `reap`, `kill_owner`) runs as today, between pumps.
   - Render never overlaps a pump, so it stays a pure reader ([`docs/ARIADNE.md`](ARIADNE.md)
     section 3).
-- **Continuous** (Stage 2; pycvc servers, `exec_coordinator`, headless hosts):
-  - Attached groups are pumped whenever they have work, a slice at a time (section 4.4).
+- **Continuous** (Stage 2, built in S2a; C++ embedders, then Stage 3's spawn groups and the
+  coordinator's job groups, S2-Q6):
+  - Attached groups are pumped whenever they have work, a pump on the pool's budget at a time
+    (section 4.4).
   - A host call that touches a group's scheduler takes the token (`with_group`), or goes through a
     thread-safe post (`post_message`, `post_control`).
 
@@ -673,10 +680,10 @@ like `exec_scheduler()`, 4.12):
 | Group | Made by | Affinity |
 |---|---|---|
 | Group 0 | `app::exec_scheduler()` itself; for pycvc, each plain `Exec`'s private scheduler. Neither is an `exec_group`: each has its own registry and random stream, which its scheduler binds (the app's in `app::exec_group0_state`, declared before the scheduler and its async host so it goes after both; an `Exec`'s in its `ExecImpl`, before its scheduler and envs), and `app::exec_pump_frame()` pumps the app's as a host-affinity group (4.12) | host |
-| A host's group | a C++ host: `exec_group(options)`, pumped by `app.exec_pool().pump_all(...)`, or registered as a frame group (`app::register_frame_group`) for `exec_pump_frame` (Stage 1a) | as its options say |
+| A host's group | a C++ host: `exec_group(options)`, pumped by `app.exec_pool().pump_all(...)`, or registered as a frame group (`app::register_frame_group`) for `exec_pump_frame` (Stage 1a), or attached (`exec_pool::attach`, S2a) | as its options say |
 | An `ExecPool` group | `pycvc.ExecPool` (Stage 1a): one per pooled `Exec`, owned by it | `any` |
 | A document group | an Ariadne `Runtime` whose document `ariadne.exec.isolate_documents` isolates (Stage 1b, 4.12), registered as a frame group | `host` when the document's env holds a `host_only` native or its host declared a thread-affine prefix at, above or under its prefix (4.8); else `any` |
-| A job group | `exec_coordinator::submit_local` with a pool attached (Stage 2) | `any` |
+| A job group | `exec_coordinator::submit_local` with a pool attached (Stage 2, S2c) | `any` |
 | A spawn group | the pool, for `spawn-isolated` children (Stage 3); up to `threads` per owner, made lazily | `any` |
 | An action group | an Ariadne document with `ariadne.exec.parallel_actions: k` (Stage 3) | `any` |
 
@@ -909,8 +916,9 @@ run queue keys on a process's effective priority (its base, or a lock-inheritanc
 **Stage 1: fork-join across groups** (built in Stage 1a, `exec_pool::pump_all`).
 - **Order.** `pump_all` orders groups longest-last-pump first (LPT), which approximates the
   shortest makespan; groups skipped by the last deadline go first, and ties go by creation order.
-  From Stage 2, which publishes each group's `best_runnable` (4.5), ties go to the group with the
-  better one. At threads 0, and in deterministic mode, every group is pumped on the caller in
+  From S2c, ties go to the group with the better `best_runnable` (4.5), which S2a's pumps publish
+  (`pump_result::best_runnable`) and nothing reads yet. At threads 0, and in deterministic mode,
+  every group is pumped on the caller in
   creation order (4.14).
 - **Execution.** Workers and the caller take groups from one mutex-guarded list per `pump_all`
   call. The caller pumps the host-affinity groups first, in creation order, and the groups on a
@@ -943,63 +951,174 @@ run queue keys on a process's effective priority (its base, or a lock-inheritanc
   told no one, and under load a frame (`exec_pump_frame`, an isolated document's `drain()`) could
   wait for ever (`ExecPool.AForceMovedCallEndsAtItsDeadline`).
 
-**Stage 2: continuous pumping.** Groups are `attach`ed to the pool.
-- **The group state word** follows the Akka and CAF mailbox pattern:
-  - `SCHEDULED`: in the ready queue or being pumped;
-  - `NOTIFIED`: work arrived since the pump began;
-  - `PUMPING`: holds the owner thread id.
-- **`wake(g)`**, called after any post to `g`'s ingress, a completion, or a due timer:
-  - `old = g.state.fetch_or(SCHEDULED | NOTIFIED)`.
-  - If `old` lacked `SCHEDULED`, push `g` onto the ready queue and notify one parked worker.
-  - Exactly one caller sees that transition, so a group is never queued twice.
-- **A worker that pops `g`:**
-  1. clears `NOTIFIED`;
-  2. takes the token;
-  3. pumps one slice (default 2 ms or 20000 steps);
-  4. releases the token;
-  5. if `g.wants_pump()` is true, pushes `g` back. Otherwise it CASes `SCHEDULED -> 0`, expecting no
-     `NOTIFIED`. If the CAS fails because a post set `NOTIFIED` meanwhile, it pushes `g` back.
-  - A post that races the release is therefore never lost. This is the re-check that A's release
-    and B's idle loop lacked.
-- **`wants_pump()`** is true when the group has a runnable process, its ingress is non-empty (the
-  atomic flag from `perf/sched`), or its earliest timer is due.
-- **The ready queue.** One mutex-guarded queue, ordered by each group's virtual time: pump time
-  consumed, divided by the group's weight. A CPU-heavy group then cannot starve a latency-sensitive
-  one.
-  - **Weight from priority.** At the end of each pump a group publishes `best_runnable`, the best
-    effective priority among its runnable processes, lock boosts included. Under a priority policy
-    its weight is that priority's CFS weight (1024 at 0, about 1.25x per step). A group of nice-0
-    processes is unweighted; a group holding a -10 process, or a lock holder boosted to -10, gets
-    about 9x the pump share of a nice-0 group, and none starves. Round-robin groups keep 1024.
-  - `state_exec.groups.priority_weights` (default on) turns it off. It ships on only once
-    `prio.groups_weighted` passes (6.3).
-  - The queue's mutex is taken about once per slice per worker (2 ms), so per-worker deques with
-    stealing are not needed at group granularity. They are a later option if `mt.groups.flood`
-    shows contention.
-- **Locality.** A group woken by a cross-group message from worker W goes into W's one-entry
-  `next` slot, Go's `runnext`. A request-and-reply pair of groups therefore stays on one core when
-  W is about to go idle. The slot is bypassed after 3 consecutive uses (Tokio's fairness valve).
-- **Parking.** Idle workers spin about 20 us, then park on the pool's eventcount
-  (`WaitOnAddress` on Windows, a futex on Linux, a condition variable elsewhere). The parking
-  timeout is the earliest timer among attached groups.
-  - Wakes use the eventcount's prepare, re-check, commit protocol: a worker announces it is about to
-    sleep, re-checks the queue, then sleeps. A wake between its last look and its sleep is never
-    lost (D's graft).
-- **Timers.** Each group keeps `perf/sched`'s timer heap. The pool keeps a small heap of
-  (deadline, group) for the earliest timer of each idle group. A worker that finds one due wakes
-  that group.
-- **Host-affinity groups** are pumped only by the host thread, in `pump_host()` or while it waits
-  in `wait_for_work`.
+**Stage 2: continuous pumping** (S2a, built in `perf/threaded-s2a`; the plan is
+`threaded-impl/S2.md`, S2-Q2 to S2-Q6, S2-Q13 and S2-Q15). A host `attach`es a group to the pool
+(`exec_pool::attach`, 4.12), and from then on the group is pumped whenever it has work and its host
+does not hold it, with no frame barrier. With nothing attached the pool is Stage 1's. This text
+first said `wake(g)` after any post, a release reading `wants_pump()`, an eventcount over
+`WaitOnAddress` or a futex, the pool reading each idle group's earliest timer, and weights on;
+S2.md section 0 (rows 7-12) records why each was built otherwise, as below.
+- **The notifier** (S2-Q2). Every post reaches `wake(g)` through a notifier inside the group's
+  scheduler's `detail::wakeup` (`wakeup::set_notifier`, `async_scheduler::set_wake_notifier`),
+  which `attach` installs and `detach` clears. While one is installed, `wakeup::notify()` calls it
+  instead of signalling, under the wakeup's own small notifier lock, and `notify_work` calls
+  `notify()` on every post (`post_message`, `post_async_completion`, `post_control`, under the
+  ingress mutex), not only while a `wait_for_work` waits. The lock port shares the scheduler's
+  wakeup and notifies under its `mu_` already, so lock posts (grants, relevels) reach the notifier
+  with no change to `lock_home.*` or `lock_manager.*`; a lock home made lazily mid-pump gets it
+  too. The lock order is the host's state, then an ingress mutex or a port's `mu_`, then the
+  notifier lock, then the pool's ready-queue mutex Q, and the pool never posts, installs or clears
+  a notifier while it holds Q. Clearing a notifier waits for a call in progress and none starts
+  after, so no wake reaches a group after its detach. A scheduler with a notifier installed is
+  never waited on through its own `wait_for_work` (asserted on its blocking path). With none
+  installed, a post reads one atomic more than before.
+- **The group state word** (`group_pool_link::state`, S2-Q4), the Akka and CAF mailbox pattern,
+  has four bits:
+  - `scheduled`: in a ready queue, or being pumped;
+  - `notified`: work arrived since the pump began;
+  - `pumping`: a worker, or the attaching thread, pumps it (a flag; the token says which thread);
+  - `detaching`: its detach or teardown has begun.
+
+  Beside it the pool keeps three facts per group under Q: `queued` (in the ready queue, a worker's
+  `next` slot or its attaching thread's ready list), `host_held` (the host thread holding the
+  token, for a `with_group` or a host body) and `deferred` (popped while held). With the four bits
+  alone a host's release could not tell a group still queued from one a worker popped and left,
+  and would queue it twice. The transitions are frozen in `exec_group.h`'s comment on
+  `group_pool_link`, amended from PL-1's model (below); in short:
+- **`wake(g)`**, the notifier, on the posting thread: `old = fetch_or(scheduled | notified)`. If
+  `old` had `scheduled` or `detaching`, done. Else, under Q, unless `detaching` is set by now,
+  queue `g`, then outside Q wake one parked worker (or the attaching thread, for a group only it
+  pumps). Exactly one caller sees the transition, so a group is never queued twice.
+- **A worker** pops `g` under Q and sets `pumping` in the same step. A `detaching` group is
+  dropped; one a host holds is left `notified` and `deferred` (its host's release queues it again)
+  while the worker takes the next. Then, with no lock: clear `notified`, take the token, which
+  nothing else holds now, pump once on the pool's budget (`pool_options::pump_steps`, 20000, and
+  `pump_seconds`, 2 ms of the group's own time: a `pump_budget`), release the token.
+- **The release** reads the pump's `pump_result`, never the scheduler: `wants_pump()` reads state
+  only the pump owner may read (S2.md section 0, row 8). The pump fills it under the token from its
+  run loop's end (`async_scheduler::run_report`, computed only while a notifier is installed):
+  `runnable` (its budget ran out with a process ready), `next_deadline` (the earliest work no post
+  announces: a timer, a timed receive's or a lock wait's deadline, a call's timeout or charge beat,
+  the collection falling due (4.7), the frame beat), `deadline_precise`, `best_runnable` and
+  `awaiting_frame`. Under Q it clears `pumping`; a failed pump goes to 4.17; then, after the hold
+  handoff (below), if `runnable` or the deadline is due it queues `g` again; else it CASes the word
+  from exactly `scheduled` to 0, and only if that succeeds files `next_deadline` in the pool's
+  timer heap. A failed CAS (a post set `notified` during the pump) queues `g` again, so a post that
+  races the release is never lost: the re-check that A's release and B's idle loop lacked.
+- **The ready queue** is one heap under Q, by virtual time (the pump time a group consumed), then
+  creation order. A woken group's virtual time is clamped up to a monotone floor less one pump
+  (S2-Q13): the floor is the virtual time of the last group popped (CFS's `min_vruntime`), the
+  slack `pump_seconds` (2 ms when pumps have no time limit), so a long-idle group gets no credit
+  with which to starve the busy ones, weights or not. Q is taken about once per pump per worker, so
+  per-worker deques with stealing are not needed at group granularity; they stay a later option if
+  `mt.groups.flood` shows contention.
+- **Weights ship off** (S2-Q13). `pool_options::priority_weights` is declared and false, and a
+  group's virtual time is its pump time, unweighted. S2c builds the weights: at the end of each
+  pump a group publishes
+  `best_runnable` (`process_table::best_runnable()`, the best effective priority among its ready
+  processes, lock boosts included; S2a copies it into `pump_result`, unused), and under a priority
+  policy its weight is that priority's CFS weight (1024 at 0, about 1.25x per step), so a group
+  holding a -10 process gets about 9x the pump share of a nice-0 group and none starves;
+  round-robin groups keep 1024. They are turned on (`priority_weights`, the tree's
+  `state_exec.groups.priority_weights`) once `prio.groups_weighted` passes (6.3).
+- **Locality.** A group a worker's pump wakes (a cross-group message, a lock grant) goes into that
+  worker's one-entry `next` slot, Go's `runnext`, so a request-and-reply pair of groups stays on
+  one core while the waker is about to go idle. The slot is bypassed after 3 consecutive uses
+  (Tokio's fairness valve). When no worker spins, the wake also wakes a parked worker, which takes
+  the slot if the waker has not come back to it (Go's `wakep`), so a woken group never waits out
+  its waker's whole pump while others park; a worker that blocks on a waiting host body hands its
+  slot's group on.
+- **Parking** (S2-Q3): an eventcount made of an atomic epoch and one `detail::wakeup` per worker,
+  not `WaitOnAddress` or a futex (whose timeouts follow the system tick on Windows unless
+  `timeBeginPeriod` is raised). An idle worker spins about 20 us watching the epoch, without Q,
+  then prepares under Q (it lists itself as parked and notes the epoch), re-checks, and commits to
+  its wakeup unless the epoch moved; a waker moves the epoch and notifies a listed worker, whose
+  wakeup keeps the notification, so a wake between a worker's last look and its sleep is never
+  lost (D's graft). A wake goes to no worker while one spins (the spinner sees the epoch, as
+  Tokio's searching worker does), else to a parked one (a P-core first; under `force_move`, one
+  that did not pump the group last). A worker that pops while more groups are queued wakes one
+  more. With no group attached for them, workers wait on Stage 1's condition variable as before.
+- **Timers.** A group publishes its next deadline at each pump (above), and the release files it
+  only when the group goes idle: in the workers' timer heap, or, for a group its attaching thread
+  pumps, in that thread's own heap, which its `wait_for_work` waits for. One parked worker, the
+  timer keeper, waits for the workers' heap's earliest entry; the others park untimed, and a worker
+  about to pump makes a parked one keeper when the heap has none. A wait is precise (the
+  high-resolution timer, which spins up to 0.6 ms on Windows) only for a sleeper's or a timed
+  wait's deadline (`deadline_precise`), as `wait_for_work`'s rule is; the call-charge beat, the
+  collection and the frame beat are coarse, so workers do not spin 0.6 ms of every millisecond. A
+  due entry wakes its group, unless it is detaching or detached. An entry a later wake made stale
+  is skipped, and a heap is rebuilt without its stale entries once they outnumber its live ones.
+- **Frame waiters** (`yield_frame`, `(await <value>)`) count as a coarse timer at now + 1 ms
+  (S2-Q4), as `Exec.run` and `run_all` beat, so a frame-yielding process never spins a worker; the
+  pump's `wake_awaiting` gives them their frame. Deterministic mode replaces the beat with the
+  host's next `pump_host` (below).
+- **Groups pumped by their attaching thread only** (S2-Q4): a host-affinity group, one on a
+  single-mode lock manager (`caller_only`), and every attached group of a pool with no workers or
+  in deterministic mode (4.14). Their wake goes to that thread's ready list and wakes the thread,
+  never a worker, and it pumps them in `pump_host`, each once on the pool's budget as a worker
+  would; `wait_for_work` waits for one to be queued or fall due.
+- **`force_move`** (`pool_options::force_move`, or `CVC_EXEC_FORCE_MOVE=1`) works in continuous
+  mode too: each pump goes to a worker other than the one that pumped the group last
+  (`stats().moves` counts the continuous pumps on another thread than the group's last), a group
+  waiting at most one pump for another worker while all the others are busy. The bench's
+  `mt.groups.move` compares two pools that differ only in it.
+- **The host thread** of an attached group is its attaching thread (S2-Q5; 4.9): it runs the
+  group's host-queue entries (`host_proxied` bodies, deferred `on_complete` callbacks), finishes
+  its failure (`take_failed`, 4.17), and touches the group only under its token (`with_group`,
+  4.12), since a worker may pump it at any time. A worker that pops a group a host holds leaves it
+  `notified` and `deferred`, and the host's release queues it again; when no pop was deferred the
+  release takes `wake(g)`'s transition, since what ran under the token (a submit, a kill, a resume)
+  posts nothing.
+- **The hold handoff and its give-back.** A worker that queues its group again and pops it in the
+  same critical section (the `next` slot) would keep a host waiting in `with_group` off a busy
+  group for good (CT-3 took 359 s before the handoff). So a release, before it chooses between
+  queueing and idling, hands `host_held` to a host waiting to hold the group now, on its behalf: a
+  `with_group` linked on it as waiting, else its attaching thread inside `pump_host` or
+  `wait_for_work` with host entries for it. The pop that follows leaves the group deferred, and the
+  host takes the hold up at its next look. A host that is not waiting gets nothing, and the group
+  goes on being pumped: a busy host freezes no group. An attaching thread that leaves `pump_host`
+  or `wait_for_work` with a hold handed to it and not taken up gives it back (`host_held` cleared,
+  its waiters notified, and the group queued again if a pop deferred it), and a detach takes such a
+  hold back at its first step.
+- **Detach and teardown** (S2-Q4): (1) under Q set `detaching`, taking back a handed hold; (2) wait
+  for `pumping`, and another thread's hold, to clear, servicing the calling thread's host queue;
+  (3) take the token, and the teardown closes the lock port; (4) under Q leave the ready queue, the
+  `next` slots, the ready and failed lists and the timer heap, and take the group's entries off its
+  attaching thread's host queue; then, outside Q, clear the notifier (waiting for a wake in
+  progress), and only then drop the attachment and store 0 in the word; (5) `detach` runs those
+  entries and releases the token, while the teardown drops them unrun and then kills, shuts the
+  host down, purges and reaps (4.2). So no worker or wake touches a group after its detach, and
+  the kills come after it.
+- **The model** (PL-1, S2-Q15). `tools/locks_model/state_word.py` checks the word exhaustively at
+  bounded counts of posters (ingress and lock posts), workers, the timer, hosts and the attaching
+  thread, with a teardown or a detach, for lost wakes, double queueing, a pump of a held group, a
+  contended token, starvation (a fair-cycle liveness check) and anything touching the group after
+  its detach ([`tools/locks_model/README.md`](../tools/locks_model/README.md), "The state-word
+  model"). In S2a.0's first host row it found four bugs (a lost wake when a `with_group` submits,
+  two host threads holding at once, `with_group` racing a detach, a detach inside `with_group`) and
+  the order of step 4; in the pool's hold handoff, that handing the hold to an attaching thread
+  busy outside the pool froze its group, and that handing it only to a waiting host still froze
+  one without the give-back. The frozen rows carry every amendment, and with them it finds nothing.
+  CTest runs its quick suite (`state_exec_state_word_model_test`), `locks-deep.yml` its deep one.
 - **Group moves.** A group pumped by worker 1 now and by worker 3 next is a move. It costs only the
   cache misses of its state, and nothing has to be re-registered, because nothing in a group is tied
   to a thread (section 2.2). Groups move freely in Stage 2; processes move between groups only in
-  Stage 3.
+  Stage 3. With more runnable groups than workers a forced move costs that and the heap work; with
+  as many workers as groups each forced pump hands the group to an idle worker, and a move then
+  measures the OS's wake latency.
 
 **Deterministic mode** (`pool_options::deterministic`, `state_exec.deterministic`, or
 `CVC_EXEC_DETERMINISTIC=1`):
 - every group is pumped on one thread in a fixed rotation by group creation order (as built:
-  `pump_all` pumps them all on its caller, in creation order);
+  `pump_all` pumps them all on its caller, in creation order; attached, its attaching thread pumps
+  them in `pump_host`);
 - slices are fixed in steps, not time: the frame deadline and the seconds budgets are ignored;
+- in continuous mode frames are the host's, not the clock's (S2a; R2b's S-M4): each `pump_host`
+  call is one pass, in creation order, over the groups queued when it began, each pumped at most
+  once, and a group whose pump left a process waiting for the next frame
+  (`pump_result::awaiting_frame`) is due at the next call instead of at the 1 ms beat, as a
+  fork-join frame is one `pump_all`. Sleepers and timed waits stay on the wall clock, in both
+  modes;
 - each group's random stream is seeded from the group's name (a hash), unless it has a seed or has
   drawn already; `exec_pump_frame` pumps group 0 with steps only and no deadline too, and seeds its
   stream from the name "group0";
@@ -1236,8 +1355,9 @@ itself gets faster, so placement keeps chatty pairs in one group.
   - No other thread mutates or refcounts anything in the walked graph.
 - **Host references.** A host holding a group's value is an external owner, which keeps it live.
   Hosts read and drop such values only between pumps (fork-join) or under the token (continuous).
-  A queued `host_proxied` body (4.9) runs on the caller while no thread pumps its group, in a
-  context with the group's registry and random stream, so what it tracks goes to the group. A
+  A queued `host_proxied` body (4.9) runs on the caller while no thread pumps its group (in
+  continuous mode, on the attaching thread under the group's token), in a context with the group's
+  registry and random stream, so what it tracks goes to the group. A
   deferred `on_complete` callback gets the process's result alone, in no context.
 - **Lifetime.** A group's registry dies with its owner, after one final collection: the deleter
   (`cycle_registry_deleter`) collects it (even inside another group's step, where
@@ -1252,7 +1372,11 @@ itself gets faster, so placement keeps chatty pairs in one group.
   once a second. A thread's registry used to be collected by whichever scheduler stepped on that
   thread. So a run (`run_loop`) that leaves nothing runnable collects the scheduler's registry when
   that rule says one is due: since the pool pumps an idle group every frame, its garbage goes
-  within about a second of a process ending (5 item 8).
+  within about a second of a process ending (5 item 8). In continuous mode (S2a) nothing pumps an
+  idle group every frame, so its pump publishes when a collection falls due
+  (`cycle_collection_due_at`: at once when one is due by its growth, else a second after the last
+  collection once a process ended and something was tracked since) as one of the deadlines in
+  `pump_result::next_deadline`, and the pool's timer pumps the group then (4.4, S2-Q4).
 - **No thread's own registry** (S1-Q3). A thread's own registry used to be dropped at thread exit
   with nothing collected, unless the thread opted in to a collection then. There is none any more:
   a bare scheduler's or evaluator's registry is its own, collected as it goes on whichever thread
@@ -1554,7 +1678,7 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
 | Kind | In group 0 or a host-affinity group | In an `any` group |
 |---|---|---|
 | `any` | installed as it is | installed as it is; it runs on whatever thread pumps the group, so it touches only its own context, thread-safe tables and the tree through pinned lookups |
-| `host_proxied` | installed as it is | installed as a wrapper. On the `pump_all`'s caller, at threads 0, or with no `pump_all` active, the body runs inline, as today. On a worker the process parks through `begin_external`, and the body goes onto the call's host-call queue with copies of its arguments (a share-mode copy, made as the process's deep-data work when one is compound); the caller runs it once the group's pump has ended, and the result comes back as a completion at the group's next pump |
+| `host_proxied` | installed as it is | installed as a wrapper. On the `pump_all`'s caller, at threads 0, or with no `pump_all` active, the body runs inline, as today. On a worker the process parks through `begin_external`, and the body goes onto the call's host-call queue with copies of its arguments (a share-mode copy, made as the process's deep-data work when one is compound); the caller runs it once the group's pump has ended, and the result comes back as a completion at the group's next pump. For an attached group (Stage 2) the queue is its attaching thread's, below |
 | `host_only` (`register_action_intrinsics`'s kind when given none) | installed as it is | not installed: a call is a NameError at any thread count, never a race, and `has?` does not see it. A document whose env would hold one is `affinity::host` (4.12) |
 
 - **Ariadne's providers** (built in Stage 1b, S1-Q7, S1.9). `register_action_intrinsics(app,
@@ -1677,14 +1801,47 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
   - A body, like a deferred `on_complete` callback, must not call `pump_all` or destroy a group
     (debug assertions).
   - **Rule: the host thread never blocks without servicing the host-call queue.** In Stage 1 that
-    is the fork-join join; Stage 2 adds `kill_owner`, `with_group` waits and `wait_for_work`. A
-    blocked worker therefore always makes progress.
+    is the fork-join join. S2a adds `wait_for_work`, `with_group`'s and `detach`'s waits, the
+    teardown's wait for a pump (`detail::detach_begin`), `take_failed`, and `pump_host`, which
+    never blocks; S2b adds `kill_owner`. A blocked worker therefore always makes progress. The
+    exceptions, each found deadlock-free (R2b's S-m6), are the teardown after it has left the pool
+    (the kills, and the host's shutdown waiting for its kernels: the group's own entries are gone
+    by then, and a worker blocked on another group's waiting body for this thread waits that
+    long), and the token's take in a detach or `take_failed` while a thread outside the
+    pool holds it (`take_token`'s short sleeps: a host that took `pump_owner_scope` itself instead
+    of `with_group`). A `pump_all` called by an attaching thread services its continuous queue in
+    its join too, beside its call's queue.
   - Each `pump_all` call has its own queue, which only its caller services (S1-Q11), so a host
     thread never waits behind another caller's batch. So with two callers at once (an Ariadne
     frame beside an `ExecPool.run_all`, or two host threads), one provider's `host_proxied` bodies
     can run on two threads at once: "the host thread" is the caller of the body's `pump_all`, not
     one fixed thread, and a provider whose state only one thread may touch serializes its bodies
     itself.
+  - **In continuous mode** (S2a, S2-Q5) no `pump_all` holds an attached group, so the queue is per
+    attaching thread (the one that called `attach`), not per call, and "the host thread" of a
+    group is its attaching thread:
+    - A worker pumping an attached group queues a body there, and the thread runs it in its
+      `pump_host`, `wait_for_work`, `with_group` and `detach` (and a teardown's `detach_begin`),
+      taking the group's token as `with_group` does, so a body never runs beside a pump, with the
+      group's registry and random stream bound. One group's bodies run in the order they were
+      queued, except that a waiting body (`run_on_host_waiting`) runs at once, under its blocked
+      worker's token, so it may run before an earlier non-waiting body of its group (another
+      process's). On the attaching thread's own pumps (a group only it pumps) a body runs inline.
+    - A worker-pumped group's `on_complete` callbacks go onto the same queue (below).
+    - An exception an entry throws, or an inline `on_complete`'s, is rethrown from `pump_host` or
+      `wait_for_work` once it is done, as `pump_all` rethrows; from `with_group`, `fn`'s wins.
+    - `detach` runs the group's queued entries on the detaching thread; a teardown drops them
+      unrun (its kills settle their calls as cancelled), as `purge_host_calls` does for a
+      `pump_all`'s queue.
+    - The calls that would wait for themselves refuse (`std::logic_error`): `detach` inside the
+      group's own pump (an inline native or callback of a group its attaching thread pumps) or
+      inside its own waiting body, and `with_group` inside its own waiting body (inside its own
+      pump or hold, `with_group` nests). A teardown in any of those places aborts in every build,
+      as inside the group's own pump (`detail::host_held_here`, 4.17).
+    - A host that stops servicing blocks a worker waiting on one of its waiting bodies: the pool
+      counts each such wait over 10 ms (`pool_stats::long_host_waits`), logs it once a group a
+      minute while it waits, and leaves that worker out of `active_workers`. Only a waiting body
+      blocks a worker; a busy host freezes no group (4.4's hold handoff).
   - libcvc's own builtins and stdlib are `any`. pycvc's Python natives are `any`, because
     `call_python` takes the GIL itself, so they serialize on the GIL.
 - **`on_complete` callbacks** (5 item 9; built in Stage 1a). In a threaded `pump_all` (workers,
@@ -1699,23 +1856,55 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
   outside a `pump_all`, callbacks run inline, as today, and a throw ends the pump (rethrown from
   `pump_all` after the join); so do `host_first`'s. A callback given to the group's scheduler
   directly (`sched().execute`, which also copies no AST and defaults no owner) runs where the group
-  is pumped, inside the pump, on a worker included. In continuous mode (Stage 2) they run in
-  `pump_host`.
-- **Kernel pools** (C's graft, Stage 2). `perf/async` gives one persistent background pool.
-  - Once group workers compete with kernels for cores, the pool is split in two:
-    - `background_cpu`, sized to the cores minus the group workers;
-    - `background_io`, larger, for blocking kernels.
-  - `executor::background` keeps meaning the first, and a registration option picks the second.
+  is pumped, inside the pump, on a worker included. In continuous mode (S2a, S2-Q5) a
+  worker-pumped attached group's callbacks are queued on its attaching thread's host queue and run
+  there, in completion order, under the group's token with its registry and stream bound (in
+  `pump_host`, `wait_for_work`, `with_group` or `detach`); on the attaching thread's own pumps they
+  run inline. A failed group's are run by `take_failed` (4.17).
+- **Kernel pools** (C's graft; Q9; built in S2a, S2-Q11). `perf/async` gives one persistent
+  background pool, and until the app's exec pool has workers every kernel runs there, as before.
+  - Once `app::exec_pool()` is built with workers, group workers compete with kernels for cores,
+    and the pools split, for the app's life (`app::trySubmitKernel`, which the exec async host
+    calls for `executor_kind::background`):
+    - `background_cpu`: max(1, cores - exec workers) persistent workers of its own, started
+      together when its first kernel comes, in priority order and FIFO within one, runs every
+      kernel but an I/O call's;
+    - `background_io` is the existing background pool, at its size (`setThreadPoolSize`'s,
+      `hardware_concurrency()` by default) and with its other tasks: it runs I/O calls' kernels,
+      picked by the existing `async_options::io` (set by the net and room calls), and
+      `compute_async`'s blocking jobs.
+  - As designed first, `background_io` was to be larger and picked by a new registration option;
+    the existing pool's size and flag served (S2.md section 0, row 24). At threads 0, in a build
+    without threads, and for a pool built apart from the app's (`std::make_unique<exec_pool>`)
+    nothing splits. A kernel that finds no `background_cpu` worker can be started goes to the
+    background pool. `wait_for_threads()` and `~app` interrupt and wait for `background_cpu`'s
+    tasks as for the background pool's; `getActiveThreadCount()` and `getPendingThreadCount()`
+    count `background_io`'s only, and `backgroundCpuPoolSize()` is the other's size;
+    `kernelPoolHere()` says which pool the calling thread works for.
   - This reverses settled question 4 of
-    [`docs/STATE_EXEC_EXCEPTIONS.md`](STATE_EXEC_EXCEPTIONS.md) ("There's no separate I/O pool",
-    line 840; section 3.5) from Stage 2 on, as the user decided (Q9).
+    [`docs/STATE_EXEC_EXCEPTIONS.md`](STATE_EXEC_EXCEPTIONS.md) ("There's no separate I/O pool";
+    section 3.5) once the exec pool has workers, as the user decided (Q9); that document says so.
 - **Blocking steps** (B21). An inline kernel or a `call->wait` at a point that cannot park
-  (`intrinsics.cpp:537-542`) blocks only the worker pumping that group.
+  (`intrinsics.cpp:1049, 1135`, `async_host.cpp:541-560` at a2e13d49) blocks only the worker
+  pumping that group.
   - Other workers keep pumping other groups, which is better than today, where it stalls everything.
-  - A long-step monitor logs any step over 1 ms with the native's name, as BEAM's `long_schedule`
-    does.
-  - In continuous mode, a worker blocked over 10 ms is excluded from the active count, and the
-    pool may start one compensating worker (Go's syscall handoff). Stage 2 makes this optional.
+  - **The long-step monitor** (S2a.7, S2-Q11), as BEAM's `long_schedule`: a step that takes longer
+    than its scheduler's threshold, one that throws included, is counted
+    (`async_scheduler::long_steps()`) and reported to the scheduler's sink with the call-site name
+    of the native it ended in, at most once per name per minute. The name is
+    `evaluator_state::native_site`: the call's head symbol (`+`, `f` in `(f x)`), "native" for a
+    function a deep-data job called, "with-lock" for a lock wait, "super", and "(no native)" when
+    the step applied none. At `slice_steps` above 1 it times a run's windows between the run's
+    clock readings (4.4, Stage S) and names a window's last step's native. The threshold is the
+    tree's `state_exec.long_step_ms` when set (0: off; 4.13), else the scheduler's default
+    (`set_long_step_default`): 1 ms for every group a pool with workers pumps, fork-join or
+    continuous, given at its first pump there, else 0. An `exec_group` logs through its app at
+    level 2, `long step: <native> took <ms> ms (group '<name>')`, and group 0 likewise with
+    `(group 0)`. Off, it reads no clock. The window is wall time, so on a loaded machine the OS's
+    preemption can make any step long at the 1 ms default; the line is rate-limited per name.
+  - A worker blocked over 10 ms on a host body is left out of `pool_stats::active_workers`. The
+    compensating worker (Go's syscall handoff) is deferred (S2-Q11): it follows only if
+    `mt.groups.async` shows workers starved by inline kernels.
 
 ### 4.10 Budgets and time accounting
 
@@ -1828,7 +2017,12 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
 ```cpp
 enum class group_affinity { any, host };
 struct pump_budget { std::uint64_t steps; double seconds; };  // seconds: infinity = no limit
-struct pump_result { std::uint64_t steps = 0; int woken = 0; bool failed = false; };
+struct pump_result { std::uint64_t steps = 0; int woken = 0; bool failed = false;
+                     // Stage 2 (S2a): what the pump left, from async_scheduler::run_report
+                     bool runnable = false;
+                     clock::time_point next_deadline = clock::time_point::max();
+                     bool deadline_precise = false; std::optional<int> best_runnable;
+                     bool awaiting_frame = false; };
 class exec_group {
  public:
   struct options {
@@ -1877,12 +2071,21 @@ class exec_group {
 - **`wants_pump()`** is true when a pump has work: a runnable process, a process awaiting the next
   frame (`awaiting_frame_count()`, which the pump's `wake_awaiting` readies), or something
   `wait_for_work` would wake for, already due (pending ingress, a lock post, a timer due, a call to
-  charge).
+  charge). It reads state only the pump owner may read, so continuous mode's release reads the
+  pump's `pump_result` instead (4.4): `runnable`, `next_deadline` and `deadline_precise`,
+  `best_runnable` and `awaiting_frame`, which the pump copies under the token from its run loop's
+  report (`async_scheduler::last_run_report()`, computed only while a wake notifier is installed;
+  section 5).
 - A value a host posts to a group's scheduler (`post_message`) is handed over, moved in: the host
   keeps no reference to a compound value it posted, and never posts one value to two groups
   (invariant G, 4.3). Nothing checks it in Stage 1 (`CVC_EXEC_VERIFY`'s tagging is not built), so
   a value shared that way is a data race in a release build.
-- td's `with_group` (continuous mode) is Stage 2's, and not declared.
+- On an attached group (S2a), `execute` from a thread that neither pumps nor holds the group (a
+  host outside `with_group`) runs under the pool's `with_group`, so it waits for a pump in progress
+  and the group is woken afterwards; its `on_complete` then runs on the attaching thread's host
+  queue when a worker pumps the group (4.9). The host's other touches of an attached group's
+  scheduler (reads, kills, reaps, `sched().execute`) go through `with_group` (below); a post
+  (`post_message`, `post_control`) stays callable from any thread, and wakes the group.
 
 **`exec_pool`** (`inc/cvc/core/exec_pool.h`, `src/cvc/core/exec_pool.cpp`; Stage 1a's fork-join
 half; `app::exec_pool()`):
@@ -1895,9 +2098,19 @@ struct pool_options {
   double inline_below = 100e-6;             // adaptive helper wake (4.4)
   cpu_set placement = cpu_set::performance;
   cvc::thread_class worker_class = cvc::thread_class::normal; // L4; not applied in Stage 1
+  // Stage 2 (S2a; S2-Q12, S2-Q13, S2-Q17)
+  std::uint64_t pump_steps = 20000;         // one continuous pump's budget (deterministic: steps)
+  double pump_seconds = 2e-3;
+  bool priority_weights = false;            // declared off; S2c builds the weights
+  bool force_move = false;                  // as CVC_EXEC_FORCE_MOVE=1, for this pool, both modes
 };
 struct pool_stats { std::uint64_t pumps, helper_wakes, skipped, worker_pumps;
-                    unsigned effective_threads; };
+                    unsigned effective_threads;
+                    // Stage 2 (S2a): continuous mode's counters
+                    std::uint64_t wakes, timer_wakes, requeues, parks, empty_wakes, moves,
+                                  host_pumps, long_host_waits;
+                    unsigned attached, active_workers;
+                    std::uint64_t fuzz_points; };
 class exec_pool {
  public:
   explicit exec_pool(const pool_options &);
@@ -1917,10 +2130,15 @@ class exec_pool {
   bool deterministic() const;               // its flag, or CVC_EXEC_DETERMINISTIC=1 at build
   std::vector<std::string> take_notes();    // the clamps and failed workers, for the owner to log
   void set_last_pump_for_test(exec_group &, double seconds); // GR-9
-  // Stage 2: continuous, routing, control
-  void attach(exec_group &); void detach(exec_group &);
-  bool pump_host(double max_seconds);       // host-affinity groups and the host-call queue
-  bool wait_for_work(double seconds);       // services the host-call queue while it waits
+  // Stage 2a (built): continuous mode
+  void attach(exec_group &);                // this thread becomes the group's attaching thread
+  void detach(exec_group &);                // waits for a pump, servicing this thread's queue
+  bool pump_host(double max_seconds);       // this thread's queue, then the groups only it pumps
+  bool wait_for_work(double seconds);       // services this thread's host queue while it waits
+  void with_group(exec_group &, const std::function<void()> &fn); // fn under the group's token
+  std::vector<exec_group *> take_failed();  // this thread's attached groups that failed, detached
+  bool attached(const exec_group &) const;  // any thread; a snapshot
+  // Stage 2b: routing, control
   bool post_message(const std::string &channel, value_t); // to the home group; false if full
   bool post_control(int pid, control_cmd);
   void kill_owner(const std::string &owner); // acknowledged by every group
@@ -1932,13 +2150,65 @@ class exec_pool {
 // (A pool's worker pumps are its stats().worker_pumps; no process-wide total is kept.)
 ```
 
-Stage 2's `pool_options` add `slice_seconds` and `slice_steps` (2 ms, 20000) and
-`priority_weights` (4.4). The pool owns no group: a group's owner destroys it before the pool goes
-(4.17). A group whose lock home attached to a single-mode manager is marked caller-only
+Stage 2's `pool_options` add `pump_steps` and `pump_seconds` (20000 steps, 2 ms: one continuous
+pump's budget), `priority_weights` (false; 4.4) and `force_move`; this text first called the
+budget `slice_steps` and `slice_seconds`, which name Stage S's runs now (S2.md section 0, row 4;
+S2-Q17). The pool owns no group: a group's owner destroys it before the pool goes (4.17). A group
+whose lock home attached to a single-mode manager is marked caller-only
 (`group_pool_link::caller_only`), and every pool pumps it on the caller of `pump_all` only, as a
 host-affinity group, logging it once per pool (a debug build asserts when a pool with workers is
 given one), so a pool built directly, or one app's pool pumping another app's groups, never steps
-a single manager's homes on two threads (S1-Q1).
+a single manager's homes on two threads (S1-Q1); attached, it is pumped by its attaching thread
+only.
+
+**Continuous mode** (S2a; 4.4, 4.9; S2-Q4, S2-Q5). A C++ host attaches its groups and drives them
+from its own thread:
+- `attach(g)`: the calling thread becomes `g`'s attaching thread, the group's notifier is
+  installed, and the group is woken once, so work posted before is seen. Refused
+  (`std::logic_error`) when `g` is attached already, to any pool, a `pump_all` holds it, or its
+  scheduler has a wake notifier installed already (`ExecPool.run_all`'s batch). From then on
+  `pump_all` refuses `g` (an assertion; `std::logic_error` in release builds) until it is
+  detached.
+- `with_group(g, fn)`: run `fn` on this thread under `g`'s token, the way the host touches an
+  attached group (a submission, a read, a kill, a reap), since a worker may pump it at any time.
+  It waits for a pump in progress, or another thread's `with_group` or host body, servicing this
+  thread's host queue; keeps workers off the group while `fn` runs (one that pops it leaves it
+  `notified`); and wakes it afterwards, since what `fn` did posts nothing. It nests inside the
+  group's own pump or hold; for a group not attached it takes the token as `pump_owner_scope` does
+  (throwing while another thread holds it), and for one being detached, the same once the detach
+  is over (at once on the detaching thread; a failed group's detach ends at `take_failed`). `fn`
+  may detach the group; destroying it inside `fn` aborts. It refuses inside the group's own
+  waiting body. `fn`'s exception propagates once the token is released, winning over an entry's.
+- `pump_host(max_seconds)`: on an attaching thread, run its host-queue entries, then pump its
+  queued groups that only it pumps (host-affinity, single-manager, and every group at threads 0 or
+  in deterministic mode), each once on the pool's budget, until none is queued or `max_seconds`
+  passed (in deterministic mode, one pass: 4.4). True when it ran an entry or pumped a group. It
+  never blocks, and never runs from a host body, a callback or a pump.
+- `wait_for_work(seconds)`: on an attaching thread, block until there is work for `pump_host` (a
+  group of its queued or falling due, a host-queue entry, a failed group to take) or `seconds`
+  passed, running its entries meanwhile. True when there is work; a failed group counts once,
+  until it is taken, so a loop that calls `take_failed` does not spin.
+- `take_failed()`: on an attaching thread, its attached groups whose pump failed, each once, in the
+  order they failed, detached by this call and logged through their apps (4.17).
+- `detach(g)`: S2-Q4's order without the kills (4.4): no worker pumps `g` once it returns, its
+  notifier is cleared, its queued entries have run on this thread, and it is an unattached group
+  again, which `pump_all` takes. On its attaching thread; nothing for a group not attached to this
+  pool. It refuses inside the group's own pump or waiting body. A group may also be destroyed
+  attached, on its attaching thread: its teardown leaves the pool first.
+- `attached(g)`, from any thread, is a snapshot; `stats()` adds continuous mode's counters: `wakes`
+  (groups queued by `wake(g)`), `timer_wakes` (queued by a deadline they published), `requeues`
+  (releases of a pump or a hold that queued a group again), `parks`, `empty_wakes` (worker wakeups
+  that found nothing to pump: PL-4's "no worker spins"), `moves` (continuous pumps on another
+  thread than the group's last), `host_pumps` (pumps on an attaching thread), `long_host_waits`,
+  `attached`, `active_workers` and `fuzz_points` (4.13).
+- The host's loop: `pump_host` with a small budget, else `wait_for_work` until its next frame or
+  event, and `take_failed` each turn. The attaching thread detaches what it attached before it
+  exits; nothing checks it, since nothing is kept per thread (S2-Q5's debug assertion would need
+  a `thread_local`), and `~exec_pool` asserts that nothing is attached.
+- Which hosts (S2-Q6): Ariadne stays fork-join, since a render must never overlap a pump, and so
+  does `ExecPool.run_all` (below); continuous mode serves C++ embedders now, and then Stage 3's
+  spawn groups and S2c's job groups. A continuous `ExecPool` waits for evidence: `mt.groups` with
+  `pump=continuous` beating fork-join by more than 10% on uneven groups (6.3).
 
 **The app** (`inc/cvc/core/app.h`; Stage 1a; [`docs/APP_API.md`](APP_API.md)):
 - `exec_pool()` builds the app's one pool at its first call, under its own mutex, from the tree
@@ -1963,6 +2233,9 @@ a single manager's homes on two threads (S1-Q1).
   `exec_pump_frame()` pumps the group until the handle is reset or destroyed, which the host does
   before the group goes, on the host thread, outside a pump.
 - `exec_pid_source()` is the pid source group 0 and every `exec_group` of the app share (4.5).
+- (S2a) The kernel pools (4.9): `trySubmitKernel(task, priority, io)`, where the exec async host
+  sends a kernel, split once the app's pool has workers; `kernelPoolHere()` and
+  `backgroundCpuPoolSize()`. Group 0 logs its long steps through the app (4.9).
 
 `async_scheduler` gains:
 - `async_scheduler(scheduling_policy, environment_ptr base)`, the base-env constructor (4.2);
@@ -1972,7 +2245,11 @@ a single manager's homes on two threads (S1-Q1).
 - `pump_owner_scope` and `pumped_elsewhere()` (4.1), on both schedulers;
 - `close_lock_port()` (4.2), on both schedulers;
 - `kill(pid, reason)` (4.5);
-- (Stage 2) an ingress entry kind for control and router messages;
+- (S2a) `set_wake_notifier(fn, ctx)` and `has_wake_notifier()` (4.4); `run_report` and
+  `last_run_report()`, what the last run loop left, computed only while a notifier is installed;
+  and the long-step monitor's `set_long_step_sink`, `set_long_step_default` and `long_steps()`
+  (4.9);
+- (S2b) an ingress entry kind for control and router messages;
 - (Stage 3) `adopt(process_ptr)`: like `restore`, keeping the pid and the process's state, its lock
   holds included;
 - a lock port for `wake` and `relevel` posts, with its own mutex, queue and pending flag and
@@ -2333,9 +2610,18 @@ and 9.1).
   - `run_all(programs) -> list[str]` puts program i on pooled `Exec` i % `size`, each pooled
     `Exec`'s programs one at a time and in order, and pumps the groups together in fork-join rounds
     (one `pump_all` each, `Exec`'s slice per group, no deadline) with the GIL released for the
-    whole batch, until every program has ended. With nothing runnable it waits on one parked
-    group's `wait_for_work` for at most 1 ms at a time, rotating, so a completion to any group is
-    seen within about 1 ms (Stage 2's eventcount replaces this). The results come back in program
+    whole batch, until every program has ended. With nothing to pump it waits once for the batch
+    (S2a.8, S2-Q6): each pooled group's scheduler has a notifier for the batch, which sets a flag
+    and signals one batch wakeup, so a post to any group, or `close()`, ends the wait at once;
+    otherwise it lasts until the earliest of the groups' run-report deadlines (timers, call
+    timeouts and charges, the 1 ms frame beat, collection) and idle limits, at most 50 ms. The 50
+    ms cap is a backstop under S2-Q6's deadline, as `Exec.run`'s idle wait is (R2b's S-m12); a
+    slot with a queued program starts at once. The notifiers are installed only for the batch and
+    cleared on every path, and no scheduler's `wait_for_work` blocks with one installed. Before
+    S2a it waited on one parked group's `wait_for_work` for at most 1 ms at a time, rotating.
+    `ExecPool.stats()` returns the pool's counters since it was made, as a dict: `batch_waits`,
+    and `batch_wait_timeouts`, the waits that ran out with work posted meanwhile (0 unless a
+    post's wake was lost; RA-1). The results come back in program
     order, rendered as `Exec.run` renders them; a failing program does not stop the others, and
     once all have ended `run_all` raises the first failure in program order.
   - A program parked for `idle_timeout` with nothing pending is killed, as in `Exec.run`. Each
@@ -2398,7 +2684,7 @@ and 9.1).
   thread, so a host destroys the coordinator on its scheduler's thread, or while nothing pumps the
   scheduler. Until Stage M, `migrate`'s kill of the source releases its locks like any kill; Stage M
   adds the refusal of lock holders (4.20).
-- **Stage 2.**
+- **Stage 2** (S2c, S2-Q14; not built).
   - `attach_pool(exec_pool &)` generalizes `attach_scheduler` (`exec_coordinator.cpp:223`).
   - `submit_local` (`exec_coordinator.cpp:586-615`) places a job in its own job group, or in the
     least-loaded of k job groups. This is the in-process analogue of its leader forwarding
@@ -2422,12 +2708,21 @@ From highest to lowest precedence, following the settings rules of
 
 The pool reads them once, when it is built (`app::exec_pool()`, at its first call). An unknown
 value is logged and the default used. Options given once the pool is built are not applied: the
-built pool is kept, and a different request is logged. `threads` cannot change while groups are
-attached (Stage 2).
+built pool is kept, and a different request is logged. A built pool's `threads` never changes,
+groups attached or not.
+
+**The long-step monitor's threshold** (S2a.7; S2-Q11, S2-Q17), `state_exec.long_step_ms`: in
+milliseconds, read under each async scheduler's watch root when a run loop starts after a setting
+under `state_exec` changed, as `state_exec.slice_steps` is (4.4, Stage S). A number read strictly
+(`"2ms"` is refused and leaves the value in force); 0 or less turns the monitor off; a key missing,
+deleted or empty gives the scheduler's default, 1 ms for a group a pool with workers pumps, else
+off (4.9). Since it is read whenever a run loop starts after a change, a scheduler given both
+slice settings now reads the tree's settings version once a run loop (R2b's S-m3, accepted).
 
 **Lock and priority settings** ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md)) follow the same
 precedence: `state_exec.policy` (`round_robin` by default), `state_exec.locks.threading` (`auto`,
-`single`, `shared`), `state_exec.groups.priority_weights` (on), `state_exec.worker_class`
+`single`, `shared`), `state_exec.groups.priority_weights` (S2c's; the weights ship off until
+`prio.groups_weighted` passes, S2-Q13, and S2a reads no such setting), `state_exec.worker_class`
 (`normal`, `pool_options::worker_class`), `state_exec.process_class`, and
 `ariadne.exec.lock_timeout` (1.0 s). `auto` makes the app's lock manager `shared` when the build
 has threads and `state_exec.threads` is above 0 (`CVC_EXEC_THREADS` counts here too), or pycvc is
@@ -2450,11 +2745,11 @@ whichever pool pumps it.
 
 | Host | How it opts in | Stage |
 |---|---|---|
-| C++ embedder | make `exec_group`s; `app.exec_pool(opts).pump_all(...)`, or `register_frame_group` and `exec_pump_frame`; `attach` in Stage 2 | 1a, 2 |
+| C++ embedder | make `exec_group`s; `app.exec_pool(opts).pump_all(...)`, or `register_frame_group` and `exec_pump_frame`; or `attach` them and drive them with `pump_host`, `wait_for_work`, `with_group` and `take_failed` (continuous mode, 4.12) | 1a, 2a |
 | Ariadne, several documents | `state_exec.threads: auto` (or `app.exec_pool(opts)` first), `ariadne.exec.isolate_documents: true`, and each frame `drain_begin` / `app.exec_pump_frame()` / `drain_end` (4.12) | 1b |
 | Ariadne, one document | `ariadne.exec.parallel_actions: k`; programs use `spawn-isolated` | 3 |
 | pycvc | `pycvc.ExecPool(app, threads=8).run_all(...)`; several `Exec`s on several threads | 1a (0) |
-| `exec_coordinator` | `attach_pool` | 2 |
+| `exec_coordinator` | `attach_pool` | 2c |
 | CLI | none (sync scheduler) | - |
 
 **A program opts in** with `(spawn-isolated script [name] [priority] [args])` (Stage 3), which
@@ -2467,15 +2762,20 @@ group automatically (D's `auto_spawn` is not taken; Q4).
   process. It does not override a host's `pool_options` (`ExecPool(threads=0)` stays 0).
 - `CVC_EXEC_DETERMINISTIC=1`: deterministic mode (4.4). Read when a pool is built.
 - `CVC_EXEC_FORCE_MOVE=1`: every group is pumped by a different thread on each pump (4.4), a lone
-  isolated Ariadne document's included; in Stage 3, every movable process moves every K pumps.
-  Read when a pool is built, so a test sets it for the pool it builds.
+  isolated Ariadne document's included, fork-join or continuous (`pool_options::force_move` does
+  the same for one pool); in Stage 3, every movable process moves every K pumps. Read when a pool
+  is built, so a test sets it for the pool it builds.
 - `CVC_EXEC_VERIFY=1`: in Stage 1, the pump owner's check in the schedulers' public mutators in a
   release build (4.1; debug builds always check). Read as each scheduler is made. Boundary
   tagging and isolation walks (4.3) are not built yet.
 - `CVC_EXEC_FUZZ=<seed>`: yields and short pauses (0-50 us) at the protocol points, read as each
   lock manager is made (the seed is the manager's). The locks track's L3 built it for the lock manager's operations and the lock
-  ports' posts, drains and close (`lock_fuzz_point`, LT-4); Stage 2 adds the state word, ingress
-  push, eventcount and router posts.
+  ports' posts, drains and close (`lock_fuzz_point`, LT-4). S2a added (S2-Q15) the pool's points,
+  read when a pool is built: after `wake(g)`'s `fetch_or` and before Q, between a pop and its
+  pump, in the release before its CAS, between the eventcount's prepare and its commit, and
+  between a host hold's `host_held` and its token (`pool_stats::fuzz_points` counts those reached
+  with a seed); and the ingress posts', read as each async scheduler is made: between a post's
+  push and its wake, under the ingress mutex. S2b adds the router's posts.
 
 ### 4.14 When only one thread is available
 
@@ -2489,8 +2789,18 @@ group automatically (D's `auto_spawn` is not taken; Q4).
   `threads()` and `stats().effective_threads` report the workers running, which the tests record.
 - With 0 threads every `pump_all` pumps its groups inline on the caller, in creation order (with
   the groups skipped by the last deadline first, before `host_first`), host-affinity ones included.
-  Results are those of deterministic mode. Continuous mode (Stage 2) pumps attached groups only
-  from `pump_host` and `wait_for_work`.
+  Results are those of deterministic mode.
+- **Continuous mode with no worker** (S2a; S2-Q4): at threads 0, in a build without threads and in
+  deterministic mode, every attached group is pumped by its attaching thread, in `pump_host` only,
+  each once on the pool's budget (deterministic: one pass a call, 4.4). `wait_for_work` pumps
+  nothing: it waits until a group is queued or falls due, servicing the thread's host queue, and a
+  post or a kernel's completion ends the wait (the group's notifier queues it on the thread's ready
+  list and signals the thread). A `with_group`'s release queues its group for the next `pump_host`
+  too, and `detach` runs the group's entries. Callbacks and `host_proxied` bodies run inline in
+  those pumps. In a build without threads, `wait_for_work` with no limit and nothing timed blocks
+  for ever, since no other thread can post: the host's concern, as any blocking wait there.
+  `state_exec_wasm_smoke` attaches a group at threads 0 and drives it with `pump_host`,
+  `wait_for_work` and `with_group`.
 - The cost over today is the pump scope (the scheduler's two thread-local stores and restores per
   entry, and `current()`'s per pump) and, with isolated documents, one pump per group instead of
   one shared one.
@@ -2643,10 +2953,13 @@ the judges' corrections. It is recorded here so the earlier stages do not close 
 | Failure | Handling |
 |---|---|
 | A program error in a step | As today: the process ends `failed` or `killed` (`async_scheduler.cpp:228-268`) |
-| A C++ exception escaping a pump | `exec_group::pump` catches it, marks the group failed (`failed()`) and returns `pump_result::failed`; the pool then kills the group's processes with "internal error" (`kill(pid, reason)`), on the pumping thread with the token taken again, and lets the other groups finish. At the join the caller logs the failure through the group's app, and `failed_groups()` returns the groups the calling thread's last `pump_all` on that pool marked failed (raw pointers, to compare with; the thread's next `pump_all` replaces them). No exception escapes a worker thread (GR-12). An `on_complete` callback run inline that throws is the host's exception, as today: it leaves the pump and is rethrown from `pump_all` after the join, as `host_first`'s is |
+| A C++ exception escaping a pump | `exec_group::pump` catches it, marks the group failed (`failed()`) and returns `pump_result::failed`; the pool then kills the group's processes with "internal error" (`kill(pid, reason)`), on the pumping thread with the token taken again, and lets the other groups finish. At the join the caller logs the failure through the group's app, and `failed_groups()` returns the groups the calling thread's last `pump_all` on that pool marked failed (raw pointers, to compare with; the thread's next `pump_all` replaces them). No exception escapes a worker thread (GR-12). An `on_complete` callback run inline that throws is the host's exception, as today: it leaves the pump and is rethrown from `pump_all` after the join, as `host_first`'s is. In continuous mode (S2a, S2-Q5) the pumping thread kills the group's processes the same way, holding the token, then sets `detaching` and lists the group on its attaching thread's failed list: `wait_for_work` counts it as work once until it is taken, and `take_failed()` there returns it once, in the order groups failed, detached, and logs it through its app. The kills' own `on_complete` callbacks, queued on the host queue, run at `take_failed`; a teardown before it drops them, the kills having settled their calls. An exception a pump passes up instead of failing the group (an inline callback's on the attaching thread, or `pump` refusing a token a thread outside the pool holds) is rethrown from that thread's `pump_host` or `wait_for_work`, a worker's queued there |
 | A native that loops inside one step | Bounded by its deadline guard (`max_step_time`, the pump's time budget). It holds one worker; other groups keep running, which is better than today. A fork-join join waits for it, bounded by the frame deadline plus that step |
-| A worker blocked in an inline kernel or `call->wait` | Holds its group only; long-step monitor; optional compensating worker (4.9) |
-| A host-only native called in a worker-pumped group | Impossible by construction: not installed, so a NameError. A `host_proxied` body runs on the `pump_all`'s caller by construction (`run_on_host`) |
+| A worker blocked in an inline kernel or `call->wait` | Holds its group only; the long-step monitor counts the step and names its native (PL-9); no compensating worker (deferred, S2-Q11; 4.9) |
+| A host-only native called in a worker-pumped group | Impossible by construction: not installed, so a NameError. A `host_proxied` body runs on the `pump_all`'s caller by construction (`run_on_host`), and an attached group's on its attaching thread (4.9) |
+| A host that stops servicing its host queue (continuous mode) | A worker waiting on a waiting body of one of its groups waits until the host services; the pool counts each wait over 10 ms (`long_host_waits`), logs it once a group a minute while it waits, and leaves that worker out of `active_workers`; the other workers keep pumping other groups. A hold is handed only to a host waiting now, so a busy host freezes no group (4.4) |
+| A `detach` or `with_group` that would wait for itself | Refused with `std::logic_error`: `detach` inside the group's own pump (an inline native or callback of a group its attaching thread pumps) or its own waiting body, `with_group` inside its own waiting body (4.9). `attach` of a group attached already, held by a `pump_all`, or whose scheduler has a notifier is refused the same way, as is a `pump_all` of an attached group (an assertion in debug builds) |
+| An attaching thread that exits with groups attached | Not checked: nothing is kept per thread. `~exec_pool` asserts that nothing is attached; the host detaches, or destroys, what it attached first (4.12) |
 | A host posts one compound value to two groups (invariant G broken) | A data race in a release build; TSan in CI. The host API documents a posted value as moved in (4.12). Stage 1 has no `CVC_EXEC_VERIFY` tagging, and `exec_group::execute(value_t)` copies the AST's lists and dicts itself |
 | A subscriber assumed the main thread but its document was declared `any` | A data race in the host's code. Mitigated by the audit, the host's thread-affine declarations, `host_only` as the default, and the debug home-thread asserts of cvcGL's render-thread subscribers (4.8) |
 | Cross-group ingress full | `msg-send` returns `{status: "error", reason: "ingress full"}`; `post_message` returns false; counted per group |
@@ -2654,12 +2967,12 @@ the judges' corrections. It is recorded here so the earlier stages do not close 
 | A lock holder killed or failed, alone or with its group | Its locks are released when the kill is applied, before `release_if_idle`; an X holder whose section had started is marked abandoned for the next exclusive holder ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 5.6) |
 | A lock waiter killed while its grant's wake is in flight | The grant is already a hold of the waiter in the lock manager, so the kill releases it and the next waiter is granted; the late wake is ignored. A waiter whose timeout fires after the grant takes the grant |
 | A lock deadlock across groups | `DeadlockError` in the request that closes the cycle, when it blocks: the check runs under the lock manager's mutex over every group's holds and waiters, so it is exact |
-| A group destroyed while pumping | Destruction takes the token, waiting for the pump; kernels in flight are waited for. Each teardown step catches and logs what it throws, so a kill or a lock release that throws (a Stage 0 follow-up) never terminates the process (4.2). Destroying a group inside a `pump_all` that holds it, or from a body or callback the pool runs, is a debug assertion; from inside its own pump (a native or inline callback of its own process) it aborts in every build |
+| A group destroyed while pumping | Destruction takes the token, waiting for the pump; kernels in flight are waited for. Each teardown step catches and logs what it throws, so a kill or a lock release that throws (a Stage 0 follow-up) never terminates the process (4.2). Destroying a group inside a `pump_all` that holds it, or from a body or callback the pool runs, is a debug assertion; from inside its own pump (a native or inline callback of its own process) it aborts in every build. An attached group's teardown (S2a, S2-Q4) first leaves its pool: `detaching` set, its pump waited for while the host queue is serviced, the token, the lock port closed, then off the pool's queues with its notifier cleared, and only then the kills (4.4), so no worker or wake touches it after; destroyed inside its own `with_group`, host body or waiting body (`detail::host_held_here`) it aborts in every build too |
 | A worker that fails to start | The pool runs with the workers that started, and notes each failure for its owner to log (`take_notes`; `app::exec_pool` logs them); the caller always pumps |
 | Under `CVC_EXEC_FORCE_MOVE`, no worker reaches a call's groups before its deadline | The caller, which may not take a group it pumped last, waits for the workers no longer than the deadline, then skips those groups itself, and a worker that skips them tells it (4.4): the frame ends on time, and the skipped groups go first next frame |
 | Teardown of an Ariadne Runtime (`~Runtime`; built in Stage 1b, S1.10, S1-Q8) | On the host thread, outside a pump: while a `pump_all` of the app's pool holds the document's group it is refused in every build, from any thread, printed and logged and then aborted before anything is touched (`refuse_if_held`, 4.12); a group-0 document's, or one whose group no pump holds, goes ahead. In this order, each step catching and logging what it throws: (1) the document's resources close (`doc_scope_.clear()`: a stream marks its descriptor closed and posts its last seq and "closed" to the scheduler it names); (2) on the scheduler its processes run on (its group's, else group 0's if it ever used it), `kill_owner` of the Runtime's owner tag, then a reap of every process the Runtime knows of, its actions' own processes included: the actions and the children they forked, the spawned children, the residents and the mount ticks (S1-Q8: a killed record left in group 0 was a leak whose context was already gone; HZ-8); (3) its frame registration, then its group, whose own teardown (4.2) kills, shuts its host down and reaps whatever is left, and then any group a move retired, each waiting for its kernels (a cancelled http request ends its transfer within about a second, 4.9). The group goes first of the Runtime's members, before the channel policy and the document scope its processes' contexts point at. Why this order: an open stream holds the group's scheduler and posts to it, from its producer thread too, so the streams close while the group lives; a started net call holds the group's host's finisher, and the host's shutdown, after the kills, cancels it before the scheduler goes (4.9). A resident a reload or a mount reconcile stops is killed and reaped then (`stop_resident`), so nothing of the Runtime's owner is left in group 0 (`AriadneHazards.AResidentAReloadStopsIsReaped`) |
 | A document moved (its placement changed) while its programs run | Its processes are killed and reaped where they ran, a `run_program` caller whose program had not ended is told "did not complete: the document moved to another group", its residents start again in the new place, the streams it owns are re-pointed there (closed if that fails), and the old group is retired: unpumped at once, destroyed at a later `drain_begin` once its kernels have ended, so the move does not wait for them (4.12) |
-| Teardown of the app | The groups' owners destroy them first; the pool owns none, and `~app` asserts in debug builds that none is left. Then `~app` destroys the pool, whose workers stop after their current pumps, before the app's async host shuts down and its background pool, which ran the groups' kernels, closes |
+| Teardown of the app | The groups' owners destroy them first (an attached group's teardown detaches it); the pool owns none, and `~app` asserts in debug builds that none is left. Then `~app` destroys the pool, whose workers stop after their current pumps, before the app's async host shuts down and its kernel pools, which ran the groups' kernels, close (`background_cpu` with the background pool, its queued tasks destroyed unrun) |
 
 ### 4.18 Every blocker, resolved
 
@@ -2903,14 +3216,15 @@ Each item says when it applies. "Always" items land whether or not a host enable
       load, a `host_only` one is a NameError in its `any` group (logged once), where in group 0 it
       binds at once.
     - Pids stay unique app-wide.
-12. **Opt-in (Stage 2 router): cross-group messages.**
+12. **Opt-in (Stage 2's S2b router; not built): cross-group messages.**
     - A message to a channel homed in another group arrives at that group's next drain.
     - FIFO holds per sender group and channel, with no order across groups.
     - A message bounced by a vanished waiter may be reordered.
     - A full ingress makes `msg-send` return `{status: "error", reason: "ingress full"}`.
-13. **Opt-in (Stage 2): cross-group control.** `kill`, `pause`, `resume` and `send-signal` on a
-    same-owner process in another group return "requested" and land at its next step boundary.
-    Cross-group `ps` and `inspect` read a snapshot at most one slice old.
+13. **Opt-in (Stage 2's S2b and S2c; not built): cross-group control.** `kill`, `pause`,
+    `resume` and `send-signal` on a same-owner process in another group return "requested" and
+    land at its next step boundary. Cross-group `ps` and `inspect` read a snapshot at most one
+    slice old.
 14. **Opt-in (Stage 3): `spawn-isolated`.** The child runs in another group with copied arguments.
     It cannot share values with its parent, only messages and the tree.
 15. **Opt-in (Stage 3): `parallel_actions`.** A document's actions from one frame may run at the
@@ -2940,14 +3254,19 @@ Each item says when it applies. "Always" items land whether or not a host enable
       kill lands within one step, and a process with `max_step_time` or `max_memory` keeps one step
       a pick.
     - `slice_steps = 1`, the default, is today's loop exactly.
-17. **Opt-in (Stage 2, Q9): the split kernel pools.** CPU-bound and blocking kernels run on separate
-    pools.
+17. **With exec workers (Q9; built in S2a, S2-Q11): the split kernel pools.** Once the app's exec
+    pool has workers, an async call's kernel runs on `background_cpu` (the cores the exec workers
+    leave, at least 1), unless it is an I/O call's (`async_options::io`), which stays on the
+    background pool, `background_io` then (4.9). `setThreadPoolSize` then bounds `background_io`
+    alone, not the CPU-bound kernels, and `getActiveThreadCount` and `getPendingThreadCount` count
+    `background_io`'s tasks only. At threads 0 nothing changes.
 18. **Opt-in (Stages 1-2): locks and priority across groups**
     ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md)).
     - A contended lock handed to a waiter in another group lands at that group's next drain (the
-      next frame in fork-join mode).
-    - A `set-priority` on a same-owner process in another group returns `#t` for "requested".
-    - Under a priority policy a group's pump share follows its best runnable priority.
+      next frame in fork-join mode; in continuous mode the lock post wakes the group, S2a).
+    - A `set-priority` on a same-owner process in another group returns `#t` for "requested" (S2c).
+    - Under a priority policy a group's pump share follows its best runnable priority (S2c; S2a
+      ships the weights off).
     - Inside a group, locks and priority behave exactly as on one scheduler.
 19. **Unchanged, deliberately:**
     - fork's shared environments;
@@ -3070,6 +3389,52 @@ head):
 - A spawned child of a deleted chroot relied on to write at the old path: none.
 - Trees that set `ariadne.exec.isolate_documents`: none ship.
 
+**Always (S2a, built)** (S2.md sections 1 and 8). With nothing attached, no wake notifier
+installed and a pool with no workers, behaviour and step counts are those before S2a:
+- **The run report** (S2-Q4) is the one always-on change in the run loop: its end computes
+  `async_scheduler::run_report` (runnable, the next deadline, `best_runnable`, frame waiters), and
+  only while a wake notifier is installed, that is while a pool has attached the group or a host's
+  batch waits on it (`ExecPool.run_all`, the bench's fork-join `mt.groups.async`). With none it
+  leaves the report as it was, and the loop is the one before S2a (the report's timer peek pops
+  stale heap entries, which at `slice_steps` above 1 could change where a run ends: R2b's S-m2).
+- **Costs, not behaviour:** a post reads one atomic more (`wakeup::notify`, `notify_work`); each
+  step stores the native's call-site name for the long-step monitor (`evaluator_state::native_site`,
+  a copy only for a form only its frame holds, and on the throw path); `pump_all` reads one atomic
+  per group for its refusal of attached groups; `run_on_host`, `defer_on_complete` and
+  `worker_pool` one more each; a scheduler given both slice settings reads the tree's settings
+  version once a run loop (4.13); and with no exec pool built, a kernel's submission reads one
+  atomic to find so. The headers stay source-compatible; the ABI grows (`wakeup` gains a mutex,
+  `evaluator_state` a pointer and a string, `async_scheduler` members).
+- **`ExecPool.run_all`'s wait** (S2-Q6): fork-join stays; between rounds it waits once for the
+  batch instead of 1 ms at a time, rotating, and a slot with a queued program starts at once
+  (4.12). `ExecPool.stats()` is new.
+
+**Hosts (S2a, built), with workers or opted in:**
+- **Continuous mode** (4.4, 4.12) is opt-in, by `exec_pool::attach`: an attached group is pumped
+  whenever it has work, its host touches it only under `with_group`, services its host queue in
+  `pump_host` and `wait_for_work`, takes failed groups with `take_failed`, and detaches before it
+  exits; its `on_complete` callbacks run on that queue, not after a join. Nothing changes for a
+  host that never attaches.
+- **The split kernel pools** (item 17), once the app's exec pool has workers.
+- **The long-step monitor** (4.9), on for every group a pool with workers pumps (a 1 ms default,
+  fork-join included) and wherever `state_exec.long_step_ms` is set: a step over its threshold is
+  counted and logged through the app at level 2, once per native per minute. On a loaded machine
+  the OS's preemption can make any step long at 1 ms.
+
+**Step counts (S2a).** Every existing program takes the steps it took before, at `slice_steps` 1
+and at `CVC_EXEC_SLICE_STEPS=256`, and an attached group's programs take the steps they take
+fork-join: `state_exec_bench_gates` pairs `mt.groups`' continuous points with its fork-join ones,
+`steps_total` unchanged point by point (6.3).
+
+**Compatibility scan (S2a)**, at 2e6ad8c27 (S2.md section 8; R2b): `.ari` documents calling `ps`,
+`kill`, `pause`, `resume` or `inspect`: none (one comment). Code reading the background pool's size:
+none in production; the bench's `app_pool_active_after` and `app_pool_pending_after` count
+`background_io` only once the pools split, and records add `app_cpu_pool_size_after`;
+`setThreadPoolSize`'s callers are tests, and [`THREAD_POOL.md`](THREAD_POOL.md) and
+[`THREAD_POOL_API.md`](THREAD_POOL_API.md) say what it sizes once split. pycvc never attaches its
+`Exec`s. Per-step interleaving: Stage S's list, unchanged. S2a changes no ingress order, so the
+message-and-control pattern is S2b's to check.
+
 ## 6. Expected performance
 
 ### 6.1 The data points
@@ -3126,14 +3491,14 @@ or refute it.
 | Scenario | Stage | What it runs | Reports |
 |---|---|---|---|
 | `mt.multi_exec` | 0 | T threads, each with a full `async_scheduler`, app-tree intrinsics and async host, running fib and raise/catch; the TSan shape. As built, a third program, `prog=tree` (recorded, never gated), runs Stage 0's code on every thread: chrooted state natives, `state-data-set`, a `state-watch`, and controls posted across threads | `extra.speedup`, and `extra.of_ceiling` against `mt.independent` in the same rep |
-| `mt.groups` | 1a | `groups` (8, 16) `exec_group`s over the frozen builtins on the app's pool, fork-join, `t` (1, 2, 4, 8, 16) pumping threads (`t - 1` workers and the caller); each group runs `prog` (fib, exceptions, or `cycle`: closure cycles) `runs` (5) times, completion read from process info after each round, not from `on_complete`. As built (Stage 2 adds continuous mode) | `extra.speedup` against one group alone through the pool, `extra.of_ceiling` against `mt.independent` in the same rep with the pool's placement, the pool's `pumps`, `helper_wakes`, `worker_pumps`, `skipped` and `effective_threads` |
+| `mt.groups` | 1a | `groups` (8, 16) `exec_group`s over the frozen builtins on the app's pool, fork-join, `t` (1, 2, 4, 8, 16) pumping threads (`t - 1` workers and the caller); each group runs `prog` (fib, exceptions, or `cycle`: closure cycles) `runs` (5) times, completion read from process info after each round, not from `on_complete`. As built. S2a adds `pump` (`fork_join`, implicit; `continuous`: the groups attached to `t` workers, none at t=1, driven by the caller's `pump_host` and `wait_for_work`, so `t` counts pumping threads in both modes) and `shape` (`even`, implicit; `uneven`: one heavy group and light ones with equal work in runs of unequal length, S2-Q6's evidence) | `extra.speedup` against one group alone through the pool, in the same mode, `extra.of_ceiling` against `mt.independent` in the same rep with the pool's placement, the pool's `pumps`, `helper_wakes`, `worker_pumps`, `skipped` and `effective_threads`; continuous mode's `wakes`, `timer_wakes`, `requeues`, `parks`, `empty_wakes`, `moves` and `host_pumps` |
 | `mt.groups.flood` | 1a | `n` (2000) tiny programs on the app's pool at `t` 1 and 4, through `t` reused groups (`mode=reuse`) or a group per program built and destroyed in the region (`mode=fresh`). The `ExecPool` twin, a pycvc script, is not written yet | `programs_per_s`, `extra.group_setup_ns`, `extra.group_teardown_ns` |
 | `mt.pycvc_threads` | 0 | T Python threads, one `Exec` each. As built, a standard-library script (`tools/bench/mt_pycvc_threads.py`) writing the bench's records, not pytest-benchmark; recorded, not gated | speedup |
 | `mt.ariadne_docs` | 1b | `docs` (1, 2, 4, 8) `AppRuntime`s on one app, each at its own prefix, loading one eligible document with `ariadne.exec.isolate_documents` on, through `drain_begin` / `exec_pump_frame` / `drain_end`, at `t` (0, 1, 2, 4, 8) pool workers besides the caller; `frame=heavy` (each tick about 8000 steps) and `frame=small` (one `state-incr`). As built ([`STATE_EXEC_BENCH.md`](STATE_EXEC_BENCH.md)) | ns per frame, the pool's `helper_wakes`, `pumps` and `skipped`, `worker_pumps`, and `extra.isolated` (documents in a group of their own), which guards the small-frame gate from passing vacuously |
 | `mt.cross_group_msg` | 2 | pingpong within one group and across two; fan-out from one dispatcher to k groups; broadcast to waiters in k groups | ns per message, wake latency percentiles |
 | `mt.state_tree` | 1a | `state-get`/`state-set` loops from G (1, 2, 4, 8) groups, a pumping thread each, on disjoint and on shared subtrees, chrooted and not, at depths 1 and 4 | ns per op against G (`extra.ns_per_op`, `extra.group_ns_per_op`) |
-| `mt.groups.async` | 2 | async kernels from G groups, `wait_for_work` drivers | completion latency, calls/s |
-| `mt.groups.move` | 2, 3 | `CVC_EXEC_FORCE_MOVE` on and off; Stage 3 process moves | cost per group move and per process move |
+| `mt.groups.async` | 2a | G (8) groups, each one program of `calls` (200) async calls in turn, the kernel spinning 20 us (`kernel=spin`, `background_cpu` once split) or blocking 1 ms (`kernel=sleep`, an I/O call); `pump=fork_join` (`pump_all` rounds and a batch wait, as `ExecPool.run_all`'s) or `continuous` (`pump_host` and `wait_for_work`); as built | `extra.lat_p50_ns` and `lat_p99_ns` (a kernel's end to its process running on), `extra.calls_per_s`, the pool's counters |
+| `mt.groups.move` | 2a, 3 | G (16) groups attached in turn to two pools of `t` workers that differ only in `pool_options::force_move`, in pumps of `steps` (2000) steps, both pools in each rep, twice each, ABBA; as built. Stage 3 adds process moves | `extra.ns_per_move` (the time `force_move` added over the moves it added, `pool_stats::moves`), `extra.moves`, each pool's time, moves and pumps |
 | `mt.isolated_spawn` | 3 | one parent spawning k `spawn-isolated` fib children that report by message | speedup against `mt.groups` |
 | `sched.single.*` `slice_steps` (built for `sched.slice`) | S | the `sched.single` workloads at `slice_steps` 1, 16, 64, 256, 1024, paired in one binary | ns/step; fairness in the bench's Stage S points |
 | `mt.groups.locks` | 2 | G groups (one per document or `ExecPool` `Exec`) whose processes take `with-lock` on keys under their own prefix, then on one shared `/` key; the same workload without `with-lock` alternated in the same rep | throughput, cross-group handoff latency |
@@ -3168,15 +3533,26 @@ binary's records match the candidate's default points (`driver=spin`, `base=own`
     (`extra.of_ceiling`), on Windows;
   - `mt.groups` clean under gcc's and clang's TSan (CI);
   - Stage 1b: `mt.ariadne_docs` small frames show 0 helper wakes (`extra.helper_wakes`).
-- **Stage 2:**
-  - `mt.groups` continuous at 8 threads at least 0.9x;
-  - `mt.cross_group_msg` wake latency p50 under 50 us on Windows;
-  - `mt.groups.move` group-move cost under 5 us;
-  - `mt.groups.locks` with disjoint keys within 5% of the same workload without `with-lock` in
-    the same rep;
-  - `prio.groups_weighted` within 20% of the CFS ratio expected for each configuration (about 9.3
-    between a 0 and a 10 group), or the weights ship off. Weights matter only while runnable
-    groups outnumber workers, so the scenario fixes the thread count.
+- **Stage 2** (S2a's gates as built: S2.md section 6, `docs/STATE_EXEC_BENCH.md`, "Threaded
+  execution's Stage 2a gates"):
+  - S2a: `steps_total` unchanged, and `sched.single.*`, `flood.*`, `limits.*`, `msg.*` and
+    `async.*` at threads 0 within 3%, as Stage 1's; `mt.groups` fork-join within 3%;
+  - S2a: `mt.groups` `pump=continuous` fib at 8 threads at least 0.9x (`extra.of_ceiling`; even
+    groups only, `GATE_GUARDS`);
+  - S2a: `mt.groups.move` group-move cost under 5 us (`extra.ns_per_move`, judged where
+    `force_move` added moves). With as many workers as groups a forced move measures the OS's
+    wake latency, not the migration (4.4), so only the configurations with more runnable groups
+    than workers judge it;
+  - S2a, recorded: `mt.groups.async`, and continuous against fork-join `mt.groups` on uneven
+    groups (S2-Q6's evidence for a continuous `ExecPool`);
+  - S2a, in CTest: `state_exec_bench_gates` runs `mt.groups`' smoke points in both modes and
+    pins continuous mode's `steps_total` to fork-join's, point by point;
+  - S2b: `mt.cross_group_msg` wake latency p50 under 50 us on Windows;
+  - S2c: `mt.groups.locks` with disjoint keys within 5% of the same workload without `with-lock`
+    in the same rep;
+  - S2c: `prio.groups_weighted` within 20% of the CFS ratio expected for each configuration
+    (about 9.3 between a 0 and a 10 group), or the weights ship off. Weights matter only while
+    runnable groups outnumber workers, so the scenario fixes the thread count.
 - **Stage 3:** `mt.isolated_spawn` with children of at least 1 ms of work reaches at least 0.8x
   `mt.groups` at 8; `mt.groups.locks.isolated` recorded.
 - **Stage S** (`threaded-impl/S2.md` section 6). `sched.slice` is built as a `slice_steps` key on
@@ -3200,7 +3576,7 @@ Stage 0 has not landed (its L2). Stage M comes last.
 |---|---|---|---|
 | 0 | Process-global hazard fixes; no threads added | `perf/async` (pool), `perf/sched` (ingress flag) | HZ cases pass; TSan clean on `mt.multi_exec` |
 | 1 | 1a (built): `exec_group`, a fork-join `exec_pool`, registry and random stream per group, lightweight groups, pid source, pump owner, the foreign-future check, provider kinds, `ExecPool`. 1b (built): host natives classified, Ariadne one pump per frame and isolated documents, the spawn context in Ariadne's groups | Stage 0 | GR, IS-1, IS-2 and AR-1 to AR-4 pass; Stage 1 gate |
-| 2 | Continuous pool with wakeups, router with channel homes, cross-group control, published info, bounded ingress, split kernel pools, `exec_coordinator` on the pool | Stage 1; `perf/sched` (timer heap, `wait_for_work`) | PL, MS and AR-7 pass; Stage 2 gate |
+| 2 | In three PRs (S2-Q1). S2a (built): the continuous pool with wakeups, split kernel pools, the long-step monitor, pycvc's batch wait. S2b: router with channel homes, cross-group control, bounded ingress. S2c: priority across groups, published info, the weights, `exec_coordinator` on the pool | Stage 1, Stage S; `perf/sched` (timer heap, `wait_for_work`) | S2a: S2.md section 4's PL, CT, ST-3, LG and RA-1 cases and its gates; then MS and AR-7; Stage 2 gate |
 | 3 | `spawn-isolated`, spawn groups, movable processes and moves, Ariadne parallel actions | Stage 2 | IS-3 to IS-10, AR-5 and AR-6 pass; Stage 3 gate |
 | S | Slices (runs) in today's `async_scheduler`, single-threaded; built in `perf/threaded-ss` | `perf/sched` (direct step, one clock reading); cut from master | SL-1 to SL-10 pass; Stage S gate |
 | L | Locks and priority on one machine, one thread and several `Exec`s ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) L0-L3, with the spawn context on one scheduler in L1b); its L4 rides Stages 1-3 | `perf/sched`, `perf/eval`, `perf/async`; it lands B28 (L1) and B27's single-scheduler part (L1b) itself, and Stage 0's `post_control` for `set_priority` if Stage 0 has not landed (L2) | that document's phase exits, with section 5's compatibility scans; its L1b also passes IS-1 and IS-2 on one scheduler (they move to whichever of L1b or Stage 1 merges first, and Stage 1 re-runs them in groups) |
@@ -3443,17 +3819,68 @@ audit and the thread-affine declarations; `uri_state`'s and streams' pin vectors
     volren's and volslice's settings; `state_object`'s teardown against a slot on another thread,
     which covers the two-scenes read in `GraphicsNode`.
 
-**Stage 2: continuous pool, router and control** (3-4 weeks).
+**Stage 2: continuous pool, router and control** (3-4 weeks). The plan (`threaded-impl/S2.md`)
+splits it in three PRs (S2-Q1): S2a, the continuous pool; S2b, the router and process control;
+S2c, priority across groups, the weights and the coordinator, after Stage 3's pool commits.
+
+**S2a: the continuous pool** (built in `perf/threaded-s2a`; S2.md section 2's S2a.0-S2a.12).
 - **Files:**
-  - `exec_pool.cpp`: the state word, ready queue, eventcount, `next` slot, timers, `pump_host`,
-    `with_group`, the pid directory, published info, `kill_owner` with acknowledgement;
+  - `exec_pool.h`/`exec_pool.cpp`: `attach`, `detach`, `pump_host`, `wait_for_work`, `with_group`,
+    `take_failed` and `attached`; the state word's transitions with `queued`, `host_held` and
+    `deferred` under the ready-queue mutex; the ready queue by virtual time with the clamp; the
+    `next` slot and its valve; the eventcount, the timer heaps and the keeper; the host queue per
+    attaching thread, the hold handoff and its give-back; failures and `take_failed`;
+    `force_move` and deterministic mode in continuous mode; the fuzz points; `pool_options`'
+    `pump_steps`, `pump_seconds`, `priority_weights` and `force_move`, and `pool_stats`' Stage 2
+    counters; `detail::detach_begin`, `detach_end`, `host_held_here`, `with_attached` and
+    `long_host_wait`; the 1 ms long-step default for a pool with workers;
+  - `exec_group.h`/`exec_group.cpp`: `group_pool_link`'s state word and `attached`;
+    `pump_result`'s report, copied in `pump`; the teardown of an attached group (S2-Q4's order);
+    `execute` under `with_group` from a host; the group's long-step sink;
+  - `process_table.h`, `process.cpp`: `wake_notifier`, `wakeup::set_notifier` and
+    `has_notifier`, `process_table::best_runnable()`;
+  - `async_scheduler.h`/`.cpp`: `set_wake_notifier`, `notify_work`'s notifier rule and its fuzz
+    point, the run report, the long-step monitor (`set_long_step_sink`, `set_long_step_default`,
+    `long_steps()`, `state_exec.long_step_ms` in `refresh_slice`); `heap.h`/`heap.cpp`:
+    `cycle_collection_due_at`;
+  - `stackless_evaluator.h`/`.cpp`: `evaluator_state::native_site` and its copy;
+  - `app.h`/`app.cpp`: the kernel pools (`trySubmitKernel`, `background_cpu`, `kernelPoolHere`,
+    `backgroundCpuPoolSize`), group 0's long-step sink; `async_host.cpp`: kernels through
+    `trySubmitKernel`; `async_call.h`'s comments;
+  - `ariadne.cpp`: `refuse_if_held` and `assert_outside_pump` learn the continuous holder;
+  - `bindings/pycvc`: `pycvc_exec.cpp`/`.h` (`run_all`'s batch wait), `pycvc_exec_pool.cpp`/`.h`
+    and `pycvc.i` (`ExecPool.stats()`);
+  - tools: `tools/locks_model/state_word.py` and `test_state_word.py` (PL-1); the bench
+    (`state_exec_bench.cpp`: `mt.groups`' `pump` and `shape`, `mt.groups.async`, `mt.groups.move`,
+    `app_cpu_pool_size_after`), `tools/bench/state_exec_bench.py` (`IMPLICIT_DEFAULTS`,
+    `GATE_GUARDS`), `state_exec_bench_gates.cmake`;
+  - CI: ci.yml's `SAN_REQUIRED_S2A` in every sanitizer leg, `SAN_BENCH`'s `mt.groups` in both
+    modes, the clang leg's additions, the wasm smoke's attached group; `run.sh`; `locks-deep.yml`'s
+    `state-word-model` lane; the CTest entry `state_exec_state_word_model_test`;
+  - docs: this document, [`APP_API.md`](APP_API.md),
+    [`STATE_EXEC_DEVELOPER_GUIDE.md`](STATE_EXEC_DEVELOPER_GUIDE.md),
+    [`STATE_EXEC_EXCEPTIONS.md`](STATE_EXEC_EXCEPTIONS.md) (settled question 4),
+    [`STATE_EXEC_BENCH.md`](STATE_EXEC_BENCH.md), [`TESTING.md`](TESTING.md),
+    [`THREAD_POOL.md`](THREAD_POOL.md), [`THREAD_POOL_API.md`](THREAD_POOL_API.md),
+    `tools/locks_model/README.md` and `bindings/pycvc/README.md`.
+- **Tests:** PL-1 to PL-5, PL-9, PL-10, CT-1 to CT-4, ST-3, LG-1, LG-2, LG-6, LG-7 and RA-1 (S2.md
+  section 4), and the implementers' own beside them: `ExecPoolContinuous`, `ExecGroupTeardown`,
+  `WakeNotifier`, `PumpReport`, `LongSteps`, `LongStepSink`, `KernelPools`, `NativeSite`, pycvc's
+  batch wait, and the review rounds' cases.
+- **Exit:** these pass; with nothing attached, no notifier installed and a pool with no workers,
+  behaviour and step counts are those before S2a (section 5), at the default and at
+  `CVC_EXEC_SLICE_STEPS=256`; the sanitizer legs are clean with `SAN_REQUIRED_S2A` found; the S2a
+  gates (6.3) pass or are recorded as no verdict with the owner's agreement.
+
+**S2b and S2c** (not built):
+- **Files:**
+  - `exec_pool.cpp`: the pid directory, published info, `kill_owner` with acknowledgement;
   - new `exec_router.h`/`.cpp`: homes, the subscription protocol, requeue, caps;
   - `intrinsics.cpp:960-1015, 1167-1191`: `msg-send` and `msg-recv` through the router when the pool
     has more than one group;
   - `async_scheduler.cpp`: the ingress entry kinds;
-  - `app.cpp`/`async_host.cpp`: the split kernel pools (Q9) and the long-step monitor;
   - `exec_coordinator.cpp`: `attach_pool`, job groups.
-- **Tests:** PL-1 to PL-10, MS-1 to MS-12, AR-7, DT-3, ST-1 to ST-3.
+- **Tests:** PL-6 to PL-8, MS-1 to MS-12, AR-7, DT-3, DT-4, ST-1, ST-2.
 - **Exit:** the Stage 2 gate; the channel semantics matrix (MS-12) matches single-group outcomes.
 - **Risk:** medium. The router's corner cases are timed waits on remote homes, kills between
   subscribe and deliver, and caps at the home.
@@ -3477,8 +3904,10 @@ audit and the thread-affine declarations; `uri_state`'s and streams' pin vectors
 stage).
 - Stage 1: a lock home per group over the app's lock manager, the spawn context (on one scheduler
   since the locks track's L1b) in groups.
-- Stage 2: `wake(g)` after lock posts, cross-group `set-priority`, `best_runnable` and the pool
-  weights, `worker_class`.
+- Stage 2: `wake(g)` after lock posts and the teardown's order, with LG-1, LG-2, LG-6 and LG-7
+  (S2a, built: a cross-group grant to an idle attached group wakes it); cross-group
+  `set-priority` (LG-4), `best_runnable` and the pool weights (LG-5), `worker_class` (S2c,
+  S2-Q13).
 - Stage 3: `adopt` renames a holder's lock record, through the lock protocol's `move`, which is
   specified, proved and model-checked first; `group_scheduler_ref` forwards `locks()` and the
   priority virtuals (`set_priority`, `get_priority`, `set_priority_checked`, `get_priority_as`,
@@ -3624,6 +4053,16 @@ it until it returns.
 | PL-8 | `kill_owner` with the owner's processes in 4 groups, then the host frees the contexts (ASan) | every group acknowledged first; no use after free |
 | PL-9 | a worker blocked 100 ms in an inline kernel | other groups keep running; the long-step monitor logs it |
 | PL-10 | `~exec_pool` with 8 busy workers (ASan) | joins; no leak, no use after free |
+
+As built in S2a (`threaded-impl/S2.md` section 4, which narrows the cases above against wall-clock
+assertions): PL-1 is the state-word model (4.4), with hosts, the attaching thread and a liveness
+check besides the posters and workers; PL-3, PL-4 and PL-5 record their latencies and assert
+counts (PL-4's "no worker spins" is `pool_stats::empty_wakes` 0; PL-5 counts the light group's
+pumps against the heavy one's); PL-6 to PL-8 are S2b's. S2a adds CT-1 (attached groups at threads
+0 to 8 equal their solo runs), CT-2 (teardown during continuous pumps), CT-3 (host bodies and the
+token), CT-4 (caller-only groups stay on their thread), ST-3 (group churn with kernels in flight)
+and RA-1 (a post ends `ExecPool.run_all`'s batch wait), in `exec_pool_test`,
+`state_exec_groups_test` and pycvc's `test_pycvc_exec_pool.py`.
 
 ### 8.4 Messaging across groups (MS, Stage 2)
 
@@ -3999,6 +4438,83 @@ Stage 1's plan added twelve decisions, which the user approved as recommended on
   at a time (asserted); each caller services only its own queue (4.4, 4.9).
 - **S1-Q12. Two PRs, in order:** Stage 1a (groups, the pool, pycvc), then Stage 1b (Ariadne's
   half), each with its own reviews and A/B (7).
+
+The plan for Stage S and Stage 2 (`threaded-impl/S2.md`) added seventeen decisions, which the user
+approved as recommended on 2026-11-12 (its section 1 keeps the alternatives weighed). Its section
+0 lists where this document's first text differed from the code, and so from what was built:
+- **S2-Q1. Order and PRs.** SS, S2a, S2b, Stage 3, then S2c; the coordinator's two Stage 0 bugs
+  (CB-1, CB-2) at once. LG-4, LG-5, MS-11, AR-7, `mt.groups.locks` and `prio.groups_weighted` move
+  to S2c, so Stage 3 starts before Stage 2's whole exit. S2a was cut after SS merged, since both
+  edit the step and run paths (7).
+- **S2-Q2. Where `wake(g)` hooks** (built in S2a): a notifier inside `detail::wakeup`, under its
+  own small lock, called instead of the signal while installed, so lock posts reach it with no
+  change to the lock files; installed by `attach` and by `ExecPool.run_all`'s batch. The lock
+  order is the host's state, then an ingress mutex or a port's `mu_`, then the notifier lock, then
+  the pool's ready-queue mutex (4.4).
+- **S2-Q3. Parking** (built in S2a): an eventcount of an atomic epoch and a `detail::wakeup` per
+  worker, a spin of about 20 us first, a timeout at the earliest published deadline, precise only
+  for sleeper and timed-wait deadlines (4.4).
+- **S2-Q4. The state word, the token, timers and teardown** (built in S2a): four bits, pop and
+  `pumping` in one step under the ready-queue mutex; a worker that finds the token held leaves the
+  group `notified`; the release reads the pump's report, never `wants_pump()`; frame waiters a
+  coarse 1 ms timer; the teardown's five steps, detaching the group before the kills; groups on a
+  single manager, host-affinity groups and every group of a pool with no workers pumped by their
+  attaching thread; `pump_all` refuses an attached group (4.4, 4.17).
+- **S2-Q5. Host bodies, callbacks and failures in continuous mode** (built in S2a): a host queue
+  per attaching thread; a waiting body under its blocked worker's token, any other under the
+  group's; callbacks there too; a failed group detached and reported through `take_failed()`; the
+  rule that the host thread never blocks without servicing extends to the new waits; a worker
+  blocked over 10 ms on a host queue is logged (4.9). As built, the debug assertion that an
+  attaching thread detaches before it exits is not made: it would need a `thread_local`, which the
+  no-singletons rule forbids; `~exec_pool` asserts that nothing is attached.
+- **S2-Q6. Which hosts go continuous** (built in S2a): Ariadne and `ExecPool.run_all` stay
+  fork-join, `run_all` waiting once for its batch on the notifiers (S2a.8); continuous mode serves
+  C++ embedders, then Stage 3's spawn groups and S2c's job groups; a continuous `ExecPool` only if
+  `mt.groups` shows continuous more than 10% ahead on uneven groups (4.12).
+- **S2-Q7. Owners across groups** (S2b): the rule is per process; pooled `Exec`s get owner tags,
+  `pycvc:<prefix>.<i>`; owner `""` has no rights across groups.
+- **S2-Q8. Process control across groups** (S2b, S2c): `kill`, `pause` and `resume` posted when
+  the directory gives the pid the caller's owner, returning `#t` for "requested"; owned processes
+  see only their owner's processes locally too; `set-priority`, `ps` and `inspect` across groups in
+  S2c; no `send-signal` intrinsic; `pool.kill_owner` with a `done`.
+- **S2-Q9. Published info** (S2c): published at the end of every run loop; rows rebuilt when a
+  generation moves, counters refreshed at most every 100 ms; `pool.info(pid)` returns that row.
+- **S2-Q10. The router** (S2b): one ordered ingress for messages, controls and router entries;
+  the throw rule kept; router entries bounced, not dropped; `#` keys never routed; requeue to the
+  front; the cap `state_exec.groups.ingress_cap` (65536) with `msg-send`'s `reason`; per-group
+  counters; the router on from the first prefix registration.
+- **S2-Q11. Kernel pools and blocking steps** (built in S2a): the split only while the app's pool
+  has workers, `background_cpu` the cores less the exec workers (at least 1), `background_io` the
+  existing pool at its size, picked by the existing `io`; the long-step monitor on with workers or
+  `state_exec.long_step_ms`, naming the call site, once per native per minute; the compensating
+  worker deferred (4.9).
+- **S2-Q12. Stage S's runs** (built in SS): `step_once` untouched at `slice_steps` 1; runs count
+  charged steps; what ends a run; preemption at a better level; the limits at the 16-step
+  readings; the settings (4.4).
+- **S2-Q13. L4's Stage 2 half**: lock-post wakes, the teardown order, LG-1, LG-2, LG-6 and LG-7 in
+  S2a (built), with the virtual-time clamp; LG-4, `best_runnable`'s use, the weights (shipped off,
+  `priority_weights` false) and `worker_class` in S2c.
+- **S2-Q14. The coordinator**: CB-1 and CB-2 as two small PRs from master; `attach_pool` with k job
+  groups in S2c.
+- **S2-Q15. Model checking and fuzzing** (built in S2a): a Python model of the state word in
+  `tools/locks_model`'s style, with no C++ port, in CTest and a `locks-deep.yml` lane (PL-1);
+  `CVC_EXEC_FUZZ` points at the word's transitions, the ingress push and the eventcount, the
+  router's in S2b (4.13).
+- **S2-Q16. Documents leaving the host thread** (S2b): S1-Q6's channel rules lifted once the
+  router exists; oidc, writable `link:` holes and the thread-affinity rules stay.
+- **S2-Q17. Names**: `state_exec.slice_steps`, `state_exec.slice_seconds`, `CVC_EXEC_SLICE_STEPS`,
+  `async_scheduler::set_slice`; `pool_options::pump_steps`, `pump_seconds`, `priority_weights`;
+  `exec_pool::with_group`, `published_process`, `caller_identity`, `exec_router`;
+  `state_exec.long_step_ms`; the router's counters.
+
+S2a's lead decided these within the S2 decisions, recorded in the frozen headers (`exec_group.h`,
+`exec_pool.h`): `queued`, `host_held` and `deferred` kept beside the word under the ready-queue
+mutex; `pump_result::deadline_precise` and `awaiting_frame`; the run report computed only while a
+notifier is installed (R2b's S-m2); the hold handoff to a host waiting now, with its give-back
+(R2b's S-M3, PL-1's model); deterministic continuous frames driven by `pump_host` (R2b's S-M4,
+within 4.4's reproducible schedule); `detach` and `with_group` refused where they would wait for
+themselves, and the teardown aborting in a group's own waiting body (R2a's C-M2, C-M3);
+`pool_options::force_move`; and `attach` refusing a scheduler that already has a notifier.
 
 ## 10. Prior art and lessons
 
