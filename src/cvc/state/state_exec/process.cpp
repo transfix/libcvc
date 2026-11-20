@@ -785,8 +785,8 @@ bool process_table::check() const {
 
 namespace detail {
 
-// S2a.0 stub (S2-Q2): the notifier is kept, under its lock; notify() does not call it yet
-// (S2a.1, the wake notifier).
+// S2-Q2: written under notifier_mu_, which notify() holds while it calls the notifier, so this
+// returns once no call of the old one runs, and none starts after.
 void wakeup::set_notifier(wake_notifier fn, void *ctx) {
   std::lock_guard<std::mutex> lock(notifier_mu_);
   notifier_ctx_ = fn ? ctx : nullptr;
@@ -797,6 +797,11 @@ void wakeup::set_notifier(wake_notifier fn, void *ctx) {
 struct wakeup::impl {
   HANDLE event = nullptr; // auto-reset: a wait it satisfies consumes the notification
   HANDLE timer = nullptr; // a synchronization timer, high-resolution where there is one
+
+  void signal() {
+    if (event)
+      SetEvent(event);
+  }
 };
 
 wakeup::wakeup() : impl_(std::make_unique<impl>()) {
@@ -815,11 +820,6 @@ wakeup::~wakeup() {
     CloseHandle(impl_->timer);
   if (impl_->event)
     CloseHandle(impl_->event);
-}
-
-void wakeup::notify() {
-  if (impl_->event)
-    SetEvent(impl_->event);
 }
 
 bool wakeup::wait_until(clock::time_point t, bool precise) {
@@ -890,18 +890,18 @@ struct wakeup::impl {
   std::mutex mu;
   std::condition_variable cv;
   bool signaled = false;
+
+  void signal() {
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      signaled = true;
+    }
+    cv.notify_one();
+  }
 };
 
 wakeup::wakeup() : impl_(std::make_unique<impl>()) {}
 wakeup::~wakeup() = default;
-
-void wakeup::notify() {
-  {
-    std::lock_guard<std::mutex> lock(impl_->mu);
-    impl_->signaled = true;
-  }
-  impl_->cv.notify_one();
-}
 
 bool wakeup::wait_until(clock::time_point t, bool /*precise*/) {
   // A far deadline (time_point::max(): none) is waited for an hour at a time, so no standard
@@ -920,6 +920,19 @@ bool wakeup::wait_until(clock::time_point t, bool /*precise*/) {
   }
 }
 #endif
+
+void wakeup::notify() {
+  // While a notifier is installed it is called instead of the signal (S2-Q2), under its lock. With
+  // none, one load and no lock. The lock re-checks it: after a set_notifier(nullptr), a signal.
+  if (notifier_.load(std::memory_order_acquire) != nullptr) {
+    std::lock_guard<std::mutex> lock(notifier_mu_);
+    if (const wake_notifier fn = notifier_.load(std::memory_order_relaxed)) {
+      fn(notifier_ctx_);
+      return;
+    }
+  }
+  impl_->signal();
+}
 
 // ---------------------------------------------------------------------------
 // detail::tree_changes

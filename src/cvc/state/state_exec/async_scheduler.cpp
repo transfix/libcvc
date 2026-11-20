@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cassert>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -61,6 +62,17 @@ bool collect_cycles_if_due(cycle_registry &r) {
   return true;
 }
 
+// CVC_EXEC_FUZZ (S2-Q15), read whenever a scheduler is made, as a lock manager reads it: the
+// fuzzing of its ingress posts, or null when it is off.
+std::unique_ptr<detail::lock_fuzz> ingress_fuzz_from_environment() {
+  const std::uint64_t seed = detail::lock_fuzz_seed_from_environment();
+  if (seed == 0)
+    return nullptr;
+  auto fuzz = std::make_unique<detail::lock_fuzz>();
+  fuzz->seed.store(seed, std::memory_order_relaxed);
+  return fuzz;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -70,8 +82,8 @@ bool collect_cycles_if_due(cycle_registry &r) {
 async_scheduler::async_scheduler(scheduling_policy policy)
     : policy_(policy), slice_steps_(slice_steps_knob()), slice_steps_default_(slice_steps_),
       evaluator_(builtins::make_default_environment()),
-      procs_(policy != scheduling_policy::round_robin),
-      wakeup_(std::make_shared<detail::wakeup>()) {}
+      procs_(policy != scheduling_policy::round_robin), wakeup_(std::make_shared<detail::wakeup>()),
+      ingress_fuzz_(ingress_fuzz_from_environment()) {}
 
 // A group's scheduler (S1.3): its global environment is its own scope over `base`. A program's
 // `set` binds in its process's own run env (step_set_value's env->set), so nothing a program writes
@@ -79,8 +91,8 @@ async_scheduler::async_scheduler(scheduling_policy policy)
 async_scheduler::async_scheduler(scheduling_policy policy, environment_ptr base)
     : policy_(policy), slice_steps_(slice_steps_knob()), slice_steps_default_(slice_steps_),
       evaluator_(environment::extend(std::move(base))),
-      procs_(policy != scheduling_policy::round_robin),
-      wakeup_(std::make_shared<detail::wakeup>()) {}
+      procs_(policy != scheduling_policy::round_robin), wakeup_(std::make_shared<detail::wakeup>()),
+      ingress_fuzz_(ingress_fuzz_from_environment()) {}
 
 void async_scheduler::set_slice(std::uint64_t steps, double seconds) {
   set_slice_steps(steps);
@@ -1012,6 +1024,43 @@ uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
   // and an unthrottled rule would walk the whole registry each frame an Ariadne action ends.
   if (registry_ && !has_runnable() && cycle_collection_due(*registry_))
     collect_cycles(*registry_);
+
+  // The pump's report (S2-Q4), always published: what the run left, which a pool's release reads
+  // instead of the scheduler. The deadline is the earliest work no post announces: the earliest
+  // live timer (precise, as wait_for_work keeps it), the calls' next timeout or charge, the frame
+  // waiters' beat (a coarse 1 ms, as Exec.run's), and the idle collection falling due. The clock
+  // is read only for a beat.
+  run_report_.runnable = has_runnable();
+  run_report_.best_runnable = procs_.best_runnable();
+  clock::time_point next = clock::time_point::max();
+  bool precise = false;
+  if (procs_.timed_count() > 0) {
+    if (const std::optional<clock::time_point> timer = procs_.next_timer()) {
+      next = *timer;
+      precise = true;
+    }
+  }
+  const auto coarse = [&next, &precise](clock::time_point t) {
+    if (t < next) {
+      next = t;
+      precise = false;
+    }
+  };
+  if (!async_calls_.empty() || procs_.awaiting_count() > 0) {
+    const clock::time_point now = clock::now();
+    if (!async_calls_.empty()) {
+      if (const std::optional<clock::time_point> charge = next_call_charge(now))
+        coarse(*charge);
+    }
+    if (procs_.awaiting_count() > 0)
+      coarse(now + std::chrono::milliseconds(1));
+  }
+  if (registry_) {
+    if (const std::optional<clock::time_point> due = cycle_collection_due_at(*registry_))
+      coarse(*due);
+  }
+  run_report_.next_deadline = next;
+  run_report_.precise = precise;
   return taken;
 }
 
@@ -1098,8 +1147,13 @@ bool async_scheduler::wait_for_work(clock::time_point deadline) {
     // look (seen here) or sees idle_waiting_ and notifies (both sides are seq_cst). A lock post
     // notifies whatever idle_waiting_ says (protocol 2.3): one this look misses ends the wait.
     idle_waiting_.store(true, std::memory_order_seq_cst);
-    if (!ingress_pending_.load(std::memory_order_seq_cst) && !(home_ && home_->port_pending()))
+    if (!ingress_pending_.load(std::memory_order_seq_cst) && !(home_ && home_->port_pending())) {
+      // S2-Q2: a scheduler with a notifier (a pool's group) is woken through it, never waited on
+      // here; a probe whose deadline has passed returned above. The notifier takes every post's
+      // signal, so in a release build this wait lasts to `until` whatever is posted.
+      assert(!wakeup_->has_notifier() && "wait_for_work: the scheduler has a wake notifier");
       wakeup_->wait_until(until, precise);
+    }
     idle_waiting_.store(false, std::memory_order_relaxed);
   }
 }
@@ -1109,7 +1163,13 @@ bool async_scheduler::wait_for_work(double seconds) {
 }
 
 void async_scheduler::notify_work() {
-  if (idle_waiting_.load(std::memory_order_seq_cst))
+  // CVC_EXEC_FUZZ (S2-Q15): a yield between the post's push and its wake, under the ingress mutex.
+  // (lock_home.h's points are frozen; the draw is a lock post's, which it only mixes in.)
+  if (ingress_fuzz_)
+    detail::lock_fuzz_point(ingress_fuzz_.get(), detail::lock_fuzz_at::post_exit);
+  // A wait in progress is notified, as is a notifier whatever idle_waiting_ says (S2-Q2): a
+  // pool's group is woken by every post.
+  if (idle_waiting_.load(std::memory_order_seq_cst) || wakeup_->has_notifier())
     wakeup_->notify();
 }
 
