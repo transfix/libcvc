@@ -66,6 +66,9 @@ struct Session {
   ari::Runtime rt{app, "ui"};
   RecordingBackend be;
   explicit Session(ari::Widget root) {
+    // CreateContext keeps an earlier context current, and the test and libcvcGL may each have
+    // their own imgui globals (Windows): this session's context must be current in both.
+    ImGui::SetCurrentContext(ctx);
     cvc::gl::ImGuiBackend::setImGuiContext(ctx);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2(800.0f, 600.0f);
