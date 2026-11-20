@@ -35,12 +35,13 @@
 #include <cstdlib>
 #include <cvc/ariadne/bind.h> // live node params: read_or_seed / read_or / write / resolve_bind
 #include <cvc/ariadne/scene.h>
-#include <cvc/ariadne/scene_generated_world.h> // the node in core: params, keys, stats, colliders
+#include <cvc/ariadne/scene_generated_world.h> // the node in core: params, keys, stats, dataset
 #include <cvc/ariadne/scene_wind.h>            // the scene's one wind, which the trees lean in
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
 #include <cvc/core/sliced_task.h>
+#include <cvc/core/types.h> // CVC_VERSION_STRING
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/gl/GeometryNode.h>
@@ -50,6 +51,7 @@
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/world_nodes.h>
 #include <cvc/image/image.h>
+#include <cvc/model/model_file_io.h> // can_write_model_to_memory
 #include <cvc/volume/bounding_box.h>
 #include <cvc/world/building_archetypes.h>
 #include <cvc/world/generated_world.h>
@@ -97,6 +99,10 @@ struct WorldJob {
   std::shared_ptr<world::generated_world> world; // rebuild: made here; repaint: the shown one
   std::vector<unsigned char> texture;
   std::vector<unsigned char> water; // world::paint_water's RGBA texels
+  // rebuild: the world as its bundle's files, written here, off the frame thread (empty when no
+  // glb can be written, or it failed: bundle_error), for its dataset (publish_generated_world).
+  world::city_bundle_files bundle;
+  std::string bundle_error;
   std::string error; // why it failed; empty when it did not
 };
 
@@ -123,10 +129,9 @@ struct WorldRT {
   std::string base_dir;               // the document's, for a relative terrain_file
   const world::building_library *library = nullptr;
   std::shared_ptr<world::generated_world> w; // the world shown
-  // What a body: on the node collides with (the terrain and the buildings): the scene's world
-  // swaps them when a new world lands.
-  std::shared_ptr<ari::SceneColliders> colliders = std::make_shared<ari::SceneColliders>();
-  bool bodies = false; // the node declares a body:, so its colliders are made
+  // The world shown as the node's dataset (publish_generated_world): a body: on the node is its
+  // world, as a data node's is, and the scene's world takes each new one at its next sync.
+  std::string data_path;
   std::string sig; // the params the current world (or the one being made) is from
   int preset = 0;  // the preset the counts last came from
   int color = 0;   // the colour the shown texture was painted in
@@ -804,7 +809,7 @@ void hide_world_install(WorldRT &rt) {
 }
 
 // The swap, in one frame: the shown world's nodes hidden (and retired), the new world's shown, and
-// it is the world shown (its ground published, its colliders, its stats).
+// it is the world shown (its ground published, its dataset, its stats).
 void swap_world(SceneGraph &sg, const std::string &id, WorldRT &rt) {
   WorldInstall &in = *rt.install;
   retire_world_nodes(sg, id, rt, rt.chunks, rt.water, rt.cells, rt.building_mesh, rt.road_mesh);
@@ -840,9 +845,18 @@ void swap_world(SceneGraph &sg, const std::string &id, WorldRT &rt) {
   rt.color = in.job->color;
   *rt.field = *rt.w->terrain; // the published ground follows the world
   put_outer_sea(sg, id, rt, *rt.w);
-  if (rt.bodies) {            // only a node with a body: needs them
-    rt.colliders->geometry = ari::generated_world_colliders(*rt.w);
-    ++rt.colliders->revision;
+  { // the world shown is the node's dataset: its physics, its grid, generated_world(id). The
+    // task wrote a rebuild's bundle; the first world's is written here.
+    std::vector<std::string> why;
+    const bool written = !in.job->bundle.empty() || !in.job->bundle_error.empty();
+    if (!in.job->bundle_error.empty())
+      why.push_back("ari: generated_world '" + id + "': its world as a bundle: " +
+                    in.job->bundle_error + "; its physics is the world as made");
+    rt.data_path = ari::publish_generated_world(*rt.app, rt.prefix, *rt.keys, rt.w, &why,
+                                                written ? &in.job->bundle : nullptr);
+    in.job->bundle.clear(); // the dataset holds the bytes now
+    if (!why.empty())
+      ari::write<std::string>(*rt.app, rt.k.status, why.front());
   }
   publish_stats(rt);
   sg.invalidateShadowBake();
@@ -926,9 +940,10 @@ public:
   WorldTask(cvc::app &app, std::shared_ptr<WorldJob> job, const world::generated_world_params &p,
             const world::building_library *library, std::shared_ptr<ari::ResolvedFile> file,
             int texture_size)
-      : _job(std::move(job)), _file(std::move(file)), _size(texture_size) {
+      : _app(&app), _job(std::move(job)), _file(std::move(file)), _size(texture_size) {
     if (_job->rebuild)
       _builder = std::make_unique<world::world_builder>(app, p, library);
+    _bundled = !_job->rebuild;
   }
 
   bool step(std::size_t budget) override {
@@ -943,6 +958,19 @@ public:
           _builder.reset();
           _file.reset(); // a fetched DEM's temp file is read
         }
+        return done();
+      }
+      if (!_bundled) {
+        // The world as its bundle, here rather than on the frame thread when it goes in (a 1.2 km
+        // world's is about 30 MB and 1.6 s to write): its dataset is that bundle read back.
+        set("bundle", kBuildShare);
+        try {
+          if (cvc::can_write_model_to_memory(".glb"))
+            _job->bundle = world::generated_world_bundle(*_app, *_job->world, CVC_VERSION_STRING);
+        } catch (const std::exception &e) {
+          _job->bundle_error = e.what();
+        }
+        _bundled = true;
         return done();
       }
       if (!_painter)
@@ -991,9 +1019,11 @@ private:
     _job->done.store(true, std::memory_order_release);
   }
 
+  cvc::app *_app;
   std::shared_ptr<WorldJob> _job;
   std::shared_ptr<ari::ResolvedFile> _file;
   int _size;
+  bool _bundled = true;
   std::unique_ptr<world::world_builder> _builder;
   std::unique_ptr<world::surface_painter> _painter;
   std::atomic<const char *> _phase{"terrain"};
@@ -1101,7 +1131,6 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   rt->id = n.id;
   cvc::app &app = *rt->app;
   rt->base = ari::generated_world_params_from(n);
-  rt->bodies = n.body.present;
   rt->base_dir = n.base_dir;
   rt->color = color_from(n.props.str("color", "material"), 0);
   rt->texture_size = std::max(256, std::min(4096, int(n.props.num("texture", 2048.0))));
@@ -1122,7 +1151,6 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   rt->color = int(ari::read_or<double>(app, rt->k.color, rt->color));
   rt->w = ari::first_generated_world(app, rt->k, n, p0, rt->library, warnings);
   rt->sig = ari::generated_world_signature(p0);
-  out.colliders[n.id] = rt->colliders; // a body: on the node collides with these
 
   // The node is the terrain; its height_field is what `ground: <id>` and a body stand on. It draws
   // through its chunks (make_chunk): its own mesh stays empty, and it holds their texture.
@@ -1155,6 +1183,8 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
     }
     rt->install.reset();
   }
+  // The world went in as the node's dataset (swap_world); a body: on the node is its world.
+  out.body_data[n.id] = rt->data_path;
 
   SceneGraph *sgp = &sg;
   const std::string id = n.id;

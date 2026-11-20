@@ -31,9 +31,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cvc/core/app.h>
 #include <cvc/volume/segmentation.h>
 #include <cvc/volume/segmentation_params.h>
 #include <exception>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -43,8 +45,11 @@ namespace cvc {
 
 namespace {
 
-// Units between two looks at cancel() and the progress, inside one step.
-constexpr std::size_t slice_units = 4096;
+// Units between two looks at cancel() and the progress, inside one step. A per-voxel pass spreads
+// a slice over the app's compute pool in pieces of genseg::for_voxels_piece voxels: 32 of them a
+// slice, so one fork-join barrier covers enough work to be worth it on a busy machine (8 a slice
+// measured about twice as slow there). A slice is still well under a tenth of a second.
+constexpr std::size_t slice_units = 262144;
 
 std::string fmt(const char *f, ...) {
   char buf[512];
@@ -191,18 +196,31 @@ genseg::task segment_stepper::impl::run() {
   r.class_names = names;
   r.class_voxels.assign(names.size(), 0);
   {
+    // Each voxel's label, and each class's count (each piece's, then their sum).
     unsigned char *lab = r.labels.data_ptr();
+    const std::size_t classes = names.size();
+    std::mutex join;
+    const auto label = [&](std::size_t b, std::size_t e) {
+      std::vector<std::size_t> count(classes, 0);
+      for (std::size_t v = b; v < e; ++v) {
+        const unsigned char s = ctx.seed_index[v];
+        if (s < 254 && s < classes) {
+          lab[v] = s;
+          ++count[s];
+        } else {
+          lab[v] = seeded_segmentation::unlabelled;
+        }
+      }
+      const std::lock_guard<std::mutex> hold(join);
+      for (std::size_t c = 0; c < classes; ++c)
+        r.class_voxels[c] += count[c];
+    };
+    GS_FOR_VOXELS_OF(ctx, n, label);
+    // The border, in x-fastest order.
     std::size_t v = 0;
     for (int k = 0; k < Z; ++k)
       for (int j = 0; j < Y; ++j)
         for (int i = 0; i < X; ++i, ++v) {
-          const unsigned char s = ctx.seed_index[v];
-          if (s < 254 && s < names.size()) {
-            lab[v] = s;
-            ++r.class_voxels[s];
-          } else {
-            lab[v] = seeded_segmentation::unlabelled;
-          }
           if (ctx.tdata[v] == genseg::genseg_context::MAX_TIME + 1)
             r.border.push_back({i, j, k});
           GS_UNIT_OF(ctx);
@@ -244,19 +262,21 @@ genseg::task segment_stepper::impl::run() {
   ctx.dataset.release();
 
   if (params.class_volumes) {
+    // Every class's volume (zero), then one pass copying each labelled voxel into its class's.
     const unsigned char *src = in.data_ptr();
     const unsigned char *lab = r.labels.data_ptr();
     const std::size_t size = in.voxelSize();
-    for (std::size_t c = 0; c < names.size(); ++c) {
-      volume cv(in.ctx(), d, in.voxelType(), in.boundingBox());
-      unsigned char *dst = cv.data_ptr();
-      for (std::size_t v = 0; v < n; ++v) {
-        if (lab[v] == c)
-          std::memcpy(dst + v * size, src + v * size, size);
-        GS_UNIT_OF(ctx);
-      }
-      r.classes.push_back(std::move(cv));
-    }
+    for (std::size_t c = 0; c < names.size(); ++c)
+      r.classes.emplace_back(in.ctx(), d, in.voxelType(), in.boundingBox());
+    std::vector<unsigned char *> dst;
+    for (volume &cv : r.classes)
+      dst.push_back(cv.data_ptr());
+    const auto copy = [&](std::size_t b, std::size_t e) {
+      for (std::size_t v = b; v < e; ++v)
+        if (lab[v] < dst.size())
+          std::memcpy(dst[lab[v]] + v * size, src + v * size, size);
+    };
+    GS_FOR_VOXELS_OF(ctx, n, copy);
   }
   r.warnings = std::move(warnings);
 }
@@ -285,8 +305,8 @@ void segment_stepper::impl::note_progress() {
     within = double(ctx.units) / (2.0 * n);
   } else if (ph == "writing") {
     lo = 0.9, hi = 1.0;
-    within = double(ctx.units) / ((1.0 + (params.class_volumes ? double(names.size()) : 0.0)) * n +
-                                  double(class_of_seed.size()));
+    within = double(ctx.units) /
+             ((2.0 + (params.class_volumes ? 1.0 : 0.0)) * n + double(class_of_seed.size()));
   }
   const double p = lo + (hi - lo) * std::min(1.0, std::max(0.0, within));
   prog = std::max(prog, std::min(p, 1.0));

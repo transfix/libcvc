@@ -201,8 +201,9 @@ for _ in range(60):
 check(bool(np.all(o["x"] > -27.0)) and bool(np.all(o["speed"] > 1.0)),
       f"each plant drives ({np.round(o['x'], 1)}, {np.round(o['speed'], 1)})")
 
-# libcvc's one simulation tick: the gym steps 0.06 s by default; tick= sets another.
-check(pycvc.SIM_TICK == 0.06 and pycvc.SIM_QUANTUM == 0.01 and pycvc.SIM_CATCHUP == 0.25,
+# libcvc's one simulation tick: the gym steps 7 quanta of 1/120 s by default; tick= sets another.
+check(pycvc.SIM_QUANTUM == 1.0 / 120.0 and pycvc.SIM_TICK_QUANTA == 7
+      and abs(pycvc.SIM_TICK - 7.0 / 120.0) < 1e-15 and pycvc.SIM_CATCHUP == 0.25,
       f"the shared tick ({pycvc.SIM_TICK}, {pycvc.SIM_QUANTUM}, {pycvc.SIM_CATCHUP})")
 check(abs(g3.dt() - pycvc.SIM_TICK) < 1e-12, f"the gym's tick is the shared one ({g3.dt()})")
 g5 = pycvc.WorldGym(doc, tick=0.05, agents=[{"plant": "kinematic", "controller": "none"}])

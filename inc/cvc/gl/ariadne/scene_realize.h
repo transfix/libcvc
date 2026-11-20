@@ -223,6 +223,10 @@ struct RealizedScene {
   // generated_world's terrain and buildings): realize_physics hands it to the world, which swaps
   // the node's bodies whenever the node bumps its revision.
   std::map<std::string, std::shared_ptr<cvc::ariadne::SceneColliders>> colliders;
+  // A custom node whose body: is a dataset it puts (a generated_world's world, as
+  // cvc::ariadne::publish_generated_world makes it), by node id: the store path, which
+  // realize_physics hands to the world as a data node's, so the world takes each new one.
+  std::map<std::string, std::string> body_data;
 
   // The scene's world (`physics:`, or the nodes' `body:`s), null without one: core libcvc's
   // cvc::ariadne::SceneWorld, the world a headless host runs for the same document. Its bodies are

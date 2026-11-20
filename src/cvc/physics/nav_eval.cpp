@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cvc/core/sim_tick.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/physics/nav_eval.h>
 #include <cvc/physics/nav_plant.h>
@@ -59,6 +60,21 @@ void add_ledger(vehicle_energy &a, const vehicle_energy &b, double k = 1.0) {
   a.power += k * b.power;
 }
 
+// The physics step for a navigator tick `dt`: the default 0.01 s when the tick is whole steps of
+// it (the trainers' 0.06 s, every score so far), the simulation quantum when it is whole quanta
+// (cvc::kSimTick), else the step nearest 0.01 s that divides it.
+double eval_physics_dt(double dt) {
+  const auto whole = [&](double step) {
+    const double k = std::round(dt / step);
+    return k >= 1.0 && std::fabs(k * step - dt) < 1e-6; // a float tick: 0.06f is 0.0599999987
+  };
+  if (whole(0.01))
+    return 0.01;
+  if (whole(cvc::kSimQuantum))
+    return cvc::kSimQuantum;
+  return dt / std::max(1.0, std::round(dt / 0.01));
+}
+
 // One seed: the fraction of `o.agents` that reached their goals in `o.ticks`, the energy they
 // drew and the distance they drove. `step_threads` is sim_world::step's (its per-agent kernels
 // give the same result on any count). `log_out` (if given) gets the run's plant_log.
@@ -93,6 +109,7 @@ plant_drive_score drive_once(const cvc::nav::coef_mlp &policy, const cvc::nav::t
 
   world_config wc;
   wc.backend = backend::jolt;
+  wc.fixed_dt = eval_physics_dt(sc.dt);
   world phys(wc);
   const material_id m = phys.add_material({"ground", static_cast<float>(o.mu), 0.0f, 0.015f});
   body_desc g;

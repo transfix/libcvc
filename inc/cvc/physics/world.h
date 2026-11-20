@@ -19,9 +19,11 @@
 //
 // Time: one step() advances fixed_dt seconds. A world driven by an application's
 // cvc::world_clock calls follow(clock) once per frame, which takes the steps due
-// since the last call (fixed_dt must be a whole number of the clock's quanta; the
-// libcvc default suite quantum is 0.01 s, so a world at fixed_dt = 0.01 steps once
-// per quantum).
+// since the last call (fixed_dt must be a whole number of the clock's quanta). The
+// simulation hosts' quantum is 1/120 s (cvc::kSimQuantum, cvc/core/sim_tick.h): a host on it
+// (a scene's world, the cars template's or a swarm's plant_host) builds its world with that
+// fixed_dt. world_config's own default stays 0.01 s, for a navigator at the trainers' 0.06 s
+// and a world outside the hosts, and the determinism goldens are pinned on it.
 //
 // Determinism: a run is a function of the initial state, the order of calls, the
 // world_config and the backend build. state_hash() digests the whole simulation

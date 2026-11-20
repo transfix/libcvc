@@ -1058,6 +1058,49 @@ TEST(SegmentationRealMaps, RibosomeAsTheLegacyLibraryAndThePublishedSplit) {
   }
 }
 
+// GroEL at 6 A (W. Chiu's map, 128^3), one seed in each of its 14 subunits (the densest voxel
+// of each, by the subunits the legacy virus pipeline cut it into), tlow 115 / thigh 180: the
+// legacy library's labels and border. Its 409 automatic seeds all go through the threshold sweep,
+// which skips the searches that would find nothing (genseg.cpp): this pins that the labels stay
+// the legacy ones. (Against those subunits, which 7-fold symmetry cut, the fronts do poorly: a
+// seed on a density peak is walled in, as on the capsid below.)
+TEST(SegmentationRealMaps, GroELAsTheLegacyLibrary) {
+  std::string why;
+  const std::string map = real_map("W_Chiu/GroEL-6A.rawiv", why);
+  if (map.empty())
+    GTEST_SKIP() << why;
+  cvc::app a;
+  const cvc::volume vol(a, map);
+  cvc::seeded_segmentation_params p;
+  p.t_low = 115;
+  p.t_high = 180;
+  p.normalized_thresholds = true;
+  p.class_volumes = false;
+  const cvc::seeded_segmentation r = cvc::segment_seeded(vol,
+                                                         classes_of({{0, 49, 43, 59},
+                                                                     {1, 37, 65, 58},
+                                                                     {2, 67, 88, 44},
+                                                                     {3, 68, 89, 59},
+                                                                     {4, 86, 77, 59},
+                                                                     {5, 76, 47, 54},
+                                                                     {6, 71, 39, 59},
+                                                                     {7, 47, 84, 67},
+                                                                     {8, 69, 90, 67},
+                                                                     {9, 75, 81, 73},
+                                                                     {10, 89, 52, 67},
+                                                                     {11, 73, 47, 84},
+                                                                     {12, 48, 43, 67},
+                                                                     {13, 47, 46, 83}}),
+                                                         p);
+  EXPECT_EQ(r.automatic_seeds, 409u);
+  EXPECT_EQ(r.classified_seeds, 409u);
+  EXPECT_EQ(labelled_voxels(r), 114692u);
+  EXPECT_EQ(r.border.size(), 55652u);
+  EXPECT_EQ(labels_fingerprint(r), 0x037d421d1363a2deull) << "labels differ from the legacy run";
+  EXPECT_EQ(border_fingerprint(r.border), 0xfbc92b101ebdebbdull)
+      << "border voxels differ from the legacy run";
+}
+
 // The capsid layer of EMD-1011 (256^3) cut into its 252 capsomers, one seed in each: the
 // densest voxel of the capsomer whose 3x3x3 neighbourhood lies inside it, by the capsomer index
 // the legacy virus pipeline wrote. With 252 classes and no automatic seeds, the legacy library's

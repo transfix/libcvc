@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cvc/core/sim_tick.h>
 #include <cvc/nav/sim_thread.h>
 #include <cvc/nav/sim_world.h>
 
@@ -43,7 +44,7 @@ double nav_dt(const sim_world &w) { return static_cast<double>(w.current_config(
 cvc::world_clock::config private_clock(const sim_world &w, double hz) {
   cvc::world_clock::config c;
   const double dt = nav_dt(w);
-  c.fixed_dt = (dt > 0.0 && std::isfinite(dt)) ? dt : 0.06;
+  c.fixed_dt = (dt > 0.0 && std::isfinite(dt)) ? dt : cvc::kSimTick;
   c.scale = (hz > 0.0 ? hz : 60.0) * c.fixed_dt;
   c.max_steps_per_advance = 8;
   return c;

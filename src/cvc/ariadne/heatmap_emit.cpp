@@ -273,41 +273,6 @@ bool heatmap_color(const std::vector<HeatmapStop> &ramp, double v, float rgb[3])
   return true;
 }
 
-bool parse_heatmap_color(const std::string &raw, float rgb[3]) {
-  const std::string t = trim(raw);
-  if (!t.empty() && t[0] == '#') {
-    const std::string h = t.substr(1);
-    if ((h.size() != 6 && h.size() != 3) ||
-        !std::all_of(h.begin(), h.end(), [](unsigned char c) { return std::isxdigit(c) != 0; }))
-      return false;
-    const unsigned long n = std::strtoul(h.c_str(), nullptr, 16);
-    if (h.size() == 6) {
-      rgb[0] = static_cast<float>((n >> 16) & 0xff) / 255.0f;
-      rgb[1] = static_cast<float>((n >> 8) & 0xff) / 255.0f;
-      rgb[2] = static_cast<float>(n & 0xff) / 255.0f;
-    } else {
-      rgb[0] = static_cast<float>((n >> 8) & 0xf) / 15.0f;
-      rgb[1] = static_cast<float>((n >> 4) & 0xf) / 15.0f;
-      rgb[2] = static_cast<float>(n & 0xf) / 15.0f;
-    }
-    return true;
-  }
-  float out[3];
-  int i = 0;
-  for (std::size_t p = 0; p <= t.size(); ++i) {
-    const std::size_t q = std::min(t.find(',', p), t.size());
-    const double v = parse_number(t.substr(p, q - p));
-    if (i >= 3 || !std::isfinite(v))
-      return false;
-    out[i] = static_cast<float>(std::clamp(v, 0.0, 1.0));
-    p = q + 1;
-  }
-  if (i != 3)
-    return false;
-  std::copy(out, out + 3, rgb);
-  return true;
-}
-
 std::string heatmap_tooltip_tokens(const std::string &tmpl, const HeatmapCellEvent &cell) {
   if (tmpl.find('{') == std::string::npos)
     return tmpl;

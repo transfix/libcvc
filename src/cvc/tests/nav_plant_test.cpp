@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
+#include <cvc/core/sim_tick.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h>
@@ -2798,4 +2799,56 @@ TEST(NavPlantConvergence, BasinGridOnJoltReach) {
                 grid[i][1], grid[i][2], 100 * mb, 100 * mc, 100 * (mb - mc), 100 * lo, 100 * hi);
   }
   EXPECT_EQ(m.size(), grid.size());
+}
+
+// The policies at the simulation tick (ARIADNE_WORLDS.md section 18.1): the shipped weights and
+// the untrained default were trained and tuned at 0.06 s, and every host now ticks at 7/120 s
+// (cvc::kSimTick). Each drives Jolt RoboRacers through the city over the same 24 s of world time
+// at 0.06 s, at the simulation tick and at 0.05 s, 20 seeds of 48 agents. The simulation tick
+// must keep the reach of 0.06 s, within the seeds' noise. A heavy run: CVC_NAV_TICK_AB=1.
+TEST(NavPlantConvergence, PoliciesHoldTheirReachAtTheSimulationTick) {
+  REQUIRE_JOLT();
+  if (!std::getenv("CVC_NAV_TICK_AB") || std::string(std::getenv("CVC_NAV_TICK_AB")) != "1")
+    GTEST_SKIP() << "a heavy run: set CVC_NAV_TICK_AB=1 to run it";
+  const vehicle_desc rr = vehicle_desc::roboracer();
+  std::vector<std::pair<std::string, cvc::nav::coef_mlp>> policies;
+#ifdef CVC_NAV_SHIPPED_WEIGHTS
+  policies.emplace_back("shipped", cvc::nav::coef_mlp::load(CVC_NAV_SHIPPED_WEIGHTS));
+#endif
+  policies.emplace_back("default_biased", cvc::nav::coef_mlp::default_biased());
+  const double span = 24.0; // s of world time each arm drives
+  const std::vector<double> ticks = {0.06, cvc::kSimTick, 0.05};
+  for (const auto &pol : policies) {
+    std::vector<double> reach(ticks.size());
+    std::vector<std::vector<double>> seeds(ticks.size());
+    for (std::size_t k = 0; k < ticks.size(); ++k) {
+      cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+      sc.dt = static_cast<float>(ticks[k]);
+      plant_reach_options o;
+      o.ticks = static_cast<int>(std::lround(span / ticks[k]));
+      o.time_budget_mps = 1.0;
+      std::vector<std::vector<plant_drive_score>> per;
+      const plant_drive_score m = score_on_plant({pol.second}, sc, rr, kCityL, o, &per)[0];
+      reach[k] = m.reach;
+      for (const plant_drive_score &ps : per[0])
+        seeds[k].push_back(ps.reach);
+      std::printf("  %-14s tick %.4f s x %3d: reach %.3f  in time %.3f  arrive %.2f m/s  "
+                  "building hits %.2f  contact %.2f s  stopped %.2f\n",
+                  pol.first.c_str(), ticks[k], o.ticks, m.reach, m.reach_in_time, m.arrive_mps,
+                  m.building_hits, m.vehicle_contact_s, m.stopped_frac);
+    }
+    // The paired difference per seed, the simulation tick less 0.06 s: its mean and standard error.
+    double mean = 0.0, sq = 0.0;
+    const std::size_t n = seeds[0].size();
+    for (std::size_t i = 0; i < n; ++i)
+      mean += seeds[1][i] - seeds[0][i];
+    mean /= static_cast<double>(n);
+    for (std::size_t i = 0; i < n; ++i)
+      sq += (seeds[1][i] - seeds[0][i] - mean) * (seeds[1][i] - seeds[0][i] - mean);
+    const double se = std::sqrt(sq / static_cast<double>(n - 1) / static_cast<double>(n));
+    std::printf("  %-14s simulation tick - 0.06 s: %+.3f reach (SE %.3f over %zu seeds)\n",
+                pol.first.c_str(), mean, se, n);
+    EXPECT_GE(reach[1], reach[0] - 0.05)
+        << pol.first << " loses reach at the simulation tick: retrain it at cvc::kSimTick";
+  }
 }
