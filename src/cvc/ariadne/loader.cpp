@@ -374,15 +374,15 @@ namespace {
 // else is a custom type, drawn by register_widget_type / a backend-native widget.
 // ORDER MATTERS: the short-form dispatch (widget_type) takes the FIRST of these present as a key,
 // so tf_editor precedes color — a tf_editor's own config may carry a `color:` node list — and
-// progress and plot precede overlay, their caption. A chart's keys name no widget type, nor
-// do a heatmap's.
+// progress and plot precede overlay, their caption. A chart's keys name no widget type, nor do a
+// heatmap's or a settings editor's.
 constexpr const char *kBuiltinWidgetTypes[] = {
-    "group",        "menubar",      "menu",    "menu_item", "window",    "progress",
-    "plot",         "chart",        "overlay", "panel",     "text",      "checkbox",
-    "slider_int",   "slider_float", "combo",   "radio",     "radio_row", "input_text",
-    "input_int",    "tf_editor",    "color",   "image",     "button",    "separator",
-    "windows_menu", "spinner",      "video",   "audio",     "text_view", "message_input",
-    "tray_icon",    "tabs",         "list",    "heatmap"};
+    "group",         "menubar",      "menu",         "menu_item", "window", "progress",
+    "plot",          "chart",        "settings",     "overlay",   "panel",  "text",
+    "checkbox",      "slider_int",   "slider_float", "combo",     "radio",  "radio_row",
+    "input_text",    "input_int",    "tf_editor",    "color",     "image",  "button",
+    "separator",     "windows_menu", "spinner",      "video",     "audio",  "text_view",
+    "message_input", "tray_icon",    "tabs",         "list",      "heatmap"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {
@@ -1069,6 +1069,67 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
   }
   if (type == "heatmap") { // a grid of cells from a subtree, coloured by a ramp
     return parse_heatmap(ctx, n, label);
+  }
+  if (type == "settings") { // an editor for every key under a state subtree, from its metadata
+    Widget w = settings(label, std::string());
+    w.settings_roots.clear();
+    const auto strings = [&](const char *key) {
+      std::vector<std::string> out;
+      const YAML::Node v = n[key];
+      if (v && v.IsScalar()) {
+        out.push_back(v.Scalar());
+      } else if (v && v.IsSequence()) {
+        for (const YAML::Node &e : v)
+          if (e.IsScalar())
+            out.push_back(e.Scalar());
+          else
+            ctx.warn("ari: settings '" + label + "' " + key + ": entries must be text — skipped");
+      } else if (v) {
+        ctx.warn("ari: settings '" + label + "' " + key + ": must be text or a list — ignored");
+      }
+      return out;
+    };
+    for (std::string &r : strings("root"))
+      if (!r.empty())
+        w.settings_roots.push_back(std::move(r));
+    if (w.settings_roots.empty())
+      ctx.warn("ari: settings '" + label + "' has no root: — it shows nothing");
+    w.settings_filter = strings("filter");
+    // groups: each entry a key (its place in the order), {key: title}, or {key: {title, help,
+    // open}}.
+    if (const YAML::Node gs = n["groups"]; gs && !gs.IsSequence()) {
+      ctx.warn("ari: settings '" + label + "' groups: must be a list — ignored");
+    } else if (gs) {
+      for (const YAML::Node &e : gs) {
+        SettingsGroupSpec g;
+        if (e.IsScalar()) {
+          g.key = e.Scalar();
+        } else if (e.IsMap() && e.size() == 1) {
+          const auto kv = *e.begin();
+          g.key = kv.first.Scalar();
+          if (kv.second.IsScalar()) {
+            g.title = kv.second.Scalar();
+          } else if (kv.second.IsMap()) {
+            g.title = str(kv.second, "title");
+            g.help = str(kv.second, "help");
+            g.open = flag(kv.second, "open", false);
+          }
+        }
+        if (g.key.empty()) {
+          ctx.warn("ari: settings '" + label +
+                   "' has a groups: entry that names no key (key, {key: title} or {key: {title, "
+                   "help, open}}) — skipped");
+          continue;
+        }
+        w.settings_groups.push_back(std::move(g));
+      }
+    }
+    w.settings_search = flag(n, "search", false);
+    w.settings_readouts = flag(n, "readouts", true);
+    w.settings_open = flag(n, "open", false);
+    w.commit_on_release = commit_on_release(ctx, n, label);
+    w.on = action(n); // optional: after each committed write or reset
+    return w;
   }
   if (type == "checkbox") {
     const std::string bind = str(n, "bind");

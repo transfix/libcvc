@@ -37,6 +37,7 @@ enum class Kind {
   Progress,       // a read-only bar: the number at a state path, over [lo, hi]
   Plot,           // a read-only line graph: the comma-separated numbers at a state path
   Chart,          // read-only curves: series with their own x, bands, markers, log y, a cursor
+  Settings,       // an editor for every key under a state subtree, each drawn from its metadata
   Checkbox,       // bound bool state
   SliderInt,      // bound int state, [ilo, ihi]
   SliderFloat,    // bound double state, [lo, hi]
@@ -112,6 +113,15 @@ struct HeatmapOptions {
   float mark_rgb[3] = {1.0f, 1.0f, 1.0f}; // `mark_color:` a marked cell's corner triangle
 };
 
+// Kind::Settings: one entry of its `groups:` list, the branch at `key` (a path under the root,
+// "a.b" for a nested one): drawn in the list's order among its siblings, under `title` ("" its
+// name), with `help` as its tooltip ("" the branch's comment), open at first when `open`.
+struct SettingsGroupSpec {
+  std::string key;
+  std::string title;
+  std::string help;
+  bool open = false;
+};
 struct Background {
   std::string src;
   std::string bind;
@@ -494,6 +504,19 @@ struct Widget {
   // "row,col"), and the cell it names is outlined. Its `tooltip`, `on_click` and `on_hover` are the
   // heatmap's own: per cell, with the cell in their tokens (the tooltip) or `event` (the handlers).
   HeatmapOptions heatmap;
+  // Kind::Settings: `settings_roots` are the subtrees it edits (`root:`, a state path or a list of
+  // them); `settings_filter` the patterns a key's path under the root must match, one of them
+  // (a substring, or a glob with * ? [..]; one starting with '-' excludes what it matches);
+  // `settings_groups` orders, renames and opens branches; `settings_search` adds a search box
+  // (its text kept at tree.<id>.search); `settings_readouts` false leaves out the read-only keys;
+  // `settings_open` opens every group at first. `on` runs after each committed write and reset;
+  // `commit_on_release` makes its sliders write once, at the release.
+  std::vector<std::string> settings_roots;
+  std::vector<std::string> settings_filter;
+  std::vector<SettingsGroupSpec> settings_groups;
+  bool settings_search = false;
+  bool settings_readouts = true;
+  bool settings_open = false;
 
   // Kind::TextView: its height in px (0: the rest of the window; rows of 16 px in a terminal);
   // `follow` keeps it at the bottom while lines arrive, if it is already there; `wrap` wraps long
@@ -733,6 +756,17 @@ inline Widget heatmap(std::string label, std::string bind, std::vector<HeatmapSt
   w.label = std::move(label);
   w.bind = std::move(bind);
   w.heatmap.ramp = std::move(ramp);
+  return w;
+}
+
+// An editor for every key under the state subtree `root` (Kind::Settings), each drawn from its
+// metadata (cvc/state/state_key_meta.h, cvc/core/param_table.h). Set the filter, groups, search
+// and the rest on the result.
+inline Widget settings(std::string label, std::string root) {
+  Widget w;
+  w.kind = Kind::Settings;
+  w.label = std::move(label);
+  w.settings_roots.push_back(std::move(root));
   return w;
 }
 
