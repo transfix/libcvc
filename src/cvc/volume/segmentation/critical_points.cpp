@@ -37,6 +37,7 @@ University of Texas at Austin for a different license.
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cvc/core/app.h>
 #include <cvc/volume/segmentation.h>
 #include <cvc/volume/segmentation_params.h>
 #include <exception>
@@ -100,24 +101,43 @@ task read_voxels(genseg_context &ctx, const volume &in, const char *who) {
   ctx.ZDIM = int(in.ZDim());
   const std::size_t n = ctx.voxel_count();
   const std::size_t X = std::size_t(ctx.XDIM), Y = std::size_t(ctx.YDIM);
+  // The per-voxel passes (this read among them) spread over the app's pool, once a volume holds
+  // enough pieces for it.
+  if (n >= 2 * for_voxels_piece)
+    ctx.pool = &in.ctx().computePool();
   ctx.dataset.allocate(n);
   const unsigned char *data = in.data_ptr();
   const data_type t = in.voxelType();
-  bool constant = true;
-  for (std::size_t v = 0; v < n; ++v) {
+  const float first = n ? voxel_as_float(data, t, 0) : 0.0f;
+  // The first voxel (in order) that is not finite, whichever piece meets it first.
+  std::atomic<std::size_t> bad{SIZE_MAX};
+  std::atomic<bool> varies{false};
+  const auto read = [&](std::size_t b, std::size_t e) {
+    bool differs = false;
+    for (std::size_t v = b; v < e; ++v) {
+      const float f = voxel_as_float(data, t, v);
+      if (!std::isfinite(f)) {
+        std::size_t seen = bad.load();
+        while (v < seen && !bad.compare_exchange_weak(seen, v)) {
+        }
+        return; // nothing later in this piece comes first
+      }
+      ctx.dataset[v] = f;
+      differs = differs || f != first;
+    }
+    if (differs)
+      varies.store(true, std::memory_order_relaxed);
+  };
+  GS_FOR_VOXELS_OF(ctx, n, read);
+  if (const std::size_t v = bad.load(); v != SIZE_MAX) {
     const float f = voxel_as_float(data, t, v);
-    if (!std::isfinite(f))
-      throw segmentation_error(fmt("%s: voxel (%zu, %zu, %zu) is %s", who, v % X, (v / X) % Y,
-                                   v / (X * Y), std::isnan(f) ? "NaN" : "not finite as a float"));
-    ctx.dataset[v] = f;
-    if (f != ctx.dataset[0])
-      constant = false;
-    GS_UNIT_OF(ctx);
+    throw segmentation_error(fmt("%s: voxel (%zu, %zu, %zu) is %s", who, v % X, (v / X) % Y,
+                                 v / (X * Y), std::isnan(f) ? "NaN" : "not finite as a float"));
   }
-  if (constant)
+  if (!varies.load())
     throw segmentation_error(fmt("%s: the volume is constant (every voxel is %g), so it has "
                                  "nothing to segment",
-                                 who, double(ctx.dataset[0])));
+                                 who, double(first)));
 }
 
 void configure(critical_seeds &s, const seeded_segmentation_params &p) {
