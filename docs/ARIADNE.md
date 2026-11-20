@@ -7182,8 +7182,11 @@ Measured in CI (2026-10-20):
   pixels beyond 40 (they pass), widgets had 40 and scene 467 (they fail).
 - With the window chrome's close and maximize glyphs (2026-11-14), menus had 7 and windows 12
   (they pass) but grid 15 (it fails).
-- So `widgets.macos.png`, `scene.macos.png` and `grid.macos.png` are macOS goldens, and macOS
-  compares those three against its own renderer.
+- The orthoslicer (2026-11-17) had 1,149 pixels beyond 40, all four macOS jobs the same to the
+  byte (it fails). Its nearest-sampled slices' texel edges and the volren's edges land a pixel
+  apart.
+- So `widgets.macos.png`, `scene.macos.png`, `grid.macos.png` and `orthoslicer.macos.png` are
+  macOS goldens, and macOS compares those four against its own renderer.
 
 To make or refresh a macOS golden, take `<name>.actual.png` from the failing macOS job's
 `ari-golden-macOS-<lane>` artifact, look at it, and commit it as `<name>.macos.png`.
