@@ -1063,6 +1063,10 @@ files beside them:
   goes through assimp, and the published wasm builds have it. The files open in other software
   (Blender, for one).
 
+**As if loaded.** glb positions are 32-bit floats and a mesh's vertices come back in the order
+its faces first use them, so the world physics runs is the bundle read back, not the generator's
+doubles: written, read and written again, a world gives the same bytes and the same hash.
+
 **One path in.** A generated world is a dataset of the same shape as a decoded bundle:
 `data-generate` beside `data-load` fills `world`, `terrain`, `buildings`, `bounds`, the ground
 texture and the rest, and the node is `source: { data: world }`. Regenerate bumps the dataset's
@@ -1087,7 +1091,7 @@ a mesh (`terrain.glb`) and a 16-bit height map PNG.
 
 | Phase | What | Size |
 |---|---|---|
-| GB1 | **The bundle, version 2:** the manifest, glb export through assimp, `write_city_bundle` from a `world_geometry` and a generated world's extras, `load_city_bundle` reading version 2 (items, cell surfaces, water level, region, edge walls, hash). A test: a generated world written and read back gives the same `world_geometry` and the same `SceneWorld` state hash after N steps. | M |
+| GB1 | **The bundle, version 2:** the manifest, glb export through assimp, `write_city_bundle` from a `world_geometry` and a generated world's extras, `load_city_bundle` reading version 2 (items, cell surfaces, water level, region, edge walls, hash). Tests: a world written and read back has the same terrain, cell surfaces, items and face surfaces, and writes the same bytes again; two loads simulate to the same state hash. | M |
 | GB2 | **One path in:** `data-generate`; a generated world as a dataset; `SceneWorld` reads only data nodes; `generated_world` as shorthand; the region and the water level on the data node. | L |
 | GB3 | **One renderer** for any world dataset. | L |
 | GB4 | **Save in the terrain lab:** a directory or zip natively, a zip download in the browser, the terrain mesh and height map for other software. | M |
