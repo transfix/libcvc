@@ -106,6 +106,8 @@ jobs:
               --platform wasm-mt --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3 || { echo "::error::failed to install wasm dep $p"; exit 1; }
           done
+          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
+          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" wasm-mt
 
       - name: Build + install libcvc + cvcGL (wasm-mt, with imgui + sdl3)
         # ONE emscripten configure builds both cvc + cvcGL targets and installs
@@ -343,6 +345,8 @@ jobs:
             --platform "$PLATFORM" --arch wasm32 --config release --link static \
             --no-fallback-to-source \
             || { echo "::error::failed to install arigl-web's $PLATFORM deps"; exit 1; }
+          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
+          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" "$PLATFORM"
           # Noarch, so not resolvable from the recipe's (static) wasm deps: the recipe says why.
           if [ "$PLATFORM" = wasm ]; then
             cvcpkg install xterm-js xterm-js-addon-fit xterm-js-addon-webgl --prefix "$WASM_DEPS" \
