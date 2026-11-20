@@ -27,10 +27,14 @@ The actors (S2-Q15):
   release, re-queue if deferred), whose run may do nothing, submit directly under the token (as
   exec_group::execute does: no post, no wake) or post. One may race a detach anywhere; none races
   a teardown (a host program never uses a group it is destroying: a with_group that set
-  host_held before the teardown began is the teardown's to wait for, one that had not is dropped);
-- the attaching thread: attach's wake, its non-waiting host bodies (as a host), the servicing of
-  waiting bodies (run under the blocked worker's token), take_failed, and last the teardown or the
-  detach (S2-Q4 steps 1-5).
+  host_held before the teardown began is the teardown's to wait for, one that had not is dropped).
+  With hold-handoff or the liveness check a host waits as P built it: a look under Q, then, if
+  the group pumps or another thread holds it, a wait linked on the group until a release or a
+  hold's end notifies it (P's notify_waiters), then a look again;
+- the attaching thread: attach's wake, its own with_group calls (`bodies`, as a host), its host
+  entries (`entries`: non-waiting bodies or callbacks a pump queued, each run under the token as
+  P's service_once runs one), the servicing of waiting bodies (run under the blocked worker's
+  token), take_failed, and last the teardown or the detach (S2-Q4 steps 1-5).
 
 Properties (PL-1), each a violation name:
 - every state: `double-queue` (queued twice), `queued-while-pumped`, `queued-unscheduled` (in the
@@ -46,7 +50,16 @@ Properties (PL-1), each a violation name:
   for an attached group not detaching: `lost-wake` (a post not drained, or runnable work left,
   and the group not queued), `lost-timer` (a sleeper neither queued nor filed), `stuck-scheduled`
   (SCHEDULED set and not queued: every later wake is a no-op);
-- `deadlock`: no step enabled while an actor is not at an idle point.
+- `deadlock`: no step enabled while an actor is not at an idle point;
+- hold-handoff: `stranded-hold` (at an idle point, a hold handed to a host that will not take it
+  up), `frozen-while-host-away` (a hold handed to the attaching thread while it is busy outside
+  the pool, `--opts away=1`: every pop of g defers until it services again),
+  `handoff-over-hold`, `handed-without-holder`, and `waiting-body-dropped` (step 4 drops a
+  waiting body its worker blocks on);
+- liveness (`--opts live=1`, no symmetry reduction): `host-starved` (a host waiting to hold g) and
+  `entry-starved` (g's host entries waiting to run) when a reachable cycle keeps it pending and is
+  fair: each actor enabled throughout it steps in it (weak fairness), and so does each actor
+  waiting only for a free mutex in one of its states (the mutexes are starvation-free).
 
 `--amend` adds the amendments this model proposes to the frozen transitions (README.md):
 - `host-wake`: a host's release wakes the group when no pop was deferred (wake's transition under
@@ -58,24 +71,39 @@ Properties (PL-1), each a violation name:
   no host_held; it takes the token as for an unattached group once the detach is over (the
   attaching thread at once);
 - `nested-release`: a host's release under Q reads the attachment first and leaves the pool's
-  record alone when its own fn detached the group (with `--opts nested=1`).
+  record alone when its own fn detached the group (with `--opts nested=1`);
+- `hold-handoff` (P's, S2a.4): a release that queues the group again sets host_held, on its
+  behalf, for a host waiting to hold it (a with_group linked as waiting, else the attaching thread
+  when it has host entries for g); the pop that follows leaves it notified and deferred; the host
+  takes the hold up at its next look; a detach's step 1 takes back a hold handed over and not yet
+  taken up;
+- `handoff-idle`: the same handoff in a release that makes the group idle (its CAS), so a group
+  woken again at once (a timer, a post) does not starve the host either;
+- `handoff-waiting`: the attaching thread gets a hold for its host entries only while it is in
+  the pool servicing its queue (pump_host, wait_for_work), not whenever it has entries;
+- `handoff-giveback`: the attaching thread, leaving those calls, gives back a hold handed to it
+  and not taken up (deferred: g is queued again).
 
 `--mutation` breaks one transition, to show the check finds it: `release-store` (the release
 clears SCHEDULED by a load and a plain store instead of the CAS), `pump-host-held` (pop pumps a
 host-held group), `zero-before-clear` (the detach stores 0 before clearing the notifier),
 `wake-no-recheck` (wake queues without re-reading DETACHING under Q), `pop-no-detaching` (pop
-pumps a detaching group).
+pumps a detaching group), `no-revoke` (the detach does not take back a handed hold).
 
 usage:
     python -I state_word.py [--actors posters=2,workers=2,hosts=1,bodies=1,teardown=1]
-                            [--opts posts=1,timer=1,sleeps=1,waiting=0,failures=0,pre=0,nested=0]
+                            [--opts posts=1,timer=1,sleeps=1,waiting=0,failures=0,pre=0,nested=0,
+                                    entries=0,repop=0,live=0,away=0]
                             [--amend all|none|NAME,...] [--mutation NAME] [--max-states N]
     python -I state_word.py --suite quick|deep     the CI checks (README.md); exit 0 when all hold
 
 `--actors` counts posters (alternately ingress and lock), workers, hosts (other threads) and
 bodies (the attaching thread's), and ends the attaching thread with teardown=1 (the default) or
-detach=1 (or neither). The JSON printed has `states`, `transitions`, `idle_states`, `seconds`,
-`complete` and `violations`, each with its detail, its length in steps and its trace.
+detach=1 (or neither). `repop=1` makes a worker whose release queues g again pop it in the
+same critical section, as P's worker does through its next slot; `away=1` lets the attaching
+thread leave the pool's calls for good (busy elsewhere) instead of its next op. The JSON printed
+has `states`, `transitions`, `idle_states`, `seconds`, `complete` and `violations`, each with
+its detail, its length in steps and its trace.
 """
 
 import os as _os, sys as _sys
@@ -91,9 +119,10 @@ from lockmodel import Violation
 
 # the word's bits (group_pool_link::scheduled, notified, pumping, detaching)
 S, N, P, D = 1, 2, 4, 8
-AMENDMENTS = ('host-wake', 'host-excl', 'host-detaching', 'nested-release')
+AMENDMENTS = ('host-wake', 'host-excl', 'host-detaching', 'nested-release', 'hold-handoff',
+              'handoff-idle', 'handoff-waiting', 'handoff-giveback')
 MUTATIONS = ('release-store', 'pump-host-held', 'zero-before-clear', 'wake-no-recheck',
-             'pop-no-detaching')
+             'pop-no-detaching', 'no-revoke')
 
 
 def wstr(w):
@@ -102,8 +131,8 @@ def wstr(w):
 
 # global slots of the state (a flat list of small ints; 0 is "none" for an owner, actors are 1..n)
 (WORD, Q, NL, IM, PM, TOK, TOKD, QN, HH, DFR, HEAP, ATT, NTF, LEFT, CLEARED, CLOSED, DESTROYED,
- FLAGS, READY, SLEEPER, SLEEPS, FAILS, WAITB, FLIST, HQ, HQW) = range(26)
-NG = 26
+ FLAGS, READY, SLEEPER, SLEEPS, FAILS, WAITB, FLIST, HQ, HQW, HANDED, ENTRIES, ENTRYB) = range(29)
+NG = 29
 SLOTS = 3   # per actor
 
 # the post routine (a poster's pc; a host's pc - H_POST)
@@ -116,19 +145,21 @@ W_PUMPING = range(W_PREL, W_CLRP + 1)   # PUMPING is set by this worker
 T_IDLE, T_OR, T_REL = 0, 1, 2
 # a host op (another thread's with_group; the attaching thread's bodies use the same pcs)
 (H_START, H_Q, H_QREL, H_TOK, H_RUN, H_TREL, H_Q2, H_CLR, H_WOR, H_REL, H_QRELU, H_U, H_URUN,
- H_UREL) = range(14)
+ H_UREL, H_QRELW, H_WAIT) = range(16)
+H_WANTS = (H_Q, H_QRELW, H_WAIT)   # it waits to hold the group (liveness's region)
 H_POST = 20   # + R_*
 H_DONE = 30
 # the attaching thread
-A_IDLE, A_ATT_OR, A_ATT_Q, A_ATT_QUEUE, A_ATT_REL, A_DONE = 0, 40, 41, 42, 43, 49
+A_IDLE, A_ATT_OR, A_ATT_Q, A_ATT_QUEUE, A_ATT_REL, A_AWAY, A_DONE = 0, 40, 41, 42, 43, 48, 49
 # the detach (S2-Q4's steps; teardown, detach, take_failed and a detach inside a body)
 (D_0, D_1, D_2, D_3, D_4, D_5, D_6, D_7, D_8, D_9, D_10, D_11, D_12, D_13, D_U) = range(50, 65)
-AUX_TEARDOWN, AUX_TF, AUX_NESTED = 1, 2, 4
+AUX_TEARDOWN, AUX_TF, AUX_NESTED, AUX_ENTRY, AUX_RELOOK, AUX_NOTIFIED = 1, 2, 4, 8, 16, 32
 
 
 class Config(object):
     def __init__(self, posters=2, workers=2, hosts=1, bodies=1, end='teardown', posts=1, timer=1,
-                 sleeps=1, waiting=0, failures=0, pre=0, nested=0,
+                 sleeps=1, waiting=0, failures=0, pre=0, nested=0, entries=0, repop=0, live=0,
+                 away=0,
                  host_outcomes=('none', 'submit', 'post'), amend=(), mutation=()):
         self.posters = tuple('ingress' if i % 2 == 0 else 'lock' for i in range(posters))
         self.workers = workers
@@ -142,6 +173,10 @@ class Config(object):
         self.failures = failures  # failed pumps, in all
         self.pre = pre            # posts before attach (no wake: attach's wake must see them)
         self.nested = nested      # an attaching thread's body may detach inside its fn
+        self.entries = entries    # host-queue entries (non-waiting bodies) the pumps may queue
+        self.repop = repop        # a release that queues g again pops it in the same section
+        self.live = live          # also check that no host starves (a fair cycle; no symmetry)
+        self.away = away          # the attaching thread may leave the pool's calls for good
         self.host_outcomes = tuple(host_outcomes)
         self.amend = frozenset(AMENDMENTS if amend == 'all' else amend)
         self.mutation = frozenset(mutation)
@@ -151,12 +186,18 @@ class Config(object):
             assert m in MUTATIONS, m
         assert end in ('teardown', 'detach', None)
         assert not nested or end == 'detach', 'nested=1 needs the detach end (teardown=0, detach=1)'
+        assert 'hold-handoff' not in self.amend or 'host-excl' in self.amend, \
+            'hold-handoff names one holder: it needs host-excl'
+        for x in ('handoff-idle', 'handoff-waiting', 'handoff-giveback'):
+            assert x not in self.amend or 'hold-handoff' in self.amend, x + ' extends hold-handoff'
 
     def describe(self):
         return {'posters': list(self.posters), 'workers': self.workers, 'hosts': self.hosts,
                 'bodies': self.bodies, 'end': self.end, 'posts': self.posts, 'timer': self.timer,
                 'sleeps': self.sleeps, 'waiting': self.waiting, 'failures': self.failures,
-                'pre': self.pre, 'nested': self.nested, 'host_outcomes': list(self.host_outcomes),
+                'pre': self.pre, 'nested': self.nested, 'entries': self.entries,
+                'repop': self.repop, 'live': self.live, 'away': self.away,
+                'host_outcomes': list(self.host_outcomes),
                 'amend': sorted(self.amend), 'mutation': sorted(self.mutation)}
 
 
@@ -165,6 +206,12 @@ class Model(object):
         self.cfg = cfg
         self.amend = cfg.amend
         self.mut = cfg.mutation
+        self.handoff = 'hold-handoff' in cfg.amend
+        # a host's wait as P builds it (a look under Q, then a wait on its wakeup until a release
+        # or a hold's end), not one step taken once the group is free: with the handoff, which
+        # hands the hold to the hosts linked as waiting, and in the liveness check, so a host that
+        # looks while the group pumps is seen to look and wait again
+        self.explicit = self.handoff or bool(cfg.live)
         self.names = {}
         self.kind = {}
         self.pkind = {}
@@ -251,6 +298,7 @@ class Model(object):
         s[SLEEPS] = self.cfg.sleeps
         s[FAILS] = self.cfg.failures
         s[WAITB] = self.cfg.waiting
+        s[ENTRYB] = self.cfg.entries
         for p in self.posters:
             s[self.base(p) + 1] = self.cfg.posts
         b = self.base(self.A)
@@ -308,6 +356,8 @@ class Model(object):
         if len(pumpers) > 1:
             raise Violation('two-pumpers', '%s pump at once'
                             % ' and '.join(self.names[x] for x in pumpers))
+        if s[HANDED] and not s[HH]:
+            raise Violation('handed-without-holder', 'a hold marked handed with no holder')
         if s[TOK] and self.kind[s[TOK]] == 'worker' and s[HH]:
             raise Violation('pump-host-held', '%s holds the token while %s holds host_held'
                             % (self.names[s[TOK]], self.names[s[HH]]))
@@ -324,18 +374,76 @@ class Model(object):
         for a in self.hosts:
             if s[self.base(a)] not in (H_START, H_DONE):
                 return False
-        return s[self.base(self.A) + 1] in (A_IDLE, A_DONE)
+        return s[self.base(self.A) + 1] in (A_IDLE, A_AWAY, A_DONE)
+
+    def lock_step(self, s, a):
+        """Whether actor `a`'s next step waits only for a mutex (Q, NL, an ingress mutex, the
+        port's): the liveness check takes the mutexes as starvation-free, so such a step, enabled
+        in some state of a cycle, is taken in it (strong fairness); a step that waits for a
+        condition (pumping clear, a hold's end, a group queued) needs only weak fairness."""
+        k = self.kind[a]
+        b = self.base(a)
+        pc = s[b]
+        if k == 'poster':
+            return pc in (0, R_NL, R_Q)
+        if k == 'worker':
+            return pc in (W_IDLE, W_Q2)   # W_IDLE: once a group is queued, it wants Q
+        if k == 'timer':
+            return pc == T_IDLE
+        if k == 'attacher':
+            pc = s[b + 1]
+            if pc in (A_ATT_Q, D_0, D_7, D_10):
+                return True
+            if pc >= 40 or pc == A_IDLE:
+                return False
+        if pc == H_Q:
+            return self.explicit
+        if pc == H_WAIT:
+            return True   # enabled only once notified: then it waits for Q alone
+        return pc == H_Q2 or pc in (H_POST + R_START, H_POST + R_NL, H_POST + R_Q)
+
+    def goals(self, s):
+        """The liveness goals pending in `s` (cfg.live), as bits: each host waiting to hold g
+        (another thread's with_group, the attaching thread's own), and g's host entries waiting
+        to run on its attaching thread."""
+        g = 0
+        for i, h in enumerate(self.hosts):
+            if s[self.base(h)] in H_WANTS:
+                g |= 1 << i
+        b = self.base(self.A)
+        if s[b + 1] in H_WANTS and not s[b + 2] & AUX_ENTRY:
+            g |= 1 << len(self.hosts)
+        if s[ENTRIES] and s[ATT] and not s[WORD] & D and s[b + 1] != A_AWAY:
+            g |= 1 << (len(self.hosts) + 1)
+        return g
+
+    def goal_name(self, bit):
+        i = bit.bit_length() - 1
+        if i < len(self.hosts):
+            return 'host-starved', '%s, waiting to hold g in with_group,' % self.names[self.hosts[i]]
+        if i == len(self.hosts):
+            return 'host-starved', 'A, waiting to hold g in its own with_group,'
+        return 'entry-starved', "g's host entry on A's queue"
 
     def idle_check(self, s):
         if not s[ATT] or s[WORD] & D:
             return
-        if (s[FLAGS] or s[READY]) and not s[QN]:
+        if s[HANDED] and s[HH] == self.A and s[self.base(self.A) + 1] == A_AWAY:
+            raise Violation('frozen-while-host-away', 'a hold handed to A, which is busy outside '
+                            'the pool: every pop of g defers until A services again')
+        if s[HANDED] and not (s[HH] == self.A and s[ENTRIES]):
+            raise Violation('stranded-hold', 'a hold handed to %s that no one takes up'
+                            % self.names.get(s[HH], 'nobody'))
+        # hold-handoff: a hold handed to the attaching thread for its host entries owes g's next
+        # pump to that thread's servicing, which queues g again (deferred) as the hold ends
+        owed = s[QN] or (s[HANDED] and s[DFR])
+        if (s[FLAGS] or s[READY]) and not owed:
             raise Violation('lost-wake', '%s and the group is not queued (word %s)'
                             % ('a post not drained' if s[FLAGS] else 'runnable work left',
                                wstr(s[WORD])))
-        if s[SLEEPER] and not (s[QN] or s[HEAP]):
+        if s[SLEEPER] and not (owed or s[HEAP]):
             raise Violation('lost-timer', 'a sleeper neither queued nor filed in the heap')
-        if s[WORD] & S and not s[QN]:
+        if s[WORD] & S and not owed:
             raise Violation('stuck-scheduled', 'SCHEDULED set, the group in no queue (word %s)'
                             % wstr(s[WORD]))
 
@@ -428,7 +536,9 @@ class Model(object):
             w = work or (s[SLEEPER] and not sl)
             for r in ((0, 1) if w else (0,)):
                 for dl in ((1, 2) if sl else (0,)):
-                    outs.append(('ok', r, sl, dl, armed))
+                    outs.append(('ok', r, sl, dl, armed, 0))
+        if special and work and s[ENTRYB]:   # the run queued a host body on its host's queue
+            outs += [o[:5] + (1,) for o in outs if o[0] == 'ok']
         return outs
 
     def apply_run(self, s, a, o, note):
@@ -449,15 +559,20 @@ class Model(object):
             s[b] = W_WAITB
             note('run: a waiting host body (run_on_host_waiting): blocks, holding the token')
             return
-        _, r, sl, dl, armed = o
+        _, r, sl, dl, armed, body = o
         s[READY] = r
         s[SLEEPER] = sl
         if armed:
             s[SLEEPS] -= 1
+        if body:
+            self.touch(s, a, 'rec')
+            s[ENTRYB] -= 1
+            s[ENTRIES] += 1
         s[b + 1] = r | (dl << 1)
         s[b] = W_TREL
-        note('run: ends with runnable=%s, next_deadline=%s%s'
-             % (bool(r), ('none', 'future', 'due')[dl], ' (armed a sleeper)' if armed else ''))
+        note('run: ends with runnable=%s, next_deadline=%s%s%s'
+             % (bool(r), ('none', 'future', 'due')[dl], ' (armed a sleeper)' if armed else '',
+                '; queued a host body for its attaching thread' if body else ''))
 
     # ------------------------------------------------------------------------------------------
     # the enabled steps of each actor: lists of labels
@@ -481,6 +596,8 @@ class Model(object):
                 return self.run_outcomes(s, bool(s[READY] or s[FLAGS]))
             if pc == W_WAITB:
                 return self.run_outcomes(s, True, False) if s[HQ] == 2 else []
+            if (pc == W_CLRP or pc == W_CAS) and self.handoff and self.requeues(s, a, pc):
+                return self.hand_targets(s)
             return ['step']
         if k == 'timer':
             if pc == T_IDLE:
@@ -489,6 +606,58 @@ class Model(object):
         if k == 'host':
             return self.host_options(s, a, pc)
         return self.attacher_options(s, a, b)
+
+    def notified(self, s, a):
+        b = self.base(a)
+        return bool(s[b + 2] & AUX_NOTIFIED) if a == self.A else bool(s[b + 1])
+
+    def notify_waiters(self, s):
+        """P's notify_waiters, under Q: each host linked as waiting on g is notified (its
+        wakeup, which keeps the notification for its next wait)."""
+        for h in self.hosts:
+            if s[self.base(h)] in (H_QRELW, H_WAIT):
+                s[self.base(h) + 1] = 1
+        b = self.base(self.A)
+        if s[b + 1] in (H_QRELW, H_WAIT):
+            s[b + 2] |= AUX_NOTIFIED
+
+    def requeues(self, s, a, pc):
+        """Whether worker `a`'s release step at `pc` hands the hold over: one that will queue g
+        again (it reads only the word and its pump_result, as the release does), and with
+        handoff-idle also the CAS that makes g idle."""
+        res = self.base(a) + 1
+        if pc == W_CLRP:
+            return not s[WORD] & D and not s[res] & 8 and bool(s[res] & 1 or (s[res] >> 1) == 2)
+        if 'release-store' in self.mut:
+            return False
+        return s[WORD] != S or 'handoff-idle' in self.amend
+
+    def waiting_hosts(self, s):
+        """The hosts linked as waiting to hold g (P's release_waiter with wants_hold)."""
+        out = [h for h in self.hosts if s[self.base(h)] in (H_QRELW, H_WAIT)]
+        b = self.base(self.A)
+        if s[b + 1] in (H_QRELW, H_WAIT):
+            out.append(self.A)
+        return out
+
+    def hand_targets(self, s):
+        """hold-handoff: a release that queues g again (with handoff-idle, any release that is
+        not a detach's or a failure's) hands the hold to a host waiting to hold it (any of them: P
+        takes the first linked), else to its attaching thread when it has host entries for g;
+        'step' when there is none."""
+        w = self.waiting_hosts(s)
+        if w:
+            return [('hand', h) for h in w]
+        if s[ENTRIES]:
+            if 'handoff-waiting' not in self.amend or s[self.base(self.A) + 1] == A_IDLE:
+                return [('hand', self.A)]   # as built: whatever the thread is doing
+        return ['step']
+
+    def entry_runnable(self, s, a):
+        """Whether one of g's host entries may run on the attaching thread now (P's
+        runnable_entry): not pumping or detaching, and not held but by a hold handed to it."""
+        return bool(s[ENTRIES] and not s[Q] and not s[WORD] & (P | D)
+                    and (not s[HH] or (s[HH] == a and s[HANDED])))
 
     def teardown_begun(self, s):
         """Whether the attaching thread has begun the group's teardown (its last op)."""
@@ -510,6 +679,14 @@ class Model(object):
             return ['start']
         if pc == H_DONE:
             return []
+        if pc == H_Q and self.explicit:   # the look: it holds, waits, or goes unattached
+            if racing_teardown:
+                return ['abandon']
+            return [] if s[Q] else ['step']
+        if pc == H_WAIT:   # waits on its wakeup until notified, then for Q to look again
+            if racing_teardown:
+                return ['abandon']
+            return ['step'] if self.notified(s, a) and not s[Q] else []
         if pc == H_Q:
             if racing_teardown:
                 return ['abandon']
@@ -526,7 +703,7 @@ class Model(object):
             return ['step'] if not s[Q] else []
         if pc == H_RUN:
             outs = list(self.cfg.host_outcomes)
-            if a == self.A and self.cfg.nested:
+            if a == self.A and self.cfg.nested and not s[self.base(a) + 2] & AUX_ENTRY:
                 outs.append('detach')
             return outs
         if pc > H_POST and pc < H_DONE:
@@ -544,7 +721,7 @@ class Model(object):
     def attacher_options(self, s, a, b):
         pc = s[b + 1]
         opi = s[b]
-        if pc == A_DONE:
+        if pc == A_DONE or pc == A_AWAY:
             return []
         if pc == A_IDLE:
             outs = []
@@ -554,6 +731,10 @@ class Model(object):
                 outs.append('service')
             if s[FLIST] and s[ATT] and not s[Q]:
                 outs.append('take_failed')
+            if self.entry_runnable(s, a):
+                outs.append('entry')   # service_once: one of g's host entries, under its token
+            if self.cfg.away and not s[Q]:
+                outs.append('away')   # leaves pump_host or wait_for_work, busy elsewhere for good
             return outs
         if pc in (A_ATT_Q, D_0, D_7):
             return ['step'] if not s[Q] else []
@@ -581,8 +762,10 @@ class Model(object):
             return ['step'] if not s[TOK] else []
         if pc < 40:   # a body: the host pcs
             outs = self.host_options(s, a, pc)
-            if pc == H_Q and s[HQ] == 1:
+            if pc in (H_Q, H_WAIT) and s[HQ] == 1:
                 outs = outs + ['service']
+            if pc == H_WAIT and self.entry_runnable(s, a):
+                outs = outs + ['entry']   # wait_round services its queue before it waits
             return outs
         return ['step']
 
@@ -614,26 +797,42 @@ class Model(object):
             s[b + 1] -= 1
         s[b] = nxt
 
+    def pop(self, s, a, b, how, note):
+        """Pop, under Q (which `a` holds): take g, then drop it, defer it or pump it."""
+        self.touch(s, a, 'rec')
+        s[QN] = 0
+        self.touch(s, a, 'word')
+        if s[WORD] & D and 'pop-no-detaching' not in self.mut:
+            note('%s, pops g: DETACHING: drops it' % how)
+            s[b] = W_RELQ0
+        elif s[HH] and 'pump-host-held' not in self.mut:
+            s[WORD] |= N
+            s[DFR] = 1
+            note('%s, pops g: host_held: fetch_or(N), sets deferred, takes the next' % how)
+            s[b] = W_RELQ0
+        else:
+            s[WORD] |= P
+            note('%s, pops g, fetch_or(P)' % how)
+            s[b] = W_PREL
+
+    def hand(self, s, a, label, note):
+        """hold-handoff, in a release that queues g again: host_held for the host `label` names,
+        on its behalf, before the queueing."""
+        if isinstance(label, tuple) and label[0] == 'hand':
+            self.touch(s, a, 'rec')
+            if s[HH]:
+                raise Violation('handoff-over-hold', '%s hands a hold %s already has'
+                                % (self.names[a], self.names[s[HH]]))
+            s[HH] = label[1]
+            s[HANDED] = 1
+            note('hands the hold to %s (host_held for it, handed)' % self.names[label[1]])
+
     def step_worker(self, s, a, label, note):
         b = self.base(a)
         pc = s[b]
         if pc == W_IDLE:
             s[Q] = a
-            self.touch(s, a, 'rec')
-            s[QN] = 0
-            self.touch(s, a, 'word')
-            if s[WORD] & D and 'pop-no-detaching' not in self.mut:
-                note('takes Q, pops g: DETACHING: drops it')
-                s[b] = W_RELQ0
-            elif s[HH] and 'pump-host-held' not in self.mut:
-                s[WORD] |= N
-                s[DFR] = 1
-                note('takes Q, pops g: host_held: fetch_or(N), sets deferred, takes the next')
-                s[b] = W_RELQ0
-            else:
-                s[WORD] |= P
-                note('takes Q, pops g, fetch_or(P)')
-                s[b] = W_PREL
+            self.pop(s, a, b, 'takes Q', note)
         elif pc == W_RELQ0 or pc == W_PREL:
             s[Q] = 0
             note('releases Q')
@@ -672,6 +871,7 @@ class Model(object):
         elif pc == W_CLRP:
             self.touch(s, a, 'word')
             s[WORD] &= ~P
+            self.notify_waiters(s)
             res = s[b + 1]
             if s[WORD] & D:
                 note('release: fetch_and(~P), DETACHING: done')
@@ -680,9 +880,12 @@ class Model(object):
                 note('release: fetch_and(~P), the pump failed')
                 s[b] = W_FAIL
             elif res & 1 or (res >> 1) == 2:
+                note('release: fetch_and(~P); %s' % ('runnable' if res & 1 else 'next_deadline due'))
+                self.hand(s, a, label, note)
                 self.queue(s, a)
-                note('release: fetch_and(~P); %s: queues g again'
-                     % ('runnable' if res & 1 else 'next_deadline due'))
+                note('queues g again')
+                if self.cfg.repop:
+                    s[b + 2] = 1
                 s[b] = W_REL
             else:
                 note('release: fetch_and(~P)')
@@ -706,6 +909,7 @@ class Model(object):
                     note('release (mutated): loads %s' % wstr(w))
                     s[b] = W_STORE
             elif w == S:
+                self.hand(s, a, label, note)
                 s[WORD] = 0
                 if (s[b + 1] >> 1) == 1:
                     self.touch(s, a, 'rec')
@@ -715,8 +919,12 @@ class Model(object):
                     note('release: CAS(S -> 0) succeeds')
                 s[b] = W_REL
             else:
+                note('release: CAS(S -> 0) fails on %s' % wstr(w))
+                self.hand(s, a, label, note)
                 self.queue(s, a)
-                note('release: CAS(S -> 0) fails on %s: queues g again' % wstr(w))
+                note('queues g again')
+                if self.cfg.repop:
+                    s[b + 2] = 1
                 s[b] = W_REL
         elif pc == W_STORE:
             self.touch(s, a, 'word')
@@ -727,10 +935,16 @@ class Model(object):
             note('release (mutated): stores 0')
             s[b] = W_REL
         elif pc == W_REL:
+            if self.cfg.repop and s[b + 2] and s[QN]:
+                s[b + 1] = 0
+                s[b + 2] = 0
+                self.pop(s, a, b, 'in the same critical section', note)
+                return
             s[Q] = 0
             note('releases Q')
             s[b] = W_IDLE
             s[b + 1] = 0
+            s[b + 2] = 0
 
     def step_timer(self, s, a, note):
         b = self.base(a)
@@ -762,8 +976,10 @@ class Model(object):
 
     def host_done(self, s, a, b):
         if a == self.A:
-            s[b] += 1
-            s[b + 1] = A_IDLE
+            aux = s[b + 2]
+            if not aux & AUX_ENTRY:
+                s[b] += 1
+            s[b + 1] = H_Q if aux & AUX_RELOOK else A_IDLE   # an entry run inside a wait: look
             s[b + 2] = 0
         else:
             s[b] = H_DONE
@@ -780,6 +996,42 @@ class Model(object):
             else:
                 note('with_group: the group is not attached')
                 s[pi] = H_U
+        elif (pc == H_Q and self.explicit or pc == H_WAIT) and label != 'abandon':
+            # the look, under Q; from H_WAIT its wakeup returned, and the look that follows
+            # unlinks it under Q (P's waiter_link), so it stays linked until it holds Q
+            s[Q] = a
+            self.touch(s, a, 'word')
+            how = 'takes Q, looks' if pc == H_Q else 'wakes, takes Q, unlinks itself, looks again'
+            if a == self.A:
+                s[pi + 1] &= ~AUX_NOTIFIED
+            else:
+                s[pi + 1] = 0
+            if s[HANDED] and s[HH] == a:
+                self.touch(s, a, 'rec')
+                s[HANDED] = 0
+                note('%s: a release handed it the hold: takes it up' % how)
+                s[pi] = H_QREL
+            elif 'host-detaching' in self.amend and (s[WORD] & D or not s[ATT]):
+                note('%s: %s: no host_held'
+                     % (how, 'DETACHING is set' if s[WORD] & D else 'no longer attached'))
+                s[pi] = H_QRELU
+            elif s[WORD] & P or ('host-excl' in self.amend and s[HH] and s[HH] != a):
+                self.touch(s, a, 'rec')
+                note('%s: %s: links itself as waiting to hold g'
+                     % (how, 'pumping' if s[WORD] & P else 'held by ' + self.names[s[HH]]))
+                s[pi] = H_QRELW
+            else:
+                self.touch(s, a, 'rec')
+                s[HH] = a
+                note('%s: free: sets host_held' % how)
+                s[pi] = H_QREL
+        elif pc == H_QRELW:
+            s[Q] = 0
+            note('releases Q, waits')
+            s[pi] = H_WAIT
+        elif pc == H_WAIT:
+            note('the teardown has begun: the host program does not go on (abandoned)')
+            s[pi] = H_DONE
         elif pc == H_Q:
             if label == 'abandon':
                 note('the teardown has begun: the host program does not go on (abandoned)')
@@ -839,6 +1091,7 @@ class Model(object):
                 return
             self.touch(s, a, 'rec')
             s[HH] = 0
+            self.notify_waiters(s)
             if s[DFR]:
                 s[DFR] = 0
                 self.queue(s, a)
@@ -897,6 +1150,39 @@ class Model(object):
             s[HQ] = 2
             note('services its host queue: runs %s\'s waiting body under its token'
                  % self.names[s[HQW]])
+            return
+        if label == 'away':
+            if 'handoff-giveback' in self.amend and s[HANDED] and s[HH] == a:
+                s[Q] = a
+                self.touch(s, a, 'rec')
+                s[HANDED] = 0
+                s[HH] = 0
+                self.notify_waiters(s)
+                if s[DFR]:
+                    s[DFR] = 0
+                    self.queue(s, a)
+                    note('leaves the pool\'s calls: takes Q, gives back the hold handed to it; '
+                         'deferred: queues g again; releases Q; busy elsewhere for good')
+                else:
+                    note('leaves the pool\'s calls: takes Q, gives back the hold handed to it, '
+                         'releases Q; busy elsewhere for good')
+                s[Q] = 0
+            else:
+                note('leaves the pool\'s calls (pump_host, wait_for_work): busy elsewhere for good')
+            s[b + 1] = A_AWAY
+            return
+        if label == 'entry':
+            s[Q] = a
+            self.touch(s, a, 'rec')
+            s[ENTRIES] -= 1
+            if s[HANDED] and s[HH] == a:
+                s[HANDED] = 0
+                note('services a host entry of g: takes Q, takes up the hold a release handed it')
+            else:
+                s[HH] = a
+                note('services a host entry of g: takes Q, sets host_held')
+            s[b + 2] = AUX_ENTRY | (AUX_RELOOK if s[b + 1] == H_WAIT else 0)
+            s[b + 1] = H_QREL
             return
         if label == 'take_failed':
             s[Q] = a
@@ -970,7 +1256,16 @@ class Model(object):
         elif pc == D_1:
             self.touch(s, a, 'word')
             s[WORD] |= D
-            note('fetch_or(D)')
+            if self.handoff and s[HANDED] and 'no-revoke' not in self.mut:
+                self.touch(s, a, 'rec')
+                note('fetch_or(D); takes back the hold handed to %s (host_held, deferred cleared)'
+                     % self.names[s[HH]])
+                s[HANDED] = 0
+                s[HH] = 0
+                s[DFR] = 0
+                self.notify_waiters(s)
+            else:
+                note('fetch_or(D)')
             s[b + 1] = D_2
         elif pc == D_2:
             s[Q] = 0
@@ -1001,11 +1296,19 @@ class Model(object):
             s[b + 1] = D_8
         elif pc == D_8:
             self.touch(s, a, 'rec')
+            if s[HQ] == 1:
+                raise Violation('waiting-body-dropped', 'step 4 drops a waiting body its worker '
+                                'blocks on')
             s[QN] = 0
             s[HEAP] = 0
             s[FLIST] = 0
             s[LEFT] = 1
-            note('leaves the ready queue, the failed list and the timer heap')
+            dropped = s[ENTRIES]
+            s[ENTRIES] = 0
+            note('leaves the ready queue, the failed list and the timer heap%s'
+                 % ('' if not dropped else '; its %d host entr%s %s' % (
+                     dropped, 'y' if dropped == 1 else 'ies',
+                     'dropped unrun (detach_end)' if aux & AUX_TEARDOWN else 'kept for step 5')))
             s[b + 1] = D_9
         elif pc == D_9:
             s[Q] = 0
@@ -1019,6 +1322,7 @@ class Model(object):
                 note('clears the notifier (under NL)')
             elif act == 'drop':
                 s[ATT] = 0
+                self.notify_waiters(s)   # finish_detach lets its waiters go
                 note('drops the attachment (the pool\'s record)')
             else:
                 s[WORD] = 0
@@ -1074,8 +1378,10 @@ PC_NAMES = {
              H_TOK: 'takes the token', H_RUN: 'runs fn', H_TREL: 'releases the token',
              H_Q2: 'takes Q', H_CLR: 'clears host_held', H_WOR: 'as wake: fetch_or(S|N)',
              H_REL: 'releases Q', H_QRELU: 'releases Q', H_U: 'takes the token (unattached)',
-             H_URUN: 'runs fn', H_UREL: 'releases the token'},
-    'attacher': {A_IDLE: 'starts its next op', A_ATT_OR: 'attach: fetch_or(S|N)',
+             H_URUN: 'runs fn', H_UREL: 'releases the token', H_QRELW: 'releases Q, waits',
+             H_WAIT: 'wakes, looks again'},
+    'attacher': {A_IDLE: 'starts its next op', A_AWAY: 'is busy elsewhere',
+                 A_ATT_OR: 'attach: fetch_or(S|N)',
                  A_ATT_Q: 'takes Q', A_ATT_QUEUE: 'queues g', A_ATT_REL: 'releases Q',
                  D_0: 'detach step 1: takes Q', D_1: 'fetch_or(D)', D_2: 'releases Q',
                  D_3: 'step 2: takes Q', D_4: 'releases Q', D_5: 'step 3: takes the token',
@@ -1110,9 +1416,13 @@ def label_str(label):
 def explore(cfg, max_states=None, log=None, symmetry=True):
     """Every reachable state, breadth first (with `symmetry`, one state per orbit of the workers'
     permutations). Returns a dict: states, transitions, idle_states (the idle states checked),
-    seconds, complete, violations {name: {detail, steps, trace}}."""
+    seconds, complete, violations {name: {detail, steps, trace}}. With cfg.live, also the
+    liveness check (fair_cycles), without the symmetry reduction."""
     m = Model(cfg)
+    if cfg.live:
+        symmetry = False
     canon = m.canon if symmetry else (lambda s: (bytes(s), None))
+    live = {}   # cfg.live: a state where a goal is pending -> (goals, enabled actors, successors)
     s0 = m.initial()
     k0 = canon(s0)[0]
     parent = {k0: None}
@@ -1143,6 +1453,13 @@ def explore(cfg, max_states=None, log=None, symmetry=True):
                 found(v.name, v.detail, k, None)
         elif not enabled:
             found('deadlock', 'no step is enabled: ' + m.describe_state(s), k, None)
+        goals = m.goals(s) if cfg.live else 0
+        succ = None
+        if goals:
+            succ = []
+            on = {a for a, _ in enabled}
+            live[k] = (goals, sum(1 << a for a in on),
+                       sum(1 << a for a in on if m.lock_step(s, a)), succ)
         for a, lab in enabled:
             s2 = list(s)
             transitions += 1
@@ -1153,12 +1470,17 @@ def explore(cfg, max_states=None, log=None, symmetry=True):
                 found(v.name, v.detail, k, (a, lab))
                 continue
             k2 = canon(s2)[0]
+            if succ is not None:
+                succ.append((k2, a, lab))
             if k2 not in parent:
                 parent[k2] = (k, (a, lab))
                 dq.append(k2)
                 if log and len(parent) % 500000 == 0:
                     log('%d states, %d transitions, %.0fs' % (len(parent), transitions,
                                                               time.time() - t0))
+    if cfg.live and not dq:
+        for name, (detail, k, cycle) in fair_cycles(m, live).items():
+            found(name, detail, k, cycle)
     res = {'config': cfg.describe(), 'states': len(parent), 'transitions': transitions,
            'idle_states': idle, 'seconds': round(time.time() - t0, 1), 'complete': not dq,
            'violations': {}}
@@ -1170,6 +1492,12 @@ def explore(cfg, max_states=None, log=None, symmetry=True):
             path.append(pa)
             h = ph
         path.reverse()
+        if isinstance(act, list):   # a fair cycle: the path to it, then the cycle
+            trace, _ = render(m, path + act, end='... and the cycle from step %d repeats for ever: '
+                              '%s' % (len(path) + 1, detail))
+            res['violations'][name] = {'detail': detail, 'steps': len(path) + len(act),
+                                       'trace': trace}
+            continue
         if act is not None:
             path.append(act)
         trace, real = render(m, path)
@@ -1177,9 +1505,124 @@ def explore(cfg, max_states=None, log=None, symmetry=True):
     return res
 
 
-def render(m, path):
+def fair_cycles(m, live):
+    """The liveness check (cfg.live): for each goal (a host waiting to hold g, or g's host entries
+    waiting to run), a reachable cycle of states where the goal stays pending and that is fair:
+    every actor enabled in each of its states takes a step in it (weak fairness), and so does
+    every actor that waits only for a free mutex in one of them (the mutexes are starvation-free:
+    Model.lock_step). Each strongly connected component of the pending states with an edge
+    inside is tested: it holds such a cycle exactly when each of those actors has an edge in it.
+    Returns {name: (detail, a state of the cycle, the cycle's actions from it)}."""
+    out = {}
+    bits = set()
+    for goals, _, _, _ in live.values():
+        g = goals
+        while g:
+            low = g & -g
+            bits.add(low)
+            g ^= low
+    for bit in sorted(bits):
+        nodes = [k for k, v in live.items() if v[0] & bit]
+        inside = set(nodes)
+        for comp in sccs(nodes, lambda k: [x[0] for x in live[k][3] if x[0] in inside]):
+            cset = set(comp)
+            acted = 0
+            for k in comp:
+                for k2, a, _ in live[k][3]:
+                    if k2 in cset:
+                        acted |= 1 << a
+            if not acted:
+                continue   # one state, no edge to itself
+            always = -1
+            locking = 0
+            for k in comp:
+                always &= live[k][1]
+                locking |= live[k][2]
+            if (always | locking) & ~acted:
+                continue   # an actor enabled throughout, or a mutex's waiter, never steps: unfair
+            name, what = m.goal_name(bit)
+            if name in out:
+                continue
+            k0 = comp[0]
+            out[name] = ('%s waits for ever: a fair cycle of %d states keeps it pending (each '
+                         'actor enabled throughout, or waiting for a free mutex, steps in it)'
+                         % (what, len(comp)), k0,
+                         cycle_from(k0, cset, live))
+    return out
+
+
+def sccs(nodes, succ):
+    """The strongly connected components of the graph on `nodes` (Tarjan, iterative)."""
+    index = {}
+    low = {}
+    on = set()
+    stack = []
+    out = []
+    n = 0
+    for root in nodes:
+        if root in index:
+            continue
+        work = [(root, iter(succ(root)))]
+        index[root] = low[root] = n
+        n += 1
+        stack.append(root)
+        on.add(root)
+        while work:
+            v, it = work[-1]
+            for w in it:
+                if w not in index:
+                    index[w] = low[w] = n
+                    n += 1
+                    stack.append(w)
+                    on.add(w)
+                    work.append((w, iter(succ(w))))
+                    break
+                if w in on:
+                    low[v] = min(low[v], index[w])
+            else:
+                work.pop()
+                if work:
+                    u = work[-1][0]
+                    low[u] = min(low[u], low[v])
+                if low[v] == index[v]:
+                    comp = []
+                    while True:
+                        w = stack.pop()
+                        on.discard(w)
+                        comp.append(w)
+                        if w == v:
+                            break
+                    out.append(comp)
+    return out
+
+
+def cycle_from(k0, cset, live):
+    """The actions of a shortest cycle from `k0` back to it inside `cset`."""
+    prev = {k0: None}
+    dq = collections.deque([k0])
+    while dq:
+        k = dq.popleft()
+        for k2, a, lab in live[k][3]:
+            if k2 not in cset:
+                continue
+            if k2 == k0:
+                acts = [(a, lab)]
+                while prev[k] is not None:
+                    pk, pa = prev[k]
+                    acts.append(pa)
+                    k = pk
+                acts.reverse()
+                return acts
+            if k2 not in prev:
+                prev[k2] = (k, (a, lab))
+                dq.append(k2)
+    return []
+
+
+def render(m, path, end=None):
     """Replay `path` (each action named as in the canonical form of the state it leaves) on the
-    real state, naming the real actors. Returns (lines, the violation's detail or None)."""
+    real state, naming the real actors. Returns (lines, the violation's detail or None); `end`,
+    when given, is the last line instead of the idle or deadlock reading."""
     s = m.initial()
     perm = m.canon(s)[1]
     out = ['initial: ' + m.describe_state(s)]
@@ -1197,6 +1640,9 @@ def render(m, path):
         out.append('%s: %s  [%s]' % (m.names[a], '; '.join(notes) or label_str(lab),
                                      m.describe_state(s)))
         perm = m.canon(s)[1]
+    if end is not None:
+        out.append(end)
+        return out, None
     if m.idle(s):
         try:
             m.idle_check(s)
@@ -1222,7 +1668,8 @@ def parse_kv(text):
 def make_config(actors=None, opts=None, amend=(), mutation=()):
     a = dict(posters=2, workers=2, hosts=1, bodies=1, teardown=1, detach=0)
     a.update(actors or {})
-    o = dict(posts=1, timer=1, sleeps=1, waiting=0, failures=0, pre=0, nested=0)
+    o = dict(posts=1, timer=1, sleeps=1, waiting=0, failures=0, pre=0, nested=0, entries=0, repop=0,
+             live=0, away=0)
     o.update(opts or {})
     end = 'teardown' if a.pop('teardown') else ('detach' if a.pop('detach') else None)
     a.pop('detach', None)
@@ -1235,7 +1682,10 @@ def make_config(actors=None, opts=None, amend=(), mutation=()):
 # both empty). The frozen protocol's findings are each isolated by every amendment but the one
 # that fixes it, on the smallest configuration that shows it.
 ALL = 'all'
-BUT = lambda name: tuple(a for a in AMENDMENTS if a != name)  # noqa: E731
+BUT = lambda *names: tuple(a for a in AMENDMENTS if a not in names)  # noqa: E731
+# host-excl's finding runs without the handoff, which presumes one holder
+NO_EXCL = BUT('host-excl', 'hold-handoff', 'handoff-idle', 'handoff-waiting', 'handoff-giveback')
+NO_HANDOFF = BUT('hold-handoff', 'handoff-idle', 'handoff-waiting', 'handoff-giveback')
 QUICK = [
     # every amendment: nothing found
     ('amended', {}, {}, ALL, (), (), ()),
@@ -1247,9 +1697,9 @@ QUICK = [
     # each finding of the frozen transitions (README.md), without its amendment
     ('finding-host-wake', dict(posters=0, workers=1, bodies=0, teardown=0), dict(timer=0),
      BUT('host-wake'), (), ('lost-wake',), ()),
-    ('finding-host-excl', dict(posters=0, workers=1, teardown=0), dict(timer=0), BUT('host-excl'),
+    ('finding-host-excl', dict(posters=0, workers=1, teardown=0), dict(timer=0), NO_EXCL,
      (), ('token-contended',), ('pump-host-held',)),
-    ('finding-host-excl-teardown', dict(posters=0, workers=1), dict(timer=0), BUT('host-excl'), (),
+    ('finding-host-excl-teardown', dict(posters=0, workers=1), dict(timer=0), NO_EXCL, (),
      ('token-contended', 'use-after-free'), ('pump-host-held', 'record-after-detach')),
     ('finding-host-detaching', dict(posters=0, workers=1, bodies=0, teardown=0, detach=1),
      dict(timer=0), BUT('host-detaching'), (), ('record-after-detach', 'token-contended'), ()),
@@ -1266,13 +1716,42 @@ QUICK = [
      ('wake-no-recheck',), ('read-after-detach',), ('use-after-free',)),
     ('mutation-pop-no-detaching', dict(posters=1, workers=1, hosts=0, bodies=0), {}, ALL,
      ('pop-no-detaching',), ('read-after-detach',), ('token-contended', 'use-after-free')),
+    # the hold handoff (P's S2a.4) and its idle form: host entries, the same-section re-pop, and
+    # the liveness check (no host starves); without them a host and the entries starve
+    ('amended-entries', dict(posters=1), dict(entries=1), ALL, (), (), ()),
+    ('amended-entries-repop', dict(posters=1), dict(entries=1, repop=1), ALL, (), (), ()),
+    ('live-amended', dict(posters=1, workers=1, teardown=0), dict(pre=1, repop=1, live=1,
+                                                                   entries=1), ALL, (), (), ()),
+    ('live-amended-detach', dict(posters=0, workers=1, teardown=0, detach=1),
+     dict(pre=1, repop=1, live=1, entries=1, failures=1), ALL, (), (), ()),
+    ('finding-no-handoff', dict(posters=0, workers=1, teardown=0), dict(pre=1, repop=1, live=1,
+                                                                         entries=1),
+     NO_HANDOFF, (), ('host-starved', 'entry-starved'), ()),
+    ('finding-handoff-idle', dict(posters=0, workers=1, bodies=0, teardown=0),
+     dict(pre=1, repop=1, live=1, entries=1), BUT('handoff-idle'), (),
+     ('host-starved', 'entry-starved'), ()),
+    ('mutation-no-revoke', dict(posters=0, workers=1, bodies=0), dict(timer=0, pre=1, entries=1),
+     ALL, ('no-revoke',), ('deadlock',), ()),
+    # the attaching thread busy outside the pool (away=1): the handoff as built (to it whenever it
+    # has host entries for g) freezes g; handed only while it services, and given back when it
+    # leaves, it does not
+    ('finding-handoff-as-built', dict(posters=1, workers=1, hosts=0, bodies=0, teardown=0),
+     dict(entries=1, away=1, timer=0), BUT('handoff-waiting', 'handoff-giveback'), (),
+     ('frozen-while-host-away',), ()),
+    ('finding-handoff-giveback', dict(posters=1, workers=1, hosts=0, bodies=0, teardown=0),
+     dict(entries=1, away=1, timer=0), BUT('handoff-giveback'), (), ('frozen-while-host-away',),
+     ()),
+    ('amended-away', dict(posters=1, workers=1, bodies=0, teardown=0), dict(entries=1, away=1),
+     ALL, (), (), ()),
+    ('live-amended-away', dict(posters=1, workers=1, bodies=0, teardown=0),
+     dict(entries=1, away=1, pre=1, repop=1, live=1), ALL, (), (), ()),
 ]
 DEEP = [
     # the frozen transitions, and each finding alone, at the default bound: nothing else found
     ('deep-frozen', {}, {}, (), (), ('lost-wake', 'token-contended'),
      ('pump-host-held', 'record-after-detach', 'use-after-free')),
     ('deep-finding-host-wake', {}, {}, BUT('host-wake'), (), ('lost-wake',), ()),
-    ('deep-finding-host-excl', {}, {}, BUT('host-excl'), (), ('token-contended',),
+    ('deep-finding-host-excl', {}, {}, NO_EXCL, (), ('token-contended',),
      ('pump-host-held', 'record-after-detach', 'use-after-free')),
     ('deep-finding-host-detaching', dict(teardown=0, detach=1), {}, BUT('host-detaching'), (),
      ('record-after-detach', 'token-contended'), ()),
@@ -1284,8 +1763,15 @@ DEEP = [
     ('deep-three-workers', dict(workers=3), {}, ALL, (), (), ()),
     ('deep-two-posts', {}, dict(posts=2, pre=1), ALL, (), (), ()),
     ('deep-detach', dict(hosts=2, teardown=0, detach=1), dict(failures=1), ALL, (), (), ()),
-    ('deep-two-hosts', dict(hosts=2), dict(failures=1, waiting=1), ALL, (), (), ()),
-    ('deep-three-posters', dict(posters=3, hosts=2), dict(failures=1), ALL, (), (), ()),
+    ('deep-two-hosts', dict(posters=1, hosts=2), dict(failures=1, waiting=1), ALL, (), (), ()),
+    ('deep-entries', dict(posters=1, hosts=2), dict(entries=2, failures=1), ALL, (), (), ()),
+    ('deep-away', {}, dict(entries=1, away=1), ALL, (), (), ()),
+    ('deep-entries-detach', dict(posters=1, hosts=2, bodies=0, teardown=0, detach=1),
+     dict(entries=2, failures=1, waiting=1), ALL, (), (), ()),
+    ('deep-live-two-hosts', dict(posters=1, workers=1, hosts=2, teardown=0),
+     dict(pre=1, repop=1, live=1, entries=1), ALL, (), (), ()),
+    ('deep-live-detach', dict(posters=1, workers=1, hosts=2, teardown=0, detach=1),
+     dict(pre=1, repop=1, live=1, entries=1, failures=1), ALL, (), (), ()),
 ]
 
 

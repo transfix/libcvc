@@ -488,9 +488,13 @@ count).
 - hosts: with_group on other threads. Its fn does nothing, posts, or submits directly under the
   token, as `exec_group::execute` does (a ready process, no post). A host may race a detach at
   any point, but not a teardown: a host program does not use a group it is destroying, so only a
-  with_group that set host_held before the teardown began is the teardown's to wait for;
-- the attaching thread: attach's wake, its host bodies (`bodies`, as a host), the servicing of
-  waiting bodies, take_failed, and last the teardown or the detach, S2-Q4's five steps.
+  with_group that set host_held before the teardown began is the teardown's to wait for. With the
+  hold handoff, or in the liveness check, a host waits as the pool waits: a look under Q, then a
+  wait linked on the group until a release or a hold's end notifies it, then a look again;
+- the attaching thread: attach's wake, its own with_group calls (`bodies`), its host entries
+  (`entries`: bodies or callbacks a pump queued, each run under the token as the pool's
+  `service_once` runs one), the servicing of waiting bodies, take_failed, and last the teardown
+  or the detach, S2-Q4's five steps.
 
 **The properties** (PL-1), each a violation name. In every state: `double-queue`,
 `queued-while-pumped`, `queued-unscheduled`, `two-pumpers`, `pump-host-held`, `token-contended`
@@ -500,12 +504,17 @@ once the attachment is dropped) and `use-after-free`. When every actor is idle (
 the top of its loop, not started or done, between operations), for an attached group not
 detaching: `lost-wake` (a post not drained, or runnable work left, and the group not queued),
 `lost-timer` and `stuck-scheduled` (SCHEDULED set, the group in no queue, so every later wake is a
-no-op). No step enabled while an actor is not idle is a `deadlock`.
+no-op). No step enabled while an actor is not idle is a `deadlock`. With the hold handoff:
+`stranded-hold` (at an idle point, a hold handed to a host that will not take it up),
+`frozen-while-host-away` (a hold handed to the attaching thread while it is busy outside the
+pool: every pop defers until it services again), `handoff-over-hold`, `handed-without-holder`
+and `waiting-body-dropped` (step 4 drops a waiting body its worker blocks on). The liveness check
+(`--opts live=1`) adds `host-starved` and `entry-starved`, below.
 
 **Running it.**
 
     python -I state_word.py --actors posters=2,workers=2,hosts=1,bodies=1,teardown=1 --amend all
-    python -I state_word.py --suite quick     # the CI checks, about 12 s
+    python -I state_word.py --suite quick     # the CI checks, about 30 s
     python -I state_word.py --suite deep      # quick, then the larger bounds (locks-deep.yml)
     python -I test_state_word.py              # unittest: the quick suite, and the explorer's checks
 
@@ -513,11 +522,15 @@ The first prints JSON like `explore.py`'s: `states`, `transitions`, `idle_states
 `complete` and `violations`, each with its detail, its length in steps and its trace. `--actors`
 counts posters, workers, hosts and bodies and ends the attaching thread with `teardown=1` (the
 default) or `detach=1`; `--opts` sets `posts` (per poster), `timer`, `sleeps` (sleepers the runs
-may arm), `waiting`, `failures`, `pre` (posts before attach) and `nested` (a body that detaches
-inside its fn); `--amend` takes `all` (the default: the transitions as amended in `exec_group.h`), `none` (as S2a.0
-first froze them) or names;
-`--mutation` a name. `--suite` exits 0 only when every check holds: the amended transitions find
-nothing, each finding is found without its amendment, and each mutation is caught.
+may arm), `waiting`, `failures`, `pre` (posts before attach), `nested` (a body that detaches
+inside its fn), `entries` (host entries the pumps may queue), `repop` (a worker whose release
+queues the group again pops it in the same critical section, as the pool's next slot does) and
+`live` (the liveness check); `--amend` takes `all` (the default: the transitions as amended in
+`exec_group.h`, with the hold handoff, `handoff-idle`, `handoff-waiting` and `handoff-giveback`),
+`none` (as S2a.0 first froze them) or names; `--mutation` a name; `away=1` lets the attaching
+thread leave the pool's calls for good (busy elsewhere). `--suite` exits 0 only when every check
+holds: the amended transitions find nothing, each finding is found without its amendment, and
+each mutation is caught.
 
 ### What it finds in the frozen transitions
 
@@ -546,11 +559,11 @@ The `finding-*` checks of the quick suite run every amendment but one and must f
    the dropped record (25 steps). The amendment: the release reads the attachment first (or a
    detach inside with_group is refused).
 
-With every amendment, the host transition reads as follows in the words of `exec_group.h` (the
-model runs this; with the fourth finding's other choice its last sentence becomes "Never a
-detach or a teardown of g inside fn (asserted)", and step 2 then waits for any host_held). Step 4
-should also say that the word is stored 0 only after the notifier is cleared (the mutation
-`zero-before-clear` below):
+With the four amendments, now in `exec_group.h`, the host transition reads as follows (with the
+fourth finding's other choice its last sentence would be "Never a detach or a teardown of g
+inside fn (asserted)", and step 2 would wait for any host_held); step 4 says too that the word is
+stored 0 only after the notifier is cleared (the mutation `zero-before-clear` below). The hold
+handoff changes this row again (next section):
 
     - with_group, or a non-waiting host body, on a host thread: under Q (each time it looks):
       if detaching is set or g is no longer attached, set nothing and take the token as for an
@@ -585,7 +598,7 @@ The shortest traces of the first three (`hh` host_held, `tok` the token, `fl` po
     W1: release: fetch_and(~P)                                     S
     W1: release: CAS(S -> 0) succeeds                              0
     W1: releases Q                                                 0
-    H1: takes Q (PUMPING clear), sets host_held                    0 hh=H1
+    H1: takes Q, looks: free: sets host_held                       0 hh=H1
     H1: releases Q                                                 0 hh=H1
     H1: takes the token                                            0 hh=H1 tok=H1
     H1: runs fn: submits a process directly (exec_group::execute: no post) 0 hh=H1 tok=H1 ready
@@ -631,10 +644,142 @@ The shortest traces of the first three (`hh` host_held, `tok` the token, `fl` po
     A: releases Q                                                  S|N|D queued
     A: step 2: takes Q: PUMPING clear, no host_held of another thread S|N|D queued
     A: releases Q                                                  S|N|D queued
-    H1: takes Q (PUMPING clear), sets host_held                    S|N|D queued hh=H1
+    H1: takes Q, looks: free: sets host_held                       S|N|D queued hh=H1
     H1: releases Q                                                 S|N|D queued hh=H1
     A: step 3: takes the token                                     S|N|D queued hh=H1 tok=A
     H1: takes the token  -> VIOLATION token-contended: H1 takes the token while A holds it
+
+### The hold handoff and dropped host entries (S2a.4)
+
+The pool (S2a.4) added two things to the amended transitions; the model checks both.
+
+**The handoff** (`hold-handoff`). A release that queues the group again (runnable, a deadline
+due, or the CAS failed on NOTIFIED) first sets host_held for a host waiting to hold it, on its
+behalf: a with_group linked as waiting, else the attaching thread when it has host entries for
+the group. The pop that follows finds host_held set and leaves the group notified and deferred;
+the host takes the hold up at its next look (or, the attaching thread, when it runs the entry),
+runs, and releases as the host row says (deferred: queue it again; else wake's transition). A
+detach's step 1 takes back a hold handed over and not yet taken up. Without it, a worker that
+queues its group and pops it again in one critical section (`repop=1`, as the pool's next slot
+does) keeps every host off a group that stays runnable: the pool saw with_group and host bodies
+starve (CT-3 took 359 s), and the model finds it (`finding-no-handoff`: `host-starved`,
+`entry-starved`).
+
+**It is safe**: with the handoff, every property holds at every bound below, with host entries,
+the same-section re-pop, failures, waiting bodies, detach and teardown; no hold is stranded,
+handed over another or left without a holder, and no token is contended. Its progress has two
+holes, each with a fix the model checks: a group made idle and woken again at once, and an
+attaching thread busy outside the pool.
+
+**But it does not stop starvation** (`finding-handoff-idle`). A release that makes the group
+idle (its CAS succeeds) hands nothing over. When the group is woken again at once (a short timer,
+such as the 1 ms frame-waiter beat, or a steady stream of posts), a worker pops it before the
+waiting host, notified by the release, takes Q and looks; the host finds it pumping, links itself
+again, and the next release again makes the group idle. The trace below repeats for ever.
+**`handoff-idle`**, the same handoff in a release whose CAS makes the group idle, cures it: the
+host then holds an idle group, and its release's wake queues the group again (one spurious pump
+at most). With both, the liveness check finds no starvation at any bound below.
+
+**To whom the attaching thread's hold goes.** As built, the release hands the hold to the
+attaching thread whenever it has a host entry for the group, whatever that thread is doing. A
+thread busy outside the pool (not in pump_host, wait_for_work, with_group or a detach) then has
+the group frozen: every pop defers, and nothing pumps the group's posted or runnable work until
+the thread services again (R2b's probe: one pump in 10 s). The model lets the attaching thread
+leave the pool's calls for good (`--opts away=1`) and checks, when every actor is idle, that no
+hold is handed to it then (`frozen-while-host-away`; `finding-handoff-as-built`, 18 steps). The
+fix handing the hold only to a host waiting now (`handoff-waiting`: a with_group linked as
+waiting, or the attaching thread inside pump_host or wait_for_work with entries for the group) is
+not enough alone: the thread can be handed the hold while it services and then return from
+pump_host or wait_for_work before it runs the entry (`finding-handoff-giveback`, 18 steps).
+`handoff-giveback` closes it: a thread leaving those calls gives back a hold handed to it and not
+taken up (host_held cleared, its waiters notified, and the group queued again if a pop deferred
+it). With both, nothing is found, and an attaching thread that services is never starved (the
+liveness check, `live-amended-away`).
+
+**The liveness check** (`--opts live=1`, without the symmetry reduction) looks, for each host
+waiting to hold the group and for the group's host entries, for a reachable cycle that keeps it
+waiting and is fair: each actor enabled in every state of the cycle steps in it (weak fairness),
+and so does each actor that waits only for a free mutex in some state of it (the mutexes are taken
+as starvation-free; a host notified by a release waits only for Q). Each strongly connected
+component of the waiting states is tested; one with such a cycle is reported with the path to it
+and the cycle.
+
+**Revoking a handed hold** (step 1) is safe, and not needed for safety as the pool builds the
+wait: a host linked as waiting always takes a handed hold up at its next look, before it looks at
+DETACHING, and step 2 then waits for it. The revocation is what keeps a hold from stranding should
+a host ever stop waiting: the mutation `no-revoke`, where a with_group stops waiting when a
+teardown begins, leaves step 2 waiting for ever (`deadlock`). With the revocation, a with_group
+that was waiting when ~exec_group began is turned away to the unattached path and then uses a
+destroyed group; that is the host program's race, as before the handoff (it held nothing of its
+own when the teardown began).
+
+**Host entries dropped by `detach_end`** (the teardown's step 4; `detach` runs them in step 5).
+No waiting body can be among them: step 2 waited for PUMPING, and a waiting body's worker pumps
+until the body ran (the check `waiting-body-dropped` holds). After step 4 nothing runs one, and
+no worker or host waits on one; the processes parked on them are killed in step 5.
+
+In the words of `exec_group.h`'s comment, the rows that change (the model runs these):
+
+    - release, under Q: clear pumping. detaching: done (the teardown waits for this). A failed
+      pump: see failure. Else, when a host waits to hold g now (a with_group linked on g as
+      waiting, else its attaching thread inside pump_host or wait_for_work with host entries for
+      g), set host_held to that host on its behalf (the hold is handed over: the pop that follows
+      leaves g notified and deferred); an attaching thread that leaves pump_host or
+      wait_for_work with a hold handed to it and not taken up gives it back under Q (host_held
+      cleared, its waiters notified, and g queued again if deferred).
+      Then pump_result::runnable, or its next_deadline due: queue g again. Else CAS the word
+      from exactly `scheduled` to 0, and only if that succeeds file next_deadline (if any) in
+      the pool's timer heap; if it fails (a post set notified), queue g again.
+    - with_group, or a non-waiting host body, on a host thread: under Q (each time it looks): a
+      hold a release handed this thread is taken up; else if detaching is set or g is no longer
+      attached, [as now]; else wait, linked on g as waiting to hold it, while pumping is set or
+      another thread holds host_held (servicing this thread's host queue meanwhile), then set
+      host_held to this thread; [the rest as now].
+    - detach and teardown: (1) under Q set detaching, and take back a hold handed over and not
+      yet taken up (host_held and deferred cleared, its host notified); [(2), (3) as now]; (4)
+      under Q leave the ready queue, the next slots, the ready list, the failed list and the
+      timer heap, and take the group's host-queue entries off its attaching thread's queue (no
+      waiting body is among them: step 2 waited for pumping); [the rest of (4) as now]; (5) the
+      teardown drops those entries unrun and kills (which settles their calls), shuts the host
+      down, purges and reaps; detach runs them instead and releases the token.
+
+The cycle (`hh` host_held):
+
+`finding-handoff-idle`, `host-starved` (27 steps):
+
+    python -I state_word.py --actors posters=0,workers=1,bodies=0,teardown=0 --opts \
+        pre=1,repop=1,live=1,entries=1 --amend \
+        host-wake,host-excl,host-detaching,nested-release,hold-handoff,handoff-waiting,handoff-giveback
+
+    initial: word 0, nothing queued or held
+    H1: with_group: the group is attached                          0 fl=1
+    A: attach: installs the notifier; wakes g: fetch_or(S|N) finds 0 S|N fl=1
+    A: takes Q                                                     S|N fl=1
+    A: queues g                                                    S|N queued fl=1
+    A: releases Q                                                  S|N queued fl=1
+    W1: takes Q, pops g, fetch_or(P)                               S|N|P fl=1
+    W1: releases Q                                                 S|N|P fl=1
+    W1: fetch_and(~N)                                              S|P fl=1
+    W1: takes the token                                            S|P tok=W1 fl=1
+    W1: drains 1 post(s); run: ends with runnable=False, next_deadline=future (armed a sleeper) S|P tok=W1
+    H1: takes Q, looks: pumping: links itself as waiting to hold g S|P tok=W1
+    H1: releases Q, waits                                          S|P tok=W1
+    W1: releases the token                                         S|P
+    W1: takes Q                                                    S|P
+    W1: release: fetch_and(~P)                                     S
+    W1: release: CAS(S -> 0) succeeds; files next_deadline in the heap 0
+    W1: releases Q                                                 0
+    T: takes Q, the deadline falls due                             0
+    T: as wake: fetch_or(S|N) finds 0: queues g                    S|N queued
+    T: releases Q                                                  S|N queued
+    W1: takes Q, pops g, fetch_or(P)                               S|N|P
+    W1: releases Q                                                 S|N|P
+    W1: fetch_and(~N)                                              S|P
+    W1: takes the token                                            S|P tok=W1
+    W1: run: ends with runnable=False, next_deadline=future        S|P tok=W1
+    H1: wakes, takes Q, unlinks itself, looks again: pumping: links itself as waiting to hold g S|P tok=W1
+    H1: releases Q, waits                                          S|P tok=W1
+    ... and the cycle from step 13 repeats for ever: H1, waiting to hold g in with_group, waits for ever: a fair cycle of 24 states keeps it pending (each actor enabled throughout, or waiting for a free mutex, steps in it)
 
 ### The mutations
 
@@ -687,7 +832,7 @@ Each breaks one transition of the amended protocol and must be caught (`mutation
 
     initial: word 0, nothing queued or held
     H1: with_group: the group is attached                          0
-    H1: takes Q (PUMPING clear), sets host_held                    0 hh=H1
+    H1: takes Q, looks: free: sets host_held                       0 hh=H1
     H1: releases Q                                                 0 hh=H1
     A: attach: installs the notifier; wakes g: fetch_or(S|N) finds 0 S|N hh=H1
     A: takes Q                                                     S|N hh=H1
@@ -705,39 +850,61 @@ the states (one per orbit of the workers), the transitions and the seconds of ea
 
 | Check | Configuration (beside the defaults) | States | Transitions | Seconds | Found |
 |---|---|---|---|---|---|
-| `amended` | amend all | 233,380 | 734,152 | 7.6 | - |
-| `amended-detach` | posters=1, hosts=2, bodies=0, detach, failures=1, amend all | 134,428 | 377,312 | 4.0 | - |
-| `amended-waiting` | posters=1, hosts=0, waiting=1, failures=1, amend all | 13,286 | 28,927 | 0.3 | - |
-| `amended-nested` | posters=1, workers=1, hosts=0, detach, timer=0, nested=1, amend all | 5,563 | 10,801 | 0.1 | - |
-| `finding-host-wake` | posters=0, workers=1, bodies=0, no teardown, timer=0, amend all but host-wake | 409 | 643 | 0.0 | lost-wake |
-| `finding-host-excl` | posters=0, workers=1, no teardown, timer=0, amend all but host-excl | 5,500 | 11,044 | 0.1 | token-contended |
-| `finding-host-excl-teardown` | posters=0, workers=1, timer=0, amend all but host-excl | 13,992 | 30,397 | 0.2 | record-after-detach, token-contended, use-after-free |
-| `finding-host-detaching` | posters=0, workers=1, bodies=0, detach, timer=0, amend all but host-detaching | 1,904 | 3,351 | 0.0 | record-after-detach, token-contended |
-| `finding-nested` | posters=1, workers=1, hosts=0, detach, timer=0, nested=1, amend all but nested-release | 5,503 | 10,743 | 0.1 | record-after-detach |
+| `amended` | amend all | 364,236 | 1,144,396 | 6.6 | - |
+| `amended-detach` | posters=1, hosts=2, bodies=0, detach, failures=1, amend all | 195,532 | 548,287 | 3.5 | - |
+| `amended-waiting` | posters=1, hosts=0, waiting=1, failures=1, amend all | 14,060 | 30,548 | 0.2 | - |
+| `amended-nested` | posters=1, workers=1, hosts=0, detach, timer=0, nested=1, amend all | 5,892 | 11,471 | 0.0 | - |
+| `finding-host-wake` | posters=0, workers=1, bodies=0, no teardown, timer=0, amend all but host-wake | 423 | 666 | 0.0 | lost-wake |
+| `finding-host-excl` | posters=0, workers=1, no teardown, timer=0, amend all but host-excl, hold-handoff, handoff-idle, handoff-waiting, handoff-giveback | 5,500 | 11,044 | 0.0 | token-contended |
+| `finding-host-excl-teardown` | posters=0, workers=1, timer=0, amend all but host-excl, hold-handoff, handoff-idle, handoff-waiting, handoff-giveback | 13,992 | 30,397 | 0.1 | record-after-detach, token-contended, use-after-free |
+| `finding-host-detaching` | posters=0, workers=1, bodies=0, detach, timer=0, amend all but host-detaching | 1,976 | 3,491 | 0.0 | record-after-detach, token-contended |
+| `finding-nested` | posters=1, workers=1, hosts=0, detach, timer=0, nested=1, amend all but nested-release | 5,832 | 11,413 | 0.1 | record-after-detach |
 | `mutation-release-store` | posters=1, workers=1, hosts=0, bodies=0, no teardown, amend all, mutation release-store | 395 | 652 | 0.0 | lost-wake |
-| `mutation-pump-host-held` | posters=1, workers=1, bodies=0, no teardown, amend all, mutation pump-host-held | 6,398 | 15,668 | 0.1 | pump-host-held, token-contended |
+| `mutation-pump-host-held` | posters=1, workers=1, bodies=0, no teardown, amend all, mutation pump-host-held | 6,970 | 16,974 | 0.1 | pump-host-held, token-contended |
 | `mutation-zero-before-clear` | posters=1, workers=1, hosts=0, bodies=0, amend all, mutation zero-before-clear | 1,604 | 3,077 | 0.0 | queued-unscheduled, read-after-detach, use-after-free |
 | `mutation-wake-no-recheck` | posters=1, workers=1, hosts=0, bodies=0, amend all, mutation wake-no-recheck | 1,632 | 3,112 | 0.0 | read-after-detach, use-after-free |
 | `mutation-pop-no-detaching` | posters=1, workers=1, hosts=0, bodies=0, amend all, mutation pop-no-detaching | 2,350 | 4,592 | 0.0 | read-after-detach, token-contended, use-after-free |
-| `deep-frozen` | amend none | 548,193 | 1,813,537 | 20.3 | lost-wake, record-after-detach, token-contended, use-after-free |
-| `deep-finding-host-wake` | amend all but host-wake | 230,813 | 726,219 | 8.1 | lost-wake |
-| `deep-finding-host-excl` | amend all but host-excl | 577,188 | 1,906,407 | 20.4 | record-after-detach, token-contended, use-after-free |
-| `deep-finding-host-detaching` | detach, amend all but host-detaching | 272,282 | 849,696 | 8.3 | record-after-detach, token-contended |
-| `deep-finding-nested` | detach, nested=1, amend all but nested-release | 282,471 | 864,970 | 8.7 | record-after-detach |
-| `deep-nested` | detach, nested=1, amend all | 285,621 | 872,592 | 8.0 | - |
-| `deep-failures-waiting` | failures=1, waiting=1, amend all | 514,469 | 1,595,091 | 15.7 | - |
-| `deep-three-workers` | workers=3, amend all | 233,380 | 759,134 | 8.8 | - |
-| `deep-two-posts` | posts=2, pre=1, amend all | 1,615,947 | 5,727,147 | 59.0 | - |
-| `deep-detach` | hosts=2, detach, failures=1, amend all | 1,574,918 | 5,420,419 | 53.8 | - |
-| `deep-two-hosts` | hosts=2, failures=1, waiting=1, amend all | 2,566,739 | 8,949,393 | 94.0 | - |
-| `deep-three-posters` | posters=3, hosts=2, failures=1, amend all | 5,304,545 | 19,838,565 | 177.3 | - |
+| `amended-entries` | posters=1, entries=1, amend all | 239,232 | 657,070 | 4.6 | - |
+| `amended-entries-repop` | posters=1, entries=1, repop=1, amend all | 216,575 | 586,388 | 4.4 | - |
+| `live-amended` | posters=1, workers=1, no teardown, pre=1, repop=1, live=1, entries=1, amend all | 229,885 | 614,407 | 4.9 | - |
+| `live-amended-detach` | posters=0, workers=1, detach, pre=1, repop=1, live=1, entries=1, failures=1, amend all | 76,059 | 175,725 | 1.1 | - |
+| `finding-no-handoff` | posters=0, workers=1, no teardown, pre=1, repop=1, live=1, entries=1, amend all but hold-handoff, handoff-idle, handoff-waiting, handoff-giveback | 35,576 | 79,834 | 0.5 | entry-starved, host-starved |
+| `finding-handoff-idle` | posters=0, workers=1, bodies=0, no teardown, pre=1, repop=1, live=1, entries=1, amend all but handoff-idle | 5,742 | 11,003 | 0.1 | entry-starved, host-starved |
+| `mutation-no-revoke` | posters=0, workers=1, bodies=0, timer=0, pre=1, entries=1, amend all, mutation no-revoke | 20,359 | 40,836 | 0.2 | deadlock |
+| `finding-handoff-as-built` | posters=1, workers=1, hosts=0, bodies=0, no teardown, entries=1, away=1, timer=0, amend all but handoff-waiting, handoff-giveback | 1,627 | 2,686 | 0.0 | frozen-while-host-away |
+| `finding-handoff-giveback` | posters=1, workers=1, hosts=0, bodies=0, no teardown, entries=1, away=1, timer=0, amend all but handoff-giveback | 1,780 | 2,982 | 0.0 | frozen-while-host-away |
+| `amended-away` | posters=1, workers=1, bodies=0, no teardown, entries=1, away=1, amend all | 29,426 | 68,476 | 0.3 | - |
+| `live-amended-away` | posters=1, workers=1, bodies=0, no teardown, entries=1, away=1, pre=1, repop=1, live=1, amend all | 61,999 | 158,532 | 0.8 | - |
+| `deep-frozen` | amend none | 548,193 | 1,813,537 | 10.0 | lost-wake, record-after-detach, token-contended, use-after-free |
+| `deep-finding-host-wake` | amend all but host-wake | 361,885 | 1,137,139 | 6.2 | lost-wake |
+| `deep-finding-host-excl` | amend all but host-excl, hold-handoff, handoff-idle, handoff-waiting, handoff-giveback | 577,188 | 1,906,407 | 10.5 | record-after-detach, token-contended, use-after-free |
+| `deep-finding-host-detaching` | detach, amend all but host-detaching | 382,114 | 1,187,265 | 6.3 | record-after-detach, token-contended |
+| `deep-finding-nested` | detach, nested=1, amend all but nested-release | 400,652 | 1,220,874 | 6.7 | record-after-detach |
+| `deep-nested` | detach, nested=1, amend all | 404,180 | 1,229,336 | 6.9 | - |
+| `deep-failures-waiting` | failures=1, waiting=1, amend all | 796,689 | 2,485,259 | 13.9 | - |
+| `deep-three-workers` | workers=3, amend all | 364,236 | 1,179,637 | 7.2 | - |
+| `deep-two-posts` | posts=2, pre=1, amend all | 2,796,143 | 9,936,948 | 58.1 | - |
+| `deep-detach` | hosts=2, detach, failures=1, amend all | 3,180,277 | 10,934,786 | 64.7 | - |
+| `deep-two-hosts` | posters=1, hosts=2, failures=1, waiting=1, amend all | 1,122,487 | 3,428,831 | 22.4 | - |
+| `deep-entries` | posters=1, hosts=2, entries=2, failures=1, amend all | 4,814,071 | 15,293,942 | 181.7 | - |
+| `deep-away` | entries=1, away=1, amend all | 1,622,436 | 5,223,772 | 57.6 | - |
+| `deep-entries-detach` | posters=1, hosts=2, bodies=0, detach, entries=2, failures=1, waiting=1, amend all | 2,632,485 | 7,678,855 | 83.4 | - |
+| `deep-live-two-hosts` | posters=1, workers=1, hosts=2, no teardown, pre=1, repop=1, live=1, entries=1, amend all | 1,676,924 | 5,057,074 | 53.4 | - |
+| `deep-live-detach` | posters=1, workers=1, hosts=2, detach, pre=1, repop=1, live=1, entries=1, failures=1, amend all | 3,134,547 | 9,706,436 | 106.6 | - |
 
-`--suite deep` runs the quick checks, then the deep ones: about 8 minutes in all here, the quick
-ones 12 s; its largest check peaks at a working set of 1.3 GB (5.3 million states). The defaults
+`--suite deep` runs the quick checks, then the deep ones: about 12 minutes in all here, the quick
+ones 28 s; its largest check peaks at a working set of
+2.5 GB (deep-entries, 4.8 million states). The defaults
 (`posters=2,workers=2,hosts=1,bodies=1,teardown=1`, the timer, one sleeper) are the `amended`
-check; posters, posts and hosts multiply the states, workers do not. Two larger amended runs,
-outside the suites, found nothing either: `--actors posters=3 --opts posts=2` (8,554,393 states,
-389 s) and `--actors hosts=2,bodies=2 --opts posts=2` (9,135,178 states, 390 s).
+check; posters, posts and hosts multiply the states, workers do not. Larger runs outside the
+suites found nothing either. Before the handoff: `--actors posters=3 --opts posts=2` (8,554,393
+states, 389 s) and `--actors hosts=2,bodies=2 --opts posts=2` (9,135,178 states, 390 s). With
+the handoff and `handoff-idle`, the liveness check (no symmetry reduction): two workers and
+`--actors posters=1,hosts=2,teardown=0,detach=1 --opts pre=1,repop=1,live=1,entries=1,failures=1`
+(4,330,051 states, 136 s); two workers and
+`--actors posters=1 --opts pre=1,repop=1,live=1,entries=2,waiting=1` (2,470,913 states, 66 s);
+and `--actors posters=1,workers=1,hosts=2,teardown=0 --opts pre=1,repop=1,live=1,entries=1`
+(1,666,942 states, 53 s).
 
 ## Revisions
 
