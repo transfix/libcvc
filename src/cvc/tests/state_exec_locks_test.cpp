@@ -5119,3 +5119,703 @@ TEST(LocksThreads, LT10_EightSchedulersRandom) {
 TEST(LocksStress, LT04_FuzzedProtocolPoints) { fuzzed_protocol_points(1000, 200, 120.0); }
 
 TEST(LocksStress, LT10_EightSchedulersRandom) { eight_schedulers_random(100000, 3000.0); }
+
+// --- Stage 2a continuous pool (td 8.3, 8.11) ---
+//
+// td 8.11's LG cases for Stage 2a (S2.md S2-Q13; S2a.9): with-lock in exec_groups attached to the
+// app's exec_pool in continuous mode, against their solo runs; cross-group grants racing kills,
+// timeouts (fork-join too) and a group's teardown; and deterministic mode's grant order and
+// deadlock victim. The attaching thread runs exec_pool.h's host loop and reads a group's scheduler
+// only under its token (with_group) or once it is detached.
+
+// clang-format off
+#include <cvc/core/exec_pool.h>
+#include <cvc/state/state_exec/exec_group.h>
+// clang-format on
+
+namespace {
+
+constexpr double kLgInf = std::numeric_limits<double>::infinity();
+constexpr double kLgCeiling = 30.0; // a case's one-sided ceiling on what it waits for (rule 7)
+
+// An environment variable set while it lives (CVC_EXEC_FUZZ, which a pool and a lock manager read
+// when they are built), and restored after.
+class lg_env_var {
+public:
+  lg_env_var(const char *name, const char *value) : name_(name) {
+    if (const char *old = std::getenv(name))
+      old_ = old;
+    set(value);
+  }
+  ~lg_env_var() { set(old_ ? old_->c_str() : nullptr); }
+  lg_env_var(const lg_env_var &) = delete;
+  lg_env_var &operator=(const lg_env_var &) = delete;
+
+private:
+  void set(const char *value) {
+#ifdef _WIN32
+    _putenv_s(name_.c_str(), value ? value : "");
+#else
+    if (value)
+      setenv(name_.c_str(), value, 1);
+    else
+      unsetenv(name_.c_str());
+#endif
+  }
+  std::string name_;
+  std::optional<std::string> old_;
+};
+
+// An app whose lock manager is shared (the tree says so before anything makes it) and whose
+// exec_pool is built first with `threads` workers and pumps of `pump_steps` steps and no time
+// budget (the oracles' steps-only budget), an async call charged one step and no CPU time.
+struct lg_app {
+  cvc::app app;
+  cvc::state &tree;
+  cvc::exec_pool &pool;
+
+  explicit lg_app(unsigned threads, std::uint64_t pump_steps = 97, bool deterministic = false)
+      : tree(cvc::state::instance(app)),
+        pool(build(app, tree, threads, pump_steps, deterministic)) {}
+
+  static cvc::exec_pool &build(cvc::app &a, cvc::state &t, unsigned threads,
+                               std::uint64_t pump_steps, bool deterministic) {
+    t("state_exec.locks.threading").value(std::string("shared"));
+    t("state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("0"));
+    cvc::pool_options o;
+    o.threads = threads;
+    o.pump_steps = pump_steps;
+    o.pump_seconds = kLgInf;
+    o.deterministic = deterministic;
+    return a.exec_pool(o);
+  }
+};
+
+// What the groups' (note x) calls said, in order: "<group>:<x>".
+struct lg_log {
+  std::mutex m;
+  std::vector<std::string> lines;
+  void add(std::string line) {
+    std::lock_guard<std::mutex> lock(m);
+    lines.push_back(std::move(line));
+  }
+  std::vector<std::string> get() {
+    std::lock_guard<std::mutex> lock(m);
+    return lines;
+  }
+};
+
+// An exec_group of `app` named, owned and chrooted `name`, with the intrinsics (with-lock, msg-*,
+// fork, state-*) and (note x), which appends "<name>:<x>" to `log` when one is given.
+struct lg_group {
+  intrinsics_context ictx;
+  environment_ptr env = environment::extend(builtins::make_default_environment());
+  std::unique_ptr<exec_group> group;
+
+  lg_group(cvc::app &app, cvc::state &tree, const std::string &name, lg_log *log = nullptr,
+           const std::function<void(exec_group::options &)> &tweak = {}) {
+    exec_group::options o;
+    o.name = name;
+    o.owner = name;
+    o.app = &app;
+    o.watch_root = &tree;
+    if (tweak)
+      tweak(o);
+    group = std::make_unique<exec_group>(std::move(o));
+    ictx.sched = &group->sched();
+    ictx.proc = make_process();
+    ictx.proc->pid = 0;
+    apply_chroot(ictx, tree, name);
+    ictx.host = &group->host();
+    register_intrinsics(env, &ictx);
+    builtins::register_fn(env, "note", [log, name](std::span<const value_t> a) -> value_t {
+      if (log)
+        log->add(name + ":" + (a.empty() ? std::string() : to_string(a[0])));
+      return nil_value();
+    });
+  }
+  lg_group(const lg_group &) = delete;
+  lg_group &operator=(const lg_group &) = delete;
+  ~lg_group() { env.reset(); }
+
+  exec_group &g() { return *group; }
+  async_scheduler &sched() { return group->sched(); }
+  // Before the group is attached, or under its token (with_group).
+  int submit(const std::string &script, std::function<void(value_t)> on_complete = {}) {
+    execute_options eo;
+    eo.env = environment::extend(env);
+    eo.on_complete = std::move(on_complete);
+    return group->execute(script, eo);
+  }
+  bool done() {
+    for (const process_info &i : sched().list_processes())
+      if (!is_finished(i.status))
+        return false;
+    return true;
+  }
+  bool finished(int pid) {
+    const auto i = sched().get_process_info(pid);
+    return i && is_finished(i->status);
+  }
+  // What `pid` came to: its result (a string bare), or its status and exit error.
+  std::string outcome(int pid) {
+    if (const auto r = sched().get_result(pid))
+      return std::holds_alternative<std::string>(r->v) ? std::get<std::string>(r->v)
+                                                       : to_string(*r);
+    const auto i = sched().get_process_info(pid);
+    return std::string("<") + (i ? to_string(i->status) : "gone") + " " +
+           sched().get_exit_error(pid).value_or("") + ">";
+  }
+  // Each process in pid order (creation order within the group): its rank, status, steps and
+  // outcome, to compare with another run of the group.
+  std::vector<std::string> record() {
+    std::vector<process_info> infos = sched().list_processes();
+    std::sort(infos.begin(), infos.end(),
+              [](const process_info &a, const process_info &b) { return a.pid < b.pid; });
+    std::vector<std::string> out;
+    for (std::size_t i = 0; i < infos.size(); ++i)
+      out.push_back("#" + std::to_string(i) + " " + to_string(infos[i].status) + " steps " +
+                    std::to_string(infos[i].step_count) + ": " + outcome(infos[i].pid));
+    return out;
+  }
+};
+
+// The attaching thread's host loop (exec_pool.h): until done(), pump_host, and wait_for_work(beat)
+// when that had nothing to do. A throw (S2a.0's stubs: "not built") or `ceiling` seconds passing
+// fails the case; true when done() held.
+bool lg_drive(cvc::exec_pool &pool, const std::function<bool()> &done, double ceiling = kLgCeiling,
+              double beat = 0.002) {
+  const auto t0 = steady::now();
+  try {
+    while (!done()) {
+      if (seconds_since(t0) > ceiling) {
+        ADD_FAILURE() << "the host loop's ceiling (" << ceiling << " s) passed";
+        return false;
+      }
+      if (!pool.pump_host(kLgInf))
+        pool.wait_for_work(beat);
+    }
+    return true;
+  } catch (const std::exception &e) {
+    ADD_FAILURE() << "the host loop threw: " << e.what();
+    return false;
+  }
+}
+
+// The groups a case attached, detached when it goes if still attached, so a case that fails or
+// throws leaves nothing attached (~exec_pool asserts so). Declared after the groups.
+class lg_attached {
+public:
+  explicit lg_attached(cvc::exec_pool &pool) : pool_(pool) {}
+  ~lg_attached() { detach_all(); }
+  lg_attached(const lg_attached &) = delete;
+  lg_attached &operator=(const lg_attached &) = delete;
+
+  void attach(exec_group &g) {
+    pool_.attach(g);
+    groups_.push_back(&g);
+  }
+  // A group the case destroys attached (its teardown detaches it).
+  void forget(exec_group &g) {
+    groups_.erase(std::remove(groups_.begin(), groups_.end(), &g), groups_.end());
+  }
+  void detach_all() noexcept {
+    for (exec_group *g : groups_)
+      try {
+        if (pool_.attached(*g))
+          pool_.detach(*g);
+      } catch (...) {
+      }
+    groups_.clear();
+  }
+
+private:
+  cvc::exec_pool &pool_;
+  std::vector<exec_group *> groups_;
+};
+
+// Whether every group of `gs` has ended, each read under its token; a group seen done stays so.
+bool lg_all_done(cvc::exec_pool &pool, std::vector<std::unique_ptr<lg_group>> &gs,
+                 std::vector<char> &done) {
+  done.resize(gs.size(), 0);
+  bool all = true;
+  for (std::size_t k = 0; k < gs.size(); ++k) {
+    if (!done[k]) {
+      bool d = false;
+      pool.with_group(gs[k]->g(), [&] { d = gs[k]->done(); });
+      done[k] = d;
+    }
+    all = all && done[k];
+  }
+  return all;
+}
+
+// The failures the running case has had so far: a part of a case stops at its own first failure,
+// and the case's later parts still run.
+int lg_failures() {
+  const ::testing::TestResult *r =
+      ::testing::UnitTest::GetInstance()->current_test_info()->result();
+  int n = 0;
+  for (int i = 0; i < r->total_part_count(); ++i)
+    n += r->GetTestPartResult(i).failed() ? 1 : 0;
+  return n;
+}
+
+// LG-1's programs for group k: a few of GR-1's (fib, an exception loop, set-attr, a broadcast to
+// a receiver, a fork) and with-lock sections on the group's own keys (under its chroot): three
+// writers of a read-modify-write that sleeps inside the lock, a shared reader, a two-key section
+// and a final reader. With `noting`, each section's body first says (note <tag>): the grant order.
+std::vector<std::string> lg_programs(int k, bool noting) {
+  const std::string n = std::to_string(10 + k % 5);
+  const auto mark = [noting](const char *tag) {
+    return noting ? std::string("(note \"") + tag + "\") " : std::string();
+  };
+  const std::string writer =
+      "(begin (set i 0) (while (< i 20) (begin (with-lock \"acc\" (begin " + mark("w") +
+      "(state-incr \"acc.n\") (set v (if (state-exists \"acc.m\") (int (state-get \"acc.m\")) 0)) "
+      "(sleep 0) (state-set \"acc.m\" (str (+ v 1))))) (set i (+ i 1)))) i)";
+  return {
+      "(begin (defun fib (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) (fib " + n + "))",
+      "(begin (set n 0) (for i (range 40) (try (raise (ValueError \"x\")) "
+      "(catch (ValueError e) (set n (+ n 1))))) n)",
+      writer,
+      writer,
+      writer,
+      "(begin (set seen (list)) (for i (range 10) (with-lock \"acc\" :shared (begin " + mark("r") +
+          "(sleep 0) (append seen (state-get \"acc.n\"))))) seen)",
+      "(with-lock (list \"acc\" \"other\") (begin " + mark("m") +
+          "(sleep 0) (list (state-get \"acc.m\") \"two keys\")))",
+      "(begin (set d (dict)) (for i (range 60) (set-attr d (str i) (* i i))) (get-attr d \"59\"))",
+      "(get-attr (msg-recv \"bc\") \"payload\")",
+      "(begin (for i (range 30) nil) (msg-send \"bc\" \"hello\") \"sent\")",
+      "(begin (set r (fork)) (if (= r 0) (begin (for i (range 10) nil) \"child\") \"parent\"))",
+      "(begin (for i (range 400) nil) (with-lock \"acc\" (begin " + mark("f") +
+          "(list (state-get \"acc.n\") (state-get \"acc.m\")))))",
+  };
+}
+
+} // namespace
+
+// LG-1 (td 8.11; S2-Q13): GR-1's oracle with with-lock sections inside each group. Each group's
+// programs (lg_programs) run alone on this thread, pumped 97 steps at a time, on an app with a
+// shared lock manager; then the groups, attached to such an app's pool at threads 0, 2 and 4,
+// pumped 97 steps at a time with no time budget, run until every process has ended: every group's
+// processes (results, steps, statuses) equal its solo run, and no lock is left held or queued.
+TEST(LocksGroups, LG01_ContinuousGroupsWithLocksEqualSolo) {
+  const int groups = under_sanitizer() ? 3 : 4;
+  const std::vector<unsigned> thread_counts =
+      under_sanitizer() ? std::vector<unsigned>{0, 2} : std::vector<unsigned>{0, 2, 4};
+  std::vector<std::vector<std::string>> solo;
+  {
+    lg_app w(0);
+    for (int k = 0; k < groups; ++k) {
+      lg_group gw(w.app, w.tree, "g" + std::to_string(k));
+      for (const std::string &p : lg_programs(k, false))
+        gw.submit(p);
+      for (int i = 0; i < 200000 && !gw.done(); ++i)
+        gw.g().pump(pump_budget{97, kLgInf});
+      EXPECT_TRUE(gw.done()) << "group " << k << " alone never ended";
+      solo.push_back(gw.record());
+    }
+  }
+  for (const unsigned threads : thread_counts) {
+    SCOPED_TRACE("threads " + std::to_string(threads));
+    lg_app w(threads);
+    std::vector<std::unique_ptr<lg_group>> gs;
+    for (int k = 0; k < groups; ++k) {
+      gs.push_back(std::make_unique<lg_group>(w.app, w.tree, "g" + std::to_string(k)));
+      for (const std::string &p : lg_programs(k, false))
+        gs.back()->submit(p);
+    }
+    lg_attached att(w.pool);
+    for (auto &gw : gs)
+      att.attach(gw->g());
+    std::vector<char> done;
+    const auto t0 = steady::now();
+    const bool drove = lg_drive(w.pool, [&] { return lg_all_done(w.pool, gs, done); }, 120.0);
+    att.detach_all();
+    const cvc::pool_stats st = w.pool.stats();
+    const lock_stats ls = w.app.lock_manager()->stats();
+    std::printf("LG-1: %d groups at threads %u (effective %u): %llu pumps, %llu waits, %.3f s\n",
+                groups, threads, w.pool.threads(), static_cast<unsigned long long>(st.pumps),
+                static_cast<unsigned long long>(ls.waits), seconds_since(t0));
+    if (!drove)
+      return;
+    for (int k = 0; k < groups; ++k)
+      EXPECT_EQ(gs[k]->record(), solo[k]) << "group " << k;
+    EXPECT_GT(ls.waits, 0u) << "the sections never met inside a lock";
+    EXPECT_EQ(ls.holds, 0u);
+    EXPECT_EQ(ls.queued, 0u);
+  }
+}
+
+namespace {
+
+// LG-2's first part: a cross-group grant racing a kill or a timeout, in one mode, `runs` times.
+// Group A holds "/lg02" for 2-8 ms (random), B's waiter queues behind it (with :timeout 0.005, or
+// killed by the host at a random time within A's hold and 2 ms after), and C's behind B's. Each
+// run has one outcome for B's waiter (its body ran and it ended, it timed out, or it was killed,
+// its body run at most once and only on a grant), C is granted (nothing lost), and the manager
+// ends empty (nothing doubled or leaked).
+void lg2_grant_races(bool continuous, bool kill, int runs) {
+  lg_app w(2, 200);
+  lg_group a(w.app, w.tree, "lg02a"), b(w.app, w.tree, "lg02b"), c(w.app, w.tree, "lg02c");
+  std::atomic<int> held{0}, bodies{0};
+  builtins::register_fn(a.env, "held", [&](std::span<const value_t>) -> value_t {
+    held.fetch_add(1);
+    return nil_value();
+  });
+  builtins::register_fn(b.env, "body", [&](std::span<const value_t>) -> value_t {
+    bodies.fetch_add(1);
+    return nil_value();
+  });
+  const std::shared_ptr<lock_manager> mgr = w.app.lock_manager();
+  lg_attached att(w.pool);
+  if (continuous) {
+    att.attach(a.g());
+    att.attach(b.g());
+    att.attach(c.g());
+  }
+  const auto on = [&](lg_group &g, const std::function<void()> &fn) {
+    if (continuous)
+      w.pool.with_group(g.g(), fn);
+    else
+      fn();
+  };
+  const auto pump_until = [&](const std::function<bool()> &done) {
+    if (continuous)
+      return lg_drive(w.pool, done, kLgCeiling, 0.0005);
+    const auto t0 = steady::now();
+    const std::vector<exec_group *> all{&a.g(), &b.g(), &c.g()};
+    while (!done()) {
+      if (seconds_since(t0) > kLgCeiling) {
+        ADD_FAILURE() << "not done within " << kLgCeiling << " s";
+        return false;
+      }
+      w.pool.pump_all(all, pump_budget{200, kLgInf}, steady::now() + std::chrono::hours(1));
+    }
+    return true;
+  };
+  std::mt19937 rng(kill ? 7 : 11);
+  std::uniform_real_distribution<double> unit(0.0, 1.0);
+  int body = 0, timeout = 0, killed = 0, killed_in_body = 0, done = 0;
+  const int failures = lg_failures();
+  try {
+    for (int run = 0; run < runs && lg_failures() == failures; ++run, ++done) {
+      const double hold = 0.002 + 0.006 * unit(rng);
+      int h = -1, p = -1, q = -1;
+      on(a, [&] {
+        h = a.submit("(with-lock \"/lg02\" (begin (held) (sleep " + std::to_string(hold) +
+                     ") \"a\"))");
+      });
+      if (!pump_until([&] { return held.load() > run; }))
+        return;
+      on(b, [&] {
+        p = b.submit(kill ? "(with-lock \"/lg02\" (begin (body) \"body\"))"
+                          : "(try (with-lock \"/lg02\" :timeout 0.005 (begin (body) \"body\")) "
+                            "(catch (TimeoutError e) \"timeout\"))");
+      });
+      // B's waiter queued behind A's hold (or, on a slow pump, already past it).
+      if (!pump_until([&] {
+            bool past = false;
+            on(a, [&] { past = a.finished(h); });
+            if (!past)
+              on(b, [&] { past = b.finished(p); });
+            return past || mgr->stats().queued >= 1;
+          }))
+        return;
+      on(c, [&] { q = c.submit("(with-lock \"/lg02\" \"c\")"); });
+      const int bodies0 = bodies.load();
+      const auto kill_at =
+          steady::now() + std::chrono::duration_cast<steady::duration>(
+                              std::chrono::duration<double>((hold + 0.002) * unit(rng)));
+      bool sent = !kill;
+      const bool ended = pump_until([&] {
+        if (!sent && steady::now() >= kill_at) {
+          on(b, [&] { b.sched().kill(p); });
+          sent = true;
+        }
+        bool d = false;
+        on(a, [&] { d = a.finished(h); });
+        if (d)
+          on(b, [&] { d = b.finished(p); });
+        if (d)
+          on(c, [&] { d = c.finished(q); });
+        return sent && d;
+      });
+      if (!ended)
+        return;
+      std::string got, next;
+      on(b, [&] { got = b.outcome(p); });
+      on(c, [&] { next = c.outcome(q); });
+      const int ran = bodies.load() - bodies0;
+      const lock_stats s = mgr->stats();
+      if (got == "body") {
+        ++body;
+        EXPECT_EQ(ran, 1) << "run " << run << ": the body ran " << ran << " times";
+      } else if (got == "timeout") {
+        ++timeout;
+        EXPECT_EQ(ran, 0) << "run " << run << ": a timed-out waiter's body ran";
+      } else if (got.rfind("<killed", 0) == 0) {
+        ++killed;
+        killed_in_body += ran;
+        EXPECT_LE(ran, 1) << "run " << run;
+      } else {
+        ADD_FAILURE() << "run " << run << ": B's waiter came to " << got;
+      }
+      EXPECT_EQ(next, "c") << "run " << run << ": C's waiter was not granted";
+      EXPECT_EQ(s.holds, 0u) << "run " << run;
+      EXPECT_EQ(s.queued, 0u) << "run " << run;
+    }
+  } catch (const std::exception &e) {
+    ADD_FAILURE() << "threw: " << e.what();
+  }
+  std::printf("LG-2 %s, %s: %d runs: body %d, timeout %d, killed %d (%d in the body)\n",
+              continuous ? "continuous" : "fork-join", kill ? "a kill" : "a timeout", done, body,
+              timeout, killed, killed_in_body);
+}
+
+// LG-2's second part: a lock post racing the target group's destruction, `runs` times (a 60 s
+// budget may end it early). A, attached, holds "/lg02p" until a message comes; B is made and
+// attached each run with a waiter queued behind it; the host posts A's message (A's worker then
+// releases, granting B's waiter through B's port, whose wake reaches the pool) and, after a random
+// spin, destroys B attached. Whichever comes first, nothing is left held or queued once A's holder
+// has ended, and nothing crashes (ASan, TSan in CI).
+void lg2_post_races_destruction(std::size_t runs) {
+  lg_app w(4, 200);
+  lg_group a(w.app, w.tree, "lg02pa");
+  std::atomic<std::size_t> held{0}, a_done{0};
+  builtins::register_fn(a.env, "held", [&](std::span<const value_t>) -> value_t {
+    held.fetch_add(1);
+    return nil_value();
+  });
+  const std::shared_ptr<lock_manager> mgr = w.app.lock_manager();
+  lg_attached att(w.pool);
+  std::mt19937 rng(41);
+  const steady::time_point budget = deadline_after(60.0);
+  const auto t0 = steady::now();
+  std::size_t run = 0;
+  const int failures = lg_failures();
+  try {
+    att.attach(a.g());
+    for (; run < runs && lg_failures() == failures && steady::now() < budget; ++run) {
+      w.pool.with_group(a.g(), [&] {
+        a.submit("(with-lock \"/lg02p\" (begin (held) (msg-recv \"/lg02p.go\") \"a\"))",
+                 [&](value_t) { a_done.fetch_add(1); });
+      });
+      if (!lg_drive(w.pool, [&] { return held.load() > run; }))
+        break;
+      auto b = std::make_unique<lg_group>(w.app, w.tree, "lg02pb");
+      b->submit("(with-lock \"/lg02p\" \"b\")");
+      w.pool.attach(b->g());
+      if (!lg_drive(w.pool, [&] { return mgr->stats().queued == 1; })) {
+        w.pool.detach(b->g());
+        break;
+      }
+      const int spin = static_cast<int>(rng() % 400);
+      a.sched().post_message("lg02p.go", value_t(std::string("go")));
+      for (int i = 0; i < spin; ++i)
+        std::this_thread::yield();
+      b.reset(); // attached: its teardown races A's release and the grant posted to its port
+      if (!lg_drive(w.pool, [&] { return a_done.load() > run; }))
+        break;
+      const lock_stats s = mgr->stats();
+      EXPECT_EQ(s.holds, 0u) << "run " << run;
+      EXPECT_EQ(s.queued, 0u) << "run " << run;
+    }
+  } catch (const std::exception &e) {
+    ADD_FAILURE() << "threw: " << e.what();
+  }
+  const lock_stats s = mgr->stats();
+  std::printf("LG-2, a post racing a destruction: %zu of %zu runs in %.2f s; posts %llu, dropped "
+              "%llu, discarded %llu%s\n",
+              run, runs, seconds_since(t0), static_cast<unsigned long long>(s.posts),
+              static_cast<unsigned long long>(s.posts_dropped),
+              static_cast<unsigned long long>(s.posts_discarded),
+              run < runs && lg_failures() == failures ? " (the 60 s budget ended it)" : "");
+  if (lg_failures() == failures)
+    EXPECT_GE(run, runs / 20) << "the budget ended it after " << run << " runs";
+  EXPECT_EQ(detail::live_groups(w.app), 1u); // A
+}
+
+// LG-2's third part (GL-2 in continuous mode): B is destroyed attached with a waiter queued behind
+// A's hold, and C's waiter behind B's. B's teardown_hook_for_test, between closing B's lock port
+// and its kills, kills A's holder under A's token, so the key is granted to B's waiter then. B's
+// kill of that waiter releases the grant, and C's waiter is granted (woken through its port).
+void lg2_grant_in_teardown() {
+  lg_app w(2, 200);
+  lg_group a(w.app, w.tree, "lg02ta"), c(w.app, w.tree, "lg02tc");
+  int holder = -1;
+  bool hook_ran = false;
+  std::string hook_error;
+  auto b =
+      std::make_unique<lg_group>(w.app, w.tree, "lg02tb", nullptr, [&](exec_group::options &o) {
+        o.teardown_hook_for_test = [&](exec_group &) {
+          hook_ran = true;
+          try {
+            w.pool.with_group(a.g(), [&] { a.sched().kill(holder); });
+          } catch (const std::exception &e) {
+            hook_error = e.what();
+          }
+        };
+      });
+  holder = a.submit("(with-lock \"/lg02t\" (msg-recv \"/lg02t.never\"))");
+  b->submit("(with-lock \"/lg02t\" \"b\")");
+  const int cw = c.submit("(with-lock \"/lg02t\" \"c\")");
+  const std::shared_ptr<lock_manager> mgr = w.app.lock_manager();
+  lg_attached att(w.pool);
+  att.attach(a.g());
+  bool ok = lg_drive(w.pool, [&] { return mgr->stats().holds == 1; });
+  if (ok) {
+    att.attach(b->g());
+    ok = lg_drive(w.pool, [&] { return mgr->stats().queued == 1; });
+  }
+  if (ok) {
+    att.attach(c.g());
+    ok = lg_drive(w.pool, [&] { return mgr->stats().queued == 2; });
+  }
+  if (!ok)
+    return; // att detaches them
+  att.forget(b->g());
+  b.reset();
+  EXPECT_TRUE(hook_ran) << "the teardown hook was not called";
+  EXPECT_EQ(hook_error, "");
+  bool c_done = false;
+  ok = lg_drive(w.pool, [&] {
+    w.pool.with_group(c.g(), [&] { c_done = c.finished(cw); });
+    return c_done;
+  });
+  att.detach_all();
+  ASSERT_TRUE(ok);
+  const auto info = a.sched().get_process_info(holder);
+  EXPECT_TRUE(info && info->status == process_status::killed);
+  EXPECT_EQ(c.outcome(cw), "c") << "C's waiter was not granted";
+  EXPECT_EQ(mgr->stats().holds, 0u);
+  EXPECT_EQ(mgr->stats().queued, 0u);
+}
+
+} // namespace
+
+// LG-2 (td 8.11): cross-group grant races under CVC_EXEC_FUZZ. A grant racing a kill and a timeout,
+// fork-join and continuous, 40 runs each (10 in Debug and under a sanitizer; CVC_LOCKS_LG02_RACES):
+// one outcome each, nothing lost or doubled. A lock post racing the target group's destruction,
+// 10^4 times (300 in Debug, 500 under a sanitizer; CVC_LOCKS_LG02_RUNS). A grant to a waiter of a
+// group in teardown, between its port's close and its kills: that waiter's kill releases it and
+// the next waiter is granted.
+TEST(LocksGroups, LG02_CrossGroupGrantRaces) {
+  lg_env_var fuzz("CVC_EXEC_FUZZ", "2026");
+  const int races = static_cast<int>(lane_size("CVC_LOCKS_LG02_RACES", 40, 10, 10));
+  for (const bool continuous : {false, true})
+    for (const bool kill : {false, true}) {
+      SCOPED_TRACE(std::string(continuous ? "continuous" : "fork-join") + ", " +
+                   (kill ? "a kill" : "a timeout"));
+      lg2_grant_races(continuous, kill, races);
+    }
+  {
+    SCOPED_TRACE("a lock post racing the target group's destruction");
+    lg2_post_races_destruction(lane_size("CVC_LOCKS_LG02_RUNS", 10000, 300, 500));
+  }
+  {
+    SCOPED_TRACE("a grant to a waiter of a group in teardown");
+    lg2_grant_in_teardown();
+  }
+}
+
+namespace {
+
+// One deterministic run (LG-6): `groups` groups of lg_programs (with their grant notes) and a
+// section on one key across the groups, attached to a pool at threads 4 in deterministic mode.
+struct lg6_run {
+  std::vector<std::string> grants;
+  std::vector<std::vector<std::string>> procs;
+};
+
+lg6_run lg6_once(int groups) {
+  lg6_run out;
+  lg_app w(4, 150, true);
+  lg_log log;
+  std::vector<std::unique_ptr<lg_group>> gs;
+  for (int k = 0; k < groups; ++k) {
+    gs.push_back(std::make_unique<lg_group>(w.app, w.tree, "lg06g" + std::to_string(k), &log));
+    for (const std::string &p : lg_programs(k, true))
+      gs.back()->submit(p);
+    gs.back()->submit("(with-lock \"/lg06\" (begin (note \"x\") (sleep 0) \"x\"))");
+  }
+  lg_attached att(w.pool);
+  for (auto &gw : gs)
+    att.attach(gw->g());
+  std::vector<char> done;
+  const bool drove = lg_drive(w.pool, [&] { return lg_all_done(w.pool, gs, done); }, 120.0);
+  att.detach_all();
+  EXPECT_TRUE(drove);
+  out.grants = log.get();
+  for (auto &gw : gs)
+    out.procs.push_back(gw->record());
+  return out;
+}
+
+} // namespace
+
+// LG-6 (td 8.11, 4.14): deterministic mode, threads 4, LG-1's programs and a key shared across the
+// groups, run twice: the identical grant order (each section's first step notes it), and identical
+// processes.
+TEST(LocksGroups, LG06_DeterministicGrantOrderRepeats) {
+  const int groups = under_sanitizer() ? 3 : 6;
+  const lg6_run first = lg6_once(groups);
+  const lg6_run second = lg6_once(groups);
+  std::printf("LG-6: %d groups, %zu grants\n", groups, first.grants.size());
+  EXPECT_FALSE(first.grants.empty());
+  EXPECT_EQ(first.grants, second.grants);
+  ASSERT_EQ(first.procs.size(), second.procs.size());
+  for (std::size_t k = 0; k < first.procs.size(); ++k)
+    EXPECT_EQ(first.procs[k], second.procs[k]) << "group " << k;
+}
+
+// LG-7 (td 8.11): a lock cycle across two groups in deterministic mode, 10 runs: A takes /x then
+// asks for /y, B takes /y then asks for /x. The same DeadlockError victim, with the same cycle,
+// every run (the request that closes the cycle); the other gets "ok", and the manager ends empty.
+TEST(LocksGroups, LG07_DeterministicDeadlockVictim) {
+  const auto program = [](const char *first, const char *second) {
+    return std::string("(try (with-lock \"") + first +
+           "\" (begin (sleep 0) (sleep 0) (with-lock \"" + second +
+           "\" \"ok\"))) (catch (DeadlockError e) (get-attr e \"cycle\")))";
+  };
+  std::optional<std::string> first_seen;
+  for (int run = 0; run < 10; ++run) {
+    SCOPED_TRACE("run " + std::to_string(run));
+    lg_app w(4, 150, true);
+    lg_group a(w.app, w.tree, "lg07a"), b(w.app, w.tree, "lg07b");
+    const int pa = a.submit(program("/lg07x", "/lg07y"));
+    const int pb = b.submit(program("/lg07y", "/lg07x"));
+    bool drove = false;
+    {
+      lg_attached att(w.pool);
+      att.attach(a.g());
+      att.attach(b.g());
+      bool da = false, db = false;
+      drove = lg_drive(w.pool, [&] {
+        w.pool.with_group(a.g(), [&] { da = a.finished(pa); });
+        w.pool.with_group(b.g(), [&] { db = b.finished(pb); });
+        return da && db;
+      });
+    }
+    ASSERT_TRUE(drove);
+    const auto ra = a.sched().get_result(pa), rb = b.sched().get_result(pb);
+    ASSERT_TRUE(ra && rb);
+    const bool a_victim = !std::holds_alternative<std::string>(ra->v);
+    const bool b_victim = !std::holds_alternative<std::string>(rb->v);
+    ASSERT_NE(a_victim, b_victim) << to_string(*ra) << " / " << to_string(*rb);
+    EXPECT_EQ(a_victim ? b.outcome(pb) : a.outcome(pa), "ok");
+    const std::string seen =
+        std::string(a_victim ? "lg07a: " : "lg07b: ") + to_string(a_victim ? *ra : *rb);
+    if (!first_seen) {
+      first_seen = seen;
+      std::printf("LG-7: the victim is %s\n", seen.c_str());
+    }
+    EXPECT_EQ(seen, *first_seen);
+    const lock_stats s = w.app.lock_manager()->stats();
+    EXPECT_EQ(s.deadlocks, 1u);
+    EXPECT_EQ(s.holds, 0u);
+    EXPECT_EQ(s.queued, 0u);
+  }
+}

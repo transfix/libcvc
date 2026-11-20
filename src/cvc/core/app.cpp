@@ -81,6 +81,25 @@
 #include <utility>
 
 namespace cvc {
+// background_cpu (app.h: trySubmitKernel; "The kernel pools", below). Its mutex guards the rest:
+// the queue (by priority, FIFO within one), the running count, the interrupt count and the stop
+// flag. `size` and the workers are set before the pool is published, and the workers taken only
+// by closeCpuKernelPool.
+struct app::CpuKernelPool {
+  unsigned int size = 0; // its workers, all started when it was made
+  boost::mutex mutex;
+  std::condition_variable_any wake; // idle workers wait here for a task
+  std::condition_variable_any idle; // nothing queued or running (wait_for_threads)
+  PoolQueue queue;
+  std::vector<thread_ptr> workers; // ~app joins them
+  unsigned int running = 0;        // tasks running
+  std::uint64_t seq = 0;           // next ThreadPoolTask::seq
+  // Bumped whenever the workers are interrupted (wait_for_threads, ~app): a worker that sees it
+  // changed clears a request left over from then before it takes its next task.
+  std::uint64_t interrupts = 0;
+  bool stopping = false; // ~app closed it: nothing queued starts, and a task submitted is dropped
+};
+
 // ---------------------
 // app::wait_for_threads
 // ---------------------
@@ -123,6 +142,12 @@ void app::wait_for_threads() {
     boost::mutex::scoped_lock lock(_threadPoolMutex);
     interruptPoolWorkersLocked();
   }
+  // background_cpu's too, once the kernel pools have split (trySubmitKernel).
+  CpuKernelPool *cpuPool = _cpuKernelPoolLive.load(std::memory_order_acquire);
+  if (cpuPool) {
+    boost::mutex::scoped_lock lock(cpuPool->mutex);
+    interruptCpuKernelWorkersLocked(*cpuPool);
+  }
 
   // Phase 2: Attempt to join all threads with a timeout. Not interruptible, as thread_info and
   // thread_feedback keep their books: an interrupt sent to this thread meanwhile stays pending
@@ -155,6 +180,17 @@ void app::wait_for_threads() {
       failed_threads.push_back(str(boost::format("background pool (%d running, %d queued)") %
                                    _activeWorkers % _pendingTasks.size()));
   } catch (...) {
+  }
+  if (cpuPool) {
+    try {
+      boost::mutex::scoped_lock lock(cpuPool->mutex);
+      if (!cpuPool->idle.wait_for(lock, std::chrono::seconds(5), [cpuPool] {
+            return cpuPool->stopping || (cpuPool->running == 0 && cpuPool->queue.empty());
+          }))
+        failed_threads.push_back(str(boost::format("background_cpu pool (%d running, %d queued)") %
+                                     cpuPool->running % cpuPool->queue.size()));
+    } catch (...) {
+    }
   }
 
   // Phase 3: Report any threads that failed to join
@@ -334,6 +370,15 @@ app::~app() {
   // interrupted as well. (Keyed pool tasks have threads of their own in _threads.)
   if (!poolClosed)
     poolWorkers = closeThreadPool();
+  // background_cpu as the background pool (trySubmitKernel): its workers are joined with them.
+  {
+    std::vector<thread_ptr> cpuWorkers = closeCpuKernelPool();
+    try {
+      poolWorkers.insert(poolWorkers.end(), cpuWorkers.begin(), cpuWorkers.end());
+    } catch (...) {
+      joinPoolWorkers(cpuWorkers); // out of memory: joined now instead
+    }
+  }
 
   // Take the map and clear it under the lock, then join without it: a worker
   // winding down takes _threadsMutex itself, so joining while holding it
@@ -1308,6 +1353,18 @@ std::optional<std::string> exec_threads_knob() {
   return e ? std::optional<std::string>(e) : std::nullopt;
 }
 
+// The long-step monitor's line for group 0 (S2a.7, S2-Q11), logged through the app at level 2.
+// The monitor calls it inside a pump, so interruption is held off (log() reaches interruption
+// points), and a throw (a log target that fails) is dropped.
+void log_long_step(cvc::app &app, const std::string &native, double seconds) {
+  boost::this_thread::disable_interruption keep_interrupt_pending;
+  try {
+    app.log(2,
+            str(boost::format("long step: %s took %.1f ms (group 0)") % native % (seconds * 1e3)));
+  } catch (...) {
+  }
+}
+
 // state_exec.threads: CVC_EXEC_THREADS when set, else the tree's.
 std::string exec_threads_text(cvc::state &root) {
   if (const std::optional<std::string> knob = exec_threads_knob())
@@ -1441,6 +1498,11 @@ cvc::state_exec::async_scheduler &app::exec_scheduler() {
       _execScheduler->set_cycle_registry(_execGroup0->registry.get());
       _execScheduler->set_random_stream(&_execGroup0->random);
       _execScheduler->set_pid_source(_execGroup0->pids);
+      // The long-step monitor (S2a.7, S2-Q11) logs through the app. It is off unless the tree
+      // sets state_exec.long_step_ms: group 0 is pumped on its host's thread, not by the pool.
+      _execScheduler->set_long_step_sink([this](const std::string &native, double seconds) {
+        log_long_step(*this, native, seconds);
+      });
       // Wire it to this app's state root so state-watches (state-watch/on_change:)
       // resolve against the app tree. Processes are chrooted per-owner on submit.
       _execScheduler->set_watch_root(&root());
@@ -2407,6 +2469,212 @@ void app::joinPoolWorkers(std::vector<thread_ptr> &workers) {
 void app::stopThreadPool() {
   std::vector<thread_ptr> workers = closeThreadPool();
   joinPoolWorkers(workers);
+}
+
+// ---------------------------------------------------------------------------
+// The kernel pools (trySubmitKernel; docs/STATE_EXEC_THREADED.md 4.9, S2-Q11)
+// ---------------------------------------------------------------------------
+// Until this app's exec pool has workers, every kernel runs on the background pool, as before.
+// Once it has (it is built once, and its workers are fixed), the pools split for good: an io
+// call's kernel stays on the background pool, now background_io, and the rest go to
+// background_cpu, sized to the cores the exec workers leave. background_cpu is a smaller copy of
+// the background pool's anonymous tasks: a queue ordered by priority, FIFO within one, and
+// persistent workers, all started as it is made, before it is published, and kept until ~app. So
+// a task is queued only while it has workers, and every worker is registered (where interrupts
+// go) before it can take one: none of the background pool's gates, creation counts or drops for
+// want of a worker. Its mutex is never held while a task runs or a thread is created, and is
+// released only by the RAII lock that took it; a worker is interruptible only while it runs a
+// task, as the background pool's are (poolWorkerLoop); a task dropped unrun (the pool has
+// stopped) reports it from its destructor, with poolDropReason() kPoolStopped.
+
+app::CpuKernelPool *app::cpuKernelPool() {
+  if (CpuKernelPool *pool = _cpuKernelPoolLive.load(std::memory_order_acquire))
+    return pool;
+  if (_kernelPoolsUnsplit.load(std::memory_order_acquire))
+    return nullptr;
+  const cvc::exec_pool *exec = exec_pool_probe();
+  if (!exec)
+    return nullptr; // no exec pool yet: the background pool, as before
+  const unsigned int workers = exec->threads();
+  if (workers == 0) {
+    _kernelPoolsUnsplit.store(true, std::memory_order_release); // built without workers: for good
+    return nullptr;
+  }
+  // Made with its workers under _cpuKernelPoolMutex, so a racing first kernel waits for them
+  // here. If none can be started, the kernel goes to the background pool as before the split,
+  // and the next one tries again.
+  boost::mutex::scoped_lock made(_cpuKernelPoolMutex);
+  if (CpuKernelPool *pool = _cpuKernelPoolLive.load(std::memory_order_acquire))
+    return pool;
+  if (_kernelPoolsUnsplit.load(std::memory_order_acquire))
+    return nullptr; // closed (~app) meanwhile
+  const unsigned int cores =
+      boost::thread::hardware_concurrency() > 0 ? boost::thread::hardware_concurrency() : 4;
+  const unsigned int size = cores > workers ? cores - workers : 1;
+  std::unique_ptr<CpuKernelPool> pool;
+  try {
+    pool = std::make_unique<CpuKernelPool>();
+    pool->workers.reserve(size); // so a worker, once created, is always recorded
+  } catch (...) {
+    return nullptr; // out of memory: the background pool
+  }
+  for (unsigned int i = 0; i < size; ++i) {
+    try {
+      if (_poolWorkerSpawnHook)
+        _poolWorkerSpawnHook(); // a test making the creation fail (app.h)
+      pool->workers.emplace_back(new boost::thread(&app::cpuKernelWorkerLoop, this, pool.get()));
+    } catch (...) {
+      break; // no more threads (resources): it keeps the workers it has
+    }
+  }
+  if (pool->workers.empty())
+    return nullptr;
+  pool->size = static_cast<unsigned int>(pool->workers.size());
+  _cpuKernelPool = std::move(pool);
+  _cpuKernelPoolLive.store(_cpuKernelPool.get(), std::memory_order_release);
+  return _cpuKernelPool.get();
+}
+
+app::PoolSubmit app::trySubmitKernel(std::function<void()> &task, thread_priority priority,
+                                     bool io) {
+  if (!task)
+    return PoolSubmit::queued;
+  CpuKernelPool *pool = io ? nullptr : cpuKernelPool();
+  if (!pool)
+    return trySubmitPooled(task, priority); // background_io, or the one pool before the split
+  bool queued = false;
+  {
+    boost::mutex::scoped_lock lock(pool->mutex);
+    if (!pool->stopping) {
+      ThreadPoolTask t;
+      t.task.swap(task); // nothing of the callable stays in `task`
+      t.priority = priority;
+      t.seq = pool->seq++;
+      try {
+        pool->queue.push(std::move(t));
+      } catch (...) {
+        t.task.swap(task); // out of memory: the caller destroys it unrun, outside the lock
+        throw;
+      }
+      queued = true;
+    }
+  }
+  if (queued) {
+    pool->wake.notify_one();
+    return PoolSubmit::queued;
+  }
+  // The pool has stopped (~app): destroyed unrun here, as submitPooled does.
+  boost::this_thread::disable_interruption keep_interrupt_pending;
+  PoolDropScope reason(*this, kPoolStopped);
+  task = nullptr;
+  return PoolSubmit::stopped;
+}
+
+void app::cpuKernelWorkerLoop(CpuKernelPool *pool) {
+  detail::apply_process_class_here();
+  // As poolWorkerLoop: only a task may be interrupted (wait_for_threads, ~app), and an interrupt
+  // sent before the worker takes its next task is cleared, under the mutex, before it takes it.
+  boost::this_thread::disable_interruption uninterruptible;
+  const auto clearStaleInterrupt = [&uninterruptible] {
+    boost::this_thread::restore_interruption interruptible(uninterruptible);
+    try {
+      boost::this_thread::interruption_point(); // a request sent before the take: not the task's
+    } catch (boost::thread_interrupted &) {
+    }
+  };
+  boost::unique_lock<boost::mutex> lock(pool->mutex);
+  clearStaleInterrupt();
+  std::uint64_t interruptsSeen = pool->interrupts;
+  for (;;) {
+    while (!pool->stopping && pool->queue.empty())
+      pool->wake.wait(lock);
+    if (pool->stopping)
+      return;
+    if (interruptsSeen != pool->interrupts) {
+      interruptsSeen = pool->interrupts;
+      clearStaleInterrupt();
+    }
+    // Swapped out of the top, as takePoolTaskLocked does: nothing of it stays in the queue.
+    ThreadPoolTask task;
+    task.task.swap(const_cast<ThreadPoolTask &>(pool->queue.top()).task);
+    pool->queue.pop();
+    ++pool->running;
+    lock.unlock();
+    {
+      boost::this_thread::restore_interruption interruptible(uninterruptible);
+      runPoolTask(task);
+    }
+    // Its captures go here, on the worker, before it counts as done.
+    task.task = nullptr;
+    lock.lock();
+    if (--pool->running == 0 && pool->queue.empty())
+      pool->idle.notify_all();
+  }
+}
+
+void app::interruptCpuKernelWorkersLocked(CpuKernelPool &pool) {
+  // pool.mutex is held, so each worker is either before its next take (and clears this as stale,
+  // having seen the new count) or running a task this interrupts.
+  ++pool.interrupts;
+  for (thread_ptr &w : pool.workers) {
+    try {
+      if (w)
+        w->interrupt();
+    } catch (...) {
+    }
+  }
+}
+
+app::kernel_pool app::kernelPoolHere() const {
+  const boost::thread::id self = boost::this_thread::get_id();
+  if (CpuKernelPool *pool = _cpuKernelPoolLive.load(std::memory_order_acquire)) {
+    boost::mutex::scoped_lock lock(pool->mutex);
+    for (const thread_ptr &w : pool->workers)
+      if (w && w->get_id() == self)
+        return kernel_pool::background_cpu;
+  }
+  boost::mutex::scoped_lock lock(const_cast<boost::mutex &>(_threadPoolMutex));
+  for (const thread_ptr &w : _poolWorkers)
+    if (w && w->get_id() == self)
+      return kernel_pool::background;
+  return kernel_pool::none;
+}
+
+unsigned int app::backgroundCpuPoolSize() const {
+  const CpuKernelPool *pool = _cpuKernelPoolLive.load(std::memory_order_acquire);
+  return pool ? pool->size : 0;
+}
+
+std::vector<thread_ptr> app::closeCpuKernelPool() {
+  std::vector<thread_ptr> workers;
+  CpuKernelPool *pool = nullptr;
+  {
+    // After a pool being made is published; none is made from now on.
+    boost::mutex::scoped_lock made(_cpuKernelPoolMutex);
+    _kernelPoolsUnsplit.store(true, std::memory_order_release);
+    pool = _cpuKernelPool.get();
+  }
+  if (!pool)
+    return workers;
+  PoolQueue dropped;
+  {
+    boost::mutex::scoped_lock lock(pool->mutex);
+    pool->stopping = true;
+    // Interrupt the tasks still running (taken before this lock: none is taken after it).
+    interruptCpuKernelWorkersLocked(*pool);
+    workers.swap(pool->workers);
+    dropped.swap(pool->queue); // queued tasks never run
+  }
+  pool->wake.notify_all();
+  pool->idle.notify_all();
+  // The queued tasks go unrun, without the mutex and with interruption held off, as
+  // closeThreadPool drops the background pool's.
+  {
+    boost::this_thread::disable_interruption keep_interrupt_pending;
+    PoolDropScope reason(*this, kPoolStopped);
+    PoolQueue().swap(dropped);
+  }
+  return workers;
 }
 
 // ---------------------------------------------------------------------------

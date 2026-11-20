@@ -32,6 +32,8 @@ to `results/`, which is not committed.
 | `random_runs.py` | long random runs over larger worlds |
 | `run_long.sh` | the long run: all of the above at their full sizes |
 | `export_traces.py` | the manager operations of one-home scenarios and random runs (phases L1 and L2), as traces the C++ model check replays |
+| `state_word.py` | the group state word of the continuous pool (S2a, PL-1): a separate model, below |
+| `test_state_word.py` | its tests: the quick suite, and checks of its explorer |
 
 ## Running it
 
@@ -449,6 +451,293 @@ rest at 2 (at most `wide`'s 26 s); Release runs every one at 3 but `wide` (48-12
 `LocksModelStress` covers. The sanitizer lanes run bound 2. `PortMatchesPythonStateCountsHomes`
 replays its configurations only in an optimized build: copied and replayed, it would take about a
 minute in that Debug lane.
+
+## The state-word model (S2a, PL-1)
+
+`state_word.py` is a second model, separate from the lock model: the group state word of
+threaded execution's continuous pool (S2a;
+[`docs/STATE_EXEC_THREADED.md`](../../docs/STATE_EXEC_THREADED.md) 4.4 and 8.3's PL-1; the plan's
+S2-Q2, S2-Q4, S2-Q5 and S2-Q15), as the S2a interface commit froze it in its comment on
+`detail::group_pool_link` in
+[`exec_group.h`](../../inc/cvc/state/state_exec/exec_group.h): the bits SCHEDULED, NOTIFIED,
+PUMPING and DETACHING, and the pool's `queued`, `host_held` and `deferred` beside them under the
+ready-queue mutex Q. It shares only `Violation` with the lock model, and like `gdestroy` it has no
+C++ port. `test_state_word.py` tests it.
+
+**A step** is one atomic operation: a fetch_or, fetch_and, CAS, load or store of the word; a take
+or release of Q, of the notifier lock NL (`detail::wakeup`'s, held while the notifier runs), of an
+ingress mutex or of the lock port's mutex; a take or release of the token. What only Q's holder
+touches (the ready queue, the pool's record of the group, the timer heap) is folded into the step
+that holds Q. A state is a flat list of small ints, kept as bytes, explored breadth first, so each
+trace is a shortest one. The workers are interchangeable, so a state is kept with its workers
+sorted; and with one group pop is under Q and the group is queued once, so at most one worker is
+past its pop at a time: a third worker adds no state (`deep-three-workers` has the default's
+count).
+
+**The actors** (S2-Q15):
+- posters, alternately an ingress post (the ingress mutex, the entry, then `wakeup::notify`
+  under NL calling wake(g)) and a lock post (the same under the port's mutex, dropped once the
+  port is closed);
+- workers: pop and PUMPING in one step under Q, clear NOTIFIED, take the token, drain and run,
+  release the token, the release under Q. A run's outcome is a choice: runnable work left or
+  not, a sleeper's deadline (none, future, or already due at the release), a failure
+  (`failures`), a waiting host body (`waiting`, run by the attaching thread under the blocked
+  worker's token);
+- the timer: a filed deadline firing under Q as wake(g), at any time, so stale fires are
+  explored;
+- hosts: with_group on other threads. Its fn does nothing, posts, or submits directly under the
+  token, as `exec_group::execute` does (a ready process, no post). A host may race a detach at
+  any point, but not a teardown: a host program does not use a group it is destroying, so only a
+  with_group that set host_held before the teardown began is the teardown's to wait for;
+- the attaching thread: attach's wake, its host bodies (`bodies`, as a host), the servicing of
+  waiting bodies, take_failed, and last the teardown or the detach, S2-Q4's five steps.
+
+**The properties** (PL-1), each a violation name. In every state: `double-queue`,
+`queued-while-pumped`, `queued-unscheduled`, `two-pumpers`, `pump-host-held`, `token-contended`
+(a take finds another thread's token) and `body-without-token`. After the detach:
+`wake-after-detach`, `read-after-detach` (a worker or the timer), `record-after-detach` (anyone,
+once the attachment is dropped) and `use-after-free`. When every actor is idle (between posts, at
+the top of its loop, not started or done, between operations), for an attached group not
+detaching: `lost-wake` (a post not drained, or runnable work left, and the group not queued),
+`lost-timer` and `stuck-scheduled` (SCHEDULED set, the group in no queue, so every later wake is a
+no-op). No step enabled while an actor is not idle is a `deadlock`.
+
+**Running it.**
+
+    python -I state_word.py --actors posters=2,workers=2,hosts=1,bodies=1,teardown=1 --amend all
+    python -I state_word.py --suite quick     # the CI checks, about 12 s
+    python -I state_word.py --suite deep      # quick, then the larger bounds (locks-deep.yml)
+    python -I test_state_word.py              # unittest: the quick suite, and the explorer's checks
+
+The first prints JSON like `explore.py`'s: `states`, `transitions`, `idle_states`, `seconds`,
+`complete` and `violations`, each with its detail, its length in steps and its trace. `--actors`
+counts posters, workers, hosts and bodies and ends the attaching thread with `teardown=1` (the
+default) or `detach=1`; `--opts` sets `posts` (per poster), `timer`, `sleeps` (sleepers the runs
+may arm), `waiting`, `failures`, `pre` (posts before attach) and `nested` (a body that detaches
+inside its fn); `--amend` takes `all` (the default: the transitions as amended in `exec_group.h`), `none` (as S2a.0
+first froze them) or names;
+`--mutation` a name. `--suite` exits 0 only when every check holds: the amended transitions find
+nothing, each finding is found without its amendment, and each mutation is caught.
+
+### What it finds in the frozen transitions
+
+Posters, workers, the timer and the teardown alone satisfy every property at every bound tried.
+The host side does not. Each finding has an amendment (`--amend`); with all four nothing is found.
+The `finding-*` checks of the quick suite run every amendment but one and must find its violation.
+
+1. **`host-wake`, a lost wake.** with_group's release re-queues the group only "if deferred". A
+   with_group or host body that submits under the token (with_group's purpose: "submit, read,
+   kill, reap"), or a deferred `on_complete` that submits a follow-up, makes an idle group
+   runnable and posts nothing, so nothing ever pumps it. The amendment: when no pop was deferred,
+   the release does wake's transition under Q (fetch_or(S|N), and queue unless SCHEDULED or
+   DETACHING was set).
+2. **`host-excl`.** Hosts wait only for PUMPING, and host_held is one flag: a with_group on
+   another thread and the attaching thread's body take the token side by side
+   (`token-contended`), and in a teardown one's release clears the other's flag, step 2 passes,
+   and the group is destroyed under a with_group (`use-after-free`, 33 steps). The amendment:
+   host_held names its thread, and a host also waits while another thread holds it.
+3. **`host-detaching`.** A with_group racing a detach sets host_held without looking at
+   DETACHING, after step 2 looked: the token is contended at step 3, and the host's release
+   writes the pool's record after step 4 dropped it (`record-after-detach`). The amendment: a
+   host that finds DETACHING set, or the group no longer attached, under Q sets nothing and takes
+   the token as for an unattached group once the detach is over.
+4. **`nested-release`** (`--opts nested=1`). Step 2 waits for "a host_held of another thread",
+   which admits a detach inside the same thread's with_group; with_group's release then writes
+   the dropped record (25 steps). The amendment: the release reads the attachment first (or a
+   detach inside with_group is refused).
+
+With every amendment, the host transition reads as follows in the words of `exec_group.h` (the
+model runs this; with the fourth finding's other choice its last sentence becomes "Never a
+detach or a teardown of g inside fn (asserted)", and step 2 then waits for any host_held). Step 4
+should also say that the word is stored 0 only after the notifier is cleared (the mutation
+`zero-before-clear` below):
+
+    - with_group, or a non-waiting host body, on a host thread: under Q (each time it looks):
+      if detaching is set or g is no longer attached, set nothing and take the token as for an
+      unattached group once the detach is over (at once on the attaching thread); else wait
+      while pumping is set or another thread holds host_held (servicing that thread's host
+      queue meanwhile), then set host_held to this thread; take the token, run, release it;
+      under Q clear host_held, and if deferred, clear it and queue g again, else as wake(g) (fn
+      may have submitted, killed or resumed under the token, which posts nothing). If fn
+      detached g, the release leaves the pool's record alone.
+
+The shortest traces of the first three (`hh` host_held, `tok` the token, `fl` posts not drained,
+`ready` runnable work left; `python -I state_word.py` with the options shown prints them):
+
+`finding-host-wake`, `lost-wake` (23 steps):
+
+    python -I state_word.py --actors posters=0,workers=1,bodies=0,teardown=0 --opts timer=0 \
+        --amend host-excl,host-detaching,nested-release
+
+    initial: word 0, nothing queued or held
+    H1: with_group: the group is attached                          0
+    A: attach: installs the notifier; wakes g: fetch_or(S|N) finds 0 S|N
+    A: takes Q                                                     S|N
+    A: queues g                                                    S|N queued
+    A: releases Q                                                  S|N queued
+    W1: takes Q, pops g, fetch_or(P)                               S|N|P
+    W1: releases Q                                                 S|N|P
+    W1: fetch_and(~N)                                              S|P
+    W1: takes the token                                            S|P tok=W1
+    W1: run: ends with runnable=False, next_deadline=none          S|P tok=W1
+    W1: releases the token                                         S|P
+    W1: takes Q                                                    S|P
+    W1: release: fetch_and(~P)                                     S
+    W1: release: CAS(S -> 0) succeeds                              0
+    W1: releases Q                                                 0
+    H1: takes Q (PUMPING clear), sets host_held                    0 hh=H1
+    H1: releases Q                                                 0 hh=H1
+    H1: takes the token                                            0 hh=H1 tok=H1
+    H1: runs fn: submits a process directly (exec_group::execute: no post) 0 hh=H1 tok=H1 ready
+    H1: releases the token                                         0 hh=H1 ready
+    H1: takes Q                                                    0 hh=H1 ready
+    H1: clears host_held (not deferred)                            0 ready
+    H1: releases Q                                                 0 ready
+    every actor is idle or done -> VIOLATION lost-wake: runnable work left and the group is not queued (word 0)
+
+`finding-host-excl`, `token-contended` (12 steps):
+
+    python -I state_word.py --actors posters=0,workers=1,teardown=0 --opts timer=0 --amend \
+        host-wake,host-detaching,nested-release
+
+    initial: word 0, nothing queued or held
+    H1: with_group: the group is attached                          0
+    H1: takes Q (PUMPING clear), sets host_held                    0 hh=H1
+    H1: releases Q                                                 0 hh=H1
+    H1: takes the token                                            0 hh=H1 tok=H1
+    A: attach: installs the notifier; wakes g: fetch_or(S|N) finds 0 S|N hh=H1 tok=H1
+    A: takes Q                                                     S|N hh=H1 tok=H1
+    A: queues g                                                    S|N queued hh=H1 tok=H1
+    A: releases Q                                                  S|N queued hh=H1 tok=H1
+    A: starts a host body                                          S|N queued hh=H1 tok=H1
+    A: takes Q (PUMPING clear), sets host_held                     S|N queued hh=A tok=H1
+    A: releases Q                                                  S|N queued hh=A tok=H1
+    A: takes the token  -> VIOLATION token-contended: A takes the token while H1 holds it
+
+`finding-host-detaching`, `token-contended` (15 steps):
+
+    python -I state_word.py --actors posters=0,workers=1,bodies=0,teardown=0,detach=1 --opts \
+        timer=0 --amend host-wake,host-excl,nested-release
+
+    initial: word 0, nothing queued or held
+    H1: with_group: the group is attached                          0
+    A: attach: installs the notifier; wakes g: fetch_or(S|N) finds 0 S|N
+    A: takes Q                                                     S|N
+    A: queues g                                                    S|N queued
+    A: releases Q                                                  S|N queued
+    A: starts the detach                                           S|N queued
+    A: detach step 1: takes Q                                      S|N queued
+    A: fetch_or(D)                                                 S|N|D queued
+    A: releases Q                                                  S|N|D queued
+    A: step 2: takes Q: PUMPING clear, no host_held of another thread S|N|D queued
+    A: releases Q                                                  S|N|D queued
+    H1: takes Q (PUMPING clear), sets host_held                    S|N|D queued hh=H1
+    H1: releases Q                                                 S|N|D queued hh=H1
+    A: step 3: takes the token                                     S|N|D queued hh=H1 tok=A
+    H1: takes the token  -> VIOLATION token-contended: H1 takes the token while A holds it
+
+### The mutations
+
+Each breaks one transition of the amended protocol and must be caught (`mutation-*`):
+- `release-store`: the release clears SCHEDULED by a load and a plain store
+  instead of the CAS. A post lands between them: its wake finds SCHEDULED and leaves NOTIFIED,
+  which the store wipes, so its entry is never drained (`lost-wake`, below).
+- `pump-host-held`: pop pumps a host-held group; the worker holds the token
+  with host_held set (`pump-host-held`, below), or finds the host's token (`token-contended`).
+- `zero-before-clear`: the detach stores 0 before clearing the notifier. A wake in progress finds
+  DETACHING clear under Q and queues the detached group (`queued-unscheduled`, then a worker's
+  `read-after-detach` and `use-after-free`): the word goes to 0 only after the notifier is
+  cleared.
+- `wake-no-recheck`: wake queues without looking at DETACHING again under Q; a wake whose fetch_or
+  preceded step 1 queues the group after step 4 left the queue (`read-after-detach`).
+- `pop-no-detaching`: pop pumps a detaching group after step 2 passed (`read-after-detach`,
+  `token-contended`).
+
+`mutation-release-store`, `lost-wake` (19 steps):
+
+    python -I state_word.py --actors posters=1,workers=1,hosts=0,bodies=0,teardown=0 --amend \
+        all --mutation release-store
+
+    initial: word 0, nothing queued or held
+    A: attach: installs the notifier; wakes g: fetch_or(S|N) finds 0 S|N
+    A: takes Q                                                     S|N
+    A: queues g                                                    S|N queued
+    A: releases Q                                                  S|N queued
+    W1: takes Q, pops g, fetch_or(P)                               S|N|P
+    W1: releases Q                                                 S|N|P
+    W1: fetch_and(~N)                                              S|P
+    W1: takes the token                                            S|P tok=W1
+    W1: run: ends with runnable=False, next_deadline=none          S|P tok=W1
+    P1: takes IM, pushes an ingress entry                          S|P tok=W1 fl=1
+    P1: takes NL: calls the notifier, wake(g)                      S|P tok=W1 fl=1
+    W1: releases the token                                         S|P fl=1
+    W1: takes Q                                                    S|P fl=1
+    W1: release: fetch_and(~P)                                     S fl=1
+    W1: release (mutated): loads S                                 S fl=1
+    P1: wake: fetch_or(S|N) finds S: done                          S|N fl=1
+    P1: releases NL, IM                                            S|N fl=1
+    W1: release (mutated): stores 0                                0 fl=1
+    W1: releases Q                                                 0 fl=1
+    every actor is idle or done -> VIOLATION lost-wake: a post not drained and the group is not queued (word 0)
+
+`mutation-pump-host-held`, `pump-host-held` (11 steps):
+
+    python -I state_word.py --actors posters=1,workers=1,bodies=0,teardown=0 --amend all \
+        --mutation pump-host-held
+
+    initial: word 0, nothing queued or held
+    H1: with_group: the group is attached                          0
+    H1: takes Q (PUMPING clear), sets host_held                    0 hh=H1
+    H1: releases Q                                                 0 hh=H1
+    A: attach: installs the notifier; wakes g: fetch_or(S|N) finds 0 S|N hh=H1
+    A: takes Q                                                     S|N hh=H1
+    A: queues g                                                    S|N queued hh=H1
+    A: releases Q                                                  S|N queued hh=H1
+    W1: takes Q, pops g, fetch_or(P)                               S|N|P hh=H1
+    W1: releases Q                                                 S|N|P hh=H1
+    W1: fetch_and(~N)                                              S|P hh=H1
+    W1: takes the token  -> VIOLATION pump-host-held: W1 holds the token while H1 holds host_held
+
+### State counts and times
+
+Measured on 2026-11-20 on the Windows builder (Python 3.11, one process, other builds beside it):
+the states (one per orbit of the workers), the transitions and the seconds of each check.
+
+| Check | Configuration (beside the defaults) | States | Transitions | Seconds | Found |
+|---|---|---|---|---|---|
+| `amended` | amend all | 233,380 | 734,152 | 7.6 | - |
+| `amended-detach` | posters=1, hosts=2, bodies=0, detach, failures=1, amend all | 134,428 | 377,312 | 4.0 | - |
+| `amended-waiting` | posters=1, hosts=0, waiting=1, failures=1, amend all | 13,286 | 28,927 | 0.3 | - |
+| `amended-nested` | posters=1, workers=1, hosts=0, detach, timer=0, nested=1, amend all | 5,563 | 10,801 | 0.1 | - |
+| `finding-host-wake` | posters=0, workers=1, bodies=0, no teardown, timer=0, amend all but host-wake | 409 | 643 | 0.0 | lost-wake |
+| `finding-host-excl` | posters=0, workers=1, no teardown, timer=0, amend all but host-excl | 5,500 | 11,044 | 0.1 | token-contended |
+| `finding-host-excl-teardown` | posters=0, workers=1, timer=0, amend all but host-excl | 13,992 | 30,397 | 0.2 | record-after-detach, token-contended, use-after-free |
+| `finding-host-detaching` | posters=0, workers=1, bodies=0, detach, timer=0, amend all but host-detaching | 1,904 | 3,351 | 0.0 | record-after-detach, token-contended |
+| `finding-nested` | posters=1, workers=1, hosts=0, detach, timer=0, nested=1, amend all but nested-release | 5,503 | 10,743 | 0.1 | record-after-detach |
+| `mutation-release-store` | posters=1, workers=1, hosts=0, bodies=0, no teardown, amend all, mutation release-store | 395 | 652 | 0.0 | lost-wake |
+| `mutation-pump-host-held` | posters=1, workers=1, bodies=0, no teardown, amend all, mutation pump-host-held | 6,398 | 15,668 | 0.1 | pump-host-held, token-contended |
+| `mutation-zero-before-clear` | posters=1, workers=1, hosts=0, bodies=0, amend all, mutation zero-before-clear | 1,604 | 3,077 | 0.0 | queued-unscheduled, read-after-detach, use-after-free |
+| `mutation-wake-no-recheck` | posters=1, workers=1, hosts=0, bodies=0, amend all, mutation wake-no-recheck | 1,632 | 3,112 | 0.0 | read-after-detach, use-after-free |
+| `mutation-pop-no-detaching` | posters=1, workers=1, hosts=0, bodies=0, amend all, mutation pop-no-detaching | 2,350 | 4,592 | 0.0 | read-after-detach, token-contended, use-after-free |
+| `deep-frozen` | amend none | 548,193 | 1,813,537 | 20.3 | lost-wake, record-after-detach, token-contended, use-after-free |
+| `deep-finding-host-wake` | amend all but host-wake | 230,813 | 726,219 | 8.1 | lost-wake |
+| `deep-finding-host-excl` | amend all but host-excl | 577,188 | 1,906,407 | 20.4 | record-after-detach, token-contended, use-after-free |
+| `deep-finding-host-detaching` | detach, amend all but host-detaching | 272,282 | 849,696 | 8.3 | record-after-detach, token-contended |
+| `deep-finding-nested` | detach, nested=1, amend all but nested-release | 282,471 | 864,970 | 8.7 | record-after-detach |
+| `deep-nested` | detach, nested=1, amend all | 285,621 | 872,592 | 8.0 | - |
+| `deep-failures-waiting` | failures=1, waiting=1, amend all | 514,469 | 1,595,091 | 15.7 | - |
+| `deep-three-workers` | workers=3, amend all | 233,380 | 759,134 | 8.8 | - |
+| `deep-two-posts` | posts=2, pre=1, amend all | 1,615,947 | 5,727,147 | 59.0 | - |
+| `deep-detach` | hosts=2, detach, failures=1, amend all | 1,574,918 | 5,420,419 | 53.8 | - |
+| `deep-two-hosts` | hosts=2, failures=1, waiting=1, amend all | 2,566,739 | 8,949,393 | 94.0 | - |
+| `deep-three-posters` | posters=3, hosts=2, failures=1, amend all | 5,304,545 | 19,838,565 | 177.3 | - |
+
+`--suite deep` runs the quick checks, then the deep ones: about 8 minutes in all here, the quick
+ones 12 s; its largest check peaks at a working set of 1.3 GB (5.3 million states). The defaults
+(`posters=2,workers=2,hosts=1,bodies=1,teardown=1`, the timer, one sleeper) are the `amended`
+check; posters, posts and hosts multiply the states, workers do not. Two larger amended runs,
+outside the suites, found nothing either: `--actors posters=3 --opts posts=2` (8,554,393 states,
+389 s) and `--actors hosts=2,bodies=2 --opts posts=2` (9,135,178 states, 390 s).
 
 ## Revisions
 

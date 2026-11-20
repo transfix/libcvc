@@ -68,10 +68,11 @@ struct group_pool_link {
   static constexpr std::uint32_t notified = 2u;  ///< work arrived since the pump began
   static constexpr std::uint32_t pumping = 4u;   ///< a worker (or its attaching thread) pumps it
   static constexpr std::uint32_t detaching = 8u; ///< its detach or teardown has begun
-  /// The transitions (S2a.0 freezes them; the pool keeps three more facts per group under its
-  /// ready-queue mutex Q, outside the word: `queued` (in a ready queue, a worker's next slot or
-  /// its attaching thread's ready list), `host_held` (a host thread holds the token, by
-  /// with_group or for a host body) and `deferred` (popped while host_held)):
+  /// The transitions (S2a.0 froze them, amended from PL-1's model, tools/locks_model's
+  /// state_word.py; the pool keeps three more facts per group under its ready-queue mutex Q,
+  /// outside the word: `queued` (in a ready queue, a worker's next slot or its attaching thread's
+  /// ready list), `host_held` (the host thread holding the token, by with_group or for a host
+  /// body, or none) and `deferred` (popped while host_held)):
   /// - wake(g), the notifier, any thread: old = fetch_or(scheduled | notified). If old has
   ///   scheduled or detaching, done. Else, under Q: unless detaching is set now, queue g (the
   ///   ready queue, the waking worker's next slot, or its attaching thread's ready list when g is
@@ -86,11 +87,17 @@ struct group_pool_link {
   ///   CAS the word from exactly `scheduled` to 0, and only if that succeeds file next_deadline
   ///   (if any) in the pool's timer heap; if it fails (a post set notified), queue g again.
   /// - a due timer, under Q: unless g is detaching or no longer attached, as wake(g).
-  /// - with_group, or a non-waiting host body, on a host thread: under Q, wait while pumping is
-  ///   set (servicing that thread's host queue meanwhile), then set host_held; take the token,
-  ///   run, release it; under Q clear host_held, and if deferred, clear it and queue g again. A
-  ///   waiting body (run_on_host_waiting) runs under its blocked worker's token instead, taking
-  ///   nothing (the worker holds pumping and the token).
+  /// - with_group, or a non-waiting host body, on a host thread: under Q (each time it looks):
+  ///   if detaching is set or g is no longer attached, set nothing and take the token as for an
+  ///   unattached group once the detach is over (at once on the detaching thread); else wait
+  ///   while pumping is set or another thread holds host_held (servicing this thread's host queue
+  ///   meanwhile), then set host_held to this thread; take the token, run, release it; under Q
+  ///   clear host_held, and if deferred, clear it and queue g again, else as wake(g) (what ran may
+  ///   have submitted, killed or resumed under the token, which posts nothing). If what ran
+  ///   detached g, the release leaves the pool's record alone. A teardown of g inside it, on the
+  ///   thread holding host_held, aborts in every build (as one inside g's own pump). A waiting
+  ///   body (run_on_host_waiting) runs under its blocked worker's token instead, taking nothing
+  ///   (the worker holds pumping and the token).
   /// - failure (a C++ exception escaped the pump): the pumping thread kills the group's
   ///   processes with "internal error" holding the token; under Q it clears pumping, sets
   ///   detaching and lists g on its attaching thread's failed list; that thread finishes the
@@ -99,9 +106,10 @@ struct group_pool_link {
   ///   host_held of another thread) to clear, servicing the calling thread's host queue; (3) take
   ///   the token, and the teardown closes the lock port; (4) under Q leave the ready queue, the
   ///   next slots, the ready list, the failed list and the timer heap; then, outside Q, clear the
-  ///   notifier (which waits for a wake in progress) and drop the attachment; the word goes to 0;
-  ///   (5) the teardown kills, shuts the host down, purges and reaps; detach runs the group's
-  ///   host-queue entries instead and releases the token.
+  ///   notifier (which waits for a wake in progress), and only then drop the attachment and store
+  ///   0 in the word (a wake between would queue a detached group); (5) the teardown kills, shuts
+  ///   the host down, purges and reaps; detach runs the group's host-queue entries instead and
+  ///   releases the token.
   std::atomic<std::uint32_t> state{0};
   /// The pool's record of the group while it is attached (exec_pool.cpp's), else null: set by
   /// attach, cleared by detach (step 4). A group attached is in no pump_all (refused there).

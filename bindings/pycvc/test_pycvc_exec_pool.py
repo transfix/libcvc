@@ -312,6 +312,57 @@ def test_po01_raw_call_while_another_thread_pumps():
     assert spins > 100, spins
 
 
+# --- Stage 2a continuous pool (td 8.3, 8.11) ---
+
+
+def _stat(stats, name):
+    """A counter of ExecPool.stats(): a dict's entry, or an attribute."""
+    return stats[name] if isinstance(stats, dict) else getattr(stats, name)
+
+
+def test_ra01_a_post_ends_the_batch_wait():
+    # RA-1 (S2.md section 4; S2-Q6): run_all with every pooled group parked on msg-recv, each
+    # pooled Exec's program receiving a Python async function's future, whose kernel waits for an
+    # event. Once both programs have parked and the batch has waited a while, a Python thread sets
+    # the event: the kernels' completions are posts to the pooled groups, which end the batch wait
+    # at once (its notifier, not a timeout). ExecPool.stats()'s batch_wait_timeouts (batch waits
+    # that timed out with work posted meanwhile) stays 0, and the batch did wait (batch_waits).
+    # The time from the post to run_all's return is printed.
+    app = pycvc.make_app()
+    pool = pycvc.ExecPool(app, threads=2, size=2, prefix="ra01pool", idle_timeout=60.0)
+    gate = threading.Event()
+    parked = threading.Semaphore(0)
+    box = {}
+
+    def opener():
+        for _ in range(2):
+            assert parked.acquire(timeout=WAIT), "a program never reached its msg-recv"
+        time.sleep(0.05)  # the batch waits meanwhile
+        box["t"] = time.monotonic()
+        gate.set()
+
+    try:
+        pool.register_async_fn("ra01gate", lambda: gate.wait(6 * WAIT) and 7)
+        pool.register_fn("ra01parked", lambda: parked.release() or True)
+        t, out = _in_thread("ra01-open", opener)
+        try:
+            res = pool.run_all(["(begin (ra01parked) (msg-recv (ra01gate-async)))"] * 2)
+            ended = time.monotonic()
+        finally:
+            gate.set()
+            _join(t)
+        assert "error" not in out, out
+        print(f"  run_all returned {ended - box['t']:.4f} s after the post")
+        assert res == ["7", "7"], res
+        stats = pool.stats()
+        print(f"  ExecPool.stats(): {stats}")
+        assert _stat(stats, "batch_waits") >= 1, stats
+        assert _stat(stats, "batch_wait_timeouts") == 0, stats
+    finally:
+        gate.set()
+        pool.close()
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:
