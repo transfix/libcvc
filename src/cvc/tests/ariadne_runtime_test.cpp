@@ -4674,6 +4674,11 @@ std::string spinner_line(const MockBackend &mb, const std::string &label) {
 TEST(AriadneAction, NavStepAsAnAsyncFunctionReturnsItsResult) {
   namespace se = cvc::state_exec;
   cvc::app app;
+  // An await is charged its call's time (docs/STATE_EXEC_EXCEPTIONS.md 3.8): no cap to run out on
+  // a loaded machine. On a loaded Debug runner the kernel can run past the defaults (0.1 s, 5000
+  // steps): the caps kill the action, and nav.result is never set.
+  cvc::state::instance(app)("ariadne.limits.action_max_steps").value(std::string("0"));
+  cvc::state::instance(app)("ariadne.limits.action_max_time").value(std::string("0"));
   app.computePool();
   app.exec_scheduler();
   app.exec_async_host(); // warm them on THIS thread
@@ -4701,9 +4706,14 @@ TEST(AriadneAction, NavStepAsAnAsyncFunctionReturnsItsResult) {
   rt.render();
   rt.drain();
   mb.button_click = false;
-  const bool resumed =
-      pump_until(rt, [&] { return !cvc::state::instance(app)("nav.result").value().empty(); });
-  ASSERT_TRUE(resumed) << "the parked action never resumed";
+  const bool resumed = pump_until(
+      rt, [&] { return !cvc::state::instance(app)("nav.result").value().empty(); }, 30000);
+  if (!resumed) {
+    std::string why;
+    for (const std::string &w : rt.take_reactive_warnings())
+      why += "\n  " + w;
+    FAIL() << "the parked action never set nav.result" << (why.empty() ? " (no warning)" : why);
+  }
   EXPECT_EQ(cvc::state::instance(app)("nav.result").value(), "86");
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
 }
