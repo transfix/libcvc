@@ -553,6 +553,85 @@ cursor: x=2500
 The core parses a series only when its text changes, so a chart costs a string compare a frame
 while its data is still.
 
+A `heatmap:` widget draws a grid of cells: each one's value as a colour from a ramp, with an
+optional text, corner mark and tooltip. Hovering and clicking report the cell. Use it for a
+confusion matrix, an adjacency or quality matrix, or a schedule grid. A document can check for it
+with `(has? "heatmap")`. The cells come from a subtree at `bind`:
+
+```yaml
+- heatmap: Link quality
+  bind: links                  # the subtree (below)
+  ramp: [[0, "#c0392b"], [12.5, "#e6a23c"], [25, "#27ae60"]]
+  cell_size: 28                # px, each cell's side (the default)
+  gap: 2                       # px between cells (the default)
+  labels: {rows: true, cols: true}   # draw the subtree's labels (the default); `labels: false`
+  legend: bottom               # none (the default) | bottom | right
+  mark_color: "#ffffff"        # a marked cell's corner triangle (the default)
+  tooltip: "{row_label} to {col_label}: {v}"   # else each cell's tip
+  on_click: (state-set "view.pair" (get-attr event "row"))
+  pick: sel                    # a click writes sel.row, sel.col, then sel = "row,col"
+  on: (state-set "view.open" "1")              # after the pick's writes
+```
+
+- **The subtree** holds `rows` and `cols`, and `cells.<r>.<c>` with `v` (the value), `text` (drawn
+  on the cell), `mark` (truthy: a small triangle in the cell's top-right corner) and `tip`. A cell
+  with no children is its value alone (`cells.0.1: 12.5`). A cell with no value (empty, `nan`, or
+  absent: a matrix's diagonal) is drawn empty, in the frame colour. `row_labels` and `col_labels`
+  are optional: children `row_labels.<i>`, or comma-separated text (`a,b,c`). A side past 256
+  cells draws its first 256 and warns.
+- **`ramp:`** is a list of `[value, colour]` stops, sorted by value, each colour `"#rrggbb"`,
+  `"#rgb"` or `[r, g, b]` (0 to 1). Between two stops the colour is mixed in proportion. Below the
+  first and above the last it is that end stop's colour (clamped). With no ramp every value is one
+  grey. The core colours the cells, so every backend shows the same colours.
+- **The tooltip** for the hovered cell is the document's `tooltip:` with the cell's tokens filled
+  in: `{row}`, `{col}`, `{v}` (six significant digits; empty with no value), `{text}`,
+  `{row_label}`, `{col_label}` and `{mark}` (1 or 0). One that is an expression after that is
+  computed on the read lane (`(state-get "links.detail.{row}.{col}")`). With no `tooltip:` it is
+  the cell's `tip`, and a cell with neither has none.
+- **`on_click:` and `on_hover:`** run per cell: a click on a cell, or each frame the pointer is
+  over one. Their program gets the cell as `event`: `row` and `col` (numbers), `v` (a number, or
+  nil with no value), `text`, `row_label`, `col_label` and `mark` (1 or 0), as
+  `(get-attr event "row")`. A gap between cells is no cell. `on_hover_end:` is the widget's, with no
+  `event`.
+- **`pick:`** writes a clicked cell to `<pick>.row` and `<pick>.col`, then `"row,col"` to `<pick>`
+  itself, so one key's watcher sees both. Then `on:` runs, with the cell as `event`. The cell
+  `<pick>` names is outlined. Without `pick:`, `on:` never runs (the loader warns): use `on_click:`.
+- **It reads the subtree only when something in it was written.** A write at or under `bind`, or
+  to one of its ancestors' own values, moves the read lane's write generation for it. Until one
+  does, a frame reads nothing but the pick's two keys. A subtree reached through a `link:` hole is
+  read every frame, because a write to the link's target is signalled under the target's path.
+  `HeatmapSpec::revision` moves with each read, so a backend can keep what it derives from the
+  cells until then.
+- **ImGui** draws the column labels centred above their columns (cut to a cell's width), the row
+  labels right-aligned at the left, the cells and their text (black or white, whichever reads on
+  the cell), the marks, an outline round the picked cell and a fainter one round the hovered cell,
+  and the legend: the ramp as a bar with its stops' values, under the grid (as wide as it, at
+  least 120 px) or at its right (as tall as it, the high values up). The whole widget is one item,
+  so the tooltip attaches to it.
+- **A terminal** (FTXUI, tvision) draws each cell as columns on the ramp's colour, as wide as the
+  widest text (2 to 8), one column apart when `gap` > 0, and one row tall. A mark ends the cell in
+  `◥` (`*` without block glyphs) in the mark's colour, a cell with no value is a dim `·`, and the
+  picked cell's text is bold and underlined. The legend is a bar of colour under the grid with the
+  stops' values below it (a terminal has no room beside it, so `right` draws there too). The
+  pointer's cell is the hovered one, with its tooltip on the tooltip line. With a `pick:` or an
+  `on_click:`, the heatmap takes focus (Tab, a click). The arrows move a cursor cell, drawn
+  inverted, which is then the hovered one, and Enter or Space clicks it. Without its colours (the
+  cells and the bar are coloured spaces, the bar drawn here as `█`), the test's 2 x 2 heatmap
+  with a ramp from 0 to 20, a marked "ok" cell and a cell with no value is:
+
+```text
+Links
+   x   y
+a     ok◥
+b      ·
+  ████████████████
+  0      10     20
+```
+
+- **Any other backend** prints the label, a line of column labels, then a line for each row: its
+  label and each cell's text (else its value), `*` after a marked one and `.` for no value. With a
+  legend, a last line lists the stops (`legend: 0 #c0392b, 12.5 #e6a23c, 25 #27ae60`).
+
 A `spinner:` widget says something is under way when there is no amount to show (a request, a
 search). The host turns it by its own frame clock (`Runtime::frame_clock`), not by state, so it keeps
 moving while the document's programs are parked: a program waiting on `http-get` still has a
