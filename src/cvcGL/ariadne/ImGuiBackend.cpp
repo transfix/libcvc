@@ -1353,6 +1353,22 @@ void ImGuiBackend::text_value_colored(const char *label, const std::string &valu
   std::string line = (label && *label) ? (std::string(label) + ": " + value) : value;
   ui::TextLineColored(line.c_str(), rgb[0], rgb[1], rgb[2]);
 }
+void ImGuiBackend::begin_text_color(const float rgb[3]) {
+#ifdef CVC_ENABLE_IMGUI
+  ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(rgb[0], rgb[1], rgb[2], 1.0f));
+  ++m_textColorPushes;
+#else
+  (void)rgb;
+#endif
+}
+void ImGuiBackend::end_text_color() {
+#ifdef CVC_ENABLE_IMGUI
+  if (m_textColorPushes > 0) {
+    ImGui::PopStyleColor();
+    --m_textColorPushes;
+  }
+#endif
+}
 bool ImGuiBackend::text_runs(const std::vector<cvc::ariadne::TextRun> &runs, const float *rgb) {
 #ifdef CVC_ENABLE_IMGUI
   // Each run right after the last (SameLine with no spacing), a picture as tall as a line of text
@@ -1890,6 +1906,18 @@ ariadne::IndexEdit ImGuiBackend::combo(const char *label, int current_index,
 // option names.
 ariadne::IndexEdit ImGuiBackend::radio(const char *label, int current_index,
                                        const std::vector<std::string> &options, bool row) {
+  return radio_options(label, current_index, options, row, nullptr);
+}
+
+ariadne::IndexEdit ImGuiBackend::radio_colored(const char *label, int current_index,
+                                               const std::vector<std::string> &options, bool row,
+                                               const std::vector<ariadne::ItemColor> &colors) {
+  return radio_options(label, current_index, options, row, &colors);
+}
+
+ariadne::IndexEdit ImGuiBackend::radio_options(const char *label, int current_index,
+                                               const std::vector<std::string> &options, bool row,
+                                               const std::vector<ariadne::ItemColor> *colors) {
   ariadne::IndexEdit e;
   e.index = current_index;
   if (options.empty())
@@ -1904,17 +1932,28 @@ ariadne::IndexEdit ImGuiBackend::radio(const char *label, int current_index,
     if (row && (i > 0 || !caption.empty()))
       ImGui::SameLine();
     ImGui::PushID(static_cast<int>(i));
+    // §5.26 the option's colour: its label, and the dot that marks it picked.
+    const ariadne::ItemColor *c =
+        colors && i < colors->size() && (*colors)[i].set ? &(*colors)[i] : nullptr;
+    if (c) {
+      const ImVec4 col(c->rgb[0], c->rgb[1], c->rgb[2], 1.0f);
+      ImGui::PushStyleColor(ImGuiCol_Text, col);
+      ImGui::PushStyleColor(ImGuiCol_CheckMark, col);
+    }
     if (ImGui::RadioButton(options[i].c_str(), static_cast<int>(i) == current_index)) {
       e.index = static_cast<int>(i); // discrete: commit on pick
       e.changed = true;
       e.committed = true;
     }
+    if (c)
+      ImGui::PopStyleColor(2);
     ImGui::PopID();
   }
   ImGui::PopID();
 #else
   (void)label;
   (void)row;
+  (void)colors;
 #endif
   return e;
 }
@@ -2438,6 +2477,9 @@ struct ImGuiBackend::BackdropFrame {
   ImDrawListSplitter split;
   ImVec2 start;
   float avail_w = 0.0f, avail_h = 0.0f;
+  bool cell_filled = false; // §5.26 the fill is the table cell's own background
+  bool flow_cell = false;   // a cell of a row laid out side by side: its fill is its own width
+  bool text_pushed = false; // the text colour that reads on the fill, pushed for the content
 };
 struct ImGuiBackend::ItemGroupFrame {
   std::string id;
@@ -2664,6 +2706,23 @@ void ImGuiBackend::begin_backdrop(const cvc::ariadne::Backdrop &bd) {
   const ImVec2 avail = ImGui::GetContentRegionAvail();
   f->avail_w = avail.x;
   f->avail_h = avail.y;
+  // §5.26 a fill in a table's cell is the cell's background, the whole cell.
+  if (bd.has_fill && bd.cell && !m_grids.empty() && !m_grids.back().split && !m_grids.back().flow) {
+    ImGui::TableSetBgColor(ImGuiTableBgTarget_CellBg,
+                           ImGui::GetColorU32(ImVec4(bd.fill[0], bd.fill[1], bd.fill[2],
+                                                     std::clamp(bd.opacity, 0.0f, 1.0f))));
+    f->cell_filled = true;
+  }
+  f->flow_cell = bd.cell && in_flow_row();
+  // On a fill alone, the content's text is black or white, whichever reads on it (dimmed toward
+  // the dark window by opacity), as in a terminal; a text the document coloured keeps its colour.
+  if (bd.has_fill && bd.image.empty()) {
+    const float k = std::clamp(bd.opacity, 0.0f, 1.0f);
+    const float lum = k * (0.299f * bd.fill[0] + 0.587f * bd.fill[1] + 0.114f * bd.fill[2]);
+    ImGui::PushStyleColor(ImGuiCol_Text, lum > 0.55f ? ImVec4(0.0f, 0.0f, 0.0f, 1.0f)
+                                                     : ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+    f->text_pushed = true;
+  }
   // The content on channel 1, so the picture, drawn last on channel 0, ends up under it.
   f->split.Split(f->dl, 2);
   f->split.SetCurrentChannel(f->dl, 1);
@@ -2680,6 +2739,8 @@ void ImGuiBackend::end_backdrop() {
     return;
   std::shared_ptr<BackdropFrame> f = std::move(m_backdrops.back());
   m_backdrops.pop_back();
+  if (f->text_pushed)
+    ImGui::PopStyleColor();
   const cvc::ariadne::Backdrop &bd = f->bd;
   // A group's area: at least its authored size (px at the UI's size, or percent of the space it
   // started in), and the full width available where it set none, as a banner is.
@@ -2701,10 +2762,15 @@ void ImGuiBackend::end_backdrop() {
     const ImRect inner = ImGui::GetCurrentWindow()->InnerRect;
     mn = inner.Min;
     mx = inner.Max;
-  } else {
+  } else if (!f->flow_cell) {
     mx.x = std::max(mx.x, mn.x + want_w);
   }
   f->split.SetCurrentChannel(f->dl, 0);
+  // §5.26 the fill, under the picture.
+  if (bd.has_fill && !f->cell_filled && mx.x > mn.x && mx.y > mn.y)
+    f->dl->AddRectFilled(mn, mx,
+                         ImGui::GetColorU32(ImVec4(bd.fill[0], bd.fill[1], bd.fill[2],
+                                                   std::clamp(bd.opacity, 0.0f, 1.0f))));
   int W = 0, H = 0;
   const unsigned int tex = bd.image.empty() ? 0 : image_texture(bd.image.c_str(), W, H);
   if (tex != 0 && mx.x > mn.x && mx.y > mn.y) {

@@ -339,6 +339,32 @@ the tier's allowance.
 
 ### 4.3 The learner (C3)
 
+**Landed:** `inc/cvc/nav/coph_learner.h` and `coph_dual.h`, tested against G5–G8 by
+`nav_coph_learner_test`. G5–G8 come from GRL-SNAM's `grl_snam.tools.coph_golden_learner`, which
+takes three update snapshots of a scripted crossing run (CVC-Lab/GRL-SNAM#195). On Windows every
+decision matches. The values come within 0.007 of the tier's allowance (rtol 1e-9, atol 1e-12):
+G5 within 0.0069, and G6–G8 within 7e-5.
+- **The state is plain data.** `coph_learner_state` holds the kept stages as C1's ledger holds
+  them, the geometry store, what the maze router reads and the committed values; C5 owns the
+  ledger and hands the state in.
+- **The routed controller is the maze router.** The demos' learner is a `MazeLearner`, so the
+  profile's route is `maze_learning.maze_route`. That is Dijkstra on the surveyed corridor network
+  (`coph_crossing_network`), with edges closed by the reported geometry and priced over the
+  terrain anchors, then a waypoint on the 0.1 m grid. After it come `navigation.project` (fast
+  when the raw force already satisfies the constraints) and the guard with
+  `maze_geometry.corridor_clear`. The last bullet below described the route field's anchors, which
+  the profile never reaches.
+- **The field fit.** It solves each stage's 16 × 16 system by Cholesky: the system is block
+  diagonal, and no other nav code uses Eigen.
+- **What G5–G8 do not reach.** The replay barely depends on the policy in the scripted run, so no
+  case halves or exhausts the budget. No replay control is projected or braked: the CBF
+  projection's full candidate set and the brake are ported but carry no golden.
+- **Left for later.**
+  - The terrain anchors an update leaves behind (`TerrainLearner.update`'s local cells) come with
+    C5, which runs updates in sequence.
+  - So do the diagnostic controls `CooperativeLearner.update` runs around an update. They only
+    count guard steps outside the update's budget.
+
 - **Field fit.** Build the design matrix over the kept stages (the overlap continuity rows are
   empty in the profile, §4.1), and solve the ridge normal equations with Eigen's LLT. The Python
   uses an LU solve, so the tier is FLOAT.
@@ -351,9 +377,9 @@ the tier's allowance.
   (`unsupported_entry`, `domain_exit`, ...) are BIT.
 - **Update.** The proposal, the projection onto the box and the trust region, up to 8 halvings,
   the validation and feasibility checks, the commit with its shaping jump, or the rollback.
-- **Routed controller.** `controller_mode='routed'` executes the route field's attraction. The C++
-  takes the route field's anchors as input from C1's records. `route_field`'s anchor mode is
-  ported; the `additive_routing` and `localized_receiver` paths it imports are not (D7).
+- **Routed controller.** `controller_mode='routed'` executes the route's attraction. (As landed: the
+  demos' maze router, above, not the route field's anchors.) The `additive_routing` and
+  `localized_receiver` paths are not ported (D7).
 
 ### 4.4 Packets and the channel (C4)
 

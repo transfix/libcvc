@@ -921,7 +921,8 @@ run queue keys on a process's effective priority (its base, or a lock-inheritanc
 - **Skipped groups first.** A group the last deadline skipped goes first. One the caller pumps
   starts even before `host_first`, `exec_pump_frame`'s group 0 (4.12): at threads 0, a
   host-affinity one, and in the threaded path when no helper was woken; otherwise the helpers take
-  it beside group 0. So a busy group 0 delays a frame group by one frame at most (4.10).
+  it beside group 0. So a busy group 0 delays a frame group by one frame at most (4.10). A group
+  the deadline short-changed counts as skipped too (4.10).
 - **Each group keeps its own pump budget** (section 4.10). The frame's DSL time becomes the maximum
   over workers instead of the sum.
 - **Adaptive helper wake** (C's graft). Helpers are woken only when they would pay for themselves:
@@ -1755,6 +1756,16 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
   - A group starts only if the deadline has not passed, and its pump's time budget is the smaller
     of its own and the time left. A group not started counts in `stats().skipped`.
   - Groups that did not start are put first in the next frame's order.
+  - So are groups the deadline short-changed, counted in `stats().short_changed`: a group that
+    started with less than half the call left (from `pump_all`'s entry to the deadline), whose
+    pump the deadline ended with a process still runnable and steps to spare. Without this, a
+    group queued behind one that takes nearly the whole frame starts every frame just before the
+    deadline, is never skipped, and gets only that sliver: `state_exec_bench`'s `mt.ariadne_docs`
+    at docs 2, threads 0 on a Debug build, where one 96 ms tick left the other document 4 ms a
+    frame, and it never finished a tick (`ExecPool.AGroupTheDeadlineCutsShortGoesFirstNextTime`).
+    A group started with half the call or more is not short-changed, so k groups that each fill a
+    frame still take turns, each starting at least once in k frames. The same mark applies in the
+    threaded path, where it puts the group ahead of the LPT order.
   - With more groups than threads, the frame stays bounded by about 0.1 s plus one pump, not by
     ceil(G / threads) x 0.1 s.
   - Group 0's pump in `exec_pump_frame` (4.12) does not starve the frame groups: a frame group
@@ -1828,7 +1839,8 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
 ```cpp
 enum class group_affinity { any, host };
 struct pump_budget { std::uint64_t steps; double seconds; };  // seconds: infinity = no limit
-struct pump_result { std::uint64_t steps = 0; int woken = 0; bool failed = false; };
+struct pump_result { std::uint64_t steps = 0; int woken = 0; bool failed = false;
+                     bool runnable = false; };  // a process still runnable at its end
 class exec_group {
  public:
   struct options {
@@ -1897,7 +1909,7 @@ struct pool_options {
   cvc::thread_class worker_class = cvc::thread_class::normal; // L4; not applied in Stage 1
 };
 struct pool_stats { std::uint64_t pumps, helper_wakes, skipped, worker_pumps;
-                    unsigned effective_threads; };
+                    unsigned effective_threads; std::uint64_t short_changed; };
 class exec_pool {
  public:
   explicit exec_pool(const pool_options &);

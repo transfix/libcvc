@@ -2378,7 +2378,7 @@ hook is declared in the block's `hooks:`, or registered by `ari_init` through th
 - **Clients' guests with hooks.** A client's resident guest on `arisrvx` is planned in
   [`ARIADNE_RESIDENT_GUESTS.md`](ARIADNE_RESIDENT_GUESTS.md). It hooks the relay's events, may
   outlive its client's connection, and spends gas from a per-principal ledger on the server
-  (phases RG1–RG7).
+  (phases RG1–RG8; in RG8 one client's resident can offer exports to the others).
 
 ### 8.8 Installing and entering programs
 

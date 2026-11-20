@@ -34,10 +34,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>                                // std::strtoull
-#include <cvc/ariadne/avatar_sim.h>               // avatar_intent
+#include <cstdlib>                                  // std::strtoull
+#include <cvc/ariadne/avatar_sim.h>                 // avatar_intent
 #include <cvc/ariadne/conference/client_registry.h> // a client's record from its link
-#include <cvc/ariadne/conference/relay_session.h> // a host's join: its credential
+#include <cvc/ariadne/conference/relay_session.h>   // a host's join: its credential
 #include <cvc/ariadne/conference/room_aoi.h>
 #include <cvc/ariadne/conference/room_aoi_relay.h>
 #include <cvc/ariadne/conference/room_calls.h>      // room-call: a client's call, the relay's reply
@@ -49,10 +49,13 @@
 #include <cvc/ariadne/conference/room_write_gate.h> // bound writes
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/holon_sync.h>      // server_pump, client_pump, read_pose, write_intent
+#include <cvc/ariadne/loader.h>          // a client's world document
 #include <cvc/ariadne/scene_world.h>     // the server document's world
 #include <cvc/ariadne/server_document.h> // a server document (arisrv --doc)
+#include <cvc/ariadne/world_rules.h>     // its world: block
 #include <cvc/ariadne/world_vehicles.h>  // its vehicles, as the relay has them
 #include <cvc/core/app.h>
+#include <cvc/core/world_clock.h> // the client world's own clock
 #include <cvc/media/media_frame.h>
 #include <cvc/media/media_router.h>
 #include <cvc/media/media_rungs.h>
@@ -1593,6 +1596,119 @@ scene:
     ASSERT_TRUE(A.entities.pose(e.id, p));
     EXPECT_LT(std::hypot(p.position.x - e.x, p.position.y - e.y), 3.0) << "entity " << e.id;
   }
+}
+
+// A server document simulates two vehicles of its own and publishes their poses as a table
+// (world: vehicles: poses:); a client's own world draws them (WD3's server-simulated entities, by
+// state): the table's entries spawn the client's `pose` entities, by name, and its packed value
+// places them each step, where the server says, the timed one a tick behind. Its entry's archetype
+// emptied (a value, which the relay replicates as it does any write), one goes from the client's
+// world too.
+TEST(RoomRelayLoopbackTest, AClientsWorldPlacesTheServersPosedEntities) {
+  if (!cvc::ariadne::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt))
+    GTEST_SKIP() << "no Jolt in this build";
+  relay_options o;
+  o.doc = R"(meta: { name: fleet server, min_libcvc: 3.7.5 }
+requires: [relay]
+server: { publish: [fleet] }
+init: |
+  (state-set "fleet.lead.archetype" "humvee")
+  (state-set "fleet.lead.name" "Lead")
+  (state-set "fleet.lead.team" "1")
+  (state-set "fleet.wing.archetype" "humvee")
+on_tick: |
+  (state-set "fleet.poses"
+    (str-concat "lead " (str (* 0.05 (int (state-get "sim.tick")))) " 4 nan 0 0 0 6 0.1 "
+                (str (/ (int (state-get "sim.tick")) 120.0))
+                "\nwing -10 -10 nan 1.5 0 0 0 0 nan"))
+  (if (= (state-get "drop") "1")
+      (state-set "fleet.wing.archetype" ""))
+)";
+  test_relay r(o);
+  ASSERT_FALSE(HasFailure());
+  ASSERT_NE(r.doc, nullptr);
+  const std::vector<link_kind> kinds = link_kinds();
+  client_list own;
+  own.push_back(std::make_unique<test_client>("A", kinds[0]));
+  const std::vector<test_client *> cs = ptrs(own);
+  test_client &A = *cs[0];
+  A.shard->add_interest("fleet");
+  ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
+
+  // The client's world: a stock world document that names the table.
+  cvc::app scratch;
+  cvc::ariadne::register_world_block(scratch);
+  cvc::ariadne::LoadResult world_doc = cvc::ariadne::load_string(scratch, R"(
+world:
+  vehicles:
+    poses: /fleet
+    archetypes:
+      humvee: { vehicle: humvee, controllers: [pose] }
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [160, 160, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)");
+  ASSERT_TRUE(world_doc.ok) << world_doc.error;
+  cvc::ariadne::world_rules rules = cvc::ariadne::default_world_rules();
+  ASSERT_EQ(cvc::ariadne::parse_world_block(*cvc::ariadne::find_world_block(world_doc), rules), "");
+  world_doc.scene.vehicles = rules.vehicles;
+  world_doc.scene.vehicle_poses = rules.vehicle_poses;
+  std::vector<std::string> warnings;
+  std::unique_ptr<cvc::ariadne::SceneWorld> world = cvc::ariadne::SceneWorld::from_scene(
+      A.app, world_doc.scene, "client", "client.physics", &warnings);
+  ASSERT_NE(world, nullptr);
+  cvc::ariadne::WorldVehicles *v = world->vehicles();
+  ASSERT_NE(v, nullptr);
+  EXPECT_EQ(v->poses_key(), "fleet");
+  cvc::world_clock::config cc;
+  cc.fixed_dt = world->world().config().fixed_dt;
+  cvc::world_clock clock(cc);
+  const auto drive = [&](double) { // the client's world, a step of the relay's at a time
+    clock.advance(kRoomStepS);
+    world->follow(clock);
+  };
+  const auto entity = [&](const std::string &name, cvc::ariadne::entity_info &out) {
+    for (const cvc::ariadne::entity_info &e : v->entities())
+      if (e.spec.name == name) {
+        out = e;
+        return true;
+      }
+    return false;
+  };
+  cvc::ariadne::entity_info lead, wing;
+  ASSERT_TRUE(run_room(r, cs, 8.0, drive,
+                       [&] {
+                         return entity("Lead", lead) && entity("wing", wing) && lead.placed &&
+                                wing.placed && lead.x > 5.0;
+                       }))
+      << "A's world has " << v->size() << " entities: " << v->status();
+  EXPECT_EQ(lead.spec.controller, "pose");
+  EXPECT_EQ(lead.spec.team, 1);
+  EXPECT_EQ(wing.x, -10.0);
+  EXPECT_EQ(wing.y, -10.0);
+  EXPECT_EQ(wing.yaw, 1.5);
+  EXPECT_EQ(lead.y, 4.0);
+  EXPECT_GT(lead.speed, 0.0);
+  // Where the server has it, but for the relay's delay and a tick behind.
+  run_room(r, cs, 1.0, drive);
+  ASSERT_TRUE(entity("Lead", lead));
+  const double server_x =
+      0.05 * std::strtod(tree_value(r.app, "ui.docs.arisrv.sim.tick").c_str(), nullptr);
+  EXPECT_LT(std::fabs(lead.x - server_x), 2.0) << lead.x << " vs " << server_x;
+  EXPECT_GT(lead.x, 5.0);
+  // The wing's entry removed on the server: it goes from A's world.
+  r.app.root()("ui.docs.arisrv.drop").value(std::string("1"));
+  ASSERT_TRUE(run_room(r, cs, 10.0, drive, [&] { return v->size() == 1; }))
+      << "the wing stayed in A's world";
+  EXPECT_TRUE(entity("Lead", lead));
 }
 
 TEST(RoomRelayLoopbackTest, ARelaySessionJoinsOnceItsCredentialHoldsAToken) {

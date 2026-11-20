@@ -20,11 +20,13 @@
 //
 // Some nodes make what their body: collides with at run time, and the world swaps those bodies
 // when it changes (sync(), which follow() runs first):
-//   * a `generated_world` node: its terrain and buildings (scene_generated_world.h). Headless, the
-//     world runs the node itself (GeneratedWorldRuntime: its world.* keys and Regenerate);
-//     drawn, cvcGL's node does and hands over its colliders.
 //   * a `source: { data }` node: its dataset's world, terrain or geometry, once the dataset is
-//     ready and again each time it changes (its rev). It needs the scene's physics: block.
+//     ready (at once when it already is) and again each time it changes (its rev). It needs the
+//     scene's physics: block.
+//   * a `generated_world` node: the same, its dataset the world it made (scene_generated_world.h,
+//     publish_generated_world: the world as a version 2 bundle, read back). Headless, the world
+//     runs the node itself (GeneratedWorldRuntime: its world.* keys and Regenerate); drawn,
+//     cvcGL's node does. Either way each new world replaces the dataset, and the bodies follow.
 // Those colliders are static and placed as they were made: the node's transform does not move
 // them. A water node's field is swapped the same way when its sea changes, except one with a wake
 // (`wake_push`, cvc::physics::field_wake), which is set in place, so it keeps its id and the wake
@@ -211,8 +213,9 @@ public:
   // The bodies node `id` has now.
   std::vector<physics::body_id> bodies_of(const std::string &id) const;
 
-  // The world a generated_world node made, when this world runs the node (from_scene); null when a
-  // renderer runs it, or there is no such node.
+  // The world a generated_world node made: the one this world runs (from_scene), else the one its
+  // dataset holds (a renderer's node, or a data node on a made dataset: its `generated`). Null for
+  // any other node.
   std::shared_ptr<const cvc::world::generated_world> generated_world(const std::string &id) const;
   // The world node `id` makes at run time (a generated world's, a dataset's) as it is now, and its
   // revision, which each new world bumps (0: none yet). Null for any other node, or before it has

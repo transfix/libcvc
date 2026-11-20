@@ -605,6 +605,21 @@ its own world document.
     a server document's program steers them), a thread-safe `WorldVehicles::set_intent`, and
     Python (`pycvc.WorldEntities`). An `external` entity is driven by its intent alone, and holds
     still without one. An intent-driven run reaches the same state hash headless and drawn.
+  - Poses (built 2026-11-19): an entity with the `pose` controller is placed from outside, by a
+    simulation the world does not run, and no plant integrates it. Its chassis is a kinematic box
+    in the world's physics world, moved to each pose at the next step, so it keeps its archetype's
+    look and label, casts shadows, is picked, pushes what it meets and is a foreign agent the
+    navigators steer around; it needs no grid. Its poses come from its keys
+    (`entities.<id>.pose.{x,y,z,heading,pitch,roll,speed,steer,t,ref}` or `.matrix`), a packed
+    value of many (`entities.poses`, a text record a line, so a relay carries it), a table the
+    world block names (`world: vehicles: poses:`, whose entries naming an archetype spawn and
+    remove the entities too), and a thread-safe `WorldVehicles::set_pose` / `set_poses` (pycvc
+    `WorldEntities.set_pose`, `set_poses` from numpy). Timed poses are drawn between the last
+    two, a tick behind; a jump is taken at once. The box look's wheels steer by the pose's steer
+    and roll at its speed. A scripted track is followed exactly, and its state hash is pinned
+    headless, drawn and under `arigl snapshot` (`physics.hash`: 1 publishes
+    `physics.stats.hash`). A drawn world now spawns `world: vehicles: start:` too, as a headless
+    one does.
   - The runtime is `WorldVehicles` ([world_vehicles.h](../../inc/cvc/ariadne/world_vehicles.h)),
     one per `SceneWorld`, with nothing process-wide: a relay that runs a world per room (RM1,
     WD3) runs one per room, and each room's panels name its keys by their root (`world_source`'s
@@ -658,6 +673,18 @@ its own world document.
     the avatars and the vehicles, a model look drawn on the client (it draws the box), the
     controller catalog's prediction (WD4: a client interpolates server-dynamic entities, so none is
     needed to watch them).
+  - **Server-simulated entities by state** (a step toward WD3's server-dynamic entities, built
+    2026-11-19 with the `pose` controller). A server that simulates its vehicles itself (a server
+    document's program, or arisrvx's Python over a simulation of its own) publishes a table of
+    poses (`server: publish: [fleet]`): an entry per vehicle naming its archetype and identity,
+    and a packed value of their poses each step. A client's own world document names the table
+    (`world: vehicles: poses: /fleet`) and its archetypes; its world spawns a `pose` entity per
+    entry and places each where the server says, timed poses drawn a tick behind, so stock
+    clients (arigl, arigl-web) draw them with the world's looks, labels and shadows, in a world
+    that also runs physics of its own. The relay replicates values, not an entry's removal, so a
+    server takes an entity out by emptying its entry's archetype. The pose stream (above) stays
+    the path for a server document's own world's vehicles in a conference room; this one needs
+    no room.
   - Not yet: the default meeting worlds' built-in vehicles (a stock world named by `--scene` is
     published, not run; `traffic.ari` is the server world with vehicles, and `world_lab.ari`
     declares its own); the model from a document's data package (the Austin package carries a
@@ -751,7 +778,7 @@ GENERATED-WORLD-ROADMAP.md's.)
 | WD0 | **Done** (2026-11-07). The loose ends: `--set` after seeding, or a guard so a `--set` can't suppress the default world; the "under a sun" comment. Built as `--set` after the world and the room's policies, before a server document's `init:` (§1) | — | S |
 | WD1 | **Done** (2026-11-07). **The world document seeds the room.** `arisrv --doc world.ari` publishes the document's `scene:` (objects, lights, shadows), in one revision (`write_room_world`). `cvc://worlds/default.ari` and `large.ari` replace the C++ seeds, and `--scene` names them. The light rig and shadows move from the conference document to the world document (Q1), and the conference document drops its `scene:` block. As built: the wire gained a rig's knobs and the shadows' interval; `room_world_from_scene` leaves out, with a warning, what the wire can't hold (other node types and sources, children, textures, shaders), and publishes every body as a static until WD3; `--scene` together with a `--doc` that has a `scene:` is refused; the C++ twins are the fallback | S0 (met by transfix/libcvc#1046) | M |
 | WD2 | **Done** (2026-11-08). **The rules come from the document.** The physics, archetype, policy and controller sections (§3), with the activation tick. The holon and `room_view` read them instead of `avatar_body{}`, `kAvatarWidth`, `max_speed = 4.0` and the panel's "walker" literal. As built: the revisioned-section writer in core (`section.h`: `{epoch, at, rev}`, the revision last); the `world:` block (`world_rules.h`), whose stock worlds' twin is `default_world_rules()`; the four sections (`room_rules.h`), lists indexed since `walker@1` is no state name; the holon's rules by tick (`holon::set_physics` and the rest), the veto applied at each step, a late client's re-run from the tick, and a body change re-creating the avatars where they stand; gravity from the scene's `physics:`; `fixed_dt` stays the room's 1/120 s (a document's other value is a warning). Every avatar has the first archetype until WD4 and WD6 let a participant pick. | WD1 | M |
-| WD3 | **Started** (2026-11-17: the vehicles). **Entities.** The entities table (§4); server-dynamic props and NPC bodies from the document and from server programs, simulated on the relay by L0's headless runtime; their poses on the pose stream; colliders for meshes. As built so far: a server document's world runs on the relay, and its vehicles reach every client as the room's entities (an identity section and pose-stream entries, played out and drawn: §14, "On the relay"). | WD2, L0 | L |
+| WD3 | **Started** (2026-11-17: the vehicles). **Entities.** The entities table (§4); server-dynamic props and NPC bodies from the document and from server programs, simulated on the relay by L0's headless runtime; their poses on the pose stream; colliders for meshes. As built so far: a server document's world runs on the relay, and its vehicles reach every client as the room's entities (an identity section and pose-stream entries, played out and drawn: §14, "On the relay"); and (2026-11-19) entities a server simulates itself reach each client's own world by state, as `pose` entities placed from a published table of poses (§14, "Server-simulated entities by state"). | WD2, L0 | L |
 | WD4 | **A controller catalog.** Kernels by `name@version`, a determinism gate per kernel, capability negotiation with an interpolation fallback; the vehicle as the second kernel. A participant picks from the archetype's list (§5k phase 3). | WD2 | L |
 | WD5 | **Generated worlds** through the world document: G5's descriptor, height-field statics on the relay. | WD1, G5 | M |
 | WD6 | **User looks and bodies.** Assets by hash, checked and rehosted by the relay; bodies clamped to the archetype (§5k phase 4). | WD2, S5 | M |
@@ -853,6 +880,10 @@ world sections in mind:
 - **Settled, headless (owner, 2026-11-07):** a headless runtime still runs physics and the whole
   world without local rendering. The world half of scene realization is core libcvc; cvcGL adds the
   view (§14). Open within it: the token's name (proposed `scene.physics`).
+- **Q17. How do loaded and generated worlds meet? Settled (owner, 2026-11-19):** a generated world
+  is a bundle (§18.8): the city bundle's format extended, one dataset path into physics, the
+  navigator and the renderer, clients sent the bytes (or generating from the seed and comparing
+  hashes), and a save in the terrain lab.
 - **Settled with C++ for the core (owner, 2026-11-07):** the world runtime is C++, behind a scene
   node and pycvc; the lab's panels are `.ari` components over it.
 
@@ -1021,3 +1052,94 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   says how much.
 - The cost of 120 Hz with many vehicles, measured on the relay before the stock worlds grow.
 - An area of interest for entities: today every client gets every one.
+
+### 18.8 World contents: a generated world is a bundle
+
+The owner's decisions, 2026-11-19: a generated world is made as if it had been saved and loaded as
+a bundle, so a loaded city (Austin) and a generated world (the terrain lab) are one kind of world
+with one path into physics, the navigator and the renderer. The city bundle's format is extended,
+not replaced. Clients get a world's bytes, and may instead generate it from its seed and compare
+hashes. The terrain lab can save its world, in the browser too, also for import into other
+software. Nav materials, water and the wall colliders are in the bundle.
+
+**What it replaces.** Today the two kinds of world are different scene nodes:
+
+- a city is a data node: `data-load ... city_bundle` decodes `terrain.json` and `buildings.glb`
+  into a dataset (`world` as `cvc::world::world_geometry`, `terrain`, `buildings`, `bounds`,
+  `satellite`), the node is `source: { data: city }`, and `SceneWorld` reads its body through the
+  dataset;
+- a generated world is a `generated_world` node: `GeneratedWorldRuntime` makes the world and its
+  own colliders, a `water` node follows it through `world:`, and cvcGL draws it with its own
+  realize (`world_nodes.cpp`), not the data node's.
+
+Both reach Jolt as a `world_geometry` through `cvc::physics::add_world_geometry`, and
+`cvc::nav::world_grid` takes either. What is doubled is the node kind, the collider feeder, the
+renderer and the contents: a generated world also has roads, props, a painted ground, water and
+nav surfaces, which a city bundle cannot carry.
+
+**The bundle, version 2.** A version 1 bundle (`terrain.json`, `buildings.glb`, optional
+`buildings_flat.glb` and `satellite.png`) still loads as it does. Version 2 adds a manifest and
+files beside them:
+
+| File | What |
+|---|---|
+| `world.json` | The manifest: `format: cvc.city_bundle`, `version: 2`; the surface table by name (ids in the files are indices into it); every item (name, file, roles, surface, placement); `edge_walls`; an optional `region` the world is cut to; the water (`level`); the generator that made it (name, version, params, seed); and the content hash. |
+| `terrain.json` | As version 1. A large world's grid may be `grid_file: terrain.f32` instead of `grid` (little-endian float32, rows x cols, north first, as `grid`). |
+| `terrain_surfaces.u16` | One surface per terrain cell (little-endian uint16, north first): the nav and contact materials. |
+| `buildings.glb` | As version 1: world metres, z up, at terrain height. |
+| `<item>.glb` | Every other mesh item (roads, props, foliage, needles, the props' coarser rungs), one primitive per surface, the material named by the surface, per-vertex colour where the item has it. |
+| `streets.json` | The street centrelines and widths the roads were extruded from. |
+| `ground.png` | The painted ground texture, where a city has `satellite.png`. |
+
+- **Nav materials** are the terrain's cell surfaces and each item's face surfaces, read through
+  the one surface table, so the renderer, the physics and the navigator read the same materials
+  (`world_grid` keeps them instead of dropping them).
+- **The water** is the level in the manifest. The loader builds the bodies of water and the
+  water's field from the stored terrain at that level, as `generated_world` does now; the
+  navigator's `set_water` and a scene `water` node read the same level, so there is one water
+  knob, and deep water is a body to a car, not ground at mu 0.10.
+- **The walls** are the manifest's `edge_walls` at the world's edge, which is the `region` when
+  there is one: the grid, the colliders and the edge walls follow the same cut, made once.
+- **Derived things are not stored:** the terrain's LOD chunks, the water's shore grid and the
+  ground under the water are rebuilt from the stored terrain on load.
+- **The hash** is SHA-256 over every file but `world.json`, in name order (each name and its
+  bytes' SHA-256), so two worlds with the same contents hash the same whatever wrote them.
+- **The meshes are written through assimp's glTF 2 exporter** (glb, to memory, so the browser
+  writes a bundle as natively does), filling the model handler's `write`, which throws today: one
+  primitive per surface, per-vertex colour, triangles and lines. Reading `buildings.glb` already
+  goes through assimp, and the published wasm builds have it. The files open in other software
+  (Blender, for one).
+
+**As if loaded.** glb positions are 32-bit floats and a mesh's vertices come back in the order
+its faces first use them, so the world physics runs is the bundle read back, not the generator's
+doubles: written, read and written again, a world gives the same bytes and the same hash.
+
+**One path in.** A generated world is a dataset of the same shape as a decoded bundle:
+`data-generate` beside `data-load` fills `world`, `terrain`, `buildings`, `bounds`, the ground
+texture and the rest, and the node is `source: { data: world }`. Regenerate bumps the dataset's
+revision, which `SceneWorld` already follows for a data node. `generated_world` the node kind
+becomes shorthand for a `data-generate` and its data node, so documents that use it keep working.
+`SceneWorld`'s public surface (`world`, `follow`, `restart`, `generated_world(id)`, `grid`,
+`vehicles`) does not change; `generated_world(id)` reads the dataset.
+
+**One renderer.** cvcGL's generated-world renderer (terrain LOD, the props' cells and rungs, roads,
+the painted ground, cloud shade) draws any world dataset, a city's included, and the data node's
+simpler world draw goes.
+
+**Getting it to a client.** The server sends the bundle's bytes, content-addressed and cached
+(§12, AD1), and a client builds the same world from them, with no generator determinism to pin
+across platforms. A client that has the generator named in the manifest may instead generate the
+world from its params and seed, write it as a bundle in memory, and compare the hash with the
+server's; on a mismatch it takes the bytes.
+
+**Saving.** The terrain lab saves its world as a bundle: natively a directory or a zip, in the
+browser a zip handed to the browser as a download. A save for other software adds the terrain as
+a mesh (`terrain.glb`) and a 16-bit height map PNG.
+
+| Phase | What | Size |
+|---|---|---|
+| GB1 | **The bundle, version 2:** the manifest, glb export through assimp, `write_city_bundle` from a `world_geometry` and a generated world's extras, `load_city_bundle` reading version 2 (items, cell surfaces, water level, region, edge walls, hash). Tests: a world written and read back has the same terrain, cell surfaces, items and face surfaces, and writes the same bytes again; two loads simulate to the same state hash. | M |
+| GB2 | **One path in:** `data-generate`; a generated world as a dataset; `SceneWorld` reads only data nodes; `generated_world` as shorthand; the region and the water level on the data node. | L |
+| GB3 | **One renderer** for any world dataset. | L |
+| GB4 | **Save in the terrain lab:** a directory or zip natively, a zip download in the browser, the terrain mesh and height map for other software. | M |
+| GB5 | **Clients:** a world's bytes by content address, cached; a seed and a hash compare as the shortcut. After OW2 and with WD5, AD1. | M |

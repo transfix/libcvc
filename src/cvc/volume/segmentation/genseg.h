@@ -35,12 +35,27 @@
 
 #include <coroutine>
 #include <cstddef>
+#include <cstdint>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <utility>
 #include <vector>
 
+namespace cvc {
+class thread_pool;
+}
+
 namespace cvc::genseg {
+
+// The per-voxel passes' pieces: body(begin, end) runs on [begin, end) split into pieces of
+// for_voxels_piece voxels spread over `pool` when there are at least two of them (else on the
+// calling thread, as with no pool). A pass hands it only work whose result for each voxel does
+// not depend on the order the pieces run in, so the labels are the same however many threads
+// run them.
+constexpr std::size_t for_voxels_piece = 8192;
+void for_voxels(thread_pool *pool, std::size_t begin, std::size_t end,
+                const std::function<void(std::size_t, std::size_t)> &body);
 
 // A routine that runs a unit at a time: each co_yield hands control back to whoever resumed it.
 // Destroying the task destroys its frame (a cancel frees everything at once). What the routine
@@ -188,6 +203,8 @@ public:
   int seeds_left = 0;
   std::size_t marched = 0;
   float minraw = 0.0f, maxraw = 0.0f; // read_data's
+  // The pool the per-voxel passes spread over (the app's compute pool), or none.
+  thread_pool *pool = nullptr;
 
   task run();
   // read_data's normalisation of dataset (and of tlow and thigh with data_unit_thresholds), and
@@ -225,6 +242,16 @@ private:
   task SearchIndex();
   void GetTime(const voxel_at &m);
   void T_GetTime(const voxel_at &m);
+  // The threshold sweep's shortcut (Segment()): sweep_tree() builds the component tree of the
+  // voxels a search front can pass, by level; sweep_labelled() brings it up to date with the
+  // voxels the sweep has labelled since; reach_level() is the highest threshold at which a search
+  // can reach a labelled voxel at all, or -1.
+  task sweep_tree();
+  task sweep_labelled();
+  int reach_level() const;
+  int face_neighbours(std::size_t v, std::size_t out[6]) const;
+  std::uint32_t tree_node(std::uint32_t v) const;
+  void mark_up(std::uint32_t v);
 
   buffer<float> step_cost; // per voxel, 0.01 exp(ALPHA |grad|)
   buffer<float> T_tdata;   // the sweep's search times
@@ -236,6 +263,26 @@ private:
   // SearchIndex()'s results: the seed it found, and its class (255: none).
   std::size_t search_voxel = 0;
   unsigned char search_index = 255;
+
+  // The sweep's shortcut. A voxel's level is the floor of the least of its six neighbours'
+  // values (as neighbours() gives them): a search front passes it at every threshold up to its
+  // level. An automatic seed's level is 256 (fronts start there at any threshold); voxels below
+  // sweep_floor, the lowest threshold the sweep searches at, are left out (tree_out). A node of
+  // the component tree is a set of voxels at levels l and up, connected through face neighbours,
+  // at level l: tree_parent gives each voxel the voxel that names its node, and a node's name the
+  // name of the node above it (itself at a root). Per node, by its name: tree_seeds, how many
+  // unclassified seeds it holds, and tree_marked, whether it holds a voxel next to a labelled
+  // one; qualifying[l] counts the nodes of level l with both.
+  static constexpr std::uint16_t tree_out = 0xffffu;
+  bool sweep_shortcut = false;
+  int sweep_floor = 0;
+  std::vector<std::uint16_t> tree_level;
+  std::vector<std::uint32_t> tree_parent, tree_seeds;
+  std::vector<unsigned char> tree_marked;
+  std::size_t qualifying[257] = {};
+  // During the sweep, GetTime() records the voxels it labels, and the automatic seeds among them.
+  bool log_labels = false;
+  std::vector<std::uint32_t> labelled_log, classified_log;
 };
 
 } // namespace cvc::genseg
@@ -247,6 +294,20 @@ private:
     if (--(ctx).units_left == 0)                                                                   \
       co_yield 0;                                                                                  \
   } while (0)
+// A per-voxel pass over the voxels [0, n) in a coroutine of the context `ctx`, a unit a voxel:
+// body(begin, end) runs on slices of at most what the step has left (so a step of budget b still
+// does b units), each slice spread over ctx.pool by for_voxels; yields once the step is used up.
+#define GS_FOR_VOXELS_OF(ctx, n, body)                                                             \
+  for (std::size_t gs_done_ = 0, gs_n_ = (n); gs_done_ < gs_n_;) {                                 \
+    const std::size_t gs_take_ =                                                                   \
+        gs_n_ - gs_done_ < (ctx).units_left ? gs_n_ - gs_done_ : (ctx).units_left;                 \
+    ::cvc::genseg::for_voxels((ctx).pool, gs_done_, gs_done_ + gs_take_, (body));                  \
+    gs_done_ += gs_take_;                                                                          \
+    (ctx).units += gs_take_;                                                                       \
+    (ctx).units_left -= gs_take_;                                                                  \
+    if ((ctx).units_left == 0)                                                                     \
+      co_yield 0;                                                                                  \
+  }
 // Run a coroutine (a task) to its end, yielding whenever it yields.
 #define GS_RUN(call)                                                                               \
   do {                                                                                             \

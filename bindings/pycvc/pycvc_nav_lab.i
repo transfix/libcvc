@@ -586,6 +586,7 @@ void nav_replay_view_redraw(PyObject *view) { pycvc_nav_lab::replay_from(view)->
 // ── the checkpoint scrubber (cvc/nav/nav_scrub.h) ──────────────────────────────────────────────
 %{
 #include <cvc/nav/nav_scrub.h>
+#include <cvc/physics/scrub_plant.h>
 
 namespace pycvc_nav_lab {
 
@@ -593,10 +594,16 @@ constexpr const char *kScrubCapsule = "cvc.nav.scrub";
 
 struct scrub_handle {
   cvc::nav::training_history history;
-  cvc::nav::scrub_scenario scenario;
-  std::vector<cvc::nav::scrub_entry> entries;
-  std::vector<std::string> lines; // what scrub() said
+  cvc::nav::scrub_scenario scenario; // its plant: the first plant's
+  std::vector<std::string> lines;    // what scrub() said
   std::unique_ptr<cvc::nav::scrub_view> view;
+  // the plant shown's entries, and the scenario on it
+  const std::vector<cvc::nav::scrub_entry> &entries() const { return view->entries(); }
+  cvc::nav::scrub_scenario shown() const {
+    cvc::nav::scrub_scenario s = scenario;
+    s.plant = view->plants()[static_cast<std::size_t>(view->plant())].plant;
+    return s;
+  }
 };
 
 inline void scrub_dtor(PyObject *cap) {
@@ -625,11 +632,14 @@ namespace pycvc {
 
 // Every checkpoint of run `run` of the history at `history` (-1: the last), deployed on the
 // scenario: a recorded input trace's world (`scenario`, a path) or the built-in blocks (`agents`,
-// `seed`), for `ticks`; cached beside the history unless `use_cache` is off. The GIL is released
-// while it deploys. Raises RuntimeError for a history with no checkpoint to deploy.
+// `seed`), for `ticks`, on each of `plants` (default the Jolt Humvee, which collides with the
+// walls, or the kinematic bicycle without Jolt; the view shows the first, nav_scrub_use_plant
+// another); cached beside the history unless `use_cache` is off. The GIL is released while it
+// deploys. Raises RuntimeError for a history with no checkpoint to deploy, or a plant unknown.
 PyObject *nav_scrub_create(const std::string &history, int run = -1,
                            const std::string &scenario = "", int agents = 4, unsigned seed = 0,
-                           long ticks = 600, bool use_cache = true, int k = -1) {
+                           long ticks = 600, bool use_cache = true, int k = -1,
+                           const std::vector<std::string> &plants = std::vector<std::string>()) {
   auto h = std::make_unique<pycvc_nav_lab::scrub_handle>();
   std::string err;
   pycvc_nav_lab::scrub_handle *raw = h.get();
@@ -640,11 +650,23 @@ PyObject *nav_scrub_create(const std::string &history, int run = -1,
                                      : cvc::nav::scenario_from_trace(scenario, ticks);
     if (raw->history.checkpoints.empty())
       throw std::runtime_error(history + ": no checkpoint names a saved .cvcnav that is there");
+    std::vector<std::string> on = plants;
+    if (on.empty())
+      on.push_back(cvc::physics::scrub_default_plant());
+    for (const std::string &p : on)
+      cvc::physics::plant_host::check(p);
     cvc::nav::scrub_options o;
     o.use_cache = use_cache;
     o.say = [raw](const std::string &line) { raw->lines.push_back(line); };
-    raw->entries = cvc::nav::scrub(raw->history, raw->scenario, o);
-    raw->view = std::make_unique<cvc::nav::scrub_view>(raw->history, raw->entries, k,
+    o.plant = cvc::physics::scrub_plant();
+    std::vector<cvc::nav::scrub_plant_runs> runs;
+    for (const std::string &p : on) {
+      cvc::nav::scrub_scenario s = raw->scenario;
+      s.plant = p;
+      runs.push_back({p, cvc::nav::scrub(raw->history, s, o)});
+    }
+    raw->scenario.plant = on.front();
+    raw->view = std::make_unique<cvc::nav::scrub_view>(raw->history, std::move(runs), k,
                                                        raw->scenario.name);
   } catch (const std::exception &e) {
     err = e.what();
@@ -655,20 +677,29 @@ PyObject *nav_scrub_create(const std::string &history, int run = -1,
   return PyCapsule_New(h.release(), pycvc_nav_lab::kScrubCapsule, pycvc_nav_lab::scrub_dtor);
 }
 
-// What it deployed: {history, schema, run, runs, scenario, scenario_hash, ticks, lines, missing,
-// skipped, checkpoints: [{step, axis, blob, sha256, cache, cached, best, selected, fitness,
-// metrics: {name: value}}]}.
+// What it deployed, on the plant shown: {history, schema, run, runs, scenario, scenario_hash,
+// ticks, plant, plants, lines, missing, skipped, checkpoints: [{step, axis, blob, sha256, cache,
+// cached, best, selected, fitness, metrics: {name: value}}]}.
 PyObject *nav_scrub_info(PyObject *handle) {
   using namespace pycvc_nav_lab;
   scrub_handle *h = scrub_from(handle);
+  const cvc::nav::scrub_scenario shown = h->shown();
   PyObject *d = PyDict_New();
   put(d, "history", str(h->history.path));
   put(d, "schema", str(h->history.schema));
   put(d, "run", PyLong_FromLong(h->history.run));
   put(d, "runs", PyLong_FromLong(h->history.runs));
-  put(d, "scenario", str(h->scenario.name));
-  put(d, "scenario_hash", str(cvc::nav::scenario_hash(h->scenario)));
-  put(d, "ticks", PyLong_FromLong(h->scenario.ticks));
+  put(d, "scenario", str(shown.name));
+  put(d, "scenario_hash", str(cvc::nav::scenario_hash(shown)));
+  put(d, "ticks", PyLong_FromLong(shown.ticks));
+  put(d, "plant", str(shown.plant));
+  PyObject *pl = PyList_New(0);
+  for (const cvc::nav::scrub_plant_runs &r : h->view->plants()) {
+    PyObject *t = str(r.plant);
+    PyList_Append(pl, t);
+    Py_DECREF(t);
+  }
+  put(d, "plants", pl);
   auto strings = [](const std::vector<std::string> &v) {
     PyObject *l = PyList_New(0);
     for (const std::string &s : v) {
@@ -682,7 +713,7 @@ PyObject *nav_scrub_info(PyObject *handle) {
   put(d, "missing", strings(h->history.missing));
   put(d, "skipped", strings(h->history.skipped));
   PyObject *cks = PyList_New(0);
-  for (const cvc::nav::scrub_entry &e : h->entries) {
+  for (const cvc::nav::scrub_entry &e : h->entries()) {
     PyObject *c = PyDict_New();
     put(c, "step", num(e.checkpoint.step));
     put(c, "axis", str(e.checkpoint.axis));
@@ -705,18 +736,23 @@ PyObject *nav_scrub_info(PyObject *handle) {
   return d;
 }
 
-// The cvc.nav.scrub/v1 report (a JSON object's text).
+// The cvc.nav.scrub/v1 report of the plant shown (a JSON object's text).
 PyObject *nav_scrub_report(PyObject *handle) {
   pycvc_nav_lab::scrub_handle *h = pycvc_nav_lab::scrub_from(handle);
-  return pycvc_nav_lab::str(cvc::nav::scrub_report_json(h->history, h->scenario, h->entries));
+  return pycvc_nav_lab::str(cvc::nav::scrub_report_json(h->history, h->shown(), h->entries()));
 }
 
-// Checkpoint i's run log.
+// Checkpoint i's run log, on the plant shown.
 PyObject *nav_scrub_log(PyObject *handle, int i) {
   pycvc_nav_lab::scrub_handle *h = pycvc_nav_lab::scrub_from(handle);
-  if (i < 0 || i >= static_cast<int>(h->entries.size()))
+  if (i < 0 || i >= static_cast<int>(h->entries().size()))
     throw std::out_of_range("pycvc.nav_scrub_log: no checkpoint " + std::to_string(i));
-  return pycvc_nav_lab::log_capsule(h->entries[static_cast<std::size_t>(i)].log);
+  return pycvc_nav_lab::log_capsule(h->entries()[static_cast<std::size_t>(i)].log);
+}
+
+// Show plant p's runs (an index into info's plants), at the same checkpoint.
+void nav_scrub_use_plant(PyObject *handle, int p) {
+  pycvc_nav_lab::scrub_from(handle)->view->use_plant(p);
 }
 
 // The scenario's world to draw: (truth (rows, cols) uint8, (min_x, min_y, max_x, max_y)).
@@ -733,8 +769,8 @@ PyObject *nav_scrub_world(PyObject *handle) {
   return out;
 }
 
-// A frame of the view (checkpoint k beside step 0). Returns {checkpoint, k, t, leg, arm, agent,
-// book, poses ((2, N, 6))}.
+// A frame of the view (checkpoint k beside step 0). Returns {checkpoint, plant (its index), k, t,
+// leg, arm, agent, book, poses ((2, N, 6))}.
 PyObject *nav_scrub_view_update(PyObject *handle, std::shared_ptr<cvc::app> app,
                                 const std::string &prefix, double dt, bool charts = true) {
   if (!app)
@@ -743,6 +779,7 @@ PyObject *nav_scrub_view_update(PyObject *handle, std::shared_ptr<cvc::app> app,
   const cvc::nav::scrub_view::frame f = h->view->update(*app, prefix, dt, charts);
   PyObject *d = PyDict_New();
   pycvc_nav_lab::put(d, "checkpoint", PyLong_FromLong(f.k));
+  pycvc_nav_lab::put(d, "plant", PyLong_FromLong(h->view->plant()));
   pycvc_nav_lab::put(d, "k", PyLong_FromLong(f.replay.k));
   pycvc_nav_lab::put(d, "t", PyFloat_FromDouble(f.replay.t));
   pycvc_nav_lab::put(d, "leg", PyLong_FromLong(f.replay.leg));

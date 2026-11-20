@@ -43,6 +43,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 
 namespace cvc {
@@ -78,6 +79,112 @@ std::string fixed(double v, int digits) {
 
 std::string rgb_text(const std::array<float, 3> &c) {
   return num(c[0]) + "," + num(c[1]) + "," + num(c[2]);
+}
+
+// HSV (h in [0, 1)) to RGB: a fleet's team colours, as the nav demos made them.
+std::array<float, 3> hsv_rgb(double h, double s, double v) {
+  const double i = std::floor(h * 6.0);
+  const double f = h * 6.0 - i;
+  const double p = v * (1.0 - s), q = v * (1.0 - f * s), t = v * (1.0 - (1.0 - f) * s);
+  double r = v, g = t, b = p;
+  switch (static_cast<int>(i) % 6) {
+  case 1:
+    r = q, g = v, b = p;
+    break;
+  case 2:
+    r = p, g = v, b = t;
+    break;
+  case 3:
+    r = p, g = q, b = v;
+    break;
+  case 4:
+    r = t, g = p, b = v;
+    break;
+  case 5:
+    r = v, g = p, b = q;
+    break;
+  default:
+    break;
+  }
+  return {static_cast<float>(r), static_cast<float>(g), static_cast<float>(b)};
+}
+
+// splitmix64: a fleet's draws, the same on every platform.
+std::uint64_t mix64(std::uint64_t &z) {
+  std::uint64_t x = (z += 0x9e3779b97f4a7c15ull);
+  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+  x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+  return x ^ (x >> 31);
+}
+
+// `n` free points of grid `on` (`dist` its distance field) at least `clearance` from anything
+// blocked and, when they can be, `sep` from each other, drawn from `seed` among the samples whose
+// column is in [c0, c1) (all of them when that band has none free): a fleet's starts and goals.
+// Empty when nothing is free. Linear in n (the separation is checked in a hash of cells).
+std::vector<std::array<double, 2>> band_points(const cvc::nav::world_grid &on,
+                                               const std::vector<float> &dist, std::uint64_t seed,
+                                               int n, double clearance, double sep, int c0,
+                                               int c1) {
+  std::vector<std::size_t> pool;
+  const auto fill = [&](int a, int b, bool clear) {
+    a = std::max(a, 0);
+    b = std::min(b, on.cols);
+    for (int r = 0; r < on.rows; ++r)
+      for (int c = a; c < b; ++c) {
+        const std::size_t i = static_cast<std::size_t>(r) * on.cols + c;
+        if (i < dist.size() && (clear ? dist[i] >= clearance : dist[i] > 0.0f))
+          pool.push_back(i);
+      }
+  };
+  fill(c0, c1, true);
+  if (pool.empty())
+    fill(c0, c1, false);
+  if (pool.empty())
+    fill(0, on.cols, true);
+  if (pool.empty())
+    fill(0, on.cols, false);
+  std::vector<std::array<double, 2>> pts;
+  if (pool.empty() || n <= 0)
+    return pts;
+  const double h = on.cell();
+  const double cell = std::max(sep, h);
+  std::unordered_map<std::uint64_t, std::vector<std::size_t>> cells_of;
+  const auto key = [&](double x, double y) {
+    const auto ix = static_cast<std::int64_t>(std::floor((x - on.min_x) / cell));
+    const auto iy = static_cast<std::int64_t>(std::floor((y - on.min_y) / cell));
+    return (static_cast<std::uint64_t>(ix) << 32) ^ static_cast<std::uint32_t>(iy);
+  };
+  const auto crowded = [&](double x, double y) {
+    if (!(sep > 0.0))
+      return false;
+    const auto ix = static_cast<std::int64_t>(std::floor((x - on.min_x) / cell));
+    const auto iy = static_cast<std::int64_t>(std::floor((y - on.min_y) / cell));
+    for (std::int64_t dx = -1; dx <= 1; ++dx)
+      for (std::int64_t dy = -1; dy <= 1; ++dy) {
+        const auto it = cells_of.find((static_cast<std::uint64_t>(ix + dx) << 32) ^
+                                      static_cast<std::uint32_t>(iy + dy));
+        if (it != cells_of.end())
+          for (std::size_t k : it->second)
+            if (std::hypot(pts[k][0] - x, pts[k][1] - y) < sep)
+              return true;
+      }
+    return false;
+  };
+  std::uint64_t z = seed;
+  pts.reserve(static_cast<std::size_t>(n));
+  for (int k = 0; k < n; ++k) {
+    std::array<double, 2> p{};
+    for (int t = 0; t < 32; ++t) {
+      const std::size_t i = pool[mix64(z) % pool.size()];
+      p = {on.min_x + static_cast<double>(i % on.cols) * h,
+           on.min_y + static_cast<double>(i / on.cols) * h};
+      if (!crowded(p[0], p[1]))
+        break;
+    }
+    cells_of[key(p[0], p[1])].push_back(pts.size());
+    pts.push_back(p);
+  }
+  return pts;
 }
 
 // "r,g,b" in [0, 1]; false (and `out` unchanged) for anything else.
@@ -237,7 +344,182 @@ entity_intent intent_from_keys(const std::array<std::string, kIntentKeys> &v) {
   return in;
 }
 
+// A whole number of text (std::stod's, "nan" and "inf" included): false for anything else.
+bool parse_number(const std::string &t, double &out) {
+  if (t.empty())
+    return false;
+  try {
+    std::size_t used = 0;
+    const double x = std::stod(t, &used);
+    if (used != t.size())
+      return false;
+    out = x;
+    return true;
+  } catch (const std::exception &) {
+    return false;
+  }
+}
+
+// A pose's numbers as a pose takes them: x, y, the angles, speed and steer finite; z and the time
+// finite or not given (NaN), never infinite.
+bool finite_pose(const entity_pose &p) {
+  const auto given = [](double v) { return std::isfinite(v) || std::isnan(v); };
+  return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.heading) &&
+         std::isfinite(p.pitch) && std::isfinite(p.roll) && std::isfinite(p.speed) &&
+         std::isfinite(p.steer) && given(p.z) && given(p.time);
+}
+
+// Two poses the same, number for number (NaN the same as NaN).
+bool same_pose(const entity_pose &a, const entity_pose &b) {
+  const auto eq = [](double u, double v) { return u == v || (std::isnan(u) && std::isnan(v)); };
+  return eq(a.x, b.x) && eq(a.y, b.y) && eq(a.z, b.z) && eq(a.heading, b.heading) &&
+         eq(a.pitch, b.pitch) && eq(a.roll, b.roll) && eq(a.speed, b.speed) &&
+         eq(a.steer, b.steer) && eq(a.time, b.time) && a.rear_axle == b.rear_axle;
+}
+
+// The rotation Rz(heading) Ry(pitch) Rx(roll) as a quaternion (w, x, y, z).
+ph::quat pose_quat(double heading, double pitch, double roll) {
+  const double ch = std::cos(0.5 * heading), sh = std::sin(0.5 * heading);
+  const double cp = std::cos(0.5 * pitch), sp = std::sin(0.5 * pitch);
+  const double cr = std::cos(0.5 * roll), sr = std::sin(0.5 * roll);
+  return {ch * cp * cr + sh * sp * sr, ch * cp * sr - sh * sp * cr, ch * sp * cr + sh * cp * sr,
+          sh * cp * cr - ch * sp * sr};
+}
+
+// A row-major 4x4 matrix's translation and its rotation's heading, pitch and roll (R = Rz Ry Rx).
+void pose_from_matrix(const double m[16], entity_pose &p) {
+  p.x = m[3];
+  p.y = m[7];
+  p.z = m[11];
+  p.pitch = std::asin(std::clamp(-m[8], -1.0, 1.0));
+  p.heading = std::atan2(m[4], m[0]);
+  p.roll = std::atan2(m[9], m[10]);
+}
+
+// "x,y,..." or "x y ...": the numbers, all of them, or false.
+bool parse_numbers(const std::string &s, std::vector<double> &out) {
+  out.clear();
+  std::string tok;
+  const auto take = [&]() {
+    if (tok.empty())
+      return true;
+    double v = 0.0;
+    if (!parse_number(tok, v))
+      return false;
+    out.push_back(v);
+    tok.clear();
+    return true;
+  };
+  for (const char ch : s) {
+    if (ch == ',' || ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
+      if (!take())
+        return false;
+    } else {
+      tok += ch;
+    }
+  }
+  return take();
+}
+
+// A pose's keys under `<base>.pose`, in this order.
+constexpr const char *kPoseLeaves[] = {"x",     "y",     "z", "heading", "pitch", "roll",
+                                       "speed", "steer", "t", "ref",     "matrix"};
+constexpr std::size_t kPoseKeys = sizeof(kPoseLeaves) / sizeof(kPoseLeaves[0]);
+
+// The pose the keys say: `matrix` (16 numbers, row-major) when it is one, else x and y (both
+// needed) and the rest; a value that is not a number counts as not given. False: no pose.
+bool pose_from_keys(const std::array<std::string, kPoseKeys> &v, entity_pose &out) {
+  entity_pose p;
+  std::vector<double> m;
+  if (!v[10].empty() && parse_numbers(v[10], m) && m.size() == 16) {
+    pose_from_matrix(m.data(), p);
+  } else {
+    if (!parse_number(v[0], p.x) || !parse_number(v[1], p.y))
+      return false;
+    parse_number(v[2], p.z);
+    parse_number(v[3], p.heading);
+    parse_number(v[4], p.pitch);
+    parse_number(v[5], p.roll);
+  }
+  parse_number(v[6], p.speed);
+  parse_number(v[7], p.steer);
+  parse_number(v[8], p.time);
+  p.rear_axle = v[9] == "rear" || v[9] == "rear_axle";
+  if (!finite_pose(p))
+    return false;
+  out = p;
+  return true;
+}
+
 } // namespace
+
+std::string pack_poses(const std::vector<std::pair<std::string, entity_pose>> &records) {
+  std::string out;
+  char buf[32];
+  const auto put = [&](double v) {
+    if (std::isnan(v))
+      out += " nan";
+    else {
+      std::snprintf(buf, sizeof(buf), " %.17g", v);
+      out += buf;
+    }
+  };
+  for (const auto &[key, p] : records) {
+    if (!out.empty())
+      out += '\n';
+    out += key;
+    for (const double v : {p.x, p.y, p.z, p.heading, p.pitch, p.roll, p.speed, p.steer, p.time})
+      put(v);
+    if (p.rear_axle)
+      out += " rear";
+  }
+  return out;
+}
+
+bool parse_poses(const std::string &text, std::vector<std::pair<std::string, entity_pose>> &out) {
+  out.clear();
+  bool all = true;
+  std::string record;
+  const auto take = [&]() {
+    std::vector<std::string> tok;
+    std::string t;
+    for (const char ch : record) {
+      if (ch == ' ' || ch == '\t' || ch == ',' || ch == '\r') {
+        if (!t.empty())
+          tok.push_back(std::move(t));
+        t.clear();
+      } else {
+        t += ch;
+      }
+    }
+    if (!t.empty())
+      tok.push_back(std::move(t));
+    record.clear();
+    if (tok.empty())
+      return;
+    entity_pose p;
+    double *fields[9] = {&p.x,    &p.y,     &p.z,     &p.heading, &p.pitch,
+                         &p.roll, &p.speed, &p.steer, &p.time};
+    bool ok =
+        tok.size() == 10 ||
+        (tok.size() == 11 && (tok[10] == "rear" || tok[10] == "center" || tok[10] == "centre"));
+    for (std::size_t i = 0; ok && i < 9; ++i)
+      ok = parse_number(tok[i + 1], *fields[i]);
+    p.rear_axle = tok.size() == 11 && tok[10] == "rear";
+    if (ok && finite_pose(p))
+      out.emplace_back(tok[0], p);
+    else
+      all = false;
+  };
+  for (const char ch : text) {
+    if (ch == '\n' || ch == ';')
+      take();
+    else
+      record += ch;
+  }
+  take();
+  return all;
+}
 
 const char *intent_mode_name(entity_intent::mode m) {
   switch (m) {
@@ -371,7 +653,7 @@ std::string find_vehicle_model(const std::string &name) {
 
 void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std::string &doc_dir,
                            const std::vector<SceneAsset> &assets,
-                           std::vector<std::string> *warnings) {
+                           std::vector<std::string> *warnings, const std::vector<SceneData> &data) {
   namespace fs = std::filesystem;
   const auto warn = [&](const std::string &w) {
     if (warnings)
@@ -428,9 +710,33 @@ void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std
       }
       continue;
     }
+    if (look.kind == "data") {
+      if (!look.uri.empty()) // resolved already (a look a host passed on whole)
+        continue;
+      const SceneData *entry = nullptr;
+      for (const SceneData &d : data)
+        if (d.name == look.data)
+          entry = &d;
+      if (entry && !entry->uri.empty()) {
+        look.uri = entry->uri;
+        look.subpath = entry->path;
+      } else {
+        warn("world: vehicles: " + v.id + ": look: no data: entry '" + look.data +
+             "' in the document; it is drawn as its box");
+        look = vehicle_look{};
+        look.kind = "box";
+      }
+      continue;
+    }
     if (look.kind == "file" && !doc_dir.empty() && relative(look.path))
       look.path = (fs::path(doc_dir) / look.path).string();
   }
+}
+
+void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std::string &doc_dir,
+                           const std::vector<SceneAsset> &assets,
+                           std::vector<std::string> *warnings) {
+  resolve_vehicle_looks(archetypes, doc_dir, assets, warnings, std::vector<SceneData>{});
 }
 
 vehicle_stats vehicle_stats_of(const ph::vehicle_desc &d) {
@@ -478,6 +784,7 @@ struct WorldVehicles::impl {
   double tick = cvc::kSimTick; // the navigator's tick asked for (s; set_tick)
   bool ready = false;      // cfg is the grid's
   bool stepping = false;   // before_step() began a step that after_step() ends
+  bool posing = false;     // and moved the `pose` entities in it
   int every = 1;           // physics steps per nav tick
   std::uint64_t steps = 0; // physics steps since the navigator was built
   std::uint64_t draws = 0; // goals drawn (each draw's seed)
@@ -533,8 +840,48 @@ struct WorldVehicles::impl {
     // The dynamic and kinematic plants' odometer (m), from its position at each navigator tick.
     double distance = 0.0, ox = 0.0, oy = 0.0;
     bool odometer = false;
+    int group = -1;    // its fleet (start: fleet:) in `groups`, -1 none
+    int rally = -1;    // its team's rally point in that fleet, -1 none
+    bool hold = false; // its goal is held (a fleet's): it does not wander from it
+    // A `pose` entity (its controller pose): no fleet, a kinematic box moved to its poses.
+    bool posed = false;
+    ph::body_id box; // its chassis, once it has a pose and the world has it
+    bool has_pose = false;
+    // Its poses, as its chassis's centre: the one it moves from and the one it moves to (the last
+    // taken), the world tick that one was taken at (the start of the step) and the span it moves
+    // over (s; 0: it is there).
+    entity_pose from, to;
+    std::uint64_t taken = 0;
+    double span = 0.0;
+    entity_pose drawn;   // where its chassis is at the end of the last step (z resolved)
+    bool moving = false; // its chassis was moved over the last step (it has a velocity)
+    double rolled = 0.0; // m its wheels have rolled, at its speed
+    // Its pose keys as last read: its own, the poses table's by id, by name and by the entry it
+    // was spawned from; and its last record in each packed value (its own table's, the poses
+    // table's).
+    std::array<std::string, 4> seen_pose;
+    std::array<entity_pose, 2> seen_packed;
+    std::array<bool, 2> have_packed{false, false};
+    std::string table_key; // the poses table's entry it was spawned from ("" none)
+    std::string table_ask; // and what that entry asked for (sync_pose_table)
   };
   std::vector<entity> ents;
+
+  // The fleets (start: entries with fleet:): their vehicles laid out together from a seed, in
+  // teams at rally points, published as one (vehicles.fleets.<name>.*).
+  struct fleet_group {
+    vehicle_start start;
+    std::uint64_t seed = 0; // the layout's: the start's, one more at each reseed
+    bool laid_out = false;
+    std::vector<std::array<double, 2>> rally; // each team's point (world metres)
+    std::vector<std::array<float, 3>> colors; // each team's colour
+    std::vector<std::string> seen_rally;      // each team's "x|y" as last written or read
+    std::string seen_restart, seen_reseed;
+    std::string status;
+    bool summary() const { return start.keys != "all"; }
+  };
+  std::vector<fleet_group> groups;
+  bool hold_placing = false; // spawn() leaves its entity unplaced (a fleet places it laid out)
   std::uint64_t next_id = 1;
   std::uint64_t rev = 0;
   std::string status;
@@ -549,6 +896,17 @@ struct WorldVehicles::impl {
   std::map<std::uint64_t, entity_intent> intents;
   std::set<std::uint64_t> live;
   std::string ikey; // the intents table (world: vehicles: intents:), "" none
+  // Poses (the `pose` controller). `mu` guards `pending` (set_pose's, taken at the next step),
+  // `taken` (each one's last pose, for pose()) and `posed_ids`.
+  std::map<std::uint64_t, entity_pose> pending, taken;
+  std::set<std::uint64_t> posed_ids;
+  std::size_t posed_count = 0; // the `pose` entities (the stepping thread's)
+  std::string pkey;            // the poses table (world: vehicles: poses:), "" none
+  double pose_jump = 20.0;     // m: a pose farther from the last is taken at once
+  std::string seen_own_packed, seen_table_packed; // the packed values as last read
+  // The table's entries a spawn refused, by key: what they asked for then (not asked again until
+  // it changes).
+  std::map<std::string, std::string> table_refused;
   // The scene's wind (set_wind), for the plants that feel no field.
   std::shared_ptr<const ph::flow_velocity> wind;
   // The still water this runtime added for its boats (ensure_water), invalid when none.
@@ -565,6 +923,8 @@ struct WorldVehicles::impl {
   }
 
   fleet *fleet_of(const entity &e) const {
+    if (e.posed) // a `pose` entity is no plant's
+      return nullptr;
     const auto it = fleets.find(e.plant);
     return it == fleets.end() ? nullptr : it->second.get();
   }
@@ -629,6 +989,36 @@ struct WorldVehicles::impl {
     return p;
   }
 
+  // A placed `pose` entity's chassis, where the last step put it.
+  pose posed_pose(const entity &e) const {
+    pose p;
+    p.chassis = e.box;
+    const entity_pose &d = e.drawn;
+    p.position = {d.x, d.y, d.z};
+    p.rotation = pose_quat(d.heading, d.pitch, d.roll);
+    p.yaw = d.heading;
+    p.speed = d.speed;
+    p.vx = d.speed * std::cos(d.heading);
+    p.vy = d.speed * std::sin(d.heading);
+    p.steer = d.steer;
+    return p;
+  }
+  // Where any placed entity's chassis is (false: not placed).
+  bool where(const entity &e, pose &out) const {
+    if (e.posed) {
+      if (!e.box.valid())
+        return false;
+      out = posed_pose(e);
+      return true;
+    }
+    const fleet *f = fleet_of(e);
+    const int i = index(e);
+    if (!f || i < 0)
+      return false;
+    out = pose_of(*f, i);
+    return true;
+  }
+
   // The kinematic bicycle's pose as its box takes it: the box's centre (ahead of its rear axle by
   // the axle's offset), on the ground under it, facing its heading.
   std::array<double, 4> bicycle_box(const fleet &f, int i, const ph::vehicle_desc &d) const {
@@ -688,6 +1078,10 @@ struct WorldVehicles::impl {
         cfg, plan->occupancy.data(), sense == "fog" ? unknown.data() : plan->occupancy.data(),
         cvc::nav::coef_mlp::default_biased(), nullptr, nullptr, nullptr, 0);
     f->sim->set_capture_drive_telemetry(drive_tel);
+    // Its kernels on the app's pool: without one each fans out by spawning and joining threads
+    // per call, most of a tick for hundreds of vehicles (FLEETS_AND_NIGHT_ROADMAP.md FL0).
+    if (app)
+      f->sim->set_thread_pool(&app->computePool());
     ph::nav_plant_options o;
     o.step_world = false; // the world steps on the clock; the plant commands and reads
     o.ground_bodies = ground;
@@ -820,6 +1214,15 @@ struct WorldVehicles::impl {
 
   // An entity out of its fleet: its vehicle (or box) out of the world.
   void remove_from_fleet(entity &e) {
+    if (e.posed) {
+      if (e.box.valid())
+        try {
+          world->remove_body(e.box);
+        } catch (const std::exception &) {
+        }
+      e.box = ph::body_id{};
+      return;
+    }
     fleet *f = fleet_of(e);
     if (!f || !e.agent)
       return;
@@ -1045,13 +1448,9 @@ struct WorldVehicles::impl {
   // Whether a placed vehicle other than `self` is within r metres of (x, y).
   bool crowded(double x, double y, double r, const entity *self) const {
     for (const entity &o : ents) {
-      if (&o == self)
+      pose p;
+      if (&o == self || !where(o, p))
         continue;
-      const fleet *f = fleet_of(o);
-      const int i = index(o);
-      if (!f || i < 0)
-        continue;
-      const pose p = pose_of(*f, i);
       if (std::hypot(p.position.x - x, p.position.y - y) < r)
         return true;
     }
@@ -1059,12 +1458,18 @@ struct WorldVehicles::impl {
   }
 
   // Put entity `e` in the world: at its start if that is free, else at a drawn point. "" or why.
+  // A `pose` entity goes where its pose is, once it has one, with or without a grid.
   std::string place(entity &e) {
+    if (e.posed)
+      return place_posed(e);
     if (!ready)
       return "waiting for the world's grid";
     const double clearance = std::hypot(e.desc.half_extents.x, e.desc.half_extents.y) + 0.5;
     if (floats(e) && !ground_of(e).any())
       return "no water deep and open enough for " + e.spec.archetype;
+    if (e.group >= 0 && static_cast<std::size_t>(e.group) < groups.size() &&
+        !groups[static_cast<std::size_t>(e.group)].laid_out)
+      lay_out(static_cast<std::size_t>(e.group));
     if (!e.started) {
       double px = 0.0, py = 0.0, ph = 0.0;
       // A start off its medium (a car's in a lake, a boat's ashore) moves to a free point.
@@ -1092,7 +1497,9 @@ struct WorldVehicles::impl {
       e.sx = p[0];
       e.sy = p[1];
     }
-    if (e.spec.controller == "nav@1") {
+    if (e.hold) {
+      // A fleet's: its goal is where its layout (or its rally point since) put it.
+    } else if (e.spec.controller == "nav@1") {
       const std::array<double, 2> g = draw_point(clearance, &e);
       e.gx = g[0];
       e.gy = g[1];
@@ -1161,6 +1568,322 @@ struct WorldVehicles::impl {
     return std::string();
   }
 
+  // ---- `pose` entities ----
+
+  // Where a chassis's centre stands at (x, y) on the ground, as a kinematic box does.
+  double stand_z(const entity &e, double x, double y) const {
+    const double wheel = e.desc.axles.empty() ? 0.4 : e.desc.axles.front().wheel_radius;
+    return ground_height(x, y) + e.desc.half_extents.z + wheel;
+  }
+
+  // A pose given to `e`, from now: where it moves to over the steps from `now` (the world tick
+  // at the start of the step it is taken at), as entity_pose says.
+  void take_pose(entity &e, const entity_pose &given, std::uint64_t now) {
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      taken[e.id] = given;
+    }
+    entity_pose c = given;
+    if (c.rear_axle) { // its chassis's centre, ahead of the rear axle along its heading
+      const double rear = rear_axle_x(e.desc);
+      c.x -= rear * std::cos(c.heading);
+      c.y -= rear * std::sin(c.heading);
+      c.rear_axle = false;
+    }
+    if (e.has_pose && std::isfinite(c.time) && std::isfinite(e.to.time)) {
+      if (c.time == e.to.time)
+        return; // the same pose again
+      const entity_pose &at = e.box.valid() ? e.drawn : e.to;
+      const double dz = std::isfinite(c.z) && std::isfinite(at.z) ? c.z - at.z : 0.0;
+      if (c.time > e.to.time && std::sqrt((c.x - at.x) * (c.x - at.x) +
+                                          (c.y - at.y) * (c.y - at.y) + dz * dz) <= pose_jump) {
+        e.span = c.time - e.to.time; // from where it is now, over the two poses' span
+        e.from = at;
+        e.to = c;
+        e.taken = now;
+        return;
+      }
+    }
+    e.from = e.to = c; // the first, an untimed one, a jump or a time gone back: there at once
+    e.span = 0.0;
+    e.taken = now;
+    e.has_pose = true;
+  }
+
+  // Where `e` is at world tick `t`: between its two poses, or at the last; its z resolved.
+  entity_pose target_at(const entity &e, std::uint64_t t) const {
+    entity_pose p = e.to;
+    if (e.span > 0.0 && t > e.taken) {
+      const double elapsed = static_cast<double>(t - e.taken) * world->config().fixed_dt;
+      const double s = std::clamp(elapsed / e.span, 0.0, 1.0);
+      if (s < 1.0 - 1e-12) { // the span's end is the pose itself, not a rounding short of it
+        const entity_pose &a = e.from, &b = e.to;
+        const auto arc = [s](double u, double v) {
+          return u + s * std::remainder(v - u, 2.0 * kPi);
+        };
+        p.x = a.x + s * (b.x - a.x);
+        p.y = a.y + s * (b.y - a.y);
+        p.z = std::isfinite(b.z) && std::isfinite(a.z) ? a.z + s * (b.z - a.z) : b.z;
+        p.heading = arc(a.heading, b.heading);
+        p.pitch = arc(a.pitch, b.pitch);
+        p.roll = arc(a.roll, b.roll);
+        p.speed = a.speed + s * (b.speed - a.speed);
+        p.steer = a.steer + s * (b.steer - a.steer);
+        p.time = std::isfinite(a.time) ? a.time + s * (b.time - a.time) : b.time;
+      }
+    }
+    if (!std::isfinite(p.z))
+      p.z = stand_z(e, p.x, p.y);
+    return p;
+  }
+
+  // Its chassis into the world at `p`: a kinematic box, which pushes what it meets.
+  void add_posed_body(entity &e, const entity_pose &p) {
+    ph::body_desc b;
+    b.shape = ph::box{e.desc.half_extents};
+    b.motion = ph::motion_type::kinematic;
+    b.position = {p.x, p.y, p.z};
+    b.rotation = pose_quat(p.heading, p.pitch, p.roll);
+    b.allow_sleeping = false;
+    e.box = world->add_body(b);
+    e.drawn = p;
+    e.moving = false;
+    ++rev;
+  }
+
+  std::string place_posed(entity &e) {
+    if (!e.has_pose || e.box.valid())
+      return std::string(); // it waits for its first pose
+    try {
+      add_posed_body(e, target_at(e, world->tick()));
+    } catch (const std::exception &ex) {
+      e.box = ph::body_id{};
+      return ex.what();
+    }
+    return std::string();
+  }
+
+  // Its chassis to `p` by the end of this step: along the way (moved, so it pushes), at once for a
+  // jump, and held exactly there, at rest, while the pose does not change.
+  void move_posed(entity &e, const entity_pose &p, double dt) {
+    const double dx = p.x - e.drawn.x, dy = p.y - e.drawn.y, dz = p.z - e.drawn.z;
+    const ph::quat q = pose_quat(p.heading, p.pitch, p.roll);
+    const bool still = dx == 0.0 && dy == 0.0 && dz == 0.0 && p.heading == e.drawn.heading &&
+                       p.pitch == e.drawn.pitch && p.roll == e.drawn.roll;
+    if (still && !e.moving) {
+      // at rest where it is
+    } else if (still || std::sqrt(dx * dx + dy * dy + dz * dz) > pose_jump) {
+      ph::body_state s; // there now, with no velocity
+      s.position = {p.x, p.y, p.z};
+      s.rotation = q;
+      world->set_state(e.box, s);
+      e.moving = false;
+    } else {
+      world->move_kinematic(e.box, {p.x, p.y, p.z}, q);
+      e.moving = true;
+    }
+    e.rolled += p.speed * dt;
+    e.drawn = p;
+  }
+
+  entity *entity_by_id(std::uint64_t id) {
+    for (entity &e : ents)
+      if (e.id == id)
+        return &e;
+    return nullptr;
+  }
+  // The `pose` entity a poses table's key names: the one its entry spawned, else by id, else by
+  // name.
+  entity *posed_by_key(const std::string &key) {
+    for (entity &e : ents)
+      if (e.posed && e.table_key == key)
+        return &e;
+    for (entity &e : ents)
+      if (e.posed && std::to_string(e.id) == key)
+        return &e;
+    for (entity &e : ents)
+      if (e.posed && e.spec.name == key)
+        return &e;
+    return nullptr;
+  }
+
+  // A packed value's records (pack_poses) under `table`.poses, read when it changed: each record
+  // that changed is a new pose for the entity it names (by id in the entities' own table, by
+  // posed_by_key in the poses table).
+  void read_packed(cvc::state &r, const std::string &table, std::string &seen, std::size_t slot,
+                   std::uint64_t now) {
+    if (table.empty())
+      return;
+    cvc::state *n = r.findDescendant(table + cvc::state::SEPARATOR + "poses");
+    std::string text = n ? n->value() : std::string();
+    if (text == seen)
+      return;
+    seen = std::move(text);
+    std::vector<std::pair<std::string, entity_pose>> records;
+    parse_poses(seen, records);
+    for (const auto &[key, p] : records) {
+      entity *e = nullptr;
+      if (slot == 0) {
+        for (entity &x : ents)
+          if (x.posed && std::to_string(x.id) == key)
+            e = &x;
+      } else {
+        e = posed_by_key(key);
+      }
+      if (!e || (e->have_packed[slot] && same_pose(e->seen_packed[slot], p)))
+        continue;
+      e->seen_packed[slot] = p;
+      e->have_packed[slot] = true;
+      take_pose(*e, p, now);
+    }
+  }
+
+  // Each `pose` entity's pose keys (`<base>.pose.*`: its own, the poses table's by id, by name and
+  // by its entry), then the packed values: a change (from what they read last) is a new pose.
+  void read_pose_keys(std::uint64_t now) {
+    cvc::state *r = root();
+    if (!r || (ekey.empty() && pkey.empty()))
+      return;
+    for (entity &e : ents) {
+      if (!e.posed)
+        continue;
+      const std::string id = std::to_string(e.id);
+      const auto in_table = [&](const std::string &key) {
+        return pkey.empty() || key.empty() ? std::string() : pkey + cvc::state::SEPARATOR + key;
+      };
+      const bool by_name = cvc::state::isValidStateName(e.spec.name) && e.spec.name != id;
+      const bool by_entry =
+          !e.table_key.empty() && e.table_key != id && (!by_name || e.table_key != e.spec.name);
+      const std::string bases[4] = {ekey.empty() ? std::string()
+                                                 : ekey + cvc::state::SEPARATOR + id,
+                                    in_table(id), by_name ? in_table(e.spec.name) : std::string(),
+                                    by_entry ? in_table(e.table_key) : std::string()};
+      for (std::size_t k = 0; k < 4; ++k) {
+        if (bases[k].empty())
+          continue;
+        cvc::state *base = r->findDescendant(bases[k] + cvc::state::SEPARATOR + "pose");
+        std::array<std::string, kPoseKeys> v;
+        std::string sig;
+        if (base)
+          for (std::size_t j = 0; j < kPoseKeys; ++j) {
+            if (cvc::state *leaf = base->findDescendant(kPoseLeaves[j]))
+              v[j] = leaf->value();
+            sig += v[j] + "|";
+          }
+        if (sig == e.seen_pose[k])
+          continue;
+        e.seen_pose[k] = sig;
+        entity_pose p;
+        if (base && pose_from_keys(v, p))
+          take_pose(e, p, now);
+      }
+    }
+    read_packed(*r, ekey, seen_own_packed, 0, now);
+    read_packed(*r, pkey, seen_table_packed, 1, now);
+  }
+
+  // Before each physics step: the poses given since the last (the keys, the packed values, then
+  // set_pose's), and each `pose` entity's chassis on its way to where it is at the step's end (a
+  // new one into the world at its first pose).
+  void pose_step() {
+    const double dt = world->config().fixed_dt;
+    const std::uint64_t now = world->tick(), end = now + 1;
+    read_pose_keys(now);
+    std::map<std::uint64_t, entity_pose> given;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      given.swap(pending);
+    }
+    for (const auto &[id, p] : given)
+      if (entity *e = entity_by_id(id); e && e->posed)
+        take_pose(*e, p, now);
+    for (entity &e : ents) {
+      if (!e.posed || !e.has_pose)
+        continue;
+      if (!ready) { // no navigator tick counts the contacts afresh: each step does
+        e.hits = 0;
+        e.hit_vehicle = false;
+      }
+      const entity_pose p = target_at(e, end);
+      try {
+        if (!e.box.valid())
+          add_posed_body(e, p);
+        else
+          move_posed(e, p, dt);
+      } catch (const std::exception &ex) {
+        status = "entity " + std::to_string(e.id) + ": " + ex.what();
+      }
+    }
+  }
+
+  // The poses table's entries that name an archetype: each one's `pose` entity, spawned when it
+  // first appears (or asks for another archetype or identity) and removed when it goes.
+  void sync_pose_table(WorldVehicles &self) {
+    cvc::state *r = root();
+    if (!r || pkey.empty())
+      return;
+    std::map<std::string, entity_spec> want;
+    std::map<std::string, std::string> asked; // each entry's request, as text
+    if (cvc::state *t = r->findDescendant(pkey))
+      for (const std::string &key : t->childNames()) {
+        if (key == "poses")
+          continue;
+        cvc::state *c = t->findDescendant(key);
+        const auto leaf = [&](const char *name) {
+          cvc::state *l = c ? c->findDescendant(name) : nullptr;
+          return l ? l->value() : std::string();
+        };
+        entity_spec s;
+        s.archetype = leaf("archetype");
+        if (s.archetype.empty())
+          continue;
+        s.controller = "pose";
+        s.name = leaf("name");
+        if (s.name.empty())
+          s.name = key;
+        const std::string team = leaf("team"), color = leaf("color"), color2 = leaf("color2");
+        double n = 0.0;
+        if (parse_number(team, n) && std::isfinite(n))
+          s.team = static_cast<int>(n);
+        parse_rgb(color, s.color);
+        parse_rgb(color2, s.color2);
+        asked[key] = s.archetype + "|" + s.name + "|" + team + "|" + color + "|" + color2;
+        want[key] = std::move(s);
+      }
+    // Those whose entry went, or asks for something else now, go.
+    std::vector<std::uint64_t> gone;
+    for (const entity &e : ents)
+      if (!e.table_key.empty()) {
+        const auto it = asked.find(e.table_key);
+        if (it == asked.end() || it->second != e.table_ask)
+          gone.push_back(e.id);
+      }
+    for (const std::uint64_t id : gone)
+      self.despawn(id);
+    for (auto it = table_refused.begin(); it != table_refused.end();)
+      it = asked.count(it->first) && asked[it->first] == it->second ? std::next(it)
+                                                                    : table_refused.erase(it);
+    for (auto &[key, spec] : want) {
+      if (table_refused.count(key))
+        continue;
+      bool have = false;
+      for (const entity &e : ents)
+        have = have || e.table_key == key;
+      if (have)
+        continue;
+      std::string why;
+      const std::uint64_t id = self.spawn(spec, &why);
+      if (!id) {
+        table_refused[key] = asked[key];
+        status = "poses table entry '" + key + "': " + why;
+        continue;
+      }
+      entity *made = entity_by_id(id);
+      made->table_key = key;
+      made->table_ask = asked[key];
+    }
+  }
+
   // Every entity out of the navigators (its vehicle out of the world, unless the world is gone).
   void unplace_all(bool world_gone) {
     if (world_gone) { // the vehicles went with the old world: forget them, don't remove them
@@ -1173,8 +1896,12 @@ struct WorldVehicles::impl {
           f->boat->world_gone();
         f->boxes.clear();
       }
-      for (entity &e : ents)
+      for (entity &e : ents) {
         e.agent = 0;
+        e.box = ph::body_id{};
+        e.from = e.to; // a `pose` entity goes back in at its last pose, at once
+        e.span = 0.0;
+      }
       fleets.clear();
       return;
     }
@@ -1188,6 +1915,272 @@ struct WorldVehicles::impl {
         if (std::string why = place(e); !why.empty() && ready)
           status = "entity " + std::to_string(e.id) + ": " + why;
     ++rev;
+  }
+
+  // Fleet `gi`'s layout: every vehicle's start and goal from its seed, its teams by their goals'
+  // latitude (each team's goal held at its rally point) and their colours, as the nav demos'
+  // swarms are made (sim_world's scatter_free, SceneSwarm's targets). Its vehicles are not placed
+  // here; place() places each at its start.
+  void lay_out(std::size_t gi) {
+    fleet_group &g = groups[gi];
+    g.laid_out = true;
+    std::vector<entity *> mine;
+    for (entity &e : ents)
+      if (e.group == static_cast<int>(gi))
+        mine.push_back(&e);
+    if (mine.empty() || !grid)
+      return;
+    const entity &first = *mine.front();
+    const WorldSpawns::start_ground gr = ground_of(first);
+    const cvc::nav::world_grid &on = gr.grid ? *gr.grid : *grid;
+    const std::vector<float> &dist = gr.sdf ? *gr.sdf : sdf;
+    double clearance = std::hypot(first.desc.half_extents.x, first.desc.half_extents.y) + 0.5;
+    if (floats(first))
+      clearance = std::max(clearance, gr.clearance);
+    const int n = static_cast<int>(mine.size());
+    const bool opposed = g.start.layout == "opposed" && on.cols > 1;
+    const int lo = opposed ? static_cast<int>(on.cols * 0.30) : on.cols;
+    const int hi = opposed ? static_cast<int>(on.cols * 0.70) : 0;
+    std::uint64_t z = g.seed;
+    const std::uint64_t start_seed = mix64(z), goal_seed = mix64(z);
+    std::vector<std::array<double, 2>> starts, goals;
+    std::vector<double> headings(static_cast<std::size_t>(n),
+                                 std::numeric_limits<double>::quiet_NaN());
+    if (g.start.layout == "points" && spawns) {
+      for (int k = 0; k < n; ++k) {
+        double px = 0.0, py = 0.0, ph = 0.0;
+        const auto taken = [&](double x, double y, double r) {
+          for (const std::array<double, 2> &s : starts)
+            if (std::hypot(s[0] - x, s[1] - y) < r)
+              return true;
+          return crowded(x, y, r, nullptr);
+        };
+        if (!spawns->choose(mine[static_cast<std::size_t>(k)]->spec.team, first.spec.archetype,
+                            taken, px, py, ph))
+          break;
+        starts.push_back({px, py});
+        headings[static_cast<std::size_t>(k)] = ph;
+      }
+      if (static_cast<int>(starts.size()) < n) { // too few points: the rest drawn
+        const std::vector<std::array<double, 2>> more =
+            band_points(on, dist, start_seed, n - static_cast<int>(starts.size()), clearance,
+                        2.0 * clearance, 0, on.cols);
+        starts.insert(starts.end(), more.begin(), more.end());
+      }
+    } else {
+      starts = band_points(on, dist, start_seed, n, clearance, 2.0 * clearance, 0, lo);
+    }
+    goals = band_points(on, dist, goal_seed, n, clearance, 0.0, hi, on.cols);
+    if (static_cast<int>(starts.size()) < n || static_cast<int>(goals.size()) < n) {
+      g.status = "no free ground for the fleet";
+      return; // each placed as a single vehicle is
+    }
+    // Teams: one rally point per latitude band, on the goal nearest the band's centre.
+    const int T = g.start.rally;
+    std::vector<int> team(static_cast<std::size_t>(n), -1);
+    g.rally.clear();
+    g.colors.clear();
+    if (T > 0) {
+      double ymin = std::numeric_limits<double>::infinity(), ymax = -ymin, xsum = 0.0;
+      for (const std::array<double, 2> &q : goals) {
+        ymin = std::min(ymin, q[1]);
+        ymax = std::max(ymax, q[1]);
+        xsum += q[0];
+      }
+      const double xmean = xsum / n;
+      for (int t = 0; t < T; ++t) {
+        g.colors.push_back(hsv_rgb(static_cast<double>(t) / T, 0.74, 0.98));
+        const double ty = ymin + (t + 0.5) / T * std::max(1e-6, ymax - ymin);
+        std::array<double, 2> best{xmean, ty};
+        double bd = std::numeric_limits<double>::infinity();
+        for (const std::array<double, 2> &q : goals)
+          if (const double d = std::hypot(q[0] - xmean, q[1] - ty); d < bd) {
+            bd = d;
+            best = q;
+          }
+        g.rally.push_back(best);
+      }
+      for (int k = 0; k < n; ++k) {
+        const double f =
+            ymax > ymin ? (goals[static_cast<std::size_t>(k)][1] - ymin) / (ymax - ymin) : 0.0;
+        team[static_cast<std::size_t>(k)] = std::clamp(static_cast<int>(f * T), 0, T - 1);
+      }
+    }
+    const bool hsv = g.start.colors.empty() ? T > 0 : g.start.colors == "hsv";
+    for (int k = 0; k < n; ++k) {
+      entity &e = *mine[static_cast<std::size_t>(k)];
+      const std::size_t ks = static_cast<std::size_t>(k);
+      const int t = team[ks];
+      e.sx = starts[ks][0];
+      e.sy = starts[ks][1];
+      if (!g.start.has_heading && std::isfinite(headings[ks]))
+        e.spec.yaw = headings[ks];
+      e.syaw = e.spec.yaw; // not finite: toward its goal (place())
+      e.started = true;
+      e.hold = true;
+      e.rally = t;
+      if (t >= 0) {
+        e.spec.team = g.start.team + t;
+        e.gx = g.rally[static_cast<std::size_t>(t)][0];
+        e.gy = g.rally[static_cast<std::size_t>(t)][1];
+      } else {
+        e.gx = goals[ks][0];
+        e.gy = goals[ks][1];
+      }
+      if (hsv)
+        e.spec.color = t >= 0 ? g.colors[static_cast<std::size_t>(t)]
+                              : hsv_rgb(static_cast<double>(k) / n, 0.74, 0.98);
+      if (e.spec.controller != "nav@1") { // none or external: it parks where it starts
+        e.gx = e.sx;
+        e.gy = e.sy;
+      }
+    }
+    g.status = "laid out: " + std::to_string(n) + " " + first.spec.archetype +
+               (g.start.layout.empty() ? std::string(" scattered") : " " + g.start.layout) +
+               ", seed " + std::to_string(g.seed) +
+               (T > 0 ? ", " + std::to_string(T) + " rally points" : std::string());
+    publish_rally(g);
+  }
+
+  // Fleet `g`'s rally keys: vehicles.fleets.<name>.rally.count and .<t>.{x,y,color}.
+  void publish_rally(fleet_group &g) {
+    g.seen_rally.assign(g.rally.size(), std::string());
+    if (vkey.empty() || !root())
+      return;
+    const std::string at = vkey + ".fleets." + g.start.fleet + ".rally.";
+    put(at + "count", std::to_string(g.rally.size()));
+    for (std::size_t t = 0; t < g.rally.size(); ++t) {
+      const std::string x = num(g.rally[t][0]), y = num(g.rally[t][1]);
+      put(at + std::to_string(t) + ".x", x);
+      put(at + std::to_string(t) + ".y", y);
+      put(at + std::to_string(t) + ".color", rgb_text(g.colors[t]));
+      g.seen_rally[t] = x + "|" + y;
+    }
+  }
+
+  fleet_group *group_named(const std::string &name) {
+    for (fleet_group &g : groups)
+      if (g.start.fleet == name)
+        return &g;
+    return nullptr;
+  }
+
+  // Fleet `gi`'s rally point `t` to (x, y) (held to the grid): its team's goals move there.
+  bool move_rally(std::size_t gi, int t, double x, double y) {
+    fleet_group &g = groups[gi];
+    if (t < 0 || static_cast<std::size_t>(t) >= g.rally.size() || !std::isfinite(x) ||
+        !std::isfinite(y))
+      return false;
+    if (grid) {
+      x = std::clamp(x, grid->min_x, grid->max_x);
+      y = std::clamp(y, grid->min_y, grid->max_y);
+    }
+    g.rally[static_cast<std::size_t>(t)] = {x, y};
+    for (entity &e : ents)
+      if (e.group == static_cast<int>(gi) && e.rally == t && e.spec.controller == "nav@1") {
+        e.gx = x;
+        e.gy = y;
+        if (fleet *f = fleet_of(e); f && index(e) >= 0)
+          f->sim->retarget(index(e), nx(x), ny(y));
+      }
+    if (!vkey.empty() && root()) {
+      const std::string at =
+          vkey + ".fleets." + g.start.fleet + ".rally." + std::to_string(t) + ".";
+      const std::string xs = num(x), ys = num(y);
+      put(at + "x", xs);
+      put(at + "y", ys);
+      g.seen_rally[static_cast<std::size_t>(t)] = xs + "|" + ys;
+    }
+    ++rev;
+    return true;
+  }
+
+  // Fleet `gi` laid out again (from its next seed when `reseed`): its vehicles out of the world
+  // and back at their new starts.
+  void restart_group(std::size_t gi, bool reseed) {
+    fleet_group &g = groups[gi];
+    if (reseed)
+      ++g.seed;
+    for (entity &e : ents)
+      if (e.group == static_cast<int>(gi)) {
+        remove_from_fleet(e);
+        e.started = false;
+        e.hold = false;
+        e.rally = -1;
+        e.spec.team = g.start.team;
+        e.spec.yaw = g.start.has_heading ? g.start.heading * kPi / 180.0
+                                         : std::numeric_limits<double>::quiet_NaN();
+      }
+    g.laid_out = false;
+    if (ready)
+      for (entity &e : ents)
+        if (e.group == static_cast<int>(gi) && !e.agent)
+          if (std::string why = place(e); !why.empty())
+            status = "entity " + std::to_string(e.id) + ": " + why;
+    ++rev;
+  }
+
+  // Each fleet's request and rally keys: a change is a request, a rally point's a move.
+  void poll_groups() {
+    for (std::size_t gi = 0; gi < groups.size(); ++gi) {
+      fleet_group &g = groups[gi];
+      const std::string at = "fleets." + g.start.fleet + ".";
+      if (const std::string r = get(at + "restart.request"); r != g.seen_restart) {
+        g.seen_restart = r;
+        restart_group(gi, false);
+      }
+      if (const std::string r = get(at + "reseed.request"); r != g.seen_reseed) {
+        g.seen_reseed = r;
+        restart_group(gi, true);
+      }
+      for (std::size_t t = 0; t < g.rally.size() && t < g.seen_rally.size(); ++t) {
+        const std::string xs = get(at + "rally." + std::to_string(t) + ".x"),
+                          ys = get(at + "rally." + std::to_string(t) + ".y");
+        if (xs + "|" + ys == g.seen_rally[t])
+          continue;
+        g.seen_rally[t] = xs + "|" + ys;
+        char *end = nullptr;
+        const double x = std::strtod(xs.c_str(), &end);
+        const bool okx = end && end != xs.c_str();
+        const double y = std::strtod(ys.c_str(), &end);
+        if (okx && end && end != ys.c_str())
+          move_rally(gi, static_cast<int>(t), x, y);
+      }
+    }
+  }
+
+  // Each fleet's counts: vehicles.fleets.names, and vehicles.fleets.<name>.{count, placed,
+  // arrived, teams, status, seed}.
+  void publish_groups() {
+    if (vkey.empty() || !root() || groups.empty())
+      return;
+    std::string names;
+    for (std::size_t gi = 0; gi < groups.size(); ++gi) {
+      const fleet_group &g = groups[gi];
+      names += (names.empty() ? "" : ",") + g.start.fleet;
+      int count = 0, placed = 0, arrived = 0;
+      for (const entity &e : ents) {
+        if (e.group != static_cast<int>(gi))
+          continue;
+        ++count;
+        const fleet *f = fleet_of(e);
+        const int i = index(e);
+        if (!f || i < 0)
+          continue;
+        ++placed;
+        const pose p = pose_of(*f, i);
+        if (std::hypot(e.gx - p.position.x, e.gy - p.position.y) < kReach + e.desc.half_extents.x)
+          ++arrived;
+      }
+      const std::string at = vkey + ".fleets." + g.start.fleet + ".";
+      put(at + "count", std::to_string(count));
+      put(at + "placed", std::to_string(placed));
+      put(at + "arrived", std::to_string(arrived));
+      put(at + "teams", std::to_string(g.rally.size()));
+      put(at + "seed", std::to_string(g.seed));
+      put(at + "status", g.status);
+    }
+    put(vkey + ".fleets.names", names);
   }
 
   // Each step of a tick: the dynamic plants' substep, the kinematic boxes a step further along the
@@ -1238,10 +2231,8 @@ struct WorldVehicles::impl {
   void count_contacts() {
     std::map<std::uint64_t, entity *> by_chassis;
     for (entity &e : ents)
-      if (const fleet *f = fleet_of(e))
-        if (const int i = index(e); i >= 0)
-          if (const ph::body_id c = pose_of(*f, i).chassis; c.valid())
-            by_chassis[c.value] = &e;
+      if (pose p; where(e, p) && p.chassis.valid())
+        by_chassis[p.chassis.value] = &e;
     if (by_chassis.empty())
       return;
     const auto of = [&](ph::body_id b) -> entity * {
@@ -1279,6 +2270,13 @@ struct WorldVehicles::impl {
     return false;
   }
 
+  bool posed_placed() const {
+    for (const entity &e : ents)
+      if (e.posed && e.box.valid())
+        return true;
+    return false;
+  }
+
   // The navigator's tick for every fleet: the intents, the step, the kinematic boxes' next poses,
   // nav@1's next goals, and the odometers.
   void navigator_tick() {
@@ -1308,20 +2306,18 @@ struct WorldVehicles::impl {
           if (fleet_of(e) == f.get())
             if (const int i = index(e); i >= 0)
               f->from[static_cast<std::size_t>(i)] = bicycle_box(*f, i, e.desc);
-      // The other plants' vehicles and the world's other movers (a holon's avatars), for this
-      // fleet's separation to steer around.
-      if (avoid && (fleets.size() > 1 || !movers.empty())) {
+      // The other plants' vehicles, the `pose` entities and the world's other movers (a
+      // holon's avatars), for this fleet's separation to steer around.
+      if (avoid && (fleets.size() > 1 || posed_placed() || !movers.empty())) {
         std::vector<float> others;
         for (const std::array<double, 2> &m : movers) {
           others.push_back(nx(m[0]));
           others.push_back(ny(m[1]));
         }
         for (const entity &o : ents) {
-          const fleet *of = fleet_of(o);
-          const int j = index(o);
-          if (!of || of == f.get() || j < 0)
+          pose q;
+          if (fleet_of(o) == f.get() || !where(o, q))
             continue;
-          const pose q = pose_of(*of, j);
           others.push_back(nx(q.position.x));
           others.push_back(ny(q.position.y));
         }
@@ -1356,8 +2352,8 @@ struct WorldVehicles::impl {
         e.oy = p.position.y;
         e.odometer = true;
       }
-      // nav@1 wanders: one at its goal draws another.
-      if (e.spec.controller == "nav@1" && wander &&
+      // nav@1 wanders: one at its goal draws another (a fleet's goal is held).
+      if (e.spec.controller == "nav@1" && wander && !e.hold &&
           std::hypot(e.gx - p.position.x, e.gy - p.position.y) < kReach + e.desc.half_extents.x) {
         const double clearance = std::hypot(e.desc.half_extents.x, e.desc.half_extents.y) + 0.5;
         const std::array<double, 2> g = draw_point(clearance, &e);
@@ -1379,6 +2375,11 @@ struct WorldVehicles::impl {
     out.goal_x = e.gx;
     out.goal_y = e.gy;
     out.reach = kReach + e.desc.half_extents.x;
+    if (e.group >= 0 && static_cast<std::size_t>(e.group) < groups.size())
+      out.fleet = groups[static_cast<std::size_t>(e.group)].start.fleet;
+    out.rally = e.rally;
+    if (e.posed)
+      return posed_info(e, std::move(out));
     const fleet *f = fleet_of(e);
     const int i = index(e);
     if (!f || i < 0)
@@ -1459,14 +2460,46 @@ struct WorldVehicles::impl {
     return out;
   }
 
+  // A `pose` entity as it is: where the last step put it, at its pose's speed and steer, with
+  // nothing driving it (no plant, no energy books; its wheels carry its weight).
+  entity_info posed_info(const entity &e, entity_info out) const {
+    out.posed = e.has_pose;
+    out.pose = e.drawn;
+    out.intent = e.applied;
+    if (!e.box.valid()) {
+      out.goal_x = out.goal_y = 0.0;
+      return out;
+    }
+    out.placed = true;
+    const pose p = posed_pose(e);
+    out.chassis = p.chassis;
+    out.x = p.position.x;
+    out.y = p.position.y;
+    out.z = p.position.z;
+    out.yaw = p.yaw;
+    out.speed = p.speed;
+    out.vx = p.vx;
+    out.vy = p.vy;
+    out.steer = p.steer;
+    out.goal_x = out.x; // it goes where it is put
+    out.goal_y = out.y;
+    out.ground_z = ground_height(out.x, out.y);
+    out.obstacle_contacts = e.hits;
+    out.vehicle_contact = e.hit_vehicle;
+    if (footprint_blocked(out.x, out.y, out.yaw, e.desc)) // a kinematic box meets no building
+      out.obstacle_contacts = std::max(out.obstacle_contacts, 1);
+    out.wheel_load = e.desc.mass * 9.80665;
+    return out;
+  }
+
   // Its wheels in its chassis box's frame, as drawn.
   std::vector<entity_wheel> wheels(const entity &e) const {
     std::vector<entity_wheel> out;
     const fleet *f = fleet_of(e);
     const int i = index(e);
-    if (!f || i < 0)
+    pose p;
+    if (!where(e, p))
       return out;
-    const pose p = pose_of(*f, i);
     // A world point into the box's frame: R^T (q - p).
     const ph::quat c{p.rotation.w, -p.rotation.x, -p.rotation.y, -p.rotation.z};
     const auto local = [&](const ph::vec3 &q) {
@@ -1479,7 +2512,7 @@ struct WorldVehicles::impl {
                       v.y + c.w * t.y + (u.z * t.x - u.x * t.z),
                       v.z + c.w * t.z + (u.x * t.y - u.y * t.x)};
     };
-    if (f->four) {
+    if (f && f->four) {
       for (const ph::dyn_4w_plant::wheel_pose &w : f->four->wheels(i)) {
         const ph::vec3 l = local(w.center);
         out.push_back({l.x, l.y, l.z, w.steer, w.down});
@@ -1491,7 +2524,9 @@ struct WorldVehicles::impl {
     const ph::vehicle_desc &d = e.desc;
     double steer = 0.0;
     std::vector<ph::wheel_state> jolt;
-    if (f->jolt) {
+    if (!f) { // a `pose` entity: its pose's steer
+      steer = e.drawn.steer;
+    } else if (f->jolt) {
       jolt = world->vehicle_state(f->jolt->vehicle(i)).wheels;
     } else if (f->bike) {
       steer = f->bike->body(i).delta;
@@ -1506,6 +2541,8 @@ struct WorldVehicles::impl {
         w.x = ax.x;
         w.y = side * ax.half_track;
         w.steer = ax.steered ? steer : 0.0;
+        if (e.posed && ax.wheel_radius > 0.0) // rolled at its pose's speed
+          w.spin = std::remainder(e.rolled / ax.wheel_radius, 2.0 * kPi);
         const ph::vec3 at{p.position.x + w.x * cy - w.y * sy, p.position.y + w.x * sy + w.y * cy,
                           0.0};
         if (k < jolt.size()) {
@@ -1627,6 +2664,8 @@ struct WorldVehicles::impl {
       put(at + "wheel_radius", num(d.axles.empty() ? 0.4 : d.axles.front().wheel_radius));
       put(at + "look.kind", a.look.kind);
       put(at + "look.path", a.look.path);
+      put(at + "look.uri", a.look.uri);
+      put(at + "look.subpath", a.look.subpath);
       put(at + "look.scale", num(a.look.scale));
       put(at + "look.yaw", num(a.look.yaw));
       put(at + "look.z", num(a.look.z));
@@ -1740,11 +2779,37 @@ struct WorldVehicles::impl {
   }
 
   void publish_entities() {
+    publish_groups();
     if (ekey.empty() || !root())
       return;
+    // A summary fleet's vehicles have keys only when vehicles.watch names them (a camera's, a
+    // panel's: ids joined by ',') or they have an intent.
+    std::set<std::uint64_t> keyed;
+    bool quiet_fleets = false;
+    for (const fleet_group &g : groups)
+      quiet_fleets = quiet_fleets || g.summary();
+    if (quiet_fleets) {
+      std::stringstream in(get("watch"));
+      for (std::string part; std::getline(in, part, ',');) {
+        char *end = nullptr;
+        const unsigned long long v = std::strtoull(part.c_str(), &end, 10);
+        if (end && end != part.c_str())
+          keyed.insert(v);
+      }
+      std::lock_guard<std::mutex> lock(mu);
+      for (const auto &[id, it] : intents)
+        keyed.insert(id);
+    }
     std::set<std::string> now;
     std::string ids, summary;
+    std::vector<int> quiet(groups.size(), 0);
     for (const entity &e : ents) {
+      if (e.group >= 0 && static_cast<std::size_t>(e.group) < groups.size() &&
+          groups[static_cast<std::size_t>(e.group)].summary() && !keyed.count(e.id) &&
+          e.applied == entity_intent{}) {
+        ++quiet[static_cast<std::size_t>(e.group)];
+        continue;
+      }
       const entity_info in = info(e);
       const std::string id = std::to_string(e.id);
       now.insert(id);
@@ -1784,6 +2849,11 @@ struct WorldVehicles::impl {
                  "  " + e.spec.controller + "  " +
                  (in.placed ? fixed(in.speed, 1) + " m/s" : std::string("waiting"));
     }
+    for (std::size_t gi = 0; gi < groups.size(); ++gi)
+      if (quiet[gi])
+        summary += (summary.empty() ? "" : "\n") + std::string("fleet ") + groups[gi].start.fleet +
+                   "  " + std::to_string(quiet[gi]) + " " + groups[gi].start.archetype +
+                   " (keys: summary)";
     cvc::state *r = root();
     for (const std::string &id : published)
       if (!now.count(id))
@@ -1858,6 +2928,8 @@ void WorldVehicles::set_ground(std::shared_ptr<const nav::world_grid> grid,
   d.grid = std::move(grid);
   d.ground = std::move(ground_bodies);
   d.status = d.grid ? "ready" : "waiting for the world's grid";
+  for (impl::fleet_group &g : d.groups) // a new grid: each fleet is laid out on it again
+    g.laid_out = false;
   try {
     d.build_navigator();
     if (d.ready)
@@ -1918,28 +2990,107 @@ std::uint64_t WorldVehicles::spawn(const entity_spec &spec, std::string *why) {
   } catch (const std::exception &ex) {
     return refuse(ex.what());
   }
+  e.posed = e.spec.controller == "pose";
+  if (e.posed)
+    e.command_by = "pose";
   d.ents.push_back(std::move(e));
   impl::entity &placed = d.ents.back();
-  if (d.ready) {
+  if (placed.posed && spec.placed) { // its first pose: where the spawn puts its rear axle
+    entity_pose first;
+    first.x = spec.x;
+    first.y = spec.y;
+    first.heading = std::isfinite(spec.yaw) ? spec.yaw : 0.0;
+    first.rear_axle = true;
+    d.take_pose(placed, first, d.world->tick());
+  }
+  if ((d.ready && !d.hold_placing) || placed.posed) {
     if (std::string w = d.place(placed); !w.empty()) {
       d.ents.pop_back();
+      {
+        std::lock_guard<std::mutex> lock(d.mu);
+        d.taken.erase(d.next_id);
+      }
       return refuse(w);
     }
   }
   ++d.next_id;
   ++d.rev;
+  if (placed.posed) {
+    ++d.posed_count;
+    // The packed values are read again at the next step, for its record in them.
+    d.seen_own_packed.assign(1, '\0');
+    d.seen_table_packed.assign(1, '\0');
+  }
   {
     std::lock_guard<std::mutex> lock(d.mu);
     d.live.insert(placed.id);
+    if (placed.posed)
+      d.posed_ids.insert(placed.id);
   }
   return placed.id;
 }
 
 std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts,
                                         std::vector<std::string> *warnings) {
+  impl &d = *_impl;
   std::size_t made = 0;
   for (std::size_t i = 0; i < starts.size(); ++i) {
     const vehicle_start &st = starts[i];
+    if (!st.fleet.empty()) {
+      // A fleet: its vehicles spawned unplaced, then laid out and placed together.
+      if (d.group_named(st.fleet)) {
+        if (warnings)
+          warnings->push_back("ari: world: vehicles: start: [" + std::to_string(i) + "]: fleet '" +
+                              st.fleet + "' is there already");
+        continue;
+      }
+      // A fleet lays out and drives its vehicles; a `pose` entity is placed by its poses alone.
+      const vehicle_archetype *fa = d.find(st.archetype);
+      if (st.controller == "pose" || (st.controller.empty() && fa && !fa->controllers.empty() &&
+                                      fa->controllers.front() == "pose")) {
+        if (warnings)
+          warnings->push_back("ari: world: vehicles: start: [" + std::to_string(i) + "]: fleet '" +
+                              st.fleet + "': its vehicles are driven, not posed (controller pose)");
+        continue;
+      }
+      d.groups.emplace_back();
+      const std::size_t gi = d.groups.size() - 1;
+      d.groups[gi].start = st;
+      d.groups[gi].seed = st.seed;
+      d.groups[gi].seen_restart = d.get("fleets." + st.fleet + ".restart.request");
+      d.groups[gi].seen_reseed = d.get("fleets." + st.fleet + ".reseed.request");
+      d.groups[gi].status = "waiting for the world's grid";
+      d.hold_placing = true;
+      int got = 0;
+      std::string why;
+      for (int k = 0; k < st.count; ++k) {
+        entity_spec s;
+        s.archetype = st.archetype;
+        s.name = (st.name.empty() ? st.fleet : st.name) + " " + std::to_string(k + 1);
+        s.team = st.team;
+        s.controller = st.controller;
+        s.plant = st.plant;
+        s.policy = st.policy;
+        if (st.has_heading)
+          s.yaw = st.heading * kPi / 180.0;
+        if (!spawn(s, &why))
+          break;
+        d.ents.back().group = static_cast<int>(gi);
+        ++got;
+      }
+      d.hold_placing = false;
+      if (got < st.count && warnings)
+        warnings->push_back("ari: world: vehicles: start: [" + std::to_string(i) + "]: fleet '" +
+                            st.fleet + "': " + why);
+      if (d.ready)
+        for (impl::entity &e : d.ents)
+          if (e.group == static_cast<int>(gi) && !e.agent)
+            if (std::string w = d.place(e); !w.empty())
+              d.status = "entity " + std::to_string(e.id) + ": " + w;
+      ++d.rev;
+      made += static_cast<std::size_t>(got);
+      continue;
+    }
     for (int k = 0; k < st.count; ++k) {
       entity_spec s;
       s.archetype = st.archetype;
@@ -1970,11 +3121,16 @@ bool WorldVehicles::despawn(std::uint64_t id) {
   for (auto it = d.ents.begin(); it != d.ents.end(); ++it)
     if (it->id == id) {
       d.remove_from_fleet(*it);
+      if (it->posed)
+        --d.posed_count;
       d.ents.erase(it);
       ++d.rev;
       std::lock_guard<std::mutex> lock(d.mu);
       d.live.erase(id);
       d.intents.erase(id);
+      d.posed_ids.erase(id);
+      d.pending.erase(id);
+      d.taken.erase(id);
       return true;
     }
   return false;
@@ -1984,10 +3140,15 @@ void WorldVehicles::clear() {
   impl &d = *_impl;
   d.unplace_all(false);
   d.ents.clear();
+  d.groups.clear();
+  d.posed_count = 0;
   ++d.rev;
   std::lock_guard<std::mutex> lock(d.mu);
   d.live.clear();
   d.intents.clear();
+  d.posed_ids.clear();
+  d.pending.clear();
+  d.taken.clear();
 }
 
 bool WorldVehicles::set_intent(std::uint64_t id, const entity_intent &intent) {
@@ -2011,6 +3172,48 @@ entity_intent WorldVehicles::intent(std::uint64_t id) const {
 }
 
 void WorldVehicles::set_intents_key(std::string key) { _impl->ikey = std::move(key); }
+
+bool WorldVehicles::set_pose(std::uint64_t id, const entity_pose &pose) {
+  const entity_pose_update one{id, pose};
+  return set_poses(std::span<const entity_pose_update>(&one, 1)) == 1;
+}
+
+std::size_t WorldVehicles::set_poses(std::span<const entity_pose_update> poses) {
+  impl &d = *_impl;
+  std::size_t took = 0;
+  std::lock_guard<std::mutex> lock(d.mu);
+  for (const entity_pose_update &u : poses)
+    if (finite_pose(u.pose) && d.posed_ids.count(u.id)) {
+      d.pending[u.id] = u.pose;
+      ++took;
+    }
+  return took;
+}
+
+bool WorldVehicles::pose(std::uint64_t id, entity_pose &out) const {
+  const impl &d = *_impl;
+  std::lock_guard<std::mutex> lock(d.mu);
+  if (const auto it = d.pending.find(id); it != d.pending.end()) {
+    out = it->second;
+    return true;
+  }
+  if (const auto it = d.taken.find(id); it != d.taken.end()) {
+    out = it->second;
+    return true;
+  }
+  return false;
+}
+
+void WorldVehicles::set_poses_key(std::string key) { _impl->pkey = std::move(key); }
+const std::string &WorldVehicles::poses_key() const { return _impl->pkey; }
+
+void WorldVehicles::set_pose_jump(double metres) {
+  if (!(metres > 0.0) || !std::isfinite(metres))
+    throw std::invalid_argument(
+        "WorldVehicles::set_pose_jump: the distance must be finite and > 0");
+  _impl->pose_jump = metres;
+}
+double WorldVehicles::pose_jump() const { return _impl->pose_jump; }
 void WorldVehicles::set_wind(std::shared_ptr<const physics::flow_velocity> wind) {
   _impl->wind = std::move(wind);
 }
@@ -2022,6 +3225,7 @@ const WorldSpawns &WorldVehicles::spawns() const { return *_impl->spawns; }
 void WorldVehicles::poll() {
   impl &d = *_impl;
   d.spawns->poll();
+  d.sync_pose_table(*this);
   if (!d.root() || d.vkey.empty())
     return;
   const std::string sel = d.get("selected") + "|" + d.get("spawn.mass") + "|" +
@@ -2033,6 +3237,7 @@ void WorldVehicles::poll() {
   }
   if (const std::string m = d.get("sense"); (m == "known" || m == "fog") && m != d.sense)
     set_sense(m);
+  d.poll_groups();
   if (const std::string a = d.get("avoid"); a == "0" || a == "1")
     if ((a == "1") != d.avoid)
       set_avoid(a == "1");
@@ -2157,8 +3362,14 @@ bool WorldVehicles::belief(const std::string &plant, std::vector<std::uint8_t> &
 
 void WorldVehicles::before_step() {
   impl &d = *_impl;
-  d.stepping = false;
-  if (!d.ready || d.ents.empty())
+  d.stepping = d.posing = false;
+  if (d.ents.empty())
+    return;
+  if (d.posed_count > 0) { // the `pose` entities, grid or none
+    d.pose_step();
+    d.posing = true;
+  }
+  if (!d.ready)
     return;
   if (d.steps++ % static_cast<std::uint64_t>(d.every) == 0)
     d.navigator_tick();
@@ -2170,7 +3381,9 @@ void WorldVehicles::after_step() {
   impl &d = *_impl;
   if (d.stepping)
     d.after_world_step();
-  d.stepping = false;
+  else if (d.posing)
+    d.count_contacts();
+  d.stepping = d.posing = false;
 }
 
 void WorldVehicles::publish() { _impl->publish_entities(); }
@@ -2206,6 +3419,41 @@ bool WorldVehicles::command(std::uint64_t id, double steer, double accel) {
         return false;
       e.cmd_steer = steer;
       e.cmd_accel = accel;
+      return true;
+    }
+  return false;
+}
+
+std::vector<std::string> WorldVehicles::fleets() const {
+  std::vector<std::string> out;
+  for (const impl::fleet_group &g : _impl->groups)
+    out.push_back(g.start.fleet);
+  return out;
+}
+
+bool WorldVehicles::rally(const std::string &fleet, int team, double &x, double &y) const {
+  for (const impl::fleet_group &g : _impl->groups)
+    if (g.start.fleet == fleet && team >= 0 && static_cast<std::size_t>(team) < g.rally.size()) {
+      x = g.rally[static_cast<std::size_t>(team)][0];
+      y = g.rally[static_cast<std::size_t>(team)][1];
+      return true;
+    }
+  return false;
+}
+
+bool WorldVehicles::move_rally(const std::string &fleet, int team, double x, double y) {
+  impl &d = *_impl;
+  for (std::size_t gi = 0; gi < d.groups.size(); ++gi)
+    if (d.groups[gi].start.fleet == fleet)
+      return d.move_rally(gi, team, x, y);
+  return false;
+}
+
+bool WorldVehicles::restart_fleet(const std::string &fleet, bool reseed) {
+  impl &d = *_impl;
+  for (std::size_t gi = 0; gi < d.groups.size(); ++gi)
+    if (d.groups[gi].start.fleet == fleet) {
+      d.restart_group(gi, reseed);
       return true;
     }
   return false;
@@ -2266,7 +3514,11 @@ std::vector<entity_plant> WorldVehicles::plants() const {
     const impl::fleet *g = d.fleet_of(e);
     const int i = d.index(e);
     p.placed = g && i >= 0;
-    if (!p.placed) {
+    if (e.posed) { // placed from outside: no model drives it
+      p.placed = e.box.valid();
+      p.model = "pose";
+    }
+    if (!p.placed || e.posed) {
       out.push_back(std::move(p));
       continue;
     }
@@ -2433,15 +3685,39 @@ std::vector<entity_info> WorldVehicles::entities() const {
   std::vector<entity_info> out;
   for (const impl::entity &e : d.ents)
     out.push_back(d.info(e));
-  // Two kinematic boxes make no contact in the physics world: they touch when they overlap.
+  // Two kinematic boxes make no contact in the physics world: they touch when they overlap. Only
+  // boxes in the same or a neighbouring cell of a grid as wide as the largest box can overlap, so
+  // each is tested against those alone: linear in the vehicles, where every pair was quadratic
+  // (320,000 tests a call for 800, and the gym and the keys call this every tick).
+  std::vector<std::size_t> kin;
+  double cell = 0.0;
   for (std::size_t a = 0; a < out.size(); ++a)
-    for (std::size_t b = a + 1; b < out.size(); ++b) {
-      const impl::entity &ea = d.ents[a], &eb = d.ents[b];
-      if (!out[a].placed || !out[b].placed || ea.plant != "kinematic" || eb.plant != "kinematic")
-        continue;
-      if (boxes_overlap(out[a], ea.desc, out[b], eb.desc))
-        out[a].vehicle_contact = out[b].vehicle_contact = true;
+    if (out[a].placed && (d.ents[a].posed || d.ents[a].plant == "kinematic")) {
+      kin.push_back(a);
+      const auto &h = d.ents[a].desc.half_extents;
+      cell = std::max(cell, 2.0 * std::hypot(h.x, h.y));
     }
+  if (kin.size() < 2 || !(cell > 0.0))
+    return out;
+  const auto key = [cell](double x, double y) {
+    const auto ix = static_cast<std::int64_t>(std::floor(x / cell));
+    const auto iy = static_cast<std::int64_t>(std::floor(y / cell));
+    return (static_cast<std::uint64_t>(ix) << 32) ^ static_cast<std::uint32_t>(iy);
+  };
+  std::unordered_map<std::uint64_t, std::vector<std::size_t>> grid;
+  grid.reserve(kin.size());
+  for (const std::size_t a : kin)
+    grid[key(out[a].x, out[a].y)].push_back(a);
+  for (const std::size_t a : kin)
+    for (int dx = -1; dx <= 1; ++dx)
+      for (int dy = -1; dy <= 1; ++dy) {
+        const auto it = grid.find(key(out[a].x + dx * cell, out[a].y + dy * cell));
+        if (it == grid.end())
+          continue;
+        for (const std::size_t b : it->second)
+          if (b > a && boxes_overlap(out[a], d.ents[a].desc, out[b], d.ents[b].desc))
+            out[a].vehicle_contact = out[b].vehicle_contact = true;
+      }
   return out;
 }
 

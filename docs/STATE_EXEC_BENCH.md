@@ -1392,12 +1392,17 @@ python3 tools/bench/state_exec_bench.py gate run.jsonl --scenario lock.uncontend
     --where form=single --where owner=short --metric extra.ns_per_lock --max 450 --max-noise 10
 python3 tools/bench/state_exec_bench.py gate run.jsonl --scenario lock.uncontended \
     --executor sync --where threading=shared --where depth=1 --where chroot=0 \
-    --metric extra.ns_per_lock --max 550 --max-noise 10
+    --where form=single --metric extra.ns_per_lock --max 550 --max-noise 10
 ```
 
 The single gate names `threading=single`: records from before phase L3 carry it too (the key
-existed with that one value), so it matches them. The shared gate is L3's as its plan states it
-(docs/STATE_EXEC_LOCKS.md 11.2, 12): every mode, form and owner of the flat unchrooted key.
+existed with that one value), so it matches them. The shared gate covers every mode and owner of
+the flat unchrooted key, single form only, like the other gates. L3's plan first named every
+form. The owner confined it to the single form on 2026-11-18 (docs/STATE_EXEC_LOCKS.md 11.3),
+because the 550 ns figure was set from single-form numbers. A nested section's inner `with-lock`
+is covered by the outer hold and never reaches the manager. Even so, the evaluator spends about
+270-300 ns on it: in the quiet windows of 2026-11-17, the shared nested points measured 708-776 ns
+and the single-form ones 428-475 ns.
 
 #### lock.handoff
 
@@ -1624,7 +1629,7 @@ Phase L3 (one app, several threads) has three gates of its own (docs/STATE_EXEC_
 driver pinned (`--pin auto`), 5 reps or more:
 
 - `lock.uncontended`, shared: at most 550 ns over `begin` (first 120 ns), the `threading=shared`
-  gate above.
+  gate above (single form, since 2026-11-18).
 - `lock.cross_thread`: on disjoint keys with 3 us sections at t = 4, at least 0.9 of the no-lock
   throughput; the hot key's handoff p50 at most 50 us, at each t that hands off (a point without
   `handoff_p50_ns`, t = 1, would fail a gate, so the gate names t); the mutex wait time recorded:

@@ -227,8 +227,12 @@ static void headless(cvc::app &app) {
   cam.update(0.5);
   cam.keyUp("w");
   chk(resets.take() == 1, "fly motion re-applies");
+  // Fly is a spectator: let go, the eye glides to a stop (about 0.4 s), then it is still.
+  for (int i = 0; i < 60; ++i)
+    cam.update(0.016);
+  resets.take();
   cam.update(0.016);
-  chk(resets.take() == 0, "and stops when the key is up");
+  chk(resets.take() == 0, "and stops once its glide is over");
   mirrored = 0;
   for (int i = 0; i < 3; ++i)
     cam.update(0.016);

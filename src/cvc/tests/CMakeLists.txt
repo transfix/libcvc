@@ -28,6 +28,8 @@ add_executable(ariadne_server_document_test ariadne_server_document_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
 add_executable(ariadne_chart_test ariadne_chart_test.cpp)
+add_executable(ariadne_heatmap_test ariadne_heatmap_test.cpp)
+add_executable(ariadne_settings_test ariadne_settings_test.cpp)
 add_executable(ariadne_term_graphics_test ariadne_term_graphics_test.cpp)
 add_executable(ariadne_media_test ariadne_media_test.cpp)
 add_executable(ariadne_files_test ariadne_files_test.cpp)
@@ -41,6 +43,7 @@ add_executable(x11_macro_headers_test x11_macro_headers_test.cpp)
 add_executable(net_http_client_test net_http_client_test.cpp)
 # Ariadne data (cvc/ariadne/data.h) and the archive reader it unpacks with (cvc/utility/archive.h).
 add_executable(ariadne_data_test ariadne_data_test.cpp)
+add_executable(ariadne_world_dataset_test ariadne_world_dataset_test.cpp)
 add_executable(net_ws_client_test net_ws_client_test.cpp)
 add_executable(net_policy_test net_policy_test.cpp)
 # End-to-end encrypted DMs (cvc/net/e2ee.h): e2ee.js's vectors replayed, and the e2ee-* verbs.
@@ -326,6 +329,7 @@ add_executable(nav_belief_material_net_test nav_belief_material_net_test.cpp)
 add_executable(nav_belief_material_controller_test nav_belief_material_controller_test.cpp)
 add_executable(nav_coph_test nav_coph_test.cpp)
 add_executable(nav_coph_model_test nav_coph_model_test.cpp)
+add_executable(nav_coph_learner_test nav_coph_learner_test.cpp)
 add_executable(nav_material_deploy_test nav_material_deploy_test.cpp)
 add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
 add_executable(nav_material_rollout_grad_test nav_material_rollout_grad_test.cpp)
@@ -371,6 +375,7 @@ add_executable(world_road_mesh_test world_road_mesh_test.cpp)
 add_executable(world_road_raster_test world_road_raster_test.cpp)
 add_executable(world_raster_test world_raster_test.cpp)
 add_executable(world_generated_test world_generated_test.cpp)
+add_executable(world_bundle_v2_test world_bundle_v2_test.cpp)
 add_executable(world_cloud_test world_cloud_test.cpp)
 add_executable(world_weather_test world_weather_test.cpp)
 add_executable(world_water_bodies_test world_water_bodies_test.cpp)
@@ -425,6 +430,8 @@ set(TEST_TARGETS
   ariadne_bind_test
   ariadne_ftxui_test
   ariadne_chart_test
+  ariadne_heatmap_test
+  ariadne_settings_test
   ariadne_term_graphics_test
   ariadne_media_test
   ariadne_files_test
@@ -437,6 +444,7 @@ set(TEST_TARGETS
   x11_macro_headers_test
   net_http_client_test
   ariadne_data_test
+  ariadne_world_dataset_test
   net_ws_client_test
   net_policy_test
   e2ee_test
@@ -597,6 +605,7 @@ set(TEST_TARGETS
   nav_belief_material_controller_test
   nav_coph_test
   nav_coph_model_test
+  nav_coph_learner_test
   nav_material_deploy_test
   nav_material_raster_test
   nav_coef_energy_test
@@ -643,6 +652,7 @@ set(TEST_TARGETS
   world_road_raster_test
   world_raster_test
   world_generated_test
+  world_bundle_v2_test
   world_cloud_test
   world_weather_test
   world_water_bodies_test
@@ -887,6 +897,20 @@ target_link_libraries(ariadne_chart_test
     GTest::gtest
     GTest::gtest_main
 )
+
+target_link_libraries(ariadne_heatmap_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_settings_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 # Three tests load GL-free documents from the repo's examples/ tree.
 target_compile_definitions(ariadne_ftxui_test PRIVATE
   CVC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../examples")
@@ -1008,6 +1032,13 @@ target_link_libraries(net_http_client_test
 )
 
 target_link_libraries(ariadne_data_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_world_dataset_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1460,6 +1491,13 @@ target_link_libraries(nav_coph_model_test
     GTest::gtest_main
 )
 
+target_link_libraries(nav_coph_learner_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(nav_material_deploy_test
   PRIVATE
     cvc
@@ -1649,7 +1687,7 @@ target_link_libraries(vis_tiler_test
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_weather_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_ewave_test ocean_wind_test)
+                   world_raster_test world_bundle_test world_bundle_v2_test world_generated_test world_cloud_test world_weather_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_ewave_test ocean_wind_test)
   target_link_libraries(${_lsys_test} PRIVATE cvc GTest::gtest GTest::gtest_main)
   target_compile_features(${_lsys_test} PRIVATE cxx_std_17)
 endforeach()
@@ -3002,7 +3040,7 @@ target_compile_features(input_trace_test PRIVATE cxx_std_17)
 target_compile_features(nav_sim_world_agents_test PRIVATE cxx_std_17)
 target_compile_features(physics_parity_test PRIVATE cxx_std_17)
 target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
-target_compile_features(physics_plant_host_test PRIVATE cxx_std_17)
+target_compile_features(physics_plant_host_test PRIVATE cxx_std_20)
 target_compile_features(physics_dyn_bike_plant_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_4w_plant_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_boat_plant_test PRIVATE cxx_std_17)
@@ -3173,6 +3211,8 @@ cvc_discover_tests(ariadne_scene_swarm_test)
 cvc_discover_tests(ariadne_server_document_test)
 cvc_discover_tests(ariadne_ftxui_test)
 cvc_discover_tests(ariadne_chart_test)
+cvc_discover_tests(ariadne_heatmap_test)
+cvc_discover_tests(ariadne_settings_test)
 cvc_discover_tests(ariadne_term_graphics_test)
 cvc_discover_tests(ariadne_media_test)
 cvc_discover_tests(ariadne_files_test)
@@ -3190,6 +3230,7 @@ cvc_discover_tests(ariadne_bind_test)
 cvc_discover_tests(x11_macro_headers_test)
 cvc_discover_tests(net_http_client_test)
 cvc_discover_tests(ariadne_data_test)
+cvc_discover_tests(ariadne_world_dataset_test PROPERTIES TIMEOUT 900)
 cvc_discover_tests(net_ws_client_test)
 cvc_discover_tests(net_policy_test)
 cvc_discover_tests(e2ee_test)
@@ -3213,8 +3254,9 @@ if(TARGET geometry_test)
   cvc_discover_tests(geometry_test)
 endif()
 if(TARGET tiler_bunny_test)
-  # About 13 s in Release; a Debug job runs the SDF and the tiling several times slower, past
-  # ctest's 300 s on a loaded runner, so it gets 900 s as tiler_intrinsics_test does.
+  # About 13 s in Release; a Debug job runs the SDF and the tiling many times slower, so in Debug
+  # its suite is TilerBunnyIntegration, a heavy suite PRs skip (tiler_bunny_test.cpp). 900 s, as
+  # tiler_intrinsics_test has, for the Release pushes that run the heavy suites.
   cvc_discover_tests(tiler_bunny_test PROPERTIES TIMEOUT 900)
 endif()
 if(TARGET algorithm_test)
@@ -3248,6 +3290,7 @@ cvc_discover_tests(nav_belief_material_net_test)
 cvc_discover_tests(nav_belief_material_controller_test)
 cvc_discover_tests(nav_coph_test)
 cvc_discover_tests(nav_coph_model_test)
+cvc_discover_tests(nav_coph_learner_test)
 cvc_discover_tests(nav_material_deploy_test)
 cvc_discover_tests(nav_material_raster_test)
 cvc_discover_tests(nav_coef_energy_test)
@@ -3277,7 +3320,7 @@ cvc_discover_tests(vis_tiler_test)
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_weather_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_wind_test)
+                   world_raster_test world_bundle_test world_bundle_v2_test world_generated_test world_cloud_test world_weather_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_wind_test)
   cvc_discover_tests(${_lsys_test})
 endforeach()
 # The water's long runs (a channel's walls, a thin wall, a moving source's wake) take 105-195 s

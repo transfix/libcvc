@@ -88,6 +88,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/snapshot_json.h
   ../../inc/cvc/physics/world_geometry.h
   ../../inc/cvc/physics/plant_host.h
+  ../../inc/cvc/physics/scrub_plant.h
   ../../inc/cvc/physics/pose_tracker.h
   ../../inc/cvc/physics/physics_codec.h
   ../../inc/cvc/physics/nav_plant.h
@@ -418,6 +419,7 @@ set(SOURCE_FILES
   physics/snapshot_json.cpp
   physics/world_geometry.cpp
   physics/plant_host.cpp
+  physics/scrub_plant.cpp
   physics/pose_tracker.cpp
   physics/physics_codec.cpp
   physics/binding_meta.cpp
@@ -518,6 +520,7 @@ set(SOURCE_FILES
   nav/coph_ledger.cpp
   nav/coph_model.cpp
   nav/coph_allocation.cpp
+  nav/coph_learner.cpp
   nav/sim_world.cpp
   nav/yield.cpp
   nav/sim_world_binding.cpp
@@ -566,6 +569,7 @@ set(SOURCE_FILES
   world/terrain_source.cpp
   world/world_geometry.cpp
   world/city_bundle.cpp
+  world/world_bundle.cpp
   world/heightfield.cpp
   world/scatter.cpp
   world/roads.cpp
@@ -696,10 +700,10 @@ endforeach()
 # this one gets the explicit flag (the CPU analog of the nav .cu precise-math
 # properties below).
 if(NOT MSVC)
-  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp nav/coph_model.cpp nav/coph_allocation.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp nav/coph_model.cpp nav/coph_allocation.cpp nav/coph_learner.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
-  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp nav/coph_model.cpp nav/coph_allocation.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp nav/coph_model.cpp nav/coph_allocation.cpp nav/coph_learner.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
@@ -1642,7 +1646,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_re
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/files.cpp ariadne/file_picker.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_entities.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/conference/client_registry.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_repeat.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/scene_water.cpp ariadne/scene_boat.cpp ariadne/scene_wind.cpp ariadne/scene_weather.cpp ariadne/world_vehicles.cpp ariadne/scene_swarm.cpp ariadne/world_spawns.cpp ariadne/world_gym.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/rich_text.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp ariadne/chart_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/files.cpp ariadne/file_picker.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_entities.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/conference/client_registry.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_repeat.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/scene_water.cpp ariadne/scene_boat.cpp ariadne/scene_wind.cpp ariadne/scene_weather.cpp ariadne/world_vehicles.cpp ariadne/scene_swarm.cpp ariadne/world_spawns.cpp ariadne/world_gym.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/rich_text.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp ariadne/chart_emit.cpp ariadne/heatmap_emit.cpp ariadne/settings_emit.cpp)
 # A document set fetched from a URL, and a runtime's browser page loading one (arigl-web, ari).
 list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 # The document a relay runs (arisrv --doc) and the namespaces it publishes.
@@ -1651,6 +1655,9 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/ariadne/server_document.h)
 # Adaptive quality (OCEAN-AND-WEATHER-ROADMAP.md §10.10, O21): the frame-time loop and its tiers.
 list(APPEND SOURCE_FILES ariadne/scene_quality.cpp)
 list(APPEND INCLUDE_FILES ../../inc/cvc/ariadne/scene_quality.h)
+# §5.26 the colours a document gives its widgets (color:, background: { color: }).
+list(APPEND SOURCE_FILES ariadne/color_value.cpp)
+list(APPEND INCLUDE_FILES ../../inc/cvc/ariadne/color_value.h)
 # The world's rules (ARIADNE_WORLDS.md WD2): revisioned sections, the world: block, and the four
 # rules sections on a room's wire.
 list(APPEND SOURCE_FILES ariadne/section.cpp ariadne/world_rules.cpp ariadne/conference/room_rules.cpp)
