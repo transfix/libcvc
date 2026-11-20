@@ -203,8 +203,11 @@ public:
   // Attach `group`: the calling thread becomes its attaching thread, its scheduler's notifier is
   // installed, and it is woken once, so work posted before is seen. Refused (std::logic_error)
   // when it is attached already, to any pool, or a pump_all holds it. pump_all refuses it from
-  // then on (an assertion; std::logic_error in release builds) until it is detached. It may be
-  // destroyed attached, on its attaching thread: its teardown detaches it first (S2-Q4).
+  // then on (an assertion; std::logic_error in release builds) until it is detached. Its host
+  // touches it only under with_group from then on (a submission, a read, a kill, a reap), since a
+  // worker may pump it at any time; its own natives and callbacks run where the rules below say.
+  // It may be destroyed attached, on its attaching thread: its teardown detaches it first
+  // (S2-Q4).
   void attach(state_exec::exec_group &group);
   // Detach `group` (S2-Q4's order, without the kills): no worker pumps it once this returns, its
   // notifier is cleared, its queued host bodies and callbacks have run on this thread, and it is
@@ -223,11 +226,14 @@ public:
   // counts); false when the time passed with none.
   bool wait_for_work(double seconds);
   // Run `fn` on this thread under `group`'s token (S2-Q4). For an attached group: wait for a pump
-  // in progress (servicing this thread's host queue), keep workers off it while `fn` runs (one
-  // that pops it meanwhile leaves it notified), and queue it again afterwards if one did. For a
-  // group not attached: take the token as async_scheduler::pump_owner_scope does (throwing when
-  // another thread holds it). For touching the group's scheduler (submit, read, kill, reap), not
-  // for pumping it. An exception from `fn` propagates once the token is released.
+  // in progress, or another thread's with_group or host body (servicing this thread's host
+  // queue), keep workers off it while `fn` runs (one that pops it meanwhile leaves it notified),
+  // and wake it afterwards, since `fn` may have submitted, killed or resumed, which posts nothing.
+  // For a group not attached, or one being detached: take the token as
+  // async_scheduler::pump_owner_scope does (throwing when another thread holds it). For touching
+  // the group's scheduler (submit, read, kill, reap), not for pumping it. `fn` may detach the
+  // group; destroying it inside `fn` aborts. An exception from `fn` propagates once the token is
+  // released.
   void with_group(state_exec::exec_group &group, const std::function<void()> &fn);
   // On an attaching thread: its attached groups whose pump failed (a C++ exception escaped it;
   // their processes were killed with "internal error"), each returned once, in the order they

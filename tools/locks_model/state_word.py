@@ -1322,7 +1322,7 @@ def main(argv):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--actors', default='')
     ap.add_argument('--opts', default='')
-    ap.add_argument('--amend', default='none')
+    ap.add_argument('--amend', default='all')
     ap.add_argument('--mutation', default='')
     ap.add_argument('--max-states', type=int, default=0)
     ap.add_argument('--suite', choices=('quick', 'deep'))

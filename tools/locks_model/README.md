@@ -514,7 +514,8 @@ The first prints JSON like `explore.py`'s: `states`, `transitions`, `idle_states
 counts posters, workers, hosts and bodies and ends the attaching thread with `teardown=1` (the
 default) or `detach=1`; `--opts` sets `posts` (per poster), `timer`, `sleeps` (sleepers the runs
 may arm), `waiting`, `failures`, `pre` (posts before attach) and `nested` (a body that detaches
-inside its fn); `--amend` takes `all`, `none` (the default: the transitions as frozen) or names;
+inside its fn); `--amend` takes `all` (the default: the transitions as amended in `exec_group.h`), `none` (as S2a.0
+first froze them) or names;
 `--mutation` a name. `--suite` exits 0 only when every check holds: the amended transitions find
 nothing, each finding is found without its amendment, and each mutation is caught.
 
