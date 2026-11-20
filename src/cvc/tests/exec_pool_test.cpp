@@ -3053,8 +3053,9 @@ void run_a_waiting_body(cvc::exec_pool &pool, exec_group &g, environment_ptr env
 
 // The waiting-body twin (the amended transitions, R2a C-M3): destroying an attached group inside
 // its own waiting body, which its blocked worker waits for, aborts in every build. Skipped where
-// the pool has no worker (the body would run inline), and while host_held_here does not yet cover a
-// waiting body (probed in one first): the teardown would wait for that worker for good.
+// the pool has no worker (the body would run inline). A waiting body is probed first:
+// host_held_here must be true in it (K-7), or the teardown would wait for the body's worker for
+// good.
 TEST(ExecGroupDeathTest, DestroyedInsideItsOwnWaitingBodyAborts) {
   {
     cvc::pool_options po;
@@ -3080,8 +3081,7 @@ TEST(ExecGroupDeathTest, DestroyedInsideItsOwnWaitingBodyAborts) {
     pool.detach(g);
     ASSERT_GE(held.load(), 0) << "the waiting body never ran";
     ASSERT_TRUE(waiting) << "the body ran inline, not as a waiting body";
-    if (held.load() == 0)
-      GTEST_SKIP() << "host_held_here does not cover a waiting body yet (R2a C-M3)";
+    ASSERT_EQ(held.load(), 1) << "host_held_here is false in the group's own waiting body";
   }
   GTEST_FLAG_SET(death_test_style, "threadsafe");
   EXPECT_DEATH(
