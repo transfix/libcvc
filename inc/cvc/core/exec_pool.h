@@ -92,6 +92,7 @@ struct pool_stats {
   std::uint64_t long_host_waits = 0; // waits of a worker over 10 ms for a host body (S2-Q5)
   unsigned attached = 0;             // groups attached now
   unsigned active_workers = 0;       // workers pumping now, less those blocked over 10 ms (S2-Q11)
+  std::uint64_t fuzz_points = 0;     // CVC_EXEC_FUZZ's pool points reached with a seed (S2-Q15)
 };
 
 class exec_pool {

@@ -23,6 +23,7 @@
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/stdlib.h>
 #include <cvc/state/state_exec/types.h>
+#include <functional>
 #include <gtest/gtest.h>
 #include <iostream>
 #include <limits>
@@ -792,6 +793,244 @@ TEST(AppExecPool, GroupsAndTheAppSchedulerShareOnePidSource) {
   for (std::size_t i = 1; i < in_a.size(); ++i)
     EXPECT_LT(in_a[i - 1], in_a[i]) << "increasing within a group";
   EXPECT_EQ(app.exec_pid_source()->load(), 16) << "the next pid";
+}
+
+// --- Stage 2a continuous mode: the pool's own (P; S2a.2, S2a.4) ---
+//
+// Each case detaches what it attached before its groups go (the teardown of an attached group is
+// S2a.5's).
+
+namespace {
+
+// Poll `cond` with plain sleeps (servicing nothing) for up to `limit` seconds.
+bool settles(const std::function<bool()> &cond, double limit = 10.0) {
+  const auto t0 = clock_type::now();
+  while (!cond()) {
+    if (clock_type::now() - t0 > std::chrono::duration<double>(limit))
+      return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return true;
+}
+
+// CVC_EXEC_FUZZ for the pools built while it lives.
+struct fuzz_scope {
+  explicit fuzz_scope(const char *seed) { set(seed); }
+  ~fuzz_scope() { set(nullptr); }
+  static void set(const char *v) {
+#ifdef _WIN32
+    _putenv_s("CVC_EXEC_FUZZ", v ? v : "");
+#else
+    if (v)
+      setenv("CVC_EXEC_FUZZ", v, 1);
+    else
+      unsetenv("CVC_EXEC_FUZZ");
+#endif
+  }
+};
+
+// A group whose pump hook records which group was pumped, in order, on a shared list.
+struct pump_order {
+  std::mutex m;
+  std::vector<std::string> names;
+  std::vector<std::thread::id> threads;
+  void add(const exec_group &g) {
+    std::lock_guard<std::mutex> lock(m);
+    names.push_back(g.opts().name);
+    threads.push_back(std::this_thread::get_id());
+  }
+  std::size_t size() {
+    std::lock_guard<std::mutex> lock(m);
+    return names.size();
+  }
+};
+
+exec_group::options logged_opts(cvc::app &app, const std::string &name, pump_order &order) {
+  exec_group::options o = opts_for(app, name);
+  o.pump_hook_for_test = [&order](exec_group &g) { order.add(g); };
+  return o;
+}
+
+// A program that counts to n, then calls `fin` (which sets `flag`): with workers nothing of the
+// host's drives an attached `any` group, so the case watches the flag and reads the result after
+// the detach.
+std::string counting_then_fin(int n) {
+  return "(begin (set i 0) (while (< i " + std::to_string(n) + ") (set i (+ i 1))) (fin) i)";
+}
+
+environment_ptr env_with_fin(std::atomic<bool> &flag) {
+  environment_ptr env = environment::extend(builtins::make_default_environment());
+  builtins::register_fn(env, "fin", [&flag](std::span<const value_t>) -> value_t {
+    flag = true;
+    return nil_value();
+  });
+  return env;
+}
+
+} // namespace
+
+// attach refuses a group attached already, to this pool or another; detach and attached() of a
+// group not attached do nothing; attach installs the notifier, detach clears it.
+TEST(ExecPoolContinuous, AttachIsRefusedTwice) {
+  cvc::exec_pool pool(cvc::pool_options{}), other(cvc::pool_options{});
+  cvc::app app;
+  exec_group g(opts_for(app, "twice"));
+  EXPECT_FALSE(pool.attached(g));
+  pool.detach(g); // nothing
+  pool.attach(g);
+  EXPECT_TRUE(pool.attached(g));
+  EXPECT_FALSE(other.attached(g));
+  EXPECT_EQ(pool.stats().attached, 1u);
+  EXPECT_THROW(pool.attach(g), std::logic_error);
+  EXPECT_THROW(other.attach(g), std::logic_error);
+  other.detach(g); // not its group: nothing
+  EXPECT_TRUE(pool.attached(g));
+  EXPECT_TRUE(g.sched().has_wake_notifier());
+  pool.detach(g);
+  EXPECT_FALSE(pool.attached(g));
+  EXPECT_FALSE(g.sched().has_wake_notifier());
+  EXPECT_EQ(pool.stats().attached, 0u);
+  EXPECT_EQ(g.pool_link().state.load(), 0u);
+}
+
+// Attached groups run on the workers to their results, with no host loop: attach wakes each once,
+// and the release queues a group again while its pump says it is runnable (a small pump_steps
+// splits each run over many pumps), on the workers only.
+TEST(ExecPoolContinuous, AttachedGroupsRunOnTheWorkers) {
+  cvc::pool_options po;
+  po.threads = 2;
+  po.pump_steps = 200;
+  cvc::exec_pool pool(po);
+  if (pool.threads() == 0)
+    GTEST_SKIP() << "no worker on this machine";
+  cvc::app app;
+  share_locks(app);
+  pump_order order;
+  std::atomic<bool> fa{false}, fb{false};
+  exec_group a(logged_opts(app, "a", order)), b(logged_opts(app, "b", order));
+  execute_options ea, eb;
+  ea.env = env_with_fin(fa);
+  eb.env = env_with_fin(fb);
+  const int pa = a.execute(counting_then_fin(2000), ea);
+  const int pb = b.execute(counting_then_fin(3000), eb);
+  pool.attach(a);
+  pool.attach(b);
+  const bool done = settles([&] { return fa.load() && fb.load(); }, 30.0);
+  pool.detach(a);
+  pool.detach(b);
+  ASSERT_TRUE(done);
+  EXPECT_EQ(result_of(a, pa), "2000");
+  EXPECT_EQ(result_of(b, pb), "3000");
+  const cvc::pool_stats s = pool.stats();
+  std::cout << s.pumps << " pumps, " << s.requeues << " requeues, " << s.wakes << " wakes, "
+            << s.parks << " parks, " << s.moves << " moves\n";
+  EXPECT_GT(s.pumps, 10u) << "the budget did not split the runs";
+  EXPECT_EQ(s.worker_pumps, s.pumps);
+  EXPECT_EQ(s.host_pumps, 0u);
+  EXPECT_GE(s.requeues, 10u);
+  EXPECT_GE(s.wakes, 2u) << "attach wakes each group once";
+  for (const std::thread::id &t : order.threads)
+    EXPECT_NE(t, std::this_thread::get_id()) << "an any group was pumped on its attaching thread";
+}
+
+// CVC_EXEC_FORCE_MOVE in continuous mode (pool_options::force_move): each pump of a group is on
+// another worker than its last (stats().moves counts them).
+TEST(ExecPoolContinuous, ForceMoveGivesEachPumpAnotherWorker) {
+  cvc::pool_options po;
+  po.threads = 2;
+  po.force_move = true;
+  po.pump_steps = 200;
+  cvc::exec_pool pool(po);
+  if (pool.threads() < 2)
+    GTEST_SKIP() << "needs two workers";
+  cvc::app app;
+  share_locks(app);
+  pump_order order;
+  std::atomic<bool> fin{false};
+  exec_group g(logged_opts(app, "moving", order));
+  execute_options eo;
+  eo.env = env_with_fin(fin);
+  const int pid = g.execute(counting_then_fin(2000), eo);
+  pool.attach(g);
+  const bool done = settles([&] { return fin.load(); }, 30.0);
+  pool.detach(g);
+  ASSERT_TRUE(done);
+  EXPECT_EQ(result_of(g, pid), "2000");
+  const cvc::pool_stats s = pool.stats();
+  ASSERT_GE(order.threads.size(), 4u);
+  for (std::size_t i = 1; i < order.threads.size(); ++i)
+    EXPECT_NE(order.threads[i], order.threads[i - 1]) << "pump " << i << " stayed on its thread";
+  EXPECT_EQ(s.moves, s.pumps - 1);
+}
+
+// S2-Q13's clamp: a group attached after another has run for a while starts at the ready queue's
+// floor less one pump, not at virtual time 0, so on one worker the two alternate rather than the
+// newcomer taking every pump until its time catches up.
+TEST(ExecPoolContinuous, ANewGroupDoesNotStarveABusyOne) {
+  cvc::pool_options po;
+  po.threads = 1;
+  cvc::exec_pool pool(po);
+  if (pool.threads() == 0)
+    GTEST_SKIP() << "no worker on this machine";
+  cvc::app app;
+  share_locks(app);
+  pump_order order;
+  exec_group busy(logged_opts(app, "busy", order)), late(logged_opts(app, "late", order));
+  busy.execute(std::string("(while #t nil)"));
+  late.execute(std::string("(while #t nil)"));
+  pool.attach(busy);
+  ASSERT_TRUE(settles([&] { return order.size() >= 50; }, 30.0));
+  std::size_t from = 0;
+  {
+    std::lock_guard<std::mutex> lock(order.m);
+    from = order.names.size();
+  }
+  pool.attach(late);
+  const bool done = settles([&] { return order.size() >= from + 40; }, 30.0);
+  pool.detach(busy);
+  pool.detach(late);
+  ASSERT_TRUE(done);
+  std::size_t busy_pumps = 0, late_pumps = 0;
+  for (std::size_t i = from; i < from + 40; ++i)
+    ++(order.names[i] == "busy" ? busy_pumps : late_pumps);
+  std::cout << "after the late attach: busy " << busy_pumps << ", late " << late_pumps << "\n";
+  EXPECT_GE(busy_pumps, 10u) << "the late group took the worker";
+  EXPECT_GE(late_pumps, 10u);
+}
+
+// The eventcount and CVC_EXEC_FUZZ: idle workers park (stats().parks), none is active once the
+// work is done, and the pool's fuzz points are reached and counted.
+TEST(ExecPoolContinuous, IdleWorkersParkAndFuzzPointsAreCounted) {
+  std::unique_ptr<cvc::exec_pool> pool;
+  {
+    fuzz_scope fuzz("1");
+    cvc::pool_options po;
+    po.threads = 2;
+    pool = std::make_unique<cvc::exec_pool>(po);
+  }
+  if (pool->threads() == 0)
+    GTEST_SKIP() << "no worker on this machine";
+  cvc::app app;
+  share_locks(app);
+  exec_group g(opts_for(app, "idle"));
+  std::atomic<bool> fin{false};
+  execute_options eo;
+  eo.env = env_with_fin(fin);
+  g.execute(counting_then_fin(100), eo);
+  pool->attach(g);
+  const bool done = settles([&] { return fin.load(); });
+  const bool parked = settles([&] {
+    const cvc::pool_stats s = pool->stats();
+    return s.parks > 0 && s.active_workers == 0;
+  });
+  const cvc::pool_stats s = pool->stats();
+  pool->detach(g);
+  ASSERT_TRUE(done);
+  std::cout << "parks " << s.parks << ", empty wakes " << s.empty_wakes << ", fuzz points "
+            << s.fuzz_points << "\n";
+  EXPECT_TRUE(parked) << "the workers never parked";
+  EXPECT_EQ(s.active_workers, 0u);
+  EXPECT_GT(s.fuzz_points, 0u);
 }
 
 // --- R1-mid fixes (P) ---
