@@ -662,8 +662,13 @@ std::string generated_world_params_json(const generated_world_params &p) {
 }
 
 generated_world_params generated_world_params_from_json(const std::string &text) {
+  return generated_world_params_from_json(text, generated_world_params());
+}
+
+generated_world_params generated_world_params_from_json(const std::string &text,
+                                                        const generated_world_params &base) {
   const ptree j = parse_json(text, "generated_world_params_from_json");
-  generated_world_params p;
+  generated_world_params p = base;
   p.seed = j.get<std::uint64_t>("seed", p.seed);
   p.half_m = j.get<double>("half_m", p.half_m);
   p.trees = j.get<int>("trees", p.trees);

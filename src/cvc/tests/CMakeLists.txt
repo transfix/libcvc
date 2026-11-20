@@ -29,6 +29,7 @@ add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
 add_executable(ariadne_chart_test ariadne_chart_test.cpp)
 add_executable(ariadne_heatmap_test ariadne_heatmap_test.cpp)
+add_executable(ariadne_settings_test ariadne_settings_test.cpp)
 add_executable(ariadne_term_graphics_test ariadne_term_graphics_test.cpp)
 add_executable(ariadne_media_test ariadne_media_test.cpp)
 add_executable(ariadne_files_test ariadne_files_test.cpp)
@@ -42,6 +43,7 @@ add_executable(x11_macro_headers_test x11_macro_headers_test.cpp)
 add_executable(net_http_client_test net_http_client_test.cpp)
 # Ariadne data (cvc/ariadne/data.h) and the archive reader it unpacks with (cvc/utility/archive.h).
 add_executable(ariadne_data_test ariadne_data_test.cpp)
+add_executable(ariadne_world_dataset_test ariadne_world_dataset_test.cpp)
 add_executable(net_ws_client_test net_ws_client_test.cpp)
 add_executable(net_policy_test net_policy_test.cpp)
 # End-to-end encrypted DMs (cvc/net/e2ee.h): e2ee.js's vectors replayed, and the e2ee-* verbs.
@@ -67,6 +69,7 @@ add_executable(state_write_policy_test state_write_policy_test.cpp)
 add_executable(state_identity_test state_identity_test.cpp)
 add_executable(state_device_key_test state_device_key_test.cpp)
 add_executable(media_rungs_test media_rungs_test.cpp)
+add_executable(voice_mixer_test voice_mixer_test.cpp)
 add_executable(fast_lane_test fast_lane_test.cpp)
 add_executable(state_distributed_metrics_test state_distributed_metrics_test.cpp)
 add_executable(state_delegation_manager_test state_delegation_manager_test.cpp)
@@ -429,6 +432,7 @@ set(TEST_TARGETS
   ariadne_ftxui_test
   ariadne_chart_test
   ariadne_heatmap_test
+  ariadne_settings_test
   ariadne_term_graphics_test
   ariadne_media_test
   ariadne_files_test
@@ -441,6 +445,7 @@ set(TEST_TARGETS
   x11_macro_headers_test
   net_http_client_test
   ariadne_data_test
+  ariadne_world_dataset_test
   net_ws_client_test
   net_policy_test
   e2ee_test
@@ -465,6 +470,7 @@ set(TEST_TARGETS
   state_identity_test
   state_device_key_test
   media_rungs_test
+  voice_mixer_test
   fast_lane_test
   state_distributed_metrics_test
   state_delegation_manager_test
@@ -900,6 +906,13 @@ target_link_libraries(ariadne_heatmap_test
     GTest::gtest
     GTest::gtest_main
 )
+
+target_link_libraries(ariadne_settings_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 # Three tests load GL-free documents from the repo's examples/ tree.
 target_compile_definitions(ariadne_ftxui_test PRIVATE
   CVC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../examples")
@@ -1021,6 +1034,13 @@ target_link_libraries(net_http_client_test
 )
 
 target_link_libraries(ariadne_data_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_world_dataset_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1777,6 +1797,12 @@ target_link_libraries(state_device_key_test
     GTest::gtest_main
 )
 target_link_libraries(media_rungs_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(voice_mixer_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2860,6 +2886,8 @@ target_compile_features(nav_yield_test PRIVATE cxx_std_17)
 if(EXISTS "${PROJECT_SOURCE_DIR}/share/cvc/nav/coef_mlp.cvcnav")
   target_compile_definitions(nav_test PRIVATE
     CVC_NAV_SHIPPED_WEIGHTS="${PROJECT_SOURCE_DIR}/share/cvc/nav/coef_mlp.cvcnav")
+  target_compile_definitions(nav_plant_test PRIVATE
+    CVC_NAV_SHIPPED_WEIGHTS="${PROJECT_SOURCE_DIR}/share/cvc/nav/coef_mlp.cvcnav")
 endif()
 # Enable the CUDA parity tests (device-resident sim_world + CUDA trainer) when built.
 if(CVC_ENABLE_CUDA)
@@ -2889,6 +2917,7 @@ target_compile_features(state_write_policy_test PRIVATE cxx_std_17)
 target_compile_features(state_identity_test PRIVATE cxx_std_17)
 target_compile_features(state_device_key_test PRIVATE cxx_std_17)
 target_compile_features(media_rungs_test PRIVATE cxx_std_17)
+target_compile_features(voice_mixer_test PRIVATE cxx_std_17)
 target_compile_features(fast_lane_test PRIVATE cxx_std_17)
 target_compile_features(state_distributed_metrics_test PRIVATE cxx_std_17)
 target_compile_features(state_delegation_manager_test PRIVATE cxx_std_17)
@@ -3192,6 +3221,7 @@ cvc_discover_tests(ariadne_server_document_test)
 cvc_discover_tests(ariadne_ftxui_test)
 cvc_discover_tests(ariadne_chart_test)
 cvc_discover_tests(ariadne_heatmap_test)
+cvc_discover_tests(ariadne_settings_test)
 cvc_discover_tests(ariadne_term_graphics_test)
 cvc_discover_tests(ariadne_media_test)
 cvc_discover_tests(ariadne_files_test)
@@ -3209,6 +3239,7 @@ cvc_discover_tests(ariadne_bind_test)
 cvc_discover_tests(x11_macro_headers_test)
 cvc_discover_tests(net_http_client_test)
 cvc_discover_tests(ariadne_data_test)
+cvc_discover_tests(ariadne_world_dataset_test PROPERTIES TIMEOUT 900)
 cvc_discover_tests(net_ws_client_test)
 cvc_discover_tests(net_policy_test)
 cvc_discover_tests(e2ee_test)
@@ -3469,6 +3500,7 @@ cvc_discover_tests(state_write_policy_test)
 cvc_discover_tests(state_identity_test)
 cvc_discover_tests(state_device_key_test)
 cvc_discover_tests(media_rungs_test)
+cvc_discover_tests(voice_mixer_test)
 cvc_discover_tests(fast_lane_test)
 cvc_discover_tests(state_distributed_metrics_test)
 cvc_discover_tests(state_delegation_manager_test)

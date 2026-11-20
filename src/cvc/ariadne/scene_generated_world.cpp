@@ -23,6 +23,9 @@
 // scene_generated_world.cpp — a generated_world node in core (see scene_generated_world.h).
 
 #include <algorithm>
+#include <boost/any.hpp>
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/bind.h>
@@ -30,11 +33,16 @@
 #include <cvc/ariadne/scene_generated_world.h>
 #include <cvc/ariadne/uri.h>
 #include <cvc/core/app.h>
+#include <cvc/core/types.h>          // CVC_VERSION_STRING
+#include <cvc/model/model_file_io.h> // can_write_model_to_memory
+#include <cvc/state/state.h>
 #include <cvc/world/building_archetypes.h>
+#include <cvc/world/city_bundle.h>
 #include <cvc/world/world_geometry.h>
 #include <exception>
 #include <map>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
 
 namespace cvc {
@@ -73,6 +81,56 @@ const world::building_library &library_at(cvc::app &app, const std::string &path
   return *it->second;
 }
 
+// A bundle's files as a dataset's, in name order.
+std::vector<cvc::archive::file> as_files(const world::city_bundle_files &bundle) {
+  std::vector<cvc::archive::file> out;
+  for (const auto &[name, bytes] : bundle)
+    out.push_back({name, bytes});
+  return out;
+}
+
+// `generated` under the dataset: the world as made, which the renderer draws until it draws any
+// world dataset (GB3) and SceneWorld::generated_world reads.
+void put_generated(DataDecode &d, std::shared_ptr<const world::generated_world> w) {
+  cvc::state &g = d.out("generated");
+  g.data(boost::any(std::move(w)));
+  g.value(std::string("generated_world"));
+}
+
+// The world as made, as a dataset's outputs: where it cannot be written as a bundle.
+void put_made(DataDecode &d, const world::generated_world &w) {
+  auto geometry = std::make_shared<const world::world_geometry>(w.geometry());
+  d.out("world").data(boost::any(geometry));
+  d.out("world").value(std::string("world_geometry"));
+  if (std::shared_ptr<const cvc::height_field> field = geometry->terrain()) {
+    cvc::state &t = d.out("terrain");
+    t("rows").value(field->rows());
+    t("cols").value(field->cols());
+    t.data(boost::any(field));
+    t.value(std::string("height_field"));
+  }
+  if (const world::geometry_item *b = geometry->find("buildings")) {
+    d.out("buildings").data(boost::any(b->geometry));
+    d.out("buildings").value(std::string("geometry"));
+  }
+  d.out("water_level").value(std::to_string(w.params.water_level_m));
+}
+
+template <class T>
+std::shared_ptr<const T> output_of(cvc::app &app, const std::string &path, const char *child) {
+  cvc::state *n = cvc::state::instance(app).findThroughLinks(path);
+  if (!n)
+    return nullptr;
+  cvc::state *c =
+      cvc::state::instance(app).findDescendant(n->fullName() + cvc::state::SEPARATOR + child);
+  if (!c)
+    return nullptr;
+  const boost::any obj = c->data();
+  if (const auto *p = boost::any_cast<std::shared_ptr<const T>>(&obj))
+    return *p;
+  return nullptr;
+}
+
 std::string joined(const std::vector<std::string> &v) {
   std::string s;
   for (const std::string &e : v)
@@ -107,13 +165,21 @@ world::generated_world_params generated_world_params_from(const SceneNode &n) {
 
 const world::building_library &generated_world_library(cvc::app &app, const SceneNode &n,
                                                        std::vector<std::string> *warnings) {
+  return generated_world_library(app, n.props.str("building_library"), n.base_dir,
+                                 "generated_world '" + n.id + "'", warnings);
+}
+
+const world::building_library &generated_world_library(cvc::app &app, const std::string &uri,
+                                                       const std::string &base_dir,
+                                                       const std::string &owner,
+                                                       std::vector<std::string> *warnings) {
   std::vector<std::string> paths;
-  if (const std::string uri = n.props.str("building_library"); !uri.empty()) {
-    ResolvedFile f = resolve_to_file(app, uri, n.base_dir);
+  if (!uri.empty()) {
+    ResolvedFile f = resolve_to_file(app, uri, base_dir);
     if (f.ok)
       paths.push_back(f.path);
     else
-      warn(warnings, "ari: generated_world '" + n.id + "': building_library " + f.error);
+      warn(warnings, "ari: " + owner + ": building_library " + f.error);
   }
   if (const char *env = std::getenv("CVC_NAV_BUNDLE"); env && *env) {
     const std::string e(env);
@@ -316,11 +382,86 @@ generated_world_colliders(const world::generated_world &w) {
   return std::make_shared<const world::world_geometry>(w.geometry());
 }
 
+// ── A generated world as a dataset ──────────────────────────────────────────────────────────────
+
+std::vector<cvc::archive::file> generated_world_dataset(DataDecode &d) {
+  const std::string text = d.spec.params.empty() ? std::string("{}") : d.spec.params;
+  namespace pt = boost::property_tree;
+  pt::ptree j;
+  try {
+    std::istringstream in(text);
+    pt::read_json(in, j);
+  } catch (const std::exception &e) {
+    throw std::runtime_error("generate: generated_world: params are not a JSON object: " +
+                             std::string(e.what()));
+  }
+  // A preset first quick-sets its counts, relief and water level; the fields given then win.
+  world::generated_world_params base;
+  if (const auto preset = j.get_optional<int>("preset")) {
+    base.preset = *preset;
+    world::apply_world_preset(base);
+  }
+  const world::generated_world_params p = world::generated_world_params_from_json(text, base);
+  const world::building_library &library =
+      generated_world_library(d.app, j.get<std::string>("building_library", ""), d.spec.base,
+                              "data." + d.spec.name, nullptr);
+  ResolvedFile f;
+  auto w = std::make_shared<const world::generated_world>(world::generate_world(
+      d.app, resolve_generated_world_file(d.app, p, d.spec.base, f), &library));
+  put_generated(d, w);
+  return as_files(world::generated_world_bundle(d.app, *w, CVC_VERSION_STRING));
+}
+
+std::string generated_world_data_name(const SceneNode &n) { return n.props.str("data", n.id); }
+
+std::string publish_generated_world(cvc::app &app, const std::string &bind_prefix,
+                                    const SceneNode &n,
+                                    std::shared_ptr<const world::generated_world> w,
+                                    std::vector<std::string> *warnings,
+                                    const world::city_bundle_files *bundle) {
+  DataSpec spec;
+  spec.name = generated_world_data_name(n);
+  spec.generate = "generated_world";
+  // Named by where it is bound, so each Regenerate replaces this node's dataset in place.
+  spec.uri = "generated_world:" +
+             resolve_bind(bind_prefix, std::string(kDataRoot) + cvc::state::SEPARATOR + spec.name);
+  spec.params = world::generated_world_params_json(w->params);
+  spec.base = n.base_dir;
+  std::shared_ptr<DataStore> store = DataStore::of(app);
+  if (bundle ? !bundle->empty() : cvc::can_write_model_to_memory(".glb")) {
+    try {
+      return store->put(
+          bind_prefix, spec,
+          as_files(bundle ? *bundle : world::generated_world_bundle(app, *w, CVC_VERSION_STRING)),
+          [w](DataDecode &d) { put_generated(d, w); });
+    } catch (const std::exception &e) {
+      warn(warnings, "ari: generated_world '" + n.id + "': its world as a bundle: " + e.what() +
+                         "; its physics is the world as made");
+    }
+  }
+  return store->put(bind_prefix, spec, {}, [w](DataDecode &d) {
+    put_generated(d, w);
+    put_made(d, *w);
+  });
+}
+
+std::shared_ptr<const world::world_geometry> dataset_world(cvc::app &app, const std::string &path) {
+  return output_of<world::world_geometry>(app, path, "world");
+}
+
+std::shared_ptr<const world::generated_world> dataset_generated_world(cvc::app &app,
+                                                                      const std::string &path) {
+  return output_of<world::generated_world>(app, path, "generated");
+}
+
 // ── GeneratedWorldRuntime ────────────────────────────────────────────────────────────────────────
 
 struct GeneratedWorldRuntime::impl {
   cvc::app *app = nullptr;
   std::string node;
+  std::string prefix;              // the bind prefix: the dataset's link is under it
+  std::shared_ptr<SceneNode> spec; // the node, for its dataset's name and directory
+  std::string data_path;           // the world's dataset (publish_generated_world)
   std::string base_dir;
   GeneratedWorldKeys keys;
   world::generated_world_params base;
@@ -329,6 +470,15 @@ struct GeneratedWorldRuntime::impl {
   std::shared_ptr<SceneColliders> colliders = std::make_shared<SceneColliders>();
   std::string sig;
   int preset = 0;
+
+  // A new world: its dataset, and the colliders its world.
+  void take(std::shared_ptr<const world::generated_world> w, std::vector<std::string> *warnings) {
+    world = w;
+    data_path = publish_generated_world(*app, prefix, *spec, w, warnings);
+    std::shared_ptr<const world::world_geometry> g = dataset_world(*app, data_path);
+    colliders->geometry = g ? g : generated_world_colliders(*w);
+    ++colliders->revision;
+  }
 };
 
 GeneratedWorldRuntime::GeneratedWorldRuntime(cvc::app &app, const SceneNode &n,
@@ -338,6 +488,9 @@ GeneratedWorldRuntime::GeneratedWorldRuntime(cvc::app &app, const SceneNode &n,
   impl &d = *_impl;
   d.app = &app;
   d.node = n.id;
+  d.prefix = bind_prefix;
+  d.spec = std::make_shared<SceneNode>(n);
+  d.spec->children.clear();
   d.base_dir = n.base_dir;
   d.base = generated_world_params_from(n);
   d.library = &generated_world_library(app, n, warnings);
@@ -352,9 +505,7 @@ GeneratedWorldRuntime::GeneratedWorldRuntime(cvc::app &app, const SceneNode &n,
   std::shared_ptr<world::generated_world> w =
       first_generated_world(app, d.keys, n, p0, d.library, warnings);
   d.sig = generated_world_signature(p0);
-  d.world = w;
-  d.colliders->geometry = generated_world_colliders(*w);
-  d.colliders->revision = 1;
+  d.take(w, warnings);
   publish_generated_world_stats(app, d.keys, *w);
   write<int>(app, d.keys.progress, 100);
 }
@@ -369,6 +520,7 @@ const std::shared_ptr<SceneColliders> &GeneratedWorldRuntime::colliders() const 
   return _impl->colliders;
 }
 const GeneratedWorldKeys &GeneratedWorldRuntime::keys() const { return _impl->keys; }
+const std::string &GeneratedWorldRuntime::data_path() const { return _impl->data_path; }
 
 bool GeneratedWorldRuntime::tick(std::vector<std::string> *warnings) {
   impl &d = *_impl;
@@ -380,9 +532,7 @@ bool GeneratedWorldRuntime::tick(std::vector<std::string> *warnings) {
     ResolvedFile f;
     auto w = std::make_shared<world::generated_world>(world::generate_world(
         app, resolve_generated_world_file(app, poll.params, d.base_dir, f), d.library));
-    d.world = w;
-    d.colliders->geometry = generated_world_colliders(*w);
-    ++d.colliders->revision;
+    d.take(w, warnings);
     publish_generated_world_stats(app, d.keys, *w);
     write<int>(app, d.keys.progress, 100);
     return true;

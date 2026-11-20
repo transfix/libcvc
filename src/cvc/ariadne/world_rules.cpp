@@ -282,7 +282,8 @@ std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out
   const std::string where = "world: vehicles: start:";
   if (!v.is_seq())
     return where + " expects a list ({archetype:, count:, name:, team:, controller:, plant:, "
-                   "policy:, at:, heading:})";
+                   "policy:, at:, heading:} or a fleet's {fleet:, spawn:, seed:, rally:, colors:, "
+                   "keys:, ...})";
   out.clear();
   std::string why;
   for (const Value &item : v.items) {
@@ -292,24 +293,74 @@ std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out
                   "policy:, at:, heading:)";
     vehicle_start s;
     for (const auto &[k, x] : item.entries) {
-      if (k == "archetype" || k == "name" || k == "controller" || k == "plant" || k == "policy") {
+      if (k == "policy" && x.is_map()) {
+        // A fleet's weights: { uri:, path:, sha256: } or { data: <entry> }.
+        for (const auto &[pk, pv] : x.entries) {
+          if (pk == "uri" || pk == "path" || pk == "sha256" || pk == "data")
+            (pk == "uri"      ? s.policy
+             : pk == "path"   ? s.policy_path
+             : pk == "sha256" ? s.policy_sha256
+                              : s.policy_data) = pv.as_string();
+          else
+            warn(warnings, at + " policy: unknown key '" + pk + "', ignored");
+        }
+        if (s.policy.empty() && s.policy_data.empty())
+          return at + " policy: expects a uri: or a data: entry ({uri:, path:, sha256:} or "
+                      "{data:})";
+        if (!s.policy.empty() && !s.policy_data.empty())
+          return at + " policy: names a uri: or a data: entry, not both";
+      } else if (k == "archetype" || k == "name" || k == "controller" || k == "plant" ||
+                 k == "policy") {
         (k == "archetype"    ? s.archetype
          : k == "name"       ? s.name
          : k == "controller" ? s.controller
          : k == "plant"      ? s.plant
                              : s.policy) = x.as_string();
-      } else if (k == "count" || k == "team") {
+      } else if (k == "fleet" || k == "spawn" || k == "colors" || k == "keys" || k == "sense" ||
+                 k == "belief") {
+        (k == "fleet"    ? s.fleet
+         : k == "spawn"  ? s.layout
+         : k == "colors" ? s.colors
+         : k == "keys"   ? s.keys
+         : k == "sense"  ? s.sense
+                         : s.belief) = x.as_string();
+      } else if (k == "count" || k == "team" || k == "seed") {
         double n = 0.0;
         if (!number(x, at + " " + k + ":", n, why))
           return why;
         if (k == "team") {
           s.team = static_cast<int>(n);
+        } else if (k == "seed") {
+          if (n < 0.0 || n > 9007199254740992.0 || n != std::floor(n))
+            return at + " seed: expects a whole number from 0";
+          s.seed = static_cast<unsigned long long>(n);
         } else {
-          if (n < 1.0 || n > kMaxVehicleStartCount || n != std::floor(n))
+          // A fleet's cap; an unnamed entry's is checked once the entry is read (fleet: may come
+          // after count:).
+          if (n < 1.0 || n > kMaxFleetCount || n != std::floor(n))
             return at + " count: expects a whole number from 1 to " +
-                   std::to_string(kMaxVehicleStartCount);
+                   std::to_string(kMaxVehicleStartCount) + " (" + std::to_string(kMaxFleetCount) +
+                   " for a fleet)";
           s.count = static_cast<int>(n);
         }
+      } else if (k == "rally") {
+        // rally: T, or rally: { count: T, assign: latitude }
+        const Value *c = x.is_map() ? nullptr : &x;
+        if (x.is_map())
+          for (const auto &[rk, rv] : x.entries) {
+            if (rk == "count")
+              c = &rv;
+            else if (rk == "assign")
+              s.assign = rv.as_string();
+            else
+              warn(warnings, at + " rally: unknown key '" + rk + "', ignored");
+          }
+        double n = 0.0;
+        if (!c || !number(*c, at + " rally:", n, why) || n < 1.0 || n > kMaxFleetRally ||
+            n != std::floor(n))
+          return at + " rally: expects a count from 1 to " + std::to_string(kMaxFleetRally) +
+                 " ({count:, assign: latitude})";
+        s.rally = static_cast<int>(n);
       } else if (k == "at") {
         if (!x.is_seq() || x.items.size() < 2 || !number(x.items[0], at + " at:", s.x, why) ||
             !number(x.items[1], at + " at:", s.y, why))
@@ -325,6 +376,54 @@ std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out
     }
     if (s.archetype.empty())
       return at + " names no archetype:";
+    if (s.fleet.empty()) {
+      if (s.count > kMaxVehicleStartCount)
+        return at + " count: expects a whole number from 1 to " +
+               std::to_string(kMaxVehicleStartCount) + " (name a fleet: for more)";
+      for (const auto &[k, x] : item.entries)
+        if (k == "spawn" || k == "seed" || k == "rally" || k == "colors" || k == "keys" ||
+            k == "sense" || k == "belief" || (k == "policy" && x.is_map()))
+          warn(warnings, at + " " + k + ": is a fleet's (fleet: names one), ignored");
+      const vehicle_start plain;
+      s.layout = plain.layout;
+      s.seed = plain.seed;
+      s.rally = plain.rally;
+      s.assign = plain.assign;
+      s.colors = plain.colors;
+      s.keys = plain.keys;
+      s.sense = plain.sense;
+      s.belief = plain.belief;
+      if (!s.policy_path.empty() || !s.policy_sha256.empty() || !s.policy_data.empty()) {
+        s.policy = plain.policy;
+        s.policy_path = plain.policy_path;
+        s.policy_sha256 = plain.policy_sha256;
+        s.policy_data = plain.policy_data;
+      }
+    } else {
+      if (!cvc::state::isValidStateName(s.fleet))
+        return at + " fleet: '" + s.fleet + "' is not a state name";
+      for (const vehicle_start &o : out)
+        if (o.fleet == s.fleet)
+          return at + " fleet: '" + s.fleet + "' is named twice";
+      if (s.placed)
+        return at + " fleet: '" + s.fleet + "' is laid out by spawn:, not at:";
+      if (s.controller == "pose")
+        return at + " fleet: '" + s.fleet + "' drives its vehicles; controller: pose places one";
+      if (!s.layout.empty() && s.layout != "opposed" && s.layout != "scattered" &&
+          s.layout != "points")
+        return at + " spawn: '" + s.layout + "' is not one (opposed, scattered, points)";
+      if (!s.assign.empty() && s.assign != "latitude")
+        return at + " rally: assign: '" + s.assign + "' is not one (latitude)";
+      if (!s.colors.empty() && s.colors != "hsv" && s.colors != "spawn")
+        return at + " colors: '" + s.colors + "' is not one (hsv, spawn)";
+      if (!s.keys.empty() && s.keys != "summary" && s.keys != "all")
+        return at + " keys: '" + s.keys + "' is not one (summary, all)";
+      if (!s.sense.empty() && s.sense != "known" && s.sense != "fog")
+        return at + " sense: '" + s.sense + "' is not one (known, fog)";
+      if (!s.belief.empty() && s.belief != "shared" && s.belief != "grouped" &&
+          s.belief != "private")
+        return at + " belief: '" + s.belief + "' is not one (shared, grouped, private)";
+    }
     if (!s.plant.empty() && !vehicle_plant_known(s.plant))
       return at + " plant: '" + s.plant +
              "' is not one (jolt, kinematic, dynamic, dynamic4w, dynamicboat)";

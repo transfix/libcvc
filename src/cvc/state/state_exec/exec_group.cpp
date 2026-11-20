@@ -323,6 +323,7 @@ pump_result exec_group::pump(const pump_budget &budget) {
                                               ? std::optional<double>(std::max(0.0, budget.seconds))
                                               : std::nullopt;
     r.steps = s.sync_run_steps(budget.steps, seconds);
+    r.runnable = s.has_runnable();
   } catch (...) {
     if (m.callback_threw) {
       // An on_complete callback run inline threw: the host's exception, as today.

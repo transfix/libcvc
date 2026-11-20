@@ -128,6 +128,9 @@ struct call_state {
   std::uint64_t seq = 0; // pool_state::call_seq
   se::pump_budget budget{0, 0.0};
   clock_type::time_point deadline;
+  // Half the time from the call's start to its deadline: a group started with less than this
+  // left that the deadline cut is short-changed (infinity: no deadline).
+  double half_span = std::numeric_limits<double>::infinity();
   bool timed = true;     // the deadline and the seconds budgets apply (not deterministic)
   bool threaded = false; // workers may pump its groups: every on_complete waits for the join
   std::thread::id caller;
@@ -154,6 +157,11 @@ struct call_state {
 struct pumped {
   double seconds = 0.0;
   bool failed = false;
+  // Short-changed: it started with less than half the call left, and the deadline (not its own
+  // budget, nor its work running out) ended its pump. It goes first next call, as a skipped group
+  // does: a group that always starts just before the deadline, behind one that takes nearly the
+  // whole frame, is never skipped, and would otherwise get only that sliver every frame.
+  bool short_changed = false;
   std::exception_ptr error;
 };
 
@@ -189,11 +197,16 @@ pumped pump_entry(call_state &c, entry &e) noexcept {
   const clock_type::time_point start = clock_type::now();
   try {
     se::pump_budget budget = c.budget;
+    const double left = c.timed ? seconds_left(c, start) : std::numeric_limits<double>::infinity();
     if (c.timed)
-      budget.seconds = std::min(budget.seconds, seconds_left(c, start));
+      budget.seconds = std::min(budget.seconds, left);
     else
       budget.seconds = std::numeric_limits<double>::infinity(); // deterministic: steps only
-    out.failed = e.group->pump(budget).failed;
+    const se::pump_result r = e.group->pump(budget);
+    out.failed = r.failed;
+    // Work left, with steps to spare, and the deadline was the time limit: the deadline cut it.
+    out.short_changed = c.timed && !r.failed && r.runnable && r.steps < budget.steps &&
+                        left < c.budget.seconds && left < c.half_span;
   } catch (...) {
     out.error = std::current_exception();
   }
@@ -251,6 +264,13 @@ void finish_group(pool_state &p, call_state &c, entry &e, int thread, const pump
   se::detail::group_pool_link &link = e.group->pool_link();
   link.last_pump_seconds = r.seconds;
   link.last_thread = thread;
+  if (r.short_changed) {
+    // Stamped as skipped by this call (its start cleared any older stamp): first next call.
+    link.skipped = true;
+    if (!link.skipped_since)
+      link.skipped_since = c.seq;
+    ++p.stats.short_changed;
+  }
   ++p.stats.pumps;
   if (on_worker)
     ++p.stats.worker_pumps;
@@ -510,6 +530,7 @@ std::vector<state_exec::exec_group *> exec_pool::pump_all(
   c.seq = p.call_seq.fetch_add(1, std::memory_order_relaxed) + 1;
   c.budget = budget;
   c.deadline = deadline;
+  c.half_span = seconds_left(c, clock_type::now()) / 2;
   c.timed = !p.deterministic;
   c.threaded = p.threads > 0 && !p.deterministic;
   c.caller = std::this_thread::get_id();
@@ -620,11 +641,12 @@ std::vector<state_exec::exec_group *> exec_pool::pump_all(
     std::lock_guard<std::mutex> lock(p.m);
     finish_group(p, c, e, 0, r, false);
   };
-  // What the caller pumps itself: `mine` (in creation order) and host_first. Those skipped before
-  // go first, the one skipped longest first (host_first first on a tie), then host_first, then
-  // the rest: so with k of them that each fill a frame, each starts at least once in k frames,
-  // and neither a busy group 0 nor busy frame groups keep the other from starting (S-M1, N1).
-  // Deterministic mode skips nothing: host_first, then the rest.
+  // What the caller pumps itself: `mine` (in creation order) and host_first. Those skipped (or
+  // short-changed, finish_group) before go first, the one skipped longest first (host_first first
+  // on a tie), then host_first, then the rest: so with k of them that each fill a frame, each
+  // starts at least once in k frames, one behind a group that takes nearly the whole frame gets a
+  // whole frame in turn, and neither a busy group 0 nor busy frame groups keep the other from
+  // starting (S-M1, N1). Deterministic mode skips nothing: host_first, then the rest.
   const auto caller_runs = [&](const std::vector<std::size_t> &mine) {
     std::uint64_t first_since = 0;
     if (host_first && c.timed) {

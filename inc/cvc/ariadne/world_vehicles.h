@@ -270,6 +270,8 @@ struct entity_info {
   bool reached = false;              // at its goal (nav@1 then draws another, unless held)
   std::string plant;                 // jolt, dynamic, dynamic4w, kinematic or dynamicboat (as
                                      // spec.plant; a `pose` entity's is its look's alone)
+  std::string fleet;                 // the fleet it was laid out in (start: fleet:), "" none
+  int rally = -1;                    // its team's rally point in its fleet, -1 none
   // Its chassis's contacts over the physics steps since the navigator's last tick (each step's
   // contact events, begun or, when the scene's physics reports them, persisting): with the
   // world's bodies other than the ground (buildings, walls, props), and with another vehicle. A
@@ -508,8 +510,8 @@ public:
   bool set_sense(const std::string &mode);
   const std::string &sense() const;
   // The occupancy plant `plant`'s navigator plans on now (row-major, the grid's rows and cols;
-  // 1 = blocked): the grid under known, its belief under fog. False when that plant has no
-  // navigator yet.
+  // 1 = blocked): the grid under known, its belief (its first plane) under fog. A fleet's own
+  // navigator is "<plant>/<fleet>". False when that plant has no navigator yet.
   bool belief(const std::string &plant, std::vector<std::uint8_t> &out, int &rows, int &cols) const;
   // Entity `id`'s command for the navigator's next tick only, in place of its controller's: the
   // steering's bicycle angle (rad, + left) and the acceleration along its heading (m/s^2), held to
@@ -550,6 +552,28 @@ public:
   // Empty for an id that is not a placed entity.
   std::vector<entity_wheel> wheels(std::uint64_t id) const;
   std::size_t size() const;
+
+  // Fleets (world: vehicles: start: entries with fleet:, spawn_starts): their names in the
+  // document's order. A fleet is laid out once the world's grid exists; its keys are
+  // `vehicles.fleets.<name>.*` (rally points, restart and reseed requests, its counts).
+  // Each fleet has a navigator of its own per plant ("<plant>/<fleet>"), made with its sense and
+  // belief: writing `.sense` (known, fog) or `.belief` (shared, grouped, private) makes it again,
+  // its vehicles at rest where they are; `.planes` counts its belief planes. `.policy` (trained,
+  // builtin, data:<entry> or a uri) switches what drives it live, and `.drives` says what does:
+  // "trained (<where>, sha256:...)", "weights (<uri>, sha256:...)", "builtin", "builtin: loading
+  // <uri>" while weights are on their way, or "builtin: no trained weights (<why>)", which the
+  // host's log also gets once.
+  std::vector<std::string> fleets() const;
+  // Fleet `fleet`'s rally point `team` (0 to rally.count - 1): where it is, false when there is
+  // none (no such fleet or team, or not laid out yet).
+  bool rally(const std::string &fleet, int team, double &x, double &y) const;
+  // Moves it (held to the grid): its team's vehicles drive there. As writing
+  // vehicles.fleets.<fleet>.rally.<team>.x and .y.
+  bool move_rally(const std::string &fleet, int team, double x, double y);
+  // Lays fleet `fleet` out again, every vehicle back to a start: from its seed (`reseed` false),
+  // or from the next one. As changing vehicles.fleets.<fleet>.restart.request or
+  // reseed.request.
+  bool restart_fleet(const std::string &fleet, bool reseed);
   // Bumps whenever a chassis comes or goes (a spawn, a removal, a new grid, a restart): a view
   // binds its drawings to the chassis again.
   std::uint64_t revision() const;

@@ -568,6 +568,79 @@ windows:
   EXPECT_TRUE(is_builtin_widget_type("chart")) << "so requires: and (has? \"chart\") see it";
 }
 
+// settings: an editor for every key under root: (a path, or a list of them), with filter: (a
+// pattern or a list), groups: (a key, {key: title} or {key: {title, help, open}}), search:,
+// readouts:, open:, commit: and on:. type: settings is the same widget.
+TEST(AriadneLoader, SettingsWidget) {
+  SKIP_WITHOUT_YAML();
+  const std::string doc = R"(
+meta: { name: T, min_libcvc: 3.4.0 }
+windows:
+  - window: W
+    children:
+      - settings: Tuning
+        root: cfg
+        filter: ["nav.*", "-nav.debug*"]
+        groups:
+          - world
+          - nav: Navigation
+          - plant: {title: The plant, help: what drives it, open: true}
+          - {}
+        search: true
+        readouts: false
+        open: true
+        commit: release
+        on: tuned
+      - type: settings
+        id: both
+        root: [nav.vehicle, /plant]
+        filter: seed
+      - settings: Bare
+)";
+  LoadResult r = fresh_load(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(count(r.root, Kind::Settings), 3);
+  const Widget *t = find(r.root, Kind::Settings, "Tuning");
+  ASSERT_NE(t, nullptr);
+  EXPECT_EQ(t->settings_roots, (std::vector<std::string>{"cfg"}));
+  EXPECT_EQ(t->settings_filter, (std::vector<std::string>{"nav.*", "-nav.debug*"}));
+  ASSERT_EQ(t->settings_groups.size(), 3u) << "the entry naming no key is skipped";
+  EXPECT_EQ(t->settings_groups[0].key, "world");
+  EXPECT_TRUE(t->settings_groups[0].title.empty());
+  EXPECT_EQ(t->settings_groups[1].key, "nav");
+  EXPECT_EQ(t->settings_groups[1].title, "Navigation");
+  EXPECT_EQ(t->settings_groups[2].key, "plant");
+  EXPECT_EQ(t->settings_groups[2].title, "The plant");
+  EXPECT_EQ(t->settings_groups[2].help, "what drives it");
+  EXPECT_TRUE(t->settings_groups[2].open);
+  EXPECT_TRUE(t->settings_search);
+  EXPECT_FALSE(t->settings_readouts);
+  EXPECT_TRUE(t->settings_open);
+  EXPECT_TRUE(t->commit_on_release);
+  EXPECT_EQ(t->on, "tuned");
+  std::function<const Widget *(const Widget &)> by_id = [&](const Widget &w) -> const Widget * {
+    if (w.kind == Kind::Settings && w.id == "both")
+      return &w;
+    for (const Widget &c : w.children)
+      if (const Widget *f = by_id(c))
+        return f;
+    return nullptr;
+  };
+  const Widget *both = by_id(r.root);
+  ASSERT_NE(both, nullptr);
+  EXPECT_EQ(both->settings_roots, (std::vector<std::string>{"nav.vehicle", "/plant"}));
+  EXPECT_EQ(both->settings_filter, (std::vector<std::string>{"seed"}));
+  EXPECT_FALSE(both->settings_search);
+  EXPECT_TRUE(both->settings_readouts);
+  EXPECT_FALSE(both->commit_on_release);
+  const Widget *bare = find(r.root, Kind::Settings, "Bare");
+  ASSERT_NE(bare, nullptr);
+  EXPECT_TRUE(bare->settings_roots.empty());
+  EXPECT_TRUE(has_warning(r, "settings 'Bare' has no root:"));
+  EXPECT_TRUE(has_warning(r, "settings 'Tuning' has a groups: entry that names no key"));
+  EXPECT_TRUE(is_builtin_widget_type("settings")) << "so requires: and (has? \"settings\") see it";
+}
+
 TEST(AriadneLoader, InputTextAndInputInt) {
   SKIP_WITHOUT_YAML();
   const char *doc = R"(
@@ -1131,6 +1204,175 @@ TEST(AriadneLoader, ColoredTextParses) {
   const Widget *t2 = find(r2.root, Kind::Text);
   ASSERT_NE(t2, nullptr);
   EXPECT_FALSE(t2->has_text_color);
+}
+
+// §5.26 a colour on a text, radio, button or menu item: written ([r, g, b], #rrggbb, c0..c7), from
+// a key ({ bind: key }) or computed ("(expr)"); a radio's may be a list, one per option.
+TEST(AriadneLoader, ComputedColorsParse) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"ari(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    children:
+      - text: Hot
+        bind: temp
+        color: "(if (> (float (state-get \"temp\")) 80) \"1,0.2,0.2\" \"\")"
+      - text: Row
+        color: { bind: palette.0 }
+      - text: Hex
+        color: "#ff8000"
+      - text: Slot
+        color: c3
+      - text: Short
+        color: "#f80"
+      - text: Off
+        color: none
+      - button: Go
+        on: go
+        color: { bind: go.color }
+      - menu_item: Act
+        on: act
+        color: c1
+      - menu_item: Flag
+        bind: flag
+        color: [0, 1, 0]
+      - radio: Follow
+        bind: cam.follow
+        options: [a, b, c]
+        color: [c0, "#00ff00", none]
+      - radio_row: Mode
+        bind: mode
+        options: [x, y]
+        color: "c4;c5"
+      - radio: Whole
+        bind: whole
+        options: [p, q]
+        color: "(state-get \"whole.color\")"
+)ari");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty()) << r.warnings.front();
+  const Widget *hot = find(r.root, Kind::Text, "Hot");
+  ASSERT_NE(hot, nullptr);
+  EXPECT_EQ(hot->color_src.substr(0, 4), "(if ");
+  EXPECT_FALSE(hot->has_text_color);
+  EXPECT_EQ(find(r.root, Kind::Text, "Row")->color_src, "palette.0");
+  const Widget *hex = find(r.root, Kind::Text, "Hex");
+  ASSERT_TRUE(hex->has_text_color);
+  EXPECT_FLOAT_EQ(hex->text_color[0], 1.0f);
+  EXPECT_NEAR(hex->text_color[1], 128.0f / 255.0f, 1e-6);
+  EXPECT_FLOAT_EQ(hex->text_color[2], 0.0f);
+  const Widget *slot = find(r.root, Kind::Text, "Slot");
+  ASSERT_TRUE(slot->has_text_color); // c3: the chart's yellow, 0xeda100
+  EXPECT_NEAR(slot->text_color[0], 0xed / 255.0f, 1e-6);
+  const Widget *shorthex = find(r.root, Kind::Text, "Short"); // #rgb: #f80 is #ff8800
+  ASSERT_TRUE(shorthex->has_text_color);
+  EXPECT_FLOAT_EQ(shorthex->text_color[0], 1.0f);
+  EXPECT_NEAR(shorthex->text_color[1], 0x88 / 255.0f, 1e-6);
+  EXPECT_FLOAT_EQ(shorthex->text_color[2], 0.0f);
+  EXPECT_FALSE(find(r.root, Kind::Text, "Off")->has_text_color);
+  EXPECT_TRUE(find(r.root, Kind::Text, "Off")->color_src.empty());
+  // A `color:` beside `button:` is the button's colour, not a colour picker.
+  const Widget *go = find(r.root, Kind::Button, "Go");
+  ASSERT_NE(go, nullptr);
+  EXPECT_EQ(go->color_src, "go.color");
+  EXPECT_EQ(count(r.root, Kind::Color), 0);
+  const Widget *act = find(r.root, Kind::MenuItemAction, "Act");
+  ASSERT_NE(act, nullptr);
+  EXPECT_TRUE(act->has_text_color);
+  const Widget *flag = find(r.root, Kind::MenuItemToggle, "Flag");
+  ASSERT_NE(flag, nullptr);
+  EXPECT_TRUE(flag->has_text_color);
+  EXPECT_FLOAT_EQ(flag->text_color[1], 1.0f);
+  // A radio's list: one colour per option, none for the default.
+  const Widget *follow = find(r.root, Kind::Radio, "Follow");
+  ASSERT_NE(follow, nullptr);
+  ASSERT_EQ(follow->option_colors.size(), 3u);
+  EXPECT_TRUE(follow->option_colors[0].set);
+  EXPECT_NEAR(follow->option_colors[0].rgb[2], 0xd6 / 255.0f, 1e-6); // c0 0x2a78d6
+  EXPECT_TRUE(follow->option_colors[1].set);
+  EXPECT_FLOAT_EQ(follow->option_colors[1].rgb[1], 1.0f);
+  EXPECT_FALSE(follow->option_colors[2].set);
+  EXPECT_FALSE(follow->has_text_color);
+  const Widget *mode = find(r.root, Kind::Radio, "Mode");
+  ASSERT_NE(mode, nullptr);
+  EXPECT_TRUE(mode->radio_row);
+  EXPECT_EQ(mode->option_colors.size(), 2u);
+  EXPECT_EQ(find(r.root, Kind::Radio, "Whole")->color_src, "(state-get \"whole.color\")");
+}
+
+// §5.26 a colour that is none of the forms warns once and draws the default; the colour picker
+// (`color: Tint`) is still a colour picker.
+TEST(AriadneLoader, BadColorWarnsAndThePickerStays) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"ari(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    children:
+      - text: Bad
+        color: purple
+      - button: Map
+        on: x
+        color: { key: nope }
+      - color: Tint
+        bind: tint
+)ari");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(has_warning(r, "'Bad' color: is [r, g, b]"));
+  EXPECT_TRUE(has_warning(r, "'Map' color: is [r, g, b]"));
+  EXPECT_FALSE(find(r.root, Kind::Text, "Bad")->has_text_color);
+  EXPECT_TRUE(find(r.root, Kind::Button, "Map")->color_src.empty());
+  const Widget *picker = find(r.root, Kind::Color);
+  ASSERT_NE(picker, nullptr);
+  EXPECT_EQ(picker->label, "Tint");
+  EXPECT_EQ(picker->bind, "tint");
+}
+
+// §5.26 `background: { color: }` on a group (a grid's cell) or a window: a fill, written or from a
+// key or an expression; `background: [r, g, b]` is short for it.
+TEST(AriadneLoader, BackgroundColorParses) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"ari(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    background: [0.1, 0.1, 0.2]
+    layout: { kind: grid, col_widths: [100, 100] }
+    children:
+      - type: group
+        id: cell
+        repeat: "3"
+        background: { color: { bind: "palette.{i}" }, opacity: 0.5 }
+        children:
+          - text: "{i}"
+      - type: group
+        id: hot
+        background: { color: "(state-get \"hot.color\")" }
+        children:
+          - text: hot
+      - type: group
+        id: pic
+        background: { src: https://example.org/a.png, color: c2 }
+        children:
+          - text: pic
+)ari");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty()) << r.warnings.front();
+  const Widget *win = find(r.root, Kind::Window);
+  ASSERT_NE(win, nullptr);
+  EXPECT_TRUE(win->background.color.set);
+  EXPECT_FLOAT_EQ(win->background.color.rgb[2], 0.2f);
+  EXPECT_FALSE(win->background.has_picture());
+  EXPECT_TRUE(win->background.any());
+  ASSERT_EQ(win->children.size(), 3u);
+  const Widget &cell = win->children[0];
+  EXPECT_EQ(cell.background.color_src, "palette.{i}");
+  EXPECT_FLOAT_EQ(cell.background.opacity, 0.5f);
+  EXPECT_EQ(win->children[1].background.color_src, "(state-get \"hot.color\")");
+  const Widget &pic = win->children[2];
+  EXPECT_TRUE(pic.background.has_picture());
+  EXPECT_TRUE(pic.background.color.set);
 }
 
 TEST(AriadneLoader, BareScalarsAndLiteralVsBoundText) {

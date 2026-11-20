@@ -1590,7 +1590,8 @@ namespace {
 // The scene's world, built by core libcvc (cvc::ariadne::SceneWorld) from the nodes that declared a
 // body: their specs, their world matrices from the spec (as a headless host composes them, so both
 // make the same world), the meshes the nodes already hold, the terrains' grids, the colliders a
-// custom node makes (out.colliders: a generated world's) and the data nodes' datasets (their bodies
+// custom node makes (out.colliders: a water's), the dataset a custom node puts (out.body_data: a
+// generated world's) and the data nodes' datasets (their bodies
 // come once a dataset is ready, at the world's sync). The moving bodies are bound to their nodes so
 // tick_scene draws them where physics has them. Problems warn (naming the node) and leave that body
 // out; nothing here throws.
@@ -1607,8 +1608,10 @@ void realize_physics(SceneGraph &sg, const cvc::ariadne::Scene &scene,
     auto m = matrices.find(p.spec);
     if (m != matrices.end())
       in.world = m->second;
-    if (auto c = out.colliders.find(p.spec->id); c != out.colliders.end() && c->second) {
-      in.colliders = c->second; // a custom node's own colliders (a generated world's)
+    if (auto d = out.body_data.find(p.spec->id); d != out.body_data.end()) {
+      in.data_path = d->second; // a dataset the node puts (a generated world's)
+    } else if (auto c = out.colliders.find(p.spec->id); c != out.colliders.end() && c->second) {
+      in.colliders = c->second; // a custom node's own colliders (a water's)
     } else {
       auto gnode = std::dynamic_pointer_cast<GeometryNode>(p.node);
       if (gnode && gnode->getGeometry()) // a copy-on-write copy: the buffers are shared

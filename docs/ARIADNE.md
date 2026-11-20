@@ -97,7 +97,8 @@ has the same table for every host, with the settings that apply and when they ar
 ### 2.1 The reactive READ lane
 
 Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `bind` /
-`text`, `tooltip`, `options`, `repeat.count` — run in a long-lived stackless evaluator
+`text`, `tooltip`, `options`, `repeat.count`, a computed `color` (§5.26) — run in a long-lived
+stackless evaluator
 (`class ReactiveEngine`, [`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)) over a
 **default-deny** environment:
 
@@ -168,7 +169,7 @@ The frame budget resets at the top of each frame, so *N* widgets cannot jointly 
 frame. Once the aggregate is spent, the rest are skipped for that frame only:
 
 - Each skipped expression keeps the value it had last frame: a `visible_when`, an `enabled_when`,
-  a computed `bind:` or text, a `tooltip`, combo `options` or a `repeat:` count.
+  a computed `bind:` or text, a `tooltip`, combo `options`, a `repeat:` count or a `color:`.
 - One that never ran yet takes its fail-safe value instead: hidden, disabled, empty or 0.
 - A skip isn't the document's fault, so it is never a reactive warning (`take_reactive_warnings`,
   the web pages' `ariadneWarning`). A real 10-post feed decoding pictures in wasm can spend the
@@ -584,7 +585,7 @@ with `(has? "heatmap")`. The cells come from a subtree at `bind`:
   are optional: children `row_labels.<i>`, or comma-separated text (`a,b,c`). A side past 256
   cells draws its first 256 and warns.
 - **`ramp:`** is a list of `[value, colour]` stops, sorted by value, each colour `"#rrggbb"`,
-  `"#rgb"` or `[r, g, b]` (0 to 1). Between two stops the colour is mixed in proportion. Below the
+  `"#rgb"`, `c0` to `c7` or `[r, g, b]` (0 to 1), as §5.26 reads one. Between two stops the colour is mixed in proportion. Below the
   first and above the last it is that end stop's colour (clamped). With no ramp every value is one
   grey. The core colours the cells, so every backend shows the same colours.
 - **The tooltip** for the hovered cell is the document's `tooltip:` with the cell's tokens filled
@@ -635,6 +636,114 @@ b      ·
 - **Any other backend** prints the label, a line of column labels, then a line for each row: its
   label and each cell's text (else its value), `*` after a marked one and `.` for no value. With a
   legend, a last line lists the stops (`legend: 0 #c0392b, 12.5 #e6a23c, 25 #27ae60`).
+
+A `settings:` widget edits every key under a state subtree, so a panel of settings needs no
+widget per key. Each key's editor comes from its metadata: the comment and properties a binding
+writes on its keys (`cvc/state/state_key_meta.h`'s `access`, `unit`, `min` and `max`, and
+`cvc/core/param_table.h`'s `type`, `choices` and `default`). A document checks for it with
+`(has? "settings")`.
+
+```yaml
+- settings: Tuning             # the label, drawn above it ("" or type: settings for none)
+  root: sim                    # a state path, or a list of them
+  filter: ["nav.*", "-nav.debug*"]   # optional: keys whose path under the root matches
+  groups:                      # optional: the order and names of the branches
+    - nav: Navigation
+    - world: {title: The world, help: what it is made of, open: true}
+    - plant                    # only its place in the order
+  search: true                 # a search box (its text kept at tree.<id>.search)
+  readouts: false              # leave out the read-only keys (default true)
+  open: true                   # every group open at first (default false)
+  commit: release              # sliders write once, at the release (default live)
+  on: tuned                    # after each committed write and each reset
+```
+
+- **The editor a key gets**, in this order:
+  - a read-out (its value and unit) for a read-only node or `access: telemetry`;
+  - a combo for `choices` (comma-separated);
+  - for a `type` (`param_table`'s):
+    - a checkbox for `bool`;
+    - an integer for `int`;
+    - a number for `number`;
+    - a text field for anything else.
+  - Without a `type`, a key with a `unit`, or with a `min` and a `max`, is a number:
+    - `state_key_meta` stores a unit of `""` (a count or a flag) as no unit, so with no unit it is
+      a checkbox over 0..1 and an integer otherwise;
+    - a unit of `tick` is an integer, shown as ticks;
+    - any other unit is a number, its unit shown after it (a ratio, `1`, shows none).
+  - A number whose value is not a number, and a key with neither a type nor a range, is a text
+    field.
+- **The editors**:
+  - An integer or a number with a `min` and a `max` is a slider over that range. The range is a
+    recommendation: ctrl+click an ImGui slider to type any value.
+  - The slider moves by ratio when the key's `scale` property is `log`, or when the range is
+    positive and spans 100x or more (`scale: linear` says not).
+  - Without a range it is a drag field (ImGui) or a text field (a terminal).
+  - A text field is applied on Enter; leaving it without one puts the value back.
+  - A value the key's kind does not take (a word for a number) is not written, and warns once.
+- **Groups.** Each branch under the root is a group:
+  - in ImGui a collapsing header, and a tree node below that;
+  - at each level the keys come first, in name order (a header has no end, so a key drawn after
+    one would read as under it), then the branches;
+  - `groups:` lists branches (`a.b` for a nested one) to put first among their siblings, in its
+    order, with a `title`, a `help` (the header's tooltip; else the branch's comment) and `open`;
+  - the rest follow in name order, under their names;
+  - a branch with nothing shown under it is left out, and a hidden node with everything under it.
+  - With several roots each root is a group of its own (a root that is one key is a row), and
+    the paths below start with the root as written (`nav.vehicle.vmax`).
+- **`filter:`** patterns match a key's path under the root:
+  - a pattern with `*`, `?` or `[...]` is a glob (`*` crosses dots), any other a substring;
+  - a key passes when it matches one of the patterns and none that start with `-`.
+- **The search box** narrows the list by words in a key's path or description, in any case; a
+  `-word` leaves out what has it. While a search or a filter narrows the list, every group is
+  drawn open.
+- **Reset.** A key whose value is not its default shows a reset, which writes the default back.
+  - The default is the key's `default` property, else the value the editor first saw it hold.
+  - A group with such keys shows a "reset all", which puts back each key under it.
+  - A read-out has no reset.
+- **The tooltip**, on a key's name and editor: its path, its description (the comment, else `doc`),
+  its unit, the recommended range, its default, and when a change applies (from `access`:
+  `knob` live, `build` when next built, `command` an input, `telemetry` read-only).
+- **Writes** go through the path every bound widget's do: a slider writes as it moves (once at
+  the release with `commit: release`), the other editors on their commit, and `on:` runs after
+  the commit, so the key's watchers and `on:` handlers see the new value.
+- **It reads its subtree again only when something under a root is written**: a value, a comment,
+  a property, a key added or taken away (the tree root's change signal, counted per root), or the
+  search changes. An editor at rest reads no state. A key reached through a link is read, but a
+  write to the link's target is not seen until something under the root changes.
+  - It lists at most 2000 keys and 32 levels, warning once when it cuts a subtree there.
+- **ImGui** draws each key as a row: its name, its editor from 42% of the width to the reset's
+  place, and the reset. A header's "reset all" sits at the right of its line.
+- **A terminal** (FTXUI, tvision; any backend without its own) draws a flat list of its own
+  widgets:
+  - each group is a `[title]` line, a renamed one by its title and the rest by their paths, with
+    a `reset all` button while a key under it can be reset;
+  - each key is its editor, labelled with its path under the root, with a `reset` button beside a
+    changed one.
+
+```text
+name: [alpha]
+speed: 3 m/s
+[Navigation]
+[ reset all ]
+nav.mode: < b >
+[x] nav.on
+nav.vmax ██████▏              12.5 m/s
+[ reset ]
+[world]
+world.seed █▎                   7
+```
+
+Two keys from the C++ side, described the way a binding describes its own:
+
+```cpp
+const cvc::state_key_meta kSim[] = {
+    {"vmax", "knob", "m/s", 0.5, 40.0, "the top speed"},
+    {"gain", "knob", "1", 0.01, 10.0, "the steering gain"},   // 1000x: a slider by ratio
+};
+cvc::describe_state_keys(app, "sim", kSim);
+// settings: with root: sim shows a slider for each, with its unit, range and description.
+```
 
 A `spinner:` widget says something is under way when there is no amount to show (a request, a
 search). The host turns it by its own frame clock (`Runtime::frame_clock`), not by state, so it keeps
@@ -1916,9 +2025,10 @@ scene:
   so headless the scene's world runs the node itself: it seeds the `world.*` keys, makes the
   world as the document says, publishes `world.stats.*`, and makes a new world at once on
   Regenerate (or on an edit while `world.auto` is on). Drawn, cvcGL's node makes it as a sliced
-  task and hands over its colliders. Either way a new world's colliders replace the old ones.
-  `SceneWorld::generated_world(id)` is the world a headless host made: its raster, roads,
-  buildings and water.
+  task. Either way each world is the node's dataset `data.<id>` (§5.17, made datasets): the
+  world written as a version 2 city bundle and read back, so the body is that dataset's world, as
+  a data node's is, and a new world replaces it in place. `SceneWorld::generated_world(id)` is
+  the world as made, headless or drawn: its raster, roads, buildings and water.
 - **A data node's body.** `body: {}` on a `source: { data }` node collides with its dataset's
   world, terrain or geometry once the dataset is ready, and again each time it changes. The
   scene's world takes them, headless or drawn, and it needs the scene's `physics:` block.
@@ -2161,6 +2271,55 @@ scene:
     document's `init:` runs before the world is made, and the runtime ignores a spawn request
     already set when it starts (a reload would spawn again), so this is how a document, a server
     document included, populates its world. A gym's reset clears them and spawns its own agents.
+  - **Fleets.** A `start:` entry with `fleet:` (a state name) is a fleet: up to 4096 vehicles,
+    named `<fleet> 1`, `<fleet> 2`, ... (or after `name:`), laid out together once the world's
+    grid exists, the way libcvc's nav swarms are:
+
+    ```yaml
+    start:
+      - { fleet: city, archetype: humvee, plant: kinematic, count: 800,
+          spawn: opposed, seed: 7, rally: { count: 16, assign: latitude } }
+    ```
+
+    - `spawn:` `opposed` starts them in the grid's west 30 % with goals in its east 30 %;
+      `scattered` (the default) draws both anywhere free; `points` starts them at the world's
+      spawn points. `seed:` (0 by default) makes the layout, the same on every platform.
+    - `rally: { count: T }` (or `rally: T`, at most 64) makes T teams by their goals' latitude.
+      Each team's rally point is the goal nearest its band's centre, and its vehicles' goal is
+      held there (they stop at it; they do not wander). Their team is the rally point's index
+      (plus the entry's `team:`), their colour hsv(t / T, 0.74, 0.98) (`colors: hsv`, the default
+      with rally points; `colors: spawn` keeps the spawn's). Without rally points each vehicle's
+      goal is its own, held as well.
+    - Its keys are `vehicles.fleets.<fleet>.*`: `count`, `placed`, `arrived`, `teams`, `seed` and
+      `status`, and `rally.count` with `rally.<t>.x`, `.y` and `.color`. Writing a rally point's
+      `x` and `y` moves its team (held to the grid). A change of `restart.request` lays the fleet
+      out again from its seed, every vehicle back at its start; `reseed.request` from the next
+      seed. `vehicles.fleets.names` lists the fleets.
+    - `keys: summary` (a fleet's default) writes no per-entity keys for its vehicles but for those
+      `vehicles.watch` names (entity ids joined by `,`: the one a camera follows, the one a panel
+      shows) and those with an intent; `entities.ids` lists the entities with keys, and
+      `entities.count` counts them all. `keys: all` writes every vehicle's.
+    - Its navigator is its own (one per plant, `<plant>/<fleet>` to `WorldVehicles::belief`).
+      `sense:` `known` or `fog` is what it knows (the world's `vehicles.sense` by default).
+      `belief:` is how its vehicles share what they sense: `shared` (the default, one map),
+      `grouped` (max(2, n / 64) maps, teammates together) or `private` (one each).
+      `vehicles.fleets.<fleet>.sense` and `.belief` make it again, its vehicles at rest where
+      they are, and `.planes` counts its maps.
+    - `policy:` is what drives it.
+      - `trained` (the default) is the published CoefMLP, found in this order:
+        `$CVC_NAV_WEIGHTS`, an installed copy, else downloaded from
+        `cvcpkg://cvc/grl-snam-weights` through the data store (cached by hash).
+      - `builtin` is the built-in net.
+      - A `.cvcnav`'s path, `{ uri:, path:, sha256: }` (a file, an https URL or a cvcpkg://
+        package, the `.cvcnav` inside it, and its hash), or `{ data: <entry> }` (the document's
+        `data:` entry).
+
+      `vehicles.fleets.<fleet>.policy` switches it live, and `.drives` says what drives:
+      `trained (<where>, sha256:...)`, `weights (...)`, `builtin`, `builtin: loading <uri>` while
+      the weights are on their way, or `builtin: no trained weights (<why>)`. Without the
+      weights it drives on the built-in net, and the host's log says why once.
+    - In C++: `WorldVehicles::fleets()`, `rally()`, `move_rally()` and `restart_fleet()`, and
+      `entity_info::fleet` and `rally`.
   - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,
     `color`, `color2` as `r,g,b`, `metadata` as `key=value, ...`, `controller`, `policy`,
     `policy_sha256`, `mass` or `mass_t` (a fraction of the range), `max_speed` or `max_speed_t`,
@@ -3308,7 +3467,8 @@ windows:
 ### 5.12 Backgrounds: `background:` on a window or group
 
 A window, an overlay or a group can have a picture behind its content: a profile's background,
-a banner behind a name.
+a banner behind a name. It can also have a solid colour, written or computed each frame
+(`background: { color: ... }`, §5.26), alone or under the picture.
 
 ```yaml
 windows:
@@ -3760,6 +3920,36 @@ scene:
 
 The next run reads the cache.
 
+**Made datasets (`generate:`).** A dataset can be made instead of fetched. The entry names a
+generator and its params, and the generator's files are decoded as a fetched dataset's are
+(`city_bundle` unless `as:` says otherwise):
+
+```yaml
+data:
+  world:
+    generate: generated_world                       # cvc::world::generate_world's world
+    params: { seed: 7, half_m: 600, preset: 1 }     # a preset quick-sets its counts first
+scene:
+  physics: {}
+  nodes:
+    - node: land
+      source: { data: world }
+      body: {}
+```
+
+The built-in `generated_world` makes the world and writes it as a version 2 city bundle
+(ARIADNE_WORLDS §18.8): `world.json`, the terrain's heights and cell surfaces, and a glb per
+mesh. It takes `generated_world_params`' fields by name (`seed`, `half_m`, `trees`, `rocks`,
+`buildings`, `amp_m`, `water_level_m`, `preset`, `terrain`, `city`, `terrain_file`, `edge`, ...)
+and `building_library`. A generated world is then the same kind of dataset as a loaded city, and
+its `world` is the bundle read back, so the physics is the same on every host that decodes it.
+Beside the decoder's outputs, `generated` holds the world as made (its raster, roads and props).
+The same params name the same dataset; a host adds generators with `register_data_generator`.
+
+A `type: generated_world` node is shorthand for this: each world it makes, at load and on each
+Regenerate, is its dataset `data.<id>` (or the node's `data:` prop), replaced in place with its
+`rev` one higher, and its `body:` is that dataset's world, as a data node's is.
+
 **Archives.** An archive is recognized by its bytes, whatever its name: tar (plain, gzip or zstd)
 and zip (stored or deflate). It is unpacked in memory, and only its regular files are kept.
 - `path:` keeps one directory of the archive, stripped from the paths, or names one file.
@@ -3774,7 +3964,7 @@ through it:
 
 | Under `data.city` | |
 |---|---|
-| `status` | `idle`, `fetching`, `unpacking`, `decoding`, `ready` or `error`; the node's value is the same |
+| `status` | `idle`, `fetching` (or `generating`), `unpacking`, `decoding`, `ready` or `error`; the node's value is the same |
 | `progress`, `error` | 0..1 while it loads; why it failed |
 | `rev` | 1, 2, ... each time a load completes: what a watcher polls |
 | `uri`, `canonical`, `sha256`, `size`, `as` | the request, what it resolved to (`cvcpkg://cy-pca/scene-austin-south-small@1.0.0+cvc.2`), the archive's hash and size, the decoder |
@@ -3791,7 +3981,7 @@ for an archive or a directory, and otherwise one picked by the file's extension:
 | `mesh` | `geometry`: a `cvc::geometry`, from any format `read_geometry` reads |
 | `volume` | `volume`: a `cvc::volume` |
 | `heightfield` | `terrain` (a `cvc::height_field`) and `bounds.*`, from a `terrain.json` |
-| `city_bundle` | `world` (a `world_geometry`), `terrain`, `buildings` (a `cvc::geometry`), `buildings_error`, `bounds.min_x` ... `max_y`, `satellite` (`satellite.png` decoded: the image on `data()`, its file path as the value) |
+| `city_bundle` | `world` (a `world_geometry`), `terrain`, `buildings` (a `cvc::geometry`), `buildings_error`, `bounds.min_x` ... `max_y`, `satellite` (`satellite.png` decoded: the image on `data()`, its file path as the value); for a version 2 bundle also `version`, `hash` (its content hash), `water_level`, `region` (`min_x` ... `max_y`, when it is cut to one) and `generator` (its name; `version`, `seed`, `params`) |
 
 A host adds its own with `register_data_decoder`.
 
@@ -3817,7 +4007,9 @@ or host can write as well.
 **Document logic.**
 - `(data-load NAME URI [AS [PATH]])` points `data.NAME` at a new request and starts it. The
   nodes bound to `NAME` keep drawing the old dataset until the new one is ready.
-- `(data-reload NAME)` loads it again.
+- `(data-generate NAME GENERATOR [PARAMS])` points `data.NAME` at a made dataset, PARAMS a JSON
+  object string: `(data-generate "world" "generated_world" "{\"seed\": 7}")`.
+- `(data-reload NAME)` loads it again (a made dataset is made again from its params).
 - `(data-status NAME)` returns its status.
 - `(data-files NAME)` lists its file paths.
 - `(data-file NAME PATH)` returns one file's bytes, or nil.
@@ -4561,6 +4753,113 @@ gives the bar `File  FE Lab  Windows`, where *FE Lab* holds FE Lab's menus as su
   `ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus`, and the loader's
   `ALoadedDocumentIsNamedByItsMeta`, check it. `examples/ariadne/documents/apps_demo.ari` loads
   `tray_demo.ari` and `apps/counter.ari` twice.
+
+### 5.26 Colours from state: `color:` and `background: { color: }`
+
+A text, a radio or `radio_row`, a button or a menu item can be drawn in a colour, and a group or a
+window can be filled with one. The colour can be written in the document, held in a state key, or
+computed each frame. So a row can take its colour from its item, and a value can turn red past a
+threshold, without two copies of the widget switched by `visible_when`.
+
+```yaml
+meta: { min_libcvc: 4.0.0 }
+init: |
+  (state-set "palette.0" "c0")        ; the chart's slots, "#rrggbb", "r,g,b" or [r, g, b]
+  (state-set "palette.1" "#e34948")
+  (state-set "palette.2" "0.2,0.8,0.3")
+windows:
+  - window: Status
+    children:
+      - type: group                   # one row per item, in the item's colour
+        repeat: "3"
+        children:
+          - text: "Item {i}"
+            bind: items.{i}.status
+            color: { bind: "palette.{i}" }
+      - text: Temperature             # red past 80, else the default colour
+        bind: temp
+        color: '(if (> (float (state-get "temp")) 80) "1,0.2,0.2" "")'
+      - radio: Follow                 # each option in its own colour
+        bind: cam.follow
+        options: [one, two, three]
+        color: [c0, c1, c2]           # or "c0;c1;c2", or a key or an expression giving a list
+      - button: Halt
+        on: halt
+        color: "#e34948"
+  - window: Grid
+    layout: { kind: grid, col_widths: [80, 80, 80] }
+    children:
+      - type: group                   # each cell filled from the palette
+        repeat: "3"
+        background:
+          color: { bind: "palette.{i}" }
+        children:
+          - text: "{i}"
+```
+
+**`color:`** takes one of these:
+
+- A colour written in the document: `[r, g, b]` (each 0 to 1), `"#rrggbb"`, `"#rgb"`, `"r,g,b"`,
+  or `c0` to `c7`, the chart's eight slots (blue, orange, aqua, yellow, magenta, green, violet, red), so
+  a row and its curve in a chart can share one. `none` is the default colour.
+- `{ bind: key }`: the key's value, read each frame.
+- `"(expr)"`: an expression on the read lane (§2.1), computed each frame.
+
+A key's value, or an expression's, is a colour in the same forms: `"r,g,b"` or `"r g b"`,
+`"[r, g, b]"`, `"#rrggbb"`, `"#rgb"`, `c0` to `c7`, or, from an expression, a list of three numbers.
+`""`, `none`, `default` or nil means the widget's own colour, which is how an expression turns a
+colour off. A `color` picker's key (`"r,g,b"`) can colour another widget directly.
+
+- **What it colours.** A text's text; a button's label; a menu item's label (`menu_item` with
+  `on:` or `bind:`); a radio's caption, options and the dot of the picked option.
+- **A colour per option.** On a radio, a list gives each option its own colour: `[c0, c1, c2]`
+  written in the document, `"c0;c1;c2"` in a key, or a list from an expression (each entry a
+  colour's text or three numbers). An empty entry, `none` or nil leaves that option in the default
+  colour. One colour colours the whole radio. On a text, a button or a menu item, a list's first
+  entry is used.
+- **`background: { color: }`** on a group or a window fills it, under its picture if it has one
+  too, `opacity:` strong. It takes the forms `color:` takes, one colour. `background: [r, g, b]`
+  is short for a written colour. A group that is a cell of a grid (`layout: { kind: grid }`) is
+  filled to its whole cell. Any other group is filled over the area its content takes, the full
+  width available unless `size:` says otherwise. A window is filled over its inner area. The text on
+  a fill with no picture is black or white, whichever reads on it, unless the document coloured
+  that text.
+- **`{i}`** in `bind:` or in the expression is the instance's index under `repeat:`, as in a
+  bind. In a flow map (`{ ... }`) a `{i}` must be quoted: `{ bind: "palette.{i}" }`.
+- **Cost.** A key is read and its text parsed once a frame. An expression is cached the way a
+  computed `bind:` and `tooltip:` are (§2.1): it runs again only after a write to a key it read.
+- **Errors.** A broken expression, or one whose value is not a colour, draws the default colour
+  and warns once (`take_reactive_warnings`). A key holding something that is not a colour does
+  the same, and the warning names the key and its value. A `color:` that is none of the forms
+  above warns at load and draws the default colour.
+- **Which kinds.** `text`, `radio`, `radio_row`, `button` and `menu_item`, and `background:` on a
+  group, a window or an overlay. A `combo` doesn't take one. The colour picker (`color: Tint`),
+  a `tf_editor`'s `color:` and a custom type's `color:` are their own keys, as before. Since
+  `color` is the last widget type the loader looks for, `color:` beside `button:` is that button's
+  colour.
+
+**Backends.**
+
+- **ImGui** draws a text, a button's or a menu item's label in the colour (`ImGuiCol_Text`) and a
+  radio option's dot in it too (`ImGuiCol_CheckMark`). A grid cell's fill is the table cell's own
+  background (`TableSetBgColor`). Any other fill is a rectangle under the group's content.
+- **FTXUI** draws the colour as the cells' colour, and a fill as their background. FTXUI picks the
+  nearest colour the terminal has: at full colour it is the colour itself, at 256 colours the
+  nearest of xterm's palette, at 16 the nearest of the sixteen.
+  `FtxuiBackend::Options::palette` says which palette the terminal has, for a host that knows and
+  for a test. With `Auto` (the default), FTXUI reads it from `COLORTERM` and `TERM`. A terminal
+  with no colour (`--graphics mono`) draws no fill.
+- **tvision** lays its window bodies out at full colour, and tvision draws each colour as the
+  nearest the terminal has. Its own menu bar and menus are tvision's, so a menu item's colour is
+  not shown there.
+
+`ariadne_loader_test`'s `ComputedColorsParse`, `BadColorWarnsAndThePickerStays` and
+`BackgroundColorParses` check the forms. `ariadne_runtime_test`'s
+`ComputedColorTurnsRedPastAThreshold`, `RepeatedRowsTakeTheirPaletteColor`,
+`RadiosButtonsAndMenuItemsTakeTheirColor` and `GroupFillInAGridCell` check what reaches a backend.
+The terminal snapshots are `ariadne_ftxui_test`'s `ComputedColorsReachTheCells` (at full, 256 and
+16 colours) and `ComputedColorsReachTheWindowCells` (tvision's cells). ImGui's pixels are checked
+by `cvcgl_imgui_colors`.
 
 ## 6. Composition: include / import / load
 
@@ -5448,7 +5747,8 @@ makes a glTF vehicle +X forward, +Z up and true to scale (as the C++ demos'
 a physics body's pose. Its planning grid is `pycvc.nav_world_rasterize(city.world(), rows, cols,
 ...)`, cvc::nav's rasterizer (no VTK), which also gives the terrain's height at each sample
 (`pycvc.nav_world_grid(world, cell)` is the same grid walled at its edge, with its signed distance
-and free points; `AriApp.grid(node, cell)` gives it for a scene's generated or data node): the
+and free points; `AriApp.grid(node, cell)` gives it for a scene's generated or data node, and
+`AriApp.world_geometry(node)` that node's world, under a drawn host too through `ari_app_attach`): the
 navigator gets the grade (`nav_sim_world_set_terrain` with the Humvee's
 `nav_plant.terrain_config_of`), and the routes keep off the slopes `nav_terrain_build` marks
 infeasible for it. The Jolt plant drives on flat ground with the buildings as boxes, as the C++

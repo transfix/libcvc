@@ -202,6 +202,28 @@ bool spawn_scope_known(const std::string &scope);
 //       start:
 //         - { archetype: rover, count: 12, team: 1 }
 //         - { archetype: rover, name: lead, at: [0, 0], heading: 90 }
+//         - { fleet: city, archetype: rover, count: 800, spawn: opposed, rally: { count: 16 } }
+//
+// An entry with `fleet:` (a state name) is a fleet: up to 4096 vehicles laid out together once the
+// world's grid exists, from `seed`. `spawn:` opposed starts them in the grid's west 30 % and gives
+// them goals in its east 30 %, scattered (the default) draws both anywhere free, and points starts
+// them at the world's spawn points with scattered goals. `rally: { count: T, assign: latitude }`
+// makes T teams by their goals' latitude, each team's goal held at its rally point (the goal
+// nearest its band's centre) and its vehicles coloured hsv(t / T, 0.74, 0.98) (`colors: hsv`, the
+// default; `colors: spawn` keeps the spawn's). A fleet's goals are held (they do not wander).
+// `keys: summary` (a fleet's default) publishes the fleet's keys (vehicles.fleets.<fleet>.*), and
+// per-entity keys only for the vehicles vehicles.watch names or with an intent; `keys: all`
+// publishes every vehicle's, as an unnamed entry's are.
+//
+// A fleet has a navigator of its own (FLEETS_AND_NIGHT_ROADMAP.md FL1b):
+//   sense:   known | fog: what it knows of the world ("" the world's vehicles.sense)
+//   belief:  shared (one map) | grouped (max(2, n / 64) maps, teammates together) | private
+//            (one each): how its vehicles share what they sense
+//   policy:  trained (the default: the published CoefMLP, $CVC_NAV_WEIGHTS, else an installed
+//            copy, else downloaded from cvcpkg://cvc/grl-snam-weights), builtin (the built-in net),
+//            a .cvcnav's path, or { uri:, path:, sha256: } (a file, an https URL or a cvcpkg://
+//            package, the .cvcnav inside it and its hash) or { data: <entry> } (the document's
+//            data: entry). Without the weights it drives on the built-in net and says why.
 struct vehicle_start {
   std::string archetype, name, controller, plant, policy;
   int team = 0;
@@ -210,9 +232,23 @@ struct vehicle_start {
   double x = 0.0, y = 0.0;
   bool has_heading = false;
   double heading = 0.0;
+  // A fleet's (all empty or 0 for an entry of single vehicles).
+  std::string fleet;
+  std::string layout; // spawn: opposed | scattered | points ("" scattered)
+  unsigned long long seed = 0;
+  int rally = 0;      // rally: { count: } (0: no teams; each its own goal)
+  std::string assign; // rally: { assign: } latitude ("" latitude)
+  std::string colors; // hsv | spawn ("" hsv with rally points, spawn without)
+  std::string keys;   // summary | all ("" summary)
+  std::string sense;  // known | fog ("" the world's)
+  std::string belief; // shared | grouped | private ("" shared)
+  // policy: { uri:, path:, sha256: } (`policy` the uri) or { data: } (`policy_data`).
+  std::string policy_path, policy_sha256, policy_data;
   bool operator==(const vehicle_start &) const = default;
 };
 constexpr int kMaxVehicleStartCount = 256;
+constexpr int kMaxFleetCount = 4096;
+constexpr int kMaxFleetRally = 64;
 
 struct world_rules {
   world_physics physics;
