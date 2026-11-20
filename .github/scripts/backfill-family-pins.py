@@ -21,7 +21,7 @@ rerun is a no-op.
 Without --apply it only reads the public catalog and prints what it would change, and which rows
 would then have no same-release peer on their platform (they stop resolving, rather than resolving
 to a mix). --apply needs an admin token in CVCPKG_TOKEN and changes published rows, so it is run by
-hand, once, by the registry's owner. It was applied to cvcpkg.org on 2026-11-19 (1,116 rows, from
+hand, once, by the registry's owner. It was applied to cvcpkg.org on 2026-11-20 UTC (1,116 rows, from
 3.2 through 4.0.1), so it now finds nothing; it is kept for a row published from a recipe without
 pins.
 
