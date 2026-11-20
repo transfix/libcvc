@@ -138,6 +138,49 @@ template <> struct scalar<double> {
   static double plant_expm1(double x) { return coph_expm1(x); }
 };
 
+// C3's duals (coph_dual.h): the value as the scalar computes it, and each derivative by the chain
+// rule. expm1's derivative is taken as (expm1(x) + 1), as torch's backward does.
+template <class T, int N> struct scalar<coph_dual<T, N>> {
+  using D = coph_dual<T, N>;
+  using S = scalar<T>;
+  static double value(const D &x) { return S::value(x.v); }
+  static D exp(const D &x) {
+    D r;
+    r.v = S::exp(x.v);
+    for (int i = 0; i < N; ++i)
+      r.d[i] = r.v * x.d[i];
+    return r;
+  }
+  static D log1p(const D &x) {
+    D r;
+    r.v = S::log1p(x.v);
+    for (int i = 0; i < N; ++i)
+      r.d[i] = x.d[i] / (1.0 + x.v);
+    return r;
+  }
+  static D sqrt(const D &x) {
+    D r;
+    r.v = S::sqrt(x.v);
+    for (int i = 0; i < N; ++i)
+      r.d[i] = x.d[i] / (2.0 * r.v);
+    return r;
+  }
+  static D plant_exp(const D &x) {
+    D r;
+    r.v = S::plant_exp(x.v);
+    for (int i = 0; i < N; ++i)
+      r.d[i] = r.v * x.d[i];
+    return r;
+  }
+  static D plant_expm1(const D &x) {
+    D r;
+    r.v = S::plant_expm1(x.v);
+    for (int i = 0; i < N; ++i)
+      r.d[i] = (r.v + 1.0) * x.d[i];
+    return r;
+  }
+};
+
 // torch.nn.functional.softplus (beta 1, threshold 20): z above 20, log1p(exp(z)) otherwise.
 template <class T> T softplus(const T &z) {
   using S = scalar<T>;
@@ -425,6 +468,28 @@ template coph_vec2_of<double> coph_grad_potential<double>(const coph_vec2_of<dou
 template coph_command_of<double>
 coph_command<double>(const coph_state_of<double> &, const coph_vec2 &, const coph_vec2_of<double> &,
                      const coph_field_view &, const std::optional<coph_shaping> &, double);
+
+// C3: the replay's duals, and the damping Newton step's hyper-dual plant.
+template coph_state_of<coph_dual2> coph_flow<coph_dual2>(const coph_state_of<coph_dual2> &,
+                                                         const coph_vec2_of<coph_dual2> &,
+                                                         const coph_dual2 &, double);
+template coph_dual2 coph_risk<coph_dual2>(const coph_vec2_of<coph_dual2> &,
+                                          const coph_field_view &);
+template coph_dual2 coph_potential<coph_dual2>(const coph_vec2_of<coph_dual2> &, const coph_vec2 &,
+                                               const coph_vec2_of<coph_dual2> &,
+                                               const coph_field_view &,
+                                               const std::optional<coph_shaping> &);
+template coph_vec2_of<coph_dual2>
+coph_grad_potential<coph_dual2>(const coph_vec2_of<coph_dual2> &, const coph_vec2 &,
+                                const coph_vec2_of<coph_dual2> &, const coph_field_view &,
+                                const std::optional<coph_shaping> &);
+template coph_command_of<coph_dual2>
+coph_command<coph_dual2>(const coph_state_of<coph_dual2> &, const coph_vec2 &,
+                         const coph_vec2_of<coph_dual2> &, const coph_field_view &,
+                         const std::optional<coph_shaping> &, double);
+template coph_state_of<coph_hyper> coph_flow<coph_hyper>(const coph_state_of<coph_hyper> &,
+                                                         const coph_vec2_of<coph_hyper> &,
+                                                         const coph_hyper &, double);
 
 // ---------------------------------------------------------------------------
 // The energy account

@@ -388,8 +388,11 @@ cvc::bounding_box SceneGraph::computeGraphicsBounds() const {
       // This child and its descendants in WORLD space: its combined local box
       // through its CACHED world matrix, the same 8-corner AABB re-fit this walk
       // used to do on a fresh vtkMatrix4x4 copy (getWorldTransform) per child.
-      // Bit-identical for the affine transforms a scene holds (w stays 1).
-      const cvc::bounding_box b = child->getCombinedWorldBoundingBox();
+      // Bit-identical for the affine transforms a scene holds (w stays 1). A
+      // descendant kept out of the scene's bounds is left out at any depth: the
+      // weather node's rain column, 12 km tall under its group, framed terrain_lab's
+      // opening view from 13 km away.
+      const cvc::bounding_box b = child->getSceneWorldBoundingBox();
 
       // Skip invalid bounding boxes (an invalid box comes back unchanged)
       if (b[0] > b[3] || b[1] > b[4] || b[2] > b[5]) {

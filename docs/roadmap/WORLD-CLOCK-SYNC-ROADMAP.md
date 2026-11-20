@@ -58,6 +58,10 @@ Three problems follow from that:
 
 ## One tick (2026-11-15)
 
+**Superseded 2026-11-19 (ARIADNE_WORLDS.md section 18.1):** every host runs the holon's 1/120 s
+quantum and the navigator's tick is 7 quanta (0.0583 s, `kSimTickQuanta`); the shipped policies
+hold their reach at it. The rest of this section is the 0.01 s / 0.06 s design it replaced.
+
 Every simulation host and trainer shares one tick: the navigator's step and the control period,
 one command per agent per tick. It is configurable everywhere, with one default for all
 (Joe, 2026-11-14: "the sim tick should be configurable, but everything should use the same default.

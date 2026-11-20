@@ -12,9 +12,11 @@
 // The scene's world runs the boat (cvc::ariadne::BoatRuntime, scene_boat.h: in its physics world,
 // afloat on its water, from its keys or by nav); this draws its hull (add_hull_node: white
 // topsides, a stripe, the wet bottom dark) at the boat's pose, bound to its hull body once the boat
-// is in the world, and hidden until then; or, with a model (its `model` prop, or the tactical
-// preset's TacticalBoat), that model fitted to the boat's length overall, its keel on the hull's
-// bottom. The water node keeps its water out of the hull (BoatRuntime::cutout).
+// is in the world, and hidden until then; or, with a model (its `model` prop: a file, a model's
+// name, or a file in a document data: entry's package, fetched as the document loads; or the
+// tactical preset's TacticalBoat), that model fitted to the boat's length overall, its keel on the
+// hull's bottom, in place of the hull once it is ready. The water node keeps its water out of the
+// hull (BoatRuntime::cutout).
 
 #include <algorithm>
 #include <array>
@@ -30,7 +32,6 @@
 #include <cvc/gl/ariadne/world_nodes.h>
 #include <cvc/gl/physics_scene_binding.h>
 #include <exception>
-#include <filesystem>
 #include <memory>
 #include <string>
 #include <system_error>
@@ -44,39 +45,41 @@ namespace ari = cvc::ariadne;
 
 namespace {
 
-// The model boat `n` is drawn as: its `model` prop (a file, or a name found where the vehicle
-// models are, `<name>.glb` too; none: its hull), else for the tactical preset TacticalBoat. ""
-// draws the hull: none asked for, or the tactical preset's model not installed (quietly; a `model`
-// that is not found warns).
-std::string boat_model_path(const ari::SceneNode &n, const std::string &preset,
+// The look boat `n` is drawn as: its `model` prop (node_model_look: `{ data: NAME, file: FILE }`,
+// a file, a model's name, or none), else for the tactical preset TacticalBoat (a local install). A
+// look of kind "" draws the hull: none asked for, or the tactical preset's model not installed
+// (quietly; a `model` that is not found warns).
+ari::vehicle_look boat_look(const ari::SceneNode &n, const std::string &preset,
+                            const std::vector<ari::SceneData> &data,
                             std::vector<std::string> *warnings) {
-  namespace fs = std::filesystem;
-  const bool asked = n.props.has("model");
-  const std::string name =
-      asked ? n.props.str("model") : (preset == "tactical" ? "TacticalBoat" : std::string());
-  if (name.empty() || name == "none")
-    return std::string();
-  std::error_code ec;
-  if (fs::is_regular_file(fs::path(name), ec))
-    return name;
-  std::string path = ari::find_vehicle_model(name);
-  if (path.empty() && fs::path(name).extension().empty())
-    path = ari::find_vehicle_model(name + ".glb");
-  if (path.empty() && asked && warnings)
-    warnings->push_back("ari: boat '" + n.id + "': no model '" + name + "'; drawn as its hull");
-  return path;
+  if (const ari::Value *m = n.props.find("model"))
+    return node_model_look(*m, data, "ari: boat '" + n.id + "'", "its hull", warnings);
+  ari::vehicle_look look;
+  look.fit = true;
+  if (preset != "tactical")
+    return look;
+  std::string path = ari::find_vehicle_model("TacticalBoat");
+  if (path.empty())
+    path = ari::find_vehicle_model("TacticalBoat.glb");
+  if (!path.empty()) {
+    look.kind = "file";
+    look.path = path;
+  }
+  return look;
 }
 
-// The fitted model under `group`: the boat's length overall (its hull's when it gives none),
-// about the hull body's origin, its keel at the hull's bottom. False when there is no hull or the
-// model cannot be read (a warning says why).
-bool attach_boat_model(SceneGraph &sg, RealizedScene &out, GraphicsNode &group,
-                       const std::string &id, const std::string &path,
-                       const cvc::physics::dyn_boat_desc &desc, const float color[3],
-                       std::vector<std::string> *warnings) {
+// The size a boat's model is fitted to: its length overall (its hull's when it gives none), and
+// the hull's bottom, the model's keel (body z).
+struct boat_fit {
+  vehicle_shape shape;
+  double keel = 0.0;
+  bool ok = false;
+};
+boat_fit boat_fit_of(const cvc::physics::dyn_boat_desc &desc) {
+  boat_fit out;
   const cvc::physics::boat_desc &boat = desc.boat;
   if (!boat.hull.hull || boat.hull.hull->vertices.empty())
-    return false;
+    return out;
   double x0 = 1e300, x1 = -1e300, y0 = 1e300, y1 = -1e300, z0 = 1e300, z1 = -1e300;
   for (const cvc::physics::vec3 &v : boat.hull.hull->vertices) {
     x0 = std::min(x0, v.x);
@@ -86,18 +89,12 @@ bool attach_boat_model(SceneGraph &sg, RealizedScene &out, GraphicsNode &group,
     z0 = std::min(z0, v.z);
     z1 = std::max(z1, v.z);
   }
-  if (!out.vehicle_models)
-    out.vehicle_models = make_vehicle_model_cache();
-  ari::vehicle_look look;
-  look.kind = "file";
-  look.path = path;
-  look.fit = true;
-  vehicle_shape shape;
-  shape.length = desc.length_overall > 0.0 ? desc.length_overall : x1 - x0;
-  shape.width = y1 - y0;
-  shape.height = z1 - z0;
-  return attach_vehicle_model(sg.appContext(), *out.vehicle_models, group, id, look, shape, z0,
-                              color, warnings);
+  out.shape.length = desc.length_overall > 0.0 ? desc.length_overall : x1 - x0;
+  out.shape.width = y1 - y0;
+  out.shape.height = z1 - z0;
+  out.keel = z0;
+  out.ok = true;
+  return out;
 }
 
 std::shared_ptr<GraphicsNode> realize_boat(SceneGraph &sg, const ari::SceneNode &n,
@@ -110,10 +107,44 @@ std::shared_ptr<GraphicsNode> realize_boat(SceneGraph &sg, const ari::SceneNode 
   if (n.has_material)
     std::copy(n.color, n.color + 3, topsides);
   static const float stripe[3] = {0.10f, 0.24f, 0.56f};
-  const std::string model = boat_model_path(n, spec.preset, warnings);
-  if (model.empty() ||
-      !attach_boat_model(sg, out, *group, n.id + "_model", model, spec.desc, topsides, warnings))
-    add_hull_node(sg, n.id + "_hull", group.get(), spec.desc.boat, topsides, stripe);
+  // Its model, when it has one and it is ready; else its hull, and while the model's package
+  // loads, the model goes in in its place once it has (the scene tick below).
+  if (!out.vehicle_models)
+    out.vehicle_models = make_vehicle_model_cache();
+  const ari::vehicle_look look = boat_look(n, spec.preset, out.data, warnings);
+  const boat_fit fit = boat_fit_of(spec.desc);
+  const std::array<float, 3> color{topsides[0], topsides[1], topsides[2]};
+  vehicle_model_status status = vehicle_model_status::failed;
+  if (!look.kind.empty() && fit.ok)
+    status =
+        vehicle_model_state(sg.appContext(), *out.vehicle_models, look, fit.shape.length, warnings);
+  const std::string model_id = n.id + "_model", hull_id = n.id + "_hull";
+  if (status != vehicle_model_status::ready ||
+      !attach_vehicle_model(sg.appContext(), *out.vehicle_models, *group, model_id, look, fit.shape,
+                            fit.keel, color.data(), warnings))
+    add_hull_node(sg, hull_id, group.get(), spec.desc.boat, topsides, stripe);
+  if (status == vehicle_model_status::pending) {
+    const std::weak_ptr<GraphicsNode> held = group;
+    auto done = std::make_shared<bool>(false);
+    out.scene_ticks.push_back(
+        [held, done, look, fit, color, model_id, hull_id](vtkRenderer *, RealizedScene &scene,
+                                                          const cvc::world_clock::step_result &) {
+          const std::shared_ptr<GraphicsNode> g = held.lock();
+          if (*done || !g || !scene.sg || !scene.vehicle_models)
+            return;
+          cvc::app &app = scene.sg->appContext();
+          const vehicle_model_status now =
+              vehicle_model_state(app, *scene.vehicle_models, look, fit.shape.length);
+          if (now == vehicle_model_status::pending)
+            return;
+          *done = true; // failed: the hull stays
+          if (now == vehicle_model_status::ready &&
+              attach_vehicle_model(app, *scene.vehicle_models, *g, model_id, look, fit.shape,
+                                   fit.keel, color.data()))
+            if (std::shared_ptr<GraphicsNode> hull = g->findChildByName(hull_id))
+              g->removeGraphicsChild(hull);
+        });
+  }
   group->setVisible(false); // until its boat is in the world
   // Bound to the boat's hull body once there is one (and again when a restart makes another).
   const std::weak_ptr<GraphicsNode> weak = group;

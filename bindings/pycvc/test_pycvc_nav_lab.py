@@ -272,5 +272,21 @@ if hasattr(pycvc, "nav_scrub_create") and has_trained:
     pycvc.nav_scrub_restart(sc, app2, "")
     expect_raises(lambda: pycvc.nav_scrub_log(sc, 5), "no such checkpoint")
     expect_raises(lambda: pycvc.nav_scrub_create(os.path.join(tmp, "none.jsonl")), "no history")
+    # the plant: the Humvee by default (the bicycle without Jolt); several, and the Plant combo
+    default = "humvee" if pycvc.plant_host.available() else "kinematic"
+    check(info["plant"] == default and info["plants"] == [default], "the default plant")
+    two = pycvc.nav_scrub_create(hist, agents=2, ticks=60, plants=["kinematic", "humvee"])
+    app3 = pycvc.App()
+    f = pycvc.nav_scrub_view_update(two, app3, "", 0.0)
+    check(pycvc.state_get(app3, "scrub.plant_labels") == "kinematic\nhumvee" and f["plant"] == 0,
+          "two plants, the first shown")  # fmt: skip
+    pycvc.state_set(app3, "scrub.plant_choice", "humvee")
+    f = pycvc.nav_scrub_view_update(two, app3, "", 0.0)
+    check(f["plant"] == 1 and f["checkpoint"] == 1 and pycvc.nav_scrub_info(two)["plant"] == "humvee",
+          "the Plant combo: the same checkpoint on the other plant")  # fmt: skip
+    check(json.loads(pycvc.nav_scrub_report(two))["scenario"]["plant"] == "humvee", "its report")
+    pycvc.nav_scrub_use_plant(two, 0)
+    check(pycvc.nav_scrub_info(two)["plant"] == "kinematic", "use_plant")
+    expect_raises(lambda: pycvc.nav_scrub_create(hist, plants=["no such"]), "an unknown plant")
 
 print(f"test_pycvc_nav_lab: {checks} checks passed")

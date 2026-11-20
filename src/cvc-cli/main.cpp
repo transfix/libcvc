@@ -58,6 +58,7 @@
 #include <cvc/ph/se2_train.h>
 #include <cvc/physics/mujoco_robot.h>
 #include <cvc/physics/plant_log_scene.h>
+#include <cvc/physics/scrub_plant.h>
 #include <cvc/state/distributed_state_session.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_distributed_admin.h>
@@ -2816,8 +2817,9 @@ static int cmd_nav(cvc::app &, int argc, char **argv) {
       "  scrub <history>   deploy every checkpoint a training history names on one scenario\n"
       "                    (cached at <history>.scrub/), and print each one's metrics\n\n"
       "  cvc nav log run.cvcrun\n"
-      "  cvc nav scrub run/history.jsonl --agents 8 --ticks 900 --report scrub.json\n");
-  std::string op, file, scenario, report;
+      "  cvc nav scrub run/history.jsonl --agents 8 --ticks 900 --report scrub.json\n"
+      "  cvc nav scrub run/history.jsonl --plant kinematic\n");
+  std::string op, file, scenario, report, plant = cvc::physics::scrub_default_plant();
   int run = -1, agents = 4;
   unsigned seed = 0;
   long ticks = 600;
@@ -2832,8 +2834,11 @@ static int cmd_nav(cvc::app &, int argc, char **argv) {
       "agents", po::value<int>(&agents)->default_value(4), "scrub: the built-in scenario's agents")(
       "seed", po::value<unsigned>(&seed)->default_value(0), "scrub: the built-in scenario's seed")(
       "ticks", po::value<long>(&ticks)->default_value(600), "scrub: each checkpoint's ticks")(
-      "report", po::value<std::string>(&report),
-      "scrub: write every checkpoint's metrics here (cvc.nav.scrub/v1)")(
+      "plant", po::value<std::string>(&plant)->default_value(plant),
+      "scrub: what the agents drive: humvee (Jolt, colliding with the walls; the default with "
+      "Jolt), roboracer, dynamic:humvee, ..., or kinematic (nav's bicycle, which drives through "
+      "walls)")("report", po::value<std::string>(&report),
+                "scrub: write every checkpoint's metrics here (cvc.nav.scrub/v1)")(
       "no-cache", po::bool_switch(&no_cache),
       "scrub: deploy every checkpoint again, cache nothing");
   po::positional_options_description pos;
@@ -2860,15 +2865,17 @@ static int cmd_nav(cvc::app &, int argc, char **argv) {
     std::cerr << "cvc nav scrub: " << file << " names no checkpoint (a .cvcnav) that is there\n";
     return 2;
   }
-  const cvc::nav::scrub_scenario s = scenario.empty()
-                                         ? cvc::nav::default_scenario(agents, seed, ticks)
-                                         : cvc::nav::scenario_from_trace(scenario, ticks);
+  cvc::nav::scrub_scenario s = scenario.empty() ? cvc::nav::default_scenario(agents, seed, ticks)
+                                                : cvc::nav::scenario_from_trace(scenario, ticks);
+  cvc::physics::plant_host::check(plant);
+  s.plant = plant;
   cvc::nav::scrub_options o;
   o.use_cache = !no_cache;
   o.say = [](const std::string &line) { std::cout << line << "\n"; };
+  o.plant = cvc::physics::scrub_plant();
   std::cout << "cvc nav scrub: " << h.checkpoints.size() << " checkpoints of " << file << " (run "
-            << h.run + 1 << " of " << h.runs << ") on " << s.name << ", " << s.ticks
-            << " ticks (scenario " << cvc::nav::scenario_hash(s) << ")\n";
+            << h.run + 1 << " of " << h.runs << ") on " << s.name << ", on " << s.plant << ", "
+            << s.ticks << " ticks (scenario " << cvc::nav::scenario_hash(s) << ")\n";
   const std::vector<cvc::nav::scrub_entry> e = cvc::nav::scrub(h, s, o);
   const cvc::nav::panel_table t = cvc::nav::scrub_table(e, -1);
   for (const std::string &c : t.columns)
@@ -3284,11 +3291,13 @@ static int cmd_segment(cvc::app &app, int argc, char **argv) {
     throw std::runtime_error("cvc segment: no seeds: give --seeds <file> or --seed name:i,j,k "
                              "(or --automatic critical-points, which needs none)");
 
-  // The stepper, so a long run can report its progress.
+  // The stepper, so a long run can report its progress. A step of 2^18 units is a few hundredths
+  // of a second, and big enough for the per-voxel passes to spread over the app's compute pool
+  // (a smaller one runs them on this thread).
   cvc::segment_stepper stepper(vol, std::move(seeds), p);
   const double every = vm["seconds"].as<double>();
   auto last = std::chrono::steady_clock::now();
-  while (!stepper.step(4096)) {
+  while (!stepper.step(std::size_t(1) << 18)) {
     if (every > 0 &&
         std::chrono::duration<double>(std::chrono::steady_clock::now() - last).count() >= every) {
       std::cerr << "cvc segment: " << stepper.status() << "\n";

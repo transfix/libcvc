@@ -62,6 +62,9 @@ TvisionBackend::TvisionBackend() : TvisionBackend(Options{}) {}
 TvisionBackend::TvisionBackend(Options opts)
     : FtxuiBackend([&] {
         opts.hosted = true;
+        // Bodies at full colour: tvision draws each as the nearest the terminal has (§5.26).
+        if (opts.palette == Options::Palette::Auto)
+          opts.palette = Options::Palette::TrueColor;
         return opts;
       }()) {}
 

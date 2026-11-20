@@ -8,6 +8,8 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include "city_bundle_v2.h"
+
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <cmath>
@@ -145,6 +147,9 @@ terrain_extent read_terrain_extent(const std::string &dir) {
 static city_bundle load_city_bundle_impl(app &ctx, const city_bundle_reader &read,
                                          const std::string &label, const std::string &dir,
                                          const city_bundle_options &options) {
+  // Version 2 (world.json): its own items, surfaces and terrain; the options do not apply.
+  if (const std::shared_ptr<const std::string> manifest = read("world.json"))
+    return detail::load_city_bundle_v2(ctx, read, label, dir, *manifest);
   const fs::path root(label);
   city_bundle out;
   out.dir = dir;

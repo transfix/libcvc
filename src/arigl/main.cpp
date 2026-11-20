@@ -459,7 +459,8 @@ ari::Widget bell_menu_item() {
 // The camera's mouse settings and distance, for the Controls window: it reads them from its own
 // state. Mouse look needs a mouse: a touch screen keeps dragging (a tap there must stay a tap on
 // the scene).
-ari::MouseControls camera_mouse(const cvc::gl::CameraController &cam, bool touch, bool room) {
+ari::MouseControls camera_mouse(const cvc::gl::CameraController &cam, bool touch, bool room,
+                                const std::string &doc_prefix) {
   const std::string at = "/" + cam.stateName() + ".settings.";
   ari::MouseControls m;
   if (!touch) {
@@ -478,7 +479,21 @@ ari::MouseControls camera_mouse(const cvc::gl::CameraController &cam, bool touch
   m.sensitivity = at + "mouse_sensitivity";
   m.invert_y = at + "invert_pitch";
   m.invert_x = at + "invert_yaw";
+  // The orbit's distance: Orbit's alone (Fly, Track and Map have none), from a metre to a world
+  // seen whole. Framing sets it from the scene (about 1.9 km for terrain_lab's 1.2 km world),
+  // which the old 1.5-40 m range, made for a room's avatar, could not show or reach. A room keeps
+  // that range.
   m.distance = "/" + cam.stateName() + ".orbit.distance";
+  // The predicate reads under the document's prefix (the read lane's root), as the camera is.
+  const std::string cam_path = cam.stateName();
+  if (!doc_prefix.empty() && cam_path.compare(0, doc_prefix.size() + 1, doc_prefix + ".") == 0)
+    m.distance_when =
+        "(= (state-get \"" + cam_path.substr(doc_prefix.size() + 1) + ".mode\") \"0\")";
+  if (!room) {
+    m.distance_lo = 0.5;
+    m.distance_hi = 50000.0;
+    m.distance_log = true;
+  }
   return m;
 }
 
@@ -2189,7 +2204,8 @@ int run_window(const ari::HostOptions &o, [[maybe_unused]] const Scripting &scri
     for (ari::KeyBinding &k : avatar_keys(view))
       host_keys.push_back(std::move(k));
   rt.app_runtime().set_host_keys(std::move(host_keys));
-  rt.app_runtime().set_host_mouse(camera_mouse(cam, ui.touchMode(), conf.active));
+  rt.app_runtime().set_host_mouse(
+      camera_mouse(cam, ui.touchMode(), conf.active, rt.app_runtime().prefix()));
   // $CVC_ARIGL_LOOK=mouse starts in mouse look (the browser page's ?look=mouse), =drag in drag to
   // look; otherwise the camera's own setting stands.
   if (const char *look = std::getenv("CVC_ARIGL_LOOK"); look && !ui.touchMode()) {

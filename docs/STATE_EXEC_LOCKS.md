@@ -1358,7 +1358,7 @@ read. They are reported under `extra.*`.
 | Name | Executors | Workload | Sweep | Metrics and gate |
 |---|---|---|---|---|
 | `native.state_atomic` | sync, async | the `native.*` method, one scenario whose `op` param picks the native | depth 1, 4; `op` set, incr, cas | `extra.ns_per_call`; gate: `incr` and `cas` at most 1.1x `set` (`compare RUN RUN --pair op=set:incr`, and `op=set:cas`, `--metric extra.ns_per_call --threshold 10`: no `WORSE`) |
-| `lock.uncontended` | sync, async | `(with-lock K (set s (+ s 1)))` against the same loop with `begin`, and nested covered sections | depth 1, 2, 4; mode x, s; chroot 0, 1; threading single, shared (L3) | `extra.ns_per_lock`, `extra.steps_per_lock`, `extra.allocs_per_lock`; gate: extra over `begin` at most 450 ns single (L1) and 550 ns shared (L3) (sync, flat key, Release), 0 steps, 0 allocations for a single-form body. The times were restated on 2026-11-12 from the measured architecture (11.3). They were first set at 60 and 120 ns from 8.8's estimate |
+| `lock.uncontended` | sync, async | `(with-lock K (set s (+ s 1)))` against the same loop with `begin`, and nested covered sections | depth 1, 2, 4; mode x, s; chroot 0, 1; threading single, shared (L3) | `extra.ns_per_lock`, `extra.steps_per_lock`, `extra.allocs_per_lock`; gate, for a single-form body: extra over `begin` at most 450 ns single (L1) and 550 ns shared (L3) (sync, flat key, Release), 0 steps, 0 allocations. The times were restated on 2026-11-12 from the measured architecture (11.3). They were first set at 60 and 120 ns from 8.8's estimate. Nested covered sections are recorded, not gated (2026-11-18) |
 | `lock.handoff` | sync, async | p `forever` loops on one key, a `(sleep 0)` in the body, 200 x p handoffs after warm-up; host-submitted or spawned (L1b) | p 2, 8, 64; workers host, spawn | `handoffs_per_s`, `wait_ns` p50/p99, `extra.fairness_spread` (most grants minus fewest); gate: at most 1 |
 | `lock.rw` | sync, async | r readers, w writers | 8/1, 64/1, 8/8 | writer `wait_ns` p99; gate: at most 2x the longest reader section at 64/1 |
 | `lock.many_keys` | sync, async | random keys out of k, single and two-key requests | 10, 1000, 100000 | `extra.ns_per_lock`, cache hit rate, live trie nodes |
@@ -1504,8 +1504,23 @@ hard gates. The numbers come from three sources:
 - the lowest of the bench's own loaded-box runs (sync, best of 100 short runs per side):
   230-305 ns single and 310-360 ns shared.
 
-The first run in a quiet window checks them. The sharding decision is unchanged:
-`lock.cross_thread` is measured again in a quiet window first.
+The quiet windows of 2026-11-16 and 17 checked them (MSVC Release, sync, flat key; each rep the
+fastest of 15 alternated runs, since the default 3 left the noise at 18-58%):
+- Single: 405-449 ns, under 450.
+- Shared, single form: 428-475 ns.
+- Shared, nested covered sections: 708-776 ns. The inner `with-lock` never reaches the manager,
+  but the evaluator still spends about 270-300 ns on it.
+
+The 550 ns figure was set from single-form numbers, so the owner confined the shared gate to
+the single form, as the single gate already was (2026-11-18). The nested points are recorded.
+
+`lock.cross_thread` was measured in the same windows:
+- On disjoint keys, with 3 us sections at t = 4, the ratio's medians were 0.77-0.83 at 31-58%
+  noise, which is inconclusive against 0.9.
+- At t = 1 they were already 0.81-0.90.
+- The hot key's handoff p50 was 10.5-19.8 us.
+
+The sharding decision is open.
 
 ## 12. Phases
 

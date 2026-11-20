@@ -97,8 +97,13 @@ struct avatar_policy {
 // length, standing on the ground under the chassis. With no look:, a humvee is drawn as the
 // Humvee model when it is installed, and as its box otherwise.
 struct vehicle_look {
-  std::string kind; // box, file, asset or model; "" the default (above)
-  std::string path; // the file, the asset's id, or the model's name
+  std::string kind; // box, file, asset, model or data; "" the default (above)
+  std::string path; // the file, the asset's id, the model's name, or (data) the file in the package
+  // data: the document's data: entry it names (`look: { data: NAME, file: FILE }`); then, once
+  // resolve_vehicle_looks has run, the entry's source and its path: inside the package, so the
+  // look is whole wherever it travels (a client has no document): a view loads `uri`
+  // (cvcpkg://ORG/NAME, https://..., a file or directory), keeps `subpath`, and reads `path` there.
+  std::string data, uri, subpath;
   double scale = 1.0, yaw = 0.0, z = 0.0;
   bool fit = false;
   bool operator==(const vehicle_look &) const = default;
@@ -116,8 +121,9 @@ struct vehicle_look {
 //   look         how it is drawn
 //   ranges       what a spawn may set, by setting: mass (kg) and max_speed (m/s), each [lo, hi]
 //   controllers  what may drive it: nav@1 (the navigator), none (it holds still), external (its
-//                intent alone: WorldVehicles::set_intent, the entity's intent keys); the first
-//                is a spawn's default
+//                intent alone: WorldVehicles::set_intent, the entity's intent keys) or pose (an
+//                outside simulation places it, and no plant integrates it: WorldVehicles::set_pose,
+//                the entity's pose keys); the first is a spawn's default
 struct vehicle_archetype {
   std::string id;
   std::string plant = "jolt";
@@ -196,6 +202,18 @@ bool spawn_scope_known(const std::string &scope);
 //       start:
 //         - { archetype: rover, count: 12, team: 1 }
 //         - { archetype: rover, name: lead, at: [0, 0], heading: 90 }
+//         - { fleet: city, archetype: rover, count: 800, spawn: opposed, rally: { count: 16 } }
+//
+// An entry with `fleet:` (a state name) is a fleet: up to 4096 vehicles laid out together once the
+// world's grid exists, from `seed`. `spawn:` opposed starts them in the grid's west 30 % and gives
+// them goals in its east 30 %, scattered (the default) draws both anywhere free, and points starts
+// them at the world's spawn points with scattered goals. `rally: { count: T, assign: latitude }`
+// makes T teams by their goals' latitude, each team's goal held at its rally point (the goal
+// nearest its band's centre) and its vehicles coloured hsv(t / T, 0.74, 0.98) (`colors: hsv`, the
+// default; `colors: spawn` keeps the spawn's). A fleet's goals are held (they do not wander).
+// `keys: summary` (a fleet's default) publishes the fleet's keys (vehicles.fleets.<fleet>.*), and
+// per-entity keys only for the vehicles vehicles.watch names or with an intent; `keys: all`
+// publishes every vehicle's, as an unnamed entry's are.
 struct vehicle_start {
   std::string archetype, name, controller, plant, policy;
   int team = 0;
@@ -204,9 +222,19 @@ struct vehicle_start {
   double x = 0.0, y = 0.0;
   bool has_heading = false;
   double heading = 0.0;
+  // A fleet's (all empty or 0 for an entry of single vehicles).
+  std::string fleet;
+  std::string layout; // spawn: opposed | scattered | points ("" scattered)
+  unsigned long long seed = 0;
+  int rally = 0;      // rally: { count: } (0: no teams; each its own goal)
+  std::string assign; // rally: { assign: } latitude ("" latitude)
+  std::string colors; // hsv | spawn ("" hsv with rally points, spawn without)
+  std::string keys;   // summary | all ("" summary)
   bool operator==(const vehicle_start &) const = default;
 };
 constexpr int kMaxVehicleStartCount = 256;
+constexpr int kMaxFleetCount = 4096;
+constexpr int kMaxFleetRally = 64;
 
 struct world_rules {
   world_physics physics;
@@ -220,6 +248,9 @@ struct world_rules {
   // as a bind is (a leading / outside the document's prefix), "" none. WorldVehicles reads
   // `<path>.<id or name>.intent.*` beside each entity's own keys.
   std::string vehicle_intents;
+  // And their poses (world: vehicles: poses:), the same way: `<path>.<key>.pose.*` and the packed
+  // `<path>.poses` place the `pose` entities, and an entry naming an archetype spawns one.
+  std::string vehicle_poses;
   // The vehicles the world starts with (world: vehicles: start:), in order; none by default.
   std::vector<vehicle_start> vehicle_starts;
   // Where they start (world: spawns:).
@@ -271,6 +302,7 @@ std::string check_world_rules(const world_rules &rules);
 //           ranges: { mass: [2000, 3500], max_speed: [5, 24.6] }
 //           controllers: [nav@1, none]
 //       intents: /drive             # optional: a second table of intents (a relay's namespace)
+//       poses: /fleet               # optional: a table of the pose entities' poses (the same)
 //
 // "" or what is wrong (check_world_rules included). A key it does not know is a warning, pushed
 // onto WARNINGS when given, and so is avatars: catalog:, which the relay's seeded catalog still

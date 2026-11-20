@@ -6859,8 +6859,9 @@ std::vector<scenario> make_scenarios() {
               "own, a strict channels: block) with ariadne.exec.isolate_documents on, driven a "
               "frame at a time: every document's drain_begin, app.exec_pump_frame, every "
               "document's drain_end, with the app's exec_pool at t workers; frame=heavy gives "
-              "each document's on_tick a 500-iteration loop (a frame's pumps well over the "
-              "pool's 100 us inline_below), frame=small one state-incr (under it): ns per "
+              "each document's on_tick a 500-iteration loop (50 in a Debug build; a frame's "
+              "pumps well over the pool's 100 us inline_below), frame=small one state-incr "
+              "(under it): ns per "
               "frame over the three calls (no backend, no render), extra.helper_wakes, "
               "extra.worker_pumps, extra.isolated and extra.any_groups (the documents in a group "
               "of their own, and in an `any` one) and extra.wakeable, the most helpers a frame "
@@ -6903,9 +6904,20 @@ std::vector<scenario> make_scenarios() {
       root("ariadne.exec.isolate_documents").value(std::string("1"));
       // Eligible (S1-Q6): a prefix of its own, a channels: block (strict lint is the default), no
       // global channel, no oidc, no link: hole. Each tick counts itself under the prefix.
+      // A Debug build's heavy loop is 50 rounds, still far over inline_below there. 500 took about
+      // 92 ms a tick on package-linux's libcvc-debug (coverage), near exec_pump_frame's 0.1 s
+      // deadline. At t=0, docs=2, d0 took most of each frame and d1 started with the ~8 ms left,
+      // so d1 finished no tick in the smoke's 4 frames. (A group the deadline cuts short is not
+      // a skipped one, which goes first next frame: d0 went first every frame.)
+#ifdef NDEBUG
+      const char *const rounds = "500";
+#else
+      const char *const rounds = "50";
+#endif
       const std::string tick =
-          heavy ? "(begin (state-incr \"ticks\") (set i 0) (while (< i 500) (set i (+ i 1))))"
-                : "(state-incr \"ticks\")";
+          heavy ? std::string("(begin (state-incr \"ticks\") (set i 0) (while (< i ") + rounds +
+                      ") (set i (+ i 1))))"
+                : std::string("(state-incr \"ticks\")");
       const std::string head = "meta: {min_libcvc: 3.4.0}\nchannels:\n  - box\non_tick: |\n  ";
       const temp_ari doc("state_exec_bench_ariadne_docs",
                          head + tick + "\nroot:\n  - text: mt.ariadne_docs\n");
