@@ -125,84 +125,92 @@ units:
             height: "{view_size}"
             zoom: 0.6
             caption: "drag: orbit   wheel: zoom"
-      # quad: XY | XZ over ZY | 3D.
+      # quad: XY | XZ over ZY | 3D: two rows, each flowing side by side. Not a table: a table
+      # spans the window's width, which would push the tools off it.
       - type: group
         id: "{id}_quad"
         visible_when: (= "{layout}" "quad")
-        layout: { kind: grid, col_widths: ["{view_size}", "{view_size}"] }
         children:
           - type: group
-            id: "{id}_quad_xy"
+            id: "{id}_quad_top"
+            layout: { kind: horizontal }
             children:
-              - type: viewport
-                view: "{id}_xy"
-                mode: slice
-                axis: z
-                show: ["{node}"]
-                hide: [surfaces]
-                input: pick
-                pick: graphics.root.children.{node}.grid.pick
-                pointer: graphics.root.children.{node}.grid.pointer
-                chrome: false
-                clear_color: [0.04, 0.045, 0.06]
-                width: "{view_size}"
-                height: "{view_size}"
-                caption: XY
-              - slider_int: Z plane
-                bind: graphics.root.children.{node}.grid.slice.z
-                range: key
-                hi: 1000
+              - type: group
+                id: "{id}_quad_xy"
+                children:
+                  - type: viewport
+                    view: "{id}_xy"
+                    mode: slice
+                    axis: z
+                    show: ["{node}"]
+                    hide: [surfaces]
+                    input: pick
+                    pick: graphics.root.children.{node}.grid.pick
+                    pointer: graphics.root.children.{node}.grid.pointer
+                    chrome: false
+                    clear_color: [0.04, 0.045, 0.06]
+                    width: "{view_size}"
+                    height: "{view_size}"
+                    caption: XY
+                  - slider_int: Z plane
+                    bind: graphics.root.children.{node}.grid.slice.z
+                    range: key
+                    hi: 1000
+              - type: group
+                id: "{id}_quad_xz"
+                children:
+                  - type: viewport
+                    view: "{id}_xz"
+                    mode: slice
+                    axis: y
+                    show: ["{node}"]
+                    hide: [surfaces]
+                    input: pick
+                    pick: graphics.root.children.{node}.grid.pick
+                    pointer: graphics.root.children.{node}.grid.pointer
+                    chrome: false
+                    clear_color: [0.04, 0.045, 0.06]
+                    width: "{view_size}"
+                    height: "{view_size}"
+                    caption: XZ
+                  - slider_int: Y plane
+                    bind: graphics.root.children.{node}.grid.slice.y
+                    range: key
+                    hi: 1000
           - type: group
-            id: "{id}_quad_xz"
+            id: "{id}_quad_bottom"
+            layout: { kind: horizontal }
             children:
+              - type: group
+                id: "{id}_quad_zy"
+                children:
+                  - type: viewport
+                    view: "{id}_zy"
+                    mode: slice
+                    axis: x
+                    show: ["{node}"]
+                    hide: [surfaces]
+                    input: pick
+                    pick: graphics.root.children.{node}.grid.pick
+                    pointer: graphics.root.children.{node}.grid.pointer
+                    chrome: false
+                    clear_color: [0.04, 0.045, 0.06]
+                    width: "{view_size}"
+                    height: "{view_size}"
+                    caption: ZY
+                  - slider_int: X plane
+                    bind: graphics.root.children.{node}.grid.slice.x
+                    range: key
+                    hi: 1000
               - type: viewport
-                view: "{id}_xz"
-                mode: slice
-                axis: y
+                view: "{id}_quad_3d"
                 show: ["{node}"]
-                hide: [surfaces]
-                input: pick
-                pick: graphics.root.children.{node}.grid.pick
-                pointer: graphics.root.children.{node}.grid.pointer
                 chrome: false
                 clear_color: [0.04, 0.045, 0.06]
                 width: "{view_size}"
                 height: "{view_size}"
-                caption: XZ
-              - slider_int: Y plane
-                bind: graphics.root.children.{node}.grid.slice.y
-                range: key
-                hi: 1000
-          - type: group
-            id: "{id}_quad_zy"
-            children:
-              - type: viewport
-                view: "{id}_zy"
-                mode: slice
-                axis: x
-                show: ["{node}"]
-                hide: [surfaces]
-                input: pick
-                pick: graphics.root.children.{node}.grid.pick
-                pointer: graphics.root.children.{node}.grid.pointer
-                chrome: false
-                clear_color: [0.04, 0.045, 0.06]
-                width: "{view_size}"
-                height: "{view_size}"
-                caption: ZY
-              - slider_int: X plane
-                bind: graphics.root.children.{node}.grid.slice.x
-                range: key
-                hi: 1000
-          - type: viewport
-            view: "{id}_quad_3d"
-            show: ["{node}"]
-            chrome: false
-            clear_color: [0.04, 0.045, 0.06]
-            width: "{view_size}"
-            height: "{view_size}"
-            zoom: 0.6
-            caption: 3D
+                zoom: 0.6
+                caption: 3D
 
   volume_grid_tools:
     args: { node: grid, id: volume_grid }
